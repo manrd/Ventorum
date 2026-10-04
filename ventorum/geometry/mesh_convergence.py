@@ -232,6 +232,9 @@ class MeshConvergenceResult:
     # other surfaces), scaled to the recommended mesh.
     recommended_surface_n_panels: list[int | None] = field(default_factory=list)
     converged: bool = False
+    # Cause of a NOT CONVERGED study (None when converged). Names the likely
+    # cause when the solver is a lifting line on a swept wing.
+    diagnosis: str | None = None
 
     def summary(self, as_markdown: bool = False) -> str:
         """Format a human-readable or Markdown summary table."""
@@ -259,10 +262,11 @@ class MeshConvergenceResult:
             lines.append("|:-----:|:-------:|:-----:|:-----:|:--:|:-------:|:--------:|:---------:|:--------:|:---------:|:------:|:------:|")
             for pt in self.points:
                 status = "Pass" if pt.is_accurate else "Coarse"
-                if pt == self.minimal_mesh:
-                    status = "**[MINIMAL]**"
-                if pt == self.recommended_mesh:
-                    status = "**[RECOMMENDED]**"
+                if self.converged:
+                    if pt == self.minimal_mesh:
+                        status = "**[MINIMAL]**"
+                    if pt == self.recommended_mesh:
+                        status = "**[RECOMMENDED]**"
                 lines.append(
                     f"| {pt.n_panels} | {pt.spacing} | {pt.total_panels} | {pt.panels_solved} | {pt.CL:.5f} | "
                     f"{pt.error_cl_pct:.3f}% | {pt.error_cdi_pct:.3f}% | {pt.error_gamma_l2_pct:.3f}% | "
@@ -274,20 +278,24 @@ class MeshConvergenceResult:
                 lines.append(
                     f"- **Convergence**: not converged within tolerance `{self.tolerance_pct:.2f}%` on "
                     f"`{self.target_metric}`; smallest error reached `{smallest_err:.3f}%`. "
-                    f"The finest evaluated mesh is recommended."
+                    f"No level meets the tolerance, so no mesh is recommended and no scaling "
+                    f"guideline is given."
                 )
-            lines.append(
-                f"- **Minimal Mesh**: `N={self.minimal_mesh.n_panels} {self.minimal_mesh.spacing}` "
-                f"({self.minimal_mesh.total_panels} total panels, {self.minimal_mesh.panels_solved} panels solved) -> $C_L$ err: `{self.minimal_mesh.error_cl_pct:.3f}%`, "
-                f"$C_{{Di}}$ err: `{self.minimal_mesh.error_cdi_pct:.3f}%`, Solve time: `{self.minimal_mesh.solve_time_ms:.2f} ms`"
-            )
-            lines.append(
-                f"- **Recommended Mesh**: `N={self.recommended_mesh.n_panels} {self.recommended_mesh.spacing}` "
-                f"({self.recommended_mesh.total_panels} total panels, {self.recommended_mesh.panels_solved} panels solved) -> $C_L$ err: `{self.recommended_mesh.error_cl_pct:.3f}%`, "
-                f"$C_{{Di}}$ err: `{self.recommended_mesh.error_cdi_pct:.3f}%`, Solve time: `{self.recommended_mesh.solve_time_ms:.2f} ms`"
-            )
-            lines.append("")
-            lines.append(self.generalization.to_markdown())
+                if self.diagnosis:
+                    lines.append(f"- **Likely cause**: {self.diagnosis}")
+            else:
+                lines.append(
+                    f"- **Minimal Mesh**: `N={self.minimal_mesh.n_panels} {self.minimal_mesh.spacing}` "
+                    f"({self.minimal_mesh.total_panels} total panels, {self.minimal_mesh.panels_solved} panels solved) -> $C_L$ err: `{self.minimal_mesh.error_cl_pct:.3f}%`, "
+                    f"$C_{{Di}}$ err: `{self.minimal_mesh.error_cdi_pct:.3f}%`, Solve time: `{self.minimal_mesh.solve_time_ms:.2f} ms`"
+                )
+                lines.append(
+                    f"- **Recommended Mesh**: `N={self.recommended_mesh.n_panels} {self.recommended_mesh.spacing}` "
+                    f"({self.recommended_mesh.total_panels} total panels, {self.recommended_mesh.panels_solved} panels solved) -> $C_L$ err: `{self.recommended_mesh.error_cl_pct:.3f}%`, "
+                    f"$C_{{Di}}$ err: `{self.recommended_mesh.error_cdi_pct:.3f}%`, Solve time: `{self.recommended_mesh.solve_time_ms:.2f} ms`"
+                )
+                lines.append("")
+                lines.append(self.generalization.to_markdown())
         else:
             w = 115
             ref_tot_drag = f"{self.reference_point.CD_total:.6f}" if self.reference_point.CD_total is not None else f"{ref_cdi:.6f}"
@@ -313,10 +321,11 @@ class MeshConvergenceResult:
             lines.append("-" * w)
             for pt in self.points:
                 status = "Accurate" if pt.is_accurate else "Coarse"
-                if pt == self.minimal_mesh:
-                    status = "[MINIMAL]"
-                if pt == self.recommended_mesh:
-                    status = "[RECOMMENDED]"
+                if self.converged:
+                    if pt == self.minimal_mesh:
+                        status = "[MINIMAL]"
+                    if pt == self.recommended_mesh:
+                        status = "[RECOMMENDED]"
                 row = (
                     f"{pt.n_panels:<6d} | {pt.spacing:<12s} | {pt.total_panels:<6d} | {pt.panels_solved:<6d} | {pt.CL:<9.5f} | "
                     f"{pt.error_cl_pct:<7.3f}% | {pt.error_cdi_pct:<8.3f}% | {pt.error_gamma_l2_pct:<8.3f}% | "
@@ -324,27 +333,31 @@ class MeshConvergenceResult:
                 )
                 lines.append(row)
             lines.append("-" * w)
-            spd_min = self.reference_point.solve_time_ms / max(self.minimal_mesh.solve_time_ms, 1e-6)
-            spd_rec = self.reference_point.solve_time_ms / max(self.recommended_mesh.solve_time_ms, 1e-6)
             if not self.converged:
                 lines.append(
                     f"[!] NOT CONVERGED: not converged within tolerance {self.tolerance_pct:.2f}% ({self.target_metric}); "
-                    f"smallest error reached {smallest_err:.3f}%. The finest evaluated mesh is recommended."
+                    f"smallest error reached {smallest_err:.3f}%. No level meets the tolerance, so no mesh "
+                    f"is recommended and no scaling guideline is given."
                 )
-            lines.append(
-                f"[+] MINIMAL MESH:     N={self.minimal_mesh.n_panels:<2d} {self.minimal_mesh.spacing:<11s} "
-                f"({self.minimal_mesh.total_panels} panels, {self.minimal_mesh.panels_solved} solved) | CL err: {self.minimal_mesh.error_cl_pct:.3f}% | "
-                f"CDi err: {self.minimal_mesh.error_cdi_pct:.3f}% | Time: {self.minimal_mesh.solve_time_ms:.2f}ms ({spd_min:.1f}x speedup)"
-            )
-            lines.append(
-                f"[+] RECOMMENDED MESH: N={self.recommended_mesh.n_panels:<2d} {self.recommended_mesh.spacing:<11s} "
-                f"({self.recommended_mesh.total_panels} panels, {self.recommended_mesh.panels_solved} solved) | CL err: {self.recommended_mesh.error_cl_pct:.3f}% | "
-                f"CDi err: {self.recommended_mesh.error_cdi_pct:.3f}% | Time: {self.recommended_mesh.solve_time_ms:.2f}ms ({spd_rec:.1f}x speedup)"
-            )
-            lines.append(
-                f"    -> Scaling Guideline: k_AR = {self.generalization.panels_per_ar:.2f} panels/AR. "
-                f"For similar geometries: N ~= max({self.generalization.min_panels}, round({self.generalization.panels_per_ar:.2f} * AR))."
-            )
+                if self.diagnosis:
+                    lines.append(f"[!] Likely cause: {self.diagnosis}")
+            else:
+                spd_min = self.reference_point.solve_time_ms / max(self.minimal_mesh.solve_time_ms, 1e-6)
+                spd_rec = self.reference_point.solve_time_ms / max(self.recommended_mesh.solve_time_ms, 1e-6)
+                lines.append(
+                    f"[+] MINIMAL MESH:     N={self.minimal_mesh.n_panels:<2d} {self.minimal_mesh.spacing:<11s} "
+                    f"({self.minimal_mesh.total_panels} panels, {self.minimal_mesh.panels_solved} solved) | CL err: {self.minimal_mesh.error_cl_pct:.3f}% | "
+                    f"CDi err: {self.minimal_mesh.error_cdi_pct:.3f}% | Time: {self.minimal_mesh.solve_time_ms:.2f}ms ({spd_min:.1f}x speedup)"
+                )
+                lines.append(
+                    f"[+] RECOMMENDED MESH: N={self.recommended_mesh.n_panels:<2d} {self.recommended_mesh.spacing:<11s} "
+                    f"({self.recommended_mesh.total_panels} panels, {self.recommended_mesh.panels_solved} solved) | CL err: {self.recommended_mesh.error_cl_pct:.3f}% | "
+                    f"CDi err: {self.recommended_mesh.error_cdi_pct:.3f}% | Time: {self.recommended_mesh.solve_time_ms:.2f}ms ({spd_rec:.1f}x speedup)"
+                )
+                lines.append(
+                    f"    -> Scaling Guideline: k_AR = {self.generalization.panels_per_ar:.2f} panels/AR. "
+                    f"For similar geometries: N ~= max({self.generalization.min_panels}, round({self.generalization.panels_per_ar:.2f} * AR))."
+                )
             if self.profiling:
                 t_tot = self.profiling.get("t_total_ms", 0.0)
                 t_ref = self.profiling.get("t_ref_ms", 0.0)
@@ -369,6 +382,26 @@ class MeshConvergenceResult:
 
     def to_dict(self) -> dict[str, Any]:
         """Convert entire study to a JSON-serializable dictionary."""
+        if self.converged:
+            minimal: dict[str, Any] | None = self.minimal_mesh.to_dict()
+            recommended: dict[str, Any] | None = self.recommended_mesh.to_dict()
+            settings: dict[str, Any] | None = {
+                "n_panels": self.recommended_settings.n_panels,
+                "spacing": self.recommended_settings.spacing,
+                "proportional_panels": self.recommended_settings.proportional_panels,
+                "min_panels": self.recommended_settings.min_panels,
+                "use_symmetry": self.recommended_settings.use_symmetry,
+                "n_chord": self.recommended_settings.n_chord,
+                "surface_n_panels": list(self.recommended_surface_n_panels),
+            }
+            generalization: dict[str, Any] | None = self.generalization.to_dict()
+        else:
+            # No level meets the tolerance: no recommended level and no
+            # scaling guideline.
+            minimal = None
+            recommended = None
+            settings = None
+            generalization = None
         return {
             "case_name": self.case_name,
             "converged": bool(self.converged),
@@ -377,18 +410,11 @@ class MeshConvergenceResult:
             "alpha_tested_deg": [float(a) for a in self.alpha_tested_deg],
             "geometry_summary": self.geometry_summary,
             "reference": self.reference_point.to_dict(),
-            "minimal_mesh": self.minimal_mesh.to_dict(),
-            "recommended_mesh": self.recommended_mesh.to_dict(),
-            "recommended_settings": {
-                "n_panels": self.recommended_settings.n_panels,
-                "spacing": self.recommended_settings.spacing,
-                "proportional_panels": self.recommended_settings.proportional_panels,
-                "min_panels": self.recommended_settings.min_panels,
-                "use_symmetry": self.recommended_settings.use_symmetry,
-                "n_chord": self.recommended_settings.n_chord,
-                "surface_n_panels": list(self.recommended_surface_n_panels),
-            },
-            "generalization": self.generalization.to_dict(),
+            "minimal_mesh": minimal,
+            "recommended_mesh": recommended,
+            "recommended_settings": settings,
+            "generalization": generalization,
+            "diagnosis": self.diagnosis,
             "points": [p.to_dict() for p in self.points],
             "profiling": self.profiling,
         }
@@ -800,8 +826,15 @@ def run_mesh_convergence_study(
     else:
         do_sweep = bool(evaluate_sweep)
 
-    if do_sweep and (sweep is None or len(sweep) <= 1):
+    if do_sweep and (sweep is None or len(sweep) == 0):
         sweep = np.array([-2.0, 0.0, 2.0, 5.0, 8.0, 10.0])
+    if do_sweep and sweep is not None and len(sweep) == 1:
+        # Solve exactly the requested angle. The study also solves the
+        # primary condition, so a single angle different from it gives two
+        # solves; a matching angle needs no extra solve.
+        base_alpha_deg = float(np.degrees(base_cond.alpha))
+        if not any(abs(float(a) - base_alpha_deg) < 1e-9 for a in sweep):
+            sweep = [float(sweep[0]), base_alpha_deg]
     sweep_angles = [float(a) for a in sweep] if (do_sweep and sweep is not None) else [float(np.degrees(base_cond.alpha))]
 
     t_study_start = time.perf_counter()
@@ -1012,7 +1045,10 @@ def run_mesh_convergence_study(
         recommended_mesh = min(points, key=lambda p: p.error_cl_pct + p.error_cdi_pct)
 
     if not converged:
-        # No level meets the tolerance: recommend the finest evaluated level.
+        # No level meets the tolerance. The finest evaluated level is kept
+        # in minimal_mesh and recommended_mesh so that plots still work, but
+        # the summary, to_dict and the agent tool report no recommended
+        # level and no scaling guideline (see diagnosis below).
         finest = max(points, key=lambda p: (p.panels_solved, p.total_panels))
         minimal_mesh = finest
         recommended_mesh = finest
@@ -1032,6 +1068,32 @@ def run_mesh_convergence_study(
         abs(getattr(s, "dihedral", 0.0)) > np.radians(5.0) or abs(getattr(s, "sweep_le", 0.0)) > np.radians(15.0)
         for s in aircraft.surfaces
     )
+
+    # Likely cause of a NOT CONVERGED study. A lifting-line solver on a
+    # swept wing is not grid convergent with sweep: the lift falls as
+    # panels are added, so no level meets the tolerance.
+    diagnosis: str | None = None
+    if not converged:
+        from ventorum.solvers.factory import resolve_solver_type
+
+        canonical = resolve_solver_type(base_settings.solver_type)
+        max_sweep_deg = max(
+            (abs(float(np.degrees(getattr(s, "sweep_le", 0.0)))) for s in aircraft.surfaces),
+            default=0.0,
+        )
+        if canonical in ("linear", "nonlinear") and (has_angled_junction or max_sweep_deg > 15.0):
+            diagnosis = (
+                f"the '{canonical}' lifting-line solver on a swept wing (max leading-edge "
+                f"sweep {max_sweep_deg:.1f} deg): the method is not grid convergent with sweep "
+                f"and the lift falls as panels are added. Repeat the study with solver='vlm'."
+            )
+        else:
+            smallest_diag_err = smallest_reached_error_pct(points, target_metric, do_sweep)
+            diagnosis = (
+                f"no evaluated level meets tolerance {tolerance_pct:.2f}% on '{target_metric}'; "
+                f"the smallest error reached is {smallest_diag_err:.3f}%. "
+                f"Refine with larger panel_counts or a larger ref_n_panels."
+            )
 
     spacing_rule = (
         "Use 'half-cosine' (tip-clustered) for planar wings (|dihedral| <= 5 deg, |sweep| <= 15 deg) "
@@ -1064,8 +1126,8 @@ def run_mesh_convergence_study(
             f"{smallest_err:.3f}%. The finest evaluated mesh (N = {n_rec} panels/semi-span, "
             f"{recommended_mesh.panels_solved} panels solved, '{recommended_mesh.spacing}' spacing) gives "
             f"{recommended_mesh.error_cl_pct:.3f}% CL error and {recommended_mesh.error_cdi_pct:.3f}% CDi error. "
-            f"The scaling N = max(12, int(round({k_ar:.2f} * AR))) is given for reference but it is not "
-            f"verified to meet the tolerance."
+            f"No scaling guideline is given because no level is verified to meet the tolerance."
+            + (f" {diagnosis[0].upper() + diagnosis[1:]}" if diagnosis else "")
         )
 
     generalization = GeneralizationGuideline(
@@ -1095,8 +1157,9 @@ def run_mesh_convergence_study(
     recommended_settings.use_symmetry = use_symmetry
     rec_surface_n = [s.n_panels for s in _level_aircraft(aircraft, n_rec, n_base).surfaces]
 
-    # Apply to case instance if requested
-    if apply_to_case and is_instance:
+    # Apply to case instance if requested. A NOT CONVERGED study has no
+    # recommendation, so it changes nothing.
+    if apply_to_case and is_instance and converged:
         case.settings = recommended_settings.clone()
         for surf, n_s in zip(case.aircraft.surfaces, rec_surface_n):
             if n_s is not None:
@@ -1152,6 +1215,7 @@ def run_mesh_convergence_study(
         profiling=profiling_data,
         recommended_surface_n_panels=rec_surface_n,
         converged=converged,
+        diagnosis=diagnosis,
     )
 
     if progress:
