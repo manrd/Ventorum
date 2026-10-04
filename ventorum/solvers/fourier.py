@@ -13,9 +13,12 @@ and the monoplane equation is collocated at ``theta_k = k pi / (N + 1)``,
     mu_k = c_k a0_k / (4 b)
 
 Results: ``CL = pi AR A_1``, ``CDi = pi AR sum n A_n^2``. The pitching moment
-adds the moment of the lift (acting on the quarter-chord line) and the
-section moment ``Cm0`` about ``Aircraft.ref_point`` (only its x coordinate
-matters for a planar wing).
+about ``Aircraft.ref_point`` adds the section moment ``Cm0`` and the moment
+``r x F`` of the section forces, which act on the quarter-chord line. The
+force of a section is ``rho V Gamma dy`` normal to the local flow: its lift
+part is normal to the free stream and its induced-drag part is
+``alpha_i`` times that value along the free stream. A wing above or below
+the reference point therefore gets a moment from both parts.
 
 Limitations: one symmetric, unswept, planar wing; linear section data; no
 ground effect. The solver refuses a wing outside that model with
@@ -177,7 +180,7 @@ def _fourier_basis(N: int) -> tuple[np.ndarray, ...]:
 
 
 def _section_data(surf: LiftingSurface, y_frac: np.ndarray) -> dict[str, np.ndarray]:
-    """Chord, twist (with incidence), a0, alpha_L0, Cd0, Cm0 and x_qc at span fractions."""
+    """Chord, twist (with incidence), a0, alpha_L0, Cd0, Cm0, x_qc and z_qc at span fractions."""
     secs = _sorted_sections(surf)
     fr = np.array([s.y_frac for s in secs])
     eta = np.asarray(y_frac, dtype=float)
@@ -195,10 +198,13 @@ def _section_data(surf: LiftingSurface, y_frac: np.ndarray) -> dict[str, np.ndar
     else:
         blender = _AirfoilBlender(secs)
         props = np.array([airfoil_linear_properties(blender.at(float(e))) for e in eta]).reshape(-1, 4)
-    x_le, _, _ = surface_reference_line(surf, eta)
-    x_qc = x_le + 0.25 * chord + float(np.asarray(surf.position, dtype=float)[0])
+    x_le, _, z_le = surface_reference_line(surf, eta)
+    pos = np.asarray(surf.position, dtype=float)
+    # The sections twist about the quarter chord, so z_qc does not change with the twist.
+    x_qc = x_le + 0.25 * chord + float(pos[0])
+    z_qc = np.asarray(z_le, dtype=float) + float(pos[2])
     return {"chord": chord, "twist": twist, "a0": props[:, 0], "alpha_L0": props[:, 1],
-            "Cd0": props[:, 2], "Cm0": props[:, 3], "x_qc": x_qc}
+            "Cd0": props[:, 2], "Cm0": props[:, 3], "x_qc": x_qc, "z_qc": z_qc}
 
 
 _SYSTEM_CACHE: OrderedDict = OrderedDict()
@@ -284,7 +290,9 @@ class FourierSolver(BaseSolver):
         N = self._n_terms(surf, settings)
         b, theta, st, mu, n_idx, lhs, theta_q, q_geo, sin_n_theta, sin_n_theta_q = _fourier_system(fp, surf, N)
         q_data = dict(q_geo)
-        q_data["x_ref"] = float(aircraft.moment_reference()[0])
+        ref = aircraft.moment_reference()
+        q_data["x_ref"] = float(ref[0])
+        q_data["z_ref"] = float(ref[2])
         return aircraft, surf, N, b, theta, st, mu, n_idx, lhs, theta_q, q_data, sin_n_theta, sin_n_theta_q
 
     @staticmethod
@@ -304,6 +312,7 @@ class FourierSolver(BaseSolver):
             "Cm0": st["Cm0"][order],
             "has_profile": bool(np.any(Cd0 != 0.0)),
             "dy_dth": 0.5 * b * np.sin(theta_q),
+            "sin_th_q": np.sin(theta_q),
         }
 
     def _result(self, aircraft, surf, N, b, theta, st, mu, n_idx, A, theta_q, q_data,
@@ -333,11 +342,21 @@ class FourierSolver(BaseSolver):
             chord=chord, Cm_section=sta["Cm0"].copy(),
         )
 
-        # Moment of the lift with y = (b/2) cos(theta): dy = (b/2) sin(theta) d(theta).
+        # Moment of the section forces about the reference point, M_y = r_z F_x - r_x F_z,
+        # with y = (b/2) cos(theta): dy = (b/2) sin(theta) d(theta). The force of
+        # each section is rho V Gamma dy normal to the local flow, which the
+        # downwash turns by alpha_i: a lift part normal to the free stream,
+        # (-sin(alpha), 0, cos(alpha)), and an induced-drag part alpha_i along
+        # the free stream, (cos(alpha), 0, sin(alpha)) (x aft, z up).
         g_q = 2.0 * b * V * (sin_n_theta_q @ A)
-        dy_dth = sta["dy_dth"]
+        alpha_i_q = (sin_n_theta_q @ (n_idx * A)) / sta["sin_th_q"]
+        dF = q_data["weights"] * rho * V * g_q * sta["dy_dth"]
+        ca, sa = np.cos(alpha), np.sin(alpha)
+        F_x = dF * (-sa + alpha_i_q * ca)
+        F_z = dF * (ca + alpha_i_q * sa)
         q_inf = 0.5 * rho * V * V
-        lift_moment = -float(np.sum(q_data["weights"] * rho * V * g_q * (q_data["x_qc"] - q_data["x_ref"]) * dy_dth))
+        lift_moment = float(np.sum((q_data["z_qc"] - q_data["z_ref"]) * F_x
+                                   - (q_data["x_qc"] - q_data["x_ref"]) * F_z))
         section_moment = q_inf * q_data["int_c2_cm0"]
         Cm = float((lift_moment + section_moment) / (q_inf * S * c_ref))
         CDp = float(q_data["int_c_cd0"] / S) if has_profile else None
