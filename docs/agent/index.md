@@ -18,6 +18,12 @@ Ventorum has a tool interface for AI agents and automated design loops: Python c
 - **Strict JSON output.** A value that is not defined (for example L/D at zero drag) is `null`.
 - **Audit log:** written only if the environment variable `VENTORUM_AGENT_AUDIT_LOG` gives a file path.
 
+## Work budget
+
+- **Work units.** One solve of a lattice with N panels costs N^2 units. The work of a call is the sum over all solves that the call will run (sweep angles, heights, mesh levels, batch candidates, derivative steps).
+- **Budget.** A call whose estimated work is above 200000000 units is refused with `error.type` `invalid_input` before any solve. The message gives the estimate, the budget and how to reduce the work: fewer angles (smaller range or larger `alpha_step_deg`), fewer heights, fewer mesh levels or spacing schemes, fewer candidates, or fewer panels (smaller `n_panels` or `n_chord`).
+- **Scope.** The budget covers `ventorum_wing_analysis`, `ventorum_polar_sweep`, `ventorum_ground_effect` (heights plus free air plus the Irodov height-pitch sweep), `ventorum_stability_derivatives` (5 solves), `ventorum_batch_evaluate` and `ventorum_mesh_convergence` (levels times the angles that are really solved). `ventorum_tune_machine` is outside the budget: its duration is stated in its description instead.
+
 ## Error types
 
 | Exception | `error.type` | Meaning |

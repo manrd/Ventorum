@@ -640,7 +640,8 @@ AGENT_TOOL_DEFINITIONS: list[dict[str, Any]] = [
     {
         "name": "ventorum_polar_sweep",
         "description": "Sweep of the angle of attack: CL, CDi, CD, Cm and L/D per angle, the lift slope "
-                       "from a linear fit and the maximum L/D.",
+                       "from a linear fit and the maximum L/D. When every angle fails, the top-level "
+                       "error copies the first row's error.",
         "parameters": {
             "type": "object",
             "properties": {
@@ -663,7 +664,9 @@ AGENT_TOOL_DEFINITIONS: list[dict[str, Any]] = [
         "description": "Ground effect at a list of heights compared with free air, with the same "
                        "chordwise mesh for all cases. Reports ground strikes per height, the bank angle "
                        "for a wingtip strike and, with 2 or more valid heights, the Irodov height-pitch "
-                       "stability margin. Fourier solver and wake_alignment 'body' are not allowed.",
+                       "stability margin. Each row carries trust_score, trust_rating, warnings and "
+                       "converged; the summary gives the lowest rating. Two heights closer than "
+                       "1e-6 * c_ref are refused. Fourier solver and wake_alignment 'body' are not allowed.",
         "parameters": {
             "type": "object",
             "properties": {
@@ -751,8 +754,11 @@ AGENT_TOOL_DEFINITIONS: list[dict[str, Any]] = [
         "name": "ventorum_mesh_convergence",
         "description": "Spanwise mesh convergence study against a fine reference mesh. Gives the "
                        "smallest mesh within the tolerance and a recommended mesh. When no level meets "
-                       "the tolerance it reports converged false and the finest mesh. Each level "
-                       "reports n_panels and panels_solved.",
+                       "the tolerance it reports converged false with no recommended mesh and no "
+                       "scaling guideline. Each level "
+                       "reports n_panels and panels_solved. alpha_tested_deg lists the angles that "
+                       "were really solved: exactly the requested alpha_sweep_deg angles, plus the "
+                       "condition alpha when a single requested angle differs from it.",
         "parameters": {
             "type": "object",
             "properties": {

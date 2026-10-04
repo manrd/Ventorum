@@ -495,9 +495,14 @@ def polar_sweep(
         ok.append((a, res))
 
     if not ok:
-        kinds = {row["status"] for row in table}
-        etype = "ground_strike" if "ground_strike" in kinds else "invalid_method"
-        return error_payload(etype, "No angle of attack in the sweep gave a result.", polar_table=table)
+        first = table[0]
+        etype = "ground_strike" if first["status"] == "ground_strike" else "invalid_method"
+        return error_payload(
+            etype,
+            f"No angle of attack in the sweep gave a result. "
+            f"First error at alpha={first['alpha_deg']:g} deg "
+            f"({first['status']}): {first['message']}",
+            polar_table=table)
 
     a_ok = np.array([a for a, _ in ok])
     cl_ok = np.array([r.totals.CL for _, r in ok])
@@ -570,6 +575,22 @@ def polar_sweep(
 
 def _k_factor(cl: float, cdi: float) -> float | None:
     return cdi / (cl * cl) if abs(cl) > 1e-6 else None
+
+
+_RATING_ORDER = {"UNRELIABLE": 0, "LOW": 1, "MODERATE": 2, "HIGH": 3}
+
+
+def _row_trust(res: Any) -> tuple[float | None, str | None, list[str], bool | None]:
+    """Return (trust_score, trust_rating, warnings, converged) of a ground-effect result.
+
+    The trust comes from the solver result of *res*; the library computes it
+    with the ground gap (h_min/c), so extreme proximity lowers the rating.
+    """
+    sol = getattr(res, "solver_result", None)
+    trust = getattr(getattr(sol, "totals", None), "trust", None)
+    if trust is None:
+        return None, None, [], bool(getattr(sol, "converged", False)) if sol is not None else None
+    return rnd(trust.score, 3), trust.rating, list(trust.warnings), bool(sol.converged)
 
 
 def _irodov(ac, ok, alpha, phi, beta, V, rho, rp, href, fixed, c_ref, dl, sweep_cls, result_cls):
@@ -691,6 +712,13 @@ def ground_effect(
     dl = parse_detail_level(detail_level)
     ax = parse_axes(axes)
     c_ref = float(ac.c_ref)
+    for h_lo, h_hi in zip(heights[:-1], heights[1:]):
+        if float(h_hi) - float(h_lo) < 1e-6 * c_ref:
+            raise InputError(
+                f"heights_m has two heights closer than 1e-6 * c_ref "
+                f"({1e-6 * c_ref:.3g} m with c_ref={c_ref:.5g} m): "
+                f"{h_lo:g} m and {h_hi:g} m. A height difference below round-off "
+                f"gives no valid height derivative. Give distinct heights.")
     _check_method(ac, sett.solver_type, sett.wake_alignment, True)
     strips = _check_mesh(ac, sett)
     a_rad, b_rad, p_rad = (float(np.radians(v)) for v in (alpha, beta, phi))
@@ -758,7 +786,8 @@ def ground_effect(
         if res is None:
             info = error_info(err)
             row.update(status="ground_strike" if info["type"] == "ground_strike" else "refused",
-                       message=info["message"])
+                       message=info["message"],
+                       trust_score=None, trust_rating=None, warnings=[], converged=None)
             rows.append(row)
             continue
         k = _k_factor(res.CL, res.CDi)
@@ -766,6 +795,7 @@ def ground_effect(
         lim_found = lim is not None and lim < MAX_BANK_DEG
         cl_ax, cm_ax, cn_ax = _apply_axes(
             res.Cl_body, res.Cm_body, res.Cn_body, alpha, beta, ax)
+        t_score, t_rating, t_warn, t_conv = _row_trust(res)
         row.update(
             status="ok",
             h_min_m=rnd(res.h_min, 5),
@@ -779,6 +809,10 @@ def ground_effect(
             phi_strike_limit_deg=rnd(lim, 3) if lim_found else None,
             bank_strike_limit_found=bool(lim_found),
             n_chord=int(res.n_chord),
+            trust_score=t_score,
+            trust_rating=t_rating,
+            warnings=t_warn,
+            converged=t_conv,
         )
         if ax == "all":
             row["moments"] = moments_all_sets(
@@ -796,6 +830,9 @@ def ground_effect(
 
     h_low, r_low = ok[0]
     low_row = next(r for r in rows if r["h_m"] == h_low)
+    ok_rows = [r for r in rows if r["status"] == "ok"]
+    rated = [r for r in ok_rows if r.get("trust_rating") in _RATING_ORDER]
+    lowest = min(rated, key=lambda r: (_RATING_ORDER[r["trust_rating"]], r["trust_score"])) if rated else None
     summary = {
         "n_heights": len(heights), "n_ok": len(ok), "n_ground_strike": n_strike, "n_refused": n_refused,
         "lowest_valid_height_m": h_low,
@@ -803,6 +840,10 @@ def ground_effect(
         "induced_drag_factor_ratio_at_lowest": low_row["induced_drag_factor_ratio"],
         "phi_strike_limit_deg_at_lowest": low_row["phi_strike_limit_deg"],
         "bank_strike_limit_found_at_lowest": low_row["bank_strike_limit_found"],
+        "trust_rating_lowest": lowest["trust_rating"] if lowest else None,
+        "trust_score_min": lowest["trust_score"] if lowest else None,
+        "trust_h_m_at_lowest": lowest["h_m"] if lowest else None,
+        "converged_all": bool(all(r.get("converged") for r in ok_rows)) if ok_rows else None,
         "bank_strike_note": (f"phi_strike_limit_deg is the bank angle of the first ground contact. The search "
                              f"stops at {MAX_BANK_DEG:g} deg: if no point touches up to that angle, "
                              "phi_strike_limit_deg is null and bank_strike_limit_found is false."),
@@ -844,6 +885,10 @@ def ground_effect(
     if n_strike or n_refused:
         bad = [f"{r['h_m']:g} m ({r['status']})" for r in rows if r["status"] != "ok"]
         fail_txt = f" Failed heights: {', '.join(bad)}."
+    trust_txt = ""
+    if lowest is not None:
+        trust_txt = (f" Lowest trust {lowest['trust_rating']} ({lowest['trust_score']}) "
+                     f"at h={lowest['h_m']:g} m.")
     cr = summary["CL_ratio_at_lowest"]
     kr = summary["induced_drag_factor_ratio_at_lowest"]
     out["executive_summary"] = (
@@ -851,12 +896,13 @@ def ground_effect(
         f"h={h_low:g} m (h/c={h_low / c_ref:.3f}, '{href}' point) CL is "
         f"{fmt(cr, '.3f')} x free air and the induced-drag factor is "
         f"{fmt(kr, '.3f')} x free air. {len(ok)} of {len(heights)} heights valid; "
-        f"same chordwise mesh (n_chord={fixed.n_chord}) for all cases.{fail_txt}{irodov_txt}"
+        f"same chordwise mesh (n_chord={fixed.n_chord}) for all cases.{trust_txt}{fail_txt}{irodov_txt}"
     )
 
     if dl == "summary":
         out["rows"] = [{k: r.get(k) for k in ("h_m", "status", "CL_ratio", "induced_drag_factor_ratio",
-                                              "phi_strike_limit_deg", "bank_strike_limit_found", "message")
+                                              "phi_strike_limit_deg", "bank_strike_limit_found", "message",
+                                              "trust_score", "trust_rating", "warnings", "converged")
                         if k in r} for r in rows]
         out["irodov"].pop("derivative_grids", None)
     else:
@@ -1321,11 +1367,27 @@ def mesh_convergence(
         executive_summary = (
             f"[Ventorum RESULT] Mesh convergence of {ac.name}: not converged within tolerance "
             f"{tol:g} % on {metric} (reference N={ref_n}); smallest error reached {smallest_err:.3f} %. "
+            f"No level meets the tolerance, so no mesh is recommended and no scaling guideline is given. "
             f"Finest evaluated mesh N={rec.panels_solved} panels solved "
             f"(spanwise setting {rec.n_panels} {rec.spacing}) "
             f"(CL error {rec.error_cl_pct:.3f} %, CDi error "
             f"{rec.error_cdi_pct:.3f} %). Errors are relative to the reference mesh, not to experiment."
         )
+        if study.diagnosis:
+            executive_summary += f" Likely cause: {study.diagnosis}"
+    if study.converged:
+        minimal_out: dict[str, Any] | None = mn.to_dict()
+        recommended_out: dict[str, Any] | None = rec.to_dict()
+        settings_out: dict[str, Any] | None = {
+            "n_panels": study.recommended_settings.n_panels,
+            "spacing": study.recommended_settings.spacing,
+        }
+        generalization_out: dict[str, Any] | None = study.generalization.to_dict()
+    else:
+        minimal_out = None
+        recommended_out = None
+        settings_out = None
+        generalization_out = None
     out: dict[str, Any] = {
         "status": "success",
         "executive_summary": executive_summary,
@@ -1333,13 +1395,12 @@ def mesh_convergence(
         "converged": bool(study.converged),
         "tolerance_pct": tol,
         "target_metric": metric,
-        "minimal_mesh": mn.to_dict(),
-        "recommended_mesh": rec.to_dict(),
-        "recommended_settings": {
-            "n_panels": study.recommended_settings.n_panels,
-            "spacing": study.recommended_settings.spacing,
-        },
-        "generalization": study.generalization.to_dict(),
+        "alpha_tested_deg": [float(a) for a in study.alpha_tested_deg],
+        "diagnosis": study.diagnosis,
+        "minimal_mesh": minimal_out,
+        "recommended_mesh": recommended_out,
+        "recommended_settings": settings_out,
+        "generalization": generalization_out,
         "condition_used": condition_payload(c),
     }
     if dl in ("standard", "full"):
