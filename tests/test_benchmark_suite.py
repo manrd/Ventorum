@@ -122,8 +122,13 @@ def test_ground_effect_returns_valid_times():
 
 
 def test_multithread_scaling_returns_speedups():
-    """Multithread benchmark returns speedup and efficiency metrics."""
-    res = benchmark_multithread(workers_list=(1, 2), n_repeats=1)
+    """Multithread benchmark returns speedup and efficiency metrics.
+
+    The lattice (160 spanwise x 4 chordwise panels) is above the size class
+    "small": n_jobs=1 solves the angles as one batch, and the pool of
+    workers is faster than the batch only for larger lattices (T-0039).
+    """
+    res = benchmark_multithread(workers_list=(1, 2), n_repeats=1, n_panels=160)
 
     assert 1 in res["workers"]
     assert 2 in res["workers"]
