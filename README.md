@@ -31,6 +31,8 @@ The package does not model compressibility, leading-edge vortex lift (slender, h
 
 The solvers use compiled (Numba) kernels on all CPU cores, and run independent cases (sweeps, batches) side by side. Run `ventorum-tune` once after installation: it measures the machine and stores the best thread settings. Without it, Ventorum uses defaults that work on any machine. See `docs/user/parallel.md`.
 
+On a machine with an NVIDIA CUDA GPU, the vortex lattice and the linear and nonlinear lifting lines also run on the GPU (`pip install -e .[gpu]`): batches of flight conditions (sweeps, ground-effect grids) and large single solves. The device `"auto"` (default) selects the GPU only where it is faster. See `docs/user/how_to_gpu.md`.
+
 ## Conventions
 
 - Geometry axes: x aft, y to the right, z up. The angles in `FlightCondition` are in radians.
@@ -49,7 +51,7 @@ From the root directory:
 pip install -e .
 ```
 
-Dependencies: `numpy`, `scipy`, `matplotlib`, `numba` and `torch`. On a machine with no GPU, install the CPU build of PyTorch first (`pip install torch --index-url https://download.pytorch.org/whl/cpu`). The Cython kernels are compiled when a C compiler is present; without one, the installation continues with the Numba and numpy kernels. Optional: `pandas` (`pip install -e .[tables]`) for table export. Development: `pip install -e .[dev]` (pytest, pytest-cov, ruff). Documentation: `pip install -e .[docs]`.
+Dependencies: `numpy`, `scipy`, `matplotlib`, `numba` and `torch`. On a machine with no GPU, install the CPU build of PyTorch first (`pip install torch --index-url https://download.pytorch.org/whl/cpu`). The Cython kernels are compiled when a C compiler is present; without one, the installation continues with the Numba and numpy kernels. Optional: `pandas` (`pip install -e .[tables]`) for table export; NVIDIA Warp (`pip install -e .[gpu]`) for the GPU pipelines, with the CUDA build of PyTorch. Development: `pip install -e .[dev]` (pytest, pytest-cov, ruff). Documentation: `pip install -e .[docs]`.
 
 ## Quick Start
 

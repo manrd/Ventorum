@@ -23,6 +23,7 @@ Task-oriented guides. Each guide solves one practical task.
 
 how_to_tune
 how_to_backends
+how_to_gpu
 how_to_sweeps
 how_to_ground_effect
 ```

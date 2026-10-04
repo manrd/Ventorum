@@ -16,6 +16,7 @@ The tuner (`ventorum.hardware.tuner`) measures in this order:
 1. For each size class (small, medium, large unless `--quick`), the fastest kernel backend for each kernel function (`tensor`, `influence`, `induced`, `trefftz`). Within 3 % of the fastest, Numba wins, then Cython, then PyTorch, then numpy.
 2. With those backends active, the best thread count for one case that runs alone.
 3. With those backends active, the best split of the cores for batches (cases in parallel against threads per case).
+4. With a CUDA GPU and the GPU pipelines (see [Run solves on the GPU](how_to_gpu)), the cost model of the `"auto"` device: for the vortex lattice and the linear and nonlinear lifting lines, at a few panel counts, the times of sweeps of a few batch sizes on the CPU (with the settings of steps 1 to 3) and on the GPU.
 
 It also records the GPUs that it finds and the torch device of the run.
 

@@ -85,9 +85,40 @@ Rules for a change:
 * The Newton Jacobian of the nonlinear lifting line uses the scalar triple product `u_i . (v_ij x dl_i) = v_ij . (dl_i x u_i)`: one cross product per strip instead of one per pair.
 * The symmetry test of the loads compares `|a - b| <= atol` directly (the same answer as `np.allclose` with `rtol = 0` for finite data).
 
+## GPU pipelines
+
+`ventorum/gpu` solves a batch of flight conditions on one lattice (or one large solve) on an NVIDIA CUDA GPU. The user guide is [Run solves on the GPU](../user/how_to_gpu). The modules:
+
+| Module | Content |
+| --- | --- |
+| `gpu/__init__.py` | Device and precision settings (`set_device`, `set_precision`, `VENTORUM_DEVICE`, `VENTORUM_GPU_PRECISION`), availability, the `"auto"` rule (`use_gpu`: the cost model of the tuner, profile key `gpu`, `model`; without it the built-in `min_work` and `min_cases` per family). |
+| `gpu/kernels.py` | NVIDIA Warp kernels, one set per precision: system matrices and velocity tensors (`tensors`, `normals`, the wake table), induced velocities for the loads, Trefftz normal wash, the nonlinear lifting-line state, trials and Jacobian, the float64 residual and contractions. |
+| `gpu/engine.py` | GPU data of a lattice (`DeviceLattice`, cached in `geom_cache`), per-case data (`CaseData`), the batched solves, the loads, the polars on the GPU. |
+| `gpu/pipeline.py` | Dispatch from `LatticeSolver.solve_batch` and `solve_lattice`; case setup and result objects with the CPU code. |
+
+How a batch runs:
+
+1. `solve_batch` (and `_solve_lattice` for one case) asks `gpu.pipeline.solve_batch` first. It returns None when the device is `"cpu"`, when `"auto"` estimates the CPU to be faster (`gpu.use_gpu(work, family, n_cases, n_panels)`: the tuned cost model of the machine, else the built-in work and case thresholds per family), inside a worker of a CPU pool with `"auto"`, or when the batch is not supported (Fourier solver; an airfoil type other than linear or tabulated; a nonlinear sweep with continuation and mixed kinds of cases). The CPU path then runs unchanged. Explicit ground planes (`solve_batch(..., grounds=...)`, used by the ground-effect sweeps) are supported.
+2. The cases are split into groups with the same unknown map, ground presence and symmetry; each group is one GPU batch, and the results come back in the order of the cases.
+3. The case setup (`_case_setup`: ground plane, validity checks, notes, wake direction) is the CPU code. The per-case inputs go to the GPU in one transfer (`engine.batch_data`); one kernel each makes the float64 wake-leg data of the float32 kernels (`case_te`, `case_points`), the Trefftz-plane geometry (`trefftz_prep`) and the terms of the lifting-line systems (`llt_rhs`). The polars of the strips are kept on the GPU and made again only when an airfoil changes (`engine.polar_struct`).
+4. The system: the bound vortices and chordwise legs do not depend on the case, so their part is computed once per lattice and unknown map (`DeviceLattice.fixed`, the GPU kernel cache); each case adds its wake legs and ground images. On a lattice with more than one chordwise panel the wake legs come from a wake table: the panels of one strip with one core radius share their wake legs, so each case evaluates them once per wake group and point.
+5. The dense solves (`engine.batched_solve`): small systems (`REF_MIN_N`) and small batches get a direct float64 LU. Otherwise one reference matrix per group of consecutive cases is inverted (float32), and each case is corrected with its residual in float64 until the relative residual is at the round-off level (float64 matrix) or below `REF_TOL32` (float32 matrix, three orders below the errors of its entries); a case that does not converge gets a direct solve.
+6. The nonlinear lifting line runs Newton's method for all cases together (`engine.llt_nonlinear`). Per iteration: the Jacobian of the active cases (`nl_jacobian`, from the terms of `nl_state`), its LU in float32 (`newton_solve`: two refinements for a float64 Jacobian, none for a float32 one), one read of the velocity tensor for the Newton step and the fixed-point direction (`contract2`), the residuals of all trial points of the line search and of the fixed-point fallback (`nl_trials`, one thread per case, trial and strip; `nl_merit` sums them in strip order), the first trial that the CPU rules accept and the new state (`nl_update`, `nl_state`), and the merit and flags per case (`nl_reduce`). One transfer per iteration gives the active cases. Continuation and the CPU fallback are described in `gpu/pipeline.py` (`_nonlinear`).
+7. The loads (`engine.loads`, two kernels: per strip and per case) are the equations of `compute_loads_batch` in float64 on the GPU. The vortex lattice takes the velocity at the load points from a cached matrix of the fixed legs (a product with the circulation, in float64), the wake legs per wake group, and the ground images per panel. The Trefftz plane evaluates the right strips only in symmetric cases.
+8. One transfer brings all arrays to the host. `loads.loads_result` and `_case_result` make the result objects (the same functions as the CPU path); the statistics of the trust score come from the per-case kernel (the same rules as `trust.spanwise_stats_batch`).
+9. The ground-effect sweeps (`ground_effect.sweep._gpu_batch`) check each case and place its ground as `analyze_ground_effect` does (`prepare_ground_case`), solve the valid cases as one batch with explicit ground planes, and make the results with `ground_case_result`. The CPU path of the sweeps (one case per worker) does not change.
+
+Rules for a change:
+
+* The matrices are stored transposed (column-major per case, entry (i, j) at `[k, j, i]`): the threads of one warp then have the same sources and contiguous points. Keep this layout in new kernels.
+* Warp kernels launch on the current PyTorch stream (`engine.launch`); a tensor viewed by a kernel must stay alive until the launch is queued (`CaseData` keeps the per-case tensors).
+* float32 kernels must keep the three rules of the module notes of `gpu/kernels.py` (pair differences, float64 wake-leg data, float64 bound-vortex cross product). A new formula with a difference of nearly equal quantities needs the same care.
+* A new per-case quantity of the loads must be added to `engine.loads` and to `loads.loads_result` (both paths make the objects there).
+* Each GPU feature needs a parity test in `tests/test_gpu_pipeline.py` against the CPU path, in float64 (round-off) and float32.
+
 ## How to check a change
 
 1. The verification report must not change (`validation/run_verification.py`).
-2. The parity tests in `tests/test_kernels.py`, `tests/test_solve_overhead.py`, `tests/test_lattice_cache.py`, `tests/test_sweep_batch.py` and `tests/test_vlm_pipeline.py`.
+2. The parity tests in `tests/test_kernels.py`, `tests/test_solve_overhead.py`, `tests/test_lattice_cache.py`, `tests/test_sweep_batch.py`, `tests/test_vlm_pipeline.py` and, on a machine with a GPU, `tests/test_gpu_pipeline.py`.
 3. A repeated solve must give the same bits as the first solve (`test_repeated_solve_gives_the_same_bits`).
 4. Timing: run on a quiet machine, with no agent or other heavy program, and compare the old and the new code side by side, alternating. A timing of the old code taken at another time is not a reference.

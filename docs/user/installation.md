@@ -11,8 +11,9 @@ pip install -e .
 | Tables | `pip install -e .[tables]` | `pandas`, for table export |
 | Development | `pip install -e .[dev]` | `pytest`, `pytest-cov`, `ruff` |
 | Documentation | `pip install -e .[docs]` | `sphinx`, `pydata-sphinx-theme`, `myst-parser` |
+| GPU | `pip install -e .[gpu]` | `warp-lang` (NVIDIA Warp, Apache-2.0), for the GPU pipelines (`ventorum.gpu`) |
 
-The required dependencies are `numpy`, `scipy`, `matplotlib`, `numba` (compiled CPU kernels) and `torch` (GPU kernels). On a machine with no GPU you can install the smaller CPU build of PyTorch first:
+The required dependencies are `numpy`, `scipy`, `matplotlib`, `numba` (compiled CPU kernels) and `torch` (GPU kernels and the GPU pipelines). The GPU pipelines also need the `gpu` extra, an NVIDIA GPU with a CUDA driver and the CUDA build of PyTorch (see [Run solves on the GPU](how_to_gpu)). On a machine with no GPU you can install the smaller CPU build of PyTorch first:
 
 ```bash
 pip install torch --index-url https://download.pytorch.org/whl/cpu
