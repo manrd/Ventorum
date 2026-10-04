@@ -59,12 +59,12 @@ def _aircraft(tail: bool, airfoil=None):
     return vt.Aircraft(surfaces=s)
 
 
-def _sweep(solver, ac, st, alphas, device, precision="float64", h=None, beta=0.0):
+def _sweep(solver, ac, st, alphas, device, precision="float64", h=None, beta=0.0, phi=0.0):
     gpu.set_device(device)
     gpu.set_precision(precision)
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
-        return solver.solve_sweep(ac, vt.FlightCondition(V_inf=25.0, h=h, beta=beta), st, alphas)
+        return solver.solve_sweep(ac, vt.FlightCondition(V_inf=25.0, h=h, beta=beta, phi=phi), st, alphas)
 
 
 def _assert_close(ref, new, tol):
@@ -242,6 +242,30 @@ def test_gpu_vortex_lattice_equals_cpu(gpu_device, precision, tail, h, beta):
     ref = _sweep(vt.HorseshoeSolver(), ac, st, alphas, "cpu", h=h, beta=beta)
     new = _sweep(vt.HorseshoeSolver(), ac, st, alphas, "gpu", precision, h=h, beta=beta)
     _assert_close(ref, new, TOL[precision])
+
+
+@pytest.mark.gpu
+@pytest.mark.parametrize("precision", ["float64", "float32"])
+@pytest.mark.parametrize("kind", ["linear", "nonlinear", "vlm"])
+def test_gpu_solver_options_equal_cpu(gpu_device, precision, kind):
+    """Parity with the body-axis wake, no symmetry folding, bank in ground effect and one chordwise panel.
+
+    The VLM case uses a single chordwise panel; the lifting-line solvers
+    ignore the chordwise count. The bank (phi) tilts the ground plane, so
+    the case is asymmetric and in ground effect.
+    """
+    solver = {"linear": vt.LinearLLTSolver, "nonlinear": vt.NonlinearSolver, "vlm": vt.HorseshoeSolver}[kind]()
+    ac = _aircraft(True, _polar() if kind == "nonlinear" else None)
+    st = vt.SolverSettings(solver_type=kind, n_panels=16, n_chord=1 if kind == "vlm" else None,
+                           wake_alignment="body", use_symmetry=False,
+                           tolerance=1e-9 if kind == "nonlinear" else 1e-6)
+    alphas = np.radians(np.linspace(-4.0, 12.0, 7))
+    ref = _sweep(solver, ac, st, alphas, "cpu", h=3.0, phi=0.05)
+    new = _sweep(solver, ac, st, alphas, "gpu", precision, h=3.0, phi=0.05)
+    tol = max(TOL[precision], 1e-8) if kind == "nonlinear" else TOL[precision]
+    _assert_close(ref, new, tol)
+    if kind == "nonlinear":
+        assert [r.iterations for r in ref] == [r.iterations for r in new] or precision == "float32"
 
 
 @pytest.mark.gpu

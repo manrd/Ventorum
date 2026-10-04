@@ -91,11 +91,16 @@ jobs:
         # The committed report must match the code. The comparison ignores
         # the run time and the environment line.
         run: python validation/compare_reports.py docs/verification_report.md "$RUNNER_TEMP/verification_report.md"
-      - name: Verification report with the Cython kernels
+      - name: Verification report with the Numba kernels
         env:
           MPLBACKEND: Agg
-          VENTORUM_KERNEL: cython
-        run: python validation/run_verification.py "$RUNNER_TEMP/verification_report_cython.md"
+          VENTORUM_KERNEL: numba
+        run: python validation/run_verification.py "$RUNNER_TEMP/verification_report_numba.md"
+      - name: Numba verification report matches the committed report
+        # The Numba backend must give the same physics as the default
+        # backend (round-off only). The comparison ignores the run time
+        # and the environment line.
+        run: python validation/compare_reports.py docs/verification_report.md "$RUNNER_TEMP/verification_report_numba.md"
       - name: Examples (smoke run)
         env:
           MPLBACKEND: Agg
