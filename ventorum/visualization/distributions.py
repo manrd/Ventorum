@@ -152,7 +152,7 @@ def plot_fourier_spectrum(
 ) -> Figure:
     """Plot the Fourier sine series circulation spectrum (A_n coefficients).
 
-    In the classical Lanchester-Prandtl lifting-line theory, the circulation is expanded as:
+    In the classical Lanchester–Prandtl lifting-line theory, the circulation is expanded as:
     Γ(θ) = 2·b·V_∞ · Σ A_n sin(n·θ), where θ = arccos(-2y/b).
     A_1 produces the equivalent elliptic lift, while higher odd harmonics
     (A_3, A_5, ...) represent departures from elliptic loading and produce

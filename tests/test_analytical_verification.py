@@ -75,7 +75,7 @@ def _sweep_warning(solver: str):
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# 1. Elliptic wing (Lanchester-Prandtl theory): e = 1 and CL_alpha = a0 / (1 + a0 / (pi AR))
+# 1. Elliptic wing (Lanchester–Prandtl theory): e = 1 and CL_alpha = a0 / (1 + a0 / (pi AR))
 # ═══════════════════════════════════════════════════════════════════════════════
 
 @pytest.mark.parametrize("solver", ["linear", "nonlinear", "fourier"])

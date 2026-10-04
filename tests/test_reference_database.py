@@ -26,7 +26,7 @@ ALPHAS_DEG = [-2.0, 0.0, 2.0, 4.0, 6.0, 8.0]
 
 
 def _cl_values():
-    """CL of an elliptic wing from Lanchester-Prandtl theory (never typed)."""
+    """CL of an elliptic wing from Lanchester–Prandtl theory (never typed)."""
     cla = analytic.elliptic_wing_cl_alpha(AR)
     return [cla * math.radians(a) for a in ALPHAS_DEG]
 

@@ -71,9 +71,9 @@ def plot_height_sweep(
     sweep_result : GroundEffectSweepResult
         Sweep data.
     alpha_deg : float or None
-        Angle of attack to plot. If None, chooses the middle alpha.
+        Angle of attack to plot [deg]. If None, chooses the middle alpha.
     phi_deg : float
-        Roll angle to isolate (default 0.0).
+        Bank angle to isolate [deg] (default 0.0).
     save_path : str or None
         If provided, saves figure to this path.
     dpi : int
@@ -151,6 +151,17 @@ def plot_roll_effect(
 
     Panels: Cl(phi) per height, the roll stiffness ``-dCl/dphi`` against h/c
     (log scale), and the yawing moment Cn(phi).
+
+    Parameters
+    ----------
+    sweep_result : GroundEffectSweepResult
+        Sweep data.
+    alpha_deg : float or None
+        Angle of attack of the plotted slice [deg]. If None, the middle angle.
+    save_path : str or None
+        If given, the figure is saved to this path.
+    dpi : int
+        Resolution of the saved figure.
     """
     if alpha_deg is None:
         a_idx = int(np.argmin(np.abs(sweep_result.alphas_deg - 4.0))) if len(sweep_result.alphas_deg) > 0 else 0
@@ -215,7 +226,19 @@ def plot_pitch_stability(
     save_path: str | None = None,
     dpi: int = 300,
 ) -> plt.Figure:
-    """Plot pitching moment Cm vs alpha and neutral point / Aerodynamic Center migration."""
+    """Plot pitching moment Cm vs alpha and neutral point / Aerodynamic Center migration.
+
+    Parameters
+    ----------
+    sweep_result : GroundEffectSweepResult
+        Sweep data.
+    phi_deg : float
+        Bank angle of the plotted slice [deg].
+    save_path : str or None
+        If given, the figure is saved to this path.
+    dpi : int
+        Resolution of the saved figure.
+    """
     p0_idx = int(np.argmin(np.abs(sweep_result.phis_deg - phi_deg)))
     alphas = sweep_result.alphas_deg
     h_over_c = sweep_result.heights / sweep_result.c_ref if sweep_result.c_ref > 0 else sweep_result.heights
@@ -367,6 +390,19 @@ def plot_ground_effect_matrix(
 
     *metric* is one of ``MATRIX_METRICS``. The sweep must have at least two
     heights and two angles of attack.
+
+    Parameters
+    ----------
+    sweep_result : GroundEffectSweepResult
+        Sweep data.
+    metric : str
+        Name of the plotted quantity.
+    phi_deg : float
+        Bank angle of the plotted slice [deg].
+    save_path : str or None
+        If given, the figure is saved to this path.
+    dpi : int
+        Resolution of the saved figure.
 
     Raises
     ------

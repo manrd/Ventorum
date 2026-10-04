@@ -27,6 +27,19 @@ Regularisation: each source has a core radius ``rc``. The finite-segment
 kernel uses the denominator ``|r1 x r2|^2 + (rc |r0|)^2`` and the
 semi-infinite kernel uses ``|d x r|^2 + rc^2``. When ``rc`` is much smaller
 than the distance, the kernels are the exact Biot-Savart law.
+
+References
+----------
+* J. Katz and A. Plotkin, "Low-Speed Aerodynamics", 2nd ed., Cambridge University
+  Press, 2001: the Biot-Savart law of a straight vortex segment and of a
+  semi-infinite vortex, and the horseshoe vortex.
+* L. Rosenhead, "The formation of vortices from a surface of discontinuity",
+  Proceedings of the Royal Society of London A 134 (1931) 170-192: a
+  positive term in the denominator of the Biot-Savart law removes the
+  singularity on the filament. The core term of Ventorum is a
+  regularisation of this kind; its form above and the size of the
+  cross-surface core (half the strip width, from a core-size study) are
+  choices of Ventorum, verified against the exact law in the tests.
 """
 
 from __future__ import annotations

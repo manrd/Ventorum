@@ -42,7 +42,7 @@ REFERENCES = {
 
 
 def elliptic_wing_cl_alpha(AR: float, a0: float = 2.0 * np.pi) -> float:
-    """Lifting-line lift slope of an elliptic wing [1/rad] (Lanchester-Prandtl theory)."""
+    """Lifting-line lift slope of an elliptic wing [1/rad] (Lanchester–Prandtl theory)."""
     return a0 / (1.0 + a0 / (np.pi * AR))
 
 

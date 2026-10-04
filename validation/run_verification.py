@@ -111,7 +111,7 @@ def case_elliptic() -> str:
                 worst = max(worst, abs(err), abs(t.e - 1.0))
                 rows.append([f"{AR:g}", f"{a0f:g}", solver, f"{ref:.4f}", f"{lift_slope(t, solver):.4f}",
                              pct(err), f"{t.e:.5f}"])
-    s = ["## V1. Elliptic wing (Lanchester-Prandtl lifting-line theory)", "",
+    s = ["## V1. Elliptic wing (Lanchester–Prandtl lifting-line theory)", "",
          f"Reference: {REFERENCES['prandtl_elliptic']}", "",
          "Elliptic planform with a straight quarter-chord line (301 sections, tip chord 1e-3 of the root), "
          "alpha = 0.5 deg, 40 panels per semi-span, default spacing. a0 is the section lift slope as a "

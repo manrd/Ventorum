@@ -279,6 +279,19 @@ class SurfaceSlice:
 class VortexLattice:
     """Panels and strips of an aircraft, in body axes.
 
+    All lengths are in metres and all angles in radians.
+
+    Attributes
+    ----------
+    chord : numpy.ndarray
+        Strip chord [m].
+    twist : numpy.ndarray
+        Strip twist, with the incidence of the surface [rad].
+    width : numpy.ndarray
+        Strip width [m].
+    area : numpy.ndarray
+        Strip area [m^2].
+
     Panels are ordered strip by strip; inside a strip from leading edge to
     trailing edge. Strips are ordered surface by surface; on a symmetric
     surface from the left tip to the right tip.

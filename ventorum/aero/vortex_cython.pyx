@@ -18,6 +18,10 @@ and :func:`ventorum.aero.vortex_numba.pack_targets` prepare them from a
 :class:`~ventorum.aero.vortex.Targets`. Each kernel takes the same
 arguments as its Numba counterpart, in the same order, plus one last
 argument ``num_threads``.
+
+The formulas and their sources are in :mod:`ventorum.aero.vortex`
+(Biot-Savart law: J. Katz and A. Plotkin, "Low-Speed Aerodynamics", 2nd ed., Cambridge University
+Press, 2001).
 """
 
 import numpy as np

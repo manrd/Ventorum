@@ -14,6 +14,10 @@ take a short path with no fold of columns.
 The kernels need flat arrays. :func:`pack_sources` and
 :func:`pack_targets` prepare them from a :class:`~ventorum.aero.vortex.HorseshoeSet`
 and :class:`~ventorum.aero.vortex.Targets`.
+
+The formulas and their sources are in :mod:`ventorum.aero.vortex`
+(Biot-Savart law: J. Katz and A. Plotkin, "Low-Speed Aerodynamics", 2nd ed., Cambridge University
+Press, 2001).
 """
 
 from __future__ import annotations

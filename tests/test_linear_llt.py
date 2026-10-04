@@ -17,7 +17,7 @@ from ventorum.solvers.linear import LinearLLTSolver, LinearSolver
 
 
 def test_linear_llt_elliptic_wing_exact():
-    """Verify LinearLLTSolver matches the exact Lanchester-Prandtl lifting-line result on elliptic wings."""
+    """Verify LinearLLTSolver matches the exact Lanchester–Prandtl lifting-line result on elliptic wings."""
     AR = 8.0
     b = 12.0
     S = b ** 2 / AR
@@ -46,7 +46,7 @@ def test_linear_llt_elliptic_wing_exact():
 
     res = LinearLLTSolver().solve(ac, cond, sett)
 
-    # Exact Lanchester-Prandtl values (with the aspect ratio of the discretised planform)
+    # Exact Lanchester–Prandtl values (with the aspect ratio of the discretised planform)
     AR_geo = ac.b_ref ** 2 / ac.S_ref
     a0 = 2.0 * np.pi
     CL_exact = a0 * np.sin(alpha_rad) / (1.0 + a0 / (np.pi * AR_geo))

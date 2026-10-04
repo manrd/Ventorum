@@ -21,6 +21,13 @@ What it does not model
   nonlinear solver with tabulated polars for stall.
 * Compressibility (no Prandtl-Glauert correction).
 * Leading-edge vortex lift of slender wings.
+
+References
+----------
+* J. Katz and A. Plotkin, "Low-Speed Aerodynamics", 2nd ed., Cambridge University
+  Press, 2001: the horseshoe-vortex lattice, the control points and the
+  flow-tangency condition.
+* M. Drela, "Flight Vehicle Aerodynamics", MIT Press, 2014: the vortex-lattice method and the Trefftz-plane drag.
 """
 
 from __future__ import annotations

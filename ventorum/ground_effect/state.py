@@ -85,6 +85,19 @@ class GroundEffectResult:
     Contains wind-axis and body-axis integrated force and moment coefficients,
     clearance metrics, strike limits, spanwise aerodynamic distributions, and
     underlying solver results.
+
+    Attributes
+    ----------
+    S_ref : float
+        Reference area [m^2].
+    b_ref : float
+        Reference span [m].
+    c_ref : float
+        Reference chord [m].
+    q_inf : float
+        Dynamic pressure [Pa].
+    h_ref : float
+        Height of the moment reference point above the ground [m].
     """
 
     condition: GroundEffectCondition

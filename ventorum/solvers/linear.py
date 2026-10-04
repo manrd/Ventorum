@@ -8,7 +8,7 @@ each bound vortex the Kutta-Joukowski force is set equal to the section lift
 
     [2 |u x dl_i| / (a0_i dA_i)] G_i - sum_j (v_ij . n_i) G_j = V (u . n_i - alpha_L0_i)
 
-For straight (unswept) lifting lines this is the Lanchester-Prandtl lifting-line theory
+For straight (unswept) lifting lines this is the Lanchester–Prandtl lifting-line theory
 for arbitrary planform, twist, camber, dihedral and several surfaces. With
 cosine spacing and control points at the mid parameter it gives ``e = 1``
 for the elliptic wing with 10 to 20 panels per semi-span.

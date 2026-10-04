@@ -2,7 +2,7 @@
 
 * **Verification** shows that the solvers solve their equations correctly.
   `run_verification.py` compares them with closed-form results and with
-  independent solutions of the same theories (Lanchester-Prandtl, Glauert, Kinner,
+  independent solutions of the same theories (Lanchester–Prandtl, Glauert, Kinner,
   Helmbold), and measures the limits of each method (sweep, taper, mesh,
   ground effect). It computes every number in the report; nothing is
   hard-coded.

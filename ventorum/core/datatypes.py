@@ -795,7 +795,7 @@ class SolverSettings:
         ``"vlm"`` / ``"horseshoe"``: vortex-lattice method (lifting surface).
         ``"linear"`` / ``"llt"``: linear lifting line (Phillips & Snyder).
         ``"nonlinear"``: nonlinear lifting line with section polars.
-        ``"fourier"``: classical Lanchester-Prandtl lifting line, Glauert's Fourier series (unswept planar wing).
+        ``"fourier"``: classical Lanchester–Prandtl lifting line, Glauert's Fourier series (unswept planar wing).
     n_panels : int
         Number of spanwise panels **per semi-span**.
     n_chord : int or None
@@ -910,7 +910,25 @@ class DiscretizedSurface:
 
 @dataclass(slots=True)
 class SpanwiseResult:
-    """Spanwise distributions for a **single** lifting surface."""
+    """Spanwise distributions for a **single** lifting surface.
+
+    Attributes
+    ----------
+    y : numpy.ndarray
+        Spanwise position of each strip [m].
+    gamma : numpy.ndarray
+        Circulation of each strip [m^2/s].
+    Cl, Cd_i, Cd_profile : numpy.ndarray
+        Section lift, induced-drag and profile-drag coefficients [-].
+    alpha_eff, alpha_i : numpy.ndarray
+        Effective and induced angle of attack of each strip [rad].
+    local_lift : numpy.ndarray
+        Lift per unit span [N/m].
+    chord : numpy.ndarray or None
+        Strip chord [m].
+    Cm_section : numpy.ndarray or None
+        Section pitching moment about the quarter chord [-].
+    """
 
     y: np.ndarray = field(default_factory=lambda: np.empty(0))
     gamma: np.ndarray = field(default_factory=lambda: np.empty(0))

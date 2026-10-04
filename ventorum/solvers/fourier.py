@@ -1,6 +1,6 @@
 # Author: Manuel Alejandro Rodriguez Diaz, PhD
 """
-Classical lifting-line solver: Lanchester-Prandtl theory with Glauert's Fourier series.
+Classical lifting-line solver: Lanchester–Prandtl theory with Glauert's Fourier series.
 
 The circulation is expanded as
 

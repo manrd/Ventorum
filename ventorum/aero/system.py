@@ -11,6 +11,14 @@ angle turns the plane about the free-stream direction.
 Image method: a source horseshoe is mirrored in the ground plane and its
 circulation changes sign, so the velocity normal to the ground is zero on the
 plane.
+
+References
+----------
+* J. Katz and A. Plotkin, "Low-Speed Aerodynamics", 2nd ed., Cambridge University
+  Press, 2001: the image method for a wall (here the ground plane) and the
+  free-stream boundary condition of the lattice.
+* K. V. Rozhdestvensky, "Aerodynamics of a Lifting System in Extreme Ground
+  Effect", Springer, 2000: lifting systems near the ground.
 """
 
 from __future__ import annotations
@@ -98,8 +106,16 @@ def side_direction(alpha: float, beta: float) -> np.ndarray:
 def ground_normal(alpha: float, beta: float = 0.0, phi: float = 0.0) -> np.ndarray:
     """Return the unit normal of the ground in body axes.
 
-    The normal points up, to the aircraft. *alpha*, *beta* and *phi* are the
-    angle of attack, the sideslip angle and the bank angle [rad].
+    The normal points up, to the aircraft.
+
+    Parameters
+    ----------
+    alpha : float
+        Angle of attack [rad].
+    beta : float
+        Sideslip angle [rad].
+    phi : float
+        Bank angle [rad].
 
     The ground is parallel to the free stream. With ``phi = 0`` the wings are
     level: the normal is the lift direction ``(-sin(alpha), 0, cos(alpha))``,
@@ -153,8 +169,14 @@ def make_ground_plane(
     ----------
     h : float
         Height [m] (must be > 0).
+    alpha : float
+        Angle of attack [rad].
+    beta : float
+        Sideslip angle [rad].
+    phi : float
+        Bank angle [rad].
     ref_point : (3,) or None
-        Reference point for ``height_ref='ref'``. Default: the origin.
+        Reference point [m] for ``height_ref='ref'``. Default: the origin.
     height_ref : {'ref', 'min'}
         * ``'ref'``: height of *ref_point*.
         * ``'min'``: smallest height of any leading- or trailing-edge node.

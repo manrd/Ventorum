@@ -163,7 +163,7 @@ def plot_surface_results(
     edge_width : float
         Line width of panel borders.
     alpha : float
-        Transparency of surface panels (0 = invisible, 1 = opaque).
+        Transparency of surface panels [-] (0 = invisible, 1 = opaque); not an angle.
     elev : float or None
         3D view elevation angle in degrees.
     azim : float or None

@@ -16,6 +16,13 @@ Reported moments use the standard aircraft convention (body axes x forward,
 y right, z down): ``Cl > 0`` right wing down, ``Cm > 0`` nose up,
 ``Cn > 0`` nose right. The geometry axes are x aft, y right, z up, so
 ``Cl = -Mx/(q S b)``, ``Cm = My/(q S c)``, ``Cn = -Mz/(q S b)``.
+
+References
+----------
+* J. Katz and A. Plotkin, "Low-Speed Aerodynamics", 2nd ed., Cambridge University
+  Press, 2001: the Kutta-Joukowski force on a bound vortex and the induced
+  drag in the Trefftz plane.
+* M. Drela, "Flight Vehicle Aerodynamics", MIT Press, 2014: the Trefftz-plane induced drag and the near-field forces.
 """
 
 from __future__ import annotations
@@ -84,6 +91,19 @@ def trefftz_induced_drag(
     ground: GroundPlane | None = None,
 ) -> tuple[float, np.ndarray, np.ndarray]:
     """Induced drag from the Trefftz plane.
+
+    Parameters
+    ----------
+    lattice : VortexLattice
+        The lattice.
+    strip_gamma : (n_strips,)
+        Circulation of each strip [m^2/s].
+    wake_dir : (3,)
+        Unit vector of the wake direction [-].
+    rho : float
+        Air density [kg/m^3].
+    ground : GroundPlane or None
+        Ground plane (image wake), or None in free air.
 
     Returns
     -------
@@ -274,6 +294,14 @@ def compute_loads(
 
     Parameters
     ----------
+    S_ref : float
+        Reference area [m^2].
+    b_ref : float
+        Reference span [m] (rolling and yawing moments).
+    c_ref : float
+        Reference chord [m] (pitching moment).
+    ref_point : (3,) or None
+        Moment reference point [m]. Default: the origin.
     gamma_panel : (n_panels,)
         Circulation of every panel horseshoe [m^2/s].
     alpha_eff_strip : (n_strips,) or None

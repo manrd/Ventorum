@@ -730,6 +730,29 @@ def ground_effect(
     ``axes`` input selects ``"stability"``, ``"wind"`` or ``"all"``
     (the three sets are then in each row under ``"moments"``). CL, CD
     and CY are relative to the free stream in every set.
+
+    Parameters
+    ----------
+    wing : dict
+        Wing or aircraft specification (see the MCP schema).
+    heights_m : list of float
+        Heights above the ground [m].
+    alpha_deg : float
+        Angle of attack [deg].
+    phi_deg : float
+        Bank angle [deg].
+    beta_deg : float
+        Sideslip angle [deg].
+    height_ref : str
+        Point whose height is given (see the MCP schema).
+    V_inf_m_s : float
+        Free-stream speed [m/s].
+    rho_kg_m3 : float
+        Air density [kg/m^3].
+    ref_point_m : list of float or None
+        Moment reference point [m].
+    settings, detail_level, axes
+        As in the MCP schema.
     """
     from ventorum.ground_effect import GroundEffectSweep, analyze_ground_effect
     from ventorum.ground_effect.solver import place_ground

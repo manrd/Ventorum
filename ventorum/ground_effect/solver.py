@@ -293,8 +293,12 @@ def analyze_ground_effect(
         Bank angle [deg]; positive puts the right wing nearer to the ground.
     beta_deg : float
         Sideslip [deg]; positive is wind from the right.
+    V_inf : float
+        Free-stream speed [m/s].
+    rho : float
+        Air density [kg/m^3].
     ref_point : (3,) or None
-        Moment reference point and the point for ``height_ref='ref'``.
+        Moment reference point [m] and the point for ``height_ref='ref'``.
         Default: ``Aircraft.ref_point`` (the origin of the geometry axes if
         None), the same point that :func:`ventorum.analyze` uses.
     height_ref : {'ref', 'min', 'qc', 'te'}

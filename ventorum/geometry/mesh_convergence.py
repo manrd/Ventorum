@@ -151,6 +151,19 @@ class GeneralizationGuideline:
 
     Provides rules to transfer the optimal mesh parameters to similar geometries,
     aspect ratios, and operating conditions.
+
+    Attributes
+    ----------
+    aspect_ratio : float
+        Aspect ratio of the studied geometry [-].
+    semi_span : float
+        Semi-span of the studied geometry [m].
+    panels_per_semi_span : float
+        Recommended panels per metre of semi-span [1/m].
+    min_dy_over_chord : float
+        Smallest strip width divided by the local chord [-].
+    dihedral_threshold_deg : float
+        Dihedral above which the guideline adds panels [deg].
     """
 
     recommended_n_panels: int

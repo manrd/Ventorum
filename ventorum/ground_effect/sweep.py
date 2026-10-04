@@ -93,6 +93,23 @@ class GroundEffectSweepResult:
     settings do not give it, the sweep sets it once from the case with the
     smallest gap to the ground (the lowest height), so that all heights use
     the same mesh and the height derivatives do not include a mesh change.
+
+    Attributes
+    ----------
+    heights : numpy.ndarray
+        Heights of the grid [m], in the convention of ``height_ref``.
+    alphas_deg : numpy.ndarray
+        Angles of attack of the grid [deg].
+    phis_deg : numpy.ndarray
+        Bank angles of the grid [deg].
+    S_ref : float
+        Reference area [m^2].
+    b_ref : float
+        Reference span [m].
+    c_ref : float
+        Reference chord [m].
+    ref_point : numpy.ndarray or None
+        Moment reference point [m], shape (3,).
     """
 
     heights: np.ndarray
@@ -496,7 +513,33 @@ def sweep_height(
     backend: str = "auto",
     **kwargs,
 ) -> GroundEffectSweepResult:
-    """Sweep the height at fixed angle of attack and bank."""
+    """Sweep the height at fixed angle of attack and bank.
+
+    Parameters
+    ----------
+    geometry : Aircraft or LiftingSurface
+        The geometry.
+    heights : sequence of float
+        Heights above the ground [m] (each > 0), in the convention of ``height_ref``.
+    alpha_deg : float
+        Angle of attack [deg].
+    phi_deg : float
+        Bank angle [deg].
+    n_workers : int or str
+        Number of parallel workers, or ``"auto"``.
+    backend : str
+        Parallel backend, or ``"auto"``.
+    **kwargs
+        Solver options (``solver``, ``settings``, ``n_panels``, ``spacing``)
+        and options of :meth:`GroundEffectSweep.run_sweep` (for example
+        ``V_inf`` [m/s], ``rho`` [kg/m^3], ``ref_point`` [m],
+        ``height_ref``).
+
+    Returns
+    -------
+    GroundEffectSweepResult
+        The grids of results.
+    """
     sk, rk = _split_kwargs(kwargs)
     return GroundEffectSweep(geometry, n_workers=n_workers, backend=backend, **sk).run_sweep(
         heights=heights, alphas_deg=[alpha_deg], phis_deg=[phi_deg], **rk)
@@ -511,7 +554,33 @@ def sweep_roll(
     backend: str = "auto",
     **kwargs,
 ) -> GroundEffectSweepResult:
-    """Sweep the bank angle at several heights."""
+    """Sweep the bank angle at several heights.
+
+    Parameters
+    ----------
+    geometry : Aircraft or LiftingSurface
+        The geometry.
+    phis_deg : sequence of float
+        Bank angles [deg].
+    heights : sequence of float
+        Heights above the ground [m] (each > 0), in the convention of ``height_ref``.
+    alpha_deg : float
+        Angle of attack [deg].
+    n_workers : int or str
+        Number of parallel workers, or ``"auto"``.
+    backend : str
+        Parallel backend, or ``"auto"``.
+    **kwargs
+        Solver options (``solver``, ``settings``, ``n_panels``, ``spacing``)
+        and options of :meth:`GroundEffectSweep.run_sweep` (for example
+        ``V_inf`` [m/s], ``rho`` [kg/m^3], ``ref_point`` [m],
+        ``height_ref``).
+
+    Returns
+    -------
+    GroundEffectSweepResult
+        The grids of results.
+    """
     sk, rk = _split_kwargs(kwargs)
     return GroundEffectSweep(geometry, n_workers=n_workers, backend=backend, **sk).run_sweep(
         heights=heights, alphas_deg=[alpha_deg], phis_deg=phis_deg, **rk)
@@ -526,7 +595,33 @@ def sweep_alpha(
     backend: str = "auto",
     **kwargs,
 ) -> GroundEffectSweepResult:
-    """Sweep the angle of attack at several heights."""
+    """Sweep the angle of attack at several heights.
+
+    Parameters
+    ----------
+    geometry : Aircraft or LiftingSurface
+        The geometry.
+    alphas_deg : sequence of float
+        Angles of attack [deg].
+    heights : sequence of float
+        Heights above the ground [m] (each > 0), in the convention of ``height_ref``.
+    phi_deg : float
+        Bank angle [deg].
+    n_workers : int or str
+        Number of parallel workers, or ``"auto"``.
+    backend : str
+        Parallel backend, or ``"auto"``.
+    **kwargs
+        Solver options (``solver``, ``settings``, ``n_panels``, ``spacing``)
+        and options of :meth:`GroundEffectSweep.run_sweep` (for example
+        ``V_inf`` [m/s], ``rho`` [kg/m^3], ``ref_point`` [m],
+        ``height_ref``).
+
+    Returns
+    -------
+    GroundEffectSweepResult
+        The grids of results.
+    """
     sk, rk = _split_kwargs(kwargs)
     return GroundEffectSweep(geometry, n_workers=n_workers, backend=backend, **sk).run_sweep(
         heights=heights, alphas_deg=alphas_deg, phis_deg=[phi_deg], **rk)
