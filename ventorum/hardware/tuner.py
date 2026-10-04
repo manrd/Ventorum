@@ -229,9 +229,6 @@ def _gpu_info() -> dict[str, Any]:
 
     info = _detect_gpu_capabilities()
     info["compute_capability"] = list(info["compute_capability"]) if info.get("compute_capability") else None
-    info["crossover_panels"] = None
-    info["note"] = ("The GPU path of the verified solvers is not available yet; "
-                    "the crossover is measured when it is.")
     return info
 
 
@@ -269,6 +266,22 @@ def tune_machine(quick: bool = False, save: bool = True, verbose: bool = True) -
     meas: dict[str, Any] = {"single": {}, "batch": {}, "kernels": {}}
     settings: dict[str, Any] = {"single": {}, "batch": {}, "kernels": {}}
 
+    from ventorum import gpu
+
+    old_device = gpu.get_device()
+    gpu.set_device("cpu")   # the steps measure the CPU paths
+    try:
+        profile = _tune_steps(quick, say, hw, cores, classes, meas, settings, t_start, prof, par, vt, warnings)
+    finally:
+        gpu.set_device(old_device)
+    if save:
+        path = prof.save_profile(profile)
+        say(f"Profile saved: {path} ({profile['tuning_seconds']} s)")
+    return profile
+
+
+def _tune_steps(quick, say, hw, cores, classes, meas, settings, t_start, prof, par, vt, warnings) -> dict[str, Any]:
+    """Run the steps of :func:`tune_machine` and return the profile."""
     with warnings.catch_warnings(), par.forced_single_threads(None):
         warnings.simplefilter("ignore")
 
@@ -316,8 +329,4 @@ def tune_machine(quick: bool = False, save: bool = True, verbose: bool = True) -
     settings["gpu"] = _gpu_info()
     settings["cython_threads"] = _cython_threads()
     settings["torch_device"] = _torch_device()
-    profile = _make_profile(prof, settings, meas, hw, quick, time.perf_counter() - t_start, vt)
-    if save:
-        path = prof.save_profile(profile)
-        say(f"Profile saved: {path} ({profile['tuning_seconds']} s)")
-    return profile
+    return _make_profile(prof, settings, meas, hw, quick, time.perf_counter() - t_start, vt)

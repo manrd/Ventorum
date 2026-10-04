@@ -242,6 +242,11 @@ class LatticeSolver(BaseSolver):
         main_surface: int = 0,
     ) -> SolverResult:
         t0 = time.perf_counter()
+        gpu_results = self._gpu_batch(lattice, [condition], settings, S_ref, b_ref, c_ref, ref_point,
+                                      main_surface, False, t0, gamma0=gamma0,
+                                      grounds=None if ground is None else [ground])
+        if gpu_results is not None:
+            return gpu_results[0]
         ground, h_min, notes, wd = self._case_setup(lattice, condition, settings, c_ref, ground, ref_point)
         gamma, alpha_eff, info = self.solve_circulation(lattice, condition, settings, ground, wd, gamma0=gamma0)
         loads = compute_loads(
@@ -509,6 +514,10 @@ class LatticeSolver(BaseSolver):
         t0 = time.perf_counter()
         if not conditions:
             return []
+        gpu_results = self._gpu_batch(lattice, conditions, settings, S_ref, b_ref, c_ref, ref_point,
+                                      main_surface, continuation, t0, grounds=grounds)
+        if gpu_results is not None:
+            return gpu_results
         explicit = [None] * len(conditions) if grounds is None else list(grounds)
         with solve_threads(lattice.n_panels, batch=len(conditions)):
             setups = [self._case_setup(lattice, c, settings, c_ref, g, ref_point) for c, g in zip(conditions, explicit)]
@@ -529,6 +538,22 @@ class LatticeSolver(BaseSolver):
                               t0, execution_time=share)
             for cond, ld, (g, _, info), st in zip(conditions, loads, sols, setups)
         ]
+
+    def _gpu_batch(self, lattice, conditions, settings, S_ref, b_ref, c_ref, ref_point, main_surface,
+                   continuation, t0, gamma0=None, grounds=None) -> list[SolverResult] | None:
+        """Solve the cases with the GPU pipelines, or return None (CPU path).
+
+        See :mod:`ventorum.gpu`: the device setting and the size of the solve
+        select the GPU; unsupported cases return None.
+        """
+        from ventorum import gpu
+
+        if gpu.get_device() == "cpu":
+            return None
+        from ventorum.gpu.pipeline import solve_batch as gpu_solve_batch
+
+        return gpu_solve_batch(self, lattice, conditions, settings, S_ref, b_ref, c_ref, ref_point,
+                               main_surface, continuation, t0, gamma0=gamma0, grounds=grounds)
 
     def solve_circulation_batch(
         self,

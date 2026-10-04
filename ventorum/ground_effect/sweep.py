@@ -335,6 +335,7 @@ class GroundEffectSweep:
                         ac, sett, float(hv), float(av), 0.0, rp, height_ref, max_bank_deg=MAX_BANK_DEG)
 
         cases = [(hi, ai, pi) for hi in range(shape[0]) for ai in range(shape[1]) for pi in range(shape[2])]
+        batch = _gpu_batch(ac, sett, cases, h_arr, a_arr, p_arr, V_inf, rho, rp, height_ref)
 
         def run(case: tuple[int, int, int]):
             hi, ai, pi = case
@@ -351,7 +352,9 @@ class GroundEffectSweep:
         backend = "thread" if self.backend == "auto" else self.backend
         if backend not in ("thread", "serial"):
             raise ValueError(f"backend={self.backend!r}: use 'auto', 'thread' or 'serial'.")
-        if backend == "serial":
+        if batch is not None:
+            outputs = batch
+        elif backend == "serial":
             outputs = [run(c) for c in cases]
         else:
             outputs = run_cases(run, cases, estimate_panels(ac, sett), self.n_workers)
@@ -388,6 +391,54 @@ class GroundEffectSweep:
             ref_point=rp, height_ref=height_ref, h_ref_grid=grids["h_ref"],
             execution_time=float(time.perf_counter() - t0),
         )
+
+
+def _gpu_batch(ac, sett, cases, h_arr, a_arr, p_arr, V_inf, rho, rp, height_ref) -> list | None:
+    """Solve all cases of a sweep as one GPU batch; return the outputs ``(case, result, error)`` or None.
+
+    The GPU takes the batch when :func:`ventorum.gpu.use_gpu` selects it
+    for its work (all cases on the lattice of the fixed chordwise count).
+    Each case is checked and its ground is placed as in
+    :func:`ventorum.ground_effect.analyze_ground_effect`; the cases that
+    fail a check keep their error, the others are solved together. None
+    means the CPU path (one case per worker).
+    """
+    from ventorum import gpu
+    from ventorum.gpu.pipeline import work_estimate
+    from ventorum.ground_effect.solver import ground_case_result, place_ground, prepare_ground_case
+    from ventorum.solvers.factory import make_solver, resolve_solver_type
+
+    if gpu.get_device() == "cpu" or not cases:
+        return None
+    canonical = resolve_solver_type(sett.solver_type)
+    if canonical not in ("vlm", "linear", "nonlinear"):
+        return None
+    solver = make_solver(canonical)
+    first = cases[0]
+    probe_cond = FlightCondition(V_inf=V_inf, alpha=float(np.radians(a_arr[first[1]])), rho=rho)
+    lattice = solver.build(ac, sett, probe_cond, None, rp)
+    if not gpu.use_gpu(work_estimate(lattice, len(cases), True), canonical, len(cases), lattice.n_panels):
+        return None
+    t0 = time.perf_counter()
+    _, probe = place_ground(ac, sett, float(h_arr[first[0]]), 0.0, 0.0, 0.0, rp, height_ref)
+    prepared, outputs = [], {}
+    for case in cases:
+        hi, ai, pi = case
+        try:
+            prepared.append((case, prepare_ground_case(
+                ac, float(h_arr[hi]), float(a_arr[ai]), float(p_arr[pi]), V_inf=V_inf, rho=rho, ref_point=rp,
+                height_ref=height_ref, settings=sett, probe=probe)))
+        except (GroundStrikeError, ValidityError) as exc:
+            outputs[case] = (case, None, exc)
+    if prepared:
+        conds = [p["condition"] for _, p in prepared]
+        grounds = [p["ground"] for _, p in prepared]
+        results = solver.solve_batch(lattice, conds, sett, ac.S_ref, ac.b_ref, ac.c_ref, ref_point=rp,
+                                     main_surface=ac.main_surface_index(), continuation=False, grounds=grounds)
+        share = (time.perf_counter() - t0) / len(prepared)
+        for (case, p), res in zip(prepared, results):
+            outputs[case] = (case, ground_case_result(p, res, False, time.perf_counter() - share), None)
+    return [outputs[c] for c in cases]
 
 
 def _fixed_n_chord(

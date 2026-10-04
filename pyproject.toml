@@ -46,6 +46,8 @@ dev = [
     "pytest-cov>=4.0",
     "ruff==0.15.20",
 ]
+# GPU pipelines (ventorum.gpu): NVIDIA Warp kernels (Apache-2.0). PyTorch with CUDA is also needed.
+gpu = ["warp-lang>=1.17,<2"]
 study = ["jax[cpu]>=0.4,<1"]
 
 [tool.setuptools.packages.find]

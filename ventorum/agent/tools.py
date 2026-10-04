@@ -335,6 +335,13 @@ def wing_analysis(
 # Polar sweep
 # ═══════════════════════════════════════════════════════════════════════════════
 
+def _gpu_takes(n_cases: int, n_panels: int) -> bool:
+    """Return True if the GPU pipelines take a batch of *n_cases* on a lattice of *n_panels* panels (free air)."""
+    from ventorum import gpu
+
+    return gpu.get_device() != "cpu" and gpu.use_gpu(float(n_cases) * float(n_panels) ** 2, "vlm", n_cases, n_panels)
+
+
 def _batched_polar(ac: Aircraft, sett: SolverSettings, conditions: list[FlightCondition],
                    alphas: list[float]) -> list[tuple]:
     """Solve the angles of a lattice polar out of ground effect as one batch.
@@ -453,10 +460,12 @@ def polar_sweep(
         outputs = first_done + list(rest)
     elif (resolve_solver_type(sett.solver_type) in ("linear", "nonlinear")
           or (resolve_solver_type(sett.solver_type) == "vlm"
-              and size_class(estimate_panels(ac, sett)) == "small"
+              and (size_class(estimate_panels(ac, sett)) == "small"
+                   or _gpu_takes(len(alphas), _planned_panels(ac, sett)))
               and _case_settings(ac, sett, strips, make_flight_condition(c, alpha_deg=alphas[0])) is sett)):
-        # Lifting lines, and small vortex lattices: one batch. A larger vortex
-        # lattice gains more from cases in parallel.
+        # Lifting lines, small vortex lattices and batches that the GPU takes:
+        # one batch. A larger vortex lattice on the CPU gains more from cases
+        # in parallel.
         outputs = _batched_polar(ac, sett, [make_flight_condition(c, alpha_deg=a) for a in alphas], alphas)
     else:
         outputs = run_cases(run, alphas, estimate_panels(ac, sett), "auto")

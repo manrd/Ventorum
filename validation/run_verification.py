@@ -445,9 +445,19 @@ def main(out_path: str | None = None) -> Path:
         "is not validation against experiment. Experimental validation needs datasets with full "
         "provenance (see `validation/experimental/README.md`); none are included yet.", "",
     ]
-    for fn in (case_elliptic, case_glauert, case_lifting_surface, case_sweep, case_tapered_straight_le,
-               case_convergence, case_ground, case_camber_moment, case_signs, case_split_surfaces):
-        parts.append(fn())
+    # The report verifies the reference (CPU) solvers, so its numbers do not
+    # depend on the GPU of the machine. The GPU pipelines are checked against
+    # them by tests/test_gpu_pipeline.py.
+    from ventorum import gpu
+
+    old_device = gpu.get_device()
+    gpu.set_device("cpu")
+    try:
+        for fn in (case_elliptic, case_glauert, case_lifting_surface, case_sweep, case_tapered_straight_le,
+                   case_convergence, case_ground, case_camber_moment, case_signs, case_split_surfaces):
+            parts.append(fn())
+    finally:
+        gpu.set_device(old_device)
     parts.append(f"Run time: {time.perf_counter() - t0:.1f} s.")
     out = Path(out_path) if out_path else ROOT / "docs" / "verification_report.md"
     out.write_text("\n".join(parts) + "\n", encoding="utf-8")

@@ -39,7 +39,8 @@ def alpha_sweep(
         Cases in parallel for the vortex-lattice solver (see
         :func:`ventorum.utils.parallel.plan_parallel`): ``"auto"`` uses the
         tuned plan of this machine or the default, and solves a small lattice
-        (size class "small") as one batch (``solve_sweep``). The kernel
+        (size class "small"), or a sweep that the GPU takes (see
+        :mod:`ventorum.gpu`), as one batch (``solve_sweep``). The kernel
         threads of each case follow from it. The lifting-line solvers solve all angles
         as one batch (``solve_sweep``) on all kernel threads; the nonlinear
         solver starts each angle from the solution of the previous one.
@@ -91,6 +92,13 @@ def alpha_sweep(
         # workers; larger lattices gain from cases in parallel.
         auto = n_jobs is None or (isinstance(n_jobs, str) and n_jobs.lower() == "auto")
         serial = plan.workers == 1 or (auto and size_class(lattice.n_panels) == "small")
+        if not serial and auto:
+            # The GPU solves all angles as one batch (see ventorum.gpu): no pool of workers.
+            from ventorum import gpu
+            from ventorum.gpu.pipeline import work_estimate
+
+            serial = gpu.get_device() != "cpu" and gpu.use_gpu(work_estimate(lattice, len(alpha_range), False), "vlm",
+                                                                len(alpha_range), lattice.n_panels)
     if serial:
         results = solver.solve_sweep(aircraft, condition, settings, alpha_range)
         if pb:
