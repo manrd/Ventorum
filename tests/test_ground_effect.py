@@ -486,3 +486,88 @@ def test_sweep_alpha_kept(rectangular_wing):
     # CL should increase with alpha
     assert res.CL[0, 1, 0] > res.CL[0, 0, 0]
     assert res.CL[0, 2, 0] > res.CL[0, 1, 0]
+
+
+# ---------------------------------------------------------------------------
+# One chordwise mesh for all angles of a sweep in ground effect (review 5, A1)
+# ---------------------------------------------------------------------------
+
+def _ge_rect_wing():
+    w = vt.LiftingSurface(semi_span=3.0, sections=[vt.WingSection(y_frac=0.0, chord=1.0),
+                                                   vt.WingSection(y_frac=1.0, chord=1.0)])
+    return vt.Aircraft(surfaces=[w], ref_point=np.array([0.25, 0.0, 0.0]))
+
+
+def _ge_sweep(alphas_deg):
+    from ventorum.solvers.factory import make_solver
+
+    settings = vt.SolverSettings(solver_type="vlm", n_panels=20)
+    return make_solver("vlm").solve_sweep(_ge_rect_wing(), vt.FlightCondition(V_inf=30.0, h=0.255),
+                                          settings, np.radians(alphas_deg))
+
+
+def test_sweep_ge_one_mesh():
+    """At h = 0.255 m the automatic n_chord (ceil(c/h_min)) is 5 at 2 deg and 6 at 6 deg.
+
+    The sweep must use one mesh (the count of the lowest gap) for every
+    angle, so dCm/dalpha has no jump at the change of the count.
+    """
+    al = np.arange(2.0, 6.01, 0.25)
+    single = [vt.analyze(_ge_rect_wing(), vt.FlightCondition(V_inf=30.0, alpha=np.radians(a), h=0.255),
+                         vt.SolverSettings(solver_type="vlm", n_panels=20)).details["lattice"].n_chord
+              for a in (al[0], al[-1])]
+    assert single[0] < single[1]  # the case crosses a change of the automatic count
+    rs = _ge_sweep(al)
+    counts = {r.details["lattice"].n_chord for r in rs}
+    assert counts == {single[1]}
+    cl = np.array([r.totals.CL for r in rs])
+    cm = np.array([r.totals.Cm for r in rs])
+    slope = np.diff(cm) / np.diff(cl)
+    # Smooth: the slope changes by about the same amount in each interval.
+    # A mesh change in the sweep gave a step about 20 times the usual change.
+    step = np.abs(np.diff(slope))
+    assert np.max(step) < 2.0 * np.median(step)
+
+
+def test_sweep_ge_matches_single_solve_on_pinned_mesh():
+    """Each angle of the sweep equals a single solve with the pinned n_chord."""
+    al = np.array([2.0, 6.0])
+    rs = _ge_sweep(al)
+    n = rs[0].details["lattice"].n_chord
+    for a, r in zip(al, rs):
+        ref = vt.analyze(_ge_rect_wing(), vt.FlightCondition(V_inf=30.0, alpha=np.radians(a), h=0.255),
+                         vt.SolverSettings(solver_type="vlm", n_panels=20, n_chord=n))
+        assert r.totals.CL == pytest.approx(ref.totals.CL, rel=1e-12, abs=1e-14)
+        assert r.totals.Cm == pytest.approx(ref.totals.Cm, rel=1e-12, abs=1e-14)
+
+
+def test_sweep_ge_keeps_given_n_chord():
+    from ventorum.solvers.factory import make_solver
+
+    settings = vt.SolverSettings(solver_type="vlm", n_panels=20, n_chord=3)
+    rs = make_solver("vlm").solve_sweep(_ge_rect_wing(), vt.FlightCondition(V_inf=30.0, h=0.255),
+                                        settings, np.radians([2.0, 6.0]))
+    assert {r.details["lattice"].n_chord for r in rs} == {3}
+    assert settings.n_chord == 3
+
+
+@pytest.mark.gpu
+def test_sweep_ge_one_mesh_gpu():
+    from ventorum import gpu
+
+    if not gpu.available():
+        pytest.skip(f"The GPU pipelines cannot run: {gpu.unavailable_reason()}")
+    old_dev, old_prec = gpu.get_device(), gpu._precision
+    try:
+        gpu.set_device("gpu")
+        gpu.set_precision("float64")
+        rs = _ge_sweep(np.array([2.0, 6.0]))
+        gpu.set_device("cpu")
+        cpu = _ge_sweep(np.array([2.0, 6.0]))
+    finally:
+        gpu.set_device(old_dev)
+        gpu.set_precision(old_prec)
+    assert {r.details["device"] for r in rs} == {"gpu"}
+    assert len({r.details["lattice"].n_chord for r in rs}) == 1
+    for g, c in zip(rs, cpu):
+        assert g.totals.Cm == pytest.approx(c.totals.Cm, rel=1e-10, abs=1e-13)

@@ -437,8 +437,10 @@ class LatticeSolver(BaseSolver):
         effect (continuation), which helps near the maximum lift. The vortex
         lattice out of ground effect solves all angles as one batch and keeps
         the influence of the bound vortices and the chordwise legs between
-        the angles; in ground effect the angles with the same chordwise count
-        form one batch, and each angle gets the same result as a single solve.
+        the angles. In ground effect, when ``settings.n_chord`` is automatic,
+        all angles use one chordwise count: the count of the angle with the
+        smallest gap to the ground. Each angle then gets the same result as
+        a single solve with that ``n_chord``.
         """
         aircraft = as_aircraft(aircraft)
         validate_aircraft(aircraft)
@@ -467,18 +469,15 @@ class LatticeSolver(BaseSolver):
             lattice.kernel_cache = {}
             return self.solve_batch(lattice, conds, settings, S, b, c, ref_point=rp, main_surface=main)
         # In ground effect the automatic chordwise count depends on the
-        # attitude: the angles with the same lattice are solved as one batch.
-        lattices = [self.build(aircraft, settings, cond, None, rp) for cond in conds]
-        out: list[SolverResult] = []
-        k0 = 0
-        while k0 < len(conds):
-            k1 = k0 + 1
-            while k1 < len(conds) and lattices[k1].n_chord == lattices[k0].n_chord:
-                k1 += 1
-            out.extend(self.solve_batch(lattices[k0], conds[k0:k1], settings, S, b, c, ref_point=rp,
-                                        main_surface=main))
-            k0 = k1
-        return out
+        # attitude. All angles use the count of the angle with the smallest
+        # gap to the ground (the largest count), so that the results of the
+        # sweep (and differences between them) do not contain a mesh change.
+        if settings.n_chord is None:
+            settings = settings.clone()
+            settings.n_chord = max(self.resolve_n_chord(aircraft, settings, cond, None, rp)
+                                   for cond in conds)
+        lattice = self.build(aircraft, settings, condition, None, rp)
+        return self.solve_batch(lattice, conds, settings, S, b, c, ref_point=rp, main_surface=main)
 
     def solve_batch(
         self,

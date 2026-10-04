@@ -612,3 +612,39 @@ def test_gemini_schema_uses_the_openapi_subset():
     assert nw["type"] == "integer" and "'auto'" in nw["description"]
     # The other formats keep the full JSON schema.
     assert "anyOf" in json.dumps(get_tool_schemas("mcp"))
+
+
+def test_stability_derivatives_ge_one_mesh():
+    """In ground effect all five cases use one chordwise mesh (review 5, A1).
+
+    At h = 0.255 m the automatic n_chord is 6 at alpha 4.5 deg and 5 at
+    3.5 deg. The derivatives must equal central differences on one mesh
+    (the larger count), and n_chord_used must name that mesh.
+    """
+    import numpy as np
+
+    import ventorum as vt
+
+    out = stability_derivatives({"span_m": 6.0, "chord_m": 1.0},
+                                {"alpha_deg": 4.0, "V_inf_m_s": 30.0, "h_m": 0.255},
+                                x_cg_m=0.25, settings={"n_panels": 20, "solver": "vlm"})
+    assert out["status"] == "success"
+    n_used = out["settings_used"]["n_chord_used"]
+
+    wing = vt.LiftingSurface(semi_span=3.0, sections=[vt.WingSection(y_frac=0.0, chord=1.0),
+                                                      vt.WingSection(y_frac=1.0, chord=1.0)])
+    ac = vt.Aircraft(surfaces=[wing], ref_point=np.array([0.25, 0.0, 0.0]))
+
+    def run(a, nc):
+        return vt.analyze(ac.clone(), vt.FlightCondition(V_inf=30.0, alpha=np.radians(a), h=0.255),
+                          vt.SolverSettings(solver_type="vlm", n_panels=20, n_chord=nc))
+
+    counts = {run(a, None).details["lattice"].n_chord for a in (3.5, 4.5)}
+    assert len(counts) == 2  # the case crosses a change of the automatic count
+    assert n_used == max(counts)
+    rp, rm = run(4.5, n_used), run(3.5, n_used)
+    cla = (rp.totals.CL - rm.totals.CL) / np.radians(1.0)
+    cma = (rp.totals.Cm - rm.totals.Cm) / np.radians(1.0)
+    d = out["stability_derivatives"]
+    assert d["CL_alpha_per_rad"] == pytest.approx(cla, abs=2e-5)
+    assert d["Cm_alpha_per_rad"] == pytest.approx(cma, abs=2e-5)

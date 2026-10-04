@@ -158,6 +158,35 @@ def _case_settings(ac: Aircraft, sett: SolverSettings, strips: int, condition: F
     return out
 
 
+def _common_settings(ac: Aircraft, sett: SolverSettings, strips: int,
+                     conditions: list[FlightCondition]) -> tuple[SolverSettings, bool]:
+    """Return one set of solver settings for all cases of a difference.
+
+    In ground effect the automatic n_chord depends on the attitude. The
+    cases of one finite difference must use the same mesh, so the count of
+    the case with the smallest gap to the ground (the largest count) is
+    used for all of them, reduced to the MAX_TOTAL_PANELS limit if needed.
+    Returns the settings and True if the count was reduced to the limit.
+    Otherwise (n_chord given, no lattice chord, no ground) *sett* is
+    returned unchanged.
+    """
+    if sett.n_chord is not None or not _uses_lattice_chord(ac, sett):
+        return sett, False
+    if all(fc.h is None for fc in conditions):
+        # Out of ground effect the automatic count does not change with the attitude.
+        out = _case_settings(ac, sett, strips, conditions[0])
+        return out, out is not sett
+    from ventorum.solvers.horseshoe import HorseshoeSolver
+
+    rp = ac.moment_reference()
+    solver = HorseshoeSolver()
+    auto = max(solver.resolve_n_chord(ac, sett, fc, None, rp) for fc in conditions)
+    cap = MAX_TOTAL_PANELS // strips
+    out = sett.clone()
+    out.n_chord = int(min(auto, cap))
+    return out, cap < auto
+
+
 def _mesh_note(capped: bool, sett: SolverSettings | None = None) -> dict[str, Any]:
     if not capped:
         return {}
@@ -906,20 +935,18 @@ def stability_derivatives(
     _check_call_work(
         5 * (_planned_panels(ac, sett, make_flight_condition(c)) ** 2),
         "fewer panels (smaller n_panels or n_chord)")
-    capped: list[SolverSettings] = []
-
     d_a, d_b = 0.5, 1.0
     a, b = c["alpha_deg"], c["beta_deg"]
     cases = {"base": (a, b), "a+": (a + d_a, b), "a-": (a - d_a, b), "b+": (a, b + d_b), "b-": (a, b - d_b)}
+    # All cases use one mesh, so that the differences contain no mesh change.
+    case_sett, capped = _common_settings(
+        ac, sett, strips, [make_flight_condition(c, alpha_deg=aa, beta_deg=bb) for aa, bb in cases.values()])
 
     def run(item):
         key, (aa, bb) = item
         fc = make_flight_condition(c, alpha_deg=aa, beta_deg=bb)
-        s = _case_settings(ac, sett, strips, fc)
-        if s is not sett:
-            capped.append(s)
         try:
-            return key, vt.analyze(ac.clone(), fc, s)
+            return key, vt.analyze(ac.clone(), fc, case_sett)
         except GroundStrikeError as exc:
             raise GroundStrikeError(f"Case alpha={aa:g} deg, beta={bb:g} deg: {exc}") from exc
 
@@ -1031,7 +1058,7 @@ def stability_derivatives(
         "base_point": base_point,
         "notes": notes,
         "condition_used": condition_payload(c),
-        "settings_used": {**settings_payload(sett, res["base"]), **_mesh_note(bool(capped))},
+        "settings_used": {**settings_payload(sett, res["base"]), **_mesh_note(capped, case_sett)},
         "trust": trust_payload(t["base"].trust),
         "axes": ax,
     }
