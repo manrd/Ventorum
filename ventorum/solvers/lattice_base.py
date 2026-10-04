@@ -18,7 +18,7 @@ from typing import Literal
 
 import numpy as np
 
-from ventorum.aero.loads import compute_loads
+from ventorum.aero.loads import compute_loads, compute_loads_batch
 from ventorum.aero.system import (
     GroundPlane,
     check_ground_clearance,
@@ -233,6 +233,30 @@ class LatticeSolver(BaseSolver):
         main_surface: int = 0,
     ) -> SolverResult:
         t0 = time.perf_counter()
+        ground, h_min, notes, wd = self._case_setup(lattice, condition, settings, c_ref, ground, ref_point)
+        gamma, alpha_eff, info = self.solve_circulation(lattice, condition, settings, ground, wd, gamma0=gamma0)
+        loads = compute_loads(
+            lattice, gamma, condition, S_ref, b_ref, c_ref,
+            ground=ground, ref_point=ref_point, alpha_eff_strip=alpha_eff, wake_dir=wd,
+            v_control=getattr(info, "v_control", None),
+        )
+        return self._case_result(lattice, condition, loads, info, gamma, ground, h_min, notes, wd,
+                                 c_ref, main_surface, t0)
+
+    def _case_setup(
+        self,
+        lattice: VortexLattice,
+        condition: FlightCondition,
+        settings: SolverSettings,
+        c_ref: float,
+        ground: GroundPlane | None,
+        ref_point: np.ndarray | None,
+    ) -> tuple[GroundPlane | None, float | None, list[str], np.ndarray]:
+        """Return the ground plane, the smallest ground clearance [m], the notes and the wake direction of one case.
+
+        Raises the errors of the validity checks (ground strike, lifting line
+        too near the ground).
+        """
         if ground is None and condition.h is not None:
             ground = ground_plane_from_condition(lattice, condition, ref_point)
         h_min = check_ground_clearance(lattice, ground)
@@ -250,15 +274,40 @@ class LatticeSolver(BaseSolver):
                 "ground-effect lift increment compared with the VLM (about 1 to 5 % of CL at "
                 "h_min/c 1 to 2)."
             )
-
         wd = wake_direction(condition, ground, getattr(settings, "wake_alignment", "freestream"))
-        gamma, alpha_eff, info = self.solve_circulation(lattice, condition, settings, ground, wd, gamma0=gamma0)
-        loads = compute_loads(
-            lattice, gamma, condition, S_ref, b_ref, c_ref,
-            ground=ground, ref_point=ref_point, alpha_eff_strip=alpha_eff, wake_dir=wd,
-            v_control=getattr(info, "v_control", None),
-        )
-        sweep_deg = quarter_chord_sweep_deg(lattice)
+        return ground, h_min, notes, wd
+
+    @staticmethod
+    def _cached(lattice: VortexLattice, key, compute):
+        """Return the lattice-only value *key* from ``lattice.geom_cache``; compute it on the first use."""
+        value = lattice.geom_cache.get(key)
+        if value is None:
+            value = compute()
+            lattice.geom_cache[key] = value
+        return value
+
+    def _case_result(
+        self,
+        lattice: VortexLattice,
+        condition: FlightCondition,
+        loads,
+        info,
+        gamma: np.ndarray,
+        ground: GroundPlane | None,
+        h_min: float | None,
+        notes: list[str],
+        wd: np.ndarray,
+        c_ref: float,
+        main_surface: int,
+        t0: float,
+        execution_time: float | None = None,
+    ) -> SolverResult:
+        """Return the result object of one case: trust score, details and warnings.
+
+        *execution_time* [s] replaces the time since *t0* when given (a
+        batch gives each case its share of the batch time).
+        """
+        sweep_deg = self._cached(lattice, "quarter_chord_sweep_deg", lambda: quarter_chord_sweep_deg(lattice))
         if self.collocation == "llt" and sweep_deg > LLT_SWEEP_WARNING_DEG:
             notes.append(
                 f"Lifting line with {sweep_deg:.1f} deg mean quarter-chord sweep (a tapered wing with a "
@@ -278,13 +327,15 @@ class LatticeSolver(BaseSolver):
             CDi=totals.CDi,
             CD_total=totals.CD_total,
             converged=info.converged,
-            n_panels=main_surface_strip_count(lattice, main_surface),
+            n_panels=self._cached(lattice, ("main_strip_count", main_surface),
+                                  lambda: main_surface_strip_count(lattice, main_surface)),
             max_sweep_rad=np.radians(sweep_deg),
             solver_type=self.name,
             h_over_c=h_over_c,
             n_chord=lattice.n_chord,
             notes=notes,
-            max_chord_over_c=float(np.max(lattice.chord) / c_ref) if c_ref else 1.0,
+            max_chord_over_c=(float(self._cached(lattice, "max_chord", lambda: np.max(lattice.chord)) / c_ref)
+                              if c_ref else 1.0),
         )
         res = SolverResult(
             spanwise=loads.spanwise,
@@ -294,14 +345,14 @@ class LatticeSolver(BaseSolver):
             iterations=info.iterations,
             residual_history=list(info.residual_history),
             condition=condition,
-            execution_time=time.perf_counter() - t0,
+            execution_time=(time.perf_counter() - t0) if execution_time is None else execution_time,
             symmetry_used=info.symmetric,
         )
         # Kept for advanced use (plots, diagnostics, ground-effect post-processing).
         res.details = {"lattice": lattice, "loads": loads, "ground": ground, "h_min": h_min,
                        "sweep_deg": sweep_deg, "notes": notes, "gamma": gamma, "wake_dir": wd}
         for msg in notes:
-            warnings.warn(msg, RuntimeWarning, stacklevel=3)
+            warnings.warn(msg, RuntimeWarning, stacklevel=4)
         return res
 
     def solve(
@@ -360,14 +411,32 @@ class LatticeSolver(BaseSolver):
     ) -> list[SolverResult]:
         """Angle-of-attack sweep.
 
-        The lattice is built once (out of ground effect). Each angle starts
-        from the circulation of the previous one (continuation), which helps
-        the nonlinear solver near the maximum lift.
+        The lifting-line solvers solve the angles as one batch (see
+        :meth:`solve_batch`): each angle gets the same result as a single
+        solve. The vortex lattice builds its lattice once (out of ground
+        effect) and keeps the influence of the bound vortices and the
+        chordwise legs between the angles. Each angle starts from the
+        circulation of the previous one (continuation), which helps the
+        nonlinear solver near the maximum lift.
         """
         aircraft = as_aircraft(aircraft)
         validate_aircraft(aircraft)
         aircraft.compute_reference_values()
         rp = aircraft.moment_reference() if ref_point is None else np.asarray(ref_point, dtype=float)
+        conds = [
+            FlightCondition(
+                V_inf=condition.V_inf, alpha=float(a), beta=condition.beta,
+                rho=condition.rho, h=condition.h, phi=getattr(condition, "phi", 0.0),
+            )
+            for a in np.asarray(alpha_range, dtype=float)
+        ]
+        if self.collocation == "llt":
+            # The lifting-line lattice does not depend on the attitude (one
+            # chordwise panel), also in ground effect.
+            lattice = self.build(aircraft, settings, condition, None, rp)
+            return self.solve_batch(lattice, conds, settings, aircraft.S_ref, aircraft.b_ref, aircraft.c_ref,
+                                    ref_point=rp, main_surface=aircraft.main_surface_index(),
+                                    continuation=condition.h is None)
         lattice = None if condition.h is not None else self.build(aircraft, settings, condition, None, rp)
         if lattice is not None:
             # The bound vortices and the chordwise legs do not change with
@@ -376,11 +445,7 @@ class LatticeSolver(BaseSolver):
         main = aircraft.main_surface_index()
         out: list[SolverResult] = []
         g_prev = None
-        for a in np.asarray(alpha_range, dtype=float):
-            cond = FlightCondition(
-                V_inf=condition.V_inf, alpha=float(a), beta=condition.beta,
-                rho=condition.rho, h=condition.h, phi=getattr(condition, "phi", 0.0),
-            )
+        for cond in conds:
             # In ground effect the automatic chordwise count depends on the attitude.
             lat = lattice if lattice is not None else self.build(aircraft, settings, cond, None, rp)
             g0 = g_prev if (g_prev is not None and lat is lattice) else None
@@ -390,6 +455,81 @@ class LatticeSolver(BaseSolver):
             )
             g_prev = res.details["gamma"] if res.converged else None
             out.append(res)
+        return out
+
+    def solve_batch(
+        self,
+        lattice: VortexLattice,
+        conditions: list[FlightCondition],
+        settings: SolverSettings,
+        S_ref: float,
+        b_ref: float,
+        c_ref: float,
+        ref_point: np.ndarray | None = None,
+        main_surface: int = 0,
+        continuation: bool = True,
+    ) -> list[SolverResult]:
+        """Solve several flight conditions on one lattice that is already built.
+
+        The cases are solved together where the solver allows it
+        (:meth:`solve_circulation_batch`), and the loads of all cases are
+        computed together (:func:`ventorum.aero.loads.compute_loads_batch`).
+        Each case gets the same result as :meth:`solve_lattice` for that
+        case; with *continuation*, a case starts from the converged
+        circulation of the case before it (used by the nonlinear solver).
+        The ground plane of each case comes from ``condition.h``.
+
+        Returns
+        -------
+        list of SolverResult
+            One result per condition, in order. ``execution_time`` is the
+            share of each case in the batch time.
+        """
+        t0 = time.perf_counter()
+        if not conditions:
+            return []
+        with solve_threads(lattice.n_panels, batch=len(conditions)):
+            setups = [self._case_setup(lattice, c, settings, c_ref, None, ref_point) for c in conditions]
+            grounds = [st[0] for st in setups]
+            wds = np.array([st[3] for st in setups], dtype=float).reshape(len(conditions), 3)
+            sols = self.solve_circulation_batch(lattice, conditions, settings, grounds, wds, continuation)
+            gammas = np.array([g for g, _, _ in sols], dtype=float)
+            alpha_effs = None if any(a is None for _, a, _ in sols) else np.array([a for _, a, _ in sols])
+            vcs = [getattr(info, "v_control", None) for _, _, info in sols]
+            loads = compute_loads_batch(
+                lattice, gammas, conditions, S_ref, b_ref, c_ref, grounds=grounds, ref_point=ref_point,
+                alpha_eff_strips=alpha_effs, wake_dirs=wds,
+                v_controls=None if any(v is None for v in vcs) else np.array(vcs),
+            )
+        share = (time.perf_counter() - t0) / len(conditions)
+        return [
+            self._case_result(lattice, cond, ld, info, g, st[0], st[1], st[2], st[3], c_ref, main_surface,
+                              t0, execution_time=share)
+            for cond, ld, (g, _, info), st in zip(conditions, loads, sols, setups)
+        ]
+
+    def solve_circulation_batch(
+        self,
+        lattice: VortexLattice,
+        conditions: list[FlightCondition],
+        settings: SolverSettings,
+        grounds: list[GroundPlane | None],
+        wake_dirs: np.ndarray,
+        continuation: bool = True,
+    ) -> list[tuple]:
+        """Return ``(gamma_panel, alpha_eff_strip or None, SolveInfo)`` for each case.
+
+        The default solves the cases one by one with :meth:`solve_circulation`.
+        With *continuation*, a case starts from the converged circulation of
+        the case before it.
+        """
+        out = []
+        g_prev = None
+        for cond, ground, wd in zip(conditions, grounds, wake_dirs):
+            sol = self.solve_circulation(lattice, cond, settings, ground, wd,
+                                         gamma0=g_prev if continuation else None)
+            g_prev = sol[0] if sol[2].converged else None
+            out.append(sol)
         return out
 
 

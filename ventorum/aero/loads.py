@@ -33,9 +33,8 @@ from ventorum.aero.system import (
     is_symmetric_condition,
     lift_direction,
     panel_targets,
-    side_direction,
 )
-from ventorum.aero.vortex import induced_velocity, trefftz_normalwash
+from ventorum.aero.vortex import induced_velocity, trefftz_normalwash_prepared, trefftz_prepare
 from ventorum.core.datatypes import (
     FlightCondition,
     IntegratedResult,
@@ -96,47 +95,104 @@ def trefftz_induced_drag(
     seg_len : (n_strips,)
         Length of each strip projected on the Trefftz plane [m].
     """
-    d = np.asarray(wake_dir, dtype=float)
-    d = d / np.linalg.norm(d)
+    D_i, w_n, seg_len = trefftz_induced_drag_batch(
+        lattice, np.asarray(strip_gamma, dtype=float)[None, :], np.asarray(wake_dir, dtype=float)[None, :],
+        np.array([float(rho)]), [ground])
+    return float(D_i[0]), w_n[0], seg_len[0]
 
-    def project(p: np.ndarray) -> np.ndarray:
-        return p - (p @ d)[:, None] * d
 
-    pl = project(lattice.te_left)
-    pr = project(lattice.te_right)
+def trefftz_induced_drag_batch(
+    lattice: VortexLattice,
+    strip_gammas: np.ndarray,
+    wake_dirs: np.ndarray,
+    rho: np.ndarray,
+    grounds: list[GroundPlane | None],
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Induced drag from the Trefftz plane for K cases on the same lattice.
+
+    Each case gets the same result, to the last bit, as
+    :func:`trefftz_induced_drag` with its own inputs.
+
+    Parameters
+    ----------
+    strip_gammas : (K, n_strips)
+        Circulation of every strip [m^2/s].
+    wake_dirs : (K, 3)
+        Wake direction of each case (the normal of its Trefftz plane).
+    rho : (K,)
+        Air density [kg/m^3].
+    grounds : list of GroundPlane or None
+        Ground plane of each case.
+
+    Returns
+    -------
+    D_i : (K,)
+        Induced drag [N].
+    w_n : (K, n_strips)
+        Normal wash in the Trefftz plane [m/s].
+    seg_len : (K, n_strips)
+        Length of each strip projected on the Trefftz plane [m].
+    """
+    K, n_s = strip_gammas.shape
+    te_l, te_r = lattice.te_left, lattice.te_right
+    d = np.empty((K, 3))
+    for k in range(K):
+        dk = np.asarray(wake_dirs[k], dtype=float)
+        d[k] = dk / np.linalg.norm(dk)
+    # Projection on the plane: p - (p . d) d.
+    dot_l = np.empty((K, n_s))
+    dot_r = np.empty((K, n_s))
+    for k in range(K):
+        dot_l[k] = te_l @ d[k]
+        dot_r[k] = te_r @ d[k]
+    pl = te_l - dot_l[:, :, None] * d[:, None, :]
+    pr = te_r - dot_r[:, :, None] * d[:, None, :]
     seg = pr - pl
-    seg_len = np.linalg.norm(seg, axis=1)
+    seg_len = np.linalg.norm(seg, axis=-1)
     # Evaluation point at the same span fraction as the control point.
     q = pl + lattice.cp_frac[:, None] * seg
-    qn = _cross(d, seg)
-    qn /= np.maximum(np.linalg.norm(qn, axis=1, keepdims=True), 1e-300)
+    qn = _cross(d[:, None, :], seg)
+    qn /= np.maximum(np.linalg.norm(qn, axis=-1, keepdims=True), 1e-300)
+    w_n = np.empty((K, n_s))
+    for k in range(K):
+        sg = strip_gammas[k]
+        p_vort = np.vstack([pr[k], pl[k]])
+        g_vort = np.concatenate([sg, -sg])
+        ground = grounds[k]
+        if ground is not None:
+            pts = ground.reflect_points(np.vstack([te_r, te_l]))
+            p_img = pts - (pts @ d[k])[:, None] * d[k]
+            p_vort = np.vstack([p_vort, p_img])
+            g_vort = np.concatenate([g_vort, -g_vort])
+        w_n[k] = trefftz_normalwash_prepared(q[k], qn[k], p_vort, g_vort, d[k],
+                                             _trefftz_core_data(lattice, ground is not None))
+    D_i = -0.5 * rho * np.sum(strip_gammas * w_n * seg_len, axis=1)
+    return D_i, w_n, seg_len
 
-    rc = CORE_RADIUS_FRACTION * lattice.width
-    p_vort = np.vstack([pr, pl])
-    g_vort = np.concatenate([strip_gamma, -strip_gamma])
-    rc_vort = np.concatenate([rc, rc])
-    # Cross-surface core: the same rule and size as the near field
-    # (panel_targets), so that a wake that passes near another surface gives
-    # the same regularised velocity in both places. One panel of each strip
-    # gives the core group and the core radius of that strip.
-    if "trefftz_strip_core" in lattice.geom_cache:
-        targets, g_src = lattice.geom_cache["trefftz_strip_core"]
-    else:
+
+def _trefftz_core_data(lattice: VortexLattice, with_images: bool) -> tuple:
+    """Core data of the Trefftz-plane vortices (lattice-only, cached on the lattice).
+
+    The vortices are the right and left trailing-edge points of every strip
+    (and their ground images when *with_images*). Cross-surface core: the
+    same rule and size as the near field (panel_targets), so that a wake
+    that passes near another surface gives the same regularised velocity in
+    both places. One panel of each strip gives the core group and the core
+    radius of that strip.
+    """
+    key = ("trefftz_core_data", with_images)
+    prep = lattice.geom_cache.get(key)
+    if prep is None:
+        rc = CORE_RADIUS_FRACTION * lattice.width
         first_panel = np.empty(lattice.n_strips, dtype=np.int64)
         first_panel[lattice.panel_strip[::-1]] = np.arange(lattice.n_panels)[::-1]
         targets = panel_targets(lattice, first_panel)
-        g_src = np.concatenate([targets.group, targets.group])
-        lattice.geom_cache["trefftz_strip_core"] = (targets, g_src)
-    if ground is not None:
-        p_img = project(ground.reflect_points(np.vstack([lattice.te_right, lattice.te_left])))
-        p_vort = np.vstack([p_vort, p_img])
-        g_vort = np.concatenate([g_vort, -g_vort])
-        rc_vort = np.concatenate([rc_vort, rc_vort])
-        g_src = np.concatenate([g_src, g_src])
-
-    w_n = trefftz_normalwash(q, qn, p_vort, g_vort, d, rc_vort, group=g_src, targets=targets)
-    D_i = -0.5 * rho * float(np.sum(strip_gamma * w_n * seg_len))
-    return D_i, w_n, seg_len
+        copies = 4 if with_images else 2
+        rc_vort = np.concatenate([rc] * copies)
+        g_src = np.concatenate([targets.group] * copies)
+        prep = trefftz_prepare(lattice.n_strips, rc_vort.size, rc_vort, group=g_src, targets=targets)
+        lattice.geom_cache[key] = prep
+    return prep
 
 
 _MIRROR = np.array([1.0, -1.0, 1.0])
@@ -235,17 +291,84 @@ def compute_loads(
         Induced velocity at the control points [m/s] from the solver. On a
         lifting-line lattice without leg forces the force points are the
         control points, so this replaces the kernel evaluation of the loads.
+
+    Notes
+    -----
+    This is :func:`compute_loads_batch` with one case.
     """
-    V = float(condition.V_inf)
-    rho = float(condition.rho)
+    return compute_loads_batch(
+        lattice, np.asarray(gamma_panel, dtype=float)[None, :], [condition], S_ref, b_ref, c_ref,
+        grounds=[ground], ref_point=ref_point,
+        alpha_eff_strips=None if alpha_eff_strip is None else np.asarray(alpha_eff_strip, dtype=float)[None, :],
+        wake_dirs=None if wake_dir is None else np.asarray(wake_dir, dtype=float)[None, :],
+        leg_forces=leg_forces,
+        v_controls=None if v_control is None else np.asarray(v_control, dtype=float)[None, :, :],
+    )[0]
+
+
+def compute_loads_batch(
+    lattice: VortexLattice,
+    gamma_panels: np.ndarray,
+    conditions: list[FlightCondition],
+    S_ref: float,
+    b_ref: float,
+    c_ref: float,
+    grounds: list[GroundPlane | None] | None = None,
+    ref_point: np.ndarray | None = None,
+    alpha_eff_strips: np.ndarray | None = None,
+    wake_dirs: np.ndarray | None = None,
+    leg_forces: bool | None = None,
+    v_controls: np.ndarray | None = None,
+) -> list[LoadsResult]:
+    """Integrate forces and moments of K solved cases on the same lattice.
+
+    The cases (for example the angles of a sweep) are computed together:
+    each array operation acts on all cases at once. Each case gets the same
+    result, to the last bit, as :func:`compute_loads` with its own inputs
+    (the operations on one case are the same, in the same order).
+
+    Parameters
+    ----------
+    lattice : VortexLattice
+        The lattice of all cases.
+    gamma_panels : (K, n_panels)
+        Circulation of every panel horseshoe [m^2/s], one row per case.
+    conditions : list of FlightCondition
+        Flight condition of each case (K items).
+    S_ref, b_ref, c_ref : float
+        Reference area [m^2], span [m] and chord [m].
+    grounds : list of GroundPlane or None, optional
+        Ground plane of each case (None items for free air). None means
+        free air for all cases.
+    ref_point : numpy.ndarray or None, optional
+        Moment reference point [m], shape (3,). None is the origin.
+    alpha_eff_strips : (K, n_strips) or None
+        Effective section angle of attack [rad] from the solver, or None
+        (see :func:`compute_loads`).
+    wake_dirs : (K, 3) or None
+        Unit wake direction of each case. None is the free-stream direction.
+    leg_forces : bool or None
+        See :func:`compute_loads`.
+    v_controls : (K, n_panels, 3) or None
+        Induced velocity at the control points [m/s] from the solver (see
+        ``v_control`` in :func:`compute_loads`).
+
+    Returns
+    -------
+    list of LoadsResult
+        One result per case.
+    """
+    K = len(conditions)
+    G = np.asarray(gamma_panels, dtype=float).reshape(K, -1)
+    grounds = [None] * K if grounds is None else list(grounds)
+    V = np.array([float(c.V_inf) for c in conditions])
+    rho = np.array([float(c.rho) for c in conditions])
     q_inf = 0.5 * rho * V * V
-    d = freestream_direction(condition.alpha, condition.beta)
-    wd = d if wake_dir is None else np.asarray(wake_dir, dtype=float)
+    D = np.array([freestream_direction(c.alpha, c.beta) for c in conditions]).reshape(K, 3)
+    WD = D if wake_dirs is None else np.asarray(wake_dirs, dtype=float).reshape(K, 3)
     rp = np.zeros(3) if ref_point is None else np.asarray(ref_point, dtype=float)
     n_s, n_c = lattice.n_strips, lattice.n_chord
-
-    gamma_panel = np.asarray(gamma_panel, dtype=float)
-    strip_gamma = gamma_panel.reshape(n_s, n_c).sum(axis=1)
+    strip_gamma = G.reshape(K, n_s, n_c).sum(axis=2)
 
     # --- near-field Kutta-Joukowski forces ------------------------------------
     mid = lattice.force_points
@@ -262,154 +385,178 @@ def compute_loads(
         leg_b_mid = 0.5 * (lattice.b + lattice.b_te)
         points += [leg_a_mid, leg_b_mid]
         swap += [2, 1]   # the a-leg of a left panel mirrors the b-leg of its mirror panel
-    reuse = v_control is not None and not leg_forces and lattice.collocation == "llt"
-    if reuse or not is_symmetric_condition(condition, ground):
-        fold = None
-    else:
-        fold = _symmetric_fold(lattice, gamma_panel, points, swap, leg_forces=leg_forces)
-    if fold is None:
-        eval_panels = np.arange(n_p)
-    else:
-        eval_panels = fold[0]
-    n_e = eval_panels.size
+    reuse = v_controls is not None and not leg_forces and lattice.collocation == "llt"
     if reuse:
-        v_all = [np.asarray(v_control, dtype=float)]
+        v_all = [np.asarray(v_controls, dtype=float).reshape(K, n_p, 3)]
     else:
-        full_map = UnknownMap(
-            unknown_panels=np.arange(n_p),
-            panel_column=np.arange(n_p),
-            symmetric=False,
-        )
-        src = build_sources(lattice, wd, full_map, ground)
-        P = np.vstack([pk[eval_panels] for pk in points])
-        tgt = panel_targets(lattice, np.tile(eval_panels, len(points)))
-        cache = lattice.kernel_cache if ground is None else None
-        v_eval = induced_velocity(P, src, gamma_panel, tgt, cache=cache,
-                                  cache_key=("loads", fold is not None, bool(leg_forces)))
-        v_all = []
-        for k in range(len(points)):
-            vk = np.empty((n_p, 3))
-            vk[eval_panels] = v_eval[k * n_e:(k + 1) * n_e]
-            v_all.append(vk)
-    if fold is not None:
-        left = fold[1]
-        mirror = lattice.panel_mirror[left]
-        for k in range(len(points)):
-            v_all[k][left] = v_all[swap[k]][mirror] * _MIRROR
+        v_all = [np.empty((K, n_p, 3)) for _ in points]
+        for k in range(K):
+            _near_field_velocity(lattice, G[k], conditions[k], grounds[k], WD[k], points, swap,
+                                 bool(leg_forces), [vk[k] for vk in v_all])
     v_ind = v_all[0]
     l_vec = lattice.b - lattice.a
-    F_panel = rho * gamma_panel[:, None] * _cross(V * d[None, :] + v_ind, l_vec)
-    M_geo = np.sum(_cross(mid - rp, F_panel), axis=0)
+    Vd = V[:, None, None] * D[:, None, :]
+    F_panel = rho[:, None, None] * G[:, :, None] * _cross(Vd + v_ind, l_vec)
+    M_geo = np.sum(_cross(mid - rp, F_panel), axis=1)
     if leg_forces:
         leg_start = np.vstack([lattice.a_te, lattice.b])
         leg_end = np.vstack([lattice.a, lattice.b_te])
         leg_mid = np.vstack([points[1], points[2]])
-        v_leg = np.vstack([v_all[1], v_all[2]])
-        g_leg = np.concatenate([gamma_panel, gamma_panel])
-        F_leg = rho * g_leg[:, None] * _cross(V * d[None, :] + v_leg, leg_end - leg_start)
-        M_geo += np.sum(_cross(leg_mid - rp, F_leg), axis=0)
-        F_panel = F_panel + F_leg[:n_p] + F_leg[n_p:]
-    F_strip = F_panel.reshape(n_s, n_c, 3).sum(axis=1)
-    F_near = F_panel.sum(axis=0)
+        v_leg = np.concatenate([v_all[1], v_all[2]], axis=1)
+        g_leg = np.concatenate([G, G], axis=1)
+        F_leg = rho[:, None, None] * g_leg[:, :, None] * _cross(Vd + v_leg, leg_end - leg_start)
+        M_geo += np.sum(_cross(leg_mid - rp, F_leg), axis=1)
+        F_panel = F_panel + F_leg[:, :n_p] + F_leg[:, n_p:]
+    F_strip = F_panel.reshape(K, n_s, n_c, 3).sum(axis=2)
+    F_near = F_panel.sum(axis=1)
 
     # --- section quantities ---------------------------------------------------
     chord = lattice.chord
     width = lattice.width
-    Cl = 2.0 * strip_gamma / (V * chord)
-    alpha_geom = np.arctan2(lattice.normal @ d, lattice.chord_dir @ d)
-    if alpha_eff_strip is None:
+    Cl = 2.0 * strip_gamma / (V[:, None] * chord)
+    alpha_geom = np.empty((K, n_s))
+    for k in range(K):
+        alpha_geom[k] = np.arctan2(lattice.normal @ D[k], lattice.chord_dir @ D[k])
+    if alpha_eff_strips is None:
         alpha_eff = lattice.alpha_L0 + Cl / np.maximum(lattice.a0, 1e-9)
     else:
-        alpha_eff = np.asarray(alpha_eff_strip, dtype=float)
+        alpha_eff = np.asarray(alpha_eff_strips, dtype=float).reshape(K, n_s)
     alpha_i = alpha_geom - alpha_eff
 
     groups = lattice.geom_cache.get("airfoil_groups")
     if groups is None:
         groups = group_strips_by_airfoil(lattice.airfoils)
         lattice.geom_cache["airfoil_groups"] = groups
-    Cd_p = np.zeros(n_s)
-    Cm_s = np.zeros(n_s)
+    Cd_p = np.zeros((K, n_s))
+    Cm_s = np.zeros((K, n_s))
     for af, idx in groups:
         if isinstance(af, LinearAirfoil):
-            Cd_p[idx] = af.Cd0
-            Cm_s[idx] = af.Cm0
+            Cd_p[:, idx] = af.Cd0
+            Cm_s[:, idx] = af.Cm0
         else:
-            Cd_p[idx] = section_cd(af, alpha_eff[idx])
-            Cm_s[idx] = section_cm(af, alpha_eff[idx])
-    has_profile = bool(np.any(Cd_p != 0.0))
+            a_idx = alpha_eff[:, idx].ravel()
+            Cd_p[:, idx] = section_cd(af, a_idx).reshape(K, idx.size)
+            Cm_s[:, idx] = section_cm(af, a_idx).reshape(K, idx.size)
+    has_profile = np.any(Cd_p != 0.0, axis=1)
 
     # Profile drag along the free stream, applied at the strip quarter chord.
-    D_p = q_inf * chord * width * Cd_p
-    F_prof = D_p[:, None] * d[None, :]
-    M_geo += np.sum(_cross(lattice.qc_mid - rp, F_prof), axis=0)
+    D_p = q_inf[:, None] * chord * width * Cd_p
+    F_prof = D_p[:, :, None] * D[:, None, :]
+    M_geo += np.sum(_cross(lattice.qc_mid - rp, F_prof), axis=1)
 
     # Section pitching moment about the axis n_lift x d (nose towards the lift side).
-    n_lift = _cross(d[None, :], lattice.dl)
-    n_lift /= np.maximum(np.linalg.norm(n_lift, axis=1, keepdims=True), 1e-300)
-    axis = _cross(n_lift, d[None, :])
-    axis /= np.maximum(np.linalg.norm(axis, axis=1, keepdims=True), 1e-300)
-    M_geo += np.sum((q_inf * chord ** 2 * width * Cm_s)[:, None] * axis, axis=0)
+    n_lift = _cross(D[:, None, :], lattice.dl)
+    n_lift /= np.maximum(np.linalg.norm(n_lift, axis=-1, keepdims=True), 1e-300)
+    axis = _cross(n_lift, D[:, None, :])
+    axis /= np.maximum(np.linalg.norm(axis, axis=-1, keepdims=True), 1e-300)
+    M_geo += np.sum((q_inf[:, None] * chord ** 2 * width * Cm_s)[:, :, None] * axis, axis=1)
 
     # --- Trefftz plane ----------------------------------------------------------
-    D_i, w_n, seg_len = trefftz_induced_drag(lattice, strip_gamma, wd, rho, ground)
-    Cd_i = -strip_gamma * w_n * seg_len / (V * V * chord * width)
+    D_i, w_n, seg_len = trefftz_induced_drag_batch(lattice, strip_gamma, WD, rho, grounds)
+    Cd_i = -strip_gamma * w_n * seg_len / (V[:, None] * V[:, None] * chord * width)
 
-    # --- totals -------------------------------------------------------------------
-    qS = q_inf * S_ref
-    F_total = F_near + F_prof.sum(axis=0)
-    CL = float(F_total @ lift_direction(condition.alpha)) / qS
-    CY = float(F_total @ side_direction(condition.alpha, condition.beta)) / qS
-    CDi = D_i / qS
-    CDi_near = float(F_near @ d) / qS
-    CDp = float(D_p.sum()) / qS if has_profile else None
-    CD_total = CDi + (CDp if CDp is not None else 0.0)
-    Cl_roll = -float(M_geo[0]) / (qS * b_ref)
-    Cm = float(M_geo[1]) / (qS * c_ref)
-    Cn = -float(M_geo[2]) / (qS * b_ref)
+    # --- totals and spanwise output per case ------------------------------------
+    F_prof_sum = F_prof.sum(axis=1)
+    L_dir = np.array([lift_direction(c.alpha) for c in conditions]).reshape(K, 3)
+    S_dir = _cross(L_dir, D)   # side_direction of each case, row by row
     AR = b_ref ** 2 / S_ref
-    e = CL ** 2 / (np.pi * AR * CDi) if CDi > 1e-12 else float("nan")
-
-    totals = IntegratedResult(
-        CL=CL,
-        CDi=CDi,
-        CDp=CDp,
-        CD_total=CD_total if has_profile else None,
-        e=e,
-        AR=AR,
-        Cl=Cl_roll,
-        Cm=Cm,
-        Cn=Cn,
-        CY=CY,
-        CDi_nearfield=CDi_near,
-    )
-
-    # --- per-surface spanwise output -----------------------------------------------
-    spanwise: list[SpanwiseResult] = []
-    for surf in lattice.surfaces:
-        sl = surf.strips
-        spanwise.append(SpanwiseResult(
-            y=lattice.qc_mid[sl, 1].copy(),
-            gamma=strip_gamma[sl].copy(),
-            Cl=Cl[sl].copy(),
-            Cd_i=Cd_i[sl].copy(),
-            Cd_profile=Cd_p[sl].copy() if has_profile else None,
-            alpha_eff=alpha_eff[sl].copy(),
-            alpha_i=alpha_i[sl].copy(),
-            local_lift=rho * V * strip_gamma[sl],
-            surface_name=surf.name,
-            chord=chord[sl].copy(),
-            Cm_section=Cm_s[sl].copy(),
+    out: list[LoadsResult] = []
+    for k in range(K):
+        qS = float(q_inf[k]) * S_ref
+        F_total = F_near[k] + F_prof_sum[k]
+        CL = float(F_total @ L_dir[k]) / qS
+        CY = float(F_total @ S_dir[k]) / qS
+        CDi = float(D_i[k]) / qS
+        CDi_near = float(F_near[k] @ D[k]) / qS
+        hp = bool(has_profile[k])
+        CDp = float(D_p[k].sum()) / qS if hp else None
+        CD_total = CDi + (CDp if CDp is not None else 0.0)
+        M = M_geo[k]
+        e = CL ** 2 / (np.pi * AR * CDi) if CDi > 1e-12 else float("nan")
+        totals = IntegratedResult(
+            CL=CL,
+            CDi=CDi,
+            CDp=CDp,
+            CD_total=CD_total if hp else None,
+            e=e,
+            AR=AR,
+            Cl=-float(M[0]) / (qS * b_ref),
+            Cm=float(M[1]) / (qS * c_ref),
+            Cn=-float(M[2]) / (qS * b_ref),
+            CY=CY,
+            CDi_nearfield=CDi_near,
+        )
+        sg, Clk, aek = strip_gamma[k], Cl[k], alpha_eff[k]
+        rVk = float(rho[k]) * float(V[k])
+        spanwise: list[SpanwiseResult] = []
+        for surf in lattice.surfaces:
+            sl = surf.strips
+            spanwise.append(SpanwiseResult(
+                y=lattice.qc_mid[sl, 1].copy(),
+                gamma=sg[sl].copy(),
+                Cl=Clk[sl].copy(),
+                Cd_i=Cd_i[k, sl].copy(),
+                Cd_profile=Cd_p[k, sl].copy() if hp else None,
+                alpha_eff=aek[sl].copy(),
+                alpha_i=alpha_i[k, sl].copy(),
+                local_lift=rVk * sg[sl],
+                surface_name=surf.name,
+                chord=chord[sl].copy(),
+                Cm_section=Cm_s[k, sl].copy(),
+            ))
+        out.append(LoadsResult(
+            totals=totals,
+            spanwise=spanwise,
+            strip_gamma=sg,
+            strip_force=F_strip[k],
+            alpha_eff=aek,
+            extras={
+                "trefftz_normalwash": w_n[k],
+                "force_total_body": F_total,
+                "moment_total_geometry_axes": M,
+            },
         ))
+    return out
 
-    return LoadsResult(
-        totals=totals,
-        spanwise=spanwise,
-        strip_gamma=strip_gamma,
-        strip_force=F_strip,
-        alpha_eff=alpha_eff,
-        extras={
-            "trefftz_normalwash": w_n,
-            "force_total_body": F_total,
-            "moment_total_geometry_axes": M_geo,
-        },
+
+def _near_field_velocity(
+    lattice: VortexLattice,
+    gamma_panel: np.ndarray,
+    condition: FlightCondition,
+    ground: GroundPlane | None,
+    wake_dir: np.ndarray,
+    points: list[np.ndarray],
+    swap: list[int],
+    leg_forces: bool,
+    out: list[np.ndarray],
+) -> None:
+    """Write the induced velocity at each point set of one case into *out* (one kernel evaluation).
+
+    On a symmetric case only the right panels are evaluated; the left panels
+    get the mirror image of their mirror panel.
+    """
+    n_p = lattice.n_panels
+    if not is_symmetric_condition(condition, ground):
+        fold = None
+    else:
+        fold = _symmetric_fold(lattice, gamma_panel, points, swap, leg_forces=leg_forces)
+    eval_panels = np.arange(n_p) if fold is None else fold[0]
+    n_e = eval_panels.size
+    full_map = UnknownMap(
+        unknown_panels=np.arange(n_p),
+        panel_column=np.arange(n_p),
+        symmetric=False,
     )
+    src = build_sources(lattice, wake_dir, full_map, ground)
+    P = np.vstack([pk[eval_panels] for pk in points])
+    tgt = panel_targets(lattice, np.tile(eval_panels, len(points)))
+    cache = lattice.kernel_cache if ground is None else None
+    v_eval = induced_velocity(P, src, gamma_panel, tgt, cache=cache,
+                              cache_key=("loads", fold is not None, bool(leg_forces)))
+    for k in range(len(points)):
+        out[k][eval_panels] = v_eval[k * n_e:(k + 1) * n_e]
+    if fold is not None:
+        left = fold[1]
+        mirror = lattice.panel_mirror[left]
+        for k in range(len(points)):
+            out[k][left] = out[swap[k]][mirror] * _MIRROR

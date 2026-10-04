@@ -245,8 +245,10 @@ def analyze_sweep(
         Panel distribution (default ``"auto"``, the same as
         :class:`SolverSettings` and :func:`analyze`).
     n_jobs : int or str
-        Number of parallel workers (1 = serial, >1 = parallel, -1 = all cores,
-        ``"auto"``). The nonlinear solver always runs in sequence.
+        Number of parallel workers for the vortex-lattice solver (1 = serial,
+        >1 = parallel, -1 = all cores, ``"auto"``). The lifting-line solvers
+        solve all angles as one batch on all kernel threads; the nonlinear
+        solver starts each angle from the solution of the previous one.
     backend : str
         Pool for the parallel cases: ``"auto"`` (threads), ``"thread"`` or
         ``"serial"``.

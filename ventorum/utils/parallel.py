@@ -90,10 +90,17 @@ def forced_single_threads(n: int | None):
         _forced_single[0] = old
 
 
-def single_case_threads(n_panels: int | None) -> int:
-    """Return the number of kernel threads for one case that runs alone."""
+def single_case_threads(n_panels: int | None, batch: int = 1) -> int:
+    """Return the number of kernel threads for one case (or one batch of cases) that runs alone.
+
+    A batch of more than one case (for example the angles of a lifting-line
+    sweep, computed in one kernel call) uses all cores: its kernel calls do
+    the work of many cases.
+    """
     if _forced_single[0] is not None:
         return int(_forced_single[0])
+    if batch > 1:
+        return cpu_cores()
     from ventorum.hardware.profile import size_class, tuned_setting
 
     tuned = tuned_setting("single", size_class(n_panels), "threads")
@@ -118,15 +125,17 @@ def blas_single_thread():
 
 
 @contextlib.contextmanager
-def solve_threads(n_panels: int | None = None):
-    """Set the thread policy inside one solve.
+def solve_threads(n_panels: int | None = None, batch: int = 1):
+    """Set the thread policy inside one solve (or one batch of *batch* cases on the same lattice).
 
     * BLAS runs on one thread while the compiled kernels run (on a 4-core
       machine a vortex-lattice solve took 64 ms with both on 4 threads, and
       24 ms with BLAS on 1 thread).
     * In a worker of :func:`case_executor` the kernels keep the thread count
       of the worker. A case that runs alone uses the tuned thread count for
-      its size (all cores by default).
+      its size (all cores by default); a batch uses all cores (see
+      :func:`single_case_threads`). The thread count does not change the
+      results (each kernel row is computed by one thread).
     * The panel count is stored in a thread-local variable for the duration
       of the context, so that the kernel backend resolver can use the size
       class of the solve. The old value is restored after the context.
@@ -141,7 +150,7 @@ def solve_threads(n_panels: int | None = None):
     try:
         old_threads = None
         if get_kernel_backend() in ("numba", "cython") and getattr(_local, "worker_threads", None) is None:
-            old_threads = _set_kernel_threads(single_case_threads(n_panels))
+            old_threads = _set_kernel_threads(single_case_threads(n_panels, batch))
         try:
             # BLAS on one thread for every kernel backend: the dense solves of
             # Ventorum are small, and a multi-threaded OpenBLAS solve of 100 to

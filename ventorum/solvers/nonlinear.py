@@ -32,10 +32,16 @@ import warnings
 
 import numpy as np
 
-from ventorum.aero.system import GroundPlane
+from ventorum.aero.system import GroundPlane, freestream_direction
 from ventorum.core.datatypes import FlightCondition, SolverSettings
 from ventorum.geometry.lattice import VortexLattice
-from ventorum.solvers.core import SolveInfo, solve_llt_linear, solve_llt_nonlinear
+from ventorum.solvers.core import (
+    SolveInfo,
+    _unknown_map,
+    linear_llt_from_tensor,
+    llt_velocity_tensors,
+    solve_llt_nonlinear,
+)
 from ventorum.solvers.lattice_base import LatticeSolver
 
 
@@ -53,12 +59,14 @@ class NonlinearSolver(LatticeSolver):
         ground: GroundPlane | None,
         wake_dir: np.ndarray | None = None,
         gamma0: np.ndarray | None = None,
+        Vt: np.ndarray | None = None,
     ) -> tuple[np.ndarray, np.ndarray, SolveInfo]:
         """Solve for the panel circulation with Newton's method.
 
         If the solve does not converge, the method starts again from the
         linear solution and from scaled linear solutions. It keeps the
-        result with the smallest residual.
+        result with the smallest residual. The velocity tensor per unknown
+        (*Vt*, computed here if None) is shared by all starts.
 
         Returns
         -------
@@ -69,11 +77,18 @@ class NonlinearSolver(LatticeSolver):
         info : SolveInfo
             Convergence information.
         """
+        use_sym = getattr(settings, "use_symmetry", True)
+        umap = _unknown_map(lattice, condition, ground, use_sym)
+        if wake_dir is None:
+            wake_dir = freestream_direction(condition.alpha, condition.beta)
+        if Vt is None:
+            Vt = llt_velocity_tensors(lattice, umap, np.asarray(wake_dir, dtype=float)[None, :], [ground])[0]
         kw = dict(
-            use_symmetry=getattr(settings, "use_symmetry", True),
+            use_symmetry=use_sym,
             max_iterations=int(settings.max_iterations),
             tolerance=float(settings.tolerance),
             wake_dir=wake_dir,
+            Vt=Vt,
         )
         gamma, alpha_eff, info = solve_llt_nonlinear(lattice, condition, ground, gamma0=gamma0, **kw)
         if not info.converged:
@@ -81,7 +96,7 @@ class NonlinearSolver(LatticeSolver):
             # minimum of the residual. Start again from the linear solution
             # (if a start value was given) and from scaled linear solutions,
             # and keep the best result.
-            g_lin, _ = solve_llt_linear(lattice, condition, ground, kw["use_symmetry"], wake_dir)
+            g_lin = linear_llt_from_tensor(lattice, condition, umap, Vt)[umap.panel_column]
             starts = ([None] if gamma0 is not None else []) + [f * g_lin for f in (0.85, 0.7, 0.55, 1.15)]
             for g_start in starts:
                 g2, a2, i2 = solve_llt_nonlinear(lattice, condition, ground, gamma0=g_start, **kw)
@@ -99,3 +114,31 @@ class NonlinearSolver(LatticeSolver):
                 stacklevel=4,
             )
         return gamma, alpha_eff, info
+
+    def solve_circulation_batch(
+        self,
+        lattice: VortexLattice,
+        conditions: list[FlightCondition],
+        settings: SolverSettings,
+        grounds: list[GroundPlane | None],
+        wake_dirs: np.ndarray,
+        continuation: bool = True,
+    ) -> list[tuple[np.ndarray, np.ndarray, SolveInfo]]:
+        """Solve the cases in order; one kernel call gives the velocity tensors of all cases.
+
+        Each case gets the same result, to the last bit, as
+        :meth:`solve_circulation` with the same start value.
+        """
+        use_sym = getattr(settings, "use_symmetry", True)
+        umaps = [_unknown_map(lattice, c, g, use_sym) for c, g in zip(conditions, grounds)]
+        if any(u is not umaps[0] for u in umaps):
+            return super().solve_circulation_batch(lattice, conditions, settings, grounds, wake_dirs, continuation)
+        Vts = llt_velocity_tensors(lattice, umaps[0], wake_dirs, grounds)
+        out = []
+        g_prev = None
+        for k, (cond, ground) in enumerate(zip(conditions, grounds)):
+            sol = self.solve_circulation(lattice, cond, settings, ground, wake_dirs[k],
+                                         gamma0=g_prev if continuation else None, Vt=Vts[k])
+            g_prev = sol[0] if sol[2].converged else None
+            out.append(sol)
+        return out

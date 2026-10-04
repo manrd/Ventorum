@@ -287,8 +287,27 @@ class FourierSolver(BaseSolver):
         q_data["x_ref"] = float(aircraft.moment_reference()[0])
         return aircraft, surf, N, b, theta, st, mu, n_idx, lhs, theta_q, q_data, sin_n_theta, sin_n_theta_q
 
+    @staticmethod
+    def _stations(b, theta, st, sin_n_theta, theta_q) -> dict:
+        """Return the angle-independent spanwise data of :meth:`_result` (computed once per sweep)."""
+        order = np.argsort(np.cos(theta))
+        th = theta[order]
+        Cd0 = st["Cd0"][order]
+        return {
+            "th": th,
+            "sin_th": np.sin(th),
+            "y": 0.5 * b * np.cos(th),
+            "sin_n": sin_n_theta[order],
+            "chord": st["chord"][order],
+            "twist": st["twist"][order],
+            "Cd0": Cd0,
+            "Cm0": st["Cm0"][order],
+            "has_profile": bool(np.any(Cd0 != 0.0)),
+            "dy_dth": 0.5 * b * np.sin(theta_q),
+        }
+
     def _result(self, aircraft, surf, N, b, theta, st, mu, n_idx, A, theta_q, q_data,
-                sin_n_theta, sin_n_theta_q, alpha, condition) -> SolverResult:
+                sin_n_theta, sin_n_theta_q, alpha, condition, stations: dict | None = None) -> SolverResult:
         V = condition.V_inf
         rho = condition.rho
         S, c_ref = aircraft.S_ref, aircraft.c_ref
@@ -298,29 +317,25 @@ class FourierSolver(BaseSolver):
         e = CL ** 2 / (np.pi * AR * CDi) if CDi > 1e-14 else float("nan")
 
         # Spanwise output at the collocation stations (left tip to right tip).
-        order = np.argsort(np.cos(theta))
-        th = theta[order]
-        y = 0.5 * b * np.cos(th)
-        sin_n = sin_n_theta[order]
+        sta = self._stations(b, theta, st, sin_n_theta, theta_q) if stations is None else stations
+        sin_n = sta["sin_n"]
         gamma = 2.0 * b * V * (sin_n @ A)
-        alpha_i = (sin_n @ (n_idx * A)) / np.sin(th)
-        chord = st["chord"][order]
-        twist = st["twist"][order]
+        alpha_i = (sin_n @ (n_idx * A)) / sta["sin_th"]
+        chord = sta["chord"].copy()
         Cl = 2.0 * gamma / (V * chord)
-        alpha_eff = alpha + twist - alpha_i
-        Cd0 = st["Cd0"][order]
-        has_profile = bool(np.any(Cd0 != 0.0))
+        alpha_eff = alpha + sta["twist"] - alpha_i
+        has_profile = sta["has_profile"]
         spanwise = SpanwiseResult(
-            y=y, gamma=gamma, Cl=Cl, Cd_i=Cl * alpha_i,
-            Cd_profile=Cd0 if has_profile else None,
+            y=sta["y"].copy(), gamma=gamma, Cl=Cl, Cd_i=Cl * alpha_i,
+            Cd_profile=sta["Cd0"].copy() if has_profile else None,
             alpha_eff=alpha_eff, alpha_i=alpha_i,
             local_lift=rho * V * gamma, surface_name=surf.name,
-            chord=chord, Cm_section=st["Cm0"][order],
+            chord=chord, Cm_section=sta["Cm0"].copy(),
         )
 
         # Moment of the lift with y = (b/2) cos(theta): dy = (b/2) sin(theta) d(theta).
         g_q = 2.0 * b * V * (sin_n_theta_q @ A)
-        dy_dth = 0.5 * b * np.sin(theta_q)
+        dy_dth = sta["dy_dth"]
         q_inf = 0.5 * rho * V * V
         lift_moment = -float(np.sum(q_data["weights"] * rho * V * g_q * (q_data["x_qc"] - q_data["x_ref"]) * dy_dth))
         section_moment = q_inf * q_data["int_c2_cm0"]
@@ -386,9 +401,10 @@ class FourierSolver(BaseSolver):
         rhs = mu[:, None] * (alphas[None, :] + st["twist"][:, None] - st["alpha_L0"][:, None])
         with blas_single_thread():
             A_all = np.linalg.solve(lhs, rhs)
+        stations = self._stations(b, theta, st, sin_n, theta_q)
         out = []
         for i, a in enumerate(alphas):
             cond = FlightCondition(V_inf=condition.V_inf, alpha=float(a), beta=condition.beta, rho=condition.rho)
             out.append(self._result(aircraft, surf, N, b, theta, st, mu, n_idx, A_all[:, i], theta_q, q_data,
-                                    sin_n, sin_n_q, float(a), cond))
+                                    sin_n, sin_n_q, float(a), cond, stations=stations))
         return out

@@ -53,12 +53,13 @@ def _count_extrema(g: np.ndarray, rel_tol: float = 1e-6) -> int:
     g = np.asarray(g, dtype=float)
     if g.size < 4:
         return 0
-    d = np.diff(g)
-    scale = max(float(np.max(np.abs(g))), 1e-300)
+    d = g[1:] - g[:-1]
+    scale = max(float(np.abs(g).max()), 1e-300)
     d = d[np.abs(d) > rel_tol * scale]
     if d.size < 2:
         return 0
-    return int(np.sum(np.sign(d[1:]) != np.sign(d[:-1])))
+    s = np.sign(d)
+    return int(np.count_nonzero(s[1:] != s[:-1]))
 
 
 def evaluate_aerodynamic_trust(
@@ -133,6 +134,15 @@ def evaluate_aerodynamic_trust(
             arrays.append(("Cd_profile", sw.Cd_profile))
         if sw.Cm_section is not None:
             arrays.append(("Cm_section", sw.Cm_section))
+        # One test for all arrays first (the usual case: all finite); the
+        # array-by-array test below only finds the label of the first bad one.
+        try:
+            all_finite = bool(np.isfinite(np.concatenate(
+                [np.asarray(arr, dtype=float).ravel() for _, arr in arrays])).all())
+        except ValueError:
+            all_finite = False
+        if all_finite:
+            continue
         for label, arr in arrays:
             values = np.asarray(arr, dtype=float)
             if values.size and not bool(np.all(np.isfinite(values))):
@@ -201,9 +211,10 @@ def evaluate_aerodynamic_trust(
     if spanwise_list:
         for sw in spanwise_list:
             if len(sw.Cl) > 0:
-                max_local_cl = max(max_local_cl, float(np.max(np.abs(sw.Cl))))
+                max_local_cl = max(max_local_cl, float(np.abs(sw.Cl).max()))
             if len(sw.alpha_eff) > 0:
-                max_alpha_eff_deg = max(max_alpha_eff_deg, float(np.max(np.abs(np.degrees(sw.alpha_eff)))))
+                # degrees(max |a|) equals max |degrees(a)|: the scaling is monotonic.
+                max_alpha_eff_deg = max(max_alpha_eff_deg, float(np.degrees(np.abs(sw.alpha_eff).max())))
     if max_local_cl == 0.0 and abs(CL) > 0:
         max_local_cl = abs(CL) * 1.25
     linear_model = solver != "nonlinear"

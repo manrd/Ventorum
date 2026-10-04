@@ -36,12 +36,12 @@ def alpha_sweep(
     alpha_range : np.ndarray or None
         Angles of attack [rad]. Defaults to -2 deg to 12 deg in 1 deg steps.
     n_jobs : int or str
-        Cases in parallel for the vortex-lattice and linear lifting-line
-        solvers (see :func:`ventorum.utils.parallel.plan_parallel`):
-        ``"auto"`` uses the tuned plan of this machine or the default. The
-        kernel threads of each case follow from it. The nonlinear
-        solver always runs in sequence, so each angle starts from the
-        solution of the previous one.
+        Cases in parallel for the vortex-lattice solver (see
+        :func:`ventorum.utils.parallel.plan_parallel`): ``"auto"`` uses the
+        tuned plan of this machine or the default. The kernel threads of
+        each case follow from it. The lifting-line solvers solve all angles
+        as one batch (``solve_sweep``) on all kernel threads; the nonlinear
+        solver starts each angle from the solution of the previous one.
     backend : {"auto", "thread", "serial"}
         Pool type (threads share the lattice).
     progress : bool
@@ -71,8 +71,11 @@ def alpha_sweep(
         from ventorum.utils.progress import ProgressBar
         pb = ProgressBar(total=len(alpha_range), title=f"Alpha Sweep ({solver.name})", unit="pts")
 
+    # The lifting-line solvers solve all angles as one batch (solve_sweep):
+    # faster than a pool of workers, and each angle gets the same result as
+    # a single solve.
     serial = (b == "serial" or not isinstance(solver, LatticeSolver) or condition.h is not None
-              or canonical == "nonlinear")
+              or getattr(solver, "collocation", "vlm") == "llt")
     if not serial:
         # One lattice for all angles; the plan depends on its size.
         from ventorum.utils.validation import validate_aircraft

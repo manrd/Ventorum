@@ -16,7 +16,9 @@ results = vt.analyze_sweep(
 )
 ```
 
-`n_jobs="auto"` uses the tuned batch plan or the default. Give an integer to fix the number of cases in parallel; the kernel threads of each case are then the cores divided by that number. The nonlinear solver always runs in sequence.
+`n_jobs="auto"` uses the tuned batch plan or the default. Give an integer to fix the number of cases in parallel; the kernel threads of each case are then the cores divided by that number.
+
+The lifting-line solvers (`"linear"`, `"nonlinear"`) do not use `n_jobs`: they solve all angles as one batch (one kernel call for all angles, all kernel threads). Each angle gets the same result as a single solve. The nonlinear solver starts each angle from the solution of the angle before it, out of ground effect.
 
 The lower-level call is `vt.alpha_sweep(aircraft, condition, settings, alpha_range)` with `alpha_range` in radians. It takes the same `n_jobs` and `backend` arguments.
 

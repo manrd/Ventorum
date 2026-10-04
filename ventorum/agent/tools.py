@@ -323,6 +323,39 @@ def wing_analysis(
 # Polar sweep
 # ═══════════════════════════════════════════════════════════════════════════════
 
+def _lifting_line_polar(ac: Aircraft, sett: SolverSettings, conditions: list[FlightCondition],
+                        alphas: list[float]) -> list[tuple]:
+    """Solve the angles of a lifting-line polar out of ground effect as one batch.
+
+    Each angle starts from the linear solution, so each angle gets the same
+    result, to the last bit, as a single solve (``vt.analyze``). Returns the
+    items ``(alpha, result, None, settings)`` of the polar table.
+    """
+    from ventorum.geometry import lattice_cache
+    from ventorum.solvers.factory import make_solver
+    from ventorum.utils.validation import validate_aircraft, validate_flight_condition, validate_solver_settings
+
+    # The same steps as vt.analyze and LatticeSolver.solve, once for all angles.
+    for fc in conditions:
+        validate_flight_condition(fc)
+    validate_solver_settings(sett)
+    solver = make_solver(resolve_solver_type(sett.solver_type))
+    aircraft = ac.clone()
+    validate_aircraft(aircraft)
+    fp = lattice_cache.surfaces_fingerprint(aircraft)
+    geo = lattice_cache.geometry_info(fp, aircraft)
+    aircraft.compute_reference_values(auto=geo["auto_ref"])
+    rp = aircraft.moment_reference()
+    lattice = solver.build(aircraft, sett, conditions[0], None, rp, fingerprint=fp)
+    results = solver.solve_batch(lattice, conditions, sett, aircraft.S_ref, aircraft.b_ref, aircraft.c_ref,
+                                 ref_point=rp, main_surface=geo["main"], continuation=False)
+    out = []
+    for a, fc, res in zip(alphas, conditions, results):
+        res.condition = fc
+        out.append((a, res, None, sett))
+    return out
+
+
 @_tool
 def polar_sweep(
     wing: Any,
@@ -406,6 +439,8 @@ def polar_sweep(
         rest = run_cases(lambda a: run(a, fixed), remaining, estimate_panels(ac, fixed or sett),
                          "auto") if fixed is not None else []
         outputs = first_done + list(rest)
+    elif resolve_solver_type(sett.solver_type) in ("linear", "nonlinear"):
+        outputs = _lifting_line_polar(ac, sett, [make_flight_condition(c, alpha_deg=a) for a in alphas], alphas)
     else:
         outputs = run_cases(run, alphas, estimate_panels(ac, sett), "auto")
 

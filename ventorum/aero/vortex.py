@@ -712,7 +712,25 @@ def trefftz_normalwash(
     numpy.ndarray
         Velocity component along ``q_normal`` [m/s], shape (m,).
     """
-    m, n = q.shape[0], p.shape[0]
+    prep = trefftz_prepare(q.shape[0], p.shape[0], rc, group, targets)
+    return trefftz_normalwash_prepared(q, q_normal, p, gamma, d, prep)
+
+
+def trefftz_prepare(
+    m: int,
+    n: int,
+    rc: np.ndarray | float,
+    group: np.ndarray | None = None,
+    targets: Targets | None = None,
+) -> tuple:
+    """Return the core data of :func:`trefftz_normalwash` as contiguous arrays.
+
+    The data depend only on the vortices and the points, not on their
+    positions: a caller that evaluates the same vortex set many times (for
+    example the angles of a sweep) prepares it once. The arguments are those
+    of :func:`trefftz_normalwash`; *m* and *n* are the numbers of points and
+    vortices.
+    """
     use_tg = targets is not None and group is not None
     src_group = np.ascontiguousarray(group, dtype=np.int64) if use_tg else np.zeros(n, dtype=np.int64)
     if use_tg:
@@ -720,12 +738,26 @@ def trefftz_normalwash(
         tg_rc2 = np.ascontiguousarray(np.broadcast_to(np.asarray(targets.rc, dtype=float) ** 2, (m,)))
     else:
         tg_group, tg_rc2 = np.zeros(m, dtype=np.int64), np.zeros(m)
+    rc2_arr = np.ascontiguousarray(np.broadcast_to(np.asarray(rc, dtype=float) ** 2, (n,)))
+    return rc2_arr, src_group, tg_group, tg_rc2, bool(use_tg)
+
+
+def trefftz_normalwash_prepared(
+    q: np.ndarray,
+    q_normal: np.ndarray,
+    p: np.ndarray,
+    gamma: np.ndarray,
+    d: np.ndarray,
+    prep: tuple,
+) -> np.ndarray:
+    """Compute :func:`trefftz_normalwash` with the core data *prep* of :func:`trefftz_prepare`."""
+    rc2_arr, src_group, tg_group, tg_rc2, use_tg = prep
+    n = p.shape[0]
     backend = kernel_backend_for("trefftz", n)
     if backend in ("numba", "cython", "torch"):
-        rc2_arr = np.ascontiguousarray(np.broadcast_to(np.asarray(rc, dtype=float) ** 2, (n,)))
         args = (np.ascontiguousarray(q, dtype=float), np.ascontiguousarray(q_normal, dtype=float),
                 np.ascontiguousarray(p, dtype=float), np.ascontiguousarray(gamma, dtype=float),
-                np.ascontiguousarray(d, dtype=float), rc2_arr, src_group, tg_group, tg_rc2, bool(use_tg))
+                np.ascontiguousarray(d, dtype=float), rc2_arr, src_group, tg_group, tg_rc2, use_tg)
         if backend == "torch":
             return _torch().trefftz_normalwash_kernel(*args)
         if backend == "cython":
@@ -733,7 +765,7 @@ def trefftz_normalwash(
         return _nb.trefftz_normalwash_kernel(*args)
     r = q[:, None, :] - p[None, :, :]
     v = _cross(np.broadcast_to(d, r.shape), r)
-    rc2 = np.broadcast_to(np.asarray(rc, dtype=float) ** 2, (n,))[None, :]
+    rc2 = rc2_arr[None, :]
     if use_tg:
         rc2 = rc2 + np.where(tg_group[:, None] != src_group[None, :], tg_rc2[:, None], 0.0)
     k = _INV_2PI * gamma[None, :] / (_dot(r, r) + rc2)
