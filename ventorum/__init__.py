@@ -303,5 +303,5 @@ from ventorum.ground_effect import (  # noqa: F401, E402
     plot_clearance_envelope,
 )
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 

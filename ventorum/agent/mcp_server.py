@@ -36,7 +36,7 @@ from ventorum.agent.dispatcher import call_tool, resolve_tool_name
 from ventorum.agent.schemas import get_tool_schemas
 
 SERVER_NAME = "ventorum-aerodynamics"
-SERVER_VERSION = "0.2.0"
+SERVER_VERSION = "0.3.0"
 LATEST_PROTOCOL = "2025-06-18"
 SUPPORTED_PROTOCOLS = ("2024-11-05", "2025-03-26", LATEST_PROTOCOL)
 

@@ -376,6 +376,13 @@ def test_mcp_unknown_protocol_version_gives_latest():
     assert r["result"]["protocolVersion"] == "2025-06-18"
 
 
+def test_mcp_server_version_is_the_package_version():
+    import ventorum
+
+    r = _rpc(json.dumps({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}}))
+    assert r["result"]["serverInfo"]["version"] == ventorum.__version__
+
+
 def test_mcp_refuses_nan_and_infinity():
     for const in ("NaN", "Infinity", "-Infinity"):
         line = ('{"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": '

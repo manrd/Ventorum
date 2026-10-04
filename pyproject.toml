@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ventorum"
-version = "0.2.0"
+version = "0.3.0"
 description = "Vortex-lattice and lifting-line aerodynamics for wings and aircraft in low-speed (incompressible) flow, with flat-ground effect"
 authors = [
     {name = "Manuel Alejandro Rodriguez Diaz, PhD"}
