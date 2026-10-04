@@ -404,6 +404,95 @@ def test_mcp_unknown_tool_is_invalid_params():
     assert r["result"]["content"][0]["type"] == "text"
 
 
+# ── T-0046 finding B2: ground-effect rows carry trust ─────────────────────────
+
+def test_ground_effect_rows_carry_trust():
+    """B2: each ground-effect row reports trust_score, trust_rating, warnings and converged."""
+    import ventorum as vt
+    from ventorum.agent.schemas import build_aircraft_from_spec
+    from ventorum.ground_effect import analyze_ground_effect
+
+    p = ground_effect(RECT, [0.15, 0.5, 1.0], alpha_deg=4.0, settings={"n_panels": 12})
+    strict_json(p)
+    assert p["status"] == "success", p
+    ok = [r for r in p["rows"] if r["status"] == "ok"]
+    assert len(ok) == 3
+    for r in ok:
+        assert "trust_score" in r and "trust_rating" in r
+        assert "warnings" in r and "converged" in r
+        assert isinstance(r["trust_score"], float) and isinstance(r["trust_rating"], str)
+        assert isinstance(r["warnings"], list) and r["converged"] is True
+    low = next(r for r in ok if r["h_m"] == 0.15)
+    assert low["trust_rating"] == "LOW"
+    assert any("Extreme ground proximity" in w for w in low["warnings"])
+    # The tool trust matches the library trust of the same case.
+    lib = analyze_ground_effect(
+        build_aircraft_from_spec(RECT), 0.15, alpha_deg=4.0,
+        settings=vt.SolverSettings(n_panels=12, n_chord=int(p["settings_used"]["n_chord"])))
+    assert low["trust_score"] == pytest.approx(lib.solver_result.totals.trust.score, abs=1e-3)
+    # The summary gives the lowest (worst) rating of the rows.
+    assert p["summary"]["trust_rating_lowest"] == "LOW"
+    assert p["summary"]["trust_score_min"] == pytest.approx(low["trust_score"])
+
+
+def test_ground_effect_summary_detail_keeps_trust():
+    """B2: the summary detail level keeps the trust fields of each row."""
+    p = ground_effect(RECT, [0.5, 1.0], alpha_deg=4.0, settings=SMALL, detail_level="summary")
+    assert p["status"] == "success", p
+    for r in p["rows"]:
+        assert {"h_m", "status", "trust_score", "trust_rating", "warnings", "converged"} <= set(r)
+
+
+# ── T-0046 finding B3: the mesh study solves the requested angles ─────────────
+
+def test_mesh_convergence_tool_solves_requested_angle():
+    """B3: alpha_sweep_deg=[3.0] solves 3 deg (plus the condition alpha), not the default sweep."""
+    from ventorum.agent import mesh_convergence as mc_tool
+
+    p = mc_tool({"span_m": 10.0, "chord_m": 1.25},
+                {"V_inf_m_s": 40.0, "alpha_deg": 4.0},
+                tolerance_pct=5.0, panel_counts=[10, 12], spacing_schemes=["half-cosine"],
+                alpha_sweep_deg=[3.0], ref_n_panels=20)
+    strict_json(p)
+    assert p["status"] == "success", p
+    assert sorted(p["alpha_tested_deg"]) == pytest.approx([3.0, 4.0])
+    assert len(p["alpha_tested_deg"]) == 2
+
+
+# ── T-0046 finding B8: a height step below round-off is refused ────────────────
+
+def test_ground_effect_refuses_tiny_height_step():
+    """B8: two heights closer than 1e-6 * c_ref are refused as invalid input."""
+    p = ground_effect(RECT, [1.0, 1.0000000000001], alpha_deg=4.0, settings=FAST)
+    assert_error(p, "invalid_input")
+    assert "1e-6" in p["error"]["message"] or "1e-06" in p["error"]["message"]
+
+
+# ── T-0046 finding B11: budget docs and all-failed polar reason ───────────────
+
+def test_polar_all_failed_copies_first_row_error():
+    """B11: when every angle fails, the top-level error copies the first row's error."""
+    p = polar_sweep(dict(RECT), 1.0, 3.0, 1.0, {"h_m": 0.01}, dict(FAST), "standard")
+    assert p["status"] == "error", p
+    assert p["error"]["type"] == "ground_strike"
+    table = p["polar_table"]
+    assert len(table) == 3 and all(r["status"] != "ok" for r in table)
+    assert table[0]["message"] in p["error"]["message"]
+    strict_json(p)
+
+
+def test_agent_guide_documents_work_budget():
+    """B11: the agent guide documents the work budget (MAX_CALL_WORK, N^2 units)."""
+    from pathlib import Path
+
+    from ventorum.agent.schemas import MAX_CALL_WORK
+
+    text = (Path(__file__).resolve().parent.parent / "docs" / "agent" / "index.md").read_text()
+    assert str(int(MAX_CALL_WORK)) in text
+    assert "N^2" in text or "N**2" in text
+    assert "budget" in text.lower()
+
+
 # ── Audit log ────────────────────────────────────────────────────────────────
 
 def test_audit_log_only_with_env_var(tmp_path, monkeypatch):
