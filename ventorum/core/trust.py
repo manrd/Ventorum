@@ -13,6 +13,16 @@ known to be weak. The rules depend on the method:
 * All methods are inviscid and incompressible and use thin-wing theory. In
   ground effect, thickness and viscous effects grow when the gap is small
   compared with the chord; the limits below are stated in h/c.
+* With tabulated section polars, the stall limits come from each polar
+  (its maximum Cl and the angle of that maximum), and a section angle
+  outside the table (where the end values are used) lowers the score.
+* A wing of low aspect ratio at a high angle of attack gets vortex lift
+  from its side edges, which the potential-flow methods do not model:
+  E. C. Polhamus, "A concept of the vortex lift of sharp-edge delta wings
+  based on a leading-edge-suction analogy", NASA TN D-3767, 1966;
+  J. E. Lamar, "Extension of leading-edge-suction analogy to wings with
+  separated flow around side edges at subsonic speeds", NASA TR R-428,
+  1974.
 
 The uncertainty values (``uncertainty_CL`` and the others) are heuristic
 bands. They are NOT calibrated against experimental data. Do not use them as
@@ -23,7 +33,7 @@ from __future__ import annotations
 
 import math
 
-from ventorum.core.constants import A_SL, MACH_LIMIT_INCOMPRESSIBLE
+from ventorum.core.constants import A_SL, MACH_LIMIT_INCOMPRESSIBLE, RHO_SL
 
 from collections.abc import Sequence
 
@@ -34,10 +44,141 @@ from ventorum.core.datatypes import (
     FlightCondition,
     LiftingSurface,
     SpanwiseResult,
+    TabulatedAirfoil,
     TrustScore,
 )
 
 LIFTING_LINE_SOLVERS = ("linear", "linear_llt", "llt", "nonlinear", "fourier")
+
+# ISA constants for the speed of sound from the air density.
+_ISA_T0 = 288.15                 # Sea-level temperature [K]
+_ISA_RHO_TROPOPAUSE = 0.36392    # Density at 11 000 m [kg/m^3]
+_ISA_T_TROPOPAUSE = 216.65       # Temperature at and above 11 000 m [K]
+_ISA_DENSITY_EXPONENT = 4.25588  # rho/rho0 = (T/T0)^4.25588 in the troposphere
+_GAMMA_R_AIR = 1.4 * 287.05287   # Ratio of specific heats times the gas constant of air [J/(kg K)]
+
+#: Thresholds of the low-aspect-ratio side-edge vortex rule (vortex lattice).
+LOW_AR_SIDE_EDGE_AR = 2.0
+LOW_AR_SIDE_EDGE_ALPHA_DEG = 10.0
+
+
+def isa_speed_of_sound(rho: float) -> float:
+    """Return the ISA speed of sound [m/s] at the air density *rho* [kg/m^3].
+
+    The ISA temperature follows from the density: in the troposphere
+    ``T = T0 (rho/rho0)^(1/4.25588)``, and 216.65 K above 11 000 m. At the
+    sea-level density the value is the sea-level speed of sound. The result
+    is exact for the ISA atmosphere and approximate for a non-standard day.
+    """
+    rho = float(rho)
+    if not np.isfinite(rho) or rho <= 0.0 or rho == RHO_SL:
+        return A_SL
+    if rho <= _ISA_RHO_TROPOPAUSE:
+        T = _ISA_T_TROPOPAUSE
+    else:
+        T = _ISA_T0 * (rho / RHO_SL) ** (1.0 / _ISA_DENSITY_EXPONENT)
+    return float(np.sqrt(_GAMMA_R_AIR * T))
+
+
+def polar_limits(airfoils: Sequence) -> dict[str, np.ndarray] | None:
+    """Return the limits of the tabulated section data of each strip.
+
+    Parameters
+    ----------
+    airfoils : sequence
+        The airfoil of each strip (``VortexLattice.airfoils``).
+
+    Returns
+    -------
+    dict of numpy.ndarray or None
+        Arrays with one value per strip: ``alpha_lo`` and ``alpha_hi``
+        [rad] (the alpha range of the table), ``cl_max`` and
+        ``alpha_cl_max`` [rad] (the largest Cl of the table and its angle),
+        ``cl_min`` and ``alpha_cl_min`` [rad]. A maximum (or minimum) at an
+        end of the table is not a stall: its values are NaN. A strip with a
+        linear airfoil has NaN everywhere. None if no strip is tabulated.
+    """
+    n = len(airfoils)
+    keys = ("alpha_lo", "alpha_hi", "cl_max", "alpha_cl_max", "cl_min", "alpha_cl_min")
+    out = {k: np.full(n, np.nan) for k in keys}
+    seen: dict[int, tuple] = {}
+    any_tab = False
+    for i, af in enumerate(airfoils):
+        if not isinstance(af, TabulatedAirfoil):
+            continue
+        any_tab = True
+        row = seen.get(id(af))
+        if row is None:
+            a, cl = af._prepare_arrays()[:2]
+            k_max, k_min = int(np.argmax(cl)), int(np.argmin(cl))
+            in_max = 0 < k_max < a.size - 1
+            in_min = 0 < k_min < a.size - 1
+            row = (float(a[0]), float(a[-1]),
+                   float(cl[k_max]) if in_max else np.nan, float(a[k_max]) if in_max else np.nan,
+                   float(cl[k_min]) if in_min else np.nan, float(a[k_min]) if in_min else np.nan)
+            seen[id(af)] = row
+        for key, v in zip(keys, row):
+            out[key][i] = v
+    return out if any_tab else None
+
+
+def polar_stats(limits: dict[str, np.ndarray] | None, cl: np.ndarray, alpha_eff: np.ndarray) -> dict | None:
+    """Compare the section results with the limits of their polars.
+
+    Parameters
+    ----------
+    limits : dict or None
+        The result of :func:`polar_limits`.
+    cl : numpy.ndarray
+        Section lift coefficient of each strip.
+    alpha_eff : numpy.ndarray
+        Effective angle of attack of each strip [rad].
+
+    Returns
+    -------
+    dict or None
+        ``n_strips``, ``n_tabulated``, ``n_out_of_table``,
+        ``max_excess_deg`` (the largest angle outside a table [deg]),
+        ``n_past_stall``, ``stall_ratio`` (the largest Cl/Cl_max of the
+        strips whose polar has a stall, positive and negative side),
+        ``peak_cl`` and ``cl_max_at_peak`` (the strip of that ratio), and
+        ``all_with_stall`` (every strip has a polar with a stall). None if
+        *limits* is None or the arrays are not finite.
+    """
+    if limits is None:
+        return None
+    cl = np.asarray(cl, dtype=float)
+    ae = np.asarray(alpha_eff, dtype=float)
+    if cl.shape != limits["alpha_lo"].shape or ae.shape != cl.shape or cl.size == 0:
+        return None
+    if not (np.isfinite(cl).all() and np.isfinite(ae).all()):
+        return None
+    tab = np.isfinite(limits["alpha_lo"])
+    excess = np.where(tab, np.maximum(limits["alpha_lo"] - ae, ae - limits["alpha_hi"]), -np.inf)
+    out_mask = excess > 1e-9
+    has_max = np.isfinite(limits["cl_max"]) & (limits["cl_max"] > 0.0)
+    has_min = np.isfinite(limits["cl_min"]) & (limits["cl_min"] < 0.0)
+    cl_max = np.where(has_max, limits["cl_max"], 1.0)
+    cl_min = np.where(has_min, limits["cl_min"], -1.0)
+    r_pos = np.where(has_max & (cl > 0.0), cl / cl_max, 0.0)
+    r_neg = np.where(has_min & (cl < 0.0), cl / cl_min, 0.0)
+    past = ((has_max & (ae > np.where(has_max, limits["alpha_cl_max"], np.inf)))
+            | (has_min & (ae < np.where(has_min, limits["alpha_cl_min"], -np.inf)))
+            | (r_pos > 1.0) | (r_neg > 1.0))
+    ratio = np.maximum(r_pos, r_neg)
+    k = int(np.argmax(ratio))
+    limit_at_k = limits["cl_max"][k] if r_pos[k] >= r_neg[k] else limits["cl_min"][k]
+    return {
+        "n_strips": int(cl.size),
+        "n_tabulated": int(tab.sum()),
+        "n_out_of_table": int(out_mask.sum()),
+        "max_excess_deg": float(np.degrees(excess[out_mask].max())) if out_mask.any() else 0.0,
+        "n_past_stall": int(past.sum()),
+        "stall_ratio": float(ratio[k]),
+        "peak_cl": float(cl[k]),
+        "cl_max_at_peak": float(limit_at_k),
+        "all_with_stall": bool(tab.all() and has_max.all()),
+    }
 
 
 def _is_finite(value: object) -> bool:
@@ -142,6 +283,7 @@ def evaluate_aerodynamic_trust(
     notes: Sequence[str] | None = None,
     max_chord_over_c: float = 1.0,
     spanwise_stats: dict | None = None,
+    polar: dict | None = None,
 ) -> TrustScore:
     """Evaluate the validity of a solution.
 
@@ -180,6 +322,14 @@ def evaluate_aerodynamic_trust(
         :func:`spanwise_stats_batch` (all arrays finite). A batch computes
         them for all its cases at once; the result is the same as from
         *spanwise_list*.
+    polar : dict or None
+        The comparison of the section results with their tabulated polars
+        (:func:`polar_stats`), or None if no strip has a tabulated polar.
+        With it, a section angle outside a table gives the penalty
+        ``polar_range``, and the stall rule also uses the maximum Cl and the
+        stall angle of each polar. When every strip has a polar with a
+        stall, the fixed limits of linear sections (Cl 1.55 and 16 deg) are
+        not used.
 
     A result with a non-finite coefficient never keeps a trust level above
     LOW: it gets the penalty ``non_finite_result`` and the warning
@@ -289,7 +439,8 @@ def evaluate_aerodynamic_trust(
     if max_local_cl == 0.0 and abs(CL) > 0:
         max_local_cl = abs(CL) * 1.25
     linear_model = solver != "nonlinear"
-    if max_local_cl > 1.55 or max_alpha_eff_deg > 16.0:
+    use_fixed = not (polar is not None and polar["all_with_stall"])
+    if use_fixed and (max_local_cl > 1.55 or max_alpha_eff_deg > 16.0):
         stall_pen = 0.50 + 0.35 * min(1.0, max(0.0, (max_local_cl - 1.55) / 0.5))
         if linear_model:
             warnings.append(
@@ -302,22 +453,72 @@ def evaluate_aerodynamic_trust(
                 f"Post-stall sections: peak section Cl={max_local_cl:.2f} (alpha_eff={max_alpha_eff_deg:.1f} deg). "
                 "The lifting-line solution past maximum lift is not unique and not validated."
             )
-    elif max_local_cl > 1.20 or max_alpha_eff_deg > 12.0:
+    elif use_fixed and (max_local_cl > 1.20 or max_alpha_eff_deg > 12.0):
         stall_pen = 0.25 * max(0.0, (max_local_cl - 1.20) / 0.35)
         warnings.append(
             f"Approaching section stall: peak section Cl={max_local_cl:.2f} (alpha_eff={max_alpha_eff_deg:.1f} deg)."
         )
+    if polar is not None:
+        # Stall of the tabulated polars: their own maximum Cl and stall angle.
+        ratio = polar["stall_ratio"]
+        if polar["n_past_stall"] > 0:
+            stall_pen = max(stall_pen, 0.50 + 0.35 * min(1.0, max(0.0, (ratio - 1.0) / 0.3)))
+            where = (f"{polar['n_past_stall']} of {polar['n_strips']} strips are past the stall of their "
+                     f"polar (peak section Cl={polar['peak_cl']:.2f}, polar Cl_max={polar['cl_max_at_peak']:.2f})")
+            if linear_model:
+                warnings.append(
+                    f"Severe stall risk: {where}. This solver uses the linear part of the polars and "
+                    "over-predicts lift here."
+                )
+                recommendations.append("Use solver='nonlinear' with the same section polars.")
+            else:
+                warnings.append(
+                    f"Post-stall sections: {where}. The lifting-line solution past maximum lift is not "
+                    "unique and not validated."
+                )
+        elif ratio > 0.9:
+            stall_pen = max(stall_pen, 0.25 * (ratio - 0.9) / 0.1)
+            warnings.append(
+                f"Approaching section stall: peak section Cl={polar['peak_cl']:.2f} is "
+                f"{100.0 * ratio:.0f} % of the polar Cl_max ({polar['cl_max_at_peak']:.2f})."
+            )
     penalties["stall_proximity"] = stall_pen
+
+    # 3b. Section angles outside the polar tables --------------------------------------
+    range_pen = 0.0
+    if polar is not None and polar["n_out_of_table"] > 0:
+        range_pen = 0.30
+        warnings.append(
+            f"Outside the polar data: {polar['n_out_of_table']} of {polar['n_strips']} strips have an "
+            f"effective angle up to {polar['max_excess_deg']:.1f} deg outside their polar table; the end "
+            "values of the table (Cl, Cd, Cm) are used there."
+        )
+        recommendations.append("Extend the section polars over the range of alpha_eff.")
+    penalties["polar_range"] = range_pen
+
+    # 3c. Side-edge vortex lift of low-aspect-ratio wings (vortex lattice) ------------
+    side_pen = 0.0
+    if (not is_llt and condition is not None and 0.0 < AR < LOW_AR_SIDE_EDGE_AR
+            and sweep_deg <= 55.0 and abs(np.degrees(condition.alpha)) > LOW_AR_SIDE_EDGE_ALPHA_DEG):
+        side_pen = 0.25
+        warnings.append(
+            f"Low aspect ratio (AR={AR:.2f} < {LOW_AR_SIDE_EDGE_AR:g}) at alpha="
+            f"{np.degrees(condition.alpha):.1f} deg: the vortex lift of the side edges is not modelled, "
+            "so CL is under-predicted (Polhamus 1966; Lamar 1974)."
+        )
+    penalties["side_edge_vortex"] = side_pen
 
     # 4. Compressibility (outside the valid envelope) ---------------------------------
     mach_pen = 0.0
     if condition is not None:
-        mach = float(condition.V_inf) / A_SL
+        a_sound = isa_speed_of_sound(getattr(condition, "rho", RHO_SL))
+        mach = float(condition.V_inf) / a_sound
         if mach > MACH_LIMIT_INCOMPRESSIBLE:
             mach_pen = 0.60 + 0.30 * min(1.0, (mach - MACH_LIMIT_INCOMPRESSIBLE) / 0.35)
             warnings.append(
-                f"Out of the valid envelope: Mach={mach:.2f} > {MACH_LIMIT_INCOMPRESSIBLE} (sea-level speed "
-                "of sound). The methods are incompressible and no compressibility correction is applied."
+                f"Out of the valid envelope: Mach={mach:.2f} > {MACH_LIMIT_INCOMPRESSIBLE} (ISA speed of "
+                f"sound {a_sound:.1f} m/s at the air density). The methods are incompressible and no "
+                "compressibility correction is applied."
             )
             recommendations.append("Reduce the speed, or use a compressible method.")
     penalties["compressibility"] = mach_pen

@@ -224,3 +224,112 @@ def test_batch_trust_statistics_give_the_same_trust_score():
         a = evaluate_aerodynamic_trust(spanwise_list=r.spanwise, **kw)
         b = evaluate_aerodynamic_trust(spanwise_stats=s, **kw)
         assert a.to_dict() == b.to_dict()
+
+
+# ---------------------------------------------------------------------------
+# Review round 5 (A3 to A6): polar limits, side-edge vortex lift, ISA Mach
+# ---------------------------------------------------------------------------
+
+def _tab_wing(tab):
+    return vt.LiftingSurface(semi_span=4.0, sections=[vt.WingSection(y_frac=0.0, chord=1.0, airfoil=tab),
+                                                      vt.WingSection(y_frac=1.0, chord=1.0, airfoil=tab)])
+
+
+def _stall_polar():
+    """Polar with the stall at 8 deg (Cl_max about 0.88), below the fixed limits (Cl 1.55, 16 deg)."""
+    a = np.radians(np.arange(-8.0, 25.1, 1.0))
+    st_a = np.radians(8.0)
+    cl = np.where(a < st_a, 2 * np.pi * a, 2 * np.pi * st_a - 1.5 * (a - st_a))
+    return vt.TabulatedAirfoil(name="lowRe", alpha=a, Cl_data=cl, Cd_data=0.01 + 0.05 * np.maximum(a - st_a, 0))
+
+
+def test_polar_out_of_range_warns():
+    """A section angle outside the polar table gives a warning and a lower score (A3).
+
+    The polar covers -4 to +4 deg only. At alpha 10 deg the nonlinear
+    lifting line uses the end values of the table: CL 0.43 against 0.84
+    with the full linear section. The trust must not stay HIGH.
+    """
+    a = np.radians(np.arange(-4.0, 4.01, 0.5))
+    tab = vt.TabulatedAirfoil(name="short", alpha=a, Cl_data=2 * np.pi * a, Cd_data=0.008 + 0 * a)
+    inside = vt.analyze(_tab_wing(tab), alpha_deg=3.0, solver="nonlinear", n_panels=30).totals.trust
+    outside = vt.analyze(_tab_wing(tab), alpha_deg=10.0, solver="nonlinear", n_panels=30).totals.trust
+    assert inside.rating == "HIGH"
+    assert not any("Outside the polar data" in w for w in inside.warnings)
+    assert outside.rating != "HIGH"
+    assert outside.factors["polar_range"] > 0.0
+    assert any("Outside the polar data" in w for w in outside.warnings)
+
+
+@pytest.mark.parametrize("solver", ["vlm", "linear"])
+def test_polar_stall_lowers_trust(solver):
+    """Past the stall of the polar, the linear-section solvers are not HIGH (A4)."""
+    tab = _stall_polar()
+    low = vt.analyze(_tab_wing(tab), alpha_deg=4.0, solver=solver, n_panels=30).totals.trust
+    high = vt.analyze(_tab_wing(tab), alpha_deg=11.0, solver=solver, n_panels=30).totals.trust
+    assert low.rating == "HIGH"
+    assert high.rating in ("LOW", "UNRELIABLE")
+    assert high.factors["stall_proximity"] >= 0.5
+    assert any("past the stall of their polar" in w for w in high.warnings)
+
+
+def test_polar_stall_nonlinear_warns():
+    tab = _stall_polar()
+    t = vt.analyze(_tab_wing(tab), alpha_deg=11.0, solver="nonlinear", n_panels=30).totals.trust
+    assert any("Post-stall sections" in w for w in t.warnings)
+
+
+def test_linear_sections_keep_fixed_stall_limits():
+    """Linear sections: the polar rule is off and the fixed limits stay (no change)."""
+    w = vt.LiftingSurface(semi_span=4.0, sections=[vt.WingSection(y_frac=0.0, chord=1.0),
+                                                   vt.WingSection(y_frac=1.0, chord=1.0)])
+    t = vt.analyze(w, alpha_deg=20.0, solver="vlm", n_panels=30).totals.trust
+    assert t.factors["polar_range"] == 0.0
+    assert t.factors["stall_proximity"] >= 0.5
+
+
+def test_polar_stats_end_maximum_is_not_stall():
+    """A table whose largest Cl is at its end has no stall information."""
+    from ventorum.core.trust import polar_limits, polar_stats
+
+    a = np.radians(np.arange(-4.0, 4.01, 1.0))
+    tab = vt.TabulatedAirfoil(name="short", alpha=a, Cl_data=2 * np.pi * a, Cd_data=0.01 + 0 * a)
+    lim = polar_limits([tab, tab])
+    assert np.isnan(lim["cl_max"]).all()
+    st = polar_stats(lim, np.array([0.3, 0.5]), np.radians([2.0, 6.0]))
+    assert st["n_out_of_table"] == 1
+    assert st["max_excess_deg"] == pytest.approx(2.0)
+    assert st["n_past_stall"] == 0
+    assert st["all_with_stall"] is False
+    assert polar_limits([vt.LinearAirfoil()]) is None
+
+
+def test_low_ar_high_alpha():
+    """Unswept AR 1 wing at high alpha: side-edge vortex lift is not modelled (A5)."""
+    w = vt.LiftingSurface(semi_span=0.5, sections=[vt.WingSection(y_frac=0.0, chord=1.0),
+                                                   vt.WingSection(y_frac=1.0, chord=1.0)])
+    t10 = vt.analyze(w, alpha_deg=8.0, solver="vlm", n_panels=20).totals.trust
+    t20 = vt.analyze(w, alpha_deg=20.0, solver="vlm", n_panels=20).totals.trust
+    assert t10.factors["side_edge_vortex"] == 0.0
+    assert t20.factors["side_edge_vortex"] > 0.0
+    assert t20.rating != "HIGH"
+    assert any("Polhamus 1966" in m for m in t20.warnings)
+
+
+def test_mach_uses_altitude():
+    """The Mach check uses the ISA speed of sound of the air density (A6)."""
+    from ventorum.core.constants import A_SL, RHO_SL
+    from ventorum.core.trust import isa_speed_of_sound
+
+    assert isa_speed_of_sound(RHO_SL) == A_SL
+    assert isa_speed_of_sound(0.36392) == pytest.approx(295.07, abs=0.05)  # 11 000 m
+    rho_5km = RHO_SL * (1.0 - 2.25577e-5 * 5000.0) ** 4.25588
+    assert isa_speed_of_sound(rho_5km) == pytest.approx(320.5, abs=0.2)
+    w = vt.LiftingSurface(semi_span=4.0, sections=[vt.WingSection(y_frac=0.0, chord=1.0),
+                                                   vt.WingSection(y_frac=1.0, chord=1.0)])
+    sea = vt.analyze(w, condition=vt.FlightCondition(V_inf=100.0, alpha=np.radians(4.0)),
+                     settings=vt.SolverSettings(solver_type="vlm", n_panels=20)).totals.trust
+    high = vt.analyze(w, condition=vt.FlightCondition(V_inf=100.0, alpha=np.radians(4.0), rho=0.36392),
+                      settings=vt.SolverSettings(solver_type="vlm", n_panels=20)).totals.trust
+    assert sea.factors["compressibility"] == 0.0
+    assert high.factors["compressibility"] > 0.0

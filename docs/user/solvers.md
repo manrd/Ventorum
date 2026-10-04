@@ -17,4 +17,4 @@ The kernel backends (numpy, Numba, Cython, PyTorch) are measured by the tuner pe
 - Incompressible flow, Mach number below 0.3. Above Mach 0.3 a case is outside the envelope: `analyze` gives a warning and the trust rating is LOW or UNRELIABLE.
 - Attached flow. Results after stall are not reliable.
 - Thin lifting surfaces. Thickness enters only through the section polars.
-- Not modelled: compressibility, leading-edge vortex lift, wake roll-up, unsteady flow, a fuselage.
+- Not modelled: compressibility, leading-edge and side-edge vortex lift, wake roll-up, unsteady flow, a fuselage.

@@ -33,7 +33,7 @@ from ventorum.core.datatypes import (
     SolverSettings,
 )
 from ventorum.core.errors import ValidityError
-from ventorum.core.trust import evaluate_aerodynamic_trust
+from ventorum.core.trust import evaluate_aerodynamic_trust, polar_limits, polar_stats
 from ventorum.geometry import lattice_cache
 from ventorum.geometry.lattice import VortexLattice, build_lattice
 from ventorum.solvers.base import BaseSolver
@@ -336,6 +336,17 @@ class LatticeSolver(BaseSolver):
             )
         h_over_c = (h_min / c_ref) if (h_min is not None and c_ref) else None
         totals = loads.totals
+        # Tabulated section polars: compare the section results with the
+        # table range and the stall of each polar (None for linear sections).
+        limits = self._cached(lattice, "polar_limits", lambda: polar_limits(lattice.airfoils))
+        polar = None
+        if limits is not None:
+            cl_strip = np.empty(lattice.n_strips)
+            ae_strip = np.empty(lattice.n_strips)
+            for surf, sw in zip(lattice.surfaces, loads.spanwise):
+                cl_strip[surf.strips] = sw.Cl
+                ae_strip[surf.strips] = sw.alpha_eff
+            polar = polar_stats(limits, cl_strip, ae_strip)
         totals.trust = evaluate_aerodynamic_trust(
             AR=totals.AR,
             surfaces=None,
@@ -355,6 +366,7 @@ class LatticeSolver(BaseSolver):
             max_chord_over_c=(float(self._cached(lattice, "max_chord", lambda: np.max(lattice.chord)) / c_ref)
                               if c_ref else 1.0),
             spanwise_stats=spanwise_stats,
+            polar=polar,
         )
         res = SolverResult(
             spanwise=loads.spanwise,
