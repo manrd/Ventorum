@@ -18,6 +18,11 @@ dist/
 *.egg-info/
 .eggs/
 
+# Private material (owner rule): task cards, backlog and studies never go to this public repository.
+/tasks/
+/studies/
+TASK_CARD.md
+
 # Agent audit log (only written when VENTORUM_AGENT_AUDIT_LOG is set)
 .ventorum_agent_audit.jsonl
 
