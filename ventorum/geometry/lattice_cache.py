@@ -113,8 +113,16 @@ def lattice_key(aircraft: Any, settings: Any, collocation: str, n_chord: int, ch
 
 
 def _freeze(obj: Any) -> None:
-    """Make every array of a lattice (and of its surface slices) read-only."""
+    """Make every array of a lattice (and of its surface slices) read-only.
+
+    The airfoils of the strips are not frozen: they are the objects of the
+    user (their tables are the arrays the user gave), and a solve must not
+    change them. A change of their data changes the surfaces fingerprint,
+    so the cache then builds a new lattice.
+    """
     for f in dataclasses.fields(obj):
+        if f.name == "airfoils":
+            continue
         val = getattr(obj, f.name)
         if isinstance(val, np.ndarray):
             val.flags.writeable = False

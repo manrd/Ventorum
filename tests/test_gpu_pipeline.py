@@ -403,3 +403,19 @@ def test_gpu_ground_effect_sweep_equals_cpu(gpu_device, precision):
         assert np.array_equal(ok, np.isfinite(b))
         assert np.max(np.abs(a[ok] - b[ok])) <= tol * max(np.max(np.abs(ref.CL[ok])), 1e-3), name
     assert all(r.solver_result.details.get("device") == "gpu" for r in new.results if r is not None)
+
+
+@pytest.mark.gpu
+def test_no_nonwritable_warning(gpu_device):
+    """The first GPU solve gives no torch warning about read-only arrays (review round 5, C4)."""
+    gpu.set_device("gpu")
+    wing = vt.LiftingSurface(semi_span=5.0, sections=[vt.WingSection(y_frac=0.0, chord=1.0),
+                                                      vt.WingSection(y_frac=1.0, chord=0.5)])
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        for solver in ("vlm", "linear", "nonlinear"):
+            for h in (None, 2.0):
+                cond = vt.FlightCondition(V_inf=30.0, alpha=np.radians(4.0), h=h)
+                r = vt.analyze(wing.clone(), cond, vt.SolverSettings(solver_type=solver, n_panels=24))
+                assert r.details.get("device") == "gpu"
+    assert not [w for w in caught if "not writable" in str(w.message)]

@@ -70,3 +70,21 @@ def test_repeated_solve_gives_the_same_bits():
     r1 = vt.NonlinearSolver().solve(_wing(), cond, st)
     r2 = vt.NonlinearSolver().solve(_wing(), cond, st)
     assert r1.totals.CL == r2.totals.CL and r1.totals.CDi == r2.totals.CDi and r1.totals.Cm == r2.totals.Cm
+
+
+def test_user_airfoil_arrays_stay_writable():
+    """A solve must not make the arrays of the user's polar read-only (review round 5, C2)."""
+    import numpy as np
+
+    import ventorum as vt
+
+    alpha = np.radians(np.arange(-10.0, 15.1, 1.0))
+    cl = 2 * np.pi * alpha
+    cd = 0.01 + 0.0 * alpha
+    tab = vt.TabulatedAirfoil(name="user", alpha=alpha, Cl_data=cl, Cd_data=cd)
+    wing = vt.LiftingSurface(semi_span=4.0, sections=[vt.WingSection(y_frac=0.0, chord=1.0, airfoil=tab),
+                                                      vt.WingSection(y_frac=1.0, chord=1.0, airfoil=tab)])
+    for solver in ("vlm", "linear", "nonlinear"):
+        vt.analyze(wing, alpha_deg=4.0, solver=solver, n_panels=10)
+    assert alpha.flags.writeable and cl.flags.writeable and cd.flags.writeable
+    cl[0] = cl[0]  # the user can still write into the array

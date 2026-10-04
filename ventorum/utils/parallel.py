@@ -107,6 +107,11 @@ def single_case_threads(n_panels: int | None, batch: int = 1) -> int:
     return int(tuned) if tuned else cpu_cores()
 
 
+_blas_lock = threading.Lock()
+_blas_depth = 0  # Number of threads inside blas_single_thread
+_blas_limiter = None  # The threadpoolctl limit of the first entry
+
+
 @contextlib.contextmanager
 def blas_single_thread():
     """Run the BLAS and LAPACK calls inside the context on one thread.
@@ -115,13 +120,33 @@ def blas_single_thread():
     unknowns) is fastest on one thread: on a 12-core machine, OpenBLAS with
     all threads was 5 to 23 times slower for 100 to 400 unknowns. Without
     threadpoolctl the context does nothing.
+
+    The BLAS thread count is a setting of the whole process, and the
+    workers of :func:`case_executor` enter and leave the context at
+    different times. The context therefore counts the threads that are
+    inside it: the first entry sets one BLAS thread, and the last exit
+    restores the count of the process from before the first entry. A
+    limit per worker would restore the counts in the wrong order (a worker
+    would get all BLAS threads again while it still runs, and the process
+    would keep one BLAS thread after the run).
     """
+    global _blas_depth, _blas_limiter
     ctl = _blas_controller()
     if ctl is None:
         yield
-    else:
-        with ctl.limit(limits=1, user_api="blas"):
-            yield
+        return
+    with _blas_lock:
+        if _blas_depth == 0:
+            _blas_limiter = ctl.limit(limits=1, user_api="blas")
+        _blas_depth += 1
+    try:
+        yield
+    finally:
+        with _blas_lock:
+            _blas_depth -= 1
+            if _blas_depth == 0 and _blas_limiter is not None:
+                _blas_limiter.restore_original_limits()
+                _blas_limiter = None
 
 
 @contextlib.contextmanager

@@ -220,8 +220,8 @@ def _nonlinear(solver, engine, dl, md, cs, lattice, conditions, settings, ground
     alpha_full[:, md["strip"]] = alpha_u
     if umap.symmetric:
         left = np.flatnonzero(~lattice.strip_is_right)
-        alpha_full[:, torch.as_tensor(left, device=g.device)] = alpha_full[
-            :, torch.as_tensor(lattice.strip_mirror[left], device=g.device)]
+        alpha_full[:, torch.as_tensor(np.array(left), device=g.device)] = alpha_full[
+            :, torch.as_tensor(np.array(lattice.strip_mirror[left]), device=g.device)]
     conv_h = out["converged"].cpu().numpy() & ~out["unresolved"].cpu().numpy()
     iters = out["iterations"].cpu().numpy()
     infos = [SolveInfo(converged=bool(conv_h[k]), iterations=int(iters[k]), residual_history=out["history"][k],

@@ -127,12 +127,28 @@ def torch_dtype(precision: str) -> torch.dtype:
     return torch.float64 if precision == "float64" else torch.float32
 
 
+def _host(x, dtype) -> np.ndarray:
+    """Return *x* as a contiguous array that torch can take (a copy if *x* is read-only).
+
+    The cached lattice arrays are read-only, and torch warns about a
+    tensor made from a read-only array.
+    """
+    a = np.ascontiguousarray(x, dtype=dtype)
+    return a if a.flags.writeable else a.copy()
+
+
+def _tensor(x) -> torch.Tensor:
+    """Return *x* (an array with its own type) as a tensor on the device, without the read-only warning."""
+    a = np.asarray(x)
+    return torch.as_tensor(a if a.flags.writeable else a.copy(), device=_dev())
+
+
 def _f64(x) -> torch.Tensor:
-    return torch.as_tensor(np.ascontiguousarray(x, dtype=np.float64), device=_dev())
+    return torch.as_tensor(_host(x, np.float64), device=_dev())
 
 
 def _i32(x) -> torch.Tensor:
-    return torch.as_tensor(np.ascontiguousarray(x, dtype=np.int32), device=_dev())
+    return torch.as_tensor(_host(x, np.int32), device=_dev())
 
 
 def split2(x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
@@ -270,19 +286,19 @@ class DeviceLattice:
             data = {
                 "n": umap.n, "symmetric": bool(umap.symmetric), "pts": pts,
                 "src_of": _i32(src_of),
-                "unknown_panels": torch.as_tensor(up.astype(np.int64), device=_dev()),
-                "panel_column": torch.as_tensor(col.astype(np.int64), device=_dev()),
+                "unknown_panels": _tensor(up.astype(np.int64)),
+                "panel_column": _tensor(col.astype(np.int64)),
             }
             data["w_src_of"] = view(data["src_of"], wp.int32)
             if sd is not None:
                 for name in ("normal", "chord_dir", "dl", "area", "a0", "alpha_L0"):
                     data[name] = _f64(sd[name])
                 data["strip_np"] = np.asarray(sd["strip"], dtype=np.int64)
-                data["strip"] = torch.as_tensor(data["strip_np"], device=_dev())
+                data["strip"] = _tensor(data["strip_np"])
             if umap.symmetric:
                 left = np.setdiff1d(np.arange(lattice.n_panels), up)
-                data["left"] = torch.as_tensor(left, device=_dev())
-                data["left_mirror"] = torch.as_tensor(lattice.panel_mirror[left], device=_dev())
+                data["left"] = _tensor(left)
+                data["left_mirror"] = _tensor(lattice.panel_mirror[left])
             self._maps[key] = data
         return data or None
 
@@ -1075,11 +1091,11 @@ def load_points(dl: DeviceLattice, lattice, fold: bool) -> dict:
         P = np.vstack([pk[eval_panels] for pk in points])
         tg = panel_targets(lattice, np.tile(eval_panels, len(points)))
         data = {"pts": PointSet(dl, P, None, tg.group, tg.rc, dl.use_tg), "n_e": int(eval_panels.size),
-                "eval": torch.as_tensor(eval_panels, device=_dev()), "swap": swap, "folded": geo is not None}
+                "eval": _tensor(eval_panels), "swap": swap, "folded": geo is not None}
         if geo is not None:
             left = geo[1]
-            data["left"] = torch.as_tensor(left, device=_dev())
-            data["left_mirror"] = torch.as_tensor(lattice.panel_mirror[left], device=_dev())
+            data["left"] = _tensor(left)
+            data["left_mirror"] = _tensor(lattice.panel_mirror[left])
         dl._cache[key] = data
     return data
 
@@ -1094,7 +1110,7 @@ def _wake_groups(dl: DeviceLattice, lattice) -> dict:
     if data is None:
         key = np.stack([lattice.panel_strip.astype(float), np.asarray(lattice.rc, dtype=float)], axis=1)
         uniq, first, inverse = np.unique(key, axis=0, return_index=True, return_inverse=True)
-        data = {"rep": _i32(first), "inverse": torch.as_tensor(inverse.ravel().astype(np.int64), device=_dev()),
+        data = {"rep": _i32(first), "inverse": _tensor(inverse.ravel().astype(np.int64)),
                 "n": int(uniq.shape[0])}
         dl._cache["wake_groups"] = data
     return data
@@ -1126,7 +1142,7 @@ def _fixed_points(dl: DeviceLattice, lattice, lp: dict, fold: bool) -> torch.Ten
     launch(dl.k.fixed_points, (pts.m, n_cols), [dl.sources, pts.struct, cs.struct(pts), view(_i32(cols), wp.int32),
                                                 view(out, wp.float64)])
     T = out.reshape(pts.m * 3, n_cols)
-    dl._cache[key] = (T, torch.as_tensor(cols[:, 0], device=_dev()))
+    dl._cache[key] = (T, _tensor(cols[:, 0]))
     return dl._cache[key]
 
 
@@ -1225,7 +1241,7 @@ def trefftz(dl: DeviceLattice, lattice, strip_gamma: torch.Tensor, WD: torch.Ten
             index[left] = pos[lattice.strip_mirror[left]]
             tc["n_right"] = int(right.size)
             tc["eval_right"] = _i32(pos)
-            tc["wn_index"] = torch.as_tensor(index, device=_dev())
+            tc["wn_index"] = _tensor(index)
             tc["tgroup_r"] = _i32(np.asarray(tg_group)[right])
             tc["trc2_r"] = _f64(np.asarray(tg_rc2, dtype=float)[right]).to(dl.T).contiguous()
         dl._cache[key] = tc
