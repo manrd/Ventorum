@@ -450,3 +450,112 @@ def test_discarded_spacing_call_is_removed():
     import ventorum.geometry.mesh_convergence as mc
 
     assert not hasattr(mc, "determine_optimal_spacing")
+
+
+# ── T-0046 finding B3: a single requested angle is solved exactly ─────────────
+
+def test_single_angle_sweep_solves_requested_angle(planar_rectangular_wing):
+    """B3: alpha_sweep_deg=[3.0] solves 3 deg (plus the condition alpha), not the default sweep."""
+    cond = vt.FlightCondition(V_inf=40.0, alpha=np.radians(4.0))
+    study = run_mesh_convergence_study(
+        case=planar_rectangular_wing,
+        condition=cond,
+        tolerance_pct=5.0,
+        panel_counts=(10, 12),
+        ref_n_panels=20,
+        spacing_schemes=("half-cosine",),
+        evaluate_sweep=True,
+        alpha_sweep_deg=[3.0],
+        progress=False,
+    )
+    assert sorted(study.alpha_tested_deg) == pytest.approx([3.0, 4.0])
+    assert len(study.alpha_tested_deg) == 2
+
+
+def test_single_angle_matching_condition_needs_no_extra_solve(planar_rectangular_wing):
+    """B3: alpha_sweep_deg equal to the condition alpha solves exactly that angle."""
+    cond = vt.FlightCondition(V_inf=40.0, alpha=np.radians(4.0))
+    study = run_mesh_convergence_study(
+        case=planar_rectangular_wing,
+        condition=cond,
+        tolerance_pct=5.0,
+        panel_counts=(10, 12),
+        ref_n_panels=20,
+        spacing_schemes=("half-cosine",),
+        evaluate_sweep=True,
+        alpha_sweep_deg=[4.0],
+        progress=False,
+    )
+    assert study.alpha_tested_deg == pytest.approx([4.0])
+
+
+# ── T-0046 finding A7: no recommendation without convergence ──────────────────
+
+def _swept_wing() -> vt.LiftingSurface:
+    """Return a swept tapered wing on which the lifting-line method is not grid convergent."""
+    return vt.LiftingSurface(
+        name="SweptBenchWing",
+        semi_span=5.0,
+        sections=[
+            vt.WingSection(y_frac=0.0, chord=1.25),
+            vt.WingSection(y_frac=1.0, chord=0.6),
+        ],
+        sweep_le=np.radians(30.0),
+        dihedral=0.0,
+        is_symmetric=True,
+    )
+
+
+def test_not_converged_gives_no_recommendation():
+    """A7: without an accurate level there is no recommended level and no scaling guideline."""
+    cond = vt.FlightCondition(V_inf=40.0, alpha=np.radians(5.0))
+    study = run_mesh_convergence_study(
+        case=_swept_wing(),
+        condition=cond,
+        tolerance_pct=0.1,
+        panel_counts=(10, 15, 20),
+        ref_n_panels=80,
+        spacing_schemes=("half-cosine",),
+        solver_type="linear",
+        progress=False,
+    )
+    assert study.converged is False
+    assert study.diagnosis is not None
+    assert "lifting" in study.diagnosis.lower() and "sweep" in study.diagnosis.lower()
+    text = study.summary(as_markdown=False)
+    assert "not converged within tolerance" in text.lower()
+    assert "RECOMMENDED" not in text
+    assert "Scaling Guideline" not in text
+    assert "no mesh" in text.lower() and "no scaling guideline" in text.lower()
+    assert "sweep" in text.lower()
+    md = study.summary(as_markdown=True)
+    assert "RECOMMENDED" not in md
+    assert "Scaling Guideline" not in md
+    assert "no scaling guideline" in md.lower()
+    data = study.to_dict()
+    assert data["minimal_mesh"] is None and data["recommended_mesh"] is None
+    assert data["generalization"] is None
+    assert data["diagnosis"] == study.diagnosis
+
+    res = call_tool(
+        "ventorum_mesh_convergence",
+        {
+            "wing": {"span_m": 10.0, "root_chord_m": 1.25, "tip_chord_m": 0.6,
+                     "sweep_le_deg": 30.0, "dihedral_deg": 0.0},
+            "flight_condition": {"V_inf_m_s": 40.0, "alpha_deg": 5.0},
+            "tolerance_pct": 0.1,
+            "panel_counts": [10, 15, 20],
+            "spacing_schemes": ["half-cosine"],
+            "ref_n_panels": 80,
+            "solver": "linear",
+            "detail_level": "standard",
+        },
+    )
+    assert res["status"] == "success", res
+    assert res["converged"] is False
+    assert res["minimal_mesh"] is None and res["recommended_mesh"] is None
+    assert res["generalization"] is None
+    assert "sweep" in res["diagnosis"].lower()
+    assert "not converged" in res["executive_summary"].lower()
+    assert "RECOMMENDED" not in res["summary_markdown"]
+    assert "Scaling Guideline" not in res["summary_markdown"]

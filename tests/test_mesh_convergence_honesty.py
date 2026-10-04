@@ -62,12 +62,20 @@ def test_not_converged_is_reported():
         progress=False,
     )
     assert study.converged is False
-    finest = max(study.points, key=lambda p: (p.panels_solved, p.total_panels))
-    assert study.recommended_mesh.panels_solved == finest.panels_solved
-    text = study.summary(as_markdown=False).lower()
-    assert "not converged within tolerance" in text
-    text_md = study.summary(as_markdown=True).lower()
-    assert "not converged within tolerance" in text_md
+    assert study.diagnosis is None or isinstance(study.diagnosis, str)
+    text = study.summary(as_markdown=False)
+    assert "not converged within tolerance" in text.lower()
+    assert "RECOMMENDED" not in text and "MINIMAL" not in text
+    assert "Scaling Guideline" not in text
+    assert "no mesh is recommended" in text.lower()
+    assert "no scaling guideline" in text.lower()
+    text_md = study.summary(as_markdown=True)
+    assert "not converged within tolerance" in text_md.lower()
+    assert "RECOMMENDED" not in text_md and "MINIMAL" not in text_md
+    assert "Scaling Guideline" not in text_md
+    data = study.to_dict()
+    assert data["minimal_mesh"] is None and data["recommended_mesh"] is None
+    assert data["generalization"] is None
 
     res = call_tool(
         "ventorum_mesh_convergence",
