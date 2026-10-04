@@ -60,3 +60,76 @@ work to remove the limit are in
 `VENTORUM_MACOS_OPENMP=1` at build time keeps the libomp build for
 experiments in a process that does not load PyTorch. Do not use it for
 normal work.
+
+## PL-2: Nonlinear sweeps past the maximum lift gain little on the GPU
+
+**Cause.** A nonlinear lifting-line sweep with continuation starts each
+case from the converged circulation of the case before it. The GPU solves
+all cases together, and it repeats the solves until no case changes its
+root (at most three passes, see `ventorum/gpu/pipeline.py`). Past the
+maximum lift, roots can change from pass to pass, and some cases do not
+converge in the Newton iterations that the GPU gives them. The cases from
+the first such case to the end of the sweep are then solved on the CPU, in
+order, with the restarts of the CPU solver.
+
+**What Ventorum does now.** The results are those of the CPU sweep. The
+cases before the first unsettled case come from the GPU.
+
+**Cost.** The cases past the maximum lift are the expensive cases of such
+a sweep (many Newton iterations and restarts), so the sweep takes about
+the time of the CPU sweep. A sweep that ends before the maximum lift is
+not affected.
+
+**How to remove the limit.** Options to study:
+
+1. Run the restarts of one case on the GPU as one batch of start values.
+2. Solve the unsettled cases on the GPU one after the other. The gain is
+   small for medium lattices: one Newton iteration of one case costs about
+   the same on the GPU as on the CPU there.
+
+## PL-3: Host work limits the GPU throughput of small cases
+
+**Cause.** A GPU solve has a fixed cost on the host: the Python code of the
+pipeline, the launch of each kernel and the transfer of the results. Each
+case of a batch also gets its result objects (loads, spanwise results,
+trust score) from Python code on the host, and the garbage collector of
+Python scans the many objects that PyTorch, NVIDIA Warp and SciPy create
+when they are imported.
+
+**What Ventorum does now.** The `"auto"` device keeps small solves on the
+CPU (`ventorum.gpu.use_gpu`, see [Run solves on the GPU](how_to_gpu)).
+The per-case inputs of a batch go to the GPU in one transfer, and one
+kernel each makes the per-case data.
+
+**Cost.** A single solve of a small lattice is faster on the CPU. For a
+large batch of small lattices, the host work, not the GPU, sets the number
+of cases per second. To see the times on a machine, run `ventorum-tune`:
+step 4 prints the CPU and GPU times per solver family, lattice and batch
+size.
+
+**How to remove the limit.** Options to study:
+
+1. CUDA graphs for the fixed sequence of kernels of a batch.
+2. Result objects that keep the arrays of the batch and make the objects
+   of a case only when they are read (a change of the interface: owner
+   decision).
+
+## PL-4: Batched LU of small systems on the GPU
+
+**Cause.** The direct solves of a GPU batch use `torch.linalg` (LU with
+partial pivoting). For a batch of matrices, PyTorch selects its library
+(cuSOLVER or MAGMA) by itself. On some GPUs, cuSOLVER is faster for small
+systems and MAGMA for large ones. Only a setting for the whole process
+selects the library, so Ventorum does not change it.
+
+**What Ventorum does now.** It uses the choice of PyTorch. The nonlinear
+lifting line factorises the Jacobian of each case at each Newton iteration
+(`engine.newton_solve`). The linear solves of larger systems use the
+inverse of a reference matrix and corrections (`engine.batched_solve`),
+not one factorisation per case.
+
+**Cost.** The Newton iterations of small and medium lattices take longer
+than they could.
+
+**How to remove the limit.** A batched LU kernel for small systems in the
+GPU pipelines, or a choice of the library per call if PyTorch offers one.

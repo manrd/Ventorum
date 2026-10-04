@@ -81,3 +81,5 @@ Large batches are split into chunks of cases, so the GPU memory stays bounded. T
 
 * A GPU that was idle runs at low clocks for the first part of the next work (on the test machine, about 0.3 s of GPU work). A short solve after an idle time can then take some times longer than the same solve in a series. The tuner measures a GPU in use.
 * A nonlinear sweep past the maximum lift gains little on the GPU: the cases that do not settle are solved on the CPU, in order (see above).
+
+The known speed limits of the GPU pipelines (nonlinear sweeps past the maximum lift, the host work of small cases, the batched LU of small systems) are entries PL-2 to PL-4 of [Known performance limits](performance_limits).
