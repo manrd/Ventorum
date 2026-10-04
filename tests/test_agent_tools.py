@@ -1,0 +1,614 @@
+# Author: Manuel Alejandro Rodriguez Diaz, PhD
+"""
+Tests of the strict AI agent tools, the dispatcher and the MCP request handler.
+"""
+
+from __future__ import annotations
+
+import json
+
+import pytest
+
+from ventorum.agent import (
+    AGENT_TOOL_DEFINITIONS,
+    batch_evaluate,
+    call_tool,
+    get_tool_schemas,
+    ground_effect,
+    handle_message,
+    polar_sweep,
+    stability_derivatives,
+    wing_analysis,
+)
+from ventorum.agent.schemas import CONDITION_PROPS, SETTINGS_PROPS, SURFACE_PROPS
+
+FAST = {"n_panels": 8}
+RECT = {"span_m": 10.0, "chord_m": 1.0}
+
+
+def strict_json(payload):
+    """The payload must be strict JSON (no NaN, no infinity)."""
+    return json.loads(json.dumps(payload, allow_nan=False))
+
+
+def assert_error(payload, kind, text=None):
+    assert payload["status"] == "error", payload
+    assert payload["error"]["type"] == kind, payload
+    if text is not None:
+        assert text in payload["error"]["message"], payload["error"]["message"]
+    strict_json(payload)
+
+
+# ── Schemas ──────────────────────────────────────────────────────────────────
+
+def test_schema_exporters():
+    n = len(AGENT_TOOL_DEFINITIONS)
+    assert n == 8  # six analysis tools and the two machine tools of T-0017
+    openai = get_tool_schemas("openai")
+    assert all(s["type"] == "function" and s["function"]["name"].startswith("ventorum_") for s in openai)
+    anthropic = get_tool_schemas("anthropic")
+    assert all("input_schema" in s for s in anthropic)
+    mcp = get_tool_schemas("mcp")
+    assert all("inputSchema" in s for s in mcp)
+    assert all(s["inputSchema"]["additionalProperties"] is False for s in mcp)
+    gemini = get_tool_schemas("gemini")
+    assert all("parameters" in s for s in gemini)
+    assert "additionalProperties" not in json.dumps(gemini)
+    for fmt in (openai, anthropic, mcp, gemini):
+        assert len(fmt) == n
+        strict_json(fmt)
+
+
+def test_schema_keys_match_parser_tables():
+    wa = next(t for t in AGENT_TOOL_DEFINITIONS if t["name"] == "ventorum_wing_analysis")["parameters"]
+    surface = wa["properties"]["wing"]["anyOf"][0]
+    assert set(surface["properties"]) == set(SURFACE_PROPS)
+    assert surface["additionalProperties"] is False
+    assert set(wa["properties"]["flight_condition"]["properties"]) == set(CONDITION_PROPS)
+    assert set(wa["properties"]["settings"]["properties"]) == set(SETTINGS_PROPS)
+    assert "tip_twist_deg" in surface["properties"]
+    assert "NEGATIVE" in surface["properties"]["tip_twist_deg"]["description"]
+
+
+# ── Wing analysis ────────────────────────────────────────────────────────────
+
+def test_wing_analysis_success():
+    p = wing_analysis({"span_m": 12.0, "root_chord_m": 1.6, "tip_chord_m": 0.8},
+                      {"V_inf_m_s": 45.0, "alpha_deg": 5.0}, FAST, "summary")
+    strict_json(p)
+    assert p["status"] == "success"
+    m = p["metrics"]
+    for key in ("CL", "CDi", "CDp", "CD", "L_over_D", "e", "Cm", "Cl", "Cn", "CY", "solver", "converged"):
+        assert key in m
+    assert m["CL"] > 0.3 and m["solver"] == "vlm" and m["converged"] is True
+    assert m["CDp"] is None and m["drag_basis"].startswith("CDi only")
+    assert p["executive_summary"].startswith("[Ventorum RESULT]")
+    assert "NOT calibrated" in p["trust"]["note"]
+    assert "heuristic_bands_not_calibrated" in p["trust"]
+    assert p["condition_used"]["alpha_deg"] == 5.0
+
+
+def test_wing_analysis_detail_levels():
+    s = wing_analysis(RECT, None, FAST, "summary")
+    assert "geometry" not in s and "spanwise_distributions" not in s
+    st = wing_analysis(RECT, None, FAST, "standard")
+    assert "geometry" in st and "sectional_diagnostics" in st and "spanwise_distributions" not in st
+    f = wing_analysis(RECT, None, FAST, "full")
+    assert f["spanwise_distributions"][0]["gamma_m2_s"]
+    strict_json(f)
+    assert_error(wing_analysis(RECT, None, FAST, "verbose"), "invalid_input", "detail_level")
+
+
+def test_constant_chord_area():
+    p = wing_analysis({"span_m": 10.0, "chord_m": 1.0}, None, FAST, "standard")
+    g = p["geometry"]
+    assert g["S_ref_m2"] == pytest.approx(10.0)
+    assert g["b_ref_m"] == pytest.approx(10.0)
+    assert g["c_ref_m"] == pytest.approx(1.0)
+
+
+def test_tip_twist_sign():
+    base = wing_analysis(RECT, {"alpha_deg": 4.0}, FAST)["metrics"]["CL"]
+    washout = wing_analysis({**RECT, "tip_twist_deg": -3.0}, {"alpha_deg": 4.0}, FAST)["metrics"]["CL"]
+    washin = wing_analysis({**RECT, "tip_twist_deg": 3.0}, {"alpha_deg": 4.0}, FAST)["metrics"]["CL"]
+    assert washout < base < washin
+
+
+def test_altitude_gives_isa_density():
+    p = wing_analysis(RECT, {"altitude_m": 3000.0}, FAST, "summary")
+    assert p["condition_used"]["rho_kg_m3"] == pytest.approx(0.9093, abs=2e-3)
+    assert "ISA" in p["condition_used"]["density_source"]
+
+
+# ── Strict input refusals ────────────────────────────────────────────────────
+
+def test_refuses_unknown_and_ambiguous_keys():
+    p = wing_analysis(RECT, {"alpha": 8.0}, FAST)
+    assert_error(p, "invalid_input", "'alpha'")
+    assert "alpha_deg" in p["error"]["message"]
+    assert_error(wing_analysis({**RECT, "washout": 3.0}, None, FAST), "invalid_input", "tip_twist_deg")
+    assert_error(wing_analysis({"span_m": 10.0, "aspect_ratio": 8.0, "chord_m": 1.0}, None, FAST),
+                 "invalid_input", "aspect_ratio")
+    assert_error(wing_analysis({"span_m": 10.0, "mean_chord": 1.0}, None, FAST), "invalid_input", "mean_chord")
+    assert_error(wing_analysis(RECT, None, {"panels": 10}), "invalid_input", "n_panels")
+    assert_error(wing_analysis({**RECT, "span": 12.0}, None, FAST), "invalid_input", "span_m")
+
+
+@pytest.mark.parametrize("wing, cond, key", [
+    ({"span": 10.0, "chord_m": 1.0}, None, "span"),
+    ({"span_m": 10.0, "chord": 1.0}, None, "chord"),
+    ({"semi_span": 5.0, "chord_m": 1.0}, None, "semi_span"),
+    ({"span_m": 10.0, "root_chord": 1.0, "tip_chord_m": 0.5}, None, "root_chord"),
+    ({"span_m": 10.0, "root_chord_m": 1.0, "tip_chord": 0.5}, None, "tip_chord"),
+    ({**RECT, "sweep_deg": 10.0}, None, "sweep_deg"),
+    (RECT, {"V_inf": 30.0}, "V_inf"),
+    (RECT, {"rho": 1.0}, "rho"),
+])
+def test_refuses_former_aliases(wing, cond, key):
+    """Defect 4: the parsers accept only the schema keys (additionalProperties false)."""
+    p = wing_analysis(wing, cond, FAST, "summary")
+    assert_error(p, "invalid_input", f"unknown key '{key}'")
+    assert "Hint" in p["error"]["message"]
+
+
+def test_refuses_wrong_types():
+    assert_error(wing_analysis(RECT, {"V_inf_m_s": "60 m/s"}, FAST), "invalid_input", "V_inf_m_s")
+    assert_error(wing_analysis({"span_m": "12 m", "chord_m": 1.0}, None, FAST), "invalid_input", "span_m")
+    assert_error(wing_analysis({**RECT, "symmetric": "false"}, None, FAST), "invalid_input", "symmetric")
+    assert_error(wing_analysis(RECT, {"alpha_deg": True}, FAST), "invalid_input", "alpha_deg")
+
+
+def test_refuses_rho_and_altitude_together():
+    assert_error(wing_analysis(RECT, {"rho_kg_m3": 1.0, "altitude_m": 500.0}, FAST), "invalid_input", "altitude_m")
+
+
+def test_refuses_bad_geometry():
+    assert_error(wing_analysis({"span_m": 10.0, "root_chord_m": 1.0}, None, FAST), "invalid_input", "tip_chord_m")
+    assert_error(wing_analysis({"span_m": 10.0, "chord_m": -1.0}, None, FAST), "invalid_input", "chord_m")
+    assert_error(wing_analysis({"span_m": 10.0, "chord_m": 1.0, "root_chord_m": 1.0, "tip_chord_m": 0.5}, None, FAST),
+                 "invalid_input", "exactly one chord")
+    assert_error(wing_analysis(RECT, None, {"n_panels": 2}), "invalid_input", "n_panels")
+    assert_error(wing_analysis({**RECT, "mirror": True}, None, FAST), "invalid_input", "mirror")
+
+
+def test_sections_and_multi_surface_spec():
+    wing = {"semi_span_m": 5.0, "sections": [
+        {"y_frac": 0.0, "chord_m": 1.2},
+        {"y_frac": 0.5, "chord_m": 1.0, "twist_deg": -1.0},
+        {"y_frac": 1.0, "chord_m": 0.6, "twist_deg": -2.0, "airfoil": {"cd0": 0.01}},
+    ]}
+    p = wing_analysis(wing, None, FAST, "standard")
+    assert p["status"] == "success"
+    assert p["geometry"]["surfaces"][0]["n_sections"] == 3
+    ac = {"surfaces": [RECT, {"name": "tail", "span_m": 3.0, "chord_m": 0.5, "position_m": [4.0, 0.0, 0.0]}],
+          "ref_point_m": [0.3, 0.0, 0.0]}
+    p = wing_analysis(ac, None, FAST, "standard")
+    assert p["status"] == "success"
+    assert p["geometry"]["S_ref_m2"] == pytest.approx(10.0)
+    assert p["geometry"]["ref_point_m"] == [0.3, 0.0, 0.0]
+    assert len(p["geometry"]["surfaces"]) == 2
+
+
+# ── Polar sweep ──────────────────────────────────────────────────────────────
+
+def test_polar_sweep():
+    p = polar_sweep({**RECT, "airfoil": {"cd0": 0.01}}, 0.0, 8.0, 2.0, {"V_inf_m_s": 40.0}, FAST, "standard")
+    strict_json(p)
+    assert p["status"] == "success"
+    assert len(p["polar_table"]) == 5
+    s = p["polar_summary"]
+    assert 3.0 < s["CL_alpha_per_rad"] < 6.3
+    assert s["drag_basis"].startswith("CD_total")
+    assert s["max_L_over_D"] > 0
+    assert s["alpha_at_max_L_over_D_deg"] in (0.0, 2.0, 4.0, 6.0, 8.0)
+    assert_error(polar_sweep(RECT, 0.0, 4.0, 2.0, {"alpha_deg": 3.0}, FAST), "invalid_input", "alpha_deg")
+
+
+# ── Ground effect ────────────────────────────────────────────────────────────
+
+def test_ground_effect_strike_rows_and_strict_json():
+    p = ground_effect(RECT, [0.05, 0.3, 0.6, 1.5], alpha_deg=4.0, settings=FAST)
+    strict_json(p)
+    assert p["status"] == "success"
+    rows = {r["h_m"]: r for r in p["rows"]}
+    assert rows[0.05]["status"] == "ground_strike"
+    assert "strike" in rows[0.05]["message"].lower()
+    ok = [r for r in p["rows"] if r["status"] == "ok"]
+    assert len(ok) == 3
+    assert len({r["n_chord"] for r in ok}) == 1
+    assert p["settings_used"]["n_chord"] == ok[0]["n_chord"]
+    assert ok[0]["CL_ratio"] > ok[-1]["CL_ratio"] > 1.0
+    assert ok[0]["induced_drag_factor_ratio"] < 1.0
+    assert ok[0]["phi_strike_limit_deg"] > 0
+    assert p["summary"]["n_ground_strike"] == 1
+    assert len(p["irodov"]["rows"]) == 3
+    assert "irodov_margin" in p["irodov"]["rows"][0]
+    assert "0.05 m (ground_strike)" in p["executive_summary"]
+
+
+def test_ground_effect_all_heights_strike_is_error():
+    p = ground_effect(RECT, [0.01, 0.02], alpha_deg=4.0, settings=FAST)
+    assert_error(p, "ground_strike")
+    assert len(p["rows"]) == 2
+
+
+def test_ground_effect_refuses_lifting_line_near_ground():
+    p = ground_effect(RECT, [0.3], alpha_deg=4.0, settings={"solver": "linear", "n_panels": 8})
+    assert_error(p, "invalid_method")
+
+
+# ── Stability derivatives ────────────────────────────────────────────────────
+
+def test_static_margin_sign():
+    fwd = stability_derivatives(RECT, {"alpha_deg": 4.0}, x_cg_m=0.10, settings=FAST)
+    aft = stability_derivatives(RECT, {"alpha_deg": 4.0}, x_cg_m=0.45, settings=FAST)
+    for p in (fwd, aft):
+        strict_json(p)
+        assert p["status"] == "success"
+    sf, sa = fwd["stability_derivatives"], aft["stability_derivatives"]
+    # Neutral point of a rectangular wing is near the quarter chord.
+    assert 0.2 < sf["neutral_point_x_m"] < 0.3
+    assert sf["static_margin_fraction"] > 0
+    assert fwd["stability_assessment"]["pitch"].startswith("statically stable")
+    assert sa["static_margin_fraction"] < 0
+    assert aft["stability_assessment"]["pitch"].startswith("statically UNSTABLE")
+    assert sa["Cm_alpha_per_rad"] > 0 > sf["Cm_alpha_per_rad"]
+
+
+def test_stability_in_ground_effect_uses_height():
+    free = stability_derivatives(RECT, {"alpha_deg": 4.0}, x_cg_m=0.1, settings=FAST)
+    ige = stability_derivatives(RECT, {"alpha_deg": 4.0, "h_m": 0.5}, x_cg_m=0.1, settings=FAST)
+    assert ige["status"] == "success"
+    assert ige["stability_derivatives"]["CL_alpha_per_rad"] > free["stability_derivatives"]["CL_alpha_per_rad"]
+    assert any("Irodov" in n for n in ige["notes"])
+    assert_error(stability_derivatives(RECT, {"alpha_deg": 4.0, "h_m": 0.01}, settings=FAST), "ground_strike")
+
+
+# ── Batch ────────────────────────────────────────────────────────────────────
+
+def test_batch_reports_failed_candidates():
+    cands = [
+        {"name": "AR6", "span_m": 6.0, "chord_m": 1.0},
+        {"name": "AR10", "span_m": 10.0, "chord_m": 1.0},
+        {"name": "bad", "span_m": 8.0, "chord": "1 m"},
+    ]
+    p = batch_evaluate(cands, {"alpha_deg": 4.0}, "min_CDi", FAST)
+    strict_json(p)
+    assert p["status"] == "success"
+    assert p["n_candidates"] == 3 and p["n_succeeded"] == 2 and p["n_failed"] == 1
+    assert p["failed"][0]["name"] == "bad"
+    assert p["failed"][0]["error"]["type"] == "invalid_input"
+    assert "candidates[2]" in p["failed"][0]["error"]["message"]
+    assert [r["name"] for r in p["rankings"]] == ["AR10", "AR6"]
+    assert "bad" in p["executive_summary"]
+
+
+def test_batch_all_failed_is_error():
+    p = batch_evaluate([{"span_m": 8.0}], None, "max_CL", FAST)
+    assert_error(p, "invalid_input")
+    assert len(p["failed"]) == 1
+
+
+# ── Dispatcher ───────────────────────────────────────────────────────────────
+
+def test_dispatcher_json_string_and_prefix():
+    args = json.dumps({"wing": RECT, "flight_condition": {"alpha_deg": 4.0}, "settings": FAST,
+                       "detail_level": "summary"})
+    p = call_tool("ventorum_wing_analysis", args)
+    assert p["status"] == "success" and p["tool"] == "ventorum_wing_analysis"
+    assert call_tool("wing_analysis", args)["status"] == "success"
+
+
+def test_dispatcher_error_types():
+    assert_error(call_tool("ventorum_wing_analysis", "NOT JSON"), "invalid_input", "JSON")
+    assert_error(call_tool("ventorum_wing_analysis", "[1, 2]"), "invalid_input", "object")
+    p = call_tool("ventorum_nonexistent", {})
+    assert_error(p, "invalid_input", "ventorum_ground_effect")
+    assert_error(call_tool("ventorum_wing_analysis", {"wing": RECT, "alpha_deg": 8}), "invalid_input", "alpha_deg")
+    assert_error(call_tool("ventorum_wing_analysis", {}), "invalid_input", "wing")
+    assert_error(call_tool("ventorum_ground_effect", {"wing": RECT, "heights_m": [0.01], "settings": FAST}),
+                 "ground_strike")
+    assert_error(call_tool("ventorum_ground_effect",
+                           {"wing": RECT, "heights_m": [0.3], "settings": {"solver": "linear"}}), "invalid_method")
+    assert_error(call_tool(None, {}), "invalid_input")
+
+
+# ── MCP request handling ─────────────────────────────────────────────────────
+
+def _rpc(line):
+    out = handle_message(line)
+    return None if out is None else json.loads(out)
+
+
+def test_mcp_parse_error_and_invalid_requests():
+    r = _rpc("{not json")
+    assert r["id"] is None and r["error"]["code"] == -32700
+    r = _rpc("42")
+    assert r["error"]["code"] == -32600
+    r = _rpc(json.dumps({"jsonrpc": "2.0", "id": 1}))
+    assert r["id"] == 1 and r["error"]["code"] == -32600
+    r = _rpc(json.dumps({"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": None}))
+    assert r["id"] == 2 and r["error"]["code"] == -32602
+    r = _rpc(json.dumps({"jsonrpc": "2.0", "id": 3, "method": "no/such"}))
+    assert r["error"]["code"] == -32601
+    r = _rpc(json.dumps({"jsonrpc": "2.0", "id": 4, "method": "tools/call", "params": {"arguments": {}}}))
+    assert r["error"]["code"] == -32602
+    assert _rpc("[]")["error"]["code"] == -32600
+
+
+def test_mcp_notification_gets_no_reply():
+    assert handle_message(json.dumps({"jsonrpc": "2.0", "method": "notifications/initialized"})) is None
+    assert handle_message(json.dumps({"jsonrpc": "2.0", "method": "notifications/initialized",
+                                      "params": None})) is None
+
+
+def test_mcp_initialize_list_and_call():
+    r = _rpc(json.dumps({"jsonrpc": "2.0", "id": "a", "method": "initialize",
+                         "params": {"protocolVersion": "2024-11-05"}}))
+    assert r["result"]["protocolVersion"] == "2024-11-05"
+    r = _rpc(json.dumps({"jsonrpc": "2.0", "id": "b", "method": "tools/list"}))
+    assert len(r["result"]["tools"]) == 8  # with the two machine tools of T-0017
+    call = {"jsonrpc": "2.0", "id": 7, "method": "tools/call",
+            "params": {"name": "ventorum_wing_analysis",
+                       "arguments": {"wing": RECT, "settings": FAST, "detail_level": "summary"}}}
+    r = _rpc(json.dumps(call))
+    assert r["id"] == 7 and r["result"]["isError"] is False
+    assert json.loads(r["result"]["content"][0]["text"])["status"] == "success"
+    call["params"]["arguments"] = {"wing": RECT, "flight_condition": {"aoa": 3}}
+    r = _rpc(json.dumps(call))
+    assert r["result"]["isError"] is True
+
+
+def test_mcp_batch_array_is_invalid_request():
+    """Defect 5: MCP 2025-06-18 has no JSON-RPC batches."""
+    batch = [{"jsonrpc": "2.0", "id": 1, "method": "ping"}]
+    r = _rpc(json.dumps(batch))
+    assert r == {"jsonrpc": "2.0", "id": None,
+                 "error": {"code": -32600, "message": r["error"]["message"]}}
+    assert _rpc(json.dumps([{"jsonrpc": "2.0", "method": "notifications/initialized"}]))["error"]["code"] == -32600
+
+
+def test_mcp_unknown_protocol_version_gives_latest():
+    r = _rpc(json.dumps({"jsonrpc": "2.0", "id": 1, "method": "initialize",
+                         "params": {"protocolVersion": "2099-01-01"}}))
+    assert r["result"]["protocolVersion"] == "2025-06-18"
+    r = _rpc(json.dumps({"jsonrpc": "2.0", "id": 2, "method": "initialize", "params": {}}))
+    assert r["result"]["protocolVersion"] == "2025-06-18"
+
+
+def test_mcp_refuses_nan_and_infinity():
+    for const in ("NaN", "Infinity", "-Infinity"):
+        line = ('{"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": '
+                '"ventorum_wing_analysis", "arguments": {"wing": {"span_m": CONST, "chord_m": 1}}}}'
+                ).replace("CONST", const)
+        r = _rpc(line)
+        assert r["id"] is None and r["error"]["code"] == -32700, r
+    assert _rpc("NaN")["error"]["code"] == -32700
+    assert_error(call_tool("ventorum_wing_analysis", '{"wing": {"span_m": NaN, "chord_m": 1}}'),
+                 "invalid_input", "JSON")
+
+
+def test_mcp_null_id_is_invalid_request():
+    r = _rpc(json.dumps({"jsonrpc": "2.0", "id": None, "method": "ping"}))
+    assert r["id"] is None and r["error"]["code"] == -32600
+
+
+def test_mcp_unknown_tool_is_invalid_params():
+    r = _rpc(json.dumps({"jsonrpc": "2.0", "id": 5, "method": "tools/call",
+                         "params": {"name": "no_such_tool", "arguments": {}}}))
+    assert r["id"] == 5 and r["error"]["code"] == -32602 and "result" not in r
+    # A tool execution error is still a result with isError true.
+    r = _rpc(json.dumps({"jsonrpc": "2.0", "id": 6, "method": "tools/call",
+                         "params": {"name": "ventorum_wing_analysis", "arguments": {"wing": {"span_m": 1}}}}))
+    assert r["result"]["isError"] is True
+    assert r["result"]["content"][0]["type"] == "text"
+
+
+# ── Audit log ────────────────────────────────────────────────────────────────
+
+def test_audit_log_only_with_env_var(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("VENTORUM_AGENT_AUDIT_LOG", raising=False)
+    call_tool("ventorum_wing_analysis", {"wing": RECT, "settings": FAST, "detail_level": "summary"})
+    assert list(tmp_path.iterdir()) == []
+
+    log = tmp_path / "logs" / "audit.jsonl"
+    log.parent.mkdir()
+    monkeypatch.setenv("VENTORUM_AGENT_AUDIT_LOG", str(log))
+    call_tool("ventorum_wing_analysis", {"wing": RECT, "settings": FAST, "detail_level": "summary"})
+    call_tool("ventorum_nonexistent", {})
+    lines = [json.loads(x) for x in log.read_text().splitlines()]
+    assert len(lines) == 2
+    assert lines[0]["status"] == "success" and lines[0]["tool"] == "ventorum_wing_analysis"
+    assert lines[1]["status"] == "error" and lines[1]["error_type"] == "invalid_input"
+
+
+# ── Regression tests of the review defects ───────────────────────────────────
+
+SMALL = {"n_panels": 12, "n_chord": 2}
+FIN = {"semi_span_m": 3.0, "chord_m": 1.0, "symmetric": False, "dihedral_deg": 90.0}
+
+
+def test_zero_lift_gives_null_ld_and_e():
+    """Defect 1 and 8: CL = 0 must not crash; L/D and e are null when they are not defined."""
+    for wing, cond in ((FIN, None), (RECT, {"alpha_deg": 0.0}), (FIN, {"h_m": 1.0})):
+        p = wing_analysis(wing, cond, SMALL, "summary")
+        strict_json(p)
+        assert p["status"] == "success", p
+        assert p["metrics"]["L_over_D"] is None and p["metrics"]["e"] is None
+        assert "L/D=n/a" in p["executive_summary"] and "e=n/a" in p["executive_summary"]
+    p = polar_sweep(FIN, 0.0, 2.0, 2.0, None, SMALL, "standard")
+    assert p["status"] == "success" and p["polar_table"][0]["L_over_D"] is None
+
+
+def test_ground_effect_ld_is_null_at_zero_drag():
+    """Zero drag gives L_over_D = null (NaN) in both library and agent."""
+    p = ground_effect(RECT, [1.0], alpha_deg=0.0, settings=SMALL)
+    strict_json(p)
+    assert p["status"] == "success"
+    assert p["rows"][0]["L_over_D"] is None and p["free_air"]["L_over_D"] is None
+    assert "None" not in p["executive_summary"]
+
+
+def test_mesh_limit_refuses_large_mesh():
+    """Defect 2: a mesh larger than MAX_TOTAL_PANELS is refused before any solve."""
+    from ventorum.agent.schemas import MAX_TOTAL_PANELS
+
+    assert MAX_TOTAL_PANELS == 4000
+    assert str(MAX_TOTAL_PANELS) in SETTINGS_PROPS["n_panels"]["description"]
+    assert str(MAX_TOTAL_PANELS) in SETTINGS_PROPS["n_chord"]["description"]
+    assert_error(wing_analysis(RECT, None, {"n_panels": 400, "n_chord": 64}), "invalid_input", "4000")
+    assert_error(wing_analysis({**RECT, "n_panels": 400}, None, {"n_chord": 8}), "invalid_input", "limit")
+    # Automatic n_chord: even the smallest automatic value (4) is too large.
+    big = {"surfaces": [{**RECT, "n_panels": 400}, {"name": "t", "span_m": 4.0, "chord_m": 0.5,
+                                                     "position_m": [4.0, 0.0, 0.0], "n_panels": 400}]}
+    assert_error(wing_analysis(big, None, None), "invalid_input", "4000")
+    assert_error(ground_effect(RECT, [1.0], settings={"n_panels": 400, "n_chord": 64}), "invalid_input", "4000")
+    assert_error(polar_sweep(RECT, 0.0, 2.0, 1.0, None, {"n_panels": 400, "n_chord": 64}), "invalid_input",
+                 "4000")
+    assert_error(stability_derivatives(RECT, None, settings={"n_panels": 400, "n_chord": 64}),
+                 "invalid_input", "4000")
+    p = batch_evaluate([RECT, {**RECT, "n_panels": 400}], None, "max_CL", {"n_chord": 8, "n_panels": 8})
+    assert p["status"] == "success" and p["n_failed"] == 1
+    assert p["failed"][0]["error"]["type"] == "invalid_input"
+    p = call_tool("ventorum_mesh_convergence", {"wing": RECT, "flight_condition": {"h_m": 0.1},
+                                                 "panel_counts": [8, 12], "ref_n_panels": 400})
+    assert_error(p, "invalid_input", "ref_n_panels")
+
+
+def test_mesh_limit_reduces_automatic_n_chord(monkeypatch):
+    """Defect 2: an automatic n_chord above the limit is reduced (here with a small test limit)."""
+    from ventorum.agent import tools
+
+    monkeypatch.setattr(tools, "MAX_TOTAL_PANELS", 100)  # 24 strips -> at most 4 chordwise panels
+    p = wing_analysis(RECT, {"alpha_deg": 2.0, "h_m": 0.12}, {"n_panels": 12}, "summary")
+    assert p["status"] == "success", p
+    assert p["settings_used"]["n_chord_used"] == 4
+    assert "reduced" in p["settings_used"]["mesh_note"]
+    g = ground_effect(RECT, [0.12, 0.5], alpha_deg=2.0, settings={"n_panels": 12})
+    assert g["status"] == "success", g
+    assert g["settings_used"]["n_chord"] == 4 and "mesh_note" in g["settings_used"]
+    # Free air needs only 4 chordwise panels: no reduction.
+    p = wing_analysis(RECT, None, {"n_panels": 12}, "summary")
+    assert p["settings_used"]["n_chord_used"] == 4 and "mesh_note" not in p["settings_used"]
+
+
+def test_fourier_in_ground_effect_is_invalid_method_in_every_tool():
+    """Defect 3: Fourier solver in ground effect gives invalid_method in every tool."""
+    F = {"solver": "fourier", "n_panels": 8}
+    gc = {"alpha_deg": 4.0, "h_m": 1.0}
+    assert_error(wing_analysis(RECT, gc, F), "invalid_method", "Fourier")
+    assert_error(polar_sweep(RECT, 0.0, 2.0, 1.0, {"h_m": 1.0}, F), "invalid_method", "Fourier")
+    assert_error(ground_effect(RECT, [0.5, 1.0], settings=F), "invalid_method", "Fourier")
+    assert_error(stability_derivatives(RECT, gc, settings=F), "invalid_method", "Fourier")
+    assert_error(batch_evaluate([RECT], gc, "max_CL", F), "invalid_method")
+    assert_error(call_tool("ventorum_mesh_convergence", {"wing": RECT, "flight_condition": gc,
+                                                          "panel_counts": [8, 12], "ref_n_panels": 20,
+                                                          "solver": "fourier"}), "invalid_method", "Fourier")
+
+
+def test_body_wake_in_ground_effect_is_invalid_input():
+    """Defect 3: settings.wake_alignment 'body' is refused in ground effect, as the schema says."""
+    B = {"wake_alignment": "body", "n_panels": 8}
+    gc = {"alpha_deg": 4.0, "h_m": 1.0}
+    assert_error(wing_analysis(RECT, gc, B), "invalid_input", "body")
+    assert_error(polar_sweep(RECT, 0.0, 2.0, 1.0, {"h_m": 1.0}, B), "invalid_input", "body")
+    assert_error(ground_effect(RECT, [1.0], settings=B), "invalid_input", "body")
+    assert_error(stability_derivatives(RECT, gc, settings=B), "invalid_input", "body")
+    assert_error(batch_evaluate([RECT], gc, "max_CL", B), "invalid_input", "body")
+    # In free air the body-axis wake is allowed.
+    assert wing_analysis(RECT, None, B, "summary")["status"] == "success"
+
+
+def test_linalg_error_is_invalid_input():
+    """A singular system is invalid input (owner decision D-07, task T-0009).
+
+    Before T-0009 a LinAlgError was "internal". The decision of the card
+    maps it to "invalid_input", with a message that names the usual cause.
+    """
+    import numpy as np
+
+    from ventorum.agent.response import error_info, error_type_of
+    from ventorum.agent.schemas import InputError
+
+    assert error_type_of(np.linalg.LinAlgError("Singular matrix")) == "invalid_input"
+    assert "singular" in error_info(np.linalg.LinAlgError("Singular matrix"))["message"]
+    assert error_type_of(InputError("x")) == "invalid_input"
+    assert error_type_of(ValueError("x")) == "invalid_input"
+
+
+def test_alpha_step_has_a_minimum():
+    """Defect 3: a tiny alpha step (5e-324) gave OverflowError -> internal."""
+    prop = next(t for t in AGENT_TOOL_DEFINITIONS
+                if t["name"] == "ventorum_polar_sweep")["parameters"]["properties"]["alpha_step_deg"]
+    assert prop["minimum"] == 0.01 and "exclusiveMinimum" not in prop
+    for step in (5e-324, 1e-6, 0.005):
+        assert_error(polar_sweep(RECT, 0.0, 5.0, step, None, FAST), "invalid_input", "alpha_step_deg")
+    p = call_tool("ventorum_polar_sweep", {"wing": RECT, "alpha_start_deg": 0.0, "alpha_end_deg": 0.02,
+                                            "alpha_step_deg": 0.01, "settings": FAST,
+                                            "detail_level": "summary"})
+    assert p["status"] == "success" and p["polar_summary"]["n_points"] == 3
+
+
+def test_ground_effect_irodov_headline_uses_central_difference():
+    """Defect 6: the headline margin is at the lowest height with a central difference, and the
+    reused centre-alpha cases give the same margins as a full 3-alpha sweep."""
+    import numpy as np
+
+    from ventorum.agent.schemas import build_aircraft_from_spec
+    from ventorum.core.datatypes import SolverSettings
+    from ventorum.ground_effect import GroundEffectSweep
+
+    hs = [0.3, 0.6, 1.0, 1.5]
+    p = ground_effect(RECT, hs, alpha_deg=4.0, settings=SMALL, detail_level="summary")
+    strict_json(p)
+    assert p["status"] == "success"
+    ir = p["irodov"]
+    assert [r["height_difference"] for r in ir["rows"]] == ["one-sided", "central", "central", "one-sided"]
+    assert ir["headline_h_m"] == 0.6
+    assert "Irodov margin at h=0.6 m (central height difference)" in p["executive_summary"]
+
+    ref = GroundEffectSweep(build_aircraft_from_spec(RECT), settings=SolverSettings(n_panels=12, n_chord=2))
+    der = ref.run_sweep(hs, [3.0, 4.0, 5.0], [0.0], compute_strike_limit=False).compute_stability_derivatives()
+    got = [r["irodov_margin"] for r in ir["rows"]]
+    assert got == pytest.approx(np.round(der["irodov_margin"][:, 1], 5).tolist(), abs=2e-5)
+
+    two = ground_effect(RECT, [0.5, 1.0], alpha_deg=4.0, settings=SMALL)
+    assert two["status"] == "success" and len(two["irodov"]["rows"]) == 2
+    assert two["irodov"]["headline_h_m"] == 0.5
+    assert any("one-sided" in n for n in two["irodov"]["notes"])
+    assert "one-sided height difference" in two["executive_summary"]
+
+
+def test_ground_effect_bank_strike_limit_not_found_is_null():
+    """Defect 6: no contact up to the 60 deg search limit gives null, not 60."""
+    p = ground_effect(RECT, [1.0, 6.0], alpha_deg=4.0, settings=SMALL)
+    strict_json(p)
+    rows = {r["h_m"]: r for r in p["rows"]}
+    assert rows[1.0]["bank_strike_limit_found"] is True and 0 < rows[1.0]["phi_strike_limit_deg"] < 60
+    assert rows[6.0]["bank_strike_limit_found"] is False and rows[6.0]["phi_strike_limit_deg"] is None
+    assert p["summary"]["bank_strike_limit_found_at_lowest"] is True
+    assert "60" in p["summary"]["bank_strike_note"]
+
+
+def test_gemini_schema_uses_the_openapi_subset():
+    """Defect 7: Gemini declarations use only the documented OpenAPI 3.0 subset."""
+    from ventorum.agent.schemas import GEMINI_SCHEMA_KEYS
+
+    def walk(node):
+        assert set(node) <= set(GEMINI_SCHEMA_KEYS), set(node) - set(GEMINI_SCHEMA_KEYS)
+        for sub in node.get("properties", {}).values():
+            walk(sub)
+        if "items" in node:
+            walk(node["items"])
+
+    for decl in get_tool_schemas("gemini"):
+        walk(decl["parameters"])
+    wa = get_tool_schemas("gemini")[0]["parameters"]["properties"]["wing"]
+    assert wa["type"] == "object" and {"span_m", "surfaces", "S_ref_m2"} <= set(wa["properties"])
+    span = wa["properties"]["span_m"]
+    assert span["minimum"] == 0 and "larger than 0" in span["description"]
+    nw = get_tool_schemas("gemini")[4]["parameters"]["properties"]["n_workers"]
+    assert nw["type"] == "integer" and "'auto'" in nw["description"]
+    # The other formats keep the full JSON schema.
+    assert "anyOf" in json.dumps(get_tool_schemas("mcp"))

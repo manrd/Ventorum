@@ -1,0 +1,73 @@
+# Author: Manuel Alejandro Rodriguez Diaz, PhD
+# Hand-started macOS checks. This workflow never runs on a push. Start it
+# from the Actions tab ("macos-debug", "Run workflow") and select a branch.
+# It follows the trail of the macOS problems (label macos, issue
+# manrd/Ventorum#1, docs/user/performance_limits.md).
+name: macos-debug
+
+on:
+  workflow_dispatch:
+    inputs:
+      full_suite:
+        description: "Also run the full test suite (it can stop with no message on a crash)"
+        type: boolean
+        default: false
+      benchmark:
+        description: "Also run the kernel benchmark (validation/bench_kernels.py)"
+        type: boolean
+        default: true
+
+jobs:
+  macos:
+    runs-on: macos-latest
+    timeout-minutes: 40
+    defaults:
+      run:
+        shell: bash
+    env:
+      MPLBACKEND: Agg
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          # The macOS wheels of PyTorch on PyPI are CPU builds.
+          python -m pip install torch
+          python -m pip install -e ".[dev,docs]"
+      - name: Environment
+        run: |
+          sw_vers
+          sysctl -n machdep.cpu.brand_string hw.ncpu
+          python -c "import sys, numpy, numba, torch; print(sys.version); print('numpy', numpy.__version__, 'numba', numba.__version__, 'torch', torch.__version__)"
+          python -c "from ventorum.aero import vortex_cython as c; print('Cython OpenMP build:', c.openmp_enabled())"
+          otool -L ventorum/aero/vortex_cython*.so
+          echo "Copies of libomp in site-packages:"
+          find "$(python -c 'import site; print(site.getsitepackages()[0])')" -name 'libomp*.dylib' || true
+      - name: OpenMP and PyTorch in one process (subprocess tests, full output)
+        # Each check runs in a subprocess, so a crash gives its error text.
+        continue-on-error: true
+        run: python -m pytest -rA -q tests/test_kernels.py -k "pytorch or openmp"
+      - name: Numba threading layer
+        continue-on-error: true
+        run: |
+          python - <<'PY'
+          import numpy as np
+          import numba
+          import ventorum as vt
+          wing = vt.LiftingSurface(name="W", semi_span=5.0, sections=[
+              vt.WingSection(y_frac=0.0, chord=1.6), vt.WingSection(y_frac=1.0, chord=0.9)])
+          ac = vt.Aircraft(name="W", surfaces=[wing])
+          st = vt.SolverSettings(solver_type="vlm", n_panels=20, n_chord=4)
+          vt.analyze(ac, alpha_deg=4.0, settings=st)
+          print("Numba threading layer:", numba.threading_layer())
+          PY
+      - name: Kernel benchmark
+        if: inputs.benchmark
+        continue-on-error: true
+        run: python validation/bench_kernels.py
+      - name: Full test suite
+        if: inputs.full_suite
+        run: python -m pytest -q

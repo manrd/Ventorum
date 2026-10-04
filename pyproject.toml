@@ -1,0 +1,91 @@
+# Author: Manuel Alejandro Rodriguez Diaz, PhD
+[build-system]
+requires = ["setuptools>=77.0", "Cython>=3.0", "numpy>=1.24"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ventorum"
+version = "0.2.0"
+description = "Vortex-lattice and lifting-line aerodynamics for wings and aircraft in low-speed (incompressible) flow, with flat-ground effect"
+authors = [
+    {name = "Manuel Alejandro Rodriguez Diaz, PhD"}
+]
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+license-files = ["LICENSE.txt"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Physics",
+    "Intended Audience :: Science/Research",
+]
+dependencies = [
+    "numpy>=1.24,<3",
+    "scipy>=1.10,<2",
+    "matplotlib>=3.7,<4",
+    "numba>=0.59,<1",
+    "threadpoolctl>=3.1",
+    "torch>=2.2,<3",
+]
+
+[project.scripts]
+ventorum-tune = "ventorum.hardware.__main__:main"
+
+[project.optional-dependencies]
+tables = ["pandas>=1.5"]
+docs = [
+    "sphinx>=8,<9",
+    "pydata-sphinx-theme>=0.16",
+    "myst-parser>=4",
+]
+dev = [
+    "pytest>=7.0",
+    "pytest-cov>=4.0",
+    "ruff==0.15.20",
+]
+study = ["jax[cpu]>=0.4,<1"]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["ventorum*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-p no:cacheprovider"
+markers = [
+    "gpu: tests that need an NVIDIA CUDA GPU",
+]
+filterwarnings = [
+    "error::DeprecationWarning:ventorum.*",
+    "error::FutureWarning:ventorum.*",
+    "error::SyntaxWarning",
+]
+
+[tool.ruff]
+line-length = 130
+target-version = "py311"
+extend-exclude = []
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "B", "UP", "D"]
+ignore = [
+    "E501",   # long lines are allowed in tables and messages
+    "E741",   # short physics names (l, I) are common
+    "B905",   # zip() without strict= in numeric code
+    "D105",   # magic methods (__repr__, ...) need no docstring
+]
+
+[tool.ruff.lint.pydocstyle]
+convention = "numpy"
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["B011", "D"]
+"examples/*" = ["D"]
+"validation/*" = ["D"]
+"docs/*" = ["D"]
+# Original code kept to study and port its optimisations (see ventorum/legacy/__init__.py).
+"ventorum/legacy/*" = ["ALL"]
+"__init__.py" = ["F401"]

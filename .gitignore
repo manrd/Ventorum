@@ -1,0 +1,69 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# C / Cython extensions & build artifacts
+*.so
+*.pyd
+*.dll
+*.dylib
+*.lib
+*.pdb
+*.exp
+*.obj
+*.o
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# Agent audit log (only written when VENTORUM_AGENT_AUDIT_LOG is set)
+.ventorum_agent_audit.jsonl
+
+# Scratch & temporary workspace files
+scratch/
+*.tmp
+*.log
+*.polar
+*.vsp*
+
+# Testing & Coverage
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+.nox/
+
+# Environments
+.env
+.venv/
+env/
+venv/
+ENV/
+
+# IDE / Editor configuration
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
+.gemini/
+
+# Reference documents, papers & literature (prevent redistributing third-party PDFs)
+*.pdf
+
+
+# Example outputs
+examples/output/
+
+# Documentation build
+docs/_build/
+docs/api/generated/
+docs/agent/tool_reference.md
+
+# Compiled extensions
+*.so
+*.pyd
+ventorum/legacy/aero/cython_kernels.c
+ventorum/aero/vortex_cython.c
+build/

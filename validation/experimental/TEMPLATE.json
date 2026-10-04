@@ -1,0 +1,13 @@
+{
+  "title": "TODO short case name",
+  "source": "TODO full citation: authors, title, report series and number, publisher, year",
+  "report_id": "TODO e.g. NASA TN D-926",
+  "table_or_figure": "TODO e.g. Table II, or Figure 7(a)",
+  "page": "TODO page number(s)",
+  "transcription": "TODO 'table' or 'digitized figure (tool, estimated reading error)'",
+  "configuration": "TODO planform, AR, taper, sweep, dihedral, twist, airfoil, chord, span",
+  "conditions": "TODO Reynolds number, Mach number, transition, ground board or moving belt, mounting",
+  "corrections": "TODO wind-tunnel corrections applied in the source, or 'none stated'",
+  "data_columns": ["alpha_deg", "h_over_c", "CL", "CD", "Cm"],
+  "data": []
+}
