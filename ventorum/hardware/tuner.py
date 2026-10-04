@@ -17,8 +17,9 @@ It measures, for each case size (see :data:`ventorum.hardware.profile.SIZE_CLASS
   model of the CPU and GPU paths per solver family (the rule of the
   ``"auto"`` device).
 
-It also records the GPUs that it finds. The results change only the speed,
-never the results of an analysis.
+It also records the GPUs that it finds. Tuning changes the speed; the device
+choice can change results at the float32 round-off level (about 1e-7 to 1e-6
+relative).
 
 The design (fingerprint, stored profile, safe defaults) follows the original
 Ventorum tuner (ventorum.legacy.hardware).

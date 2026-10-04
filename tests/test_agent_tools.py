@@ -648,3 +648,107 @@ def test_stability_derivatives_ge_one_mesh():
     d = out["stability_derivatives"]
     assert d["CL_alpha_per_rad"] == pytest.approx(cla, abs=2e-5)
     assert d["Cm_alpha_per_rad"] == pytest.approx(cma, abs=2e-5)
+
+
+# ── T-0044: device and precision ─────────────────────────────────────────────
+
+def test_payload_states_device_precision():
+    """Every result states its device (cpu or gpu) and precision (float32 or float64)."""
+    from ventorum.agent import mesh_convergence
+
+    p = wing_analysis(RECT, {"alpha_deg": 4.0}, FAST, "summary")
+    strict_json(p)
+    assert p["status"] == "success"
+    assert p["settings_used"]["device"] in ("cpu", "gpu")
+    assert p["settings_used"]["precision"] in ("float32", "float64")
+    assert p["settings_used"]["device"] in p["executive_summary"]
+    assert p["settings_used"]["precision"] in p["executive_summary"]
+
+    pol = polar_sweep(RECT, 0.0, 4.0, 2.0, None, FAST, "standard")
+    strict_json(pol)
+    assert pol["status"] == "success"
+    assert pol["settings_used"]["device"] in ("cpu", "gpu")
+    assert pol["settings_used"]["precision"] in ("float32", "float64")
+    assert pol["settings_used"]["device"] in pol["executive_summary"]
+    assert pol["settings_used"]["precision"] in pol["executive_summary"]
+    ok_rows = [r for r in pol["polar_table"] if r["status"] == "ok"]
+    assert ok_rows
+    for row in ok_rows:
+        assert row["device"] in ("cpu", "gpu"), row
+        assert row["precision"] in ("float32", "float64"), row
+
+    g = ground_effect(RECT, [0.6, 1.0, 1.5], alpha_deg=4.0, settings=FAST)
+    strict_json(g)
+    assert g["status"] == "success"
+    assert g["settings_used"]["device"] in ("cpu", "gpu")
+    assert g["settings_used"]["precision"] in ("float32", "float64")
+    assert g["settings_used"]["device"] in g["executive_summary"]
+    assert g["settings_used"]["precision"] in g["executive_summary"]
+    ok_g = [r for r in g["rows"] if r["status"] == "ok"]
+    assert ok_g
+    for row in ok_g:
+        assert row["device"] in ("cpu", "gpu"), row
+        assert row["precision"] in ("float32", "float64"), row
+
+    s = stability_derivatives(RECT, {"alpha_deg": 4.0}, x_cg_m=0.1, settings=FAST)
+    strict_json(s)
+    assert s["status"] == "success"
+    assert s["settings_used"]["device"] in ("cpu", "gpu")
+    assert s["settings_used"]["precision"] in ("float32", "float64")
+    assert s["settings_used"]["device"] in s["executive_summary"]
+    assert s["settings_used"]["precision"] in s["executive_summary"]
+
+    b = batch_evaluate([RECT, {"span_m": 6.0, "chord_m": 1.0}], None, "max_CL", FAST)
+    strict_json(b)
+    assert b["status"] == "success"
+    assert b["settings_used"]["device"] in ("cpu", "gpu")
+    assert b["settings_used"]["precision"] in ("float32", "float64")
+    assert b["settings_used"]["device"] in b["executive_summary"]
+    assert b["settings_used"]["precision"] in b["executive_summary"]
+    assert b["rankings"]
+    for row in b["rankings"]:
+        assert row["device"] in ("cpu", "gpu"), row
+        assert row["precision"] in ("float32", "float64"), row
+
+    m = mesh_convergence(
+        {"span_m": 10.0, "root_chord_m": 1.5, "tip_chord_m": 1.0},
+        {"V_inf_m_s": 45.0, "alpha_deg": 4.0},
+        panel_counts=[12, 20],
+        spacing_schemes=["half-cosine"],
+        ref_n_panels=30,
+    )
+    strict_json(m)
+    assert m["status"] == "success"
+    assert m["device"] in ("cpu", "gpu", "mixed")
+    assert m["precision"] in ("float32", "float64", "mixed")
+    assert m["device"] in m["executive_summary"]
+    assert m["precision"] in m["executive_summary"]
+
+
+def test_machine_capabilities_has_no_fingerprint():
+    """The public capabilities send no machine identifier and no fingerprint hash."""
+    from ventorum.agent import call_tool as _call
+
+    p = _call("ventorum_machine_capabilities", {})
+    strict_json(p)
+    assert p["status"] == "success"
+    blob = json.dumps(p)
+    assert "machine_guid" not in blob
+    assert "node_name" not in blob
+    assert "fingerprint" not in blob
+    assert "fingerprint" not in p["hardware"]
+
+
+def test_machine_capabilities_reports_gpu_pipeline():
+    """The capabilities report the GPU pipeline device and precision."""
+    from ventorum import gpu
+    from ventorum.agent import call_tool as _call
+
+    info = gpu.info()
+    p = _call("ventorum_machine_capabilities", {})
+    strict_json(p)
+    assert p["status"] == "success"
+    assert "gpu_pipeline" in p
+    assert p["gpu_pipeline"]["device"] == info["device"]
+    assert p["gpu_pipeline"]["precision"] == info["precision"]
+    assert p["gpu_pipeline"]["available"] == info["available"]

@@ -54,10 +54,11 @@ class HardwareInfo:
     fingerprint: str
 
     def public_dict(self) -> dict[str, Any]:
-        """Return the hardware data without the machine identifier and the computer name."""
+        """Return the hardware data without the machine identifier, the computer name and the fingerprint."""
         d = self.to_dict()
         d.pop("machine_guid", None)
         d.pop("node_name", None)
+        d.pop("fingerprint", None)
         return d
 
     def to_dict(self) -> dict[str, Any]:

@@ -19,7 +19,7 @@ ventorum-tune --quick    # skips the large cases
 ventorum-tune show       # prints the stored profile and says if it matches this machine
 ```
 
-The tuner measures, for small, medium and large cases, the kernel backend for each kernel function (tensor, influence, induced, trefftz), the best thread count for one case, and the best split of the cores for batches. It stores a profile in the user configuration folder (`ventorum-tune path` prints it). The tuner never runs before an ordinary analysis. Ventorum does not depend on it: without a profile, or when the profile belongs to another machine, it uses built-in defaults that work on any machine. The tuning changes only the speed, never the results. The profile also stores `torch_device`, the torch device of the tuning run.
+The tuner measures, for small, medium and large cases, the kernel backend for each kernel function (tensor, influence, induced, trefftz), the best thread count for one case, and the best split of the cores for batches. It stores a profile in the user configuration folder (`ventorum-tune path` prints it). The tuner never runs before an ordinary analysis. Ventorum does not depend on it: without a profile, or when the profile belongs to another machine, it uses built-in defaults that work on any machine. Tuning changes the speed; the device choice can change results at the float32 round-off level (about 1e-7 to 1e-6 relative). The profile also stores `torch_device`, the torch device of the tuning run.
 
 ## Kernel backend choice
 

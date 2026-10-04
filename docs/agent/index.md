@@ -30,8 +30,8 @@ Ventorum has a tool interface for AI agents and automated design loops: Python c
 
 ## Machine capabilities and tuning
 
-- `ventorum_machine_capabilities` (no input): public hardware data (never a machine identifier), available kernel backends, Cython thread mode (`openmp`, `python` or null), torch device (or null), GPU data and tuning profile status (`none`, `valid`, `other machine`, `old schema` or `disabled`), with one sentence of advice.
-- `ventorum_tune_machine` (`quick` and `save`, both boolean, both default true): measures this machine and writes its tuning profile, the same result as `ventorum-tune`. It takes about half a minute with `quick` true and up to two minutes with `quick` false. It changes speed only, never results. This tool is outside the work budget: its duration is stated here instead. A second call while one runs is refused with `invalid_input` ("a tuning run is in progress").
+- `ventorum_machine_capabilities` (no input): public hardware data (never a machine identifier or a fingerprint), available kernel backends, Cython thread mode (`openmp`, `python` or null), torch device (or null), GPU data, GPU pipeline device and precision, and tuning profile status (`none`, `valid`, `other machine`, `old schema` or `disabled`), with one sentence of advice.
+- `ventorum_tune_machine` (`quick` and `save`, both boolean, both default true): measures this machine and writes its tuning profile, the same result as `ventorum-tune`. It takes about half a minute with `quick` true and up to two minutes with `quick` false. Tuning changes the speed; the device choice can change results at the float32 round-off level (about 1e-7 to 1e-6 relative). This tool is outside the work budget: its duration is stated here instead. A second call while one runs is refused with `invalid_input` ("a tuning run is in progress").
 
 ## Example
 

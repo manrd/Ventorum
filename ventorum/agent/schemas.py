@@ -787,8 +787,9 @@ AGENT_TOOL_DEFINITIONS: list[dict[str, Any]] = [
     {
         "name": "ventorum_machine_capabilities",
         "description": "Hardware capabilities of this machine: public hardware data (never a machine "
-                       "identifier), available kernel backends, Cython thread mode, torch device, GPU "
-                       "data and tuning profile status, with one sentence of advice. Takes no input.",
+                       "identifier or a fingerprint), available kernel backends, Cython thread mode, "
+                       "torch device, GPU data, GPU pipeline device and precision, and tuning profile "
+                       "status, with one sentence of advice. Takes no input.",
         "parameters": {
             "type": "object",
             "properties": {},
@@ -799,8 +800,9 @@ AGENT_TOOL_DEFINITIONS: list[dict[str, Any]] = [
         "name": "ventorum_tune_machine",
         "description": "Measure this machine and write its tuning profile (same result as ventorum-tune). "
                        "Takes about half a minute with quick true and up to two minutes with quick false. "
-                       "It changes speed only, never results. This tool is outside the work budget: its "
-                       "duration is stated here instead.",
+                       "Tuning changes the speed; the device choice can change results at the float32 "
+                       "round-off level (about 1e-7 to 1e-6 relative). This tool is outside the work "
+                       "budget: its duration is stated here instead.",
         "parameters": {
             "type": "object",
             "properties": {

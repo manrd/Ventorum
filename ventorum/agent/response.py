@@ -227,19 +227,81 @@ def condition_payload(c: dict[str, Any]) -> dict[str, Any]:
 
 
 def settings_payload(s: Any, res: SolverResult | None = None) -> dict[str, Any]:
-    """Return the solver settings that the tool used."""
+    """Return the solver settings that the tool used.
+
+    The payload states the device (``"cpu"`` or ``"gpu"``) and the
+    precision (``"float32"`` or ``"float64"``) of the result. A CPU
+    solve has no device keys in its details, so it reports ``"cpu"``
+    and ``"float64"``.
+    """
     out = {
         "solver_requested": s.solver_type,
         "n_panels": int(s.n_panels),
         "n_chord": s.n_chord if s.n_chord is not None else "auto",
         "wake_alignment": s.wake_alignment,
     }
+    device, precision = result_device_precision(res)
+    out["device"] = device
+    out["precision"] = precision
     if res is not None:
-        out["solver_used"] = res.solver_type
-        lat = res.details.get("lattice") if isinstance(res.details, dict) else None
+        target = res
+        if not hasattr(target, "details") and hasattr(target, "solver_result"):
+            target = target.solver_result
+        if hasattr(target, "solver_type"):
+            out["solver_used"] = target.solver_type
+        details = target.details if hasattr(target, "details") else None
+        lat = details.get("lattice") if isinstance(details, dict) else None
         if lat is not None and hasattr(lat, "n_chord"):
             out["n_chord_used"] = int(lat.n_chord)
     return out
+
+
+def result_device_precision(res: Any | None) -> tuple[str, str]:
+    """Return the (device, precision) of a solver result.
+
+    A GPU solve stores ``"gpu"`` and ``"float32"`` or ``"float64"`` in
+    its details. A CPU solve stores no keys, so it reports ``"cpu"``
+    and ``"float64"``. A ground-effect result reports the device of its
+    solver result.
+    """
+    try:
+        target = res
+        if target is not None and not hasattr(target, "details") and hasattr(target, "solver_result"):
+            target = target.solver_result
+        details = target.details if target is not None and hasattr(target, "details") else None
+        if isinstance(details, dict):
+            device = details.get("device", "cpu")
+            precision = details.get("precision", "float64")
+            if device not in ("cpu", "gpu"):
+                device = "cpu"
+            if precision not in ("float32", "float64"):
+                precision = "float64"
+            return str(device), str(precision)
+    except Exception:  # noqa: BLE001 - a bad details object reports the CPU default
+        pass
+    return "cpu", "float64"
+
+
+def computation_device_precision(results: Any) -> tuple[str, str]:
+    """Return the common (device, precision) of solver results, or mixed.
+
+    *results* is one result or a list of results. When all results share
+    the same device and precision, return them. When they differ, return
+    ``"mixed"`` for the value that differs.
+    """
+    items = list(results) if isinstance(results, (list, tuple)) else [results]
+    devices = {result_device_precision(r)[0] for r in items}
+    precisions = {result_device_precision(r)[1] for r in items}
+    device = next(iter(devices)) if len(devices) == 1 else "mixed"
+    precision = next(iter(precisions)) if len(precisions) == 1 else "mixed"
+    return device, precision
+
+
+def device_summary_text(device: str, precision: str) -> str:
+    """Return the sentence that states the device and precision of a result."""
+    if device == "mixed" or precision == "mixed":
+        return f"Computed on mixed devices in mixed precision (device {device}, precision {precision})."
+    return f"Computed on {device} in {precision}."
 
 
 def moments_in_axes(
