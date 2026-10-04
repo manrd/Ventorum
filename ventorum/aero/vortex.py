@@ -33,10 +33,12 @@ References
 * J. Katz and A. Plotkin, "Low-Speed Aerodynamics", 2nd ed., Cambridge University
   Press, 2001: the Biot-Savart law of a straight vortex segment and of a
   semi-infinite vortex, and the horseshoe vortex.
-* L. Rosenhead, "The formation of vortices from a surface of discontinuity",
-  Proceedings of the Royal Society of London A 134 (1931) 170-192: a
+* L. Rosenhead, "The spread of vorticity in the wake behind a cylinder",
+  Proceedings of the Royal Society of London A 127 (1930) 590-612: a
   positive term in the denominator of the Biot-Savart law removes the
-  singularity on the filament. The core term of Ventorum is a
+  singularity on the filament. R. Krasny, "Desingularization of periodic
+  vortex sheet roll-up", Journal of Computational Physics 65 (1986)
+  292-313, uses the same idea for vortex sheets. The core term of Ventorum is a
   regularisation of this kind; its form above and the size of the
   cross-surface core (half the strip width, from a core-size study) are
   choices of Ventorum, verified against the exact law in the tests.

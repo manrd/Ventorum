@@ -664,7 +664,7 @@ AGENT_TOOL_DEFINITIONS: list[dict[str, Any]] = [
         "description": "Ground effect at a list of heights compared with free air, with the same "
                        "chordwise mesh for all cases. Reports ground strikes per height, the bank angle "
                        "for a wingtip strike and, with 2 or more valid heights, the Irodov height-pitch "
-                       "stability margin. Each row carries trust_score, trust_rating, warnings and "
+                       "stability margin (valid when ref_point_m is the centre of gravity). Each row carries trust_score, trust_rating, warnings and "
                        "converged; the summary gives the lowest rating. Two heights closer than "
                        "1e-6 * c_ref are refused. Fourier solver and wake_alignment 'body' are not allowed.",
         "parameters": {

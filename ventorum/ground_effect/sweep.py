@@ -13,13 +13,21 @@ reference point, in metres)::
     x_alpha = -c * (dCm/dalpha) / (dCL/dalpha)   (pitch aerodynamic centre)
     x_h     = -c * (dCm/dh)     / (dCL/dh)       (height aerodynamic centre)
 
-Longitudinal static stability needs the height centre ahead of the pitch
-centre, with the centre of gravity between them::
+Longitudinal static stability at constant speed needs the height centre
+upstream of (ahead of) the pitch centre::
 
-    x_h < x_cg < x_alpha,   so   irodov_margin = (x_alpha - x_h) / c > 0.
+    x_h < x_alpha,   so   irodov_margin = (x_alpha - x_h) / c > 0.
 
-(M. Irodov, 1970; see also K. V. Rozhdestvensky, "Wing-in-ground effect
-vehicles", Progress in Aerospace Sciences 42, 2006, pp. 211-283.)
+The criterion applies to the derivatives about the centre of gravity: the
+pitch derivative is a rotation about the moment reference point, and the
+margin changes when that point moves. Give the centre of gravity as the
+moment reference point.
+
+(R. D. Irodov, "Criteria of longitudinal stability of ekranoplan", Uchenye
+Zapiski TsAGI 1(4), 1970, pp. 63-74, in Russian; English machine
+translation, Foreign Technology Division, 1974, DTIC AD-A002918. See also
+K. V. Rozhdestvensky, "Wing-in-ground effect vehicles", Progress in
+Aerospace Sciences 42, 2006, pp. 211-283.)
 
 Both derivatives are about the moment reference point, with the height of
 that point held fixed, whatever ``height_ref`` the sweep uses: the margin of
@@ -189,9 +197,11 @@ class GroundEffectSweepResult:
             * ``x_alpha``, ``x_h``: local pitch and height aerodynamic
               centres [m], shape (n_h, n_alpha).
             * ``irodov_margin``: (x_alpha - x_h)/c. It must be > 0 for
-              static stability in ground effect. Both centres are about
-              the moment reference point (``pivot_point_m``) with its
-              height held fixed, for every ``height_ref``.
+              static stability in ground effect (Irodov criterion). Both
+              centres are about the moment reference point
+              (``pivot_point_m``) with its height held fixed, for every
+              ``height_ref``. The criterion applies only when that point is
+              the centre of gravity.
             * ``Cl_phi``, ``Cn_phi``, ``CY_phi`` [1/rad] vs height (bank fit
               over abs(phi) <= 5 deg at the alpha nearest 4 deg). A
               bank-restoring moment has Cl_phi < 0.
@@ -205,7 +215,8 @@ class GroundEffectSweepResult:
         out["note"] = ("Pitch and height derivatives are about the moment reference point, with the height "
                        "of that point held fixed (also when height_ref is not 'ref'). Height derivatives "
                        "are at constant alpha. End points of the height grid use one-sided (first-order) "
-                       "differences.")
+                       "differences. The Irodov criterion applies when the moment reference point is the "
+                       "centre of gravity.")
         p0 = int(np.argmin(np.abs(self.phis_deg)))
         a_rad = np.radians(self.alphas_deg)
 

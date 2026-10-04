@@ -676,7 +676,9 @@ def _irodov(ac, ok, alpha, phi, beta, V, rho, rp, href, fixed, c_ref, dl, sweep_
     notes = [
         "x_alpha and x_h are the pitch and height aerodynamic centres in metres aft of the moment "
         f"reference point (the pivot, {[rnd(v, 5) for v in rp]} m). irodov_margin = (x_alpha - x_h)/c_ref; "
-        "height-pitch static stability needs a margin > 0 (x_h ahead of x_alpha).",
+        "height-pitch static stability needs a margin > 0 (x_h ahead of x_alpha; R. D. Irodov 1970). "
+        "The criterion applies when the moment reference point is the centre of gravity: give the "
+        "centre of gravity as ref_point_m.",
         f"Pitch derivatives: alpha {alpha - 1:g}, {alpha:g}, {alpha + 1:g} deg at constant height of the "
         f"moment reference point. Height derivatives: constant alpha. The margin of one flight state does "
         f"not depend on height_ref. {der.get('note', '')}",

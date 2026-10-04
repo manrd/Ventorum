@@ -275,12 +275,13 @@ def plot_pitch_stability(
     axs[1].grid(True)
 
     # 3. Irodov margin (x_alpha - x_h)/c: must be positive for static stability
+    #    (valid when the moment reference point is the centre of gravity)
     if "irodov_margin" in derivs:
         axs[2].plot(h_over_c, derivs["irodov_margin"][:, a_mid], "d-", color="#2ca02c", linewidth=2.0)
         axs[2].axhline(0.0, color="black", linestyle="--", linewidth=0.8)
         axs[2].set_xlabel("$h / c$ (Height / Mean Chord)")
         axs[2].set_ylabel("$(x_\\alpha - x_h) / c$")
-        axs[2].set_title("Irodov Margin (stable if > 0)")
+        axs[2].set_title("Irodov Margin about the reference point (stable if > 0)")
         axs[2].grid(True)
 
     if save_path:

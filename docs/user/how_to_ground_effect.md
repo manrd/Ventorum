@@ -27,7 +27,7 @@ out = sweep.run_sweep(heights=[0.4, 0.6, 1.0], alphas_deg=[2.0, 4.0, 6.0], phis_
 deriv = out.compute_stability_derivatives()
 ```
 
-`run_sweep` accepts `V_inf`, `rho`, `ref_point`, `height_ref`, `compute_strike_limit` and `progress`. `compute_stability_derivatives()` gives the pitch and height aerodynamic centres and the Irodov margin `(x_alpha - x_h)/c` (stable if larger than 0). Plot helpers (`plot_height_sweep`, `plot_roll_effect`, `plot_pitch_stability`, `plot_ground_effect_matrix`) draw the grids.
+`run_sweep` accepts `V_inf`, `rho`, `ref_point`, `height_ref`, `compute_strike_limit` and `progress`. `compute_stability_derivatives()` gives the pitch and height aerodynamic centres and the Irodov margin `(x_alpha - x_h)/c` (stable if larger than 0; R. D. Irodov 1970). The criterion applies when the moment reference point is the centre of gravity: give it as `ref_point`. Plot helpers (`plot_height_sweep`, `plot_roll_effect`, `plot_pitch_stability`, `plot_ground_effect_matrix`) draw the grids.
 
 ## Background
 
