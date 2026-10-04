@@ -19,7 +19,9 @@ import numpy as np
 
 import ventorum as vt
 from ventorum.agent.response import (
+    computation_device_precision,
     condition_payload,
+    device_summary_text,
     drag_and_ld,
     error_info,
     error_payload,
@@ -29,6 +31,7 @@ from ventorum.agent.response import (
     metrics_payload,
     moments_all_sets,
     moments_in_axes,
+    result_device_precision,
     rnd,
     sectional_payload,
     settings_payload,
@@ -303,12 +306,14 @@ def wing_analysis(
     trust = trust_payload(res.totals.trust)
     rp = ac.moment_reference()
     where = "free air" if c["h_m"] is None else f"h={c['h_m']:g} m above the ground"
+    device, precision = result_device_precision(res)
     summary = (
         f"[Ventorum RESULT] {ac.name}: CL={fmt(m['CL'], '.4f')}, CDi={fmt(m['CDi'], '.5f')}, "
         f"CD={fmt(m['CD'], '.5f')} ({m['drag_basis']}), L/D={fmt(m['L_over_D'], '.2f')}, "
         f"e={fmt(m['e'], '.3f')}, Cm={fmt(m['Cm'], '.4f')} about {_fmt_point(rp)} m. "
         f"Condition: alpha={c['alpha_deg']:g} deg, beta={c['beta_deg']:g} deg, V={c['V_inf_m_s']:g} m/s, "
-        f"{where}. Solver: {res.solver_type}, converged={bool(res.converged)}."
+        f"{where}. Solver: {res.solver_type}, converged={bool(res.converged)}. "
+        f"{device_summary_text(device, precision)}"
     )
     if res.totals.trust is not None:
         t = res.totals.trust
@@ -481,11 +486,12 @@ def polar_sweep(
         m = metrics_payload(res)
         _, cm_ax, _ = _apply_axes(res.totals.Cl, res.totals.Cm, res.totals.Cn, a, c["beta_deg"],
                                   ax)
+        device, precision = result_device_precision(res)
         row: dict[str, Any] = {
             "alpha_deg": a, "CL": m["CL"], "CDi": m["CDi"], "CD": m["CD"],
             "L_over_D": m["L_over_D"], "Cm": cm_ax, "e": m["e"], "converged": m["converged"],
             "trust_score": rnd(res.totals.trust.score, 3) if res.totals.trust else None,
-            "status": "ok"}
+            "status": "ok", "device": device, "precision": precision}
         if in_ground:
             row["n_chord"] = _used_n_chord(res)
         if ax == "all":
@@ -542,14 +548,19 @@ def polar_sweep(
                     f"({len(ok)} of {n} angles valid): {slope_txt}, {ld_txt}.")
     if len(ok) < n:
         exec_summary += f" {n - len(ok)} angle(s) failed; see polar_table."
+    device_all, precision_all = computation_device_precision([r for _, r in ok])
+    exec_summary += f" {device_summary_text(device_all, precision_all)}"
 
     note_sett = capped[0] if capped else None
+    settings_used = {**settings_payload(sett, ok[0][1]), **_mesh_note(bool(capped), note_sett)}
+    settings_used["device"] = device_all
+    settings_used["precision"] = precision_all
     out: dict[str, Any] = {
         "status": "success",
         "executive_summary": exec_summary,
         "polar_summary": summary,
         "condition_used": {k: v for k, v in condition_payload(c).items() if k != "alpha_deg"},
-        "settings_used": {**settings_payload(sett, ok[0][1]), **_mesh_note(bool(capped), note_sett)},
+        "settings_used": settings_used,
         "axes": ax,
     }
     if dl == "summary":
@@ -766,6 +777,7 @@ def ground_effect(
         lim_found = lim is not None and lim < MAX_BANK_DEG
         cl_ax, cm_ax, cn_ax = _apply_axes(
             res.Cl_body, res.Cm_body, res.Cn_body, alpha, beta, ax)
+        device, precision = result_device_precision(res)
         row.update(
             status="ok",
             h_min_m=rnd(res.h_min, 5),
@@ -779,6 +791,8 @@ def ground_effect(
             phi_strike_limit_deg=rnd(lim, 3) if lim_found else None,
             bank_strike_limit_found=bool(lim_found),
             n_chord=int(res.n_chord),
+            device=device,
+            precision=precision,
         )
         if ax == "all":
             row["moments"] = moments_all_sets(
@@ -831,6 +845,12 @@ def ground_effect(
                            "heights_meaning": f"heights_m are metres above the ground of the '{href}' point."},
         "settings_used": {**settings_payload(fixed), "n_chord": int(fixed.n_chord), **_mesh_note(capped, fixed)},
     }
+    device_all, precision_all = computation_device_precision([r for _, r in ok] + ([free] if free is not None else []))
+    out["settings_used"]["device"] = device_all
+    out["settings_used"]["precision"] = precision_all
+    free_device, free_precision = result_device_precision(free)
+    out["free_air"]["device"] = free_device
+    out["free_air"]["precision"] = free_precision
 
     # Irodov height-pitch criterion.
     irodov_txt = ""
@@ -851,12 +871,14 @@ def ground_effect(
         f"h={h_low:g} m (h/c={h_low / c_ref:.3f}, '{href}' point) CL is "
         f"{fmt(cr, '.3f')} x free air and the induced-drag factor is "
         f"{fmt(kr, '.3f')} x free air. {len(ok)} of {len(heights)} heights valid; "
-        f"same chordwise mesh (n_chord={fixed.n_chord}) for all cases.{fail_txt}{irodov_txt}"
+        f"same chordwise mesh (n_chord={fixed.n_chord}) for all cases.{fail_txt}{irodov_txt} "
+        f"{device_summary_text(device_all, precision_all)}"
     )
 
     if dl == "summary":
         out["rows"] = [{k: r.get(k) for k in ("h_m", "status", "CL_ratio", "induced_drag_factor_ratio",
-                                              "phi_strike_limit_deg", "bank_strike_limit_found", "message")
+                                              "phi_strike_limit_deg", "bank_strike_limit_found", "message",
+                                              "device", "precision")
                         if k in r} for r in rows]
         out["irodov"].pop("derivative_grids", None)
     else:
@@ -1011,11 +1033,13 @@ def stability_derivatives(
     sm_txt = f"{sm * 100:+.1f} %" if sm is not None else "n/a"
     xnp_txt = f"{x_np:.4f} m" if x_np is not None else "n/a"
     h_txt = "" if c["h_m"] is None else f", h={c['h_m']:g} m"
+    device_all, precision_all = computation_device_precision(list(res.values()))
     exec_summary = (
         f"[Ventorum RESULT] Stability of {ac.name} at alpha={a:g} deg, beta={b:g} deg{h_txt}: "
         f"CL_alpha={CL_a:.3f}/rad, Cm_alpha={Cm_a_sel:.4f}/rad about x_cg={x_cg:.4f} m, neutral point "
         f"{xnp_txt}, static margin {sm_txt} of c_ref. Pitch: {pitch.split(':')[0]}. "
-        f"Roll (Cl_beta): {roll.split(' (')[0]}. Yaw (Cn_beta): {yaw.split(' (')[0]}."
+        f"Roll (Cl_beta): {roll.split(' (')[0]}. Yaw (Cn_beta): {yaw.split(' (')[0]}. "
+        f"{device_summary_text(device_all, precision_all)}"
     )
     _, base_cm, _ = _apply_axes(t["base"].Cl, t["base"].Cm, t["base"].Cn, a, b, ax)
     base_point: dict[str, Any] = {
@@ -1023,6 +1047,9 @@ def stability_derivatives(
     if ax == "all":
         base_point["moments"] = moments_all_sets(
             t["base"].Cl, t["base"].Cm, t["base"].Cn, a, b)
+    settings_used = {**settings_payload(sett, res["base"]), **_mesh_note(bool(capped))}
+    settings_used["device"] = device_all
+    settings_used["precision"] = precision_all
     out: dict[str, Any] = {
         "status": "success",
         "executive_summary": exec_summary,
@@ -1031,7 +1058,7 @@ def stability_derivatives(
         "base_point": base_point,
         "notes": notes,
         "condition_used": condition_payload(c),
-        "settings_used": {**settings_payload(sett, res["base"]), **_mesh_note(bool(capped))},
+        "settings_used": settings_used,
         "trust": trust_payload(t["base"].trust),
         "axes": ax,
     }
@@ -1046,8 +1073,10 @@ def stability_derivatives(
         for k, v in t.items():
             aa, bb = cases[k]
             cl_p, cm_p, cn_p = _apply_axes(v.Cl, v.Cm, v.Cn, aa, bb, ax)
+            device_k, precision_k = result_device_precision(res[k])
             case: dict[str, Any] = {"alpha_deg": aa, "beta_deg": bb, "CL": rnd(v.CL),
-                                    "Cm": cm_p, "Cl": cl_p, "Cn": cn_p, "CY": rnd(v.CY)}
+                                    "Cm": cm_p, "Cl": cl_p, "Cn": cn_p, "CY": rnd(v.CY),
+                                    "device": device_k, "precision": precision_k}
             if ax == "all":
                 case["moments"] = moments_all_sets(v.Cl, v.Cm, v.Cn, aa, bb)
             out["perturbed_cases"][k] = case
@@ -1120,6 +1149,7 @@ def batch_evaluate(
         outputs = run_cases(run, built, max((estimate_panels(b[2], sett) or 0) for b in built) or None, workers)
 
     ranked: list[dict[str, Any]] = []
+    ok_results: list[Any] = []
     for i, name, ac, res, err, s_used in outputs:
         if res is None:
             failed.append({"index": i, "name": name, "error": error_info(err)})
@@ -1128,6 +1158,7 @@ def batch_evaluate(
         cd, basis, ld = drag_and_ld(tot)
         S, b = float(ac.S_ref), float(ac.b_ref)
         _, cm_ax, _ = _apply_axes(tot.Cl, tot.Cm, tot.Cn, c["alpha_deg"], c["beta_deg"], ax)
+        device, precision = result_device_precision(res)
         row: dict[str, Any] = {
             "index": i, "name": name,
             "CL": rnd(tot.CL), "CDi": rnd(tot.CDi, 7), "CD": rnd(cd, 7), "drag_basis": basis,
@@ -1137,7 +1168,9 @@ def batch_evaluate(
             "trust_score": rnd(tot.trust.score, 3) if tot.trust else None,
             "trust_rating": tot.trust.rating if tot.trust else None,
             "warnings": list(tot.trust.warnings) if tot.trust else [],
+            "device": device, "precision": precision,
         }
+        ok_results.append(res)
         used_chord = _used_n_chord(res)
         if used_chord is None and s_used is not None and s_used.n_chord is not None:
             used_chord = int(s_used.n_chord)
@@ -1172,11 +1205,16 @@ def batch_evaluate(
     if obj == "max_L_over_D" and all(row["drag_basis"].startswith("CDi only") for row in ranked):
         notes.append("L/D uses induced drag only (no airfoil cd0). The ranking favours low CL and high span.")
     best = ranked[0]
+    device_all, precision_all = computation_device_precision(ok_results)
     summary = (f"[Ventorum RESULT] Batch of {len(candidates)} candidates ({len(ranked)} valid, "
                f"{len(failed)} failed), objective {obj}: best is '{best['name']}' with L/D={best['L_over_D']}, "
-               f"CL={best['CL']}, CDi={best['CDi']}.")
+               f"CL={best['CL']}, CDi={best['CDi']}. "
+               f"{device_summary_text(device_all, precision_all)}")
     if failed:
         summary += " Failed: " + ", ".join(f"'{f['name']}' ({f['error']['type']})" for f in failed) + "."
+    settings_used = settings_payload(sett)
+    settings_used["device"] = device_all
+    settings_used["precision"] = precision_all
     return {
         "status": "success",
         "executive_summary": summary,
@@ -1188,7 +1226,7 @@ def batch_evaluate(
         "failed": failed,
         "notes": notes,
         "condition_used": condition_payload(c),
-        "settings_used": settings_payload(sett),
+        "settings_used": settings_used,
         "axes": ax,
     }
 
@@ -1308,6 +1346,10 @@ def mesh_convergence(
     from ventorum.geometry.mesh_convergence import smallest_reached_error_pct
 
     smallest_err = smallest_reached_error_pct(study.points, metric, do_sweep)
+    study_results = [p.result for p in study.points if p.result is not None]
+    if study.reference_result is not None:
+        study_results.append(study.reference_result)
+    device_all, precision_all = computation_device_precision(study_results) if study_results else ("cpu", "float64")
     if study.converged:
         executive_summary = (
             f"[Ventorum RESULT] Mesh convergence of {ac.name} (tolerance {tol:g} % on {metric}, reference "
@@ -1315,7 +1357,8 @@ def mesh_convergence(
             f"(spanwise setting {mn.n_panels} {mn.spacing}); recommended N="
             f"{rec.panels_solved} panels solved (spanwise setting {rec.n_panels} {rec.spacing}) "
             f"(CL error {rec.error_cl_pct:.3f} %, CDi error "
-            f"{rec.error_cdi_pct:.3f} %). Errors are relative to the reference mesh, not to experiment."
+            f"{rec.error_cdi_pct:.3f} %). Errors are relative to the reference mesh, not to experiment. "
+            f"{device_summary_text(device_all, precision_all)}"
         )
     else:
         executive_summary = (
@@ -1324,7 +1367,8 @@ def mesh_convergence(
             f"Finest evaluated mesh N={rec.panels_solved} panels solved "
             f"(spanwise setting {rec.n_panels} {rec.spacing}) "
             f"(CL error {rec.error_cl_pct:.3f} %, CDi error "
-            f"{rec.error_cdi_pct:.3f} %). Errors are relative to the reference mesh, not to experiment."
+            f"{rec.error_cdi_pct:.3f} %). Errors are relative to the reference mesh, not to experiment. "
+            f"{device_summary_text(device_all, precision_all)}"
         )
     out: dict[str, Any] = {
         "status": "success",
@@ -1341,6 +1385,8 @@ def mesh_convergence(
         },
         "generalization": study.generalization.to_dict(),
         "condition_used": condition_payload(c),
+        "device": device_all,
+        "precision": precision_all,
     }
     if dl in ("standard", "full"):
         out["summary_markdown"] = study.summary(as_markdown=True)
@@ -1383,16 +1429,17 @@ def _profile_status(hw_fingerprint: str) -> tuple[dict[str, Any], str]:
 def machine_capabilities() -> dict[str, Any]:
     """Hardware capabilities, kernel backends and tuning profile status.
 
-    Takes no input. The hardware data never contains a machine identifier.
-    The profile status is ``"none"``, ``"valid"``, ``"other machine"``,
-    ``"old schema"`` or ``"disabled"``.
+    Takes no input. The hardware data never contains a machine identifier
+    or a fingerprint hash. The profile status is ``"none"``,
+    ``"valid"``, ``"other machine"``, ``"old schema"`` or ``"disabled"``.
+    The GPU pipeline device and precision come from ``ventorum.gpu.info()``.
 
     Returns
     -------
     dict
         Payload with ``"status"``, ``"executive_summary"``, ``"hardware"``,
         ``"kernel_backends"``, ``"cython_threads"``, ``"torch_device"``,
-        ``"gpu"``, ``"profile"`` and ``"advice"``.
+        ``"gpu"``, ``"gpu_pipeline"``, ``"profile"`` and ``"advice"``.
     """
     from ventorum.hardware import detector as _det
     from ventorum.hardware import tuner as _tuner
@@ -1410,13 +1457,17 @@ def machine_capabilities() -> dict[str, Any]:
         "compute_capability": (list(hw.cuda_compute_capability)
                                if hw.cuda_compute_capability else None),
     }
+    from ventorum import gpu as _gpu
+
+    gpu_pipeline = _gpu.info()
     profile, advice = _profile_status(hw.fingerprint)
     gpu_txt = hw.gpu_name if hw.gpu_available else "no GPU"
     summary = (
         f"[Ventorum RESULT] Machine: {hw.system} {hw.machine}, {hw.logical_cores} threads "
         f"({hw.physical_cores} cores), {hw.total_ram_gb:g} GB RAM, GPU: {gpu_txt}. "
         f"Kernel backends: {', '.join(backends)}. Cython threads: {cython_threads}. "
-        f"Torch device: {torch_device}. Profile: {profile['status']}. {advice}"
+        f"Torch device: {torch_device}. GPU pipeline: device {gpu_pipeline['device']}, "
+        f"precision {gpu_pipeline['precision']}. Profile: {profile['status']}. {advice}"
     )
     return {
         "status": "success",
@@ -1426,6 +1477,7 @@ def machine_capabilities() -> dict[str, Any]:
         "cython_threads": cython_threads,
         "torch_device": torch_device,
         "gpu": gpu,
+        "gpu_pipeline": gpu_pipeline,
         "profile": profile,
         "advice": advice,
     }
@@ -1437,8 +1489,9 @@ def tune_machine(quick: bool = True, save: bool = True) -> dict[str, Any]:
 
     A second call while one runs is refused with ``"invalid_input"``. This
     tool is outside the work budget: it takes about half a minute with
-    *quick* true and up to two minutes with *quick* false. It changes speed
-    only, never results.
+    *quick* true and up to two minutes with *quick* false. Tuning changes
+    the speed; the device choice can change results at the float32
+    round-off level (about 1e-7 to 1e-6 relative).
 
     Parameters
     ----------
@@ -1473,7 +1526,8 @@ def tune_machine(quick: bool = True, save: bool = True) -> dict[str, Any]:
         "executive_summary": (
             f"[Ventorum RESULT] Tuned this machine in {fmt(seconds, '.1f')} s "
             f"(quick={q}, saved={s}): kernel backends per size class for "
-            f"{', '.join(sorted(kernels))}. Tuning changes speed only, never results."
+            f"{', '.join(sorted(kernels))}. Tuning changes the speed; the device choice can "
+            "change results at the float32 round-off level (about 1e-7 to 1e-6 relative)."
         ),
         "kernels": kernels,
         "single": settings.get("single", {}),

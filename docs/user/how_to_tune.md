@@ -28,7 +28,7 @@ A profile with an older schema is ignored; run `ventorum-tune` again. A profile 
 
 ## Effect on results
 
-Tuning changes only the speed, never the results. All backends agree with the numpy reference to round-off. Check the active profile with `ventorum-tune show`. Disable it for one run with `VENTORUM_DISABLE_AUTOTUNE=1`.
+Tuning changes the speed; the device choice can change results at the float32 round-off level (about 1e-7 to 1e-6 relative). All backends agree with the numpy reference to round-off. Check the active profile with `ventorum-tune show`. Disable it for one run with `VENTORUM_DISABLE_AUTOTUNE=1`.
 
 ## Background
 
