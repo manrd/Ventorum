@@ -1,7 +1,10 @@
 # Author: Manuel Alejandro Rodriguez Diaz, PhD
 """Vortex-lattice single-solve and sweep pipelines (T-0039).
 
-Every check compares bits (``numpy.array_equal``), never with a tolerance:
+Every check compares bits (``numpy.array_equal``), never with a tolerance,
+except the torch backend in ground effect, which is not reproducible to the
+bit from one run to the next (also before T-0039): there each angle of the
+sweep is compared with a relative tolerance of 1e-12:
 
 * A vortex-lattice sweep out of ground effect gives each angle the result of
   the kernel-cache path that existed before (``solve_lattice`` on a lattice
@@ -11,9 +14,6 @@ Every check compares bits (``numpy.array_equal``), never with a tolerance:
 * ``solve_vlm_batch`` equals ``solve_vlm`` per case.
 * ``alpha_sweep`` and the agent polar tool give the results of the paths
   they replace.
-
-The torch backend is not reproducible to the bit in ground effect from one
-run to the next (also before T-0039), so it is left out of the ground cases.
 """
 
 from __future__ import annotations
@@ -62,6 +62,33 @@ def _assert_same_result(r, s):
             assert _same(getattr(sw_r, name), getattr(sw_s, name)), name
 
 
+def _assert_close_result(r, s, rtol=1e-12, atol=1e-14):
+    """Compare two results with a relative tolerance (torch in ground effect).
+
+    The torch backend is not reproducible to the bit from one run to the
+    next, so its sweep angles are compared with a tolerance instead of
+    with ``numpy.array_equal``.
+    """
+    for name in TOTALS:
+        a, b = getattr(r.totals, name), getattr(s.totals, name)
+        if a is None or b is None:
+            assert a is None and b is None, name
+        else:
+            np.testing.assert_allclose(a, b, rtol=rtol, atol=atol, err_msg=name)
+    assert r.totals.trust.score == s.totals.trust.score
+    np.testing.assert_allclose(r.details["gamma"], s.details["gamma"], rtol=rtol, atol=atol,
+                               err_msg="gamma")
+    assert r.converged == s.converged
+    assert r.symmetry_used == s.symmetry_used
+    for sw_r, sw_s in zip(r.spanwise, s.spanwise):
+        for name in ("gamma", "Cl", "Cd_i", "alpha_eff", "alpha_i", "local_lift", "Cm_section", "Cd_profile"):
+            a, b = getattr(sw_r, name), getattr(sw_s, name)
+            if a is None or b is None:
+                assert a is None and b is None, name
+            else:
+                np.testing.assert_allclose(a, b, rtol=rtol, atol=atol, err_msg=name)
+
+
 def _wing(**kw):
     af = vt.LinearAirfoil(Cd0=0.008, Cm0=-0.03)
     return vt.LiftingSurface(name="wing", semi_span=5.0, n_panels=8, sections=[
@@ -89,8 +116,8 @@ CASES = {
 def test_vlm_sweep_angles_equal_reference(backend, case, n_chord):
     """Each angle of solve_sweep equals the kernel-cache solve (free air) or the single solve (ground)."""
     make_aircraft, kw = CASES[case]
-    if backend == "torch" and "h" in kw:
-        pytest.skip("torch is not reproducible to the bit in ground effect")
+    in_ground = "h" in kw
+    close = backend == "torch" and in_ground
     V.set_kernel_backend(backend)
     solver = make_solver("vlm")
     st = vt.SolverSettings(solver_type="vlm", n_chord=n_chord, spacing="cosine")
@@ -103,7 +130,7 @@ def test_vlm_sweep_angles_equal_reference(backend, case, n_chord):
         cache_lattice = None
         for a, r in zip(ALPHAS, sweep):
             cond = vt.FlightCondition(V_inf=30.0, alpha=float(a), **kw)
-            if "h" in kw:
+            if in_ground:
                 ref = solver.solve(ac, cond, st)
             else:
                 if cache_lattice is None:
@@ -111,7 +138,10 @@ def test_vlm_sweep_angles_equal_reference(backend, case, n_chord):
                     cache_lattice.kernel_cache = {}
                 ref = solver.solve_lattice(cache_lattice, cond, st, ac.S_ref, ac.b_ref, ac.c_ref,
                                            ref_point=rp, main_surface=ac.main_surface_index())
-            _assert_same_result(r, ref)
+            if close:
+                _assert_close_result(r, ref)
+            else:
+                _assert_same_result(r, ref)
 
 
 def _vlm_case(ac, cond):

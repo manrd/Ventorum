@@ -352,6 +352,20 @@ def case_signs() -> str:
     llt_body = {d: clb(d, "body", "linear") for d in dihedrals}
     rows = [[f"{d:+g}", f"{body[d]:+.5f}", f"{body[d] - body[0.0]:+.5f}", f"{free[d]:+.5f}", f"{llt_body[d]:+.5f}"]
             for d in dihedrals]
+
+    def fin_beta_derivs():
+        wing = vt.LiftingSurface(semi_span=5.0, sections=[vt.WingSection(0, 1.0), vt.WingSection(1, 1.0)])
+        fin = vt.LiftingSurface(name="fin", semi_span=1.2, dihedral=np.radians(90.0), is_symmetric=False,
+                                position=np.array([5.0, 0.0, 0.2]),
+                                sections=[vt.WingSection(0, 1.0), vt.WingSection(1, 0.6)])
+        ac = vt.Aircraft(surfaces=[wing, fin])
+        sett = vt.SolverSettings(solver_type="vlm", n_panels=20, wake_alignment="body")
+        t = [vt.analyze(ac, condition=vt.FlightCondition(alpha=np.radians(4), beta=np.radians(b)),
+                         settings=sett).totals for b in (-1, 1)]
+        db = np.radians(2)
+        return (t[1].CY - t[0].CY) / db, (t[1].Cn - t[0].Cn) / db
+
+    cyb_fin, cnb_fin = fin_beta_derivs()
     s = ["## V9. Sign conventions", "",
          "Rolling moment due to sideslip of a rectangular wing (AR 10, alpha 4 deg). Standard convention: "
          "positive dihedral gives Cl_beta < 0. The dihedral term (Cl_beta minus the value of the flat "
@@ -361,7 +375,12 @@ def case_signs() -> str:
          "only), so with the body-axis wake its flat-wing value is zero. With the free-stream wake the "
          "wake skew adds a further term.", "",
          table(["dihedral [deg]", "VLM, body-axis wake [1/rad]", "VLM dihedral term [1/rad]",
-                "VLM, free-stream wake [1/rad]", "lifting line, body-axis wake [1/rad]"], rows), ""]
+                "VLM, free-stream wake [1/rad]", "lifting line, body-axis wake [1/rad]"], rows), "",
+         "Fin case: the same rectangular wing with an aft fin (vertical surface of semi-span 1.2 m, "
+         "root chord 1.0 m, tip chord 0.6 m, at x = 5.0 m, z = 0.2 m), alpha 4 deg, VLM with the "
+         "body-axis wake, 20 panels. The fin gives a side force away from the wind (CY_beta < 0) and "
+         "weathercock stability (Cn_beta > 0).", "",
+         table(["CY_beta [1/rad]", "Cn_beta [1/rad]"], [[f"{cyb_fin:+.5f}", f"{cnb_fin:+.5f}"]]), ""]
     return "\n".join(s)
 
 
