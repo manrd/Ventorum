@@ -31,7 +31,7 @@ Solver limits
 from __future__ import annotations
 
 import time
-from typing import Literal
+from typing import Any, Literal
 from collections.abc import Sequence
 
 import numpy as np
@@ -323,6 +323,39 @@ def analyze_ground_effect(
         Fourier solver is used (it has no ground effect).
     """
     t0 = time.perf_counter()
+    case = prepare_ground_case(geometry, h, alpha_deg, phi_deg, beta_deg, V_inf=V_inf, rho=rho,
+                               ref_point=ref_point, height_ref=height_ref, solver=solver, settings=settings,
+                               n_panels=n_panels, spacing=spacing)
+    sol = make_solver(case["canonical"])
+    res = sol.solve(case["aircraft"], case["condition"], case["settings"], ground=case["ground"],
+                    ref_point=case["ref_point"])
+    return ground_case_result(case, res, compute_strike_limit, t0)
+
+
+def prepare_ground_case(
+    geometry: Aircraft | LiftingSurface,
+    h: float,
+    alpha_deg: float = 4.0,
+    phi_deg: float = 0.0,
+    beta_deg: float = 0.0,
+    *,
+    V_inf: float = 50.0,
+    rho: float = RHO_SL,
+    ref_point: np.ndarray | Sequence[float] | None = None,
+    height_ref: Literal["ref", "min", "qc", "te"] = "ref",
+    solver: str | None = None,
+    settings: SolverSettings | None = None,
+    n_panels: int = 80,
+    spacing: str = "auto",
+    probe: VortexLattice | None = None,
+) -> dict[str, Any]:
+    """Check one case of :func:`analyze_ground_effect` and place its ground; return the case data.
+
+    The arguments are those of :func:`analyze_ground_effect`; *probe* is
+    the lattice with one chordwise panel that places the ground, when the
+    caller has it (a sweep builds it once). The checks and the errors are
+    those of :func:`analyze_ground_effect`.
+    """
     h = check_height(h)
     for name, val in (("alpha_deg", alpha_deg), ("phi_deg", phi_deg), ("beta_deg", beta_deg)):
         if not np.isfinite(val):
@@ -331,7 +364,7 @@ def analyze_ground_effect(
     aircraft = _as_aircraft(geometry)
     validate_aircraft(aircraft)
     aircraft.compute_reference_values()
-    S_ref, b_ref, c_ref = aircraft.S_ref, aircraft.b_ref, aircraft.c_ref
+    c_ref = aircraft.c_ref
 
     if settings is None:
         sett = SolverSettings(solver_type=solver or "auto", n_panels=n_panels, spacing=spacing)
@@ -345,7 +378,11 @@ def analyze_ground_effect(
 
     alpha, beta, phi = np.radians(alpha_deg), np.radians(beta_deg), np.radians(phi_deg)
     rp = aircraft.moment_reference() if ref_point is None else np.asarray(ref_point, dtype=float)
-    gp, probe = place_ground(aircraft, sett, h, alpha, beta, phi, rp, height_ref)
+    if probe is None:
+        gp, probe = place_ground(aircraft, sett, h, alpha, beta, phi, rp, height_ref)
+    else:
+        p, mode = plane_reference(aircraft, rp, height_ref)
+        gp = make_ground_plane(probe, h, alpha, beta, phi, ref_point=p, height_ref=mode)
     clear = clearance_info(probe, gp, rp, reference_surface_indices(aircraft))
     if clear["h_min"] <= 0.0:
         raise GroundStrikeError(
@@ -358,10 +395,22 @@ def analyze_ground_effect(
             f"Lifting-line solver '{canonical}' is not valid in ground effect below "
             f"h_min/c = {LLT_GE_MIN_H_OVER_C} (here {h_min_over_c:.3f}). Use solver='vlm'."
         )
+    return {
+        "h": h, "alpha_deg": alpha_deg, "phi_deg": phi_deg, "beta_deg": beta_deg, "V_inf": V_inf, "rho": rho,
+        "height_ref": height_ref, "aircraft": aircraft, "settings": sett, "canonical": canonical,
+        "condition": FlightCondition(V_inf=V_inf, alpha=alpha, beta=beta, rho=rho, phi=phi),
+        "ground": gp, "ref_point": rp, "clear": clear, "h_min_over_c": h_min_over_c,
+    }
 
-    condition = FlightCondition(V_inf=V_inf, alpha=alpha, beta=beta, rho=rho, phi=phi)
-    sol = make_solver(canonical)
-    res = sol.solve(aircraft, condition, sett, ground=gp, ref_point=rp)
+
+def ground_case_result(case: dict[str, Any], res, compute_strike_limit: bool, t0: float) -> GroundEffectResult:
+    """Return the :class:`GroundEffectResult` of a case of :func:`prepare_ground_case` and its solver result."""
+    aircraft, sett, gp, rp = case["aircraft"], case["settings"], case["ground"], case["ref_point"]
+    h, alpha_deg, phi_deg, beta_deg = case["h"], case["alpha_deg"], case["phi_deg"], case["beta_deg"]
+    V_inf, rho, height_ref, condition = case["V_inf"], case["rho"], case["height_ref"], case["condition"]
+    clear, h_min_over_c = case["clear"], case["h_min_over_c"]
+    S_ref, b_ref, c_ref = aircraft.S_ref, aircraft.b_ref, aircraft.c_ref
+    alpha = condition.alpha
     tot = res.totals
     lattice: VortexLattice = res.details["lattice"]
 

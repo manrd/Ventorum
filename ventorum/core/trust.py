@@ -62,6 +62,68 @@ def _count_extrema(g: np.ndarray, rel_tol: float = 1e-6) -> int:
     return int(np.count_nonzero(s[1:] != s[:-1]))
 
 
+def _count_extrema_rows(G: np.ndarray, rel_tol: float = 1e-6) -> np.ndarray:
+    """Return :func:`_count_extrema` of each row of *G* (shape (K, m)), with the same rules."""
+    G = np.asarray(G, dtype=float)
+    K, m = G.shape
+    if m < 4:
+        return np.zeros(K, dtype=int)
+    d = G[:, 1:] - G[:, :-1]
+    scale = np.maximum(np.abs(G).max(axis=1), 1e-300)
+    keep = np.abs(d) > rel_tol * scale[:, None]
+    s = np.sign(d)
+    # The sign of the last kept step before each step (forward fill).
+    idx = np.where(keep, np.arange(m - 1)[None, :], -1)
+    last = np.maximum.accumulate(idx, axis=1)
+    prev = np.concatenate([np.full((K, 1), -1), last[:, :-1]], axis=1)
+    prev_sign = np.take_along_axis(s, np.maximum(prev, 0), axis=1)
+    change = keep & (prev >= 0) & (s != prev_sign)
+    return change.sum(axis=1).astype(int)
+
+
+def spanwise_stats_batch(surface_strips: Sequence, arrays: dict[str, np.ndarray]) -> list[dict | None]:
+    """Return the spanwise statistics of the trust score for K cases at once.
+
+    Parameters
+    ----------
+    surface_strips : sequence of slices or index arrays
+        The strips of each surface (the split of the spanwise results).
+    arrays : dict of (K, n_strips) arrays
+        ``gamma``, ``Cl``, ``Cd_i``, ``alpha_eff``, ``alpha_i``,
+        ``local_lift`` and, if present, ``Cd_profile`` and ``Cm_section``
+        (a value of None means "absent" for all cases).
+
+    Returns
+    -------
+    list of dict or None
+        For each case the values that :func:`evaluate_aerodynamic_trust`
+        computes from the spanwise results (``max_local_cl``,
+        ``max_alpha_eff_deg``, ``n_extrema``), or None when an array of the
+        case is not finite (the caller then passes the spanwise results, so
+        that the warning names the array).
+    """
+    names = [n for n in ("gamma", "Cl", "Cd_i", "alpha_eff", "alpha_i", "local_lift", "Cd_profile", "Cm_section")
+             if arrays.get(n) is not None]
+    K = arrays["gamma"].shape[0]
+    finite = np.ones(K, dtype=bool)
+    for n in names:
+        finite &= np.isfinite(arrays[n]).all(axis=1)
+    cl = np.abs(arrays["Cl"])
+    ae = np.abs(arrays["alpha_eff"])
+    max_cl = np.zeros(K)
+    max_ae = np.zeros(K)
+    n_ext = np.zeros(K, dtype=int)
+    for sl in surface_strips:
+        g = arrays["gamma"][:, sl]
+        if g.shape[1] == 0:
+            continue
+        max_cl = np.maximum(max_cl, cl[:, sl].max(axis=1))
+        max_ae = np.maximum(max_ae, np.degrees(ae[:, sl].max(axis=1)))
+        n_ext = np.maximum(n_ext, _count_extrema_rows(g))
+    return [{"max_local_cl": float(max_cl[k]), "max_alpha_eff_deg": float(max_ae[k]), "n_extrema": int(n_ext[k])}
+            if finite[k] else None for k in range(K)]
+
+
 def evaluate_aerodynamic_trust(
     AR: float,
     surfaces: Sequence[DiscretizedSurface | LiftingSurface] | None = None,
@@ -79,6 +141,7 @@ def evaluate_aerodynamic_trust(
     n_chord: int | None = None,
     notes: Sequence[str] | None = None,
     max_chord_over_c: float = 1.0,
+    spanwise_stats: dict | None = None,
 ) -> TrustScore:
     """Evaluate the validity of a solution.
 
@@ -112,6 +175,11 @@ def evaluate_aerodynamic_trust(
     max_chord_over_c : float
         Largest strip chord divided by the reference chord (for the
         chordwise panel check in ground effect).
+    spanwise_stats : dict or None
+        The statistics of the spanwise results from
+        :func:`spanwise_stats_batch` (all arrays finite). A batch computes
+        them for all its cases at once; the result is the same as from
+        *spanwise_list*.
 
     A result with a non-finite coefficient never keeps a trust level above
     LOW: it gets the penalty ``non_finite_result`` and the warning
@@ -124,7 +192,7 @@ def evaluate_aerodynamic_trust(
     for label, value in (("CL", CL), ("CDi", CDi), ("CD_total", CD_total)):
         if value is not None and not _is_finite(value):
             bad_totals.append(f"{label}={value}")
-    for sw in spanwise_list or ():
+    for sw in (spanwise_list or ()) if spanwise_stats is None else ():
         arrays = [
             ("gamma", sw.gamma), ("Cl", sw.Cl), ("Cd_i", sw.Cd_i),
             ("alpha_eff", sw.alpha_eff), ("alpha_i", sw.alpha_i),
@@ -208,7 +276,10 @@ def evaluate_aerodynamic_trust(
     stall_pen = 0.0
     max_local_cl = 0.0
     max_alpha_eff_deg = 0.0
-    if spanwise_list:
+    if spanwise_stats is not None:
+        max_local_cl = spanwise_stats["max_local_cl"]
+        max_alpha_eff_deg = spanwise_stats["max_alpha_eff_deg"]
+    elif spanwise_list:
         for sw in spanwise_list:
             if len(sw.Cl) > 0:
                 max_local_cl = max(max_local_cl, float(np.abs(sw.Cl).max()))
@@ -284,8 +355,11 @@ def evaluate_aerodynamic_trust(
     if n_panels < 8:
         num_pen += 0.15 * ((8 - n_panels) / 4.0)
         warnings.append(f"Coarse spanwise mesh (n_panels={n_panels} < 8).")
-    if spanwise_list:
-        n_extrema = max((_count_extrema(sw.gamma) for sw in spanwise_list), default=0)
+    if spanwise_list or spanwise_stats is not None:
+        if spanwise_stats is not None:
+            n_extrema = spanwise_stats["n_extrema"]
+        else:
+            n_extrema = max((_count_extrema(sw.gamma) for sw in spanwise_list), default=0)
         if n_extrema > 6:
             num_pen += 0.40
             warnings.append(

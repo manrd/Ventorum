@@ -11,7 +11,13 @@ import pytest
 
 import ventorum as vt
 from ventorum.core.datatypes import FlightCondition, LiftingSurface, WingSection
-from ventorum.core.trust import TrustScore, evaluate_aerodynamic_trust
+from ventorum.core.trust import (
+    TrustScore,
+    _count_extrema,
+    _count_extrema_rows,
+    evaluate_aerodynamic_trust,
+    spanwise_stats_batch,
+)
 
 
 def test_trust_score_high_aspect_ratio_straight_wing():
@@ -186,3 +192,35 @@ def test_trust_evaluation_is_cheap():
         )
     elapsed_ms = (time.perf_counter() - t0) * 1000.0 / n_runs
     assert elapsed_ms < 5.0, f"Trust evaluation too slow: {elapsed_ms:.4f} ms per call"
+
+
+def test_extrema_count_of_rows_equals_the_count_per_row():
+    rng = np.random.default_rng(3)
+    for _ in range(300):
+        m = int(rng.integers(1, 25))
+        G = rng.normal(size=(4, m)).cumsum(axis=1)
+        if rng.random() < 0.5:
+            G = np.round(G, 1)
+        assert np.array_equal(_count_extrema_rows(G), [_count_extrema(g) for g in G])
+
+
+def test_batch_trust_statistics_give_the_same_trust_score():
+    wing = LiftingSurface(name="wing", semi_span=5.0, sweep_le=np.radians(2.0),
+                          sections=[WingSection(y_frac=0.0, chord=1.25), WingSection(y_frac=1.0, chord=0.9)])
+    tail = LiftingSurface(name="tail", semi_span=1.5, position=np.array([3.5, 0.0, 0.5]),
+                          sections=[WingSection(y_frac=0.0, chord=0.6), WingSection(y_frac=1.0, chord=0.4)])
+    ac = vt.Aircraft(surfaces=[wing, tail])
+    st = vt.SolverSettings(solver_type="vlm", n_panels=12, n_chord=2)
+    res = vt.HorseshoeSolver().solve_sweep(ac, FlightCondition(V_inf=25.0), st, np.radians([-2.0, 4.0, 14.0]))
+    lat = res[0].details["lattice"]
+    arrays = {}
+    for name in ("gamma", "Cl", "Cd_i", "alpha_eff", "alpha_i", "local_lift", "Cm_section"):
+        arrays[name] = np.array([np.concatenate([getattr(sw, name) for sw in r.spanwise]) for r in res])
+    stats = spanwise_stats_batch([surf.strips for surf in lat.surfaces], arrays)
+    for r, s in zip(res, stats):
+        t = r.totals
+        kw = dict(AR=t.AR, condition=r.condition, CL=t.CL, CDi=t.CDi, CD_total=t.CD_total, n_panels=12,
+                  solver_type="vlm", n_chord=2)
+        a = evaluate_aerodynamic_trust(spanwise_list=r.spanwise, **kw)
+        b = evaluate_aerodynamic_trust(spanwise_stats=s, **kw)
+        assert a.to_dict() == b.to_dict()

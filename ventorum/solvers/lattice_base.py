@@ -310,11 +310,15 @@ class LatticeSolver(BaseSolver):
         main_surface: int,
         t0: float,
         execution_time: float | None = None,
+        spanwise_stats: dict | None = None,
     ) -> SolverResult:
         """Return the result object of one case: trust score, details and warnings.
 
         *execution_time* [s] replaces the time since *t0* when given (a
-        batch gives each case its share of the batch time).
+        batch gives each case its share of the batch time). *spanwise_stats*
+        are the statistics of the spanwise results for the trust score, if
+        the caller computed them for a batch
+        (:func:`ventorum.core.trust.spanwise_stats_batch`).
         """
         sweep_deg = self._cached(lattice, "quarter_chord_sweep_deg", lambda: quarter_chord_sweep_deg(lattice))
         if self.collocation == "llt" and sweep_deg > LLT_SWEEP_WARNING_DEG:
@@ -345,6 +349,7 @@ class LatticeSolver(BaseSolver):
             notes=notes,
             max_chord_over_c=(float(self._cached(lattice, "max_chord", lambda: np.max(lattice.chord)) / c_ref)
                               if c_ref else 1.0),
+            spanwise_stats=spanwise_stats,
         )
         res = SolverResult(
             spanwise=loads.spanwise,
@@ -481,6 +486,7 @@ class LatticeSolver(BaseSolver):
         ref_point: np.ndarray | None = None,
         main_surface: int = 0,
         continuation: bool = True,
+        grounds: list[GroundPlane | None] | None = None,
     ) -> list[SolverResult]:
         """Solve several flight conditions on one lattice that is already built.
 
@@ -490,7 +496,9 @@ class LatticeSolver(BaseSolver):
         Each case gets the same result as :meth:`solve_lattice` for that
         case; with *continuation*, a case starts from the converged
         circulation of the case before it (used by the nonlinear solver).
-        The ground plane of each case comes from ``condition.h``.
+        The ground plane of each case comes from ``condition.h``, or from
+        *grounds* (one plane or None per case, the explicit ground of
+        :meth:`solve`) when it is given.
 
         Returns
         -------
@@ -501,8 +509,9 @@ class LatticeSolver(BaseSolver):
         t0 = time.perf_counter()
         if not conditions:
             return []
+        explicit = [None] * len(conditions) if grounds is None else list(grounds)
         with solve_threads(lattice.n_panels, batch=len(conditions)):
-            setups = [self._case_setup(lattice, c, settings, c_ref, None, ref_point) for c in conditions]
+            setups = [self._case_setup(lattice, c, settings, c_ref, g, ref_point) for c, g in zip(conditions, explicit)]
             grounds = [st[0] for st in setups]
             wds = np.array([st[3] for st in setups], dtype=float).reshape(len(conditions), 3)
             sols = self.solve_circulation_batch(lattice, conditions, settings, grounds, wds, continuation)

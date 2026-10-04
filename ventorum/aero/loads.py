@@ -479,50 +479,95 @@ def compute_loads_batch(
         CD_total = CDi + (CDp if CDp is not None else 0.0)
         M = M_geo[k]
         e = CL ** 2 / (np.pi * AR * CDi) if CDi > 1e-12 else float("nan")
-        totals = IntegratedResult(
-            CL=CL,
-            CDi=CDi,
-            CDp=CDp,
-            CD_total=CD_total if hp else None,
-            e=e,
-            AR=AR,
-            Cl=-float(M[0]) / (qS * b_ref),
-            Cm=float(M[1]) / (qS * c_ref),
-            Cn=-float(M[2]) / (qS * b_ref),
-            CY=CY,
-            CDi_nearfield=CDi_near,
-        )
-        sg, Clk, aek = strip_gamma[k], Cl[k], alpha_eff[k]
+        sg = strip_gamma[k]
         rVk = float(rho[k]) * float(V[k])
-        spanwise: list[SpanwiseResult] = []
-        for surf in lattice.surfaces:
-            sl = surf.strips
-            spanwise.append(SpanwiseResult(
-                y=lattice.qc_mid[sl, 1].copy(),
-                gamma=sg[sl].copy(),
-                Cl=Clk[sl].copy(),
-                Cd_i=Cd_i[k, sl].copy(),
-                Cd_profile=Cd_p[k, sl].copy() if hp else None,
-                alpha_eff=aek[sl].copy(),
-                alpha_i=alpha_i[k, sl].copy(),
-                local_lift=rVk * sg[sl],
-                surface_name=surf.name,
-                chord=chord[sl].copy(),
-                Cm_section=Cm_s[k, sl].copy(),
-            ))
-        out.append(LoadsResult(
-            totals=totals,
-            spanwise=spanwise,
-            strip_gamma=sg,
-            strip_force=F_strip[k],
-            alpha_eff=aek,
-            extras={
-                "trefftz_normalwash": w_n[k],
-                "force_total_body": F_total,
-                "moment_total_geometry_axes": M,
-            },
+        out.append(loads_result(
+            lattice, CL=CL, CDi=CDi, CDp=CDp, CD_total=CD_total if hp else None, e=e, AR=AR,
+            Cl=-float(M[0]) / (qS * b_ref), Cm=float(M[1]) / (qS * c_ref), Cn=-float(M[2]) / (qS * b_ref),
+            CY=CY, CDi_nearfield=CDi_near, strip_gamma=sg, Cl_strip=Cl[k], Cd_i=Cd_i[k],
+            Cd_profile=Cd_p[k] if hp else None, alpha_eff=alpha_eff[k], alpha_i=alpha_i[k],
+            local_lift_factor=rVk, Cm_section=Cm_s[k], strip_force=F_strip[k], trefftz_normalwash=w_n[k],
+            force_total=F_total, moment_total=M,
         ))
     return out
+
+
+def loads_result(
+    lattice: VortexLattice,
+    *,
+    CL: float,
+    CDi: float,
+    CDp: float | None,
+    CD_total: float | None,
+    e: float,
+    AR: float,
+    Cl: float,
+    Cm: float,
+    Cn: float,
+    CY: float,
+    CDi_nearfield: float,
+    strip_gamma: np.ndarray,
+    Cl_strip: np.ndarray,
+    Cd_i: np.ndarray,
+    Cd_profile: np.ndarray | None,
+    alpha_eff: np.ndarray,
+    alpha_i: np.ndarray,
+    local_lift_factor: float,
+    Cm_section: np.ndarray,
+    strip_force: np.ndarray,
+    trefftz_normalwash: np.ndarray,
+    force_total: np.ndarray,
+    moment_total: np.ndarray,
+) -> LoadsResult:
+    """Return the :class:`LoadsResult` of one case from its integrated values and its strip arrays.
+
+    The CPU loads (:func:`compute_loads_batch`) and the GPU pipelines
+    (:mod:`ventorum.gpu`) make their result objects here. The strip arrays
+    (shape (n_strips,)) are split per surface; ``local_lift_factor`` is
+    ``rho * V_inf`` [kg/(m^2 s)], so the local lift is ``rho V Gamma`` [N/m].
+    """
+    totals = IntegratedResult(
+        CL=CL,
+        CDi=CDi,
+        CDp=CDp,
+        CD_total=CD_total,
+        e=e,
+        AR=AR,
+        Cl=Cl,
+        Cm=Cm,
+        Cn=Cn,
+        CY=CY,
+        CDi_nearfield=CDi_nearfield,
+    )
+    chord = lattice.chord
+    spanwise: list[SpanwiseResult] = []
+    for surf in lattice.surfaces:
+        sl = surf.strips
+        spanwise.append(SpanwiseResult(
+            y=lattice.qc_mid[sl, 1].copy(),
+            gamma=strip_gamma[sl].copy(),
+            Cl=Cl_strip[sl].copy(),
+            Cd_i=Cd_i[sl].copy(),
+            Cd_profile=Cd_profile[sl].copy() if Cd_profile is not None else None,
+            alpha_eff=alpha_eff[sl].copy(),
+            alpha_i=alpha_i[sl].copy(),
+            local_lift=local_lift_factor * strip_gamma[sl],
+            surface_name=surf.name,
+            chord=chord[sl].copy(),
+            Cm_section=Cm_section[sl].copy(),
+        ))
+    return LoadsResult(
+        totals=totals,
+        spanwise=spanwise,
+        strip_gamma=strip_gamma,
+        strip_force=strip_force,
+        alpha_eff=alpha_eff,
+        extras={
+            "trefftz_normalwash": trefftz_normalwash,
+            "force_total_body": force_total,
+            "moment_total_geometry_axes": moment_total,
+        },
+    )
 
 
 def _load_points(lattice: VortexLattice, eval_panels: np.ndarray, points: list[np.ndarray]) -> tuple:
