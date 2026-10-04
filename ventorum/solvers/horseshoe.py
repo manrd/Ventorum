@@ -32,7 +32,7 @@ import numpy as np
 from ventorum.aero.system import GroundPlane
 from ventorum.core.datatypes import FlightCondition, SolverSettings
 from ventorum.geometry.lattice import VortexLattice
-from ventorum.solvers.core import SolveInfo, solve_vlm
+from ventorum.solvers.core import SolveInfo, solve_vlm, solve_vlm_batch
 from ventorum.solvers.lattice_base import LatticeSolver
 
 
@@ -62,7 +62,7 @@ class HorseshoeSolver(LatticeSolver):
         info : SolveInfo
             Convergence information.
         """
-        if lattice.has_tabulated:
+        if _has_tabulated(lattice):
             warnings.warn(
                 "The VLM uses the linear part of the tabulated polars (lift slope and zero-lift "
                 "angle from a fit). Stall is not modelled; for the start of stall on an unswept wing use solver='nonlinear'.",
@@ -72,6 +72,43 @@ class HorseshoeSolver(LatticeSolver):
         gamma, info = solve_vlm(lattice, condition, ground,
                                 use_symmetry=getattr(settings, "use_symmetry", True), wake_dir=wake_dir)
         return gamma, None, info
+
+    def solve_circulation_batch(
+        self,
+        lattice: VortexLattice,
+        conditions: list[FlightCondition],
+        settings: SolverSettings,
+        grounds: list[GroundPlane | None],
+        wake_dirs: np.ndarray,
+        continuation: bool = True,
+    ) -> list[tuple[np.ndarray, None, SolveInfo]]:
+        """Solve all cases together: the systems one by one, the dense solves in one call.
+
+        Each case gets the same circulation, to the last bit, as
+        :meth:`solve_circulation`. *continuation* has no effect (the system
+        is linear).
+        """
+        if _has_tabulated(lattice):
+            warnings.warn(
+                "The VLM uses the linear part of the tabulated polars (lift slope and zero-lift "
+                "angle from a fit). Stall is not modelled; for the start of stall on an unswept wing use solver='nonlinear'.",
+                RuntimeWarning,
+                stacklevel=4,
+            )
+        sols = solve_vlm_batch(lattice, conditions, grounds,
+                               getattr(settings, "use_symmetry", True), wake_dirs)
+        if sols is None:
+            return super().solve_circulation_batch(lattice, conditions, settings, grounds, wake_dirs, False)
+        return [(g, None, info) for g, info in sols]
+
+
+def _has_tabulated(lattice: VortexLattice) -> bool:
+    """Return ``lattice.has_tabulated``, cached on the lattice (the test walks every strip)."""
+    value = lattice.geom_cache.get("has_tabulated")
+    if value is None:
+        value = lattice.has_tabulated
+        lattice.geom_cache["has_tabulated"] = value
+    return value
 
 
 # Clearer name for the same solver.

@@ -140,6 +140,40 @@ def solve_vlm(
     return g[umap.panel_column], SolveInfo(symmetric=umap.symmetric)
 
 
+def solve_vlm_batch(
+    lattice: VortexLattice,
+    conditions: list[FlightCondition],
+    grounds: list[GroundPlane | None],
+    use_symmetry: bool,
+    wake_dirs: np.ndarray,
+) -> list[tuple[np.ndarray, SolveInfo]] | None:
+    """Solve the vortex lattice for K cases on the same lattice.
+
+    Each system is assembled as in :func:`assemble_vlm` (with the kernel
+    cache of the lattice out of ground effect), and one call of the dense
+    solver solves all systems. Each case gets the same result, to the last
+    bit, as :func:`solve_vlm` for that case.
+
+    Returns
+    -------
+    list of (gamma, SolveInfo) or None
+        Circulation of every panel [m^2/s] and the information of each
+        case. None if the cases do not have the same unknown map (the
+        caller then solves them one by one).
+    """
+    umaps = [_unknown_map(lattice, c, g, use_symmetry) for c, g in zip(conditions, grounds)]
+    umap = umaps[0]
+    if any(u is not umap for u in umaps):
+        return None
+    K, n = len(conditions), umap.n
+    A = np.empty((K, n, n))
+    rhs = np.empty((K, n))
+    for k, (cond, ground) in enumerate(zip(conditions, grounds)):
+        A[k], rhs[k], _ = assemble_vlm(lattice, cond, ground, use_symmetry, wake_dirs[k])
+    g = np.linalg.solve(A, rhs[:, :, None])[:, :, 0]
+    return [(g[k][umap.panel_column], SolveInfo(symmetric=umap.symmetric)) for k in range(K)]
+
+
 def _llt_strip_data(lattice: VortexLattice, umap: UnknownMap) -> dict[str, np.ndarray]:
     if lattice.collocation != "llt":
         raise ValueError("Lifting-line solvers need a lattice built with collocation='llt'.")

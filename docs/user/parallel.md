@@ -50,7 +50,7 @@ The full table of all environment variables is in [Environment variables](enviro
 
 | Function | Setting | Meaning |
 | --- | --- | --- |
-| `analyze_sweep`, `alpha_sweep` | `n_jobs` | Vortex lattice: `"auto"` (default): the tuned plan or the default; an integer: that many cases in parallel; `-1`: one case per core. Lifting lines: not used (one batch for all angles) |
+| `analyze_sweep`, `alpha_sweep` | `n_jobs` | Vortex lattice: `"auto"` (default): one batch for a small lattice (at most 400 panels), else the tuned plan or the default; an integer: that many cases in parallel; `-1`: one case per core. Lifting lines: not used (one batch for all angles) |
 | `GroundEffectSweep.run_sweep` | `n_workers` | The same, for the cases of the grid |
 | `run_parallel_instances` | `max_concurrent_instances` | Instances in parallel; each runs its own cases inside its worker |
 

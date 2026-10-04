@@ -577,13 +577,53 @@ def velocity_tensor_unknowns(
 def induced_velocity(
     P: np.ndarray, hs: HorseshoeSet, gamma_unknowns: np.ndarray, targets: Targets | None = None,
     cache: dict | None = None, cache_key: object = None,
+    repeat: tuple[np.ndarray, np.ndarray] | None = None,
 ) -> np.ndarray:
     """Return the total induced velocity at *P* for the circulation of the unknowns: (m, 3).
 
     *cache* and *cache_key* work as in :func:`influence_matrix`: the
     velocity per source from the bound vortices and chordwise legs is kept,
     and only the wake legs are computed again.
+
+    *repeat* = ``(keep, inverse)`` tells that the points repeat:
+    ``P[keep][inverse]`` equals *P*, also for the targets. The kernel then
+    runs only on ``P[keep]``. Each kernel row is computed alone, so the result
+    has the same bits as without *repeat*. With a cache, the cached part keeps
+    all rows (its matrix-vector product can round differently when the rows
+    change); only the wake legs use the points without repeats.
     """
+    if repeat is None:
+        return _induced(P, hs, gamma_unknowns, targets, cache, cache_key, False)
+    keep, inverse = repeat
+    tg_keep = None if targets is None else Targets(group=targets.group[keep], rc=targets.rc[keep])
+    if cache is not None and cache_key is not None:
+        fixed = _induced(P, hs, gamma_unknowns, targets, cache, cache_key, True)
+        if fixed is None:   # no cache for this case (numpy backend or too large)
+            return _induced(P, hs, gamma_unknowns, targets, cache, cache_key, False)
+        return fixed + _induced_parts(P[keep], hs, gamma_unknowns, tg_keep, 2)[inverse]
+    return _induced(P[keep], hs, gamma_unknowns, tg_keep, None, None, False)[inverse]
+
+
+def _induced_parts(P, hs, gamma_unknowns, targets, parts: int) -> np.ndarray:
+    """Return one part (1 fixed legs, 2 wake legs) of the induced velocity with a compiled backend."""
+    m, n = P.shape[0], hs.n
+    g_src = gamma_unknowns[hs.column] * hs.sign
+    backend = kernel_backend_for("induced", n)
+    a, b, a_te, b_te, d, rc2, grp, sign = _nb.pack_sources(hs)
+    tg_group, tg_rc2, use_tg = _nb.pack_targets(m, hs, targets)
+    Pc = np.ascontiguousarray(P, dtype=float)
+    gc = np.ascontiguousarray(g_src, dtype=float)
+    if backend == "torch":
+        return _torch().induced_velocity_kernel(Pc, a, b, a_te, b_te, d, rc2, grp, gc,
+                                                tg_group, tg_rc2, use_tg, parts)
+    if backend == "cython":
+        return _cy_call("induced_velocity_kernel", Pc, a, b, a_te, b_te, d, rc2, grp, gc,
+                        tg_group, tg_rc2, use_tg, parts)
+    return _nb.induced_velocity_kernel(Pc, a, b, a_te, b_te, d, rc2, grp, gc, tg_group, tg_rc2, use_tg, parts)
+
+
+def _induced(P, hs, gamma_unknowns, targets, cache, cache_key, fixed_only: bool) -> np.ndarray | None:
+    """Body of :func:`induced_velocity`. With *fixed_only*, return only the cached part (None if there is none)."""
     m, n = P.shape[0], hs.n
     g_src = gamma_unknowns[hs.column] * hs.sign
     backend = kernel_backend_for("induced", n)
@@ -609,6 +649,8 @@ def induced_velocity(
                 cache[("T", cache_key)] = T
             g_col = np.ascontiguousarray(gamma_unknowns[hs.column], dtype=float)
             v = (T @ g_col).reshape(m, 3)
+            if fixed_only:
+                return v
             if backend == "torch":
                 return v + _torch().induced_velocity_kernel(Pc, a, b, a_te, b_te, d, rc2, grp, gc,
                                                        tg_group, tg_rc2, use_tg, 2)
@@ -617,6 +659,8 @@ def induced_velocity(
                                                        tg_group, tg_rc2, use_tg, 2)
             return v + _nb.induced_velocity_kernel(Pc, a, b, a_te, b_te, d, rc2, grp, gc,
                                                    tg_group, tg_rc2, use_tg, 2)
+        if fixed_only:
+            return None
         if backend == "torch":
             return _torch().induced_velocity_kernel(Pc, a, b, a_te, b_te, d, rc2, grp, gc,
                                                tg_group, tg_rc2, use_tg, 0)
@@ -624,6 +668,8 @@ def induced_velocity(
             return _cy_call("induced_velocity_kernel", Pc, a, b, a_te, b_te, d, rc2, grp, gc,
                                                tg_group, tg_rc2, use_tg, 0)
         return _nb.induced_velocity_kernel(Pc, a, b, a_te, b_te, d, rc2, grp, gc, tg_group, tg_rc2, use_tg)
+    if fixed_only:
+        return None
     out = np.zeros((m, 3))
     step = _chunk_rows(m, n)
     for i0 in range(0, m, step):

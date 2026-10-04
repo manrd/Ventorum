@@ -16,7 +16,7 @@ results = vt.analyze_sweep(
 )
 ```
 
-`n_jobs="auto"` uses the tuned batch plan or the default. Give an integer to fix the number of cases in parallel; the kernel threads of each case are then the cores divided by that number.
+`n_jobs="auto"` uses the tuned batch plan or the default; a small vortex lattice (at most 400 panels) is solved as one batch, which is faster than cases in parallel. Give an integer to fix the number of cases in parallel; the kernel threads of each case are then the cores divided by that number.
 
 The lifting-line solvers (`"linear"`, `"nonlinear"`) do not use `n_jobs`: they solve all angles as one batch (one kernel call for all angles, all kernel threads). Each angle gets the same result as a single solve. The nonlinear solver starts each angle from the solution of the angle before it, out of ground effect.
 

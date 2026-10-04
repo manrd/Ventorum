@@ -57,7 +57,9 @@ from ventorum.core.constants import RHO_SL
 from ventorum.core.datatypes import Aircraft, FlightCondition, SolverSettings
 from ventorum.core.errors import GroundStrikeError, ValidityError
 from ventorum.ground_effect.solver import MAX_BANK_DEG
+from ventorum.geometry import lattice_cache
 from ventorum.geometry.lattice import build_lattice
+from ventorum.hardware.profile import size_class
 from ventorum.solvers.factory import resolve_solver_type
 from ventorum.solvers.lattice_base import DEFAULT_N_CHORD, MAX_AUTO_N_CHORD
 from ventorum.utils.jsonsafe import json_safe
@@ -113,7 +115,12 @@ def _check_mesh(ac: Aircraft, sett: SolverSettings) -> int:
     For an automatic n_chord the check uses the smallest automatic value;
     :func:`_case_settings` reduces a larger automatic value.
     """
-    strips = build_lattice(ac, sett, collocation="vlm", n_chord=1).n_strips
+    chord_spacing = getattr(sett, "chord_spacing", "uniform")
+    key = lattice_cache.lattice_key(ac, sett, "vlm", 1, chord_spacing)
+    probe = lattice_cache.get_or_build(key, lambda: build_lattice(
+        ac, sett, collocation="vlm", n_chord=1, chord_spacing=chord_spacing,
+    ))
+    strips = probe.n_strips
     if _uses_lattice_chord(ac, sett):
         n_chord = int(sett.n_chord) if sett.n_chord is not None else DEFAULT_N_CHORD
     else:
@@ -197,7 +204,12 @@ def _planned_panels(
     An automatic ``n_chord`` is resolved without solving; the mesh-limit
     cap of :func:`_case_settings` applies.
     """
-    strips = build_lattice(ac, sett, collocation="vlm", n_chord=1).n_strips
+    chord_spacing = getattr(sett, "chord_spacing", "uniform")
+    key = lattice_cache.lattice_key(ac, sett, "vlm", 1, chord_spacing)
+    probe = lattice_cache.get_or_build(key, lambda: build_lattice(
+        ac, sett, collocation="vlm", n_chord=1, chord_spacing=chord_spacing,
+    ))
+    strips = probe.n_strips
     if not _uses_lattice_chord(ac, sett):
         return int(strips)
     if sett.n_chord is not None:
@@ -323,15 +335,14 @@ def wing_analysis(
 # Polar sweep
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def _lifting_line_polar(ac: Aircraft, sett: SolverSettings, conditions: list[FlightCondition],
-                        alphas: list[float]) -> list[tuple]:
-    """Solve the angles of a lifting-line polar out of ground effect as one batch.
+def _batched_polar(ac: Aircraft, sett: SolverSettings, conditions: list[FlightCondition],
+                   alphas: list[float]) -> list[tuple]:
+    """Solve the angles of a lattice polar out of ground effect as one batch.
 
-    Each angle starts from the linear solution, so each angle gets the same
-    result, to the last bit, as a single solve (``vt.analyze``). Returns the
-    items ``(alpha, result, None, settings)`` of the polar table.
+    Each angle gets the same result, to the last bit, as a single solve
+    (``vt.analyze``). Returns the items ``(alpha, result, None, settings)``
+    of the polar table.
     """
-    from ventorum.geometry import lattice_cache
     from ventorum.solvers.factory import make_solver
     from ventorum.utils.validation import validate_aircraft, validate_flight_condition, validate_solver_settings
 
@@ -354,6 +365,7 @@ def _lifting_line_polar(ac: Aircraft, sett: SolverSettings, conditions: list[Fli
         res.condition = fc
         out.append((a, res, None, sett))
     return out
+
 
 
 @_tool
@@ -439,8 +451,13 @@ def polar_sweep(
         rest = run_cases(lambda a: run(a, fixed), remaining, estimate_panels(ac, fixed or sett),
                          "auto") if fixed is not None else []
         outputs = first_done + list(rest)
-    elif resolve_solver_type(sett.solver_type) in ("linear", "nonlinear"):
-        outputs = _lifting_line_polar(ac, sett, [make_flight_condition(c, alpha_deg=a) for a in alphas], alphas)
+    elif (resolve_solver_type(sett.solver_type) in ("linear", "nonlinear")
+          or (resolve_solver_type(sett.solver_type) == "vlm"
+              and size_class(estimate_panels(ac, sett)) == "small"
+              and _case_settings(ac, sett, strips, make_flight_condition(c, alpha_deg=alphas[0])) is sett)):
+        # Lifting lines, and small vortex lattices: one batch. A larger vortex
+        # lattice gains more from cases in parallel.
+        outputs = _batched_polar(ac, sett, [make_flight_condition(c, alpha_deg=a) for a in alphas], alphas)
     else:
         outputs = run_cases(run, alphas, estimate_panels(ac, sett), "auto")
 

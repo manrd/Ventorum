@@ -103,6 +103,7 @@ class LatticeSolver(BaseSolver):
         condition: FlightCondition,
         ground: GroundPlane | None,
         ref_point: np.ndarray | None = None,
+        fingerprint: object = None,
     ) -> int:
         """Return the number of chordwise panels.
 
@@ -125,6 +126,8 @@ class LatticeSolver(BaseSolver):
         ref_point : numpy.ndarray or None, optional
             Moment reference point [m], shape (3,). If None, the aircraft
             reference point is used.
+        fingerprint : object, optional
+            Surfaces fingerprint if the caller computed it.
 
         Returns
         -------
@@ -138,7 +141,12 @@ class LatticeSolver(BaseSolver):
         if ground is None and condition.h is None:
             return DEFAULT_N_CHORD
         # In ground effect a chordwise panel should not be longer than the gap.
-        probe = build_lattice(aircraft, settings, collocation="vlm", n_chord=1)
+        chord_spacing = getattr(settings, "chord_spacing", "uniform")
+        key = lattice_cache.lattice_key(aircraft, settings, "vlm", 1, chord_spacing,
+                                        fingerprint=fingerprint)
+        probe = lattice_cache.get_or_build(key, lambda: build_lattice(
+            aircraft, settings, collocation="vlm", n_chord=1, chord_spacing=chord_spacing,
+        ))
         rp = aircraft.moment_reference() if ref_point is None else ref_point
         gp = ground if ground is not None else ground_plane_from_condition(probe, condition, rp)
         h_min = float(np.min(gp.height(probe.all_points())))
@@ -161,7 +169,8 @@ class LatticeSolver(BaseSolver):
         The arguments are the same as for :meth:`resolve_n_chord`;
         *fingerprint* is the surfaces fingerprint if the caller computed it.
         """
-        n_chord = self.resolve_n_chord(aircraft, settings, condition, ground, ref_point)
+        n_chord = self.resolve_n_chord(aircraft, settings, condition, ground, ref_point,
+                                       fingerprint=fingerprint)
         chord_spacing = getattr(settings, "chord_spacing", "uniform")
         # The lattice depends only on the geometry and the mesh settings: reuse
         # it for repeated solves (see ventorum.geometry.lattice_cache).
@@ -411,13 +420,15 @@ class LatticeSolver(BaseSolver):
     ) -> list[SolverResult]:
         """Angle-of-attack sweep.
 
-        The lifting-line solvers solve the angles as one batch (see
-        :meth:`solve_batch`): each angle gets the same result as a single
-        solve. The vortex lattice builds its lattice once (out of ground
-        effect) and keeps the influence of the bound vortices and the
-        chordwise legs between the angles. Each angle starts from the
-        circulation of the previous one (continuation), which helps the
-        nonlinear solver near the maximum lift.
+        The angles are solved in batches (see :meth:`solve_batch`). The
+        lifting-line solvers solve all angles as one batch, and each angle
+        gets the same result as a single solve; the nonlinear solver starts
+        each angle from the circulation of the previous one out of ground
+        effect (continuation), which helps near the maximum lift. The vortex
+        lattice out of ground effect solves all angles as one batch and keeps
+        the influence of the bound vortices and the chordwise legs between
+        the angles; in ground effect the angles with the same chordwise count
+        form one batch, and each angle gets the same result as a single solve.
         """
         aircraft = as_aircraft(aircraft)
         validate_aircraft(aircraft)
@@ -430,31 +441,33 @@ class LatticeSolver(BaseSolver):
             )
             for a in np.asarray(alpha_range, dtype=float)
         ]
+        S, b, c = aircraft.S_ref, aircraft.b_ref, aircraft.c_ref
+        main = aircraft.main_surface_index()
         if self.collocation == "llt":
             # The lifting-line lattice does not depend on the attitude (one
             # chordwise panel), also in ground effect.
             lattice = self.build(aircraft, settings, condition, None, rp)
-            return self.solve_batch(lattice, conds, settings, aircraft.S_ref, aircraft.b_ref, aircraft.c_ref,
-                                    ref_point=rp, main_surface=aircraft.main_surface_index(),
+            return self.solve_batch(lattice, conds, settings, S, b, c, ref_point=rp, main_surface=main,
                                     continuation=condition.h is None)
-        lattice = None if condition.h is not None else self.build(aircraft, settings, condition, None, rp)
-        if lattice is not None:
-            # The bound vortices and the chordwise legs do not change with
-            # the angle of attack: compute their influence once.
+        if condition.h is None:
+            # Vortex lattice out of ground effect: one lattice for all angles.
+            # The bound vortices and the chordwise legs do not change with the
+            # angle of attack: their influence is computed once (kernel cache).
+            lattice = self.build(aircraft, settings, condition, None, rp)
             lattice.kernel_cache = {}
-        main = aircraft.main_surface_index()
+            return self.solve_batch(lattice, conds, settings, S, b, c, ref_point=rp, main_surface=main)
+        # In ground effect the automatic chordwise count depends on the
+        # attitude: the angles with the same lattice are solved as one batch.
+        lattices = [self.build(aircraft, settings, cond, None, rp) for cond in conds]
         out: list[SolverResult] = []
-        g_prev = None
-        for cond in conds:
-            # In ground effect the automatic chordwise count depends on the attitude.
-            lat = lattice if lattice is not None else self.build(aircraft, settings, cond, None, rp)
-            g0 = g_prev if (g_prev is not None and lat is lattice) else None
-            res = self.solve_lattice(
-                lat, cond, settings, aircraft.S_ref, aircraft.b_ref, aircraft.c_ref,
-                ref_point=rp, gamma0=g0, main_surface=main,
-            )
-            g_prev = res.details["gamma"] if res.converged else None
-            out.append(res)
+        k0 = 0
+        while k0 < len(conds):
+            k1 = k0 + 1
+            while k1 < len(conds) and lattices[k1].n_chord == lattices[k0].n_chord:
+                k1 += 1
+            out.extend(self.solve_batch(lattices[k0], conds[k0:k1], settings, S, b, c, ref_point=rp,
+                                        main_surface=main))
+            k0 = k1
         return out
 
     def solve_batch(

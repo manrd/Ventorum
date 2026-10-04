@@ -375,36 +375,44 @@ def compute_loads_batch(
     n_p = lattice.n_panels
     if leg_forces is None:
         leg_forces = lattice.collocation == "vlm"
-    # Evaluation points per panel: the force point and, with leg forces, the
-    # mid-points of the legs a_te -> a and b -> b_te (they carry the panel
-    # circulation in the same sense as in the horseshoe kernel).
-    points = [mid]
-    swap = [0]
-    if leg_forces:
-        leg_a_mid = 0.5 * (lattice.a_te + lattice.a)
-        leg_b_mid = 0.5 * (lattice.b + lattice.b_te)
-        points += [leg_a_mid, leg_b_mid]
-        swap += [2, 1]   # the a-leg of a left panel mirrors the b-leg of its mirror panel
-    reuse = v_controls is not None and not leg_forces and lattice.collocation == "llt"
+    use_leg = bool(leg_forces)
+    geom_key = ("loads_geom", use_leg)
+    cached_geom = lattice.geom_cache.get(geom_key)
+    if cached_geom is None:
+        points = [mid]
+        swap = [0]
+        if use_leg:
+            leg_a_mid = 0.5 * (lattice.a_te + lattice.a)
+            leg_b_mid = 0.5 * (lattice.b + lattice.b_te)
+            points += [leg_a_mid, leg_b_mid]
+            swap += [2, 1]  # the a-leg of a left panel mirrors the b-leg of its mirror panel
+            leg_start = np.vstack([lattice.a_te, lattice.b])
+            leg_end = np.vstack([lattice.a, lattice.b_te])
+            leg_mid = np.vstack([points[1], points[2]])
+            leg_vec = leg_end - leg_start
+        else:
+            leg_mid = leg_vec = None
+        l_vec = lattice.b - lattice.a
+        cached_geom = (points, swap, l_vec, leg_mid, leg_vec)
+        lattice.geom_cache[geom_key] = cached_geom
+    points, swap, l_vec, leg_mid, leg_vec = cached_geom
+
+    reuse = v_controls is not None and not use_leg and lattice.collocation == "llt"
     if reuse:
         v_all = [np.asarray(v_controls, dtype=float).reshape(K, n_p, 3)]
     else:
         v_all = [np.empty((K, n_p, 3)) for _ in points]
         for k in range(K):
             _near_field_velocity(lattice, G[k], conditions[k], grounds[k], WD[k], points, swap,
-                                 bool(leg_forces), [vk[k] for vk in v_all])
+                                 use_leg, [vk[k] for vk in v_all])
     v_ind = v_all[0]
-    l_vec = lattice.b - lattice.a
     Vd = V[:, None, None] * D[:, None, :]
     F_panel = rho[:, None, None] * G[:, :, None] * _cross(Vd + v_ind, l_vec)
     M_geo = np.sum(_cross(mid - rp, F_panel), axis=1)
-    if leg_forces:
-        leg_start = np.vstack([lattice.a_te, lattice.b])
-        leg_end = np.vstack([lattice.a, lattice.b_te])
-        leg_mid = np.vstack([points[1], points[2]])
+    if use_leg:
         v_leg = np.concatenate([v_all[1], v_all[2]], axis=1)
         g_leg = np.concatenate([G, G], axis=1)
-        F_leg = rho[:, None, None] * g_leg[:, :, None] * _cross(Vd + v_leg, leg_end - leg_start)
+        F_leg = rho[:, None, None] * g_leg[:, :, None] * _cross(Vd + v_leg, leg_vec)
         M_geo += np.sum(_cross(leg_mid - rp, F_leg), axis=1)
         F_panel = F_panel + F_leg[:, :n_p] + F_leg[:, n_p:]
     F_strip = F_panel.reshape(K, n_s, n_c, 3).sum(axis=2)
@@ -423,20 +431,18 @@ def compute_loads_batch(
         alpha_eff = np.asarray(alpha_eff_strips, dtype=float).reshape(K, n_s)
     alpha_i = alpha_geom - alpha_eff
 
-    groups = lattice.geom_cache.get("airfoil_groups")
-    if groups is None:
-        groups = group_strips_by_airfoil(lattice.airfoils)
-        lattice.geom_cache["airfoil_groups"] = groups
+    lin_afs, lin_strips, lin_index, other_groups = _airfoil_split(lattice)
     Cd_p = np.zeros((K, n_s))
     Cm_s = np.zeros((K, n_s))
-    for af, idx in groups:
-        if isinstance(af, LinearAirfoil):
-            Cd_p[:, idx] = af.Cd0
-            Cm_s[:, idx] = af.Cm0
-        else:
-            a_idx = alpha_eff[:, idx].ravel()
-            Cd_p[:, idx] = section_cd(af, a_idx).reshape(K, idx.size)
-            Cm_s[:, idx] = section_cm(af, a_idx).reshape(K, idx.size)
+    if lin_afs:
+        # Linear airfoils: constant coefficients, written for all their strips at once.
+        # The values are read from the airfoil objects on every call.
+        Cd_p[:, lin_strips] = np.array([af.Cd0 for af in lin_afs], dtype=float)[lin_index]
+        Cm_s[:, lin_strips] = np.array([af.Cm0 for af in lin_afs], dtype=float)[lin_index]
+    for af, idx in other_groups:
+        a_idx = alpha_eff[:, idx].ravel()
+        Cd_p[:, idx] = section_cd(af, a_idx).reshape(K, idx.size)
+        Cm_s[:, idx] = section_cm(af, a_idx).reshape(K, idx.size)
     has_profile = np.any(Cd_p != 0.0, axis=1)
 
     # Profile drag along the free stream, applied at the strip quarter chord.
@@ -519,6 +525,61 @@ def compute_loads_batch(
     return out
 
 
+def _load_points(lattice: VortexLattice, eval_panels: np.ndarray, points: list[np.ndarray]) -> tuple:
+    """Return the evaluation points of the loads, their targets, and the repeats among the points.
+
+    Returns ``(P, tgt, repeat)``. *P* stacks the point sets set by set. With
+    one core group (one surface, or surfaces joined into one group) the
+    target core radius never acts (it acts only between different groups),
+    so the velocity at a point depends only on the point. A point that occurs
+    more than once (the leg mid-point of a panel is the leg mid-point of its
+    neighbour) is then evaluated once: *repeat* = ``(keep, inverse)`` with
+    ``P[keep][inverse]`` equal to *P* (see :func:`induced_velocity`). With
+    more than one group, or no repeated point, *repeat* is None.
+    """
+    P = np.vstack([pk[eval_panels] for pk in points])
+    tgt = panel_targets(lattice, np.tile(eval_panels, len(points)))
+    if np.unique(tgt.group).size > 1 or np.unique(_core_group_of(lattice)).size > 1:
+        return P, tgt, None
+    P_u, first, inverse = np.unique(P, axis=0, return_index=True, return_inverse=True)
+    if P_u.shape[0] == P.shape[0]:
+        return P, tgt, None
+    order = np.argsort(first)   # keep the first-occurrence order of the points
+    rank = np.empty_like(order)
+    rank[order] = np.arange(order.size)
+    return P, tgt, (first[order], rank[inverse.ravel()])
+
+
+def _core_group_of(lattice: VortexLattice) -> np.ndarray:
+    """Core group of every strip (the surface index when the lattice has no joined groups)."""
+    g = lattice.strip_core_group
+    return lattice.strip_surface if g is None else g
+
+
+def _airfoil_split(lattice: VortexLattice) -> tuple:
+    """Return the strips grouped by airfoil: the linear airfoils together, the others per airfoil.
+
+    Returns ``(lin_afs, lin_strips, lin_index, other_groups)``: the linear
+    airfoil objects, their strips, the index into *lin_afs* of each of those
+    strips, and ``(airfoil, strips)`` for every other airfoil. Lattice-only,
+    cached on the lattice.
+    """
+    split = lattice.geom_cache.get("airfoil_split")
+    if split is None:
+        groups = lattice.geom_cache.get("airfoil_groups")
+        if groups is None:
+            groups = group_strips_by_airfoil(lattice.airfoils)
+            lattice.geom_cache["airfoil_groups"] = groups
+        lin = [(af, idx) for af, idx in groups if isinstance(af, LinearAirfoil)]
+        other = [(af, idx) for af, idx in groups if not isinstance(af, LinearAirfoil)]
+        lin_afs = [af for af, _ in lin]
+        lin_strips = np.concatenate([idx for _, idx in lin]) if lin else np.empty(0, dtype=int)
+        lin_index = np.concatenate([np.full(idx.size, i) for i, (_, idx) in enumerate(lin)]) if lin             else np.empty(0, dtype=int)
+        split = (lin_afs, lin_strips, lin_index, other)
+        lattice.geom_cache["airfoil_split"] = split
+    return split
+
+
 def _near_field_velocity(
     lattice: VortexLattice,
     gamma_panel: np.ndarray,
@@ -542,17 +603,24 @@ def _near_field_velocity(
         fold = _symmetric_fold(lattice, gamma_panel, points, swap, leg_forces=leg_forces)
     eval_panels = np.arange(n_p) if fold is None else fold[0]
     n_e = eval_panels.size
-    full_map = UnknownMap(
-        unknown_panels=np.arange(n_p),
-        panel_column=np.arange(n_p),
-        symmetric=False,
-    )
+    full_map = lattice.geom_cache.get("loads_full_map")
+    if full_map is None:
+        full_map = UnknownMap(
+            unknown_panels=np.arange(n_p),
+            panel_column=np.arange(n_p),
+            symmetric=False,
+        )
+        lattice.geom_cache["loads_full_map"] = full_map
     src = build_sources(lattice, wake_dir, full_map, ground)
-    P = np.vstack([pk[eval_panels] for pk in points])
-    tgt = panel_targets(lattice, np.tile(eval_panels, len(points)))
+    p_tgt_key = ("loads_points", fold is not None, bool(leg_forces))
+    p_tgt = lattice.geom_cache.get(p_tgt_key)
+    if p_tgt is None:
+        p_tgt = _load_points(lattice, eval_panels, points)
+        lattice.geom_cache[p_tgt_key] = p_tgt
+    P, tgt, repeat = p_tgt
     cache = lattice.kernel_cache if ground is None else None
     v_eval = induced_velocity(P, src, gamma_panel, tgt, cache=cache,
-                              cache_key=("loads", fold is not None, bool(leg_forces)))
+                              cache_key=("loads", fold is not None, bool(leg_forces)), repeat=repeat)
     for k in range(len(points)):
         out[k][eval_panels] = v_eval[k * n_e:(k + 1) * n_e]
     if fold is not None:

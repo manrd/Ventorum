@@ -242,10 +242,16 @@ def plan_parallel(n_tasks: int, n_panels: int | None = None, n_jobs: int | str |
 def estimate_panels(aircraft, settings) -> int | None:
     """Return the panel count of the vortex lattice of *aircraft* (an estimate for the parallel plan)."""
     try:
+        from ventorum.geometry import lattice_cache
         from ventorum.geometry.lattice import build_lattice
 
         n_chord = settings.n_chord if settings.n_chord else 4
-        return int(build_lattice(aircraft, settings, collocation="vlm", n_chord=n_chord).n_panels)
+        chord_spacing = getattr(settings, "chord_spacing", "uniform")
+        key = lattice_cache.lattice_key(aircraft, settings, "vlm", n_chord, chord_spacing)
+        lat = lattice_cache.get_or_build(key, lambda: build_lattice(
+            aircraft, settings, collocation="vlm", n_chord=n_chord, chord_spacing=chord_spacing,
+        ))
+        return int(lat.n_panels)
     except Exception:  # noqa: BLE001 - only an estimate
         return None
 

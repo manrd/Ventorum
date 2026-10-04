@@ -38,8 +38,9 @@ def alpha_sweep(
     n_jobs : int or str
         Cases in parallel for the vortex-lattice solver (see
         :func:`ventorum.utils.parallel.plan_parallel`): ``"auto"`` uses the
-        tuned plan of this machine or the default. The kernel threads of
-        each case follow from it. The lifting-line solvers solve all angles
+        tuned plan of this machine or the default, and solves a small lattice
+        (size class "small") as one batch (``solve_sweep``). The kernel
+        threads of each case follow from it. The lifting-line solvers solve all angles
         as one batch (``solve_sweep``) on all kernel threads; the nonlinear
         solver starts each angle from the solution of the previous one.
     backend : {"auto", "thread", "serial"}
@@ -52,6 +53,7 @@ def alpha_sweep(
     list[SolverResult]
         One result per angle of attack; moments are about ``aircraft.ref_point``.
     """
+    from ventorum.hardware.profile import size_class
     from ventorum.solvers.factory import make_solver, resolve_solver_type
     from ventorum.solvers.lattice_base import LatticeSolver
     from ventorum.utils.parallel import case_executor, plan_parallel
@@ -85,7 +87,10 @@ def alpha_sweep(
         rp = aircraft.moment_reference()
         lattice = solver.build(aircraft, settings, condition, None, rp)
         plan = plan_parallel(len(alpha_range), lattice.n_panels, n_jobs)
-        serial = plan.workers == 1
+        # A small lattice: one batch (solve_sweep) is faster than a pool of
+        # workers; larger lattices gain from cases in parallel.
+        auto = n_jobs is None or (isinstance(n_jobs, str) and n_jobs.lower() == "auto")
+        serial = plan.workers == 1 or (auto and size_class(lattice.n_panels) == "small")
     if serial:
         results = solver.solve_sweep(aircraft, condition, settings, alpha_range)
         if pb:

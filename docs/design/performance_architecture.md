@@ -23,7 +23,7 @@ The Fourier solver (`ventorum/solvers/fourier.py`) uses steps 1 to 3 and caches 
 | Lattice cache | `ventorum/geometry/lattice_cache.py` | builder helper functions (the objects), surfaces fingerprint, collocation, chordwise count and spacing, spanwise mesh settings | the last 8 built lattices | arrays are read-only; `get_or_build` returns a shallow copy with `kernel_cache = None` |
 | Geometry information | same module | surfaces fingerprint | main-surface index, automatic reference values | depends only on the surfaces |
 | `lattice.geom_cache` | field of `VortexLattice` | per item | airfoil groups, symmetry geometry of the force points, Trefftz-plane core data, left panels of the symmetric map, unknown maps, lifting-line strip data and airfoil groups per map, quarter-chord sweep, main-surface strip count, largest chord | lattice-only data; shared by the shallow copies of one cached lattice; the cached unknown maps and strip data are read-only |
-| `lattice.kernel_cache` | field of `VortexLattice` | per item | the part of the influence matrices and velocity tensors from the bound vortices and the chordwise legs (they do not change with the wake direction) | set only by vortex-lattice sweeps (`solve_sweep`, the parallel `alpha_sweep`); None in a single solve and in a lifting-line batch, so that these always give the same bits |
+| `lattice.kernel_cache` | field of `VortexLattice` | per item | the part of the influence matrices and velocity tensors from the bound vortices and the chordwise legs (they do not change with the wake direction) | set only by vortex-lattice sweeps out of ground effect (`solve_sweep`, the parallel `alpha_sweep`); None in a single solve, in the agent polar batch and in a lifting-line batch, so that these always give the same bits |
 | Fourier basis | `fourier._fourier_basis` | number of terms N | collocation and quadrature angles, sine tables | read-only |
 | Fourier system | `fourier._fourier_system` | surfaces fingerprint, N, helper functions | section data, system matrix, quadrature data, exact span integrals | read-only; the moment reference point is applied per call |
 | Gauss nodes | `fourier._gauss_legendre` | order | nodes and weights | read-only |
@@ -70,6 +70,15 @@ Rules for a change:
 * `alpha_sweep` (and `Ventorum.analyze_sweep`) sends lifting-line sweeps to `solve_sweep`; the agent polar tool solves lifting-line polars out of ground effect with `solve_batch(..., continuation=False)`, so each angle equals `vt.analyze`.
 * A new per-case value in the loads must be computed for all cases with the rules above, or in the per-case loop at the end of `compute_loads_batch`.
 
+## Vortex-lattice pipelines
+
+* **Repeated load points.** The loads evaluate the induced velocity at the force point and at the two leg mid-points of every panel. The leg mid-point of a panel is the leg mid-point of its neighbour, to the bit. With one core group (one surface, or surfaces joined into one group) the target core radius never acts, so `loads._load_points` gives `repeat = (keep, inverse)` and `induced_velocity(..., repeat=repeat)` runs the kernel on each point once. Each kernel row is computed alone, so the bits do not change. With the kernel cache, the cached part keeps all rows (its matrix-vector product can round differently when the rows change); only the wake legs use the points without repeats. With more than one core group there is no repeat (the target core radius depends on the strip width).
+* **Sweeps.** `solve_sweep` of the vortex lattice out of ground effect sets the kernel cache and calls `solve_batch`: the systems are assembled one by one (as `assemble_vlm`, with the cache) and solved with one call of the dense solver (`core.solve_vlm_batch`); the loads of all angles are computed together. Each angle has the bits of the kernel-cache path that existed before. In ground effect the automatic chordwise count depends on the attitude: the angles with the same count form one batch, and each angle has the bits of a single solve.
+* **Probe lattices.** `resolve_n_chord` (in ground effect), `estimate_panels` and the mesh checks of the agent tools take their probe lattices from the lattice cache.
+* **Small lattices in one batch.** `alpha_sweep` with `n_jobs="auto"` and the agent polar tool solve a vortex lattice of the size class "small" (`hardware.profile.size_class`) as one batch; a larger lattice keeps the pool of workers, which gains from cases in parallel (the dense solves of one process do not run in parallel). The agent polar batch has no kernel cache, so each angle equals `vt.analyze`.
+* Lattice-only values cached on the lattice: the loads geometry (force points, leg mid-points and vectors), the load points and their repeats, the unknown map of the loads, the airfoil split (linear airfoils together), `has_tabulated`.
+* The torch backend is not reproducible to the bit from one run to the next in ground effect (this was so before these changes); the parity tests leave it out of the ground cases.
+
 ## Small numerical rules
 
 * `utils.vec.cross3` replaces `numpy.cross` on small arrays: the same formula and order of operations (the same bits), without the axis handling of `numpy.cross`.
@@ -79,6 +88,6 @@ Rules for a change:
 ## How to check a change
 
 1. The verification report must not change (`validation/run_verification.py`).
-2. The parity tests in `tests/test_kernels.py`, `tests/test_solve_overhead.py`, `tests/test_lattice_cache.py` and `tests/test_sweep_batch.py`.
+2. The parity tests in `tests/test_kernels.py`, `tests/test_solve_overhead.py`, `tests/test_lattice_cache.py`, `tests/test_sweep_batch.py` and `tests/test_vlm_pipeline.py`.
 3. A repeated solve must give the same bits as the first solve (`test_repeated_solve_gives_the_same_bits`).
 4. Timing: run on a quiet machine, with no agent or other heavy program, and compare the old and the new code side by side, alternating. A timing of the old code taken at another time is not a reference.
