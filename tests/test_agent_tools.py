@@ -848,3 +848,89 @@ def test_machine_capabilities_reports_gpu_pipeline():
     assert p["gpu_pipeline"]["device"] == info["device"]
     assert p["gpu_pipeline"]["precision"] == info["precision"]
     assert p["gpu_pipeline"]["available"] == info["available"]
+
+
+# ── T-0047 finding B5: explicit null is refused for every key ────────────────
+
+def test_null_values_are_refused_with_key_name():
+    """B5: {"alpha_deg": null} (also V, twist, a0, cd0, S_ref, settings keys) is invalid_input."""
+    cases = [
+        (RECT, {"alpha_deg": None}, FAST, "flight_condition.alpha_deg"),
+        (RECT, {"V_inf_m_s": None}, FAST, "flight_condition.V_inf_m_s"),
+        ({**RECT, "tip_twist_deg": None}, None, FAST, "tip_twist_deg"),
+        ({"span_m": 10.0, "chord_m": 1.0, "airfoil": {"a0_per_rad": None}}, None, FAST, "a0_per_rad"),
+        ({"span_m": 10.0, "chord_m": 1.0, "airfoil": {"cd0": None}}, None, FAST, "cd0"),
+        ({"surfaces": [RECT], "S_ref_m2": None}, None, FAST, "S_ref_m2"),
+        (RECT, None, {"n_panels": None}, "settings.n_panels"),
+        (RECT, None, {"n_panels": 8, "n_chord": None}, "settings.n_chord"),
+    ]
+    for wing, cond, sett, key in cases:
+        assert_error(wing_analysis(wing, cond, sett, "summary"), "invalid_input", key)
+    # Null through the dispatcher (JSON null) names the key too.
+    assert_error(call_tool("ventorum_wing_analysis",
+                           {"wing": RECT, "flight_condition": {"alpha_deg": None}, "settings": FAST}),
+                 "invalid_input", "alpha_deg")
+
+
+# ── T-0047 finding B6: the default angle of attack is 5 deg ─────────────────
+
+def test_default_alpha_is_five_deg_in_every_interface():
+    """B6/Q4: an omitted alpha is 5 deg in the agent schemas, vt.analyze, FlightCondition and Ventorum."""
+    import numpy as np
+
+    import ventorum as vt
+    from ventorum.agent.schemas import CONDITION_PROPS
+
+    assert "Default 5." in CONDITION_PROPS["alpha_deg"]["description"]
+    p = wing_analysis(RECT, None, FAST, "summary")
+    assert p["status"] == "success", p
+    assert p["condition_used"]["alpha_deg"] == 5.0
+    g = ground_effect(RECT, [1.0], settings=FAST)
+    assert g["status"] == "success", g
+    assert g["condition_used"]["alpha_deg"] == 5.0
+    assert vt.FlightCondition().alpha == pytest.approx(np.radians(5.0))
+    wing = vt.LiftingSurface(semi_span=5.0, sections=[vt.WingSection(y_frac=0.0, chord=1.5),
+                                                     vt.WingSection(y_frac=1.0, chord=1.0)])
+    assert vt.Ventorum(name="t5", geometry=wing).condition.alpha == pytest.approx(np.radians(5.0))
+
+
+# ── T-0047 finding B7: the main surface has the largest projected area ───────
+
+def test_main_surface_is_largest_projected_area():
+    """B7: the reference values come from the surface with the largest projected planform area."""
+    from ventorum.agent.schemas import AIRCRAFT_PROPS
+
+    assert "largest projected planform area" in AIRCRAFT_PROPS["surfaces"]["description"]
+    ac = {"surfaces": [{"name": "tail", "span_m": 3.0, "chord_m": 0.5},
+                       {"name": "wing", "span_m": 10.0, "chord_m": 1.0}]}
+    p = wing_analysis(ac, None, FAST, "standard")
+    assert p["status"] == "success", p
+    assert p["geometry"]["S_ref_m2"] == pytest.approx(10.0)
+    assert p["geometry"]["b_ref_m"] == pytest.approx(10.0)
+
+
+# ── T-0047 finding B9: tiny geometry is invalid input, not internal ──────────
+
+def test_tiny_geometry_is_invalid_input_not_internal():
+    """B9: span 1e-300 is invalid_input (it gave internal ZeroDivisionError)."""
+    assert_error(wing_analysis({"span_m": 1e-300, "chord_m": 1.0}, None, FAST, "summary"),
+                 "invalid_input", "semi_span")
+    assert_error(wing_analysis({"span_m": 10.0, "chord_m": 1e-300}, None, FAST, "summary"),
+                 "invalid_input", "chord")
+    assert_error(wing_analysis({"surfaces": [RECT], "S_ref_m2": 0.0}, None, FAST, "summary"),
+                 "invalid_input", "S_ref_m2")
+
+
+# ── T-0047 finding B10: 1-D numpy arrays are accepted where lists are ─────────
+
+def test_numpy_arrays_are_accepted_as_lists():
+    """B10: a 1-D numpy array is accepted for vector and list inputs."""
+    import numpy as np
+
+    p = wing_analysis({**RECT, "position_m": np.array([0.0, 0.0, 0.0])}, None, FAST, "summary")
+    assert p["status"] == "success", p
+    ref = wing_analysis(dict(RECT), None, FAST, "summary")
+    assert p["metrics"]["CL"] == pytest.approx(ref["metrics"]["CL"])
+    g = ground_effect(RECT, np.array([0.6, 1.0]), settings=FAST)
+    assert g["status"] == "success", g
+    assert [r["h_m"] for r in g["rows"]] == pytest.approx([0.6, 1.0])
