@@ -21,3 +21,14 @@ Each result has a `TrustScore` with a rating (`HIGH`, `MODERATE`, `LOW`, `UNRELI
 :::{warning}
 The uncertainty bands of the trust score are heuristic. They are not calibrated against experiments. Do not use them as error bars.
 :::
+
+## Numerical error bars
+
+`ventorum.numerical_error_bars` solves the case on three spanwise meshes (the user mesh is the fine level) and gives each of the six force and moment coefficients a discretisation error bar. This is layer 1 of the planned error bars (see [Trust score and error bars](../theory/trust_score)).
+
+```python
+bars = vt.numerical_error_bars(wing, settings=vt.SolverSettings(n_panels=40))
+print(bars.summary())
+```
+
+Each `bars.bars[name]` holds the fine-mesh value, the interval bounds (`None` when the coefficient diverges with mesh refinement), the status (always `"numerical_only"` in layer 1), the coverage (always `None` until a calibrated layer exists) and the numerical layer contribution (state, observed order, safety factor, levels and values). The notes in `bars.notes` state the scope: spanwise discretisation error only, not an error against experiment. The moments use the selected axes (`axes="body"`, `"stability"` or `"wind"`).
