@@ -122,3 +122,13 @@ Rules for a change:
 2. The parity tests in `tests/test_kernels.py`, `tests/test_solve_overhead.py`, `tests/test_lattice_cache.py`, `tests/test_sweep_batch.py`, `tests/test_vlm_pipeline.py` and, on a machine with a GPU, `tests/test_gpu_pipeline.py`.
 3. A repeated solve must give the same bits as the first solve (`test_repeated_solve_gives_the_same_bits`).
 4. Timing: run on a quiet machine, with no agent or other heavy program, and compare the old and the new code side by side, alternating. A timing of the old code taken at another time is not a reference.
+
+## Speed history and side-by-side timing
+
+`validation/perf_history.py` measures a fixed set of workloads over time. The workload names and their definitions are fixed (`WORKLOAD_NAMES` in the script). Never change the definition of a workload: the history would then compare different work. Add a new workload under a new name.
+
+* `python validation/perf_history.py --history PATH --note TEXT` appends one record to the history file. The owner keeps that file outside the repository; the script refuses a path inside the repository. One record is one JSON object per line with the date, the Ventorum version, the git commit and the dirty flag, Python, NumPy, the CPU core count, the GPU name or null, one entry per workload (`unit`, `median`, `min`, `max`) and the note. A record holds no machine name, no user name and no path. Each workload runs one warm-up call and then 7 timed calls with `time.perf_counter()`. With a GPU, the sweep workloads run again on the GPU as rows with the suffix `_gpu`.
+* `python validation/perf_history.py --report PATH` prints a Markdown table. One row per record, one column per workload, with the change against the previous record in percent.
+* `python validation/perf_history.py --compare TREE_A TREE_B --rounds N` runs every workload in a subprocess with `PYTHONPATH` set to the tree, and alternates A, B, A, B. Every subprocess checks that it imports `ventorum` from that tree. The table gives the median of A, the median of B, the ratio B/A and the spread of the rounds. The header names a tree without a compiled Cython kernel, because the kernel backend changes the time.
+
+A history row is a trend. It is not a proof of a speed change: use `--compare`, as in "How to check a change" above. The tests are in `tests/test_perf_history.py`; the option `--tiny` runs the workloads with small meshes and one timed call.
