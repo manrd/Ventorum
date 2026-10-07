@@ -274,4 +274,5 @@ def transform_lattice(
         ),
         join_warnings=list(lattice.join_warnings),
         kernel_cache=None,
+        control_info=[dict(c) for c in getattr(lattice, "control_info", [])],
     )

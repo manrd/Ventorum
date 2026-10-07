@@ -333,6 +333,61 @@ AirfoilType = LinearAirfoil | TabulatedAirfoil
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# Control surfaces
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@dataclass(slots=True)
+class ControlSurface:
+    """A hinged control surface (flap, aileron, elevator, rudder) of a lifting surface.
+
+    Parameters
+    ----------
+    name : str
+        Identifier of the control surface.
+    eta_start : float
+        Span fraction of the semi-span where the control starts [-], in [0, 1].
+    eta_end : float
+        Span fraction where the control ends [-], in [0, 1].
+    hinge_x_c : float
+        Hinge position, fraction of the local chord from the leading edge [-],
+        in (0, 1).
+    deflection : float
+        Deflection angle [rad], positive right-hand rotation about the strip hinge axis.
+    symmetric : bool
+        If True, symmetric deflection on left copy; if False, antisymmetric.
+    """
+
+    name: str = "flap"
+    eta_start: float = 0.0
+    eta_end: float = 1.0
+    hinge_x_c: float = 0.75
+    deflection: float = 0.0
+    symmetric: bool = True
+
+    def clone(self) -> ControlSurface:
+        """Fast explicit clone avoiding reflection."""
+        return ControlSurface(
+            name=self.name,
+            eta_start=self.eta_start,
+            eta_end=self.eta_end,
+            hinge_x_c=self.hinge_x_c,
+            deflection=self.deflection,
+            symmetric=self.symmetric,
+        )
+
+    def __copy__(self) -> ControlSurface:
+        return self.clone()
+
+    def __deepcopy__(self, memo: dict) -> ControlSurface:
+        return self.clone()
+
+    @property
+    def deflection_deg(self) -> float:
+        """Deflection angle in degrees [deg]."""
+        return float(np.degrees(self.deflection))
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # Wing geometry
 # ═══════════════════════════════════════════════════════════════════════════════
 
@@ -442,6 +497,7 @@ class LiftingSurface:
     n_panels: int | None = None
     spacing: str | None = None
     mirror_y: bool = False
+    controls: list[ControlSurface] = field(default_factory=list)
 
     def clone(self) -> LiftingSurface:
         """Fast explicit clone."""
@@ -457,6 +513,7 @@ class LiftingSurface:
             n_panels=self.n_panels,
             spacing=self.spacing,
             mirror_y=self.mirror_y,
+            controls=[c.clone() for c in self.controls],
         )
 
     def mirrored(self, name: str | None = None) -> LiftingSurface:
@@ -543,6 +600,44 @@ class Aircraft:
 
     def __deepcopy__(self, memo: dict) -> Aircraft:
         return self.clone()
+
+    def control_names(self) -> list[str]:
+        """Return the sorted, unique control surface names across all surfaces."""
+        names = {c.name for surf in self.surfaces for c in getattr(surf, "controls", [])}
+        return sorted(names)
+
+    def set_deflection(self, name: str, deflection: float) -> int:
+        """Set the deflection [rad] of every control with this name on all surfaces.
+
+        Parameters
+        ----------
+        name : str
+            Control surface name.
+        deflection : float
+            Deflection angle [rad].
+
+        Returns
+        -------
+        int
+            Number of control surfaces updated.
+
+        Raises
+        ------
+        ValueError
+            If no control surface with *name* exists on any surface.
+        """
+        known = self.control_names()
+        if name not in known:
+            raise ValueError(
+                f"Unknown control surface {name!r}; known control names: {known}."
+            )
+        count = 0
+        for surf in self.surfaces:
+            for c in getattr(surf, "controls", []):
+                if c.name == name:
+                    c.deflection = float(deflection)
+                    count += 1
+        return count
 
     def moment_reference(self) -> np.ndarray:
         """Moment reference point [m] in geometry axes (the origin if ``ref_point`` is None)."""
@@ -1251,6 +1346,17 @@ def aircraft_to_json(ac: Aircraft) -> str:
                 "z_le": sec.z_le,
                 "airfoil": _airfoil_to_dict(sec.airfoil),
             })
+        controls = [
+            {
+                "name": c.name,
+                "eta_start": c.eta_start,
+                "eta_end": c.eta_end,
+                "hinge_x_c": c.hinge_x_c,
+                "deflection": c.deflection,
+                "symmetric": c.symmetric,
+            }
+            for c in getattr(surf, "controls", [])
+        ]
         surfaces.append({
             "name": surf.name,
             "semi_span": surf.semi_span,
@@ -1263,6 +1369,7 @@ def aircraft_to_json(ac: Aircraft) -> str:
             "n_panels": surf.n_panels,
             "spacing": surf.spacing,
             "mirror_y": surf.mirror_y,
+            "controls": controls,
         })
     data = {
         "name": ac.name,
@@ -1291,6 +1398,17 @@ def aircraft_from_json(text: str) -> Aircraft:
                 z_le=sec_d.get("z_le"),
                 airfoil=_airfoil_from_dict(sec_d["airfoil"]),
             ))
+        controls = [
+            ControlSurface(
+                name=cd["name"],
+                eta_start=cd["eta_start"],
+                eta_end=cd["eta_end"],
+                hinge_x_c=cd["hinge_x_c"],
+                deflection=cd["deflection"],
+                symmetric=cd.get("symmetric", True),
+            )
+            for cd in sd.get("controls", [])
+        ]
         surfaces.append(LiftingSurface(
             name=sd.get("name", "Surface"),
             semi_span=sd["semi_span"],
@@ -1303,6 +1421,7 @@ def aircraft_from_json(text: str) -> Aircraft:
             n_panels=sd.get("n_panels", None),
             spacing=sd.get("spacing", None),
             mirror_y=sd.get("mirror_y", False),
+            controls=controls,
         ))
     return Aircraft(
         name=data.get("name", "Aircraft"),
