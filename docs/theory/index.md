@@ -24,6 +24,7 @@ The chapters contain no result values. The values of the model parameters come f
 | [Forces and moments](forces_and_moments.md) | Kutta-Joukowski near-field forces, Trefftz-plane induced drag, section data, static derivatives | Katz and Plotkin (2001); Drela (2014); E. Trefftz (1921) |
 | [Ground effect](ground_effect.md) | Method of images over flat ground, height and bank derivatives, Irodov criterion | C. Wieselsberger (1921); K. V. Rozhdestvensky (2000, 2006); R. D. Irodov (1970) |
 | [Control surfaces](control_surfaces.md) | Thin-airfoil flap theory, panel deflection and section modification | H. Glauert (1926); I. H. Abbott and A. E. von Doenhoff (1959) |
+| [Trim solver](trim.md) | Longitudinal and lateral trim for target lift and zero moments | B. Etkin and L. D. Reid (1996); J. E. Dennis and R. B. Schnabel (1996) |
 | [Symmetry](symmetry.md) | Use of the mirror symmetry of the flow | Katz and Plotkin (2001) |
 | [Trust score and error bars](trust_score.md) | Envelope checks (experimental) and the planned error-bar layers | W. L. Oberkampf and C. J. Roy (2010); ASME V&V 20 (2009); P. J. Roache (1998) |
 
@@ -39,6 +40,7 @@ vortex_lattice
 forces_and_moments
 ground_effect
 control_surfaces
+trim
 symmetry
 trust_score
 ```

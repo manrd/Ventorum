@@ -48,6 +48,10 @@ from ventorum.solvers import (  # noqa: F401
     LinearSolver,
     NonlinearSolver,
 )
+from ventorum.solvers.trimming import (  # noqa: F401
+    TrimResult,
+    trim,
+)
 from ventorum.aero.polars import (  # noqa: F401
     load_xfoil_polar,
     load_csv_polar,

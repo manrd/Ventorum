@@ -26,6 +26,7 @@ how_to_backends
 how_to_gpu
 how_to_sweeps
 how_to_ground_effect
+how_to_trim
 ```
 
 ## Reference
