@@ -49,6 +49,7 @@ from ventorum.core.datatypes import (
     SolverSettings,
 )
 from ventorum.core.constants import RHO_SL
+from ventorum.geometry import lattice_cache
 from ventorum.geometry.lattice import VortexLattice, build_lattice, lattice_to_discretized
 from ventorum.ground_effect.state import GroundEffectCondition, GroundEffectResult
 from ventorum.solvers.factory import make_solver, resolve_solver_type
@@ -127,7 +128,11 @@ def place_ground(
     probe : VortexLattice
         Lattice with one chordwise panel that was used to place the ground.
     """
-    probe = build_lattice(aircraft, settings, collocation="vlm", n_chord=1)
+    chord_spacing = getattr(settings, "chord_spacing", "uniform")
+    key = lattice_cache.lattice_key(aircraft, settings, "vlm", 1, chord_spacing)
+    probe = lattice_cache.get_or_build(
+        key, lambda: build_lattice(aircraft, settings, collocation="vlm", n_chord=1, chord_spacing=chord_spacing)
+    )
     p, mode = plane_reference(aircraft, ref_point, height_ref)
     gp = make_ground_plane(probe, h, alpha, beta, phi, ref_point=p, height_ref=mode)
     return gp, probe
@@ -202,7 +207,11 @@ def find_bank_strike_limit(
     up to the search limit, so the true limit is larger), and 0 if the level
     attitude already touches.
     """
-    probe = build_lattice(aircraft, settings, collocation="vlm", n_chord=1)
+    chord_spacing = getattr(settings, "chord_spacing", "uniform")
+    key = lattice_cache.lattice_key(aircraft, settings, "vlm", 1, chord_spacing)
+    probe = lattice_cache.get_or_build(
+        key, lambda: build_lattice(aircraft, settings, collocation="vlm", n_chord=1, chord_spacing=chord_spacing)
+    )
     pts = probe.all_points()
     alpha, beta = np.radians(alpha_deg), np.radians(beta_deg)
     rp = np.asarray(ref_point, dtype=float)
