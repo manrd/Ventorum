@@ -294,6 +294,7 @@ class VortexLattice:
         Strip chord [m].
     twist : numpy.ndarray
         Strip twist, with the incidence of the surface [rad].
+        Keeps the undeformed (jig) twist; the deformed shape is in the nodes.
     width : numpy.ndarray
         Strip width [m].
     area : numpy.ndarray
@@ -767,6 +768,59 @@ def build_lattice(
         spacing = resolve_spacing(surf.spacing if surf.spacing is not None else settings.spacing, surf, collocation)
         eta_e, eta_mid = _surface_eta(surf, int(n_sp), spacing)
         geo = surface_edge_geometry(surf, eta_e)
+        d = getattr(surf, "node_displacements", None)
+        if d is not None:
+            expected_shape = (len(eta_e), 3)
+            if d.le.shape != expected_shape:
+                raise ValueError(
+                    f"[{surf.name}] node_displacements.le has shape {d.le.shape}, expected {expected_shape}. "
+                    "Use ventorum.geometry.undeformed_nodes to get the node positions of the mesh."
+                )
+            if d.te.shape != expected_shape:
+                raise ValueError(
+                    f"[{surf.name}] node_displacements.te has shape {d.te.shape}, expected {expected_shape}. "
+                    "Use ventorum.geometry.undeformed_nodes to get the node positions of the mesh."
+                )
+            if not np.all(np.isfinite(d.le)):
+                raise ValueError(f"[{surf.name}] node_displacements.le contains non-finite values.")
+            if not np.all(np.isfinite(d.te)):
+                raise ValueError(f"[{surf.name}] node_displacements.te contains non-finite values.")
+            max_le = float(np.max(np.linalg.norm(d.le, axis=1))) if d.le.size else 0.0
+            max_te = float(np.max(np.linalg.norm(d.te, axis=1))) if d.te.size else 0.0
+            if max_le > surf.semi_span * (1.0 + 1e-9):
+                raise ValueError(
+                    f"[{surf.name}] node_displacements.le has displacement {max_le:.4g} m larger than semi-span {surf.semi_span:.4g} m."
+                )
+            if max_te > surf.semi_span * (1.0 + 1e-9):
+                raise ValueError(
+                    f"[{surf.name}] node_displacements.te has displacement {max_te:.4g} m larger than semi-span {surf.semi_span:.4g} m."
+                )
+            le_e = geo["le"] + d.le
+            te_e = geo["te"] + d.te
+            chord_undef = geo["chord"]
+            chord_def = np.linalg.norm(te_e - le_e, axis=1)
+            if np.any(chord_def <= 1e-6 * chord_undef):
+                k = int(np.flatnonzero(chord_def <= 1e-6 * chord_undef)[0])
+                raise ValueError(
+                    f"[{surf.name}] node_displacements: deformed chord at edge {k} ({chord_def[k]:.4g} m) "
+                    f"is not larger than 1e-6 times undeformed chord ({chord_undef[k]:.4g} m)."
+                )
+            qc_undef = geo["le"] + 0.25 * (geo["te"] - geo["le"])
+            dl_undef = qc_undef[1:] - qc_undef[:-1]
+            width_undef = np.sqrt(dl_undef[:, 1] ** 2 + dl_undef[:, 2] ** 2)
+            qc_def = le_e + 0.25 * (te_e - le_e)
+            dl_def = qc_def[1:] - qc_def[:-1]
+            width_def = np.sqrt(dl_def[:, 1] ** 2 + dl_def[:, 2] ** 2)
+            if np.any(width_def <= 1e-6 * width_undef):
+                k = int(np.flatnonzero(width_def <= 1e-6 * width_undef)[0])
+                raise ValueError(
+                    f"[{surf.name}] node_displacements: deformed strip width of strip {k} ({width_def[k]:.4g} m) "
+                    f"is not larger than 1e-6 times undeformed width ({width_undef[k]:.4g} m)."
+                )
+            edge_chord_half = chord_def
+        else:
+            le_e, te_e = geo["le"], geo["te"]
+            edge_chord_half = geo["chord"]
         # Fraction of the strip width (root edge to tip edge) where the control point is.
         frac_r = (eta_mid - eta_e[:-1]) / np.maximum(eta_e[1:] - eta_e[:-1], 1e-300)
         n_r = len(eta_mid)
@@ -846,7 +900,6 @@ def build_lattice(
             not c.symmetric and abs(c.deflection) > 1e-12 for c in controls
         )
 
-        le_e, te_e = geo["le"], geo["te"]
         mirror = np.array([1.0, -1.0, 1.0])
         if surf.is_symmetric and getattr(surf, "mirror_y", False):
             raise ValueError(f"[{surf.name}] mirror_y=True needs is_symmetric=False.")
@@ -864,7 +917,7 @@ def build_lattice(
             te_left_e = (te_e * mirror)[::-1]
             edge_le = np.vstack([le_left_e, le_e[1:]])
             edge_te = np.vstack([te_left_e, te_e[1:]])
-            edge_chord = np.concatenate([geo["chord"][::-1], geo["chord"][1:]])
+            edge_chord = np.concatenate([edge_chord_half[::-1], edge_chord_half[1:]])
             edge_twist = np.concatenate([geo["twist"][::-1], geo["twist"][1:]])
 
             if not is_chordwise and controls:
@@ -905,7 +958,7 @@ def build_lattice(
             # (tip to root), as on the left half of a symmetric surface.
             edge_le = (le_e * mirror)[::-1]
             edge_te = (te_e * mirror)[::-1]
-            edge_chord, edge_twist = geo["chord"][::-1], geo["twist"][::-1]
+            edge_chord, edge_twist = edge_chord_half[::-1], geo["twist"][::-1]
             if not is_chordwise and controls:
                 afs = []
                 for j in range(n_r):
@@ -933,7 +986,7 @@ def build_lattice(
             ctrl_surf = [ctrl_for_k[n_r - 1 - j] for j in range(n_r)]
         else:
             edge_le, edge_te = le_e, te_e
-            edge_chord, edge_twist = geo["chord"], geo["twist"]
+            edge_chord, edge_twist = edge_chord_half, geo["twist"]
             afs = right_af
             props = right_props
             eta_s = eta_mid

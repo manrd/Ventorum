@@ -81,6 +81,8 @@ def _check_geometry_in_model(surf: LiftingSurface) -> None:
 
     Raises
     ------
+    ValueError
+        If the surface has node displacements set.
     ValidityError
         If the quarter-chord line sweeps more than ``SWEEP_LIMIT_DEG`` on a
         spanwise interval between two sections, or if a section has a
@@ -88,6 +90,13 @@ def _check_geometry_in_model(surf: LiftingSurface) -> None:
         ``PLANAR_TOL_FRACTION`` times the semi-span. The message names the
         vortex lattice (``solver_type="vlm"``) as the solver to use.
     """
+    if getattr(surf, "node_displacements", None) is not None:
+        raise ValueError(
+            f"The Fourier solver cannot model deformed geometry with node displacements "
+            f"(surface '{surf.name}' has node_displacements set). "
+            "Use the vortex lattice solver (solver_type='vlm') or lifting line solvers "
+            "(solver_type='linear' or 'nonlinear')."
+        )
     use_vlm = 'Use the vortex lattice solver: solver_type="vlm".'
     b = surf.semi_span
     z_tol = PLANAR_TOL_FRACTION * b

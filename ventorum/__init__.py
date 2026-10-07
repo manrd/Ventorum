@@ -29,6 +29,7 @@ from ventorum.core.datatypes import (  # noqa: F401
     IntegratedResult,
     LinearAirfoil,
     LiftingSurface,
+    NodeDisplacements,
     SolverResult,
     SolverSettings,
     SpanwiseResult,

@@ -48,6 +48,30 @@ aircraft = Aircraft(surfaces=[wing, htail])
 aircraft_pitched = aircraft.set_deflection("elevator", np.radians(-2.0))
 ```
 
+## Deformed geometry
+
+A user can set displacements of the lattice nodes on a `LiftingSurface` using `NodeDisplacements`. Displacements are specified for the leading-edge and trailing-edge nodes on the defining half (root to tip):
+
+```python
+import numpy as np
+from ventorum import LiftingSurface, NodeDisplacements
+from ventorum.geometry import undeformed_nodes, displacements_from_section_motion
+
+# Extract the undeformed lattice nodes for the target mesh
+nodes = undeformed_nodes(aircraft, solver="vlm")["Wing"]
+
+# Create displacements from section heave and twist
+n_edges = len(nodes["eta"])
+heave = 0.05 * (nodes["eta"] ** 2)
+twist = np.zeros(n_edges)
+disp = displacements_from_section_motion(nodes, heave=heave, twist=twist)
+
+# Assign displacements to the surface
+wing.node_displacements = disp
+```
+
+Symmetric surfaces and mirror copies mirror the displacements across the plane y = 0.
+
 ## Save and load
 
 ```python

@@ -51,6 +51,12 @@ Derivation of the shift: consider one panel of chord $c$ in two-dimensional flow
 
 Camber enters through the zero-lift angle. The normal of the boundary condition, $\hat{\mathbf n}_{bc}$, is the geometric normal of the strip turned nose up by $-\alpha_{L0}$ about the spanwise axis in the y-z plane (the same axis as the twist). The section data are defined in streamwise sections, so camber then acts as the same incidence also on a swept surface.
 
+### Deformed geometry
+
+Node displacements define deformed geometry for aeroelastic analysis. A user provides displacements of the leading-edge and trailing-edge lattice nodes on the defining half of each surface in geometry axes. Displacements are added to the undeformed edge coordinates. For symmetric surfaces and mirror copies, the defining half is displaced and mirrored across the plane y = 0.
+
+Reference values ($S_{\text{ref}}$, $b_{\text{ref}}$, $c_{\text{ref}}$) and the moment reference point stay on the undeformed geometry. This matches the standard convention for flexible aircraft. The strip twist array keeps the undeformed jig twist. The panel nodes and boundary normals follow the displaced geometry. The trailing wake leaves the deformed trailing edge along the free stream or the body axis, as in the undeformed formulation.
+
 ## Equations
 
 The flow-tangency condition at the control point $\mathbf P_i$ of panel $i$ is
