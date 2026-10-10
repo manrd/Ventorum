@@ -58,6 +58,16 @@ from ventorum.solvers.trimming import (  # noqa: F401
     TrimResult,
     trim,
 )
+from ventorum.solvers.control_derivatives import (  # noqa: F401
+    ControlDerivatives,
+    ControlDerivativesResult,
+    HingeMomentDerivatives,
+    control_derivatives,
+)
+from ventorum.aero.hinge import (  # noqa: F401
+    HingeMoment,
+    hinge_moments,
+)
 from ventorum.aero.polars import (  # noqa: F401
     load_xfoil_polar,
     load_csv_polar,

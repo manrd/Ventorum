@@ -10,6 +10,14 @@ a minor version can change a public interface.
 
 ### Added
 
+- Control derivatives and hinge moments: `control_derivatives` gives, for each control name, the
+  derivatives of CL, CD, CY, Cl, Cm and Cn per unit deflection (central differences, one-sided near
+  the 30 deg limit; moments in body, stability or wind axes), and for each copy of each control the
+  hinge-moment coefficient with its derivatives in deflection and angle of attack. `hinge_moments`
+  gives the hinge moments of one solved case: from the bound-vortex forces of the flap panels
+  (vortex lattice with two or more chordwise panels) or from thin-airfoil section theory (lifting
+  lines). `hinge_moment_derivatives` gives the thin-airfoil Ch_alpha and Ch_delta of a plain flap
+  (Glauert 1926).
 - Numerical error bars (layer 1 of the error bars): `numerical_error_bars` solves a case on three
   spanwise mesh levels and gives, for each coefficient, an interval from the grid convergence
   index (Roache 1998) with the observed order of Celik et al. (2008). Each bar states its

@@ -27,6 +27,7 @@ from ventorum.core.datatypes import (
 __all__ = [
     "flap_effectiveness",
     "flap_moment_derivative",
+    "hinge_moment_derivatives",
     "deflected_airfoil",
     "validate_controls",
 ]
@@ -95,6 +96,67 @@ def flap_moment_derivative(hinge_x_c: float) -> float:
         return 0.0
     theta_h = float(np.arccos(np.clip(1.0 - 2.0 * h, -1.0, 1.0)))
     return float(-0.5 * np.sin(theta_h) * (1.0 - np.cos(theta_h)))
+
+
+def hinge_moment_derivatives(hinge_x_c: float) -> tuple[float, float]:
+    """Compute the section hinge-moment derivatives of a plain flap from thin-airfoil theory.
+
+    The section hinge moment of a flap aft of ``x/c = hinge_x_c`` is
+    ``Ch = Ch_alpha * alpha + Ch_delta * delta``, with ``alpha`` the angle of
+    attack of the flat plate ahead of the hinge and ``delta`` the flap
+    deflection. The hinge moment is about the hinge line, positive when it
+    tends to increase the deflection (trailing edge down). The coefficient is
+    ``Ch = H' / (q c_f^2)``, with ``H'`` the hinge moment per unit span
+    [N m/m], ``q`` the dynamic pressure [Pa] and ``c_f = (1 - hinge_x_c) c``
+    the flap chord [m].
+
+    With ``x/c = (1 - cos(theta)) / 2``, ``theta_h = arccos(1 - 2 hinge_x_c)``
+    and ``E = 1 - hinge_x_c``, the integral of the thin-airfoil load
+    (Glauert's series) times the arm aft of the hinge gives::
+
+        Ch_alpha = -((pi - theta_h) (cos(theta_h) - 1/2)
+                     + sin(theta_h) (1 - cos(theta_h) / 2)) / E^2
+        Ch_delta = (1 - theta_h / pi) Ch_alpha
+                   - sin(theta_h) ((pi - theta_h) cos(theta_h) + sin(theta_h)) / (2 pi E^2)
+
+    The first term of ``Ch_delta`` is the load of the flat plate at the
+    angle ``(1 - theta_h / pi) delta``; the second is the load of the
+    flap series terms (a logarithmic load at the hinge). At ``hinge_x_c -> 0``
+    both derivatives go to ``-pi/2`` (moment of a flat plate about its
+    leading edge). At ``hinge_x_c -> 1``, ``Ch_alpha -> 0`` and
+    ``Ch_delta -> -8 / (3 pi)``.
+
+    Parameters
+    ----------
+    hinge_x_c : float
+        Hinge chordwise position as a fraction of local chord from the
+        leading edge [-], in (0, 1).
+
+    Returns
+    -------
+    tuple of float
+        ``(Ch_alpha, Ch_delta)`` [1/rad], both negative.
+
+    Raises
+    ------
+    ValueError
+        If *hinge_x_c* is not in the open interval (0, 1).
+
+    References
+    ----------
+    H. Glauert, The Elements of Aerofoil and Airscrew Theory, Cambridge
+    University Press, 1926: thin-airfoil theory and the Fourier series of
+    the load of a cambered (flapped) section.
+    """
+    h = float(hinge_x_c)
+    if not (0.0 < h < 1.0):
+        raise ValueError(f"hinge_x_c must satisfy 0 < hinge_x_c < 1, got {hinge_x_c}.")
+    theta_h = float(np.arccos(1.0 - 2.0 * h))
+    c, s = float(np.cos(theta_h)), float(np.sin(theta_h))
+    e2 = (1.0 - h) ** 2
+    ch_alpha = -((np.pi - theta_h) * (c - 0.5) + s * (1.0 - 0.5 * c)) / e2
+    ch_delta = (1.0 - theta_h / np.pi) * ch_alpha - s * ((np.pi - theta_h) * c + s) / (2.0 * np.pi * e2)
+    return float(ch_alpha), float(ch_delta)
 
 
 def deflected_airfoil(airfoil: AirfoilType, delta: float, hinge_x_c: float) -> AirfoilType:

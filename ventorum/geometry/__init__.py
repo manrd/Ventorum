@@ -23,6 +23,7 @@ from ventorum.geometry.transform import (
 from ventorum.geometry.controls import (
     flap_effectiveness,
     flap_moment_derivative,
+    hinge_moment_derivatives,
     deflected_airfoil,
     validate_controls,
 )
@@ -47,6 +48,7 @@ __all__ = [
     "transform_lattice",
     "flap_effectiveness",
     "flap_moment_derivative",
+    "hinge_moment_derivatives",
     "deflected_airfoil",
     "validate_controls",
     "undeformed_nodes",
