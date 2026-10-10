@@ -70,6 +70,15 @@ DIVERGENT_NOTE = (
     "no numerical error bar: the coefficient diverges with mesh refinement"
 )
 
+#: Note of a bar with a value that is not finite at one mesh level.
+NON_FINITE_NOTE = "a mesh-level value is not finite"
+
+#: Note of a result without a CD bar because the drag basis changes.
+DRAG_BASIS_NOTE = (
+    "no CD bar: the fine level has profile drag, but a coarser level has "
+    "no CD_total, so the drag basis is not the same at the three levels"
+)
+
 #: Note of a bar whose observed-order iteration did not converge.
 NOT_CONVERGED_ORDER_NOTE = (
     "the observed order of convergence was not found; "
@@ -83,6 +92,17 @@ MIN_FINE_PANELS = 16
 #: and the order is clipped to this range (project decision).
 ORDER_LOWER = 0.5
 ORDER_UPPER = 4.0
+
+
+def _json_float(value: float | None) -> float | None:
+    """Return *value* as a float, or None when it is None or not finite.
+
+    Strict JSON has no NaN and no infinity, so these become None.
+    """
+    if value is None:
+        return None
+    number = float(value)
+    return number if math.isfinite(number) else None
 
 
 @dataclass(slots=True)
@@ -125,21 +145,20 @@ class LayerContribution:
     values: list[float] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
-        """Return the contribution as a dict with JSON types only."""
-        half = self.half_width
-        order = self.observed_order
-        safety = self.safety_factor
-        f_ext = self.f_extrapolated
+        """Return the contribution as a dict with JSON types only.
+
+        A number that is not finite becomes None (strict JSON).
+        """
         return {
             "layer": str(self.layer),
-            "half_width": None if half is None else float(half),
+            "half_width": _json_float(self.half_width),
             "method": str(self.method),
             "state": str(self.state),
-            "observed_order": None if order is None else float(order),
-            "safety_factor": None if safety is None else float(safety),
-            "f_extrapolated": None if f_ext is None else float(f_ext),
+            "observed_order": _json_float(self.observed_order),
+            "safety_factor": _json_float(self.safety_factor),
+            "f_extrapolated": _json_float(self.f_extrapolated),
             "levels": [int(n) for n in self.levels],
-            "values": [float(v) for v in self.values],
+            "values": [_json_float(v) for v in self.values],
         }
 
 
@@ -199,17 +218,17 @@ class ErrorBar:
         return layer.half_width if layer is not None else None
 
     def to_dict(self) -> dict[str, Any]:
-        """Return the bar as a dict with JSON types only."""
-        low = self.interval_low
-        high = self.interval_high
-        cover = self.coverage
+        """Return the bar as a dict with JSON types only.
+
+        A number that is not finite becomes None (strict JSON).
+        """
         return {
             "name": str(self.name),
-            "value": float(self.value),
-            "interval_low": None if low is None else float(low),
-            "interval_high": None if high is None else float(high),
+            "value": _json_float(self.value),
+            "interval_low": _json_float(self.interval_low),
+            "interval_high": _json_float(self.interval_high),
             "status": str(self.status),
-            "coverage": None if cover is None else float(cover),
+            "coverage": _json_float(self.coverage),
             "layers": {k: v.to_dict() for k, v in self.layers.items()},
             "notes": [str(n) for n in self.notes],
         }
@@ -223,7 +242,9 @@ class ErrorBarResult:
     ----------
     bars : dict[str, ErrorBar]
         Bars keyed by coefficient (``"CL"``, ``"CD"``, ``"CY"``,
-        ``"Cl"``, ``"Cm"``, ``"Cn"``).
+        ``"Cl"``, ``"Cm"``, ``"Cn"``). The ``"CD"`` bar is not present
+        when the drag basis is not the same at the three levels; a note
+        then says so.
     axes : str
         Moment axis system of the Cl, Cm and Cn bars (``"body"``,
         ``"stability"`` or ``"wind"``).
@@ -447,20 +468,24 @@ def coefficient_error_bar(
 
     * ``"roundoff"``: the changes are at round-off level. The half-width
       is ``3 * max(|eps21|, |eps32|)``.
-    * ``"monotonic"`` (``0 <= R < 1``): the observed order comes from
+    * ``"monotonic"`` (``0 < R < 1``): the observed order comes from
       :func:`observed_order`. With ``0.5 <= p <= 4.0`` the safety factor
       is 1.25, else it is 3.0 with the order clipped to [0.5, 4.0]. The
       half-width is ``Fs * |eps21| / (r21^p_used - 1)``.
     * ``"oscillatory"`` (``R < 0``): the half-width is
       ``3.0 * 0.5 * (max - min)`` of the three values (project decision).
-    * ``"divergent"`` (``R >= 1``): the change grows with refinement, so
-      there is no interval.
-    * ``"not_converged_order"``: monotonic values whose observed-order
-      iteration fails. The half-width is ``3.0 * |eps21|`` (a simple
-      conservative project rule).
+    * ``"divergent"`` (``R >= 1``, or ``eps32 = 0`` with ``eps21 != 0``):
+      the change grows with refinement, so there is no interval.
+    * ``"not_converged_order"``: monotonic values (``0 <= R < 1``) whose
+      observed-order iteration fails. The half-width is ``3.0 * |eps21|``
+      (a simple conservative project rule). At ``R = 0`` (``eps21 = 0``)
+      this rule gives zero, so the half-width is
+      ``3.0 * max(|eps21|, |eps32|)`` there.
 
     A bar with an interval is centred on the fine-level value f1 (not on
-    the extrapolated value).
+    the extrapolated value). A value that is not finite gives the state
+    ``"divergent"`` without an interval and only the note that a
+    mesh-level value is not finite.
 
     Parameters
     ----------
@@ -475,24 +500,31 @@ def coefficient_error_bar(
     -------
     ErrorBar
         Bar with status ``"numerical_only"`` and coverage None.
+
+    Raises
+    ------
+    ValueError
+        If *levels* is not strictly decreasing (``N1 > N2 > N3 >= 1``,
+        fine level first).
     """
     f1, f2, f3 = (float(values[0]), float(values[1]), float(values[2]))
     n1, n2, n3 = (int(levels[0]), int(levels[1]), int(levels[2]))
+    if not (n1 > n2 > n3 >= 1):
+        raise ValueError(
+            f"levels={[n1, n2, n3]} must be strictly decreasing positive panel "
+            "counts [N1, N2, N3], with the fine level first."
+        )
     r21, r32 = refinement_ratios([n1, n2, n3])
     notes: list[str] = []
 
-    finite = math.isfinite(f1) and math.isfinite(f2) and math.isfinite(f3)
-    fine_ratios = math.isfinite(r21) and math.isfinite(r32) and r21 > 1.0 and r32 > 1.0
-    if not finite or not fine_ratios:
+    if not (math.isfinite(f1) and math.isfinite(f2) and math.isfinite(f3)):
         layer = LayerContribution(
             half_width=None,
             state="divergent",
             levels=[n1, n2, n3],
             values=[f1, f2, f3],
         )
-        notes.append(DIVERGENT_NOTE)
-        if not finite:
-            notes.append("a mesh-level value is not finite")
+        notes.append(NON_FINITE_NOTE)
         return ErrorBar(
             name=name,
             value=f1,
@@ -524,32 +556,11 @@ def coefficient_error_bar(
             notes=notes,
         )
 
-    if eps32 == 0.0:
-        if eps21 > 0.0:
-            big_r = math.inf
-        elif eps21 < 0.0:
-            big_r = -math.inf
-        else:
-            big_r = math.nan
-    else:
-        big_r = eps21 / eps32
-
-    if math.isnan(big_r):
-        layer = LayerContribution(
-            half_width=0.0,
-            state="roundoff",
-            levels=[n1, n2, n3],
-            values=[f1, f2, f3],
-        )
-        return ErrorBar(
-            name=name,
-            value=f1,
-            interval_low=f1,
-            interval_high=f1,
-            status="numerical_only",
-            layers={"numerical": layer},
-            notes=notes,
-        )
+    # Here the values are not at round-off, so eps21 and eps32 are not both
+    # zero. With eps32 = 0 the coarse step has no change but the fine step
+    # has one: the change grows with refinement whatever its sign, so R is
+    # set to +inf (divergent).
+    big_r = math.inf if eps32 == 0.0 else eps21 / eps32
 
     if big_r < 0.0:
         half = 1.5 * (max(f1, f2, f3) - min(f1, f2, f3))
@@ -587,7 +598,13 @@ def coefficient_error_bar(
 
     order = observed_order(f1, f2, f3, r21, r32)
     if order is None or not math.isfinite(order):
-        half = 3.0 * abs(eps21)
+        if eps21 == 0.0:
+            # R = 0: the fine and medium values are equal but the coarse
+            # value is not. 3 * |eps21| would give a zero half-width, so
+            # use 3 * max(|eps21|, |eps32|) (project decision).
+            half = 3.0 * max(abs(eps21), abs(eps32))
+        else:
+            half = 3.0 * abs(eps21)
         layer = LayerContribution(
             half_width=half,
             state="not_converged_order",
@@ -643,27 +660,39 @@ def _surface_clip_note(
     the same panel count on two mesh levels. The check reads the strip
     count of each surface from the lattice of each level. Levels without
     a lattice (Fourier solver) give no note.
+
+    Parameters
+    ----------
+    base_settings : SolverSettings
+        Settings of the fine level (they give ``min_panels``).
+    results : list[SolverResult]
+        Solver results of the fine, medium and coarse levels.
+
+    Returns
+    -------
+    str or None
+        The note for the first surface that was not refined, or None.
     """
-    try:
-        lattices = [res.details.get("lattice") for res in results]
-        if any(lat is None for lat in lattices):
-            return None
-        n_surf = len(lattices[0].surfaces)
-        if any(len(lat.surfaces) != n_surf for lat in lattices):
-            return None
-        names = [sw.surface_name for sw in results[0].spanwise]
-        for index in range(n_surf):
-            counts = [len(lat.surfaces[index].strips) for lat in lattices]
-            if not (counts[0] > counts[1] > counts[2]):
-                label = names[index] if index < len(names) else f"surface {index}"
-                floor = int(base_settings.min_panels)
-                return (
-                    f"proportional panels with min_panels={floor}: the {label!r} "
-                    f"surface has the same panel count at two mesh levels, "
-                    "so it was not refined with the others"
-                )
-    except (AttributeError, IndexError, KeyError, TypeError, ValueError):
+    lattices = [res.details.get("lattice") for res in results]
+    if any(lat is None for lat in lattices):
         return None
+    n_surf = len(lattices[0].surfaces)
+    if any(len(lat.surfaces) != n_surf for lat in lattices):
+        return None
+    for index in range(n_surf):
+        # ``strips`` is a slice of the strip arrays of the lattice.
+        counts = [
+            lat.surfaces[index].strips.stop - lat.surfaces[index].strips.start
+            for lat in lattices
+        ]
+        if not (counts[0] > counts[1] > counts[2]):
+            label = lattices[0].surfaces[index].name
+            floor = int(base_settings.min_panels)
+            return (
+                f"proportional panels with min_panels={floor}: the {label!r} "
+                f"surface has the same panel count at two mesh levels, "
+                "so it was not refined with the others"
+            )
     return None
 
 
@@ -777,24 +806,26 @@ def numerical_error_bars(
         level_results.append(analyze(level_aircraft, condition=cond, settings=level_settings))
 
     fine = level_results[0]
+    notes = [LAYER_NOTE]
     use_total = fine.totals.CDp is not None
+    drag_ok = True
     if use_total:
         drag_basis = "CD_total (induced + profile)"
-
-        def drag_of(res: SolverResult) -> float:
-            total = res.totals.CD_total
-            return float(total) if total is not None else float(res.totals.CDi)
+        # Use the same basis at the three levels. Do not mix CD_total and
+        # CDi: when a level has no CD_total, give no CD bar.
+        drag_ok = all(res.totals.CD_total is not None for res in level_results)
+        if not drag_ok:
+            notes.append(DRAG_BASIS_NOTE)
     else:
         drag_basis = "CDi only: the airfoils have no profile drag"
-
-        def drag_of(res: SolverResult) -> float:
-            return float(res.totals.CDi)
 
     series: dict[str, list[float]] = {name: [] for name in COEFFICIENT_NAMES}
     for res in level_results:
         moments = res.moments(axes)
         series["CL"].append(float(res.totals.CL))
-        series["CD"].append(drag_of(res))
+        if drag_ok:
+            drag = res.totals.CD_total if use_total else res.totals.CDi
+            series["CD"].append(float(drag))
         series["CY"].append(float(res.totals.CY))
         series["Cl"].append(float(moments["Cl"]))
         series["Cm"].append(float(moments["Cm"]))
@@ -803,8 +834,8 @@ def numerical_error_bars(
     bars = {
         name: coefficient_error_bar(name, series[name], levels)
         for name in COEFFICIENT_NAMES
+        if name != "CD" or drag_ok
     }
-    notes = [LAYER_NOTE]
     clip = _surface_clip_note(base, level_results) if base.proportional_panels else None
     if clip is not None:
         notes.append(clip)

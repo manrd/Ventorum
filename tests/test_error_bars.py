@@ -11,6 +11,7 @@ import pytest
 
 import ventorum as vt
 from ventorum.core.datatypes import (
+    Aircraft,
     FlightCondition,
     LiftingSurface,
     SolverSettings,
@@ -18,7 +19,11 @@ from ventorum.core.datatypes import (
     WingSection,
 )
 from ventorum.core.error_bars import (
+    DIVERGENT_NOTE,
+    DRAG_BASIS_NOTE,
     LAYER_NOTE,
+    NON_FINITE_NOTE,
+    NOT_CONVERGED_ORDER_NOTE,
     ErrorBar,
     coefficient_error_bar,
     mesh_levels,
@@ -200,7 +205,8 @@ def test_axes_change_only_moments():
     assert stab.bars["Cn"].value == pytest.approx(fine_moments["Cn"])
 
 
-def test_profile_drag_basis():
+def _tabulated_wing():
+    # Rectangular wing AR 8 with a tabulated airfoil that has profile drag.
     deg = np.array([-5.0, 0.0, 5.0, 10.0])
     tabulated = TabulatedAirfoil(
         name="tab",
@@ -208,7 +214,7 @@ def test_profile_drag_basis():
         Cl_data=np.array([-0.5, 0.0, 0.5, 1.0]),
         Cd_data=np.array([0.010, 0.008, 0.010, 0.015]),
     )
-    wing_tab = LiftingSurface(
+    return LiftingSurface(
         name="tab",
         semi_span=5.0,
         sections=[
@@ -216,6 +222,10 @@ def test_profile_drag_basis():
             WingSection(y_frac=1.0, chord=1.25, airfoil=tabulated),
         ],
     )
+
+
+def test_profile_drag_basis():
+    wing_tab = _tabulated_wing()
     condition = FlightCondition(alpha=np.radians(5.0))
     with_tab = numerical_error_bars(
         wing_tab, condition=condition, settings=SolverSettings(solver_type="vlm", n_panels=20)
@@ -268,3 +278,119 @@ def test_lifting_line_and_ground_effect_run():
             if bar.interval_low is not None:
                 assert math.isfinite(bar.interval_low)
                 assert math.isfinite(bar.interval_high)
+
+
+def _wing_and_tail():
+    # Wing (semi-span 5 m) and a small tail (semi-span 1 m) at x = 6 m.
+    wing = _rectangular_wing_ar8()
+    tail = LiftingSurface(
+        name="tail",
+        semi_span=1.0,
+        position=np.array([6.0, 0.0, 0.0]),
+        sections=[
+            WingSection(y_frac=0.0, chord=0.5),
+            WingSection(y_frac=1.0, chord=0.5),
+        ],
+    )
+    return Aircraft(name="wing_tail", surfaces=[wing, tail])
+
+
+def test_min_panels_note_names_the_small_surface():
+    # Regression: the strip count of a surface is a slice, and len() of a
+    # slice raised a TypeError that hid the note.
+    condition = FlightCondition(alpha=np.radians(5.0))
+    settings = SolverSettings(
+        solver_type="vlm", n_panels=24, proportional_panels=True, min_panels=8
+    )
+    result = numerical_error_bars(_wing_and_tail(), condition=condition, settings=settings)
+    clip_notes = [n for n in result.notes if "min_panels=8" in n]
+    assert len(clip_notes) == 1
+    assert "'tail'" in clip_notes[0]
+    assert "not refined with the others" in clip_notes[0]
+    single = numerical_error_bars(
+        _rectangular_wing_ar8(), condition=condition, settings=settings
+    )
+    assert not any("min_panels" in n for n in single.notes)
+
+
+@pytest.mark.parametrize(
+    "values",
+    [(1.0, 1.1, 1.1), (1.0, 0.9, 0.9), (-1.0, -1.1, -1.1), (-1.0, -0.9, -0.9)],
+)
+def test_zero_coarse_change_is_divergent_for_both_signs(values):
+    # Regression: with eps32 = 0 and eps21 != 0 the state depended on the
+    # sign of eps21 (divergent or oscillatory). Index 1 is the fine mesh.
+    bar = coefficient_error_bar("CL", list(values), [40, 28, 20])
+    layer = bar.layers["numerical"]
+    assert layer.state == "divergent"
+    assert layer.half_width is None
+    assert bar.interval_low is None
+    assert bar.interval_high is None
+    assert DIVERGENT_NOTE in bar.notes
+
+
+def test_zero_fine_change_gives_nonzero_half_width():
+    # Regression: R = 0 (f1 = f2, f3 different) gave a zero half-width.
+    # eps21 = 0, eps32 = 0.05: U = 3 * max(0, 0.05) = 0.15.
+    bar = coefficient_error_bar("CL", [1.0, 1.0, 1.05], [40, 28, 20])
+    layer = bar.layers["numerical"]
+    assert layer.state == "not_converged_order"
+    assert layer.half_width == pytest.approx(0.15)
+    assert bar.interval_low == pytest.approx(0.85)
+    assert bar.interval_high == pytest.approx(1.15)
+    assert NOT_CONVERGED_ORDER_NOTE in bar.notes
+
+
+def test_not_converged_order_keeps_eps21_rule_for_positive_r():
+    # For 0 < R < 1 the rule stays U = 3 * |eps21|. f2 - f1 = 1e-3 and
+    # f3 - f2 = 1e300 give an order that overflows, so the iteration fails.
+    bar = coefficient_error_bar("CL", [1.0, 1.001, 1e300], [40, 28, 20])
+    layer = bar.layers["numerical"]
+    assert layer.state == "not_converged_order"
+    assert layer.half_width == pytest.approx(3.0 * 1e-3, rel=1e-9)
+
+
+def test_levels_must_be_strictly_decreasing():
+    with pytest.raises(ValueError):
+        coefficient_error_bar("CL", [1.0, 1.02, 1.06], [40, 40, 28])
+    with pytest.raises(ValueError):
+        coefficient_error_bar("CL", [1.0, 1.02, 1.06], [20, 28, 40])
+
+
+def test_non_finite_value_note_and_strict_json():
+    # Regression: a non-finite value got the divergent note, and to_dict()
+    # gave NaN, which is not strict JSON.
+    bar = coefficient_error_bar("CL", [math.nan, 1.0, 1.1], [40, 28, 20])
+    assert bar.notes == [NON_FINITE_NOTE]
+    assert DIVERGENT_NOTE not in bar.notes
+    assert bar.interval_low is None and bar.interval_high is None
+    text = json.dumps(bar.to_dict(), allow_nan=False)
+    data = json.loads(text)
+    assert data["value"] is None
+    assert data["layers"]["numerical"]["values"] == [None, 1.0, 1.1]
+
+
+def test_drag_basis_mixing_gives_no_cd_bar(monkeypatch):
+    # Regression: when a coarser level had no CD_total, its CD fell back to
+    # CDi, so the CD bar mixed two drag bases.
+    original = vt.analyze
+
+    def analyze_without_total_on_coarse(*args, **kwargs):
+        res = original(*args, **kwargs)
+        if kwargs["settings"].n_panels == 14:
+            res.totals.CD_total = None
+        return res
+
+    monkeypatch.setattr(vt, "analyze", analyze_without_total_on_coarse)
+    result = numerical_error_bars(
+        _tabulated_wing(),
+        condition=FlightCondition(alpha=np.radians(5.0)),
+        settings=SolverSettings(solver_type="vlm", n_panels=20),
+    )
+    assert result.levels == [20, 14, 10]
+    assert result.drag_basis.startswith("CD_total")
+    assert "CD" not in result.bars
+    assert DRAG_BASIS_NOTE in result.notes
+    assert "CL" in result.bars
+    json.dumps(result.to_dict(), allow_nan=False)
+    assert "| CD |" not in result.summary()
