@@ -30,9 +30,11 @@ import numpy as np
 
 from ventorum.core.datatypes import (
     Aircraft,
+    ControlSurface,
     FlightCondition,
     LinearAirfoil,
     LiftingSurface,
+    NodeDisplacements,
     SolverSettings,
     WingSection,
 )
@@ -102,6 +104,49 @@ SECTION_PROPS: dict[str, dict[str, Any]] = {
                 "description": "Linear airfoil model of this section. Default: the surface airfoil."},
 }
 
+CONTROL_PROPS: dict[str, dict[str, Any]] = {
+    "name": {"type": "string",
+             "description": "Control name (string, no unit). Required. Must be unique on the surface. "
+                            "Controls on different surfaces with the same name move together."},
+    "eta_start": _num("Start of the control as a fraction of the semi-span [-]: 0 = root, 1 = tip. "
+                      "Default 0.", minimum=0, maximum=1),
+    "eta_end": _num("End of the control as a fraction of the semi-span [-]: 0 = root, 1 = tip. "
+                    "Default 1.", minimum=0, maximum=1),
+    "hinge_x_c": {"type": "number", "exclusiveMinimum": 0, "maximum": 1,
+                  "description": "Hinge position as a fraction of the local chord from the leading edge [-]. "
+                                 "Default 0.75. Must be larger than 0 and smaller than 1."},
+    "deflection_deg": _num("Deflection [deg]. Positive = right-hand rotation about the hinge axis "
+                           "(trailing edge down on a horizontal surface, trailing edge to +y on a fin). "
+                           "Range -30 to 30. Default 0.", minimum=-30, maximum=30),
+    "symmetric": {"type": "boolean",
+                  "description": "True (default, boolean): the same deflection on both halves (flap, "
+                                 "elevator). False: the opposite deflection on the left copy (aileron)."},
+}
+
+_DISP_VECTOR = {
+    "type": "array", "items": {"type": "number"}, "minItems": 3, "maxItems": 3,
+    "description": "One displacement [dx, dy, dz] in metres [m], geometry axes (x aft, y right, z up).",
+}
+
+NODE_DISPLACEMENT_PROPS: dict[str, dict[str, Any]] = {
+    "le_m": {"type": "array", "minItems": 2, "maxItems": 401, "items": _DISP_VECTOR,
+             "description": "Leading-edge node displacements in metres [m]: one [dx, dy, dz] triple per "
+                            "strip edge of the defining half, from the root to the tip. Must have the same "
+                            "length as te_m. The number of items must equal the number of strip edges of the "
+                            "defining half for the solver and settings of the call; use "
+                            "ventorum_undeformed_nodes to get them."},
+    "te_m": {"type": "array", "minItems": 2, "maxItems": 401, "items": _DISP_VECTOR,
+             "description": "Trailing-edge node displacements in metres [m]: one [dx, dy, dz] triple per "
+                            "strip edge of the defining half, from the root to the tip. Must have the same "
+                            "length as le_m. The number of items must equal the number of strip edges of the "
+                            "defining half for the solver and settings of the call; use "
+                            "ventorum_undeformed_nodes to get them."},
+    "eta": {"type": "array", "minItems": 2, "maxItems": 401, "items": {"type": "number"},
+            "description": "Spanwise stations [-] as fractions of the semi-span, from "
+                           "ventorum_undeformed_nodes. Optional. When given, the solver checks that the mesh "
+                           "has the same stations."},
+}
+
 SURFACE_PROPS: dict[str, dict[str, Any]] = {
     "name": {"type": "string", "description": "Surface name."},
     "span_m": _num("Tip-to-tip span [m] of a symmetric surface, measured along the dihedral line. "
@@ -141,6 +186,22 @@ SURFACE_PROPS: dict[str, dict[str, Any]] = {
     "airfoil": {"type": "object", "properties": AIRFOIL_PROPS, "additionalProperties": False,
                 "description": "Linear airfoil model for all sections. Default: thin airfoil "
                                "(a0 = 2*pi, no camber, no profile drag)."},
+    "controls": {
+        "type": "array", "minItems": 1, "maxItems": 10,
+        "items": {"type": "object", "properties": CONTROL_PROPS,
+                  "required": ["name"], "additionalProperties": False},
+        "description": "Hinged control surfaces (flaps, ailerons, elevators, rudders), 1 to 10. "
+                       "Deflections are given in degrees [deg]; span limits are fractions [-] of the "
+                       "semi-span. A surface with 'mirror': true gives the controls to both copies.",
+    },
+    "node_displacements": {
+        "type": "object", "properties": NODE_DISPLACEMENT_PROPS,
+        "required": ["le_m", "te_m"], "additionalProperties": False,
+        "description": "Deformed shape of the surface in metres [m]: displacements of the leading-edge "
+                       "and trailing-edge lattice nodes of the defining half. The number of items must "
+                       "equal the number of strip edges of the defining half for the solver and settings "
+                       "of the call; use ventorum_undeformed_nodes to get them.",
+    },
 }
 
 AIRCRAFT_PROPS: dict[str, dict[str, Any]] = {
@@ -232,6 +293,9 @@ _HINTS = {
     "height": "use h_m (height of the moment reference point above the ground, metres)",
     "panels": "use n_panels",
     "wingspan": "use span_m",
+    "deflection": "use deflection_deg (degrees)",
+    "hinge": "use hinge_x_c (fraction of the chord)",
+    "flaps": "use controls",
     "x_cg": "use x_cg_m",
     "heights": "use heights_m",
     "chord_root": "use root_chord_m",
@@ -381,6 +445,83 @@ def parse_airfoil(spec: Any, where: str) -> LinearAirfoil:
     )
 
 
+def _parse_controls(val: Any, where: str) -> list[ControlSurface]:
+    """Build control surfaces from a strict controls list. Deflections are stored in rad."""
+    if not isinstance(val, list) or not (1 <= len(val) <= 10):
+        raise InputError(f"'{where}' must be a list of 1 to 10 control objects.")
+    out: list[ControlSurface] = []
+    seen: set[str] = set()
+    for i, item in enumerate(val):
+        w = f"{where}[{i}]"
+        d = check_keys(item, CONTROL_PROPS, w)
+        if "name" not in d:
+            raise InputError(f"{w}: 'name' is required.")
+        name = string(d["name"], f"{w}.name")
+        if name in seen:
+            raise InputError(f"{w}: duplicate control name {name!r}. 'name' must be unique on the surface.")
+        seen.add(name)
+        eta_start = _num_key(d, "eta_start", CONTROL_PROPS, w, 0.0)
+        eta_end = _num_key(d, "eta_end", CONTROL_PROPS, w, 1.0)
+        hinge = _num_key(d, "hinge_x_c", CONTROL_PROPS, w, 0.75)
+        if hinge >= 1.0:
+            raise InputError(f"'{w}.hinge_x_c' must be < 1, got {hinge}.")
+        deflection_deg = _num_key(d, "deflection_deg", CONTROL_PROPS, w, 0.0)
+        symmetric = boolean(d["symmetric"], f"{w}.symmetric") if "symmetric" in d else True
+        out.append(ControlSurface(
+            name=name,
+            eta_start=float(eta_start),
+            eta_end=float(eta_end),
+            hinge_x_c=float(hinge),
+            deflection=float(np.radians(deflection_deg)),
+            symmetric=symmetric,
+        ))
+    return out
+
+
+def _parse_disp_array(val: Any, where: str) -> list[list[float]]:
+    """Return a displacement array as a list of [dx, dy, dz] triples in metres."""
+    if isinstance(val, np.ndarray):
+        if val.ndim != 2:
+            raise InputError(f"'{where}' must be a list of 2 to 401 [dx, dy, dz] triples in metres, "
+                             f"got an array of shape {val.shape}.")
+        val = val.tolist()
+    if not isinstance(val, (list, tuple)) or not (2 <= len(val) <= 401):
+        n = len(val) if isinstance(val, (list, tuple)) else val
+        raise InputError(f"'{where}' must be a list of 2 to 401 [dx, dy, dz] triples in metres, got {n}.")
+    out: list[list[float]] = []
+    for i, item in enumerate(val):
+        w = f"{where}[{i}]"
+        if isinstance(item, np.ndarray):
+            item = item.tolist() if item.ndim == 1 else item
+        if not isinstance(item, (list, tuple)) or len(item) != 3:
+            got = len(item) if isinstance(item, (list, tuple)) else repr(item)
+            raise InputError(f"'{w}' must be a list of exactly 3 numbers [dx, dy, dz] in metres, "
+                             f"got {got}.")
+        out.append([number(v, f"{w}[{k}]") for k, v in enumerate(item)])
+    return out
+
+
+def _parse_node_displacements(val: Any, where: str) -> NodeDisplacements:
+    """Build node displacements in metres from a strict node_displacements object."""
+    d = check_keys(val, NODE_DISPLACEMENT_PROPS, where)
+    for req in ("le_m", "te_m"):
+        if req not in d:
+            raise InputError(f"{where}: '{req}' is required.")
+    le = _parse_disp_array(d["le_m"], f"{where}.le_m")
+    te = _parse_disp_array(d["te_m"], f"{where}.te_m")
+    if len(le) != len(te):
+        raise InputError(f"{where}: 'le_m' and 'te_m' must have the same length, got {len(le)} and "
+                         f"{len(te)}.")
+    eta = None
+    if "eta" in d:
+        stations = number_list(d["eta"], f"{where}.eta", min_len=2, max_len=401)
+        if len(stations) != len(le):
+            raise InputError(f"{where}: 'eta' must have the same length as 'le_m' and 'te_m', got "
+                             f"{len(stations)} stations for {len(le)} edges.")
+        eta = np.array(stations, dtype=float)
+    return NodeDisplacements(le=np.array(le, dtype=float), te=np.array(te, dtype=float), eta=eta)
+
+
 def parse_surface(spec: Any, where: str = "wing", index: int = 0) -> list[LiftingSurface]:
     """Build one surface (two if ``mirror`` is true) from a strict surface object."""
     d = check_keys(spec, SURFACE_PROPS, where)
@@ -449,6 +590,19 @@ def parse_surface(spec: Any, where: str = "wing", index: int = 0) -> list[Liftin
         dihedral=float(np.radians(_num_key(d, "dihedral_deg", SURFACE_PROPS, where, 0.0))),
         n_panels=n_panels,
     )
+    if "controls" in d:
+        surf.controls = _parse_controls(d["controls"], f"{where}.controls")
+    if "node_displacements" in d:
+        surf.node_displacements = _parse_node_displacements(d["node_displacements"], f"{where}.node_displacements")
+    if surf.controls:
+        from ventorum.geometry.controls import validate_controls
+
+        try:
+            validate_controls(surf)
+        except InputError:
+            raise
+        except ValueError as exc:
+            raise InputError(f"{where}: {exc}") from exc
     out = [surf]
     if mirror:
         out.append(surf.mirrored())
@@ -643,6 +797,14 @@ SETTINGS_SCHEMA = _obj(SETTINGS_PROPS, "Solver settings. All keys are optional."
 _POLAR_CONDITION_SCHEMA = _obj({k: v for k, v in CONDITION_PROPS.items() if k != "alpha_deg"},
                                "Flight condition without alpha_deg (the sweep sets alpha).")
 
+_AXES_NO_ALL_SCHEMA = {
+    "type": "string",
+    "enum": ["body", "stability", "wind"],
+    "description": "Moment axes: 'body' (default, fixed to the aircraft), 'stability' (turned by "
+                   "alpha about y) or 'wind' (turned by beta about z, x along the free stream). "
+                   "'all' is refused. CL, CD and CY are relative to the free stream in every set.",
+}
+
 AGENT_TOOL_DEFINITIONS: list[dict[str, Any]] = [
     {
         "name": "ventorum_wing_analysis",
@@ -809,6 +971,81 @@ AGENT_TOOL_DEFINITIONS: list[dict[str, Any]] = [
                 "ref_n_panels": _int("Panels per semi-span of the reference mesh. Default 160. Must be "
                                      "larger than all panel_counts.", minimum=20, maximum=400),
                 "solver": SETTINGS_PROPS["solver"],
+                "detail_level": {**DETAIL_LEVEL, "default": "standard"},
+            },
+            "required": ["wing"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "ventorum_undeformed_nodes",
+        "description": "Strip-edge stations and undeformed lattice nodes of each surface: the eta stations "
+                       "[-] and the leading-edge and trailing-edge node coordinates [m] of the mesh that "
+                       "the solver builds with these settings. Use them to build node_displacements. "
+                       "The Fourier solver takes no node displacements and is refused with invalid_method. "
+                       "No solve runs, so the work budget does not apply.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "wing": WING_SCHEMA,
+                "settings": SETTINGS_SCHEMA,
+            },
+            "required": ["wing"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "ventorum_trim",
+        "description": "Trim an aircraft with Newton's method (Etkin and Reid; Dennis and Schnabel): the "
+                       "angle of attack [deg] and the control deflections [deg] for a target lift "
+                       "coefficient [-] with zero aerodynamic moments. A target that is not reached is "
+                       "not an error: the payload gives trim_status and trimmed false. Every solve runs "
+                       "on the CPU in float64.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "wing": WING_SCHEMA,
+                "CL_target": _num("Target lift coefficient [-]. Range -3 to 5.", minimum=-3, maximum=5),
+                "pitch_control": {"type": "string",
+                                  "description": "Name of the pitch control (string, must match a name of "
+                                                 "the controls of the wing)."},
+                "roll_control": {"type": "string",
+                                 "description": "Name of the roll control (string, must match a name of "
+                                                "the controls). Optional. Give both roll_control and "
+                                                "yaw_control, or neither (lateral trim)."},
+                "yaw_control": {"type": "string",
+                                "description": "Name of the yaw control (string, must match a name of "
+                                               "the controls). Optional. Give both roll_control and "
+                                               "yaw_control, or neither (lateral trim)."},
+                "flight_condition": CONDITION_SCHEMA,
+                "alpha_bounds_deg": {"type": "array",
+                                     "items": {"type": "number", "minimum": -30, "maximum": 30},
+                                     "minItems": 2, "maxItems": 2,
+                                     "description": "Lower and upper bounds of the angle of attack [deg]. "
+                                                    "Must increase. Default [-10, 20]."},
+                "max_iterations": _int("Maximum Newton iterations [-] (integer). Range 1 to 50. "
+                                       "Default 20.", minimum=1, maximum=50),
+                "settings": SETTINGS_SCHEMA,
+                "detail_level": {**DETAIL_LEVEL, "default": "standard"},
+                "axes": {**AXES_SCHEMA, "default": "body"},
+            },
+            "required": ["wing", "CL_target", "pitch_control"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "ventorum_error_bars",
+        "description": "Layer-1 numerical error bars of the six force and moment coefficients from three "
+                       "spanwise mesh levels (Grid Convergence Index, Roache; observed order, Celik et al.). "
+                       "The user mesh is the fine level. Only the numerical (spanwise discretisation) layer "
+                       "is included; the other layers are not implemented. n_panels below 16 is refused.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "wing": WING_SCHEMA,
+                "flight_condition": CONDITION_SCHEMA,
+                "settings": SETTINGS_SCHEMA,
+                "axes": {**_AXES_NO_ALL_SCHEMA, "default": "body"},
                 "detail_level": {**DETAIL_LEVEL, "default": "standard"},
             },
             "required": ["wing"],
