@@ -156,11 +156,11 @@ Both `roll_control` and `yaw_control` must be supplied together for lateral trim
 
 When `condition.h` is set, the trim solver models flight in ground effect. The height of `Aircraft.ref_point` remains constant while the angle of attack changes.
 
-Because ground effect increases wing lift at a given angle of attack, the trimmed angle of attack in ground effect is lower than in free air.
+Because ground effect increases wing lift at a given angle of attack, the trimmed angle of attack in ground effect is usually lower than in free air.
 
 ## Execution device and precision
 
-Every solve within `trim` runs on the CPU in 64-bit precision (`float64`). Finite differences in 32-bit precision suffer from numerical noise and fail to converge. The global device setting is restored when `trim` finishes. Do not run `trim` concurrently with other functions that modify the device setting.
+Every solve within `trim` runs on the CPU in 64-bit precision (`float64`). Finite differences in 32-bit precision suffer from numerical noise and can fail to converge. The global device setting is restored when `trim` finishes. Do not run `trim` concurrently with other functions that modify the device setting.
 
 ## Background
 

@@ -110,7 +110,7 @@ def main() -> None:
     print(f"Alpha:        {res_long.alpha_deg:.3f} deg")
     print(f"Elevator:     {res_long.deflections_deg['elevator']:.3f} deg")
     print(f"CL:           {res_long.CL:.6f}")
-    print(f"CDi:          {res_long.CD:.6f} ({res_long.drag_basis})")
+    print(f"CD ({res_long.drag_basis}):     {res_long.CD:.6f}")
     print(f"Cm:           {res_long.Cm:.2e}")
 
     # --- 3. Lateral trim at sideslip -----------------------------------------
@@ -135,7 +135,7 @@ def main() -> None:
     print(f"Aileron:      {res_lat.deflections_deg['aileron']:.3f} deg")
     print(f"Rudder:       {res_lat.deflections_deg['rudder']:.3f} deg")
     print(f"CL:           {res_lat.CL:.6f}")
-    print(f"CDi:          {res_lat.CD:.6f} ({res_lat.drag_basis})")
+    print(f"CD ({res_lat.drag_basis}):     {res_lat.CD:.6f}")
     print(f"Cl:           {res_lat.Cl:.2e}")
     print(f"Cm:           {res_lat.Cm:.2e}")
     print(f"Cn:           {res_lat.Cn:.2e}")

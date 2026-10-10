@@ -66,7 +66,7 @@ When `condition.h` is defined, Ventorum models flight in ground effect over a fl
 
 ## Precision and device execution
 
-All trim calculations execute on the CPU using 64-bit floating-point arithmetic (`float64`). Finite-difference approximations with a step size of $1.0 \times 10^{-4}$ rad suffer from severe cancellation errors in 32-bit arithmetic (`float32`), where unit round-off is approximately $1.2 \times 10^{-7}$. 64-bit precision provides machine epsilon of $2.2 \times 10^{-16}$, which yields derivative accuracy of approximately eight decimal digits.
+All trim calculations execute on the CPU using 64-bit floating-point arithmetic (`float64`). For the central difference with step $h$, the truncation error is $O(h^2)$ and the round-off error is about $\varepsilon / h$, with $\varepsilon$ the machine epsilon of the arithmetic (about $1.2 \times 10^{-7}$ in `float32`, $2.2 \times 10^{-16}$ in `float64`). With $h = 1.0 \times 10^{-4}$ rad, $\varepsilon / h$ is about $10^{-3}$ in `float32` and about $2 \times 10^{-12}$ in `float64`.
 
 The solver sets the global execution device to `"cpu"` for the duration of the trim solve and restores the previous device setting in a `finally` block upon completion.
 
