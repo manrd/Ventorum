@@ -277,10 +277,10 @@ def _check_call_work(estimate: int, hint: str) -> None:
             f"Reduce the work with {hint}.")
 
 
-def _workers(val: Any) -> int | str:
+def _jobs(val: Any) -> int | str:
     if val == "auto":
         return "auto"
-    return integer(val, "n_workers", minimum=1, maximum=64)
+    return integer(val, "n_jobs", minimum=1, maximum=64)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -1195,7 +1195,7 @@ def batch_evaluate(
     flight_condition: dict[str, Any] | None = None,
     objective: str = "max_L_over_D",
     settings: dict[str, Any] | None = None,
-    n_workers: int | str = "auto",
+    n_jobs: int | str = "auto",
     axes: str = "body",
 ) -> dict[str, Any]:
     """Analyse several candidates at one condition and rank the valid ones.
@@ -1212,7 +1212,7 @@ def batch_evaluate(
     c = parse_condition(flight_condition)
     sett = parse_settings(settings)
     obj = string(objective, "objective", _OBJECTIVES)
-    workers = _workers(n_workers)
+    workers = _jobs(n_jobs)
     ax = parse_axes(axes)
     in_ground = c["h_m"] is not None
     if in_ground and sett.wake_alignment == "body":

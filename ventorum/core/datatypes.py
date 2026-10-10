@@ -939,10 +939,12 @@ class SolverSettings:
         ``"auto"`` (default): always ``"vlm"``, also when a section has a
         tabulated polar (select ``"nonlinear"`` explicitly to use the polar
         past its linear range).
-        ``"vlm"`` / ``"horseshoe"``: vortex-lattice method (lifting surface).
-        ``"linear"`` / ``"llt"``: linear lifting line (Phillips & Snyder).
+        ``"vlm"``: vortex-lattice method (lifting surface).
+        ``"linear"``: linear lifting line (Phillips & Snyder).
         ``"nonlinear"``: nonlinear lifting line with section polars.
         ``"fourier"``: classical Lanchester–Prandtl lifting line, Glauert's Fourier series (unswept planar wing).
+        Old names (``"horseshoe"``, ``"lattice"``, ``"llt"``, ``"linear_llt"``)
+        still work for now with a ``FutureWarning`` that names the new name.
     n_panels : int
         Number of spanwise panels **per semi-span**.
     n_chord : int or None
@@ -974,7 +976,7 @@ class SolverSettings:
         Minimum panels per semi-span when proportional scaling is enabled.
     """
 
-    solver_type: Literal["auto", "vlm", "horseshoe", "linear", "llt", "nonlinear", "fourier"] | str = "auto"
+    solver_type: Literal["auto", "vlm", "linear", "nonlinear", "fourier"] | str = "auto"
     n_panels: int = 80
     spacing: Literal["auto", "cosine", "half-cosine", "root", "uniform"] | str = "auto"
     max_iterations: int = 200

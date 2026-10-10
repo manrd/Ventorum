@@ -344,7 +344,7 @@ def benchmark_multi_instance(
                 condition=cond,
                 settings=sett,
                 alpha_sweep_deg=alphas,
-                n_workers=1,
+                n_jobs=1,
                 backend="thread",
             )
             instances.append(inst)
@@ -354,7 +354,7 @@ def benchmark_multi_instance(
     serial_results_map = {}
     baseline_instances = _create_cases()
     for inst in baseline_instances:
-        inst.n_workers = 1
+        inst.n_jobs = 1
         _res = inst.run(progress=False)
         serial_results_map[inst.name] = [
             (r.totals.CL, r.totals.CDi, r.totals.e, np.copy(r.spanwise[0].gamma))
@@ -383,7 +383,7 @@ def benchmark_multi_instance(
         for _ in range(n_repeats):
             cases = _create_cases()
             for c in cases:
-                c.n_workers = w_per_inst
+                c.n_jobs = w_per_inst
 
             t0 = time.perf_counter()
             run_parallel_instances(

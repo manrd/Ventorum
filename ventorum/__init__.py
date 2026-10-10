@@ -19,6 +19,7 @@ Quick start
 from __future__ import annotations
 
 import numpy as np
+import warnings
 
 # --- re-export public API ----------------------------------------------------
 from ventorum.core.datatypes import (  # noqa: F401
@@ -189,8 +190,8 @@ def analyze(
     V_inf : float
         Free-stream velocity [m/s].
     solver : str or None
-        ``"auto"`` (default) is always ``"vlm"``. Also ``"vlm"`` (alias
-        ``"horseshoe"``), ``"linear"`` (lifting line), ``"nonlinear"`` (select
+        ``"auto"`` (default) is always ``"vlm"``. Also ``"vlm"``,
+        ``"linear"`` (lifting line), ``"nonlinear"`` (select
         it to use tabulated polars past the linear range) and ``"fourier"``.
     n_panels : int
         Spanwise panels per semi-span (when *settings* is None).
@@ -202,6 +203,7 @@ def analyze(
     SolverResult
     """
     from ventorum.solvers.factory import make_solver, resolve_solver_type
+    from ventorum.utils.deprecation import warn_solver_alias
     from ventorum.utils.validation import validate_flight_condition, validate_solver_settings
 
     aircraft = Aircraft(name="SingleWing", surfaces=[geometry]) if isinstance(geometry, LiftingSurface) else geometry
@@ -220,7 +222,10 @@ def analyze(
         settings.use_symmetry = bool(use_symmetry)
 
     validate_flight_condition(condition)
-    validate_solver_settings(settings)
+    warn_solver_alias(settings.solver_type)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", FutureWarning)
+        validate_solver_settings(settings)
 
     canonical = resolve_solver_type(settings.solver_type)
     result = make_solver(canonical).solve(aircraft, condition, settings)
@@ -290,12 +295,18 @@ def analyze_sweep(
         settings = settings.clone()
         settings.use_symmetry = bool(use_symmetry)
 
+    from ventorum.utils.deprecation import warn_solver_alias
+
+    warn_solver_alias(settings.solver_type)
+
     alpha_range = np.radians(alpha_deg_range)
 
-    return alpha_sweep(
-        aircraft, condition, settings, alpha_range,
-        n_jobs=n_jobs, backend=backend, progress=progress,
-    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", FutureWarning)
+        return alpha_sweep(
+            aircraft, condition, settings, alpha_range,
+            n_jobs=n_jobs, backend=backend, progress=progress,
+        )
 
 from ventorum.ground_effect import (  # noqa: F401, E402
     GroundEffectCondition,

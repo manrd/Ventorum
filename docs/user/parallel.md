@@ -51,10 +51,18 @@ The full table of all environment variables is in [Environment variables](enviro
 | Function | Setting | Meaning |
 | --- | --- | --- |
 | `analyze_sweep`, `alpha_sweep` | `n_jobs` | Vortex lattice: `"auto"` (default): one batch for a small lattice (at most 400 panels), else the tuned plan or the default; an integer: that many cases in parallel; `-1`: one case per core. Lifting lines: not used (one batch for all angles) |
-| `GroundEffectSweep.run_sweep` | `n_workers` | The same, for the cases of the grid |
+| `GroundEffectSweep` | `n_jobs` | The same, for the cases of the grid (an argument of the constructor, not of `run_sweep`) |
 | `run_parallel_instances` | `max_concurrent_instances` | Instances in parallel; each runs its own cases inside its worker |
 
 When you give the number of cases in parallel, the kernel threads of each case are the cores divided by that number.
+
+## Old names
+
+| Old name | Canonical name | Status |
+| --- | --- | --- |
+| `n_workers` | `n_jobs` | Removed; a call with `n_workers=` raises `TypeError`. In the MCP tool the key `n_workers` is refused with a hint to use `n_jobs`. |
+| `solver="horseshoe"`, `solver="lattice"` | `solver="vlm"` | Still work with a `FutureWarning` that names the new name. |
+| `solver="llt"`, `solver="linear_llt"` | `solver="linear"` | Still work with a `FutureWarning` that names the new name. |
 
 :::{note}
 The PyTorch backend runs the verified kernels on the CPU or on a CUDA GPU (select it in the profile or force it with `VENTORUM_KERNEL=torch`). The tuner records the GPUs that it finds and the torch device of its run. The linear solve stays on the CPU.

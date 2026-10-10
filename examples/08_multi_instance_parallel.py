@@ -72,15 +72,15 @@ def main():
     # 2. Package into independent Ventorum instances, each utilizing 2 internal workers
     # Total active threads: 4 instances * 2 workers = 8 concurrent compute workers
     instances = [
-        vt.Ventorum("Sailplane", geometry=wing_sailplane, alpha_sweep_deg=alphas_deg, n_workers=2, n_panels=30),
-        vt.Ventorum("Swept_Transport", geometry=wing_swept, alpha_sweep_deg=alphas_deg, n_workers=2, n_panels=30),
-        vt.Ventorum("Cropped_Delta", geometry=wing_delta, alpha_sweep_deg=alphas_deg, n_workers=2, n_panels=30),
-        vt.Ventorum("GA_Dihedral", geometry=wing_ga, alpha_sweep_deg=alphas_deg, n_workers=2, n_panels=30),
+        vt.Ventorum("Sailplane", geometry=wing_sailplane, alpha_sweep_deg=alphas_deg, n_jobs=2, n_panels=30),
+        vt.Ventorum("Swept_Transport", geometry=wing_swept, alpha_sweep_deg=alphas_deg, n_jobs=2, n_panels=30),
+        vt.Ventorum("Cropped_Delta", geometry=wing_delta, alpha_sweep_deg=alphas_deg, n_jobs=2, n_panels=30),
+        vt.Ventorum("GA_Dihedral", geometry=wing_ga, alpha_sweep_deg=alphas_deg, n_jobs=2, n_panels=30),
     ]
 
     print(f"\nConfigured {len(instances)} independent Ventorum instances:")
     for inst in instances:
-        print(f" - [{inst.name}]: {len(alphas_deg)} alphas, {inst.n_workers} internal workers, N={inst.settings.n_panels}")
+        print(f" - [{inst.name}]: {len(alphas_deg)} alphas, {inst.n_jobs} internal workers, N={inst.settings.n_panels}")
 
     # 3. Execute all instances concurrently in parallel
     print("\nExecuting instances in parallel...")
