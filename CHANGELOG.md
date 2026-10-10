@@ -72,6 +72,10 @@ a minor version can change a public interface.
 
 ### Changed
 
+- Breaking: `transform_moments` takes the keyword-only arguments `b_ref` and `c_ref` [m] (required).
+  The new function `moment_axes_matrix` returns the 3 x 3 matrix of a change of moment axes.
+  `SolverResult` has the fields `b_ref` and `c_ref` [m]; every solver sets them, and
+  `SolverResult.moments` needs them for the stability and wind axes.
 - `trim` runs its solves on the device that the settings and the global device select, and no
   longer sets the global device to the CPU. `TrimResult` has `device` and `precision`. In float32
   the convergence tolerances are at least `FLOAT32_TOLERANCE_FLOOR` (1e-6, about five times the
@@ -122,6 +126,14 @@ a minor version can change a public interface.
 
 ### Fixed
 
+- Moment coefficients in wind axes: the change of axes now acts on the dimensional moments,
+  C' = L^-1 R L C with L = diag(b_ref, c_ref, b_ref), because Cl and Cn use the reference span and
+  Cm uses the reference chord. Before, the rotation acted on the coefficients, so the wind-axis Cl
+  and Cm were wrong with sideslip when b_ref is not equal to c_ref (for example the wind-axis Cl of
+  a wing of aspect ratio 10 at 5 deg sideslip by about 75 %). This changes `SolverResult.moments`,
+  the wind set of the agent tools, the wind-axis derivatives of `control_derivatives` and of the
+  agent tool `ventorum_stability_derivatives`. Body and stability axes, the rate and height
+  derivatives (already correct) and the verification report do not change.
 - The agent tools accept a 1-D numpy array where they accept a list of numbers.
 
 ## [0.3.0] - 2026-10-04
