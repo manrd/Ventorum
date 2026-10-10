@@ -38,7 +38,11 @@ python validation/avl/compare.py --avl PATH --out DIR [--quick] [--workers N] [-
   written as its right half with `YDUPLICATE` about y = 0 (this needs
   `iYsym = 0`). A mirror copy (`mirror_y=True`) is written as its own
   surface with mirrored coordinates, ordered tip to root so sections
-  still run left to right.
+  still run left to right. AVL applies the spanwise spacing parameter
+  from the first section to the last, so its sign changes for the
+  mirror copy. The mirror copy gets the `COMPONENT` index of its
+  partner surface; the two halves of a `YDUPLICATE` surface also share
+  one index.
 * One AVL SECTION per Ventorum section. Incidence [deg] = section
   twist + surface incidence - zero-lift angle of the section airfoil.
   The lift slope factor (`CLAF`) = `a0 / (2 pi)`.
@@ -78,8 +82,15 @@ python validation/avl/compare.py --avl PATH --out DIR [--quick] [--workers N] [-
   roll and yaw moments `Cl'`, `Cn'` beside the body values).
   The `ST` table is in stability axes; `SB` would give body axes.
 * Verdict of a run: the exit code means nothing; a run is good only
-  when `ft.txt` and `st.txt` exist and parse completely. The command
-  stream ends with a blank line (leaves OPER) and `QUIT`.
+  when `ft.txt` and `st.txt` exist, parse completely, give the
+  requested `Alpha` and `Beta` (absolute tolerance 1e-4 deg) and give
+  the expected `# Surfaces`, `# Strips` and `# Vortices` counts in
+  their header. The harness deletes old output files before each run:
+  AVL asks "File exists. Append/Overwrite/Cancel" for an existing file,
+  and that prompt takes the next line of the command stream. The
+  command stream ends with a blank line (leaves OPER), 4 more blank
+  lines (they get back to the top level if a prompt took a line that
+  was not planned) and `QUIT`.
 
 ## Limits
 

@@ -46,7 +46,9 @@ def parse_ft(text: str) -> dict[str, float]:
         ``Cm`` and ``Cn`` are the AVL standard-axis body moments;
         ``Cl_prim`` and ``Cn_prim`` are the stability-axis values
         (primed in the file). ``CDff`` is the Trefftz-plane induced
-        drag.
+        drag. ``n_surfaces``, ``n_strips`` and ``n_vortices`` are the
+        counts of the file header (``# Surfaces``, ``# Strips`` and
+        ``# Vortices``).
 
     Raises
     ------
@@ -80,6 +82,9 @@ def parse_ft(text: str) -> dict[str, float]:
         "Xref": get(r"Xref\s*=\s*(" + _FLOAT + r")", "Xref"),
         "Yref": get(r"Yref\s*=\s*(" + _FLOAT + r")", "Yref"),
         "Zref": get(r"Zref\s*=\s*(" + _FLOAT + r")", "Zref"),
+        "n_surfaces": get(r"#\s*Surfaces\s*=\s*(\d+)", "# Surfaces"),
+        "n_strips": get(r"#\s*Strips\s*=\s*(\d+)", "# Strips"),
+        "n_vortices": get(r"#\s*Vortices\s*=\s*(\d+)", "# Vortices"),
     }
     return out
 

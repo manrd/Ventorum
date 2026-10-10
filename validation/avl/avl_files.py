@@ -17,7 +17,11 @@ Mapping rules (task T-0055, fixed decisions):
   as its right half with the ``YDUPLICATE`` keyword about y = 0.
   A mirror copy (``mirror_y=True``) is written as its own surface with
   mirrored coordinates, ordered from tip to root so that the sections
-  still run from left to right (increasing y).
+  still run from left to right (increasing y). The spanwise spacing
+  parameter changes sign for that order, because AVL applies it from
+  the first section to the last section. A mirror copy and its partner
+  surface get the same ``COMPONENT`` index, as ``YDUPLICATE`` gives to
+  the two halves of a duplicated surface.
 * One AVL SECTION per Ventorum ``WingSection``. The leading-edge point
   comes from ``surface_edge_geometry``. The incidence angle [deg] is
   the section twist plus the surface incidence minus the zero-lift
@@ -88,6 +92,14 @@ class AvlCase:
         True when the case uses the ground-effect rotation method.
     notes : tuple of str
         Warnings about approximations (for example ``allow_cm0``).
+    n_surfaces : int or None
+        Expected AVL surface count (a duplicated surface counts two).
+        None skips the check of the ``FT`` header.
+    n_strips : int or None
+        Expected AVL strip count (spanwise vortex count of all
+        surfaces). None skips the check.
+    n_vortices : int or None
+        Expected AVL horseshoe-vortex count. None skips the check.
     """
 
     avl_text: str
@@ -96,6 +108,9 @@ class AvlCase:
     zsym: float | None = None
     ground: bool = False
     notes: tuple[str, ...] = ()
+    n_surfaces: int | None = None
+    n_strips: int | None = None
+    n_vortices: int | None = None
 
 
 def _num(value: float) -> str:
@@ -124,6 +139,29 @@ def _surface_name(surf: Any, index: int) -> str:
     """Return a one-line AVL surface name for *surf*."""
     name = str(getattr(surf, "name", "") or "").strip().replace("\n", " ")
     return name if name else f"Surface{index + 1}"
+
+
+def _component_indices(surfaces: list[Any]) -> list[int]:
+    """Return the AVL ``COMPONENT`` index [-] of each surface.
+
+    Each surface gets its own index (1, 2, ...), except a mirror copy
+    (``mirror_y=True``), which gets the index of its partner surface
+    (the same geometry with the opposite mirror flag). AVL does not use
+    the finite-core model between surfaces of one component; the two
+    halves of a ``YDUPLICATE`` surface also share one index.
+    """
+    from ventorum.core.datatypes import _is_mirror_pair
+
+    index = [k + 1 for k in range(len(surfaces))]
+    for k, surf in enumerate(surfaces):
+        if not bool(getattr(surf, "mirror_y", False)):
+            continue
+        for j, other in enumerate(surfaces):
+            partner = not bool(getattr(other, "mirror_y", False))
+            if j != k and partner and _is_mirror_pair(other, surf):
+                index[k] = index[j]
+                break
+    return index
 
 
 def _section_airfoil_props(surf: Any) -> None:
@@ -210,6 +248,10 @@ def build_case(
         f"{_num(ref[0])} {_num(ref[1])} {_num(ref[2])}",
     ]
 
+    components = _component_indices(list(ac.surfaces))
+    n_surfaces = 0
+    n_strips = 0
+    n_vortices = 0
     for s_idx, surf in enumerate(ac.surfaces):
         name = _surface_name(surf, s_idx)
         _section_airfoil_props(surf)
@@ -254,6 +296,10 @@ def build_case(
         if spacing_key == "power":
             notes.append(f"[{name}] Ventorum 'power' spacing mapped to AVL -2.0.")
         s_space = SPACING_MAP[spacing_key]
+        if mirror and s_space != 0.0:
+            # AVL applies the spacing from the first section to the last.
+            # The mirror copy is written tip to root, so the sign changes.
+            s_space = -s_space
         chord_spacing = str(getattr(settings, "chord_spacing", "uniform")).lower()
         if chord_spacing not in CHORD_SPACING_MAP:
             raise ValueError(f"[{name}] chord_spacing={chord_spacing!r} has no AVL mapping.")
@@ -261,9 +307,14 @@ def build_case(
 
         lines += ["SURFACE", name,
                   f"{int(n_chord)} {CHORD_SPACING_MAP[chord_spacing]:.1f} "
-                  f"{int(n_span)} {s_space:.1f}"]
+                  f"{int(n_span)} {s_space:.1f}",
+                  "COMPONENT", str(components[s_idx])]
         if symmetric:
             lines += ["YDUPLICATE", "0.0"]
+        halves = 2 if symmetric else 1
+        n_surfaces += halves
+        n_strips += halves * int(n_span)
+        n_vortices += halves * int(n_span) * int(n_chord)
         for k in order:
             sec = secs[k]
             af = sec.airfoil
@@ -305,7 +356,32 @@ def build_case(
         zsym=zsym,
         ground=ground,
         notes=tuple(notes),
+        n_surfaces=n_surfaces,
+        n_strips=n_strips,
+        n_vortices=n_vortices,
     )
+
+
+#: Blank lines before ``QUIT``. Each blank line leaves one menu level,
+#: so the program gets back to the top level even when a prompt took a
+#: line that the stream did not plan for.
+QUIT_PADDING = 4
+
+
+def _oper_block(run_alpha_deg: float, run_beta_deg: float, ft_name: str,
+                st_name: str) -> list[str]:
+    """Return the OPER commands of one run case (enter, solve, write, leave)."""
+    return [
+        "OPER",
+        f"A A {float(run_alpha_deg):.6f}",
+        f"B B {float(run_beta_deg):.6f}",
+        "X",
+        "FT",
+        ft_name,
+        "ST",
+        st_name,
+        "",
+    ]
 
 
 def command_stream(
@@ -321,8 +397,10 @@ def command_stream(
     and the stability derivatives (``ST``) to files, leaves the menus
     and quits. Each command that prompts for more input (``FT``,
     ``ST``) is followed by its file name on the next line. A blank
-    line leaves the OPER menu, as the AVL documentation requires, and
-    ``QUIT`` leaves the program.
+    line leaves the OPER menu, as the AVL documentation requires.
+    :data:`QUIT_PADDING` more blank lines come before ``QUIT``, so the
+    stream gets back to the top level even if a prompt took one line
+    more than planned.
 
     Parameters
     ----------
@@ -340,18 +418,32 @@ def command_stream(
     str
         Command stream text for the standard input of ``avl.exe``.
     """
-    return "\n".join(
-        [
-            "OPER",
-            f"A A {float(run_alpha_deg):.6f}",
-            f"B B {float(run_beta_deg):.6f}",
-            "X",
-            "FT",
-            ft_name,
-            "ST",
-            st_name,
-            "",
-            "QUIT",
-            "",
-        ]
-    )
+    lines = _oper_block(run_alpha_deg, run_beta_deg, ft_name, st_name)
+    return "\n".join(lines + [""] * QUIT_PADDING + ["QUIT", ""])
+
+
+def session_command_stream(
+    entries: list[tuple[str | None, float, float, str, str]],
+) -> str:
+    """Build one AVL command stream that runs several cases in one session.
+
+    Parameters
+    ----------
+    entries : list of tuple
+        One ``(avl_name, alpha_deg, beta_deg, ft_name, st_name)`` per
+        run case, in run order. ``avl_name`` is the geometry file to
+        read with the ``LOAD`` command before the case (a ground-effect
+        sweep has one rotated geometry per angle), or None to keep the
+        geometry that is already loaded. Angles in [deg].
+
+    Returns
+    -------
+    str
+        Command stream text for the standard input of ``avl.exe``.
+    """
+    lines: list[str] = []
+    for avl_name, alpha, beta, ft_name, st_name in entries:
+        if avl_name is not None:
+            lines += ["LOAD", avl_name]
+        lines += _oper_block(alpha, beta, ft_name, st_name)
+    return "\n".join(lines + [""] * QUIT_PADDING + ["QUIT", ""])
