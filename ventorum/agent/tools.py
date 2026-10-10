@@ -67,6 +67,7 @@ from ventorum.solvers.factory import resolve_solver_type
 from ventorum.solvers.lattice_base import DEFAULT_N_CHORD, MAX_AUTO_N_CHORD
 from ventorum.utils.jsonsafe import json_safe
 from ventorum.utils.parallel import estimate_panels, run_cases
+from ventorum.utils.validation import MIN_SPEED_M_S
 
 MAX_POLAR_POINTS = 61
 
@@ -740,7 +741,7 @@ def ground_effect(
     heights_m : list of float
         Heights above the ground [m].
     alpha_deg : float
-        Angle of attack [deg].
+        Angle of attack [deg] (default 5.0).
     phi_deg : float
         Bank angle [deg].
     beta_deg : float
@@ -769,7 +770,7 @@ def ground_effect(
     phi = number(phi_deg, "phi_deg", minimum=-60, maximum=60)
     beta = number(beta_deg, "beta_deg", minimum=-30, maximum=30)
     href = string(height_ref, "height_ref", ("ref", "min", "qc", "te"))
-    V = number(V_inf_m_s, "V_inf_m_s", exclusive_min=0, maximum=340)
+    V = number(V_inf_m_s, "V_inf_m_s", minimum=MIN_SPEED_M_S, maximum=340)
     rho = number(rho_kg_m3, "rho_kg_m3", exclusive_min=0, maximum=2)
     rp = vector3(ref_point_m, "ref_point_m") if ref_point_m is not None else ac.moment_reference()
     ac.ref_point = np.array(rp, dtype=float)

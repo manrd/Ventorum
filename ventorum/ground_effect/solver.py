@@ -264,7 +264,7 @@ def ground_frame_maps(gp: GroundPlane, condition: FlightCondition, h: float):
 def analyze_ground_effect(
     geometry: Aircraft | LiftingSurface,
     h: float,
-    alpha_deg: float = 4.0,
+    alpha_deg: float = 5.0,
     phi_deg: float = 0.0,
     beta_deg: float = 0.0,
     *,
@@ -288,7 +288,7 @@ def analyze_ground_effect(
         *height_ref*. With the default ``height_ref='ref'``, the ground is
         at the distance h below *ref_point*.
     alpha_deg : float
-        Angle of attack = pitch attitude relative to the ground [deg].
+        Angle of attack = pitch attitude relative to the ground [deg] (default 5.0).
     phi_deg : float
         Bank angle [deg]; positive puts the right wing nearer to the ground.
     beta_deg : float
@@ -339,7 +339,7 @@ def analyze_ground_effect(
 def prepare_ground_case(
     geometry: Aircraft | LiftingSurface,
     h: float,
-    alpha_deg: float = 4.0,
+    alpha_deg: float = 5.0,
     phi_deg: float = 0.0,
     beta_deg: float = 0.0,
     *,

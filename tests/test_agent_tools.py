@@ -850,38 +850,102 @@ def test_machine_capabilities_reports_gpu_pipeline():
     assert p["gpu_pipeline"]["available"] == info["available"]
 
 
-# ── T-0047 finding B5: explicit null is refused for every key ────────────────
+# ── Explicit null is refused for every key ──────────────────────────────────
 
 def test_null_values_are_refused_with_key_name():
-    """B5: {"alpha_deg": null} (also V, twist, a0, cd0, S_ref, settings keys) is invalid_input."""
+    """{"alpha_deg": null} (also V, twist, a0, cd0, S_ref, settings keys) is invalid_input."""
     cases = [
-        (RECT, {"alpha_deg": None}, FAST, "flight_condition.alpha_deg"),
-        (RECT, {"V_inf_m_s": None}, FAST, "flight_condition.V_inf_m_s"),
-        ({**RECT, "tip_twist_deg": None}, None, FAST, "tip_twist_deg"),
-        ({"span_m": 10.0, "chord_m": 1.0, "airfoil": {"a0_per_rad": None}}, None, FAST, "a0_per_rad"),
-        ({"span_m": 10.0, "chord_m": 1.0, "airfoil": {"cd0": None}}, None, FAST, "cd0"),
-        ({"surfaces": [RECT], "S_ref_m2": None}, None, FAST, "S_ref_m2"),
-        (RECT, None, {"n_panels": None}, "settings.n_panels"),
-        (RECT, None, {"n_panels": 8, "n_chord": None}, "settings.n_chord"),
+        (RECT, {"alpha_deg": None}, FAST, "flight_condition", "alpha_deg"),
+        (RECT, {"V_inf_m_s": None}, FAST, "flight_condition", "V_inf_m_s"),
+        ({**RECT, "tip_twist_deg": None}, None, FAST, "wing", "tip_twist_deg"),
+        ({"span_m": 10.0, "chord_m": 1.0, "airfoil": {"a0_per_rad": None}}, None, FAST, "wing.airfoil",
+         "a0_per_rad"),
+        ({"span_m": 10.0, "chord_m": 1.0, "airfoil": {"cd0": None}}, None, FAST, "wing.airfoil", "cd0"),
+        ({"surfaces": [RECT], "S_ref_m2": None}, None, FAST, "wing", "S_ref_m2"),
+        (RECT, None, {"n_panels": None}, "settings", "n_panels"),
+        (RECT, None, {"n_panels": 8, "n_chord": None}, "settings", "n_chord"),
     ]
-    for wing, cond, sett, key in cases:
-        assert_error(wing_analysis(wing, cond, sett, "summary"), "invalid_input", key)
+    for wing, cond, sett, where, key in cases:
+        p = wing_analysis(wing, cond, sett, "summary")
+        assert_error(p, "invalid_input", f"{where}: '{key}' is null")
+        assert "got None" not in p["error"]["message"]
     # Null through the dispatcher (JSON null) names the key too.
     assert_error(call_tool("ventorum_wing_analysis",
                            {"wing": RECT, "flight_condition": {"alpha_deg": None}, "settings": FAST}),
-                 "invalid_input", "alpha_deg")
+                 "invalid_input", "'alpha_deg' is null")
+    assert_error(call_tool("ventorum_wing_analysis",
+                           json.dumps({"wing": {**RECT, "dihedral_deg": None}, "settings": FAST})),
+                 "invalid_input", "'dihedral_deg' is null")
 
 
-# ── T-0047 finding B6: the default angle of attack is 5 deg ─────────────────
+_REQUIRED_ARGS = {
+    "wing": RECT,
+    "alpha_start_deg": 0.0,
+    "alpha_end_deg": 4.0,
+    "alpha_step_deg": 2.0,
+    "heights_m": [1.0],
+    "candidates": [RECT],
+}
+
+
+def test_null_top_level_arguments_are_refused(monkeypatch):
+    """JSON null for an optional tool argument is invalid_input; the tool is not called.
+
+    Before the fix, a null top-level argument (for example
+    ``"settings": null``) meant "omitted" and the tool ran.
+    """
+    from ventorum.agent import dispatcher
+
+    calls = []
+
+    def stub(**kwargs):
+        calls.append(kwargs)
+        return {"status": "success"}
+
+    n_checked = 0
+    for t in AGENT_TOOL_DEFINITIONS:
+        name = t["name"]
+        schema = t["parameters"]
+        required = schema.get("required", [])
+        monkeypatch.setitem(dispatcher.TOOL_FUNCTIONS, name, stub)
+        base = {k: _REQUIRED_ARGS[k] for k in required}
+        for key in sorted(set(schema["properties"]) - set(required)):
+            p = call_tool(name, {**base, key: None})
+            assert_error(p, "invalid_input", f"'{key}' is null")
+            assert "Omit the key" in p["error"]["message"]
+            # The same through a JSON string (a real JSON null).
+            p = call_tool(name, json.dumps({**base, key: None}))
+            assert_error(p, "invalid_input", f"'{key}' is null")
+            n_checked += 1
+    assert n_checked >= 20
+    assert calls == []
+
+
+def test_python_none_still_means_omitted():
+    """In a Python call, None for an optional argument keeps its meaning "use the default"."""
+    p = wing_analysis(RECT, flight_condition=None, settings=FAST, axes=None)
+    assert p["status"] == "success", p
+    assert p["condition_used"]["alpha_deg"] == 5.0
+    g = ground_effect(RECT, [1.0], ref_point_m=None, settings=None)
+    assert g["status"] == "success", g
+
+
+# ── The default angle of attack is 5 deg ────────────────────────────────────
 
 def test_default_alpha_is_five_deg_in_every_interface():
-    """B6/Q4: an omitted alpha is 5 deg in the agent schemas, vt.analyze, FlightCondition and Ventorum."""
+    """An omitted alpha is 5 deg in the agent schemas, vt.analyze, FlightCondition and Ventorum."""
+    import inspect
+
     import numpy as np
 
     import ventorum as vt
     from ventorum.agent.schemas import CONDITION_PROPS
 
     assert "Default 5." in CONDITION_PROPS["alpha_deg"]["description"]
+    ge_def = next(t for t in AGENT_TOOL_DEFINITIONS if t["name"] == "ventorum_ground_effect")
+    assert "Default 5." in ge_def["parameters"]["properties"]["alpha_deg"]["description"]
+    assert inspect.signature(ground_effect).parameters["alpha_deg"].default == 5.0
+    assert "default 5.0" in ground_effect.__doc__
     p = wing_analysis(RECT, None, FAST, "summary")
     assert p["status"] == "success", p
     assert p["condition_used"]["alpha_deg"] == 5.0
@@ -892,12 +956,17 @@ def test_default_alpha_is_five_deg_in_every_interface():
     wing = vt.LiftingSurface(semi_span=5.0, sections=[vt.WingSection(y_frac=0.0, chord=1.5),
                                                      vt.WingSection(y_frac=1.0, chord=1.0)])
     assert vt.Ventorum(name="t5", geometry=wing).condition.alpha == pytest.approx(np.radians(5.0))
+    # vt.analyze without a condition and without alpha_deg solves at 5 deg.
+    res = vt.analyze(wing, n_panels=8)
+    assert res.condition.alpha == pytest.approx(np.radians(5.0))
+    ref = vt.analyze(wing, n_panels=8, alpha_deg=5.0)
+    assert res.totals.CL == pytest.approx(ref.totals.CL, rel=1e-12)
 
 
-# ── T-0047 finding B7: the main surface has the largest projected area ───────
+# ── The main surface has the largest projected area ─────────────────────────
 
 def test_main_surface_is_largest_projected_area():
-    """B7: the reference values come from the surface with the largest projected planform area."""
+    """The reference values come from the surface with the largest projected planform area."""
     from ventorum.agent.schemas import AIRCRAFT_PROPS
 
     assert "largest projected planform area" in AIRCRAFT_PROPS["surfaces"]["description"]
@@ -909,10 +978,10 @@ def test_main_surface_is_largest_projected_area():
     assert p["geometry"]["b_ref_m"] == pytest.approx(10.0)
 
 
-# ── T-0047 finding B9: tiny geometry is invalid input, not internal ──────────
+# ── Tiny geometry is invalid input, not internal ───────────────────────────
 
 def test_tiny_geometry_is_invalid_input_not_internal():
-    """B9: span 1e-300 is invalid_input (it gave internal ZeroDivisionError)."""
+    """Span 1e-300 is invalid_input (it gave internal ZeroDivisionError)."""
     assert_error(wing_analysis({"span_m": 1e-300, "chord_m": 1.0}, None, FAST, "summary"),
                  "invalid_input", "semi_span")
     assert_error(wing_analysis({"span_m": 10.0, "chord_m": 1e-300}, None, FAST, "summary"),
@@ -921,10 +990,10 @@ def test_tiny_geometry_is_invalid_input_not_internal():
                  "invalid_input", "S_ref_m2")
 
 
-# ── T-0047 finding B10: 1-D numpy arrays are accepted where lists are ─────────
+# ── 1-D numpy arrays are accepted where lists are ──────────────────────────
 
 def test_numpy_arrays_are_accepted_as_lists():
-    """B10: a 1-D numpy array is accepted for vector and list inputs."""
+    """A 1-D numpy array is accepted for vector and list inputs."""
     import numpy as np
 
     p = wing_analysis({**RECT, "position_m": np.array([0.0, 0.0, 0.0])}, None, FAST, "summary")
@@ -934,3 +1003,51 @@ def test_numpy_arrays_are_accepted_as_lists():
     g = ground_effect(RECT, np.array([0.6, 1.0]), settings=FAST)
     assert g["status"] == "success", g
     assert [r["h_m"] for r in g["rows"]] == pytest.approx([0.6, 1.0])
+
+
+def test_tiny_reference_values_are_invalid_input():
+    """Reference values of 1e-300 are invalid_input that names the key.
+
+    Before the fix, b_ref_m = 1e-300 gave an internal ZeroDivisionError
+    and S_ref_m2 = 1e-300 gave an internal OverflowError in the loads.
+    """
+    from ventorum.agent.schemas import build_aircraft_from_spec
+
+    for key in ("S_ref_m2", "b_ref_m", "c_ref_m"):
+        p = call_tool("ventorum_wing_analysis",
+                      {"wing": {"surfaces": [RECT], key: 1e-300}, "settings": FAST})
+        assert_error(p, "invalid_input", key)
+    # A small but sane value passes.
+    p = call_tool("ventorum_wing_analysis",
+                  {"wing": {"surfaces": [RECT], "S_ref_m2": 1e-3, "b_ref_m": 1e-3, "c_ref_m": 1e-3},
+                   "settings": FAST, "detail_level": "summary"})
+    assert p["status"] == "success", p
+    # The Python call path with an Aircraft object is checked too.
+    for attr in ("S_ref", "b_ref", "c_ref"):
+        ac = build_aircraft_from_spec({"surfaces": [RECT]})
+        setattr(ac, attr, 1e-300)
+        assert_error(wing_analysis(ac, None, FAST, "summary"), "invalid_input", attr)
+
+
+def test_speed_below_minimum_is_invalid_input():
+    """V_inf below 0.1 m/s is invalid_input in every tool; 0.1 m/s is accepted.
+
+    Before the fix, V_inf_m_s = 1e-300 gave an internal ZeroDivisionError
+    and 0.05 m/s was accepted.
+    """
+    for v in (1e-300, 0.05):
+        assert_error(call_tool("ventorum_wing_analysis",
+                               {"wing": RECT, "flight_condition": {"V_inf_m_s": v}, "settings": FAST}),
+                     "invalid_input", "V_inf_m_s")
+        assert_error(call_tool("ventorum_ground_effect",
+                               {"wing": RECT, "heights_m": [1.0], "V_inf_m_s": v, "settings": FAST}),
+                     "invalid_input", "V_inf_m_s")
+    p = call_tool("ventorum_wing_analysis",
+                  {"wing": RECT, "flight_condition": {"V_inf_m_s": 0.1}, "settings": FAST,
+                   "detail_level": "summary"})
+    assert p["status"] == "success", p
+    g = call_tool("ventorum_ground_effect",
+                  {"wing": RECT, "heights_m": [1.0], "V_inf_m_s": 0.1, "settings": FAST,
+                   "detail_level": "summary"})
+    assert g["status"] == "success", g
+    assert CONDITION_PROPS["V_inf_m_s"]["minimum"] == 0.1

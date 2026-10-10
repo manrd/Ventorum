@@ -518,7 +518,7 @@ def _split_kwargs(kwargs: dict) -> tuple[dict, dict]:
 def sweep_height(
     geometry: Aircraft | LiftingSurface,
     heights: Sequence[float] | np.ndarray,
-    alpha_deg: float = 4.0,
+    alpha_deg: float = 5.0,
     phi_deg: float = 0.0,
     n_workers: int | str = "auto",
     backend: str = "auto",
@@ -533,7 +533,7 @@ def sweep_height(
     heights : sequence of float
         Heights above the ground [m] (each > 0), in the convention of ``height_ref``.
     alpha_deg : float
-        Angle of attack [deg].
+        Angle of attack [deg] (default 5.0).
     phi_deg : float
         Bank angle [deg].
     n_workers : int or str
@@ -560,7 +560,7 @@ def sweep_roll(
     geometry: Aircraft | LiftingSurface,
     phis_deg: Sequence[float] | np.ndarray,
     heights: Sequence[float] | np.ndarray = (0.5, 1.0, 2.0),
-    alpha_deg: float = 4.0,
+    alpha_deg: float = 5.0,
     n_workers: int | str = "auto",
     backend: str = "auto",
     **kwargs,
@@ -576,7 +576,7 @@ def sweep_roll(
     heights : sequence of float
         Heights above the ground [m] (each > 0), in the convention of ``height_ref``.
     alpha_deg : float
-        Angle of attack [deg].
+        Angle of attack [deg] (default 5.0).
     n_workers : int or str
         Number of parallel workers, or ``"auto"``.
     backend : str

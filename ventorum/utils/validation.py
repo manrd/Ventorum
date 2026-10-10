@@ -36,6 +36,9 @@ MIN_AREA_M2 = 1.0e-12
 ANGLE_LIMIT_RAD = math.pi
 #: Largest free-stream speed [m/s].
 SPEED_LIMIT_M_S = 1.0e4
+#: Smallest free-stream speed [m/s] accepted. A smaller speed makes the
+#: dynamic pressure underflow and gives a division by zero in the loads.
+MIN_SPEED_M_S = 0.1
 
 
 def _is_finite_number(value: object) -> bool:
@@ -213,13 +216,16 @@ def validate_aircraft(ac: Aircraft) -> None:
         raise ValueError("Aircraft must have at least one LiftingSurface.")
     for surf in ac.surfaces:
         validate_surface(surf)
-    for key in ("S_ref", "b_ref", "c_ref"):
+    # Lower limits on the reference values. A smaller positive value
+    # underflows or overflows in the coefficients (q*S, q*S*b, q*S*c).
+    for key, floor, unit in (("S_ref", MIN_AREA_M2, "m^2"), ("b_ref", MIN_SPAN_M, "m"),
+                             ("c_ref", MIN_CHORD_M, "m")):
         value = getattr(ac, key)
         if value is not None:
             _finite_value(f"Aircraft '{ac.name}': {key}", value)
-            if value <= 0:
+            if value < floor:
                 raise ValueError(
-                    f"Aircraft '{ac.name}': {key}={value} must be > 0."
+                    f"Aircraft '{ac.name}': {key}={value} {unit} must be >= {floor:g} {unit}."
                 )
     if ac.ref_point is not None:
         try:
@@ -235,8 +241,8 @@ def validate_aircraft(ac: Aircraft) -> None:
 def validate_flight_condition(fc: FlightCondition) -> None:
     """Check :class:`FlightCondition` values."""
     _finite_value("V_inf", fc.V_inf)
-    if fc.V_inf <= 0:
-        raise ValueError(f"V_inf={fc.V_inf} must be > 0.")
+    if fc.V_inf < MIN_SPEED_M_S:
+        raise ValueError(f"V_inf={fc.V_inf} m/s must be >= {MIN_SPEED_M_S:g} m/s.")
     if fc.V_inf > SPEED_LIMIT_M_S:
         raise ValueError(
             f"V_inf={fc.V_inf} m/s is above the size limit {SPEED_LIMIT_M_S:g} m/s."

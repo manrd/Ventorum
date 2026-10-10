@@ -182,7 +182,7 @@ def test_non_finite_guard_never_raises_the_trust_level():
 
 
 def test_tiny_span_chord_and_area_are_refused():
-    """T-0047 B9: validate_surface has lower limits on span, chord and area."""
+    """validate_surface has lower limits on span, chord and area."""
     wing = _wing()
     wing.semi_span = 1e-300
     with pytest.raises(ValueError) as exc:
@@ -203,7 +203,7 @@ def test_tiny_span_chord_and_area_are_refused():
 
 
 def test_small_but_sane_wing_still_passes():
-    """T-0047 B9: the lower limits do not refuse a small (1 cm) wing."""
+    """The lower limits do not refuse a small (1 cm) wing."""
     wing = _wing(semi_span=0.005, sections=[
         vt.WingSection(y_frac=0.0, chord=0.01),
         vt.WingSection(y_frac=1.0, chord=0.01),
@@ -212,9 +212,59 @@ def test_small_but_sane_wing_still_passes():
 
 
 def test_zero_reference_values_are_refused():
-    """T-0047 B9: a zero S_ref, b_ref or c_ref is refused."""
+    """A zero S_ref, b_ref or c_ref is refused."""
     for key in ("S_ref", "b_ref", "c_ref"):
         ac = vt.Aircraft(name="A", surfaces=[_wing()], **{key: 0.0})
         with pytest.raises(ValueError) as exc:
             V.validate_aircraft(ac)
         assert key in str(exc.value)
+
+
+def test_tiny_reference_values_are_refused():
+    """S_ref, b_ref and c_ref below their lower limits are refused; the limits pass.
+
+    Before the fix, b_ref = 1e-300 gave a ZeroDivisionError and
+    S_ref = 1e-300 an OverflowError in the loads.
+    """
+    floors = {"S_ref": V.MIN_AREA_M2, "b_ref": V.MIN_SPAN_M, "c_ref": V.MIN_CHORD_M}
+    for key, floor in floors.items():
+        for bad in (1e-300, 0.5 * floor):
+            ac = vt.Aircraft(name="A", surfaces=[_wing()], **{key: bad})
+            with pytest.raises(ValueError) as exc:
+                V.validate_aircraft(ac)
+            assert key in str(exc.value)
+        V.validate_aircraft(vt.Aircraft(name="A", surfaces=[_wing()], **{key: floor}))
+
+
+def test_speed_below_minimum_is_refused():
+    """V_inf below 0.1 m/s is refused; 0.1 m/s is accepted.
+
+    Before the fix, V_inf = 1e-300 passed the check and gave a
+    ZeroDivisionError in the loads.
+    """
+    assert V.MIN_SPEED_M_S == 0.1
+    for bad in (1e-300, 0.05):
+        with pytest.raises(ValueError) as exc:
+            V.validate_flight_condition(vt.FlightCondition(V_inf=bad))
+        assert "V_inf" in str(exc.value)
+    V.validate_flight_condition(vt.FlightCondition(V_inf=0.1))
+    with pytest.raises(ValueError):
+        vt.analyze(_wing(), V_inf=1e-300, n_panels=8)
+
+
+def test_ground_effect_default_alpha_is_five_deg():
+    """The ground-effect Python API uses alpha = 5 deg when alpha_deg is omitted."""
+    import dataclasses
+    import inspect
+
+    from ventorum.ground_effect import GroundEffectCondition, analyze_ground_effect, sweep_height, sweep_roll
+    from ventorum.ground_effect.solver import prepare_ground_case
+
+    for fn in (analyze_ground_effect, prepare_ground_case, sweep_height, sweep_roll):
+        assert inspect.signature(fn).parameters["alpha_deg"].default == 5.0, fn.__name__
+    # prepare_ground_case refers to the parameters of analyze_ground_effect.
+    for fn in (analyze_ground_effect, sweep_height, sweep_roll, GroundEffectCondition):
+        assert "(default 5.0)" in " ".join(fn.__doc__.split()), fn.__name__
+    fields = {f.name: f for f in dataclasses.fields(GroundEffectCondition)}
+    assert fields["alpha_deg"].default == 5.0
+    assert GroundEffectCondition().alpha_deg == 5.0
