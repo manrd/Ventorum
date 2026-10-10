@@ -21,32 +21,51 @@ A geometry has three levels.
 
 ## Control surfaces
 
-Attach control surfaces to a `LiftingSurface` using `ControlSurface`. Specify the hinge chord fraction, spanwise extent, and deflection sign conventions.
+A `ControlSurface` is a hinged flap (flap, aileron, elevator or rudder) on a `LiftingSurface`. Give it in the `controls` list of the surface. The fields are:
+
+| Field | Meaning |
+| --- | --- |
+| `name` | The name of the control. Controls on different surfaces with the same name move together. |
+| `eta_start`, `eta_end` | The span limits, as fractions of the semi-span (0 at the root, 1 at the tip). |
+| `hinge_x_c` | The hinge position, as a fraction of the local chord from the leading edge. |
+| `deflection` | The deflection [rad], positive trailing edge down (on a vertical fin: trailing edge to +y). The limit is 30 deg. |
+| `symmetric` | `True` (flap, elevator): both halves deflect in the same direction. `False` (aileron): the left half deflects in the opposite direction. |
+
+`Aircraft.set_deflection(name, deflection)` sets the deflection of all the controls with this name. It returns the number of controls that it changed. The deflection is part of the geometry, so each solve after the change uses it.
 
 ```python
 import numpy as np
-from ventorum import ControlSurface, LiftingSurface, Aircraft
+import ventorum as vt
 
-elevator = ControlSurface(
-    name="elevator",
-    hinge_x_frac=0.75,
-    eta_start=0.0,
-    eta_end=1.0,
-    symmetric=True,
-    deflection_limit=np.radians(25.0),
+# A wing with ailerons (antisymmetric) on the outer 40 % of the semi-span.
+wing = vt.LiftingSurface(
+    name="wing",
+    semi_span=5.0,
+    sections=[vt.WingSection(y_frac=0.0, chord=1.2), vt.WingSection(y_frac=1.0, chord=0.8)],
+    controls=[vt.ControlSurface(name="aileron", eta_start=0.6, eta_end=1.0, hinge_x_c=0.75, symmetric=False)],
 )
 
-htail = LiftingSurface(
-    name="horizontal_tail",
-    sections=[...],
-    controls=[elevator],
+# A horizontal tail with an elevator on the full span.
+htail = vt.LiftingSurface(
+    name="htail",
+    semi_span=1.6,
+    position=np.array([4.0, 0.0, 0.3]),
+    sections=[vt.WingSection(y_frac=0.0, chord=0.7), vt.WingSection(y_frac=1.0, chord=0.5)],
+    controls=[vt.ControlSurface(name="elevator", eta_start=0.0, eta_end=1.0, hinge_x_c=0.7)],
 )
 
-aircraft = Aircraft(surfaces=[wing, htail])
+aircraft = vt.Aircraft(name="demo", surfaces=[wing, htail], ref_point=np.array([0.3, 0.0, 0.0]))
 
-# Set control deflection
-aircraft_pitched = aircraft.set_deflection("elevator", np.radians(-2.0))
+# Right aileron trailing edge down 5 deg (left trailing edge up): roll to the left.
+aircraft.set_deflection("aileron", np.radians(5.0))
+# Elevator trailing edge up 2 deg: nose-up pitching moment.
+aircraft.set_deflection("elevator", np.radians(-2.0))
+
+result = vt.analyze(aircraft, alpha_deg=3.0, V_inf=30.0, solver="vlm")
+print(f"CL = {result.totals.CL:.4f}, Cm = {result.totals.Cm:.4f}, Cl = {result.totals.Cl:.4f}")
 ```
+
+The vortex-lattice solver with two or more chordwise panels turns the boundary-condition normals of the flap panels. The lifting-line solvers, and the vortex lattice with one chordwise panel, use a deflected section polar. The [theory chapter](../theory/control_surfaces.md) gives the two models. The Fourier solver does not accept a deflected control.
 
 ## Save and load
 

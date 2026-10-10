@@ -911,3 +911,33 @@ def test_deflected_airfoil_follows_the_table_rule():
     assert np.max(np.abs(new_lin.Cl(a) - lin.Cl(a + tau * delta))) <= tol
     assert np.all(np.asarray(new_lin.Cm(a)) == new_lin.Cm0)
     assert ctrl_mod.deflected_airfoil(lin, 0.0, h) is lin
+
+
+def test_user_manual_example_runs():
+    """Prove that the control-surface example of the user manual runs as written.
+
+    The test reads the code block from docs/user/geometry.md, so the manual
+    and the test cannot drift apart.
+    """
+    import re
+    from pathlib import Path
+
+    text = (Path(__file__).resolve().parents[1] / "docs" / "user" / "geometry.md").read_text(encoding="utf-8")
+    section = text.split("## Control surfaces", 1)[1].split("\n## ", 1)[0]
+    blocks = re.findall(r"```python\n(.*?)```", section, flags=re.S)
+    assert len(blocks) == 1, "the section must have exactly one Python example"
+    code = blocks[0]
+    assert 'aircraft.set_deflection("elevator", np.radians(-2.0))' in code
+    assert "symmetric=False" in code  # the example has an aileron
+
+    namespace: dict = {}
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        exec(compile(code, "docs/user/geometry.md", "exec"), namespace)  # noqa: S102
+    ac = namespace["aircraft"]
+    elevators = [c for s in ac.surfaces for c in s.controls if c.name == "elevator"]
+    ailerons = [c for s in ac.surfaces for c in s.controls if c.name == "aileron"]
+    assert elevators and all(c.deflection == np.radians(-2.0) for c in elevators)
+    assert ailerons and all(not c.symmetric for c in ailerons)
+    res = namespace["result"]
+    assert np.isfinite(res.totals.CL) and res.totals.Cl < 0.0  # right trailing edge down
