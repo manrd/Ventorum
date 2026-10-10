@@ -93,6 +93,14 @@ a minor version can change a public interface.
 - The canonical solver names are `"auto"`, `"vlm"`, `"linear"`, `"nonlinear"` and `"fourier"`. The
   old names `"horseshoe"`, `"lattice"`, `"llt"` and `"linear_llt"` still work, with one
   `FutureWarning` at the public call that names the new name.
+- The vortex-lattice force on the chordwise legs that lie on the surface uses only the velocity
+  tangent to the surface. The normal velocity at the leg points is a leak of the discrete lattice;
+  its force was an in-plane force that an impermeable surface cannot carry. Results change for
+  cases with an antisymmetric control deflection at angle of attack (no aileron side force on a
+  flat wing; the aileron yawing moment now agrees with the Trefftz-plane value) and, at second
+  order, for non-planar wings in sideslip. The rolling moment due to sideslip of flat wings does
+  not change. Verification case V9 (fin side force) and V10 (separate surfaces at a dihedral
+  break) change at the fifth digit and by up to 0.3 percentage points.
 
 ### Fixed
 

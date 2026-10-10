@@ -68,7 +68,7 @@ A linear airfoil has the constants $a_0$, $\alpha_{L0}$, $C_{d0}$ and $C_{m0}$. 
 
 ## Assumptions
 
-- One horseshoe per strip: no chordwise extent. Forces act on the bound vortex only.
+- One horseshoe per strip: no chordwise extent. Forces act on the bound vortex only. So the lifting line gives almost no rolling moment due to sideslip on a flat (planar, unswept) wing, where measurements show a stable rolling moment (Goodman and Brewer 1948); use the vortex lattice for lateral derivatives of planar wings.
 - The section behaves as in two-dimensional flow at the local angle of attack and the local velocity (strip theory).
 - Rigid, straight wake (see [Vortex filaments](vortex_kernels.md)); inviscid, incompressible flow.
 
@@ -97,6 +97,7 @@ A linear airfoil has the constants $a_0$, $\alpha_{L0}$, $C_{d0}$ and $C_{m0}$. 
 
 - W. F. Phillips and D. O. Snyder, "Modern adaptation of Prandtl's classic lifting-line theory", *Journal of Aircraft* 37(4), 2000, pp. 662-670.
 - W. F. Phillips, *Mechanics of Flight*, Wiley, 2004, section 1.9.
+- A. Goodman and J. D. Brewer, "Investigation at low speeds of the effect of aspect ratio and sweep on static and yawing stability derivatives of untapered wings", NACA TN 1669, 1948.
 - F. N. Fritsch and R. E. Carlson, "Monotone piecewise cubic interpolation", *SIAM Journal on Numerical Analysis* 17(2), 1980, pp. 238-246.
 - F. N. Fritsch and J. Butland, "A method for constructing local monotone piecewise cubic interpolants", *SIAM Journal on Scientific and Statistical Computing* 5(2), 1984, pp. 300-304.
 - M. Drela, "XFOIL: an analysis and design system for low Reynolds number airfoils", in T. J. Mueller (ed.), *Low Reynolds Number Aerodynamics*, Lecture Notes in Engineering 54, Springer, 1989, pp. 1-12.

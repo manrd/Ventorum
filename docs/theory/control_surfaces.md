@@ -141,6 +141,7 @@ The control surface model uses these assumptions:
 - In chordwise mode, the trailing edge nodes do not translate. Ground-clearance checks do not detect deflected flap positions.
 - A snapped panel can be up to 1.25 times its normal length. The ground-effect rule that limits chordwise panel length to the gap height does not see this extension.
 - At control side edges, the bound vortices of neighbouring strips can end at different chordwise locations.
+- The side force of an antisymmetric deflection (aileron) on a flat wing is not modelled: the rotated-normal model has no flap side edges, and the leg forces use the tangential velocity only (see [Forces and moments](forces_and_moments.md)). On a thin wing this side force is small and proportional to the angle of attack times the deflection; DATCOM neglects it for plain wings.
 - The classical Fourier solver does not support deflected control surfaces.
 - The section hinge moment is the thin-airfoil value of a plain flap: no gap, no nose balance, no camber term, attached flow only. Past stall it has no physical meaning.
 - The chordwise hinge moment converges slowly with the number of chordwise panels (table above). Use 16 or more chordwise panels for hinge moments.
