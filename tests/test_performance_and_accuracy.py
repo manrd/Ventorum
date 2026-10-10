@@ -52,7 +52,7 @@ def test_fourier_analytical_elliptic_wing():
 
     # Discretize elliptic chord distribution with a straight, unswept
     # quarter-chord line (the lifting line of Glauert's solution; the
-    # Fourier solver refuses a swept quarter-chord line, owner decision D-08)
+    # Fourier solver refuses a swept quarter-chord line)
     n_secs = 31
     y_fracs = np.linspace(0, 1, n_secs)
     chords = [c_root * np.sqrt(max(1.0 - yf**2, 1e-8)) for yf in y_fracs]
@@ -67,7 +67,7 @@ def test_fourier_analytical_elliptic_wing():
     res = vt.analyze(wing, condition=cond, solver="fourier", n_panels=40)
 
     # Each tolerance is about 10 times the relative error measured today on this
-    # 31-section discretised planform (task T-0010, decision 1).
+    # 31-section discretised planform.
 
     # For an elliptic wing:
     # 1. Oswald efficiency e = 1.000 (measured error today: 1.6e-3; old tolerance 0.05)
@@ -83,8 +83,8 @@ def test_fourier_analytical_elliptic_wing():
     # 3. Induced drag CDi = CL^2 / (pi * AR * e)
     expected_CDi = (res.totals.CL ** 2) / (np.pi * AR * res.totals.e)
     # Measured relative error today: 2.3e-3. Ten times that (2.3e-2) would be
-    # looser than the old tolerance, so the old, tighter 0.01 stays (review of
-    # T-0010: a tolerance is never made looser).
+    # looser than the old tolerance, so the old, tighter 0.01 stays (a
+    # tolerance is never made looser).
     np.testing.assert_allclose(res.totals.CDi, expected_CDi, rtol=0.01)
 
 
@@ -115,7 +115,7 @@ def test_fourier_solve_sweep_machine_precision():
     wing = vt.LiftingSurface(
         semi_span=6.0,
         sections=[
-            # Straight, unswept quarter-chord line (owner decision D-08).
+            # Straight, unswept quarter-chord line.
             vt.WingSection(y_frac=0.0, chord=1.8, twist=0.0, x_le=-0.25 * 1.8),
             vt.WingSection(y_frac=1.0, chord=0.9, twist=np.radians(-2.0), x_le=-0.25 * 0.9),
         ],

@@ -1,5 +1,5 @@
 # Author: Manuel Alejandro Rodriguez Diaz, PhD
-"""The GitHub workflow files are valid YAML (review of T-0010).
+"""The GitHub workflow files are valid YAML.
 
 A one-line mapping (``permissions: contents: read``) is not valid YAML; it
 stopped the whole CI workflow. PyYAML is not a dependency of Ventorum, so the

@@ -51,6 +51,16 @@ Derivation of the shift: consider one panel of chord $c$ in two-dimensional flow
 
 Camber enters through the zero-lift angle. The normal of the boundary condition, $\hat{\mathbf n}_{bc}$, is the geometric normal of the strip turned nose up by $-\alpha_{L0}$ about the spanwise axis in the y-z plane (the same axis as the twist). The section data are defined in streamwise sections, so camber then acts as the same incidence also on a swept surface.
 
+### Deformed geometry
+
+Node displacements give a deformed geometry, for example for aeroelastic analysis. `LiftingSurface.node_displacements` (a `NodeDisplacements`) holds the displacements [m] of the leading-edge and trailing-edge nodes at each strip edge of the defining half of the surface, from root to tip, in geometry axes. The lattice adds them to the undeformed nodes. The chord of an edge is then $|\mathbf x_{te} - \mathbf x_{le}|$ of the displaced nodes. All the other lattice data (strips, panels, control points, normals and control surfaces) come from the displaced nodes with the method above.
+
+The number and the stations of the edges depend on the mesh settings and on the solver (the `auto` spacing of the lifting line is different from that of the vortex lattice). `ventorum.geometry.undeformed_nodes` gives the nodes of the mesh for one settings object and one solver. Use the same settings and solver for `undeformed_nodes` and for the analysis. When `NodeDisplacements.eta` holds the edge stations, the lattice compares them with the stations of the mesh and refuses a mismatch.
+
+The left half of a symmetric surface and a mirror copy (`mirrored()`) get the mirror image (y to -y) of the displaced defining half. Thus a symmetric surface stays symmetric. An asymmetric deformation needs two surfaces with `is_symmetric=False`, each with its own displacements.
+
+The reference values $S_{	ext{ref}}$, $b_{	ext{ref}}$, $c_{	ext{ref}}$ and the ground-effect height reference point (`Aircraft.root_point`) stay on the undeformed geometry. The strip twist array keeps the undeformed (jig) twist; the displaced nodes and the normals hold the deformed shape. The wake leaves the deformed trailing edge along the free stream or the body axis, as for an undeformed surface.
+
 ## Equations
 
 The flow-tangency condition at the control point $\mathbf P_i$ of panel $i$ is

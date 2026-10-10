@@ -6,6 +6,65 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Before version 1.0.0,
 a minor version can change a public interface.
 
+## [Unreleased]
+
+### Added
+
+- Numerical error bars (layer 1 of the error bars): `numerical_error_bars` solves a case on three
+  spanwise mesh levels and gives, for each coefficient, an interval from the grid convergence
+  index (Roache 1998) with the observed order of Celik et al. (2008). Each bar states its
+  convergence state (`monotonic`, `oscillatory`, `not_converged_order`, `divergent` or
+  `roundoff`) and its notes. `ErrorBar` and `ErrorBarResult` hold the output.
+- `validation/perf_history.py`: a speed history of fixed workloads per commit (record mode, which
+  times the code of its own tree) and a side-by-side timing of two source trees (compare mode,
+  one fresh process per run, alternating order). The output holds no machine identifier.
+- Control surfaces: `ControlSurface` on a `LiftingSurface` (spanwise limits, hinge line as a
+  fraction of the chord, deflection, symmetric or antisymmetric on the mirror copy, limit 30 deg),
+  and `Aircraft.set_deflection`. The vortex lattice with two or more chordwise panels turns the
+  normals of the panels aft of the hinge. The lifting lines, and the vortex lattice with one
+  chordwise panel, use a section polar deflected by thin-airfoil theory (Glauert 1926). An
+  antisymmetric deflection turns off the symmetry fold. The Fourier solver refuses a deflected
+  control.
+- Deformed geometry: `NodeDisplacements` on a `LiftingSurface` moves the leading-edge and
+  trailing-edge nodes of the lattice (for example from a structural solver). `undeformed_nodes`
+  gives the nodes of the mesh, and `displacements_from_section_motion` builds displacements from
+  section heave and twist. The reference values stay those of the undeformed shape. An optional
+  station check refuses displacements built for another mesh. The Fourier solver refuses node
+  displacements.
+- Trim solver `trim`: a Newton method with a central finite-difference Jacobian finds the angle
+  of attack and the control deflections for a target CL and zero Cm (and, on request, zero Cl
+  and Cn), in free air and in ground effect at a constant height. It runs on the CPU in float64.
+  A target that cannot be reached gives a status and notes; invalid input raises ValueError.
+  `examples/11_trim.py` shows its use.
+
+### Changed
+
+- The default angle of attack is 5 deg in every interface. The agent tool `ventorum_ground_effect`
+  changes from 4 deg to 5 deg. The `Ventorum` instance changes from 0 deg to 5 deg. The
+  ground-effect Python API (`analyze_ground_effect`, `prepare_ground_case`, `sweep_height`,
+  `sweep_roll`, `GroundEffectSweep.run_sweep` and `GroundEffectCondition`) changes from 4 deg
+  to 5 deg. The agent flight condition, `vt.analyze` and `FlightCondition` already used 5 deg.
+- The agent tools refuse an explicit JSON `null` for every key, at the top level and in nested
+  objects (`invalid_input` that names the key). Omit the key to get its default. In a Python call,
+  `None` for an optional argument still means "use the default".
+- Lower limits on the input: semi-span and section chord at least 1e-6 m, planform area at least
+  1e-12 m^2, reference area `S_ref` at least 1e-12 m^2, reference span `b_ref` and reference chord
+  `c_ref` at least 1e-6 m. A smaller value gave an internal division by zero or overflow in the
+  loads; it is now an input error.
+- The free-stream speed must be at least 0.1 m/s (`validate_flight_condition` and the agent
+  schemas). A smaller speed gave an internal division by zero in the loads.
+- The main surface (the source of the reference values) is the surface with the largest projected
+  planform area. The texts now say this; the code did not change.
+- Documentation: the README names the tuned kernel backends, the API index lists the hardware
+  and GPU packages, and the agent map lists all packages. The recovery audit refers to its
+  measured speed tables and gives no typed speed ratios.
+- Continuous integration uses the first versions of the checkout and setup-python actions that
+  run on Node.js 24.
+
+### Fixed
+
+- The agent tools accept a 1-D numpy array where they accept a list of numbers.
+
 ## [0.3.0] - 2026-10-04
 
 This version closes the first development phase (P0): the verified core, its kernel backends,

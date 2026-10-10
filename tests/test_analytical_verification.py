@@ -28,9 +28,9 @@ from ventorum.reference import (
 )
 from ventorum.solvers.lattice_base import assemble_system_matrix
 
-# Task T-0010, decision 4: no fixture hides warnings here. A test in this
-# module must not emit a warning; a test that expects one uses pytest.warns,
-# and pytest.warns overrides this mark for that test.
+# No fixture hides warnings here. A test in this module must not emit a
+# warning; a test that expects one uses pytest.warns, and pytest.warns
+# overrides this mark for that test.
 pytestmark = pytest.mark.filterwarnings("error")
 
 

@@ -38,8 +38,8 @@ def numpy_backend():
 def _restore_kernel_backend():
     """Restore the backend setting after every test of this file.
 
-    Review of T-0016: some torch tests left the backend on "torch", and the
-    tests of other files that ran after them failed.
+    Some torch tests left the backend on "torch", and the tests of other
+    files that ran after them failed.
     """
     old = V._kernel_backend
     yield
@@ -628,7 +628,7 @@ def test_cuda_tuner_measures_torch(monkeypatch):
 
 
 def test_import_does_not_load_torch():
-    """Review of T-0016: importing Ventorum must not import PyTorch (about 3 s, and an OpenMP clash on macOS).
+    """Importing Ventorum must not import PyTorch (about 3 s, and an OpenMP clash on macOS).
 
     The torch backend loads PyTorch on its first use only.
     """
@@ -726,10 +726,10 @@ def test_kernel_parts_add_up_on_straight_horseshoes(numpy_backend, backend):
     assert np.max(np.abs(v1 + v2 - v0)) <= 1e-13 * np.max(np.abs(v0))
 
 
-# ── Test for ProgressBar.set_current (kept per D-02) ──────────────────────────
+# ── Test for ProgressBar.set_current (public function kept, with a test) ──────────
 
 def test_progressbar_set_current():
-    """Test that ProgressBar.set_current works (kept per D-02)."""
+    """Test that ProgressBar.set_current works (a public function that is kept, with a test)."""
     import io
     from ventorum.utils.progress import ProgressBar
 

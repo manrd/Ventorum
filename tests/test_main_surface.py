@@ -1,4 +1,4 @@
-"""Main surface rule (T-0014): the surface with the largest projected planform area.
+"""Main surface rule: the surface with the largest projected planform area.
 
 The area is projected on the x-y plane, after mirroring (a symmetric surface
 counts both halves, and a half surface counts with its mirror copy). A tie

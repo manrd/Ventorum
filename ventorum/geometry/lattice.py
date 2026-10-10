@@ -53,11 +53,18 @@ import numpy as np
 from ventorum.core.datatypes import (
     Aircraft,
     AirfoilType,
+    ControlSurface,
     LiftingSurface,
     LinearAirfoil,
     SolverSettings,
     TabulatedAirfoil,
     WingSection,
+)
+from ventorum.geometry.controls import (
+    deflected_airfoil,
+    flap_effectiveness,  # noqa: F401 (re-exported for lattice_cache builder helpers)
+    flap_moment_derivative,  # noqa: F401 (re-exported for lattice_cache builder helpers)
+    validate_controls,
 )
 from ventorum.geometry.discretization import compute_surface_n_panels, get_spacing
 from ventorum.utils.vec import cross3
@@ -76,7 +83,7 @@ CORE_RADIUS_FRACTION = 0.01
 # between two tail control points. Surfaces that share an edge (two halves of
 # a V-tail, a split wing, a wing and its winglet) are one vortex sheet: the
 # added core does not apply between them (see ``core_groups``).
-CROSS_SURFACE_CORE_FRACTION = 0.5  # owner decision D-03 (2026-10-03), from the T-0013 core-size study
+CROSS_SURFACE_CORE_FRACTION = 0.5  # owner decision of 2026-10-03, from the core-size study with a wing and a tail
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -287,6 +294,7 @@ class VortexLattice:
         Strip chord [m].
     twist : numpy.ndarray
         Strip twist, with the incidence of the surface [rad].
+        Keeps the undeformed (jig) twist; the deformed shape is in the nodes.
     width : numpy.ndarray
         Strip width [m].
     area : numpy.ndarray
@@ -346,6 +354,7 @@ class VortexLattice:
     # geometry, Trefftz strip data). Shared by the shallow copies that the
     # lattice cache hands out, so they are computed once per geometry.
     geom_cache: dict = field(default_factory=dict, repr=False, compare=False)
+    control_info: list[dict] = field(default_factory=list)
 
     @property
     def n_panels(self) -> int:
@@ -632,14 +641,18 @@ def _surface_eta(surf: LiftingSurface, n_panels: int, spacing: str) -> tuple[np.
     the break. This is done only for surfaces with at most 4 interior
     sections and when the breaks are at most a third of the panel count; a
     smooth planform given by many sections keeps the plain spacing.
+
+    Control surface span limits (not 0 and not 1) are snapped after the
+    section breaks, with the same nearest-edge and quarter-width rules,
+    independently of the section-count rule.
     """
     edges, mids = get_spacing(spacing, n_panels, surf=surf)
     edges = np.asarray(edges, dtype=float).copy()
     mids = np.asarray(mids, dtype=float).copy()
     edges[0], edges[-1] = 0.0, 1.0
     breaks = _section_breaks(surf)
+    moved: set[int] = set()
     if breaks and len(breaks) <= max(1, (len(edges) - 1) // 3):
-        moved: set[int] = set()
         for eb in breaks:
             cand = [i for i in range(1, len(edges) - 1) if i not in moved]
             if not cand:
@@ -656,7 +669,77 @@ def _surface_eta(surf: LiftingSurface, n_panels: int, spacing: str) -> tuple[np.
             mids[i - 1] = 0.5 * (edges[i - 1] + edges[i])
             mids[i] = 0.5 * (edges[i] + edges[i + 1])
             moved.add(i)
+
+    controls = getattr(surf, "controls", [])
+    if controls:
+        ctrl_limits = []
+        for c in controls:
+            for lim in (c.eta_start, c.eta_end):
+                if 1e-12 < lim < 1.0 - 1e-12:
+                    ctrl_limits.append(float(lim))
+        for clim in ctrl_limits:
+            dist = np.abs(edges - clim)
+            min_dist_idx = int(np.argmin(dist))
+            if dist[min_dist_idx] < 1e-12:
+                if 1 <= min_dist_idx < len(edges) - 1:
+                    moved.add(min_dist_idx)
+                continue
+            cand = [i for i in range(1, len(edges) - 1) if i not in moved]
+            if not cand:
+                continue
+            i = min(cand, key=lambda j: abs(edges[j] - clim))
+            w_left, w_right = edges[i] - edges[i - 1], edges[i + 1] - edges[i]
+            if clim - edges[i - 1] < 0.25 * w_left or edges[i + 1] - clim < 0.25 * w_right:
+                continue
+            edges[i] = clim
+            mids[i - 1] = 0.5 * (edges[i - 1] + edges[i])
+            mids[i] = 0.5 * (edges[i] + edges[i + 1])
+            moved.add(i)
+
     return edges, mids
+
+
+def _surface_mesh_eta(
+    surf: LiftingSurface,
+    settings: SolverSettings,
+    collocation: str,
+    ref_semi: float,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Spanwise strip edges and control-point stations of the defining half of a surface.
+
+    This function applies the panel-count rule (the surface ``n_panels``, the
+    settings ``n_panels`` or the proportional panel count) and the spacing
+    rule of the solver. :func:`build_lattice` and
+    :func:`ventorum.geometry.deformation.undeformed_nodes` both use it, so
+    they always give the same stations.
+
+    Parameters
+    ----------
+    surf : LiftingSurface
+        The surface.
+    settings : SolverSettings
+        Spanwise panel count and spacing.
+    collocation : {"vlm", "llt"}
+        Control-point rule. The ``"auto"`` spacing depends on it.
+    ref_semi : float
+        Reference semi-span for proportional panel counts [m]: the largest
+        semi-span of the aircraft surfaces.
+
+    Returns
+    -------
+    tuple of numpy.ndarray
+        The edge stations ``eta_e`` (n_edges,) and the control-point
+        stations ``eta_mid`` (n_edges - 1,), as fractions of the semi-span.
+    """
+    if getattr(settings, "proportional_panels", False) and surf.n_panels is None:
+        n_sp = compute_surface_n_panels(
+            surf, base_n_panels=settings.n_panels, reference_semi_span=ref_semi,
+            min_panels=getattr(settings, "min_panels", 8),
+        )
+    else:
+        n_sp = surf.n_panels if surf.n_panels is not None else settings.n_panels
+    spacing = resolve_spacing(surf.spacing if surf.spacing is not None else settings.spacing, surf, collocation)
+    return _surface_eta(surf, int(n_sp), spacing)
 
 
 def _chordwise_fractions(n_chord: int, chord_spacing: str) -> np.ndarray:
@@ -696,42 +779,185 @@ def build_lattice(
     n_chord = max(1, int(n_chord))
     xi = _chordwise_fractions(n_chord, chord_spacing)
 
+    for surf in aircraft.surfaces:
+        validate_controls(surf)
+
+    is_chordwise = (collocation == "vlm" and n_chord >= 2)
+    mode_str = "chordwise" if is_chordwise else "section"
+
     ref_semi = max((s.semi_span for s in aircraft.surfaces), default=1.0)
 
     strip_parts: dict[str, list[Any]] = {k: [] for k in (
         "surface", "le_l", "le_r", "te_l", "te_r", "chord", "twist", "a0", "aL0", "cd0", "cm0",
         "mirror", "is_right", "eta", "frac",
     )}
+    strip_xi_all: list[np.ndarray] = []
+    strip_ctrl_all: list[ControlSurface | None] = []
+    strip_hinge_eff_all: list[float | None] = []
+    control_info: list[dict[str, Any]] = []
+
     airfoils: list[AirfoilType] = []
     surfaces: list[SurfaceSlice] = []
     strip_offset = 0
 
+    # One deflected airfoil for each (base airfoil, deflection, hinge). The
+    # loads group the tabulated strips by airfoil object, so a new object for
+    # each strip makes the nonlinear solve much slower. Each memo value also
+    # holds the base airfoil, so its id stays unique while the memo lives.
+    deflected_memo: dict[tuple[int, float, float], tuple[AirfoilType, AirfoilType]] = {}
+
+    def _deflected(base: AirfoilType, delta: float, hinge_x_c: float) -> AirfoilType:
+        key = (id(base), float(delta), float(hinge_x_c))
+        hit = deflected_memo.get(key)
+        if hit is None:
+            hit = (base, deflected_airfoil(base, delta, hinge_x_c))
+            deflected_memo[key] = hit
+        return hit[1]
+
     for s_idx, surf in enumerate(aircraft.surfaces):
-        if getattr(settings, "proportional_panels", False) and surf.n_panels is None:
-            n_sp = compute_surface_n_panels(
-                surf, base_n_panels=settings.n_panels, reference_semi_span=ref_semi,
-                min_panels=getattr(settings, "min_panels", 8),
-            )
-        else:
-            n_sp = surf.n_panels if surf.n_panels is not None else settings.n_panels
-        spacing = resolve_spacing(surf.spacing if surf.spacing is not None else settings.spacing, surf, collocation)
-        eta_e, eta_mid = _surface_eta(surf, int(n_sp), spacing)
+        eta_e, eta_mid = _surface_mesh_eta(surf, settings, collocation, ref_semi)
         geo = surface_edge_geometry(surf, eta_e)
+        d = getattr(surf, "node_displacements", None)
+        if d is not None:
+            if d.eta is not None and (
+                d.eta.shape != eta_e.shape or float(np.max(np.abs(d.eta - eta_e))) > 1e-12
+            ):
+                raise ValueError(
+                    f"[{surf.name}] node_displacements.eta does not match the spanwise stations of the "
+                    f"mesh ({eta_e.size} edges). The displacements were made for another mesh or "
+                    "solver. Use the same settings and solver for "
+                    "ventorum.geometry.undeformed_nodes and for the analysis."
+                )
+            expected_shape = (len(eta_e), 3)
+            if d.le.shape != expected_shape:
+                raise ValueError(
+                    f"[{surf.name}] node_displacements.le has shape {d.le.shape}, expected {expected_shape}. "
+                    "Use ventorum.geometry.undeformed_nodes to get the node positions of the mesh."
+                )
+            if d.te.shape != expected_shape:
+                raise ValueError(
+                    f"[{surf.name}] node_displacements.te has shape {d.te.shape}, expected {expected_shape}. "
+                    "Use ventorum.geometry.undeformed_nodes to get the node positions of the mesh."
+                )
+            if not np.all(np.isfinite(d.le)):
+                raise ValueError(f"[{surf.name}] node_displacements.le contains non-finite values.")
+            if not np.all(np.isfinite(d.te)):
+                raise ValueError(f"[{surf.name}] node_displacements.te contains non-finite values.")
+            max_le = float(np.max(np.linalg.norm(d.le, axis=1))) if d.le.size else 0.0
+            max_te = float(np.max(np.linalg.norm(d.te, axis=1))) if d.te.size else 0.0
+            if max_le > surf.semi_span * (1.0 + 1e-9):
+                raise ValueError(
+                    f"[{surf.name}] node_displacements.le has displacement {max_le:.4g} m larger than semi-span {surf.semi_span:.4g} m."
+                )
+            if max_te > surf.semi_span * (1.0 + 1e-9):
+                raise ValueError(
+                    f"[{surf.name}] node_displacements.te has displacement {max_te:.4g} m larger than semi-span {surf.semi_span:.4g} m."
+                )
+            le_e = geo["le"] + d.le
+            te_e = geo["te"] + d.te
+            chord_undef = geo["chord"]
+            chord_def = np.linalg.norm(te_e - le_e, axis=1)
+            if np.any(chord_def <= 1e-6 * chord_undef):
+                k = int(np.flatnonzero(chord_def <= 1e-6 * chord_undef)[0])
+                raise ValueError(
+                    f"[{surf.name}] node_displacements: deformed chord at edge {k} ({chord_def[k]:.4g} m) "
+                    f"is not larger than 1e-6 times undeformed chord ({chord_undef[k]:.4g} m)."
+                )
+            qc_undef = geo["le"] + 0.25 * (geo["te"] - geo["le"])
+            dl_undef = qc_undef[1:] - qc_undef[:-1]
+            width_undef = np.sqrt(dl_undef[:, 1] ** 2 + dl_undef[:, 2] ** 2)
+            qc_def = le_e + 0.25 * (te_e - le_e)
+            dl_def = qc_def[1:] - qc_def[:-1]
+            width_def = np.sqrt(dl_def[:, 1] ** 2 + dl_def[:, 2] ** 2)
+            if np.any(width_def <= 1e-6 * width_undef):
+                k = int(np.flatnonzero(width_def <= 1e-6 * width_undef)[0])
+                raise ValueError(
+                    f"[{surf.name}] node_displacements: deformed strip width of strip {k} ({width_def[k]:.4g} m) "
+                    f"is not larger than 1e-6 times undeformed width ({width_undef[k]:.4g} m)."
+                )
+            edge_chord_half = chord_def
+        else:
+            le_e, te_e = geo["le"], geo["te"]
+            edge_chord_half = geo["chord"]
         # Fraction of the strip width (root edge to tip edge) where the control point is.
         frac_r = (eta_mid - eta_e[:-1]) / np.maximum(eta_e[1:] - eta_e[:-1], 1e-300)
+        n_r = len(eta_mid)
 
         blender = _AirfoilBlender(_sorted_sections(surf))
-        right_af = [blender.at(float(e)) for e in eta_mid]
-        # The linear properties depend only on the airfoil object: compute them
-        # once per distinct object (most surfaces share one airfoil).
+        base_right_af = [blender.at(float(e)) for e in eta_mid]
+
+        controls = getattr(surf, "controls", [])
+        ctrl_for_k: list[ControlSurface | None] = [None] * n_r
+        hinge_eff_for_k: list[float | None] = [None] * n_r
+        xi_for_k: list[np.ndarray] = [xi] * n_r
+
+        for c in controls:
+            k_ctrl = np.flatnonzero((eta_mid >= c.eta_start - 1e-9) & (eta_mid <= c.eta_end + 1e-9))
+            if len(k_ctrl) == 0:
+                raise ValueError(
+                    f"Control {c.name!r} on surface {surf.name!r} has no strip; "
+                    "use more panels or a wider span."
+                )
+            eta_start_eff = float(eta_e[k_ctrl[0]])
+            eta_end_eff = float(eta_e[k_ctrl[-1] + 1])
+            if is_chordwise:
+                k_hinge = 1 + int(np.argmin(np.abs(xi[1:n_chord] - c.hinge_x_c)))
+                len_before_old = xi[k_hinge] - xi[k_hinge - 1]
+                len_after_old = xi[k_hinge + 1] - xi[k_hinge]
+                len_before_new = c.hinge_x_c - xi[k_hinge - 1]
+                len_after_new = xi[k_hinge + 1] - c.hinge_x_c
+                tol = 1e-12
+                if (0.5 * len_before_old - tol <= len_before_new <= 1.25 * len_before_old + tol and
+                        0.5 * len_after_old - tol <= len_after_new <= 1.25 * len_after_old + tol):
+                    hinge_x_c_eff = float(c.hinge_x_c)
+                    ctrl_xi = xi.copy()
+                    ctrl_xi[k_hinge] = c.hinge_x_c
+                else:
+                    hinge_x_c_eff = float(xi[k_hinge])
+                    ctrl_xi = xi.copy()
+            else:
+                hinge_x_c_eff = None
+                ctrl_xi = xi.copy()
+
+            control_info.append({
+                "surface": surf.name,
+                "name": c.name,
+                "mode": mode_str,
+                "eta_start_eff": eta_start_eff,
+                "eta_end_eff": eta_end_eff,
+                "hinge_x_c": float(c.hinge_x_c),
+                "hinge_x_c_eff": hinge_x_c_eff,
+                "n_strips": len(k_ctrl),
+                "deflection_rad": float(c.deflection),
+                "symmetric": bool(c.symmetric),
+            })
+
+            for k in k_ctrl:
+                ctrl_for_k[k] = c
+                hinge_eff_for_k[k] = hinge_x_c_eff
+                xi_for_k[k] = ctrl_xi
+
         props_of: dict[int, tuple[float, float, float, float]] = {}
+        if not is_chordwise and controls:
+            right_af = []
+            for k in range(n_r):
+                c = ctrl_for_k[k]
+                if c is not None:
+                    right_af.append(_deflected(base_right_af[k], c.deflection, c.hinge_x_c))
+                else:
+                    right_af.append(base_right_af[k])
+        else:
+            right_af = list(base_right_af)
+
         for af in right_af:
             if id(af) not in props_of:
                 props_of[id(af)] = airfoil_linear_properties(af)
         right_props = np.array([props_of[id(af)] for af in right_af]).reshape(-1, 4)
-        n_r = len(eta_mid)
 
-        le_e, te_e = geo["le"], geo["te"]
+        has_asymmetric_deflection = any(
+            not c.symmetric and c.deflection != 0.0 for c in controls
+        )
+
         mirror = np.array([1.0, -1.0, 1.0])
         if surf.is_symmetric and getattr(surf, "mirror_y", False):
             raise ValueError(f"[{surf.name}] mirror_y=True needs is_symmetric=False.")
@@ -749,37 +975,86 @@ def build_lattice(
             te_left_e = (te_e * mirror)[::-1]
             edge_le = np.vstack([le_left_e, le_e[1:]])
             edge_te = np.vstack([te_left_e, te_e[1:]])
-            edge_chord = np.concatenate([geo["chord"][::-1], geo["chord"][1:]])
+            edge_chord = np.concatenate([edge_chord_half[::-1], edge_chord_half[1:]])
             edge_twist = np.concatenate([geo["twist"][::-1], geo["twist"][1:]])
-            afs = right_af[::-1] + right_af
-            props = np.vstack([right_props[::-1], right_props])
+
+            if not is_chordwise and controls:
+                left_af = []
+                for j in range(n_r):
+                    k = n_r - 1 - j
+                    c = ctrl_for_k[k]
+                    if c is not None:
+                        delta = c.deflection if c.symmetric else -c.deflection
+                        left_af.append(_deflected(base_right_af[k], delta, c.hinge_x_c))
+                    else:
+                        left_af.append(base_right_af[k])
+                for af in left_af:
+                    if id(af) not in props_of:
+                        props_of[id(af)] = airfoil_linear_properties(af)
+                left_props = np.array([props_of[id(af)] for af in left_af]).reshape(-1, 4)
+                afs = left_af + right_af
+                props = np.vstack([left_props, right_props])
+            else:
+                afs = right_af[::-1] + right_af
+                props = np.vstack([right_props[::-1], right_props])
+
             eta_s = np.concatenate([-eta_mid[::-1], eta_mid])
-            # Left strip k (k = 0 at the left tip) mirrors right strip n_r - 1 - k.
-            local_mirror = np.concatenate([n_r + np.arange(n_r)[::-1], np.arange(n_r)[::-1]])
+            if has_asymmetric_deflection:
+                local_mirror = np.full(2 * n_r, -1)
+            else:
+                # Left strip k (k = 0 at the left tip) mirrors right strip n_r - 1 - k.
+                local_mirror = np.concatenate([n_r + np.arange(n_r)[::-1], np.arange(n_r)[::-1]])
             is_right = np.concatenate([np.zeros(n_r, bool), np.ones(n_r, bool)])
             # Left strips run from the tip edge to the root edge.
             frac = np.concatenate([(1.0 - frac_r)[::-1], frac_r])
+
+            xi_surf = [xi_for_k[n_r - 1 - j] for j in range(n_r)] + xi_for_k
+            hinge_eff_surf = [hinge_eff_for_k[n_r - 1 - j] for j in range(n_r)] + hinge_eff_for_k
+            ctrl_surf = [ctrl_for_k[n_r - 1 - j] for j in range(n_r)] + ctrl_for_k
         elif getattr(surf, "mirror_y", False):
             # Mirror image (y -> -y) of the surface; strips run left to right
             # (tip to root), as on the left half of a symmetric surface.
             edge_le = (le_e * mirror)[::-1]
             edge_te = (te_e * mirror)[::-1]
-            edge_chord, edge_twist = geo["chord"][::-1], geo["twist"][::-1]
-            afs = right_af[::-1]
-            props = right_props[::-1]
+            edge_chord, edge_twist = edge_chord_half[::-1], geo["twist"][::-1]
+            if not is_chordwise and controls:
+                afs = []
+                for j in range(n_r):
+                    k = n_r - 1 - j
+                    c = ctrl_for_k[k]
+                    if c is not None:
+                        delta = c.deflection if c.symmetric else -c.deflection
+                        afs.append(_deflected(base_right_af[k], delta, c.hinge_x_c))
+                    else:
+                        afs.append(base_right_af[k])
+                for af in afs:
+                    if id(af) not in props_of:
+                        props_of[id(af)] = airfoil_linear_properties(af)
+                props = np.array([props_of[id(af)] for af in afs]).reshape(-1, 4)
+            else:
+                afs = right_af[::-1]
+                props = right_props[::-1]
             eta_s = -eta_mid[::-1]
             local_mirror = np.full(n_r, -1)
             is_right = np.zeros(n_r, bool)
             frac = (1.0 - frac_r)[::-1]
+
+            xi_surf = [xi_for_k[n_r - 1 - j] for j in range(n_r)]
+            hinge_eff_surf = [hinge_eff_for_k[n_r - 1 - j] for j in range(n_r)]
+            ctrl_surf = [ctrl_for_k[n_r - 1 - j] for j in range(n_r)]
         else:
             edge_le, edge_te = le_e, te_e
-            edge_chord, edge_twist = geo["chord"], geo["twist"]
+            edge_chord, edge_twist = edge_chord_half, geo["twist"]
             afs = right_af
             props = right_props
             eta_s = eta_mid
             local_mirror = np.full(n_r, -1)
             is_right = np.ones(n_r, bool)
             frac = frac_r
+
+            xi_surf = list(xi_for_k)
+            hinge_eff_surf = list(hinge_eff_for_k)
+            ctrl_surf = list(ctrl_for_k)
 
         n_s = edge_le.shape[0] - 1
         strip_parts["surface"].append(np.full(n_s, s_idx))
@@ -797,6 +1072,9 @@ def build_lattice(
         strip_parts["is_right"].append(is_right)
         strip_parts["eta"].append(eta_s)
         strip_parts["frac"].append(frac)
+        strip_xi_all.extend(xi_surf)
+        strip_hinge_eff_all.extend(hinge_eff_surf)
+        strip_ctrl_all.extend(ctrl_surf)
         airfoils.extend(afs)
         surfaces.append(SurfaceSlice(
             name=surf.name, index=s_idx, is_symmetric=surf.is_symmetric,
@@ -837,10 +1115,12 @@ def build_lattice(
     # --- panels ---------------------------------------------------------------
     n_strips = chord.shape[0]
     claf = np.clip(cat["a0"] / (2.0 * np.pi), 0.2, 2.0)
-    pa, pb, pcp, pstrip, _pmirror_k = [], [], [], [], []
+    pa, pb, pcp, pstrip = [], [], [], []
     frac = cat["frac"][:, None]
+    strip_xi_arr = np.array(strip_xi_all)  # shape (n_strips, n_chord + 1)
     for k in range(n_chord):
-        x0, x1 = xi[k], xi[k + 1]
+        x0 = strip_xi_arr[:, k, None]
+        x1 = strip_xi_arr[:, k + 1, None]
         dx = x1 - x0
         f_bound = x0 + 0.25 * dx
         pa.append(le_l + f_bound * (te_l - le_l))
@@ -848,7 +1128,7 @@ def build_lattice(
         if collocation == "llt":
             pcp.append(pa[-1] + frac * (pb[-1] - pa[-1]))
         else:
-            f_cp = (x0 + 0.25 * dx + 0.5 * dx * claf)[:, None]
+            f_cp = x0 + 0.25 * dx + 0.5 * dx * claf[:, None]
             p_l = le_l + f_cp * (te_l - le_l)
             p_r = le_r + f_cp * (te_r - le_r)
             pcp.append(p_l + frac * (p_r - p_l))
@@ -859,13 +1139,38 @@ def build_lattice(
     cp = np.stack(pcp, axis=1).reshape(-1, 3)
     panel_strip = np.repeat(np.arange(n_strips), n_chord)
     panel_k = np.tile(np.arange(n_chord), n_strips)
-    panel_length = np.diff(xi)[panel_k] * chord[panel_strip]
+    d_xi = np.diff(strip_xi_arr, axis=1)  # shape (n_strips, n_chord)
+    panel_length = (d_xi * chord[:, None]).reshape(-1)
     strip_mirror = cat["mirror"].astype(int)
     panel_mirror = np.where(
         strip_mirror[panel_strip] >= 0,
         strip_mirror[panel_strip] * n_chord + panel_k,
         -1,
     )
+
+    normal_bc = normal_bc_strip[panel_strip].copy()
+    if is_chordwise:
+        is_right_arr = cat["is_right"].astype(bool)
+        for s in range(n_strips):
+            c = strip_ctrl_all[s]
+            if c is not None:
+                hinge_eff = strip_hinge_eff_all[s]
+                H_l = le_l[s] + hinge_eff * (te_l[s] - le_l[s])
+                H_r = le_r[s] + hinge_eff * (te_r[s] - le_r[s])
+                H_axis = H_r - H_l
+                norm_H = float(np.linalg.norm(H_axis))
+                # H_l and H_r are at the same point only on a degenerate strip,
+                # for example a strip of zero width (semi_span = 0: the solvers
+                # refuse it, but build_lattice accepts it, and its normal is
+                # zero). The fallback axis only prevents a division by zero.
+                u_hinge = (H_axis / norm_H) if norm_H > 1e-300 else np.array([0.0, 1.0, 0.0])
+                delta = c.deflection if (is_right_arr[s] or c.symmetric) else -c.deflection
+                if delta != 0.0:
+                    for k in range(n_chord):
+                        x0_k = strip_xi_arr[s, k]
+                        if x0_k >= hinge_eff - 1e-12:
+                            p_idx = s * n_chord + k
+                            normal_bc[p_idx] = _rotate(normal_bc[p_idx:p_idx + 1], u_hinge[None, :], delta)[0]
 
     lattice = VortexLattice(
         collocation=collocation,
@@ -875,7 +1180,7 @@ def build_lattice(
         a_te=te_l[panel_strip],
         b_te=te_r[panel_strip],
         cp=cp,
-        normal_bc=normal_bc_strip[panel_strip],
+        normal_bc=normal_bc,
         panel_strip=panel_strip,
         panel_mirror=panel_mirror,
         panel_length=panel_length,
@@ -905,6 +1210,7 @@ def build_lattice(
         surfaces=surfaces,
         strip_core_group=core_groups(surfaces)[cat["surface"].astype(int)],
         join_warnings=near_miss_warnings(surfaces),
+        control_info=control_info,
     )
     check_overlaps(lattice)
     return lattice

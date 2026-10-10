@@ -23,11 +23,13 @@ import numpy as np
 # --- re-export public API ----------------------------------------------------
 from ventorum.core.datatypes import (  # noqa: F401
     Aircraft,
+    ControlSurface,
     DiscretizedSurface,
     FlightCondition,
     IntegratedResult,
     LinearAirfoil,
     LiftingSurface,
+    NodeDisplacements,
     SolverResult,
     SolverSettings,
     SpanwiseResult,
@@ -38,6 +40,11 @@ from ventorum.core.datatypes import (  # noqa: F401
     aircraft_to_json,
 )
 from ventorum.core.trust import evaluate_aerodynamic_trust  # noqa: F401
+from ventorum.core.error_bars import (  # noqa: F401
+    ErrorBar,
+    ErrorBarResult,
+    numerical_error_bars,
+)
 from ventorum.solvers import (  # noqa: F401
     BaseSolver,
     FourierSolver,
@@ -46,6 +53,10 @@ from ventorum.solvers import (  # noqa: F401
     LinearLLTSolver,
     LinearSolver,
     NonlinearSolver,
+)
+from ventorum.solvers.trimming import (  # noqa: F401
+    TrimResult,
+    trim,
 )
 from ventorum.aero.polars import (  # noqa: F401
     load_xfoil_polar,

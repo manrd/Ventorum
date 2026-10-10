@@ -7,7 +7,7 @@ logic and of the batch helpers run everywhere.
 
 Tolerances: float64 results equal the CPU results to round-off (the order of
 the sums differs). float32 results are within the float32 error of the
-kernels (owner direction D-19 accepts float32 for the GPU paths).
+kernels (the owner accepts float32 for the GPU paths).
 """
 
 from __future__ import annotations

@@ -1,7 +1,7 @@
 # Author: Manuel Alejandro Rodriguez Diaz, PhD
 """Speed of the original (legacy) code against the verified core.
 
-The recovery audit (``docs/design/recovery_audit.md``, task T-0015) needs
+The recovery audit (``docs/design/recovery_audit.md``) needs
 measured speed numbers wherever a legacy component and a present component
 do the same work. This script measures them. It prints Markdown tables with
 the median wall time of each case; the audit copies them with the date and
