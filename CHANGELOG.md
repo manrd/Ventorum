@@ -8,6 +8,14 @@ a minor version can change a public interface.
 
 ## [Unreleased]
 
+### Added
+
+- Numerical error bars (layer 1 of the error bars): `numerical_error_bars` solves a case on three
+  spanwise mesh levels and gives, for each coefficient, an interval from the grid convergence
+  index (Roache 1998) with the observed order of Celik et al. (2008). Each bar states its
+  convergence state (`monotonic`, `oscillatory`, `not_converged_order`, `divergent` or
+  `roundoff`) and its notes. `ErrorBar` and `ErrorBarResult` hold the output.
+
 ### Changed
 
 - The default angle of attack is 5 deg in every interface. The agent tool `ventorum_ground_effect`
