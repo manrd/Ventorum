@@ -429,3 +429,25 @@ def test_error_bars_and_trim_carry_the_common_output_fields():
     assert t["trimmed"] is True
     assert set(t["moments"]) == {"body", "stability", "wind"}
     assert t["moments"]["body"]["Cm"] == pytest.approx(t["Cm"], abs=1e-6)  # the sets are rounded to 6 decimals
+
+
+@pytest.mark.parametrize("device", ["cpu", pytest.param("gpu", marks=pytest.mark.gpu)])
+def test_trim_tool_reports_the_device_of_its_solves(device):
+    """Regression (D-26): ventorum_trim reported cpu/float64 also when trim ran on the GPU in float32."""
+    from ventorum import gpu
+
+    if device == "gpu" and not gpu.available():
+        pytest.skip(f"GPU pipeline unavailable: {gpu.unavailable_reason()}")
+    old_dev, old_prec = gpu.get_device(), gpu.get_precision()
+    try:
+        gpu.set_device(device)
+        gpu.set_precision("float32")
+        t = trim(dict(WING_TAIL), 0.5, "elevator", settings={"n_panels": 8})
+    finally:
+        gpu.set_device(old_dev)
+        gpu.set_precision(old_prec)
+    want = ("gpu", "float32") if device == "gpu" else ("cpu", "float64")
+    assert t["status"] == "success" and t["trimmed"] is True, t
+    assert (t["device"], t["precision"]) == want
+    assert (t["settings_used"]["device"], t["settings_used"]["precision"]) == want
+    assert f"Computed on {want[0]} in {want[1]}." in t["executive_summary"]

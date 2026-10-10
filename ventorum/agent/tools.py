@@ -1654,19 +1654,25 @@ def trim(
     else:
         cl_ax, cm_ax, cn_ax = moments_in_axes(tr.Cl, tr.Cm, tr.Cn, tr.alpha_deg, c["beta_deg"], ax)
     trimmed = tr.status == "trimmed"
+    # Device and precision of the trim solves (D-26: trim uses the selected device).
+    if tr.device in ("none", "", None):
+        device, precision = result_device_precision(tr.result)
+    else:
+        device, precision = str(tr.device), str(tr.precision)
+    dev_txt = device_summary_text(device, precision)
     defl_txt = ", ".join(f"{k}={v:+.3f} deg" for k, v in sorted(tr.deflections_deg.items()))
     if trimmed:
         summary = (
             f"[Ventorum RESULT] Trimmed {ac.name}: alpha={tr.alpha_deg:.4f} deg, {defl_txt}, "
             f"CL={fmt(tr.CL, '.5f')}, Cm={fmt(tr.Cm, '.3e')} in {tr.iterations} iteration(s). "
-            "Computed on cpu in float64."
+            f"{dev_txt}"
         )
     else:
         summary = (
             f"[Ventorum RESULT] Not trimmed: {ac.name} (trim_status={tr.status}): target "
             f"CL={cl_t:g} not reached; alpha={fmt(tr.alpha_deg, '.4f')} deg, {defl_txt}, "
             f"CL={fmt(tr.CL, '.5f')}, Cm={fmt(tr.Cm, '.3e')}. "
-            f"Notes: {'; '.join(tr.notes) if tr.notes else 'none'}. Computed on cpu in float64."
+            f"Notes: {'; '.join(tr.notes) if tr.notes else 'none'}. {dev_txt}"
         )
     out: dict[str, Any] = {
         "status": "success",
@@ -1685,11 +1691,11 @@ def trim(
         "iterations": int(tr.iterations),
         "notes": list(tr.notes),
         "trust": None if tr.result is None else trust_payload(tr.result.totals.trust),
-        "device": "cpu",
-        "precision": "float64",
+        "device": device,
+        "precision": precision,
         "condition_used": condition_payload(c),
         "settings_used": {**settings_payload(sett, tr.result), **_mesh_note(case_sett is not sett, case_sett),
-                          "device": "cpu", "precision": "float64"},
+                          "device": device, "precision": precision},
         "axes": ax,
     }
     if ax == "all" and all(np.isfinite(v) for v in vals):
