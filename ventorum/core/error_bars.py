@@ -47,7 +47,7 @@ from ventorum.core.datatypes import (
 #: Method string stored in every layer contribution of this module.
 METHOD = "GCI, Roache (1998); observed order, Celik et al. (2008)"
 
-#: Allowed values of ``ErrorBar.status``. This task sets only
+#: Allowed values of ``ErrorBar.status``. The present code sets only
 #: ``"numerical_only"``; later layers set the other states.
 STATUS_VALUES = (
     "statistically_calibrated",
@@ -178,9 +178,9 @@ class ErrorBar:
     interval_high : float or None
         Upper bound of the interval, or None without an interval.
     status : str
-        One of ``STATUS_VALUES``. This task sets only ``"numerical_only"``.
+        One of ``STATUS_VALUES``. The present code sets only ``"numerical_only"``.
     coverage : float or None
-        Stated probability of coverage. Always None in this task (only a
+        Stated probability of coverage. Always None in the present code (only a
         calibrated bar has a coverage).
     layers : dict[str, LayerContribution]
         Contribution of each layer, keyed by layer name.
