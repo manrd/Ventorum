@@ -6,6 +6,16 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Before version 1.0.0,
 a minor version can change a public interface.
 
+## [Unreleased]
+
+### Changed
+
+- Documentation: the README names the tuned kernel backends, the API index lists the hardware
+  and GPU packages, and the agent map lists all packages. The recovery audit refers to its
+  measured speed tables and gives no typed speed ratios.
+- Continuous integration uses the first versions of the checkout and setup-python actions that
+  run on Node.js 24.
+
 ## [0.3.0] - 2026-10-04
 
 This version closes the first development phase (P0): the verified core, its kernel backends,
