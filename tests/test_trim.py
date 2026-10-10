@@ -623,3 +623,14 @@ def test_inner_solve_not_converged_is_not_trimmed(monkeypatch):
     # The reported point is the last point with a converged solve
     assert res.result is not None
     assert res.result.converged is True
+
+
+def test_fourier_solver_is_refused_before_iteration(monkeypatch):
+    """The Fourier solver refuses deflected controls, so trim refuses it as invalid input."""
+    calls = []
+    monkeypatch.setattr(vt, "analyze", lambda *a, **k: calls.append(1))
+    ac = _build_wing_tail_aircraft()
+    cond = vt.FlightCondition(V_inf=30.0, alpha=0.0)
+    with pytest.raises(ValueError, match="Fourier"):
+        vt.trim(ac, cond, vt.SolverSettings(solver_type="fourier"), CL_target=0.5, pitch_control="elevator")
+    assert calls == []

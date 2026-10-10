@@ -232,7 +232,8 @@ def trim(
         wrong order, max_iterations < 1, one lateral control without the other,
         lateral controls that are not distinct, tolerances that are not positive
         and finite, invalid solver settings (for example an unknown solver_type),
-        or an invalid flight condition.
+        the Fourier solver (it does not accept a deflected control), or an
+        invalid flight condition.
 
     Notes
     -----
@@ -312,7 +313,11 @@ def trim(
     validate_flight_condition(condition)
     if settings is not None:
         validate_solver_settings(settings)
-        resolve_solver_type(settings.solver_type)
+        if resolve_solver_type(settings.solver_type) == "fourier":
+            raise ValueError(
+                "The Fourier solver does not accept a deflected control, so it cannot trim. "
+                "Use solver_type 'vlm', 'linear' or 'nonlinear'."
+            )
 
     ac_clone = aircraft.clone()
     unknown_names: list[str] = ["alpha", pitch_control]
