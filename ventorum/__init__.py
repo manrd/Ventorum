@@ -39,6 +39,11 @@ from ventorum.core.datatypes import (  # noqa: F401
     aircraft_to_json,
 )
 from ventorum.core.trust import evaluate_aerodynamic_trust  # noqa: F401
+from ventorum.core.error_bars import (  # noqa: F401
+    ErrorBar,
+    ErrorBarResult,
+    numerical_error_bars,
+)
 from ventorum.solvers import (  # noqa: F401
     BaseSolver,
     FourierSolver,

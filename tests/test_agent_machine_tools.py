@@ -1,6 +1,6 @@
 # Author: Manuel Alejandro Rodriguez Diaz, PhD
 """
-Tests of the agent machine-capability and tuning tools (T-0017).
+Tests of the agent machine-capability and tuning tools.
 """
 
 from __future__ import annotations

@@ -1,10 +1,10 @@
 # Author: Manuel Alejandro Rodriguez Diaz, PhD
-"""Vortex-lattice single-solve and sweep pipelines (T-0039).
+"""Vortex-lattice single-solve and sweep pipelines.
 
 Every check compares bits (``numpy.array_equal``), never with a tolerance,
 except the torch backend in ground effect, which is not reproducible to the
-bit from one run to the next (also before T-0039): there each angle of the
-sweep is compared with a relative tolerance of 1e-12:
+bit from one run to the next (also before the batched pipelines): there each
+angle of the sweep is compared with a relative tolerance of 1e-12:
 
 * A vortex-lattice sweep out of ground effect gives each angle the result of
   the kernel-cache path that existed before (``solve_lattice`` on a lattice

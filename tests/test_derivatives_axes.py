@@ -1,6 +1,6 @@
 # Author: Manuel Alejandro Rodriguez Diaz, PhD
 """
-Tests of task T-0032: stability derivatives in the selected axes.
+Tests of the stability derivatives in the selected axes.
 
 The derivatives follow the ``axes`` choice. They are taken in the axes
 of the reference flight condition (alpha_0, beta_0), held fixed while

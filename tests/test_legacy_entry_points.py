@@ -1,5 +1,5 @@
 # Author: Manuel Alejandro Rodriguez Diaz, PhD
-"""The legacy entry points run on the legacy solvers (recovery audit, T-0015).
+"""The legacy entry points run on the legacy solvers (recovery audit).
 
 After the move into ``ventorum.legacy``, some legacy modules imported the
 entry points of the verified core (``ventorum.analyze``) and passed legacy
