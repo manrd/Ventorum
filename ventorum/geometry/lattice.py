@@ -857,7 +857,7 @@ def build_lattice(
         right_props = np.array([props_of[id(af)] for af in right_af]).reshape(-1, 4)
 
         has_asymmetric_deflection = any(
-            not c.symmetric and abs(c.deflection) > 1e-12 for c in controls
+            not c.symmetric and c.deflection != 0.0 for c in controls
         )
 
         le_e, te_e = geo["le"], geo["te"]
@@ -1062,9 +1062,13 @@ def build_lattice(
                 H_r = le_r[s] + hinge_eff * (te_r[s] - le_r[s])
                 H_axis = H_r - H_l
                 norm_H = float(np.linalg.norm(H_axis))
+                # H_l and H_r are at the same point only on a degenerate strip,
+                # for example a strip of zero width (semi_span = 0: the solvers
+                # refuse it, but build_lattice accepts it, and its normal is
+                # zero). The fallback axis only prevents a division by zero.
                 u_hinge = (H_axis / norm_H) if norm_H > 1e-300 else np.array([0.0, 1.0, 0.0])
                 delta = c.deflection if (is_right_arr[s] or c.symmetric) else -c.deflection
-                if abs(delta) > 1e-14:
+                if delta != 0.0:
                     for k in range(n_chord):
                         x0_k = strip_xi_arr[s, k]
                         if x0_k >= hinge_eff - 1e-12:

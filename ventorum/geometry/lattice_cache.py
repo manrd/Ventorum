@@ -149,6 +149,10 @@ def get_or_build(key: tuple, build: Callable[[], Any]) -> Any:
                 _cache.popitem(last=False)
     out = copy.copy(hit)
     out.kernel_cache = None
+    # The control information is a list of dicts: give each copy its own, so
+    # a change by one caller does not reach the cached lattice or other copies.
+    if getattr(hit, "control_info", None):
+        out.control_info = [dict(c) for c in hit.control_info]
     return out
 
 

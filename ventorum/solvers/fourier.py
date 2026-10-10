@@ -48,6 +48,7 @@ from ventorum.core.datatypes import (
 from ventorum.core.errors import ValidityError
 from ventorum.core.trust import evaluate_aerodynamic_trust
 from ventorum.geometry import lattice_cache
+from ventorum.geometry.controls import validate_controls
 from ventorum.geometry.discretization import fourier_collocation_angles
 from ventorum.geometry.lattice import _AirfoilBlender, _sorted_sections, airfoil_linear_properties, surface_reference_line
 from ventorum.solvers.base import BaseSolver
@@ -276,8 +277,11 @@ class FourierSolver(BaseSolver):
         # solver_type="vlm" for geometry outside the model.
         for _surf in aircraft.surfaces:
             _check_geometry_in_model(_surf)
+            # Refuse invalid controls first, with the same message as the
+            # lattice solvers; then refuse any deflection that is not zero.
+            validate_controls(_surf)
             for _ctrl in getattr(_surf, "controls", []):
-                if abs(_ctrl.deflection) > 1e-12:
+                if _ctrl.deflection != 0.0:
                     raise ValueError(
                         f"The Fourier solver cannot model deflected control surfaces (control '{_ctrl.name}' "
                         f"on surface '{_surf.name}' has deflection {np.degrees(_ctrl.deflection):.2f} deg). "

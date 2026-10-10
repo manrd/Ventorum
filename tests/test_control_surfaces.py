@@ -1001,6 +1001,71 @@ def test_symmetric_wing_equals_half_plus_mirror_copy(solver_name, control, airfo
         assert abs(a - b) <= 1e-12 * max(1.0, abs(a)), f"{coef}: {a} vs {b}"
 
 
+def test_any_nonzero_deflection_is_applied():
+    """Prove that every path uses the same zero test (deflection != 0.0).
+
+    A very small antisymmetric deflection stops the symmetry fold, a very
+    small chordwise deflection turns the flap normals, and the Fourier
+    solver refuses a very small deflection. A deflection of exactly zero
+    changes nothing.
+    """
+    def wing(defl, symmetric=True):
+        return vt.LiftingSurface(
+            semi_span=5.0,
+            sections=[vt.WingSection(0.0, 1.0), vt.WingSection(1.0, 1.0)],
+            controls=[vt.ControlSurface(name="c", eta_start=0.5, eta_end=1.0, deflection=defl, symmetric=symmetric)],
+            n_panels=8,
+        )
+
+    tiny = 1e-15
+    assert not vt.build_lattice(vt.Aircraft(surfaces=[wing(tiny, symmetric=False)])).can_fold_symmetry()
+    assert vt.build_lattice(vt.Aircraft(surfaces=[wing(0.0, symmetric=False)])).can_fold_symmetry()
+
+    lat_zero = vt.build_lattice(vt.Aircraft(surfaces=[wing(0.0)]), n_chord=4)
+    lat_tiny = vt.build_lattice(vt.Aircraft(surfaces=[wing(tiny)]), n_chord=4)
+    lat_clean = vt.build_lattice(vt.Aircraft(surfaces=[wing(0.0)]), n_chord=4)
+    assert np.array_equal(lat_zero.normal_bc, lat_clean.normal_bc)
+    assert not np.array_equal(lat_tiny.normal_bc, lat_zero.normal_bc)
+
+    cond = vt.FlightCondition(V_inf=30.0, alpha=np.radians(2.0))
+    st = vt.SolverSettings(solver_type="fourier", n_panels=8)
+    with pytest.raises(ValueError, match="vlm"):
+        vt.FourierSolver().solve(wing(tiny), cond, st)
+
+
+def test_fourier_validates_controls_first():
+    """Prove that the Fourier solver refuses an invalid control also at zero deflection."""
+    bad = vt.LiftingSurface(
+        semi_span=5.0,
+        sections=[vt.WingSection(0.0, 1.0), vt.WingSection(1.0, 1.0)],
+        controls=[vt.ControlSurface(name="flap", hinge_x_c=1.5, deflection=0.0)],
+        n_panels=8,
+    )
+    cond = vt.FlightCondition(V_inf=30.0, alpha=np.radians(2.0))
+    with pytest.raises(ValueError, match="hinge_x_c"):
+        vt.FourierSolver().solve(bad, cond, vt.SolverSettings(solver_type="fourier", n_panels=8))
+
+
+def test_cache_copies_do_not_share_control_info():
+    """Prove that a change of control_info on one cached lattice copy does not reach the other copies."""
+    lattice_cache.clear()
+    wing = vt.LiftingSurface(
+        semi_span=5.0,
+        sections=[vt.WingSection(0.0, 1.0), vt.WingSection(1.0, 1.0)],
+        controls=[vt.ControlSurface(name="flap", eta_start=0.2, eta_end=0.6, deflection=0.05)],
+        n_panels=8,
+    )
+    ac = vt.Aircraft(surfaces=[wing])
+    st = vt.SolverSettings(solver_type="vlm", n_panels=8, n_chord=4)
+    key = lattice_cache.lattice_key(ac, st, "vlm", 4, "cosine")
+    first = lattice_cache.get_or_build(key, lambda: vt.build_lattice(ac, st, n_chord=4, chord_spacing="cosine"))
+    first.control_info[0]["name"] = "changed"
+    first.control_info.append({"name": "extra"})
+    second = lattice_cache.get_or_build(key, lambda: pytest.fail("the cache must not build again"))
+    assert [c["name"] for c in second.control_info] == ["flap"]
+    lattice_cache.clear()
+
+
 def test_user_manual_example_runs():
     """Prove that the control-surface example of the user manual runs as written.
 
