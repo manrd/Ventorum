@@ -869,3 +869,45 @@ def test_section_mode_shares_one_deflected_airfoil(symmetric, eta_start, n_objec
     assert len({id(a) for a in lat.airfoils}) == n_objects
     # The user's airfoil is used unchanged outside the control only.
     assert any(a is af for a in lat.airfoils) == (n_objects == 3)
+
+
+def test_deflected_airfoil_follows_the_table_rule():
+    """Prove the documented rule of deflected_airfoil.
+
+    For a tabulated airfoil with a Cm that changes with the angle:
+    Cl_new(a) = Cl(a + tau*delta), Cd_new(a) = Cd(a + tau*delta) and
+    Cm_new(a) = Cm(a + tau*delta) + dCm_ddelta*delta (the moment follows the
+    shifted lift curve). For a linear airfoil: alpha_L0 - tau*delta and
+    Cm0 + dCm_ddelta*delta, with a0 and Cd0 unchanged. The input airfoil
+    does not change.
+    """
+    h, delta = 0.7, np.radians(6.0)
+    tau = ctrl_mod.flap_effectiveness(h)
+    dcm = ctrl_mod.flap_moment_derivative(h)
+
+    af = _tab_airfoil()
+    alpha_before = np.array(af.alpha, copy=True)
+    cm_before = np.array(af.Cm_data, copy=True)
+    new = ctrl_mod.deflected_airfoil(af, delta, h)
+    assert new is not af
+    assert np.array_equal(af.alpha, alpha_before) and np.array_equal(af.Cm_data, cm_before)
+
+    a = np.radians(np.linspace(-6.0, 12.0, 37))  # inside the table range after the shift
+    tol = 1e-12
+    assert np.max(np.abs(new.Cl(a) - af.Cl(a + tau * delta))) <= tol
+    assert np.max(np.abs(new.Cd(a) - af.Cd(a + tau * delta))) <= tol
+    assert np.max(np.abs(new.Cm(a) - (af.Cm(a + tau * delta) + dcm * delta))) <= tol
+    # The rule is not Cm(a) + dCm_ddelta*delta: the table Cm changes with the angle.
+    assert np.max(np.abs(new.Cm(a) - (af.Cm(a) + dcm * delta))) > 1e-3
+
+    no_cm = ctrl_mod.deflected_airfoil(_tab_airfoil(with_cm=False), delta, h)
+    assert np.max(np.abs(no_cm.Cm(a) - dcm * delta)) <= tol
+
+    lin = vt.LinearAirfoil(a0=5.9, alpha_L0=np.radians(-2.0), Cd0=0.009, Cm0=-0.04)
+    new_lin = ctrl_mod.deflected_airfoil(lin, delta, h)
+    assert new_lin.a0 == lin.a0 and new_lin.Cd0 == lin.Cd0
+    assert abs(new_lin.alpha_L0 - (lin.alpha_L0 - tau * delta)) <= 1e-15
+    assert abs(new_lin.Cm0 - (lin.Cm0 + dcm * delta)) <= 1e-15
+    assert np.max(np.abs(new_lin.Cl(a) - lin.Cl(a + tau * delta))) <= tol
+    assert np.all(np.asarray(new_lin.Cm(a)) == new_lin.Cm0)
+    assert ctrl_mod.deflected_airfoil(lin, 0.0, h) is lin

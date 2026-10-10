@@ -56,11 +56,20 @@ Representative values:
 | 0.80 | 2.214297 | 0.549815 | -0.640000 |
 | 0.90 | 2.498092 | 0.395819 | -0.540000 |
 
-For a `LinearAirfoil`, the deflected airfoil has:
+The deflected airfoil applies the same rule to the section polar of the strip. The flap shifts the polar by $\tau \delta$ in angle of attack and adds $\frac{dC_m}{d\delta} \delta$ to the pitching moment:
+
+$$C_{l,\text{new}}(\alpha) = C_l(\alpha + \tau \delta)$$
+
+$$C_{d,\text{new}}(\alpha) = C_d(\alpha + \tau \delta)$$
+
+$$C_{m,\text{new}}(\alpha) = C_m(\alpha + \tau \delta) + \frac{dC_m}{d\delta} \delta$$
+
+For a `TabulatedAirfoil`, the new table has the angles $\alpha_{\text{new}} = \alpha - \tau \delta$, the same lift and drag rows, and the pitching-moment rows plus $\frac{dC_m}{d\delta} \delta$. Thus the pitching moment follows the shifted lift curve, also in stall: at an angle of the base table, the deflected section has the same lift coefficient, and its pitching moment changes by $\frac{dC_m}{d\delta} \delta$ only. The angle range of the table also moves by $-\tau \delta$. A table without pitching-moment data gets $C_{m,\text{new}} = \frac{dC_m}{d\delta} \delta$ at all angles.
+
+For a `LinearAirfoil`, the pitching moment and the profile drag do not change with the angle of attack. The same rule then gives:
 - $\alpha_{L0,\text{new}} = \alpha_{L0} - \tau \delta$
 - $C_{m0,\text{new}} = C_{m0} + \frac{dC_m}{d\delta} \delta$
-
-For a `TabulatedAirfoil`, the angle table shifts by $\alpha_{\text{new}} = \alpha - \tau \delta$, while lift and drag tables remain unchanged. Pitching moment values shift by $\frac{dC_m}{d\delta} \delta$.
+- the lift slope $a_0$ and $C_{d0}$ do not change.
 
 ## Assumptions and limits
 
@@ -80,6 +89,7 @@ The implementation is verified in `tests/test_control_surfaces.py`:
 - `test_flap_effectiveness_matches_thin_airfoil_table`
 - `test_zero_deflection_full_span_gives_the_same_bits`
 - `test_section_mode_equals_shifted_airfoil`
+- `test_deflected_airfoil_follows_the_table_rule`
 - `test_vlm_flap_ratio_approaches_tau`
 - `test_flap_signs`
 - `test_aileron_signs_and_no_symmetry_fold`

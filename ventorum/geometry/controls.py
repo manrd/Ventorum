@@ -52,9 +52,9 @@ def flap_effectiveness(hinge_x_c: float) -> float:
     References
     ----------
     H. Glauert, The Elements of Aerofoil and Airscrew Theory, Cambridge
-    University Press, 1926, chapter V.
+    University Press, 1926.
     J. Katz and A. Plotkin, Low-Speed Aerodynamics, 2nd ed., Cambridge
-    University Press, 2001, chapter 5.
+    University Press, 2001.
     """
     h = float(hinge_x_c)
     if h <= 0.0:
@@ -86,9 +86,9 @@ def flap_moment_derivative(hinge_x_c: float) -> float:
     References
     ----------
     H. Glauert, The Elements of Aerofoil and Airscrew Theory, Cambridge
-    University Press, 1926, chapter V.
+    University Press, 1926.
     J. Katz and A. Plotkin, Low-Speed Aerodynamics, 2nd ed., Cambridge
-    University Press, 2001, chapter 5.
+    University Press, 2001.
     """
     h = float(hinge_x_c)
     if h <= 0.0 or h >= 1.0:
@@ -100,24 +100,46 @@ def flap_moment_derivative(hinge_x_c: float) -> float:
 def deflected_airfoil(airfoil: AirfoilType, delta: float, hinge_x_c: float) -> AirfoilType:
     """Construct an airfoil model for a strip with a deflected flap.
 
-    Uses thin-airfoil theory of a hinged flap:
-    Cl_new(alpha) = Cl(alpha + tau * delta),
-    Cm_new(alpha) = Cm(alpha) + dCm_ddelta * delta,
-    Cd_new(alpha) = Cd(alpha + tau * delta).
+    The thin-airfoil theory of a hinged flap gives the lift change as a
+    shift of the angle of attack by ``tau * delta`` and a pitching-moment
+    change ``dCm_ddelta * delta`` about the quarter chord. The deflected
+    airfoil is
+
+    - ``Cl_new(alpha) = Cl(alpha + tau * delta)``,
+    - ``Cd_new(alpha) = Cd(alpha + tau * delta)``,
+    - ``Cm_new(alpha) = Cm(alpha + tau * delta) + dCm_ddelta * delta``,
+
+    with ``tau = flap_effectiveness(hinge_x_c)`` and
+    ``dCm_ddelta = flap_moment_derivative(hinge_x_c)``.
+
+    For a ``TabulatedAirfoil`` the new table has the angles
+    ``alpha - tau * delta``, the same Cl and Cd rows, and the Cm rows plus
+    ``dCm_ddelta * delta``. Thus the Cm of the section follows the shifted
+    lift curve, also in stall: at a given angle of the base table, the
+    deflected section has the same Cl and its Cm changes by
+    ``dCm_ddelta * delta`` only. The angle range of the table also moves by
+    ``-tau * delta``. A table without Cm data gets
+    ``Cm_new = dCm_ddelta * delta`` at every angle.
+
+    For a ``LinearAirfoil``, Cm and Cd do not change with the angle, so the
+    same rule gives ``alpha_L0_new = alpha_L0 - tau * delta`` and
+    ``Cm0_new = Cm0 + dCm_ddelta * delta``. The lift slope ``a0`` and
+    ``Cd0`` do not change.
 
     Parameters
     ----------
     airfoil : AirfoilType
         Base airfoil model (LinearAirfoil or TabulatedAirfoil).
     delta : float
-        Flap deflection angle [rad].
+        Flap deflection angle [rad], positive trailing edge down.
     hinge_x_c : float
         Hinge chordwise position as a fraction of local chord [-].
 
     Returns
     -------
     AirfoilType
-        Deflected airfoil model. Returns the exact same object if delta == 0.0.
+        Deflected airfoil model, a new object. The function returns the
+        same object if ``delta == 0.0``. It does not change *airfoil*.
 
     References
     ----------

@@ -23,7 +23,7 @@ The chapters contain no result values. The values of the model parameters come f
 | [Vortex-lattice method](vortex_lattice.md) | Bent horseshoe vortices on chordwise panels | V. M. Falkner (1943); Katz and Plotkin (2001); M. Drela (2014) |
 | [Forces and moments](forces_and_moments.md) | Kutta-Joukowski near-field forces, Trefftz-plane induced drag, section data, static derivatives | Katz and Plotkin (2001); Drela (2014); E. Trefftz (1921) |
 | [Ground effect](ground_effect.md) | Method of images over flat ground, height and bank derivatives, Irodov criterion | C. Wieselsberger (1921); K. V. Rozhdestvensky (2000, 2006); R. D. Irodov (1970) |
-| [Control surfaces](control_surfaces.md) | Thin-airfoil flap theory, panel deflection and section modification | H. Glauert (1926); I. H. Abbott and A. E. von Doenhoff (1959) |
+| [Control surfaces](control_surfaces.md) | Thin-airfoil flap theory, panel deflection and section modification | H. Glauert (1926); Katz and Plotkin (2001) |
 | [Symmetry](symmetry.md) | Use of the mirror symmetry of the flow | Katz and Plotkin (2001) |
 | [Trust score and error bars](trust_score.md) | Envelope checks (experimental) and the planned error-bar layers | W. L. Oberkampf and C. J. Roy (2010); ASME V&V 20 (2009); P. J. Roache (1998) |
 
