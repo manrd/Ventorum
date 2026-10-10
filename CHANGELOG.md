@@ -25,6 +25,12 @@ a minor version can change a public interface.
   chordwise panel, use a section polar deflected by thin-airfoil theory (Glauert 1926). An
   antisymmetric deflection turns off the symmetry fold. The Fourier solver refuses a deflected
   control.
+- Deformed geometry: `NodeDisplacements` on a `LiftingSurface` moves the leading-edge and
+  trailing-edge nodes of the lattice (for example from a structural solver). `undeformed_nodes`
+  gives the nodes of the mesh, and `displacements_from_section_motion` builds displacements from
+  section heave and twist. The reference values stay those of the undeformed shape. An optional
+  station check refuses displacements built for another mesh. The Fourier solver refuses node
+  displacements.
 
 ### Changed
 
