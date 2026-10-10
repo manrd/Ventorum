@@ -1,9 +1,9 @@
 # Author: Manuel Alejandro Rodriguez Diaz, PhD
 """Speed guard for the Fourier solver: results stay unchanged.
 
-Reference values come from the present solver before the speed change
-(task T-0025). The test solves 3 wings at 2 angles with ``solve`` and
-with ``solve_sweep`` and compares every total, every spanwise array
+Reference values come from the present solver before the speed change.
+The test solves 3 wings at 2 angles with ``solve`` and with ``solve_sweep``
+and compares every total, every spanwise array
 and the Fourier coefficients against the stored values.
 """
 
@@ -255,7 +255,7 @@ REF = {
 
 
 def test_cached_quadrature_is_read_only():
-    """Review of T-0025: the cached Gauss-Legendre arrays cannot be changed by a caller."""
+    """The cached Gauss-Legendre arrays cannot be changed by a caller."""
     from ventorum.solvers.fourier import _gauss_legendre
 
     x, w = _gauss_legendre(16)

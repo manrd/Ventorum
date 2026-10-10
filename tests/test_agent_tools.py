@@ -43,7 +43,7 @@ def assert_error(payload, kind, text=None):
 
 def test_schema_exporters():
     n = len(AGENT_TOOL_DEFINITIONS)
-    assert n == 8  # six analysis tools and the two machine tools of T-0017
+    assert n == 8  # six analysis tools and the two machine tools
     openai = get_tool_schemas("openai")
     assert all(s["type"] == "function" and s["function"]["name"].startswith("ventorum_") for s in openai)
     anthropic = get_tool_schemas("anthropic")
@@ -347,7 +347,7 @@ def test_mcp_initialize_list_and_call():
                          "params": {"protocolVersion": "2024-11-05"}}))
     assert r["result"]["protocolVersion"] == "2024-11-05"
     r = _rpc(json.dumps({"jsonrpc": "2.0", "id": "b", "method": "tools/list"}))
-    assert len(r["result"]["tools"]) == 8  # with the two machine tools of T-0017
+    assert len(r["result"]["tools"]) == 8  # with the two machine tools
     call = {"jsonrpc": "2.0", "id": 7, "method": "tools/call",
             "params": {"name": "ventorum_wing_analysis",
                        "arguments": {"wing": RECT, "settings": FAST, "detail_level": "summary"}}}
@@ -411,10 +411,10 @@ def test_mcp_unknown_tool_is_invalid_params():
     assert r["result"]["content"][0]["type"] == "text"
 
 
-# ── T-0046 finding B2: ground-effect rows carry trust ─────────────────────────
+# ── Ground-effect rows carry trust ────────────────────────────────────────────
 
 def test_ground_effect_rows_carry_trust():
-    """B2: each ground-effect row reports trust_score, trust_rating, warnings and converged."""
+    """Each ground-effect row reports trust_score, trust_rating, warnings and converged."""
     import ventorum as vt
     from ventorum.agent.schemas import build_aircraft_from_spec
     from ventorum.ground_effect import analyze_ground_effect
@@ -443,17 +443,17 @@ def test_ground_effect_rows_carry_trust():
 
 
 def test_ground_effect_summary_detail_keeps_trust():
-    """B2: the summary detail level keeps the trust fields of each row."""
+    """The summary detail level keeps the trust fields of each row."""
     p = ground_effect(RECT, [0.5, 1.0], alpha_deg=4.0, settings=SMALL, detail_level="summary")
     assert p["status"] == "success", p
     for r in p["rows"]:
         assert {"h_m", "status", "trust_score", "trust_rating", "warnings", "converged"} <= set(r)
 
 
-# ── T-0046 finding B3: the mesh study solves the requested angles ─────────────
+# ── The mesh study solves the requested angles ───────────────────────────────
 
 def test_mesh_convergence_tool_solves_requested_angle():
-    """B3: alpha_sweep_deg=[3.0] solves 3 deg (plus the condition alpha), not the default sweep."""
+    """alpha_sweep_deg=[3.0] solves 3 deg (plus the condition alpha), not the default sweep."""
     from ventorum.agent import mesh_convergence as mc_tool
 
     p = mc_tool({"span_m": 10.0, "chord_m": 1.25},
@@ -466,19 +466,19 @@ def test_mesh_convergence_tool_solves_requested_angle():
     assert len(p["alpha_tested_deg"]) == 2
 
 
-# ── T-0046 finding B8: a height step below round-off is refused ────────────────
+# ── A height step below round-off is refused ─────────────────────────────────
 
 def test_ground_effect_refuses_tiny_height_step():
-    """B8: two heights closer than 1e-6 * c_ref are refused as invalid input."""
+    """Two heights closer than 1e-6 * c_ref are refused as invalid input."""
     p = ground_effect(RECT, [1.0, 1.0000000000001], alpha_deg=4.0, settings=FAST)
     assert_error(p, "invalid_input")
     assert "1e-6" in p["error"]["message"] or "1e-06" in p["error"]["message"]
 
 
-# ── T-0046 finding B11: budget docs and all-failed polar reason ───────────────
+# ── Budget docs and the reason of an all-failed polar ────────────────────────
 
 def test_polar_all_failed_copies_first_row_error():
-    """B11: when every angle fails, the top-level error copies the first row's error."""
+    """When every angle fails, the top-level error copies the first row's error."""
     p = polar_sweep(dict(RECT), 1.0, 3.0, 1.0, {"h_m": 0.01}, dict(FAST), "standard")
     assert p["status"] == "error", p
     assert p["error"]["type"] == "ground_strike"
@@ -489,7 +489,7 @@ def test_polar_all_failed_copies_first_row_error():
 
 
 def test_agent_guide_documents_work_budget():
-    """B11: the agent guide documents the work budget (MAX_CALL_WORK, N^2 units)."""
+    """The agent guide documents the work budget (MAX_CALL_WORK, N^2 units)."""
     from pathlib import Path
 
     from ventorum.agent.schemas import MAX_CALL_WORK
@@ -617,10 +617,10 @@ def test_body_wake_in_ground_effect_is_invalid_input():
 
 
 def test_linalg_error_is_invalid_input():
-    """A singular system is invalid input (owner decision D-07, task T-0009).
+    """A singular system is invalid input, not an internal failure.
 
-    Before T-0009 a LinAlgError was "internal". The decision of the card
-    maps it to "invalid_input", with a message that names the usual cause.
+    A LinAlgError used to be reported as "internal". The owner decided to
+    map it to "invalid_input", with a message that names the usual cause.
     """
     import numpy as np
 
@@ -746,7 +746,7 @@ def test_stability_derivatives_ge_one_mesh():
     assert d["Cm_alpha_per_rad"] == pytest.approx(cma, abs=2e-5)
 
 
-# ── T-0044: device and precision ─────────────────────────────────────────────
+# ── Device and precision ─────────────────────────────────────────────────────
 
 def test_payload_states_device_precision():
     """Every result states its device (cpu or gpu) and precision (float32 or float64)."""

@@ -55,10 +55,11 @@ from ventorum.utils.parallel import blas_single_thread
 from ventorum.utils.validation import validate_aircraft, validate_fourier_applicability
 
 #: Largest quarter-chord sweep on one spanwise interval that the Fourier
-#: solver accepts [deg] (owner decision D-08).
+#: solver accepts [deg]. The Fourier model has one straight, unswept,
+#: planar lifting line.
 SWEEP_LIMIT_DEG = 1.0
 #: Smallest vertical offset that counts as out of plane, as a fraction of
-#: the semi-span [m] (owner decision D-08).
+#: the semi-span [m]. Above it the geometry is outside the planar model.
 PLANAR_TOL_FRACTION = 1.0e-9
 
 
@@ -271,8 +272,8 @@ class FourierSolver(BaseSolver):
         if isinstance(aircraft, LiftingSurface):
             aircraft = Aircraft(surfaces=[aircraft])
         validate_aircraft(aircraft)
-        # The geometry guard runs before the older applicability check: the
-        # owner decisions D-08 fix ValidityError and a message that names
+        # The geometry guard runs before the older applicability check: it
+        # raises ValidityError and gives a message that names
         # solver_type="vlm" for geometry outside the model.
         for _surf in aircraft.surfaces:
             _check_geometry_in_model(_surf)

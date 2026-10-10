@@ -452,10 +452,10 @@ def test_discarded_spacing_call_is_removed():
     assert not hasattr(mc, "determine_optimal_spacing")
 
 
-# ── T-0046 finding B3: a single requested angle is solved exactly ─────────────
+# ── A single requested angle is solved exactly ───────────────────────────────
 
 def test_single_angle_sweep_solves_requested_angle(planar_rectangular_wing):
-    """B3: alpha_sweep_deg=[3.0] solves 3 deg (plus the condition alpha), not the default sweep."""
+    """alpha_sweep_deg=[3.0] solves 3 deg (plus the condition alpha), not the default sweep."""
     cond = vt.FlightCondition(V_inf=40.0, alpha=np.radians(4.0))
     study = run_mesh_convergence_study(
         case=planar_rectangular_wing,
@@ -473,7 +473,7 @@ def test_single_angle_sweep_solves_requested_angle(planar_rectangular_wing):
 
 
 def test_single_angle_matching_condition_needs_no_extra_solve(planar_rectangular_wing):
-    """B3: alpha_sweep_deg equal to the condition alpha solves exactly that angle."""
+    """alpha_sweep_deg equal to the condition alpha solves exactly that angle."""
     cond = vt.FlightCondition(V_inf=40.0, alpha=np.radians(4.0))
     study = run_mesh_convergence_study(
         case=planar_rectangular_wing,
@@ -489,7 +489,7 @@ def test_single_angle_matching_condition_needs_no_extra_solve(planar_rectangular
     assert study.alpha_tested_deg == pytest.approx([4.0])
 
 
-# ── T-0046 finding A7: no recommendation without convergence ──────────────────
+# ── No recommendation without convergence ────────────────────────────────────
 
 def _swept_wing() -> vt.LiftingSurface:
     """Return a swept tapered wing on which the lifting-line method is not grid convergent."""
@@ -507,7 +507,7 @@ def _swept_wing() -> vt.LiftingSurface:
 
 
 def test_not_converged_gives_no_recommendation():
-    """A7: without an accurate level there is no recommended level and no scaling guideline."""
+    """Without an accurate level there is no recommended level and no scaling guideline."""
     cond = vt.FlightCondition(V_inf=40.0, alpha=np.radians(5.0))
     study = run_mesh_convergence_study(
         case=_swept_wing(),

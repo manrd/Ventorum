@@ -412,7 +412,7 @@ def benchmark_multi_instance(
         solves_sec = total_solves / best_time_s if best_time_s > 0 else 0.0
         denom_workers = min(active_workers, cpu_max)
         efficiency = (speedup / max(1, denom_workers)) * 100.0
-        zero_interference = max_discrepancy < 1e-12  # card T-0030, decision 2
+        zero_interference = max_discrepancy < 1e-12  # zero interference means agreement to round-off
 
         results_records.append({
             "concurrent_instances": inst_c,

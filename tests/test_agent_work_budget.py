@@ -1,5 +1,5 @@
 # Author: Manuel Alejandro Rodriguez Diaz, PhD
-"""Work budget of the agent tools (T-0007).
+"""Work budget of the agent tools.
 
 Each tool estimates its total work before it solves anything. The work
 of one solve of a lattice with N panels is N^2 units. A call above
