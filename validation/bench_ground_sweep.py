@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import subprocess
 import time
+from pathlib import Path
 
 import numpy as np
 
@@ -13,10 +14,16 @@ from ventorum.ground_effect.sweep import GroundEffectSweep
 
 
 def _get_git_commit() -> str:
-    """Return the short git commit hash or 'unknown'."""
+    """Return the short git commit hash of the code under test, or 'unknown'.
+
+    The command runs in the folder of the imported ``ventorum`` package, so
+    the hash is that of the code under test (set by ``PYTHONPATH``), not
+    that of the current folder.
+    """
     try:
         out = subprocess.check_output(
             ["git", "rev-parse", "--short", "HEAD"],
+            cwd=Path(vt.__file__).resolve().parents[1],
             stderr=subprocess.DEVNULL,
             text=True,
         )
@@ -81,6 +88,8 @@ def main() -> None:
 
     alphas_9 = np.linspace(0.0, 8.0, 9)
     phis_1 = np.array([0.0])
+    # Two bank angles: symmetric (phi = 0) and not symmetric cases in one sweep.
+    phis_2 = np.array([0.0, 3.0])
 
     # (a) VLM ground effect sweep: 6 heights x 9 alphas x 1 phi
     heights_vlm = np.linspace(0.5, 3.0, 6)
@@ -93,8 +102,13 @@ def main() -> None:
         sw = GroundEffectSweep(wt_ac, settings=vt.SolverSettings(solver_type="vlm", n_panels=40))
         return sw.run_sweep(heights_vlm, alphas_9, phis_1)
 
+    def run_vlm_20_two_banks():
+        sw = GroundEffectSweep(wt_ac, settings=vt.SolverSettings(solver_type="vlm", n_panels=20))
+        return sw.run_sweep(heights_vlm, alphas_9, phis_2)
+
     t_vlm_20 = _median_time(run_vlm_20)
     t_vlm_40 = _median_time(run_vlm_40)
+    t_vlm_20_2 = _median_time(run_vlm_20_two_banks)
 
     # (b) Linear lifting line sweep: heights at h/c >= 1
     heights_llt = np.linspace(1.5, 3.5, 6)
@@ -107,8 +121,13 @@ def main() -> None:
         sw = GroundEffectSweep(wt_ac, settings=vt.SolverSettings(solver_type="linear", n_panels=40))
         return sw.run_sweep(heights_llt, alphas_9, phis_1)
 
+    def run_llt_20_two_banks():
+        sw = GroundEffectSweep(wt_ac, settings=vt.SolverSettings(solver_type="linear", n_panels=20))
+        return sw.run_sweep(heights_llt, alphas_9, phis_2)
+
     t_llt_20 = _median_time(run_llt_20)
     t_llt_40 = _median_time(run_llt_40)
+    t_llt_20_2 = _median_time(run_llt_20_two_banks)
 
     # (c) 33 single analyze calls of a symmetric wing in free air
     alphas_33 = np.linspace(-2.0, 10.0, 33)
@@ -129,8 +148,10 @@ def main() -> None:
     print("| --- | --- | --- | --- | ---:|")
     print(f"| Wing + tail sweep | VLM | 20 | 6 x 9 x 1 | {1e3 * t_vlm_20:.1f} |")
     print(f"| Wing + tail sweep | VLM | 40 | 6 x 9 x 1 | {1e3 * t_vlm_40:.1f} |")
+    print(f"| Wing + tail sweep, bank 0 and 3 deg | VLM | 20 | 6 x 9 x 2 | {1e3 * t_vlm_20_2:.1f} |")
     print(f"| Wing + tail sweep | LLT linear | 20 | 6 x 9 x 1 | {1e3 * t_llt_20:.1f} |")
     print(f"| Wing + tail sweep | LLT linear | 40 | 6 x 9 x 1 | {1e3 * t_llt_40:.1f} |")
+    print(f"| Wing + tail sweep, bank 0 and 3 deg | LLT linear | 20 | 6 x 9 x 2 | {1e3 * t_llt_20_2:.1f} |")
     print(f"| Symmetric wing free air | VLM (default) | 80 | 33 solves | {1e3 * t_trefftz_33:.1f} |")
 
 
