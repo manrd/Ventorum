@@ -70,6 +70,15 @@ a minor version can change a public interface.
   induced drag in the Trefftz plane uses one half of a symmetric case. The results are the same
   to round-off (the induced drag changes by about 1e-14 relative). The sweep does not change the
   device setting.
+- Breaking: the worker-count argument `n_workers` is now `n_jobs` everywhere (`GroundEffectSweep`,
+  `sweep_height`, `sweep_roll`, `sweep_alpha`, `Ventorum`, `Ventorum.analyze_sweep`,
+  `run_parallel_instances`, `VentorumCaseManager.create_case` and the agent tool
+  `ventorum_batch_evaluate`). The old name is removed: a Python call with `n_workers=` raises
+  `TypeError`, and the agent tool refuses the key with a hint to `n_jobs`. `Ventorum(n_jobs="auto")`
+  now uses the automatic parallel plan (before, `"auto"` meant 1).
+- The canonical solver names are `"auto"`, `"vlm"`, `"linear"`, `"nonlinear"` and `"fourier"`. The
+  old names `"horseshoe"`, `"lattice"`, `"llt"` and `"linear_llt"` still work, with one
+  `FutureWarning` at the public call that names the new name.
 
 ### Fixed
 
