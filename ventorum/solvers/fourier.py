@@ -276,6 +276,14 @@ class FourierSolver(BaseSolver):
         # solver_type="vlm" for geometry outside the model.
         for _surf in aircraft.surfaces:
             _check_geometry_in_model(_surf)
+            for _ctrl in getattr(_surf, "controls", []):
+                if abs(_ctrl.deflection) > 1e-12:
+                    raise ValueError(
+                        f"The Fourier solver cannot model deflected control surfaces (control '{_ctrl.name}' "
+                        f"on surface '{_surf.name}' has deflection {np.degrees(_ctrl.deflection):.2f} deg). "
+                        "Use the vortex lattice solver (solver_type='vlm') or lifting line solvers "
+                        "(solver_type='linear' or 'nonlinear')."
+                    )
         validate_fourier_applicability(aircraft)
         if condition.h is not None:
             raise ValidityError("The Fourier solver has no ground effect. Use solver='vlm' or 'linear'.")

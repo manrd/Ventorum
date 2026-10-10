@@ -23,6 +23,7 @@ import numpy as np
 # --- re-export public API ----------------------------------------------------
 from ventorum.core.datatypes import (  # noqa: F401
     Aircraft,
+    ControlSurface,
     DiscretizedSurface,
     FlightCondition,
     IntegratedResult,

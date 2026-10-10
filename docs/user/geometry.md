@@ -19,6 +19,35 @@ A geometry has three levels.
 - `LinearAirfoil`: lift slope `a0`, zero-lift angle `alpha_L0`, profile drag `Cd0` and pitching moment `Cm0`.
 - `TabulatedAirfoil`: a polar table (alpha, Cl, Cd, Cm), for example from XFOIL or a wind tunnel. The vortex-lattice solver uses its linear part; the nonlinear lifting line uses the full table.
 
+## Control surfaces
+
+Attach control surfaces to a `LiftingSurface` using `ControlSurface`. Specify the hinge chord fraction, spanwise extent, and deflection sign conventions.
+
+```python
+import numpy as np
+from ventorum import ControlSurface, LiftingSurface, Aircraft
+
+elevator = ControlSurface(
+    name="elevator",
+    hinge_x_frac=0.75,
+    eta_start=0.0,
+    eta_end=1.0,
+    symmetric=True,
+    deflection_limit=np.radians(25.0),
+)
+
+htail = LiftingSurface(
+    name="horizontal_tail",
+    sections=[...],
+    controls=[elevator],
+)
+
+aircraft = Aircraft(surfaces=[wing, htail])
+
+# Set control deflection
+aircraft_pitched = aircraft.set_deflection("elevator", np.radians(-2.0))
+```
+
 ## Save and load
 
 ```python
