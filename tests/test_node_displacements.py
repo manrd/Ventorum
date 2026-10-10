@@ -445,6 +445,51 @@ def test_undeformed_nodes_match_the_lattice():
         assert np.max(np.abs(nodes["Wing"]["eta"] - eta_expected)) <= 1e-14
 
 
+def _swept_wing() -> vt.LiftingSurface:
+    return vt.LiftingSurface(
+        name="Wing",
+        semi_span=5.0,
+        sweep_le=np.radians(30.0),
+        sections=[
+            vt.WingSection(y_frac=0.0, chord=2.0),
+            vt.WingSection(y_frac=1.0, chord=1.0),
+        ],
+    )
+
+
+def test_undeformed_nodes_follow_the_solver_spacing():
+    """The "auto" spacing depends on the solver; the nodes must follow the real solver path."""
+    from ventorum.solvers.factory import make_solver, resolve_solver_type
+
+    ac = vt.Aircraft(surfaces=[_swept_wing()])
+    st = vt.SolverSettings(n_panels=16)
+    assert st.spacing == "auto"
+    cond = vt.FlightCondition(V_inf=30.0, alpha=np.radians(4.0))
+
+    eta_vlm = undeformed_nodes(ac, st, solver="vlm")["Wing"]["eta"]
+    eta_llt = undeformed_nodes(ac, st, solver="linear")["Wing"]["eta"]
+    assert eta_vlm.shape == eta_llt.shape
+    assert np.max(np.abs(eta_vlm - eta_llt)) > 0.1
+
+    for solver in ("vlm", "linear", "nonlinear", "auto", "llt", "horseshoe"):
+        st_s = vt.SolverSettings(n_panels=16, solver_type=solver)
+        nodes = undeformed_nodes(ac, st_s, solver=solver)["Wing"]
+        lat = make_solver(resolve_solver_type(solver)).build(ac, st_s, cond)
+        sl = lat.surfaces[0]
+        n_half = len(nodes["eta"])
+        assert sl.edge_le.shape[0] == 2 * n_half - 1
+        assert np.max(np.abs(nodes["le"] - sl.edge_le[n_half - 1:])) <= 1e-14
+        assert np.max(np.abs(nodes["te"] - sl.edge_te[n_half - 1:])) <= 1e-14
+
+
+def test_undeformed_nodes_refuses_fourier():
+    ac = vt.Aircraft(surfaces=[_sample_wing()])
+    with pytest.raises(ValueError, match="Fourier"):
+        undeformed_nodes(ac, solver="fourier")
+    with pytest.raises(ValueError, match="Unknown solver"):
+        undeformed_nodes(ac, solver="panel")
+
+
 # 10. test_cache_key_follows_displacements
 def test_cache_key_follows_displacements():
     wing = _sample_wing()

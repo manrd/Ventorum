@@ -699,6 +699,49 @@ def _surface_eta(surf: LiftingSurface, n_panels: int, spacing: str) -> tuple[np.
     return edges, mids
 
 
+def _surface_mesh_eta(
+    surf: LiftingSurface,
+    settings: SolverSettings,
+    collocation: str,
+    ref_semi: float,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Spanwise strip edges and control-point stations of the defining half of a surface.
+
+    This function applies the panel-count rule (the surface ``n_panels``, the
+    settings ``n_panels`` or the proportional panel count) and the spacing
+    rule of the solver. :func:`build_lattice` and
+    :func:`ventorum.geometry.deformation.undeformed_nodes` both use it, so
+    they always give the same stations.
+
+    Parameters
+    ----------
+    surf : LiftingSurface
+        The surface.
+    settings : SolverSettings
+        Spanwise panel count and spacing.
+    collocation : {"vlm", "llt"}
+        Control-point rule. The ``"auto"`` spacing depends on it.
+    ref_semi : float
+        Reference semi-span for proportional panel counts [m]: the largest
+        semi-span of the aircraft surfaces.
+
+    Returns
+    -------
+    tuple of numpy.ndarray
+        The edge stations ``eta_e`` (n_edges,) and the control-point
+        stations ``eta_mid`` (n_edges - 1,), as fractions of the semi-span.
+    """
+    if getattr(settings, "proportional_panels", False) and surf.n_panels is None:
+        n_sp = compute_surface_n_panels(
+            surf, base_n_panels=settings.n_panels, reference_semi_span=ref_semi,
+            min_panels=getattr(settings, "min_panels", 8),
+        )
+    else:
+        n_sp = surf.n_panels if surf.n_panels is not None else settings.n_panels
+    spacing = resolve_spacing(surf.spacing if surf.spacing is not None else settings.spacing, surf, collocation)
+    return _surface_eta(surf, int(n_sp), spacing)
+
+
 def _chordwise_fractions(n_chord: int, chord_spacing: str) -> np.ndarray:
     if chord_spacing in ("cosine", "full-cosine"):
         return 0.5 * (1.0 - np.cos(np.linspace(0.0, np.pi, n_chord + 1)))
@@ -772,15 +815,7 @@ def build_lattice(
         return hit[1]
 
     for s_idx, surf in enumerate(aircraft.surfaces):
-        if getattr(settings, "proportional_panels", False) and surf.n_panels is None:
-            n_sp = compute_surface_n_panels(
-                surf, base_n_panels=settings.n_panels, reference_semi_span=ref_semi,
-                min_panels=getattr(settings, "min_panels", 8),
-            )
-        else:
-            n_sp = surf.n_panels if surf.n_panels is not None else settings.n_panels
-        spacing = resolve_spacing(surf.spacing if surf.spacing is not None else settings.spacing, surf, collocation)
-        eta_e, eta_mid = _surface_eta(surf, int(n_sp), spacing)
+        eta_e, eta_mid = _surface_mesh_eta(surf, settings, collocation, ref_semi)
         geo = surface_edge_geometry(surf, eta_e)
         d = getattr(surf, "node_displacements", None)
         if d is not None:

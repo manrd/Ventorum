@@ -21,7 +21,8 @@ part is normal to the free stream and its induced-drag part is
 the reference point therefore gets a moment from both parts.
 
 Limitations: one symmetric, unswept, planar wing; linear section data; no
-ground effect. The solver refuses a wing outside that model with
+ground effect; no node displacements (the solver refuses a surface with
+``node_displacements`` with ``ValueError``). The solver refuses a wing outside that model with
 ``ValidityError`` (see ``_check_geometry_in_model``): quarter-chord sweep
 above 1 deg on a spanwise interval, dihedral, or a vertical offset of the
 sections. Reference: H. Glauert, "The Elements of Aerofoil and Airscrew

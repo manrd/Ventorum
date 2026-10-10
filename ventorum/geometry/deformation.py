@@ -6,13 +6,14 @@ from __future__ import annotations
 import numpy as np
 
 from ventorum.core.datatypes import Aircraft, NodeDisplacements, SolverSettings
-from ventorum.geometry.discretization import compute_surface_n_panels
 from ventorum.geometry.lattice import (
     _rotate,
-    _surface_eta,
-    resolve_spacing,
+    _surface_mesh_eta,
     surface_edge_geometry,
 )
+
+#: Collocation rule of each canonical solver name that accepts node displacements.
+_COLLOCATION = {"vlm": "vlm", "linear": "llt", "nonlinear": "llt"}
 
 
 def undeformed_nodes(
@@ -23,6 +24,11 @@ def undeformed_nodes(
 ) -> dict[str, dict[str, np.ndarray]]:
     """Return undeformed lattice node coordinates and strip edges for each surface.
 
+    The strip edges come from the same function that
+    :func:`ventorum.geometry.lattice.build_lattice` uses, so they are the
+    edges of the mesh that the solver builds. Use the same settings and the
+    same solver here and for the analysis.
+
     Parameters
     ----------
     aircraft : Aircraft
@@ -30,26 +36,31 @@ def undeformed_nodes(
     settings : SolverSettings or None
         Discretisation settings. Defaults are used if None.
     solver : str
-        Solver name ('vlm' uses 'vlm' collocation; 'linear' and 'nonlinear' use 'llt').
+        Solver name. All the names that ``SolverSettings.solver_type``
+        accepts are valid, except the Fourier solver. ``"vlm"`` uses the
+        vortex-lattice collocation; ``"linear"`` and ``"nonlinear"`` use the
+        lifting-line collocation (the ``"auto"`` spacing depends on it).
 
     Returns
     -------
     dict[str, dict[str, np.ndarray]]
-        Mapping of surface name to a dict with keys 'eta' (n_edges,),
+        Mapping of surface name to a dict with keys 'eta' (n_edges,) [-],
         'le' (n_edges, 3) [m], and 'te' (n_edges, 3) [m].
 
     Raises
     ------
     ValueError
-        If surface names are not unique, or if the solver name is unknown.
+        If surface names are not unique, if the solver name is unknown, or
+        if the solver is the Fourier solver.
     """
-    s_clean = solver.lower()
-    if s_clean in ("vlm", "horseshoe", "auto"):
-        collocation = "vlm"
-    elif s_clean in ("linear", "llt", "nonlinear"):
-        collocation = "llt"
-    else:
-        raise ValueError(f"Unknown solver {solver!r}; use 'vlm', 'linear', or 'nonlinear'.")
+    from ventorum.solvers.factory import resolve_solver_type
+
+    canonical = resolve_solver_type(solver)
+    if canonical not in _COLLOCATION:
+        raise ValueError(
+            "The Fourier solver does not accept node displacements; use 'vlm', 'linear' or 'nonlinear'."
+        )
+    collocation = _COLLOCATION[canonical]
 
     names = [s.name for s in aircraft.surfaces]
     if len(names) != len(set(names)):
@@ -60,21 +71,7 @@ def undeformed_nodes(
     out: dict[str, dict[str, np.ndarray]] = {}
 
     for surf in aircraft.surfaces:
-        if getattr(st, "proportional_panels", False) and surf.n_panels is None:
-            n_sp = compute_surface_n_panels(
-                surf,
-                base_n_panels=st.n_panels,
-                reference_semi_span=ref_semi,
-                min_panels=getattr(st, "min_panels", 8),
-            )
-        else:
-            n_sp = surf.n_panels if surf.n_panels is not None else st.n_panels
-        spacing = resolve_spacing(
-            surf.spacing if surf.spacing is not None else st.spacing,
-            surf,
-            collocation,
-        )
-        eta_e, _ = _surface_eta(surf, int(n_sp), spacing)
+        eta_e, _ = _surface_mesh_eta(surf, st, collocation, ref_semi)
         geo = surface_edge_geometry(surf, eta_e)
         out[surf.name] = {
             "eta": np.asarray(eta_e, dtype=float).copy(),
