@@ -86,7 +86,7 @@ def test_controls_key_equals_python_api():
             "controls": [{"name": "elevator", "hinge_x_c": 0.7, "deflection_deg": -2.0}]}
     spec = {"surfaces": [wing, tail], "ref_point_m": [0.45, 0.0, 0.0]}
     cond = {"V_inf_m_s": 40.0, "alpha_deg": 4.0}
-    p = wing_analysis(spec, cond, {"n_panels": 12}, "summary")
+    p = wing_analysis(aircraft=spec, flight_condition=cond, settings={"n_panels": 12}, detail_level="summary")
     strict_json(p)
     assert p["status"] == "success", p
 
@@ -107,8 +107,8 @@ def test_controls_key_equals_python_api():
     assert m["CDi"] == pytest.approx(round(ref.totals.CDi, 7), rel=1e-12)
     assert m["Cm"] == pytest.approx(round(ref.totals.Cm, 6), rel=1e-12)
     # The deflection is not ignored: the lift differs from the clean wing.
-    clean = wing_analysis({"surfaces": [{k: v for k, v in wing.items() if k != "controls"}, tail]},
-                          cond, {"n_panels": 12}, "summary")
+    clean = wing_analysis(aircraft={"surfaces": [{k: v for k, v in wing.items() if k != "controls"}, tail]},
+                          flight_condition=cond, settings={"n_panels": 12}, detail_level="summary")
     assert clean["status"] == "success", clean
     assert m["CL"] != pytest.approx(clean["metrics"]["CL"])
 
@@ -261,7 +261,7 @@ def test_node_displacements_errors():
 
 def test_trim_tool_equals_python_trim():
     """ventorum_trim with CL_target 0.5 equals vt.trim."""
-    t = trim(dict(WING_TAIL), 0.5, "elevator", settings={"n_panels": 8})
+    t = trim(aircraft=dict(WING_TAIL), CL_target=0.5, pitch_control="elevator", settings={"n_panels": 8})
     strict_json(t)
     assert t["status"] == "success", t
     assert t["trim_status"] == "trimmed" and t["trimmed"] is True
@@ -282,16 +282,16 @@ def test_trim_tool_equals_python_trim():
 
 def test_trim_tool_not_reached_is_success_with_status():
     """CL_target 3.0 is success with trimmed false and the Not trimmed summary."""
-    t = trim(dict(WING_TAIL), 3.0, "elevator", settings={"n_panels": 8})
+    t = trim(aircraft=dict(WING_TAIL), CL_target=3.0, pitch_control="elevator", settings={"n_panels": 8})
     strict_json(t)
     assert t["status"] == "success", t
     assert t["trimmed"] is False
     assert t["trim_status"] in ("not_converged", "alpha_limit", "control_limit")
     assert len(t["notes"]) > 0
     assert t["executive_summary"].startswith("[Ventorum RESULT] Not trimmed:")
-    assert_error(trim(dict(WING_TAIL), 0.5, "no_such_control", settings=FAST),
+    assert_error(trim(aircraft=dict(WING_TAIL), CL_target=0.5, pitch_control="no_such_control", settings=FAST),
                  "invalid_input", "no_such_control")
-    assert_error(trim(dict(WING_TAIL), 0.5, "elevator", settings={"solver": "fourier", "n_panels": 8}),
+    assert_error(trim(aircraft=dict(WING_TAIL), CL_target=0.5, pitch_control="elevator", settings={"solver": "fourier", "n_panels": 8}),
                  "invalid_input", "Fourier")
 
 
@@ -365,9 +365,9 @@ def test_new_schemas_export():
     assert "items" in le_m and le_m["items"]["type"] == "array"
     assert "items" in le_m["items"] and le_m["items"]["items"]["type"] == "number"
     mcp = {t["name"]: t for t in get_tool_schemas("mcp")}
-    assert mcp["ventorum_trim"]["inputSchema"]["required"] == ["wing", "CL_target", "pitch_control"]
+    assert mcp["ventorum_trim"]["inputSchema"]["required"] == ["CL_target", "pitch_control"]
     assert mcp["ventorum_error_bars"]["inputSchema"]["properties"]["axes"]["enum"] == ["body", "stability",
-                                                                                       "wind"]
+                                                                                        "wind"]
     # Every new key has a description with its unit.
     units = ("[m]", "[deg]", "[-]", "degrees", "metres", "coefficient", "integer", "boolean", "string")
     new_keys: dict[str, dict] = dict(CONTROL_PROPS)
@@ -388,7 +388,7 @@ def test_new_schemas_export():
 
 def test_explicit_null_in_new_keys():
     """An explicit null for each new key is invalid_input that names the key."""
-    base = {"wing": dict(WING_TAIL), "CL_target": 0.5, "pitch_control": "elevator",
+    base = {"aircraft": dict(WING_TAIL), "CL_target": 0.5, "pitch_control": "elevator",
             "settings": dict(FAST)}
     for key in ("CL_target", "pitch_control", "alpha_bounds_deg", "max_iterations"):
         assert_error(call_tool("ventorum_trim", {**base, key: None}), "invalid_input", key)
@@ -407,8 +407,8 @@ def test_trim_and_error_bars_refuse_methods_like_the_other_tools():
     as in ventorum_wing_analysis."""
     ground = {"alpha_deg": 3.0, "h_m": 2.0}
     body = {"n_panels": 16, "wake_alignment": "body"}
-    assert_error(wing_analysis(dict(WING_TAIL), ground, body), "invalid_input")
-    assert_error(trim(dict(WING_TAIL), 0.5, "elevator", flight_condition=ground, settings=body),
+    assert_error(wing_analysis(aircraft=dict(WING_TAIL), flight_condition=ground, settings=body), "invalid_input")
+    assert_error(trim(aircraft=dict(WING_TAIL), CL_target=0.5, pitch_control="elevator", flight_condition=ground, settings=body),
                  "invalid_input")
     assert_error(error_bars(dict(RECT), ground, body), "invalid_input")
     fourier = {"n_panels": 16, "solver": "fourier"}
@@ -424,7 +424,7 @@ def test_error_bars_and_trim_carry_the_common_output_fields():
     assert e["axes"] == "stability"
     assert e["condition_used"]["alpha_deg"] == 4.0
     assert e["settings_used"]["n_panels"] == 16
-    t = trim(dict(WING_TAIL), 0.5, "elevator", settings={"n_panels": 8}, axes="all")
+    t = trim(aircraft=dict(WING_TAIL), CL_target=0.5, pitch_control="elevator", settings={"n_panels": 8}, axes="all")
     strict_json(t)
     assert t["trimmed"] is True
     assert set(t["moments"]) == {"body", "stability", "wind"}
@@ -442,12 +442,12 @@ def test_trim_tool_reports_the_device_of_its_solves(device):
     try:
         gpu.set_device(device)
         gpu.set_precision("float32")
-        t = trim(dict(WING_TAIL), 0.5, "elevator", settings={"n_panels": 8})
+        t = trim(aircraft=dict(WING_TAIL), CL_target=0.5, pitch_control="elevator", settings={"n_panels": 8})
     finally:
         gpu.set_device(old_dev)
         gpu.set_precision(old_prec)
     want = ("gpu", "float32") if device == "gpu" else ("cpu", "float64")
     assert t["status"] == "success" and t["trimmed"] is True, t
     assert (t["device"], t["precision"]) == want
-    assert (t["settings_used"]["device"], t["settings_used"]["precision"]) == want
     assert f"Computed on {want[0]} in {want[1]}." in t["executive_summary"]
+

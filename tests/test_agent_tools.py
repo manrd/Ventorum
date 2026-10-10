@@ -61,7 +61,7 @@ def test_schema_exporters():
 
 def test_schema_keys_match_parser_tables():
     wa = next(t for t in AGENT_TOOL_DEFINITIONS if t["name"] == "ventorum_wing_analysis")["parameters"]
-    surface = wa["properties"]["wing"]["anyOf"][0]
+    surface = wa["properties"]["wing"]
     assert set(surface["properties"]) == set(SURFACE_PROPS)
     assert surface["additionalProperties"] is False
     assert set(wa["properties"]["flight_condition"]["properties"]) == set(CONDITION_PROPS)
@@ -182,7 +182,7 @@ def test_sections_and_multi_surface_spec():
     assert p["geometry"]["surfaces"][0]["n_sections"] == 3
     ac = {"surfaces": [RECT, {"name": "tail", "span_m": 3.0, "chord_m": 0.5, "position_m": [4.0, 0.0, 0.0]}],
           "ref_point_m": [0.3, 0.0, 0.0]}
-    p = wing_analysis(ac, None, FAST, "standard")
+    p = wing_analysis(aircraft=ac, settings=FAST, detail_level="standard")
     assert p["status"] == "success"
     assert p["geometry"]["S_ref_m2"] == pytest.approx(10.0)
     assert p["geometry"]["ref_point_m"] == [0.3, 0.0, 0.0]
@@ -558,7 +558,7 @@ def test_mesh_limit_refuses_large_mesh():
     # Automatic n_chord: even the smallest automatic value (4) is too large.
     big = {"surfaces": [{**RECT, "n_panels": 400}, {"name": "t", "span_m": 4.0, "chord_m": 0.5,
                                                      "position_m": [4.0, 0.0, 0.0], "n_panels": 400}]}
-    assert_error(wing_analysis(big, None, None), "invalid_input", "4000")
+    assert_error(wing_analysis(aircraft=big), "invalid_input", "4000")
     assert_error(ground_effect(RECT, [1.0], settings={"n_panels": 400, "n_chord": 64}), "invalid_input", "4000")
     assert_error(polar_sweep(RECT, 0.0, 2.0, 1.0, None, {"n_panels": 400, "n_chord": 64}), "invalid_input",
                  "4000")
@@ -701,7 +701,9 @@ def test_gemini_schema_uses_the_openapi_subset():
     for decl in get_tool_schemas("gemini"):
         walk(decl["parameters"])
     wa = get_tool_schemas("gemini")[0]["parameters"]["properties"]["wing"]
-    assert wa["type"] == "object" and {"span_m", "surfaces", "S_ref_m2"} <= set(wa["properties"])
+    ac_schema = get_tool_schemas("gemini")[0]["parameters"]["properties"]["aircraft"]
+    assert wa["type"] == "object" and "span_m" in wa["properties"]
+    assert ac_schema["type"] == "object" and {"surfaces", "S_ref_m2"} <= set(ac_schema["properties"])
     span = wa["properties"]["span_m"]
     assert span["minimum"] == 0 and "larger than 0" in span["description"]
     nw = get_tool_schemas("gemini")[4]["parameters"]["properties"]["n_jobs"]
@@ -855,18 +857,18 @@ def test_machine_capabilities_reports_gpu_pipeline():
 def test_null_values_are_refused_with_key_name():
     """{"alpha_deg": null} (also V, twist, a0, cd0, S_ref, settings keys) is invalid_input."""
     cases = [
-        (RECT, {"alpha_deg": None}, FAST, "flight_condition", "alpha_deg"),
-        (RECT, {"V_inf_m_s": None}, FAST, "flight_condition", "V_inf_m_s"),
-        ({**RECT, "tip_twist_deg": None}, None, FAST, "wing", "tip_twist_deg"),
-        ({"span_m": 10.0, "chord_m": 1.0, "airfoil": {"a0_per_rad": None}}, None, FAST, "wing.airfoil",
+        (RECT, None, {"alpha_deg": None}, FAST, "flight_condition", "alpha_deg"),
+        (RECT, None, {"V_inf_m_s": None}, FAST, "flight_condition", "V_inf_m_s"),
+        ({**RECT, "tip_twist_deg": None}, None, None, FAST, "wing", "tip_twist_deg"),
+        ({"span_m": 10.0, "chord_m": 1.0, "airfoil": {"a0_per_rad": None}}, None, None, FAST, "wing.airfoil",
          "a0_per_rad"),
-        ({"span_m": 10.0, "chord_m": 1.0, "airfoil": {"cd0": None}}, None, FAST, "wing.airfoil", "cd0"),
-        ({"surfaces": [RECT], "S_ref_m2": None}, None, FAST, "wing", "S_ref_m2"),
-        (RECT, None, {"n_panels": None}, "settings", "n_panels"),
-        (RECT, None, {"n_panels": 8, "n_chord": None}, "settings", "n_chord"),
+        ({"span_m": 10.0, "chord_m": 1.0, "airfoil": {"cd0": None}}, None, None, FAST, "wing.airfoil", "cd0"),
+        (None, {"surfaces": [RECT], "S_ref_m2": None}, None, FAST, "aircraft", "S_ref_m2"),
+        (RECT, None, None, {"n_panels": None}, "settings", "n_panels"),
+        (RECT, None, None, {"n_panels": 8, "n_chord": None}, "settings", "n_chord"),
     ]
-    for wing, cond, sett, where, key in cases:
-        p = wing_analysis(wing, cond, sett, "summary")
+    for wing, aircraft, cond, sett, where, key in cases:
+        p = wing_analysis(wing=wing, aircraft=aircraft, flight_condition=cond, settings=sett, detail_level="summary")
         assert_error(p, "invalid_input", f"{where}: '{key}' is null")
         assert "got None" not in p["error"]["message"]
     # Null through the dispatcher (JSON null) names the key too.
@@ -974,7 +976,7 @@ def test_main_surface_is_largest_projected_area():
     assert "largest projected planform area" in AIRCRAFT_PROPS["surfaces"]["description"]
     ac = {"surfaces": [{"name": "tail", "span_m": 3.0, "chord_m": 0.5},
                        {"name": "wing", "span_m": 10.0, "chord_m": 1.0}]}
-    p = wing_analysis(ac, None, FAST, "standard")
+    p = wing_analysis(aircraft=ac, settings=FAST, detail_level="standard")
     assert p["status"] == "success", p
     assert p["geometry"]["S_ref_m2"] == pytest.approx(10.0)
     assert p["geometry"]["b_ref_m"] == pytest.approx(10.0)
@@ -988,7 +990,7 @@ def test_tiny_geometry_is_invalid_input_not_internal():
                  "invalid_input", "semi_span")
     assert_error(wing_analysis({"span_m": 10.0, "chord_m": 1e-300}, None, FAST, "summary"),
                  "invalid_input", "chord")
-    assert_error(wing_analysis({"surfaces": [RECT], "S_ref_m2": 0.0}, None, FAST, "summary"),
+    assert_error(wing_analysis(aircraft={"surfaces": [RECT], "S_ref_m2": 0.0}, settings=FAST, detail_level="summary"),
                  "invalid_input", "S_ref_m2")
 
 
@@ -1017,18 +1019,18 @@ def test_tiny_reference_values_are_invalid_input():
 
     for key in ("S_ref_m2", "b_ref_m", "c_ref_m"):
         p = call_tool("ventorum_wing_analysis",
-                      {"wing": {"surfaces": [RECT], key: 1e-300}, "settings": FAST})
+                      {"aircraft": {"surfaces": [RECT], key: 1e-300}, "settings": FAST})
         assert_error(p, "invalid_input", key)
     # A small but sane value passes.
     p = call_tool("ventorum_wing_analysis",
-                  {"wing": {"surfaces": [RECT], "S_ref_m2": 1e-3, "b_ref_m": 1e-3, "c_ref_m": 1e-3},
+                  {"aircraft": {"surfaces": [RECT], "S_ref_m2": 1e-3, "b_ref_m": 1e-3, "c_ref_m": 1e-3},
                    "settings": FAST, "detail_level": "summary"})
     assert p["status"] == "success", p
     # The Python call path with an Aircraft object is checked too.
     for attr in ("S_ref", "b_ref", "c_ref"):
-        ac = build_aircraft_from_spec({"surfaces": [RECT]})
+        ac = build_aircraft_from_spec(aircraft={"surfaces": [RECT]})
         setattr(ac, attr, 1e-300)
-        assert_error(wing_analysis(ac, None, FAST, "summary"), "invalid_input", attr)
+        assert_error(wing_analysis(aircraft=ac, settings=FAST, detail_level="summary"), "invalid_input", attr)
 
 
 def test_speed_below_minimum_is_invalid_input():

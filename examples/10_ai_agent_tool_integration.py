@@ -88,9 +88,9 @@ def main():
     # 6. Batch with one invalid candidate.
     p = show("6. Batch", call_tool("ventorum_batch_evaluate", {
         "candidates": [
-            {"name": "AR6", "span_m": 6.0, "chord_m": 1.0, "airfoil": {"cd0": 0.008}},
-            {"name": "AR10", "span_m": 10.0, "chord_m": 1.0, "airfoil": {"cd0": 0.008}},
-            {"name": "bad", "span_m": 8.0, "chord_m": "1 m"},
+            {"wing": {"name": "AR6", "span_m": 6.0, "chord_m": 1.0, "airfoil": {"cd0": 0.008}}},
+            {"wing": {"name": "AR10", "span_m": 10.0, "chord_m": 1.0, "airfoil": {"cd0": 0.008}}},
+            {"wing": {"name": "bad", "span_m": 8.0, "chord_m": "1 m"}},
         ],
         "flight_condition": {"V_inf_m_s": 40.0, "alpha_deg": 5.0},
         "objective": "max_L_over_D",

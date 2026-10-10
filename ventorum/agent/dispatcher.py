@@ -21,7 +21,7 @@ from typing import Any
 from collections.abc import Callable
 
 from ventorum.agent.response import error_payload
-from ventorum.agent.schemas import AGENT_TOOL_DEFINITIONS, TOOL_NAMES, check_keys
+from ventorum.agent.schemas import AGENT_TOOL_DEFINITIONS, TOOL_NAMES, active_tool_context, check_keys
 from ventorum.agent.tools import (
     batch_evaluate,
     error_bars,
@@ -104,15 +104,16 @@ def _run(tool_name: Any, arguments: Any) -> tuple[str | None, dict[str, Any]]:
                                    f"The arguments must be a JSON object, got {type(args).__name__}.")
 
     params = _PARAMS[name]
-    try:
-        args = check_keys(args, params["properties"], f"{name} arguments")
-    except ValueError as exc:
-        return name, error_payload(exc)
-    missing = [k for k in params.get("required", []) if k not in args]
-    if missing:
-        return name, error_payload("invalid_input", f"{name}: missing required argument(s): {', '.join(missing)}.")
+    with active_tool_context(name):
+        try:
+            args = check_keys(args, params["properties"], f"{name} arguments")
+        except ValueError as exc:
+            return name, error_payload(exc)
+        missing = [k for k in params.get("required", []) if k not in args]
+        if missing:
+            return name, error_payload("invalid_input", f"{name}: missing required argument(s): {', '.join(missing)}.")
 
-    return name, TOOL_FUNCTIONS[name](**args)
+        return name, TOOL_FUNCTIONS[name](**args)
 
 
 def call_tool(tool_name: str, arguments: dict[str, Any] | str | None = None) -> dict[str, Any]:

@@ -11,6 +11,7 @@ returns an error payload.
 from __future__ import annotations
 
 import functools
+import inspect
 import threading
 from typing import Any
 from collections.abc import Callable
@@ -39,12 +40,15 @@ from ventorum.agent.response import (
     trust_payload,
 )
 from ventorum.agent.schemas import (
+    _CANDIDATE_SCHEMA,
     MAX_CALL_WORK,
     MAX_TOTAL_PANELS,
     MIN_ALPHA_STEP_DEG,
     InputError,
+    active_tool_context,
     boolean,
     build_aircraft_from_spec,
+    check_keys,
     integer,
     make_flight_condition,
     number,
@@ -57,7 +61,7 @@ from ventorum.agent.schemas import (
     vector3,
 )
 from ventorum.core.constants import RHO_SL
-from ventorum.core.datatypes import Aircraft, FlightCondition, SolverSettings
+from ventorum.core.datatypes import Aircraft, FlightCondition, LiftingSurface, SolverSettings
 from ventorum.core.errors import GroundStrikeError, ValidityError
 from ventorum.ground_effect.solver import MAX_BANK_DEG
 from ventorum.geometry import lattice_cache
@@ -78,11 +82,20 @@ _TUNE_LOCK = threading.Lock()
 
 def _tool(fn: Callable[..., dict[str, Any]]) -> Callable[..., dict[str, Any]]:
     """Catch every exception of a tool and return an error payload; make the output JSON-safe."""
+    params = list(inspect.signature(fn).parameters.keys())
+    has_geom_pair = len(params) >= 2 and params[0] == "wing" and params[1] == "aircraft"
 
     @functools.wraps(fn)
     def wrapper(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        tool_name = "ventorum_" + fn.__name__
+        if has_geom_pair and len(args) >= 2 and "aircraft" not in kwargs:
+            a1 = args[1]
+            is_ac = isinstance(a1, Aircraft) or (isinstance(a1, dict) and "surfaces" in a1)
+            if not is_ac:
+                args = (args[0], None) + args[1:]
         try:
-            out = fn(*args, **kwargs)
+            with active_tool_context(tool_name):
+                out = fn(*args, **kwargs)
         except Exception as exc:  # noqa: BLE001 - a tool must not raise
             return error_payload(exc)
         return json_safe(out)
@@ -292,7 +305,8 @@ def _jobs(val: Any) -> int | str:
 
 @_tool
 def wing_analysis(
-    wing: Any,
+    wing: Any = None,
+    aircraft: Any = None,
     flight_condition: dict[str, Any] | None = None,
     settings: dict[str, Any] | None = None,
     detail_level: str = "standard",
@@ -302,8 +316,10 @@ def wing_analysis(
 
     Parameters
     ----------
-    wing : dict
-        Surface spec or aircraft spec (see the tool schema).
+    wing : dict or None
+        One surface spec.
+    aircraft : dict or None
+        Several surfaces with reference values (see the tool schema).
     flight_condition : dict or None
         ``V_inf_m_s``, ``alpha_deg``, ``beta_deg``, ``rho_kg_m3`` or
         ``altitude_m``, ``h_m`` (ground effect).
@@ -316,7 +332,7 @@ def wing_analysis(
         the three sets in ``metrics["moments"]``. CL, CD and CY are
         relative to the free stream in every set.
     """
-    ac = build_aircraft_from_spec(wing)
+    ac = build_aircraft_from_spec(wing=wing, aircraft=aircraft)
     c = parse_condition(flight_condition)
     sett = parse_settings(settings)
     dl = parse_detail_level(detail_level)
@@ -418,10 +434,11 @@ def _batched_polar(ac: Aircraft, sett: SolverSettings, conditions: list[FlightCo
 
 @_tool
 def polar_sweep(
-    wing: Any,
-    alpha_start_deg: float,
-    alpha_end_deg: float,
-    alpha_step_deg: float,
+    wing: Any = None,
+    aircraft: Any = None,
+    alpha_start_deg: float = 0.0,
+    alpha_end_deg: float = 10.0,
+    alpha_step_deg: float = 2.0,
     flight_condition: dict[str, Any] | None = None,
     settings: dict[str, Any] | None = None,
     detail_level: str = "standard",
@@ -435,7 +452,7 @@ def polar_sweep(
     system of Cm (``"body"`` by default, ``"all"`` adds the three moment
     sets to each row).
     """
-    ac = build_aircraft_from_spec(wing)
+    ac = build_aircraft_from_spec(wing=wing, aircraft=aircraft)
     c = parse_condition(flight_condition,
                         allow=("V_inf_m_s", "beta_deg", "rho_kg_m3", "altitude_m", "h_m"))
     sett = parse_settings(settings)
@@ -719,8 +736,9 @@ def _irodov(ac, ok, alpha, phi, beta, V, rho, rp, href, fixed, c_ref, dl, sweep_
 
 @_tool
 def ground_effect(
-    wing: Any,
-    heights_m: list[float],
+    wing: Any = None,
+    aircraft: Any = None,
+    heights_m: list[float] | None = None,
     alpha_deg: float = 5.0,
     phi_deg: float = 0.0,
     beta_deg: float = 0.0,
@@ -744,8 +762,10 @@ def ground_effect(
 
     Parameters
     ----------
-    wing : dict
-        Wing or aircraft specification (see the MCP schema).
+    wing : dict or None
+        One surface specification (see the schema).
+    aircraft : dict or None
+        Aircraft specification with surfaces (see the schema).
     heights_m : list of float
         Heights above the ground [m].
     alpha_deg : float
@@ -769,7 +789,9 @@ def ground_effect(
     from ventorum.ground_effect.solver import place_ground
     from ventorum.ground_effect.sweep import GroundEffectSweepResult
 
-    ac = build_aircraft_from_spec(wing)
+    ac = build_aircraft_from_spec(wing=wing, aircraft=aircraft)
+    if heights_m is None:
+        raise InputError("'heights_m' is required.")
     heights = number_list(heights_m, "heights_m", min_len=1, max_len=20, exclusive_min=0)
     if len(set(heights)) != len(heights):
         raise InputError("heights_m has duplicate values.")
@@ -1007,7 +1029,8 @@ def ground_effect(
 
 @_tool
 def stability_derivatives(
-    wing: Any,
+    wing: Any = None,
+    aircraft: Any = None,
     flight_condition: dict[str, Any] | None = None,
     x_cg_m: float | None = None,
     settings: dict[str, Any] | None = None,
@@ -1028,7 +1051,7 @@ def stability_derivatives(
     every set. The static margin and the neutral point use the
     body-axis Cm_alpha and keep their values in every set.
     """
-    ac = build_aircraft_from_spec(wing)
+    ac = build_aircraft_from_spec(wing=wing, aircraft=aircraft)
     c = parse_condition(flight_condition)
     sett = parse_settings(settings)
     dl = parse_detail_level(detail_level)
@@ -1228,7 +1251,7 @@ def batch_evaluate(
     ``"all"`` adds the three moment sets to each ranking).
     """
     if not isinstance(candidates, list) or not (1 <= len(candidates) <= 50):
-        raise InputError("'candidates' must be a list of 1 to 50 wing specs.")
+        raise InputError("'candidates' must be a list of 1 to 50 candidate objects.")
     c = parse_condition(flight_condition)
     sett = parse_settings(settings)
     obj = string(objective, "objective", _OBJECTIVES)
@@ -1242,34 +1265,62 @@ def batch_evaluate(
     failed: list[dict[str, Any]] = []
     built: list[tuple[int, str, Any, int]] = []
     for i, cand in enumerate(candidates):
-        name = cand.get("name") if isinstance(cand, dict) and isinstance(cand.get("name"), str) \
-            else f"candidate_{i + 1}"
+        cand_name: str | None = None
+        if isinstance(cand, dict):
+            cand_geom = cand.get("wing") if "wing" in cand else cand.get("aircraft")
+            if isinstance(cand_geom, dict) and isinstance(cand_geom.get("name"), str):
+                cand_name = cand_geom["name"]
+            elif isinstance(cand.get("name"), str):
+                cand_name = cand["name"]
+        elif isinstance(cand, (Aircraft, LiftingSurface)) and cand.name:
+            cand_name = cand.name
+        name = cand_name if cand_name else f"candidate_{i + 1}"
+
         try:
-            ac_i = build_aircraft_from_spec(cand, f"candidates[{i}]")
-            _check_method(ac_i, sett.solver_type, sett.wake_alignment, in_ground)
-            built.append((i, name, ac_i, _check_mesh(ac_i, sett)))
+            if isinstance(cand, (Aircraft, LiftingSurface)):
+                ac_i = build_aircraft_from_spec(wing=cand, where=f"candidates[{i}]")
+                c_i, sett_i = c, sett
+            elif not isinstance(cand, dict):
+                raise InputError(f"candidates[{i}] must be a JSON object, got {type(cand).__name__}.")
+            else:
+                has_w = "wing" in cand
+                has_a = "aircraft" in cand
+                if not has_w and not has_a and any(k in cand for k in ("span_m", "chord_m", "aspect_ratio", "root_chord_m")):
+                    w_in = cand
+                    a_in = None
+                    c_i, sett_i = c, sett
+                else:
+                    d_cand = check_keys(cand, _CANDIDATE_SCHEMA, f"candidates[{i}]")
+                    w_in = d_cand.get("wing")
+                    a_in = d_cand.get("aircraft")
+                    c_i = parse_condition(d_cand["flight_condition"]) if "flight_condition" in d_cand else c
+                    sett_i = parse_settings(d_cand["settings"]) if "settings" in d_cand else sett
+                ac_i = build_aircraft_from_spec(wing=w_in, aircraft=a_in, where=f"candidates[{i}]")
+            _check_method(ac_i, sett_i.solver_type, sett_i.wake_alignment, c_i["h_m"] is not None)
+            fc_i = make_flight_condition(c_i) if c_i is not c else fc
+            built.append((i, name, ac_i, _check_mesh(ac_i, sett_i), fc_i, sett_i, c_i))
         except Exception as exc:  # noqa: BLE001
             failed.append({"index": i, "name": name, "error": error_info(exc)})
 
     def run(item):
-        i, name, ac, strips = item
+        i, name, ac, strips, fc_i, sett_i, c_i = item
         try:
-            s = _case_settings(ac, sett, strips, fc)
-            return i, name, ac, vt.analyze(ac, fc, s), None, s
+            s = _case_settings(ac, sett_i, strips, fc_i)
+            return i, name, ac, vt.analyze(ac, fc_i, s), None, s, c_i
         except Exception as exc:  # noqa: BLE001
-            return i, name, ac, None, exc, None
+            return i, name, ac, None, exc, None, c_i
 
     if built:
         _check_call_work(
-            sum(_planned_panels(ac_i, sett, fc) ** 2 for _, _, ac_i, _ in built),
+            sum(_planned_panels(b[2], b[5], b[4]) ** 2 for b in built),
             "fewer candidates or fewer panels (smaller n_panels or n_chord)")
     outputs = []
     if built:
-        outputs = run_cases(run, built, max((estimate_panels(b[2], sett) or 0) for b in built) or None, workers)
+        outputs = run_cases(run, built, max((estimate_panels(b[2], b[5]) or 0) for b in built) or None, workers)
 
     ranked: list[dict[str, Any]] = []
     ok_results: list[Any] = []
-    for i, name, ac, res, err, s_used in outputs:
+    for i, name, ac, res, err, s_used, c_i in outputs:
         if res is None:
             failed.append({"index": i, "name": name, "error": error_info(err)})
             continue
@@ -1277,7 +1328,7 @@ def batch_evaluate(
         cd, basis, ld = drag_and_ld(tot)
         S, b = float(ac.S_ref), float(ac.b_ref)
         b_ref, c_ref = float(ac.b_ref), float(ac.c_ref)
-        _, cm_ax, _ = _apply_axes(tot.Cl, tot.Cm, tot.Cn, c["alpha_deg"], c["beta_deg"], ax,
+        _, cm_ax, _ = _apply_axes(tot.Cl, tot.Cm, tot.Cn, c_i["alpha_deg"], c_i["beta_deg"], ax,
                                   b_ref=b_ref, c_ref=c_ref)
         device, precision = result_device_precision(res)
         row: dict[str, Any] = {
@@ -1359,7 +1410,8 @@ def batch_evaluate(
 
 @_tool
 def mesh_convergence(
-    wing: Any,
+    wing: Any = None,
+    aircraft: Any = None,
     flight_condition: dict[str, Any] | None = None,
     tolerance_pct: float = 0.5,
     target_metric: str = "both",
@@ -1373,7 +1425,7 @@ def mesh_convergence(
     """Spanwise mesh convergence study (wraps ``run_mesh_convergence_study``)."""
     from ventorum.geometry.mesh_convergence import run_mesh_convergence_study
 
-    ac = build_aircraft_from_spec(wing)
+    ac = build_aircraft_from_spec(wing=wing, aircraft=aircraft)
     c = parse_condition(flight_condition)
     dl = parse_detail_level(detail_level)
     tol = number(tolerance_pct, "tolerance_pct", exclusive_min=0, maximum=50)
@@ -1538,7 +1590,8 @@ def mesh_convergence(
 
 @_tool
 def undeformed_nodes(
-    wing: Any,
+    wing: Any = None,
+    aircraft: Any = None,
     settings: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Strip-edge stations and undeformed lattice nodes of each surface.
@@ -1551,15 +1604,17 @@ def undeformed_nodes(
 
     Parameters
     ----------
-    wing : dict
-        Surface spec or aircraft spec (see the tool schema).
+    wing : dict or None
+        One surface spec.
+    aircraft : dict or None
+        Several surfaces with reference values (see the tool schema).
     settings : dict or None
         ``solver``, ``n_panels``, ``n_chord``, ``wake_alignment``. The solver
         selects the station rule (``"fourier"`` is refused).
     """
     from ventorum.geometry.deformation import undeformed_nodes as _geom_undeformed_nodes
 
-    ac = build_aircraft_from_spec(wing)
+    ac = build_aircraft_from_spec(wing=wing, aircraft=aircraft)
     sett = parse_settings(settings)
     if resolve_solver_type(sett.solver_type) == "fourier":
         raise ValidityError("The Fourier solver takes no node displacements. Use solver='vlm', 'linear' "
@@ -1594,9 +1649,10 @@ def undeformed_nodes(
 
 @_tool
 def trim(
-    wing: Any,
-    CL_target: float,
-    pitch_control: str,
+    wing: Any = None,
+    aircraft: Any = None,
+    CL_target: float | None = None,
+    pitch_control: str | None = None,
     roll_control: str | None = None,
     yaw_control: str | None = None,
     flight_condition: dict[str, Any] | None = None,
@@ -1618,8 +1674,10 @@ def trim(
 
     Parameters
     ----------
-    wing : dict
-        Surface spec or aircraft spec with the controls that the call names.
+    wing : dict or None
+        One surface spec.
+    aircraft : dict or None
+        Aircraft spec with several surfaces (see the tool schema).
     CL_target : float
         Target lift coefficient [-].
     pitch_control : str
@@ -1640,7 +1698,11 @@ def trim(
     axes : 'body', 'stability', 'wind' or 'all'
         Axis system of the moment coefficients Cl, Cm and Cn.
     """
-    ac = build_aircraft_from_spec(wing)
+    ac = build_aircraft_from_spec(wing=wing, aircraft=aircraft)
+    if CL_target is None:
+        raise InputError("'CL_target' is required.")
+    if pitch_control is None:
+        raise InputError("'pitch_control' is required.")
     cl_t = number(CL_target, "CL_target", minimum=-3, maximum=5)
     pitch = string(pitch_control, "pitch_control")
     roll = string(roll_control, "roll_control") if roll_control is not None else None
@@ -1741,7 +1803,8 @@ def trim(
 
 @_tool
 def error_bars(
-    wing: Any,
+    wing: Any = None,
+    aircraft: Any = None,
     flight_condition: dict[str, Any] | None = None,
     settings: dict[str, Any] | None = None,
     axes: str = "body",
@@ -1756,8 +1819,10 @@ def error_bars(
 
     Parameters
     ----------
-    wing : dict
-        Surface spec or aircraft spec (see the tool schema).
+    wing : dict or None
+        One surface spec.
+    aircraft : dict or None
+        Aircraft spec with several surfaces (see the tool schema).
     flight_condition : dict or None
         ``V_inf_m_s``, ``alpha_deg``, ``beta_deg``, ``rho_kg_m3`` or
         ``altitude_m``, ``h_m``.
@@ -1771,7 +1836,7 @@ def error_bars(
     """
     from ventorum.core.error_bars import mesh_levels as _mesh_levels
 
-    ac = build_aircraft_from_spec(wing)
+    ac = build_aircraft_from_spec(wing=wing, aircraft=aircraft)
     c = parse_condition(flight_condition)
     sett = parse_settings(settings)
     parse_detail_level(detail_level)  # Accepted for consistency; the bar content is the same at every level.

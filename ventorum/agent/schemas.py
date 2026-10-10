@@ -22,8 +22,11 @@ key tables that the parsers use.
 
 from __future__ import annotations
 
+import contextlib
+import contextvars
 import copy
 import math
+import re
 from typing import Any, Literal
 
 import numpy as np
@@ -301,14 +304,118 @@ _HINTS = {
     "chord_root": "use root_chord_m",
     "chord_tip": "use tip_chord_m",
     "n_workers": "use n_jobs",
+    "x_start": "use position_m ([x, y, z] of the root leading edge, metres)",
+    "y_start": "use position_m ([x, y, z] of the root leading edge, metres)",
+    "z_start": "use position_m ([x, y, z] of the root leading edge, metres)",
+    "position": "use position_m ([x, y, z] of the root leading edge, metres)",
+    "x_le": "use position_m ([x, y, z] of the root leading edge, metres)",
+    "offset": "use position_m ([x, y, z] of the root leading edge, metres)",
+    "location": "use position_m ([x, y, z] of the root leading edge, metres)",
+    "root_le": "use position_m",
+    "solver_type": "use solver in settings",
+    "method": "use solver in settings",
+    "cg": "use x_cg_m (stability tool) or aircraft.ref_point_m",
+    "cg_m": "use x_cg_m (stability tool) or aircraft.ref_point_m",
+    "mach": "Mach number is not an input (incompressible flow); give V_inf_m_s",
+    "wings": "use the 'aircraft' argument with 'surfaces'",
+    "components": "use the 'aircraft' argument with 'surfaces'",
+    "parts": "use the 'aircraft' argument with 'surfaces'",
+    "tail": "add it as a surface in aircraft.surfaces",
+    "stabilizer": "add it as a surface in aircraft.surfaces",
+    "htail": "add it as a surface in aircraft.surfaces",
+    "vtail": "add it as a surface in aircraft.surfaces",
+    "fin": "add it as a surface in aircraft.surfaces",
 }
+
+_ACTIVE_TOOL: contextvars.ContextVar[str | None] = contextvars.ContextVar("_ACTIVE_TOOL", default=None)
+
+
+@contextlib.contextmanager
+def active_tool_context(tool_name: str):
+    """Set the active tool context for key placement hints.
+
+    Parameters
+    ----------
+    tool_name : str
+        Name of the tool being executed or validated.
+    """
+    token = _ACTIVE_TOOL.set(tool_name)
+    try:
+        yield
+    finally:
+        _ACTIVE_TOOL.reset(token)
+
+
+def _extract_container_keys(schema: dict[str, Any], container_name: str, result: dict[str, set[str]]) -> None:
+    if not isinstance(schema, dict):
+        return
+    props = schema.get("properties")
+    if isinstance(props, dict):
+        for k, v in props.items():
+            result.setdefault(k, set()).add(container_name)
+            if isinstance(v, dict):
+                if v.get("type") == "object":
+                    _extract_container_keys(v, k, result)
+                elif v.get("type") == "array" and isinstance(v.get("items"), dict):
+                    if v["items"].get("type") == "object":
+                        _extract_container_keys(v["items"], k, result)
+
+
+def _get_tool_key_map(tool_name: str | None) -> dict[str, set[str]]:
+    if not tool_name:
+        return {}
+    for tool_def in AGENT_TOOL_DEFINITIONS:
+        if tool_def["name"] == tool_name:
+            result: dict[str, set[str]] = {}
+            params = tool_def.get("parameters", {})
+            props = params.get("properties", {})
+            for top_k, top_v in props.items():
+                result.setdefault(top_k, set()).add("top level")
+                if isinstance(top_v, dict):
+                    if top_v.get("type") == "object":
+                        _extract_container_keys(top_v, top_k, result)
+                    elif top_v.get("type") == "array" and isinstance(top_v.get("items"), dict):
+                        if top_v["items"].get("type") == "object":
+                            _extract_container_keys(top_v["items"], top_k, result)
+            return result
+    return {}
+
+
+def _container_from_where(where: str) -> str:
+    if not where or where.endswith("arguments"):
+        return "top level"
+    cleaned = re.sub(r"\[\d+\]", "", where)
+    parts = cleaned.split(".")
+    last = parts[-1].strip()
+    return last if last else "top level"
+
+
+def _get_placement_hint(key: str, where: str, tool: str | None = None) -> str | None:
+    tool_name = tool or _ACTIVE_TOOL.get()
+    key_map = _get_tool_key_map(tool_name)
+    if not key_map or key not in key_map:
+        return None
+    containers = key_map[key]
+    current = _container_from_where(where)
+    other = [c for c in sorted(containers) if c != current]
+    if not other:
+        return None
+
+    parts: list[str] = []
+    if "top level" in other:
+        parts.append("at the top level")
+    named = [f"'{c}'" for c in other if c != "top level"]
+    if named:
+        parts.append(f"in {' or '.join(named)}")
+    return f"'{key}' belongs {' or '.join(parts)}"
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # Primitive checks
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def check_keys(obj: Any, allowed: dict[str, Any] | set[str] | list[str], where: str) -> dict[str, Any]:
+def check_keys(obj: Any, allowed: dict[str, Any] | set[str] | list[str], where: str,
+               *, tool: str | None = None) -> dict[str, Any]:
     """Check that *obj* is a dict with known keys only; return a copy of it.
 
     A key with the value None (JSON null) is refused: omit the key to get
@@ -317,16 +424,26 @@ def check_keys(obj: Any, allowed: dict[str, Any] | set[str] | list[str], where: 
     """
     if not isinstance(obj, dict):
         raise InputError(f"{where} must be a JSON object, got {type(obj).__name__}.")
-    allowed_set = set(allowed)
+    if isinstance(allowed, dict) and "properties" in allowed:
+        allowed_set = set(allowed["properties"])
+    else:
+        allowed_set = set(allowed)
     out: dict[str, Any] = {}
     for key, val in obj.items():
         if not isinstance(key, str):
             raise InputError(f"{where}: keys must be strings, got {key!r}.")
         if key not in allowed_set:
-            hint = _HINTS.get(key) or _HINTS.get(key.lower())
+            hints: list[str] = []
+            placement_hint = _get_placement_hint(key, where, tool)
+            if placement_hint:
+                hints.append(placement_hint)
+            unit_hint = _HINTS.get(key) or _HINTS.get(key.lower())
+            if unit_hint:
+                hints.append(unit_hint)
+
             msg = f"{where}: unknown key '{key}'."
-            if hint:
-                msg += f" Hint: {hint}."
+            if hints:
+                msg += f" Hint: {'; '.join(hints)}."
             msg += f" Allowed keys: {', '.join(sorted(allowed_set))}."
             raise InputError(msg)
         if val is None:
@@ -635,38 +752,61 @@ def _parse_sections(val: Any, where: str, default_af: LinearAirfoil) -> list[Win
     return out
 
 
-def build_aircraft_from_spec(spec: Any, where: str = "wing") -> Aircraft:
-    """Build an :class:`Aircraft` from a strict wing spec.
+def build_aircraft_from_spec(
+    wing: Any = None,
+    aircraft: Any = None,
+    where: str | None = None,
+) -> Aircraft:
+    """Build an :class:`Aircraft` from a strict wing or aircraft spec.
 
-    *spec* is one surface object, or an aircraft object with ``surfaces``.
-    An :class:`Aircraft` or :class:`LiftingSurface` instance is also accepted
-    (it is copied). *where* names the input in error messages.
+    Give exactly one of *wing* (one surface) or *aircraft* (several surfaces,
+    with ``surfaces``). An :class:`Aircraft` or :class:`LiftingSurface` instance
+    is also accepted from Python callers under either name.
     """
-    if isinstance(spec, Aircraft):
-        ac = spec.clone()
-    elif isinstance(spec, LiftingSurface):
-        ac = Aircraft(name=spec.name, surfaces=[spec.clone()])
-    elif isinstance(spec, dict) and "surfaces" in spec:
-        d = check_keys(spec, AIRCRAFT_PROPS, where)
-        surfs_in = d["surfaces"]
-        if not isinstance(surfs_in, list) or not (1 <= len(surfs_in) <= 20):
-            raise InputError(f"'{where}.surfaces' must be a list of 1 to 20 surface objects.")
-        surfaces: list[LiftingSurface] = []
-        for i, s in enumerate(surfs_in):
-            surfaces.extend(parse_surface(s, f"{where}.surfaces[{i}]", i))
-        ac = Aircraft(
-            name=string(d["name"], f"{where}.name") if "name" in d else "Aircraft",
-            surfaces=surfaces,
-            S_ref=_num_key(d, "S_ref_m2", AIRCRAFT_PROPS, where),
-            b_ref=_num_key(d, "b_ref_m", AIRCRAFT_PROPS, where),
-            c_ref=_num_key(d, "c_ref_m", AIRCRAFT_PROPS, where),
-            ref_point=vector3(d["ref_point_m"], f"{where}.ref_point_m") if "ref_point_m" in d else None,
-        )
-    elif isinstance(spec, dict):
-        surfaces = parse_surface(spec, where, 0)
-        ac = Aircraft(name=surfaces[0].name, surfaces=surfaces)
+    if (wing is None) == (aircraft is None):
+        msg = "Give exactly one of 'wing' (one surface) or 'aircraft' (several surfaces, with 'surfaces')."
+        prefix = f"{where}: " if where else ""
+        raise InputError(f"{prefix}{msg}")
+
+    if aircraft is not None:
+        spec = aircraft
+        w_name = where or "aircraft"
+        if isinstance(spec, Aircraft):
+            ac = spec.clone()
+        elif isinstance(spec, LiftingSurface):
+            ac = Aircraft(name=spec.name, surfaces=[spec.clone()])
+        elif isinstance(spec, dict):
+            d = check_keys(spec, AIRCRAFT_PROPS, w_name)
+            if "surfaces" not in d:
+                raise InputError(f"'{w_name}': 'surfaces' is required.")
+            surfs_in = d["surfaces"]
+            if not isinstance(surfs_in, list) or not (1 <= len(surfs_in) <= 20):
+                raise InputError(f"'{w_name}.surfaces' must be a list of 1 to 20 surface objects.")
+            surfaces: list[LiftingSurface] = []
+            for i, s in enumerate(surfs_in):
+                surfaces.extend(parse_surface(s, f"{w_name}.surfaces[{i}]", i))
+            ac = Aircraft(
+                name=string(d["name"], f"{w_name}.name") if "name" in d else "Aircraft",
+                surfaces=surfaces,
+                S_ref=_num_key(d, "S_ref_m2", AIRCRAFT_PROPS, w_name),
+                b_ref=_num_key(d, "b_ref_m", AIRCRAFT_PROPS, w_name),
+                c_ref=_num_key(d, "c_ref_m", AIRCRAFT_PROPS, w_name),
+                ref_point=vector3(d["ref_point_m"], f"{w_name}.ref_point_m") if "ref_point_m" in d else None,
+            )
+        else:
+            raise InputError(f"'{w_name}' must be a JSON object, got {type(spec).__name__}.")
     else:
-        raise InputError(f"'{where}' must be a JSON object, got {type(spec).__name__}.")
+        spec = wing
+        w_name = where or "wing"
+        if isinstance(spec, Aircraft):
+            ac = spec.clone()
+        elif isinstance(spec, LiftingSurface):
+            ac = Aircraft(name=spec.name, surfaces=[spec.clone()])
+        elif isinstance(spec, dict):
+            surfaces = parse_surface(spec, w_name, 0)
+            ac = Aircraft(name=surfaces[0].name, surfaces=surfaces)
+        else:
+            raise InputError(f"'{w_name}' must be a JSON object, got {type(spec).__name__}.")
     from ventorum.utils.validation import validate_surface
 
     for surf in ac.surfaces:
@@ -771,7 +911,8 @@ _SURFACE_SCHEMA = {
     "type": "object",
     "properties": SURFACE_PROPS,
     "additionalProperties": False,
-    "description": "One lifting surface. Give span_m or semi_span_m, and chord_m, or root_chord_m with "
+    "description": "Give exactly one of 'wing' (one surface) or 'aircraft' (several surfaces, with 'surfaces'). "
+                   "One lifting surface. Give span_m or semi_span_m, and chord_m, or root_chord_m with "
                    "tip_chord_m, or sections.",
 }
 _AIRCRAFT_SCHEMA = {
@@ -779,15 +920,9 @@ _AIRCRAFT_SCHEMA = {
     "properties": AIRCRAFT_PROPS,
     "required": ["surfaces"],
     "additionalProperties": False,
-    "description": "Several lifting surfaces with reference values and a moment reference point.",
+    "description": "Give exactly one of 'wing' (one surface) or 'aircraft' (several surfaces, with 'surfaces'). "
+                   "Several lifting surfaces with reference values and a moment reference point.",
 }
-WING_SCHEMA = {
-    "anyOf": [_SURFACE_SCHEMA, _AIRCRAFT_SCHEMA],
-    "description": "Geometry: one surface object, or an object with 'surfaces'. Lengths in metres, "
-                   "angles in degrees.",
-}
-
-
 def _obj(props: dict[str, Any], desc: str) -> dict[str, Any]:
     return {"type": "object", "properties": props, "additionalProperties": False, "description": desc}
 
@@ -796,6 +931,21 @@ CONDITION_SCHEMA = _obj(CONDITION_PROPS, "Flight condition. All keys are optiona
 SETTINGS_SCHEMA = _obj(SETTINGS_PROPS, "Solver settings. All keys are optional.")
 _POLAR_CONDITION_SCHEMA = _obj({k: v for k, v in CONDITION_PROPS.items() if k != "alpha_deg"},
                                "Flight condition without alpha_deg (the sweep sets alpha).")
+
+_CANDIDATE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "wing": _SURFACE_SCHEMA,
+        "aircraft": _AIRCRAFT_SCHEMA,
+        "flight_condition": CONDITION_SCHEMA,
+        "settings": SETTINGS_SCHEMA,
+    },
+    "additionalProperties": False,
+    "description": (
+        "Give exactly one of 'wing' (one surface) or 'aircraft' (several surfaces, with 'surfaces'). "
+        "Per-candidate geometry, optional flight_condition, and optional settings."
+    ),
+}
 
 _AXES_NO_ALL_SCHEMA = {
     "type": "string",
@@ -814,13 +964,13 @@ AGENT_TOOL_DEFINITIONS: list[dict[str, Any]] = [
         "parameters": {
             "type": "object",
             "properties": {
-                "wing": WING_SCHEMA,
+                "wing": _SURFACE_SCHEMA,
+                "aircraft": _AIRCRAFT_SCHEMA,
                 "flight_condition": CONDITION_SCHEMA,
                 "settings": SETTINGS_SCHEMA,
                 "detail_level": {**DETAIL_LEVEL, "default": "standard"},
                 "axes": {**AXES_SCHEMA, "default": "body"},
             },
-            "required": ["wing"],
             "additionalProperties": False,
         },
     },
@@ -832,7 +982,8 @@ AGENT_TOOL_DEFINITIONS: list[dict[str, Any]] = [
         "parameters": {
             "type": "object",
             "properties": {
-                "wing": WING_SCHEMA,
+                "wing": _SURFACE_SCHEMA,
+                "aircraft": _AIRCRAFT_SCHEMA,
                 "alpha_start_deg": _num("First angle of attack [deg].", minimum=-30, maximum=30),
                 "alpha_end_deg": _num("Last angle of attack [deg] (>= alpha_start_deg).", minimum=-30, maximum=30),
                 "alpha_step_deg": _num(f"Step [deg], at least {MIN_ALPHA_STEP_DEG}. At most 61 angles.",
@@ -842,7 +993,7 @@ AGENT_TOOL_DEFINITIONS: list[dict[str, Any]] = [
                 "detail_level": {**DETAIL_LEVEL, "default": "standard"},
                 "axes": {**AXES_SCHEMA, "default": "body"},
             },
-            "required": ["wing", "alpha_start_deg", "alpha_end_deg", "alpha_step_deg"],
+            "required": ["alpha_start_deg", "alpha_end_deg", "alpha_step_deg"],
             "additionalProperties": False,
         },
     },
@@ -857,7 +1008,8 @@ AGENT_TOOL_DEFINITIONS: list[dict[str, Any]] = [
         "parameters": {
             "type": "object",
             "properties": {
-                "wing": WING_SCHEMA,
+                "wing": _SURFACE_SCHEMA,
+                "aircraft": _AIRCRAFT_SCHEMA,
                 "heights_m": {"type": "array", "items": {"type": "number", "exclusiveMinimum": 0},
                               "minItems": 1, "maxItems": 20,
                               "description": "Heights above the ground [m] of the point that height_ref "
@@ -880,7 +1032,7 @@ AGENT_TOOL_DEFINITIONS: list[dict[str, Any]] = [
                 "detail_level": {**DETAIL_LEVEL, "default": "standard"},
                 "axes": {**AXES_SCHEMA, "default": "body"},
             },
-            "required": ["wing", "heights_m"],
+            "required": ["heights_m"],
             "additionalProperties": False,
         },
     },
@@ -893,7 +1045,8 @@ AGENT_TOOL_DEFINITIONS: list[dict[str, Any]] = [
         "parameters": {
             "type": "object",
             "properties": {
-                "wing": WING_SCHEMA,
+                "wing": _SURFACE_SCHEMA,
+                "aircraft": _AIRCRAFT_SCHEMA,
                 "flight_condition": CONDITION_SCHEMA,
                 "x_cg_m": _num("Centre of gravity x position [m], geometry axes (x aft). Default: the "
                                "aircraft ref_point_m x, else 0."),
@@ -909,7 +1062,6 @@ AGENT_TOOL_DEFINITIONS: list[dict[str, Any]] = [
                                         "CD and CY are relative to the free stream in every set. The static "
                                         "margin and the neutral point use the body-axis Cm_alpha."},
             },
-            "required": ["wing"],
             "additionalProperties": False,
         },
     },
@@ -920,9 +1072,9 @@ AGENT_TOOL_DEFINITIONS: list[dict[str, Any]] = [
         "parameters": {
             "type": "object",
             "properties": {
-                "candidates": {"type": "array", "items": WING_SCHEMA, "minItems": 1, "maxItems": 50,
-                               "description": "Candidate geometries (same format as 'wing'). Use 'name' "
-                                              "to label them."},
+                "candidates": {"type": "array", "items": _CANDIDATE_SCHEMA, "minItems": 1, "maxItems": 50,
+                               "description": "Candidate geometries: array of objects, each with exactly one "
+                                              "of 'wing' or 'aircraft'. Use 'name' to label them."},
                 "flight_condition": CONDITION_SCHEMA,
                 "objective": {"type": "string", "enum": ["max_L_over_D", "min_CDi", "max_CL"],
                               "description": "Ranking objective. Default max_L_over_D (uses CD with "
@@ -949,7 +1101,8 @@ AGENT_TOOL_DEFINITIONS: list[dict[str, Any]] = [
         "parameters": {
             "type": "object",
             "properties": {
-                "wing": WING_SCHEMA,
+                "wing": _SURFACE_SCHEMA,
+                "aircraft": _AIRCRAFT_SCHEMA,
                 "flight_condition": CONDITION_SCHEMA,
                 "tolerance_pct": _num("Allowed error against the reference [%]. Default 0.5.",
                                       exclusiveMinimum=0, maximum=50),
@@ -973,7 +1126,6 @@ AGENT_TOOL_DEFINITIONS: list[dict[str, Any]] = [
                 "solver": SETTINGS_PROPS["solver"],
                 "detail_level": {**DETAIL_LEVEL, "default": "standard"},
             },
-            "required": ["wing"],
             "additionalProperties": False,
         },
     },
@@ -987,10 +1139,10 @@ AGENT_TOOL_DEFINITIONS: list[dict[str, Any]] = [
         "parameters": {
             "type": "object",
             "properties": {
-                "wing": WING_SCHEMA,
+                "wing": _SURFACE_SCHEMA,
+                "aircraft": _AIRCRAFT_SCHEMA,
                 "settings": SETTINGS_SCHEMA,
             },
-            "required": ["wing"],
             "additionalProperties": False,
         },
     },
@@ -1004,7 +1156,8 @@ AGENT_TOOL_DEFINITIONS: list[dict[str, Any]] = [
         "parameters": {
             "type": "object",
             "properties": {
-                "wing": WING_SCHEMA,
+                "wing": _SURFACE_SCHEMA,
+                "aircraft": _AIRCRAFT_SCHEMA,
                 "CL_target": _num("Target lift coefficient [-]. Range -3 to 5.", minimum=-3, maximum=5),
                 "pitch_control": {"type": "string",
                                   "description": "Name of the pitch control (string, must match a name of "
@@ -1029,7 +1182,7 @@ AGENT_TOOL_DEFINITIONS: list[dict[str, Any]] = [
                 "detail_level": {**DETAIL_LEVEL, "default": "standard"},
                 "axes": {**AXES_SCHEMA, "default": "body"},
             },
-            "required": ["wing", "CL_target", "pitch_control"],
+            "required": ["CL_target", "pitch_control"],
             "additionalProperties": False,
         },
     },
@@ -1042,13 +1195,13 @@ AGENT_TOOL_DEFINITIONS: list[dict[str, Any]] = [
         "parameters": {
             "type": "object",
             "properties": {
-                "wing": WING_SCHEMA,
+                "wing": _SURFACE_SCHEMA,
+                "aircraft": _AIRCRAFT_SCHEMA,
                 "flight_condition": CONDITION_SCHEMA,
                 "settings": SETTINGS_SCHEMA,
                 "axes": {**_AXES_NO_ALL_SCHEMA, "default": "body"},
                 "detail_level": {**DETAIL_LEVEL, "default": "standard"},
             },
-            "required": ["wing"],
             "additionalProperties": False,
         },
     },

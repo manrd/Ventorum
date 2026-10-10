@@ -19,6 +19,42 @@ Ventorum has a tool interface for AI agents and automated design loops: Python c
 - **Strict JSON output.** A value that is not defined (for example L/D at zero drag) is `null`.
 - **Audit log:** written only if the environment variable `VENTORUM_AGENT_AUDIT_LOG` gives a file path.
 
+## Geometry arguments: wing and aircraft
+
+Every tool that takes a geometry takes exactly one of `wing` or `aircraft`.
+This change removes `anyOf` because some clients drop its keys.
+
+- `wing`: one lifting surface (for example a main wing).
+- `aircraft`: several surfaces, with reference values and a moment reference point (`surfaces` is required).
+
+A call must give exactly one of the two. A call with both or neither is refused with `invalid_input`.
+
+Example with `wing`:
+
+```json
+{
+  "wing": {
+    "span_m": 12.0,
+    "root_chord_m": 1.6,
+    "tip_chord_m": 0.8
+  }
+}
+```
+
+Example with `aircraft`:
+
+```json
+{
+  "aircraft": {
+    "surfaces": [
+      {"name": "wing", "span_m": 12.0, "root_chord_m": 1.6, "tip_chord_m": 0.8},
+      {"name": "tail", "span_m": 4.0, "chord_m": 0.7, "position_m": [4.6, 0.0, 0.3]}
+    ],
+    "ref_point_m": [0.45, 0.0, 0.0]
+  }
+}
+```
+
 ## Work budget
 
 - **Work units.** One solve of a lattice with N panels costs N^2 units. The work of a call is the sum over all solves that the call will run (sweep angles, heights, mesh levels, batch candidates, derivative steps).
