@@ -401,20 +401,32 @@ class NodeDisplacements:
         Leading-edge node displacements [m], shape (n_edges, 3).
     te : np.ndarray
         Trailing-edge node displacements [m], shape (n_edges, 3).
+    eta : np.ndarray or None
+        Optional spanwise stations of the edges that the displacements were
+        made for, as fractions of the semi-span [-], shape (n_edges,), as
+        :func:`ventorum.geometry.undeformed_nodes` gives them. When it is
+        set, :func:`ventorum.geometry.lattice.build_lattice` compares it with the
+        edge stations of the mesh (absolute tolerance 1e-12) and raises
+        ``ValueError`` if they are different. None (the default) skips this
+        check.
     """
 
     le: np.ndarray
     te: np.ndarray
+    eta: np.ndarray | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "le", np.asarray(self.le, dtype=float))
         object.__setattr__(self, "te", np.asarray(self.te, dtype=float))
+        if self.eta is not None:
+            object.__setattr__(self, "eta", np.asarray(self.eta, dtype=float))
 
     def clone(self) -> NodeDisplacements:
         """Fast explicit clone."""
         return NodeDisplacements(
             le=np.asarray(self.le, dtype=float).copy(),
             te=np.asarray(self.te, dtype=float).copy(),
+            eta=None if self.eta is None else np.asarray(self.eta, dtype=float).copy(),
         )
 
     def __copy__(self) -> NodeDisplacements:
@@ -1399,7 +1411,11 @@ def aircraft_to_json(ac: Aircraft) -> str:
         ]
         nd = getattr(surf, "node_displacements", None)
         node_disp_json = (
-            {"le": nd.le.tolist(), "te": nd.te.tolist()}
+            {
+                "le": nd.le.tolist(),
+                "te": nd.te.tolist(),
+                "eta": None if nd.eta is None else nd.eta.tolist(),
+            }
             if nd is not None
             else None
         )
@@ -1458,9 +1474,11 @@ def aircraft_from_json(text: str) -> Aircraft:
         ]
         nd_data = sd.get("node_displacements")
         if nd_data is not None:
+            eta_data = nd_data.get("eta")
             node_disp = NodeDisplacements(
                 le=np.asarray(nd_data["le"], dtype=float),
                 te=np.asarray(nd_data["te"], dtype=float),
+                eta=None if eta_data is None else np.asarray(eta_data, dtype=float),
             )
         else:
             node_disp = None

@@ -819,6 +819,15 @@ def build_lattice(
         geo = surface_edge_geometry(surf, eta_e)
         d = getattr(surf, "node_displacements", None)
         if d is not None:
+            if d.eta is not None and (
+                d.eta.shape != eta_e.shape or float(np.max(np.abs(d.eta - eta_e))) > 1e-12
+            ):
+                raise ValueError(
+                    f"[{surf.name}] node_displacements.eta does not match the spanwise stations of the "
+                    f"mesh ({eta_e.size} edges). The displacements were made for another mesh or "
+                    "solver. Use the same settings and solver for "
+                    "ventorum.geometry.undeformed_nodes and for the analysis."
+                )
             expected_shape = (len(eta_e), 3)
             if d.le.shape != expected_shape:
                 raise ValueError(

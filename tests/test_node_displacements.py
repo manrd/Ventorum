@@ -482,6 +482,48 @@ def test_undeformed_nodes_follow_the_solver_spacing():
         assert np.max(np.abs(nodes["te"] - sl.edge_te[n_half - 1:])) <= 1e-14
 
 
+@pytest.mark.filterwarnings("ignore:Lifting line with")
+def test_station_check_refuses_the_mesh_of_another_solver():
+    """Displacements made for the VLM mesh of a swept wing are refused by the lifting line."""
+    wing = _swept_wing()
+    ac = vt.Aircraft(surfaces=[wing])
+    st_vlm = vt.SolverSettings(n_panels=16, solver_type="vlm")
+    st_llt = vt.SolverSettings(n_panels=16, solver_type="linear")
+    cond = vt.FlightCondition(V_inf=30.0, alpha=np.radians(4.0))
+
+    nodes = undeformed_nodes(ac, st_vlm, solver="vlm")["Wing"]
+    eta = nodes["eta"]
+    disp = displacements_from_section_motion(nodes, heave=0.05 * eta ** 2, twist=np.zeros_like(eta))
+    assert disp.eta is not None and np.array_equal(disp.eta, eta)
+    wing.node_displacements = disp
+
+    # The same solver passes.
+    res = vt.analyze(ac, cond, st_vlm)
+    assert np.isfinite(res.totals.CL)
+
+    # Another solver has other stations (with the same count): refused.
+    with pytest.raises(ValueError, match=r"node_displacements\.eta") as exc:
+        vt.analyze(ac, cond, st_llt)
+    msg = str(exc.value)
+    assert "[Wing]" in msg
+    assert "Use the same settings and solver" in msg
+    assert "undeformed_nodes" in msg
+
+    # Stations with another edge count are also refused.
+    wing.node_displacements = vt.NodeDisplacements(le=disp.le, te=disp.te, eta=eta[:-1])
+    with pytest.raises(ValueError, match=r"node_displacements\.eta"):
+        vt.build_lattice(ac, st_vlm)
+
+    # eta None keeps the old behaviour: no station check, and the same bits.
+    wing.node_displacements = vt.NodeDisplacements(le=disp.le, te=disp.te)
+    assert wing.node_displacements.eta is None
+    assert np.isfinite(vt.analyze(ac, cond, st_llt).totals.CL)
+    res_none = vt.analyze(ac, cond, st_vlm)
+    assert res_none.totals.CL == res.totals.CL
+    assert res_none.totals.CDi == res.totals.CDi
+    assert res_none.totals.Cm == res.totals.Cm
+
+
 def test_undeformed_nodes_refuses_fourier():
     ac = vt.Aircraft(surfaces=[_sample_wing()])
     with pytest.raises(ValueError, match="Fourier"):
@@ -564,8 +606,19 @@ def test_json_round_trip_keeps_displacements():
     ac_loaded = vt.aircraft_from_json(json_str)
     wing_loaded = ac_loaded.surfaces[0]
     assert wing_loaded.node_displacements is not None
-    assert np.allclose(wing_loaded.node_displacements.le, disp.le)
-    assert np.allclose(wing_loaded.node_displacements.te, disp.te)
+    # The JSON text keeps every float64 value exactly (shortest round-trip repr).
+    assert np.array_equal(wing_loaded.node_displacements.le, disp.le)
+    assert np.array_equal(wing_loaded.node_displacements.te, disp.te)
+    assert np.array_equal(wing_loaded.node_displacements.eta, disp.eta)
+
+    # Round trip without the stations (eta None).
+    wing_no_eta = _sample_wing()
+    wing_no_eta.node_displacements = vt.NodeDisplacements(le=disp.le, te=disp.te)
+    json_no_eta = vt.aircraft_to_json(vt.Aircraft(surfaces=[wing_no_eta]))
+    nd_no_eta = vt.aircraft_from_json(json_no_eta).surfaces[0].node_displacements
+    assert nd_no_eta.eta is None
+    assert np.array_equal(nd_no_eta.le, disp.le)
+    assert np.array_equal(nd_no_eta.te, disp.te)
 
     # Test round-trip with None
     wing_none = _sample_wing()

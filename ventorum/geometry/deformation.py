@@ -94,7 +94,10 @@ def displacements_from_section_motion(
     Parameters
     ----------
     nodes : dict[str, np.ndarray]
-        Dictionary containing 'le' and 'te' node arrays of shape (n_edges, 3) [m].
+        Dictionary containing 'le' and 'te' node arrays of shape (n_edges, 3) [m],
+        as :func:`undeformed_nodes` gives them. If it also contains 'eta',
+        the result keeps a copy of it, so the lattice checks that the mesh
+        has the same strip edges.
     heave : np.ndarray
         Spanwise vertical displacement (+z) at each edge [m], shape (n_edges,).
     twist : np.ndarray
@@ -152,4 +155,7 @@ def displacements_from_section_motion(
     d_le = le_new - le0
     d_te = te_new - te0
 
-    return NodeDisplacements(le=d_le, te=d_te)
+    eta = nodes.get("eta")
+    if eta is not None:
+        eta = np.asarray(eta, dtype=float).copy()
+    return NodeDisplacements(le=d_le, te=d_te, eta=eta)
