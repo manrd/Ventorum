@@ -756,6 +756,20 @@ def build_lattice(
     surfaces: list[SurfaceSlice] = []
     strip_offset = 0
 
+    # One deflected airfoil for each (base airfoil, deflection, hinge). The
+    # loads group the tabulated strips by airfoil object, so a new object for
+    # each strip makes the nonlinear solve much slower. Each memo value also
+    # holds the base airfoil, so its id stays unique while the memo lives.
+    deflected_memo: dict[tuple[int, float, float], tuple[AirfoilType, AirfoilType]] = {}
+
+    def _deflected(base: AirfoilType, delta: float, hinge_x_c: float) -> AirfoilType:
+        key = (id(base), float(delta), float(hinge_x_c))
+        hit = deflected_memo.get(key)
+        if hit is None:
+            hit = (base, deflected_airfoil(base, delta, hinge_x_c))
+            deflected_memo[key] = hit
+        return hit[1]
+
     for s_idx, surf in enumerate(aircraft.surfaces):
         if getattr(settings, "proportional_panels", False) and surf.n_panels is None:
             n_sp = compute_surface_n_panels(
@@ -831,7 +845,7 @@ def build_lattice(
             for k in range(n_r):
                 c = ctrl_for_k[k]
                 if c is not None:
-                    right_af.append(deflected_airfoil(base_right_af[k], c.deflection, c.hinge_x_c))
+                    right_af.append(_deflected(base_right_af[k], c.deflection, c.hinge_x_c))
                 else:
                     right_af.append(base_right_af[k])
         else:
@@ -874,7 +888,7 @@ def build_lattice(
                     c = ctrl_for_k[k]
                     if c is not None:
                         delta = c.deflection if c.symmetric else -c.deflection
-                        left_af.append(deflected_airfoil(base_right_af[k], delta, c.hinge_x_c))
+                        left_af.append(_deflected(base_right_af[k], delta, c.hinge_x_c))
                     else:
                         left_af.append(base_right_af[k])
                 for af in left_af:
@@ -913,7 +927,7 @@ def build_lattice(
                     c = ctrl_for_k[k]
                     if c is not None:
                         delta = c.deflection if c.symmetric else -c.deflection
-                        afs.append(deflected_airfoil(base_right_af[k], delta, c.hinge_x_c))
+                        afs.append(_deflected(base_right_af[k], delta, c.hinge_x_c))
                     else:
                         afs.append(base_right_af[k])
                 for af in afs:

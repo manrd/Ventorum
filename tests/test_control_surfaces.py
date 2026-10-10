@@ -829,3 +829,43 @@ def test_gpu_control_surfaces_equal_cpu(gpu_device, precision, solver_type, cont
         scale = max(float(np.max(np.abs(a))), cl_scale if name not in ("CDi",) else 1e-3)
         diff = np.max(np.abs(a - b))
         assert diff <= tol * scale, f"{solver_type} {control_type} {precision} {name}: diff {diff:.3e} > {tol * scale:.3e}"
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Regression tests of the review
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def _tab_airfoil(with_cm: bool = True) -> vt.TabulatedAirfoil:
+    """Return a tabulated airfoil with a Cm that changes with the angle (or no Cm data)."""
+    a = np.radians(np.arange(-10.0, 20.1, 2.0))
+    return vt.TabulatedAirfoil(
+        name="tab",
+        alpha=a,
+        Cl_data=2.0 * np.pi * np.sin(a) * np.cos(a) ** 2,
+        Cd_data=0.008 + 0.02 * a ** 2,
+        Cm_data=(-0.05 + 0.1 * a + 0.3 * a ** 2) if with_cm else None,
+    )
+
+
+@pytest.mark.parametrize("symmetric, eta_start, n_objects", [
+    (True, 0.0, 1),    # full-span flap: one deflected airfoil for all the strips
+    (False, 0.6, 3),   # aileron: the base airfoil, +delta (right) and -delta (left)
+])
+def test_section_mode_shares_one_deflected_airfoil(symmetric, eta_start, n_objects):
+    """Prove that section mode makes one deflected airfoil object for each deflection, not one for each strip.
+
+    The loads group the tabulated strips by airfoil object. One object for
+    each strip made the nonlinear solve about 10 times slower.
+    """
+    af = _tab_airfoil()
+    wing = vt.LiftingSurface(
+        semi_span=5.0,
+        sections=[vt.WingSection(0.0, 1.0, airfoil=af), vt.WingSection(1.0, 1.0, airfoil=af)],
+        controls=[vt.ControlSurface(eta_start=eta_start, eta_end=1.0, deflection=np.radians(5.0),
+                                    symmetric=symmetric)],
+        n_panels=12,
+    )
+    lat = vt.build_lattice(vt.Aircraft(surfaces=[wing]), collocation="llt")
+    assert len({id(a) for a in lat.airfoils}) == n_objects
+    # The user's airfoil is used unchanged outside the control only.
+    assert any(a is af for a in lat.airfoils) == (n_objects == 3)
