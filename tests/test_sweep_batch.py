@@ -1,5 +1,5 @@
 # Author: Manuel Alejandro Rodriguez Diaz, PhD
-"""Batched lifting-line sweeps (T-0038).
+"""Batched lifting-line sweeps.
 
 A lifting-line sweep solves its angles as one batch: one kernel call gives
 the velocity tensors of all angles, one call of the dense solver solves all

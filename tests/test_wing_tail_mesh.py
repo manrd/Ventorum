@@ -1,5 +1,5 @@
 # Author: Manuel Alejandro Rodriguez Diaz, PhD
-"""Induced drag of a wing and tail when the wing wake passes near the tail (task T-0013).
+"""Induced drag of a wing and tail when the wing wake passes near the tail.
 
 The Trefftz-plane normal wash uses the same cross-surface core as the near
 field, so the induced drag of this case does not depend on the tail mesh.

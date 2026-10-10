@@ -458,10 +458,10 @@ def test_asymmetric_distributions_show_both_mirrored_halves():
     plt.close(fig)
 
 
-# ── Tests for sweep_roll and sweep_alpha (kept per D-02) ────────────────────────
+# ── Tests for sweep_roll and sweep_alpha (public function kept, with a test) ────────
 
 def test_sweep_roll_kept(rectangular_wing):
-    """Test that sweep_roll runs and returns results (kept per D-02)."""
+    """Test that sweep_roll runs and returns results (a public function that is kept, with a test)."""
     from ventorum.ground_effect.sweep import sweep_roll
 
     heights = [1.0, 2.0]  # Higher heights to avoid ground strike at phi=5 deg
@@ -475,7 +475,7 @@ def test_sweep_roll_kept(rectangular_wing):
 
 
 def test_sweep_alpha_kept(rectangular_wing):
-    """Test that sweep_alpha runs and returns results (kept per D-02)."""
+    """Test that sweep_alpha runs and returns results (a public function that is kept, with a test)."""
     from ventorum.ground_effect.sweep import sweep_alpha
 
     heights = [0.5, 1.0, 2.0]

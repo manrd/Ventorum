@@ -1,5 +1,5 @@
 # Author: Manuel Alejandro Rodriguez Diaz, PhD
-"""Honesty checks for mesh-convergence reports (T-0008)."""
+"""Honesty checks for mesh-convergence reports."""
 
 from __future__ import annotations
 

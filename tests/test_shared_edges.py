@@ -1,4 +1,4 @@
-"""Shared-edge join of surfaces for the cross-surface vortex core (T-0012).
+"""Shared-edge join of surfaces for the cross-surface vortex core.
 
 Surfaces that meet along an edge are one vortex sheet. They must be in one
 core group also when their edges match only approximately. The reference of

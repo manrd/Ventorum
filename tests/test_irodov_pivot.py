@@ -1,4 +1,4 @@
-"""Irodov height-pitch margin: one value for one flight state (T-0014).
+"""Irodov height-pitch margin: one value for one flight state.
 
 The pitch and height aerodynamic centres are taken about the moment
 reference point, with the height of that point held fixed (Rozhdestvensky,

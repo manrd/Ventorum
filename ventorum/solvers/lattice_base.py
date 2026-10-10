@@ -55,9 +55,9 @@ MAX_AUTO_N_CHORD = 32
 LLT_SWEEP_WARNING_DEG = 2.5
 
 # Lifting line in ground effect: against the vortex lattice it under-predicts
-# the lift increment by 3 to 5 % of CL at h_min/c = 1 and by 13 to 18 % at
-# h_min/c = 0.5 (rectangular wings, AR 4 to 8, alpha 2 to 6 deg). Refused
-# below the first value, warned below the second.
+# the lift increment by 3 to 5 % of CL at h_min/c = 1 (rectangular wings,
+# AR 4 to 8, alpha 2 to 6 deg). Below h_min/c = 1 the solver is refused, and
+# below h_min/c = 2 a note warns that the lift increment is under-predicted.
 LLT_GE_MIN_H_OVER_C = 1.0
 LLT_GE_WARN_H_OVER_C = 2.0
 

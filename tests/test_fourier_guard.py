@@ -1,12 +1,11 @@
 # Author: Manuel Alejandro Rodriguez Diaz, PhD
 """
-Tests of the geometry guard of the classical Fourier solver (task T-0005).
+Tests of the geometry guard of the classical Fourier solver.
 
 Glauert's Fourier solution models one straight, unswept, planar lifting
-line. The solver refuses a wing outside that model with ``ValidityError``
-(owner decision D-08). The agent tools map that error to
-``invalid_method``. A wing inside the model gives the same result as
-before the guard.
+line. The solver refuses a wing outside that model with ``ValidityError``.
+The agent tools map that error to ``invalid_method``. A wing inside the
+model gives the same result as before the guard.
 """
 
 from __future__ import annotations

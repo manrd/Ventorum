@@ -20,6 +20,16 @@ from ventorum.geometry.transform import (
     rotation_matrix,
     transform_lattice,
 )
+from ventorum.geometry.controls import (
+    flap_effectiveness,
+    flap_moment_derivative,
+    deflected_airfoil,
+    validate_controls,
+)
+from ventorum.geometry.deformation import (
+    displacements_from_section_motion,
+    undeformed_nodes,
+)
 
 __all__ = [
     "get_spacing",
@@ -35,5 +45,11 @@ __all__ = [
     "discretize_aircraft_surfaces",
     "rotation_matrix",
     "transform_lattice",
+    "flap_effectiveness",
+    "flap_moment_derivative",
+    "deflected_airfoil",
+    "validate_controls",
+    "undeformed_nodes",
+    "displacements_from_section_motion",
 ]
 
