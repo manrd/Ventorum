@@ -46,6 +46,7 @@ from ventorum.core.datatypes import (
     SolverSettings,
     SpanwiseResult,
 )
+from ventorum.aero.system import has_rates
 from ventorum.core.errors import ValidityError
 from ventorum.core.trust import evaluate_aerodynamic_trust
 from ventorum.geometry import lattice_cache
@@ -304,6 +305,9 @@ class FourierSolver(BaseSolver):
             raise ValidityError("The Fourier solver has no ground effect. Use solver='vlm' or 'linear'.")
         if abs(condition.beta) > 1e-12:
             raise ValidityError("The Fourier solver is symmetric and has no sideslip. Use solver='vlm'.")
+        if has_rates(condition):
+            raise ValidityError("The Fourier solver has no body rates (p, q, r). Use solver='vlm', 'linear' "
+                                "or 'nonlinear'.")
         # The reference values and the whole Fourier system depend only on the
         # surfaces and N: computed once per geometry (same fingerprint as the
         # lattice cache), read-only. The moment reference point is per call.

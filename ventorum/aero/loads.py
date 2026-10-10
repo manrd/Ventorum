@@ -11,6 +11,15 @@ Forces and moments from a solved vortex lattice.
 * Profile drag: section polar ``Cd(alpha_eff)`` on every strip.
 * Section pitching moment: ``Cm(alpha_eff)`` about the quarter chord
   (``Cm0`` for a linear airfoil), added as a pure moment.
+* Body rates (``FlightCondition.p, q, r``): the onset velocity at each
+  point is ``V_inf d - Omega x (x - x_ref)`` (rotation about the moment
+  reference point). It replaces the free stream in the Kutta-Joukowski
+  forces, and in the direction and the dynamic pressure of the profile drag
+  and the section moment of each strip (at the quarter chord). The
+  geometric angle of a strip uses the onset at its three-quarter chord.
+  The wake and the Trefftz plane stay along the free stream. With one
+  chordwise panel, the section moment gets the thin-airfoil term of the
+  chordwise change of the rotation velocity (-pi/4 per unit q c / (2 V)).
 
 Reported moments use the standard aircraft convention (body axes x forward,
 y right, z down): ``Cl > 0`` right wing down, ``Cm > 0`` nose up,
@@ -37,9 +46,12 @@ from ventorum.aero.system import (
     UnknownMap,
     build_sources,
     freestream_direction,
+    has_rates,
     is_symmetric_condition,
     lift_direction,
     panel_targets,
+    rotation_vector,
+    rotation_velocity,
 )
 from ventorum.aero.vortex import induced_velocity, trefftz_normalwash_prepared, trefftz_prepare
 from ventorum.core.datatypes import (
@@ -366,7 +378,8 @@ def compute_loads(
     c_ref : float
         Reference chord [m] (pitching moment).
     ref_point : (3,) or None
-        Moment reference point [m]. Default: the origin.
+        Moment reference point [m], also the centre of the body rates.
+        Default: the origin.
     gamma_panel : (n_panels,)
         Circulation of every panel horseshoe [m^2/s].
     alpha_eff_strip : (n_strips,) or None
@@ -437,7 +450,8 @@ def compute_loads_batch(
         Ground plane of each case (None items for free air). None means
         free air for all cases.
     ref_point : numpy.ndarray or None, optional
-        Moment reference point [m], shape (3,). None is the origin.
+        Moment reference point [m], shape (3,), also the centre of the body
+        rates. None is the origin.
     alpha_eff_strips : (K, n_strips) or None
         Effective section angle of attack [rad] from the solver, or None
         (see :func:`compute_loads`).
@@ -505,7 +519,9 @@ def compute_loads_batch(
                                  use_leg, [vk[k] for vk in v_all])
     v_ind = v_all[0]
     Vd = V[:, None, None] * D[:, None, :]
-    F_panel = rho[:, None, None] * G[:, :, None] * _cross(Vd + v_ind, l_vec)
+    rated = [k for k in range(K) if has_rates(conditions[k])]
+    U_mid = Vd if not rated else _onset_at(conditions, rated, Vd, mid, rp)
+    F_panel = rho[:, None, None] * G[:, :, None] * _cross(U_mid + v_ind, l_vec)
     M_geo = np.sum(_cross(mid - rp, F_panel), axis=1)
     if use_leg:
         v_leg = np.concatenate([v_all[1], v_all[2]], axis=1)
@@ -515,8 +531,10 @@ def compute_loads_batch(
         # velocity; the normal velocity at the leg points is the leak of the
         # discrete lattice between its control points. Its force would be an
         # in-plane force (for example an aileron side force about 60 % too
-        # large against the far field).
-        V_leg = Vd + v_leg
+        # large against the far field). The onset velocity includes the body
+        # rates when a case has them.
+        U_leg = Vd if not rated else _onset_at(conditions, rated, Vd, leg_mid, rp)
+        V_leg = U_leg + v_leg
         V_leg = V_leg - np.sum(V_leg * leg_normal, axis=-1)[:, :, None] * leg_normal
         F_leg = rho[:, None, None] * g_leg[:, :, None] * _cross(V_leg, leg_vec)
         M_geo += np.sum(_cross(leg_mid - rp, F_leg), axis=1)
@@ -531,6 +549,16 @@ def compute_loads_batch(
     alpha_geom = np.empty((K, n_s))
     for k in range(K):
         alpha_geom[k] = np.arctan2(lattice.normal @ D[k], lattice.chord_dir @ D[k])
+    if rated:
+        # Local onset of each strip: at the three-quarter chord for the
+        # geometric angle, at the quarter chord for the profile drag and the
+        # section moment (direction and dynamic pressure).
+        p34 = lattice.qc_mid + 0.5 * chord[:, None] * lattice.chord_dir
+        U34 = _onset_at(conditions, rated, Vd, p34, rp)
+        U_qc = _onset_at(conditions, rated, Vd, lattice.qc_mid, rp)
+        for k in rated:
+            alpha_geom[k] = np.arctan2(np.sum(lattice.normal * U34[k], axis=1),
+                                       np.sum(lattice.chord_dir * U34[k], axis=1))
     if alpha_eff_strips is None:
         alpha_eff = lattice.alpha_L0 + Cl / np.maximum(lattice.a0, 1e-9)
     else:
@@ -549,19 +577,36 @@ def compute_loads_batch(
         a_idx = alpha_eff[:, idx].ravel()
         Cd_p[:, idx] = section_cd(af, a_idx).reshape(K, idx.size)
         Cm_s[:, idx] = section_cm(af, a_idx).reshape(K, idx.size)
+    if rated and lattice.n_chord == 1:
+        # One chordwise panel has no chordwise load. Thin-airfoil theory: a
+        # normal velocity that grows along the chord at the rate k [1/s]
+        # gives Cm_c/4 = -(pi / 8) k c / U (-pi/4 per unit q c / (2 V) for a
+        # pitch rate). The lift part is in the three-quarter-chord onset.
+        for k in rated:
+            omega = rotation_vector(conditions[k])
+            slope = -np.sum(lattice.normal * _cross(omega[None, :], lattice.chord_dir), axis=1)
+            Cm_s[k] = Cm_s[k] - (np.pi / 8.0) * slope * chord / np.linalg.norm(U34[k], axis=1)
     has_profile = np.any(Cd_p != 0.0, axis=1)
 
-    # Profile drag along the free stream, applied at the strip quarter chord.
-    D_p = q_inf[:, None] * chord * width * Cd_p
-    F_prof = D_p[:, :, None] * D[:, None, :]
+    # Profile drag along the free stream (the local onset with body
+    # rates), applied at the strip quarter chord.
+    if rated:
+        speed = np.linalg.norm(U_qc, axis=-1)
+        D_loc = U_qc / speed[:, :, None]
+        q_loc = 0.5 * rho[:, None] * speed * speed
+    else:
+        D_loc = D[:, None, :]
+        q_loc = q_inf[:, None]
+    D_p = q_loc * chord * width * Cd_p
+    F_prof = D_p[:, :, None] * D_loc
     M_geo += np.sum(_cross(lattice.qc_mid - rp, F_prof), axis=1)
 
     # Section pitching moment about the axis n_lift x d (nose towards the lift side).
-    n_lift = _cross(D[:, None, :], lattice.dl)
+    n_lift = _cross(D_loc, lattice.dl)
     n_lift /= np.maximum(np.linalg.norm(n_lift, axis=-1, keepdims=True), 1e-300)
-    axis = _cross(n_lift, D[:, None, :])
+    axis = _cross(n_lift, D_loc)
     axis /= np.maximum(np.linalg.norm(axis, axis=-1, keepdims=True), 1e-300)
-    M_geo += np.sum((q_inf[:, None] * chord ** 2 * width * Cm_s)[:, :, None] * axis, axis=1)
+    M_geo += np.sum((q_loc * chord ** 2 * width * Cm_s)[:, :, None] * axis, axis=1)
 
     # --- Trefftz plane ----------------------------------------------------------
     D_i, w_n, seg_len = trefftz_induced_drag_batch(lattice, strip_gamma, WD, rho, grounds)
@@ -596,6 +641,24 @@ def compute_loads_batch(
             force_total=F_total, moment_total=M,
         ))
     return out
+
+
+def _onset_at(
+    conditions: list[FlightCondition],
+    rated: list[int],
+    Vd: np.ndarray,
+    points: np.ndarray,
+    rp: np.ndarray,
+) -> np.ndarray:
+    """Return the onset velocity [m/s] of K cases at *points* (m, 3), shape (K, m, 3).
+
+    *Vd* (K, 1, 3) is the free-stream velocity of each case; the cases in
+    *rated* (indices of the cases with body rates) add the rotation about *rp*.
+    """
+    U = np.broadcast_to(Vd, (Vd.shape[0], points.shape[0], 3)).copy()
+    for k in rated:
+        U[k] += rotation_velocity(conditions[k], points, rp)
+    return U
 
 
 def loads_result(

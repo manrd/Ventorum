@@ -12,6 +12,7 @@ A solve has four steps:
 
 from __future__ import annotations
 
+import dataclasses
 import time
 import warnings
 from typing import Literal
@@ -23,6 +24,7 @@ from ventorum.aero.system import (
     GroundPlane,
     check_ground_clearance,
     ground_plane_from_condition,
+    rotation_velocity,
     wake_direction,
 )
 from ventorum.core.datatypes import (
@@ -60,6 +62,11 @@ LLT_SWEEP_WARNING_DEG = 2.5
 # below h_min/c = 2 a note warns that the lift increment is under-predicted.
 LLT_GE_MIN_H_OVER_C = 1.0
 LLT_GE_WARN_H_OVER_C = 2.0
+
+# Body rates: above this rotation speed on the geometry, as a fraction of
+# V_inf (a local helix angle of about 6 deg), the straight wake of the
+# quasi-steady model is a poor approximation and the result gets a note.
+LARGE_ROTATION_FRACTION = 0.1
 
 
 def as_aircraft(geometry: Aircraft | LiftingSurface) -> Aircraft:
@@ -190,10 +197,13 @@ class LatticeSolver(BaseSolver):
         ground: GroundPlane | None,
         wake_dir: np.ndarray | None = None,
         gamma0: np.ndarray | None = None,
+        ref_point: np.ndarray | None = None,
     ):
         """Return ``(gamma_panel, alpha_eff_strip or None, SolveInfo)``.
 
         *gamma0* is a start value (used by the nonlinear solver in sweeps).
+        *ref_point* [m] is the moment reference point, the centre of the
+        body rates of *condition* (the origin if None).
         """
         raise NotImplementedError
 
@@ -248,14 +258,15 @@ class LatticeSolver(BaseSolver):
         if gpu_results is not None:
             return gpu_results[0]
         ground, h_min, notes, wd = self._case_setup(lattice, condition, settings, c_ref, ground, ref_point)
-        gamma, alpha_eff, info = self.solve_circulation(lattice, condition, settings, ground, wd, gamma0=gamma0)
+        gamma, alpha_eff, info = self.solve_circulation(lattice, condition, settings, ground, wd, gamma0=gamma0,
+                                                        ref_point=ref_point)
         loads = compute_loads(
             lattice, gamma, condition, S_ref, b_ref, c_ref,
             ground=ground, ref_point=ref_point, alpha_eff_strip=alpha_eff, wake_dir=wd,
             v_control=getattr(info, "v_control", None),
         )
         return self._case_result(lattice, condition, loads, info, gamma, ground, h_min, notes, wd,
-                                 c_ref, main_surface, t0)
+                                 c_ref, main_surface, t0, ref_point=ref_point)
 
     def _case_setup(
         self,
@@ -288,6 +299,15 @@ class LatticeSolver(BaseSolver):
                 "ground-effect lift increment compared with the VLM (about 1 to 5 % of CL at "
                 "h_min/c 1 to 2)."
             )
+        w_rot = rotation_velocity(condition, lattice.all_points(), ref_point)
+        if w_rot is not None:
+            w_max = float(np.max(np.linalg.norm(w_rot, axis=1))) / float(condition.V_inf)
+            if w_max > LARGE_ROTATION_FRACTION:
+                notes.append(
+                    f"Body rates: the rotation speed reaches {w_max:.3f} V_inf on the geometry (above "
+                    f"{LARGE_ROTATION_FRACTION:g}). The quasi-steady model keeps the wake straight along the free "
+                    "stream; with this rotation the real wake is a helix, so the result is less reliable."
+                )
         wd = wake_direction(condition, ground, getattr(settings, "wake_alignment", "freestream"))
         return ground, h_min, notes, wd
 
@@ -316,8 +336,13 @@ class LatticeSolver(BaseSolver):
         t0: float,
         execution_time: float | None = None,
         spanwise_stats: dict | None = None,
+        ref_point: np.ndarray | None = None,
     ) -> SolverResult:
         """Return the result object of one case: trust score, details and warnings.
+
+        *ref_point* [m] is the moment reference point of the solve (the
+        centre of the body rates), kept in ``details["ref_point"]`` (None is
+        the origin).
 
         *execution_time* [s] replaces the time since *t0* when given (a
         batch gives each case its share of the batch time). *spanwise_stats*
@@ -381,7 +406,8 @@ class LatticeSolver(BaseSolver):
         )
         # Kept for advanced use (plots, diagnostics, ground-effect post-processing).
         res.details = {"lattice": lattice, "loads": loads, "ground": ground, "h_min": h_min,
-                       "sweep_deg": sweep_deg, "notes": notes, "gamma": gamma, "wake_dir": wd}
+                       "sweep_deg": sweep_deg, "notes": notes, "gamma": gamma, "wake_dir": wd,
+                       "ref_point": None if ref_point is None else np.asarray(ref_point, dtype=float)}
         for msg in notes:
             warnings.warn(msg, RuntimeWarning, stacklevel=4)
         return res
@@ -458,13 +484,7 @@ class LatticeSolver(BaseSolver):
         validate_aircraft(aircraft)
         aircraft.compute_reference_values()
         rp = aircraft.moment_reference() if ref_point is None else np.asarray(ref_point, dtype=float)
-        conds = [
-            FlightCondition(
-                V_inf=condition.V_inf, alpha=float(a), beta=condition.beta,
-                rho=condition.rho, h=condition.h, phi=getattr(condition, "phi", 0.0),
-            )
-            for a in np.asarray(alpha_range, dtype=float)
-        ]
+        conds = [dataclasses.replace(condition, alpha=float(a)) for a in np.asarray(alpha_range, dtype=float)]
         S, b, c = aircraft.S_ref, aircraft.b_ref, aircraft.c_ref
         main = aircraft.main_surface_index()
         if self.collocation == "llt":
@@ -543,7 +563,8 @@ class LatticeSolver(BaseSolver):
             setups = [self._case_setup(lattice, c, settings, c_ref, g, ref_point) for c, g in zip(conditions, explicit)]
             grounds = [st[0] for st in setups]
             wds = np.array([st[3] for st in setups], dtype=float).reshape(len(conditions), 3)
-            sols = self.solve_circulation_batch(lattice, conditions, settings, grounds, wds, continuation)
+            sols = self.solve_circulation_batch(lattice, conditions, settings, grounds, wds, continuation,
+                                                ref_point=ref_point)
             gammas = np.array([g for g, _, _ in sols], dtype=float)
             alpha_effs = None if any(a is None for _, a, _ in sols) else np.array([a for _, a, _ in sols])
             vcs = [getattr(info, "v_control", None) for _, _, info in sols]
@@ -555,7 +576,7 @@ class LatticeSolver(BaseSolver):
         share = (time.perf_counter() - t0) / len(conditions)
         return [
             self._case_result(lattice, cond, ld, info, g, st[0], st[1], st[2], st[3], c_ref, main_surface,
-                              t0, execution_time=share)
+                              t0, execution_time=share, ref_point=ref_point)
             for cond, ld, (g, _, info), st in zip(conditions, loads, sols, setups)
         ]
 
@@ -583,18 +604,19 @@ class LatticeSolver(BaseSolver):
         grounds: list[GroundPlane | None],
         wake_dirs: np.ndarray,
         continuation: bool = True,
+        ref_point: np.ndarray | None = None,
     ) -> list[tuple]:
         """Return ``(gamma_panel, alpha_eff_strip or None, SolveInfo)`` for each case.
 
         The default solves the cases one by one with :meth:`solve_circulation`.
         With *continuation*, a case starts from the converged circulation of
-        the case before it.
+        the case before it. *ref_point* [m] is the centre of the body rates.
         """
         out = []
         g_prev = None
         for cond, ground, wd in zip(conditions, grounds, wake_dirs):
             sol = self.solve_circulation(lattice, cond, settings, ground, wd,
-                                         gamma0=g_prev if continuation else None)
+                                         gamma0=g_prev if continuation else None, ref_point=ref_point)
             g_prev = sol[0] if sol[2].converged else None
             out.append(sol)
         return out

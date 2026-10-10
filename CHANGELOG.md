@@ -10,6 +10,14 @@ a minor version can change a public interface.
 
 ### Added
 
+- Body rates and rate derivatives: `FlightCondition` has the body angular rates `p`, `q`, `r`
+  [rad/s] (flight-dynamics body axes, rotation about the moment reference point). The vortex lattice
+  and the linear and nonlinear lifting lines solve the quasi-steady rotating flow, in free air and in
+  ground effect (the lifting lines take the section onset at the three-quarter chord; one chordwise
+  panel gets the thin-airfoil section moment of the rotation). `rate_derivatives` gives the
+  derivatives of CL, CD, CY, Cl, Cm and Cn per unit p b/2V, q c/2V and r b/2V (central differences,
+  one batch), in body, stability or wind axes (`rate_axes_transform`). The Fourier solver refuses
+  rates; cases with rates run on the CPU path.
 - Control derivatives and hinge moments: `control_derivatives` gives, for each control name, the
   derivatives of CL, CD, CY, Cl, Cm and Cn per unit deflection (central differences, one-sided near
   the 30 deg limit; moments in body, stability or wind axes), and for each copy of each control the

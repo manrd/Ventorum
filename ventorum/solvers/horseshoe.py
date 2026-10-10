@@ -57,8 +57,12 @@ class HorseshoeSolver(LatticeSolver):
         ground: GroundPlane | None,
         wake_dir: np.ndarray | None = None,
         gamma0: np.ndarray | None = None,
+        ref_point: np.ndarray | None = None,
     ) -> tuple[np.ndarray, None, SolveInfo]:
         """Solve for the panel circulation.
+
+        *ref_point* [m] is the moment reference point, the centre of the
+        body rates of *condition* (the origin if None).
 
         Returns
         -------
@@ -77,7 +81,8 @@ class HorseshoeSolver(LatticeSolver):
                 stacklevel=4,
             )
         gamma, info = solve_vlm(lattice, condition, ground,
-                                use_symmetry=getattr(settings, "use_symmetry", True), wake_dir=wake_dir)
+                                use_symmetry=getattr(settings, "use_symmetry", True), wake_dir=wake_dir,
+                                ref_point=ref_point)
         return gamma, None, info
 
     def solve_circulation_batch(
@@ -88,6 +93,7 @@ class HorseshoeSolver(LatticeSolver):
         grounds: list[GroundPlane | None],
         wake_dirs: np.ndarray,
         continuation: bool = True,
+        ref_point: np.ndarray | None = None,
     ) -> list[tuple[np.ndarray, None, SolveInfo]]:
         """Solve all cases together: the systems one by one, the dense solves in one call.
 
@@ -103,9 +109,10 @@ class HorseshoeSolver(LatticeSolver):
                 stacklevel=4,
             )
         sols = solve_vlm_batch(lattice, conditions, grounds,
-                               getattr(settings, "use_symmetry", True), wake_dirs)
+                               getattr(settings, "use_symmetry", True), wake_dirs, ref_point)
         if sols is None:
-            return super().solve_circulation_batch(lattice, conditions, settings, grounds, wake_dirs, False)
+            return super().solve_circulation_batch(lattice, conditions, settings, grounds, wake_dirs, False,
+                                                   ref_point=ref_point)
         return [(g, None, info) for g, info in sols]
 
 

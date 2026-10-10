@@ -34,6 +34,7 @@ from ventorum.aero.system import (
     is_symmetric_condition,
     make_unknown_map,
     panel_targets,
+    rotation_velocity,
 )
 from ventorum.aero.vortex import HorseshoeSet, influence_matrix, velocity_tensor_unknowns
 from ventorum.core.datatypes import FlightCondition
@@ -110,8 +111,14 @@ def assemble_vlm(
     ground: GroundPlane | None = None,
     use_symmetry: bool = True,
     wake_dir: np.ndarray | None = None,
+    ref_point: np.ndarray | None = None,
 ) -> tuple[np.ndarray, np.ndarray, UnknownMap]:
-    """Matrix and right-hand side of the vortex-lattice system."""
+    """Matrix and right-hand side of the vortex-lattice system.
+
+    With body rates in *condition*, the onset velocity at each control point
+    includes the rotation about *ref_point* [m] (the origin if None):
+    ``(V_inf d - Omega x (x - x_ref) + v) . n = 0``.
+    """
     if lattice.collocation != "vlm":
         raise ValueError("assemble_vlm needs a lattice built with collocation='vlm'.")
     d = freestream_direction(condition.alpha, condition.beta)
@@ -124,6 +131,9 @@ def assemble_vlm(
     cache = lattice.kernel_cache if ground is None else None
     A = influence_matrix(P, n_bc, src, umap.n, tg, cache=cache, cache_key=("vlm", umap.symmetric))
     rhs = -condition.V_inf * (n_bc @ d)
+    w_rot = rotation_velocity(condition, P, ref_point)
+    if w_rot is not None:
+        rhs = rhs - np.sum(n_bc * w_rot, axis=1)
     return A, rhs, umap
 
 
@@ -133,9 +143,13 @@ def solve_vlm(
     ground: GroundPlane | None = None,
     use_symmetry: bool = True,
     wake_dir: np.ndarray | None = None,
+    ref_point: np.ndarray | None = None,
 ) -> tuple[np.ndarray, SolveInfo]:
-    """Solve the vortex lattice. Returns the circulation of every panel."""
-    A, rhs, umap = assemble_vlm(lattice, condition, ground, use_symmetry, wake_dir)
+    """Solve the vortex lattice. Returns the circulation of every panel.
+
+    *ref_point* [m] is the centre of the body rates (see :func:`assemble_vlm`).
+    """
+    A, rhs, umap = assemble_vlm(lattice, condition, ground, use_symmetry, wake_dir, ref_point)
     g = np.linalg.solve(A, rhs)
     return g[umap.panel_column], SolveInfo(symmetric=umap.symmetric)
 
@@ -146,6 +160,7 @@ def solve_vlm_batch(
     grounds: list[GroundPlane | None],
     use_symmetry: bool,
     wake_dirs: np.ndarray,
+    ref_point: np.ndarray | None = None,
 ) -> list[tuple[np.ndarray, SolveInfo]] | None:
     """Solve the vortex lattice for K cases on the same lattice.
 
@@ -169,7 +184,7 @@ def solve_vlm_batch(
     A = np.empty((K, n, n))
     rhs = np.empty((K, n))
     for k, (cond, ground) in enumerate(zip(conditions, grounds)):
-        A[k], rhs[k], _ = assemble_vlm(lattice, cond, ground, use_symmetry, wake_dirs[k])
+        A[k], rhs[k], _ = assemble_vlm(lattice, cond, ground, use_symmetry, wake_dirs[k], ref_point)
     g = np.linalg.solve(A, rhs[:, :, None])[:, :, 0]
     return [(g[k][umap.panel_column], SolveInfo(symmetric=umap.symmetric)) for k in range(K)]
 
@@ -203,17 +218,75 @@ def assemble_llt_linear(
     ground: GroundPlane | None = None,
     use_symmetry: bool = True,
     wake_dir: np.ndarray | None = None,
+    ref_point: np.ndarray | None = None,
 ) -> tuple[np.ndarray, np.ndarray, UnknownMap]:
     """Linear Phillips & Snyder system ``M G = r``.
 
     ``[2 |u x dl_i| / (a0_i dA_i)] G_i - sum_j (v_ij . n_i) G_j = V (u . n_i - alpha_L0_i)``
+
+    With body rates, ``V u`` becomes the local onset ``U_i`` of each strip
+    (see :func:`llt_onset`): ``[2 |e_i x dl_i| / (a0_i dA_i)] G_i -
+    sum_j (v_ij . n_i) G_j = U_i . n_i - |U_i| alpha_L0_i``, with ``e_i``
+    the unit vector of ``U_i``.
     """
-    M, rhs, umap, _ = _assemble_llt_linear(lattice, condition, ground, use_symmetry, wake_dir)
+    M, rhs, umap, _ = _assemble_llt_linear(lattice, condition, ground, use_symmetry, wake_dir, ref_point)
     return M, rhs, umap
 
 
-def _linear_llt_matrix(lattice, condition, sd, A_ind):
-    """Matrix and right-hand side of the linear lifting line from the normal influence *A_ind*."""
+def llt_onset(
+    lattice: VortexLattice,
+    umap: UnknownMap,
+    condition: FlightCondition,
+    ref_point: np.ndarray | None = None,
+) -> np.ndarray | None:
+    """Local onset velocity of the lifting-line unknowns with body rates [m/s], or None without rates.
+
+    The onset of strip i is ``V_inf d - Omega x (x_i - x_ref)`` at the
+    three-quarter-chord point ``x_i`` of the strip, at the span fraction of
+    the control point. Thin-airfoil theory gives, for a normal velocity that
+    changes linearly along the chord, the section lift of its value at the
+    three-quarter chord. A pitch rate then gives the section lift of the
+    equal change of the angle of attack (Katz and Plotkin 2001, the
+    lumped-vortex element).
+
+    Parameters
+    ----------
+    lattice : VortexLattice
+        Lifting-line lattice.
+    umap : UnknownMap
+        Unknown map.
+    condition : FlightCondition
+        Flight condition with the body rates [rad/s].
+    ref_point : numpy.ndarray or None, optional
+        Centre of the rotation [m] (the moment reference point). None is the origin.
+
+    Returns
+    -------
+    numpy.ndarray or None
+        Onset velocity [m/s], shape (n_unknowns, 3), or None if all rates are zero.
+    """
+    key = ("llt_three_quarter_points", umap.symmetric)
+    pts = lattice.geom_cache.get(key)
+    if pts is None:
+        s = lattice.panel_strip[umap.unknown_panels]
+        pts = lattice.cp[umap.unknown_panels] + 0.5 * lattice.chord[s][:, None] * lattice.chord_dir[s]
+        pts.setflags(write=False)
+        lattice.geom_cache[key] = pts
+    w_rot = rotation_velocity(condition, pts, ref_point)
+    if w_rot is None:
+        return None
+    return condition.V_inf * freestream_direction(condition.alpha, condition.beta)[None, :] + w_rot
+
+
+def _linear_llt_matrix(lattice, condition, sd, A_ind, onset=None):
+    """Matrix and right-hand side of the linear lifting line from the normal influence *A_ind*.
+
+    *onset* is the local onset velocity of each unknown [m/s] with body
+    rates (:func:`llt_onset`), or None for the free stream.
+    """
+    if onset is not None:
+        diag, rhs = _llt_onset_terms(sd, onset)
+        return np.diag(diag) - A_ind, rhs
     d = freestream_direction(condition.alpha, condition.beta)
     diag = 2.0 * np.linalg.norm(cross3(d[None, :], sd["dl"]), axis=1) / (sd["a0"] * sd["area"])
     M = np.diag(diag) - A_ind
@@ -221,7 +294,16 @@ def _linear_llt_matrix(lattice, condition, sd, A_ind):
     return M, rhs
 
 
-def _assemble_llt_linear(lattice, condition, ground, use_symmetry, wake_dir):
+def _llt_onset_terms(sd: dict, onset: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Return the diagonal and the right-hand side of the linear lifting line for a local onset (n, 3) [m/s]."""
+    speed = np.linalg.norm(onset, axis=1)
+    unit = onset / speed[:, None]
+    diag = 2.0 * np.linalg.norm(cross3(unit, sd["dl"]), axis=1) / (sd["a0"] * sd["area"])
+    rhs = np.sum(sd["normal"] * onset, axis=1) - speed * sd["alpha_L0"]
+    return diag, rhs
+
+
+def _assemble_llt_linear(lattice, condition, ground, use_symmetry, wake_dir, ref_point=None):
     """Linear lifting-line system, and the velocity tensor per unknown when it was computed.
 
     Outside sweeps (no kernel cache) the system comes from the velocity
@@ -243,7 +325,7 @@ def _assemble_llt_linear(lattice, condition, ground, use_symmetry, wake_dir):
     else:
         Vt = None
         A_ind = influence_matrix(P, sd["normal"], src, umap.n, tg, cache=cache, cache_key=("llt", umap.symmetric))
-    M, rhs = _linear_llt_matrix(lattice, condition, sd, A_ind)
+    M, rhs = _linear_llt_matrix(lattice, condition, sd, A_ind, llt_onset(lattice, umap, condition, ref_point))
     return M, rhs, umap, Vt
 
 
@@ -253,9 +335,13 @@ def solve_llt_linear(
     ground: GroundPlane | None = None,
     use_symmetry: bool = True,
     wake_dir: np.ndarray | None = None,
+    ref_point: np.ndarray | None = None,
 ) -> tuple[np.ndarray, SolveInfo]:
-    """Solve the linear lifting line. Returns the circulation of every strip."""
-    M, rhs, umap, Vt = _assemble_llt_linear(lattice, condition, ground, use_symmetry, wake_dir)
+    """Solve the linear lifting line. Returns the circulation of every strip.
+
+    *ref_point* [m] is the centre of the body rates (see :func:`llt_onset`).
+    """
+    M, rhs, umap, Vt = _assemble_llt_linear(lattice, condition, ground, use_symmetry, wake_dir, ref_point)
     g = np.linalg.solve(M, rhs)
     info = SolveInfo(symmetric=umap.symmetric)
     if Vt is not None:
@@ -411,6 +497,7 @@ def solve_llt_linear_batch(
     grounds: list[GroundPlane | None],
     use_symmetry: bool,
     wake_dirs: np.ndarray,
+    ref_point: np.ndarray | None = None,
 ) -> list[tuple[np.ndarray, SolveInfo]] | None:
     """Solve the linear lifting line for K cases on the same lattice.
 
@@ -438,7 +525,11 @@ def solve_llt_linear_batch(
     diag = 2.0 * np.linalg.norm(cross3(D[:, None, :], sd["dl"]), axis=-1) / (sd["a0"] * sd["area"])
     rhs = np.empty((K, n))
     for k, c in enumerate(conditions):
-        rhs[k] = c.V_inf * (sd["normal"] @ D[k] - sd["alpha_L0"])
+        onset = llt_onset(lattice, umap, c, ref_point)
+        if onset is None:
+            rhs[k] = c.V_inf * (sd["normal"] @ D[k] - sd["alpha_L0"])
+        else:
+            diag[k], rhs[k] = _llt_onset_terms(sd, onset)
 
     def system(k: int) -> np.ndarray:
         return np.diag(diag[k]) - np.einsum("ijk,ik->ij", Vts[k], sd["normal"])
@@ -459,10 +550,15 @@ def solve_llt_linear_batch(
 
 def linear_llt_from_tensor(
     lattice: VortexLattice, condition: FlightCondition, umap: UnknownMap, Vt: np.ndarray,
+    ref_point: np.ndarray | None = None,
 ) -> np.ndarray:
-    """Return the circulation of the unknowns of the linear lifting line from the velocity tensor *Vt*."""
+    """Return the circulation of the unknowns of the linear lifting line from the velocity tensor *Vt*.
+
+    *ref_point* [m] is the centre of the body rates (see :func:`llt_onset`).
+    """
     sd = _llt_strip_data(lattice, umap)
-    M, rhs = _linear_llt_matrix(lattice, condition, sd, np.einsum("ijk,ik->ij", Vt, sd["normal"]))
+    M, rhs = _linear_llt_matrix(lattice, condition, sd, np.einsum("ijk,ik->ij", Vt, sd["normal"]),
+                                llt_onset(lattice, umap, condition, ref_point))
     return np.linalg.solve(M, rhs)
 
 
@@ -487,6 +583,7 @@ def solve_llt_nonlinear(
     gamma0: np.ndarray | None = None,
     wake_dir: np.ndarray | None = None,
     Vt: np.ndarray | None = None,
+    ref_point: np.ndarray | None = None,
 ) -> tuple[np.ndarray, np.ndarray, SolveInfo]:
     """Solve the nonlinear lifting line with section polars (Newton's method).
 
@@ -504,6 +601,10 @@ def solve_llt_nonlinear(
     *Vt* is the velocity tensor per unknown of this case, shape (n, n, 3),
     if the caller has it (for example from :func:`llt_velocity_tensors`);
     otherwise it is computed here.
+
+    With body rates, ``V_inf`` becomes the local onset ``U_i`` of each strip
+    (:func:`llt_onset`, rotation about *ref_point* [m]): ``W_i = U_i +
+    sum_j v_ij G_j``, and the section lift is ``|U_i|^2 dA_i Cl_i / 2``.
 
     Returns
     -------
@@ -548,11 +649,17 @@ def solve_llt_nonlinear(
             dcl[idx] = section_cl_slope(af, alpha[idx])
         return cl, dcl
 
-    Vinf = V * d
-    scale = V * V * dA
+    onset = llt_onset(lattice, umap, condition, ref_point)
+    if onset is None:
+        Vinf = V * d
+        scale = V * V * dA
+        Vinf_rows = Vinf[None, :]
+    else:
+        Vinf_rows = onset
+        scale = np.sum(onset * onset, axis=1) * dA
 
     def evaluate(g: np.ndarray):
-        W = Vinf[None, :] + np.einsum("ijk,j->ik", Vt, g)
+        W = Vinf_rows + np.einsum("ijk,j->ik", Vt, g)
         wx = cross3(W, dl)
         wxn = np.linalg.norm(wx, axis=1)
         wn = np.sum(W * n_vec, axis=1)
@@ -564,7 +671,7 @@ def solve_llt_nonlinear(
 
     if gamma0 is None:
         # Linear start from the same velocity tensor (no second kernel pass).
-        g = linear_llt_from_tensor(lattice, condition, umap, Vt)
+        g = linear_llt_from_tensor(lattice, condition, umap, Vt, ref_point)
     else:
         g = np.asarray(gamma0, dtype=float)[umap.unknown_panels].copy()
 
@@ -638,5 +745,5 @@ def solve_llt_nonlinear(
         left = np.flatnonzero(~lattice.strip_is_right)
         alpha_full[left] = alpha_full[lattice.strip_mirror[left]]
     info = SolveInfo(converged=converged, iterations=it, residual_history=history, symmetric=umap.symmetric)
-    info.v_control = _panel_velocity(lattice, umap, W - Vinf[None, :])
+    info.v_control = _panel_velocity(lattice, umap, W - Vinf_rows)
     return gamma_full, alpha_full, info
