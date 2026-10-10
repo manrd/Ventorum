@@ -67,6 +67,30 @@ print(f"CL = {result.totals.CL:.4f}, Cm = {result.totals.Cm:.4f}, Cl = {result.t
 
 The vortex-lattice solver with two or more chordwise panels turns the boundary-condition normals of the flap panels. The lifting-line solvers, and the vortex lattice with one chordwise panel, use a deflected section polar. The [theory chapter](../theory/control_surfaces.md) gives the two models. The Fourier solver does not accept a deflected control.
 
+## Deformed geometry
+
+A user can set displacements of the lattice nodes on a `LiftingSurface` using `NodeDisplacements`. Displacements are specified for the leading-edge and trailing-edge nodes on the defining half (root to tip):
+
+```python
+import numpy as np
+from ventorum import LiftingSurface, NodeDisplacements
+from ventorum.geometry import undeformed_nodes, displacements_from_section_motion
+
+# Extract the undeformed lattice nodes for the target mesh
+nodes = undeformed_nodes(aircraft, solver="vlm")["Wing"]
+
+# Create displacements from section heave and twist
+n_edges = len(nodes["eta"])
+heave = 0.05 * (nodes["eta"] ** 2)
+twist = np.zeros(n_edges)
+disp = displacements_from_section_motion(nodes, heave=heave, twist=twist)
+
+# Assign displacements to the surface
+wing.node_displacements = disp
+```
+
+Symmetric surfaces and mirror copies mirror the displacements across the plane y = 0.
+
 ## Save and load
 
 ```python

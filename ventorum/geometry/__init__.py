@@ -26,6 +26,10 @@ from ventorum.geometry.controls import (
     deflected_airfoil,
     validate_controls,
 )
+from ventorum.geometry.deformation import (
+    displacements_from_section_motion,
+    undeformed_nodes,
+)
 
 __all__ = [
     "get_spacing",
@@ -45,5 +49,7 @@ __all__ = [
     "flap_moment_derivative",
     "deflected_airfoil",
     "validate_controls",
+    "undeformed_nodes",
+    "displacements_from_section_motion",
 ]
 

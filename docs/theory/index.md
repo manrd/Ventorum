@@ -20,7 +20,7 @@ The chapters contain no result values. The values of the model parameters come f
 | [Vortex filaments](vortex_kernels.md) | Biot-Savart law of the bent horseshoe vortex, the core model and the cross-surface core | J. Katz and A. Plotkin (2001); L. Rosenhead (1930) |
 | [Classical lifting line](classical_lifting_line.md) | Glauert's Fourier-series solution of the Lanchester–Prandtl lifting-line equation | F. W. Lanchester (1907); L. Prandtl (1918, 1919); H. Glauert (1926) |
 | [Numerical lifting line](numerical_lifting_line.md) | Linear and nonlinear lifting line with section polars | W. F. Phillips and D. O. Snyder (2000); W. F. Phillips (2004) |
-| [Vortex-lattice method](vortex_lattice.md) | Bent horseshoe vortices on chordwise panels | V. M. Falkner (1943); Katz and Plotkin (2001); M. Drela (2014) |
+| [Vortex-lattice method](vortex_lattice.md) | Bent horseshoe vortices on chordwise panels and deformed geometry | V. M. Falkner (1943); Katz and Plotkin (2001); M. Drela (2014) |
 | [Forces and moments](forces_and_moments.md) | Kutta-Joukowski near-field forces, Trefftz-plane induced drag, section data, static derivatives | Katz and Plotkin (2001); Drela (2014); E. Trefftz (1921) |
 | [Ground effect](ground_effect.md) | Method of images over flat ground, height and bank derivatives, Irodov criterion | C. Wieselsberger (1921); K. V. Rozhdestvensky (2000, 2006); R. D. Irodov (1970) |
 | [Control surfaces](control_surfaces.md) | Thin-airfoil flap theory, panel deflection and section modification | H. Glauert (1926); Katz and Plotkin (2001) |
