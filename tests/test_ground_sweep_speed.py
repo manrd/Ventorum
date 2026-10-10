@@ -79,6 +79,7 @@ def rectangular_wing():
     )
 
 
+@pytest.mark.slow
 @pytest.mark.parametrize("phis", [(0.0,), (3.0,), (0.0, 3.0)], ids=["phi0", "phi3", "phi0_3"])
 @pytest.mark.parametrize("solver_type", ["vlm", "linear", "nonlinear"])
 def test_cpu_batch_sweep_equals_case_by_case(wing_tail_aircraft, solver_type, phis, monkeypatch):

@@ -17,22 +17,39 @@ Three properties define it: high computational efficiency with no manual tuning 
 - **macOS**: the owner cannot test on a Mac, so macOS problems wait until the general development is done. Do not spend the task on them. When you see a possible macOS problem, record it: add an entry to `docs/user/performance_limits.md` (if it costs speed) or a GitHub issue with the label `macos`, and mention it in your report. Do not try to fix it unless the task asks for it.
 - **Never** remove a kernel backend (Numba, Cython, numpy, PyTorch) because it is slower in one case or on one machine. Each backend that wins somewhere stays; the tuner measures which one wins.
 
-## Gates before every commit (always)
+## Checks (always)
 
-Run these commands. All must pass, and the verification report must not change unless the task is to change a result:
+The checks have three levels. Do not run a higher level than this section asks: the full set takes minutes, and it runs at the phase gate and in CI.
+
+**1. Every change or task (before each commit).** Run only these. They must pass:
+
+```bash
+ruff check .
+python -m pytest -q tests/test_<module>.py ...   # only the test files of the modules that you changed, and your new tests
+python validation/run_verification.py /tmp/verification_check.md   # only when you changed code in ventorum/; compare with docs/verification_report.md (ignore the run-time line)
+```
+
+The verification report must not change unless the task is to change a result.
+
+**2. Phase gate (only when the owner closes a phase).** The full set, on a quiet machine:
 
 ```bash
 pip install -e .[dev,docs]
 ruff check .
-python -m pytest -q
-python validation/run_verification.py /tmp/verification_check.md   # compare with docs/verification_report.md (ignore the run-time line)
+python -m pytest -q -m "not benchmark"   # all tests, also the tests marked slow
+python validation/run_verification.py /tmp/verification_check.md
 sphinx-build -W --keep-going -b html docs docs/_build/html
 ```
 
+Also run all scripts in `examples/` and the GPU tests on a machine with a GPU.
+
+**3. CI on push.** GitHub Actions runs the full set on every push. A failure there is fixed in the next change.
+
+- `python -m pytest -q` without options skips the tests marked `slow` (tuner runs, new processes, full-size identity sweeps) and `benchmark`. Mark a new test `slow` when it takes more than about 5 s.
 - A change that moves a verification number needs a reason in the commit message and the owner's approval.
 - Every bug you fix gets a regression test.
 - A new kernel or backend must agree with the numpy reference kernel to round-off; add a parity test (see `tests/test_kernels.py`).
-- Run all scripts in `examples/` when you change a public interface.
+- When you change a public interface, run the scripts in `examples/` that use it.
 
 ## Code standards (always)
 
@@ -87,7 +104,7 @@ Task cards and the backlog are private: they are not in this repository. When th
 1. Read this file and the task card completely before you start.
 2. Work only on the branch that the card names, and change only the files that the card allows.
 3. The decisions in the card are fixed. Do not change them. If the card is not clear, or the task needs a decision that the card does not give, stop and write the question in the report. Do not guess.
-4. Write the tests that the card asks for, then the code. Run the gates (above) and the acceptance checks of the card.
+4. Write the tests that the card asks for, then the code. Run the level-1 checks (above) and the acceptance checks of the card. Do not run the full test suite.
 5. Fill in the "Completion report" section of the card, honestly: what you did, the results of each check, and what you could not do. Do not commit the card: commit only your work.
 6. If a check fails and you cannot fix it inside the scope, report it. Do not weaken a test, a tolerance or a check to make it pass.
 

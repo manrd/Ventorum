@@ -299,6 +299,7 @@ print("ok")
 """
 
 
+@pytest.mark.slow
 @pytest.mark.parametrize("torch_first", [True, False])
 def test_cython_kernels_run_in_a_process_with_pytorch(torch_first):
     """Regression test: the OpenMP runtime of the Cython kernels must coexist with PyTorch.
@@ -380,6 +381,7 @@ print("ok", numba.threading_layer())
 """
 
 
+@pytest.mark.slow
 @pytest.mark.parametrize("torch_first", [True, False])
 def test_numba_kernels_run_in_a_process_with_pytorch(torch_first):
     """Regression test: the threading layer of Numba must coexist with PyTorch.

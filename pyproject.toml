@@ -56,10 +56,11 @@ include = ["ventorum*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-p no:cacheprovider -m 'not benchmark'"
+addopts = "-p no:cacheprovider -m 'not benchmark and not slow'"
 markers = [
     "gpu: tests that need an NVIDIA CUDA GPU",
     "benchmark: wall-clock timing checks (fail under load; excluded from the default gate)",
+    "slow: long tests (tuner runs, new processes, full-size identity sweeps); run at the phase gate and in CI with -m 'not benchmark'",
 ]
 filterwarnings = [
     "error::DeprecationWarning:ventorum.*",

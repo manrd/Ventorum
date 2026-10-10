@@ -156,6 +156,7 @@ def test_elevator_trend_of_a_stable_aircraft():
     assert res_06.deflections_deg["elevator"] < res_03.deflections_deg["elevator"]
 
 
+@pytest.mark.slow
 def test_lateral_trim_with_sideslip():
     """Verify 4-variable lateral trim at sideslip yields zero rolling, pitching, and yawing moments."""
     wing = vt.LiftingSurface(
@@ -247,6 +248,7 @@ def test_lateral_trim_with_sideslip():
     assert abs(check_sol.totals.Cn) <= 1.0e-7
 
 
+@pytest.mark.slow
 def test_unreachable_target_reports_limit():
     """Verify unreachable targets terminate with limit status and converged=False."""
     ac = _build_wing_tail_aircraft()

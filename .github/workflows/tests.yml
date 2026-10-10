@@ -77,12 +77,12 @@ jobs:
         # no message, and this test shows the message.
         env:
           MPLBACKEND: Agg
-        run: python -m pytest -q tests/test_kernels.py -k "pytorch or openmp"
+        run: python -m pytest -q -m "not benchmark" tests/test_kernels.py -k "pytorch or openmp"
       - name: Tests
         env:
           MPLBACKEND: Agg
           VENTORUM_REQUIRE_OPENMP: ${{ runner.os == 'macOS' && '0' || '1' }}
-        run: python -m pytest -q
+        run: python -m pytest -q -m "not benchmark"
       - name: Verification report (theory checks)
         env:
           MPLBACKEND: Agg

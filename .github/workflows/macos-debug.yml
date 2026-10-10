@@ -49,7 +49,7 @@ jobs:
       - name: OpenMP and PyTorch in one process (subprocess tests, full output)
         # Each check runs in a subprocess, so a crash gives its error text.
         continue-on-error: true
-        run: python -m pytest -rA -q tests/test_kernels.py -k "pytorch or openmp"
+        run: python -m pytest -rA -q -m "not benchmark" tests/test_kernels.py -k "pytorch or openmp"
       - name: Numba threading layer
         continue-on-error: true
         run: |
@@ -70,4 +70,4 @@ jobs:
         run: python validation/bench_kernels.py
       - name: Full test suite
         if: inputs.full_suite
-        run: python -m pytest -q
+        run: python -m pytest -q -m "not benchmark"

@@ -89,6 +89,7 @@ def _record(date: str, workloads: dict) -> dict:
     }
 
 
+@pytest.mark.slow
 def test_record_has_all_fields_and_no_identifiers(tmp_path):
     """One tiny run writes one JSON line with the fields of decision 4 and no identifier."""
     from ventorum import gpu
@@ -179,6 +180,7 @@ def test_report_shows_change_between_records(tmp_path):
     assert "A history row is a trend." in text
 
 
+@pytest.mark.slow
 def test_compare_checks_the_imported_tree(tmp_path):
     """Compare the repository with itself, and stop on a tree without ventorum."""
     result = ph.run_compare(

@@ -32,7 +32,7 @@ A task is ready for delegation when its acceptance checks can find every likely 
 The review must find the same problems that Claude would avoid when it writes the code. It is cheaper than writing the code because it reads the difference, not the whole code base, and because the checks run automatically.
 
 1. **Scope**: `git diff --stat` against the base commit. Every changed file is in the allowed list. No test, tolerance or check was weakened or deleted.
-2. **Gates**: run all gates of AGENTS.md again; do not trust the report. The verification report must be unchanged.
+2. **Checks**: run the level-1 checks of AGENTS.md again (ruff, the test files of the changed modules, the verification report when `ventorum/` changed); do not trust the report. The verification report must be unchanged. The full set runs only at the phase gate and in CI.
 3. **Acceptance checks**: run each check of the card, and compare with the report.
 4. **Specification**: read the difference against the card: interfaces, units, edge cases, errors, method and its source.
 5. **Numerics**: the parts of the card that need judgement (for example near-singular cases, tolerances, thread safety). Add a quick independent check where the card names a risk.

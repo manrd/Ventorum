@@ -61,6 +61,7 @@ def test_capabilities_never_contain_the_machine_id(config_dir):
     assert hw.machine_guid and hw.machine_guid not in blob
 
 
+@pytest.mark.slow
 def test_tune_tool_writes_a_profile_and_capabilities_see_it(config_dir, monkeypatch):
     from ventorum.hardware import tuner
 

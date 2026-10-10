@@ -91,6 +91,7 @@ def test_parallel_sweep_equals_serial_sweep(config_dir):
         assert ra.totals.CL == pytest.approx(rb.totals.CL, rel=1e-12)
 
 
+@pytest.mark.slow
 def test_quick_tuner_writes_a_matching_profile(config_dir, monkeypatch):
     from ventorum.aero import vortex as V
     from ventorum.hardware import tuner
@@ -255,6 +256,7 @@ def test_forced_backend_that_is_not_available_falls_back(monkeypatch):
         assert V.kernel_backend_for(k) == V.get_kernel_backend() != "cython"
 
 
+@pytest.mark.slow
 def test_tuner_uses_its_kernel_choices_without_a_file(config_dir, monkeypatch):
     """Regression test: steps 2 and 3 use the kernel choices of step 1, also with save=False."""
     from ventorum.aero import vortex as V
