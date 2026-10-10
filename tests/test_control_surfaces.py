@@ -468,29 +468,41 @@ def test_span_limits_snap_to_strip_edges():
     assert abs(info["eta_start_eff"] - 0.43) <= 1e-12, f"eta_start_eff {info['eta_start_eff']} not 0.43"
     assert abs(info["eta_end_eff"] - 0.77) <= 1e-12, f"eta_end_eff {info['eta_end_eff']} not 0.77"
 
-    # Section break preservation test
+    # Section break preservation test. The kink at 0.52 is not on the uniform
+    # edges (step 0.05), so the section-break rule moves the edge at 0.50 onto
+    # it. The control limit 0.53 is nearer to that moved edge than to any
+    # other edge: the control must snap another edge and leave the kink.
     wing_kink = vt.LiftingSurface(
         name="kink_wing",
         semi_span=5.0,
-        sections=[vt.WingSection(0.0, 2.0), vt.WingSection(0.5, 1.5), vt.WingSection(1.0, 1.0)],
+        sections=[vt.WingSection(0.0, 2.0), vt.WingSection(0.52, 1.5), vt.WingSection(1.0, 1.0)],
         n_panels=20,
         spacing="uniform",
     )
     lat_kink_clean = vt.build_lattice(vt.Aircraft(surfaces=[wing_kink]))
 
     wing_kink_ctrl = wing_kink.clone()
-    wing_kink_ctrl.controls = [vt.ControlSurface(name="ctrl", eta_start=0.22, eta_end=0.44)]
+    wing_kink_ctrl.controls = [vt.ControlSurface(name="ctrl", eta_start=0.22, eta_end=0.53)]
     lat_kink_ctrl = vt.build_lattice(vt.Aircraft(surfaces=[wing_kink_ctrl]))
 
-    # Kink is at eta=0.5
-    # Check that an edge exists at 0.5 in both lattices at the exact same location
     edge_eta_clean = lat_kink_clean.surfaces[0].edge_le[:, 1] / wing_kink.semi_span
     edge_eta_ctrl = lat_kink_ctrl.surfaces[0].edge_le[:, 1] / wing_kink.semi_span
-    assert np.any(np.isclose(edge_eta_clean, 0.5, atol=1e-12))
-    assert np.any(np.isclose(edge_eta_ctrl, 0.5, atol=1e-12))
-    kink_clean = edge_eta_clean[np.argmin(np.abs(edge_eta_clean - 0.5))]
-    kink_ctrl = edge_eta_ctrl[np.argmin(np.abs(edge_eta_ctrl - 0.5))]
-    assert abs(kink_clean - kink_ctrl) <= 1e-12
+    right_clean = edge_eta_clean[edge_eta_clean >= -1e-12]
+    right_ctrl = edge_eta_ctrl[edge_eta_ctrl >= -1e-12]
+    uniform = np.linspace(0.0, 1.0, 21)
+    assert np.min(np.abs(uniform - 0.52)) > 0.01  # the kink must be snapped
+    # Without the control: the edge at 0.50 moved onto the kink, all other edges are uniform.
+    assert np.any(np.abs(right_clean - 0.52) <= 1e-12)
+    assert not np.any(np.abs(right_clean - 0.50) <= 1e-12)
+    # With the control: the kink edge is still at 0.52, and the control limit
+    # 0.53 is on another edge (the one at 0.55 moved).
+    assert np.any(np.abs(right_ctrl - 0.52) <= 1e-12)
+    assert np.any(np.abs(right_ctrl - 0.53) <= 1e-12)
+    assert not np.any(np.abs(right_ctrl - 0.55) <= 1e-12)
+    assert abs(lat_kink_ctrl.control_info[0]["eta_end_eff"] - 0.53) <= 1e-12
+    # Only the edges that the control limits moved differ from the clean lattice.
+    changed = np.flatnonzero(np.abs(right_clean - right_ctrl) > 1e-12)
+    assert sorted(np.round(right_ctrl[changed], 12)) == [0.22, 0.53]
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -592,6 +604,25 @@ def test_cache_key_follows_every_control_field():
     assert lattice_cache.surfaces_fingerprint(ac) != fp_base
     wing.controls[0].symmetric = True
     assert lattice_cache.surfaces_fingerprint(ac) == fp_base
+
+    # 7. Solve through the cache: a new deflection changes the result, and the
+    # old deflection gives the old bits again (chordwise and section mode).
+    lattice_cache.clear()
+    cond = vt.FlightCondition(V_inf=30.0, alpha=np.radians(3.0))
+    for solver, st in (
+        (vt.VortexLatticeSolver(), vt.SolverSettings(solver_type="vlm", n_panels=8, n_chord=4)),
+        (vt.LinearLLTSolver(), vt.SolverSettings(solver_type="linear", n_panels=8)),
+    ):
+        r_first = solver.solve(ac, cond, st)
+        assert ac.set_deflection("flap", 0.12) == 1
+        r_changed = solver.solve(ac, cond, st)
+        assert r_changed.totals.CL != r_first.totals.CL
+        assert r_changed.totals.Cm != r_first.totals.Cm
+        ac.set_deflection("flap", 0.05)
+        r_back = solver.solve(ac, cond, st)
+        for coef in ("CL", "CDi", "Cm", "Cl", "Cn", "CY"):
+            assert getattr(r_back.totals, coef) == getattr(r_first.totals, coef), coef
+        assert np.array_equal(r_back.details["gamma"], r_first.details["gamma"])
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -821,6 +852,8 @@ def test_gpu_control_surfaces_equal_cpu(gpu_device, precision, solver_type, cont
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         r_gpu = solver.solve_sweep(ac, cond, st, alphas)
+    for r in r_gpu:
+        assert r.details["device"] == "gpu"
 
     cl_scale = max(float(np.max(np.abs([r.totals.CL for r in r_cpu]))), 1e-3)
     for name in ("CL", "CDi", "Cm", "Cl", "Cn", "CY"):
@@ -911,6 +944,61 @@ def test_deflected_airfoil_follows_the_table_rule():
     assert np.max(np.abs(new_lin.Cl(a) - lin.Cl(a + tau * delta))) <= tol
     assert np.all(np.asarray(new_lin.Cm(a)) == new_lin.Cm0)
     assert ctrl_mod.deflected_airfoil(lin, 0.0, h) is lin
+
+
+_MIRROR_SOLVERS = {
+    "vlm4": (vt.VortexLatticeSolver, dict(solver_type="vlm", n_chord=4)),
+    "vlm1": (vt.VortexLatticeSolver, dict(solver_type="vlm", n_chord=1)),
+    "linear": (vt.LinearLLTSolver, dict(solver_type="linear")),
+    "nonlinear": (vt.NonlinearSolver, dict(solver_type="nonlinear")),
+}
+
+
+@pytest.mark.parametrize("airfoil", ["linear", "tabulated", "tabulated_no_cm"])
+@pytest.mark.parametrize("control", ["flap", "aileron"])
+@pytest.mark.parametrize("solver_name", list(_MIRROR_SOLVERS))
+def test_symmetric_wing_equals_half_plus_mirror_copy(solver_name, control, airfoil):
+    """Prove that the left half of a symmetric surface and a mirror copy deflect the same way.
+
+    A symmetric wing must give the same coefficients as its right half
+    (is_symmetric=False) plus the mirrored() copy, with the same control.
+    This runs the left-strip branch and the mirror_y branch of build_lattice
+    in the chordwise mode (VLM, n_chord 4) and in the section mode (VLM
+    n_chord 1, linear and nonlinear lifting line), for a symmetric flap and
+    for an antisymmetric aileron.
+    """
+    if airfoil == "linear":
+        af = vt.LinearAirfoil(a0=6.0, alpha_L0=np.radians(-1.5), Cd0=0.009, Cm0=-0.04)
+    else:
+        af = _tab_airfoil(with_cm=(airfoil == "tabulated"))
+    if control == "flap":
+        ctrl = vt.ControlSurface(name="flap", eta_start=0.2, eta_end=0.7, hinge_x_c=0.7,
+                                 deflection=np.radians(6.0), symmetric=True)
+    else:
+        ctrl = vt.ControlSurface(name="aileron", eta_start=0.6, eta_end=1.0, hinge_x_c=0.75,
+                                 deflection=np.radians(6.0), symmetric=False)
+    sections = [vt.WingSection(0.0, 1.2, airfoil=af), vt.WingSection(1.0, 0.7, airfoil=af)]
+    ref = dict(S_ref=9.5, b_ref=10.0, c_ref=0.97, ref_point=np.array([0.3, 0.0, 0.0]))
+
+    full = vt.LiftingSurface(name="wing", semi_span=5.0, sweep_le=np.radians(10.0), dihedral=np.radians(4.0),
+                             sections=sections, controls=[ctrl.clone()], n_panels=10)
+    right = vt.LiftingSurface(name="wing_r", semi_span=5.0, sweep_le=np.radians(10.0), dihedral=np.radians(4.0),
+                              is_symmetric=False, sections=sections, controls=[ctrl.clone()], n_panels=10)
+    ac_full = vt.Aircraft(surfaces=[full], **ref)
+    ac_pair = vt.Aircraft(surfaces=[right.mirrored(name="wing_l"), right], **ref)
+
+    solver_cls, kw = _MIRROR_SOLVERS[solver_name]
+    st = vt.SolverSettings(n_panels=10, use_symmetry=False, **kw)
+    cond = vt.FlightCondition(V_inf=30.0, alpha=np.radians(4.0))
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        r_full = solver_cls().solve(ac_full, cond, st)
+        r_pair = solver_cls().solve(ac_pair, cond, st)
+    if control == "aileron":
+        assert r_full.totals.Cl < -1e-3  # the aileron rolls the wing; Cl is not zero by symmetry
+    for coef in ("CL", "CDi", "Cm", "Cl", "Cn", "CY"):
+        a, b = getattr(r_full.totals, coef), getattr(r_pair.totals, coef)
+        assert abs(a - b) <= 1e-12 * max(1.0, abs(a)), f"{coef}: {a} vs {b}"
 
 
 def test_user_manual_example_runs():

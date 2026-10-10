@@ -95,6 +95,7 @@ The implementation is verified in `tests/test_control_surfaces.py`:
 - `test_aileron_signs_and_no_symmetry_fold`
 - `test_rudder_signs`
 - `test_twin_rudders_with_mirror_copy`
+- `test_symmetric_wing_equals_half_plus_mirror_copy`
 - `test_span_limits_snap_to_strip_edges`
 - `test_hinge_snaps_on_control_strips_only`
 - `test_cache_key_follows_every_control_field`
