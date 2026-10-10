@@ -15,6 +15,9 @@ a minor version can change a public interface.
   index (Roache 1998) with the observed order of Celik et al. (2008). Each bar states its
   convergence state (`monotonic`, `oscillatory`, `not_converged_order`, `divergent` or
   `roundoff`) and its notes. `ErrorBar` and `ErrorBarResult` hold the output.
+- `validation/perf_history.py`: a speed history of fixed workloads per commit (record mode, which
+  times the code of its own tree) and a side-by-side timing of two source trees (compare mode,
+  one fresh process per run, alternating order). The output holds no machine identifier.
 
 ### Changed
 
