@@ -13,6 +13,7 @@ import numpy as np
 import pytest
 
 import ventorum as vt
+from validation.avl import compare
 from validation.avl.avl_files import (
     QUIT_PADDING,
     build_case,
@@ -22,6 +23,7 @@ from validation.avl.avl_files import (
 from validation.avl.avl_output import parse_ft, parse_st
 from validation.avl.avl_run import (
     AvlCase,
+    AvlRunResult,
     check_parsed,
     find_avl,
     run_case,
@@ -29,6 +31,7 @@ from validation.avl.avl_run import (
 )
 from validation.avl.compare import (
     ROOT,
+    _triple_avl,
     build_dihedral,
     build_rect,
     main,
@@ -277,6 +280,14 @@ def test_failed_run_is_reported(tmp_path):
 # Regression tests of the review of T-0055
 # --------------------------------------------------------------------------
 
+def _fake_parsed(**values: float) -> dict[str, float]:
+    """Parsed AVL FT plus ST dict with every key at 0 except *values*."""
+    keys = list(parse_st((DATA / "rect_st.txt").read_text(encoding="utf-8")))
+    out = {key: 0.0 for key in keys}
+    out.update(values)
+    return out
+
+
 def _mirror_aircraft() -> Aircraft:
     """Wing plus an off-plane surface and its mirror copy."""
     wing = vt.LiftingSurface(
@@ -400,6 +411,144 @@ def test_writer_mirror_copy_spacing_and_component():
     assert [s[1] for s in secs] == [-2.0, -1.0]
     assert [s[3] for s in secs] == [0.4, 0.5]
     assert (case.n_surfaces, case.n_strips, case.n_vortices) == (4, 40, 160)
+
+
+def test_triple_avl_uses_near_field_side_force():
+    """CY comes from CYtot (near field), as CL comes from CLtot."""
+    parsed = _fake_parsed(CLtot=0.5, CYtot=0.1, CYff=0.2, CDff=0.01)
+    triple = _triple_avl(parsed, stability=False)
+    assert triple["CY"] == 0.1
+    assert triple["CL"] == 0.5
+
+
+def _fake_solve_avl(fail_at=None):
+    """Return a stand-in of compare.solve_avl with linear AVL results."""
+    def fake(avl_exe, alpha_deg, beta_deg, base_settings, ac, h, folder, timeout):
+        case = build_case(ac, base_settings, alpha_deg=alpha_deg, beta_deg=beta_deg,
+                          ground_h=h)
+        if fail_at is not None and (alpha_deg, beta_deg) == fail_at:
+            return case, AvlRunResult(ok=False, error="stand-in failure")
+        parsed = _fake_parsed(
+            Alpha=alpha_deg, Beta=beta_deg,
+            CLtot=0.1 * alpha_deg, Cmtot=-0.02 * alpha_deg, CYtot=-0.01 * beta_deg,
+            Cl_prim=-0.003 * beta_deg, Cn_prim=0.002 * beta_deg,
+            CLa=999.0, Cma=-999.0, CYb=999.0, Clb=999.0, Cnb=999.0, Xnp=99.0,
+        )
+        return case, AvlRunResult(ok=True, banner="Athena Vortex Lattice Program Version 3.52",
+                                  forces=parsed, stabderivs=parsed)
+    return fake
+
+
+def _small_spec(h=None, cd0=0.0):
+    """Case spec of a small rectangular wing (fast Ventorum solves)."""
+    def build():
+        airfoil = LinearAirfoil(Cd0=cd0)
+        surf = vt.LiftingSurface(
+            name="Wing", semi_span=4.0,
+            sections=[vt.WingSection(0.0, 1.0, airfoil=airfoil),
+                      vt.WingSection(1.0, 1.0, airfoil=airfoil)],
+        )
+        return Aircraft(name="small", surfaces=[surf])
+    return {"id": "small", "label": "Small wing", "build": build, "h": h}
+
+
+@pytest.mark.parametrize("h", [None, 1.0])
+def test_avl_derivatives_come_from_extra_runs(tmp_path, monkeypatch, h):
+    """AVL CL_alpha, Cm_alpha, beta derivatives and xnp use the extra runs.
+
+    The ST table values (999 in the stand-in) stay in the AVL_ST column.
+    """
+    monkeypatch.setattr(compare, "solve_avl", _fake_solve_avl())
+    record = compare.run_set(None, _small_spec(h), 6, [4.0], tmp_path, 10.0)
+    derivs = record["derivatives"]
+    per_deg = 180.0 / math.pi
+    assert derivs["avl"]["CL_alpha"] == pytest.approx(0.1 * per_deg)
+    assert derivs["avl"]["Cm_alpha"] == pytest.approx(-0.02 * per_deg)
+    assert derivs["avl"]["CY_beta"] == pytest.approx(-0.01 * per_deg)
+    assert derivs["avl"]["Cl_beta"] == pytest.approx(-0.003 * per_deg)
+    assert derivs["avl"]["Cn_beta"] == pytest.approx(0.002 * per_deg)
+    assert derivs["avl_st"]["CL_alpha"] == 999.0
+    ac = _small_spec(h)["build"]()
+    ac.compute_reference_values()
+    x_ref = float(ac.moment_reference()[0])
+    assert derivs["xnp"]["avl"] == pytest.approx(x_ref + ac.c_ref * 0.2)
+    assert derivs["xnp"]["avl_st"] == 99.0
+    assert derivs["notes"] == []
+
+
+def test_failed_extra_run_gives_na_and_note(tmp_path, monkeypatch):
+    """A failed extra AVL run is never dropped silently."""
+    monkeypatch.setattr(compare, "solve_avl", _fake_solve_avl(fail_at=(4.5, 0.0)))
+    record = compare.run_set(None, _small_spec(1.0), 6, [4.0], tmp_path, 10.0)
+    derivs = record["derivatives"]
+    assert derivs["avl"]["CL_alpha"] is None
+    assert derivs["avl"]["Cm_alpha"] is None
+    assert derivs["xnp"]["avl"] is None
+    assert derivs["avl"]["Cl_beta"] is not None
+    assert len(derivs["notes"]) == 1
+    assert "4.5" in derivs["notes"][0] and "stand-in failure" in derivs["notes"][0]
+
+
+def test_case_notes_are_kept_in_rows(tmp_path):
+    """The notes of the AVL writer reach each row and the set record."""
+    record = compare.run_set(tmp_path / "no_such_avl.exe", _small_spec(cd0=0.01), 6,
+                             [4.0], tmp_path, 10.0)
+    row = record["rows"][0]
+    assert any("Cd0" in note for note in row["notes"])
+    assert any("Cd0" in note for note in record["notes"])
+    assert row["avl"] is None and "avl_error" in row
+
+
+def _fake_timing() -> dict:
+    """Timing record with fixed values for the report test."""
+    return {
+        "avl_native_s": [1.0], "avl_native_median_s": 1.0,
+        "avl_session_s": [0.5], "avl_session_median_s": 0.5,
+        "avl_enhanced_s": [0.2], "avl_enhanced_median_s": 0.2,
+        "ventorum_cpu_s": [0.1], "ventorum_cpu_median_s": 0.1,
+        "ventorum_auto_s": [0.1], "ventorum_auto_median_s": 0.1,
+        "avl_failed_runs": {"avl_native": 0, "avl_enhanced": 0, "avl_session": 0},
+        "workers": 2, "repeats": 1,
+    }
+
+
+def test_failed_ventorum_solve_reads_failed(tmp_path, monkeypatch):
+    """A failed Ventorum solve prints 'failed'; planned empty cells print 'n/a'."""
+    real = compare.solve_ventorum
+
+    def broken(ac, mesh, wake, alpha_deg, beta_deg=0.0, h=None):
+        if wake == "freestream":
+            raise RuntimeError("stand-in solver failure")
+        return real(ac, mesh, wake, alpha_deg, beta_deg, h)
+
+    monkeypatch.setattr(compare, "solve_avl", _fake_solve_avl())
+    monkeypatch.setattr(compare, "solve_ventorum", broken)
+    record = compare.run_set(None, _small_spec(1.0), 6, [4.0], tmp_path, 10.0)
+    record["timing"] = _fake_timing()
+    meta = {"date": "d", "ventorum_version": "v", "git_commit": "c", "avl_banner": "b",
+            "cpu_cores": 2, "workers": 2}
+    text = compare.write_markdown(meta, [record])
+    cl_line = next(line for line in text.splitlines() if line.startswith("| 4.00 | CL |"))
+    cells = [c.strip() for c in cl_line.strip("|").split("|")]
+    assert cells[2] == "n/a"      # body wake in ground effect: empty by plan
+    assert cells[3] == "failed"   # free-stream solve failed
+    assert "stand-in solver failure" in text
+    assert "AVL, one session" in text
+    assert "chord" in text.lower() and "1e-5" in text
+
+
+def test_time_device_sweep_warms_up(monkeypatch):
+    """One untimed warm-up sweep runs before the timed repeats."""
+    calls = []
+
+    def fake_sweep(ac, mesh, h, angles):
+        calls.append(1)
+        return 0.01 * len(calls)
+
+    monkeypatch.setattr(compare, "_ventorum_sweep_once", fake_sweep)
+    _median, samples = compare.time_device_sweep(build_rect(), 6, None, [4.0], "cpu", 2)
+    assert len(calls) == 3
+    assert samples == [0.02, 0.03]
 
 
 def test_avl_stale_folder_gives_new_values(tmp_path):
