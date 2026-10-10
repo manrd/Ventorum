@@ -162,3 +162,77 @@ def test_near_miss_warns():
     text = " ".join(str(w.message) for w in rec)
     assert "300" in text and "mm" in text            # gap of 0.3 m = 300 mm
     assert any("outer" in n and "mm" in n for n in res.details["notes"])
+
+
+def _relate_reference(si, sj):
+    """Double-loop form of the edge relation, kept as the reference of the vectorised one."""
+    wi, wj = lattice_module._edge_strip_widths(si), lattice_module._edge_strip_widths(sj)
+    best = None
+    for e in range(si.edge_le.shape[0]):
+        a0, a1 = si.edge_le[e], si.edge_te[e]
+        la = float(np.linalg.norm(a1 - a0))
+        if la < 1e-12:
+            continue
+        ua = (a1 - a0) / la
+        for f in range(sj.edge_le.shape[0]):
+            b0, b1 = sj.edge_le[f], sj.edge_te[f]
+            lb = float(np.linalg.norm(b1 - b0))
+            if lb < 1e-12:
+                continue
+            ub = (b1 - b0) / lb
+            gap = max(
+                float(np.max(lattice_module._perpendicular_distance(np.vstack([b0, b1]), a0, ua))),
+                float(np.max(lattice_module._perpendicular_distance(np.vstack([a0, a1]), b0, ub))),
+            )
+            t = np.sort([(b0 - a0) @ ua, (b1 - a0) @ ua])
+            overlap = max(0.0, min(la, float(t[1])) - max(0.0, float(t[0]))) / min(la, lb)
+            if overlap < lattice_module.JOIN_MIN_OVERLAP:
+                continue
+            tol = float(np.clip(
+                lattice_module.JOIN_TOL_STRIP_FRACTION * min(wi[e], wj[f]),
+                lattice_module.JOIN_TOL_CHORD_FRACTION * max(la, lb),
+                lattice_module.JOIN_TOL_CHORD_MAX_FRACTION * min(la, lb),
+            ))
+            if gap <= tol:
+                return True, None
+            angle = np.degrees(np.arccos(min(1.0, abs(float(ua @ ub)))))
+            chord = min(la, lb)
+            if angle < lattice_module.NEAR_MISS_MAX_ANGLE_DEG and gap <= lattice_module.NEAR_MISS_MAX_GAP_CHORDS * chord:
+                if best is None or gap < best[0]:
+                    best = (gap, chord)
+    return False, best
+
+
+def _random_edges(rng, n, y0, dy, gap_z=0.0, tilt=0.0):
+    from types import SimpleNamespace
+
+    y = y0 + dy * np.sort(rng.random(n))
+    le = np.column_stack([0.1 * rng.random(n), y, gap_z + tilt * y])
+    te = le + np.column_stack([0.5 + rng.random(n), 0.01 * rng.standard_normal(n), 0.01 * rng.standard_normal(n)])
+    return SimpleNamespace(edge_le=le, edge_te=te)
+
+
+def test_vectorised_edge_relation_equals_the_double_loop():
+    """The vectorised edge relation gives the same join and near miss as the double loop."""
+    rng = np.random.default_rng(7)
+    seen = {"joined": 0, "near": 0, "none": 0}
+    for k in range(300):
+        n_i, n_j = int(rng.integers(3, 12)), int(rng.integers(3, 12))
+        si = _random_edges(rng, n_i, 0.0, 2.0)
+        sj = _random_edges(rng, n_j, rng.uniform(-0.5, 2.5), rng.uniform(0.5, 2.0),
+                           gap_z=rng.choice([0.0, 1e-4, 0.05, 0.3, 5.0]), tilt=rng.choice([0.0, 0.05, 0.5]))
+        if k % 10 == 0:
+            sj.edge_te[0] = sj.edge_le[0]  # a zero-length edge is skipped
+        if k % 7 == 0:
+            sj.edge_le[1:3] = si.edge_le[0:2]  # shared edges
+            sj.edge_te[1:3] = si.edge_te[0:2]
+        ref = _relate_reference(si, sj)
+        new = lattice_module._relate_surfaces(si, sj)
+        assert new[0] == ref[0]
+        if ref[1] is None:
+            assert new[1] is None
+        else:
+            assert new[1] is not None
+            assert np.allclose(new[1], ref[1], rtol=1e-12, atol=0.0)
+        seen["joined" if ref[0] else ("near" if ref[1] else "none")] += 1
+    assert min(seen.values()) > 0, seen  # every outcome is tested

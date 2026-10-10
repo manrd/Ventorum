@@ -443,38 +443,56 @@ def _relate_surfaces(si: SurfaceSlice, sj: SurfaceSlice) -> tuple[bool, tuple[fl
     of edges that are nearly parallel and overlap, but are not joined.
     """
     wi, wj = _edge_strip_widths(si), _edge_strip_widths(sj)
+    a0_all, b0_all = np.asarray(si.edge_le, dtype=float), np.asarray(sj.edge_le, dtype=float)
+    va, vb = np.asarray(si.edge_te, dtype=float) - a0_all, np.asarray(sj.edge_te, dtype=float) - b0_all
+    la_all, lb_all = np.linalg.norm(va, axis=1), np.linalg.norm(vb, axis=1)
+    ia, ib = np.flatnonzero(la_all >= 1e-12), np.flatnonzero(lb_all >= 1e-12)
+    if ia.size == 0 or ib.size == 0:
+        return False, None
+    b0, lb, wjb = b0_all[ib], lb_all[ib], wj[ib]
+    b1 = b0 + vb[ib]
+    ub = vb[ib] / lb[:, None]
+
+    def _perp(p: np.ndarray, origin: np.ndarray, unit: np.ndarray) -> np.ndarray:
+        # Distance of the points p (..., 3) from the lines through origin with direction unit [m].
+        d = p - origin
+        return np.linalg.norm(d - np.sum(d * unit, axis=-1)[..., None] * unit, axis=-1)
+
+    # All pairs of edges at once, in blocks of rows of si to bound the memory.
+    # The pairs are visited in the same order as a double loop (row-major), so
+    # the first closest near miss is the same.
     best: tuple[float, float] | None = None
-    for e in range(si.edge_le.shape[0]):
-        a0, a1 = si.edge_le[e], si.edge_te[e]
-        la = float(np.linalg.norm(a1 - a0))
-        if la < 1e-12:
-            continue
-        ua = (a1 - a0) / la
-        for f in range(sj.edge_le.shape[0]):
-            b0, b1 = sj.edge_le[f], sj.edge_te[f]
-            lb = float(np.linalg.norm(b1 - b0))
-            if lb < 1e-12:
-                continue
-            ub = (b1 - b0) / lb
-            gap = max(
-                float(np.max(_perpendicular_distance(np.vstack([b0, b1]), a0, ua))),
-                float(np.max(_perpendicular_distance(np.vstack([a0, a1]), b0, ub))),
-            )
-            t = np.sort([(b0 - a0) @ ua, (b1 - a0) @ ua])
-            overlap = max(0.0, min(la, float(t[1])) - max(0.0, float(t[0]))) / min(la, lb)
-            if overlap < JOIN_MIN_OVERLAP:
-                continue
-            tol = float(np.clip(
-                JOIN_TOL_STRIP_FRACTION * min(wi[e], wj[f]),
-                JOIN_TOL_CHORD_FRACTION * max(la, lb), JOIN_TOL_CHORD_MAX_FRACTION * min(la, lb),
-            ))
-            if gap <= tol:
-                return True, None
-            angle = np.degrees(np.arccos(min(1.0, abs(float(ua @ ub)))))
-            chord = min(la, lb)
-            if angle < NEAR_MISS_MAX_ANGLE_DEG and gap <= NEAR_MISS_MAX_GAP_CHORDS * chord:
-                if best is None or gap < best[0]:
-                    best = (gap, chord)
+    rows = max(1, 2_000_000 // max(ib.size, 1))
+    for s0 in range(0, ia.size, rows):
+        sel = ia[s0:s0 + rows]
+        a0 = a0_all[sel][:, None, :]
+        la = la_all[sel][:, None]
+        ua = va[sel][:, None, :] / la[..., None]
+        a1 = a0 + va[sel][:, None, :]
+        gap = np.maximum(
+            np.maximum(_perp(b0[None], a0, ua), _perp(b1[None], a0, ua)),
+            np.maximum(_perp(a0, b0[None], ub[None]), _perp(a1, b0[None], ub[None])),
+        )
+        t0 = np.sum((b0[None] - a0) * ua, axis=-1)
+        t1 = np.sum((b1[None] - a0) * ua, axis=-1)
+        t_lo, t_hi = np.minimum(t0, t1), np.maximum(t0, t1)
+        lmin, lmax = np.minimum(la, lb[None]), np.maximum(la, lb[None])
+        overlap = np.maximum(0.0, np.minimum(la, t_hi) - np.maximum(0.0, t_lo)) / lmin
+        valid = overlap >= JOIN_MIN_OVERLAP
+        tol = np.clip(
+            JOIN_TOL_STRIP_FRACTION * np.minimum(wi[sel][:, None], wjb[None]),
+            JOIN_TOL_CHORD_FRACTION * lmax, JOIN_TOL_CHORD_MAX_FRACTION * lmin,
+        )
+        if np.any(valid & (gap <= tol)):
+            return True, None
+        cosang = np.minimum(1.0, np.abs(np.sum(ua * ub[None], axis=-1)))
+        near = valid & (np.degrees(np.arccos(cosang)) < NEAR_MISS_MAX_ANGLE_DEG) & (
+            gap <= NEAR_MISS_MAX_GAP_CHORDS * lmin)
+        if np.any(near):
+            k = int(np.argmin(np.where(near, gap, np.inf)))
+            g, c = float(gap.flat[k]), float(lmin.flat[k])
+            if best is None or g < best[0]:
+                best = (g, c)
     return False, best
 
 
