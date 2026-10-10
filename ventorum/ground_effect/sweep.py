@@ -572,7 +572,7 @@ def _cpu_batch(
     (symmetric and not symmetric cases), because one batch solves only
     cases with the same unknowns. Each group is solved in chunks that keep
     the matrices of one chunk within ``_MAX_BATCH_BYTES``, with the CPU
-    branch of the solver (``LatticeSolver._solve_batch_cpu``, no
+    branch of the solver (``LatticeSolver.solve_batch`` with ``_cpu_only=True``, no
     continuation). This function does not change the device setting of
     :mod:`ventorum.gpu`.
 
@@ -646,10 +646,10 @@ def _cpu_batch(
                 chunk = members[k0: k0 + chunk_sz]
                 # The CPU branch of solve_batch: no GPU check, no change of the
                 # device setting (safe when sweeps run in parallel threads).
-                chunk_res = solver._solve_batch_cpu(
+                chunk_res = solver.solve_batch(
                     lattice, [prepared[i][1]["condition"] for i in chunk], sett, ac.S_ref, ac.b_ref, ac.c_ref,
                     ref_point=rp, main_surface=ac.main_surface_index(),
-                    continuation=False, grounds=[prepared[i][1]["ground"] for i in chunk],
+                    continuation=False, grounds=[prepared[i][1]["ground"] for i in chunk], _cpu_only=True,
                 )
                 for i, res in zip(chunk, chunk_res):
                     all_results[i] = res
