@@ -45,24 +45,24 @@ def test_axes_round_trip():
     """Body to stability to wind and back gives the input to 1e-12."""
     alpha, beta = np.radians(7.5), np.radians(5.0)
     start = (0.0123, -0.0456, 0.0078)
-    stab = transform_moments(*start, alpha, beta, "stability")
+    stab = transform_moments(*start, alpha, beta, "stability", b_ref=1.0, c_ref=1.0)
     wind = transform_moments(stab["Cl"], stab["Cm"], stab["Cn"], alpha, beta, "wind",
-                             from_axes="stability")
+                             from_axes="stability", b_ref=1.0, c_ref=1.0)
     back = transform_moments(wind["Cl"], wind["Cm"], wind["Cn"], alpha, beta, "body",
-                             from_axes="wind")
+                             from_axes="wind", b_ref=1.0, c_ref=1.0)
     assert [back["Cl"], back["Cm"], back["Cn"]] == pytest.approx(list(start), abs=1e-12)
 
 
 def test_axes_hand_cases():
     """Hand-computed rotations at alpha = 90 deg and at beta = 90 deg."""
     cl, cm, cn = 1.0, 2.0, 3.0
-    got = transform_moments(cl, cm, cn, np.radians(90.0), 0.0, "stability")
+    got = transform_moments(cl, cm, cn, np.radians(90.0), 0.0, "stability", b_ref=1.0, c_ref=1.0)
     assert [got["Cl"], got["Cm"], got["Cn"]] == pytest.approx([3.0, 2.0, -1.0], abs=1e-12)
-    got = transform_moments(cl, cm, cn, np.radians(90.0), 0.0, "wind")
+    got = transform_moments(cl, cm, cn, np.radians(90.0), 0.0, "wind", b_ref=1.0, c_ref=1.0)
     assert [got["Cl"], got["Cm"], got["Cn"]] == pytest.approx([3.0, 2.0, -1.0], abs=1e-12)
-    got = transform_moments(cl, cm, cn, 0.0, np.radians(90.0), "stability")
+    got = transform_moments(cl, cm, cn, 0.0, np.radians(90.0), "stability", b_ref=1.0, c_ref=1.0)
     assert [got["Cl"], got["Cm"], got["Cn"]] == pytest.approx([1.0, 2.0, 3.0], abs=1e-12)
-    got = transform_moments(cl, cm, cn, 0.0, np.radians(90.0), "wind")
+    got = transform_moments(cl, cm, cn, 0.0, np.radians(90.0), "wind", b_ref=1.0, c_ref=1.0)
     assert [got["Cl"], got["Cm"], got["Cn"]] == pytest.approx([2.0, -1.0, 3.0], abs=1e-12)
 
 

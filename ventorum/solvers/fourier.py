@@ -401,6 +401,7 @@ class FourierSolver(BaseSolver):
         return SolverResult(
             spanwise=[spanwise], totals=totals, solver_type="fourier", converged=True,
             iterations=1, fourier_coefficients=A, condition=condition,
+            b_ref=float(aircraft.b_ref), c_ref=float(aircraft.c_ref),
         )
 
     def solve(

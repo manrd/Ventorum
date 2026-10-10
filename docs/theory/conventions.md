@@ -33,13 +33,25 @@ C_n = -\frac{M_z}{q_\infty S_\text{ref} b_\text{ref}},
 
 with the dynamic pressure $q_\infty = \tfrac12 \rho V_\infty^2$ [Pa] and the air density $\rho$ [kg/m^3].
 
-The moment coefficients can be given in three axis systems (Stevens, Lewis and Johnson 2016, chapter 2): body (the default), stability (body axes turned by $\alpha$ about y) and wind (stability axes turned by $\beta$ about z). For the vector $(C_l, C_m, C_n)$:
+The moment coefficients can be given in three axis systems (Stevens, Lewis and Johnson 2016, chapter 2): body (the default), stability (body axes turned by $\alpha$ about y) and wind (stability axes turned by $\beta$ about z).
+
+The rotation matrix $R$ acts on the dimensional moment vector $(L_x, M_y, N_z)$. Because $C_l$ and $C_n$ use $b_\text{ref}$ while $C_m$ uses $c_\text{ref}$, the coefficient vector $\mathbf C = (C_l, C_m, C_n)^T$ transforms as
+
+```{math}
+\mathbf C' = \mathbf L^{-1} R \mathbf L \mathbf C, \qquad \mathbf L = \operatorname{diag}(b_\text{ref}, c_\text{ref}, b_\text{ref}).
+```
+
+The rotation matrices are:
 
 ```{math}
 R_{bs} = \begin{pmatrix} \cos\alpha & 0 & \sin\alpha \\ 0 & 1 & 0 \\ -\sin\alpha & 0 & \cos\alpha \end{pmatrix}, \qquad
 R_{sw} = \begin{pmatrix} \cos\beta & \sin\beta & 0 \\ -\sin\beta & \cos\beta & 0 \\ 0 & 0 & 1 \end{pmatrix}, \qquad
 R_{bw} = R_{sw} R_{bs}.
 ```
+
+Because $R_{bs}$ turns about y and mixes only $C_l$ and $C_n$ (which both use $b_\text{ref}$), $\mathbf L^{-1} R_{bs} \mathbf L = R_{bs}$. The transform for the stability axes is therefore identical to the plain rotation matrix $R_{bs}$.
+
+When $\beta \ne 0$ and $b_\text{ref} \ne c_\text{ref}$, $R_{bw}$ mixes $C_l$ and $C_m$, and $\mathbf L^{-1} R_{bw} \mathbf L$ scales the mixed terms. For example, at $\alpha = 0$ and $\beta = 90^\circ$, $(C_l, C_m, C_n) = (1, 2, 3)$ gives $(2, -1, 3)$ when $b_\text{ref} = c_\text{ref} = 1\text{ m}$, and $(1, -2, 3)$ when $b_\text{ref} = 2\text{ m}$ and $c_\text{ref} = 1\text{ m}$.
 
 The force coefficients $C_L$, $C_D$ and $C_Y$ are always relative to the free stream ($\hat{\mathbf L}$, $\hat{\mathbf u}$ and $\hat{\mathbf Y}$).
 

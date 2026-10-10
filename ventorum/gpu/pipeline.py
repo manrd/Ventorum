@@ -94,8 +94,8 @@ def solve_batch(solver, lattice, conditions: list, settings, S_ref: float, b_ref
     share = (time.perf_counter() - t0) / K
     out: list = [None] * K
     for idx, (arrays, infos, umap) in solved:
-        res = _results(solver, lattice, [conditions[k] for k in idx], arrays, [setups[k] for k in idx], umap, c_ref,
-                       main_surface, t0, share, precision, infos=infos, ref_point=ref_point)
+        res = _results(solver, lattice, [conditions[k] for k in idx], arrays, [setups[k] for k in idx], umap, b_ref,
+                       c_ref, main_surface, t0, share, precision, infos=infos, ref_point=ref_point)
         for k, r in zip(idx, res):
             out[k] = r
     return out
@@ -259,8 +259,9 @@ def _nonlinear(solver, engine, dl, md, cs, lattice, conditions, settings, ground
     return G, vp, alpha_full, infos
 
 
-def _results(solver, lattice, conditions, arrays: dict, setups: list, umap, c_ref: float, main_surface: int,
-             t0: float, share: float, precision: str, infos: list | None = None, ref_point=None) -> list:
+def _results(solver, lattice, conditions, arrays: dict, setups: list, umap, b_ref: float, c_ref: float,
+             main_surface: int, t0: float, share: float, precision: str, infos: list | None = None,
+             ref_point=None) -> list:
     """Return the result objects of a GPU batch (the loads objects and the CPU result builder)."""
     from ventorum.aero.loads import loads_result
     from ventorum.solvers.core import SolveInfo
@@ -285,8 +286,8 @@ def _results(solver, lattice, conditions, arrays: dict, setups: list, umap, c_re
             force_total=arrays["F_total"][k], moment_total=arrays["M"][k],
         )
         info = infos[k] if infos is not None else SolveInfo(symmetric=umap.symmetric)
-        res = solver._case_result(lattice, cond, ld, info, gammas[k], st[0], st[1], st[2], st[3], c_ref,
-                                  main_surface, t0, execution_time=share, spanwise_stats=stats[k],
+        res = solver._case_result(lattice, cond, ld, info, gammas[k], st[0], st[1], st[2], st[3], b_ref,
+                                  c_ref, main_surface, t0, execution_time=share, spanwise_stats=stats[k],
                                   ref_point=ref_point)
         res.details["device"] = "gpu"
         res.details["precision"] = precision

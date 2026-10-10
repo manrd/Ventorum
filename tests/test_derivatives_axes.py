@@ -21,7 +21,7 @@ import numpy as np
 import pytest
 
 from ventorum.agent import stability_derivatives, wing_analysis
-from ventorum.core.axes import rotation_body_to_stability, rotation_body_to_wind
+from ventorum.core.axes import moment_axes_matrix, rotation_body_to_stability
 
 FAST = {"n_panels": 8}
 RECT = {"span_m": 10.0, "chord_m": 1.0}
@@ -76,7 +76,6 @@ def test_derivatives_are_rotated_body_derivatives(monkeypatch):
     assert wind["status"] == "success", wind
     a0, b0 = np.radians(6.0), np.radians(4.0)
     r_bs = rotation_body_to_stability(a0)
-    r_bw = rotation_body_to_wind(a0, b0)
     db = body["stability_derivatives"]
     ds = stab["stability_derivatives"]
     dw = wind["stability_derivatives"]
@@ -107,8 +106,9 @@ def test_derivatives_are_rotated_body_derivatives(monkeypatch):
     d_m_db = np.array([(mom["b+"]["Cl"] - mom["b-"]["Cl"]) / dbb,
                        (mom["b+"]["Cm"] - mom["b-"]["Cm"]) / dbb,
                        (mom["b+"]["Cn"] - mom["b-"]["Cn"]) / dbb])
-    exp_wind_a = r_bw @ d_m_da
-    exp_wind_b = r_bw @ d_m_db
+    m_bw = moment_axes_matrix(a0, b0, to="wind", b_ref=RECT["span_m"], c_ref=RECT["chord_m"])
+    exp_wind_a = m_bw @ d_m_da
+    exp_wind_b = m_bw @ d_m_db
     assert dw["Cm_alpha_per_rad"] == pytest.approx(float(exp_wind_a[1]), abs=1e-12)
     assert dw["Cl_beta_per_rad"] == pytest.approx(float(exp_wind_b[0]), abs=1e-12)
     assert dw["Cn_beta_per_rad"] == pytest.approx(float(exp_wind_b[2]), abs=1e-12)

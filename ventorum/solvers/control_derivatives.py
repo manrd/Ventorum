@@ -260,7 +260,7 @@ def control_derivatives(
     The lifting lines use the thin-airfoil deflected section (Glauert 1926).
     """
     from ventorum import analyze
-    from ventorum.core.axes import rotation_body_to_stability, rotation_body_to_wind
+    from ventorum.core.axes import moment_axes_matrix
     from ventorum.solvers.factory import resolve_solver_type
     from ventorum.utils.validation import validate_flight_condition, validate_solver_settings
 
@@ -297,9 +297,9 @@ def control_derivatives(
 
     base = solve(ac, condition)
     use_cd_total = base.totals.CD_total is not None
-    rot = {"body": np.eye(3),
-           "stability": rotation_body_to_stability(float(condition.alpha)),
-           "wind": rotation_body_to_wind(float(condition.alpha), float(condition.beta))}[axes]
+    rot = moment_axes_matrix(float(condition.alpha), float(condition.beta),
+                             to=axes, from_axes="body",
+                             b_ref=float(base.b_ref), c_ref=float(base.c_ref))
 
     def coeffs(r: SolverResult) -> np.ndarray:
         c = _coefficients(r, use_cd_total)

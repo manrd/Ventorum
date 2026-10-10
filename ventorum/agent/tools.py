@@ -215,11 +215,14 @@ def _apply_axes(
     alpha_deg: float,
     beta_deg: float,
     axes: str,
+    *,
+    b_ref: float,
+    c_ref: float,
 ) -> tuple[float | None, float | None, float | None]:
     """Return the rounded (Cl, Cm, Cn) triple in the requested axes."""
     if axes in ("body", "all"):
         return rnd(Cl), rnd(Cm), rnd(Cn)
-    c, m, n = moments_in_axes(Cl, Cm, Cn, alpha_deg, beta_deg, axes)
+    c, m, n = moments_in_axes(Cl, Cm, Cn, alpha_deg, beta_deg, axes, b_ref=b_ref, c_ref=c_ref)
     return rnd(c), rnd(m), rnd(n)
 
 
@@ -328,11 +331,14 @@ def wing_analysis(
     case_sett = _case_settings(ac, sett, strips, fc)
     res = vt.analyze(ac, fc, case_sett)
     m = metrics_payload(res)
+    b_ref, c_ref = float(res.b_ref), float(res.c_ref)
     m["Cl"], m["Cm"], m["Cn"] = _apply_axes(
-        res.totals.Cl, res.totals.Cm, res.totals.Cn, c["alpha_deg"], c["beta_deg"], ax)
+        res.totals.Cl, res.totals.Cm, res.totals.Cn, c["alpha_deg"], c["beta_deg"], ax,
+        b_ref=b_ref, c_ref=c_ref)
     if ax == "all":
         m["moments"] = moments_all_sets(
-            res.totals.Cl, res.totals.Cm, res.totals.Cn, c["alpha_deg"], c["beta_deg"])
+            res.totals.Cl, res.totals.Cm, res.totals.Cn, c["alpha_deg"], c["beta_deg"],
+            b_ref=b_ref, c_ref=c_ref)
     trust = trust_payload(res.totals.trust)
     rp = ac.moment_reference()
     where = "free air" if c["h_m"] is None else f"h={c['h_m']:g} m above the ground"
@@ -514,8 +520,9 @@ def polar_sweep(
                           else "refused", "message": info["message"]})
             continue
         m = metrics_payload(res)
+        b_ref, c_ref = float(res.b_ref), float(res.c_ref)
         _, cm_ax, _ = _apply_axes(res.totals.Cl, res.totals.Cm, res.totals.Cn, a, c["beta_deg"],
-                                  ax)
+                                  ax, b_ref=b_ref, c_ref=c_ref)
         device, precision = result_device_precision(res)
         row: dict[str, Any] = {
             "alpha_deg": a, "CL": m["CL"], "CDi": m["CDi"], "CD": m["CD"],
@@ -526,7 +533,8 @@ def polar_sweep(
             row["n_chord"] = _used_n_chord(res)
         if ax == "all":
             row["moments"] = moments_all_sets(
-                res.totals.Cl, res.totals.Cm, res.totals.Cn, a, c["beta_deg"])
+                res.totals.Cl, res.totals.Cm, res.totals.Cn, a, c["beta_deg"],
+                b_ref=b_ref, c_ref=c_ref)
         table.append(row)
         ok.append((a, res))
 
@@ -859,8 +867,10 @@ def ground_effect(
         k = _k_factor(res.CL, res.CDi)
         lim = res.phi_strike_limit
         lim_found = lim is not None and lim < MAX_BANK_DEG
+        b_ref, c_ref = float(ac.b_ref), float(ac.c_ref)
         cl_ax, cm_ax, cn_ax = _apply_axes(
-            res.Cl_body, res.Cm_body, res.Cn_body, alpha, beta, ax)
+            res.Cl_body, res.Cm_body, res.Cn_body, alpha, beta, ax,
+            b_ref=b_ref, c_ref=c_ref)
         device, precision = result_device_precision(res)
         t_score, t_rating, t_warn, t_conv = _row_trust(res)
         row.update(
@@ -885,7 +895,8 @@ def ground_effect(
         )
         if ax == "all":
             row["moments"] = moments_all_sets(
-                res.Cl_body, res.Cm_body, res.Cn_body, alpha, beta)
+                res.Cl_body, res.Cm_body, res.Cn_body, alpha, beta,
+                b_ref=b_ref, c_ref=c_ref)
         rows.append(row)
         ok.append((h, res))
 
@@ -921,14 +932,17 @@ def ground_effect(
         "ratio_definitions": "CL_ratio = CL / CL_free_air. induced_drag_factor_ratio = (CDi/CL^2) / "
                              "(CDi/CL^2)_free_air; below 1 means less induced drag for the same lift.",
     }
+    b_ref, c_ref = float(ac.b_ref), float(ac.c_ref)
     _, free_cm, _ = _apply_axes(
-        free.totals.Cl, free.totals.Cm, free.totals.Cn, alpha, beta, ax)
+        free.totals.Cl, free.totals.Cm, free.totals.Cn, alpha, beta, ax,
+        b_ref=b_ref, c_ref=c_ref)
     free_air = {"CL": rnd(cl_f), "CDi": rnd(free.totals.CDi, 7), "Cm": free_cm,
                 "L_over_D": rnd(drag_and_ld(free.totals)[2], 3), "e": rnd(free.totals.e, 4),
                 "note": "Free air at the same alpha and beta, bank angle 0, same mesh."}
     if ax == "all":
         free_air["moments"] = moments_all_sets(
-            free.totals.Cl, free.totals.Cm, free.totals.Cn, alpha, beta)
+            free.totals.Cl, free.totals.Cm, free.totals.Cn, alpha, beta,
+            b_ref=b_ref, c_ref=c_ref)
 
     out: dict[str, Any] = {
         "status": "success",
@@ -1064,12 +1078,14 @@ def stability_derivatives(
     else:
         x_np = sm = None
 
-    from ventorum.core.axes import rotation_body_to_stability, rotation_body_to_wind
+    from ventorum.core.axes import moment_axes_matrix
 
     a0, b0 = float(np.radians(a)), float(np.radians(b))
-    rotations = {"body": np.eye(3),
-                 "stability": rotation_body_to_stability(a0),
-                 "wind": rotation_body_to_wind(a0, b0)}
+    b_ref = float(ac.b_ref)
+    rotations = {
+        name: moment_axes_matrix(a0, b0, to=name, from_axes="body", b_ref=b_ref, c_ref=c_ref)
+        for name in ("body", "stability", "wind")
+    }
 
     def _derivs_for(name: str) -> dict[str, Any]:
         """Return the rounded derivatives in the axis system *name*."""
@@ -1140,12 +1156,14 @@ def stability_derivatives(
         f"Roll (Cl_beta): {roll.split(' (')[0]}. Yaw (Cn_beta): {yaw.split(' (')[0]}. "
         f"{device_summary_text(device_all, precision_all)}"
     )
-    _, base_cm, _ = _apply_axes(t["base"].Cl, t["base"].Cm, t["base"].Cn, a, b, ax)
+    _, base_cm, _ = _apply_axes(t["base"].Cl, t["base"].Cm, t["base"].Cn, a, b, ax,
+                                b_ref=b_ref, c_ref=c_ref)
     base_point: dict[str, Any] = {
         "CL": rnd(t["base"].CL), "Cm_about_cg": base_cm, "CDi": rnd(t["base"].CDi, 7)}
     if ax == "all":
         base_point["moments"] = moments_all_sets(
-            t["base"].Cl, t["base"].Cm, t["base"].Cn, a, b)
+            t["base"].Cl, t["base"].Cm, t["base"].Cn, a, b,
+            b_ref=b_ref, c_ref=c_ref)
     settings_used = {**settings_payload(sett, res["base"]), **_mesh_note(capped, case_sett)}
     settings_used["device"] = device_all
     settings_used["precision"] = precision_all
@@ -1171,13 +1189,15 @@ def stability_derivatives(
         out["perturbed_cases"] = {}
         for k, v in t.items():
             aa, bb = cases[k]
-            cl_p, cm_p, cn_p = _apply_axes(v.Cl, v.Cm, v.Cn, aa, bb, ax)
+            cl_p, cm_p, cn_p = _apply_axes(v.Cl, v.Cm, v.Cn, aa, bb, ax,
+                                           b_ref=b_ref, c_ref=c_ref)
             device_k, precision_k = result_device_precision(res[k])
             case: dict[str, Any] = {"alpha_deg": aa, "beta_deg": bb, "CL": rnd(v.CL),
                                     "Cm": cm_p, "Cl": cl_p, "Cn": cn_p, "CY": rnd(v.CY),
                                     "device": device_k, "precision": precision_k}
             if ax == "all":
-                case["moments"] = moments_all_sets(v.Cl, v.Cm, v.Cn, aa, bb)
+                case["moments"] = moments_all_sets(v.Cl, v.Cm, v.Cn, aa, bb,
+                                                   b_ref=b_ref, c_ref=c_ref)
             out["perturbed_cases"][k] = case
     return out
 
@@ -1256,7 +1276,9 @@ def batch_evaluate(
         tot = res.totals
         cd, basis, ld = drag_and_ld(tot)
         S, b = float(ac.S_ref), float(ac.b_ref)
-        _, cm_ax, _ = _apply_axes(tot.Cl, tot.Cm, tot.Cn, c["alpha_deg"], c["beta_deg"], ax)
+        b_ref, c_ref = float(ac.b_ref), float(ac.c_ref)
+        _, cm_ax, _ = _apply_axes(tot.Cl, tot.Cm, tot.Cn, c["alpha_deg"], c["beta_deg"], ax,
+                                  b_ref=b_ref, c_ref=c_ref)
         device, precision = result_device_precision(res)
         row: dict[str, Any] = {
             "index": i, "name": name,
@@ -1279,7 +1301,8 @@ def batch_evaluate(
             row.update(_mesh_note(True, s_used))
         if ax == "all":
             row["moments"] = moments_all_sets(
-                tot.Cl, tot.Cm, tot.Cn, c["alpha_deg"], c["beta_deg"])
+                tot.Cl, tot.Cm, tot.Cn, c["alpha_deg"], c["beta_deg"],
+                b_ref=b_ref, c_ref=c_ref)
         ranked.append(row)
     failed.sort(key=lambda f: f["index"])
 
@@ -1648,11 +1671,15 @@ def trim(
     tr = vt.trim(ac, fc, case_sett, CL_target=cl_t, pitch_control=pitch, roll_control=roll,
                  yaw_control=yaw, alpha_bounds_deg=(lo, hi), max_iterations=max_iter)
 
+    if ac.b_ref is None or ac.c_ref is None:
+        ac.compute_reference_values()
+    b_ref, c_ref = float(ac.b_ref), float(ac.c_ref)
     vals = (tr.Cl, tr.Cm, tr.Cn)
     if ax in ("body", "all") or not all(np.isfinite(v) for v in vals):
         cl_ax, cm_ax, cn_ax = (float(v) for v in vals)
     else:
-        cl_ax, cm_ax, cn_ax = moments_in_axes(tr.Cl, tr.Cm, tr.Cn, tr.alpha_deg, c["beta_deg"], ax)
+        cl_ax, cm_ax, cn_ax = moments_in_axes(tr.Cl, tr.Cm, tr.Cn, tr.alpha_deg, c["beta_deg"], ax,
+                                             b_ref=b_ref, c_ref=c_ref)
     trimmed = tr.status == "trimmed"
     # Device and precision of the trim solves (trim uses the selected device).
     if tr.device in ("none", "", None):
@@ -1699,7 +1726,8 @@ def trim(
         "axes": ax,
     }
     if ax == "all" and all(np.isfinite(v) for v in vals):
-        out["moments"] = moments_all_sets(tr.Cl, tr.Cm, tr.Cn, tr.alpha_deg, c["beta_deg"])
+        out["moments"] = moments_all_sets(tr.Cl, tr.Cm, tr.Cn, tr.alpha_deg, c["beta_deg"],
+                                          b_ref=b_ref, c_ref=c_ref)
     if dl in ("standard", "full"):
         out["residual_history"] = [float(v) for v in tr.residual_history]
     if dl == "full":

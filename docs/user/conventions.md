@@ -25,9 +25,14 @@ coefficients `CL`, `CD` and `CY` keep their present definitions
 | `stability` | The body axes turned by the angle of attack `alpha` about the y axis, so that x lies along the projection of the free stream on the plane of symmetry. |
 | `wind` | The stability axes turned by the sideslip angle `beta` about the z axis, so that x lies along the free stream. |
 
+The physical rotation acts on the dimensional moment vector (L_x, M_y, N_z).
+Because Cl and Cn use b_ref while Cm uses c_ref, the coefficient vector
+C = (Cl, Cm, Cn) transforms as:
+
+    C' = L^-1 R L C,   with L = diag(b_ref, c_ref, b_ref)
+
 With `ca = cos(alpha)`, `sa = sin(alpha)`, `cb = cos(beta)`,
-`sb = sin(beta)` (alpha and beta in rad), a moment vector transforms as
-`M_out = R M_in`:
+`sb = sin(beta)` (alpha and beta in rad), the rotation matrices are:
 
 - Body to stability (rotation by `alpha` about y):
 
@@ -36,6 +41,9 @@ R_bs = [[ca, 0, sa],
         [ 0, 1,  0],
         [-sa, 0, ca]]
 ```
+
+Because `R_bs` mixes only Cl and Cn which both use `b_ref`, `L^-1 R_bs L = R_bs`.
+The transform equals the plain rotation for stability axes.
 
 - Stability to wind (rotation by `-beta` about z):
 
@@ -47,9 +55,13 @@ R_sw = [[cb, sb, 0],
 
 - Body to wind: `R_bw = R_sw R_bs`. The inverse maps use the transpose.
 
+When `beta` is not 0 and `b_ref` is not equal to `c_ref`, Cl and Cm mix, and
+`L^-1 R_bw L` scales each component by the reference lengths.
+
 Two checks: at `alpha = 90` deg and `beta = 0`, `(Cl, Cm, Cn) = (1, 2, 3)`
 gives `(3, 2, -1)` in stability and wind axes. At `alpha = 0` and
-`beta = 90` deg it gives `(2, -1, 3)` in wind axes. The function
+`beta = 90` deg, `(Cl, Cm, Cn) = (1, 2, 3)` gives `(2, -1, 3)` when
+`b_ref = c_ref = 1`, and `(1, -2, 3)` when `b_ref = 2` and `c_ref = 1`. The function
 `ventorum.core.axes.transform_moments` applies these maps, and
 `SolverResult.moments(axes=...)` returns the stored body-axis moments in
 the selected system (`axes="all"` returns the three sets).

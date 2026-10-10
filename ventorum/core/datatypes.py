@@ -1293,6 +1293,9 @@ class SolverResult:
     symmetry_used: bool = False  # Records if Y=0 symmetry plane was utilized
     # Solver internals kept for post-processing (lattice, loads, ground plane).
     details: dict[str, Any] = field(default_factory=dict)
+    # Reference span and chord [m] of the solve.
+    b_ref: float | None = None
+    c_ref: float | None = None
 
     def clone(self) -> SolverResult:
         """Fast explicit clone."""
@@ -1308,6 +1311,8 @@ class SolverResult:
             execution_time=self.execution_time,
             symmetry_used=self.symmetry_used,
             details=dict(self.details),
+            b_ref=self.b_ref,
+            c_ref=self.c_ref,
         )
 
     def __copy__(self) -> SolverResult:
@@ -1337,21 +1342,28 @@ class SolverResult:
         Raises
         ------
         ValueError
-            If *axes* is not a known value.
+            If *axes* is not a known value, or if *b_ref* or *c_ref*
+            is None when expressing moments in non-body axes.
         """
-        from ventorum.core.axes import transform_moments
-
         if axes not in ("body", "stability", "wind", "all"):
             raise ValueError(f"'axes' must be one of ['body', 'stability', 'wind', 'all'], got {axes!r}.")
+        tot = self.totals
+        if axes == "body":
+            return {"Cl": float(tot.Cl), "Cm": float(tot.Cm), "Cn": float(tot.Cn)}
+        if self.b_ref is None:
+            raise ValueError(f"'b_ref' is required to express moments in {axes!r} axes.")
+        if self.c_ref is None:
+            raise ValueError(f"'c_ref' is required to express moments in {axes!r} axes.")
+        from ventorum.core.axes import transform_moments
+
         alpha = float(self.condition.alpha) if self.condition is not None else 0.0
         beta = float(self.condition.beta) if self.condition is not None else 0.0
-        tot = self.totals
         if axes == "all":
             return {
-                name: transform_moments(tot.Cl, tot.Cm, tot.Cn, alpha, beta, name)
+                name: transform_moments(tot.Cl, tot.Cm, tot.Cn, alpha, beta, name, b_ref=self.b_ref, c_ref=self.c_ref)
                 for name in ("body", "stability", "wind")
             }
-        return transform_moments(tot.Cl, tot.Cm, tot.Cn, alpha, beta, axes)
+        return transform_moments(tot.Cl, tot.Cm, tot.Cn, alpha, beta, axes, b_ref=self.b_ref, c_ref=self.c_ref)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

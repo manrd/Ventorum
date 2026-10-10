@@ -266,7 +266,7 @@ class LatticeSolver(BaseSolver):
             v_control=getattr(info, "v_control", None),
         )
         return self._case_result(lattice, condition, loads, info, gamma, ground, h_min, notes, wd,
-                                 c_ref, main_surface, t0, ref_point=ref_point)
+                                 b_ref, c_ref, main_surface, t0, ref_point=ref_point)
 
     def _case_setup(
         self,
@@ -331,6 +331,7 @@ class LatticeSolver(BaseSolver):
         h_min: float | None,
         notes: list[str],
         wd: np.ndarray,
+        b_ref: float,
         c_ref: float,
         main_surface: int,
         t0: float,
@@ -403,6 +404,8 @@ class LatticeSolver(BaseSolver):
             condition=condition,
             execution_time=(time.perf_counter() - t0) if execution_time is None else execution_time,
             symmetry_used=info.symmetric,
+            b_ref=float(b_ref),
+            c_ref=float(c_ref),
         )
         # Kept for advanced use (plots, diagnostics, ground-effect post-processing).
         res.details = {"lattice": lattice, "loads": loads, "ground": ground, "h_min": h_min,
@@ -575,7 +578,7 @@ class LatticeSolver(BaseSolver):
             )
         share = (time.perf_counter() - t0) / len(conditions)
         return [
-            self._case_result(lattice, cond, ld, info, g, st[0], st[1], st[2], st[3], c_ref, main_surface,
+            self._case_result(lattice, cond, ld, info, g, st[0], st[1], st[2], st[3], b_ref, c_ref, main_surface,
                               t0, execution_time=share, ref_point=ref_point)
             for cond, ld, (g, _, info), st in zip(conditions, loads, sols, setups)
         ]

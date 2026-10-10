@@ -22,13 +22,20 @@ definitions (relative to the free stream) in every set; only the moment
 coefficients Cl, Cm and Cn change with the axes.
 
 Rotation matrices (alpha and beta in rad, ca = cos(alpha) and so on).
-A moment vector M = (Cl, Cm, Cn) transforms as M_out = R M_in.
+The physical rotation acts on the dimensional moment vector (L_x, M_y, N_z).
+Because Cl and Cn use b_ref while Cm uses c_ref, the coefficient vector
+C = (Cl, Cm, Cn) transforms as:
+
+    C' = L^-1 R L C,   with L = diag(b_ref, c_ref, b_ref)
 
 Body to stability (rotation by alpha about y)::
 
     R_bs = [[ca, 0, sa],
             [ 0, 1,  0],
             [-sa, 0, ca]]
+
+Because R_bs mixes only Cl and Cn which both use b_ref, L^-1 R_bs L = R_bs.
+The transform equals the plain rotation for stability axes.
 
 Stability to wind (rotation by beta about z, so that x meets the flight
 velocity, whose stability-frame components are (cos(beta), sin(beta), 0)
@@ -43,10 +50,17 @@ Body to wind::
 
     R_bw = R_sw R_bs
 
-The inverse maps use the transpose, since the matrices are orthogonal.
+When beta is not 0 and b_ref is not equal to c_ref, Cl and Cm mix, and
+L^-1 R_bw L scales each component by the reference lengths. For example,
+at alpha = 0 and beta = 90 deg, (Cl, Cm, Cn) = (1, 2, 3) gives (2, -1, 3)
+when b_ref = c_ref = 1, and (1, -2, 3) when b_ref = 2 and c_ref = 1.
+
+The inverse maps use the transpose, since the rotation matrices are orthogonal.
 """
 
 from __future__ import annotations
+
+import math
 
 import numpy as np
 
@@ -114,6 +128,70 @@ def rotation_body_to_wind(alpha: float, beta: float) -> np.ndarray:
     return rotation_stability_to_wind(beta) @ rotation_body_to_stability(alpha)
 
 
+def moment_axes_matrix(
+    alpha: float,
+    beta: float,
+    to: str,
+    from_axes: str = "body",
+    *,
+    b_ref: float,
+    c_ref: float,
+) -> np.ndarray:
+    """Return the matrix that transforms moment coefficients.
+
+    The matrix M transforms C = (Cl, Cm, Cn) from *from_axes* to *to*,
+    so that C_to = M @ C_from. The map uses M = L^-1 R_to R_from^T L,
+    where L = diag(b_ref, c_ref, b_ref) [m].
+
+    Parameters
+    ----------
+    alpha : float
+        Angle of attack [rad].
+    beta : float
+        Sideslip angle [rad], positive for wind from the right.
+    to : str
+        Target system: ``"body"``, ``"stability"`` or ``"wind"``.
+    from_axes : str, optional
+        Source system (default ``"body"``).
+    b_ref : float
+        Reference span [m], must be finite and positive.
+    c_ref : float
+        Reference chord [m], must be finite and positive.
+
+    Returns
+    -------
+    numpy.ndarray
+        Matrix of shape (3, 3).
+
+    Raises
+    ------
+    ValueError
+        If *to* or *from_axes* is not a known axis system, or if *b_ref*
+        or *c_ref* is not finite or not positive.
+
+    References
+    ----------
+    B. L. Stevens, F. L. Lewis and E. N. Johnson, Aircraft Control and
+    Simulation, 3rd ed., Wiley, 2016, chapter 2.
+    """
+    _check_axes("to", to)
+    _check_axes("from_axes", from_axes)
+    b_val = float(b_ref)
+    if not (math.isfinite(b_val) and b_val > 0.0):
+        raise ValueError(f"'b_ref' must be finite and positive, got {b_ref!r}.")
+    c_val = float(c_ref)
+    if not (math.isfinite(c_val) and c_val > 0.0):
+        raise ValueError(f"'c_ref' must be finite and positive, got {c_ref!r}.")
+
+    r_bs = rotation_body_to_stability(float(alpha))
+    r_bw = rotation_body_to_wind(float(alpha), float(beta))
+    rotations = {"body": np.eye(3), "stability": r_bs, "wind": r_bw}
+    r_rel = rotations[to] @ rotations[from_axes].T
+    L = np.diag([b_val, c_val, b_val])
+    Li = np.diag([1.0 / b_val, 1.0 / c_val, 1.0 / b_val])
+    return Li @ r_rel @ L
+
+
 def transform_moments(
     Cl: float,
     Cm: float,
@@ -122,6 +200,9 @@ def transform_moments(
     beta: float,
     to: str,
     from_axes: str = "body",
+    *,
+    b_ref: float,
+    c_ref: float,
 ) -> dict[str, float]:
     """Express moment coefficients in another axis system.
 
@@ -141,6 +222,10 @@ def transform_moments(
         Target system: ``"body"``, ``"stability"`` or ``"wind"``.
     from_axes : str, optional
         Source system (default ``"body"``).
+    b_ref : float
+        Reference span [m], must be finite and positive.
+    c_ref : float
+        Reference chord [m], must be finite and positive.
 
     Returns
     -------
@@ -150,14 +235,15 @@ def transform_moments(
     Raises
     ------
     ValueError
-        If *to* or *from_axes* is not a known axis system.
+        If *to* or *from_axes* is not a known axis system, or if *b_ref*
+        or *c_ref* is not finite or not positive.
+
+    References
+    ----------
+    B. L. Stevens, F. L. Lewis and E. N. Johnson, Aircraft Control and
+    Simulation, 3rd ed., Wiley, 2016, chapter 2.
     """
-    _check_axes("to", to)
-    _check_axes("from_axes", from_axes)
+    m = moment_axes_matrix(alpha, beta, to, from_axes, b_ref=b_ref, c_ref=c_ref)
     vec = np.array([float(Cl), float(Cm), float(Cn)], dtype=float)
-    r_bs = rotation_body_to_stability(alpha)
-    r_bw = rotation_body_to_wind(alpha, beta)
-    to_body = {"body": np.eye(3), "stability": r_bs.T, "wind": r_bw.T}
-    from_body = {"body": np.eye(3), "stability": r_bs, "wind": r_bw}
-    out = from_body[to] @ (to_body[from_axes] @ vec)
+    out = m @ vec
     return {"Cl": float(out[0]), "Cm": float(out[1]), "Cn": float(out[2])}

@@ -311,16 +311,20 @@ def moments_in_axes(
     alpha_deg: float,
     beta_deg: float,
     axes: str,
+    *,
+    b_ref: float,
+    c_ref: float,
 ) -> tuple[float, float, float]:
     """Return the body-axis triple (Cl, Cm, Cn) expressed in *axes*.
 
     *alpha_deg* and *beta_deg* are the angle of attack and the sideslip
     angle [deg]. *axes* is ``"body"``, ``"stability"`` or ``"wind"``.
+    *b_ref* and *c_ref* [m] are the reference span and chord.
     """
     from ventorum.core.axes import transform_moments
 
     m = transform_moments(Cl, Cm, Cn, float(np.radians(alpha_deg)), float(np.radians(beta_deg)),
-                          axes)
+                          axes, b_ref=b_ref, c_ref=c_ref)
     return float(m["Cl"]), float(m["Cm"]), float(m["Cn"])
 
 
@@ -330,12 +334,18 @@ def moments_all_sets(
     Cn: float,
     alpha_deg: float,
     beta_deg: float,
+    *,
+    b_ref: float,
+    c_ref: float,
 ) -> dict[str, dict[str, float | None]]:
-    """Return the moment triple in the body, stability and wind axes."""
+    """Return the moment triple in the body, stability and wind axes.
+
+    *b_ref* and *c_ref* [m] are the reference span and chord.
+    """
     from ventorum.core.axes import transform_moments
 
     alpha, beta = float(np.radians(alpha_deg)), float(np.radians(beta_deg))
     return {
-        name: {k: rnd(v) for k, v in transform_moments(Cl, Cm, Cn, alpha, beta, name).items()}
+        name: {k: rnd(v) for k, v in transform_moments(Cl, Cm, Cn, alpha, beta, name, b_ref=b_ref, c_ref=c_ref).items()}
         for name in ("body", "stability", "wind")
     }

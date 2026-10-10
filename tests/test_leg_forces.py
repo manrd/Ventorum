@@ -50,7 +50,7 @@ def _solve(ac, alpha_deg, beta_deg=0.0, n_panels=16, n_chord=4):
 def _stability_cn(res, alpha_deg, beta_deg=0.0):
     t = res.totals
     return float(transform_moments(t.Cl, t.Cm, t.Cn, np.radians(alpha_deg), np.radians(beta_deg),
-                                   "stability")["Cn"])
+                                   "stability", b_ref=float(res.b_ref), c_ref=float(res.c_ref))["Cn"])
 
 
 def _trefftz_yaw(res, ac, fc):
@@ -116,7 +116,8 @@ def test_flat_wing_rolling_moment_due_to_sideslip_against_naca_tn1669(aspect_rat
     for beta in (2.0, -2.0):
         res, _ = _solve(ac, alpha_deg=4.0, beta_deg=beta, n_panels=24, n_chord=8)
         t = res.totals
-        cl.append(float(transform_moments(t.Cl, t.Cm, t.Cn, np.radians(4.0), np.radians(beta), "stability")["Cl"]))
+        cl.append(float(transform_moments(t.Cl, t.Cm, t.Cn, np.radians(4.0), np.radians(beta), "stability",
+                                          b_ref=float(res.b_ref), c_ref=float(res.c_ref))["Cl"]))
     res0, _ = _solve(ac, alpha_deg=4.0, n_panels=24, n_chord=8)
     slope = (cl[0] - cl[1]) / 4.0 / res0.totals.CL
     assert slope < 0.0  # stable effective dihedral, as measured
