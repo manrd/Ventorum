@@ -45,6 +45,9 @@ myst_heading_anchors = 3
 
 # API reference from the NumPy-style docstrings.
 autosummary_generate = True
+# NVIDIA Warp is the optional extra "gpu". It is not installed on the CI
+# documentation runners, so the GPU modules import a mock of it.
+autodoc_mock_imports = ["warp"]
 autodoc_default_options = {"members": True, "show-inheritance": True}
 autodoc_typehints = "description"
 autodoc_member_order = "bysource"
