@@ -65,6 +65,11 @@ a minor version can change a public interface.
   measured speed tables and gives no typed speed ratios.
 - Continuous integration uses the first versions of the checkout and setup-python actions that
   run on Node.js 24.
+- Ground-effect sweeps on the CPU solve their cases as batches (one dense solve and one loads
+  pass per chunk), grouped by unknown map, with the probe lattice from the lattice cache. The
+  induced drag in the Trefftz plane uses one half of a symmetric case. The results are the same
+  to round-off (the induced drag changes by about 1e-14 relative). The sweep does not change the
+  device setting.
 
 ### Fixed
 
