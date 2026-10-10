@@ -22,7 +22,7 @@ The chapters contain no result values. The values of the model parameters come f
 | [Numerical lifting line](numerical_lifting_line.md) | Linear and nonlinear lifting line with section polars | W. F. Phillips and D. O. Snyder (2000); W. F. Phillips (2004) |
 | [Vortex-lattice method](vortex_lattice.md) | Bent horseshoe vortices on chordwise panels and deformed geometry | V. M. Falkner (1943); Katz and Plotkin (2001); M. Drela (2014) |
 | [Forces and moments](forces_and_moments.md) | Kutta-Joukowski near-field forces, Trefftz-plane induced drag, section data, static derivatives | Katz and Plotkin (2001); Drela (2014); E. Trefftz (1921) |
-| [Ground effect](ground_effect.md) | Method of images over flat ground, height and bank derivatives, Irodov criterion | C. Wieselsberger (1921); K. V. Rozhdestvensky (2000, 2006); R. D. Irodov (1970) |
+| [Ground effect](ground_effect.md) | Method of images over flat ground, height and bank derivatives (one state or a sweep), Irodov criterion | C. Wieselsberger (1921); K. V. Rozhdestvensky (2000, 2006); R. D. Irodov (1970) |
 | [Control surfaces](control_surfaces.md) | Thin-airfoil flap theory, panel deflection and section modification, hinge moments, control derivatives | H. Glauert (1926); Katz and Plotkin (2001); Etkin and Reid (1996) |
 | [Body rates](rotation_rates.md) | Quasi-steady rotation in the boundary condition and the loads, rate derivatives p, q, r | Katz and Plotkin (2001); Etkin and Reid (1996); Phillips and Snyder (2000) |
 | [Trim solver](trim.md) | Longitudinal and lateral trim for target lift and zero moments | B. Etkin and L. D. Reid (1996); J. E. Dennis and R. B. Schnabel (1996) |

@@ -73,6 +73,10 @@ from ventorum.solvers.rate_derivatives import (  # noqa: F401
     rate_axes_transform,
     rate_derivatives,
 )
+from ventorum.solvers.height_derivatives import (  # noqa: F401
+    HeightDerivativesResult,
+    height_derivatives,
+)
 from ventorum.aero.polars import (  # noqa: F401
     load_xfoil_polar,
     load_csv_polar,

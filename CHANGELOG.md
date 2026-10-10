@@ -10,6 +10,12 @@ a minor version can change a public interface.
 
 ### Added
 
+- Height derivatives: `height_derivatives` gives the static derivatives of one flight state in
+  ground effect (`FlightCondition.h` set): CL, CD, CY, Cl, Cm and Cn with respect to alpha, beta,
+  the bank angle and h/c_ref, about the moment reference point with its height held fixed (central
+  differences, one batch on one mesh, on the selected device), and the pitch and height
+  aerodynamic centres with the Irodov margin of that state. Moments in body, stability or wind axes
+  (with the reference lengths b and c).
 - Body rates and rate derivatives: `FlightCondition` has the body angular rates `p`, `q`, `r`
   [rad/s] (flight-dynamics body axes, rotation about the moment reference point). The vortex lattice
   and the linear and nonlinear lifting lines solve the quasi-steady rotating flow, in free air and in
