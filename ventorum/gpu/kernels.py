@@ -866,8 +866,13 @@ def _build(precision: str) -> SimpleNamespace:  # noqa: C901 - one closure per k
             Fp = (rk * g) * wp.cross(Vd + vmid[k, p], lvec[p])
             M = M + wp.cross(mid[p] - rp, Fp)
             if use_leg != 0:
-                Fa = (rk * g) * wp.cross(Vd + vla[k, p], lega[p])
-                Fb = (rk * g) * wp.cross(Vd + vlb[k, p], legb[p])
+                # Tangential velocity only (see compute_loads_batch).
+                va = Vd + vla[k, p]
+                vb = Vd + vlb[k, p]
+                va = va - wp.dot(va, nrm[s]) * nrm[s]
+                vb = vb - wp.dot(vb, nrm[s]) * nrm[s]
+                Fa = (rk * g) * wp.cross(va, lega[p])
+                Fb = (rk * g) * wp.cross(vb, legb[p])
                 M = M + wp.cross(lmida[p] - rp, Fa) + wp.cross(lmidb[p] - rp, Fb)
                 Fp = Fp + Fa + Fb
             F = F + Fp

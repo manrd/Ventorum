@@ -376,7 +376,10 @@ def compute_loads(
         Apply the Kutta-Joukowski force also to the trailing legs that lie on
         the surface (from the bound vortex to the trailing edge). These legs
         are bound vorticity of the lifting surface; their force is not zero
-        in sideslip, on non-planar surfaces and near the ground. Default:
+        in sideslip, on non-planar surfaces and near the ground. The leg force
+        uses only the velocity tangent to the strip surface: the surface is
+        impermeable, so the normal velocity at the leg points (the leak of
+        the discrete lattice) carries no force. Default:
         True for the vortex-lattice method, False for the lifting line (whose
         model has no chordwise extent; forces on the bound vortex only, as in
         Phillips and Snyder).
@@ -483,12 +486,14 @@ def compute_loads_batch(
             leg_end = np.vstack([lattice.a, lattice.b_te])
             leg_mid = np.vstack([points[1], points[2]])
             leg_vec = leg_end - leg_start
+            strip_normal = lattice.normal[lattice.panel_strip]
+            leg_normal = np.vstack([strip_normal, strip_normal])
         else:
-            leg_mid = leg_vec = None
+            leg_mid = leg_vec = leg_normal = None
         l_vec = lattice.b - lattice.a
-        cached_geom = (points, swap, l_vec, leg_mid, leg_vec)
+        cached_geom = (points, swap, l_vec, leg_mid, leg_vec, leg_normal)
         lattice.geom_cache[geom_key] = cached_geom
-    points, swap, l_vec, leg_mid, leg_vec = cached_geom
+    points, swap, l_vec, leg_mid, leg_vec, leg_normal = cached_geom
 
     reuse = v_controls is not None and not use_leg and lattice.collocation == "llt"
     if reuse:
@@ -505,7 +510,15 @@ def compute_loads_batch(
     if use_leg:
         v_leg = np.concatenate([v_all[1], v_all[2]], axis=1)
         g_leg = np.concatenate([G, G], axis=1)
-        F_leg = rho[:, None, None] * g_leg[:, :, None] * _cross(Vd + v_leg, leg_vec)
+        # Only the velocity tangent to the surface acts on a leg. The surface is
+        # impermeable, so its bound vorticity carries no force from a normal
+        # velocity; the normal velocity at the leg points is the leak of the
+        # discrete lattice between its control points. Its force would be an
+        # in-plane force (for example an aileron side force about 60 % too
+        # large against the far field).
+        V_leg = Vd + v_leg
+        V_leg = V_leg - np.sum(V_leg * leg_normal, axis=-1)[:, :, None] * leg_normal
+        F_leg = rho[:, None, None] * g_leg[:, :, None] * _cross(V_leg, leg_vec)
         M_geo += np.sum(_cross(leg_mid - rp, F_leg), axis=1)
         F_panel = F_panel + F_leg[:, :n_p] + F_leg[:, n_p:]
     F_strip = F_panel.reshape(K, n_s, n_c, 3).sum(axis=2)

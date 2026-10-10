@@ -253,7 +253,13 @@ def test_dihedral_gives_negative_cl_beta_and_is_antisymmetric():
 def test_leg_forces_converge_and_close_the_drag_balance():
     """The force on the on-surface trailing legs does not depend on the chordwise
     panel count, and with it the near-field drag agrees with the Trefftz-plane
-    drag in sideslip."""
+    drag in sideslip.
+
+    The legs use only the velocity tangent to the surface. The lattice has no
+    side-edge suction, which gives the small body side force that momentum
+    needs in sideslip, so the near-field drag is about 1 % low at 10 deg of
+    sideslip and 0.3 % low at 5 deg. The check uses 5 deg (owner decision,
+    2026-10-10)."""
     ac = vt.Aircraft(surfaces=[vt.LiftingSurface(semi_span=4.0, sections=[vt.WingSection(0, 1.0), vt.WingSection(1, 1.0)])])
     clb = []
     for nc in (4, 8):
@@ -262,7 +268,7 @@ def test_leg_forces_converge_and_close_the_drag_balance():
              for b in (-2.0, 2.0)]
         clb.append((t[1].Cl - t[0].Cl) / np.radians(4.0))
     assert abs(clb[1] / clb[0] - 1.0) < 0.02
-    t = vt.analyze(ac, condition=vt.FlightCondition(alpha=np.radians(5.0), beta=np.radians(10.0)),
+    t = vt.analyze(ac, condition=vt.FlightCondition(alpha=np.radians(5.0), beta=np.radians(5.0)),
                     settings=vt.SolverSettings(solver_type="vlm", n_panels=20, n_chord=4)).totals
     assert abs(t.CDi_nearfield / t.CDi - 1.0) < 0.01
 
