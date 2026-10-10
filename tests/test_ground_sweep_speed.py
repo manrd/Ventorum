@@ -15,7 +15,15 @@ from ventorum.geometry import lattice_cache
 from ventorum.ground_effect import solver as ge_solver
 from ventorum.ground_effect import sweep as ge_sweep
 from ventorum.ground_effect.sweep import GroundEffectSweep
+from ventorum.solvers import core as solver_core
+from ventorum.solvers import horseshoe as horseshoe_module
+from ventorum.solvers import linear as linear_module
 from ventorum.solvers.factory import make_solver
+from ventorum.solvers.lattice_base import LatticeSolver
+
+# The lifting line warns below h_min/c = 2 in ground effect. The sweeps of
+# these tests are there on purpose: do not show these expected warnings.
+pytestmark = pytest.mark.filterwarnings("ignore:Lifting line in ground effect:RuntimeWarning")
 
 _GRID_KEYS = (
     "CL", "CDi", "CD", "CY", "Cl", "Cm", "Cn",
@@ -71,16 +79,22 @@ def rectangular_wing():
     )
 
 
+@pytest.mark.parametrize("phis", [(0.0,), (3.0,), (0.0, 3.0)], ids=["phi0", "phi3", "phi0_3"])
 @pytest.mark.parametrize("solver_type", ["vlm", "linear", "nonlinear"])
-def test_cpu_batch_sweep_equals_case_by_case(wing_tail_aircraft, solver_type, monkeypatch):
-    """CPU batch sweep gives the same rows as the case-by-case path."""
+def test_cpu_batch_sweep_equals_case_by_case(wing_tail_aircraft, solver_type, phis, monkeypatch):
+    """CPU batch sweep gives the same rows as the case-by-case path.
+
+    With one bank angle all cases have the same unknown map, so the batch
+    solves several cases in one call (K > 1). With two bank angles the
+    symmetric and the not symmetric cases form two groups.
+    """
     sett = vt.SolverSettings(solver_type=solver_type, n_panels=16)
     sweep = GroundEffectSweep(wing_tail_aircraft, settings=sett, backend="serial")
 
     # Grid: 3 heights above h_min/c >= 1.0, plus 1 height where some cases strike.
     heights = [0.1, 1.5, 2.0, 3.0]
     alphas = [0.0, 2.0, 4.0, 6.0]
-    phis = [0.0, 3.0]
+    phis = list(phis)
 
     # Run batch sweep on CPU
     res_batch = sweep.run_sweep(heights, alphas, phis)
@@ -346,3 +360,87 @@ def test_parallel_sweeps_keep_the_device_and_the_results(wing_tail_aircraft, rec
         assert gpu.get_device() == "auto"
         for res_p, res_s in zip(parallel, serial):
             _assert_same_rows(res_p, res_s, rtol=0.0, label="(parallel threads)")
+
+
+@pytest.mark.parametrize("solver_type", ["vlm", "linear", "nonlinear"])
+def test_mixed_bank_sweep_has_no_batch_fallback(wing_tail_aircraft, solver_type, monkeypatch):
+    """A sweep with phi = 0 and phi = 3 deg solves each chunk as one batch.
+
+    Regression test: the symmetric cases (phi = 0) have half the unknowns of
+    the others. A chunk with both kinds made the batch solvers return None,
+    and the cases were solved one by one.
+    """
+    batch_returns = []
+
+    def spy(fn):
+        def wrapped(*args, **kwargs):
+            out = fn(*args, **kwargs)
+            batch_returns.append(out is not None)
+            return out
+        return wrapped
+
+    monkeypatch.setattr(horseshoe_module, "solve_vlm_batch", spy(horseshoe_module.solve_vlm_batch))
+    monkeypatch.setattr(linear_module, "solve_llt_linear_batch", spy(linear_module.solve_llt_linear_batch))
+    fallback_calls = []
+    orig_one_by_one = LatticeSolver.solve_circulation_batch
+
+    def spy_one_by_one(self, *args, **kwargs):
+        fallback_calls.append(len(args[1]))
+        return orig_one_by_one(self, *args, **kwargs)
+
+    # The subclasses call the one-by-one solve of the base class only when
+    # their batch cannot take the cases.
+    monkeypatch.setattr(LatticeSolver, "solve_circulation_batch", spy_one_by_one)
+
+    sweep = _serial_sweep(wing_tail_aircraft, solver_type, n_panels=12)
+    grid = ([1.5, 2.0], [0.0, 4.0], [0.0, 3.0])
+    res_batch = sweep.run_sweep(*grid)
+
+    assert fallback_calls == []
+    assert all(batch_returns)
+    if solver_type in ("vlm", "linear"):
+        assert len(batch_returns) == 2   # one call per group (symmetric, not symmetric)
+
+    monkeypatch.setattr(ge_sweep, "_cpu_batch", lambda *args, **kwargs: None)
+    res_single = sweep.run_sweep(*grid)
+    _assert_same_rows(res_batch, res_single, label=f"for solver {solver_type}")
+
+
+@pytest.mark.parametrize("solver_type", ["vlm", "linear", "nonlinear"])
+def test_chunk_size_uses_the_unknowns_of_its_cases(wing_tail_aircraft, solver_type, monkeypatch):
+    """Each chunk is sized with the unknown count of the cases that it contains.
+
+    Regression test: the chunk size came from the first case only. A first
+    symmetric case (half the unknowns) gave chunks of cases with twice the
+    unknowns, so up to 4 times the memory budget.
+    """
+    events = []
+    orig_chunk_size = ge_sweep._chunk_size
+
+    def spy_chunk_size(canonical, n_unknowns):
+        events.append(("chunk", n_unknowns))
+        return orig_chunk_size(canonical, n_unknowns)
+
+    monkeypatch.setattr(ge_sweep, "_chunk_size", spy_chunk_size)
+    solver_cls = type(make_solver(solver_type))
+    orig_batch = solver_cls.solve_circulation_batch
+
+    def spy_batch(self, lattice, conditions, settings, grounds, wake_dirs, continuation=True):
+        use_sym = getattr(settings, "use_symmetry", True)
+        ns = {solver_core._unknown_map(lattice, c, g, use_sym).n for c, g in zip(conditions, grounds)}
+        events.append(("solve", ns))
+        return orig_batch(self, lattice, conditions, settings, grounds, wake_dirs, continuation)
+
+    monkeypatch.setattr(solver_cls, "solve_circulation_batch", spy_batch)
+
+    # The first case is symmetric (phi = 0), the next one is not (phi = 3 deg).
+    _serial_sweep(wing_tail_aircraft, solver_type, n_panels=12).run_sweep([1.5, 2.0], [0.0, 4.0], [0.0, 3.0])
+
+    last_chunk_n = None
+    for kind, value in events:
+        if kind == "chunk":
+            last_chunk_n = value
+        else:
+            assert len(value) == 1, f"one chunk mixes unknown counts {sorted(value)}"
+            assert value == {last_chunk_n}
+    assert len([e for e in events if e[0] == "solve"]) == 2   # one chunk per group

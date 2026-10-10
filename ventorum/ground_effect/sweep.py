@@ -435,9 +435,48 @@ def _prepare_sweep_cases(
     rp: np.ndarray,
     height_ref: str,
 ) -> tuple[Any, list[tuple[tuple[int, int, int], dict[str, Any]]], dict[tuple[int, int, int], tuple[Any, None, Exception]]]:
-    """Prepare ground sweep cases, sharing one probe lattice from place_ground.
+    """Check the cases of a sweep and place their ground, with one shared probe lattice.
 
-    Returns (probe, prepared, outputs).
+    The probe lattice comes from :func:`ventorum.ground_effect.solver.place_ground`
+    (from the lattice cache). Each case is prepared with
+    :func:`ventorum.ground_effect.solver.prepare_ground_case`, as
+    :func:`ventorum.ground_effect.analyze_ground_effect` does. This helper
+    is shared by the GPU and the CPU batches of the sweep.
+
+    Parameters
+    ----------
+    ac : Aircraft
+        The aircraft.
+    sett : SolverSettings
+        Solver settings of the sweep.
+    cases : list of tuple of int
+        Grid indices ``(height, angle of attack, bank angle)`` of the cases.
+    h_arr : numpy.ndarray
+        Heights of the sweep [m].
+    a_arr : numpy.ndarray
+        Angles of attack of the sweep [deg].
+    p_arr : numpy.ndarray
+        Bank angles of the sweep [deg].
+    V_inf : float
+        Free-stream speed [m/s].
+    rho : float
+        Air density [kg/m^3].
+    rp : numpy.ndarray
+        Moment reference point [m], shape (3,).
+    height_ref : str
+        Convention of the heights (``"ref"``, ``"min"``, ``"qc"`` or ``"te"``).
+
+    Returns
+    -------
+    probe : VortexLattice
+        The probe lattice (one chordwise panel, read-only).
+    prepared : list of tuple
+        ``(case, data)`` of each valid case, in the order of *cases*. *data*
+        is the dictionary of ``prepare_ground_case`` (flight condition,
+        ground plane and the other values of the case).
+    outputs : dict
+        ``case -> (case, None, error)`` for each case that fails a check
+        (ground strike or validity error).
     """
     from ventorum.ground_effect.solver import place_ground, prepare_ground_case
 
@@ -522,7 +561,54 @@ def _cpu_batch(
     height_ref: str,
     backend: str = "auto",
 ) -> list | None:
-    """Solve cases of a sweep as batches on the CPU in chunks, or return None."""
+    """Solve the cases of a sweep as batches on the CPU, or return None.
+
+    The batch is used when *backend* is ``"serial"`` or when the lattice is
+    of the size class "small" (:func:`ventorum.hardware.profile.size_class`).
+    Each case is checked and its ground is placed as in
+    :func:`ventorum.ground_effect.analyze_ground_effect`
+    (``_prepare_sweep_cases``); the cases that fail a check keep their
+    error. The valid cases are put into groups with the same unknown map
+    (symmetric and not symmetric cases), because one batch solves only
+    cases with the same unknowns. Each group is solved in chunks that keep
+    the matrices of one chunk within ``_MAX_BATCH_BYTES``, with the CPU
+    branch of the solver (``LatticeSolver._solve_batch_cpu``, no
+    continuation). This function does not change the device setting of
+    :mod:`ventorum.gpu`.
+
+    Parameters
+    ----------
+    ac : Aircraft
+        The aircraft.
+    sett : SolverSettings
+        Solver settings of the sweep (with the fixed chordwise count).
+    cases : list of tuple of int
+        Grid indices ``(height, angle of attack, bank angle)`` of the cases.
+    h_arr : numpy.ndarray
+        Heights of the sweep [m].
+    a_arr : numpy.ndarray
+        Angles of attack of the sweep [deg].
+    p_arr : numpy.ndarray
+        Bank angles of the sweep [deg].
+    V_inf : float
+        Free-stream speed [m/s].
+    rho : float
+        Air density [kg/m^3].
+    rp : numpy.ndarray
+        Moment reference point [m], shape (3,).
+    height_ref : str
+        Convention of the heights (``"ref"``, ``"min"``, ``"qc"`` or ``"te"``).
+    backend : str, optional
+        Parallel backend of the sweep (``"thread"`` or ``"serial"``).
+
+    Returns
+    -------
+    list of tuple or None
+        The outputs ``(case, result, error)`` in the order of *cases*, or
+        None when the sweep uses the case-by-case path (no cases, a solver
+        without a lattice batch, or a lattice that is not small with a
+        backend other than ``"serial"``).
+    """
     from ventorum.ground_effect.solver import ground_case_result
     from ventorum.hardware.profile import size_class
     from ventorum.solvers.core import _unknown_map
@@ -543,25 +629,30 @@ def _cpu_batch(
     t0 = time.perf_counter()
     _, prepared, outputs = _prepare_sweep_cases(ac, sett, cases, h_arr, a_arr, p_arr, V_inf, rho, rp, height_ref)
     if prepared:
-        cond0 = prepared[0][1]["condition"]
-        g0 = prepared[0][1]["ground"]
-        umap = _unknown_map(lattice, cond0, g0, getattr(sett, "use_symmetry", True))
-        n_unknowns = umap.n if umap is not None else lattice.n_panels
-        chunk_sz = _chunk_size(canonical, n_unknowns)
-
-        all_results = []
-        for k0 in range(0, len(prepared), chunk_sz):
-            chunk = prepared[k0 : k0 + chunk_sz]
-            conds = [p["condition"] for _, p in chunk]
-            grounds = [p["ground"] for _, p in chunk]
-            # The CPU branch of solve_batch: no GPU check, no change of the
-            # device setting (safe when sweeps run in parallel threads).
-            chunk_res = solver._solve_batch_cpu(
-                lattice, conds, sett, ac.S_ref, ac.b_ref, ac.c_ref,
-                ref_point=rp, main_surface=ac.main_surface_index(),
-                continuation=False, grounds=grounds,
-            )
-            all_results.extend(chunk_res)
+        # One batch needs one unknown map (the same object, as the batch
+        # solvers check): group the cases by their map. The symmetric map
+        # has about half the unknowns. The groups keep the order of the cases.
+        use_sym = getattr(sett, "use_symmetry", True)
+        groups: dict[int, list[int]] = {}
+        n_of_group: dict[int, int] = {}
+        for idx, (_, p) in enumerate(prepared):
+            umap = _unknown_map(lattice, p["condition"], p["ground"], use_sym)
+            groups.setdefault(id(umap), []).append(idx)
+            n_of_group[id(umap)] = umap.n
+        all_results: list[Any] = [None] * len(prepared)
+        for key, members in groups.items():
+            chunk_sz = _chunk_size(canonical, n_of_group[key])
+            for k0 in range(0, len(members), chunk_sz):
+                chunk = members[k0: k0 + chunk_sz]
+                # The CPU branch of solve_batch: no GPU check, no change of the
+                # device setting (safe when sweeps run in parallel threads).
+                chunk_res = solver._solve_batch_cpu(
+                    lattice, [prepared[i][1]["condition"] for i in chunk], sett, ac.S_ref, ac.b_ref, ac.c_ref,
+                    ref_point=rp, main_surface=ac.main_surface_index(),
+                    continuation=False, grounds=[prepared[i][1]["ground"] for i in chunk],
+                )
+                for i, res in zip(chunk, chunk_res):
+                    all_results[i] = res
 
         share = (time.perf_counter() - t0) / len(prepared)
         for (case, p), res in zip(prepared, all_results):
