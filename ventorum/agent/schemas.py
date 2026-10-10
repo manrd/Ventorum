@@ -38,6 +38,7 @@ from ventorum.core.datatypes import (
 )
 from ventorum.core.constants import RHO_SL
 from ventorum.core.errors import VentorumError
+from ventorum.utils.validation import MIN_AREA_M2, MIN_CHORD_M, MIN_SPAN_M, MIN_SPEED_M_S
 
 
 class InputError(VentorumError):
@@ -146,17 +147,18 @@ AIRCRAFT_PROPS: dict[str, dict[str, Any]] = {
     "name": {"type": "string", "description": "Configuration name."},
     "surfaces": {"type": "array", "minItems": 1, "maxItems": 20,
                  "items": {"type": "object", "properties": SURFACE_PROPS, "additionalProperties": False},
-                 "description": "Lifting surfaces. The first one is the main wing (reference values)."},
+                 "description": "Lifting surfaces. The surface with the largest projected planform area "
+                                "is the main wing (reference values)."},
     "ref_point_m": _vec3("Moment reference point [x, y, z] in metres, geometry axes. Default [0, 0, 0]."),
-    "S_ref_m2": _num("Reference area [m^2]. Default: from the main wing.", exclusiveMinimum=0),
-    "b_ref_m": _num("Reference span [m]. Default: from the main wing.", exclusiveMinimum=0),
+    "S_ref_m2": _num("Reference area [m^2]. Default: from the main wing.", minimum=MIN_AREA_M2),
+    "b_ref_m": _num("Reference span [m]. Default: from the main wing.", minimum=MIN_SPAN_M),
     "c_ref_m": _num("Reference chord [m]. Default: mean aerodynamic chord of the main wing.",
-                    exclusiveMinimum=0),
+                    minimum=MIN_CHORD_M),
 }
 
 CONDITION_PROPS: dict[str, dict[str, Any]] = {
-    "V_inf_m_s": _num("Free-stream speed [m/s]. Default 50.", exclusiveMinimum=0, maximum=340),
-    "alpha_deg": _num("Angle of attack [deg]. Default 4.", minimum=-30, maximum=30),
+    "V_inf_m_s": _num("Free-stream speed [m/s]. Default 50.", minimum=MIN_SPEED_M_S, maximum=340),
+    "alpha_deg": _num("Angle of attack [deg]. Default 5.", minimum=-30, maximum=30),
     "beta_deg": _num("Sideslip [deg], positive = wind from the right. Default 0.", minimum=-30, maximum=30),
     "rho_kg_m3": _num("Air density [kg/m^3]. Default 1.225 (RHO_SL). Do not combine with altitude_m.",
                       exclusiveMinimum=0, maximum=2),
@@ -242,7 +244,12 @@ _HINTS = {
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def check_keys(obj: Any, allowed: dict[str, Any] | set[str] | list[str], where: str) -> dict[str, Any]:
-    """Check that *obj* is a dict with known keys only; return a copy of it."""
+    """Check that *obj* is a dict with known keys only; return a copy of it.
+
+    A key with the value None (JSON null) is refused: omit the key to get
+    its default. This applies to the tool arguments (through the
+    dispatcher) and to every nested object.
+    """
     if not isinstance(obj, dict):
         raise InputError(f"{where} must be a JSON object, got {type(obj).__name__}.")
     allowed_set = set(allowed)
@@ -257,6 +264,9 @@ def check_keys(obj: Any, allowed: dict[str, Any] | set[str] | list[str], where: 
                 msg += f" Hint: {hint}."
             msg += f" Allowed keys: {', '.join(sorted(allowed_set))}."
             raise InputError(msg)
+        if val is None:
+            raise InputError(f"{where}: '{key}' is null. Omit the key to use the default; "
+                             "explicit null is refused.")
         out[key] = val
     return out
 
@@ -311,14 +321,22 @@ def string(val: Any, name: str, choices: list[str] | tuple[str, ...] | None = No
 
 
 def vector3(val: Any, name: str) -> np.ndarray:
-    """Return a 3-component vector of numbers."""
+    """Return a 3-component vector of numbers. A 1-D numpy array is accepted."""
+    if isinstance(val, np.ndarray):
+        if val.ndim != 1:
+            raise InputError(f"'{name}' must be a list of 3 numbers [x, y, z] in metres, got {val!r}.")
+        val = val.tolist()
     if not isinstance(val, (list, tuple)) or len(val) != 3:
         raise InputError(f"'{name}' must be a list of 3 numbers [x, y, z] in metres, got {val!r}.")
     return np.array([number(v, f"{name}[{i}]") for i, v in enumerate(val)], dtype=float)
 
 
 def number_list(val: Any, name: str, *, min_len: int = 1, max_len: int = 100, **limits: Any) -> list[float]:
-    """Return a list of numbers."""
+    """Return a list of numbers. A 1-D numpy array is accepted."""
+    if isinstance(val, np.ndarray):
+        if val.ndim != 1:
+            raise InputError(f"'{name}' must be a list of numbers, got {val!r}.")
+        val = val.tolist()
     if not isinstance(val, (list, tuple)):
         raise InputError(f"'{name}' must be a list of numbers, got {val!r}.")
     if not (min_len <= len(val) <= max_len):
@@ -339,8 +357,11 @@ def _limits(prop: dict[str, Any]) -> dict[str, Any]:
 
 def _num_key(d: dict[str, Any], key: str, props: dict[str, dict[str, Any]], where: str,
              default: float | None = None) -> float | None:
-    if key not in d or d[key] is None:
+    if key not in d:
         return default
+    if d[key] is None:
+        raise InputError(f"'{where}.{key}' is null. Omit the key to use the default; "
+                         "explicit null is refused.")
     return number(d[key], f"{where}.{key}", **_limits(props[key]))
 
 
@@ -528,7 +549,7 @@ def parse_condition(spec: Any, *, allow: tuple[str, ...] | None = None,
         raise InputError(f"{where}: give 'rho_kg_m3' or 'altitude_m', not both.")
     out = {
         "V_inf_m_s": _num_key(d, "V_inf_m_s", CONDITION_PROPS, where, 50.0),
-        "alpha_deg": _num_key(d, "alpha_deg", CONDITION_PROPS, where, 4.0),
+        "alpha_deg": _num_key(d, "alpha_deg", CONDITION_PROPS, where, 5.0),
         "beta_deg": _num_key(d, "beta_deg", CONDITION_PROPS, where, 0.0),
         "h_m": _num_key(d, "h_m", CONDITION_PROPS, where, None),
     }
@@ -564,7 +585,10 @@ def parse_settings(spec: Any, where: str = "settings") -> SolverSettings:
         s.solver_type = string(d["solver"], f"{where}.solver", SETTINGS_PROPS["solver"]["enum"])
     if "n_panels" in d:
         s.n_panels = integer(d["n_panels"], f"{where}.n_panels", minimum=4, maximum=400)
-    if "n_chord" in d and d["n_chord"] is not None:
+    if "n_chord" in d:
+        if d["n_chord"] is None:
+            raise InputError(f"'{where}.n_chord' is null. Omit the key for the automatic value; "
+                             "explicit null is refused.")
         s.n_chord = integer(d["n_chord"], f"{where}.n_chord", minimum=1, maximum=64)
     if "wake_alignment" in d:
         s.wake_alignment = string(d["wake_alignment"], f"{where}.wake_alignment",
@@ -675,7 +699,7 @@ AGENT_TOOL_DEFINITIONS: list[dict[str, Any]] = [
                               "minItems": 1, "maxItems": 20,
                               "description": "Heights above the ground [m] of the point that height_ref "
                                              "selects. Metres, not h/b or h/c."},
-                "alpha_deg": _num("Angle of attack = pitch attitude to the ground [deg]. Default 4.",
+                "alpha_deg": _num("Angle of attack = pitch attitude to the ground [deg]. Default 5.",
                                   minimum=-30, maximum=30),
                 "phi_deg": _num("Bank angle [deg], positive = right wing down. Default 0.",
                                 minimum=-60, maximum=60),
@@ -685,7 +709,7 @@ AGENT_TOOL_DEFINITIONS: list[dict[str, Any]] = [
                                               "reference point, 'min' the lowest point of the geometry, "
                                               "'qc' / 'te' the root quarter chord / trailing edge of the "
                                               "main wing."},
-                "V_inf_m_s": _num("Free-stream speed [m/s]. Default 50.", exclusiveMinimum=0, maximum=340),
+                "V_inf_m_s": _num("Free-stream speed [m/s]. Default 50.", minimum=MIN_SPEED_M_S, maximum=340),
                 "rho_kg_m3": _num("Air density [kg/m^3]. Default 1.225 (RHO_SL).", exclusiveMinimum=0, maximum=2),
                 "ref_point_m": _vec3("Moment reference point [x, y, z] in metres. Default: the aircraft "
                                      "ref_point_m, else [0, 0, 0]."),

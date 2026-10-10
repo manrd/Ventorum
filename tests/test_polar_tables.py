@@ -130,7 +130,7 @@ def test_blend_of_equal_ranges_does_not_warn():
 
 
 def test_strip_section_data_do_not_depend_on_the_table_order():
-    """Review of T-0004: the lattice reads Cd0 and Cm0 from the sorted tables.
+    """The lattice reads Cd0 and Cm0 from the sorted tables.
 
     The arrays are stored as the user gives them, so code that reads them
     directly with np.interp (which needs ascending angles) gave wrong values

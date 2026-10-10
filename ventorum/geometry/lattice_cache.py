@@ -59,7 +59,7 @@ def _fingerprint(obj: Any) -> Any:
 #: key, so that code which replaces one (for example the verification of
 #: forced core groups) never gets a lattice built with the original.
 _BUILD_HELPERS = ("core_groups", "near_miss_warnings", "surface_edge_geometry", "surface_reference_line",
-                  "resolve_spacing", "_surface_eta", "airfoil_linear_properties", "check_overlaps",
+                  "resolve_spacing", "_surface_eta", "_surface_mesh_eta", "airfoil_linear_properties", "check_overlaps",
                   "_chordwise_fractions", "compute_surface_n_panels", "build_lattice",
                   "validate_controls", "deflected_airfoil", "flap_effectiveness", "flap_moment_derivative")
 

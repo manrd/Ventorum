@@ -392,6 +392,51 @@ class ControlSurface:
 # ═══════════════════════════════════════════════════════════════════════════════
 
 @dataclass(slots=True)
+class NodeDisplacements:
+    """Displacements [m] of the leading-edge and trailing-edge lattice nodes of the defining half of a surface.
+
+    Parameters
+    ----------
+    le : np.ndarray
+        Leading-edge node displacements [m], shape (n_edges, 3).
+    te : np.ndarray
+        Trailing-edge node displacements [m], shape (n_edges, 3).
+    eta : np.ndarray or None
+        Optional spanwise stations of the edges that the displacements were
+        made for, as fractions of the semi-span [-], shape (n_edges,), as
+        :func:`ventorum.geometry.undeformed_nodes` gives them. When it is
+        set, :func:`ventorum.geometry.lattice.build_lattice` compares it with the
+        edge stations of the mesh (absolute tolerance 1e-12) and raises
+        ``ValueError`` if they are different. None (the default) skips this
+        check.
+    """
+
+    le: np.ndarray
+    te: np.ndarray
+    eta: np.ndarray | None = None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "le", np.asarray(self.le, dtype=float))
+        object.__setattr__(self, "te", np.asarray(self.te, dtype=float))
+        if self.eta is not None:
+            object.__setattr__(self, "eta", np.asarray(self.eta, dtype=float))
+
+    def clone(self) -> NodeDisplacements:
+        """Fast explicit clone."""
+        return NodeDisplacements(
+            le=np.asarray(self.le, dtype=float).copy(),
+            te=np.asarray(self.te, dtype=float).copy(),
+            eta=None if self.eta is None else np.asarray(self.eta, dtype=float).copy(),
+        )
+
+    def __copy__(self) -> NodeDisplacements:
+        return self.clone()
+
+    def __deepcopy__(self, memo: dict) -> NodeDisplacements:
+        return self.clone()
+
+
+@dataclass(slots=True)
 class WingSection:
     """Properties at a single spanwise station of a lifting surface.
 
@@ -481,6 +526,10 @@ class LiftingSurface:
         twist. Use :meth:`mirrored` to make the left copy of a surface that is
         not on the plane y = 0 (for example twin fins); ``is_symmetric`` must
         then be *False*.
+    controls : list[ControlSurface]
+        Hinged control surfaces defined on this surface.
+    node_displacements : NodeDisplacements | None
+        Displacements [m] of the leading- and trailing-edge nodes of the defining half.
     """
 
     name: str = "Wing"
@@ -498,6 +547,7 @@ class LiftingSurface:
     spacing: str | None = None
     mirror_y: bool = False
     controls: list[ControlSurface] = field(default_factory=list)
+    node_displacements: NodeDisplacements | None = None
 
     def clone(self) -> LiftingSurface:
         """Fast explicit clone."""
@@ -514,6 +564,7 @@ class LiftingSurface:
             spacing=self.spacing,
             mirror_y=self.mirror_y,
             controls=[c.clone() for c in self.controls],
+            node_displacements=self.node_displacements.clone() if self.node_displacements is not None else None,
         )
 
     def mirrored(self, name: str | None = None) -> LiftingSurface:
@@ -694,6 +745,7 @@ class Aircraft:
     def root_point(self, which: str = "qc") -> np.ndarray:
         """Root quarter-chord (``"qc"``) or trailing-edge (``"te"``) point of the main surface [m].
 
+        The point is computed on the undeformed geometry.
         The root is the section at ``y_frac = 0``. On a mirror copy
         (``mirror_y=True``) it is at the mirrored y.
         """
@@ -1357,6 +1409,16 @@ def aircraft_to_json(ac: Aircraft) -> str:
             }
             for c in getattr(surf, "controls", [])
         ]
+        nd = getattr(surf, "node_displacements", None)
+        node_disp_json = (
+            {
+                "le": nd.le.tolist(),
+                "te": nd.te.tolist(),
+                "eta": None if nd.eta is None else nd.eta.tolist(),
+            }
+            if nd is not None
+            else None
+        )
         surfaces.append({
             "name": surf.name,
             "semi_span": surf.semi_span,
@@ -1370,6 +1432,7 @@ def aircraft_to_json(ac: Aircraft) -> str:
             "spacing": surf.spacing,
             "mirror_y": surf.mirror_y,
             "controls": controls,
+            "node_displacements": node_disp_json,
         })
     data = {
         "name": ac.name,
@@ -1409,6 +1472,16 @@ def aircraft_from_json(text: str) -> Aircraft:
             )
             for cd in sd.get("controls", [])
         ]
+        nd_data = sd.get("node_displacements")
+        if nd_data is not None:
+            eta_data = nd_data.get("eta")
+            node_disp = NodeDisplacements(
+                le=np.asarray(nd_data["le"], dtype=float),
+                te=np.asarray(nd_data["te"], dtype=float),
+                eta=None if eta_data is None else np.asarray(eta_data, dtype=float),
+            )
+        else:
+            node_disp = None
         surfaces.append(LiftingSurface(
             name=sd.get("name", "Surface"),
             semi_span=sd["semi_span"],
@@ -1422,6 +1495,7 @@ def aircraft_from_json(text: str) -> Aircraft:
             spacing=sd.get("spacing", None),
             mirror_y=sd.get("mirror_y", False),
             controls=controls,
+            node_displacements=node_disp,
         ))
     return Aircraft(
         name=data.get("name", "Aircraft"),

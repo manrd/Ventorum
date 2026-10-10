@@ -21,7 +21,8 @@ part is normal to the free stream and its induced-drag part is
 the reference point therefore gets a moment from both parts.
 
 Limitations: one symmetric, unswept, planar wing; linear section data; no
-ground effect. The solver refuses a wing outside that model with
+ground effect; no node displacements (the solver refuses a surface with
+``node_displacements`` with ``ValueError``). The solver refuses a wing outside that model with
 ``ValidityError`` (see ``_check_geometry_in_model``): quarter-chord sweep
 above 1 deg on a spanwise interval, dihedral, or a vertical offset of the
 sections. Reference: H. Glauert, "The Elements of Aerofoil and Airscrew
@@ -56,10 +57,11 @@ from ventorum.utils.parallel import blas_single_thread
 from ventorum.utils.validation import validate_aircraft, validate_fourier_applicability
 
 #: Largest quarter-chord sweep on one spanwise interval that the Fourier
-#: solver accepts [deg] (owner decision D-08).
+#: solver accepts [deg]. The Fourier model has one straight, unswept,
+#: planar lifting line.
 SWEEP_LIMIT_DEG = 1.0
 #: Smallest vertical offset that counts as out of plane, as a fraction of
-#: the semi-span [m] (owner decision D-08).
+#: the semi-span [m]. Above it the geometry is outside the planar model.
 PLANAR_TOL_FRACTION = 1.0e-9
 
 
@@ -82,6 +84,8 @@ def _check_geometry_in_model(surf: LiftingSurface) -> None:
 
     Raises
     ------
+    ValueError
+        If the surface has node displacements set.
     ValidityError
         If the quarter-chord line sweeps more than ``SWEEP_LIMIT_DEG`` on a
         spanwise interval between two sections, or if a section has a
@@ -89,6 +93,13 @@ def _check_geometry_in_model(surf: LiftingSurface) -> None:
         ``PLANAR_TOL_FRACTION`` times the semi-span. The message names the
         vortex lattice (``solver_type="vlm"``) as the solver to use.
     """
+    if getattr(surf, "node_displacements", None) is not None:
+        raise ValueError(
+            f"The Fourier solver cannot model deformed geometry with node displacements "
+            f"(surface '{surf.name}' has node_displacements set). "
+            "Use the vortex lattice solver (solver_type='vlm') or lifting line solvers "
+            "(solver_type='linear' or 'nonlinear')."
+        )
     use_vlm = 'Use the vortex lattice solver: solver_type="vlm".'
     b = surf.semi_span
     z_tol = PLANAR_TOL_FRACTION * b
@@ -272,8 +283,8 @@ class FourierSolver(BaseSolver):
         if isinstance(aircraft, LiftingSurface):
             aircraft = Aircraft(surfaces=[aircraft])
         validate_aircraft(aircraft)
-        # The geometry guard runs before the older applicability check: the
-        # owner decisions D-08 fix ValidityError and a message that names
+        # The geometry guard runs before the older applicability check: it
+        # raises ValidityError and gives a message that names
         # solver_type="vlm" for geometry outside the model.
         for _surf in aircraft.surfaces:
             _check_geometry_in_model(_surf)

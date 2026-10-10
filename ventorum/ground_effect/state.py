@@ -32,7 +32,8 @@ class GroundEffectCondition:
         *height_ref*. With ``height_ref='ref'``, the ground is at the
         distance h below *ref_point*.
     alpha_deg : float
-        Pitch angle / angle of attack relative to horizontal ground [deg].
+        Pitch angle / angle of attack relative to horizontal ground [deg]
+        (default 5.0).
     phi_deg : float
         Roll / bank angle relative to ground [deg].
         Positive = right wing (starboard) dips down, left wing (port) rises up.
@@ -56,7 +57,7 @@ class GroundEffectCondition:
     """
 
     h: float = 1.0
-    alpha_deg: float = 4.0
+    alpha_deg: float = 5.0
     phi_deg: float = 0.0
     beta_deg: float = 0.0
     V_inf: float = 50.0
