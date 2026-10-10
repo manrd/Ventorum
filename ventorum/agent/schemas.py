@@ -999,8 +999,8 @@ AGENT_TOOL_DEFINITIONS: list[dict[str, Any]] = [
         "description": "Trim an aircraft with Newton's method (Etkin and Reid; Dennis and Schnabel): the "
                        "angle of attack [deg] and the control deflections [deg] for a target lift "
                        "coefficient [-] with zero aerodynamic moments. A target that is not reached is "
-                       "not an error: the payload gives trim_status and trimmed false. Every solve runs "
-                       "on the CPU in float64.",
+                       "not an error: the payload gives trim_status and trimmed false. The solves run on "
+                       "the selected device; the payload states the device and the precision.",
         "parameters": {
             "type": "object",
             "properties": {

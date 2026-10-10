@@ -11,7 +11,7 @@ Verifies:
 7. Linear and nonlinear lifting line solvers trim successfully.
 8. Input aircraft geometry and control deflections remain unchanged after trim.
 9. Input validation rejects invalid configurations and parameters.
-10. Execution occurs on CPU in float64 and restores prior device setting.
+10. The solves run on the selected device (D-26); trim does not change the global device.
 11. Serialization via to_dict produces valid JSON without internal objects.
 
 The regression tests of the review check the failure paths: a failed solve
@@ -30,6 +30,7 @@ import pytest
 
 import ventorum as vt
 from ventorum import gpu
+from ventorum.solvers import trimming
 
 
 def _build_wing_tail_aircraft(hinge_x_c: float = 0.7, z_tail: float = 0.0) -> vt.Aircraft:
@@ -370,10 +371,8 @@ def test_invalid_input():
         vt.trim(ac, cond, CL_target=0.5, pitch_control="elevator", max_iterations=0)
 
 
-def test_trim_runs_on_cpu_float64(monkeypatch):
-    """Verify trim runs on CPU float64 and restores prior device setting."""
-    # Regression: the old test only read the keys that trim writes itself.
-    # A spy on analyze now records the global device at each solve.
+def test_trim_uses_the_selected_device(monkeypatch):
+    """Trim solves on the device that the global setting selects and does not change it (D-26)."""
     real_analyze = vt.analyze
     devices: list[str] = []
 
@@ -391,19 +390,41 @@ def test_trim_runs_on_cpu_float64(monkeypatch):
 
         res = vt.trim(ac, cond, st, CL_target=0.4, pitch_control="elevator")
         assert res.status == "trimmed"
-
-        # Every solve of the trim ran with the global device set to "cpu"
         assert len(devices) > 0
-        assert all(d == "cpu" for d in devices)
-
-        # Device keys stored in result details
-        assert res.result.details.get("device") == "cpu"
-        assert res.result.details.get("precision") == "float64"
-
-        # Global device restored
+        assert all(d == "auto" for d in devices)
+        # The result states the device and the precision of the solves.
+        assert res.device == res.result.details.get("device", "cpu")
+        assert res.precision == res.result.details.get("precision", "float64")
+        assert res.to_dict()["device"] == res.device
         assert gpu.get_device() == "auto"
     finally:
         gpu.set_device(old)
+
+
+@pytest.mark.gpu
+def test_trim_converges_on_the_gpu_in_float32():
+    """On the GPU in float32 the trim converges to the CPU float64 trim within the float32 floor."""
+    if not gpu.available():
+        pytest.skip(f"GPU pipeline unavailable: {gpu.unavailable_reason()}")
+    old_dev, old_prec = gpu.get_device(), gpu.get_precision()
+    ac = _build_wing_tail_aircraft()
+    cond = vt.FlightCondition(V_inf=30.0, alpha=0.0)
+    st = vt.SolverSettings(solver_type="vlm", n_panels=12, n_chord=4)
+    try:
+        gpu.set_device("cpu")
+        ref = vt.trim(ac, cond, st, CL_target=0.4, pitch_control="elevator")
+        gpu.set_device("gpu")
+        gpu.set_precision("float32")
+        res = vt.trim(ac, cond, st, CL_target=0.4, pitch_control="elevator")
+    finally:
+        gpu.set_device(old_dev)
+        gpu.set_precision(old_prec)
+    assert ref.status == "trimmed" and (ref.device, ref.precision) == ("cpu", "float64")
+    assert res.status == "trimmed" and (res.device, res.precision) == ("gpu", "float32")
+    assert any("float32" in n for n in res.notes)
+    assert abs(res.CL - 0.4) <= trimming.FLOAT32_TOLERANCE_FLOOR and abs(res.Cm) <= trimming.FLOAT32_TOLERANCE_FLOOR
+    assert res.alpha_deg == pytest.approx(ref.alpha_deg, abs=1e-3)
+    assert res.deflections_deg["elevator"] == pytest.approx(ref.deflections_deg["elevator"], abs=1e-3)
 
 
 def test_device_is_restored_after_keyboard_interrupt(monkeypatch):

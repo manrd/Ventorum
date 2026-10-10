@@ -1590,7 +1590,8 @@ def trim(
     the wing. Give ``roll_control`` and ``yaw_control`` together for lateral
     trim, or neither for longitudinal trim. A target that is not reached is not
     an error: the payload gives ``"trim_status"`` and ``"trimmed"`` false.
-    Every solve runs on the CPU in float64.
+    The solves run on the selected device; the payload states the device
+    and the precision (in float32 the tolerances are at least 1e-6).
 
     Parameters
     ----------

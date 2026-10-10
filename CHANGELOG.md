@@ -66,6 +66,10 @@ a minor version can change a public interface.
 
 ### Changed
 
+- `trim` runs its solves on the device that the settings and the global device select, and no
+  longer sets the global device to the CPU. `TrimResult` has `device` and `precision`. In float32
+  the convergence tolerances are at least `FLOAT32_TOLERANCE_FLOOR` (1e-6, about five times the
+  float32 round-off of the coefficients), with a note. The agent tool `ventorum_trim` follows.
 - The default angle of attack is 5 deg in every interface. The agent tool `ventorum_ground_effect`
   changes from 4 deg to 5 deg. The `Ventorum` instance changes from 0 deg to 5 deg. The
   ground-effect Python API (`analyze_ground_effect`, `prepare_ground_case`, `sweep_height`,

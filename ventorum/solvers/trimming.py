@@ -17,10 +17,12 @@ differences with a step size of 1.0e-4 rad.
 
 Notes
 -----
-Every solve in this module runs on the CPU in float64 precision. Finite differences
-are not suitable for float32 precision. The trim function temporarily sets the global
-device to "cpu" and restores the previous device setting upon completion. For this
-reason, trim must not run concurrently with other calls that alter the global device.
+The solves run on the device that the settings and the global device select
+(owner decision D-26, 2026-10-10). The result states the device and the precision.
+In float32 the round-off of the coefficients is about 1e-7 (measured on the GPU
+pipelines against float64), so the convergence tolerances get the floor
+``FLOAT32_TOLERANCE_FLOOR``; the 1e-4 rad step then gives the Jacobian to about 1e-4
+relative, which is enough for Newton's method.
 
 When condition.h is set (ground effect), the height of Aircraft.ref_point above the
 ground plane remains constant while the angle of attack changes.
@@ -41,7 +43,6 @@ from typing import Any
 
 import numpy as np
 
-import ventorum.gpu
 from ventorum.core.datatypes import Aircraft, FlightCondition, SolverResult, SolverSettings
 from ventorum.core.errors import GroundStrikeError, ValidityError
 
@@ -52,6 +53,10 @@ _SOLVE_FAILURES = (GroundStrikeError, ValidityError)
 # Singular-Jacobian limits: relative column norm and condition number.
 _COLUMN_NORM_LIMIT = 1.0e-8
 _CONDITION_LIMIT = 1.0e10
+
+#: Smallest convergence tolerance [-] of CL and of the moments when a solve is in
+#: float32: about five times the float32 round-off of the coefficients.
+FLOAT32_TOLERANCE_FLOOR = 1.0e-6
 
 
 def _json_float(value: float) -> float | None:
@@ -114,6 +119,11 @@ class TrimResult:
         Clone of the input aircraft with the deflections of the reported point.
     notes : list[str]
         Informational notes and convergence diagnostics.
+    device : str
+        Device of the solves: "cpu", "gpu", "mixed", or "none" when no solve
+        succeeded.
+    precision : str
+        Precision of the solves: "float64", "float32", "mixed", or "none".
     """
 
     status: str
@@ -133,6 +143,8 @@ class TrimResult:
     result: SolverResult | None = None
     aircraft: Aircraft = field(default_factory=Aircraft)
     notes: list[str] = field(default_factory=list)
+    device: str = "none"
+    precision: str = "none"
 
     def to_dict(self) -> dict[str, Any]:
         """Return a JSON-compatible dictionary without result and aircraft objects.
@@ -156,6 +168,8 @@ class TrimResult:
             "residual_history": [_json_float(r) for r in self.residual_history],
             "jacobian": [[_json_float(elem) for elem in row] for row in self.jacobian],
             "notes": list(self.notes),
+            "device": str(self.device),
+            "precision": str(self.precision),
         }
 
 
@@ -251,10 +265,10 @@ def trim(
     with ``converged=False``) give the status "not_converged" and a note. All
     other exceptions of the solver propagate to the caller.
 
-    Every solve runs on the CPU in float64. The function sets the global device
-    to "cpu" with :func:`ventorum.gpu.set_device` and restores the previous value
-    when it returns or raises. This is not thread-safe: do not run ``trim`` at the
-    same time as other calls that change the device.
+    The solves run on the device that the settings and the global device select;
+    the result states the device and the precision. When a solve is in float32,
+    the tolerances are at least ``FLOAT32_TOLERANCE_FLOOR`` (1e-6), and a note
+    says so. The function does not change the global device.
 
     When ``condition.h`` is set (ground effect), the height of ``Aircraft.ref_point``
     above the ground plane stays constant while the angle of attack changes.
@@ -360,279 +374,287 @@ def trim(
             f"{name} = {math.degrees(float(val)):.4f} deg" for name, val in zip(unknown_names, x_vec)
         )
 
-    old_device = ventorum.gpu.get_device()
-    try:
-        ventorum.gpu.set_device("cpu")
+    devices: set[str] = set()
+    precisions: set[str] = set()
 
-        def _evaluate(x_vec: np.ndarray) -> tuple[SolverResult | None, np.ndarray | None, str | None]:
-            fc = condition.clone()
-            fc.alpha = float(x_vec[0])
-            ac_clone.set_deflection(pitch_control, float(x_vec[1]))
-            if is_lateral:
-                assert roll_control is not None and yaw_control is not None
-                ac_clone.set_deflection(roll_control, float(x_vec[2]))
-                ac_clone.set_deflection(yaw_control, float(x_vec[3]))
+    def _evaluate(x_vec: np.ndarray) -> tuple[SolverResult | None, np.ndarray | None, str | None]:
+        fc = condition.clone()
+        fc.alpha = float(x_vec[0])
+        ac_clone.set_deflection(pitch_control, float(x_vec[1]))
+        if is_lateral:
+            assert roll_control is not None and yaw_control is not None
+            ac_clone.set_deflection(roll_control, float(x_vec[2]))
+            ac_clone.set_deflection(yaw_control, float(x_vec[3]))
 
-            # Only the documented solver failures become a status. All other
-            # exceptions (programming errors, KeyboardInterrupt) propagate.
-            try:
-                sol = analyze(ac_clone, fc, settings=settings)
-            except _SOLVE_FAILURES as exc:
-                return None, None, f"The solve failed at ({_describe(x_vec)}): {exc}"
+        # Only the documented solver failures become a status. All other
+        # exceptions (programming errors, KeyboardInterrupt) propagate.
+        try:
+            sol = analyze(ac_clone, fc, settings=settings)
+        except _SOLVE_FAILURES as exc:
+            return None, None, f"The solve failed at ({_describe(x_vec)}): {exc}"
 
-            if not sol.converged:
-                return None, None, f"The inner solve did not converge at ({_describe(x_vec)})."
+        if not sol.converged:
+            return None, None, f"The inner solve did not converge at ({_describe(x_vec)})."
+        devices.add(str(sol.details.get("device", "cpu")))
+        precisions.add(str(sol.details.get("precision", "float64")))
 
-            tot = sol.totals
-            if not is_lateral:
-                res_vec = np.array([tot.CL - CL_target, tot.Cm], dtype=float)
+        tot = sol.totals
+        if not is_lateral:
+            res_vec = np.array([tot.CL - CL_target, tot.Cm], dtype=float)
+        else:
+            res_vec = np.array([tot.CL - CL_target, tot.Cm, tot.Cl, tot.Cn], dtype=float)
+
+        if not np.all(np.isfinite(res_vec)):
+            return None, None, f"The solve gave non-finite residual values at ({_describe(x_vec)})."
+        return sol, res_vec, None
+
+    def _compute_jacobian(x_vec: np.ndarray) -> tuple[np.ndarray | None, str | None]:
+        h_step = 1.0e-4
+        J_mat = np.zeros((n_vars, n_vars), dtype=float)
+        for col in range(n_vars):
+            x_plus = x_vec.copy()
+            x_minus = x_vec.copy()
+            if x_vec[col] + h_step > upper_bounds[col]:
+                x_plus[col] = upper_bounds[col]
+                x_minus[col] = upper_bounds[col] - 2.0 * h_step
+            elif x_vec[col] - h_step < lower_bounds[col]:
+                x_plus[col] = lower_bounds[col] + 2.0 * h_step
+                x_minus[col] = lower_bounds[col]
             else:
-                res_vec = np.array([tot.CL - CL_target, tot.Cm, tot.Cl, tot.Cn], dtype=float)
+                x_plus[col] = x_vec[col] + h_step
+                x_minus[col] = x_vec[col] - h_step
 
-            if not np.all(np.isfinite(res_vec)):
-                return None, None, f"The solve gave non-finite residual values at ({_describe(x_vec)})."
-            return sol, res_vec, None
+            _, R_plus, err_plus = _evaluate(x_plus)
+            if err_plus is not None or R_plus is None:
+                return None, f"Jacobian calculation failed for +step on {unknown_names[col]}: {err_plus}"
 
-        def _compute_jacobian(x_vec: np.ndarray) -> tuple[np.ndarray | None, str | None]:
-            h_step = 1.0e-4
-            J_mat = np.zeros((n_vars, n_vars), dtype=float)
-            for col in range(n_vars):
-                x_plus = x_vec.copy()
-                x_minus = x_vec.copy()
-                if x_vec[col] + h_step > upper_bounds[col]:
-                    x_plus[col] = upper_bounds[col]
-                    x_minus[col] = upper_bounds[col] - 2.0 * h_step
-                elif x_vec[col] - h_step < lower_bounds[col]:
-                    x_plus[col] = lower_bounds[col] + 2.0 * h_step
-                    x_minus[col] = lower_bounds[col]
-                else:
-                    x_plus[col] = x_vec[col] + h_step
-                    x_minus[col] = x_vec[col] - h_step
+            _, R_minus, err_minus = _evaluate(x_minus)
+            if err_minus is not None or R_minus is None:
+                return None, f"Jacobian calculation failed for -step on {unknown_names[col]}: {err_minus}"
 
-                _, R_plus, err_plus = _evaluate(x_plus)
-                if err_plus is not None or R_plus is None:
-                    return None, f"Jacobian calculation failed for +step on {unknown_names[col]}: {err_plus}"
+            J_mat[:, col] = (R_plus - R_minus) / (2.0 * h_step)
 
-                _, R_minus, err_minus = _evaluate(x_minus)
-                if err_minus is not None or R_minus is None:
-                    return None, f"Jacobian calculation failed for -step on {unknown_names[col]}: {err_minus}"
+        if not np.all(np.isfinite(J_mat)):
+            return None, "Jacobian contains non-finite entries."
+        return J_mat, None
 
-                J_mat[:, col] = (R_plus - R_minus) / (2.0 * h_step)
+    def _singular_reason(J_mat: np.ndarray) -> str | None:
+        """Return the reason why the Jacobian is singular, or None."""
+        J_norm = float(np.linalg.norm(J_mat))
+        col_norms = np.linalg.norm(J_mat, axis=0)
+        no_effect = [
+            (unknown_names[j], float(col_norms[j]))
+            for j in range(n_vars)
+            if col_norms[j] <= _COLUMN_NORM_LIMIT * J_norm
+        ]
+        if no_effect:
+            text = ", ".join(f"{name!r} (column norm {cn:.2e})" for name, cn in no_effect)
+            return (
+                f"Singular Jacobian: the unknown {text} has no effect on the residuals "
+                f"(Jacobian norm {J_norm:.2e})."
+            )
+        cond_J = float(np.linalg.cond(J_mat))
+        if not math.isfinite(cond_J) or cond_J > _CONDITION_LIMIT:
+            return (
+                f"Singular Jacobian: condition number is {cond_J:.2e}, "
+                f"above the limit {_CONDITION_LIMIT:.0e}."
+            )
+        return None
 
-            if not np.all(np.isfinite(J_mat)):
-                return None, "Jacobian contains non-finite entries."
-            return J_mat, None
+    def _build_result(
+        status_str: str,
+        converged_flag: bool,
+        x_final: np.ndarray,
+        last_sol: SolverResult | None,
+        n_iters: int,
+        history: list[float],
+        jac_matrix: np.ndarray,
+        notes_list: list[str],
+    ) -> TrimResult:
+        ac_clone.set_deflection(pitch_control, float(x_final[1]))
+        if is_lateral:
+            assert roll_control is not None and yaw_control is not None
+            ac_clone.set_deflection(roll_control, float(x_final[2]))
+            ac_clone.set_deflection(yaw_control, float(x_final[3]))
 
-        def _singular_reason(J_mat: np.ndarray) -> str | None:
-            """Return the reason why the Jacobian is singular, or None."""
-            J_norm = float(np.linalg.norm(J_mat))
-            col_norms = np.linalg.norm(J_mat, axis=0)
-            no_effect = [
-                (unknown_names[j], float(col_norms[j]))
-                for j in range(n_vars)
-                if col_norms[j] <= _COLUMN_NORM_LIMIT * J_norm
-            ]
-            if no_effect:
-                text = ", ".join(f"{name!r} (column norm {cn:.2e})" for name, cn in no_effect)
-                return (
-                    f"Singular Jacobian: the unknown {text} has no effect on the residuals "
-                    f"(Jacobian norm {J_norm:.2e})."
-                )
-            cond_J = float(np.linalg.cond(J_mat))
-            if not math.isfinite(cond_J) or cond_J > _CONDITION_LIMIT:
-                return (
-                    f"Singular Jacobian: condition number is {cond_J:.2e}, "
-                    f"above the limit {_CONDITION_LIMIT:.0e}."
-                )
-            return None
+        # Collect deflections from all surfaces
+        defs_deg: dict[str, float] = {}
+        for s in ac_clone.surfaces:
+            for c in getattr(s, "controls", []):
+                defs_deg[c.name] = float(np.degrees(c.deflection))
 
-        def _build_result(
-            status_str: str,
-            converged_flag: bool,
-            x_final: np.ndarray,
-            last_sol: SolverResult | None,
-            n_iters: int,
-            history: list[float],
-            jac_matrix: np.ndarray,
-            notes_list: list[str],
-        ) -> TrimResult:
-            ac_clone.set_deflection(pitch_control, float(x_final[1]))
-            if is_lateral:
-                assert roll_control is not None and yaw_control is not None
-                ac_clone.set_deflection(roll_control, float(x_final[2]))
-                ac_clone.set_deflection(yaw_control, float(x_final[3]))
-
-            # Collect deflections from all surfaces
-            defs_deg: dict[str, float] = {}
-            for s in ac_clone.surfaces:
-                for c in getattr(s, "controls", []):
-                    defs_deg[c.name] = float(np.degrees(c.deflection))
-
-            if last_sol is None:
-                # No solve succeeded: report NaN, never false zeros.
-                nan = float("nan")
-                CL = CD = CY = Cl = Cm = Cn = nan
-                basis = "none"
+        if last_sol is None:
+            # No solve succeeded: report NaN, never false zeros.
+            nan = float("nan")
+            CL = CD = CY = Cl = Cm = Cn = nan
+            basis = "none"
+        else:
+            tot = last_sol.totals
+            if tot.CD_total is not None and tot.CDp is not None:
+                CD = float(tot.CD_total)
+                basis = "CD_total"
             else:
-                last_sol.details["device"] = "cpu"
-                last_sol.details["precision"] = "float64"
-                tot = last_sol.totals
-                if tot.CD_total is not None and tot.CDp is not None:
-                    CD = float(tot.CD_total)
-                    basis = "CD_total"
-                else:
-                    CD = float(tot.CDi)
-                    basis = "CDi"
-                CL, CY = float(tot.CL), float(tot.CY)
-                Cl, Cm, Cn = float(tot.Cl), float(tot.Cm), float(tot.Cn)
+                CD = float(tot.CDi)
+                basis = "CDi"
+            CL, CY = float(tot.CL), float(tot.CY)
+            Cl, Cm, Cn = float(tot.Cl), float(tot.Cm), float(tot.Cn)
 
-            return TrimResult(
-                status=status_str,
-                converged=converged_flag,
-                alpha_deg=float(np.degrees(x_final[0])),
-                deflections_deg=defs_deg,
-                CL=CL,
-                CD=CD,
-                drag_basis=basis,
-                CY=CY,
-                Cl=Cl,
-                Cm=Cm,
-                Cn=Cn,
-                iterations=int(n_iters),
-                residual_history=list(history),
-                jacobian=[[float(val) for val in row] for row in jac_matrix],
-                result=last_sol,
-                aircraft=ac_clone,
-                notes=list(notes_list),
+        return TrimResult(
+            status=status_str,
+            converged=converged_flag,
+            alpha_deg=float(np.degrees(x_final[0])),
+            deflections_deg=defs_deg,
+            CL=CL,
+            CD=CD,
+            drag_basis=basis,
+            CY=CY,
+            Cl=Cl,
+            Cm=Cm,
+            Cn=Cn,
+            iterations=int(n_iters),
+            residual_history=list(history),
+            jacobian=[[float(val) for val in row] for row in jac_matrix],
+            result=last_sol,
+            aircraft=ac_clone,
+            notes=list(notes_list),
+            device="none" if not devices else (next(iter(devices)) if len(devices) == 1 else "mixed"),
+            precision="none" if not precisions else (next(iter(precisions)) if len(precisions) == 1
+                                                     else "mixed"),
+        )
+
+    notes: list[str] = []
+    residual_history: list[float] = []
+    outward_counts = np.zeros(n_vars, dtype=int)
+    # The last point with a good solve, its solution and its Jacobian.
+    good_x: np.ndarray | None = None
+    good_sol: SolverResult | None = None
+    good_J = nan_jacobian
+
+    # iter_idx is the number of Newton steps done before this point. Every
+    # stop returns iterations = iter_idx, thus
+    # len(residual_history) == iterations + 1.
+    for iter_idx in range(max_iterations + 1):
+        sol, R, err = _evaluate(x)
+        if err is not None or sol is None or R is None:
+            residual_history.append(float("nan"))
+            notes.append(err if err is not None else "Evaluation failed.")
+            if good_x is None:
+                notes.append("No solve succeeded: the coefficients are NaN.")
+                return _build_result(
+                    "not_converged", False, x, None, iter_idx, residual_history, nan_jacobian, notes
+                )
+            notes.append(f"The result gives the last point with a good solve ({_describe(good_x)}).")
+            return _build_result(
+                "not_converged", False, good_x, good_sol, iter_idx, residual_history, good_J, notes
             )
 
-        notes: list[str] = []
-        residual_history: list[float] = []
-        outward_counts = np.zeros(n_vars, dtype=int)
-        # The last point with a good solve, its solution and its Jacobian.
-        good_x: np.ndarray | None = None
-        good_sol: SolverResult | None = None
-        good_J = nan_jacobian
+        good_x, good_sol, good_J = x.copy(), sol, nan_jacobian
+        max_res = float(np.max(np.abs(R)))
+        residual_history.append(max_res)
 
-        # iter_idx is the number of Newton steps done before this point. Every
-        # stop returns iterations = iter_idx, thus
-        # len(residual_history) == iterations + 1.
-        for iter_idx in range(max_iterations + 1):
-            sol, R, err = _evaluate(x)
-            if err is not None or sol is None or R is None:
-                residual_history.append(float("nan"))
-                notes.append(err if err is not None else "Evaluation failed.")
-                if good_x is None:
-                    notes.append("No solve succeeded: the coefficients are NaN.")
-                    return _build_result(
-                        "not_converged", False, x, None, iter_idx, residual_history, nan_jacobian, notes
+        # Check convergence. In float32 the tolerances have a floor at
+        # the round-off of the coefficients.
+        tl_CL, tl_m = tol_CL, tol_moment
+        if "float32" in precisions:
+            tl_CL = max(tol_CL, FLOAT32_TOLERANCE_FLOOR)
+            tl_m = max(tol_moment, FLOAT32_TOLERANCE_FLOOR)
+            if (tl_CL, tl_m) != (tol_CL, tol_moment) and not any("float32" in n for n in notes):
+                notes.append(f"The solves are in float32: the tolerances are tol_CL = {tl_CL:.1e} and "
+                             f"tol_moment = {tl_m:.1e} (floor {FLOAT32_TOLERANCE_FLOOR:.0e}, about five "
+                             "times the float32 round-off of the coefficients).")
+        if abs(R[0]) <= tl_CL and all(abs(r) <= tl_m for r in R[1:]):
+            J_final, err_final = _compute_jacobian(x)
+            if J_final is not None:
+                good_J = J_final
+            else:
+                notes.append(f"The Jacobian at the trim point is not available: {err_final}")
+            return _build_result(
+                "trimmed", True, x, sol, iter_idx, residual_history, good_J, notes
+            )
+
+        if iter_idx == max_iterations:
+            notes.append(f"Maximum iterations ({max_iterations}) reached without convergence.")
+            J_final, err_final = _compute_jacobian(x)
+            if J_final is not None:
+                good_J = J_final
+            else:
+                notes.append(f"The Jacobian at the last point is not available: {err_final}")
+            return _build_result(
+                "not_converged", False, x, sol, iter_idx, residual_history, good_J, notes
+            )
+
+        # Compute Jacobian
+        J, err_J = _compute_jacobian(x)
+        if err_J is not None or J is None:
+            notes.append(err_J if err_J is not None else "Jacobian computation failed.")
+            return _build_result(
+                "not_converged", False, x, sol, iter_idx, residual_history, nan_jacobian, notes
+            )
+        good_J = J
+
+        # Check singularity: an unknown with no effect, or a large condition number
+        reason = _singular_reason(J)
+        if reason is not None:
+            notes.append(reason)
+            return _build_result(
+                "not_converged", False, x, sol, iter_idx, residual_history, good_J, notes
+            )
+        try:
+            dx = np.linalg.solve(J, -R)
+        except np.linalg.LinAlgError as exc:
+            notes.append(f"Singular Jacobian: {exc}.")
+            return _build_result(
+                "not_converged", False, x, sol, iter_idx, residual_history, good_J, notes
+            )
+
+        if not np.all(np.isfinite(dx)):
+            notes.append("Newton step contains non-finite entries.")
+            return _build_result(
+                "not_converged", False, x, sol, iter_idx, residual_history, good_J, notes
+            )
+
+        # Bound limit stop check
+        limit_stop = False
+        stop_status = ""
+        for j in range(n_vars):
+            at_lower = (x[j] - lower_bounds[j]) <= 1.0e-10
+            points_outward_lower = at_lower and (dx[j] < -1.0e-10)
+
+            at_upper = (upper_bounds[j] - x[j]) <= 1.0e-10
+            points_outward_upper = at_upper and (dx[j] > 1.0e-10)
+
+            if points_outward_lower or points_outward_upper:
+                outward_counts[j] += 1
+            else:
+                outward_counts[j] = 0
+
+            if outward_counts[j] >= 2 and not limit_stop:
+                limit_stop = True
+                if j == 0:
+                    stop_status = "alpha_limit"
+                    bnd_deg = alpha_bounds_deg[0] if points_outward_lower else alpha_bounds_deg[1]
+                    notes.append(f"Angle of attack reached bound of {bnd_deg:.1f} deg.")
+                else:
+                    stop_status = "control_limit"
+                    ctrl_name = unknown_names[j]
+                    bnd_deg = -30.0 if points_outward_lower else 30.0
+                    notes.append(
+                        f"Control surface {ctrl_name!r} reached deflection bound of {bnd_deg:.1f} deg."
                     )
-                notes.append(f"The result gives the last point with a good solve ({_describe(good_x)}).")
-                return _build_result(
-                    "not_converged", False, good_x, good_sol, iter_idx, residual_history, good_J, notes
-                )
 
-            good_x, good_sol, good_J = x.copy(), sol, nan_jacobian
-            max_res = float(np.max(np.abs(R)))
-            residual_history.append(max_res)
+        if limit_stop:
+            return _build_result(
+                stop_status, False, x, sol, iter_idx, residual_history, good_J, notes
+            )
 
-            # Check convergence
-            if abs(R[0]) <= tol_CL and all(abs(r) <= tol_moment for r in R[1:]):
-                J_final, err_final = _compute_jacobian(x)
-                if J_final is not None:
-                    good_J = J_final
-                else:
-                    notes.append(f"The Jacobian at the trim point is not available: {err_final}")
-                return _build_result(
-                    "trimmed", True, x, sol, iter_idx, residual_history, good_J, notes
-                )
+        # Step limit: scale down if largest change exceeds 5 deg
+        max_step = math.radians(5.0)
+        largest_change = float(np.max(np.abs(dx)))
+        if largest_change > max_step:
+            dx = dx * (max_step / largest_change)
 
-            if iter_idx == max_iterations:
-                notes.append(f"Maximum iterations ({max_iterations}) reached without convergence.")
-                J_final, err_final = _compute_jacobian(x)
-                if J_final is not None:
-                    good_J = J_final
-                else:
-                    notes.append(f"The Jacobian at the last point is not available: {err_final}")
-                return _build_result(
-                    "not_converged", False, x, sol, iter_idx, residual_history, good_J, notes
-                )
+        # Cut at bounds
+        x = np.clip(x + dx, lower_bounds, upper_bounds)
 
-            # Compute Jacobian
-            J, err_J = _compute_jacobian(x)
-            if err_J is not None or J is None:
-                notes.append(err_J if err_J is not None else "Jacobian computation failed.")
-                return _build_result(
-                    "not_converged", False, x, sol, iter_idx, residual_history, nan_jacobian, notes
-                )
-            good_J = J
-
-            # Check singularity: an unknown with no effect, or a large condition number
-            reason = _singular_reason(J)
-            if reason is not None:
-                notes.append(reason)
-                return _build_result(
-                    "not_converged", False, x, sol, iter_idx, residual_history, good_J, notes
-                )
-            try:
-                dx = np.linalg.solve(J, -R)
-            except np.linalg.LinAlgError as exc:
-                notes.append(f"Singular Jacobian: {exc}.")
-                return _build_result(
-                    "not_converged", False, x, sol, iter_idx, residual_history, good_J, notes
-                )
-
-            if not np.all(np.isfinite(dx)):
-                notes.append("Newton step contains non-finite entries.")
-                return _build_result(
-                    "not_converged", False, x, sol, iter_idx, residual_history, good_J, notes
-                )
-
-            # Bound limit stop check
-            limit_stop = False
-            stop_status = ""
-            for j in range(n_vars):
-                at_lower = (x[j] - lower_bounds[j]) <= 1.0e-10
-                points_outward_lower = at_lower and (dx[j] < -1.0e-10)
-
-                at_upper = (upper_bounds[j] - x[j]) <= 1.0e-10
-                points_outward_upper = at_upper and (dx[j] > 1.0e-10)
-
-                if points_outward_lower or points_outward_upper:
-                    outward_counts[j] += 1
-                else:
-                    outward_counts[j] = 0
-
-                if outward_counts[j] >= 2 and not limit_stop:
-                    limit_stop = True
-                    if j == 0:
-                        stop_status = "alpha_limit"
-                        bnd_deg = alpha_bounds_deg[0] if points_outward_lower else alpha_bounds_deg[1]
-                        notes.append(f"Angle of attack reached bound of {bnd_deg:.1f} deg.")
-                    else:
-                        stop_status = "control_limit"
-                        ctrl_name = unknown_names[j]
-                        bnd_deg = -30.0 if points_outward_lower else 30.0
-                        notes.append(
-                            f"Control surface {ctrl_name!r} reached deflection bound of {bnd_deg:.1f} deg."
-                        )
-
-            if limit_stop:
-                return _build_result(
-                    stop_status, False, x, sol, iter_idx, residual_history, good_J, notes
-                )
-
-            # Step limit: scale down if largest change exceeds 5 deg
-            max_step = math.radians(5.0)
-            largest_change = float(np.max(np.abs(dx)))
-            if largest_change > max_step:
-                dx = dx * (max_step / largest_change)
-
-            # Cut at bounds
-            x = np.clip(x + dx, lower_bounds, upper_bounds)
-
-        # Not reached: the loop returns when iter_idx == max_iterations.
-        raise AssertionError("The trim loop ended without a result.")
-
-    finally:
-        ventorum.gpu.set_device(old_device)
+    # Not reached: the loop returns when iter_idx == max_iterations.
+    raise AssertionError("The trim loop ended without a result.")

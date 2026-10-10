@@ -66,9 +66,9 @@ When `condition.h` is defined, Ventorum models flight in ground effect over a fl
 
 ## Precision and device execution
 
-All trim calculations execute on the CPU using 64-bit floating-point arithmetic (`float64`). For the central difference with step $h$, the truncation error is $O(h^2)$ and the round-off error is about $\varepsilon / h$, with $\varepsilon$ the machine epsilon of the arithmetic (about $1.2 \times 10^{-7}$ in `float32`, $2.2 \times 10^{-16}$ in `float64`). With $h = 1.0 \times 10^{-4}$ rad, $\varepsilon / h$ is about $10^{-3}$ in `float32` and about $2 \times 10^{-12}$ in `float64`.
+The trim solves run on the device that the settings and the global device select (the CPU in `float64`, or the GPU pipelines in `float32` or `float64`); the result states the device and the precision. For the central difference with step $h$, the truncation error is $O(h^2)$ and the round-off error is about $\varepsilon / h$, with $\varepsilon$ the machine epsilon of the arithmetic (about $1.2 \times 10^{-7}$ in `float32`, $2.2 \times 10^{-16}$ in `float64`). With $h = 1.0 \times 10^{-4}$ rad, $\varepsilon / h$ is about $10^{-3}$ in `float32` and about $2 \times 10^{-12}$ in `float64`.
 
-The solver sets the global execution device to `"cpu"` for the duration of the trim solve and restores the previous device setting in a `finally` block upon completion.
+A Jacobian with a relative error of this size still gives Newton's method its convergence; it changes only the rate near the solution. In `float32` the round-off of the coefficients themselves limits the residual that the iteration can reach, so the convergence tolerances have the floor `FLOAT32_TOLERANCE_FLOOR` of `ventorum.solvers.trimming`, and the result has a note. The solver does not change the global device setting.
 
 ## Assumptions and limits
 
@@ -89,7 +89,7 @@ The trim solver is verified by the unit test suite in `tests/test_trim.py`:
 - Ground effect lift increase demonstrating reduced trim angle of attack.
 - Multi-solver compatibility across vortex lattice and lifting-line solvers.
 - Input geometry immutability ensuring that input objects are never modified in place.
-- CPU device and precision restoration.
+- The solves use the selected device and the global device setting does not change; on the GPU in `float32` the trim converges to the `float64` trim within the tolerance floor.
 - Failure paths: a ground strike during the iteration and at the start point, a control with no effect (singular Jacobian), an inner solve that does not converge, invalid settings, and exceptions that must propagate.
 
 ## References

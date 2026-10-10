@@ -265,7 +265,7 @@ def test_trim_tool_equals_python_trim():
     strict_json(t)
     assert t["status"] == "success", t
     assert t["trim_status"] == "trimmed" and t["trimmed"] is True
-    assert t["device"] == "cpu" and t["precision"] == "float64"
+    assert (t["device"], t["precision"]) in (("cpu", "float64"), ("gpu", "float32"), ("gpu", "float64"))
 
     ref = vt.trim(_python_wing_tail(), vt.FlightCondition(alpha=np.radians(5.0)),
                   vt.SolverSettings(n_panels=8), CL_target=0.5, pitch_control="elevator")

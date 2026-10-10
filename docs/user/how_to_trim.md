@@ -160,7 +160,7 @@ Because ground effect increases wing lift at a given angle of attack, the trimme
 
 ## Execution device and precision
 
-Every solve within `trim` runs on the CPU in 64-bit precision (`float64`). Finite differences in 32-bit precision suffer from numerical noise and can fail to converge. The global device setting is restored when `trim` finishes. Do not run `trim` concurrently with other functions that modify the device setting.
+The solves of `trim` run on the device that the settings and the global device select. `res.device` and `res.precision` give the device and the precision of the solves. In `float32` (the default precision of the GPU pipelines) the tolerances `tol_CL` and `tol_moment` are at least `1e-6`, about five times the `float32` round-off of the coefficients, and a note says so. `trim` does not change the global device setting.
 
 ## Background
 
