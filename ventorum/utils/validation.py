@@ -280,9 +280,6 @@ def validate_flight_condition(fc: FlightCondition) -> None:
 def validate_solver_settings(ss: SolverSettings) -> None:
     """Check :class:`SolverSettings` values."""
     from ventorum.solvers.factory import VALID_SOLVER_NAMES as valid_solvers
-    from ventorum.utils.deprecation import warn_solver_alias
-
-    warn_solver_alias(ss.solver_type)
     if str(ss.solver_type).lower() not in valid_solvers:
         raise ValueError(
             f"solver_type='{ss.solver_type}' must be one of {valid_solvers}."

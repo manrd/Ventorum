@@ -300,10 +300,12 @@ class GroundEffectSweep:
         n_panels: int = 80,
         spacing: str = "auto",
     ):
-        from ventorum.utils.deprecation import warn_solver_alias
+        from ventorum.utils.deprecation import canonical_settings, canonical_solver
 
-        warn_solver_alias(solver if solver is not None else (
-            settings.solver_type if settings is not None else None))
+        if solver is not None:
+            solver = canonical_solver(solver)
+        elif settings is not None:
+            settings = canonical_settings(settings)
         self.aircraft = _as_aircraft(geometry)
         self.n_jobs = n_jobs
         self.backend = (backend or "auto").lower()

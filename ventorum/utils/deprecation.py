@@ -55,3 +55,49 @@ def warn_solver_alias(solver_name: str | None) -> str:
         break
     warnings.warn(message, FutureWarning, stacklevel=level)
     return canonical
+
+
+def canonical_settings(settings):
+    """Warn for an old solver name and return settings with the canonical name.
+
+    A public entry point calls this once. When ``settings.solver_type`` is an
+    old name, the function warns (see :func:`warn_solver_alias`) and returns
+    a copy with the canonical name, so the inner calls see only canonical
+    names and give no second warning. Otherwise it returns *settings*
+    unchanged. The function does not change the warning filters, so it is
+    safe in threads.
+
+    Parameters
+    ----------
+    settings : SolverSettings
+        Settings given by the user.
+
+    Returns
+    -------
+    SolverSettings
+        *settings*, or a copy with the canonical solver name.
+    """
+    name = getattr(settings, "solver_type", None)
+    if name is None or str(name).lower() not in SOLVER_ALIASES:
+        return settings
+    out = settings.clone()
+    out.solver_type = warn_solver_alias(name)
+    return out
+
+
+def canonical_solver(name: str | None) -> str | None:
+    """Warn for an old solver name and return the canonical name.
+
+    Parameters
+    ----------
+    name : str or None
+        Solver name given by the user.
+
+    Returns
+    -------
+    str or None
+        The canonical name for an old name; else *name* unchanged.
+    """
+    if name is None or str(name).lower() not in SOLVER_ALIASES:
+        return name
+    return warn_solver_alias(name)

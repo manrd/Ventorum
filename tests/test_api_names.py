@@ -180,3 +180,33 @@ def test_docs_and_examples_use_canonical_names():
         assert "n_workers=" not in text, path
         for match in solver_pattern.finditer(text):
             assert match.group(2) not in ("horseshoe", "lattice", "llt", "linear_llt"), (path, match.group(0))
+
+
+def test_old_solver_name_warns_once_per_entry_point_and_keeps_filters(monkeypatch):
+    """Each public entry point warns one time and does not change the warning filters.
+
+    The warning filters are global to the process. A change of them in a solve
+    is not safe when solves run in threads (parallel sweeps).
+    """
+    wing = _wing()
+    calls = {
+        "analyze": lambda: vt.analyze(wing, alpha_deg=2.0, solver="horseshoe", n_panels=12),
+        "analyze_sweep": lambda: vt.analyze_sweep(wing, [0.0, 2.0, 4.0], solver="horseshoe", n_panels=12),
+        "Ventorum": lambda: vt.Ventorum("W", geometry=wing, solver="llt", n_panels=12).analyze(),
+        "GroundEffectSweep": lambda: GroundEffectSweep(wing, solver="horseshoe", n_panels=12).run_sweep(
+            [2.0], [2.0], compute_strike_limit=False),
+    }
+    for name, call in calls.items():
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            changes = []
+            monkeypatch.setattr(warnings, "simplefilter", lambda *a, _c=changes, **k: _c.append("simplefilter"))
+            monkeypatch.setattr(warnings, "filterwarnings", lambda *a, _c=changes, **k: _c.append("filterwarnings"))
+            try:
+                call()
+            finally:
+                monkeypatch.undo()
+        assert changes == [], (name, changes)
+        future = [w for w in caught if issubclass(w.category, FutureWarning)]
+        assert len(future) == 1, (name, [str(w.message) for w in future])
+        assert "test_api_names" in future[0].filename, name

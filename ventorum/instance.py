@@ -114,10 +114,12 @@ class Ventorum:
         case_id: str | None = None,
         metadata: dict[str, Any] | None = None,
     ):
-        from ventorum.utils.deprecation import warn_solver_alias
+        from ventorum.utils.deprecation import canonical_settings, canonical_solver
 
-        warn_solver_alias(solver if solver is not None else (
-            settings.solver_type if settings is not None else None))
+        if solver is not None:
+            solver = canonical_solver(solver)
+        elif settings is not None:
+            settings = canonical_settings(settings)
         self.case_id = case_id or f"case_{uuid.uuid4().hex[:8]}"
         self.name = name
 
