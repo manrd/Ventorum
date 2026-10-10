@@ -121,6 +121,8 @@ def trefftz_induced_drag(
     return float(D_i[0]), w_n[0], seg_len[0]
 
 
+# Test hook only: True makes trefftz_induced_drag_batch use the full
+# evaluation also in symmetric cases (the tests compare the two paths).
 _FORCE_FULL_TREFFTZ = False
 
 
@@ -226,6 +228,25 @@ def _trefftz_core_data(lattice: VortexLattice, with_images: bool, right_only: bo
     that passes near another surface gives the same regularised velocity in
     both places. One panel of each strip gives the core group and the core
     radius of that strip.
+
+    Parameters
+    ----------
+    lattice : VortexLattice
+        The lattice.
+    with_images : bool
+        If True, the vortices include the ground images.
+    right_only : bool, optional
+        If True, the target data (core group and core radius of the
+        evaluation points) is only for the strips on the right half
+        (``lattice.strip_is_right``), in their index order. The source data
+        stays the same (all vortices). The half evaluation of symmetric
+        cases uses it. Default False (all strips).
+
+    Returns
+    -------
+    tuple
+        The prepared core data of ``vortex.trefftz_prepare``, as given to
+        ``trefftz_normalwash_prepared``.
     """
     key = ("trefftz_core_data", with_images, right_only)
     prep = lattice.geom_cache.get(key)
