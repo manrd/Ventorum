@@ -36,6 +36,11 @@ a minor version can change a public interface.
   and Cn), in free air and in ground effect at a constant height. It runs on the CPU in float64.
   A target that cannot be reached gives a status and notes; invalid input raises ValueError.
   `examples/11_trim.py` shows its use.
+- `validation/avl`: a black-box comparison harness with AVL. It writes AVL input files from a
+  Ventorum aircraft, runs AVL with a command stream, reads its output (the exit status of AVL is
+  not used), checks the angles and the mesh counts of each run, and compares forces, moments and
+  derivatives with Ventorum in free air and in ground effect (geometry rotation). It also
+  compares the run times. Nothing from AVL is in the code: only its input and output formats.
 
 ### Changed
 
