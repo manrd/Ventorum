@@ -57,7 +57,8 @@ The iteration stops when one of the following criteria is met:
 1. **Convergence**: $|C_L - C_{L,\text{target}}| \le \text{tol\_CL}$ (default $10^{-6}$) and every moment residual is less than or equal to $\text{tol\_moment}$ (default $10^{-7}$). The status is `"trimmed"`.
 2. **Bound limit**: An unknown sits at a boundary and the computed Newton step points outward in two consecutive iterations. The solver terminates with status `"alpha_limit"` or `"control_limit"`.
 3. **Iteration limit**: The iteration count reaches `max_iterations` without satisfying the convergence tolerances. The status is `"not_converged"`.
-4. **Numerical failure**: The Jacobian is singular or an evaluation produces non-finite values. The solver terminates with status `"not_converged"`.
+4. **Numerical failure**: The Jacobian is singular or an evaluation produces non-finite values. The solver terminates with status `"not_converged"`. The Jacobian is singular when the column of one unknown has a norm of at most $10^{-8}$ times the norm of the Jacobian (the unknown has no effect on the residuals), or when the condition number is above $10^{10}$.
+5. **Solve failure**: A solve fails with a ground strike, the lifting line is too near the ground, or an inner nonlinear solve does not converge. The status is `"not_converged"`. The result gives the last point with a good solve and a note on the failed point. When no solve succeeded, the coefficients are NaN and `result` is None. Invalid input raises `ValueError` before the iteration starts. All other exceptions propagate.
 
 ## Ground effect convention
 
@@ -89,6 +90,7 @@ The trim solver is verified by the unit test suite in `tests/test_trim.py`:
 - Multi-solver compatibility across vortex lattice and lifting-line solvers.
 - Input geometry immutability ensuring that input objects are never modified in place.
 - CPU device and precision restoration.
+- Failure paths: a ground strike during the iteration and at the start point, a control with no effect (singular Jacobian), an inner solve that does not converge, invalid settings, and exceptions that must propagate.
 
 ## References
 

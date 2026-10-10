@@ -13,6 +13,12 @@ Verifies:
 9. Input validation rejects invalid configurations and parameters.
 10. Execution occurs on CPU in float64 and restores prior device setting.
 11. Serialization via to_dict produces valid JSON without internal objects.
+
+The regression tests of the review check the failure paths: a failed solve
+reports the last good point or NaN, a control with no effect gives a singular
+Jacobian, only the documented solver failures become a status, an inner solve
+that does not converge is not accepted, and the iteration count agrees with
+the residual history.
 """
 
 from __future__ import annotations
@@ -71,6 +77,8 @@ def test_longitudinal_trim_wing_tail():
     assert res.converged is True
     assert abs(res.CL - target_cl) <= 1.0e-6
     assert abs(res.Cm) <= 1.0e-7
+    assert len(res.residual_history) == res.iterations + 1
+    assert np.all(np.isfinite(res.jacobian))
 
     # Independent solve verification
     cond_check = vt.FlightCondition(V_inf=30.0, alpha=np.radians(res.alpha_deg))
@@ -256,6 +264,8 @@ def test_unreachable_target_reports_limit():
     )
     assert res_high_cl.status in ("alpha_limit", "control_limit")
     assert res_high_cl.converged is False
+    # Regression: a limit stop counted one iteration too many.
+    assert len(res_high_cl.residual_history) == res_high_cl.iterations + 1
 
     # 2. Ineffective elevator (hinge 0.97) and far-aft reference point
     ac_ineffective = _build_wing_tail_aircraft(hinge_x_c=0.97)
@@ -338,7 +348,7 @@ def test_invalid_input():
     cond = vt.FlightCondition(V_inf=30.0, alpha=0.0)
 
     # 1. Unknown control name
-    with pytest.raises(ValueError, match="Unknown pitch control 'nonexistent'"):
+    with pytest.raises(ValueError, match=r"Unknown pitch control 'nonexistent'.*\['elevator'\]"):
         vt.trim(ac, cond, CL_target=0.5, pitch_control="nonexistent")
 
     # 2. Roll control without yaw control
@@ -358,24 +368,60 @@ def test_invalid_input():
         vt.trim(ac, cond, CL_target=0.5, pitch_control="elevator", max_iterations=0)
 
 
-def test_trim_runs_on_cpu_float64():
+def test_trim_runs_on_cpu_float64(monkeypatch):
     """Verify trim runs on CPU float64 and restores prior device setting."""
+    # Regression: the old test only read the keys that trim writes itself.
+    # A spy on analyze now records the global device at each solve.
+    real_analyze = vt.analyze
+    devices: list[str] = []
+
+    def spy(*args, **kwargs):
+        devices.append(gpu.get_device())
+        return real_analyze(*args, **kwargs)
+
+    monkeypatch.setattr(vt, "analyze", spy)
+    old = gpu.get_device()
     gpu.set_device("auto")
-    assert gpu.get_device() == "auto"
+    try:
+        ac = _build_wing_tail_aircraft()
+        cond = vt.FlightCondition(V_inf=30.0, alpha=0.0)
+        st = vt.SolverSettings(solver_type="vlm", n_panels=12, n_chord=4)
 
-    ac = _build_wing_tail_aircraft()
-    cond = vt.FlightCondition(V_inf=30.0, alpha=0.0)
-    st = vt.SolverSettings(solver_type="vlm", n_panels=12, n_chord=4)
+        res = vt.trim(ac, cond, st, CL_target=0.4, pitch_control="elevator")
+        assert res.status == "trimmed"
 
-    res = vt.trim(ac, cond, st, CL_target=0.4, pitch_control="elevator")
-    assert res.status == "trimmed"
+        # Every solve of the trim ran with the global device set to "cpu"
+        assert len(devices) > 0
+        assert all(d == "cpu" for d in devices)
 
-    # Device keys stored in result details
-    assert res.result.details.get("device") == "cpu"
-    assert res.result.details.get("precision") == "float64"
+        # Device keys stored in result details
+        assert res.result.details.get("device") == "cpu"
+        assert res.result.details.get("precision") == "float64"
 
-    # Global device restored
-    assert gpu.get_device() == "auto"
+        # Global device restored
+        assert gpu.get_device() == "auto"
+    finally:
+        gpu.set_device(old)
+
+
+def test_device_is_restored_after_keyboard_interrupt(monkeypatch):
+    """Verify a KeyboardInterrupt in a solve propagates and the device is restored."""
+
+    def interrupt(*args, **kwargs):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(vt, "analyze", interrupt)
+    old = gpu.get_device()
+    gpu.set_device("auto")
+    try:
+        before = gpu.get_device()
+        ac = _build_wing_tail_aircraft()
+        cond = vt.FlightCondition(V_inf=30.0, alpha=0.0)
+        with pytest.raises(KeyboardInterrupt):
+            vt.trim(ac, cond, CL_target=0.4, pitch_control="elevator")
+        assert gpu.get_device() == before
+    finally:
+        gpu.set_device(old)
 
 
 def test_to_dict_is_json():
@@ -399,3 +445,181 @@ def test_to_dict_is_json():
     serialized = json.dumps(data)
     deserialized = json.loads(serialized)
     assert deserialized["status"] == "trimmed"
+
+
+def _build_wing_tail_fin_aircraft() -> vt.Aircraft:
+    """Build the wing-tail aircraft with a fin and a rudder."""
+    ac = _build_wing_tail_aircraft()
+    fin = vt.LiftingSurface(
+        name="fin",
+        semi_span=1.5,
+        is_symmetric=False,
+        dihedral=np.pi / 2.0,
+        position=np.array([4.0, 0.0, 0.0]),
+        sections=[vt.WingSection(y_frac=0.0, chord=0.8), vt.WingSection(y_frac=1.0, chord=0.4)],
+        controls=[
+            vt.ControlSurface(
+                name="rudder",
+                eta_start=0.0,
+                eta_end=1.0,
+                hinge_x_c=0.7,
+                deflection=0.0,
+                symmetric=True,
+            )
+        ],
+        n_panels=8,
+    )
+    ac.surfaces.append(fin)
+    return ac
+
+
+def test_ground_strike_during_iteration_reports_last_good_point():
+    """Verify a ground strike during the iteration reports the last good point, not zeros."""
+    # Regression: the result gave CL = 0, Cm = 0 and a default SolverResult with
+    # converged=True after a failed solve.
+    ac = _build_wing_tail_aircraft(z_tail=0.0)
+    ac.compute_reference_values()
+    c_ref = float(ac.c_ref)
+    cond = vt.FlightCondition(V_inf=30.0, alpha=np.radians(2.0), h=0.3 * c_ref)
+    st = vt.SolverSettings(solver_type="vlm", n_panels=14, n_chord=4)
+
+    res = vt.trim(ac, cond, st, CL_target=0.8, pitch_control="elevator")
+
+    assert res.status == "not_converged"
+    assert res.converged is False
+    assert res.iterations >= 1
+    assert len(res.residual_history) == res.iterations + 1
+    assert np.isnan(res.residual_history[-1])
+    assert np.isfinite(res.residual_history[-2])
+    assert any("ground" in n for n in res.notes)
+    assert any("last point with a good solve" in n for n in res.notes)
+
+    # The reported values are those of the last good solve
+    assert res.result is not None
+    assert res.result.converged is True
+    assert res.CL == res.result.totals.CL
+    assert res.Cm == res.result.totals.Cm
+    assert res.CL != 0.0
+    assert np.all(np.isfinite(res.jacobian))
+
+    # An independent solve at the reported point gives the reported values
+    cond_check = vt.FlightCondition(V_inf=30.0, alpha=np.radians(res.alpha_deg), h=0.3 * c_ref)
+    check = vt.analyze(res.aircraft, cond_check, st)
+    assert check.totals.CL == pytest.approx(res.CL, abs=1.0e-9)
+    assert check.totals.Cm == pytest.approx(res.Cm, abs=1.0e-9)
+
+
+def test_ground_strike_at_start_point_reports_nan():
+    """Verify a failed solve at the start point gives NaN coefficients and no result."""
+    ac = _build_wing_tail_aircraft(z_tail=0.0)
+    ac.compute_reference_values()
+    c_ref = float(ac.c_ref)
+    # At 15 deg the tail trailing edge is below the ground plane.
+    cond = vt.FlightCondition(V_inf=30.0, alpha=np.radians(15.0), h=0.3 * c_ref)
+    st = vt.SolverSettings(solver_type="vlm", n_panels=14, n_chord=4)
+
+    res = vt.trim(ac, cond, st, CL_target=0.8, pitch_control="elevator")
+
+    assert res.status == "not_converged"
+    assert res.converged is False
+    assert res.result is None
+    assert res.drag_basis == "none"
+    for value in (res.CL, res.CD, res.CY, res.Cl, res.Cm, res.Cn):
+        assert np.isnan(value)
+    assert res.iterations == 0
+    assert len(res.residual_history) == 1
+    assert np.isnan(res.residual_history[0])
+    # Regression: a Jacobian that was not computed was reported as zeros.
+    assert np.all(np.isnan(res.jacobian))
+    assert res.alpha_deg == pytest.approx(15.0)
+    assert any("No solve succeeded" in n for n in res.notes)
+
+    # to_dict stays strict JSON: NaN becomes None
+    data = res.to_dict()
+    json.dumps(data, allow_nan=False)
+    assert data["CL"] is None
+    assert data["residual_history"] == [None]
+
+
+def test_control_with_no_effect_gives_singular_jacobian():
+    """Verify a pitch control with no effect on CL and Cm is detected as singular."""
+    # Regression: the condition number (about 5e14) was below the old limit 1e15
+    # and the iteration ran to max_iterations.
+    ac = _build_wing_tail_fin_aircraft()
+    cond = vt.FlightCondition(V_inf=30.0, alpha=np.radians(2.0))
+    st = vt.SolverSettings(solver_type="vlm", n_panels=14, n_chord=4)
+
+    res = vt.trim(ac, cond, st, CL_target=0.5, pitch_control="rudder")
+
+    assert res.status == "not_converged"
+    assert res.converged is False
+    assert res.iterations <= 1
+    assert any("Singular Jacobian" in n and "'rudder'" in n for n in res.notes)
+
+
+def test_invalid_settings_and_condition_raise_before_iteration(monkeypatch):
+    """Verify invalid settings or condition raise ValueError before any solve."""
+    # Regression: every exception of a solve was caught and became "not_converged".
+    calls: list[int] = []
+    real_analyze = vt.analyze
+
+    def spy(*args, **kwargs):
+        calls.append(1)
+        return real_analyze(*args, **kwargs)
+
+    monkeypatch.setattr(vt, "analyze", spy)
+    ac = _build_wing_tail_aircraft()
+    cond = vt.FlightCondition(V_inf=30.0, alpha=0.0)
+
+    with pytest.raises(ValueError, match="bogus"):
+        vt.trim(ac, cond, vt.SolverSettings(solver_type="bogus"), CL_target=0.5, pitch_control="elevator")
+
+    with pytest.raises(ValueError, match="V_inf"):
+        vt.trim(ac, vt.FlightCondition(V_inf=-1.0, alpha=0.0), CL_target=0.5, pitch_control="elevator")
+
+    assert calls == []
+
+
+def test_unexpected_solver_exception_propagates(monkeypatch):
+    """Verify an exception that is not a documented solver failure propagates."""
+
+    def broken(*args, **kwargs):
+        raise TypeError("injected error")
+
+    monkeypatch.setattr(vt, "analyze", broken)
+    old = gpu.get_device()
+    ac = _build_wing_tail_aircraft()
+    cond = vt.FlightCondition(V_inf=30.0, alpha=0.0)
+    with pytest.raises(TypeError, match="injected error"):
+        vt.trim(ac, cond, CL_target=0.5, pitch_control="elevator")
+    assert gpu.get_device() == old
+
+
+def test_inner_solve_not_converged_is_not_trimmed(monkeypatch):
+    """Verify an inner solve with converged=False at the final point does not give "trimmed"."""
+    # Regression: a solution with converged=False was accepted as a trim point.
+    real_analyze = vt.analyze
+    target_cl = 0.4
+
+    def not_converged_at_trim_point(*args, **kwargs):
+        sol = real_analyze(*args, **kwargs)
+        # Only the final point meets the tolerances of the trim.
+        if abs(sol.totals.CL - target_cl) <= 1.0e-6 and abs(sol.totals.Cm) <= 1.0e-7:
+            sol.converged = False
+        return sol
+
+    monkeypatch.setattr(vt, "analyze", not_converged_at_trim_point)
+    ac = _build_wing_tail_aircraft()
+    cond = vt.FlightCondition(V_inf=30.0, alpha=0.0)
+    st = vt.SolverSettings(solver_type="vlm", n_panels=12, n_chord=4)
+
+    res = vt.trim(ac, cond, st, CL_target=target_cl, pitch_control="elevator")
+
+    assert res.status == "not_converged"
+    assert res.converged is False
+    assert any("did not converge" in n for n in res.notes)
+    assert len(res.residual_history) == res.iterations + 1
+    assert np.isnan(res.residual_history[-1])
+    # The reported point is the last point with a converged solve
+    assert res.result is not None
+    assert res.result.converged is True
