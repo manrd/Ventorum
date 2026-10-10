@@ -31,6 +31,11 @@ a minor version can change a public interface.
   section heave and twist. The reference values stay those of the undeformed shape. An optional
   station check refuses displacements built for another mesh. The Fourier solver refuses node
   displacements.
+- Trim solver `trim`: a Newton method with a central finite-difference Jacobian finds the angle
+  of attack and the control deflections for a target CL and zero Cm (and, on request, zero Cl
+  and Cn), in free air and in ground effect at a constant height. It runs on the CPU in float64.
+  A target that cannot be reached gives a status and notes; invalid input raises ValueError.
+  `examples/11_trim.py` shows its use.
 
 ### Changed
 
