@@ -1635,14 +1635,16 @@ def trim(
     sett = parse_settings(settings)
     dl = parse_detail_level(detail_level)
     ax = parse_axes(axes)
-    _check_mesh(ac, sett)
+    _check_method(ac, sett.solver_type, sett.wake_alignment, c["h_m"] is not None)
+    strips = _check_mesh(ac, sett)
     fc = make_flight_condition(c)
+    case_sett = _case_settings(ac, sett, strips, fc)
     n_unknowns = 4 if (roll is not None or yaw is not None) else 2
     n_panels = _planned_panels(ac, sett, fc)
     _check_call_work(
         (1 + max_iter * (1 + 2 * n_unknowns)) * n_panels * n_panels,
         "fewer panels (smaller n_panels or n_chord) or a smaller max_iterations")
-    tr = vt.trim(ac, fc, sett, CL_target=cl_t, pitch_control=pitch, roll_control=roll,
+    tr = vt.trim(ac, fc, case_sett, CL_target=cl_t, pitch_control=pitch, roll_control=roll,
                  yaw_control=yaw, alpha_bounds_deg=(lo, hi), max_iterations=max_iter)
 
     vals = (tr.Cl, tr.Cm, tr.Cn)
@@ -1685,9 +1687,12 @@ def trim(
         "device": "cpu",
         "precision": "float64",
         "condition_used": condition_payload(c),
-        "settings_used": {**settings_payload(sett, tr.result), "device": "cpu", "precision": "float64"},
+        "settings_used": {**settings_payload(sett, tr.result), **_mesh_note(case_sett is not sett, case_sett),
+                          "device": "cpu", "precision": "float64"},
         "axes": ax,
     }
+    if ax == "all" and all(np.isfinite(v) for v in vals):
+        out["moments"] = moments_all_sets(tr.Cl, tr.Cm, tr.Cn, tr.alpha_deg, c["beta_deg"])
     if dl in ("standard", "full"):
         out["residual_history"] = [float(v) for v in tr.residual_history]
     if dl == "full":
@@ -1736,17 +1741,19 @@ def error_bars(
     sett = parse_settings(settings)
     parse_detail_level(detail_level)  # Accepted for consistency; the bar content is the same at every level.
     ax = string(axes, "axes", ("body", "stability", "wind")) if axes is not None else "body"
-    _check_mesh(ac, sett)
+    _check_method(ac, sett.solver_type, sett.wake_alignment, c["h_m"] is not None)
+    strips = _check_mesh(ac, sett)
     levels = _mesh_levels(int(sett.n_panels))
     fc = make_flight_condition(c)
+    case_sett = _case_settings(ac, sett, strips, fc)
     estimate = 0
     for n_level in levels:
-        s_level = sett.clone()
+        s_level = case_sett.clone()
         s_level.n_panels = int(n_level)
         n_here = _planned_panels(ac, s_level, fc)
         estimate += n_here * n_here
     _check_call_work(estimate, "fewer panels (smaller n_panels)")
-    res = vt.numerical_error_bars(ac, condition=fc, settings=sett, axes=ax)
+    res = vt.numerical_error_bars(ac, condition=fc, settings=case_sett, axes=ax)
     device, precision = result_device_precision(res.results[0] if res.results else None)
     lines = []
     for name in ("CL", "CD", "CY", "Cl", "Cm", "Cn"):
@@ -1773,6 +1780,9 @@ def error_bars(
         "status_of_bars": "numerical_only",
         "device": device,
         "precision": precision,
+        "condition_used": condition_payload(c),
+        "settings_used": {**settings_payload(sett), **_mesh_note(case_sett is not sett, case_sett)},
+        "axes": ax,
     }
 
 

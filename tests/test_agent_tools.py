@@ -885,6 +885,8 @@ _REQUIRED_ARGS = {
     "alpha_step_deg": 2.0,
     "heights_m": [1.0],
     "candidates": [RECT],
+    "CL_target": 0.5,
+    "pitch_control": "elevator",
 }
 
 

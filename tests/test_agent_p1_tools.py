@@ -398,3 +398,34 @@ def test_explicit_null_in_new_keys():
     assert_error(call_tool("ventorum_wing_analysis",
                            {"wing": {**RECT, "node_displacements": None}, "settings": dict(FAST)}),
                  "invalid_input", "node_displacements")
+
+
+# Review: the new tools follow the method check, the mesh cap and the output fields of the others ─
+
+def test_trim_and_error_bars_refuse_methods_like_the_other_tools():
+    """Body-axis wake in ground effect is invalid_input and Fourier in ground effect is invalid_method,
+    as in ventorum_wing_analysis."""
+    ground = {"alpha_deg": 3.0, "h_m": 2.0}
+    body = {"n_panels": 16, "wake_alignment": "body"}
+    assert_error(wing_analysis(dict(WING_TAIL), ground, body), "invalid_input")
+    assert_error(trim(dict(WING_TAIL), 0.5, "elevator", flight_condition=ground, settings=body),
+                 "invalid_input")
+    assert_error(error_bars(dict(RECT), ground, body), "invalid_input")
+    fourier = {"n_panels": 16, "solver": "fourier"}
+    assert_error(wing_analysis(dict(RECT), ground, fourier), "invalid_method")
+    assert_error(error_bars(dict(RECT), ground, fourier), "invalid_method")
+
+
+def test_error_bars_and_trim_carry_the_common_output_fields():
+    """The error-bar result states its axes, condition and settings; trim with axes 'all' gives the three sets."""
+    e = error_bars(dict(RECT), {"alpha_deg": 4.0}, {"n_panels": 16}, axes="stability")
+    strict_json(e)
+    assert e["status"] == "success", e
+    assert e["axes"] == "stability"
+    assert e["condition_used"]["alpha_deg"] == 4.0
+    assert e["settings_used"]["n_panels"] == 16
+    t = trim(dict(WING_TAIL), 0.5, "elevator", settings={"n_panels": 8}, axes="all")
+    strict_json(t)
+    assert t["trimmed"] is True
+    assert set(t["moments"]) == {"body", "stability", "wind"}
+    assert t["moments"]["body"]["Cm"] == pytest.approx(t["Cm"], abs=1e-6)  # the sets are rounded to 6 decimals
