@@ -6,7 +6,7 @@ The script prints a table with the median time (ms) of
 :func:`ventorum.aero.vortex.influence_matrix` for the four backends,
 for the three case sizes of the tuner (160, 960 and 3200 panels), with one
 thread and with all cores. The numbers change only the speed, never the
-results; the tuner (task T-0002) uses them to pick a backend per case size.
+results; the tuner uses them to pick a backend per case size.
 
 Usage:
     python validation/bench_kernels.py

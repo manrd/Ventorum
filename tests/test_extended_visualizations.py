@@ -3,10 +3,10 @@
 Tests for comprehensive physical, geometric, and aerodynamic visualizations.
 
 Every plot test checks the content of the figure: the number of lines or
-collections, the axis labels and one data value (task T-0010, decision 3).
-The data checks use a relative tolerance of 1e-12: the plotted values come
-from the same result arrays, so the measured error today is 0, and decision 1
-sets the floor at 1e-12 relative.
+collections, the axis labels and one data value. The data checks use a
+relative tolerance of 1e-12: the plotted values come from the same result
+arrays, so the measured error today is 0, and the tolerance floor is 1e-12
+relative.
 """
 
 import pytest

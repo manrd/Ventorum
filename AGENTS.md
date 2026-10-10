@@ -67,9 +67,13 @@ sphinx-build -W --keep-going -b html docs docs/_build/html
 | `ventorum/geometry` | Lattice, spanwise spacing, mesh convergence |
 | `ventorum/aero` | Vortex kernels (`vortex.py` numpy reference, `vortex_numba.py` compiled), assembly, loads, polars |
 | `ventorum/solvers` | Verified solvers: VLM, linear and nonlinear lifting line, Fourier |
+| `ventorum/gpu` | GPU pipelines of the lattice solvers (NVIDIA Warp kernels, PyTorch batch solves), device and precision selection |
 | `ventorum/hardware` | Hardware detection, machine profile, tuner (`ventorum-tune`) |
 | `ventorum/utils/parallel.py` | Two-level parallel plan (cases in parallel, kernel threads per case) |
 | `ventorum/ground_effect` | Ground-effect analysis and sweeps |
+| `ventorum/reference` | Reference solutions and reference data for verification |
+| `ventorum/visualization` | Plot functions (distributions, drag polar, planform, wake, convergence) |
+| `ventorum/instance.py` | Independent solver instances and a manager that runs them in parallel |
 | `ventorum/agent` | Tool interface for AI agents and the MCP server |
 | `ventorum/legacy` | The original solvers and acceleration paths (Numba, Cython, PyTorch GPU, autotuner), kept to study and port their optimisations. Some legacy solvers have known physics defects; see `tests/test_legacy.py`. Do not delete anything here. |
 | `tests/` | Tests; `test_analytical_verification.py` holds the theory checks |

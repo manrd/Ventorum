@@ -53,4 +53,4 @@ Background that explains why Ventorum works this way.
 - [Theory manual](../theory/index): equations, assumptions, limits and references of each model.
 - [Software description](../design/index): architecture, kernel backends, tuner, parallelism and legacy package.
 - [Conventions](conventions): axes, units, angles and moment systems.
-- [Results and trust](results): what a `SolverResult` holds and how far to trust it.
+- [Results and trust](results.md): what a `SolverResult` holds and how far to trust it.
