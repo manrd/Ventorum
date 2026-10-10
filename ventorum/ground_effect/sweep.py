@@ -380,6 +380,8 @@ class GroundEffectSweep:
         backend = "thread" if self.backend == "auto" else self.backend
         if backend not in ("thread", "serial"):
             raise ValueError(f"backend={self.backend!r}: use 'auto', 'thread' or 'serial'.")
+        if batch is None:
+            batch = _cpu_batch(ac, sett, cases, h_arr, a_arr, p_arr, V_inf, rho, rp, height_ref, backend=backend)
         if batch is not None:
             outputs = batch
         elif backend == "serial":
@@ -421,6 +423,41 @@ class GroundEffectSweep:
         )
 
 
+def _prepare_sweep_cases(
+    ac: Aircraft,
+    sett: SolverSettings,
+    cases: list[tuple[int, int, int]],
+    h_arr: np.ndarray,
+    a_arr: np.ndarray,
+    p_arr: np.ndarray,
+    V_inf: float,
+    rho: float,
+    rp: np.ndarray,
+    height_ref: str,
+) -> tuple[Any, list[tuple[tuple[int, int, int], dict[str, Any]]], dict[tuple[int, int, int], tuple[Any, None, Exception]]]:
+    """Prepare ground sweep cases, sharing one probe lattice from place_ground.
+
+    Returns (probe, prepared, outputs).
+    """
+    from ventorum.ground_effect.solver import place_ground, prepare_ground_case
+
+    first = cases[0]
+    _, probe = place_ground(ac, sett, float(h_arr[first[0]]), 0.0, 0.0, 0.0, rp, height_ref)
+    prepared: list[tuple[tuple[int, int, int], dict[str, Any]]] = []
+    outputs: dict[tuple[int, int, int], tuple[Any, None, Exception]] = {}
+    for case in cases:
+        hi, ai, pi = case
+        try:
+            prepared.append((case, prepare_ground_case(
+                ac, float(h_arr[hi]), float(a_arr[ai]), float(p_arr[pi]),
+                V_inf=V_inf, rho=rho, ref_point=rp,
+                height_ref=height_ref, settings=sett, probe=probe,
+            )))
+        except (GroundStrikeError, ValidityError) as exc:
+            outputs[case] = (case, None, exc)
+    return probe, prepared, outputs
+
+
 def _gpu_batch(ac, sett, cases, h_arr, a_arr, p_arr, V_inf, rho, rp, height_ref) -> list | None:
     """Solve all cases of a sweep as one GPU batch; return the outputs ``(case, result, error)`` or None.
 
@@ -429,11 +466,11 @@ def _gpu_batch(ac, sett, cases, h_arr, a_arr, p_arr, V_inf, rho, rp, height_ref)
     Each case is checked and its ground is placed as in
     :func:`ventorum.ground_effect.analyze_ground_effect`; the cases that
     fail a check keep their error, the others are solved together. None
-    means the CPU path (one case per worker).
+    means the CPU path.
     """
     from ventorum import gpu
     from ventorum.gpu.pipeline import work_estimate
-    from ventorum.ground_effect.solver import ground_case_result, place_ground, prepare_ground_case
+    from ventorum.ground_effect.solver import ground_case_result
     from ventorum.solvers.factory import make_solver, resolve_solver_type
 
     if gpu.get_device() == "cpu" or not cases:
@@ -448,16 +485,7 @@ def _gpu_batch(ac, sett, cases, h_arr, a_arr, p_arr, V_inf, rho, rp, height_ref)
     if not gpu.use_gpu(work_estimate(lattice, len(cases), True), canonical, len(cases), lattice.n_panels):
         return None
     t0 = time.perf_counter()
-    _, probe = place_ground(ac, sett, float(h_arr[first[0]]), 0.0, 0.0, 0.0, rp, height_ref)
-    prepared, outputs = [], {}
-    for case in cases:
-        hi, ai, pi = case
-        try:
-            prepared.append((case, prepare_ground_case(
-                ac, float(h_arr[hi]), float(a_arr[ai]), float(p_arr[pi]), V_inf=V_inf, rho=rho, ref_point=rp,
-                height_ref=height_ref, settings=sett, probe=probe)))
-        except (GroundStrikeError, ValidityError) as exc:
-            outputs[case] = (case, None, exc)
+    _, prepared, outputs = _prepare_sweep_cases(ac, sett, cases, h_arr, a_arr, p_arr, V_inf, rho, rp, height_ref)
     if prepared:
         conds = [p["condition"] for _, p in prepared]
         grounds = [p["ground"] for _, p in prepared]
@@ -466,6 +494,85 @@ def _gpu_batch(ac, sett, cases, h_arr, a_arr, p_arr, V_inf, rho, rp, height_ref)
         share = (time.perf_counter() - t0) / len(prepared)
         for (case, p), res in zip(prepared, results):
             outputs[case] = (case, ground_case_result(p, res, False, time.perf_counter() - share), None)
+    return [outputs[c] for c in cases]
+
+
+_MAX_BATCH_BYTES = 256 * 1024 * 1024
+
+
+def _chunk_size(canonical: str, n_unknowns: int) -> int:
+    """Return the largest number of cases K keeping matrices within 256 MiB."""
+    factor = 4 if canonical in ("linear", "nonlinear") else 1
+    per_case = factor * (n_unknowns ** 2) * 8
+    if per_case <= 0:
+        return 1
+    return max(1, int(_MAX_BATCH_BYTES // per_case))
+
+
+def _cpu_batch(
+    ac: Aircraft,
+    sett: SolverSettings,
+    cases: list[tuple[int, int, int]],
+    h_arr: np.ndarray,
+    a_arr: np.ndarray,
+    p_arr: np.ndarray,
+    V_inf: float,
+    rho: float,
+    rp: np.ndarray,
+    height_ref: str,
+    backend: str = "auto",
+) -> list | None:
+    """Solve cases of a sweep as batches on the CPU in chunks, or return None."""
+    from ventorum import gpu
+    from ventorum.ground_effect.solver import ground_case_result
+    from ventorum.hardware.profile import size_class
+    from ventorum.solvers.core import _unknown_map
+    from ventorum.solvers.factory import make_solver, resolve_solver_type
+
+    if not cases:
+        return None
+    canonical = resolve_solver_type(sett.solver_type)
+    if canonical not in ("vlm", "linear", "nonlinear"):
+        return None
+    solver = make_solver(canonical)
+    first = cases[0]
+    probe_cond = FlightCondition(V_inf=V_inf, alpha=float(np.radians(a_arr[first[1]])), rho=rho)
+    lattice = solver.build(ac, sett, probe_cond, None, rp)
+    if backend != "serial" and size_class(lattice.n_panels) != "small":
+        return None
+
+    t0 = time.perf_counter()
+    _, prepared, outputs = _prepare_sweep_cases(ac, sett, cases, h_arr, a_arr, p_arr, V_inf, rho, rp, height_ref)
+    if prepared:
+        cond0 = prepared[0][1]["condition"]
+        g0 = prepared[0][1]["ground"]
+        umap = _unknown_map(lattice, cond0, g0, getattr(sett, "use_symmetry", True))
+        n_unknowns = umap.n if umap is not None else lattice.n_panels
+        chunk_sz = _chunk_size(canonical, n_unknowns)
+
+        all_results = []
+        for k0 in range(0, len(prepared), chunk_sz):
+            chunk = prepared[k0 : k0 + chunk_sz]
+            conds = [p["condition"] for _, p in chunk]
+            grounds = [p["ground"] for _, p in chunk]
+            prev_device = gpu.get_device()
+            try:
+                if prev_device != "cpu":
+                    gpu.set_device("cpu")
+                chunk_res = solver.solve_batch(
+                    lattice, conds, sett, ac.S_ref, ac.b_ref, ac.c_ref,
+                    ref_point=rp, main_surface=ac.main_surface_index(),
+                    continuation=False, grounds=grounds,
+                )
+            finally:
+                if prev_device != "cpu":
+                    gpu.set_device(prev_device)
+            all_results.extend(chunk_res)
+
+        share = (time.perf_counter() - t0) / len(prepared)
+        for (case, p), res in zip(prepared, all_results):
+            outputs[case] = (case, ground_case_result(p, res, False, time.perf_counter() - share), None)
+
     return [outputs[c] for c in cases]
 
 
@@ -491,7 +598,13 @@ def _fixed_n_chord(
         return None
     if not hasattr(solver, "resolve_n_chord"):
         return None
-    probe = build_lattice(aircraft, settings, collocation="vlm", n_chord=1)
+    from ventorum.geometry import lattice_cache
+
+    chord_spacing = getattr(settings, "chord_spacing", "uniform")
+    key = lattice_cache.lattice_key(aircraft, settings, "vlm", 1, chord_spacing)
+    probe = lattice_cache.get_or_build(
+        key, lambda: build_lattice(aircraft, settings, collocation="vlm", n_chord=1, chord_spacing=chord_spacing)
+    )
     pts = probe.all_points()
     p_plane, mode = plane_reference(aircraft, ref_point, height_ref)
     best_gap, best_gp = np.inf, None

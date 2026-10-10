@@ -121,6 +121,9 @@ def trefftz_induced_drag(
     return float(D_i[0]), w_n[0], seg_len[0]
 
 
+_FORCE_FULL_TREFFTZ = False
+
+
 def trefftz_induced_drag_batch(
     lattice: VortexLattice,
     strip_gammas: np.ndarray,
@@ -174,6 +177,15 @@ def trefftz_induced_drag_batch(
     qn = _cross(d[:, None, :], seg)
     qn /= np.maximum(np.linalg.norm(qn, axis=-1, keepdims=True), 1e-300)
     w_n = np.empty((K, n_s))
+    can_fold = lattice.can_fold_symmetry()
+    right = np.flatnonzero(lattice.strip_is_right)
+    left = np.flatnonzero(~lattice.strip_is_right)
+    mirror = lattice.strip_mirror
+    has_half = bool(can_fold and right.size > 0 and left.size > 0)
+    pos = np.full(n_s, -1, dtype=np.int64)
+    if has_half:
+        pos[right] = np.arange(right.size)
+
     for k in range(K):
         sg = strip_gammas[k]
         p_vort = np.vstack([pr[k], pl[k]])
@@ -184,13 +196,28 @@ def trefftz_induced_drag_batch(
             p_img = pts - (pts @ d[k])[:, None] * d[k]
             p_vort = np.vstack([p_vort, p_img])
             g_vort = np.concatenate([g_vort, -g_vort])
-        w_n[k] = trefftz_normalwash_prepared(q[k], qn[k], p_vort, g_vort, d[k],
-                                             _trefftz_core_data(lattice, ground is not None))
+
+        use_half = False
+        if has_half and not _FORCE_FULL_TREFFTZ:
+            case_is_sym = (wake_dirs[k][1] == 0.0) and (ground is None or abs(ground.normal[1]) <= 1e-12)
+            if case_is_sym:
+                sg_max = max(float(np.max(np.abs(sg))), 1e-300)
+                if _close(sg[left], sg[mirror[left]], 1e-12 * sg_max):
+                    use_half = True
+
+        if use_half:
+            prep_r = _trefftz_core_data(lattice, ground is not None, right_only=True)
+            wn_r = trefftz_normalwash_prepared(q[k][right], qn[k][right], p_vort, g_vort, d[k], prep_r)
+            w_n[k, right] = wn_r
+            w_n[k, left] = wn_r[pos[mirror[left]]]
+        else:
+            w_n[k] = trefftz_normalwash_prepared(q[k], qn[k], p_vort, g_vort, d[k],
+                                                 _trefftz_core_data(lattice, ground is not None))
     D_i = -0.5 * rho * np.sum(strip_gammas * w_n * seg_len, axis=1)
     return D_i, w_n, seg_len
 
 
-def _trefftz_core_data(lattice: VortexLattice, with_images: bool) -> tuple:
+def _trefftz_core_data(lattice: VortexLattice, with_images: bool, right_only: bool = False) -> tuple:
     """Core data of the Trefftz-plane vortices (lattice-only, cached on the lattice).
 
     The vortices are the right and left trailing-edge points of every strip
@@ -200,9 +227,13 @@ def _trefftz_core_data(lattice: VortexLattice, with_images: bool) -> tuple:
     both places. One panel of each strip gives the core group and the core
     radius of that strip.
     """
-    key = ("trefftz_core_data", with_images)
+    key = ("trefftz_core_data", with_images, right_only)
     prep = lattice.geom_cache.get(key)
-    if prep is None:
+    if prep is not None:
+        return prep
+    base_key = ("trefftz_core_data", with_images)
+    base_prep = lattice.geom_cache.get(base_key)
+    if base_prep is None:
         rc = CORE_RADIUS_FRACTION * lattice.width
         first_panel = np.empty(lattice.n_strips, dtype=np.int64)
         first_panel[lattice.panel_strip[::-1]] = np.arange(lattice.n_panels)[::-1]
@@ -210,8 +241,21 @@ def _trefftz_core_data(lattice: VortexLattice, with_images: bool) -> tuple:
         copies = 4 if with_images else 2
         rc_vort = np.concatenate([rc] * copies)
         g_src = np.concatenate([targets.group] * copies)
-        prep = trefftz_prepare(lattice.n_strips, rc_vort.size, rc_vort, group=g_src, targets=targets)
-        lattice.geom_cache[key] = prep
+        base_prep = trefftz_prepare(lattice.n_strips, rc_vort.size, rc_vort, group=g_src, targets=targets)
+        lattice.geom_cache[base_key] = base_prep
+        lattice.geom_cache[("trefftz_core_data", with_images, False)] = base_prep
+    if not right_only:
+        return base_prep
+    rc2_arr, src_group, tg_group, tg_rc2, use_tg = base_prep
+    right = np.flatnonzero(lattice.strip_is_right)
+    prep = (
+        rc2_arr,
+        src_group,
+        np.ascontiguousarray(tg_group[right]),
+        np.ascontiguousarray(tg_rc2[right]),
+        use_tg,
+    )
+    lattice.geom_cache[key] = prep
     return prep
 
 
