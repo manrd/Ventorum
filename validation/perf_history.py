@@ -9,16 +9,21 @@ Usage
 Record mode appends one JSON object per line to the history file of
 ``--history``. The owner keeps that file outside the repository. The script
 refuses a history path inside the repository, and a record holds no machine
-name, no user name and no path.
+name, no user name and no path. Record mode times the ``ventorum`` package of
+the tree that holds this script: the measurement runs in a child process with
+``PYTHONPATH`` set to that tree, and the child checks its import. A record
+made with ``--tiny`` has the mark ``[tiny]`` at the end of its note.
 
 Report mode prints one Markdown row per record, one column per workload, and
-the percent change against the previous record.
+the percent change against the previous record of the same kind (tiny or
+full).
 
 Compare mode times two source trees side by side: one subprocess per run,
-``PYTHONPATH`` set to the tree, alternating tree A and tree B. Each subprocess
-checks that it imports ``ventorum`` from that tree. This is the only proof of
-a speed change (see ``docs/design/performance_architecture.md``, "How to check
-a change"). A history row is a trend.
+``PYTHONPATH`` set to the tree, A then B in even rounds and B then A in odd
+rounds. Each subprocess checks that it imports ``tree/ventorum/__init__.py``.
+This is the only proof of a speed change (see
+``docs/design/performance_architecture.md``, "How to check a change"). A
+history row is a trend.
 
 Workloads
 ---------
@@ -30,6 +35,7 @@ under a new name.
 from __future__ import annotations
 
 import argparse
+import gc
 import json
 import os
 import platform
@@ -77,6 +83,10 @@ TIMED_CALLS = 7
 GPU_WARMUP_S = 0.5
 #: Timeout [s] of one subprocess of the compare mode.
 CHILD_TIMEOUT_S = 600.0
+#: Timeout [s] of the child process of the record mode (all workloads).
+RECORD_TIMEOUT_S = 3600.0
+#: Mark at the end of the note of a record made with ``--tiny``.
+TINY_MARK = "[tiny]"
 #: Line that must stay under the report table.
 TREND_LINE = "A history row is a trend. It is not a proof of a speed change: use --compare."
 #: Prefix of the JSON line that a subprocess of the compare mode prints.
@@ -301,6 +311,7 @@ def measure(workload: Workload, tiny: bool) -> dict[str, Any]:
         sweep workload. The timing uses :func:`time.perf_counter`.
     """
     workload.call()  # warm-up: caches and compiled kernels
+    gc.collect()  # collect the garbage of the warm-up before the timed calls
     calls = 1 if tiny else TIMED_CALLS
     values = np.empty(calls, dtype=float)
     for index in range(calls):
@@ -402,7 +413,11 @@ def git_state(tree: Path) -> tuple[str, bool]:
         if rev.returncode != 0:
             return "unknown", False
         status = subprocess.run(
-            ["git", "status", "--porcelain"], cwd=tree, capture_output=True, text=True, timeout=60
+            ["git", "--no-optional-locks", "status", "--porcelain"],
+            cwd=tree,
+            capture_output=True,
+            text=True,
+            timeout=60,
         )
     except (OSError, subprocess.SubprocessError):
         return "unknown", False
@@ -411,7 +426,44 @@ def git_state(tree: Path) -> tuple[str, bool]:
     return commit, dirty
 
 
-def make_record(note: str, rows: dict[str, dict[str, Any]]) -> dict[str, Any]:
+def tiny_note(note: str) -> str:
+    """Return *note* with the mark :data:`TINY_MARK` at its end.
+
+    Parameters
+    ----------
+    note : str
+        Text of the ``--note`` option.
+
+    Returns
+    -------
+    str
+        The note of a record made with ``--tiny``.
+    """
+    return f"{note} {TINY_MARK}" if note else TINY_MARK
+
+
+def is_tiny_record(record: dict[str, Any]) -> bool:
+    """Return True when *record* was made with ``--tiny``.
+
+    Parameters
+    ----------
+    record : dict
+        One record of the history file.
+
+    Returns
+    -------
+    bool
+        True when the note ends with :data:`TINY_MARK`.
+    """
+    return str(record.get("note") or "").rstrip().endswith(TINY_MARK)
+
+
+def make_record(
+    note: str,
+    rows: dict[str, dict[str, Any]],
+    tree: Path | None = None,
+    tiny: bool = False,
+) -> dict[str, Any]:
     """Build the record of one run.
 
     Parameters
@@ -420,6 +472,11 @@ def make_record(note: str, rows: dict[str, dict[str, Any]]) -> dict[str, Any]:
         Text of the ``--note`` option.
     rows : dict
         Timing rows from :func:`run_workloads`.
+    tree : Path or None
+        Source tree of the git commit. Defaults to the tree of this script.
+    tiny : bool
+        True when the rows used the test meshes. The note then gets the
+        mark :data:`TINY_MARK`.
 
     Returns
     -------
@@ -427,7 +484,7 @@ def make_record(note: str, rows: dict[str, dict[str, Any]]) -> dict[str, Any]:
         The fields of the record. The record holds no machine name, no user
         name and no path.
     """
-    commit, dirty = git_state(REPO_ROOT)
+    commit, dirty = git_state(REPO_ROOT if tree is None else tree)
     return {
         "date": datetime.now().isoformat(timespec="seconds"),
         "ventorum_version": vt.__version__,
@@ -438,12 +495,37 @@ def make_record(note: str, rows: dict[str, dict[str, Any]]) -> dict[str, Any]:
         "cpu_cores": int(cpu_cores()),
         "gpu": gpu.info().get("name"),
         "workloads": rows,
-        "note": note,
+        "note": tiny_note(note) if tiny else note,
     }
 
 
-def run_record(note: str, tiny: bool) -> dict[str, Any]:
-    """Run all workloads and return the record for the history file.
+def run_record(note: str, tiny: bool, tree: Path | None = None) -> dict[str, Any]:
+    """Run all workloads in this process and return the record.
+
+    Parameters
+    ----------
+    note : str
+        Text of the ``--note`` option.
+    tiny : bool
+        Test mode: small meshes and one timed call.
+    tree : Path or None
+        Source tree of the git commit. Defaults to the tree of this script.
+
+    Returns
+    -------
+    dict
+        The record of :func:`make_record`.
+    """
+    return make_record(note, run_workloads(tiny), tree, tiny)
+
+
+def record_in_child(note: str, tiny: bool) -> dict[str, Any]:
+    """Time the ``ventorum`` package of :data:`REPO_ROOT` in a child process.
+
+    The parent process can import ``ventorum`` from another tree (for
+    example an editable install). The child has ``PYTHONPATH`` set to
+    :data:`REPO_ROOT` and checks that it imports ``ventorum`` from that tree,
+    so the times and the git commit of the record come from the same tree.
 
     Parameters
     ----------
@@ -456,8 +538,16 @@ def run_record(note: str, tiny: bool) -> dict[str, Any]:
     -------
     dict
         The record of :func:`make_record`.
+
+    Raises
+    ------
+    SystemExit
+        If the child fails or does not import ``ventorum`` from the tree.
     """
-    return make_record(note, run_workloads(tiny))
+    options = ["--record-child", f"--note={note}", "--expect-tree", str(REPO_ROOT)]
+    if tiny:
+        options.append("--tiny")
+    return _child(options, REPO_ROOT, timeout=RECORD_TIMEOUT_S)
 
 
 def _is_inside(path: Path, root: Path) -> bool:
@@ -588,12 +678,15 @@ class ReportRow:
         Short git commit of the record.
     cells : list of ReportCell
         One cell per column of :class:`Report`.
+    tiny : bool
+        True when the record was made with ``--tiny``.
     """
 
     date: str
     version: str
     commit: str
     cells: list[ReportCell]
+    tiny: bool = False
 
 
 @dataclass
@@ -626,8 +719,9 @@ def build_report(records: Sequence[dict[str, Any]]) -> Report:
     Returns
     -------
     Report
-        The percent change of a cell is against the previous record that has
-        a value for that workload.
+        The percent change of a cell is against the previous record of the
+        same kind (tiny or full) that has a value for that workload. The
+        report never compares a tiny record with a full record.
     """
     columns: list[str] = []
     units: dict[str, str | None] = {}
@@ -641,8 +735,9 @@ def build_report(records: Sequence[dict[str, Any]]) -> Report:
                 units[name] = str(unit) if unit is not None else None
 
     rows: list[ReportRow] = []
-    previous: dict[str, float] = {}
+    previous: dict[tuple[bool, str], float] = {}
     for record in records:
+        tiny = is_tiny_record(record)
         workloads = record.get("workloads") or {}
         cells: list[ReportCell] = []
         for name in columns:
@@ -653,11 +748,12 @@ def build_report(records: Sequence[dict[str, Any]]) -> Report:
                 if isinstance(raw, (int, float)) and not isinstance(raw, bool):
                     value = float(raw)
             change: float | None = None
-            if value is not None and previous.get(name) not in (None, 0.0):
-                change = 100.0 * (value - previous[name]) / previous[name]
+            key = (tiny, name)
+            if value is not None and previous.get(key) not in (None, 0.0):
+                change = 100.0 * (value - previous[key]) / previous[key]
             cells.append(ReportCell(value=value, change_pct=change))
             if value is not None:
-                previous[name] = value
+                previous[key] = value
         commit = str(record.get("git_commit") or "unknown")
         rows.append(
             ReportRow(
@@ -665,6 +761,7 @@ def build_report(records: Sequence[dict[str, Any]]) -> Report:
                 version=str(record.get("ventorum_version") or ""),
                 commit=commit[:7],
                 cells=cells,
+                tiny=tiny,
             )
         )
     return Report(columns=columns, units=[units[name] for name in columns], rows=rows)
@@ -691,7 +788,8 @@ def render_report(report: Report) -> str:
     Returns
     -------
     str
-        The Markdown table, an empty line and :data:`TREND_LINE`.
+        The Markdown table, an empty line and :data:`TREND_LINE`. The commit
+        cell of a tiny record has the mark :data:`TINY_MARK`.
     """
     header = ["date", "version", "commit"]
     header += [f"{name} ({unit})" if unit else name for name, unit in zip(report.columns, report.units)]
@@ -700,10 +798,16 @@ def render_report(report: Report) -> str:
         "| " + " | ".join(["---"] * len(header)) + " |",
     ]
     for row in report.rows:
-        cells = [row.date, row.version, row.commit]
+        commit = f"{row.commit} {TINY_MARK}" if row.tiny else row.commit
+        cells = [row.date, row.version, commit]
         cells += [_cell_text(cell) for cell in row.cells]
         lines.append("| " + " | ".join(cells) + " |")
     lines.append("")
+    if any(row.tiny for row in report.rows):
+        lines.append(
+            f"A row with {TINY_MARK} used the test meshes. The change in percent compares "
+            "only records of the same kind."
+        )
     lines.append(TREND_LINE)
     return "\n".join(lines) + "\n"
 
@@ -721,11 +825,14 @@ class TreeInfo:
     cython : bool
         True when the compiled Cython kernel is importable. The kernel
         backend changes the time, so the table header reports it.
+    file : str
+        Imported ``ventorum/__init__.py``, relative to *tree*.
     """
 
     tree: Path
     version: str
     cython: bool
+    file: str = ""
 
 
 @dataclass
@@ -802,14 +909,24 @@ def _import_checked(tree: Path) -> Any:
     Raises
     ------
     SystemExit
-        If the package cannot be imported, or if it comes from another tree.
+        If the package cannot be imported, if it is a namespace package
+        (no ``__init__.py``), or if its ``__init__.py`` is not
+        ``tree/ventorum/__init__.py``. A file elsewhere under *tree* (for
+        example in a nested worktree) is also refused.
     """
     try:
         import ventorum as imported
     except ImportError as exc:
         raise SystemExit(f"error: ventorum cannot be imported for the tree {tree}: {exc}") from exc
-    found = Path(imported.__file__).resolve()
-    if not _is_inside(found, tree):
+    location = getattr(imported, "__file__", None)
+    if location is None:
+        raise SystemExit(
+            f"error: ventorum is imported as a namespace package (no __init__.py) and not from the "
+            f"tree {tree}. The subprocess does not test this tree; check PYTHONPATH."
+        )
+    found = Path(location).resolve()
+    expected = (Path(tree) / "ventorum" / "__init__.py").resolve()
+    if found != expected:
         raise SystemExit(
             f"error: ventorum is imported from {found} and not from the tree {tree}. "
             "The subprocess does not test this tree; check PYTHONPATH."
@@ -817,7 +934,7 @@ def _import_checked(tree: Path) -> Any:
     return imported
 
 
-def _child(options: Sequence[str], tree: Path) -> dict[str, Any]:
+def _child(options: Sequence[str], tree: Path, timeout: float = CHILD_TIMEOUT_S) -> dict[str, Any]:
     """Run this script as a child process on *tree* and return its JSON line.
 
     Parameters
@@ -826,6 +943,8 @@ def _child(options: Sequence[str], tree: Path) -> dict[str, Any]:
         Child options, for example ``["--probe", "--expect-tree", tree]``.
     tree : Path
         Source tree. ``PYTHONPATH`` is set to this tree alone.
+    timeout : float
+        Time limit [s] of the child.
 
     Returns
     -------
@@ -841,10 +960,10 @@ def _child(options: Sequence[str], tree: Path) -> dict[str, Any]:
     env["PYTHONPATH"] = str(tree)
     command = [sys.executable, str(Path(__file__).resolve()), *options]
     try:
-        proc = subprocess.run(command, env=env, capture_output=True, text=True, timeout=CHILD_TIMEOUT_S)
+        proc = subprocess.run(command, env=env, capture_output=True, text=True, timeout=timeout)
     except subprocess.TimeoutExpired as exc:
         raise SystemExit(
-            f"error: the run in the tree {tree} did not finish in {CHILD_TIMEOUT_S:g} s."
+            f"error: the run in the tree {tree} did not finish in {timeout:g} s."
         ) from exc
     if proc.returncode != 0:
         detail = (proc.stderr or proc.stdout).strip()
@@ -871,7 +990,17 @@ def _probe(tree: Path) -> TreeInfo:
     TreeInfo
     """
     payload = _child(["--probe", "--expect-tree", str(tree)], tree)
-    return TreeInfo(tree=tree, version=str(payload.get("version") or "?"), cython=bool(payload.get("cython")))
+    raw = Path(str(payload.get("file") or "?"))
+    try:
+        relative = raw.resolve().relative_to(Path(tree).resolve()).as_posix()
+    except (OSError, ValueError):
+        relative = raw.name
+    return TreeInfo(
+        tree=tree,
+        version=str(payload.get("version") or "?"),
+        cython=bool(payload.get("cython")),
+        file=relative,
+    )
 
 
 def run_compare(
@@ -883,7 +1012,8 @@ def run_compare(
 ) -> CompareResult:
     """Time the workloads on two source trees, alternating A and B.
 
-    Every run is a child process with ``PYTHONPATH`` set to its tree, so the
+    Even rounds (0, 2, ...) run A then B; odd rounds run B then A, so that
+    neither tree always runs first. Every run is a child process with ``PYTHONPATH`` set to its tree, so the
     subprocess tests the tree under test and not the installed package. Each
     child checks its own import (see :func:`_import_checked`).
 
@@ -893,7 +1023,7 @@ def run_compare(
         Folders that each hold a ``ventorum`` package (two worktrees, for
         example).
     rounds : int
-        Number of A, B rounds (default 3, at least 1).
+        Number of rounds (default 3, at least 1).
     workloads : sequence of str or None
         Workload names to run. All fixed names when None.
     tiny : bool
@@ -936,9 +1066,12 @@ def run_compare(
         options = ["--run", name]
         if tiny:
             options.append("--tiny")
-        for _ in range(rounds):
-            run_a = _child([*options, "--expect-tree", str(left)], left)
-            run_b = _child([*options, "--expect-tree", str(right)], right)
+        for index in range(rounds):
+            order = ((left, "a"), (right, "b")) if index % 2 == 0 else ((right, "b"), (left, "a"))
+            runs: dict[str, dict[str, Any]] = {}
+            for tree, side in order:
+                runs[side] = _child([*options, "--expect-tree", str(tree)], tree)
+            run_a, run_b = runs["a"], runs["b"]
             if not unit:
                 unit = str(run_a["unit"])
             if str(run_b["unit"]) != unit:
@@ -972,6 +1105,15 @@ def _cython_text(cython: bool) -> str:
     return "no compiled Cython kernel (the kernel backend changes the time)"
 
 
+def _tree_line(label: str, info: TreeInfo) -> str:
+    """Return the header line of one tree: folder name, imported file, version, kernel."""
+    imported = info.file or "?"
+    return (
+        f"Tree {label}: {Path(info.tree).name} (imports {imported}, ventorum {info.version}, "
+        f"{_cython_text(info.cython)})"
+    )
+
+
 def render_compare(result: CompareResult) -> str:
     """Return the side-by-side table as Markdown text.
 
@@ -983,13 +1125,15 @@ def render_compare(result: CompareResult) -> str:
     Returns
     -------
     str
-        The header with both trees and the table. The header names a tree
-        without a compiled Cython kernel.
+        The header with both trees and the table. The header gives the folder
+        name of each tree (not the full path), the imported file relative to
+        the tree, and names a tree without a compiled Cython kernel.
     """
     lines = [
-        f"Side-by-side timing: tree A then tree B, {result.rounds} round(s), one subprocess per run.",
-        f"Tree A: {result.tree_a.tree} (ventorum {result.tree_a.version}, {_cython_text(result.tree_a.cython)})",
-        f"Tree B: {result.tree_b.tree} (ventorum {result.tree_b.version}, {_cython_text(result.tree_b.cython)})",
+        f"Side-by-side timing: {result.rounds} round(s), A then B in even rounds and B then A in "
+        "odd rounds, one subprocess per run.",
+        _tree_line("A", result.tree_a),
+        _tree_line("B", result.tree_b),
         "The spread column is max minus min of the ratio B/A over the rounds.",
         "A ratio below 1 means that B is faster for a workload in ms; "
         "a ratio above 1 means that B is faster for a workload in cases/s.",
@@ -1051,21 +1195,28 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--tiny", action="store_true", help="test mode: small meshes and one timed call")
     parser.add_argument("--run", metavar="NAME", help="internal: run one workload and print one JSON line")
     parser.add_argument("--probe", action="store_true", help="internal: print version and kernel backends")
+    parser.add_argument(
+        "--record-child", action="store_true", help="internal: run all workloads and print the record"
+    )
     parser.add_argument("--expect-tree", type=Path, help="internal: check that ventorum comes from this tree")
     args = parser.parse_args(argv)
 
     modes = sum(value is not None for value in (args.history, args.report, args.compare))
-    modes += (args.run is not None) + int(args.probe)
+    modes += (args.run is not None) + int(args.probe) + int(args.record_child)
     if modes > 1:
-        parser.error("give one mode only: --history, --report, --compare, --run or --probe.")
+        parser.error("give one mode only: --history, --report, --compare, --run, --probe or --record-child.")
 
-    if args.run is not None or args.probe:
+    if args.run is not None or args.probe or args.record_child:
         if args.expect_tree is None:
-            parser.error("--run and --probe need --expect-tree TREE.")
+            parser.error("--run, --probe and --record-child need --expect-tree TREE.")
         tree = Path(args.expect_tree).expanduser().resolve()
-        _import_checked(tree)
+        imported = _import_checked(tree)
         if args.probe:
-            print(f"{JSON_MARKER} " + json.dumps({"version": vt.__version__, "cython": _have_cython()}))
+            payload = {"version": imported.__version__, "cython": _have_cython(), "file": imported.__file__}
+            print(f"{JSON_MARKER} " + json.dumps(payload))
+            return 0
+        if args.record_child:
+            print(f"{JSON_MARKER} " + json.dumps(run_record(args.note, args.tiny, tree)))
             return 0
         if args.run not in WORKLOAD_NAMES:
             parser.error(f"unknown workload {args.run!r}; the fixed names are: {', '.join(WORKLOAD_NAMES)}.")
@@ -1090,7 +1241,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.history is None:
         parser.error("--history PATH is required to write a record.")
     history = check_history_path(args.history)
-    record = run_record(args.note, args.tiny)
+    record = record_in_child(args.note, args.tiny)
     append_record(history, record)
     print(f"appended a record with {len(record['workloads'])} workloads to {history}")
     return 0

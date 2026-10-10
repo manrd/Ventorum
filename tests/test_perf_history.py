@@ -12,6 +12,9 @@ import getpass
 import json
 import math
 import platform
+import subprocess
+import sys
+import types
 from pathlib import Path
 
 import pytest
@@ -101,7 +104,7 @@ def test_record_has_all_fields_and_no_identifiers(tmp_path):
     assert isinstance(record["git_dirty"], bool)
     assert isinstance(record["cpu_cores"], int) and record["cpu_cores"] >= 1
     assert record["gpu"] is None or isinstance(record["gpu"], str)
-    assert record["note"] == "tiny test record"
+    assert record["note"] == "tiny test record [tiny]"  # a tiny record is marked
     assert record["ventorum_version"] and record["python"] and record["numpy"]
 
     for name in ph.WORKLOAD_NAMES:
@@ -213,6 +216,161 @@ def test_workload_names_are_fixed():
         "ground_vlm_n40_6x9",
     ]
     assert set(ph.SWEEP_WORKLOADS) <= set(ph.WORKLOAD_NAMES)
+
+
+def test_record_times_the_ventorum_of_its_own_tree(tmp_path, monkeypatch):
+    """Record mode stops when the timed ventorum is not the tree of the git commit.
+
+    Regression test: record mode timed the first ``ventorum`` on the import
+    path (often an editable install of another tree) and recorded the git
+    commit of the tree that holds the script.
+    """
+    fake = tmp_path / "fake_tree"
+    fake.mkdir()
+    monkeypatch.setattr(ph, "REPO_ROOT", fake)
+    history = tmp_path / "history.jsonl"
+    with pytest.raises(SystemExit) as exc:
+        ph.main(["--history", str(history), "--tiny"])
+    message = str(exc.value)
+    assert "ventorum" in message
+    assert "not from the tree" in message or "cannot be imported" in message
+    assert str(fake) in message
+    assert not history.exists()
+
+
+def test_tiny_record_is_marked_and_not_compared_with_full(tmp_path):
+    """A tiny record has the mark in its note; the report compares records of the same kind only."""
+    record = ph.make_record("smoke", {}, tree=tmp_path, tiny=True)
+    assert record["note"] == "smoke [tiny]"
+    assert ph.is_tiny_record(record)
+    assert ph.make_record("", {}, tree=tmp_path, tiny=True)["note"] == "[tiny]"
+    full = ph.make_record("smoke", {}, tree=tmp_path, tiny=False)
+    assert full["note"] == "smoke"
+    assert not ph.is_tiny_record(full)
+
+    def with_note(date, median, note):
+        rec = _record(date, {"single_vlm_n20_c4": _entry("ms", median)})
+        rec["note"] = note
+        return rec
+
+    records = [
+        with_note("2026-10-01T00:00:00", 100.0, "full one"),
+        with_note("2026-10-02T00:00:00", 10.0, "tiny one [tiny]"),
+        with_note("2026-10-03T00:00:00", 90.0, "full two"),
+        with_note("2026-10-04T00:00:00", 12.0, "tiny two [tiny]"),
+    ]
+    report = ph.build_report(records)
+    changes = [row.cells[0].change_pct for row in report.rows]
+    assert changes[0] is None
+    assert changes[1] is None  # first tiny record: no tiny record before it
+    assert changes[2] == pytest.approx(-10.0)  # against the first full record
+    assert changes[3] == pytest.approx(20.0)  # against the first tiny record
+    assert [row.tiny for row in report.rows] == [False, True, False, True]
+
+    text = ph.render_report(report)
+    assert "0123456 [tiny]" in text
+    assert "same kind" in text
+
+
+def _fake_ventorum(monkeypatch, location):
+    """Put a fake ``ventorum`` module with ``__file__`` = *location* in ``sys.modules``."""
+    module = types.ModuleType("ventorum")
+    module.__file__ = None if location is None else str(location)
+    monkeypatch.setitem(sys.modules, "ventorum", module)
+    return module
+
+
+def test_import_check_requires_the_init_file_of_the_tree(tmp_path, monkeypatch):
+    """The import check accepts only TREE/ventorum/__init__.py, not any file under TREE."""
+    outer = tmp_path / "outer"
+    nested = outer / "worktrees" / "nested"
+    init = nested / "ventorum" / "__init__.py"
+    init.parent.mkdir(parents=True)
+    init.write_text("", encoding="utf-8")
+
+    module = _fake_ventorum(monkeypatch, init)
+    # A package of a nested worktree is under the outer tree, but it is not its package.
+    with pytest.raises(SystemExit) as exc:
+        ph._import_checked(outer)
+    assert "not from the tree" in str(exc.value)
+    assert ph._import_checked(nested) is module
+
+    # A namespace package has no __file__.
+    _fake_ventorum(monkeypatch, None)
+    with pytest.raises(SystemExit) as exc:
+        ph._import_checked(nested)
+    assert "namespace package" in str(exc.value)
+
+
+def test_compare_header_names_the_tree_folder_and_the_imported_file(tmp_path):
+    """The header gives the folder name and the imported file relative to the tree, not the full path."""
+    info = ph._probe(REPO_ROOT)
+    assert info.file == "ventorum/__init__.py"
+
+    tree_a = tmp_path / "tree_a"
+    tree_b = tmp_path / "tree_b"
+    result = ph.CompareResult(
+        rounds=1,
+        tiny=True,
+        tree_a=ph.TreeInfo(tree=tree_a, version="0.3.0", cython=False, file="ventorum/__init__.py"),
+        tree_b=ph.TreeInfo(tree=tree_b, version="0.3.1", cython=True, file="ventorum/__init__.py"),
+        rows=[],
+    )
+    text = ph.render_compare(result)
+    assert "Tree A: tree_a (imports ventorum/__init__.py, ventorum 0.3.0" in text
+    assert "Tree B: tree_b (imports ventorum/__init__.py, ventorum 0.3.1" in text
+    assert str(tmp_path) not in text
+
+
+def test_compare_alternates_the_order_of_the_trees(tmp_path, monkeypatch):
+    """Even rounds run A then B; odd rounds run B then A. The ratio stays B/A."""
+    tree_a = tmp_path / "tree_a"
+    tree_b = tmp_path / "tree_b"
+    tree_a.mkdir()
+    tree_b.mkdir()
+    order: list[str] = []
+
+    def fake_child(options, tree, timeout=None):
+        tree = Path(tree)
+        if "--probe" in options:
+            return {"version": "0.3.0", "cython": True, "file": str(tree / "ventorum" / "__init__.py")}
+        label = "A" if tree == tree_a.resolve() else "B"
+        order.append(label)
+        return {"unit": "ms", "median": 10.0 if label == "A" else 20.0, "min": 1.0, "max": 30.0}
+
+    monkeypatch.setattr(ph, "_child", fake_child)
+    result = ph.run_compare(tree_a, tree_b, rounds=4, workloads=["single_vlm_n20_c4"], tiny=True)
+    assert order == ["A", "B", "B", "A", "A", "B", "B", "A"]
+    row = result.rows[0]
+    assert row.median_a == pytest.approx(10.0)
+    assert row.median_b == pytest.approx(20.0)
+    assert row.ratio == pytest.approx(2.0)
+    assert row.spread == pytest.approx(0.0)
+
+
+def test_measure_collects_garbage_after_the_warm_up(monkeypatch):
+    """The garbage of the warm-up call is collected before the timed calls."""
+    events: list[str] = []
+    monkeypatch.setattr(ph.gc, "collect", lambda *args: events.append("gc") or 0)
+    workload = ph.Workload("probe", lambda: events.append("call"), "ms", 1)
+    ph.measure(workload, tiny=True)
+    assert events == ["call", "gc", "call"]
+    events.clear()
+    ph.measure(workload, tiny=False)
+    assert events == ["call", "gc"] + ["call"] * ph.TIMED_CALLS
+
+
+def test_git_status_takes_no_optional_locks(tmp_path, monkeypatch):
+    """The dirty check does not take the optional git index lock."""
+    commands: list[list[str]] = []
+
+    def fake_run(command, **kwargs):
+        commands.append(list(command))
+        return subprocess.CompletedProcess(command, 0, stdout="0123456789abcdef\n", stderr="")
+
+    monkeypatch.setattr(ph.subprocess, "run", fake_run)
+    assert ph.git_state(tmp_path) == ("0123456789abcdef", True)
+    assert ["git", "--no-optional-locks", "status", "--porcelain"] in commands
 
 
 if __name__ == "__main__":
