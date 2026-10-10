@@ -496,7 +496,7 @@ def test_undeformed_nodes_follow_the_solver_spacing():
     assert eta_vlm.shape == eta_llt.shape
     assert np.max(np.abs(eta_vlm - eta_llt)) > 0.1
 
-    for solver in ("vlm", "linear", "nonlinear", "auto", "llt", "horseshoe"):
+    for solver in ("vlm", "linear", "nonlinear", "auto"):
         st_s = vt.SolverSettings(n_panels=16, solver_type=solver)
         nodes = undeformed_nodes(ac, st_s, solver=solver)["Wing"]
         lat = make_solver(resolve_solver_type(solver)).build(ac, st_s, cond)

@@ -66,6 +66,9 @@ def alpha_sweep(
     if b not in ("auto", "thread", "serial"):
         raise ValueError(f"backend={backend!r}: use 'auto', 'thread' or 'serial'.")
 
+    from ventorum.utils.deprecation import warn_solver_alias
+
+    warn_solver_alias(settings.solver_type)
     canonical = resolve_solver_type(settings.solver_type)
     solver = make_solver(canonical)
 

@@ -68,17 +68,17 @@ class Ventorum:
         you give explicitly (not None) change these settings.
     alpha_sweep_deg : np.ndarray or Sequence[float] or None
         If provided, configuring this instance to run an angle-of-attack sweep.
-    n_workers : int
-        Number of internal workers allocated to this instance for its computations
-        (e.g., parallelizing internal alpha sweeps). 1 = serial within instance,
-        >1 = parallel workers within this instance, -1 = all available CPU cores.
+    n_jobs : int or str
+        Number of cases in parallel for the sweeps of this instance
+        (1 = serial within instance, >1 = parallel cases, -1 = one per
+        core, ``"auto"`` = the automatic plan). The default is 1.
     backend : str
         Concurrency backend for this instance's internal workers: 'auto' or
         'thread' (ThreadPoolExecutor), or 'serial'.
     solver : str or None
         Solver algorithm: 'auto' (the vortex-lattice method, the same default
-        as :func:`ventorum.analyze`), 'vlm' (alias 'horseshoe'), 'linear'
-        (or 'linear_llt'), 'nonlinear' or 'fourier'. None: 'auto' if
+        as :func:`ventorum.analyze`), 'vlm', 'linear',
+        'nonlinear' or 'fourier'. None: 'auto' if
         *settings* is None, otherwise the solver of *settings*.
     n_panels : int or None
         Panels per semi-span. None: 80 if *settings* is None, otherwise the
@@ -104,7 +104,7 @@ class Ventorum:
         settings: SolverSettings | None = None,
         *,
         alpha_sweep_deg: np.ndarray | Sequence[float] | None = None,
-        n_workers: int = 1,
+        n_jobs: int | str = 1,
         backend: str = "auto",
         solver: str | None = None,
         n_panels: int | None = None,
@@ -114,10 +114,14 @@ class Ventorum:
         case_id: str | None = None,
         metadata: dict[str, Any] | None = None,
     ):
+        from ventorum.utils.deprecation import warn_solver_alias
+
+        warn_solver_alias(solver if solver is not None else (
+            settings.solver_type if settings is not None else None))
         self.case_id = case_id or f"case_{uuid.uuid4().hex[:8]}"
         self.name = name
 
-        self.n_workers = 1 if n_workers in (None, "auto") else int(n_workers)
+        self.n_jobs = 1 if n_jobs is None else n_jobs
         self.backend = "thread" if backend is None or backend.lower() == "auto" else backend.lower()
 
         self.metadata = dict(metadata or {})
@@ -210,7 +214,7 @@ class Ventorum:
         alpha_deg_range: np.ndarray | Sequence[float] | None = None,
         *,
         V_inf: float | None = None,
-        n_workers: int | None = None,
+        n_jobs: int | str | None = None,
         backend: str | None = None,
         progress: bool = False,
         use_symmetry: bool | None = None,
@@ -223,8 +227,8 @@ class Ventorum:
             Array of angles of attack in degrees. If None, uses `self.alpha_sweep_deg`.
         V_inf : float or None
             Free-stream velocity [m/s].
-        n_workers : int or None
-            Workers dedicated to this sweep. Defaults to `self.n_workers`.
+        n_jobs : int, str or None
+            Cases in parallel for this sweep. Defaults to `self.n_jobs`.
         backend : str or None
             Concurrency backend ('auto', 'thread' or 'serial'). Defaults to `self.backend`.
         progress : bool
@@ -250,7 +254,7 @@ class Ventorum:
         if alphas is None:
             raise ValueError("No alpha range provided for sweep.")
 
-        workers = n_workers if n_workers is not None else self.n_workers
+        workers = n_jobs if n_jobs is not None else self.n_jobs
         b_end = backend.lower() if backend is not None else self.backend
 
         cond = self.condition.clone()
@@ -284,7 +288,7 @@ class Ventorum:
         """Execute the primary case configured for this instance.
 
         If `alpha_sweep_deg` is configured, runs a multi-angle sweep using
-        `self.n_workers`. Otherwise, executes a single-point analysis.
+        `self.n_jobs`. Otherwise, executes a single-point analysis.
         Thread-safe, self-timed, and updates `self.status` and `self.execution_time`.
         """
         with self._lock:
@@ -296,7 +300,7 @@ class Ventorum:
             if self.alpha_sweep_deg is not None:
                 res = self.analyze_sweep(
                     alpha_deg_range=self.alpha_sweep_deg,
-                    n_workers=self.n_workers,
+                    n_jobs=self.n_jobs,
                     backend=self.backend,
                     progress=progress,
                 )
@@ -330,7 +334,7 @@ class Ventorum:
                 "name": self.name,
                 "status": self.status,
                 "execution_time_s": self.execution_time,
-                "n_workers": self.n_workers,
+                "n_jobs": self.n_jobs,
                 "backend": self.backend,
                 "solver_type": self.settings.solver_type,
                 "n_panels": self.settings.n_panels,
@@ -496,7 +500,7 @@ class Ventorum:
                 condition=self.condition.clone() if (deep and self.condition is not None) else self.condition,
                 settings=self.settings.clone() if (deep and self.settings is not None) else self.settings,
                 alpha_sweep_deg=self.alpha_sweep_deg.copy() if (deep and self.alpha_sweep_deg is not None) else self.alpha_sweep_deg,
-                n_workers=self.n_workers,
+                n_jobs=self.n_jobs,
                 backend=self.backend,
                 metadata=dict(self.metadata) if deep else self.metadata,
             )
@@ -506,7 +510,7 @@ class Ventorum:
         with self._lock:
             return (
                 f"<Ventorum instance='{self.name}' id='{self.case_id}' status='{self.status}' "
-                f"workers={self.n_workers} ({self.backend}) time={self.execution_time:.3f}s>"
+                f"n_jobs={self.n_jobs} ({self.backend}) time={self.execution_time:.3f}s>"
             )
 
 
@@ -524,7 +528,7 @@ def run_parallel_instances(
     """Execute multiple independent Ventorum instances concurrently in parallel.
 
     Each instance executes its designated aerodynamic case, using its own dedicated
-    worker pool (`instance.n_workers`), providing full hierarchical / nested
+    worker pool (`instance.n_jobs`), providing full hierarchical / nested
     parallelism with verified zero-crosstalk.
 
     Parameters
@@ -620,7 +624,7 @@ class VentorumCaseManager:
         name: str,
         geometry: Aircraft | LiftingSurface,
         alpha_sweep_deg: np.ndarray | Sequence[float] | None = None,
-        n_workers: int = 1,
+        n_jobs: int | str = 1,
         backend: str = "auto",
         condition: FlightCondition | None = None,
         settings: SolverSettings | None = None,
@@ -634,7 +638,7 @@ class VentorumCaseManager:
             condition=condition,
             settings=settings,
             alpha_sweep_deg=alpha_sweep_deg,
-            n_workers=n_workers,
+            n_jobs=n_jobs,
             backend=backend,
             solver=solver,
             n_panels=n_panels,
@@ -715,7 +719,7 @@ class VentorumCaseManager:
                 "case_id": s["case_id"],
                 "status": s["status"],
                 "time_s": s["execution_time_s"],
-                "workers": s["n_workers"],
+                "workers": s["n_jobs"],
                 "backend": s["backend"],
                 "solver": s.get("solver_type"),
                 "panels": s.get("n_panels"),

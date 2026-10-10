@@ -17,12 +17,12 @@ print(res.CL, res.CDi, res.Cl, res.h_min_over_c)
 
 ## A grid of cases
 
-`GroundEffectSweep` runs every combination of heights, angles of attack and bank angles with one chordwise mesh for all cases. Its cases run in parallel; `n_workers` works like `n_jobs` in [Run a sweep in parallel](how_to_sweeps):
+`GroundEffectSweep` runs every combination of heights, angles of attack and bank angles with one chordwise mesh for all cases. Its cases run in parallel; `n_jobs` works like `n_jobs` in [Run a sweep in parallel](how_to_sweeps):
 
 ```python
 from ventorum.ground_effect import GroundEffectSweep
 
-sweep = GroundEffectSweep(wing, n_workers="auto", solver="horseshoe", n_panels=40)
+sweep = GroundEffectSweep(wing, n_jobs="auto", solver="vlm", n_panels=40)
 out = sweep.run_sweep(heights=[0.4, 0.6, 1.0], alphas_deg=[2.0, 4.0, 6.0], phis_deg=[0.0])
 deriv = out.compute_stability_derivatives()
 ```

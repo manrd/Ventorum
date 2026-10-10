@@ -297,7 +297,7 @@ def test_linear_llt_tabulated_airfoil_extraction():
 
 
 def test_linear_llt_top_level_analyze_api():
-    """Verify vt.analyze() works seamlessly with solver='linear' and solver='linear_llt'."""
+    """Verify vt.analyze() works seamlessly with solver='linear'."""
     wing = vt.LiftingSurface(
         semi_span=4.0,
         sections=[
@@ -306,7 +306,7 @@ def test_linear_llt_top_level_analyze_api():
         ],
     )
     res1 = vt.analyze(wing, alpha_deg=3.0, solver="linear", n_panels=20)
-    res2 = vt.analyze(wing, alpha_deg=3.0, solver="linear_llt", n_panels=20)
+    res2 = vt.analyze(wing, alpha_deg=3.0, solver="linear", n_panels=20)
 
     assert res1.solver_type == "linear"
     assert res2.solver_type == "linear"

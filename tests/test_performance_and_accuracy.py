@@ -207,7 +207,7 @@ def test_horseshoe_solve_sweep_machine_precision():
     )
     ac = vt.Aircraft(surfaces=[wing])
     cond = vt.FlightCondition(V_inf=45.0)
-    settings = vt.SolverSettings(solver_type="horseshoe", n_panels=25)
+    settings = vt.SolverSettings(solver_type="vlm", n_panels=25)
     alphas = np.radians(np.linspace(-4.0, 10.0, 8))
 
     solver = HorseshoeSolver()

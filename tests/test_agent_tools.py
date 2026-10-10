@@ -704,7 +704,7 @@ def test_gemini_schema_uses_the_openapi_subset():
     assert wa["type"] == "object" and {"span_m", "surfaces", "S_ref_m2"} <= set(wa["properties"])
     span = wa["properties"]["span_m"]
     assert span["minimum"] == 0 and "larger than 0" in span["description"]
-    nw = get_tool_schemas("gemini")[4]["parameters"]["properties"]["n_workers"]
+    nw = get_tool_schemas("gemini")[4]["parameters"]["properties"]["n_jobs"]
     assert nw["type"] == "integer" and "'auto'" in nw["description"]
     # The other formats keep the full JSON schema.
     assert "anyOf" in json.dumps(get_tool_schemas("mcp"))

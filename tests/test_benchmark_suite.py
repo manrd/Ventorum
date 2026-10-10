@@ -214,7 +214,7 @@ def test_multi_instance_detailed_verification():
                                       sections=[vt.WingSection(0.0, 1.0), vt.WingSection(1.0, 0.4)])
 
         inst = Ventorum(name=f"Serial_{name}", geometry=surf, alpha_sweep_deg=alphas,
-                         n_workers=1, n_panels=25)
+                         n_jobs=1, n_panels=25)
         res_list = inst.run()
         serial_results[name] = [
             (r.totals.CL, r.totals.CDi, r.totals.e, np.copy(r.spanwise[0].gamma))
@@ -237,7 +237,7 @@ def test_multi_instance_detailed_verification():
                                       sections=[vt.WingSection(0.0, 1.0), vt.WingSection(1.0, 0.4)])
 
         inst = Ventorum(name=f"Parallel_{name}", geometry=surf, alpha_sweep_deg=alphas,
-                         n_workers=2, backend="thread", n_panels=25)
+                         n_jobs=2, backend="thread", n_panels=25)
         parallel_instances.append(inst)
 
     completed = run_parallel_instances(parallel_instances, max_concurrent_instances=4,

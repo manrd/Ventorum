@@ -9,7 +9,7 @@ results = vt.analyze_sweep(
     wing,
     alpha_deg_range=alphas_deg,   # angles in degrees
     V_inf=50.0,
-    solver="horseshoe",
+    solver="vlm",
     n_panels=40,
     n_jobs="auto",                # "auto" (default), an integer, or -1 (one case per core)
     backend="auto",               # "auto" (threads), "thread" or "serial"
@@ -24,7 +24,7 @@ The lower-level call is `vt.alpha_sweep(aircraft, condition, settings, alpha_ran
 
 ## Ground-effect grid
 
-`GroundEffectSweep` runs grids of heights, angles of attack and bank angles with one chordwise mesh for all cases. Its `n_workers` argument works like `n_jobs` above. See [Run a ground-effect study](how_to_ground_effect).
+`GroundEffectSweep` runs grids of heights, angles of attack and bank angles with one chordwise mesh for all cases. Its `n_jobs` argument works like `n_jobs` above. See [Run a ground-effect study](how_to_ground_effect).
 
 ## Independent instances
 

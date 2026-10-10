@@ -280,6 +280,9 @@ def validate_flight_condition(fc: FlightCondition) -> None:
 def validate_solver_settings(ss: SolverSettings) -> None:
     """Check :class:`SolverSettings` values."""
     from ventorum.solvers.factory import VALID_SOLVER_NAMES as valid_solvers
+    from ventorum.utils.deprecation import warn_solver_alias
+
+    warn_solver_alias(ss.solver_type)
     if str(ss.solver_type).lower() not in valid_solvers:
         raise ValueError(
             f"solver_type='{ss.solver_type}' must be one of {valid_solvers}."
@@ -328,7 +331,7 @@ def validate_fourier_applicability(ac: Aircraft) -> None:
     if len(ac.surfaces) > 1:
         raise ValueError(
             "The Fourier solver supports only a single lifting surface. "
-            f"Got {len(ac.surfaces)} surfaces. Use 'horseshoe' instead."
+            f"Got {len(ac.surfaces)} surfaces. Use 'vlm' instead."
         )
     surf = ac.surfaces[0]
     if not surf.is_symmetric:
@@ -344,11 +347,11 @@ def validate_fourier_applicability(ac: Aircraft) -> None:
             raise ValueError(
                 "The Fourier solver does not support swept wings "
                 f"(sweep_le={np.degrees(surf.sweep_le):.1f}°). "
-                "Use 'horseshoe' instead."
+                "Use 'vlm' instead."
             )
     if abs(surf.dihedral) > np.radians(0.5):
         raise ValueError(
             "The Fourier solver does not support dihedral "
             f"(dihedral={np.degrees(surf.dihedral):.1f}°). "
-            "Use 'horseshoe' instead."
+            "Use 'vlm' instead."
         )

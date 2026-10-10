@@ -195,7 +195,7 @@ def test_strike_detection_and_limit(rectangular_wing):
 
 def test_sweep_engine_and_derivatives(rectangular_wing):
     """Verify multidimensional sweep execution and stability derivatives."""
-    sweep = GroundEffectSweep(rectangular_wing, n_workers=1, settings=_mesh(20, 3))
+    sweep = GroundEffectSweep(rectangular_wing, n_jobs=1, settings=_mesh(20, 3))
     heights = [0.3, 0.6, 1.2]
     alphas = [0.0, 4.0, 8.0]
     phis = [0.0, 2.0]
@@ -273,8 +273,8 @@ def test_parallel_sweep_consistency(rectangular_wing):
     alphas = [2.0, 4.0]
     phis = [0.0, 2.0]
 
-    sweep_ser = GroundEffectSweep(rectangular_wing, n_workers=1, n_panels=20)
-    sweep_par = GroundEffectSweep(rectangular_wing, n_workers=2, n_panels=20)
+    sweep_ser = GroundEffectSweep(rectangular_wing, n_jobs=1, n_panels=20)
+    sweep_par = GroundEffectSweep(rectangular_wing, n_jobs=2, n_panels=20)
 
     res_ser = sweep_ser.run_sweep(heights=heights, alphas_deg=alphas, phis_deg=phis)
     res_par = sweep_par.run_sweep(heights=heights, alphas_deg=alphas, phis_deg=phis)

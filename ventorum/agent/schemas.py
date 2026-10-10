@@ -236,6 +236,7 @@ _HINTS = {
     "heights": "use heights_m",
     "chord_root": "use root_chord_m",
     "chord_tip": "use tip_chord_m",
+    "n_workers": "use n_jobs",
 }
 
 
@@ -765,7 +766,7 @@ AGENT_TOOL_DEFINITIONS: list[dict[str, Any]] = [
                               "description": "Ranking objective. Default max_L_over_D (uses CD with "
                                              "profile drag when the airfoils give cd0, else CDi)."},
                 "settings": SETTINGS_SCHEMA,
-                "n_workers": {"anyOf": [{"type": "integer", "minimum": 1, "maximum": 64},
+                "n_jobs": {"anyOf": [{"type": "integer", "minimum": 1, "maximum": 64},
                                         {"type": "string", "enum": ["auto"]}],
                               "description": "Parallel threads. Default 'auto'."},
                 "axes": {**AXES_SCHEMA, "default": "body"},

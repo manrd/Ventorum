@@ -95,7 +95,7 @@ def test_single_instance_sweep_with_workers(sample_wings):
         name="SweepTest",
         geometry=sample_wings["swept"],
         alpha_sweep_deg=alphas,
-        n_workers=2,
+        n_jobs=2,
         backend="thread",
         n_panels=20,
     )
@@ -125,7 +125,7 @@ def test_multi_instance_parallel_zero_interference(sample_wings):
             name=f"Serial_{case_key}",
             geometry=wing,
             alpha_sweep_deg=alphas,
-            n_workers=1,
+            n_jobs=1,
             n_panels=25,
         )
         res_list = inst_serial.run()
@@ -140,7 +140,7 @@ def test_multi_instance_parallel_zero_interference(sample_wings):
             name=f"Parallel_{case_key}",
             geometry=sample_wings[case_key],
             alpha_sweep_deg=alphas,
-            n_workers=2,  # Multi-worker within each instance
+            n_jobs=2,  # Multi-worker within each instance
             backend="thread",
             n_panels=25,
             metadata={"origin_key": case_key},
@@ -189,8 +189,8 @@ def test_case_manager_workflow(sample_wings):
     mgr = VentorumCaseManager("AeroStudy")
     alphas = np.array([0.0, 5.0, 10.0])
 
-    mgr.create_case("CaseA", sample_wings["rect"], alpha_sweep_deg=alphas, n_workers=2, n_panels=20)
-    mgr.create_case("CaseB", sample_wings["swept"], alpha_sweep_deg=alphas, n_workers=2, n_panels=20)
+    mgr.create_case("CaseA", sample_wings["rect"], alpha_sweep_deg=alphas, n_jobs=2, n_panels=20)
+    mgr.create_case("CaseB", sample_wings["swept"], alpha_sweep_deg=alphas, n_jobs=2, n_panels=20)
 
     completed = mgr.run_all(max_concurrent_instances=2, show_progress=False)
     assert len(completed) == 2
@@ -238,9 +238,9 @@ def test_case_manager_analytics_and_optimization(sample_wings):
     alphas = np.array([0.0, 4.0, 8.0])
 
     # Case 1: High aspect ratio wing (sailplane)
-    mgr.create_case("Sailplane", sample_wings["sailplane"], alpha_sweep_deg=alphas, n_workers=1, n_panels=20)
+    mgr.create_case("Sailplane", sample_wings["sailplane"], alpha_sweep_deg=alphas, n_jobs=1, n_panels=20)
     # Case 2: Rectangular wing
-    mgr.create_case("Rectangular", sample_wings["rect"], alpha_sweep_deg=alphas, n_workers=1, n_panels=20)
+    mgr.create_case("Rectangular", sample_wings["rect"], alpha_sweep_deg=alphas, n_jobs=1, n_panels=20)
 
     mgr.run_all(show_progress=False)
 
@@ -317,6 +317,6 @@ def test_polar_uses_swept_alphas(sample_wings):
 
 def test_process_backend_is_refused(sample_wings):
     inst = Ventorum("Proc", geometry=sample_wings["rect"], n_panels=12, alpha_sweep_deg=[0, 2],
-                     backend="process", n_workers=2)
+                     backend="process", n_jobs=2)
     with pytest.raises(ValueError, match="thread"):
         inst.run()

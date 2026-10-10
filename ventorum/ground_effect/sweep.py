@@ -293,15 +293,19 @@ class GroundEffectSweep:
     def __init__(
         self,
         geometry: Aircraft | LiftingSurface,
-        n_workers: int | str = "auto",
+        n_jobs: int | str = "auto",
         backend: str = "auto",
         solver: str | None = None,
         settings: SolverSettings | None = None,
         n_panels: int = 80,
         spacing: str = "auto",
     ):
+        from ventorum.utils.deprecation import warn_solver_alias
+
+        warn_solver_alias(solver if solver is not None else (
+            settings.solver_type if settings is not None else None))
         self.aircraft = _as_aircraft(geometry)
-        self.n_workers = n_workers
+        self.n_jobs = n_jobs
         self.backend = (backend or "auto").lower()
         self.solver = solver
         self.settings = settings
@@ -388,7 +392,7 @@ class GroundEffectSweep:
         elif backend == "serial":
             outputs = [run(c) for c in cases]
         else:
-            outputs = run_cases(run, cases, estimate_panels(ac, sett), self.n_workers)
+            outputs = run_cases(run, cases, estimate_panels(ac, sett), self.n_jobs)
         errors: dict[tuple[int, int, int], str] = {}
 
         for count, (case, res, err) in enumerate(outputs):
@@ -719,7 +723,7 @@ def sweep_height(
     heights: Sequence[float] | np.ndarray,
     alpha_deg: float = 5.0,
     phi_deg: float = 0.0,
-    n_workers: int | str = "auto",
+    n_jobs: int | str = "auto",
     backend: str = "auto",
     **kwargs,
 ) -> GroundEffectSweepResult:
@@ -735,7 +739,7 @@ def sweep_height(
         Angle of attack [deg] (default 5.0).
     phi_deg : float
         Bank angle [deg].
-    n_workers : int or str
+    n_jobs : int or str
         Number of parallel workers, or ``"auto"``.
     backend : str
         Parallel backend, or ``"auto"``.
@@ -751,7 +755,7 @@ def sweep_height(
         The grids of results.
     """
     sk, rk = _split_kwargs(kwargs)
-    return GroundEffectSweep(geometry, n_workers=n_workers, backend=backend, **sk).run_sweep(
+    return GroundEffectSweep(geometry, n_jobs=n_jobs, backend=backend, **sk).run_sweep(
         heights=heights, alphas_deg=[alpha_deg], phis_deg=[phi_deg], **rk)
 
 
@@ -760,7 +764,7 @@ def sweep_roll(
     phis_deg: Sequence[float] | np.ndarray,
     heights: Sequence[float] | np.ndarray = (0.5, 1.0, 2.0),
     alpha_deg: float = 5.0,
-    n_workers: int | str = "auto",
+    n_jobs: int | str = "auto",
     backend: str = "auto",
     **kwargs,
 ) -> GroundEffectSweepResult:
@@ -776,7 +780,7 @@ def sweep_roll(
         Heights above the ground [m] (each > 0), in the convention of ``height_ref``.
     alpha_deg : float
         Angle of attack [deg] (default 5.0).
-    n_workers : int or str
+    n_jobs : int or str
         Number of parallel workers, or ``"auto"``.
     backend : str
         Parallel backend, or ``"auto"``.
@@ -792,7 +796,7 @@ def sweep_roll(
         The grids of results.
     """
     sk, rk = _split_kwargs(kwargs)
-    return GroundEffectSweep(geometry, n_workers=n_workers, backend=backend, **sk).run_sweep(
+    return GroundEffectSweep(geometry, n_jobs=n_jobs, backend=backend, **sk).run_sweep(
         heights=heights, alphas_deg=[alpha_deg], phis_deg=phis_deg, **rk)
 
 
@@ -801,7 +805,7 @@ def sweep_alpha(
     alphas_deg: Sequence[float] | np.ndarray,
     heights: Sequence[float] | np.ndarray = (0.5, 1.0, 2.0),
     phi_deg: float = 0.0,
-    n_workers: int | str = "auto",
+    n_jobs: int | str = "auto",
     backend: str = "auto",
     **kwargs,
 ) -> GroundEffectSweepResult:
@@ -817,7 +821,7 @@ def sweep_alpha(
         Heights above the ground [m] (each > 0), in the convention of ``height_ref``.
     phi_deg : float
         Bank angle [deg].
-    n_workers : int or str
+    n_jobs : int or str
         Number of parallel workers, or ``"auto"``.
     backend : str
         Parallel backend, or ``"auto"``.
@@ -833,5 +837,5 @@ def sweep_alpha(
         The grids of results.
     """
     sk, rk = _split_kwargs(kwargs)
-    return GroundEffectSweep(geometry, n_workers=n_workers, backend=backend, **sk).run_sweep(
+    return GroundEffectSweep(geometry, n_jobs=n_jobs, backend=backend, **sk).run_sweep(
         heights=heights, alphas_deg=alphas_deg, phis_deg=[phi_deg], **rk)
