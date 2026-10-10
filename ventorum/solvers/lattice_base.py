@@ -529,6 +529,69 @@ class LatticeSolver(BaseSolver):
                                       main_surface, continuation, t0, grounds=grounds)
         if gpu_results is not None:
             return gpu_results
+        return self._solve_batch_cpu(lattice, conditions, settings, S_ref, b_ref, c_ref, ref_point=ref_point,
+                                     main_surface=main_surface, continuation=continuation, grounds=grounds,
+                                     t0=t0)
+
+    def _solve_batch_cpu(
+        self,
+        lattice: VortexLattice,
+        conditions: list[FlightCondition],
+        settings: SolverSettings,
+        S_ref: float,
+        b_ref: float,
+        c_ref: float,
+        ref_point: np.ndarray | None = None,
+        main_surface: int = 0,
+        continuation: bool = True,
+        grounds: list[GroundPlane | None] | None = None,
+        t0: float | None = None,
+    ) -> list[SolverResult]:
+        """Solve several flight conditions on the CPU, without the GPU check.
+
+        This is the CPU branch of :meth:`solve_batch`. It does not read or
+        change the device setting of :mod:`ventorum.gpu`, so a caller that
+        must stay on the CPU (for example the ground-effect sweeps) can use
+        it from several threads at the same time.
+
+        Parameters
+        ----------
+        lattice : VortexLattice
+            The lattice, already built.
+        conditions : list of FlightCondition
+            Flight conditions, one per case.
+        settings : SolverSettings
+            Solver settings.
+        S_ref : float
+            Reference area [m^2].
+        b_ref : float
+            Reference span [m].
+        c_ref : float
+            Reference chord [m].
+        ref_point : numpy.ndarray or None, optional
+            Moment reference point [m], shape (3,).
+        main_surface : int, optional
+            Index of the main surface (for the trust score).
+        continuation : bool, optional
+            If True, a case starts from the converged circulation of the
+            case before it (nonlinear solver).
+        grounds : list of GroundPlane or None, optional
+            Explicit ground plane (or None) of each case. If None, the
+            ground of each case comes from ``condition.h``.
+        t0 : float or None, optional
+            Start time of the batch [s] (``time.perf_counter``). If None,
+            the time at the call is used.
+
+        Returns
+        -------
+        list of SolverResult
+            One result per condition, in order. ``execution_time`` is the
+            share of each case in the batch time.
+        """
+        if t0 is None:
+            t0 = time.perf_counter()
+        if not conditions:
+            return []
         explicit = [None] * len(conditions) if grounds is None else list(grounds)
         with solve_threads(lattice.n_panels, batch=len(conditions)):
             setups = [self._case_setup(lattice, c, settings, c_ref, g, ref_point) for c, g in zip(conditions, explicit)]

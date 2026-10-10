@@ -523,7 +523,6 @@ def _cpu_batch(
     backend: str = "auto",
 ) -> list | None:
     """Solve cases of a sweep as batches on the CPU in chunks, or return None."""
-    from ventorum import gpu
     from ventorum.ground_effect.solver import ground_case_result
     from ventorum.hardware.profile import size_class
     from ventorum.solvers.core import _unknown_map
@@ -555,18 +554,13 @@ def _cpu_batch(
             chunk = prepared[k0 : k0 + chunk_sz]
             conds = [p["condition"] for _, p in chunk]
             grounds = [p["ground"] for _, p in chunk]
-            prev_device = gpu.get_device()
-            try:
-                if prev_device != "cpu":
-                    gpu.set_device("cpu")
-                chunk_res = solver.solve_batch(
-                    lattice, conds, sett, ac.S_ref, ac.b_ref, ac.c_ref,
-                    ref_point=rp, main_surface=ac.main_surface_index(),
-                    continuation=False, grounds=grounds,
-                )
-            finally:
-                if prev_device != "cpu":
-                    gpu.set_device(prev_device)
+            # The CPU branch of solve_batch: no GPU check, no change of the
+            # device setting (safe when sweeps run in parallel threads).
+            chunk_res = solver._solve_batch_cpu(
+                lattice, conds, sett, ac.S_ref, ac.b_ref, ac.c_ref,
+                ref_point=rp, main_surface=ac.main_surface_index(),
+                continuation=False, grounds=grounds,
+            )
             all_results.extend(chunk_res)
 
         share = (time.perf_counter() - t0) / len(prepared)

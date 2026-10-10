@@ -3,16 +3,36 @@
 
 from __future__ import annotations
 
+import threading
+
 import numpy as np
 import pytest
 
 import ventorum as vt
+from ventorum import gpu
 from ventorum.aero import loads as loads_module
 from ventorum.geometry import lattice_cache
 from ventorum.ground_effect import solver as ge_solver
 from ventorum.ground_effect import sweep as ge_sweep
 from ventorum.ground_effect.sweep import GroundEffectSweep
 from ventorum.solvers.factory import make_solver
+
+_GRID_KEYS = (
+    "CL", "CDi", "CD", "CY", "Cl", "Cm", "Cn",
+    "L_over_D", "e", "h_min", "h_ref_grid", "phi_strike_limit",
+)
+
+
+def _assert_same_rows(res_a, res_b, rtol=1e-12, label=""):
+    """Assert that two sweep results have the same grids, flags and errors."""
+    for k in _GRID_KEYS:
+        np.testing.assert_allclose(
+            getattr(res_a, k), getattr(res_b, k), rtol=rtol, atol=1e-12 if rtol else 0.0, equal_nan=True,
+            err_msg=f"Mismatch in grid {k} {label}",
+        )
+    np.testing.assert_array_equal(res_a.is_strike, res_b.is_strike)
+    np.testing.assert_array_equal(res_a.refused, res_b.refused)
+    assert res_a.errors == res_b.errors
 
 
 @pytest.fixture
@@ -242,3 +262,87 @@ def test_asymmetric_circulation_uses_full_trefftz(rectangular_wing, monkeypatch)
 
     loads_module.trefftz_induced_drag_batch(lat, gamma[None, :], wake_dirs, rho, [None])
     assert not half_eval_called
+
+
+def _serial_sweep(ac, solver_type, n_panels=8):
+    """Return a sweep of *ac* in serial mode with a small mesh."""
+    sett = vt.SolverSettings(solver_type=solver_type, n_panels=n_panels)
+    return GroundEffectSweep(ac, settings=sett, backend="serial")
+
+
+def test_cpu_batch_does_not_change_the_device(wing_tail_aircraft, monkeypatch):
+    """The CPU batch never calls gpu.set_device and never enters the GPU pipeline.
+
+    Regression test: the CPU batch set the device to "cpu" for each chunk
+    and restored it after the chunk. That global change is not thread-safe.
+    """
+    monkeypatch.setattr(gpu, "_device", "auto")
+    monkeypatch.setattr(ge_sweep, "_gpu_batch", lambda *args, **kwargs: None)
+    set_calls = []
+    monkeypatch.setattr(gpu, "set_device", lambda name: set_calls.append(name))
+    pipeline_calls = []
+
+    def no_gpu(*args, **kwargs):
+        pipeline_calls.append(1)
+        return None
+
+    monkeypatch.setattr("ventorum.gpu.pipeline.solve_batch", no_gpu)
+    cpu_batch_calls = []
+    orig_cpu_batch = ge_sweep._cpu_batch
+
+    def spy_cpu_batch(*args, **kwargs):
+        out = orig_cpu_batch(*args, **kwargs)
+        cpu_batch_calls.append(out is not None)
+        return out
+
+    monkeypatch.setattr(ge_sweep, "_cpu_batch", spy_cpu_batch)
+
+    res = _serial_sweep(wing_tail_aircraft, "vlm").run_sweep([1.5, 2.0], [0.0, 4.0], [0.0, 3.0])
+
+    assert cpu_batch_calls == [True]
+    assert set_calls == []
+    assert pipeline_calls == []
+    assert gpu.get_device() == "auto"
+    assert np.all(np.isfinite(res.CL))
+
+
+def _sweeps_in_threads(jobs):
+    """Run each job ``(aircraft, solver, grid)`` as a sweep in its own thread; all start together."""
+    barrier = threading.Barrier(len(jobs))
+    results: list = [None] * len(jobs)
+    failures: list = []
+
+    def work(i, ac, solver_type, grid):
+        try:
+            barrier.wait()
+            results[i] = _serial_sweep(ac, solver_type).run_sweep(*grid)
+        except Exception as exc:  # noqa: BLE001 - the main thread reports it
+            failures.append(exc)
+
+    threads = [threading.Thread(target=work, args=(i, *job)) for i, job in enumerate(jobs)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    return results, failures
+
+
+def test_parallel_sweeps_keep_the_device_and_the_results(wing_tail_aircraft, rectangular_wing, monkeypatch):
+    """Two sweeps in parallel threads give the serial results and keep the device setting."""
+    monkeypatch.setattr(gpu, "_device", "auto")
+    monkeypatch.setattr(ge_sweep, "_gpu_batch", lambda *args, **kwargs: None)
+    wing_ac = vt.Aircraft(name="Wing", surfaces=[rectangular_wing])
+    jobs = [
+        (wing_tail_aircraft, "vlm", ([1.5, 2.0], [0.0, 2.0, 4.0], [0.0, 3.0])),
+        (wing_ac, "linear", ([1.5, 2.5], [0.0, 2.0, 4.0], [0.0, 3.0])),
+    ]
+
+    serial = [_serial_sweep(ac, s).run_sweep(*grid) for ac, s, grid in jobs]
+    assert gpu.get_device() == "auto"
+
+    for _ in range(3):
+        parallel, failures = _sweeps_in_threads(jobs)
+        assert failures == []
+        assert gpu.get_device() == "auto"
+        for res_p, res_s in zip(parallel, serial):
+            _assert_same_rows(res_p, res_s, rtol=0.0, label="(parallel threads)")
