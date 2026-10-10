@@ -18,6 +18,13 @@ a minor version can change a public interface.
 - `validation/perf_history.py`: a speed history of fixed workloads per commit (record mode, which
   times the code of its own tree) and a side-by-side timing of two source trees (compare mode,
   one fresh process per run, alternating order). The output holds no machine identifier.
+- Control surfaces: `ControlSurface` on a `LiftingSurface` (spanwise limits, hinge line as a
+  fraction of the chord, deflection, symmetric or antisymmetric on the mirror copy, limit 30 deg),
+  and `Aircraft.set_deflection`. The vortex lattice with two or more chordwise panels turns the
+  normals of the panels aft of the hinge. The lifting lines, and the vortex lattice with one
+  chordwise panel, use a section polar deflected by thin-airfoil theory (Glauert 1926). An
+  antisymmetric deflection turns off the symmetry fold. The Fourier solver refuses a deflected
+  control.
 
 ### Changed
 
