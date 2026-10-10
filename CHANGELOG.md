@@ -41,6 +41,12 @@ a minor version can change a public interface.
   not used), checks the angles and the mesh counts of each run, and compares forces, moments and
   derivatives with Ventorum in free air and in ground effect (geometry rotation). It also
   compares the run times. Nothing from AVL is in the code: only its input and output formats.
+- Agent tools for the P1 features: the surface object takes `controls` (flaps, ailerons,
+  elevators, rudders; deflections in degrees) and `node_displacements` (metres), so every geometry
+  tool accepts them. New tools: `ventorum_trim` (target CL with zero moments; a target that is not
+  reached gives `trimmed: false` and a status, not an error), `ventorum_error_bars` (layer-1
+  numerical error bars) and `ventorum_undeformed_nodes` (the mesh nodes to build displacements
+  from). The agent interface now has 11 tools.
 
 ### Changed
 
