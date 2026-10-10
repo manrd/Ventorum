@@ -179,3 +179,42 @@ def test_non_finite_guard_never_raises_the_trust_level():
     t = evaluate_aerodynamic_trust(**kw)
     assert t.rating == "UNRELIABLE"
     assert any("non-finite result" in w.lower() for w in t.warnings)
+
+
+def test_tiny_span_chord_and_area_are_refused():
+    """T-0047 B9: validate_surface has lower limits on span, chord and area."""
+    wing = _wing()
+    wing.semi_span = 1e-300
+    with pytest.raises(ValueError) as exc:
+        V.validate_surface(wing)
+    assert "semi_span" in str(exc.value)
+    wing = _wing()
+    wing.sections[0].chord = 1e-300
+    wing.sections[1].chord = 1e-300
+    with pytest.raises(ValueError) as exc:
+        V.validate_surface(wing)
+    assert "chord" in str(exc.value)
+    for bad in (0.0, -1.0):
+        wing = _wing()
+        wing.semi_span = bad
+        with pytest.raises(ValueError) as exc:
+            V.validate_surface(wing)
+        assert "semi_span" in str(exc.value)
+
+
+def test_small_but_sane_wing_still_passes():
+    """T-0047 B9: the lower limits do not refuse a small (1 cm) wing."""
+    wing = _wing(semi_span=0.005, sections=[
+        vt.WingSection(y_frac=0.0, chord=0.01),
+        vt.WingSection(y_frac=1.0, chord=0.01),
+    ])
+    V.validate_surface(wing)
+
+
+def test_zero_reference_values_are_refused():
+    """T-0047 B9: a zero S_ref, b_ref or c_ref is refused."""
+    for key in ("S_ref", "b_ref", "c_ref"):
+        ac = vt.Aircraft(name="A", surfaces=[_wing()], **{key: 0.0})
+        with pytest.raises(ValueError) as exc:
+            V.validate_aircraft(ac)
+        assert key in str(exc.value)

@@ -712,7 +712,7 @@ def _irodov(ac, ok, alpha, phi, beta, V, rho, rp, href, fixed, c_ref, dl, sweep_
 def ground_effect(
     wing: Any,
     heights_m: list[float],
-    alpha_deg: float = 4.0,
+    alpha_deg: float = 5.0,
     phi_deg: float = 0.0,
     beta_deg: float = 0.0,
     height_ref: str = "ref",

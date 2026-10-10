@@ -25,6 +25,13 @@ from ventorum.core.datatypes import (
 #: Largest absolute value of a length or a position [m]. Only absurd values
 #: are refused; this is not a flight envelope.
 LENGTH_LIMIT_M = 1.0e5
+#: Smallest semi-span and section chord [m] accepted. Smaller positive
+#: values underflow to zero in products of lengths (area, q*S*b) and give
+#: a division by zero in the loads. A wing below one micrometre is absurd.
+MIN_SPAN_M = 1.0e-6
+MIN_CHORD_M = 1.0e-6
+#: Smallest planform area [m^2] accepted (unprojected, both halves).
+MIN_AREA_M2 = 1.0e-12
 #: Largest absolute value of an angle [rad].
 ANGLE_LIMIT_RAD = math.pi
 #: Largest free-stream speed [m/s].
@@ -83,9 +90,9 @@ def validate_section(sec: WingSection, idx: int, surface_name: str) -> None:
             f"must be in [0, 1]."
         )
     _check_length(f"{tag}: chord", sec.chord)
-    if sec.chord <= 0:
+    if sec.chord < MIN_CHORD_M:
         raise ValueError(
-            f"[{surface_name}] Section {idx}: chord={sec.chord} must be > 0."
+            f"[{surface_name}] Section {idx}: chord={sec.chord} m must be >= {MIN_CHORD_M:g} m."
         )
     _check_angle(f"{tag}: twist", sec.twist)
     if sec.x_le is not None:
@@ -109,9 +116,9 @@ def validate_section(sec: WingSection, idx: int, surface_name: str) -> None:
 def validate_surface(surf: LiftingSurface) -> None:
     """Check a :class:`LiftingSurface` for completeness and consistency."""
     _check_length(f"[{surf.name}] semi_span", surf.semi_span)
-    if surf.semi_span <= 0:
+    if surf.semi_span < MIN_SPAN_M:
         raise ValueError(
-            f"[{surf.name}] semi_span={surf.semi_span} must be > 0."
+            f"[{surf.name}] semi_span={surf.semi_span} m must be >= {MIN_SPAN_M:g} m."
         )
     try:
         position = np.asarray(surf.position, dtype=float)
@@ -183,6 +190,21 @@ def validate_surface(surf: LiftingSurface) -> None:
             raise ValueError(
                 f"[{surf.name}] Unknown spacing={surf.spacing!r}. Options: 'auto', 'cosine', 'half-cosine', 'root', 'uniform', 'power'."
             )
+    # Planform area (unprojected: semi_span is the length along the
+    # dihedral line unless z_le is given). The unprojected area is used
+    # so that a vertical fin (no projected area) still passes.
+    fracs = [s.y_frac for s in surf.sections]
+    chords = [s.chord for s in surf.sections]
+    area = surf.semi_span * sum(
+        0.5 * (a + b) * (g - f)
+        for a, b, f, g in zip(chords[:-1], chords[1:], fracs[:-1], fracs[1:])
+    )
+    if surf.is_symmetric:
+        area *= 2.0
+    if area < MIN_AREA_M2:
+        raise ValueError(
+            f"[{surf.name}] planform area={area} m^2 must be >= {MIN_AREA_M2:g} m^2."
+        )
 
 
 def validate_aircraft(ac: Aircraft) -> None:
@@ -191,6 +213,14 @@ def validate_aircraft(ac: Aircraft) -> None:
         raise ValueError("Aircraft must have at least one LiftingSurface.")
     for surf in ac.surfaces:
         validate_surface(surf)
+    for key in ("S_ref", "b_ref", "c_ref"):
+        value = getattr(ac, key)
+        if value is not None:
+            _finite_value(f"Aircraft '{ac.name}': {key}", value)
+            if value <= 0:
+                raise ValueError(
+                    f"Aircraft '{ac.name}': {key}={value} must be > 0."
+                )
     if ac.ref_point is not None:
         try:
             ref = np.asarray(ac.ref_point, dtype=float).reshape(3)
