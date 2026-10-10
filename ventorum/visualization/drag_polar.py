@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+import dataclasses
+
 import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.figure import Figure
@@ -114,10 +116,7 @@ def alpha_sweep(
     lattice.kernel_cache = {}
 
     def one(a: float) -> SolverResult:
-        cond = FlightCondition(
-            V_inf=condition.V_inf, alpha=float(a), beta=condition.beta,
-            rho=condition.rho, h=condition.h, phi=getattr(condition, "phi", 0.0),
-        )
+        cond = dataclasses.replace(condition, alpha=float(a))
         return solver.solve_lattice(lattice, cond, settings, aircraft.S_ref, aircraft.b_ref, aircraft.c_ref,
                                     ref_point=rp, main_surface=aircraft.main_surface_index())
 

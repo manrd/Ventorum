@@ -41,7 +41,7 @@ from typing import Any
 
 import numpy as np
 
-from ventorum.aero.system import UnknownMap, build_sources, freestream_direction, panel_targets
+from ventorum.aero.system import UnknownMap, build_sources, freestream_direction, panel_targets, rotation_velocity
 from ventorum.aero.vortex import induced_velocity
 from ventorum.core.datatypes import SolverResult
 from ventorum.geometry.controls import flap_effectiveness, hinge_moment_derivatives
@@ -153,9 +153,12 @@ def _bound_forces(result: SolverResult, panels: np.ndarray) -> tuple[np.ndarray,
     src = build_sources(lattice, np.asarray(d["wake_dir"], dtype=float), umap, d.get("ground"))
     P = lattice.force_points[panels]
     v = induced_velocity(P, src, gamma, panel_targets(lattice, panels))
-    V = float(cond.V_inf) * freestream_direction(cond.alpha, cond.beta)
+    U = float(cond.V_inf) * freestream_direction(cond.alpha, cond.beta)[None, :]
+    w_rot = rotation_velocity(cond, P, d.get("ref_point"))
+    if w_rot is not None:
+        U = U + w_rot   # body rates: the onset at each force point
     l_vec = lattice.b[panels] - lattice.a[panels]
-    F = float(cond.rho) * gamma[panels, None] * cross3(V[None, :] + v, l_vec)
+    F = float(cond.rho) * gamma[panels, None] * cross3(U + v, l_vec)
     return P, F
 
 
@@ -190,7 +193,9 @@ def hinge_moments(result: SolverResult) -> list[HingeMoment]:
     Notes
     -----
     Chordwise mode: the force on the bound vortex of each flap panel is
-    ``rho Gamma (V_inf + v) x l``, with the induced velocity ``v`` from a new
+    ``rho Gamma (U + v) x l``, with the onset ``U`` (the free stream, plus
+    the rotation about the moment reference point with body rates) and the
+    induced velocity ``v`` from a new
     evaluation of the kernel at the force points (as the loads, with the
     ground images and the wake of the case). The forces on the chordwise
     legs are left out: the two legs of one horseshoe carry opposite

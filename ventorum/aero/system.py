@@ -60,6 +60,76 @@ def freestream_direction(alpha: float, beta: float = 0.0) -> np.ndarray:
     return np.array([ca * cb, -sb, sa * cb])
 
 
+def has_rates(condition: FlightCondition) -> bool:
+    """Return True if one of the body rates ``p``, ``q``, ``r`` of *condition* is not zero."""
+    return (getattr(condition, "p", 0.0) != 0.0 or getattr(condition, "q", 0.0) != 0.0
+            or getattr(condition, "r", 0.0) != 0.0)
+
+
+def rotation_vector(condition: FlightCondition) -> np.ndarray:
+    """Return the angular velocity of the aircraft in geometry axes [rad/s].
+
+    The body rates ``p``, ``q``, ``r`` of *condition* are given in the
+    flight-dynamics body axes (x forward, y right, z down). The geometry axes
+    are x aft, y right, z up, so the vector is ``(-p, q, -r)``.
+
+    Parameters
+    ----------
+    condition : FlightCondition
+        Flight condition with the body rates [rad/s].
+
+    Returns
+    -------
+    numpy.ndarray
+        Angular velocity [rad/s], shape (3,).
+    """
+    return np.array([-float(getattr(condition, "p", 0.0)), float(getattr(condition, "q", 0.0)),
+                     -float(getattr(condition, "r", 0.0))])
+
+
+def rotation_velocity(
+    condition: FlightCondition,
+    points: np.ndarray,
+    center: np.ndarray | None = None,
+) -> np.ndarray | None:
+    """Return the onset velocity of the rotation at *points* [m/s], or None without rotation.
+
+    Quasi-steady rotation: an aircraft that turns with the angular velocity
+    ``Omega`` about the point *center* sees, at a point ``x`` fixed to it,
+    the air velocity ``-Omega x (x - center)`` in addition to the free
+    stream. The local onset velocity is ``V_inf d - Omega x (x - center)``.
+
+    Parameters
+    ----------
+    condition : FlightCondition
+        Flight condition with the body rates [rad/s].
+    points : numpy.ndarray
+        Points [m] in geometry axes, shape (m, 3).
+    center : numpy.ndarray or None, optional
+        Centre of the rotation [m], shape (3,): the moment reference point
+        of the solve. None is the origin.
+
+    Returns
+    -------
+    numpy.ndarray or None
+        Velocity [m/s], shape (m, 3), or None if all rates are zero.
+
+    Notes
+    -----
+    In ground effect the images of the vortices stay plain mirror images:
+    in the earth frame the air and the ground are at rest, so the
+    perturbation velocity must have no normal component on the ground.
+    The rotation enters only the boundary condition on the real surfaces.
+    """
+    if not has_rates(condition):
+        return None
+    omega = rotation_vector(condition)
+    rel = np.asarray(points, dtype=float)
+    if center is not None:
+        rel = rel - np.asarray(center, dtype=float)
+    return -cross3(omega[None, :], rel)
+
+
 def wake_direction(
     condition: FlightCondition,
     ground: GroundPlane | None = None,
@@ -219,8 +289,13 @@ def ground_plane_from_condition(
 
 
 def is_symmetric_condition(condition: FlightCondition, ground: GroundPlane | None) -> bool:
-    """Return True if the flow is symmetric about the body x-z plane."""
+    """Return True if the flow is symmetric about the body x-z plane.
+
+    A roll rate or a yaw rate makes the flow asymmetric; a pitch rate does not.
+    """
     if abs(condition.beta) > 1e-12:
+        return False
+    if getattr(condition, "p", 0.0) != 0.0 or getattr(condition, "r", 0.0) != 0.0:
         return False
     if ground is not None and abs(ground.normal[1]) > 1e-12:
         return False

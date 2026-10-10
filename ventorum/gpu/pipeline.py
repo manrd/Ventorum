@@ -51,6 +51,12 @@ def solve_batch(solver, lattice, conditions: list, settings, S_ref: float, b_ref
     """
     if gpu.get_device() == "cpu" or solver.name not in ("linear", "nonlinear", "vlm"):
         return None
+    from ventorum.aero.system import has_rates
+
+    if any(has_rates(c) for c in conditions):
+        # The GPU kernels take one free-stream velocity per case; body rates
+        # need the onset per point. These cases run on the CPU path.
+        return None
     from ventorum.utils.parallel import _local as _par_local
 
     if gpu.get_device() == "auto" and getattr(_par_local, "worker_threads", None) is not None:
@@ -89,7 +95,7 @@ def solve_batch(solver, lattice, conditions: list, settings, S_ref: float, b_ref
     out: list = [None] * K
     for idx, (arrays, infos, umap) in solved:
         res = _results(solver, lattice, [conditions[k] for k in idx], arrays, [setups[k] for k in idx], umap, c_ref,
-                       main_surface, t0, share, precision, infos=infos)
+                       main_surface, t0, share, precision, infos=infos, ref_point=ref_point)
         for k, r in zip(idx, res):
             out[k] = r
     return out
@@ -254,7 +260,7 @@ def _nonlinear(solver, engine, dl, md, cs, lattice, conditions, settings, ground
 
 
 def _results(solver, lattice, conditions, arrays: dict, setups: list, umap, c_ref: float, main_surface: int,
-             t0: float, share: float, precision: str, infos: list | None = None) -> list:
+             t0: float, share: float, precision: str, infos: list | None = None, ref_point=None) -> list:
     """Return the result objects of a GPU batch (the loads objects and the CPU result builder)."""
     from ventorum.aero.loads import loads_result
     from ventorum.solvers.core import SolveInfo
@@ -280,7 +286,8 @@ def _results(solver, lattice, conditions, arrays: dict, setups: list, umap, c_re
         )
         info = infos[k] if infos is not None else SolveInfo(symmetric=umap.symmetric)
         res = solver._case_result(lattice, cond, ld, info, gammas[k], st[0], st[1], st[2], st[3], c_ref,
-                                  main_surface, t0, execution_time=share, spanwise_stats=stats[k])
+                                  main_surface, t0, execution_time=share, spanwise_stats=stats[k],
+                                  ref_point=ref_point)
         res.details["device"] = "gpu"
         res.details["precision"] = precision
         out.append(res)

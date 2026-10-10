@@ -28,6 +28,7 @@ how_to_sweeps
 how_to_ground_effect
 how_to_trim
 how_to_control_derivatives
+how_to_rate_derivatives
 ```
 
 ## Reference

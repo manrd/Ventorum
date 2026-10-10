@@ -60,13 +60,16 @@ class NonlinearSolver(LatticeSolver):
         wake_dir: np.ndarray | None = None,
         gamma0: np.ndarray | None = None,
         Vt: np.ndarray | None = None,
+        ref_point: np.ndarray | None = None,
     ) -> tuple[np.ndarray, np.ndarray, SolveInfo]:
         """Solve for the panel circulation with Newton's method.
 
         If the solve does not converge, the method starts again from the
         linear solution and from scaled linear solutions. It keeps the
         result with the smallest residual. The velocity tensor per unknown
-        (*Vt*, computed here if None) is shared by all starts.
+        (*Vt*, computed here if None) is shared by all starts. *ref_point*
+        [m] is the moment reference point, the centre of the body rates of
+        *condition* (the origin if None).
 
         Returns
         -------
@@ -89,6 +92,7 @@ class NonlinearSolver(LatticeSolver):
             tolerance=float(settings.tolerance),
             wake_dir=wake_dir,
             Vt=Vt,
+            ref_point=ref_point,
         )
         gamma, alpha_eff, info = solve_llt_nonlinear(lattice, condition, ground, gamma0=gamma0, **kw)
         if not info.converged:
@@ -96,7 +100,7 @@ class NonlinearSolver(LatticeSolver):
             # minimum of the residual. Start again from the linear solution
             # (if a start value was given) and from scaled linear solutions,
             # and keep the best result.
-            g_lin = linear_llt_from_tensor(lattice, condition, umap, Vt)[umap.panel_column]
+            g_lin = linear_llt_from_tensor(lattice, condition, umap, Vt, ref_point)[umap.panel_column]
             starts = ([None] if gamma0 is not None else []) + [f * g_lin for f in (0.85, 0.7, 0.55, 1.15)]
             for g_start in starts:
                 g2, a2, i2 = solve_llt_nonlinear(lattice, condition, ground, gamma0=g_start, **kw)
@@ -123,6 +127,7 @@ class NonlinearSolver(LatticeSolver):
         grounds: list[GroundPlane | None],
         wake_dirs: np.ndarray,
         continuation: bool = True,
+        ref_point: np.ndarray | None = None,
     ) -> list[tuple[np.ndarray, np.ndarray, SolveInfo]]:
         """Solve the cases in order; one kernel call gives the velocity tensors of all cases.
 
@@ -132,13 +137,14 @@ class NonlinearSolver(LatticeSolver):
         use_sym = getattr(settings, "use_symmetry", True)
         umaps = [_unknown_map(lattice, c, g, use_sym) for c, g in zip(conditions, grounds)]
         if any(u is not umaps[0] for u in umaps):
-            return super().solve_circulation_batch(lattice, conditions, settings, grounds, wake_dirs, continuation)
+            return super().solve_circulation_batch(lattice, conditions, settings, grounds, wake_dirs, continuation,
+                                                   ref_point=ref_point)
         Vts = llt_velocity_tensors(lattice, umaps[0], wake_dirs, grounds)
         out = []
         g_prev = None
         for k, (cond, ground) in enumerate(zip(conditions, grounds)):
             sol = self.solve_circulation(lattice, cond, settings, ground, wake_dirs[k],
-                                         gamma0=g_prev if continuation else None, Vt=Vts[k])
+                                         gamma0=g_prev if continuation else None, Vt=Vts[k], ref_point=ref_point)
             g_prev = sol[0] if sol[2].converged else None
             out.append(sol)
         return out

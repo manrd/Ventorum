@@ -887,6 +887,14 @@ class FlightCondition:
         geometry axes) above the ground plane. *None* means free air.
     phi : float
         Bank (roll) angle [rad].
+    p, q, r : float
+        Body angular rates [rad/s] about the moment reference point, in the
+        flight-dynamics body axes (x forward, y right, z down): ``p > 0``
+        right wing down, ``q > 0`` nose up, ``r > 0`` nose right (the signs
+        of Cl, Cm and Cn). Default 0. The lattice solvers (``"vlm"``,
+        ``"linear"``, ``"nonlinear"``) solve the quasi-steady rotating flow
+        (see :mod:`ventorum.aero.system`); the ``"fourier"`` solver refuses
+        a rate that is not zero.
     """
 
     V_inf: float = 50.0
@@ -895,6 +903,9 @@ class FlightCondition:
     rho: float = RHO_SL
     h: float | None = None  # Height of Aircraft.ref_point (default: the origin) above the ground plane [m]
     phi: float = 0.0  # Bank / roll angle [rad] (default 0.0)
+    p: float = 0.0  # Roll rate [rad/s], body axes, > 0 right wing down
+    q: float = 0.0  # Pitch rate [rad/s], body axes, > 0 nose up
+    r: float = 0.0  # Yaw rate [rad/s], body axes, > 0 nose right
 
     @property
     def phi_deg(self) -> float:
@@ -920,6 +931,9 @@ class FlightCondition:
             rho=self.rho,
             h=self.h,
             phi=self.phi,
+            p=self.p,
+            q=self.q,
+            r=self.r,
         )
 
     def __copy__(self) -> FlightCondition:
