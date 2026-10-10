@@ -774,3 +774,31 @@ def test_gpu_deformed_lattice_equals_cpu(gpu_device, solver_type: str, precision
     assert abs(res_cpu.totals.CL - res_gpu.totals.CL) <= tol * cl_max
     assert abs(res_cpu.totals.CDi - res_gpu.totals.CDi) <= tol * cl_max
     assert abs(res_cpu.totals.Cm - res_gpu.totals.Cm) <= tol * cl_max
+
+
+def test_user_manual_example_runs():
+    """Prove that the deformed-geometry example of the user manual runs as written.
+
+    The test reads the code block from docs/user/geometry.md, so the manual
+    and the test cannot drift apart.
+    """
+    import re
+    from pathlib import Path
+
+    text = (Path(__file__).resolve().parents[1] / "docs" / "user" / "geometry.md").read_text(encoding="utf-8")
+    section = text.split("## Deformed geometry", 1)[1].split("\n## ", 1)[0]
+    blocks = re.findall(r"```python\n(.*?)```", section, flags=re.S)
+    assert len(blocks) == 1, "the section must have exactly one Python example"
+    code = blocks[0]
+    assert "undeformed_nodes(aircraft, settings, solver=" in code
+
+    namespace: dict = {}
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        exec(compile(code, "docs/user/geometry.md", "exec"), namespace)  # noqa: S102
+    wing = namespace["wing"]
+    nd = wing.node_displacements
+    assert nd is not None and nd.eta is not None
+    assert np.max(nd.le[:, 2]) > 0.0  # the tip bends up
+    res = namespace["result"]
+    assert np.isfinite(res.totals.CL) and res.totals.CL > 0.0

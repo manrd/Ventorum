@@ -53,9 +53,13 @@ Camber enters through the zero-lift angle. The normal of the boundary condition,
 
 ### Deformed geometry
 
-Node displacements define deformed geometry for aeroelastic analysis. A user provides displacements of the leading-edge and trailing-edge lattice nodes on the defining half of each surface in geometry axes. Displacements are added to the undeformed edge coordinates. For symmetric surfaces and mirror copies, the defining half is displaced and mirrored across the plane y = 0.
+Node displacements give a deformed geometry, for example for aeroelastic analysis. `LiftingSurface.node_displacements` (a `NodeDisplacements`) holds the displacements [m] of the leading-edge and trailing-edge nodes at each strip edge of the defining half of the surface, from root to tip, in geometry axes. The lattice adds them to the undeformed nodes. The chord of an edge is then $|\mathbf x_{te} - \mathbf x_{le}|$ of the displaced nodes. All the other lattice data (strips, panels, control points, normals and control surfaces) come from the displaced nodes with the method above.
 
-Reference values ($S_{\text{ref}}$, $b_{\text{ref}}$, $c_{\text{ref}}$) and the moment reference point stay on the undeformed geometry. This matches the standard convention for flexible aircraft. The strip twist array keeps the undeformed jig twist. The panel nodes and boundary normals follow the displaced geometry. The trailing wake leaves the deformed trailing edge along the free stream or the body axis, as in the undeformed formulation.
+The number and the stations of the edges depend on the mesh settings and on the solver (the `auto` spacing of the lifting line is different from that of the vortex lattice). `ventorum.geometry.undeformed_nodes` gives the nodes of the mesh for one settings object and one solver. Use the same settings and solver for `undeformed_nodes` and for the analysis. When `NodeDisplacements.eta` holds the edge stations, the lattice compares them with the stations of the mesh and refuses a mismatch.
+
+The left half of a symmetric surface and a mirror copy (`mirrored()`) get the mirror image (y to -y) of the displaced defining half. Thus a symmetric surface stays symmetric. An asymmetric deformation needs two surfaces with `is_symmetric=False`, each with its own displacements.
+
+The reference values $S_{	ext{ref}}$, $b_{	ext{ref}}$, $c_{	ext{ref}}$ and the ground-effect height reference point (`Aircraft.root_point`) stay on the undeformed geometry. The strip twist array keeps the undeformed (jig) twist; the displaced nodes and the normals hold the deformed shape. The wake leaves the deformed trailing edge along the free stream or the body axis, as for an undeformed surface.
 
 ## Equations
 

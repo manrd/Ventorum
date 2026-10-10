@@ -69,27 +69,38 @@ The vortex-lattice solver with two or more chordwise panels turns the boundary-c
 
 ## Deformed geometry
 
-A user can set displacements of the lattice nodes on a `LiftingSurface` using `NodeDisplacements`. Displacements are specified for the leading-edge and trailing-edge nodes on the defining half (root to tip):
+`LiftingSurface.node_displacements` gives a deformed shape to a surface, for example the shape from a structural model. A `NodeDisplacements` holds the displacements [m] of the leading-edge node (`le`) and of the trailing-edge node (`te`) at each strip edge of the defining half of the surface, from the root to the tip. Each array has the shape `(n_edges, 3)`, in geometry axes (x aft, y right, z up).
+
+The number and the position of the strip edges depend on the mesh settings and on the solver. `ventorum.geometry.undeformed_nodes` gives the edge stations `eta` and the undeformed nodes `le` and `te` of each surface. Use the same settings and solver for `undeformed_nodes` and for the analysis. `displacements_from_section_motion` keeps the stations in `NodeDisplacements.eta`, and the solver then refuses displacements that were made for another mesh.
 
 ```python
 import numpy as np
-from ventorum import LiftingSurface, NodeDisplacements
-from ventorum.geometry import undeformed_nodes, displacements_from_section_motion
+import ventorum as vt
+from ventorum.geometry import displacements_from_section_motion, undeformed_nodes
 
-# Extract the undeformed lattice nodes for the target mesh
-nodes = undeformed_nodes(aircraft, solver="vlm")["Wing"]
+wing = vt.LiftingSurface(
+    name="Wing",
+    semi_span=5.0,
+    sections=[vt.WingSection(y_frac=0.0, chord=1.2), vt.WingSection(y_frac=1.0, chord=0.8)],
+)
+aircraft = vt.Aircraft(name="flexible", surfaces=[wing])
+settings = vt.SolverSettings(solver_type="vlm", n_panels=20)
 
-# Create displacements from section heave and twist
-n_edges = len(nodes["eta"])
-heave = 0.05 * (nodes["eta"] ** 2)
-twist = np.zeros(n_edges)
-disp = displacements_from_section_motion(nodes, heave=heave, twist=twist)
+# The undeformed nodes of the mesh that this solver builds with these settings.
+nodes = undeformed_nodes(aircraft, settings, solver="vlm")["Wing"]
 
-# Assign displacements to the surface
+# Tip bending of 0.25 m up (parabolic in eta) and a tip twist of 1 deg nose down.
+eta = nodes["eta"]
+disp = displacements_from_section_motion(
+    nodes, heave=0.25 * eta**2, twist=np.radians(-1.0) * eta, pivot_x_c=0.25,
+)
 wing.node_displacements = disp
+
+result = vt.analyze(aircraft, vt.FlightCondition(V_inf=30.0, alpha=np.radians(4.0)), settings)
+print(f"CL = {result.totals.CL:.4f}, Cm = {result.totals.Cm:.4f}")
 ```
 
-Symmetric surfaces and mirror copies mirror the displacements across the plane y = 0.
+The left half of a symmetric surface and a mirror copy get the mirror image of the displacements (y to -y). The reference values (`S_ref`, `b_ref`, `c_ref`) and the ground-effect height reference point stay on the undeformed geometry. The Fourier solver does not accept node displacements. The [theory chapter](../theory/vortex_lattice.md) gives the rules.
 
 ## Save and load
 
