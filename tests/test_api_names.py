@@ -1,5 +1,5 @@
 # Author: Manuel Alejandro Rodriguez Diaz, PhD
-"""One canonical name per concept: n_jobs and solver names (T-0057)."""
+"""One canonical name per concept: n_jobs and solver names."""
 
 from __future__ import annotations
 

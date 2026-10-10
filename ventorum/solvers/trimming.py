@@ -18,7 +18,8 @@ differences with a step size of 1.0e-4 rad.
 Notes
 -----
 The solves run on the device that the settings and the global device select
-(owner decision D-26, 2026-10-10). The result states the device and the precision.
+(the low-order methods do not need float64, so trim does not force the CPU). The result
+states the device and the precision.
 In float32 the round-off of the coefficients is about 1e-7 (measured on the GPU
 pipelines against float64), so the convergence tolerances get the floor
 ``FLOAT32_TOLERANCE_FLOOR``; the 1e-4 rad step then gives the Jacobian to about 1e-4

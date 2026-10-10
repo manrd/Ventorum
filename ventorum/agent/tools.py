@@ -1654,7 +1654,7 @@ def trim(
     else:
         cl_ax, cm_ax, cn_ax = moments_in_axes(tr.Cl, tr.Cm, tr.Cn, tr.alpha_deg, c["beta_deg"], ax)
     trimmed = tr.status == "trimmed"
-    # Device and precision of the trim solves (D-26: trim uses the selected device).
+    # Device and precision of the trim solves (trim uses the selected device).
     if tr.device in ("none", "", None):
         device, precision = result_device_precision(tr.result)
     else:

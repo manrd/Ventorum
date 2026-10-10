@@ -278,7 +278,7 @@ def test_to_dict_is_json_ready():
 
 @pytest.mark.gpu
 def test_gpu_agrees_with_cpu():
-    """The selected device runs the cases (D-26); float32 differences stay at the round-off floor."""
+    """The selected device runs the cases; float32 differences stay at the round-off floor."""
     from ventorum import gpu
 
     if not gpu.available():

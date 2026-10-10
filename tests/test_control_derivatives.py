@@ -1,5 +1,5 @@
 # Author: Manuel Alejandro Rodriguez Diaz, PhD
-"""Tests of the control derivatives and the hinge moments (plan item P1-03)."""
+"""Tests of the control derivatives and the hinge moments."""
 
 from __future__ import annotations
 
@@ -206,7 +206,7 @@ def test_lifting_line_flap_derivative_is_tau_times_lift_slope():
 
 
 def test_vlm_full_span_flap_effectiveness_ratio():
-    """VLM chordwise mode: CL_delta / CL_alpha approaches tau (pre-check of T-0060: -3 % at n_chord 8)."""
+    """VLM chordwise mode: CL_delta / CL_alpha approaches tau (measured before: -3 % at n_chord 8)."""
     h = 0.75
     w = _wing([vt.ControlSurface("flap", 0.0, 1.0, h, 0.0)])
     st = vt.SolverSettings(solver_type="vlm", n_panels=20, n_chord=16, chord_spacing="uniform")

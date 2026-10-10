@@ -1,5 +1,5 @@
 # Author: Manuel Alejandro Rodriguez Diaz, PhD
-"""Tests of deformed geometry: node displacements of the lattice (T-0053)."""
+"""Tests of deformed geometry: node displacements of the lattice."""
 
 from __future__ import annotations
 

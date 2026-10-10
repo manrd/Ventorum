@@ -7,7 +7,7 @@ AVL geometry file format described in the AVL user documentation
 case. It never reads AVL source code; it only writes text files that
 ``avl.exe`` reads as a black box.
 
-Mapping rules (task T-0055, fixed decisions):
+Mapping rules:
 
 * Units are metres. ``Sref``, ``Cref`` and ``Bref`` come from the
   Ventorum aircraft after ``compute_reference_values()``.

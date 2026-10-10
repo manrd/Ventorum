@@ -11,7 +11,7 @@ Verifies:
 7. Linear and nonlinear lifting line solvers trim successfully.
 8. Input aircraft geometry and control deflections remain unchanged after trim.
 9. Input validation rejects invalid configurations and parameters.
-10. The solves run on the selected device (D-26); trim does not change the global device.
+10. The solves run on the selected device; trim does not change the global device.
 11. Serialization via to_dict produces valid JSON without internal objects.
 
 The regression tests of the review check the failure paths: a failed solve
@@ -372,7 +372,7 @@ def test_invalid_input():
 
 
 def test_trim_uses_the_selected_device(monkeypatch):
-    """Trim solves on the device that the global setting selects and does not change it (D-26)."""
+    """Trim solves on the device that the global setting selects and does not change it."""
     real_analyze = vt.analyze
     devices: list[str] = []
 

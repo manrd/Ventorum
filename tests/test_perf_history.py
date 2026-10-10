@@ -23,7 +23,7 @@ from validation import perf_history as ph
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
-#: The fields that every record must hold (task T-0059, decision 4).
+#: The fields that every record must hold.
 REQUIRED_FIELDS = {
     "date",
     "ventorum_version",

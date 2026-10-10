@@ -1,5 +1,5 @@
 # Author: Manuel Alejandro Rodriguez Diaz, PhD
-"""Tests for the AVL comparison harness (task T-0055).
+"""Tests for the AVL comparison harness.
 
 Tests 1-7 run without AVL. Tests 8-10 need the real ``avl.exe`` and
 skip with "AVL not found: set VENTORUM_AVL_EXE" when it is absent.
@@ -277,7 +277,7 @@ def test_failed_run_is_reported(tmp_path):
 
 
 # --------------------------------------------------------------------------
-# Regression tests of the review of T-0055
+# Regression tests of the review of the harness
 # --------------------------------------------------------------------------
 
 def _fake_parsed(**values: float) -> dict[str, float]:

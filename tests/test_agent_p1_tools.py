@@ -433,7 +433,7 @@ def test_error_bars_and_trim_carry_the_common_output_fields():
 
 @pytest.mark.parametrize("device", ["cpu", pytest.param("gpu", marks=pytest.mark.gpu)])
 def test_trim_tool_reports_the_device_of_its_solves(device):
-    """Regression (D-26): ventorum_trim reported cpu/float64 also when trim ran on the GPU in float32."""
+    """Regression: ventorum_trim reported cpu/float64 also when trim ran on the GPU in float32."""
     from ventorum import gpu
 
     if device == "gpu" and not gpu.available():
