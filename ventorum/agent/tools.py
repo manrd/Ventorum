@@ -1510,6 +1510,273 @@ def mesh_convergence(
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# Undeformed nodes
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@_tool
+def undeformed_nodes(
+    wing: Any,
+    settings: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Strip-edge stations and undeformed lattice nodes of each surface.
+
+    Returns the ``eta`` stations and the leading-edge and trailing-edge node
+    coordinates of the mesh that the solver builds with these settings, for
+    the ``node_displacements`` input. The Fourier solver takes no node
+    displacements and is refused. No solve runs, so the work budget does not
+    apply.
+
+    Parameters
+    ----------
+    wing : dict
+        Surface spec or aircraft spec (see the tool schema).
+    settings : dict or None
+        ``solver``, ``n_panels``, ``n_chord``, ``wake_alignment``. The solver
+        selects the station rule (``"fourier"`` is refused).
+    """
+    from ventorum.geometry.deformation import undeformed_nodes as _geom_undeformed_nodes
+
+    ac = build_aircraft_from_spec(wing)
+    sett = parse_settings(settings)
+    if resolve_solver_type(sett.solver_type) == "fourier":
+        raise ValidityError("The Fourier solver takes no node displacements. Use solver='vlm', 'linear' "
+                            "or 'nonlinear'.")
+    _check_mesh(ac, sett)
+    nodes = _geom_undeformed_nodes(ac, sett, solver=sett.solver_type)
+    surfaces: dict[str, Any] = {}
+    for name, nd in nodes.items():
+        eta = np.asarray(nd["eta"], dtype=float)
+        surfaces[name] = {
+            "eta": eta.tolist(),
+            "le_m": np.asarray(nd["le"], dtype=float).tolist(),
+            "te_m": np.asarray(nd["te"], dtype=float).tolist(),
+            "n_edges": int(eta.size),
+        }
+    summary = (
+        f"[Ventorum RESULT] Undeformed nodes of {ac.name}: {len(surfaces)} surface(s) "
+        f"({', '.join(sorted(surfaces))}). Solver: {resolve_solver_type(sett.solver_type)}. "
+        "No solve ran, so the work budget does not apply."
+    )
+    return {
+        "status": "success",
+        "executive_summary": summary,
+        "settings_used": settings_payload(sett),
+        "surfaces": surfaces,
+    }
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Trim
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@_tool
+def trim(
+    wing: Any,
+    CL_target: float,
+    pitch_control: str,
+    roll_control: str | None = None,
+    yaw_control: str | None = None,
+    flight_condition: dict[str, Any] | None = None,
+    alpha_bounds_deg: list[float] | None = None,
+    max_iterations: int = 20,
+    settings: dict[str, Any] | None = None,
+    detail_level: str = "standard",
+    axes: str = "body",
+) -> dict[str, Any]:
+    """Angle of attack and control deflections for a target lift with zero moments.
+
+    Newton's method (Etkin and Reid; Dennis and Schnabel). The start point is
+    the angle of attack of ``flight_condition`` and the current deflections of
+    the wing. Give ``roll_control`` and ``yaw_control`` together for lateral
+    trim, or neither for longitudinal trim. A target that is not reached is not
+    an error: the payload gives ``"trim_status"`` and ``"trimmed"`` false.
+    Every solve runs on the CPU in float64.
+
+    Parameters
+    ----------
+    wing : dict
+        Surface spec or aircraft spec with the controls that the call names.
+    CL_target : float
+        Target lift coefficient [-].
+    pitch_control : str
+        Name of the pitch control.
+    roll_control, yaw_control : str or None
+        Names of the roll and yaw controls. Give both or neither.
+    flight_condition : dict or None
+        ``V_inf_m_s``, ``alpha_deg`` (start point of the iteration),
+        ``beta_deg``, ``rho_kg_m3`` or ``altitude_m``, ``h_m``.
+    alpha_bounds_deg : list of float or None
+        Lower and upper bounds of the angle of attack [deg]. Default [-10, 20].
+    max_iterations : int
+        Maximum Newton iterations. Default 20.
+    settings : dict or None
+        ``solver``, ``n_panels``, ``n_chord``, ``wake_alignment``.
+    detail_level : 'summary', 'standard' or 'full'
+        ``standard`` and ``full`` add ``residual_history``; ``full`` adds ``jacobian``.
+    axes : 'body', 'stability', 'wind' or 'all'
+        Axis system of the moment coefficients Cl, Cm and Cn.
+    """
+    ac = build_aircraft_from_spec(wing)
+    cl_t = number(CL_target, "CL_target", minimum=-3, maximum=5)
+    pitch = string(pitch_control, "pitch_control")
+    roll = string(roll_control, "roll_control") if roll_control is not None else None
+    yaw = string(yaw_control, "yaw_control") if yaw_control is not None else None
+    c = parse_condition(flight_condition)
+    if alpha_bounds_deg is None:
+        lo, hi = -10.0, 20.0
+    else:
+        bounds = number_list(alpha_bounds_deg, "alpha_bounds_deg", min_len=2, max_len=2,
+                              minimum=-30, maximum=30)
+        lo, hi = float(bounds[0]), float(bounds[1])
+        if hi <= lo:
+            raise InputError(f"'alpha_bounds_deg' must increase, got [{lo:g}, {hi:g}].")
+    max_iter = integer(max_iterations, "max_iterations", minimum=1, maximum=50) \
+        if max_iterations is not None else 20
+    sett = parse_settings(settings)
+    dl = parse_detail_level(detail_level)
+    ax = parse_axes(axes)
+    _check_mesh(ac, sett)
+    fc = make_flight_condition(c)
+    n_unknowns = 4 if (roll is not None or yaw is not None) else 2
+    n_panels = _planned_panels(ac, sett, fc)
+    _check_call_work(
+        (1 + max_iter * (1 + 2 * n_unknowns)) * n_panels * n_panels,
+        "fewer panels (smaller n_panels or n_chord) or a smaller max_iterations")
+    tr = vt.trim(ac, fc, sett, CL_target=cl_t, pitch_control=pitch, roll_control=roll,
+                 yaw_control=yaw, alpha_bounds_deg=(lo, hi), max_iterations=max_iter)
+
+    vals = (tr.Cl, tr.Cm, tr.Cn)
+    if ax in ("body", "all") or not all(np.isfinite(v) for v in vals):
+        cl_ax, cm_ax, cn_ax = (float(v) for v in vals)
+    else:
+        cl_ax, cm_ax, cn_ax = moments_in_axes(tr.Cl, tr.Cm, tr.Cn, tr.alpha_deg, c["beta_deg"], ax)
+    trimmed = tr.status == "trimmed"
+    defl_txt = ", ".join(f"{k}={v:+.3f} deg" for k, v in sorted(tr.deflections_deg.items()))
+    if trimmed:
+        summary = (
+            f"[Ventorum RESULT] Trimmed {ac.name}: alpha={tr.alpha_deg:.4f} deg, {defl_txt}, "
+            f"CL={fmt(tr.CL, '.5f')}, Cm={fmt(tr.Cm, '.3e')} in {tr.iterations} iteration(s). "
+            "Computed on cpu in float64."
+        )
+    else:
+        summary = (
+            f"[Ventorum RESULT] Not trimmed: {ac.name} (trim_status={tr.status}): target "
+            f"CL={cl_t:g} not reached; alpha={fmt(tr.alpha_deg, '.4f')} deg, {defl_txt}, "
+            f"CL={fmt(tr.CL, '.5f')}, Cm={fmt(tr.Cm, '.3e')}. "
+            f"Notes: {'; '.join(tr.notes) if tr.notes else 'none'}. Computed on cpu in float64."
+        )
+    out: dict[str, Any] = {
+        "status": "success",
+        "executive_summary": summary,
+        "trim_status": tr.status,
+        "trimmed": bool(trimmed),
+        "alpha_deg": float(tr.alpha_deg),
+        "deflections_deg": {k: float(v) for k, v in tr.deflections_deg.items()},
+        "CL": float(tr.CL),
+        "CD": float(tr.CD),
+        "drag_basis": tr.drag_basis,
+        "CY": float(tr.CY),
+        "Cl": cl_ax,
+        "Cm": cm_ax,
+        "Cn": cn_ax,
+        "iterations": int(tr.iterations),
+        "notes": list(tr.notes),
+        "trust": None if tr.result is None else trust_payload(tr.result.totals.trust),
+        "device": "cpu",
+        "precision": "float64",
+        "condition_used": condition_payload(c),
+        "settings_used": {**settings_payload(sett, tr.result), "device": "cpu", "precision": "float64"},
+        "axes": ax,
+    }
+    if dl in ("standard", "full"):
+        out["residual_history"] = [float(v) for v in tr.residual_history]
+    if dl == "full":
+        out["jacobian"] = [[float(v) for v in row] for row in tr.jacobian]
+    return out
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Numerical error bars
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@_tool
+def error_bars(
+    wing: Any,
+    flight_condition: dict[str, Any] | None = None,
+    settings: dict[str, Any] | None = None,
+    axes: str = "body",
+    detail_level: str = "standard",
+) -> dict[str, Any]:
+    """Layer-1 numerical error bars of the six force and moment coefficients.
+
+    Three spanwise mesh levels (the user mesh is the fine level); Grid
+    Convergence Index (Roache) with the observed order (Celik et al.). Only
+    the numerical (spanwise discretisation) layer is included; the other
+    layers are not implemented.
+
+    Parameters
+    ----------
+    wing : dict
+        Surface spec or aircraft spec (see the tool schema).
+    flight_condition : dict or None
+        ``V_inf_m_s``, ``alpha_deg``, ``beta_deg``, ``rho_kg_m3`` or
+        ``altitude_m``, ``h_m``.
+    settings : dict or None
+        ``solver``, ``n_panels`` (the fine level N1; at least 16),
+        ``n_chord``, ``wake_alignment``.
+    axes : 'body', 'stability' or 'wind'
+        Moment axis system of the Cl, Cm and Cn bars. ``"all"`` is refused.
+    detail_level : 'summary', 'standard' or 'full'
+        Accepted for consistency; the bar content is the same at every level.
+    """
+    from ventorum.core.error_bars import mesh_levels as _mesh_levels
+
+    ac = build_aircraft_from_spec(wing)
+    c = parse_condition(flight_condition)
+    sett = parse_settings(settings)
+    parse_detail_level(detail_level)  # Accepted for consistency; the bar content is the same at every level.
+    ax = string(axes, "axes", ("body", "stability", "wind")) if axes is not None else "body"
+    _check_mesh(ac, sett)
+    levels = _mesh_levels(int(sett.n_panels))
+    fc = make_flight_condition(c)
+    estimate = 0
+    for n_level in levels:
+        s_level = sett.clone()
+        s_level.n_panels = int(n_level)
+        n_here = _planned_panels(ac, s_level, fc)
+        estimate += n_here * n_here
+    _check_call_work(estimate, "fewer panels (smaller n_panels)")
+    res = vt.numerical_error_bars(ac, condition=fc, settings=sett, axes=ax)
+    device, precision = result_device_precision(res.results[0] if res.results else None)
+    lines = []
+    for name in ("CL", "CD", "CY", "Cl", "Cm", "Cn"):
+        bar = res.bars.get(name)
+        if bar is None:
+            lines.append(f"{name}: no bar (the drag basis is not the same at the three levels)")
+            continue
+        state = bar.layers["numerical"].state if "numerical" in bar.layers else None
+        lines.append(f"{name}={fmt(bar.value, '.6f')} [{fmt(bar.interval_low, '.6f')}, "
+                     f"{fmt(bar.interval_high, '.6f')}] ({state})")
+    summary = (
+        f"[Ventorum RESULT] Numerical error bars of {ac.name} "
+        f"(spanwise levels {levels[0]}/{levels[1]}/{levels[2]}):\n" + "\n".join(lines) +
+        "\nOnly the numerical (spanwise discretisation) layer is included; "
+        "the other layers are not implemented. "
+        f"{device_summary_text(device, precision)}"
+    )
+    return {
+        "status": "success",
+        "executive_summary": summary,
+        "error_bars": res.to_dict(),
+        "levels": [int(n) for n in levels],
+        "notes": list(res.notes),
+        "status_of_bars": "numerical_only",
+        "device": device,
+        "precision": precision,
+    }
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # Machine capabilities and tuning
 # ═══════════════════════════════════════════════════════════════════════════════
 

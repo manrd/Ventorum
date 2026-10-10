@@ -23,10 +23,13 @@ from ventorum.agent.schemas import (
 )
 from ventorum.agent.tools import (
     batch_evaluate,
+    error_bars,
     ground_effect,
     mesh_convergence,
     polar_sweep,
     stability_derivatives,
+    trim,
+    undeformed_nodes,
     wing_analysis,
 )
 
@@ -37,6 +40,7 @@ __all__ = [
     "build_aircraft_from_spec",
     "build_flight_condition_from_spec",
     "call_tool",
+    "error_bars",
     "get_tool_schemas",
     "ground_effect",
     "handle_message",
@@ -45,5 +49,7 @@ __all__ = [
     "polar_sweep",
     "run_mcp_server",
     "stability_derivatives",
+    "trim",
+    "undeformed_nodes",
     "wing_analysis",
 ]

@@ -43,7 +43,7 @@ def assert_error(payload, kind, text=None):
 
 def test_schema_exporters():
     n = len(AGENT_TOOL_DEFINITIONS)
-    assert n == 8  # six analysis tools and the two machine tools
+    assert n == 11  # six analysis tools, trim, error bars, undeformed nodes, and the two machine tools
     openai = get_tool_schemas("openai")
     assert all(s["type"] == "function" and s["function"]["name"].startswith("ventorum_") for s in openai)
     anthropic = get_tool_schemas("anthropic")
@@ -347,7 +347,7 @@ def test_mcp_initialize_list_and_call():
                          "params": {"protocolVersion": "2024-11-05"}}))
     assert r["result"]["protocolVersion"] == "2024-11-05"
     r = _rpc(json.dumps({"jsonrpc": "2.0", "id": "b", "method": "tools/list"}))
-    assert len(r["result"]["tools"]) == 8  # with the two machine tools
+    assert len(r["result"]["tools"]) == 11  # with trim, error bars, undeformed nodes, and the two machine tools
     call = {"jsonrpc": "2.0", "id": 7, "method": "tools/call",
             "params": {"name": "ventorum_wing_analysis",
                        "arguments": {"wing": RECT, "settings": FAST, "detail_level": "summary"}}}

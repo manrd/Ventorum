@@ -24,12 +24,15 @@ from ventorum.agent.response import error_payload
 from ventorum.agent.schemas import AGENT_TOOL_DEFINITIONS, TOOL_NAMES, check_keys
 from ventorum.agent.tools import (
     batch_evaluate,
+    error_bars,
     ground_effect,
     machine_capabilities,
     mesh_convergence,
     polar_sweep,
     stability_derivatives,
+    trim,
     tune_machine,
+    undeformed_nodes,
     wing_analysis,
 )
 from ventorum.utils.jsonsafe import json_safe
@@ -44,6 +47,9 @@ TOOL_FUNCTIONS: dict[str, Callable[..., dict[str, Any]]] = {
     "ventorum_stability_derivatives": stability_derivatives,
     "ventorum_batch_evaluate": batch_evaluate,
     "ventorum_mesh_convergence": mesh_convergence,
+    "ventorum_trim": trim,
+    "ventorum_error_bars": error_bars,
+    "ventorum_undeformed_nodes": undeformed_nodes,
     "ventorum_machine_capabilities": machine_capabilities,
     "ventorum_tune_machine": tune_machine,
 }

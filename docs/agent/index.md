@@ -23,7 +23,7 @@ Ventorum has a tool interface for AI agents and automated design loops: Python c
 
 - **Work units.** One solve of a lattice with N panels costs N^2 units. The work of a call is the sum over all solves that the call will run (sweep angles, heights, mesh levels, batch candidates, derivative steps).
 - **Budget.** A call whose estimated work is above 200000000 units is refused with `error.type` `invalid_input` before any solve. The message gives the estimate, the budget and how to reduce the work: fewer angles (smaller range or larger `alpha_step_deg`), fewer heights, fewer mesh levels or spacing schemes, fewer candidates, or fewer panels (smaller `n_panels` or `n_chord`).
-- **Scope.** The budget covers `ventorum_wing_analysis`, `ventorum_polar_sweep`, `ventorum_ground_effect` (heights plus free air plus the Irodov height-pitch sweep), `ventorum_stability_derivatives` (5 solves), `ventorum_batch_evaluate` and `ventorum_mesh_convergence` (levels times the angles that are really solved). `ventorum_tune_machine` is outside the budget: its duration is stated in its description instead.
+- **Scope.** The budget covers `ventorum_wing_analysis`, `ventorum_polar_sweep`, `ventorum_ground_effect` (heights plus free air plus the Irodov height-pitch sweep), `ventorum_stability_derivatives` (5 solves), `ventorum_batch_evaluate`, `ventorum_mesh_convergence` (levels times the angles that are really solved), `ventorum_trim` (`(1 + max_iterations * (1 + 2 * n_unknowns)) * N^2`, with 2 unknowns in longitudinal trim and 4 in lateral trim) and `ventorum_error_bars` (`N1^2 + N2^2 + N3^2` of the three spanwise levels). `ventorum_tune_machine` and `ventorum_undeformed_nodes` are outside the budget: they run no solve (their duration or mesh is stated in their description instead).
 
 ## Error types
 
@@ -39,6 +39,23 @@ Ventorum has a tool interface for AI agents and automated design loops: Python c
 
 - `ventorum_machine_capabilities` (no input): public hardware data (never a machine identifier or a fingerprint), available kernel backends, Cython thread mode (`openmp`, `python` or null), torch device (or null), GPU data, GPU pipeline device and precision, and tuning profile status (`none`, `valid`, `other machine`, `old schema` or `disabled`), with one sentence of advice.
 - `ventorum_tune_machine` (`quick` and `save`, both boolean, both default true): measures this machine and writes its tuning profile, the same result as `ventorum-tune`. It takes about half a minute with `quick` true and up to two minutes with `quick` false. Tuning changes the speed; the device choice can change results at the float32 round-off level (about 1e-7 to 1e-6 relative). This tool is outside the work budget: its duration is stated here instead. A second call while one runs is refused with `invalid_input` ("a tuning run is in progress").
+
+## Control surfaces
+
+- A surface object takes an optional `controls` key: a list of 1 to 10 objects with `name` (string, required, unique on the surface), `eta_start` and `eta_end` (span limits as fractions of the semi-span, no unit, defaults 0 and 1), `hinge_x_c` (hinge position as a fraction of the local chord, no unit, default 0.75), `deflection_deg` (degrees, positive = right-hand rotation about the hinge axis: trailing edge down on a horizontal surface, trailing edge to +y on a fin; range -30 to 30, default 0) and `symmetric` (boolean, default true; false = opposite deflection on the left copy, an aileron). All tools that take a geometry accept them with no other change. A surface with `mirror: true` gives the controls to both copies.
+
+## Node displacements and undeformed nodes
+
+- A surface object takes an optional `node_displacements` key with `le_m` and `te_m` (leading-edge and trailing-edge node displacements in metres, one `[dx, dy, dz]` triple per strip edge of the defining half, from root to tip) and the optional key `eta` (span stations as fractions of the semi-span, no unit). `le_m` and `te_m` must have the same length. The number of items must equal the number of strip edges of the defining half for the solver and settings of the call.
+- `ventorum_undeformed_nodes` (`wing`, `settings`): returns the `eta` stations (no unit) and the `le_m` and `te_m` node coordinates (metres) of each surface, with `n_edges`. Use it to build `node_displacements`. The Fourier solver takes no node displacements and is refused with `invalid_method`. No solve runs, so this tool is outside the work budget.
+
+## Trim
+
+- `ventorum_trim` (`wing` with the named controls, `CL_target` (no unit), `pitch_control` (string), optional `roll_control` and `yaw_control` (strings, both or neither), `flight_condition` (`alpha_deg` is the start point of the iteration), `alpha_bounds_deg` (degrees), `max_iterations` (count), `settings`, `detail_level`, `axes`): angle of attack (degrees) and control deflections (degrees) for the target lift coefficient with zero moments, by Newton's method. Every solve runs on the CPU in float64. A target that is not reached is not an error: the payload has `"status": "success"`, `"trim_status"`, `"trimmed"` false and the notes. The work estimate is `(1 + max_iterations * (1 + 2 * n_unknowns)) * N^2` (2 unknowns in longitudinal trim, 4 in lateral trim); reduce the work with fewer panels (smaller `n_panels`) or a smaller `max_iterations`.
+
+## Numerical error bars
+
+- `ventorum_error_bars` (`wing`, `flight_condition`, `settings` (`n_panels` is the fine level N1, at least 16), `axes` (`body`, `stability` or `wind`; `all` is refused), `detail_level`): layer-1 numerical error bars of the six force and moment coefficients from three spanwise mesh levels. Only the numerical (spanwise discretisation) layer is included; the other layers are not implemented, and `status_of_bars` is always `numerical_only`. The work estimate is `N1^2 + N2^2 + N3^2`; reduce the work with fewer panels (smaller `n_panels`).
 
 ## Example
 
