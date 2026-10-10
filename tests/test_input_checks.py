@@ -268,3 +268,6 @@ def test_ground_effect_default_alpha_is_five_deg():
     fields = {f.name: f for f in dataclasses.fields(GroundEffectCondition)}
     assert fields["alpha_deg"].default == 5.0
     assert GroundEffectCondition().alpha_deg == 5.0
+    from ventorum.ground_effect import GroundEffectSweep
+    assert tuple(inspect.signature(GroundEffectSweep.run_sweep).parameters["alphas_deg"].default) == (5.0,)
+    assert "(default 5.0)" in " ".join(GroundEffectSweep.run_sweep.__doc__.split())

@@ -13,7 +13,7 @@ a minor version can change a public interface.
 - The default angle of attack is 5 deg in every interface. The agent tool `ventorum_ground_effect`
   changes from 4 deg to 5 deg. The `Ventorum` instance changes from 0 deg to 5 deg. The
   ground-effect Python API (`analyze_ground_effect`, `prepare_ground_case`, `sweep_height`,
-  `sweep_roll` and `GroundEffectCondition`) changes from 4 deg to 5 deg. The agent flight
+  `sweep_roll`, `GroundEffectSweep.run_sweep` and `GroundEffectCondition`) changes from 4 deg to 5 deg. The agent flight
   condition, `vt.analyze` and `FlightCondition` already used 5 deg.
 - The agent tools refuse an explicit JSON `null` for every key, at the top level and in nested
   objects (`invalid_input` that names the key). Omit the key to get its default. In a Python call,

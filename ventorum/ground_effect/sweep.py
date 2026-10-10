@@ -311,7 +311,7 @@ class GroundEffectSweep:
     def run_sweep(
         self,
         heights: Sequence[float] | np.ndarray,
-        alphas_deg: Sequence[float] | np.ndarray = (4.0,),
+        alphas_deg: Sequence[float] | np.ndarray = (5.0,),
         phis_deg: Sequence[float] | np.ndarray = (0.0,),
         *,
         V_inf: float = 50.0,
@@ -323,7 +323,8 @@ class GroundEffectSweep:
     ) -> GroundEffectSweepResult:
         """Run every combination of height, angle of attack and bank angle.
 
-        Raises ValueError if a height is not a finite number larger than 0,
+        The angles of attack ``alphas_deg`` are in deg (default 5.0); the bank
+        angles ``phis_deg`` are in deg (default 0.0). Raises ValueError if a height is not a finite number larger than 0,
         or if an angle is not finite.
         """
         t0 = time.perf_counter()
