@@ -74,7 +74,7 @@ def test_linear_llt_airfoil_properties():
         semi_span=5.0,
         sections=[
             # Straight, unswept quarter-chord line: the Fourier solver
-            # refuses a swept one (owner decision D-08).
+            # refuses a swept one.
             vt.WingSection(y_frac=0.0, chord=1.2, airfoil=afoil, x_le=-0.25 * 1.2),
             vt.WingSection(y_frac=1.0, chord=0.8, airfoil=afoil, x_le=-0.25 * 0.8),
         ],

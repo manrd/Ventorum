@@ -22,9 +22,9 @@ Solver limits
   the lowest height for all cases.
 * Lifting-line solvers (``"linear"``, ``"nonlinear"``): one horseshoe per
   strip cannot follow the chordwise variation of the image flow. Against the
-  vortex lattice they under-predict the lift increment: by 3 to 5 % of CL at
-  h_min/c = 1 and by 13 to 18 % at h_min/c = 0.5 (rectangular wings, AR 4 to
-  8, alpha 2 to 6 deg). They are refused below h_min/c = 1.
+  vortex lattice they under-predict the lift increment by 3 to 5 % of CL at
+  h_min/c = 1 (rectangular wings, AR 4 to 8, alpha 2 to 6 deg). They are
+  refused below h_min/c = 1.
 * The Fourier solver has no ground effect.
 """
 

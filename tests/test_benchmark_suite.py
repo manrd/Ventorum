@@ -126,7 +126,7 @@ def test_multithread_scaling_returns_speedups():
 
     The lattice (160 spanwise x 4 chordwise panels) is above the size class
     "small": n_jobs=1 solves the angles as one batch, and the pool of
-    workers is faster than the batch only for larger lattices (T-0039).
+    workers is faster than the batch only for larger lattices.
     Only the structure is checked here; the wall-clock comparison lives in
     the benchmark-marked test below (it fails under load).
     """

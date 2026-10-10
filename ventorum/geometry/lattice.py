@@ -76,7 +76,7 @@ CORE_RADIUS_FRACTION = 0.01
 # between two tail control points. Surfaces that share an edge (two halves of
 # a V-tail, a split wing, a wing and its winglet) are one vortex sheet: the
 # added core does not apply between them (see ``core_groups``).
-CROSS_SURFACE_CORE_FRACTION = 0.5  # owner decision D-03 (2026-10-03), from the T-0013 core-size study
+CROSS_SURFACE_CORE_FRACTION = 0.5  # owner decision of 2026-10-03, from the core-size study with a wing and a tail
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

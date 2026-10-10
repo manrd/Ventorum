@@ -1,4 +1,4 @@
-"""Input checks for non-finite and extreme inputs (T-0003).
+"""Input checks for non-finite and extreme inputs.
 
 Every input that cannot give a valid result is refused before the solve,
 with a ``ValueError`` that names the field and the value.
@@ -167,7 +167,7 @@ def test_non_finite_result_is_never_high_trust(bad):
 
 
 def test_non_finite_guard_never_raises_the_trust_level():
-    """Review of T-0003: the guard caps the level at LOW; it must not lift UNRELIABLE to LOW."""
+    """The guard caps the level at LOW; it must not lift UNRELIABLE to LOW."""
     import numpy as np
 
     from ventorum.core.trust import evaluate_aerodynamic_trust

@@ -29,7 +29,7 @@ The package does not model compressibility, leading-edge vortex lift (slender, h
 | `"nonlinear"` | The same lifting line, solved with Newton iteration on the section polars (smooth PCHIP interpolation, line search, restarts; sweeps start from the previous angle) | Start of stall with tabulated polars on unswept wings. Select it explicitly. | As `"linear"`. Far past the maximum lift the lifting line can have more than one solution or none; a case that does not converge is reported (`converged=False`, low trust). |
 | `"fourier"` | Classical Fourier series (H. Glauert, 1926) | One symmetric, unswept, planar wing. | No ground effect. |
 
-The solvers use compiled (Numba) kernels on all CPU cores, and run independent cases (sweeps, batches) side by side. Run `ventorum-tune` once after installation: it measures the machine and stores the best thread settings. Without it, Ventorum uses defaults that work on any machine. See `docs/user/parallel.md`.
+The solvers run their vortex kernels on all CPU cores. Each kernel gets its backend from the tuner, per kernel and per case size: Cython (the default on Linux and Windows), Numba or numpy, and PyTorch when the machine profile selects it (see `docs/user/how_to_backends.md`). Independent cases (sweeps, batches) run side by side. Run `ventorum-tune` once after installation: it measures the machine and stores the best backend and thread settings. Without it, Ventorum uses defaults that work on any machine. See `docs/user/parallel.md`.
 
 On a machine with an NVIDIA CUDA GPU, the vortex lattice and the linear and nonlinear lifting lines also run on the GPU (`pip install -e .[gpu]`): batches of flight conditions (sweeps, ground-effect grids) and large single solves. The device `"auto"` (default) selects the GPU only where it is faster. See `docs/user/how_to_gpu.md`.
 
@@ -104,7 +104,7 @@ print(res.CL, res.CDi, res.Cl, res.h_min_over_c)
 
 ## Verification
 
-`python validation/run_verification.py` writes `docs/verification_report.md` (a few seconds). It compares the solvers with:
+`python validation/run_verification.py` writes `docs/verification_report.md`. It compares the solvers with:
 
 - The elliptic wing of the Lanchester–Prandtl lifting-line theory and Glauert's monoplane equation (solved independently in `ventorum.reference`).
 - The flat circular wing (Kinner, lifting-surface theory) and Helmbold's formula.

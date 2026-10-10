@@ -302,9 +302,9 @@ def test_roll_breaks_symmetry():
 def test_signs_match_the_flow_angles():
     """Nose-up pitch equals a positive alpha, and nose-right yaw equals a negative beta.
 
-    Reviewer test (T-0031): the signs are anchored to the flow angles of the
-    solver, not only to the matrix product. A flow at alpha 0, beta 0 seen
-    in the axes of the rotated geometry is R^T times (1, 0, 0).
+    The signs are anchored to the flow angles of the solver, not only to
+    the matrix product. A flow at alpha 0, beta 0 seen in the axes of the
+    rotated geometry is R^T times (1, 0, 0).
     """
     from ventorum.aero.system import freestream_direction
 
