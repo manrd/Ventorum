@@ -276,7 +276,9 @@ def test_upward_bending_adds_dihedral_effect():
 def test_mirror_copy_gets_mirrored_displacements():
     semi_span = 4.0
     st = vt.SolverSettings(solver_type="vlm", n_panels=16, n_chord=2)
-    cond = vt.FlightCondition(V_inf=30.0, alpha=np.radians(4.0))
+    # Sideslip makes Cl and Cn different from zero, so the test does not
+    # compare two values that are zero by symmetry.
+    cond = vt.FlightCondition(V_inf=30.0, alpha=np.radians(4.0), beta=np.radians(3.0))
 
     wing_sym = vt.LiftingSurface(
         name="WingSym",
@@ -296,10 +298,25 @@ def test_mirror_copy_gets_mirrored_displacements():
         twist=eta * np.radians(1.5),
         pivot_x_c=0.25,
     )
+    # Spanwise (y) displacements, zero at the root (a symmetric root stays on y = 0).
+    disp.le[1:, 1] += 0.02 * eta[1:] ** 2
+    disp.te[1:, 1] += 0.03 * eta[1:] ** 2
+    assert np.all(disp.le[1:, 1] != 0.0) and np.all(disp.te[1:, 1] != 0.0)
     wing_sym.node_displacements = disp
 
     lat_sym = vt.build_lattice(ac_sym, st, collocation="vlm", n_chord=2)
     assert lat_sym.can_fold_symmetry() is True
+
+    # Node level: the right half has the displaced nodes and the left half is
+    # their mirror image (root to tip becomes tip to root).
+    mirror = np.array([1.0, -1.0, 1.0])
+    n_half = len(eta)
+    sl = lat_sym.surfaces[0]
+    for edge, base, d in ((sl.edge_le, nodes["le"], disp.le), (sl.edge_te, nodes["te"], disp.te)):
+        right = edge[n_half - 1:]
+        left = edge[:n_half]
+        assert np.array_equal(right, base + d)
+        assert np.array_equal(left, (right * mirror)[::-1])
 
     wing_r = vt.LiftingSurface(
         name="WingR",
@@ -314,12 +331,20 @@ def test_mirror_copy_gets_mirrored_displacements():
     wing_l = wing_r.mirrored("WingL")
     ac_pair = vt.Aircraft(surfaces=[wing_r, wing_l])
 
+    # The mirror copy has the mirror image of the displaced right half.
+    lat_pair = vt.build_lattice(ac_pair, st, collocation="vlm", n_chord=2)
+    sl_r, sl_l = lat_pair.surfaces
+    for edge_sym, edge_r, edge_l in ((sl.edge_le, sl_r.edge_le, sl_l.edge_le),
+                                     (sl.edge_te, sl_r.edge_te, sl_l.edge_te)):
+        assert np.array_equal(edge_r, edge_sym[n_half - 1:])
+        assert np.array_equal(edge_l, (edge_r * mirror)[::-1])
+
     res_sym = vt.analyze(ac_sym, cond, st)
     res_pair = vt.analyze(ac_pair, cond, st)
 
-    assert np.isclose(res_sym.totals.CL, res_pair.totals.CL, rtol=1e-10)
-    assert np.isclose(res_sym.totals.Cl, res_pair.totals.Cl, atol=1e-14)
-    assert np.isclose(res_sym.totals.Cn, res_pair.totals.Cn, atol=1e-14)
+    assert abs(res_sym.totals.Cl) > 1e-4 and abs(res_sym.totals.Cn) > 1e-6
+    for k in ("CL", "Cl", "Cn"):
+        assert np.isclose(getattr(res_sym.totals, k), getattr(res_pair.totals, k), rtol=1e-10, atol=0.0), k
 
 
 # 8. test_wrong_shape_is_refused, test_collapsed_strip_is_refused, test_too_large_displacement_is_refused
@@ -663,27 +688,48 @@ def test_displacements_with_control_surface():
 
 
 # 14. test_ground_clearance_uses_deformed_nodes
-def test_ground_clearance_uses_deformed_nodes():
+@pytest.mark.parametrize("solver", ["vlm", "linear", "nonlinear"])
+def test_ground_clearance_uses_deformed_nodes(solver: str):
     wing = _sample_wing()
-    st = vt.SolverSettings(solver_type="vlm", n_panels=16)
-    # Undistorted wing at h=1.0 m clears the ground
-    cond = vt.FlightCondition(V_inf=30.0, alpha=0.0, h=1.0)
+    st = vt.SolverSettings(solver_type=solver, n_panels=16)
+    # The undeformed flat wing at h = 2.0 m clears the ground. This height is
+    # above the lifting-line limit h/c_ref = 1 (c_ref = 1.56 m here).
+    cond = vt.FlightCondition(V_inf=30.0, alpha=0.0, h=2.0)
     ac_undef = vt.Aircraft(surfaces=[wing])
-    res_undef = vt.analyze(ac_undef, cond, st)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        res_undef = vt.analyze(ac_undef, cond, st)
     assert res_undef.converged
 
-    # Deform tip downward by 1.5 m so that it penetrates ground (clearance < 0)
-    nodes = undeformed_nodes(ac_undef, st, solver="vlm")["Wing"]
+    # Move the tip down by 2.5 m, so that it crosses the ground (clearance < 0).
+    nodes = undeformed_nodes(ac_undef, st, solver=solver)["Wing"]
     d_le = np.zeros_like(nodes["le"])
     d_te = np.zeros_like(nodes["te"])
-    d_le[-1, 2] = -1.5
-    d_te[-1, 2] = -1.5
+    d_le[-1, 2] = -2.5
+    d_te[-1, 2] = -2.5
     wing_down = wing.clone()
     wing_down.node_displacements = vt.NodeDisplacements(le=d_le, te=d_te)
     ac_down = vt.Aircraft(surfaces=[wing_down])
 
-    with pytest.raises(GroundStrikeError):
+    # An undeformed wing with anhedral: its tip is below the ground at the same h.
+    wing_anhedral = vt.LiftingSurface(
+        name="Wing",
+        semi_span=5.0,
+        dihedral=-np.arctan(2.5 / 5.0),
+        sections=[
+            vt.WingSection(y_frac=0.0, chord=2.0),
+            vt.WingSection(y_frac=1.0, chord=1.0),
+        ],
+    )
+    ac_anhedral = vt.Aircraft(surfaces=[wing_anhedral])
+
+    with pytest.raises(GroundStrikeError) as exc_down:
         vt.analyze(ac_down, cond, st)
+    with pytest.raises(GroundStrikeError) as exc_anhedral:
+        vt.analyze(ac_anhedral, cond, st)
+    prefix = "Geometry touches or crosses the ground plane"
+    assert str(exc_down.value).startswith(prefix)
+    assert str(exc_anhedral.value).startswith(prefix)
 
 
 # 15. test_gpu_deformed_lattice_equals_cpu
