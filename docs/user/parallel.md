@@ -4,7 +4,7 @@ Ventorum uses all the cores of the machine with no manual tuning, at two levels:
 
 | Level | What runs in parallel | Who decides |
 | --- | --- | --- |
-| Inside one case | The compiled (Numba) vortex kernels run on several threads | Ventorum: the tuned thread count of the machine, else all cores |
+| Inside one case | The compiled vortex kernels (Cython or Numba, as the tuner selects) run on several threads | Ventorum: the tuned thread count of the machine, else all cores |
 | Across cases | Independent cases (sweep angles, batch cases, ground-effect grids, instances) run side by side | Ventorum: the tuned plan, else a default by case size |
 
 The product of the cases in parallel and the threads per case never exceeds the number of cores. A case that runs inside a worker never starts a second pool. Inside a solve, the BLAS library runs on one thread, so that it does not compete with the kernel threads.

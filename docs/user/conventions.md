@@ -5,7 +5,7 @@
 | Geometry axes | x aft, y to the right, z up |
 | Angles in `FlightCondition` | Radians. The short arguments of `analyze` (`alpha_deg`) are in degrees. |
 | `semi_span` | Length along the dihedral line. If a section gives `z_le`, it is the projected y extent. |
-| Reference values | `S_ref`, `b_ref`, `c_ref` are projected on the x-y plane; `c_ref` is the mean aerodynamic chord. Values you do not set come from the main surface (the first surface that is not vertical) and its mirror copy. |
+| Reference values | `S_ref`, `b_ref`, `c_ref` are projected on the x-y plane; `c_ref` is the mean aerodynamic chord. Values you do not set come from the main surface (the surface with the largest projected planform area) and its mirror copy. |
 | Moments | As in AVL: `Cl > 0` right wing down, `Cm > 0` nose up, `Cn > 0` nose right. |
 | Moment reference point | `Aircraft.ref_point` (for example the centre of gravity), the origin if not set. |
 | Sideslip | `beta > 0` is wind from the right. Positive dihedral gives `Cl_beta < 0`. |

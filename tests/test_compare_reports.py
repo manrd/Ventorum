@@ -1,6 +1,6 @@
 # Author: Manuel Alejandro Rodriguez Diaz, PhD
 """
-Tests for validation/compare_reports.py (task T-0010, decision 5).
+Tests for validation/compare_reports.py.
 
 The script must ignore the run-time line and the environment line, accept
 round-off differences in numbers, and reject a changed result or a changed

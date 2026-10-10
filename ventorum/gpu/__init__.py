@@ -25,8 +25,8 @@ Selection
   support.
 * :func:`set_precision` (or ``VENTORUM_GPU_PRECISION``): ``"float64"`` gives
   the results of the CPU solvers to round-off; ``"float32"`` is faster on
-  most GPUs, and its error is about 1e-7 to 1e-6 relative (owner direction
-  D-19 accepts float32 for the GPU paths). ``"auto"`` is ``"float32"``.
+  most GPUs, and its error is about 1e-7 to 1e-6 relative (the owner
+  accepts float32 for the GPU paths). ``"auto"`` is ``"float32"``.
 
 The GPU pipelines need the packages ``torch`` (with CUDA) and ``warp-lang``.
 Without them, or without a CUDA GPU, all solves run on the CPU.
@@ -41,7 +41,8 @@ import threading
 DEVICES = ("auto", "cpu", "gpu")
 PRECISIONS = ("auto", "float32", "float64")
 
-# Default precision of "auto" on the GPU (owner direction D-19).
+# Default precision of "auto" on the GPU: float32, which the owner accepts
+# for the GPU paths.
 AUTO_PRECISION = "float32"
 
 # Built-in rule of the "auto" device, per solver family (the solver names),

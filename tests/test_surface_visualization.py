@@ -3,10 +3,10 @@
 Tests for 3D colored surface panel visualizations (plot_surface_results).
 
 Every test checks the content of the figure: the number of collections, the
-axis labels, the colour bar text and one data value (task T-0010, decision 3).
-The data checks use a relative tolerance of 1e-12: the plotted values come
-from the same result arrays, so the measured error today is 0, and decision 1
-sets the floor at 1e-12 relative.
+axis labels, the colour bar text and one data value. The data checks use a
+relative tolerance of 1e-12: the plotted values come from the same result
+arrays, so the measured error today is 0, and the tolerance floor is 1e-12
+relative.
 """
 
 import pytest

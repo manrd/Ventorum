@@ -86,7 +86,7 @@ class Ventorum:
     V_inf : float
         Free-stream velocity [m/s] (default 50.0).
     alpha_deg : float or None
-        Baseline angle of attack in degrees.
+        Baseline angle of attack in degrees (default 5.0).
     use_symmetry : bool or None
         Use the y = 0 symmetry plane. None: True if *settings* is None,
         otherwise the value of *settings*.
@@ -137,7 +137,7 @@ class Ventorum:
         if condition is not None:
             self.condition = condition.clone()
         else:
-            alpha_rad = np.radians(alpha_deg) if alpha_deg is not None else 0.0
+            alpha_rad = np.radians(alpha_deg) if alpha_deg is not None else np.radians(5.0)
             self.condition = FlightCondition(V_inf=V_inf, alpha=alpha_rad)
 
         # Build solver settings. The defaults apply only when no settings are given.

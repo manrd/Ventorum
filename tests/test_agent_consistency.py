@@ -1,6 +1,6 @@
 # Author: Manuel Alejandro Rodriguez Diaz, PhD
 """
-Consistency tests of task T-0009: selectable moment axes, error-type
+Consistency tests of the agent tools: selectable moment axes, error-type
 mapping, batch n_chord report, single-mesh ground-effect polar sweep and
 MCP survival on invalid input.
 """
@@ -112,7 +112,7 @@ def test_agent_axes_input():
 
 
 def test_error_type_table():
-    """One case per row of the error-type table of decision 2."""
+    """One case per row of the error-type mapping (error_type_of)."""
     assert error_type_of(InputError("bad key")) == "invalid_input"
     assert error_type_of(ValueError("bad value")) == "invalid_input"
     assert error_type_of(ValidityError("no ground effect")) == "invalid_method"
@@ -189,7 +189,7 @@ def test_mcp_survives_invalid_utf8():
 
 
 def test_wind_axes_follow_the_flight_velocity_of_the_solver():
-    """Review of T-0009: the wind x axis is the flight velocity of the solver's own sideslip sign.
+    """The wind x axis is the flight velocity of the solver's own sideslip sign.
 
     The free stream of the solver is in the geometry axes (x aft, y right,
     z up); the moment triple is in the standard body axes (x forward,

@@ -290,10 +290,10 @@ def test_no_warning_for_sorted_polar():
         _sorted_polar().Cl(0.01)
 
 
-# ── Test for load_csv_polar (kept per D-02) ────────────────────────────────────
+# ── Test for load_csv_polar (public function kept, with a test) ────────────────────
 
 def test_load_csv_polar(tmp_path):
-    """Test that load_csv_polar loads a CSV polar correctly (kept per D-02)."""
+    """Test that load_csv_polar loads a CSV polar correctly (a public function that is kept, with a test)."""
     from ventorum.aero.polars import load_csv_polar
 
     csv_content = """alpha,Cl,Cd,Cm
