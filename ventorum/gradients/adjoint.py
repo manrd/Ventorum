@@ -45,24 +45,28 @@ _SYMMETRIC_OUTPUTS = ("CL", "CDi", "CDp", "CD", "Cm")
 PHASE2_CARD = "T-0071"
 
 
-def _device_precision() -> tuple[str, str]:
-    """Return the (torch device, precision) of the gradient computation."""
+def _gradient_device(result: Any) -> str:
+    """Return the torch device of the gradient computation.
+
+    The gradients run on the device of the production solve: the device
+    selection of :mod:`ventorum.gpu` (setting ``"auto"``, ``"cpu"`` or
+    ``"gpu"``, and the size rule of ``"auto"``) decides it for the solve,
+    and the gradients follow it.
+    """
     require_torch()
     import torch
 
+    if str(result.details.get("device", "cpu")) == "gpu" and torch.cuda.is_available():
+        return "cuda"
+    return "cpu"
+
+
+def _gradient_precision() -> str:
+    """Return the precision of the gradient partials and the adjoint solve."""
     from ventorum import gpu
 
-    if gpu.get_device() == "gpu" and torch.cuda.is_available():
-        try:
-            device = "cuda"
-        except Exception:  # noqa: BLE001 - fall back to the CPU
-            device = "cpu"
-    else:
-        device = "cpu"
     precision = gpu.get_precision()
-    if precision not in ("float32", "float64"):
-        precision = "float32"
-    return device, precision
+    return precision if precision in ("float32", "float64") else "float32"
 
 
 def _torch_dtype(precision: str):  # type: ignore[no-untyped-def]
@@ -92,6 +96,10 @@ def _check_names(outputs: Any, wrt: Any) -> tuple[tuple[str, ...], tuple[str, ..
     """Check output and input names; return them as tuples."""
     outs = tuple(outputs)
     ins = tuple(wrt)
+    if not outs:
+        raise ValueError(f"No output requested; use one or more of {list(ALL_OUTPUTS)}.")
+    if not ins:
+        raise ValueError(f"No input requested; use one or more of {list(ALL_WRT)}.")
     for o in outs:
         if o not in ALL_OUTPUTS:
             raise ValueError(f"Unknown output {o!r}; use one of {list(ALL_OUTPUTS)}.")
@@ -172,7 +180,10 @@ def build_reference(
     Returns (model, base) with the numpy base values of every input.
     *accum* selects the source summation (``"sequential"``, ``"pairwise"``
     or ``"kahan"``); *local_origin* measures the coordinates from the
-    detached centroid of the lattice.
+    detached centroid of the lattice. The gradient functions use the
+    defaults (sequential, body axes): the other variants gave the same
+    float32 accuracy within the round-off and are slower; they stay here
+    for comparisons only.
     """
     import torch
 
@@ -373,14 +384,15 @@ class GradientResult:
     device : str
         Torch device of the gradient computation (``"cpu"`` or ``"cuda"``).
     precision_primal : str
-        Precision of the production solve (always ``"float64"`` on the CPU).
+        Precision of the production solve (``"float64"`` on the CPU; the
+        GPU precision setting on the GPU).
     precision_gradient : str
         Precision of the gradient partials and the adjoint solve.
     method : str
         Always ``"adjoint"``.
     forward_mismatch : float
-        Largest relative difference between the reference copy and the
-        production result.
+        Largest relative difference between the differentiated reference
+        copy and the production result (see :func:`gradients`).
     n_solves : int
         Number of production solves (always 1).
     n_adjoint : int
@@ -430,17 +442,6 @@ class GradientResult:
         }
 
 
-def _grad_options() -> tuple[str, bool]:
-    """Return the (accum, local_origin) float32 options (defaults: sequential, False)."""
-    import os
-
-    accum = os.environ.get("VENTORUM_GRAD_ACCUM", "sequential").strip().lower()
-    if accum not in ("sequential", "pairwise", "kahan"):
-        accum = "sequential"
-    local = os.environ.get("VENTORUM_GRAD_ORIGIN", "").strip().lower() in ("1", "true", "local")
-    return accum, local
-
-
 def _prepare_case(geometry: Any, condition: Any, settings: Any, axes: str,
                   wrt: tuple[str, ...], outputs: tuple[str, ...]) -> dict:
     """Run the production solve and build the reference model.
@@ -480,10 +481,10 @@ def _prepare_case(geometry: Any, condition: Any, settings: Any, axes: str,
     lattice = result.details["lattice"]
     production_symmetric = bool(result.symmetry_used)
     symmetric = _adjoint_use_symmetry(production_symmetric, wrt, outputs)
-    device, precision = _device_precision()
-    accum, local_origin = _grad_options()
-    model, base = build_reference(ac, condition, st, lattice, axes, device, precision, symmetric,
-                                  accum=accum, local_origin=local_origin)
+    device = _gradient_device(result)
+    precision = _gradient_precision()
+    precision_primal = str(result.details.get("precision", "float64"))
+    model, base = build_reference(ac, condition, st, lattice, axes, device, precision, symmetric)
     gamma_panel = np.asarray(result.details["gamma"], dtype=float)
     col = np.asarray(model.b["panel_column_full"].cpu())
     # Circulation per unknown from the production panels (mean of the mapped panels).
@@ -491,27 +492,12 @@ def _prepare_case(geometry: Any, condition: Any, settings: Any, axes: str,
     acc = np.zeros(int(model.b["n_unknowns"]))
     np.add.at(acc, col, gamma_panel)
     g_unknown = acc / np.maximum(cnt, 1)
-    # Parity model: the folded system whenever the production state is
-    # symmetric, so exactly-zero lateral outputs cancel to round-off. The
-    # gradients keep the model above (full unless the symmetry rule holds).
-    parity_model = None
-    g_parity = None
-    if production_symmetric and not symmetric:
-        parity_model, _ = build_reference(
-            ac, condition, st, lattice, axes, device, precision, True,
-            accum=accum, local_origin=local_origin)
-        pcol = np.asarray(parity_model.b["panel_column_full"].cpu())
-        pcnt = np.bincount(pcol, minlength=int(parity_model.b["n_unknowns"]))
-        pacc = np.zeros(int(parity_model.b["n_unknowns"]))
-        np.add.at(pacc, pcol, gamma_panel)
-        g_parity = pacc / np.maximum(pcnt, 1)
     return {
         "aircraft": ac, "settings": st, "condition": condition, "canonical": canonical,
         "result": result, "lattice": lattice, "model": model, "base": base,
-        "device": device, "precision": precision, "symmetric": symmetric,
-        "production_symmetric": production_symmetric,
-        "g_unknown": g_unknown, "parity_model": parity_model, "g_parity": g_parity,
-        "axes": axes,
+        "device": device, "precision": precision, "precision_primal": precision_primal,
+        "symmetric": symmetric, "production_symmetric": production_symmetric,
+        "g_unknown": g_unknown, "axes": axes,
     }
 
 
@@ -519,11 +505,14 @@ def _adjoint_solve(
     prep: dict,
     wrt: tuple[str, ...],
     make_targets: Any,
+    vectors: tuple[str, ...] = (),
 ) -> tuple[dict, dict, float, int]:
     """Run the adjoint computation for the targets of *make_targets*.
 
     *make_targets* maps the torch outputs dict to a list of (name, scalar).
-    One forward pass gives the outputs, the system and the reference values.
+    One forward pass of the differentiated model gives the outputs, the
+    system and the values of the forward check; *vectors* names the vector
+    outputs that the forward check also compares.
     Returns (values, jacobian, forward_mismatch, n_adjoint).
     """
     import torch
@@ -531,75 +520,136 @@ def _adjoint_solve(
     model: TorchReference = prep["model"]
     base = prep["base"]
     device, precision = prep["device"], prep["precision"]
-    tol = 1e-10 if precision == "float64" else 1e-4
     t = make_input_tensors(model, base, wrt, device, precision)
     g0 = torch.as_tensor(np.ascontiguousarray(prep["g_unknown"]),
                          dtype=model.b["dtype"], device=model.b["device"])
     g_var = g0.detach().clone().requires_grad_(True)
     outputs, A, rhs = model.forward(t, g_var)
     targets = make_targets(outputs)
-    # Parity values: the folded system when the production state is
-    # symmetric (exact cancellation of the lateral zeros), else this model.
-    if prep["parity_model"] is not None:
-        pmodel = prep["parity_model"]
-        gpar = torch.as_tensor(np.ascontiguousarray(prep["g_parity"]),
-                               dtype=pmodel.b["dtype"], device=pmodel.b["device"])
-        pout, _, _ = pmodel.forward(t, gpar)
-    else:
-        pout = outputs
     A_det = A.detach()
     g_star = g0.detach()
     prod = _production_values(prep)
-    ref_vals = {k: float(pout[k].detach().cpu()) for k in prod}
-    # Forward parity: relative differences with a floor at 1e-3 of the
-    # largest output magnitude, or an absolute band (1e-9 in float64,
-    # 1e-5 in float32 [coefficient units]) for small outputs where float32
-    # round-off alone exceeds the relative gate. The parity model uses the
-    # folded system on symmetric states, so exactly-zero lateral outputs
-    # cancel to round-off. A real divergence (for example a missing load
-    # term) exceeds the gate by orders of magnitude.
-    abs_tol = 1e-9 if precision == "float64" else 1e-5
-    scale = max(1e-300, max(abs(p) for p in prod.values()))
+    worst = _forward_check(prep, outputs, prod, vectors)
+    # One backward pass per target gives df/dG (the adjoint right-hand
+    # side) and the explicit partials df/dx together.
+    names = [name for name, _ in targets]
+    leaves = [v for v in t.values() if isinstance(v, torch.Tensor) and v.requires_grad]
+    grads_g = []
+    grads_fx = []
+    for _, f in targets:
+        # An output without a dependence on the circulation or the inputs
+        # (for example CDp with respect to alpha only) has no graph.
+        if f.requires_grad:
+            parts = torch.autograd.grad(f, [g_var] + leaves, retain_graph=True, allow_unused=True)
+        else:
+            parts = (None,) * (1 + len(leaves))
+        gg = parts[0] if parts[0] is not None else torch.zeros_like(g_var)
+        grads_g.append(gg.detach())
+        grads_fx.append(parts[1:])
+    B = torch.stack(grads_g, dim=1)
+    Lambda = torch.linalg.solve(A_det.T, B)
+    residual = A @ g_star - rhs
+    jacobian: dict = {}
+    values = {k: prod[k] for k in names if k in prod}
+    for j, name in enumerate(names):
+        # Total derivative: df/dx - lambda^T dR/dx at the fixed G*.
+        lam = Lambda[:, j].detach()
+        r_term = (lam * residual).sum()
+        if r_term.requires_grad:
+            grads_r = torch.autograd.grad(r_term, leaves, retain_graph=True, allow_unused=True)
+        else:
+            grads_r = (None,) * len(leaves)
+        gmap = {}
+        for v, gf, gr in zip(leaves, grads_fx[j], grads_r):
+            if gf is None and gr is None:
+                gmap[id(v)] = None
+                continue
+            tot = (gf if gf is not None else 0.0) - (gr if gr is not None else 0.0)
+            gmap[id(v)] = tot.detach().cpu().numpy()
+        jacobian[name] = _pack_jacobian(model, t, gmap, wrt, base)
+    return values, jacobian, worst, len(targets)
+
+
+# Scalar outputs that are components of one force vector and of one
+# moment vector (relative scale of the forward check).
+_FORCE_VECTOR = ("CL", "CY")
+_MOMENT_VECTOR = ("Cl", "Cm", "Cn")
+
+
+def _forward_check(prep: dict, outputs: dict, prod: dict[str, float],
+                   vectors: tuple[str, ...]) -> float:
+    """Compare the differentiated model with the production result.
+
+    Returns the largest relative difference (``forward_mismatch``). Raises
+    RuntimeError with the output names when it is above 1e-10 (float64) or
+    1e-4 (float32).
+
+    The difference of CDi, CDp and CD is relative to the production value
+    of each. CL and CY are components of one force vector, and Cl, Cm and
+    Cn are components of one moment vector: their differences are relative
+    to the largest production magnitude of the components of the same
+    vector (the normwise relative error of the vector). The round-off of a
+    vector component is relative to the vector, so a small component (CY
+    in a small sideslip, or CY, Cl and Cn of a symmetric state, which are
+    zero by symmetry) has no relative scale of its own. An output with an
+    exact zero production value (for example CDp with Cd0 = 0) uses the
+    force scale.
+
+    A requested vector output (``strip_force`` [N], ``section_cl``) is
+    compared with its production array: the largest difference relative
+    to the largest production magnitude of the array, because single
+    components go through zero along the span.
+    """
+    precision = prep["precision"]
+    both64 = precision == "float64" and prep["precision_primal"] == "float64"
+    tol = 1e-10 if both64 else 1e-4
+    force_scale = max(abs(prod[k]) for k in _FORCE_VECTOR)
+    moment_scale = max(abs(prod[k]) for k in _MOMENT_VECTOR)
     worst = 0.0
     bad = []
     for k, p in prod.items():
-        r = ref_vals[k]
+        r = float(outputs[k].detach().cpu())
         if not (math.isfinite(r) and math.isfinite(p)):
             worst = float("inf")
             bad.append(k)
             continue
-        rel = abs(r - p) / max(abs(p), 1e-3 * scale)
+        if k in _FORCE_VECTOR:
+            denom = force_scale
+        elif k in _MOMENT_VECTOR:
+            denom = moment_scale
+        else:
+            denom = abs(p) if p != 0.0 else force_scale
+        rel = abs(r - p) / denom if denom > 0.0 else (0.0 if r == p else float("inf"))
         worst = max(worst, rel)
-        if rel > tol and abs(r - p) > abs_tol:
+        if rel > tol:
+            bad.append(k)
+    for k, arr in _production_vectors(prep, vectors).items():
+        r = outputs[k].detach().cpu().numpy().reshape(arr.shape)
+        scale = float(np.max(np.abs(arr)))
+        diff = float(np.max(np.abs(r - arr)))
+        rel = diff / scale if scale > 0.0 else (0.0 if diff == 0.0 else float("inf"))
+        if not np.isfinite(rel):
+            rel = float("inf")
+        worst = max(worst, rel)
+        if rel > tol:
             bad.append(k)
     if bad:
         raise RuntimeError(
             f"The reference copy differs from the production result above {tol:g} "
             f"(outputs: {', '.join(bad)}; worst {worst:.3g}). "
             "The gradient would not be the gradient of the reported result.")
-    # Right-hand sides df/dG for the requested scalar targets.
-    names = [name for name, _ in targets]
-    grads_g = []
-    for _, f in targets:
-        gg = torch.autograd.grad(f, g_var, retain_graph=True, allow_unused=True)[0]
-        if gg is None:
-            gg = torch.zeros_like(g_var)
-        grads_g.append(gg.detach())
-    B = torch.stack(grads_g, dim=1)
-    Lambda = torch.linalg.solve(A_det.T, B)
-    jacobian: dict = {}
-    values = {k: prod[k] for k in names if k in prod}
-    for j, (name, f) in enumerate(targets):
-        lam = Lambda[:, j].detach()
-        lag = f - (lam * (A @ g_star - rhs)).sum()
-        grads = torch.autograd.grad(
-            lag, [v for v in t.values() if isinstance(v, torch.Tensor) and v.requires_grad],
-            retain_graph=True, allow_unused=True)
-        gmap = {id(v): (gr.detach().cpu().numpy() if gr is not None else None)
-                for v, gr in zip(
-                    [v for v in t.values() if isinstance(v, torch.Tensor) and v.requires_grad], grads)}
-        jacobian[name] = _pack_jacobian(model, t, gmap, wrt, base)
-    return values, jacobian, worst, len(targets)
+    return worst
+
+
+def _production_vectors(prep: dict, names: tuple[str, ...]) -> dict[str, np.ndarray]:
+    """Return the production arrays of the vector outputs in *names*."""
+    loads = prep["result"].details["loads"]
+    out = {}
+    if "strip_force" in names:
+        out["strip_force"] = np.asarray(loads.strip_force, dtype=float)
+    if "section_cl" in names:
+        out["section_cl"] = np.concatenate([np.asarray(sp.Cl, dtype=float) for sp in loads.spanwise])
+    return out
 
 
 def _production_values(prep: dict) -> dict[str, float]:
@@ -719,12 +769,11 @@ def gradients(
     ]
     if prep["precision"] == "float32":
         notes.append(
-            "Float32 gradients: scalar-input gradients meet the 1e-3 gate, but node "
-            "gradients can exceed it on general meshes (measured to 1.4e-2 relative on "
-            "a swept wing); check the result with check_gradients (rtol=1e-3).")
+            "Float32 gradients: the D-13 gate is 1e-3 relative; check the result with "
+            "check_gradients (rtol=1e-3).")
     return GradientResult(
         values=values, jacobian=jacobian, device=prep["device"],
-        precision_primal="float64", precision_gradient=prep["precision"],
+        precision_primal=prep["precision_primal"], precision_gradient=prep["precision"],
         forward_mismatch=worst, n_adjoint=n_adj, symmetric=prep["symmetric"], notes=notes)
 
 
@@ -787,6 +836,7 @@ def gradient_vjp(
         assert total is not None
         return [("__vjp__", total)]
 
-    _, jacobian, _, _ = _adjoint_solve(prep, ins, _make)
+    vectors = tuple(o for o in seeds if o in VECTOR_OUTPUTS)
+    _, jacobian, _, _ = _adjoint_solve(prep, ins, _make, vectors=vectors)
     return jacobian["__vjp__"]
 
