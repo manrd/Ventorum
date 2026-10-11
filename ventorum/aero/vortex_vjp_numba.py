@@ -6,8 +6,9 @@ The functions here compute the same quantities as the numpy reference
 topology masks, same floors), in one pass over each (point, source) pair,
 without (rows, sources) temporary arrays. The points run in parallel
 (``prange``) in blocks of rows; each block adds its source derivatives into
-its own buffer, and the buffers are added in block order at the end, so
-the result does not depend on the thread timing.
+its own buffer, and the buffers are added in block order at the end. The
+block partition depends only on the row count, so the result is bitwise
+the same for every thread count and thread timing.
 
 Each pair is computed in float64 (scalar CPU code runs at the same speed in
 float32 and float64); the caller casts the result to the precision of the
@@ -26,8 +27,10 @@ import math
 
 import numpy as np
 
+from ventorum.aero.vortex_vjp import row_blocks
+
 try:
-    from numba import get_num_threads, njit, prange
+    from numba import njit, prange
 
     HAVE_NUMBA = True
 except ImportError:  # pragma: no cover - numba is a dependency
@@ -45,9 +48,13 @@ _NVTX = 5
 
 
 def blocks(m: int) -> int:
-    """Return the number of row blocks of one call (two per Numba thread, at most one per row)."""
-    t = get_num_threads() if HAVE_NUMBA else 1
-    return max(1, min(int(m), 2 * int(t)))
+    """Return the number of row blocks of one call.
+
+    The count depends only on the row count *m* (see
+    :func:`ventorum.aero.vortex_vjp.row_blocks`), so the result is bitwise
+    the same for every Numba thread count.
+    """
+    return row_blocks(m)
 
 
 if HAVE_NUMBA:

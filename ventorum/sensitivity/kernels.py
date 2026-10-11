@@ -33,6 +33,8 @@ from typing import Any
 
 import numpy as np
 
+from ventorum.aero.vortex_vjp import row_block_edges, row_blocks
+
 try:
     import torch
 
@@ -331,7 +333,8 @@ def _cython_impl():  # type: ignore[no-untyped-def]
     the calling thread). Without OpenMP (the default macOS build, see
     setup.py) the rows are split into blocks that run on Python threads;
     the kernels release the GIL. The source derivatives of the blocks are
-    added in block order.
+    added in block order. The VJP blocks depend only on the row count, so
+    the result is bitwise the same for every thread count.
     """
     from ventorum.utils.parallel import kernel_threads
 
@@ -339,7 +342,15 @@ def _cython_impl():  # type: ignore[no-untyped-def]
     omp = bool(cy.openmp_enabled())
 
     def _nblocks(m: int, threads: int) -> int:
-        return max(1, min(int(m), 2 * int(threads)))
+        # The partition depends only on the row count: bitwise the same
+        # result for every thread count (*threads* is not used).
+        return row_blocks(m)
+
+    def _vjp_edges(m: int) -> np.ndarray | None:
+        # Python-thread blocks of the VJP: the same partition as the OpenMP
+        # kernel, so that both builds add the same block sums in the same order.
+        edges = row_block_edges(m)
+        return None if len(edges) <= 2 else edges
 
     def fwd(mode, P, X, a, b, at, bt, d, rc2s, tgrc2, sg, tg, own, sp, edge, sea, seb, s, col, n_u, use_tg):
         threads = kernel_threads()
@@ -369,7 +380,7 @@ def _cython_impl():  # type: ignore[no-untyped-def]
                                     edge[i0:i1], sea, seb, s, col, Wr, use_w, bool(use_tg), nb, nt)
 
         m = P.shape[0]
-        edges = None if omp else _row_edges(m, threads)
+        edges = None if omp else _vjp_edges(m)
         if edges is None:
             return call(0, m, _nblocks(m, threads), threads if omp else 1)
         parts = list(_cython_pool().map(lambda k: call(edges[k], edges[k + 1], 1, 1), range(len(edges) - 1)))
@@ -404,7 +415,7 @@ def _cython_impl():  # type: ignore[no-untyped-def]
             return cy.trefftz_vjp(q[i0:i1], qn[i0:i1], p, gamma, d, rc2, tgrc2[i0:i1], sg, tg[i0:i1],
                                   bool(use_tg), gw[i0:i1], nb, nt)
 
-        edges = None if omp else _row_edges(m, threads)
+        edges = None if omp else _vjp_edges(m)
         if edges is None:
             return call(0, m, _nblocks(m, threads), threads if omp else 1)
         parts = list(_cython_pool().map(lambda k: call(edges[k], edges[k + 1], 1, 1), range(len(edges) - 1)))

@@ -150,8 +150,13 @@ g_q_i += g_r,  g_p_j -= g_r
 The compiled kernels compute each pair once in the forward kernel and once (forward and
 reverse sweep together) in the VJP kernel. On the CPU the rows run in parallel in blocks;
 each block adds its source derivatives into its own buffer, and the buffers are added in
-block order, so the result does not depend on the thread timing. Each pair is computed in
-float64 on the CPU (scalar CPU code has the same speed in float32 and float64). On the
+block order. The block partition depends only on the row count (blocks of 32 rows, at
+most 128 blocks), not on the thread count, so the result is bitwise the same for every
+thread count and thread timing. Each pair is computed in float64 on the CPU (scalar CPU
+code has the same speed in float32 and float64), also for a float32 request: the O(n^2)
+partials of the CPU kernels are then float64 values cast to float32, while the O(n)
+parts and the adjoint solve use float32. A float32 `GradientResult` of a CPU kernel
+path says this in its `notes`. On the
 GPU one launch adds the target derivatives per block of sources and a second launch adds
 the source derivatives per block of targets; the block sums are added in float64, and no
 atomic additions are used. The float32 GPU kernels compute each pair in float32. On the

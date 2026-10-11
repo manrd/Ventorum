@@ -69,6 +69,52 @@ _INV_2PI = 1.0 / (2.0 * math.pi)
 # is representable (1e-300 is zero in float32).
 FLOORS = {"float64": 1e-300, "float32": 1e-30}
 
+# Row blocks of the compiled VJP kernels (Numba, Cython). Each block adds its
+# source derivatives into its own buffer, and the buffers are added in block
+# order. The partition depends only on the row count (not on the thread
+# count), so the result is bitwise the same for every thread count. The cap
+# limits the buffer memory (blocks x sources x 17 values) of large lattices.
+VJP_BLOCK_ROWS = 32
+VJP_MAX_BLOCKS = 128
+
+
+def row_blocks(m: int) -> int:
+    """Return the number of row blocks of a compiled VJP call.
+
+    Parameters
+    ----------
+    m : int
+        Number of rows (target points) of the call.
+
+    Returns
+    -------
+    int
+        ``ceil(m / VJP_BLOCK_ROWS)``, at least 1 and at most
+        ``VJP_MAX_BLOCKS``. It does not depend on the thread count.
+    """
+    return max(1, min(-(-int(m) // VJP_BLOCK_ROWS), VJP_MAX_BLOCKS))
+
+
+def row_block_edges(m: int) -> np.ndarray:
+    """Return the row edges of the blocks of :func:`row_blocks`.
+
+    Block ``t`` holds the rows ``(t * m) // nb`` to ``((t + 1) * m) // nb``,
+    the same partition as the compiled kernels.
+
+    Parameters
+    ----------
+    m : int
+        Number of rows of the call.
+
+    Returns
+    -------
+    numpy.ndarray
+        Integer edges, shape (nb + 1,).
+    """
+    nb = row_blocks(m)
+    return np.array([(t * int(m)) // nb for t in range(nb + 1)], dtype=np.int64)
+
+
 # Target number of values per (rows, sources) temporary of one chunk.
 _CHUNK_VALUES = 400_000
 

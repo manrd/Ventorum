@@ -295,23 +295,121 @@ def test_trefftz_vjp_backends_agree() -> None:
 
 def test_resolve_rules() -> None:
     """The method keyword and the forced backend select the path of the partials."""
-    assert K.resolve("reference", "cpu") == ("reference", "torch")
-    assert K.resolve("kernels", "cpu") == ("kernels", K.default_backend("cpu"))
-    K.set_vjp_backend("numpy")
-    assert K.resolve("auto", "cpu") == ("kernels", "numpy")
-    assert K.resolve("kernels", "cpu") == ("kernels", "numpy")
-    assert K.resolve("reference", "cpu") == ("reference", "torch")
-    K.set_vjp_backend("torch")
-    assert K.resolve("auto", "cpu") == ("reference", "torch")
-    assert K.resolve("kernels", "cpu") == ("kernels", K.default_backend("cpu"))
-    # A forced backend of another device is not used.
-    K.set_vjp_backend("warp")
-    assert K.resolve("auto", "cpu") == ("kernels", K.default_backend("cpu"))
+    old = K.get_forced_backend()
+    try:
+        assert K.resolve("reference", "cpu") == ("reference", "torch")
+        assert K.resolve("kernels", "cpu") == ("kernels", K.default_backend("cpu"))
+        K.set_vjp_backend("numpy")
+        assert K.resolve("auto", "cpu") == ("kernels", "numpy")
+        assert K.resolve("kernels", "cpu") == ("kernels", "numpy")
+        assert K.resolve("reference", "cpu") == ("reference", "torch")
+        K.set_vjp_backend("torch")
+        assert K.resolve("auto", "cpu") == ("reference", "torch")
+        assert K.resolve("kernels", "cpu") == ("kernels", K.default_backend("cpu"))
+        # A forced backend of another device is not used.
+        K.set_vjp_backend("warp")
+        assert K.resolve("auto", "cpu") == ("kernels", K.default_backend("cpu"))
+        K.set_vjp_backend(None)
+        with pytest.raises(ValueError, match="method"):
+            K.resolve("fast", "cpu")
+        with pytest.raises(ValueError, match="VJP backend"):
+            K.set_vjp_backend("fortran")
+    finally:
+        K.set_vjp_backend(old)
+
+
+def test_resolve_rules_restores_the_forced_backend(monkeypatch) -> None:
+    """Regression: test_resolve_rules restores the forced backend also when it fails part way."""
     K.set_vjp_backend(None)
-    with pytest.raises(ValueError, match="method"):
-        K.resolve("fast", "cpu")
-    with pytest.raises(ValueError, match="VJP backend"):
-        K.set_vjp_backend("fortran")
+    real = K.resolve
+    calls = []
+
+    def failing(*args, **kwargs):  # type: ignore[no-untyped-def]
+        calls.append(args)
+        if K.get_forced_backend() == "numpy":
+            raise AssertionError("failure after the backend is forced")
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(K, "resolve", failing)
+    with pytest.raises(AssertionError, match="forced"):
+        test_resolve_rules()
+    assert len(calls) == 3
+    assert K.get_forced_backend() is None
+
+
+def test_row_blocks_depend_only_on_the_row_count() -> None:
+    """The VJP row partition is a function of the row count only (fixed block size, capped count)."""
+    from ventorum.aero import vortex_vjp as ref
+
+    assert ref.row_blocks(1) == 1
+    assert ref.row_blocks(ref.VJP_BLOCK_ROWS) == 1
+    assert ref.row_blocks(ref.VJP_BLOCK_ROWS + 1) == 2
+    assert ref.row_blocks(10**7) == ref.VJP_MAX_BLOCKS
+    edges = ref.row_block_edges(1000)
+    assert edges[0] == 0 and edges[-1] == 1000 and len(edges) == ref.row_blocks(1000) + 1
+    assert np.all(np.diff(edges) > 0)
+
+
+def _vjp_at_threads(backend: str, threads: int, horseshoe: tuple, trefftz: tuple) -> list[np.ndarray]:
+    """Return the horseshoe and Trefftz VJP arrays of *backend* with *threads* Numba threads."""
+    import numba
+
+    old = numba.get_num_threads()
+    numba.set_num_threads(threads)
+    try:
+        _, vjp, _, tvjp = K._cpu_impl(backend)
+        out = list(vjp(*horseshoe, True)) + list(tvjp(*trefftz))
+    finally:
+        numba.set_num_threads(old)
+    return [np.array(x, copy=True) for x in out]
+
+
+def _determinism_inputs() -> tuple[tuple, tuple]:
+    P, X, a, b, ate, bte, d, rc2s, tgrc2, sg, tg, own, sp, edge, sea, seb, s, col, W = _synthetic(301, 97, 40, 11)
+    horseshoe = (P, X, a, b, ate, bte, d, rc2s, tgrc2, sg, tg, own, sp, edge, sea, seb, s, col, W)
+    rng = np.random.default_rng(12)
+    m, n = 263, 71
+    q, qn, p = rng.normal(size=(m, 3)), rng.normal(size=(m, 3)), rng.normal(size=(n, 3))
+    dd = np.array([0.9, 0.1, 0.2]) / np.linalg.norm([0.9, 0.1, 0.2])
+    trefftz = (q, qn, p, rng.normal(size=n), dd, rng.uniform(1e-3, 1e-2, n), rng.uniform(1e-3, 1e-2, m),
+               rng.integers(0, 2, n).astype(np.int64), rng.integers(0, 2, m).astype(np.int64), True,
+               rng.normal(size=m))
+    return horseshoe, trefftz
+
+
+@pytest.mark.parametrize("backend", ["numba", "cython"])
+def test_vjp_bitwise_equal_for_any_thread_count(backend: str) -> None:
+    """Regression: the CPU VJP gives bitwise the same arrays with 1 and N kernel threads."""
+    import numba
+
+    if not K.available(backend, "cpu"):
+        pytest.skip(f"The {backend} VJP backend is not available.")
+    n_max = int(numba.config.NUMBA_NUM_THREADS)
+    if n_max < 2:
+        pytest.skip("Numba has only one thread on this machine.")
+    horseshoe, trefftz = _determinism_inputs()
+    one = _vjp_at_threads(backend, 1, horseshoe, trefftz)
+    for threads in sorted({2, 3, n_max}):
+        if threads > n_max:
+            continue
+        many = _vjp_at_threads(backend, threads, horseshoe, trefftz)
+        for x, y in zip(one, many):
+            assert np.array_equal(x, y), (backend, threads)
+
+
+def test_cython_python_threads_bitwise_equal_openmp(monkeypatch) -> None:
+    """Regression: the Cython VJP on Python threads gives bitwise the OpenMP result (same partition)."""
+    cy = pytest.importorskip("ventorum.aero.vortex_vjp_cython")
+    horseshoe, trefftz = _determinism_inputs()
+    _, vjp, _, tvjp = K._cython_impl()
+    want = list(vjp(*horseshoe, True)) + list(tvjp(*trefftz))
+    monkeypatch.setattr(cy, "openmp_enabled", lambda: False)
+    for threads in (1, 5):
+        monkeypatch.setattr("ventorum.utils.parallel.kernel_threads", lambda t=threads: t)
+        _, vjp2, _, tvjp2 = K._cython_impl()
+        got = list(vjp2(*horseshoe, True)) + list(tvjp2(*trefftz))
+        for x, y in zip(want, got):
+            assert np.array_equal(x, y), threads
 
 
 def _write_profile(monkeypatch, tmp_path, settings: dict) -> None:
