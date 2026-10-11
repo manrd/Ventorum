@@ -3,8 +3,8 @@
 
 The tuner runs only when it is called: at setup (``ventorum-tune``), or when a
 user or an AI agent asks for it (:func:`tune_machine`). It never runs before
-an ordinary analysis. A normal run takes about half a minute; ``quick=True``
-skips the large cases.
+an ordinary analysis. A full run takes up to about two minutes;
+``quick=True`` skips the large cases and takes about half a minute.
 
 It measures, for each case size (see :data:`ventorum.hardware.profile.SIZE_CLASSES`):
 

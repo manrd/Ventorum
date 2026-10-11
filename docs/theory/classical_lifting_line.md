@@ -81,7 +81,7 @@ The solver refuses a geometry or a condition outside the model, with the error `
 - sideslip ($\beta \neq 0$);
 - ground effect ($h$ given).
 
-Inside the envelope, the model has the limits of lifting-line theory: low aspect ratio, stall and compressibility are outside it. The trust score lowers the rating for them (see [Trust score](trust_score.md)).
+Inside the envelope, the model has the limits of Lanchester–Prandtl lifting-line theory: low aspect ratio, stall and compressibility are outside it. The trust score lowers the rating for them (see [Trust score](trust_score.md)).
 
 ## Implementation
 

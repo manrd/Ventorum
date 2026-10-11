@@ -14,16 +14,16 @@ The product of the cases in parallel and the threads per case never exceeds the 
 Run the tuner once after installation, and again after a hardware change:
 
 ```bash
-ventorum-tune            # about half a minute; or: python -m ventorum.hardware tune
+ventorum-tune            # up to two minutes (--quick: about half a minute); or: python -m ventorum.hardware tune
 ventorum-tune --quick    # skips the large cases
 ventorum-tune show       # prints the stored profile and says if it matches this machine
 ```
 
-The tuner measures, for small, medium and large cases, the kernel backend for each kernel function (tensor, influence, induced, trefftz), the best thread count for one case, and the best split of the cores for batches. It stores a profile in the user configuration folder (`ventorum-tune path` prints it). The tuner never runs before an ordinary analysis. Ventorum does not depend on it: without a profile, or when the profile belongs to another machine, it uses built-in defaults that work on any machine. Tuning changes the speed; the device choice can change results at the float32 round-off level (about 1e-7 to 1e-6 relative). The profile also stores `torch_device`, the torch device of the tuning run.
+The tuner measures, for small, medium and large cases, the kernel backend for each kernel function (tensor, influence, induced, trefftz), the best thread count for one case, and the best split of the cores for batches. With a CUDA GPU it also measures the cost model of the CPU and GPU paths (profile key `gpu`), and it measures the VJP backend of the adjoint gradients (`grad_vjp`). It stores a profile in the user configuration folder (`ventorum-tune path` prints it). The tuner never runs before an ordinary analysis. Ventorum does not depend on it: without a profile, or when the profile belongs to another machine, it uses built-in defaults that work on any machine. Tuning changes the speed; the device choice can change results at the float32 round-off level (about 1e-7 to 1e-6 relative). The profile also stores `torch_device`, the torch device of the tuning run.
 
 ## Kernel backend choice
 
-The four kernel functions (velocity tensor, influence matrix, induced velocity, Trefftz normal wash) do not have to use the same backend. The tuner times each kernel function for each available backend (Numba, Cython, PyTorch, numpy) at each case size, and writes the fastest one to the profile. When backends are within 3 %, Numba wins (it needs no C compiler on reinstall), then Cython, then PyTorch, then numpy. At run time, `"auto"` uses the backend of the profile for the kernel function and the case size of the call. One solve can use two backends: this is the "hybrid" mode.
+The four kernel functions (velocity tensor, influence matrix, induced velocity, Trefftz normal wash) do not have to use the same backend. The tuner times each kernel function for each available backend (Numba, Cython, PyTorch; numpy only for small cases when a compiled backend is available) at each case size, and writes the fastest one to the profile. When backends are within 3 %, Numba wins (it needs no C compiler on reinstall), then Cython, then PyTorch, then numpy. At run time, `"auto"` uses the backend of the profile for the kernel function and the case size of the call. One solve can use two backends: this is the "hybrid" mode.
 
 The backend of a call is resolved in this order:
 
@@ -31,7 +31,7 @@ The backend of a call is resolved in this order:
 2. `"auto"` with a matching profile: the profile entry for the kernel and the size class. If the entry is missing, or names a backend that is not available now, the default below is used.
 3. `"auto"` without a profile: the default of the platform.
 
-The default of the platform is Numba where it is installed on macOS (the Cython build has no OpenMP there, see [known performance limits](performance_limits)), and Cython where the extension is compiled on all other systems. Without a compiled backend, it is numpy. The default never selects the PyTorch backend: the tuner selects it where it wins, or you force it with `VENTORUM_KERNEL=torch`.
+The default of the platform is Numba where it is installed on macOS (the Cython build has no OpenMP there, see [known performance limits](performance_limits)), and Cython where the extension is compiled on all other systems (else Numba). On macOS without Numba it is Cython. Without a compiled backend, it is numpy. The default never selects the PyTorch backend: the tuner selects it where it wins, or you force it with `VENTORUM_KERNEL=torch`.
 
 | Environment variable | Effect |
 | --- | --- |
@@ -65,5 +65,5 @@ When you give the number of cases in parallel, the kernel threads of each case a
 | `solver="llt"`, `solver="linear_llt"` | `solver="linear"` | Still work with a `FutureWarning` that names the new name. |
 
 :::{note}
-The PyTorch backend runs the verified kernels on the CPU or on a CUDA GPU (select it in the profile or force it with `VENTORUM_KERNEL=torch`). The tuner records the GPUs that it finds and the torch device of its run. The linear solve stays on the CPU.
+The PyTorch backend runs the verified kernels on the CPU or on a CUDA GPU (select it in the profile or force it with `VENTORUM_KERNEL=torch`). The tuner records the GPUs that it finds and the torch device of its run. With the PyTorch kernel backend the linear solve stays on the CPU; the GPU pipelines ([Run solves on the GPU](how_to_gpu)) solve on the GPU.
 :::
