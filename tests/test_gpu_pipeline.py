@@ -212,8 +212,8 @@ def test_gpu_nonlinear_lifting_line_equals_cpu(gpu_device, precision, tail, h, b
     ac = _aircraft(tail, _polar())
     st = vt.SolverSettings(solver_type="nonlinear", n_panels=24, spacing="cosine", tolerance=1e-9)
     alphas = np.radians(np.linspace(-4.0, 12.0, 9))
-    ref = _sweep(vt.NonlinearSolver(), ac, st, alphas, "cpu", h=h, beta=beta)
-    new = _sweep(vt.NonlinearSolver(), ac, st, alphas, "gpu", precision, h=h, beta=beta)
+    ref = _sweep(vt.NonlinearLLTSolver(), ac, st, alphas, "cpu", h=h, beta=beta)
+    new = _sweep(vt.NonlinearLLTSolver(), ac, st, alphas, "gpu", precision, h=h, beta=beta)
     _assert_close(ref, new, max(TOL[precision], 1e-8))
     assert [r.iterations for r in ref] == [r.iterations for r in new] or precision == "float32"
 
@@ -223,8 +223,8 @@ def test_gpu_nonlinear_lifting_line_past_stall_follows_the_cpu_branch(gpu_device
     ac = _aircraft(False, _polar(stall=True))
     st = vt.SolverSettings(solver_type="nonlinear", n_panels=20, spacing="cosine")
     alphas = np.radians(np.linspace(6.0, 18.0, 13))
-    ref = _sweep(vt.NonlinearSolver(), ac, st, alphas, "cpu")
-    new = _sweep(vt.NonlinearSolver(), ac, st, alphas, "gpu", "float64")
+    ref = _sweep(vt.NonlinearLLTSolver(), ac, st, alphas, "cpu")
+    new = _sweep(vt.NonlinearLLTSolver(), ac, st, alphas, "gpu", "float64")
     a = np.array([r.totals.CL for r in ref])
     b = np.array([r.totals.CL for r in new])
     assert np.max(np.abs(a - b)) <= 1e-5 * np.max(np.abs(a))
@@ -239,8 +239,8 @@ def test_gpu_vortex_lattice_equals_cpu(gpu_device, precision, tail, h, beta):
     ac = _aircraft(tail)
     st = vt.SolverSettings(solver_type="vlm", n_panels=16, n_chord=3, spacing="cosine")
     alphas = np.radians(np.linspace(-4.0, 12.0, 7))
-    ref = _sweep(vt.HorseshoeSolver(), ac, st, alphas, "cpu", h=h, beta=beta)
-    new = _sweep(vt.HorseshoeSolver(), ac, st, alphas, "gpu", precision, h=h, beta=beta)
+    ref = _sweep(vt.VortexLatticeSolver(), ac, st, alphas, "cpu", h=h, beta=beta)
+    new = _sweep(vt.VortexLatticeSolver(), ac, st, alphas, "gpu", precision, h=h, beta=beta)
     _assert_close(ref, new, TOL[precision])
 
 
@@ -254,7 +254,7 @@ def test_gpu_solver_options_equal_cpu(gpu_device, precision, kind):
     ignore the chordwise count. The bank (phi) tilts the ground plane, so
     the case is asymmetric and in ground effect.
     """
-    solver = {"linear": vt.LinearLLTSolver, "nonlinear": vt.NonlinearSolver, "vlm": vt.HorseshoeSolver}[kind]()
+    solver = {"linear": vt.LinearLLTSolver, "nonlinear": vt.NonlinearLLTSolver, "vlm": vt.VortexLatticeSolver}[kind]()
     ac = _aircraft(True, _polar() if kind == "nonlinear" else None)
     st = vt.SolverSettings(solver_type=kind, n_panels=16, n_chord=1 if kind == "vlm" else None,
                            wake_alignment="body", use_symmetry=False,
@@ -271,7 +271,7 @@ def test_gpu_solver_options_equal_cpu(gpu_device, precision, kind):
 @pytest.mark.gpu
 @pytest.mark.parametrize("kind", ["linear", "nonlinear", "vlm"])
 def test_gpu_single_solve_equals_cpu(gpu_device, kind):
-    solver = {"linear": vt.LinearLLTSolver, "nonlinear": vt.NonlinearSolver, "vlm": vt.HorseshoeSolver}[kind]()
+    solver = {"linear": vt.LinearLLTSolver, "nonlinear": vt.NonlinearLLTSolver, "vlm": vt.VortexLatticeSolver}[kind]()
     ac = _aircraft(True, _polar() if kind == "nonlinear" else None)
     st = vt.SolverSettings(solver_type=kind, n_panels=20, n_chord=3 if kind == "vlm" else None)
     cond = vt.FlightCondition(V_inf=30.0, alpha=np.radians(5.0))
@@ -335,7 +335,7 @@ def test_gpu_iterative_solves_equal_cpu(gpu_device, monkeypatch, kind, precision
     from ventorum.gpu import engine
 
     monkeypatch.setattr(engine, "REF_MIN_N", 0)   # the iterative solve also for small systems
-    solver = {"linear": vt.LinearLLTSolver, "nonlinear": vt.NonlinearSolver, "vlm": vt.HorseshoeSolver}[kind]()
+    solver = {"linear": vt.LinearLLTSolver, "nonlinear": vt.NonlinearLLTSolver, "vlm": vt.VortexLatticeSolver}[kind]()
     ac = _aircraft(True, _polar() if kind == "nonlinear" else None)
     st = vt.SolverSettings(solver_type=kind, n_panels=20, n_chord=3 if kind == "vlm" else None, tolerance=1e-9)
     alphas = np.radians(np.linspace(-4.0, 12.0, 9))
@@ -349,7 +349,7 @@ def test_gpu_iterative_solves_equal_cpu(gpu_device, monkeypatch, kind, precision
 def test_gpu_polars_follow_a_change_of_the_airfoils(gpu_device, kind):
     # The GPU keeps the polars of a lattice; a change of an airfoil (on the
     # same lattice object) must reach the next solve, as on the CPU.
-    solver = {"linear": vt.LinearLLTSolver, "nonlinear": vt.NonlinearSolver}[kind]()
+    solver = {"linear": vt.LinearLLTSolver, "nonlinear": vt.NonlinearLLTSolver}[kind]()
     lin = vt.LinearAirfoil(Cd0=0.008, Cm0=-0.04)
     tab = _polar()
     ac = _aircraft(False, tab if kind == "nonlinear" else lin)

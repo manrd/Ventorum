@@ -209,7 +209,7 @@ def test_alpha_sweep_of_vlm_keeps_its_results(n_jobs):
     st = vt.SolverSettings(solver_type="vlm", n_chord=4)
     cond = vt.FlightCondition(V_inf=30.0)
     for r, s in zip(alpha_sweep(ac, cond, st, ALPHAS, n_jobs=n_jobs),
-                    vt.HorseshoeSolver().solve_sweep(ac, cond, st, ALPHAS)):
+                    vt.VortexLatticeSolver().solve_sweep(ac, cond, st, ALPHAS)):
         _assert_same_result(r, s)
 
 
@@ -244,7 +244,7 @@ def test_probe_lattices_come_from_the_cache():
     ac.compute_reference_values()
     st = vt.SolverSettings(solver_type="vlm")
     cond = vt.FlightCondition(V_inf=30.0, alpha=np.radians(4.0), h=1.0)
-    solver = vt.HorseshoeSolver()
+    solver = vt.VortexLatticeSolver()
     assert solver.resolve_n_chord(ac, st, cond, None) == solver.resolve_n_chord(ac, st, cond, None)
     assert estimate_panels(ac, st) == estimate_panels(ac, st) == 16 * 4
     assert len(lattice_cache._cache) == 2   # the probe (one chordwise panel) and the four-panel lattice

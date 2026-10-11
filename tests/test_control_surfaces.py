@@ -88,7 +88,7 @@ def test_zero_deflection_full_span_gives_the_same_bits():
     solvers = [
         ("vlm", vt.VortexLatticeSolver(), vt.SolverSettings(solver_type="vlm", n_panels=8, n_chord=4, chord_spacing="uniform")),
         ("linear", vt.LinearLLTSolver(), vt.SolverSettings(solver_type="linear", n_panels=8)),
-        ("nonlinear", vt.NonlinearSolver(), vt.SolverSettings(solver_type="nonlinear", n_panels=8)),
+        ("nonlinear", vt.NonlinearLLTSolver(), vt.SolverSettings(solver_type="nonlinear", n_panels=8)),
     ]
 
     for name, s_inst, st in solvers:
@@ -182,8 +182,8 @@ def test_section_mode_equals_shifted_airfoil():
     )
 
     st_nl = vt.SolverSettings(solver_type="nonlinear", n_panels=10)
-    r_ctrl_nl = vt.NonlinearSolver().solve(wing_ctrl_tab, cond, st_nl)
-    r_shift_nl = vt.NonlinearSolver().solve(wing_shifted_tab, cond, st_nl)
+    r_ctrl_nl = vt.NonlinearLLTSolver().solve(wing_ctrl_tab, cond, st_nl)
+    r_shift_nl = vt.NonlinearLLTSolver().solve(wing_shifted_tab, cond, st_nl)
 
     for field_name in ("CL", "CDi", "Cm", "Cl", "Cn", "CY"):
         v_c = getattr(r_ctrl_nl.totals, field_name)
@@ -833,7 +833,7 @@ def test_gpu_control_surfaces_equal_cpu(gpu_device, precision, solver_type, cont
     solver_cls = {
         "vlm": vt.VortexLatticeSolver,
         "linear": vt.LinearLLTSolver,
-        "nonlinear": vt.NonlinearSolver,
+        "nonlinear": vt.NonlinearLLTSolver,
     }[solver_type]
     solver = solver_cls()
 
@@ -950,7 +950,7 @@ _MIRROR_SOLVERS = {
     "vlm4": (vt.VortexLatticeSolver, dict(solver_type="vlm", n_chord=4)),
     "vlm1": (vt.VortexLatticeSolver, dict(solver_type="vlm", n_chord=1)),
     "linear": (vt.LinearLLTSolver, dict(solver_type="linear")),
-    "nonlinear": (vt.NonlinearSolver, dict(solver_type="nonlinear")),
+    "nonlinear": (vt.NonlinearLLTSolver, dict(solver_type="nonlinear")),
 }
 
 

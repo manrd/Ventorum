@@ -20,7 +20,7 @@ from ventorum.geometry.discretization import (
     get_spacing,
 )
 from ventorum.geometry.processing import discretize_surface, discretize_aircraft_surfaces
-from ventorum.solvers.horseshoe import HorseshoeSolver
+from ventorum.solvers.horseshoe import VortexLatticeSolver
 from ventorum.core.config import aircraft_to_json, aircraft_from_json
 
 
@@ -218,7 +218,7 @@ def test_discretize_aircraft_surfaces_with_proportional_and_auto():
 
 
 def test_horseshoe_solver_with_auto_and_proportional():
-    """Verify HorseshoeSolver end-to-end execution with auto-spacing and proportional allocation."""
+    """Verify VortexLatticeSolver end-to-end execution with auto-spacing and proportional allocation."""
     main_wing = vt.LiftingSurface(
         name="Wing",
         semi_span=1.5,
@@ -236,7 +236,7 @@ def test_horseshoe_solver_with_auto_and_proportional():
     ac = vt.Aircraft(surfaces=[main_wing, v_tail])
     cond = vt.FlightCondition(V_inf=30.0, alpha=np.radians(4.0))
 
-    solver = HorseshoeSolver()
+    solver = VortexLatticeSolver()
     settings = vt.SolverSettings(
         n_panels=40,
         spacing="auto",

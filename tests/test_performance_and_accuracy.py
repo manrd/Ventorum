@@ -12,9 +12,9 @@ import numpy as np
 
 import ventorum as vt
 from ventorum.geometry.processing import discretize_surface
-from ventorum.solvers.horseshoe import HorseshoeSolver
+from ventorum.solvers.horseshoe import VortexLatticeSolver
 from ventorum.solvers.fourier import FourierSolver
-from ventorum.solvers.nonlinear import NonlinearSolver
+from ventorum.solvers.nonlinear import NonlinearLLTSolver
 
 
 def test_vlm_prebuilt_lattice_equivalence():
@@ -30,7 +30,7 @@ def test_vlm_prebuilt_lattice_equivalence():
     )
     ac = vt.Aircraft(surfaces=[wing])
     ac.compute_reference_values()
-    solver = HorseshoeSolver()
+    solver = VortexLatticeSolver()
     settings = vt.SolverSettings(n_panels=30)
     lattice = solver.build(ac, settings, vt.FlightCondition())
 
@@ -145,7 +145,7 @@ def test_fourier_solve_sweep_machine_precision():
 
 
 def test_nonlinear_prebuilt_lattice_equivalence():
-    """NonlinearSolver.solve_lattice matches solve down to machine precision."""
+    """NonlinearLLTSolver.solve_lattice matches solve down to machine precision."""
     alpha_data = np.linspace(np.radians(-10), np.radians(20), 30)
     cl_data = 2 * np.pi * alpha_data
     cd_data = 0.01 + 0.05 * alpha_data**2
@@ -163,7 +163,7 @@ def test_nonlinear_prebuilt_lattice_equivalence():
     cond = vt.FlightCondition(alpha=np.radians(3.5), V_inf=30.0)
     settings = vt.SolverSettings(solver_type="nonlinear", n_panels=20, max_iterations=60)
 
-    solver = NonlinearSolver()
+    solver = NonlinearLLTSolver()
     res_direct = solver.solve(ac, cond, settings)
     lattice = solver.build(ac, settings, cond)
     res_lat = solver.solve_lattice(lattice, cond, settings, ac.S_ref, ac.b_ref, ac.c_ref)
@@ -196,7 +196,7 @@ def test_discretized_surface_cache_integrity():
 
 
 def test_horseshoe_solve_sweep_machine_precision():
-    """Verify HorseshoeSolver.solve_sweep produces machine-precision identical results to serial solves."""
+    """Verify VortexLatticeSolver.solve_sweep produces machine-precision identical results to serial solves."""
     wing = vt.LiftingSurface(
         name="HorseshoeWing",
         semi_span=5.0,
@@ -210,7 +210,7 @@ def test_horseshoe_solve_sweep_machine_precision():
     settings = vt.SolverSettings(solver_type="vlm", n_panels=25)
     alphas = np.radians(np.linspace(-4.0, 10.0, 8))
 
-    solver = HorseshoeSolver()
+    solver = VortexLatticeSolver()
     # Serial reference
     res_serial = [
         solver.solve(ac, vt.FlightCondition(V_inf=45.0, alpha=float(a)), settings)
@@ -229,7 +229,7 @@ def test_horseshoe_solve_sweep_machine_precision():
 
 
 def test_nonlinear_solve_sweep_machine_precision():
-    """Verify NonlinearSolver.solve_sweep matches serial solves down to machine precision."""
+    """Verify NonlinearLLTSolver.solve_sweep matches serial solves down to machine precision."""
     alpha_data = np.linspace(np.radians(-10), np.radians(20), 30)
     cl_data = 2 * np.pi * (alpha_data + np.radians(1.0))
     cd_data = 0.009 + 0.04 * alpha_data**2
@@ -248,7 +248,7 @@ def test_nonlinear_solve_sweep_machine_precision():
     settings = vt.SolverSettings(solver_type="nonlinear", n_panels=20, max_iterations=50)
     alphas = np.radians(np.linspace(-2.0, 8.0, 6))
 
-    solver = NonlinearSolver()
+    solver = NonlinearLLTSolver()
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", UserWarning)
         res_serial = [

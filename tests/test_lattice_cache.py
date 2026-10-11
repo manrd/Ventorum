@@ -67,8 +67,8 @@ def test_repeated_solve_gives_the_same_bits():
     lattice_cache.clear()
     cond = vt.FlightCondition(V_inf=30.0, alpha=np.radians(4.0))
     st = vt.SolverSettings(solver_type="nonlinear")
-    r1 = vt.NonlinearSolver().solve(_wing(), cond, st)
-    r2 = vt.NonlinearSolver().solve(_wing(), cond, st)
+    r1 = vt.NonlinearLLTSolver().solve(_wing(), cond, st)
+    r2 = vt.NonlinearLLTSolver().solve(_wing(), cond, st)
     assert r1.totals.CL == r2.totals.CL and r1.totals.CDi == r2.totals.CDi and r1.totals.Cm == r2.totals.Cm
 
 

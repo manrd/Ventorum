@@ -13,7 +13,7 @@ import numpy as np
 import pytest
 
 import ventorum as vt
-from ventorum.solvers.linear import LinearLLTSolver, LinearSolver
+from ventorum.solvers.linear import LinearLLTSolver
 
 
 def test_linear_llt_elliptic_wing_exact():
@@ -83,7 +83,7 @@ def test_linear_llt_airfoil_properties():
     cond = vt.FlightCondition(V_inf=50.0, alpha=np.radians(2.0))
     sett = vt.SolverSettings(solver_type="linear", n_panels=40, spacing="cosine")
 
-    res_linear = LinearSolver().solve(ac, cond, sett)
+    res_linear = LinearLLTSolver().solve(ac, cond, sett)
     res_fourier = vt.FourierSolver().solve(ac, cond, sett)
 
     # Same wing, same section data: CL and CDi agree with the Fourier

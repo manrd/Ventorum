@@ -89,7 +89,7 @@ where $\mathbf v_{ij}$ [1/m] is the velocity at $\mathbf P_i$ from the horseshoe
 
 ## Implementation
 
-- `ventorum.solvers.horseshoe.HorseshoeSolver` (alias `VortexLatticeSolver`), on `ventorum.solvers.lattice_base.LatticeSolver` (`resolve_n_chord`, `build`, `solve`, `solve_sweep`, `solve_batch`).
+- `ventorum.solvers.horseshoe.VortexLatticeSolver`, on `ventorum.solvers.lattice_base.LatticeSolver` (`resolve_n_chord`, `build`, `solve`, `solve_sweep`, `solve_batch`).
 - `ventorum.geometry.lattice.build_lattice` (strips, panels, control points, normals, core groups); `ventorum.geometry.discretization` (spacing functions).
 - `ventorum.solvers.core.assemble_vlm`, `solve_vlm`, `solve_vlm_batch`.
 - In a sweep out of ground effect, the influence of the bound vortices and the chordwise legs does not change with the angle and is computed once (`VortexLattice.kernel_cache`); only the wake legs are computed for each angle.

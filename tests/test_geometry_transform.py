@@ -98,7 +98,7 @@ def test_rotation_order():
 def test_input_not_changed():
     """Verify input lattice is strictly unmodified after transform_lattice."""
     ac = _wing_and_tail()
-    solver = vt.HorseshoeSolver()
+    solver = vt.VortexLatticeSolver()
     cond = vt.FlightCondition(V_inf=30.0, alpha=np.radians(4.0))
     st = vt.SolverSettings(n_panels=8, n_chord=3)
     lattice = solver.build(ac, st, cond)
@@ -139,7 +139,7 @@ def test_input_not_changed():
 def test_refuse_non_rotation():
     """Verify non-orthonormal and reflection matrices raise ValueError with informative messages."""
     ac = _wing_and_tail()
-    solver = vt.HorseshoeSolver()
+    solver = vt.VortexLatticeSolver()
     cond = vt.FlightCondition(V_inf=30.0, alpha=np.radians(4.0))
     lattice = solver.build(ac, vt.SolverSettings(n_panels=8, n_chord=2), cond)
 
@@ -168,7 +168,7 @@ def test_same_force_in_own_axes():
     ac = _wing_and_tail()
     ac.compute_reference_values()
     settings = vt.SolverSettings(n_panels=8, n_chord=3)
-    solver = vt.HorseshoeSolver()
+    solver = vt.VortexLatticeSolver()
 
     alpha_orig = np.radians(4.0)
     beta_orig = 0.0
@@ -241,7 +241,7 @@ def test_pitch_keeps_symmetry():
     ac = _wing_and_tail()
     ac.compute_reference_values()
     cond = vt.FlightCondition(V_inf=30.0, alpha=np.radians(5.0))
-    solver = vt.HorseshoeSolver()
+    solver = vt.VortexLatticeSolver()
 
     lat = solver.build(ac, vt.SolverSettings(n_panels=8, n_chord=3), cond)
     assert lat.can_fold_symmetry() is True
@@ -274,7 +274,7 @@ def test_roll_breaks_symmetry():
     """Verify non-pitch rotations or y-translations deactivate symmetry folding."""
     ac = _wing_and_tail()
     cond = vt.FlightCondition(V_inf=30.0, alpha=np.radians(5.0))
-    solver = vt.HorseshoeSolver()
+    solver = vt.VortexLatticeSolver()
     lat = solver.build(ac, vt.SolverSettings(n_panels=8, n_chord=3), cond)
     assert lat.can_fold_symmetry() is True
 

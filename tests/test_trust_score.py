@@ -211,7 +211,7 @@ def test_batch_trust_statistics_give_the_same_trust_score():
                           sections=[WingSection(y_frac=0.0, chord=0.6), WingSection(y_frac=1.0, chord=0.4)])
     ac = vt.Aircraft(surfaces=[wing, tail])
     st = vt.SolverSettings(solver_type="vlm", n_panels=12, n_chord=2)
-    res = vt.HorseshoeSolver().solve_sweep(ac, FlightCondition(V_inf=25.0), st, np.radians([-2.0, 4.0, 14.0]))
+    res = vt.VortexLatticeSolver().solve_sweep(ac, FlightCondition(V_inf=25.0), st, np.radians([-2.0, 4.0, 14.0]))
     lat = res[0].details["lattice"]
     arrays = {}
     for name in ("gamma", "Cl", "Cd_i", "alpha_eff", "alpha_i", "local_lift", "Cm_section"):

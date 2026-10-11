@@ -212,7 +212,7 @@ def test_lifting_line_moment_about_quarter_chord_is_cm0():
         res = vt.LinearLLTSolver().solve(
             w, vt.FlightCondition(alpha=np.radians(5.0)),
             vt.SolverSettings(solver_type=solver, n_panels=20), ref_point=np.array([0.25, 0.0, 0.0]),
-        ) if solver == "linear" else vt.NonlinearSolver().solve(
+        ) if solver == "linear" else vt.NonlinearLLTSolver().solve(
             w, vt.FlightCondition(alpha=np.radians(5.0)),
             vt.SolverSettings(solver_type=solver, n_panels=20), ref_point=np.array([0.25, 0.0, 0.0]),
         )

@@ -18,6 +18,9 @@ The kernel backends (numpy, Numba, Cython, PyTorch) are measured by the tuner pe
 | --- | --- | --- |
 | `solver="horseshoe"`, `solver="lattice"` | `solver="vlm"` | Still work with a `FutureWarning` that names the new name. |
 | `solver="llt"`, `solver="linear_llt"` | `solver="linear"` | Still work with a `FutureWarning` that names the new name. |
+| `HorseshoeSolver` | `VortexLatticeSolver` | Still works with a `FutureWarning` that names the new name. Removed in 1.0. |
+| `LinearSolver` | `LinearLLTSolver` | Still works with a `FutureWarning` that names the new name. Removed in 1.0. |
+| `NonlinearSolver` | `NonlinearLLTSolver` | Still works with a `FutureWarning` that names the new name. Removed in 1.0. |
 
 ## Scope
 

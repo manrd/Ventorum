@@ -81,7 +81,7 @@ A linear airfoil has the constants $a_0$, $\alpha_{L0}$, $C_{d0}$ and $C_{m0}$. 
 
 ## Implementation
 
-- `ventorum.solvers.linear.LinearLLTSolver` and `ventorum.solvers.nonlinear.NonlinearSolver` (both on `ventorum.solvers.lattice_base.LatticeSolver`).
+- `ventorum.solvers.linear.LinearLLTSolver` and `ventorum.solvers.nonlinear.NonlinearLLTSolver` (both on `ventorum.solvers.lattice_base.LatticeSolver`).
 - `ventorum.solvers.core`: `assemble_llt_linear`, `solve_llt_linear`, `solve_llt_linear_batch` (all angles of a sweep in one kernel call and one call of the dense solver), `solve_llt_nonlinear`.
 - The lattice is built with `collocation="llt"` (`ventorum.geometry.lattice.build_lattice`): one chordwise panel per strip and the control point on the bound vortex.
 - The GPU pipelines (`ventorum.gpu`) solve the same equations in float32 or float64.
