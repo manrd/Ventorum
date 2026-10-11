@@ -13,6 +13,7 @@ A solve has four steps:
 from __future__ import annotations
 
 import dataclasses
+import math
 import time
 import warnings
 from typing import Literal
@@ -320,6 +321,23 @@ class LatticeSolver(BaseSolver):
             lattice.geom_cache[key] = value
         return value
 
+    @staticmethod
+    def _cn_stability(totals, condition: FlightCondition, b_ref: float, c_ref: float) -> float | None:
+        """Return the near-field ``Cn`` in stability axes (the axes of ``Cn_trefftz``), or None.
+
+        None when the result has no ``Cn_trefftz`` or the reference lengths
+        [m] are not positive. The value is the third row of the body to
+        stability map of :func:`ventorum.core.axes.transform_moments`:
+        ``Cn_s = -sin(alpha) Cl + cos(alpha) Cn``. Cl and Cn both use
+        ``b_ref``, so the reference lengths cancel (see
+        :mod:`ventorum.core.axes`). The closed form avoids the matrix set-up
+        of ``transform_moments`` on every case of a batch.
+        """
+        if totals.Cn_trefftz is None or not (b_ref and c_ref and b_ref > 0.0 and c_ref > 0.0):
+            return None
+        a = float(condition.alpha)
+        return -math.sin(a) * float(totals.Cl) + math.cos(a) * float(totals.Cn)
+
     def _case_result(
         self,
         lattice: VortexLattice,
@@ -393,6 +411,10 @@ class LatticeSolver(BaseSolver):
                               if c_ref else 1.0),
             spanwise_stats=spanwise_stats,
             polar=polar,
+            CY=totals.CY,
+            CY_farfield=totals.CY_farfield,
+            Cn_stability=self._cn_stability(totals, condition, b_ref, c_ref),
+            Cn_trefftz=totals.Cn_trefftz,
         )
         res = SolverResult(
             spanwise=loads.spanwise,

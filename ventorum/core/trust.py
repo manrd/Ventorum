@@ -61,6 +61,61 @@ _GAMMA_R_AIR = 1.4 * 287.05287   # Ratio of specific heats times the gas constan
 LOW_AR_SIDE_EDGE_AR = 2.0
 LOW_AR_SIDE_EDGE_ALPHA_DEG = 10.0
 
+#: Near-field and far-field lateral comparison: relative limit [-] and the
+#: absolute floors of CY and Cn [-]. A warning needs both limits passed.
+NEAR_FAR_RELATIVE = 0.05
+NEAR_FAR_FLOOR_CY = 0.001
+NEAR_FAR_FLOOR_CN = 0.0002
+
+
+def near_far_lateral_warnings(
+    CY: float | None = None,
+    CY_farfield: float | None = None,
+    Cn: float | None = None,
+    Cn_trefftz: float | None = None,
+) -> list[str]:
+    """Return the warnings of the near-field and far-field lateral comparison.
+
+    The near-field value must be in the axes of the far-field value: ``CY``
+    in wind axes (the side force normal to the free stream) and ``Cn`` in
+    stability axes. For each coefficient, the rule warns when
+    ``|near - far| > 0.05 |far|`` and ``|near - far|`` is larger than the
+    floor (0.001 for CY, 0.0002 for Cn). A pair with a None or a non-finite
+    value gives no warning.
+
+    Parameters
+    ----------
+    CY : float or None
+        Near-field side-force coefficient in wind axes [-].
+    CY_farfield : float or None
+        Side-force coefficient of the Trefftz plane in wind axes [-].
+    Cn : float or None
+        Near-field yawing-moment coefficient in stability axes [-].
+    Cn_trefftz : float or None
+        Yawing-moment coefficient of the Trefftz-plane induced drag in
+        stability axes [-].
+
+    Returns
+    -------
+    list of str
+        One warning per coefficient that fails the rule (empty if none).
+    """
+    out: list[str] = []
+    pairs = (("CY", "CY_farfield", "wind axes", CY, CY_farfield, NEAR_FAR_FLOOR_CY),
+             ("Cn", "Cn_trefftz", "stability axes", Cn, Cn_trefftz, NEAR_FAR_FLOOR_CN))
+    for name, far_name, axes, near, far, floor in pairs:
+        if near is None or far is None or not (_is_finite(near) and _is_finite(far)):
+            continue
+        near_v, far_v = float(near), float(far)
+        diff = abs(near_v - far_v)
+        if diff > NEAR_FAR_RELATIVE * abs(far_v) and diff > floor:
+            out.append(
+                f"Near field and far field do not agree for {name} ({axes}): near field {near_v:.6g}, "
+                f"{far_name} {far_v:.6g}, difference {diff:.3g}. A probable cause is the side-edge forces, which "
+                "the transpiration model does not carry (see the theory manual, forces and moments)."
+            )
+    return out
+
 
 def isa_speed_of_sound(rho: float) -> float:
     """Return the ISA speed of sound [m/s] at the air density *rho* [kg/m^3].
@@ -284,6 +339,10 @@ def evaluate_aerodynamic_trust(
     max_chord_over_c: float = 1.0,
     spanwise_stats: dict | None = None,
     polar: dict | None = None,
+    CY: float | None = None,
+    CY_farfield: float | None = None,
+    Cn_stability: float | None = None,
+    Cn_trefftz: float | None = None,
 ) -> TrustScore:
     """Evaluate the validity of a solution.
 
@@ -330,6 +389,15 @@ def evaluate_aerodynamic_trust(
         stall angle of each polar. When every strip has a polar with a
         stall, the fixed limits of linear sections (Cl 1.55 and 16 deg) are
         not used.
+    CY, CY_farfield : float or None
+        Near-field side-force coefficient and the far-field value of the
+        Trefftz plane, both in wind axes [-].
+    Cn_stability, Cn_trefftz : float or None
+        Near-field yawing-moment coefficient in stability axes and the
+        yawing moment of the Trefftz-plane induced drag (stability axes)
+        [-]. When the near field and the far field do not agree
+        (:func:`near_far_lateral_warnings`), the result gets a warning. The
+        comparison is a diagnostic: it does not change the score.
 
     A result with a non-finite coefficient never keeps a trust level above
     LOW: it gets the penalty ``non_finite_result`` and the warning
@@ -567,6 +635,9 @@ def evaluate_aerodynamic_trust(
                 f"Spanwise circulation oscillates ({n_extrema} local extrema): probable numerical problem."
             )
     penalties["numerical"] = num_pen
+
+    # 7. Near-field and far-field lateral values (a warning only, no penalty) -------------------
+    warnings.extend(near_far_lateral_warnings(CY, CY_farfield, Cn_stability, Cn_trefftz))
 
     for msg in notes or ():
         if msg not in warnings:
