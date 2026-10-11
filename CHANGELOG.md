@@ -72,6 +72,16 @@ a minor version can change a public interface.
 
 ### Changed
 
+- **Breaking (agent tools and MCP):** the geometry argument has no `anyOf` now, because some MCP
+  clients drop the keys of an `anyOf` object argument (a multi-surface `wing` arrived empty). Each
+  tool that takes a geometry takes exactly one of `wing` (one surface) or `aircraft` (several
+  surfaces, with `surfaces` and the reference values). A call with both or neither is refused with
+  `invalid_input`. A `wing` with `surfaces` or a reference value is refused with a hint to
+  `aircraft`. Each `ventorum_batch_evaluate` candidate is an object with exactly one of the keys
+  `wing` or `aircraft`. The Python tool functions take `aircraft=None` after `wing`.
+- Agent tools: a refusal of an unknown key says where the key belongs when the same tool accepts
+  it at another place (for example `'solver' belongs in 'settings'`), and new hints cover common
+  invented keys (`x_start`, `position`, `cg`, `mach`, `tail` and others).
 - Breaking: `transform_moments` takes the keyword-only arguments `b_ref` and `c_ref` [m] (required).
   The new function `moment_axes_matrix` returns the 3 x 3 matrix of a change of moment axes.
   `SolverResult` has the fields `b_ref` and `c_ref` [m]; every solver sets them, and
