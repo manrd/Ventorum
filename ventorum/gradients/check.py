@@ -9,11 +9,26 @@ below 1/10 of the tolerance.
 
 from __future__ import annotations
 
+import dataclasses
 from typing import Any
 
 import numpy as np
 
-from ventorum.core.datatypes import FlightCondition  # noqa: F401 - re-exported name check
+# Absolute fallback steps of the section properties when the base value is
+# zero (or very small): a0 [1/rad], alpha_L0 [rad], Cd0 [-], Cm0 [-]. They
+# are 1e-4 of a typical magnitude of each property.
+_SECTION_STEP_FLOOR = {"a0": 1e-4 * 2.0 * np.pi, "alpha_L0": 1e-4, "Cd0": 1e-6, "Cm0": 1e-5}
+
+# Factors of the step ladders. The node step is 1e-3 of the smallest core
+# radius of the lattice (one step); the other steps are relative to the
+# base step of the input. Each component uses the step with the smallest
+# error bound (the larger of the Richardson estimate and the round-off).
+_NODE_STEP_FACTORS = (1.0,)
+_STEP_FACTORS = (1.0, 0.3, 0.1)
+
+# Zero-derivative check: a reference that is zero within this factor times
+# its error bound cannot be compared relatively (see check_gradients).
+_ZERO_FACTOR = 10.0
 
 
 def _production_scalars(geometry: Any, condition: Any, settings: Any, axes: str) -> dict[str, float]:
@@ -35,29 +50,46 @@ def _production_scalars(geometry: Any, condition: Any, settings: Any, axes: str)
     return out
 
 
-def _richardson(
-    get: Any,
-    x0: float,
-    h: float,
-    rtol: float,
-) -> tuple[float, float, bool]:
-    """Return (FD(h/2) extrapolated value, error estimate, usable).
+def _richardson(get: Any, x0: float, h: float, outs: tuple[str, ...],
+                eps: float) -> dict[str, tuple[float, float, float]]:
+    """Return per output (reference, error estimate, round-off level).
 
-    Central differences with steps h and h/2; the estimate is
-    |FD(h) - FD(h/2)| / 3. Usable when the estimate is below rtol/10 of
-    the reference size.
+    Central differences with steps h and h/2 of the vector function *get*
+    (a dict of outputs). The reference is (4 FD(h/2) - FD(h)) / 3, the
+    estimate |FD(h) - FD(h/2)| / 3, and the round-off level of the
+    differences eps * max|f| / h (*eps* is the machine epsilon of the
+    production solve).
     """
     f_p_h = get(x0 + h)
     f_m_h = get(x0 - h)
     f_p_h2 = get(x0 + h / 2.0)
     f_m_h2 = get(x0 - h / 2.0)
-    fd_h = (f_p_h - f_m_h) / (2.0 * h)
-    fd_h2 = (f_p_h2 - f_m_h2) / h
-    est = abs(fd_h - fd_h2) / 3.0
-    ref = (4.0 * fd_h2 - fd_h) / 3.0
-    scale = max(abs(ref), 1e-300)
-    usable = bool(np.isfinite(ref) and np.isfinite(est) and est <= 0.1 * rtol * scale)
-    return float(ref), float(est), usable
+    out = {}
+    for o in outs:
+        fd_h = (f_p_h[o] - f_m_h[o]) / (2.0 * h)
+        fd_h2 = (f_p_h2[o] - f_m_h2[o]) / h
+        est = abs(fd_h - fd_h2) / 3.0
+        ref = (4.0 * fd_h2 - fd_h) / 3.0
+        size = max(abs(f_p_h[o]), abs(f_m_h[o]), abs(f_p_h2[o]), abs(f_m_h2[o]))
+        out[o] = (float(ref), float(est), float(eps * size / (0.5 * h)))
+    return out
+
+
+def _ladder(get: Any, x0: float, h: float, factors: tuple[float, ...], outs: tuple[str, ...],
+            eps: float) -> dict[str, list[tuple[float, float, float, float]]]:
+    """Return per output the Richardson candidates (step, ref, est, round-off) of the steps h * factors."""
+    out: dict[str, list[tuple[float, float, float, float]]] = {o: [] for o in outs}
+    fds = [(h * f, _richardson(get, x0, h * f, outs, eps)) for f in factors]
+    for o in outs:
+        for k, (step, fd) in enumerate(fds):
+            ref, est, rnd = fd[o]
+            if len(fds) > 1:
+                # Convergence: the Richardson value of a neighbour step must
+                # agree; the spread to the nearer neighbour joins the bound.
+                spread = min(abs(ref - fds[j][1][o][0]) for j in (k - 1, k + 1) if 0 <= j < len(fds))
+                rnd = max(rnd, spread)
+            out[o].append((step, ref, est, rnd))
+    return out
 
 
 def check_gradients(
@@ -96,10 +128,50 @@ def check_gradients(
     Returns
     -------
     dict
-        ``"pass"`` (bool), ``"compared"``, ``"skipped"`` and per-component
-        details with the reference value, the error estimate, the relative
-        error and the verdict.
+        ``"pass"`` (bool), ``"compared"``, ``"skipped"``, ``"groups"``
+        (per input group the compared and skipped counts),
+        ``"reasons"`` (why the check failed, empty when it passed) and
+        ``"details"`` per component with the reference value, the error
+        estimate, the step [unit of the input], the relative error, the
+        mode and the verdict.
+
+    Notes
+    -----
+    The reference of each component is the Richardson value of decision 10
+    of the gradient method: central differences with steps h and h/2, with
+    the error estimate |FD(h) - FD(h/2)| / 3. The error bound of a
+    reference is the larger of the estimate and the round-off of the
+    differences (machine epsilon of the production solve times the output
+    magnitude over the step); with a step ladder, the spread to the
+    Richardson value of the neighbour step joins the bound.
+
+    * A component with an error bound below rtol/10 of its reference is
+      compared relatively: it passes when |grad - ref| <= rtol |ref|.
+    * The scale S of an input component is the largest resolved reference
+      of the outputs for that input (else the largest output magnitude per
+      unit input). A resolved component below rtol S has no relative scale
+      of its own in the precision of the gradient (it is the difference of
+      larger terms); it passes when |grad - ref| <= rtol S (mode
+      ``"column"``).
+    * A component whose reference is zero within 10 times its error bound
+      is a zero derivative (for example dCL/drho). It passes when |grad|
+      is below the larger of that bound and rtol S (mode ``"zero"``).
+    * Every other component is skipped.
+
+    The node step is 1e-3 of the smallest core radius of the lattice. A
+    larger step crosses the core-radius length scale, where the
+    differences do not converge. The other inputs use the steps 1, 0.3 and
+    0.1 times the base step (1e-4 of the base value, angles 1e-4 rad, with
+    an absolute floor per section property for a zero base value); each
+    component uses the step with the smallest error bound.
+
+    The check fails when a component fails, and also when an input group
+    (each scalar input, ``"sections"``, ``"reference"``, ``"nodes"``) has
+    no compared component: such a group is not verified. With a float32
+    production solve (the GPU in float32) the differences do not resolve
+    the node directions, and the check reports that group.
     """
+    import ventorum as vt
     from ventorum.core.datatypes import Aircraft, LiftingSurface, SolverSettings
     from ventorum.gradients.adjoint import _check_names, gradients
 
@@ -109,38 +181,66 @@ def check_gradients(
     axes = "body"
     grad_res = gradients(ac, condition, st, outputs=outs, wrt=ins, axes=axes)
     jac = grad_res.jacobian
+    base_res = vt.analyze(ac.clone(), condition, st.clone())
+    prec = str(base_res.details.get("precision", "float64"))
+    eps = float(np.finfo(np.float32 if prec == "float32" else np.float64).eps)
     rng = np.random.default_rng(seed)
     details: dict[str, Any] = {}
-    n_compared = 0
-    n_skipped = 0
+    groups: dict[str, dict[str, int]] = {}
     ok_all = True
 
-    def _record(key: str, grad: float, ref: float, est: float, usable: bool) -> None:
-        nonlocal n_compared, n_skipped, ok_all
-        scale = max(abs(ref), 1e-300)
-        if not usable:
-            n_skipped += 1
-            details[key] = {"grad": float(grad), "ref": float(ref), "est": float(est),
-                            "rel_err": None, "pass": None, "compared": False}
-            return
-        rel = abs(grad - ref) / scale
-        # Relative gate per D-13, with an absolute floor at 1e-3 of the
-        # tolerance: an exactly-zero derivative (for example dCL/drho, or a
-        # tiny derivative like dCD/dbeta) cannot be resolved relatively; the
-        # finite differences only amplify production round-off there, and the
-        # float32 partials carry absolute noise around 1e-7.
-        passed = bool(rel <= rtol or abs(grad - ref) <= 1e-3 * rtol)
-        n_compared += 1
-        if not passed:
-            ok_all = False
-        details[key] = {"grad": float(grad), "ref": float(ref), "est": float(est),
-                        "rel_err": float(rel), "pass": passed, "compared": True}
+    f0 = _production_scalars(ac, condition, st, axes)
+
+    def _record(group: str, suffix: str, grads: dict[str, float],
+                fd: dict[str, list[tuple[float, float, float, float]]], x_scale: float) -> None:
+        """Record the components of all outputs for one input component.
+
+        *fd* holds per output the candidates (step, ref, est, round-off);
+        *x_scale* is the magnitude of the input [unit of the input].
+        """
+        nonlocal ok_all
+        cnt = groups.setdefault(group, {"compared": 0, "skipped": 0})
+        pick = {}
+        for o in outs:
+            h, ref, est, rnd = min(fd[o], key=lambda c: max(c[2], c[3]) / max(abs(c[1]), 1e-300))
+            err = max(est, rnd)
+            resolved = bool(np.isfinite(ref) and np.isfinite(err) and ref != 0.0
+                            and err <= 0.1 * rtol * abs(ref))
+            pick[o] = (h, ref, est, err, resolved)
+        # Scale of the column: the largest resolved reference of the outputs,
+        # else the output magnitude per unit input.
+        scale = max((abs(v[1]) for v in pick.values() if v[4]), default=0.0)
+        if scale == 0.0:
+            scale = max(abs(f0[o]) for o in outs) / max(abs(x_scale), 1e-300)
+        for o in outs:
+            h, ref, est, err, resolved = pick[o]
+            grad = float(grads[o])
+            info = {"grad": grad, "ref": float(ref), "est": float(est), "step": float(h)}
+            if resolved:
+                near_zero = abs(ref) < rtol * scale
+                denom = scale if near_zero else abs(ref)
+                rel = abs(grad - ref) / denom
+                info.update(rel_err=float(rel), mode="column" if near_zero else "relative",
+                            compared=True, passed=bool(rel <= rtol))
+            elif np.isfinite(grad) and all(abs(c[1]) <= _ZERO_FACTOR * max(c[2], c[3]) for c in fd[o]):
+                bound = max(min(_ZERO_FACTOR * max(c[2], c[3]) for c in fd[o]), rtol * scale)
+                info.update(rel_err=None, mode="zero", bound=float(bound),
+                            compared=True, passed=bool(abs(grad) <= bound))
+            else:
+                info.update(rel_err=None, mode="skipped", compared=False, passed=None)
+            details[f"{o}:{suffix}"] = info
+            if info["compared"]:
+                cnt["compared"] += 1
+                if not info["passed"]:
+                    ok_all = False
+            else:
+                cnt["skipped"] += 1
 
     base_h = {
         "alpha": 1e-4, "beta": 1e-4, "phi": 1e-4,
-        "V_inf": 1e-4 * max(float(condition.V_inf), 1e-300),
-        "rho": 1e-4 * max(float(condition.rho), 1e-300),
-        "h": 1e-4 * max(float(condition.h) if condition.h is not None else 1.0, 1e-300),
+        "V_inf": 1e-4 * abs(float(condition.V_inf)),
+        "rho": 1e-4 * abs(float(condition.rho)),
+        "h": 1e-4 * abs(float(condition.h)) if condition.h is not None else 0.0,
     }
     for key in ("alpha", "beta", "V_inf", "rho", "h", "phi"):
         if key not in ins:
@@ -148,17 +248,13 @@ def check_gradients(
         if key == "h" and condition.h is None:
             continue
         h = base_h[key]
-        for o in outs:
-            def _get(v: float, _k: str = key, _o: str = o) -> float:
-                import dataclasses
 
-                c2 = dataclasses.replace(condition, **{_k: v})
-                return _production_scalars(ac, c2, st, axes)[_o]
+        def _get(v: float, _k: str = key) -> dict[str, float]:
+            c2 = dataclasses.replace(condition, **{_k: v})
+            return _production_scalars(ac, c2, st, axes)
 
-            x0 = float(getattr(condition, key))
-            ref, est, usable = _richardson(_get, x0, h, rtol)
-            grad = float(jac[o][key]) if isinstance(jac[o], dict) else 0.0
-            _record(f"{o}:{key}", grad, ref, est, usable)
+        fd = _ladder(_get, float(getattr(condition, key)), h, _STEP_FACTORS, outs, eps)
+        _record(key, key, {o: float(jac[o][key]) for o in outs}, fd, h / 1e-4)
     if "sections" in ins:
         from ventorum.solvers.factory import make_solver, resolve_solver_type
 
@@ -177,20 +273,19 @@ def check_gradients(
                 weights = _section_weights(ac, solver, st, condition, surf.name, j, base_props)
                 for prop in ("a0", "alpha_L0", "Cd0", "Cm0"):
                     x0 = float(getattr(sec.airfoil, prop))
-                    h = 1e-4 * max(abs(x0), 1e-300)
+                    h = _section_step(prop, x0)
                     w = weights[prop]
-                    for o in outs:
-                        gvec = np.asarray(jac[o]["sections"][prop], dtype=float).reshape(-1)
-                        pred = float(gvec @ w)
 
-                        def _get(v: float, _n: str = surf.name, _j: int = j,
-                                 _p: str = prop, _o: str = o) -> float:
-                            ac3 = ac.clone()
-                            _set_section_prop(ac3, _n, _j, _p, v)
-                            return _production_scalars(ac3, condition, st, axes)[_o]
+                    def _get(v: float, _n: str = surf.name, _j: int = j,
+                             _p: str = prop) -> dict[str, float]:
+                        ac3 = ac.clone()
+                        _set_section_prop(ac3, _n, _j, _p, v)
+                        return _production_scalars(ac3, condition, st, axes)
 
-                        ref, est, usable = _richardson(_get, x0, h, rtol)
-                        _record(f"{o}:sections.{surf.name}[{j}].{prop}", pred, ref, est, usable)
+                    fd = _ladder(_get, x0, h, _STEP_FACTORS, outs, eps)
+                    grads = {o: float(np.asarray(jac[o]["sections"][prop], dtype=float).reshape(-1) @ w)
+                             for o in outs}
+                    _record("sections", f"sections.{surf.name}[{j}].{prop}", grads, fd, h / 1e-4)
     if "reference" in ins:
         ac2 = ac.clone()
         ac2.compute_reference_values()
@@ -198,31 +293,31 @@ def check_gradients(
                     "c_ref": float(ac2.c_ref),
                     "ref_point": np.asarray(ac2.moment_reference(), dtype=float)}
         for key in ("S_ref", "b_ref", "c_ref"):
-            h = 1e-4 * max(abs(ref_base[key]), 1e-300)
-            for o in outs:
-                def _get(v: float, _k: str = key, _o: str = o) -> float:
-                    ac3 = ac.clone()
-                    setattr(ac3, _k, v)
-                    ac3._auto_ref.discard(_k)
-                    return _production_scalars(ac3, condition, st, axes)[_o]
+            h = 1e-4 * abs(ref_base[key])
 
-                ref, est, usable = _richardson(_get, ref_base[key], h, rtol)
-                grad = float(jac[o]["reference"][key])
-                _record(f"{o}:reference.{key}", grad, ref, est, usable)
+            def _get(v: float, _k: str = key) -> dict[str, float]:
+                ac3 = ac.clone()
+                setattr(ac3, _k, v)
+                ac3._auto_ref.discard(_k)
+                return _production_scalars(ac3, condition, st, axes)
+
+            fd = _ladder(_get, ref_base[key], h, _STEP_FACTORS, outs, eps)
+            _record("reference", f"reference.{key}",
+                    {o: float(jac[o]["reference"][key]) for o in outs}, fd, ref_base[key])
         rp0 = ref_base["ref_point"]
-        h = 1e-4 * max(float(ac2.c_ref), 1e-300)
-        for o in outs:
-            gvec = np.asarray(jac[o]["reference"]["ref_point"], dtype=float).reshape(3)
-            for k in range(3):
-                def _get(v: float, _kk: int = k, _o: str = o) -> float:
-                    ac3 = ac.clone()
-                    rp = rp0.copy()
-                    rp[_kk] = v
-                    ac3.ref_point = rp
-                    return _production_scalars(ac3, condition, st, axes)[_o]
+        h = 1e-4 * abs(float(ac2.c_ref))
+        for k in range(3):
+            def _get(v: float, _kk: int = k) -> dict[str, float]:
+                ac3 = ac.clone()
+                rp = rp0.copy()
+                rp[_kk] = v
+                ac3.ref_point = rp
+                return _production_scalars(ac3, condition, st, axes)
 
-                ref, est, usable = _richardson(_get, float(rp0[k]), h, rtol)
-                _record(f"{o}:reference.ref_point[{k}]", float(gvec[k]), ref, est, usable)
+            fd = _ladder(_get, float(rp0[k]), h, _STEP_FACTORS, outs, eps)
+            grads = {o: float(np.asarray(jac[o]["reference"]["ref_point"], dtype=float).reshape(3)[k])
+                     for o in outs}
+            _record("reference", f"reference.ref_point[{k}]", grads, fd, float(ac2.c_ref))
     if "nodes" in ins:
         from ventorum.geometry.deformation import undeformed_nodes
         from ventorum.solvers.factory import resolve_solver_type
@@ -242,9 +337,9 @@ def check_gradients(
                     for c in range(3):
                         flat.append((s.name, tag, i, c))
         dim = len(flat)
-        # Small step: the node response is smooth, and 1e-5 of the span keeps
-        # both the truncation and the round-off of the differences small.
-        h = 1e-5 * max(float(s.semi_span) for s in ac2.surfaces)
+        rc_min = float(np.min(np.asarray(base_res.details["lattice"].rc, dtype=float)))
+        h0 = 1e-3 * rc_min
+        span = max(float(s.semi_span) for s in ac2.surfaces)
         # A symmetric surface is mirrored about y = 0 and must start there:
         # freeze the root y-displacements of symmetric surfaces, else the
         # perturbed geometry is refused.
@@ -255,19 +350,33 @@ def check_gradients(
             u = rng.standard_normal(dim)
             u[frozen] = 0.0
             u = u / max(float(np.linalg.norm(u)), 1e-300)
-            for o in outs:
-                g_full = _gather_node_grad(jac[o], flat)
-                grad = float(g_full @ u)
 
-                def _get(v: float, _u: Any = u, _o: str = o) -> float:
-                    ac3 = ac.clone()
-                    _apply_node_step(ac3, base_nodes, disp0, flat, _u, v)
-                    return _production_scalars(ac3, condition, st, axes)[_o]
+            def _get(v: float, _u: Any = u) -> dict[str, float]:
+                ac3 = ac.clone()
+                _apply_node_step(ac3, base_nodes, disp0, flat, _u, v)
+                return _production_scalars(ac3, condition, st, axes)
 
-                ref, est, usable = _richardson(_get, 0.0, h, rtol)
-                _record(f"{o}:nodes.dir{dj}", grad, ref, est, usable)
-    return {"pass": bool(ok_all), "compared": n_compared, "skipped": n_skipped,
-            "rtol": float(rtol), "details": details}
+            fd = _ladder(_get, 0.0, h0, _NODE_STEP_FACTORS, outs, eps)
+            grads = {o: float(_gather_node_grad(jac[o], flat) @ u) for o in outs}
+            _record("nodes", f"nodes.dir{dj}", grads, fd, span)
+    reasons = [f"input group {g!r} has no compared component" for g, c in groups.items()
+               if c["compared"] == 0]
+    failed = [k for k, v in details.items() if v["compared"] and not v["passed"]]
+    if failed:
+        reasons.insert(0, f"{len(failed)} component(s) above rtol {rtol:g}: {', '.join(failed)}")
+    n_compared = sum(c["compared"] for c in groups.values())
+    n_skipped = sum(c["skipped"] for c in groups.values())
+    return {"pass": bool(ok_all and not reasons), "compared": n_compared, "skipped": n_skipped,
+            "rtol": float(rtol), "groups": groups, "reasons": reasons, "details": details}
+
+
+def _section_step(prop: str, x0: float) -> float:
+    """Return the finite-difference step of section property *prop* at *x0*.
+
+    The step is 1e-4 of the base value, with an absolute floor for a zero
+    or small base value (``_SECTION_STEP_FLOOR``, unit of the property).
+    """
+    return max(1e-4 * abs(float(x0)), _SECTION_STEP_FLOOR[prop])
 
 
 def _gather_node_grad(jac_o: dict, flat: list) -> np.ndarray:
@@ -284,7 +393,7 @@ def _gather_node_grad(jac_o: dict, flat: list) -> np.ndarray:
 def _apply_node_step(ac: Any, base_nodes: Any, disp0: Any, flat: list,
                      u: np.ndarray, v: float) -> None:
     """Add v * u to the node displacements of *ac* (absolute node step)."""
-    import numpy as _np
+    from ventorum.core.datatypes import NodeDisplacements
 
     step = (np.asarray(u, dtype=float) * float(v))
     per: dict = {}
@@ -296,18 +405,16 @@ def _apply_node_step(ac: Any, base_nodes: Any, disp0: Any, flat: list,
         n_e = int(bn["eta"].shape[0])
         d0 = disp0.get(name)
         if d0 is None:
-            le = _np.zeros((n_e, 3))
-            te = _np.zeros((n_e, 3))
+            le = np.zeros((n_e, 3))
+            te = np.zeros((n_e, 3))
         else:
-            le = _np.asarray(d0.le, dtype=float).copy()
-            te = _np.asarray(d0.te, dtype=float).copy()
+            le = np.asarray(d0.le, dtype=float).copy()
+            te = np.asarray(d0.te, dtype=float).copy()
         for tag, items in tags.items():
             arr = le if tag == "le" else te
             for i, c, val in items:
                 arr[i, c] += val
-        from ventorum.core.datatypes import NodeDisplacements
-
-        eta = _np.asarray(bn["eta"], dtype=float).copy()
+        eta = np.asarray(bn["eta"], dtype=float).copy()
         surf.node_displacements = NodeDisplacements(le=le, te=te, eta=eta)
 
 
@@ -341,7 +448,7 @@ def _section_weights(ac: Any, solver: Any, st: Any, condition: Any,
         ac3 = ac.clone()
         surf = next(s for s in ac3.surfaces if s.name == surf_name)
         x0 = float(getattr(surf.sections[j].airfoil, prop))
-        dv = 1e-4 * max(abs(x0), 1e-300)
+        dv = _section_step(prop, x0)
         _set_section_prop(ac3, surf_name, j, prop, x0 + dv)
         lat = solver.build(ac3, st, condition)
         cur = np.asarray(getattr(lat, prop), dtype=float)
