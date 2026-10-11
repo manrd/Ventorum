@@ -32,3 +32,18 @@ print(bars.summary())
 ```
 
 Each `bars.bars[name]` holds the fine-mesh value, the interval bounds (`None` when the coefficient diverges with mesh refinement), the status (always `"numerical_only"` in layer 1), the coverage (always `None` until a calibrated layer exists) and the numerical layer contribution (state, observed order, safety factor, levels and values). The notes in `bars.notes` state the scope: spanwise discretisation error only, not an error against experiment. The moments use the selected axes (`axes="body"`, `"stability"` or `"wind"`). With proportional panels, a note names a surface that `min_panels` holds at the same panel count on two mesh levels. When the fine level has profile drag but a coarser level has no `CD_total`, the result has no `"CD"` bar and a note says why.
+
+## Input-uncertainty bars
+
+`ventorum.input_error_bars` propagates the standard uncertainties (one standard deviation) of the flow inputs and of the linear section properties through the gradients of the six coefficients (first-order propagation, `u_c(f)^2 = J U J^T`). The expanded half-width is `k u_c` with the coverage factor `k` (default 2). This is layer 2 of the planned error bars (see [Trust score and error bars](../theory/trust_score)).
+
+```python
+bars = vt.input_error_bars(
+    wing,
+    settings=vt.SolverSettings(solver_type="vlm", n_panels=24, n_chord=2),
+    uncertainties={"alpha": 0.002, "sections": {"Wing": {"a0": 0.05}}},
+)
+print(bars.summary())
+```
+
+Each `bars.bars[name]` holds the production value, the interval `[value - k u_c, value + k u_c]`, the status `"input_only"`, the coverage (always `None`, not calibrated) and the input layer contribution. `bars.bars[name].input_shares` gives the share of each input in `u_c^2` (they sum to 1 for independent inputs), and `gradient_methods` states the gradient method per input (`"adjoint"` or `"central differences"`). Outside the adjoint scope (nonlinear lifting line, tabulated airfoils, deflected controls, body rates, Fourier solver) the flow inputs use central differences and section inputs are refused. `ventorum.combine_error_bars(numerical, inputs)` combines a layer-1 result and a layer-2 result of the same case: the half-width is `sqrt(h_num^2 + h_input^2)`, centred on the fine-level value of layer 1, with status `"numerical_and_input"`.

@@ -43,8 +43,10 @@ from ventorum.core.trust import evaluate_aerodynamic_trust  # noqa: F401
 from ventorum.core.error_bars import (  # noqa: F401
     ErrorBar,
     ErrorBarResult,
+    combine_error_bars,
     numerical_error_bars,
 )
+from ventorum.core.input_uncertainty import input_error_bars  # noqa: F401
 from ventorum.solvers import (  # noqa: F401
     BaseSolver,
     FourierSolver,

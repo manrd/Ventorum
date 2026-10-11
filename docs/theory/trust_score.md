@@ -46,20 +46,32 @@ Output structure. An `ErrorBar` holds the coefficient name, the fine-level value
 
 Limits. The bar covers the spanwise discretisation error only; the chordwise error is not in the bar. The bar is about the mesh, not about the model: it is not an error against experiment.
 
+### Layer 2: input uncertainty (implemented)
+
+Each of the six force and moment coefficients of a case gets an input-uncertainty bar when the user gives the standard uncertainties (one standard deviation) of the flow inputs and of the linear section properties. The method is first-order (linear) propagation of uncertainty, the law of propagation of uncertainty of the GUM (JCGM 100:2008, section 5.1, equation 10 for independent inputs and equation 13 with correlations): `u_c(f)^2 = J U J^T` with `J` the gradient of the coefficient with respect to the inputs and `U` the covariance matrix of the inputs. The expanded half-width is `k u_c` with the coverage factor `k` (default 2, GUM section 6). The combination of the numerical layer and the input layer by root sum of squares of independent contributions follows Oberkampf and Roy (2010).
+
+Inputs. `ventorum.core.input_uncertainty.input_error_bars` takes a dict `uncertainties` with optional keys `alpha` [rad], `beta` [rad], `phi` [rad], `V_inf` [m/s], `rho` [kg/m^3], `h` [m] (ground effect only), and `sections` (a dict of surface name to dict with optional `a0` [1/rad], `alpha_L0` [rad], `Cd0` [-], `Cm0` [-]). A section uncertainty of a surface applies to every strip of that surface and is fully correlated along the span: the gradient is summed over the strips of the surface before the propagation. An optional `correlations` dict gives correlation coefficients of pairs of flow inputs in [-1, 1]; the default is independent inputs.
+
+Gradients. The gradients come from `ventorum.gradients` (discrete adjoint) when the configuration is in its scope. Outside its scope (nonlinear lifting line, tabulated airfoils, deflected controls, body rates, Fourier solver) the flow-input gradients come from central differences of the production solve with the steps alpha 0.5 deg, beta 1 deg, phi 0.5 deg, `V_inf` 1 %, `rho` 1 % and `h` 5 % of the smallest ground clearance; section inputs are then refused. The result states the method per input (`"adjoint"` or `"central differences"`). The device and the precision of the production solve are used.
+
+Output structure. The layer-2 `LayerContribution` has `layer="input"`, `half_width = k u_c`, a method that names the GUM law and the gradient method, and an empty `values` field. `ErrorBar.coverage` stays None (the bar is not calibrated); a note states that `k = 2` assumes a normal distribution of the output. Each bar also gives the share of each input in `u_c^2` (they sum to 1 for independent inputs), so the user sees which input dominates. The layer-2 result has status `"input_only"`. `ventorum.core.error_bars.combine_error_bars` combines a layer-1 result and a layer-2 result of the same case into one `ErrorBarResult` with status `"numerical_and_input"`: the half-width is `sqrt(h_num^2 + h_input^2)` and the interval is centred on the fine-level value of layer 1. A bar whose layer 1 has no interval keeps no interval, and a note says why.
+
+Limits. The bar is first order: it is exact only for small uncertainties of a near-linear response. The coverage factor is not calibrated. Geometry (node) uncertainty is not covered.
+
 The later layers are planned:
 
-2. **Input uncertainty.** The effect of the uncertainty of the inputs (geometry, flight condition, section data) when the user gives it.
 3. **Model-form uncertainty.** The difference between the model and reality, from validation comparisons that include the uncertainty of the experiment, with the method of ASME V&V 20 (2009) and Oberkampf and Roy (2010). Only graded reference data are used.
 4. **Statistical coverage.** A stated probability of coverage, only where enough good reference cases exist. The calibration method is not chosen yet.
 
-Until these layers exist, a result has only the trust score of this chapter.
+Until these layers exist, a result has only the trust score of this chapter plus layers 1 and 2.
 
 ## Implementation
 
 - `ventorum.core.trust`: `evaluate_aerodynamic_trust`, `polar_limits`, `polar_stats`, `isa_speed_of_sound`, `spanwise_stats_batch`.
 - `ventorum.core.datatypes.TrustScore`.
 - `ventorum.geometry.mesh_convergence`: the GCI.
-- `ventorum.core.error_bars`: layer 1 (numerical error bars from three mesh levels).
+- `ventorum.core.error_bars`: layer 1 (numerical error bars from three mesh levels) and the combination.
+- `ventorum.core.input_uncertainty`: layer 2 (input uncertainty by linear propagation).
 
 ## Verification
 
@@ -67,6 +79,7 @@ The rules are tested in the test suite (for example the penalties at the limits 
 
 ## References
 
+- JCGM 100:2008 (GUM), *Evaluation of measurement data: Guide to the expression of uncertainty in measurement*, Joint Committee for Guides in Metrology, 2008.
 - W. L. Oberkampf and C. J. Roy, *Verification and Validation in Scientific Computing*, Cambridge University Press, 2010.
 - ASME V&V 20-2009, *Standard for Verification and Validation in Computational Fluid Dynamics and Heat Transfer*, American Society of Mechanical Engineers, 2009.
 - P. J. Roache, *Verification and Validation in Computational Science and Engineering*, Hermosa Publishers, 1998.

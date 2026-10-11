@@ -47,22 +47,44 @@ from ventorum.core.datatypes import (
 #: Method string stored in every layer contribution of this module.
 METHOD = "GCI, Roache (1998); observed order, Celik et al. (2008)"
 
-#: Allowed values of ``ErrorBar.status``. The present code sets only
-#: ``"numerical_only"``; later layers set the other states.
+#: Allowed values of ``ErrorBar.status``. Layer 1 sets only
+#: ``"numerical_only"``; layer 2 sets only ``"input_only"``; the
+#: combination sets only ``"numerical_and_input"``.
 STATUS_VALUES = (
     "statistically_calibrated",
     "model_form_estimated",
     "numerical_only",
+    "input_only",
+    "numerical_and_input",
     "outside_envelope",
 )
 
 #: Coefficients with an error bar, in output order.
 COEFFICIENT_NAMES = ("CL", "CD", "CY", "Cl", "Cm", "Cn")
 
-#: Note present in the notes of every result of this module.
+#: Note present in the notes of every layer-1 result.
 LAYER_NOTE = (
     "Layer 1 only: spanwise discretisation error. "
     "It is not an error against experiment."
+)
+
+#: Note present in the notes of every layer-2 result.
+INPUT_LAYER_NOTE = (
+    "Layer 2 only: input uncertainty by first-order propagation. "
+    "It is not an error against experiment."
+)
+
+#: Note of a combined bar without an interval (layer 1 has no interval).
+NO_COMBINED_INTERVAL_NOTE = (
+    "no combined interval: the numerical layer has no interval, "
+    "so the root sum of squares has no interval"
+)
+
+#: Note of a combined result.
+COMBINED_NOTE = (
+    "Combined layer 1 (numerical) and layer 2 (input) by root sum of "
+    "squares of independent contributions; the interval is centred on "
+    "the fine-level value of layer 1."
 )
 
 #: Note of a bar without an interval (divergent convergence).
@@ -112,26 +134,30 @@ class LayerContribution:
     Attributes
     ----------
     layer : str
-        Layer name, here always ``"numerical"``.
+        Layer name: ``"numerical"`` (layer 1) or ``"input"`` (layer 2).
     half_width : float or None
         Half-width of the interval in coefficient units, or None when the
         layer gives no interval.
     method : str
-        Method that produced the contribution.
+        Method that produced the contribution. Layer 2 names the GUM law
+        of propagation of uncertainty and the gradient method.
     state : str
-        Convergence state: ``"roundoff"``, ``"monotonic"``,
+        Convergence state of layer 1: ``"roundoff"``, ``"monotonic"``,
         ``"oscillatory"``, ``"divergent"`` or ``"not_converged_order"``.
+        Layer 2 uses ``"propagated"``.
     observed_order : float or None
-        Observed order of convergence, when found.
+        Observed order of convergence, when found (layer 1 only).
     safety_factor : float or None
-        Safety factor used in the half-width, when one applies.
+        Safety factor used in the half-width, when one applies (layer 1 only).
     f_extrapolated : float or None
         Richardson-extrapolated value (information only; the interval is
-        centred on the fine-level value, not on this value).
+        centred on the fine-level value, not on this value; layer 1 only).
     levels : list[int]
-        Spanwise panel counts [N1, N2, N3], index 1 is the fine mesh.
+        Spanwise panel counts [N1, N2, N3], index 1 is the fine mesh
+        (layer 1 only; layer 2 leaves it empty).
     values : list[float]
-        Coefficient values [f1, f2, f3], index 1 is the fine mesh.
+        Coefficient values [f1, f2, f3], index 1 is the fine mesh
+        (layer 1 only; layer 2 leaves it empty).
     """
 
     layer: str = "numerical"
@@ -172,13 +198,16 @@ class ErrorBar:
         Coefficient name (``"CL"``, ``"CD"``, ``"CY"``, ``"Cl"``,
         ``"Cm"`` or ``"Cn"``).
     value : float
-        Coefficient value on the fine mesh (f1).
+        Coefficient value on the fine mesh (f1). The combined bar uses
+        the fine-level value of layer 1.
     interval_low : float or None
         Lower bound of the interval, or None without an interval.
     interval_high : float or None
         Upper bound of the interval, or None without an interval.
     status : str
-        One of ``STATUS_VALUES``. The present code sets only ``"numerical_only"``.
+        One of ``STATUS_VALUES``. Layer 1 sets ``"numerical_only"``,
+        layer 2 sets ``"input_only"`` and the combination sets
+        ``"numerical_and_input"``.
     coverage : float or None
         Stated probability of coverage. Always None in the present code (only a
         calibrated bar has a coverage).
@@ -186,6 +215,13 @@ class ErrorBar:
         Contribution of each layer, keyed by layer name.
     notes : list[str]
         Human-readable notes about this bar.
+    input_shares : dict[str, float]
+        Share of each input in the input-uncertainty variance ``u_c^2``
+        (layer 2 only; empty without an input layer). The shares sum to 1
+        for independent inputs.
+    gradient_methods : dict[str, str]
+        Gradient method of each input (layer 2 only; empty without an
+        input layer): ``"adjoint"`` or ``"central differences"``.
     """
 
     name: str = "CL"
@@ -196,6 +232,8 @@ class ErrorBar:
     coverage: float | None = None
     layers: dict[str, LayerContribution] = field(default_factory=dict)
     notes: list[str] = field(default_factory=list)
+    input_shares: dict[str, float] = field(default_factory=dict)
+    gradient_methods: dict[str, str] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         """Check that the status is one of the allowed values."""
@@ -207,15 +245,31 @@ class ErrorBar:
 
     @property
     def state(self) -> str | None:
-        """Convergence state of the numerical layer, or None without it."""
+        """Convergence state of the numerical layer, else of the input layer, else None."""
         layer = self.layers.get("numerical")
+        if layer is not None:
+            return layer.state
+        layer = self.layers.get("input")
         return layer.state if layer is not None else None
 
     @property
     def half_width(self) -> float | None:
-        """Half-width of the numerical layer, or None without an interval."""
-        layer = self.layers.get("numerical")
-        return layer.half_width if layer is not None else None
+        """Half-width of the interval, or None without an interval.
+
+        With both layers present this is the root sum of squares of the
+        two half-widths; with one layer it is that half-width.
+        """
+        num = self.layers.get("numerical")
+        inp = self.layers.get("input")
+        h_num = num.half_width if num is not None else None
+        h_in = inp.half_width if inp is not None else None
+        if num is not None and inp is not None:
+            if h_num is None:
+                return None
+            return math.sqrt(h_num * h_num + h_in * h_in)
+        if num is not None:
+            return h_num
+        return h_in
 
     def to_dict(self) -> dict[str, Any]:
         """Return the bar as a dict with JSON types only.
@@ -231,6 +285,8 @@ class ErrorBar:
             "coverage": _json_float(self.coverage),
             "layers": {k: v.to_dict() for k, v in self.layers.items()},
             "notes": [str(n) for n in self.notes],
+            "input_shares": {str(k): float(v) for k, v in self.input_shares.items()},
+            "gradient_methods": {str(k): str(v) for k, v in self.gradient_methods.items()},
         }
 
 
@@ -846,5 +902,102 @@ def numerical_error_bars(
         solver=fine.solver_type,
         levels=levels,
         results=level_results,
+        notes=notes,
+    )
+
+
+def combine_error_bars(
+    numerical: ErrorBarResult,
+    inputs: ErrorBarResult,
+) -> ErrorBarResult:
+    """Combine a layer-1 result and a layer-2 result into one result.
+
+    The two results must come from the same case (same moment axes and
+    same coefficient set). Each combined bar carries both layer
+    contributions. The half-width is the root sum of squares of the
+    independent contributions ``sqrt(h_num^2 + h_input^2)``. The
+    interval is centred on the fine-level value of layer 1. A bar whose
+    layer 1 has no interval keeps no interval, and a note says why.
+
+    Parameters
+    ----------
+    numerical : ErrorBarResult
+        Layer-1 result of :func:`numerical_error_bars`.
+    inputs : ErrorBarResult
+        Layer-2 result of ``ventorum.core.input_uncertainty.input_error_bars``.
+
+    Returns
+    -------
+    ErrorBarResult
+        Bars with status ``"numerical_and_input"`` and coverage None.
+
+    Raises
+    ------
+    ValueError
+        If the axes differ or the coefficient sets differ.
+    """
+    if numerical.axes != inputs.axes:
+        raise ValueError(
+            f"Cannot combine error bars with different axes: "
+            f"{numerical.axes!r} and {inputs.axes!r}."
+        )
+    if set(numerical.bars) != set(inputs.bars):
+        raise ValueError(
+            f"Cannot combine error bars with different coefficients: "
+            f"{sorted(numerical.bars)} and {sorted(inputs.bars)}."
+        )
+    bars: dict[str, ErrorBar] = {}
+    for name in COEFFICIENT_NAMES:
+        if name not in numerical.bars:
+            continue
+        num_bar = numerical.bars[name]
+        in_bar = inputs.bars[name]
+        num_layer = num_bar.layers.get("numerical")
+        in_layer = in_bar.layers.get("input")
+        if num_layer is None or in_layer is None:
+            raise ValueError(
+                f"Cannot combine the {name!r} bar: it lacks a "
+                "'numerical' or an 'input' layer."
+            )
+        h_num = num_layer.half_width
+        h_in = float(in_layer.half_width)
+        notes = list(num_bar.notes) + list(in_bar.notes)
+        if h_num is None:
+            notes.append(NO_COMBINED_INTERVAL_NOTE)
+            bars[name] = ErrorBar(
+                name=name,
+                value=float(num_bar.value),
+                interval_low=None,
+                interval_high=None,
+                status="numerical_and_input",
+                coverage=None,
+                layers={"numerical": num_layer, "input": in_layer},
+                notes=notes,
+                input_shares=dict(in_bar.input_shares),
+                gradient_methods=dict(in_bar.gradient_methods),
+            )
+        else:
+            half = math.sqrt(h_num * h_num + h_in * h_in)
+            value = float(num_bar.value)
+            bars[name] = ErrorBar(
+                name=name,
+                value=value,
+                interval_low=value - half,
+                interval_high=value + half,
+                status="numerical_and_input",
+                coverage=None,
+                layers={"numerical": num_layer, "input": in_layer},
+                notes=notes,
+                input_shares=dict(in_bar.input_shares),
+                gradient_methods=dict(in_bar.gradient_methods),
+            )
+    notes = list(numerical.notes) + list(inputs.notes) + [COMBINED_NOTE]
+    return ErrorBarResult(
+        bars=bars,
+        axes=numerical.axes,
+        drag_basis=numerical.drag_basis,
+        solver=numerical.solver,
+        levels=list(numerical.levels),
+        results=list(numerical.results),
         notes=notes,
     )
