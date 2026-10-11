@@ -426,11 +426,12 @@ def test_chunk_size_uses_the_unknowns_of_its_cases(wing_tail_aircraft, solver_ty
     solver_cls = type(make_solver(solver_type))
     orig_batch = solver_cls.solve_circulation_batch
 
-    def spy_batch(self, lattice, conditions, settings, grounds, wake_dirs, continuation=True):
+    def spy_batch(self, lattice, conditions, settings, grounds, wake_dirs, continuation=True, ref_point=None):
         use_sym = getattr(settings, "use_symmetry", True)
         ns = {solver_core._unknown_map(lattice, c, g, use_sym).n for c, g in zip(conditions, grounds)}
         events.append(("solve", ns))
-        return orig_batch(self, lattice, conditions, settings, grounds, wake_dirs, continuation)
+        return orig_batch(self, lattice, conditions, settings, grounds, wake_dirs, continuation,
+                          ref_point=ref_point)
 
     monkeypatch.setattr(solver_cls, "solve_circulation_batch", spy_batch)
 
