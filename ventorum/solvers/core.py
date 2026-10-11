@@ -243,7 +243,13 @@ def llt_onset(
 
     The onset of strip i is ``V_inf d - Omega x (x_i - x_ref)`` at the
     three-quarter-chord point ``x_i`` of the strip, at the span fraction of
-    the control point. Thin-airfoil theory gives, for a normal velocity that
+    the control point (the point where the boundary condition of the strip
+    applies). The loads (``ventorum.aero.loads``) take the geometric angle
+    of the output at the three-quarter chord of the strip mid-point
+    instead: that is a strip quantity for every lattice, also the vortex
+    lattice, whose control points are not on the quarter-chord line. The
+    two points differ only in the span position inside the strip.
+    Thin-airfoil theory gives, for a normal velocity that
     changes linearly along the chord, the section lift of its value at the
     three-quarter chord. A pitch rate then gives the section lift of the
     equal change of the angle of attack (Katz and Plotkin 2001, the

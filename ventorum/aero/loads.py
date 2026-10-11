@@ -730,7 +730,11 @@ def compute_loads_batch(
     if rated:
         # Local onset of each strip: at the three-quarter chord for the
         # geometric angle, at the quarter chord for the profile drag and the
-        # section moment (direction and dynamic pressure).
+        # section moment (direction and dynamic pressure). The points are at
+        # the strip mid-point, for every lattice. The lifting-line solve
+        # (ventorum.solvers.core.llt_onset) uses the span fraction of the
+        # control point instead, where its boundary condition applies. The
+        # geometric angle here gives only the output alpha_i.
         p34 = lattice.qc_mid + 0.5 * chord[:, None] * lattice.chord_dir
         U34 = _onset_at(conditions, rated, Vd, p34, rp)
         U_qc = _onset_at(conditions, rated, Vd, lattice.qc_mid, rp)
