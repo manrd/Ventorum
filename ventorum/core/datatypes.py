@@ -1274,6 +1274,15 @@ class SolverResult:
     The induced drag ``totals.CDi`` comes from the Trefftz plane and is the
     reference value. ``totals.CDi_nearfield`` (from the surface forces) is a
     diagnostic only; it is not reliable on swept wings.
+
+    Attributes
+    ----------
+    b_ref : float or None
+        Reference span of the solve [m]. :meth:`moments` needs it for the
+        stability and wind axes.
+    c_ref : float or None
+        Reference chord of the solve [m]. :meth:`moments` needs it for the
+        stability and wind axes.
     """
 
     # Per-surface spanwise distributions (one entry per LiftingSurface)
