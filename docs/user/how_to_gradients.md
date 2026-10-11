@@ -1,0 +1,91 @@
+# How to compute adjoint gradients
+
+`ventorum.gradients` gives exact gradients of the solver outputs with respect to the
+lattice nodes, the flow variables, the linear section properties and the reference
+values, for the vortex lattice and the linear lifting line. One production solve and
+one adjoint computation give all gradients, without finite differences.
+
+```python
+import numpy as np
+import ventorum as vt
+
+wing = vt.LiftingSurface(
+    name="Wing",
+    semi_span=5.0,
+    sections=[
+        vt.WingSection(y_frac=0.0, chord=2.0),
+        vt.WingSection(y_frac=1.0, chord=1.0),
+    ],
+)
+aircraft = vt.Aircraft(surfaces=[wing])
+condition = vt.FlightCondition(V_inf=30.0, alpha=np.radians(4.0))
+settings = vt.SolverSettings(solver_type="vlm", n_panels=12, n_chord=2)
+
+result = vt.gradients(
+    aircraft, condition, settings,
+    outputs=("CL", "CD", "Cm"),
+    wrt=("alpha", "nodes"),
+    axes="body",
+)
+print(f"CL = {result.values['CL']:.4f}, dCL/dalpha = {result.jacobian['CL']['alpha']:.4f} per rad")
+```
+
+The call solves the case once (`n_solves == 1`) and then one adjoint system per output
+(`n_adjoint`). The mesh topology is fixed: spanwise stations, chordwise count and
+fractions do not change. Angles use rad, lengths use m.
+
+## Inputs and outputs
+
+Inputs (`wrt`): `"nodes"` (per surface the leading- and trailing-edge nodes of the
+defining half), `"alpha"`, `"beta"`, `"V_inf"`, `"rho"`, `"h"`, `"phi"`, `"sections"`
+(per strip `a0`, `alpha_L0`, `Cd0`, `Cm0` of linear airfoils) and `"reference"`
+(`S_ref`, `b_ref`, `c_ref`, `ref_point`).
+
+Outputs: `"CL"`, `"CY"`, `"CDi"`, `"CDp"`, `"CD"`, `"Cl"`, `"Cm"`, `"Cn"` in the axes
+`axes` (`"body"`, `"stability"`, `"wind"`). The vector outputs `"strip_force"` and
+`"section_cl"` go through `gradient_vjp` with a seed per output:
+
+Use the strips of the solved lattice for the seed shape:
+
+```python
+loads = vt.analyze(aircraft, condition, settings).details["loads"]
+seed = np.ones_like(loads.strip_force)
+direction = vt.gradient_vjp(
+    aircraft, condition, settings,
+    seeds={"strip_force": seed},
+    wrt=("alpha",),
+)
+print(f"d(sum of strip forces)/dalpha = {direction['alpha']}")
+```
+
+## Trust
+
+The reference copy also gives the output values. `forward_mismatch` reports the largest
+relative difference to the production result. Above 1e-10 in float64 (1e-4 in float32)
+the call raises `RuntimeError`: the gradient would not be the gradient of the reported
+result. `check_gradients` checks the gradients against Richardson-extrapolated central
+differences of the production solve:
+
+```python
+check = vt.check_gradients(
+    aircraft, condition, settings,
+    outputs=("CL", "CD", "Cm"),
+    wrt=("alpha", "nodes"),
+    n_directions=3,
+    rtol=1e-6,
+)
+print(f"gradients pass: {check['pass']} ({check['compared']} compared, {check['skipped']} skipped)")
+```
+
+Gradients run in float32 by default (the GPU precision setting selects it) and in
+float64 when that setting selects float64. The symmetric system is folded only when the
+case is symmetric and every requested input and output is symmetric; else the full
+system is used.
+
+## Limits
+
+Phase 1 covers the vortex lattice and the linear lifting line with linear airfoils.
+The nonlinear lifting line, tabulated airfoils, nonzero control deflections, nonzero
+body rates and the Fourier solver are refused with `ValueError` (see T-0071). Ground
+effect is supported: `h` is the height of the moment reference point, and the ground
+plane and its images follow the inputs.

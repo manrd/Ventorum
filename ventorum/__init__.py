@@ -75,6 +75,12 @@ from ventorum.solvers.height_derivatives import (  # noqa: F401
     HeightDerivativesResult,
     height_derivatives,
 )
+from ventorum.gradients import (  # noqa: F401
+    GradientResult,
+    check_gradients,
+    gradient_vjp,
+    gradients,
+)
 from ventorum.aero.polars import (  # noqa: F401
     load_xfoil_polar,
     load_csv_polar,

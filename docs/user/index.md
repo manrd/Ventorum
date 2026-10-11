@@ -30,6 +30,7 @@ how_to_trim
 how_to_control_derivatives
 how_to_rate_derivatives
 how_to_height_derivatives
+how_to_gradients
 ```
 
 ## Reference
