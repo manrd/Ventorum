@@ -22,6 +22,15 @@ Cases above Mach 0.3 are listed as outside the envelope and not run.
 A `theory` case has no `grade`: it is verification, so the runner shows it
 in its own section and never counts it in the summary statistics.
 
+A result can also hold a static derivative (`quantity = "<C>_<v>"`, for
+example `Cl_beta`, with `derivative_unit` and, for moments, `axes`), use
+lift coefficients as the abscissa (`CL` instead of `alpha_deg`), or give one
+slope d(quantity)/dCL over a lift range (`slope_of = "CL"`, `CL_range`).
+The runner computes the derivatives by central differences (alpha 0.5 deg,
+beta 1 deg, one mesh for the cases of one point), reports a lift
+coefficient beyond the Ventorum sweep range as "not reached", and gives the
+fitted slope with its largest residual. The template describes every field.
+
 Reference cases are private until their licence is clear: they never enter
 this repository.
 

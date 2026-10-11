@@ -35,11 +35,39 @@ Rules:
   the moment reference point of the solve. A `height_point` without a `h_m`
   list is refused. `extraction` is `table` or `digitised`;
   `digitising_error` is required when digitised.
+- Derivative quantities: `quantity` can also be `<C>_<v>`, with `<C>` one
+  of `CL`, `CD`, `CY`, `Cl`, `Cm`, `Cn` and `<v>` one of `alpha`, `beta`
+  (for example `Cl_beta`). A derivative quantity needs `derivative_unit`:
+  `1/deg` or `1/rad`, the unit of the stored values. A moment derivative
+  (`Cl_*`, `Cm_*`, `Cn_*`) needs `moment_point`, and takes `axes`: `body`,
+  `stability` or `wind` (default `stability`, as NACA stability-tunnel
+  data). `derivative_unit` and `axes` are refused on other quantities.
+  Rate and control derivatives are not in the format.
+- Abscissa: a result has either `alpha_deg` (list of angles in degrees) or
+  `CL` (list of lift coefficients), never both. With `CL`, the runner finds
+  the angle of attack where Ventorum gives that lift coefficient (alpha
+  sweep and linear interpolation, one mesh) and evaluates the quantity
+  there. A lift coefficient beyond the Ventorum range of the sweep is
+  reported as "not reached"; it is never extrapolated.
+- Slope entries: `slope_of = "CL"` and `CL_range = [lo, hi]` (lo < hi) give
+  exactly one value: the slope d(quantity)/dCL over that lift range. A slope
+  entry has no `alpha_deg` or `CL` list. The runner evaluates the quantity
+  at 5 equally spaced lift coefficients of the range, fits a straight line
+  (least squares), and reports the fitted slope and the largest residual.
+  For a derivative quantity, `derivative_unit` is the unit of the quantity:
+  for example a slope in 1/deg means d(Cl_beta [1/deg])/dCL.
+- Signs follow Ventorum: Cl > 0 right wing down, beta > 0 for the wind from
+  the right. For a source in yaw angle psi = -beta, store the converted
+  value (for example Cl_beta = -Cl_psi) and say so in the case text and in
+  `[quality] notes`.
 - The parser refuses a file with a missing required field, a value that
   starts with `TODO`, lists of different lengths, an unknown quantity, a
   `h_m` list with a length different from `alpha_deg` or a value that is
   not above 0, a `height_point` without 3 values, or a `height_point`
-  without a `h_m` list.
+  without a `h_m` list. It also refuses a derivative quantity without
+  `derivative_unit`, an unknown derivative variable, both `alpha_deg` and
+  `CL` in one result, a slope entry with more than one value or without
+  `CL_range`, and a `CL_range` with lo >= hi.
 - Take the values from a table when one exists. For a figure, record the
   digitizing tool and the estimated reading error.
 - The example values below are illustrative only (`synthetic = true`).
@@ -86,6 +114,26 @@ uncertainty_kind = "relative"
 moment_point = [0.3, 0.0, 0.0]
 extraction = "digitised"
 digitising_error = 0.005
+
+[[results]]
+quantity = "Cl_beta"
+CL = [0.2, 0.4]
+values = [-0.0005, -0.001]
+derivative_unit = "1/deg"
+axes = "stability"
+moment_point = [0.3, 0.0, 0.0]
+extraction = "digitised"
+digitising_error = 0.0002
+
+[[results]]
+quantity = "Cl_beta"
+slope_of = "CL"
+CL_range = [0.0, 0.4]
+values = [-0.0025]
+derivative_unit = "1/deg"
+moment_point = [0.3, 0.0, 0.0]
+extraction = "digitised"
+digitising_error = 0.0003
 
 [quality]
 notes = "Example notes: tunnel, mounting, transition."

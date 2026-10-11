@@ -18,7 +18,9 @@
 * **Validation** compares the models with experiments. It needs measured data
   with full provenance. The `experimental/` folder holds those datasets; it is
   empty at this time. See `experimental/README.md` for the format and the
-  candidate sources.
+  candidate sources. `run_validation.py` runs the Markdown reference cases
+  (`reference_template.md`): coefficients against alpha or CL, static
+  derivatives such as Cl_beta, and slopes against CL.
 
 * **Speed history**: `python validation/perf_history.py --history PATH`
   appends one timing record per run to a history file outside the
