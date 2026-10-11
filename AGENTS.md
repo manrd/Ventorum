@@ -75,6 +75,7 @@ Also run `python validation/gpu_gate.py <log.md>` on a machine with an NVIDIA GP
 - **Never** add credentials, API keys, tokens, machine identifiers or personal data to the repository, to logs or to test data.
 - **Never** add unpublished results, paper drafts, private planning documents or reference data whose licence is not clear. The owner adds reference data.
 - **Never** add task cards (`T-NNNN-*.md`, `TASK_CARD.md`), the backlog or the decision log, study scripts or study reports. They stay in the owner's private folder. The folders `tasks/` and `studies/` must not exist in this repository; `.gitignore` excludes them. Before every commit, read `git diff --cached --stat` and remove any such file.
+- **Never** write private planning IDs (task IDs `T-NNNN`, decision IDs `D-NN`, plan items `P1-NN`) in a file of this repository: code, messages, docstrings, comments, tests or documents. Give the reason in plain words. `tests/test_no_private_ids.py` checks this.
 
 ## Repository map
 
