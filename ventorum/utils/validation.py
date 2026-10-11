@@ -266,13 +266,16 @@ def validate_flight_condition(fc: FlightCondition) -> None:
             raise ValueError(
                 f"Height h={fc.h} m is above the size limit {LENGTH_LIMIT_M:g} m."
             )
-    from ventorum.core.constants import A_SL, MACH_LIMIT_INCOMPRESSIBLE
-    mach = fc.V_inf / A_SL
+    from ventorum.core.constants import MACH_LIMIT_INCOMPRESSIBLE
+    from ventorum.core.trust import isa_speed_of_sound
+    a_sound = isa_speed_of_sound(fc.rho)
+    mach = fc.V_inf / a_sound
     if mach > MACH_LIMIT_INCOMPRESSIBLE:
         import warnings
         warnings.warn(
-            f"Mach {mach:.2f} (V_inf={fc.V_inf} m/s, sea-level speed of sound) is above the incompressible "
-            f"limit {MACH_LIMIT_INCOMPRESSIBLE}: the case is out of the valid envelope.",
+            f"Mach {mach:.2f} (V_inf={fc.V_inf} m/s, ISA speed of sound {a_sound:.1f} m/s at the air "
+            f"density) is above the incompressible limit {MACH_LIMIT_INCOMPRESSIBLE}: the case is out of "
+            "the valid envelope.",
             RuntimeWarning, stacklevel=3,
         )
 

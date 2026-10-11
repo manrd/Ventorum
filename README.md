@@ -13,7 +13,7 @@ Ventorum is a Python package for the aerodynamic analysis of wings and aircraft 
 
 The methods are valid for:
 
-- Incompressible flow: Mach number below 0.3 (sea-level speed of sound). There is no compressibility correction. Above Mach 0.3 a case is out of the envelope: `analyze` gives a warning and the trust rating is LOW or UNRELIABLE.
+- Incompressible flow: Mach number below 0.3 (ISA speed of sound at the air density). There is no compressibility correction. Above Mach 0.3 a case is out of the envelope: `analyze` gives a warning and the trust rating is LOW or UNRELIABLE.
 - Attached flow. The nonlinear lifting line uses section polars to show the start of stall. Results after stall are not reliable.
 - Thin lifting surfaces. The surfaces have no thickness; section thickness enters only through the section polars.
 

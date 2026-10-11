@@ -271,3 +271,19 @@ def test_ground_effect_default_alpha_is_five_deg():
     from ventorum.ground_effect import GroundEffectSweep
     assert tuple(inspect.signature(GroundEffectSweep.run_sweep).parameters["alphas_deg"].default) == (5.0,)
     assert "(default 5.0)" in " ".join(GroundEffectSweep.run_sweep.__doc__.split())
+
+
+def test_mach_warning_uses_the_isa_speed_of_sound():
+    """The Mach warning of the input check uses the same speed of sound as the trust score."""
+    import warnings
+
+    from ventorum.core.trust import isa_speed_of_sound
+
+    rho = 0.4   # about 7 km in the ISA atmosphere
+    v = 100.0   # Mach 0.29 at sea level, Mach 0.34 at rho = 0.4 kg/m^3
+    assert v / isa_speed_of_sound(rho) > 0.3 > v / isa_speed_of_sound(1.225)
+    with pytest.warns(RuntimeWarning, match=r"Mach 0\.34 .*ISA speed of sound"):
+        V.validate_flight_condition(vt.FlightCondition(V_inf=v, rho=rho))
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        V.validate_flight_condition(vt.FlightCondition(V_inf=v, rho=1.225))
