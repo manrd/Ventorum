@@ -262,7 +262,8 @@ value of the neighbour step joins the bound. Two cases have no relative scale of
 own and use the largest resolved reference of the outputs for the same input (else the
 output magnitude per unit input): a component below rtol times that scale, and a zero
 derivative (a reference that is zero within 10 times its error bound at every step,
-for example dCL/drho). The
+for example dCL/drho). A zero derivative counts as compared only when 10 times its
+error bound is below rtol times that scale; else it is skipped, with a reason. The
 check fails when a component fails and when an input group has no compared component.
 
 ## Verification

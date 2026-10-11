@@ -206,8 +206,10 @@ def check_gradients(
       larger terms); it passes when abs(grad - ref) <= rtol S (mode
       ``"column"``).
     * A component whose reference is zero within 10 times its error bound
-      is a zero derivative (for example dCL/drho). It passes when abs(grad)
-      is below the larger of that bound and rtol S (mode ``"zero"``).
+      is a zero derivative (for example dCL/drho). When 10 times its error
+      bound (the noise bound) is below rtol S, it passes when abs(grad) is
+      below rtol S (mode ``"zero"``). A larger noise bound would accept
+      almost any gradient, so the component is skipped, with a reason.
     * Every other component is skipped.
 
     The node step is 1e-3 of the smallest core radius of the lattice. A
@@ -275,9 +277,18 @@ def check_gradients(
                 info.update(rel_err=float(rel), mode="column" if near_zero else "relative",
                             compared=True, passed=bool(rel <= rtol))
             elif np.isfinite(grad) and all(abs(c[1]) <= _ZERO_FACTOR * max(c[2], c[3]) for c in fd[o]):
-                bound = max(min(_ZERO_FACTOR * max(c[2], c[3]) for c in fd[o]), rtol * scale)
-                info.update(rel_err=None, mode="zero", bound=float(bound),
-                            compared=True, passed=bool(abs(grad) <= bound))
+                noise_bound = min(_ZERO_FACTOR * max(c[2], c[3]) for c in fd[o])
+                if noise_bound < rtol * scale:
+                    bound = rtol * scale
+                    info.update(rel_err=None, mode="zero", bound=float(bound),
+                                compared=True, passed=bool(abs(grad) <= bound))
+                else:
+                    # A large noise bound would accept almost any gradient:
+                    # the component verifies nothing.
+                    info.update(rel_err=None, mode="skipped", compared=False, passed=None,
+                                bound=float(noise_bound),
+                                reason=(f"zero reference, but its noise bound {noise_bound:.3e} is not "
+                                        f"below rtol S = {rtol * scale:.3e}"))
             else:
                 info.update(rel_err=None, mode="skipped", compared=False, passed=None)
             details[f"{o}:{suffix}"] = info

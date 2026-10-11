@@ -663,6 +663,36 @@ def test_check_reports_group_without_comparison(float64_precision) -> None:
     assert any("'alpha'" in r for r in out["reasons"]), out["reasons"]
 
 
+def test_check_zero_mode_needs_a_small_noise_bound(float64_precision, monkeypatch) -> None:
+    """A zero derivative counts as compared only when its noise bound is below rtol S."""
+    from ventorum.sensitivity import check as C
+
+    ac = vt.Aircraft(surfaces=[_plain_wing()])
+    cond = vt.FlightCondition(V_inf=30.0, alpha=np.radians(4.0))
+    st = vt.SolverSettings(solver_type="vlm", n_panels=8, n_chord=1)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        out = vt.check_gradients(ac, cond, st, outputs=("CL", "CD"), wrt=("rho",), rtol=1e-6)
+    info = out["details"]["CL:rho"]
+    assert info["mode"] == "zero" and info["compared"] and info["passed"], info
+    real = C._ladder
+
+    def noisy(*args, **kwargs):  # type: ignore[no-untyped-def]
+        # The error bound of every reference becomes 1e6 times larger.
+        fd = real(*args, **kwargs)
+        return {o: [(h, ref, est * 1e6, rnd * 1e6) for h, ref, est, rnd in c] for o, c in fd.items()}
+
+    monkeypatch.setattr(C, "_ladder", noisy)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        out = vt.check_gradients(ac, cond, st, outputs=("CL", "CD"), wrt=("rho",), rtol=1e-6)
+    info = out["details"]["CL:rho"]
+    assert info["mode"] == "skipped" and not info["compared"], info
+    assert "noise bound" in info["reason"]
+    assert out["groups"]["rho"]["compared"] == 0
+    assert out["pass"] is False
+
+
 def test_check_zero_valued_sections(float64_precision) -> None:
     """Section properties with a zero base value use an absolute step (no false failure)."""
     af = vt.LinearAirfoil(name="Zero", a0=2.0 * np.pi, alpha_L0=0.0, Cd0=0.0, Cm0=0.0)
