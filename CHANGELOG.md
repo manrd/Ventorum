@@ -206,6 +206,11 @@ a minor version can change a public interface.
 
 ### Fixed
 
+- The float32 reference copy of the gradients gave NaN for a target point on a segment end
+  point (a distance floor of 1e-300 is 0 in float32); the floor now follows the precision.
+- `check_gradients` assumed a round-off level of the solve that is too small for node motion;
+  it now measures the noise of each node direction and skips components at the noise level.
+  The node gradients of the linear lifting line are verified with a polynomial fit.
 - `import ventorum` loaded PyTorch through the gradient package; the gradient functions now
   load on first use.
 - A lattice-only value of None (the polar limits of linear airfoils) was computed again for
