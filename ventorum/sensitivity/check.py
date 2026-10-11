@@ -184,12 +184,11 @@ def check_gradients(
 
     Notes
     -----
-    The reference of each component is the Richardson value of decision 10
-    of the gradient method: central differences with steps h and h/2, with
-    the error estimate abs(FD(h) - FD(h/2)) / 3. The error bound of a
+    The reference of each component is a Richardson value: central
+    differences with steps h and h/2, with the error estimate abs(FD(h) - FD(h/2)) / 3. The error bound of a
     reference is the larger of the estimate and the round-off of the
-    differences (machine epsilon of the production solve times the output
-    magnitude over the step); with a step ladder, the spread to the
+    differences (two times the machine epsilon of the production solve times
+    the output magnitude over the step); with a step ladder, the spread to the
     Richardson value of the neighbour step joins the bound. The node
     directions have one step and no spread: their round-off is also at
     least 6 sigma / h, where sigma is the noise level of the production

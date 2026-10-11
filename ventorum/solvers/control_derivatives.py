@@ -394,7 +394,7 @@ def control_derivatives(
         "wind axes, Cn_trefftz in stability axes). The near-field derivatives stay the reported values.",
         "Hinge moment positive when it tends to increase the local deflection (trailing edge down on a "
         "horizontal surface). Ch = H / (q S_f c_f), S_f the flap area aft of the hinge, c_f the "
-        "root-mean-square flap chord.",
+        "mean flap chord weighted by the flap area.",
     ]
     if "chordwise" in modes:
         notes.append("Chordwise hinge moments come from the bound-vortex forces of the flap panels. They converge "
