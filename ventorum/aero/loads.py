@@ -8,6 +8,10 @@ Forces and moments from a solved vortex lattice.
 * Induced drag: Trefftz plane far downstream (the wake is straight and
   parallel to the free stream). This is the reference value ``CDi``. The
   drag component of the surface forces is kept as ``CDi_nearfield``.
+* Far-field lateral diagnostics (Trefftz plane): the side force of the
+  trailing vortex sheet ``CY_farfield`` (wind axes) and the yawing moment of
+  the induced-drag distribution ``Cn_trefftz`` (stability axes). The
+  near-field ``CY`` and ``Cn`` stay the result values.
 * Profile drag: section polar ``Cd(alpha_eff)`` on every strip.
 * Section pitching moment: ``Cm(alpha_eff)`` about the quarter chord
   (``Cm0`` for a linear airfoil), added as a pure moment.
@@ -172,22 +176,7 @@ def trefftz_induced_drag_batch(
     """
     K, n_s = strip_gammas.shape
     te_l, te_r = lattice.te_left, lattice.te_right
-    d = np.empty((K, 3))
-    for k in range(K):
-        dk = np.asarray(wake_dirs[k], dtype=float)
-        d[k] = dk / np.linalg.norm(dk)
-    # Projection on the plane: p - (p . d) d.
-    dot_l = np.empty((K, n_s))
-    dot_r = np.empty((K, n_s))
-    for k in range(K):
-        dot_l[k] = te_l @ d[k]
-        dot_r[k] = te_r @ d[k]
-    pl = te_l - dot_l[:, :, None] * d[:, None, :]
-    pr = te_r - dot_r[:, :, None] * d[:, None, :]
-    seg = pr - pl
-    seg_len = np.linalg.norm(seg, axis=-1)
-    # Evaluation point at the same span fraction as the control point.
-    q = pl + lattice.cp_frac[:, None] * seg
+    d, pl, pr, seg, seg_len, q = _trefftz_trace(lattice, wake_dirs)
     qn = _cross(d[:, None, :], seg)
     qn /= np.maximum(np.linalg.norm(qn, axis=-1, keepdims=True), 1e-300)
     w_n = np.empty((K, n_s))
@@ -213,11 +202,7 @@ def trefftz_induced_drag_batch(
 
         use_half = False
         if has_half and not _FORCE_FULL_TREFFTZ:
-            case_is_sym = (wake_dirs[k][1] == 0.0) and (ground is None or abs(ground.normal[1]) <= 1e-12)
-            if case_is_sym:
-                sg_max = max(float(np.max(np.abs(sg))), 1e-300)
-                if _close(sg[left], sg[mirror[left]], 1e-12 * sg_max):
-                    use_half = True
+            use_half = _trefftz_case_symmetric(sg, wake_dirs[k], ground, left, mirror)
 
         if use_half:
             prep_r = _trefftz_core_data(lattice, ground is not None, right_only=True)
@@ -229,6 +214,199 @@ def trefftz_induced_drag_batch(
                                                  _trefftz_core_data(lattice, ground is not None))
     D_i = -0.5 * rho * np.sum(strip_gammas * w_n * seg_len, axis=1)
     return D_i, w_n, seg_len
+
+
+def _trefftz_trace(lattice: VortexLattice, wake_dirs: np.ndarray) -> tuple:
+    """Return the trace of the trailing edges in the Trefftz plane of K cases.
+
+    Parameters
+    ----------
+    lattice : VortexLattice
+        The lattice.
+    wake_dirs : (K, 3)
+        Wake direction of each case (the normal of its Trefftz plane).
+
+    Returns
+    -------
+    tuple
+        ``(d, pl, pr, seg, seg_len, q)``: the unit plane normals (K, 3), the
+        left and right trailing-edge points projected on the plane
+        (K, n_strips, 3) [m], the trace segment ``pr - pl`` of each strip
+        (K, n_strips, 3) [m], its length (K, n_strips) [m], and the
+        evaluation point of each strip at the span fraction of its control
+        point (K, n_strips, 3) [m].
+    """
+    wake_dirs = np.asarray(wake_dirs, dtype=float)
+    K = wake_dirs.shape[0]
+    n_s = lattice.n_strips
+    te_l, te_r = lattice.te_left, lattice.te_right
+    d = np.empty((K, 3))
+    for k in range(K):
+        dk = np.asarray(wake_dirs[k], dtype=float)
+        d[k] = dk / np.linalg.norm(dk)
+    # Projection on the plane: p - (p . d) d.
+    dot_l = np.empty((K, n_s))
+    dot_r = np.empty((K, n_s))
+    for k in range(K):
+        dot_l[k] = te_l @ d[k]
+        dot_r[k] = te_r @ d[k]
+    pl = te_l - dot_l[:, :, None] * d[:, None, :]
+    pr = te_r - dot_r[:, :, None] * d[:, None, :]
+    seg = pr - pl
+    seg_len = np.linalg.norm(seg, axis=-1)
+    # Evaluation point at the same span fraction as the control point.
+    q = pl + lattice.cp_frac[:, None] * seg
+    return d, pl, pr, seg, seg_len, q
+
+
+def _trefftz_case_symmetric(
+    sg: np.ndarray,
+    wake_dir: np.ndarray,
+    ground: GroundPlane | None,
+    left: np.ndarray,
+    mirror: np.ndarray,
+) -> bool:
+    """Return True if one Trefftz-plane case is symmetric about y = 0.
+
+    The lattice must allow the fold (the caller checks it). The case is
+    symmetric when the wake direction and the ground normal have no y
+    component and the circulation *sg* [m^2/s] of each left strip equals
+    that of its mirror strip (to 1e-12 of the largest value).
+    """
+    case_is_sym = (wake_dir[1] == 0.0) and (ground is None or abs(ground.normal[1]) <= 1e-12)
+    if not case_is_sym:
+        return False
+    sg_max = max(float(np.max(np.abs(sg))), 1e-300)
+    return _close(sg[left], sg[mirror[left]], 1e-12 * sg_max)
+
+
+def trefftz_lateral_batch(
+    lattice: VortexLattice,
+    strip_gammas: np.ndarray,
+    w_n: np.ndarray,
+    wake_dirs: np.ndarray,
+    conditions: list[FlightCondition],
+    grounds: list[GroundPlane | None],
+    S_ref: float,
+    b_ref: float,
+    ref_point: np.ndarray | None = None,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Far-field lateral diagnostics from the Trefftz plane for K cases on the same lattice.
+
+    Two values per case, next to the near-field ``CY`` and ``Cn``:
+
+    * ``CY_farfield``: the Kutta-Joukowski force of the trailing vortex
+      sheet in the Trefftz plane. Each strip trace segment ``ds`` (from the
+      left to the right trailing-edge point, projected on the plane) with
+      the circulation ``Gamma`` gives ``F = rho V_inf Gamma (V_hat x ds)``
+      [N], with ``V_hat`` the free-stream direction. ``CY_farfield`` is the
+      sum of the components along the wind-axis side direction
+      (``lift_direction x V_hat``, positive to the right), divided by
+      ``q S_ref``.
+    * ``Cn_trefftz``: the yawing moment of the Trefftz-plane induced-drag
+      distribution about the moment reference point, in stability axes.
+      The induced drag of a strip is ``D'_i = -0.5 rho Gamma_i w_n,i
+      |ds_i|`` [N] (the distribution of :func:`trefftz_induced_drag_batch`,
+      along the free stream). Its arm is the vector from the reference
+      point to the strip evaluation point, both projected on the Trefftz
+      plane. ``Cn_trefftz = -(sum arm_i x D'_i V_hat) . z_s / (q S_ref
+      b_ref)``, with ``z_s`` the stability z axis (the lift direction, up
+      in the geometry axes). With the lateral arm ``y_i`` along the side
+      direction this is ``sum D'_i y_i / (q S_ref b_ref)``: more drag on
+      the right wing gives ``Cn > 0`` (nose right), as for ``Cn``.
+
+    The trace is the trace of the induced drag (the trailing edges of the
+    lattice; a deflected control turns the panel normals and does not move
+    the trailing edge). In ground effect the normal wash ``w_n`` includes
+    the image wake, as in the induced drag. A symmetric case (the cases
+    where :func:`trefftz_induced_drag_batch` evaluates one half) gives 0
+    exactly for both values.
+
+    Parameters
+    ----------
+    lattice : VortexLattice
+        The lattice of all cases.
+    strip_gammas : (K, n_strips)
+        Circulation of every strip [m^2/s].
+    w_n : (K, n_strips)
+        Normal wash in the Trefftz plane [m/s] (from
+        :func:`trefftz_induced_drag_batch`).
+    wake_dirs : (K, 3)
+        Wake direction of each case (the normal of its Trefftz plane).
+    conditions : list of FlightCondition
+        Flight condition of each case (speed [m/s], density [kg/m^3],
+        alpha and beta [rad]).
+    grounds : list of GroundPlane or None
+        Ground plane of each case.
+    S_ref : float
+        Reference area [m^2].
+    b_ref : float
+        Reference span [m].
+    ref_point : (3,) or None
+        Moment reference point [m]. None is the origin.
+
+    Returns
+    -------
+    CY_farfield : (K,)
+        Far-field side-force coefficient in wind axes [-].
+    Cn_trefftz : (K,)
+        Yawing-moment coefficient of the induced-drag distribution in
+        stability axes [-].
+
+    References
+    ----------
+    * J. Katz and A. Plotkin, "Low-Speed Aerodynamics", 2nd ed., Cambridge
+      University Press, 2001: the Kutta-Joukowski force and the Trefftz
+      plane.
+    * M. Drela, "Flight Vehicle Aerodynamics", MIT Press, 2014: the
+      far-field force of the trailing vortex sheet in the Trefftz plane.
+    """
+    G = np.asarray(strip_gammas, dtype=float)
+    W = np.asarray(w_n, dtype=float)
+    K = G.shape[0]
+    WD = np.asarray(wake_dirs, dtype=float).reshape(K, 3)
+    rp = np.zeros(3) if ref_point is None else np.asarray(ref_point, dtype=float)
+    # All cases at once (the GPU pipelines call this on the host for the whole batch).
+    # Projection on the plane: p - (p . d) d. The two sums use the triple
+    # product: (u x ds) . y = ds . (y x u), and (a x D' u) . z = D' a . (u x z).
+    d = WD / np.linalg.norm(WD, axis=1, keepdims=True)
+    te_l, te_r = lattice.te_left, lattice.te_right
+    dte = te_r - te_l                                              # (n_s, 3)
+    p_cp = te_l + lattice.cp_frac[:, None] * dte                   # evaluation points before the projection
+    V = np.array([float(c.V_inf) for c in conditions])
+    rho = np.array([float(c.rho) for c in conditions])
+    alpha = np.array([float(c.alpha) for c in conditions])
+    beta = np.array([float(c.beta) for c in conditions])
+    ca, sa, cb, sb = np.cos(alpha), np.sin(alpha), np.cos(beta), np.sin(beta)
+    D = np.stack([ca * cb, -sb, sa * cb], axis=1)                  # free-stream direction
+    L = np.stack([-sa, np.zeros(K), ca], axis=1)                   # lift direction (stability z, up)
+    S = _cross(L, D)                                               # wind-axis side direction
+    qS = 0.5 * rho * V * V * float(S_ref)
+    u_cy = _cross(S, D)                                            # (K, 3)
+    u_cn = _cross(D, L)                                            # (K, 3)
+    dte_d = dte @ d.T                                              # (n_s, K)
+    # ds . u = dte . u - (dte . d)(d . u)
+    seg_u = (dte @ u_cy.T - dte_d * np.sum(d * u_cy, axis=1)[None, :]).T
+    cy = rho * V * np.sum(G * seg_u, axis=1) / qS
+    seg_len = np.sqrt(np.maximum(np.sum(dte * dte, axis=1)[:, None] - dte_d * dte_d, 0.0)).T
+    Dp = -0.5 * rho[:, None] * G * W * seg_len
+    # The arm is (q - rp) projected on the plane: a . u = (p - rp) . u - ((p - rp) . d)(d . u).
+    rel = p_cp - rp[None, :]
+    arm_u = (rel @ u_cn.T - (rel @ d.T) * np.sum(d * u_cn, axis=1)[None, :]).T
+    cn = -np.sum(Dp * arm_u, axis=1) / (qS * float(b_ref))
+    # Symmetric cases: both values are 0 exactly. The rule is the rule of
+    # _trefftz_case_symmetric, for all cases at once.
+    left = np.flatnonzero(~lattice.strip_is_right)
+    if lattice.can_fold_symmetry() and 0 < left.size < lattice.n_strips:
+        flat = np.array([g is None or abs(g.normal[1]) <= 1e-12 for g in grounds], dtype=bool)
+        cand = (WD[:, 1] == 0.0) & flat
+        if cand.any():
+            g_max = np.maximum(np.max(np.abs(G), axis=1), 1e-300)
+            same = np.all(np.abs(G[:, left] - G[:, lattice.strip_mirror[left]]) <= 1e-12 * g_max[:, None], axis=1)
+            sym = cand & same
+            cy[sym] = 0.0
+            cn[sym] = 0.0
+    return cy, cn
 
 
 def _trefftz_core_data(lattice: VortexLattice, with_images: bool, right_only: bool = False) -> tuple:
@@ -611,6 +789,7 @@ def compute_loads_batch(
     # --- Trefftz plane ----------------------------------------------------------
     D_i, w_n, seg_len = trefftz_induced_drag_batch(lattice, strip_gamma, WD, rho, grounds)
     Cd_i = -strip_gamma * w_n * seg_len / (V[:, None] * V[:, None] * chord * width)
+    CY_ff, Cn_tr = trefftz_lateral_batch(lattice, strip_gamma, w_n, WD, conditions, grounds, S_ref, b_ref, rp)
 
     # --- totals and spanwise output per case ------------------------------------
     F_prof_sum = F_prof.sum(axis=1)
@@ -639,6 +818,7 @@ def compute_loads_batch(
             Cd_profile=Cd_p[k] if hp else None, alpha_eff=alpha_eff[k], alpha_i=alpha_i[k],
             local_lift_factor=rVk, Cm_section=Cm_s[k], strip_force=F_strip[k], trefftz_normalwash=w_n[k],
             force_total=F_total, moment_total=M,
+            CY_farfield=float(CY_ff[k]), Cn_trefftz=float(Cn_tr[k]),
         ))
     return out
 
@@ -687,6 +867,8 @@ def loads_result(
     trefftz_normalwash: np.ndarray,
     force_total: np.ndarray,
     moment_total: np.ndarray,
+    CY_farfield: float | None = None,
+    Cn_trefftz: float | None = None,
 ) -> LoadsResult:
     """Return the :class:`LoadsResult` of one case from its integrated values and its strip arrays.
 
@@ -694,6 +876,8 @@ def loads_result(
     (:mod:`ventorum.gpu`) make their result objects here. The strip arrays
     (shape (n_strips,)) are split per surface; ``local_lift_factor`` is
     ``rho * V_inf`` [kg/(m^2 s)], so the local lift is ``rho V Gamma`` [N/m].
+    ``CY_farfield`` and ``Cn_trefftz`` are the far-field lateral diagnostics
+    of :func:`trefftz_lateral_batch` (None if not computed).
     """
     totals = IntegratedResult(
         CL=CL,
@@ -707,6 +891,8 @@ def loads_result(
         Cn=Cn,
         CY=CY,
         CDi_nearfield=CDi_nearfield,
+        CY_farfield=CY_farfield,
+        Cn_trefftz=Cn_trefftz,
     )
     chord = lattice.chord
     spanwise: list[SpanwiseResult] = []

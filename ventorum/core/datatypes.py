@@ -1219,6 +1219,13 @@ class IntegratedResult:
     * ``CDi_nearfield`` is the induced drag from the forces on the surface
       (a diagnostic). It is not reliable on swept wings; do not use it in
       place of ``CDi``.
+    * ``CY_farfield`` is the side force of the trailing vortex sheet in the
+      Trefftz plane, in wind axes (positive to the right). ``Cn_trefftz`` is
+      the yawing moment of the Trefftz-plane induced-drag distribution about
+      the moment reference point, in stability axes (``Cn > 0`` nose right).
+      Both are diagnostics that show where the near field is weak; the
+      near-field ``CY`` and ``Cn`` stay the result values. They are None
+      for the Fourier solver.
     * ``Cl``, ``Cm``, ``Cn`` are body-axis moments about the reference point
       in the standard aircraft convention: ``Cl > 0`` right wing down,
       ``Cm > 0`` nose up, ``Cn > 0`` nose right. Static stability needs
@@ -1238,6 +1245,8 @@ class IntegratedResult:
     trust: TrustScore | None = None
     CY: float = 0.0            # Side force coefficient (positive to the right)
     CDi_nearfield: float | None = None  # Induced drag from surface forces (diagnostic)
+    CY_farfield: float | None = None    # Side force from the Trefftz plane, wind axes (diagnostic)
+    Cn_trefftz: float | None = None     # Yaw moment of the Trefftz induced drag, stability axes (diagnostic)
 
     def clone(self) -> IntegratedResult:
         """Fast explicit clone."""
@@ -1255,6 +1264,8 @@ class IntegratedResult:
             trust=self.trust.clone() if self.trust is not None else None,
             CY=self.CY,
             CDi_nearfield=self.CDi_nearfield,
+            CY_farfield=self.CY_farfield,
+            Cn_trefftz=self.Cn_trefftz,
         )
 
     def __copy__(self) -> IntegratedResult:

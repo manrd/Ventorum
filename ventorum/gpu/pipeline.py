@@ -95,7 +95,7 @@ def solve_batch(solver, lattice, conditions: list, settings, S_ref: float, b_ref
     out: list = [None] * K
     for idx, (arrays, infos, umap) in solved:
         res = _results(solver, lattice, [conditions[k] for k in idx], arrays, [setups[k] for k in idx], umap, b_ref,
-                       c_ref, main_surface, t0, share, precision, infos=infos, ref_point=ref_point)
+                       c_ref, main_surface, t0, share, precision, infos=infos, ref_point=ref_point, S_ref=S_ref)
         for k, r in zip(idx, res):
             out[k] = r
     return out
@@ -261,14 +261,30 @@ def _nonlinear(solver, engine, dl, md, cs, lattice, conditions, settings, ground
 
 def _results(solver, lattice, conditions, arrays: dict, setups: list, umap, b_ref: float, c_ref: float,
              main_surface: int, t0: float, share: float, precision: str, infos: list | None = None,
-             ref_point=None) -> list:
-    """Return the result objects of a GPU batch (the loads objects and the CPU result builder)."""
-    from ventorum.aero.loads import loads_result
+             ref_point=None, S_ref: float | None = None) -> list:
+    """Return the result objects of a GPU batch (the loads objects and the CPU result builder).
+
+    The far-field lateral diagnostics (``CY_farfield``, ``Cn_trefftz``) are
+    computed on the host from the strip circulation and the Trefftz-plane
+    normal wash of the GPU (:func:`ventorum.aero.loads.trefftz_lateral_batch`,
+    the CPU equations). *S_ref* [m^2] is the reference area; None gives no
+    far-field values.
+    """
+    from ventorum.aero.loads import loads_result, trefftz_lateral_batch
     from ventorum.solvers.core import SolveInfo
 
     totals = arrays["totals"].tolist()
     span = arrays["span"]
     gammas = arrays["gamma"]
+    K = len(conditions)
+    if S_ref is not None:
+        wds = np.array([st[3] for st in setups], dtype=float).reshape(K, 3)
+        cy_ff, cn_tr = trefftz_lateral_batch(
+            lattice, np.asarray(span[:, 0], dtype=float), np.asarray(arrays["w_n"], dtype=float), wds, conditions,
+            [st[0] for st in setups], S_ref, b_ref, ref_point)
+        cy_ff, cn_tr = cy_ff.tolist(), cn_tr.tolist()
+    else:
+        cy_ff = cn_tr = [None] * K
     # Statistics of the trust score from the GPU (None for a case with a
     # non-finite value: the trust score then names the array).
     stats = [{"max_local_cl": r[1], "max_alpha_eff_deg": r[2], "n_extrema": int(r[3])} if r[0] != 0.0 else None
@@ -284,6 +300,7 @@ def _results(solver, lattice, conditions, arrays: dict, setups: list, umap, b_re
             alpha_eff=span[k, 4], alpha_i=span[k, 5], local_lift_factor=float(cond.rho) * float(cond.V_inf),
             Cm_section=span[k, 7], strip_force=arrays["strip_force"][k], trefftz_normalwash=arrays["w_n"][k],
             force_total=arrays["F_total"][k], moment_total=arrays["M"][k],
+            CY_farfield=cy_ff[k], Cn_trefftz=cn_tr[k],
         )
         info = infos[k] if infos is not None else SolveInfo(symmetric=umap.symmetric)
         res = solver._case_result(lattice, cond, ld, info, gammas[k], st[0], st[1], st[2], st[3], b_ref,
