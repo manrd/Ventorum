@@ -213,10 +213,69 @@ def test_adjoint_vs_richardson(case_id: str, ac: vt.Aircraft, cond: vt.FlightCon
         warnings.simplefilter("ignore")
         out = vt.check_gradients(ac, cond, st, outputs=outputs, wrt=wrt,
                                  n_directions=3, rtol=1e-6, seed=0)
-    assert all(c["compared"] > 0 for c in out["groups"].values()), (case_id, out["groups"])
-    if "nodes" in wrt:
+    groups = {g: c for g, c in out["groups"].items() if not (case_id == "linear" and g == "nodes")}
+    assert all(c["compared"] > 0 for c in groups.values()), (case_id, out["groups"])
+    if "nodes" in wrt and case_id != "linear":
         assert out["groups"]["nodes"]["compared"] > 0, case_id
-    assert out["pass"], (case_id, _failed(out))
+    if case_id == "linear":
+        # The Richardson steps cannot resolve the node directions of the linear
+        # lifting line above the measured noise of the solve: the check skips
+        # them. test_linear_node_gradients_polynomial_fit verifies them.
+        reasons = [r for r in out["reasons"] if "'nodes'" not in r]
+        failed = [k for k, v in out["details"].items() if v["compared"] and not v["passed"]]
+        assert not failed and not reasons, (case_id, _failed(out))
+    else:
+        assert out["pass"], (case_id, _failed(out))
+
+
+def test_linear_node_gradients_polynomial_fit(float64_precision) -> None:
+    """The linear lifting-line node gradients agree with a polynomial fit (1e-6).
+
+    The Richardson reference of check_gradients cannot resolve these node
+    directions above the noise of the solve. A least-squares polynomial of
+    degree 8 through 61 production solves over +/- 1e-5 m along each of 3
+    random node directions gives the directional derivative at 0. The gate
+    is 1e-6 relative to the largest directional derivative of each output.
+    """
+    from ventorum.geometry.deformation import undeformed_nodes
+    from ventorum.sensitivity.check import _apply_node_step, _gather_node_grad, _production_scalars
+
+    case = next(c for c in _parity_cases() if c[0] == "linear")
+    _, ac, cond, st = case
+    outs = ("CL", "CD", "Cm")
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        res = vt.gradients(ac, cond, st, outputs=outs, wrt=("nodes",), axes="body")
+    base_nodes = undeformed_nodes(ac.clone(), st, solver="linear")
+    disp0 = {s.name: (s.node_displacements.clone() if s.node_displacements is not None else None)
+             for s in ac.surfaces}
+    flat = [(s.name, tag, i, c) for s in ac.surfaces for tag in ("le", "te")
+            for i in range(int(base_nodes[s.name]["eta"].shape[0])) for c in range(3)]
+    frozen = [j for j, (name, tag, i, c) in enumerate(flat)
+              if i == 0 and c == 1 and next(s for s in ac.surfaces if s.name == name).is_symmetric]
+    rng = np.random.default_rng(0)
+    t = np.linspace(-1e-5, 1e-5, 61)
+    adj = {o: [] for o in outs}
+    fit = {o: [] for o in outs}
+    for _ in range(3):
+        u = rng.standard_normal(len(flat))
+        u[frozen] = 0.0
+        u /= np.linalg.norm(u)
+        vals = {o: [] for o in outs}
+        for v in t:
+            ac3 = ac.clone()
+            _apply_node_step(ac3, base_nodes, disp0, flat, u, float(v))
+            sc = _production_scalars(ac3, cond, st, "body")
+            for o in outs:
+                vals[o].append(sc[o])
+        for o in outs:
+            coef = np.polynomial.polynomial.polyfit(t / 1e-5, np.asarray(vals[o]), 8)
+            fit[o].append(coef[1] / 1e-5)
+            adj[o].append(float(_gather_node_grad(res.jacobian[o], flat) @ u))
+    for o in outs:
+        scale = max(abs(x) for x in adj[o])
+        err = max(abs(a - f) for a, f in zip(adj[o], fit[o])) / scale
+        assert err <= 1e-6, (o, err, adj[o], fit[o])
 
 
 def test_translation_identity(float64_precision) -> None:
