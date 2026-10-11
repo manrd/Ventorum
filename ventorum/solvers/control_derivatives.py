@@ -65,6 +65,16 @@ class ControlDerivatives:
         Force-coefficient derivatives [1/rad], relative to the free stream.
     Cl, Cm, Cn : float
         Moment-coefficient derivatives [1/rad] in the axes of the result.
+    CY_farfield : float
+        Derivative of the far-field side force of the Trefftz plane (wind
+        axes) [1/rad], from the same differences as ``CY``. A diagnostic:
+        ``CY`` stays the reported value. NaN if the solver gives no value.
+    Cn_trefftz : float
+        Derivative of the yawing moment of the Trefftz-plane induced drag
+        [1/rad], from the same differences as ``Cn``. It stays in the
+        stability axes of the base condition (its own axes) for every
+        ``axes``. A diagnostic: ``Cn`` stays the reported value. NaN if the
+        solver gives no value.
     """
 
     control: str
@@ -77,12 +87,14 @@ class ControlDerivatives:
     Cl: float
     Cm: float
     Cn: float
+    CY_farfield: float = math.nan
+    Cn_trefftz: float = math.nan
 
     def to_dict(self) -> dict[str, Any]:
         """Return the values as a dictionary of plain Python types (non-finite values as None)."""
         out: dict[str, Any] = {"control": self.control, "scheme": self.scheme,
                                "deflection_rad": _json_float(self.deflection), "step_rad": _json_float(self.step)}
-        for k in ("CL", "CD", "CY", "Cl", "Cm", "Cn"):
+        for k in ("CL", "CD", "CY", "Cl", "Cm", "Cn", "CY_farfield", "Cn_trefftz"):
             out[f"{k}_delta_per_rad"] = _json_float(getattr(self, k))
         return out
 
@@ -184,10 +196,16 @@ def _shifted(ac: Aircraft, name: str, d: float) -> Aircraft:
 
 
 def _coefficients(res: SolverResult, use_cd_total: bool) -> np.ndarray:
-    """Return ``[CL, CD, CY, Cl, Cm, Cn]`` (body-axis moments) of a result."""
+    """Return ``[CL, CD, CY, Cl, Cm, Cn, CY_farfield, Cn_trefftz]`` of a result.
+
+    The moments ``Cl, Cm, Cn`` are in body axes; ``Cn_trefftz`` is in
+    stability axes. A far-field value that the result does not give is NaN.
+    """
     t = res.totals
     cd = t.CD_total if (use_cd_total and t.CD_total is not None) else t.CDi
-    return np.array([t.CL, cd, t.CY, t.Cl, t.Cm, t.Cn], dtype=float)
+    cy_ff = math.nan if t.CY_farfield is None else t.CY_farfield
+    cn_tr = math.nan if t.Cn_trefftz is None else t.Cn_trefftz
+    return np.array([t.CL, cd, t.CY, t.Cl, t.Cm, t.Cn, cy_ff, cn_tr], dtype=float)
 
 
 def _hinge_key(m: HingeMoment) -> tuple[str, str, str]:
@@ -303,7 +321,7 @@ def control_derivatives(
 
     def coeffs(r: SolverResult) -> np.ndarray:
         c = _coefficients(r, use_cd_total)
-        c[3:] = rot @ c[3:]
+        c[3:6] = rot @ c[3:6]
         return c
 
     def hinge_ch(r: SolverResult) -> dict[tuple[str, str, str], float]:
@@ -348,6 +366,7 @@ def control_derivatives(
         derivs[name] = ControlDerivatives(
             control=name, deflection=defl[0], step=h, scheme=scheme,
             CL=float(dc[0]), CD=float(dc[1]), CY=float(dc[2]), Cl=float(dc[3]), Cm=float(dc[4]), Cn=float(dc[5]),
+            CY_farfield=float(dc[6]), Cn_trefftz=float(dc[7]),
         )
         for k in keys:
             ch_delta[k][name] = float(dch[k])
@@ -371,6 +390,8 @@ def control_derivatives(
         "one name move together; the left half of an antisymmetric control moves by the opposite amount.",
         f"Moment derivatives in the '{axes}' axes of the base condition, held fixed. CL, CD and CY are relative "
         "to the free stream.",
+        "CY_farfield and Cn_trefftz derivatives are far-field diagnostics from the Trefftz plane (CY_farfield in "
+        "wind axes, Cn_trefftz in stability axes). The near-field derivatives stay the reported values.",
         "Hinge moment positive when it tends to increase the local deflection (trailing edge down on a "
         "horizontal surface). Ch = H / (q S_f c_f), S_f the flap area aft of the hinge, c_f the "
         "root-mean-square flap chord.",

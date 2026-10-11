@@ -347,6 +347,10 @@ def wing_analysis(
     case_sett = _case_settings(ac, sett, strips, fc)
     res = vt.analyze(ac, fc, case_sett)
     m = metrics_payload(res)
+    # Far-field lateral diagnostics (Trefftz plane): CY_farfield in wind axes,
+    # Cn_trefftz in stability axes for every 'axes' value; None for the Fourier solver.
+    m["CY_farfield"] = rnd(res.totals.CY_farfield)
+    m["Cn_trefftz"] = rnd(res.totals.Cn_trefftz)
     b_ref, c_ref = float(res.b_ref), float(res.c_ref)
     m["Cl"], m["Cm"], m["Cn"] = _apply_axes(
         res.totals.Cl, res.totals.Cm, res.totals.Cn, c["alpha_deg"], c["beta_deg"], ax,
