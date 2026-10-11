@@ -1,6 +1,6 @@
 # Author: Manuel Alejandro Rodriguez Diaz, PhD
 """
-Tests for agent tool input schemas across LLM clients (T-0052).
+Tests for agent tool input schemas across LLM clients.
 """
 
 from __future__ import annotations
@@ -273,7 +273,7 @@ def test_batch_candidates_forms():
 
 
 def test_batch_candidate_without_geometry_key_is_refused():
-    # Review T-0052: a bare surface object as a candidate was silently taken as 'wing'
+    # Review: a bare surface object as a candidate was silently taken as 'wing'
     # (decision 3: exactly one of the keys 'wing' or 'aircraft').
     res = call_tool("ventorum_batch_evaluate", {
         "candidates": [{"wing": RECT}, {"name": "bare", **RECT}],
@@ -287,7 +287,7 @@ def test_batch_candidate_without_geometry_key_is_refused():
 
 
 def test_batch_candidate_takes_only_wing_or_aircraft():
-    # Review T-0052: per-candidate flight_condition and settings are not part of the card.
+    # Review: per-candidate flight_condition and settings are not part of the specification.
     res = call_tool("ventorum_batch_evaluate", {
         "candidates": [{"wing": RECT}, {"wing": RECT, "flight_condition": {"alpha_deg": 2.0}}],
         "settings": FAST,
@@ -301,7 +301,7 @@ def test_batch_candidate_takes_only_wing_or_aircraft():
 
 
 def test_batch_candidate_error_path_names_the_argument():
-    # Review T-0052: the card's example message is "candidates[0].wing: unknown key 'ref_point_m'".
+    # Review: the specified example message is "candidates[0].wing: unknown key 'ref_point_m'".
     res = call_tool("ventorum_batch_evaluate", {
         "candidates": [{"wing": {**RECT, "ref_point_m": [0.0, 0.0, 0.0]}}],
         "settings": FAST,
@@ -321,7 +321,7 @@ def test_aircraft_only_key_in_wing_gives_decision_2_hint():
 
 
 def test_python_polar_sweep_requires_the_alpha_range():
-    # Review T-0052: the agent gave silent defaults (0, 10, 2 deg) to required arguments.
+    # Review: the first version gave silent defaults (0, 10, 2 deg) to required arguments.
     from ventorum.agent import polar_sweep
 
     res = polar_sweep(wing=RECT, settings=FAST)
