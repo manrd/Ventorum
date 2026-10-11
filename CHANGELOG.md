@@ -37,6 +37,10 @@ a minor version can change a public interface.
   index (Roache 1998) with the observed order of Celik et al. (2008). Each bar states its
   convergence state (`monotonic`, `oscillatory`, `not_converged_order`, `divergent` or
   `roundoff`) and its notes. `ErrorBar` and `ErrorBarResult` hold the output.
+- `validation/gpu_gate.py`: one command for the GPU checks of a phase gate (all GPU tests and all
+  examples with `VENTORUM_DEVICE=gpu`, optionally again in float64). It writes a short Markdown log
+  with the versions, the GPU model and one row per step, and no machine identifiers. Exit code 0
+  (pass), 1 (a step failed or timed out) or 2 (no GPU).
 - `validation/perf_history.py`: a speed history of fixed workloads per commit (record mode, which
   times the code of its own tree) and a side-by-side timing of two source trees (compare mode,
   one fresh process per run, alternating order). The output holds no machine identifier.
