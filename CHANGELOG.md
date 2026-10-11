@@ -10,6 +10,18 @@ a minor version can change a public interface.
 
 ### Added
 
+- Error bars, layer 2 (input uncertainty): `input_error_bars` propagates the standard
+  uncertainties of the flow inputs (alpha, beta, phi [rad], V_inf [m/s], rho [kg/m^3], h [m])
+  and of the linear section properties per surface (a0, alpha_L0, Cd0, Cm0, fully correlated
+  along the span) to the six coefficients with the first-order law of the GUM (JCGM 100:2008),
+  with optional correlations of the flow inputs. The half-width is k u_c (default k = 2). The
+  gradients come from the adjoint method; outside its scope the flow inputs use central
+  differences of the production solve and section inputs are refused. Each bar gives the share
+  of each input. `combine_error_bars` combines layers 1 and 2 by root sum of squares. New
+  error-bar statuses `"input_only"` and `"numerical_and_input"`.
+- `GradientScopeError` (a subclass of `ValueError`): the gradients raise it for the
+  configurations that they do not cover yet (nonlinear lifting line, tabulated airfoils,
+  deflected controls, body rates, Fourier solver).
 - Adjoint gradients (phase 1): `gradients` gives exact gradients of the scalar outputs
   (CL, CY, CDi, CDp, CD, Cl, Cm and Cn, in body, stability or wind axes) with respect to
   the lattice nodes, the flow variables, the linear section properties and the reference
