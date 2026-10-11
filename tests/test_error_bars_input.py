@@ -258,6 +258,42 @@ def test_combine_rss(float64_precision):
     assert any("no combined interval" in n for n in bar.notes)
 
 
+def test_combine_without_numerical_cd_bar(float64_precision):
+    """A layer-1 result without a CD bar combines the other bars; a note names CD."""
+    wing = _plain_wing()
+    cond, st = _condition(), _settings()
+    numerical = vt.numerical_error_bars(
+        wing, condition=cond,
+        settings=vt.SolverSettings(solver_type="vlm", n_panels=24, n_chord=2))
+    del numerical.bars["CD"]
+    inputs = vt.input_error_bars(
+        wing, condition=cond, settings=st,
+        uncertainties={"alpha": np.radians(0.1)}, coverage_factor=2.0)
+    combined = vt.combine_error_bars(numerical, inputs)
+    assert set(combined.bars) == set(COEFFICIENT_NAMES) - {"CD"}
+    assert any("'CD'" in n and "layer-1" in n for n in combined.notes)
+    h_num = numerical.bars["CL"].layers["numerical"].half_width
+    h_in = inputs.bars["CL"].layers["input"].half_width
+    assert combined.bars["CL"].half_width == pytest.approx(math.hypot(h_num, h_in))
+    # Other differences of the coefficient sets are still refused.
+    del numerical.bars["CL"]
+    with pytest.raises(ValueError, match="different coefficients"):
+        vt.combine_error_bars(numerical, inputs)
+
+
+def test_half_width_without_input_half_width():
+    """A bar whose input layer has no half-width has no half-width (no TypeError)."""
+    from ventorum.core.error_bars import ErrorBar, LayerContribution
+
+    bar = ErrorBar(
+        name="CL", value=0.5, status="numerical_and_input",
+        layers={
+            "numerical": LayerContribution(half_width=0.01, state="monotonic"),
+            "input": LayerContribution(layer="input", half_width=None, state="propagated"),
+        })
+    assert bar.half_width is None
+
+
 def test_refusals(float64_precision):
     """Negative, non-finite or unknown keys, h in free air, unknown surfaces: ValueError."""
     wing = _plain_wing()

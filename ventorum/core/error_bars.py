@@ -264,7 +264,7 @@ class ErrorBar:
         h_num = num.half_width if num is not None else None
         h_in = inp.half_width if inp is not None else None
         if num is not None and inp is not None:
-            if h_num is None:
+            if h_num is None or h_in is None:
                 return None
             return math.sqrt(h_num * h_num + h_in * h_in)
         if num is not None:
@@ -917,7 +917,10 @@ def combine_error_bars(
     contributions. The half-width is the root sum of squares of the
     independent contributions ``sqrt(h_num^2 + h_input^2)``. The
     interval is centred on the fine-level value of layer 1. A bar whose
-    layer 1 has no interval keeps no interval, and a note says why.
+    layer 1 has no interval keeps no interval, and a note says why. When
+    one result has no CD bar (layer 1 gives none when the drag basis is
+    not the same at the three levels), the other bars are combined and a
+    note names the missing CD bar.
 
     Parameters
     ----------
@@ -934,21 +937,25 @@ def combine_error_bars(
     Raises
     ------
     ValueError
-        If the axes differ or the coefficient sets differ.
+        If the axes differ, or if the coefficient sets differ by more than
+        the CD bar.
     """
     if numerical.axes != inputs.axes:
         raise ValueError(
             f"Cannot combine error bars with different axes: "
             f"{numerical.axes!r} and {inputs.axes!r}."
         )
-    if set(numerical.bars) != set(inputs.bars):
+    # Layer 1 gives no CD bar when the drag basis changes between the mesh
+    # levels. Only a missing CD bar is accepted; it gets a note.
+    missing = set(numerical.bars) ^ set(inputs.bars)
+    if missing - {"CD"}:
         raise ValueError(
             f"Cannot combine error bars with different coefficients: "
             f"{sorted(numerical.bars)} and {sorted(inputs.bars)}."
         )
     bars: dict[str, ErrorBar] = {}
     for name in COEFFICIENT_NAMES:
-        if name not in numerical.bars:
+        if name not in numerical.bars or name not in inputs.bars:
             continue
         num_bar = numerical.bars[name]
         in_bar = inputs.bars[name]
@@ -960,9 +967,9 @@ def combine_error_bars(
                 "'numerical' or an 'input' layer."
             )
         h_num = num_layer.half_width
-        h_in = float(in_layer.half_width)
+        h_in = in_layer.half_width
         notes = list(num_bar.notes) + list(in_bar.notes)
-        if h_num is None:
+        if h_num is None or h_in is None:
             notes.append(NO_COMBINED_INTERVAL_NOTE)
             bars[name] = ErrorBar(
                 name=name,
@@ -977,6 +984,7 @@ def combine_error_bars(
                 gradient_methods=dict(in_bar.gradient_methods),
             )
         else:
+            h_in = float(h_in)
             half = math.sqrt(h_num * h_num + h_in * h_in)
             value = float(num_bar.value)
             bars[name] = ErrorBar(
@@ -992,6 +1000,12 @@ def combine_error_bars(
                 gradient_methods=dict(in_bar.gradient_methods),
             )
     notes = list(numerical.notes) + list(inputs.notes) + [COMBINED_NOTE]
+    if "CD" in missing:
+        lacking = "layer-1" if "CD" not in numerical.bars else "layer-2"
+        notes.append(
+            f"no combined 'CD' bar: the {lacking} result has no 'CD' bar, "
+            "so only the other bars are combined"
+        )
     return ErrorBarResult(
         bars=bars,
         axes=numerical.axes,
