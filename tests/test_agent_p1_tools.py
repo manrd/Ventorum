@@ -357,7 +357,7 @@ def test_new_schemas_export():
     """All four formats export the new tools; nested arrays keep items in Gemini."""
     for fmt in ("openai", "anthropic", "gemini", "mcp"):
         schemas = get_tool_schemas(fmt)
-        assert len(schemas) == 11
+        assert len(schemas) == 12
         strict_json(schemas)
     gemini = {t["name"]: t for t in get_tool_schemas("gemini")}
     wing_props = gemini["ventorum_wing_analysis"]["parameters"]["properties"]["wing"]["properties"]
