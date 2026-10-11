@@ -96,11 +96,22 @@ def seg_vel(P: torch.Tensor, A: torch.Tensor, B: torch.Tensor, rc2: torch.Tensor
     n2 = torch.sqrt((r2 * r2).sum(-1) + 1e-300)
     t1 = r1 / n1[..., None]
     t2 = r2 / n2[..., None]
-    proj = (
+    proj_in = (
         r0[..., 0] * (t1[..., 0] - t2[..., 0])
         + r0[..., 1] * (t1[..., 1] - t2[..., 1])
         + r0[..., 2] * (t1[..., 2] - t2[..., 2])
     )
+    # The same projection without cancellation where r1 . r2 > 0 (target
+    # not over the segment): r0 . (t1 - t2) = |r1 x r2|^2 (n1 + n2) /
+    # (n1 n2 (n1 n2 + r1 . r2)). The direct form loses digits there (t1 and
+    # t2 are almost equal), and its partial derivatives carry O(1/rc^2)
+    # round-off noise at points near the extension of the segment.
+    dot12 = (r1 * r2).sum(-1)
+    n12 = n1 * n2
+    out_side = dot12 > 0.0
+    den_out = torch.where(out_side, n12 * (n12 + dot12), torch.ones_like(n12))
+    proj_out = cr2 * (n1 + n2) / den_out
+    proj = torch.where(out_side, proj_out, proj_in)
     denom = cr2 + rc2 * r0sq
     ok = denom > 1e-300
     safe = torch.where(ok, denom, torch.ones_like(denom))
@@ -117,11 +128,16 @@ def ray_vel(P: torch.Tensor, A: torch.Tensor, d: torch.Tensor, rc2: torch.Tensor
     cz = dd[..., 0] * r[..., 1] - dd[..., 1] * r[..., 0]
     cr2 = cx * cx + cy * cy + cz * cz
     rn = torch.sqrt((r * r).sum(-1) + 1e-300)
-    cos_t = (dd * r).sum(-1) / rn
+    dr = (dd * r).sum(-1)
+    # 1 + cos(t) for a unit d. Behind the start point (d . r < 0) the same
+    # value without cancellation: |d x r|^2 / (rn (rn - d . r)).
+    behind = dr < 0.0
+    den_b = torch.where(behind, rn * (rn - dr), torch.ones_like(rn))
+    one_cos = torch.where(behind, cr2 / den_b, 1.0 + dr / rn)
     denom = cr2 + rc2
     ok = denom > 1e-300
     safe = torch.where(ok, denom, torch.ones_like(denom))
-    k = torch.where(ok, (1.0 / (4.0 * math.pi)) * (1.0 + cos_t) / safe, torch.zeros_like(cos_t))
+    k = torch.where(ok, (1.0 / (4.0 * math.pi)) * one_cos / safe, torch.zeros_like(one_cos))
     return torch.stack((cx * k, cy * k, cz * k), dim=-1)
 
 
@@ -168,6 +184,16 @@ def kahan_sum(x: torch.Tensor, dim: int) -> torch.Tensor:
         c = (t - s) - y
         s = t
     return s.reshape(rest)
+
+
+def _rows(x: torch.Tensor | None, i0: int, i1: int) -> torch.Tensor | None:
+    """Return rows i0:i1 of *x*, or None."""
+    return None if x is None else x[i0:i1]
+
+
+def _chunked(fn, m: int, step: int, *tensors: torch.Tensor) -> torch.Tensor:  # type: ignore[no-untyped-def]
+    """Evaluate fn(i0, i1, *tensors) in row chunks of *step* rows and join the rows."""
+    return torch.cat([fn(i0, min(m, i0 + step), *tensors) for i0 in range(0, m, step)], dim=0)
 
 
 class TorchReference:
@@ -355,6 +381,23 @@ class TorchReference:
             s_group = torch.cat((src_group, src_group), dim=0)
             s_col = torch.cat((col, col), dim=0)
 
+        # Topology ids of the sources for the on-segment masks: the panel of
+        # each bound segment and the lattice edge of each leg. Images get -2:
+        # no target lies on an image segment by construction.
+        edges = b["strip_edges"]
+        pid = torch.arange(n_p, dtype=torch.int64, device=self.device)
+        ea = edges[panel_strip, 0]
+        eb = edges[panel_strip, 1]
+        if h is not None:
+            img = torch.full((n_p,), -2, dtype=torch.int64, device=self.device)
+            pid = torch.cat((pid, img))
+            ea = torch.cat((ea, img))
+            eb = torch.cat((eb, img))
+        b["_src_ids"] = {"panel": pid, "edge_a": ea, "edge_b": eb}
+        panel_ids = torch.arange(n_p, dtype=torch.int64, device=self.device)
+        edge_l_panel = edges[panel_strip, 0]
+        edge_r_panel = edges[panel_strip, 1]
+
         rc2_src = s_rc * s_rc
         tg_group = tgt_group_unk
         tg_rc = tgt_rc_unk
@@ -371,9 +414,11 @@ class TorchReference:
             a0_u = a0[b["strip_of_unknown"]]
             aL0_u = aL0[b["strip_of_unknown"]]
             normal_u = normal[b["strip_of_unknown"]]
+            # The collocation point of a lifting-line strip lies on its own
+            # bound segment.
             Vt = self._tensor_unknowns(cp_u, s_a, s_b, s_ate, s_bte, s_wd,
                                        rc2_src, s_group, s_sign, s_col, n_u,
-                                       tg_group, tg_rc)
+                                       tg_group, tg_rc, own=b["unknown_panels"])
             a_ind = torch.einsum("ijk,ik->ij", Vt, normal_u)
             cross_dl = torch.linalg.cross(d.expand_as(dl_u), dl_u)
             diag = 2.0 * torch.linalg.norm(cross_dl, dim=1) / (a0_u * area_u)
@@ -395,18 +440,19 @@ class TorchReference:
             mid_e = mid[right]
             tgt_ge = tgt_group_panel[right]
             tgt_re = tgt_rc_panel[right]
+            own_e = panel_ids[right]
         else:
             mid_e = mid
             tgt_ge = tgt_group_panel
             tgt_re = tgt_rc_panel
+            own_e = panel_ids
+        # The load point of a panel lies on its own bound segment.
         if h is None:
             g_e = g_panel * s_sign
-            v_e = self._induced(mid_e, s_a, s_b, s_ate, s_bte, s_wd, rc2_src,
-                                s_group, g_e, tgt_ge, tgt_re)
         else:
             g_e = torch.cat((g_panel, g_panel), dim=0) * s_sign
-            v_e = self._induced(mid_e, s_a, s_b, s_ate, s_bte, s_wd, rc2_src,
-                                s_group, g_e, tgt_ge, tgt_re)
+        v_e = self._induced(mid_e, s_a, s_b, s_ate, s_bte, s_wd, rc2_src,
+                            s_group, g_e, tgt_ge, tgt_re, own=own_e)
         if fold:
             right = b["right_panels"]
             left = b["left_panels"]
@@ -444,8 +490,11 @@ class TorchReference:
                 leg_e = torch.cat((la_e, lb_e), dim=0)
                 ltgt_g = torch.cat((tgt_ge, tgt_ge), dim=0)
                 ltgt_r = torch.cat((tgt_re, tgt_re), dim=0)
+                # A leg mid-point lies on the line of its edge, so also on
+                # the legs of the other panels that use the same edge.
+                ledge = torch.cat((edge_l_panel[right], edge_r_panel[right]), dim=0)
                 v_leg_e = self._induced(leg_e, s_a, s_b, s_ate, s_bte, s_wd, rc2_src,
-                                        s_group, g_leg_src, ltgt_g, ltgt_r)
+                                        s_group, g_leg_src, ltgt_g, ltgt_r, edge=ledge)
                 n_r = right.shape[0]
                 pos = pos_all
                 mir_right = pos[pm[left]]
@@ -455,8 +504,10 @@ class TorchReference:
                 v_leg[left] = v_leg_e[n_r + mir_right] * mir
                 v_leg[n_p + left] = v_leg_e[mir_right] * mir
             else:
+                ledge = torch.cat((edge_l_panel, edge_r_panel), dim=0)
                 v_leg = self._induced(leg_mid, s_a, s_b, s_ate, s_bte, s_wd, rc2_src,
-                                      s_group, g_leg_src, leg_tgt_group, leg_tgt_rc)
+                                      s_group, g_leg_src, leg_tgt_group, leg_tgt_rc,
+                                      edge=ledge)
             U_leg = (V * d).expand_as(v_leg)
             V_leg = U_leg + v_leg
             Vn = (V_leg * leg_normal).sum(-1)
@@ -563,22 +614,66 @@ class TorchReference:
         b_te: torch.Tensor,
         d: torch.Tensor,
         rc2: torch.Tensor,
+        own: torch.Tensor | None = None,
+        edge: torch.Tensor | None = None,
+        src: dict | None = None,
     ) -> torch.Tensor:
         """Unit-circulation velocity of bent horseshoes at P (differentiable).
 
-        With pairwise or Kahan accumulation the five leg terms are added in
-        pairs, so the cancellation of each vortex pair keeps fewer digits.
+        Parameters
+        ----------
+        P : torch.Tensor
+            Target points [m], shape (rows, 3).
+        a, b, a_te, b_te : torch.Tensor
+            Source horseshoe corners [m], shape (n_src, 3).
+        d : torch.Tensor
+            Trailing directions of the sources, shape (n_src, 3).
+        rc2 : torch.Tensor
+            Squared core radii [m^2], shape (rows, n_src).
+        own : torch.Tensor or None
+            Per target the panel whose bound segment holds the target, or -1.
+        edge : torch.Tensor or None
+            Per target the lattice edge whose line holds the target, or -1.
+        src : dict or None
+            Topology ids of the sources (panel, edge_a, edge_b); None takes
+            the ids of the last forward pass.
+
+        Returns
+        -------
+        torch.Tensor
+            Velocity per unit circulation [1/m], shape (rows, n_src, 3).
+
+        Notes
+        -----
+        A target that lies on a source segment by construction (a load
+        point on its own bound segment, a leg mid-point on the legs of the
+        same edge line) stays on that segment for every node motion, so the
+        induced velocity of that pair is identically zero. The kernel value
+        there is zero, but its partial derivatives are O(1/rc^2) terms that
+        cancel only in exact arithmetic. These pairs are set to zero by the
+        mesh topology (index masks), not by a distance threshold: a
+        threshold would also remove real collinear terms of other strips.
         """
+        bound = seg_vel(P, a, b, rc2)
+        leg_a = seg_vel(P, a_te, a, rc2)
+        leg_b = seg_vel(P, b, b_te, rc2)
+        if src is None:
+            src = self.b.get("_src_ids")
+        if src is not None and own is not None:
+            keep = own[:, None] != src["panel"][None, :]
+            bound = torch.where(keep[..., None], bound, torch.zeros_like(bound))
+        if src is not None and edge is not None:
+            keep_a = edge[:, None] != src["edge_a"][None, :]
+            keep_b = edge[:, None] != src["edge_b"][None, :]
+            leg_a = torch.where(keep_a[..., None], leg_a, torch.zeros_like(leg_a))
+            leg_b = torch.where(keep_b[..., None], leg_b, torch.zeros_like(leg_b))
+        ray_b = ray_vel(P, b_te, d, rc2)
+        ray_a = ray_vel(P, a_te, d, rc2)
         mode = self.b.get("accum", "sequential")
         if mode == "sequential":
-            return horseshoe_vel(P, a, b, a_te, b_te, d, rc2)
-        terms = torch.stack((
-            seg_vel(P, a, b, rc2),
-            seg_vel(P, a_te, a, rc2),
-            seg_vel(P, b, b_te, rc2),
-            ray_vel(P, b_te, d, rc2),
-            -ray_vel(P, a_te, d, rc2),
-        ), dim=0)
+            # Same order of addition as horseshoe_vel.
+            return (bound + leg_a + leg_b) + ray_b - ray_a
+        terms = torch.stack((bound, leg_a, leg_b, ray_b, -ray_a), dim=0)
         if mode == "pairwise":
             return pairwise_sum(terms, 0)
         return kahan_sum(terms, 0)
@@ -603,57 +698,75 @@ class TorchReference:
                        bv: torch.Tensor, a_te: torch.Tensor, b_te: torch.Tensor,
                        wd: torch.Tensor, rc2_src: torch.Tensor, grp: torch.Tensor,
                        sign: torch.Tensor, col: torch.Tensor, n_u: int,
-                       tg_group: torch.Tensor | None, tg_rc: torch.Tensor | None) -> torch.Tensor:
+                       tg_group: torch.Tensor | None, tg_rc: torch.Tensor | None,
+                       own: torch.Tensor | None = None,
+                       edge: torch.Tensor | None = None) -> torch.Tensor:
         """Normal-velocity influence matrix with folded columns (chunked)."""
         m = P.shape[0]
-        n_src = a.shape[0]
-        out = torch.zeros((m, n_u), dtype=self.dtype, device=self.device)
-        step = chunk_rows(m, n_src)
-        for i0 in range(0, m, step):
-            i1 = min(m, i0 + step)
-            rc2 = self._rc2_chunk(rc2_src, grp, tg_group, tg_rc, i0, i1)
-            v = self._horseshoe(P[i0:i1], a, bv, a_te, b_te, wd, rc2)
+        src = self.b.get("_src_ids")
+        tgr = tg_rc if tg_group is not None else None
+
+        def _fn(i0: int, i1: int, P: torch.Tensor, N: torch.Tensor, a: torch.Tensor,
+                bv: torch.Tensor, a_te: torch.Tensor, b_te: torch.Tensor, wd: torch.Tensor,
+                rc2_src: torch.Tensor, *rest: torch.Tensor) -> torch.Tensor:
+            tg = rest[0] if rest else None
+            rc2 = self._rc2_chunk(rc2_src, grp, tg_group, tg, i0, i1)
+            v = self._horseshoe(P[i0:i1], a, bv, a_te, b_te, wd, rc2,
+                                _rows(own, i0, i1), _rows(edge, i0, i1), src=src)
             a_src = (v * N[i0:i1, None, :]).sum(-1) * sign[None, :]
             acc = torch.zeros((i1 - i0, n_u), dtype=self.dtype, device=self.device)
-            acc = acc.index_add(1, col, a_src)
-            out[i0:i1] = acc
-        return out
+            return acc.index_add(1, col, a_src)
+
+        args = (P, N, a, bv, a_te, b_te, wd, rc2_src) + ((tgr,) if tgr is not None else ())
+        return _chunked(_fn, m, chunk_rows(m, a.shape[0]), *args)
 
     def _tensor_unknowns(self, P: torch.Tensor, a: torch.Tensor, bv: torch.Tensor,
                          a_te: torch.Tensor, b_te: torch.Tensor, wd: torch.Tensor,
                          rc2_src: torch.Tensor, grp: torch.Tensor, sign: torch.Tensor,
                          col: torch.Tensor, n_u: int, tg_group: torch.Tensor | None,
-                         tg_rc: torch.Tensor | None) -> torch.Tensor:
+                         tg_rc: torch.Tensor | None, own: torch.Tensor | None = None,
+                         edge: torch.Tensor | None = None) -> torch.Tensor:
         """Velocity per unknown at P (chunked)."""
         m = P.shape[0]
-        n_src = a.shape[0]
-        out = torch.zeros((m, n_u, 3), dtype=self.dtype, device=self.device)
-        step = chunk_rows(m, n_src)
-        for i0 in range(0, m, step):
-            i1 = min(m, i0 + step)
-            rc2 = self._rc2_chunk(rc2_src, grp, tg_group, tg_rc, i0, i1)
-            v = self._horseshoe(P[i0:i1], a, bv, a_te, b_te, wd, rc2)
+        src = self.b.get("_src_ids")
+        tgr = tg_rc if tg_group is not None else None
+
+        def _fn(i0: int, i1: int, P: torch.Tensor, a: torch.Tensor, bv: torch.Tensor,
+                a_te: torch.Tensor, b_te: torch.Tensor, wd: torch.Tensor,
+                rc2_src: torch.Tensor, *rest: torch.Tensor) -> torch.Tensor:
+            tg = rest[0] if rest else None
+            rc2 = self._rc2_chunk(rc2_src, grp, tg_group, tg, i0, i1)
+            v = self._horseshoe(P[i0:i1], a, bv, a_te, b_te, wd, rc2,
+                                _rows(own, i0, i1), _rows(edge, i0, i1), src=src)
             v = v * sign[None, :, None]
             acc = torch.zeros((i1 - i0, n_u, 3), dtype=self.dtype, device=self.device)
-            acc = acc.index_add(1, col, v)
-            out[i0:i1] = acc
-        return out
+            return acc.index_add(1, col, v)
+
+        args = (P, a, bv, a_te, b_te, wd, rc2_src) + ((tgr,) if tgr is not None else ())
+        return _chunked(_fn, m, chunk_rows(m, a.shape[0]), *args)
 
     def _induced(self, P: torch.Tensor, a: torch.Tensor, bv: torch.Tensor,
                  a_te: torch.Tensor, b_te: torch.Tensor, wd: torch.Tensor,
                  rc2_src: torch.Tensor, grp: torch.Tensor, g_src: torch.Tensor,
-                 tg_group: torch.Tensor | None, tg_rc: torch.Tensor | None) -> torch.Tensor:
+                 tg_group: torch.Tensor | None, tg_rc: torch.Tensor | None,
+                 own: torch.Tensor | None = None,
+                 edge: torch.Tensor | None = None) -> torch.Tensor:
         """Total induced velocity at P for source strengths *g_src* (chunked)."""
         m = P.shape[0]
-        n_src = a.shape[0]
-        out = torch.zeros((m, 3), dtype=self.dtype, device=self.device)
-        step = chunk_rows(m, n_src)
-        for i0 in range(0, m, step):
-            i1 = min(m, i0 + step)
-            rc2 = self._rc2_chunk(rc2_src, grp, tg_group, tg_rc, i0, i1)
-            v = self._horseshoe(P[i0:i1], a, bv, a_te, b_te, wd, rc2)
-            out[i0:i1] = self._src_sum(v * g_src[None, :, None], 1)
-        return out
+        src = self.b.get("_src_ids")
+        tgr = tg_rc if tg_group is not None else None
+
+        def _fn(i0: int, i1: int, P: torch.Tensor, a: torch.Tensor, bv: torch.Tensor,
+                a_te: torch.Tensor, b_te: torch.Tensor, wd: torch.Tensor,
+                rc2_src: torch.Tensor, g_src: torch.Tensor, *rest: torch.Tensor) -> torch.Tensor:
+            tg = rest[0] if rest else None
+            rc2 = self._rc2_chunk(rc2_src, grp, tg_group, tg, i0, i1)
+            v = self._horseshoe(P[i0:i1], a, bv, a_te, b_te, wd, rc2,
+                                _rows(own, i0, i1), _rows(edge, i0, i1), src=src)
+            return self._src_sum(v * g_src[None, :, None], 1)
+
+        args = (P, a, bv, a_te, b_te, wd, rc2_src, g_src) + ((tgr,) if tgr is not None else ())
+        return _chunked(_fn, m, chunk_rows(m, a.shape[0]), *args)
 
     def _trefftz(self, te_l: torch.Tensor, te_r: torch.Tensor, sg: torch.Tensor,
                  wd: torch.Tensor, rho: torch.Tensor, frac: torch.Tensor,
@@ -701,10 +814,10 @@ class TorchReference:
         tg_rc = 0.5 * width
         rc2 = rc * rc
         tg_rc2 = tg_rc * tg_rc
-        out = torch.zeros((m,), dtype=self.dtype, device=self.device)
-        step = max(1, chunk_rows(m, n))
-        for i0 in range(0, m, step):
-            i1 = min(m, i0 + step)
+
+        def _fn(i0: int, i1: int, q: torch.Tensor, qn: torch.Tensor, p: torch.Tensor,
+                gamma: torch.Tensor, d: torch.Tensor, rc2: torch.Tensor,
+                tg_rc2: torch.Tensor) -> torch.Tensor:
             r = q[i0:i1, None, :] - p[None, :, :]
             vx = d[1] * r[..., 2] - d[2] * r[..., 1]
             vy = d[2] * r[..., 0] - d[0] * r[..., 2]
@@ -715,8 +828,9 @@ class TorchReference:
             k = (1.0 / (2.0 * math.pi)) * gamma[None, :] / ((r * r).sum(-1) + c2)
             qq = qn[i0:i1, None, :]
             wn = (vx * qq[..., 0] + vy * qq[..., 1] + vz * qq[..., 2]) * k
-            out[i0:i1] = self._src_sum(wn, 1)
-        return out
+            return self._src_sum(wn, 1)
+
+        return _chunked(_fn, m, max(1, chunk_rows(m, n)), q, qn, p, gamma, d, rc2, tg_rc2)
 
     def _axes_moments(self, Cl: torch.Tensor, Cm: torch.Tensor, Cn: torch.Tensor,
                       alpha: torch.Tensor, beta: torch.Tensor,
