@@ -1120,3 +1120,50 @@ def test_float32_reference_with_target_on_end_point(device: str, restore_vjp_bac
     assert res["float32"].forward_mismatch <= 1e-4
     _assert_same_gradients_per_output(res["float64"], res["float32"], outs, 1e-3, f"wtf-flap0:{device}")
 
+
+def test_check_noise_bound_skips_noisy_reference() -> None:
+    """A finite-difference reference at the noise level of the solve is skipped, not compared.
+
+    Regression: the round-off bound of the node directions was eps max(abs(f))
+    / h, but a node motion changes the rounding of the whole lattice. The
+    measured noise of the production solve was about 80 eps max(abs(f)) on the
+    wing and tail in ground effect with one chordwise panel, and the check
+    reported a false failure of 2e-6.
+    """
+    from ventorum.sensitivity import check as C
+
+    rng = np.random.default_rng(3)
+    sigma = 1e-14
+    slope = 0.03
+
+    def get(x: float) -> dict[str, float]:
+        return {"CL": 0.6 + slope * x + 5.0 * x * x + sigma * float(rng.standard_normal())}
+
+    noise = C._noise_level(get, 0.0, 1e-10, ("CL",))
+    assert 0.3 * sigma <= noise["CL"] <= 3.0 * sigma, noise
+    eps = float(np.finfo(np.float64).eps)
+    h = 2.5e-7
+    _, _, rnd_eps = C._richardson(get, 0.0, h, ("CL",), eps)["CL"]
+    _, _, rnd = C._richardson(get, 0.0, h, ("CL",), eps, noise)["CL"]
+    # The eps model claims a resolved reference; the measured noise does not.
+    assert rnd_eps <= 0.1 * 1e-6 * slope
+    assert rnd > 0.1 * 1e-6 * slope
+    assert rnd >= C._NOISE_FACTOR * noise["CL"] / h
+
+
+@pytest.mark.slow
+def test_check_ground_effect_one_chordwise_panel(float64_precision, cpu_device) -> None:
+    """check_gradients passes (1e-6) on the wing and tail in ground effect with one chordwise panel.
+
+    Regression of a false failure (CL along a node direction, 2.1e-6): the
+    adjoint gradient agrees with a polynomial fit of 61 production solves
+    to 1e-8, but the finite-difference reference had the noise of the
+    production solve, which the eps model of the round-off did not include.
+    """
+    case_id, ac, cond, st = _difficult_cases()[0]
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        out = vt.check_gradients(ac, cond, st, outputs=("CL", "CD", "Cm", "Cn"), wrt=_full_wrt(cond),
+                                 n_directions=3, rtol=1e-6, seed=0, method="reference")
+    assert out["pass"], _failed(out)
+    assert out["groups"]["nodes"]["compared"] > 0

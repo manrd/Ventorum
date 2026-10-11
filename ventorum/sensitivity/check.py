@@ -30,6 +30,13 @@ _STEP_FACTORS = (1.0, 0.3, 0.1)
 # its error bound cannot be compared relatively (see check_gradients).
 _ZERO_FACTOR = 10.0
 
+# Noise probe of the node directions: the number of points, their spacing
+# as a fraction of the node step, and the factor of the measured noise
+# level in the round-off bound (see _noise_level and _richardson).
+_NOISE_POINTS = 10
+_NOISE_SPACING = 1e-3
+_NOISE_FACTOR = 6.0
+
 
 def _production_scalars(geometry: Any, condition: Any, settings: Any, axes: str) -> dict[str, float]:
     """Return the scalar outputs of one production solve in *axes*."""
@@ -51,14 +58,18 @@ def _production_scalars(geometry: Any, condition: Any, settings: Any, axes: str)
 
 
 def _richardson(get: Any, x0: float, h: float, outs: tuple[str, ...],
-                eps: float) -> dict[str, tuple[float, float, float]]:
+                eps: float, noise: dict[str, float] | None = None
+                ) -> dict[str, tuple[float, float, float]]:
     """Return per output (reference, error estimate, round-off level).
 
     Central differences with steps h and h/2 of the vector function *get*
     (a dict of outputs). The reference is (4 FD(h/2) - FD(h)) / 3, the
     estimate abs(FD(h) - FD(h/2)) / 3, and the round-off level of the
-    differences eps * max(abs(f)) / h (*eps* is the machine epsilon of the
-    production solve).
+    differences 2 eps max(abs(f)) / h (*eps* is the machine epsilon of the
+    production solve). When *noise* gives the measured noise level sigma
+    of an output (see :func:`_noise_level`), the round-off level is the
+    larger of that value and 6 sigma / h: the noise of the Richardson
+    value is 1.9 sigma / h, and 6 sigma / h is about three times that.
     """
     f_p_h = get(x0 + h)
     f_m_h = get(x0 - h)
@@ -71,15 +82,46 @@ def _richardson(get: Any, x0: float, h: float, outs: tuple[str, ...],
         est = abs(fd_h - fd_h2) / 3.0
         ref = (4.0 * fd_h2 - fd_h) / 3.0
         size = max(abs(f_p_h[o]), abs(f_m_h[o]), abs(f_p_h2[o]), abs(f_m_h2[o]))
-        out[o] = (float(ref), float(est), float(eps * size / (0.5 * h)))
+        rnd = eps * size / (0.5 * h)
+        if noise is not None:
+            rnd = max(rnd, _NOISE_FACTOR * noise[o] / h)
+        out[o] = (float(ref), float(est), float(rnd))
+    return out
+
+
+def _noise_level(get: Any, x0: float, delta: float, outs: tuple[str, ...]) -> dict[str, float]:
+    """Return per output the measured noise level sigma of *get* near *x0*.
+
+    The function is evaluated at _NOISE_POINTS points with the spacing
+    *delta* around *x0*. A quadratic least-squares fit removes the smooth
+    part; sigma is the standard deviation of the residuals (unit of the
+    output). The spacing is much smaller than the finite-difference step,
+    so the residuals are the round-off of the production solve. This
+    round-off can be much larger than eps max(abs(f)): a node motion
+    changes the rounding of all lattice quantities, and the solve
+    amplifies it.
+    """
+    n = _NOISE_POINTS
+    s = (np.arange(n, dtype=float) - 0.5 * (n - 1)) * float(delta)
+    vals = [get(x0 + v) for v in s]
+    out = {}
+    for o in outs:
+        y = np.array([float(v[o]) for v in vals])
+        if not np.all(np.isfinite(y)):
+            out[o] = float("inf")
+            continue
+        coef = np.polyfit(s, y, 2)
+        res = y - np.polyval(coef, s)
+        out[o] = float(np.sqrt(np.sum(res * res) / (n - 3)))
     return out
 
 
 def _ladder(get: Any, x0: float, h: float, factors: tuple[float, ...], outs: tuple[str, ...],
-            eps: float) -> dict[str, list[tuple[float, float, float, float]]]:
+            eps: float, noise: dict[str, float] | None = None
+            ) -> dict[str, list[tuple[float, float, float, float]]]:
     """Return per output the Richardson candidates (step, ref, est, round-off) of the steps h * factors."""
     out: dict[str, list[tuple[float, float, float, float]]] = {o: [] for o in outs}
-    fds = [(h * f, _richardson(get, x0, h * f, outs, eps)) for f in factors]
+    fds = [(h * f, _richardson(get, x0, h * f, outs, eps, noise)) for f in factors]
     for o in outs:
         for k, (step, fd) in enumerate(fds):
             ref, est, rnd = fd[o]
@@ -148,7 +190,13 @@ def check_gradients(
     reference is the larger of the estimate and the round-off of the
     differences (machine epsilon of the production solve times the output
     magnitude over the step); with a step ladder, the spread to the
-    Richardson value of the neighbour step joins the bound.
+    Richardson value of the neighbour step joins the bound. The node
+    directions have one step and no spread: their round-off is also at
+    least 6 sigma / h, where sigma is the noise level of the production
+    solve, measured per output with 10 solves at a spacing of 1e-3 of the
+    step along the same direction (the residual of a quadratic fit). A
+    node motion changes the rounding of the whole lattice, and this noise
+    can be much larger than the machine epsilon times the output.
 
     * A component with an error bound below rtol/10 of its reference is
       compared relatively: it passes when abs(grad - ref) <= rtol abs(ref).
@@ -361,7 +409,8 @@ def check_gradients(
                 _apply_node_step(ac3, base_nodes, disp0, flat, _u, v)
                 return _production_scalars(ac3, condition, st, axes)
 
-            fd = _ladder(_get, 0.0, h0, _NODE_STEP_FACTORS, outs, eps)
+            noise = _noise_level(_get, 0.0, _NOISE_SPACING * h0, outs)
+            fd = _ladder(_get, 0.0, h0, _NODE_STEP_FACTORS, outs, eps, noise)
             grads = {o: float(_gather_node_grad(jac[o], flat) @ u) for o in outs}
             _record("nodes", f"nodes.dir{dj}", grads, fd, span)
     reasons = [f"input group {g!r} has no compared component" for g, c in groups.items()

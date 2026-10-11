@@ -233,7 +233,14 @@ results carry a note that names the 1e-3 gate.
 (the larger of the Richardson estimate and the round-off of the differences) is below
 1/10 of the tolerance. The node step is 1e-3 of the smallest core radius of the lattice:
 a larger step crosses the core-radius length scale, where the differences do not
-converge. The other inputs use a ladder of three steps (1, 0.3 and 0.1 times the base
+converge. The node directions have one step and no spread term, so their round-off
+bound is also at least 6 sigma / h, where sigma is the noise level of the production
+solve per output: the standard deviation of the residuals of a quadratic fit through 10
+solves at a spacing of 1e-3 of the node step along the same direction. A node motion
+changes the rounding of all lattice quantities, and this noise can be much larger than
+the machine epsilon times the output (about 80 times on a wing and tail in ground effect
+with one chordwise panel). The Richardson value has a noise of about 1.9 sigma / h.
+The other inputs use a ladder of three steps (1, 0.3 and 0.1 times the base
 step, 1e-4 of the base value with an absolute floor for a zero base value); each
 component uses the step with the smallest error bound, and the spread to the Richardson
 value of the neighbour step joins the bound. Two cases have no relative scale of their
