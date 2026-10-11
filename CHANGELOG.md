@@ -8,6 +8,8 @@ a minor version can change a public interface.
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-10-11
+
 ### Added
 
 - Compiled VJP kernels of the adjoint gradients: hand-derived vector-Jacobian products of the
