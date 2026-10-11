@@ -176,13 +176,54 @@ def _parse_uncertainties(
                 raise ValueError(
                     f"Correlation {key!r} must be in [-1, 1], got {value!r}."
                 )
+            if (pair[0], pair[1]) in corr or (pair[1], pair[0]) in corr:
+                raise ValueError(
+                    f"Correlation pair {key!r} is given more than once "
+                    "(as (a, b) and (b, a)). Give each pair of inputs once."
+                )
             corr[(pair[0], pair[1])] = rho
+    _check_covariance(flow, corr)
     if not flow and not sections:
         raise ValueError(
             "uncertainties has no uncertain input: give at least one of "
             f"{_valid_uncertainty_keys()}."
         )
     return flow, sections, corr
+
+
+def _check_covariance(flow: dict[str, float], corr: dict[tuple[str, str], float]) -> None:
+    """Refuse correlations that give a covariance that is not positive semi-definite.
+
+    The covariance of the flow inputs is ``U[i, i] = sigma_i^2`` and
+    ``U[i, j] = rho_ij sigma_i sigma_j`` [units of the inputs squared]. A
+    pair with an input that has no uncertainty has no effect. The check
+    refuses ``U`` when its smallest eigenvalue is below ``-1e-12`` times
+    its largest eigenvalue.
+
+    Raises
+    ------
+    ValueError
+        If ``U`` is not positive semi-definite; the message names the
+        correlation pairs.
+    """
+    used = [pair for pair in corr if pair[0] in flow and pair[1] in flow]
+    if not used:
+        return
+    order = list(flow)
+    index = {key: k for k, key in enumerate(order)}
+    sigma = np.array([flow[key] for key in order], dtype=float)
+    cov = np.diag(sigma ** 2)
+    for first, second in used:
+        i, j = index[first], index[second]
+        cov[i, j] = cov[j, i] = corr[(first, second)] * sigma[i] * sigma[j]
+    eig = np.linalg.eigvalsh(cov)
+    if eig[0] < -1e-12 * max(float(eig[-1]), 0.0):
+        pairs = ", ".join(f"{pair!r}: {corr[pair]:g}" for pair in used)
+        raise ValueError(
+            "The correlations give an input covariance that is not positive "
+            f"semi-definite (smallest eigenvalue {eig[0]:.3e}, largest {eig[-1]:.3e}). "
+            f"Correct the correlation pairs {{{pairs}}}."
+        )
 
 
 def _production_coeffs(
@@ -352,6 +393,8 @@ def _propagate(
     for name in COEFFICIENT_NAMES:
         grad = np.array([float(jacobian[name].get(key, 0.0)) for key in order], dtype=float)
         var = float(grad @ cov @ grad)
+        # The covariance is positive semi-definite (checked at input); a
+        # negative value here is round-off only.
         var = max(var, 0.0)
         u_c[name] = math.sqrt(var)
         if var <= 0.0:
@@ -402,8 +445,9 @@ def input_error_bars(
         along the span.
     correlations : dict or None
         Correlation coefficients of pairs of flow inputs, for example
-        ``{("alpha", "V_inf"): 0.5}``, each in [-1, 1]. Default
-        independent inputs.
+        ``{("alpha", "V_inf"): 0.5}``, each in [-1, 1]. Give each pair
+        once. The input covariance must be positive semi-definite.
+        Default independent inputs.
     axes : str
         Moment axis system of the Cl, Cm and Cn bars: ``"body"``,
         ``"stability"`` or ``"wind"``. ``"all"`` is refused.
@@ -423,6 +467,8 @@ def input_error_bars(
         For an unknown axis system, a non-positive coverage factor, a
         negative, non-finite or unknown uncertainty key, ``h`` in free
         air, an unknown surface name, a correlation outside [-1, 1], or
+        a correlation pair given more than once, correlations that give
+        an input covariance that is not positive semi-definite, or
         a section input outside the adjoint scope (nonlinear lifting
         line, tabulated airfoils, deflected controls, body rates,
         Fourier solver), which names the limit.

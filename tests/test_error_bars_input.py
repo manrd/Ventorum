@@ -285,6 +285,36 @@ def test_refusals(float64_precision):
             correlations={("alpha", "beta"): 1.5})
 
 
+def test_repeated_correlation_pair_refused(float64_precision):
+    """The pairs (a, b) and (b, a) in one dict are refused; they must not add up."""
+    wing = _plain_wing()
+    cond, st = _condition(), _settings()
+    with pytest.raises(ValueError, match="more than once"):
+        vt.input_error_bars(
+            wing, condition=cond, settings=st,
+            uncertainties={"alpha": 0.01, "beta": 0.01},
+            correlations={("alpha", "beta"): 0.4, ("beta", "alpha"): 0.4})
+
+
+def test_covariance_not_positive_semidefinite_refused(float64_precision):
+    """Correlations that give a covariance with a negative eigenvalue are refused."""
+    wing = _plain_wing()
+    cond = vt.FlightCondition(V_inf=30.0, alpha=np.radians(4.0), beta=np.radians(3.0))
+    st = _settings()
+    corr = {("alpha", "beta"): 0.9, ("alpha", "phi"): 0.9, ("beta", "phi"): -0.9}
+    with pytest.raises(ValueError, match="positive semi-definite") as info:
+        vt.input_error_bars(
+            wing, condition=cond, settings=st,
+            uncertainties={"alpha": 0.01, "beta": 0.01, "phi": 0.01},
+            correlations=corr)
+    for first, second in corr:
+        assert f"('{first}', '{second}')" in str(info.value)
+    # The same correlations with one input without uncertainty have no effect.
+    vt.input_error_bars(
+        wing, condition=cond, settings=st,
+        uncertainties={"alpha": 0.01, "beta": 0.01}, correlations=corr)
+
+
 def test_to_dict_json(float64_precision):
     """to_dict of layer-2 and combined results is strict JSON."""
     wing = _plain_wing()
