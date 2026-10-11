@@ -33,7 +33,7 @@ from typing import Any
 
 import numpy as np
 
-from ventorum.sensitivity.adjoint import GradientScopeError
+from ventorum.sensitivity.errors import GradientScopeError
 from ventorum.core.datatypes import (
     Aircraft,
     FlightCondition,

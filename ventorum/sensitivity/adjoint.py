@@ -25,6 +25,7 @@ from typing import Any
 
 import numpy as np
 
+from ventorum.sensitivity.errors import GradientScopeError  # noqa: F401 (re-export)
 from ventorum.sensitivity.reference import TorchReference, require_torch
 from ventorum.core.datatypes import SolverSettings as _SolverSettings
 
@@ -43,17 +44,6 @@ _SYMMETRIC_WRT = ("alpha", "V_inf", "rho", "h")
 _SYMMETRIC_NODE_WRT = _SYMMETRIC_WRT + ("nodes",)
 # Outputs that keep a symmetric state symmetric (longitudinal only).
 _SYMMETRIC_OUTPUTS = ("CL", "CDi", "CDp", "CD", "Cm")
-
-
-
-class GradientScopeError(ValueError):
-    """A configuration that the adjoint gradients do not cover yet.
-
-    The nonlinear lifting line, tabulated airfoils, deflected controls, body
-    rates and the Fourier solver have no adjoint gradients in this version.
-    A later version adds them. Callers can catch this error to use another
-    method (for example central differences of the production solve).
-    """
 
 
 def _gradient_device(result: Any) -> str:

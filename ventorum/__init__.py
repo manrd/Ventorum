@@ -86,13 +86,9 @@ from ventorum.solvers.derivative_matrix import (  # noqa: F401
     DerivativeMatrixResult,
     derivative_matrix,
 )
-from ventorum.sensitivity import (  # noqa: F401
-    GradientResult,
-    GradientScopeError,
-    check_gradients,
-    gradient_vjp,
-    gradients,
-)
+# The gradient functions load PyTorch: the module __getattr__ (end of this
+# file) gives them on first access, so that ``import ventorum`` stays light.
+from ventorum.sensitivity.errors import GradientScopeError  # noqa: F401
 from ventorum.aero.polars import (  # noqa: F401
     load_xfoil_polar,
     load_csv_polar,
@@ -357,9 +353,19 @@ from ventorum.ground_effect import (  # noqa: F401, E402
 
 __version__ = "0.3.0"
 
+# Names of ventorum.sensitivity that load PyTorch (given by __getattr__).
+_LAZY_SENSITIVITY = ("GradientResult", "check_gradients", "gradient_vjp", "gradients")
+
 
 def __getattr__(name: str):
-    """Return an old solver class name with a deprecation warning."""
+    """Return a lazy gradient name, or an old solver class name with a deprecation warning."""
+    if name in _LAZY_SENSITIVITY:
+        import ventorum.sensitivity as sensitivity
+
+        value = getattr(sensitivity, name)
+        globals()[name] = value
+        return value
+
     from ventorum.utils.deprecation import DEPRECATED_CLASS_NAMES, warn_deprecated_class
 
     if name in DEPRECATED_CLASS_NAMES:
@@ -368,3 +374,8 @@ def __getattr__(name: str):
         warn_deprecated_class(name, DEPRECATED_CLASS_NAMES[name])
         return getattr(solvers, DEPRECATED_CLASS_NAMES[name])
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
+def __dir__() -> list[str]:
+    """Return the module names, with the lazy gradient names included."""
+    return sorted(set(globals()) | set(_LAZY_SENSITIVITY))
