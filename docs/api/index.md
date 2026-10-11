@@ -12,6 +12,7 @@ Generated from the docstrings of the package (NumPy docstring standard). The ori
    ventorum.aero
    ventorum.solvers
    ventorum.ground_effect
+   ventorum.sensitivity
    ventorum.hardware
    ventorum.gpu
    ventorum.agent

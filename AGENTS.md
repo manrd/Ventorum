@@ -88,6 +88,7 @@ Also run `python validation/gpu_gate.py <log.md>` on a machine with an NVIDIA GP
 | `ventorum/hardware` | Hardware detection, machine profile, tuner (`ventorum-tune`) |
 | `ventorum/utils/parallel.py` | Two-level parallel plan (cases in parallel, kernel threads per case) |
 | `ventorum/ground_effect` | Ground-effect analysis and sweeps |
+| `ventorum/sensitivity` | Adjoint gradients of the lattice solvers (`gradients`, `gradient_vjp`, `check_gradients`) |
 | `ventorum/reference` | Reference solutions and reference data for verification |
 | `ventorum/visualization` | Plot functions (distributions, drag polar, planform, wake, convergence) |
 | `ventorum/instance.py` | Independent solver instances and a manager that runs them in parallel |

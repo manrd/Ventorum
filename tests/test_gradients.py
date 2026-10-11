@@ -603,7 +603,7 @@ def test_check_zero_valued_sections(float64_precision) -> None:
 
 def test_check_has_no_absolute_floor(float64_precision, monkeypatch) -> None:
     """A small derivative with a relative error above rtol fails (no absolute floor)."""
-    from ventorum.gradients import adjoint
+    from ventorum.sensitivity import adjoint
 
     real = adjoint.gradients
 
@@ -628,7 +628,7 @@ def test_check_has_no_absolute_floor(float64_precision, monkeypatch) -> None:
 
 def test_forward_check_is_strict(float64_precision, monkeypatch) -> None:
     """The forward check has no absolute band and also compares the vector outputs."""
-    from ventorum.gradients import adjoint
+    from ventorum.sensitivity import adjoint
 
     ac = vt.Aircraft(surfaces=[_plain_wing()])
     cond = vt.FlightCondition(V_inf=30.0, alpha=np.radians(4.0))

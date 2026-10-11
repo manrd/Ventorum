@@ -22,7 +22,8 @@ a minor version can change a public interface.
   in float32 by default (float64 through the precision setting); the folded symmetric
   system is used only when the case and every requested input and output are symmetric.
   The row chunks of the O(n^2) work bound the memory also in the backward pass.
-  `GradientResult` holds the output.
+  `GradientResult` holds the output. The functions are in the subpackage `ventorum.sensitivity`
+  and are exported from `ventorum`.
 - Height derivatives: `height_derivatives` gives the static derivatives of one flight state in
   ground effect (`FlightCondition.h` set): CL, CD, CY, Cl, Cm and Cn with respect to alpha, beta,
   the bank angle and h/c_ref, about the moment reference point with its height held fixed (central

@@ -81,12 +81,12 @@ largest production magnitude of the array.
 
 ## Implementation
 
-* `ventorum/gradients/reference.py`: the differentiable copy (lattice from edge nodes,
+* `ventorum/sensitivity/reference.py`: the differentiable copy (lattice from edge nodes,
   system rows, Kutta-Joukowski and leg forces with the tangential velocity, Trefftz
   drag, profile drag and section moment of linear airfoils, ground images, cross-surface
   core, axes transforms).
-* `ventorum/gradients/adjoint.py`: `gradients`, `gradient_vjp`, `GradientResult`.
-* `ventorum/gradients/check.py`: `check_gradients` with the Richardson reference
+* `ventorum/sensitivity/adjoint.py`: `gradients`, `gradient_vjp`, `GradientResult`.
+* `ventorum/sensitivity/check.py`: `check_gradients` with the Richardson reference
   (central differences with steps h and h/2, error estimate |FD(h) - FD(h/2)| / 3).
 
 Device and precision: the gradients run on the device of the production solve (the

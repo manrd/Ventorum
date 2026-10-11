@@ -25,7 +25,7 @@ from typing import Any
 
 import numpy as np
 
-from ventorum.gradients.reference import TorchReference, require_torch
+from ventorum.sensitivity.reference import TorchReference, require_torch
 from ventorum.core.datatypes import SolverSettings as _SolverSettings
 
 SCALAR_OUTPUTS = ("CL", "CY", "CDi", "CDp", "CD", "Cl", "Cm", "Cn")

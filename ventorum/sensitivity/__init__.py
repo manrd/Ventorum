@@ -8,12 +8,12 @@ line. :func:`gradient_vjp` covers the vector outputs. :func:`check_gradients`
 checks the gradients against Richardson finite differences.
 """
 
-from ventorum.gradients.adjoint import (
+from ventorum.sensitivity.adjoint import (
     GradientResult,
     gradients,
     gradient_vjp,
 )
-from ventorum.gradients.check import check_gradients
+from ventorum.sensitivity.check import check_gradients
 
 __all__ = [
     "GradientResult",

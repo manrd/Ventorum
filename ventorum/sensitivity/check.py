@@ -173,7 +173,7 @@ def check_gradients(
     """
     import ventorum as vt
     from ventorum.core.datatypes import Aircraft, LiftingSurface, SolverSettings
-    from ventorum.gradients.adjoint import _check_names, gradients
+    from ventorum.sensitivity.adjoint import _check_names, gradients
 
     outs, ins = _check_names(outputs, wrt)
     st = settings.clone() if settings is not None else SolverSettings()
