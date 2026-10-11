@@ -206,6 +206,14 @@ a minor version can change a public interface.
 
 ### Fixed
 
+- Small defects from the review of P1: `input_error_bars` refuses repeated correlation pairs
+  and a covariance that is not positive semi-definite; `combine_error_bars` accepts a layer-1
+  result without a CD bar (with a note) and no longer raises when a half-width is None; the
+  numerical error bars note the refinement ratios of surfaces with their own `n_panels`; the
+  Irodov centre-slope threshold is one constant (1e-9) in the height derivatives and the
+  sweeps; the trim result notes a start point clipped into the bounds; the Mach warning of the
+  input checks uses the ISA speed of sound at the flight density; a zero-valued component of
+  `check_gradients` counts as compared only when its bound is small enough.
 - The float32 reference copy of the gradients gave NaN for a target point on a segment end
   point (a distance floor of 1e-300 is 0 in float32); the floor now follows the precision.
 - `check_gradients` assumed a round-off level of the solve that is too small for node motion;
