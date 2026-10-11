@@ -618,8 +618,9 @@ def _forward_check(prep: dict, outputs: dict, prod: dict[str, float],
     """Compare the differentiated model with the production result.
 
     Returns the largest relative difference (``forward_mismatch``). Raises
-    RuntimeError with the output names when it is above 1e-10 (float64) or
-    1e-4 (float32).
+    RuntimeError with the output names when it is above 1e-10 (the primal
+    and the gradient precision are both float64) or 1e-4 (one of them is
+    float32).
 
     The difference of CDi, CDp and CD is relative to the production value
     of each. CL and CY are components of one force vector, and Cl, Cm and

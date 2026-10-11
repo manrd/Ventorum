@@ -693,6 +693,24 @@ def test_check_zero_mode_needs_a_small_noise_bound(float64_precision, monkeypatc
     assert out["pass"] is False
 
 
+def test_forward_check_limit_needs_both_precisions_float64() -> None:
+    """The 1e-10 forward-check limit needs a float64 primal and a float64 gradient."""
+    torch = pytest.importorskip("torch")
+    from ventorum.sensitivity.adjoint import _forward_check
+
+    prod = {"CL": 0.5, "CY": 0.0, "Cl": 0.0, "Cm": -0.1, "Cn": 0.0}
+    outputs = {k: torch.tensor(v * (1.0 + 1e-6), dtype=torch.float64) for k, v in prod.items()}
+    for primal in ("float32", "float64"):
+        for grad_prec in ("float32", "float64"):
+            prep = {"precision": grad_prec, "precision_primal": primal,
+                    "result": vt.SolverResult(details={"loads": None})}
+            if primal == grad_prec == "float64":
+                with pytest.raises(RuntimeError, match="above 1e-10"):
+                    _forward_check(prep, outputs, prod, ())
+            else:
+                assert _forward_check(prep, outputs, prod, ()) == pytest.approx(1e-6, rel=1e-6)
+
+
 def test_check_zero_valued_sections(float64_precision) -> None:
     """Section properties with a zero base value use an absolute step (no false failure)."""
     af = vt.LinearAirfoil(name="Zero", a0=2.0 * np.pi, alpha_L0=0.0, Cd0=0.0, Cm0=0.0)
