@@ -156,7 +156,12 @@ class HeightDerivativesResult:
 
 
 def _coefficients(res: SolverResult, use_cd_total: bool) -> np.ndarray:
-    """Return ``[CL, CD, CY, Cl, Cm, Cn]`` (body-axis moments) of a result."""
+    """Return ``[CL, CD, CY, Cl, Cm, Cn]`` (body-axis moments) of a result.
+
+    The base case sets *use_cd_total* once for all the cases. A case has
+    no ``CD_total`` only when its profile drag is exactly zero, so then
+    ``CD_total = CDi + 0`` and the value ``CDi`` keeps the same drag basis.
+    """
     t = res.totals
     cd = t.CD_total if (use_cd_total and t.CD_total is not None) else t.CDi
     return np.array([t.CL, cd, t.CY, t.Cl, t.Cm, t.Cn], dtype=float)
