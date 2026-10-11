@@ -831,6 +831,47 @@ def test_method_keyword(float64_precision, restore_vjp_backend) -> None:
             vt.gradient_vjp(ac, cond, st, seeds={"CL": 1.0}, wrt=("alpha",), method="")
 
 
+@pytest.mark.parametrize("method", ["kernels", "reference"])
+def test_node_fold_equals_full(method: str, float64_precision) -> None:
+    """Node inputs of a symmetric request use the fold; the gradients equal the full system (1e-12).
+
+    The full system is selected by one lateral output (CY). The root y
+    gradients of the fold are exactly zero (a symmetric output is an even
+    function of the root y); the full system gives zero to round-off.
+    """
+    cases = [
+        (vt.Aircraft(surfaces=[_swept_wing()]), vt.SolverSettings(solver_type="vlm", n_panels=10, n_chord=4), None),
+        (vt.Aircraft(surfaces=[_swept_wing()]), vt.SolverSettings(solver_type="vlm", n_panels=10, n_chord=4), 0.6),
+        (vt.Aircraft(surfaces=[_plain_wing()]), vt.SolverSettings(solver_type="linear", n_panels=12), None),
+        (_wing_tail(), vt.SolverSettings(solver_type="vlm", n_panels=10, n_chord=2), None),
+    ]
+    outs = ("CL", "CDi", "CD", "Cm")
+    for ac, st, h in cases:
+        cond = vt.FlightCondition(V_inf=30.0, alpha=np.radians(4.0), h=h)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            fold = vt.gradients(ac, cond, st, outputs=outs, wrt=("alpha", "nodes"), method=method)
+            full = vt.gradients(ac, cond, st, outputs=outs + ("CY",), wrt=("alpha", "nodes"), method=method)
+        assert fold.symmetric is True and full.symmetric is False
+        for o in outs:
+            for s, arrs in fold.jacobian[o]["nodes"].items():
+                for tag in ("le", "te"):
+                    a = np.asarray(arrs[tag], dtype=float)
+                    b = np.asarray(full.jacobian[o]["nodes"][s][tag], dtype=float)
+                    assert a[0, 1] == 0.0
+                    assert float(np.max(np.abs(a - b))) <= 1e-12 * float(np.max(np.abs(b))), (o, s, tag)
+            assert fold.jacobian[o]["alpha"] == pytest.approx(full.jacobian[o]["alpha"], rel=1e-12)
+    # A surface that is not symmetric keeps the full system for node inputs.
+    wing = _plain_wing()
+    wing.is_symmetric = False
+    cond = vt.FlightCondition(V_inf=30.0, alpha=np.radians(4.0))
+    st = vt.SolverSettings(solver_type="vlm", n_panels=8, n_chord=1)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        res = vt.gradients(vt.Aircraft(surfaces=[wing]), cond, st, outputs=("CL",), wrt=("nodes",), method=method)
+    assert res.symmetric is False
+
+
 @pytest.mark.parametrize("backend", ["numba", "cython", "numpy"])
 @pytest.mark.parametrize("case_id,ac,cond,st", _parity_cases(), ids=[c[0] for c in _parity_cases()])
 def test_float32_gate_kernels(case_id: str, ac: vt.Aircraft, cond: vt.FlightCondition, st: vt.SolverSettings,

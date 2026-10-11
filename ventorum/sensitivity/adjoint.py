@@ -34,9 +34,13 @@ ALL_OUTPUTS = SCALAR_OUTPUTS + VECTOR_OUTPUTS
 SCALAR_INPUTS = ("alpha", "beta", "V_inf", "rho", "h", "phi")
 ALL_WRT = ("nodes", "alpha", "beta", "V_inf", "rho", "h", "phi", "sections", "reference")
 
-# Inputs that keep a symmetric state symmetric (no beta, phi, node, section
-# or reference-point change that breaks the y = 0 symmetry).
+# Inputs that keep a symmetric state symmetric (no beta, phi, section or
+# reference-point change that breaks the y = 0 symmetry). The node inputs of
+# a symmetric surface are the nodes of its defining half, mirrored to the
+# other half, so they keep the symmetry too when every surface is symmetric
+# (see _adjoint_use_symmetry).
 _SYMMETRIC_WRT = ("alpha", "V_inf", "rho", "h")
+_SYMMETRIC_NODE_WRT = _SYMMETRIC_WRT + ("nodes",)
 # Outputs that keep a symmetric state symmetric (longitudinal only).
 _SYMMETRIC_OUTPUTS = ("CL", "CDi", "CDp", "CD", "Cm")
 
@@ -84,17 +88,21 @@ def _torch_dtype(precision: str):  # type: ignore[no-untyped-def]
 
 
 def _adjoint_use_symmetry(production_symmetric: bool, wrt: tuple[str, ...],
-                          outputs: tuple[str, ...]) -> bool:
+                          outputs: tuple[str, ...], surfaces_symmetric: bool = False) -> bool:
     """Return True when the folded symmetric system gives the exact adjoint.
 
     The fold constrains the circulation to the symmetric subspace, so it is
     exact only when the case is symmetric and every requested input and
-    output is symmetric (no beta, phi, node, section or reference change,
-    no lateral output). Else the full system is used.
+    output is symmetric (no beta, phi, section or reference change, no
+    lateral output). The node inputs are symmetric when every surface is
+    symmetric (*surfaces_symmetric*): the inputs are the nodes of the
+    defining half, and the other half is their mirror image. Else the full
+    system is used.
     """
     if not production_symmetric:
         return False
-    if any(w not in _SYMMETRIC_WRT for w in wrt):
+    allowed = _SYMMETRIC_NODE_WRT if surfaces_symmetric else _SYMMETRIC_WRT
+    if any(w not in allowed for w in wrt):
         return False
     return all(o in _SYMMETRIC_OUTPUTS for o in outputs)
 
@@ -499,7 +507,8 @@ def _prepare_case(geometry: Any, condition: Any, settings: Any, axes: str,
     result = solver.solve(ac, condition, st)
     lattice = result.details["lattice"]
     production_symmetric = bool(result.symmetry_used)
-    symmetric = _adjoint_use_symmetry(production_symmetric, wrt, outputs)
+    surfaces_symmetric = all(bool(sl.is_symmetric) for sl in lattice.surfaces)
+    symmetric = _adjoint_use_symmetry(production_symmetric, wrt, outputs, surfaces_symmetric)
     device = _gradient_device(result)
     precision = _gradient_precision()
     precision_primal = str(result.details.get("precision", "float64"))
@@ -587,7 +596,7 @@ def _adjoint_solve(
                 continue
             tot = (gf if gf is not None else 0.0) - (gr if gr is not None else 0.0)
             gmap[id(v)] = tot.detach().cpu().numpy()
-        jacobian[name] = _pack_jacobian(model, t, gmap, wrt, base)
+        jacobian[name] = _pack_jacobian(model, t, gmap, wrt, base, bool(prep["symmetric"]))
     return values, jacobian, worst, len(targets)
 
 
@@ -692,8 +701,18 @@ def _production_values(prep: dict) -> dict[str, float]:
 
 
 def _pack_jacobian(model: TorchReference, t: dict, gmap: dict, wrt: tuple[str, ...],
-                   base: dict) -> dict:
-    """Pack the flat autograd gradients into the jacobian structure."""
+                   base: dict, symmetric: bool = False) -> dict:
+    """Pack the flat autograd gradients into the jacobian structure.
+
+    With the folded system (*symmetric*), the y-component of the root node
+    of each symmetric surface is set to zero. A y-change of the root node
+    is the only node change that is not mirrored (the root lies on y = 0),
+    so the fold does not cover it. Its exact derivative is zero: the
+    geometry with the root at y = +e is the mirror image of the geometry
+    with the root at y = -e, and a symmetric output has the same value for
+    both, so it is an even function of e. The full system gives this zero
+    to round-off.
+    """
     j: dict = {}
     if "nodes" in wrt:
         nodes: dict = {}
@@ -702,9 +721,12 @@ def _pack_jacobian(model: TorchReference, t: dict, gmap: dict, wrt: tuple[str, .
             gte = gmap.get(id(t[f"nodes:{s['name']}:te"]))
             n_e = int(s["n_edges"])
             nodes[s["name"]] = {
-                "le": np.zeros((n_e, 3)) if gle is None else np.asarray(gle, dtype=float),
-                "te": np.zeros((n_e, 3)) if gte is None else np.asarray(gte, dtype=float),
+                "le": np.zeros((n_e, 3)) if gle is None else np.asarray(gle, dtype=float).copy(),
+                "te": np.zeros((n_e, 3)) if gte is None else np.asarray(gte, dtype=float).copy(),
             }
+            if symmetric and s["kind"] == "symmetric":
+                nodes[s["name"]]["le"][0, 1] = 0.0
+                nodes[s["name"]]["te"][0, 1] = 0.0
         j["nodes"] = nodes
     for key in SCALAR_INPUTS:
         if key in wrt:
