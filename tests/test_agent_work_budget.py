@@ -90,7 +90,7 @@ def test_normal_calls_pass():
     assert ground_effect(dict(RECT), [0.6, 1.0, 1.5], alpha_deg=4.0,
                          settings=dict(FAST))["status"] == "success"
     assert stability_derivatives(dict(RECT), None, settings=dict(FAST))["status"] == "success"
-    assert batch_evaluate([dict(RECT), {"span_m": 6.0, "chord_m": 1.0}], None, "max_CL",
+    assert batch_evaluate([{"wing": dict(RECT)}, {"wing": {"span_m": 6.0, "chord_m": 1.0}}], None, "max_CL",
                           dict(FAST))["status"] == "success"
     p = mesh_convergence(
         {"span_m": 10.0, "root_chord_m": 1.5, "tip_chord_m": 1.0},

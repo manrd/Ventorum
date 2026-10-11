@@ -325,6 +325,11 @@ _HINTS = {
     "htail": "add it as a surface in aircraft.surfaces",
     "vtail": "add it as a surface in aircraft.surfaces",
     "fin": "add it as a surface in aircraft.surfaces",
+    "surfaces": "use the 'aircraft' argument for several surfaces or for reference values",
+    "S_ref_m2": "use the 'aircraft' argument for several surfaces or for reference values",
+    "b_ref_m": "use the 'aircraft' argument for several surfaces or for reference values",
+    "c_ref_m": "use the 'aircraft' argument for several surfaces or for reference values",
+    "ref_point_m": "use the 'aircraft' argument for several surfaces or for reference values",
 }
 
 _ACTIVE_TOOL: contextvars.ContextVar[str | None] = contextvars.ContextVar("_ACTIVE_TOOL", default=None)
@@ -424,10 +429,7 @@ def check_keys(obj: Any, allowed: dict[str, Any] | set[str] | list[str], where: 
     """
     if not isinstance(obj, dict):
         raise InputError(f"{where} must be a JSON object, got {type(obj).__name__}.")
-    if isinstance(allowed, dict) and "properties" in allowed:
-        allowed_set = set(allowed["properties"])
-    else:
-        allowed_set = set(allowed)
+    allowed_set = set(allowed)
     out: dict[str, Any] = {}
     for key, val in obj.items():
         if not isinstance(key, str):
@@ -923,6 +925,8 @@ _AIRCRAFT_SCHEMA = {
     "description": "Give exactly one of 'wing' (one surface) or 'aircraft' (several surfaces, with 'surfaces'). "
                    "Several lifting surfaces with reference values and a moment reference point.",
 }
+
+
 def _obj(props: dict[str, Any], desc: str) -> dict[str, Any]:
     return {"type": "object", "properties": props, "additionalProperties": False, "description": desc}
 
@@ -937,14 +941,9 @@ _CANDIDATE_SCHEMA = {
     "properties": {
         "wing": _SURFACE_SCHEMA,
         "aircraft": _AIRCRAFT_SCHEMA,
-        "flight_condition": CONDITION_SCHEMA,
-        "settings": SETTINGS_SCHEMA,
     },
     "additionalProperties": False,
-    "description": (
-        "Give exactly one of 'wing' (one surface) or 'aircraft' (several surfaces, with 'surfaces'). "
-        "Per-candidate geometry, optional flight_condition, and optional settings."
-    ),
+    "description": "Give exactly one of 'wing' (one surface) or 'aircraft' (several surfaces, with 'surfaces').",
 }
 
 _AXES_NO_ALL_SCHEMA = {

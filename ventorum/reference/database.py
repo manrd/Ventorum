@@ -396,7 +396,9 @@ def load_case(path: str | Path) -> ReferenceCase:
     if not isinstance(geometry, dict):
         raise _fail(name, "geometry", f"must be a table, got {geometry!r}")
     try:
-        aircraft = build_aircraft_from_spec(geometry, where="geometry")
+        # The case format keeps one geometry table: one surface, or several with "surfaces".
+        key = "aircraft" if "surfaces" in geometry else "wing"
+        aircraft = build_aircraft_from_spec(**{key: geometry}, where="geometry")
     except ValueError as exc:
         raise _fail(name, "geometry", str(exc)) from exc
 

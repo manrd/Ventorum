@@ -87,14 +87,14 @@ def test_mcp_batch_evaluate_n_jobs():
     """The MCP tool takes n_jobs and refuses n_workers with a hint to n_jobs."""
     cand = {"span_m": 10.0, "chord_m": 1.0}
     ok = call_tool("ventorum_batch_evaluate", {
-        "candidates": [cand],
+        "candidates": [{"wing": cand}],
         "settings": {"n_panels": 8},
         "n_jobs": 1,
     })
     assert ok["status"] == "success", ok
 
     bad = call_tool("ventorum_batch_evaluate", {
-        "candidates": [cand],
+        "candidates": [{"wing": cand}],
         "settings": {"n_panels": 8},
         "n_workers": 1,
     })

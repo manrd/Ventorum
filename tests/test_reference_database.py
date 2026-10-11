@@ -436,3 +436,29 @@ def test_template_parses():
     block = template.read_text(encoding="utf-8").split("```toml")[1].split("```")[0]
     data = tomllib.loads(block)
     assert data["identity"]["id"] == "template_example"
+
+
+def test_geometry_with_several_surfaces_loads(tmp_path):
+    """A geometry table with ``surfaces`` gives a multi-surface aircraft (format of the template)."""
+    body = _valid_toml("wing_tail_synthetic")
+    start, end = body.index("[geometry]"), body.index("[conditions]")
+    geometry = """[geometry]
+ref_point_m = [0.25, 0.0, 0.0]
+
+[[geometry.surfaces]]
+name = "wing"
+span_m = 6.0
+chord_m = 1.0
+
+[[geometry.surfaces]]
+name = "tail"
+span_m = 2.0
+chord_m = 0.5
+position_m = [4.0, 0.0, 0.0]
+
+"""
+    path = tmp_path / "wing_tail_synthetic.md"
+    path.write_text(f"# Case\n\n```toml\n{body[:start]}{geometry}{body[end:]}```\n", encoding="utf-8")
+    case = load_case(path)
+    assert [s.name for s in case.aircraft.surfaces] == ["wing", "tail"]
+    assert list(case.aircraft.ref_point) == pytest.approx([0.25, 0.0, 0.0])

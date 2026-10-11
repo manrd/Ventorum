@@ -177,7 +177,7 @@ def test_controls_in_every_geometry_tool():
     assert polar_sweep(flap, 0.0, 4.0, 2.0, None, FAST, "standard")["status"] == "success"
     assert ground_effect(flap, [1.5], alpha_deg=4.0, settings=FAST)["status"] == "success"
     assert stability_derivatives(flap, {"alpha_deg": 4.0}, settings=FAST)["status"] == "success"
-    assert batch_evaluate([flap, dict(RECT)], {"alpha_deg": 4.0}, "max_CL", FAST)["status"] == "success"
+    assert batch_evaluate([{"wing": flap}, {"wing": dict(RECT)}], {"alpha_deg": 4.0}, "max_CL", FAST)["status"] == "success"
     m = mesh_convergence(flap, {"alpha_deg": 4.0}, panel_counts=[8, 10],
                          spacing_schemes=["half-cosine"], ref_n_panels=20)
     assert m["status"] == "success", m
@@ -449,5 +449,6 @@ def test_trim_tool_reports_the_device_of_its_solves(device):
     want = ("gpu", "float32") if device == "gpu" else ("cpu", "float64")
     assert t["status"] == "success" and t["trimmed"] is True, t
     assert (t["device"], t["precision"]) == want
+    assert (t["settings_used"]["device"], t["settings_used"]["precision"]) == want
     assert f"Computed on {want[0]} in {want[1]}." in t["executive_summary"]
 

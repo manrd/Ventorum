@@ -29,6 +29,8 @@ This change removes `anyOf` because some clients drop its keys.
 
 A call must give exactly one of the two. A call with both or neither is refused with `invalid_input`.
 
+In `ventorum_batch_evaluate`, each item of `candidates` is an object with exactly one of the keys `wing` or `aircraft`, for example `{"wing": {"name": "AR8", "span_m": 8.0, "chord_m": 1.0}}`.
+
 Example with `wing`:
 
 ```json

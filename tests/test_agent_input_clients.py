@@ -270,3 +270,60 @@ def test_batch_candidates_forms():
     assert failed[1]["index"] == 2
     assert "candidates[2]" in failed[1]["error"]["message"]
     assert documented_msg in failed[1]["error"]["message"]
+
+
+def test_batch_candidate_without_geometry_key_is_refused():
+    # Review T-0052: a bare surface object as a candidate was silently taken as 'wing'
+    # (decision 3: exactly one of the keys 'wing' or 'aircraft').
+    res = call_tool("ventorum_batch_evaluate", {
+        "candidates": [{"wing": RECT}, {"name": "bare", **RECT}],
+        "settings": FAST,
+    })
+    assert res["status"] == "success", res
+    assert res["n_succeeded"] == 1 and res["n_failed"] == 1
+    msg = res["failed"][0]["error"]["message"]
+    assert res["failed"][0]["index"] == 1
+    assert "candidates[1]" in msg and "unknown key" in msg
+
+
+def test_batch_candidate_takes_only_wing_or_aircraft():
+    # Review T-0052: per-candidate flight_condition and settings are not part of the card.
+    res = call_tool("ventorum_batch_evaluate", {
+        "candidates": [{"wing": RECT}, {"wing": RECT, "flight_condition": {"alpha_deg": 2.0}}],
+        "settings": FAST,
+    })
+    assert res["status"] == "success", res
+    assert res["n_failed"] == 1
+    assert "unknown key 'flight_condition'" in res["failed"][0]["error"]["message"]
+    props = next(t for t in AGENT_TOOL_DEFINITIONS if t["name"] == "ventorum_batch_evaluate")[
+        "parameters"]["properties"]["candidates"]["items"]["properties"]
+    assert set(props) == {"wing", "aircraft"}
+
+
+def test_batch_candidate_error_path_names_the_argument():
+    # Review T-0052: the card's example message is "candidates[0].wing: unknown key 'ref_point_m'".
+    res = call_tool("ventorum_batch_evaluate", {
+        "candidates": [{"wing": {**RECT, "ref_point_m": [0.0, 0.0, 0.0]}}],
+        "settings": FAST,
+    })
+    msg = res["failed"][0]["error"]["message"]
+    assert "candidates[0].wing: unknown key 'ref_point_m'" in msg
+    assert "'ref_point_m' belongs in 'aircraft'" in msg
+
+
+def test_aircraft_only_key_in_wing_gives_decision_2_hint():
+    for key, val in (("surfaces", [RECT]), ("S_ref_m2", 10.0), ("b_ref_m", 10.0), ("c_ref_m", 1.0),
+                     ("ref_point_m", [0.0, 0.0, 0.0])):
+        res = call_tool("ventorum_wing_analysis", {"wing": {**RECT, key: val}, "settings": FAST})
+        assert res["error"]["type"] == "invalid_input"
+        assert "use the 'aircraft' argument for several surfaces or for reference values" in \
+            res["error"]["message"], key
+
+
+def test_python_polar_sweep_requires_the_alpha_range():
+    # Review T-0052: the agent gave silent defaults (0, 10, 2 deg) to required arguments.
+    from ventorum.agent import polar_sweep
+
+    res = polar_sweep(wing=RECT, settings=FAST)
+    assert res["status"] == "error" and res["error"]["type"] == "invalid_input"
+    assert "alpha_start_deg" in res["error"]["message"]

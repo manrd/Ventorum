@@ -104,7 +104,7 @@ def test_agent_axes_input():
         p = stability_derivatives(RECT, None, settings=FAST, detail_level="summary", axes=axes)
         assert p["status"] == "success", (axes, p)
         assert p["axes"] == axes
-        p = batch_evaluate([RECT], None, "max_CL", FAST, axes=axes)
+        p = batch_evaluate([{"wing": RECT}], None, "max_CL", FAST, axes=axes)
         assert p["status"] == "success", (axes, p)
         assert p["axes"] == axes
     bad = wing_analysis(RECT, None, FAST, "summary", axes="horizon")
@@ -136,7 +136,7 @@ def test_batch_reports_reduced_n_chord(monkeypatch):
     from ventorum.agent import batch_evaluate, tools
 
     monkeypatch.setattr(tools, "MAX_TOTAL_PANELS", 100)
-    p = batch_evaluate([RECT, {**RECT, "span_m": 8.0}], {"alpha_deg": 2.0, "h_m": 0.12},
+    p = batch_evaluate([{"wing": RECT}, {"wing": {**RECT, "span_m": 8.0}}], {"alpha_deg": 2.0, "h_m": 0.12},
                        "max_CL", {"n_panels": 12})
     assert p["status"] == "success", p
     assert p["axes"] == "body"
@@ -145,7 +145,7 @@ def test_batch_reports_reduced_n_chord(monkeypatch):
         assert row["n_chord"] == 4
         assert "reduced" in row["mesh_note"]
     # Without a reduction the n_chord is still reported and there is no note.
-    p = batch_evaluate([RECT], {"alpha_deg": 4.0}, "max_CL", FAST)
+    p = batch_evaluate([{"wing": RECT}], {"alpha_deg": 4.0}, "max_CL", FAST)
     assert p["status"] == "success", p
     assert p["rankings"][0]["n_chord"] == 2 or isinstance(p["rankings"][0]["n_chord"], int)
     assert "mesh_note" not in p["rankings"][0]

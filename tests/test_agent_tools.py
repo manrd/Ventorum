@@ -268,9 +268,9 @@ def test_stability_in_ground_effect_uses_height():
 
 def test_batch_reports_failed_candidates():
     cands = [
-        {"name": "AR6", "span_m": 6.0, "chord_m": 1.0},
-        {"name": "AR10", "span_m": 10.0, "chord_m": 1.0},
-        {"name": "bad", "span_m": 8.0, "chord": "1 m"},
+        {"wing": {"name": "AR6", "span_m": 6.0, "chord_m": 1.0}},
+        {"wing": {"name": "AR10", "span_m": 10.0, "chord_m": 1.0}},
+        {"wing": {"name": "bad", "span_m": 8.0, "chord": "1 m"}},
     ]
     p = batch_evaluate(cands, {"alpha_deg": 4.0}, "min_CDi", FAST)
     strict_json(p)
@@ -284,7 +284,7 @@ def test_batch_reports_failed_candidates():
 
 
 def test_batch_all_failed_is_error():
-    p = batch_evaluate([{"span_m": 8.0}], None, "max_CL", FAST)
+    p = batch_evaluate([{"wing": {"span_m": 8.0}}], None, "max_CL", FAST)
     assert_error(p, "invalid_input")
     assert len(p["failed"]) == 1
 
@@ -564,7 +564,7 @@ def test_mesh_limit_refuses_large_mesh():
                  "4000")
     assert_error(stability_derivatives(RECT, None, settings={"n_panels": 400, "n_chord": 64}),
                  "invalid_input", "4000")
-    p = batch_evaluate([RECT, {**RECT, "n_panels": 400}], None, "max_CL", {"n_chord": 8, "n_panels": 8})
+    p = batch_evaluate([{"wing": RECT}, {"wing": {**RECT, "n_panels": 400}}], None, "max_CL", {"n_chord": 8, "n_panels": 8})
     assert p["status"] == "success" and p["n_failed"] == 1
     assert p["failed"][0]["error"]["type"] == "invalid_input"
     p = call_tool("ventorum_mesh_convergence", {"wing": RECT, "flight_condition": {"h_m": 0.1},
@@ -597,7 +597,7 @@ def test_fourier_in_ground_effect_is_invalid_method_in_every_tool():
     assert_error(polar_sweep(RECT, 0.0, 2.0, 1.0, {"h_m": 1.0}, F), "invalid_method", "Fourier")
     assert_error(ground_effect(RECT, [0.5, 1.0], settings=F), "invalid_method", "Fourier")
     assert_error(stability_derivatives(RECT, gc, settings=F), "invalid_method", "Fourier")
-    assert_error(batch_evaluate([RECT], gc, "max_CL", F), "invalid_method")
+    assert_error(batch_evaluate([{"wing": RECT}], gc, "max_CL", F), "invalid_method")
     assert_error(call_tool("ventorum_mesh_convergence", {"wing": RECT, "flight_condition": gc,
                                                           "panel_counts": [8, 12], "ref_n_panels": 20,
                                                           "solver": "fourier"}), "invalid_method", "Fourier")
@@ -611,7 +611,7 @@ def test_body_wake_in_ground_effect_is_invalid_input():
     assert_error(polar_sweep(RECT, 0.0, 2.0, 1.0, {"h_m": 1.0}, B), "invalid_input", "body")
     assert_error(ground_effect(RECT, [1.0], settings=B), "invalid_input", "body")
     assert_error(stability_derivatives(RECT, gc, settings=B), "invalid_input", "body")
-    assert_error(batch_evaluate([RECT], gc, "max_CL", B), "invalid_input", "body")
+    assert_error(batch_evaluate([{"wing": RECT}], gc, "max_CL", B), "invalid_input", "body")
     # In free air the body-axis wake is allowed.
     assert wing_analysis(RECT, None, B, "summary")["status"] == "success"
 
@@ -796,7 +796,7 @@ def test_payload_states_device_precision():
     assert s["settings_used"]["device"] in s["executive_summary"]
     assert s["settings_used"]["precision"] in s["executive_summary"]
 
-    b = batch_evaluate([RECT, {"span_m": 6.0, "chord_m": 1.0}], None, "max_CL", FAST)
+    b = batch_evaluate([{"wing": RECT}, {"wing": {"span_m": 6.0, "chord_m": 1.0}}], None, "max_CL", FAST)
     strict_json(b)
     assert b["status"] == "success"
     assert b["settings_used"]["device"] in ("cpu", "gpu")
@@ -886,7 +886,7 @@ _REQUIRED_ARGS = {
     "alpha_end_deg": 4.0,
     "alpha_step_deg": 2.0,
     "heights_m": [1.0],
-    "candidates": [RECT],
+    "candidates": [{"wing": RECT}],
     "CL_target": 0.5,
     "pitch_control": "elevator",
 }

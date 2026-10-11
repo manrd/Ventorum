@@ -436,9 +436,9 @@ def _batched_polar(ac: Aircraft, sett: SolverSettings, conditions: list[FlightCo
 def polar_sweep(
     wing: Any = None,
     aircraft: Any = None,
-    alpha_start_deg: float = 0.0,
-    alpha_end_deg: float = 10.0,
-    alpha_step_deg: float = 2.0,
+    alpha_start_deg: float | None = None,
+    alpha_end_deg: float | None = None,
+    alpha_step_deg: float | None = None,
     flight_condition: dict[str, Any] | None = None,
     settings: dict[str, Any] | None = None,
     detail_level: str = "standard",
@@ -453,6 +453,10 @@ def polar_sweep(
     sets to each row).
     """
     ac = build_aircraft_from_spec(wing=wing, aircraft=aircraft)
+    missing = [k for k, v in (("alpha_start_deg", alpha_start_deg), ("alpha_end_deg", alpha_end_deg),
+                              ("alpha_step_deg", alpha_step_deg)) if v is None]
+    if missing:
+        raise InputError(f"missing required argument(s): {', '.join(missing)}.")
     c = parse_condition(flight_condition,
                         allow=("V_inf_m_s", "beta_deg", "rho_kg_m3", "altitude_m", "h_m"))
     sett = parse_settings(settings)
@@ -1265,62 +1269,48 @@ def batch_evaluate(
     failed: list[dict[str, Any]] = []
     built: list[tuple[int, str, Any, int]] = []
     for i, cand in enumerate(candidates):
-        cand_name: str | None = None
-        if isinstance(cand, dict):
-            cand_geom = cand.get("wing") if "wing" in cand else cand.get("aircraft")
-            if isinstance(cand_geom, dict) and isinstance(cand_geom.get("name"), str):
-                cand_name = cand_geom["name"]
-            elif isinstance(cand.get("name"), str):
-                cand_name = cand["name"]
-        elif isinstance(cand, (Aircraft, LiftingSurface)) and cand.name:
-            cand_name = cand.name
-        name = cand_name if cand_name else f"candidate_{i + 1}"
-
+        where = f"candidates[{i}]"
+        name = f"candidate_{i + 1}"
         try:
             if isinstance(cand, (Aircraft, LiftingSurface)):
-                ac_i = build_aircraft_from_spec(wing=cand, where=f"candidates[{i}]")
-                c_i, sett_i = c, sett
-            elif not isinstance(cand, dict):
-                raise InputError(f"candidates[{i}] must be a JSON object, got {type(cand).__name__}.")
+                # Python callers can give instances (decision 6 of the card).
+                if cand.name:
+                    name = cand.name
+                ac_i = build_aircraft_from_spec(aircraft=cand, where=where)
             else:
-                has_w = "wing" in cand
-                has_a = "aircraft" in cand
-                if not has_w and not has_a and any(k in cand for k in ("span_m", "chord_m", "aspect_ratio", "root_chord_m")):
-                    w_in = cand
-                    a_in = None
-                    c_i, sett_i = c, sett
-                else:
-                    d_cand = check_keys(cand, _CANDIDATE_SCHEMA, f"candidates[{i}]")
-                    w_in = d_cand.get("wing")
-                    a_in = d_cand.get("aircraft")
-                    c_i = parse_condition(d_cand["flight_condition"]) if "flight_condition" in d_cand else c
-                    sett_i = parse_settings(d_cand["settings"]) if "settings" in d_cand else sett
-                ac_i = build_aircraft_from_spec(wing=w_in, aircraft=a_in, where=f"candidates[{i}]")
-            _check_method(ac_i, sett_i.solver_type, sett_i.wake_alignment, c_i["h_m"] is not None)
-            fc_i = make_flight_condition(c_i) if c_i is not c else fc
-            built.append((i, name, ac_i, _check_mesh(ac_i, sett_i), fc_i, sett_i, c_i))
+                d = check_keys(cand, _CANDIDATE_SCHEMA["properties"], where)
+                key = "wing" if "wing" in d else "aircraft"
+                geom = d.get(key)
+                if isinstance(geom, dict) and isinstance(geom.get("name"), str):
+                    name = geom["name"]
+                if ("wing" in d) == ("aircraft" in d):
+                    raise InputError(f"{where}: Give exactly one of 'wing' (one surface) or 'aircraft' "
+                                     "(several surfaces, with 'surfaces').")
+                ac_i = build_aircraft_from_spec(**{key: geom}, where=f"{where}.{key}")
+            _check_method(ac_i, sett.solver_type, sett.wake_alignment, in_ground)
+            built.append((i, name, ac_i, _check_mesh(ac_i, sett)))
         except Exception as exc:  # noqa: BLE001
             failed.append({"index": i, "name": name, "error": error_info(exc)})
 
     def run(item):
-        i, name, ac, strips, fc_i, sett_i, c_i = item
+        i, name, ac, strips = item
         try:
-            s = _case_settings(ac, sett_i, strips, fc_i)
-            return i, name, ac, vt.analyze(ac, fc_i, s), None, s, c_i
+            s = _case_settings(ac, sett, strips, fc)
+            return i, name, ac, vt.analyze(ac, fc, s), None, s
         except Exception as exc:  # noqa: BLE001
-            return i, name, ac, None, exc, None, c_i
+            return i, name, ac, None, exc, None
 
     if built:
         _check_call_work(
-            sum(_planned_panels(b[2], b[5], b[4]) ** 2 for b in built),
+            sum(_planned_panels(ac_i, sett, fc) ** 2 for _, _, ac_i, _ in built),
             "fewer candidates or fewer panels (smaller n_panels or n_chord)")
     outputs = []
     if built:
-        outputs = run_cases(run, built, max((estimate_panels(b[2], b[5]) or 0) for b in built) or None, workers)
+        outputs = run_cases(run, built, max((estimate_panels(b[2], sett) or 0) for b in built) or None, workers)
 
     ranked: list[dict[str, Any]] = []
     ok_results: list[Any] = []
-    for i, name, ac, res, err, s_used, c_i in outputs:
+    for i, name, ac, res, err, s_used in outputs:
         if res is None:
             failed.append({"index": i, "name": name, "error": error_info(err)})
             continue
@@ -1328,7 +1318,7 @@ def batch_evaluate(
         cd, basis, ld = drag_and_ld(tot)
         S, b = float(ac.S_ref), float(ac.b_ref)
         b_ref, c_ref = float(ac.b_ref), float(ac.c_ref)
-        _, cm_ax, _ = _apply_axes(tot.Cl, tot.Cm, tot.Cn, c_i["alpha_deg"], c_i["beta_deg"], ax,
+        _, cm_ax, _ = _apply_axes(tot.Cl, tot.Cm, tot.Cn, c["alpha_deg"], c["beta_deg"], ax,
                                   b_ref=b_ref, c_ref=c_ref)
         device, precision = result_device_precision(res)
         row: dict[str, Any] = {
