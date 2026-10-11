@@ -397,6 +397,10 @@ class GradientResult:
         Precision of the gradient partials and the adjoint solve.
     method : str
         Always ``"adjoint"``.
+    partials : str
+        Path and backend of the partial derivatives: ``"kernels:<backend>"``
+        (compiled VJP kernels: ``numba``, ``cython``, ``numpy`` or ``warp``)
+        or ``"reference:torch"`` (the PyTorch reference copy).
     forward_mismatch : float
         Largest relative difference between the differentiated reference
         copy and the production result (see :func:`gradients`).
@@ -416,6 +420,7 @@ class GradientResult:
     precision_primal: str
     precision_gradient: str
     method: str = "adjoint"
+    partials: str = "reference:torch"
     forward_mismatch: float = 0.0
     n_solves: int = 1
     n_adjoint: int = 0
@@ -441,6 +446,7 @@ class GradientResult:
             "precision_primal": self.precision_primal,
             "precision_gradient": self.precision_gradient,
             "method": self.method,
+            "partials": self.partials,
             "forward_mismatch": float(self.forward_mismatch),
             "n_solves": int(self.n_solves),
             "n_adjoint": int(self.n_adjoint),
@@ -450,13 +456,15 @@ class GradientResult:
 
 
 def _prepare_case(geometry: Any, condition: Any, settings: Any, axes: str,
-                  wrt: tuple[str, ...], outputs: tuple[str, ...]) -> dict:
+                  wrt: tuple[str, ...], outputs: tuple[str, ...], method: str = "auto") -> dict:
     """Run the production solve and build the reference model.
 
     Returns a dict with the aircraft, lattice, result, model, base values,
-    device, precision and flags. Raises ValueError for refused input.
-    The adjoint uses the folded symmetric system only when the case is
-    symmetric and every requested input and output is symmetric.
+    device, precision, flags and the path of the partial derivatives
+    (*method*, see :func:`ventorum.sensitivity.kernels.resolve`). Raises
+    ValueError for refused input. The adjoint uses the folded symmetric
+    system only when the case is symmetric and every requested input and
+    output is symmetric.
     """
     from ventorum.core.datatypes import Aircraft, LiftingSurface
     from ventorum.solvers.factory import make_solver, resolve_solver_type
@@ -467,8 +475,12 @@ def _prepare_case(geometry: Any, condition: Any, settings: Any, axes: str,
         validate_solver_settings,
     )
 
+    from ventorum.sensitivity.kernels import METHODS, resolve
+
     if axes not in ("body", "stability", "wind"):
         raise ValueError(f"'axes' must be one of ['body', 'stability', 'wind'], got {axes!r}.")
+    if method not in METHODS:
+        raise ValueError(f"Unknown gradient method {method!r}; use one of {list(METHODS)}.")
     ac = Aircraft(name="SingleWing", surfaces=[geometry]) if isinstance(geometry, LiftingSurface) else geometry
     ac = ac.clone()
     st = canonical_settings(settings.clone() if settings is not None else _SolverSettings())
@@ -492,6 +504,8 @@ def _prepare_case(geometry: Any, condition: Any, settings: Any, axes: str,
     precision = _gradient_precision()
     precision_primal = str(result.details.get("precision", "float64"))
     model, base = build_reference(ac, condition, st, lattice, axes, device, precision, symmetric)
+    path, backend = resolve(method, device, int(lattice.n_panels))
+    model.b["vjp_backend"] = backend if path == "kernels" else None
     gamma_panel = np.asarray(result.details["gamma"], dtype=float)
     col = np.asarray(model.b["panel_column_full"].cpu())
     # Circulation per unknown from the production panels (mean of the mapped panels).
@@ -504,7 +518,7 @@ def _prepare_case(geometry: Any, condition: Any, settings: Any, axes: str,
         "result": result, "lattice": lattice, "model": model, "base": base,
         "device": device, "precision": precision, "precision_primal": precision_primal,
         "symmetric": symmetric, "production_symmetric": production_symmetric,
-        "g_unknown": g_unknown, "axes": axes,
+        "g_unknown": g_unknown, "axes": axes, "partials": f"{path}:{backend}",
     }
 
 
@@ -723,6 +737,7 @@ def gradients(
     outputs: tuple[str, ...] = ("CL", "CD", "Cm"),
     wrt: tuple[str, ...] = ("alpha", "nodes"),
     axes: str = "body",
+    method: str = "auto",
 ) -> GradientResult:
     """Compute exact gradients of scalar solver outputs by the discrete adjoint.
 
@@ -743,12 +758,19 @@ def gradients(
         "sections", "reference"``. Lengths in m, angles in rad.
     axes : str
         Axes of the moments: ``"body"``, ``"stability"`` or ``"wind"``.
+    method : str
+        Path of the partial derivatives: ``"auto"`` (the ``grad_vjp``
+        choice of the machine profile; without a profile the compiled
+        kernels: Numba on the CPU, NVIDIA Warp on the GPU), ``"kernels"``
+        (the compiled vector-Jacobian-product kernels) or ``"reference"``
+        (the PyTorch reference copy). All paths give the same gradients to
+        round-off.
 
     Returns
     -------
     GradientResult
-        Values, jacobian, device, precisions, method, forward mismatch,
-        solve counts, symmetry flag and notes.
+        Values, jacobian, device, precisions, method, path of the partials,
+        forward mismatch, solve counts, symmetry flag and notes.
 
     Raises
     ------
@@ -764,7 +786,7 @@ def gradients(
         if o in VECTOR_OUTPUTS:
             raise ValueError(
                 f"Output {o!r} is a vector output; use gradient_vjp with seeds.")
-    prep = _prepare_case(geometry, condition, settings, axes, ins, outs)
+    prep = _prepare_case(geometry, condition, settings, axes, ins, outs, method)
 
     def _make(outputs: dict) -> list:
         return [(o, outputs[o]) for o in outs]
@@ -781,7 +803,8 @@ def gradients(
     return GradientResult(
         values=values, jacobian=jacobian, device=prep["device"],
         precision_primal=prep["precision_primal"], precision_gradient=prep["precision"],
-        forward_mismatch=worst, n_adjoint=n_adj, symmetric=prep["symmetric"], notes=notes)
+        partials=prep["partials"], forward_mismatch=worst, n_adjoint=n_adj,
+        symmetric=prep["symmetric"], notes=notes)
 
 
 def gradient_vjp(
@@ -792,6 +815,7 @@ def gradient_vjp(
     seeds: dict,
     wrt: tuple[str, ...] = ("alpha", "nodes"),
     axes: str = "body",
+    method: str = "auto",
 ) -> dict:
     """Compute the gradient of a weighted sum of outputs (vector-Jacobian product).
 
@@ -811,6 +835,8 @@ def gradient_vjp(
         Inputs, as in :func:`gradients`.
     axes : str
         Axes of the moments.
+    method : str
+        Path of the partial derivatives, as in :func:`gradients`.
 
     Returns
     -------
@@ -824,7 +850,7 @@ def gradient_vjp(
         if o not in ALL_OUTPUTS:
             raise ValueError(f"Unknown output {o!r}; use one of {list(ALL_OUTPUTS)}.")
     _, ins = _check_names(tuple(seeds), wrt)
-    prep = _prepare_case(geometry, condition, settings, axes, ins, tuple(seeds))
+    prep = _prepare_case(geometry, condition, settings, axes, ins, tuple(seeds), method)
     import torch
 
     model: TorchReference = prep["model"]

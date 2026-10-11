@@ -102,6 +102,7 @@ def check_gradients(
     n_directions: int = 3,
     rtol: float = 1e-6,
     seed: int = 0,
+    method: str = "auto",
 ) -> dict:
     """Check adjoint gradients against Richardson finite differences.
 
@@ -124,6 +125,9 @@ def check_gradients(
         Relative tolerance: 1e-6 in float64, 1e-3 in float32.
     seed : int
         Seed of the random node directions.
+    method : str
+        Path of the partial derivatives of the adjoint gradients (see
+        :func:`ventorum.sensitivity.gradients`).
 
     Returns
     -------
@@ -133,7 +137,8 @@ def check_gradients(
         ``"reasons"`` (why the check failed, empty when it passed) and
         ``"details"`` per component with the reference value, the error
         estimate, the step [unit of the input], the relative error, the
-        mode and the verdict.
+        mode and the verdict, and ``"partials"`` (the path of the partial
+        derivatives of the adjoint gradients).
 
     Notes
     -----
@@ -179,7 +184,7 @@ def check_gradients(
     st = settings.clone() if settings is not None else SolverSettings()
     ac = Aircraft(name="SingleWing", surfaces=[geometry]) if isinstance(geometry, LiftingSurface) else geometry
     axes = "body"
-    grad_res = gradients(ac, condition, st, outputs=outs, wrt=ins, axes=axes)
+    grad_res = gradients(ac, condition, st, outputs=outs, wrt=ins, axes=axes, method=method)
     jac = grad_res.jacobian
     base_res = vt.analyze(ac.clone(), condition, st.clone())
     prec = str(base_res.details.get("precision", "float64"))
@@ -367,7 +372,8 @@ def check_gradients(
     n_compared = sum(c["compared"] for c in groups.values())
     n_skipped = sum(c["skipped"] for c in groups.values())
     return {"pass": bool(ok_all and not reasons), "compared": n_compared, "skipped": n_skipped,
-            "rtol": float(rtol), "groups": groups, "reasons": reasons, "details": details}
+            "rtol": float(rtol), "groups": groups, "reasons": reasons, "details": details,
+            "partials": grad_res.partials}
 
 
 def _section_step(prop: str, x0: float) -> float:

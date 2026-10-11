@@ -716,3 +716,162 @@ def test_user_manual_example_runs(float64_precision) -> None:
         exec(compile(blocks[0], "docs/user/how_to_gradients.md", "exec"), namespace)  # noqa: S102
     res = namespace["result"]
     assert math.isfinite(res.values["CL"]) and res.values["CL"] > 0.0
+
+
+# --- Compiled VJP kernels of the partial derivatives ------------------------------------------
+
+
+@pytest.fixture
+def restore_vjp_backend():
+    """Restore the forced VJP backend after the test."""
+    from ventorum.sensitivity import kernels as K
+
+    old = K.get_forced_backend()
+    yield K
+    K.set_vjp_backend(old)
+
+
+def _all_gradients(res_jac: dict) -> dict[str, np.ndarray]:
+    """Return every input group of one output jacobian as a flat array (nodes per surface and tag)."""
+    out: dict[str, np.ndarray] = {}
+    for key, val in res_jac.items():
+        if key == "nodes":
+            for s, arrs in val.items():
+                for tag in ("le", "te"):
+                    out[f"nodes.{s}.{tag}"] = np.asarray(arrs[tag], dtype=float).ravel()
+        elif isinstance(val, dict):
+            out[key] = np.concatenate([np.atleast_1d(np.asarray(v, dtype=float)).ravel() for v in val.values()])
+        else:
+            out[key] = np.atleast_1d(np.asarray(val, dtype=float))
+    return out
+
+
+def _assert_same_gradients(ref: vt.GradientResult, new: vt.GradientResult, outputs: tuple, tol: float,
+                           tag: str) -> None:
+    """Each input group of each output agrees to *tol* relative to its largest component.
+
+    The scalar inputs (alpha, beta, V_inf, rho, h, phi) form one group.
+    """
+    for o in outputs:
+        a, b = _all_gradients(ref.jacobian[o]), _all_gradients(new.jacobian[o])
+        assert a.keys() == b.keys(), (tag, o)
+        scal = [k for k in a if not k.startswith(("nodes.", "sections", "reference"))]
+        groups = {k: [k] for k in a if k not in scal}
+        if scal:
+            groups["scalars"] = scal
+        for g, keys in groups.items():
+            x = np.concatenate([a[k] for k in keys])
+            y = np.concatenate([b[k] for k in keys])
+            scale = float(np.max(np.abs(x)))
+            err = float(np.max(np.abs(x - y)))
+            assert err <= tol * scale or (scale == 0.0 and err == 0.0), (tag, o, g, err, scale)
+
+
+@pytest.mark.parametrize("case_id,ac,cond,st", _parity_cases(), ids=[c[0] for c in _parity_cases()])
+def test_gradients_kernels_equal_reference(case_id: str, ac: vt.Aircraft, cond: vt.FlightCondition,
+                                           st: vt.SolverSettings, float64_precision,
+                                           restore_vjp_backend) -> None:
+    """The compiled VJP kernels give the gradients of the PyTorch reference copy to 1e-12 (float64).
+
+    All CPU backends, all parity configurations, all inputs and outputs.
+    """
+    K = restore_vjp_backend
+    wrt, outputs = _case_io(case_id, cond)
+    backends = [b for b in K.CPU_BACKENDS if K.available(b, "cpu")]
+    assert "numba" in backends and "numpy" in backends
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        ref = vt.gradients(ac, cond, st, outputs=outputs, wrt=wrt, method="reference")
+        assert ref.partials == "reference:torch"
+        for backend in backends:
+            K.set_vjp_backend(backend)
+            new = vt.gradients(ac, cond, st, outputs=outputs, wrt=wrt, method="kernels")
+            assert new.partials == f"kernels:{backend}"
+            assert new.method == "adjoint"
+            assert new.symmetric == ref.symmetric
+            assert new.forward_mismatch <= 1e-12, (case_id, backend, new.forward_mismatch)
+            for o in outputs:
+                assert new.values[o] == ref.values[o]
+            _assert_same_gradients(ref, new, outputs, 1e-12, f"{case_id}:{backend}")
+
+
+def test_method_keyword(float64_precision, restore_vjp_backend) -> None:
+    """method selects the path of the partials; GradientResult.partials names it; the results agree."""
+    K = restore_vjp_backend
+    K.set_vjp_backend(None)
+    ac = vt.Aircraft(surfaces=[_plain_wing()])
+    cond = vt.FlightCondition(V_inf=30.0, alpha=np.radians(4.0), beta=np.radians(2.0))
+    st = vt.SolverSettings(solver_type="vlm", n_panels=8, n_chord=2)
+    outs = ("CL", "CD", "Cm")
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        ref = vt.gradients(ac, cond, st, outputs=outs, wrt=("alpha", "nodes"), method="reference")
+        ker = vt.gradients(ac, cond, st, outputs=outs, wrt=("alpha", "nodes"), method="kernels")
+        auto = vt.gradients(ac, cond, st, outputs=outs, wrt=("alpha", "nodes"))
+        vjp_ref = vt.gradient_vjp(ac, cond, st, seeds={"CL": 1.0, "Cm": 2.0}, wrt=("alpha",),
+                                  method="reference")
+        vjp_ker = vt.gradient_vjp(ac, cond, st, seeds={"CL": 1.0, "Cm": 2.0}, wrt=("alpha",),
+                                  method="kernels")
+        check = vt.check_gradients(ac, cond, st, outputs=("CL",), wrt=("alpha",), rtol=1e-6,
+                                   method="reference")
+    assert ref.partials == "reference:torch"
+    assert ker.partials == "kernels:" + K.default_backend("cpu")
+    path, backend = K.resolve("auto", "cpu", 32)  # 32 panels: the small size class
+    assert auto.partials == f"{path}:{backend}"
+    assert ref.to_dict()["partials"] == "reference:torch"
+    assert check["partials"] == "reference:torch" and check["pass"]
+    _assert_same_gradients(ref, ker, outs, 1e-12, "kernels")
+    _assert_same_gradients(ref, auto, outs, 1e-12, "auto")
+    assert vjp_ker["alpha"] == pytest.approx(vjp_ref["alpha"], rel=1e-12)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        with pytest.raises(ValueError, match="method"):
+            vt.gradients(ac, cond, st, outputs=("CL",), wrt=("alpha",), method="fast")
+        with pytest.raises(ValueError, match="method"):
+            vt.gradient_vjp(ac, cond, st, seeds={"CL": 1.0}, wrt=("alpha",), method="")
+
+
+@pytest.mark.parametrize("backend", ["numba", "cython", "numpy"])
+@pytest.mark.parametrize("case_id,ac,cond,st", _parity_cases(), ids=[c[0] for c in _parity_cases()])
+def test_float32_gate_kernels(case_id: str, ac: vt.Aircraft, cond: vt.FlightCondition, st: vt.SolverSettings,
+                              backend: str, float32_precision, cpu_device, restore_vjp_backend) -> None:
+    """Float32 gradients with the compiled kernels pass check_gradients with rtol 1e-3 (the float32 gate)."""
+    K = restore_vjp_backend
+    if not K.available(backend, "cpu"):
+        pytest.skip(f"The {backend} VJP backend is not available.")
+    K.set_vjp_backend(backend)
+    wrt, outputs = _case_io(case_id, cond, check=True)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        out = vt.check_gradients(ac, cond, st, outputs=outputs, wrt=wrt, n_directions=3, rtol=1e-3, seed=0,
+                                 method="kernels")
+    assert out["partials"] == f"kernels:{backend}"
+    assert all(c["compared"] > 0 for c in out["groups"].values()), (case_id, out["groups"])
+    assert out["pass"], (case_id, _failed(out))
+
+
+@pytest.mark.gpu
+def test_gpu_kernels_equal_reference(gpu_device, restore_vjp_backend) -> None:
+    """On the GPU the Warp kernels give the gradients of the reference copy (float64 1e-12, float32 1e-4).
+
+    The VJP products agree to 1e-5 in float32 (tests/test_vjp_kernels.py). The
+    complete gradient of a small output (Cn in a small sideslip) is the
+    difference of larger terms, so both float32 paths lose digits there; the
+    float32 tolerance of the complete gradients is 1e-4, the float32
+    tolerance of the forward check.
+    """
+    K = restore_vjp_backend
+    if not K.available("warp", "cuda"):
+        pytest.skip("The Warp VJP kernels need warp-lang.")
+    K.set_vjp_backend(None)
+    gpu.set_device("gpu")
+    for case_id, ac, cond, st in _parity_cases():
+        wrt, outputs = _case_io(case_id, cond)
+        for prec, tol in (("float64", 1e-12), ("float32", 1e-4)):
+            gpu.set_precision(prec)
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                ref = vt.gradients(ac, cond, st, outputs=outputs, wrt=wrt, method="reference")
+                new = vt.gradients(ac, cond, st, outputs=outputs, wrt=wrt)
+            assert new.device == "cuda" and new.partials == "kernels:warp", (case_id, new.partials)
+            _assert_same_gradients(ref, new, outputs, tol, f"{case_id}:{prec}")
