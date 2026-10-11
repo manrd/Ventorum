@@ -10,6 +10,13 @@ a minor version can change a public interface.
 
 ### Added
 
+- Reference-case format: derivative quantities `<C>_alpha` and `<C>_beta` (C in CL, CD, CY,
+  Cl, Cm, Cn) with `derivative_unit` (1/deg or 1/rad) and `axes` (default stability axes);
+  results against a lift-coefficient list `CL` instead of `alpha_deg` (a CL that the alpha
+  sweep does not reach is reported, never extrapolated); slope entries (`slope_of = "CL"`,
+  `CL_range`) with a least-squares fit. The validation runner computes the Ventorum values
+  with central differences (alpha 0.5 deg, beta 1 deg, one mesh), as the agent tool
+  `ventorum_stability_derivatives`. Existing case files do not change.
 - Error bars, layer 2 (input uncertainty): `input_error_bars` propagates the standard
   uncertainties of the flow inputs (alpha, beta, phi [rad], V_inf [m/s], rho [kg/m^3], h [m])
   and of the linear section properties per surface (a0, alpha_L0, Cd0, Cm0, fully correlated
