@@ -111,11 +111,22 @@ The units of each column are:
 - $1/\text{rad}$ for angle and control variables ($\alpha, \beta, \phi, \delta$).
 - Dimensionless ($-$) for height $h/c_\text{ref}$ and body rates $\hat{p}, \hat{q}, \hat{r}$.
 
-Forces $C_L, C_D, C_Y$ are relative to the free stream in body, stability, and wind axes. Moments $C_l, C_m, C_n$ transform from body axes with the reference lengths $b_\text{ref}$ and $c_\text{ref}$:
+Forces $C_L, C_D, C_Y$ are relative to the free stream in body, stability, and wind axes. The axes of the base condition stay fixed while the variables change. $\mathbf{R}$ is the rotation from the body axes to the target axes, and $\mathbf{L} = \operatorname{diag}(b_\text{ref}, c_\text{ref}, b_\text{ref})$.
+
+In the static, height and control columns the variables do not depend on the axes. Only the moment rows turn, with the reference lengths:
 
 ```{math}
-\begin{bmatrix} C_l \\ C_m \\ C_n \end{bmatrix}_\text{target} = \mathbf{L}^{-1} \mathbf{R} \mathbf{L} \begin{bmatrix} C_l \\ C_m \\ C_n \end{bmatrix}_\text{body}, \qquad \mathbf{L} = \operatorname{diag}(b_\text{ref}, c_\text{ref}, b_\text{ref}).
+\begin{bmatrix} C_l \\ C_m \\ C_n \end{bmatrix}_\text{target} = \mathbf{L}^{-1} \mathbf{R} \mathbf{L} \begin{bmatrix} C_l \\ C_m \\ C_n \end{bmatrix}_\text{body}.
 ```
+
+In the rate columns the rates are components of the angular velocity, so the rates turn together with the moments, as in `rate_derivatives`. With $\mathbf{F}$ the $3 \times 3$ force block (rows $C_L, C_D, C_Y$) and $\mathbf{J}$ the $3 \times 3$ moment block (rows $C_l, C_m, C_n$) of the rate columns:
+
+```{math}
+\mathbf{F}_\text{target} = \mathbf{F}_\text{body} \, \mathbf{L} \mathbf{R}^{T} \mathbf{L}^{-1}, \qquad
+\mathbf{J}_\text{target} = \mathbf{L}^{-1} \mathbf{R} \mathbf{L} \, \mathbf{J}_\text{body} \, \mathbf{L} \mathbf{R}^{T} \mathbf{L}^{-1}.
+```
+
+Thus every column equals the result of its source function (`static_derivatives`, `height_derivatives`, `control_derivatives` and `rate_derivatives`) in the same axes.
 
 ## Assumptions
 

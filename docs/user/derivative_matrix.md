@@ -56,7 +56,7 @@ The `axes` argument selects the axis system:
 - `"wind"`: turned by beta about the z axis.
 - `"all"`: returns a dictionary with matrices in body, stability, and wind axes.
 
-Force rows (CL, CD, CY) are relative to the free stream in every set. Moment rows transform with the reference span $b_\text{ref}$ and chord $c_\text{ref}$.
+Force rows (CL, CD, CY) are relative to the free stream in every set. In the static, height and control columns, the moment rows turn with the reference span $b_\text{ref}$ and chord $c_\text{ref}$. In the rate columns, the rates turn together with the moments, as in `rate_derivatives`. Thus each column equals the result of its source function in the same axes.
 
 ## Ground effect
 
@@ -68,7 +68,7 @@ When `condition.h` is set, `derivative_matrix` adds the height group by default.
 - `static_margin`: static margin fraction of body-axis pitch stability.
 - `neutral_point_x`: neutral point x position in geometry coordinates [m].
 - `irodov_margin`: height-pitch stability margin in ground effect.
-- Per control: Trefftz-plane lateral diagnostics `CY_farfield` and `Cn_trefftz`, and trust warnings if the near/far lateral rule applies.
+- `controls`: one entry per control name, `diagnostics["controls"][name]`, with the Trefftz-plane lateral derivatives `CY_farfield` and `Cn_trefftz` [1/rad] and the trust warnings when the near/far lateral rule applies.
 
 Export methods:
 - `res.to_dict()`: returns a JSON-safe dictionary with lists for arrays and None for non-finite values.

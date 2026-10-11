@@ -23,12 +23,17 @@ from typing import Any
 
 import numpy as np
 
-from ventorum.core.axes import moment_axes_matrix, transform_moments
+from ventorum.core.axes import (
+    moment_axes_matrix,
+    rotation_body_to_stability,
+    rotation_body_to_wind,
+    transform_moments,
+)
 from ventorum.core.datatypes import Aircraft, FlightCondition, LiftingSurface, SolverResult, SolverSettings
 from ventorum.core.trust import near_far_lateral_warnings
 from ventorum.solvers.control_derivatives import control_derivatives
 from ventorum.solvers.height_derivatives import height_derivatives
-from ventorum.solvers.rate_derivatives import rate_derivatives
+from ventorum.solvers.rate_derivatives import rate_axes_transform, rate_derivatives
 from ventorum.solvers.static_derivatives import static_derivatives
 
 __all__ = ["DerivativeMatrixResult", "DerivativeMatrixAllDict", "derivative_matrix"]
@@ -36,6 +41,111 @@ __all__ = ["DerivativeMatrixResult", "DerivativeMatrixAllDict", "derivative_matr
 _ROWS = ("CL", "CD", "CY", "Cl", "Cm", "Cn")
 _VALID_GROUPS = ("static", "control", "rate", "height")
 _VALID_AXES = ("body", "stability", "wind", "all")
+_RATE_COLUMNS = ("p_hat", "q_hat", "r_hat")
+_DEFAULT_GROUPS = ("static", "control", "rate")
+
+#: Steps of the static and height columns in ground effect (as the defaults
+#: of height_derivatives): alpha 0.5 deg, beta 1 deg, phi 0.5 deg [rad], and
+#: the height step as a fraction of the smallest clearance.
+_GROUND_STEPS = {"alpha": math.radians(0.5), "beta": math.radians(1.0), "phi": math.radians(0.5), "h_frac": 0.05}
+
+
+def effective_groups_of(groups: tuple[str, ...] | list[str], in_ground: bool) -> list[str]:
+    """Return the derivative groups that a call computes.
+
+    Parameters
+    ----------
+    groups : sequence of str
+        Requested groups (``"static"``, ``"control"``, ``"rate"``,
+        ``"height"``).
+    in_ground : bool
+        True when the flight condition has a height above the ground.
+
+    Returns
+    -------
+    list of str
+        The requested groups. In ground effect, ``"height"`` is added when
+        the default groups were requested.
+
+    Raises
+    ------
+    ValueError
+        For an unknown group, or for ``"height"`` in free air.
+    """
+    if isinstance(groups, str) or not isinstance(groups, (list, tuple)):
+        raise ValueError(f"'groups' must be a list of group names from {list(_VALID_GROUPS)}, got {groups!r}.")
+    requested = list(groups)
+    for g in requested:
+        if g not in _VALID_GROUPS:
+            raise ValueError(f"Unknown group {g!r}; allowed groups: {list(_VALID_GROUPS)}.")
+    if not in_ground and "height" in requested:
+        raise ValueError("Requesting 'height' in free air is not allowed (condition.h is not set).")
+    effective = list(requested)
+    if in_ground and "height" not in effective and set(requested) == set(_DEFAULT_GROUPS):
+        effective.append("height")
+    return effective
+
+
+def mesh_probe_conditions(
+    ac: Aircraft,
+    condition: FlightCondition,
+    settings: SolverSettings,
+    groups: list[str],
+    ref_point: np.ndarray,
+    *,
+    fingerprint: Any = None,
+) -> list[FlightCondition]:
+    """Return the flight conditions that set the common chordwise count.
+
+    In ground effect the automatic chordwise count depends on the
+    attitude and on the height. The static and height columns come from
+    ``height_derivatives``, which uses the largest count over its nine
+    cases (base, alpha, beta, phi and height steps). The control and rate
+    cases use the base condition. Out of ground effect the count does not
+    change with the attitude, so only the base condition is returned.
+
+    Parameters
+    ----------
+    ac : Aircraft
+        Case geometry with its reference values computed.
+    condition : FlightCondition
+        Base flight condition.
+    settings : SolverSettings
+        Solver settings.
+    groups : list of str
+        Effective groups of the call (see :func:`effective_groups_of`).
+    ref_point : numpy.ndarray
+        Moment reference point [m], shape (3,).
+    fingerprint : object, optional
+        Lattice-cache fingerprint of the surfaces.
+
+    Returns
+    -------
+    list of FlightCondition
+        The base condition first, then the stepped conditions.
+    """
+    if condition.h is None or not ({"static", "height"} & set(groups)):
+        return [condition]
+    from ventorum.aero.system import ground_plane_from_condition
+    from ventorum.geometry import lattice_cache
+    from ventorum.geometry.lattice import build_lattice
+
+    rp = np.asarray(ref_point, dtype=float)
+    chord_spacing = getattr(settings, "chord_spacing", "uniform")
+    key = lattice_cache.lattice_key(ac, settings, "vlm", 1, chord_spacing, fingerprint=fingerprint)
+    probe = lattice_cache.get_or_build(key, lambda: build_lattice(
+        ac, settings, collocation="vlm", n_chord=1, chord_spacing=chord_spacing))
+    h_min = float(np.min(ground_plane_from_condition(probe, condition, rp).height(probe.all_points())))
+    if h_min <= 0.0:
+        # The solve refuses this state with its own message.
+        return [condition]
+    conds = [condition]
+    for name, d in (("alpha", _GROUND_STEPS["alpha"]), ("beta", _GROUND_STEPS["beta"]),
+                    ("phi", _GROUND_STEPS["phi"]), ("h", _GROUND_STEPS["h_frac"] * h_min)):
+        base_val = float(getattr(condition, name))
+        for sgn in (1.0, -1.0):
+            conds.append(dataclasses.replace(condition, **{name: base_val + sgn * d}))
+    return conds
 
 
 def _json_float(value: float | None) -> float | None:
@@ -78,9 +188,11 @@ class DerivativeMatrixResult:
     precision : str
         Precision of the solves (``"float64"``, ``"float32"`` or ``"mixed"``).
     diagnostics : dict[str, Any]
-        Diagnostic quantities: static margin and neutral point, far-field
-        diagnostics per control with lateral trust warnings, and Irodov
-        margin in ground effect.
+        Diagnostic quantities: ``static_margin`` [-] and ``neutral_point_x``
+        [m] from the body-axis Cm_alpha; ``irodov_margin`` [-] and
+        ``irodov`` in ground effect; ``controls``, one entry per control
+        name with the far-field derivatives ``CY_farfield`` and
+        ``Cn_trefftz`` [1/rad] and the near/far lateral ``warnings``.
     notes : list of str
         Notes on the methods and conventions.
     base : SolverResult or None
@@ -312,19 +424,8 @@ def derivative_matrix(
     if axes not in _VALID_AXES:
         raise ValueError(f"'axes' must be one of {list(_VALID_AXES)}, got {axes!r}.")
 
-    requested_groups = list(groups)
-    for g in requested_groups:
-        if g not in _VALID_GROUPS:
-            raise ValueError(f"Unknown group {g!r}; allowed groups: {list(_VALID_GROUPS)}.")
-
     in_ground = condition.h is not None
-    if not in_ground and "height" in requested_groups:
-        raise ValueError("Requesting 'height' in free air is not allowed (condition.h is not set).")
-
-    # In ground effect, 'height' is added by default when default groups were used
-    effective_groups = list(requested_groups)
-    if in_ground and "height" not in effective_groups and set(requested_groups) == {"static", "control", "rate"}:
-        effective_groups.append("height")
+    effective_groups = effective_groups_of(groups, in_ground)
 
     known_controls = list(ac.control_names())
     ctrl_names: list[str] = []
@@ -348,33 +449,8 @@ def derivative_matrix(
     # Cost rule: resolve n_chord once so that all groups share the exact same mesh.
     if settings.n_chord is None and solver.collocation == "vlm":
         settings = settings.clone()
-        if in_ground:
-            # Match the resolved mesh of height_derivatives
-            from ventorum.aero.system import ground_plane_from_condition
-            from ventorum.geometry.lattice import build_lattice
-            chord_spacing = getattr(settings, "chord_spacing", "uniform")
-            key = lattice_cache.lattice_key(ac, settings, "vlm", 1, chord_spacing, fingerprint=fp)
-            probe = lattice_cache.get_or_build(key, lambda: build_lattice(
-                ac, settings, collocation="vlm", n_chord=1, chord_spacing=chord_spacing))
-            h_min = float(np.min(ground_plane_from_condition(probe, condition, rp).height(probe.all_points())))
-            d_h = 0.05 * h_min
-            d_alpha = math.radians(0.5)
-            d_beta = math.radians(1.0)
-            d_phi = math.radians(0.5)
-            conds_probe = [
-                condition,
-                dataclasses.replace(condition, alpha=float(condition.alpha) + d_alpha),
-                dataclasses.replace(condition, alpha=float(condition.alpha) - d_alpha),
-                dataclasses.replace(condition, beta=float(condition.beta) + d_beta),
-                dataclasses.replace(condition, beta=float(condition.beta) - d_beta),
-                dataclasses.replace(condition, phi=float(condition.phi) + d_phi),
-                dataclasses.replace(condition, phi=float(condition.phi) - d_phi),
-                dataclasses.replace(condition, h=float(condition.h) + d_h),
-                dataclasses.replace(condition, h=float(condition.h) - d_h),
-            ]
-            settings.n_chord = max(solver.resolve_n_chord(ac, settings, c, None, rp, fingerprint=fp) for c in conds_probe)
-        else:
-            settings.n_chord = solver.resolve_n_chord(ac, settings, condition, None, rp, fingerprint=fp)
+        conds_probe = mesh_probe_conditions(ac, condition, settings, effective_groups, rp, fingerprint=fp)
+        settings.n_chord = max(solver.resolve_n_chord(ac, settings, c, None, rp, fingerprint=fp) for c in conds_probe)
 
     # Solve the constituent groups in body axes
     body_columns: list[np.ndarray] = []
@@ -494,7 +570,6 @@ def derivative_matrix(
                 "warnings": list(warns),
             }
             ctrl_diags[name] = ctrl_diag
-            diagnostics[name] = ctrl_diag
         diagnostics["controls"] = ctrl_diags
 
     # 3. Rate group
@@ -534,12 +609,23 @@ def derivative_matrix(
         b_ref=b_ref, c_ref=c_ref,
     )
 
+    # The rate columns turn with the rates and the moments together, as
+    # rate_derivatives does (rate_axes_transform). The other columns keep
+    # their variables; only their moment rows turn.
+    rate_cols = [j for j, name in enumerate(col_names) if name in _RATE_COLUMNS]
+    rate_rot = {
+        "stability": rotation_body_to_stability(float(condition.alpha)),
+        "wind": rotation_body_to_wind(float(condition.alpha), float(condition.beta)),
+    }
+
     def _matrix_in(ax_name: str) -> np.ndarray:
         if ax_name == "body" or n_cols == 0:
             return matrix_body.copy()
         rot = rot_stab if ax_name == "stability" else rot_wind
         m = matrix_body.copy()
         m[3:] = rot @ matrix_body[3:]
+        if rate_cols:
+            m[:, rate_cols] = rate_axes_transform(matrix_body[:, rate_cols], rate_rot[ax_name], b_ref, c_ref)
         return m
 
     if axes == "all":
