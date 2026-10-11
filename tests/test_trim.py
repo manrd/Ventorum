@@ -657,3 +657,18 @@ def test_fourier_solver_is_refused_before_iteration(monkeypatch):
     with pytest.raises(ValueError, match="Fourier"):
         vt.trim(ac, cond, vt.SolverSettings(solver_type="fourier"), CL_target=0.5, pitch_control="elevator")
     assert calls == []
+
+
+def test_start_point_outside_the_bounds_gives_a_note():
+    """Regression: a start point outside the bounds was clipped without a note."""
+    ac = _build_wing_tail_aircraft()
+    cond = vt.FlightCondition(V_inf=30.0, alpha=np.radians(25.0))
+    st = vt.SolverSettings(solver_type="vlm", n_panels=14, n_chord=4)
+    res = vt.trim(ac, cond, st, CL_target=0.5, pitch_control="elevator")
+    assert res.status == "trimmed"
+    start = [n for n in res.notes if "start point" in n]
+    assert len(start) == 1
+    assert "alpha = 25.0000 deg" in start[0] and "alpha = 20.0000 deg" in start[0]
+    inside = vt.trim(ac, vt.FlightCondition(V_inf=30.0, alpha=np.radians(2.0)), st,
+                     CL_target=0.5, pitch_control="elevator")
+    assert not any("start point" in n for n in inside.notes)

@@ -225,6 +225,9 @@ def trim(
         together with roll_control for lateral trim.
     alpha_bounds_deg : tuple[float, float]
         Lower and upper bounds for angle of attack [deg]. Default is (-10.0, 20.0).
+        A start point outside the bounds (alpha, or a deflection outside
+        [-30, 30] deg) moves to the nearest point in the bounds, and a note
+        of the result says so.
     max_iterations : int
         Maximum number of Newton iterations. Default is 20.
     tol_CL : float
@@ -367,13 +370,21 @@ def trim(
             _get_control_deflection(ac_clone, yaw_control),
         ])
 
-    x = np.clip(np.array(x_init, dtype=float), lower_bounds, upper_bounds)
+    x_start = np.array(x_init, dtype=float)
+    x = np.clip(x_start, lower_bounds, upper_bounds)
     nan_jacobian = np.full((n_vars, n_vars), np.nan, dtype=float)
 
     def _describe(x_vec: np.ndarray) -> str:
         """Return the values of the unknowns of a point [deg] as text."""
         return ", ".join(
             f"{name} = {math.degrees(float(val)):.4f} deg" for name, val in zip(unknown_names, x_vec)
+        )
+
+    start_notes: list[str] = []
+    if np.any(x != x_start):
+        start_notes.append(
+            f"The start point ({_describe(x_start)}) is outside the bounds; the iteration starts "
+            f"from the nearest point in the bounds ({_describe(x)})."
         )
 
     devices: set[str] = set()
@@ -524,7 +535,7 @@ def trim(
                                                      else "mixed"),
         )
 
-    notes: list[str] = []
+    notes: list[str] = list(start_notes)
     residual_history: list[float] = []
     outward_counts = np.zeros(n_vars, dtype=int)
     # The last point with a good solve, its solution and its Jacobian.
