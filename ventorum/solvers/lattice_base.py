@@ -315,11 +315,11 @@ class LatticeSolver(BaseSolver):
     @staticmethod
     def _cached(lattice: VortexLattice, key, compute):
         """Return the lattice-only value *key* from ``lattice.geom_cache``; compute it on the first use."""
-        value = lattice.geom_cache.get(key)
-        if value is None:
-            value = compute()
-            lattice.geom_cache[key] = value
-        return value
+        cache = lattice.geom_cache
+        if key not in cache:
+            # A None value is cached too (for example no polar limits for linear airfoils).
+            cache[key] = compute()
+        return cache[key]
 
     @staticmethod
     def _cn_stability(totals, condition: FlightCondition, b_ref: float, c_ref: float) -> float | None:

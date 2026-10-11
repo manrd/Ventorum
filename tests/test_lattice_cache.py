@@ -88,3 +88,25 @@ def test_user_airfoil_arrays_stay_writable():
         vt.analyze(wing, alpha_deg=4.0, solver=solver, n_panels=10)
     assert alpha.flags.writeable and cl.flags.writeable and cd.flags.writeable
     cl[0] = cl[0]  # the user can still write into the array
+
+
+def test_cached_none_value_is_computed_once():
+    """Regression test: a lattice-only value of None was computed again on every case.
+
+    Linear airfoils have no polar limits (None), so the limits were recomputed
+    for each case of a sweep.
+    """
+    from types import SimpleNamespace
+
+    from ventorum.solvers.lattice_base import LatticeSolver
+
+    lattice = SimpleNamespace(geom_cache={})
+    calls = []
+
+    def compute():
+        calls.append(1)
+        return None
+
+    assert LatticeSolver._cached(lattice, "polar_limits", compute) is None
+    assert LatticeSolver._cached(lattice, "polar_limits", compute) is None
+    assert len(calls) == 1
