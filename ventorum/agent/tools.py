@@ -42,6 +42,8 @@ from ventorum.agent.response import (
 )
 from ventorum.agent.schemas import (
     _CANDIDATE_SCHEMA,
+    INPUT_UNCERTAINTY_FLOW_PROPS,
+    INPUT_UNCERTAINTY_SECTION_PROPS,
     MAX_CALL_WORK,
     MAX_TOTAL_PANELS,
     MIN_ALPHA_STEP_DEG,
@@ -1796,6 +1798,67 @@ def trim(
 # Numerical error bars
 # ═══════════════════════════════════════════════════════════════════════════════
 
+#: Agent key of a layer-2 flow uncertainty: (key of input_error_bars, factor to its unit).
+_UNC_FLOW_KEYS = {
+    "alpha_deg": ("alpha", math.pi / 180.0),
+    "beta_deg": ("beta", math.pi / 180.0),
+    "phi_deg": ("phi", math.pi / 180.0),
+    "V_inf_m_s": ("V_inf", 1.0),
+    "rho_kg_m3": ("rho", 1.0),
+    "h_m": ("h", 1.0),
+}
+
+#: Agent key of a layer-2 section uncertainty: (key of input_error_bars, factor to its unit).
+_UNC_SECTION_KEYS = {
+    "a0_per_rad": ("a0", 1.0),
+    "alpha_L0_deg": ("alpha_L0", math.pi / 180.0),
+    "Cd0": ("Cd0", 1.0),
+    "Cm0": ("Cm0", 1.0),
+}
+assert set(_UNC_FLOW_KEYS) == set(INPUT_UNCERTAINTY_FLOW_PROPS)
+assert set(_UNC_SECTION_KEYS) == set(INPUT_UNCERTAINTY_SECTION_PROPS)
+
+
+def _parse_input_uncertainties(raw: Any, ac: Aircraft, in_ground: bool) -> dict[str, Any]:
+    """Check the agent input uncertainties and return them in the units of input_error_bars.
+
+    The checks run on the values in the units of the agent input, so an
+    error message gives the value as the user wrote it. Angles in degrees
+    become rad; the other values keep their SI units.
+    """
+    obj = check_keys(raw, list(_UNC_FLOW_KEYS) + ["sections"], "input_uncertainties")
+    out: dict[str, Any] = {}
+    for key, val in obj.items():
+        if key == "sections":
+            continue
+        target, factor = _UNC_FLOW_KEYS[key]
+        out[target] = number(val, f"input_uncertainties.{key}", minimum=0.0) * factor
+    if "h" in out and not in_ground:
+        raise InputError("input_uncertainties.h_m needs ground effect: give flight_condition.h_m.")
+    if "sections" in obj:
+        sections = obj["sections"]
+        if not isinstance(sections, dict):
+            raise InputError("input_uncertainties.sections must be a JSON object of surface name to "
+                             f"uncertainties, got {type(sections).__name__}.")
+        names = [surf.name for surf in ac.surfaces]
+        parsed: dict[str, dict[str, float]] = {}
+        for surf, props in sections.items():
+            if surf not in names:
+                raise InputError(f"input_uncertainties.sections: unknown surface name {surf!r}. "
+                                 f"Known surface names: {', '.join(names)}.")
+            where = f"input_uncertainties.sections.{surf}"
+            p = check_keys(props, list(_UNC_SECTION_KEYS), where)
+            parsed[surf] = {
+                _UNC_SECTION_KEYS[k][0]: number(v, f"{where}.{k}", minimum=0.0) * _UNC_SECTION_KEYS[k][1]
+                for k, v in p.items()
+            }
+        out["sections"] = parsed
+    if not any(k != "sections" for k in out) and not any(out.get("sections", {}).values()):
+        raise InputError("input_uncertainties has no uncertain input: give at least one of "
+                         f"{', '.join(list(_UNC_FLOW_KEYS) + ['sections'])}.")
+    return out
+
+
 @_tool
 def error_bars(
     wing: Any = None,
@@ -1830,7 +1893,12 @@ def error_bars(
     detail_level : 'summary', 'standard' or 'full'
         Accepted for consistency; the bar content is the same at every level.
     input_uncertainties : dict or None
-        Optional input uncertainties (angles in degrees).
+        Optional layer-2 standard uncertainties: ``alpha_deg``,
+        ``beta_deg``, ``phi_deg`` [deg], ``V_inf_m_s`` [m/s],
+        ``rho_kg_m3`` [kg/m^3], ``h_m`` [m] (ground effect only), and
+        ``sections`` (surface name to ``a0_per_rad`` [1/rad],
+        ``alpha_L0_deg`` [deg], ``Cd0`` [-], ``Cm0`` [-]). The angles are
+        converted to rad for :func:`ventorum.input_error_bars`.
     """
     from ventorum.core.error_bars import mesh_levels as _mesh_levels
 
@@ -1844,40 +1912,26 @@ def error_bars(
     levels = _mesh_levels(int(sett.n_panels))
     fc = make_flight_condition(c)
     case_sett = _case_settings(ac, sett, strips, fc)
+    parsed_unc = (None if input_uncertainties is None
+                  else _parse_input_uncertainties(input_uncertainties, ac, c["h_m"] is not None))
     estimate = 0
     for n_level in levels:
         s_level = case_sett.clone()
         s_level.n_panels = int(n_level)
         n_here = _planned_panels(ac, s_level, fc)
         estimate += n_here * n_here
+    if parsed_unc is not None:
+        # Input layer: one production solve on the fine level, then the
+        # gradients: the adjoint (a forward and an adjoint solve) or central
+        # differences (two solves per flow input). The larger count is used.
+        n_fine = _planned_panels(ac, case_sett, fc)
+        n_flow = sum(1 for k in parsed_unc if k != "sections")
+        estimate += (1 + 2 * max(1, n_flow)) * n_fine * n_fine
     _check_call_work(estimate, "fewer panels (smaller n_panels)")
     res = vt.numerical_error_bars(ac, condition=fc, settings=case_sett, axes=ax)
 
     status_of_bars = "numerical_only"
-    if input_uncertainties is not None:
-        if not isinstance(input_uncertainties, dict):
-            raise InputError(f"'input_uncertainties' must be a JSON object, got {type(input_uncertainties).__name__}.")
-        parsed_unc: dict[str, Any] = {}
-        for k, v in input_uncertainties.items():
-            if k in ("alpha", "beta", "phi"):
-                parsed_unc[k] = math.radians(number(v, f"input_uncertainties.{k}"))
-            elif k == "sections":
-                if not isinstance(v, dict):
-                    raise InputError(f"'input_uncertainties.sections' must be a JSON object, got {type(v).__name__}.")
-                parsed_sec = {}
-                for s_name, s_props in v.items():
-                    if not isinstance(s_props, dict):
-                        raise InputError(f"'input_uncertainties.sections.{s_name}' must be a JSON object.")
-                    p_dict = {}
-                    for prop_k, prop_v in s_props.items():
-                        if prop_k == "alpha_L0":
-                            p_dict[prop_k] = math.radians(number(prop_v, f"input_uncertainties.sections.{s_name}.alpha_L0"))
-                        else:
-                            p_dict[prop_k] = number(prop_v, f"input_uncertainties.sections.{s_name}.{prop_k}")
-                    parsed_sec[s_name] = p_dict
-                parsed_unc["sections"] = parsed_sec
-            else:
-                parsed_unc[k] = number(v, f"input_uncertainties.{k}")
+    if parsed_unc is not None:
         inp_bars = vt.input_error_bars(ac, condition=fc, settings=case_sett, uncertainties=parsed_unc, axes=ax)
         res = vt.combine_error_bars(res, inp_bars)
         status_of_bars = "numerical_and_input"
@@ -1945,7 +1999,15 @@ def derivative_matrix(
     (CL, CD, CY, Cl, Cm, Cn) with respect to static angles (alpha, beta,
     and in ground effect phi and h/c), control deflections (per control name),
     and nondimensional body rates (p_hat, q_hat, r_hat).
+
+    All the cases of one call use one mesh: an automatic chordwise count is
+    resolved once over all the cases and reduced to the panel limit if
+    needed. The work estimate counts the real solves: in free air 5 static
+    solves, 1 + 2 n control solves (n controls) and 7 rate solves; in
+    ground effect 9 static and height solves instead of 5.
     """
+    from ventorum.solvers.derivative_matrix import effective_groups_of, mesh_probe_conditions
+
     ac = build_aircraft_from_spec(wing=wing, aircraft=aircraft)
     c = parse_condition(flight_condition)
     sett = parse_settings(settings)
@@ -1955,36 +2017,50 @@ def derivative_matrix(
     x_cg = number(x_cg_m, "x_cg_m") if x_cg_m is not None else float(base[0])
     ac.ref_point = np.array([x_cg, 0.0, float(base[2])])
     ac.compute_reference_values()
-    _check_method(ac, sett.solver_type, sett.wake_alignment, c["h_m"] is not None)
-    _check_mesh(ac, sett)
+    in_ground = c["h_m"] is not None
+    _check_method(ac, sett.solver_type, sett.wake_alignment, in_ground)
+    strips = _check_mesh(ac, sett)
 
-    eff_groups = ("static", "control", "rate") if groups is None else groups
-    if not isinstance(eff_groups, (list, tuple)):
+    raw_groups = ["static", "control", "rate"] if groups is None else groups
+    if isinstance(raw_groups, str) or not isinstance(raw_groups, (list, tuple)):
         raise InputError("'groups' must be an array of group names.")
+    try:
+        eff_groups = effective_groups_of(list(raw_groups), in_ground)
+    except ValueError as exc:
+        raise InputError(str(exc)) from exc
+    known = list(ac.control_names())
+    if controls is not None:
+        if isinstance(controls, str) or not isinstance(controls, (list, tuple)):
+            raise InputError("'controls' must be an array of control names.")
+        unknown = [n for n in controls if n not in known]
+        if unknown:
+            raise InputError(f"Unknown control name(s) {unknown}; known control names: {known}.")
+    ctrl_list = (known if controls is None else list(controls)) if "control" in eff_groups else []
 
     fc = make_flight_condition(c)
+    # One mesh for all the cases of the call (static, height, control and rate).
+    probe_conds = mesh_probe_conditions(ac, fc, sett, eff_groups, np.asarray(ac.moment_reference(), dtype=float))
+    case_sett, capped = _common_settings(ac, sett, strips, probe_conds)
 
-    # Estimate number of solves for the work budget check
-    known = ac.control_names()
-    ctrl_list = list(known) if controls is None else list(controls)
-    n_solves = 1
-    if "static" in eff_groups:
-        n_solves += 8 if c["h_m"] is not None else 4
-    if "height" in eff_groups and c["h_m"] is not None and "static" not in eff_groups:
-        n_solves += 8
-    if "control" in eff_groups:
-        n_solves += 2 * len(ctrl_list)
+    # Work budget: the real number of solves of the source functions.
+    n_solves = 0
+    if in_ground and ({"static", "height"} & set(eff_groups)):
+        n_solves += 9                       # height_derivatives: base and 8 steps
+    elif "static" in eff_groups:
+        n_solves += 5                       # static_derivatives: base and 4 steps
+    if ctrl_list:
+        n_solves += 1 + 2 * len(ctrl_list)  # control_derivatives: base and 2 per control
     if "rate" in eff_groups:
-        n_solves += 6
+        n_solves += 7                       # rate_derivatives: base and 6 steps
     _check_call_work(
-        n_solves * (_planned_panels(ac, sett, fc) ** 2),
-        "fewer panels (smaller n_panels or n_chord)",
+        n_solves * (_planned_panels(ac, case_sett, fc) ** 2),
+        "fewer panels (smaller n_panels or n_chord), fewer groups or fewer controls",
     )
 
     dm_res = vt.derivative_matrix(
-        ac, fc, sett,
+        ac, fc, case_sett,
         groups=eff_groups,
-        controls=controls,
+        controls=ctrl_list if "control" in eff_groups else None,
         axes=ax,
     )
 
@@ -2002,27 +2078,31 @@ def derivative_matrix(
     if ax == "all":
         matrix_payload = _format_matrix(dm_res.results["body"])
         matrices_payload = {name: _format_matrix(dm_res.results[name]) for name in ("body", "stability", "wind")}
-        dev = dm_res.device
-        prec = dm_res.precision
-        base_sol = dm_res.base
-        notes = dm_res.notes
-        cols = dm_res.columns
-        rows = dm_res.rows
-        units = dm_res.units
-        methods = dm_res.methods
-        diags = dm_res.diagnostics
     else:
         matrix_payload = _format_matrix(dm_res)
         matrices_payload = None
-        dev = dm_res.device
-        prec = dm_res.precision
-        base_sol = dm_res.base
-        notes = dm_res.notes
-        cols = dm_res.columns
-        rows = dm_res.rows
-        units = dm_res.units
-        methods = dm_res.methods
-        diags = dm_res.diagnostics
+    dev, prec = dm_res.device, dm_res.precision
+    base_sol = dm_res.base
+    cols, rows = dm_res.columns, dm_res.rows
+    raw_diag = dm_res.diagnostics
+
+    # Diagnostics with the unit in each key name, as the other tools.
+    diags: dict[str, Any] = {}
+    if "static_margin" in raw_diag:
+        diags["static_margin_fraction"] = rnd(raw_diag["static_margin"], 5)
+        diags["neutral_point_x_m"] = rnd(raw_diag["neutral_point_x"], 5)
+    if "irodov" in raw_diag:
+        iro = raw_diag["irodov"]
+        diags["irodov_margin"] = rnd(iro.get("margin"), 5)
+        diags["irodov"] = {"x_alpha_m": rnd(iro.get("x_alpha_m"), 5), "x_h_m": rnd(iro.get("x_h_m"), 5),
+                           "irodov_margin": rnd(iro.get("margin"), 5), "verdict": iro.get("verdict")}
+    if "controls" in raw_diag:
+        diags["controls"] = {
+            name: {"CY_farfield_delta_per_rad": rnd(d["CY_farfield"]),
+                   "Cn_trefftz_delta_per_rad": rnd(d["Cn_trefftz"]),
+                   "warnings": list(d["warnings"])}
+            for name, d in raw_diag["controls"].items()
+        }
 
     dev_txt = device_summary_text(dev, prec)
     summary = (
@@ -2030,21 +2110,21 @@ def derivative_matrix(
         f"{len(cols)} columns ({', '.join(cols)}). "
         f"{dev_txt}"
     )
-
+    settings_used = {**settings_payload(sett, base_sol), **_mesh_note(capped, case_sett)}
     out: dict[str, Any] = {
         "status": "success",
         "executive_summary": summary,
         "matrix": matrix_payload,
         "columns": list(cols),
         "rows": list(rows),
-        "units": {col: u for col, u in zip(cols, units)},
-        "methods": {col: m for col, m in zip(cols, methods)},
+        "units": {col: u for col, u in zip(cols, dm_res.units)},
+        "methods": {col: m for col, m in zip(cols, dm_res.methods)},
         "axes": ax,
         "diagnostics": diags,
-        "notes": list(notes),
+        "notes": list(dm_res.notes),
         "trust": trust_payload(base_sol.totals.trust) if base_sol is not None else None,
         "condition_used": condition_payload(c),
-        "settings_used": settings_payload(sett, base_sol),
+        "settings_used": settings_used,
         "device": dev,
         "precision": prec,
     }

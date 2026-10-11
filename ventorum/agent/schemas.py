@@ -954,6 +954,44 @@ _AXES_NO_ALL_SCHEMA = {
                    "'all' is refused. CL, CD and CY are relative to the free stream in every set.",
 }
 
+#: Section properties of the layer-2 input uncertainties (agent units).
+INPUT_UNCERTAINTY_SECTION_PROPS: dict[str, dict[str, Any]] = {
+    "a0_per_rad": _num("Standard uncertainty of the section lift-curve slope [1/rad].", minimum=0),
+    "alpha_L0_deg": _num("Standard uncertainty of the section zero-lift angle [deg].", minimum=0),
+    "Cd0": _num("Standard uncertainty of the section profile drag coefficient [-].", minimum=0),
+    "Cm0": _num("Standard uncertainty of the section pitching moment coefficient [-].", minimum=0),
+}
+
+#: Flow inputs of the layer-2 input uncertainties (agent units).
+INPUT_UNCERTAINTY_FLOW_PROPS: dict[str, dict[str, Any]] = {
+    "alpha_deg": _num("Standard uncertainty of the angle of attack [deg].", minimum=0),
+    "beta_deg": _num("Standard uncertainty of the sideslip angle [deg].", minimum=0),
+    "phi_deg": _num("Standard uncertainty of the bank angle [deg].", minimum=0),
+    "V_inf_m_s": _num("Standard uncertainty of the free-stream speed [m/s].", minimum=0),
+    "rho_kg_m3": _num("Standard uncertainty of the air density [kg/m^3].", minimum=0),
+    "h_m": _num("Standard uncertainty of the height above the ground [m]. Ground effect only.", minimum=0),
+}
+
+INPUT_UNCERTAINTIES_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "description": "Layer-2 standard uncertainties (one standard deviation, never negative). Flow inputs "
+                   "and, in 'sections', the linear section data per surface name (fully correlated along "
+                   "the span). The layer-2 bars are combined with the numerical bars by root sum of squares.",
+    "properties": {
+        **INPUT_UNCERTAINTY_FLOW_PROPS,
+        "sections": {
+            "type": "object",
+            "description": "Section uncertainties keyed by surface name.",
+            "additionalProperties": {
+                "type": "object",
+                "properties": INPUT_UNCERTAINTY_SECTION_PROPS,
+                "additionalProperties": False,
+            },
+        },
+    },
+    "additionalProperties": False,
+}
+
 AGENT_TOOL_DEFINITIONS: list[dict[str, Any]] = [
     {
         "name": "ventorum_wing_analysis",
@@ -1200,11 +1238,7 @@ AGENT_TOOL_DEFINITIONS: list[dict[str, Any]] = [
                 "settings": SETTINGS_SCHEMA,
                 "axes": {**_AXES_NO_ALL_SCHEMA, "default": "body"},
                 "detail_level": {**DETAIL_LEVEL, "default": "standard"},
-                "input_uncertainties": {
-                    "type": "object",
-                    "description": "Standard uncertainties of flow inputs (alpha, beta, phi in deg, "
-                                   "V_inf in m/s, rho in kg/m^3, h in m) and section data.",
-                },
+                "input_uncertainties": INPUT_UNCERTAINTIES_SCHEMA,
             },
             "additionalProperties": False,
         },

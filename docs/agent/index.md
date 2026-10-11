@@ -61,7 +61,7 @@ Example with `aircraft`:
 
 - **Work units.** One solve of a lattice with N panels costs N^2 units. The work of a call is the sum over all solves that the call will run (sweep angles, heights, mesh levels, batch candidates, derivative steps).
 - **Budget.** A call whose estimated work is above 200000000 units is refused with `error.type` `invalid_input` before any solve. The message gives the estimate, the budget and how to reduce the work: fewer angles (smaller range or larger `alpha_step_deg`), fewer heights, fewer mesh levels or spacing schemes, fewer candidates, or fewer panels (smaller `n_panels` or `n_chord`).
-- **Scope.** The budget covers `ventorum_wing_analysis`, `ventorum_polar_sweep`, `ventorum_ground_effect` (heights plus free air plus the Irodov height-pitch sweep), `ventorum_stability_derivatives` (5 solves), `ventorum_derivative_matrix` (sum of planned solves across constituent groups), `ventorum_batch_evaluate`, `ventorum_mesh_convergence` (levels times the angles that are really solved), `ventorum_trim` (`(1 + max_iterations * (1 + 2 * n_unknowns)) * N^2`, with 2 unknowns in longitudinal trim and 4 in lateral trim) and `ventorum_error_bars` (`N1^2 + N2^2 + N3^2` of the three spanwise levels). `ventorum_tune_machine` and `ventorum_undeformed_nodes` are outside the budget: they run no solve (their duration or mesh is stated in their description instead).
+- **Scope.** The budget covers `ventorum_wing_analysis`, `ventorum_polar_sweep`, `ventorum_ground_effect` (heights plus free air plus the Irodov height-pitch sweep), `ventorum_stability_derivatives` (5 solves), `ventorum_derivative_matrix` (the real solves times N^2: in free air 5 static, 1 + 2 n control (n controls) and 7 rate solves, so 13 + 2 n with all groups; in ground effect 9 static and height solves instead of 5, so 17 + 2 n), `ventorum_batch_evaluate`, `ventorum_mesh_convergence` (levels times the angles that are really solved), `ventorum_trim` (`(1 + max_iterations * (1 + 2 * n_unknowns)) * N^2`, with 2 unknowns in longitudinal trim and 4 in lateral trim) and `ventorum_error_bars` (`N1^2 + N2^2 + N3^2` of the three spanwise levels, plus `(1 + 2 max(1, k)) N1^2` with `input_uncertainties`, k = number of flow inputs). `ventorum_tune_machine` and `ventorum_undeformed_nodes` are outside the budget: they run no solve (their duration or mesh is stated in their description instead).
 
 ## Error types
 
@@ -93,11 +93,16 @@ Example with `aircraft`:
 
 ## Numerical and input error bars
 
-- `ventorum_error_bars` (`wing` or `aircraft`, `flight_condition`, `settings` (`n_panels` is the fine level N1, at least 16), `axes` (`body`, `stability` or `wind`; `all` is refused), `detail_level`, `input_uncertainties`): layer-1 numerical error bars of the six force and moment coefficients from three spanwise mesh levels. When `input_uncertainties` is omitted, only the numerical layer is included and `status_of_bars` is `numerical_only`. With `input_uncertainties` (flow uncertainties with angles in degrees, section data), the layer-2 input uncertainty is combined by root sum of squares and `status_of_bars` is `numerical_and_input`. The work estimate is `N1^2 + N2^2 + N3^2`; reduce the work with fewer panels (smaller `n_panels`).
+- `ventorum_error_bars` (`wing` or `aircraft`, `flight_condition`, `settings` (`n_panels` is the fine level N1, at least 16), `axes` (`body`, `stability` or `wind`; `all` is refused), `detail_level`, `input_uncertainties`): layer-1 numerical error bars of the six force and moment coefficients from three spanwise mesh levels. When `input_uncertainties` is omitted, only the numerical layer is included and `status_of_bars` is `numerical_only`.
+- `input_uncertainties` gives the layer-2 standard uncertainties (one standard deviation, never negative), with the unit in each key name: `alpha_deg`, `beta_deg`, `phi_deg` [deg], `V_inf_m_s` [m/s], `rho_kg_m3` [kg/m^3], `h_m` [m] (ground effect only), and `sections`, a JSON object of surface name to `a0_per_rad` [1/rad], `alpha_L0_deg` [deg], `Cd0` [-], `Cm0` [-]. The tool converts the angles to rad. The input layer is combined with the numerical layer by root sum of squares and `status_of_bars` is `numerical_and_input`. An error message gives the value in the unit of the input.
+- The work estimate is `N1^2 + N2^2 + N3^2`, plus `(1 + 2 max(1, k)) N1^2` for the input layer (one solve, then the adjoint or two solves per flow input; k = number of flow inputs). Reduce the work with fewer panels (smaller `n_panels`).
 
 ## Full aerodynamic derivative matrix
 
-- `ventorum_derivative_matrix` (`wing` or `aircraft`, `flight_condition`, `settings`, `groups`, `controls`, `axes`, `x_cg_m`, `detail_level`): full aerodynamic derivative matrix of one flight state. Deflections in degrees in the agent input; derivative output per rad, with the unit in each key name (`..._per_rad`) for angles and deflections, and dimensionless for height and rates. The matrix is returned as a dictionary of rows (`CL, CD, CY, Cl, Cm, Cn`) keyed by column label. Output includes `units`, `methods`, `axes`, `diagnostics` (static margin, neutral point, Irodov margin in ground effect, far-field lateral diagnostics per control), and trust notes.
+- `ventorum_derivative_matrix` (`wing` or `aircraft`, `flight_condition`, `settings`, `groups`, `controls`, `axes`, `x_cg_m`, `detail_level`): full aerodynamic derivative matrix of one flight state. Deflections in degrees in the agent input; derivative output per rad, with the unit in each key name (`..._per_rad`) for angles and deflections, and dimensionless for height and rates. The matrix is returned as a dictionary of rows (`CL, CD, CY, Cl, Cm, Cn`) keyed by column label. Output includes `units`, `methods`, `axes`, `diagnostics` and trust notes.
+- `diagnostics` has the unit in each key name: `static_margin_fraction` and `neutral_point_x_m` (body-axis Cm_alpha), `irodov_margin` and `irodov` (`x_alpha_m`, `x_h_m`, `irodov_margin`, `verdict`) in ground effect, and `controls`, one entry per control name with `CY_farfield_delta_per_rad`, `Cn_trefftz_delta_per_rad` and the near/far `warnings`.
+- All the cases of one call use one mesh. An automatic `n_chord` is resolved once over all the cases; when the mesh is above the panel limit, the count is reduced and `settings_used.mesh_note` says so.
+- In the stability and wind axes, the static, height and control columns turn only their moment rows; the rate columns turn with the rates, so each column equals its source function in the same axes.
 
 Example call:
 
@@ -118,6 +123,33 @@ res = call_tool("ventorum_derivative_matrix", {
 })
 print(res["executive_summary"])
 print("CL_alpha:", res["matrix"]["CL"]["alpha_per_rad"])
+```
+
+Example output (abridged: the rows CD, CY, Cl and Cn and the keys `notes`, `trust`, `condition_used`, `settings_used`, `device` and `precision` are not shown; produced by the call above on the CPU):
+
+```json
+{
+  "status": "success",
+  "executive_summary": "[Ventorum RESULT] Derivative matrix of Wing in body axes: 6 columns (alpha, beta, delta:elevator, p_hat, q_hat, r_hat). Computed on cpu in float64.",
+  "columns": ["alpha", "beta", "delta:elevator", "p_hat", "q_hat", "r_hat"],
+  "units": {"alpha": "1/rad", "beta": "1/rad", "delta:elevator": "1/rad", "p_hat": "-", "q_hat": "-", "r_hat": "-"},
+  "methods": {"alpha": "central, 0.5 deg", "beta": "central, 1 deg", "delta:elevator": "central, 1 deg",
+              "p_hat": "central, 0.01", "q_hat": "central, 0.01", "r_hat": "central, 0.01"},
+  "axes": "body",
+  "matrix": {
+    "CL": {"alpha_per_rad": 4.828981, "beta_per_rad": 0.0, "delta:elevator_per_rad": 2.697583,
+           "p_hat": -0.0, "q_hat": 7.320158, "r_hat": -0.0},
+    "Cm": {"alpha_per_rad": -1.175825, "beta_per_rad": -0.0, "delta:elevator_per_rad": -1.287283,
+           "p_hat": -0.0, "q_hat": -2.502685, "r_hat": -0.0}
+  },
+  "diagnostics": {
+    "static_margin_fraction": 0.24349,
+    "neutral_point_x_m": 0.24349,
+    "controls": {
+      "elevator": {"CY_farfield_delta_per_rad": 0.0, "Cn_trefftz_delta_per_rad": 0.0, "warnings": []}
+    }
+  }
+}
 ```
 
 ## Example

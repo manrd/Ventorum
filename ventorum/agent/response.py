@@ -151,14 +151,16 @@ def metrics_payload(res: SolverResult) -> dict[str, Any]:
         "Cm": rnd(tot.Cm),
         "Cl": rnd(tot.Cl),
         "Cn": rnd(tot.Cn),
+        "CY": rnd(tot.CY),
+        "solver": res.solver_type,
+        "converged": bool(res.converged),
     }
-    if tot.Cn_trefftz is not None:
-        out["Cn_trefftz"] = rnd(tot.Cn_trefftz)
-    out["CY"] = rnd(tot.CY)
+    # Far-field lateral diagnostics (Trefftz plane) after the other keys, in
+    # the order that wing_analysis already used, so that its output does not change.
     if tot.CY_farfield is not None:
         out["CY_farfield"] = rnd(tot.CY_farfield)
-    out["solver"] = res.solver_type
-    out["converged"] = bool(res.converged)
+    if tot.Cn_trefftz is not None:
+        out["Cn_trefftz"] = rnd(tot.Cn_trefftz)
     return out
 
 
