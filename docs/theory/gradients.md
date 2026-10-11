@@ -29,10 +29,12 @@ with O(n^2) work (system rows, near-field load points, Trefftz points) run in on
 paths, selected by the keyword `method` (see "Vector-Jacobian products of the kernel"
 below):
 
-* The compiled kernels (`method="kernels"`, and the default `"auto"`): one forward
-  kernel and one hand-derived vector-Jacobian-product (VJP) kernel per part, in Numba,
-  Cython or numpy on the CPU and NVIDIA Warp on the GPU. They store no tensor of
-  point-source pairs.
+* The compiled kernels (`method="kernels"`, and the default `"auto"` unless the
+  backend selection below gives the reference copy): one forward kernel and one
+  hand-derived vector-Jacobian-product (VJP) kernel per part, in Numba, Cython or numpy
+  on the CPU and NVIDIA Warp on the GPU. The Numba, Cython and Warp kernels store no
+  tensor of point-source pairs; the numpy backend holds the pairs in row chunks of about
+  4e5 values.
 * The PyTorch reference copy (`method="reference"`): row chunks with automatic
   differentiation. The chunk size comes from a memory budget (`VENTORUM_GRAD_CHUNK`,
   default the budget of `vortex_torch`, in values). The budget counts all values that
@@ -84,7 +86,9 @@ proj = r0 . (t1 - t2)                                         else
 den = |c|^2 + rc2 |r0|^2,  k = proj / (4 pi den),  v = k c
 ```
 
-The floor `f` is 1e-300 in float64 and 1e-30 in float32. A pair with `den` at or below
+The floor `f` is 1e-300 in float64 arithmetic (all CPU kernels, which compute in
+float64) and 1e-30 in the float32 Warp kernels and in the numpy reference with float32
+arrays. The PyTorch reference copy adds 1e-300 in both precisions. A pair with `den` at or below
 the floor has `v = 0` and zero derivatives. The reverse sweep:
 
 ```text
@@ -134,7 +138,8 @@ circulation) and the unknown `col_j` of each source:
 ```text
 system rows:      A[i, col_j] += s_j N_i . v_ij,  adjoint W[i, n]:  u_ij = s_j W[i, col_j] N_i
 induced velocity: V_i = sum_j s_j v_ij,           adjoint X_i:      u_ij = s_j X_i
-g_N_i = sum_j s_j W[i, col_j] v_ij,  g_s_j = sum_i W[i, col_j] X_i . v_ij  (W = 1 for V)
+g_N_i = sum_j s_j W[i, col_j] v_ij
+g_s_j = sum_i W[i, col_j] N_i . v_ij  (system rows),  g_s_j = sum_i X_i . v_ij  (V)
 ```
 
 The Trefftz normal wash `w_i = sum_j gamma_j / (2 pi) ((d x r_ij) . n_i) / (|r_ij|^2 +
@@ -147,12 +152,15 @@ g_n_i += g_e (d x r),  g_v = g_e n_i,  g_d += r x g_v,  g_r = 2 g_D r + g_v x d
 g_q_i += g_r,  g_p_j -= g_r
 ```
 
-The compiled kernels compute each pair once in the forward kernel and once (forward and
-reverse sweep together) in the VJP kernel. On the CPU the rows run in parallel in blocks;
+The compiled kernels compute each pair once in the forward kernel. The CPU VJP kernels
+compute each pair once more (forward and reverse sweep together); the Warp VJP computes
+each pair twice (one row launch and one column launch). With Numba and Cython the rows
+run in parallel in blocks;
 each block adds its source derivatives into its own buffer, and the buffers are added in
 block order. The block partition depends only on the row count (blocks of 32 rows, at
 most 128 blocks), not on the thread count, so the result is bitwise the same for every
-thread count and thread timing. Each pair is computed in float64 on the CPU (scalar CPU
+thread count and thread timing. The numpy backend runs the rows in sequence, in chunks.
+Each pair is computed in float64 on the CPU (scalar CPU
 code has the same speed in float32 and float64), also for a float32 request: the O(n^2)
 partials of the CPU kernels are then float64 values cast to float32, while the O(n)
 parts and the adjoint solve use float32. A float32 `GradientResult` of a CPU kernel
@@ -188,9 +196,11 @@ deflections, nonzero body rates and the Fourier solver. A later version adds the
 ground plane and its images follow the inputs; a ground strike raises as in `analyze`.
 
 The forward check runs at every call: the differentiated reference copy also gives the
-output values, and above 1e-10 relative difference in float64 (1e-4 in float32) the call
-raises `RuntimeError` with the names of the outputs. CDi, CDp and CD are compared
-relative to their production values. CL and CY are components of one force vector, and
+output values. Above 1e-10 relative difference (when the gradients and the production
+solve are both float64; else above 1e-4) the call raises `RuntimeError` with the names
+of the outputs. CDi, CDp and CD are compared relative to their production values; a
+production value of exactly zero (for example CDp with Cd0 = 0) uses the scale of the
+force vector. CL and CY are components of one force vector, and
 Cl, Cm and Cn of one moment vector: they are compared relative to the largest production
 magnitude among the components of the same vector, because the round-off of a component
 is relative to its vector (CY, Cl and Cn of a symmetric state are zero by symmetry). The
@@ -213,16 +223,19 @@ largest production magnitude of the array.
 * `ventorum/sensitivity/check.py`: `check_gradients` with the Richardson reference
   (central differences with steps h and h/2, error estimate |FD(h) - FD(h/2)| / 3).
 
-Path of the partials: `method="auto"` (the default) takes the `grad_vjp` entry of the
-machine profile for the device and the size class; without a profile it takes the
-compiled kernels (Numba on the CPU, Warp on the GPU). `method="kernels"` takes the
-default compiled backend of the device, and `method="reference"` the PyTorch reference
-copy. `GradientResult.partials` names the path and the backend (for example
+Path of the partials: `method="auto"` (the default) takes the backend that
+`set_vjp_backend` forces, else the `grad_vjp` entry of the machine profile for the
+device and the size class, else the default backend of the device: Numba (then Cython,
+then numpy) on the CPU, Warp on the GPU, and the PyTorch reference copy on a GPU without
+Warp. `method="kernels"` takes the forced or the default compiled backend and raises
+`ValueError` when the device has no compiled backend. `method="reference"` takes the
+PyTorch reference copy. `GradientResult.partials` names the path and the backend (for example
 `"kernels:numba"` or `"reference:torch"`); `GradientResult.method` stays `"adjoint"`.
 
 Device and precision: the gradients run on the device of the production solve (the
 device selection of `ventorum.gpu`). The gradient partials and the adjoint solve use the
-GPU precision setting: float32 by default, float64 when the setting selects it.
+GPU precision setting: float32 by default (or the precision of the machine profile),
+float64 when the setting selects it.
 `precision_primal` is the precision of the production solve. The source terms are added
 in sequence, with the coordinates in body axes: pairwise addition of the source terms,
 coordinates relative to a local origin and compensated (Kahan) addition give the same
@@ -230,8 +243,8 @@ float32 accuracy within the round-off, and sequential addition is the fastest. F
 results carry a note that names the 1e-3 gate.
 
 `check_gradients` compares a component relatively when the error bound of its reference
-(the larger of the Richardson estimate and the round-off of the differences) is below
-1/10 of the tolerance. The node step is 1e-3 of the smallest core radius of the lattice:
+(the larger of the Richardson estimate and the round-off of the differences) is at most
+rtol/10 times the magnitude of the reference. The node step is 1e-3 of the smallest core radius of the lattice:
 a larger step crosses the core-radius length scale, where the differences do not
 converge. The node directions have one step and no spread term, so their round-off
 bound is also at least 6 sigma / h, where sigma is the noise level of the production
@@ -241,12 +254,15 @@ changes the rounding of all lattice quantities, and this noise can be much large
 the machine epsilon times the output (about 80 times on a wing and tail in ground effect
 with one chordwise panel). The Richardson value has a noise of about 1.9 sigma / h.
 The other inputs use a ladder of three steps (1, 0.3 and 0.1 times the base
-step, 1e-4 of the base value with an absolute floor for a zero base value); each
-component uses the step with the smallest error bound, and the spread to the Richardson
+step; the base step is 1e-4 rad for the angles, 1e-4 of the value for `V_inf`, `rho`,
+`h`, `S_ref`, `b_ref` and `c_ref`, 1e-4 `c_ref` for `ref_point`, and max(1e-4 |x|, floor)
+for the section properties, with a fixed floor per property); each component uses the
+step with the smallest relative error bound, and the spread to the Richardson
 value of the neighbour step joins the bound. Two cases have no relative scale of their
 own and use the largest resolved reference of the outputs for the same input (else the
 output magnitude per unit input): a component below rtol times that scale, and a zero
-derivative (a reference that is zero within its error bound, for example dCL/drho). The
+derivative (a reference that is zero within 10 times its error bound at every step,
+for example dCL/drho). The
 check fails when a component fails and when an input group has no compared component.
 
 ## Verification

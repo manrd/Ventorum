@@ -8,7 +8,7 @@ All solvers use one horseshoe shape (a "bent" horseshoe)::
              --(along chord)--> TE_b --(along d)--> infinity
 
 * ``A -> B`` is the bound vortex (on the 1/4-chord line of the panel).
-* ``A -> TE_a`` and ``B -> TE_b`` follow the local chord to the trailing edge.
+* ``TE_a -> A`` and ``B -> TE_b`` follow the local chord to the trailing edge.
   They stay in the plane of the wing, so a control point never sits just
   below or above a trailing leg. The old straight legs, which left the bound
   vortex along the free stream, did that at angle of attack and made the
@@ -20,7 +20,8 @@ All solvers use one horseshoe shape (a "bent" horseshoe)::
 Image systems (ground plane) and y-symmetry are handled by the caller, which
 gives extra "source" horseshoes with a sign of +1 or -1.
 
-The kernels are plain numpy. They process the evaluation points in chunks,
+The reference kernels of this module are plain numpy; the production paths
+call the Numba, Cython or PyTorch backends. The numpy kernels process the evaluation points in chunks,
 so memory stays bounded for large lattices.
 
 Regularisation: each source has a core radius ``rc``. The finite-segment

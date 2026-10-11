@@ -22,7 +22,7 @@ form of ``1 + cos(t)`` behind its start point. Pairs whose target lies on a
 source segment by the mesh topology (the own panel of a load point, the
 edge line of a leg mid-point) are zero, with zero derivatives.
 
-The pair core is ``rc2 = rc2_src[j] + rc2_tg[i]`` for a target and a source
+The pair core is ``rc2 = rc2_src[j] + tg_rc2[i]`` for a target and a source
 of different core groups (``use_tg``), else ``rc2_src[j]``.
 
 The derivatives are derived by hand in reverse mode from the kernel formula

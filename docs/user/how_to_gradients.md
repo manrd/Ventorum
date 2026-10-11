@@ -61,11 +61,12 @@ print(f"d(sum of strip forces)/dalpha = {direction['alpha']}")
 ## Trust
 
 The reference copy also gives the output values. `forward_mismatch` reports the largest
-relative difference to the production result. Above 1e-10 in float64 (1e-4 in float32)
-the call raises `RuntimeError`: the gradient would not be the gradient of the reported
+relative difference to the production result. Above 1e-10 (when the gradients and the
+production solve are both float64; else above 1e-4) the call raises `RuntimeError`: the gradient would not be the gradient of the reported
 result. `check_gradients` checks the gradients against Richardson-extrapolated central
-differences of the production solve. Use `rtol=1e-3` for float32 gradients (the
-default) and `rtol=1e-6` for float64 gradients:
+differences of the production solve. The default tolerance is `rtol=1e-6`. Use
+`rtol=1e-3` for float32 gradients (float32 is the default precision) and `rtol=1e-6` for
+float64 gradients:
 
 ```python
 check = vt.check_gradients(
@@ -83,7 +84,8 @@ The check fails when a component is outside the tolerance, and also when an inpu
 has no compared component; `reasons` says why.
 
 Gradients run on the device of the production solve (the device setting of
-`ventorum.gpu`). They run in float32 by default (the GPU precision setting selects it)
+`ventorum.gpu`). They run in float32 by default (the GPU precision setting, or the precision of the
+machine profile, selects it)
 and in float64 when that setting selects float64. `precision_primal` gives the precision
 of the production solve. The symmetric system is folded only when the case is
 symmetric and every requested input and output is symmetric (node inputs count as
@@ -94,10 +96,12 @@ symmetric when every surface is symmetric); else the full system is used.
 The keyword `method` selects how the partial derivatives of the O(n^2) parts (system
 rows, load points, Trefftz points) are made:
 
-* `"auto"` (the default): the choice of the machine profile (`ventorum-tune` measures
-  it per case size and device); without a profile the compiled kernels, Numba on the
-  CPU and NVIDIA Warp on the GPU.
-* `"kernels"`: the compiled vector-Jacobian-product kernels of the device.
+* `"auto"` (the default): the backend that `set_vjp_backend` forces, else the choice of
+  the machine profile (`ventorum-tune` measures it per case size and device), else the
+  default backend: Numba (then Cython, then numpy) on the CPU, NVIDIA Warp on the GPU,
+  and the reference copy on a GPU without Warp.
+* `"kernels"`: the compiled vector-Jacobian-product kernels of the device (a
+  `ValueError` when the device has none).
 * `"reference"`: the PyTorch reference copy (slower; the correctness reference).
 
 All paths give the same gradients to round-off. `result.partials` names the path and
