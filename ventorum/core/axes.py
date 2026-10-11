@@ -209,11 +209,11 @@ def transform_moments(
     Parameters
     ----------
     Cl : float
-        Rolling moment coefficient (Cl > 0 right wing down).
+        Rolling moment coefficient [-] (Cl > 0 right wing down).
     Cm : float
-        Pitching moment coefficient (Cm > 0 nose up).
+        Pitching moment coefficient [-] (Cm > 0 nose up).
     Cn : float
-        Yawing moment coefficient (Cn > 0 nose right).
+        Yawing moment coefficient [-] (Cn > 0 nose right).
     alpha : float
         Angle of attack [rad].
     beta : float

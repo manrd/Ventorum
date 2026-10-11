@@ -2,7 +2,7 @@
 
 `ventorum.derivative_matrix` gives the full aerodynamic derivative matrix of one flight state in one call.
 
-The matrix contains the sensitivity of the six force and moment coefficients (CL, CD, CY, Cl, Cm, Cn) to static variables (alpha, beta, and in ground effect phi and h/c), control surface deflections, and body rotation rates (p_hat, q_hat, r_hat).
+The matrix contains the sensitivity of the six force and moment coefficients (CL, CD, CY, Cl, Cm, Cn) to static variables (alpha, beta), height variables in ground effect (phi, h/c), control surface deflections, and body rotation rates (p_hat, q_hat, r_hat).
 
 ## Example
 
@@ -44,7 +44,7 @@ The matrix has six fixed rows:
 - Cn: yawing moment coefficient [-].
 
 The columns appear in group order:
-1. Static: `alpha` and `beta` [1/rad]. In ground effect, `phi` [1/rad] and `h_over_c` [-] follow.
+1. Static: `alpha` and `beta` [1/rad]. With the height group (ground effect only), `phi` [1/rad] and `h_over_c` [-] follow.
 2. Control: `delta:<name>` [1/rad] for each control surface.
 3. Rate: `p_hat`, `q_hat`, `r_hat` [-] for the nondimensional body rotation rates ($p b / 2V$, $q c / 2V$, $r b / 2V$).
 
@@ -60,7 +60,7 @@ Force rows (CL, CD, CY) are relative to the free stream in every set. In the sta
 
 ## Ground effect
 
-When `condition.h` is set, `derivative_matrix` adds the height group by default. The static columns come from height derivatives at fixed pivot height. Requesting the height group in free air raises a `ValueError`.
+When `condition.h` is set and `groups` is the default, `derivative_matrix` adds the height group. The static columns come from height derivatives at fixed pivot height. Requesting the height group in free air raises a `ValueError`.
 
 ## Diagnostics and export
 

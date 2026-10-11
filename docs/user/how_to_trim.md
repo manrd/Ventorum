@@ -71,7 +71,7 @@ The user aircraft is never modified in place. The trimmed aircraft clone is avai
 
 ## Lateral trim with sideslip
 
-When sideslip is present, lateral trim solves for four unknowns simultaneously:
+When `roll_control` and `yaw_control` are both given, lateral trim solves for four unknowns at the same time, at the sideslip angle of the condition (it can be zero):
 - Angle of attack $\alpha$
 - Pitch control deflection $\delta_{\text{pitch}}$
 - Roll control deflection $\delta_{\text{roll}}$
@@ -160,7 +160,7 @@ Because ground effect increases wing lift at a given angle of attack, the trimme
 
 ## Execution device and precision
 
-The solves of `trim` run on the device that the settings and the global device select. `res.device` and `res.precision` give the device and the precision of the solves. In `float32` (the default precision of the GPU pipelines) the tolerances `tol_CL` and `tol_moment` are at least `1e-6`, about five times the `float32` round-off of the coefficients, and a note says so. `trim` does not change the global device setting.
+The solves of `trim` run on the device that the settings and the global device select. `res.device` and `res.precision` give the device and the precision of the solves. In `float32` (the default precision of the GPU pipelines) the tolerances `tol_CL` and `tol_moment` are at least `1e-6`, about ten times the `float32` round-off of the coefficients, and a note says so. `trim` does not change the global device setting.
 
 ## Background
 

@@ -22,8 +22,9 @@ The solves run on the device that the settings and the global device select
 states the device and the precision.
 In float32 the round-off of the coefficients is about 1e-7 (measured on the GPU
 pipelines against float64), so the convergence tolerances get the floor
-``FLOAT32_TOLERANCE_FLOOR``; the 1e-4 rad step then gives the Jacobian to about 1e-4
-relative, which is enough for Newton's method.
+``FLOAT32_TOLERANCE_FLOOR``; with the 1e-4 rad step the round-off error of the
+Jacobian entries is then about 1e-3 per rad (about 1e-4 relative to a lift slope
+of 5 per rad), which is enough for Newton's method.
 
 When condition.h is set (ground effect), the height of Aircraft.ref_point above the
 ground plane remains constant while the angle of attack changes.
@@ -56,7 +57,7 @@ _COLUMN_NORM_LIMIT = 1.0e-8
 _CONDITION_LIMIT = 1.0e10
 
 #: Smallest convergence tolerance [-] of CL and of the moments when a solve is in
-#: float32: about five times the float32 round-off of the coefficients.
+#: float32: about ten times the float32 round-off of the coefficients.
 FLOAT32_TOLERANCE_FLOOR = 1.0e-6
 
 
@@ -106,7 +107,7 @@ class TrimResult:
     iterations : int
         Number of Newton steps done.
     residual_history : list[float]
-        Largest absolute residual at each evaluated point, from the start point.
+        Largest absolute residual [-] at each evaluated point, from the start point.
         It has ``iterations + 1`` entries for every status. The entry is NaN for a
         point where the solve failed.
     jacobian : list[list[float]]

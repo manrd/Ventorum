@@ -290,7 +290,7 @@ def alpha_for_cl(
     aircraft : Aircraft
         The aircraft.
     cl_target : float
-        Target lift coefficient.
+        Target lift coefficient [-].
     beta_deg : float
         Sideslip angle [deg].
     make_condition : callable
@@ -357,9 +357,9 @@ def slope_fit(x: Sequence[float], y: Sequence[float]) -> tuple[float, float]:
     Parameters
     ----------
     x : sequence of float
-        Abscissas (for example lift coefficients).
+        Abscissas (for example lift coefficients [-]).
     y : sequence of float
-        Ordinates (same length, at least 2 values).
+        Ordinates in the unit of the quantity (same length, at least 2 values).
 
     Returns
     -------

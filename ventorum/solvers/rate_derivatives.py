@@ -138,7 +138,7 @@ def rate_axes_transform(
     Parameters
     ----------
     matrix_body : numpy.ndarray
-        Body-axis derivatives, shape (6, 3): rows CL, CD, CY, Cl, Cm, Cn;
+        Body-axis derivatives [-] (per unit nondimensional rate), shape (6, 3): rows CL, CD, CY, Cl, Cm, Cn;
         columns p_hat, q_hat, r_hat.
     rotation : numpy.ndarray
         Rotation matrix from body to the target axes, shape (3, 3).
@@ -219,7 +219,9 @@ def rate_derivatives(
     and of the linear lifting line is linear in the rates and the forces are
     quadratic, so the central difference is exact to round-off for them,
     except for the terms with the local speed (the lifting-line section
-    equation and the profile drag), which are second order in the step.
+    equation, the profile drag and the section-moment term of one chordwise
+    panel, also in the vortex lattice with ``n_chord=1``), which are second
+    order in the step.
 
     The derivatives in other axes come from the body-axis derivatives by
     :func:`rate_axes_transform` (the rates and the moments turn together).

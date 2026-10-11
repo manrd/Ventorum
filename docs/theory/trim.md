@@ -89,7 +89,7 @@ The trim solver is verified by the unit test suite in `tests/test_trim.py`:
 - Ground effect lift increase demonstrating reduced trim angle of attack.
 - Multi-solver compatibility across vortex lattice and lifting-line solvers.
 - Input geometry immutability ensuring that input objects are never modified in place.
-- The solves use the selected device and the global device setting does not change; on the GPU in `float32` the trim converges to the `float64` trim within the tolerance floor.
+- The solves use the selected device and the global device setting does not change; on the GPU in `float32` the residuals are within `FLOAT32_TOLERANCE_FLOOR`, and the angle of attack and the deflection agree with the CPU `float64` trim within 1e-3 deg.
 - Failure paths: a ground strike during the iteration and at the start point, a control with no effect (singular Jacobian), an inner solve that does not converge, invalid settings, and exceptions that must propagate.
 
 ## References

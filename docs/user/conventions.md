@@ -21,7 +21,7 @@ coefficients `CL`, `CD` and `CY` keep their present definitions
 
 | System | Definition |
 | --- | --- |
-| `body` | Fixed to the aircraft (x aft, y right, z up). This is the default of every solver result and every agent tool. |
+| `body` | Fixed to the aircraft. The triple (Cl, Cm, Cn) is the moment vector in the flight-dynamics body axes (x forward, y right, z down); the geometry axes are x aft, y right, z up. This is the default of every solver result and every agent tool. |
 | `stability` | The body axes turned by the angle of attack `alpha` about the y axis, so that x lies along the projection of the free stream on the plane of symmetry. |
 | `wind` | The stability axes turned by the sideslip angle `beta` about the z axis, so that x lies along the free stream. |
 
@@ -45,7 +45,7 @@ R_bs = [[ca, 0, sa],
 Because `R_bs` mixes only Cl and Cn which both use `b_ref`, `L^-1 R_bs L = R_bs`.
 The transform equals the plain rotation for stability axes.
 
-- Stability to wind (rotation by `-beta` about z):
+- Stability to wind (rotation by `beta` about the z axis of the flight-dynamics axes, z down):
 
 ```text
 R_sw = [[cb, sb, 0],

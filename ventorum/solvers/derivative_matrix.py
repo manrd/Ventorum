@@ -3,8 +3,8 @@
 
 :func:`derivative_matrix` computes the sensitivity of the six force and
 moment coefficients (CL, CD, CY, Cl, Cm, Cn) to static variables (alpha,
-beta, and in ground effect phi and h/c), control deflections (per control
-surface name), and body rotation rates (p_hat, q_hat, r_hat).
+beta), height variables in ground effect (phi and h/c), control deflections
+(per control surface name), and body rotation rates (p_hat, q_hat, r_hat).
 
 References
 ----------
@@ -386,7 +386,8 @@ def derivative_matrix(
         Solver settings (default: :class:`SolverSettings`).
     groups : sequence of str
         Derivative groups to include. Default ``("static", "control", "rate")``.
-        In ground effect (``condition.h`` set), ``"height"`` is added by default.
+        In ground effect (``condition.h`` set), ``"height"`` is added when
+        ``groups`` is the default.
     controls : list of str or None
         Control surface names to differentiate. None selects all controls
         of the aircraft.
