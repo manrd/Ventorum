@@ -153,13 +153,19 @@ def run_step(step: Step) -> StepResult:
     """Run *step* in a subprocess and return its result."""
     env = dict(os.environ)
     env.update(step.env)
+    # Import Ventorum from this tree, so the log's git commit is the code that ran.
+    env["PYTHONPATH"] = os.pathsep.join(p for p in (str(REPO_ROOT), os.environ.get("PYTHONPATH")) if p)
     start = time.perf_counter()
     try:
         proc = subprocess.run(
             step.argv, cwd=REPO_ROOT, env=env, capture_output=True, text=True, timeout=step.timeout
         )
     except subprocess.TimeoutExpired as exc:
-        out = str(exc.stdout or "") + "\n" + str(exc.stderr or "")
+        # The captured output of a timeout is bytes, also with text=True.
+        out = "\n".join(
+            part.decode("utf-8", "replace") if isinstance(part, bytes) else (part or "")
+            for part in (exc.stdout, exc.stderr)
+        )
         return StepResult(step.name, "timeout", time.perf_counter() - start, _last_line(out))
     except OSError as exc:
         return StepResult(step.name, "fail", time.perf_counter() - start, f"cannot start: {exc}")
@@ -195,7 +201,11 @@ def _gpu_lines() -> list[str]:
 
 
 def _git_commit() -> str:
-    """Return the short hash of the checked-out commit, or "unknown"."""
+    """Return the short hash of the checked-out commit, or "unknown".
+
+    A tree with uncommitted changes to tracked files is marked, so the log
+    does not claim a commit that is not the code that ran.
+    """
     try:
         proc = subprocess.run(
             ["git", "rev-parse", "--short", "HEAD"],
@@ -203,7 +213,17 @@ def _git_commit() -> str:
         )
     except (OSError, subprocess.SubprocessError):
         return "unknown"
-    return proc.stdout.strip() if proc.returncode == 0 and proc.stdout.strip() else "unknown"
+    if proc.returncode != 0 or not proc.stdout.strip():
+        return "unknown"
+    commit = proc.stdout.strip()
+    try:
+        dirty = subprocess.run(
+            ["git", "status", "--porcelain", "--untracked-files=no"],
+            cwd=REPO_ROOT, capture_output=True, text=True, timeout=60,
+        ).stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        return commit
+    return f"{commit} (with uncommitted changes)" if dirty else commit
 
 
 def _numpy_version() -> str:

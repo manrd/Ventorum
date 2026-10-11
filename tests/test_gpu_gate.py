@@ -15,6 +15,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 import ventorum.gpu as gpu_mod
 
 SCRIPT = Path(__file__).resolve().parents[1] / "validation" / "gpu_gate.py"
@@ -37,6 +39,20 @@ def _dry_run(*args: str) -> subprocess.CompletedProcess:
         [sys.executable, str(SCRIPT), "--dry-run", *args],
         capture_output=True, text=True, encoding="utf-8", timeout=60,
     )
+
+
+@pytest.fixture(autouse=True)
+def _no_forced_path(monkeypatch):
+    """Ignore a forcing variable of the shell; each test sets the GPU state it needs."""
+    monkeypatch.delenv("VENTORUM_GPU_GATE_FORCE_NO_GPU", raising=False)
+
+
+@pytest.fixture
+def fake_gpu(monkeypatch):
+    """Make the GPU look available, so the runner tests also pass on CI (no GPU)."""
+    monkeypatch.setattr(gpu_mod, "available", lambda: True)
+    monkeypatch.setattr(gpu_mod, "unavailable_reason", lambda: None)
+    monkeypatch.setattr(gpu_mod, "info", lambda: {"name": "Test GPU"})
 
 
 def _passing(step):
@@ -85,11 +101,12 @@ def test_no_gpu_exit_code(tmp_path, monkeypatch):
     assert "NOT GPU evidence" in log_allow.read_text(encoding="utf-8")
 
 
-def test_log_has_no_machine_identifiers(tmp_path):
+def test_log_has_no_machine_identifiers(tmp_path, fake_gpu):
     mod = _load()
     log = tmp_path / "gpu_gate.md"
     assert mod.main([str(log)], runner=_passing) == 0
     text = log.read_text(encoding="utf-8")
+    assert "- GPU: Test GPU" in text
     assert socket.gethostname() not in text
     user = getpass.getuser()
     # A very short user name occurs in normal words, so only a longer
@@ -99,7 +116,7 @@ def test_log_has_no_machine_identifiers(tmp_path):
     assert str(Path.home()) not in text
 
 
-def test_failed_step_gives_exit_1(tmp_path):
+def test_failed_step_gives_exit_1(tmp_path, fake_gpu):
     mod = _load()
 
     def _fail_first_example(step):
@@ -113,3 +130,30 @@ def test_failed_step_gives_exit_1(tmp_path):
     assert mod.main([str(log)], runner=_fail_first_example) == 1
     text = log.read_text(encoding="utf-8")
     assert text.strip().endswith("GPU gate: FAIL (1 failures)")
+
+
+def test_timeout_output_is_text(monkeypatch):
+    """A timeout gives the last output line as text (the captured output is bytes)."""
+    mod = _load()
+
+    def _timeout(*args, **kwargs):
+        raise subprocess.TimeoutExpired(cmd="x", timeout=1.0, output=b"first\nlast line\n", stderr=b"")
+
+    monkeypatch.setattr(mod.subprocess, "run", _timeout)
+    result = mod.run_step(mod.Step(name="slow", argv=["x"], env={}, timeout=1.0))
+    assert result.status == "timeout"
+    assert result.last_line == "last line"
+
+
+def test_steps_import_this_tree(monkeypatch):
+    """Each step imports Ventorum from the tree of the script (the logged commit)."""
+    mod = _load()
+    seen = {}
+
+    def _run(argv, cwd, env, **kwargs):
+        seen["path"] = env["PYTHONPATH"].split(mod.os.pathsep)[0]
+        return subprocess.CompletedProcess(argv, 0, stdout="ok\n", stderr="")
+
+    monkeypatch.setattr(mod.subprocess, "run", _run)
+    mod.run_step(mod.Step(name="s", argv=["x"], env={}, timeout=None))
+    assert Path(seen["path"]) == REPO_ROOT
