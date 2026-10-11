@@ -18,9 +18,11 @@ a minor version can change a public interface.
   topology). `gradient_vjp` covers the vector outputs (`strip_force`, `section_cl`) with
   a seed per output. `check_gradients` checks the gradients against Richardson-extrapolated
   central differences. The reference copy reports `forward_mismatch` and raises above
-  1e-10 in float64 (1e-4 in float32). Gradients run in float32 by default (float64 through
-  the precision setting); the folded symmetric system is used only when the case and every
-  requested input and output are symmetric. `GradientResult` holds the output.
+  1e-10 in float64 (1e-4 in float32). Gradients run on the device of the production solve,
+  in float32 by default (float64 through the precision setting); the folded symmetric
+  system is used only when the case and every requested input and output are symmetric.
+  The row chunks of the O(n^2) work bound the memory also in the backward pass.
+  `GradientResult` holds the output.
 - Height derivatives: `height_derivatives` gives the static derivatives of one flight state in
   ground effect (`FlightCondition.h` set): CL, CD, CY, Cl, Cm and Cn with respect to alpha, beta,
   the bank angle and h/c_ref, about the moment reference point with its height held fixed (central

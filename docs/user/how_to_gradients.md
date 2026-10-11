@@ -64,7 +64,8 @@ The reference copy also gives the output values. `forward_mismatch` reports the 
 relative difference to the production result. Above 1e-10 in float64 (1e-4 in float32)
 the call raises `RuntimeError`: the gradient would not be the gradient of the reported
 result. `check_gradients` checks the gradients against Richardson-extrapolated central
-differences of the production solve:
+differences of the production solve. Use `rtol=1e-3` for float32 gradients (the
+default) and `rtol=1e-6` for float64 gradients:
 
 ```python
 check = vt.check_gradients(
@@ -72,15 +73,21 @@ check = vt.check_gradients(
     outputs=("CL", "CD", "Cm"),
     wrt=("alpha", "nodes"),
     n_directions=3,
-    rtol=1e-6,
+    rtol=1e-3 if result.precision_gradient == "float32" else 1e-6,
 )
 print(f"gradients pass: {check['pass']} ({check['compared']} compared, {check['skipped']} skipped)")
+print(check["reasons"])
 ```
 
-Gradients run in float32 by default (the GPU precision setting selects it) and in
-float64 when that setting selects float64. The symmetric system is folded only when the
-case is symmetric and every requested input and output is symmetric; else the full
-system is used.
+The check fails when a component is outside the tolerance, and also when an input group
+has no compared component; `reasons` says why.
+
+Gradients run on the device of the production solve (the device setting of
+`ventorum.gpu`). They run in float32 by default (the GPU precision setting selects it)
+and in float64 when that setting selects float64. `precision_primal` gives the precision
+of the production solve. The symmetric system is folded only when the case is
+symmetric and every requested input and output is symmetric; else the full system is
+used.
 
 ## Limits
 
