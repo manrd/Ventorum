@@ -41,7 +41,7 @@ python validation/run_verification.py /tmp/verification_check.md
 sphinx-build -W --keep-going -b html docs docs/_build/html
 ```
 
-Also run all scripts in `examples/` and the GPU tests on a machine with a GPU.
+Also run `python validation/gpu_gate.py <log.md>` on a machine with an NVIDIA GPU (all GPU tests and all examples on the GPU) and keep the log with the gate record.
 
 **3. CI on push.** GitHub Actions runs the full set on every push. A failure there is fixed in the next change.
 

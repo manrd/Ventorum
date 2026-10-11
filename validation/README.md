@@ -26,6 +26,10 @@
   `--compare TREE_A TREE_B` times two source trees side by side,
   alternating (see `docs/design/performance_architecture.md`).
 
+* **GPU gate**: `python validation/gpu_gate.py <log.md>` runs all GPU
+  tests and all examples on an NVIDIA GPU and writes a short Markdown
+  log for the phase-gate record (see `docs/contributing/index.md`).
+
 The references are in `ventorum/reference/analytic.py` (with citations) and
 the loader with the provenance check is in
 `ventorum/reference/experimental.py`.
