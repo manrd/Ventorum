@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import math
 import warnings
 
@@ -13,31 +14,44 @@ import ventorum as vt
 from ventorum import gpu
 
 
+@contextlib.contextmanager
+def _gpu_settings(device: str | None = None, precision: str | None = None):
+    """Set the device and the precision; restore the stored settings after the block.
+
+    The stored precision setting can be ``"auto"``. ``gpu.get_precision()``
+    resolves ``"auto"``, so the block keeps the raw setting to restore it.
+    """
+    old_dev, old_prec = gpu.get_device(), gpu._precision
+    try:
+        if device is not None:
+            gpu.set_device(device)
+        if precision is not None:
+            gpu.set_precision(precision)
+        yield
+    finally:
+        gpu.set_device(old_dev)
+        gpu.set_precision(old_prec)
+
+
 @pytest.fixture
 def float64_precision():
     """Run the test with float64 gradient precision; restore it after it."""
-    old = gpu.get_precision()
-    gpu.set_precision("float64")
-    yield
-    gpu.set_precision(old)
+    with _gpu_settings(precision="float64"):
+        yield
 
 
 @pytest.fixture
 def float32_precision():
     """Run the test with float32 gradient precision; restore it after it."""
-    old = gpu.get_precision()
-    gpu.set_precision("float32")
-    yield
-    gpu.set_precision(old)
+    with _gpu_settings(precision="float32"):
+        yield
 
 
 @pytest.fixture
 def cpu_device():
     """Run the test on the CPU; restore the device setting after it."""
-    old = gpu.get_device()
-    gpu.set_device("cpu")
-    yield
-    gpu.set_device(old)
+    with _gpu_settings(device="cpu"):
+        yield
 
 
 @pytest.fixture
@@ -45,10 +59,19 @@ def gpu_device():
     """Run the test with the GPU device selected; restore the settings after it."""
     if not gpu.available():
         pytest.skip(f"The GPU pipelines cannot run: {gpu.unavailable_reason()}")
-    old_dev, old_prec = gpu.get_device(), gpu.get_precision()
-    yield
-    gpu.set_device(old_dev)
-    gpu.set_precision(old_prec)
+    with _gpu_settings():
+        yield
+
+
+def test_gpu_settings_restore_the_auto_precision() -> None:
+    """The precision fixtures restore the raw setting ``"auto"``, not the resolved value."""
+    with _gpu_settings(precision="auto"):
+        with _gpu_settings(precision="float32"):
+            assert gpu.get_precision() == "float32"
+        assert gpu._precision == "auto"
+        with _gpu_settings(device="cpu", precision="float64"):
+            assert gpu.get_device() == "cpu"
+        assert gpu._precision == "auto"
 
 
 def _linear_section() -> vt.LinearAirfoil:
@@ -610,7 +633,7 @@ def test_float32_node_gradients_on_segment_pairs(cpu_device) -> None:
     for cid in ("linear", "vlm-swept-full"):
         _, ac, cond, st = case[cid]
         for prec in ("float64", "float32"):
-            old = gpu.get_precision()
+            old = gpu._precision
             gpu.set_precision(prec)
             try:
                 with warnings.catch_warnings():
@@ -1092,7 +1115,7 @@ def test_cpu_kernels_float32_note(backend: str, cpu_device, restore_vjp_backend)
     ac = vt.Aircraft(surfaces=[_plain_wing()])
     cond = vt.FlightCondition(V_inf=30.0, alpha=np.radians(4.0))
     st = vt.SolverSettings(solver_type="vlm", n_panels=6, n_chord=1)
-    old = gpu.get_precision()
+    old = gpu._precision
     found = {}
     try:
         for prec in ("float32", "float64"):
@@ -1162,7 +1185,7 @@ def test_float32_reference_with_target_on_end_point(device: str, restore_vjp_bac
     cond = vt.FlightCondition(V_inf=30.0, alpha=np.radians(5.0), beta=np.radians(4.0))
     st = vt.SolverSettings(solver_type="vlm", n_panels=8, n_chord=4)
     outs = ("CL", "CY", "CD", "Cl", "Cm", "Cn")
-    old_dev, old_prec = gpu.get_device(), gpu.get_precision()
+    old_dev, old_prec = gpu.get_device(), gpu._precision
     try:
         gpu.set_device(device)
         res = {}
