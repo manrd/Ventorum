@@ -85,6 +85,18 @@ extensions.append(
         optional=True,
     )
 )
+# Vector-Jacobian products of the kernel (adjoint gradients); same threads as above.
+extensions.append(
+    Extension(
+        "ventorum.aero.vortex_vjp_cython",
+        ["ventorum/aero/vortex_vjp_cython.pyx"],
+        include_dirs=[np.get_include()],
+        define_macros=[("NPY_NO_DEPRECATED_API", "NPY_1_7_API_VERSION")],
+        extra_compile_args=cy_compile,
+        extra_link_args=cy_link,
+        optional=True,
+    )
+)
 
 if not cy_compile:
     if sys.platform == "darwin" and os.environ.get("VENTORUM_MACOS_OPENMP", "") != "1":

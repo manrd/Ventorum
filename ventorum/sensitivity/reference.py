@@ -475,10 +475,17 @@ class TorchReference:
             normal_u = normal[b["strip_of_unknown"]]
             # The collocation point of a lifting-line strip lies on its own
             # bound segment.
-            Vt = self._tensor_unknowns(cp_u, s_a, s_b, s_ate, s_bte, s_wd,
-                                       rc2_src, s_group, s_sign, s_col, n_u,
-                                       tg_group, tg_rc, own=b["unknown_panels"])
-            a_ind = torch.einsum("ijk,ik->ij", Vt, normal_u)
+            if self._vjp_backend() is not None:
+                # Compiled kernels: the normal component per source, added
+                # per unknown (equal to the tensor path to round-off).
+                a_ind = self._normal_matrix(cp_u, normal_u, s_a, s_b, s_ate, s_bte, s_wd,
+                                            rc2_src, s_group, s_sign, s_col, n_u,
+                                            tg_group, tg_rc, own=b["unknown_panels"])
+            else:
+                Vt = self._tensor_unknowns(cp_u, s_a, s_b, s_ate, s_bte, s_wd,
+                                           rc2_src, s_group, s_sign, s_col, n_u,
+                                           tg_group, tg_rc, own=b["unknown_panels"])
+                a_ind = torch.einsum("ijk,ik->ij", Vt, normal_u)
             cross_dl = torch.linalg.cross(d.expand_as(dl_u), dl_u)
             diag = 2.0 * torch.linalg.norm(cross_dl, dim=1) / (a0_u * area_u)
             A = torch.diag(diag) - a_ind
@@ -664,6 +671,29 @@ class TorchReference:
             return kahan_sum(x, dim)
         return x.sum(dim)
 
+    def _vjp_backend(self) -> str | None:
+        """Return the compiled VJP backend of the model, or None for the PyTorch path.
+
+        The adjoint functions set ``build["vjp_backend"]``. The compiled
+        kernels add the source terms in their own order, so a model with an
+        accumulation rule other than ``"sequential"`` uses the PyTorch path.
+        """
+        backend = self.b.get("vjp_backend")
+        if backend is None or self.b.get("accum", "sequential") != "sequential":
+            return None
+        return str(backend)
+
+    def _topology(self, m: int, grp: torch.Tensor, col: torch.Tensor | None, n_u: int,
+                  tg_group: torch.Tensor | None, tg_rc: torch.Tensor | None,
+                  own: torch.Tensor | None, edge: torch.Tensor | None):  # type: ignore[no-untyped-def]
+        """Return the fixed integer data of one kernel product."""
+        from ventorum.sensitivity.kernels import Topology
+
+        src = self.b["_src_ids"]
+        use_tg = tg_group is not None and tg_rc is not None
+        return Topology(grp, tg_group if use_tg else None, own, edge, src["panel"], src["edge_a"],
+                        src["edge_b"], col, n_u, use_tg, m, self.device)
+
     def _horseshoe(
         self,
         P: torch.Tensor,
@@ -762,6 +792,13 @@ class TorchReference:
                        edge: torch.Tensor | None = None) -> torch.Tensor:
         """Normal-velocity influence matrix with folded columns (chunked)."""
         m = P.shape[0]
+        backend = self._vjp_backend()
+        if backend is not None:
+            from ventorum.sensitivity.kernels import horseshoe_rows
+
+            topo = self._topology(m, grp, col, n_u, tg_group, tg_rc, own, edge)
+            tg_rc2 = tg_rc * tg_rc if topo.use_tg else None
+            return horseshoe_rows(backend, topo, P, N, a, bv, a_te, b_te, wd, rc2_src, tg_rc2, sign)
         src = self.b.get("_src_ids")
         tgr = tg_rc if tg_group is not None else None
 
@@ -812,6 +849,13 @@ class TorchReference:
                  edge: torch.Tensor | None = None) -> torch.Tensor:
         """Total induced velocity at P for source strengths *g_src* (chunked)."""
         m = P.shape[0]
+        backend = self._vjp_backend()
+        if backend is not None:
+            from ventorum.sensitivity.kernels import horseshoe_induced
+
+            topo = self._topology(m, grp, None, a.shape[0], tg_group, tg_rc, own, edge)
+            tg_rc2 = tg_rc * tg_rc if topo.use_tg else None
+            return horseshoe_induced(backend, topo, P, a, bv, a_te, b_te, wd, rc2_src, tg_rc2, g_src)
         src = self.b.get("_src_ids")
         tgr = tg_rc if tg_group is not None else None
 
@@ -873,6 +917,11 @@ class TorchReference:
         tg_rc = 0.5 * width
         rc2 = rc * rc
         tg_rc2 = tg_rc * tg_rc
+        backend = self._vjp_backend()
+        if backend is not None:
+            from ventorum.sensitivity.kernels import trefftz_wash
+
+            return trefftz_wash(backend, (src_group, tg_group, True), q, qn, p, gamma, d, rc2, tg_rc2)
 
         def _fn(i0: int, i1: int, q: torch.Tensor, qn: torch.Tensor, p: torch.Tensor,
                 gamma: torch.Tensor, d: torch.Tensor, rc2: torch.Tensor,
