@@ -4,7 +4,7 @@
 
 | Attribute | Content |
 | --- | --- |
-| `totals` | Integrated coefficients: `CL`, `CDi` (Trefftz plane), `CDp`, `CD_total`, `e`, `CY`, `Cl`, `Cm`, `Cn`, and the trust score |
+| `totals` | Integrated coefficients: `CL`, `CDi` (Trefftz plane), `CDp`, `CD_total`, `e`, `CY`, `Cl`, `Cm`, `Cn`, the far-field diagnostics `CY_farfield` (wind axes) and `Cn_trefftz` (stability axes; both None for the Fourier solver), and the trust score |
 | `spanwise` | One `SpanwiseResult` per surface: circulation, section lift, induced drag, effective angle of attack |
 | `converged` | False if the solver did not meet its tolerance |
 | `details` | Solver data (lattice, circulation, wake direction, ground plane) for plots and checks |
@@ -17,6 +17,7 @@ Each result has a `TrustScore` with a rating (`HIGH`, `MODERATE`, `LOW`, `UNRELI
 - Polar range: a section angle outside its polar table lowers the score. The end values of the table are used there.
 - Low aspect ratio: the vortex lattice does not model the vortex lift of the side edges of a wing with aspect ratio below 2 at more than 10 deg (Polhamus 1966; Lamar 1974).
 - Mach number: the speed of sound is the ISA value at the air density of the flight condition.
+- Near field and far field: a warning when the near-field `CY` or `Cn` (in stability axes) differs from `CY_farfield` or `Cn_trefftz` by more than 5 % and more than a floor (0.001 for `CY`, 0.0002 for `Cn`). The warning does not change the score. See [Forces and moments](../theory/forces_and_moments.md).
 
 :::{warning}
 The uncertainty bands of the trust score are heuristic. They are not calibrated against experiments. Do not use them as error bars.

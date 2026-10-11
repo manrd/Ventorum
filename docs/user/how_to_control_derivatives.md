@@ -33,6 +33,7 @@ print(res.device, res.precision, res.n_solves)
 
 - The derivatives are per radian of the `deflection` field. All controls with one name move together. The left half of an antisymmetric control (an aileron) moves by the opposite amount, so its `Ch_delta` with respect to its own name has the opposite sign of the right half.
 - `axes="stability"` or `axes="wind"` gives the moment derivatives in the axes of the base condition. `CL`, `CD` and `CY` are always relative to the free stream.
+- Each `ControlDerivatives` also gives the far-field diagnostics `CY_farfield` and `Cn_trefftz` (per rad; `Cn_trefftz` stays in stability axes). The near-field values stay the reported derivatives.
 - `controls=["flap"]` limits the derivatives to some names. `hinge_alpha=False` skips the two solves for `Ch_alpha`.
 - The method uses central differences with a 1 deg step (`step_deg`). Near the 30 deg limit it uses a one-sided difference; `scheme` tells which.
 - `res.to_dict()` gives a JSON-compatible dictionary.

@@ -44,6 +44,19 @@ D_i = -\frac{\rho}{2} \sum_s \Gamma_s\, w_{n,s}\, \ell_s, \qquad C_{Di} = \frac{
 
 where $\ell_s$ [m] is the length of the projected strip segment. The section induced drag is $C_{d,i} = -\Gamma_s w_{n,s} \ell_s / (V_\infty^2 c_s w_s)$, with the strip chord $c_s$ and width $w_s$. The span efficiency is $e = C_L^2/(\pi\,AR\,C_{Di})$. In ground effect the image vortices are added in the same plane (see [Ground effect](ground_effect.md)).
 
+## Far-field lateral diagnostics
+
+Each lattice result also gives two far-field lateral values, next to the near-field `CY` and `Cn`. They are diagnostics: the near-field values stay the result values.
+
+- **Side force of the trailing vortex sheet, `CY_farfield`.** Each projected strip segment $\mathrm d\mathbf s_s$ (from the left to the right trailing-edge node, on the Trefftz plane) carries the circulation $\Gamma_s$. Its Kutta-Joukowski force in the far field is $\mathbf F_s = \rho V_\infty \Gamma_s\, (\hat{\mathbf u}\times \mathrm d\mathbf s_s)$ [N], with $\hat{\mathbf u}$ the free-stream direction (Katz and Plotkin 2001, chapter 8; Drela 2014, chapter 5). `CY_farfield` is the sum of the components along the wind-axis side direction $\hat{\mathbf y}_w = \hat{\mathbf L}\times\hat{\mathbf u}$ (positive to the right), divided by $q_\infty S_\text{ref}$.
+- **Yawing moment of the induced drag, `Cn_trefftz`.** The induced drag of each strip, $D'_s = -\tfrac{\rho}{2}\Gamma_s w_{n,s}\ell_s$ [N] (the distribution of the induced drag above, along $\hat{\mathbf u}$), acts at the evaluation point $\mathbf q_s$ of its segment. With the arm $\mathbf a_s$ from the reference point to $\mathbf q_s$, both projected on the Trefftz plane, the moment is $\mathbf M_T = \sum_s \mathbf a_s \times D'_s\hat{\mathbf u}$. In stability axes, $C_{n,T} = -\mathbf M_T\cdot\hat{\mathbf z}_s/(q_\infty S b)$ with $\hat{\mathbf z}_s = \hat{\mathbf L}$ (up in the geometry axes). With the lateral arm $y_s = \mathbf a_s\cdot\hat{\mathbf y}_w$ this is $C_{n,T} = \sum_s D'_s y_s/(q_\infty S b)$: more drag on the right wing gives $C_n > 0$ (nose right), the sign of `Cn`.
+
+The trace is the trace of the induced drag. A deflected control turns the panel normals and does not move the trailing edge, so the trace of a flat wing with a deflected aileron is flat and `CY_farfield` is 0 there. In ground effect the normal wash includes the image wake, as in the induced drag. A symmetric case (the half evaluation of the Trefftz plane) gives 0 exactly for both values. The GPU pipelines compute both values on the host from the strip circulation and the normal wash of the GPU, with the same equations.
+
+The Trefftz plane has no chordwise position. A side force that acts at a chordwise distance from the reference point gives a near-field yawing moment that `Cn_trefftz` does not contain, so in sideslip the two yawing moments can differ for this reason too.
+
+**Trust warning.** The near-field `CY` (already relative to the free stream) and the near-field `Cn`, expressed in stability axes, are compared with the far-field values. The result gets a warning when $|\text{near}-\text{far}| > 0.05\,|\text{far}|$ and $|\text{near}-\text{far}|$ is larger than a floor: 0.001 for `CY` and 0.0002 for `Cn`. A probable cause of a difference is the side-edge forces that the transpiration model does not carry (see *In-plane edge forces* above). The warning does not change the score.
+
 ## Section quantities
 
 For each strip, the section lift coefficient is $c_l = 2\Gamma_s/(V_\infty c_s)$ (lower case, to keep it apart from the rolling moment $C_l$). The effective angle of attack $\alpha_\text{eff}$ comes from the nonlinear solver, or else from the linear section: $\alpha_\text{eff} = \alpha_{L0} + c_l/a_0$. With $\hat{\mathbf n}$ the geometric unit normal of the strip and $\hat{\mathbf a}$ its unit chord direction, the geometric angle of the strip is $\alpha_\text{geo} = \operatorname{atan2}(\hat{\mathbf u}\cdot\hat{\mathbf n}, \hat{\mathbf u}\cdot\hat{\mathbf a})$ and the induced angle is $\alpha_i = \alpha_\text{geo} - \alpha_\text{eff}$.
@@ -87,6 +100,7 @@ with $C_{m\alpha}$ in the body axes. This is a small-angle form: it takes the li
 
 - `ventorum.aero.loads.compute_loads` and `compute_loads_batch` (near field, section data, moments).
 - `ventorum.aero.loads.trefftz_induced_drag` and `trefftz_induced_drag_batch`; the kernel `ventorum.aero.vortex.trefftz_normalwash`.
+- `ventorum.aero.loads.trefftz_lateral_batch` (`CY_farfield`, `Cn_trefftz`); `ventorum.core.trust.near_far_lateral_warnings` (the near/far warning).
 - `ventorum.agent.tools.stability_derivatives`.
 
 ## Verification

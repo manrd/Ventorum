@@ -129,6 +129,8 @@ The thin-airfoil load is logarithmic at the hinge, so the lattice hinge moment c
 
 The derivatives are central finite differences of solves at $\delta \pm h$ (default $h = 1$ deg). All controls with one name move together, and the derivative is per unit change of the `deflection` field: the left half of an antisymmetric control moves by $-h$. When $|\delta| + h$ passes the 30 deg limit, the second-order one-sided difference $\left(3C(\delta) - 4C(\delta \mp h) + C(\delta \mp 2h)\right)/(\pm 2h)$ replaces the central difference. $\partial C_h/\partial\alpha$ uses $\alpha \pm 0.5$ deg; in ground effect the moment reference point stays at its height. The moment derivatives are in the body axes (default), or in the stability or wind axes of the base condition, held fixed. The solves with a changed deflection use the same mesh: the hinge snap and the control strips do not depend on the deflection.
 
+The same differences give the derivatives of the far-field diagnostics `CY_farfield` (wind axes) and `Cn_trefftz` (stability axes of the base condition, for every choice of axes); see [Forces and moments](forces_and_moments.md). `to_dict` gives them as `CY_farfield_delta_per_rad` and `Cn_trefftz_delta_per_rad`. The near-field derivatives stay the reported values.
+
 The solves run on the device that the settings select, and the result gives the device and the precision. With a 1 deg step, the float32 round-off of the GPU paths is about $10^{-5}$ of a derivative.
 
 ## Assumptions and limits
@@ -141,7 +143,7 @@ The control surface model uses these assumptions:
 - In chordwise mode, the trailing edge nodes do not translate. Ground-clearance checks do not detect deflected flap positions.
 - A snapped panel can be up to 1.25 times its normal length. The ground-effect rule that limits chordwise panel length to the gap height does not see this extension.
 - At control side edges, the bound vortices of neighbouring strips can end at different chordwise locations.
-- The side force of an antisymmetric deflection (aileron) on a flat wing is not modelled: the rotated-normal model has no flap side edges, and the leg forces use the tangential velocity only (see [Forces and moments](forces_and_moments.md)). On a thin wing this side force is small and proportional to the angle of attack times the deflection; DATCOM neglects it for plain wings.
+- The side force of an antisymmetric deflection (aileron) on a flat wing is not modelled: the rotated-normal model has no flap side edges, and the leg forces use the tangential velocity only (see [Forces and moments](forces_and_moments.md)). On a thin wing this side force is small and proportional to the angle of attack times the deflection; DATCOM neglects it for plain wings. The far-field `CY_farfield` does not show it either: the Trefftz trace uses the trailing edges of the lattice, which a deflection does not move.
 - The classical Fourier solver does not support deflected control surfaces.
 - The section hinge moment is the thin-airfoil value of a plain flap: no gap, no nose balance, no camber term, attached flow only. Past stall it has no physical meaning.
 - The chordwise hinge moment converges slowly with the number of chordwise panels (table above). Use 16 or more chordwise panels for hinge moments.
