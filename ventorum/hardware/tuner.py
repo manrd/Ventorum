@@ -15,7 +15,12 @@ It measures, for each case size (see :data:`ventorum.hardware.profile.SIZE_CLASS
   case, for batches (sweeps, design studies);
 * with a CUDA GPU and the GPU pipelines (:mod:`ventorum.gpu`), a cost
   model of the CPU and GPU paths per solver family (the rule of the
-  ``"auto"`` device).
+  ``"auto"`` device);
+* the backend of the vector-Jacobian products of the adjoint gradients
+  (entry ``grad_vjp``: per size class and device, the fastest of the
+  compiled VJP kernels and the PyTorch reference copy, see
+  :mod:`ventorum.sensitivity.kernels`). A profile without this entry (an
+  older profile) still loads; the gradients then use the built-in default.
 
 It also records the GPUs that it finds. Tuning changes the speed; the device
 choice can change results at the float32 round-off level (about 1e-7 to 1e-6
@@ -189,6 +194,13 @@ def _kernel_fn(kernel: str, lat, src, tg, gamma, n: int):
     return fn
 
 
+def _grad_available() -> bool:
+    """Return True when the gradient step can run (PyTorch is installed)."""
+    import importlib.util
+
+    return importlib.util.find_spec("torch") is not None
+
+
 def _cython_threads() -> str | None:
     """Return the Cython thread mode: "openmp", "python" or None."""
     from ventorum.aero import vortex as V
@@ -334,6 +346,81 @@ def _measure_gpu(quick: bool, say) -> tuple[dict[str, Any], dict[str, Any]]:
     return {"available": True, "precision": precision, "model": model}, {"lattices": rows}
 
 
+# VJP backends of the gradient step that are not measured per size class and
+# device: numpy and the PyTorch reference copy are 10 to 100 times slower than
+# the compiled kernels on the CPU at medium and large sizes.
+_GRAD_SKIP = {"cpu": {"medium": ("numpy", "torch"), "large": ("numpy", "torch")}, "gpu": {}}
+
+
+def _grad_fn(ac, st, device: str):
+    """Return fn(backend) that runs one forward and backward pass of the gradient partials.
+
+    The pass is the one of :func:`ventorum.gradients` for the outputs CL,
+    CD and Cm with respect to alpha and the nodes: the differentiable
+    reference copy with its O(n^2) parts (system rows, load points,
+    Trefftz points) in the VJP backend *backend* (``"torch"`` is the
+    PyTorch reference copy).
+    """
+    import torch
+
+    import ventorum as vt
+    from ventorum.sensitivity import adjoint
+
+    wrt, outs = ("alpha", "nodes"), ("CL", "CD", "Cm")
+    cond = vt.FlightCondition(V_inf=30.0, alpha=np.radians(4.0))
+    prep = adjoint._prepare_case(ac, cond, st, "body", wrt, outs, "reference")
+    model, base = adjoint.build_reference(prep["aircraft"], cond, prep["settings"], prep["lattice"], "body",
+                                          device, prep["precision"], prep["symmetric"])
+    g = torch.as_tensor(prep["g_unknown"], dtype=model.b["dtype"], device=model.b["device"])
+    t = adjoint.make_input_tensors(model, base, wrt, device, prep["precision"])
+    leaves = [v for v in t.values() if isinstance(v, torch.Tensor) and v.requires_grad]
+
+    def fn(backend: str):
+        model.b["vjp_backend"] = None if backend == "torch" else backend
+        out, A, rhs = model.forward(t, g)
+        loss = sum(out[o] for o in outs) + (A @ g - rhs).sum()
+        grads = torch.autograd.grad(loss, leaves, allow_unused=True)
+        if device == "cuda":
+            torch.cuda.synchronize()
+        return grads
+
+    return fn
+
+
+def _measure_grad_vjp(cls: str, ac, st, cores: int, say) -> tuple[dict[str, str], dict[str, dict[str, float]]]:
+    """Time the VJP backends of the gradient partials for one case size; return the choices and the times.
+
+    The choice per device (``"cpu"``, ``"gpu"``) is the fastest backend
+    (a compiled backend wins a tie with the reference copy).
+    """
+    from ventorum import gpu
+    from ventorum.sensitivity import kernels as K
+    from ventorum.utils import parallel as par
+
+    choices: dict[str, str] = {}
+    times: dict[str, dict[str, float]] = {}
+    devices = ["cpu"] + (["gpu"] if K.available("warp", "cuda") and gpu.available() else [])
+    for dev in devices:
+        torch_dev = "cuda" if dev == "gpu" else "cpu"
+        names = list(K.GPU_BACKENDS if dev == "gpu" else K.CPU_BACKENDS) + ["torch"]
+        names = [b for b in names if K.available(b, torch_dev) and b not in _GRAD_SKIP[dev].get(cls, ())]
+        fn = _grad_fn(ac, st, torch_dev)
+        times[dev] = {}
+        for backend in names:
+            with par.forced_single_threads(cores), par.solve_threads(None):
+                if dev == "gpu":
+                    times[dev][backend] = _time_warm(lambda b=backend, f=fn: f(b), _REPEATS[cls])
+                else:
+                    times[dev][backend] = _time(lambda b=backend, f=fn: f(b), _REPEATS[cls])
+        best = min(times[dev].values())
+        close = [b for b, t in times[dev].items() if t <= best * (1.0 + _TIE)]
+        order = ("numba", "cython", "warp", "numpy", "torch")
+        choices[dev] = next(b for b in order if b in close)
+        say(f"{cls:6s} gradient VJP {dev}: {choices[dev]} (" + ", ".join(
+            f"{b} {1e3 * t:.1f} ms" for b, t in times[dev].items()) + ")")
+    return choices, times
+
+
 def tune_machine(quick: bool = False, save: bool = True, verbose: bool = True) -> dict[str, Any]:
     """Measure this machine and return (and by default save) its profile.
 
@@ -365,8 +452,8 @@ def tune_machine(quick: bool = False, save: bool = True, verbose: bool = True) -
     hw = scan_hardware(detect_gpu=False)
     cores = par.cpu_cores()
     classes = ["small", "medium"] if quick else ["small", "medium", "large"]
-    meas: dict[str, Any] = {"single": {}, "batch": {}, "kernels": {}}
-    settings: dict[str, Any] = {"single": {}, "batch": {}, "kernels": {}}
+    meas: dict[str, Any] = {"single": {}, "batch": {}, "kernels": {}, "grad_vjp": {}}
+    settings: dict[str, Any] = {"single": {}, "batch": {}, "kernels": {}, "grad_vjp": {}}
 
     from ventorum import gpu
 
@@ -434,6 +521,14 @@ def _tune_steps(quick, say, hw, cores, classes, meas, settings, t_start, prof, p
                                   quick, 0.0, vt)
             with _profile_in_process(step3):
                 gpu_settings, gpu_meas = _measure_gpu(quick, say)
+
+                # 5. Backend of the vector-Jacobian products of the adjoint gradients.
+                if _grad_available():
+                    for cls in classes:
+                        ac, st = _wing(*_CASES[cls])
+                        choice, times = _measure_grad_vjp(cls, ac, st, cores, say)
+                        settings["grad_vjp"][cls] = choice
+                        meas["grad_vjp"][cls] = times
     settings["gpu"] = {**_gpu_info(), **gpu_settings}
     meas["gpu"] = gpu_meas
     settings["cython_threads"] = _cython_threads()

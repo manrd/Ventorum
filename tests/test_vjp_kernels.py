@@ -366,3 +366,31 @@ def test_default_backends() -> None:
     assert K.default_backend("cpu") == "numba"
     expected = "warp" if K.available("warp", "cuda") else "torch"
     assert K.default_backend("cuda") == expected
+
+
+@pytest.mark.slow
+def test_quick_tuner_writes_grad_vjp(monkeypatch, tmp_path, _profile_cache) -> None:
+    """The tuner writes the grad_vjp entry per size class and device; the gradients then use it."""
+    pytest.importorskip("torch")
+    import json
+
+    from ventorum.hardware import profile as prof
+    from ventorum.hardware import tuner
+
+    monkeypatch.setenv("VENTORUM_CONFIG_DIR", str(tmp_path))
+    monkeypatch.delenv("VENTORUM_DISABLE_AUTOTUNE", raising=False)
+    monkeypatch.setattr(tuner, "_CASES", {"small": (6, 2), "medium": (8, 2), "large": (10, 2)})
+    monkeypatch.setattr(tuner, "_REPEATS", {"small": 1, "medium": 1, "large": 1})
+    tuner.tune_machine(quick=True, verbose=False)
+    data = json.loads(prof.profile_path().read_text(encoding="utf-8"))
+    entry = data["settings"]["grad_vjp"]
+    assert set(entry) == {"small", "medium"}
+    devices = {"cpu"} | ({"gpu"} if K.available("warp", "cuda") else set())
+    for cls in ("small", "medium"):
+        assert set(entry[cls]) == devices
+        assert entry[cls]["cpu"] in K.CPU_BACKENDS + ("torch",)
+        assert set(data["measurements"]["grad_vjp"][cls]["cpu"]) >= {"numba"}
+        if "gpu" in devices:
+            assert entry[cls]["gpu"] in ("warp", "torch")
+    prof.reset_profile_cache()
+    assert K.tuned_backend("cpu", 10) == entry["small"]["cpu"]
