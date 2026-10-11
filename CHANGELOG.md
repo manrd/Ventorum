@@ -129,6 +129,12 @@ a minor version can change a public interface.
 - The canonical solver names are `"auto"`, `"vlm"`, `"linear"`, `"nonlinear"` and `"fourier"`. The
   old names `"horseshoe"`, `"lattice"`, `"llt"` and `"linear_llt"` still work, with one
   `FutureWarning` at the public call that names the new name.
+- Each solver has one canonical class name that matches its solver string: `VortexLatticeSolver`
+  (`"vlm"`), `LinearLLTSolver` (`"linear"`), `NonlinearLLTSolver` (`"nonlinear"`) and
+  `FourierSolver` (`"fourier"`). The old names `HorseshoeSolver`, `LinearSolver` and
+  `NonlinearSolver` still work from the same modules (the same class object) until version 1.0,
+  with one `FutureWarning` that names the new name. They are not in `__all__` any more. The
+  non-convergence warning of the nonlinear lifting line names `NonlinearLLTSolver`.
 - The vortex-lattice force on the chordwise legs that lie on the surface uses only the velocity
   tangent to the surface. The normal velocity at the leg points is a leak of the discrete lattice;
   its force was an in-plane force that an impermeable surface cannot carry. Results change for
