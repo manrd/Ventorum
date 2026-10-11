@@ -71,4 +71,5 @@ docs/agent/tool_reference.md
 *.pyd
 ventorum/legacy/aero/cython_kernels.c
 ventorum/aero/vortex_cython.c
+ventorum/aero/vortex_vjp_cython.c
 build/
