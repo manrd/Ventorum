@@ -10,6 +10,14 @@ a minor version can change a public interface.
 
 ### Added
 
+- Far-field lateral diagnostics: every vortex-lattice and lifting-line result gives
+  `totals.CY_farfield` (side force of the trailing vortex sheet in the Trefftz plane, wind
+  axes) and `totals.Cn_trefftz` (yawing moment of the Trefftz-plane induced drag, stability
+  axes), also on the GPU. They are diagnostics; the near-field `CY` and `Cn` stay the result
+  values. The trust score warns (no penalty) when the near and far values differ by more than
+  5 % and more than a floor (CY 0.001, Cn 0.0002); the yawing moments are compared only when
+  the side force is below the CY floor. The control derivatives give the far-field
+  derivatives `CY_farfield_delta_per_rad` and `Cn_trefftz_delta_per_rad`.
 - Reference-case format: derivative quantities `<C>_alpha` and `<C>_beta` (C in CL, CD, CY,
   Cl, Cm, Cn) with `derivative_unit` (1/deg or 1/rad) and `axes` (default stability axes);
   results against a lift-coefficient list `CL` instead of `alpha_deg` (a CL that the alpha
@@ -179,6 +187,8 @@ a minor version can change a public interface.
 
 ### Fixed
 
+- A lattice-only value of None (the polar limits of linear airfoils) was computed again for
+  every case of a sweep; it is now cached.
 - Moment coefficients in wind axes: the change of axes now acts on the dimensional moments,
   C' = L^-1 R L C with L = diag(b_ref, c_ref, b_ref), because Cl and Cn use the reference span and
   Cm uses the reference chord. Before, the rotation acted on the coefficients, so the wind-axis Cl
