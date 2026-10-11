@@ -9,6 +9,19 @@ whether the difference is inside the uncertainty. A result with its own
 ``h [m]`` column); else every point uses the case height ``[conditions]
 h_m``.
 
+A derivative quantity (for example ``Cl_beta``) is computed by central
+differences (alpha 0.5 deg, beta 1 deg, one mesh for the cases of one
+point) and given in the ``derivative_unit`` of the result; a moment
+derivative uses the ``axes`` of the result. A result with the ``CL``
+abscissa finds the angle of attack where Ventorum gives each lift
+coefficient (alpha sweep from -10 to 20 deg and linear interpolation) and
+evaluates the quantity there; the table then shows the CL and the alpha
+found. A lift coefficient outside the CL range of the sweep is reported as
+"not reached" and is not counted. A slope entry (``slope_of = "CL"``)
+evaluates the quantity at 5 equally spaced lift coefficients of
+``CL_range``, fits a straight line by least squares, and reports the
+fitted slope and the largest residual.
+
 Synthetic cases are marked and are never counted in the summary statistics.
 Theory cases are shown in their own section "Theory cases (verification,
 not counted)" and are never counted: they are verification, not validation.
@@ -35,6 +48,17 @@ import numpy as np
 import ventorum as vt
 from ventorum.aero.system import ground_normal
 from ventorum.reference.database import MACH_LIMIT, ReferenceError, load_case
+from ventorum.reference.derivatives import (
+    CL_SWEEP_ALPHA_DEG,
+    SLOPE_POINTS,
+    alpha_for_cl,
+    central_difference,
+    coefficient,
+    is_derivative,
+    per_rad_to_unit,
+    slope_fit,
+    split_derivative,
+)
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -51,13 +75,13 @@ def table(header, rows):
     return "\n".join(out)
 
 
+#: Start of the error text of a lift coefficient that the alpha sweep does not reach.
+NOT_REACHED = "not reached"
+
+
 def ventorum_value(totals, quantity):
     """Read one coefficient from integrated totals (CD falls back to CDi)."""
-    if quantity == "CD":
-        if totals.CD_total is not None:
-            return float(totals.CD_total), ""
-        return float(totals.CDi), "CDi (no profile drag)"
-    return float(getattr(totals, quantity)), ""
+    return coefficient(totals, quantity)
 
 
 def point_height(case, result, h_point, alpha_deg):
@@ -81,8 +105,155 @@ def point_height(case, result, h_point, alpha_deg):
     return float(h_point + float((solve_ref - anchor) @ k))
 
 
+def solve_aircraft(case, result):
+    """Return the aircraft of one result (a copy with the moment point when it has one)."""
+    if result.moment_point is None:
+        return case.aircraft
+    aircraft = case.aircraft.clone()
+    aircraft.ref_point = np.array(result.moment_point, dtype=float)
+    return aircraft
+
+
+def condition_factory(case, h_ref):
+    """Return ``make(alpha_deg, beta_deg)``, a flight condition at the height ``h_ref`` [m] or in free air."""
+
+    def make(alpha_deg, beta_deg):
+        return vt.FlightCondition(
+            V_inf=case.mach * SPEED_OF_SOUND_M_S,
+            alpha=float(np.radians(alpha_deg)),
+            beta=float(np.radians(beta_deg)),
+            rho=RHO_KG_M3,
+            h=h_ref,
+        )
+
+    return make
+
+
+def evaluate(case, result, aircraft, alpha_deg, h_ref, settings):
+    """Ventorum value of the quantity of *result* at one angle of attack [deg].
+
+    A plain quantity comes from one solve. A derivative quantity comes from
+    central differences (``ventorum.reference.derivatives.central_difference``)
+    at the constant height ``h_ref`` [m] of the solve reference point, and
+    is converted to ``result.derivative_unit``. Returns ``(value, note)``.
+    """
+    make = condition_factory(case, h_ref)
+    if is_derivative(result.quantity):
+        value = central_difference(
+            aircraft, result.quantity, alpha_deg, case.beta_deg, make, settings, axes=result.axes
+        )
+        return per_rad_to_unit(value, result.derivative_unit), ""
+    totals = vt.analyze(aircraft, condition=make(alpha_deg, case.beta_deg), settings=settings).totals
+    return ventorum_value(totals, result.quantity)
+
+
+class NotReached(Exception):
+    """A lift coefficient outside the Ventorum CL range of the alpha sweep."""
+
+
+def value_at_cl(case, result, aircraft, settings, cl_target, h_point):
+    """Find the alpha where Ventorum gives *cl_target* and evaluate the quantity there.
+
+    The alpha sweep and the search use one mesh. With a listed height
+    ``h_point`` [m], each sweep angle uses the converted height of the
+    solve reference point (``point_height``); sweep angles where that
+    height is not > 0 are left out. A plain quantity is evaluated with the
+    mesh of the sweep; a derivative uses one mesh for its own cases.
+    Returns ``(alpha_deg, value, note)``. Raises ``NotReached`` when the
+    target is outside the CL range of the sweep (no extrapolation).
+    """
+    if h_point is None:
+        grid = list(CL_SWEEP_ALPHA_DEG)
+        make_sweep = condition_factory(case, None)
+    else:
+        grid = [a for a in CL_SWEEP_ALPHA_DEG if point_height(case, result, h_point, a) > 0.0]
+
+        def make_sweep(alpha_deg, beta_deg):
+            h_ref = point_height(case, result, h_point, alpha_deg)
+            return condition_factory(case, h_ref)(alpha_deg, beta_deg)
+
+    alpha_deg, (cl_lo, cl_hi), sweep_settings = alpha_for_cl(
+        aircraft, cl_target, case.beta_deg, make_sweep, settings, alpha_grid_deg=grid
+    )
+    if alpha_deg is None:
+        raise NotReached(
+            f"{NOT_REACHED}: CL {cl_target:g} is outside the Ventorum CL range of the alpha sweep "
+            f"({cl_lo:.4f} to {cl_hi:.4f}); no extrapolation"
+        )
+    h_ref = None if h_point is None else point_height(case, result, h_point, alpha_deg)
+    point_settings = settings if is_derivative(result.quantity) else sweep_settings
+    value, note = evaluate(case, result, aircraft, alpha_deg, h_ref, point_settings)
+    return alpha_deg, value, note
+
+
+def run_cl_result(case, result, solver):
+    """Rows of a result with the ``CL`` abscissa.
+
+    Each row is ``(CL, reference, uncertainty, Ventorum, difference,
+    inside, note, error, alpha_deg)``. A lift coefficient that the alpha
+    sweep does not reach gives an error text that starts with
+    ``not reached``.
+    """
+    heights = list(result.h_m) if result.h_m is not None else [case.h_m] * len(result.values)
+    uncs = result.abs_uncertainty if result.abs_uncertainty is not None else [None] * len(result.values)
+    aircraft = solve_aircraft(case, result)
+    settings = vt.SolverSettings(solver_type=solver, n_panels=N_PANELS)
+    rows = []
+    for h_point, cl_target, ref, unc in zip(heights, result.CL, result.values, uncs):
+        try:
+            alpha_deg, got, note = value_at_cl(case, result, aircraft, settings, cl_target, h_point)
+        except NotReached as exc:
+            rows.append((cl_target, ref, unc, None, None, "n/a", "", str(exc), None))
+            continue
+        except Exception as exc:  # noqa: BLE001 - one bad point must not stop the report
+            rows.append((cl_target, ref, unc, None, None, "n/a", "", f"{type(exc).__name__}: {exc}", None))
+            continue
+        diff = got - ref
+        inside = "n/a" if unc is None else ("yes" if abs(diff) <= unc else "no")
+        rows.append((cl_target, ref, unc, got, diff, inside, note, None, alpha_deg))
+    return rows
+
+
+def run_slope_result(case, result, solver):
+    """Row of a slope entry (``slope_of = "CL"``).
+
+    The quantity is evaluated at 5 equally spaced lift coefficients of
+    ``CL_range`` and a straight line is fitted (least squares). The single
+    row is ``(CL_range, reference, uncertainty, fitted slope, difference,
+    inside, note, error, largest residual)``; the residual is in the unit
+    of the quantity.
+    """
+    h_point = result.h_m[0] if result.h_m is not None else case.h_m
+    unc = result.abs_uncertainty[0] if result.abs_uncertainty is not None else None
+    ref = result.values[0]
+    lo, hi = result.CL_range
+    aircraft = solve_aircraft(case, result)
+    settings = vt.SolverSettings(solver_type=solver, n_panels=N_PANELS)
+    targets = [float(c) for c in np.linspace(lo, hi, SLOPE_POINTS)]
+    values = []
+    notes = set()
+    try:
+        for cl_target in targets:
+            _, value, note = value_at_cl(case, result, aircraft, settings, cl_target, h_point)
+            values.append(value)
+            if note:
+                notes.add(note)
+    except NotReached as exc:
+        return [((lo, hi), ref, unc, None, None, "n/a", "", str(exc), None)]
+    except Exception as exc:  # noqa: BLE001 - one bad entry must not stop the report
+        return [((lo, hi), ref, unc, None, None, "n/a", "", f"{type(exc).__name__}: {exc}", None)]
+    slope, residual = slope_fit(targets, values)
+    diff = slope - ref
+    inside = "n/a" if unc is None else ("yes" if abs(diff) <= unc else "no")
+    return [((lo, hi), ref, unc, slope, diff, inside, "; ".join(sorted(notes)), None, residual)]
+
+
 def run_result(case, result, solver):
     """Solve Ventorum at each alpha of one result. Returns rows for the report.
+
+    A result with the ``CL`` abscissa goes to ``run_cl_result`` and a slope
+    entry to ``run_slope_result``. A derivative quantity is computed by
+    central differences and given in its ``derivative_unit``.
 
     A result with its own ``h_m`` list solves each point at its own height;
     else every point uses ``case.h_m``. A listed height is the height of
@@ -91,6 +262,10 @@ def run_result(case, result, solver):
     solve reference point with the ground normal. A point whose converted
     height is not > 0 is reported as an error; the other points still run.
     """
+    if result.slope_of is not None:
+        return run_slope_result(case, result, solver)
+    if result.CL is not None:
+        return run_cl_result(case, result, solver)
     if result.h_m is not None:
         heights = list(result.h_m)
     else:
@@ -120,21 +295,10 @@ def run_result(case, result, solver):
                     )
                 )
                 continue
-        aircraft = case.aircraft
-        if result.moment_point is not None:
-            aircraft = case.aircraft.clone()
-            aircraft.ref_point = np.array(result.moment_point, dtype=float)
-        condition = vt.FlightCondition(
-            V_inf=case.mach * SPEED_OF_SOUND_M_S,
-            alpha=float(np.radians(alpha_deg)),
-            beta=float(np.radians(case.beta_deg)),
-            rho=RHO_KG_M3,
-            h=h_ref,
-        )
+        aircraft = solve_aircraft(case, result)
         settings = vt.SolverSettings(solver_type=solver, n_panels=N_PANELS)
         try:
-            totals = vt.analyze(aircraft, condition=condition, settings=settings).totals
-            got, note = ventorum_value(totals, result.quantity)
+            got, note = evaluate(case, result, aircraft, alpha_deg, h_ref, settings)
             diff = got - ref
             inside = "n/a" if unc is None else ("yes" if abs(diff) <= unc else "no")
             rows.append((alpha_deg, ref, unc, got, diff, inside, note, None))
@@ -175,22 +339,41 @@ def case_section(case, solver, counted, heading="##"):
             if result.height_point is not None
             else ""
         )
-        parts += [f"### {result.quantity} ({result.extraction}{moment}{anchor})", ""]
+        parts += [f"### {result_heading(result)} ({result.extraction}{moment}{anchor}{derivative_text(result)})", ""]
         rows = run_result(case, result, solver)
-        if result.h_m is not None:
-            header = ["alpha [deg]", "h [m]", "reference", "uncertainty", "Ventorum", "difference", "inside"]
+        h_head = ["h [m]"] if result.h_m is not None else []
+        fv = value_format(result)
+        if result.slope_of is not None:
+            header = ["CL range"] + h_head + [
+                "reference", "uncertainty", "fitted slope", "difference", "inside", "largest residual"]
+        elif result.CL is not None:
+            header = ["CL", "alpha [deg]"] + h_head + [
+                "reference", "uncertainty", "Ventorum", "difference", "inside"]
         else:
-            header = ["alpha [deg]", "reference", "uncertainty", "Ventorum", "difference", "inside"]
+            header = ["alpha [deg]"] + h_head + ["reference", "uncertainty", "Ventorum", "difference", "inside"]
         table_rows = []
-        for point_index, (alpha_deg, ref, unc, got, diff, inside, note, error) in enumerate(rows):
+        for point_index, row in enumerate(rows):
+            abscissa, ref, unc, got, diff, inside, note, error = row[:8]
             h_cell = [f"{result.h_m[point_index]:g}"] if result.h_m is not None else []
-            if error is not None:
-                table_rows.append([f"{alpha_deg:g}"] + h_cell + [f"{ref:.6f}", _fmt_unc(unc), "error", "-", "n/a"])
+            if result.slope_of is not None:
+                first = [f"{abscissa[0]:g} to {abscissa[1]:g}"]
+            elif result.CL is not None:
+                first = [f"{abscissa:g}", "-" if row[8] is None else f"{row[8]:.4f}"]
             else:
-                mark = f"{got:.6f} ({note})" if note else f"{got:.6f}"
-                table_rows.append(
-                    [f"{alpha_deg:g}"] + h_cell + [f"{ref:.6f}", _fmt_unc(unc), mark, f"{diff:+.6f}", inside]
-                )
+                first = [f"{abscissa:g}"]
+            plain = result.derivative_unit is None and result.slope_of is None
+            unc_cell = _fmt_unc(unc) if plain or unc is None else fv(unc)
+            if error is not None:
+                status = NOT_REACHED if error.startswith(NOT_REACHED) else "error"
+                cells = first + h_cell + [fv(ref), unc_cell, status, "-", "n/a"]
+                if result.slope_of is not None:
+                    cells.append("-")
+            else:
+                mark = f"{fv(got)} ({note})" if note else fv(got)
+                cells = first + h_cell + [fv(ref), unc_cell, mark, fv(diff, sign=True), inside]
+                if result.slope_of is not None:
+                    cells.append(f"{row[8]:.3e}")
+            table_rows.append(cells)
             if error is None:
                 if not case.synthetic and case.source_type != "theory":
                     counted["points"] += 1
@@ -206,9 +389,23 @@ def case_section(case, solver, counted, heading="##"):
             table(header, table_rows),
             "",
         ]
+        if result.slope_of is not None:
+            parts += [
+                f"The fitted slope is the least-squares line through {SLOPE_POINTS} equally spaced CL "
+                "of the range; the largest residual is in the unit of the quantity.",
+                "",
+            ]
         errors = [(r[0], r[7]) for r in rows if r[7] is not None]
-        for alpha_deg, message in errors:
-            parts += [f"Point at alpha {alpha_deg:g} deg failed: {message}.", ""]
+        for abscissa, message in errors:
+            if message.startswith(NOT_REACHED):
+                where = "slope" if result.slope_of is not None else f"point at CL {abscissa:g}"
+                parts += [f"The {where} is {message}.", ""]
+            elif result.slope_of is not None:
+                parts += [f"Slope over CL {abscissa[0]:g} to {abscissa[1]:g} failed: {message}.", ""]
+            elif result.CL is not None:
+                parts += [f"Point at CL {abscissa:g} failed: {message}.", ""]
+            else:
+                parts += [f"Point at alpha {abscissa:g} deg failed: {message}.", ""]
     if case.notes:
         parts += [f"Quality notes: {case.notes}", ""]
     return "\n".join(parts)
@@ -216,6 +413,38 @@ def case_section(case, solver, counted, heading="##"):
 
 def _fmt_unc(unc):
     return "n/a" if unc is None else f"{unc:.6f}"
+
+
+def result_heading(result):
+    """Heading text of one result: the quantity, or d(quantity)/dCL for a slope entry."""
+    if result.slope_of is not None:
+        return f"d({result.quantity})/d{result.slope_of}"
+    return result.quantity
+
+
+def derivative_text(result):
+    """Heading text of the unit and the axes of a derivative quantity (empty for others)."""
+    if result.derivative_unit is None:
+        return ""
+    parts = split_derivative(result.quantity)
+    axes = f", {result.axes} axes" if parts is not None and parts[0] in ("Cl", "Cm", "Cn") else ""
+    return f"{axes}, {result.quantity} in {result.derivative_unit}"
+
+
+def value_format(result):
+    """Return the number format of one result.
+
+    Plain quantities keep 6 decimals. Derivative quantities and slopes use
+    6 significant digits, because their values per degree are small.
+    """
+    small = result.derivative_unit is not None or result.slope_of is not None
+
+    def fmt(value, sign=False):
+        if small:
+            return f"{value:+.6g}" if sign else f"{value:.6g}"
+        return f"{value:+.6f}" if sign else f"{value:.6f}"
+
+    return fmt
 
 
 def build_report(db_folder, cases, outside, errors, solver):
