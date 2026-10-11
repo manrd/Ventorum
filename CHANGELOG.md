@@ -10,6 +10,16 @@ a minor version can change a public interface.
 
 ### Added
 
+- Derivative matrix: `derivative_matrix` gives the static (alpha, beta; in ground effect also
+  phi and h/c), control (per control name) and rate (p, q, r nondimensional) derivatives of the
+  six coefficients of one flight state in one result, with the units, the method of each
+  column, the axes (`body`, `stability`, `wind` or `all`) and diagnostics (far-field
+  derivatives per control with the near/far warning, static margin and neutral point, Irodov
+  margin in ground effect). Every column equals the existing function. New
+  `static_derivatives` for the free-air static columns. MCP tool
+  `ventorum_derivative_matrix` (twelve tools now). The agent tool `ventorum_error_bars` takes
+  optional `input_uncertainties` and then returns the combined bars of layers 1 and 2. The
+  totals of the agent tools give `CY_farfield` and `Cn_trefftz`.
 - Far-field lateral diagnostics: every vortex-lattice and lifting-line result gives
   `totals.CY_farfield` (side force of the trailing vortex sheet in the Trefftz plane, wind
   axes) and `totals.Cn_trefftz` (yawing moment of the Trefftz-plane induced drag, stability
