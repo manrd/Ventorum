@@ -46,6 +46,23 @@ _SYMMETRIC_NODE_WRT = _SYMMETRIC_WRT + ("nodes",)
 _SYMMETRIC_OUTPUTS = ("CL", "CDi", "CDp", "CD", "Cm")
 
 
+CPU_KERNELS_FLOAT64_NOTE = (
+    "The CPU VJP kernels evaluate the O(n^2) partials in float64; the O(n) parts and the adjoint "
+    "solve use float32.")
+
+
+def _cpu_kernels_in_float64(partials: str) -> bool:
+    """Return True when *partials* names a CPU VJP kernel (it evaluates each pair in float64).
+
+    Parameters
+    ----------
+    partials : str
+        Path and backend of the partials, ``"<path>:<backend>"``.
+    """
+    path, _, backend = partials.partition(":")
+    return path == "kernels" and backend in ("numba", "cython", "numpy")
+
+
 def _gradient_device(result: Any) -> str:
     """Return the torch device of the gradient computation.
 
@@ -812,6 +829,8 @@ def gradients(
         notes.append(
             "Float32 gradients: the gradient gate of float32 is 1e-3 relative; check the result with "
             "check_gradients (rtol=1e-3).")
+        if _cpu_kernels_in_float64(prep["partials"]):
+            notes.append(CPU_KERNELS_FLOAT64_NOTE)
     return GradientResult(
         values=values, jacobian=jacobian, device=prep["device"],
         precision_primal=prep["precision_primal"], precision_gradient=prep["precision"],

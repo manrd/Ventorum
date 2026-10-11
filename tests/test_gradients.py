@@ -1016,3 +1016,36 @@ def test_gpu_float32_gate_against_float64(gpu_device, restore_vjp_backend) -> No
             assert res[prec].partials == "kernels:warp", (case_id, res[prec].partials)
             assert res[prec].precision_gradient == prec, case_id
         _assert_same_gradients_per_output(res["float64"], res["float32"], outputs, 1e-3, f"{case_id}:gate")
+
+
+@pytest.mark.parametrize("backend", ["numba", "cython", "numpy"])
+def test_cpu_kernels_float32_note(backend: str, cpu_device, restore_vjp_backend) -> None:
+    """A float32 request on a CPU kernel path says that the O(n^2) partials are float64 values.
+
+    The note is absent on the reference path and for float64 requests.
+    """
+    from ventorum.sensitivity.adjoint import CPU_KERNELS_FLOAT64_NOTE
+
+    K = restore_vjp_backend
+    if not K.available(backend, "cpu"):
+        pytest.skip(f"The {backend} VJP backend is not available.")
+    K.set_vjp_backend(backend)
+    ac = vt.Aircraft(surfaces=[_plain_wing()])
+    cond = vt.FlightCondition(V_inf=30.0, alpha=np.radians(4.0))
+    st = vt.SolverSettings(solver_type="vlm", n_panels=6, n_chord=1)
+    old = gpu.get_precision()
+    found = {}
+    try:
+        for prec in ("float32", "float64"):
+            gpu.set_precision(prec)
+            for method in ("kernels", "reference"):
+                with warnings.catch_warnings():
+                    warnings.simplefilter("ignore")
+                    res = vt.gradients(ac, cond, st, outputs=("CL",), wrt=("alpha", "nodes"), method=method)
+                found[(prec, method)] = (res.precision_gradient, res.partials, CPU_KERNELS_FLOAT64_NOTE in res.notes)
+    finally:
+        gpu.set_precision(old)
+    assert found[("float32", "kernels")] == ("float32", f"kernels:{backend}", True)
+    assert found[("float32", "reference")] == ("float32", "reference:torch", False)
+    assert found[("float64", "kernels")] == ("float64", f"kernels:{backend}", False)
+    assert found[("float64", "reference")] == ("float64", "reference:torch", False)
