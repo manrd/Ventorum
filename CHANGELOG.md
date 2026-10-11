@@ -10,6 +10,15 @@ a minor version can change a public interface.
 
 ### Added
 
+- Compiled VJP kernels of the adjoint gradients: hand-derived vector-Jacobian products of the
+  horseshoe kernel in numpy, Numba, Cython (OpenMP) and NVIDIA Warp (float32 and float64),
+  chosen by the tuner (new profile entry `grad_vjp`; old profiles still load). `gradients`,
+  `gradient_vjp` and `check_gradients` take `method="auto"`, `"kernels"` or `"reference"`
+  (the PyTorch reference path stays); `GradientResult.partials` names the path and backend.
+  The gradients cost about 10 to 17 production solves (before: 90 to 400). Node inputs of
+  symmetric requests use the folded system. CPU results are bitwise the same for every thread
+  count. On the CPU the kernels evaluate the pair terms in float64 also for float32 requests
+  (stated in the notes).
 - Derivative matrix: `derivative_matrix` gives the static (alpha, beta; in ground effect also
   phi and h/c), control (per control name) and rate (p, q, r nondimensional) derivatives of the
   six coefficients of one flight state in one result, with the units, the method of each
@@ -197,6 +206,8 @@ a minor version can change a public interface.
 
 ### Fixed
 
+- `import ventorum` loaded PyTorch through the gradient package; the gradient functions now
+  load on first use.
 - A lattice-only value of None (the polar limits of linear airfoils) was computed again for
   every case of a sweep; it is now cached.
 - Moment coefficients in wind axes: the change of axes now acts on the dimensional moments,
