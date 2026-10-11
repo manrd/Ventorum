@@ -33,7 +33,14 @@ except ImportError:  # pragma: no cover - torch is optional
     _HAVE_TORCH = False
 
 # Default chunk budget [values]: the budget of ventorum.aero.vortex_torch.
+# Here the budget counts all values that one chunk holds in its forward and
+# backward pass, so it bounds the memory of the gradient computation.
 _DEFAULT_CHUNK_VALUES = 2.0e7
+
+# Values per (target, source) pair that one chunk of the horseshoe kernel
+# holds in its forward and backward pass (measured: about 200 with the
+# PyTorch CPU backend; the largest single temporary has 3).
+_PAIR_VALUES = 200
 
 _MIRROR = (1.0, -1.0, 1.0)
 
@@ -58,8 +65,13 @@ def chunk_budget() -> float:
 
 
 def chunk_rows(m: int, n: int) -> int:
-    """Return the row count of one chunk for *m* rows and *n* sources."""
-    per_row = 3 * max(1, int(n))
+    """Return the row count of one chunk for *m* rows and *n* sources.
+
+    One chunk holds about ``_PAIR_VALUES`` values per (row, source) pair in
+    its forward and backward pass; the chunk keeps that total below the
+    budget of :func:`chunk_budget`.
+    """
+    per_row = _PAIR_VALUES * max(1, int(n))
     return max(1, min(int(m), int(chunk_budget() // per_row)))
 
 
@@ -191,8 +203,55 @@ def _rows(x: torch.Tensor | None, i0: int, i1: int) -> torch.Tensor | None:
     return None if x is None else x[i0:i1]
 
 
+class _ChunkedRows(torch.autograd.Function if _HAVE_TORCH else object):  # type: ignore[misc]
+    """Row-chunked evaluation that keeps only its inputs for the backward pass.
+
+    The forward pass evaluates the chunks without a graph. The backward
+    pass evaluates each chunk again with a graph, takes its
+    vector-Jacobian product with the output gradient of the chunk, adds it
+    to the input gradients and frees the chunk graph before the next
+    chunk. So the memory of the O(n^2) kernel work stays at one chunk in
+    the forward and in the backward pass, also for repeated backward
+    passes on the same graph.
+    """
+
+    @staticmethod
+    def forward(ctx, fn, m, step, *tensors):  # type: ignore[no-untyped-def]
+        """Evaluate fn(i0, i1, *tensors) for the row chunks and join the rows."""
+        ctx.fn = fn
+        ctx.m = m
+        ctx.step = step
+        ctx.save_for_backward(*tensors)
+        return torch.cat([fn(i0, min(m, i0 + step), *tensors) for i0 in range(0, m, step)], dim=0)
+
+    @staticmethod
+    def backward(ctx, gout):  # type: ignore[no-untyped-def]
+        """Return the input gradients, one chunk at a time."""
+        tensors = ctx.saved_tensors
+        need = ctx.needs_input_grad[3:]
+        grads = [torch.zeros_like(t) if nd else None for t, nd in zip(tensors, need)]
+        for i0 in range(0, ctx.m, ctx.step):
+            i1 = min(ctx.m, i0 + ctx.step)
+            with torch.enable_grad():
+                leaves = [t.detach().requires_grad_(True) if nd else t.detach()
+                          for t, nd in zip(tensors, need)]
+                y = ctx.fn(i0, i1, *leaves)
+                wanted = [leaf for leaf, nd in zip(leaves, need) if nd]
+                parts = torch.autograd.grad(y, wanted, gout[i0:i1], allow_unused=True)
+            it = iter(parts)
+            for k, nd in enumerate(need):
+                if nd:
+                    g = next(it)
+                    if g is not None:
+                        grads[k] = grads[k] + g
+            del y, leaves, wanted, parts
+        return (None, None, None, *grads)
+
+
 def _chunked(fn, m: int, step: int, *tensors: torch.Tensor) -> torch.Tensor:  # type: ignore[no-untyped-def]
-    """Evaluate fn(i0, i1, *tensors) in row chunks of *step* rows and join the rows."""
+    """Evaluate fn(i0, i1, *tensors) in row chunks of *step* rows (see _ChunkedRows)."""
+    if torch.is_grad_enabled() and any(t.requires_grad for t in tensors):
+        return _ChunkedRows.apply(fn, m, step, *tensors)
     return torch.cat([fn(i0, min(m, i0 + step), *tensors) for i0 in range(0, m, step)], dim=0)
 
 
