@@ -8,7 +8,9 @@ airfoil models for lifting-line solvers, and validates control surface inputs.
 References
 ----------
 H. Glauert, The Elements of Aerofoil and Airscrew Theory, Cambridge
-University Press, 1926.
+University Press, 1926, chapter VII.
+H. Glauert, "Theoretical relationships for an aerofoil with hinged flap",
+Aeronautical Research Committee, R&M 1095, 1927.
 J. Katz and A. Plotkin, Low-Speed Aerodynamics, 2nd ed., Cambridge
 University Press, 2001.
 """
@@ -145,8 +147,12 @@ def hinge_moment_derivatives(hinge_x_c: float) -> tuple[float, float]:
     References
     ----------
     H. Glauert, The Elements of Aerofoil and Airscrew Theory, Cambridge
-    University Press, 1926: thin-airfoil theory and the Fourier series of
-    the load of a cambered (flapped) section.
+    University Press, 1926, chapter VII: thin-airfoil theory and the Fourier
+    series of the load of a cambered (flapped) section.
+    H. Glauert, "Theoretical relationships for an aerofoil with hinged
+    flap", Aeronautical Research Committee, R&M 1095, 1927: the hinge
+    moment of a hinged flap (``Ch_alpha`` is twice his ``b_1``, equation
+    14, because his coefficients use ``rho V^2``).
     """
     h = float(hinge_x_c)
     if not (0.0 < h < 1.0):

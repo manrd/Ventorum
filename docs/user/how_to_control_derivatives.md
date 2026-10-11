@@ -46,12 +46,12 @@ for m in vt.hinge_moments(res_case):
     print(m.control, m.side, m.mode, f"H={m.H:.3f} N m", f"Ch={m.Ch:.4f}")
 ```
 
-A hinge moment is positive when it tends to increase the local deflection of that copy (trailing edge down on a horizontal surface). The coefficient uses the flap area aft of the hinge and the root-mean-square flap chord.
+A hinge moment is positive when it tends to increase the local deflection of that copy (trailing edge down on a horizontal surface). The coefficient uses the flap area aft of the hinge and the mean flap chord weighted by the flap area (sum of c_f^2 w divided by sum of c_f w).
 
 ## Which model gives the hinge moment
 
 - Vortex lattice with `n_chord >= 2`: the panel loads aft of the hinge. The value converges slowly with `n_chord`; use 16 or more chordwise panels. The theory manual gives a convergence table.
 - Lifting lines, and the vortex lattice with `n_chord = 1`: thin-airfoil theory of a plain flap on each strip (no gap, no nose balance, attached flow only).
-- The Fourier solver does not accept control surfaces.
+- The Fourier solver refuses a deflected control and gives no hinge moments.
 
 The [theory chapter](../theory/control_surfaces.md) gives the formulas and the verification.

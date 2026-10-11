@@ -59,7 +59,7 @@ The number and the stations of the edges depend on the mesh settings and on the 
 
 The left half of a symmetric surface and a mirror copy (`mirrored()`) get the mirror image (y to -y) of the displaced defining half. Thus a symmetric surface stays symmetric. An asymmetric deformation needs two surfaces with `is_symmetric=False`, each with its own displacements.
 
-The reference values $S_{	ext{ref}}$, $b_{	ext{ref}}$, $c_{	ext{ref}}$ and the ground-effect height reference point (`Aircraft.root_point`) stay on the undeformed geometry. The strip twist array keeps the undeformed (jig) twist; the displaced nodes and the normals hold the deformed shape. The wake leaves the deformed trailing edge along the free stream or the body axis, as for an undeformed surface.
+The reference values $S_{\text{ref}}$, $b_{\text{ref}}$ and $c_{\text{ref}}$ stay on the undeformed geometry. In ground effect the height is measured from `Aircraft.ref_point` (the default), or from `Aircraft.root_point` (`height_ref='qc'` or `'te'`), which is computed on the undeformed geometry; with `height_ref='min'` it is the height of the lowest deformed node. The strip twist array keeps the undeformed (jig) twist; the displaced nodes and the normals hold the deformed shape. The wake leaves the deformed trailing edge along the free stream or the body axis, as for an undeformed surface.
 
 ## Equations
 

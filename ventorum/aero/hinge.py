@@ -17,8 +17,8 @@ The hinge moment of a copy of a control is positive when it tends to
 increase the local deflection of that copy: a right-hand moment about the
 hinge axis of the lattice (trailing edge down on a horizontal surface, on
 both halves). The coefficient is ``Ch = H / (q S_f c_f)``, with ``S_f`` the
-flap area aft of the hinge and ``c_f`` the root-mean-square flap chord
-``sum(c_f,i^2 w_i) / sum(c_f,i w_i)``. Thus ``Ch`` is the
+flap area aft of the hinge and ``c_f`` the mean flap chord weighted by
+the flap area, ``sum(c_f,i^2 w_i) / sum(c_f,i w_i)``. Thus ``Ch`` is the
 ``c_f^2 w``-weighted mean of the strip values, and a two-dimensional
 section gives the section coefficient.
 
@@ -28,7 +28,10 @@ References
   University Press, 2001: the Kutta-Joukowski force on the bound vortex of
   a lattice panel.
 * H. Glauert, The Elements of Aerofoil and Airscrew Theory, Cambridge
-  University Press, 1926: thin-airfoil theory of a hinged flap.
+  University Press, 1926, chapter VII: thin aerofoil theory.
+* H. Glauert, "Theoretical relationships for an aerofoil with hinged
+  flap", Aeronautical Research Committee, R&M 1095, 1927: the lift, moment
+  and hinge moment of a hinged flap, and the sign of the hinge moment.
 * B. Etkin and L. D. Reid, Dynamics of Flight: Stability and Control,
   3rd ed., Wiley, 1996: the hinge-moment coefficient referred to the area
   and chord of the control aft of the hinge.
@@ -81,7 +84,7 @@ class HingeMoment:
     S_f : float
         Flap area aft of the hinge [m^2].
     c_f : float
-        Root-mean-square flap chord aft of the hinge [m].
+        Mean flap chord aft of the hinge, weighted by the flap area [m].
     n_strips : int
         Number of strips of this copy.
     """
@@ -201,14 +204,15 @@ def hinge_moments(result: SolverResult) -> list[HingeMoment]:
     legs are left out: the two legs of one horseshoe carry opposite
     vorticity over the same chordwise interval, so their moments about the
     hinge cancel except for the difference of the induced velocity at the
-    two legs. The hinge moment converges to first order in the number of
+    two legs. The hinge moment converges slowly with the number of
     chordwise panels (the thin-airfoil load is logarithmic at the hinge).
 
     Section mode: ``alpha_fp = alpha_eff - alpha_L0 - tau delta`` per strip,
     with ``alpha_L0`` the zero-lift angle of the deflected strip section and
     ``tau`` the flap effectiveness. In the linear range this is
-    ``Cl / a0 - tau delta``. The camber of the base section adds no hinge
-    moment in this model, and thin-airfoil theory does not hold past stall.
+    ``Cl / a0 - tau delta``. The camber of the base section enters only
+    through the strip lift, as the flat-plate angle ``-alpha_L0`` of the base
+    section; the hinge-moment term of the camber line itself is not modelled, and thin-airfoil theory does not hold past stall.
     """
     d = getattr(result, "details", None) or {}
     lattice = d.get("lattice")

@@ -100,7 +100,7 @@ result = vt.analyze(aircraft, vt.FlightCondition(V_inf=30.0, alpha=np.radians(4.
 print(f"CL = {result.totals.CL:.4f}, Cm = {result.totals.Cm:.4f}")
 ```
 
-The left half of a symmetric surface and a mirror copy get the mirror image of the displacements (y to -y). The reference values (`S_ref`, `b_ref`, `c_ref`) and the ground-effect height reference point stay on the undeformed geometry. The Fourier solver does not accept node displacements. The [theory chapter](../theory/vortex_lattice.md) gives the rules.
+The left half of a symmetric surface and a mirror copy get the mirror image of the displacements (y to -y). The reference values (`S_ref`, `b_ref`, `c_ref`) stay on the undeformed geometry. In ground effect the height is measured from `Aircraft.ref_point` (the default), or from `Aircraft.root_point` (`height_ref='qc'` or `'te'`), which is computed on the undeformed geometry; with `height_ref='min'` it is the height of the lowest deformed node. The Fourier solver does not accept node displacements. The [theory chapter](../theory/vortex_lattice.md) gives the rules.
 
 ## Save and load
 

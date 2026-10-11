@@ -508,8 +508,8 @@ class LiftingSurface:
     is_symmetric : bool
         If *True*, the surface is mirrored about the aircraft's xz-plane.
     position : np.ndarray
-        ``[x, y, z]`` offset of the surface root LE from the aircraft
-        reference point [m].
+        ``[x, y, z]`` offset of the surface root LE from the origin of the
+        geometry axes [m].
     incidence : float
         Surface incidence angle relative to the aircraft reference [rad].
         It is added to the section twist (rotation about the quarter chord).
@@ -956,7 +956,7 @@ class SolverSettings:
         ``"vlm"``: vortex-lattice method (lifting surface).
         ``"linear"``: linear lifting line (Phillips & Snyder).
         ``"nonlinear"``: nonlinear lifting line with section polars.
-        ``"fourier"``: classical Lanchester–Prandtl lifting line, Glauert's Fourier series (unswept planar wing).
+        ``"fourier"``: Lanchester–Prandtl lifting-line theory, Glauert's Fourier series (unswept planar wing).
         Old names (``"horseshoe"``, ``"lattice"``, ``"llt"``, ``"linear_llt"``)
         still work for now with a ``FutureWarning`` that names the new name.
     n_panels : int
@@ -1137,8 +1137,8 @@ class TrustScore:
     ----------
     score : float
         Composite trust score in [0.0, 1.0]. 1.0 indicates perfect adherence
-        to classical lifting-line assumptions; values < 0.4 indicate the flow
-        physics severely violate LLT assumptions.
+        to the assumptions of Lanchester–Prandtl lifting-line theory; values
+        < 0.4 indicate that the flow physics severely violate them.
     rating : Literal["HIGH", "MODERATE", "LOW", "UNRELIABLE"]
         Qualitative categorization of analysis validity.
     uncertainty_CL : float
