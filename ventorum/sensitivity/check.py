@@ -3,7 +3,7 @@
 
 The reference is Richardson-extrapolated central differences of the
 production solve with steps h and h/2, with the error estimate
-|FD(h) - FD(h/2)| / 3. A component is compared only where the estimate is
+abs(FD(h) - FD(h/2)) / 3. A component is compared only where the estimate is
 below 1/10 of the tolerance.
 """
 
@@ -56,8 +56,8 @@ def _richardson(get: Any, x0: float, h: float, outs: tuple[str, ...],
 
     Central differences with steps h and h/2 of the vector function *get*
     (a dict of outputs). The reference is (4 FD(h/2) - FD(h)) / 3, the
-    estimate |FD(h) - FD(h/2)| / 3, and the round-off level of the
-    differences eps * max|f| / h (*eps* is the machine epsilon of the
+    estimate abs(FD(h) - FD(h/2)) / 3, and the round-off level of the
+    differences eps * max(abs(f)) / h (*eps* is the machine epsilon of the
     production solve).
     """
     f_p_h = get(x0 + h)
@@ -144,22 +144,22 @@ def check_gradients(
     -----
     The reference of each component is the Richardson value of decision 10
     of the gradient method: central differences with steps h and h/2, with
-    the error estimate |FD(h) - FD(h/2)| / 3. The error bound of a
+    the error estimate abs(FD(h) - FD(h/2)) / 3. The error bound of a
     reference is the larger of the estimate and the round-off of the
     differences (machine epsilon of the production solve times the output
     magnitude over the step); with a step ladder, the spread to the
     Richardson value of the neighbour step joins the bound.
 
     * A component with an error bound below rtol/10 of its reference is
-      compared relatively: it passes when |grad - ref| <= rtol |ref|.
+      compared relatively: it passes when abs(grad - ref) <= rtol abs(ref).
     * The scale S of an input component is the largest resolved reference
       of the outputs for that input (else the largest output magnitude per
       unit input). A resolved component below rtol S has no relative scale
       of its own in the precision of the gradient (it is the difference of
-      larger terms); it passes when |grad - ref| <= rtol S (mode
+      larger terms); it passes when abs(grad - ref) <= rtol S (mode
       ``"column"``).
     * A component whose reference is zero within 10 times its error bound
-      is a zero derivative (for example dCL/drho). It passes when |grad|
+      is a zero derivative (for example dCL/drho). It passes when abs(grad)
       is below the larger of that bound and rtol S (mode ``"zero"``).
     * Every other component is skipped.
 

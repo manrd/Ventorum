@@ -541,7 +541,7 @@ class _TrefftzFn(torch.autograd.Function if _HAVE_TORCH else object):  # type: i
 
 
 def horseshoe_rows(backend: str, topo: Topology, P, N, a, b, a_te, b_te, d, rc2_src, tg_rc2, sign):  # type: ignore[no-untyped-def]
-    """Return the system rows ``A[i, col[j]] += sign[j] N[i] . v_ij`` (differentiable), shape (m, n_u)."""
+    """Return the system rows ``A[i, col[j]] += sign[j] dot(N[i], v_ij)`` (differentiable), shape (m, n_u)."""
     return _HorseshoeFn.apply(backend, topo, 0, P, N, a, b, a_te, b_te, d, rc2_src, tg_rc2, sign)
 
 
