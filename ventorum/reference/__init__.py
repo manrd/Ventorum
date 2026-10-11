@@ -21,3 +21,12 @@ from ventorum.reference.database import (  # noqa: F401
     load_case,
     load_database,
 )
+from ventorum.reference.derivatives import (  # noqa: F401
+    DERIVATIVE_AXES,
+    DERIVATIVE_COEFFICIENTS,
+    DERIVATIVE_UNITS,
+    DERIVATIVE_VARIABLES,
+    alpha_for_cl,
+    central_difference,
+    slope_fit,
+)

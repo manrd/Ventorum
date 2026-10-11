@@ -21,7 +21,8 @@ Tables of the TOML block:
   ``Cm``, ``CY``, ``Cl``, ``Cn``), ``alpha_deg`` [deg] (list), ``values``
   (list, same length), ``uncertainty`` (number or list, optional),
   ``uncertainty_kind`` (``absolute`` or ``relative``; required with
-  ``uncertainty``), ``moment_point`` (for moments; list of 3 values [m]),
+  ``uncertainty``), ``moment_point`` (for moments and moment derivatives;
+  list of 3 values [m]),
   ``h_m`` (optional list of heights [m], one for each point, each > 0),
   ``height_point`` (optional point [x, y, z] [m] whose height ``h_m`` gives;
   when missing, the height is the height of the moment reference point of
@@ -29,6 +30,30 @@ Tables of the TOML block:
   (``table`` or ``digitised``), ``digitising_error`` (required
   when digitised).
 * ``[quality]`` (optional): ``notes``.
+
+Derivative quantities, abscissas and slope entries:
+
+* ``quantity`` can also be a static derivative ``<C>_<v>``: ``<C>`` is
+  ``CL``, ``CD``, ``CY``, ``Cl``, ``Cm`` or ``Cn`` and ``<v>`` is ``alpha``
+  or ``beta`` (for example ``Cl_beta``). A derivative quantity needs
+  ``derivative_unit`` (``1/deg`` or ``1/rad``, the unit of the stored
+  values). A moment derivative needs ``moment_point``, and takes ``axes``
+  (``body``, ``stability`` or ``wind``; default ``stability``, as NACA
+  stability-tunnel data). ``derivative_unit`` and ``axes`` are refused on
+  other quantities.
+* A result has either ``alpha_deg`` (list) or ``CL`` (list of lift
+  coefficients). With ``CL``, the runner finds the angle of attack where
+  Ventorum gives that lift coefficient and evaluates the quantity there; a
+  lift coefficient beyond the Ventorum range of the alpha sweep is "not
+  reached", never extrapolated.
+* A slope entry has ``slope_of = "CL"``, ``CL_range = [lo, hi]`` (lo < hi)
+  and exactly one value: the slope d(quantity)/dCL over that range. It has
+  no ``alpha_deg`` or ``CL`` list. For a derivative quantity,
+  ``derivative_unit`` is the unit of the quantity (for example
+  d(Cl_beta [1/deg])/dCL).
+* Signs follow Ventorum: Cl > 0 right wing down, beta > 0 for wind from the
+  right. A source in yaw angle psi = -beta stores the converted value and
+  says so in the case text and in ``[quality] notes``.
 
 Grades: A is an experiment with stated uncertainty and documented
 corrections; B is an experiment without stated uncertainty, or high-order
@@ -41,6 +66,10 @@ with ``TODO``, lists of different lengths, an unknown quantity, a grade
 on a theory case, a ``h_m`` list with a length different from ``alpha_deg``,
 a ``h_m`` value that is not > 0, a ``height_point`` without 3 values, or a
 ``height_point`` without a ``h_m`` list, and names the file and the field.
+It also refuses a derivative quantity without ``derivative_unit``, an
+unknown derivative variable, a result with both ``alpha_deg`` and ``CL``, a
+slope entry with more than one value or without ``CL_range``, and a
+``CL_range`` with lo >= hi.
 """
 
 from __future__ import annotations
@@ -51,6 +80,16 @@ import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+
+from ventorum.reference.derivatives import (
+    DEFAULT_DERIVATIVE_AXES,
+    DERIVATIVE_AXES,
+    DERIVATIVE_COEFFICIENTS,
+    DERIVATIVE_UNITS,
+    DERIVATIVE_VARIABLES,
+    is_derivative,
+    split_derivative,
+)
 
 #: Quantities that a reference result can hold.
 QUANTITIES = ("CL", "CD", "CDi", "Cm", "CY", "Cl", "Cn")
@@ -78,11 +117,15 @@ class ResultEntry:
     Parameters
     ----------
     quantity : str
-        One of ``CL``, ``CD``, ``CDi``, ``Cm``, ``CY``, ``Cl``, ``Cn``.
+        One of ``CL``, ``CD``, ``CDi``, ``Cm``, ``CY``, ``Cl``, ``Cn``, or a
+        derivative quantity ``<C>_<v>`` with ``<C>`` in ``CL``, ``CD``,
+        ``CY``, ``Cl``, ``Cm``, ``Cn`` and ``<v>`` in ``alpha``, ``beta``.
     alpha_deg : list[float]
-        Angles of attack [deg].
+        Angles of attack [deg]. Empty when the result uses the ``CL``
+        abscissa or is a slope entry.
     values : list[float]
-        Reference values at ``alpha_deg``.
+        Reference values at ``alpha_deg`` (or at ``CL``; one value for a
+        slope entry).
     abs_uncertainty : list[float] or None
         Absolute uncertainty of each value (relative uncertainties are
         converted with ``abs(value)``). None when the source states none.
@@ -100,6 +143,21 @@ class ResultEntry:
         Point [x, y, z] of the model in metres whose height ``h_m`` gives.
         None means the moment reference point of the solve (``moment_point``
         when the result has one, else ``Aircraft.ref_point``).
+    derivative_unit : str or None
+        Unit of the stored values of a derivative quantity: ``"1/deg"`` or
+        ``"1/rad"``. For a slope entry it is the unit of the quantity, for
+        example d(Cl_beta [1/deg])/dCL. None for other quantities.
+    axes : str or None
+        Axes of a moment derivative: ``"body"``, ``"stability"`` (default)
+        or ``"wind"``. None for quantities that are not derivatives.
+    CL : list[float] or None
+        Lift coefficients of the points (the abscissa instead of
+        ``alpha_deg``). None when the result uses ``alpha_deg``.
+    slope_of : str or None
+        ``"CL"`` for a slope entry: the single value is the slope
+        d(quantity)/dCL over ``CL_range``. None otherwise.
+    CL_range : list[float] or None
+        Lift range [lo, hi] of a slope entry (lo < hi).
     """
 
     quantity: str = "CL"
@@ -111,6 +169,11 @@ class ResultEntry:
     moment_point: list[float] | None = None
     h_m: list[float] | None = None
     height_point: list[float] | None = None
+    derivative_unit: str | None = None
+    axes: str | None = None
+    CL: list[float] | None = None
+    slope_of: str | None = None
+    CL_range: list[float] | None = None
 
 
 @dataclass(slots=True)
@@ -234,17 +297,88 @@ def _parse_result(data: Any, index: int, name: str) -> ResultEntry:
     if not isinstance(data, dict):
         raise _fail(name, where, f"must be a table, got {data!r}")
     quantity = _required(data, "quantity", where, name)
-    if quantity not in QUANTITIES:
+    derivative = is_derivative(quantity)
+    if quantity not in QUANTITIES and not derivative:
+        parts = split_derivative(quantity)
+        if parts is not None and parts[0] in DERIVATIVE_COEFFICIENTS:
+            raise _fail(
+                name,
+                f"{where}.quantity",
+                f"unknown variable {parts[1]!r} in quantity {quantity!r} "
+                f"(allowed: {', '.join(DERIVATIVE_VARIABLES)})",
+            )
         raise _fail(name, f"{where}.quantity", f"unknown quantity {quantity!r}")
-    alpha = _number_list(_required(data, "alpha_deg", where, name), f"{where}.alpha_deg", name)
+    derivative_unit = None
+    axes = None
+    if derivative:
+        derivative_unit = _required(data, "derivative_unit", where, name)
+        if derivative_unit not in DERIVATIVE_UNITS:
+            raise _fail(
+                name,
+                f"{where}.derivative_unit",
+                f"must be one of {list(DERIVATIVE_UNITS)}, got {derivative_unit!r}",
+            )
+        axes = data.get("axes", DEFAULT_DERIVATIVE_AXES)
+        if axes not in DERIVATIVE_AXES:
+            raise _fail(name, f"{where}.axes", f"must be one of {list(DERIVATIVE_AXES)}, got {axes!r}")
+    else:
+        for key in ("derivative_unit", "axes"):
+            if key in data and data[key] is not None:
+                raise _fail(name, f"{where}.{key}", "is only for derivative quantities <C>_<v>")
     values = _number_list(_required(data, "values", where, name), f"{where}.values", name)
-    if len(alpha) != len(values):
-        raise _fail(
-            name,
-            where,
-            f"lists of different lengths: 'alpha_deg' has {len(alpha)} values, "
-            f"'values' has {len(values)} values",
-        )
+    has_alpha = "alpha_deg" in data and data["alpha_deg"] is not None
+    has_cl = "CL" in data and data["CL"] is not None
+    alpha: list[float] = []
+    cl_list = None
+    slope_of = None
+    cl_range = None
+    if "slope_of" in data and data["slope_of"] is not None:
+        slope_of = data["slope_of"]
+        if slope_of != "CL":
+            raise _fail(name, f"{where}.slope_of", f"must be 'CL', got {slope_of!r}")
+        if has_alpha or has_cl:
+            raise _fail(
+                name,
+                where,
+                "a slope entry ('slope_of') takes no 'alpha_deg' or 'CL' list: it uses 'CL_range'",
+            )
+        cl_range = _number_list(_required(data, "CL_range", where, name), f"{where}.CL_range", name)
+        if len(cl_range) != 2:
+            raise _fail(name, f"{where}.CL_range", "must hold 2 values [lo, hi]")
+        if cl_range[0] >= cl_range[1]:
+            raise _fail(
+                name, f"{where}.CL_range", f"lo must be < hi, got [{cl_range[0]:g}, {cl_range[1]:g}]"
+            )
+        if len(values) != 1:
+            raise _fail(
+                name,
+                f"{where}.values",
+                f"a slope entry holds exactly one value, got {len(values)} values",
+            )
+        n_points = 1
+        points_key = "values"
+    else:
+        if "CL_range" in data and data["CL_range"] is not None:
+            raise _fail(name, f"{where}.CL_range", "present without 'slope_of'")
+        if has_alpha and has_cl:
+            raise _fail(name, where, "give either 'alpha_deg' or 'CL', not both")
+        if has_cl:
+            cl_list = _number_list(data["CL"], f"{where}.CL", name)
+            abscissa_key, abscissa = "CL", cl_list
+        else:
+            if not has_alpha:
+                raise _fail(name, f"{where}.alpha_deg", "missing required field (give 'alpha_deg' or 'CL')")
+            alpha = _number_list(data["alpha_deg"], f"{where}.alpha_deg", name)
+            abscissa_key, abscissa = "alpha_deg", alpha
+        if len(abscissa) != len(values):
+            raise _fail(
+                name,
+                where,
+                f"lists of different lengths: '{abscissa_key}' has {len(abscissa)} values, "
+                f"'values' has {len(values)} values",
+            )
+        n_points = len(values)
+        points_key = abscissa_key
     extraction = _required(data, "extraction", where, name)
     if extraction not in ("table", "digitised"):
         raise _fail(name, f"{where}.extraction", f"must be 'table' or 'digitised', got {extraction!r}")
@@ -256,7 +390,10 @@ def _parse_result(data: Any, index: int, name: str) -> ResultEntry:
     elif "digitising_error" in data and data["digitising_error"] is not None:
         digitising_error = _number(data["digitising_error"], f"{where}.digitising_error", name, minimum=0.0)
     moment_point = None
-    if quantity in MOMENT_QUANTITIES:
+    moment_quantity = quantity in MOMENT_QUANTITIES or (
+        derivative and split_derivative(quantity)[0] in MOMENT_QUANTITIES
+    )
+    if moment_quantity:
         raw = _required(data, "moment_point", where, name)
         moment_point = _number_list(raw, f"{where}.moment_point", name)
         if len(moment_point) != 3:
@@ -269,12 +406,12 @@ def _parse_result(data: Any, index: int, name: str) -> ResultEntry:
     h_m = None
     if "h_m" in data and data["h_m"] is not None:
         h_m = _number_list(data["h_m"], f"{where}.h_m", name)
-        if len(h_m) != len(alpha):
+        if len(h_m) != n_points:
+            first = f"'{points_key}' has {n_points} values" if slope_of is None else "a slope entry has 1 value"
             raise _fail(
                 name,
                 where,
-                f"lists of different lengths: 'alpha_deg' has {len(alpha)} values, "
-                f"'h_m' has {len(h_m)} values",
+                f"lists of different lengths: {first}, 'h_m' has {len(h_m)} values",
             )
         for i, h in enumerate(h_m):
             if h <= 0.0:
@@ -314,6 +451,11 @@ def _parse_result(data: Any, index: int, name: str) -> ResultEntry:
         moment_point=moment_point,
         h_m=h_m,
         height_point=height_point,
+        derivative_unit=derivative_unit,
+        axes=axes,
+        CL=cl_list,
+        slope_of=slope_of,
+        CL_range=cl_range,
     )
 
 
@@ -338,8 +480,11 @@ def load_case(path: str | Path) -> ReferenceCase:
         different lengths, the quantity is unknown, a theory case has a
         grade, a ``h_m`` list has a length different from ``alpha_deg`` or a
         value that is not > 0, ``height_point`` has not 3 values, or
-        ``height_point`` is present without a ``h_m`` list. The message
-        names the file and the field.
+        ``height_point`` is present without a ``h_m`` list. Also if a
+        derivative quantity has no ``derivative_unit``, a derivative
+        variable is unknown, a result has both ``alpha_deg`` and ``CL``, a
+        slope entry has more than one value or no ``CL_range``, or
+        ``CL_range`` has lo >= hi. The message names the file and the field.
     """
     from ventorum.agent.schemas import build_aircraft_from_spec
 
