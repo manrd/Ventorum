@@ -26,7 +26,7 @@ The criterion applies when the pivot is the centre of gravity.
 References
 ----------
 * R. D. Irodov, "Criteria of longitudinal stability of ekranoplan",
-  Uchenye Zapiski TsAGI 1(4), 1970, pp. 63-74 (in Russian); English machine
+  Uchenye Zapiski TsAGI 1(4), 1970, pp. 63-72 (in Russian); English machine
   translation, Foreign Technology Division, 1974, DTIC AD-A002918.
 * K. V. Rozhdestvensky, "Wing-in-ground effect vehicles", Progress in
   Aerospace Sciences 42, 2006, pp. 211-283: the pitch and height
@@ -208,8 +208,9 @@ def height_derivatives(
         Solver settings (default: :class:`SolverSettings`). The solvers
         ``"vlm"``, ``"linear"`` and ``"nonlinear"`` are accepted; the
         Fourier solver has no ground effect and is refused. With
-        ``n_chord=None`` all the cases use the chordwise count of the case
-        with the smallest gap to the ground.
+        ``n_chord=None`` all the cases use the largest automatic chordwise
+        count of the nine cases (normally that of the case with the smallest
+        gap to the ground).
     h_step : float
         Height step as a fraction of the smallest clearance of the base
         state [-], in (0, 0.5]. Default 0.05.

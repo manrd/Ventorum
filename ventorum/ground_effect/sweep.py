@@ -24,7 +24,7 @@ margin changes when that point moves. Give the centre of gravity as the
 moment reference point.
 
 (R. D. Irodov, "Criteria of longitudinal stability of ekranoplan", Uchenye
-Zapiski TsAGI 1(4), 1970, pp. 63-74, in Russian; English machine
+Zapiski TsAGI 1(4), 1970, pp. 63-72, in Russian; English machine
 translation, Foreign Technology Division, 1974, DTIC AD-A002918. See also
 K. V. Rozhdestvensky, "Wing-in-ground effect vehicles", Progress in
 Aerospace Sciences 42, 2006, pp. 211-283.)

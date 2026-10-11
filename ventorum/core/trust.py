@@ -21,7 +21,7 @@ known to be weak. The rules depend on the method:
   E. C. Polhamus, "A concept of the vortex lift of sharp-edge delta wings
   based on a leading-edge-suction analogy", NASA TN D-3767, 1966;
   J. E. Lamar, "Extension of leading-edge-suction analogy to wings with
-  separated flow around side edges at subsonic speeds", NASA TR R-428,
+  separated flow around the side edges at subsonic speeds", NASA TR R-428,
   1974.
 
 The uncertainty values (``uncertainty_CL`` and the others) are heuristic
@@ -89,8 +89,8 @@ def near_far_lateral_warnings(
     floor (0.001 for CY, 0.0002 for Cn). A pair with a None or a non-finite
     value gives no warning.
 
-    The Cn pair is compared only when the side force is below the CY floor
-    (near and far field). The Trefftz plane has no chordwise position, so
+    The Cn pair is compared only when each available (finite) side force,
+    near and far field, is at or below the CY floor. The Trefftz plane has no chordwise position, so
     ``Cn_trefftz`` does not contain the yawing moment of a side force that
     acts ahead of or behind the reference point; with a side force the two
     Cn values differ for that reason alone.

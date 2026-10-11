@@ -198,12 +198,12 @@ class ErrorBar:
         Coefficient name (``"CL"``, ``"CD"``, ``"CY"``, ``"Cl"``,
         ``"Cm"`` or ``"Cn"``).
     value : float
-        Coefficient value on the fine mesh (f1). The combined bar uses
+        Coefficient value [-] on the fine mesh (f1). The combined bar uses
         the fine-level value of layer 1.
     interval_low : float or None
-        Lower bound of the interval, or None without an interval.
+        Lower bound of the interval [-], or None without an interval.
     interval_high : float or None
-        Upper bound of the interval, or None without an interval.
+        Upper bound of the interval [-], or None without an interval.
     status : str
         One of ``STATUS_VALUES``. Layer 1 sets ``"numerical_only"``,
         layer 2 sets ``"input_only"`` and the combination sets
@@ -218,7 +218,7 @@ class ErrorBar:
     input_shares : dict[str, float]
         Share of each input in the input-uncertainty variance ``u_c^2``
         (layer 2 only; empty without an input layer). The shares sum to 1
-        for independent inputs.
+        when ``u_c > 0``; with correlations a share can be negative.
     gradient_methods : dict[str, str]
         Gradient method of each input (layer 2 only; empty without an
         input layer): ``"adjoint"`` or ``"central differences"``.
@@ -425,15 +425,15 @@ def observed_order(
     Parameters
     ----------
     f1 : float
-        Fine-level value.
+        Fine-level coefficient value [-].
     f2 : float
-        Medium-level value.
+        Medium-level coefficient value [-].
     f3 : float
-        Coarse-level value.
+        Coarse-level coefficient value [-].
     r21 : float
-        Refinement ratio of fine to medium (N1 / N2).
+        Refinement ratio of fine to medium (N1 / N2) [-].
     r32 : float
-        Refinement ratio of medium to coarse (N2 / N3).
+        Refinement ratio of medium to coarse (N2 / N3) [-].
 
     Returns
     -------
@@ -494,13 +494,13 @@ def richardson_extrapolate(f1: float, f2: float, r21: float, p_used: float) -> f
     Parameters
     ----------
     f1 : float
-        Fine-level value.
+        Fine-level coefficient value [-].
     f2 : float
-        Medium-level value.
+        Medium-level coefficient value [-].
     r21 : float
-        Refinement ratio of fine to medium (N1 / N2).
+        Refinement ratio of fine to medium (N1 / N2) [-].
     p_used : float
-        Order used in the extrapolation.
+        Order used in the extrapolation [-].
 
     Returns
     -------

@@ -3,7 +3,7 @@
 
 First-order (linear) propagation of uncertainty, the law of propagation
 of uncertainty of the GUM (JCGM 100:2008, section 5.1, equation 10 for
-independent inputs and equation 13 with correlations): ``u_c(f)^2 = J U J^T``
+independent inputs and equation 13 of section 5.2 with correlations): ``u_c(f)^2 = J U J^T``
 with ``J`` the gradient of the coefficient with respect to the inputs and
 ``U`` the covariance matrix of the inputs. The expanded half-width is
 ``k u_c`` with the coverage factor ``k`` (default 2, GUM section 6).
@@ -13,14 +13,16 @@ of squares of independent contributions follows Oberkampf and Roy (2010).
 The gradients come from ``ventorum.gradients`` (discrete adjoint) when
 the configuration is in its scope. Outside its scope the flow-input
 gradients come from central differences of the production solve; section
-inputs are then refused. The device and the precision of the production
-solve are used; no CPU or float64 forcing applies.
+inputs are then refused. The adjoint runs on the device of the production
+solve, with the precision of ``ventorum.gpu.get_precision()``; the CPU
+kernels evaluate the O(n^2) partials in float64. The central differences
+use the production solve itself.
 
 References
 ----------
 JCGM 100:2008 (GUM), Evaluation of measurement data: Guide to the
 expression of uncertainty in measurement, Joint Committee for Guides in
-Metrology, 2008, sections 5.1 and 6.
+Metrology, 2008, sections 5.1, 5.2 and 6.
 W. L. Oberkampf and C. J. Roy, Verification and Validation in
 Scientific Computing, Cambridge University Press, 2010.
 """
@@ -376,7 +378,7 @@ def input_error_bars(
     inputs and of the linear section properties through the gradients of
     the six force and moment coefficients (CL, CD, CY, Cl, Cm, Cn):
     ``u_c(f)^2 = J U J^T`` (GUM JCGM 100:2008, section 5.1, equation 10
-    for independent inputs and equation 13 with correlations). CD is
+    for independent inputs and equation 13 of section 5.2 with correlations). CD is
     CDi + CDp as in ``gradients``. The expanded half-width is
     ``k u_c`` with the coverage factor ``k`` (default 2, GUM section 6).
 

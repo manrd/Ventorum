@@ -36,7 +36,7 @@ print(hd.device, hd.n_solves, hd.n_chord)
 ## Steps and mesh
 
 - Central differences with the steps `alpha_step_deg=0.5`, `beta_step_deg=1.0`, `phi_step_deg=0.5` and `h_step=0.05` (a fraction of the smallest clearance of the base state). `hd.steps` gives the steps used.
-- All nine cases are solved as one batch on one mesh. With `n_chord=None`, all cases use the chordwise count of the case with the smallest gap.
+- All nine cases are solved as one batch on one mesh. With `n_chord=None`, all cases use the largest automatic chordwise count of the nine cases (normally the count of the case with the smallest gap).
 - A case that touches the ground stops the function with `GroundStrikeError`; the message names the case. Use smaller steps or a larger height.
 - The solves run on the selected device; `hd.device` and `hd.precision` say which.
 

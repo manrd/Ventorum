@@ -55,7 +55,7 @@ The trace is the trace of the induced drag. A deflected control turns the panel 
 
 The Trefftz plane has no chordwise position. A side force that acts at a chordwise distance from the reference point gives a near-field yawing moment that `Cn_trefftz` does not contain, so in sideslip the two yawing moments can differ for this reason too.
 
-**Trust warning.** The near-field `CY` (already relative to the free stream) and the near-field `Cn`, expressed in stability axes, are compared with the far-field values. The result gets a warning when $|\text{near}-\text{far}| > 0.05\,|\text{far}|$ and $|\text{near}-\text{far}|$ is larger than a floor: 0.001 for `CY` and 0.0002 for `Cn`. The `Cn` pair is compared only when the near-field and the far-field side forces are both below the `CY` floor, because of the missing chordwise arm described above. A probable cause of a difference is the side-edge forces that the transpiration model does not carry (see *In-plane edge forces* above). The warning does not change the score.
+**Trust warning.** The near-field `CY` (already relative to the free stream) and the near-field `Cn`, expressed in stability axes, are compared with the far-field values. The result gets a warning when $|\text{near}-\text{far}| > 0.05\,|\text{far}|$ and $|\text{near}-\text{far}|$ is larger than a floor: 0.001 for `CY` and 0.0002 for `Cn`. The `Cn` pair is compared only when each available (finite) side force, near and far, is at or below the `CY` floor, because of the missing chordwise arm described above. A probable cause of a difference is the side-edge forces that the transpiration model does not carry (see *In-plane edge forces* above). The warning does not change the score.
 
 ## Section quantities
 
@@ -103,7 +103,7 @@ The function `derivative_matrix` combines the static, control, rate, and height 
 The matrix has six fixed rows: $C_L, C_D, C_Y, C_l, C_m, C_n$.
 
 The columns follow group order:
-1. Static variables: $\alpha$ and $\beta$. In ground effect, $\phi$ and $h/c_\text{ref}$ follow.
+1. Static variables: $\alpha$ and $\beta$. With the height group (ground effect only), $\phi$ and $h/c_\text{ref}$ follow.
 2. Control deflections: $\delta_k$ for each control name.
 3. Nondimensional rates: $\hat{p} = p b / (2 V)$, $\hat{q} = q c / (2 V)$, $\hat{r} = r b / (2 V)$.
 
@@ -159,5 +159,5 @@ Thus every column equals the result of its source function (`static_derivatives`
 - J. Katz and A. Plotkin, *Low-Speed Aerodynamics*, 2nd ed., Cambridge University Press, 2001, chapters 8 and 12.
 - M. Drela, *Flight Vehicle Aerodynamics*, MIT Press, 2014, chapter 5.
 - A. Goodman and J. D. Brewer, "Investigation at low speeds of the effect of aspect ratio and sweep on static and yawing stability derivatives of untapered wings", NACA TN 1669, 1948.
-- *USAF Stability and Control DATCOM*, Air Force Flight Dynamics Laboratory, Wright-Patterson Air Force Base, section 6.2.3 (side force due to asymmetric deflection of control devices).
+- R. D. Finck, *USAF Stability and Control DATCOM*, McDonnell Douglas Corporation for the Air Force Flight Dynamics Laboratory, Wright-Patterson Air Force Base, revised 1978 (AFWAL-TR-83-3048), section 6.2.3 (side force due to asymmetric deflection of control devices).
 - W. F. Phillips and D. O. Snyder, "Modern adaptation of Prandtl's classic lifting-line theory", *Journal of Aircraft* 37(4), 2000, pp. 662-670.

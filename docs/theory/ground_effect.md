@@ -43,9 +43,9 @@ The vortex lattice selects the chordwise panel count from the gap (see [Vortex-l
 
 `GroundEffectSweep` solves a grid of heights $h$, angles of attack $\alpha$ and bank angles $\phi$. `GroundEffectSweepResult.compute_stability_derivatives` gives:
 
-- $C_{L\alpha}$, $C_{m\alpha}$ [1/rad] at each height, from a least-squares line over the angles of the grid with $|\alpha| \le$ 8 deg at $\phi = 0$, and the aerodynamic centre $x_{ac} = -c\,C_{m\alpha}/C_{L\alpha}$ [m] aft of the reference point. These are at constant height of the `height_ref` point, without the chain-rule correction below; thus $x_{ac}$ can differ from $x_\alpha$.
+- $C_{L\alpha}$, $C_{m\alpha}$ [1/rad] at each height, from a least-squares line over the angles of the grid with $|\alpha| \le$ 8 deg at the bank angle of the grid nearest to 0 (with fewer than two angles in this window, all angles of the grid), and the aerodynamic centre $x_{ac} = -c\,C_{m\alpha}/C_{L\alpha}$ [m] aft of the reference point. These are at constant height of the `height_ref` point, without the chain-rule correction below; thus $x_{ac}$ can differ from $x_\alpha$.
 - $C_{Lh} = \partial C_L/\partial(h/c)$ and $C_{mh} = \partial C_m/\partial(h/c)$ at constant $\alpha$, by finite differences on the height grid (`numpy.gradient`: second-order central differences inside, first-order one-sided differences at the end points).
-- $C_{l\phi}$, $C_{n\phi}$, $C_{Y\phi}$ [1/rad] from a least-squares line over the bank angles with $|\phi| \le$ 5 deg, at the angle of attack of the grid nearest to 4 deg. A bank-restoring rolling moment has $C_{l\phi} < 0$; $C_l$ and $C_n$ are in the stability axes.
+- $C_{l\phi}$, $C_{n\phi}$, $C_{Y\phi}$ [1/rad] from a least-squares line over the bank angles with $|\phi| \le$ 5 deg (with fewer than two bank angles in this window, all bank angles of the grid), at the angle of attack of the grid nearest to 4 deg. A bank-restoring rolling moment has $C_{l\phi} < 0$; $C_l$ and $C_n$ are in the stability axes.
 
 ### Irodov criterion
 
@@ -76,7 +76,7 @@ The criterion applies to the derivatives about the centre of gravity: the pitch 
 \frac{\partial C}{\partial v} \approx \frac{C(v + \Delta v) - C(v - \Delta v)}{2\,\Delta v}, \qquad C = C_L, C_D, C_Y, C_l, C_m, C_n .
 ```
 
-The pivot keeps its height in every case. A change of $\alpha$ or $\phi$ turns the ground about the pivot (the ground plane above, with the offset $o$ from the height of the pivot), and a change of $h$ moves the ground along $\hat{\mathbf k}$ at constant attitude. The derivatives are thus the partial derivatives of the Irodov criterion, about the pivot, and the criterion follows from the same matrix. The height step is a fraction of the smallest clearance $h_\text{min}$ of the base state (default $0.05\,h_\text{min}$): the ground effect varies with the gap, so the relative truncation error of the central difference is about $(\Delta h/h_\text{min})^2/6$ for a load that varies as $1/h_\text{min}$. The angle steps are 0.5 deg ($\alpha$, $\phi$) and 1 deg ($\beta$). All nine cases are solved as one batch on one lattice; with an automatic chordwise count, all cases use the count of the case with the smallest gap.
+The pivot keeps its height in every case. A change of $\alpha$ or $\phi$ turns the ground about the pivot (the ground plane above, with the offset $o$ from the height of the pivot), and a change of $h$ moves the ground along $\hat{\mathbf k}$ at constant attitude. The derivatives are thus the partial derivatives of the Irodov criterion, about the pivot, and the criterion follows from the same matrix. The height step is a fraction of the smallest clearance $h_\text{min}$ of the base state (default $0.05\,h_\text{min}$): the ground effect varies with the gap, so the relative truncation error of the central difference is about $(\Delta h/h_\text{min})^2$ for a load that varies as $1/h_\text{min}$ (the central difference of $1/h$ is $-1/(h^2 - \Delta h^2)$). The angle steps are 0.5 deg ($\alpha$, $\phi$) and 1 deg ($\beta$). All nine cases are solved as one batch on one lattice; with an automatic chordwise count, all cases use the largest automatic count of the nine cases (normally the count of the case with the smallest gap).
 
 The bank and height columns give the coupling of the height with the roll motion: at $\phi \neq 0$ the two tips have different gaps, so $C_{lh}$, $C_{nh}$ and $C_{Yh}$ are not zero, and $C_{l\phi}$ is the ground-effect roll stiffness at constant height of the pivot. At $\phi = 0$ and $\beta = 0$ the flow is symmetric: the lateral coefficients do not change with $\alpha$ and $h$, and the longitudinal coefficients are even functions of $\beta$ and $\phi$.
 
@@ -101,7 +101,7 @@ The moment rows in the stability or wind axes turn the dimensional moments with 
 
 - `ventorum.aero.system`: `ground_normal`, `GroundPlane`, `make_ground_plane`, `build_sources` (image horseshoes), `check_ground_clearance`.
 - `ventorum.aero.loads.trefftz_induced_drag_batch` (image wake in the Trefftz plane).
-- `ventorum.ground_effect.analyze_ground_effect`, `find_bank_strike_limit`, `clearance_info`. The result also gives the force coefficient along the ground normal (`vertical_force_coefficient`), the body-axis force coefficients, and $C_l$ and $C_n$ in the stability axes.
+- `ventorum.ground_effect.analyze_ground_effect`; `ventorum.ground_effect.solver.find_bank_strike_limit` and `clearance_info`. The result also gives the force coefficient along the ground normal (`vertical_force_coefficient`), the body-axis force coefficients, and $C_l$ and $C_n$ in the stability axes.
 - `ventorum.ground_effect.GroundEffectSweep`, `GroundEffectSweepResult.compute_stability_derivatives`.
 - `ventorum.height_derivatives` (`ventorum/solvers/height_derivatives.py`): the derivative matrix and the Irodov terms of one state.
 
@@ -109,7 +109,7 @@ The moment rows in the stability or wind axes turn the dimensional moments with 
 
 - [V7](../verification_report.md): zero normal velocity on a tilted and banked plane; the free-air limit at large height; chordwise convergence of the vortex lattice; lifting line against the vortex lattice.
 - Tests compare an explicit mirror wing with the image method, and the Irodov terms with direct differences.
-- `tests/test_height_derivatives.py`: the derivatives of one state against single solves and against the sweep; the chain rule of the $lpha$ derivative between two pivots; symmetry; the free-air limit; the axes transform with the reference lengths; the GPU path.
+- `tests/test_height_derivatives.py`: the derivatives of one state against single solves and against the sweep; the chain rule of the $\alpha$ derivative between two pivots; symmetry; the free-air limit; the axes transform with the reference lengths; the GPU path.
 
 ## References
 
@@ -117,4 +117,4 @@ The moment rows in the stability or wind axes turn the dimensional moments with 
 - J. Katz and A. Plotkin, *Low-Speed Aerodynamics*, 2nd ed., Cambridge University Press, 2001 (method of images).
 - K. V. Rozhdestvensky, *Aerodynamics of a Lifting System in Extreme Ground Effect*, Springer, 2000.
 - K. V. Rozhdestvensky, "Wing-in-ground effect vehicles", *Progress in Aerospace Sciences* 42, 2006, pp. 211-283.
-- R. D. Irodov, "Criteria of longitudinal stability of ekranoplan", *Uchenye Zapiski TsAGI* 1(4), 1970, pp. 63-74 (in Russian); English machine translation "Criteria of the longitudinal stability of the ekranoplan", Foreign Technology Division, 1974, DTIC AD-A002918.
+- R. D. Irodov, "Criteria of longitudinal stability of ekranoplan", *Uchenye Zapiski TsAGI* 1(4), 1970, pp. 63-72 (in Russian); English machine translation "Criteria of the longitudinal stability of the ekranoplan", Foreign Technology Division, 1974, DTIC AD-A002918.
