@@ -292,7 +292,7 @@ def _measure_gpu(quick: bool, say) -> tuple[dict[str, Any], dict[str, Any]]:
         return {"available": False, "reason": gpu.unavailable_reason()}, {}
     old_dev, old_prec = gpu.get_device(), gpu._precision
     precision = gpu.get_precision()
-    solvers = {"vlm": vt.HorseshoeSolver, "linear": vt.LinearLLTSolver, "nonlinear": vt.NonlinearSolver}
+    solvers = {"vlm": vt.VortexLatticeSolver, "linear": vt.LinearLLTSolver, "nonlinear": vt.NonlinearLLTSolver}
     rows = []
     model: dict[str, dict[str, Any]] = {}
     try:

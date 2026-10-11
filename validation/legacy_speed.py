@@ -207,21 +207,21 @@ def solve_cases() -> str:
         ("Fourier lifting line", legacy_case(L.FourierSolver, "fourier"),
          core_case(vt.FourierSolver, "fourier"), "same model"),
         ("horseshoe (legacy) / VLM, 1 chordwise panel (core)", legacy_case(L.HorseshoeSolver, "horseshoe"),
-         core_case(vt.HorseshoeSolver, "vlm", n_chord=1), "legacy has known defects"),
+         core_case(vt.VortexLatticeSolver, "vlm", n_chord=1), "legacy has known defects"),
         ("horseshoe (legacy) / VLM, 4 chordwise panels (core)", legacy_case(L.HorseshoeSolver, "horseshoe"),
-         core_case(vt.HorseshoeSolver, "vlm", n_chord=4), "legacy has known defects"),
+         core_case(vt.VortexLatticeSolver, "vlm", n_chord=4), "legacy has known defects"),
         ("nonlinear lifting line (tabulated polar)", legacy_case(L.NonlinearSolver, "nonlinear", tab=True),
-         core_case(vt.NonlinearSolver, "nonlinear", tab=True), "legacy gives about half the lift"),
+         core_case(vt.NonlinearLLTSolver, "nonlinear", tab=True), "legacy gives about half the lift"),
     ]
     if HAS_TORCH:
         dev = "cuda" if L.has_cuda() else "cpu"
         pairs += [
             (f"GPU horseshoe on {dev} (legacy) / VLM, 1 chordwise panel (core)",
              legacy_case(L.GPUHorseshoeSolver, "horseshoe", device=dev),
-             core_case(vt.HorseshoeSolver, "vlm", n_chord=1), "legacy has known defects"),
+             core_case(vt.VortexLatticeSolver, "vlm", n_chord=1), "legacy has known defects"),
             (f"GPU nonlinear on {dev} (legacy) / nonlinear lifting line (core)",
              legacy_case(L.GPUNonlinearSolver, "nonlinear", tab=True, device=dev),
-             core_case(vt.NonlinearSolver, "nonlinear", tab=True), "legacy gives about half the lift"),
+             core_case(vt.NonlinearLLTSolver, "nonlinear", tab=True), "legacy gives about half the lift"),
         ]
     rows = []
     for name, (l1, ls), (c1, cs), note in pairs:

@@ -91,5 +91,11 @@ class LinearLLTSolver(LatticeSolver):
         return [(g, None, info) for g, info in sols]
 
 
-# Alias for convenience
-LinearSolver = LinearLLTSolver
+def __getattr__(name: str):
+    """Return the old class name with a deprecation warning."""
+    if name == "LinearSolver":
+        from ventorum.utils.deprecation import warn_deprecated_class
+
+        warn_deprecated_class("LinearSolver", "LinearLLTSolver")
+        return LinearLLTSolver
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

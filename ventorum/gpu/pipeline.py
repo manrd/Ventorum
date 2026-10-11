@@ -174,7 +174,7 @@ def _nonlinear(solver, engine, dl, md, cs, lattice, conditions, settings, ground
     then (a different root, no convergence, or the last few slow cases that
     the GPU hands over) are solved on the CPU, in order, each from the
     solution of the case before it, with the restarts of
-    :meth:`ventorum.solvers.nonlinear.NonlinearSolver.solve_circulation`.
+    :meth:`ventorum.solvers.nonlinear.NonlinearLLTSolver.solve_circulation`.
     """
     import torch
 

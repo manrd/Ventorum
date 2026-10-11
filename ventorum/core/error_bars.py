@@ -785,13 +785,13 @@ def numerical_error_bars(
 
     frozen_chord: int | None = None
     if canonical == "vlm" and base.n_chord is None:
-        from ventorum.solvers.horseshoe import HorseshoeSolver
+        from ventorum.solvers.horseshoe import VortexLatticeSolver
 
         fine_aircraft = _level_aircraft(aircraft, levels[0], n1)
         probe = base.clone()
         probe.n_panels = levels[0]
         frozen_chord = int(
-            HorseshoeSolver().resolve_n_chord(
+            VortexLatticeSolver().resolve_n_chord(
                 fine_aircraft, probe, cond, None, fine_aircraft.moment_reference()
             )
         )

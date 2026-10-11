@@ -57,6 +57,41 @@ def warn_solver_alias(solver_name: str | None) -> str:
     return canonical
 
 
+#: Old solver class names that still work. Each maps to its canonical class name.
+DEPRECATED_CLASS_NAMES = {
+    "HorseshoeSolver": "VortexLatticeSolver",
+    "LinearSolver": "LinearLLTSolver",
+    "NonlinearSolver": "NonlinearLLTSolver",
+}
+
+
+def warn_deprecated_class(old_name: str, new_name: str) -> None:
+    """Warn for an old solver class name.
+
+    Parameters
+    ----------
+    old_name : str
+        Old class name used by the caller.
+    new_name : str
+        Canonical class name to use instead.
+    """
+    message = (
+        f"{old_name} is deprecated; use {new_name}. "
+        "The old name will be removed in version 1.0."
+    )
+    level = 2
+    frames = traceback.extract_stack()
+    for depth, frame in enumerate(reversed(frames[:-1]), start=2):
+        name = frame.filename.replace("\\", "/")
+        if "ventorum/utils/deprecation" in name:
+            continue
+        if "/ventorum/" in name or name.endswith("/ventorum.py"):
+            continue
+        level = depth
+        break
+    warnings.warn(message, FutureWarning, stacklevel=level)
+
+
 def canonical_settings(settings):
     """Warn for an old solver name and return settings with the canonical name.
 

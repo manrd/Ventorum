@@ -43,7 +43,7 @@ from ventorum.solvers.core import SolveInfo, solve_vlm, solve_vlm_batch
 from ventorum.solvers.lattice_base import LatticeSolver
 
 
-class HorseshoeSolver(LatticeSolver):
+class VortexLatticeSolver(LatticeSolver):
     """Vortex-lattice method with linear section data (default solver)."""
 
     collocation = "vlm"
@@ -125,5 +125,11 @@ def _has_tabulated(lattice: VortexLattice) -> bool:
     return value
 
 
-# Clearer name for the same solver.
-VortexLatticeSolver = HorseshoeSolver
+def __getattr__(name: str):
+    """Return the old class name with a deprecation warning."""
+    if name == "HorseshoeSolver":
+        from ventorum.utils.deprecation import warn_deprecated_class
+
+        warn_deprecated_class("HorseshoeSolver", "VortexLatticeSolver")
+        return VortexLatticeSolver
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

@@ -37,14 +37,14 @@ def resolve_solver_type(solver_type: str | None) -> str:
 def make_solver(canonical: str):
     """Instance of the solver class for a canonical name."""
     if canonical == "vlm":
-        from ventorum.solvers.horseshoe import HorseshoeSolver
-        return HorseshoeSolver()
+        from ventorum.solvers.horseshoe import VortexLatticeSolver
+        return VortexLatticeSolver()
     if canonical == "linear":
         from ventorum.solvers.linear import LinearLLTSolver
         return LinearLLTSolver()
     if canonical == "nonlinear":
-        from ventorum.solvers.nonlinear import NonlinearSolver
-        return NonlinearSolver()
+        from ventorum.solvers.nonlinear import NonlinearLLTSolver
+        return NonlinearLLTSolver()
     if canonical == "fourier":
         from ventorum.solvers.fourier import FourierSolver
         return FourierSolver()

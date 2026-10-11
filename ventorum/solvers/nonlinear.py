@@ -45,7 +45,7 @@ from ventorum.solvers.core import (
 from ventorum.solvers.lattice_base import LatticeSolver
 
 
-class NonlinearSolver(LatticeSolver):
+class NonlinearLLTSolver(LatticeSolver):
     """Nonlinear lifting line with tabulated (or linear) section polars."""
 
     collocation = "llt"
@@ -111,7 +111,7 @@ class NonlinearSolver(LatticeSolver):
         if not info.converged:
             last = info.residual_history[-1] if info.residual_history else float("nan")
             warnings.warn(
-                f"NonlinearSolver did not converge in {info.iterations} Newton iterations "
+                f"NonlinearLLTSolver did not converge in {info.iterations} Newton iterations "
                 f"(section Cl error {last:.2e}). The result is not reliable; this is common "
                 "past the maximum lift.",
                 RuntimeWarning,
@@ -148,3 +148,13 @@ class NonlinearSolver(LatticeSolver):
             g_prev = sol[0] if sol[2].converged else None
             out.append(sol)
         return out
+
+
+def __getattr__(name: str):
+    """Return the old class name with a deprecation warning."""
+    if name == "NonlinearSolver":
+        from ventorum.utils.deprecation import warn_deprecated_class
+
+        warn_deprecated_class("NonlinearSolver", "NonlinearLLTSolver")
+        return NonlinearLLTSolver
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

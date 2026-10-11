@@ -643,8 +643,8 @@ def assemble_system_matrix(
     canonical = resolve_solver_type(settings.solver_type)
     collocation = "vlm" if canonical == "vlm" else "llt"
     if collocation == "vlm":
-        from ventorum.solvers.horseshoe import HorseshoeSolver
-        lattice = HorseshoeSolver().build(aircraft, settings, condition)
+        from ventorum.solvers.horseshoe import VortexLatticeSolver
+        lattice = VortexLatticeSolver().build(aircraft, settings, condition)
     else:
         lattice = build_lattice(aircraft, settings, collocation="llt")
     ground = ground_plane_from_condition(lattice, condition, aircraft.moment_reference()) if condition.h is not None else None

@@ -297,7 +297,7 @@ def case_ground() -> str:
             for s in ("vlm", "linear"):
                 lat_s = build_lattice(vt.Aircraft(surfaces=[wg]), st, collocation="vlm", n_chord=1)
                 gp_s = make_ground_plane(lat_s, hc, np.radians(4.0), height_ref="min")
-                sol = vt.HorseshoeSolver() if s == "vlm" else vt.LinearLLTSolver()
+                sol = vt.VortexLatticeSolver() if s == "vlm" else vt.LinearLLTSolver()
                 try:
                     r = sol.solve(wg, vt.FlightCondition(alpha=np.radians(4.0)),
                                   vt.SolverSettings(solver_type=s, n_panels=24), ground=gp_s)

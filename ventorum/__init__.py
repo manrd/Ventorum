@@ -48,11 +48,9 @@ from ventorum.core.error_bars import (  # noqa: F401
 from ventorum.solvers import (  # noqa: F401
     BaseSolver,
     FourierSolver,
-    HorseshoeSolver,
     VortexLatticeSolver,
     LinearLLTSolver,
-    LinearSolver,
-    NonlinearSolver,
+    NonlinearLLTSolver,
 )
 from ventorum.solvers.trimming import (  # noqa: F401
     TrimResult,
@@ -340,4 +338,27 @@ from ventorum.ground_effect import (  # noqa: F401, E402
 )
 
 __version__ = "0.3.0"
+
+
+def __getattr__(name: str):
+    """Return an old solver class name with a deprecation warning."""
+    if name == "HorseshoeSolver":
+        from ventorum.solvers.horseshoe import VortexLatticeSolver
+        from ventorum.utils.deprecation import warn_deprecated_class
+
+        warn_deprecated_class("HorseshoeSolver", "VortexLatticeSolver")
+        return VortexLatticeSolver
+    if name == "LinearSolver":
+        from ventorum.solvers.linear import LinearLLTSolver
+        from ventorum.utils.deprecation import warn_deprecated_class
+
+        warn_deprecated_class("LinearSolver", "LinearLLTSolver")
+        return LinearLLTSolver
+    if name == "NonlinearSolver":
+        from ventorum.solvers.nonlinear import NonlinearLLTSolver
+        from ventorum.utils.deprecation import warn_deprecated_class
+
+        warn_deprecated_class("NonlinearSolver", "NonlinearLLTSolver")
+        return NonlinearLLTSolver
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 

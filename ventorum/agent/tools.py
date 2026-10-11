@@ -164,10 +164,10 @@ def _case_settings(ac: Aircraft, sett: SolverSettings, strips: int, condition: F
     cap = MAX_TOTAL_PANELS // strips
     if cap >= MAX_AUTO_N_CHORD:
         return sett
-    from ventorum.solvers.horseshoe import HorseshoeSolver
+    from ventorum.solvers.horseshoe import VortexLatticeSolver
 
     rp = ac.moment_reference() if ref_point is None else ref_point
-    auto = HorseshoeSolver().resolve_n_chord(ac, sett, condition, ground, rp)
+    auto = VortexLatticeSolver().resolve_n_chord(ac, sett, condition, ground, rp)
     if auto <= cap:
         return sett
     out = sett.clone()
@@ -193,10 +193,10 @@ def _common_settings(ac: Aircraft, sett: SolverSettings, strips: int,
         # Out of ground effect the automatic count does not change with the attitude.
         out = _case_settings(ac, sett, strips, conditions[0])
         return out, out is not sett
-    from ventorum.solvers.horseshoe import HorseshoeSolver
+    from ventorum.solvers.horseshoe import VortexLatticeSolver
 
     rp = ac.moment_reference()
-    solver = HorseshoeSolver()
+    solver = VortexLatticeSolver()
     auto = max(solver.resolve_n_chord(ac, sett, fc, None, rp) for fc in conditions)
     cap = MAX_TOTAL_PANELS // strips
     out = sett.clone()
@@ -265,11 +265,11 @@ def _planned_panels(
         return int(strips * int(sett.n_chord))
     if condition is None and ground is None:
         return int(strips * DEFAULT_N_CHORD)
-    from ventorum.solvers.horseshoe import HorseshoeSolver
+    from ventorum.solvers.horseshoe import VortexLatticeSolver
 
     rp = ac.moment_reference() if ref_point is None else ref_point
     try:
-        n = int(HorseshoeSolver().resolve_n_chord(ac, sett, condition, ground, rp))
+        n = int(VortexLatticeSolver().resolve_n_chord(ac, sett, condition, ground, rp))
     except Exception:  # noqa: BLE001 - only an estimate
         n = int(DEFAULT_N_CHORD)
     cap = MAX_TOTAL_PANELS // max(int(strips), 1)
@@ -1466,10 +1466,10 @@ def mesh_convergence(
             elif resolve_solver_type(_lvl_sett.solver_type) != "vlm":
                 _n_a = int(_strips_a)
             else:
-                from ventorum.solvers.horseshoe import HorseshoeSolver
+                from ventorum.solvers.horseshoe import VortexLatticeSolver
 
                 try:
-                    _nc = int(HorseshoeSolver().resolve_n_chord(
+                    _nc = int(VortexLatticeSolver().resolve_n_chord(
                         _lvl_ac, _lvl_sett, _fc_a, None, _lvl_ac.moment_reference()))
                 except Exception:  # noqa: BLE001 - only an estimate
                     _nc = int(DEFAULT_N_CHORD)
