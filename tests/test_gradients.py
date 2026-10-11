@@ -1049,3 +1049,74 @@ def test_cpu_kernels_float32_note(backend: str, cpu_device, restore_vjp_backend)
     assert found[("float32", "reference")] == ("float32", "reference:torch", False)
     assert found[("float64", "kernels")] == ("float64", f"kernels:{backend}", False)
     assert found[("float64", "reference")] == ("float64", "reference:torch", False)
+
+
+def _wing_tail_fin_flap() -> vt.Aircraft:
+    """Return a wing (flap at zero deflection), a tail and a vertical fin on the plane y = 0.
+
+    The flap edges put leg mid-points of the wing exactly on end points of
+    other wing segments.
+    """
+    flap = vt.ControlSurface(name="flap", eta_start=0.2, eta_end=0.6, hinge_x_c=0.7, deflection=0.0)
+    wing = _difficult_surface("Wing", 5.0, 2.0, 1.0, dih=np.radians(4.0), sweep=np.radians(10.0))
+    wing.controls = [flap]
+    tail = _difficult_surface("Tail", 2.0, 0.8, 0.5, pos=(4.0, 0.0, 0.5))
+    fin = _difficult_surface("Fin", 1.2, 0.9, 0.5, pos=(4.2, 0.0, 0.5), dih=np.pi / 2)
+    fin.is_symmetric = False
+    return vt.Aircraft(name="WTF", surfaces=[wing, tail, fin])
+
+
+def test_kernels_target_on_end_point_float32() -> None:
+    """The reference kernels stay finite in float32 at a target on a segment end point.
+
+    Regression: the floor 1e-300 of the squared distances rounds to zero in
+    float32, and the unit vectors became 0/0 (the forward check then raised
+    with "worst inf").
+    """
+    import torch
+
+    from ventorum.sensitivity.reference import ray_vel, seg_vel
+
+    pts = np.array([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.3, 0.4, 0.1]])
+    A = np.array([[0.0, 0.0, 0.0], [0.5, -0.2, 0.0]])
+    B = np.array([[1.0, 0.0, 0.0], [0.5, 0.8, 0.0]])
+    d = np.array([[1.0, 0.0, 0.0], [1.0, 0.0, 0.0]])
+    rc2 = torch.full((3, 2), 1e-4, dtype=torch.float64)
+    for fn, args in ((seg_vel, (A, B)), (ray_vel, (A, d))):
+        v64 = fn(torch.tensor(pts), *(torch.tensor(a) for a in args), rc2).numpy()
+        v32 = fn(torch.tensor(pts, dtype=torch.float32), *(torch.tensor(a, dtype=torch.float32) for a in args),
+                 rc2.float()).numpy()
+        assert np.all(np.isfinite(v32)), fn.__name__
+        assert np.allclose(v32, v64, rtol=1e-5, atol=1e-6 * float(np.max(np.abs(v64)))), fn.__name__
+
+
+@pytest.mark.parametrize("device", ["cpu", "gpu"])
+def test_float32_reference_with_target_on_end_point(device: str, restore_vjp_backend) -> None:
+    """Float32 reference gradients of a wing with a flap, a tail and a fin pass the forward check.
+
+    The float32 gradients of the reference path agree with the float64
+    gradients to 1e-3 (per output, relative to the largest component).
+    """
+    if device == "gpu" and not gpu.available():
+        pytest.skip(f"The GPU pipelines cannot run: {gpu.unavailable_reason()}")
+    ac = _wing_tail_fin_flap()
+    cond = vt.FlightCondition(V_inf=30.0, alpha=np.radians(5.0), beta=np.radians(4.0))
+    st = vt.SolverSettings(solver_type="vlm", n_panels=8, n_chord=4)
+    outs = ("CL", "CY", "CD", "Cl", "Cm", "Cn")
+    old_dev, old_prec = gpu.get_device(), gpu.get_precision()
+    try:
+        gpu.set_device(device)
+        res = {}
+        for prec in ("float64", "float32"):
+            gpu.set_precision(prec)
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                res[prec] = vt.gradients(ac, cond, st, outputs=outs, wrt=("nodes", "alpha", "beta"),
+                                         method="reference")
+    finally:
+        gpu.set_device(old_dev)
+        gpu.set_precision(old_prec)
+    assert res["float32"].precision_gradient == "float32"
+    assert res["float32"].forward_mismatch <= 1e-4
+    _assert_same_gradients_per_output(res["float64"], res["float32"], outs, 1e-3, f"wtf-flap0:{device}")
+

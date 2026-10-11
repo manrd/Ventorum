@@ -96,6 +96,16 @@ def rod_rot(v: torch.Tensor, axis: torch.Tensor, angle: torch.Tensor) -> torch.T
     return v * c[:, None] + cr * s[:, None] + axis * (kdv * (1.0 - c))[:, None]
 
 
+def _length_floor(dtype: torch.dtype) -> float:
+    """Return the floor of the squared distances in the kernels [m^2].
+
+    The floor is 1e-300, or the smallest normal number of *dtype* when that
+    is larger. In float32 the value 1e-300 rounds to zero, and a target on
+    a segment end point then gives 0/0 in the unit vectors.
+    """
+    return max(1e-300, float(torch.finfo(dtype).tiny))
+
+
 def seg_vel(P: torch.Tensor, A: torch.Tensor, B: torch.Tensor, rc2: torch.Tensor) -> torch.Tensor:
     """Velocity of unit finite segments A -> B at P (differentiable)."""
     r1 = P[:, None, :] - A[None, :, :]
@@ -106,8 +116,10 @@ def seg_vel(P: torch.Tensor, A: torch.Tensor, B: torch.Tensor, rc2: torch.Tensor
     cz = r1[..., 0] * r2[..., 1] - r1[..., 1] * r2[..., 0]
     cr2 = cx * cx + cy * cy + cz * cz
     r0sq = r0[..., 0] ** 2 + r0[..., 1] ** 2 + r0[..., 2] ** 2
-    n1 = torch.sqrt((r1 * r1).sum(-1) + 1e-300)
-    n2 = torch.sqrt((r2 * r2).sum(-1) + 1e-300)
+    # The floor keeps the unit vectors finite when P is on an end point.
+    floor = _length_floor(P.dtype)
+    n1 = torch.sqrt((r1 * r1).sum(-1) + floor)
+    n2 = torch.sqrt((r2 * r2).sum(-1) + floor)
     t1 = r1 / n1[..., None]
     t2 = r2 / n2[..., None]
     proj_in = (
@@ -127,7 +139,7 @@ def seg_vel(P: torch.Tensor, A: torch.Tensor, B: torch.Tensor, rc2: torch.Tensor
     proj_out = cr2 * (n1 + n2) / den_out
     proj = torch.where(out_side, proj_out, proj_in)
     denom = cr2 + rc2 * r0sq
-    ok = denom > 1e-300
+    ok = denom > floor
     safe = torch.where(ok, denom, torch.ones_like(denom))
     k = torch.where(ok, (1.0 / (4.0 * math.pi)) * proj / safe, torch.zeros_like(proj))
     return torch.stack((cx * k, cy * k, cz * k), dim=-1)
@@ -141,7 +153,8 @@ def ray_vel(P: torch.Tensor, A: torch.Tensor, d: torch.Tensor, rc2: torch.Tensor
     cy = dd[..., 2] * r[..., 0] - dd[..., 0] * r[..., 2]
     cz = dd[..., 0] * r[..., 1] - dd[..., 1] * r[..., 0]
     cr2 = cx * cx + cy * cy + cz * cz
-    rn = torch.sqrt((r * r).sum(-1) + 1e-300)
+    floor = _length_floor(P.dtype)
+    rn = torch.sqrt((r * r).sum(-1) + floor)
     dr = (dd * r).sum(-1)
     # 1 + cos(t) for a unit d. Behind the start point (d . r < 0) the same
     # value without cancellation: |d x r|^2 / (rn (rn - d . r)).
@@ -149,7 +162,7 @@ def ray_vel(P: torch.Tensor, A: torch.Tensor, d: torch.Tensor, rc2: torch.Tensor
     den_b = torch.where(behind, rn * (rn - dr), torch.ones_like(rn))
     one_cos = torch.where(behind, cr2 / den_b, 1.0 + dr / rn)
     denom = cr2 + rc2
-    ok = denom > 1e-300
+    ok = denom > floor
     safe = torch.where(ok, denom, torch.ones_like(denom))
     k = torch.where(ok, (1.0 / (4.0 * math.pi)) * one_cos / safe, torch.zeros_like(one_cos))
     return torch.stack((cx * k, cy * k, cz * k), dim=-1)
