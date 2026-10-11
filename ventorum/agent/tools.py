@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import functools
 import inspect
+import math
 import threading
 from typing import Any
 from collections.abc import Callable
@@ -1803,13 +1804,14 @@ def error_bars(
     settings: dict[str, Any] | None = None,
     axes: str = "body",
     detail_level: str = "standard",
+    input_uncertainties: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Layer-1 numerical error bars of the six force and moment coefficients.
 
     Three spanwise mesh levels (the user mesh is the fine level); Grid
-    Convergence Index (Roache) with the observed order (Celik et al.). Only
-    the numerical (spanwise discretisation) layer is included; the other
-    layers are not implemented.
+    Convergence Index (Roache) with the observed order (Celik et al.).
+    With ``input_uncertainties``, layer-2 input uncertainty is combined
+    by root sum of squares.
 
     Parameters
     ----------
@@ -1827,6 +1829,8 @@ def error_bars(
         Moment axis system of the Cl, Cm and Cn bars. ``"all"`` is refused.
     detail_level : 'summary', 'standard' or 'full'
         Accepted for consistency; the bar content is the same at every level.
+    input_uncertainties : dict or None
+        Optional input uncertainties (angles in degrees).
     """
     from ventorum.core.error_bars import mesh_levels as _mesh_levels
 
@@ -1848,6 +1852,36 @@ def error_bars(
         estimate += n_here * n_here
     _check_call_work(estimate, "fewer panels (smaller n_panels)")
     res = vt.numerical_error_bars(ac, condition=fc, settings=case_sett, axes=ax)
+
+    status_of_bars = "numerical_only"
+    if input_uncertainties is not None:
+        if not isinstance(input_uncertainties, dict):
+            raise InputError(f"'input_uncertainties' must be a JSON object, got {type(input_uncertainties).__name__}.")
+        parsed_unc: dict[str, Any] = {}
+        for k, v in input_uncertainties.items():
+            if k in ("alpha", "beta", "phi"):
+                parsed_unc[k] = math.radians(number(v, f"input_uncertainties.{k}"))
+            elif k == "sections":
+                if not isinstance(v, dict):
+                    raise InputError(f"'input_uncertainties.sections' must be a JSON object, got {type(v).__name__}.")
+                parsed_sec = {}
+                for s_name, s_props in v.items():
+                    if not isinstance(s_props, dict):
+                        raise InputError(f"'input_uncertainties.sections.{s_name}' must be a JSON object.")
+                    p_dict = {}
+                    for prop_k, prop_v in s_props.items():
+                        if prop_k == "alpha_L0":
+                            p_dict[prop_k] = math.radians(number(prop_v, f"input_uncertainties.sections.{s_name}.alpha_L0"))
+                        else:
+                            p_dict[prop_k] = number(prop_v, f"input_uncertainties.sections.{s_name}.{prop_k}")
+                    parsed_sec[s_name] = p_dict
+                parsed_unc["sections"] = parsed_sec
+            else:
+                parsed_unc[k] = number(v, f"input_uncertainties.{k}")
+        inp_bars = vt.input_error_bars(ac, condition=fc, settings=case_sett, uncertainties=parsed_unc, axes=ax)
+        res = vt.combine_error_bars(res, inp_bars)
+        status_of_bars = "numerical_and_input"
+
     device, precision = result_device_precision(res.results[0] if res.results else None)
     lines = []
     for name in ("CL", "CD", "CY", "Cl", "Cm", "Cn"):
@@ -1858,11 +1892,20 @@ def error_bars(
         state = bar.layers["numerical"].state if "numerical" in bar.layers else None
         lines.append(f"{name}={fmt(bar.value, '.6f')} [{fmt(bar.interval_low, '.6f')}, "
                      f"{fmt(bar.interval_high, '.6f')}] ({state})")
+
+    layer_note = (
+        "Numerical and input layers included (combined by root sum of squares)."
+        if status_of_bars == "numerical_and_input"
+        else "Only the numerical (spanwise discretisation) layer is included; the other layers are not implemented."
+    )
+    summary_prefix = (
+        f"[Ventorum RESULT] Combined numerical and input error bars of {ac.name} "
+        if status_of_bars == "numerical_and_input"
+        else f"[Ventorum RESULT] Numerical error bars of {ac.name} "
+    )
     summary = (
-        f"[Ventorum RESULT] Numerical error bars of {ac.name} "
-        f"(spanwise levels {levels[0]}/{levels[1]}/{levels[2]}):\n" + "\n".join(lines) +
-        "\nOnly the numerical (spanwise discretisation) layer is included; "
-        "the other layers are not implemented. "
+        f"{summary_prefix}(spanwise levels {levels[0]}/{levels[1]}/{levels[2]}):\n"
+        + "\n".join(lines) + f"\n{layer_note} "
         f"{device_summary_text(device, precision)}"
     )
     return {
@@ -1871,13 +1914,148 @@ def error_bars(
         "error_bars": res.to_dict(),
         "levels": [int(n) for n in levels],
         "notes": list(res.notes),
-        "status_of_bars": "numerical_only",
+        "status_of_bars": status_of_bars,
         "device": device,
         "precision": precision,
         "condition_used": condition_payload(c),
         "settings_used": {**settings_payload(sett), **_mesh_note(case_sett is not sett, case_sett)},
         "axes": ax,
     }
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Derivative matrix
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@_tool
+def derivative_matrix(
+    wing: Any = None,
+    aircraft: Any = None,
+    flight_condition: dict[str, Any] | None = None,
+    settings: dict[str, Any] | None = None,
+    groups: list[str] | tuple[str, ...] | None = None,
+    controls: list[str] | None = None,
+    axes: str = "body",
+    x_cg_m: float | None = None,
+    detail_level: str = "standard",
+) -> dict[str, Any]:
+    """Full aerodynamic derivative matrix of one flight state.
+
+    Computes the derivatives of the six force and moment coefficients
+    (CL, CD, CY, Cl, Cm, Cn) with respect to static angles (alpha, beta,
+    and in ground effect phi and h/c), control deflections (per control name),
+    and nondimensional body rates (p_hat, q_hat, r_hat).
+    """
+    ac = build_aircraft_from_spec(wing=wing, aircraft=aircraft)
+    c = parse_condition(flight_condition)
+    sett = parse_settings(settings)
+    dl = parse_detail_level(detail_level)
+    ax = parse_axes(axes)
+    base = ac.moment_reference()
+    x_cg = number(x_cg_m, "x_cg_m") if x_cg_m is not None else float(base[0])
+    ac.ref_point = np.array([x_cg, 0.0, float(base[2])])
+    ac.compute_reference_values()
+    _check_method(ac, sett.solver_type, sett.wake_alignment, c["h_m"] is not None)
+    _check_mesh(ac, sett)
+
+    eff_groups = ("static", "control", "rate") if groups is None else groups
+    if not isinstance(eff_groups, (list, tuple)):
+        raise InputError("'groups' must be an array of group names.")
+
+    fc = make_flight_condition(c)
+
+    # Estimate number of solves for the work budget check
+    known = ac.control_names()
+    ctrl_list = list(known) if controls is None else list(controls)
+    n_solves = 1
+    if "static" in eff_groups:
+        n_solves += 8 if c["h_m"] is not None else 4
+    if "height" in eff_groups and c["h_m"] is not None and "static" not in eff_groups:
+        n_solves += 8
+    if "control" in eff_groups:
+        n_solves += 2 * len(ctrl_list)
+    if "rate" in eff_groups:
+        n_solves += 6
+    _check_call_work(
+        n_solves * (_planned_panels(ac, sett, fc) ** 2),
+        "fewer panels (smaller n_panels or n_chord)",
+    )
+
+    dm_res = vt.derivative_matrix(
+        ac, fc, sett,
+        groups=eff_groups,
+        controls=controls,
+        axes=ax,
+    )
+
+    def _format_matrix(res: vt.DerivativeMatrixResult) -> dict[str, Any]:
+        out_dict: dict[str, Any] = {}
+        for i, row_name in enumerate(res.rows):
+            row_map: dict[str, Any] = {}
+            for j, col_name in enumerate(res.columns):
+                unit = res.units[j]
+                key_name = f"{col_name}_per_rad" if unit == "1/rad" else col_name
+                row_map[key_name] = rnd(res.matrix[i, j])
+            out_dict[row_name] = row_map
+        return out_dict
+
+    if ax == "all":
+        matrix_payload = _format_matrix(dm_res.results["body"])
+        matrices_payload = {name: _format_matrix(dm_res.results[name]) for name in ("body", "stability", "wind")}
+        dev = dm_res.device
+        prec = dm_res.precision
+        base_sol = dm_res.base
+        notes = dm_res.notes
+        cols = dm_res.columns
+        rows = dm_res.rows
+        units = dm_res.units
+        methods = dm_res.methods
+        diags = dm_res.diagnostics
+    else:
+        matrix_payload = _format_matrix(dm_res)
+        matrices_payload = None
+        dev = dm_res.device
+        prec = dm_res.precision
+        base_sol = dm_res.base
+        notes = dm_res.notes
+        cols = dm_res.columns
+        rows = dm_res.rows
+        units = dm_res.units
+        methods = dm_res.methods
+        diags = dm_res.diagnostics
+
+    dev_txt = device_summary_text(dev, prec)
+    summary = (
+        f"[Ventorum RESULT] Derivative matrix of {ac.name} in {ax} axes: "
+        f"{len(cols)} columns ({', '.join(cols)}). "
+        f"{dev_txt}"
+    )
+
+    out: dict[str, Any] = {
+        "status": "success",
+        "executive_summary": summary,
+        "matrix": matrix_payload,
+        "columns": list(cols),
+        "rows": list(rows),
+        "units": {col: u for col, u in zip(cols, units)},
+        "methods": {col: m for col, m in zip(cols, methods)},
+        "axes": ax,
+        "diagnostics": diags,
+        "notes": list(notes),
+        "trust": trust_payload(base_sol.totals.trust) if base_sol is not None else None,
+        "condition_used": condition_payload(c),
+        "settings_used": settings_payload(sett, base_sol),
+        "device": dev,
+        "precision": prec,
+    }
+    if matrices_payload is not None:
+        out["matrices"] = matrices_payload
+    if dl == "full" and base_sol is not None:
+        out["base_result"] = {
+            "metrics": metrics_payload(base_sol),
+            "trust": trust_payload(base_sol.totals.trust) if base_sol.totals.trust is not None else None,
+        }
+    return out
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

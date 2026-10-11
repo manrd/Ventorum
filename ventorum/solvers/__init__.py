@@ -2,17 +2,31 @@
 """Solvers: vortex-lattice method, numerical lifting line and Fourier lifting line."""
 
 from ventorum.solvers.base import BaseSolver
+from ventorum.solvers.derivative_matrix import (
+    DerivativeMatrixAllDict,
+    DerivativeMatrixResult,
+    derivative_matrix,
+)
 from ventorum.solvers.fourier import FourierSolver
 from ventorum.solvers.horseshoe import VortexLatticeSolver
 from ventorum.solvers.linear import LinearLLTSolver
 from ventorum.solvers.nonlinear import NonlinearLLTSolver
+from ventorum.solvers.static_derivatives import (
+    StaticDerivativesResult,
+    static_derivatives,
+)
 
 __all__ = [
     "BaseSolver",
+    "DerivativeMatrixAllDict",
+    "DerivativeMatrixResult",
     "FourierSolver",
-    "VortexLatticeSolver",
     "LinearLLTSolver",
     "NonlinearLLTSolver",
+    "StaticDerivativesResult",
+    "VortexLatticeSolver",
+    "derivative_matrix",
+    "static_derivatives",
 ]
 
 

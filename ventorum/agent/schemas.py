@@ -1189,8 +1189,8 @@ AGENT_TOOL_DEFINITIONS: list[dict[str, Any]] = [
         "name": "ventorum_error_bars",
         "description": "Layer-1 numerical error bars of the six force and moment coefficients from three "
                        "spanwise mesh levels (Grid Convergence Index, Roache; observed order, Celik et al.). "
-                       "The user mesh is the fine level. Only the numerical (spanwise discretisation) layer "
-                       "is included; the other layers are not implemented. n_panels below 16 is refused.",
+                       "The user mesh is the fine level. With input_uncertainties, layer-2 input uncertainty "
+                       "is combined by root sum of squares. n_panels below 16 is refused.",
         "parameters": {
             "type": "object",
             "properties": {
@@ -1199,6 +1199,43 @@ AGENT_TOOL_DEFINITIONS: list[dict[str, Any]] = [
                 "flight_condition": CONDITION_SCHEMA,
                 "settings": SETTINGS_SCHEMA,
                 "axes": {**_AXES_NO_ALL_SCHEMA, "default": "body"},
+                "detail_level": {**DETAIL_LEVEL, "default": "standard"},
+                "input_uncertainties": {
+                    "type": "object",
+                    "description": "Standard uncertainties of flow inputs (alpha, beta, phi in deg, "
+                                   "V_inf in m/s, rho in kg/m^3, h in m) and section data.",
+                },
+            },
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "ventorum_derivative_matrix",
+        "description": "Full aerodynamic derivative matrix of one flight state: sensitivity of the six "
+                       "force and moment coefficients (CL, CD, CY, Cl, Cm, Cn) to static variables (alpha, "
+                       "beta, and in ground effect phi and h/c), control deflections, and body rates "
+                       "(p_hat, q_hat, r_hat).",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "wing": _SURFACE_SCHEMA,
+                "aircraft": _AIRCRAFT_SCHEMA,
+                "flight_condition": CONDITION_SCHEMA,
+                "settings": SETTINGS_SCHEMA,
+                "groups": {
+                    "type": "array",
+                    "items": {"type": "string", "enum": ["static", "control", "rate", "height"]},
+                    "description": "Derivative groups to include. Default ['static', 'control', 'rate']. "
+                                   "In ground effect, 'height' is added by default.",
+                },
+                "controls": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Optional list of control names to differentiate. Default: all controls.",
+                },
+                "axes": {**AXES_SCHEMA, "default": "body"},
+                "x_cg_m": _num("Centre of gravity x position [m], geometry axes (x aft). Default: the "
+                               "aircraft ref_point_m x, else 0."),
                 "detail_level": {**DETAIL_LEVEL, "default": "standard"},
             },
             "additionalProperties": False,

@@ -77,6 +77,15 @@ from ventorum.solvers.height_derivatives import (  # noqa: F401
     HeightDerivativesResult,
     height_derivatives,
 )
+from ventorum.solvers.static_derivatives import (  # noqa: F401
+    StaticDerivativesResult,
+    static_derivatives,
+)
+from ventorum.solvers.derivative_matrix import (  # noqa: F401
+    DerivativeMatrixAllDict,
+    DerivativeMatrixResult,
+    derivative_matrix,
+)
 from ventorum.sensitivity import (  # noqa: F401
     GradientResult,
     GradientScopeError,

@@ -61,7 +61,7 @@ Example with `aircraft`:
 
 - **Work units.** One solve of a lattice with N panels costs N^2 units. The work of a call is the sum over all solves that the call will run (sweep angles, heights, mesh levels, batch candidates, derivative steps).
 - **Budget.** A call whose estimated work is above 200000000 units is refused with `error.type` `invalid_input` before any solve. The message gives the estimate, the budget and how to reduce the work: fewer angles (smaller range or larger `alpha_step_deg`), fewer heights, fewer mesh levels or spacing schemes, fewer candidates, or fewer panels (smaller `n_panels` or `n_chord`).
-- **Scope.** The budget covers `ventorum_wing_analysis`, `ventorum_polar_sweep`, `ventorum_ground_effect` (heights plus free air plus the Irodov height-pitch sweep), `ventorum_stability_derivatives` (5 solves), `ventorum_batch_evaluate`, `ventorum_mesh_convergence` (levels times the angles that are really solved), `ventorum_trim` (`(1 + max_iterations * (1 + 2 * n_unknowns)) * N^2`, with 2 unknowns in longitudinal trim and 4 in lateral trim) and `ventorum_error_bars` (`N1^2 + N2^2 + N3^2` of the three spanwise levels). `ventorum_tune_machine` and `ventorum_undeformed_nodes` are outside the budget: they run no solve (their duration or mesh is stated in their description instead).
+- **Scope.** The budget covers `ventorum_wing_analysis`, `ventorum_polar_sweep`, `ventorum_ground_effect` (heights plus free air plus the Irodov height-pitch sweep), `ventorum_stability_derivatives` (5 solves), `ventorum_derivative_matrix` (sum of planned solves across constituent groups), `ventorum_batch_evaluate`, `ventorum_mesh_convergence` (levels times the angles that are really solved), `ventorum_trim` (`(1 + max_iterations * (1 + 2 * n_unknowns)) * N^2`, with 2 unknowns in longitudinal trim and 4 in lateral trim) and `ventorum_error_bars` (`N1^2 + N2^2 + N3^2` of the three spanwise levels). `ventorum_tune_machine` and `ventorum_undeformed_nodes` are outside the budget: they run no solve (their duration or mesh is stated in their description instead).
 
 ## Error types
 
@@ -91,9 +91,34 @@ Example with `aircraft`:
 
 - `ventorum_trim` (`wing` with the named controls, `CL_target` (no unit), `pitch_control` (string), optional `roll_control` and `yaw_control` (strings, both or neither), `flight_condition` (`alpha_deg` is the start point of the iteration), `alpha_bounds_deg` (degrees), `max_iterations` (count), `settings`, `detail_level`, `axes`): angle of attack (degrees) and control deflections (degrees) for the target lift coefficient with zero moments, by Newton's method. The solves run on the selected device; the payload states the device and the precision (in float32 the tolerances are at least 1e-6). A target that is not reached is not an error: the payload has `"status": "success"`, `"trim_status"`, `"trimmed"` false and the notes. The work estimate is `(1 + max_iterations * (1 + 2 * n_unknowns)) * N^2` (2 unknowns in longitudinal trim, 4 in lateral trim); reduce the work with fewer panels (smaller `n_panels`) or a smaller `max_iterations`.
 
-## Numerical error bars
+## Numerical and input error bars
 
-- `ventorum_error_bars` (`wing`, `flight_condition`, `settings` (`n_panels` is the fine level N1, at least 16), `axes` (`body`, `stability` or `wind`; `all` is refused), `detail_level`): layer-1 numerical error bars of the six force and moment coefficients from three spanwise mesh levels. Only the numerical (spanwise discretisation) layer is included; the other layers are not implemented, and `status_of_bars` is always `numerical_only`. The work estimate is `N1^2 + N2^2 + N3^2`; reduce the work with fewer panels (smaller `n_panels`).
+- `ventorum_error_bars` (`wing` or `aircraft`, `flight_condition`, `settings` (`n_panels` is the fine level N1, at least 16), `axes` (`body`, `stability` or `wind`; `all` is refused), `detail_level`, `input_uncertainties`): layer-1 numerical error bars of the six force and moment coefficients from three spanwise mesh levels. When `input_uncertainties` is omitted, only the numerical layer is included and `status_of_bars` is `numerical_only`. With `input_uncertainties` (flow uncertainties with angles in degrees, section data), the layer-2 input uncertainty is combined by root sum of squares and `status_of_bars` is `numerical_and_input`. The work estimate is `N1^2 + N2^2 + N3^2`; reduce the work with fewer panels (smaller `n_panels`).
+
+## Full aerodynamic derivative matrix
+
+- `ventorum_derivative_matrix` (`wing` or `aircraft`, `flight_condition`, `settings`, `groups`, `controls`, `axes`, `x_cg_m`, `detail_level`): full aerodynamic derivative matrix of one flight state. Deflections in degrees in the agent input; derivative output per rad, with the unit in each key name (`..._per_rad`) for angles and deflections, and dimensionless for height and rates. The matrix is returned as a dictionary of rows (`CL, CD, CY, Cl, Cm, Cn`) keyed by column label. Output includes `units`, `methods`, `axes`, `diagnostics` (static margin, neutral point, Irodov margin in ground effect, far-field lateral diagnostics per control), and trust notes.
+
+Example call:
+
+```python
+from ventorum.agent import call_tool
+
+res = call_tool("ventorum_derivative_matrix", {
+    "wing": {
+        "span_m": 10.0,
+        "chord_m": 1.0,
+        "controls": [
+            {"name": "elevator", "hinge_x_c": 0.75, "deflection_deg": 1.0},
+        ],
+    },
+    "flight_condition": {"V_inf_m_s": 30.0, "alpha_deg": 3.0},
+    "settings": {"n_panels": 12},
+    "detail_level": "standard",
+})
+print(res["executive_summary"])
+print("CL_alpha:", res["matrix"]["CL"]["alpha_per_rad"])
+```
 
 ## Example
 

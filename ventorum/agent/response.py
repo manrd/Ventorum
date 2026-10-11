@@ -139,7 +139,7 @@ def metrics_payload(res: SolverResult) -> dict[str, Any]:
     """Integrated coefficients of one solution."""
     tot = res.totals
     cd, basis, ld = drag_and_ld(tot)
-    return {
+    out: dict[str, Any] = {
         "CL": rnd(tot.CL),
         "CDi": rnd(tot.CDi, 7),
         "CDp": rnd(tot.CDp, 7),
@@ -151,10 +151,15 @@ def metrics_payload(res: SolverResult) -> dict[str, Any]:
         "Cm": rnd(tot.Cm),
         "Cl": rnd(tot.Cl),
         "Cn": rnd(tot.Cn),
-        "CY": rnd(tot.CY),
-        "solver": res.solver_type,
-        "converged": bool(res.converged),
     }
+    if tot.Cn_trefftz is not None:
+        out["Cn_trefftz"] = rnd(tot.Cn_trefftz)
+    out["CY"] = rnd(tot.CY)
+    if tot.CY_farfield is not None:
+        out["CY_farfield"] = rnd(tot.CY_farfield)
+    out["solver"] = res.solver_type
+    out["converged"] = bool(res.converged)
+    return out
 
 
 def geometry_payload(ac: Aircraft) -> dict[str, Any]:

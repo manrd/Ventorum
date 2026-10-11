@@ -23,6 +23,7 @@ from ventorum.agent.schemas import (
 )
 from ventorum.agent.tools import (
     batch_evaluate,
+    derivative_matrix,
     error_bars,
     ground_effect,
     mesh_convergence,
@@ -40,6 +41,7 @@ __all__ = [
     "build_aircraft_from_spec",
     "build_flight_condition_from_spec",
     "call_tool",
+    "derivative_matrix",
     "error_bars",
     "get_tool_schemas",
     "ground_effect",

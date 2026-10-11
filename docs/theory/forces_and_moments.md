@@ -85,6 +85,38 @@ SM = \frac{x_{np} - x_{cg}}{c_\text{ref}},
 
 with $C_{m\alpha}$ in the body axes. This is a small-angle form: it takes the lift as the force normal to the body x axis, and it ignores the drag and a vertical offset of the centre of gravity. Thus the computed neutral point moves a little with $x_{cg}$. It follows from $C_m(x) = C_m(x_{cg}) + C_L (x - x_{cg})/c_\text{ref}$ for a moment taken about a point a distance $x - x_{cg}$ aft (x aft, $C_m$ nose up), and from the definition of the neutral point, $\partial C_m / \partial\alpha = 0$ about it.
 
+## Full aerodynamic derivative matrix
+
+The function `derivative_matrix` combines the static, control, rate, and height derivatives into one matrix:
+
+```{math}
+\mathbf{M} = \begin{bmatrix}
+\frac{\partial C_L}{\partial \alpha} & \frac{\partial C_L}{\partial \beta} & \cdots & \frac{\partial C_L}{\partial \delta_k} & \cdots & \frac{\partial C_L}{\partial \hat{p}} & \frac{\partial C_L}{\partial \hat{q}} & \frac{\partial C_L}{\partial \hat{r}} \\
+\frac{\partial C_D}{\partial \alpha} & \frac{\partial C_D}{\partial \beta} & \cdots & \frac{\partial C_D}{\partial \delta_k} & \cdots & \frac{\partial C_D}{\partial \hat{p}} & \frac{\partial C_D}{\partial \hat{q}} & \frac{\partial C_D}{\partial \hat{r}} \\
+\frac{\partial C_Y}{\partial \alpha} & \frac{\partial C_Y}{\partial \beta} & \cdots & \frac{\partial C_Y}{\partial \delta_k} & \cdots & \frac{\partial C_Y}{\partial \hat{p}} & \frac{\partial C_Y}{\partial \hat{q}} & \frac{\partial C_Y}{\partial \hat{r}} \\
+\frac{\partial C_l}{\partial \alpha} & \frac{\partial C_l}{\partial \beta} & \cdots & \frac{\partial C_l}{\partial \delta_k} & \cdots & \frac{\partial C_l}{\partial \hat{p}} & \frac{\partial C_l}{\partial \hat{q}} & \frac{\partial C_l}{\partial \hat{r}} \\
+\frac{\partial C_m}{\partial \alpha} & \frac{\partial C_m}{\partial \beta} & \cdots & \frac{\partial C_m}{\partial \delta_k} & \cdots & \frac{\partial C_m}{\partial \hat{p}} & \frac{\partial C_m}{\partial \hat{q}} & \frac{\partial C_m}{\partial \hat{r}} \\
+\frac{\partial C_n}{\partial \alpha} & \frac{\partial C_n}{\partial \beta} & \cdots & \frac{\partial C_n}{\partial \delta_k} & \cdots & \frac{\partial C_n}{\partial \hat{p}} & \frac{\partial C_n}{\partial \hat{q}} & \frac{\partial C_n}{\partial \hat{r}}
+\end{bmatrix}
+```
+
+The matrix has six fixed rows: $C_L, C_D, C_Y, C_l, C_m, C_n$.
+
+The columns follow group order:
+1. Static variables: $\alpha$ and $\beta$. In ground effect, $\phi$ and $h/c_\text{ref}$ follow.
+2. Control deflections: $\delta_k$ for each control name.
+3. Nondimensional rates: $\hat{p} = p b / (2 V)$, $\hat{q} = q c / (2 V)$, $\hat{r} = r b / (2 V)$.
+
+The units of each column are:
+- $1/\text{rad}$ for angle and control variables ($\alpha, \beta, \phi, \delta$).
+- Dimensionless ($-$) for height $h/c_\text{ref}$ and body rates $\hat{p}, \hat{q}, \hat{r}$.
+
+Forces $C_L, C_D, C_Y$ are relative to the free stream in body, stability, and wind axes. Moments $C_l, C_m, C_n$ transform from body axes with the reference lengths $b_\text{ref}$ and $c_\text{ref}$:
+
+```{math}
+\begin{bmatrix} C_l \\ C_m \\ C_n \end{bmatrix}_\text{target} = \mathbf{L}^{-1} \mathbf{R} \mathbf{L} \begin{bmatrix} C_l \\ C_m \\ C_n \end{bmatrix}_\text{body}, \qquad \mathbf{L} = \operatorname{diag}(b_\text{ref}, c_\text{ref}, b_\text{ref}).
+```
+
 ## Assumptions
 
 - The wake is straight and parallel to $\hat{\mathbf d}$ up to the Trefftz plane (no roll-up). The Trefftz plane is normal to $\hat{\mathbf d}$.

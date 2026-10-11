@@ -24,6 +24,7 @@ from ventorum.agent.response import error_payload
 from ventorum.agent.schemas import AGENT_TOOL_DEFINITIONS, TOOL_NAMES, active_tool_context, check_keys
 from ventorum.agent.tools import (
     batch_evaluate,
+    derivative_matrix,
     error_bars,
     ground_effect,
     machine_capabilities,
@@ -45,6 +46,7 @@ TOOL_FUNCTIONS: dict[str, Callable[..., dict[str, Any]]] = {
     "ventorum_polar_sweep": polar_sweep,
     "ventorum_ground_effect": ground_effect,
     "ventorum_stability_derivatives": stability_derivatives,
+    "ventorum_derivative_matrix": derivative_matrix,
     "ventorum_batch_evaluate": batch_evaluate,
     "ventorum_mesh_convergence": mesh_convergence,
     "ventorum_trim": trim,
