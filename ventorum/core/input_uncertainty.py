@@ -33,6 +33,7 @@ from typing import Any
 
 import numpy as np
 
+from ventorum.sensitivity.adjoint import GradientScopeError
 from ventorum.core.datatypes import (
     Aircraft,
     FlightCondition,
@@ -455,19 +456,16 @@ def input_error_bars(
     method_per_input: dict[str, str] = {}
     try:
         if lattice is None:
-            raise ValueError("no lattice of the production solve (see T-0071)")
+            raise GradientScopeError("The production solve gives no lattice (Fourier solver).")
         values, jacobian = _adjoint_gradients(
             aircraft, cond, base, axes, flow, section_unc, lattice)
         uniform_method = "adjoint"
-    except ValueError as exc:
-        if "T-0071" not in str(exc) and "no lattice" not in str(exc):
-            raise
+    except GradientScopeError as exc:
         if section_unc:
             raise ValueError(
-                "Section uncertainties need adjoint gradients, which the present "
-                "configuration has no scope for (nonlinear lifting line, tabulated "
-                "airfoils, deflected controls, body rates or Fourier solver, see "
-                "T-0071): flow inputs use central differences of the production solve."
+                "Section uncertainties need adjoint gradients, which do not cover this "
+                f"configuration yet ({exc}). Flow inputs alone use central differences "
+                "of the production solve."
             ) from exc
         values, jacobian = _central_gradients(aircraft, cond, base, axes, flow, base_coeffs)
         uniform_method = "central differences"

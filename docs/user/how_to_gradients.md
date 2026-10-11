@@ -93,6 +93,6 @@ used.
 
 Phase 1 covers the vortex lattice and the linear lifting line with linear airfoils.
 The nonlinear lifting line, tabulated airfoils, nonzero control deflections, nonzero
-body rates and the Fourier solver are refused with `ValueError` (see T-0071). Ground
+body rates and the Fourier solver are refused with `GradientScopeError` (a `ValueError`); a later version adds them. Ground
 effect is supported: `h` is the height of the moment reference point, and the ground
 plane and its images follow the inputs.

@@ -206,7 +206,7 @@ def test_fallback_central_differences(float64_precision):
     manual = (float(plus.totals.CL) - float(minus.totals.CL)) / (2.0 * step)
     expected = 2.0 * abs(manual) * sigma
     assert result.bars["CL"].layers["input"].half_width == pytest.approx(expected, rel=1e-8)
-    with pytest.raises(ValueError, match="T-0071"):
+    with pytest.raises(ValueError, match="Section uncertainties need adjoint gradients"):
         vt.input_error_bars(
             wing, condition=cond, settings=st,
             uncertainties={"sections": {"tab": {"a0": 0.1}}})

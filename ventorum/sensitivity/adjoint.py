@@ -40,9 +40,16 @@ _SYMMETRIC_WRT = ("alpha", "V_inf", "rho", "h")
 # Outputs that keep a symmetric state symmetric (longitudinal only).
 _SYMMETRIC_OUTPUTS = ("CL", "CDi", "CDp", "CD", "Cm")
 
-# Phase-2 card for refused configurations (nonlinear lifting line, tabulated
-# airfoils, controls, body rates, planform parameters).
-PHASE2_CARD = "T-0071"
+
+
+class GradientScopeError(ValueError):
+    """A configuration that the adjoint gradients do not cover yet.
+
+    The nonlinear lifting line, tabulated airfoils, deflected controls, body
+    rates and the Fourier solver have no adjoint gradients in this version.
+    A later version adds them. Callers can catch this error to use another
+    method (for example central differences of the production solve).
+    """
 
 
 def _gradient_device(result: Any) -> str:
@@ -110,31 +117,31 @@ def _check_names(outputs: Any, wrt: Any) -> tuple[tuple[str, ...], tuple[str, ..
 
 
 def _refuse_configuration(ac: Any, condition: Any, settings: Any, canonical: str) -> None:
-    """Raise ValueError for configurations outside phase 1 (naming the phase-2 card)."""
+    """Raise GradientScopeError for configurations that the adjoint gradients do not cover yet."""
     if canonical == "fourier":
-        raise ValueError(
-            f"The Fourier solver has no adjoint gradients in phase 1 (see {PHASE2_CARD}).")
+        raise GradientScopeError(
+            "The Fourier solver has no adjoint gradients in this version.")
     if canonical == "nonlinear":
-        raise ValueError(
-            f"The nonlinear lifting line has no adjoint gradients in phase 1 (see {PHASE2_CARD}).")
+        raise GradientScopeError(
+            "The nonlinear lifting line has no adjoint gradients in this version.")
     for surf in ac.surfaces:
         for sec in surf.sections:
             from ventorum.core.datatypes import TabulatedAirfoil
 
             if isinstance(sec.airfoil, TabulatedAirfoil):
-                raise ValueError(
-                    "Tabulated airfoils have no adjoint gradients in phase 1 "
-                    f"(see {PHASE2_CARD}); use linear airfoils.")
+                raise GradientScopeError(
+                    "Tabulated airfoils have no adjoint gradients in this version"
+                    "; use linear airfoils.")
         for c in getattr(surf, "controls", []):
             if float(c.deflection) != 0.0:
-                raise ValueError(
+                raise GradientScopeError(
                     f"Control deflection {c.name!r} = {float(c.deflection):g} rad is not zero: "
-                    f"controls have no adjoint gradients in phase 1 (see {PHASE2_CARD}).")
+                    f"controls have no adjoint gradients in this version.")
     if (float(getattr(condition, "p", 0.0)) != 0.0
             or float(getattr(condition, "q", 0.0)) != 0.0
             or float(getattr(condition, "r", 0.0)) != 0.0):
-        raise ValueError(
-            f"Body rates have no adjoint gradients in phase 1 (see {PHASE2_CARD}).")
+        raise GradientScopeError(
+            "Body rates have no adjoint gradients in this version.")
 
 
 def _recover_xi(lattice: Any) -> np.ndarray:
@@ -769,7 +776,7 @@ def gradients(
     ]
     if prep["precision"] == "float32":
         notes.append(
-            "Float32 gradients: the D-13 gate is 1e-3 relative; check the result with "
+            "Float32 gradients: the gradient gate of float32 is 1e-3 relative; check the result with "
             "check_gradients (rtol=1e-3).")
     return GradientResult(
         values=values, jacobian=jacobian, device=prep["device"],

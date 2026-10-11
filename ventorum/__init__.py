@@ -79,6 +79,7 @@ from ventorum.solvers.height_derivatives import (  # noqa: F401
 )
 from ventorum.sensitivity import (  # noqa: F401
     GradientResult,
+    GradientScopeError,
     check_gradients,
     gradient_vjp,
     gradients,

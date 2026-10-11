@@ -64,9 +64,9 @@ reason. Both forms give the same values as the production kernel to round-off.
 
 ## Envelope
 
-Outside phase 1 the functions raise `ValueError`: the nonlinear lifting line, tabulated
-airfoils, nonzero control deflections, nonzero body rates and the Fourier solver
-(see T-0071). In ground effect `h` is the height of the moment reference point, and the
+The functions raise `GradientScopeError` (a `ValueError`) for the configurations that
+they do not cover yet: the nonlinear lifting line, tabulated airfoils, nonzero control
+deflections, nonzero body rates and the Fourier solver. A later version adds them. In ground effect `h` is the height of the moment reference point, and the
 ground plane and its images follow the inputs; a ground strike raises as in `analyze`.
 
 The forward check runs at every call: the differentiated reference copy also gives the
