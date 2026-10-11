@@ -1,5 +1,5 @@
 # Author: Manuel Alejandro Rodriguez Diaz, PhD
-"""Cache of built vortex lattices (owner decision, 2026-10-03).
+"""Cache of built vortex lattices.
 
 A lattice depends only on the geometry of the aircraft and on the mesh
 settings. Repeated solves of the same geometry (at other flight conditions,
