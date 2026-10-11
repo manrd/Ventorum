@@ -129,7 +129,7 @@ def test_dihedral_sideslip_cy(solver):
 
 @pytest.mark.parametrize("solver", [
     pytest.param("vlm", marks=pytest.mark.xfail(
-        strict=True, reason="Open question to the owner: the VLM near-field CY is about 9 % below the far field "
+        strict=True, reason="Known difference, not resolved: the VLM near-field CY is about 9 % below the far field "
         "at alpha 4 deg (the difference grows with the spanwise panels; at alpha 0 the two agree to 0.3 %).")),
     "linear",
     "nonlinear",
@@ -206,7 +206,7 @@ def test_aileron_far_field():
 
 
 @pytest.mark.xfail(strict=True, reason=(
-    "Open question to the owner: the Trefftz trace of the induced drag does not include the "
+    "Known limit, not resolved: the Trefftz trace of the induced drag does not include the "
     "trailing-edge displacement of a deflected control (the controls turn the panel normals). Adding it would "
     "change the induced drag of every deflected case, so it is not added; the flat trace gives no side force."))
 def test_aileron_far_field_side_force_sign():
@@ -249,9 +249,22 @@ def test_warning_rule():
     # Exactly at a limit: no warning (strict inequality).
     assert near_far_lateral_warnings(CY=0.002, CY_farfield=0.001) == []        # diff = floor
     # Both coefficients at once; None and non-finite values give no warning.
-    assert len(near_far_lateral_warnings(CY=0.2, CY_farfield=0.1, Cn=0.02, Cn_trefftz=0.01)) == 2
+    assert len(near_far_lateral_warnings(CY=-0.0009, CY_farfield=0.0009, Cn=0.02, Cn_trefftz=0.01)) == 2
     assert near_far_lateral_warnings(CY=0.2, CY_farfield=None, Cn=None, Cn_trefftz=0.01) == []
     assert near_far_lateral_warnings(CY=float("nan"), CY_farfield=0.1) == []
+
+
+def test_cn_compared_only_without_side_force():
+    """Regression test: with a side force the Cn pair is not compared.
+
+    The Trefftz plane has no chordwise position, so Cn_trefftz misses the yaw of a
+    side force ahead of or behind the reference point. A dihedral wing in sideslip
+    gave a false Cn warning.
+    """
+    w = near_far_lateral_warnings(CY=0.05, CY_farfield=0.05, Cn=-1.4e-4, Cn_trefftz=5.5e-4)
+    assert w == []
+    w = near_far_lateral_warnings(CY=0.0005, CY_farfield=0.0008, Cn=-1.4e-4, Cn_trefftz=5.5e-4)
+    assert len(w) == 1 and "Cn" in w[0]
 
 
 def test_warning_does_not_change_the_score():

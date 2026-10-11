@@ -55,7 +55,7 @@ The trace is the trace of the induced drag. A deflected control turns the panel 
 
 The Trefftz plane has no chordwise position. A side force that acts at a chordwise distance from the reference point gives a near-field yawing moment that `Cn_trefftz` does not contain, so in sideslip the two yawing moments can differ for this reason too.
 
-**Trust warning.** The near-field `CY` (already relative to the free stream) and the near-field `Cn`, expressed in stability axes, are compared with the far-field values. The result gets a warning when $|\text{near}-\text{far}| > 0.05\,|\text{far}|$ and $|\text{near}-\text{far}|$ is larger than a floor: 0.001 for `CY` and 0.0002 for `Cn`. A probable cause of a difference is the side-edge forces that the transpiration model does not carry (see *In-plane edge forces* above). The warning does not change the score.
+**Trust warning.** The near-field `CY` (already relative to the free stream) and the near-field `Cn`, expressed in stability axes, are compared with the far-field values. The result gets a warning when $|\text{near}-\text{far}| > 0.05\,|\text{far}|$ and $|\text{near}-\text{far}|$ is larger than a floor: 0.001 for `CY` and 0.0002 for `Cn`. The `Cn` pair is compared only when the near-field and the far-field side forces are both below the `CY` floor, because of the missing chordwise arm described above. A probable cause of a difference is the side-edge forces that the transpiration model does not carry (see *In-plane edge forces* above). The warning does not change the score.
 
 ## Section quantities
 

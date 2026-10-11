@@ -68,6 +68,12 @@ NEAR_FAR_FLOOR_CY = 0.001
 NEAR_FAR_FLOOR_CN = 0.0002
 
 
+def _negligible_side_force(CY: float | None, CY_farfield: float | None) -> bool:
+    """Return True when the near-field and far-field side forces are below the CY floor."""
+    values = [v for v in (CY, CY_farfield) if v is not None and _is_finite(v)]
+    return all(abs(float(v)) <= NEAR_FAR_FLOOR_CY for v in values)
+
+
 def near_far_lateral_warnings(
     CY: float | None = None,
     CY_farfield: float | None = None,
@@ -82,6 +88,12 @@ def near_far_lateral_warnings(
     ``|near - far| > 0.05 |far|`` and ``|near - far|`` is larger than the
     floor (0.001 for CY, 0.0002 for Cn). A pair with a None or a non-finite
     value gives no warning.
+
+    The Cn pair is compared only when the side force is below the CY floor
+    (near and far field). The Trefftz plane has no chordwise position, so
+    ``Cn_trefftz`` does not contain the yawing moment of a side force that
+    acts ahead of or behind the reference point; with a side force the two
+    Cn values differ for that reason alone.
 
     Parameters
     ----------
@@ -105,6 +117,8 @@ def near_far_lateral_warnings(
              ("Cn", "Cn_trefftz", "stability axes", Cn, Cn_trefftz, NEAR_FAR_FLOOR_CN))
     for name, far_name, axes, near, far, floor in pairs:
         if near is None or far is None or not (_is_finite(near) and _is_finite(far)):
+            continue
+        if name == "Cn" and not _negligible_side_force(CY, CY_farfield):
             continue
         near_v, far_v = float(near), float(far)
         diff = abs(near_v - far_v)
