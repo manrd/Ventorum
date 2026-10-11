@@ -61,6 +61,16 @@ work to remove the limit are in
 experiments in a process that does not load PyTorch. Do not use it for
 normal work.
 
+**The VJP kernels of the adjoint gradients.** The Cython VJP extension
+(`ventorum.aero.vortex_vjp_cython`) has the same build rule and the same
+fallback: without OpenMP its rows run in blocks on Python threads, and the
+source derivatives of the blocks are added in block order
+(`test_cython_python_threads_equal_openmp` in `tests/test_vjp_kernels.py`).
+The Numba VJP kernels use `prange`, so they probably have the same
+OpenMP problem as the Numba solve kernels. Neither is tested on macOS yet.
+The gradients use Numba by default; when Numba fails on a Mac, select the
+Cython or numpy VJP backend (`ventorum.sensitivity.kernels.set_vjp_backend`).
+
 ## PL-2: Nonlinear sweeps past the maximum lift gain little on the GPU
 
 **Cause.** A nonlinear lifting-line sweep with continuation starts each

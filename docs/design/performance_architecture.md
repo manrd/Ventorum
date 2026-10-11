@@ -118,6 +118,24 @@ Rules for a change:
 * A new per-case quantity of the loads must be added to `engine.loads` and to `loads.loads_result` (both paths make the objects there).
 * Each GPU feature needs a parity test in `tests/test_gpu_pipeline.py` against the CPU path, in float64 (round-off) and float32.
 
+## Adjoint gradients: VJP kernels
+
+`ventorum.gradients` takes the partial derivatives from the differentiable reference copy (`sensitivity/reference.py`). Its O(n^2) parts (system rows, induced velocity at the load points, Trefftz normal wash) run as PyTorch autograd functions with a compiled forward kernel and a compiled vector-Jacobian-product (VJP) kernel (`sensitivity/kernels.py`). The derivation is in the theory manual ([Adjoint gradients](../theory/gradients)).
+
+| Module | Content |
+| --- | --- |
+| `aero/vortex_vjp.py` | numpy reference of the forward products and of the VJP (row chunks). |
+| `aero/vortex_vjp_numba.py` | Numba kernels: row blocks in parallel (two blocks per thread), the source derivatives of each block in its own buffer, the buffers added in block order. |
+| `aero/vortex_vjp_cython.pyx` | Cython kernels with the same layout (OpenMP; without OpenMP the rows run in blocks on Python threads, as the solve kernels). |
+| `gpu/vjp_kernels.py` | Warp kernels (float32 and float64): the system rows with one thread per entry (the sources of the unknown in source order), the VJP in a row launch (target derivatives per block of 32 sources) and a column launch (source derivatives per block of 32 targets), block sums added by PyTorch in float64, no atomic additions. |
+
+Rules:
+
+* The selection: `method="auto"` takes the machine profile entry `grad_vjp` (`settings["grad_vjp"][size_class][device]`, device `"cpu"` or `"gpu"`, the tuner step 5); without the entry Numba on the CPU and Warp on the GPU. `"torch"` in the profile selects the reference copy. An older profile without the entry loads unchanged (the schema version does not change).
+* Every VJP backend must agree with the PyTorch reference VJP to round-off: 1e-12 in float64, 1e-5 in float32, for the products and every input gradient (`tests/test_vjp_kernels.py`).
+* A change of the kernel formula of the reference copy (`seg_vel`, `ray_vel`, the masks) needs the same change in all VJP backends and in the derivation.
+* The CPU kernels compute each pair in float64 (scalar code has the same speed in float32). The float32 GPU kernels compute each pair in float32 and add at most 32 terms in float32 before the float64 block sums.
+
 ## How to check a change
 
 1. The verification report must not change (`validation/run_verification.py`).

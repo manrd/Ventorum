@@ -86,8 +86,27 @@ Gradients run on the device of the production solve (the device setting of
 `ventorum.gpu`). They run in float32 by default (the GPU precision setting selects it)
 and in float64 when that setting selects float64. `precision_primal` gives the precision
 of the production solve. The symmetric system is folded only when the case is
-symmetric and every requested input and output is symmetric; else the full system is
-used.
+symmetric and every requested input and output is symmetric (node inputs count as
+symmetric when every surface is symmetric); else the full system is used.
+
+## Speed: the path of the partial derivatives
+
+The keyword `method` selects how the partial derivatives of the O(n^2) parts (system
+rows, load points, Trefftz points) are made:
+
+* `"auto"` (the default): the choice of the machine profile (`ventorum-tune` measures
+  it per case size and device); without a profile the compiled kernels, Numba on the
+  CPU and NVIDIA Warp on the GPU.
+* `"kernels"`: the compiled vector-Jacobian-product kernels of the device.
+* `"reference"`: the PyTorch reference copy (slower; the correctness reference).
+
+All paths give the same gradients to round-off. `result.partials` names the path and
+the backend, for example `"kernels:numba"`:
+
+```python
+fast = vt.gradients(aircraft, condition, settings, outputs=("CL",), wrt=("alpha",), method="kernels")
+print(fast.partials)
+```
 
 ## Limits
 

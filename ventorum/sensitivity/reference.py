@@ -3,8 +3,10 @@
 
 The model rebuilds the lattice from the edge nodes of each surface, the
 system rows and the outputs in PyTorch, with the same formulas as the
-production code. The mesh topology is fixed. All O(n^2) work runs in row
-chunks with a memory budget.
+production code. The mesh topology is fixed. The O(n^2) work (system rows,
+load points, Trefftz points) runs in row chunks with a memory budget, or,
+when ``build["vjp_backend"]`` names a backend, in the compiled forward and
+vector-Jacobian-product kernels of :mod:`ventorum.sensitivity.kernels`.
 
 References
 ----------
