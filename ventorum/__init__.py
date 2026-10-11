@@ -342,23 +342,11 @@ __version__ = "0.3.0"
 
 def __getattr__(name: str):
     """Return an old solver class name with a deprecation warning."""
-    if name == "HorseshoeSolver":
-        from ventorum.solvers.horseshoe import VortexLatticeSolver
-        from ventorum.utils.deprecation import warn_deprecated_class
+    from ventorum.utils.deprecation import DEPRECATED_CLASS_NAMES, warn_deprecated_class
 
-        warn_deprecated_class("HorseshoeSolver", "VortexLatticeSolver")
-        return VortexLatticeSolver
-    if name == "LinearSolver":
-        from ventorum.solvers.linear import LinearLLTSolver
-        from ventorum.utils.deprecation import warn_deprecated_class
+    if name in DEPRECATED_CLASS_NAMES:
+        import ventorum.solvers as solvers
 
-        warn_deprecated_class("LinearSolver", "LinearLLTSolver")
-        return LinearLLTSolver
-    if name == "NonlinearSolver":
-        from ventorum.solvers.nonlinear import NonlinearLLTSolver
-        from ventorum.utils.deprecation import warn_deprecated_class
-
-        warn_deprecated_class("NonlinearSolver", "NonlinearLLTSolver")
-        return NonlinearLLTSolver
+        warn_deprecated_class(name, DEPRECATED_CLASS_NAMES[name])
+        return getattr(solvers, DEPRECATED_CLASS_NAMES[name])
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
-

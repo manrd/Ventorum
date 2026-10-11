@@ -132,3 +132,19 @@ def _without_getattr(text: str) -> str:
         if not skip:
             out.append(line)
     return "\n".join(out)
+
+
+def test_from_import_of_old_name_warns_once():
+    """A from-import of an old name from a package warns once, at the user's line.
+
+    Regression test: importlib probes the name with hasattr before the import
+    statement reads it, which gave two warnings.
+    """
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        from ventorum import HorseshoeSolver  # noqa: F401
+        from ventorum.solvers import LinearSolver  # noqa: F401
+        from ventorum.solvers.nonlinear import NonlinearSolver  # noqa: F401
+    future = [w for w in caught if issubclass(w.category, FutureWarning)]
+    assert [str(w.message).split()[0] for w in future] == list(OLD_TO_NEW)
+    assert all(Path(w.filename).name == Path(__file__).name for w in future)

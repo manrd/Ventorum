@@ -3,8 +3,11 @@
 
 from __future__ import annotations
 
+import os
 import traceback
 import warnings
+
+_PACKAGE_DIR = os.path.normcase(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))) + os.sep
 
 #: Canonical solver names. Use these in new code.
 CANONICAL_SOLVERS = ("auto", "vlm", "linear", "nonlinear", "fourier")
@@ -16,6 +19,29 @@ SOLVER_ALIASES = {
     "llt": "linear",
     "linear_llt": "linear",
 }
+
+
+def _user_stacklevel() -> int:
+    """Return the ``stacklevel`` of the first frame outside the package.
+
+    The caller gives this value to :func:`warnings.warn` so that the warning
+    points at the user's code.
+
+    Returns
+    -------
+    int
+        Stack level for :func:`warnings.warn` called by the caller of this
+        function, or -1 when importlib probes a name for the statement
+        ``from package import name``.
+    """
+    frames = traceback.extract_stack()[:-2]
+    for depth, frame in enumerate(reversed(frames), start=2):
+        if frame.name == "_handle_fromlist" and frame.filename.startswith("<frozen importlib"):
+            return -1
+        if os.path.normcase(os.path.abspath(frame.filename)).startswith(_PACKAGE_DIR):
+            continue
+        return depth
+    return 2
 
 
 def warn_solver_alias(solver_name: str | None) -> str:
@@ -43,17 +69,7 @@ def warn_solver_alias(solver_name: str | None) -> str:
         f"solver '{solver_name}' is deprecated; use '{canonical}' instead. "
         "The old name still works for now and gives the same result."
     )
-    level = 2
-    frames = traceback.extract_stack()
-    for depth, frame in enumerate(reversed(frames[:-1]), start=2):
-        name = frame.filename.replace("\\", "/")
-        if "ventorum/utils/deprecation" in name:
-            continue
-        if "/ventorum/" in name or name.endswith("/ventorum.py"):
-            continue
-        level = depth
-        break
-    warnings.warn(message, FutureWarning, stacklevel=level)
+    warnings.warn(message, FutureWarning, stacklevel=_user_stacklevel())
     return canonical
 
 
@@ -79,16 +95,12 @@ def warn_deprecated_class(old_name: str, new_name: str) -> None:
         f"{old_name} is deprecated; use {new_name}. "
         "The old name will be removed in version 1.0."
     )
-    level = 2
-    frames = traceback.extract_stack()
-    for depth, frame in enumerate(reversed(frames[:-1]), start=2):
-        name = frame.filename.replace("\\", "/")
-        if "ventorum/utils/deprecation" in name:
-            continue
-        if "/ventorum/" in name or name.endswith("/ventorum.py"):
-            continue
-        level = depth
-        break
+    level = _user_stacklevel()
+    if level < 0:
+        # importlib probes the name of a package with hasattr before the
+        # statement "from package import name" reads it. Warn only once, at
+        # the read.
+        return
     warnings.warn(message, FutureWarning, stacklevel=level)
 
 
