@@ -394,3 +394,21 @@ def test_drag_basis_mixing_gives_no_cd_bar(monkeypatch):
     assert "CL" in result.bars
     json.dumps(result.to_dict(), allow_nan=False)
     assert "| CD |" not in result.summary()
+
+
+def test_own_surface_panels_note_global_ratios():
+    # Regression: a surface with its own n_panels has rounded panel counts on
+    # the coarse levels, but the bar uses the global ratios r21 and r32. The
+    # result says so and gives the panel counts of that surface.
+    aircraft = _wing_and_tail()
+    aircraft.surfaces[1].n_panels = 10
+    condition = FlightCondition(alpha=np.radians(5.0))
+    settings = SolverSettings(solver_type="vlm", n_panels=24)
+    result = numerical_error_bars(aircraft, condition=condition, settings=settings)
+    assert result.levels == [24, 17, 12]
+    ratio_notes = [n for n in result.notes if "global panel counts" in n]
+    assert len(ratio_notes) == 1
+    assert "'tail'" in ratio_notes[0]
+    assert "[10, 7, 5]" in ratio_notes[0]
+    plain = numerical_error_bars(_wing_and_tail(), condition=condition, settings=settings)
+    assert not any("global panel counts" in n for n in plain.notes)

@@ -752,6 +752,44 @@ def _surface_clip_note(
     return None
 
 
+def _surface_ratio_note(level_aircraft: list[Aircraft], levels: list[int]) -> str | None:
+    """Note when a surface with its own ``n_panels`` has other refinement ratios, or None.
+
+    The GCI of a total coefficient uses one pair of refinement ratios, from
+    the global panel counts. A surface with its own ``n_panels`` is scaled
+    and rounded at each level, so its own ratios can differ.
+
+    Parameters
+    ----------
+    level_aircraft : list[Aircraft]
+        Aircraft of the fine, medium and coarse levels.
+    levels : list[int]
+        Global spanwise panel counts [N1, N2, N3].
+
+    Returns
+    -------
+    str or None
+        One note that names each surface with its own ``n_panels``, its
+        panel counts and its ratios, or None when no surface has one.
+    """
+    r21, r32 = refinement_ratios(levels)
+    parts = []
+    for index, surf in enumerate(level_aircraft[0].surfaces):
+        if surf.n_panels is None:
+            continue
+        counts = [int(ac.surfaces[index].n_panels) for ac in level_aircraft]
+        s21 = counts[0] / counts[1]
+        s32 = counts[1] / counts[2]
+        parts.append(f"{surf.name!r} {counts} (ratios {s21:.4f}, {s32:.4f})")
+    if not parts:
+        return None
+    return (
+        f"the refinement ratios r21={r21:.4f} and r32={r32:.4f} come from the "
+        f"global panel counts {list(levels)}; surfaces with their own n_panels "
+        f"have the panel counts {'; '.join(parts)}"
+    )
+
+
 def numerical_error_bars(
     geometry: Aircraft | LiftingSurface,
     condition: FlightCondition | None = None,
@@ -775,8 +813,10 @@ def numerical_error_bars(
     as the user gave them. An automatic chordwise count is resolved one
     time on the fine level and then used for all three levels, because
     in ground effect it can depend on the mesh. A surface with its own
-    ``n_panels`` is scaled in the same way. The bar covers the spanwise
-    discretisation error only.
+    ``n_panels`` is scaled in the same way; its counts are rounded, but
+    the bar uses the global refinement ratios, and a note gives the
+    counts of that surface. The bar covers the spanwise discretisation
+    error only.
 
     Parameters
     ----------
@@ -853,8 +893,10 @@ def numerical_error_bars(
         )
 
     level_results: list[SolverResult] = []
+    all_level_aircraft: list[Aircraft] = []
     for n_level in levels:
         level_aircraft = _level_aircraft(aircraft, n_level, n1)
+        all_level_aircraft.append(level_aircraft)
         level_settings = base.clone()
         level_settings.n_panels = n_level
         if frozen_chord is not None:
@@ -895,6 +937,9 @@ def numerical_error_bars(
     clip = _surface_clip_note(base, level_results) if base.proportional_panels else None
     if clip is not None:
         notes.append(clip)
+    ratio_note = _surface_ratio_note(all_level_aircraft, levels)
+    if ratio_note is not None:
+        notes.append(ratio_note)
     return ErrorBarResult(
         bars=bars,
         axes=axes,
