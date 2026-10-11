@@ -7,3 +7,7 @@ A_SL = 340.294       # Speed of sound at sea level [m/s]
 # The methods are incompressible. Above this Mach number the results are out
 # of the valid envelope (no compressibility correction is applied).
 MACH_LIMIT_INCOMPRESSIBLE = 0.3
+
+# A lift or moment slope below this value [per rad or per unit h/c] gives no
+# aerodynamic centre (pitch or height) and no Irodov margin.
+MIN_CENTRE_SLOPE = 1e-9

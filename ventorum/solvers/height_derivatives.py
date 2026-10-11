@@ -45,6 +45,7 @@ from typing import Any
 
 import numpy as np
 
+from ventorum.core.constants import MIN_CENTRE_SLOPE
 from ventorum.core.datatypes import Aircraft, FlightCondition, LiftingSurface, SolverResult, SolverSettings
 from ventorum.core.errors import GroundStrikeError
 
@@ -53,7 +54,7 @@ __all__ = ["HeightDerivativesResult", "height_derivatives"]
 _VARIABLES = ("alpha", "beta", "phi", "h")
 _COEFFS = ("CL", "CD", "CY", "Cl", "Cm", "Cn")
 # A slope below this value [per rad or per unit h/c] gives no aerodynamic centre.
-_MIN_SLOPE = 1e-9
+_MIN_SLOPE = MIN_CENTRE_SLOPE
 
 
 def _json_float(value: float | None) -> float | None:

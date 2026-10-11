@@ -118,3 +118,26 @@ def test_agent_tool_margin_independent_of_height_ref():
     assert m_ref is not None and m_te is not None
     assert abs(m_te - m_ref) < 2e-3          # truncation of the 1 deg and 0.05 m steps only
     assert p_te["irodov"]["pivot_point_m"] == pytest.approx(REF.tolist())
+
+
+def test_grid_and_state_tools_use_one_slope_threshold():
+    """A slope between 1e-12 and 1e-9 gives no centre in the grid tool, as in the state tool."""
+    from ventorum.ground_effect.sweep import GroundEffectSweepResult
+    from ventorum.solvers import height_derivatives as hd
+
+    heights = np.array([0.2, 0.3, 0.4])
+    alphas = np.array([2.0, 4.0, 6.0])
+    phis = np.array([0.0])
+    h_grid, a_grid = np.meshgrid(heights / C, np.radians(alphas), indexing="ij")
+    slope = 1e-10   # dCL/d(h/c) and dCL/dalpha, below the threshold
+    CL = (0.3 + slope * h_grid + slope * a_grid)[:, :, None]
+    Cm = (-0.05 + 1e-3 * h_grid + 1e-3 * a_grid)[:, :, None]
+    res = GroundEffectSweepResult(heights=heights, alphas_deg=alphas, phis_deg=phis,
+                                  grid_shape=(3, 3, 1), CL=CL, Cm=Cm, c_ref=C)
+    der = res.compute_stability_derivatives()
+    assert np.allclose(der["CL_h"], slope)
+    assert np.all(np.isnan(der["x_h"]))
+    assert np.all(np.isnan(der["x_alpha"]))
+    state = hd._irodov(np.array([[slope, 0, 0, slope], [0] * 4, [0] * 4, [0] * 4,
+                                 [1e-3, 0, 0, 1e-3], [0] * 4]), C)
+    assert state["x_alpha_m"] is None and state["x_h_m"] is None

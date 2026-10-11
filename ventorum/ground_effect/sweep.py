@@ -61,7 +61,7 @@ from ventorum.utils.jsonsafe import json_safe
 from ventorum.utils.parallel import estimate_panels, run_cases
 from ventorum.aero.system import make_ground_plane
 from ventorum.geometry.lattice import build_lattice
-from ventorum.core.constants import RHO_SL
+from ventorum.core.constants import MIN_CENTRE_SLOPE, RHO_SL
 from ventorum.ground_effect.solver import (
     MAX_BANK_DEG,
     _as_aircraft,
@@ -227,7 +227,7 @@ class GroundEffectSweepResult:
             CL_a = np.array([_nan_slope(a_rad[mask], self.CL[hi, mask, p0]) for hi in range(len(h_vals))])
             Cm_a = np.array([_nan_slope(a_rad[mask], self.Cm[hi, mask, p0]) for hi in range(len(h_vals))])
             with np.errstate(divide="ignore", invalid="ignore"):
-                x_ac = np.where(np.abs(CL_a) > 1e-9, -Cm_a / CL_a * c, np.nan)
+                x_ac = np.where(np.abs(CL_a) > MIN_CENTRE_SLOPE, -Cm_a / CL_a * c, np.nan)
             out.update(CL_alpha=CL_a, CL_alpha_deg=CL_a * np.pi / 180.0,
                        Cm_alpha=Cm_a, Cm_alpha_deg=Cm_a * np.pi / 180.0, x_ac=x_ac)
 
@@ -248,7 +248,7 @@ class GroundEffectSweepResult:
             Cm_h = np.gradient(self.Cm[:, :, p0], h_over_c, axis=0)
             out.update(CL_h=CL_h, Cm_h=Cm_h)
             with np.errstate(divide="ignore", invalid="ignore"):
-                x_h = np.where(np.abs(CL_h) > 1e-12, -Cm_h / CL_h * c, np.nan)
+                x_h = np.where(np.abs(CL_h) > MIN_CENTRE_SLOPE, -Cm_h / CL_h * c, np.nan)
             out["x_h"] = x_h
             if len(self.alphas_deg) >= 2:
                 CL_al = np.gradient(self.CL[:, :, p0], a_rad, axis=1)
@@ -266,7 +266,7 @@ class GroundEffectSweepResult:
                         CL_al = CL_al - CL_h * dhr
                         Cm_al = Cm_al - Cm_h * dhr
                 with np.errstate(divide="ignore", invalid="ignore"):
-                    x_alpha = np.where(np.abs(CL_al) > 1e-12, -Cm_al / CL_al * c, np.nan)
+                    x_alpha = np.where(np.abs(CL_al) > MIN_CENTRE_SLOPE, -Cm_al / CL_al * c, np.nan)
                 out["x_alpha"] = x_alpha
                 out["irodov_margin"] = (x_alpha - x_h) / c
         return out
