@@ -14,13 +14,21 @@ Kernel
 ------
 The kernel is the one of the reference copy: the bound segment ``a -> b``,
 the chordwise legs ``a_te -> a`` and ``b -> b_te``, and the semi-infinite
-wake rays from ``b_te`` and ``a_te`` along ``d``, each with the core term
-``rc^2`` (Katz and Plotkin 2001, section 10.4; the core as in
-:mod:`ventorum.aero.vortex`). The segment uses the stable form of the
-projection where the target is not over the segment, the ray the stable
-form of ``1 + cos(t)`` behind its start point. Pairs whose target lies on a
-source segment by the mesh topology (the own panel of a load point, the
-edge line of a leg mid-point) are zero, with zero derivatives.
+wake rays from ``b_te`` and ``a_te`` along ``d`` (Katz and Plotkin 2001,
+section 10.4). The core acts on the distance ``D`` from the target to the
+finite filament, as in :mod:`ventorum.aero.vortex`. Over a segment the
+denominator is ``|r1 x r2|^2 + rc^2 |r0|^2``, with the stable form of the
+projection where ``r1 . r2 > 0``. In front of the start point of a ray it
+is ``|d x r|^2 + rc^2``. Outside a segment (before ``A`` or after ``B``)
+and behind the start point of a ray, the exact Biot-Savart law (in its
+form without cancellation) is multiplied by the Scully factor
+``D^2 / (D^2 + rc^2)``, with ``D`` the distance to the nearest end point
+(Scully 1975; Vatistas, Kozel and Mih 1991, n = 1). ``D^2`` is C1 across
+the end points. At exactly collinear outside points the velocity is zero,
+but its derivative is the exact-law derivative times the factor. Pairs
+whose target lies on a source segment by the mesh topology (the own panel
+of a load point, the edge line of a leg mid-point) are zero, with zero
+derivatives.
 
 The pair core is ``rc2 = rc2_src[j] + tg_rc2[i]`` for a target and a source
 of different core groups (``use_tg``), else ``rc2_src[j]``.
@@ -48,6 +56,11 @@ References
 ----------
 * J. Katz and A. Plotkin, "Low-Speed Aerodynamics", 2nd ed., Cambridge
   University Press, 2001, sections 2.11 and 10.4.
+* M. P. Scully, "Computation of helicopter rotor wake geometry and its
+  influence on rotor harmonic airloads", ASRL TR 178-1, Massachusetts
+  Institute of Technology, 1975.
+* G. H. Vatistas, V. Kozel and W. C. Mih, "A simpler model for
+  concentrated vortices", Experiments in Fluids 11, 1991, pp. 73-76.
 * A. Griewank and A. Walther, "Evaluating Derivatives: Principles and
   Techniques of Algorithmic Differentiation", 2nd ed., SIAM, 2008.
 * J. R. R. A. Martins and J. T. Hwang, "Review and unification of methods
@@ -142,49 +155,82 @@ def _seg_forward(P, A, B, rc2, floor):
     c = _cross(r1, r2)
     cr2 = _dot(c, c)
     r0sq = _dot(r0, r0)
-    n1 = np.sqrt(_dot(r1, r1) + floor)
-    n2 = np.sqrt(_dot(r2, r2) + floor)
+    d1 = _dot(r1, r1) + floor
+    d2 = _dot(r2, r2) + floor
+    n1 = np.sqrt(d1)
+    n2 = np.sqrt(d2)
     t1 = r1 / n1[..., None]
     t2 = r2 / n2[..., None]
     dot12 = _dot(r1, r2)
     n12 = n1 * n2
-    out = dot12 > 0.0
-    den_out = np.where(out, n12 * (n12 + dot12), 1.0)
-    proj_out = cr2 * (n1 + n2) / den_out
+    e = n12 + dot12
+    # Over the segment: the stable projection where r1 . r2 > 0, else the
+    # direct form.
+    os_ = dot12 > 0.0
+    den_os = np.where(os_, n12 * e, 1.0)
+    proj_os = cr2 * (n1 + n2) / den_os
     proj_in = _dot(r0, t1 - t2)
-    proj = np.where(out, proj_out, proj_in)
+    proj = np.where(os_, proj_os, proj_in)
     denom = cr2 + rc2 * r0sq
     ok = denom > floor
     safe = np.where(ok, denom, 1.0)
-    k = np.where(ok, _INV_4PI * proj / safe, 0.0)
+    k_in = np.where(ok, _INV_4PI * proj / safe, 0.0)
+    # Outside the segment (before A or after B): exact law times
+    # F = D2 / (D2 + rc2), D2 the squared distance to the nearest end point.
+    before = _dot(r0, r1) < 0.0
+    after = _dot(r0, r2) > 0.0
+    outside = before | after
+    D2 = np.where(before, d1, d2)
+    ok_out = outside & (e > floor)
+    den_out = np.where(ok_out, n12 * e, 1.0)
+    q = 1.0 / (D2 + rc2)
+    F = D2 * q
+    k_out = np.where(ok_out, _INV_4PI * (n1 + n2) / den_out * F, 0.0)
+    k = np.where(outside, k_out, k_in)
     v = c * k[..., None]
-    return v, (r1, r2, r0, c, cr2, r0sq, n1, n2, t1, t2, dot12, n12, out, den_out, proj_out,
-               rc2, ok, safe, k)
+    return v, (r1, r2, r0, c, cr2, r0sq, n1, n2, t1, t2, dot12, n12, e, os_, den_os, proj_os,
+               rc2, ok, safe, k_in, k, outside, before, ok_out, den_out, q, F, k_out)
 
 
 def _seg_backward(u, st):
     """Return (gP, gA, gB, grc2) of a segment for the adjoint *u* of its velocity."""
-    (r1, r2, r0, c, cr2, r0sq, n1, n2, t1, t2, dot12, n12, out, den_out, proj_out,
-     rc2, ok, safe, k) = st
+    (r1, r2, r0, c, cr2, r0sq, n1, n2, t1, t2, dot12, n12, e, os_, den_os, proj_os,
+     rc2, ok, safe, k_in, k, outside, before, ok_out, den_out, q, F, k_out) = st
     gc = k[..., None] * u
     gk = _dot(u, c)
-    gproj = np.where(ok, gk * _INV_4PI / safe, 0.0)
-    gden = np.where(ok, -gk * k / safe, 0.0)
+    # Over the segment: k = proj / (4 pi (cr2 + rc2 r0sq)).
+    gki = np.where(outside, 0.0, gk)
+    gproj = np.where(ok, gki * _INV_4PI / safe, 0.0)
+    gden = np.where(ok, -gki * k_in / safe, 0.0)
     gcr2 = gden.copy()
     grc2 = gden * r0sq
     gr0sq = gden * rc2
-    gpo = np.where(out, gproj, 0.0)
-    gpi = np.where(out, 0.0, gproj)
-    # Stable form: proj = cr2 (n1 + n2) / D, D = n12 (n12 + dot12).
-    gcr2 = gcr2 + gpo * (n1 + n2) / den_out
-    gsum = gpo * cr2 / den_out
-    gD = -gpo * proj_out / den_out
-    gn12 = gD * (2.0 * n12 + dot12)
-    gdot12 = gD * n12
+    gpo = np.where(os_, gproj, 0.0)
+    gpi = np.where(os_, 0.0, gproj)
+    # Stable form: proj = cr2 (n1 + n2) / G, G = n12 e.
+    gcr2 = gcr2 + gpo * (n1 + n2) / den_os
+    gsum = gpo * cr2 / den_os
+    gG = -gpo * proj_os / den_os
+    gn12 = gG * e
+    ge = gG * n12
+    # Outside: k = (n1 + n2) / (4 pi n12 e) F, F = D2 / (D2 + rc2).
+    gko = np.where(ok_out, gk, 0.0)
+    gsum = gsum + gko * _INV_4PI * F / den_out
+    gG = -gko * k_out / den_out
+    gn12 = gn12 + gG * e
+    ge = ge + gG * n12
+    gF = gko * _INV_4PI * (n1 + n2) / den_out
+    # dF/dD2 = rc2 / (D2 + rc2)^2, dF/drc2 = -D2 / (D2 + rc2)^2.
+    gD2 = gF * (rc2 * q) * q
+    grc2 = grc2 - gF * F * q
+    # e = n12 + dot12.
+    gn12 = gn12 + ge
+    gdot12 = ge
     gn1 = gsum + gn12 * n2
     gn2 = gsum + gn12 * n1
-    gr1 = gdot12[..., None] * r2
-    gr2 = gdot12[..., None] * r1
+    # D2 = |r1|^2 before A, |r2|^2 after B.
+    gr1 = gdot12[..., None] * r2 + (2.0 * np.where(before, gD2, 0.0))[..., None] * r1
+    gr2 = gdot12[..., None] * r1 + (2.0 * np.where(before, 0.0, gD2))[..., None] * r2
     # Direct form: proj = r0 . (r1 / n1 - r2 / n2).
     gr0 = gpi[..., None] * (t1 - t2)
     gt1 = gpi[..., None] * r0
@@ -207,40 +253,49 @@ def _ray_forward(P, A, d, rc2, floor):
     r = P - A
     c = _cross(d, r)
     cr2 = _dot(c, c)
-    rn = np.sqrt(_dot(r, r) + floor)
+    D2 = _dot(r, r) + floor
+    rn = np.sqrt(D2)
     dr = _dot(d, r)
-    behind = dr < 0.0
-    den_b = np.where(behind, rn * (rn - dr), 1.0)
-    oc_b = cr2 / den_b
-    oc = np.where(behind, oc_b, 1.0 + dr / rn)
+    # In front of the start point: k = (1 + cos(t)) / (4 pi (cr2 + rc2)).
     denom = cr2 + rc2
     ok = denom > floor
     safe = np.where(ok, denom, 1.0)
-    k = np.where(ok, _INV_4PI * oc / safe, 0.0)
+    k_in = np.where(ok, _INV_4PI * (1.0 + dr / rn) / safe, 0.0)
+    # Behind it: exact law times F = D2 / (D2 + rc2).
+    behind = dr < 0.0
+    e = rn * (rn - dr)
+    ok_out = behind & (e > floor)
+    den_out = np.where(ok_out, e, 1.0)
+    q = 1.0 / (D2 + rc2)
+    F = D2 * q
+    k_out = np.where(ok_out, _INV_4PI / den_out * F, 0.0)
+    k = np.where(behind, k_out, k_in)
     v = c * k[..., None]
-    return v, (r, d, c, cr2, rn, dr, behind, den_b, oc_b, ok, safe, k)
+    return v, (r, d, c, cr2, rn, dr, rc2, ok, safe, k_in, k, behind, ok_out, den_out, q, F, k_out)
 
 
 def _ray_backward(u, st):
     """Return (gP, gA, gd, grc2) of a ray for the adjoint *u* of its velocity."""
-    r, d, c, cr2, rn, dr, behind, den_b, oc_b, ok, safe, k = st
+    r, d, c, cr2, rn, dr, rc2, ok, safe, k_in, k, behind, ok_out, den_out, q, F, k_out = st
     gc = k[..., None] * u
     gk = _dot(u, c)
-    goc = np.where(ok, gk * _INV_4PI / safe, 0.0)
-    gden = np.where(ok, -gk * k / safe, 0.0)
+    # In front: k = (1 + dr / rn) / (4 pi (cr2 + rc2)).
+    gkf = np.where(behind, 0.0, gk)
+    goc = np.where(ok, gkf * _INV_4PI / safe, 0.0)
+    gden = np.where(ok, -gkf * k_in / safe, 0.0)
     gcr2 = gden.copy()
-    grc2 = gden
-    gb = np.where(behind, goc, 0.0)
-    gf = np.where(behind, 0.0, goc)
-    # Behind: oc = cr2 / E, E = rn (rn - dr).
-    gcr2 = gcr2 + gb / den_b
-    gE = -gb * oc_b / den_b
-    grn = gE * (2.0 * rn - dr)
-    gdr = -gE * rn
-    # Ahead: oc = 1 + dr / rn.
-    gdr = gdr + gf / rn
-    grn = grn - gf * dr / (rn * rn)
-    gr = (grn / rn)[..., None] * r + gdr[..., None] * d
+    grc2 = gden.copy()
+    gdr = goc / rn
+    grn = -goc * dr / (rn * rn)
+    # Behind: k = F / (4 pi E), E = rn (rn - dr), D2 = |r|^2.
+    gkb = np.where(ok_out, gk, 0.0)
+    gE = -gkb * k_out / den_out
+    grn = grn + gE * (2.0 * rn - dr)
+    gdr = gdr - gE * rn
+    gF = gkb * _INV_4PI / den_out
+    gD2 = gF * (rc2 * q) * q
+    grc2 = grc2 - gF * F * q
+    gr = (grn / rn + 2.0 * gD2)[..., None] * r + gdr[..., None] * d
     gd = gdr[..., None] * r
     gc = gc + (2.0 * gcr2)[..., None] * c
     gd = gd + _cross(r, gc)

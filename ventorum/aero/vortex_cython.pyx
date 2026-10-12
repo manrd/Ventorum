@@ -84,6 +84,52 @@ cdef inline bint _is_straight(const double[:, ::1] a, const double[:, ::1] b,
     return True
 
 
+cdef inline double _seg_k(double r1x, double r1y, double r1z, double r2x, double r2y, double r2z,
+                          double r0x, double r0y, double r0z, double n1, double n2,
+                          double cr2, double r0sq, double rc2) noexcept nogil:
+    # Factor k of one finite segment (velocity = (r1 x r2) k), as in the numpy kernel.
+    # Over the segment the core term is rc2 |r0|^2. Outside it (before the start
+    # or after the end) the exact law is multiplied by D^2 / (D^2 + rc2), with D
+    # the distance to the nearest end point.
+    cdef double dd, e, proj, denom
+    cdef bint before = r0x * r1x + r0y * r1y + r0z * r1z < 0.0
+    cdef bint after = r0x * r2x + r0y * r2y + r0z * r2z > 0.0
+    if before or after:
+        if before:
+            dd = r1x * r1x + r1y * r1y + r1z * r1z + 1e-300
+        else:
+            dd = r2x * r2x + r2y * r2y + r2z * r2z + 1e-300
+        e = n1 * n2 + r1x * r2x + r1y * r2y + r1z * r2z
+        if e > 1e-300:
+            return _INV_4PI * (n1 + n2) / (n1 * n2 * e) * (dd / (dd + rc2))
+        return 0.0
+    proj = (r0x * (r1x / n1 - r2x / n2)
+            + r0y * (r1y / n1 - r2y / n2)
+            + r0z * (r1z / n1 - r2z / n2))
+    denom = cr2 + rc2 * r0sq
+    if denom > 1e-300:
+        return _INV_4PI * proj / denom
+    return 0.0
+
+
+cdef inline double _ray_k(double rx, double ry, double rz, double rn, double dr,
+                          double cr2, double rc2) noexcept nogil:
+    # Factor k of one semi-infinite line (velocity = (d x r) k), as in the numpy
+    # kernel; dr = d . r. Behind the start point the exact law is multiplied by
+    # D^2 / (D^2 + rc2), with D = |r|.
+    cdef double dd, e, denom
+    if dr < 0.0:
+        dd = rx * rx + ry * ry + rz * rz + 1e-300
+        e = rn * (rn - dr)
+        if e > 1e-300:
+            return _INV_4PI / e * (dd / (dd + rc2))
+        return 0.0
+    denom = cr2 + rc2
+    if denom > 1e-300:
+        return _INV_4PI * (1.0 + dr / rn) / denom
+    return 0.0
+
+
 def induced_velocity_kernel(const double[:, ::1] P, const double[:, ::1] a, const double[:, ::1] b,
                             const double[:, ::1] a_te, const double[:, ::1] b_te, const double[:, ::1] d,
                             const double[::1] rc2_src, const cnp.int64_t[::1] src_group, const double[::1] g_src,
@@ -131,12 +177,12 @@ def induced_velocity_kernel(const double[:, ::1] P, const double[:, ::1] a, cons
     cdef double px, py, pz, ax, ay, az, bx, by, bz, tax, tay, taz, tbx, tby, tbz
     cdef bint straight_left, straight_right
     cdef double r1x, r1y, r1z, r2x, r2y, r2z, r0x, r0y, r0z, n1, n2
-    cdef double cx, cy, cz, cr2, r0sq, proj, denom, k
+    cdef double cx, cy, cz, cr2, r0sq, k
     cdef double q1x, q1y, q1z, nq, w2x, w2y, w2z, nw
     cdef double dx, dy, dz
     cdef double rbrx, rbry, rbrz, rbrn, larx, lary, larz, larn
-    cdef double qx, qy, qz, qcr2, qcos, qden, qk
-    cdef double ex, ey, ez, ecr2, ecos, eden, ek
+    cdef double qx, qy, qz, qcr2, qdr, qk
+    cdef double ex, ey, ez, ecr2, edr, ek
     cdef double ux, uy, uz
     if parts == 0 and not use_tg and _is_straight(a, b, a_te, b_te, n):
         out = np.empty((m, 3), dtype=np.float64)
@@ -175,14 +221,8 @@ def induced_velocity_kernel(const double[:, ::1] P, const double[:, ::1] a, cons
                 cz = r1x * r2y - r1y * r2x
                 cr2 = cx * cx + cy * cy + cz * cz
                 r0sq = r0x * r0x + r0y * r0y + r0z * r0z
-                proj = (r0x * (r1x / n1 - r2x / n2)
-                        + r0y * (r1y / n1 - r2y / n2)
-                        + r0z * (r1z / n1 - r2z / n2))
-                denom = cr2 + rc2_src[j] * r0sq
-                if denom > 1e-300:
-                    k = _INV_4PI * proj / denom
-                else:
-                    k = 0.0
+                k = _seg_k(r1x, r1y, r1z, r2x, r2y, r2z, r0x, r0y, r0z,
+                           n1, n2, cr2, r0sq, rc2_src[j])
                 vx = cx * k
                 vy = cy * k
                 vz = cz * k
@@ -193,35 +233,27 @@ def induced_velocity_kernel(const double[:, ::1] P, const double[:, ::1] a, cons
                     qx = -dz * r2y
                     qy = dz * r2x - dx * r2z
                     qz = dx * r2y
-                    qcos = (dx * r2x + dz * r2z) / n2
+                    qdr = dx * r2x + dz * r2z
                     ex = -dz * r1y
                     ey = dz * r1x - dx * r1z
                     ez = dx * r1y
-                    ecos = (dx * r1x + dz * r1z) / n1
+                    edr = dx * r1x + dz * r1z
                 else:
                     qx = dy * r2z - dz * r2y
                     qy = dz * r2x - dx * r2z
                     qz = dx * r2y - dy * r2x
-                    qcos = (dx * r2x + dy * r2y + dz * r2z) / n2
+                    qdr = dx * r2x + dy * r2y + dz * r2z
                     ex = dy * r1z - dz * r1y
                     ey = dz * r1x - dx * r1z
                     ez = dx * r1y - dy * r1x
-                    ecos = (dx * r1x + dy * r1y + dz * r1z) / n1
+                    edr = dx * r1x + dy * r1y + dz * r1z
                 qcr2 = qx * qx + qy * qy + qz * qz
-                qden = qcr2 + rc2_src[j]
-                if qden > 1e-300:
-                    qk = _INV_4PI * (1.0 + qcos) / qden
-                else:
-                    qk = 0.0
+                qk = _ray_k(r2x, r2y, r2z, n2, qdr, qcr2, rc2_src[j])
                 vx = vx + qx * qk
                 vy = vy + qy * qk
                 vz = vz + qz * qk
                 ecr2 = ex * ex + ey * ey + ez * ez
-                eden = ecr2 + rc2_src[j]
-                if eden > 1e-300:
-                    ek = _INV_4PI * (1.0 + ecos) / eden
-                else:
-                    ek = 0.0
+                ek = _ray_k(r1x, r1y, r1z, n1, edr, ecr2, rc2_src[j])
                 vx = vx - ex * ek
                 vy = vy - ey * ek
                 vz = vz - ez * ek
@@ -307,14 +339,8 @@ def induced_velocity_kernel(const double[:, ::1] P, const double[:, ::1] a, cons
                     cz = r1x * r2y - r1y * r2x
                     cr2 = cx * cx + cy * cy + cz * cz
                     r0sq = r0x * r0x + r0y * r0y + r0z * r0z
-                    proj = (r0x * (r1x / n1 - r2x / n2)
-                            + r0y * (r1y / n1 - r2y / n2)
-                            + r0z * (r1z / n1 - r2z / n2))
-                    denom = cr2 + rc2 * r0sq
-                    if denom > 1e-300:
-                        k = _INV_4PI * proj / denom
-                    else:
-                        k = 0.0
+                    k = _seg_k(r1x, r1y, r1z, r2x, r2y, r2z, r0x, r0y, r0z,
+                               n1, n2, cr2, r0sq, rc2)
                     vx = cx * k
                     vy = cy * k
                     vz = cz * k
@@ -331,14 +357,8 @@ def induced_velocity_kernel(const double[:, ::1] P, const double[:, ::1] a, cons
                     cz = q1x * r1y - q1y * r1x
                     cr2 = cx * cx + cy * cy + cz * cz
                     r0sq = r0x * r0x + r0y * r0y + r0z * r0z
-                    proj = (r0x * (q1x / nq - r1x / n1)
-                            + r0y * (q1y / nq - r1y / n1)
-                            + r0z * (q1z / nq - r1z / n1))
-                    denom = cr2 + rc2 * r0sq
-                    if denom > 1e-300:
-                        k = _INV_4PI * proj / denom
-                    else:
-                        k = 0.0
+                    k = _seg_k(q1x, q1y, q1z, r1x, r1y, r1z, r0x, r0y, r0z,
+                               nq, n1, cr2, r0sq, rc2)
                     vx = vx + cx * k
                     vy = vy + cy * k
                     vz = vz + cz * k
@@ -355,14 +375,8 @@ def induced_velocity_kernel(const double[:, ::1] P, const double[:, ::1] a, cons
                     cz = r2x * w2y - r2y * w2x
                     cr2 = cx * cx + cy * cy + cz * cz
                     r0sq = r0x * r0x + r0y * r0y + r0z * r0z
-                    proj = (r0x * (r2x / n2 - w2x / nw)
-                            + r0y * (r2y / n2 - w2y / nw)
-                            + r0z * (r2z / n2 - w2z / nw))
-                    denom = cr2 + rc2 * r0sq
-                    if denom > 1e-300:
-                        k = _INV_4PI * proj / denom
-                    else:
-                        k = 0.0
+                    k = _seg_k(r2x, r2y, r2z, w2x, w2y, w2z, r0x, r0y, r0z,
+                               n2, nw, cr2, r0sq, rc2)
                     vx = vx + cx * k
                     vy = vy + cy * k
                     vz = vz + cz * k
@@ -394,35 +408,27 @@ def induced_velocity_kernel(const double[:, ::1] P, const double[:, ::1] a, cons
                     qx = -dz * rbry
                     qy = dz * rbrx - dx * rbrz
                     qz = dx * rbry
-                    qcos = (dx * rbrx + dz * rbrz) / rbrn
+                    qdr = dx * rbrx + dz * rbrz
                     ex = -dz * lary
                     ey = dz * larx - dx * larz
                     ez = dx * lary
-                    ecos = (dx * larx + dz * larz) / larn
+                    edr = dx * larx + dz * larz
                 else:
                     qx = dy * rbrz - dz * rbry
                     qy = dz * rbrx - dx * rbrz
                     qz = dx * rbry - dy * rbrx
-                    qcos = (dx * rbrx + dy * rbry + dz * rbrz) / rbrn
+                    qdr = dx * rbrx + dy * rbry + dz * rbrz
                     ex = dy * larz - dz * lary
                     ey = dz * larx - dx * larz
                     ez = dx * lary - dy * larx
-                    ecos = (dx * larx + dy * lary + dz * larz) / larn
+                    edr = dx * larx + dy * lary + dz * larz
                 qcr2 = qx * qx + qy * qy + qz * qz
-                qden = qcr2 + rc2
-                if qden > 1e-300:
-                    qk = _INV_4PI * (1.0 + qcos) / qden
-                else:
-                    qk = 0.0
+                qk = _ray_k(rbrx, rbry, rbrz, rbrn, qdr, qcr2, rc2)
                 ux = qx * qk
                 uy = qy * qk
                 uz = qz * qk
                 ecr2 = ex * ex + ey * ey + ez * ez
-                eden = ecr2 + rc2
-                if eden > 1e-300:
-                    ek = _INV_4PI * (1.0 + ecos) / eden
-                else:
-                    ek = 0.0
+                ek = _ray_k(larx, lary, larz, larn, edr, ecr2, rc2)
                 ex = ex * ek
                 ey = ey * ek
                 ez = ez * ek
@@ -507,12 +513,12 @@ def normal_influence_kernel(const double[:, ::1] P, const double[:, ::1] normals
     cdef double px, py, pz, ax, ay, az, bx, by, bz, tax, tay, taz, tbx, tby, tbz
     cdef bint straight_left, straight_right
     cdef double r1x, r1y, r1z, r2x, r2y, r2z, r0x, r0y, r0z, n1, n2
-    cdef double cx, cy, cz, cr2, r0sq, proj, denom, k
+    cdef double cx, cy, cz, cr2, r0sq, k
     cdef double q1x, q1y, q1z, nq, w2x, w2y, w2z, nw
     cdef double dx, dy, dz
     cdef double rbrx, rbry, rbrz, rbrn, larx, lary, larz, larn
-    cdef double qx, qy, qz, qcr2, qcos, qden, qk
-    cdef double ex, ey, ez, ecr2, ecos, eden, ek
+    cdef double qx, qy, qz, qcr2, qdr, qk
+    cdef double ex, ey, ez, ecr2, edr, ek
     cdef double ux, uy, uz
     if parts == 0 and not use_tg and _is_direct(column, sign, n_unknowns, n) \
             and _is_straight(a, b, a_te, b_te, n):
@@ -553,14 +559,8 @@ def normal_influence_kernel(const double[:, ::1] P, const double[:, ::1] normals
                 cz = r1x * r2y - r1y * r2x
                 cr2 = cx * cx + cy * cy + cz * cz
                 r0sq = r0x * r0x + r0y * r0y + r0z * r0z
-                proj = (r0x * (r1x / n1 - r2x / n2)
-                        + r0y * (r1y / n1 - r2y / n2)
-                        + r0z * (r1z / n1 - r2z / n2))
-                denom = cr2 + rc2_src[j] * r0sq
-                if denom > 1e-300:
-                    k = _INV_4PI * proj / denom
-                else:
-                    k = 0.0
+                k = _seg_k(r1x, r1y, r1z, r2x, r2y, r2z, r0x, r0y, r0z,
+                           n1, n2, cr2, r0sq, rc2_src[j])
                 vx = cx * k
                 vy = cy * k
                 vz = cz * k
@@ -572,35 +572,27 @@ def normal_influence_kernel(const double[:, ::1] P, const double[:, ::1] normals
                     qx = -dz * r2y
                     qy = dz * r2x - dx * r2z
                     qz = dx * r2y
-                    qcos = (dx * r2x + dz * r2z) / n2
+                    qdr = dx * r2x + dz * r2z
                     ex = -dz * r1y
                     ey = dz * r1x - dx * r1z
                     ez = dx * r1y
-                    ecos = (dx * r1x + dz * r1z) / n1
+                    edr = dx * r1x + dz * r1z
                 else:
                     qx = dy * r2z - dz * r2y
                     qy = dz * r2x - dx * r2z
                     qz = dx * r2y - dy * r2x
-                    qcos = (dx * r2x + dy * r2y + dz * r2z) / n2
+                    qdr = dx * r2x + dy * r2y + dz * r2z
                     ex = dy * r1z - dz * r1y
                     ey = dz * r1x - dx * r1z
                     ez = dx * r1y - dy * r1x
-                    ecos = (dx * r1x + dy * r1y + dz * r1z) / n1
+                    edr = dx * r1x + dy * r1y + dz * r1z
                 qcr2 = qx * qx + qy * qy + qz * qz
-                qden = qcr2 + rc2_src[j]
-                if qden > 1e-300:
-                    qk = _INV_4PI * (1.0 + qcos) / qden
-                else:
-                    qk = 0.0
+                qk = _ray_k(r2x, r2y, r2z, n2, qdr, qcr2, rc2_src[j])
                 vx = vx + qx * qk
                 vy = vy + qy * qk
                 vz = vz + qz * qk
                 ecr2 = ex * ex + ey * ey + ez * ez
-                eden = ecr2 + rc2_src[j]
-                if eden > 1e-300:
-                    ek = _INV_4PI * (1.0 + ecos) / eden
-                else:
-                    ek = 0.0
+                ek = _ray_k(r1x, r1y, r1z, n1, edr, ecr2, rc2_src[j])
                 vx = vx - ex * ek
                 vy = vy - ey * ek
                 vz = vz - ez * ek
@@ -680,14 +672,8 @@ def normal_influence_kernel(const double[:, ::1] P, const double[:, ::1] normals
                     cz = r1x * r2y - r1y * r2x
                     cr2 = cx * cx + cy * cy + cz * cz
                     r0sq = r0x * r0x + r0y * r0y + r0z * r0z
-                    proj = (r0x * (r1x / n1 - r2x / n2)
-                            + r0y * (r1y / n1 - r2y / n2)
-                            + r0z * (r1z / n1 - r2z / n2))
-                    denom = cr2 + rc2 * r0sq
-                    if denom > 1e-300:
-                        k = _INV_4PI * proj / denom
-                    else:
-                        k = 0.0
+                    k = _seg_k(r1x, r1y, r1z, r2x, r2y, r2z, r0x, r0y, r0z,
+                               n1, n2, cr2, r0sq, rc2)
                     vx = cx * k
                     vy = cy * k
                     vz = cz * k
@@ -704,14 +690,8 @@ def normal_influence_kernel(const double[:, ::1] P, const double[:, ::1] normals
                     cz = q1x * r1y - q1y * r1x
                     cr2 = cx * cx + cy * cy + cz * cz
                     r0sq = r0x * r0x + r0y * r0y + r0z * r0z
-                    proj = (r0x * (q1x / nq - r1x / n1)
-                            + r0y * (q1y / nq - r1y / n1)
-                            + r0z * (q1z / nq - r1z / n1))
-                    denom = cr2 + rc2 * r0sq
-                    if denom > 1e-300:
-                        k = _INV_4PI * proj / denom
-                    else:
-                        k = 0.0
+                    k = _seg_k(q1x, q1y, q1z, r1x, r1y, r1z, r0x, r0y, r0z,
+                               nq, n1, cr2, r0sq, rc2)
                     vx = vx + cx * k
                     vy = vy + cy * k
                     vz = vz + cz * k
@@ -728,14 +708,8 @@ def normal_influence_kernel(const double[:, ::1] P, const double[:, ::1] normals
                     cz = r2x * w2y - r2y * w2x
                     cr2 = cx * cx + cy * cy + cz * cz
                     r0sq = r0x * r0x + r0y * r0y + r0z * r0z
-                    proj = (r0x * (r2x / n2 - w2x / nw)
-                            + r0y * (r2y / n2 - w2y / nw)
-                            + r0z * (r2z / n2 - w2z / nw))
-                    denom = cr2 + rc2 * r0sq
-                    if denom > 1e-300:
-                        k = _INV_4PI * proj / denom
-                    else:
-                        k = 0.0
+                    k = _seg_k(r2x, r2y, r2z, w2x, w2y, w2z, r0x, r0y, r0z,
+                               n2, nw, cr2, r0sq, rc2)
                     vx = vx + cx * k
                     vy = vy + cy * k
                     vz = vz + cz * k
@@ -767,35 +741,27 @@ def normal_influence_kernel(const double[:, ::1] P, const double[:, ::1] normals
                     qx = -dz * rbry
                     qy = dz * rbrx - dx * rbrz
                     qz = dx * rbry
-                    qcos = (dx * rbrx + dz * rbrz) / rbrn
+                    qdr = dx * rbrx + dz * rbrz
                     ex = -dz * lary
                     ey = dz * larx - dx * larz
                     ez = dx * lary
-                    ecos = (dx * larx + dz * larz) / larn
+                    edr = dx * larx + dz * larz
                 else:
                     qx = dy * rbrz - dz * rbry
                     qy = dz * rbrx - dx * rbrz
                     qz = dx * rbry - dy * rbrx
-                    qcos = (dx * rbrx + dy * rbry + dz * rbrz) / rbrn
+                    qdr = dx * rbrx + dy * rbry + dz * rbrz
                     ex = dy * larz - dz * lary
                     ey = dz * larx - dx * larz
                     ez = dx * lary - dy * larx
-                    ecos = (dx * larx + dy * lary + dz * larz) / larn
+                    edr = dx * larx + dy * lary + dz * larz
                 qcr2 = qx * qx + qy * qy + qz * qz
-                qden = qcr2 + rc2
-                if qden > 1e-300:
-                    qk = _INV_4PI * (1.0 + qcos) / qden
-                else:
-                    qk = 0.0
+                qk = _ray_k(rbrx, rbry, rbrz, rbrn, qdr, qcr2, rc2)
                 ux = qx * qk
                 uy = qy * qk
                 uz = qz * qk
                 ecr2 = ex * ex + ey * ey + ez * ez
-                eden = ecr2 + rc2
-                if eden > 1e-300:
-                    ek = _INV_4PI * (1.0 + ecos) / eden
-                else:
-                    ek = 0.0
+                ek = _ray_k(larx, lary, larz, larn, edr, ecr2, rc2)
                 ex = ex * ek
                 ey = ey * ek
                 ez = ez * ek
@@ -861,12 +827,12 @@ def velocity_tensor_kernel(const double[:, ::1] P, const double[:, ::1] a, const
     cdef double px, py, pz, ax, ay, az, bx, by, bz, tax, tay, taz, tbx, tby, tbz
     cdef bint straight_left, straight_right
     cdef double r1x, r1y, r1z, r2x, r2y, r2z, r0x, r0y, r0z, n1, n2
-    cdef double cx, cy, cz, cr2, r0sq, proj, denom, k
+    cdef double cx, cy, cz, cr2, r0sq, k
     cdef double q1x, q1y, q1z, nq, w2x, w2y, w2z, nw
     cdef double dx, dy, dz
     cdef double rbrx, rbry, rbrz, rbrn, larx, lary, larz, larn
-    cdef double qx, qy, qz, qcr2, qcos, qden, qk
-    cdef double ex, ey, ez, ecr2, ecos, eden, ek
+    cdef double qx, qy, qz, qcr2, qdr, qk
+    cdef double ex, ey, ez, ecr2, edr, ek
     cdef double ux, uy, uz
     for i in prange(m, num_threads=num_threads, nogil=True, schedule="static"):
         # Assign the per-pair results here so each thread gets a private copy.
@@ -937,14 +903,8 @@ def velocity_tensor_kernel(const double[:, ::1] P, const double[:, ::1] a, const
                     cz = r1x * r2y - r1y * r2x
                     cr2 = cx * cx + cy * cy + cz * cz
                     r0sq = r0x * r0x + r0y * r0y + r0z * r0z
-                    proj = (r0x * (r1x / n1 - r2x / n2)
-                            + r0y * (r1y / n1 - r2y / n2)
-                            + r0z * (r1z / n1 - r2z / n2))
-                    denom = cr2 + rc2 * r0sq
-                    if denom > 1e-300:
-                        k = _INV_4PI * proj / denom
-                    else:
-                        k = 0.0
+                    k = _seg_k(r1x, r1y, r1z, r2x, r2y, r2z, r0x, r0y, r0z,
+                               n1, n2, cr2, r0sq, rc2)
                     vx = cx * k
                     vy = cy * k
                     vz = cz * k
@@ -961,14 +921,8 @@ def velocity_tensor_kernel(const double[:, ::1] P, const double[:, ::1] a, const
                     cz = q1x * r1y - q1y * r1x
                     cr2 = cx * cx + cy * cy + cz * cz
                     r0sq = r0x * r0x + r0y * r0y + r0z * r0z
-                    proj = (r0x * (q1x / nq - r1x / n1)
-                            + r0y * (q1y / nq - r1y / n1)
-                            + r0z * (q1z / nq - r1z / n1))
-                    denom = cr2 + rc2 * r0sq
-                    if denom > 1e-300:
-                        k = _INV_4PI * proj / denom
-                    else:
-                        k = 0.0
+                    k = _seg_k(q1x, q1y, q1z, r1x, r1y, r1z, r0x, r0y, r0z,
+                               nq, n1, cr2, r0sq, rc2)
                     vx = vx + cx * k
                     vy = vy + cy * k
                     vz = vz + cz * k
@@ -985,14 +939,8 @@ def velocity_tensor_kernel(const double[:, ::1] P, const double[:, ::1] a, const
                     cz = r2x * w2y - r2y * w2x
                     cr2 = cx * cx + cy * cy + cz * cz
                     r0sq = r0x * r0x + r0y * r0y + r0z * r0z
-                    proj = (r0x * (r2x / n2 - w2x / nw)
-                            + r0y * (r2y / n2 - w2y / nw)
-                            + r0z * (r2z / n2 - w2z / nw))
-                    denom = cr2 + rc2 * r0sq
-                    if denom > 1e-300:
-                        k = _INV_4PI * proj / denom
-                    else:
-                        k = 0.0
+                    k = _seg_k(r2x, r2y, r2z, w2x, w2y, w2z, r0x, r0y, r0z,
+                               n2, nw, cr2, r0sq, rc2)
                     vx = vx + cx * k
                     vy = vy + cy * k
                     vz = vz + cz * k
@@ -1024,35 +972,27 @@ def velocity_tensor_kernel(const double[:, ::1] P, const double[:, ::1] a, const
                     qx = -dz * rbry
                     qy = dz * rbrx - dx * rbrz
                     qz = dx * rbry
-                    qcos = (dx * rbrx + dz * rbrz) / rbrn
+                    qdr = dx * rbrx + dz * rbrz
                     ex = -dz * lary
                     ey = dz * larx - dx * larz
                     ez = dx * lary
-                    ecos = (dx * larx + dz * larz) / larn
+                    edr = dx * larx + dz * larz
                 else:
                     qx = dy * rbrz - dz * rbry
                     qy = dz * rbrx - dx * rbrz
                     qz = dx * rbry - dy * rbrx
-                    qcos = (dx * rbrx + dy * rbry + dz * rbrz) / rbrn
+                    qdr = dx * rbrx + dy * rbry + dz * rbrz
                     ex = dy * larz - dz * lary
                     ey = dz * larx - dx * larz
                     ez = dx * lary - dy * larx
-                    ecos = (dx * larx + dy * lary + dz * larz) / larn
+                    edr = dx * larx + dy * lary + dz * larz
                 qcr2 = qx * qx + qy * qy + qz * qz
-                qden = qcr2 + rc2
-                if qden > 1e-300:
-                    qk = _INV_4PI * (1.0 + qcos) / qden
-                else:
-                    qk = 0.0
+                qk = _ray_k(rbrx, rbry, rbrz, rbrn, qdr, qcr2, rc2)
                 ux = qx * qk
                 uy = qy * qk
                 uz = qz * qk
                 ecr2 = ex * ex + ey * ey + ez * ez
-                eden = ecr2 + rc2
-                if eden > 1e-300:
-                    ek = _INV_4PI * (1.0 + ecos) / eden
-                else:
-                    ek = 0.0
+                ek = _ray_k(larx, lary, larz, larn, edr, ecr2, rc2)
                 ex = ex * ek
                 ey = ey * ek
                 ez = ez * ek
@@ -1131,12 +1071,12 @@ def velocity_unknowns_kernel(const double[:, ::1] P, const double[:, ::1] a, con
     cdef double px, py, pz, ax, ay, az, bx, by, bz, tax, tay, taz, tbx, tby, tbz
     cdef bint straight_left, straight_right
     cdef double r1x, r1y, r1z, r2x, r2y, r2z, r0x, r0y, r0z, n1, n2
-    cdef double cx, cy, cz, cr2, r0sq, proj, denom, k
+    cdef double cx, cy, cz, cr2, r0sq, k
     cdef double q1x, q1y, q1z, nq, w2x, w2y, w2z, nw
     cdef double dx, dy, dz
     cdef double rbrx, rbry, rbrz, rbrn, larx, lary, larz, larn
-    cdef double qx, qy, qz, qcr2, qcos, qden, qk
-    cdef double ex, ey, ez, ecr2, ecos, eden, ek
+    cdef double qx, qy, qz, qcr2, qdr, qk
+    cdef double ex, ey, ez, ecr2, edr, ek
     cdef double ux, uy, uz
     for i in prange(m, num_threads=num_threads, nogil=True, schedule="static"):
         # Assign the per-pair results here so each thread gets a private copy.
@@ -1207,14 +1147,8 @@ def velocity_unknowns_kernel(const double[:, ::1] P, const double[:, ::1] a, con
                     cz = r1x * r2y - r1y * r2x
                     cr2 = cx * cx + cy * cy + cz * cz
                     r0sq = r0x * r0x + r0y * r0y + r0z * r0z
-                    proj = (r0x * (r1x / n1 - r2x / n2)
-                            + r0y * (r1y / n1 - r2y / n2)
-                            + r0z * (r1z / n1 - r2z / n2))
-                    denom = cr2 + rc2 * r0sq
-                    if denom > 1e-300:
-                        k = _INV_4PI * proj / denom
-                    else:
-                        k = 0.0
+                    k = _seg_k(r1x, r1y, r1z, r2x, r2y, r2z, r0x, r0y, r0z,
+                               n1, n2, cr2, r0sq, rc2)
                     vx = cx * k
                     vy = cy * k
                     vz = cz * k
@@ -1231,14 +1165,8 @@ def velocity_unknowns_kernel(const double[:, ::1] P, const double[:, ::1] a, con
                     cz = q1x * r1y - q1y * r1x
                     cr2 = cx * cx + cy * cy + cz * cz
                     r0sq = r0x * r0x + r0y * r0y + r0z * r0z
-                    proj = (r0x * (q1x / nq - r1x / n1)
-                            + r0y * (q1y / nq - r1y / n1)
-                            + r0z * (q1z / nq - r1z / n1))
-                    denom = cr2 + rc2 * r0sq
-                    if denom > 1e-300:
-                        k = _INV_4PI * proj / denom
-                    else:
-                        k = 0.0
+                    k = _seg_k(q1x, q1y, q1z, r1x, r1y, r1z, r0x, r0y, r0z,
+                               nq, n1, cr2, r0sq, rc2)
                     vx = vx + cx * k
                     vy = vy + cy * k
                     vz = vz + cz * k
@@ -1255,14 +1183,8 @@ def velocity_unknowns_kernel(const double[:, ::1] P, const double[:, ::1] a, con
                     cz = r2x * w2y - r2y * w2x
                     cr2 = cx * cx + cy * cy + cz * cz
                     r0sq = r0x * r0x + r0y * r0y + r0z * r0z
-                    proj = (r0x * (r2x / n2 - w2x / nw)
-                            + r0y * (r2y / n2 - w2y / nw)
-                            + r0z * (r2z / n2 - w2z / nw))
-                    denom = cr2 + rc2 * r0sq
-                    if denom > 1e-300:
-                        k = _INV_4PI * proj / denom
-                    else:
-                        k = 0.0
+                    k = _seg_k(r2x, r2y, r2z, w2x, w2y, w2z, r0x, r0y, r0z,
+                               n2, nw, cr2, r0sq, rc2)
                     vx = vx + cx * k
                     vy = vy + cy * k
                     vz = vz + cz * k
@@ -1294,35 +1216,27 @@ def velocity_unknowns_kernel(const double[:, ::1] P, const double[:, ::1] a, con
                     qx = -dz * rbry
                     qy = dz * rbrx - dx * rbrz
                     qz = dx * rbry
-                    qcos = (dx * rbrx + dz * rbrz) / rbrn
+                    qdr = dx * rbrx + dz * rbrz
                     ex = -dz * lary
                     ey = dz * larx - dx * larz
                     ez = dx * lary
-                    ecos = (dx * larx + dz * larz) / larn
+                    edr = dx * larx + dz * larz
                 else:
                     qx = dy * rbrz - dz * rbry
                     qy = dz * rbrx - dx * rbrz
                     qz = dx * rbry - dy * rbrx
-                    qcos = (dx * rbrx + dy * rbry + dz * rbrz) / rbrn
+                    qdr = dx * rbrx + dy * rbry + dz * rbrz
                     ex = dy * larz - dz * lary
                     ey = dz * larx - dx * larz
                     ez = dx * lary - dy * larx
-                    ecos = (dx * larx + dy * lary + dz * larz) / larn
+                    edr = dx * larx + dy * lary + dz * larz
                 qcr2 = qx * qx + qy * qy + qz * qz
-                qden = qcr2 + rc2
-                if qden > 1e-300:
-                    qk = _INV_4PI * (1.0 + qcos) / qden
-                else:
-                    qk = 0.0
+                qk = _ray_k(rbrx, rbry, rbrz, rbrn, qdr, qcr2, rc2)
                 ux = qx * qk
                 uy = qy * qk
                 uz = qz * qk
                 ecr2 = ex * ex + ey * ey + ez * ez
-                eden = ecr2 + rc2
-                if eden > 1e-300:
-                    ek = _INV_4PI * (1.0 + ecos) / eden
-                else:
-                    ek = 0.0
+                ek = _ray_k(larx, lary, larz, larn, edr, ecr2, rc2)
                 ex = ex * ek
                 ey = ey * ek
                 ez = ez * ek

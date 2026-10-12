@@ -109,7 +109,17 @@ def _length_floor(dtype: torch.dtype) -> float:
 
 
 def seg_vel(P: torch.Tensor, A: torch.Tensor, B: torch.Tensor, rc2: torch.Tensor) -> torch.Tensor:
-    """Velocity of unit finite segments A -> B at P (differentiable)."""
+    """Velocity of unit finite segments A -> B at P (differentiable).
+
+    The core acts on the distance from P to the finite segment, as in
+    :func:`ventorum.aero.vortex.segment_velocity`. Over the segment the
+    denominator is ``|r1 x r2|^2 + rc2 |r0|^2``. Before A or after B the
+    exact Biot-Savart law (Katz and Plotkin, 2001) is multiplied by the
+    Scully factor ``D^2 / (D^2 + rc2)`` (Scully, 1975; Vatistas, Kozel and
+    Mih, 1991, n = 1), with ``D`` the distance to the nearest end point.
+    The unused branch of each ``torch.where`` gets safe denominators, so
+    that autograd gives no NaN gradient. Lengths in m, rc2 in m^2.
+    """
     r1 = P[:, None, :] - A[None, :, :]
     r2 = P[:, None, :] - B[None, :, :]
     r0 = B[None, :, :] - A[None, :, :]
@@ -120,8 +130,10 @@ def seg_vel(P: torch.Tensor, A: torch.Tensor, B: torch.Tensor, rc2: torch.Tensor
     r0sq = r0[..., 0] ** 2 + r0[..., 1] ** 2 + r0[..., 2] ** 2
     # The floor keeps the unit vectors finite when P is on an end point.
     floor = _length_floor(P.dtype)
-    n1 = torch.sqrt((r1 * r1).sum(-1) + floor)
-    n2 = torch.sqrt((r2 * r2).sum(-1) + floor)
+    d1 = (r1 * r1).sum(-1) + floor
+    d2 = (r2 * r2).sum(-1) + floor
+    n1 = torch.sqrt(d1)
+    n2 = torch.sqrt(d2)
     t1 = r1 / n1[..., None]
     t2 = r2 / n2[..., None]
     proj_in = (
@@ -129,26 +141,47 @@ def seg_vel(P: torch.Tensor, A: torch.Tensor, B: torch.Tensor, rc2: torch.Tensor
         + r0[..., 1] * (t1[..., 1] - t2[..., 1])
         + r0[..., 2] * (t1[..., 2] - t2[..., 2])
     )
-    # The same projection without cancellation where r1 . r2 > 0 (target
-    # not over the segment): r0 . (t1 - t2) = |r1 x r2|^2 (n1 + n2) /
-    # (n1 n2 (n1 n2 + r1 . r2)). The direct form loses digits there (t1 and
-    # t2 are almost equal), and its partial derivatives carry O(1/rc^2)
-    # round-off noise at points near the extension of the segment.
+    # The same projection without cancellation where r1 . r2 > 0:
+    # r0 . (t1 - t2) = |r1 x r2|^2 (n1 + n2) / (n1 n2 (n1 n2 + r1 . r2)).
+    # The direct form loses digits there (t1 and t2 are almost equal).
     dot12 = (r1 * r2).sum(-1)
     n12 = n1 * n2
+    e = n12 + dot12
     out_side = dot12 > 0.0
-    den_out = torch.where(out_side, n12 * (n12 + dot12), torch.ones_like(n12))
-    proj_out = cr2 * (n1 + n2) / den_out
-    proj = torch.where(out_side, proj_out, proj_in)
+    den_os = torch.where(out_side, n12 * e, torch.ones_like(n12))
+    proj_os = cr2 * (n1 + n2) / den_os
+    proj = torch.where(out_side, proj_os, proj_in)
     denom = cr2 + rc2 * r0sq
     ok = denom > floor
     safe = torch.where(ok, denom, torch.ones_like(denom))
-    k = torch.where(ok, (1.0 / (4.0 * math.pi)) * proj / safe, torch.zeros_like(proj))
+    k_in = torch.where(ok, (1.0 / (4.0 * math.pi)) * proj / safe, torch.zeros_like(proj))
+    # Outside the segment: before A (r0 . r1 < 0) or after B (r0 . r2 > 0).
+    # Exact law (no cancellation) times D^2 / (D^2 + rc2).
+    before = (r0 * r1).sum(-1) < 0.0
+    after = (r0 * r2).sum(-1) > 0.0
+    outside = before | after
+    D2 = torch.where(before, d1, d2)
+    ok_out = outside & (e > floor)
+    den_out = torch.where(ok_out, n12 * e, torch.ones_like(e))
+    k_out = torch.where(
+        ok_out,
+        (1.0 / (4.0 * math.pi)) * (n1 + n2) / den_out * (D2 / (D2 + rc2)),
+        torch.zeros_like(e),
+    )
+    k = torch.where(outside, k_out, k_in)
     return torch.stack((cx * k, cy * k, cz * k), dim=-1)
 
 
 def ray_vel(P: torch.Tensor, A: torch.Tensor, d: torch.Tensor, rc2: torch.Tensor) -> torch.Tensor:
-    """Velocity of unit semi-infinite lines from A along d at P (differentiable)."""
+    """Velocity of unit semi-infinite lines from A along d at P (differentiable).
+
+    The core acts on the distance from P to the line, as in
+    :func:`ventorum.aero.vortex.ray_velocity`. In front of A (``d . r >= 0``)
+    the denominator is ``|d x r|^2 + rc2``. Behind A the exact law is
+    multiplied by the Scully factor ``D^2 / (D^2 + rc2)`` with ``D = |r|``.
+    The unused branch of each ``torch.where`` gets safe denominators, so
+    that autograd gives no NaN gradient. Lengths in m, rc2 in m^2.
+    """
     r = P[:, None, :] - A[None, :, :]
     dd = d[None, :, :]
     cx = dd[..., 1] * r[..., 2] - dd[..., 2] * r[..., 1]
@@ -156,17 +189,20 @@ def ray_vel(P: torch.Tensor, A: torch.Tensor, d: torch.Tensor, rc2: torch.Tensor
     cz = dd[..., 0] * r[..., 1] - dd[..., 1] * r[..., 0]
     cr2 = cx * cx + cy * cy + cz * cz
     floor = _length_floor(P.dtype)
-    rn = torch.sqrt((r * r).sum(-1) + floor)
+    D2 = (r * r).sum(-1) + floor
+    rn = torch.sqrt(D2)
     dr = (dd * r).sum(-1)
-    # 1 + cos(t) for a unit d. Behind the start point (d . r < 0) the same
-    # value without cancellation: |d x r|^2 / (rn (rn - d . r)).
-    behind = dr < 0.0
-    den_b = torch.where(behind, rn * (rn - dr), torch.ones_like(rn))
-    one_cos = torch.where(behind, cr2 / den_b, 1.0 + dr / rn)
     denom = cr2 + rc2
     ok = denom > floor
     safe = torch.where(ok, denom, torch.ones_like(denom))
-    k = torch.where(ok, (1.0 / (4.0 * math.pi)) * one_cos / safe, torch.zeros_like(one_cos))
+    k_in = torch.where(ok, (1.0 / (4.0 * math.pi)) * (1.0 + dr / rn) / safe, torch.zeros_like(denom))
+    # Behind the start point: exact law (no cancellation) times D^2 / (D^2 + rc2).
+    behind = dr < 0.0
+    e = rn * (rn - dr)
+    ok_out = behind & (e > floor)
+    den_out = torch.where(ok_out, e, torch.ones_like(e))
+    k_out = torch.where(ok_out, (1.0 / (4.0 * math.pi)) / den_out * (D2 / (D2 + rc2)), torch.zeros_like(e))
+    k = torch.where(behind, k_out, k_in)
     return torch.stack((cx * k, cy * k, cz * k), dim=-1)
 
 

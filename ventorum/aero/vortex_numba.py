@@ -69,11 +69,27 @@ if HAVE_NUMBA:
     def _seg_terms(r1x, r1y, r1z, r2x, r2y, r2z, r0x, r0y, r0z, n1, n2, rc2):
         # Velocity of one finite segment from ready vectors and norms.
         # Same formula as the numpy kernel; a zero-length segment adds nothing.
+        # Over the segment the core term is rc2 |r0|^2; outside it (before the
+        # start or after the end) the exact law is multiplied by
+        # D^2 / (D^2 + rc2), D the distance to the nearest end point.
         if r0x == 0.0 and r0y == 0.0 and r0z == 0.0:
             return 0.0, 0.0, 0.0
         cx = r1y * r2z - r1z * r2y
         cy = r1z * r2x - r1x * r2z
         cz = r1x * r2y - r1y * r2x
+        before = r0x * r1x + r0y * r1y + r0z * r1z < 0.0
+        after = r0x * r2x + r0y * r2y + r0z * r2z > 0.0
+        if before or after:
+            if before:
+                dd = r1x * r1x + r1y * r1y + r1z * r1z + 1e-300
+            else:
+                dd = r2x * r2x + r2y * r2y + r2z * r2z + 1e-300
+            e = n1 * n2 + r1x * r2x + r1y * r2y + r1z * r2z
+            if e > 1e-300:
+                k = _INV_4PI * (n1 + n2) / (n1 * n2 * e) * (dd / (dd + rc2))
+            else:
+                k = 0.0
+            return cx * k, cy * k, cz * k
         cr2 = cx * cx + cy * cy + cz * cz
         r0sq = r0x * r0x + r0y * r0y + r0z * r0z
         proj = (r0x * (r1x / n1 - r2x / n2) + r0y * (r1y / n1 - r2y / n2)
@@ -89,20 +105,30 @@ if HAVE_NUMBA:
     def _ray_terms(rx, ry, rz, rn, dx, dy, dz, rc2):
         # Velocity of one semi-infinite line from a ready vector and norm.
         # Same formula as the numpy kernel; dy == 0 uses the shorter form.
+        # Behind the start point the exact law is multiplied by
+        # D^2 / (D^2 + rc2), D = |r|.
         if dy == 0.0:
             cx = -dz * ry
             cy = dz * rx - dx * rz
             cz = dx * ry
-            cos_t = (dx * rx + dz * rz) / rn
+            dr = dx * rx + dz * rz
         else:
             cx = dy * rz - dz * ry
             cy = dz * rx - dx * rz
             cz = dx * ry - dy * rx
-            cos_t = (dx * rx + dy * ry + dz * rz) / rn
+            dr = dx * rx + dy * ry + dz * rz
+        if dr < 0.0:
+            dd = rx * rx + ry * ry + rz * rz + 1e-300
+            e = rn * (rn - dr)
+            if e > 1e-300:
+                k = _INV_4PI / e * (dd / (dd + rc2))
+            else:
+                k = 0.0
+            return cx * k, cy * k, cz * k
         cr2 = cx * cx + cy * cy + cz * cz
         denom = cr2 + rc2
         if denom > 1e-300:
-            k = _INV_4PI * (1.0 + cos_t) / denom
+            k = _INV_4PI * (1.0 + dr / rn) / denom
         else:
             k = 0.0
         return cx * k, cy * k, cz * k

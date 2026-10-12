@@ -66,6 +66,8 @@ cdef enum:
 cdef inline void _seg_v(double px, double py, double pz, double ax, double ay, double az,
                         double bx, double by, double bz, double rc2, double* v) noexcept nogil:
     # Velocity of a unit finite segment a -> b at p (stable projection).
+    # Outside the segment (before a or after b) the exact law is multiplied by
+    # D^2 / (D^2 + rc2), D the distance to the nearest end point (see ventorum.aero.vortex).
     cdef double r1x = px - ax, r1y = py - ay, r1z = pz - az
     cdef double r2x = px - bx, r2y = py - by, r2z = pz - bz
     cdef double r0x = bx - ax, r0y = by - ay, r0z = bz - az
@@ -74,20 +76,31 @@ cdef inline void _seg_v(double px, double py, double pz, double ax, double ay, d
     cdef double cz = r1x * r2y - r1y * r2x
     cdef double cr2 = cx * cx + cy * cy + cz * cz
     cdef double r0sq = r0x * r0x + r0y * r0y + r0z * r0z
-    cdef double n1 = sqrt(r1x * r1x + r1y * r1y + r1z * r1z + _FLOOR)
-    cdef double n2 = sqrt(r2x * r2x + r2y * r2y + r2z * r2z + _FLOOR)
+    cdef double d1 = r1x * r1x + r1y * r1y + r1z * r1z + _FLOOR
+    cdef double d2 = r2x * r2x + r2y * r2y + r2z * r2z + _FLOOR
+    cdef double n1 = sqrt(d1)
+    cdef double n2 = sqrt(d2)
     cdef double dot12 = r1x * r2x + r1y * r2y + r1z * r2z
-    cdef double n12, proj, den, k
-    if dot12 > 0.0:
-        n12 = n1 * n2
-        proj = cr2 * (n1 + n2) / (n12 * (n12 + dot12))
-    else:
-        proj = (r0x * (r1x / n1 - r2x / n2) + r0y * (r1y / n1 - r2y / n2)
-                + r0z * (r1z / n1 - r2z / n2))
-    den = cr2 + rc2 * r0sq
+    cdef bint before = r0x * r1x + r0y * r1y + r0z * r1z < 0.0
+    cdef bint after = r0x * r2x + r0y * r2y + r0z * r2z > 0.0
+    cdef double n12, proj, den, k, e, dd
     k = 0.0
-    if den > _FLOOR:
-        k = _INV_4PI * proj / den
+    if before or after:
+        dd = d1 if before else d2
+        n12 = n1 * n2
+        e = n12 + dot12
+        if e > _FLOOR:
+            k = _INV_4PI * (n1 + n2) / (n12 * e) * (dd / (dd + rc2))
+    else:
+        if dot12 > 0.0:
+            n12 = n1 * n2
+            proj = cr2 * (n1 + n2) / (n12 * (n12 + dot12))
+        else:
+            proj = (r0x * (r1x / n1 - r2x / n2) + r0y * (r1y / n1 - r2y / n2)
+                    + r0z * (r1z / n1 - r2z / n2))
+        den = cr2 + rc2 * r0sq
+        if den > _FLOOR:
+            k = _INV_4PI * proj / den
     v[0] = cx * k
     v[1] = cy * k
     v[2] = cz * k
@@ -95,23 +108,26 @@ cdef inline void _seg_v(double px, double py, double pz, double ax, double ay, d
 
 cdef inline void _ray_v(double px, double py, double pz, double ax, double ay, double az,
                         double dx, double dy, double dz, double rc2, double* v) noexcept nogil:
-    # Velocity of a unit semi-infinite line from a along d at p (stable 1 + cos).
+    # Velocity of a unit semi-infinite line from a along d at p.
+    # Behind the start point the exact law is multiplied by D^2 / (D^2 + rc2), D = |r|.
     cdef double rx = px - ax, ry = py - ay, rz = pz - az
     cdef double cx = dy * rz - dz * ry
     cdef double cy = dz * rx - dx * rz
     cdef double cz = dx * ry - dy * rx
     cdef double cr2 = cx * cx + cy * cy + cz * cz
-    cdef double rn = sqrt(rx * rx + ry * ry + rz * rz + _FLOOR)
+    cdef double dd = rx * rx + ry * ry + rz * rz + _FLOOR
+    cdef double rn = sqrt(dd)
     cdef double dr = dx * rx + dy * ry + dz * rz
-    cdef double oc, den, k
-    if dr < 0.0:
-        oc = cr2 / (rn * (rn - dr))
-    else:
-        oc = 1.0 + dr / rn
-    den = cr2 + rc2
+    cdef double e, den, k
     k = 0.0
-    if den > _FLOOR:
-        k = _INV_4PI * oc / den
+    if dr < 0.0:
+        e = rn * (rn - dr)
+        if e > _FLOOR:
+            k = _INV_4PI / e * (dd / (dd + rc2))
+    else:
+        den = cr2 + rc2
+        if den > _FLOOR:
+            k = _INV_4PI * (1.0 + dr / rn) / den
     v[0] = cx * k
     v[1] = cy * k
     v[2] = cz * k
@@ -130,10 +146,14 @@ cdef inline void _seg_fb(double px, double py, double pz, double ax, double ay, 
     cdef double cz = r1x * r2y - r1y * r2x
     cdef double cr2 = cx * cx + cy * cy + cz * cz
     cdef double r0sq = r0x * r0x + r0y * r0y + r0z * r0z
-    cdef double n1 = sqrt(r1x * r1x + r1y * r1y + r1z * r1z + _FLOOR)
-    cdef double n2 = sqrt(r2x * r2x + r2y * r2y + r2z * r2z + _FLOOR)
+    cdef double d1 = r1x * r1x + r1y * r1y + r1z * r1z + _FLOOR
+    cdef double d2 = r2x * r2x + r2y * r2y + r2z * r2z + _FLOOR
+    cdef double n1 = sqrt(d1)
+    cdef double n2 = sqrt(d2)
     cdef double dot12 = r1x * r2x + r1y * r2y + r1z * r2z
-    cdef bint out = dot12 > 0.0
+    cdef bint before = r0x * r1x + r0y * r1y + r0z * r1z < 0.0
+    cdef bint after = r0x * r2x + r0y * r2y + r0z * r2z > 0.0
+    cdef bint stab = dot12 > 0.0
     cdef double n12 = n1 * n2
     cdef double t1x = r1x / n1, t1y = r1y / n1, t1z = r1z / n1
     cdef double t2x = r2x / n2, t2y = r2y / n2, t2z = r2z / n2
@@ -141,35 +161,37 @@ cdef inline void _seg_fb(double px, double py, double pz, double ax, double ay, 
     cdef double gr1x = 0.0, gr1y = 0.0, gr1z = 0.0, gr2x = 0.0, gr2y = 0.0, gr2z = 0.0
     cdef double gr0x = 0.0, gr0y = 0.0, gr0z = 0.0
     cdef double gsum, gD, gn12, gdot12, gn1, gn2, gt1x, gt1y, gt1z, f1, f2
+    cdef double dd, dsum, fac, hh, gh, gfac, gdd
     cdef int q
-    if out:
+    if before or after:
+        # Exact law times the core factor:
+        # k = (n1 + n2) / (4 pi n1 n2 e) * D2 / (D2 + rc2), e = n1 n2 + r1 . r2.
+        if not (n12 + dot12) > _FLOOR:
+            for q in range(13):
+                o[q] = 0.0
+            return
         den_out = n12 * (n12 + dot12)
-        proj = cr2 * (n1 + n2) / den_out
-    else:
-        den_out = 1.0
-        proj = r0x * (t1x - t2x) + r0y * (t1y - t2y) + r0z * (t1z - t2z)
-    den = cr2 + rc2 * r0sq
-    if not den > _FLOOR:
-        for q in range(13):
-            o[q] = 0.0
-        return
-    k = _INV_4PI * proj / den
-    o[0] = cx * k
-    o[1] = cy * k
-    o[2] = cz * k
-    gcx = k * ux
-    gcy = k * uy
-    gcz = k * uz
-    gk = ux * cx + uy * cy + uz * cz
-    gproj = gk * _INV_4PI / den
-    gden = -gk * k / den
-    gcr2 = gden
-    grc2 = gden * r0sq
-    gr0sq = gden * rc2
-    if out:
-        gcr2 = gcr2 + gproj * (n1 + n2) / den_out
-        gsum = gproj * cr2 / den_out
-        gD = -gproj * proj / den_out
+        dd = d1 if before else d2
+        dsum = dd + rc2
+        fac = dd / dsum
+        hh = (n1 + n2) / den_out
+        k = _INV_4PI * hh * fac
+        o[0] = cx * k
+        o[1] = cy * k
+        o[2] = cz * k
+        gcx = k * ux
+        gcy = k * uy
+        gcz = k * uz
+        gk = ux * cx + uy * cy + uz * cz
+        gh = gk * _INV_4PI * fac
+        gfac = gk * _INV_4PI * hh
+        # dF/dD2 = rc2 / (D2 + rc2)^2, dF/drc2 = -D2 / (D2 + rc2)^2.
+        gdd = gfac * rc2 / (dsum * dsum)
+        grc2 = -gfac * dd / (dsum * dsum)
+        gcr2 = 0.0
+        gr0sq = 0.0
+        gsum = gh / den_out
+        gD = -gh * hh / den_out
         gn12 = gD * (2.0 * n12 + dot12)
         gdot12 = gD * n12
         gn1 = gsum + gn12 * n2
@@ -180,21 +202,69 @@ cdef inline void _seg_fb(double px, double py, double pz, double ax, double ay, 
         gr2x = gdot12 * r1x
         gr2y = gdot12 * r1y
         gr2z = gdot12 * r1z
+        # dD2/dr1 = 2 r1 (before), dD2/dr2 = 2 r2 (after).
+        if before:
+            gr1x = gr1x + 2.0 * gdd * r1x
+            gr1y = gr1y + 2.0 * gdd * r1y
+            gr1z = gr1z + 2.0 * gdd * r1z
+        else:
+            gr2x = gr2x + 2.0 * gdd * r2x
+            gr2y = gr2y + 2.0 * gdd * r2y
+            gr2z = gr2z + 2.0 * gdd * r2z
     else:
-        gr0x = gproj * (t1x - t2x)
-        gr0y = gproj * (t1y - t2y)
-        gr0z = gproj * (t1z - t2z)
-        gt1x = gproj * r0x
-        gt1y = gproj * r0y
-        gt1z = gproj * r0z
-        gr1x = gt1x / n1
-        gr1y = gt1y / n1
-        gr1z = gt1z / n1
-        gr2x = -gt1x / n2
-        gr2y = -gt1y / n2
-        gr2z = -gt1z / n2
-        gn1 = -(gt1x * t1x + gt1y * t1y + gt1z * t1z) / n1
-        gn2 = (gt1x * t2x + gt1y * t2y + gt1z * t2z) / n2
+        if stab:
+            den_out = n12 * (n12 + dot12)
+            proj = cr2 * (n1 + n2) / den_out
+        else:
+            den_out = 1.0
+            proj = r0x * (t1x - t2x) + r0y * (t1y - t2y) + r0z * (t1z - t2z)
+        den = cr2 + rc2 * r0sq
+        if not den > _FLOOR:
+            for q in range(13):
+                o[q] = 0.0
+            return
+        k = _INV_4PI * proj / den
+        o[0] = cx * k
+        o[1] = cy * k
+        o[2] = cz * k
+        gcx = k * ux
+        gcy = k * uy
+        gcz = k * uz
+        gk = ux * cx + uy * cy + uz * cz
+        gproj = gk * _INV_4PI / den
+        gden = -gk * k / den
+        gcr2 = gden
+        grc2 = gden * r0sq
+        gr0sq = gden * rc2
+        if stab:
+            gcr2 = gcr2 + gproj * (n1 + n2) / den_out
+            gsum = gproj * cr2 / den_out
+            gD = -gproj * proj / den_out
+            gn12 = gD * (2.0 * n12 + dot12)
+            gdot12 = gD * n12
+            gn1 = gsum + gn12 * n2
+            gn2 = gsum + gn12 * n1
+            gr1x = gdot12 * r2x
+            gr1y = gdot12 * r2y
+            gr1z = gdot12 * r2z
+            gr2x = gdot12 * r1x
+            gr2y = gdot12 * r1y
+            gr2z = gdot12 * r1z
+        else:
+            gr0x = gproj * (t1x - t2x)
+            gr0y = gproj * (t1y - t2y)
+            gr0z = gproj * (t1z - t2z)
+            gt1x = gproj * r0x
+            gt1y = gproj * r0y
+            gt1z = gproj * r0z
+            gr1x = gt1x / n1
+            gr1y = gt1y / n1
+            gr1z = gt1z / n1
+            gr2x = -gt1x / n2
+            gr2y = -gt1y / n2
+            gr2z = -gt1z / n2
+            gn1 = -(gt1x * t1x + gt1y * t1y + gt1z * t1z) / n1
+            gn2 = (gt1x * t2x + gt1y * t2y + gt1z * t2z) / n2
     f1 = gn1 / n1
     f2 = gn2 / n2
     gr1x = gr1x + f1 * r1x
@@ -238,44 +308,61 @@ cdef inline void _ray_fb(double px, double py, double pz, double ax, double ay, 
     cdef double cy = dz * rx - dx * rz
     cdef double cz = dx * ry - dy * rx
     cdef double cr2 = cx * cx + cy * cy + cz * cz
-    cdef double rn = sqrt(rx * rx + ry * ry + rz * rz + _FLOOR)
+    cdef double dd = rx * rx + ry * ry + rz * rz + _FLOOR
+    cdef double rn = sqrt(dd)
     cdef double dr = dx * rx + dy * ry + dz * rz
-    cdef bint behind = dr < 0.0
     cdef double den_b, oc, den, k, gcx, gcy, gcz, gk, goc, gden, gcr2, grc2, gE, grn, gdr, f
     cdef double grx, gry, grz, gdx, gdy, gdz
+    cdef double dsum, fac, gfac
+    cdef double gdd = 0.0
     cdef int q
-    if behind:
+    if dr < 0.0:
+        # Exact law times the core factor: k = 1 / (4 pi E) * D2 / (D2 + rc2), E = rn (rn - dr).
         den_b = rn * (rn - dr)
-        oc = cr2 / den_b
-    else:
-        den_b = 1.0
-        oc = 1.0 + dr / rn
-    den = cr2 + rc2
-    if not den > _FLOOR:
-        for q in range(10):
-            o[q] = 0.0
-        return
-    k = _INV_4PI * oc / den
-    o[0] = cx * k
-    o[1] = cy * k
-    o[2] = cz * k
-    gcx = k * ux
-    gcy = k * uy
-    gcz = k * uz
-    gk = ux * cx + uy * cy + uz * cz
-    goc = gk * _INV_4PI / den
-    gden = -gk * k / den
-    gcr2 = gden
-    grc2 = gden
-    if behind:
-        gcr2 = gcr2 + goc / den_b
-        gE = -goc * oc / den_b
+        if not den_b > _FLOOR:
+            for q in range(10):
+                o[q] = 0.0
+            return
+        dsum = dd + rc2
+        fac = dd / dsum
+        k = _INV_4PI / den_b * fac
+        o[0] = cx * k
+        o[1] = cy * k
+        o[2] = cz * k
+        gcx = k * ux
+        gcy = k * uy
+        gcz = k * uz
+        gk = ux * cx + uy * cy + uz * cz
+        gfac = gk * _INV_4PI / den_b
+        gE = -gk * k / den_b
+        # dF/dD2 = rc2 / (D2 + rc2)^2, dF/drc2 = -D2 / (D2 + rc2)^2, dD2/dr = 2 r.
+        gdd = gfac * rc2 / (dsum * dsum)
+        grc2 = -gfac * dd / (dsum * dsum)
+        gcr2 = 0.0
         grn = gE * (2.0 * rn - dr)
         gdr = -gE * rn
     else:
+        oc = 1.0 + dr / rn
+        den = cr2 + rc2
+        if not den > _FLOOR:
+            for q in range(10):
+                o[q] = 0.0
+            return
+        k = _INV_4PI * oc / den
+        o[0] = cx * k
+        o[1] = cy * k
+        o[2] = cz * k
+        gcx = k * ux
+        gcy = k * uy
+        gcz = k * uz
+        gk = ux * cx + uy * cy + uz * cz
+        goc = gk * _INV_4PI / den
+        gden = -gk * k / den
+        gcr2 = gden
+        grc2 = gden
         gdr = goc / rn
         grn = -goc * dr / (rn * rn)
-    f = grn / rn
+    f = grn / rn + 2.0 * gdd
     grx = f * rx + gdr * dx
     gry = f * ry + gdr * dy
     grz = f * rz + gdr * dz

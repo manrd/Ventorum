@@ -492,3 +492,168 @@ def test_quick_tuner_writes_grad_vjp(monkeypatch, tmp_path, _profile_cache) -> N
             assert entry[cls]["gpu"] in ("warp", "torch")
     prof.reset_profile_cache()
     assert K.tuned_backend("cpu", 10) == entry["small"]["cpu"]
+
+
+def _collinear_targets(A: np.ndarray, B: np.ndarray, seed: int) -> np.ndarray:
+    """Return targets on and near the extended line A -> B outside the filament.
+
+    The targets before A and after B lie on the line (exactly collinear in
+    binary floating point when A and B have dyadic coordinates) and at small
+    offsets from it, plus some general targets.
+    """
+    rng = np.random.default_rng(seed)
+    pts = []
+    for t in (-2.0, -0.5, -0.125, 1.125, 1.5, 3.0):
+        base = A + t * (B - A)
+        pts.append(base)
+        for off in (1e-9, 1e-6, 1e-3, 1e-1):
+            pts.append(base + off * rng.normal(size=3))
+    pts.extend(rng.normal(size=(8, 3)))
+    return np.array(pts)
+
+
+@pytest.mark.parametrize("kind", ["segment", "ray"])
+def test_filament_vjp_parity_on_extended_lines(kind: str) -> None:
+    """The numpy and Numba filament VJP equal torch autograd of the reference near and on the extended lines.
+
+    Targets lie before and after the segments (behind the rays), exactly
+    collinear and at offsets from 1e-9 m to 0.1 m. There the core uses the
+    distance to the nearest end point, and the derivative of the velocity
+    at a collinear point is not zero. Float64, 1e-12 relative to the
+    largest component of each gradient.
+    """
+    torch = pytest.importorskip("torch")
+    from ventorum.aero import vortex_vjp as ref
+    from ventorum.aero import vortex_vjp_numba as nb
+    from ventorum.sensitivity.reference import ray_vel, seg_vel
+
+    A = np.array([[0.0, 0.0, 0.0], [0.5, -0.25, 0.125], [1.0, 2.0, -0.5]])
+    if kind == "segment":
+        E = np.array([[1.0, 0.5, 0.25], [0.5, 0.75, 0.125], [1.0, 2.0, -0.5]])  # last: zero length
+    else:
+        E = np.array([[1.0, 0.0, 0.0], [0.6, 0.0, -0.8], [0.0, 0.0, 1.0]])
+    lines = [(A[j], A[j] + E[j]) if kind == "ray" else (A[j], E[j]) for j in range(2)]
+    P = np.vstack([_collinear_targets(a, b, 11 + j) for j, (a, b) in enumerate(lines)])
+    m, n = P.shape[0], A.shape[0]
+    rng = np.random.default_rng(3)
+    rc2 = rng.uniform(1e-3, 0.3, (m, n))
+    u = rng.normal(size=(m, n, 3))
+
+    tP, tA, tE, tr = (torch.tensor(x, dtype=torch.float64, requires_grad=True) for x in (P, A, E, rc2))
+    fn = seg_vel if kind == "segment" else ray_vel
+    v_t = fn(tP, tA, tE, tr)
+    g_t = torch.autograd.grad((v_t * torch.tensor(u)).sum(), [tP, tA, tE, tr])
+    v_t = v_t.detach().numpy()
+    g_t = [g.numpy() for g in g_t]
+
+    tol = _TOL["float64"]
+
+    def check(v, grads, name):
+        assert float(np.max(np.abs(v - v_t))) <= tol * float(np.max(np.abs(v_t))), (name, "velocity")
+        for q, (gn, gr) in enumerate(zip(grads, g_t)):
+            err = float(np.max(np.abs(gn - gr))) / float(np.max(np.abs(gr)))
+            assert err <= tol, (name, q, err)
+
+    # numpy reference VJP.
+    if kind == "segment":
+        v, st = ref._seg_forward(P[:, None, :], A[None], E[None], rc2, ref.FLOORS["float64"])
+        gP, gA, gE, gr = ref._seg_backward(u, st)
+    else:
+        v, st = ref._ray_forward(P[:, None, :], A[None], E[None], rc2, ref.FLOORS["float64"])
+        gP, gA, gE, gr = ref._ray_backward(u, st)
+    check(v, [gP.sum(axis=1), gA.sum(axis=0), gE.sum(axis=0), gr], "numpy")
+
+    # Numba VJP (one pair per call).
+    v = np.zeros((m, n, 3))
+    gP = np.zeros((m, 3))
+    gA = np.zeros((n, 3))
+    gE = np.zeros((n, 3))
+    gr = np.zeros((m, n))
+    v2 = np.zeros((m, n, 3))
+    vel = nb._seg_v if kind == "segment" else nb._ray_v
+    for i in range(m):
+        for j in range(n):
+            if kind == "segment":
+                o = nb._seg_fb(*P[i], *A[j], *E[j], rc2[i, j], *u[i, j])
+                gA[j] += o[6:9]
+                gE[j] += o[9:12]
+                gr[i, j] = o[12]
+            else:
+                o = nb._ray_fb(*P[i], *A[j], *E[j], rc2[i, j], *u[i, j])
+                gA[j] -= o[3:6]
+                gE[j] += o[6:9]
+                gr[i, j] = o[9]
+            v[i, j] = o[:3]
+            v2[i, j] = vel(*P[i], *A[j], *E[j], rc2[i, j])
+            gP[i] += o[3:6]
+    check(v, [gP, gA, gE, gr], "numba")
+    assert float(np.max(np.abs(v2 - v_t))) <= tol * float(np.max(np.abs(v_t))), "numba forward"
+
+
+def _warp_line_case(seed: int) -> tuple:
+    """Return horseshoes and targets on and near the extended lines of their legs (outside the legs)."""
+    rng = np.random.default_rng(seed)
+    a = np.array([[0.25, -0.5, 0.0], [0.5, 0.625, 0.0625]])
+    b = np.array([[0.25, 0.5, 0.0], [0.75, 1.625, 0.125]])
+    ate = a + np.array([1.0, 0.0, 0.0])
+    bte = b + np.array([1.0, 0.0, 0.125])
+    d = np.array([[1.0, 0.0, 0.0], [0.6, 0.0, 0.8]])
+    pts = []
+    for s in range(2):
+        for p0, p1 in ((a[s], b[s]), (ate[s], a[s]), (b[s], bte[s])):
+            for t in (-0.5, -0.125, 1.125, 1.5):
+                pts.append(p0 + t * (p1 - p0))
+        for p0 in (ate[s], bte[s]):
+            for t in (0.125, 1.0):
+                pts.append(p0 - t * d[s])
+    pts = np.array(pts)
+    off = np.array([1e-6, 1e-3, 1e-1])[rng.integers(0, 3, len(pts))][:, None]
+    P = np.vstack([pts, pts + off * rng.normal(size=pts.shape)])
+    return P, a, b, ate, bte, d
+
+
+@pytest.mark.gpu
+@pytest.mark.parametrize("precision", ["float64", "float32"])
+def test_warp_vjp_parity_on_extended_leg_lines(precision: str) -> None:
+    """The Warp horseshoe VJP equals torch autograd of the reference on and near the extended leg lines.
+
+    The targets lie before and after the finite legs and behind the start
+    points of the wake legs, exactly collinear and at offsets from 1e-6 m to
+    0.1 m. There the core uses the distance to the nearest end point, and
+    the derivative at a collinear point is not zero. The tolerances are
+    those of the other parity tests of this file.
+    """
+    torch = _need_cuda()
+    from types import SimpleNamespace
+
+    from ventorum.gpu import vjp_kernels as wk
+    from ventorum.sensitivity.reference import horseshoe_vel
+
+    P, a, b, ate, bte, d = _warp_line_case(21)
+    m, n = P.shape[0], a.shape[0]
+    rng = np.random.default_rng(4)
+    X = rng.normal(size=(m, 3))
+    rc2 = np.array([4e-4, 2.5e-3])
+    s = np.array([1.0, -1.0])
+    dt = torch.float64 if precision == "float64" else torch.float32
+    dev = "cuda"
+    ins = [torch.tensor(x, dtype=dt, device=dev, requires_grad=True) for x in (P, X, a, b, ate, bte, d, rc2, s)]
+    tP, tX, ta, tb, tat, tbt, td, tr, ts = ins
+    v = horseshoe_vel(tP, ta, tb, tat, tbt, td, tr)
+    loss = ((v * tX[:, None, :]).sum(-1) * ts[None, :]).sum()
+    want = [g.detach().double().cpu().numpy() for g in torch.autograd.grad(loss, ins)]
+
+    i64 = torch.int64
+    topo = SimpleNamespace(src_group=torch.zeros(n, dtype=i64), tg_group=torch.zeros(m, dtype=i64),
+                           own=torch.full((m,), -1, dtype=i64), src_panel=torch.arange(n, dtype=i64),
+                           edge=torch.full((m,), -1, dtype=i64), src_edge_a=torch.arange(n, dtype=i64),
+                           src_edge_b=torch.arange(n, dtype=i64), col=torch.arange(n, dtype=i64),
+                           n_u=n, use_tg=False)
+    det = [x.detach() for x in ins]
+    out = wk.horseshoe_vjp(det[0], det[1], det[2], det[3], det[4], det[5], det[6], det[7], None, det[8], None, topo)
+    gP, gX, _, ga, gb, gat, gbt, gd, gr, gs = (None if x is None else x.double().cpu().numpy() for x in out)
+    tol = _TOL[precision]
+    for q, (gn, gw) in enumerate(zip((gP, gX, ga, gb, gat, gbt, gd, gr, gs), want)):
+        assert np.all(np.isfinite(gn)), q
+        err = float(np.max(np.abs(gn - gw))) / float(np.max(np.abs(gw)))
+        assert err <= tol, (precision, q, err)

@@ -831,3 +831,166 @@ def test_velocity_unknowns_kernel_parity(backend, with_ground, numpy_backend):
     V.set_kernel_backend("numpy")
     ref = V.velocity_tensor_unknowns(P, hs, n_unk, tg)
     assert np.max(np.abs(fused - ref)) <= 1e-12 * np.max(np.abs(ref))
+
+
+# Core on the distance to the finite filament: points on and near the extended
+# lines of the filaments, outside the filaments.
+
+def _line_points(s, e, w, ray=False):
+    """Points on and near the extended line of the filament from *s* to *e* (or of a ray from *s* along *e - s*).
+
+    *w* is a unit vector normal to the filament. The points are before the
+    start, after the end (segments only), exactly or nearly on the line,
+    near the end points, and over the filament.
+    """
+    u = e - s
+    length = np.linalg.norm(u)
+    u = u / length
+    pts = [s - 0.5 * length * u, s - 1e-3 * length * u, s - 0.3 * length * u + 0.01 * length * w,
+           s + 1e-6 * length * w, s - 1e-6 * length * u + 1e-6 * length * w,
+           s - 0.2 * length * u + 0.3 * length * w, s + 0.5 * length * u, s + 0.5 * length * u + 1e-3 * w]
+    if not ray:
+        pts += [e + 0.5 * length * u, e + 1e-3 * length * u, e + 0.3 * length * u + 0.02 * length * w,
+                e + 1e-6 * length * w, e + 1e-6 * length * u - 1e-6 * length * w,
+                e + 0.2 * length * u - 0.3 * length * w]
+    return pts
+
+
+def _extended_line_case(straight):
+    """Horseshoes and points on and near the extended lines of all their filaments.
+
+    The first horseshoe has axis-aligned filaments, so that some points are
+    exactly on the extended lines. The second is oblique, with a wake
+    direction that has a y component. The third is a ground image (sign -1)
+    of the first, with the same unknown. Without *straight*, the chordwise
+    legs have a length and the points have a cross-surface core.
+    """
+    a = np.array([[0.0, -1.0, 0.0], [0.2, 1.3, 0.1], [0.0, -1.0, -1.6]])
+    b = np.array([[0.0, 1.0, 0.0], [0.3, 2.4, 0.25], [0.0, 1.0, -1.6]])
+    if straight:
+        a_te, b_te = a.copy(), b.copy()
+    else:
+        a_te = np.array([[0.5, -1.0, 0.0], [0.9, 1.35, 0.05], [0.5, -1.0, -1.6]])
+        b_te = np.array([[0.5, 1.0, 0.0], [1.0, 2.5, 0.2], [0.5, 1.0, -1.6]])
+    d = np.array([[1.0, 0.0, 0.0], [1.0, 0.1, 0.05], [1.0, 0.0, 0.0]])
+    d /= np.linalg.norm(d, axis=1)[:, None]
+    z = np.array([0.0, 0.0, 1.0])
+    pts = []
+    for j in range(2):
+        pts += _line_points(a[j], b[j], z)
+        if not straight:
+            pts += _line_points(a_te[j], a[j], z)
+            pts += _line_points(b[j], b_te[j], z)
+        for start in (a_te[j], b_te[j]):
+            pts += _line_points(start, start + d[j], z, ray=True)
+    P = np.array(pts)
+    m = P.shape[0]
+    nrm = np.tile([0.3, -0.2, 0.9], (m, 1)) / np.linalg.norm([0.3, -0.2, 0.9])
+    group = None if straight else np.array([0, 1, 0], dtype=np.int64)
+    hs = V.HorseshoeSet(a=a, b=b, a_te=a_te, b_te=b_te, wake_dir=d, rc=np.array([0.05, 0.02, 0.05]),
+                        sign=np.array([1.0, 1.0, -1.0]), column=np.array([0, 1, 0], dtype=np.int64),
+                        group=group)
+    tg = None if straight else V.Targets(group=(np.arange(m) % 2).astype(np.int64), rc=np.full(m, 0.03))
+    gamma = np.array([1.3, -0.7])
+    return P, nrm, hs, tg, gamma, 2
+
+
+def _extended_line_outputs(backend, straight):
+    """Run the kernels of one backend on the extended-line case."""
+    P, nrm, hs, tg, gamma, n = _extended_line_case(straight)
+    V.set_kernel_backend(backend)
+    return (V.horseshoe_velocity_tensor(P, hs, tg),
+            V.influence_matrix(P, nrm, hs, n, tg),
+            V.induced_velocity(P, hs, gamma, tg),
+            # The compiled backends add part 1 (fixed legs) and part 2 (wake legs) here.
+            V.influence_matrix(P, nrm, hs, n, tg, cache={}, cache_key="k"),
+            V.velocity_tensor_unknowns(P, hs, n, tg))
+
+
+@pytest.mark.parametrize("straight", [False, True])
+@pytest.mark.parametrize("backend", ["numba", "cython", "torch"])
+def test_extended_line_points_equal_numpy(numpy_backend, monkeypatch, backend, straight):
+    """Each backend gives the numpy result at points on and near the extended lines of the filaments."""
+    if backend == "cython":
+        pytest.importorskip("ventorum.aero.vortex_cython")
+    if backend == "torch":
+        _torch_cpu(monkeypatch)
+    ref = _extended_line_outputs("numpy", straight)
+    new = _extended_line_outputs(backend, straight)
+    for r, x in zip(ref, new):
+        assert np.all(np.isfinite(x))
+        assert np.max(np.abs(x - r)) <= 1e-12 * np.max(np.abs(r))
+
+
+@pytest.mark.gpu
+@pytest.mark.parametrize("straight", [False, True])
+def test_extended_line_points_equal_numpy_cuda(numpy_backend, monkeypatch, straight):
+    """The torch kernels on a CUDA GPU give the numpy result at points on and near the extended lines."""
+    _need_cuda()
+    monkeypatch.setenv("VENTORUM_TORCH_DEVICE", "cuda")
+    ref = _extended_line_outputs("numpy", straight)
+    new = _extended_line_outputs("torch", straight)
+    for r, x in zip(ref, new):
+        assert np.max(np.abs(x - r)) <= 1e-12 * np.max(np.abs(r))
+
+
+def _exact_segment(P, A, B):
+    """Exact Biot-Savart velocity of a unit segment A -> B at points off its line (Katz and Plotkin)."""
+    r1, r2, r0 = P - A, P - B, B - A
+    c = np.cross(r1, r2)
+    proj = (r1 / np.linalg.norm(r1, axis=1)[:, None] - r2 / np.linalg.norm(r2, axis=1)[:, None]) @ r0
+    return c * (proj / (4.0 * np.pi * np.sum(c * c, axis=1)))[:, None]
+
+
+def _exact_ray(P, A, d):
+    """Exact Biot-Savart velocity of a unit semi-infinite line from A along d at points off its line."""
+    r = P - A
+    c = np.cross(d, r)
+    cos_t = (r @ d) / np.linalg.norm(r, axis=1)
+    return c * ((1.0 + cos_t) / (4.0 * np.pi * np.sum(c * c, axis=1)))[:, None]
+
+
+def test_numpy_core_on_the_distance_to_the_filament():
+    """Over the filament the old regularised formula applies; outside it the exact law times D^2 / (D^2 + rc^2)."""
+    rng = np.random.default_rng(29)
+    A = np.array([0.1, -0.4, 0.2])
+    B = np.array([0.3, 0.9, 0.35])
+    rc = 0.08
+    r0 = B - A
+    L = np.linalg.norm(r0)
+    u = r0 / L
+    w = np.cross(u, [0.0, 0.0, 1.0])
+    w /= np.linalg.norm(w)
+    w2 = np.cross(u, w)
+    t = rng.uniform(-1.0, 2.0, size=200)
+    h = rng.uniform(0.01, 0.5, size=200)
+    phi = rng.uniform(0.0, 2.0 * np.pi, size=200)
+    P = A + L * t[:, None] * u + h[:, None] * (np.cos(phi)[:, None] * w + np.sin(phi)[:, None] * w2)
+    v = V.segment_velocity(P, A[None, :], B[None, :], rc)[:, 0, :]
+    over = (t >= 0.0) & (t <= 1.0)
+    # Over the segment: the old production formula, proj / (|r1 x r2|^2 + rc^2 |r0|^2).
+    r1, r2 = P - A, P - B
+    c = np.cross(r1, r2)
+    proj = (r1 / np.linalg.norm(r1, axis=1)[:, None] - r2 / np.linalg.norm(r2, axis=1)[:, None]) @ r0
+    old = c * (proj / (4.0 * np.pi * (np.sum(c * c, axis=1) + rc ** 2 * L ** 2)))[:, None]
+    assert np.max(np.abs(v[over] - old[over])) <= 1e-12 * np.max(np.abs(old[over]))
+    # Outside: exact law times D^2 / (D^2 + rc^2), D the distance to the nearest end point.
+    D2 = np.where(t < 0.0, np.sum(r1 * r1, axis=1), np.sum(r2 * r2, axis=1))
+    want = _exact_segment(P, A, B) * (D2 / (D2 + rc ** 2))[:, None]
+    out = ~over
+    assert np.max(np.abs(v[out] - want[out])) <= 1e-12 * np.max(np.abs(want[out]))
+    # Exactly on the extended line, outside the segment, the velocity is zero.
+    Pc = np.array([[0.0, -1.5, 0.0], [0.0, 1.25, 0.0]])
+    assert np.all(V.segment_velocity(Pc, np.array([[0.0, -1.0, 0.0]]), np.array([[0.0, 1.0, 0.0]]), rc) == 0.0)
+
+    # Semi-infinite line from A along u.
+    vr = V.ray_velocity(P, A[None, :], u[None, :], rc)[:, 0, :]
+    front = t >= 0.0
+    r = P - A
+    cr = np.cross(u, r)
+    cos_t = (r @ u) / np.linalg.norm(r, axis=1)
+    old_r = cr * ((1.0 + cos_t) / (4.0 * np.pi * (np.sum(cr * cr, axis=1) + rc ** 2)))[:, None]
+    assert np.max(np.abs(vr[front] - old_r[front])) <= 1e-12 * np.max(np.abs(old_r[front]))
+    D2r = np.sum(r * r, axis=1)
+    want_r = _exact_ray(P, A, u) * (D2r / (D2r + rc ** 2))[:, None]
+    assert np.max(np.abs(vr[~front] - want_r[~front])) <= 1e-12 * np.max(np.abs(want_r[~front]))

@@ -1250,11 +1250,11 @@ def _production_values(prep: dict) -> dict[str, float]:
 _TABLE_POINT_TOL = 1e-12
 
 LLT_NODE_NOTE = (
-    "Lifting-line node gradients: the vortex core on the collinear bound segments of the lifting "
-    "line makes its node sensitivity depend on a length scale of about 1e-5 m (the core), so the "
-    "node gradients of the lifting line are not physical at that scale. An investigation of this "
-    "effect is open. Use the vortex lattice for node gradients, or check them with differences "
-    "at the mesh scale.")
+    "Lifting-line node gradients: the vortex core acts on the distance to the finite filament, so "
+    "the bound segments of the strips on one line do not change the node sensitivity; the node "
+    "gradients of the linear lifting line agree with an exact-law reference within 2 % in the tests. It keeps "
+    "the limits of its model (one panel per strip; not grid convergent with sweep): for the "
+    "chordwise shape use the vortex lattice.")
 
 
 def _unknown_strips(b: dict, unknowns: Any) -> list[int]:

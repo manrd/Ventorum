@@ -149,8 +149,10 @@ def _segment(P, A, B, rc2):
     cr2 = cx * cx + cy * cy + cz * cz
     r0sq = r0[..., 0] * r0[..., 0] + r0[..., 1] * r0[..., 1] + r0[..., 2] * r0[..., 2]
     # A tiny floor keeps the unit vectors finite when P is on an end point.
-    n1 = torch.sqrt((r1 * r1).sum(-1) + 1e-300)
-    n2 = torch.sqrt((r2 * r2).sum(-1) + 1e-300)
+    d1 = (r1 * r1).sum(-1) + 1e-300
+    d2 = (r2 * r2).sum(-1) + 1e-300
+    n1 = torch.sqrt(d1)
+    n2 = torch.sqrt(d2)
     t1 = r1 / n1[..., None]
     t2 = r2 / n2[..., None]
     proj = (r0[..., 0] * (t1[..., 0] - t2[..., 0])
@@ -159,7 +161,18 @@ def _segment(P, A, B, rc2):
     denom = cr2 + rc2 * r0sq
     ok = denom > 1e-300
     safe = torch.where(ok, denom, torch.ones_like(denom))
-    k = torch.where(ok, _INV_4PI * proj / safe, torch.zeros_like(proj))
+    k_in = torch.where(ok, _INV_4PI * proj / safe, torch.zeros_like(proj))
+    # Outside the segment (before A or after B) the exact law is multiplied by
+    # D^2 / (D^2 + rc^2), with D the distance to the nearest end point.
+    before = (r0 * r1).sum(-1) < 0.0
+    after = (r0 * r2).sum(-1) > 0.0
+    outside = before | after
+    D2 = torch.where(before, d1, d2)
+    e = n1 * n2 + (r1 * r2).sum(-1)
+    ok_out = outside & (e > 1e-300)
+    safe_out = torch.where(ok_out, n1 * n2 * e, torch.ones_like(e))
+    k_out = torch.where(ok_out, _INV_4PI * (n1 + n2) / safe_out * (D2 / (D2 + rc2)), torch.zeros_like(e))
+    k = torch.where(outside, k_out, k_in)
     return torch.stack((cx * k, cy * k, cz * k), dim=-1)
 
 
@@ -171,12 +184,21 @@ def _ray(P, A, d, rc2):
     cy = dd[..., 2] * r[..., 0] - dd[..., 0] * r[..., 2]
     cz = dd[..., 0] * r[..., 1] - dd[..., 1] * r[..., 0]
     cr2 = cx * cx + cy * cy + cz * cz
-    rn = torch.sqrt((r * r).sum(-1) + 1e-300)
-    cos_t = (dd * r).sum(-1) / rn
+    D2 = (r * r).sum(-1) + 1e-300
+    rn = torch.sqrt(D2)
+    dr = (dd * r).sum(-1)
+    cos_t = dr / rn
     denom = cr2 + rc2
     ok = denom > 1e-300
     safe = torch.where(ok, denom, torch.ones_like(denom))
-    k = torch.where(ok, _INV_4PI * (1.0 + cos_t) / safe, torch.zeros_like(cos_t))
+    k_in = torch.where(ok, _INV_4PI * (1.0 + cos_t) / safe, torch.zeros_like(cos_t))
+    # Behind the start point the exact law is multiplied by D^2 / (D^2 + rc^2), D = |r|.
+    behind = dr < 0.0
+    e = rn * (rn - dr)
+    ok_out = behind & (e > 1e-300)
+    safe_out = torch.where(ok_out, e, torch.ones_like(e))
+    k_out = torch.where(ok_out, _INV_4PI / safe_out * (D2 / (D2 + rc2)), torch.zeros_like(e))
+    k = torch.where(behind, k_out, k_in)
     return torch.stack((cx * k, cy * k, cz * k), dim=-1)
 
 

@@ -16,8 +16,11 @@ The kernels compute, for K flight conditions on one lattice in one launch:
 
 Physics and regularisation are the same as in the reference kernels of
 :mod:`ventorum.aero.vortex`: the Biot-Savart law of the bent horseshoe (finite
-segments and semi-infinite wake legs), the core radius ``rc`` with the
-denominators ``|r1 x r2|^2 + rc^2 |r0|^2`` and ``|d x r|^2 + rc^2``, and the
+segments and semi-infinite wake legs), the core radius ``rc`` that acts on
+the distance to the finite filament (over the filament the denominators
+``|r1 x r2|^2 + rc^2 |r0|^2`` and ``|d x r|^2 + rc^2``; outside it the exact
+law times the Scully factor ``D^2 / (D^2 + rc^2)``, with ``D`` the distance
+to the nearest end point; see :mod:`ventorum.aero.vortex`), and the
 cross-surface core of :class:`ventorum.aero.vortex.Targets`. The ground images
 are made inside the kernels from the ground plane of each case (method of
 images: the source points are mirrored in the plane, the circulation changes
@@ -239,50 +242,76 @@ def _build(precision: str) -> SimpleNamespace:  # noqa: C901 - one closure per k
         return rsqrt(wp.dot(r, r) + T(floor))
 
     @wp.func(module=module)
-    def seg(r1: vec, r2: vec, r0: vec, i1: T, i2: T, rc2: T):
-        # Finite segment from the vectors to its two end points (r1, r2), its
-        # direction r0 and the inverse norms of r1 and r2.
-        c = wp.cross(r1, r2)
-        proj = wp.dot(r0, r1 * i1 - r2 * i2)
-        den = wp.dot(c, c) + rc2 * wp.dot(r0, r0)
+    def seg_c(c: vec, r1: vec, r2: vec, r0: vec, i1: T, i2: T, rc2: T):
+        # Finite segment with the cross product c = r1 x r2 given, the vectors
+        # to its two end points (r1, r2), its direction r0 and the inverse
+        # norms of r1 and r2. The core acts on the distance to the finite
+        # segment (see ventorum.aero.vortex): over the segment the denominator
+        # is |c|^2 + rc2 |r0|^2; outside it (before the start point or after
+        # the end point) the exact law is multiplied by D2 / (D2 + rc2), with
+        # D2 the squared distance to the nearest end point.
+        a1 = wp.dot(r0, r1)
+        a2 = wp.dot(r0, r2)
         k = T(0.0)
-        if den > T(floor):
-            k = T(_INV_4PI) * proj * rcp(den)
+        if a1 < T(0.0) or a2 > T(0.0):
+            D2 = T(0.0)
+            if a1 < T(0.0):
+                D2 = wp.dot(r1, r1) + T(floor)
+            else:
+                D2 = wp.dot(r2, r2) + T(floor)
+            # e = |r1| |r2| + r1 . r2 has no cancellation outside the segment.
+            e = rcp(i1 * i2) + wp.dot(r1, r2)
+            if e > T(floor):
+                k = T(_INV_4PI) * (i1 + i2) * rcp(e) * D2 * rcp(D2 + rc2)
+        else:
+            proj = wp.dot(r0, r1 * i1 - r2 * i2)
+            den = wp.dot(c, c) + rc2 * wp.dot(r0, r0)
+            if den > T(floor):
+                k = T(_INV_4PI) * proj * rcp(den)
         return c * k
 
     @wp.func(module=module)
-    def seg_c(c: vec, r1: vec, r2: vec, r0: vec, i1: T, i2: T, rc2: T):
-        # The same segment with the cross product c = r1 x r2 given.
-        proj = wp.dot(r0, r1 * i1 - r2 * i2)
-        den = wp.dot(c, c) + rc2 * wp.dot(r0, r0)
-        k = T(0.0)
-        if den > T(floor):
-            k = T(_INV_4PI) * proj * rcp(den)
-        return c * k
+    def seg(r1: vec, r2: vec, r0: vec, i1: T, i2: T, rc2: T):
+        # The same finite segment; the cross product is computed here.
+        return seg_c(wp.cross(r1, r2), r1, r2, r0, i1, i2, rc2)
 
     @wp.func(module=module)
     def ray(r: vec, ir: T, d: vec, rc2: T):
         # Semi-infinite line from the point at -r along the unit vector d
-        # (float64 formula of the reference kernels).
+        # (float64 formula of the reference kernels). In front of the start
+        # point (d . r >= 0) the denominator is |d x r|^2 + rc2; behind it the
+        # exact law (no cancellation) is multiplied by D2 / (D2 + rc2), with
+        # D2 = |r|^2 (see ventorum.aero.vortex).
         c = wp.cross(d, r)
-        den = wp.dot(c, c) + rc2
+        dr = wp.dot(d, r)
         k = T(0.0)
-        if den > T(floor):
-            k = T(_INV_4PI) * (T(1.0) + wp.dot(d, r) * ir) * rcp(den)
+        if dr < T(0.0):
+            D2 = wp.dot(r, r) + T(floor)
+            rn = D2 * ir
+            e = rn * (rn - dr)
+            if e > T(floor):
+                k = T(_INV_4PI) * rcp(e) * D2 * rcp(D2 + rc2)
+        else:
+            den = wp.dot(c, c) + rc2
+            if den > T(floor):
+                k = T(_INV_4PI) * (T(1.0) + dr * ir) * rcp(den)
         return c * k
 
     @wp.func(module=module)
     def ray_pre(c: vec, dr: T, rn: T, rc2: T):
-        # Semi-infinite line from c = d x r and dr = d . r (float32 kernels).
-        # 1 + cos(theta) = |c|^2 / (|r| (|r| - d.r)) when d.r < 0 (no cancellation).
-        cc = wp.dot(c, c)
-        den = cc + rc2
-        opc = T(1.0) + dr / rn
-        if dr < T(0.0):
-            opc = cc / (rn * (rn - dr))
+        # Semi-infinite line from c = d x r, dr = d . r and rn = |r| (float32
+        # kernels; rn includes the floor). The same branches as `ray`:
+        # behind the start point D2 = rn^2.
         k = T(0.0)
-        if den > T(floor):
-            k = T(_INV_4PI) * opc / den
+        if dr < T(0.0):
+            D2 = rn * rn
+            e = rn * (rn - dr)
+            if e > T(floor):
+                k = T(_INV_4PI) / e * D2 / (D2 + rc2)
+        else:
+            den = wp.dot(c, c) + rc2
+            if den > T(floor):
+                k = T(_INV_4PI) * (T(1.0) + dr / rn) / den
         return c * k
 
     @wp.func(module=module)

@@ -24,10 +24,28 @@ The reference kernels of this module are plain numpy; the production paths
 call the Numba, Cython or PyTorch backends. The numpy kernels process the evaluation points in chunks,
 so memory stays bounded for large lattices.
 
-Regularisation: each source has a core radius ``rc``. The finite-segment
-kernel uses the denominator ``|r1 x r2|^2 + (rc |r0|)^2`` and the
-semi-infinite kernel uses ``|d x r|^2 + rc^2``. When ``rc`` is much smaller
-than the distance, the kernels are the exact Biot-Savart law.
+Regularisation: each source has a core radius ``rc``. The core acts on the
+distance ``D`` from the point to the finite filament (not on the distance
+``h`` from the extended line of the filament):
+
+* Over the filament (the foot of the perpendicular from the point lies on
+  the segment, or the point is in front of the start of a semi-infinite
+  line), ``D = h``. The finite-segment kernel uses the denominator
+  ``|r1 x r2|^2 + (rc |r0|)^2`` and the semi-infinite kernel uses
+  ``|d x r|^2 + rc^2``. This is the exact law times ``h^2 / (h^2 + rc^2)``.
+* Outside the filament, ``D`` is the distance to the nearest end point, and
+  the velocity is the exact law times ``D^2 / (D^2 + rc^2)``. The exact law
+  there is computed in a form without cancellation: for a segment
+  ``(r1 x r2) (|r1| + |r2|) / (4 pi |r1| |r2| (|r1| |r2| + r1 . r2))``, for a
+  semi-infinite line ``(d x r) / (4 pi |r| (|r| - d . r))``.
+
+The factor ``D^2 / (D^2 + rc^2)`` is the Scully core profile (the case
+n = 1 of the Vatistas family). ``D^2`` and its first derivative are
+continuous at the end points, so the velocity and its derivatives with
+respect to the geometry have no jump there. A point on the extended line of
+a filament, outside the filament, gets the exact law times the factor; the
+core does not remove its velocity. When ``rc`` is much smaller than ``D``,
+the kernels are the exact Biot-Savart law.
 
 References
 ----------
@@ -43,6 +61,13 @@ References
   regularisation of this kind; its form above and the size of the
   cross-surface core (half the strip width, from a core-size study) are
   choices of Ventorum, verified against the exact law in the tests.
+* M. P. Scully, "Computation of helicopter rotor wake geometry and its
+  influence on rotor harmonic airloads", ASRL TR 178-1, Massachusetts
+  Institute of Technology, 1975: the core velocity profile
+  ``r^2 / (r^2 + rc^2)``.
+* G. H. Vatistas, V. Kozel and W. C. Mih, "A simpler model for concentrated
+  vortices", Experiments in Fluids 11 (1991) 73-76: the family of core
+  profiles; its case n = 1 is the Scully profile.
 """
 
 from __future__ import annotations
@@ -408,15 +433,24 @@ def segment_velocity(
 ) -> np.ndarray:
     """Velocity at points *P* from unit-strength finite segments *A* -> *B*.
 
+    The core acts on the distance from the point to the finite segment (see
+    the module notes): over the segment the denominator is
+    ``|r1 x r2|^2 + (rc |r0|)^2``; outside it the exact law is multiplied by
+    ``D^2 / (D^2 + rc^2)``, with ``D`` the distance to the nearest end point.
+
     Parameters
     ----------
-    P : (m, 3) evaluation points.
-    A, B : (n, 3) segment end points.
-    rc : (n,) or float, core radius per segment.
+    P : numpy.ndarray
+        Evaluation points [m], shape (m, 3).
+    A, B : numpy.ndarray
+        Segment end points [m], shape (n, 3).
+    rc : numpy.ndarray or float
+        Core radius [m], shape (n,), (m, n) or a scalar.
 
     Returns
     -------
-    (m, n, 3) induced velocity for unit circulation.
+    numpy.ndarray
+        Induced velocity for unit circulation [m/s per m^2/s], shape (m, n, 3).
     """
     P = P[:, None, :]
     r1 = P - A[None, :, :]
@@ -427,8 +461,10 @@ def segment_velocity(
     r0sq = _dot(r0, r0)
     rc2 = _rc2(rc, P.shape[0], A.shape[0])
     # A tiny floor keeps the unit vectors finite when P is on an end point.
-    n1 = np.sqrt(_dot(r1, r1) + 1e-300)
-    n2 = np.sqrt(_dot(r2, r2) + 1e-300)
+    d1 = _dot(r1, r1) + 1e-300
+    d2 = _dot(r2, r2) + 1e-300
+    n1 = np.sqrt(d1)
+    n2 = np.sqrt(d2)
     proj = (
         r0[..., 0] * (r1[..., 0] / n1 - r2[..., 0] / n2)
         + r0[..., 1] * (r1[..., 1] / n1 - r2[..., 1] / n2)
@@ -436,7 +472,16 @@ def segment_velocity(
     )
     denom = cr2 + rc2 * r0sq
     ok = denom > 1e-300
-    k = np.where(ok, _INV_4PI * proj / np.where(ok, denom, 1.0), 0.0)
+    k_in = np.where(ok, _INV_4PI * proj / np.where(ok, denom, 1.0), 0.0)
+    # Outside the segment: the point is before A (r0 . r1 < 0) or after B
+    # (r0 . r2 > 0). D^2 is the squared distance to the nearest end point.
+    before = _dot(r0, r1) < 0.0
+    after = _dot(r0, r2) > 0.0
+    D2 = np.where(before, d1, d2)
+    e = n1 * n2 + _dot(r1, r2)
+    ok_out = (before | after) & (e > 1e-300)
+    k_out = np.where(ok_out, _INV_4PI * (n1 + n2) / np.where(ok_out, n1 * n2 * e, 1.0) * (D2 / (D2 + rc2)), 0.0)
+    k = np.where(before | after, k_out, k_in)
     return cr * k[..., None]
 
 
@@ -449,28 +494,45 @@ def ray_velocity(
     """Velocity at *P* from unit-strength semi-infinite lines that start at *A*.
 
     The vorticity points along the unit vector *d* (from *A* to infinity).
+    The core acts on the distance from the point to the line (see the module
+    notes): in front of the start point (``d . r >= 0``) the denominator is
+    ``|d x r|^2 + rc^2``; behind it the exact law is multiplied by
+    ``D^2 / (D^2 + rc^2)`` with ``D = |r|``.
 
     Parameters
     ----------
-    P : (m, 3) evaluation points.
-    A : (n, 3) start points.
-    d : (n, 3) unit directions.
-    rc : (n,) or float, core radius.
+    P : numpy.ndarray
+        Evaluation points [m], shape (m, 3).
+    A : numpy.ndarray
+        Start points [m], shape (n, 3).
+    d : numpy.ndarray
+        Unit directions, shape (n, 3).
+    rc : numpy.ndarray or float
+        Core radius [m], shape (n,), (m, n) or a scalar.
 
     Returns
     -------
-    (m, n, 3) induced velocity for unit circulation.
+    numpy.ndarray
+        Induced velocity for unit circulation [m/s per m^2/s], shape (m, n, 3).
     """
     r = P[:, None, :] - A[None, :, :]
     dd = d[None, :, :]
     cr = _cross(dd, r)
     cr2 = _dot(cr, cr)
-    rn = np.sqrt(_dot(r, r) + 1e-300)
-    cos_t = _dot(dd, r) / rn
+    D2 = _dot(r, r) + 1e-300
+    rn = np.sqrt(D2)
+    dr = _dot(dd, r)
+    cos_t = dr / rn
     rc2 = _rc2(rc, P.shape[0], A.shape[0])
     denom = cr2 + rc2
     ok = denom > 1e-300
-    k = np.where(ok, _INV_4PI * (1.0 + cos_t) / np.where(ok, denom, 1.0), 0.0)
+    k_in = np.where(ok, _INV_4PI * (1.0 + cos_t) / np.where(ok, denom, 1.0), 0.0)
+    # Behind the start point: exact law (no cancellation) times D^2 / (D^2 + rc^2).
+    behind = dr < 0.0
+    e = rn * (rn - dr)
+    ok_out = behind & (e > 1e-300)
+    k_out = np.where(ok_out, _INV_4PI / np.where(ok_out, e, 1.0) * (D2 / (D2 + rc2)), 0.0)
+    k = np.where(behind, k_out, k_in)
     return cr * k[..., None]
 
 

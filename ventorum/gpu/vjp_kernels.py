@@ -76,155 +76,221 @@ def _build(precision: str) -> SimpleNamespace:  # noqa: C901 - one closure per k
 
     @wp.func(module=module)
     def seg_v(p: vec, A: vec, B: vec, rc2: T):
-        # Velocity of a unit finite segment A -> B at p (stable projection).
+        # Velocity of a unit finite segment A -> B at p. Over the segment: the
+        # production formula (stable projection where r1 . r2 > 0). Outside it
+        # (before A or after B): the exact law times D2 / (D2 + rc2), with D2
+        # the squared distance to the nearest end point (see ventorum.aero.vortex).
         r1 = p - A
         r2 = p - B
         r0 = B - A
         c = wp.cross(r1, r2)
         cr2 = wp.dot(c, c)
-        n1 = wp.sqrt(wp.dot(r1, r1) + T(floor))
-        n2 = wp.sqrt(wp.dot(r2, r2) + T(floor))
+        d1 = wp.dot(r1, r1) + T(floor)
+        d2 = wp.dot(r2, r2) + T(floor)
+        n1 = wp.sqrt(d1)
+        n2 = wp.sqrt(d2)
         dot12 = wp.dot(r1, r2)
-        proj = T(0.0)
-        if dot12 > T(0.0):
-            n12 = n1 * n2
-            proj = cr2 * (n1 + n2) / (n12 * (n12 + dot12))
-        else:
-            proj = wp.dot(r0, r1 / n1 - r2 / n2)
-        den = cr2 + rc2 * wp.dot(r0, r0)
+        n12 = n1 * n2
+        e = n12 + dot12
+        a1 = wp.dot(r0, r1)
+        a2 = wp.dot(r0, r2)
         k = T(0.0)
-        if den > T(floor):
-            k = T(_INV_4PI) * proj / den
+        if a1 < T(0.0) or a2 > T(0.0):
+            D2 = d2
+            if a1 < T(0.0):
+                D2 = d1
+            if e > T(floor):
+                k = T(_INV_4PI) * (n1 + n2) / (n12 * e) * (D2 / (D2 + rc2))
+        else:
+            proj = T(0.0)
+            if dot12 > T(0.0):
+                proj = cr2 * (n1 + n2) / (n12 * e)
+            else:
+                proj = wp.dot(r0, r1 / n1 - r2 / n2)
+            den = cr2 + rc2 * wp.dot(r0, r0)
+            if den > T(floor):
+                k = T(_INV_4PI) * proj / den
         return c * k
 
     @wp.func(module=module)
     def ray_v(p: vec, A: vec, d: vec, rc2: T):
-        # Velocity of a unit semi-infinite line from A along d at p (stable 1 + cos).
+        # Velocity of a unit semi-infinite line from A along d at p. In front
+        # of A: the production formula. Behind A: the exact law times
+        # D2 / (D2 + rc2), with D2 = |r|^2 (see ventorum.aero.vortex).
         r = p - A
         c = wp.cross(d, r)
-        cr2 = wp.dot(c, c)
-        rn = wp.sqrt(wp.dot(r, r) + T(floor))
+        D2 = wp.dot(r, r) + T(floor)
+        rn = wp.sqrt(D2)
         dr = wp.dot(d, r)
-        oc = T(1.0) + dr / rn
-        if dr < T(0.0):
-            oc = cr2 / (rn * (rn - dr))
-        den = cr2 + rc2
         k = T(0.0)
-        if den > T(floor):
-            k = T(_INV_4PI) * oc / den
+        if dr < T(0.0):
+            e = rn * (rn - dr)
+            if e > T(floor):
+                k = T(_INV_4PI) / e * (D2 / (D2 + rc2))
+        else:
+            den = wp.dot(c, c) + rc2
+            if den > T(floor):
+                k = T(_INV_4PI) * (T(1.0) + dr / rn) / den
         return c * k
 
     @wp.func(module=module)
     def seg_fb(p: vec, A: vec, B: vec, rc2: T, u: vec):
         # Velocity and VJP of a unit finite segment A -> B at p for the adjoint u.
         # Returns v, gP, gA, gB, grc2. A pair with a zero denominator gives zeros.
+        # The branches are those of seg_v.
         r1 = p - A
         r2 = p - B
         r0 = B - A
         c = wp.cross(r1, r2)
         cr2 = wp.dot(c, c)
         r0sq = wp.dot(r0, r0)
-        n1 = wp.sqrt(wp.dot(r1, r1) + T(floor))
-        n2 = wp.sqrt(wp.dot(r2, r2) + T(floor))
+        d1 = wp.dot(r1, r1) + T(floor)
+        d2 = wp.dot(r2, r2) + T(floor)
+        n1 = wp.sqrt(d1)
+        n2 = wp.sqrt(d2)
         dot12 = wp.dot(r1, r2)
         n12 = n1 * n2
+        e = n12 + dot12
         t1 = r1 / n1
         t2 = r2 / n2
-        out = dot12 > T(0.0)
-        den_out = T(1.0)
-        proj = T(0.0)
-        if out:
-            den_out = n12 * (n12 + dot12)
-            proj = cr2 * (n1 + n2) / den_out
-        else:
-            proj = wp.dot(r0, t1 - t2)
-        den = cr2 + rc2 * r0sq
-        ok = T(0.0)
-        safe = T(1.0)
-        if den > T(floor):
-            ok = T(1.0)
-            safe = den
-        k = ok * T(_INV_4PI) * proj / safe
-        v = c * k
-        gc = u * k
-        gk = wp.dot(u, c)
-        gproj = ok * gk * T(_INV_4PI) / safe
-        gden = -ok * gk * k / safe
-        gcr2 = gden
-        grc2 = gden * r0sq
-        gr0sq = gden * rc2
+        before = wp.dot(r0, r1) < T(0.0)
+        after = wp.dot(r0, r2) > T(0.0)
         gr1 = vec()
         gr2 = vec()
         gr0 = vec()
         gn1 = T(0.0)
         gn2 = T(0.0)
-        if out:
-            gcr2 = gcr2 + gproj * (n1 + n2) / den_out
-            gsum = gproj * cr2 / den_out
-            gD = -gproj * proj / den_out
-            gn12 = gD * (T(2.0) * n12 + dot12)
-            gdot12 = gD * n12
-            gn1 = gsum + gn12 * n2
-            gn2 = gsum + gn12 * n1
-            gr1 = r2 * gdot12
-            gr2 = r1 * gdot12
+        grc2 = T(0.0)
+        k = T(0.0)
+        gc = vec()
+        if before or after:
+            # k = S F / (4 pi G), S = n1 + n2, G = n12 e, F = D2 / (D2 + rc2).
+            if e > T(floor):
+                D2 = d2
+                if before:
+                    D2 = d1
+                S = n1 + n2
+                G = n12 * e
+                q = D2 + rc2
+                F = D2 / q
+                k = T(_INV_4PI) * S / G * F
+                gk = wp.dot(u, c)
+                gc = u * k
+                gS = gk * T(_INV_4PI) * F / G
+                gF = gk * T(_INV_4PI) * S / G
+                gG = -gk * k / G
+                gn12 = gG * (T(2.0) * n12 + dot12)
+                gdot12 = gG * n12
+                gn1 = gS + gn12 * n2
+                gn2 = gS + gn12 * n1
+                gD2 = gF * rc2 / (q * q)
+                grc2 = -gF * D2 / (q * q)
+                gr1 = r2 * gdot12
+                gr2 = r1 * gdot12
+                if before:
+                    gr1 = gr1 + r1 * (T(2.0) * gD2)
+                else:
+                    gr2 = gr2 + r2 * (T(2.0) * gD2)
         else:
-            gr0 = (t1 - t2) * gproj
-            gt1 = r0 * gproj
-            gr1 = gt1 / n1
-            gr2 = -gt1 / n2
-            gn1 = -wp.dot(gt1, t1) / n1
-            gn2 = wp.dot(gt1, t2) / n2
+            out = dot12 > T(0.0)
+            den_out = T(1.0)
+            proj = T(0.0)
+            if out:
+                den_out = n12 * e
+                proj = cr2 * (n1 + n2) / den_out
+            else:
+                proj = wp.dot(r0, t1 - t2)
+            den = cr2 + rc2 * r0sq
+            ok = T(0.0)
+            safe = T(1.0)
+            if den > T(floor):
+                ok = T(1.0)
+                safe = den
+            k = ok * T(_INV_4PI) * proj / safe
+            gc = u * k
+            gk = wp.dot(u, c)
+            gproj = ok * gk * T(_INV_4PI) / safe
+            gden = -ok * gk * k / safe
+            gcr2 = gden
+            grc2 = gden * r0sq
+            gr0sq = gden * rc2
+            if out:
+                gcr2 = gcr2 + gproj * (n1 + n2) / den_out
+                gsum = gproj * cr2 / den_out
+                gD = -gproj * proj / den_out
+                gn12 = gD * (T(2.0) * n12 + dot12)
+                gdot12 = gD * n12
+                gn1 = gsum + gn12 * n2
+                gn2 = gsum + gn12 * n1
+                gr1 = r2 * gdot12
+                gr2 = r1 * gdot12
+            else:
+                gr0 = (t1 - t2) * gproj
+                gt1 = r0 * gproj
+                gr1 = gt1 / n1
+                gr2 = -gt1 / n2
+                gn1 = -wp.dot(gt1, t1) / n1
+                gn2 = wp.dot(gt1, t2) / n2
+            gc = gc + c * (T(2.0) * gcr2)
+            gr0 = gr0 + r0 * (T(2.0) * gr0sq)
+        v = c * k
         gr1 = gr1 + r1 * (gn1 / n1)
         gr2 = gr2 + r2 * (gn2 / n2)
-        gc = gc + c * (T(2.0) * gcr2)
         gr1 = gr1 + wp.cross(r2, gc)
         gr2 = gr2 + wp.cross(gc, r1)
-        gr0 = gr0 + r0 * (T(2.0) * gr0sq)
         return v, gr1 + gr2, -gr1 - gr0, gr0 - gr2, grc2
 
     @wp.func(module=module)
     def ray_fb(p: vec, A: vec, d: vec, rc2: T, u: vec):
         # Velocity and VJP of a unit semi-infinite line from A along d at p.
-        # Returns v, gP, gd, grc2; gA is -gP.
+        # Returns v, gP, gd, grc2; gA is -gP. The branches are those of ray_v.
         r = p - A
         c = wp.cross(d, r)
         cr2 = wp.dot(c, c)
-        rn = wp.sqrt(wp.dot(r, r) + T(floor))
+        D2 = wp.dot(r, r) + T(floor)
+        rn = wp.sqrt(D2)
         dr = wp.dot(d, r)
-        behind = dr < T(0.0)
-        den_b = T(1.0)
-        oc = T(1.0) + dr / rn
-        if behind:
-            den_b = rn * (rn - dr)
-            oc = cr2 / den_b
-        den = cr2 + rc2
-        ok = T(0.0)
-        safe = T(1.0)
-        if den > T(floor):
-            ok = T(1.0)
-            safe = den
-        k = ok * T(_INV_4PI) * oc / safe
-        v = c * k
-        gc = u * k
-        gk = wp.dot(u, c)
-        goc = ok * gk * T(_INV_4PI) / safe
-        gden = -ok * gk * k / safe
-        gcr2 = gden
-        grc2 = gden
+        k = T(0.0)
+        gc = vec()
         grn = T(0.0)
         gdr = T(0.0)
-        if behind:
-            gcr2 = gcr2 + goc / den_b
-            gE = -goc * oc / den_b
-            grn = gE * (T(2.0) * rn - dr)
-            gdr = -gE * rn
+        gD2 = T(0.0)
+        grc2 = T(0.0)
+        if dr < T(0.0):
+            # k = F / (4 pi E), E = rn (rn - dr), F = D2 / (D2 + rc2).
+            e = rn * (rn - dr)
+            if e > T(floor):
+                q = D2 + rc2
+                F = D2 / q
+                k = T(_INV_4PI) / e * F
+                gk = wp.dot(u, c)
+                gc = u * k
+                gF = gk * T(_INV_4PI) / e
+                gE = -gk * k / e
+                grn = gE * (T(2.0) * rn - dr)
+                gdr = -gE * rn
+                gD2 = gF * rc2 / (q * q)
+                grc2 = -gF * D2 / (q * q)
         else:
+            den = cr2 + rc2
+            ok = T(0.0)
+            safe = T(1.0)
+            if den > T(floor):
+                ok = T(1.0)
+                safe = den
+            oc = T(1.0) + dr / rn
+            k = ok * T(_INV_4PI) * oc / safe
+            gk = wp.dot(u, c)
+            gc = u * k
+            goc = ok * gk * T(_INV_4PI) / safe
+            gden = -ok * gk * k / safe
+            grc2 = gden
             gdr = goc / rn
             grn = -goc * dr / (rn * rn)
-        gr = r * (grn / rn) + d * gdr
+            gc = gc + c * (T(2.0) * gden)
+        v = c * k
+        gr = r * (grn / rn + T(2.0) * gD2) + d * gdr
         gd = r * gdr
-        gc = gc + c * (T(2.0) * gcr2)
         gd = gd + wp.cross(r, gc)
         gr = gr + wp.cross(gc, d)
         return v, gr, gd, grc2

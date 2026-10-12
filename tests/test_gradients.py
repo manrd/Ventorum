@@ -1275,3 +1275,35 @@ def test_check_ground_effect_one_chordwise_panel(float64_precision, cpu_device) 
                                  n_directions=3, rtol=1e-6, seed=0, method="reference")
     assert out["pass"], _failed(out)
     assert out["groups"]["nodes"]["compared"] > 0
+
+
+@pytest.mark.parametrize("t", [-0.5, 1.75])
+def test_reference_segment_derivative_at_collinear_point(t: float) -> None:
+    """Central differences of seg_vel at an exactly collinear point outside the segment do not depend on the step.
+
+    The target lies on the extended line of the segment, before A (t < 0)
+    or after B (t > 1). The core uses the distance to the nearest end
+    point, so the velocity is zero there but its derivative across the line
+    is the exact-law derivative times the core factor. Central differences
+    with steps from 1e-8 m to 1e-3 m agree with each other and with the
+    autograd derivative.
+    """
+    torch = pytest.importorskip("torch")
+    from ventorum.sensitivity.reference import seg_vel
+
+    A = torch.tensor([[0.0, 0.0, 0.0]], dtype=torch.float64)
+    B = torch.tensor([[1.0, 0.5, 0.0]], dtype=torch.float64)
+    rc2 = torch.tensor([[0.25]], dtype=torch.float64)
+    # Exactly collinear in binary floating point; the step is along z, where
+    # the coordinate of the target is 0, so the step is exact.
+    P0 = torch.tensor([[t, 0.5 * t, 0.0]], dtype=torch.float64)
+    assert float(torch.abs(seg_vel(P0, A, B, rc2)).max()) == 0.0
+    P = P0.clone().requires_grad_(True)
+    v = seg_vel(P, A, B, rc2)[0, 0]
+    jac = torch.stack([torch.autograd.grad(v[k], P, retain_graph=True)[0][0, 2] for k in range(3)])
+    assert float(torch.abs(jac).max()) > 0.0
+    for h in (1e-8, 1e-7, 1e-6, 1e-5, 1e-4, 1e-3):
+        dz = torch.tensor([[0.0, 0.0, h]], dtype=torch.float64)
+        fd = (seg_vel(P0 + dz, A, B, rc2) - seg_vel(P0 - dz, A, B, rc2))[0, 0] / (2.0 * h)
+        err = float(torch.abs(fd - jac).max()) / float(torch.abs(jac).max())
+        assert err <= 1e-5, (h, err)

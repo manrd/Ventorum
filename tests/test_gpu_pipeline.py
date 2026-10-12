@@ -13,6 +13,7 @@ kernels (the owner accepts float32 for the GPU paths).
 from __future__ import annotations
 
 import warnings
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -419,3 +420,109 @@ def test_no_nonwritable_warning(gpu_device):
                 r = vt.analyze(wing.clone(), cond, vt.SolverSettings(solver_type=solver, n_panels=24))
                 assert r.details.get("device") == "gpu"
     assert not [w for w in caught if "not writable" in str(w.message)]
+
+
+def _line_points(rng) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Return two horseshoes (a, b, a_te, b_te) and points on and near the extended lines of their legs.
+
+    The first horseshoe has axis-aligned legs, so the points on the extended
+    lines are exactly collinear. The second horseshoe is swept and has
+    dihedral (the points are collinear to round-off). The points are before
+    and after each finite leg, behind the start points of the wake legs
+    (wake direction +x), on the end points, and at small distances from the
+    lines.
+    """
+    a = np.array([[0.25, -0.5, 0.0], [0.4, 0.6, 0.05]])
+    b = np.array([[0.25, 0.5, 0.0], [0.7, 1.6, 0.15]])
+    a_te = a + np.array([[1.0, 0.0, 0.0], [0.8, 0.0, 0.0]])
+    b_te = b + np.array([[1.0, 0.0, 0.0], [0.7, 0.0, 0.0]])
+    pts = []
+    for s in range(2):
+        for p0, p1 in ((a[s], b[s]), (a_te[s], a[s]), (b[s], b_te[s])):
+            for t in (-0.75, -0.01, -1e-4, 0.0, 1.0, 1.0 + 1e-4, 1.01, 1.6):
+                pts.append(p0 + t * (p1 - p0))
+        for p0 in (a_te[s], b_te[s]):
+            for t in (1e-4, 0.02, 0.3, 2.0):
+                pts.append(p0 - t * np.array([1.0, 0.0, 0.0]))
+    pts = np.array(pts)
+    near = pts + rng.normal(size=pts.shape) * np.array([1e-4, 1e-2, 0.1])[rng.integers(0, 3, len(pts))][:, None]
+    return a, b, a_te, b_te, np.vstack([pts, near])
+
+
+def _np_horseshoes(P, a, b, a_te, b_te, d, rc):
+    """Velocity (m, n, 3) of unit horseshoes from the numpy reference kernels."""
+    from ventorum.aero.vortex import ray_velocity, segment_velocity
+
+    dd = np.broadcast_to(d, a.shape)
+    return (segment_velocity(P, a, b, rc) + segment_velocity(P, a_te, a, rc) + segment_velocity(P, b, b_te, rc)
+            + ray_velocity(P, b_te, dd, rc) - ray_velocity(P, a_te, dd, rc))
+
+
+@pytest.mark.gpu
+@pytest.mark.parametrize("precision", ["float64", "float32"])
+@pytest.mark.parametrize("ground", [False, True])
+def test_gpu_kernels_equal_numpy_on_the_extended_leg_lines(precision, ground):
+    """The Warp horseshoe kernels equal the numpy reference on and near the extended lines of the legs.
+
+    The core acts on the distance to the finite filament: outside a leg the
+    kernels use the exact law times D^2 / (D^2 + rc^2). The points lie on
+    the extended lines of the finite legs (exactly collinear included) and
+    behind the start points of the wake legs; the ground images are the
+    images of the same horseshoes.
+    """
+    _need_gpu()
+    import torch
+
+    from ventorum.gpu import engine
+    from ventorum.gpu.kernels import kernels
+
+    rng = np.random.default_rng(11)
+    a, b, a_te, b_te, P = _line_points(rng)
+    n, m = a.shape[0], P.shape[0]
+    rc = np.array([0.02, 0.05])
+    D = np.array([[1.0, 0.0, 0.0], [np.cos(0.08), 0.0, np.sin(0.08)]])
+    K = D.shape[0]
+    gk = np.array([0.0, 0.0, 1.0])
+    go = -0.7
+    k = kernels(precision)
+    T = engine.torch_dtype(precision)
+    t = {"A": engine._f64(a), "B": engine._f64(b), "ATE": engine._f64(a_te), "BTE": engine._f64(b_te),
+         "r0b": engine._f64(b - a).to(T).contiguous(), "r0a": engine._f64(a - a_te).to(T).contiguous(),
+         "r0t": engine._f64(b_te - b).to(T).contiguous(), "rc2": engine._f64(rc ** 2).to(T).contiguous(),
+         "group": engine._i32(np.zeros(n))}
+    t["Ah"], t["Al"] = engine.split2(t["A"])
+    src = k.Sources()
+    for name in ("A", "B", "ATE", "BTE"):
+        setattr(src, name, engine.view(t[name], engine.wp.vec3d))
+    src.Ah = engine.view(t["Ah"], engine.wp.vec3f)
+    src.Al = engine.view(t["Al"], engine.wp.vec3f)
+    for name in ("r0b", "r0a", "r0t"):
+        setattr(src, name, engine.view(t[name], k.vec))
+    src.rc2 = engine.view(t["rc2"], k.T)
+    src.group = engine.view(t["group"], engine.wp.int32)
+    dl = SimpleNamespace(k=k, T=T, precision=precision, n_panels=n, t=t, sources=src)
+    pts = engine.PointSet(dl, P, None, np.zeros(m), np.zeros(m), 0)
+    GK = engine._f64(np.tile(gk, (K, 1)) if ground else np.zeros((K, 3)))
+    GO = engine._f64(np.full(K, go) if ground else np.zeros(K))
+    cs = engine.CaseData(dl, engine._f64(D), [object()] * K if ground else [None] * K, GK=GK, GO=GO)
+    src_of = engine._i32(np.arange(n).reshape(n, 1))
+    vT = torch.zeros((K, n, m, 3), dtype=T, device=engine._dev())
+    nT = torch.zeros((K, n, m), dtype=T, device=engine._dev())
+    dummy = torch.zeros((1, 1, 3), dtype=T, device=engine._dev())
+    engine.launch(k.tensors[0], (K, n, m), [src, pts.struct, cs.struct(pts), engine.view(src_of, engine.wp.int32),
+                                           engine.view(dummy, k.vec), 1, engine.view(vT, k.vec),
+                                           engine.view(nT, k.T)])
+    got = vT.double().cpu().numpy().transpose(0, 2, 1, 3)
+    tol = TOL[precision]
+    for kk in range(K):
+        want = _np_horseshoes(P, a, b, a_te, b_te, D[kk], rc)
+        if ground:
+            def mirror(x):
+                return x - 2.0 * ((x @ gk) - go)[:, None] * gk
+
+            dm = D[kk] - 2.0 * (D[kk] @ gk) * gk
+            want = want - _np_horseshoes(P, mirror(a), mirror(b), mirror(a_te), mirror(b_te), dm, rc)
+        assert np.all(np.isfinite(got[kk]))
+        scale = float(np.max(np.abs(want)))
+        err = float(np.max(np.abs(got[kk] - want)))
+        assert err <= tol * scale, (precision, ground, kk, err / scale)

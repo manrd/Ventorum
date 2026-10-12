@@ -14,6 +14,11 @@ Each pair is computed in float64 (scalar CPU code runs at the same speed in
 float32 and float64); the caller casts the result to the precision of the
 request.
 
+The vortex core acts on the distance from the target to the finite
+filament: outside a segment and behind the start point of a ray, the
+exact law is multiplied by the Scully factor ``D^2 / (D^2 + rc^2)`` (see
+:mod:`ventorum.aero.vortex`).
+
 The derivation of the derivatives is in :mod:`ventorum.aero.vortex_vjp` and
 in the theory manual (``docs/theory/gradients.md``). Sources: J. Katz and
 A. Plotkin, "Low-Speed Aerodynamics", 2nd ed., Cambridge University Press,
@@ -61,7 +66,8 @@ if HAVE_NUMBA:
 
     @njit(cache=True, inline="always")
     def _seg_v(px, py, pz, ax, ay, az, bx, by, bz, rc2):
-        # Velocity of a unit finite segment a -> b at p (stable projection).
+        # Velocity of a unit finite segment a -> b at p. The core acts on the
+        # distance to the finite segment (see ventorum.aero.vortex).
         r1x = px - ax
         r1y = py - ay
         r1z = pz - az
@@ -76,9 +82,23 @@ if HAVE_NUMBA:
         cz = r1x * r2y - r1y * r2x
         cr2 = cx * cx + cy * cy + cz * cz
         r0sq = r0x * r0x + r0y * r0y + r0z * r0z
-        n1 = math.sqrt(r1x * r1x + r1y * r1y + r1z * r1z + _FLOOR)
-        n2 = math.sqrt(r2x * r2x + r2y * r2y + r2z * r2z + _FLOOR)
+        d1 = r1x * r1x + r1y * r1y + r1z * r1z + _FLOOR
+        d2 = r2x * r2x + r2y * r2y + r2z * r2z + _FLOOR
+        n1 = math.sqrt(d1)
+        n2 = math.sqrt(d2)
         dot12 = r1x * r2x + r1y * r2y + r1z * r2z
+        before = r0x * r1x + r0y * r1y + r0z * r1z < 0.0
+        after = r0x * r2x + r0y * r2y + r0z * r2z > 0.0
+        if before or after:
+            # Outside: exact law times D2 / (D2 + rc2), D2 to the nearest end point.
+            n12 = n1 * n2
+            e = n12 + dot12
+            if e > _FLOOR:
+                D2 = d1 if before else d2
+                k = _INV_4PI * (n1 + n2) / (n12 * e) * (D2 * (1.0 / (D2 + rc2)))
+            else:
+                k = 0.0
+            return cx * k, cy * k, cz * k
         if dot12 > 0.0:
             n12 = n1 * n2
             proj = cr2 * (n1 + n2) / (n12 * (n12 + dot12))
@@ -94,7 +114,8 @@ if HAVE_NUMBA:
 
     @njit(cache=True, inline="always")
     def _ray_v(px, py, pz, ax, ay, az, dx, dy, dz, rc2):
-        # Velocity of a unit semi-infinite line from a along d at p (stable 1 + cos).
+        # Velocity of a unit semi-infinite line from a along d at p. The core
+        # acts on the distance to the line (see ventorum.aero.vortex).
         rx = px - ax
         ry = py - ay
         rz = pz - az
@@ -102,15 +123,20 @@ if HAVE_NUMBA:
         cy = dz * rx - dx * rz
         cz = dx * ry - dy * rx
         cr2 = cx * cx + cy * cy + cz * cz
-        rn = math.sqrt(rx * rx + ry * ry + rz * rz + _FLOOR)
+        D2 = rx * rx + ry * ry + rz * rz + _FLOOR
+        rn = math.sqrt(D2)
         dr = dx * rx + dy * ry + dz * rz
         if dr < 0.0:
-            oc = cr2 / (rn * (rn - dr))
-        else:
-            oc = 1.0 + dr / rn
+            # Behind the start point: exact law times D2 / (D2 + rc2).
+            e = rn * (rn - dr)
+            if e > _FLOOR:
+                k = _INV_4PI / e * (D2 * (1.0 / (D2 + rc2)))
+            else:
+                k = 0.0
+            return cx * k, cy * k, cz * k
         den = cr2 + rc2
         if den > _FLOOR:
-            k = _INV_4PI * oc / den
+            k = _INV_4PI * (1.0 + dr / rn) / den
         else:
             k = 0.0
         return cx * k, cy * k, cz * k
@@ -133,11 +159,67 @@ if HAVE_NUMBA:
         cz = r1x * r2y - r1y * r2x
         cr2 = cx * cx + cy * cy + cz * cz
         r0sq = r0x * r0x + r0y * r0y + r0z * r0z
-        n1 = math.sqrt(r1x * r1x + r1y * r1y + r1z * r1z + _FLOOR)
-        n2 = math.sqrt(r2x * r2x + r2y * r2y + r2z * r2z + _FLOOR)
+        d1 = r1x * r1x + r1y * r1y + r1z * r1z + _FLOOR
+        d2 = r2x * r2x + r2y * r2y + r2z * r2z + _FLOOR
+        n1 = math.sqrt(d1)
+        n2 = math.sqrt(d2)
         dot12 = r1x * r2x + r1y * r2y + r1z * r2z
-        out = dot12 > 0.0
         n12 = n1 * n2
+        before = r0x * r1x + r0y * r1y + r0z * r1z < 0.0
+        after = r0x * r2x + r0y * r2y + r0z * r2z > 0.0
+        if before or after:
+            # Outside: k = (n1 + n2) / (4 pi n12 e) F, e = n12 + dot12,
+            # F = D2 / (D2 + rc2), D2 = |r1|^2 before a, |r2|^2 after b.
+            e = n12 + dot12
+            if not e > _FLOOR:
+                return (0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+            D2 = d1 if before else d2
+            q = 1.0 / (D2 + rc2)
+            F = D2 * q
+            den_o = n12 * e
+            k = _INV_4PI * (n1 + n2) / den_o * F
+            vx = cx * k
+            vy = cy * k
+            vz = cz * k
+            gcx = k * ux
+            gcy = k * uy
+            gcz = k * uz
+            gk = ux * cx + uy * cy + uz * cz
+            gsum = gk * _INV_4PI * F / den_o
+            gG = -gk * k / den_o
+            ge = gG * n12
+            gn12 = gG * e + ge
+            gdot12 = ge
+            gF = gk * _INV_4PI * (n1 + n2) / den_o
+            # dF/dD2 = rc2 / (D2 + rc2)^2, dF/drc2 = -D2 / (D2 + rc2)^2.
+            gD2 = gF * (rc2 * q) * q
+            grc2 = -gF * F * q
+            f1 = (gsum + gn12 * n2) / n1
+            f2 = (gsum + gn12 * n1) / n2
+            if before:
+                f1 += 2.0 * gD2
+            else:
+                f2 += 2.0 * gD2
+            gr1x = gdot12 * r2x + f1 * r1x
+            gr1y = gdot12 * r2y + f1 * r1y
+            gr1z = gdot12 * r2z + f1 * r1z
+            gr2x = gdot12 * r1x + f2 * r2x
+            gr2y = gdot12 * r1y + f2 * r2y
+            gr2z = gdot12 * r1z + f2 * r2z
+            # c = r1 x r2: g_r1 += r2 x gc, g_r2 += gc x r1.
+            gr1x += r2y * gcz - r2z * gcy
+            gr1y += r2z * gcx - r2x * gcz
+            gr1z += r2x * gcy - r2y * gcx
+            gr2x += gcy * r1z - gcz * r1y
+            gr2y += gcz * r1x - gcx * r1z
+            gr2z += gcx * r1y - gcy * r1x
+            return (vx, vy, vz,
+                    gr1x + gr2x, gr1y + gr2y, gr1z + gr2z,
+                    -gr1x, -gr1y, -gr1z,
+                    -gr2x, -gr2y, -gr2z,
+                    grc2)
+        # Over the segment: the production formula.
+        out = dot12 > 0.0
         t1x = r1x / n1
         t1y = r1y / n1
         t1z = r1z / n1
@@ -242,48 +324,57 @@ if HAVE_NUMBA:
         cy = dz * rx - dx * rz
         cz = dx * ry - dy * rx
         cr2 = cx * cx + cy * cy + cz * cz
-        rn = math.sqrt(rx * rx + ry * ry + rz * rz + _FLOOR)
+        D2 = rx * rx + ry * ry + rz * rz + _FLOOR
+        rn = math.sqrt(D2)
         dr = dx * rx + dy * ry + dz * rz
-        behind = dr < 0.0
-        if behind:
-            den_b = rn * (rn - dr)
-            oc = cr2 / den_b
+        if dr < 0.0:
+            # Behind: k = F / (4 pi E), E = rn (rn - dr), F = D2 / (D2 + rc2).
+            e = rn * (rn - dr)
+            if not e > _FLOOR:
+                return (0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+            q = 1.0 / (D2 + rc2)
+            F = D2 * q
+            k = _INV_4PI / e * F
+            gcx = k * ux
+            gcy = k * uy
+            gcz = k * uz
+            gk = ux * cx + uy * cy + uz * cz
+            gE = -gk * k / e
+            grn = gE * (2.0 * rn - dr)
+            gdr = -gE * rn
+            gF = gk * _INV_4PI / e
+            gD2 = gF * (rc2 * q) * q
+            grc2 = -gF * F * q
+            f = grn / rn + 2.0 * gD2
         else:
-            den_b = 1.0
+            den = cr2 + rc2
+            if not den > _FLOOR:
+                return (0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
             oc = 1.0 + dr / rn
-        den = cr2 + rc2
-        if not den > _FLOOR:
-            return (0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
-        k = _INV_4PI * oc / den
+            k = _INV_4PI * oc / den
+            gcx = k * ux
+            gcy = k * uy
+            gcz = k * uz
+            gk = ux * cx + uy * cy + uz * cz
+            goc = gk * _INV_4PI / den
+            gden = -gk * k / den
+            gcr2 = gden
+            grc2 = gden
+            gdr = goc / rn
+            grn = -goc * dr / (rn * rn)
+            f = grn / rn
+            gcx += 2.0 * gcr2 * cx
+            gcy += 2.0 * gcr2 * cy
+            gcz += 2.0 * gcr2 * cz
         vx = cx * k
         vy = cy * k
         vz = cz * k
-        gcx = k * ux
-        gcy = k * uy
-        gcz = k * uz
-        gk = ux * cx + uy * cy + uz * cz
-        goc = gk * _INV_4PI / den
-        gden = -gk * k / den
-        gcr2 = gden
-        grc2 = gden
-        if behind:
-            gcr2 += goc / den_b
-            gE = -goc * oc / den_b
-            grn = gE * (2.0 * rn - dr)
-            gdr = -gE * rn
-        else:
-            gdr = goc / rn
-            grn = -goc * dr / (rn * rn)
-        f = grn / rn
         grx = f * rx + gdr * dx
         gry = f * ry + gdr * dy
         grz = f * rz + gdr * dz
         gdx = gdr * rx
         gdy = gdr * ry
         gdz = gdr * rz
-        gcx += 2.0 * gcr2 * cx
-        gcy += 2.0 * gcr2 * cy
-        gcz += 2.0 * gcr2 * cz
         # c = d x r: g_d += r x gc, g_r += gc x d.
         gdx += ry * gcz - rz * gcy
         gdy += rz * gcx - rx * gcz
