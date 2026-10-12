@@ -235,7 +235,22 @@ def kernel_backend_for(kernel: str, n_panels: int | None = None) -> str:
 
 
 def _kernel_backends_for(n_panels: int | None = None) -> dict[str, str]:
-    """Return the backend used for each vortex kernel."""
+    """Return the backend of each vortex kernel, for the dispatch record of a result.
+
+    Parameters
+    ----------
+    n_panels : int or None, optional
+        Panel count that selects the size class (see
+        :func:`kernel_backend_for`). None means the thread-local value of
+        ``ventorum.utils.parallel.solve_threads``, else small.
+
+    Returns
+    -------
+    dict of str to str
+        Each kernel name of ``KERNELS`` (``"tensor"``, ``"influence"``,
+        ``"induced"``, ``"trefftz"``) mapped to its backend (``"numba"``,
+        ``"cython"``, ``"torch"`` or ``"numpy"``).
+    """
     return {k: kernel_backend_for(k, n_panels) for k in KERNELS}
 
 

@@ -1275,7 +1275,18 @@ class IntegratedResult:
         return self.clone()
 
     def to_dict(self) -> dict[str, Any]:
-        """Convert integrated aerodynamic coefficients to a dictionary."""
+        """Return the integrated coefficients as a dictionary of plain Python values.
+
+        Returns
+        -------
+        dict
+            The keys ``CL``, ``CDi``, ``CDp``, ``CD_total``, ``e``,
+            ``CL_alpha`` [1/rad], ``AR``, ``Cl``, ``Cm``, ``Cn``, ``CY``,
+            ``CDi_nearfield``, ``CY_farfield`` and ``Cn_trefftz``
+            (dimensionless coefficients as float, or None when the solver
+            does not give the value), and ``trust`` (the dictionary of the
+            trust score, or None).
+        """
         return {
             "CL": float(self.CL),
             "CDi": float(self.CDi),
@@ -1411,14 +1422,30 @@ class SolverResult:
         Parameters
         ----------
         detail_level : str, optional
-            ``"summary"``, ``"standard"`` (default) or ``"full"``.
-            The dispatch record is included only when ``detail_level == "full"``.
+            ``"summary"``: the solver data, the condition and the totals.
+            ``"standard"`` (default): also the spanwise arrays. ``"full"``:
+            also the dispatch record (``details["dispatch"]``).
 
         Returns
         -------
         dict
-            Dictionary of solver result quantities.
+            Dictionary of plain Python values: ``solver_type``,
+            ``converged``, ``iterations``, ``execution_time`` [s],
+            ``totals`` (see :meth:`IntegratedResult.to_dict`), ``condition``
+            (``V_inf`` [m/s], ``alpha`` [rad], ``beta`` [rad]) when the
+            result has one, ``spanwise`` (``y`` [m], ``Cl``, ``Cd_i`` per
+            surface) and ``dispatch``, as *detail_level* sets.
+
+        Raises
+        ------
+        ValueError
+            If *detail_level* is not ``"summary"``, ``"standard"`` or
+            ``"full"``.
         """
+        if detail_level not in ("summary", "standard", "full"):
+            raise ValueError(
+                f"detail_level={detail_level!r}: use 'summary', 'standard' or 'full'."
+            )
         out: dict[str, Any] = {
             "solver_type": self.solver_type,
             "converged": bool(self.converged),

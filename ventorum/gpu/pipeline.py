@@ -49,6 +49,24 @@ def solve_batch(solver, lattice, conditions: list, settings, S_ref: float, b_ref
     *gamma0* is the start circulation of every panel of a single nonlinear
     solve (see ``solve_lattice``), and *grounds* the explicit ground plane
     of each case (None: from ``condition.h``).
+
+    Parameters
+    ----------
+    return_reason : bool, optional
+        If False (default), return only the results (or None). If True,
+        return the tuple ``(results, reason)``.
+
+    Returns
+    -------
+    results : list of SolverResult or None
+        One result per condition, in order, or None when the cases go to
+        the CPU path. This is the only return value when *return_reason* is
+        False.
+    reason : str
+        One plain sentence that gives the reason of the GPU decision or of
+        the fallback to the CPU path, for example
+        ``"called inside a CPU worker thread"``. Returned only when
+        *return_reason* is True.
     """
     if gpu.get_device() == "cpu":
         return (None, gpu._REASON_DEVICE_CPU) if return_reason else None
@@ -108,8 +126,14 @@ def _solve_group(solver, lattice, conditions: list, setups: list, settings, S_re
                  c_ref: float, ref_point, continuation: bool, gamma0, precision: str, use_sym: bool):
     """Solve one group of cases (one unknown map, ground presence and symmetry) on the GPU.
 
-    Returns ``(arrays, infos, umap)`` for :func:`_results`, or None when the
-    GPU pipelines do not support the group.
+    Returns
+    -------
+    solved : tuple or None
+        ``(arrays, infos, umap)`` for :func:`_results`, or None when the GPU
+        pipelines do not support the group.
+    reason : str or None
+        The reason when *solved* is None (an unknown map or airfoils that
+        the GPU pipelines do not support), else None.
     """
     from ventorum.aero.system import is_symmetric_condition
     from ventorum.gpu import engine
@@ -276,7 +300,9 @@ def _results(solver, lattice, conditions, arrays: dict, setups: list, umap, b_re
     computed on the host from the strip circulation and the Trefftz-plane
     normal wash of the GPU (:func:`ventorum.aero.loads.trefftz_lateral_batch`,
     the CPU equations). *S_ref* [m^2] is the reference area; None gives no
-    far-field values.
+    far-field values. *dispatch_reason* is the reason of the GPU decision;
+    it goes into the ``reason`` of the dispatch record
+    (``details["dispatch"]``), which is made once for the batch.
     """
     from ventorum.aero.loads import loads_result, trefftz_lateral_batch
     from ventorum.aero.vortex import KERNELS

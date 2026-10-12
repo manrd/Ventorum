@@ -284,20 +284,29 @@ def use_gpu(
     Parameters
     ----------
     work : float
-        Work estimate of the solve.
+        Work estimate of the solve: the number of horseshoe evaluations
+        (dimensionless count).
     family : str, optional
-        Solver family: ``"vlm"``, ``"linear"`` or ``"nonlinear"``.
+        Solver family: ``"vlm"`` (default), ``"linear"`` or ``"nonlinear"``.
     n_cases : int, optional
-        Number of cases.
+        Number of cases of the solve (default 1).
     n_panels : int or None, optional
-        Panel count of the lattice.
+        Panel count of the lattice. None disables the cost model, and the
+        built-in rule decides.
     return_reason : bool, optional
-        If True, return ``(use, reason)`` where reason is a plain sentence.
+        If False (default), return only the decision. If True, return the
+        tuple ``(use, reason)``.
 
     Returns
     -------
-    bool or tuple of (bool, str)
-        Whether to use the GPU, and optionally the reason string.
+    use : bool
+        True if the solve runs on the GPU. This is the only return value
+        when *return_reason* is False.
+    reason : str
+        One plain sentence that gives the reason of the decision, for
+        example ``"auto: GPU cost model 3.1 ms < CPU 9.4 ms"`` or
+        ``"device setting is cpu"``. Returned only when *return_reason* is
+        True.
     """
     if _device == "cpu":
         decision, reason = False, _REASON_DEVICE_CPU

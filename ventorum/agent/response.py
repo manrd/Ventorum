@@ -204,7 +204,21 @@ def sectional_payload(res: SolverResult) -> dict[str, Any]:
 
 
 def dispatch_payload(res: Any | None) -> dict[str, Any] | None:
-    """Return the dispatch record from a solver result."""
+    """Return a copy of the dispatch record of a result, for the full agent output.
+
+    Parameters
+    ----------
+    res : SolverResult, object with a ``solver_result`` attribute, or None
+        The result. An object without ``details`` (for example a
+        ``GroundEffectResult``) is read through its ``solver_result``.
+
+    Returns
+    -------
+    dict or None
+        A copy of ``details["dispatch"]`` (see the user manual, results
+        page), or None when the result has no dispatch record (for example
+        the Fourier solver) or *res* is None.
+    """
     target = res
     if target is not None and not hasattr(target, "details") and hasattr(target, "solver_result"):
         target = target.solver_result

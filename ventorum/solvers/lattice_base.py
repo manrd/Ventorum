@@ -696,6 +696,23 @@ class LatticeSolver(BaseSolver):
 
         See :mod:`ventorum.gpu`: the device setting and the size of the solve
         select the GPU; unsupported cases return None.
+
+        Parameters
+        ----------
+        return_reason : bool, optional
+            If False (default), return only the results (or None). If True,
+            return the tuple ``(results, reason)``. The other parameters are
+            those of :meth:`solve_batch`.
+
+        Returns
+        -------
+        results : list of SolverResult or None
+            One result per condition, or None for the CPU path. This is the
+            only return value when *return_reason* is False.
+        reason : str
+            One plain sentence that gives the reason of the GPU decision or
+            of the fallback (see :func:`ventorum.gpu.pipeline.solve_batch`).
+            Returned only when *return_reason* is True.
         """
         from ventorum import gpu
 

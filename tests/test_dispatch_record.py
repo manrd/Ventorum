@@ -593,3 +593,19 @@ def test_gpu_batch_does_not_build_cpu_record(monkeypatch):
         assert results[0].details["dispatch"] is not results[1].details["dispatch"]
     finally:
         gpu.set_device(old_dev)
+
+
+def test_to_dict_refuses_unknown_detail_level():
+    """SolverResult.to_dict refuses a detail level that it does not know."""
+    old_dev = gpu.get_device()
+    try:
+        gpu.set_device("cpu")
+        res = VortexLatticeSolver().solve(
+            _rect_aircraft(), FlightCondition(V_inf=30.0, alpha=np.radians(4.0)),
+            SolverSettings(solver_type="vlm", n_panels=16),
+        )
+        for bad in ("Full", "all", "", None):
+            with pytest.raises(ValueError, match="detail_level"):
+                res.to_dict(detail_level=bad)
+    finally:
+        gpu.set_device(old_dev)
