@@ -37,7 +37,7 @@ print(rd.device, rd.n_solves)
 - `axes="stability"` gives the rates and the moments in the stability axes, as AVL does. `axes="body"` (default) and `axes="wind"` are also accepted. CL, CD and CY are relative to the free stream.
 - The function uses central differences with the step `step=0.01` in each nondimensional rate. All cases are solved as one batch on one mesh.
 - With `condition.h` (ground effect), the derivatives are at constant height of the reference point.
-- The solvers `"vlm"`, `"linear"` and `"nonlinear"` accept rates. The Fourier solver does not. The cases with rates run on the CPU, also when the GPU is selected; `rd.device` says it.
+- The solvers `"vlm"`, `"linear"` and `"nonlinear"` accept rates. The Fourier solver does not. The cases with rates run on the selected device (`ventorum.gpu.set_device`): the GPU pipelines of the three solvers apply the rotation velocity at each point, in free air and in ground effect. With the device `"auto"`, a small batch can run on the CPU because it is faster there. `rd.device` and `rd.precision` say where and how the cases ran.
 - `rd.to_dict()` gives a JSON-compatible dictionary.
 
 ## Which model to use
