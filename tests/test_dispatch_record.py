@@ -719,3 +719,116 @@ def test_fallback_reason_unknown_map(monkeypatch):
         assert res.details["dispatch"]["reason"] == "unknown map is not supported on GPU"
     finally:
         gpu.set_device(old_dev)
+
+
+def test_spanwise_payload_does_not_change_caller_locals():
+    """spanwise_payload does not write into a local dict 'out' of its caller."""
+    from ventorum.agent.response import spanwise_payload
+
+    old_dev = gpu.get_device()
+    try:
+        gpu.set_device("cpu")
+        res = VortexLatticeSolver().solve(
+            _rect_aircraft(), FlightCondition(V_inf=30.0, alpha=np.radians(4.0)),
+            SolverSettings(solver_type="vlm", n_panels=16),
+        )
+        assert "dispatch" in res.details
+
+        def unrelated_caller():
+            out = {"my": "data"}
+            spanwise_payload(res)
+            return out
+
+        assert unrelated_caller() == {"my": "data"}
+    finally:
+        gpu.set_device(old_dev)
+
+
+_TOOL_RECT = {"span_m": 10.0, "chord_m": 1.0}
+_TOOL_WING_TAIL = {
+    "surfaces": [
+        {"name": "wing", "span_m": 12.0, "root_chord_m": 1.8, "tip_chord_m": 1.0},
+        {"name": "tail", "span_m": 4.0, "chord_m": 0.7, "position_m": [4.6, 0.0, 0.3],
+         "controls": [{"name": "elevator", "hinge_x_c": 0.7}]},
+    ],
+    "ref_point_m": [0.45, 0.0, 0.0],
+}
+
+
+def _tool_call(name: str, dl: str) -> dict:
+    """Run the agent tool *name* on a small case at detail level *dl*."""
+    from ventorum.agent import tools as T
+
+    fast = {"n_panels": 8}
+    if name == "wing_analysis":
+        return T.wing_analysis(wing=_TOOL_RECT, settings=fast, detail_level=dl)
+    if name == "polar_sweep":
+        return T.polar_sweep(wing=_TOOL_RECT, alpha_start_deg=0, alpha_end_deg=4, alpha_step_deg=2,
+                             settings=fast, detail_level=dl)
+    if name == "ground_effect":
+        return T.ground_effect(wing=_TOOL_RECT, heights_m=[0.5, 1.0], settings=fast, detail_level=dl)
+    if name == "stability_derivatives":
+        return T.stability_derivatives(wing=_TOOL_RECT, settings=fast, detail_level=dl)
+    if name == "mesh_convergence":
+        return T.mesh_convergence(wing=_TOOL_RECT, flight_condition={"alpha_deg": 4.0}, panel_counts=[8, 10],
+                                  ref_n_panels=24, spacing_schemes=["cosine"], detail_level=dl)
+    if name == "trim":
+        return T.trim(aircraft=_TOOL_WING_TAIL, CL_target=0.5, pitch_control="elevator", settings=fast,
+                      detail_level=dl)
+    if name == "error_bars":
+        return T.error_bars(wing=_TOOL_RECT, flight_condition={"alpha_deg": 4.0}, settings={"n_panels": 16},
+                            detail_level=dl)
+    if name == "derivative_matrix":
+        return T.derivative_matrix(aircraft=_TOOL_WING_TAIL, settings=fast, detail_level=dl)
+    raise AssertionError(name)
+
+
+def _tool_records(name: str, disp) -> list:
+    """Return the dispatch records of the full output of tool *name*, and check its shape."""
+    if name in ("wing_analysis", "trim", "error_bars", "derivative_matrix"):
+        return [disp]
+    if name == "polar_sweep":
+        assert isinstance(disp, list)
+        return disp
+    if name == "ground_effect":
+        assert set(disp) == {"rows", "free_air"}
+        return [*disp["rows"], disp["free_air"]]
+    if name == "stability_derivatives":
+        assert set(disp) == {"base", "a+", "a-", "b+", "b-"}
+        return list(disp.values())
+    if name == "mesh_convergence":
+        assert set(disp) == {"points", "reference"}
+        return [*disp["points"], disp["reference"]]
+    raise AssertionError(name)
+
+
+@pytest.mark.parametrize("name", [
+    "wing_analysis", "polar_sweep", "ground_effect", "stability_derivatives", "mesh_convergence",
+    "trim", "error_bars", "derivative_matrix",
+])
+def test_agent_tools_dispatch_only_at_full(name):
+    """Every agent tool that runs a lattice solve gives dispatch at full detail only."""
+    for dl in ("summary", "standard"):
+        out = _tool_call(name, dl)
+        assert out["status"] == "success", out
+        assert "dispatch" not in out
+    out = _tool_call(name, "full")
+    assert out["status"] == "success", out
+    assert "dispatch" in out
+    records = _tool_records(name, out["dispatch"])
+    assert records
+    for rec in records:
+        _assert_dispatch(rec)
+    if name == "polar_sweep":
+        assert len(out["dispatch"]) == len(out["polar_table"])
+    if name == "ground_effect":
+        assert len(out["dispatch"]["rows"]) == len(out["rows"])
+    if name == "mesh_convergence":
+        assert len(out["dispatch"]["points"]) == len(out["all_evaluated_points"])
+
+
+def test_agent_tool_full_dispatch_none_for_fourier():
+    """A tool that runs the Fourier solver gives dispatch None at full detail."""
+    out = wing_analysis(wing=_TOOL_RECT, settings={"solver": "fourier", "n_panels": 12}, detail_level="full")
+    assert out["status"] == "success"
+    assert out["dispatch"] is None

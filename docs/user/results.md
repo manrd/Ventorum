@@ -24,7 +24,22 @@ Every result of a lattice solver records how it was computed and why in `result.
 | `profile` | str or None | Machine profile fingerprint string, or None when no profile was active |
 | `reason` | str | Plain sentence stating the dispatch decision and any fallback reason |
 
-In `result.to_dict()` and in agent tools, the dispatch record is included only when `detail_level="full"`. Existing top-level keys `details["device"]` and `details["precision"]` on GPU results remain unchanged.
+In `result.to_dict()` and in the agent tools, the dispatch record is included only when `detail_level="full"`. The summary and standard outputs do not have it. The keys `details["device"]` and `details["precision"]` of GPU results do not change.
+
+At `detail_level="full"`, each agent tool that runs a lattice solve gives the key `dispatch`. A record is None for a failed case and for a solver without a record (Fourier).
+
+| Tool | `dispatch` |
+| --- | --- |
+| `wing_analysis` | The record of the solve |
+| `polar_sweep` | A list with one record per row of `polar_table` |
+| `ground_effect` | `{"rows": [...], "free_air": ...}`: one record per entry of `rows`, and the record of the free-air case (the Irodov sweep is not included) |
+| `stability_derivatives` | One record per case of `perturbed_cases` (`"base"`, `"a+"`, `"a-"`, `"b+"`, `"b-"`) |
+| `mesh_convergence` | `{"points": [...], "reference": ...}`: one record per entry of `all_evaluated_points`, and the record of the reference mesh |
+| `trim` | The record of the solve of the final trim point |
+| `error_bars` | The record of the solve of the fine level (the user mesh) |
+| `derivative_matrix` | The record of the base case |
+
+`batch_evaluate` has no `detail_level` input, so it gives no dispatch record.
 
 
 ## Trust score

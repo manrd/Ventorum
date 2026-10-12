@@ -24,6 +24,7 @@ from ventorum.agent.response import (
     computation_device_precision,
     condition_payload,
     device_summary_text,
+    dispatch_payload,
     drag_and_ld,
     error_info,
     error_payload,
@@ -329,6 +330,9 @@ def wing_analysis(
     settings : dict or None
         ``solver``, ``n_panels``, ``n_chord``, ``wake_alignment``.
     detail_level : 'summary', 'standard' or 'full'
+        ``full`` adds the spanwise arrays and ``dispatch``: the dispatch
+        record of the solve (device, backends, threads, plan and reason),
+        or None for a solver without a record (Fourier).
     axes : 'body', 'stability', 'wind' or 'all'
         Axis system of the moment coefficients Cl, Cm and Cn.
         ``"body"`` (default) is fixed to the aircraft. ``"all"`` returns
@@ -392,6 +396,7 @@ def wing_analysis(
         out["sectional_diagnostics"] = sectional_payload(res)
     if dl == "full":
         out["spanwise_distributions"] = spanwise_payload(res)
+        out["dispatch"] = dispatch_payload(res)
     return out
 
 
@@ -457,7 +462,9 @@ def polar_sweep(
     without ``alpha_deg``. In ground effect all angles use one mesh: the
     mesh of the first valid angle. The ``axes`` input selects the axis
     system of Cm (``"body"`` by default, ``"all"`` adds the three moment
-    sets to each row).
+    sets to each row). With ``detail_level="full"``, ``dispatch`` is a list
+    with one entry per row of ``polar_table``: the dispatch record of that
+    angle, or None for a failed angle or a solver without a record.
     """
     ac = build_aircraft_from_spec(wing=wing, aircraft=aircraft)
     missing = [k for k, v in (("alpha_start_deg", alpha_start_deg), ("alpha_end_deg", alpha_end_deg),
@@ -541,7 +548,9 @@ def polar_sweep(
 
     table: list[dict[str, Any]] = []
     ok: list[tuple[float, Any]] = []
+    table_dispatch: list[dict[str, Any] | None] = []
     for a, res, err, _s in outputs:
+        table_dispatch.append(dispatch_payload(res))
         if res is None:
             info = error_info(err)
             table.append({"alpha_deg": a, "status": "ground_strike" if info["type"] == "ground_strike"
@@ -643,6 +652,7 @@ def polar_sweep(
         out["geometry"] = geometry_payload(ac)
     if dl == "full":
         out["trust_per_point"] = [{"alpha_deg": a, **trust_payload(r.totals.trust)} for a, r in ok]
+        out["dispatch"] = table_dispatch
     return out
 
 
@@ -794,7 +804,10 @@ def ground_effect(
     ref_point_m : list of float or None
         Moment reference point [m].
     settings, detail_level, axes
-        As in the MCP schema.
+        As in the MCP schema. With ``detail_level="full"``, ``dispatch`` is
+        ``{"rows": [...], "free_air": ...}``: one dispatch record per entry
+        of ``rows`` (None for a failed height) and the record of the
+        free-air case. The cases of the Irodov sweep are not included.
     """
     from ventorum.ground_effect import GroundEffectSweep, analyze_ground_effect
     from ventorum.ground_effect.solver import place_ground
@@ -888,7 +901,9 @@ def ground_effect(
 
     rows: list[dict[str, Any]] = []
     ok: list[tuple[float, Any]] = []
+    rows_dispatch: list[dict[str, Any] | None] = []
     for h, res, err in sorted(outputs, key=lambda t: t[0]):
+        rows_dispatch.append(dispatch_payload(res))
         row: dict[str, Any] = {"h_m": h, "h_over_c": rnd(h / c_ref, 5)}
         if res is None:
             info = error_info(err)
@@ -1031,6 +1046,8 @@ def ground_effect(
         out["irodov"].pop("derivative_grids", None)
     else:
         out["geometry"] = geometry_payload(ac)
+    if dl == "full":
+        out["dispatch"] = {"rows": rows_dispatch, "free_air": dispatch_payload(free)}
     return out
 
 
@@ -1060,7 +1077,10 @@ def stability_derivatives(
     axes of the reference condition, held fixed while alpha and beta
     change. CL_alpha and CY_beta are relative to the free stream in
     every set. The static margin and the neutral point use the
-    body-axis Cm_alpha and keep their values in every set.
+    body-axis Cm_alpha and keep their values in every set. With
+    ``detail_level="full"``, ``dispatch`` maps each case of
+    ``perturbed_cases`` (``"base"``, ``"a+"``, ``"a-"``, ``"b+"``,
+    ``"b-"``) to its dispatch record.
     """
     ac = build_aircraft_from_spec(wing=wing, aircraft=aircraft)
     c = parse_condition(flight_condition)
@@ -1233,6 +1253,7 @@ def stability_derivatives(
                 case["moments"] = moments_all_sets(v.Cl, v.Cm, v.Cn, aa, bb,
                                                    b_ref=b_ref, c_ref=c_ref)
             out["perturbed_cases"][k] = case
+        out["dispatch"] = {k: dispatch_payload(res[k]) for k in t}
     return out
 
 
@@ -1419,7 +1440,13 @@ def mesh_convergence(
     solver: str | None = None,
     detail_level: str = "standard",
 ) -> dict[str, Any]:
-    """Spanwise mesh convergence study (wraps ``run_mesh_convergence_study``)."""
+    """Spanwise mesh convergence study (wraps ``run_mesh_convergence_study``).
+
+    With ``detail_level="full"``, ``dispatch`` is
+    ``{"points": [...], "reference": ...}``: one dispatch record per entry
+    of ``all_evaluated_points`` (None for a point without a result) and
+    the record of the reference mesh.
+    """
     from ventorum.geometry.mesh_convergence import run_mesh_convergence_study
 
     ac = build_aircraft_from_spec(wing=wing, aircraft=aircraft)
@@ -1578,6 +1605,8 @@ def mesh_convergence(
         out["summary_markdown"] = study.summary(as_markdown=True)
     if dl == "full":
         out["all_evaluated_points"] = [p.to_dict() for p in study.points]
+        out["dispatch"] = {"points": [dispatch_payload(p.result) for p in study.points],
+                           "reference": dispatch_payload(study.reference_result)}
     return out
 
 
@@ -1691,7 +1720,9 @@ def trim(
     settings : dict or None
         ``solver``, ``n_panels``, ``n_chord``, ``wake_alignment``.
     detail_level : 'summary', 'standard' or 'full'
-        ``standard`` and ``full`` add ``residual_history``; ``full`` adds ``jacobian``.
+        ``standard`` and ``full`` add ``residual_history``; ``full`` adds
+        ``jacobian`` and ``dispatch``: the dispatch record of the solve of
+        the final trim point (None when no solve succeeded).
     axes : 'body', 'stability', 'wind' or 'all'
         Axis system of the moment coefficients Cl, Cm and Cn.
     """
@@ -1791,6 +1822,7 @@ def trim(
         out["residual_history"] = [float(v) for v in tr.residual_history]
     if dl == "full":
         out["jacobian"] = [[float(v) for v in row] for row in tr.jacobian]
+        out["dispatch"] = dispatch_payload(tr.result)
     return out
 
 
@@ -1891,7 +1923,9 @@ def error_bars(
     axes : 'body', 'stability' or 'wind'
         Moment axis system of the Cl, Cm and Cn bars. ``"all"`` is refused.
     detail_level : 'summary', 'standard' or 'full'
-        Accepted for consistency; the bar content is the same at every level.
+        The bar content is the same at every level. ``full`` adds
+        ``dispatch``: the dispatch record of the solve of the fine level
+        (the user mesh), or None.
     input_uncertainties : dict or None
         Optional layer-2 standard uncertainties: ``alpha_deg``,
         ``beta_deg``, ``phi_deg`` [deg], ``V_inf_m_s`` [m/s],
@@ -1905,7 +1939,7 @@ def error_bars(
     ac = build_aircraft_from_spec(wing=wing, aircraft=aircraft)
     c = parse_condition(flight_condition)
     sett = parse_settings(settings)
-    parse_detail_level(detail_level)  # Accepted for consistency; the bar content is the same at every level.
+    dl = parse_detail_level(detail_level)  # The bar content is the same at every level.
     ax = string(axes, "axes", ("body", "stability", "wind")) if axes is not None else "body"
     _check_method(ac, sett.solver_type, sett.wake_alignment, c["h_m"] is not None)
     strips = _check_mesh(ac, sett)
@@ -1962,7 +1996,7 @@ def error_bars(
         + "\n".join(lines) + f"\n{layer_note} "
         f"{device_summary_text(device, precision)}"
     )
-    return {
+    out: dict[str, Any] = {
         "status": "success",
         "executive_summary": summary,
         "error_bars": res.to_dict(),
@@ -1975,6 +2009,9 @@ def error_bars(
         "settings_used": {**settings_payload(sett), **_mesh_note(case_sett is not sett, case_sett)},
         "axes": ax,
     }
+    if dl == "full":
+        out["dispatch"] = dispatch_payload(res.results[0] if res.results else None)
+    return out
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -2005,6 +2042,9 @@ def derivative_matrix(
     needed. The work estimate counts the real solves: in free air 5 static
     solves, 1 + 2 n control solves (n controls) and 7 rate solves; in
     ground effect 9 static and height solves instead of 5.
+
+    With ``detail_level="full"``, ``dispatch`` is the dispatch record of
+    the base case (the solve of ``base_result``), or None.
     """
     from ventorum.solvers.derivative_matrix import effective_groups_of, mesh_probe_conditions
 
@@ -2135,6 +2175,8 @@ def derivative_matrix(
             "metrics": metrics_payload(base_sol),
             "trust": trust_payload(base_sol.totals.trust) if base_sol.totals.trust is not None else None,
         }
+    if dl == "full":
+        out["dispatch"] = dispatch_payload(base_sol)
     return out
 
 

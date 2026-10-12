@@ -217,29 +217,23 @@ def dispatch_payload(res: Any | None) -> dict[str, Any] | None:
     dict or None
         A copy of ``details["dispatch"]`` (see the user manual, results
         page), or None when the result has no dispatch record (for example
-        the Fourier solver) or *res* is None.
+        the Fourier solver) or *res* is None. The agent tools give it only
+        at ``detail_level="full"``, under the key ``"dispatch"``.
     """
     target = res
     if target is not None and not hasattr(target, "details") and hasattr(target, "solver_result"):
         target = target.solver_result
     details = getattr(target, "details", None)
-    if isinstance(details, dict) and "dispatch" in details:
-        return dict(details["dispatch"])
+    if isinstance(details, dict) and isinstance(details.get("dispatch"), dict):
+        rec = dict(details["dispatch"])
+        if isinstance(rec.get("backends"), dict):
+            rec["backends"] = dict(rec["backends"])
+        return rec
     return None
 
 
 def spanwise_payload(res: SolverResult) -> list[dict[str, Any]]:
     """Spanwise arrays per surface."""
-    import inspect
-
-    frame = inspect.currentframe()
-    if frame is not None and frame.f_back is not None:
-        caller_locals = frame.f_back.f_locals
-        if "out" in caller_locals and isinstance(caller_locals["out"], dict):
-            disp = dispatch_payload(res)
-            if disp is not None:
-                caller_locals["out"]["dispatch"] = disp
-
     out = []
     for sw in res.spanwise:
         out.append({
