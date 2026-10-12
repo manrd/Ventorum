@@ -11,7 +11,7 @@
 
 ## Dispatch record
 
-Every result of a lattice solver records how it was computed and why in `result.details["dispatch"]`. The record is a read-only dict: all results of one batch share it, so a change raises TypeError. Use `dict(result.details["dispatch"])` to get a copy that can change.
+Every result of a lattice solver records how it was computed and why in `result.details["dispatch"]`.
 
 | Field | Type | Description |
 | --- | --- | --- |

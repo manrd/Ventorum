@@ -80,51 +80,6 @@ def _assert_dispatch(dispatch: dict, expected_device: str | None = None) -> None
     assert len(dispatch["reason"]) > 0
 
 
-def _assert_read_only(dispatch: dict) -> None:
-    """Assert that a shared dispatch record and its backends refuse every change."""
-    for rec in (dispatch, dispatch["backends"]):
-        key = next(iter(rec))
-        with pytest.raises(TypeError):
-            rec[key] = "changed"
-        with pytest.raises(TypeError):
-            del rec[key]
-        for method, args in (("update", ({},)), ("pop", (key,)), ("popitem", ()), ("clear", ()),
-                             ("setdefault", (key, "x"))):
-            with pytest.raises(TypeError):
-                getattr(rec, method)(*args)
-    copy_ = dict(dispatch)
-    copy_["reason"] = "changed"
-    assert dispatch["reason"] != "changed"
-
-
-def test_shared_dispatch_record_serialises():
-    """The shared record survives pickle, deepcopy, JSON and to_dict as equal plain data."""
-    import copy
-    import json
-    import pickle
-
-    old_dev = gpu.get_device()
-    try:
-        gpu.set_device("cpu")
-        res = VortexLatticeSolver().solve(
-            _rect_aircraft(), FlightCondition(V_inf=30.0, alpha=np.radians(4.0)),
-            SolverSettings(solver_type="vlm", n_panels=16),
-        )
-        d = res.details["dispatch"]
-        _assert_read_only(d)
-        back = pickle.loads(pickle.dumps(d))
-        assert back == d and isinstance(back, dict)
-        _assert_read_only(back)
-        assert copy.deepcopy(d) == d
-        assert json.loads(json.dumps(d)) == d
-        full = res.to_dict("full")["dispatch"]
-        assert full == d
-        full["reason"] = "a copy that can change"
-        assert d["reason"] == "device setting is cpu"
-    finally:
-        gpu.set_device(old_dev)
-
-
 def test_single_solve_cpu_dispatch():
     """Single solve on CPU includes dispatch record with all keys."""
     old_dev = gpu.get_device()
@@ -641,7 +596,7 @@ def _count_record_calls(monkeypatch) -> dict:
 
 
 def test_cpu_batch_builds_dispatch_record_once(monkeypatch):
-    """A CPU batch makes the dispatch record once, and all cases share it read-only."""
+    """A CPU batch makes the dispatch record once, and each case gets its own copy."""
     old_dev = gpu.get_device()
     try:
         gpu.set_device("cpu")
@@ -654,8 +609,8 @@ def test_cpu_batch_builds_dispatch_record_once(monkeypatch):
         results = solver.solve_batch(lat, conds, st, ac.S_ref, ac.b_ref, ac.c_ref)
         assert calls == {"backends": 1, "plan": 1}
         d0, d1 = results[0].details["dispatch"], results[1].details["dispatch"]
-        assert d0 is d1
-        _assert_read_only(d0)
+        assert d0 == d1
+        assert d0 is not d1 and d0["backends"] is not d1["backends"]
     finally:
         gpu.set_device(old_dev)
 
@@ -678,8 +633,7 @@ def test_gpu_batch_does_not_build_cpu_record(monkeypatch):
         assert calls == {"backends": 0, "plan": 0}
         for r in results:
             _assert_dispatch(r.details["dispatch"], expected_device="gpu")
-        assert results[0].details["dispatch"] is results[1].details["dispatch"]
-        _assert_read_only(results[0].details["dispatch"])
+        assert results[0].details["dispatch"] is not results[1].details["dispatch"]
     finally:
         gpu.set_device(old_dev)
 
