@@ -57,6 +57,8 @@ AUTO_PRECISION = "float32"
 # replaces the rule with a cost model of the machine (key "gpu", "model").
 DEFAULT_MIN_WORK = {"vlm": 5.0e4, "linear": 3.0e5, "nonlinear": 3.0e5}
 DEFAULT_MIN_CASES = {"vlm": 24, "linear": 20, "nonlinear": 12}
+# Dispatch reason of every solve that the device setting "cpu" keeps on the CPU.
+_REASON_DEVICE_CPU = "device setting is cpu"
 FAMILIES = ("vlm", "linear", "nonlinear")
 
 
@@ -298,7 +300,7 @@ def use_gpu(
         Whether to use the GPU, and optionally the reason string.
     """
     if _device == "cpu":
-        decision, reason = False, "device setting is cpu"
+        decision, reason = False, _REASON_DEVICE_CPU
     elif _device == "gpu":
         if available():
             decision, reason = True, "device setting is gpu"

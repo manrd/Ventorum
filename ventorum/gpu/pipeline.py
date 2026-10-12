@@ -51,7 +51,7 @@ def solve_batch(solver, lattice, conditions: list, settings, S_ref: float, b_ref
     of each case (None: from ``condition.h``).
     """
     if gpu.get_device() == "cpu":
-        return (None, "device setting is cpu") if return_reason else None
+        return (None, gpu._REASON_DEVICE_CPU) if return_reason else None
     if solver.name not in ("linear", "nonlinear", "vlm"):
         return (None, f"solver '{solver.name}' is not supported on GPU") if return_reason else None
     from ventorum.utils.parallel import _local as _par_local

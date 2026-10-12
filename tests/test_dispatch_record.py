@@ -170,8 +170,7 @@ def test_fallback_reason_device_cpu():
         cond = FlightCondition(V_inf=30.0, alpha=np.radians(4.0))
         st = SolverSettings(solver_type="vlm", n_panels=16)
         res = VortexLatticeSolver().solve(ac, cond, st)
-        reason = res.details["dispatch"]["reason"]
-        assert "cpu" in reason.lower() and "device" in reason.lower()
+        assert res.details["dispatch"]["reason"] == "device setting is cpu"
     finally:
         gpu.set_device(old_dev)
 
@@ -186,15 +185,14 @@ def test_fallback_reason_worker_thread(monkeypatch):
         cond = FlightCondition(V_inf=30.0, alpha=np.radians(4.0))
         st = SolverSettings(solver_type="vlm", n_panels=16)
         res = VortexLatticeSolver().solve(ac, cond, st)
-        reason = res.details["dispatch"]["reason"]
-        assert "worker thread" in reason.lower()
+        assert res.details["dispatch"]["reason"] == "called inside a CPU worker thread"
         assert res.details["dispatch"]["plan_source"] == "nested"
     finally:
         gpu.set_device(old_dev)
 
 
 def test_fallback_reason_cost_model(monkeypatch):
-    """GPU fallback reason identifies when cost model rejects GPU."""
+    """GPU fallback reason gives the two cost-model times when the model rejects the GPU."""
     old_dev = gpu.get_device()
     try:
         gpu.set_device("auto")
@@ -209,11 +207,105 @@ def test_fallback_reason_cost_model(monkeypatch):
         ac = _rect_aircraft()
         cond = FlightCondition(V_inf=30.0, alpha=np.radians(4.0))
         st = SolverSettings(solver_type="vlm", n_panels=100)
-        res = VortexLatticeSolver().solve(ac, cond, st)
-        reason = res.details["dispatch"]["reason"]
-        assert "cost model" in reason.lower()
+        solver = VortexLatticeSolver()
+        lat = solver.build(ac, st, cond)
+        res = solver.solve_batch(lat, [cond], st, ac.S_ref, ac.b_ref, ac.c_ref)[0]
+        t_gpu = gpu.estimate_time(fake_model, "gpu", lat.n_panels, 1)
+        t_cpu = gpu.estimate_time(fake_model, "cpu", lat.n_panels, 1)
+        assert t_gpu >= t_cpu
+        expected = f"auto: GPU cost model {t_gpu * 1e3:.1f} ms >= CPU {t_cpu * 1e3:.1f} ms"
+        assert res.details["dispatch"]["reason"] == expected
     finally:
         gpu.set_device(old_dev)
+
+
+def test_fallback_reason_min_work_rule(monkeypatch):
+    """Without a cost model, the reason gives the work and the case count against the built-in rule."""
+    old_dev = gpu.get_device()
+    try:
+        gpu.set_device("auto")
+        monkeypatch.setattr(gpu, "available", lambda: True)
+        monkeypatch.setattr(gpu, "cost_model", lambda family: None)
+        use, reason = gpu.use_gpu(10.0, "vlm", 2, 40, return_reason=True)
+        assert use is False
+        mw, mc = gpu.min_work("vlm"), gpu.min_cases("vlm")
+        assert reason == f"auto: work 10 < min_work {mw:.0f} and 2 cases < min_cases {mc}"
+        use, reason = gpu.use_gpu(mw, "vlm", 1, 40, return_reason=True)
+        assert use is True
+        assert reason == f"auto: work {mw:.0f} >= min_work {mw:.0f}"
+        use, reason = gpu.use_gpu(10.0, "vlm", mc, 40, return_reason=True)
+        assert use is True
+        assert reason == f"auto: {mc} cases >= min_cases {mc}"
+    finally:
+        gpu.set_device(old_dev)
+
+
+def test_fallback_reason_gpu_unavailable(monkeypatch):
+    """The reason names the missing GPU for the device settings gpu and auto."""
+    old_dev = gpu.get_device()
+    try:
+        monkeypatch.setattr(gpu, "available", lambda: False)
+        monkeypatch.setattr(gpu, "unavailable_reason", lambda: "no CUDA device")
+        # set_device("gpu") refuses a missing GPU: a device setting from
+        # before the GPU was lost gives this state.
+        monkeypatch.setattr(gpu, "_device", "gpu")
+        assert gpu.use_gpu(1e9, "vlm", 100, 400, return_reason=True) == (
+            False, "GPU requested but unavailable: no CUDA device")
+        monkeypatch.setattr(gpu, "_device", "auto")
+        assert gpu.use_gpu(1e9, "vlm", 100, 400, return_reason=True) == (
+            False, "GPU is not available: no CUDA device")
+        assert gpu.use_gpu(1e9, "vlm", 100, 400) is False
+    finally:
+        gpu.set_device(old_dev)
+
+
+def test_fallback_reason_device_cpu_same_wording():
+    """The solver, the GPU batch and use_gpu give the same reason for the device setting cpu."""
+    from ventorum.gpu.pipeline import solve_batch as gpu_solve_batch
+
+    old_dev = gpu.get_device()
+    try:
+        gpu.set_device("cpu")
+        ac = _rect_aircraft()
+        cond = FlightCondition(V_inf=30.0, alpha=np.radians(4.0))
+        st = SolverSettings(solver_type="vlm", n_panels=16)
+        solver = VortexLatticeSolver()
+        lat = solver.build(ac, st, cond)
+        res = solver.solve_batch(lat, [cond, cond], st, ac.S_ref, ac.b_ref, ac.c_ref)
+        assert [r.details["dispatch"]["reason"] for r in res] == ["device setting is cpu"] * 2
+        out = gpu_solve_batch(solver, lat, [cond], st, ac.S_ref, ac.b_ref, ac.c_ref, None, 0, False, 0.0,
+                              return_reason=True)
+        assert out == (None, "device setting is cpu")
+        assert gpu.use_gpu(1e9, "vlm", 100, 400, return_reason=True) == (False, "device setting is cpu")
+    finally:
+        gpu.set_device(old_dev)
+
+
+def test_fallback_reason_unsupported_solver():
+    """The GPU batch names a solver family that it does not support."""
+    from ventorum.gpu.pipeline import solve_batch as gpu_solve_batch
+
+    class _Other:
+        name = "other"
+
+    old_dev = gpu.get_device()
+    try:
+        gpu.set_device("auto")
+        out = gpu_solve_batch(_Other(), None, [], None, 1.0, 1.0, 1.0, None, 0, False, 0.0, return_reason=True)
+        assert out == (None, "solver 'other' is not supported on GPU")
+    finally:
+        gpu.set_device(old_dev)
+
+
+def test_fallback_reason_cpu_only_batch():
+    """A batch with the private CPU-only flag records the reason of the flag."""
+    ac = _rect_aircraft()
+    cond = FlightCondition(V_inf=30.0, alpha=np.radians(4.0))
+    st = SolverSettings(solver_type="vlm", n_panels=16)
+    solver = VortexLatticeSolver()
+    lat = solver.build(ac, st, cond)
+    res = solver.solve_batch(lat, [cond], st, ac.S_ref, ac.b_ref, ac.c_ref, _cpu_only=True)
+    assert res[0].details["dispatch"]["reason"] == "caller requested cpu only"
 
 
 @pytest.mark.gpu

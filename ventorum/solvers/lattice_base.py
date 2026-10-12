@@ -676,8 +676,7 @@ class LatticeSolver(BaseSolver):
         from ventorum import gpu
 
         if gpu.get_device() == "cpu":
-            reason = "device is cpu"
-            return (None, reason) if return_reason else None
+            return (None, gpu._REASON_DEVICE_CPU) if return_reason else None
         from ventorum.gpu.pipeline import solve_batch as gpu_solve_batch
 
         return gpu_solve_batch(
