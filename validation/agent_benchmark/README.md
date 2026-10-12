@@ -21,9 +21,9 @@ The harness uses only the Python standard library and Ventorum.
 
 ## Rules
 
-- Give the output folder with `--out`. It must be outside the repository; the harness refuses a folder inside it.
+- Give the output folder with `--out`. It must be outside the repository; the harness refuses a folder inside it (also by another spelling of the same folder) and a folder inside any git checkout.
 - Keep the model config outside the repository. It gives the endpoints, the model strings, the names of the key variables and the prices.
-- Keys come only from environment variables. The harness never writes a key, a host name or a user name to an output file. A redaction filter removes strings that look like keys from every record.
+- Keys come only from environment variables. The harness never writes a key, a host name or a user name to an output file. A redaction filter removes strings that look like keys, and the values of all variables that the config names in `api_key_env`, from every record and from the audit logs. The MCP server does not get these variables.
 - The harness refuses a model on the owner blacklist.
 - Run one benchmark at a time on a machine (no concurrent benchmarks). `--jobs` above 1 is only for API models, and the run is then marked "times not comparable".
 
@@ -84,8 +84,8 @@ python -m validation.agent_benchmark.runner run --config <config.json> --model l
 - `--tasks` takes `all`, `track_b`, `level:N`, or ids and ranges (`AB-01,AB-05:AB-09`).
 - `--repeats` is k (default 3).
 - `--seed N` makes the held-out variants of seed N (0 is the public set).
-- `--run-id ID` resumes the run `ID`: the finished task runs are skipped.
-- The limits (`--max-turns`, `--max-tool-calls`, `--task-time-s`, `--tool-time-s`, `--request-time-s`, `--max-output-tokens`, `--cost-cap-usd`) override the config.
+- `--run-id ID` resumes the run `ID`: the finished task runs are skipped. A task run that ended with `endpoint_error` runs again, and the report keeps only its last record.
+- The limits (`--max-turns`, `--max-tool-calls`, `--task-time-s`, `--tool-time-s`, `--request-time-s`, `--max-output-tokens`, `--cost-cap-usd`) override the config. The cost cap must be above 0 USD. At the cap the run stops cleanly; the cost of the task run that reached the cap is recorded (`run_stopped` event), and a resume adds it to the cost so far.
 
 Each task run gets a new MCP server process, a hidden warm-up call before the task clock starts, a sandbox copy of the tuning profile folder (`VENTORUM_CONFIG_DIR`), an audit log (`VENTORUM_AGENT_AUDIT_LOG`) and an empty working folder.
 
@@ -118,7 +118,7 @@ The model must end its last message with one block:
 </final_answer>
 ```
 
-A task run succeeds when the status, the values (within the task tolerances), the required caveat codes, the provenance of each number (a tool result or the task formula), and the argument checks agree with one accepted outcome of the task. The record also gives the error kinds (for example `wrong_units`, `sign_error`, `geometry_drift`, `hallucinated_value`, `unsupported_value`, `missed_refusal`, `false_refusal`, `format_error`, `limit:turns`). The lenient score (numbers found in free text) is reported apart and never ranks models.
+A task run succeeds when the status, the values (within the task tolerances), the required caveat codes, the provenance of each number (a tool result or the task formula), and the argument checks agree with one accepted outcome of the task. A placeholder value (`"n/a"`, `""`, `"unknown"`, `"none"`, `"null"`, `"na"`, `"-"`) counts as no value. A value with two numbers (a range such as `"3 to 5"`) is not one value: it gets `format_error`. A task can name flight-condition entries that the geometry comparison does not compare (`ignore_condition`, for example the start angle of attack of a trim). The record also gives the error kinds (for example `wrong_units`, `sign_error`, `geometry_drift`, `hallucinated_value`, `unsupported_value`, `missed_refusal`, `false_refusal`, `format_error`, `limit:turns`). The lenient score (numbers found in free text) is reported apart and never ranks models.
 
 ## Track B (existing clients)
 
@@ -127,4 +127,6 @@ python -m validation.agent_benchmark.client_track --config <config.json> --clien
     --model <model> --out <folder outside the repository>
 ```
 
-The default command lines of the clients are in `client_track.py`. Check them against the installed client version and override them in the config (`clients.<name>.command`). The client runs in an empty temporary folder with only the Ventorum MCP server and its built-in shell, file and web tools off.
+The default command lines of the clients are in `client_track.py`. Check them against the installed client version and override them in the config (`clients.<name>.command`). The client runs in an empty temporary folder with only the Ventorum MCP server and its built-in shell, file and web tools off. The prompt goes to the client through its standard input (a template can also use `{prompt_file}`); a template with `{prompt}` is refused. The client runs in a new process group, and at the timeout the harness stops the client and all its child processes.
+
+The harness replays the calls of the audit log through a separate MCP server with a sandbox config folder to get the payloads. It never replays `ventorum_tune_machine`: that call gets only its status from the audit line. The references are checked as in track A.
