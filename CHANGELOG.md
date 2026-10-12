@@ -8,6 +8,17 @@ a minor version can change a public interface.
 
 ## [Unreleased]
 
+### Added
+
+- Gradients with respect to the planform parameters: `gradients`, `gradient_vjp` and
+  `check_gradients` accept the input `"planform"` (per surface `semi_span`, `sweep_le`,
+  `dihedral`, `incidence`, `position`; per section `chord`, `twist`, `x_le`, `z_le`, `y_frac`,
+  `alpha_L0`; lengths in m, angles in rad). The chain rule runs through a PyTorch copy of the
+  geometry builder (equal to the production nodes to round-off); the mesh topology stays
+  fixed. At a section break that a mesh edge meets, the `y_frac` derivative follows the branch
+  that any nonzero step takes, and a note names the section. Mirror pairs with automatic
+  reference values get a note: the gradient is per copy.
+
 ## [0.4.0] - 2026-10-11
 
 ### Added
