@@ -7,7 +7,25 @@
 | `totals` | Integrated coefficients: `CL`, `CDi` (Trefftz plane), `CDp`, `CD_total`, `e`, `CY`, `Cl`, `Cm`, `Cn`, the far-field diagnostics `CY_farfield` (wind axes) and `Cn_trefftz` (stability axes; both None for the Fourier solver), and the trust score |
 | `spanwise` | One `SpanwiseResult` per surface: circulation, section lift, induced drag, effective angle of attack |
 | `converged` | False if the solver did not meet its tolerance |
-| `details` | Solver data (lattice, circulation, wake direction, ground plane) for plots and checks |
+| `details` | Solver data (lattice, circulation, wake direction, ground plane, dispatch) for plots and checks |
+
+## Dispatch record
+
+Every result of a lattice solver records how it was computed and why in `result.details["dispatch"]`.
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `device` | str | `"cpu"` or `"gpu"` |
+| `precision` | str | `"float64"` on CPU; `"float32"` or `"float64"` on GPU |
+| `backends` | dict | Kernel name (`"tensor"`, `"influence"`, `"induced"`, `"trefftz"`) mapped to the backend used |
+| `threads` | int | Kernel thread count for the solve step |
+| `workers` | int | Worker count planned for the batch (1 for a single solve) |
+| `plan_source` | str | Source of the parallel plan: `"user"`, `"profile"`, `"default"` or `"nested"` |
+| `profile` | str or None | Machine profile fingerprint string, or None when no profile was active |
+| `reason` | str | Plain sentence stating the dispatch decision and any fallback reason |
+
+In `result.to_dict()` and in agent tools, the dispatch record is included only when `detail_level="full"`. Existing top-level keys `details["device"]` and `details["precision"]` on GPU results remain unchanged.
+
 
 ## Trust score
 

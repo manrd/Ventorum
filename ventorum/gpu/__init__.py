@@ -263,7 +263,13 @@ def estimate_time(model: dict, device: str, n_panels: int, n_cases: int) -> floa
     return ts[j] + slope * (K - ks[j])
 
 
-def use_gpu(work: float, family: str = "vlm", n_cases: int = 1, n_panels: int | None = None) -> bool:
+def use_gpu(
+    work: float,
+    family: str = "vlm",
+    n_cases: int = 1,
+    n_panels: int | None = None,
+    return_reason: bool = False,
+) -> bool | tuple[bool, str]:
     """Return True if a solve of the solver *family* runs on the GPU.
 
     *work* is the work of the solve (see
@@ -272,17 +278,60 @@ def use_gpu(work: float, family: str = "vlm", n_cases: int = 1, n_panels: int | 
     device, a tuned cost model of the machine (:func:`cost_model`) compares
     the estimated times; without one, the built-in rule
     (``DEFAULT_MIN_WORK``, ``DEFAULT_MIN_CASES``) decides.
+
+    Parameters
+    ----------
+    work : float
+        Work estimate of the solve.
+    family : str, optional
+        Solver family: ``"vlm"``, ``"linear"`` or ``"nonlinear"``.
+    n_cases : int, optional
+        Number of cases.
+    n_panels : int or None, optional
+        Panel count of the lattice.
+    return_reason : bool, optional
+        If True, return ``(use, reason)`` where reason is a plain sentence.
+
+    Returns
+    -------
+    bool or tuple of (bool, str)
+        Whether to use the GPU, and optionally the reason string.
     """
     if _device == "cpu":
-        return False
-    if _device == "gpu":
-        return available()
-    if not available():
-        return False
-    model = cost_model(family) if n_panels is not None else None
-    if model is not None:
-        return estimate_time(model, "gpu", n_panels, n_cases) < estimate_time(model, "cpu", n_panels, n_cases)
-    return work >= min_work(family) or n_cases >= min_cases(family)
+        decision, reason = False, "device setting is cpu"
+    elif _device == "gpu":
+        if available():
+            decision, reason = True, "device setting is gpu"
+        else:
+            decision, reason = False, f"GPU requested but unavailable: {unavailable_reason()}"
+    elif not available():
+        decision, reason = False, f"GPU is not available: {unavailable_reason()}"
+    else:
+        model = cost_model(family) if n_panels is not None else None
+        if model is not None:
+            t_gpu = estimate_time(model, "gpu", n_panels, n_cases)
+            t_cpu = estimate_time(model, "cpu", n_panels, n_cases)
+            if t_gpu < t_cpu:
+                decision = True
+                reason = f"auto: GPU cost model {t_gpu * 1e3:.1f} ms < CPU {t_cpu * 1e3:.1f} ms"
+            else:
+                decision = False
+                reason = f"auto: GPU cost model {t_gpu * 1e3:.1f} ms >= CPU {t_cpu * 1e3:.1f} ms"
+        else:
+            mw = min_work(family)
+            mc = min_cases(family)
+            if work >= mw:
+                decision = True
+                reason = f"auto: work {work:.0f} >= min_work {mw:.0f}"
+            elif n_cases >= mc:
+                decision = True
+                reason = f"auto: {n_cases} cases >= min_cases {mc}"
+            else:
+                decision = False
+                reason = f"auto: work {work:.0f} < min_work {mw:.0f} and {n_cases} cases < min_cases {mc}"
+    if return_reason:
+        return decision, reason
+    return decision
 
 
 def info() -> dict:

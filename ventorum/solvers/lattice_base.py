@@ -253,9 +253,12 @@ class LatticeSolver(BaseSolver):
         main_surface: int = 0,
     ) -> SolverResult:
         t0 = time.perf_counter()
-        gpu_results = self._gpu_batch(lattice, [condition], settings, S_ref, b_ref, c_ref, ref_point,
-                                      main_surface, False, t0, gamma0=gamma0,
-                                      grounds=None if ground is None else [ground])
+        gpu_results, gpu_reason = self._gpu_batch(
+            lattice, [condition], settings, S_ref, b_ref, c_ref, ref_point,
+            main_surface, False, t0, gamma0=gamma0,
+            grounds=None if ground is None else [ground],
+            return_reason=True,
+        )
         if gpu_results is not None:
             return gpu_results[0]
         ground, h_min, notes, wd = self._case_setup(lattice, condition, settings, c_ref, ground, ref_point)
@@ -266,8 +269,11 @@ class LatticeSolver(BaseSolver):
             ground=ground, ref_point=ref_point, alpha_eff_strip=alpha_eff, wake_dir=wd,
             v_control=getattr(info, "v_control", None),
         )
-        return self._case_result(lattice, condition, loads, info, gamma, ground, h_min, notes, wd,
-                                 b_ref, c_ref, main_surface, t0, ref_point=ref_point)
+        return self._case_result(
+            lattice, condition, loads, info, gamma, ground, h_min, notes, wd,
+            b_ref, c_ref, main_surface, t0, ref_point=ref_point,
+            gpu_reason=gpu_reason, n_cases=1,
+        )
 
     def _case_setup(
         self,
@@ -356,6 +362,8 @@ class LatticeSolver(BaseSolver):
         execution_time: float | None = None,
         spanwise_stats: dict | None = None,
         ref_point: np.ndarray | None = None,
+        gpu_reason: str | None = None,
+        n_cases: int = 1,
     ) -> SolverResult:
         """Return the result object of one case: trust score, details and warnings.
 
@@ -429,10 +437,41 @@ class LatticeSolver(BaseSolver):
             b_ref=float(b_ref),
             c_ref=float(c_ref),
         )
+        from ventorum.aero.vortex import _kernel_backends_for
+        from ventorum.hardware.profile import active_profile
+        from ventorum.utils.parallel import kernel_threads, plan_parallel
+
+        prof = active_profile()
+        profile_fp = prof.get("fingerprint") if isinstance(prof, dict) else None
+        plan = plan_parallel(n_cases, lattice.n_panels)
+        threads = int(kernel_threads())
+        if threads < 1:
+            threads = max(1, int(plan.threads_per_worker))
+        workers = max(1, int(plan.workers))
+        reason = gpu_reason or "CPU path selected"
+
         # Kept for advanced use (plots, diagnostics, ground-effect post-processing).
-        res.details = {"lattice": lattice, "loads": loads, "ground": ground, "h_min": h_min,
-                       "sweep_deg": sweep_deg, "notes": notes, "gamma": gamma, "wake_dir": wd,
-                       "ref_point": None if ref_point is None else np.asarray(ref_point, dtype=float)}
+        res.details = {
+            "lattice": lattice,
+            "loads": loads,
+            "ground": ground,
+            "h_min": h_min,
+            "sweep_deg": sweep_deg,
+            "notes": notes,
+            "gamma": gamma,
+            "wake_dir": wd,
+            "ref_point": None if ref_point is None else np.asarray(ref_point, dtype=float),
+            "dispatch": {
+                "device": "cpu",
+                "precision": "float64",
+                "backends": _kernel_backends_for(lattice.n_panels),
+                "threads": threads,
+                "workers": workers,
+                "plan_source": plan.source,
+                "profile": profile_fp,
+                "reason": reason,
+            },
+        }
         for msg in notes:
             warnings.warn(msg, RuntimeWarning, stacklevel=4)
         return res
@@ -578,11 +617,16 @@ class LatticeSolver(BaseSolver):
         t0 = time.perf_counter()
         if not conditions:
             return []
+        gpu_reason = None
         if not _cpu_only:
-            gpu_results = self._gpu_batch(lattice, conditions, settings, S_ref, b_ref, c_ref, ref_point,
-                                          main_surface, continuation, t0, grounds=grounds)
+            gpu_results, gpu_reason = self._gpu_batch(
+                lattice, conditions, settings, S_ref, b_ref, c_ref, ref_point,
+                main_surface, continuation, t0, grounds=grounds, return_reason=True,
+            )
             if gpu_results is not None:
                 return gpu_results
+        else:
+            gpu_reason = "caller requested cpu only"
         explicit = [None] * len(conditions) if grounds is None else list(grounds)
         with solve_threads(lattice.n_panels, batch=len(conditions)):
             setups = [self._case_setup(lattice, c, settings, c_ref, g, ref_point) for c, g in zip(conditions, explicit)]
@@ -598,15 +642,32 @@ class LatticeSolver(BaseSolver):
                 alpha_eff_strips=alpha_effs, wake_dirs=wds,
                 v_controls=None if any(v is None for v in vcs) else np.array(vcs),
             )
-        share = (time.perf_counter() - t0) / len(conditions)
-        return [
-            self._case_result(lattice, cond, ld, info, g, st[0], st[1], st[2], st[3], b_ref, c_ref, main_surface,
-                              t0, execution_time=share, ref_point=ref_point)
-            for cond, ld, (g, _, info), st in zip(conditions, loads, sols, setups)
-        ]
+            share = (time.perf_counter() - t0) / len(conditions)
+            return [
+                self._case_result(
+                    lattice, cond, ld, info, g, st[0], st[1], st[2], st[3], b_ref, c_ref, main_surface,
+                    t0, execution_time=share, ref_point=ref_point,
+                    gpu_reason=gpu_reason, n_cases=len(conditions),
+                )
+                for cond, ld, (g, _, info), st in zip(conditions, loads, sols, setups)
+            ]
 
-    def _gpu_batch(self, lattice, conditions, settings, S_ref, b_ref, c_ref, ref_point, main_surface,
-                   continuation, t0, gamma0=None, grounds=None) -> list[SolverResult] | None:
+    def _gpu_batch(
+        self,
+        lattice,
+        conditions,
+        settings,
+        S_ref,
+        b_ref,
+        c_ref,
+        ref_point,
+        main_surface,
+        continuation,
+        t0,
+        gamma0=None,
+        grounds=None,
+        return_reason: bool = False,
+    ) -> tuple[list[SolverResult] | None, str] | list[SolverResult] | None:
         """Solve the cases with the GPU pipelines, or return None (CPU path).
 
         See :mod:`ventorum.gpu`: the device setting and the size of the solve
@@ -615,11 +676,26 @@ class LatticeSolver(BaseSolver):
         from ventorum import gpu
 
         if gpu.get_device() == "cpu":
-            return None
+            reason = "device is cpu"
+            return (None, reason) if return_reason else None
         from ventorum.gpu.pipeline import solve_batch as gpu_solve_batch
 
-        return gpu_solve_batch(self, lattice, conditions, settings, S_ref, b_ref, c_ref, ref_point,
-                               main_surface, continuation, t0, gamma0=gamma0, grounds=grounds)
+        return gpu_solve_batch(
+            self,
+            lattice,
+            conditions,
+            settings,
+            S_ref,
+            b_ref,
+            c_ref,
+            ref_point,
+            main_surface,
+            continuation,
+            t0,
+            gamma0=gamma0,
+            grounds=grounds,
+            return_reason=return_reason,
+        )
 
     def solve_circulation_batch(
         self,

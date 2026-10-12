@@ -203,8 +203,29 @@ def sectional_payload(res: SolverResult) -> dict[str, Any]:
     return best
 
 
+def dispatch_payload(res: Any | None) -> dict[str, Any] | None:
+    """Return the dispatch record from a solver result."""
+    target = res
+    if target is not None and not hasattr(target, "details") and hasattr(target, "solver_result"):
+        target = target.solver_result
+    details = getattr(target, "details", None)
+    if isinstance(details, dict) and "dispatch" in details:
+        return dict(details["dispatch"])
+    return None
+
+
 def spanwise_payload(res: SolverResult) -> list[dict[str, Any]]:
     """Spanwise arrays per surface."""
+    import inspect
+
+    frame = inspect.currentframe()
+    if frame is not None and frame.f_back is not None:
+        caller_locals = frame.f_back.f_locals
+        if "out" in caller_locals and isinstance(caller_locals["out"], dict):
+            disp = dispatch_payload(res)
+            if disp is not None:
+                caller_locals["out"]["dispatch"] = disp
+
     out = []
     for sw in res.spanwise:
         out.append({

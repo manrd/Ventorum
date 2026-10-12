@@ -234,6 +234,11 @@ def kernel_backend_for(kernel: str, n_panels: int | None = None) -> str:
     return backend
 
 
+def _kernel_backends_for(n_panels: int | None = None) -> dict[str, str]:
+    """Return the backend used for each vortex kernel."""
+    return {k: kernel_backend_for(k, n_panels) for k in KERNELS}
+
+
 def _kernel_threads() -> int:
     """Return the kernel thread count of the calling thread.
 

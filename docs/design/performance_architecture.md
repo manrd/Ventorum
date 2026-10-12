@@ -107,8 +107,22 @@ How a batch runs:
 5. The dense solves (`engine.batched_solve`): small systems (`REF_MIN_N`) and small batches get a direct float64 LU. Otherwise one reference matrix per group of consecutive cases is inverted (float32), and each case is corrected with its residual in float64 until the relative residual is at the round-off level (float64 matrix) or below `REF_TOL32` (float32 matrix, three orders below the errors of its entries); a case that does not converge gets a direct solve.
 6. The nonlinear lifting line runs Newton's method for all cases together (`engine.llt_nonlinear`). Per iteration: the Jacobian of the active cases (`nl_jacobian`, from the terms of `nl_state`), its LU in float32 (`newton_solve`: two refinements for a float64 Jacobian, none for a float32 one), one read of the velocity tensor for the Newton step and the fixed-point direction (`contract2`), the residuals of all trial points of the line search and of the fixed-point fallback (`nl_trials`, one thread per case, trial and strip; `nl_merit` sums them in strip order), the first trial that the CPU rules accept and the new state (`nl_update`, `nl_state`), and the merit and flags per case (`nl_reduce`). One transfer per iteration gives the active cases. Continuation and the CPU fallback are described in `gpu/pipeline.py` (`_nonlinear`).
 7. The loads (`engine.loads`, two kernels: per strip and per case) are the equations of `compute_loads_batch` in float64 on the GPU. The vortex lattice takes the velocity at the load points from a cached matrix of the fixed legs (a product with the circulation, in float64), the wake legs per wake group, and the ground images per panel. The Trefftz plane evaluates the right strips only in symmetric cases.
-8. One transfer brings all arrays to the host. `loads.loads_result` and `_case_result` make the result objects (the same functions as the CPU path); the statistics of the trust score come from the per-case kernel (the same rules as `trust.spanwise_stats_batch`).
+8. One transfer brings all arrays to the host. `loads.loads_result` and `_case_result` make the result objects (the same functions as the CPU path); the statistics of the trust score come from the per-case kernel (the same rules as `trust.spanwise_stats_batch`). Each result includes the `dispatch` dictionary.
 9. The ground-effect sweeps (`ground_effect.sweep._gpu_batch`) check each case and place its ground as `analyze_ground_effect` does (`prepare_ground_case`), solve the valid cases as one batch with explicit ground planes, and make the results with `ground_case_result`. When the GPU does not take the batch, the CPU path batches small lattices and serial runs in chunks, and larger lattices keep the worker pool.
+
+## Dispatch recording and reasons
+
+Lattice solver results record dispatch decisions in `result.details["dispatch"]`:
+
+* `device`: `"cpu"` or `"gpu"`.
+* `precision`: `"float64"` on CPU; `"float32"` or `"float64"` on GPU.
+* `backends`: maps each kernel name (`"tensor"`, `"influence"`, `"induced"`, `"trefftz"`) to the backend used.
+* `threads`: kernel thread count for the solve step.
+* `workers`: concurrent cases or worker processes planned by `ParallelPlan`.
+* `plan_source`: `"user"`, `"profile"`, `"default"` or `"nested"`.
+* `profile`: active machine profile fingerprint, or None.
+* `reason`: plain sentence describing the dispatch decision or the fallback reason (such as device settings, worker pools, body rates, unsupported polars, or cost model comparisons).
+
 
 Rules for a change:
 

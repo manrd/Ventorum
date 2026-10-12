@@ -40,7 +40,8 @@ def work_estimate(lattice, n_cases: int, in_ground: bool) -> float:
 
 
 def solve_batch(solver, lattice, conditions: list, settings, S_ref: float, b_ref: float, c_ref: float,
-                ref_point, main_surface: int, continuation: bool, t0: float, gamma0=None, grounds=None):
+                ref_point, main_surface: int, continuation: bool, t0: float, gamma0=None, grounds=None,
+                return_reason: bool = False):
     """Solve the cases on the GPU, or return None (the caller then solves them on the CPU).
 
     The arguments are those of
@@ -49,18 +50,26 @@ def solve_batch(solver, lattice, conditions: list, settings, S_ref: float, b_ref
     solve (see ``solve_lattice``), and *grounds* the explicit ground plane
     of each case (None: from ``condition.h``).
     """
-    if gpu.get_device() == "cpu" or solver.name not in ("linear", "nonlinear", "vlm"):
-        return None
+    if gpu.get_device() == "cpu":
+        return (None, "device setting is cpu") if return_reason else None
+    if solver.name not in ("linear", "nonlinear", "vlm"):
+        return (None, f"solver '{solver.name}' is not supported on GPU") if return_reason else None
+    from ventorum.aero.system import has_rates
+
+    if getattr(solver, "supports_gpu_rates", True) is False and any(has_rates(c) for c in conditions):
+        return (None, "body rates need the CPU path") if return_reason else None
     from ventorum.utils.parallel import _local as _par_local
 
     if gpu.get_device() == "auto" and getattr(_par_local, "worker_threads", None) is not None:
         # A worker of a CPU pool (cases in parallel): the pool was chosen for
         # the CPU, and many small GPU solves from several threads are slow.
-        return None
+        return (None, "called inside a CPU worker thread") if return_reason else None
     in_ground = any(c.h is not None for c in conditions) or (grounds is not None and any(g is not None for g in grounds))
-    if not gpu.use_gpu(work_estimate(lattice, len(conditions), in_ground), solver.name, len(conditions),
-                       lattice.n_panels):
-        return None
+    work = work_estimate(lattice, len(conditions), in_ground)
+    use_gpu_dec, use_gpu_reason = gpu.use_gpu(work, solver.name, len(conditions),
+                                              lattice.n_panels, return_reason=True)
+    if not use_gpu_dec:
+        return (None, use_gpu_reason) if return_reason else None
     from ventorum.aero.system import is_symmetric_condition
     from ventorum.solvers.core import _unknown_map
 
@@ -77,21 +86,25 @@ def solve_batch(solver, lattice, conditions: list, settings, S_ref: float, b_ref
         key = (id(umap), st[0] is not None, is_symmetric_condition(c, st[0]))
         groups.setdefault(key, []).append(k)
     if len(groups) > 1 and continuation and solver.name == "nonlinear":
-        return None   # continuation needs the cases in order: the CPU path
+        return (None, "continuation needs the cases in order: the CPU path") if return_reason else None
     solved = []
     for idx in groups.values():
-        sub = _solve_group(solver, lattice, [conditions[k] for k in idx], [setups[k] for k in idx], settings,
-                           S_ref, b_ref, c_ref, ref_point, continuation, gamma0, precision, use_sym)
+        sub, group_reason = _solve_group(solver, lattice, [conditions[k] for k in idx], [setups[k] for k in idx], settings,
+                                         S_ref, b_ref, c_ref, ref_point, continuation, gamma0, precision, use_sym)
         if sub is None:
-            return None
+            return (None, group_reason) if return_reason else None
         solved.append((idx, sub))
     share = (time.perf_counter() - t0) / K
     out: list = [None] * K
+    reason = use_gpu_reason if gpu.get_device() == "auto" else "device setting is gpu"
     for idx, (arrays, infos, umap) in solved:
         res = _results(solver, lattice, [conditions[k] for k in idx], arrays, [setups[k] for k in idx], umap, b_ref,
-                       c_ref, main_surface, t0, share, precision, infos=infos, ref_point=ref_point, S_ref=S_ref)
+                       c_ref, main_surface, t0, share, precision, infos=infos, ref_point=ref_point, S_ref=S_ref,
+                       dispatch_reason=reason)
         for k, r in zip(idx, res):
             out[k] = r
+    if return_reason:
+        return out, reason
     return out
 
 
@@ -113,11 +126,11 @@ def _solve_group(solver, lattice, conditions: list, setups: list, settings, S_re
     dl = engine.device_lattice(lattice, precision)
     md = dl.unknown_map(lattice, umap)
     if md is None:
-        return None
+        return None, "unknown map is not supported on GPU"
     try:
         engine.check_polars(dl, lattice)
     except TypeError:
-        return None
+        return None, "airfoils are not supported on GPU"
     bd = engine.batch_data(conditions, wds, grounds)
     Dfs, V, rho, alpha, WD = bd["D"], bd["V"], bd["rho"], bd["alpha"], bd["WD"]
     # The host flag avoids a device-to-host sync per solve in rate-free cases.
@@ -150,7 +163,7 @@ def _solve_group(solver, lattice, conditions: list, setups: list, settings, S_re
     arrays = engine.loads(dl, lattice, G, v_points, Dfs, V, rho, alpha, WD, grounds, S_ref, b_ref, c_ref,
                           ref_point, alpha_eff, use_leg=solver.name == "vlm", extra={"gamma": G}, symmetric=symmetric,
                           GK=bd["GK"], GO=bd["GO"], omega=omega)
-    return arrays, infos, umap
+    return (arrays, infos, umap), None
 
 
 # Continuation passes of the GPU nonlinear solves (see _nonlinear).
@@ -260,7 +273,7 @@ def _nonlinear(solver, engine, dl, md, cs, lattice, conditions, settings, ground
 
 def _results(solver, lattice, conditions, arrays: dict, setups: list, umap, b_ref: float, c_ref: float,
              main_surface: int, t0: float, share: float, precision: str, infos: list | None = None,
-             ref_point=None, S_ref: float | None = None) -> list:
+             ref_point=None, S_ref: float | None = None, dispatch_reason: str = "device setting is gpu") -> list:
     """Return the result objects of a GPU batch (the loads objects and the CPU result builder).
 
     The far-field lateral diagnostics (``CY_farfield``, ``Cn_trefftz``) are
@@ -270,8 +283,12 @@ def _results(solver, lattice, conditions, arrays: dict, setups: list, umap, b_re
     far-field values.
     """
     from ventorum.aero.loads import loads_result, trefftz_lateral_batch
+    from ventorum.aero.vortex import KERNELS
+    from ventorum.hardware.profile import active_profile
     from ventorum.solvers.core import SolveInfo
 
+    prof = active_profile()
+    prof_fp = prof.get("fingerprint") if prof is not None else None
     totals = arrays["totals"].tolist()
     span = arrays["span"]
     gammas = arrays["gamma"]
@@ -307,5 +324,15 @@ def _results(solver, lattice, conditions, arrays: dict, setups: list, umap, b_re
                                   ref_point=ref_point)
         res.details["device"] = "gpu"
         res.details["precision"] = precision
+        res.details["dispatch"] = {
+            "device": "gpu",
+            "precision": precision,
+            "backends": {kernel: "warp" for kernel in KERNELS},
+            "threads": 1,
+            "workers": 1,
+            "plan_source": "default",
+            "profile": prof_fp,
+            "reason": dispatch_reason,
+        }
         out.append(res)
     return out

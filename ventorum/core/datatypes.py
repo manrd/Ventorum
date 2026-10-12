@@ -1274,6 +1274,26 @@ class IntegratedResult:
     def __deepcopy__(self, memo: dict) -> IntegratedResult:
         return self.clone()
 
+    def to_dict(self) -> dict[str, Any]:
+        """Convert integrated aerodynamic coefficients to a dictionary."""
+        return {
+            "CL": float(self.CL),
+            "CDi": float(self.CDi),
+            "CDp": None if self.CDp is None else float(self.CDp),
+            "CD_total": None if self.CD_total is None else float(self.CD_total),
+            "e": float(self.e),
+            "CL_alpha": None if self.CL_alpha is None else float(self.CL_alpha),
+            "AR": float(self.AR),
+            "Cl": float(self.Cl),
+            "Cm": float(self.Cm),
+            "Cn": float(self.Cn),
+            "CY": float(self.CY),
+            "CDi_nearfield": None if self.CDi_nearfield is None else float(self.CDi_nearfield),
+            "CY_farfield": None if self.CY_farfield is None else float(self.CY_farfield),
+            "Cn_trefftz": None if self.Cn_trefftz is None else float(self.Cn_trefftz),
+            "trust": self.trust.to_dict() if self.trust is not None else None,
+        }
+
 
 @dataclass(slots=True)
 class SolverResult:
@@ -1384,6 +1404,48 @@ class SolverResult:
                 for name in ("body", "stability", "wind")
             }
         return transform_moments(tot.Cl, tot.Cm, tot.Cn, alpha, beta, axes, b_ref=self.b_ref, c_ref=self.c_ref)
+
+    def to_dict(self, detail_level: str = "standard") -> dict[str, Any]:
+        """Convert solver result to a dictionary.
+
+        Parameters
+        ----------
+        detail_level : str, optional
+            ``"summary"``, ``"standard"`` (default) or ``"full"``.
+            The dispatch record is included only when ``detail_level == "full"``.
+
+        Returns
+        -------
+        dict
+            Dictionary of solver result quantities.
+        """
+        out: dict[str, Any] = {
+            "solver_type": self.solver_type,
+            "converged": bool(self.converged),
+            "iterations": int(self.iterations),
+            "execution_time": float(self.execution_time),
+            "totals": self.totals.to_dict(),
+        }
+        if self.condition is not None:
+            out["condition"] = {
+                "V_inf": float(self.condition.V_inf),
+                "alpha": float(self.condition.alpha),
+                "beta": float(self.condition.beta),
+            }
+        if detail_level in ("standard", "full"):
+            out["spanwise"] = [
+                {
+                    "surface_name": sw.surface_name,
+                    "y": sw.y.tolist() if isinstance(sw.y, np.ndarray) else list(sw.y),
+                    "Cl": sw.Cl.tolist() if isinstance(sw.Cl, np.ndarray) else list(sw.Cl),
+                    "Cd_i": sw.Cd_i.tolist() if isinstance(sw.Cd_i, np.ndarray) else list(sw.Cd_i),
+                }
+                for sw in self.spanwise
+            ]
+        if detail_level == "full":
+            if "dispatch" in self.details:
+                out["dispatch"] = dict(self.details["dispatch"])
+        return out
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
