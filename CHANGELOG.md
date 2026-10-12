@@ -25,6 +25,26 @@ a minor version can change a public interface.
   fixed. At a section break that a mesh edge meets, the `y_frac` derivative follows the branch
   that any nonzero step takes, and a note names the section. Mirror pairs with automatic
   reference values get a note: the gradient is per copy.
+- Adjoint gradients of control deflections (input `"controls"`, per control name, 1/rad),
+  body rates (inputs `"p"`, `"q"`, `"r"`, rad/s), the nonlinear lifting line (Newton Jacobian
+  at the converged state; a solve that did not converge is refused; a note past the maximum
+  lift) and tabulated airfoils (derivative of the production interpolant; one-sided at a table
+  point, with a note). The symmetric fold applies only when every requested input is
+  symmetric. A residual check (componentwise backward error) now guards the forward check.
+  `check_gradients` covers the new inputs and uses one-sided steps at the 30 deg deflection
+  limit. Lifting-line node gradients carry a note: the vortex core on collinear bound
+  segments makes them inexact.
+
+### Changed
+
+- `input_error_bars` uses the adjoint for the nonlinear lifting line and tabulated airfoils;
+  central differences stay only for the Fourier solver. Section inputs (gradients and
+  uncertainties) are refused on tabulated airfoils for every solver.
+
+### Fixed
+
+- Adjoint gradients with 24 or more cosine chordwise panels no longer fail the forward check:
+  the chordwise panel fractions are now recovered without round-off growth.
 
 ## [0.4.0] - 2026-10-11
 
