@@ -1,18 +1,21 @@
 # Author: Manuel Alejandro Rodriguez Diaz, PhD
 """Kutta-Joukowski force on the on-wing legs of the vortex lattice.
 
-The surface is impermeable, so the leg force uses only the velocity tangent
-to the strip surface. The normal velocity at the leg points is the leak of
-the discrete lattice between its control points; its force is an in-plane
-force that a thin surface cannot carry. The checks compare the near field
-with far-field (Trefftz-plane) values and with measured data:
+The rule depends on the edge of the leg (``ventorum.aero.loads.leg_force_rules``).
+On a shared edge the surface is impermeable, so the leg force uses only the
+velocity tangent to the strip surface: the normal velocity at the leg points
+is the leak of the discrete lattice between its control points. On a kink
+edge the coincident legs carry no force. On a free edge (a tip) the full
+velocity acts: its in-plane force is the side-edge force. The checks compare
+the near field with far-field (Trefftz-plane) values and with measured data:
 
-* the side force of an aileron on a flat wing (the in-plane leak force gave
-  CY_delta about +0.025/rad at alpha 3 deg; a flat-trace far field gives 0),
+* the side force of an aileron on a flat wing: only the free tip edges give
+  an in-plane force (the in-plane leak force of the shared edges gave
+  CY_delta about +0.025/rad at alpha 3 deg),
 * the yawing moment of an aileron against the moment of the Trefftz-plane
-  induced drag,
-* the body-axis side force of a dihedral wing in sideslip against the
-  far-field force,
+  induced drag, without the yawing moment of the side-edge force (the
+  Trefftz plane has no chordwise position),
+* the side force of a dihedral wing in sideslip against the far-field force,
 * the rolling moment due to sideslip of flat unswept wings against NACA
   TN 1669 (A. Goodman and J. D. Brewer, 1948, figure 9).
 """
@@ -65,22 +68,64 @@ def _trefftz_yaw(res, ac, fc):
     return float(np.sum(lat.qc_mid[:, 1] * drag)) / (q * ac.S_ref * ac.b_ref)
 
 
-def test_aileron_gives_no_in_plane_side_force_on_a_flat_wing():
-    """Regression: the normal leak velocity on the legs gave an aileron side force proportional to alpha."""
+def _free_edge_loads(res, fc):
+    """Force [N] and moment [N m] (geometry axes, about the reference point) of the legs on free edges."""
+    lat = res.details["lattice"]
+    g = np.asarray(res.details["gamma"], dtype=float)
+    n_p = lat.n_panels
+    _, _, kind = L.leg_force_rules(lat)
+    pts = [lat.force_points, 0.5 * (lat.a_te + lat.a), 0.5 * (lat.b + lat.b_te)]
+    vel = [np.empty((n_p, 3)) for _ in pts]
+    wd = np.asarray(res.details["wake_dir"], dtype=float)
+    L._near_field_velocity(lat, g, fc, res.details["ground"], wd, pts, [0, 2, 1], True, vel)
+    v_leg = fc.V_inf * freestream_direction(fc.alpha, fc.beta) + np.vstack([vel[1], vel[2]])
+    seg = np.vstack([lat.a - lat.a_te, lat.b_te - lat.b])
+    mid = np.vstack([pts[1], pts[2]])
+    free = kind == L.LEG_FREE
+    f = fc.rho * np.concatenate([g, g])[free, None] * np.cross(v_leg[free], seg[free])
+    rp = res.details["ref_point"]
+    rp = np.zeros(3) if rp is None else rp
+    return f.sum(axis=0), np.cross(mid[free] - rp, f).sum(axis=0)
+
+
+def test_aileron_side_force_on_a_flat_wing_comes_from_the_free_edges():
+    """Regression: the normal leak velocity on the legs gave an aileron side force proportional to alpha.
+
+    The shared edges carry no in-plane force; the side force is the side-edge
+    force of the free tip edges (full velocity), antisymmetric in the deflection.
+    """
+    cy = {}
     for delta in (2.0, -2.0):
-        res, _ = _solve(_wing(aileron_deg=delta), alpha_deg=3.0)
-        assert abs(res.totals.CY) < 1e-12, res.totals.CY
+        ac = _wing(aileron_deg=delta)
+        res, fc = _solve(ac, alpha_deg=3.0)
+        f_free, _ = _free_edge_loads(res, fc)
+        side = np.cross(lift_direction(fc.alpha), freestream_direction(fc.alpha, fc.beta))
+        cy_free = float(f_free @ side) / (0.5 * fc.rho * fc.V_inf ** 2 * ac.S_ref)
+        assert abs(cy_free) > 1e-6
+        assert res.totals.CY == pytest.approx(cy_free, rel=1e-9, abs=1e-14)
+        cy[delta] = res.totals.CY
+    assert cy[2.0] == pytest.approx(-cy[-2.0], rel=1e-9)
 
 
 def test_aileron_yaw_agrees_with_the_trefftz_plane():
     """Regression: the yawing moment due to aileron (stability axes) is within 5 % of the Trefftz value
-    (it was 13 % low with the full velocity on the legs)."""
+    (it was 13 % low with the full velocity on all legs).
+
+    The yawing moment of the side-edge force of the free tip edges is taken
+    out of the near field: the Trefftz plane has no chordwise position, so
+    it cannot contain the yaw of a side force ahead of or behind the
+    reference point.
+    """
     alpha = 3.0
     near, far = [], []
     for delta in (2.0, -2.0):
         ac = _wing(aileron_deg=delta)
         res, fc = _solve(ac, alpha, n_panels=24, n_chord=8)
-        near.append(_stability_cn(res, alpha))
+        _, m_free = _free_edge_loads(res, fc)
+        q_sb = 0.5 * fc.rho * fc.V_inf ** 2 * ac.S_ref * ac.b_ref
+        cn_free = float(transform_moments(-m_free[0] / q_sb, 0.0, -m_free[2] / q_sb, np.radians(alpha), 0.0,
+                                          "stability", b_ref=float(res.b_ref), c_ref=float(res.c_ref))["Cn"])
+        near.append(_stability_cn(res, alpha) - cn_free)
         far.append(_trefftz_yaw(res, ac, fc))
     cn_near = (near[0] - near[1]) / np.radians(4.0)
     cn_far = (far[0] - far[1]) / np.radians(4.0)
@@ -88,23 +133,36 @@ def test_aileron_yaw_agrees_with_the_trefftz_plane():
     assert cn_near == pytest.approx(cn_far, rel=0.05)
 
 
-def test_dihedral_wing_body_side_force_agrees_with_the_far_field():
-    """Regression: body-axis side force of a 10 deg dihedral wing in sideslip at alpha 8 deg is within 5 %
-    of the far-field Kutta-Joukowski force of the wake trace (it was 14 % high)."""
+def test_dihedral_wing_side_force_agrees_with_the_far_field():
+    """Regression: the side force of a 10 deg dihedral wing in sideslip agrees with the far-field
+    Kutta-Joukowski force of the wake trace.
+
+    The comparison is normal to the free stream (wind axes): the far-field
+    force of the trace has no drag component, so its body-axis y component
+    misses the drag times sin(beta) of the near field. At alpha 4 deg the two
+    agree within 5 %; at alpha 8 deg the near/far rule of the trust score
+    (5 % or the CY floor) gives no warning.
+    """
+    from ventorum.core.trust import NEAR_FAR_FLOOR_CY
+
     ac = _wing(dihedral_deg=10.0)
-    res, fc = _solve(ac, alpha_deg=8.0, beta_deg=4.0, n_chord=8)
-    t = res.totals
-    D = freestream_direction(fc.alpha, fc.beta)
-    lift_dir = lift_direction(fc.alpha)
-    side_dir = np.cross(lift_dir, D)
-    q_s = 0.5 * fc.rho * fc.V_inf ** 2 * ac.S_ref
-    f_near = q_s * (t.CL * lift_dir + t.CY * side_dir + t.CDi_nearfield * D)
-    lat, g = res.details["lattice"], res.details["gamma"]
-    wd = np.asarray(res.details["wake_dir"], dtype=float)
-    seg = lat.b - lat.a
-    seg_trace = seg - np.outer(seg @ wd, wd)
-    f_far = fc.rho * fc.V_inf * np.sum(g[:, None] * np.cross(D, seg_trace), axis=0)
-    assert f_near[1] == pytest.approx(f_far[1], rel=0.05)
+    for alpha, rel in ((4.0, 0.05), (8.0, None)):
+        res, fc = _solve(ac, alpha_deg=alpha, beta_deg=4.0, n_chord=8)
+        t = res.totals
+        D = freestream_direction(fc.alpha, fc.beta)
+        side_dir = np.cross(lift_direction(fc.alpha), D)
+        q_s = 0.5 * fc.rho * fc.V_inf ** 2 * ac.S_ref
+        lat, g = res.details["lattice"], res.details["gamma"]
+        wd = np.asarray(res.details["wake_dir"], dtype=float)
+        seg = lat.b - lat.a
+        seg_trace = seg - np.outer(seg @ wd, wd)
+        f_far = fc.rho * fc.V_inf * np.sum(g[:, None] * np.cross(D, seg_trace), axis=0)
+        cy_far = float(f_far @ side_dir) / q_s
+        assert cy_far == pytest.approx(t.CY_farfield, rel=1e-9)
+        if rel is not None:
+            assert t.CY == pytest.approx(cy_far, rel=rel)
+        diff = abs(t.CY - cy_far)
+        assert not (diff > 0.05 * abs(cy_far) and diff > NEAR_FAR_FLOOR_CY)
 
 
 @pytest.mark.parametrize("aspect_ratio, measured", [(1.34, -0.0080), (2.61, -0.0044), (5.16, -0.0011)])
@@ -126,7 +184,7 @@ def test_flat_wing_rolling_moment_due_to_sideslip_against_naca_tn1669(aspect_rat
 
 @pytest.mark.gpu
 def test_gpu_leg_forces_match_the_cpu():
-    """The GPU loads use the same tangential leg rule as the CPU (float64)."""
+    """The GPU loads use the same leg rules as the CPU (float64): tangential, kink and free edges."""
     from ventorum import gpu
 
     if not gpu.available():

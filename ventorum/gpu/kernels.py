@@ -864,6 +864,7 @@ def _build(precision: str) -> SimpleNamespace:  # noqa: C901 - one closure per k
                     D: wp.array(dtype=wp.vec3d), V: wp.array(dtype=wp.float64), rho: wp.array(dtype=wp.float64),
                     rp: wp.vec3d, lvec: wp.array(dtype=wp.vec3d), mid: wp.array(dtype=wp.vec3d),
                     lega: wp.array(dtype=wp.vec3d), legb: wp.array(dtype=wp.vec3d),
+                    nla: wp.array(dtype=wp.vec3d), nlb: wp.array(dtype=wp.vec3d),
                     lmida: wp.array(dtype=wp.vec3d), lmidb: wp.array(dtype=wp.vec3d), n_c: int,
                     chord: wp.array(dtype=wp.float64), width: wp.array(dtype=wp.float64),
                     nrm: wp.array(dtype=wp.vec3d), cdir: wp.array(dtype=wp.vec3d), dl: wp.array(dtype=wp.vec3d),
@@ -895,11 +896,13 @@ def _build(precision: str) -> SimpleNamespace:  # noqa: C901 - one closure per k
             Fp = (rk * g) * wp.cross(Vd + vmid[k, p], lvec[p])
             M = M + wp.cross(mid[p] - rp, Fp)
             if use_leg != 0:
-                # Tangential velocity only (see compute_loads_batch).
+                # The leg rule of each edge (see leg_force_rules): nla and nlb
+                # are the removed normals (zero on a free edge), and lega and
+                # legb are zero on a kink edge (no force).
                 va = Vd + vla[k, p]
                 vb = Vd + vlb[k, p]
-                va = va - wp.dot(va, nrm[s]) * nrm[s]
-                vb = vb - wp.dot(vb, nrm[s]) * nrm[s]
+                va = va - wp.dot(va, nla[p]) * nla[p]
+                vb = vb - wp.dot(vb, nlb[p]) * nlb[p]
                 Fa = (rk * g) * wp.cross(va, lega[p])
                 Fb = (rk * g) * wp.cross(vb, legb[p])
                 M = M + wp.cross(lmida[p] - rp, Fa) + wp.cross(lmidb[p] - rp, Fb)
@@ -949,6 +952,7 @@ def _build(precision: str) -> SimpleNamespace:  # noqa: C901 - one closure per k
                           rho: wp.array(dtype=wp.float64), omega: wp.array(dtype=wp.vec3d), rp: wp.vec3d,
                           lvec: wp.array(dtype=wp.vec3d), mid: wp.array(dtype=wp.vec3d),
                           lega: wp.array(dtype=wp.vec3d), legb: wp.array(dtype=wp.vec3d),
+                          nla: wp.array(dtype=wp.vec3d), nlb: wp.array(dtype=wp.vec3d),
                           lmida: wp.array(dtype=wp.vec3d), lmidb: wp.array(dtype=wp.vec3d), n_c: int,
                           chord: wp.array(dtype=wp.float64), width: wp.array(dtype=wp.float64),
                           nrm: wp.array(dtype=wp.vec3d), cdir: wp.array(dtype=wp.vec3d), dl: wp.array(dtype=wp.vec3d),
@@ -979,8 +983,8 @@ def _build(precision: str) -> SimpleNamespace:  # noqa: C901 - one closure per k
                 ub = Vd - wp.cross(om, lmidb[p] - rp)
                 va = ua + vla[k, p]
                 vb = ub + vlb[k, p]
-                va = va - wp.dot(va, nrm[s]) * nrm[s]
-                vb = vb - wp.dot(vb, nrm[s]) * nrm[s]
+                va = va - wp.dot(va, nla[p]) * nla[p]
+                vb = vb - wp.dot(vb, nlb[p]) * nlb[p]
                 Fa = (rk * g) * wp.cross(va, lega[p])
                 Fb = (rk * g) * wp.cross(vb, legb[p])
                 M = M + wp.cross(lmida[p] - rp, Fa) + wp.cross(lmidb[p] - rp, Fb)

@@ -742,8 +742,11 @@ class TorchReference:
             leg_end = torch.cat((a, b_te), dim=0)
             leg_mid = torch.cat((leg_a_mid, leg_b_mid), dim=0)
             leg_vec = leg_end - leg_start
+            # Leg rule of the production loads (leg_force_rules): the strip
+            # normal is removed on a shared edge, nothing on a free edge (the
+            # full velocity), and a kink leg has no force (scale 0).
             strip_normal = normal[panel_strip]
-            leg_normal = torch.cat((strip_normal, strip_normal), dim=0)
+            leg_normal = torch.cat((strip_normal, strip_normal), dim=0) * b["leg_keep_normal"][:, None]
             leg_tgt_group = torch.cat((tgt_group_panel, tgt_group_panel), dim=0)
             leg_tgt_rc = torch.cat((tgt_rc_panel, tgt_rc_panel), dim=0)
             if h is None:
@@ -780,7 +783,7 @@ class TorchReference:
             V_leg = U_leg + v_leg
             Vn = (V_leg * leg_normal).sum(-1)
             V_leg = V_leg - Vn[:, None] * leg_normal
-            g_leg_only = torch.cat((g_panel, g_panel), dim=0)
+            g_leg_only = torch.cat((g_panel, g_panel), dim=0) * b["leg_scale"]
             f_leg = rho * g_leg_only[:, None] * torch.linalg.cross(V_leg, leg_vec)
             m_geo = m_geo + torch.linalg.cross(leg_mid - rp, f_leg).sum(0)
             f_panel = f_panel + f_leg[:n_p] + f_leg[n_p:]

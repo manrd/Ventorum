@@ -502,6 +502,15 @@ def build_reference(
             strip_edges[k, 1] = offset + (k - sl.strips.start) + 1
         offset += n_full
 
+    # Leg-force rule of each chordwise leg (a-legs, then b-legs), as in the
+    # production loads (ventorum.aero.loads.leg_force_rules). The rule is a
+    # property of the mesh topology; it does not change with the geometry
+    # inputs of the gradient.
+    from ventorum.aero.loads import LEG_FREE, leg_force_rules
+
+    _, leg_scale, leg_kind = leg_force_rules(lattice)
+    leg_keep_normal = (leg_kind != LEG_FREE).astype(float)
+
     def _t(name: str, arr: np.ndarray) -> torch.Tensor:
         return torch.as_tensor(np.ascontiguousarray(arr).copy(), dtype=dtype, device=device)
 
@@ -537,6 +546,8 @@ def build_reference(
         "panel_mirror": _l(panel_mirror),
         "right_panels": _l(right_panels),
         "left_panels": _l(left_panels),
+        "leg_keep_normal": _t("lkn", leg_keep_normal),
+        "leg_scale": _t("lsc", np.asarray(leg_scale, dtype=float)),
         "accum": accum,
         "origin": None,
     }

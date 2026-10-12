@@ -127,18 +127,68 @@ def test_dihedral_sideslip_cy(solver):
     assert clone.CY_farfield == t.CY_farfield and clone.Cn_trefftz == t.Cn_trefftz
 
 
-@pytest.mark.parametrize("solver", [
-    pytest.param("vlm", marks=pytest.mark.xfail(
-        strict=True, reason="Known difference, not resolved: the VLM near-field CY is about 9 % below the far field "
-        "at alpha 4 deg (the difference grows with the spanwise panels; at alpha 0 the two agree to 0.3 %).")),
-    "linear",
-    "nonlinear",
-])
+@pytest.mark.parametrize("solver", SOLVERS)
 def test_dihedral_sideslip_cy_within_5_percent(solver):
-    """The card value: CY_farfield and the near-field CY agree within 5 % (relative)."""
+    """CY_farfield and the near-field CY agree within 5 % (relative).
+
+    Regression for the VLM: the two legs at the dihedral kink of the root
+    removed the normal velocity with different strip normals (a false side
+    force that grew with the panels), and the tangential rule removed the
+    side-edge force of the tips. The near field was about 9 % off.
+    """
     res = _quiet(vt.analyze, _wing(10.0), DIHEDRAL_COND, _settings(solver))
     t = res.totals
     assert abs(t.CY - t.CY_farfield) <= 0.05 * abs(t.CY_farfield)
+
+
+def test_dihedral_kink_cy_converges_with_the_panels():
+    """VLM: CY of the dihedral wing in sideslip changes less than 0.5 % from 20 to 80 panels per semi-span."""
+    cy = {}
+    for n in (20, 80):
+        st = vt.SolverSettings(solver_type="vlm", n_panels=n, spacing="cosine", n_chord=4)
+        cy[n] = _quiet(vt.analyze, _wing(10.0), DIHEDRAL_COND, st).totals.CY
+    assert abs(cy[80] - cy[20]) <= 0.005 * abs(cy[80])
+
+
+def test_dihedral_root_legs_carry_no_side_force():
+    """VLM: the coincident legs at the dihedral kink of the root carry a side force below 1e-6 (coefficient)."""
+    from ventorum.aero import loads as L
+
+    res = _quiet(vt.analyze, _wing(10.0), DIHEDRAL_COND, _settings("vlm"))
+    lat, g, c = res.details["lattice"], np.asarray(res.details["gamma"], dtype=float), res.condition
+    n_p = lat.n_panels
+    normal, scale, kind = L.leg_force_rules(lat)
+    start = np.vstack([lat.a_te, lat.b])
+    end = np.vstack([lat.a, lat.b_te])
+    root = np.flatnonzero((np.abs(start[:, 1]) < 1e-12) & (np.abs(end[:, 1]) < 1e-12))
+    assert root.size == 2 * lat.n_chord and np.all(kind[root] == L.LEG_KINK)
+    # The velocity at the leg mid-points of the solved case.
+    pts = [lat.force_points, 0.5 * (lat.a_te + lat.a), 0.5 * (lat.b + lat.b_te)]
+    vel = [np.empty((n_p, 3)) for _ in pts]
+    L._near_field_velocity(lat, g, c, None, np.asarray(res.details["wake_dir"], dtype=float), pts, [0, 2, 1],
+                           True, vel)
+    v = c.V_inf * freestream_direction(c.alpha, c.beta) + np.vstack([vel[1], vel[2]])
+    side = np.cross(lift_direction(c.alpha), freestream_direction(c.alpha, c.beta))
+    q_s = 0.5 * c.rho * c.V_inf ** 2 * 8.0   # span 8 m, chord 1 m
+
+    def cy_root(nrm, scl):
+        vt_ = v - np.sum(v * nrm, axis=1)[:, None] * nrm
+        f = c.rho * (np.concatenate([g, g]) * scl)[:, None] * np.cross(vt_, end - start)
+        return float(f[root].sum(axis=0) @ side) / q_s
+
+    assert abs(cy_root(normal, scale)) < 1e-6
+    # With the strip normal of each leg (the old rule), the kink legs gave a side force.
+    strip_normal = lat.normal[np.concatenate([lat.panel_strip, lat.panel_strip])]
+    assert abs(cy_root(strip_normal, np.ones_like(scale))) > 1e-4
+
+
+def test_flat_wing_side_force_in_sideslip_below_the_floor():
+    """VLM: a flat wing in sideslip has a side force (the side-edge force of the tips) below the CY floor."""
+    res = _quiet(vt.analyze, _wing(0.0), DIHEDRAL_COND, _settings("vlm"))
+    t = res.totals
+    assert abs(t.CY_farfield) <= 1e-12
+    assert abs(t.CY) < NEAR_FAR_FLOOR_CY
+    assert not _lateral_warnings(res, "CY")
 
 
 def test_dihedral_sideslip_cy_at_zero_alpha_agrees():
@@ -194,10 +244,16 @@ def _aileron_result():
 
 
 def test_aileron_far_field():
-    """AR 8 flat wing, antisymmetric aileron 5 deg, alpha 3 deg: near-field CY about 0; the trust follows the rule."""
+    """AR 8 flat wing, antisymmetric aileron 5 deg, alpha 3 deg: small near-field CY; the trust follows the rule.
+
+    The aileron reaches the tip. The full velocity on the legs of the free tip
+    edges gives a side-edge force: CY_delta is positive (side force to the
+    right for the right trailing edge down), and CY stays below the CY floor.
+    The tangential rule on all legs gave CY = 0 here.
+    """
     res = _aileron_result()
     t = res.totals
-    assert abs(t.CY) <= 1e-6
+    assert 1e-6 < t.CY < NEAR_FAR_FLOOR_CY
     assert t.CY_farfield is not None and math.isfinite(t.CY_farfield)
     assert t.Cn_trefftz is not None and math.isfinite(t.Cn_trefftz)
     expected = _near_far(res)
@@ -232,7 +288,8 @@ def test_warning_rule():
     # Large values: the 5 % limit decides.
     assert near_far_lateral_warnings(CY=0.104, CY_farfield=0.1) == []          # 4 %
     w = near_far_lateral_warnings(CY=0.106, CY_farfield=0.1)                   # 6 %
-    assert len(w) == 1 and "CY" in w[0] and "0.106" in w[0] and "0.1" in w[0] and "side-edge" in w[0]
+    assert len(w) == 1 and "CY" in w[0] and "0.106" in w[0] and "0.1" in w[0] and "junction" in w[0]
+    assert "side-edge" not in w[0]   # the free tip edges carry the side-edge force
     assert "difference 0.006" in w[0]
     # Small values: the floor decides.
     assert near_far_lateral_warnings(CY=0.0009, CY_farfield=0.0) == []

@@ -125,8 +125,10 @@ def near_far_lateral_warnings(
         if diff > NEAR_FAR_RELATIVE * abs(far_v) and diff > floor:
             out.append(
                 f"Near field and far field do not agree for {name} ({axes}): near field {near_v:.6g}, "
-                f"{far_name} {far_v:.6g}, difference {diff:.3g}. A probable cause is the side-edge forces, which "
-                "the transpiration model does not carry (see the theory manual, forces and moments)."
+                f"{far_name} {far_v:.6g}, difference {diff:.3g}. Probable causes: a junction of surfaces that "
+                "the mesh does not resolve (for example a fin on a tail tip, a winglet, or joined edges with "
+                "chordwise grids or strip widths that do not match), or a deflected control, whose trailing-edge "
+                "displacement the Trefftz-plane trace does not include (see the theory manual, forces and moments)."
             )
     return out
 

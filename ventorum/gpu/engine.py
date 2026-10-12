@@ -1392,8 +1392,15 @@ def loads(dl: DeviceLattice, lattice, G: torch.Tensor, v_points: list[torch.Tens
     dev = _dev()
     geo = dl._cache.get("loads_geo")
     if geo is None:
+        from ventorum.aero.loads import leg_force_rules
+
+        n_p = lattice.n_panels
+        leg_n, leg_s, _ = leg_force_rules(lattice)
         geo = {
-            "lega": _f64(lattice.a - lattice.a_te), "legb": _f64(lattice.b_te - lattice.b),
+            # A kink leg carries no force: its vector is zero (see leg_force_rules).
+            "lega": _f64((lattice.a - lattice.a_te) * leg_s[:n_p, None]),
+            "legb": _f64((lattice.b_te - lattice.b) * leg_s[n_p:, None]),
+            "nlega": _f64(leg_n[:n_p]), "nlegb": _f64(leg_n[n_p:]),
             "lmida": _f64(0.5 * (lattice.a_te + lattice.a)), "lmidb": _f64(0.5 * (lattice.b + lattice.b_te)),
             "surf0": _i32([sf.strips.start for sf in lattice.surfaces]),
             "surf1": _i32([sf.strips.stop for sf in lattice.surfaces]),
@@ -1422,6 +1429,7 @@ def loads(dl: DeviceLattice, lattice, G: torch.Tensor, v_points: list[torch.Tens
             view(G.contiguous(), wp.float64), view(vm, v3), view(vla, v3), view(vlb, v3), 1 if use_leg else 0,
             w_D, w_V, w_rho, view(omega.contiguous(), wp.vec3d), wp.vec3d(*rp),
             cview(lt, "l_vec", v3), cview(lt, "mid", v3), cview(geo, "lega", v3), cview(geo, "legb", v3),
+            cview(geo, "nlega", v3), cview(geo, "nlegb", v3),
             cview(geo, "lmida", v3), cview(geo, "lmidb", v3), int(n_c),
             cview(lt, "chord", wp.float64), cview(lt, "width", wp.float64), cview(lt, "normal", v3),
             cview(lt, "chord_dir", v3), cview(lt, "dl", v3), cview(lt, "qc_mid", v3), cview(lt, "a0", wp.float64),
@@ -1433,6 +1441,7 @@ def loads(dl: DeviceLattice, lattice, G: torch.Tensor, v_points: list[torch.Tens
             view(G.contiguous(), wp.float64), view(vm, v3), view(vla, v3), view(vlb, v3), 1 if use_leg else 0,
             w_D, w_V, w_rho, wp.vec3d(*rp),
             cview(lt, "l_vec", v3), cview(lt, "mid", v3), cview(geo, "lega", v3), cview(geo, "legb", v3),
+            cview(geo, "nlega", v3), cview(geo, "nlegb", v3),
             cview(geo, "lmida", v3), cview(geo, "lmidb", v3), int(n_c),
             cview(lt, "chord", wp.float64), cview(lt, "width", wp.float64), cview(lt, "normal", v3),
             cview(lt, "chord_dir", v3), cview(lt, "dl", v3), cview(lt, "qc_mid", v3), cview(lt, "a0", wp.float64),
