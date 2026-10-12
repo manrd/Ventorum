@@ -183,8 +183,19 @@ def _tabulated_wing() -> vt.LiftingSurface:
     )
 
 
-def test_fallback_central_differences(float64_precision):
-    """Nonlinear lifting line: flow inputs use central differences; sections refused."""
+def _alpha_central_difference(wing, settings, alpha, step):
+    """Return dCL/dalpha [1/rad] by a central difference of the production solve."""
+    plus = vt.analyze(
+        wing.clone(), condition=vt.FlightCondition(alpha=alpha + step),
+        settings=settings.clone())
+    minus = vt.analyze(
+        wing.clone(), condition=vt.FlightCondition(alpha=alpha - step),
+        settings=settings.clone())
+    return (float(plus.totals.CL) - float(minus.totals.CL)) / (2.0 * step)
+
+
+def test_nonlinear_tabulated_uses_adjoint(float64_precision):
+    """Nonlinear lifting line, tabulated airfoils: flow inputs use the adjoint; sections refused."""
     wing = _tabulated_wing()
     cond = vt.FlightCondition(alpha=np.radians(5.0))
     st = vt.SolverSettings(solver_type="nonlinear", n_panels=16)
@@ -192,24 +203,43 @@ def test_fallback_central_differences(float64_precision):
     result = vt.input_error_bars(
         wing, condition=cond, settings=st,
         uncertainties={"alpha": sigma}, coverage_factor=2.0)
+    assert result.bars["CL"].gradient_methods == {"alpha": "adjoint"}
+    assert "adjoint" in result.bars["CL"].layers["input"].method
+    manual = _alpha_central_difference(wing, st, np.radians(5.0), np.radians(0.5))
+    expected = 2.0 * abs(manual) * sigma
+    # The 0.5 deg central difference has a relative step error of about 1e-5 here.
+    assert result.bars["CL"].layers["input"].half_width == pytest.approx(expected, rel=1e-4)
+    with pytest.raises(ValueError, match="Section uncertainties need adjoint gradients"):
+        vt.input_error_bars(
+            wing, condition=cond, settings=st,
+            uncertainties={"sections": {"tab": {"a0": 0.1}}})
+
+
+def test_fallback_central_differences(float64_precision):
+    """Fourier solver: flow inputs use central differences; sections refused."""
+    wing = vt.LiftingSurface(
+        name="rect",
+        semi_span=5.0,
+        sections=[
+            vt.WingSection(y_frac=0.0, chord=1.25),
+            vt.WingSection(y_frac=1.0, chord=1.25),
+        ],
+    )
+    cond = vt.FlightCondition(alpha=np.radians(5.0))
+    st = vt.SolverSettings(solver_type="fourier", n_panels=16)
+    sigma = np.radians(0.1)
+    result = vt.input_error_bars(
+        wing, condition=cond, settings=st,
+        uncertainties={"alpha": sigma}, coverage_factor=2.0)
     assert result.bars["CL"].gradient_methods == {"alpha": "central differences"}
     assert "central differences" in result.bars["CL"].layers["input"].method
-    step = np.radians(0.5)
-    plus = vt.analyze(
-        wing.clone(),
-        condition=vt.FlightCondition(alpha=np.radians(5.0) + step),
-        settings=st.clone())
-    minus = vt.analyze(
-        wing.clone(),
-        condition=vt.FlightCondition(alpha=np.radians(5.0) - step),
-        settings=st.clone())
-    manual = (float(plus.totals.CL) - float(minus.totals.CL)) / (2.0 * step)
+    manual = _alpha_central_difference(wing, st, np.radians(5.0), np.radians(0.5))
     expected = 2.0 * abs(manual) * sigma
     assert result.bars["CL"].layers["input"].half_width == pytest.approx(expected, rel=1e-8)
     with pytest.raises(ValueError, match="Section uncertainties need adjoint gradients"):
         vt.input_error_bars(
             wing, condition=cond, settings=st,
-            uncertainties={"sections": {"tab": {"a0": 0.1}}})
+            uncertainties={"sections": {"rect": {"a0": 0.1}}})
 
 
 def test_combine_rss(float64_precision):

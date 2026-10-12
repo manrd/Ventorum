@@ -11,9 +11,13 @@ The combination of the numerical layer and the input layer by root sum
 of squares of independent contributions follows Oberkampf and Roy (2010).
 
 The gradients come from ``ventorum.gradients`` (discrete adjoint) when
-the configuration is in its scope. Outside its scope the flow-input
+the configuration is in its scope: the VLM and the linear and nonlinear
+lifting lines, with linear or tabulated airfoils, control deflections and
+body rates. Outside its scope (the Fourier solver) the flow-input
 gradients come from central differences of the production solve; section
-inputs are then refused. The adjoint runs on the device of the production
+inputs are then refused. Section inputs are also refused on tabulated
+airfoils, because the table, not the section values, sets the section
+there. The adjoint runs on the device of the production
 solve, with the precision of ``ventorum.gpu.get_precision()``; the CPU
 kernels evaluate the O(n^2) partials in float64. The central differences
 use the production solve itself.
@@ -469,8 +473,7 @@ def input_error_bars(
         air, an unknown surface name, a correlation outside [-1, 1], or
         a correlation pair given more than once, correlations that give
         an input covariance that is not positive semi-definite, or
-        a section input outside the adjoint scope (nonlinear lifting
-        line, tabulated airfoils, deflected controls, body rates,
+        a section input outside the adjoint scope (tabulated airfoils,
         Fourier solver), which names the limit.
     """
     if axes not in ("body", "stability", "wind"):
