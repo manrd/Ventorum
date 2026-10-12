@@ -95,7 +95,14 @@ of a control follow the rule of the mesh builder.
   the fit moves with the table, so `alpha_L0` changes by `-tau delta`.
 * Chordwise mode (vortex lattice with two or more chordwise panels): the normals of the
   panels aft of the effective hinge turn by the local deflection about the hinge line
-  (Rodrigues rotation), with the hinge line from the strip nodes.
+  (Rodrigues rotation), with the hinge line from the strip nodes. The flap panels are
+  the panels that the mesh builder turns: the panels whose leading node is the hinge node
+  or aft of it. The reference copy takes the chordwise fractions from the panel lengths
+  of the lattice (`panel_length / chord`, summed from the leading edge) and then uses the
+  exact fractions of the mesh builder (uniform or cosine, with the moved hinge node) when
+  they agree within 1e-6 of the smallest panel fraction. The hinge node is the node
+  nearest to the effective hinge; its fraction must agree with the effective hinge
+  within the same tolerance, else the call raises `RuntimeError`.
 
 The derivative at zero deflection is included. The fold applies only when every control
 is symmetric.
@@ -346,6 +353,27 @@ is relative to its vector (CY, Cl and Cn of a symmetric state are zero by symmet
 requested vector outputs (`strip_force`, `section_cl`) are compared relative to the
 largest production magnitude of the array.
 
+The forward check also checks the boundary conditions. An output can depend weakly on
+one term of the boundary condition (a normal, a section `alpha_L0`, the onset of a body
+rate), so the output comparison alone can miss a wrong term. The check computes the
+componentwise backward error (Oettli and Prager 1964) of the production circulation
+`G*` in the system of the reference copy:
+
+```text
+omega = max_i |A G* - b|_i / (|A| |G*| + |b|)_i
+```
+
+For the nonlinear lifting line, `A` is the Newton Jacobian and `A G* - b` is the
+residual of the section lift. Above 1e-6 (the gradients and the production solve both
+float64) or 3e-2 (one of them float32) the call raises `RuntimeError`. For the
+nonlinear lifting line the limit is at least 100 times the solver `tolerance`, because
+the solve stops at that tolerance. The plain ratio `|A G* - b| / |b|` is not used: the
+vortex-core terms of the lifting line make the entries of `A` large, and that ratio then
+grows with the round-off far above the size of a real defect. The two limits are far
+above the round-off that was measured on the CPU and the GPU (vortex lattice up to 2560
+unknowns, lifting lines up to 1000 unknowns). In float64, an angle error of 0.01 deg in
+one boundary condition is above the limit; float32 finds only large errors.
+
 ## Implementation
 
 * `ventorum/sensitivity/reference.py`: the differentiable copy (lattice from edge nodes,
@@ -470,3 +498,6 @@ check fails when a component fails and when an input group has no compared compo
 * F. N. Fritsch and R. E. Carlson, "Monotone piecewise cubic interpolation", SIAM
   Journal on Numerical Analysis 17(2), 1980, pp. 238-246.
 * M. Drela, "Flight Vehicle Aerodynamics", MIT Press, 2014.
+* W. Oettli and W. Prager, "Compatibility of approximate solution of linear equations
+  with given error bounds for coefficients and right-hand sides", Numerische Mathematik
+  6, 1964, pp. 405-409.

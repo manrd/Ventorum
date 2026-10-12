@@ -591,3 +591,126 @@ def test_user_guide_phase2_example_runs(float64_cpu) -> None:
         exec(compile(blocks[0], "docs/user/how_to_gradients.md", "exec"), namespace)  # noqa: S102
     res = namespace["cresult"]
     assert np.isfinite(res.jacobian["CL"]["controls"]["flap"])
+
+
+def _flap_hinge(deflection_deg: float, hinge_x_c: float) -> vt.ControlSurface:
+    return vt.ControlSurface(name="flap", eta_start=0.2, eta_end=0.6, hinge_x_c=hinge_x_c,
+                             deflection=np.radians(deflection_deg), symmetric=True)
+
+
+def _swept_wing(controls=None) -> vt.LiftingSurface:
+    """A swept, tapered wing (sweep 20 deg, taper 0.35) for the fine chordwise meshes."""
+    af = _linear_section()
+    w = vt.LiftingSurface(
+        name="Wing", semi_span=5.0, sweep_le=np.radians(20.0), dihedral=np.radians(5.0),
+        sections=[vt.WingSection(y_frac=0.0, chord=2.0, airfoil=af),
+                  vt.WingSection(y_frac=1.0, chord=0.7, airfoil=af)])
+    if controls:
+        w.controls = list(controls)
+    return w
+
+
+_FINE_CHORD = [(12, "uniform", 0.75), (16, "cosine", 0.7)]
+
+
+@pytest.mark.parametrize("deflection_deg", [0.0, 5.0])
+@pytest.mark.parametrize("n_chord,spacing,hinge", _FINE_CHORD)
+def test_controls_fine_chordwise_mesh(n_chord, spacing, hinge, deflection_deg, float64_cpu) -> None:
+    """Regression: the chordwise-mode control gradient of a fine chordwise mesh passes Richardson.
+
+    The chordwise fractions of the reference copy came from a recursion that
+    amplified the round-off at each panel. At 12 uniform panels the hinge
+    node then was 1e-12 forward of the hinge, the hinge panel dropped out
+    of the flap panels, and the gradient was about 3 percent low.
+    """
+    ac = vt.Aircraft(surfaces=[_swept_wing(controls=[_flap_hinge(deflection_deg, hinge)])])
+    cond = vt.FlightCondition(V_inf=30.0, alpha=np.radians(4.0))
+    st = vt.SolverSettings(solver_type="vlm", n_panels=8, n_chord=n_chord, chord_spacing=spacing)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        out = vt.check_gradients(ac, cond, st, outputs=("CL", "Cm"), wrt=("controls",),
+                                 n_directions=0, rtol=1e-6)
+    assert out["groups"]["controls"]["compared"] > 0
+    assert out["pass"], _failed(out)
+
+
+@pytest.mark.parametrize("n_chord,spacing,hinge", [
+    (4, "uniform", 0.75), (8, "uniform", 0.7), (12, "uniform", 0.75), (16, "cosine", 0.7),
+    (24, "cosine", 0.75), (32, "cosine", 0.7), (32, "uniform", 0.73)])
+def test_flap_panels_equal_production_rotated_panels(n_chord, spacing, hinge, float64_cpu) -> None:
+    """The flap panels of the reference copy are the panels that the production mesh turns."""
+    from ventorum.sensitivity import adjoint
+
+    ac = vt.Aircraft(surfaces=[_swept_wing(controls=[_flap_hinge(5.0, hinge), _aileron()])])
+    cond = vt.FlightCondition(V_inf=30.0, alpha=np.radians(4.0), beta=_BETA)
+    st = vt.SolverSettings(solver_type="vlm", n_panels=8, n_chord=n_chord, chord_spacing=spacing)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        prep = adjoint._prepare_case(ac, cond, st, "body", ("controls",), ("CL",), "reference")
+    lat = prep["lattice"]
+    turned = np.flatnonzero(
+        np.linalg.norm(lat.normal_bc - lat.normal_bc_strip[lat.panel_strip], axis=1) > 1e-12)
+    model = sorted(prep["model"].b["ctrl_chord"]["panels"].cpu().numpy().tolist())
+    assert model == turned.tolist()
+    # The recovered chordwise fractions are the production fractions.
+    xi = np.asarray(prep["model"].b["xi"].cpu())
+    d = np.diff(xi, axis=1).reshape(-1) * np.asarray(lat.chord)[lat.panel_strip]
+    assert np.array_equal(d, np.asarray(lat.panel_length))
+
+
+@pytest.mark.parametrize("n_chord", [24, 32])
+def test_fine_cosine_chordwise_gradient(n_chord, float64_cpu) -> None:
+    """Regression: a fine cosine chordwise mesh gives a gradient that passes Richardson.
+
+    The old recursion of the chordwise fractions gave a forward mismatch of
+    2.6e-10 at 24 and 4.3e-6 at 32 cosine panels, and the gradient raised
+    RuntimeError also without controls.
+    """
+    ac = vt.Aircraft(surfaces=[_swept_wing()])
+    cond = vt.FlightCondition(V_inf=30.0, alpha=np.radians(4.0), beta=_BETA)
+    st = vt.SolverSettings(solver_type="vlm", n_panels=8, n_chord=n_chord, chord_spacing="cosine")
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        res = vt.gradients(ac, cond, st, outputs=("CL", "Cl"), wrt=("alpha", "beta"))
+        out = vt.check_gradients(ac, cond, st, outputs=("CL", "Cl"), wrt=("alpha", "beta"),
+                                 n_directions=0, rtol=1e-6)
+    assert res.forward_mismatch <= 1e-12
+    assert out["pass"], _failed(out)
+
+
+def test_residual_check_detects_a_wrong_boundary_condition(float64_cpu) -> None:
+    """The backward error of the production state is round-off; a wrong right-hand side is refused."""
+    import torch
+
+    from ventorum.sensitivity import adjoint
+
+    ac = vt.Aircraft(surfaces=[_wing(controls=[_flap()])])
+    cond = vt.FlightCondition(V_inf=30.0, alpha=np.radians(4.0), beta=_BETA)
+    for st in (_settings("vlm", 4), _settings("linear"), _settings("nonlinear")):
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            prep = adjoint._prepare_case(ac, cond, st, "body", ("alpha",), ("CL",), "reference")
+            res = vt.gradients(ac, cond, st, outputs=("CL",), wrt=("alpha",))
+        assert res.forward_mismatch <= 1e-12
+        model = prep["model"]
+        t = adjoint.make_input_tensors(model, prep["base"], ("alpha",), prep["device"],
+                                       prep["precision"], prep)
+        g = torch.as_tensor(prep["g_unknown"], dtype=model.b["dtype"], device=model.b["device"])
+        with torch.no_grad():
+            _, A, rhs = model.forward(t, g)
+        omega = adjoint._residual_check(prep, A, rhs, g)
+        assert omega <= 1e-10, (st.solver_type, omega)
+        # One boundary condition with an angle error of 0.01 deg [rad].
+        bad = rhs.clone()
+        bad[3] += float(np.radians(0.01)) * float(torch.max(torch.abs(rhs)))
+        with pytest.raises(RuntimeError, match="does not solve the system"):
+            adjoint._residual_check(prep, A, bad, g)
+        # The same error in the base input of the reference copy (alpha): the
+        # output check sees it too, but the residual check is independent.
+        base = dict(prep["base"])
+        base["alpha"] = float(base["alpha"]) + float(np.radians(0.01))
+        t2 = adjoint.make_input_tensors(model, base, ("alpha",), prep["device"], prep["precision"], prep)
+        with torch.no_grad():
+            _, A2, rhs2 = model.forward(t2, g)
+        with pytest.raises(RuntimeError, match="does not solve the system"):
+            adjoint._residual_check(prep, A2, rhs2, g)

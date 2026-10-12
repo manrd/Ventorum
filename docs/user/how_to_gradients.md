@@ -211,7 +211,10 @@ gradients, or check them with differences at the mesh scale.
 The reference copy also gives the output values. `forward_mismatch` reports the largest
 relative difference to the production result. Above 1e-10 (when the gradients and the
 production solve are both float64; else above 1e-4) the call raises `RuntimeError`: the gradient would not be the gradient of the reported
-result. `check_gradients` checks the gradients against Richardson-extrapolated central
+result. The call also checks that the production circulation solves the equations of
+the reference copy (the componentwise backward error, limit 1e-6 in float64 and 3e-2 in
+float32; see the theory manual). A wrong term of a boundary condition then raises
+`RuntimeError` also when the outputs do not show it. `check_gradients` checks the gradients against Richardson-extrapolated central
 differences of the production solve. The default tolerance is `rtol=1e-6`. Use
 `rtol=1e-3` for float32 gradients (float32 is the default precision) and `rtol=1e-6` for
 float64 gradients:

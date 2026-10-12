@@ -21,6 +21,10 @@ References
   lifting-line theory", Journal of Aircraft 37(4), 2000, pp. 662-670.
 * H. Glauert, "The Elements of Aerofoil and Airscrew Theory", Cambridge
   University Press, 1926: the thin-airfoil flap effectiveness.
+* W. Oettli and W. Prager, "Compatibility of approximate solution of linear
+  equations with given error bounds for coefficients and right-hand sides",
+  Numerische Mathematik 6, 1964, pp. 405-409: the componentwise backward
+  error of the residual check.
 """
 
 from __future__ import annotations
@@ -171,29 +175,66 @@ def _refuse_configuration(ac: Any, condition: Any, settings: Any, canonical: str
                         "properties). Use wrt='nodes' or 'sections' for tabulated airfoils.")
 
 
-def _recover_xi(lattice: Any) -> np.ndarray:
+# Relative tolerance (to the smallest chordwise panel fraction of the strip)
+# within which a recovered chordwise fraction is the same node as a
+# production fraction. The recovery from the panel lengths has an error of
+# a few units of round-off (about 1e-15); two different nodes are at least
+# half a panel apart (the hinge rule of the mesh builder).
+_XI_NODE_RTOL = 1e-6
+
+
+def _recover_xi(lattice: Any, aircraft: Any = None) -> np.ndarray:
     """Return the chordwise fractions (n_strips, n_chord + 1) of the lattice.
 
-    The fractions come from the bound-vortex positions, so hinge-shifted
-    panels of undeflected controls are reproduced exactly.
+    The fractions come from the panel lengths of the lattice
+    (``panel_length / chord``, summed from the leading edge). This sum adds
+    the round-off of each panel; it does not amplify it. Each strip is then
+    compared with the fractions of the mesh builder (uniform and cosine
+    spacing, with the hinge node of a chordwise control moved to its
+    effective hinge fraction): when one of them agrees within
+    ``_XI_NODE_RTOL`` of the smallest panel fraction, the exact production
+    fractions are used. Without *aircraft* the hinge nodes are not known,
+    and a strip with a moved hinge node keeps the summed fractions.
+
+    Parameters
+    ----------
+    lattice : VortexLattice
+        Production lattice.
+    aircraft : Aircraft or None
+        Aircraft of the lattice (for the hinge nodes of the controls).
+
+    Returns
+    -------
+    numpy.ndarray
+        Chordwise fractions [-] of the panel edges, 0 at the leading edge
+        and 1 at the trailing edge.
     """
+    from ventorum.geometry.lattice import _chordwise_fractions
+
     n_s = int(lattice.n_strips)
     n_c = int(lattice.n_chord)
+    chord = np.asarray(lattice.chord, dtype=float)
+    length = np.asarray(lattice.panel_length, dtype=float).reshape(n_s, n_c)
+    d = length / np.where(chord > 0.0, chord, 1.0)[:, None]
     xi = np.zeros((n_s, n_c + 1))
-    a = np.asarray(lattice.a, dtype=float).reshape(n_s, n_c, 3)
-    le_l = np.asarray(lattice.le_left, dtype=float)
-    te_l = np.asarray(lattice.te_left, dtype=float)
+    xi[:, 1:] = np.cumsum(d, axis=1)
+    xi[:, -1] = 1.0
+    hinge: list[float | None] = [None] * n_s
+    if aircraft is not None and str(lattice.collocation) == "vlm" and n_c >= 2:
+        for k, v in enumerate(_strip_controls(aircraft, lattice)):
+            if v is not None and v[1] is not None:
+                hinge[k] = float(v[1])
+    bases = [_chordwise_fractions(n_c, "uniform"), _chordwise_fractions(n_c, "cosine")]
     for s in range(n_s):
-        edge = te_l[s] - le_l[s]
-        denom = float(edge @ edge)
-        x = 0.0
-        xi[s, 0] = 0.0
-        for k in range(n_c):
-            f = float((a[s, k] - le_l[s]) @ edge / denom) if denom > 0.0 else x + 0.25 / n_c
-            xn = x + (f - x) / 0.25
-            xi[s, k + 1] = xn
-            x = xn
-        xi[s, -1] = 1.0
+        for base in bases:
+            cand = base.copy()
+            if hinge[s] is not None and n_c >= 2:
+                kh = 1 + int(np.argmin(np.abs(base[1:n_c] - hinge[s])))
+                cand[kh] = hinge[s]
+            tol = _XI_NODE_RTOL * float(np.min(np.diff(cand)))
+            if tol > 0.0 and float(np.max(np.abs(cand - xi[s]))) <= tol:
+                xi[s] = cand
+                break
     return xi
 
 
@@ -283,14 +324,23 @@ def _control_maps(aircraft: Any, lattice: Any, xi: np.ndarray, names: list[str],
             continue
         c, h_eff = v
         sgn = 1.0 if (is_right[k] or c.symmetric) else -1.0
-        for j in range(n_chord):
-            if xi[k, j] >= float(h_eff) - 1e-12:
-                panels.append(k * n_chord + j)
-                pstrip.append(k)
-                hinge.append(float(h_eff))
-                sign.append(sgn)
-                ctrl.append(index[c.name])
-                delta0.append(float(c.deflection))
+        # The mesh builder turns the panels whose leading node is the hinge
+        # node or aft of it. The hinge node is the node at the effective
+        # hinge fraction; the recovered fraction of that node agrees with
+        # it within the round-off, far below the panel size.
+        kh = 1 + int(np.argmin(np.abs(xi[k, 1:n_chord] - float(h_eff))))
+        tol = _XI_NODE_RTOL * float(np.min(np.diff(xi[k])))
+        if abs(float(xi[k, kh]) - float(h_eff)) > tol:
+            raise RuntimeError(
+                f"Strip {k}: no chordwise node of the lattice is at the effective hinge fraction "
+                f"{float(h_eff):.15g} (nearest {float(xi[k, kh]):.15g}).")
+        for j in range(kh, n_chord):
+            panels.append(k * n_chord + j)
+            pstrip.append(k)
+            hinge.append(float(h_eff))
+            sign.append(sgn)
+            ctrl.append(index[c.name])
+            delta0.append(float(c.deflection))
     if not panels:
         return None, None
     chord = {"panels": _t(panels, True), "strip": _t(pstrip, True), "hinge": _t(hinge),
@@ -395,7 +445,7 @@ def build_reference(
 
     tg_u = panel_targets(lattice, unknown_panels)
     tg_p = panel_targets(lattice, np.arange(n_p))
-    xi = _recover_xi(lattice)
+    xi = _recover_xi(lattice, aircraft)
     frac = np.asarray(lattice.cp_frac, dtype=float)
     cp_frac_panel = frac[panel_strip]
 
@@ -927,7 +977,8 @@ def _adjoint_pass(
     targets = make_targets(outputs)
     A_det = A.detach()
     g_star = g0.detach()
-    worst = 0.0 if means_at is not None else _forward_check(prep, outputs, prod, vectors)
+    worst = 0.0 if means_at is not None else _forward_check(prep, outputs, prod, vectors,
+                                                            A_det, rhs.detach(), g_star)
     # One backward pass per target gives df/dG (the adjoint right-hand
     # side) and the explicit partials df/dx together.
     names = [name for name, _ in targets]
@@ -992,9 +1043,92 @@ _FORCE_VECTOR = ("CL", "CY")
 _MOMENT_VECTOR = ("Cl", "Cm", "Cn")
 
 
+# Limits of the componentwise backward error of the production state in the
+# system of the reference copy (see _residual_check). Measured round-off
+# (CPU and GPU; vortex lattice up to 2560 unknowns, linear lifting line up
+# to 1000 unknowns, nonlinear lifting line up to 600 unknowns): float64
+# at most 3.6e-9 (linear lifting line, 1000 unknowns; the vortex lattice
+# at most 2e-15), float32 at most 2.8e-3 (linear lifting line, 1000
+# unknowns; the vortex lattice at most 2.5e-4). An angle error of 0.01 deg
+# in the boundary condition gave 2.8e-5 or more in the same cases.
+_RESIDUAL_TOL_FLOAT64 = 1e-6
+_RESIDUAL_TOL_FLOAT32 = 3e-2
+# The nonlinear lifting line stops at its section Cl tolerance: its limit is
+# also at least this factor times the tolerance of the settings.
+_RESIDUAL_TOL_NONLINEAR_FACTOR = 100.0
+
+
+def _residual_check(prep: dict, A: Any, rhs: Any, g: Any) -> float:
+    """Check that the production circulation solves the system of the reference copy.
+
+    The check computes the componentwise backward error (Oettli and
+    Prager 1964) of the production state *g* in the system ``A g = rhs``
+    of the reference copy::
+
+        omega = max_i |A g - rhs|_i / (|A| |g| + |rhs|)_i
+
+    The output comparison of :func:`_forward_check` cannot see a wrong
+    term of the boundary condition (a normal, a section alpha_L0, the
+    onset of a body rate) when the outputs do not depend strongly on it.
+    This check sees it: the production state then does not solve the
+    equations of the reference copy. The componentwise form has the scale
+    of the round-off also when the lifting line has large vortex-core
+    terms in A (the plain ratio ``|A g - rhs| / |rhs|`` does not: it gave
+    2.5 in float32 at 1000 unknowns).
+
+    Parameters
+    ----------
+    prep : dict
+        Case of :func:`_prepare_case`.
+    A : torch.Tensor
+        System matrix (the Newton Jacobian for the nonlinear lifting line).
+    rhs : torch.Tensor
+        Right-hand side of the system.
+    g : torch.Tensor
+        Production circulation per unknown [m^2/s].
+
+    Returns
+    -------
+    float
+        The backward error omega [-].
+
+    Raises
+    ------
+    RuntimeError
+        When omega is above ``_RESIDUAL_TOL_FLOAT64`` (1e-6; the primal and
+        the gradient precision are both float64) or ``_RESIDUAL_TOL_FLOAT32``
+        (3e-2; one of them is float32). For the nonlinear lifting line the
+        limit is at least 100 times the solver tolerance.
+    """
+    import torch
+
+    both64 = prep["precision"] == "float64" and prep["precision_primal"] == "float64"
+    tol = _RESIDUAL_TOL_FLOAT64 if both64 else _RESIDUAL_TOL_FLOAT32
+    if prep.get("canonical") == "nonlinear":
+        tol = max(tol, _RESIDUAL_TOL_NONLINEAR_FACTOR * float(prep["settings"].tolerance))
+    with torch.no_grad():
+        r = torch.abs(A @ g - rhs)
+        denom = torch.abs(A) @ torch.abs(g) + torch.abs(rhs)
+        tiny = torch.finfo(r.dtype).tiny
+        ratio = torch.where(denom > tiny, r / torch.clamp(denom, min=tiny),
+                            torch.where(r > 0.0, torch.full_like(r, float("inf")), torch.zeros_like(r)))
+        omega = float(torch.max(ratio)) if ratio.numel() else 0.0
+    if not math.isfinite(omega) or omega > tol:
+        raise RuntimeError(
+            f"The production circulation does not solve the system of the reference copy: "
+            f"the backward error is {omega:.3g} (limit {tol:g}). A term of the boundary "
+            "condition of the reference copy differs from the production solve. "
+            "The gradient would not be the gradient of the reported result.")
+    return omega
+
+
 def _forward_check(prep: dict, outputs: dict, prod: dict[str, float],
-                   vectors: tuple[str, ...]) -> float:
+                   vectors: tuple[str, ...], A: Any = None, rhs: Any = None,
+                   g: Any = None) -> float:
     """Compare the differentiated model with the production result.
+
+    With *A*, *rhs* and *g* given, :func:`_residual_check` also checks that
+    the production circulation solves the system of the reference copy.
 
     Returns the largest relative difference (``forward_mismatch``). Raises
     RuntimeError with the output names when it is above 1e-10 (the primal
@@ -1055,6 +1189,8 @@ def _forward_check(prep: dict, outputs: dict, prod: dict[str, float],
             f"The reference copy differs from the production result above {tol:g} "
             f"(outputs: {', '.join(bad)}; worst {worst:.3g}). "
             "The gradient would not be the gradient of the reported result.")
+    if A is not None:
+        prep["bc_backward_error"] = _residual_check(prep, A, rhs, g)
     return worst
 
 
