@@ -32,6 +32,7 @@ how_to_rate_derivatives
 how_to_height_derivatives
 derivative_matrix
 how_to_gradients
+how_to_openmdao
 ```
 
 ## Reference
