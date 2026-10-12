@@ -107,14 +107,14 @@ For large A the first three tend to the strip-theory values -a_0/8, C_L/4 and -C
 ## Envelope
 
 - The Fourier solver refuses a rate that is not zero (`ValidityError`).
-- The GPU pipelines support body rates for the vortex lattice and the numerical lifting lines (linear and nonlinear), in free air and in ground effect. Solves run on the selected device, and the result states the device.
+- The GPU pipelines support body rates for the vortex lattice and the numerical lifting lines (linear and nonlinear), in free air and in ground effect. Solves run on the selected device, and the result states the device. One fallback remains: a nonlinear batch with continuation that mixes symmetric and non-symmetric cases (for example a pitch rate in some cases and a roll rate in others) runs on the CPU, because the continuation needs the cases in order. `rate_derivatives` solves without continuation and runs on the GPU.
 - In ground effect the rate derivatives do not include the coupling with the height change (see [Ground effect](ground_effect.md)).
 
 ## Implementation
 
 - `ventorum.aero.system.rotation_velocity`, `rotation_vector`, `has_rates`: the onset of the rotation.
 - `ventorum.solvers.core`: `assemble_vlm` (right-hand side), `llt_onset`, the linear and nonlinear lifting-line systems.
-- `ventorum.gpu.kernels`: `vlm_rhs` with rotation wash, `llt_rhs_rates`, `loads_strip_rates`.
+- `ventorum.gpu.engine`: `vlm_solve` (rotation wash in the right-hand side), `llt_terms` and `loads`; `ventorum.gpu.kernels`: `llt_rhs_rates`, `loads_strip_rates`. A batch without rates keeps the kernels without rates (the host flag `has_rates` of `batch_data` selects them).
 - `ventorum.aero.loads.compute_loads_batch`: forces, profile drag and section moment with the local onset; the section-moment term of one chordwise panel.
 - `ventorum.aero.hinge`: the chordwise hinge moment with the onset at the flap force points.
 - `ventorum.solvers.rate_derivatives`: `rate_derivatives`, `rate_axes_transform`.

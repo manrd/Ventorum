@@ -120,7 +120,8 @@ def _solve_group(solver, lattice, conditions: list, setups: list, settings, S_re
         return None
     bd = engine.batch_data(conditions, wds, grounds)
     Dfs, V, rho, alpha, WD = bd["D"], bd["V"], bd["rho"], bd["alpha"], bd["WD"]
-    omega = bd["omega"]
+    # The host flag avoids a device-to-host sync per solve in rate-free cases.
+    omega = bd["omega"] if bd["has_rates"] else None
     cs = engine.CaseData(dl, WD, grounds, GK=bd["GK"], GO=bd["GO"])
     infos = None
     alpha_eff = None

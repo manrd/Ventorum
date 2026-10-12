@@ -706,12 +706,17 @@ def llt_terms(dl: DeviceLattice, md: dict, Dfs: torch.Tensor, V: torch.Tensor,
     The terms of :func:`ventorum.solvers.core.solve_llt_linear` (one kernel):
     ``2 |u x dl_i| / (a0_i dA_i)``, ``V (u . n_i - alpha_L0_i)``,
     ``V^2 dA_i`` and ``V u``.
+
+    *omega* is the angular velocity (K, 3) [rad/s] of each case in geometry
+    axes, or None for a batch without body rates. The caller decides with
+    the host flag ``has_rates`` of :func:`batch_data`, so that no device
+    sync is necessary here.
     """
     K, n = Dfs.shape[0], md["n"]
     diag = torch.empty((K, n), dtype=_F64, device=_dev())
     rhs = torch.empty((K, n), dtype=_F64, device=_dev())
     scale = torch.empty((K, n), dtype=_F64, device=_dev())
-    if omega is not None and bool((omega != 0.0).any()):
+    if omega is not None:
         onset = torch.empty((K, n, 3), dtype=_F64, device=_dev())
         rp = np.zeros(3) if ref_point is None else np.asarray(ref_point, dtype=float)
         launch(dl.k.llt_rhs_rates, (K, n), [
@@ -1081,13 +1086,18 @@ def vlm_solve(dl: DeviceLattice, md: dict, cs: CaseData, lattice, Dfs: torch.Ten
 
     The system is that of :func:`ventorum.solvers.core.solve_vlm`: flow
     tangency ``(V_inf + v) . n_bc = 0`` at the control points.
+
+    *omega* is the angular velocity (K, 3) [rad/s] of each case in geometry
+    axes, or None for a batch without body rates. The caller decides with
+    the host flag ``has_rates`` of :func:`batch_data`, so that no device
+    sync is necessary here.
     """
     K, n = cs.K, md["n"]
     nbc = md.get("nbc64")
     if nbc is None:
         nbc = md["nbc64"] = _f64(lattice.normal_bc[md["unknown_panels"].cpu().numpy()])
     rhs = -V[:, None] * (Dfs @ nbc.T)
-    if omega is not None and bool((omega != 0.0).any()):
+    if omega is not None:
         rp = np.zeros(3) if ref_point is None else np.asarray(ref_point, dtype=float)
         cp = md.get("cp")
         if cp is None:
@@ -1362,6 +1372,10 @@ def loads(dl: DeviceLattice, lattice, G: torch.Tensor, v_points: list[torch.Tens
         All cases are symmetric about the x-z plane (see :func:`trefftz`).
     GK, GO : tensors, optional
         Ground planes of the cases on the GPU (see :func:`batch_data`).
+    omega : (K, 3) tensor or None
+        Angular velocity of each case in geometry axes [rad/s], or None for a
+        batch without body rates (the host flag ``has_rates`` of
+        :func:`batch_data` decides; no device sync here).
 
     Returns
     -------
@@ -1402,7 +1416,7 @@ def loads(dl: DeviceLattice, lattice, G: torch.Tensor, v_points: list[torch.Tens
     w_rho = view(rho.contiguous(), wp.float64)
     w_span = view(span, wp.float64)
     w_part = view(part, wp.float64)
-    has_rates = omega is not None and bool((omega != 0.0).any())
+    has_rates = omega is not None
     if has_rates:
         launch(k.loads_strip_rates, (K, n_s), [
             view(G.contiguous(), wp.float64), view(vm, v3), view(vla, v3), view(vlb, v3), 1 if use_leg else 0,
