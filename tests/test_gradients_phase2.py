@@ -714,3 +714,35 @@ def test_residual_check_detects_a_wrong_boundary_condition(float64_cpu) -> None:
             _, A2, rhs2 = model.forward(t2, g)
         with pytest.raises(RuntimeError, match="does not solve the system"):
             adjoint._residual_check(prep, A2, rhs2, g)
+
+
+@pytest.mark.parametrize("solver,n_chord", [("nonlinear", None), ("linear", None), ("vlm", 2)])
+def test_sections_refused_on_tabulated_airfoils(solver, n_chord, float64_cpu) -> None:
+    """Regression: wrt='sections' with a tabulated airfoil raises GradientScopeError.
+
+    Before, the nonlinear lifting line returned exact zeros for a0, alpha_L0,
+    Cd0 and Cm0 of the tabulated strips, and the linear solvers zeros for
+    Cd0 and Cm0, with no note.
+    """
+    tab = _wing(_tabulated_section())
+    tail = vt.LiftingSurface(
+        name="Tail", semi_span=2.0, position=np.array([5.0, 0.0, 0.5]),
+        sections=[vt.WingSection(y_frac=0.0, chord=0.8, airfoil=_linear_section()),
+                  vt.WingSection(y_frac=1.0, chord=0.5, airfoil=_linear_section())])
+    mixed = vt.Aircraft(surfaces=[tab, tail])
+    cond = vt.FlightCondition(V_inf=30.0, alpha=np.radians(4.0))
+    st = _settings(solver, n_chord)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        for geom in (vt.Aircraft(surfaces=[_wing(_tabulated_section())]), mixed):
+            with pytest.raises(vt.GradientScopeError, match=r"tabulated airfoils of surface\(s\) \['Wing'\]"):
+                vt.gradients(geom, cond, st, outputs=("CL", "CD"), wrt=("alpha", "sections"))
+            with pytest.raises(vt.GradientScopeError, match="not available"):
+                vt.gradient_vjp(geom, cond, st, seeds={"CL": 1.0}, wrt=("sections",))
+        # The other inputs of the mixed aircraft stay available.
+        res = vt.gradients(mixed, cond, st, outputs=("CL",), wrt=("alpha",))
+        assert np.isfinite(res.jacobian["CL"]["alpha"])
+        # Linear airfoils keep the section input.
+        lin = vt.Aircraft(surfaces=[_wing(), tail])
+        res = vt.gradients(lin, cond, st, outputs=("CL", "CD"), wrt=("sections",))
+        assert np.any(np.asarray(res.jacobian["CD"]["sections"]["Cd0"]) != 0.0)

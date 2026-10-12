@@ -45,11 +45,15 @@ per section, see below; it cannot be combined with `"nodes"`), `"controls"` (per
 control name, per unit deflection [1/rad]) and `"p"`, `"q"`, `"r"` (body rates
 [rad/s]; see below).
 
-For a tabulated airfoil the strip values of `"sections"` are the linear fit of the
-polar that the linear solvers use (`a0`, `alpha_L0`); its profile drag and section
-moment come from the table at the section angle, so `Cd0` and `Cm0` of a tabulated
-strip have zero gradients. The nonlinear lifting line takes the section lift from the
-table, so `a0` and `alpha_L0` of a tabulated strip have zero gradients there.
+The input `"sections"` needs linear airfoils. When a surface has a tabulated airfoil,
+the functions raise `GradientScopeError` and name the surface. On a tabulated strip
+some of the four values do not enter the result: the linear solvers take the profile
+drag and the section moment from the table (`Cd0` and `Cm0` are not used), and their
+`a0` and `alpha_L0` are a fit of the table, not inputs of the airfoil; the nonlinear
+lifting line takes the lift, the drag and the moment from the table (none of the four
+values is used). The input names the four values of every surface, so one tabulated
+surface refuses it also on an aircraft with other, linear surfaces. The other inputs
+stay available.
 
 Outputs: `"CL"`, `"CY"`, `"CDi"`, `"CDp"`, `"CD"`, `"Cl"`, `"Cm"`, `"Cn"` in the axes
 `axes` (`"body"`, `"stability"`, `"wind"`). The vector outputs `"strip_force"` and

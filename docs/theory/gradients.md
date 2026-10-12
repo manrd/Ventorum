@@ -337,7 +337,10 @@ results are equal to round-off.
 
 The functions raise `GradientScopeError` (a `ValueError`) for the Fourier solver (a
 closed form: central differences are the method there), for a nonlinear lifting-line
-solve that did not converge, and for the planform input with tabulated airfoils. In
+solve that did not converge, for the planform input with tabulated airfoils, and for the
+section input (`"sections"`) when a surface has a tabulated airfoil (some of `a0`,
+`alpha_L0`, `Cd0` and `Cm0` do not enter the result on a tabulated strip, so their
+derivatives would be zeros without a meaning). In
 ground effect `h` is the height of the moment reference point, and the ground plane and
 its images follow the inputs; a ground strike raises as in `analyze`.
 

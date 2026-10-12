@@ -156,8 +156,14 @@ def _refuse_configuration(ac: Any, condition: Any, settings: Any, canonical: str
     The Fourier solver is refused (closed form: central differences are the
     method there). The planform input needs linear airfoils: the planform
     chain interpolates the linear section properties of the sections.
-    A nonlinear lifting-line solve that did not converge is refused after
-    the solve (see :func:`_prepare_case`).
+    The section input (``"sections"``: a0, alpha_L0, Cd0 and Cm0 of every
+    strip) is refused when a surface has a tabulated airfoil: on the
+    strips of a tabulated polar some of these values do not enter the
+    result, so their derivatives would be zeros without a meaning. The
+    input names all four values of every surface, so one tabulated
+    surface refuses it also on an aircraft with other, linear surfaces;
+    the other inputs stay available. A nonlinear lifting-line solve that
+    did not converge is refused after the solve (see :func:`_prepare_case`).
     """
     from ventorum.core.datatypes import TabulatedAirfoil
 
@@ -165,6 +171,22 @@ def _refuse_configuration(ac: Any, condition: Any, settings: Any, canonical: str
         raise GradientScopeError(
             "The Fourier solver has no adjoint gradients (closed form): use central differences "
             "of the production solve, or solver_type 'vlm', 'linear' or 'nonlinear'.")
+    if "sections" in wrt:
+        tab = [surf.name for surf in ac.surfaces
+               if any(isinstance(sec.airfoil, TabulatedAirfoil) for sec in surf.sections)]
+        if tab:
+            if canonical == "nonlinear":
+                why = ("the nonlinear lifting line takes the lift, the drag and the moment of these "
+                       "strips from the tables, so a0, alpha_L0, Cd0 and Cm0 do not enter the result")
+            else:
+                why = ("the linear solvers take the profile drag and the moment of these strips "
+                       "from the tables, so Cd0 and Cm0 do not enter the result, and a0 and "
+                       "alpha_L0 are a fit of the table, not inputs of the airfoil")
+            raise GradientScopeError(
+                f"Input 'sections' is not available for the tabulated airfoils of surface(s) "
+                f"{tab}: {why}. Their derivatives would be zeros without a meaning. Remove "
+                "'sections' from wrt, use linear airfoils for section gradients, or change the "
+                "table data and use differences of the production solve.")
     if "planform" in wrt:
         for surf in ac.surfaces:
             for sec in surf.sections:
