@@ -219,6 +219,17 @@ def dispatch_payload(res: Any | None) -> dict[str, Any] | None:
         page), or None when the result has no dispatch record (for example
         the Fourier solver) or *res* is None. The agent tools give it only
         at ``detail_level="full"``, under the key ``"dispatch"``.
+
+    Notes
+    -----
+    A CPU record has ``device`` ``"cpu"``, ``precision`` ``"float64"``,
+    ``backends`` with the four vortex kernels (``"tensor"``,
+    ``"influence"``, ``"induced"``, ``"trefftz"``), and integer
+    ``threads`` and ``workers`` with their ``plan_source``. A GPU record has
+    ``device`` ``"gpu"``, the GPU precision, ``backends`` with the kernel
+    groups that ran on the GPU for the solver family (``"warp"``) and
+    ``"dense_solve": "torch"``, and None for ``threads``, ``workers`` and
+    ``plan_source`` (the CPU thread plan does not apply).
     """
     target = res
     if target is not None and not hasattr(target, "details") and hasattr(target, "solver_result"):

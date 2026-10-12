@@ -17,12 +17,14 @@ Every result of a lattice solver records how it was computed and why in `result.
 | --- | --- | --- |
 | `device` | str | `"cpu"` or `"gpu"` |
 | `precision` | str | `"float64"` on CPU; `"float32"` or `"float64"` on GPU |
-| `backends` | dict | Kernel name (`"tensor"`, `"influence"`, `"induced"`, `"trefftz"`) mapped to the backend used |
-| `threads` | int | Kernel threads of the thread that solved the case |
-| `workers` | int | Cases that ran at the same time: the size of the worker pool that solved the case, or 1 when the case or the batch ran alone |
-| `plan_source` | str | Source of the plan that ran: `"user"` (the `n_jobs` of the user, or forced threads), `"profile"` (the tuned values of the machine profile), `"default"` (the built-in values) or `"nested"` (a worker thread whose pool plan is not known) |
+| `backends` | dict | CPU: each vortex kernel (`"tensor"`, `"influence"`, `"induced"`, `"trefftz"`) mapped to its backend. GPU: each kernel group that ran mapped to `"warp"`, and `"dense_solve"` mapped to `"torch"` (see below) |
+| `threads` | int or None | Kernel threads of the thread that solved the case; None on the GPU |
+| `workers` | int or None | Cases that ran at the same time: the size of the worker pool that solved the case, or 1 when the case or the batch ran alone; None on the GPU |
+| `plan_source` | str or None | None on the GPU. On the CPU, the source of the plan that ran: `"user"` (the `n_jobs` of the user, or forced threads), `"profile"` (the tuned values of the machine profile), `"default"` (the built-in values) or `"nested"` (a worker thread whose pool plan is not known) |
 | `profile` | str or None | Machine profile fingerprint string, or None when no profile was active |
 | `reason` | str | Plain sentence stating the dispatch decision and any fallback reason |
+
+The GPU kernel groups of each solver family: the vortex lattice has `"influence"` (the system matrix), `"induced"` (the velocities at the load points), `"trefftz"` and `"loads"`; the linear lifting line has `"tensor"` (the velocity tensors), `"trefftz"` and `"loads"`; the nonlinear lifting line also has `"newton"` (the Newton iterations). The dense solves use the PyTorch linear algebra on the GPU (`"dense_solve": "torch"`). The CPU thread plan does not apply to a GPU batch, so `threads`, `workers` and `plan_source` are None. A nonlinear case that does not converge on the GPU is solved again on the CPU; its record stays the GPU record of the batch.
 
 In `result.to_dict()` and in the agent tools, the dispatch record is included only when `detail_level="full"`. The summary and standard outputs do not have it. The keys `details["device"]` and `details["precision"]` of GPU results do not change.
 

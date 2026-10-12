@@ -116,12 +116,12 @@ Lattice solver results record dispatch decisions in `result.details["dispatch"]`
 
 * `device`: `"cpu"` or `"gpu"`.
 * `precision`: `"float64"` on CPU; `"float32"` or `"float64"` on GPU.
-* `backends`: maps each kernel name (`"tensor"`, `"influence"`, `"induced"`, `"trefftz"`) to the backend used.
+* `backends`: on the CPU, each vortex kernel (`"tensor"`, `"influence"`, `"induced"`, `"trefftz"`) mapped to its backend. On the GPU, the kernel groups of the solver family that ran on Warp (`pipeline.GPU_BACKENDS`) and `"dense_solve": "torch"`. `threads`, `workers` and `plan_source` are None on the GPU.
 * `threads`: the kernel threads of the thread that solved the case (read inside `solve_threads`).
 * `workers`: the cases that ran at the same time. `case_executor` keeps the `ParallelPlan` of its pool in each worker thread (`parallel._local.plan`), and the record reads it. A case or a batch that runs alone records 1.
 * `plan_source`: `"user"`, `"profile"`, `"default"` or `"nested"`, for the plan that ran. In a pool worker it is the source of the pool plan. A serial `run_cases` with a plan of the user or the profile keeps that plan while the cases run. A single solve gives `"profile"` when its threads come from the tuned single-case setting, and a batch gives `"default"` (all cores). `"nested"` is a worker thread without a known pool plan.
 * `profile`: active machine profile fingerprint, or None.
-* `reason`: plain sentence describing the dispatch decision or the fallback reason (such as device settings, worker pools, body rates, unsupported polars, or cost model comparisons).
+* `reason`: plain sentence describing the dispatch decision or the fallback reason (such as the device setting, a CPU worker thread, unsupported polars or unknown maps, the nonlinear continuation, or the cost model). The CPU batch of a ground-effect sweep records the reason of the GPU decision of the sweep (`sweep._gpu_batch`).
 
 
 Rules for a change:

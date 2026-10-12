@@ -60,12 +60,21 @@ def _assert_dispatch(dispatch: dict, expected_device: str | None = None) -> None
         assert dispatch["device"] == expected_device
     assert dispatch["precision"] in ("float32", "float64")
     assert isinstance(dispatch["backends"], dict)
-    assert set(dispatch["backends"].keys()) == KERNEL_NAMES
-    assert isinstance(dispatch["threads"], int)
-    assert dispatch["threads"] >= 1
-    assert isinstance(dispatch["workers"], int)
-    assert dispatch["workers"] >= 1
-    assert dispatch["plan_source"] in ("user", "profile", "default", "nested")
+    if dispatch["device"] == "gpu":
+        # The GPU record: the kernel groups that ran and no CPU thread plan.
+        assert dispatch["backends"]["dense_solve"] == "torch"
+        assert {"trefftz", "loads"} <= set(dispatch["backends"])
+        assert all(v == "warp" for k, v in dispatch["backends"].items() if k != "dense_solve")
+        assert dispatch["threads"] is None
+        assert dispatch["workers"] is None
+        assert dispatch["plan_source"] is None
+    else:
+        assert set(dispatch["backends"].keys()) == KERNEL_NAMES
+        assert isinstance(dispatch["threads"], int)
+        assert dispatch["threads"] >= 1
+        assert isinstance(dispatch["workers"], int)
+        assert dispatch["workers"] >= 1
+        assert dispatch["plan_source"] in ("user", "profile", "default", "nested")
     assert dispatch["profile"] is None or isinstance(dispatch["profile"], str)
     assert isinstance(dispatch["reason"], str)
     assert len(dispatch["reason"]) > 0
@@ -449,7 +458,8 @@ def test_gpu_solve_dispatch():
         _assert_dispatch(disp, expected_device="gpu")
         assert disp["device"] == "gpu"
         assert disp["precision"] == "float64"
-        assert all(b == "warp" for b in disp["backends"].values())
+        assert disp["backends"] == {"influence": "warp", "induced": "warp", "trefftz": "warp",
+                                    "loads": "warp", "dense_solve": "torch"}
         # Existing top-level details keys stay intact
         assert res.details["device"] == "gpu"
         assert res.details["precision"] == "float64"
@@ -864,3 +874,35 @@ def test_agent_tool_full_dispatch_none_for_fourier():
     out = wing_analysis(wing=_TOOL_RECT, settings={"solver": "fourier", "n_panels": 12}, detail_level="full")
     assert out["status"] == "success"
     assert out["dispatch"] is None
+
+
+@pytest.mark.gpu
+@pytest.mark.parametrize("solver_type", ["vlm", "linear", "nonlinear"])
+def test_gpu_record_shape(solver_type):
+    """A GPU result names the kernel groups of its family and has no CPU thread plan."""
+    if not gpu.available():
+        pytest.skip(f"GPU unavailable: {gpu.unavailable_reason()}")
+    expected = {
+        "vlm": {"influence": "warp", "induced": "warp", "trefftz": "warp", "loads": "warp",
+                "dense_solve": "torch"},
+        "linear": {"tensor": "warp", "trefftz": "warp", "loads": "warp", "dense_solve": "torch"},
+        "nonlinear": {"tensor": "warp", "newton": "warp", "trefftz": "warp", "loads": "warp",
+                      "dense_solve": "torch"},
+    }[solver_type]
+    old_dev = gpu.get_device()
+    try:
+        gpu.set_device("gpu")
+        ac = _rect_aircraft()
+        st = SolverSettings(solver_type=solver_type, n_panels=16)
+        solver = make_solver(solver_type)
+        conds = [FlightCondition(V_inf=30.0, alpha=np.radians(a)) for a in (2.0, 4.0)]
+        lat = solver.build(ac, st, conds[0])
+        for r in solver.solve_batch(lat, conds, st, ac.S_ref, ac.b_ref, ac.c_ref, continuation=False):
+            d = r.details["dispatch"]
+            assert r.details["device"] == "gpu"
+            assert d["device"] == "gpu"
+            assert d["backends"] == expected
+            assert d["threads"] is None and d["workers"] is None and d["plan_source"] is None
+            assert d["precision"] == r.details["precision"]
+    finally:
+        gpu.set_device(old_dev)

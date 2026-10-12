@@ -291,6 +291,23 @@ def _nonlinear(solver, engine, dl, md, cs, lattice, conditions, settings, ground
     return G, vp, alpha_full, infos
 
 
+# The kernel groups of a GPU batch of each solver family and the backend that
+# runs them (the "backends" of the dispatch record of a GPU result). The
+# Warp kernels: "tensor" (velocity tensors of the lifting lines,
+# engine.llt_tensors), "influence" (normal-wash system of the vortex
+# lattice, engine.vlm_system), "induced" (velocities at the load points of
+# the vortex lattice, engine.vlm_load_velocities), "newton" (Newton
+# iterations of the nonlinear lifting line, engine.llt_nonlinear),
+# "trefftz" (Trefftz plane, engine.trefftz) and "loads" (engine.loads). The
+# dense solves (engine.batched_solve, engine.newton_solve) use the PyTorch
+# linear algebra (torch.linalg) on the GPU.
+GPU_BACKENDS = {
+    "vlm": {"influence": "warp", "induced": "warp", "trefftz": "warp", "loads": "warp", "dense_solve": "torch"},
+    "linear": {"tensor": "warp", "trefftz": "warp", "loads": "warp", "dense_solve": "torch"},
+    "nonlinear": {"tensor": "warp", "newton": "warp", "trefftz": "warp", "loads": "warp", "dense_solve": "torch"},
+}
+
+
 def _results(solver, lattice, conditions, arrays: dict, setups: list, umap, b_ref: float, c_ref: float,
              main_surface: int, t0: float, share: float, precision: str, infos: list | None = None,
              ref_point=None, S_ref: float | None = None, dispatch_reason: str = "device setting is gpu") -> list:
@@ -305,18 +322,19 @@ def _results(solver, lattice, conditions, arrays: dict, setups: list, umap, b_re
     (``details["dispatch"]``), which is made once for the batch.
     """
     from ventorum.aero.loads import loads_result, trefftz_lateral_batch
-    from ventorum.aero.vortex import KERNELS
     from ventorum.hardware.profile import active_profile
     from ventorum.solvers.core import SolveInfo
 
     prof = active_profile()
+    # The CPU thread plan does not apply to a GPU batch: threads, workers
+    # and plan_source are None.
     dispatch = {
         "device": "gpu",
         "precision": precision,
-        "backends": {kernel: "warp" for kernel in KERNELS},
-        "threads": 1,
-        "workers": 1,
-        "plan_source": "default",
+        "backends": dict(GPU_BACKENDS[solver.name]),
+        "threads": None,
+        "workers": None,
+        "plan_source": None,
         "profile": prof.get("fingerprint") if isinstance(prof, dict) else None,
         "reason": dispatch_reason,
     }
