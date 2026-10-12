@@ -2,8 +2,10 @@
 """Differentiable reference copy of the lattice solvers for adjoint gradients.
 
 The model rebuilds the lattice from the edge nodes of each surface, the
-system rows and the outputs in PyTorch, with the same formulas as the
-production code. The mesh topology is fixed. The O(n^2) work (system rows,
+system rows (or the residual and the Newton Jacobian of the nonlinear
+lifting line) and the outputs in PyTorch, with the same formulas as the
+production code: control deflections, body rates and the interpolation of
+tabulated polars included. The mesh topology is fixed. The O(n^2) work (system rows,
 load points, Trefftz points) runs in row chunks with a memory budget, or,
 when ``build["vjp_backend"]`` names a backend, in the compiled forward and
 vector-Jacobian-product kernels of :mod:`ventorum.sensitivity.kernels`.
@@ -213,6 +215,70 @@ def kahan_sum(x: torch.Tensor, dim: int) -> torch.Tensor:
     return s.reshape(rest)
 
 
+def pp_from_scipy(poly: object, device: object, dtype: object) -> dict:
+    """Return the breakpoints and the cubic coefficients of a scipy piecewise polynomial as tensors.
+
+    Parameters
+    ----------
+    poly : scipy.interpolate.PPoly
+        Piecewise cubic (for example the ``PchipInterpolator`` of a
+        tabulated polar), with ``x`` (m,) and ``c`` (4, m - 1) in the local
+        power basis: ``f(x) = sum_k c[k, i] (x - x_i)^(3 - k)``.
+    device, dtype
+        Torch device and dtype of the tensors.
+
+    Returns
+    -------
+    dict
+        ``"x"`` (m,), ``"c"`` (4, m - 1), and the table limits ``"lo"``,
+        ``"hi"`` [rad] as floats.
+    """
+    import numpy as np
+
+    xb = np.asarray(poly.x, dtype=float)  # type: ignore[attr-defined]
+    c = np.asarray(poly.c, dtype=float)  # type: ignore[attr-defined]
+    if c.shape[0] != 4:
+        raise ValueError(f"Expected a piecewise cubic, got order {c.shape[0] - 1}.")
+    return {"x": torch.as_tensor(xb.copy(), dtype=dtype, device=device),
+            "c": torch.as_tensor(c.copy(), dtype=dtype, device=device),
+            "lo": float(xb[0]), "hi": float(xb[-1])}
+
+
+def _pp_interval(pp: dict, xc: torch.Tensor) -> torch.Tensor:
+    """Return the interval index of the clamped points *xc* (no graph)."""
+    xb = pp["x"]
+    i = torch.searchsorted(xb, xc.detach().contiguous(), right=True) - 1
+    return torch.clamp(i, 0, xb.shape[0] - 2)
+
+
+def pp_eval(pp: dict, x: torch.Tensor) -> torch.Tensor:
+    """Evaluate a piecewise cubic of :func:`pp_from_scipy` at *x* (differentiable).
+
+    Outside the table the end values are kept (the angle is clamped), as in
+    ``TabulatedAirfoil``. A point on a breakpoint takes the interval to its
+    right (the last interval at the upper end), so its derivative is the
+    one-sided derivative of that interval. The shape-preserving cubic has a
+    continuous first derivative, so both sides agree to round-off.
+    """
+    xc = torch.clamp(x, pp["lo"], pp["hi"])
+    i = _pp_interval(pp, xc)
+    c = pp["c"]
+    dx = xc - pp["x"][i]
+    return ((c[0, i] * dx + c[1, i]) * dx + c[2, i]) * dx + c[3, i]
+
+
+def pp_slope(pp: dict, x: torch.Tensor) -> torch.Tensor:
+    """Return the derivative of a piecewise cubic at *x* (no graph); zero outside the table."""
+    with torch.no_grad():
+        xc = torch.clamp(x, pp["lo"], pp["hi"])
+        i = _pp_interval(pp, xc)
+        c = pp["c"]
+        dx = xc - pp["x"][i]
+        val = (3.0 * c[0, i] * dx + 2.0 * c[1, i]) * dx + c[2, i]
+        inside = (x >= pp["lo"]) & (x <= pp["hi"])
+        return torch.where(inside, val, torch.zeros_like(val))
+
+
 def _rows(x: torch.Tensor | None, i0: int, i1: int) -> torch.Tensor | None:
     """Return rows i0:i1 of *x*, or None."""
     return None if x is None else x[i0:i1]
@@ -314,9 +380,13 @@ class TorchReference:
             Torch scalars for each scalar output, plus ``strip_force``
             (n_strips, 3) and ``section_cl`` (n_strips,).
         A : torch.Tensor
-            System matrix, shape (n, n).
+            System matrix, shape (n, n). For the nonlinear lifting line it
+            is the Newton Jacobian dR/dG at *g_unknown* (no graph).
         rhs : torch.Tensor
-            Right-hand side, shape (n,).
+            Right-hand side, shape (n,). For the nonlinear lifting line it
+            is ``A G - R(G, x)``. So in both cases ``A G - rhs`` is the
+            residual and ``solve(A, rhs)`` is the next Newton iterate (the
+            solution for the linear solvers).
         """
         b = self.b
         n_s = b["n_strips"]
@@ -339,6 +409,19 @@ class TorchReference:
             wd = torch.tensor([1.0, 0.0, 0.0], dtype=self.dtype, device=self.device)
         else:
             wd = d
+
+        # --- body rates: quasi-steady rotation about the reference point ------
+        rated = bool(b.get("rates", False))
+        if rated:
+            # Rates p, q, r in the flight-dynamics body axes; the geometry axes
+            # are x aft, y right, z up, so the angular velocity is (-p, q, -r).
+            omega = torch.stack((-t["p"], t["q"], -t["r"]))
+
+            def _w_rot(pts: torch.Tensor) -> torch.Tensor:
+                return -torch.linalg.cross(omega.expand_as(pts), pts - rp)
+
+            def _onset(pts: torch.Tensor) -> torch.Tensor:
+                return V * d + _w_rot(pts)
 
         # --- lattice from the edge nodes ------------------------------------
         le_l, le_r, te_l, te_r = self._strips(t)
@@ -366,6 +449,23 @@ class TorchReference:
         )
         span_yz = _norm_rows(span_yz)
         aL0 = t["alpha_L0"]
+        cm0 = t["Cm0"]
+        # Control deflections. The tensors "controls:<name>" are the changes of
+        # the deflection of every control with that name [rad] (zero at the
+        # base point). Section mode (lifting lines and one chordwise panel):
+        # the thin-airfoil deflected section, alpha_L0 - tau delta and
+        # Cm0 + dCm/ddelta delta, and the tabulated polars at alpha + tau delta.
+        inc = self._control_increments(t)
+        shift_strip = None
+        cm_shift_strip = None
+        cs = b.get("ctrl_section")
+        if cs is not None and inc is not None:
+            inc_s = inc[cs["ctrl"]]
+            aL0 = aL0.index_add(0, cs["strips"], -cs["tau_sign"] * inc_s)
+            cm0 = cm0.index_add(0, cs["strips"], cs["dcm_sign"] * inc_s)
+            zero = torch.zeros(n_s, dtype=self.dtype, device=self.device)
+            shift_strip = zero.index_add(0, cs["strips"], cs["tau_sign"] * inc_s)
+            cm_shift_strip = zero.index_add(0, cs["strips"], cs["dcm_sign"] * inc_s)
         normal_bc_strip = rod_rot(normal, span_yz, -aL0)
 
         a0 = t["a0"]
@@ -405,6 +505,21 @@ class TorchReference:
         rc_panel = 0.01 * torch.minimum(width[panel_strip], panel_length)
 
         n_bc = normal_bc_strip[panel_strip]
+        cc = b.get("ctrl_chord")
+        if cc is not None:
+            # Chordwise mode (vortex lattice, two or more chordwise panels):
+            # the normals of the panels aft of the hinge turn by the local
+            # deflection about the hinge line, as in the mesh builder.
+            s_c = cc["strip"]
+            hf = cc["hinge"][:, None]
+            h_l = le_l[s_c] + hf * (te_l[s_c] - le_l[s_c])
+            h_r = le_r[s_c] + hf * (te_r[s_c] - le_r[s_c])
+            u_hinge = _norm_rows(h_r - h_l)
+            delta_p = cc["delta0"]
+            if inc is not None:
+                delta_p = delta_p + inc[cc["ctrl"]]
+            turned = rod_rot(n_bc[cc["panels"]], u_hinge, cc["sign"] * delta_p)
+            n_bc = n_bc.index_copy(0, cc["panels"], turned)
         cp_u = cp[b["unknown_panels"]]
         n_bc_u = n_bc[b["unknown_panels"]]
         # Target cross-core radii follow the strip widths (they are not fixed:
@@ -477,11 +592,19 @@ class TorchReference:
         tg_rc = tgt_rc_unk
 
         # --- system matrix and right-hand side -------------------------------
+        alpha_u_nl = None
         if b["collocation"] == "vlm":
             A = self._normal_matrix(cp_u, n_bc_u, s_a, s_b, s_ate, s_bte, s_wd,
                                     rc2_src, s_group, s_sign, s_col, n_u,
                                     tg_group, tg_rc)
             rhs = -V * (n_bc_u * d).sum(-1)
+            if rated:
+                rhs = rhs - (n_bc_u * _w_rot(cp_u)).sum(-1)
+        elif b.get("solver") == "nonlinear":
+            A, rhs, alpha_u_nl = self._nonlinear_system(
+                t, g_unknown, d, V, cp_u, dl, area, normal, cdir, chord, a0, aL0, shift_strip,
+                s_a, s_b, s_ate, s_bte, s_wd, rc2_src, s_group, s_sign, s_col, n_u,
+                tg_group, tg_rc, h, _onset if rated else None)
         else:
             dl_u = dl[b["strip_of_unknown"]]
             area_u = area[b["strip_of_unknown"]]
@@ -501,10 +624,22 @@ class TorchReference:
                                            rc2_src, s_group, s_sign, s_col, n_u,
                                            tg_group, tg_rc, own=b["unknown_panels"])
                 a_ind = torch.einsum("ijk,ik->ij", Vt, normal_u)
-            cross_dl = torch.linalg.cross(d.expand_as(dl_u), dl_u)
-            diag = 2.0 * torch.linalg.norm(cross_dl, dim=1) / (a0_u * area_u)
-            A = torch.diag(diag) - a_ind
-            rhs = V * ((normal_u * d).sum(-1) - aL0_u)
+            if rated:
+                # Local onset at the three-quarter chord of each strip, at
+                # the span fraction of the control point (as llt_onset).
+                sou = b["strip_of_unknown"]
+                p34 = cp_u + 0.5 * chord[sou][:, None] * cdir[sou]
+                onset_u = _onset(p34)
+                speed = torch.linalg.norm(onset_u, dim=1)
+                unit = onset_u / speed[:, None]
+                diag = 2.0 * torch.linalg.norm(torch.linalg.cross(unit, dl_u), dim=1) / (a0_u * area_u)
+                A = torch.diag(diag) - a_ind
+                rhs = (normal_u * onset_u).sum(-1) - speed * aL0_u
+            else:
+                cross_dl = torch.linalg.cross(d.expand_as(dl_u), dl_u)
+                diag = 2.0 * torch.linalg.norm(cross_dl, dim=1) / (a0_u * area_u)
+                A = torch.diag(diag) - a_ind
+                rhs = V * ((normal_u * d).sum(-1) - aL0_u)
 
         # --- near-field loads ------------------------------------------------
         f_frac = b["cp_frac_panel"]
@@ -545,7 +680,7 @@ class TorchReference:
             v_ind[left] = v_e[pos_all[pm[left]]] * mir
         else:
             v_ind = v_e
-        U = (V * d).expand_as(v_ind)
+        U = _onset(mid) if rated else (V * d).expand_as(v_ind)
         f_panel = rho * g_panel[:, None] * torch.linalg.cross(U + v_ind, l_vec)
         m_geo = torch.linalg.cross(mid - rp, f_panel).sum(0)
         if use_leg:
@@ -589,7 +724,7 @@ class TorchReference:
                 v_leg = self._induced(leg_mid, s_a, s_b, s_ate, s_bte, s_wd, rc2_src,
                                       s_group, g_leg_src, leg_tgt_group, leg_tgt_rc,
                                       edge=ledge)
-            U_leg = (V * d).expand_as(v_leg)
+            U_leg = _onset(leg_mid) if rated else (V * d).expand_as(v_leg)
             V_leg = U_leg + v_leg
             Vn = (V_leg * leg_normal).sum(-1)
             V_leg = V_leg - Vn[:, None] * leg_normal
@@ -604,22 +739,41 @@ class TorchReference:
         nd = (normal * d).sum(-1)
         cd_ = (cdir * d).sum(-1)
         alpha_geom = torch.atan2(nd, cd_)
-        alpha_eff = aL0 + cl_strip / torch.clamp_min(a0, 1e-9)
-        cd0 = t["Cd0"]
-        cm0 = t["Cm0"]
+        if alpha_u_nl is not None:
+            # Nonlinear lifting line: the section angle of the solve (one
+            # panel per strip; a left strip of the fold takes its mirror).
+            alpha_eff = alpha_u_nl[b["panel_column_full"]]
+        else:
+            alpha_eff = aL0 + cl_strip / torch.clamp_min(a0, 1e-9)
+        cd_p, cm_s = self._section_drag_moment(t["Cd0"], cm0, alpha_eff, shift_strip, cm_shift_strip)
         q_inf = 0.5 * rho * V * V
         S_ref = t["S_ref"]
         b_ref = t["b_ref"]
         c_ref = t["c_ref"]
         qS = q_inf * S_ref
-        d_p = q_inf * chord * width * cd0
-        f_prof = d_p[:, None] * d.expand(n_s, 3)
+        if rated:
+            if n_chord == 1:
+                # One chordwise panel: the thin-airfoil moment of the
+                # chordwise change of the rotation velocity, at the
+                # three-quarter chord of the strip mid-point.
+                p34s = qc_mid + 0.5 * chord[:, None] * cdir
+                slope = -(normal * torch.linalg.cross(omega.expand_as(cdir), cdir)).sum(-1)
+                cm_s = cm_s - (math.pi / 8.0) * slope * chord / torch.linalg.norm(_onset(p34s), dim=1)
+            u_qc = _onset(qc_mid)
+            speed_qc = torch.linalg.norm(u_qc, dim=1)
+            d_loc = u_qc / speed_qc[:, None]
+            q_loc = 0.5 * rho * speed_qc * speed_qc
+        else:
+            d_loc = d.expand(n_s, 3)
+            q_loc = q_inf
+        d_p = q_loc * chord * width * cd_p
+        f_prof = d_p[:, None] * d_loc
         m_geo = m_geo + torch.linalg.cross(qc_mid - rp, f_prof).sum(0)
-        n_lift = torch.linalg.cross(d.expand(n_s, 3), dl)
+        n_lift = torch.linalg.cross(d_loc, dl)
         n_lift = n_lift / torch.clamp_min(torch.linalg.norm(n_lift, dim=1, keepdim=True), 1e-300)
-        axis = torch.linalg.cross(n_lift, d.expand(n_s, 3))
+        axis = torch.linalg.cross(n_lift, d_loc)
         axis = axis / torch.clamp_min(torch.linalg.norm(axis, dim=1, keepdim=True), 1e-300)
-        m_geo = m_geo + ((q_inf * chord * chord * width * cm0)[:, None] * axis).sum(0)
+        m_geo = m_geo + ((q_loc * chord * chord * width * cm_s)[:, None] * axis).sum(0)
 
         # --- Trefftz induced drag --------------------------------------------
         di, w_n, _seg = self._trefftz(te_l, te_r, strip_gamma, wd, rho, frac,
@@ -676,6 +830,145 @@ class TorchReference:
             edge_te = edge_te - origin
         idx = b["strip_edges"]
         return edge_le[idx[:, 0]], edge_le[idx[:, 1]], edge_te[idx[:, 0]], edge_te[idx[:, 1]]
+
+    def _control_increments(self, t: dict) -> torch.Tensor | None:
+        """Return the deflection changes [rad] per control name, or None without controls."""
+        names = self.b.get("control_names") or []
+        if not names:
+            return None
+        return torch.stack([t[f"controls:{n}"] for n in names])
+
+    def _section_drag_moment(self, cd0: torch.Tensor, cm0: torch.Tensor, alpha_eff: torch.Tensor,
+                             shift: torch.Tensor | None,
+                             cm_shift: torch.Tensor | None) -> tuple[torch.Tensor, torch.Tensor]:
+        """Return the section profile drag and moment coefficients per strip.
+
+        Linear airfoils give Cd0 and Cm0. A tabulated airfoil gives its
+        polar (the shape-preserving cubic of the production code) at the
+        effective angle *alpha_eff* [rad], plus the deflection change of the
+        section mode (*shift* [rad] on the angle, *cm_shift* on Cm).
+        """
+        tables = self.b.get("tables") or []
+        if not tables:
+            return cd0, cm0
+        lin = self.b["lin_strip_mask"]
+        cd_p = cd0 * lin
+        cm_s = cm0 * lin
+        record = []
+        for tab in tables:
+            idx = tab["strips"]
+            a_t = alpha_eff[idx]
+            if shift is not None:
+                a_t = a_t + shift[idx]
+            record.append(a_t.detach())
+            cd_p = cd_p.index_add(0, idx, pp_eval(tab["Cd"], a_t))
+            cm_t = pp_eval(tab["Cm"], a_t) if tab["Cm"] is not None else torch.zeros_like(a_t)
+            if cm_shift is not None:
+                cm_t = cm_t + cm_shift[idx]
+            cm_s = cm_s.index_add(0, idx, cm_t)
+        self.b["_table_alpha"] = record
+        return cd_p, cm_s
+
+    def _section_cl_unknowns(self, alpha_u: torch.Tensor, a0: torch.Tensor, aL0: torch.Tensor,
+                             shift: torch.Tensor | None) -> tuple[torch.Tensor, torch.Tensor]:
+        """Return the section lift coefficient and its slope [1/rad] per unknown.
+
+        Linear airfoils give ``a0 (alpha - alpha_L0)``. A tabulated airfoil
+        gives its polar at ``alpha`` plus the deflection change of the
+        section mode. The slope has no graph (it enters the Newton
+        Jacobian only); it is zero outside the table, as in the production
+        ``Cl_slope``.
+        """
+        b = self.b
+        sou = b["strip_of_unknown"]
+        lin = b["lin_strip_mask"][sou] if b.get("tables") else None
+        if lin is None:
+            cl = a0[sou] * (alpha_u - aL0[sou])
+            return cl, a0[sou].detach()
+        cl = a0[sou] * (alpha_u - aL0[sou]) * lin
+        slope = (a0[sou] * lin).detach()
+        rec = []
+        for tab in b["tables"]:
+            pos = tab["unknowns"]
+            if pos.numel() == 0:
+                rec.append(alpha_u.new_zeros(0))
+                continue
+            a_t = alpha_u[pos]
+            if shift is not None:
+                a_t = a_t + shift[sou[pos]]
+            rec.append(a_t.detach())
+            cl = cl.index_add(0, pos, pp_eval(tab["Cl"], a_t))
+            slope = slope.index_add(0, pos, pp_slope(tab["Cl"], a_t.detach()))
+        b["_table_alpha_unknowns"] = rec
+        return cl, slope
+
+    def _nonlinear_system(self, t: dict, g_unknown: torch.Tensor, d: torch.Tensor, V: torch.Tensor,
+                          cp_u: torch.Tensor, dl: torch.Tensor, area: torch.Tensor,
+                          normal: torch.Tensor, cdir: torch.Tensor, chord: torch.Tensor,
+                          a0: torch.Tensor, aL0: torch.Tensor, shift: torch.Tensor | None,
+                          s_a: torch.Tensor, s_b: torch.Tensor, s_ate: torch.Tensor,
+                          s_bte: torch.Tensor, s_wd: torch.Tensor, rc2_src: torch.Tensor,
+                          s_group: torch.Tensor, s_sign: torch.Tensor, s_col: torch.Tensor, n_u: int,
+                          tg_group: torch.Tensor, tg_rc: torch.Tensor, h: torch.Tensor | None,
+                          onset: object) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Return (J, J G - R, alpha) of the nonlinear lifting line at the circulation *g_unknown*.
+
+        The residual of strip i (Phillips and Snyder 2000, eq. 15 in
+        dimensional form) is ``R_i = 2 |W_i x dl_i| G_i - s_i Cl_i(alpha_i)``
+        with ``W_i = U_i + sum_j v_ij G_j`` at the control point,
+        ``alpha_i = atan2(W_i . n_i, W_i . a_i)`` and ``s_i = |U_i|^2 dA_i``
+        (``U_i`` the free stream, or the local onset at the three-quarter
+        chord with body rates). ``J = dR/dG`` is the Newton Jacobian of the
+        production solve, without a graph. The second value is
+        ``J G - R``, so that ``J G - (J G - R) = R`` carries the graph of the
+        residual in the inputs, and ``solve(J, J G - R)`` is the Newton step.
+        *alpha* [rad] is the section angle per unknown (with a graph).
+        """
+        b = self.b
+        sou = b["strip_of_unknown"]
+        dl_u = dl[sou]
+        area_u = area[sou]
+        normal_u = normal[sou]
+        cdir_u = cdir[sou]
+        if onset is not None:
+            p34 = cp_u + 0.5 * chord[sou][:, None] * cdir_u
+            u_on = onset(p34)  # type: ignore[operator]
+            scale = (u_on * u_on).sum(-1) * area_u
+        else:
+            u_on = (V * d).expand(n_u, 3)
+            scale = V * V * area_u
+        g_panel = g_unknown[b["panel_column_full"]]
+        g_src = g_panel * s_sign if h is None else torch.cat((g_panel, g_panel), dim=0) * s_sign
+        v_u = self._induced(cp_u, s_a, s_b, s_ate, s_bte, s_wd, rc2_src, s_group, g_src,
+                            tg_group, tg_rc, own=b["unknown_panels"])
+        W = u_on + v_u
+        wx = torch.linalg.cross(W, dl_u)
+        wxn = torch.linalg.norm(wx, dim=1)
+        wn = (W * normal_u).sum(-1)
+        wa = (W * cdir_u).sum(-1)
+        alpha_u = torch.atan2(wn, wa)
+        cl, dcl = self._section_cl_unknowns(alpha_u, a0, aL0, shift)
+        R = 2.0 * wxn * g_unknown - scale * cl
+        with torch.no_grad():
+            Vt = self._tensor_unknowns(cp_u.detach(), s_a.detach(), s_b.detach(), s_ate.detach(),
+                                       s_bte.detach(), s_wd.detach(), rc2_src.detach(), s_group,
+                                       s_sign, s_col, n_u, tg_group,
+                                       None if tg_rc is None else tg_rc.detach(),
+                                       own=b["unknown_panels"])
+            g_d = g_unknown.detach()
+            wxd, wxnd, wnd, wad = wx.detach(), wxn.detach(), wn.detach(), wa.detach()
+            u = wxd / torch.clamp_min(wxnd, 1e-300)[:, None]
+            dwxn = torch.einsum("ijk,ik->ij", Vt, torch.linalg.cross(dl_u.detach(), u))
+            vn = torch.einsum("ijk,ik->ij", Vt, normal_u.detach())
+            va = torch.einsum("ijk,ik->ij", Vt, cdir_u.detach())
+            denom = torch.clamp_min(wad * wad + wnd * wnd, 1e-300)
+            dalpha = (wad[:, None] * vn - wnd[:, None] * va) / denom[:, None]
+            J = 2.0 * g_d[:, None] * dwxn - (scale.detach() * dcl)[:, None] * dalpha
+            J = J + torch.diag(2.0 * wxnd)
+            b["_nl_slope"] = dcl.detach()
+            b["_nl_residual"] = (R.detach() / scale.detach())
+        rhs = J @ g_d - R
+        return J, rhs, alpha_u
 
     def _src_sum(self, x: torch.Tensor, dim: int) -> torch.Tensor:
         """Sum *x* along *dim* with the accumulation rule of the model."""

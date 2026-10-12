@@ -161,6 +161,10 @@ def check_gradients(
     wrt : tuple of str
         Inputs to check. ``"nodes"`` is checked along *n_directions*
         random unit directions over all node coordinates (seeded).
+        ``"controls"`` is checked per control name (all controls with one
+        name move together; base step 1e-4 rad). ``"p"``, ``"q"``, ``"r"``
+        use the base step 1e-4 of the nondimensional rate (1e-4 times
+        2 V / b_ref for p and r, 2 V / c_ref for q) [rad/s].
         ``"planform"`` is checked parameter by parameter (surface
         semi-span, sweep, dihedral, incidence and position; per-section
         chord, twist, x_le, z_le, span fraction and airfoil incidence).
@@ -324,6 +328,42 @@ def check_gradients(
 
         fd = _ladder(_get, float(getattr(condition, key)), h, _STEP_FACTORS, outs, eps)
         _record(key, key, {o: float(jac[o][key]) for o in outs}, fd, h / 1e-4)
+    if any(k in ins for k in ("p", "q", "r")):
+        ac2 = ac.clone()
+        ac2.compute_reference_values()
+        V = abs(float(condition.V_inf))
+        # The base step is 1e-4 of the nondimensional rates p b/(2V),
+        # q c/(2V) and r b/(2V) [rad/s].
+        to_rate = {"p": 2.0 * V / float(ac2.b_ref), "q": 2.0 * V / float(ac2.c_ref),
+                   "r": 2.0 * V / float(ac2.b_ref)}
+        for key in ("p", "q", "r"):
+            if key not in ins:
+                continue
+            h = 1e-4 * to_rate[key]
+
+            def _get(v: float, _k: str = key) -> dict[str, float]:
+                c2 = dataclasses.replace(condition, **{_k: v})
+                return _production_scalars(ac, c2, st, axes)
+
+            fd = _ladder(_get, float(getattr(condition, key, 0.0)), h, _STEP_FACTORS, outs, eps)
+            _record(key, key, {o: float(jac[o][key]) for o in outs}, fd, to_rate[key])
+    if "controls" in ins:
+        from ventorum.sensitivity.adjoint import control_names
+
+        for name in control_names(ac):
+            h = 1e-4
+
+            def _get(v: float, _n: str = name) -> dict[str, float]:
+                ac3 = ac.clone()
+                for s in ac3.surfaces:
+                    for c in getattr(s, "controls", []):
+                        if c.name == _n:
+                            c.deflection = float(c.deflection) + float(v)
+                return _production_scalars(ac3, condition, st, axes)
+
+            fd = _ladder(_get, 0.0, h, _STEP_FACTORS, outs, eps)
+            _record("controls", f"controls.{name}",
+                    {o: float(jac[o]["controls"][name]) for o in outs}, fd, 1.0)
     if "sections" in ins:
         from ventorum.solvers.factory import make_solver, resolve_solver_type
 

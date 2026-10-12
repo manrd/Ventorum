@@ -1,12 +1,14 @@
 # Author: Manuel Alejandro Rodriguez Diaz, PhD
-"""Adjoint gradients of the vortex lattice and the linear lifting line.
+"""Adjoint gradients of the vortex lattice and the linear and nonlinear lifting lines.
 
-Discrete adjoint: residual R(G, x) = A(x) G - b(x). The circulation G comes
-from the normal production solve. One LU factor of A gives G and every
-adjoint vector: A^T lambda_j = df_j/dG. The total derivative is the gradient
-of the Lagrangian f_j(G*, x) - lambda_j . (A(x) G* - b(x)) at the fixed
-converged G* (Martins and Hwang 2013; Martins and Ning 2021, ch. 6). No
-automatic differentiation runs through the linear solve.
+Discrete adjoint: residual R(G, x) = A(x) G - b(x) for the linear solvers.
+The circulation G comes from the normal production solve. One LU factor of
+A gives G and every adjoint vector: A^T lambda_j = df_j/dG. The total
+derivative is the gradient of the Lagrangian f_j(G*, x) - lambda_j . R(G*, x)
+at the fixed converged G* (Martins and Hwang 2013; Martins and Ning 2021,
+ch. 6). No automatic differentiation runs through the solve. The nonlinear
+lifting line has a residual that is nonlinear in G; its adjoint uses the
+Newton Jacobian dR/dG at the converged state (Phillips and Snyder 2000).
 
 References
 ----------
@@ -15,6 +17,10 @@ References
   AIAA Journal 51(11), 2013, pp. 2582-2599.
 * J. R. R. A. Martins and A. Ning, "Engineering Design Optimization",
   Cambridge University Press, 2021, ch. 6.
+* W. F. Phillips and D. O. Snyder, "Modern adaptation of Prandtl's classic
+  lifting-line theory", Journal of Aircraft 37(4), 2000, pp. 662-670.
+* H. Glauert, "The Elements of Aerofoil and Airscrew Theory", Cambridge
+  University Press, 1926: the thin-airfoil flap effectiveness.
 """
 
 from __future__ import annotations
@@ -32,16 +38,18 @@ from ventorum.core.datatypes import SolverSettings as _SolverSettings
 SCALAR_OUTPUTS = ("CL", "CY", "CDi", "CDp", "CD", "Cl", "Cm", "Cn")
 VECTOR_OUTPUTS = ("strip_force", "section_cl")
 ALL_OUTPUTS = SCALAR_OUTPUTS + VECTOR_OUTPUTS
-SCALAR_INPUTS = ("alpha", "beta", "V_inf", "rho", "h", "phi")
+SCALAR_INPUTS = ("alpha", "beta", "V_inf", "rho", "h", "phi", "p", "q", "r")
+RATE_INPUTS = ("p", "q", "r")
 ALL_WRT = ("nodes", "alpha", "beta", "V_inf", "rho", "h", "phi", "sections", "reference",
-           "planform")
+           "planform", "controls", "p", "q", "r")
 
-# Inputs that keep a symmetric state symmetric (no beta, phi, section or
-# reference-point change that breaks the y = 0 symmetry). The node inputs of
-# a symmetric surface are the nodes of its defining half, mirrored to the
-# other half, so they keep the symmetry too when every surface is symmetric
-# (see _adjoint_use_symmetry).
-_SYMMETRIC_WRT = ("alpha", "V_inf", "rho", "h")
+# Inputs that keep a symmetric state symmetric (no beta, phi, roll or yaw
+# rate, section or reference-point change that breaks the y = 0 symmetry).
+# The pitch rate q keeps the symmetry. The node inputs of a symmetric
+# surface are the nodes of its defining half, mirrored to the other half,
+# so they keep the symmetry too when every surface is symmetric; the control
+# inputs keep it when every control is symmetric (see _adjoint_use_symmetry).
+_SYMMETRIC_WRT = ("alpha", "V_inf", "rho", "h", "q")
 _SYMMETRIC_NODE_WRT = _SYMMETRIC_WRT + ("nodes",)
 # Outputs that keep a symmetric state symmetric (longitudinal only).
 _SYMMETRIC_OUTPUTS = ("CL", "CDi", "CDp", "CD", "Cm")
@@ -96,20 +104,25 @@ def _torch_dtype(precision: str):  # type: ignore[no-untyped-def]
 
 
 def _adjoint_use_symmetry(production_symmetric: bool, wrt: tuple[str, ...],
-                          outputs: tuple[str, ...], surfaces_symmetric: bool = False) -> bool:
+                          outputs: tuple[str, ...], surfaces_symmetric: bool = False,
+                          controls_symmetric: bool = False) -> bool:
     """Return True when the folded symmetric system gives the exact adjoint.
 
     The fold constrains the circulation to the symmetric subspace, so it is
     exact only when the case is symmetric and every requested input and
-    output is symmetric (no beta, phi, section or reference change, no
-    lateral output). The node inputs are symmetric when every surface is
-    symmetric (*surfaces_symmetric*): the inputs are the nodes of the
-    defining half, and the other half is their mirror image. Else the full
-    system is used.
+    output is symmetric (no beta, phi, roll rate p, yaw rate r, section or
+    reference change, no lateral output). The node inputs are symmetric
+    when every surface is symmetric (*surfaces_symmetric*): the inputs are
+    the nodes of the defining half, and the other half is their mirror
+    image. The control inputs are symmetric when every control is symmetric
+    (*controls_symmetric*); an antisymmetric control (an aileron) moves the
+    two halves in opposite directions. Else the full system is used.
     """
     if not production_symmetric:
         return False
     allowed = _SYMMETRIC_NODE_WRT if surfaces_symmetric else _SYMMETRIC_WRT
+    if controls_symmetric:
+        allowed = allowed + ("controls",)
     if any(w not in allowed for w in wrt):
         return False
     return all(o in _SYMMETRIC_OUTPUTS for o in outputs)
@@ -132,32 +145,30 @@ def _check_names(outputs: Any, wrt: Any) -> tuple[tuple[str, ...], tuple[str, ..
     return outs, ins
 
 
-def _refuse_configuration(ac: Any, condition: Any, settings: Any, canonical: str) -> None:
-    """Raise GradientScopeError for configurations that the adjoint gradients do not cover yet."""
+def _refuse_configuration(ac: Any, condition: Any, settings: Any, canonical: str,
+                          wrt: tuple[str, ...] = ()) -> None:
+    """Raise GradientScopeError for configurations that the adjoint gradients do not cover.
+
+    The Fourier solver is refused (closed form: central differences are the
+    method there). The planform input needs linear airfoils: the planform
+    chain interpolates the linear section properties of the sections.
+    A nonlinear lifting-line solve that did not converge is refused after
+    the solve (see :func:`_prepare_case`).
+    """
+    from ventorum.core.datatypes import TabulatedAirfoil
+
     if canonical == "fourier":
         raise GradientScopeError(
-            "The Fourier solver has no adjoint gradients in this version.")
-    if canonical == "nonlinear":
-        raise GradientScopeError(
-            "The nonlinear lifting line has no adjoint gradients in this version.")
-    for surf in ac.surfaces:
-        for sec in surf.sections:
-            from ventorum.core.datatypes import TabulatedAirfoil
-
-            if isinstance(sec.airfoil, TabulatedAirfoil):
-                raise GradientScopeError(
-                    "Tabulated airfoils have no adjoint gradients in this version"
-                    "; use linear airfoils.")
-        for c in getattr(surf, "controls", []):
-            if float(c.deflection) != 0.0:
-                raise GradientScopeError(
-                    f"Control deflection {c.name!r} = {float(c.deflection):g} rad is not zero: "
-                    f"controls have no adjoint gradients in this version.")
-    if (float(getattr(condition, "p", 0.0)) != 0.0
-            or float(getattr(condition, "q", 0.0)) != 0.0
-            or float(getattr(condition, "r", 0.0)) != 0.0):
-        raise GradientScopeError(
-            "Body rates have no adjoint gradients in this version.")
+            "The Fourier solver has no adjoint gradients (closed form): use central differences "
+            "of the production solve, or solver_type 'vlm', 'linear' or 'nonlinear'.")
+    if "planform" in wrt:
+        for surf in ac.surfaces:
+            for sec in surf.sections:
+                if isinstance(sec.airfoil, TabulatedAirfoil):
+                    raise GradientScopeError(
+                        f"Surface {surf.name!r} has a tabulated airfoil: the planform input needs "
+                        "linear airfoils (the planform chain interpolates their linear section "
+                        "properties). Use wrt='nodes' or 'sections' for tabulated airfoils.")
 
 
 def _recover_xi(lattice: Any) -> np.ndarray:
@@ -184,6 +195,146 @@ def _recover_xi(lattice: Any) -> np.ndarray:
             x = xn
         xi[s, -1] = 1.0
     return xi
+
+
+def control_names(aircraft: Any) -> list[str]:
+    """Return the sorted unique control names of *aircraft* (the keys of the ``"controls"`` input)."""
+    return sorted({c.name for s in aircraft.surfaces for c in getattr(s, "controls", [])})
+
+
+def _strip_controls(aircraft: Any, lattice: Any) -> list[tuple[Any, float | None] | None]:
+    """Return per strip the control of the strip and its effective hinge fraction, or None.
+
+    The rule is the rule of the mesh builder
+    (:func:`ventorum.geometry.lattice.build_lattice`): a control covers the
+    strips whose span fraction of the control point is inside its limits
+    (1e-9 tolerance), a later control of the same surface replaces an
+    earlier one, and the effective hinge fraction of the chordwise mode
+    comes from ``lattice.control_info`` (same order as the controls).
+    """
+    out: list[tuple[Any, float | None] | None] = [None] * int(lattice.n_strips)
+    info = list(getattr(lattice, "control_info", []))
+    pos = 0
+    eta = np.abs(np.asarray(lattice.eta, dtype=float))
+    for sl in lattice.surfaces:
+        surf = aircraft.surfaces[int(sl.index)]
+        for c in getattr(surf, "controls", []):
+            entry = info[pos] if pos < len(info) else None
+            pos += 1
+            if entry is None or entry["name"] != c.name or entry["surface"] != surf.name:
+                raise RuntimeError("The control information of the lattice does not match the aircraft.")
+            for k in range(sl.strips.start, sl.strips.stop):
+                if c.eta_start - 1e-9 <= eta[k] <= c.eta_end + 1e-9:
+                    out[k] = (c, entry["hinge_x_c_eff"])
+    return out
+
+
+def _control_maps(aircraft: Any, lattice: Any, xi: np.ndarray, names: list[str], device: str,
+                  dtype: Any) -> tuple[dict | None, dict | None]:
+    """Return the section-mode and the chordwise-mode control maps of the reference model.
+
+    Section mode (lifting lines, or the vortex lattice with one chordwise
+    panel): per control strip the strip index, the control index, the
+    signed flap effectiveness ``sign tau`` and the signed moment derivative
+    ``sign dCm/ddelta`` (Glauert 1926). Chordwise mode (vortex lattice with
+    two or more chordwise panels): per flap panel (the panels whose leading
+    fraction is aft of the effective hinge) the panel and strip indices,
+    the effective hinge fraction, the sign, the control index and the base
+    deflection [rad]. The sign is +1 on a right strip and for a symmetric
+    control, else -1 (the left half of an antisymmetric control).
+    """
+    import torch
+
+    from ventorum.geometry.controls import flap_effectiveness, flap_moment_derivative
+
+    per_strip = _strip_controls(aircraft, lattice)
+    if not any(v is not None for v in per_strip):
+        return None, None
+    index = {n: i for i, n in enumerate(names)}
+    is_right = np.asarray(lattice.strip_is_right, dtype=bool)
+    n_chord = int(lattice.n_chord)
+    chordwise = str(lattice.collocation) == "vlm" and n_chord >= 2
+
+    def _t(a: list, integer: bool = False) -> Any:
+        return torch.as_tensor(np.asarray(a), dtype=torch.int64 if integer else dtype,
+                               device=device)
+
+    if not chordwise:
+        strips, ctrl, tau_s, dcm_s, delta0 = [], [], [], [], []
+        for k, v in enumerate(per_strip):
+            if v is None:
+                continue
+            c, _ = v
+            sgn = 1.0 if (is_right[k] or c.symmetric) else -1.0
+            strips.append(k)
+            ctrl.append(index[c.name])
+            tau_s.append(sgn * flap_effectiveness(c.hinge_x_c))
+            dcm_s.append(sgn * flap_moment_derivative(c.hinge_x_c))
+            delta0.append(float(c.deflection))
+        sec = {"strips": _t(strips, True), "ctrl": _t(ctrl, True), "tau_sign": _t(tau_s),
+               "dcm_sign": _t(dcm_s),
+               "np": {"strips": np.asarray(strips, dtype=np.int64),
+                      "tau_sign": np.asarray(tau_s), "dcm_sign": np.asarray(dcm_s),
+                      "delta0": np.asarray(delta0)}}
+        return sec, None
+    panels, pstrip, hinge, sign, ctrl, delta0 = [], [], [], [], [], []
+    for k, v in enumerate(per_strip):
+        if v is None:
+            continue
+        c, h_eff = v
+        sgn = 1.0 if (is_right[k] or c.symmetric) else -1.0
+        for j in range(n_chord):
+            if xi[k, j] >= float(h_eff) - 1e-12:
+                panels.append(k * n_chord + j)
+                pstrip.append(k)
+                hinge.append(float(h_eff))
+                sign.append(sgn)
+                ctrl.append(index[c.name])
+                delta0.append(float(c.deflection))
+    if not panels:
+        return None, None
+    chord = {"panels": _t(panels, True), "strip": _t(pstrip, True), "hinge": _t(hinge),
+             "sign": _t(sign), "ctrl": _t(ctrl, True), "delta0": _t(delta0)}
+    return None, chord
+
+
+def _airfoil_tables(lattice: Any, unknown_panels: np.ndarray, device: str,
+                    dtype: Any) -> tuple[list, Any]:
+    """Return the polar tables of the tabulated strips and the mask of the linear strips.
+
+    Each table entry holds the strips of one airfoil object (the strips
+    that the production loads group together), the positions of their
+    unknowns, and the cubic pieces of the production interpolation of Cl,
+    Cd and Cm (Cm None without moment data).
+    """
+    import torch
+
+    from ventorum.aero.loads import group_strips_by_airfoil
+    from ventorum.core.datatypes import TabulatedAirfoil
+    from ventorum.sensitivity.reference import pp_from_scipy
+
+    groups = group_strips_by_airfoil(list(lattice.airfoils))
+    unknown_strip = np.asarray(lattice.panel_strip, dtype=np.int64)[np.asarray(unknown_panels)]
+    lin = np.ones(int(lattice.n_strips))
+    tables = []
+    for af, idx in groups:
+        if not isinstance(af, TabulatedAirfoil):
+            continue
+        lin[idx] = 0.0
+        f = af._pchip()
+        pos = np.flatnonzero(np.isin(unknown_strip, idx))
+        tables.append({
+            "name": af.name,
+            "strips": torch.as_tensor(np.asarray(idx, dtype=np.int64), device=device),
+            "unknowns": torch.as_tensor(pos.astype(np.int64), device=device),
+            "Cl": pp_from_scipy(f["Cl"], device, dtype),
+            "Cd": pp_from_scipy(f["Cd"], device, dtype),
+            "Cm": pp_from_scipy(f["Cm"], device, dtype) if "Cm" in f else None,
+            "table_alpha": np.asarray(af.tables()[0], dtype=float),
+        })
+    if not tables:
+        return [], None
+    return tables, torch.as_tensor(lin, dtype=dtype, device=device)
 
 
 def build_reference(
@@ -317,6 +468,21 @@ def build_reference(
         "accum": accum,
         "origin": None,
     }
+    from ventorum.solvers.factory import resolve_solver_type
+
+    build["solver"] = resolve_solver_type(settings.solver_type)
+    rates = {k: float(getattr(condition, k, 0.0)) for k in RATE_INPUTS}
+    # The onset with the rotation is used when a rate is not zero; the
+    # gradient functions also set it when a rate is a requested input.
+    build["rates"] = any(v != 0.0 for v in rates.values())
+    names = control_names(aircraft)
+    build["control_names"] = names
+    sec_map, chord_map = _control_maps(aircraft, lattice, xi, names, device, dtype)
+    build["ctrl_section"] = sec_map
+    build["ctrl_chord"] = chord_map
+    tables, lin_mask = _airfoil_tables(lattice, unknown_panels, device, dtype)
+    build["tables"] = tables
+    build["lin_strip_mask"] = lin_mask
     if local_origin:
         pts = np.vstack(
             [np.asarray(s["base_le"]) for s in surfaces]
@@ -331,6 +497,10 @@ def build_reference(
         "rho": float(condition.rho),
         "h": None if condition.h is None else float(condition.h),
         "phi": float(getattr(condition, "phi", 0.0)),
+        "p": rates["p"],
+        "q": rates["q"],
+        "r": rates["r"],
+        "control_names": list(names),
         "a0": np.asarray(lattice.a0, dtype=float).copy(),
         "alpha_L0": np.asarray(lattice.alpha_L0, dtype=float).copy(),
         "Cd0": np.asarray(lattice.Cd0, dtype=float).copy(),
@@ -385,6 +555,11 @@ def make_input_tensors(
     t["V_inf"] = _s("V_inf", base["V_inf"])
     t["rho"] = _s("rho", base["rho"])
     t["phi"] = _s("phi", base["phi"])
+    for key in RATE_INPUTS:
+        t[key] = _s(key, base.get(key, 0.0))
+    for name in base.get("control_names", []):
+        # The change of the deflection of every control with this name [rad].
+        t[f"controls:{name}"] = _s("controls", 0.0)
     if base["h"] is None:
         t["h"] = None
     else:
@@ -469,6 +644,19 @@ def _attach_planform(model: TorchReference, t: dict, prep: dict, wrt: tuple[str,
                 f"The planform port gives {per[prop].shape[0]} strips, "
                 f"the lattice has {t[prop].shape[0]}.")
         t[prop] = per[prop]
+    cs = model.b.get("ctrl_section")
+    if cs is not None:
+        # The port interpolates the sections without the deflection: add the
+        # thin-airfoil change of the base deflection of the control strips.
+        npm = cs["np"]
+        d_al0 = np.zeros(t["alpha_L0"].shape[0])
+        d_cm0 = np.zeros(t["Cm0"].shape[0])
+        np.add.at(d_al0, npm["strips"], -npm["tau_sign"] * npm["delta0"])
+        np.add.at(d_cm0, npm["strips"], npm["dcm_sign"] * npm["delta0"])
+        t["alpha_L0"] = t["alpha_L0"] + torch.as_tensor(d_al0, dtype=dtype, device=dev)
+        t["Cm0"] = t["Cm0"] + torch.as_tensor(d_cm0, dtype=dtype, device=dev)
+        per["alpha_L0"] = t["alpha_L0"]
+        per["Cm0"] = t["Cm0"]
     auto = set(getattr(ac, "_auto_ref", set())) & {"S_ref", "b_ref", "c_ref"}
     for key in ("S_ref", "b_ref", "c_ref"):
         if key in auto:
@@ -595,6 +783,9 @@ def _prepare_case(geometry: Any, condition: Any, settings: Any, axes: str,
 
     from ventorum.sensitivity.kernels import METHODS, resolve
 
+    if "controls" in wrt and not control_names(geometry if not isinstance(geometry, LiftingSurface)
+                                               else Aircraft(name="SingleWing", surfaces=[geometry])):
+        raise ValueError('Input "controls" needs an aircraft with one or more control surfaces.')
     if "nodes" in wrt and "planform" in wrt:
         raise ValueError(
             'Inputs "nodes" and "planform" describe the same freedom: use "planform" '
@@ -610,9 +801,10 @@ def _prepare_case(geometry: Any, condition: Any, settings: Any, axes: str,
     validate_flight_condition(condition)
     validate_solver_settings(st)
     canonical = resolve_solver_type(st.solver_type)
-    _refuse_configuration(ac, condition, st, canonical)
+    _refuse_configuration(ac, condition, st, canonical, wrt)
     for v in (condition.alpha, condition.beta, condition.V_inf, condition.rho,
-              getattr(condition, "phi", 0.0)):
+              getattr(condition, "phi", 0.0), getattr(condition, "p", 0.0),
+              getattr(condition, "q", 0.0), getattr(condition, "r", 0.0)):
         if not math.isfinite(float(v)):
             raise ValueError(f"Flight condition has a non-finite value {v!r}.")
     if condition.h is not None and not math.isfinite(float(condition.h)):
@@ -620,14 +812,26 @@ def _prepare_case(geometry: Any, condition: Any, settings: Any, axes: str,
     validate_aircraft(ac)
     solver = make_solver(canonical)
     result = solver.solve(ac, condition, st)
+    if canonical == "nonlinear" and not bool(result.converged):
+        last = result.residual_history[-1] if result.residual_history else float("nan")
+        raise GradientScopeError(
+            f"The nonlinear lifting-line solve did not converge in {result.iterations} Newton "
+            f"iterations (section Cl error {last:.2e}, tolerance {float(st.tolerance):.1e}). The adjoint "
+            "needs the converged state: the gradient of a state that does not solve the equations "
+            "is not defined. Change the case (for example a smaller angle of attack) or the "
+            "settings (max_iterations).")
     lattice = result.details["lattice"]
     production_symmetric = bool(result.symmetry_used)
     surfaces_symmetric = all(bool(sl.is_symmetric) for sl in lattice.surfaces)
-    symmetric = _adjoint_use_symmetry(production_symmetric, wrt, outputs, surfaces_symmetric)
+    controls_symmetric = all(bool(c.symmetric) for s in ac.surfaces for c in getattr(s, "controls", []))
+    symmetric = _adjoint_use_symmetry(production_symmetric, wrt, outputs, surfaces_symmetric,
+                                      controls_symmetric)
     device = _gradient_device(result)
     precision = _gradient_precision()
     precision_primal = str(result.details.get("precision", "float64"))
     model, base = build_reference(ac, condition, st, lattice, axes, device, precision, symmetric)
+    if any(w in RATE_INPUTS for w in wrt):
+        model.b["rates"] = True
     path, backend = resolve(method, device, int(lattice.n_panels))
     model.b["vjp_backend"] = backend if path == "kernels" else None
     gamma_panel = np.asarray(result.details["gamma"], dtype=float)
@@ -708,8 +912,16 @@ def _adjoint_pass(
     prod = _production_values(prep)
     if means_at is not None:
         with torch.no_grad():
-            _, A0, rhs0 = model.forward(t, g0)
-            g0 = torch.linalg.solve(A0, rhs0)
+            # Newton iterations from the production state: one step solves
+            # the linear systems; the nonlinear lifting line iterates.
+            n_it = 1 if model.b.get("solver") != "nonlinear" else _BRANCH_NEWTON_STEPS
+            for _ in range(n_it):
+                _, A0, rhs0 = model.forward(t, g0)
+                g_new = torch.linalg.solve(A0, rhs0)
+                step = float(torch.max(torch.abs(g_new - g0)))
+                g0 = g_new
+                if step <= 1e-14 * max(float(torch.max(torch.abs(g0))), 1e-300):
+                    break
     g_var = g0.detach().clone().requires_grad_(True)
     outputs, A, rhs = model.forward(t, g_var)
     targets = make_targets(outputs)
@@ -766,6 +978,12 @@ def _adjoint_pass(
             gmap[id(v)] = tot.detach().cpu().numpy()
         jacobian[name] = _pack_jacobian(model, t, gmap, wrt, base, bool(prep["symmetric"]))
     return values, jacobian, worst, len(targets)
+
+
+# Newton steps of the nonlinear lifting line on the edge-mean branch of a
+# coincident section break (see _adjoint_pass); the iteration stops earlier
+# when the step is at the round-off of the circulation.
+_BRANCH_NEWTON_STEPS = 30
 
 
 # Scalar outputs that are components of one force vector and of one
@@ -869,6 +1087,129 @@ def _production_values(prep: dict) -> dict[str, float]:
     return prod
 
 
+# Distance [rad] within which a section angle is on a table point of a
+# tabulated polar (the result notes name these strips).
+_TABLE_POINT_TOL = 1e-12
+
+LLT_NODE_NOTE = (
+    "Lifting-line node gradients: the vortex core on the collinear bound segments of the lifting "
+    "line makes its node sensitivity depend on a length scale of about 1e-5 m (the core), so the "
+    "node gradients of the lifting line are not physical at that scale. An investigation of this "
+    "effect is open. Use the vortex lattice for node gradients, or check them with differences "
+    "at the mesh scale.")
+
+
+def _table_notes(model: TorchReference) -> list[str]:
+    """Return the notes on the strips of tabulated polars at a table point or outside the table."""
+    b = model.b
+    tables = b.get("tables") or []
+    if not tables:
+        return []
+    at_point: set[int] = set()
+    outside: set[int] = set()
+    pairs = []
+    rec_s = b.get("_table_alpha") or []
+    for tab, a in zip(tables, rec_s):
+        pairs.append((tab, np.asarray(tab["strips"].cpu()), np.asarray(a.cpu(), dtype=float)))
+    rec_u = b.get("_table_alpha_unknowns") or []
+    sou = np.asarray(b["strip_of_unknown"].cpu())
+    for tab, a in zip(tables, rec_u):
+        pos = np.asarray(tab["unknowns"].cpu())
+        pairs.append((tab, sou[pos], np.asarray(a.cpu(), dtype=float)))
+    for tab, strips, a in pairs:
+        ta = tab["table_alpha"]
+        for s, v in zip(strips, a):
+            if v < ta[0] or v > ta[-1]:
+                outside.add(int(s))
+            elif float(np.min(np.abs(ta - v))) <= _TABLE_POINT_TOL * max(1.0, abs(v)):
+                at_point.add(int(s))
+    notes = []
+    if at_point:
+        notes.append(
+            "Tabulated polars: the section angle of strip(s) "
+            f"{sorted(at_point)} is on a table point; the gradient uses the one-sided derivative "
+            "of the interpolation (the interval to the right of the point).")
+    if outside:
+        notes.append(
+            "Tabulated polars: the section angle of strip(s) "
+            f"{sorted(outside)} is outside the table; the polar keeps its end value there, so its "
+            "derivative with the angle is zero.")
+    return notes
+
+
+def _nonlinear_notes(model: TorchReference) -> list[str]:
+    """Return the notes of the nonlinear lifting line and warn past the maximum lift."""
+    import warnings
+
+    b = model.b
+    if b.get("solver") != "nonlinear":
+        return []
+    notes = ["Nonlinear lifting line: the adjoint uses the Newton Jacobian dR/dG of the section "
+             "lift residual at the converged state (Phillips and Snyder 2000)."]
+    slope = b.get("_nl_slope")
+    if slope is not None:
+        dcl = np.asarray(slope.cpu(), dtype=float)
+        sou = np.asarray(b["strip_of_unknown"].cpu())
+        bad = sorted({int(sou[i]) for i in np.flatnonzero(dcl <= 0.0)})
+        if bad:
+            msg = (f"Past the maximum lift: the section lift slope is zero or negative on strip(s) {bad}. "
+                   "The gradient is local, and the solution may not be unique.")
+            notes.append(msg)
+            warnings.warn(msg, RuntimeWarning, stacklevel=3)
+    res = b.get("_nl_residual")
+    if res is not None:
+        worst = float(np.max(np.abs(res.cpu().numpy())))
+        notes.append(f"Section Cl residual of the converged state: {worst:.2e}.")
+    return notes
+
+
+def _case_notes(prep: dict, ins: tuple[str, ...]) -> list[str]:
+    """Return the notes of the configuration: controls, nonlinear lifting line, tables, node caveat."""
+    model: TorchReference = prep["model"]
+    notes: list[str] = []
+    if "controls" in ins:
+        if model.b.get("ctrl_chord") is not None:
+            notes.append(
+                "Controls (chordwise mode): the derivative per unit deflection [1/rad] turns the "
+                "normals of the panels aft of the hinge about the hinge line. All controls with one "
+                "name move together; the left half of an antisymmetric control moves the opposite way.")
+        else:
+            notes.append(
+                "Controls (section mode): the derivative per unit deflection [1/rad] of the "
+                "thin-airfoil deflected section (alpha_L0 - tau delta, Cm0 + dCm/ddelta delta; "
+                "Glauert 1926). All controls with one name move together; the left half of an "
+                "antisymmetric control moves the opposite way.")
+    notes.extend(_nonlinear_notes(model))
+    notes.extend(_table_notes(model))
+    if prep["canonical"] in ("linear", "nonlinear") and ("nodes" in ins or "planform" in ins):
+        notes.append(LLT_NODE_NOTE)
+    return notes
+
+
+def _rate_notes(prep: dict, jacobian: dict, outs: tuple[str, ...], ins: tuple[str, ...]) -> list[str]:
+    """Return the nondimensional rate derivatives of the outputs as notes.
+
+    The nondimensional rates are p b/(2V), q c/(2V) and r b/(2V), with the
+    reference values of the case (as :func:`ventorum.rate_derivatives`).
+    """
+    rates = [w for w in RATE_INPUTS if w in ins]
+    if not rates:
+        return []
+    base = prep["base"]
+    V = float(base["V_inf"])
+    to_hat = {"p": 2.0 * V / float(base["b_ref"]), "q": 2.0 * V / float(base["c_ref"]),
+              "r": 2.0 * V / float(base["b_ref"])}
+    parts = []
+    for o in outs:
+        for w in rates:
+            parts.append(f"{o}_{w} = {float(jacobian[o][w]) * to_hat[w]:.6g}")
+    return [
+        "Body rates: quasi-steady rotation about the moment reference point; the jacobian is per "
+        "rad/s. Nondimensional derivatives per unit p b/(2V), q c/(2V), r b/(2V) "
+        f"(b_ref {float(base['b_ref']):.6g} m, c_ref {float(base['c_ref']):.6g} m; rates in body "
+        f"axes, moments in the '{prep['axes']}' axes): " + ", ".join(parts) + "."]
+
+
 def _pack_jacobian(model: TorchReference, t: dict, gmap: dict, wrt: tuple[str, ...],
                    base: dict, symmetric: bool = False) -> dict:
     """Pack the flat autograd gradients into the jacobian structure.
@@ -903,6 +1244,12 @@ def _pack_jacobian(model: TorchReference, t: dict, gmap: dict, wrt: tuple[str, .
                 continue
             gr = gmap.get(id(t[key])) if t.get(key) is not None else None
             j[key] = 0.0 if gr is None else float(np.asarray(gr, dtype=float))
+    if "controls" in wrt:
+        ctrl = {}
+        for name in base.get("control_names", []):
+            gr = gmap.get(id(t[f"controls:{name}"]))
+            ctrl[name] = 0.0 if gr is None else float(np.asarray(gr, dtype=float))
+        j["controls"] = ctrl
     if "sections" in wrt:
         sec = {}
         for key in ("a0", "alpha_L0", "Cd0", "Cm0"):
@@ -968,19 +1315,26 @@ def gradients(
     condition : FlightCondition
         Flight condition. Angles in rad, height in m.
     settings : SolverSettings or None
-        Solver settings. Only ``"vlm"`` and ``"linear"`` with linear
-        airfoils, zero control deflections and zero body rates are accepted.
+        Solver settings: ``"vlm"``, ``"linear"`` or ``"nonlinear"``, with
+        linear or tabulated airfoils, control deflections and body rates.
+        The Fourier solver is refused (``GradientScopeError``), and so is a
+        nonlinear solve that did not converge.
     outputs : tuple of str
         Scalar outputs from ``"CL", "CY", "CDi", "CDp", "CD", "Cl", "Cm", "Cn"``.
         Vector outputs go through :func:`gradient_vjp`.
     wrt : tuple of str
         Inputs from ``"nodes", "alpha", "beta", "V_inf", "rho", "h", "phi",
-        "sections", "reference", "planform"``. Lengths in m, angles in rad,
-        ``y_frac`` dimensionless. ``"planform"`` gives per surface the
-        semi-span [m], sweep_le, dihedral and incidence [rad], position [m]
-        and per-section lists (chord [m], twist [rad], x_le [m] or None,
-        z_le [m] or None, y_frac [-], alpha_L0 [rad]); it cannot be combined
-        with ``"nodes"``.
+        "sections", "reference", "planform", "controls", "p", "q", "r"``.
+        Lengths in m, angles in rad, rates in rad/s, ``y_frac``
+        dimensionless. ``"planform"`` gives per surface the semi-span [m],
+        sweep_le, dihedral and incidence [rad], position [m] and per-section
+        lists (chord [m], twist [rad], x_le [m] or None, z_le [m] or None,
+        y_frac [-], alpha_L0 [rad]); it cannot be combined with ``"nodes"``
+        and needs linear airfoils. ``"controls"`` gives per control name the
+        derivative per unit deflection [1/rad] (all controls with one name
+        move together). ``"p"``, ``"q"``, ``"r"`` are the body rates
+        [rad/s] (flight-dynamics body axes); the notes give the
+        nondimensional derivatives.
     axes : str
         Axes of the moments: ``"body"``, ``"stability"`` or ``"wind"``.
     method : str
@@ -1030,6 +1384,8 @@ def gradients(
         if prep["production_symmetric"]:
             notes.append("Planform inputs use the full system, also for symmetric cases.")
         notes.extend(prep["model"].b.get("_planform", {}).get("notes", []))
+    notes.extend(_case_notes(prep, ins))
+    notes.extend(_rate_notes(prep, jacobian, outs, ins))
     if prep["precision"] == "float32":
         notes.append(
             "Float32 gradients: the gradient gate of float32 is 1e-3 relative; check the result with "
@@ -1107,5 +1463,7 @@ def gradient_vjp(
 
     vectors = tuple(o for o in seeds if o in VECTOR_OUTPUTS)
     _, jacobian, _, _ = _adjoint_solve(prep, ins, _make, vectors=vectors)
+    # The warning past the maximum lift of the nonlinear lifting line.
+    _nonlinear_notes(model)
     return jacobian["__vjp__"]
 

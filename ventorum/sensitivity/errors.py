@@ -7,10 +7,10 @@ This module imports nothing heavy, so that other modules can catch
 
 
 class GradientScopeError(ValueError):
-    """A configuration that the adjoint gradients do not cover yet.
+    """A configuration that the adjoint gradients do not cover.
 
-    The nonlinear lifting line, tabulated airfoils, deflected controls, body
-    rates and the Fourier solver have no adjoint gradients in this version.
-    A later version adds them. Callers can catch this error to use another
+    The Fourier solver (a closed form), a nonlinear lifting-line solve that
+    did not converge, and the planform input with tabulated airfoils have
+    no adjoint gradients. Callers can catch this error to use another
     method (for example central differences of the production solve).
     """

@@ -490,7 +490,7 @@ def test_vjp_strip_force(float64_precision) -> None:
 
 
 def test_refusals(float64_precision) -> None:
-    """Refused configurations and bad names raise ValueError (GradientScopeError for configurations not covered yet)."""
+    """Refused configurations and bad names raise ValueError (GradientScopeError for the Fourier solver)."""
     ac = vt.Aircraft(surfaces=[_plain_wing()])
     cond = vt.FlightCondition(V_inf=30.0, alpha=np.radians(4.0))
     st = vt.SolverSettings(solver_type="vlm", n_panels=8, n_chord=1)
@@ -512,36 +512,14 @@ def test_refusals(float64_precision) -> None:
             vt.gradient_vjp(ac, cond, st, seeds={"CL": 1.0}, wrt=())
         with pytest.raises(ValueError, match="No output requested"):
             vt.check_gradients(ac, cond, st, outputs=(), wrt=("alpha",))
-        # Nonlinear solver.
-        with pytest.raises(vt.GradientScopeError):
-            vt.gradients(ac, cond, vt.SolverSettings(solver_type="nonlinear", n_panels=8),
-                         outputs=("CL",), wrt=("alpha",))
-        # Fourier solver.
+        # Fourier solver (closed form: no adjoint). The nonlinear lifting line,
+        # tabulated airfoils, control deflections and body rates are covered
+        # (tests/test_gradients_phase2.py).
         with pytest.raises(vt.GradientScopeError):
             vt.gradients(ac, cond, vt.SolverSettings(solver_type="fourier", n_panels=8),
                          outputs=("CL",), wrt=("alpha",))
-        # Tabulated airfoil.
-        af = vt.TabulatedAirfoil(
-            alpha=np.radians(np.arange(-4.0, 14.0, 2.0)),
-            Cl_data=2.0 * np.pi * np.radians(np.arange(-4.0, 14.0, 2.0)),
-            Cd_data=0.01 + np.zeros(9))
-        wing = vt.LiftingSurface(name="Wing", semi_span=5.0, sections=[
-            vt.WingSection(y_frac=0.0, chord=2.0, airfoil=af),
-            vt.WingSection(y_frac=1.0, chord=1.0, airfoil=af)])
-        with pytest.raises(vt.GradientScopeError):
-            vt.gradients(vt.Aircraft(surfaces=[wing]), cond, st, outputs=("CL",), wrt=("alpha",))
-        # Control deflection not zero.
-        flap = vt.ControlSurface(name="flap", eta_start=0.3, eta_end=0.7, hinge_x_c=0.75,
-                                 deflection=np.radians(5.0))
-        wing_c = _plain_wing()
-        wing_c.controls = [flap]
-        with pytest.raises(vt.GradientScopeError):
-            vt.gradients(vt.Aircraft(surfaces=[wing_c]), cond, st, outputs=("CL",), wrt=("alpha",))
-        # Body rates not zero.
         import dataclasses
 
-        with pytest.raises(vt.GradientScopeError):
-            vt.gradients(ac, dataclasses.replace(cond, q=0.01), st, outputs=("CL",), wrt=("alpha",))
         # Non-finite input.
         with pytest.raises(ValueError, match="finite"):
             vt.gradients(ac, dataclasses.replace(cond, alpha=math.nan), st,
