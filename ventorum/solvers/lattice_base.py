@@ -89,25 +89,27 @@ def _cpu_dispatch(n_panels: int, batch: int, reason: str | None) -> dict:
     Returns
     -------
     dict
-        The keys ``device``, ``precision``, ``backends``, ``threads``,
-        ``workers``, ``plan_source``, ``profile`` and ``reason``.
+        A read-only dict (shared by all cases of the batch) with the keys
+        ``device``, ``precision``, ``backends``, ``threads``, ``workers``,
+        ``plan_source``, ``profile`` and ``reason``.
     """
     from ventorum.aero.vortex import _kernel_backends_for
+    from ventorum.core.datatypes import _ReadOnlyDict
     from ventorum.hardware.profile import active_profile
     from ventorum.utils.parallel import _dispatch_plan
 
     prof = active_profile()
     workers, threads, plan_source = _dispatch_plan(n_panels, batch)
-    return {
+    return _ReadOnlyDict({
         "device": "cpu",
         "precision": "float64",
-        "backends": _kernel_backends_for(n_panels),
+        "backends": _ReadOnlyDict(_kernel_backends_for(n_panels)),
         "threads": threads,
         "workers": workers,
         "plan_source": plan_source,
         "profile": prof.get("fingerprint") if isinstance(prof, dict) else None,
         "reason": reason or "CPU path selected",
-    }
+    })
 
 
 def as_aircraft(geometry: Aircraft | LiftingSurface) -> Aircraft:
@@ -418,8 +420,8 @@ class LatticeSolver(BaseSolver):
 
         *dispatch* is the dispatch record of the solve (``details["dispatch"]``),
         made once per batch (:func:`_cpu_dispatch` on the CPU, the GPU
-        pipeline on the GPU). Each case gets its own copy. None makes a CPU
-        record of a single case.
+        pipeline on the GPU). All cases of the batch share this read-only
+        record (no copy per case). None makes a CPU record of a single case.
         """
         sweep_deg = self._cached(lattice, "quarter_chord_sweep_deg", lambda: quarter_chord_sweep_deg(lattice))
         if self.collocation == "llt" and sweep_deg > LLT_SWEEP_WARNING_DEG:
@@ -494,7 +496,7 @@ class LatticeSolver(BaseSolver):
             "gamma": gamma,
             "wake_dir": wd,
             "ref_point": None if ref_point is None else np.asarray(ref_point, dtype=float),
-            "dispatch": {**dispatch, "backends": dict(dispatch["backends"])},
+            "dispatch": dispatch,
         }
         for msg in notes:
             warnings.warn(msg, RuntimeWarning, stacklevel=4)

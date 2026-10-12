@@ -1306,6 +1306,35 @@ class IntegratedResult:
         }
 
 
+class _ReadOnlyDict(dict):
+    """A dict that refuses changes: the shared dispatch record of the results of one batch.
+
+    All the results of a batch share one record (``details["dispatch"]``),
+    so that the record costs no copy per case. A change would change the
+    record of every case of the batch, so the dict refuses it with
+    TypeError. ``dict(record)`` gives a changeable copy. The record is a
+    dict for ``isinstance``, :func:`json.dumps`, :mod:`pickle` and
+    :func:`copy.deepcopy`.
+    """
+
+    __slots__ = ()
+
+    def _refuse(self, *args, **kwargs):
+        raise TypeError("The dispatch record is read-only; use dict(record) to get a copy.")
+
+    __setitem__ = __delitem__ = __ior__ = _refuse
+    clear = pop = popitem = setdefault = update = _refuse
+
+    def __reduce__(self):
+        return (type(self), (dict(self),))
+
+    def __copy__(self):
+        return self
+
+    def __deepcopy__(self, memo):
+        return self
+
+
 @dataclass(slots=True)
 class SolverResult:
     """Top-level container returned by every solver.
@@ -1471,7 +1500,10 @@ class SolverResult:
             ]
         if detail_level == "full":
             if "dispatch" in self.details:
-                out["dispatch"] = dict(self.details["dispatch"])
+                rec = dict(self.details["dispatch"])
+                if isinstance(rec.get("backends"), dict):
+                    rec["backends"] = dict(rec["backends"])
+                out["dispatch"] = rec
         return out
 
 

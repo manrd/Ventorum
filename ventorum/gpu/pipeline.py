@@ -348,22 +348,23 @@ def _results(solver, lattice, conditions, arrays: dict, setups: list, umap, b_re
     float64; its loads are computed on the GPU in float64).
     """
     from ventorum.aero.loads import loads_result, trefftz_lateral_batch
+    from ventorum.core.datatypes import _ReadOnlyDict
     from ventorum.hardware.profile import active_profile
     from ventorum.solvers.core import SolveInfo
 
     prof = active_profile()
-    # The CPU thread plan does not apply to a GPU batch: threads, workers
-    # and plan_source are None.
-    dispatch = {
+    # One read-only record for all cases of the batch. The CPU thread plan
+    # does not apply to a GPU batch: threads, workers and plan_source are None.
+    dispatch = _ReadOnlyDict({
         "device": "gpu",
         "precision": precision,
-        "backends": dict(GPU_BACKENDS[solver.name]),
+        "backends": _ReadOnlyDict(GPU_BACKENDS[solver.name]),
         "threads": None,
         "workers": None,
         "plan_source": None,
         "profile": prof.get("fingerprint") if isinstance(prof, dict) else None,
         "reason": dispatch_reason,
-    }
+    })
     totals = arrays["totals"].tolist()
     span = arrays["span"]
     gammas = arrays["gamma"]
