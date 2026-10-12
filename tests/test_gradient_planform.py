@@ -442,6 +442,14 @@ def _cranked_wing() -> vt.LiftingSurface:
         sections=[_section(0.0, 3.0, 2.0), _section(0.35, 2.2, 1.0), _section(1.0, 0.9, -2.0)])
 
 
+def _coincident_wing() -> vt.LiftingSurface:
+    """Three sections with explicit x_le and z_le; the break at 0.5 lies on a mesh edge."""
+    return vt.LiftingSurface(
+        name="W", semi_span=4.0,
+        sections=[_section(0.0, 2.0, 1.0, x_le=0.0, z_le=0.0),
+                  _section(0.5, 1.5, 0.0, x_le=0.5, z_le=0.25),
+                  _section(1.0, 1.0, -1.0, x_le=1.2, z_le=0.9)])
+
 
 def _production_cl(ac: vt.Aircraft, cond, st) -> float:
     return float(vt.analyze(ac.clone(), cond, st.clone()).totals.CL)
@@ -557,6 +565,72 @@ def test_planform_control_on_break_edge(float64_precision) -> None:
     assert np.array_equal(geom.surfaces["W"].mid_base, eta_mid)
 
 
+def test_planform_coincident_break(float64_precision, cpu_device) -> None:
+    """Regression: a break exactly on a mesh edge gives the derivative of the moved branch.
+
+    Production moves the edge for any nonzero y_frac step, so central
+    differences converge to the derivative of the edge-mean branch. The
+    gradient matches them (1e-6), a note names the section, and
+    check_gradients compares that component.
+    """
+    from ventorum.sensitivity.planform import build_planform
+
+    ac = vt.Aircraft(surfaces=[_coincident_wing()])
+    cond = vt.FlightCondition(V_inf=30.0, alpha=np.radians(4.0), beta=np.radians(3.0))
+    st = vt.SolverSettings(solver_type="vlm", n_panels=10, n_chord=2)
+    geom = build_planform(ac, st, "vlm")
+    assert geom.coincident == [("W", 1)]
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        res = vt.gradients(ac, cond, st, outputs=("CL", "CD", "Cm"), wrt=("planform",))
+    assert res.forward_mismatch <= 1e-12, res.forward_mismatch
+    assert any("section 1" in n and "lies exactly on a mesh edge" in n for n in res.notes), res.notes
+    g = float(res.jacobian["CL"]["planform"]["W"]["sections"][1]["y_frac"])
+
+    def cl_at(v: float) -> float:
+        a = ac.clone()
+        a.surfaces[0].sections[1].y_frac = v
+        return _production_cl(a, cond, st)
+
+    fd = {h: (cl_at(0.5 + h) - cl_at(0.5 - h)) / (2.0 * h) for h in (2e-4, 1e-4)}
+    ref = (4.0 * fd[1e-4] - fd[2e-4]) / 3.0
+    assert abs(g - ref) <= 1e-6 * abs(ref), (g, ref)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        out = vt.check_gradients(ac, cond, st, outputs=("CL", "CD", "Cm"),
+                                 wrt=("planform",), n_directions=0, rtol=1e-6, seed=0)
+    assert out["pass"], _failed(out)
+    for o in ("CL", "CD", "Cm"):
+        assert out["details"][f"{o}:planform.W.sec[1].y_frac"]["compared"], o
+
+
+def test_planform_mirror_pair_auto_refs(float64_precision, cpu_device) -> None:
+    """Mirror pairs: a note and skips with automatic references; all pass with explicit ones."""
+    twin = vt.LiftingSurface(
+        name="Twin", semi_span=1.5, is_symmetric=False, position=np.array([3.0, 0.8, 0.2]),
+        sweep_le=np.radians(10.0), sections=[_section(0.0, 0.8, 1.0), _section(1.0, 0.5, -1.0)])
+    cond = vt.FlightCondition(V_inf=30.0, alpha=np.radians(4.0), beta=np.radians(3.0))
+    st = vt.SolverSettings(solver_type="vlm", n_panels=8, n_chord=2)
+    ac = vt.Aircraft(surfaces=[twin, twin.mirrored("TwinL")])
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        res = vt.gradients(ac, cond, st, outputs=("CL",), wrt=("planform",))
+        out = vt.check_gradients(ac, cond, st, outputs=("CL", "Cm"), wrt=("planform",),
+                                 n_directions=0, rtol=1e-6, seed=0)
+    assert any("mirror pair" in n for n in res.notes), res.notes
+    pf = [v for k, v in out["details"].items() if k.startswith("planform.")]
+    assert pf and all(not v["compared"] and "mirror pair" in v["reason"] for v in pf)
+    assert out["groups"]["planform"]["compared"] == 0
+    ac_ex = ac.clone()
+    ac_ex.S_ref, ac_ex.b_ref, ac_ex.c_ref = 2.0, 4.0, 0.65
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        res_ex = vt.gradients(ac_ex, cond, st, outputs=("CL",), wrt=("planform",))
+        out_ex = vt.check_gradients(ac_ex, cond, st, outputs=("CL", "Cm"), wrt=("planform",),
+                                    n_directions=0, rtol=1e-6, seed=0)
+    assert not any("mirror pair" in n for n in res_ex.notes)
+    assert out_ex["pass"], _failed(out_ex)
+    assert out_ex["groups"]["planform"]["skipped"] == 0, out_ex["groups"]
 
 
 def test_planform_refuses_unsorted_sections(float64_precision) -> None:

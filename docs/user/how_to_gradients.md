@@ -105,6 +105,19 @@ planform. Planform inputs use the full system, also for symmetric cases. The
 translation identity holds per surface: the position gradient equals the
 summed node gradients of that surface.
 
+Read the result notes. Two cases make the production output jump, and a note
+tells you:
+
+* A section break that lies exactly on a mesh edge. Any change of the span
+  fraction of that section moves the edge, so the output jumps at the base
+  point. The span-fraction gradient of that section is the derivative for any
+  nonzero change (central differences agree with it).
+* A mirror pair (a surface and its `mirrored()` copy) that gives the automatic
+  reference values. The gradient is per copy; a change of both copies together
+  is the sum of the two gradients. A change of one copy alone breaks the pair,
+  so the automatic reference values change. `check_gradients` skips these
+  components. Set `S_ref`, `b_ref` and `c_ref` explicitly to remove the jump.
+
 ## Trust
 
 The reference copy also gives the output values. `forward_mismatch` reports the largest

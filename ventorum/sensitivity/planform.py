@@ -56,8 +56,10 @@ class SurfaceTrace:
         Per edge the section index whose span fraction it tracks, or None.
     snap_moved : list
         Per edge True when the edge moved to its break at the base point.
-        An edge on its break keeps the spacing midpoints until the break
-        moves away (same rule as the numpy builder).
+        An edge that lies exactly on its break keeps the spacing midpoints
+        at the base point (same rule as the numpy builder); any nonzero
+        change of the span fraction of its section moves the edge, and the
+        neighbour control stations become the edge means.
     root_mask : np.ndarray
         Per edge True where the twist axis is the y axis (frozen).
     sec_has_x : list of bool
@@ -104,13 +106,42 @@ class SurfaceTrace:
 
 @dataclass
 class PlanformGeometry:
-    """Frozen planform topology of an aircraft for the torch port."""
+    """Frozen planform topology of an aircraft for the torch port.
+
+    Attributes
+    ----------
+    surfaces : dict
+        Surface name to :class:`SurfaceTrace`.
+    order : list of str
+        Surface names in the order of the aircraft.
+    main_index : int
+        Index of the main surface.
+    ref_surfaces : list of str
+        The main surface and its mirror copies (automatic reference values).
+    ref_factors : dict
+        Surface name to the area factor (2 for a symmetric surface, else 1).
+    auto_refs : list of str
+        Reference values that are automatic (``"S_ref"``, ``"b_ref"``,
+        ``"c_ref"``).
+    mirror_ref_auto : list of str
+        The surfaces of a mirror pair that gives automatic reference values
+        (empty when there is no such pair).
+    coincident : list of tuple
+        ``(surface, section)`` of each section whose break lies exactly on a
+        spacing edge at the base point.
+    notes : list of str
+        Result notes about the planform topology.
+    """
 
     surfaces: dict = field(default_factory=dict)
     order: list = field(default_factory=list)
     main_index: int = 0
     ref_surfaces: list = field(default_factory=list)
     ref_factors: dict = field(default_factory=dict)
+    auto_refs: list = field(default_factory=list)
+    mirror_ref_auto: list = field(default_factory=list)
+    coincident: list = field(default_factory=list)
+    notes: list = field(default_factory=list)
 
 
 @dataclass
@@ -209,7 +240,8 @@ def build_planform(aircraft: Any, settings: Any, collocation: str) -> PlanformGe
     Returns
     -------
     PlanformGeometry
-        Frozen traces per surface, main-surface index and reference surfaces.
+        Frozen traces per surface, main-surface index, reference surfaces,
+        coincident breaks and result notes.
 
     Raises
     ------
@@ -236,6 +268,19 @@ def build_planform(aircraft: Any, settings: Any, collocation: str) -> PlanformGe
     geom = PlanformGeometry()
     geom.main_index = aircraft.main_surface_index()
     geom.ref_surfaces = [s.name for s in aircraft.reference_surfaces()]
+    ac_ref = aircraft.clone()
+    ac_ref.compute_reference_values()
+    geom.auto_refs = sorted(set(getattr(ac_ref, "_auto_ref", set())) & {"S_ref", "b_ref", "c_ref"})
+    if len(geom.ref_surfaces) > 1 and geom.auto_refs:
+        geom.mirror_ref_auto = list(geom.ref_surfaces)
+        names = ", ".join(f"'{n}'" for n in geom.ref_surfaces)
+        geom.notes.append(
+            f"Surfaces {names} form a mirror pair that gives the automatic reference values "
+            f"({', '.join(geom.auto_refs)}). The planform gradient is per copy with the pair "
+            "kept; a joint change of both copies is the sum of the gradients of the copies. "
+            "A change of one copy alone breaks the mirror pair, so the production reference "
+            "values change and the production output jumps: finite differences of one copy "
+            "do not converge to this gradient. Set explicit reference values to remove the jump.")
     for surf in aircraft.surfaces:
         tr = SurfaceTrace()
         tr.name = surf.name
@@ -265,6 +310,18 @@ def build_planform(aircraft: Any, settings: Any, collocation: str) -> PlanformGe
         tr.mid_base = np.asarray(eta_mid, dtype=float).copy()
         tr.snap_sec = list(snap)
         tr.snap_moved = list(snap_moved)
+        for i, sec_idx in enumerate(tr.snap_sec):
+            if sec_idx is not None and not bool(tr.snap_moved[i]):
+                geom.coincident.append((surf.name, int(sec_idx)))
+                geom.notes.append(
+                    f"Surface '{surf.name}', section {int(sec_idx)} (y_frac "
+                    f"{float(surf.sections[int(sec_idx)].y_frac):.6g}) lies exactly on a mesh "
+                    "edge. Any nonzero change of its y_frac moves the edge with the section and "
+                    "the control stations of the two neighbour strips change from the spacing "
+                    "rule to the edge means, so the production output jumps at the base point. "
+                    "The y_frac gradient of this section is the derivative of the branch that "
+                    "production follows for any nonzero step (central differences converge to "
+                    "it); the other gradients are the derivatives at the base point.")
         tr.n_sections = len(surf.sections)
         secs = list(surf.sections)
         tr.sec_has_x = [bool(s.x_le is not None) for s in secs]
@@ -485,7 +542,8 @@ def edge_nodes_torch(tr: SurfaceTrace, p: dict, device: Any, dtype: Any) -> tupl
 
 
 def planform_tensors(geom: PlanformGeometry, device: Any, dtype: Any,
-                     differentiable: bool = True) -> PlanformTensors:
+                     differentiable: bool = True,
+                     means_at: tuple | None = None) -> PlanformTensors:
     """Build all torch tensors of the planform port.
 
     Parameters
@@ -501,6 +559,13 @@ def planform_tensors(geom: PlanformGeometry, device: Any, dtype: Any,
         constants (parity checks). The airfoil incidence (``alpha_L0``) always
         comes from the section parameters; the other section properties
         (``a0``, ``Cd0``, ``Cm0``) come from the frozen base values.
+    means_at : tuple or None
+        ``(surface, section)`` of a coincident break (see
+        :attr:`PlanformGeometry.coincident`). None gives the production
+        branch at the base point: the control stations next to an edge that
+        lies exactly on its break keep the spacing rule. A tuple gives the
+        branch that production follows for any nonzero change of the span
+        fraction of that section: those control stations are the edge means.
 
     Returns
     -------
@@ -515,46 +580,40 @@ def planform_tensors(geom: PlanformGeometry, device: Any, dtype: Any,
         out.params[name] = p
         le, te, eta = edge_nodes_torch(tr, p, device, dtype)
         out.nodes[name] = {"le": le, "te": te, "eta": eta}
-        out.strips[name] = _strip_tensors_with_consts(tr, p, eta, device, dtype)
+        means_sec = means_at[1] if means_at is not None and means_at[0] == name else None
+        out.strips[name] = _strip_tensors_with_consts(tr, p, eta, device, dtype, means_sec)
     out.refs = _auto_refs_torch(geom, out.params, device, dtype)
     return out
 
 
 def _strip_tensors_with_consts(tr: SurfaceTrace, p: dict, eta: Any,
-                               device: Any, dtype: Any) -> dict:
-    """Return the defining-half strip tensors with frozen non-planform properties."""
+                               device: Any, dtype: Any, means_sec: int | None = None) -> dict:
+    """Return the defining-half strip tensors with frozen non-planform properties.
+
+    The control station of a strip next to a moved snapped edge is the mean
+    of its edges (it follows the edge). Next to an edge that lies exactly on
+    its break, the station keeps the spacing rule (the production value at
+    the base point), except for the edges of section *means_sec*, where it is
+    the edge mean (the branch of any nonzero change of that span fraction).
+    The branch is a fixed choice from the float64 station trace, so no
+    coincidence test runs in the gradient precision.
+    """
     import torch
 
     dev = torch.device(device)
     n_r = tr.n_sp
     base = torch.as_tensor(np.ascontiguousarray(tr.mid_base), dtype=dtype, device=dev)
     means = 0.5 * (eta[:-1] + eta[1:])
-    yf_now = torch.stack([d["y_frac"] for d in p["sec"]])
-    forced = [False] * n_r
-    switches: dict = {}
+    use_means = [False] * n_r
     for i, sec_idx in enumerate(tr.snap_sec):
         if sec_idx is None:
             continue
-        if bool(tr.snap_moved[i]):
+        if bool(tr.snap_moved[i]) or (means_sec is not None and sec_idx == means_sec):
             for k in (i - 1, i):
                 if 0 <= k < n_r:
-                    forced[k] = True
-        else:
-            coincident = torch.abs(
-                torch.tensor(float(tr.eta_base[i]), dtype=dtype, device=dev)
-                - yf_now[sec_idx]) < 1e-12
-            for k in (i - 1, i):
-                if 0 <= k < n_r:
-                    switches.setdefault(k, []).append(coincident)
-    act = torch.as_tensor(np.array(forced, dtype=float), dtype=dtype, device=dev)
-    for k, group in switches.items():
-        all_c = group[0]
-        for c in group[1:]:
-            all_c = all_c & c
-        gate = torch.where(all_c, 0.0, 1.0)
-        one = torch.where(torch.arange(n_r, device=dev) == k, gate, 0.0)
-        act = act + one
-    mid = torch.where(act > 0.5, means, base)
+                    use_means[k] = True
+    mask = torch.as_tensor(np.array(use_means, dtype=bool), device=dev)
+    mid = torch.where(mask, means, base)
     span = torch.clamp_min(eta[1:] - eta[:-1], 1e-300)
     frac = (mid - eta[:-1]) / span
     fr = torch.stack([d["y_frac"] for d in p["sec"]])

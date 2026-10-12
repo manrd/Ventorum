@@ -185,13 +185,35 @@ results are equal to round-off.
   builder: edge geometry, station rule, strip interpolation of the section
   properties, control-point fractions and automatic reference values. The port
   reproduces the numpy builder to 1e-14.
+* The station rule of the port is the rule of the mesh builder, also the limits:
+  section breaks snap only when there are at most four interior sections and at
+  most a third as many breaks as panels, and the automatic spacing follows the
+  solver (the lifting-line rule for the linear lifting line).
 * An edge on its break (a station that coincides with a section break at the base
-  point) switches the control stations from the spacing rule to the edge means on
-  any practical span-fraction step. The gradient there is one-sided, and
-  `check_gradients` skips it with a reason. A parameter change that adds, removes
-  or moves a snap to another edge (or flips the automatic spacing) is skipped the
-  same way: the fixed-topology gradient has no finite-difference reference there.
-  Wings whose interior sections are all kinked keep every break and verify fully.
+  point) keeps the spacing rule for its control stations at the base point. Any
+  nonzero change of the span fraction of that section moves the edge with the
+  break, and the control stations of the two neighbour strips become the edge
+  means, on both sides of the base point. The production output therefore jumps
+  at the base point, and the two one-sided differences diverge as the step
+  goes to zero; the central differences converge to the derivative of the
+  edge-mean branch. The span-fraction gradient of that section is the
+  derivative of that branch: one more adjoint pass runs on the edge-mean branch
+  with its own solved state. The other gradients are the derivatives at the base
+  point (their changes keep the edge on the break). A result note names the
+  section, and `check_gradients` compares the component.
+* A mirror pair (a surface and its `mirrored()` copy) that gives the automatic
+  reference values: the gradient is per copy with the pair kept, and a joint
+  change of both copies is the sum of the two gradients. A change of one copy
+  alone breaks the pair detection, so the production reference values change
+  and the production output jumps. A result note says so, and `check_gradients`
+  skips those components with a reason. With explicit reference values there is
+  no jump and every component verifies.
+* A parameter change that adds, removes or moves a snap to another edge (or flips
+  the automatic spacing) is skipped by `check_gradients` with a reason: the
+  fixed-topology gradient has no finite-difference reference there. Wings whose
+  interior sections are all kinked keep every break and verify fully.
+* The sections of a surface must be ordered by span fraction (the solvers refuse
+  other input); the port raises ValueError otherwise.
 * The planform parameters per surface are the semi-span [m], the leading-edge
   sweep [rad], the dihedral [rad], the incidence [rad] and the position [m], and
   per section the chord [m], the twist [rad], `x_le` [m] (None when unset), `z_le`
@@ -313,7 +335,10 @@ check fails when a component fails and when an input group has no compared compo
   identity of the position gradients, the nodes-planform refusal, the agreement of
   the airfoil incidence with the sections view, the kernel-reference agreement and
   the planform how-to example. Components whose mesh stations jump within the
-  difference step are skipped with a reason.
+  difference step are skipped with a reason. Regression tests: the lifting-line
+  spacing rule on a swept cranked wing, the break-count limit, a break exactly on
+  a mesh edge (the span-fraction gradient against central differences), mirror
+  pairs with automatic and explicit reference values, and unordered sections.
 * `tests/test_vjp_kernels.py`: each VJP backend (numpy, Numba, Cython, Warp) against
   the PyTorch reference VJP for the products and all input gradients (1e-12 float64,
   1e-5 float32), the thread paths, the backend selection and the machine profile.

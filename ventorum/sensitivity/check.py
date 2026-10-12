@@ -164,6 +164,9 @@ def check_gradients(
         ``"planform"`` is checked parameter by parameter (surface
         semi-span, sweep, dihedral, incidence and position; per-section
         chord, twist, x_le, z_le, span fraction and airfoil incidence).
+        Components are skipped with a reason when the mesh stations jump
+        within the step, and for the copies of a mirror pair that gives
+        automatic reference values (a change of one copy breaks the pair).
     n_directions : int
         Number of random node directions.
     rtol : float
@@ -394,6 +397,7 @@ def check_gradients(
         canonical = resolve_solver_type(st.solver_type)
         collocation = "vlm" if canonical == "vlm" else "llt"
         base_geom = PF.build_planform(ac, st, collocation)
+        mirror_auto = set(base_geom.mirror_ref_auto)
         base_snap = {n: (list(tr.snap_sec), tr.n_sp, tr.spacing)
                      for n, tr in base_geom.surfaces.items()}
         for tgt in _planform_targets(ac2, c_ref):
@@ -401,6 +405,16 @@ def check_gradients(
                 details[tgt["suffix"]] = {}
                 details[tgt["suffix"]].update(rel_err=None, mode="skipped", compared=False,
                                               passed=None, reason=tgt["skip"])
+                groups.setdefault("planform", {"compared": 0, "skipped": 0})["skipped"] += 1
+                continue
+            if tgt["surf"] in mirror_auto:
+                details[tgt["suffix"]] = {}
+                details[tgt["suffix"]].update(
+                    rel_err=None, mode="skipped", compared=False, passed=None,
+                    reason=("the surface is one copy of a mirror pair that gives the automatic "
+                            "reference values: a change of one copy breaks the pair and the "
+                            "production reference values jump, so the per-copy gradient has "
+                            "no finite-difference reference (set explicit reference values)"))
                 groups.setdefault("planform", {"compared": 0, "skipped": 0})["skipped"] += 1
                 continue
             if _planform_topology_jumps(ac, st, collocation, base_geom, base_snap, tgt):
@@ -640,19 +654,16 @@ def _planform_topology_jumps(ac: Any, st: Any, collocation: str, base_geom: Any,
 
     A spanwise snap that appears, disappears or moves to another edge (or a
     spacing flip) changes the mesh stations by much more than the smooth
-    motion with the parameter. An edge on its break (coincident at the base
-    point) also jumps: any practical span-fraction step moves the break off
-    the spacing edge, and the control stations switch from the spacing rule
-    to the edge means. The fixed-topology gradient then has no
+    motion with the parameter. The fixed-topology gradient then has no
     finite-difference reference there.
+
+    An edge that lies exactly on its break is not a jump here: both
+    difference steps move the edge with the break and use the edge means,
+    and the y_frac gradient of that section is the derivative of that
+    branch (see :func:`ventorum.sensitivity.adjoint._adjoint_solve`).
     """
     from ventorum.sensitivity import planform as PF
 
-    if tgt["key"] == "y_frac":
-        tr = base_geom.surfaces[tgt["surf"]]
-        for i, sec_idx in enumerate(tr.snap_sec):
-            if sec_idx == tgt["sec"] and not bool(tr.snap_moved[i]):
-                return True
     for sgn in (+1.0, -1.0):
         ac3 = ac.clone()
         _set_planform_param(ac3, tgt["surf"], tgt["sec"], tgt["key"], tgt.get("sub"),

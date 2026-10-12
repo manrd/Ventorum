@@ -350,13 +350,17 @@ def make_input_tensors(
     device: str,
     precision: str,
     prep: dict | None = None,
+    planform_means_at: tuple | None = None,
 ) -> dict:
     """Return the torch input tensors; requested inputs require grad.
 
     With ``"planform"`` in *wrt*, the node, strip-property and automatic
     reference tensors are differentiable functions of the planform parameters
     (see :mod:`ventorum.sensitivity.planform`), and *prep* (the dict of
-    :func:`_prepare_case`) is required.
+    :func:`_prepare_case`) is required. *planform_means_at* selects the
+    branch of a coincident section break (see
+    :func:`ventorum.sensitivity.planform.planform_tensors`); None gives the
+    production branch at the base point.
     """
     import torch
 
@@ -397,12 +401,12 @@ def make_input_tensors(
     if "planform" in wrt:
         if prep is None:
             raise ValueError("The planform input needs the case dict of _prepare_case.")
-        _attach_planform(model, t, prep, wrt, device, precision)
+        _attach_planform(model, t, prep, wrt, device, precision, planform_means_at)
     return t
 
 
 def _attach_planform(model: TorchReference, t: dict, prep: dict, wrt: tuple[str, ...],
-                     device: str, precision: str) -> None:
+                     device: str, precision: str, means_at: tuple | None = None) -> None:
     """Replace the geometry tensors of *t* by the differentiable planform port.
 
     The node tensors become the port nodes plus the fixed node displacements,
@@ -412,7 +416,8 @@ def _attach_planform(model: TorchReference, t: dict, prep: dict, wrt: tuple[str,
     *t* under ``"planform:..."`` keys. Intermediate input tensors whose own
     jacobian is requested (strips for ``"sections"``, automatic references for
     ``"reference"``) are registered for the extra gradients of
-    :func:`_adjoint_solve`.
+    :func:`_adjoint_solve`. *means_at* selects the branch of a coincident
+    section break (None: the production branch at the base point).
     """
     import torch
 
@@ -424,7 +429,7 @@ def _attach_planform(model: TorchReference, t: dict, prep: dict, wrt: tuple[str,
     canonical = prep["canonical"]
     collocation = "vlm" if canonical == "vlm" else "llt"
     geom = PF.build_planform(ac, prep["settings"], collocation)
-    pt = PF.planform_tensors(geom, device, dtype, differentiable=True)
+    pt = PF.planform_tensors(geom, device, dtype, differentiable=True, means_at=means_at)
     base_surf = {s["name"]: s for s in model.b["surfaces"]}
     nsec = {}
     for name in geom.order:
@@ -478,7 +483,8 @@ def _attach_planform(model: TorchReference, t: dict, prep: dict, wrt: tuple[str,
         extra += [t[prop] for prop in ("a0", "alpha_L0", "Cd0", "Cm0")]
     if "reference" in wrt:
         extra += [t[key] for key in ("S_ref", "b_ref", "c_ref") if key in auto]
-    model.b["_planform"] = {"nsec": nsec, "extra": extra}
+    model.b["_planform"] = {"nsec": nsec, "extra": extra,
+                            "coincident": list(geom.coincident), "notes": list(geom.notes)}
 
 
 @dataclass
@@ -653,22 +659,63 @@ def _adjoint_solve(
     system and the values of the forward check; *vectors* names the vector
     outputs that the forward check also compares.
     Returns (values, jacobian, forward_mismatch, n_adjoint).
+
+    With ``"planform"`` in *wrt* and a section break that lies exactly on a
+    mesh edge (a coincident break), any nonzero change of the span fraction
+    of that section moves the edge and changes the neighbour control
+    stations to the edge means. One more adjoint pass per coincident section
+    then runs on that branch (its own solved state, no forward check against
+    the base-point production result), and gives the y_frac gradient of
+    that section.
+    """
+    values, jacobian, worst, n_adj = _adjoint_pass(prep, wrt, make_targets, vectors)
+    if "planform" in wrt:
+        model: TorchReference = prep["model"]
+        for surf_name, sec in list(model.b.get("_planform", {}).get("coincident", [])):
+            _, jac_m, _, n_m = _adjoint_pass(prep, wrt, make_targets, (),
+                                             means_at=(surf_name, int(sec)))
+            n_adj += n_m
+            for name in jacobian:
+                jacobian[name]["planform"][surf_name]["sections"][int(sec)]["y_frac"] = (
+                    jac_m[name]["planform"][surf_name]["sections"][int(sec)]["y_frac"])
+    return values, jacobian, worst, n_adj
+
+
+def _adjoint_pass(
+    prep: dict,
+    wrt: tuple[str, ...],
+    make_targets: Any,
+    vectors: tuple[str, ...] = (),
+    means_at: tuple | None = None,
+) -> tuple[dict, dict, float, int]:
+    """Run one adjoint pass (see :func:`_adjoint_solve`).
+
+    With *means_at* None, the state is the production circulation and the
+    forward check runs. With *means_at* a coincident section, the planform
+    port takes the branch of a nonzero change of that span fraction, the
+    state is the solution of that linear system, and no forward check runs
+    (the production result at the base point is on the other branch).
     """
     import torch
 
     model: TorchReference = prep["model"]
     base = prep["base"]
     device, precision = prep["device"], prep["precision"]
-    t = make_input_tensors(model, base, wrt, device, precision, prep)
+    t = make_input_tensors(model, base, wrt, device, precision, prep,
+                           planform_means_at=means_at)
     g0 = torch.as_tensor(np.ascontiguousarray(prep["g_unknown"]),
                          dtype=model.b["dtype"], device=model.b["device"])
+    prod = _production_values(prep)
+    if means_at is not None:
+        with torch.no_grad():
+            _, A0, rhs0 = model.forward(t, g0)
+            g0 = torch.linalg.solve(A0, rhs0)
     g_var = g0.detach().clone().requires_grad_(True)
     outputs, A, rhs = model.forward(t, g_var)
     targets = make_targets(outputs)
     A_det = A.detach()
     g_star = g0.detach()
-    prod = _production_values(prep)
-    worst = _forward_check(prep, outputs, prod, vectors)
+    worst = 0.0 if means_at is not None else _forward_check(prep, outputs, prod, vectors)
     # One backward pass per target gives df/dG (the adjoint right-hand
     # side) and the explicit partials df/dx together.
     names = [name for name, _ in targets]
@@ -982,6 +1029,7 @@ def gradients(
             "keep position y at 0.")
         if prep["production_symmetric"]:
             notes.append("Planform inputs use the full system, also for symmetric cases.")
+        notes.extend(prep["model"].b.get("_planform", {}).get("notes", []))
     if prep["precision"] == "float32":
         notes.append(
             "Float32 gradients: the gradient gate of float32 is 1e-3 relative; check the result with "
