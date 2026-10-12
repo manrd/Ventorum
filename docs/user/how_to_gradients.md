@@ -205,12 +205,15 @@ differences: the converged state has a residual of the order of the tolerance.
   note names those strips too.
 * The planform input needs linear airfoils (`GradientScopeError` otherwise).
 
-Lifting-line node gradients: the vortex core on the collinear bound segments of the
-lifting line makes the node sensitivity of the lifting line depend on a length scale of
-about 1e-5 m (the core size), so these node gradients are not physical at that scale. An
-investigation of this effect is open. A result note repeats this caveat when the
-lifting line returns node or planform gradients. Use the vortex lattice for node
-gradients, or check them with differences at the mesh scale.
+Lifting-line node gradients: the vortex core acts on the distance from a point to the
+finite filament (see [Vortex filaments](../theory/vortex_kernels.md)). The force points
+and the collocation points of a lifting line lie on the extended lines of the bound
+segments of the other strips; a core on the distance to the extended line changed their
+velocity there and gave node gradients with errors of order one. With the present core
+the node gradients agree with an exact-law reference within 2 %, and finite differences
+do not depend on the step from 1e-8 m to 1e-3 m (`tests/test_core_node_gradients.py`).
+A result note states the remaining limits of the lifting-line model when the lifting
+line returns node or planform gradients.
 
 ## Trust
 

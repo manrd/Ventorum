@@ -141,11 +141,16 @@ lift from the table at the section angle of the solve.
 
 ### Lifting-line node gradients
 
-The vortex core on the collinear bound segments of the lifting line makes the node
-sensitivity of the lifting line depend on a length scale of about 1e-5 m (the core). At
-that scale the node gradients of the lifting line are not physical. An investigation of
-this effect is open. The result notes state this caveat when the lifting line returns
-node or planform gradients.
+The force points and collocation points of a lifting line lie on the extended lines of
+the bound segments of the other strips, outside those segments. A core that acts on the
+distance to the extended line of a filament gave these pairs a velocity factor
+`h^2 / (h^2 + rc^2)`, with a length scale of the core size, and node gradients with errors
+of order one against the exact law. The core acts on the distance to the finite filament
+(see [Vortex filaments](vortex_kernels.md)), so these pairs follow the exact law times
+`D^2 / (D^2 + rc^2)`, with `D` the distance to the nearest end point. The node gradients
+of the linear lifting line agree with an exact-law reference within 2 %, and the finite
+differences do not depend on the step from 1e-8 m to 1e-3 m
+(`tests/test_core_node_gradients.py`).
 
 ### Target points on a vortex segment
 
@@ -158,13 +163,16 @@ but its partial derivatives are terms of order 1/rc^2 that cancel only in exact
 arithmetic. The reference copy sets these pairs to zero by the mesh topology (index
 masks of the own panel and of the edge line), not by a distance threshold.
 
-The segment kernel uses the projection `r0 . (t1 - t2)` where the target is over the
-segment (`r1 . r2 <= 0`), and the equal value `|r1 x r2|^2 (n1 + n2) / (n1 n2 (n1 n2 +
-r1 . r2))` elsewhere (Katz and Plotkin 2001, the two forms of the Biot-Savart law of a
-straight segment). The second form has no cancellation when `t1` and `t2` are almost
-equal (far points, points near the extension of the segment). The semi-infinite kernel
-uses `1 + cos(t) = |d x r|^2 / (|r| (|r| - d . r))` behind its start point for the same
-reason. Both forms give the same values as the production kernel to round-off.
+Over the segment (the foot of the perpendicular on the segment), the segment kernel uses
+the projection `r0 . (t1 - t2)` where `r1 . r2 <= 0`, and the equal value `|r1 x r2|^2
+(n1 + n2) / (n1 n2 (n1 n2 + r1 . r2))` elsewhere (Katz and Plotkin 2001, the two forms of
+the Biot-Savart law of a straight segment). The second form has no cancellation when `t1`
+and `t2` are almost equal. Outside the segment (before `A` or after `B`) the kernel is the
+exact law in the second form times the core factor `F = D2 / (D2 + rc2)`, with `D2` the
+squared distance to the nearest end point. The semi-infinite kernel uses `1 + cos(t)` in
+front of its start point and the exact law `1 / (|r| (|r| - d . r))` times `F` (with
+`D2 = |r|^2`) behind it. All forms give the same values as the production kernel to
+round-off.
 
 ### Vector-Jacobian products of the kernel
 
@@ -182,9 +190,14 @@ core as in `vortex.py`):
 ```text
 r1 = P - A,  r2 = P - B,  r0 = B - A,  c = r1 x r2
 n1 = sqrt(|r1|^2 + f),  n2 = sqrt(|r2|^2 + f),  t1 = r1 / n1,  t2 = r2 / n2
+before = r0 . r1 < 0,  after = r0 . r2 > 0,  outside = before or after
+over the segment:
 proj = |c|^2 (n1 + n2) / D,  D = n1 n2 (n1 n2 + r1 . r2)     if r1 . r2 > 0
 proj = r0 . (t1 - t2)                                         else
 den = |c|^2 + rc2 |r0|^2,  k = proj / (4 pi den),  v = k c
+outside:
+D2 = n1^2 if before, else n2^2,  F = D2 / (D2 + rc2)
+k = (n1 + n2) F / (4 pi D),  v = k c
 ```
 
 The floor `f` is 1e-300 in float64 arithmetic (all CPU kernels, which compute in
@@ -201,6 +214,9 @@ stable form:  g_cr2 += g_proj (n1 + n2) / D,  g_n1 = g_n2 = g_proj |c|^2 / D
 direct form:  g_r0 = g_proj (t1 - t2),  g_t1 = g_proj r0
               g_r1 = g_t1 / n1,  g_r2 = -g_t1 / n2
               g_n1 = -(g_t1 . t1) / n1,  g_n2 = (g_t1 . t2) / n2
+outside:      g_n1 = g_n2 = g_k F / (4 pi D),  g_D = -g_k k / D  (as in the stable form)
+              g_F = g_k (n1 + n2) / (4 pi D),  g_D2 = g_F rc2 / (D2 + rc2)^2
+              g_rc2 = -g_F D2 / (D2 + rc2)^2,  g_r1 += 2 g_D2 r1 (before) or g_r2 += 2 g_D2 r2 (after)
 norms:        g_r1 += (g_n1 / n1) r1,  g_r2 += (g_n2 / n2) r2
 cross:        g_c += 2 g_cr2 c,  g_r1 += r2 x g_c,  g_r2 += g_c x r1,  g_r0 += 2 g_r0sq r0
 end points:   g_P = g_r1 + g_r2,  g_A = -g_r1 - g_r0,  g_B = g_r0 - g_r2
@@ -210,17 +226,17 @@ Semi-infinite line from `A` along the unit vector `d`:
 
 ```text
 r = P - A,  c = d x r,  rn = sqrt(|r|^2 + f),  dr = d . r
-oc = |c|^2 / E,  E = rn (rn - dr)    if dr < 0
-oc = 1 + dr / rn                     else
-den = |c|^2 + rc2,  k = oc / (4 pi den),  v = k c
+in front (dr >= 0):  den = |c|^2 + rc2,  k = (1 + dr / rn) / (4 pi den),  v = k c
+behind (dr < 0):     E = rn (rn - dr),  F = D2 / (D2 + rc2),  D2 = rn^2,  k = F / (4 pi E),  v = k c
 ```
 
 ```text
 g_c = k u,  g_k = u . c,  g_oc = g_k / (4 pi den),  g_den = -g_k k / den
 g_cr2 = g_den,  g_rc2 = g_den
-behind:  g_cr2 += g_oc / E,  g_E = -g_oc oc / E,  g_rn = g_E (2 rn - dr),  g_dr = -g_E rn
+behind:  g_E = -g_k k / E,  g_rn = g_E (2 rn - dr),  g_dr = -g_E rn
+         g_F = g_k / (4 pi E),  g_D2 = g_F rc2 / (D2 + rc2)^2,  g_rc2 = -g_F D2 / (D2 + rc2)^2
 ahead:   g_dr = g_oc / rn,  g_rn = -g_oc dr / rn^2
-g_r = (g_rn / rn) r + g_dr d,  g_d = g_dr r
+g_r = (g_rn / rn + 2 g_D2) r + g_dr d,  g_d = g_dr r
 g_c += 2 g_cr2 c,  g_d += r x g_c,  g_r += g_c x d
 g_P = g_r,  g_A = -g_r
 ```
@@ -384,7 +400,7 @@ one boundary condition is above the limit; float32 finds only large errors.
 
 * `ventorum/sensitivity/reference.py`: the differentiable copy (lattice from edge nodes,
   system rows, the nonlinear lifting-line residual and its Newton Jacobian,
-  Kutta-Joukowski and leg forces with the tangential velocity, Trefftz drag, profile
+  Kutta-Joukowski and leg forces with the leg rules of the loads, Trefftz drag, profile
   drag and section moment of linear and tabulated airfoils, control deflections, body
   rates, ground images, cross-surface core, axes transforms).
 * `ventorum/sensitivity/adjoint.py`: `gradients`, `gradient_vjp`, `GradientResult`.
