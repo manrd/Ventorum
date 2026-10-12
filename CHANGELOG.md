@@ -40,6 +40,15 @@ a minor version can change a public interface.
   and a cost cap, and a second track that drives existing clients. References are computed at
   run time; the task file holds no reference values. Keys come only from environment variables
   and are removed from every output.
+- Dispatch record: every lattice-solver result has `details["dispatch"]` with the device, the
+  precision, the kernel backend per kernel, the threads, the workers and the source of the
+  parallel plan that ran, the tuning profile in use, and one sentence with the reason of the
+  device choice (for example the GPU cost model, the work threshold, a CPU worker thread, or a
+  nonlinear case solved again on the CPU). GPU results give None for threads, workers and plan
+  source. `SolverResult.to_dict` and `IntegratedResult.to_dict` give the record with
+  `detail_level="full"`, and so do the agent tools (not `batch_evaluate`). The default agent
+  output does not change. The record adds about 1 % to a small GPU sweep (more garbage
+  collection) and no measurable time on the CPU.
 
 ### Changed
 
