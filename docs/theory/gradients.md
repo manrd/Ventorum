@@ -400,6 +400,10 @@ one boundary condition is above the limit; float32 finds only large errors.
   (central differences with steps h and h/2, error estimate |FD(h) - FD(h/2)| / 3). The
   control inputs use the base step 1e-4 rad of the deflection change; the rates use
   1e-4 of the nondimensional rate (`2 V / b_ref` for p and r, `2 V / c_ref` for q).
+  When a central step of a control goes past the deflection limit of 30 deg, the
+  differences are one-sided, away from the limit: the second-order one-sided difference
+  `(-3 f(0) + 4 f(s h) - f(2 s h)) / (2 s h)` with the same Richardson combination. When
+  controls of one name are at both limits, the check raises `ValueError`.
 
 Path of the partials: `method="auto"` (the default) takes the backend that
 `set_vjp_backend` forces, else the `grad_vjp` entry of the machine profile for the

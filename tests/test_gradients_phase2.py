@@ -746,3 +746,31 @@ def test_sections_refused_on_tabulated_airfoils(solver, n_chord, float64_cpu) ->
         lin = vt.Aircraft(surfaces=[_wing(), tail])
         res = vt.gradients(lin, cond, st, outputs=("CL", "CD"), wrt=("sections",))
         assert np.any(np.asarray(res.jacobian["CD"]["sections"]["Cd0"]) != 0.0)
+
+
+@pytest.mark.parametrize("deflection_deg", [30.0, -30.0])
+def test_check_gradients_at_the_deflection_limit(deflection_deg, float64_cpu) -> None:
+    """Regression: check_gradients at a deflection of 30 deg uses one-sided differences.
+
+    Before, the central step went past the 30 deg limit and the check raised
+    a validation error.
+    """
+    from ventorum.sensitivity.check import _control_side
+
+    flap = _flap(deflection_deg)
+    ail = _aileron(deflection_deg)
+    ac = vt.Aircraft(surfaces=[_wing(controls=[flap, ail])])
+    cond = vt.FlightCondition(V_inf=30.0, alpha=np.radians(4.0), beta=_BETA)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        out = vt.check_gradients(ac, cond, _settings("vlm", 4), outputs=("CL", "Cl"),
+                                 wrt=("controls",), n_directions=0, rtol=1e-6)
+    assert out["pass"], _failed(out)
+    side = -1 if deflection_deg > 0 else 1
+    for name in ("flap", "aileron"):
+        assert out["details"][f"CL:controls.{name}"]["one_sided"] == side
+    # Inside the limit the differences stay central.
+    assert _control_side("flap", [np.radians(10.0)], 1e-4) == 0
+    # Controls of one name at both limits: no side stays inside.
+    with pytest.raises(ValueError, match="cannot stay inside the deflection limit"):
+        _control_side("flap", [np.radians(30.0), np.radians(-30.0)], 1e-4)

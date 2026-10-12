@@ -58,7 +58,7 @@ def _production_scalars(geometry: Any, condition: Any, settings: Any, axes: str)
 
 
 def _richardson(get: Any, x0: float, h: float, outs: tuple[str, ...],
-                eps: float, noise: dict[str, float] | None = None
+                eps: float, noise: dict[str, float] | None = None, side: int = 0
                 ) -> dict[str, tuple[float, float, float]]:
     """Return per output (reference, error estimate, round-off level).
 
@@ -70,7 +70,34 @@ def _richardson(get: Any, x0: float, h: float, outs: tuple[str, ...],
     of an output (see :func:`_noise_level`), the round-off level is the
     larger of that value and 6 sigma / h: the noise of the Richardson
     value is 1.9 sigma / h, and 6 sigma / h is about three times that.
+
+    With *side* +1 or -1 the differences are one-sided, to the side of
+    *side* only (for an input at a limit of its range). The second-order
+    one-sided difference
+    ``D(h) = (-3 f(x0) + 4 f(x0 + s h) - f(x0 + 2 s h)) / (2 s h)``
+    replaces the central difference, with the same Richardson combination
+    and estimate (both differences have an error of order h^2). The
+    round-off level is then 12 eps max(abs(f)) / h (the sum of the
+    magnitudes of the weights of the Richardson value).
     """
+    if side:
+        sgn = 1.0 if side > 0 else -1.0
+        f0 = get(x0)
+        f_1 = get(x0 + sgn * h / 2.0)
+        f_2 = get(x0 + sgn * h)
+        f_4 = get(x0 + sgn * 2.0 * h)
+        out1 = {}
+        for o in outs:
+            d_h = (-3.0 * f0[o] + 4.0 * f_2[o] - f_4[o]) / (2.0 * sgn * h)
+            d_h2 = (-3.0 * f0[o] + 4.0 * f_1[o] - f_2[o]) / (sgn * h)
+            est = abs(d_h - d_h2) / 3.0
+            ref = (4.0 * d_h2 - d_h) / 3.0
+            size = max(abs(f0[o]), abs(f_1[o]), abs(f_2[o]), abs(f_4[o]))
+            rnd = 12.0 * eps * size / h
+            if noise is not None:
+                rnd = max(rnd, _NOISE_FACTOR * noise[o] / h)
+            out1[o] = (float(ref), float(est), float(rnd))
+        return out1
     f_p_h = get(x0 + h)
     f_m_h = get(x0 - h)
     f_p_h2 = get(x0 + h / 2.0)
@@ -117,11 +144,15 @@ def _noise_level(get: Any, x0: float, delta: float, outs: tuple[str, ...]) -> di
 
 
 def _ladder(get: Any, x0: float, h: float, factors: tuple[float, ...], outs: tuple[str, ...],
-            eps: float, noise: dict[str, float] | None = None
+            eps: float, noise: dict[str, float] | None = None, side: int = 0
             ) -> dict[str, list[tuple[float, float, float, float]]]:
-    """Return per output the Richardson candidates (step, ref, est, round-off) of the steps h * factors."""
+    """Return per output the Richardson candidates (step, ref, est, round-off) of the steps h * factors.
+
+    *side* selects central (0) or one-sided (+1, -1) differences (see
+    :func:`_richardson`).
+    """
     out: dict[str, list[tuple[float, float, float, float]]] = {o: [] for o in outs}
-    fds = [(h * f, _richardson(get, x0, h * f, outs, eps, noise)) for f in factors]
+    fds = [(h * f, _richardson(get, x0, h * f, outs, eps, noise, side)) for f in factors]
     for o in outs:
         for k, (step, fd) in enumerate(fds):
             ref, est, rnd = fd[o]
@@ -162,7 +193,9 @@ def check_gradients(
         Inputs to check. ``"nodes"`` is checked along *n_directions*
         random unit directions over all node coordinates (seeded).
         ``"controls"`` is checked per control name (all controls with one
-        name move together; base step 1e-4 rad). ``"p"``, ``"q"``, ``"r"``
+        name move together; base step 1e-4 rad). Near the deflection limit
+        of 30 deg the differences are one-sided, away from the limit
+        (``"one_sided"`` in the details gives the side). ``"p"``, ``"q"``, ``"r"``
         use the base step 1e-4 of the nondimensional rate (1e-4 times
         2 V / b_ref for p and r, 2 V / c_ref for q) [rad/s].
         ``"planform"`` is checked parameter by parameter (surface
@@ -352,6 +385,9 @@ def check_gradients(
 
         for name in control_names(ac):
             h = 1e-4
+            defl = [float(c.deflection) for s in ac.surfaces for c in getattr(s, "controls", [])
+                    if c.name == name]
+            side = _control_side(name, defl, h * max(_STEP_FACTORS))
 
             def _get(v: float, _n: str = name) -> dict[str, float]:
                 ac3 = ac.clone()
@@ -361,9 +397,12 @@ def check_gradients(
                             c.deflection = float(c.deflection) + float(v)
                 return _production_scalars(ac3, condition, st, axes)
 
-            fd = _ladder(_get, 0.0, h, _STEP_FACTORS, outs, eps)
+            fd = _ladder(_get, 0.0, h, _STEP_FACTORS, outs, eps, side=side)
             _record("controls", f"controls.{name}",
                     {o: float(jac[o]["controls"][name]) for o in outs}, fd, 1.0)
+            if side:
+                for o in outs:
+                    details[f"{o}:controls.{name}"]["one_sided"] = side
     if "sections" in ins:
         from ventorum.solvers.factory import make_solver, resolve_solver_type
 
@@ -536,6 +575,52 @@ def check_gradients(
     return {"pass": bool(ok_all and not reasons), "compared": n_compared, "skipped": n_skipped,
             "rtol": float(rtol), "groups": groups, "reasons": reasons, "details": details,
             "partials": grad_res.partials}
+
+
+# Largest deflection magnitude of a control [rad] (the limit of
+# ventorum.geometry.controls.validate_controls).
+_DEFLECTION_LIMIT = float(np.radians(30.0))
+
+
+def _control_side(name: str, deflections: list[float], h_max: float) -> int:
+    """Return the side of the differences of one control name: 0 central, +1 or -1 one-sided.
+
+    The central differences move every control with the name by up to
+    +/- *h_max* [rad]. When this step goes past the deflection limit of
+    30 deg for one of them, the differences are one-sided, away from the
+    limit; the one-sided points reach 2 *h_max*.
+
+    Parameters
+    ----------
+    name : str
+        Control name.
+    deflections : list of float
+        Deflections of the controls with this name [rad].
+    h_max : float
+        Largest step of the step ladder [rad].
+
+    Returns
+    -------
+    int
+        0 (central), +1 or -1 (one-sided to that side).
+
+    Raises
+    ------
+    ValueError
+        When neither side stays inside the limit (controls with one name
+        at both limits).
+    """
+    lim = _DEFLECTION_LIMIT
+    if all(abs(d) + h_max <= lim for d in deflections):
+        return 0
+    for side in ((-1, 1) if max(deflections, key=abs) > 0.0 else (1, -1)):
+        if all(abs(d + side * 2.0 * h_max) <= lim for d in deflections):
+            return side
+    raise ValueError(
+        f"Control {name!r}: the differences of check_gradients cannot stay inside the "
+        f"deflection limit of 30 deg on either side (deflections "
+        f"{[round(float(np.degrees(d)), 6) for d in deflections]} deg). Check the controls of "
+        "this name at a smaller deflection.")
 
 
 def _section_step(prop: str, x0: float) -> float:
