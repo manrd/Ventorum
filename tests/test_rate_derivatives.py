@@ -18,6 +18,7 @@ Checks:
 from __future__ import annotations
 
 import dataclasses
+import types
 import warnings
 
 import numpy as np
@@ -31,12 +32,15 @@ from ventorum.reference.analytic import wing_sections_elliptic
 
 @pytest.fixture(autouse=True)
 def _cpu():
+    """Select the CPU, and restore the previous device and precision after the test."""
     from ventorum import gpu
 
     old = gpu.get_device()
+    old_prec = gpu._precision
     gpu.set_device("cpu")
     yield
     gpu.set_device(old)
+    gpu.set_precision(old_prec)
 
 
 def _elliptic(AR: float, a0: float = 2.0 * np.pi) -> vt.Aircraft:
@@ -319,13 +323,29 @@ def test_no_note_for_small_rates():
         vt.analyze(ac, fc, _settings("vlm", 8))
 
 
-def test_gpu_path_returns_none_for_unsupported_solver():
-    """The GPU pipeline returns None for unsupported solvers or when CPU is set."""
+def test_gpu_path_returns_none_for_unsupported_solver(monkeypatch):
+    """With the GPU selected, the pipeline returns None for a solver that it does not support (Fourier).
+
+    The device check passes (the GPU is selected), so the solver check gives
+    the None. A supported solver passes both checks and reaches the next step.
+    """
+    from ventorum import gpu
     from ventorum.gpu import pipeline
 
+    class _Reached(Exception):
+        pass
+
+    def _use_gpu(*args, **kwargs):
+        raise _Reached
+
+    monkeypatch.setattr(gpu, "get_device", lambda: "gpu")
+    monkeypatch.setattr(gpu, "use_gpu", _use_gpu)
+    lattice = types.SimpleNamespace(n_panels=8)
     cond = vt.FlightCondition(V_inf=20.0, alpha=0.0, q=0.1)
-    solver = vt.FourierSolver()
-    assert pipeline.solve_batch(solver, None, [cond], None, 1.0, 1.0, 1.0, None, 0, False, 0.0) is None
+    assert pipeline.solve_batch(vt.FourierSolver(), lattice, [cond], None, 1.0, 1.0, 1.0, None, 0, False,
+                                0.0) is None
+    with pytest.raises(_Reached):
+        pipeline.solve_batch(vt.VortexLatticeSolver(), lattice, [cond], None, 1.0, 1.0, 1.0, None, 0, False, 0.0)
 
 
 def test_fourier_solver_refuses_rates():
