@@ -34,6 +34,12 @@ a minor version can change a public interface.
   `check_gradients` covers the new inputs and uses one-sided steps at the 30 deg deflection
   limit. Lifting-line node gradients carry a note: the vortex core on collinear bound
   segments makes them inexact.
+- Agent benchmark harness (`validation/agent_benchmark/`, standard library only): a public task
+  set of 49 tasks in 9 levels, an MCP client loop for OpenAI-compatible and Anthropic endpoints,
+  strict scoring with a provenance check of every reported number, error kinds, repeats, resume
+  and a cost cap, and a second track that drives existing clients. References are computed at
+  run time; the task file holds no reference values. Keys come only from environment variables
+  and are removed from every output.
 
 ### Changed
 
