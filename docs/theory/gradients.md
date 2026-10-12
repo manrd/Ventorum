@@ -1,9 +1,10 @@
 # Adjoint gradients
 
 This chapter gives the discrete adjoint method of `ventorum.gradients`: exact gradients
-of the solver outputs with respect to the lattice nodes, the flow variables, the linear
-section properties and the reference values, for the vortex-lattice method and the
-linear numerical lifting line.
+of the solver outputs with respect to the lattice nodes, the flow variables, the section
+properties, the reference values, the control deflections and the body rates, for the
+vortex-lattice method and the linear and nonlinear numerical lifting lines, with linear
+or tabulated airfoils.
 
 ## Model in one paragraph
 
@@ -12,7 +13,9 @@ and the inputs `x`. The circulation comes from the normal production solve. One 
 factor of `A` gives `G` and every adjoint vector `lambda_j` from `A^T lambda_j =
 df_j/dG`. The total derivative of the output `f_j` is the gradient of the Lagrangian
 `f_j(G*, x) - lambda_j . (A(x) G* - b(x))` at the fixed converged `G*`. No automatic
-differentiation runs through the linear solve.
+differentiation runs through the linear solve. The nonlinear lifting line has a residual
+`R(G, x)` that is nonlinear in `G`; the same Lagrangian applies with the Newton Jacobian
+`J = dR/dG` at the converged state in place of `A` (see "Nonlinear lifting line" below).
 
 ## Equations
 
@@ -45,6 +48,94 @@ below):
 
 The O(n) parts (lattice from the nodes, forces, coefficients) stay in PyTorch on both
 paths. Both paths give the same gradients to round-off.
+
+### Nonlinear lifting line
+
+The residual of strip `i` (Phillips and Snyder 2000, eq. 15 in dimensional form) is
+
+```text
+R_i = 2 |W_i x dl_i| G_i - s_i Cl_i(alpha_i)
+W_i = U_i + sum_j v_ij G_j,   alpha_i = atan2(W_i . n_i, W_i . a_i),   s_i = |U_i|^2 dA_i
+```
+
+with `U_i` the free stream (or the local onset with body rates, below), `n_i` the
+normal and `a_i` the chord direction of the strip, and `v_ij` the velocity per unit
+circulation of unknown `j` at the control point of strip `i`. The Newton Jacobian is
+
+```text
+J_ij = 2 G_i v_ij . (dl_i x u_i) - s_i Cl_i'(alpha_i) (wa_i vn_ij - wn_i va_ij) / (wa_i^2 + wn_i^2)
+       + delta_ij 2 |W_i x dl_i|
+```
+
+with `u_i = (W_i x dl_i) / |W_i x dl_i|`, `wn_i = W_i . n_i`, `wa_i = W_i . a_i`,
+`vn_ij = v_ij . n_i` and `va_ij = v_ij . a_i`: the Jacobian of the Newton iteration of the
+production solve. The adjoint solves `J^T lambda_j = df_j/dG` at the converged `G*`, and
+the total derivative is the gradient of `f_j(G*, x) - lambda_j . R(G*, x)`. The reference
+copy gives `R` with its graph in the inputs (the induced velocity `W_i - U_i` comes from
+the kernel products, so both paths of the partials apply) and `J` without a graph. A test
+compares `J` with the automatic derivative of `R` (1e-12). The converged state has a
+residual of the order of the solver tolerance, and the gradient has an error of the same
+order. A solve that did not converge is refused. Where a section lift slope `Cl_i'` is
+zero or negative (past the maximum lift) the gradient is local and the solution may not
+be unique; the result warns. On the edge-mean branch of a planform break the state is
+the solution of Newton iterations from the production state.
+
+### Control deflections
+
+The input `"controls"` holds per control name the change of the deflection of every
+control with that name [rad]. The local deflection is `delta` on a right strip and for a
+symmetric control, and `-delta` on the left half of an antisymmetric control. The strips
+of a control follow the rule of the mesh builder.
+
+* Section mode (lifting lines, and the vortex lattice with one chordwise panel): the
+  thin-airfoil deflected section (Glauert 1926), `alpha_L0 - tau delta` and
+  `Cm0 + dCm/ddelta delta`, with the flap effectiveness `tau` and the moment derivative of
+  `ventorum.geometry.controls`. A tabulated polar is taken at `alpha + tau delta`, with
+  `Cm + dCm/ddelta delta`. The mesh builder fits the linear part of the shifted table;
+  the fit moves with the table, so `alpha_L0` changes by `-tau delta`.
+* Chordwise mode (vortex lattice with two or more chordwise panels): the normals of the
+  panels aft of the effective hinge turn by the local deflection about the hinge line
+  (Rodrigues rotation), with the hinge line from the strip nodes.
+
+The derivative at zero deflection is included. The fold applies only when every control
+is symmetric.
+
+### Body rates
+
+The inputs `"p"`, `"q"`, `"r"` [rad/s] are the body rates in the flight-dynamics axes.
+The angular velocity in the geometry axes is `Omega = (-p, q, -r)` and the onset at a
+point `x` is `U(x) = V_inf d - Omega x (x - x_ref)` (quasi-steady rotation about the
+moment reference point). As in the production solve: the vortex lattice uses `U` at the
+control points in the boundary condition; the lifting lines use `U` at the three-quarter
+chord of each strip (span fraction of the control point) in the diagonal, the right-hand
+side and the residual; the loads use `U` at the force points, at the leg mid-points, and
+at the quarter chord for the profile drag and the section moment; with one chordwise
+panel the section moment has the thin-airfoil term `-(pi/8) k c / |U|` of the chordwise
+change `k` of the rotation velocity. The wake stays along the free stream. The reference
+point is an input (`"reference"`), so its gradient includes the move of the centre of
+rotation. The rates p and r are antisymmetric and use the full system; q keeps the fold.
+The notes give the nondimensional derivatives per unit `p b/(2V)`, `q c/(2V)`,
+`r b/(2V)` (rates in body axes).
+
+### Tabulated airfoils
+
+The production polars are shape-preserving piecewise cubics (Fritsch and Carlson 1980)
+with a continuous first derivative, and the end values outside the table. The reference
+copy evaluates the same cubic pieces in PyTorch, so the derivative is the derivative of
+the production interpolant. A point on a table point takes the interval to its right (a
+one-sided derivative; both sides agree to round-off); a note names the strips there.
+Outside the table the derivative is zero; a note names those strips. The linear solvers
+take the profile drag and the section moment of a tabulated strip from the table at the
+effective angle `alpha_L0 + Cl / a0`; the nonlinear lifting line also takes the section
+lift from the table at the section angle of the solve.
+
+### Lifting-line node gradients
+
+The vortex core on the collinear bound segments of the lifting line makes the node
+sensitivity of the lifting line depend on a length scale of about 1e-5 m (the core). At
+that scale the node gradients of the lifting line are not physical. An investigation of
+this effect is open. The result notes state this caveat when the lifting line returns
+node or planform gradients.
 
 ### Target points on a vortex segment
 
@@ -222,8 +313,9 @@ results are equal to round-off.
   1). The position y of a symmetric surface must stay 0. A uniform position shift
   of a surface equals the summed node gradients of that surface, and all position
   gradients plus the reference-point gradient sum to zero (the translation rule).
-* The flow is linear in the circulation: vortex lattice and linear lifting line with
-  linear airfoils, zero control deflections and zero body rates.
+* The vortex lattice and the linear lifting line are linear in the circulation; the
+  nonlinear lifting line uses the Newton Jacobian at the converged state. Control
+  deflections, body rates and tabulated airfoils enter as given above.
 * The folded symmetric system applies only when the case is symmetric and every
   requested input and output is symmetric (no beta, phi, section or reference change,
   no lateral output). Node inputs are symmetric when every surface is symmetric: the
@@ -236,10 +328,11 @@ results are equal to round-off.
 
 ## Envelope
 
-The functions raise `GradientScopeError` (a `ValueError`) for the configurations that
-they do not cover yet: the nonlinear lifting line, tabulated airfoils, nonzero control
-deflections, nonzero body rates and the Fourier solver. A later version adds them. In ground effect `h` is the height of the moment reference point, and the
-ground plane and its images follow the inputs; a ground strike raises as in `analyze`.
+The functions raise `GradientScopeError` (a `ValueError`) for the Fourier solver (a
+closed form: central differences are the method there), for a nonlinear lifting-line
+solve that did not converge, and for the planform input with tabulated airfoils. In
+ground effect `h` is the height of the moment reference point, and the ground plane and
+its images follow the inputs; a ground strike raises as in `analyze`.
 
 The forward check runs at every call: the differentiated reference copy also gives the
 output values. Above 1e-10 relative difference (when the gradients and the production
@@ -256,9 +349,10 @@ largest production magnitude of the array.
 ## Implementation
 
 * `ventorum/sensitivity/reference.py`: the differentiable copy (lattice from edge nodes,
-  system rows, Kutta-Joukowski and leg forces with the tangential velocity, Trefftz
-  drag, profile drag and section moment of linear airfoils, ground images, cross-surface
-  core, axes transforms).
+  system rows, the nonlinear lifting-line residual and its Newton Jacobian,
+  Kutta-Joukowski and leg forces with the tangential velocity, Trefftz drag, profile
+  drag and section moment of linear and tabulated airfoils, control deflections, body
+  rates, ground images, cross-surface core, axes transforms).
 * `ventorum/sensitivity/adjoint.py`: `gradients`, `gradient_vjp`, `GradientResult`.
   `wrt="planform"` is refused together with `wrt="nodes"` (the same freedom); it
   always uses the full system.
@@ -272,7 +366,9 @@ largest production magnitude of the array.
   `vortex_vjp_cython.pyx` and `ventorum/gpu/vjp_kernels.py` (Warp, float32 and
   float64): the forward and VJP kernels.
 * `ventorum/sensitivity/check.py`: `check_gradients` with the Richardson reference
-  (central differences with steps h and h/2, error estimate |FD(h) - FD(h/2)| / 3).
+  (central differences with steps h and h/2, error estimate |FD(h) - FD(h/2)| / 3). The
+  control inputs use the base step 1e-4 rad of the deflection change; the rates use
+  1e-4 of the nondimensional rate (`2 V / b_ref` for p and r, `2 V / c_ref` for q).
 
 Path of the partials: `method="auto"` (the default) takes the backend that
 `set_vjp_backend` forces, else the `grad_vjp` entry of the machine profile for the
@@ -328,6 +424,18 @@ check fails when a component fails and when an input group has no compared compo
   reference path to 1e-12 (float64) for all parity configurations and CPU backends, the
   float32 gate (1e-3) for each CPU backend, the Warp gradients on the GPU, the `method`
   keyword and the fold of the node inputs (equal to the full system to 1e-12).
+* `tests/test_gradients_phase2.py`: controls (chordwise and section mode, also at zero
+  deflection, wing and tail), body rates (vortex lattice with 1 and 4 chordwise panels,
+  linear lifting line, ground effect, also at zero rates), tabulated airfoils and the
+  nonlinear lifting line (linear and tabulated airfoils, with controls and rates):
+  forward parity to 1e-12 (float64), Richardson checks of all requested inputs (1e-6),
+  the kernel path equal to the reference path (1e-12), the float32 gate against float64
+  (1e-3), the agreement with `control_derivatives` and `rate_derivatives` within their
+  difference error, the Newton Jacobian against the automatic derivative of the
+  residual, the PyTorch polar against scipy, the fold rule of q, p, r and the controls,
+  the planform chain with deflected sections and a coincident break of the nonlinear
+  lifting line, the refusals, the notes, and the GPU device (float64 to 1e-10, float32
+  to 1e-3 of the CPU float64 gradients).
 * `tests/test_gradient_planform.py`: port parity to 1e-14 (sections, sweep, dihedral,
   incidence, position, symmetric and mirror surfaces, section and control breaks,
   explicit `x_le`/`z_le`), Richardson checks of each planform parameter (1e-6
@@ -357,4 +465,8 @@ check fails when a component fails and when an input group has no compared compo
   Algorithmic Differentiation", 2nd ed., SIAM, 2008.
 * W. F. Phillips and D. O. Snyder, "Modern adaptation of Prandtl's classic
   lifting-line theory", Journal of Aircraft 37(4), 2000, pp. 662-670.
+* H. Glauert, "The Elements of Aerofoil and Airscrew Theory", Cambridge University
+  Press, 1926.
+* F. N. Fritsch and R. E. Carlson, "Monotone piecewise cubic interpolation", SIAM
+  Journal on Numerical Analysis 17(2), 1980, pp. 238-246.
 * M. Drela, "Flight Vehicle Aerodynamics", MIT Press, 2014.
