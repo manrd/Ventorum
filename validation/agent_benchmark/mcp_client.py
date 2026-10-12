@@ -14,7 +14,8 @@ The server environment follows the isolation rules of the benchmark:
   that a call to ``ventorum_tune_machine`` cannot change the profile of the
   owner;
 * the working folder is an empty temporary folder;
-* environment variables whose names look like secrets are removed.
+* environment variables whose names look like secrets are removed, and so
+  are the key variables that the config names (``drop``).
 """
 
 from __future__ import annotations
@@ -65,7 +66,7 @@ def repo_root_of_ventorum() -> Path:
 
 
 def make_server_env(audit_log: str | Path | None = None, config_dir: str | Path | None = None,
-                    extra: dict[str, str] | None = None) -> dict[str, str]:
+                    extra: dict[str, str] | None = None, drop: Any = ()) -> dict[str, str]:
     """Return the environment of an isolated server process.
 
     Parameters
@@ -76,13 +77,18 @@ def make_server_env(audit_log: str | Path | None = None, config_dir: str | Path 
         Folder for ``VENTORUM_CONFIG_DIR`` (a sandbox copy of the profile).
     extra : dict, optional
         More variables (for example ``MPLBACKEND``).
+    drop : iterable of str, optional
+        Names of more variables to remove, whatever their names are (for
+        example the ``api_key_env`` names of the config).
 
     Returns
     -------
     dict
-        The environment. Variables whose names look like secrets are not in it.
+        The environment. Variables whose names look like secrets, and the
+        variables in *drop*, are not in it.
     """
-    env = {k: v for k, v in os.environ.items() if not SECRET_ENV_NAME.search(k)}
+    dropped = set(drop or ())
+    env = {k: v for k, v in os.environ.items() if not SECRET_ENV_NAME.search(k) and k not in dropped}
     root = str(repo_root_of_ventorum())
     env["PYTHONPATH"] = root + (os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else "")
     env["MPLBACKEND"] = "Agg"
@@ -155,7 +161,7 @@ class McpClient:
         """Start the server process and the reader threads."""
         self.proc = subprocess.Popen(
             self.command, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            env=self.env, cwd=str(self.cwd), bufsize=0,
+            env=self.env, cwd=str(self.cwd), bufsize=-1,  # buffered pipes; _send flushes stdin
         )
         threading.Thread(target=self._read_stdout, daemon=True).start()
         threading.Thread(target=self._read_stderr, daemon=True).start()
@@ -344,7 +350,7 @@ class McpClient:
 
 
 def start_session(audit_log: str | Path | None = None, config_dir: str | Path | None = None,
-                  timeout_s: float = 300.0) -> McpClient:
+                  timeout_s: float = 300.0, drop_env: Any = ()) -> McpClient:
     """Start an isolated server, initialize it and list its tools.
 
     Parameters
@@ -355,13 +361,16 @@ def start_session(audit_log: str | Path | None = None, config_dir: str | Path | 
         Sandbox profile folder.
     timeout_s : float, optional
         Default request timeout [s].
+    drop_env : iterable of str, optional
+        Names of environment variables that the server must not get (the
+        key variables of the config).
 
     Returns
     -------
     McpClient
         A client that is ready for ``tools/call``.
     """
-    client = McpClient(env=make_server_env(audit_log, config_dir), timeout_s=timeout_s).start()
+    client = McpClient(env=make_server_env(audit_log, config_dir, drop=drop_env), timeout_s=timeout_s).start()
     try:
         client.initialize()
         client.list_tools()

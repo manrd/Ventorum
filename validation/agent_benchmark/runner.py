@@ -139,11 +139,35 @@ def check_model_allowed(label: str, model_cfg: dict[str, Any]) -> None:
 
 
 def check_out_dir(out: str | Path) -> Path:
-    """Return the resolved output folder. Refuse a folder inside the repository."""
-    p = Path(out).expanduser().resolve()
-    for root in {REPO_ROOT.resolve()}:
-        if p == root or root in p.parents:
+    """Return the resolved output folder. Refuse a folder inside the repository or inside any git checkout.
+
+    The check is by identity: each existing folder on the path (the folder
+    itself or its nearest existing ancestor, and all ancestors above it) is
+    compared with the repository root by :func:`os.path.samefile`, so other
+    spellings of the same folder (a long-path prefix, a UNC share, a short
+    name or a junction) are refused too. A folder whose ancestor holds a
+    ``.git`` entry (a folder, or the file of a worktree) is also refused.
+    """
+    p = Path(out).expanduser()
+    try:
+        p = p.resolve()
+    except OSError:
+        p = p.absolute()
+    root = REPO_ROOT.resolve()
+    if p == root or root in p.parents:
+        raise RunRefused(f"the output folder must be outside the repository: {p}")
+    for anc in (p, *p.parents):
+        try:
+            if not anc.exists():
+                continue
+            same = os.path.samefile(anc, root)
+            git = (anc / ".git").exists()
+        except OSError:
+            continue
+        if same:
             raise RunRefused(f"the output folder must be outside the repository: {p}")
+        if git:
+            raise RunRefused(f"the output folder must not be inside a repository checkout ({anc.name}): {p}")
     return p
 
 
@@ -157,15 +181,43 @@ KEY_PATTERNS = (
     re.compile(r"(?=[A-Za-z0-9+/_\-]*[A-Z])(?=[A-Za-z0-9+/_\-]*[a-z])(?=[A-Za-z0-9+/_\-]*\d)[A-Za-z0-9+/_\-]{40,}={0,2}"),
 )
 SECRET_ENV = re.compile(r"(KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL|AUTH)", re.IGNORECASE)
+MIN_SECRET_LEN = 8
+
+
+def key_env_names(config: Any) -> set[str]:
+    """Return the names of all key variables in a config (every ``api_key_env`` value, at any depth)."""
+    out: set[str] = set()
+    stack = [config]
+    while stack:
+        o = stack.pop()
+        if isinstance(o, dict):
+            for k, v in o.items():
+                if k == "api_key_env" and isinstance(v, str) and v:
+                    out.add(v)
+                else:
+                    stack.append(v)
+        elif isinstance(o, list):
+            stack.extend(o)
+    return out
 
 
 class Redactor:
-    """Remove keys, user names, host names and home paths from log records."""
+    """Remove keys, user names, host names and home paths from log records.
 
-    def __init__(self) -> None:
+    Parameters
+    ----------
+    secret_env_names : iterable of str, optional
+        Names of more environment variables that hold keys (for example the
+        ``api_key_env`` names of the config). Their values are removed,
+        whatever the variable name is. The values of variables whose names
+        look like secrets are always removed.
+    """
+
+    def __init__(self, secret_env_names: Any = ()) -> None:
         lits: list[tuple[str, str]] = []
+        names = set(secret_env_names or ())
         for k, v in os.environ.items():
-            if SECRET_ENV.search(k) and v and len(v) >= 8:
+            if (SECRET_ENV.search(k) or k in names) and v and len(v) >= MIN_SECRET_LEN:
                 lits.append((v, "<redacted-key>"))
         home = str(Path.home())
         if len(home) > 3:
@@ -229,6 +281,44 @@ class JsonlLog:
 def write_json(path: Path, obj: Any, redact: Redactor) -> None:
     """Write a redacted JSON file."""
     path.write_text(json.dumps(redact(obj), indent=2, allow_nan=False, default=str), encoding="utf-8")
+
+
+def redact_file(path: Path, redact: Redactor) -> None:
+    """Redact a JSON Lines file in place (for example a server audit log).
+
+    A line that is not JSON is redacted as text.
+    """
+    if not path.is_file():
+        return
+    out = []
+    for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+        if not line.strip():
+            continue
+        try:
+            out.append(json.dumps(redact(json.loads(line)), allow_nan=False, default=str))
+        except ValueError:
+            out.append(redact.text(line))
+    path.write_text("".join(x + "\n" for x in out), encoding="utf-8")
+
+
+def latest_records(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Keep the last record of each task and repeat (a run that is done again replaces the earlier record)."""
+    last: dict[tuple[Any, Any], dict[str, Any]] = {}
+    for r in records:
+        last[(r.get("task_id"), r.get("repeat"))] = r
+    return list(last.values())
+
+
+def finished_pairs(records: list[dict[str, Any]]) -> set[tuple[Any, Any]]:
+    """Return the task and repeat pairs that a resume skips. A pair whose last record has ``endpoint_error`` runs again."""
+    return {(r["task_id"], r["repeat"]) for r in latest_records(records)
+            if "endpoint_error" not in r.get("error_kinds", [])}
+
+
+def partial_costs(events_path: Path) -> float:
+    """Return the cost [USD] of the task runs that stopped at the cost cap (``run_stopped`` events)."""
+    return sum(float(e.get("cost_usd", 0.0) or 0.0) for e in read_jsonl(events_path)
+               if e.get("type") == "run_stopped")
 
 
 def read_jsonl(path: Path) -> list[dict[str, Any]]:
@@ -345,9 +435,10 @@ class Session:
 SessionFactory = Callable[[Path, Path], Session]
 
 
-def default_session_factory(audit_log: Path, config_dir: Path, timeout_s: float = 300.0) -> Session:
-    """Start a new isolated server for one task run."""
-    return Session(start_session(audit_log, config_dir, timeout_s=timeout_s), owned=True)
+def default_session_factory(audit_log: Path, config_dir: Path, timeout_s: float = 300.0,
+                            drop_env: Any = ()) -> Session:
+    """Start a new isolated server for one task run. The variables in *drop_env* are not given to the server."""
+    return Session(start_session(audit_log, config_dir, timeout_s=timeout_s, drop_env=drop_env), owned=True)
 
 
 @dataclass
@@ -538,9 +629,11 @@ def run_task(ctx: RunContext, variant: TaskVariant, repeat: int) -> dict[str, An
         wall = time.monotonic() - t0
     finally:
         session.close(kill=killed)
+        redact_file(audit, ctx.redact)
     if stopped_cost:
         with ctx.lock:
             ctx.stop_reason = "cost cap"
+            ctx.cost_so_far += cost
         event("run_stopped", turns, reason="cost cap", cost_usd=cost)
         return None
     with warnings.catch_warnings():
@@ -639,8 +732,12 @@ def run_benchmark(config: dict[str, Any], model_label: str, condition: str, task
     if limits is None:
         limits = Limits(**config.get("limits", {}))
     limits = limits.resolved(local)
+    cap = limits.cost_cap_usd
+    if isinstance(cap, bool) or not isinstance(cap, (int, float)) or not cap > 0:
+        raise RunRefused(f"cost_cap_usd must be above 0 USD (got {cap!r}); give a large cap for a free model")
     adapter = adapter or make_adapter(model_cfg)
-    redact = Redactor()
+    key_names = key_env_names(config)
+    redact = Redactor(key_names)
 
     run_id = run_id or make_run_id(model_label, condition, ids, seed)
     if not re.match(r"^[A-Za-z0-9_.\-]+$", run_id):
@@ -664,26 +761,8 @@ def run_benchmark(config: dict[str, Any], model_label: str, condition: str, task
     else:
         n_other = None
 
-    ref_path = run_dir / "references.json"
-    if ref_path.is_file():
-        refs = json.loads(ref_path.read_text(encoding="utf-8"))
-        missing = [t for t in ids if t not in refs]
-        if missing:
-            refs.update(compute_all(ts, missing, seed, reference_call))
-            write_json(ref_path, refs, redact)
-    else:
-        refs = compute_all(ts, ids, seed, reference_call)
-        write_json(ref_path, refs, redact)
-    bad = {t: refs[t]["problems"] for t in ids if not refs[t]["valid"]}
-    if bad:
-        raise RunStopped(f"golden calls do not give the expected results: {bad}")
     facts = environment_facts()
-    prev = _previous_references(out_root, run_dir, facts, ts, seed, baseline)
-    if prev is not None:
-        changes = regression_check({t: refs[t] for t in ids}, prev)
-        if changes:
-            raise RunStopped("reference values changed for the same Ventorum commit (a verification matter): "
-                             + "; ".join(changes[:10]))
+    refs = prepare_references(ts, ids, seed, run_dir, out_root, redact, facts, reference_call, baseline)
 
     if not resume:
         manifest = {
@@ -706,18 +785,23 @@ def run_benchmark(config: dict[str, Any], model_label: str, condition: str, task
         adapter=adapter, condition=condition, limits=limits, references=refs,
         events=JsonlLog(run_dir / "events.jsonl", redact), results=JsonlLog(run_dir / "results.jsonl", redact),
         redact=redact,
-        session_factory=session_factory or (lambda a, c: default_session_factory(a, c, limits.tool_time_s)),
+        session_factory=session_factory or (lambda a, c: default_session_factory(a, c, limits.tool_time_s,
+                                                                                  drop_env=key_names)),
         warmup=warmup, temperature=float(model_cfg.get("temperature", 0.0)),
         model_seed=model_cfg.get("seed", 0), lock=threading.Lock(),
     )
     done_records = read_jsonl(run_dir / "results.jsonl")
-    done = {(r["task_id"], r["repeat"]) for r in done_records}
-    ctx.cost_so_far = sum(float(r.get("cost_usd", 0.0)) for r in done_records)
+    done = finished_pairs(done_records)
+    ctx.cost_so_far = (sum(float(r.get("cost_usd", 0.0)) for r in done_records)
+                       + partial_costs(run_dir / "events.jsonl"))
     todo = [(rep, tid) for rep in range(1, repeats + 1) for tid in ids if (tid, rep) not in done]
     variants = {tid: ts.variant(tid, seed) for tid in ids}
 
     def one(item: tuple[int, str]) -> None:
         rep, tid = item
+        with ctx.lock:
+            if not ctx.stop_reason and ctx.cost_so_far >= limits.cost_cap_usd:
+                ctx.stop_reason = "cost cap"
         if ctx.stop_reason:
             return
         run_task(ctx, variants[tid], rep)
@@ -739,6 +823,44 @@ def run_benchmark(config: dict[str, Any], model_label: str, condition: str, task
         manifest["warmup"] = ctx.warmup_facts
     write_json(manifest_path, manifest, redact)
     return run_dir
+
+
+def prepare_references(ts: TaskSet, ids: list[str], seed: int, run_dir: Path, out_root: Path, redact: Redactor,
+                       facts: dict[str, Any], reference_call: Callable | None = None,
+                       baseline: str | Path | None = None) -> dict[str, dict[str, Any]]:
+    """Compute or load the references of a run and check them (track A and track B).
+
+    The golden calls of the tasks that ``references.json`` of the run folder
+    does not hold yet are run. The run stops if a golden call does not give
+    the expected result, or if a value differs (at 1e-4 relative) from the
+    references of an earlier run of the same Ventorum commit (or from
+    *baseline*).
+
+    Raises
+    ------
+    RunStopped
+        A golden call is not valid, or a reference value changed.
+    """
+    ref_path = run_dir / "references.json"
+    if ref_path.is_file():
+        refs = json.loads(ref_path.read_text(encoding="utf-8"))
+        missing = [t for t in ids if t not in refs]
+        if missing:
+            refs.update(compute_all(ts, missing, seed, reference_call))
+            write_json(ref_path, refs, redact)
+    else:
+        refs = compute_all(ts, ids, seed, reference_call)
+        write_json(ref_path, refs, redact)
+    bad = {t: refs[t]["problems"] for t in ids if not refs[t]["valid"]}
+    if bad:
+        raise RunStopped(f"golden calls do not give the expected results: {bad}")
+    prev = _previous_references(out_root, run_dir, facts, ts, seed, baseline)
+    if prev is not None:
+        changes = regression_check({t: refs[t] for t in ids}, prev)
+        if changes:
+            raise RunStopped("reference values changed for the same Ventorum commit (a verification matter): "
+                             + "; ".join(changes[:10]))
+    return refs
 
 
 def _previous_references(out_root: Path, run_dir: Path, facts: dict[str, Any], ts: TaskSet, seed: int,
@@ -795,8 +917,16 @@ def _fmt(x: Any, spec: str = ".3f") -> str:
     return format(x, spec)
 
 
-def summarise(records: list[dict[str, Any]]) -> dict[str, Any]:
-    """Compute the summary statistics of the result records of one run."""
+def summarise(records: list[dict[str, Any]], extra_cost_usd: float = 0.0) -> dict[str, Any]:
+    """Compute the summary statistics of the result records of one run.
+
+    Only the last record of each task and repeat counts (a run that is done
+    again replaces the earlier record). The cost is the sum over all
+    records, plus *extra_cost_usd* (the task runs that stopped at the cost
+    cap) [USD].
+    """
+    all_records = records
+    records = latest_records(records)
     inc = [r for r in records if not r.get("excluded")]
     per_task: dict[str, list[bool]] = {}
     for r in inc:
@@ -834,7 +964,7 @@ def summarise(records: list[dict[str, Any]]) -> dict[str, Any]:
         "wall_s_mean": mean([r["times_s"]["wall"] for r in inc]),
         "model_s_mean": mean([r["times_s"]["model"] for r in inc]),
         "tool_s_mean": mean([r["times_s"]["tool"] for r in inc]),
-        "cost_usd_total": sum(float(r.get("cost_usd", 0.0)) for r in records),
+        "cost_usd_total": sum(float(r.get("cost_usd", 0.0)) for r in all_records) + float(extra_cost_usd),
         "error_kinds": dict(sorted(kinds.items(), key=lambda kv: (-kv[1], kv[0]))),
     }
 
@@ -843,8 +973,9 @@ def report(run_dir: str | Path) -> dict[str, Any]:
     """Write ``summary.md`` and ``summary.csv`` of a run from ``results.jsonl``. Return the summary."""
     run_dir = Path(run_dir)
     manifest = json.loads((run_dir / "manifest.json").read_text(encoding="utf-8"))
-    records = read_jsonl(run_dir / "results.jsonl")
-    s = summarise(records)
+    all_records = read_jsonl(run_dir / "results.jsonl")
+    s = summarise(all_records, partial_costs(run_dir / "events.jsonl"))
+    records = latest_records(all_records)
     redact = Redactor()
     m = manifest.get("model", {})
     lines = [

@@ -11,6 +11,9 @@ from __future__ import annotations
 
 import json
 import math
+import os
+import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -447,6 +450,118 @@ def test_ignore_condition_validated(tmp_path):
             TaskSet(path)
 
 
+def test_redactor_gets_config_key_variables(server, task_set, tmp_path, monkeypatch):
+    """A key in a variable of any name that the config names is redacted and kept from the server."""
+    from validation.agent_benchmark.mcp_client import make_server_env
+    from validation.agent_benchmark.runner import Redactor, key_env_names
+
+    key = "AIza" + "b7Kq2" * 7
+    assert len(key) == 39
+    monkeypatch.setenv("LLM_GATEWAY_CRED", key)
+    cfg = {"models": {"fake": {"adapter": "scripted", "model": "fake-model", "local": True,
+                               "api_key_env": "LLM_GATEWAY_CRED"}}}
+    names = key_env_names(cfg)
+    assert names == {"LLM_GATEWAY_CRED"}
+    assert key not in Redactor(names).text("HTTP 400: API key not valid: " + key)
+    assert "LLM_GATEWAY_CRED" not in make_server_env(drop=names)
+    steps = [{"text": f"The endpoint said: key {key} is not valid. " + final("refused", {}, [])}]
+    run_dir, _, _ = run_fake(server, task_set, tmp_path, ["AB-01"], steps, config=cfg)
+    report(run_dir)
+    for p in run_dir.rglob("*"):
+        if p.is_file():
+            assert key not in p.read_text(encoding="utf-8", errors="replace"), p.name
+
+
+def test_cost_cap_stop_and_resume(server, task_set, tmp_path):
+    """The cost cap stops the run; the partial cost is recorded and counts on resume."""
+    cfg = {"models": {"api": {"adapter": "scripted", "model": "m", "local": False,
+                              "prices_usd_per_mtok": {"input": 1000.0, "output": 1000.0}}}}
+    refuse = {"text": final("refused", {}, [])}
+    run_dir, res, ad = run_fake(server, task_set, tmp_path, ["AB-01", "AB-02"], [refuse], repeat_last=True,
+                                run_id="cap", config=cfg, limits=Limits(cost_cap_usd=0.01))
+    man = json.loads((run_dir / "manifest.json").read_text(encoding="utf-8"))
+    assert man["status"] == "stopped (cost cap)" and ad.n_requests == 1 and res == []
+    assert man["cost_usd"] > 0.01
+    _, res2, ad2 = run_fake(server, task_set, tmp_path, ["AB-01", "AB-02"], [refuse], repeat_last=True,
+                            run_id="cap", config=cfg, limits=Limits(cost_cap_usd=0.01))
+    man2 = json.loads((run_dir / "manifest.json").read_text(encoding="utf-8"))
+    assert ad2.n_requests == 0 and res2 == []
+    assert man2["status"] == "stopped (cost cap)" and man2["cost_usd"] == pytest.approx(man["cost_usd"])
+    assert report(run_dir)["cost_usd_total"] == pytest.approx(man["cost_usd"])
+
+
+def test_cost_cap_must_be_positive(server, task_set, tmp_path):
+    for cap in (0.0, -1.0):
+        with pytest.raises(RunRefused, match="cost_cap_usd"):
+            run_fake(server, task_set, tmp_path, ["AB-01"], [], limits=Limits(cost_cap_usd=cap))
+
+
+def test_endpoint_error_retried_on_resume(server, task_set, tmp_path):
+    """A record with endpoint_error is not done: a resume runs the task again and the report keeps the last record."""
+    from validation.agent_benchmark.adapters import EndpointError
+
+    def down(msgs, tools):
+        raise EndpointError("HTTP 503")
+
+    run_dir, res, _ = run_fake(server, task_set, tmp_path, ["AB-01"], [down], run_id="retry")
+    assert len(res) == 1 and "endpoint_error" in res[0]["error_kinds"]
+    _, res2, ad2 = run_fake(server, task_set, tmp_path, ["AB-01"], [{"text": final("refused", {}, [])}],
+                            run_id="retry")
+    assert ad2.n_requests == 1 and len(res2) == 2
+    s = report(run_dir)
+    assert s["n_records"] == 1 and s["n_excluded"] == 0
+
+
+def test_output_folder_repository_identity(tmp_path):
+    """The repository is refused by identity (prefix forms), and so is any folder under a git checkout."""
+    if os.name == "nt":
+        with pytest.raises(RunRefused, match="outside the repository"):
+            check_out_dir("\\\\?\\" + str(ROOT / "agent_benchmark_runs"))
+    for kind in ("dir", "file"):
+        fake = tmp_path / f"checkout_{kind}"
+        fake.mkdir()
+        if kind == "dir":
+            (fake / ".git").mkdir()
+        else:
+            (fake / ".git").write_text("gitdir: elsewhere\n", encoding="utf-8")
+        with pytest.raises(RunRefused, match="repository"):
+            check_out_dir(fake / "runs" / "out")
+    assert check_out_dir(tmp_path / "plain" / "out") == (tmp_path / "plain" / "out").resolve()
+
+
+def test_output_folder_unc_form():
+    """The repository is refused through an administrative UNC share, where the share is available."""
+    if os.name != "nt":
+        pytest.skip("UNC paths exist only on Windows")
+    drive, rest = os.path.splitdrive(str(ROOT))
+    unc = "\\\\localhost\\" + drive.rstrip(":") + "$" + rest
+    if not os.path.exists(unc):
+        pytest.skip("the administrative share is not available without administrator rights")
+    with pytest.raises(RunRefused, match="outside the repository"):
+        check_out_dir(unc + "\\agent_benchmark_runs")
+
+
+def test_mcp_client_reads_large_reply_fast():
+    """A 2 MB reply is read in well under the bound (buffered pipes)."""
+    from validation.agent_benchmark.mcp_client import McpClient, make_server_env
+
+    srv = ("import sys,json\n"
+           "for line in sys.stdin:\n"
+           "    m=json.loads(line)\n"
+           "    if 'id' in m: print(json.dumps({'jsonrpc':'2.0','id':m['id'],'result':{'pad':'x'*2000000}}),"
+           " flush=True)\n")
+    c = McpClient(command=[sys.executable, "-c", srv], env=make_server_env()).start()
+    try:
+        c.request("warm", {}, timeout_s=60)
+        t0 = time.perf_counter()
+        result, n = c.request("big", {}, timeout_s=60)
+        dt = time.perf_counter() - t0
+    finally:
+        c.close()
+    assert n > 2_000_000 and len(result["pad"]) == 2_000_000
+    assert dt < 2.0, dt
+
+
 def test_geometry_compares_reference_point(task_set):
     """AB-35 without ref_point_m is geometry_drift; an equal point through x_cg_m is not."""
     v = task_set.variant("AB-35", 0)
@@ -481,3 +596,52 @@ def test_answer_format_edge_cases(task_set):
     assert normalise_value("\u22121.73 deg") == (-1.73, True)
     assert normalise_value("4.8 /rad") == (4.8, True)
     assert normalise_value("1.2 kg/m^3") == (1.2, True)
+
+
+def test_jobs_two(server, task_set, tmp_path):
+    """--jobs 2 runs every task once and marks the times as not comparable."""
+    cfg = {"models": {"api": {"adapter": "scripted", "model": "m", "local": False}}}
+    label = "api"
+    adapter = ScriptedAdapter({**cfg["models"][label], "repeat_last": True}, [{"text": final("refused", {}, [])}])
+    run_dir = run_benchmark(cfg, label, "focused", ["AB-01", "AB-02", "AB-06"], 1, tmp_path, run_id="jobs",
+                            task_set=task_set, adapter=adapter,
+                            session_factory=lambda audit, cdir: Session(server, owned=False), warmup=False,
+                            reference_call=mcp_call(server), check_other_servers=False, jobs=2)
+    recs = read_jsonl(run_dir / "results.jsonl")
+    assert sorted(r["task_id"] for r in recs) == ["AB-01", "AB-02", "AB-06"]
+    man = json.loads((run_dir / "manifest.json").read_text(encoding="utf-8"))
+    assert man["jobs"] == 2 and man["times_comparable"] is False and man["status"] == "finished"
+
+
+@pytest.mark.slow
+def test_default_session_warmup_and_audit_redacted(task_set, tmp_path, monkeypatch):
+    """The default session starts a server per task, sends the hidden warm-up, and redacts the run's audit file."""
+    key = "AIza" + "c8Lm3" * 7
+    monkeypatch.setenv("LLM_GATEWAY_CRED", key)
+    cfg = {"models": {"fake": {"adapter": "scripted", "model": "fake-model", "local": True,
+                               "api_key_env": "LLM_GATEWAY_CRED"}}}
+    args = json.loads(json.dumps(canonical_args(task_set, "AB-01")))
+    args["wing"]["name"] = "wing " + key
+    first_request = {}
+
+    def first(msgs, tools):
+        first_request["roles"] = [m["role"] for m in msgs]
+        return call_step("ventorum_wing_analysis", args)
+
+    def answer(msgs, tools):
+        m = last_payload(msgs)["metrics"]
+        return {"text": final("answered", {"CL": m["CL"], "CDi": m["CDi"]})}
+
+    adapter = ScriptedAdapter(cfg["models"]["fake"], [first, answer])
+    run_dir = run_benchmark(cfg, "fake", "focused", ["AB-01"], 1, tmp_path, run_id="default-session",
+                            task_set=task_set, adapter=adapter, check_other_servers=False)
+    assert first_request["roles"] == ["system", "user"]
+    events = read_jsonl(run_dir / "events.jsonl")
+    warm = [e for e in events if e["type"] == "warmup"]
+    assert len(warm) == 1 and warm[0]["status"] == "success"
+    res = read_jsonl(run_dir / "results.jsonl")
+    assert res[0]["success"] is True, res[0]["error_kinds"]
+    audit = run_dir / "audit" / "AB-01_r1.jsonl"
+    text = audit.read_text(encoding="utf-8")
+    assert text.strip() and "ventorum_wing_analysis" in text
+    assert key not in text and "<redacted-key>" in text
