@@ -48,3 +48,14 @@ print(bars.summary())
 ```
 
 Each `bars.bars[name]` holds the production value, the interval `[value - k u_c, value + k u_c]`, the status `"input_only"`, the coverage (always `None`, not calibrated) and the input layer contribution. `bars.bars[name].input_shares` gives the share of each input in `u_c^2` (they sum to 1 when `u_c > 0`; with correlations a share can be negative), and `gradient_methods` states the gradient method per input (`"adjoint"` or `"central differences"`). Outside the adjoint scope (nonlinear lifting line, tabulated airfoils, deflected controls, body rates, Fourier solver) the flow inputs use central differences and section inputs are refused. `ventorum.combine_error_bars(numerical, inputs)` combines a layer-1 result and a layer-2 result of the same case: the half-width is `sqrt(h_num^2 + h_input^2)`, centred on the fine-level value of layer 1, with status `"numerical_and_input"`.
+
+## Mesh convergence study
+
+`ventorum.run_mesh_convergence_study` solves the case on a set of spanwise panel counts and spacing schemes and compares each level with a fine reference mesh. It gives the minimal mesh (the smallest accurate and safe level) and the recommended mesh (a level whose error is within `robustness_margin * tolerance_pct`, at least 12 panels per semi-span; a robust `"auto"` level is preferred).
+
+```python
+study = vt.run_mesh_convergence_study(wing, tolerance_pct=0.5, panel_counts=(10, 20, 40))
+print(study.summary())
+```
+
+The selection uses a deterministic cost: the total panel count, then the number of panels solved. When two levels have the same cost, the level that is evaluated first is kept (order of `spacing_schemes`, then of `panel_counts`). The measured solve times are not used, so the same case gives the same recommendation on every run and on every machine. The solve times stay in the result as information. The `efficiency_score` of a level is `(N_ref / N)^2 / (1 + e)`, with `N` the number of panels solved, `N_ref` the number of panels solved on the reference mesh and `e` the mean of the CL and CDi errors in percent.

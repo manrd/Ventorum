@@ -97,6 +97,11 @@ Example with `aircraft`:
 - `input_uncertainties` gives the layer-2 standard uncertainties (one standard deviation, never negative), with the unit in each key name: `alpha_deg`, `beta_deg`, `phi_deg` [deg], `V_inf_m_s` [m/s], `rho_kg_m3` [kg/m^3], `h_m` [m] (ground effect only), and `sections`, a JSON object of surface name to `a0_per_rad` [1/rad], `alpha_L0_deg` [deg], `Cd0` [-], `Cm0` [-]. The tool converts the angles to rad. The input layer is combined with the numerical layer by root sum of squares and `status_of_bars` is `numerical_and_input`. An error message gives the value in the unit of the input.
 - The work estimate is `N1^2 + N2^2 + N3^2`, plus `(1 + 2 max(1, k)) N1^2` for the input layer (one solve, then the adjoint or two solves per flow input; k = number of flow inputs). Reduce the work with fewer panels (smaller `n_panels`).
 
+## Mesh convergence
+
+- `ventorum_mesh_convergence` (`wing` or `aircraft`, `flight_condition`, `tolerance_pct` (percent), `target_metric`, `panel_counts`, `spacing_schemes`, `alpha_sweep_deg` (degrees), `ref_n_panels`, `solver`, `detail_level`): spanwise mesh convergence study against a fine reference mesh. It gives the smallest mesh within the tolerance (`minimal_mesh`) and the recommended mesh (`recommended_mesh`, `recommended_settings`). When no level meets the tolerance, `converged` is false and there is no recommended mesh.
+- The selection is reproducible. It uses a deterministic cost (total panel count, then panels solved), not the measured solve time. When two levels have the same cost, the level evaluated first is kept (order of `spacing_schemes`, then of `panel_counts`). Two calls with the same arguments give the same recommended mesh. The `solve_time_ms` values are information only.
+
 ## Full aerodynamic derivative matrix
 
 - `ventorum_derivative_matrix` (`wing` or `aircraft`, `flight_condition`, `settings`, `groups`, `controls`, `axes`, `x_cg_m`, `detail_level`): full aerodynamic derivative matrix of one flight state. Deflections in degrees in the agent input; derivative output per rad, with the unit in each key name (`..._per_rad`) for angles and deflections, and dimensionless for height and rates. The matrix is returned as a dictionary of rows (`CL, CD, CY, Cl, Cm, Cn`) keyed by column label. Output includes `units`, `methods`, `axes`, `diagnostics` and trust notes.
