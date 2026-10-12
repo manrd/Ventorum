@@ -1055,6 +1055,64 @@ def ground_effect(
 # Stability derivatives
 # ═══════════════════════════════════════════════════════════════════════════════
 
+def _stability_trust(t: dict[str, Any], cases: dict[str, tuple[float, float]], CY_b: float,
+                     db: float) -> dict[str, Any]:
+    """Return the trust payload of a stability calculation from all its cases.
+
+    The payload is the one of the case with the lowest score (the base case
+    when the scores are equal). Its warnings are the warnings of every case:
+    a warning of a perturbed case that the base case does not have gets the
+    name and the angles of the case. A last warning compares CY_beta with the
+    CY_beta of the Trefftz plane by the near/far rule of the trust score
+    (5 % relative, and a difference of the side-force change over the step
+    above the CY floor).
+
+    Parameters
+    ----------
+    t : dict
+        Totals of each case (``"base"``, ``"a+"``, ``"a-"``, ``"b+"``, ``"b-"``).
+    cases : dict
+        Angle of attack and sideslip [deg] of each case.
+    CY_b : float
+        Near-field CY_beta [1/rad].
+    db : float
+        Sideslip step between the cases ``"b+"`` and ``"b-"`` [rad].
+
+    Returns
+    -------
+    dict
+        The trust payload (see :func:`trust_payload`).
+    """
+    from ventorum.core.trust import NEAR_FAR_FLOOR_CY, NEAR_FAR_RELATIVE
+
+    trusts = {k: v.trust for k, v in t.items() if v.trust is not None}
+    if "base" not in trusts:
+        return trust_payload(None)
+    worst = min(trusts, key=lambda k: (trusts[k].score, k != "base"))
+    payload = trust_payload(trusts[worst])
+    warnings_out = list(trusts["base"].warnings)
+    for k, tr in trusts.items():
+        if k == "base":
+            continue
+        aa, bb = cases[k]
+        for w in tr.warnings:
+            if w not in trusts["base"].warnings:
+                warnings_out.append(f"Case {k} (alpha={aa:g} deg, beta={bb:g} deg): {w}")
+    far_p, far_m = t["b+"].CY_farfield, t["b-"].CY_farfield
+    if far_p is not None and far_m is not None and np.isfinite(far_p) and np.isfinite(far_m):
+        CYff_b = (float(far_p) - float(far_m)) / db
+        diff = abs(CY_b - CYff_b)
+        if diff > NEAR_FAR_RELATIVE * abs(CYff_b) and diff * db > NEAR_FAR_FLOOR_CY:
+            warnings_out.append(
+                f"CY_beta {CY_b:.5g}/rad of the near field and CY_beta {CYff_b:.5g}/rad of the Trefftz plane "
+                "do not agree. The side force of the near field is not reliable: a probable cause is a junction "
+                "of surfaces (for example a fin on a tail tip, or a winglet) that the mesh does not resolve.")
+    payload["warnings"] = warnings_out
+    if worst != "base":
+        payload["note"] = f"{payload['note']} The score and the rating are those of the case {worst}."
+    return payload
+
+
 @_tool
 def stability_derivatives(
     wing: Any = None,
@@ -1080,7 +1138,10 @@ def stability_derivatives(
     body-axis Cm_alpha and keep their values in every set. With
     ``detail_level="full"``, ``dispatch`` maps each case of
     ``perturbed_cases`` (``"base"``, ``"a+"``, ``"a-"``, ``"b+"``,
-    ``"b-"``) to its dispatch record.
+    ``"b-"``) to its dispatch record. The ``trust`` output covers all five
+    cases: the score of the weakest case, the warnings of every case, and a
+    warning when CY_beta and the CY_beta of the Trefftz plane do not agree
+    (see :func:`_stability_trust`).
     """
     ac = build_aircraft_from_spec(wing=wing, aircraft=aircraft)
     c = parse_condition(flight_condition)
@@ -1230,7 +1291,7 @@ def stability_derivatives(
         "notes": notes,
         "condition_used": condition_payload(c),
         "settings_used": settings_used,
-        "trust": trust_payload(t["base"].trust),
+        "trust": _stability_trust(t, cases, CY_b, db),
         "axes": ax,
     }
     if ax == "all":

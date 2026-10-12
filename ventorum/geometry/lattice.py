@@ -344,7 +344,7 @@ class VortexLattice:
     surfaces: list[SurfaceSlice] = field(default_factory=list)
     # Core group of each strip: surfaces that share an edge have the same group.
     strip_core_group: np.ndarray | None = None
-    # Warnings about surface edges that are near but not joined (see ``near_miss_warnings``).
+    # Warnings about surface edges that are near each other (see ``near_miss_warnings``).
     join_warnings: list[str] = field(default_factory=list)
     # Cache of the parts of the vortex system that do not change with the
     # angle of attack (see ventorum.aero.vortex). None means no cache. A
@@ -429,26 +429,49 @@ def _perpendicular_distance(p: np.ndarray, origin: np.ndarray, unit: np.ndarray)
     return np.linalg.norm(d - np.outer(d @ unit, unit), axis=1)
 
 
-def _relate_surfaces(si: SurfaceSlice, sj: SurfaceSlice) -> tuple[bool, tuple[float, float] | None]:
+def _interior_edge(surf: SurfaceSlice, k: int) -> bool:
+    """Return True when edge *k* of *surf* is an interior strip edge.
+
+    The two end edges are not interior. The root edge of a symmetric surface
+    (its plane of symmetry) is not interior either: it is at the same place
+    for every mesh.
+    """
+    n = int(np.asarray(surf.edge_le).shape[0])
+    if k == 0 or k == n - 1:
+        return False
+    return not (getattr(surf, "is_symmetric", False) and n % 2 == 1 and k == n // 2)
+
+
+def _relate_surfaces(si: SurfaceSlice, sj: SurfaceSlice) -> tuple[bool, tuple[float, float] | None, dict]:
     """Compare the edges of two surfaces.
 
-    Return ``(joined, near_miss)``. ``joined`` is True when an edge segment
-    (the line from the leading-edge node to the trailing-edge node of one
-    section) of *si* lies on an edge segment of *sj* within the tolerance,
-    over at least ``JOIN_MIN_OVERLAP`` of the shorter segment. The tolerance
-    is ``JOIN_TOL_STRIP_FRACTION`` times the smaller local strip width, kept
-    between ``JOIN_TOL_CHORD_FRACTION`` times the longer segment and
-    ``JOIN_TOL_CHORD_MAX_FRACTION`` times the shorter segment.
-    ``near_miss`` is None, or ``(gap, local_chord)`` [m] of the closest pair
-    of edges that are nearly parallel and overlap, but are not joined.
+    Return ``(joined, near_miss, info)``. ``joined`` is True when an edge
+    segment (the line from the leading-edge node to the trailing-edge node
+    of one section) of *si* lies on an edge segment of *sj* within the
+    tolerance, over at least ``JOIN_MIN_OVERLAP`` of the shorter segment,
+    and the chordwise grids of the two edges match: the leading-edge and
+    trailing-edge nodes of one edge are, along the edge line, within the
+    tolerance of the end nodes of the other edge (in the same or the opposite
+    order). The tolerance is ``JOIN_TOL_STRIP_FRACTION`` times the smaller
+    local strip width, kept between ``JOIN_TOL_CHORD_FRACTION`` times the
+    longer segment and ``JOIN_TOL_CHORD_MAX_FRACTION`` times the shorter
+    segment. ``near_miss`` is None, or ``(gap, local_chord)`` [m] of the
+    closest pair of edges that are nearly parallel and overlap, but are not
+    within the tolerance. ``info`` has two keys: ``"grid_mismatch"`` is True
+    when two edges lie on each other within the tolerance but their
+    chordwise grids do not match (they are not joined); ``"interior"`` lists
+    ``"i"`` and/or ``"j"`` when the surfaces are joined only through an
+    interior strip edge of *si* or *sj* (no pair of boundary edges is
+    joined; see :func:`_interior_edge`).
     """
+    info: dict = {"grid_mismatch": False, "interior": []}
     wi, wj = _edge_strip_widths(si), _edge_strip_widths(sj)
     a0_all, b0_all = np.asarray(si.edge_le, dtype=float), np.asarray(sj.edge_le, dtype=float)
     va, vb = np.asarray(si.edge_te, dtype=float) - a0_all, np.asarray(sj.edge_te, dtype=float) - b0_all
     la_all, lb_all = np.linalg.norm(va, axis=1), np.linalg.norm(vb, axis=1)
     ia, ib = np.flatnonzero(la_all >= 1e-12), np.flatnonzero(lb_all >= 1e-12)
     if ia.size == 0 or ib.size == 0:
-        return False, None
+        return False, None, info
     b0, lb, wjb = b0_all[ib], lb_all[ib], wj[ib]
     b1 = b0 + vb[ib]
     ub = vb[ib] / lb[:, None]
@@ -462,6 +485,9 @@ def _relate_surfaces(si: SurfaceSlice, sj: SurfaceSlice) -> tuple[bool, tuple[fl
     # The pairs are visited in the same order as a double loop (row-major), so
     # the first closest near miss is the same.
     best: tuple[float, float] | None = None
+    joined = False
+    interior: set[str] = set()
+    boundary = False
     rows = max(1, 2_000_000 // max(ib.size, 1))
     for s0 in range(0, ia.size, rows):
         sel = ia[s0:s0 + rows]
@@ -483,17 +509,38 @@ def _relate_surfaces(si: SurfaceSlice, sj: SurfaceSlice) -> tuple[bool, tuple[fl
             JOIN_TOL_STRIP_FRACTION * np.minimum(wi[sel][:, None], wjb[None]),
             JOIN_TOL_CHORD_FRACTION * lmax, JOIN_TOL_CHORD_MAX_FRACTION * lmin,
         )
-        if np.any(valid & (gap <= tol)):
-            return True, None
+        close = valid & (gap <= tol)
+        grid = ((np.abs(t0) <= tol) & (np.abs(t1 - la) <= tol)) | ((np.abs(t1) <= tol) & (np.abs(t0 - la) <= tol))
+        pairs = close & grid
+        if np.any(pairs):
+            joined = True
+            for r, c in zip(*np.nonzero(pairs)):
+                ei, ej = _interior_edge(si, int(sel[r])), _interior_edge(sj, int(ib[c]))
+                if not (ei or ej):
+                    boundary = True
+                if ei:
+                    interior.add("i")
+                if ej:
+                    interior.add("j")
+        if np.any(close & ~grid):
+            info["grid_mismatch"] = True
+        if joined:
+            continue
         cosang = np.minimum(1.0, np.abs(np.sum(ua * ub[None], axis=-1)))
-        near = valid & (np.degrees(np.arccos(cosang)) < NEAR_MISS_MAX_ANGLE_DEG) & (
+        near = valid & ~close & (np.degrees(np.arccos(cosang)) < NEAR_MISS_MAX_ANGLE_DEG) & (
             gap <= NEAR_MISS_MAX_GAP_CHORDS * lmin)
         if np.any(near):
             k = int(np.argmin(np.where(near, gap, np.inf)))
             g, c = float(gap.flat[k]), float(lmin.flat[k])
             if best is None or g < best[0]:
                 best = (g, c)
-    return False, best
+    if joined:
+        info["grid_mismatch"] = False
+        # The join tolerance can also accept the interior edge next to a
+        # joined boundary edge; only a join with no boundary pair is reported.
+        info["interior"] = [] if boundary else sorted(interior)
+        return True, None, info
+    return False, best, info
 
 
 def check_overlaps(lattice: VortexLattice) -> None:
@@ -561,9 +608,10 @@ def core_groups(surfaces: list[SurfaceSlice]) -> np.ndarray:
     Two surfaces are in the same group if they share an edge: an edge segment
     of one (the line from the leading-edge node to the trailing-edge node of
     one section, after mirroring) lies on an edge segment of the other within
-    a tolerance, over at least half of the shorter segment (see
-    :func:`_relate_surfaces`). The tolerance is the smaller local strip width,
-    with limits. The groups are the connected sets of this relation.
+    a tolerance, over at least half of the shorter segment, and the chordwise
+    grids of the two edges match (see :func:`_relate_surfaces`). The
+    tolerance is the smaller local strip width, with limits. The groups are
+    the connected sets of this relation.
     """
     n = len(surfaces)
     parent = list(range(n))
@@ -582,22 +630,47 @@ def core_groups(surfaces: list[SurfaceSlice]) -> np.ndarray:
 
 
 def near_miss_warnings(surfaces: list[SurfaceSlice]) -> list[str]:
-    """Return one warning for each pair of surfaces whose edges are near but not joined.
+    """Return the warnings about the edges of surfaces that are near each other.
 
-    Two edges are a near miss when they are nearly parallel (angle below
-    ``NEAR_MISS_MAX_ANGLE_DEG``), overlap, and are further apart than the
-    join tolerance but not more than ``NEAR_MISS_MAX_GAP_CHORDS`` local
-    chords. Surfaces that are in one group through a third surface give no
-    warning.
+    * Near miss: two edges are nearly parallel (angle below
+      ``NEAR_MISS_MAX_ANGLE_DEG``), overlap, and are further apart than the
+      join tolerance but not more than ``NEAR_MISS_MAX_GAP_CHORDS`` local
+      chords.
+    * Chordwise grids that do not match: two edges lie on each other within
+      the join tolerance, but their end nodes are offset along the edge. The
+      surfaces are not joined.
+    * Interior edge: a joined edge is an interior strip edge of the other
+      surface (for example a tail tip on the side of a fin). The join then
+      depends on the mesh.
+
+    Surfaces that are in one group through a third surface give no near-miss
+    or grid warning.
     """
     groups = core_groups(surfaces)
     out = []
     for i in range(len(surfaces)):
         for j in range(i + 1, len(surfaces)):
+            joined, near, info = _relate_surfaces(surfaces[i], surfaces[j])
+            names = {"i": surfaces[i].name, "j": surfaces[j].name}
+            if joined:
+                for side in info["interior"]:
+                    other = names["j" if side == "i" else "i"]
+                    out.append(
+                        f"An edge of surface '{other}' meets an interior strip edge of surface '{names[side]}'. "
+                        "The surfaces are joined there, but the join depends on the mesh. Put a section of "
+                        f"'{names[side]}' at the junction, or split it there."
+                    )
+                continue
             if groups[i] == groups[j]:
                 continue
-            _, near = _relate_surfaces(surfaces[i], surfaces[j])
-            if near is not None:
+            if info["grid_mismatch"]:
+                out.append(
+                    f"Surfaces '{surfaces[i].name}' and '{surfaces[j].name}' have edges that lie on each other, "
+                    "but their chordwise grids do not match (the leading-edge or trailing-edge nodes are offset "
+                    "along the edge). They are not joined: the cross-surface core acts between them. To join "
+                    "them, make the leading and trailing edges of the two edges match."
+                )
+            elif near is not None:
                 out.append(
                     f"Surfaces '{surfaces[i].name}' and '{surfaces[j].name}' have edges {1e3 * near[0]:.1f} mm "
                     "apart that are nearly parallel. They are not joined: the cross-surface core acts "

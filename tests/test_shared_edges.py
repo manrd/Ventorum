@@ -143,9 +143,13 @@ def test_small_overlap_is_not_joined():
     wing = _surface("wing", 4.0, N)
     # Root chord 0.3 at the tip of a wing with chord 1: 30 % overlap along the edge line.
     stub = _surface("stub", 0.5, 4, chord=0.3, is_symmetric=False, position=np.array([0.7, 4.0, 0.0]))
-    # The shorter edge (0.3) lies fully on the wing tip edge, so it is joined.
-    groups, _ = _groups(_aircraft([wing, stub, stub.mirrored()]))
-    assert groups["wing"] == groups["stub"]
+    # The shorter edge (0.3) lies fully on the wing tip edge, but the chordwise
+    # grids of the two edges do not match (the stub leading edge is 0.7 m aft of
+    # the wing leading edge). Such edges are not joined, and a warning is given:
+    # the leg-force rule of a shared edge needs coincident legs.
+    groups, lat = _groups(_aircraft([wing, stub, stub.mirrored()]))
+    assert groups["wing"] != groups["stub"]
+    assert any("chordwise grids do not match" in w and "stub" in w for w in lat.join_warnings)
     # Shift the stub so that only 20 % of its edge lies on the wing tip edge.
     stub2 = _surface("stub2", 0.5, 4, chord=0.3, is_symmetric=False, position=np.array([0.94, 4.0, 0.0]))
     groups, _ = _groups(_aircraft([wing, stub2, stub2.mirrored()]))
@@ -194,7 +198,12 @@ def _relate_reference(si, sj):
                 lattice_module.JOIN_TOL_CHORD_MAX_FRACTION * min(la, lb),
             ))
             if gap <= tol:
-                return True, None
+                # Joined only when the chordwise grids match: the end nodes of
+                # one edge are, along the edge line, at the end nodes of the other.
+                t0, t1 = (b0 - a0) @ ua, (b1 - a0) @ ua
+                if (abs(t0) <= tol and abs(t1 - la) <= tol) or (abs(t1) <= tol and abs(t0 - la) <= tol):
+                    return True, None
+                continue
             angle = np.degrees(np.arccos(min(1.0, abs(float(ua @ ub)))))
             chord = min(la, lb)
             if angle < lattice_module.NEAR_MISS_MAX_ANGLE_DEG and gap <= lattice_module.NEAR_MISS_MAX_GAP_CHORDS * chord:
