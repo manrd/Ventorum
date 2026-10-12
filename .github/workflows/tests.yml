@@ -110,3 +110,35 @@ jobs:
             python "$f"
             echo "::endgroup::"
           done
+
+  mdo:
+    # The optional extra mdo (OpenMDAO components). One OS and one Python
+    # version: the components are pure Python. The job runs the tests of
+    # ventorum.mdo, also the slow ones, and the OpenMDAO example.
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      - name: Install with the extra mdo
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install torch --index-url https://download.pytorch.org/whl/cpu
+          python -m pip install -e ".[dev,mdo]"
+      - name: OpenMDAO is installed
+        run: python -c "import openmdao, ventorum.mdo; print('OpenMDAO', openmdao.__version__)"
+      - name: Tests of ventorum.mdo
+        env:
+          MPLBACKEND: Agg
+        run: python -m pytest -q -m "not benchmark" tests/test_mdo.py
+      - name: OpenMDAO example
+        env:
+          MPLBACKEND: Agg
+        run: python examples/12_openmdao_twist.py
