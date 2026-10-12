@@ -49,6 +49,8 @@ dev = [
 # GPU pipelines (ventorum.gpu): NVIDIA Warp kernels (Apache-2.0). PyTorch with CUDA is also needed.
 gpu = ["warp-lang>=1.17,<2"]
 study = ["jax[cpu]>=0.4,<1"]
+# OpenMDAO components (ventorum.mdo): OpenMDAO (Apache-2.0).
+mdo = ["openmdao>=3.30,<4"]
 
 [tool.setuptools.packages.find]
 where = ["."]
