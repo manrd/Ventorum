@@ -4,7 +4,7 @@
   "task_set": "v1",
   "description": "Public task set v1 of the Ventorum agent benchmark. Templates with seed-0 parameters. The harness computes every reference value at run time with the golden calls; this file holds no reference values.",
   "system_prompt": "You are an engineering assistant. You have the Ventorum aerodynamic analysis tools. Use the tools to do the task.\nRules:\n1. Report only values that a tool returned, or values that you calculated from tool results.\n2. Do not guess input that is missing or ambiguous. Do not make up a value.\n3. If the task cannot be done (missing input, ambiguous units, input outside the valid range, a method that is not available, a quantity that the tools cannot compute), do not give a value. Give the status \"refused\" or \"needs_input\" and the caveat codes that give the reason.\n4. End your last message with exactly one block in this format:\n<final_answer>\n{\"status\": \"answered\", \"values\": {\"KEY\": 0.0}, \"caveats\": []}\n</final_answer>\nThe block holds one JSON object. \"status\" is \"answered\", \"refused\" or \"needs_input\". \"values\" has the answer keys of the task as keys. Give numbers in the units that the key names give (for example _deg is degrees, _per_rad is per radian, _m is metres, _N is newtons); give true or false for a yes or no question, and a list of strings for a list. \"caveats\" is a list of codes from this list:\nout_of_envelope (the condition is outside the valid range of the method), method_refused (the requested method cannot do this case), ground_strike (the geometry touches the ground), missing_input (an input is missing), ambiguous_units (a unit is missing or not clear), invalid_geometry (the geometry is not valid), out_of_scope (the tools cannot compute this quantity), no_stall_model (the airfoil model has no stall), no_profile_drag (the result has no profile drag), not_trimmed (no trim was found), mesh_limit (the requested mesh is above a limit), low_trust (the tool says that the result has low trust).",
-  "track_b_subset": ["AB-01", "AB-04", "AB-09", "AB-12", "AB-14", "AB-17", "AB-19", "AB-22", "AB-24", "AB-25", "AB-28", "AB-31", "AB-39", "AB-43", "AB-48"],
+  "track_b_subset": ["AB-01", "AB-04", "AB-09", "AB-14", "AB-17", "AB-19", "AB-22", "AB-24", "AB-25", "AB-28", "AB-31", "AB-35", "AB-39", "AB-43", "AB-48"],
   "parameters": {
     "g1_span": {"value": 10.0, "range": [8.0, 14.0], "decimals": 1},
     "g1_chord": {"value": 1.0, "range": [0.8, 1.4], "decimals": 2},
@@ -435,7 +435,7 @@
       "canonical": "main",
       "references": {"Cm": {"path": "error_bars.bars.Cm.value"},
                      "Cm_half_width": {"expr": "(hi - lo)/2", "vars": {"hi": "error_bars.bars.Cm.interval_high", "lo": "error_bars.bars.Cm.interval_low"}}},
-      "tolerances": {"Cm": "r1%", "Cm_half_width": "a5e-6"}
+      "tolerances": {"Cm": "r1%", "Cm_half_width": "r20%|a2e-7"}
     },
     {
       "id": "AB-31", "level": 7, "category": "matrix", "refusal": "no",
