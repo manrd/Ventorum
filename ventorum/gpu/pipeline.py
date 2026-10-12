@@ -111,10 +111,10 @@ def solve_batch(solver, lattice, conditions: list, settings, S_ref: float, b_ref
     share = (time.perf_counter() - t0) / K
     out: list = [None] * K
     reason = use_gpu_reason if gpu.get_device() == "auto" else "device setting is gpu"
-    for idx, (arrays, infos, umap) in solved:
+    for idx, (arrays, infos, umap, cpu_cases) in solved:
         res = _results(solver, lattice, [conditions[k] for k in idx], arrays, [setups[k] for k in idx], umap, b_ref,
                        c_ref, main_surface, t0, share, precision, infos=infos, ref_point=ref_point, S_ref=S_ref,
-                       dispatch_reason=reason)
+                       dispatch_reason=reason, cpu_cases=cpu_cases)
         for k, r in zip(idx, res):
             out[k] = r
     if return_reason:
@@ -129,8 +129,11 @@ def _solve_group(solver, lattice, conditions: list, setups: list, settings, S_re
     Returns
     -------
     solved : tuple or None
-        ``(arrays, infos, umap)`` for :func:`_results`, or None when the GPU
-        pipelines do not support the group.
+        ``(arrays, infos, umap, cpu_cases)`` for :func:`_results`, or None
+        when the GPU pipelines do not support the group. *cpu_cases* maps
+        the index (in the group) of each case that the CPU solved again
+        (nonlinear lifting line, see :func:`_nonlinear`) to its CPU
+        dispatch record; it is empty for the other cases.
     reason : str or None
         The reason when *solved* is None (an unknown map or airfoils that
         the GPU pipelines do not support), else None.
@@ -158,15 +161,16 @@ def _solve_group(solver, lattice, conditions: list, setups: list, settings, S_re
     cs = engine.CaseData(dl, WD, grounds, GK=bd["GK"], GO=bd["GO"])
     infos = None
     alpha_eff = None
+    cpu_cases: dict = {}
     symmetric = umap.symmetric
     if solver.name == "linear":
         g, v = engine.llt_linear(dl, md, cs, Dfs, V, omega=omega, ref_point=ref_point)
         G, vp = engine.to_panels(lattice, md, g, v)
         v_points = [vp]
     elif solver.name == "nonlinear":
-        G, vp, alpha_eff, infos = _nonlinear(solver, engine, dl, md, cs, lattice, conditions, settings, grounds,
-                                             wds, Dfs, V, umap, continuation, gamma0, omega=omega,
-                                             ref_point=ref_point)
+        G, vp, alpha_eff, infos, cpu_cases = _nonlinear(solver, engine, dl, md, cs, lattice, conditions, settings,
+                                                        grounds, wds, Dfs, V, umap, continuation, gamma0,
+                                                        omega=omega, ref_point=ref_point)
         v_points = [vp]
     else:
         from ventorum.solvers.horseshoe import _has_tabulated
@@ -183,8 +187,12 @@ def _solve_group(solver, lattice, conditions: list, setups: list, settings, S_re
     arrays = engine.loads(dl, lattice, G, v_points, Dfs, V, rho, alpha, WD, grounds, S_ref, b_ref, c_ref,
                           ref_point, alpha_eff, use_leg=solver.name == "vlm", extra={"gamma": G}, symmetric=symmetric,
                           GK=bd["GK"], GO=bd["GO"], omega=omega)
-    return (arrays, infos, umap), None
+    return (arrays, infos, umap, cpu_cases), None
 
+
+# Dispatch reasons of a nonlinear case that the CPU solves again after the GPU.
+_REASON_NL_NOT_CONVERGED = "gpu: the nonlinear solve did not converge; solved again on the cpu"
+_REASON_NL_NOT_SETTLED = "gpu: the nonlinear continuation did not settle; solved again on the cpu"
 
 # Continuation passes of the GPU nonlinear solves (see _nonlinear).
 MAX_CONTINUATION_PASSES = 3
@@ -205,6 +213,12 @@ def _nonlinear(solver, engine, dl, md, cs, lattice, conditions, settings, ground
     the GPU hands over) are solved on the CPU, in order, each from the
     solution of the case before it, with the restarts of
     :meth:`ventorum.solvers.nonlinear.NonlinearLLTSolver.solve_circulation`.
+
+    The fifth return value maps the index of each case that the CPU solved
+    again to its CPU dispatch record (made inside the thread policy of the
+    CPU solves, with the reason ``_REASON_NL_NOT_CONVERGED`` or
+    ``_REASON_NL_NOT_SETTLED``). The loads of these cases are still
+    computed on the GPU, in float64.
     """
     import torch
 
@@ -270,12 +284,18 @@ def _nonlinear(solver, engine, dl, md, cs, lattice, conditions, settings, ground
     redo = np.flatnonzero(~conv_h | unsettled.cpu().numpy())
     if continuation and redo.size:
         redo = np.arange(int(redo[0]), K)
+    cpu_cases: dict[int, dict] = {}
     if redo.size:
+        from ventorum.solvers.lattice_base import _cpu_dispatch
         from ventorum.utils.parallel import solve_threads
 
         # The thread policy of the CPU solves (BLAS on one thread, kernel threads).
         with solve_threads(lattice.n_panels):
+            records = {why: _cpu_dispatch(lattice.n_panels, 1, why)
+                       for why in {_REASON_NL_NOT_CONVERGED if not conv_h[k] else _REASON_NL_NOT_SETTLED
+                                   for k in redo}}
             for k in redo:
+                cpu_cases[int(k)] = records[_REASON_NL_NOT_CONVERGED if not conv_h[k] else _REASON_NL_NOT_SETTLED]
                 g_prev = None
                 if gamma0 is not None and K == 1:
                     g_prev = np.asarray(gamma0, dtype=float)
@@ -288,7 +308,7 @@ def _nonlinear(solver, engine, dl, md, cs, lattice, conditions, settings, ground
                 vp[k] = engine._f64(info.v_control)
                 info.v_control = None
                 infos[k] = info
-    return G, vp, alpha_full, infos
+    return G, vp, alpha_full, infos, cpu_cases
 
 
 # The kernel groups of a GPU batch of each solver family and the backend that
@@ -310,7 +330,8 @@ GPU_BACKENDS = {
 
 def _results(solver, lattice, conditions, arrays: dict, setups: list, umap, b_ref: float, c_ref: float,
              main_surface: int, t0: float, share: float, precision: str, infos: list | None = None,
-             ref_point=None, S_ref: float | None = None, dispatch_reason: str = "device setting is gpu") -> list:
+             ref_point=None, S_ref: float | None = None, dispatch_reason: str = "device setting is gpu",
+             cpu_cases: dict | None = None) -> list:
     """Return the result objects of a GPU batch (the loads objects and the CPU result builder).
 
     The far-field lateral diagnostics (``CY_farfield``, ``Cn_trefftz``) are
@@ -320,6 +341,11 @@ def _results(solver, lattice, conditions, arrays: dict, setups: list, umap, b_re
     far-field values. *dispatch_reason* is the reason of the GPU decision;
     it goes into the ``reason`` of the dispatch record
     (``details["dispatch"]``), which is made once for the batch.
+    *cpu_cases* maps the index of each case whose circulation the CPU
+    solved (see :func:`_nonlinear`) to its CPU dispatch record. Such a
+    case gets that record and no ``details["device"]`` and
+    ``details["precision"]`` (the convention of a CPU result: device cpu,
+    float64; its loads are computed on the GPU in float64).
     """
     from ventorum.aero.loads import loads_result, trefftz_lateral_batch
     from ventorum.hardware.profile import active_profile
@@ -368,10 +394,12 @@ def _results(solver, lattice, conditions, arrays: dict, setups: list, umap, b_re
             CY_farfield=cy_ff[k], Cn_trefftz=cn_tr[k],
         )
         info = infos[k] if infos is not None else SolveInfo(symmetric=umap.symmetric)
+        cpu_record = cpu_cases.get(k) if cpu_cases else None
         res = solver._case_result(lattice, cond, ld, info, gammas[k], st[0], st[1], st[2], st[3], b_ref,
                                   c_ref, main_surface, t0, execution_time=share, spanwise_stats=stats[k],
-                                  ref_point=ref_point, dispatch=dispatch)
-        res.details["device"] = "gpu"
-        res.details["precision"] = precision
+                                  ref_point=ref_point, dispatch=dispatch if cpu_record is None else cpu_record)
+        if cpu_record is None:
+            res.details["device"] = "gpu"
+            res.details["precision"] = precision
         out.append(res)
     return out

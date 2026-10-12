@@ -906,3 +906,44 @@ def test_gpu_record_shape(solver_type):
             assert d["precision"] == r.details["precision"]
     finally:
         gpu.set_device(old_dev)
+
+
+@pytest.mark.gpu
+def test_gpu_nonlinear_case_solved_again_on_cpu_records_cpu(monkeypatch):
+    """A nonlinear case that does not converge on the GPU and is solved again on the CPU records the CPU."""
+    if not gpu.available():
+        pytest.skip(f"GPU unavailable: {gpu.unavailable_reason()}")
+    from ventorum.gpu import engine
+
+    real = engine.llt_nonlinear
+
+    def one_case_fails(*args, **kwargs):
+        out = real(*args, **kwargs)
+        conv = out["converged"].clone()
+        conv[1] = False
+        out["converged"] = conv
+        return out
+
+    monkeypatch.setattr(engine, "llt_nonlinear", one_case_fails)
+    old_dev = gpu.get_device()
+    try:
+        gpu.set_device("gpu")
+        ac = _rect_aircraft()
+        st = SolverSettings(solver_type="nonlinear", n_panels=16)
+        solver = make_solver("nonlinear")
+        conds = [FlightCondition(V_inf=30.0, alpha=np.radians(a)) for a in (2.0, 4.0, 6.0)]
+        lat = solver.build(ac, st, conds[0])
+        res = solver.solve_batch(lat, conds, st, ac.S_ref, ac.b_ref, ac.c_ref, continuation=False)
+        for k in (0, 2):
+            assert res[k].details["device"] == "gpu"
+            _assert_dispatch(res[k].details["dispatch"], expected_device="gpu")
+        d = res[1].details["dispatch"]
+        _assert_dispatch(d, expected_device="cpu")
+        assert d["precision"] == "float64"
+        assert d["workers"] == 1
+        assert d["reason"] == "gpu: the nonlinear solve did not converge; solved again on the cpu"
+        assert "device" not in res[1].details
+        assert "precision" not in res[1].details
+        assert res[1].converged
+    finally:
+        gpu.set_device(old_dev)
