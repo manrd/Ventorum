@@ -3,10 +3,17 @@
 
 The client (opencode or Claude Code) runs headless in an empty temporary
 folder, with only the Ventorum MCP server and no shell, file or web tools.
+The prompt goes to the client through its standard input (and the file
+``prompt.txt`` in the work folder), never on the command line. The client
+runs in a new process group; at a timeout the harness stops the client and
+all its child processes (for example the MCP server).
+
 The harness scores each run from the final text of the client and from the
 server audit log (``VENTORUM_AGENT_AUDIT_LOG``): it replays the logged tool
-arguments through :func:`ventorum.agent.call_tool` to get the payloads for
-the provenance check. Results of track B are reported apart from track A,
+arguments through a separate Ventorum MCP server with a sandbox config
+folder, to get the payloads for the provenance check. A logged call of
+``ventorum_tune_machine`` is never replayed: its status comes from the audit
+line, with no numbers. Results of track B are reported apart from track A,
 because each client adds its own system prompt and counts tokens in its own
 way.
 
@@ -16,14 +23,18 @@ way.
 The client command lines are templates. The defaults below are the known
 forms; check them against the installed client version, and override them
 in the private config (``clients.<name>.command``). The placeholders are
-``{exe}``, ``{model}``, ``{prompt}``, ``{mcp_config}`` and ``{workdir}``.
+``{exe}``, ``{model}``, ``{prompt_file}``, ``{mcp_config}`` and ``{workdir}``.
+A template with ``{prompt}`` is refused: the prompt must not be on the
+command line.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import os
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -34,8 +45,8 @@ from typing import Any
 from collections.abc import Callable
 
 from validation.agent_benchmark import HARNESS_VERSION, LOG_SCHEMA_VERSION
-from validation.agent_benchmark.mcp_client import make_server_env, sandbox_config_dir
-from validation.agent_benchmark.references import compute_all, in_process_call
+from validation.agent_benchmark.mcp_client import make_server_env, sandbox_config_dir, start_session
+from validation.agent_benchmark.references import mcp_call
 from validation.agent_benchmark.runner import (
     JsonlLog,
     Redactor,
@@ -44,9 +55,13 @@ from validation.agent_benchmark.runner import (
     check_model_allowed,
     check_out_dir,
     environment_facts,
+    finished_pairs,
+    key_env_names,
     load_config,
     make_run_id,
+    prepare_references,
     read_jsonl,
+    redact_file,
     report,
     write_json,
 )
@@ -59,15 +74,18 @@ OPENCODE_TOOLS_OFF = ("bash", "edit", "write", "read", "patch", "glob", "grep", 
 CLAUDE_TOOLS_OFF = ("Bash", "Read", "Write", "Edit", "MultiEdit", "Glob", "Grep", "LS", "WebFetch", "WebSearch",
                     "Task", "NotebookEdit", "TodoWrite")
 
+#: Tools that are never replayed from the audit log (they change the machine state).
+NO_REPLAY = ("ventorum_tune_machine",)
+
 DEFAULT_CLIENTS: dict[str, dict[str, Any]] = {
     "opencode": {
         "exe": "opencode-cli",
-        "command": ["{exe}", "run", "--standalone", "-m", "{model}", "{prompt}"],
+        "command": ["{exe}", "run", "--standalone", "-m", "{model}"],
         "output": "text",
     },
     "claude_code": {
         "exe": "claude",
-        "command": ["{exe}", "-p", "{prompt}", "--output-format", "json", "--model", "{model}",
+        "command": ["{exe}", "-p", "--output-format", "json", "--model", "{model}",
                     "--mcp-config", "{mcp_config}", "--strict-mcp-config",
                     "--allowedTools", "mcp__ventorum", "--disallowedTools", ",".join(CLAUDE_TOOLS_OFF)],
         "output": "json",
@@ -104,9 +122,20 @@ def write_client_config(client: str, workdir: Path, audit_log: Path, config_dir:
     return path
 
 
-def build_command(client_cfg: dict[str, Any], model: str, prompt: str, mcp_config: Path, workdir: Path) -> list[str]:
-    """Fill in the command template of a client."""
-    subs = {"{exe}": str(client_cfg["exe"]), "{model}": model, "{prompt}": prompt,
+def build_command(client_cfg: dict[str, Any], model: str, prompt_file: Path, mcp_config: Path,
+                  workdir: Path) -> list[str]:
+    """Fill in the command template of a client.
+
+    Raises
+    ------
+    RunRefused
+        The template has the placeholder ``{prompt}`` (the prompt goes
+        through the standard input or ``{prompt_file}``).
+    """
+    if any("{prompt}" in str(part) for part in client_cfg["command"]):
+        raise RunRefused("the client command must not hold {prompt}: the prompt goes through the standard input "
+                         "or {prompt_file}")
+    subs = {"{exe}": str(client_cfg["exe"]), "{model}": model, "{prompt_file}": str(prompt_file),
             "{mcp_config}": str(mcp_config), "{workdir}": str(workdir)}
     out = []
     for part in client_cfg["command"]:
@@ -136,38 +165,145 @@ def parse_client_output(stdout: str, kind: str) -> dict[str, Any]:
                                       "cache_write_tokens": 0, "estimated": True}, "cost_usd": 0.0}
 
 
-def calls_from_audit(audit_log: Path, call: Callable[[str, dict[str, Any]], dict[str, Any]] | None = None
-                     ) -> list[dict[str, Any]]:
+def _status_payload(entry: dict[str, Any]) -> dict[str, Any]:
+    """Return a payload with the status of an audit line only (no numbers)."""
+    p: dict[str, Any] = {"status": entry.get("status"), "replayed": False}
+    if entry.get("error_type"):
+        p["error"] = {"type": entry.get("error_type")}
+    return p
+
+
+def calls_from_audit(audit_log: Path, call: Callable[[str, dict[str, Any]], dict[str, Any]] | None = None,
+                     config_dir: Path | None = None, drop_env: Any = ()) -> list[dict[str, Any]]:
     """Rebuild the tool calls of a run from the server audit log.
 
     The audit log has the tool name, the status and the arguments of each
-    call, not the payload. The arguments are run again (default: in this
-    process) to get the payloads for the provenance check.
+    call, not the payload. The arguments are run again to get the payloads
+    for the provenance check. The tools of :data:`NO_REPLAY` are not run
+    again: their payload holds only the status of the audit line.
+
+    Parameters
+    ----------
+    audit_log : Path
+        The audit log of the client run.
+    call : callable, optional
+        ``call(tool, args) -> payload``. The default starts a Ventorum MCP
+        server with a sandbox copy of the profile folder (in *config_dir*,
+        or in a temporary folder), and closes it at the end.
+    config_dir : Path, optional
+        Sandbox profile folder of the default server.
+    drop_env : iterable of str, optional
+        Environment variables that the default server must not get.
     """
-    call = call or in_process_call
+    session = None
+    tmp: Path | None = None
     out = []
-    for e in read_jsonl(audit_log):
-        args = e.get("arguments")
-        if isinstance(args, str):
-            try:
-                args = json.loads(args)
-            except json.JSONDecodeError:
-                args = None
-        rec: dict[str, Any] = {"name": e.get("tool"), "arguments": e.get("arguments"), "args": None, "payload": None,
-                               "rpc_error": None, "harness_error": None}
-        if isinstance(args, dict):
-            rec["args"] = args
-            rec["payload"] = call(str(e.get("tool")), args)
-        else:
-            rec["harness_error"] = "bad_arguments"
-        out.append(rec)
+    try:
+        for e in read_jsonl(audit_log):
+            tool = str(e.get("tool"))
+            args = e.get("arguments")
+            if isinstance(args, str):
+                try:
+                    args = json.loads(args)
+                except json.JSONDecodeError:
+                    args = None
+            rec: dict[str, Any] = {"name": e.get("tool"), "arguments": e.get("arguments"), "args": None,
+                                   "payload": None, "rpc_error": None, "harness_error": None}
+            if tool in NO_REPLAY:
+                rec["args"] = args if isinstance(args, dict) else None
+                rec["payload"] = _status_payload(e)
+            elif isinstance(args, dict):
+                if call is None:
+                    if config_dir is None:
+                        tmp = Path(tempfile.mkdtemp(prefix="vt_replay_cfg_"))
+                        config_dir = tmp
+                    session = start_session(config_dir=sandbox_config_dir(config_dir), drop_env=drop_env)
+                    call = mcp_call(session)
+                rec["args"] = args
+                rec["payload"] = call(tool, args)
+            else:
+                rec["harness_error"] = "bad_arguments"
+            out.append(rec)
+    finally:
+        if session is not None:
+            session.close()
+        if tmp is not None:
+            shutil.rmtree(tmp, ignore_errors=True)
     return out
+
+
+def kill_tree(proc: subprocess.Popen) -> None:
+    """Stop a process and all its child processes (Windows: ``taskkill /T /F``; POSIX: the process group)."""
+    if proc.poll() is not None:
+        return
+    if os.name == "nt":
+        try:
+            subprocess.run(["taskkill", "/T", "/F", "/PID", str(proc.pid)], capture_output=True, timeout=60)
+        except (OSError, subprocess.SubprocessError):
+            pass
+    else:
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            pass
+    if proc.poll() is None:
+        proc.kill()
+
+
+def run_client_process(cmd: list[str], cwd: Path, prompt: str, timeout_s: float,
+                       env: dict[str, str] | None = None) -> tuple[str, int | None, bool]:
+    """Run a client with the prompt on its standard input.
+
+    The client starts in a new process group. At the timeout, the client and
+    all its child processes are stopped.
+
+    Parameters
+    ----------
+    cmd : list of str
+        Command line (with no prompt in it).
+    cwd : Path
+        Working folder.
+    prompt : str
+        Prompt text, written to the standard input.
+    timeout_s : float
+        Time limit [s].
+    env : dict, optional
+        Environment (default: the environment of this process).
+
+    Returns
+    -------
+    tuple
+        ``(stdout, return_code, timed_out)``; ``return_code`` is None after
+        a timeout.
+
+    Raises
+    ------
+    OSError
+        The client cannot start.
+    """
+    kw: dict[str, Any] = {}
+    if os.name == "nt":
+        kw["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+    else:
+        kw["start_new_session"] = True
+    proc = subprocess.Popen(cmd, cwd=cwd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                            text=True, encoding="utf-8", errors="replace", env=env, **kw)
+    try:
+        stdout, _ = proc.communicate(prompt, timeout=timeout_s)
+        return stdout or "", proc.returncode, False
+    except subprocess.TimeoutExpired:
+        kill_tree(proc)
+        try:
+            stdout, _ = proc.communicate(timeout=30)
+        except subprocess.TimeoutExpired:
+            stdout = ""
+        return stdout or "", None, True
 
 
 def score_client_run(variant: TaskVariant, references: dict[str, Any], final_text: str, audit_log: Path,
                      call: Callable[[str, dict[str, Any]], dict[str, Any]] | None = None,
                      extra_codes: list[str] | None = None) -> dict[str, Any]:
-    """Score one client run from its final text and its audit log."""
+    """Score one client run from its final text and its audit log (see :func:`calls_from_audit`)."""
     calls = calls_from_audit(audit_log, call)
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
@@ -176,8 +312,16 @@ def score_client_run(variant: TaskVariant, references: dict[str, Any], final_tex
 
 def run_client_track(config: dict[str, Any], client: str, model: str, task_ids: list[str] | str | None,
                      repeats: int, out_dir: str | Path, *, run_id: str | None = None, seed: int = 0,
-                     task_set: TaskSet | None = None, timeout_s: float = 1800.0) -> Path:
-    """Run a client on a task subset and score each run. Return the run folder."""
+                     task_set: TaskSet | None = None, timeout_s: float = 1800.0,
+                     reference_call: Callable[[str, dict[str, Any]], dict[str, Any]] | None = None,
+                     baseline: str | Path | None = None) -> Path:
+    """Run a client on a task subset and score each run. Return the run folder.
+
+    The references are checked as in track A (see
+    :func:`validation.agent_benchmark.runner.prepare_references`): the run
+    stops before a client starts if a golden call is not valid or a
+    reference value changed.
+    """
     check_model_allowed(model, {"model": model})
     out_root = check_out_dir(out_dir)
     ccfg = {**DEFAULT_CLIENTS.get(client, {}), **(config.get("clients", {}).get(client, {}))}
@@ -188,13 +332,10 @@ def run_client_track(config: dict[str, Any], client: str, model: str, task_ids: 
     run_id = run_id or make_run_id(f"{client}:{model}", "client", ids, seed)
     run_dir = out_root / run_id
     (run_dir / "audit").mkdir(parents=True, exist_ok=True)
-    redact = Redactor()
-    ref_path = run_dir / "references.json"
-    if ref_path.is_file():
-        refs = json.loads(ref_path.read_text(encoding="utf-8"))
-    else:
-        refs = compute_all(ts, ids, seed)
-        write_json(ref_path, refs, redact)
+    key_names = key_env_names(config)
+    redact = Redactor(key_names)
+    facts = environment_facts()
+    refs = prepare_references(ts, ids, seed, run_dir, out_root, redact, facts, reference_call, baseline)
     manifest_path = run_dir / "manifest.json"
     if not manifest_path.is_file():
         write_json(manifest_path, {
@@ -203,13 +344,41 @@ def run_client_track(config: dict[str, Any], client: str, model: str, task_ids: 
             "task_set": {"version": ts.version, "file": ts.path.name, "sha256": ts.file_hash},
             "system_prompt_sha256": ts.system_prompt_hash, "seed": seed, "tasks": ids, "repeats": repeats,
             "condition": "client", "model": {"label": f"{client}:{model}", "adapter": client, "model": model},
-            "environment": environment_facts(), "status": "running",
+            "environment": facts, "status": "running",
             "times_comparable": True,
         }, redact)
     cfg_dir = sandbox_config_dir(run_dir / "sandbox_config")
     results = JsonlLog(run_dir / "results.jsonl", redact)
     events = JsonlLog(run_dir / "events.jsonl", redact)
-    done = {(r["task_id"], r["repeat"]) for r in read_jsonl(run_dir / "results.jsonl")}
+    done = finished_pairs(read_jsonl(run_dir / "results.jsonl"))
+    replay: dict[str, Any] = {}
+
+    def replay_call(tool: str, args: dict[str, Any]) -> dict[str, Any]:
+        # One replay server for the whole run, with its own sandbox profile folder.
+        if "call" not in replay:
+            replay["session"] = start_session(config_dir=sandbox_config_dir(run_dir / "replay_config"),
+                                              drop_env=key_names)
+            replay["call"] = mcp_call(replay["session"])
+        return replay["call"](tool, args)
+
+    try:
+        _run_client_tasks(ts, ids, repeats, seed, done, client, model, ccfg, cfg_dir, refs, run_id, run_dir,
+                          timeout_s, replay_call, results, events, redact)
+    finally:
+        if "session" in replay:
+            replay["session"].close()
+    man = json.loads(manifest_path.read_text(encoding="utf-8"))
+    man["status"] = "finished"
+    man["updated_utc"] = _now()
+    write_json(manifest_path, man, redact)
+    return run_dir
+
+
+def _run_client_tasks(ts: TaskSet, ids: list[str], repeats: int, seed: int, done: set, client: str, model: str,
+                      ccfg: dict[str, Any], cfg_dir: Path, refs: dict[str, Any], run_id: str, run_dir: Path,
+                      timeout_s: float, replay_call: Callable, results: JsonlLog, events: JsonlLog,
+                      redact: Redactor) -> None:
+    """Run and score the client runs that are not done yet."""
     for rep in range(1, repeats + 1):
         for tid in ids:
             if (tid, rep) in done:
@@ -220,26 +389,25 @@ def run_client_track(config: dict[str, Any], client: str, model: str, task_ids: 
             try:
                 mcfg = write_client_config(client, work, audit, cfg_dir)
                 prompt = ts.system_prompt + "\n\nTask: " + v.prompt
-                cmd = build_command(ccfg, model, prompt, mcfg, work)
+                prompt_file = work / "prompt.txt"
+                prompt_file.write_text(prompt, encoding="utf-8")
+                cmd = build_command(ccfg, model, prompt_file, mcfg, work)
                 codes: list[str] = []
                 t0 = time.monotonic()
                 try:
-                    proc = subprocess.run(cmd, cwd=work, capture_output=True, text=True, encoding="utf-8",
-                                          errors="replace", timeout=timeout_s)
-                    stdout, rc = proc.stdout, proc.returncode
-                except subprocess.TimeoutExpired as exc:
-                    stdout = exc.stdout if isinstance(exc.stdout, str) else ""
-                    rc = None
-                    codes.append("limit:time")
+                    stdout, rc, timed_out = run_client_process(cmd, work, prompt, timeout_s)
                 except OSError as exc:
                     raise RunRefused(f"cannot start the client: {exc}") from exc
+                if timed_out:
+                    codes.append("limit:time")
                 wall = time.monotonic() - t0
             finally:
                 shutil.rmtree(work, ignore_errors=True)
             out = parse_client_output(stdout, ccfg.get("output", "text"))
             if rc not in (0, None):
                 codes.append("endpoint_error")
-            score = score_client_run(v, refs[tid], out["text"], audit, extra_codes=codes)
+            score = score_client_run(v, refs[tid], out["text"], audit, call=replay_call, extra_codes=codes)
+            redact_file(audit, redact)
             events.write({"schema_version": LOG_SCHEMA_VERSION, "run_id": run_id, "task_id": tid, "repeat": rep,
                           "type": "client_run", "time_utc": _now(), "return_code": rc, "final_text": out["text"]})
             results.write({
@@ -250,11 +418,6 @@ def run_client_track(config: dict[str, Any], client: str, model: str, task_ids: 
                 "times_s": {"wall": round(wall, 3), "model": 0.0, "tool": 0.0, "overhead": 0.0},
                 "cost_usd": out["cost_usd"], "time_utc": _now(),
             })
-    man = json.loads(manifest_path.read_text(encoding="utf-8"))
-    man["status"] = "finished"
-    man["updated_utc"] = _now()
-    write_json(manifest_path, man, redact)
-    return run_dir
 
 
 def main(argv: list[str] | None = None) -> int:

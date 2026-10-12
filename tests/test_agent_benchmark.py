@@ -379,14 +379,39 @@ def test_client_track_scores_from_audit_log(server, task_set, refs, tmp_path):
     path = write_client_config("claude_code", tmp_path, audit, tmp_path / "cfg")
     cfg = json.loads(path.read_text(encoding="utf-8"))
     assert list(cfg["mcpServers"]) == ["ventorum"]
-    cmd = build_command({"exe": "client", "command": ["{exe}", "-p", "{prompt}", "--mcp-config", "{mcp_config}"]},
-                        "m", "hello", path, tmp_path)
-    assert cmd == ["client", "-p", "hello", "--mcp-config", str(path)]
+    prompt_file = tmp_path / "prompt.txt"
+    cmd = build_command({"exe": "client", "command": ["{exe}", "-p", "--file", "{prompt_file}", "--mcp-config",
+                                                      "{mcp_config}"]}, "m", prompt_file, path, tmp_path)
+    assert cmd == ["client", "-p", "--file", str(prompt_file), "--mcp-config", str(path)]
 
 
 # ---------------------------------------------------------------------------
 # Regression tests of the review findings
 # ---------------------------------------------------------------------------
+
+def _pid_alive(pid: int) -> bool:
+    """Return True if the process *pid* runs (no signal is sent)."""
+    if os.name == "nt":
+        import ctypes
+
+        k32 = ctypes.windll.kernel32
+        h = k32.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+        if not h:
+            return False
+        try:
+            code = ctypes.c_ulong()
+            k32.GetExitCodeProcess(h, ctypes.byref(code))
+            return code.value == 259  # STILL_ACTIVE
+        finally:
+            k32.CloseHandle(h)
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
 
 def _score(task_set, tid, final_text, calls, references=None):
     from validation.agent_benchmark.scoring import score_run
@@ -394,6 +419,57 @@ def _score(task_set, tid, final_text, calls, references=None):
     v = task_set.variant(tid, 0)
     return score_run(v, references if references is not None else compute_references(v, lambda t, a: {}),
                      final_text, calls)
+
+
+def test_client_track_never_replays_the_tuner(tmp_path, monkeypatch):
+    """Track B takes the tuner status from the audit line and replays the other calls in a sandbox session."""
+    from validation.agent_benchmark import client_track
+    from validation.agent_benchmark.scoring import numbers_in
+
+    audit = tmp_path / "audit.jsonl"
+    lines = [{"tool": "ventorum_tune_machine", "status": "success", "error_type": None, "arguments": {}},
+             {"tool": "ventorum_wing_analysis", "status": "success", "error_type": None,
+              "arguments": {"wing": {"span_m": 10.0, "chord_m": 1.0}}}]
+    audit.write_text("".join(json.dumps(e) + "\n" for e in lines), encoding="utf-8")
+    seen = []
+
+    def call(name, args):
+        seen.append(name)
+        return {"status": "success", "metrics": {"CL": 0.3}}
+
+    calls = client_track.calls_from_audit(audit, call)
+    assert seen == ["ventorum_wing_analysis"]
+    assert calls[0]["name"] == "ventorum_tune_machine" and calls[0]["payload"]["status"] == "success"
+    assert numbers_in(calls[0]["payload"]) == []
+
+    # The default replay never runs in this process: it uses a server with a sandbox config folder.
+    def no_in_process(*a, **k):
+        raise AssertionError("in-process replay")
+
+    started = {}
+
+    class FakeClient:
+        def call_tool(self, name, args, timeout_s=None):
+            seen.append("session:" + name)
+            return {"payload": {"status": "success"}, "text": "{}", "is_error": False, "rpc_error": None,
+                    "bytes": 2}
+
+        def kill(self):
+            pass
+
+        def close(self):
+            started["closed"] = True
+
+    def fake_start(audit_log=None, config_dir=None, timeout_s=300.0, **kw):
+        started["config_dir"] = config_dir
+        return FakeClient()
+
+    monkeypatch.setattr(client_track, "in_process_call", no_in_process, raising=False)
+    monkeypatch.setattr(client_track, "start_session", fake_start, raising=False)
+    seen.clear()
+    client_track.calls_from_audit(audit)
+    assert seen == ["session:ventorum_wing_analysis"]
+    assert started["config_dir"] is not None and started.get("closed")
 
 
 PLACEHOLDERS = ("n/a", "", "unknown", "None", "null", "NA", "-", "N/A", "UNKNOWN")
@@ -560,6 +636,47 @@ def test_mcp_client_reads_large_reply_fast():
         c.close()
     assert n > 2_000_000 and len(result["pad"]) == 2_000_000
     assert dt < 2.0, dt
+
+
+def test_client_process_tree_killed_on_timeout(tmp_path):
+    """A client that times out is killed with all its children; the prompt goes through stdin."""
+    from validation.agent_benchmark.client_track import RunRefused as CtRefused
+    from validation.agent_benchmark.client_track import build_command, run_client_process
+
+    pid_file = tmp_path / "child.pid"
+    parent = tmp_path / "parent.py"
+    parent.write_text(
+        "import subprocess, sys, time\n"
+        "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'],\n"
+        "                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)\n"
+        f"open({str(pid_file)!r}, 'w').write(str(child.pid))\n"
+        "time.sleep(60)\n", encoding="utf-8")
+    t0 = time.monotonic()
+    stdout, rc, timed_out = run_client_process([sys.executable, str(parent)], tmp_path, "hello", 4.0)
+    assert timed_out and rc is None and time.monotonic() - t0 < 30
+    child = int(pid_file.read_text(encoding="utf-8"))
+    deadline = time.monotonic() + 10
+    while _pid_alive(child) and time.monotonic() < deadline:
+        time.sleep(0.2)
+    assert not _pid_alive(child), "the child of the client is still running"
+
+    echo = tmp_path / "echo.py"
+    echo.write_text("import sys\nsys.stdout.write('got:' + sys.stdin.read())\n", encoding="utf-8")
+    stdout, rc, timed_out = run_client_process([sys.executable, str(echo)], tmp_path, "the task prompt", 60.0)
+    assert stdout == "got:the task prompt" and rc == 0 and not timed_out
+    with pytest.raises(CtRefused, match="prompt"):
+        build_command({"exe": "c", "command": ["{exe}", "{prompt}"]}, "m", tmp_path / "p.txt", tmp_path, tmp_path)
+
+
+def test_client_track_checks_references(tmp_path):
+    """Track B stops when a golden call does not give the expected result, before a client starts."""
+    from validation.agent_benchmark.client_track import run_client_track
+    from validation.agent_benchmark.runner import RunStopped
+
+    cfg = {"models": {}, "clients": {"claude_code": {"exe": "no-such-client-program"}}}
+    with pytest.raises(RunStopped, match="golden calls"):
+        run_client_track(cfg, "claude_code", "m", ["AB-01"], 1, tmp_path, run_id="refcheck",
+                         reference_call=lambda t, a: {"status": "error", "error": {"type": "internal"}})
 
 
 def test_geometry_compares_reference_point(task_set):
