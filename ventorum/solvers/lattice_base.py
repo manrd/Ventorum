@@ -612,6 +612,7 @@ class LatticeSolver(BaseSolver):
         continuation: bool = True,
         grounds: list[GroundPlane | None] | None = None,
         _cpu_only: bool = False,
+        _cpu_reason: str | None = None,
     ) -> list[SolverResult]:
         """Solve several flight conditions on one lattice that is already built.
 
@@ -630,7 +631,10 @@ class LatticeSolver(BaseSolver):
         caller that must stay on the CPU (for example the ground-effect
         sweeps) can use it from several threads at the same time. The flag
         keeps the CPU branch in this method, so the warnings of the solve
-        point to the same caller frame on both paths.
+        point to the same caller frame on both paths. The private
+        *_cpu_reason* is the reason of the CPU path that the caller found
+        (for example the reason of :func:`ventorum.gpu.use_gpu`); it goes
+        into the dispatch record. None gives ``"caller requested cpu only"``.
 
         Returns
         -------
@@ -650,7 +654,7 @@ class LatticeSolver(BaseSolver):
             if gpu_results is not None:
                 return gpu_results
         else:
-            gpu_reason = "caller requested cpu only"
+            gpu_reason = _cpu_reason or "caller requested cpu only"
         explicit = [None] * len(conditions) if grounds is None else list(grounds)
         with solve_threads(lattice.n_panels, batch=len(conditions)):
             setups = [self._case_setup(lattice, c, settings, c_ref, g, ref_point) for c, g in zip(conditions, explicit)]

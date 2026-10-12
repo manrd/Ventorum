@@ -370,7 +370,9 @@ class GroundEffectSweep:
                         ac, sett, float(hv), float(av), 0.0, rp, height_ref, max_bank_deg=MAX_BANK_DEG)
 
         cases = [(hi, ai, pi) for hi in range(shape[0]) for ai in range(shape[1]) for pi in range(shape[2])]
-        batch = _gpu_batch(ac, sett, cases, h_arr, a_arr, p_arr, V_inf, rho, rp, height_ref)
+        gpu_reason: list[str] = []
+        batch = _gpu_batch(ac, sett, cases, h_arr, a_arr, p_arr, V_inf, rho, rp, height_ref,
+                           reason_out=gpu_reason)
 
         def run(case: tuple[int, int, int]):
             hi, ai, pi = case
@@ -388,7 +390,8 @@ class GroundEffectSweep:
         if backend not in ("thread", "serial"):
             raise ValueError(f"backend={self.backend!r}: use 'auto', 'thread' or 'serial'.")
         if batch is None:
-            batch = _cpu_batch(ac, sett, cases, h_arr, a_arr, p_arr, V_inf, rho, rp, height_ref, backend=backend)
+            batch = _cpu_batch(ac, sett, cases, h_arr, a_arr, p_arr, V_inf, rho, rp, height_ref, backend=backend,
+                               gpu_reason=gpu_reason[0] if gpu_reason else None)
         if batch is not None:
             outputs = batch
         elif backend == "serial":
@@ -504,7 +507,8 @@ def _prepare_sweep_cases(
     return probe, prepared, outputs
 
 
-def _gpu_batch(ac, sett, cases, h_arr, a_arr, p_arr, V_inf, rho, rp, height_ref) -> list | None:
+def _gpu_batch(ac, sett, cases, h_arr, a_arr, p_arr, V_inf, rho, rp, height_ref,
+               reason_out: list[str] | None = None) -> list | None:
     """Solve all cases of a sweep as one GPU batch; return the outputs ``(case, result, error)`` or None.
 
     The GPU takes the batch when :func:`ventorum.gpu.use_gpu` selects it
@@ -513,22 +517,39 @@ def _gpu_batch(ac, sett, cases, h_arr, a_arr, p_arr, V_inf, rho, rp, height_ref)
     :func:`ventorum.ground_effect.analyze_ground_effect`; the cases that
     fail a check keep their error, the others are solved together. None
     means the CPU path.
+
+    When *reason_out* is a list, the function appends the reason of the
+    device decision (one plain sentence, for example
+    ``"device setting is cpu"``) when it returns None for a sweep with
+    cases. The CPU batch records this reason in the dispatch record of
+    each result (see :func:`_cpu_batch`).
     """
     from ventorum import gpu
     from ventorum.gpu.pipeline import work_estimate
     from ventorum.ground_effect.solver import ground_case_result
     from ventorum.solvers.factory import make_solver, resolve_solver_type
 
-    if gpu.get_device() == "cpu" or not cases:
+    def fallback(reason: str) -> None:
+        if reason_out is not None:
+            reason_out.append(reason)
+
+    if not cases:
+        return None
+    if gpu.get_device() == "cpu":
+        fallback(gpu._REASON_DEVICE_CPU)
         return None
     canonical = resolve_solver_type(sett.solver_type)
     if canonical not in ("vlm", "linear", "nonlinear"):
+        fallback(f"solver '{canonical}' is not supported on GPU")
         return None
     solver = make_solver(canonical)
     first = cases[0]
     probe_cond = FlightCondition(V_inf=V_inf, alpha=float(np.radians(a_arr[first[1]])), rho=rho)
     lattice = solver.build(ac, sett, probe_cond, None, rp)
-    if not gpu.use_gpu(work_estimate(lattice, len(cases), True), canonical, len(cases), lattice.n_panels):
+    use, reason = gpu.use_gpu(work_estimate(lattice, len(cases), True), canonical, len(cases), lattice.n_panels,
+                              return_reason=True)
+    if not use:
+        fallback(reason)
         return None
     t0 = time.perf_counter()
     _, prepared, outputs = _prepare_sweep_cases(ac, sett, cases, h_arr, a_arr, p_arr, V_inf, rho, rp, height_ref)
@@ -567,6 +588,7 @@ def _cpu_batch(
     rp: np.ndarray,
     height_ref: str,
     backend: str = "auto",
+    gpu_reason: str | None = None,
 ) -> list | None:
     """Solve the cases of a sweep as batches on the CPU, or return None.
 
@@ -607,6 +629,10 @@ def _cpu_batch(
         Convention of the heights (``"ref"``, ``"min"``, ``"qc"`` or ``"te"``).
     backend : str, optional
         Parallel backend of the sweep (``"thread"`` or ``"serial"``).
+    gpu_reason : str or None, optional
+        Reason why the sweep does not run on the GPU (from
+        :func:`_gpu_batch`). It goes into the ``reason`` of the dispatch
+        record of each result. None gives the reason of the CPU-only flag.
 
     Returns
     -------
@@ -657,6 +683,7 @@ def _cpu_batch(
                     lattice, [prepared[i][1]["condition"] for i in chunk], sett, ac.S_ref, ac.b_ref, ac.c_ref,
                     ref_point=rp, main_surface=ac.main_surface_index(),
                     continuation=False, grounds=[prepared[i][1]["ground"] for i in chunk], _cpu_only=True,
+                    _cpu_reason=gpu_reason,
                 )
                 for i, res in zip(chunk, chunk_res):
                     all_results[i] = res

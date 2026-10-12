@@ -298,15 +298,47 @@ def test_fallback_reason_unsupported_solver():
         gpu.set_device(old_dev)
 
 
-def test_fallback_reason_cpu_only_batch():
-    """A batch with the private CPU-only flag records the reason of the flag."""
-    ac = _rect_aircraft()
-    cond = FlightCondition(V_inf=30.0, alpha=np.radians(4.0))
-    st = SolverSettings(solver_type="vlm", n_panels=16)
-    solver = VortexLatticeSolver()
-    lat = solver.build(ac, st, cond)
-    res = solver.solve_batch(lat, [cond], st, ac.S_ref, ac.b_ref, ac.c_ref, _cpu_only=True)
-    assert res[0].details["dispatch"]["reason"] == "caller requested cpu only"
+def _small_ground_sweep():
+    """Run a small ground-effect sweep (4 cases, small lattice: the CPU batch path)."""
+    wing = vt.LiftingSurface(
+        name="wing",
+        semi_span=3.0,
+        sections=[vt.WingSection(y_frac=0.0, chord=1.0), vt.WingSection(y_frac=1.0, chord=0.7)],
+    )
+    st = SolverSettings(solver_type="vlm", n_panels=12, n_chord=2)
+    res = GroundEffectSweep(wing, settings=st).run_sweep(heights=[0.3, 0.6], alphas_deg=[2.0, 4.0], V_inf=30.0)
+    rs = [r for r in res.results if r is not None]
+    assert len(rs) == 4
+    return rs
+
+
+def test_ground_sweep_cpu_batch_reason_device_cpu():
+    """The CPU batch of a ground-effect sweep on device cpu records the device reason."""
+    old_dev = gpu.get_device()
+    try:
+        gpu.set_device("cpu")
+        for r in _small_ground_sweep():
+            assert r.solver_result.details["dispatch"]["reason"] == "device setting is cpu"
+    finally:
+        gpu.set_device(old_dev)
+
+
+def test_ground_sweep_cpu_batch_reason_min_work(monkeypatch):
+    """The CPU batch of a small ground-effect sweep on device auto records the min_work rule."""
+    import re
+
+    old_dev = gpu.get_device()
+    try:
+        gpu.set_device("auto")
+        monkeypatch.setattr(gpu, "available", lambda: True)
+        monkeypatch.setattr(gpu, "cost_model", lambda family: None)
+        mw, mc = gpu.min_work("vlm"), gpu.min_cases("vlm")
+        pattern = rf"auto: work \d+ < min_work {mw:.0f} and 4 cases < min_cases {mc}"
+        for r in _small_ground_sweep():
+            assert "device" not in r.solver_result.details
+            assert re.fullmatch(pattern, r.solver_result.details["dispatch"]["reason"])
+    finally:
+        gpu.set_device(old_dev)
 
 
 @pytest.mark.gpu
