@@ -10,6 +10,13 @@ a minor version can change a public interface.
 
 ### Added
 
+- Body rates on the GPU pipelines: cases with p, q, r run on the selected device for the vortex
+  lattice and both lifting lines, in free air and in ground effect (per-point rotation onset at
+  the control points, the three-quarter-chord points and the force points). GPU float64 equals
+  the CPU to round-off; rate cases run 3 to 49 times faster than on the CPU on the test machine.
+  Rate-free cases keep their speed. `rate_derivatives` and `derivative_matrix` report the
+  device. A nonlinear batch with continuation that mixes symmetric and non-symmetric cases still
+  runs on the CPU (stated in the theory chapter).
 - Gradients with respect to the planform parameters: `gradients`, `gradient_vjp` and
   `check_gradients` accept the input `"planform"` (per surface `semi_span`, `sweep_le`,
   `dihedral`, `incidence`, `position`; per section `chord`, `twist`, `x_le`, `z_le`, `y_frac`,
