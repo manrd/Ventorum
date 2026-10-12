@@ -38,8 +38,9 @@ fractions do not change. Angles use rad, lengths use m.
 
 Inputs (`wrt`): `"nodes"` (per surface the leading- and trailing-edge nodes of the
 defining half), `"alpha"`, `"beta"`, `"V_inf"`, `"rho"`, `"h"`, `"phi"`, `"sections"`
-(per strip `a0`, `alpha_L0`, `Cd0`, `Cm0` of linear airfoils) and `"reference"`
-(`S_ref`, `b_ref`, `c_ref`, `ref_point`).
+(per strip `a0`, `alpha_L0`, `Cd0`, `Cm0` of linear airfoils), `"reference"`
+(`S_ref`, `b_ref`, `c_ref`, `ref_point`) and `"planform"` (per surface and
+per section, see below; it cannot be combined with `"nodes"`).
 
 Outputs: `"CL"`, `"CY"`, `"CDi"`, `"CDp"`, `"CD"`, `"Cl"`, `"Cm"`, `"Cn"` in the axes
 `axes` (`"body"`, `"stability"`, `"wind"`). The vector outputs `"strip_force"` and
@@ -57,6 +58,52 @@ direction = vt.gradient_vjp(
 )
 print(f"d(sum of strip forces)/dalpha = {direction['alpha']}")
 ```
+
+## Planform parameters
+
+`wrt="planform"` gives gradients with respect to the planform parameters of
+each surface: semi-span [m], sweep of the leading edge [rad], dihedral [rad],
+incidence [rad] and position [m], and per section chord [m], twist [rad],
+leading-edge offsets `x_le` and `z_le` [m], span fraction `y_frac`
+(dimensionless) and airfoil incidence `alpha_L0` [rad]. The jacobian maps each
+surface name to these values, with the sections as a list in order. A section
+that does not set `x_le` or `z_le` gives None there (it has no such
+parameter). The root and tip span fractions are pinned (0 and 1) and give
+0.0.
+
+```python
+import numpy as np
+import ventorum as vt
+
+pwing = vt.LiftingSurface(
+    name="Wing",
+    semi_span=5.0,
+    sections=[
+        vt.WingSection(y_frac=0.0, chord=2.0),
+        vt.WingSection(y_frac=1.0, chord=1.0),
+    ],
+)
+paircraft = vt.Aircraft(surfaces=[pwing])
+pcondition = vt.FlightCondition(V_inf=30.0, alpha=np.radians(4.0))
+psettings = vt.SolverSettings(solver_type="vlm", n_panels=12, n_chord=2)
+
+presult = vt.gradients(
+    paircraft, pcondition, psettings,
+    outputs=("CL", "CD", "Cm"),
+    wrt=("planform",),
+    axes="body",
+)
+print(f"dCL/dsemi_span = {presult.jacobian['CL']['planform']['Wing']['semi_span']:.4f} per m")
+```
+
+The chain rule runs through a differentiable port of the geometry builder,
+not through finite differences. The mesh topology stays fixed: the panel
+count, the spacing choice and the snap assignment of each spanwise station do
+not change, but the stations move with the parameters (a station snapped to a
+section tracks its span fraction). The automatic reference values follow the
+planform. Planform inputs use the full system, also for symmetric cases. The
+translation identity holds per surface: the position gradient equals the
+summed node gradients of that surface.
 
 ## Trust
 

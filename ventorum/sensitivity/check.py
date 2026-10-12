@@ -161,6 +161,9 @@ def check_gradients(
     wrt : tuple of str
         Inputs to check. ``"nodes"`` is checked along *n_directions*
         random unit directions over all node coordinates (seeded).
+        ``"planform"`` is checked parameter by parameter (surface
+        semi-span, sweep, dihedral, incidence and position; per-section
+        chord, twist, x_le, z_le, span fraction and airfoil incidence).
     n_directions : int
         Number of random node directions.
     rtol : float
@@ -381,10 +384,56 @@ def check_gradients(
             grads = {o: float(np.asarray(jac[o]["reference"]["ref_point"], dtype=float).reshape(3)[k])
                      for o in outs}
             _record("reference", f"reference.ref_point[{k}]", grads, fd, float(ac2.c_ref))
+    if "planform" in ins:
+        from ventorum.sensitivity import planform as PF
+        from ventorum.solvers.factory import resolve_solver_type
+
+        ac2 = ac.clone()
+        ac2.compute_reference_values()
+        c_ref = float(ac2.c_ref)
+        canonical = resolve_solver_type(st.solver_type)
+        collocation = "vlm" if canonical == "vlm" else "linear"
+        base_geom = PF.build_planform(ac, st, collocation)
+        base_snap = {n: (list(tr.snap_sec), tr.n_sp, tr.spacing)
+                     for n, tr in base_geom.surfaces.items()}
+        for tgt in _planform_targets(ac2, c_ref):
+            if tgt.get("skip"):
+                details[tgt["suffix"]] = {}
+                details[tgt["suffix"]].update(rel_err=None, mode="skipped", compared=False,
+                                              passed=None, reason=tgt["skip"])
+                groups.setdefault("planform", {"compared": 0, "skipped": 0})["skipped"] += 1
+                continue
+            if _planform_topology_jumps(ac, st, collocation, base_geom, base_snap, tgt):
+                details[tgt["suffix"]] = {}
+                details[tgt["suffix"]].update(
+                    rel_err=None, mode="skipped", compared=False, passed=None,
+                    reason=("the mesh stations jump within the difference step "
+                            "(a spanwise snap appears or moves): the fixed-topology "
+                            "gradient has no finite-difference reference there"))
+                groups.setdefault("planform", {"compared": 0, "skipped": 0})["skipped"] += 1
+                continue
+
+            def _get(v: float, _t: dict = tgt) -> dict[str, float]:
+                ac3 = ac.clone()
+                _set_planform_param(ac3, _t["surf"], _t["sec"], _t["key"], _t.get("sub"), v)
+                return _production_scalars(ac3, condition, st, axes)
+
+            fd = _ladder(_get, tgt["x0"], tgt["h"], _STEP_FACTORS, outs, eps)
+            grads = {}
+            for o in outs:
+                jp = jac[o]["planform"][tgt["surf"]]
+                if tgt["sec"] is None:
+                    if tgt["key"] == "position":
+                        g = float(np.asarray(jp["position"], dtype=float).reshape(3)[tgt["sub"]])
+                    else:
+                        g = float(jp[tgt["key"]])
+                else:
+                    g = float(jp["sections"][tgt["sec"]][tgt["key"]])
+                grads[o] = g
+            _record("planform", tgt["suffix"], grads, fd, tgt["scale"])
     if "nodes" in ins:
         from ventorum.geometry.deformation import undeformed_nodes
         from ventorum.solvers.factory import resolve_solver_type
-
         ac2 = ac.clone()
         canonical = resolve_solver_type(st.solver_type)
         solver_name = "vlm" if canonical == "vlm" else "linear"
@@ -519,3 +568,125 @@ def _section_weights(ac: Any, solver: Any, st: Any, condition: Any,
         cur = np.asarray(getattr(lat, prop), dtype=float)
         weights[prop] = (cur - base_props[prop]) / dv
     return weights
+
+
+def _planform_targets(ac: Any, c_ref: float) -> list:
+    """List the finite-difference targets of the planform input.
+
+    Each target holds the surface, the section (None for surface parameters),
+    the key, the position component (for ``"position"``), the base value, the
+    step, the suffix of the details entry, the input scale and, for an invalid
+    direction, the skip reason. Parameters that do not exist (unset ``x_le``
+    or ``z_le``, pinned root and tip span fractions) are omitted.
+    """
+    out = []
+    for surf in ac.surfaces:
+        has_z = bool(any(s.z_le is not None for s in surf.sections))
+        for key in ("semi_span", "sweep_le", "dihedral", "incidence"):
+            if key == "dihedral" and has_z:
+                continue
+            x0 = float(getattr(surf, key))
+            h = 1e-4 if key != "semi_span" else 1e-4 * abs(x0)
+            out.append({"surf": surf.name, "sec": None, "key": key, "sub": None,
+                        "x0": x0, "h": h, "suffix": f"planform.{surf.name}.{key}",
+                        "scale": 1.0 if key != "semi_span" else h / 1e-4})
+        pos = np.asarray(surf.position, dtype=float).reshape(3)
+        for k in range(3):
+            if k == 1 and bool(surf.is_symmetric):
+                out.append({"surf": surf.name, "sec": None, "key": "position", "sub": k,
+                            "suffix": f"planform.{surf.name}.position[{k}]",
+                            "skip": "position y of a symmetric surface must stay 0"})
+                continue
+            out.append({"surf": surf.name, "sec": None, "key": "position", "sub": k,
+                        "x0": float(pos[k]), "h": 1e-4 * c_ref,
+                        "suffix": f"planform.{surf.name}.position[{k}]",
+                        "scale": c_ref})
+        n = len(surf.sections)
+        for j, sec in enumerate(surf.sections):
+            base = {"chord": (float(sec.chord), 1e-4 * abs(float(sec.chord))),
+                    "twist": (float(sec.twist), 1e-4),
+                    "alpha_L0": (float(sec.airfoil.alpha_L0),
+                                 max(1e-4 * abs(float(sec.airfoil.alpha_L0)), 1e-4))}
+            for key, (x0, h) in base.items():
+                out.append({"surf": surf.name, "sec": j, "key": key, "sub": None,
+                            "x0": x0, "h": h,
+                            "suffix": f"planform.{surf.name}.sec[{j}].{key}",
+                            "scale": 1.0 if key != "chord" else h / 1e-4})
+            for key in ("x_le", "z_le"):
+                v = getattr(sec, key)
+                if v is None:
+                    continue
+                x0 = float(v)
+                chord = float(sec.chord)
+                out.append({"surf": surf.name, "sec": j, "key": key, "sub": None,
+                            "x0": x0, "h": max(1e-4 * abs(x0), 1e-4 * chord),
+                            "suffix": f"planform.{surf.name}.sec[{j}].{key}",
+                            "scale": chord})
+            if 0 < j < n - 1:
+                lo, hi = float(surf.sections[j - 1].y_frac), float(surf.sections[j + 1].y_frac)
+                gap = min(float(sec.y_frac) - lo, hi - float(sec.y_frac))
+                h = min(1e-4, 0.25 * gap) if gap > 0.0 else 0.0
+                if h > 0.0:
+                    out.append({"surf": surf.name, "sec": j, "key": "y_frac", "sub": None,
+                                "x0": float(sec.y_frac), "h": h,
+                                "suffix": f"planform.{surf.name}.sec[{j}].y_frac",
+                                "scale": 1.0})
+    return out
+
+
+def _planform_topology_jumps(ac: Any, st: Any, collocation: str, base_geom: Any,
+                             base_snap: dict, tgt: dict) -> bool:
+    """Return True when the mesh stations jump within the difference step.
+
+    A spanwise snap that appears, disappears or moves to another edge (or a
+    spacing flip) changes the mesh stations by much more than the smooth
+    motion with the parameter. An edge on its break (coincident at the base
+    point) also jumps: any practical span-fraction step moves the break off
+    the spacing edge, and the control stations switch from the spacing rule
+    to the edge means. The fixed-topology gradient then has no
+    finite-difference reference there.
+    """
+    from ventorum.sensitivity import planform as PF
+
+    if tgt["key"] == "y_frac":
+        tr = base_geom.surfaces[tgt["surf"]]
+        for i, sec_idx in enumerate(tr.snap_sec):
+            if sec_idx == tgt["sec"] and not bool(tr.snap_moved[i]):
+                return True
+    for sgn in (+1.0, -1.0):
+        ac3 = ac.clone()
+        _set_planform_param(ac3, tgt["surf"], tgt["sec"], tgt["key"], tgt.get("sub"),
+                            tgt["x0"] + sgn * tgt["h"])
+        try:
+            geom = PF.build_planform(ac3, st, collocation)
+        except (RuntimeError, ValueError):
+            return True
+        for name, (snap, n_sp, spacing) in base_snap.items():
+            tr = geom.surfaces[name]
+            if (list(tr.snap_sec) != list(snap) or tr.n_sp != n_sp
+                    or tr.spacing != spacing):
+                return True
+    return False
+
+
+def _set_planform_param(ac: Any, surf_name: str, sec: Any, key: str,
+                        sub: Any, v: float) -> None:
+    """Set one planform parameter of a cloned aircraft to *v*."""
+    surf = next(s for s in ac.surfaces if s.name == surf_name)
+    if sec is None:
+        if key == "position":
+            pos = np.asarray(surf.position, dtype=float).reshape(3).copy()
+            pos[int(sub)] = float(v)
+            surf.position = pos
+        else:
+            setattr(surf, key, float(v))
+        return
+    s = surf.sections[int(sec)]
+    if key == "alpha_L0":
+        from ventorum.core.datatypes import LinearAirfoil
+
+        af = s.airfoil
+        s.airfoil = LinearAirfoil(name=af.name, a0=float(af.a0), alpha_L0=float(v),
+                                  Cd0=float(af.Cd0), Cm0=float(af.Cm0))
+    else:
+        setattr(s, key, float(v))

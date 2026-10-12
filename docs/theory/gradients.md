@@ -176,6 +176,30 @@ results are equal to round-off.
 
 * The mesh topology is fixed: spanwise stations, chordwise count and chordwise
   fractions do not change with the inputs.
+* The planform input (`"planform"`, see `ventorum/sensitivity/planform.py`) refines
+  this rule: the panel count, the spacing choice and the snap assignment of each
+  spanwise station stay fixed, but the stations move with the parameters. A station
+  snapped to a section break tracks the span fraction of its section; the control
+  stations next to a moved snap are the means of their edges, as in the mesh
+  builder. The chain rule runs through a differentiable port of the geometry
+  builder: edge geometry, station rule, strip interpolation of the section
+  properties, control-point fractions and automatic reference values. The port
+  reproduces the numpy builder to 1e-14.
+* An edge on its break (a station that coincides with a section break at the base
+  point) switches the control stations from the spacing rule to the edge means on
+  any practical span-fraction step. The gradient there is one-sided, and
+  `check_gradients` skips it with a reason. A parameter change that adds, removes
+  or moves a snap to another edge (or flips the automatic spacing) is skipped the
+  same way: the fixed-topology gradient has no finite-difference reference there.
+  Wings whose interior sections are all kinked keep every break and verify fully.
+* The planform parameters per surface are the semi-span [m], the leading-edge
+  sweep [rad], the dihedral [rad], the incidence [rad] and the position [m], and
+  per section the chord [m], the twist [rad], `x_le` [m] (None when unset), `z_le`
+  [m] (None when unset), the span fraction (dimensionless) and the airfoil
+  incidence `alpha_L0` [rad]. The root and tip span fractions are pinned (0 and
+  1). The position y of a symmetric surface must stay 0. A uniform position shift
+  of a surface equals the summed node gradients of that surface, and all position
+  gradients plus the reference-point gradient sum to zero (the translation rule).
 * The flow is linear in the circulation: vortex lattice and linear lifting line with
   linear airfoils, zero control deflections and zero body rates.
 * The folded symmetric system applies only when the case is symmetric and every
@@ -214,6 +238,11 @@ largest production magnitude of the array.
   drag, profile drag and section moment of linear airfoils, ground images, cross-surface
   core, axes transforms).
 * `ventorum/sensitivity/adjoint.py`: `gradients`, `gradient_vjp`, `GradientResult`.
+  `wrt="planform"` is refused together with `wrt="nodes"` (the same freedom); it
+  always uses the full system.
+* `ventorum/sensitivity/planform.py`: the differentiable port (edge geometry, station
+  rule with frozen snap assignment, strip properties, fractions, automatic
+  references) and the full-strip assembly maps.
 * `ventorum/sensitivity/kernels.py`: the autograd functions of the kernel path, the
   backend adapters and the backend selection (`method`, the machine profile entry
   `grad_vjp`, `set_vjp_backend`).
@@ -277,6 +306,14 @@ check fails when a component fails and when an input group has no compared compo
   reference path to 1e-12 (float64) for all parity configurations and CPU backends, the
   float32 gate (1e-3) for each CPU backend, the Warp gradients on the GPU, the `method`
   keyword and the fold of the node inputs (equal to the full system to 1e-12).
+* `tests/test_gradient_planform.py`: port parity to 1e-14 (sections, sweep, dihedral,
+  incidence, position, symmetric and mirror surfaces, section and control breaks,
+  explicit `x_le`/`z_le`), Richardson checks of each planform parameter (1e-6
+  float64) on the parity configurations and on wings with breaks, the translation
+  identity of the position gradients, the nodes-planform refusal, the agreement of
+  the airfoil incidence with the sections view, the kernel-reference agreement and
+  the planform how-to example. Components whose mesh stations jump within the
+  difference step are skipped with a reason.
 * `tests/test_vjp_kernels.py`: each VJP backend (numpy, Numba, Cython, Warp) against
   the PyTorch reference VJP for the products and all input gradients (1e-12 float64,
   1e-5 float32), the thread paths, the backend selection and the machine profile.

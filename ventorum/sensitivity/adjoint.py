@@ -33,7 +33,8 @@ SCALAR_OUTPUTS = ("CL", "CY", "CDi", "CDp", "CD", "Cl", "Cm", "Cn")
 VECTOR_OUTPUTS = ("strip_force", "section_cl")
 ALL_OUTPUTS = SCALAR_OUTPUTS + VECTOR_OUTPUTS
 SCALAR_INPUTS = ("alpha", "beta", "V_inf", "rho", "h", "phi")
-ALL_WRT = ("nodes", "alpha", "beta", "V_inf", "rho", "h", "phi", "sections", "reference")
+ALL_WRT = ("nodes", "alpha", "beta", "V_inf", "rho", "h", "phi", "sections", "reference",
+           "planform")
 
 # Inputs that keep a symmetric state symmetric (no beta, phi, section or
 # reference-point change that breaks the y = 0 symmetry). The node inputs of
@@ -348,8 +349,15 @@ def make_input_tensors(
     wrt: tuple[str, ...],
     device: str,
     precision: str,
+    prep: dict | None = None,
 ) -> dict:
-    """Return the torch input tensors; requested inputs require grad."""
+    """Return the torch input tensors; requested inputs require grad.
+
+    With ``"planform"`` in *wrt*, the node, strip-property and automatic
+    reference tensors are differentiable functions of the planform parameters
+    (see :mod:`ventorum.sensitivity.planform`), and *prep* (the dict of
+    :func:`_prepare_case`) is required.
+    """
     import torch
 
     dtype = _torch_dtype(precision)
@@ -386,7 +394,91 @@ def make_input_tensors(
         t[key] = _s("reference", base[key])
     rp = _a(base["ref_point"], "reference" in wrt)
     t["ref_point"] = rp
+    if "planform" in wrt:
+        if prep is None:
+            raise ValueError("The planform input needs the case dict of _prepare_case.")
+        _attach_planform(model, t, prep, wrt, device, precision)
     return t
+
+
+def _attach_planform(model: TorchReference, t: dict, prep: dict, wrt: tuple[str, ...],
+                     device: str, precision: str) -> None:
+    """Replace the geometry tensors of *t* by the differentiable planform port.
+
+    The node tensors become the port nodes plus the fixed node displacements,
+    the strip tensors become the interpolated section properties, the automatic
+    reference values become functions of the planform, and the control-point
+    fractions follow the spanwise stations. The planform leaves are stored in
+    *t* under ``"planform:..."`` keys. Intermediate input tensors whose own
+    jacobian is requested (strips for ``"sections"``, automatic references for
+    ``"reference"``) are registered for the extra gradients of
+    :func:`_adjoint_solve`.
+    """
+    import torch
+
+    from ventorum.sensitivity import planform as PF
+
+    dtype = _torch_dtype(precision)
+    dev = torch.device(device)
+    ac = prep["aircraft"]
+    canonical = prep["canonical"]
+    collocation = "vlm" if canonical == "vlm" else "linear"
+    geom = PF.build_planform(ac, prep["settings"], collocation)
+    pt = PF.planform_tensors(geom, device, dtype, differentiable=True)
+    base_surf = {s["name"]: s for s in model.b["surfaces"]}
+    nsec = {}
+    for name in geom.order:
+        tr = geom.surfaces[name]
+        nsec[name] = tr.n_sections
+        p = pt.params[name]
+        t[f"planform:{name}:semi_span"] = p["semi_span"]
+        t[f"planform:{name}:sweep_le"] = p["sweep_le"]
+        t[f"planform:{name}:dihedral"] = p["dihedral"]
+        t[f"planform:{name}:incidence"] = p["incidence"]
+        t[f"planform:{name}:position"] = p["position"]
+        for j, d in enumerate(p["sec"]):
+            for key in ("chord", "twist", "y_frac", "alpha_L0", "x_le", "z_le"):
+                if d[key] is not None:
+                    t[f"planform:{name}:sec{j}:{key}"] = d[key]
+        base_le = np.asarray(base_surf[name]["base_le"], dtype=float)
+        base_te = np.asarray(base_surf[name]["base_te"], dtype=float)
+        nn = pt.nodes[name]
+
+        def _atm(arr: np.ndarray) -> torch.Tensor:
+            return torch.as_tensor(np.ascontiguousarray(arr), dtype=dtype, device=dev)
+
+        n_e = int(base_le.shape[0])
+        if nn["le"].shape[0] != n_e:
+            raise RuntimeError(
+                f"[{name}] the planform port gives {nn['le'].shape[0]} edges, "
+                f"the lattice has {n_e}.")
+        d_le = _atm(base_le - tr.undef["le"])
+        d_te = _atm(base_te - tr.undef["te"])
+        t[f"nodes:{name}:le"] = nn["le"] + d_le
+        t[f"nodes:{name}:te"] = nn["te"] + d_te
+    per = {}
+    for prop in ("a0", "alpha_L0", "Cd0", "Cm0"):
+        per[prop] = PF.full_strip_tensor(geom, {n: pt.strips[n][prop] for n in geom.order})
+        if per[prop].shape != t[prop].shape:
+            raise RuntimeError(
+                f"The planform port gives {per[prop].shape[0]} strips, "
+                f"the lattice has {t[prop].shape[0]}.")
+        t[prop] = per[prop]
+    auto = set(getattr(ac, "_auto_ref", set())) & {"S_ref", "b_ref", "c_ref"}
+    for key in ("S_ref", "b_ref", "c_ref"):
+        if key in auto:
+            t[key] = pt.refs[key]
+    frac_full = PF.full_frac_tensor(geom, {n: pt.strips[n]["frac"] for n in geom.order})
+    if frac_full.shape != model.b["frac"].shape:
+        raise RuntimeError("The planform port gives a fraction array of a wrong shape.")
+    model.b["frac"] = frac_full
+    model.b["cp_frac_panel"] = frac_full[model.b["panel_strip"]]
+    extra = []
+    if "sections" in wrt:
+        extra += [t[prop] for prop in ("a0", "alpha_L0", "Cd0", "Cm0")]
+    if "reference" in wrt:
+        extra += [t[key] for key in ("S_ref", "b_ref", "c_ref") if key in auto]
+    model.b["_planform"] = {"nsec": nsec, "extra": extra}
 
 
 @dataclass
@@ -403,6 +495,11 @@ class GradientResult:
         ``NodeDisplacements.le`` and ``.te``. ``"sections"`` maps each
         property name to an array per strip. ``"reference"`` maps each
         reference value to a float, with ``"ref_point"`` an array of 3.
+        ``"planform"`` maps each surface name to its parameters:
+        ``"semi_span"``, ``"sweep_le"``, ``"dihedral"``, ``"incidence"``,
+        ``"position"`` (array of 3) and ``"sections"`` (a list per section
+        with ``"chord"``, ``"twist"``, ``"x_le"``, ``"z_le"``,
+        ``"y_frac"`` and ``"alpha_L0"``).
     device : str
         Torch device of the gradient computation (``"cpu"`` or ``"cuda"``).
     precision_primal : str
@@ -492,6 +589,11 @@ def _prepare_case(geometry: Any, condition: Any, settings: Any, axes: str,
 
     from ventorum.sensitivity.kernels import METHODS, resolve
 
+    if "nodes" in wrt and "planform" in wrt:
+        raise ValueError(
+            'Inputs "nodes" and "planform" describe the same freedom: use "planform" '
+            "for design parameters (the chain rule gives the node effect), or "
+            '"nodes" for free node moves.')
     if axes not in ("body", "stability", "wind"):
         raise ValueError(f"'axes' must be one of ['body', 'stability', 'wind'], got {axes!r}.")
     if method not in METHODS:
@@ -557,7 +659,7 @@ def _adjoint_solve(
     model: TorchReference = prep["model"]
     base = prep["base"]
     device, precision = prep["device"], prep["precision"]
-    t = make_input_tensors(model, base, wrt, device, precision)
+    t = make_input_tensors(model, base, wrt, device, precision, prep)
     g0 = torch.as_tensor(np.ascontiguousarray(prep["g_unknown"]),
                          dtype=model.b["dtype"], device=model.b["device"])
     g_var = g0.detach().clone().requires_grad_(True)
@@ -570,19 +672,24 @@ def _adjoint_solve(
     # One backward pass per target gives df/dG (the adjoint right-hand
     # side) and the explicit partials df/dx together.
     names = [name for name, _ in targets]
-    leaves = [v for v in t.values() if isinstance(v, torch.Tensor) and v.requires_grad]
+    leaves = [v for v in t.values()
+              if isinstance(v, torch.Tensor) and v.is_leaf and v.requires_grad]
+    extra = list(model.b.get("_planform", {}).get("extra", []))
     grads_g = []
     grads_fx = []
+    grads_ex = []
     for _, f in targets:
         # An output without a dependence on the circulation or the inputs
         # (for example CDp with respect to alpha only) has no graph.
         if f.requires_grad:
-            parts = torch.autograd.grad(f, [g_var] + leaves, retain_graph=True, allow_unused=True)
+            parts = torch.autograd.grad(f, [g_var] + leaves + extra, retain_graph=True,
+                                        allow_unused=True)
         else:
-            parts = (None,) * (1 + len(leaves))
+            parts = (None,) * (1 + len(leaves) + len(extra))
         gg = parts[0] if parts[0] is not None else torch.zeros_like(g_var)
         grads_g.append(gg.detach())
-        grads_fx.append(parts[1:])
+        grads_fx.append(parts[1:1 + len(leaves)])
+        grads_ex.append(parts[1 + len(leaves):])
     B = torch.stack(grads_g, dim=1)
     Lambda = torch.linalg.solve(A_det.T, B)
     residual = A @ g_star - rhs
@@ -593,11 +700,18 @@ def _adjoint_solve(
         lam = Lambda[:, j].detach()
         r_term = (lam * residual).sum()
         if r_term.requires_grad:
-            grads_r = torch.autograd.grad(r_term, leaves, retain_graph=True, allow_unused=True)
+            grads_r = torch.autograd.grad(r_term, leaves + extra, retain_graph=True,
+                                          allow_unused=True)
         else:
-            grads_r = (None,) * len(leaves)
+            grads_r = (None,) * (len(leaves) + len(extra))
         gmap = {}
-        for v, gf, gr in zip(leaves, grads_fx[j], grads_r):
+        for v, gf, gr in zip(leaves, grads_fx[j], grads_r[:len(leaves)]):
+            if gf is None and gr is None:
+                gmap[id(v)] = None
+                continue
+            tot = (gf if gf is not None else 0.0) - (gr if gr is not None else 0.0)
+            gmap[id(v)] = tot.detach().cpu().numpy()
+        for v, gf, gr in zip(extra, grads_ex[j], grads_r[len(leaves):]):
             if gf is None and gr is None:
                 gmap[id(v)] = None
                 continue
@@ -756,6 +870,35 @@ def _pack_jacobian(model: TorchReference, t: dict, gmap: dict, wrt: tuple[str, .
         gr = gmap.get(id(t["ref_point"]))
         ref["ref_point"] = np.zeros(3) if gr is None else np.asarray(gr, dtype=float).reshape(3)
         j["reference"] = ref
+    if "planform" in wrt:
+        nsec = model.b.get("_planform", {}).get("nsec", {})
+        pf: dict = {}
+        for name, n_s in nsec.items():
+            entry: dict = {}
+            for key in ("semi_span", "sweep_le", "dihedral", "incidence"):
+                gr = gmap.get(id(t[f"planform:{name}:{key}"]))
+                entry[key] = 0.0 if gr is None else float(np.asarray(gr, dtype=float))
+            gr = gmap.get(id(t[f"planform:{name}:position"]))
+            entry["position"] = (np.zeros(3) if gr is None
+                                 else np.asarray(gr, dtype=float).reshape(3).copy())
+            secs = []
+            for jj in range(int(n_s)):
+                d: dict = {}
+                for key in ("chord", "twist", "y_frac", "alpha_L0"):
+                    tkey = f"planform:{name}:sec{jj}:{key}"
+                    gr = gmap.get(id(t[tkey])) if tkey in t else None
+                    d[key] = 0.0 if gr is None else float(np.asarray(gr, dtype=float))
+                for key in ("x_le", "z_le"):
+                    tkey = f"planform:{name}:sec{jj}:{key}"
+                    if tkey not in t:
+                        d[key] = None
+                    else:
+                        gr = gmap.get(id(t[tkey]))
+                        d[key] = 0.0 if gr is None else float(np.asarray(gr, dtype=float))
+                secs.append(d)
+            entry["sections"] = secs
+            pf[name] = entry
+        j["planform"] = pf
     return j
 
 
@@ -785,7 +928,12 @@ def gradients(
         Vector outputs go through :func:`gradient_vjp`.
     wrt : tuple of str
         Inputs from ``"nodes", "alpha", "beta", "V_inf", "rho", "h", "phi",
-        "sections", "reference"``. Lengths in m, angles in rad.
+        "sections", "reference", "planform"``. Lengths in m, angles in rad,
+        ``y_frac`` dimensionless. ``"planform"`` gives per surface the
+        semi-span [m], sweep_le, dihedral and incidence [rad], position [m]
+        and per-section lists (chord [m], twist [rad], x_le [m] or None,
+        z_le [m] or None, y_frac [-], alpha_L0 [rad]); it cannot be combined
+        with ``"nodes"``.
     axes : str
         Axes of the moments: ``"body"``, ``"stability"`` or ``"wind"``.
     method : str
@@ -826,6 +974,14 @@ def gradients(
         "Discrete adjoint of the production solve (Martins and Hwang 2013; Martins and Ning 2021, ch. 6).",
         "The mesh topology is fixed (spanwise stations, chordwise count and fractions).",
     ]
+    if "planform" in ins:
+        notes.append(
+            "The planform chain runs through a differentiable port of the geometry builder: "
+            "the spanwise stations move with the parameters, their count does not change. "
+            "Root and tip span fractions are pinned (0 and 1); symmetric surfaces must "
+            "keep position y at 0.")
+        if prep["production_symmetric"]:
+            notes.append("Planform inputs use the full system, also for symmetric cases.")
     if prep["precision"] == "float32":
         notes.append(
             "Float32 gradients: the gradient gate of float32 is 1e-3 relative; check the result with "
