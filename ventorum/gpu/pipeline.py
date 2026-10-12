@@ -51,12 +51,6 @@ def solve_batch(solver, lattice, conditions: list, settings, S_ref: float, b_ref
     """
     if gpu.get_device() == "cpu" or solver.name not in ("linear", "nonlinear", "vlm"):
         return None
-    from ventorum.aero.system import has_rates
-
-    if any(has_rates(c) for c in conditions):
-        # The GPU kernels take one free-stream velocity per case; body rates
-        # need the onset per point. These cases run on the CPU path.
-        return None
     from ventorum.utils.parallel import _local as _par_local
 
     if gpu.get_device() == "auto" and getattr(_par_local, "worker_threads", None) is not None:
@@ -126,17 +120,19 @@ def _solve_group(solver, lattice, conditions: list, setups: list, settings, S_re
         return None
     bd = engine.batch_data(conditions, wds, grounds)
     Dfs, V, rho, alpha, WD = bd["D"], bd["V"], bd["rho"], bd["alpha"], bd["WD"]
+    omega = bd["omega"]
     cs = engine.CaseData(dl, WD, grounds, GK=bd["GK"], GO=bd["GO"])
     infos = None
     alpha_eff = None
     symmetric = umap.symmetric
     if solver.name == "linear":
-        g, v = engine.llt_linear(dl, md, cs, Dfs, V)
+        g, v = engine.llt_linear(dl, md, cs, Dfs, V, omega=omega, ref_point=ref_point)
         G, vp = engine.to_panels(lattice, md, g, v)
         v_points = [vp]
     elif solver.name == "nonlinear":
         G, vp, alpha_eff, infos = _nonlinear(solver, engine, dl, md, cs, lattice, conditions, settings, grounds,
-                                             wds, Dfs, V, umap, continuation, gamma0)
+                                             wds, Dfs, V, umap, continuation, gamma0, omega=omega,
+                                             ref_point=ref_point)
         v_points = [vp]
     else:
         from ventorum.solvers.horseshoe import _has_tabulated
@@ -146,13 +142,13 @@ def _solve_group(solver, lattice, conditions: list, setups: list, settings, S_re
                 "The VLM uses the linear part of the tabulated polars (lift slope and zero-lift "
                 "angle from a fit). Stall is not modelled; for the start of stall on an unswept wing use solver='nonlinear'.",
                 RuntimeWarning, stacklevel=6)
-        g = engine.vlm_solve(dl, md, cs, lattice, Dfs, V)
+        g = engine.vlm_solve(dl, md, cs, lattice, Dfs, V, omega=omega, ref_point=ref_point)
         G = g[:, md["panel_column"]]
         symmetric = all(is_symmetric_condition(c, gr) for c, gr in zip(conditions, grounds))
         v_points = engine.vlm_load_velocities(dl, lattice, cs, G, symmetric)
     arrays = engine.loads(dl, lattice, G, v_points, Dfs, V, rho, alpha, WD, grounds, S_ref, b_ref, c_ref,
                           ref_point, alpha_eff, use_leg=solver.name == "vlm", extra={"gamma": G}, symmetric=symmetric,
-                          GK=bd["GK"], GO=bd["GO"])
+                          GK=bd["GK"], GO=bd["GO"], omega=omega)
     return arrays, infos, umap
 
 
@@ -161,7 +157,7 @@ MAX_CONTINUATION_PASSES = 3
 
 
 def _nonlinear(solver, engine, dl, md, cs, lattice, conditions, settings, grounds, wds, Dfs, V, umap,
-               continuation: bool, gamma0):
+               continuation: bool, gamma0, omega=None, ref_point=None):
     """Newton solves of the nonlinear lifting line on the GPU; return panel circulation, velocity, alpha and infos.
 
     With *continuation* (a sweep out of ground effect), the CPU solver starts
@@ -184,7 +180,7 @@ def _nonlinear(solver, engine, dl, md, cs, lattice, conditions, settings, ground
     tol = float(settings.tolerance)
     max_it = int(settings.max_iterations)
     handover = max(1, K // 16)
-    prep = engine.llt_nonlinear_prepare(dl, md, cs, lattice, Dfs, V)
+    prep = engine.llt_nonlinear_prepare(dl, md, cs, lattice, Dfs, V, omega=omega, ref_point=ref_point)
     g_start = None
     if gamma0 is not None and K == 1:
         up = md["unknown_panels"]
@@ -221,7 +217,9 @@ def _nonlinear(solver, engine, dl, md, cs, lattice, conditions, settings, ground
                 first = int(torch.nonzero(changed).flatten()[0])
                 unsettled[first:] = True
     g, alpha_u, W = out["g"], out["alpha"], out["W"]
-    G, vp = engine.to_panels(lattice, md, g, W - prep["Vinf"][:, None, :])
+    vinf = prep["Vinf"]
+    vp_sub = W - (vinf if vinf.dim() == 3 else vinf[:, None, :])
+    G, vp = engine.to_panels(lattice, md, g, vp_sub)
     alpha_full = torch.empty((K, lattice.n_strips), dtype=torch.float64, device=g.device)
     alpha_full[:, md["strip"]] = alpha_u
     if umap.symmetric:
@@ -250,7 +248,7 @@ def _nonlinear(solver, engine, dl, md, cs, lattice, conditions, settings, ground
                 elif continuation and k > 0 and infos[k - 1].converged:
                     g_prev = G[k - 1].cpu().numpy()
                 gk, ak, info = solver.solve_circulation(lattice, conditions[k], settings, grounds[k], wds[k],
-                                                        gamma0=g_prev)
+                                                        gamma0=g_prev, ref_point=ref_point)
                 G[k] = engine._f64(gk)
                 alpha_full[k] = engine._f64(ak)
                 vp[k] = engine._f64(info.v_control)

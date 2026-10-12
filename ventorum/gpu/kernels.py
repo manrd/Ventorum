@@ -914,6 +914,97 @@ def _build(precision: str) -> SimpleNamespace:  # noqa: C901 - one closure per k
         part[k, s, 11] = flag
 
     @wp.kernel(module=module)
+    def loads_strip_rates(G: wp.array2d(dtype=wp.float64), vmid: wp.array2d(dtype=wp.vec3d),
+                          vla: wp.array2d(dtype=wp.vec3d), vlb: wp.array2d(dtype=wp.vec3d), use_leg: int,
+                          D: wp.array(dtype=wp.vec3d), V: wp.array(dtype=wp.float64),
+                          rho: wp.array(dtype=wp.float64), omega: wp.array(dtype=wp.vec3d), rp: wp.vec3d,
+                          lvec: wp.array(dtype=wp.vec3d), mid: wp.array(dtype=wp.vec3d),
+                          lega: wp.array(dtype=wp.vec3d), legb: wp.array(dtype=wp.vec3d),
+                          lmida: wp.array(dtype=wp.vec3d), lmidb: wp.array(dtype=wp.vec3d), n_c: int,
+                          chord: wp.array(dtype=wp.float64), width: wp.array(dtype=wp.float64),
+                          nrm: wp.array(dtype=wp.vec3d), cdir: wp.array(dtype=wp.vec3d), dl: wp.array(dtype=wp.vec3d),
+                          qc: wp.array(dtype=wp.vec3d), a0: wp.array(dtype=wp.float64), aL0: wp.array(dtype=wp.float64),
+                          ae_in: wp.array2d(dtype=wp.float64), has_ae: int, pol: Polars,
+                          wn: wp.array2d(dtype=wp.float64), segl: wp.array2d(dtype=wp.float64),
+                          span: wp.array3d(dtype=wp.float64), sforce: wp.array2d(dtype=wp.vec3d),
+                          part: wp.array3d(dtype=wp.float64)):
+        # The loads of strip s of case k with body rates (the equations of compute_loads_batch).
+        k, s = wp.tid()
+        d = D[k]
+        Vk = V[k]
+        rk = rho[k]
+        om = omega[k]
+        Vd = Vk * d
+        sg = wp.float64(0.0)
+        F = wp.vec3d()
+        M = wp.vec3d()
+        for r in range(n_c):
+            p = s * n_c + r
+            g = G[k, p]
+            sg = sg + g
+            u_mid = Vd - wp.cross(om, mid[p] - rp)
+            Fp = (rk * g) * wp.cross(u_mid + vmid[k, p], lvec[p])
+            M = M + wp.cross(mid[p] - rp, Fp)
+            if use_leg != 0:
+                ua = Vd - wp.cross(om, lmida[p] - rp)
+                ub = Vd - wp.cross(om, lmidb[p] - rp)
+                va = ua + vla[k, p]
+                vb = ub + vlb[k, p]
+                va = va - wp.dot(va, nrm[s]) * nrm[s]
+                vb = vb - wp.dot(vb, nrm[s]) * nrm[s]
+                Fa = (rk * g) * wp.cross(va, lega[p])
+                Fb = (rk * g) * wp.cross(vb, legb[p])
+                M = M + wp.cross(lmida[p] - rp, Fa) + wp.cross(lmidb[p] - rp, Fb)
+                Fp = Fp + Fa + Fb
+            F = F + Fp
+        c = chord[s]
+        w = width[s]
+        cl = wp.float64(2.0) * sg / (Vk * c)
+        p34 = qc[s] + wp.float64(0.5) * c * cdir[s]
+        u34 = Vd - wp.cross(om, p34 - rp)
+        ag = wp.atan2(wp.dot(nrm[s], u34), wp.dot(cdir[s], u34))
+        ae = aL0[s] + cl / wp.max(a0[s], wp.float64(1e-9))
+        if has_ae != 0:
+            ae = ae_in[k, s]
+        cdm = polar_cd_cm(pol, s, ae)
+        cm_strip = cdm[1]
+        if n_c == 1:
+            slope = -wp.dot(nrm[s], wp.cross(om, cdir[s]))
+            cm_strip = cm_strip - wp.float64(0.39269908169872414) * slope * c / wp.length(u34)
+        u_qc = Vd - wp.cross(om, qc[s] - rp)
+        speed = wp.length(u_qc)
+        d_loc = u_qc / wp.max(speed, wp.float64(1e-300))
+        q_loc = wp.float64(0.5) * rk * speed * speed
+        Dp = q_loc * c * w * cdm[0]
+        Fprof = Dp * d_loc
+        M = M + wp.cross(qc[s] - rp, Fprof)
+        nl = wp.cross(d_loc, dl[s])
+        nl = nl / wp.max(wp.length(nl), wp.float64(1e-300))
+        ax = wp.cross(nl, d_loc)
+        ax = ax / wp.max(wp.length(ax), wp.float64(1e-300))
+        M = M + (q_loc * c * c * w * cm_strip) * ax
+        di = sg * wn[k, s] * segl[k, s]
+        span[k, 0, s] = sg
+        span[k, 1, s] = cl
+        span[k, 2, s] = -di / (Vk * Vk * c * w)
+        span[k, 3, s] = cdm[0]
+        span[k, 4, s] = ae
+        span[k, 5, s] = ag - ae
+        span[k, 6, s] = rk * Vk * sg
+        span[k, 7, s] = cm_strip
+        sforce[k, s] = F
+        for j in range(3):
+            part[k, s, j] = F[j]
+            part[k, s, 3 + j] = M[j]
+            part[k, s, 6 + j] = Fprof[j]
+        part[k, s, 9] = Dp
+        part[k, s, 10] = di
+        flag = wp.float64(0.0)
+        if cdm[0] != wp.float64(0.0):
+            flag = wp.float64(1.0)
+        part[k, s, 11] = flag
+
+    @wp.kernel(module=module)
     def loads_totals(part: wp.array3d(dtype=wp.float64), D: wp.array(dtype=wp.vec3d),
                      V: wp.array(dtype=wp.float64), rho: wp.array(dtype=wp.float64),
                      alpha: wp.array(dtype=wp.float64), S_ref: wp.float64, b_ref: wp.float64, c_ref: wp.float64,
@@ -1238,12 +1329,33 @@ def _build(precision: str) -> SimpleNamespace:  # noqa: C901 - one closure per k
         if i == 0:
             vinf[k] = v * d
 
+    @wp.kernel(module=module)
+    def llt_rhs_rates(D: wp.array(dtype=wp.vec3d), V: wp.array(dtype=wp.float64),
+                      omega: wp.array(dtype=wp.vec3d), rp: wp.vec3d,
+                      p34: wp.array(dtype=wp.vec3d), dl: wp.array(dtype=wp.vec3d),
+                      nrm: wp.array(dtype=wp.vec3d), area: wp.array(dtype=wp.float64),
+                      a0: wp.array(dtype=wp.float64), aL0: wp.array(dtype=wp.float64),
+                      diag: wp.array2d(dtype=wp.float64), rhs: wp.array2d(dtype=wp.float64),
+                      scale: wp.array2d(dtype=wp.float64), onset: wp.array2d(dtype=wp.vec3d)):
+        # The terms of the linear lifting line of strip i for case k with body rates.
+        k, i = wp.tid()
+        d = D[k]
+        v = V[k]
+        om = omega[k]
+        u = v * d - wp.cross(om, p34[i] - rp)
+        spd = wp.length(u)
+        unit_u = u / wp.max(spd, wp.float64(1e-300))
+        diag[k, i] = wp.float64(2.0) * wp.length(wp.cross(unit_u, dl[i])) / (a0[i] * area[i])
+        rhs[k, i] = wp.dot(u, nrm[i]) - spd * aL0[i]
+        scale[k, i] = (spd * spd) * area[i]
+        onset[k, i] = u
+
     return SimpleNamespace(T=T, vec=vec, precision=precision, Sources=Sources, Points=Points, Cases=Cases,
                            tensors=tensors, normals=normals, induced=induced, contract=contract, residual=residual,
                            fixed_points=fixed_points, induced_wakes=induced_wakes, induced_img_fixed=induced_img_fixed,
                            Polars=Polars, nl_state=nl_state, nl_trials=nl_trials, nl_jacobian=nl_jacobian,
                            nl_reduce=nl_reduce, nl_update=nl_update, contract2=contract2, nl_merit=nl_merit,
                            wake_table=wake_table, normal_from_table=normal_from_table,
-                           loads_strip=loads_strip, loads_totals=loads_totals,
+                           loads_strip=loads_strip, loads_strip_rates=loads_strip_rates, loads_totals=loads_totals,
                            trefftz=trefftz, case_te=case_te, case_points=case_points, trefftz_prep=trefftz_prep,
-                           llt_rhs=llt_rhs)
+                           llt_rhs=llt_rhs, llt_rhs_rates=llt_rhs_rates)

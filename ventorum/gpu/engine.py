@@ -295,6 +295,11 @@ class DeviceLattice:
                     data[name] = _f64(sd[name])
                 data["strip_np"] = np.asarray(sd["strip"], dtype=np.int64)
                 data["strip"] = _tensor(data["strip_np"])
+                s = data["strip_np"]
+                p34 = lattice.cp[up] + 0.5 * lattice.chord[s][:, None] * lattice.chord_dir[s]
+                data["p34"] = _f64(p34)
+            else:
+                data["cp"] = _f64(lattice.cp[up])
             if umap.symmetric:
                 left = np.setdiff1d(np.arange(lattice.n_panels), up)
                 data["left"] = _tensor(left)
@@ -620,29 +625,37 @@ def batch_data(conditions: list, wds, grounds: list) -> dict:
     ``D`` (K, 3) free-stream direction, ``V``, ``rho``, ``alpha`` (K,) speed
     [m/s], density [kg/m^3] and angle of attack [rad], ``WD`` (K, 3) wake
     direction, ``GK`` (K, 3) and ``GO`` (K,) normal and offset [m] of the
-    ground plane (zero for a case without ground).
+    ground plane (zero for a case without ground), and ``omega`` (K, 3) angular
+    velocity [rad/s].
     """
     from ventorum.aero.system import freestream_direction
 
     K = len(conditions)
-    buf = np.zeros(13 * K)
+    buf = np.zeros(16 * K)
     D = buf[:3 * K].reshape(K, 3)
     GK = buf[6 * K:9 * K].reshape(K, 3)
-    V, rho, alpha, GO = (buf[(9 + j) * K:(10 + j) * K] for j in range(4))
+    omega = buf[9 * K:12 * K].reshape(K, 3)
+    V, rho, alpha, GO = (buf[(12 + j) * K:(13 + j) * K] for j in range(4))
     for k, c in enumerate(conditions):
         D[k] = freestream_direction(c.alpha, c.beta)
         V[k] = float(c.V_inf)
         rho[k] = float(c.rho)
         alpha[k] = float(c.alpha)
+        omega[k, 0] = -float(getattr(c, "p", 0.0))
+        omega[k, 1] = float(getattr(c, "q", 0.0))
+        omega[k, 2] = -float(getattr(c, "r", 0.0))
     buf[3 * K:6 * K] = np.asarray(wds, dtype=float).reshape(-1)
     for k, g in enumerate(grounds):
         if g is not None:
             GK[k] = g.normal
             GO[k] = g.offset
     dev = _f64(buf)
-    out = {"D": dev[:3 * K].view(K, 3), "WD": dev[3 * K:6 * K].view(K, 3), "GK": dev[6 * K:9 * K].view(K, 3)}
+    out = {
+        "D": dev[:3 * K].view(K, 3), "WD": dev[3 * K:6 * K].view(K, 3), "GK": dev[6 * K:9 * K].view(K, 3),
+        "omega": dev[9 * K:12 * K].view(K, 3), "has_rates": bool(np.any(omega != 0.0)),
+    }
     for j, name in enumerate(("V", "rho", "alpha", "GO")):
-        out[name] = dev[(9 + j) * K:(10 + j) * K]
+        out[name] = dev[(12 + j) * K:(13 + j) * K]
     return out
 
 
@@ -686,8 +699,9 @@ def _subset(self: CaseData, k0: int, k1: int) -> CaseData:
 CaseData.subset = _subset
 
 
-def llt_terms(dl: DeviceLattice, md: dict, Dfs: torch.Tensor, V: torch.Tensor) -> tuple:
-    """Return the diagonal, the right-hand side and the residual scale (K, n), and the free-stream velocity (K, 3).
+def llt_terms(dl: DeviceLattice, md: dict, Dfs: torch.Tensor, V: torch.Tensor,
+              omega: torch.Tensor | None = None, ref_point=None) -> tuple:
+    """Return the diagonal, the right-hand side and the residual scale (K, n), and the free-stream velocity (K, 3) or onset (K, n, 3).
 
     The terms of :func:`ventorum.solvers.core.solve_llt_linear` (one kernel):
     ``2 |u x dl_i| / (a0_i dA_i)``, ``V (u . n_i - alpha_L0_i)``,
@@ -697,6 +711,17 @@ def llt_terms(dl: DeviceLattice, md: dict, Dfs: torch.Tensor, V: torch.Tensor) -
     diag = torch.empty((K, n), dtype=_F64, device=_dev())
     rhs = torch.empty((K, n), dtype=_F64, device=_dev())
     scale = torch.empty((K, n), dtype=_F64, device=_dev())
+    if omega is not None and bool((omega != 0.0).any()):
+        onset = torch.empty((K, n, 3), dtype=_F64, device=_dev())
+        rp = np.zeros(3) if ref_point is None else np.asarray(ref_point, dtype=float)
+        launch(dl.k.llt_rhs_rates, (K, n), [
+            view(Dfs.contiguous(), wp.vec3d), view(V.contiguous(), wp.float64),
+            view(omega.contiguous(), wp.vec3d), wp.vec3d(*rp),
+            cview(md, "p34", wp.vec3d), cview(md, "dl", wp.vec3d), cview(md, "normal", wp.vec3d),
+            cview(md, "area", wp.float64), cview(md, "a0", wp.float64), cview(md, "alpha_L0", wp.float64),
+            view(diag, wp.float64), view(rhs, wp.float64), view(scale, wp.float64),
+            view(onset, wp.vec3d)])
+        return diag, rhs, scale, onset
     vinf = torch.empty((K, 3), dtype=_F64, device=_dev())
     launch(dl.k.llt_rhs, (K, n), [view(Dfs.contiguous(), wp.vec3d), view(V.contiguous(), wp.float64),
                                   cview(md, "dl", wp.vec3d), cview(md, "normal", wp.vec3d), cview(md, "area", wp.float64),
@@ -706,7 +731,8 @@ def llt_terms(dl: DeviceLattice, md: dict, Dfs: torch.Tensor, V: torch.Tensor) -
     return diag, rhs, scale, vinf
 
 
-def llt_linear(dl: DeviceLattice, md: dict, cs: CaseData, Dfs: torch.Tensor, V: torch.Tensor) -> tuple:
+def llt_linear(dl: DeviceLattice, md: dict, cs: CaseData, Dfs: torch.Tensor, V: torch.Tensor,
+               omega: torch.Tensor | None = None, ref_point=None) -> tuple:
     """Solve the linear lifting line of all cases; return the unknown circulation (K, n) and velocity (K, n, 3).
 
     The system is that of :func:`ventorum.solvers.core.solve_llt_linear`:
@@ -716,7 +742,7 @@ def llt_linear(dl: DeviceLattice, md: dict, cs: CaseData, Dfs: torch.Tensor, V: 
     g_all = torch.empty((K, n), dtype=_F64, device=_dev())
     v_all = torch.empty((K, n, 3), dtype=_F64, device=_dev())
     elem = 8 if dl.T == torch.float64 else 4
-    diag, rhs, _, _ = llt_terms(dl, md, Dfs, V)
+    diag, rhs, _, _ = llt_terms(dl, md, Dfs, V, omega=omega, ref_point=ref_point)
     for k0, k1 in _chunks(K, n * n * elem * 12):
         Vt, An = llt_tensors(dl, md, cs, k0, k1)
         g = batched_solve(An, rhs[k0:k1], diag64=diag[k0:k1], kern=dl.k)
@@ -837,7 +863,7 @@ def polar_struct(dl: DeviceLattice, airfoils: list, role=None):
 
 
 def llt_nonlinear_prepare(dl: DeviceLattice, md: dict, cs: CaseData, lattice, Dfs: torch.Tensor,
-                          V: torch.Tensor) -> dict:
+                          V: torch.Tensor, omega: torch.Tensor | None = None, ref_point=None) -> dict:
     """Return the data of the Newton solves of a batch: velocity tensor, projections, polars, linear start."""
     K, n = cs.K, md["n"]
     k = dl.k
@@ -847,7 +873,7 @@ def llt_nonlinear_prepare(dl: DeviceLattice, md: dict, cs: CaseData, lattice, Df
     Va = torch.einsum("kjic,ic->kji", Vt, adir.to(T)).contiguous()
     strips = md["strip_np"]
     pol, pol_t = polar_struct(dl, [lattice.airfoils[s] for s in strips], role=("unknowns", md["symmetric"]))
-    diag, rhs, scale, vinf = llt_terms(dl, md, Dfs, V)
+    diag, rhs, scale, vinf = llt_terms(dl, md, Dfs, V, omega=omega, ref_point=ref_point)
     g_lin = batched_solve(An, rhs, diag64=diag, kern=k)
     return {"dl": dl, "md": md, "K": K, "n": n, "Vt": Vt, "An": An, "Va": Va, "pol": pol, "pol_t": pol_t,
             "Vinf": vinf, "scale": scale, "g_lin": g_lin}
@@ -940,7 +966,7 @@ def llt_nonlinear(prep: dict, tol: float, max_iter: int, g_start: torch.Tensor |
 
     W = torch.empty((K, n, 3), dtype=_F64, device=dev)
     launch(k.contract, (K, n), [w_Vt, view(g, wp.float64), view(W, wp.vec3d)])
-    W.add_(Vinf[:, None, :])
+    W.add_(Vinf if Vinf.dim() == 3 else Vinf[:, None, :])
     w_W, w_g = view(W, wp.vec3d), view(g, wp.float64)
 
     def state() -> None:
@@ -1049,7 +1075,8 @@ def vlm_system(dl: DeviceLattice, md: dict, cs: CaseData, k0: int, k1: int, latt
     return An
 
 
-def vlm_solve(dl: DeviceLattice, md: dict, cs: CaseData, lattice, Dfs: torch.Tensor, V: torch.Tensor) -> torch.Tensor:
+def vlm_solve(dl: DeviceLattice, md: dict, cs: CaseData, lattice, Dfs: torch.Tensor, V: torch.Tensor,
+              omega: torch.Tensor | None = None, ref_point=None) -> torch.Tensor:
     """Solve the vortex lattice of all cases; return the circulation of the unknowns (K, n) [m^2/s].
 
     The system is that of :func:`ventorum.solvers.core.solve_vlm`: flow
@@ -1060,6 +1087,14 @@ def vlm_solve(dl: DeviceLattice, md: dict, cs: CaseData, lattice, Dfs: torch.Ten
     if nbc is None:
         nbc = md["nbc64"] = _f64(lattice.normal_bc[md["unknown_panels"].cpu().numpy()])
     rhs = -V[:, None] * (Dfs @ nbc.T)
+    if omega is not None and bool((omega != 0.0).any()):
+        rp = np.zeros(3) if ref_point is None else np.asarray(ref_point, dtype=float)
+        cp = md.get("cp")
+        if cp is None:
+            cp = md["cp"] = _f64(lattice.cp[md["unknown_panels"].cpu().numpy()])
+        rel = cp - _f64(rp)
+        w_rot = -torch.linalg.cross(omega[:, None, :], rel[None, :, :])
+        rhs = rhs - torch.sum(nbc[None, :, :] * w_rot, dim=-1)
     g_all = torch.empty((K, n), dtype=_F64, device=_dev())
     elem = 8 if dl.T == torch.float64 else 4
     for k0, k1 in _chunks(K, n * n * elem * 3):
@@ -1297,7 +1332,7 @@ def loads(dl: DeviceLattice, lattice, G: torch.Tensor, v_points: list[torch.Tens
           V: torch.Tensor, rho: torch.Tensor, alpha: torch.Tensor, WD: torch.Tensor, grounds: list,
           S_ref: float, b_ref: float, c_ref: float, ref_point, alpha_eff: torch.Tensor | None,
           use_leg: bool, extra: dict | None = None, symmetric: bool = False, GK: torch.Tensor | None = None,
-          GO: torch.Tensor | None = None) -> dict:
+          GO: torch.Tensor | None = None, omega: torch.Tensor | None = None) -> dict:
     """Return all loads of the batch as host arrays (the equations of :func:`ventorum.aero.loads.compute_loads_batch`).
 
     Two kernels compute them: one per strip (forces, moments, section
@@ -1367,16 +1402,29 @@ def loads(dl: DeviceLattice, lattice, G: torch.Tensor, v_points: list[torch.Tens
     w_rho = view(rho.contiguous(), wp.float64)
     w_span = view(span, wp.float64)
     w_part = view(part, wp.float64)
-    launch(k.loads_strip, (K, n_s), [
-        view(G.contiguous(), wp.float64), view(vm, v3), view(vla, v3), view(vlb, v3), 1 if use_leg else 0,
-        w_D, w_V, w_rho, wp.vec3d(*rp),
-        cview(lt, "l_vec", v3), cview(lt, "mid", v3), cview(geo, "lega", v3), cview(geo, "legb", v3),
-        cview(geo, "lmida", v3), cview(geo, "lmidb", v3), int(n_c),
-        cview(lt, "chord", wp.float64), cview(lt, "width", wp.float64), cview(lt, "normal", v3),
-        cview(lt, "chord_dir", v3), cview(lt, "dl", v3), cview(lt, "qc_mid", v3), cview(lt, "a0", wp.float64),
-        cview(lt, "alpha_L0", wp.float64), view(ae, wp.float64), 1 if alpha_eff is not None else 0, pol,
-        view(w_n.contiguous(), wp.float64), view(seg_len.contiguous(), wp.float64),
-        w_span, view(sforce, v3), w_part])
+    has_rates = omega is not None and bool((omega != 0.0).any())
+    if has_rates:
+        launch(k.loads_strip_rates, (K, n_s), [
+            view(G.contiguous(), wp.float64), view(vm, v3), view(vla, v3), view(vlb, v3), 1 if use_leg else 0,
+            w_D, w_V, w_rho, view(omega.contiguous(), wp.vec3d), wp.vec3d(*rp),
+            cview(lt, "l_vec", v3), cview(lt, "mid", v3), cview(geo, "lega", v3), cview(geo, "legb", v3),
+            cview(geo, "lmida", v3), cview(geo, "lmidb", v3), int(n_c),
+            cview(lt, "chord", wp.float64), cview(lt, "width", wp.float64), cview(lt, "normal", v3),
+            cview(lt, "chord_dir", v3), cview(lt, "dl", v3), cview(lt, "qc_mid", v3), cview(lt, "a0", wp.float64),
+            cview(lt, "alpha_L0", wp.float64), view(ae, wp.float64), 1 if alpha_eff is not None else 0, pol,
+            view(w_n.contiguous(), wp.float64), view(seg_len.contiguous(), wp.float64),
+            w_span, view(sforce, v3), w_part])
+    else:
+        launch(k.loads_strip, (K, n_s), [
+            view(G.contiguous(), wp.float64), view(vm, v3), view(vla, v3), view(vlb, v3), 1 if use_leg else 0,
+            w_D, w_V, w_rho, wp.vec3d(*rp),
+            cview(lt, "l_vec", v3), cview(lt, "mid", v3), cview(geo, "lega", v3), cview(geo, "legb", v3),
+            cview(geo, "lmida", v3), cview(geo, "lmidb", v3), int(n_c),
+            cview(lt, "chord", wp.float64), cview(lt, "width", wp.float64), cview(lt, "normal", v3),
+            cview(lt, "chord_dir", v3), cview(lt, "dl", v3), cview(lt, "qc_mid", v3), cview(lt, "a0", wp.float64),
+            cview(lt, "alpha_L0", wp.float64), view(ae, wp.float64), 1 if alpha_eff is not None else 0, pol,
+            view(w_n.contiguous(), wp.float64), view(seg_len.contiguous(), wp.float64),
+            w_span, view(sforce, v3), w_part])
     tot = torch.empty((K, 22), dtype=_F64, device=dev)
     launch(k.loads_totals, (K,), [w_part, w_D, w_V, w_rho, view(alpha.contiguous(), wp.float64), float(S_ref),
                                   float(b_ref), float(c_ref), w_span, cview(geo, "surf0", wp.int32),

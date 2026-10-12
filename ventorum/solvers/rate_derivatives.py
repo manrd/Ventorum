@@ -226,8 +226,8 @@ def rate_derivatives(
     The derivatives in other axes come from the body-axis derivatives by
     :func:`rate_axes_transform` (the rates and the moments turn together).
 
-    The cases with body rates run on the CPU: the GPU pipelines take one
-    free-stream velocity per case.
+    The cases run on the selected device (:mod:`ventorum.gpu`); the
+    result reports ``device`` (``"gpu"`` or ``"cpu"``) and ``precision``.
     """
     from ventorum.aero.system import rotation_velocity
     from ventorum.core.axes import rotation_body_to_stability, rotation_body_to_wind

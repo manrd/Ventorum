@@ -319,14 +319,12 @@ def test_no_note_for_small_rates():
         vt.analyze(ac, fc, _settings("vlm", 8))
 
 
-def test_gpu_path_returns_none_for_rate_cases(monkeypatch):
-    """The GPU pipeline takes one free stream per case: cases with body rates go to the CPU path."""
-    from ventorum import gpu
+def test_gpu_path_returns_none_for_unsupported_solver():
+    """The GPU pipeline returns None for unsupported solvers or when CPU is set."""
     from ventorum.gpu import pipeline
 
-    monkeypatch.setattr(gpu, "get_device", lambda: "gpu")
     cond = vt.FlightCondition(V_inf=20.0, alpha=0.0, q=0.1)
-    solver = vt.VortexLatticeSolver()
+    solver = vt.FourierSolver()
     assert pipeline.solve_batch(solver, None, [cond], None, 1.0, 1.0, 1.0, None, 0, False, 0.0) is None
 
 
@@ -366,8 +364,8 @@ def test_to_dict_is_json_ready():
 
 @pytest.mark.gpu
 @pytest.mark.parametrize("solver", ["vlm", "linear"])
-def test_gpu_device_runs_rate_cases_on_the_cpu(solver):
-    """With the GPU selected, the cases with body rates run on the CPU and give the CPU derivatives."""
+def test_gpu_device_runs_rate_cases_on_the_gpu(solver):
+    """With the GPU selected, the cases with body rates run on the GPU and give the CPU derivatives."""
     from ventorum import gpu
 
     if not gpu.available():
@@ -376,6 +374,7 @@ def test_gpu_device_runs_rate_cases_on_the_cpu(solver):
     st = _settings(solver, 12)
     cpu = vt.rate_derivatives(_rect(6.0), fc, st)
     gpu.set_device("gpu")
+    gpu.set_precision("float64")
     on_gpu = vt.rate_derivatives(_rect(6.0), fc, st)
-    assert on_gpu.device == "cpu"
-    assert np.array_equal(on_gpu.matrix, cpu.matrix)
+    assert on_gpu.device == "gpu"
+    assert np.allclose(on_gpu.matrix, cpu.matrix, rtol=1e-10, atol=1e-10)

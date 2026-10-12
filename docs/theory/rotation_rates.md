@@ -107,20 +107,21 @@ For large A the first three tend to the strip-theory values -a_0/8, C_L/4 and -C
 ## Envelope
 
 - The Fourier solver refuses a rate that is not zero (`ValidityError`).
-- The GPU pipelines take one free-stream velocity per case; the cases with rates run on the CPU, and the result states the device.
+- The GPU pipelines support body rates for the vortex lattice and the numerical lifting lines (linear and nonlinear), in free air and in ground effect. Solves run on the selected device, and the result states the device.
 - In ground effect the rate derivatives do not include the coupling with the height change (see [Ground effect](ground_effect.md)).
 
 ## Implementation
 
 - `ventorum.aero.system.rotation_velocity`, `rotation_vector`, `has_rates`: the onset of the rotation.
 - `ventorum.solvers.core`: `assemble_vlm` (right-hand side), `llt_onset`, the linear and nonlinear lifting-line systems.
+- `ventorum.gpu.kernels`: `vlm_rhs` with rotation wash, `llt_rhs_rates`, `loads_strip_rates`.
 - `ventorum.aero.loads.compute_loads_batch`: forces, profile drag and section moment with the local onset; the section-moment term of one chordwise panel.
 - `ventorum.aero.hinge`: the chordwise hinge moment with the onset at the flap force points.
 - `ventorum.solvers.rate_derivatives`: `rate_derivatives`, `rate_axes_transform`.
 
 ## Verification
 
-`tests/test_rate_derivatives.py` checks the closed forms above with the linear lifting line, the three-quarter-chord rule (a pitch rate gives the lift of the equal incidence change), the section moment -pi/4, the equivalence of a roll rate and an antisymmetric linear twist at zero lift in free air and in ground effect, the symmetry of the derivatives, the independence of the VLM derivatives from the step, the axes transform against solves with rates given in the target axes, and the CPU path of rate cases with the GPU selected.
+`tests/test_rate_derivatives.py` checks the closed forms above with the linear lifting line, the three-quarter-chord rule (a pitch rate gives the lift of the equal incidence change), the section moment -pi/4, the equivalence of a roll rate and an antisymmetric linear twist at zero lift in free air and in ground effect, the symmetry of the derivatives, the independence of the VLM derivatives from the step, and the axes transform against solves with rates given in the target axes. `tests/test_gpu_rates.py` checks the parity of the GPU pipelines against the CPU path for VLM, linear and nonlinear lifting line in free air and in ground effect.
 
 ## References
 
