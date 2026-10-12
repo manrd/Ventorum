@@ -76,8 +76,11 @@ the kernel products, so both paths of the partials apply) and `J` without a grap
 compares `J` with the automatic derivative of `R` (1e-12). The converged state has a
 residual of the order of the solver tolerance, and the gradient has an error of the same
 order. A solve that did not converge is refused. Where a section lift slope `Cl_i'` is
-zero or negative (past the maximum lift) the gradient is local and the solution may not
-be unique; the result warns. On the edge-mean branch of a planform break the state is
+zero or negative inside the table (past the maximum lift) the gradient is local and the
+solution may not be unique; the result warns. An angle outside the table also has a zero
+slope (the polar keeps its end value); the note on the angles outside the table covers
+it, and it gives no warning. With the folded symmetric system, the notes name the strips
+of both halves. On the edge-mean branch of a planform break the state is
 the solution of Newton iterations from the production state.
 
 ### Control deflections

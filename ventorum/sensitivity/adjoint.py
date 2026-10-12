@@ -1257,6 +1257,19 @@ LLT_NODE_NOTE = (
     "at the mesh scale.")
 
 
+def _unknown_strips(b: dict, unknowns: Any) -> list[int]:
+    """Return the sorted strips of the panels of the unknowns *unknowns*.
+
+    With the folded symmetric system one unknown holds a right-half panel
+    and its mirror panel, so the strips of both halves are returned. The
+    strip numbers are the strip numbers of the full lattice.
+    """
+    col = np.asarray(b["panel_column_full"].cpu())
+    strip = np.asarray(b["panel_strip"].cpu())
+    sel = np.isin(col, np.asarray(unknowns, dtype=np.int64))
+    return sorted({int(k) for k in strip[sel]})
+
+
 def _table_notes(model: TorchReference) -> list[str]:
     """Return the notes on the strips of tabulated polars at a table point or outside the table."""
     b = model.b
@@ -1270,17 +1283,18 @@ def _table_notes(model: TorchReference) -> list[str]:
     for tab, a in zip(tables, rec_s):
         pairs.append((tab, np.asarray(tab["strips"].cpu()), np.asarray(a.cpu(), dtype=float)))
     rec_u = b.get("_table_alpha_unknowns") or []
-    sou = np.asarray(b["strip_of_unknown"].cpu())
     for tab, a in zip(tables, rec_u):
         pos = np.asarray(tab["unknowns"].cpu())
-        pairs.append((tab, sou[pos], np.asarray(a.cpu(), dtype=float)))
+        # One unknown can hold the strips of both halves (folded system).
+        pairs.append((tab, [_unknown_strips(b, [u]) for u in pos], np.asarray(a.cpu(), dtype=float)))
     for tab, strips, a in pairs:
         ta = tab["table_alpha"]
         for s, v in zip(strips, a):
+            group = s if isinstance(s, list) else [int(s)]
             if v < ta[0] or v > ta[-1]:
-                outside.add(int(s))
+                outside.update(group)
             elif float(np.min(np.abs(ta - v))) <= _TABLE_POINT_TOL * max(1.0, abs(v)):
-                at_point.add(int(s))
+                at_point.update(group)
     notes = []
     if at_point:
         notes.append(
@@ -1307,8 +1321,16 @@ def _nonlinear_notes(model: TorchReference) -> list[str]:
     slope = b.get("_nl_slope")
     if slope is not None:
         dcl = np.asarray(slope.cpu(), dtype=float)
-        sou = np.asarray(b["strip_of_unknown"].cpu())
-        bad = sorted({int(sou[i]) for i in np.flatnonzero(dcl <= 0.0)})
+        # A section angle outside a table has a zero slope (the polar keeps
+        # its end value): the outside-table note of _table_notes covers it,
+        # and it is not a state past the maximum lift.
+        outside = np.zeros(dcl.shape, dtype=bool)
+        for tab, a in zip(b.get("tables") or [], b.get("_table_alpha_unknowns") or []):
+            pos = np.asarray(tab["unknowns"].cpu())
+            v = np.asarray(a.cpu(), dtype=float)
+            ta = tab["table_alpha"]
+            outside[pos] |= (v < ta[0]) | (v > ta[-1])
+        bad = _unknown_strips(b, np.flatnonzero((dcl <= 0.0) & ~outside))
         if bad:
             msg = (f"Past the maximum lift: the section lift slope is zero or negative on strip(s) {bad}. "
                    "The gradient is local, and the solution may not be unique.")

@@ -193,9 +193,11 @@ differences: the converged state has a residual of the order of the tolerance.
 
 * A solve that did not converge raises `GradientScopeError`: the gradient of a state
   that does not solve the equations is not defined.
-* Past the maximum lift (a section lift slope that is zero or negative on a strip) the
-  call warns, and a note says that the gradient is local and that the solution may not be
-  unique.
+* Past the maximum lift (a section lift slope that is zero or negative on a strip, at a
+  section angle inside the table) the call warns, and a note says that the gradient is
+  local and that the solution may not be unique. A section angle outside the table gets
+  the note on angles outside the table instead. The notes name the strips of both halves
+  of a symmetric surface.
 * The derivatives of a tabulated polar are the derivatives of the interpolation of the
   production code (a shape-preserving cubic with a continuous first derivative). At a
   table point the derivative of the interval to the right is used, and a note names the

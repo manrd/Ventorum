@@ -774,3 +774,46 @@ def test_check_gradients_at_the_deflection_limit(deflection_deg, float64_cpu) ->
     # Controls of one name at both limits: no side stays inside.
     with pytest.raises(ValueError, match="cannot stay inside the deflection limit"):
         _control_side("flap", [np.radians(30.0), np.radians(-30.0)], 1e-4)
+
+
+def _past_max_strips(notes: list[str]) -> list[int]:
+    """Return the strips of the note past the maximum lift (empty without the note)."""
+    import re
+
+    for n in notes:
+        if n.startswith("Past the maximum lift"):
+            return [int(v) for v in re.search(r"strip\(s\) \[([0-9, ]*)\]", n).group(1).split(",")]
+    return []
+
+
+def test_past_maximum_lift_note_strips(float64_cpu) -> None:
+    """Regression: the note past the maximum lift excludes angles outside the table and lists both halves.
+
+    Before, a section angle below the table start (zero slope of the clamped
+    polar) gave the warning past the maximum lift, and the folded symmetric
+    system listed only the strips of the right half.
+    """
+    a = np.radians(np.arange(-4.0, 8.0, 2.0))
+    short = vt.TabulatedAirfoil(name="Short", alpha=a, Cl_data=2.0 * np.pi * a,
+                                Cd_data=0.01 + 0.02 * a ** 2)
+    st = vt.SolverSettings(solver_type="nonlinear", n_panels=10, tolerance=1e-12)
+    cond = vt.FlightCondition(V_inf=30.0, alpha=np.radians(-7.0))
+    with warnings.catch_warnings(record=True) as rec:
+        warnings.simplefilter("always")
+        res = vt.gradients(vt.Aircraft(surfaces=[_wing(short)]), cond, st, outputs=("CL",),
+                           wrt=("alpha",))
+    assert not any("Past the maximum lift" in str(w.message) for w in rec)
+    assert _past_max_strips(res.notes) == []
+    assert any("outside the table" in n for n in res.notes), res.notes
+    # Zero slope inside the table: the folded and the full system name the same strips.
+    ac = vt.Aircraft(surfaces=[_wing(_plateau_section())])
+    cond = vt.FlightCondition(V_inf=30.0, alpha=np.radians(18.0))
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        fold = vt.gradients(ac, cond, st, outputs=("CL",), wrt=("alpha",))
+        full = vt.gradients(ac, cond, st, outputs=("CL",), wrt=("alpha", "beta"))
+    assert fold.symmetric and not full.symmetric
+    strips = _past_max_strips(fold.notes)
+    assert strips and strips == _past_max_strips(full.notes)
+    n_s = 2 * 10
+    assert sorted(n_s - 1 - k for k in strips) == strips
