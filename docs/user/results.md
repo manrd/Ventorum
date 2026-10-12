@@ -18,9 +18,9 @@ Every result of a lattice solver records how it was computed and why in `result.
 | `device` | str | `"cpu"` or `"gpu"` |
 | `precision` | str | `"float64"` on CPU; `"float32"` or `"float64"` on GPU |
 | `backends` | dict | Kernel name (`"tensor"`, `"influence"`, `"induced"`, `"trefftz"`) mapped to the backend used |
-| `threads` | int | Kernel thread count for the solve step |
-| `workers` | int | Worker count planned for the batch (1 for a single solve) |
-| `plan_source` | str | Source of the parallel plan: `"user"`, `"profile"`, `"default"` or `"nested"` |
+| `threads` | int | Kernel threads of the thread that solved the case |
+| `workers` | int | Cases that ran at the same time: the size of the worker pool that solved the case, or 1 when the case or the batch ran alone |
+| `plan_source` | str | Source of the plan that ran: `"user"` (the `n_jobs` of the user, or forced threads), `"profile"` (the tuned values of the machine profile), `"default"` (the built-in values) or `"nested"` (a worker thread whose pool plan is not known) |
 | `profile` | str or None | Machine profile fingerprint string, or None when no profile was active |
 | `reason` | str | Plain sentence stating the dispatch decision and any fallback reason |
 

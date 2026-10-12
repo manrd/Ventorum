@@ -282,30 +282,91 @@ def estimate_panels(aircraft, settings) -> int | None:
 
 
 def run_cases(func, items, n_panels: int | None = None, n_jobs: int | str | None = "auto") -> list:
-    """Run *func* on each item with the parallel plan, and return the results in input order."""
+    """Run *func* on each item with the parallel plan, and return the results in input order.
+
+    When the plan runs the cases one at a time and comes from the user or
+    the machine profile, the plan is kept in a thread-local variable while
+    the cases run, so that the dispatch record of each result names it
+    (see :func:`_dispatch_plan`).
+    """
     items = list(items)
     plan = plan_parallel(len(items), n_panels, n_jobs)
     if plan.workers <= 1:
-        return [func(it) for it in items]
+        if plan.source not in ("user", "profile"):
+            return [func(it) for it in items]
+        old = getattr(_local, "plan", None)
+        _local.plan = plan
+        try:
+            return [func(it) for it in items]
+        finally:
+            _local.plan = old
     with case_executor(plan) as ex:
         return list(ex.map(func, items))
 
 
-def _worker_init(threads: int) -> None:
-    _local.worker_threads = threads
-    _set_kernel_threads(threads)
+def _worker_init(plan: ParallelPlan) -> None:
+    """Set the kernel threads of a worker thread and keep the plan of its pool."""
+    _local.worker_threads = plan.threads_per_worker
+    _local.plan = plan
+    _set_kernel_threads(plan.threads_per_worker)
 
 
 @contextlib.contextmanager
 def case_executor(plan: ParallelPlan):
     """Yield a thread pool that runs cases with the thread counts of *plan*.
 
-    Each worker thread sets its own Numba thread count. Use ``executor.map``
-    or ``executor.submit`` as with any ``concurrent.futures`` executor.
+    Each worker thread sets its own Numba thread count and keeps *plan* in
+    a thread-local variable (the dispatch record of the results names it).
+    Use ``executor.map`` or ``executor.submit`` as with any
+    ``concurrent.futures`` executor.
     """
     with ThreadPoolExecutor(max_workers=plan.workers, initializer=_worker_init,
-                            initargs=(plan.threads_per_worker,)) as ex:
+                            initargs=(plan,)) as ex:
         yield ex
+
+
+def _dispatch_plan(n_panels: int | None, batch: int = 1) -> tuple[int, int, str]:
+    """Return the plan that runs the calling solve, for the dispatch record.
+
+    Call it inside :func:`solve_threads`, so that the kernel thread count is
+    the count of the solve.
+
+    Parameters
+    ----------
+    n_panels : int or None
+        Panel count of the lattice (it selects the size class).
+    batch : int, optional
+        Number of cases that the solve computes together.
+
+    Returns
+    -------
+    tuple of (int, int, str)
+        ``(workers, threads, source)``. *workers* is the number of cases
+        that run at the same time, *threads* the kernel threads of the
+        calling thread and *source* the source of the plan: ``"user"``,
+        ``"profile"``, ``"default"`` or ``"nested"``. In a worker of
+        :func:`case_executor` (or a serial :func:`run_cases` with a plan of
+        the user or the profile), the plan of the pool applies. In a worker
+        thread without a known plan, the source is ``"nested"``. A solve
+        that runs alone has one worker; its thread count comes from the
+        user (:func:`forced_single_threads`), from the tuned single-case
+        setting of the profile, or from the default (all cores, also for a
+        batch of several cases).
+    """
+    threads = max(1, kernel_threads())
+    plan = getattr(_local, "plan", None)
+    if plan is not None:
+        return max(1, int(plan.workers)), threads, plan.source
+    if getattr(_local, "worker_threads", None) is not None:
+        return 1, threads, "nested"
+    if _forced_single[0] is not None:
+        return 1, threads, "user"
+    if batch > 1:
+        return 1, threads, "default"
+    from ventorum.hardware.profile import size_class, tuned_setting
+
+    tuned = tuned_setting("single", size_class(n_panels), "threads")
+    return 1, threads, "profile" if tuned else "default"
 
 
 def resolve_workers(n_tasks: int, n_jobs: int | str | None = "auto", max_cap: int = 16) -> int:

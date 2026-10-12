@@ -439,15 +439,11 @@ class LatticeSolver(BaseSolver):
         )
         from ventorum.aero.vortex import _kernel_backends_for
         from ventorum.hardware.profile import active_profile
-        from ventorum.utils.parallel import kernel_threads, plan_parallel
+        from ventorum.utils.parallel import _dispatch_plan
 
         prof = active_profile()
         profile_fp = prof.get("fingerprint") if isinstance(prof, dict) else None
-        plan = plan_parallel(n_cases, lattice.n_panels)
-        threads = int(kernel_threads())
-        if threads < 1:
-            threads = max(1, int(plan.threads_per_worker))
-        workers = max(1, int(plan.workers))
+        workers, threads, plan_source = _dispatch_plan(lattice.n_panels, n_cases)
         reason = gpu_reason or "CPU path selected"
 
         # Kept for advanced use (plots, diagnostics, ground-effect post-processing).
@@ -467,7 +463,7 @@ class LatticeSolver(BaseSolver):
                 "backends": _kernel_backends_for(lattice.n_panels),
                 "threads": threads,
                 "workers": workers,
-                "plan_source": plan.source,
+                "plan_source": plan_source,
                 "profile": profile_fp,
                 "reason": reason,
             },

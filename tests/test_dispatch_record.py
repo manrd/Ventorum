@@ -423,3 +423,109 @@ def test_gpu_solve_dispatch():
     finally:
         gpu.set_device(old_dev)
         gpu.set_precision(old_prec)
+
+
+def _expected_solve_threads(n: int) -> int | None:
+    """Return the kernel threads that solve_threads sets for a solve that runs alone, or None."""
+    from ventorum.aero.vortex import get_kernel_backend
+
+    if get_kernel_backend() not in ("numba", "cython"):
+        return None
+    import numba
+
+    return max(1, min(int(n), numba.config.NUMBA_NUM_THREADS))
+
+
+def test_batch_cpu_dispatch_records_plan_that_ran():
+    """A 33-case CPU batch runs in the calling thread: one worker and the batch thread count."""
+    old_dev = gpu.get_device()
+    try:
+        gpu.set_device("cpu")
+        ac = _rect_aircraft()
+        solver = VortexLatticeSolver()
+        st = SolverSettings(solver_type="vlm", n_panels=16)
+        conds = [FlightCondition(V_inf=30.0, alpha=np.radians(a)) for a in np.linspace(-4.0, 12.0, 33)]
+        lat = solver.build(ac, st, conds[0])
+        results = solver.solve_batch(lat, conds, st, ac.S_ref, ac.b_ref, ac.c_ref)
+        expected = _expected_solve_threads(parallel.single_case_threads(lat.n_panels, batch=33))
+        for r in results:
+            d = r.details["dispatch"]
+            assert d["workers"] == 1
+            assert d["plan_source"] == "default"
+            if expected is not None:
+                assert d["threads"] == expected
+    finally:
+        gpu.set_device(old_dev)
+
+
+def test_single_solve_profile_threads_record_profile(monkeypatch):
+    """A single solve with the tuned single-case threads of the profile records plan_source profile."""
+    from ventorum.hardware.profile import size_class
+
+    old_dev = gpu.get_device()
+    try:
+        gpu.set_device("cpu")
+        ac = _rect_aircraft()
+        cond = FlightCondition(V_inf=30.0, alpha=np.radians(4.0))
+        st = SolverSettings(solver_type="vlm", n_panels=16)
+        solver = VortexLatticeSolver()
+        lat = solver.build(ac, st, cond)
+        fake = {"fingerprint": "fp-single", "settings": {"single": {size_class(lat.n_panels): {"threads": 2}}}}
+        monkeypatch.setattr(profile, "active_profile", lambda: fake)
+        res = solver.solve_lattice(lat, cond, st, ac.S_ref, ac.b_ref, ac.c_ref)
+        d = res.details["dispatch"]
+        assert d["plan_source"] == "profile"
+        assert d["workers"] == 1
+        assert d["profile"] == "fp-single"
+        expected = _expected_solve_threads(2)
+        if expected is not None:
+            assert d["threads"] == expected
+    finally:
+        gpu.set_device(old_dev)
+
+
+def test_ground_sweep_user_jobs_record_user_plan():
+    """A ground-effect sweep with n_jobs=3 on a lattice that is not small records the pool of 3 workers."""
+    old_dev = gpu.get_device()
+    try:
+        gpu.set_device("cpu")
+        wing = vt.LiftingSurface(
+            name="wing",
+            semi_span=3.0,
+            sections=[vt.WingSection(y_frac=0.0, chord=1.0), vt.WingSection(y_frac=1.0, chord=1.0)],
+        )
+        st = SolverSettings(solver_type="vlm", n_panels=60, n_chord=8)
+        res = GroundEffectSweep(wing, settings=st, n_jobs=3).run_sweep(
+            heights=[0.5, 1.0], alphas_deg=[2.0, 4.0], V_inf=30.0,
+        )
+        plan = parallel.plan_parallel(4, 480, 3)
+        assert plan.workers == 3
+        rs = [r for r in res.results if r is not None]
+        assert len(rs) == 4
+        for r in rs:
+            d = r.solver_result.details["dispatch"]
+            assert d["workers"] == 3
+            assert d["plan_source"] == "user"
+            expected = _expected_solve_threads(plan.threads_per_worker)
+            if expected is not None:
+                assert d["threads"] == expected
+    finally:
+        gpu.set_device(old_dev)
+
+
+def test_serial_run_cases_with_user_jobs_record_user():
+    """A serial run of cases with n_jobs=1 records one worker and plan_source user."""
+    old_dev = gpu.get_device()
+    try:
+        gpu.set_device("cpu")
+        ac = _rect_aircraft()
+        st = SolverSettings(solver_type="vlm", n_panels=16)
+        solver = VortexLatticeSolver()
+        conds = [FlightCondition(V_inf=30.0, alpha=np.radians(a)) for a in (0.0, 4.0)]
+        results = parallel.run_cases(lambda c: solver.solve(ac, c, st), conds, 64, n_jobs=1)
+        for r in results:
+            assert r.details["dispatch"]["workers"] == 1
+            assert r.details["dispatch"]["plan_source"] == "user"
+        assert getattr(parallel._local, "plan", None) is None
+    finally:
+        gpu.set_device(old_dev)
