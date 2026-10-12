@@ -422,7 +422,7 @@ def _attach_planform(model: TorchReference, t: dict, prep: dict, wrt: tuple[str,
     dev = torch.device(device)
     ac = prep["aircraft"]
     canonical = prep["canonical"]
-    collocation = "vlm" if canonical == "vlm" else "linear"
+    collocation = "vlm" if canonical == "vlm" else "llt"
     geom = PF.build_planform(ac, prep["settings"], collocation)
     pt = PF.planform_tensors(geom, device, dtype, differentiable=True)
     base_surf = {s["name"]: s for s in model.b["surfaces"]}

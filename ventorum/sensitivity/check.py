@@ -392,7 +392,7 @@ def check_gradients(
         ac2.compute_reference_values()
         c_ref = float(ac2.c_ref)
         canonical = resolve_solver_type(st.solver_type)
-        collocation = "vlm" if canonical == "vlm" else "linear"
+        collocation = "vlm" if canonical == "vlm" else "llt"
         base_geom = PF.build_planform(ac, st, collocation)
         base_snap = {n: (list(tr.snap_sec), tr.n_sp, tr.spacing)
                      for n, tr in base_geom.surfaces.items()}

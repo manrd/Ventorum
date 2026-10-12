@@ -426,3 +426,147 @@ def test_howto_planform_block_runs(float64_precision) -> None:
         exec(compile(plan[0], "docs/user/how_to_gradients.md", "exec"), namespace)  # noqa: S102
     res = namespace["presult"]
     assert res.jacobian["CL"]["planform"]["Wing"]["semi_span"] != 0.0
+
+
+def _section(y: float, chord: float, twist_deg: float = 0.0, x_le=None, z_le=None,
+             airfoil=None) -> vt.WingSection:
+    return vt.WingSection(y_frac=y, chord=chord, twist=np.radians(twist_deg), x_le=x_le,
+                          z_le=z_le, airfoil=airfoil if airfoil is not None else _linear_section())
+
+
+def _cranked_wing() -> vt.LiftingSurface:
+    """Three sections, 25 deg sweep, chord and twist kink at y_frac 0.35."""
+    return vt.LiftingSurface(
+        name="W", semi_span=6.0, sweep_le=np.radians(25.0), dihedral=np.radians(4.0),
+        incidence=np.radians(2.0), position=np.array([1.0, 0.0, 0.3]),
+        sections=[_section(0.0, 3.0, 2.0), _section(0.35, 2.2, 1.0), _section(1.0, 0.9, -2.0)])
+
+
+
+def _production_cl(ac: vt.Aircraft, cond, st) -> float:
+    return float(vt.analyze(ac.clone(), cond, st.clone()).totals.CL)
+
+
+def test_planform_linear_auto_spacing_cranked(float64_precision, cpu_device) -> None:
+    """Regression: the linear lifting line uses the lifting-line rule of the auto spacing.
+
+    The chain used the vortex-lattice spacing rule for the lifting line, so the
+    port stations differed from the production stations and the forward check
+    raised. Now the forward check passes and every planform parameter of a
+    swept cranked wing matches the Richardson differences (1e-6).
+    """
+    from ventorum.geometry.lattice import _surface_mesh_eta
+    from ventorum.sensitivity.planform import build_planform
+
+    ac = vt.Aircraft(surfaces=[_cranked_wing()])
+    cond = vt.FlightCondition(V_inf=30.0, alpha=np.radians(4.0), beta=np.radians(3.0))
+    st = vt.SolverSettings(solver_type="linear", n_panels=16)
+    geom = build_planform(ac, st, "llt")
+    eta_e, _ = _surface_mesh_eta(ac.surfaces[0], st, "llt", 6.0)
+    assert np.array_equal(geom.surfaces["W"].eta_base, eta_e)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        res = vt.gradients(ac, cond, st, outputs=("CL", "CD", "Cm"), wrt=("planform",))
+    assert res.forward_mismatch <= 1e-12, res.forward_mismatch
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        out = vt.check_gradients(ac, cond, st, outputs=("CL", "CD", "Cm"),
+                                 wrt=("planform",), n_directions=0, rtol=1e-6, seed=0)
+    assert out["pass"], _failed(out)
+    assert out["groups"]["planform"]["compared"] > 0, out["groups"]
+    assert not any("jump" in str(v.get("reason")) for v in out["details"].values())
+    # Some components do not resolve to rtol/10 in check_gradients (the lifting
+    # line differences have a larger noise); compare them here with one
+    # Richardson step at 1e-6.
+    jac = res.jacobian["CL"]["planform"]["W"]
+    setters = {
+        "semi_span": (lambda a, v: setattr(a.surfaces[0], "semi_span", v), 6.0,
+                      jac["semi_span"]),
+        "sweep_le": (lambda a, v: setattr(a.surfaces[0], "sweep_le", v), np.radians(25.0),
+                     jac["sweep_le"]),
+        "dihedral": (lambda a, v: setattr(a.surfaces[0], "dihedral", v), np.radians(4.0),
+                     jac["dihedral"]),
+        "sec[1].y_frac": (lambda a, v: setattr(a.surfaces[0].sections[1], "y_frac", v), 0.35,
+                          jac["sections"][1]["y_frac"]),
+        "sec[1].chord": (lambda a, v: setattr(a.surfaces[0].sections[1], "chord", v), 2.2,
+                         jac["sections"][1]["chord"]),
+    }
+    h = 1e-3
+    for key, (setter, x0, g) in setters.items():
+        def cl_at(v: float, _s=setter) -> float:
+            a = ac.clone()
+            _s(a, v)
+            return _production_cl(a, cond, st)
+
+        d1 = (cl_at(x0 + h) - cl_at(x0 - h)) / (2.0 * h)
+        d2 = (cl_at(x0 + 0.5 * h) - cl_at(x0 - 0.5 * h)) / h
+        ref = (4.0 * d2 - d1) / 3.0
+        assert abs(float(g) - ref) <= 1e-6 * abs(ref), (key, float(g), ref)
+
+
+def test_planform_break_count_limit(float64_precision, cpu_device) -> None:
+    """Regression: the station trace applies the break-count limit of the numpy builder.
+
+    Five sections with distinct airfoils give three breaks; with five panels
+    the limit max(1, 5 // 3) = 1 keeps the plain spacing. The trace snapped
+    the breaks anyway and the chain refused to run.
+    """
+    from ventorum.geometry.lattice import _surface_mesh_eta
+    from ventorum.sensitivity.planform import build_planform
+
+    def af(name: str, a_l0: float, cd0: float = 0.008) -> vt.LinearAirfoil:
+        return vt.LinearAirfoil(name=name, a0=2.0 * np.pi, alpha_L0=np.radians(a_l0),
+                                Cd0=cd0, Cm0=-0.05)
+
+    wing = vt.LiftingSurface(
+        name="W", semi_span=5.0, sweep_le=np.radians(-8.0),
+        sections=[_section(0.0, 2.0, 1.0, airfoil=af("a", -2.0)),
+                  _section(0.2, 1.9, 0.5, airfoil=af("b", -1.0)),
+                  _section(0.5, 1.5, 0.0, airfoil=af("c", -3.0)),
+                  _section(0.8, 1.2, -1.0, airfoil=af("d", -2.0, 0.01)),
+                  _section(1.0, 0.6, -3.0, airfoil=af("e", -1.5))])
+    ac = vt.Aircraft(surfaces=[wing])
+    cond = vt.FlightCondition(V_inf=30.0, alpha=np.radians(4.0), beta=np.radians(3.0))
+    st = vt.SolverSettings(solver_type="vlm", n_panels=5, n_chord=1)
+    geom = build_planform(ac, st, "vlm")
+    eta_e, eta_mid = _surface_mesh_eta(wing, st, "vlm", 5.0)
+    assert np.array_equal(geom.surfaces["W"].eta_base, eta_e)
+    assert np.array_equal(geom.surfaces["W"].mid_base, eta_mid)
+    assert all(s is None for s in geom.surfaces["W"].snap_sec)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        res = vt.gradients(ac, cond, st, outputs=("CL",), wrt=("planform",))
+    assert res.forward_mismatch <= 1e-12, res.forward_mismatch
+
+
+def test_planform_control_on_break_edge(float64_precision) -> None:
+    """The control-limit snap of the trace equals the numpy rule when a limit is on a moved edge."""
+    from ventorum.geometry.lattice import _surface_mesh_eta
+    from ventorum.sensitivity.planform import build_planform
+
+    wing = _cranked_wing()
+    st = vt.SolverSettings(solver_type="vlm", n_panels=12, n_chord=2)
+    geom0 = build_planform(vt.Aircraft(surfaces=[wing]), st, "vlm")
+    tr = geom0.surfaces["W"]
+    i = next(k for k, s in enumerate(tr.snap_sec) if s is not None)
+    wing.controls = [vt.ControlSurface(name="flap", eta_start=float(tr.eta_base[i]),
+                                       eta_end=0.8, hinge_x_c=0.75, deflection=0.0)]
+    geom = build_planform(vt.Aircraft(surfaces=[wing]), st, "vlm")
+    eta_e, eta_mid = _surface_mesh_eta(wing, st, "vlm", 6.0)
+    assert np.array_equal(geom.surfaces["W"].eta_base, eta_e)
+    assert np.array_equal(geom.surfaces["W"].mid_base, eta_mid)
+
+
+
+
+def test_planform_refuses_unsorted_sections(float64_precision) -> None:
+    """The port refuses sections that are not ordered by y_frac (the numpy builder sorts)."""
+    from ventorum.sensitivity.planform import build_planform
+
+    wing = _cranked_wing()
+    wing.sections = [wing.sections[0], wing.sections[2], wing.sections[1]]
+    st = vt.SolverSettings(solver_type="vlm", n_panels=12, n_chord=2)
+    with pytest.raises(ValueError, match="ordered by y_frac"):
+        build_planform(vt.Aircraft(surfaces=[wing]), st, "vlm")
+    with pytest.raises(ValueError, match="collocation"):
+        build_planform(vt.Aircraft(surfaces=[_cranked_wing()]), st, "linear")

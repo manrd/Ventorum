@@ -126,11 +126,14 @@ class PlanformTensors:
 def _eta_trace(surf: Any, n_sp: int, spacing: str) -> tuple:
     """Return (edges, mids, snap, moved) of the spanwise stations with provenance.
 
-    The algorithm is the station rule of the numpy builder (section breaks then
-    control limits, nearest free edge, quarter-width rule): *snap[i]* is the section
-    index whose span fraction edge *i* tracks, or None, and *moved[i]* tells whether
-    the edge moved at the base point. Control snaps are constants (control limits
-    are not planform parameters), so they need no provenance.
+    The algorithm is the station rule of the numpy builder
+    (:func:`ventorum.geometry.lattice._surface_eta`): section breaks first
+    (only when the break count is at most a third of the panel count), then
+    control limits, each with the nearest-free-edge and quarter-width rules.
+    *snap[i]* is the section index whose span fraction edge *i* tracks, or
+    None, and *moved[i]* tells whether the edge moved at the base point (False
+    for an edge that lies exactly on its break). Control snaps are constants
+    (control limits are not planform parameters), so they need no provenance.
     """
     from ventorum.geometry.discretization import get_spacing
     from ventorum.geometry.lattice import _section_breaks
@@ -145,34 +148,48 @@ def _eta_trace(surf: Any, n_sp: int, spacing: str) -> tuple:
     fr = [float(s.y_frac) for s in secs]
     breaks = [(float(eb), fr.index(float(eb))) for eb in _section_breaks(surf)]
     moved: set = set()
-
-    def _snap_to(value: float, sec_idx: int | None) -> None:
-        cand = [i for i in range(1, len(edges) - 1) if i not in moved]
-        if not cand:
-            return
-        i = min(cand, key=lambda j: abs(edges[j] - value))
-        if abs(edges[i] - value) < 1e-12:
-            moved.add(i)
-            if sec_idx is not None:
+    if breaks and len(breaks) <= max(1, (len(edges) - 1) // 3):
+        for eb, sec_idx in breaks:
+            cand = [i for i in range(1, len(edges) - 1) if i not in moved]
+            if not cand:
+                break
+            i = min(cand, key=lambda j: abs(edges[j] - eb))
+            if abs(edges[i] - eb) < 1e-12:
+                moved.add(i)
                 snap[i] = sec_idx
-            return
-        w_left, w_right = edges[i] - edges[i - 1], edges[i + 1] - edges[i]
-        if value - edges[i - 1] < 0.25 * w_left or edges[i + 1] - value < 0.25 * w_right:
-            return
-        edges[i] = value
-        mids[i - 1] = 0.5 * (edges[i - 1] + edges[i])
-        mids[i] = 0.5 * (edges[i] + edges[i + 1])
-        moved.add(i)
-        if sec_idx is not None:
+                continue
+            w_left, w_right = edges[i] - edges[i - 1], edges[i + 1] - edges[i]
+            if eb - edges[i - 1] < 0.25 * w_left or edges[i + 1] - eb < 0.25 * w_right:
+                continue
+            edges[i] = eb
+            mids[i - 1] = 0.5 * (edges[i - 1] + edges[i])
+            mids[i] = 0.5 * (edges[i] + edges[i + 1])
+            moved.add(i)
             snap[i] = sec_idx
             snap_moved[i] = True
-
-    for eb, sec_idx in breaks:
-        _snap_to(eb, sec_idx)
+    ctrl_limits = []
     for c in getattr(surf, "controls", []):
         for lim in (c.eta_start, c.eta_end):
             if 1e-12 < lim < 1.0 - 1e-12:
-                _snap_to(float(lim), None)
+                ctrl_limits.append(float(lim))
+    for clim in ctrl_limits:
+        dist = np.abs(edges - clim)
+        k = int(np.argmin(dist))
+        if dist[k] < 1e-12:
+            if 1 <= k < len(edges) - 1:
+                moved.add(k)
+            continue
+        cand = [i for i in range(1, len(edges) - 1) if i not in moved]
+        if not cand:
+            continue
+        i = min(cand, key=lambda j: abs(edges[j] - clim))
+        w_left, w_right = edges[i] - edges[i - 1], edges[i + 1] - edges[i]
+        if clim - edges[i - 1] < 0.25 * w_left or edges[i + 1] - clim < 0.25 * w_right:
+            continue
+        edges[i] = clim
+        mids[i - 1] = 0.5 * (edges[i - 1] + edges[i])
+        mids[i] = 0.5 * (edges[i] + edges[i + 1])
+        moved.add(i)
     return edges, mids, snap, snap_moved
 
 
@@ -186,17 +203,33 @@ def build_planform(aircraft: Any, settings: Any, collocation: str) -> PlanformGe
     settings : SolverSettings
         Discretisation settings (panel counts, spacing).
     collocation : str
-        ``"vlm"`` or ``"llt"`` (selects the spacing rule of ``"auto"``).
+        ``"vlm"`` or ``"llt"`` (selects the spacing rule of ``"auto"``; the
+        linear lifting line uses ``"llt"``).
 
     Returns
     -------
     PlanformGeometry
         Frozen traces per surface, main-surface index and reference surfaces.
+
+    Raises
+    ------
+    ValueError
+        For an unknown collocation, or sections that are not ordered by
+        y_frac (the numpy builder sorts them; the section index of the
+        jacobian must be the index in the surface list).
     """
     from ventorum.geometry.deformation import undeformed_nodes
     from ventorum.geometry.discretization import compute_surface_n_panels
     from ventorum.geometry.lattice import _surface_mesh_eta, resolve_spacing
 
+    if collocation not in ("vlm", "llt"):
+        raise ValueError(f"Unknown collocation {collocation!r}; use 'vlm' or 'llt'.")
+    for surf in aircraft.surfaces:
+        fracs = [float(s.y_frac) for s in surf.sections]
+        if fracs != sorted(fracs):
+            raise ValueError(
+                f"[{surf.name}] Sections must be ordered by y_frac for the planform chain. "
+                f"Got: {fracs}.")
     solver = "vlm" if collocation == "vlm" else "linear"
     ref_semi = max((float(s.semi_span) for s in aircraft.surfaces), default=1.0)
     undef = undeformed_nodes(aircraft, settings, solver=solver)
