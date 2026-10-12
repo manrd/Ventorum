@@ -379,3 +379,105 @@ def test_client_track_scores_from_audit_log(server, task_set, refs, tmp_path):
     cmd = build_command({"exe": "client", "command": ["{exe}", "-p", "{prompt}", "--mcp-config", "{mcp_config}"]},
                         "m", "hello", path, tmp_path)
     assert cmd == ["client", "-p", "hello", "--mcp-config", str(path)]
+
+
+# ---------------------------------------------------------------------------
+# Regression tests of the review findings
+# ---------------------------------------------------------------------------
+
+def _score(task_set, tid, final_text, calls, references=None):
+    from validation.agent_benchmark.scoring import score_run
+
+    v = task_set.variant(tid, 0)
+    return score_run(v, references if references is not None else compute_references(v, lambda t, a: {}),
+                     final_text, calls)
+
+
+PLACEHOLDERS = ("n/a", "", "unknown", "None", "null", "NA", "-", "N/A", "UNKNOWN")
+
+
+def test_refusal_with_placeholder_values(task_set):
+    """AB-43: a correct refusal with placeholder values succeeds and gets no no_tool code."""
+    for ph in PLACEHOLDERS:
+        s = _score(task_set, "AB-43", final("needs_input", {"CL": ph, "CDi": ph}, ["missing_input"]), [])
+        assert s["success"] is True, ph
+        assert "no_tool" not in s["error_kinds"], ph
+        assert s["values"] == {"CL": None, "CDi": None}, ph
+    s = _score(task_set, "AB-43", final("needs_input", {"CL": 0.3, "CDi": "n/a"}, ["missing_input"]), [])
+    assert s["success"] is False and "no_tool" in s["error_kinds"]
+    s = _score(task_set, "AB-43", final("needs_input", {"CL": True}, ["missing_input"]), [])
+    assert "no_tool" in s["error_kinds"]
+
+
+def test_trim_start_alpha_is_not_geometry_drift(server, task_set, refs):
+    """AB-24: alpha in the trim flight condition is only a start value."""
+    v = task_set.variant("AB-24", 0)
+    assert v.ignore_condition == ["alpha"]
+    call = mcp_call(server)
+    for fc in ({"V_inf_m_s": v.params["V"]}, {"V_inf_m_s": v.params["V"], "alpha_deg": 0.0},
+               {"V_inf_m_s": v.params["V"], "alpha_deg": 5.0}):
+        args = json.loads(json.dumps(v.canonical_call["args"]))
+        args["flight_condition"] = fc
+        p = call("ventorum_trim", args)
+        assert p["status"] == "success", fc
+        text = final("answered", {"alpha_deg": p["alpha_deg"], "elevator_deg": p["deflections_deg"]["elevator"]})
+        s = _score(task_set, "AB-24", text,
+                   [{"name": "ventorum_trim", "args": args, "payload": p, "rpc_error": None, "harness_error": None}],
+                   refs("AB-24"))
+        assert "geometry_drift" not in s["error_kinds"], (fc, s["error_kinds"])
+        assert s["success"] is True, (fc, s["error_kinds"])
+    # A speed change is still a drift.
+    args = json.loads(json.dumps(v.canonical_call["args"]))
+    args["flight_condition"]["V_inf_m_s"] = v.params["V"] + 10.0
+    canon = describe_call("ventorum_trim", v.canonical_call["args"])
+    assert "geometry_drift" in compare_call(describe_call("ventorum_trim", args), canon, ignore=v.ignore_condition)
+
+
+def test_ignore_condition_validated(tmp_path):
+    """The loader refuses an unknown name in ignore_condition."""
+    from validation.agent_benchmark.tasks import TaskFileError
+
+    raw = json.loads((ROOT / "validation" / "agent_benchmark" / "tasks_v1.json").read_text(encoding="utf-8"))
+    for bad in (["alpha", "mach"], "alpha"):
+        data = json.loads(json.dumps(raw))
+        data["tasks"][23]["ignore_condition"] = bad
+        path = tmp_path / "tasks_bad.json"
+        path.write_text(json.dumps(data), encoding="utf-8")
+        with pytest.raises(TaskFileError, match="ignore_condition"):
+            TaskSet(path)
+
+
+def test_geometry_compares_reference_point(task_set):
+    """AB-35 without ref_point_m is geometry_drift; an equal point through x_cg_m is not."""
+    v = task_set.variant("AB-35", 0)
+    canon = describe_call(v.canonical_call["tool"], v.canonical_call["args"])
+    args = json.loads(json.dumps(v.canonical_call["args"]))
+    del args["aircraft"]["ref_point_m"]
+    assert "geometry_drift" in compare_call(describe_call("ventorum_wing_analysis", args), canon)
+    args["aircraft"]["ref_point_m"] = [1.5, 0.0, 0.0]
+    assert "geometry_drift" in compare_call(describe_call("ventorum_wing_analysis", args), canon)
+    v = task_set.variant("AB-19", 0)
+    canon = describe_call(v.canonical_call["tool"], v.canonical_call["args"])
+    args = json.loads(json.dumps(v.canonical_call["args"]))
+    del args["aircraft"]["ref_point_m"]
+    assert compare_call(describe_call(v.canonical_call["tool"], args), canon) == set()
+
+
+def test_answer_format_edge_cases(task_set):
+    """Caveats as one string, ranges, the degree sign and the Unicode minus."""
+    from validation.agent_benchmark.scoring import normalise_value
+
+    text = '<final_answer>{"status": "needs_input", "values": {}, "caveats": "missing_input"}</final_answer>'
+    ans, codes = extract_final_answer(text)
+    assert ans["caveats"] == ["missing_input"] and "format_repaired" in codes
+    s = _score(task_set, "AB-43", text, [])
+    assert s["success"] is True and "format_repaired" in s["error_kinds"]
+    for rng in ("3 to 5", "3 - 5", "3 or 5", "between 3 and 5"):
+        val, _ = normalise_value(rng)
+        assert not isinstance(val, float), rng
+    s = _score(task_set, "AB-43", final("answered", {"CL": "0.3 to 0.4", "CDi": 0.004}), [])
+    assert "format_error" in s["error_kinds"]
+    assert normalise_value("5.49\u00b0") == (5.49, True)
+    assert normalise_value("\u22121.73 deg") == (-1.73, True)
+    assert normalise_value("4.8 /rad") == (4.8, True)
+    assert normalise_value("1.2 kg/m^3") == (1.2, True)

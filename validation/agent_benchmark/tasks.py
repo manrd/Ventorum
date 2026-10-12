@@ -47,6 +47,8 @@ CAVEAT_CODES = (
 )
 REFUSAL_FLAGS = ("no", "yes", "or_caveat")
 EXPECT_VALUES = ("success", "invalid_input", "invalid_method", "ground_strike")
+#: Entries of the flight-condition fingerprint that a task can leave out of the comparison.
+CONDITION_ENTRIES = ("V", "alpha", "beta", "rho", "h")
 TASK_ID = re.compile(r"^AB-\d{2}$")
 
 
@@ -319,6 +321,10 @@ class TaskVariant:
         Accepted outcomes: ``{"status": [...], "caveats": [...], "values": [...]}``.
     argument_checks : list of dict
         Checks of the built geometry: ``{"quantity", "value", "tolerance"}``.
+    ignore_condition : list of str
+        Flight-condition entries that the geometry comparison does not
+        compare (for example ``"alpha"`` for a trim, where the angle of
+        attack is only a start value).
     params : dict
         Parameter values of this variant.
     """
@@ -338,6 +344,7 @@ class TaskVariant:
     tolerances: dict[str, Tolerance]
     outcomes: list[dict[str, Any]]
     argument_checks: list[dict[str, Any]] = field(default_factory=list)
+    ignore_condition: list[str] = field(default_factory=list)
     params: dict[str, Any] = field(default_factory=dict)
 
     @property
@@ -553,7 +560,8 @@ class TaskSet:
             refusal=task["refusal"], prompt=prompt, answer_keys=keys, tools=tools, focused_tools=focused,
             calls=calls, canonical=task.get("canonical"), references=dict(task.get("references", {})),
             tolerances={k: parse_tolerance(v) for k, v in task.get("tolerances", {}).items()},
-            outcomes=outcomes, argument_checks=checks, params=params,
+            outcomes=outcomes, argument_checks=checks, ignore_condition=list(task.get("ignore_condition", [])),
+            params=params,
         )
 
 
@@ -611,6 +619,9 @@ def validate_task_data(data: Any) -> list[str]:
             for s in _strings(call.get("args")):
                 if s.startswith("@") and s[1:] not in geoms:
                     p.append(f"{tid}: unknown geometry {s}")
+        ign = t.get("ignore_condition", [])
+        if not isinstance(ign, list) or any(e not in CONDITION_ENTRIES for e in ign):
+            p.append(f"{tid}: ignore_condition must be a list of {CONDITION_ENTRIES}")
         canon = t.get("canonical")
         if canon is not None and canon not in t["calls"]:
             p.append(f"{tid}: canonical call {canon!r} is not in calls")

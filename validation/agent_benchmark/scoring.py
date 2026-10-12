@@ -50,7 +50,14 @@ from validation.agent_benchmark.tasks import STATUSES, Tolerance, TaskVariant
 
 FINAL_BLOCK = re.compile(r"<final_answer>(.*?)</final_answer>", re.S | re.I)
 FINAL_OPEN = re.compile(r"<final_answer>(.*)$", re.S | re.I)
-ONE_NUMBER = re.compile(r"^\s*([-+]?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?)\s*[A-Za-z/%^0-9_ ]*$")
+#: One number, then an optional unit text (letters, the degree sign, ``/``, ``%``, ``^``, digits).
+ONE_NUMBER = re.compile(r"^\s*([-+]?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?)\s*([A-Za-z\u00b0\u00b5/%^0-9_ .*()\-]*)$")
+#: Unit exponents (``m^2``, ``rad^-1``) and digits after a letter (``m2``). Other digits are a second number.
+UNIT_DIGITS = re.compile(r"\^[-+]?\d+|(?<=[A-Za-z])\d+")
+#: Strings that mean "no value" (compared after strip and lower case).
+PLACEHOLDERS = frozenset({"", "n/a", "na", "unknown", "none", "null", "-"})
+#: Minus signs that are not ASCII (Unicode minus, figure dash, small and full-width hyphen-minus).
+MINUS_SIGNS = {"\u2212": "-", "\u2012": "-", "\ufe63": "-", "\uff0d": "-"}
 DEG = 180.0 / math.pi
 UNIT_FACTORS = (DEG, 1.0 / DEG, 0.3048, 1.0 / 0.3048, 0.514444, 1.0 / 0.514444, 1000.0, 0.001, 100.0, 0.01)
 UNIT_RATIO_TOL = 0.005
@@ -119,21 +126,51 @@ def extract_final_answer(text: str) -> tuple[dict[str, Any] | None, list[str]]:
     if not isinstance(obj, dict) or obj.get("status") not in STATUSES:
         return None, ["format_error"]
     values = obj.get("values") if isinstance(obj.get("values"), dict) else {}
-    caveats = [c for c in obj.get("caveats", []) if isinstance(c, str)] if isinstance(obj.get("caveats"), list) else []
+    raw_caveats = obj.get("caveats", [])
+    if isinstance(raw_caveats, str):
+        # One code as a string instead of a list: accept it as a one-element list, and flag the repair.
+        raw_caveats = [raw_caveats.strip()] if raw_caveats.strip() else []
+        if "format_repaired" not in codes:
+            codes.append("format_repaired")
+    caveats = [c for c in raw_caveats if isinstance(c, str)] if isinstance(raw_caveats, list) else []
     return {"status": obj["status"], "values": values, "caveats": caveats}, codes
 
 
+def _clean_number_text(v: str) -> str:
+    for k, rep in MINUS_SIGNS.items():
+        v = v.replace(k, rep)
+    return v
+
+
+def is_number_range(v: Any) -> bool:
+    """Return True if *v* is a string that starts with a number and holds a second number (``"3 to 5"``)."""
+    if not isinstance(v, str):
+        return False
+    m = ONE_NUMBER.match(_clean_number_text(v))
+    return bool(m) and bool(re.search(r"\d", UNIT_DIGITS.sub("", m.group(2))))
+
+
 def normalise_value(v: Any) -> tuple[Any, bool]:
-    """Return ``(value, as_string)``. A string with one number or a boolean word is converted."""
+    """Return ``(value, as_string)``.
+
+    A placeholder string (``"n/a"``, ``""``, ``"unknown"``, ``"none"``,
+    ``"null"``, ``"na"``, ``"-"``, any case) gives None. A string with one
+    number and an optional unit (``"4.8 /rad"``, ``"5.5\u00b0"``, also with a
+    Unicode minus) or a boolean word is converted. A string with two numbers
+    (a range such as ``"3 to 5"``) is not converted.
+    """
     if isinstance(v, str):
         s = v.strip().lower()
+        if s in PLACEHOLDERS:
+            return None, False
         if s in ("true", "yes"):
             return True, True
         if s in ("false", "no"):
             return False, True
-        m = ONE_NUMBER.match(v)
-        if m:
-            return float(m.group(1)), True
+        if not is_number_range(v):
+            m = ONE_NUMBER.match(_clean_number_text(v))
+            if m:
+                return float(m.group(1)), True
     if isinstance(v, int) and not isinstance(v, bool):
         return float(v), False
     return v, False
@@ -223,7 +260,7 @@ def geometry_print(ac: Any) -> dict[str, Any]:
     """Return a mesh-free fingerprint of a built aircraft (lengths in m, angles in rad)."""
     surfs = [_surface_print(s) for s in ac.surfaces]
     surfs.sort(key=lambda d: (round(float(d["x_le"][0]), 3), round(float(d["z"][-1]), 3), round(float(d["y"][-1]), 3)))
-    rp = np.zeros(3) if ac.ref_point is None else np.asarray(ac.ref_point, dtype=float)
+    rp = np.asarray(ac.moment_reference(), dtype=float).reshape(3)
     return {"surfaces": surfs, "refs": np.array([ac.S_ref, ac.b_ref, ac.c_ref], dtype=float), "ref_point": rp}
 
 
@@ -259,9 +296,10 @@ def compare_geometry(model: dict[str, Any], canon: dict[str, Any]) -> set[str]:
             c = classify_arrays(ms[key], cs[key])
             if c:
                 codes.add(c)
-    c = classify_arrays(model["refs"], canon["refs"])
-    if c:
-        codes.add(c)
+    for key in ("refs", "ref_point"):
+        c = classify_arrays(model[key], canon[key])
+        if c:
+            codes.add(c)
     return codes
 
 
@@ -285,18 +323,28 @@ def _condition_of(tool: str, args: dict[str, Any]) -> dict[str, float]:
     return out
 
 
-def _ref_x(args: dict[str, Any], ac: Any) -> float | None:
-    if "x_cg_m" in args:
-        return float(args["x_cg_m"])
-    if isinstance(args.get("ref_point_m"), list) and args["ref_point_m"]:
-        return float(args["ref_point_m"][0])
-    if isinstance(args.get("aircraft"), dict) and "ref_point_m" in args["aircraft"]:
-        return float(ac.ref_point[0])
-    return None
+def _moment_point(args: dict[str, Any], ac: Any) -> np.ndarray:
+    """Return the moment reference point [m] that a tool uses for a call.
+
+    The tools with ``x_cg_m`` use ``[x_cg_m, 0, z_ref]``; the ground-effect
+    tool uses ``ref_point_m`` if it is given; else the aircraft reference
+    point (the origin if the aircraft has none).
+    """
+    base = np.asarray(ac.moment_reference(), dtype=float).reshape(3)
+    if args.get("x_cg_m") is not None:
+        return np.array([float(args["x_cg_m"]), 0.0, float(base[2])])
+    rp = args.get("ref_point_m")
+    if isinstance(rp, list) and len(rp) == 3:
+        return np.array([float(x) for x in rp])
+    return base
 
 
 def describe_call(tool: str, args: dict[str, Any]) -> dict[str, Any] | None:
-    """Build the geometry and the condition of a call. Return None if the call has no geometry or does not build."""
+    """Build the geometry and the condition of a call. Return None if the call has no geometry or does not build.
+
+    The geometry fingerprint holds the moment reference point that the tool
+    uses for the call (see :func:`_moment_point`).
+    """
     from ventorum.agent import build_aircraft_from_spec
 
     if not isinstance(args, dict) or not ("wing" in args or "aircraft" in args):
@@ -304,25 +352,32 @@ def describe_call(tool: str, args: dict[str, Any]) -> dict[str, Any] | None:
     try:
         ac = build_aircraft_from_spec(wing=args.get("wing"), aircraft=args.get("aircraft"))
         cond = _condition_of(tool, args)
+        geom = geometry_print(ac)
+        geom["ref_point"] = _moment_point(args, ac)
     except (ValueError, TypeError):
         return None
-    return {"geometry": geometry_print(ac), "condition": cond, "ref_x": _ref_x(args, ac)}
+    return {"geometry": geom, "condition": cond}
 
 
-def compare_call(model: dict[str, Any], canon: dict[str, Any]) -> set[str]:
-    """Compare a described model call with the described canonical call. Return error codes."""
+def compare_call(model: dict[str, Any], canon: dict[str, Any], ignore: list[str] | tuple[str, ...] = ()) -> set[str]:
+    """Compare a described model call with the described canonical call. Return error codes.
+
+    Parameters
+    ----------
+    model, canon : dict
+        Outputs of :func:`describe_call`.
+    ignore : list of str, optional
+        Condition entries that are not compared (for example ``"alpha"``
+        for a trim, where the angle of attack is only a start value).
+    """
     codes = compare_geometry(model["geometry"], canon["geometry"])
     mc, cc = model["condition"], canon["condition"]
-    for key in (set(mc) & set(cc)) - {"src"}:
+    for key in (set(mc) & set(cc)) - {"src"} - set(ignore):
         c = classify_arrays(np.array([mc[key]]), np.array([cc[key]]))
         if c:
             codes.add(c)
-    if mc.get("src") == "fc" and cc.get("src") == "fc" and ("h" in mc) != ("h" in cc):
+    if mc.get("src") == "fc" and cc.get("src") == "fc" and "h" not in ignore and ("h" in mc) != ("h" in cc):
         codes.add("geometry_drift")
-    if canon["ref_x"] is not None and model["ref_x"] is not None:
-        c = classify_arrays(np.array([model["ref_x"]]), np.array([canon["ref_x"]]))
-        if c:
-            codes.add(c)
     return codes
 
 
@@ -355,7 +410,7 @@ def argument_codes(variant: TaskVariant, calls: list[dict[str, Any]]) -> set[str
             if c["name"] in accepted and c.get("args") is not None:
                 d = describe_call(c["name"], c["args"])
                 if d is not None:
-                    results.append(compare_call(d, cdesc))
+                    results.append(compare_call(d, cdesc, variant.ignore_condition))
         if results and not any(not r for r in results):
             codes |= results[-1]
     cflat = _flat_numbers(canon["args"])
@@ -518,6 +573,8 @@ def score_run(variant: TaskVariant, references: dict[str, Any], final_text: str,
     values: dict[str, Any] = {}
     as_string = []
     for k in variant.answer_keys:
+        if is_number_range(raw_values.get(k)):
+            codes.add("format_error")  # a range is not one value
         v, s = normalise_value(raw_values.get(k))
         values[k] = v
         if s:
@@ -586,7 +643,7 @@ def score_run(variant: TaskVariant, references: dict[str, Any], final_text: str,
             codes.add("wrong_tool")
     if any(c["name"] == "ventorum_tune_machine" for c in calls):
         codes.add("wrong_tool")
-    if any(values.get(k) is not None for k in variant.answer_keys) and not succ_calls:
+    if any(_is_num(values.get(k)) or isinstance(values.get(k), bool) for k in variant.answer_keys) and not succ_calls:
         codes.add("no_tool")
     codes |= argument_codes(variant, calls)
     if variant.argument_checks and not args_ok and succ_calls:

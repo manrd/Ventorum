@@ -359,7 +359,7 @@
       "tools": ["trim"],
       "parameters": {"V": {"value": 40.0, "range": [30.0, 50.0], "decimals": 0}, "CL": {"value": 0.5, "range": [0.3, 0.7], "decimals": 2}},
       "calls": {"main": {"tool": "trim", "args": {"aircraft": "@A1", "CL_target": "=CL", "pitch_control": "elevator", "flight_condition": {"V_inf_m_s": "=V", "alpha_deg": 3.0}}, "expect": "success"}},
-      "canonical": "main",
+      "canonical": "main", "ignore_condition": ["alpha"],
       "references": {"alpha_deg": {"path": "alpha_deg"}, "elevator_deg": {"path": "deflections_deg.elevator"}},
       "tolerances": {"alpha_deg": "a0.03", "elevator_deg": "a0.03"}
     },
@@ -372,7 +372,7 @@
                      "CL": {"value": 0.4, "range": [0.3, 0.5], "decimals": 2}},
       "calls": {"main": {"tool": "trim", "args": {"aircraft": "@A2", "CL_target": "=CL", "pitch_control": "elevator", "roll_control": "aileron", "yaw_control": "rudder",
                                                   "flight_condition": {"V_inf_m_s": "=V", "alpha_deg": 3.0, "beta_deg": "=beta"}, "settings": {"n_panels": 24}}, "expect": "success"}},
-      "canonical": "main",
+      "canonical": "main", "ignore_condition": ["alpha"],
       "references": {"alpha_deg": {"path": "alpha_deg"}, "elevator_deg": {"path": "deflections_deg.elevator"},
                      "aileron_deg": {"path": "deflections_deg.aileron"}, "rudder_deg": {"path": "deflections_deg.rudder"}},
       "tolerances": {"alpha_deg": "a0.03", "elevator_deg": "a0.03", "aileron_deg": "a0.005", "rudder_deg": "a0.03"}
@@ -385,7 +385,7 @@
       "parameters": {"m": {"value": 600.0, "range": [500.0, 700.0], "decimals": -1}, "V": {"value": 40.0, "range": [38.0, 50.0], "decimals": 0}},
       "calls": {"main": {"tool": "trim", "args": {"aircraft": "@A1", "CL_target": "=m*9.80665/(0.5*1.225*V**2*9.0)", "pitch_control": "elevator",
                                                   "flight_condition": {"V_inf_m_s": "=V", "alpha_deg": 3.0}}, "expect": "success"}},
-      "canonical": "main",
+      "canonical": "main", "ignore_condition": ["alpha"],
       "references": {"CL": {"path": "CL"}, "alpha_deg": {"path": "alpha_deg"}, "elevator_deg": {"path": "deflections_deg.elevator"}},
       "tolerances": {"CL": "r1%", "alpha_deg": "a0.03", "elevator_deg": "a0.03"}
     },
@@ -396,7 +396,7 @@
       "tools": ["trim"],
       "parameters": {"V": {"value": 40.0, "range": [30.0, 50.0], "decimals": 0}, "CL": {"value": 2.5, "range": [2.2, 3.0], "decimals": 1}},
       "calls": {"main": {"tool": "trim", "args": {"aircraft": "@A1", "CL_target": "=CL", "pitch_control": "elevator", "flight_condition": {"V_inf_m_s": "=V", "alpha_deg": 3.0}}, "expect": "success"}},
-      "canonical": "main",
+      "canonical": "main", "ignore_condition": ["alpha"],
       "references": {"trimmable": {"path": "trimmed"}},
       "tolerances": {"trimmable": "exact"},
       "outcomes": [{"status": ["answered"], "caveats": ["not_trimmed"], "values": "all"}]
