@@ -75,7 +75,8 @@ class MeshConvergencePoint:
     mean_sweep_error_pct : float
         Mean relative error across all evaluated angles of attack in a sweep.
     solve_time_ms : float
-        Median solve execution time in milliseconds.
+        Median measured solve time [ms]. Information only: the selection of
+        the minimal and recommended meshes does not use it.
     cond_num : float
         Condition number of the aerodynamic influence coefficient (AIC) matrix.
     min_panel_ar : float
@@ -85,7 +86,11 @@ class MeshConvergencePoint:
     is_safe : bool
         Whether the mesh avoids numerical ill-conditioning and aspect ratio collapse.
     efficiency_score : float
-        Composite score balancing accuracy, panel count, and execution speed.
+        Composite score that balances accuracy and computational cost [-]:
+        ``(panels_solved_ref / panels_solved)**2 / (1 + mean error in %)``,
+        with the mean of the CL and CDi errors. The cost is the work of one
+        dense solve (panels solved squared), not the measured time, so the
+        score is the same on every run and on every machine.
     gci_cl : float | None
         Grid Convergence Index (%) for CL if part of a monotonic refinement triplet.
     gci_cdi : float | None
@@ -662,6 +667,24 @@ def _compute_gci_triplets(points_by_spacing: dict[str, list[MeshConvergencePoint
                             p3.gci_cdi = float(gci_cd)
 
 
+def _cost_key(p: MeshConvergencePoint) -> tuple[int, int]:
+    """Return the deterministic cost of a mesh level for the selection.
+
+    Parameters
+    ----------
+    p : MeshConvergencePoint
+        Evaluated mesh level.
+
+    Returns
+    -------
+    tuple of int
+        ``(total_panels, panels_solved)``. The minimal and recommended meshes
+        are the levels with the smallest key. The measured solve time is not
+        part of the key, so the selection does not change with machine load.
+    """
+    return (int(p.total_panels), int(p.panels_solved))
+
+
 def _checked_error_pct(
     pt: MeshConvergencePoint, target_metric: str, do_sweep: bool,
 ) -> float:
@@ -719,6 +742,16 @@ def run_mesh_convergence_study(
     Determines the minimal and recommended mesh configurations that deliver accurate
     aerodynamic forces within tolerance across the studied flight envelope, and extracts
     generalization guidelines that apply to similar geometries and conditions.
+
+    Selection rule. The minimal mesh is the accurate and safe level with the
+    smallest cost. The recommended mesh is the robust level (error within
+    ``robustness_margin * tolerance_pct``, at least 12 panels) with the smallest
+    cost; a robust 'auto' level is preferred. The cost is the pair
+    ``(total_panels, panels_solved)``. When two levels have the same cost, the
+    level evaluated first is kept (order of ``spacing_schemes``, then of
+    ``panel_counts``). The measured solve times are not used, so the same
+    case gives the same recommendation on every run and on every machine.
+    The solve times stay in the result as information.
 
     Parameters
     ----------
@@ -968,10 +1001,12 @@ def run_mesh_convergence_study(
             # Numerical safety checks
             is_safe = (cond_num < 1e8) and (min_ar > 0.001)
 
-            # Efficiency score: rewards speedup and accuracy, penalizes unnecessary panels
-            spd = ref_t_ms / max(t_ms, 1e-4)
+            # Efficiency score: rewards a low cost and a small error. The
+            # cost is the work of one dense solve (panels solved squared),
+            # not the measured time, so the score is reproducible.
+            cost_ratio = (ref_panels_solved / max(panels_solved, 1)) ** 2
             avg_err = 0.5 * (err_cl + err_cdi)
-            eff_score = float(spd / (1.0 + avg_err))
+            eff_score = float(cost_ratio / (1.0 + avg_err))
 
             pt = MeshConvergencePoint(
                 n_panels=n_p,
@@ -1008,13 +1043,17 @@ def run_mesh_convergence_study(
     _compute_gci_triplets(points_by_spacing)
 
     # 5. Identify Minimal Mesh
-    # Must be accurate and safe. Among those, minimum total_panels, then solve_time_ms.
+    # Must be accurate and safe. Among those, minimum total_panels, then
+    # minimum panels_solved (the deterministic cost). The measured solve
+    # time is not used, so the selection is the same on every run. When the
+    # two counts are equal, the level evaluated first (order of
+    # spacing_schemes, then panel_counts) is kept.
     # ``converged`` is True only when at least one level meets the tolerance
     # on every checked quantity.
     converged = bool(any(p.is_accurate for p in points))
     accurate_safe = [p for p in points if p.is_accurate and p.is_safe]
     if accurate_safe:
-        minimal_mesh = min(accurate_safe, key=lambda p: (p.total_panels, p.solve_time_ms))
+        minimal_mesh = min(accurate_safe, key=_cost_key)
     else:
         # Fallback to candidate with minimum combined error
         minimal_mesh = min(points, key=lambda p: p.error_cl_pct + p.error_cdi_pct)
@@ -1045,12 +1084,14 @@ def run_mesh_convergence_study(
     robust_candidates = [p for p in points if is_robust(p) and p.n_panels >= 12]
 
     if robust_candidates:
-        # Prefer 'auto' spacing if present and robust, otherwise pick highest efficiency score
+        # Prefer 'auto' spacing if present and robust, otherwise take the
+        # robust level with the lowest deterministic cost (same rule as the
+        # minimal mesh).
         auto_robust = [p for p in robust_candidates if p.spacing == "auto"]
         if auto_robust:
-            recommended_mesh = min(auto_robust, key=lambda p: (p.total_panels, p.solve_time_ms))
+            recommended_mesh = min(auto_robust, key=_cost_key)
         else:
-            recommended_mesh = min(robust_candidates, key=lambda p: (p.total_panels, p.solve_time_ms))
+            recommended_mesh = min(robust_candidates, key=_cost_key)
     elif accurate_safe:
         # If no mesh reached the tighter robustness margin, use the minimal mesh or next highest
         recommended_mesh = minimal_mesh

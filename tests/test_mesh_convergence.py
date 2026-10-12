@@ -559,3 +559,73 @@ def test_not_converged_gives_no_recommendation():
     assert "not converged" in res["executive_summary"].lower()
     assert "RECOMMENDED" not in res["summary_markdown"]
     assert "Scaling Guideline" not in res["summary_markdown"]
+
+
+class _FakeClock:
+    """Replace ``time`` in the mesh-convergence module with a controlled clock.
+
+    Each call of ``perf_counter`` advances the clock by the next step [s].
+    With ``rising=True`` the steps increase, so a level that is timed later
+    seems slower. With ``rising=False`` the steps decrease, so a level that
+    is timed later seems faster.
+    """
+
+    def __init__(self, rising: bool) -> None:
+        self.rising = rising
+        self.t = 0.0
+        self.calls = 0
+
+    def perf_counter(self) -> float:
+        self.calls += 1
+        step = self.calls if self.rising else max(1000 - self.calls, 1)
+        self.t += 1e-3 * step
+        return self.t
+
+
+def test_recommendation_does_not_depend_on_measured_times(monkeypatch):
+    """The recommended and minimal meshes must not change with the solve times.
+
+    Regression test: the selection used the measured solve time to break a
+    tie between two levels with the same panel count, so two runs on a
+    loaded machine could recommend different meshes. The two runs below use
+    clocks that order the solve times of the levels in opposite directions.
+    """
+    import ventorum.geometry.mesh_convergence as mc
+
+    args = {
+        "wing": {"span_m": 10.0, "root_chord_m": 1.25, "tip_chord_m": 1.25,
+                 "sweep_le_deg": 0.0, "dihedral_deg": 0.0},
+        "flight_condition": {"V_inf_m_s": 40.0, "alpha_deg": 5.0},
+        "tolerance_pct": 5.0,
+        "panel_counts": [12, 16],
+        "spacing_schemes": ["half-cosine", "uniform"],
+        "ref_n_panels": 40,
+        "solver": "linear",
+        "detail_level": "full",
+    }
+    outputs = []
+    for rising in (True, False):
+        clock = _FakeClock(rising)
+        monkeypatch.setattr(mc, "time", clock)
+        res = call_tool("ventorum_mesh_convergence", args)
+        assert res["status"] == "success", res
+        assert clock.calls > 0
+        outputs.append(res)
+
+    a, b = outputs
+    # The fake clocks give different times, so the test really changes them.
+    times_a = [p["solve_time_ms"] for p in a["all_evaluated_points"]]
+    times_b = [p["solve_time_ms"] for p in b["all_evaluated_points"]]
+    assert times_a != times_b
+    # Both spacings at the selected level have the same panel count, so the
+    # old rule broke the tie with the measured time.
+    rec = a["recommended_mesh"]
+    tied = [p for p in a["all_evaluated_points"]
+            if p["total_panels"] == rec["total_panels"] and p["spacing"] != rec["spacing"]]
+    assert tied
+    for key in ("n_panels", "spacing", "total_panels", "panels_solved"):
+        assert a["recommended_mesh"][key] == b["recommended_mesh"][key]
+        assert a["minimal_mesh"][key] == b["minimal_mesh"][key]
+    assert a["recommended_settings"] == b["recommended_settings"]
+    assert ([p["efficiency_score"] for p in a["all_evaluated_points"]]
+            == [p["efficiency_score"] for p in b["all_evaluated_points"]])
