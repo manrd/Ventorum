@@ -17,6 +17,7 @@ from ventorum.agent.tools import wing_analysis
 from ventorum.core.datatypes import FlightCondition, SolverSettings
 from ventorum.ground_effect import GroundEffectSweep
 from ventorum.hardware import profile
+from ventorum.solvers.factory import make_solver
 from ventorum.solvers.horseshoe import VortexLatticeSolver
 from ventorum.solvers.linear import LinearLLTSolver
 from ventorum.utils import parallel
@@ -607,5 +608,114 @@ def test_to_dict_refuses_unknown_detail_level():
         for bad in ("Full", "all", "", None):
             with pytest.raises(ValueError, match="detail_level"):
                 res.to_dict(detail_level=bad)
+    finally:
+        gpu.set_device(old_dev)
+
+
+@pytest.mark.parametrize("solver_type", ["linear", "nonlinear"])
+def test_lifting_line_cpu_dispatch(solver_type):
+    """The linear and nonlinear lifting lines record the CPU dispatch of a single solve and a sweep."""
+    old_dev = gpu.get_device()
+    try:
+        gpu.set_device("cpu")
+        ac = _rect_aircraft()
+        st = SolverSettings(solver_type=solver_type, n_panels=16)
+        single = vt.analyze(ac, FlightCondition(V_inf=30.0, alpha=np.radians(4.0)), st)
+        sweep = make_solver(solver_type).solve_sweep(ac, FlightCondition(V_inf=30.0), st,
+                                                         np.radians([0.0, 4.0]))
+        assert single.solver_type == solver_type
+        for r in [single, *sweep]:
+            d = r.details["dispatch"]
+            _assert_dispatch(d, expected_device="cpu")
+            assert d["precision"] == "float64"
+            assert d["workers"] == 1
+            assert d["reason"] == "device setting is cpu"
+        assert single.details["dispatch"]["plan_source"] in ("profile", "default")
+        assert sweep[0].details["dispatch"]["plan_source"] == "default"
+    finally:
+        gpu.set_device(old_dev)
+
+
+@pytest.mark.gpu
+@pytest.mark.parametrize("solver_type", ["linear", "nonlinear"])
+def test_lifting_line_gpu_dispatch(solver_type):
+    """The linear and nonlinear lifting lines on device gpu record the GPU dispatch."""
+    if not gpu.available():
+        pytest.skip(f"GPU unavailable: {gpu.unavailable_reason()}")
+    old_dev = gpu.get_device()
+    try:
+        gpu.set_device("gpu")
+        ac = _rect_aircraft()
+        st = SolverSettings(solver_type=solver_type, n_panels=16)
+        res = vt.analyze(ac, FlightCondition(V_inf=30.0, alpha=np.radians(4.0)), st)
+        assert res.details["device"] == "gpu"
+        _assert_dispatch(res.details["dispatch"], expected_device="gpu")
+        assert res.details["dispatch"]["reason"] == "device setting is gpu"
+    finally:
+        gpu.set_device(old_dev)
+
+
+@pytest.mark.gpu
+def test_fallback_reason_nonlinear_groups():
+    """A nonlinear batch with continuation and several case groups records the continuation reason."""
+    if not gpu.available():
+        pytest.skip(f"GPU unavailable: {gpu.unavailable_reason()}")
+    old_dev = gpu.get_device()
+    try:
+        gpu.set_device("gpu")
+        ac = _rect_aircraft()
+        st = SolverSettings(solver_type="nonlinear", n_panels=16)
+        solver = make_solver("nonlinear")
+        # Symmetric and side-slip cases: two groups of unknowns.
+        conds = [FlightCondition(V_inf=30.0, alpha=np.radians(a), beta=np.radians(b))
+                 for a, b in ((2.0, 0.0), (4.0, 3.0), (6.0, 0.0))]
+        lat = solver.build(ac, st, conds[0])
+        res = solver.solve_batch(lat, conds, st, ac.S_ref, ac.b_ref, ac.c_ref, continuation=True)
+        for r in res:
+            assert "device" not in r.details
+            _assert_dispatch(r.details["dispatch"], expected_device="cpu")
+            assert r.details["dispatch"]["reason"] == "continuation needs the cases in order: the CPU path"
+    finally:
+        gpu.set_device(old_dev)
+
+
+@pytest.mark.gpu
+def test_fallback_reason_unsupported_polars(monkeypatch):
+    """Section polars that the GPU pipelines refuse record the airfoil reason."""
+    if not gpu.available():
+        pytest.skip(f"GPU unavailable: {gpu.unavailable_reason()}")
+    from ventorum.gpu import engine
+
+    def refuse(dl, lattice):
+        raise TypeError("polar not supported")
+
+    monkeypatch.setattr(engine, "check_polars", refuse)
+    old_dev = gpu.get_device()
+    try:
+        gpu.set_device("gpu")
+        res = vt.analyze(_rect_aircraft(), FlightCondition(V_inf=30.0, alpha=np.radians(4.0)),
+                         SolverSettings(solver_type="vlm", n_panels=16))
+        assert "device" not in res.details
+        _assert_dispatch(res.details["dispatch"], expected_device="cpu")
+        assert res.details["dispatch"]["reason"] == "airfoils are not supported on GPU"
+    finally:
+        gpu.set_device(old_dev)
+
+
+@pytest.mark.gpu
+def test_fallback_reason_unknown_map(monkeypatch):
+    """An unknown map that the GPU pipelines refuse records the unknown-map reason."""
+    if not gpu.available():
+        pytest.skip(f"GPU unavailable: {gpu.unavailable_reason()}")
+    from ventorum.gpu import engine
+
+    monkeypatch.setattr(engine.DeviceLattice, "unknown_map", lambda self, lattice, umap: None)
+    old_dev = gpu.get_device()
+    try:
+        gpu.set_device("gpu")
+        res = vt.analyze(_rect_aircraft(), FlightCondition(V_inf=30.0, alpha=np.radians(4.0)),
+                         SolverSettings(solver_type="vlm", n_panels=16))
+        assert "device" not in res.details
+        assert res.details["dispatch"]["reason"] == "unknown map is not supported on GPU"
     finally:
         gpu.set_device(old_dev)
