@@ -51,6 +51,10 @@ a minor version can change a public interface.
 
 - Adjoint gradients with 24 or more cosine chordwise panels no longer fail the forward check:
   the chordwise panel fractions are now recovered without round-off growth.
+- The mesh-convergence study (`ventorum_mesh_convergence`) gave a recommended mesh that could
+  change from run to run: the measured solve time decided between levels of equal panel count.
+  The selection and the efficiency score now use a deterministic cost (panel counts; the score
+  uses the panels solved squared). Measured times stay in the output as information.
 
 ## [0.4.0] - 2026-10-11
 
