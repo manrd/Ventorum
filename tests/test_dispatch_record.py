@@ -529,3 +529,67 @@ def test_serial_run_cases_with_user_jobs_record_user():
         assert getattr(parallel._local, "plan", None) is None
     finally:
         gpu.set_device(old_dev)
+
+
+def _count_record_calls(monkeypatch) -> dict:
+    """Count the calls of the backend and plan helpers of the dispatch record."""
+    from ventorum.aero import vortex
+
+    calls = {"backends": 0, "plan": 0}
+    real_backends = vortex._kernel_backends_for
+    real_plan = parallel._dispatch_plan
+
+    def backends(*args, **kwargs):
+        calls["backends"] += 1
+        return real_backends(*args, **kwargs)
+
+    def plan(*args, **kwargs):
+        calls["plan"] += 1
+        return real_plan(*args, **kwargs)
+
+    monkeypatch.setattr(vortex, "_kernel_backends_for", backends)
+    monkeypatch.setattr(parallel, "_dispatch_plan", plan)
+    return calls
+
+
+def test_cpu_batch_builds_dispatch_record_once(monkeypatch):
+    """A CPU batch makes the dispatch record once, and each case gets its own copy."""
+    old_dev = gpu.get_device()
+    try:
+        gpu.set_device("cpu")
+        ac = _rect_aircraft()
+        solver = VortexLatticeSolver()
+        st = SolverSettings(solver_type="vlm", n_panels=16)
+        conds = [FlightCondition(V_inf=30.0, alpha=np.radians(a)) for a in np.linspace(-4.0, 12.0, 33)]
+        lat = solver.build(ac, st, conds[0])
+        calls = _count_record_calls(monkeypatch)
+        results = solver.solve_batch(lat, conds, st, ac.S_ref, ac.b_ref, ac.c_ref)
+        assert calls == {"backends": 1, "plan": 1}
+        d0, d1 = results[0].details["dispatch"], results[1].details["dispatch"]
+        assert d0 == d1
+        assert d0 is not d1 and d0["backends"] is not d1["backends"]
+    finally:
+        gpu.set_device(old_dev)
+
+
+@pytest.mark.gpu
+def test_gpu_batch_does_not_build_cpu_record(monkeypatch):
+    """A GPU batch does not make a CPU dispatch record."""
+    if not gpu.available():
+        pytest.skip(f"GPU unavailable: {gpu.unavailable_reason()}")
+    old_dev = gpu.get_device()
+    try:
+        gpu.set_device("gpu")
+        ac = _rect_aircraft()
+        solver = VortexLatticeSolver()
+        st = SolverSettings(solver_type="vlm", n_panels=16)
+        conds = [FlightCondition(V_inf=30.0, alpha=np.radians(a)) for a in (0.0, 4.0, 8.0)]
+        lat = solver.build(ac, st, conds[0])
+        calls = _count_record_calls(monkeypatch)
+        results = solver.solve_batch(lat, conds, st, ac.S_ref, ac.b_ref, ac.c_ref)
+        assert calls == {"backends": 0, "plan": 0}
+        for r in results:
+            _assert_dispatch(r.details["dispatch"], expected_device="gpu")
+        assert results[0].details["dispatch"] is not results[1].details["dispatch"]
+    finally:
+        gpu.set_device(old_dev)

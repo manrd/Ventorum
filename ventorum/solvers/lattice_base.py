@@ -70,6 +70,46 @@ LLT_GE_WARN_H_OVER_C = 2.0
 LARGE_ROTATION_FRACTION = 0.1
 
 
+def _cpu_dispatch(n_panels: int, batch: int, reason: str | None) -> dict:
+    """Return the dispatch record of a CPU solve, for all cases of one batch.
+
+    Call it inside :func:`ventorum.utils.parallel.solve_threads`, so that the
+    kernel threads are those of the solve.
+
+    Parameters
+    ----------
+    n_panels : int
+        Panel count of the lattice.
+    batch : int
+        Number of cases that the solve computes together.
+    reason : str or None
+        Reason of the CPU path (the GPU fallback reason). None gives
+        ``"CPU path selected"``.
+
+    Returns
+    -------
+    dict
+        The keys ``device``, ``precision``, ``backends``, ``threads``,
+        ``workers``, ``plan_source``, ``profile`` and ``reason``.
+    """
+    from ventorum.aero.vortex import _kernel_backends_for
+    from ventorum.hardware.profile import active_profile
+    from ventorum.utils.parallel import _dispatch_plan
+
+    prof = active_profile()
+    workers, threads, plan_source = _dispatch_plan(n_panels, batch)
+    return {
+        "device": "cpu",
+        "precision": "float64",
+        "backends": _kernel_backends_for(n_panels),
+        "threads": threads,
+        "workers": workers,
+        "plan_source": plan_source,
+        "profile": prof.get("fingerprint") if isinstance(prof, dict) else None,
+        "reason": reason or "CPU path selected",
+    }
+
+
 def as_aircraft(geometry: Aircraft | LiftingSurface) -> Aircraft:
     """Return *geometry* as an aircraft; wrap a single surface in a new aircraft."""
     if isinstance(geometry, LiftingSurface):
@@ -272,7 +312,7 @@ class LatticeSolver(BaseSolver):
         return self._case_result(
             lattice, condition, loads, info, gamma, ground, h_min, notes, wd,
             b_ref, c_ref, main_surface, t0, ref_point=ref_point,
-            gpu_reason=gpu_reason, n_cases=1,
+            dispatch=_cpu_dispatch(lattice.n_panels, 1, gpu_reason),
         )
 
     def _case_setup(
@@ -362,8 +402,7 @@ class LatticeSolver(BaseSolver):
         execution_time: float | None = None,
         spanwise_stats: dict | None = None,
         ref_point: np.ndarray | None = None,
-        gpu_reason: str | None = None,
-        n_cases: int = 1,
+        dispatch: dict | None = None,
     ) -> SolverResult:
         """Return the result object of one case: trust score, details and warnings.
 
@@ -376,6 +415,11 @@ class LatticeSolver(BaseSolver):
         are the statistics of the spanwise results for the trust score, if
         the caller computed them for a batch
         (:func:`ventorum.core.trust.spanwise_stats_batch`).
+
+        *dispatch* is the dispatch record of the solve (``details["dispatch"]``),
+        made once per batch (:func:`_cpu_dispatch` on the CPU, the GPU
+        pipeline on the GPU). Each case gets its own copy. None makes a CPU
+        record of a single case.
         """
         sweep_deg = self._cached(lattice, "quarter_chord_sweep_deg", lambda: quarter_chord_sweep_deg(lattice))
         if self.collocation == "llt" and sweep_deg > LLT_SWEEP_WARNING_DEG:
@@ -437,15 +481,8 @@ class LatticeSolver(BaseSolver):
             b_ref=float(b_ref),
             c_ref=float(c_ref),
         )
-        from ventorum.aero.vortex import _kernel_backends_for
-        from ventorum.hardware.profile import active_profile
-        from ventorum.utils.parallel import _dispatch_plan
-
-        prof = active_profile()
-        profile_fp = prof.get("fingerprint") if isinstance(prof, dict) else None
-        workers, threads, plan_source = _dispatch_plan(lattice.n_panels, n_cases)
-        reason = gpu_reason or "CPU path selected"
-
+        if dispatch is None:
+            dispatch = _cpu_dispatch(lattice.n_panels, 1, None)
         # Kept for advanced use (plots, diagnostics, ground-effect post-processing).
         res.details = {
             "lattice": lattice,
@@ -457,16 +494,7 @@ class LatticeSolver(BaseSolver):
             "gamma": gamma,
             "wake_dir": wd,
             "ref_point": None if ref_point is None else np.asarray(ref_point, dtype=float),
-            "dispatch": {
-                "device": "cpu",
-                "precision": "float64",
-                "backends": _kernel_backends_for(lattice.n_panels),
-                "threads": threads,
-                "workers": workers,
-                "plan_source": plan_source,
-                "profile": profile_fp,
-                "reason": reason,
-            },
+            "dispatch": {**dispatch, "backends": dict(dispatch["backends"])},
         }
         for msg in notes:
             warnings.warn(msg, RuntimeWarning, stacklevel=4)
@@ -638,12 +666,12 @@ class LatticeSolver(BaseSolver):
                 alpha_eff_strips=alpha_effs, wake_dirs=wds,
                 v_controls=None if any(v is None for v in vcs) else np.array(vcs),
             )
+            dispatch = _cpu_dispatch(lattice.n_panels, len(conditions), gpu_reason)
             share = (time.perf_counter() - t0) / len(conditions)
             return [
                 self._case_result(
                     lattice, cond, ld, info, g, st[0], st[1], st[2], st[3], b_ref, c_ref, main_surface,
-                    t0, execution_time=share, ref_point=ref_point,
-                    gpu_reason=gpu_reason, n_cases=len(conditions),
+                    t0, execution_time=share, ref_point=ref_point, dispatch=dispatch,
                 )
                 for cond, ld, (g, _, info), st in zip(conditions, loads, sols, setups)
             ]

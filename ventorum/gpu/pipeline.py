@@ -284,7 +284,16 @@ def _results(solver, lattice, conditions, arrays: dict, setups: list, umap, b_re
     from ventorum.solvers.core import SolveInfo
 
     prof = active_profile()
-    prof_fp = prof.get("fingerprint") if prof is not None else None
+    dispatch = {
+        "device": "gpu",
+        "precision": precision,
+        "backends": {kernel: "warp" for kernel in KERNELS},
+        "threads": 1,
+        "workers": 1,
+        "plan_source": "default",
+        "profile": prof.get("fingerprint") if isinstance(prof, dict) else None,
+        "reason": dispatch_reason,
+    }
     totals = arrays["totals"].tolist()
     span = arrays["span"]
     gammas = arrays["gamma"]
@@ -317,18 +326,8 @@ def _results(solver, lattice, conditions, arrays: dict, setups: list, umap, b_re
         info = infos[k] if infos is not None else SolveInfo(symmetric=umap.symmetric)
         res = solver._case_result(lattice, cond, ld, info, gammas[k], st[0], st[1], st[2], st[3], b_ref,
                                   c_ref, main_surface, t0, execution_time=share, spanwise_stats=stats[k],
-                                  ref_point=ref_point)
+                                  ref_point=ref_point, dispatch=dispatch)
         res.details["device"] = "gpu"
         res.details["precision"] = precision
-        res.details["dispatch"] = {
-            "device": "gpu",
-            "precision": precision,
-            "backends": {kernel: "warp" for kernel in KERNELS},
-            "threads": 1,
-            "workers": 1,
-            "plan_source": "default",
-            "profile": prof_fp,
-            "reason": dispatch_reason,
-        }
         out.append(res)
     return out
