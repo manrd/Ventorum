@@ -216,20 +216,21 @@ def test_fallback_reason_cost_model(monkeypatch):
         gpu.set_device(old_dev)
 
 
-def test_fallback_reason_body_rates(monkeypatch):
-    """GPU fallback reason identifies when body rates need the CPU path."""
+@pytest.mark.gpu
+def test_body_rates_on_gpu_record_gpu():
+    """A case with body rates on device gpu runs on the GPU and records device gpu."""
+    if not gpu.available():
+        pytest.skip(f"GPU unavailable: {gpu.unavailable_reason()}")
     old_dev = gpu.get_device()
     try:
-        gpu.set_device("auto")
-        solver = VortexLatticeSolver()
-        # Simulate solver without GPU rate support
-        monkeypatch.setattr(solver, "supports_gpu_rates", False, raising=False)
+        gpu.set_device("gpu")
         ac = _rect_aircraft()
-        cond = FlightCondition(V_inf=30.0, alpha=np.radians(4.0), p=0.2)
+        cond = FlightCondition(V_inf=30.0, alpha=np.radians(4.0), p=0.2, q=0.1)
         st = SolverSettings(solver_type="vlm", n_panels=16)
-        res = solver.solve(ac, cond, st)
-        reason = res.details["dispatch"]["reason"]
-        assert "body rates" in reason.lower()
+        res = VortexLatticeSolver().solve(ac, cond, st)
+        assert res.details["device"] == "gpu"
+        _assert_dispatch(res.details["dispatch"], expected_device="gpu")
+        assert res.details["dispatch"]["reason"] == "device setting is gpu"
     finally:
         gpu.set_device(old_dev)
 

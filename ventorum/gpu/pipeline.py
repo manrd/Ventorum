@@ -54,10 +54,6 @@ def solve_batch(solver, lattice, conditions: list, settings, S_ref: float, b_ref
         return (None, "device setting is cpu") if return_reason else None
     if solver.name not in ("linear", "nonlinear", "vlm"):
         return (None, f"solver '{solver.name}' is not supported on GPU") if return_reason else None
-    from ventorum.aero.system import has_rates
-
-    if getattr(solver, "supports_gpu_rates", True) is False and any(has_rates(c) for c in conditions):
-        return (None, "body rates need the CPU path") if return_reason else None
     from ventorum.utils.parallel import _local as _par_local
 
     if gpu.get_device() == "auto" and getattr(_par_local, "worker_threads", None) is not None:
