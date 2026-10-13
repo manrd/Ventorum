@@ -39,7 +39,9 @@ a minor version can change a public interface.
   strict scoring with a provenance check of every reported number, error kinds, repeats, resume
   and a cost cap, and a second track that drives existing clients. References are computed at
   run time; the task file holds no reference values. Keys come only from environment variables
-  and are removed from every output.
+  and are removed from every output. A task stops with `loop:repeat_call` when the model sends
+  a successful call again, and a tool call that the endpoint cannot parse counts as a format
+  failure (no retry, not excluded).
 - Dispatch record: every lattice-solver result has `details["dispatch"]` with the device, the
   precision, the kernel backend per kernel, the threads, the workers and the source of the
   parallel plan that ran, the tuning profile in use, and one sentence with the reason of the
