@@ -125,6 +125,12 @@ def test_aileron_yaw_agrees_with_the_trefftz_plane():
         q_sb = 0.5 * fc.rho * fc.V_inf ** 2 * ac.S_ref * ac.b_ref
         cn_free = float(transform_moments(-m_free[0] / q_sb, 0.0, -m_free[2] / q_sb, np.radians(alpha), 0.0,
                                           "stability", b_ref=float(res.b_ref), c_ref=float(res.c_ref))["Cn"])
+        # No independent reference of the yaw of the side-edge force exists
+        # here: the Trefftz-plane trace of a flat wing with a deflected
+        # aileron is flat (CY_farfield = 0), and no measured value of this
+        # case is available. The check is only that this part is small
+        # against the near-field yaw (below 10 %).
+        assert abs(cn_free) < 0.1 * abs(_stability_cn(res, alpha))
         near.append(_stability_cn(res, alpha) - cn_free)
         far.append(_trefftz_yaw(res, ac, fc))
     cn_near = (near[0] - near[1]) / np.radians(4.0)
