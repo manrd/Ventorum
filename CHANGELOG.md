@@ -72,6 +72,9 @@ a minor version can change a public interface.
   change from run to run: the measured solve time decided between levels of equal panel count.
   The selection and the efficiency score now use a deterministic cost (panel counts; the score
   uses the panels solved squared). Measured times stay in the output as information.
+- The gradient of a tabulated airfoil at the ends of its table was 0 with newer PyTorch
+  versions (the derivative of `torch.clamp` at a bound is not documented and changed). The
+  reference model now gives the end slope with every PyTorch version.
 
 ## [0.4.0] - 2026-10-11
 
