@@ -143,27 +143,36 @@ def _assert_partials(data, rtol: float, atol: float, floor: float = 0.0) -> None
 
 
 def test_import_without_openmdao(monkeypatch) -> None:
-    """``import ventorum`` works without OpenMDAO; ``ventorum.mdo`` names the extra."""
+    """With OpenMDAO hidden, ``import ventorum.mdo`` raises an ImportError that names the extra.
+
+    The check of ``import ventorum`` without OpenMDAO runs in a new
+    interpreter (next test): a second import of ventorum in this process
+    would mix two copies of its modules.
+    """
     for mod in [m for m in sys.modules if m == "openmdao" or m.startswith("openmdao.")]:
         monkeypatch.delitem(sys.modules, mod)
     monkeypatch.setitem(sys.modules, "openmdao", None)
     monkeypatch.setitem(sys.modules, "openmdao.api", None)
     monkeypatch.delitem(sys.modules, "ventorum.mdo", raising=False)
-    assert importlib.import_module("ventorum").analyze is vt.analyze
     with pytest.raises(ImportError, match=r"ventorum\[mdo\]"):
         importlib.import_module("ventorum.mdo")
     assert "ventorum.mdo" not in sys.modules
 
 
-@pytest.mark.slow
 def test_import_ventorum_does_not_load_openmdao() -> None:
-    """In a new interpreter with OpenMDAO hidden, ``import ventorum`` works and does not load it."""
+    """In a new interpreter with OpenMDAO hidden, ``import ventorum`` works and ``ventorum.mdo`` names the extra."""
     import subprocess
 
-    code = ("import sys; sys.modules['openmdao'] = None; import ventorum; "
-            "print(ventorum.analyze is not None, any(m.startswith('openmdao.') for m in sys.modules))")
+    code = (
+        "import sys; sys.modules['openmdao'] = None; import ventorum\n"
+        "print(ventorum.analyze is not None, any(m.startswith('openmdao.') for m in sys.modules))\n"
+        "try:\n"
+        "    import ventorum.mdo\n"
+        "except ImportError as exc:\n"
+        "    print('ventorum[mdo]' in str(exc))\n"
+    )
     out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, cwd=ROOT, check=True)
-    assert out.stdout.strip().splitlines()[-1] == "True False"
+    assert out.stdout.strip().splitlines()[-2:] == ["True False", "True"]
 
 
 # --- Explicit component with analytic partials -------------------------------------------------
@@ -356,6 +365,67 @@ def test_component_refusals(kwargs, match) -> None:
         prob.setup()
 
 
+def test_check_partials_ground_effect_rates_and_density(float64_precision) -> None:
+    """check_partials with the height, the body rates, the bank angle and the density (VLM, ground effect)."""
+    _om()
+    from ventorum.mdo import VentorumComponent
+
+    aircraft, _, settings = _case()
+    condition = vt.FlightCondition(V_inf=30.0, alpha=np.radians(4.0), h=2.0, phi=np.radians(2.0),
+                                   p=0.05, q=0.03, r=-0.02, rho=1.1)
+    comp = VentorumComponent(aircraft, settings, condition=condition,
+                             outputs=("CL", "CD", "Cl", "Cm", "Cn"), inputs=("h", "p", "q", "r", "phi", "rho"))
+    prob = _problem(comp)
+    res = vt.analyze(aircraft, condition, settings)
+    assert prob.get_val("CL")[0] == pytest.approx(res.totals.CL, rel=1e-12)
+    _assert_partials(_check(prob), rtol=1e-6, atol=1e-9)
+
+
+def test_check_partials_linear_lifting_line(float64_precision) -> None:
+    """check_partials with the linear lifting line (flow inputs and a control)."""
+    _om()
+    from ventorum.mdo import VentorumComponent
+
+    aircraft, condition, _ = _case(controls=True)
+    settings = vt.SolverSettings(solver_type="linear", n_panels=8)
+    comp = VentorumComponent(aircraft, settings, condition=condition,
+                             outputs=("CL", "CD", "Cm"), inputs=("alpha", "V_inf", "controls"))
+    prob = _problem(comp)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")  # The sweep warning of the lifting line (tapered wing).
+        res = vt.analyze(aircraft, condition, settings)
+    assert prob.get_val("CL")[0] == pytest.approx(res.totals.CL, rel=1e-12)
+    _assert_partials(_check(prob), rtol=1e-6, atol=1e-9)
+
+
+def test_control_name_on_two_surfaces(float64_precision) -> None:
+    """One control input moves the controls with that name on two surfaces together."""
+    _om()
+    from ventorum.mdo import VentorumComponent
+
+    wing = _wing()
+    tail = vt.LiftingSurface(
+        name="Tail", semi_span=2.0, position=np.array([5.0, 0.0, 0.3]),
+        sections=[vt.WingSection(y_frac=0.0, chord=0.9), vt.WingSection(y_frac=1.0, chord=0.6)])
+    for surf in (wing, tail):
+        surf.controls = [vt.ControlSurface(name="flap", eta_start=0.2, eta_end=0.8, hinge_x_c=0.7,
+                                           deflection=np.radians(2.0))]
+    aircraft = vt.Aircraft(surfaces=[wing, tail])
+    condition = vt.FlightCondition(V_inf=30.0, alpha=np.radians(4.0))
+    settings = vt.SolverSettings(solver_type="vlm", n_panels=6, n_chord=2)
+    comp = VentorumComponent(aircraft, settings, condition=condition, outputs=("CL", "Cm"), inputs=("controls",))
+    prob = _problem(comp)
+    assert list(comp.input_names) == ["controls:flap"]
+    _assert_partials(_check(prob), rtol=1e-6, atol=1e-9)
+    prob.set_val("controls:flap", 5.0, units="deg")
+    prob.run_model()
+    ac2 = aircraft.clone()
+    for surf in ac2.surfaces:
+        surf.controls[0].deflection = np.radians(5.0)
+    res = vt.analyze(ac2, condition, settings)
+    assert prob.get_val("Cm")[0] == pytest.approx(res.moments("body")["Cm"], rel=1e-12)
+
+
 # --- Matrix-free component (vector outputs) ----------------------------------------------------
 
 
@@ -430,6 +500,30 @@ def test_forward_cache_follows_the_precision() -> None:
             warnings.simplefilter("ignore")
             prob.compute_totals(of=["CL"], wrt=["alpha"])
         assert comp.gradient_result.precision_gradient == "float32"
+
+
+def test_forward_cache_follows_the_inputs(float64_precision) -> None:
+    """After a change of the inputs, the forward mode gives the Jacobian at the new inputs."""
+    om = _om()
+    from ventorum.mdo import VentorumMatrixFreeComponent
+
+    aircraft, condition, _ = _case()
+    settings = vt.SolverSettings(solver_type="vlm", n_panels=4, n_chord=1)
+    prob = om.Problem(reports=False)
+    prob.model.add_subsystem("aero", VentorumMatrixFreeComponent(
+        aircraft, settings, condition=condition, outputs=("CD", "section_cl"), inputs=("alpha",)), promotes=["*"])
+    prob.setup(mode="fwd")
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        prob.run_model()
+        j1 = prob.compute_totals(of=["CD"], wrt=["alpha"])["CD", "alpha"][0, 0]
+        prob.set_val("alpha", 8.0, units="deg")
+        prob.run_model()
+        j2 = prob.compute_totals(of=["CD"], wrt=["alpha"])["CD", "alpha"][0, 0]
+        cond2 = vt.FlightCondition(V_inf=30.0, alpha=np.radians(8.0))
+        ref = vt.gradients(aircraft, cond2, settings, outputs=("CD",), wrt=("alpha",)).jacobian["CD"]["alpha"]
+    assert j2 == pytest.approx(ref, rel=1e-12)
+    assert abs(j2 - j1) > 1e-3 * abs(ref)
 
 
 # --- GPU in float32 ----------------------------------------------------------------------------
