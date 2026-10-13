@@ -118,7 +118,14 @@ The model must end its last message with one block:
 </final_answer>
 ```
 
-A task run succeeds when the status, the values (within the task tolerances), the required caveat codes, the provenance of each number (a tool result or the task formula), and the argument checks agree with one accepted outcome of the task. A placeholder value (`"n/a"`, `""`, `"unknown"`, `"none"`, `"null"`, `"na"`, `"-"`) counts as no value. A value with two numbers (a range such as `"3 to 5"`) is not one value: it gets `format_error`. A task can name flight-condition entries that the geometry comparison does not compare (`ignore_condition`, for example the start angle of attack of a trim). The record also gives the error kinds (for example `wrong_units`, `sign_error`, `geometry_drift`, `hallucinated_value`, `unsupported_value`, `missed_refusal`, `false_refusal`, `format_error`, `limit:turns`). The lenient score (numbers found in free text) is reported apart and never ranks models.
+A task run succeeds when the status, the values (within the task tolerances), the required caveat codes, the provenance of each number (a tool result or the task formula), and the argument checks agree with one accepted outcome of the task. A placeholder value (`"n/a"`, `""`, `"unknown"`, `"none"`, `"null"`, `"na"`, `"-"`) counts as no value. A value with two numbers (a range such as `"3 to 5"`) is not one value: it gets `format_error`. A task can name flight-condition entries that the geometry comparison does not compare (`ignore_condition`, for example the start angle of attack of a trim). The record also gives the error kinds (for example `wrong_units`, `sign_error`, `geometry_drift`, `hallucinated_value`, `unsupported_value`, `missed_refusal`, `false_refusal`, `format_error`, `limit:turns`, `loop:repeat_call`). The lenient score (numbers found in free text) is reported apart and never ranks models.
+
+Two harness rules stop a task run as a model failure. The record is not excluded from the success rate:
+
+- Repeated call: when the model sends a tool call identical to an earlier call of the same task run whose result was a success (same tool, same arguments after JSON normalisation), the harness does not run the call. It stops the task run with the error kind `loop:repeat_call`. A repeat of a call whose result was an error runs again.
+- Tool-call parse failure: when the endpoint returns an error whose message shows that it could not parse the tool call of the model (for example HTTP 500 with "error parsing tool call" or "syntax error", case-insensitive), the harness does not retry the request. The record gets `format_error` and the sub-kind `format_error:tool_call_parse`.
+
+Other endpoint errors (other 5xx errors, network errors, timeouts) are retried. After the retries the record gets `endpoint_error` and is excluded from the success rate, as is `context_overflow`.
 
 ## Track B (existing clients)
 

@@ -762,3 +762,146 @@ def test_default_session_warmup_and_audit_redacted(task_set, tmp_path, monkeypat
     text = audit.read_text(encoding="utf-8")
     assert text.strip() and "ventorum_wing_analysis" in text
     assert key not in text and "<redacted-key>" in text
+
+
+# ---------------------------------------------------------------------------
+# Harness rules: repeated successful call, tool-call parse failure
+# ---------------------------------------------------------------------------
+
+def test_repeat_successful_call_stops_the_task(server, task_set, tmp_path):
+    """An identical repeat of a successful call is not run: the task stops with loop:repeat_call."""
+    args = canonical_args(task_set, "AB-01")
+    # The same call again, with the keys in another order and as a JSON string (equal after normalisation).
+    repeat = json.dumps(dict(reversed(list(args.items()))))
+    steps = [call_step("ventorum_wing_analysis", args), call_step("ventorum_wing_analysis", repeat),
+             {"text": final("refused", {}, [])}]
+    run_dir, res, ad = run_fake(server, task_set, tmp_path, ["AB-01"], steps)
+    assert ad.n_requests == 2
+    events = [e for e in read_jsonl(run_dir / "events.jsonl") if e["type"] == "tool_call"]
+    ran = [e for e in events if not e.get("harness_error")]
+    assert len(ran) == 1 and ran[0]["status"] == "success"
+    assert [e["harness_error"] for e in events if e.get("harness_error")] == ["repeat_call"]
+    rec = res[0]
+    assert "loop:repeat_call" in rec["error_kinds"]
+    assert rec["excluded"] is False and rec["success"] is False
+    assert report(run_dir)["n_excluded"] == 0
+
+
+def test_repeat_of_failed_call_is_run(server, task_set, tmp_path):
+    """A repeat of a call whose result was an error is run again (no loop:repeat_call)."""
+    _, res, ad = run_fake(server, task_set, tmp_path, ["AB-01"], [BAD_CALL, BAD_CALL, {"text": final("refused", {})}])
+    assert ad.n_requests == 3
+    assert "loop:repeat_call" not in res[0]["error_kinds"]
+    assert res[0]["n_tool_calls"] == 2 and res[0]["n_harness_refused"] == 0
+
+
+class _StubEndpoint:
+    """A local HTTP stub of a chat-completions endpoint that always returns one error status."""
+
+    def __init__(self, status: int, body: str):
+        import http.server
+        import threading
+
+        stub = self
+        self.status = status
+        self.body = body.encode("utf-8")
+        self.n_requests = 0
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_POST(self):  # noqa: N802 - name from the standard library
+                n = int(self.headers.get("Content-Length", 0) or 0)
+                self.rfile.read(n)
+                stub.n_requests += 1
+                self.send_response(stub.status)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(stub.body)))
+                self.end_headers()
+                self.wfile.write(stub.body)
+
+            def log_message(self, *a):
+                pass
+
+        self.httpd = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.url = f"http://127.0.0.1:{self.httpd.server_address[1]}/v1"
+        self.thread = threading.Thread(target=self.httpd.serve_forever, daemon=True)
+        self.thread.start()
+
+    def close(self):
+        self.httpd.shutdown()
+        self.httpd.server_close()
+
+
+PARSE_500 = json.dumps({"error": {"message": "error parsing tool call: raw='{\"wing\": {', err=unexpected end of "
+                                             "JSON input"}})
+SYNTAX_500 = json.dumps({"error": "Value looks like object, but can't find closing '}' symbol: Syntax Error"})
+
+
+@pytest.fixture
+def no_proxy(monkeypatch):
+    for name in ("HTTP_PROXY", "http_proxy", "HTTPS_PROXY", "https_proxy", "ALL_PROXY", "all_proxy"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("NO_PROXY", "127.0.0.1,localhost")
+    monkeypatch.setenv("no_proxy", "127.0.0.1,localhost")
+
+
+@pytest.mark.parametrize("body", [PARSE_500, SYNTAX_500])
+def test_adapter_tool_call_parse_error_not_retried(no_proxy, body):
+    """An endpoint error that shows a tool-call parse failure raises ToolCallParseError after one request."""
+    from validation.agent_benchmark.adapters import ToolCallParseError, make_adapter
+
+    stub = _StubEndpoint(500, body)
+    try:
+        ad = make_adapter({"adapter": "openai_chat", "base_url": stub.url, "model": "m", "retries": 2})
+        with pytest.raises(ToolCallParseError):
+            ad.complete([{"role": "user", "content": "x"}], [], timeout_s=10.0)
+    finally:
+        stub.close()
+    assert stub.n_requests == 1
+
+
+def _stub_run(server, task_set, tmp_path, stub, run_id):
+    from validation.agent_benchmark.adapters import make_adapter
+
+    cfg = {"models": {"stub": {"adapter": "openai_chat", "base_url": stub.url, "model": "m", "local": True,
+                               "retries": 1}}}
+    adapter = make_adapter(cfg["models"]["stub"])
+    run_dir = run_benchmark(cfg, "stub", "focused", ["AB-01"], 1, tmp_path, run_id=run_id, task_set=task_set,
+                            adapter=adapter, session_factory=lambda audit, cdir: Session(server, owned=False),
+                            warmup=False, reference_call=mcp_call(server), check_other_servers=False)
+    return run_dir, read_jsonl(run_dir / "results.jsonl")
+
+
+def test_endpoint_tool_call_parse_failure_is_format_error(server, task_set, tmp_path, no_proxy):
+    """HTTP 500 with a tool-call parse message: no retry, format_error (tool_call_parse), not excluded."""
+    stub = _StubEndpoint(500, PARSE_500)
+    try:
+        run_dir, res = _stub_run(server, task_set, tmp_path, stub, "parse500")
+    finally:
+        stub.close()
+    assert stub.n_requests == 1
+    rec = res[0]
+    assert "format_error" in rec["error_kinds"] and "format_error:tool_call_parse" in rec["error_kinds"]
+    assert "endpoint_error" not in rec["error_kinds"]
+    assert rec["excluded"] is False and rec["success"] is False
+    ev = [e for e in read_jsonl(run_dir / "events.jsonl") if e["type"] == "tool_call_parse_error"]
+    assert len(ev) == 1 and "parsing tool call" in ev[0]["message"]
+    # A resume does not run the task again: the record is a model failure, not an endpoint failure.
+    stub2 = _StubEndpoint(500, PARSE_500)
+    try:
+        _, res2 = _stub_run(server, task_set, tmp_path, stub2, "parse500")
+    finally:
+        stub2.close()
+    assert stub2.n_requests == 0 and len(res2) == 1
+
+
+def test_endpoint_503_still_retried_and_excluded(server, task_set, tmp_path, no_proxy):
+    """HTTP 503 (no parse message) keeps the retry and the exclusion rules."""
+    stub = _StubEndpoint(503, json.dumps({"error": "service unavailable"}))
+    try:
+        _, res = _stub_run(server, task_set, tmp_path, stub, "e503")
+    finally:
+        stub.close()
+    assert stub.n_requests == 2  # one request and one retry
+    rec = res[0]
+    assert "endpoint_error" in rec["error_kinds"] and "format_error:tool_call_parse" not in rec["error_kinds"]
+    assert rec["excluded"] is True

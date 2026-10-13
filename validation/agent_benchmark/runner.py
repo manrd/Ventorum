@@ -54,6 +54,7 @@ from validation.agent_benchmark.adapters import (
     BaseAdapter,
     ConfigError,
     EndpointError,
+    ToolCallParseError,
     make_adapter,
     parse_arguments,
 )
@@ -435,6 +436,14 @@ class Session:
 SessionFactory = Callable[[Path, Path], Session]
 
 
+def call_key(args: dict[str, Any]) -> str:
+    """Return the normalised JSON text of tool-call arguments (sorted keys, no spaces).
+
+    Two calls of the same tool with equal keys are identical calls.
+    """
+    return json.dumps(args, sort_keys=True, separators=(",", ":"), default=str)
+
+
 def default_session_factory(audit_log: Path, config_dir: Path, timeout_s: float = 300.0,
                             drop_env: Any = ()) -> Session:
     """Start a new isolated server for one task run. The variables in *drop_env* are not given to the server."""
@@ -479,6 +488,7 @@ def run_task(ctx: RunContext, variant: TaskVariant, repeat: int) -> dict[str, An
     client = session.client
     codes: list[str] = []
     calls: list[dict[str, Any]] = []
+    succeeded: set[tuple[str, str]] = set()  # successful calls: (tool, normalised JSON of the arguments)
     usage_tot = {"input_tokens": 0, "output_tokens": 0, "cache_read_tokens": 0, "cache_write_tokens": 0}
     estimated = False
     cost = 0.0
@@ -522,6 +532,11 @@ def run_task(ctx: RunContext, variant: TaskVariant, repeat: int) -> dict[str, An
                 reply = ctx.adapter.complete(messages, offered, temperature=ctx.temperature, seed=ctx.model_seed,
                                              max_tokens=lim.max_output_tokens,
                                              timeout_s=max(1.0, min(lim.request_time_s, remaining)))
+            except ToolCallParseError as exc:
+                # The endpoint could not parse the tool call of the model: a model format failure (no retry).
+                codes += ["format_error", "format_error:tool_call_parse"]
+                event("tool_call_parse_error", turns + 1, message=str(exc))
+                break
             except EndpointError as exc:
                 codes.append("endpoint_error")
                 event("endpoint_error", turns + 1, message=str(exc))
@@ -582,6 +597,15 @@ def run_task(ctx: RunContext, variant: TaskVariant, repeat: int) -> dict[str, An
                     if args is None:
                         rec["harness_error"] = "bad_arguments"
                         text = f"Error: {problem}."
+                    elif (tc.name, call_key(args)) in succeeded:
+                        # An identical repeat of a successful call: do not run it, stop the task.
+                        rec["args"] = args
+                        rec["harness_error"] = "repeat_call"
+                        codes.append("loop:repeat_call")
+                        event("tool_call", turns, name=tc.name, arguments=args, harness_error="repeat_call")
+                        calls.append(rec)
+                        stop = True
+                        break
                     else:
                         rec["args"] = args
                         remaining = lim.task_time_s - (time.monotonic() - t0)
@@ -608,6 +632,8 @@ def run_task(ctx: RunContext, variant: TaskVariant, repeat: int) -> dict[str, An
                         rec["rpc_error"] = out["rpc_error"]
                         text = out["text"]
                         p = out["payload"] or {}
+                        if p.get("status") == "success" and not out["is_error"] and not out["rpc_error"]:
+                            succeeded.add((tc.name, call_key(args)))
                         ex_ms = p.get("execution_time_ms")
                         if isinstance(ex_ms, (int, float)):
                             tool_exec_s += float(ex_ms) / 1000.0

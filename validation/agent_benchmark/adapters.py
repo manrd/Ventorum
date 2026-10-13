@@ -18,6 +18,12 @@ The conversation uses a neutral message format:
 * ``{"role": "assistant", "content": str, "tool_calls": [{"id", "name", "arguments"}]}``
 * ``{"role": "tool", "tool_call_id": str, "name": str, "content": str}``
 
+An endpoint error is retried (HTTP 408, 409, 425, 429 and 5xx, network
+errors and timeouts) and then raises :class:`EndpointError`. An endpoint
+error whose message shows that the endpoint could not parse the tool call
+of the model (for example "error parsing tool call" or "syntax error") is
+not retried: it raises :class:`ToolCallParseError`, a model format failure.
+
 Keys come only from environment variables (the config gives the name of the
 variable). The adapters never log request headers or keys. Endpoint URLs and
 model names come from the private config, not from this code.
@@ -27,6 +33,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import time
 import urllib.error
 import urllib.request
@@ -36,10 +43,25 @@ from collections.abc import Callable
 
 ANTHROPIC_VERSION = "2023-06-01"
 RETRY_HTTP = {408, 409, 425, 429, 500, 502, 503, 504, 529}
+#: Endpoint error messages that show that the endpoint could not parse the tool call of the model
+#: (case-insensitive). Such an error is a model format failure, not an endpoint failure.
+TOOL_CALL_PARSE = re.compile(r"syntax error|tool[ _-]?calls? pars|pars(?:e|ed|ing) (?:the )?tool[ _-]?calls?", re.I)
 
 
 class EndpointError(RuntimeError):
     """A model request failed after the retries (HTTP or network failure)."""
+
+
+class ToolCallParseError(EndpointError):
+    """The endpoint could not parse the tool call of the model (for example HTTP 500 "error parsing tool call").
+
+    This is a model format failure. The adapter does not retry the request.
+    """
+
+
+def is_tool_call_parse_error(message: str) -> bool:
+    """Return True if an endpoint error message shows a tool-call parse failure."""
+    return bool(TOOL_CALL_PARSE.search(message or ""))
 
 
 class ConfigError(ValueError):
@@ -185,11 +207,14 @@ class BaseAdapter:
                 return out, time.perf_counter() - t0, attempt
             except urllib.error.HTTPError as exc:
                 last = f"HTTP {exc.code}"
+                detail = ""
                 try:
-                    detail = exc.read().decode("utf-8", errors="replace")[:300]
-                    last += f": {detail}"
+                    detail = exc.read().decode("utf-8", errors="replace")
+                    last += f": {detail[:300]}"
                 except OSError:
                     pass
+                if is_tool_call_parse_error(detail):
+                    raise ToolCallParseError(last) from None
                 if exc.code not in RETRY_HTTP:
                     raise EndpointError(last) from None
             except (urllib.error.URLError, TimeoutError, OSError, json.JSONDecodeError) as exc:

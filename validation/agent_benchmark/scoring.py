@@ -30,10 +30,25 @@ Error kinds (one run can have several): ``invalid_input:<sub>``,
 ``no_tool``, ``wrong_units``, ``sign_error``, ``geometry_drift``,
 ``hallucinated_value``, ``unsupported_value``, ``missed_refusal``,
 ``false_refusal``, ``format_error``, ``format_repaired``, ``limit:<kind>``,
-``context_overflow``, ``endpoint_error``. Three diagnostic codes are added:
+``context_overflow``, ``endpoint_error``, ``loop:repeat_call``. Three
+diagnostic codes are added:
 ``wrong_value`` (a wrong value that is in a tool result), ``missing_value``
 (an answer key with no value) and ``tool_internal`` (a tool reply with the
 error type ``internal``).
+
+Two codes come from the runner and always make the run a failure that is
+not excluded from the success rate:
+
+* ``loop:repeat_call``: the model sent a tool call identical (same tool,
+  same arguments after JSON normalisation) to an earlier successful call of
+  the same task run. The harness did not run it and stopped the task run.
+* ``format_error`` with ``format_error:tool_call_parse``: the endpoint
+  returned an error that shows that it could not parse the tool call of the
+  model (for example HTTP 500 "error parsing tool call"). The harness does
+  not retry the request.
+
+Other endpoint errors (other 5xx errors, timeouts) give ``endpoint_error``
+after the retries, and the run is excluded, as is ``context_overflow``.
 """
 
 from __future__ import annotations
@@ -553,7 +568,8 @@ def score_run(variant: TaskVariant, references: dict[str, Any], final_text: str,
         Tool calls of the run: ``{"name", "args" (dict or None), "payload"
         (dict or None), "rpc_error", "harness_error"}``.
     extra_codes : list of str, optional
-        Codes from the runner (``limit:*``, ``context_overflow``,
+        Codes from the runner (``limit:*``, ``loop:repeat_call``,
+        ``format_error:tool_call_parse``, ``context_overflow``,
         ``endpoint_error``).
 
     Returns
