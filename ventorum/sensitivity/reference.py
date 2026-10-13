@@ -251,6 +251,20 @@ def _pp_interval(pp: dict, xc: torch.Tensor) -> torch.Tensor:
     return torch.clamp(i, 0, xb.shape[0] - 2)
 
 
+def _pp_clamp(pp: dict, x: torch.Tensor) -> torch.Tensor:
+    """Clamp *x* to the table limits with a fixed derivative convention.
+
+    The derivative is 1 inside the closed interval ``[lo, hi]`` (the table
+    ends included) and 0 outside it. ``torch.clamp`` does not document its
+    derivative at a bound, and it changed between torch versions (1 in
+    torch 2.6, 0 in torch 2.14 for float bounds). So the clamp is made from
+    ``torch.where``, which passes the gradient to the selected value only.
+    """
+    lo = torch.as_tensor(pp["lo"], dtype=x.dtype, device=x.device)
+    hi = torch.as_tensor(pp["hi"], dtype=x.dtype, device=x.device)
+    return torch.where(x < lo, lo, torch.where(x > hi, hi, x))
+
+
 def pp_eval(pp: dict, x: torch.Tensor) -> torch.Tensor:
     """Evaluate a piecewise cubic of :func:`pp_from_scipy` at *x* (differentiable).
 
@@ -258,9 +272,11 @@ def pp_eval(pp: dict, x: torch.Tensor) -> torch.Tensor:
     ``TabulatedAirfoil``. A point on a breakpoint takes the interval to its
     right (the last interval at the upper end), so its derivative is the
     one-sided derivative of that interval. The shape-preserving cubic has a
-    continuous first derivative, so both sides agree to round-off.
+    continuous first derivative, so both sides agree to round-off. At the
+    table ends the derivative is the one-sided derivative inside the table,
+    the same as :func:`pp_slope`, for all torch versions.
     """
-    xc = torch.clamp(x, pp["lo"], pp["hi"])
+    xc = _pp_clamp(pp, x)
     i = _pp_interval(pp, xc)
     c = pp["c"]
     dx = xc - pp["x"][i]
@@ -270,7 +286,7 @@ def pp_eval(pp: dict, x: torch.Tensor) -> torch.Tensor:
 def pp_slope(pp: dict, x: torch.Tensor) -> torch.Tensor:
     """Return the derivative of a piecewise cubic at *x* (no graph); zero outside the table."""
     with torch.no_grad():
-        xc = torch.clamp(x, pp["lo"], pp["hi"])
+        xc = _pp_clamp(pp, x)
         i = _pp_interval(pp, xc)
         c = pp["c"]
         dx = xc - pp["x"][i]

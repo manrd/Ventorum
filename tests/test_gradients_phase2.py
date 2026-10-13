@@ -408,6 +408,35 @@ def test_piecewise_cubic_matches_scipy() -> None:
     assert np.max(np.abs(pp_slope(pp, torch.tensor(ta[1:-1])).numpy() - left)) <= 1e-9
 
 
+@pytest.mark.parametrize("dtype_name", ["float64", "float32"])
+def test_piecewise_cubic_gradient_at_table_ends(dtype_name: str) -> None:
+    """At the two table ends the autograd derivative is the one-sided slope inside the table.
+
+    Regression test: the clamp to the table used ``torch.clamp``, whose
+    derivative at a bound is not documented. It is 1 in torch 2.6 and 0 in
+    torch 2.14, so the derivative at the table ends was zero on newer torch.
+    """
+    import torch
+    from scipy.interpolate import PchipInterpolator
+
+    from ventorum.sensitivity.reference import pp_eval, pp_from_scipy, pp_slope
+
+    dtype = getattr(torch, dtype_name)
+    xs = np.array([-0.2, -0.1, 0.0, 0.1, 0.2])
+    poly = PchipInterpolator(xs, 2.0 * np.pi * xs + 0.3 * xs**2)
+    pp = pp_from_scipy(poly, "cpu", dtype)
+    x = torch.tensor([xs[0], xs[-1], xs[0] - 0.05, xs[-1] + 0.05], dtype=dtype, requires_grad=True)
+    (g,) = torch.autograd.grad(pp_eval(pp, x).sum(), x)
+    slope = pp_slope(pp, x.detach())
+    ends = poly.derivative()(xs[[0, -1]])
+    assert np.all(np.abs(ends) > 1.0)
+    tol = 1e-12 if dtype == torch.float64 else 1e-5
+    assert np.max(np.abs(g[:2].numpy() - ends)) <= tol
+    assert np.max(np.abs(slope[:2].numpy() - ends)) <= tol
+    assert np.all(g[2:].numpy() == 0.0)
+    assert np.all(slope[2:].numpy() == 0.0)
+
+
 def test_newton_jacobian_matches_autograd(float64_cpu) -> None:
     """The Newton Jacobian of the nonlinear lifting line equals the autograd derivative of the residual."""
     import torch
