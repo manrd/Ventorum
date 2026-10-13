@@ -333,7 +333,10 @@ def check_gradients(
                                 reason=(f"zero reference, but its noise bound {noise_bound:.3e} is not "
                                         f"below rtol S = {rtol * scale:.3e}"))
             else:
-                info.update(rel_err=None, mode="skipped", compared=False, passed=None)
+                info.update(rel_err=None, mode="skipped", compared=False, passed=None,
+                            bound=float(err),
+                            reason=(f"error bound {err:.3e} of the reference is above rtol/10 |ref| = "
+                                    f"{0.1 * rtol * abs(ref):.3e}"))
             details[f"{o}:{suffix}"] = info
             if info["compared"]:
                 cnt["compared"] += 1
