@@ -103,7 +103,22 @@ def _problem(component):
     return prob
 
 
+# Central-difference step of the free-stream speed [m/s]. The coefficients
+# do not depend on V_inf in incompressible flow, so their exact partial is
+# zero and the differences hold only round-off: about n ulp(C) / (2 h). With
+# h = 1e-7 m/s one ulp of CL = 0.57 gives 5.6e-10, and a solve that differs
+# by 3 ulp between V_inf + h and V_inf - h (measured on the Linux CI) gives
+# 1.7e-9, above atol = 1e-9. With h = 1e-4 m/s (relative step 3.3e-6, near
+# the one of alpha) the floor is 1000 times lower. The truncation error stays
+# zero for the coefficients and for forces that are quadratic in V_inf.
+V_INF_STEP = 1e-4
+
+
 def _check(prob, step: float = 1e-7):
+    comp = prob.model.aero
+    names = {name.rsplit(".", 1)[-1] for name, _ in comp.list_inputs(out_stream=None)}
+    if "V_inf" in names:
+        comp.set_check_partial_options(wrt="V_inf", step=max(step, V_INF_STEP))
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         return prob.check_partials(out_stream=None, method="fd", form="central", step=step, compact_print=True)
@@ -396,6 +411,30 @@ def test_check_partials_linear_lifting_line(float64_precision) -> None:
         res = vt.analyze(aircraft, condition, settings)
     assert prob.get_val("CL")[0] == pytest.approx(res.totals.CL, rel=1e-12)
     _assert_partials(_check(prob), rtol=1e-6, atol=1e-9)
+
+
+@pytest.mark.parametrize("solver_type", ["linear", "vlm"])
+def test_check_partials_v_inf_round_off_floor(float64_precision, solver_type: str) -> None:
+    """The differences of the zero V_inf partials stay 10 times below atol = 1e-9.
+
+    Regression test: with a step of 1e-7 m/s on V_inf the round-off of the
+    central differences of CL was 1.7e-9 on the Linux CI, so a correct
+    (zero) analytic partial failed check_partials.
+    """
+    _om()
+    from ventorum.mdo import VentorumComponent
+
+    aircraft, condition, _ = _case(controls=True)
+    extra = {"n_panels": 8} if solver_type == "linear" else {"n_panels": 6, "n_chord": 2}
+    settings = vt.SolverSettings(solver_type=solver_type, **extra)
+    comp = VentorumComponent(aircraft, settings, condition=condition,
+                             outputs=("CL", "CD", "Cm"), inputs=("alpha", "V_inf", "controls"))
+    prob = _problem(comp)
+    data = _check(prob)["aero"]
+    for out in ("CL", "CD", "Cm"):
+        entry = data[(out, "V_inf")]
+        assert np.max(np.abs(entry["J_fwd"])) <= 1e-12, out
+        assert np.max(np.abs(entry["J_fd"])) <= 1e-10, out
 
 
 def test_control_name_on_two_surfaces(float64_precision) -> None:
