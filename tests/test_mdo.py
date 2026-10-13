@@ -397,6 +397,41 @@ def test_matrix_free_reverse_product_equals_gradient_vjp(float64_precision) -> N
     assert jac["strip_force", "alpha"].reshape(force.shape)[1, 2] == pytest.approx(ref["alpha"], rel=1e-12)
 
 
+def test_forward_cache_follows_the_precision() -> None:
+    """After a change of the precision, the forward mode gives a fresh Jacobian (regression)."""
+    _om()
+    from ventorum.mdo import VentorumMatrixFreeComponent
+
+    aircraft, condition, _ = _case()
+    settings = vt.SolverSettings(solver_type="vlm", n_panels=4, n_chord=1)
+    with _gpu_settings(precision="float32"):
+        comp = VentorumMatrixFreeComponent(aircraft, settings, condition=condition,
+                                           outputs=("CL", "strip_force"), inputs=("alpha",))
+        om = _om()
+        prob = om.Problem(reports=False)
+        prob.model.add_subsystem("aero", comp, promotes=["*"])
+        prob.setup(mode="fwd")
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            prob.run_model()
+            prob.compute_totals(of=["CL"], wrt=["alpha"])
+        assert comp.gradient_result.precision_gradient == "float32"
+        gpu.set_precision("float64")
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            prob.run_model()
+            jac = prob.compute_totals(of=["CL"], wrt=["alpha"])
+            ref = vt.gradients(aircraft, condition, settings, outputs=("CL",), wrt=("alpha",))
+        assert ref.precision_gradient == "float64"
+        assert jac["CL", "alpha"][0, 0] == pytest.approx(ref.jacobian["CL"]["alpha"], rel=1e-12)
+        # A change of the precision without a new compute also drops the kept Jacobian.
+        gpu.set_precision("float32")
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            prob.compute_totals(of=["CL"], wrt=["alpha"])
+        assert comp.gradient_result.precision_gradient == "float32"
+
+
 # --- GPU in float32 ----------------------------------------------------------------------------
 
 

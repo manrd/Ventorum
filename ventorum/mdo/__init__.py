@@ -430,8 +430,9 @@ class VentorumMatrixFreeComponent(_VentorumBase):
 
     The forward product needs the full Jacobian: one adjoint solve per
     scalar output and one per component of each vector output. The
-    component keeps that Jacobian for the last input values. The forward
-    mode is correct but slow; use the reverse mode.
+    component keeps that Jacobian until the next ``compute`` or a change of
+    the input values, the device or the precision. The forward mode is
+    correct but slow; use the reverse mode.
 
     Parameters
     ----------
@@ -460,7 +461,24 @@ class VentorumMatrixFreeComponent(_VentorumBase):
         self._vt_dense: dict[str, dict[str, np.ndarray]] = {}
 
     def _vt_key(self, inputs: Any) -> bytes:
-        return b"".join(np.asarray(inputs[n], dtype=float).tobytes() for n in self.input_names)
+        """Return the key of the kept Jacobian: input values, device, precision and options."""
+        from ventorum import gpu
+
+        state = repr((gpu.get_device(), gpu.get_precision(), self.options["axes"], self.options["method"]))
+        return state.encode() + b"".join(np.asarray(inputs[n], dtype=float).tobytes() for n in self.input_names)
+
+    def compute(self, inputs: Any, outputs: Any) -> None:
+        """Run one Ventorum analysis with the input values and drop the kept Jacobian.
+
+        Parameters
+        ----------
+        inputs : Vector
+            Input values (units as in :meth:`VentorumComponent.compute`).
+        outputs : Vector
+            Output values: coefficients (dimensionless), strip forces [N].
+        """
+        self._vt_dense_key, self._vt_dense = None, {}
+        super().compute(inputs, outputs)
 
     def _vt_vjp(self, ac: Aircraft, condition: FlightCondition, seeds: dict) -> dict:
         import ventorum as vt
