@@ -280,6 +280,11 @@ class SurfaceSlice:
     edge_te: np.ndarray      # (n_edges, 3) trailing-edge nodes
     edge_chord: np.ndarray   # (n_edges,)
     edge_twist: np.ndarray   # (n_edges,)
+    # Unit spanwise direction of each strip from the geometry definition (the
+    # untwisted reference line, without node displacements), projected on the
+    # plane normal to the untwisted chord: (n_strips, 3). The leg-force rule
+    # takes the kinks of the surface from it (ventorum.aero.loads.leg_force_rules).
+    strip_span_def: np.ndarray | None = None
 
 
 @dataclass
@@ -1064,6 +1069,7 @@ def build_lattice(
             mirror = np.array([1.0, -1.0, 1.0])
             le_left_e = (le_e * mirror)[::-1]
             te_left_e = (te_e * mirror)[::-1]
+            edge_ref = np.vstack([(geo["qc"] * mirror)[::-1], geo["qc"][1:]])
             edge_le = np.vstack([le_left_e, le_e[1:]])
             edge_te = np.vstack([te_left_e, te_e[1:]])
             edge_chord = np.concatenate([edge_chord_half[::-1], edge_chord_half[1:]])
@@ -1107,6 +1113,7 @@ def build_lattice(
             # (tip to root), as on the left half of a symmetric surface.
             edge_le = (le_e * mirror)[::-1]
             edge_te = (te_e * mirror)[::-1]
+            edge_ref = (geo["qc"] * mirror)[::-1]
             edge_chord, edge_twist = edge_chord_half[::-1], geo["twist"][::-1]
             if not is_chordwise and controls:
                 afs = []
@@ -1135,6 +1142,7 @@ def build_lattice(
             ctrl_surf = [ctrl_for_k[n_r - 1 - j] for j in range(n_r)]
         else:
             edge_le, edge_te = le_e, te_e
+            edge_ref = geo["qc"]
             edge_chord, edge_twist = edge_chord_half, geo["twist"]
             afs = right_af
             props = right_props
@@ -1167,10 +1175,16 @@ def build_lattice(
         strip_hinge_eff_all.extend(hinge_eff_surf)
         strip_ctrl_all.extend(ctrl_surf)
         airfoils.extend(afs)
+        # The untwisted reference line has the chord along x: its spanwise
+        # direction in the y-z plane is the dihedral direction of the strip.
+        span_def = np.diff(np.asarray(edge_ref, dtype=float), axis=0)
+        span_def[:, 0] = 0.0
+        span_def /= np.maximum(np.linalg.norm(span_def, axis=1, keepdims=True), 1e-300)
         surfaces.append(SurfaceSlice(
             name=surf.name, index=s_idx, is_symmetric=surf.is_symmetric,
             strips=slice(strip_offset, strip_offset + n_s),
             edge_le=edge_le, edge_te=edge_te, edge_chord=edge_chord, edge_twist=edge_twist,
+            strip_span_def=span_def,
         ))
         strip_offset += n_s
 
@@ -1304,6 +1318,12 @@ def build_lattice(
         control_info=control_info,
     )
     check_overlaps(lattice)
+    if collocation == "vlm":
+        # The leg-force rules depend only on the mesh; their warnings join the
+        # notes of every result of this lattice.
+        from ventorum.aero.loads import leg_force_rules
+
+        leg_force_rules(lattice)
     return lattice
 
 

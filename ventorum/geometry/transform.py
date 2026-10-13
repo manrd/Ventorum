@@ -209,6 +209,8 @@ def transform_lattice(
                 edge_te=_transform_points(s.edge_te),
                 edge_chord=s.edge_chord.copy(),
                 edge_twist=s.edge_twist.copy(),
+                strip_span_def=(_transform_directions(s.strip_span_def)
+                                if s.strip_span_def is not None else None),
             ))
         elif hasattr(s, "nodes_qc"):
             from ventorum.core.datatypes import DiscretizedSurface

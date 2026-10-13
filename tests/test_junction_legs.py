@@ -142,18 +142,81 @@ def test_free_tip_legs_use_the_full_velocity_and_interior_legs_the_strip_normal(
     assert np.allclose(normal[~tip], lat.normal[np.concatenate([lat.panel_strip, lat.panel_strip])][~tip])
 
 
-def test_twisted_wing_has_no_kink_inside_each_half():
-    """Twist turns the strip normals about an axis across the edge line: the edges inside each half are not kinks.
-
-    The root can be a kink: with twist and taper the quarter-chord line of
-    the two halves meets at an angle.
-    """
+def test_twisted_wing_has_no_kink():
+    """Twist and taper never make a kink: the kinks come from the geometry definition."""
     w = vt.LiftingSurface(name="w", semi_span=4.0, sections=[
         vt.WingSection(0.0, 1.0, twist=math.radians(2.0)), vt.WingSection(1.0, 0.6, twist=math.radians(-4.0))])
     lat = build_lattice(vt.Aircraft(surfaces=[w]), vt.SolverSettings(n_panels=10, n_chord=2), collocation="vlm")
-    _, _, kind = L.leg_force_rules(lat)
-    mid = 0.5 * (np.vstack([lat.a_te, lat.b]) + np.vstack([lat.a, lat.b_te]))
-    assert not np.any((kind == L.LEG_KINK) & (np.abs(mid[:, 1]) > 1e-9))
+    _, scale, kind = L.leg_force_rules(lat)
+    assert not np.any(kind == L.LEG_KINK) and np.all(scale == 1.0)
+
+
+def _swept_twisted_wing():
+    return vt.LiftingSurface(name="W", semi_span=4.0, sweep_le=math.radians(30.0), sections=[
+        vt.WingSection(y_frac=0.0, chord=1.2), vt.WingSection(y_frac=1.0, chord=0.6, twist=math.radians(-3.0))])
+
+
+def _tangential_rules(lattice):
+    """Leg rules without kinks: the strip normal on every shared edge, the full velocity on the free edges."""
+    _, _, kind = L.leg_force_rules(lattice)
+    strip_normal = lattice.normal[np.concatenate([lattice.panel_strip, lattice.panel_strip])]
+    free = kind == L.LEG_FREE
+    return np.where(free[:, None], 0.0, strip_normal), np.ones(kind.size), np.where(free, L.LEG_FREE, L.LEG_SHARED)
+
+
+def test_swept_twisted_wing_in_sideslip_has_no_kink(monkeypatch):
+    """Regression: the piecewise-flat strips of a swept, tapered wing with washout fold about the edges.
+
+    The fold scales as 1/n, so a fold threshold made the interior edges kinks
+    as the mesh was refined, and Cl lost the leg forces. The kinks now come
+    from the geometry definition: there are none here, Cl changes less than
+    1 % from 20 to 80 panels, and it equals the value of the tangential rule.
+    From 10 to 80 panels the change is about 1.2 %, as with the leg rule
+    before the kink rules: that is the mesh convergence of Cl, not the rule
+    (the limit of that step is 1.5 %).
+    """
+    cond = vt.FlightCondition(V_inf=30.0, alpha=math.radians(6.0), beta=math.radians(5.0))
+    cl = {}
+    for n in (10, 20, 80):
+        st = vt.SolverSettings(solver_type="vlm", n_panels=n, n_chord=2)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            res = vt.analyze(vt.Aircraft(surfaces=[_swept_twisted_wing()]), cond, st)
+        _, scale, kind = L.leg_force_rules(res.details["lattice"])
+        assert not np.any(kind == L.LEG_KINK) and np.all(scale == 1.0)
+        cl[n] = res.totals.Cl
+    assert abs(cl[80] - cl[20]) <= 0.01 * abs(cl[80])
+    assert abs(cl[80] - cl[10]) <= 0.015 * abs(cl[80])
+    monkeypatch.setattr(L, "leg_force_rules", _tangential_rules)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        ref = vt.analyze(vt.Aircraft(surfaces=[_swept_twisted_wing()]), cond,
+                         vt.SolverSettings(solver_type="vlm", n_panels=80, n_chord=2)).totals.Cl
+    assert cl[80] == pytest.approx(ref, rel=1e-12)
+
+
+def test_loads_are_continuous_in_a_small_dihedral():
+    """A flat wing at a dihedral of 0.0286 and 0.029 deg: no jump of CL, CY and Cl in sideslip.
+
+    A fold below LEG_KINK_BLEND_RAD scales the leg force of the tangential
+    rule, so the loads are continuous in the dihedral angle, also through 0.
+    """
+    cond = vt.FlightCondition(V_inf=20.0, alpha=math.radians(4.0), beta=math.radians(5.0))
+    out = {}
+    for d in (0.0, 0.0286, 0.029, 0.0294):
+        w = vt.LiftingSurface(name="w", semi_span=4.0, dihedral=math.radians(d),
+                              sections=[vt.WingSection(0.0, 1.0), vt.WingSection(1.0, 1.0)])
+        st = vt.SolverSettings(solver_type="vlm", n_panels=24, spacing="cosine", n_chord=4)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            t = vt.analyze(w, cond, st).totals
+        out[d] = np.array([t.CL, t.CY, t.Cl])
+    step_a = out[0.029] - out[0.0286]
+    step_b = out[0.0294] - out[0.029]
+    # Equal steps of the dihedral give nearly equal changes (no jump at either side).
+    assert np.all(np.abs(step_a - step_b) <= 0.05 * np.abs(step_b) + 1e-9)
+    # From 0 to 0.0286 deg the change is about 0.0286 / 0.0004 times the small step.
+    assert np.all(np.abs(out[0.0286] - out[0.0]) <= 100.0 * np.abs(step_a) + 1e-8)
 
 
 def test_offset_chordwise_grids_are_not_joined():

@@ -532,18 +532,67 @@ def _symmetric_fold(
 
 
 # Leg-force rules (see :func:`leg_force_rules`).
+#: Fold angle [rad] about the edge line at which a kink edge carries no leg
+#: force at all. Below it, the leg force of the tangential rule is scaled by
+#: ``1 - fold / LEG_KINK_BLEND_RAD``, so the loads stay continuous when the
+#: dihedral of a surface goes through zero.
+LEG_KINK_BLEND_RAD = float(np.radians(1.0))
+#: Fold angles [rad] below this value are round-off of the geometry
+#: definition, not a kink.
+LEG_KINK_ROUNDOFF_RAD = 1e-9
+
 #: Largest distance between the end points of two legs that share an edge, as
 #: a fraction of the narrowest strip of the surface next to the edge of each
 #: leg. Another edge of the same surface is at least that width away, so the
 #: rule never pairs two different edges of one surface.
 LEG_SHARE_STRIP_FRACTION = 0.75
-#: Sine of the smallest fold angle about the edge line that makes a shared
-#: edge a kink. A twist of the strips turns their normals about an axis
-#: across the edge line, not about it, so a twisted surface has no kink.
-LEG_KINK_SIN = 1.0e-3
 
 #: Leg kinds of :func:`leg_force_rules`.
 LEG_FREE, LEG_SHARED, LEG_KINK = 0, 1, 2
+
+
+def _leg_edge_data(lattice: VortexLattice) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Return per leg the surface, the edge in the surface, the direction into the strip and a width.
+
+    The direction is the spanwise definition direction of the strip, from
+    the edge into the strip. The width [m] is the narrowest strip width [m] next to the edge on the surface of the
+    leg. The a-leg of a strip lies on its first edge, the b-leg on its second
+    edge (the strips are ordered along each surface).
+    """
+    n_p = lattice.n_panels
+    ps = np.asarray(lattice.panel_strip)
+    w_s = np.asarray(lattice.width, dtype=float)
+    surf_of_strip = np.asarray(lattice.strip_surface)
+    edge = np.empty(2 * n_p, dtype=np.int64)
+    into = np.zeros((2 * n_p, 3))
+    narrow = np.empty(2 * n_p)
+    surf = np.concatenate([surf_of_strip[ps], surf_of_strip[ps]])
+    span = np.zeros((w_s.size, 3))
+    for sf in lattice.surfaces:
+        sl = sf.strips
+        d = getattr(sf, "strip_span_def", None)
+        if d is None:
+            # No definition data (a lattice built elsewhere): the y-z direction of the quarter-chord line.
+            q_l = lattice.le_left[sl] + 0.25 * (lattice.te_left[sl] - lattice.le_left[sl])
+            q_r = lattice.le_right[sl] + 0.25 * (lattice.te_right[sl] - lattice.le_right[sl])
+            d = q_r - q_l
+            d[:, 0] = 0.0
+            d = d / np.maximum(np.linalg.norm(d, axis=1, keepdims=True), 1e-300)
+        span[sl] = d
+    k = np.arange(w_s.size)
+    same_prev = (k > 0) & (surf_of_strip[np.maximum(k - 1, 0)] == surf_of_strip)
+    same_next = (k < w_s.size - 1) & (surf_of_strip[np.minimum(k + 1, w_s.size - 1)] == surf_of_strip)
+    prev = np.where(same_prev, w_s[np.maximum(k - 1, 0)], w_s)
+    nxt = np.where(same_next, w_s[np.minimum(k + 1, w_s.size - 1)], w_s)
+    start = np.array([sf.strips.start for sf in lattice.surfaces])
+    local = k - start[surf_of_strip]
+    edge[:n_p] = local[ps]
+    edge[n_p:] = local[ps] + 1
+    into[:n_p] = span[ps]
+    into[n_p:] = -span[ps]
+    narrow[:n_p] = np.minimum(w_s, prev)[ps]
+    narrow[n_p:] = np.minimum(w_s, nxt)[ps]
+    return surf, edge, into, narrow
 
 
 def leg_force_rules(lattice: VortexLattice) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -555,18 +604,22 @@ def leg_force_rules(lattice: VortexLattice) -> tuple[np.ndarray, np.ndarray, np.
 
     * Shared edge (``LEG_SHARED``): the leg coincides with a leg of a strip
       of the same core group (the neighbour strip, the mirror strip at the
-      root, or a strip of a joined surface), and the strips meet without a
-      kink. Only the velocity tangent to the strip acts on the leg: the
-      normal velocity at the leg (the leak of the discrete lattice between
-      its control points) carries no force.
-    * Kink edge (``LEG_KINK``): a shared edge where the strips meet with a
-      fold about the edge line (a dihedral break, the root of a wing with
-      dihedral, a fin on a tail tip, a winglet). The velocity is projected
-      on the edge line, so the leg carries no force and the coincident legs
+      root, or a strip of a joined surface), and the geometry definition has
+      no kink there. Only the velocity tangent to the strip acts on the leg:
+      the normal velocity at the leg (the leak of the discrete lattice
+      between its control points) carries no force.
+    * Kink edge (``LEG_KINK``): a shared edge where the geometry definition
+      has a fold about the edge line: a change of dihedral between sections
+      of one surface, the root of a symmetric surface with dihedral, or the
+      angle between two joined surfaces (a fin on a tail tip, a winglet).
+      The velocity is projected on the edge line, so the coincident legs
       carry no net force. With the strip normal of each leg, the normal
-      velocity at the kink (which is tangential to the other strip) does
-      not cancel between the coincident legs, and their force grows with
-      the spanwise panels.
+      velocity at the kink (which is tangential to the other strip) does not
+      cancel between the coincident legs, and their force grows with the
+      spanwise panels. For a fold below ``LEG_KINK_BLEND_RAD`` the leg keeps
+      the tangential rule with its force scaled by
+      ``1 - fold / LEG_KINK_BLEND_RAD``, so the loads are continuous in the
+      dihedral angle.
     * Free edge (``LEG_FREE``): no other leg of the core group lies on the
       edge (a tip, or the root of a surface that is not mirrored or
       joined). The full velocity acts on the leg. This in-plane force is
@@ -586,7 +639,8 @@ def leg_force_rules(lattice: VortexLattice) -> tuple[np.ndarray, np.ndarray, np.
         Unit normal whose velocity component is removed, shape
         (2 n_panels, 3). Zero for a free edge.
     scale : numpy.ndarray
-        1.0, or 0.0 for a kink edge, shape (2 n_panels,).
+        Scale of the leg force, shape (2 n_panels,): 1.0, 0.0 on a kink
+        edge, between them on a kink edge with a small fold.
     kind : numpy.ndarray
         ``LEG_FREE``, ``LEG_SHARED`` or ``LEG_KINK``, shape (2 n_panels,).
 
@@ -594,16 +648,21 @@ def leg_force_rules(lattice: VortexLattice) -> tuple[np.ndarray, np.ndarray, np.
     -----
     Two legs share an edge when they belong to different strips of one core
     group and their end points agree (in the same or the opposite order)
-    within a tolerance: ``LEG_SHARE_STRIP_FRACTION`` times the narrowest
-    strip next to the edge on the surface of each leg (the strip of the leg
-    and its neighbour on that edge), kept between 1e-6 and 0.1 times the
-    strip chord; the smaller value of the two legs applies. A set of shared legs
-    is a kink when the strip normals, projected on the plane normal to the
-    edge line, differ by an angle whose sine is above ``LEG_KINK_SIN``.
-    The rules are cached on the lattice (they depend only on the geometry).
-    The Kutta-Joukowski force on the vortex segments of a lattice is in
-    J. Katz and A. Plotkin, "Low-Speed Aerodynamics", 2nd ed., Cambridge
-    University Press, 2001.
+    within ``LEG_SHARE_STRIP_FRACTION`` times the narrowest strip next to the
+    edge on the surface of each leg, kept between 1e-6 and 0.1 times the
+    strip chord; the smaller value of the two legs applies.
+
+    The fold of a set of shared legs comes from the geometry definition, not
+    from the strip normals: each strip has the spanwise direction of its
+    untwisted reference line without node displacements, in the plane normal
+    to the untwisted chord (``SurfaceSlice.strip_span_def``). For two legs,
+    with ``u`` the direction from the edge into each strip, the fold is
+    ``pi`` minus the angle between the two ``u``. Twist, taper and sweep do
+    not change these directions, so they never make a kink. The rules are a
+    property of the mesh; they are cached on the lattice, and the gradients
+    keep them fixed. The Kutta-Joukowski force on the vortex segments of a
+    lattice is in J. Katz and A. Plotkin, "Low-Speed Aerodynamics", 2nd ed.,
+    Cambridge University Press, 2001.
     """
     cached = lattice.geom_cache.get("leg_force_rules")
     if cached is not None:
@@ -618,18 +677,9 @@ def leg_force_rules(lattice: VortexLattice) -> tuple[np.ndarray, np.ndarray, np.
     length = np.linalg.norm(seg, axis=1)
     strip_normal = lattice.normal[strip]
     group = _core_group_of(lattice)[strip]
-    # Narrowest strip next to the edge of each leg, on its own surface: the
-    # a-leg lies on the edge shared with the strip before, the b-leg on the
-    # edge shared with the strip after (strips are ordered along each surface).
-    w_s = np.asarray(lattice.width, dtype=float)
-    surf = np.asarray(lattice.strip_surface)
-    n_s = w_s.size
-    k = np.arange(n_s)
-    prev = np.where((k > 0) & (surf[np.maximum(k - 1, 0)] == surf), w_s[np.maximum(k - 1, 0)], w_s)
-    nxt = np.where((k < n_s - 1) & (surf[np.minimum(k + 1, n_s - 1)] == surf), w_s[np.minimum(k + 1, n_s - 1)], w_s)
-    width = np.concatenate([np.minimum(w_s, prev)[lattice.panel_strip], np.minimum(w_s, nxt)[lattice.panel_strip]])
     chord = np.asarray(lattice.chord, dtype=float)[strip]
-    tol = np.clip(LEG_SHARE_STRIP_FRACTION * width, 1e-6 * chord, 0.1 * chord)
+    _, _, into, narrow = _leg_edge_data(lattice)
+    tol = np.clip(LEG_SHARE_STRIP_FRACTION * narrow, 1e-6 * chord, 0.1 * chord)
     mid = 0.5 * (start + end)
     parent = np.arange(2 * n_p)
 
@@ -656,19 +706,22 @@ def leg_force_rules(lattice: VortexLattice) -> tuple[np.ndarray, np.ndarray, np.
                     parent[max(ri, rj)] = min(ri, rj)
     roots = np.array([find(i) for i in range(2 * n_p)], dtype=np.int64)
     kind = np.full(2 * n_p, LEG_FREE, dtype=np.int64)
+    scale = np.ones(2 * n_p)
     counts = np.bincount(roots, minlength=2 * n_p)
     shared = valid & (counts[roots] > 1)
     kind[shared] = LEG_SHARED
     for r in np.unique(roots[shared]):
         members = np.flatnonzero(roots == r)
-        t_hat = seg[members[0]] / length[members[0]]
-        e = strip_normal[members] - np.outer(strip_normal[members] @ t_hat, t_hat)
-        e /= np.maximum(np.linalg.norm(e, axis=1, keepdims=True), 1e-300)
-        fold = np.linalg.norm(np.cross(e, e[0]), axis=1)
-        if np.max(fold) > LEG_KINK_SIN:
+        u = into[members]
+        fold = 0.0
+        for a in range(members.size):
+            for b in range(a + 1, members.size):
+                # Angle between u_a and -u_b (no loss of digits near 0).
+                fold = max(fold, float(np.arctan2(np.linalg.norm(np.cross(u[a], u[b])), -(u[a] @ u[b]))))
+        if fold > LEG_KINK_ROUNDOFF_RAD:
             kind[members] = LEG_KINK
+            scale[members] = max(0.0, 1.0 - fold / LEG_KINK_BLEND_RAD)
     normal = np.where((kind == LEG_FREE)[:, None], 0.0, strip_normal)
-    scale = np.where(kind == LEG_KINK, 0.0, 1.0)
     out = (normal, scale, kind)
     lattice.geom_cache["leg_force_rules"] = out
     return out
