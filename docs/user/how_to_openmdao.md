@@ -82,9 +82,14 @@ give with `set_val`, `add_design_var` and connections.
   default value is the displacement of the geometry (zero when it has none).
   `vt.geometry.undeformed_nodes(aircraft, settings)` gives the node positions and
   the number of edges. The mesh topology is fixed.
-* On a symmetric surface the root stays on the plane y = 0. The component uses 0
-  for the y-displacement of the root nodes (row 0, column 1 of `le` and `te`),
-  and the partials there are 0.
+* On a symmetric surface the root stays on the plane y = 0 (the lattice refuses
+  other roots). The component uses 0 for the y-displacement of the root nodes
+  (row 0, column 1 of `le` and `te`), so the outputs do not depend on that entry
+  and its partials are 0. `vt.gradients` gives a small nonzero derivative there;
+  the component does not use it. A nonzero input value there gives an OpenMDAO
+  warning (the component does not raise, so a `check_partials` step on that
+  entry still runs). A nonzero value in the node displacements of the geometry
+  raises `ValueError` at `setup`.
 * A control input sets the deflection of all controls with that name (the left
   half of an antisymmetric control moves the opposite way, as in the solver).
   Controls with one name must have one deflection in the geometry.

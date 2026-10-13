@@ -262,6 +262,47 @@ def test_node_input_moves_the_lattice(float64_precision) -> None:
     assert prob.get_val("CD")[0] == pytest.approx(res.totals.CD_total, rel=1e-12)
 
 
+def test_root_y_input_of_a_symmetric_surface_warns(float64_precision) -> None:
+    """A nonzero root y-displacement input gives one warning and does not change CL."""
+    om = _om()
+    from ventorum.mdo import VentorumComponent
+
+    aircraft, condition, settings = _case()
+    comp = VentorumComponent(aircraft, settings, condition=condition, inputs=("nodes",), outputs=("CL",))
+    prob = _problem(comp)
+    cl0 = float(prob.get_val("CL")[0])
+    le = prob.get_val("nodes:Wing:le").copy()
+    le[0, 1] = 0.01
+    prob.set_val("nodes:Wing:le", le)
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        prob.run_model()
+    root = [w for w in caught if issubclass(w.category, om.OpenMDAOWarning) and "root y-displacement" in str(w.message)]
+    assert len(root) == 1
+    assert float(prob.get_val("CL")[0]) == cl0
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        jac = prob.compute_totals(of=["CL"], wrt=["nodes:Wing:le"])
+    assert jac["CL", "nodes:Wing:le"].reshape(-1, 3)[0, 1] == 0.0
+
+
+def test_root_y_displacement_of_the_geometry_is_refused() -> None:
+    """A symmetric geometry with a nonzero root y-displacement raises ValueError at setup."""
+    om = _om()
+    from ventorum.geometry import undeformed_nodes
+    from ventorum.mdo import VentorumComponent
+
+    aircraft, condition, settings = _case()
+    n_e = undeformed_nodes(aircraft, settings)["Wing"]["le"].shape[0]
+    le = np.zeros((n_e, 3))
+    le[0, 1] = 0.01
+    aircraft.surfaces[0].node_displacements = vt.NodeDisplacements(le=le, te=np.zeros((n_e, 3)))
+    prob = om.Problem(reports=False)
+    prob.model.add_subsystem("aero", VentorumComponent(aircraft, settings, condition=condition, inputs=("nodes",)))
+    with pytest.raises(ValueError, match="root"):
+        prob.setup()
+
+
 def test_surface_name_with_a_dot_is_changed(float64_precision) -> None:
     """OpenMDAO forbids a dot in a variable name: the dot becomes an underscore."""
     _om()

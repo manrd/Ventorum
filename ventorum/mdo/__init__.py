@@ -176,6 +176,11 @@ class _VentorumBase(om.ExplicitComponent):
                 for surf in self._vt_aircraft.surfaces:
                     n_e = nodes[surf.name]["le"].shape[0]
                     d = getattr(surf, "node_displacements", None)
+                    if d is not None and surf.is_symmetric and (d.le[0, 1] != 0.0 or d.te[0, 1] != 0.0):
+                        raise ValueError(
+                            f"[{surf.name}] is symmetric, but its node_displacements move the root to "
+                            f"y = {float(d.le[0, 1]):.4g} m (le) and {float(d.te[0, 1]):.4g} m (te). The root of a "
+                            "symmetric surface stays on y = 0; set row 0, column 1 of le and te to 0.")
                     for part in ("le", "te"):
                         val = np.zeros((n_e, 3)) if d is None else np.asarray(getattr(d, part), dtype=float).copy()
                         self._vt_add(f"nodes:{_om_name(surf.name)}:{part}", ("nodes", surf.name, part), val, "m")
@@ -216,8 +221,12 @@ class _VentorumBase(om.ExplicitComponent):
 
     # --- Analysis -------------------------------------------------------------------------------
 
-    def _vt_case(self, inputs: Any) -> tuple[Aircraft, FlightCondition]:
-        """Return the aircraft and the condition with the input values."""
+    def _vt_case(self, inputs: Any, warn: bool = False) -> tuple[Aircraft, FlightCondition]:
+        """Return the aircraft and the condition with the input values.
+
+        With *warn*, issue an OpenMDAO warning when an input moves the root
+        of a symmetric surface off y = 0 (the component uses 0 there).
+        """
         ac = self._vt_aircraft.clone()
         changes: dict[str, float] = {}
         node_parts: dict[str, dict[str, np.ndarray]] = {}
@@ -234,10 +243,17 @@ class _VentorumBase(om.ExplicitComponent):
             if surf.name in node_parts:
                 parts = node_parts[surf.name]
                 if surf.is_symmetric:
-                    # The root of a symmetric surface stays on the plane y = 0 (the
-                    # lattice refuses other roots). The output is an even function of
-                    # this displacement, so its exact derivative is zero, as the
-                    # gradient gives it.
+                    # The root of a symmetric surface stays on the plane y = 0: the
+                    # lattice refuses other roots. The component holds this value at
+                    # 0, so the output does not depend on the input there and the
+                    # partial is 0 (see _vt_flat). vt.gradients gives a small nonzero
+                    # derivative for this entry; the component does not use it.
+                    root_y = (float(parts["le"][0, 1]), float(parts["te"][0, 1]))
+                    if warn and any(v != 0.0 for v in root_y):
+                        om.issue_warning(
+                            f"The root y-displacement of the symmetric surface {surf.name!r} is "
+                            f"{root_y} m (le, te). The root stays on y = 0: the component uses 0 "
+                            "there, and the partials of that entry are 0.", prefix=self.pathname)
                     parts["le"][0, 1] = 0.0
                     parts["te"][0, 1] = 0.0
                 surf.node_displacements = NodeDisplacements(le=parts["le"], te=parts["te"],
@@ -289,7 +305,7 @@ class _VentorumBase(om.ExplicitComponent):
         outputs : Vector
             Output values: coefficients (dimensionless), strip forces [N].
         """
-        ac, condition = self._vt_case(inputs)
+        ac, condition = self._vt_case(inputs, warn=True)
         result = self._vt_analyze(ac, condition)
         self.last_result = result
         scalars = self._vt_scalars(result)
@@ -305,7 +321,8 @@ class _VentorumBase(om.ExplicitComponent):
         if key[0] == "nodes":
             g = np.array(gradient["nodes"][key[1]][key[2]], dtype=float)
             if key[1] in self._vt_symmetric:
-                # The component keeps the root of a symmetric surface on y = 0 (see _vt_case).
+                # The component holds the root y-displacement of a symmetric surface at
+                # 0 (see _vt_case), so the output does not depend on this input entry.
                 g[0, 1] = 0.0
             return g.reshape(-1)
         return np.array([float(gradient["controls"][key[1]])])
@@ -342,8 +359,10 @@ class VentorumComponent(_VentorumBase):
         defining half, shape (n_edges, 3), as
         :class:`ventorum.NodeDisplacements`. On a symmetric surface the
         root stays on the plane y = 0: the component uses 0 for the
-        y-displacement of the root nodes (row 0, column 1), and the
-        partials there are 0. ``"controls"`` adds per
+        y-displacement of the root nodes (row 0, column 1), so the outputs
+        do not depend on that entry and its partials are 0. A nonzero input
+        value there gives an OpenMDAO warning; a nonzero value in the
+        geometry raises ``ValueError`` at setup. ``"controls"`` adds per
         control name the input ``controls:<name>``: the deflection [rad]
         of all controls with that name. A character other than a letter, a
         digit or ``_`` in a surface or control name becomes ``_``.
