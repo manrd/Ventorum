@@ -285,6 +285,8 @@ class SurfaceSlice:
     # plane normal to the untwisted chord: (n_strips, 3). The leg-force rule
     # takes the kinks of the surface from it (ventorum.aero.loads.leg_force_rules).
     strip_span_def: np.ndarray | None = None
+    # True for each edge that is joined to an edge of another surface: (n_edges,).
+    edge_joined: np.ndarray | None = None
 
 
 @dataclass
@@ -467,9 +469,10 @@ def _relate_surfaces(si: SurfaceSlice, sj: SurfaceSlice) -> tuple[bool, tuple[fl
     chordwise grids do not match (they are not joined); ``"interior"`` lists
     ``"i"`` and/or ``"j"`` when the surfaces are joined only through an
     interior strip edge of *si* or *sj* (no pair of boundary edges is
-    joined; see :func:`_interior_edge`).
+    joined; see :func:`_interior_edge`); ``"edges"`` lists the joined pairs
+    ``(edge of si, edge of sj)``.
     """
-    info: dict = {"grid_mismatch": False, "interior": []}
+    info: dict = {"grid_mismatch": False, "interior": [], "edges": []}
     wi, wj = _edge_strip_widths(si), _edge_strip_widths(sj)
     a0_all, b0_all = np.asarray(si.edge_le, dtype=float), np.asarray(sj.edge_le, dtype=float)
     va, vb = np.asarray(si.edge_te, dtype=float) - a0_all, np.asarray(sj.edge_te, dtype=float) - b0_all
@@ -520,6 +523,7 @@ def _relate_surfaces(si: SurfaceSlice, sj: SurfaceSlice) -> tuple[bool, tuple[fl
         if np.any(pairs):
             joined = True
             for r, c in zip(*np.nonzero(pairs)):
+                info["edges"].append((int(sel[r]), int(ib[c])))
                 ei, ej = _interior_edge(si, int(sel[r])), _interior_edge(sj, int(ib[c]))
                 if not (ei or ej):
                     boundary = True
@@ -632,6 +636,22 @@ def core_groups(surfaces: list[SurfaceSlice]) -> np.ndarray:
             if _relate_surfaces(surfaces[i], surfaces[j])[0]:
                 parent[find(j)] = find(i)
     return np.array([find(i) for i in range(n)], dtype=int)
+
+
+def mark_joined_edges(surfaces: list[SurfaceSlice]) -> None:
+    """Set ``edge_joined`` of each surface: True for the edges joined to an edge of another surface.
+
+    The join rule is the one of :func:`core_groups` (see :func:`_relate_surfaces`).
+    """
+    for sf in surfaces:
+        sf.edge_joined = np.zeros(np.asarray(sf.edge_le).shape[0], dtype=bool)
+    for i in range(len(surfaces)):
+        for j in range(i + 1, len(surfaces)):
+            joined, _, info = _relate_surfaces(surfaces[i], surfaces[j])
+            if joined:
+                for ei, ej in info["edges"]:
+                    surfaces[i].edge_joined[ei] = True
+                    surfaces[j].edge_joined[ej] = True
 
 
 def near_miss_warnings(surfaces: list[SurfaceSlice]) -> list[str]:
@@ -1317,6 +1337,7 @@ def build_lattice(
         join_warnings=near_miss_warnings(surfaces),
         control_info=control_info,
     )
+    mark_joined_edges(surfaces)
     check_overlaps(lattice)
     if collocation == "vlm":
         # The leg-force rules depend only on the mesh; their warnings join the

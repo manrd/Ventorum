@@ -541,12 +541,6 @@ LEG_KINK_BLEND_RAD = float(np.radians(1.0))
 #: definition, not a kink.
 LEG_KINK_ROUNDOFF_RAD = 1e-9
 
-#: Largest distance between the end points of two legs that share an edge, as
-#: a fraction of the narrowest strip of the surface next to the edge of each
-#: leg. Another edge of the same surface is at least that width away, so the
-#: rule never pairs two different edges of one surface.
-LEG_SHARE_STRIP_FRACTION = 0.75
-
 #: Leg kinds of :func:`leg_force_rules`.
 LEG_FREE, LEG_SHARED, LEG_KINK = 0, 1, 2
 
@@ -625,6 +619,13 @@ def leg_force_rules(lattice: VortexLattice) -> tuple[np.ndarray, np.ndarray, np.
       joined). The full velocity acts on the leg. This in-plane force is
       the side-edge force of the free edge.
 
+    A leg that matches no other leg on an interior strip edge of its surface
+    (for example at the end of a control, where the chordwise panels of the
+    two strips differ) keeps the tangential rule. A leg on an edge that the
+    join rule joins to another surface, but that matches no leg there, keeps
+    the tangential rule too, and the lattice gets a warning that the model
+    does not resolve this junction.
+
     The force on a leg is ``scale * rho * Gamma * (V - (V . n) n) x l``, with
     ``n`` and ``scale`` from this function.
 
@@ -646,11 +647,16 @@ def leg_force_rules(lattice: VortexLattice) -> tuple[np.ndarray, np.ndarray, np.
 
     Notes
     -----
-    Two legs share an edge when they belong to different strips of one core
-    group and their end points agree (in the same or the opposite order)
-    within ``LEG_SHARE_STRIP_FRACTION`` times the narrowest strip next to the
-    edge on the surface of each leg, kept between 1e-6 and 0.1 times the
-    strip chord; the smaller value of the two legs applies.
+    Two legs of different strips of one core group share an edge when they
+    lie on each other by the join measure of
+    :func:`ventorum.geometry.lattice.core_groups`: the distance of each end
+    point from the line of the other leg, and the offset of the end points
+    along that line, are below the tolerance. Between two surfaces the
+    tolerance is the join tolerance (``JOIN_TOL_STRIP_FRACTION`` times the
+    narrowest strip next to the edge of each leg, kept between
+    ``JOIN_TOL_CHORD_FRACTION`` and ``JOIN_TOL_CHORD_MAX_FRACTION`` times
+    the strip chord). The strips of one surface share their nodes, so legs
+    of one surface use the lower limit only.
 
     The fold of a set of shared legs comes from the geometry definition, not
     from the strip normals: each strip has the spanwise direction of its
@@ -669,6 +675,12 @@ def leg_force_rules(lattice: VortexLattice) -> tuple[np.ndarray, np.ndarray, np.
         return cached
     from scipy.spatial import cKDTree
 
+    from ventorum.geometry.lattice import (
+        JOIN_TOL_CHORD_FRACTION,
+        JOIN_TOL_CHORD_MAX_FRACTION,
+        JOIN_TOL_STRIP_FRACTION,
+    )
+
     n_p = lattice.n_panels
     strip = np.concatenate([lattice.panel_strip, lattice.panel_strip])
     start = np.vstack([lattice.a_te, lattice.b])
@@ -678,8 +690,9 @@ def leg_force_rules(lattice: VortexLattice) -> tuple[np.ndarray, np.ndarray, np.
     strip_normal = lattice.normal[strip]
     group = _core_group_of(lattice)[strip]
     chord = np.asarray(lattice.chord, dtype=float)[strip]
-    _, _, into, narrow = _leg_edge_data(lattice)
-    tol = np.clip(LEG_SHARE_STRIP_FRACTION * narrow, 1e-6 * chord, 0.1 * chord)
+    surf, edge, into, narrow = _leg_edge_data(lattice)
+    tol_join = np.clip(JOIN_TOL_STRIP_FRACTION * narrow, JOIN_TOL_CHORD_FRACTION * chord,
+                       JOIN_TOL_CHORD_MAX_FRACTION * chord)
     mid = 0.5 * (start + end)
     parent = np.arange(2 * n_p)
 
@@ -689,18 +702,37 @@ def leg_force_rules(lattice: VortexLattice) -> tuple[np.ndarray, np.ndarray, np.
             i = parent[i]
         return i
 
+    def on_each_other(i: int, j: int, t: float) -> bool:
+        # The join measure: end points near the other line, and along it near the other end points.
+        ui = seg[i] / length[i]
+        uj = seg[j] / length[j]
+
+        def perp(p, o, u):
+            d = p - o
+            return np.linalg.norm(d - (d @ u) * u)
+
+        gap = max(perp(start[j], start[i], ui), perp(end[j], start[i], ui),
+                  perp(start[i], start[j], uj), perp(end[i], start[j], uj))
+        if not gap < t:
+            return False
+        s0 = (start[j] - start[i]) @ ui
+        s1 = (end[j] - start[i]) @ ui
+        li = length[i]
+        return bool((abs(s0) < t and abs(s1 - li) < t) or (abs(s1) < t and abs(s0 - li) < t))
+
     valid = length > 0.0
     idx = np.flatnonzero(valid)
     if idx.size > 1:
         tree = cKDTree(mid[idx])
-        for p, q in sorted(tree.query_pairs(float(np.max(tol[idx])))):
+        for p, q in sorted(tree.query_pairs(float(np.max(tol_join[idx])))):
             i, j = int(idx[p]), int(idx[q])
             if strip[i] == strip[j] or group[i] != group[j]:
                 continue
-            t = min(tol[i], tol[j])
-            same = (np.linalg.norm(start[i] - start[j]) <= t and np.linalg.norm(end[i] - end[j]) <= t)
-            crossed = (np.linalg.norm(start[i] - end[j]) <= t and np.linalg.norm(end[i] - start[j]) <= t)
-            if same or crossed:
+            if surf[i] == surf[j]:
+                t = JOIN_TOL_CHORD_FRACTION * max(chord[i], chord[j])
+            else:
+                t = min(tol_join[i], tol_join[j])
+            if on_each_other(i, j, t):
                 ri, rj = find(i), find(j)
                 if ri != rj:
                     parent[max(ri, rj)] = min(ri, rj)
@@ -721,6 +753,29 @@ def leg_force_rules(lattice: VortexLattice) -> tuple[np.ndarray, np.ndarray, np.
         if fold > LEG_KINK_ROUNDOFF_RAD:
             kind[members] = LEG_KINK
             scale[members] = max(0.0, 1.0 - fold / LEG_KINK_BLEND_RAD)
+    # A leg that matches no other leg is free only on a boundary edge of its
+    # surface that is not joined. On an interior edge (for example at the end
+    # of a control, where the chordwise panels of the two strips differ) it
+    # keeps the tangential rule. On a joined edge it keeps the tangential rule
+    # too, and the lattice gets a warning.
+    unmatched = []
+    for i in np.flatnonzero(valid & (kind == LEG_FREE)):
+        sf = lattice.surfaces[int(surf[i])]
+        e = int(edge[i])
+        if 0 < e < np.asarray(sf.edge_le).shape[0] - 1:
+            kind[i] = LEG_SHARED
+            continue
+        joined = getattr(sf, "edge_joined", None)
+        if joined is not None and bool(joined[e]):
+            kind[i] = LEG_SHARED
+            unmatched.append(sf.name)
+    if unmatched:
+        names = ", ".join(f"'{n}'" for n in sorted(set(unmatched)))
+        msg = (f"Joined edges of the surfaces {names} have chordwise legs that do not lie on the legs of the "
+               "other surface (for example because the chordwise panels of the two surfaces differ). The model "
+               "does not resolve this junction: these legs keep the tangential leg rule.")
+        if msg not in lattice.join_warnings:
+            lattice.join_warnings.append(msg)
     normal = np.where((kind == LEG_FREE)[:, None], 0.0, strip_normal)
     out = (normal, scale, kind)
     lattice.geom_cache["leg_force_rules"] = out

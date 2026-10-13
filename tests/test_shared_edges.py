@@ -245,3 +245,55 @@ def test_vectorised_edge_relation_equals_the_double_loop():
             assert np.allclose(new[1], ref[1], rtol=1e-12, atol=0.0)
         seen["joined" if ref[0] else ("near" if ref[1] else "none")] += 1
     assert min(seen.values()) > 0, seen  # every outcome is tested
+
+
+def test_dihedral_break_with_incidence_legs_are_shared_for_every_mesh():
+    """The junction legs of a dihedral break with an incidence step are never free, and CY is smooth in n.
+
+    The incidence step opens a gap between the trailing-edge nodes of the
+    two edges. The legs match by the join measure and tolerance, so the
+    junction is a kink edge for every mesh (with a stricter leg tolerance
+    some meshes had free junction legs, and CY jumped with n).
+    """
+    from ventorum.aero import loads as L
+
+    cy = []
+    for n in (72, 76, 80, 88):
+        inner = _surface("inner", 2.0, n // 2)
+        outer = vt.LiftingSurface(
+            name="outer", semi_span=2.0, n_panels=n // 2, spacing="uniform", dihedral=np.radians(8.0),
+            is_symmetric=False, position=np.array([0.0, 2.0, 0.0]), incidence=np.radians(3.0),
+            sections=[vt.WingSection(y_frac=0.0, chord=1.0), vt.WingSection(y_frac=1.0, chord=1.0)])
+        ac = _aircraft([inner, outer, outer.mirrored()])
+        cond = vt.FlightCondition(V_inf=30.0, alpha=np.radians(5.0), beta=np.radians(4.0))
+        res = vt.analyze(ac, condition=cond, settings=vt.SolverSettings(n_panels=n))
+        lat = res.details["lattice"]
+        _, _, kind = L.leg_force_rules(lat)
+        mid = 0.5 * (np.vstack([lat.a_te, lat.b]) + np.vstack([lat.a, lat.b_te]))
+        junction = np.abs(np.abs(mid[:, 1]) - 2.0) < 0.5 * float(np.min(lat.width))
+        assert junction.sum() == 4 * lat.n_chord
+        assert np.all(kind[junction] == L.LEG_KINK)
+        cy.append(res.totals.CY)
+    d = np.diff(cy)
+    assert np.all(d > 0.0) or np.all(d < 0.0)
+
+
+def test_unmatched_legs_on_a_joined_edge_keep_the_tangential_rule(monkeypatch):
+    """Joined edges whose legs do not lie on each other: tangential rule (not free, not kink) and a warning."""
+    from ventorum.aero import loads as L
+
+    inner = _surface("inner", 2.0, 8)
+    outer = _surface("outer", 2.0, 8, is_symmetric=False, position=np.array([0.0, 2.0, 0.0]),
+                     controls=[vt.ControlSurface("f", 0.0, 1.0, 0.3, np.radians(5.0))])
+    ac = _aircraft([inner, outer, outer.mirrored()])
+    lat = build_lattice(ac, vt.SolverSettings(n_panels=16), collocation="vlm", n_chord=4)
+    assert not lat.join_warnings
+    # The hinge moves the chordwise panels of the outer strips. With a small
+    # leg tolerance the junction legs behind the hinge no longer match.
+    monkeypatch.setattr(lattice_module, "JOIN_TOL_CHORD_MAX_FRACTION", 1e-3)
+    lat.geom_cache.pop("leg_force_rules")
+    _, scale, kind = L.leg_force_rules(lat)
+    mid = 0.5 * (np.vstack([lat.a_te, lat.b]) + np.vstack([lat.a, lat.b_te]))
+    junction = np.abs(np.abs(mid[:, 1]) - 2.0) < 1e-9
+    assert np.all(kind[junction] == L.LEG_SHARED) and np.all(scale[junction] == 1.0)
+    assert any("do not lie on the legs of the other surface" in w for w in lat.join_warnings)
