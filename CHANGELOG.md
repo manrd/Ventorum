@@ -49,6 +49,12 @@ a minor version can change a public interface.
   `detail_level="full"`, and so do the agent tools (not `batch_evaluate`). The default agent
   output does not change. The record adds about 1 % to a small GPU sweep (more garbage
   collection) and no measurable time on the CPU.
+- OpenMDAO components (optional extra `mdo`, `openmdao>=3.30,<4`): `ventorum.mdo.VentorumComponent`
+  wraps one analysis with analytic partials from the adjoint (`gradients`), and
+  `VentorumMatrixFreeComponent` adds `strip_force` [N] and `section_cl` with products from
+  `gradient_vjp`. Inputs are the flow values, the node displacements and the control
+  deflections, with OpenMDAO units; device and precision follow the global settings.
+  `import ventorum` does not need OpenMDAO. Example 12 minimises CD at fixed CL with twist.
 
 ### Changed
 
