@@ -72,8 +72,6 @@ def solve_batch(solver, lattice, conditions: list, settings, S_ref: float, b_ref
         return (None, gpu._REASON_DEVICE_CPU) if return_reason else None
     if solver.name not in ("linear", "nonlinear", "vlm"):
         return (None, f"solver '{solver.name}' is not supported on GPU") if return_reason else None
-    if any(getattr(c, "mach", None) is not None and c.mach > 0.0 for c in conditions):
-        return (None, "compressibility correction runs on the CPU path") if return_reason else None
     from ventorum.utils.parallel import _local as _par_local
 
     if gpu.get_device() == "auto" and getattr(_par_local, "worker_threads", None) is not None:
@@ -95,11 +93,14 @@ def solve_batch(solver, lattice, conditions: list, settings, S_ref: float, b_ref
     explicit = [None] * K if grounds is None else list(grounds)
     setups = [solver._case_setup(lattice, c, settings, c_ref, g, ref_point) for c, g in zip(conditions, explicit)]
     # Groups of cases with the same unknown map, ground presence and symmetry:
-    # each group is one GPU batch.
+    # each group is one GPU batch. Cases with different Mach numbers or
+    # different free-stream directions form separate groups.
     groups: dict[tuple, list[int]] = {}
     for k, (c, st) in enumerate(zip(conditions, setups)):
         umap = _unknown_map(lattice, c, st[0], use_sym)
-        key = (id(umap), st[0] is not None, is_symmetric_condition(c, st[0]))
+        has_mach = getattr(c, "mach", None) is not None and c.mach > 0.0
+        mach_key = (float(c.mach), float(c.alpha), float(c.beta)) if has_mach else None
+        key = (id(umap), st[0] is not None, is_symmetric_condition(c, st[0]), mach_key)
         groups.setdefault(key, []).append(k)
     if len(groups) > 1 and continuation and solver.name == "nonlinear":
         return (None, "continuation needs the cases in order: the CPU path") if return_reason else None
@@ -148,7 +149,12 @@ def _solve_group(solver, lattice, conditions: list, setups: list, settings, S_re
     grounds = [st[0] for st in setups]
     wds = np.array([st[3] for st in setups], dtype=float).reshape(K, 3)
     umap = _unknown_map(lattice, conditions[0], grounds[0], use_sym)
-    dl = engine.device_lattice(lattice, precision)
+    has_mach = getattr(conditions[0], "mach", None) is not None and conditions[0].mach > 0.0
+    if has_mach:
+        mt = engine.MachTransform(conditions[0].mach, conditions[0].alpha, conditions[0].beta, ref_point=ref_point)
+        dl = engine.device_lattice(lattice, precision, mach_transform=mt)
+    else:
+        dl = engine.device_lattice(lattice, precision)
     md = dl.unknown_map(lattice, umap)
     if md is None:
         return None, "unknown map is not supported on GPU"
@@ -160,7 +166,11 @@ def _solve_group(solver, lattice, conditions: list, setups: list, settings, S_re
     Dfs, V, rho, alpha, WD = bd["D"], bd["V"], bd["rho"], bd["alpha"], bd["WD"]
     # The host flag avoids a device-to-host sync per solve in rate-free cases.
     omega = bd["omega"] if bd["has_rates"] else None
-    cs = engine.CaseData(dl, WD, grounds, GK=bd["GK"], GO=bd["GO"])
+    if has_mach:
+        WD_s = engine._f64(np.tile([1.0, 0.0, 0.0], (K, 1)))
+        cs = engine.CaseData(dl, WD_s, grounds)
+    else:
+        cs = engine.CaseData(dl, WD, grounds, GK=bd["GK"], GO=bd["GO"])
     infos = None
     alpha_eff = None
     cpu_cases: dict = {}
@@ -186,7 +196,8 @@ def _solve_group(solver, lattice, conditions: list, setups: list, settings, S_re
         G = g[:, md["panel_column"]]
         symmetric = all(is_symmetric_condition(c, gr) for c, gr in zip(conditions, grounds))
         v_points = engine.vlm_load_velocities(dl, lattice, cs, G, symmetric)
-    arrays = engine.loads(dl, lattice, G, v_points, Dfs, V, rho, alpha, WD, grounds, S_ref, b_ref, c_ref,
+    dl_phys = engine.device_lattice(lattice, precision) if has_mach else dl
+    arrays = engine.loads(dl_phys, lattice, G, v_points, Dfs, V, rho, alpha, WD, grounds, S_ref, b_ref, c_ref,
                           ref_point, alpha_eff, use_leg=solver.name == "vlm", extra={"gamma": G}, symmetric=symmetric,
                           GK=bd["GK"], GO=bd["GO"], omega=omega)
     return (arrays, infos, umap, cpu_cases), None

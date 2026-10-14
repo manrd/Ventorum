@@ -42,13 +42,20 @@ piecewise cubic interpolation", SIAM Journal on Numerical Analysis 17(2),
 
 from __future__ import annotations
 
+import math
 import threading
 
 import numpy as np
 import torch
 import warp as wp
 
-from ventorum.aero.system import UnknownMap, panel_targets
+from ventorum.aero.system import (
+    UnknownMap,
+    freestream_direction,
+    lift_direction,
+    panel_targets,
+    side_direction,
+)
 from ventorum.core.datatypes import LinearAirfoil, TabulatedAirfoil
 from ventorum.gpu.kernels import kernels
 
@@ -212,6 +219,44 @@ class PointSet:
         self.struct = s
 
 
+class MachTransform:
+    """Affine coordinate transformation for the Prandtl-Glauert compressibility correction."""
+
+    def __init__(self, mach: float, alpha: float, beta_flow: float, ref_point=None):
+        self.mach = float(mach)
+        self.alpha = float(alpha)
+        self.beta_flow = float(beta_flow)
+        self.beta = math.sqrt(1.0 - self.mach * self.mach)
+        self.d = freestream_direction(alpha, beta_flow)
+        self.lift = lift_direction(alpha)
+        self.side = side_direction(alpha, beta_flow)
+        self.R = np.vstack([self.d, self.side, self.lift])
+        self.ref_point = np.zeros(3) if ref_point is None else np.asarray(ref_point, dtype=float)
+        self.key = (
+            self.mach,
+            float(self.d[0]),
+            float(self.d[1]),
+            float(self.d[2]),
+            float(self.ref_point[0]),
+            float(self.ref_point[1]),
+            float(self.ref_point[2]),
+        )
+
+    def to_s(self, pts: np.ndarray) -> np.ndarray:
+        """Map points to stretched free-stream axes: x_fs / beta, y_fs, z_fs."""
+        p_fs = (pts - self.ref_point) @ self.R.T
+        p_s = p_fs.copy()
+        p_s[:, 0] /= self.beta
+        return p_s
+
+    def transform_normal(self, n: np.ndarray) -> np.ndarray:
+        """Map boundary condition normals to effective normals in free-stream axes."""
+        n_fs = n @ self.R.T
+        n_eff = n_fs.copy()
+        n_eff[:, 0] /= self.beta
+        return n_eff
+
+
 class DeviceLattice:
     """The lattice arrays on the GPU for one precision.
 
@@ -219,10 +264,11 @@ class DeviceLattice:
     core radii and normals have the type of *precision*.
     """
 
-    def __init__(self, lattice, precision: str):
+    def __init__(self, lattice, precision: str, mach_transform: MachTransform | None = None):
         from ventorum.geometry.lattice import CROSS_SURFACE_CORE_FRACTION
 
         self.precision = precision
+        self.mach_transform = mach_transform
         self.k = kernels(precision)
         self.T = torch_dtype(precision)
         self.n_panels = int(lattice.n_panels)
@@ -234,14 +280,28 @@ class DeviceLattice:
         # The target core changes the result only between different groups.
         self.use_tg = 1 if np.unique(self.panel_group).size > 1 else 0
         T = self.T
-        self.t = {
-            "A": _f64(lattice.a), "B": _f64(lattice.b), "ATE": _f64(lattice.a_te), "BTE": _f64(lattice.b_te),
-            "r0b": _f64(lattice.b - lattice.a).to(T).contiguous(),
-            "r0a": _f64(lattice.a - lattice.a_te).to(T).contiguous(),
-            "r0t": _f64(lattice.b_te - lattice.b).to(T).contiguous(),
-            "rc2": _f64(np.asarray(lattice.rc, dtype=float) ** 2).to(T).contiguous(),
-            "group": _i32(self.panel_group),
-        }
+        if mach_transform is not None:
+            a_s = mach_transform.to_s(lattice.a)
+            b_s = mach_transform.to_s(lattice.b)
+            a_te_s = mach_transform.to_s(lattice.a_te)
+            b_te_s = mach_transform.to_s(lattice.b_te)
+            self.t = {
+                "A": _f64(a_s), "B": _f64(b_s), "ATE": _f64(a_te_s), "BTE": _f64(b_te_s),
+                "r0b": _f64(b_s - a_s).to(T).contiguous(),
+                "r0a": _f64(a_s - a_te_s).to(T).contiguous(),
+                "r0t": _f64(b_te_s - b_s).to(T).contiguous(),
+                "rc2": _f64(np.asarray(lattice.rc, dtype=float) ** 2).to(T).contiguous(),
+                "group": _i32(self.panel_group),
+            }
+        else:
+            self.t = {
+                "A": _f64(lattice.a), "B": _f64(lattice.b), "ATE": _f64(lattice.a_te), "BTE": _f64(lattice.b_te),
+                "r0b": _f64(lattice.b - lattice.a).to(T).contiguous(),
+                "r0a": _f64(lattice.a - lattice.a_te).to(T).contiguous(),
+                "r0t": _f64(lattice.b_te - lattice.b).to(T).contiguous(),
+                "rc2": _f64(np.asarray(lattice.rc, dtype=float) ** 2).to(T).contiguous(),
+                "group": _i32(self.panel_group),
+            }
         self.t["Ah"], self.t["Al"] = split2(self.t["A"])
         self.TE = torch.stack([self.t["ATE"], self.t["BTE"]], dim=1)   # (n, 2, 3)
         k = self.k
@@ -279,10 +339,16 @@ class DeviceLattice:
 
                 sd = _llt_strip_data(lattice, umap)
                 normals = sd["normal"]
+                eval_p = lattice.cp[up]
             else:
                 sd = None
-                normals = lattice.normal_bc[up]
-            pts = PointSet(self, lattice.cp[up], normals, tg.group, tg.rc, self.use_tg)
+                if self.mach_transform is not None:
+                    eval_p = self.mach_transform.to_s(lattice.cp[up])
+                    normals = self.mach_transform.transform_normal(lattice.normal_bc[up])
+                else:
+                    eval_p = lattice.cp[up]
+                    normals = lattice.normal_bc[up]
+            pts = PointSet(self, eval_p, normals, tg.group, tg.rc, self.use_tg)
             data = {
                 "n": umap.n, "symmetric": bool(umap.symmetric), "pts": pts,
                 "src_of": _i32(src_of),
@@ -300,6 +366,8 @@ class DeviceLattice:
                 data["p34"] = _f64(p34)
             else:
                 data["cp"] = _f64(lattice.cp[up])
+                if self.mach_transform is not None:
+                    data["nbc64"] = _f64(lattice.normal_bc[up])
             if umap.symmetric:
                 left = np.setdiff1d(np.arange(lattice.n_panels), up)
                 data["left"] = _tensor(left)
@@ -348,12 +416,15 @@ def _lattice_tensors(lattice) -> dict:
     return t
 
 
-def device_lattice(lattice, precision: str) -> DeviceLattice:
+def device_lattice(lattice, precision: str, mach_transform: MachTransform | None = None) -> DeviceLattice:
     """Return the GPU data of *lattice* for *precision* (cached on the lattice)."""
-    key = ("gpu_lattice", DEVICE, precision)
+    if mach_transform is None:
+        key = ("gpu_lattice", DEVICE, precision)
+    else:
+        key = ("gpu_lattice_mach", DEVICE, precision, mach_transform.key)
     dl = lattice.geom_cache.get(key)
     if dl is None:
-        dl = DeviceLattice(lattice, precision)
+        dl = DeviceLattice(lattice, precision, mach_transform=mach_transform)
         lattice.geom_cache[key] = dl
     return dl
 
@@ -1130,6 +1201,8 @@ def load_points(dl: DeviceLattice, lattice, fold: bool) -> dict:
         leg_a = 0.5 * (lattice.a_te + lattice.a)
         leg_b = 0.5 * (lattice.b + lattice.b_te)
         points = [mid, leg_a, leg_b]
+        if dl.mach_transform is not None:
+            points = [dl.mach_transform.to_s(pk) for pk in points]
         swap = [0, 2, 1]
         geo = _symmetric_fold(lattice, np.ones(lattice.n_panels), points, swap, leg_forces=True) if fold else None
         eval_panels = np.arange(lattice.n_panels) if geo is None else geo[0]
@@ -1243,6 +1316,12 @@ def vlm_load_velocities(dl: DeviceLattice, lattice, cs: CaseData, G: torch.Tenso
         mirror = _const("mirror")
         for j, sw in enumerate(lp["swap"]):
             sets[j][:, lp["left"]] = sets[sw][:, lp["left_mirror"]] * mirror
+    if dl.mach_transform is not None:
+        R_dev = _f64(dl.mach_transform.R)
+        beta_val = dl.mach_transform.beta
+        for j in range(3):
+            sets[j][..., 0] /= beta_val
+            sets[j] = sets[j] @ R_dev
     return sets
 
 

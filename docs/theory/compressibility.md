@@ -95,8 +95,7 @@ The vortex-lattice solver reproduces this scaling.
 
 - Valid for Mach numbers $0 \le M < 1$.
 - At $M > 0.7$, local flow can become supersonic. Shocks and wave drag can appear. The trust score gives a warning above $M = 0.7$ and reduces the confidence rating.
-- The VLM solver (`solver_type="vlm"`) supports the compressibility correction on the CPU path.
-- The GPU pipeline falls back to the CPU path when `mach` is set.
+- The VLM solver (`solver_type="vlm"`) supports the compressibility correction on the CPU and GPU paths.
 - The lifting-line solvers (linear, nonlinear, and Fourier) refuse `mach > 0` and raise `ValidityError`.
 - Ground effect refuses `mach > 0` and raises `ValidityError`.
 - Adjoint gradients and gradient checks refuse `mach > 0` and raise `GradientScopeError`.
@@ -107,7 +106,7 @@ The vortex-lattice solver reproduces this scaling.
 - `ventorum.core.trust`: applies Mach number penalties and envelope warnings.
 - `ventorum.solvers.core.assemble_vlm`: applies the coordinate stretch and normal vector scaling in free-stream axes.
 - `ventorum.aero.loads._near_field_velocity`: computes transformed induced velocities and scales the streamwise component.
-- `ventorum.gpu.pipeline.can_run_on_gpu`: detects `mach > 0` and routes execution to the CPU path. This is a temporary limit of the first version: the GPU path and the gradients with `mach > 0` follow.
+- `ventorum.gpu.pipeline`: solves VLM batches with `mach > 0` on the GPU by transforming coordinates and normals per Mach group.
 - `ventorum.solvers.lattice_base`: validates solver compatibility and raises errors for unsupported configurations.
 
 ## Verification

@@ -526,3 +526,52 @@ def test_gpu_kernels_equal_numpy_on_the_extended_leg_lines(precision, ground):
         scale = float(np.max(np.abs(want)))
         err = float(np.max(np.abs(got[kk] - want)))
         assert err <= tol * scale, (precision, ground, kk, err / scale)
+
+
+@pytest.mark.gpu
+@pytest.mark.parametrize("precision", ["float64", "float32"])
+@pytest.mark.parametrize("mach", [0.3, 0.6])
+@pytest.mark.parametrize("beta", [0.0, np.radians(3.0)])
+def test_gpu_mach_parity_single_case(gpu_device, precision, mach, beta):
+    """Parity test of the VLM GPU pipeline with Mach against the CPU."""
+    solver = vt.VortexLatticeSolver()
+    ac = _aircraft(tail=True)
+    st = vt.SolverSettings(solver_type="vlm", n_panels=20, n_chord=2)
+    cond = vt.FlightCondition(V_inf=50.0, alpha=np.radians(4.0), beta=beta, mach=mach)
+    gpu.set_device("cpu")
+    ref = [solver.solve(ac, cond, st)]
+    gpu.set_device("gpu")
+    gpu.set_precision(precision)
+    new = [solver.solve(ac, cond, st)]
+    _assert_close(ref, new, TOL[precision])
+
+
+@pytest.mark.gpu
+@pytest.mark.parametrize("precision", ["float64", "float32"])
+def test_gpu_mach_parity_mixed_sweep(gpu_device, precision):
+    """Parity test of a 33-case sweep with mixed Mach numbers on the GPU."""
+    solver = vt.VortexLatticeSolver()
+    ac = _aircraft(tail=True)
+    st = vt.SolverSettings(solver_type="vlm", n_panels=16, n_chord=2)
+    machs = [0.0, 0.3, 0.6]
+    alphas = np.radians(np.linspace(-2.0, 6.0, 33))
+    conditions = []
+    for i, a in enumerate(alphas):
+        m = machs[i % len(machs)]
+        b = np.radians(3.0) if i % 2 == 1 else 0.0
+        conditions.append(vt.FlightCondition(V_inf=45.0 + i, alpha=a, beta=b, mach=m))
+    assert len(conditions) == 33
+
+    lattice = solver.build(ac, st, conditions[0])
+    ac.compute_reference_values()
+
+    def run_solve(device):
+        gpu.set_device(device)
+        gpu.set_precision(precision)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            return solver.solve_batch(lattice, conditions, st, ac.S_ref, ac.b_ref, ac.c_ref)
+
+    ref = run_solve("cpu")
+    new = run_solve("gpu")
+    _assert_close(ref, new, TOL[precision])

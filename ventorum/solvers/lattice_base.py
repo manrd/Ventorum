@@ -729,9 +729,6 @@ class LatticeSolver(BaseSolver):
         """
         from ventorum import gpu
 
-        if any(getattr(c, "mach", None) is not None and c.mach > 0.0 for c in conditions):
-            return (None, "compressibility correction runs on the CPU path") if return_reason else None
-
         if gpu.get_device() == "cpu":
             return (None, gpu._REASON_DEVICE_CPU) if return_reason else None
         from ventorum.gpu.pipeline import solve_batch as gpu_solve_batch

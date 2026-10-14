@@ -108,7 +108,9 @@ def test_ground_effect_refusal_with_mach():
 
 
 def test_gpu_fallback_with_mach():
-    """Check that GPU dispatch runs on the CPU path with mach > 0."""
+    """Check that GPU dispatch runs on the GPU and agrees with the CPU when mach > 0."""
+    from ventorum import gpu
+
     wing = LiftingSurface(
         name="GPUWing",
         semi_span=4.0,
@@ -118,10 +120,25 @@ def test_gpu_fallback_with_mach():
         ],
     )
     cond = FlightCondition(V_inf=40.0, alpha=np.radians(3.0), mach=0.5)
-    res = vt.analyze(wing, condition=cond, solver="vlm")
-    dispatch = res.details.get("dispatch", {})
-    assert dispatch.get("device") == "cpu"
-    assert "compressibility correction runs on the cpu path" in dispatch.get("reason", "").lower()
+    res_cpu = vt.analyze(wing, condition=cond, solver="vlm")
+    if not gpu.available():
+        dispatch = res_cpu.details.get("dispatch", {})
+        assert dispatch.get("device") == "cpu"
+        return
+    old_dev = gpu.get_device()
+    old_prec = gpu.get_precision()
+    try:
+        gpu.set_device("gpu")
+        gpu.set_precision("float64")
+        res_gpu = vt.analyze(wing, condition=cond, solver="vlm")
+        dispatch = res_gpu.details.get("dispatch", {})
+        assert dispatch.get("device") == "gpu"
+        assert np.isclose(res_gpu.totals.CL, res_cpu.totals.CL, rtol=1e-10)
+        assert np.isclose(res_gpu.totals.CDi, res_cpu.totals.CDi, rtol=1e-10)
+        assert np.allclose(res_gpu.details["gamma"], res_cpu.details["gamma"], rtol=1e-10)
+    finally:
+        gpu.set_device(old_dev)
+        gpu.set_precision(old_prec)
 
 
 def test_gradient_refusals_with_mach():
