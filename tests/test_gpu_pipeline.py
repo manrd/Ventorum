@@ -575,3 +575,26 @@ def test_gpu_mach_parity_mixed_sweep(gpu_device, precision):
     ref = run_solve("cpu")
     new = run_solve("gpu")
     _assert_close(ref, new, TOL[precision])
+
+
+def test_mach_device_lattice_cache_keeps_one_entry():
+    """A Mach sweep over many angles keeps one stretched GPU lattice per precision (no growth)."""
+    from ventorum import gpu
+    from ventorum.gpu import engine
+
+    if not gpu.available():
+        pytest.skip("no GPU")
+    import ventorum as vt
+
+    wing = vt.LiftingSurface(name="W", semi_span=4.0, sections=[
+        vt.WingSection(y_frac=0.0, chord=1.0), vt.WingSection(y_frac=1.0, chord=1.0)])
+    ac = vt.Aircraft(surfaces=[wing])
+    solver = vt.VortexLatticeSolver()
+    st = vt.SolverSettings(solver_type="vlm", n_panels=8, n_chord=2)
+    lat = solver.build(ac, st, vt.FlightCondition(V_inf=40.0))
+    for a in (1.0, 2.0, 3.0):
+        mt = engine.MachTransform(0.5, np.radians(a), 0.0)
+        dl = engine.device_lattice(lat, "float64", mach_transform=mt)
+        assert engine.device_lattice(lat, "float64", mach_transform=mt) is dl
+    keys = [k for k in lat.geom_cache if isinstance(k, tuple) and k and k[0] == "gpu_lattice_mach"]
+    assert len(keys) == 1

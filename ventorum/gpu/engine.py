@@ -417,15 +417,25 @@ def _lattice_tensors(lattice) -> dict:
 
 
 def device_lattice(lattice, precision: str, mach_transform: MachTransform | None = None) -> DeviceLattice:
-    """Return the GPU data of *lattice* for *precision* (cached on the lattice)."""
+    """Return the GPU data of *lattice* for *precision* (cached on the lattice).
+
+    A stretched lattice (Mach > 0) depends on the Mach number and the
+    free-stream direction. Only the most recent one is kept per precision,
+    so a long sweep over many angles does not fill the GPU memory.
+    """
     if mach_transform is None:
         key = ("gpu_lattice", DEVICE, precision)
-    else:
-        key = ("gpu_lattice_mach", DEVICE, precision, mach_transform.key)
-    dl = lattice.geom_cache.get(key)
-    if dl is None:
-        dl = DeviceLattice(lattice, precision, mach_transform=mach_transform)
-        lattice.geom_cache[key] = dl
+        dl = lattice.geom_cache.get(key)
+        if dl is None:
+            dl = DeviceLattice(lattice, precision)
+            lattice.geom_cache[key] = dl
+        return dl
+    key = ("gpu_lattice_mach", DEVICE, precision)
+    held = lattice.geom_cache.get(key)
+    if held is not None and held[0] == mach_transform.key:
+        return held[1]
+    dl = DeviceLattice(lattice, precision, mach_transform=mach_transform)
+    lattice.geom_cache[key] = (mach_transform.key, dl)
     return dl
 
 
