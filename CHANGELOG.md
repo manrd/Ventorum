@@ -72,6 +72,10 @@ a minor version can change a public interface.
 
 ### Changed
 
+- The near-field loads of the vortex lattice evaluate each shared trailing-edge wake ray once
+  (the rays of one strip that start at the same point merge, with their circulations summed).
+  A 33-case VLM sweep is about 7 % faster, a wing-tail sweep about 6 %. Results equal to
+  round-off; one round-off line of the verification report moves (7.0e-16 to 6.2e-16).
 - The numpy reference vortex kernel is 13 % to 24 % faster (fewer temporary arrays; the
   outside law of the finite-filament core only where it is needed). Results equal to
   round-off; the PyTorch kernel is unchanged.
