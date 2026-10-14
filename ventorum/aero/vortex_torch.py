@@ -153,26 +153,113 @@ def _segment(P, A, B, rc2):
     d2 = (r2 * r2).sum(-1) + 1e-300
     n1 = torch.sqrt(d1)
     n2 = torch.sqrt(d2)
-    t1 = r1 / n1[..., None]
-    t2 = r2 / n2[..., None]
-    proj = (r0[..., 0] * (t1[..., 0] - t2[..., 0])
-            + r0[..., 1] * (t1[..., 1] - t2[..., 1])
-            + r0[..., 2] * (t1[..., 2] - t2[..., 2]))
-    denom = cr2 + rc2 * r0sq
-    ok = denom > 1e-300
-    safe = torch.where(ok, denom, torch.ones_like(denom))
-    k_in = torch.where(ok, _INV_4PI * proj / safe, torch.zeros_like(proj))
-    # Outside the segment (before A or after B) the exact law is multiplied by
-    # D^2 / (D^2 + rc^2), with D the distance to the nearest end point.
+    # Speed trick: the masks come first, so each branch runs only where needed.
     before = (r0 * r1).sum(-1) < 0.0
     after = (r0 * r2).sum(-1) > 0.0
     outside = before | after
-    D2 = torch.where(before, d1, d2)
-    e = n1 * n2 + (r1 * r2).sum(-1)
-    ok_out = outside & (e > 1e-300)
-    safe_out = torch.where(ok_out, n1 * n2 * e, torch.ones_like(e))
-    k_out = torch.where(ok_out, _INV_4PI * (n1 + n2) / safe_out * (D2 / (D2 + rc2)), torch.zeros_like(e))
-    k = torch.where(outside, k_out, k_in)
+    n_out = int(outside.sum())
+    total = outside.numel()
+    if n_out == 0:
+        # Speed trick: all over the segment, inside law only (no outside arrays).
+        t1 = r1 / n1[..., None]
+        t2 = r2 / n2[..., None]
+        proj = (r0[..., 0] * (t1[..., 0] - t2[..., 0])
+                + r0[..., 1] * (t1[..., 1] - t2[..., 1])
+                + r0[..., 2] * (t1[..., 2] - t2[..., 2]))
+        denom = cr2 + rc2 * r0sq
+        ok = denom > 1e-300
+        safe = torch.where(ok, denom, torch.ones_like(denom))
+        k = torch.where(ok, _INV_4PI * proj / safe, torch.zeros_like(proj))
+    elif n_out == total:
+        # Speed trick: all outside the segment, outside law only.
+        D2 = torch.where(before, d1, d2)
+        e = n1 * n2 + (r1 * r2).sum(-1)
+        ok = e > 1e-300
+        safe = torch.where(ok, n1 * n2 * e, torch.ones_like(e))
+        k = torch.where(ok, _INV_4PI * (n1 + n2) / safe * (D2 / (D2 + rc2)), torch.zeros_like(e))
+    elif n_out < 0.1 * total:
+        # Speed trick: outside fraction is small, so the outside law runs
+        # on masked blocks only.
+        t1 = r1 / n1[..., None]
+        t2 = r2 / n2[..., None]
+        proj = (r0[..., 0] * (t1[..., 0] - t2[..., 0])
+                + r0[..., 1] * (t1[..., 1] - t2[..., 1])
+                + r0[..., 2] * (t1[..., 2] - t2[..., 2]))
+        denom = cr2 + rc2 * r0sq
+        ok = denom > 1e-300
+        safe = torch.where(ok, denom, torch.ones_like(denom))
+        k = torch.where(ok, _INV_4PI * proj / safe, torch.zeros_like(proj))
+        rows, cols = torch.where(outside)
+        r1b = r1[outside]
+        r2b = r2[outside]
+        n1b = n1[outside]
+        n2b = n2[outside]
+        d1b = d1[outside]
+        d2b = d2[outside]
+        bef = before[outside]
+        D2b = torch.where(bef, d1b, d2b)
+        eb = n1b * n2b + (r1b * r2b).sum(-1)
+        if rc2.shape == D2.shape:
+            rcb = rc2[outside]
+        else:
+            rcb = rc2[0, cols]
+        okb = eb > 1e-300
+        safe_b = torch.where(okb, n1b * n2b * eb, torch.ones_like(eb))
+        k_out_b = torch.where(okb, _INV_4PI * (n1b + n2b) / safe_b * (D2b / (D2b + rcb)),
+                              torch.zeros_like(eb))
+        k[outside] = k_out_b
+    elif n_out > 0.9 * total:
+        # Speed trick: inside fraction is small, so the inside law runs
+        # on masked blocks only.
+        D2 = torch.where(before, d1, d2)
+        e = n1 * n2 + (r1 * r2).sum(-1)
+        ok = e > 1e-300
+        safe = torch.where(ok, n1 * n2 * e, torch.ones_like(e))
+        k = torch.where(ok & outside, _INV_4PI * (n1 + n2) / safe * (D2 / (D2 + rc2)),
+                           torch.zeros_like(e))
+        inside = ~outside
+        rows, cols = torch.where(inside)
+        r1b = r1[inside]
+        r2b = r2[inside]
+        n1b = n1[inside]
+        n2b = n2[inside]
+        cr2b = cr2[inside]
+        r0b = r0[0, cols]
+        if rc2.shape == D2.shape:
+            rcb = rc2[inside]
+        else:
+            rcb = rc2[0, cols]
+        if r0sq.shape == D2.shape:
+            r0sqb = r0sq[inside]
+        else:
+            r0sqb = r0sq[0, cols]
+        t1b = r1b / n1b[:, None]
+        t2b = r2b / n2b[:, None]
+        projb = (r0b[:, 0] * (t1b[:, 0] - t2b[:, 0])
+                 + r0b[:, 1] * (t1b[:, 1] - t2b[:, 1])
+                 + r0b[:, 2] * (t1b[:, 2] - t2b[:, 2]))
+        denomb = cr2b + rcb * r0sqb
+        okb = denomb > 1e-300
+        safe_b = torch.where(okb, denomb, torch.ones_like(denomb))
+        k[inside] = torch.where(okb, _INV_4PI * projb / safe_b, torch.zeros_like(projb))
+    else:
+        t1 = r1 / n1[..., None]
+        t2 = r2 / n2[..., None]
+        proj = (r0[..., 0] * (t1[..., 0] - t2[..., 0])
+                + r0[..., 1] * (t1[..., 1] - t2[..., 1])
+                + r0[..., 2] * (t1[..., 2] - t2[..., 2]))
+        denom = cr2 + rc2 * r0sq
+        ok = denom > 1e-300
+        safe = torch.where(ok, denom, torch.ones_like(denom))
+        k_in = torch.where(ok, _INV_4PI * proj / safe, torch.zeros_like(proj))
+        # Outside the segment (before A or after B) the exact law is multiplied by
+        # D^2 / (D^2 + rc^2), with D the distance to the nearest end point.
+        D2 = torch.where(before, d1, d2)
+        e = n1 * n2 + (r1 * r2).sum(-1)
+        ok_out = outside & (e > 1e-300)
+        safe_out = torch.where(ok_out, n1 * n2 * e, torch.ones_like(e))
+        k_out = torch.where(ok_out, _INV_4PI * (n1 + n2) / safe_out * (D2 / (D2 + rc2)), torch.zeros_like(e))
+        k = torch.where(outside, k_out, k_in)
     return torch.stack((cx * k, cy * k, cz * k), dim=-1)
 
 
@@ -187,18 +274,74 @@ def _ray(P, A, d, rc2):
     D2 = (r * r).sum(-1) + 1e-300
     rn = torch.sqrt(D2)
     dr = (dd * r).sum(-1)
-    cos_t = dr / rn
-    denom = cr2 + rc2
-    ok = denom > 1e-300
-    safe = torch.where(ok, denom, torch.ones_like(denom))
-    k_in = torch.where(ok, _INV_4PI * (1.0 + cos_t) / safe, torch.zeros_like(cos_t))
-    # Behind the start point the exact law is multiplied by D^2 / (D^2 + rc^2), D = |r|.
+    # Speed trick: the mask comes first, so each branch runs only where needed.
     behind = dr < 0.0
-    e = rn * (rn - dr)
-    ok_out = behind & (e > 1e-300)
-    safe_out = torch.where(ok_out, e, torch.ones_like(e))
-    k_out = torch.where(ok_out, _INV_4PI / safe_out * (D2 / (D2 + rc2)), torch.zeros_like(e))
-    k = torch.where(behind, k_out, k_in)
+    n_beh = int(behind.sum())
+    total = behind.numel()
+    if n_beh == 0:
+        # Speed trick: all in front, inside law only.
+        cos_t = dr / rn
+        denom = cr2 + rc2
+        ok = denom > 1e-300
+        safe = torch.where(ok, denom, torch.ones_like(denom))
+        k = torch.where(ok, _INV_4PI * (1.0 + cos_t) / safe, torch.zeros_like(cos_t))
+    elif n_beh == total:
+        # Speed trick: all behind, outside law only (the wake case).
+        e = rn * (rn - dr)
+        ok = e > 1e-300
+        safe = torch.where(ok, e, torch.ones_like(e))
+        k = torch.where(ok, _INV_4PI / safe * (D2 / (D2 + rc2)), torch.zeros_like(e))
+    elif n_beh < 0.1 * total:
+        # Speed trick: behind fraction is small, outside law on masked blocks only.
+        cos_t = dr / rn
+        denom = cr2 + rc2
+        ok = denom > 1e-300
+        safe = torch.where(ok, denom, torch.ones_like(denom))
+        k = torch.where(ok, _INV_4PI * (1.0 + cos_t) / safe, torch.zeros_like(cos_t))
+        rows, cols = torch.where(behind)
+        rnb = rn[behind]
+        drb = dr[behind]
+        D2b = D2[behind]
+        eb = rnb * (rnb - drb)
+        if rc2.shape == D2.shape:
+            rcb = rc2[behind]
+        else:
+            rcb = rc2[0, cols]
+        okb = eb > 1e-300
+        safe_b = torch.where(okb, eb, torch.ones_like(eb))
+        k[behind] = torch.where(okb, _INV_4PI / safe_b * (D2b / (D2b + rcb)), torch.zeros_like(eb))
+    elif n_beh > 0.9 * total:
+        # Speed trick: front fraction is small, inside law on masked blocks only.
+        e = rn * (rn - dr)
+        ok = e > 1e-300
+        safe = torch.where(ok, e, torch.ones_like(e))
+        k = torch.where(ok & behind, _INV_4PI / safe * (D2 / (D2 + rc2)), torch.zeros_like(e))
+        front = ~behind
+        rows, cols = torch.where(front)
+        drb = dr[front]
+        rnb = rn[front]
+        cr2b = cr2[front]
+        if rc2.shape == D2.shape:
+            rcb = rc2[front]
+        else:
+            rcb = rc2[0, cols]
+        cosb = drb / rnb
+        denomb = cr2b + rcb
+        okb = denomb > 1e-300
+        safe_b = torch.where(okb, denomb, torch.ones_like(denomb))
+        k[front] = torch.where(okb, _INV_4PI * (1.0 + cosb) / safe_b, torch.zeros_like(cosb))
+    else:
+        cos_t = dr / rn
+        denom = cr2 + rc2
+        ok = denom > 1e-300
+        safe = torch.where(ok, denom, torch.ones_like(denom))
+        k_in = torch.where(ok, _INV_4PI * (1.0 + cos_t) / safe, torch.zeros_like(cos_t))
+        # Behind the start point the exact law is multiplied by D^2 / (D^2 + rc^2), D = |r|.
+        e = rn * (rn - dr)
+        ok_out = behind & (e > 1e-300)
+        safe_out = torch.where(ok_out, e, torch.ones_like(e))
+        k_out = torch.where(ok_out, _INV_4PI / safe_out * (D2 / (D2 + rc2)), torch.zeros_like(e))
+        k = torch.where(behind, k_out, k_in)
     return torch.stack((cx * k, cy * k, cz * k), dim=-1)
 
 

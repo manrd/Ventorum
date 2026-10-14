@@ -452,37 +452,188 @@ def segment_velocity(
     numpy.ndarray
         Induced velocity for unit circulation [m/s per m^2/s], shape (m, n, 3).
     """
-    P = P[:, None, :]
-    r1 = P - A[None, :, :]
-    r2 = P - B[None, :, :]
-    r0 = (B - A)[None, :, :]
-    cr = _cross(r1, r2)
-    cr2 = _dot(cr, cr)
-    r0sq = _dot(r0, r0)
-    rc2 = _rc2(rc, P.shape[0], A.shape[0])
+    m, n = P.shape[0], A.shape[0]
+    r1 = P[:, None, :] - A[None, :, :]
+    r2 = P[:, None, :] - B[None, :, :]
+    r0 = B - A
+    # Speed trick: components of r1 x r2 in place (one temporary per component).
+    # Formula: cr = r1 x r2 (Katz and Plotkin).
+    r1x, r1y, r1z = r1[..., 0], r1[..., 1], r1[..., 2]
+    r2x, r2y, r2z = r2[..., 0], r2[..., 1], r2[..., 2]
+    cx = r1y * r2z
+    cx -= r1z * r2y
+    cy = r1z * r2x
+    cy -= r1x * r2z
+    cz = r1x * r2y
+    cz -= r1y * r2x
+    cr2 = cx * cx
+    cr2 += cy * cy
+    cr2 += cz * cz
+    r0sq = r0[:, 0] * r0[:, 0] + r0[:, 1] * r0[:, 1] + r0[:, 2] * r0[:, 2]
+    rc2 = _rc2(rc, m, n)
     # A tiny floor keeps the unit vectors finite when P is on an end point.
-    d1 = _dot(r1, r1) + 1e-300
-    d2 = _dot(r2, r2) + 1e-300
+    # Speed trick: squared norms in place (no extra temporaries for the sums).
+    d1 = r1x * r1x
+    d1 += r1y * r1y
+    d1 += r1z * r1z
+    d1 += 1e-300
+    d2 = r2x * r2x
+    d2 += r2y * r2y
+    d2 += r2z * r2z
+    d2 += 1e-300
     n1 = np.sqrt(d1)
     n2 = np.sqrt(d2)
-    proj = (
-        r0[..., 0] * (r1[..., 0] / n1 - r2[..., 0] / n2)
-        + r0[..., 1] * (r1[..., 1] / n1 - r2[..., 1] / n2)
-        + r0[..., 2] * (r1[..., 2] / n1 - r2[..., 2] / n2)
-    )
-    denom = cr2 + rc2 * r0sq
-    ok = denom > 1e-300
-    k_in = np.where(ok, _INV_4PI * proj / np.where(ok, denom, 1.0), 0.0)
     # Outside the segment: the point is before A (r0 . r1 < 0) or after B
     # (r0 . r2 > 0). D^2 is the squared distance to the nearest end point.
-    before = _dot(r0, r1) < 0.0
-    after = _dot(r0, r2) > 0.0
-    D2 = np.where(before, d1, d2)
-    e = n1 * n2 + _dot(r1, r2)
-    ok_out = (before | after) & (e > 1e-300)
-    k_out = np.where(ok_out, _INV_4PI * (n1 + n2) / np.where(ok_out, n1 * n2 * e, 1.0) * (D2 / (D2 + rc2)), 0.0)
-    k = np.where(before | after, k_out, k_in)
-    return cr * k[..., None]
+    # Speed trick: the masks come first, so each branch runs only where needed.
+    d01 = r0[None, :, 0] * r1x
+    d01 += r0[None, :, 1] * r1y
+    d01 += r0[None, :, 2] * r1z
+    d02 = r0[None, :, 0] * r2x
+    d02 += r0[None, :, 1] * r2y
+    d02 += r0[None, :, 2] * r2z
+    before = d01 < 0.0
+    after = d02 > 0.0
+    outside = before | after
+    n_out = int(np.count_nonzero(outside))
+    total = m * n
+    k = np.empty((m, n))
+    if n_out == 0:
+        # All over the segment: inside law only.
+        # Formula: k = proj / (4 pi (|r1 x r2|^2 + rc^2 |r0|^2)).
+        # Speed trick: one reciprocal per norm (not six divisions).
+        inv1 = 1.0 / n1
+        inv2 = 1.0 / n2
+        t = r1x * inv1
+        t -= r2x * inv2
+        proj = r0[None, :, 0] * t
+        t = r1y * inv1
+        t -= r2y * inv2
+        proj += r0[None, :, 1] * t
+        t = r1z * inv1
+        t -= r2z * inv2
+        proj += r0[None, :, 2] * t
+        denom = cr2 + rc2 * r0sq
+        ok = denom > 1e-300
+        # Speed trick: indexed assignment (no safe-denominator temporary).
+        k[~ok] = 0.0
+        k[ok] = _INV_4PI * proj[ok] / denom[ok]
+    elif n_out == total:
+        # All outside the segment: outside law only.
+        # Formula: k = (n1 + n2) / (4 pi n1 n2 e) D^2 / (D^2 + rc^2),
+        # e = n1 n2 + r1 . r2 (no cancellation form).
+        e = n1 * n2
+        e += r1x * r2x
+        e += r1y * r2y
+        e += r1z * r2z
+        D2 = np.where(before, d1, d2)
+        ok = e > 1e-300
+        k[~ok] = 0.0
+        denom2 = D2 + rc2
+        D2 /= denom2
+        k[ok] = _INV_4PI * (n1[ok] + n2[ok]) / (n1[ok] * n2[ok] * e[ok]) * D2[ok]
+    elif n_out < 0.1 * total:
+        # Speed trick: outside fraction is small, so the outside law runs
+        # on flat indexed blocks only (few pairs, contiguous per block).
+        inv1 = 1.0 / n1
+        inv2 = 1.0 / n2
+        t = r1x * inv1
+        t -= r2x * inv2
+        proj = r0[None, :, 0] * t
+        t = r1y * inv1
+        t -= r2y * inv2
+        proj += r0[None, :, 1] * t
+        t = r1z * inv1
+        t -= r2z * inv2
+        proj += r0[None, :, 2] * t
+        denom = cr2 + rc2 * r0sq
+        ok = denom > 1e-300
+        k[~ok] = 0.0
+        k[ok] = _INV_4PI * proj[ok] / denom[ok]
+        idx = np.flatnonzero(outside)
+        r1b = r1.reshape(-1, 3)[idx]
+        r2b = r2.reshape(-1, 3)[idx]
+        n1b = n1.flat[idx]
+        n2b = n2.flat[idx]
+        D2b = np.where(d01.flat[idx] < 0.0, d1.flat[idx], d2.flat[idx])
+        eb = n1b * n2b + (r1b[:, 0] * r2b[:, 0] + r1b[:, 1] * r2b[:, 1] + r1b[:, 2] * r2b[:, 2])
+        if rc2.size == total:
+            rcb = rc2.flat[idx]
+        else:
+            rcb = np.asarray(rc2).ravel()[idx % n]
+        okb = eb > 1e-300
+        k.flat[idx[~okb]] = 0.0
+        v = idx[okb]
+        ev, Dv, rv = eb[okb], D2b[okb], rcb[okb]
+        a1, a2 = n1b[okb], n2b[okb]
+        k.flat[v] = _INV_4PI * (a1 + a2) / (a1 * a2 * ev) * (Dv / (Dv + rv))
+    elif n_out > 0.9 * total:
+        # Speed trick: inside fraction is small, so the inside law runs
+        # on flat indexed blocks only.
+        e = n1 * n2
+        e += r1x * r2x
+        e += r1y * r2y
+        e += r1z * r2z
+        D2 = np.where(before, d1, d2)
+        ok = e > 1e-300
+        k[~ok] = 0.0
+        denom2 = D2 + rc2
+        D2 /= denom2
+        ovalid = outside & ok
+        k[ovalid] = _INV_4PI * (n1[ovalid] + n2[ovalid]) / (n1[ovalid] * n2[ovalid] * e[ovalid]) * D2[ovalid]
+        idx = np.flatnonzero(~outside)
+        r1b = r1.reshape(-1, 3)[idx]
+        r2b = r2.reshape(-1, 3)[idx]
+        n1b = n1.flat[idx]
+        n2b = n2.flat[idx]
+        cr2b = cr2.flat[idx]
+        col = idx % n
+        r0b = r0[col]
+        if rc2.size == total:
+            rcb = rc2.flat[idx]
+        else:
+            rcb = np.asarray(rc2).ravel()[col]
+        r0sqb = r0sq[col]
+        projb = (r0b[:, 0] * (r1b[:, 0] / n1b - r2b[:, 0] / n2b)
+                 + r0b[:, 1] * (r1b[:, 1] / n1b - r2b[:, 1] / n2b)
+                 + r0b[:, 2] * (r1b[:, 2] / n1b - r2b[:, 2] / n2b))
+        denomb = cr2b + rcb * r0sqb
+        okb = denomb > 1e-300
+        k.flat[idx[~okb]] = 0.0
+        k.flat[idx[okb]] = _INV_4PI * projb[okb] / denomb[okb]
+    else:
+        # Mixed fractions: both laws on all pairs, but with fewer
+        # temporaries (in-place sums, indexed assignment, no safe arrays).
+        inv1 = 1.0 / n1
+        inv2 = 1.0 / n2
+        t = r1x * inv1
+        t -= r2x * inv2
+        proj = r0[None, :, 0] * t
+        t = r1y * inv1
+        t -= r2y * inv2
+        proj += r0[None, :, 1] * t
+        t = r1z * inv1
+        t -= r2z * inv2
+        proj += r0[None, :, 2] * t
+        denom = cr2 + rc2 * r0sq
+        ok = denom > 1e-300
+        k[~ok] = 0.0
+        k[ok] = _INV_4PI * proj[ok] / denom[ok]
+        e = n1 * n2
+        e += r1x * r2x
+        e += r1y * r2y
+        e += r1z * r2z
+        D2 = np.where(before, d1, d2)
+        ok_out = outside & (e > 1e-300)
+        k[outside & ~ok_out] = 0.0
+        denom2 = D2 + rc2
+        D2 /= denom2
+        k[ok_out] = _INV_4PI * (n1[ok_out] + n2[ok_out]) / (n1[ok_out] * n2[ok_out] * e[ok_out]) * D2[ok_out]
+    out = np.empty_like(r1)
+    out[..., 0] = cx * k
+    out[..., 1] = cy * k
+    out[..., 2] = cz * k
+    return out
 
 
 def ray_velocity(
@@ -515,25 +666,118 @@ def ray_velocity(
     numpy.ndarray
         Induced velocity for unit circulation [m/s per m^2/s], shape (m, n, 3).
     """
+    m, n = P.shape[0], A.shape[0]
     r = P[:, None, :] - A[None, :, :]
     dd = d[None, :, :]
-    cr = _cross(dd, r)
-    cr2 = _dot(cr, cr)
-    D2 = _dot(r, r) + 1e-300
+    rx, ry, rz = r[..., 0], r[..., 1], r[..., 2]
+    dx, dy, dz = dd[..., 0], dd[..., 1], dd[..., 2]
+    # Speed trick: components of d x r in place (one temporary per component).
+    # Formula: cr = d x r (Katz and Plotkin).
+    cx = dy * rz
+    cx -= dz * ry
+    cy = dz * rx
+    cy -= dx * rz
+    cz = dx * ry
+    cz -= dy * rx
+    cr2 = cx * cx
+    cr2 += cy * cy
+    cr2 += cz * cz
+    # Speed trick: squared norm in place.
+    D2 = rx * rx
+    D2 += ry * ry
+    D2 += rz * rz
+    D2 += 1e-300
     rn = np.sqrt(D2)
-    dr = _dot(dd, r)
-    cos_t = dr / rn
-    rc2 = _rc2(rc, P.shape[0], A.shape[0])
-    denom = cr2 + rc2
-    ok = denom > 1e-300
-    k_in = np.where(ok, _INV_4PI * (1.0 + cos_t) / np.where(ok, denom, 1.0), 0.0)
-    # Behind the start point: exact law (no cancellation) times D^2 / (D^2 + rc^2).
+    dr = dx * rx
+    dr += dy * ry
+    dr += dz * rz
+    # Speed trick: the mask comes first, so each branch runs only where needed.
     behind = dr < 0.0
-    e = rn * (rn - dr)
-    ok_out = behind & (e > 1e-300)
-    k_out = np.where(ok_out, _INV_4PI / np.where(ok_out, e, 1.0) * (D2 / (D2 + rc2)), 0.0)
-    k = np.where(behind, k_out, k_in)
-    return cr * k[..., None]
+    n_beh = int(np.count_nonzero(behind))
+    total = m * n
+    rc2 = _rc2(rc, m, n)
+    k = np.empty((m, n))
+    if n_beh == 0:
+        # All in front of the start point: inside law only.
+        # Formula: k = (1 + d . r / |r|) / (4 pi (|d x r|^2 + rc^2)).
+        cos_t = dr / rn
+        denom = cr2 + rc2
+        ok = denom > 1e-300
+        k[~ok] = 0.0
+        k[ok] = _INV_4PI * (1.0 + cos_t[ok]) / denom[ok]
+    elif n_beh == total:
+        # All behind the start point: outside law only.
+        # Formula: k = D^2 / (4 pi |r| (|r| - d . r) (D^2 + rc^2)), D = |r|.
+        e = rn * (rn - dr)
+        ok = e > 1e-300
+        k[~ok] = 0.0
+        denom2 = D2 + rc2
+        D2 /= denom2
+        k[ok] = _INV_4PI / e[ok] * D2[ok]
+    elif n_beh < 0.1 * total:
+        # Speed trick: behind fraction is small, so the outside law runs
+        # on flat indexed blocks only.
+        cos_t = dr / rn
+        denom = cr2 + rc2
+        ok = denom > 1e-300
+        k[~ok] = 0.0
+        k[ok] = _INV_4PI * (1.0 + cos_t[ok]) / denom[ok]
+        idx = np.flatnonzero(behind)
+        rnb = rn.flat[idx]
+        drb = dr.flat[idx]
+        D2b = D2.flat[idx]
+        eb = rnb * (rnb - drb)
+        if rc2.size == total:
+            rcb = rc2.flat[idx]
+        else:
+            rcb = np.asarray(rc2).ravel()[idx % n]
+        okb = eb > 1e-300
+        k.flat[idx[~okb]] = 0.0
+        v = idx[okb]
+        ev, Dv, rv = eb[okb], D2b[okb], rcb[okb]
+        k.flat[v] = _INV_4PI / ev * (Dv / (Dv + rv))
+    elif n_beh > 0.9 * total:
+        # Speed trick: front fraction is small, so the inside law runs
+        # on flat indexed blocks only.
+        e = rn * (rn - dr)
+        ok = e > 1e-300
+        denom2 = D2 + rc2
+        D2 /= denom2
+        k[~ok] = 0.0
+        ovalid = behind & ok
+        k[ovalid] = _INV_4PI / e[ovalid] * D2[ovalid]
+        idx = np.flatnonzero(~behind)
+        drb = dr.flat[idx]
+        rnb = rn.flat[idx]
+        cr2b = cr2.flat[idx]
+        if rc2.size == total:
+            rcb = rc2.flat[idx]
+        else:
+            rcb = np.asarray(rc2).ravel()[idx % n]
+        cosb = drb / rnb
+        denomb = cr2b + rcb
+        okb = denomb > 1e-300
+        k.flat[idx[~okb]] = 0.0
+        k.flat[idx[okb]] = _INV_4PI * (1.0 + cosb[okb]) / denomb[okb]
+    else:
+        # Mixed fractions: both laws on all pairs, but with fewer
+        # temporaries (in-place sums, indexed assignment, no safe arrays).
+        cos_t = dr / rn
+        denom = cr2 + rc2
+        ok = denom > 1e-300
+        k[~ok] = 0.0
+        k[ok] = _INV_4PI * (1.0 + cos_t[ok]) / denom[ok]
+        e = rn * (rn - dr)
+        ok_out = behind & (e > 1e-300)
+        k[behind & ~ok_out] = 0.0
+        denom2 = D2 + rc2
+        D2 /= denom2
+        k[ok_out] = _INV_4PI / e[ok_out] * D2[ok_out]
+    out = np.empty_like(r)
+    out[..., 0] = cx * k
+    out[..., 1] = cy * k
+    out[..., 2] = cz * k
+    return out
 
 
 def _rc2(rc, m: int, n: int) -> np.ndarray:

@@ -994,3 +994,76 @@ def test_numpy_core_on_the_distance_to_the_filament():
     D2r = np.sum(r * r, axis=1)
     want_r = _exact_ray(P, A, u) * (D2r / (D2r + rc ** 2))[:, None]
     assert np.max(np.abs(vr[~front] - want_r[~front])) <= 1e-12 * np.max(np.abs(want_r[~front]))
+
+
+def _edge_core_points():
+    """Return segment, ray and edge targets: ends, extended lines, behind starts, zero core."""
+    A = np.array([0.1, -0.4, 0.2])
+    B = np.array([0.3, 0.9, 0.35])
+    r0 = B - A
+    length = float(np.linalg.norm(r0))
+    u = r0 / length
+    pts = [
+        A,
+        B,
+        A + 0.5 * r0,
+        A + 0.5 * r0 + np.array([1e-9, 0.0, 0.0]),
+        A - 0.5 * r0,
+        B + 0.5 * r0,
+        A - 1e-3 * r0,
+        B + 1e-3 * r0,
+        A - 0.3 * r0 + np.array([0.0, 1e-6, 0.0]),
+        B + 0.3 * r0 + np.array([0.0, 0.0, 1e-6]),
+        A + 0.25 * r0 + np.array([0.0, 0.05, 0.02]),
+    ]
+    return np.array(pts), A, B, u
+
+
+def test_segment_ray_edge_points_equal_torch_and_exact():
+    """Edge targets agree between numpy and torch to 1e-13, also with zero core.
+
+    The targets are on a segment end, on the segment line outside the
+    segment, behind a ray start, and on the ray start. Each backend runs
+    with core radius 0.05 and with core radius 0. With zero core the
+    off-line targets equal the exact Biot-Savart law.
+    """
+    P, A, B, u = _edge_core_points()
+    for rc in (0.05, 0.0):
+        v_seg = V.segment_velocity(P, A[None, :], B[None, :], rc)[:, 0, :]
+        assert np.all(np.isfinite(v_seg))
+        v_ray = V.ray_velocity(P, A[None, :], u[None, :], rc)[:, 0, :]
+        assert np.all(np.isfinite(v_ray))
+        torch = pytest.importorskip("torch")
+        from ventorum.aero import vortex_torch as vtorch
+
+        if not vtorch.HAVE_TORCH:
+            pytest.skip("PyTorch is not installed.")
+        old_device = os.environ.get("VENTORUM_TORCH_DEVICE", "")
+        os.environ["VENTORUM_TORCH_DEVICE"] = "cpu"
+        try:
+            tP = torch.as_tensor(np.ascontiguousarray(P, dtype=np.float64), dtype=torch.float64)
+            tA = torch.as_tensor(np.ascontiguousarray(A[None, :], dtype=np.float64), dtype=torch.float64)
+            tB = torch.as_tensor(np.ascontiguousarray(B[None, :], dtype=np.float64), dtype=torch.float64)
+            tu = torch.as_tensor(np.ascontiguousarray(u[None, :], dtype=np.float64), dtype=torch.float64)
+            trc = torch.as_tensor(np.full((1, 1), float(rc) ** 2, dtype=np.float64), dtype=torch.float64)
+            t_seg = vtorch._segment(tP, tA, tB, trc).cpu().numpy()[:, 0, :]
+            t_ray = vtorch._ray(tP, tA, tu, trc).cpu().numpy()[:, 0, :]
+        finally:
+            if old_device:
+                os.environ["VENTORUM_TORCH_DEVICE"] = old_device
+            else:
+                os.environ.pop("VENTORUM_TORCH_DEVICE", None)
+        for ref, new in ((v_seg, t_seg), (v_ray, t_ray)):
+            scale = float(np.max(np.abs(ref)))
+            if scale > 0.0:
+                assert np.max(np.abs(new - ref)) <= 1e-13 * scale
+            else:
+                assert np.max(np.abs(new - ref)) == 0.0
+        if rc == 0.0:
+            off = np.array([10])
+            want_seg = _exact_segment(P[off], A, B)
+            assert np.max(np.abs(v_seg[off] - want_seg)) <= 1e-12 * np.max(np.abs(want_seg))
+            want_ray = _exact_ray(P[off], A, u)
+            assert np.max(np.abs(v_ray[off] - want_ray)) <= 1e-12 * np.max(np.abs(want_ray))
+            line = np.array([4, 5])
+            assert np.max(np.abs(v_seg[line])) <= 1e-15
