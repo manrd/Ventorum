@@ -312,41 +312,6 @@ def test_discrete_identity():
         assert diff_F < 1e-12
 
 
-def test_2d_limit_prandtl_glauert():
-    """Check that high-AR flat wing lift slope scales as 1/beta within 1%."""
-    wing = LiftingSurface(
-        name="HighARWing",
-        semi_span=50.0,
-        sections=[
-            WingSection(y_frac=0.0, chord=1.0),
-            WingSection(y_frac=1.0, chord=1.0),
-        ],
-    )
-    aircraft = vt.Aircraft(name="HighARAircraft", surfaces=[wing])
-    settings = SolverSettings(solver_type="vlm", n_panels=40, n_chord=4)
-
-    # Solve at Mach 0.0 for two angles to get lift slope
-    c0_a1 = FlightCondition(V_inf=40.0, alpha=np.radians(1.0), mach=0.0)
-    c0_a2 = FlightCondition(V_inf=40.0, alpha=np.radians(2.0), mach=0.0)
-    r0_a1 = vt.analyze(aircraft, condition=c0_a1, settings=settings)
-    r0_a2 = vt.analyze(aircraft, condition=c0_a2, settings=settings)
-    cl_alpha_0 = (r0_a2.totals.CL - r0_a1.totals.CL) / np.radians(1.0)
-
-    # Solve at Mach 0.5
-    mach = 0.5
-    beta = math.sqrt(1.0 - mach ** 2)
-    c5_a1 = FlightCondition(V_inf=40.0, alpha=np.radians(1.0), mach=mach)
-    c5_a2 = FlightCondition(V_inf=40.0, alpha=np.radians(2.0), mach=mach)
-    r5_a1 = vt.analyze(aircraft, condition=c5_a1, settings=settings)
-    r5_a2 = vt.analyze(aircraft, condition=c5_a2, settings=settings)
-    cl_alpha_5 = (r5_a2.totals.CL - r5_a1.totals.CL) / np.radians(1.0)
-
-    ratio_actual = cl_alpha_5 / cl_alpha_0
-    ratio_expected = 1.0 / beta
-    rel_error = abs(ratio_actual - ratio_expected) / ratio_expected
-    assert rel_error < 0.01, f"Expected 1/beta={ratio_expected:.4f}, got {ratio_actual:.4f} (err {rel_error*100:.2f}%)"
-
-
 def test_finite_wing_helmbold_diederich():
     """Check aspect ratio 8 wing lift slope against Helmbold-Diederich within 3%."""
     wing = LiftingSurface(

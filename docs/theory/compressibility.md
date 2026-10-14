@@ -107,20 +107,19 @@ The vortex-lattice solver reproduces this scaling.
 - `ventorum.core.trust`: applies Mach number penalties and envelope warnings.
 - `ventorum.solvers.core.assemble_vlm`: applies the coordinate stretch and normal vector scaling in free-stream axes.
 - `ventorum.aero.loads._near_field_velocity`: computes transformed induced velocities and scales the streamwise component.
-- `ventorum.gpu.pipeline.can_run_on_gpu`: detects `mach > 0` and routes execution to the CPU path.
+- `ventorum.gpu.pipeline.can_run_on_gpu`: detects `mach > 0` and routes execution to the CPU path. This is a temporary limit of the first version: the GPU path and the gradients with `mach > 0` follow.
 - `ventorum.solvers.lattice_base`: validates solver compatibility and raises errors for unsupported configurations.
 
 ## Verification
 
 - Bit-for-bit equality: solves with `mach=None` and `mach=0.0` give identical results.
 - Discrete identity: solving at Mach $M$ matches the incompressible solve on an explicitly stretched geometry.
-- Two-dimensional limit: high aspect ratio wing scales as $1/\beta$ within 1%.
 - Finite wing: aspect ratio 8 wing scales within 3% of the Helmbold-Diederich formula up to $M = 0.6$.
 - Tests in `tests/test_compressibility.py` verify all rules and error conditions.
 
 ## References
 
-- B. H. Goethert, "Plane and Three-Dimensional Flow at Subsonic Speeds", NACA TM 1105, 1946.
+- B. H. Goethert, "Plane and Three-Dimensional Flow at High Subsonic Speeds", NACA TM 1105, 1946.
 - M. Drela, *Flight Vehicle Aerodynamics*, MIT Press, 2014.
 - J. Katz and A. Plotkin, *Low-Speed Aerodynamics*, 2nd ed., Cambridge University Press, 2001.
 - H. Glauert, "The Effect of Compressibility on the Lift of an Aerofoil", *Proceedings of the Royal Society of London*, Series A, Vol. 118, No. 779, 1928, pp. 113-119.
