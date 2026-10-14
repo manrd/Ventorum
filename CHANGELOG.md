@@ -8,6 +8,8 @@ a minor version can change a public interface.
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-10-14
+
 ### Added
 
 - Compressibility correction for the vortex lattice: the optional `FlightCondition.mach`
