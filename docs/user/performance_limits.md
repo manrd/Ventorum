@@ -170,3 +170,30 @@ timing workloads of `validation/perf_history.py` did not become slower.
 **How to remove the limit.** Fuse the projection and the core factor into
 one pass of the numpy and PyTorch kernels (fewer temporary arrays), and
 measure again with the tuner.
+
+## PL-6: The untuned GPU thresholds keep small solves on the CPU
+
+**Cause.** Without a tuned cost model (no machine profile, or a solve whose
+panel count is not known), the `"auto"` device uses one fixed work threshold
+and one fixed case threshold per solver family (`DEFAULT_MIN_WORK`,
+`DEFAULT_MIN_CASES` in `ventorum/gpu/__init__.py`). One value per family
+cannot fit every GPU: the thresholds stay conservative, so small solves and
+small batches run on the CPU even on GPUs that would win them.
+
+**What Ventorum does now.** `ventorum-tune` measures the crossover per family
+on the machine from its GPU step, without extra timing: the smallest work
+where the GPU median beats the CPU median at 1 case (`min_work`), and the
+smallest winning case count from the 1 and 33 case timings at the smallest
+measured lattice (`min_cases`), stored in the profile (schema 3). The cost
+model decides whenever the panel count is known; the thresholds only decide
+when it is not known.
+
+**Cost.** A solve without a known panel count can run on the CPU while the
+GPU would be faster. To see the crossovers on a machine, run
+`ventorum-tune`: its step 6 prints them.
+
+**How to remove the limit.** Options to study:
+
+1. Resolve the panel count before every device decision, so the cost model
+   always decides (a change of the call structure: owner decision).
+2. Thresholds per lattice size class instead of one per family.

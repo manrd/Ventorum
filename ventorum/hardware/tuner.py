@@ -3,8 +3,9 @@
 
 The tuner runs only when it is called: at setup (``ventorum-tune``), or when a
 user or an AI agent asks for it (:func:`tune_machine`). It never runs before
-an ordinary analysis. A full run takes up to about two minutes;
-``quick=True`` skips the large cases and takes about half a minute.
+an ordinary analysis. A quick run stays under 60 s: it skips the large cases
+and trims the repeats, the GPU batches and the gradient devices. The full
+mode measures everything and reports its time.
 
 It measures, for each case size (see :data:`ventorum.hardware.profile.SIZE_CLASSES`):
 
@@ -13,6 +14,8 @@ It measures, for each case size (see :data:`ventorum.hardware.profile.SIZE_CLASS
 * the best number of kernel threads for one case that runs alone;
 * the best split of the cores between cases in parallel and threads per
   case, for batches (sweeps, design studies);
+* the kernel threads of one case inside a multi-case batch that runs alone
+  (a lifting-line batch on one lattice);
 * with a CUDA GPU and the GPU pipelines (:mod:`ventorum.gpu`), a cost
   model of the CPU and GPU paths per solver family (the rule of the
   ``"auto"`` device);
@@ -21,6 +24,12 @@ It measures, for each case size (see :data:`ventorum.hardware.profile.SIZE_CLASS
   compiled VJP kernels and the PyTorch reference copy, see
   :mod:`ventorum.sensitivity.kernels`). A profile without this entry (an
   older profile) still loads; the gradients then use the built-in default.
+
+It measures once per machine, from the rows of the GPU step (no extra
+timing), the smallest work where the GPU median beats the CPU median per
+solver family (``min_work`` at 1 case, ``min_cases`` at 33 cases). The full
+mode also times the chunk caps of the CPU ground-effect batch and of the
+adjoint gradients per path (a quick run keeps the defaults).
 
 It also records the GPUs that it finds. Tuning changes the speed; the device
 choice can change results at the float32 round-off level (about 1e-7 to 1e-6
@@ -46,7 +55,16 @@ _CASES = {
     "large": (100, 16),   # 3200 panels
 }
 _REPEATS = {"small": 7, "medium": 3, "large": 2}
+# Repeats of a quick run (quick must stay under 60 s on the owner machine).
+_QUICK_REPEATS = {"small": 3, "medium": 2}
 _TIE = 0.03  # a setting with fewer threads wins if it is less than 3 % slower
+
+
+def _repeats(cls: str, quick: bool) -> int:
+    """Return the timed repeats of one timing for case class *cls*."""
+    if quick:
+        return _QUICK_REPEATS.get(cls, _REPEATS[cls])
+    return _REPEATS[cls]
 
 
 def _wing(n_panels: int, n_chord: int):
@@ -138,7 +156,7 @@ def _pick_backend(timings: dict[str, float]) -> str:
     return min(timings, key=timings.get)
 
 
-def _measure_kernels(cls: str, ac, st, cores: int) -> tuple[dict[str, str], dict[str, dict[str, float]]]:
+def _measure_kernels(cls: str, ac, st, cores: int, quick: bool = False) -> tuple[dict[str, str], dict[str, dict[str, float]]]:
     """Time each kernel function for each backend of one case size.
 
     Returns the chosen backend per kernel and the raw times in seconds.
@@ -153,6 +171,7 @@ def _measure_kernels(cls: str, ac, st, cores: int) -> tuple[dict[str, str], dict
     src = build_sources(lat, np.array([1.0, 0.0, 0.05]), UnknownMap(np.arange(n), np.arange(n), False), None)
     tg = panel_targets(lat, np.arange(n))
     gamma = np.linspace(0.5, 2.0, n)
+    reps = _repeats(cls, quick)
 
     backends = _available_backends()
     if cls != "small" and len(backends) > 1:
@@ -166,7 +185,7 @@ def _measure_kernels(cls: str, ac, st, cores: int) -> tuple[dict[str, str], dict
         times[kernel] = {}
         for backend in backends:
             with _kernel_backend(backend), par.forced_single_threads(cores), par.solve_threads(n):
-                times[kernel][backend] = _time(_kernel_fn(kernel, lat, src, tg, gamma, n), _REPEATS[cls])
+                times[kernel][backend] = _time(_kernel_fn(kernel, lat, src, tg, gamma, n), reps)
         choices[kernel] = _pick_backend(times[kernel])
     return choices, times
 
@@ -272,8 +291,91 @@ _GPU_CASES = {
 }
 # Batch sizes (cases) of the GPU step, per device. The CPU time of a batch
 # grows linearly with its cases; the GPU time does not (a small batch does
-# not fill the GPU), so the GPU has a third, large batch.
+# not fill the GPU), so the GPU has a third, large batch. A quick run keeps
+# the first two GPU batches (the cost model needs at least two sizes).
 _GPU_BATCHES = {"cpu": (1, 33), "gpu": (1, 33, 257)}
+
+
+def crossover_work(works: list[float], cpu_times: list[float], gpu_times: list[float]) -> float | None:
+    """Return the smallest work where the GPU median beats the CPU median, or None.
+
+    Parameters
+    ----------
+    works : list of float
+        Work of each measured lattice (horseshoe evaluations, dimensionless
+        count), in any order.
+    cpu_times, gpu_times : list of float
+        Median times [s] on the CPU and on the GPU at each work.
+
+    Returns
+    -------
+    float or None
+        The crossover work: log-linear interpolation of the log time ratio
+        between the bracketing sizes. The smallest work when the GPU wins at
+        every size; None when the CPU wins at every size.
+    """
+    import math
+
+    if not (len(works) == len(cpu_times) == len(gpu_times)) or not works:
+        raise ValueError("works, cpu_times and gpu_times must be non-empty lists of the same length.")
+    prev: tuple[float, float, float] | None = None
+    for w, c, g in sorted(zip(works, cpu_times, gpu_times), key=lambda p: p[0]):
+        if g < c:
+            if prev is None:
+                return float(w)
+            w0, c0, g0 = prev
+            r0 = math.log(c0 / g0)
+            r1 = math.log(c / g)
+            f = r0 / (r0 - r1)
+            return math.exp(math.log(w0) + f * (math.log(w) - math.log(w0)))
+        prev = (w, c, g)
+    return None
+
+
+def crossover_cases(cpu_1: float, cpu_33: float, gpu_1: float, gpu_33: float) -> float | None:
+    """Return the smallest case count where the GPU batch beats the CPU batch, or None.
+
+    Linear interpolation of the time difference between 1 and 33 cases [s].
+    1.0 when the GPU already wins at 1 case; None when the CPU still wins
+    at 33 cases.
+    """
+    d1 = cpu_1 - gpu_1
+    d33 = cpu_33 - gpu_33
+    if d1 >= 0.0:
+        return 1.0
+    if d33 <= 0.0:
+        return None
+    return 1.0 + 32.0 * (-d1) / (d33 - d1)
+
+
+def crossover_from_rows(rows: list[dict[str, Any]]) -> tuple[dict[str, float], dict[str, int], dict[str, Any]]:
+    """Return the GPU crossover thresholds per solver family from the GPU step rows.
+
+    For each family, ``min_work`` is the crossover work at 1 case (free-air
+    work: cases times panels squared) and ``min_cases`` is the crossover
+    case count at the smallest measured lattice. A family without a measured
+    crossover keeps the built-in default (no entry). The third value holds
+    the details for the measurements record.
+    """
+    min_work: dict[str, float] = {}
+    min_cases: dict[str, int] = {}
+    details: dict[str, Any] = {}
+    by_family: dict[str, list[dict[str, Any]]] = {}
+    for row in rows:
+        by_family.setdefault(row["family"], []).append(row)
+    for family, fam_rows in by_family.items():
+        fam_rows = sorted(fam_rows, key=lambda r: r["panels"])
+        ordered = [(r["panels"] * r["panels"], r["seconds"]["cpu_1"], r["seconds"]["gpu_1"]) for r in fam_rows]
+        w = crossover_work([p[0] for p in ordered], [p[1] for p in ordered], [p[2] for p in ordered])
+        first = fam_rows[0]["seconds"]
+        k = crossover_cases(first["cpu_1"], first["cpu_33"], first["gpu_1"], first["gpu_33"])
+        details[family] = {"panels": [r["panels"] for r in fam_rows],
+                           "crossover_work": w, "crossover_cases": k}
+        if w is not None:
+            min_work[family] = float(w)
+        if k is not None:
+            min_cases[family] = max(1, int(round(k)))
+    return min_work, min_cases, details
 
 
 def _tuning_airfoil():
@@ -302,6 +404,11 @@ def _measure_gpu(quick: bool, say) -> tuple[dict[str, Any], dict[str, Any]]:
 
     if not gpu.available():
         return {"available": False, "reason": gpu.unavailable_reason()}, {}
+    # A quick run keeps two batch sizes (the cost model needs at least two),
+    # a shorter warm-up and fewer repeats, so that it stays under 60 s.
+    batches = {"cpu": _GPU_BATCHES["cpu"], "gpu": _GPU_BATCHES["gpu"][:2] if quick else _GPU_BATCHES["gpu"]}
+    warm = 0.3 if quick else 0.5
+    gpu_reps = 3 if quick else 5
     old_dev, old_prec = gpu.get_device(), gpu._precision
     precision = gpu.get_precision()
     solvers = {"vlm": vt.VortexLatticeSolver, "linear": vt.LinearLLTSolver, "nonlinear": vt.NonlinearLLTSolver}
@@ -311,7 +418,7 @@ def _measure_gpu(quick: bool, say) -> tuple[dict[str, Any], dict[str, Any]]:
         for family, lattices in _GPU_CASES[bool(quick)].items():
             sec = {"airfoil": _tuning_airfoil()} if family == "nonlinear" else {}
             entry: dict[str, Any] = {"n": []}
-            entry.update({dev: {"k": list(ks), "t": []} for dev, ks in _GPU_BATCHES.items()})
+            entry.update({dev: {"k": list(ks), "t": []} for dev, ks in batches.items()})
             for n, nc in lattices:
                 wing = vt.LiftingSurface(name="TuningWing", semi_span=5.0, sections=[
                     vt.WingSection(y_frac=0.0, chord=1.6, **sec), vt.WingSection(y_frac=1.0, chord=0.9, **sec)])
@@ -322,7 +429,7 @@ def _measure_gpu(quick: bool, say) -> tuple[dict[str, Any], dict[str, Any]]:
                 n_p = int(solver.build(ac, st, cond).n_panels)
                 entry["n"].append(n_p)
                 seconds = {}
-                for dev, ks in _GPU_BATCHES.items():
+                for dev, ks in batches.items():
                     gpu.set_device(dev)
                     times = []
                     for K in ks:
@@ -333,7 +440,7 @@ def _measure_gpu(quick: bool, say) -> tuple[dict[str, Any], dict[str, Any]]:
 
                         # A GPU after an idle time runs at low clocks: the
                         # model holds the times of a GPU in use.
-                        times.append(_time_warm(fn, 5) if dev == "gpu" else _time(fn, 3))
+                        times.append(_time_warm(fn, gpu_reps, warm) if dev == "gpu" else _time(fn, 3))
                         seconds[f"{dev}_{K}"] = times[-1]
                     entry[dev]["t"].append(times)
                 rows.append({"family": family, "panels": n_p, "seconds": seconds})
@@ -387,11 +494,12 @@ def _grad_fn(ac, st, device: str):
     return fn
 
 
-def _measure_grad_vjp(cls: str, ac, st, cores: int, say) -> tuple[dict[str, str], dict[str, dict[str, float]]]:
+def _measure_grad_vjp(cls: str, ac, st, cores: int, say, quick: bool = False) -> tuple[dict[str, str], dict[str, dict[str, float]]]:
     """Time the VJP backends of the gradient partials for one case size; return the choices and the times.
 
     The choice per device (``"cpu"``, ``"gpu"``) is the fastest backend
-    (a compiled backend wins a tie with the reference copy).
+    (a compiled backend wins a tie with the reference copy). A quick run
+    measures the CPU device only.
     """
     from ventorum import gpu
     from ventorum.sensitivity import kernels as K
@@ -399,7 +507,8 @@ def _measure_grad_vjp(cls: str, ac, st, cores: int, say) -> tuple[dict[str, str]
 
     choices: dict[str, str] = {}
     times: dict[str, dict[str, float]] = {}
-    devices = ["cpu"] + (["gpu"] if K.available("warp", "cuda") and gpu.available() else [])
+    devices = ["cpu"] if quick else ["cpu"] + (["gpu"] if K.available("warp", "cuda") and gpu.available() else [])
+    reps = _repeats(cls, quick)
     for dev in devices:
         torch_dev = "cuda" if dev == "gpu" else "cpu"
         names = list(K.GPU_BACKENDS if dev == "gpu" else K.CPU_BACKENDS) + ["torch"]
@@ -409,9 +518,9 @@ def _measure_grad_vjp(cls: str, ac, st, cores: int, say) -> tuple[dict[str, str]
         for backend in names:
             with par.forced_single_threads(cores), par.solve_threads(None):
                 if dev == "gpu":
-                    times[dev][backend] = _time_warm(lambda b=backend, f=fn: f(b), _REPEATS[cls])
+                    times[dev][backend] = _time_warm(lambda b=backend, f=fn: f(b), reps)
                 else:
-                    times[dev][backend] = _time(lambda b=backend, f=fn: f(b), _REPEATS[cls])
+                    times[dev][backend] = _time(lambda b=backend, f=fn: f(b), reps)
         best = min(times[dev].values())
         close = [b for b, t in times[dev].items() if t <= best * (1.0 + _TIE)]
         order = ("numba", "cython", "warp", "numpy", "torch")
@@ -421,13 +530,140 @@ def _measure_grad_vjp(cls: str, ac, st, cores: int, say) -> tuple[dict[str, str]
     return choices, times
 
 
+# Cases of one batch in the batch-threads step: enough cases that the batch
+# path runs, few enough that the step stays fast.
+_BATCH_THREADS_CASES = 8
+# Candidate chunk caps [MiB] of the ground-effect step.
+_CHUNK_CANDIDATES_MIB = (64.0, 256.0, 1024.0)
+_DEFAULT_CHUNK_MIB = 256.0
+
+
+def _measure_batch_threads(cls: str, ac, st, cores: int, quick: bool, say) -> tuple[int, dict[str, float]]:
+    """Time a lifting-line batch at each thread count; return the best count and the times.
+
+    The batch runs alone on the CPU with the kernel choices of step 1: its
+    kernel calls do the work of ``_BATCH_THREADS_CASES`` cases. The best
+    count is the tuned ``batch_threads`` of the size class (fewer threads
+    win a tie). Times in seconds.
+    """
+    import ventorum as vt
+    from ventorum.utils import parallel as par
+
+    lin_st = vt.SolverSettings(solver_type="linear", n_panels=st.n_panels)
+    solver = vt.LinearLLTSolver()
+    cond = vt.FlightCondition(V_inf=30.0)
+    lat = solver.build(ac, lin_st, cond)
+    conds = [vt.FlightCondition(V_inf=30.0, alpha=float(a))
+             for a in np.radians(np.linspace(-4.0, 10.0, _BATCH_THREADS_CASES))]
+    breps = 2 if quick else 3
+
+    def run():
+        return solver.solve_batch(lat, conds, lin_st, ac.S_ref, ac.b_ref, ac.c_ref, _cpu_only=True)
+
+    run()  # warm-up (the first batch call builds the batch path)
+    timings = {}
+    for t in _thread_candidates(cores):
+        with par.forced_single_threads(t):
+            timings[t] = _time(run, breps)
+    best = _pick(timings)
+    say(f"{cls:6s} batch threads: {best} threads, {1e3 * timings[best]:.1f} ms for {_BATCH_THREADS_CASES} cases")
+    return best, {str(k): v for k, v in timings.items()}
+
+
+def _ground_chunk_workload():
+    """Return (sweep, heights, alphas) of the chunk timing workload.
+
+    A serial ground-effect sweep of 220 linear cases on 100 strips: about
+    70 MB of dense matrices, so the smallest candidate cap (64 MiB) solves
+    it in two chunks and the larger caps in one.
+    """
+    import ventorum as vt
+    from ventorum.ground_effect.sweep import GroundEffectSweep
+
+    wing = vt.LiftingSurface(name="TuningWing", semi_span=5.0, sections=[
+        vt.WingSection(y_frac=0.0, chord=1.6), vt.WingSection(y_frac=1.0, chord=0.9)])
+    st = vt.SolverSettings(solver_type="linear", n_panels=100)
+    sweep = GroundEffectSweep(wing, settings=st, backend="serial")
+    return sweep, np.linspace(1.0, 5.0, 4), np.linspace(-4.0, 10.0, 55)
+
+
+def _measure_chunks(quick: bool, say, grad_choice: dict[str, Any]) -> tuple[dict[str, float], dict[str, Any]]:
+    """Return the tuned chunk caps per path [MiB] and the measurements.
+
+    The ground-effect cap times a serial sweep at each candidate cap (the
+    default wins a tie: larger caps only remove per-chunk overhead, and the
+    default is the safe memory bound). The gradient budget times one small
+    forward and backward pass at budgets around the default (same tie rule).
+    A quick run keeps the defaults without timing them.
+    """
+    from ventorum.sensitivity import reference as ref
+
+    meas: dict[str, Any] = {}
+    if quick:
+        say("chunks   quick mode keeps the default caps (the full mode measures them)")
+        return {"ground_cpu": _DEFAULT_CHUNK_MIB,
+                "gradient": float(ref._DEFAULT_CHUNK_VALUES * 8.0 / 1024 / 1024)}, \
+            {"ground_cpu": {"choice": _DEFAULT_CHUNK_MIB, "reason": "quick mode: default, not measured"},
+             "gradient": {"choice": "default", "reason": "quick mode: default, not measured"}}
+
+    # Ground-effect CPU batch. One timing is noisy (tens of percent), so each
+    # cap runs once warm and three times timed; the default wins a tie.
+    sweep, heights, alphas = _ground_chunk_workload()
+    ground_times: dict[str, float] = {}
+    for cap in _CHUNK_CANDIDATES_MIB:
+        with _profile_in_process({"settings": {"chunk_mib": {"ground_cpu": cap}}}):
+            ground_times[str(cap)] = _time(lambda: sweep.run_sweep(heights, alphas, (0.0,), V_inf=30.0), 3)
+    best_cap = min(ground_times, key=ground_times.get)
+    close = [c for c in _CHUNK_CANDIDATES_MIB if ground_times[str(c)] <= ground_times[best_cap] * (1.0 + _TIE)]
+    ground_choice = _DEFAULT_CHUNK_MIB if _DEFAULT_CHUNK_MIB in close else float(best_cap)
+    say(f"chunks   ground CPU batch: {ground_choice:g} MiB (" + ", ".join(
+        f"{c:g} MiB {ground_times[str(c)]:.2f} s" for c in _CHUNK_CANDIDATES_MIB) + ")")
+    meas["ground_cpu"] = {"caps_mib": list(_CHUNK_CANDIDATES_MIB),
+                          "seconds": ground_times, "choice_mib": ground_choice}
+
+    # Adjoint gradient chunks.
+    base_values = float(ref._DEFAULT_CHUNK_VALUES)
+    grad_times: dict[str, float] = {}
+    if not _grad_available():
+        meas["gradient"] = {"choice_mib": base_values * 8.0 / 1024 / 1024,
+                            "reason": "PyTorch is not installed: default, not measured"}
+        return {"ground_cpu": float(ground_choice),
+                "gradient": float(base_values * 8.0 / 1024 / 1024)}, meas
+    ac, st = _wing(*_CASES["small"])
+    fn = _grad_fn(ac, st, "cpu")
+    backend = (grad_choice.get("small", {}).get("cpu") if isinstance(grad_choice, dict) else None)
+    if backend not in ("numba", "cython", "warp", "numpy", "torch"):
+        backend = "numba"
+    import os
+
+    old_env = os.environ.get("VENTORUM_GRAD_CHUNK")
+    try:
+        for factor in (0.25, 1.0, 4.0):
+            os.environ["VENTORUM_GRAD_CHUNK"] = repr(base_values * factor)
+            grad_times[str(factor)] = _time(lambda: fn(backend), 2)
+    finally:
+        if old_env is None:
+            os.environ.pop("VENTORUM_GRAD_CHUNK", None)
+        else:
+            os.environ["VENTORUM_GRAD_CHUNK"] = old_env
+    best_factor = min(grad_times, key=grad_times.get)
+    close_f = [f for f in ("0.25", "1.0", "4.0") if grad_times[f] <= grad_times[best_factor] * (1.0 + _TIE)]
+    grad_choice_mib = base_values * 8.0 / 1024 / 1024 if "1.0" in close_f else base_values * float(best_factor) * 8.0 / 1024 / 1024
+    say(f"chunks   gradient: {grad_choice_mib:.1f} MiB (" + ", ".join(
+        f"x{f} {1e3 * grad_times[f]:.0f} ms" for f in ("0.25", "1.0", "4.0")) + ")")
+    meas["gradient"] = {"factors": ["0.25", "1.0", "4.0"], "seconds": grad_times, "choice_mib": grad_choice_mib}
+    return {"ground_cpu": float(ground_choice), "gradient": float(grad_choice_mib)}, meas
+
+
 def tune_machine(quick: bool = False, save: bool = True, verbose: bool = True) -> dict[str, Any]:
     """Measure this machine and return (and by default save) its profile.
 
     Parameters
     ----------
     quick : bool
-        Skip the large cases (about 3 times faster).
+        Skip the large cases and trim the repeats, the GPU batches and the
+        gradient devices, so that the run stays under 60 s. The full mode
+        measures everything and reports its time.
     save : bool
         Write the profile to the user configuration folder (see
         :func:`ventorum.hardware.profile.profile_path`).
@@ -452,8 +688,10 @@ def tune_machine(quick: bool = False, save: bool = True, verbose: bool = True) -
     hw = scan_hardware(detect_gpu=False)
     cores = par.cpu_cores()
     classes = ["small", "medium"] if quick else ["small", "medium", "large"]
-    meas: dict[str, Any] = {"single": {}, "batch": {}, "kernels": {}, "grad_vjp": {}}
-    settings: dict[str, Any] = {"single": {}, "batch": {}, "kernels": {}, "grad_vjp": {}}
+    meas: dict[str, Any] = {"single": {}, "batch": {}, "kernels": {}, "grad_vjp": {},
+                             "batch_threads": {}, "crossover": {}, "chunks": {}}
+    settings: dict[str, Any] = {"single": {}, "batch": {}, "kernels": {}, "grad_vjp": {},
+                                "batch_threads": {}}
 
     from ventorum import gpu
 
@@ -496,7 +734,8 @@ def _tune_steps(quick, say, hw, cores, classes, meas, settings, t_start, prof, p
                 single = {}
                 for t in _thread_candidates(cores):
                     with par.forced_single_threads(t):
-                        single[t] = _time(lambda ac=ac, st=st: vt.analyze(ac, alpha_deg=4.0, settings=st), _REPEATS[cls])
+                        single[t] = _time(lambda ac=ac, st=st: vt.analyze(ac, alpha_deg=4.0, settings=st),
+                                          _repeats(cls, quick))
                 best_t = _pick(single)
                 settings["single"][cls] = {"threads": best_t}
                 meas["single"][cls] = {"panels": n_pan, "seconds": {str(k): v for k, v in single.items()}}
@@ -505,6 +744,10 @@ def _tune_steps(quick, say, hw, cores, classes, meas, settings, t_start, prof, p
                 # 3. Batch: workers x threads per worker.
                 n_tasks = {"small": 4 * cores, "medium": 2 * cores, "large": max(2, cores)}[cls]
                 alphas = np.linspace(-4.0, 10.0, n_tasks)
+                # Warm-up: the first sweep builds the lattice and compiles
+                # the batch path. Without it the first candidate pays that
+                # one-time cost, which biases the choice and wastes time.
+                vt.analyze_sweep(ac, alphas, settings=st, n_jobs=min(2, cores))
                 batch = {}
                 for w in _thread_candidates(cores):
                     t0 = time.perf_counter()
@@ -515,6 +758,13 @@ def _tune_steps(quick, say, hw, cores, classes, meas, settings, t_start, prof, p
                 meas["batch"][cls] = {"panels": n_pan, "cases_per_second": {str(k): v for k, v in batch.items()}}
                 say(f"{cls:6s} batch: {best_w} cases in parallel x {cores // best_w} threads, {batch[best_w]:.0f} cases/s")
 
+                # 3b. Threads of one case inside a multi-case batch that runs
+                # alone (a lifting-line batch on one lattice).
+                best_bt, bt_times = _measure_batch_threads(cls, ac, st, cores, quick, say)
+                settings["batch_threads"][cls] = best_bt
+                meas["batch_threads"][cls] = {"panels": n_pan, "cases": _BATCH_THREADS_CASES,
+                                              "seconds": bt_times}
+
             # 4. GPU pipelines: the cost model of the CPU and GPU paths. The
             # CPU times use the settings of steps 1 to 3.
             step3 = _make_profile(prof, {k: dict(settings[k]) for k in ("kernels", "single", "batch")}, {}, hw,
@@ -522,15 +772,34 @@ def _tune_steps(quick, say, hw, cores, classes, meas, settings, t_start, prof, p
             with _profile_in_process(step3):
                 gpu_settings, gpu_meas = _measure_gpu(quick, say)
 
+                # 6. GPU thresholds from the measured crossover: the smallest
+                # work where the GPU median beats the CPU median per family,
+                # at 1 case (min_work) and at 33 cases (min_cases). No extra
+                # timing: the values come from the rows of step 4.
+                min_work, min_cases, cross_meas = crossover_from_rows(gpu_meas.get("lattices", []))
+                gpu_settings["min_work"] = min_work
+                gpu_settings["min_cases"] = min_cases
+                meas["crossover"] = cross_meas
+                for family in sorted({r["family"] for r in gpu_meas.get("lattices", [])}):
+                    work = f"{min_work[family]:.3g}" if family in min_work else "default (CPU wins in range)"
+                    cases = str(min_cases[family]) if family in min_cases else "default (CPU wins in range)"
+                    say(f"crossover {family:9s} min_work {work}, min_cases {cases}")
+
                 # 5. Backend of the vector-Jacobian products of the adjoint gradients.
                 if _grad_available():
                     for cls in classes:
                         ac, st = _wing(*_CASES[cls])
-                        choice, times = _measure_grad_vjp(cls, ac, st, cores, say)
+                        choice, times = _measure_grad_vjp(cls, ac, st, cores, say, quick)
                         settings["grad_vjp"][cls] = choice
                         meas["grad_vjp"][cls] = times
+
+                # 7. Chunk caps per path (the full mode measures them; a
+                # quick run keeps the defaults).
+                chunk_mib, chunk_meas = _measure_chunks(quick, say, settings["grad_vjp"])
+                meas["chunks"] = chunk_meas
     settings["gpu"] = {**_gpu_info(), **gpu_settings}
     meas["gpu"] = gpu_meas
+    settings["chunk_mib"] = chunk_mib
     settings["cython_threads"] = _cython_threads()
     settings["torch_device"] = _torch_device()
     return _make_profile(prof, settings, meas, hw, quick, time.perf_counter() - t_start, vt)

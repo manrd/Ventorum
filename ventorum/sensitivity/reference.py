@@ -56,15 +56,30 @@ def require_torch() -> None:
 
 
 def chunk_budget() -> float:
-    """Return the chunk budget [values] from VENTORUM_GRAD_CHUNK or the default."""
+    """Return the chunk budget [values].
+
+    The environment variable ``VENTORUM_GRAD_CHUNK`` wins when it holds a
+    positive number. Else the tuned value of the machine profile applies
+    (key ``"chunk_mib"``, ``"gradient"``, in MiB; one value takes 8 bytes).
+    Else the default ``_DEFAULT_CHUNK_VALUES`` applies.
+    """
     raw = os.environ.get("VENTORUM_GRAD_CHUNK", "").strip()
     if raw:
         try:
             value = float(raw)
         except ValueError:
-            return _DEFAULT_CHUNK_VALUES
-        if value > 0.0:
-            return value
+            pass
+        else:
+            if value > 0.0:
+                return value
+    try:
+        from ventorum.hardware.profile import tuned_setting
+
+        mib = float(tuned_setting("chunk_mib", "gradient", default=None))
+    except (TypeError, ValueError, OverflowError):
+        return _DEFAULT_CHUNK_VALUES
+    if mib > 0.0:
+        return mib * 1024 * 1024 / 8.0
     return _DEFAULT_CHUNK_VALUES
 
 

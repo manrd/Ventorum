@@ -567,13 +567,32 @@ def _gpu_batch(ac, sett, cases, h_arr, a_arr, p_arr, V_inf, rho, rp, height_ref,
 _MAX_BATCH_BYTES = 256 * 1024 * 1024
 
 
+def _chunk_cap_bytes() -> int:
+    """Return the largest dense matrices of one CPU chunk [bytes].
+
+    The tuner writes the cap per machine (profile key ``"chunk_mib"``,
+    ``"ground_cpu"``, in MiB); without one the default ``_MAX_BATCH_BYTES``
+    applies. A missing or bad value gives the default.
+    """
+    from ventorum.hardware.profile import tuned_setting
+
+    try:
+        mib = float(tuned_setting("chunk_mib", "ground_cpu", default=None))
+        cap = max(1, int(mib * 1024 * 1024))
+    except (TypeError, ValueError, OverflowError):
+        return _MAX_BATCH_BYTES
+    if not (mib > 0.0):
+        return _MAX_BATCH_BYTES
+    return cap
+
+
 def _chunk_size(canonical: str, n_unknowns: int) -> int:
-    """Return the largest number of cases K keeping matrices within 256 MiB."""
+    """Return the largest number of cases K keeping matrices within the chunk cap."""
     factor = 4 if canonical in ("linear", "nonlinear") else 1
     per_case = factor * (n_unknowns ** 2) * 8
     if per_case <= 0:
         return 1
-    return max(1, int(_MAX_BATCH_BYTES // per_case))
+    return max(1, int(_chunk_cap_bytes() // per_case))
 
 
 def _cpu_batch(
@@ -600,7 +619,7 @@ def _cpu_batch(
     error. The valid cases are put into groups with the same unknown map
     (symmetric and not symmetric cases), because one batch solves only
     cases with the same unknowns. Each group is solved in chunks that keep
-    the matrices of one chunk within ``_MAX_BATCH_BYTES``, with the CPU
+    the matrices of one chunk within the tuned chunk cap (:func:`_chunk_cap_bytes`, default 256 MiB), with the CPU
     branch of the solver (``LatticeSolver.solve_batch`` with ``_cpu_only=True``, no
     continuation). This function does not change the device setting of
     :mod:`ventorum.gpu`.

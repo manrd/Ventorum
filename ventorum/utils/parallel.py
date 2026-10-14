@@ -90,17 +90,36 @@ def forced_single_threads(n: int | None):
         _forced_single[0] = old
 
 
+def _tuned_batch_threads(n_panels: int | None) -> int | None:
+    """Return the tuned kernel threads of one case inside a multi-case batch, or None.
+
+    The tuner writes the value per size class (key ``"batch_threads"``); a
+    missing or bad value gives None, and the caller uses all cores.
+    """
+    from ventorum.hardware.profile import size_class, tuned_setting
+
+    try:
+        tuned = tuned_setting("batch_threads", size_class(n_panels), default=None)
+        value = int(tuned) if tuned is not None else 0
+    except (TypeError, ValueError):
+        return None
+    if value < 1:
+        return None
+    return max(1, min(value, cpu_cores()))
+
+
 def single_case_threads(n_panels: int | None, batch: int = 1) -> int:
     """Return the number of kernel threads for one case (or one batch of cases) that runs alone.
 
     A batch of more than one case (for example the angles of a lifting-line
-    sweep, computed in one kernel call) uses all cores: its kernel calls do
-    the work of many cases.
+    sweep, computed in one kernel call) uses the tuned thread count of its
+    size class, or all cores without one. Its kernel calls do the work of
+    many cases.
     """
     if _forced_single[0] is not None:
         return int(_forced_single[0])
     if batch > 1:
-        return cpu_cores()
+        return _tuned_batch_threads(n_panels) or cpu_cores()
     from ventorum.hardware.profile import size_class, tuned_setting
 
     tuned = tuned_setting("single", size_class(n_panels), "threads")
@@ -158,7 +177,8 @@ def solve_threads(n_panels: int | None = None, batch: int = 1):
       24 ms with BLAS on 1 thread).
     * In a worker of :func:`case_executor` the kernels keep the thread count
       of the worker. A case that runs alone uses the tuned thread count for
-      its size (all cores by default); a batch uses all cores (see
+      its size (all cores by default); a batch uses the tuned
+      ``batch_threads`` count of its size class (all cores by default, see
       :func:`single_case_threads`). The thread count does not change the
       results (each kernel row is computed by one thread).
     * The panel count is stored in a thread-local variable for the duration
@@ -350,8 +370,9 @@ def _dispatch_plan(n_panels: int | None, batch: int = 1) -> tuple[int, int, str]
         thread without a known plan, the source is ``"nested"``. A solve
         that runs alone has one worker; its thread count comes from the
         user (:func:`forced_single_threads`), from the tuned single-case
-        setting of the profile, or from the default (all cores, also for a
-        batch of several cases).
+        setting of the profile, or from the default (all cores). A batch of
+        several cases uses the tuned ``batch_threads`` setting of its size
+        class when the profile has one, else all cores.
     """
     threads = max(1, kernel_threads())
     plan = getattr(_local, "plan", None)
@@ -362,7 +383,7 @@ def _dispatch_plan(n_panels: int | None, batch: int = 1) -> tuple[int, int, str]
     if _forced_single[0] is not None:
         return 1, threads, "user"
     if batch > 1:
-        return 1, threads, "default"
+        return 1, threads, "profile" if _tuned_batch_threads(n_panels) else "default"
     from ventorum.hardware.profile import size_class, tuned_setting
 
     tuned = tuned_setting("single", size_class(n_panels), "threads")

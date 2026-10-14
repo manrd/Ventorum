@@ -26,7 +26,10 @@ from pathlib import Path
 from typing import Any
 
 PROFILE_FILENAME = "machine_profile.json"
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
+# Schema 2 profiles still load. Schema 2 lacks the keys of schema 3 (the GPU
+# thresholds ``min_work`` and ``min_cases``, ``chunk_mib`` per path and
+# ``batch_threads`` per size class); readers use built-in defaults for them.
 
 # Case classes by the number of panels of the lattice.
 SIZE_CLASSES = ("small", "medium", "large")
@@ -118,7 +121,7 @@ def active_profile() -> dict[str, Any] | None:
         if data is not None:
             from ventorum.hardware.detector import get_machine_fingerprint
 
-            ok = data.get("schema") == SCHEMA_VERSION and data.get("fingerprint") == get_machine_fingerprint()
+            ok = data.get("schema") in (2, SCHEMA_VERSION) and data.get("fingerprint") == get_machine_fingerprint()
             data = data if ok else None
         _cached, _cached_loaded = data, True
         return _cached

@@ -301,3 +301,92 @@ def test_profile_can_select_torch(config_dir, monkeypatch):
             assert V.kernel_backend_for(k) == "torch"
     finally:
         prof.reset_profile_cache()
+
+
+def test_schema_2_profile_still_loads(config_dir):
+    fp = get_machine_fingerprint()
+    prof.save_profile({"schema": 2, "fingerprint": fp,
+                       "settings": {"single": {"small": {"threads": 1}},
+                                    "batch": {"small": {"workers": 1, "threads": 1}}}})
+    assert prof.active_profile() is not None
+    assert prof.tuned_setting("batch_threads", "small", default=None) is None
+    assert prof.tuned_setting("chunk_mib", "ground_cpu", default=None) is None
+    # Missing keys use the defaults: all cores, 256 MiB, the gradient default.
+    assert par.single_case_threads(100, batch=8) == par.cpu_cores()
+    from ventorum import gpu
+    from ventorum.ground_effect import sweep as _sweep
+    from ventorum.sensitivity import reference as _ref
+
+    assert gpu.min_work("vlm") == gpu.DEFAULT_MIN_WORK["vlm"]
+    assert gpu.min_cases("linear") == gpu.DEFAULT_MIN_CASES["linear"]
+    assert _sweep._chunk_size("vlm", 100) == 256 * 1024 * 1024 // (100 * 100 * 8)
+    assert _ref.chunk_budget() == _ref._DEFAULT_CHUNK_VALUES
+
+
+def test_batch_threads_come_from_the_profile(config_dir):
+    fp = get_machine_fingerprint()
+    prof.save_profile({"schema": prof.SCHEMA_VERSION, "fingerprint": fp,
+                       "settings": {"batch_threads": {"small": 2}}})
+    try:
+        assert par.single_case_threads(100, batch=8) == 2
+        assert par.single_case_threads(100, batch=1) == par.cpu_cores()
+        assert par.single_case_threads(1000, batch=8) == par.cpu_cores()
+    finally:
+        prof.reset_profile_cache()
+
+
+def test_bad_batch_threads_fall_back_to_all_cores(config_dir):
+    fp = get_machine_fingerprint()
+    for bad in (0, -2, "many", None):
+        prof.save_profile({"schema": prof.SCHEMA_VERSION, "fingerprint": fp,
+                           "settings": {"batch_threads": {"small": bad}}})
+        try:
+            assert par.single_case_threads(100, batch=8) == par.cpu_cores()
+        finally:
+            prof.reset_profile_cache()
+
+
+def test_gpu_thresholds_come_from_the_profile(config_dir):
+    from ventorum import gpu
+
+    fp = get_machine_fingerprint()
+    prof.save_profile({"schema": prof.SCHEMA_VERSION, "fingerprint": fp,
+                       "settings": {"gpu": {"available": False, "min_work": {"vlm": 12345.0},
+                                            "min_cases": {"linear": 7}}}})
+    try:
+        assert gpu.min_work("vlm") == 12345.0
+        assert gpu.min_work("linear") == gpu.DEFAULT_MIN_WORK["linear"]
+        assert gpu.min_cases("linear") == 7
+        assert gpu.min_cases("vlm") == gpu.DEFAULT_MIN_CASES["vlm"]
+    finally:
+        prof.reset_profile_cache()
+
+
+def test_ground_chunk_cap_comes_from_the_profile(config_dir):
+    from ventorum.ground_effect import sweep as _sweep
+
+    fp = get_machine_fingerprint()
+    prof.save_profile({"schema": prof.SCHEMA_VERSION, "fingerprint": fp,
+                       "settings": {"chunk_mib": {"ground_cpu": 1.0}}})
+    try:
+        assert _sweep._chunk_cap_bytes() == 1024 * 1024
+        assert _sweep._chunk_size("linear", 1000) == 1
+    finally:
+        prof.reset_profile_cache()
+    (config_dir / prof.PROFILE_FILENAME).unlink()
+    assert _sweep._chunk_cap_bytes() == 256 * 1024 * 1024
+
+
+def test_gradient_chunk_budget_profile_and_environment(config_dir, monkeypatch):
+    from ventorum.sensitivity import reference as _ref
+
+    fp = get_machine_fingerprint()
+    prof.save_profile({"schema": prof.SCHEMA_VERSION, "fingerprint": fp,
+                       "settings": {"chunk_mib": {"gradient": 80.0}}})
+    try:
+        assert _ref.chunk_budget() == 80.0 * 1024 * 1024 / 8.0
+        # The environment variable still wins over the profile.
+        monkeypatch.setenv("VENTORUM_GRAD_CHUNK", "5e5")
+        assert _ref.chunk_budget() == 5e5
+    finally:
+        prof.reset_profile_cache()
