@@ -60,6 +60,19 @@ a minor version can change a public interface.
 
 ### Changed
 
+- Vortex core and leg forces (result change, approved by the owner): the core is applied on the
+  distance to the finite filament in every kernel family (numpy, Numba, Cython, PyTorch, Warp,
+  and the gradient kernels). The leg force of a strip edge follows the kind of edge: legs on a
+  shared edge of one surface carry no net force; at a kink (from the geometry definition:
+  dihedral change, mirrored-root dihedral, angle between joined surfaces) the leg velocity is
+  projected on the kink line; free tip edges use the full velocity. Legs of joined edges are
+  matched with the join tolerance. This removes a side force that grew with the mesh at
+  junctions (a fin on a tail tip: CY_beta from -0.46 to -2.46 between 10 and 80 panels before,
+  within 0.2 % now) and at winglets. `stability_derivatives` reports the trust and warnings of
+  all its cases and compares CY_beta with the Trefftz-plane value. Joined edges whose chordwise
+  grids do not match are not joined, with a warning. Verification case V10 changes (reason in
+  the commit). The Numba and Cython kernels are faster; the numpy and PyTorch CPU kernels are
+  slower (see the performance limits, PL-5).
 - `input_error_bars` uses the adjoint for the nonlinear lifting line and tabulated airfoils;
   central differences stay only for the Fourier solver. Section inputs (gradients and
   uncertainties) are refused on tabulated airfoils for every solver.
