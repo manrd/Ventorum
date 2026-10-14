@@ -537,14 +537,16 @@ def _measure_grad_vjp(cls: str, ac, st, cores: int, say, quick: bool = False) ->
 _BATCH_THREADS_CASES = 33
 # Solver families measured in the batch-threads step.
 _BATCH_THREADS_FAMILIES = ("vlm", "linear", "nonlinear")
-# A batch thread count is written only when it beats all cores by more than
+# A thread count is written only when it beats all cores by more than
 # this fraction (median times).
 _BATCH_THREADS_MIN_GAIN = 0.05
-# The tuner self-check drops the batch entries when a fixed workload with
-# them is slower than without them by more than this fraction.
+_SINGLE_THREADS_MIN_GAIN = 0.05
+# The tuner self-check drops the entries when a fixed workload with them is
+# slower than without them by more than this fraction.
 _SELF_CHECK_MAX_SLOWDOWN = 0.02
-# Repeats of one timing of the batch-threads step and of the self-check.
+# Repeats of one timing of the thread steps and of the self-check.
 _BATCH_THREADS_REPEATS = 3
+_SINGLE_THREADS_REPEATS = 5
 # Candidate chunk caps [MiB] of the ground-effect step.
 _CHUNK_CANDIDATES_MIB = (64.0, 256.0, 1024.0)
 _DEFAULT_CHUNK_MIB = 256.0
@@ -566,19 +568,36 @@ def _batch_threads_keep(timings: dict[int, float], cores: int) -> int | None:
     return None
 
 
-def _self_check_drop(times: dict[str, tuple[float, float]]) -> str | None:
-    """Return why the batch entries must be dropped, or None to keep them.
+def _single_threads_keep(timings: dict[int, float], cores: int) -> int | None:
+    """Return the thread count to write, or None for all cores (no entry).
+
+    The fastest count wins (fewer threads win a tie, see :func:`_pick`), but
+    only when its median time beats all cores by more than
+    ``_SINGLE_THREADS_MIN_GAIN``. If no measured setting can meet this, the
+    tuner writes no entry and single solves use all cores, the default.
+    """
+    best = _pick(timings)
+    if best == cores:
+        return None
+    if timings[best] * (1.0 + _SINGLE_THREADS_MIN_GAIN) < timings[cores]:
+        return best
+    return None
+
+
+def _self_check_drop(times: dict[str, tuple[float, float]], kind: str = "batch") -> str | None:
+    """Return why the entries must be dropped, or None to keep them.
 
     *times* maps each workload name to ``(with_s, without_s)``: the median
-    time [s] of the workload with the new batch entries and without them. A
+    time [s] of the workload with the new entries and without them. A
     workload that is slower with the entries by more than
-    ``_SELF_CHECK_MAX_SLOWDOWN`` drops all batch entries.
+    ``_SELF_CHECK_MAX_SLOWDOWN`` drops all entries of that kind.
     """
+    noun = "batch entries" if kind == "batch" else "single entries"
     for name, (with_s, without_s) in times.items():
         if with_s > without_s * (1.0 + _SELF_CHECK_MAX_SLOWDOWN):
             slower = 100.0 * (with_s - without_s) / without_s
-            return (f"{name} is {slower:.1f} % slower with the tuned batch threads "
-                    f"({with_s:.3f} s against {without_s:.3f} s): drop the batch entries")
+            return (f"{name} is {slower:.1f} % slower with the tuned {kind} threads "
+                    f"({with_s:.3f} s against {without_s:.3f} s): drop the {noun}")
     return None
 
 
@@ -749,6 +768,69 @@ def _self_check_workloads():
     return out
 
 
+def _self_check_single_workloads():
+    """Return the fixed single workloads of the single-threads self-check.
+
+    The same single workloads as ``single_vlm_n20_c4`` and ``single_vlm_n80_c4``
+    of ``validation/perf_history.py``: a rectangular wing (semi-span 5 m, chord
+    1.25 m) at 4 deg angle of attack.
+    """
+    import ventorum as vt
+
+    wing = vt.LiftingSurface(
+        name="SelfCheckWing",
+        semi_span=5.0,
+        sections=[
+            vt.WingSection(y_frac=0.0, chord=1.25, airfoil=vt.LinearAirfoil()),
+            vt.WingSection(y_frac=1.0, chord=1.25, airfoil=vt.LinearAirfoil()),
+        ],
+    )
+    out = {}
+    for name, panels, n_chord in (("single_vlm_n20_c4", 20, 4),
+                                  ("single_vlm_n80_c4", 80, 4)):
+        st = vt.SolverSettings(solver_type="vlm", n_panels=panels, n_chord=n_chord)
+
+        def run(wing=wing, st=st):
+            return vt.analyze(wing, alpha_deg=4.0, settings=st)
+
+        out[name] = run
+    return out
+
+
+def _self_check_single_threads(settings, hw, quick, say, prof, vt) -> dict[str, Any]:
+    """Time two fixed single solves with and without the single entries; drop them if slower.
+
+    A full tuner run ends with this check: each workload runs with the new
+    ``single`` entries and without them (all cores). If either workload is
+    slower with the entries by more than ``_SELF_CHECK_MAX_SLOWDOWN``, all
+    single entries are dropped from *settings* and the reason is printed.
+    Returns the measurements record. A quick run skips the check. It never
+    changes the results, only the thread counts.
+    """
+    if quick or not settings.get("single"):
+        return {"skipped": "quick mode" if quick else "no single entries measured"}
+    workloads = _self_check_single_workloads()
+    full = {k: dict(v) for k, v in settings.items() if k in ("kernels", "single", "batch", "batch_threads")}
+    times: dict[str, tuple[float, float]] = {}
+    with _profile_in_process(_make_profile(prof, full, {}, hw, quick, 0.0, vt)):
+        with_times = {name: _time(fn, _SINGLE_THREADS_REPEATS) for name, fn in workloads.items()}
+    stripped = {k: v for k, v in full.items() if k != "single"}
+    with _profile_in_process(_make_profile(prof, stripped, {}, hw, quick, 0.0, vt)):
+        without_times = {name: _time(fn, _SINGLE_THREADS_REPEATS) for name, fn in workloads.items()}
+    for name in workloads:
+        times[name] = (with_times[name], without_times[name])
+    reason = _self_check_drop(times, kind="single")
+    if reason is None:
+        say("self-check single threads: the fixed single solves keep their speed "
+            + ", ".join(f"{n} {w:.3f} s with, {wo:.3f} s without" for n, (w, wo) in times.items()))
+        return {"workloads": {n: {"with_s": w, "without_s": wo} for n, (w, wo) in times.items()},
+                "kept": True}
+    settings["single"] = {}
+    say(f"self-check single threads: {reason}")
+    return {"workloads": {n: {"with_s": w, "without_s": wo} for n, (w, wo) in times.items()},
+            "kept": False, "reason": reason}
+
+
 def _self_check_batch_threads(settings, hw, quick, say, prof, vt) -> dict[str, Any]:
     """Time two fixed sweeps with and without the batch entries; drop them if slower.
 
@@ -861,14 +943,30 @@ def _tune_steps(quick, say, hw, cores, classes, meas, settings, t_start, prof, p
 
                 # 2. One case alone: kernel threads.
                 single = {}
+                reps = _repeats(cls, quick) if quick else max(_SINGLE_THREADS_REPEATS, _repeats(cls, False))
                 for t in _thread_candidates(cores):
-                    with par.forced_single_threads(t):
-                        single[t] = _time(lambda ac=ac, st=st: vt.analyze(ac, alpha_deg=4.0, settings=st),
-                                          _repeats(cls, quick))
-                best_t = _pick(single)
-                settings["single"][cls] = {"threads": best_t}
-                meas["single"][cls] = {"panels": n_pan, "seconds": {str(k): v for k, v in single.items()}}
-                say(f"{cls:6s} ({n_pan} panels) one case: {best_t} threads, {1e3 * single[best_t]:.1f} ms")
+                    cand_prof = _make_profile(prof, {
+                        "kernels": dict(settings["kernels"]),
+                        "single": {cls: {"threads": t}},
+                    }, {}, hw, quick, 0.0, vt)
+                    with _profile_in_process(cand_prof):
+                        single[t] = _time(lambda ac=ac, st=st: vt.analyze(ac, alpha_deg=4.0, settings=st), reps)
+                best_t = _single_threads_keep(single, cores)
+                if best_t is not None:
+                    settings["single"][cls] = {"threads": best_t}
+                meas["single"][cls] = {
+                    "panels": n_pan,
+                    "seconds": {str(k): v for k, v in single.items()},
+                    "choice": best_t,
+                    "reason": ("beats all cores by more than 5 %" if best_t is not None
+                               else "no setting beats all cores by more than 5 %: no entry"),
+                }
+                if best_t is None:
+                    say(f"{cls:6s} ({n_pan} panels) one case: no setting beats all cores by more than "
+                        f"{100.0 * _SINGLE_THREADS_MIN_GAIN:.0f} % ({1e3 * single[cores]:.1f} ms on all cores): no entry")
+                else:
+                    say(f"{cls:6s} ({n_pan} panels) one case: {best_t} threads, {1e3 * single[best_t]:.1f} ms "
+                        f"(all cores {1e3 * single[cores]:.1f} ms)")
 
                 # 3. Batch: workers x threads per worker.
                 n_tasks = {"small": 4 * cores, "medium": 2 * cores, "large": max(2, cores)}[cls]
@@ -936,8 +1034,9 @@ def _tune_steps(quick, say, hw, cores, classes, meas, settings, t_start, prof, p
                 # quick run keeps the defaults).
                 chunk_mib, chunk_meas = _measure_chunks(quick, say, settings["grad_vjp"])
                 meas["chunks"] = chunk_meas
-    # 8. Self-check of a full run: the fixed sweeps with the new batch
+    # 8. Self-check of a full run: the fixed workloads with the new single and batch
     # entries must keep their speed against all cores.
+    meas["single_threads_self_check"] = _self_check_single_threads(settings, hw, quick, say, prof, vt)
     meas["batch_threads_self_check"] = _self_check_batch_threads(settings, hw, quick, say, prof, vt)
     settings["gpu"] = {**_gpu_info(), **gpu_settings}
     meas["gpu"] = gpu_meas
