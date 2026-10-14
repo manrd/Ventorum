@@ -104,6 +104,14 @@ a minor version can change a public interface.
 
 ### Fixed
 
+- The tuned `batch_threads` setting could halve the CPU sweep throughput: the tuner timed an
+  8-case linear lifting-line batch and applied the result to every solver family. The tuner now
+  times a 33-case batch of each family (vlm, linear, nonlinear) on the sweep path, keeps a value
+  only when it beats all cores by more than 5 %, and a full run ends with a self-check that drops
+  the values if a fixed sweep is more than 2 % slower. The profile stores
+  `batch_threads[family][size_class]`; the old flat form still loads and is ignored (all cores).
+  Run `ventorum-tune` again to replace an old entry.
+
 - The lift-slope clamp of the gradient reference (section lift slope between 0.2 and 2 times
   2 pi) has the same derivative convention for all torch versions: 1 on the closed interval,
   0 outside it. Before, torch 2.14 gave 0 at the bounds.
