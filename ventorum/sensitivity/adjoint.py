@@ -1609,8 +1609,7 @@ def gradients(
             "Compressibility correction (mach > 0): the Prandtl-Glauert stretch "
             "about the moment reference point is in the differentiable reference; "
             "the chain rule includes the change of the stretched geometry with "
-            "alpha, beta and mach. The Trefftz plane is unchanged. "
-            "The solve and the gradients run on the CPU path.")
+            "alpha, beta and mach. The Trefftz plane is unchanged.")
     if prep["precision"] == "float32":
         notes.append(
             "Float32 gradients: the gradient gate of float32 is 1e-3 relative; check the result with "

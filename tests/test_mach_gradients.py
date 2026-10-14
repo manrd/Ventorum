@@ -193,3 +193,41 @@ def test_check_mach_planform(mach: float) -> None:
               if v.get("compared") and not v.get("passed")]
     assert not failed, (mach, failed)
     assert out["pass"], (mach, out["reasons"])
+
+
+def test_mach_gradients_gpu_equal_cpu():
+    """Mach gradients on the GPU device equal the CPU gradients to round-off (float64)."""
+    import warnings
+
+    import numpy as np
+
+    import ventorum as vt
+    from ventorum import gpu
+
+    if not gpu.available():
+        import pytest
+
+        pytest.skip("no GPU")
+    wing = vt.LiftingSurface(name="W", semi_span=4.0, sections=[
+        vt.WingSection(y_frac=0.0, chord=1.2), vt.WingSection(y_frac=1.0, chord=0.8)])
+    ac = vt.Aircraft(surfaces=[wing])
+    cond = vt.FlightCondition(V_inf=40.0, alpha=np.radians(4.0), beta=np.radians(2.0), mach=0.5)
+    st = vt.SolverSettings(solver_type="vlm", n_panels=12, n_chord=3)
+    old_dev, old_prec = gpu.get_device(), gpu.get_precision()
+    out = {}
+    try:
+        gpu.set_precision("float64")
+        for dev in ("cpu", "gpu"):
+            gpu.set_device(dev)
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                out[dev] = vt.gradients(ac, cond, st, outputs=("CL", "CDi", "Cm"), wrt=("alpha", "beta", "mach"))
+    finally:
+        gpu.set_device(old_dev)
+        gpu.set_precision(old_prec)
+    assert out["gpu"].device != "cpu"
+    for o in ("CL", "CDi", "Cm"):
+        for w in ("alpha", "beta", "mach"):
+            a = float(np.asarray(out["cpu"].jacobian[o][w]))
+            b = float(np.asarray(out["gpu"].jacobian[o][w]))
+            assert abs(a - b) <= 1e-10 * max(abs(a), 1e-12), (o, w, a, b)

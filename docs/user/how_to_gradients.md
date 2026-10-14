@@ -289,8 +289,8 @@ print(f"dCL/dM = {mres.jacobian['CL']['mach']:.4f} per unit Mach")
 ```
 
 At `mach = 0` the `"mach"` derivative is 0; at `mach = None` it is refused.
-Ground effect and the lifting lines refuse `mach > 0`. The gradients run on
-the CPU path with `mach > 0`.
+Ground effect and the lifting lines refuse `mach > 0`. The gradients with
+`mach > 0` run on the selected device (CPU or GPU).
 
 ## Limits
 
