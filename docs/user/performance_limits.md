@@ -166,14 +166,13 @@ to 32 % longer and the PyTorch CPU kernel 26 % to 34 % longer than with the
 core on the infinite line. The Numba and Cython kernels are 14 % to 21 %
 faster than before (fewer operations after the restructuring). The fixed
 timing workloads of `validation/perf_history.py` did not become slower.
-After the array-cost reduction (fewer temporaries, the outside law only
-where needed), measured on a 12-core Windows machine with the same method
-(before and after alternating, two runs each, median of 5 per run, in ms):
-numpy 28.7 to 27.7 at 20x4, 466.3 to 421.6 at 80x4, 1705.2 to 1648.7 at
-80x8, 16479.0 to 14437.3 at 160x12; PyTorch CPU 28.7 to 28.5 at 20x4,
-340.5 to 316.0 at 80x4, 2400.3 to 2194.8 at 80x8, 25918.2 to 23327.0 at
-160x12. The numpy kernel is 3 % to 12 % faster and the PyTorch CPU kernel
-1 % to 10 % faster than before the reduction. The limit remains.
+After the array-cost reduction of the numpy kernel (fewer temporaries,
+the outside law only where it is needed), measured with the same method
+(influence matrix, before and after alternating, two runs each, median of
+5 per run, in ms): 12.5 to 10.9 at 20x4, 177.1 to 142.2 at 80x4, 750.2 to
+585.8 at 80x8, 6560 to 4987 at 160x12, so 13 % to 24 % faster. The same
+change made the PyTorch CPU kernel slower at small sizes, so it was not
+applied there. The limit remains.
 
 **How to remove the limit.** Fuse the projection and the core factor into
 one pass of the numpy and PyTorch kernels (fewer temporary arrays), and
