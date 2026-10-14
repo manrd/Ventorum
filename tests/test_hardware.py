@@ -326,11 +326,25 @@ def test_schema_2_profile_still_loads(config_dir):
 def test_batch_threads_come_from_the_profile(config_dir):
     fp = get_machine_fingerprint()
     prof.save_profile({"schema": prof.SCHEMA_VERSION, "fingerprint": fp,
+                       "settings": {"batch_threads": {"vlm": {"small": 2}}}})
+    try:
+        assert par.single_case_threads(100, batch=8, family="vlm") == 2
+        assert par.single_case_threads(100, batch=1, family="vlm") == par.cpu_cores()
+        assert par.single_case_threads(1000, batch=8, family="vlm") == par.cpu_cores()
+        assert par.single_case_threads(100, batch=8, family="linear") == par.cpu_cores()
+        assert par.single_case_threads(100, batch=8) == par.cpu_cores()
+    finally:
+        prof.reset_profile_cache()
+
+
+def test_old_flat_batch_threads_are_ignored(config_dir):
+    """A schema-3 profile with the old flat batch_threads form uses all cores."""
+    fp = get_machine_fingerprint()
+    prof.save_profile({"schema": prof.SCHEMA_VERSION, "fingerprint": fp,
                        "settings": {"batch_threads": {"small": 2}}})
     try:
-        assert par.single_case_threads(100, batch=8) == 2
-        assert par.single_case_threads(100, batch=1) == par.cpu_cores()
-        assert par.single_case_threads(1000, batch=8) == par.cpu_cores()
+        for family in ("vlm", "linear", "nonlinear"):
+            assert par.single_case_threads(100, batch=8, family=family) == par.cpu_cores()
     finally:
         prof.reset_profile_cache()
 
@@ -339,9 +353,9 @@ def test_bad_batch_threads_fall_back_to_all_cores(config_dir):
     fp = get_machine_fingerprint()
     for bad in (0, -2, "many", None):
         prof.save_profile({"schema": prof.SCHEMA_VERSION, "fingerprint": fp,
-                           "settings": {"batch_threads": {"small": bad}}})
+                           "settings": {"batch_threads": {"vlm": {"small": bad}}}})
         try:
-            assert par.single_case_threads(100, batch=8) == par.cpu_cores()
+            assert par.single_case_threads(100, batch=8, family="vlm") == par.cpu_cores()
         finally:
             prof.reset_profile_cache()
 
