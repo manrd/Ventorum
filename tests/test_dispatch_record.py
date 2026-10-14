@@ -494,7 +494,8 @@ def test_batch_cpu_dispatch_records_plan_that_ran():
         for r in results:
             d = r.details["dispatch"]
             assert d["workers"] == 1
-            assert d["plan_source"] == "default"
+            # A tuned batch_threads entry of the machine profile makes the source "profile".
+            assert d["plan_source"] == ("profile" if parallel._tuned_batch_threads(lat.n_panels) else "default")
             if expected is not None:
                 assert d["threads"] == expected
     finally:
@@ -673,7 +674,7 @@ def test_lifting_line_cpu_dispatch(solver_type):
             assert d["workers"] == 1
             assert d["reason"] == "device setting is cpu"
         assert single.details["dispatch"]["plan_source"] in ("profile", "default")
-        assert sweep[0].details["dispatch"]["plan_source"] == "default"
+        assert sweep[0].details["dispatch"]["plan_source"] in ("profile", "default")
     finally:
         gpu.set_device(old_dev)
 

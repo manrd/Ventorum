@@ -22,7 +22,7 @@ It also records the GPUs that it finds and the torch device of the run.
 
 ## The profile
 
-The tuner writes a JSON profile (schema 2) to the user configuration folder. The folder is `VENTORUM_CONFIG_DIR` when set, else the platform folder (see [Environment variables](environment)). The profile stores the kernel choice per size class and kernel, the raw times, the thread plan, the Cython thread mode (`openmp`, `python` or none) and the torch device.
+The tuner writes a JSON profile (schema 3; a schema-2 profile still loads) to the user configuration folder. The folder is `VENTORUM_CONFIG_DIR` when set, else the platform folder (see [Environment variables](environment)). The profile stores the kernel choice per size class and kernel, the raw times, the thread plan, the threads of one case inside a batch, the GPU limits, the chunk sizes, the Cython thread mode (`openmp`, `python` or none) and the torch device.
 
 A profile with an older schema is ignored; run `ventorum-tune` again. A profile of another machine is ignored (fingerprint check). Ventorum never runs the tuner by itself and never depends on the profile: without a matching profile it uses built-in defaults that work on any machine.
 

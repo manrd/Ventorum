@@ -45,7 +45,7 @@ Five backends exist: `"numpy"` (the reference kernels in `aero/vortex.py`), `"nu
 
 The size class comes from `solve_threads(n_panels)` when the call runs inside a solve, else from the source count of the call. One solve can use two backends at once (hybrid mode, for example Cython for the influence matrix and Numba for the tensor). All backends agree with the numpy reference to round-off (see `tests/test_kernels.py`).
 
-## The tuner and the profile schema 2
+## The tuner and the profile schema 3
 
 Run the tuner once after installation, and again after a hardware change:
 
@@ -58,7 +58,7 @@ ventorum-tune path       # prints the profile file path
 
 The tuner (`hardware/tuner.py`) measures in this order. First, for each size class (small, medium, large unless `quick=True`), it times each available backend for each of the four kernels directly, with all cores. It skips numpy at medium and large when a compiled backend exists. Within 3 % of the fastest, Numba wins, then Cython, then PyTorch, then numpy. Next, with the selected backends active, it measures the best thread count for one case alone, and the best split of the cores for batches. It also records the GPUs that it finds and the torch device of the run.
 
-The profile (schema 2, `SCHEMA_VERSION = 2`) stores the choices in `settings["kernels"][size_class][kernel]`, the raw times in `measurements["kernels"][size_class][kernel][backend]`, plus `settings["cython_threads"]` (`"openmp"`, `"python"` or `None`), `settings["torch_device"]`, `settings["single"]`, `settings["batch"]` and `settings["gpu"]`. A profile with an older schema is ignored, so users run `ventorum-tune` again. The tuner never runs before an ordinary analysis. Ventorum does not depend on it: without a profile, or when the profile belongs to another machine (fingerprint check), it uses built-in defaults that work on any machine. Tuning changes the speed; the device choice can change results at the float32 round-off level (about 1e-7 to 1e-6 relative).
+The profile (schema 3, `SCHEMA_VERSION = 3`) stores the choices in `settings["kernels"][size_class][kernel]`, the raw times in `measurements["kernels"][size_class][kernel][backend]`, plus `settings["cython_threads"]` (`"openmp"`, `"python"` or `None`), `settings["torch_device"]`, `settings["single"]`, `settings["batch"]`, `settings["gpu"]` (with the GPU limits `min_work` and `min_cases` per family), `settings["batch_threads"]` per size class and `settings["chunk_mib"]` per path. A schema-2 profile still loads: the missing schema-3 entries use the built-in defaults. A profile with an older schema is ignored, so users run `ventorum-tune` again. The tuner never runs before an ordinary analysis. Ventorum does not depend on it: without a profile, or when the profile belongs to another machine (fingerprint check), it uses built-in defaults that work on any machine. Tuning changes the speed; the device choice can change results at the float32 round-off level (about 1e-7 to 1e-6 relative).
 
 ## Parallelism
 

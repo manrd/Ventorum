@@ -253,10 +253,11 @@ def test_agent_polar_of_lifting_line_equals_single_solves(solver_name):
 
 
 def test_empty_batch_and_batch_threads():
-    """An empty batch gives no results; a batch that runs alone uses all cores."""
+    """An empty batch gives no results; a batch that runs alone uses all cores without a tuned value."""
     ac = vt.Aircraft(surfaces=[_surface()])
     assert vt.LinearLLTSolver().solve_sweep(ac, vt.FlightCondition(V_inf=30.0), vt.SolverSettings(), []) == []
-    assert par.single_case_threads(40, batch=8) == par.cpu_cores()
+    # The machine profile can hold a tuned batch_threads value for this size class.
+    assert par.single_case_threads(40, batch=8) == (par._tuned_batch_threads(40) or par.cpu_cores())
     with par.forced_single_threads(2):
         assert par.single_case_threads(40, batch=8) == 2
 
