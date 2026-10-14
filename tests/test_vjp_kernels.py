@@ -468,7 +468,12 @@ def test_default_backends() -> None:
 
 @pytest.mark.slow
 def test_quick_tuner_writes_grad_vjp(monkeypatch, tmp_path, _profile_cache) -> None:
-    """The tuner writes the grad_vjp entry per size class and device; the gradients then use it."""
+    """The quick tuner writes the CPU grad_vjp entry per size class; the gradients then use it.
+
+    A quick run times the CPU device only (it must stay short), so a GPU
+    keeps its default backend. The full-mode GPU measurement is checked in
+    :func:`test_full_grad_vjp_measures_gpu`.
+    """
     pytest.importorskip("torch")
     import json
 
@@ -483,15 +488,31 @@ def test_quick_tuner_writes_grad_vjp(monkeypatch, tmp_path, _profile_cache) -> N
     data = json.loads(prof.profile_path().read_text(encoding="utf-8"))
     entry = data["settings"]["grad_vjp"]
     assert set(entry) == {"small", "medium"}
-    devices = {"cpu"} | ({"gpu"} if K.available("warp", "cuda") else set())
     for cls in ("small", "medium"):
-        assert set(entry[cls]) == devices
+        assert set(entry[cls]) == {"cpu"}
         assert entry[cls]["cpu"] in K.CPU_BACKENDS + ("torch",)
         assert set(data["measurements"]["grad_vjp"][cls]["cpu"]) >= {"numba"}
-        if "gpu" in devices:
-            assert entry[cls]["gpu"] in ("warp", "torch")
     prof.reset_profile_cache()
     assert K.tuned_backend("cpu", 10) == entry["small"]["cpu"]
+    assert K.tuned_backend("cuda", 10) is None
+
+
+@pytest.mark.slow
+@pytest.mark.gpu
+def test_full_grad_vjp_measures_gpu(monkeypatch) -> None:
+    """The full-mode gradient step times the GPU backends and chooses Warp or PyTorch."""
+    pytest.importorskip("torch")
+    from ventorum import gpu
+    from ventorum.hardware import tuner
+
+    if not (K.available("warp", "cuda") and gpu.available()):
+        pytest.skip("needs the Warp CUDA backend")
+    monkeypatch.setattr(tuner, "_REPEATS", {"small": 1, "medium": 1, "large": 1})
+    ac, st = tuner._wing(6, 2)
+    choice, times = tuner._measure_grad_vjp("small", ac, st, 2, lambda _msg: None, quick=False)
+    assert set(choice) == {"cpu", "gpu"}
+    assert choice["gpu"] in ("warp", "torch")
+    assert set(times["gpu"]) >= {"warp"}
 
 
 def _collinear_targets(A: np.ndarray, B: np.ndarray, seed: int) -> np.ndarray:
