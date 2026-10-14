@@ -72,6 +72,8 @@ def solve_batch(solver, lattice, conditions: list, settings, S_ref: float, b_ref
         return (None, gpu._REASON_DEVICE_CPU) if return_reason else None
     if solver.name not in ("linear", "nonlinear", "vlm"):
         return (None, f"solver '{solver.name}' is not supported on GPU") if return_reason else None
+    if any(getattr(c, "mach", None) is not None and c.mach > 0.0 for c in conditions):
+        return (None, "compressibility correction runs on the CPU path") if return_reason else None
     from ventorum.utils.parallel import _local as _par_local
 
     if gpu.get_device() == "auto" and getattr(_par_local, "worker_threads", None) is not None:

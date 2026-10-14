@@ -595,16 +595,31 @@ def evaluate_aerodynamic_trust(
     # 4. Compressibility (outside the valid envelope) ---------------------------------
     mach_pen = 0.0
     if condition is not None:
-        a_sound = isa_speed_of_sound(getattr(condition, "rho", RHO_SL))
-        mach = float(condition.V_inf) / a_sound
+        correction_applied = getattr(condition, "mach", None) is not None and condition.mach > 0.0
+        if correction_applied:
+            mach = float(condition.mach)
+        else:
+            a_sound = isa_speed_of_sound(getattr(condition, "rho", RHO_SL))
+            mach = float(condition.V_inf) / a_sound
+
         if mach > MACH_LIMIT_INCOMPRESSIBLE:
             mach_pen = 0.60 + 0.30 * min(1.0, (mach - MACH_LIMIT_INCOMPRESSIBLE) / 0.35)
+            if correction_applied:
+                warnings.append(
+                    f"Out of the valid envelope: Mach={mach:.2f} > {MACH_LIMIT_INCOMPRESSIBLE}. "
+                    "The Prandtl-Glauert correction is applied and is not validated above Mach 0.3."
+                )
+            else:
+                warnings.append(
+                    f"Out of the valid envelope: Mach={mach:.2f} > {MACH_LIMIT_INCOMPRESSIBLE} (ISA speed of "
+                    f"sound {a_sound:.1f} m/s at the air density). The methods are incompressible and no "
+                    "compressibility correction is applied."
+                )
+                recommendations.append("Reduce the speed, or use a compressible method.")
+        if correction_applied and mach > 0.7:
             warnings.append(
-                f"Out of the valid envelope: Mach={mach:.2f} > {MACH_LIMIT_INCOMPRESSIBLE} (ISA speed of "
-                f"sound {a_sound:.1f} m/s at the air density). The methods are incompressible and no "
-                "compressibility correction is applied."
+                f"Mach={mach:.2f} > 0.7: linear theory loses validity near the critical Mach number."
             )
-            recommendations.append("Reduce the speed, or use a compressible method.")
     penalties["compressibility"] = mach_pen
 
     # 5. Ground proximity (stated in h/c) ------------------------------------------------

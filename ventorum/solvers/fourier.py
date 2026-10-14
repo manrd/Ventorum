@@ -301,6 +301,8 @@ class FourierSolver(BaseSolver):
                         "(solver_type='linear' or 'nonlinear')."
                     )
         validate_fourier_applicability(aircraft)
+        if getattr(condition, "mach", None) is not None and condition.mach > 0.0:
+            raise ValidityError("The Fourier solver does not support compressibility (mach > 0). Use solver='vlm'.")
         if condition.h is not None:
             raise ValidityError("The Fourier solver has no ground effect. Use solver='vlm' or 'linear'.")
         if abs(condition.beta) > 1e-12:

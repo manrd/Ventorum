@@ -167,6 +167,8 @@ def _refuse_configuration(ac: Any, condition: Any, settings: Any, canonical: str
     """
     from ventorum.core.datatypes import TabulatedAirfoil
 
+    if getattr(condition, "mach", None) is not None and condition.mach > 0.0:
+        raise GradientScopeError("Adjoint gradients are not supported with compressibility correction (mach > 0).")
     if canonical == "fourier":
         raise GradientScopeError(
             "The Fourier solver has no adjoint gradients (closed form): use central differences "

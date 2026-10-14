@@ -271,6 +271,10 @@ def check_gradients(
     import ventorum as vt
     from ventorum.core.datatypes import Aircraft, LiftingSurface, SolverSettings
     from ventorum.sensitivity.adjoint import _check_names, gradients
+    from ventorum.sensitivity.errors import GradientScopeError
+
+    if getattr(condition, "mach", None) is not None and condition.mach > 0.0:
+        raise GradientScopeError("check_gradients does not support compressibility correction (mach > 0).")
 
     outs, ins = _check_names(outputs, wrt)
     st = settings.clone() if settings is not None else SolverSettings()

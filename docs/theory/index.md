@@ -21,6 +21,7 @@ The chapters contain no result values. The values of the model parameters come f
 | [Classical lifting line](classical_lifting_line.md) | Glauert's Fourier-series solution of the Lanchester–Prandtl lifting-line equation | F. W. Lanchester (1907); L. Prandtl (1918, 1919); H. Glauert (1926) |
 | [Numerical lifting line](numerical_lifting_line.md) | Linear and nonlinear lifting line with section polars | W. F. Phillips and D. O. Snyder (2000); W. F. Phillips (2004) |
 | [Vortex-lattice method](vortex_lattice.md) | Bent horseshoe vortices on chordwise panels and deformed geometry | V. M. Falkner (1943); Katz and Plotkin (2001); M. Drela (2014) |
+| [Compressibility](compressibility.md) | Prandtl-Glauert rule and Goethert transformation for subsonic flow | B. H. Goethert (1946); M. Drela (2014); J. Katz and A. Plotkin (2001) |
 | [Forces and moments](forces_and_moments.md) | Kutta-Joukowski near-field forces, Trefftz-plane induced drag, section data, static derivatives | Katz and Plotkin (2001); Drela (2014); E. Trefftz (1921) |
 | [Ground effect](ground_effect.md) | Method of images over flat ground, height and bank derivatives (one state or a sweep), Irodov criterion | C. Wieselsberger (1921); K. V. Rozhdestvensky (2000, 2006); R. D. Irodov (1970) |
 | [Adjoint gradients](gradients.md) | Discrete adjoint gradients of the vortex lattice and the linear lifting line | J. R. R. A. Martins and J. T. Hwang (2013); J. R. R. A. Martins and A. Ning (2021) |
@@ -39,6 +40,7 @@ vortex_kernels
 classical_lifting_line
 numerical_lifting_line
 vortex_lattice
+compressibility
 forces_and_moments
 ground_effect
 gradients

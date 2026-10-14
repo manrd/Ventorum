@@ -331,6 +331,15 @@ class LatticeSolver(BaseSolver):
         """
         if ground is None and condition.h is not None:
             ground = ground_plane_from_condition(lattice, condition, ref_point)
+        if getattr(condition, "mach", None) is not None and condition.mach > 0.0:
+            if self.collocation == "llt":
+                raise ValidityError(
+                    f"Lifting-line solver '{self.name}' does not support compressibility (mach > 0). Use solver='vlm'."
+                )
+            if ground is not None or condition.h is not None:
+                raise ValidityError(
+                    "Compressibility correction (mach > 0) is not supported in ground effect."
+                )
         h_min = check_ground_clearance(lattice, ground)
         if self.collocation == "llt" and h_min is not None and c_ref:
             hc = h_min / c_ref
@@ -719,6 +728,9 @@ class LatticeSolver(BaseSolver):
             Returned only when *return_reason* is True.
         """
         from ventorum import gpu
+
+        if any(getattr(c, "mach", None) is not None and c.mach > 0.0 for c in conditions):
+            return (None, "compressibility correction runs on the CPU path") if return_reason else None
 
         if gpu.get_device() == "cpu":
             return (None, gpu._REASON_DEVICE_CPU) if return_reason else None

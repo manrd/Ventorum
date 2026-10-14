@@ -27,6 +27,7 @@ import numpy as np
 
 from ventorum.aero.system import GroundPlane
 from ventorum.core.datatypes import FlightCondition, SolverSettings
+from ventorum.core.errors import ValidityError
 from ventorum.geometry.lattice import VortexLattice
 from ventorum.solvers.core import SolveInfo, solve_llt_linear, solve_llt_linear_batch
 from ventorum.solvers.lattice_base import LatticeSolver
@@ -62,6 +63,8 @@ class LinearLLTSolver(LatticeSolver):
         info : SolveInfo
             Convergence information.
         """
+        if getattr(condition, "mach", None) is not None and condition.mach > 0.0:
+            raise ValidityError("Lifting-line solver 'linear' does not support compressibility (mach > 0). Use solver='vlm'.")
         gamma, info = solve_llt_linear(lattice, condition, ground,
                                        use_symmetry=getattr(settings, "use_symmetry", True), wake_dir=wake_dir,
                                        ref_point=ref_point)
@@ -83,6 +86,8 @@ class LinearLLTSolver(LatticeSolver):
         :meth:`solve_circulation`. *continuation* has no effect (the system
         is linear).
         """
+        if any(getattr(c, "mach", None) is not None and c.mach > 0.0 for c in conditions):
+            raise ValidityError("Lifting-line solver 'linear' does not support compressibility (mach > 0). Use solver='vlm'.")
         sols = solve_llt_linear_batch(lattice, conditions, grounds,
                                       getattr(settings, "use_symmetry", True), wake_dirs, ref_point)
         if sols is None:

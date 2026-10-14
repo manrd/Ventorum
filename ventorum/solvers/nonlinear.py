@@ -34,6 +34,7 @@ import numpy as np
 
 from ventorum.aero.system import GroundPlane, freestream_direction
 from ventorum.core.datatypes import FlightCondition, SolverSettings
+from ventorum.core.errors import ValidityError
 from ventorum.geometry.lattice import VortexLattice
 from ventorum.solvers.core import (
     SolveInfo,
@@ -80,6 +81,8 @@ class NonlinearLLTSolver(LatticeSolver):
         info : SolveInfo
             Convergence information.
         """
+        if getattr(condition, "mach", None) is not None and condition.mach > 0.0:
+            raise ValidityError("Lifting-line solver 'nonlinear' does not support compressibility (mach > 0). Use solver='vlm'.")
         use_sym = getattr(settings, "use_symmetry", True)
         umap = _unknown_map(lattice, condition, ground, use_sym)
         if wake_dir is None:

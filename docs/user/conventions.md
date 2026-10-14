@@ -9,6 +9,7 @@
 | Moments | As in AVL: `Cl > 0` right wing down, `Cm > 0` nose up, `Cn > 0` nose right. |
 | Moment reference point | `Aircraft.ref_point` (for example the centre of gravity), the origin if not set. |
 | Sideslip | `beta > 0` is wind from the right. Positive dihedral gives `Cl_beta < 0`. |
+| Mach number | Dimensionless, stored in `FlightCondition.mach`. Valid for $0 \le M < 1$. Supported by VLM (`solver_type="vlm"`). |
 | Wake | `wake_alignment="freestream"` (default) sends the wake along the free stream; `"body"` sends it along the x axis, as in AVL. |
 | Units | SI: m, m/s, kg/m^3, N. |
 
@@ -65,4 +66,12 @@ gives `(3, 2, -1)` in stability and wind axes. At `alpha = 0` and
 `ventorum.core.axes.transform_moments` applies these maps, and
 `SolverResult.moments(axes=...)` returns the stored body-axis moments in
 the selected system (`axes="all"` returns the three sets).
+
+## Mach number and compressibility
+
+`FlightCondition` holds an optional `mach` field (`float | None = None`). The valid range is $0 \le M < 1$. When `mach` is `None` or `0.0`, the flow is incompressible.
+
+Only the vortex-lattice solver (`solver_type="vlm"`) supports compressible flow. It applies the Prandtl-Glauert compressibility correction in the form given by Goethert (1946) on the CPU path. The GPU pipeline falls back to the CPU path when `mach` is set.
+
+The lifting-line solvers (linear, nonlinear, and Fourier) refuse `mach > 0` with `ValidityError`. Ground-effect analyses also refuse `mach > 0` with `ValidityError`. Adjoint gradients refuse `mach > 0` with `GradientScopeError`.
 

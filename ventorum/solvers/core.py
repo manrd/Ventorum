@@ -29,15 +29,19 @@ from ventorum.aero.loads import group_strips_by_airfoil
 from ventorum.aero.system import (
     GroundPlane,
     UnknownMap,
+    _core_group,
     build_sources,
     freestream_direction,
     is_symmetric_condition,
+    lift_direction,
     make_unknown_map,
     panel_targets,
     rotation_velocity,
+    side_direction,
 )
 from ventorum.aero.vortex import HorseshoeSet, influence_matrix, velocity_tensor_unknowns
 from ventorum.core.datatypes import FlightCondition
+from ventorum.core.errors import ValidityError
 from ventorum.geometry.lattice import VortexLattice, section_cl, section_cl_slope
 from ventorum.utils.vec import cross3
 
@@ -121,6 +125,53 @@ def assemble_vlm(
     """
     if lattice.collocation != "vlm":
         raise ValueError("assemble_vlm needs a lattice built with collocation='vlm'.")
+    if getattr(condition, "mach", None) is not None and condition.mach > 0.0:
+        if ground is not None:
+            raise ValidityError("Compressibility correction (mach > 0) is not supported in ground effect.")
+        import math
+        M = float(condition.mach)
+        beta = math.sqrt(1.0 - M * M)
+        d = freestream_direction(condition.alpha, condition.beta)
+        lift = lift_direction(condition.alpha)
+        side = side_direction(condition.alpha, condition.beta)
+        R = np.vstack([d, side, lift])
+        rp = np.zeros(3) if ref_point is None else np.asarray(ref_point, dtype=float)
+
+        def to_s(pts: np.ndarray) -> np.ndarray:
+            p_fs = (pts - rp) @ R.T
+            p_s = p_fs.copy()
+            p_s[:, 0] /= beta
+            return p_s
+
+        umap = _unknown_map(lattice, condition, ground, use_symmetry)
+        a_s = to_s(lattice.a)
+        b_s = to_s(lattice.b)
+        a_te_s = to_s(lattice.a_te)
+        b_te_s = to_s(lattice.b_te)
+        w_fs = np.array([1.0, 0.0, 0.0])
+        group = _core_group(lattice)[lattice.panel_strip]
+        src = HorseshoeSet(
+            a=a_s, b=b_s, a_te=a_te_s, b_te=b_te_s,
+            wake_dir=np.tile(w_fs, (lattice.n_panels, 1)),
+            rc=lattice.rc,
+            sign=np.ones(lattice.n_panels),
+            column=umap.panel_column.copy(),
+            group=group,
+        )
+        P = lattice.cp[umap.unknown_panels]
+        P_s = to_s(P)
+        tg = panel_targets(lattice, umap.unknown_panels)
+        n_bc = lattice.normal_bc[umap.unknown_panels]
+        n_fs = n_bc @ R.T
+        n_eff = n_fs.copy()
+        n_eff[:, 0] /= beta
+        A = influence_matrix(P_s, n_eff, src, umap.n, tg)
+        rhs = -condition.V_inf * (n_bc @ d)
+        w_rot = rotation_velocity(condition, P, ref_point)
+        if w_rot is not None:
+            rhs = rhs - np.sum(n_bc * w_rot, axis=1)
+        return A, rhs, umap
+
     d = freestream_direction(condition.alpha, condition.beta)
     wd = d if wake_dir is None else np.asarray(wake_dir, dtype=float)
     umap = _unknown_map(lattice, condition, ground, use_symmetry)

@@ -895,6 +895,10 @@ class FlightCondition:
         ``"linear"``, ``"nonlinear"``) solve the quasi-steady rotating flow
         (see :mod:`ventorum.aero.system`); the ``"fourier"`` solver refuses
         a rate that is not zero.
+    mach : float or None
+        Mach number [-] for the Prandtl-Glauert compressibility correction
+        in the vortex-lattice solver. *None* (default) means no correction:
+        every result is the same as today. Must satisfy 0 <= mach < 1.
     """
 
     V_inf: float = 50.0
@@ -906,6 +910,14 @@ class FlightCondition:
     p: float = 0.0  # Roll rate [rad/s], body axes, > 0 right wing down
     q: float = 0.0  # Pitch rate [rad/s], body axes, > 0 nose up
     r: float = 0.0  # Yaw rate [rad/s], body axes, > 0 nose right
+    mach: float | None = None  # Mach number [-] (0 <= mach < 1)
+
+    def __post_init__(self) -> None:
+        if self.mach is not None:
+            if not (0.0 <= self.mach < 1.0):
+                raise ValueError(
+                    f"mach must satisfy 0 <= mach < 1 (subsonic), got {self.mach}."
+                )
 
     @property
     def phi_deg(self) -> float:
@@ -934,6 +946,7 @@ class FlightCondition:
             p=self.p,
             q=self.q,
             r=self.r,
+            mach=self.mach,
         )
 
     def __copy__(self) -> FlightCondition:

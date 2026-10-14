@@ -56,8 +56,9 @@ from ventorum.aero.system import (
     panel_targets,
     rotation_vector,
     rotation_velocity,
+    side_direction,
 )
-from ventorum.aero.vortex import induced_velocity, trefftz_normalwash_prepared, trefftz_prepare
+from ventorum.aero.vortex import HorseshoeSet, induced_velocity, trefftz_normalwash_prepared, trefftz_prepare
 from ventorum.core.datatypes import (
     FlightCondition,
     IntegratedResult,
@@ -1252,6 +1253,57 @@ def _near_field_velocity(
     get the mirror image of their mirror panel.
     """
     n_p = lattice.n_panels
+    if getattr(condition, "mach", None) is not None and condition.mach > 0.0:
+        import math
+        M = float(condition.mach)
+        beta = math.sqrt(1.0 - M * M)
+        d = freestream_direction(condition.alpha, condition.beta)
+        lift = lift_direction(condition.alpha)
+        side = side_direction(condition.alpha, condition.beta)
+        R = np.vstack([d, side, lift])
+
+        def to_s(pts: np.ndarray) -> np.ndarray:
+            p_fs = pts @ R.T
+            p_s = p_fs.copy()
+            p_s[:, 0] /= beta
+            return p_s
+
+        if not is_symmetric_condition(condition, ground):
+            fold = None
+        else:
+            fold = _symmetric_fold(lattice, gamma_panel, points, swap, leg_forces=leg_forces)
+        eval_panels = np.arange(n_p) if fold is None else fold[0]
+        n_e = eval_panels.size
+
+        a_s = to_s(lattice.a)
+        b_s = to_s(lattice.b)
+        a_te_s = to_s(lattice.a_te)
+        b_te_s = to_s(lattice.b_te)
+        w_fs = np.array([1.0, 0.0, 0.0])
+        group = _core_group_of(lattice)[lattice.panel_strip]
+        src_s = HorseshoeSet(
+            a=a_s, b=b_s, a_te=a_te_s, b_te=b_te_s,
+            wake_dir=np.tile(w_fs, (n_p, 1)),
+            rc=lattice.rc,
+            sign=np.ones(n_p),
+            column=np.arange(n_p),
+            group=group,
+        )
+        points_s = [to_s(pk) for pk in points]
+        P_s, tgt, repeat = _load_points(lattice, eval_panels, points_s)
+        v_eval_s = induced_velocity(P_s, src_s, gamma_panel, tgt, repeat=repeat)
+        v_phys_fs = v_eval_s.copy()
+        v_phys_fs[:, 0] /= beta
+        v_phys_geo = v_phys_fs @ R
+        for k in range(len(points)):
+            out[k][eval_panels] = v_phys_geo[k * n_e:(k + 1) * n_e]
+        if fold is not None:
+            left = fold[1]
+            mirror = lattice.panel_mirror[left]
+            for k in range(len(points)):
+                out[k][left] = out[swap[k]][mirror] * _MIRROR
+        return
+
     if not is_symmetric_condition(condition, ground):
         fold = None
     else:
