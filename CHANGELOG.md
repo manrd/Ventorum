@@ -70,6 +70,9 @@ a minor version can change a public interface.
 
 ### Changed
 
+- The numpy reference vortex kernel is 13 % to 24 % faster (fewer temporary arrays; the
+  outside law of the finite-filament core only where it is needed). Results equal to
+  round-off; the PyTorch kernel is unchanged.
 - Machine profile schema 3 (by addition; a schema-2 profile still loads): `ventorum-tune` also
   writes the GPU limits `min_work` and `min_cases` per solver family (from the measured
   crossover), the kernel threads of one case inside a multi-case batch per size class
