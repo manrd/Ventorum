@@ -490,12 +490,12 @@ def test_batch_cpu_dispatch_records_plan_that_ran():
         conds = [FlightCondition(V_inf=30.0, alpha=np.radians(a)) for a in np.linspace(-4.0, 12.0, 33)]
         lat = solver.build(ac, st, conds[0])
         results = solver.solve_batch(lat, conds, st, ac.S_ref, ac.b_ref, ac.c_ref)
-        expected = _expected_solve_threads(parallel.single_case_threads(lat.n_panels, batch=33))
+        expected = _expected_solve_threads(parallel.single_case_threads(lat.n_panels, batch=33, family="vlm"))
         for r in results:
             d = r.details["dispatch"]
             assert d["workers"] == 1
             # A tuned batch_threads entry of the machine profile makes the source "profile".
-            assert d["plan_source"] == ("profile" if parallel._tuned_batch_threads(lat.n_panels) else "default")
+            assert d["plan_source"] == ("profile" if parallel._tuned_batch_threads(lat.n_panels, "vlm") else "default")
             if expected is not None:
                 assert d["threads"] == expected
     finally:

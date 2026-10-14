@@ -15,7 +15,9 @@ It measures, for each case size (see :data:`ventorum.hardware.profile.SIZE_CLASS
 * the best split of the cores between cases in parallel and threads per
   case, for batches (sweeps, design studies);
 * the kernel threads of one case inside a multi-case batch that runs alone
-  (a lifting-line batch on one lattice);
+  (a 33-case batch of each solver family on one lattice, on the sweep
+  path); a cell is written only when it beats all cores by more than 5 %,
+  else the sweeps use all cores;
 * with a CUDA GPU and the GPU pipelines (:mod:`ventorum.gpu`), a cost
   model of the CPU and GPU paths per solver family (the rule of the
   ``"auto"`` device);
@@ -530,43 +532,105 @@ def _measure_grad_vjp(cls: str, ac, st, cores: int, say, quick: bool = False) ->
     return choices, times
 
 
-# Cases of one batch in the batch-threads step: enough cases that the batch
-# path runs, few enough that the step stays fast.
-_BATCH_THREADS_CASES = 8
+# Cases of one batch in the batch-threads step: the sweep size of the fixed
+# workloads, so the measurement uses the same path as the sweeps.
+_BATCH_THREADS_CASES = 33
+# Solver families measured in the batch-threads step.
+_BATCH_THREADS_FAMILIES = ("vlm", "linear", "nonlinear")
+# A batch thread count is written only when it beats all cores by more than
+# this fraction (median times).
+_BATCH_THREADS_MIN_GAIN = 0.05
+# The tuner self-check drops the batch entries when a fixed workload with
+# them is slower than without them by more than this fraction.
+_SELF_CHECK_MAX_SLOWDOWN = 0.02
+# Repeats of one timing of the batch-threads step and of the self-check.
+_BATCH_THREADS_REPEATS = 3
 # Candidate chunk caps [MiB] of the ground-effect step.
 _CHUNK_CANDIDATES_MIB = (64.0, 256.0, 1024.0)
 _DEFAULT_CHUNK_MIB = 256.0
 
 
-def _measure_batch_threads(cls: str, ac, st, cores: int, quick: bool, say) -> tuple[int, dict[str, float]]:
-    """Time a lifting-line batch at each thread count; return the best count and the times.
+def _batch_threads_keep(timings: dict[int, float], cores: int) -> int | None:
+    """Return the thread count to write, or None for all cores (no entry).
 
-    The batch runs alone on the CPU with the kernel choices of step 1: its
-    kernel calls do the work of ``_BATCH_THREADS_CASES`` cases. The best
-    count is the tuned ``batch_threads`` of the size class (fewer threads
-    win a tie). Times in seconds.
+    The fastest count wins (fewer threads win a tie, see :func:`_pick`), but
+    only when its median time beats all cores by more than
+    ``_BATCH_THREADS_MIN_GAIN``. If no measured setting can meet this, the
+    tuner writes no entry and the sweeps use all cores, the default.
+    """
+    best = _pick(timings)
+    if best == cores:
+        return None
+    if timings[best] * (1.0 + _BATCH_THREADS_MIN_GAIN) < timings[cores]:
+        return best
+    return None
+
+
+def _self_check_drop(times: dict[str, tuple[float, float]]) -> str | None:
+    """Return why the batch entries must be dropped, or None to keep them.
+
+    *times* maps each workload name to ``(with_s, without_s)``: the median
+    time [s] of the workload with the new batch entries and without them. A
+    workload that is slower with the entries by more than
+    ``_SELF_CHECK_MAX_SLOWDOWN`` drops all batch entries.
+    """
+    for name, (with_s, without_s) in times.items():
+        if with_s > without_s * (1.0 + _SELF_CHECK_MAX_SLOWDOWN):
+            slower = 100.0 * (with_s - without_s) / without_s
+            return (f"{name} is {slower:.1f} % slower with the tuned batch threads "
+                    f"({with_s:.3f} s against {without_s:.3f} s): drop the batch entries")
+    return None
+
+
+def _batch_threads_solver(family: str):
+    """Return a solver of the batch-threads family *family*."""
+    from ventorum.solvers.horseshoe import VortexLatticeSolver
+    from ventorum.solvers.linear import LinearLLTSolver
+    from ventorum.solvers.nonlinear import NonlinearLLTSolver
+
+    return {"vlm": VortexLatticeSolver, "linear": LinearLLTSolver,
+            "nonlinear": NonlinearLLTSolver}[family]()
+
+
+def _measure_batch_threads(family: str, cls: str, ac, st, cores: int, say) -> tuple[int | None, dict[str, float]]:
+    """Time a 33-case batch of solver family *family* at each thread count.
+
+    The batch runs alone on the CPU with the kernel choices of step 1, on
+    the same path that the sweeps use (:meth:`solve_batch` with the CPU
+    path). Return the thread count to write and the times [s]. The count is
+    None when no setting beats all cores by more than 5 % (see
+    :func:`_batch_threads_keep`); the caller then writes no entry and the
+    sweeps use all cores.
     """
     import ventorum as vt
     from ventorum.utils import parallel as par
 
-    lin_st = vt.SolverSettings(solver_type="linear", n_panels=st.n_panels)
-    solver = vt.LinearLLTSolver()
+    solver = _batch_threads_solver(family)
+    if family == "vlm":
+        fam_st = vt.SolverSettings(solver_type="vlm", n_panels=st.n_panels, n_chord=st.n_chord)
+    else:
+        fam_st = vt.SolverSettings(solver_type=family, n_panels=st.n_panels)
     cond = vt.FlightCondition(V_inf=30.0)
-    lat = solver.build(ac, lin_st, cond)
+    lat = solver.build(ac, fam_st, cond)
     conds = [vt.FlightCondition(V_inf=30.0, alpha=float(a))
              for a in np.radians(np.linspace(-4.0, 10.0, _BATCH_THREADS_CASES))]
-    breps = 2 if quick else 3
 
     def run():
-        return solver.solve_batch(lat, conds, lin_st, ac.S_ref, ac.b_ref, ac.c_ref, _cpu_only=True)
+        return solver.solve_batch(lat, conds, fam_st, ac.S_ref, ac.b_ref, ac.c_ref, _cpu_only=True)
 
     run()  # warm-up (the first batch call builds the batch path)
     timings = {}
     for t in _thread_candidates(cores):
         with par.forced_single_threads(t):
-            timings[t] = _time(run, breps)
-    best = _pick(timings)
-    say(f"{cls:6s} batch threads: {best} threads, {1e3 * timings[best]:.1f} ms for {_BATCH_THREADS_CASES} cases")
+            timings[t] = _time(run, _BATCH_THREADS_REPEATS)
+    best = _batch_threads_keep(timings, cores)
+    if best is None:
+        say(f"{cls:6s} batch threads {family:9s}: no setting beats all cores by more than "
+            f"{100.0 * _BATCH_THREADS_MIN_GAIN:.0f} % ({1e3 * timings[cores]:.1f} ms for "
+            f"{_BATCH_THREADS_CASES} cases on all cores): no entry")
+    else:
+        say(f"{cls:6s} batch threads {family:9s}: {best} threads, {1e3 * timings[best]:.1f} ms for "
+            f"{_BATCH_THREADS_CASES} cases (all cores {1e3 * timings[cores]:.1f} ms)")
     return best, {str(k): v for k, v in timings.items()}
 
 
@@ -653,6 +717,71 @@ def _measure_chunks(quick: bool, say, grad_choice: dict[str, Any]) -> tuple[dict
         f"x{f} {1e3 * grad_times[f]:.0f} ms" for f in ("0.25", "1.0", "4.0")) + ")")
     meas["gradient"] = {"factors": ["0.25", "1.0", "4.0"], "seconds": grad_times, "choice_mib": grad_choice_mib}
     return {"ground_cpu": float(ground_choice), "gradient": float(grad_choice_mib)}, meas
+
+
+def _self_check_workloads():
+    """Return the fixed sweep workloads of the batch-threads self-check.
+
+    The same sweeps as the fixed workloads ``sweep_vlm_n40_c4_33`` and
+    ``sweep_linear_n80_33`` of ``validation/perf_history.py``: a rectangular
+    wing (semi-span 5 m, chord 1.25 m), 33 angles from -4 to 12 deg.
+    """
+    import ventorum as vt
+
+    wing = vt.LiftingSurface(
+        name="SelfCheckWing",
+        semi_span=5.0,
+        sections=[
+            vt.WingSection(y_frac=0.0, chord=1.25, airfoil=vt.LinearAirfoil()),
+            vt.WingSection(y_frac=1.0, chord=1.25, airfoil=vt.LinearAirfoil()),
+        ],
+    )
+    alphas = np.linspace(-4.0, 12.0, 33)
+    out = {}
+    for name, solver, panels, n_chord in (("sweep_vlm_n40_c4_33", "vlm", 40, 4),
+                                          ("sweep_linear_n80_33", "linear", 80, None)):
+        st = vt.SolverSettings(solver_type=solver, n_panels=panels, n_chord=n_chord)
+
+        def run(wing=wing, alphas=alphas, st=st):
+            return vt.analyze_sweep(wing, alphas, settings=st)
+
+        out[name] = run
+    return out
+
+
+def _self_check_batch_threads(settings, hw, quick, say, prof, vt) -> dict[str, Any]:
+    """Time two fixed sweeps with and without the batch entries; drop them if slower.
+
+    A full tuner run ends with this check: each workload runs with the new
+    ``batch_threads`` entries and without them (all cores). If either
+    workload is slower with the entries by more than
+    ``_SELF_CHECK_MAX_SLOWDOWN``, all batch entries are dropped from
+    *settings* and the reason is printed. Returns the measurements record.
+    A quick run skips the check. It never changes the results, only the
+    thread counts.
+    """
+    if quick or not settings.get("batch_threads"):
+        return {"skipped": "quick mode" if quick else "no batch entries measured"}
+    workloads = _self_check_workloads()
+    full = {k: dict(v) for k, v in settings.items() if k in ("kernels", "single", "batch", "batch_threads")}
+    times: dict[str, tuple[float, float]] = {}
+    with _profile_in_process(_make_profile(prof, full, {}, hw, quick, 0.0, vt)):
+        with_times = {name: _time(fn, _BATCH_THREADS_REPEATS) for name, fn in workloads.items()}
+    stripped = {k: v for k, v in full.items() if k != "batch_threads"}
+    with _profile_in_process(_make_profile(prof, stripped, {}, hw, quick, 0.0, vt)):
+        without_times = {name: _time(fn, _BATCH_THREADS_REPEATS) for name, fn in workloads.items()}
+    for name in workloads:
+        times[name] = (with_times[name], without_times[name])
+    reason = _self_check_drop(times)
+    if reason is None:
+        say("self-check batch threads: the fixed sweeps keep their speed "
+            + ", ".join(f"{n} {w:.3f} s with, {wo:.3f} s without" for n, (w, wo) in times.items()))
+        return {"workloads": {n: {"with_s": w, "without_s": wo} for n, (w, wo) in times.items()},
+                "kept": True}
+    settings["batch_threads"] = {}
+    say(f"self-check batch threads: {reason}")
+    return {"workloads": {n: {"with_s": w, "without_s": wo} for n, (w, wo) in times.items()},
+            "kept": False, "reason": reason}
 
 
 def tune_machine(quick: bool = False, save: bool = True, verbose: bool = True) -> dict[str, Any]:
@@ -759,11 +888,21 @@ def _tune_steps(quick, say, hw, cores, classes, meas, settings, t_start, prof, p
                 say(f"{cls:6s} batch: {best_w} cases in parallel x {cores // best_w} threads, {batch[best_w]:.0f} cases/s")
 
                 # 3b. Threads of one case inside a multi-case batch that runs
-                # alone (a lifting-line batch on one lattice).
-                best_bt, bt_times = _measure_batch_threads(cls, ac, st, cores, quick, say)
-                settings["batch_threads"][cls] = best_bt
-                meas["batch_threads"][cls] = {"panels": n_pan, "cases": _BATCH_THREADS_CASES,
-                                              "seconds": bt_times}
+                # alone (a 33-case batch of each solver family on one
+                # lattice, on the sweep path). A cell is written only when
+                # it beats all cores by more than 5 %; else the sweeps use
+                # all cores.
+                for family in _BATCH_THREADS_FAMILIES:
+                    best_bt, bt_times = _measure_batch_threads(family, cls, ac, st, cores, say)
+                    meas["batch_threads"].setdefault(family, {})[cls] = {
+                        "panels": n_pan, "cases": _BATCH_THREADS_CASES,
+                        "seconds": bt_times,
+                        "choice": best_bt,
+                        "reason": ("beats all cores by more than 5 %" if best_bt is not None
+                                   else "no setting beats all cores by more than 5 %: no entry"),
+                    }
+                    if best_bt is not None:
+                        settings["batch_threads"].setdefault(family, {})[cls] = best_bt
 
             # 4. GPU pipelines: the cost model of the CPU and GPU paths. The
             # CPU times use the settings of steps 1 to 3.
@@ -797,6 +936,9 @@ def _tune_steps(quick, say, hw, cores, classes, meas, settings, t_start, prof, p
                 # quick run keeps the defaults).
                 chunk_mib, chunk_meas = _measure_chunks(quick, say, settings["grad_vjp"])
                 meas["chunks"] = chunk_meas
+    # 8. Self-check of a full run: the fixed sweeps with the new batch
+    # entries must keep their speed against all cores.
+    meas["batch_threads_self_check"] = _self_check_batch_threads(settings, hw, quick, say, prof, vt)
     settings["gpu"] = {**_gpu_info(), **gpu_settings}
     meas["gpu"] = gpu_meas
     settings["chunk_mib"] = chunk_mib

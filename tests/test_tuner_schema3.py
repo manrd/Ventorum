@@ -64,13 +64,13 @@ def test_schema_3_profile_marks_new_keys(config_dir):
     prof.save_profile({"schema": 3, "fingerprint": fp, "settings": {
         "single": {"small": {"threads": 1}},
         "batch": {"small": {"workers": 1, "threads": 1}},
-        "batch_threads": {"small": 2},
+        "batch_threads": {"vlm": {"small": 2}},
         "chunk_mib": {"ground_cpu": 256.0, "gradient": 152.0},
         "gpu": {"available": False, "min_work": {"vlm": 1.0e5}, "min_cases": {"vlm": 24}},
     }})
     active = prof.active_profile()
     assert active is not None and active["schema"] == 3
-    assert prof.tuned_setting("batch_threads", "small", default=None) == 2
+    assert prof.tuned_setting("batch_threads", "vlm", "small", default=None) == 2
     assert prof.tuned_setting("chunk_mib", "ground_cpu", default=None) == 256.0
     assert prof.tuned_setting("gpu", "min_work", "vlm", default=None) == 1.0e5
 
@@ -86,7 +86,9 @@ def test_quick_tuner_writes_schema_3_keys(config_dir, monkeypatch):
     monkeypatch.setattr(tuner_mod, "_GPU_CASES", {True: {"vlm": [(6, 2)]}, False: {"vlm": [(6, 2)]}})
     p = tuner_mod.tune_machine(quick=True, verbose=False)
     assert p["schema"] == prof.SCHEMA_VERSION == 3
-    assert set(p["settings"]["batch_threads"]) == {"small", "medium"}
+    assert set(p["settings"]["batch_threads"]) <= {"vlm", "linear", "nonlinear"}
+    for _family, cells in p["settings"]["batch_threads"].items():
+        assert set(cells) <= {"small", "medium"}
     assert set(p["settings"]["chunk_mib"]) == {"ground_cpu", "gradient"}
     assert p["settings"]["chunk_mib"]["ground_cpu"] > 0.0
     assert p["settings"]["chunk_mib"]["gradient"] > 0.0
@@ -94,3 +96,42 @@ def test_quick_tuner_writes_schema_3_keys(config_dir, monkeypatch):
     assert isinstance(p["settings"]["gpu"].get("min_cases", {}), dict)
     assert "batch_threads" in p["measurements"] and "chunks" in p["measurements"]
     assert prof.active_profile() is not None
+
+
+def test_batch_threads_keep_needs_a_clear_win():
+    """The tuner keeps a batch thread count only when it beats all cores by more than 5 %."""
+    cores = 12
+    all_cores = 1.00
+    # A 10 % win is kept, and the fastest count wins.
+    assert tuner._batch_threads_keep({1: 1.20, 2: 0.90, cores: all_cores}, cores) == 2
+    # A 4 % win is not enough: no entry (all cores, the default).
+    assert tuner._batch_threads_keep({1: 1.20, 2: 0.96, cores: all_cores}, cores) is None
+    # All cores fastest: no entry.
+    assert tuner._batch_threads_keep({1: 1.20, 2: 1.10, cores: all_cores}, cores) is None
+    # Exactly 5 % is not more than 5 %: no entry.
+    assert tuner._batch_threads_keep({2: all_cores / 1.05, cores: all_cores}, cores) is None
+
+
+def test_self_check_drop_needs_a_clear_loss():
+    """The tuner self-check drops the batch entries when a fixed workload is more than 2 % slower."""
+    assert tuner._self_check_drop({"sweep": (1.03, 1.00)}) is not None
+    assert tuner._self_check_drop({"sweep": (1.02, 1.00)}) is None
+    assert tuner._self_check_drop({"sweep": (0.99, 1.00)}) is None
+    assert "sweep" in (tuner._self_check_drop({"sweep": (1.05, 1.00)}) or "")
+    kept = tuner._self_check_drop({"a": (1.00, 1.00), "b": (1.01, 1.00)})
+    assert kept is None
+
+
+def test_old_flat_batch_threads_form_is_ignored(config_dir):
+    """The reader ignores the old flat batch_threads form and uses all cores."""
+    from ventorum.utils import parallel as par
+
+    fp = get_machine_fingerprint()
+    prof.save_profile({"schema": 3, "fingerprint": fp,
+                       "settings": {"batch_threads": {"small": 2, "medium": 8, "large": 12}}})
+    try:
+        for family in ("vlm", "linear", "nonlinear"):
+            assert par._tuned_batch_threads(100, family) is None
+            assert par.single_case_threads(100, batch=33, family=family) == par.cpu_cores()
+    finally:
+        prof.reset_profile_cache()

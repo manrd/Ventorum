@@ -90,16 +90,23 @@ def forced_single_threads(n: int | None):
         _forced_single[0] = old
 
 
-def _tuned_batch_threads(n_panels: int | None) -> int | None:
+def _tuned_batch_threads(n_panels: int | None, family: str | None = None) -> int | None:
     """Return the tuned kernel threads of one case inside a multi-case batch, or None.
 
-    The tuner writes the value per size class (key ``"batch_threads"``); a
-    missing or bad value gives None, and the caller uses all cores.
+    The tuner writes the value per solver family and size class (key
+    ``"batch_threads"`` as ``settings["batch_threads"][family][size_class]``
+    with *family* one of ``"vlm"``, ``"linear"`` or ``"nonlinear"``); a
+    missing or bad value gives None, and the caller uses all cores. A
+    profile with the old flat form (``settings["batch_threads"][size_class]``)
+    is ignored: it gives None. Without a family (None or unknown) it gives
+    None.
     """
     from ventorum.hardware.profile import size_class, tuned_setting
 
+    if family not in ("vlm", "linear", "nonlinear"):
+        return None
     try:
-        tuned = tuned_setting("batch_threads", size_class(n_panels), default=None)
+        tuned = tuned_setting("batch_threads", family, size_class(n_panels), default=None)
         value = int(tuned) if tuned is not None else 0
     except (TypeError, ValueError):
         return None
@@ -108,18 +115,18 @@ def _tuned_batch_threads(n_panels: int | None) -> int | None:
     return max(1, min(value, cpu_cores()))
 
 
-def single_case_threads(n_panels: int | None, batch: int = 1) -> int:
+def single_case_threads(n_panels: int | None, batch: int = 1, family: str | None = None) -> int:
     """Return the number of kernel threads for one case (or one batch of cases) that runs alone.
 
     A batch of more than one case (for example the angles of a lifting-line
     sweep, computed in one kernel call) uses the tuned thread count of its
-    size class, or all cores without one. Its kernel calls do the work of
+    solver family and size class, or all cores without one. Its kernel calls do the work of
     many cases.
     """
     if _forced_single[0] is not None:
         return int(_forced_single[0])
     if batch > 1:
-        return _tuned_batch_threads(n_panels) or cpu_cores()
+        return _tuned_batch_threads(n_panels, family) or cpu_cores()
     from ventorum.hardware.profile import size_class, tuned_setting
 
     tuned = tuned_setting("single", size_class(n_panels), "threads")
@@ -169,7 +176,7 @@ def blas_single_thread():
 
 
 @contextlib.contextmanager
-def solve_threads(n_panels: int | None = None, batch: int = 1):
+def solve_threads(n_panels: int | None = None, batch: int = 1, family: str | None = None):
     """Set the thread policy inside one solve (or one batch of *batch* cases on the same lattice).
 
     * BLAS runs on one thread while the compiled kernels run (on a 4-core
@@ -178,7 +185,7 @@ def solve_threads(n_panels: int | None = None, batch: int = 1):
     * In a worker of :func:`case_executor` the kernels keep the thread count
       of the worker. A case that runs alone uses the tuned thread count for
       its size (all cores by default); a batch uses the tuned
-      ``batch_threads`` count of its size class (all cores by default, see
+      ``batch_threads`` count of its solver family and size class (all cores by default, see
       :func:`single_case_threads`). The thread count does not change the
       results (each kernel row is computed by one thread).
     * The panel count is stored in a thread-local variable for the duration
@@ -195,7 +202,7 @@ def solve_threads(n_panels: int | None = None, batch: int = 1):
     try:
         old_threads = None
         if get_kernel_backend() in ("numba", "cython") and getattr(_local, "worker_threads", None) is None:
-            old_threads = _set_kernel_threads(single_case_threads(n_panels, batch))
+            old_threads = _set_kernel_threads(single_case_threads(n_panels, batch, family))
         try:
             # BLAS on one thread for every kernel backend: the dense solves of
             # Ventorum are small, and a multi-threaded OpenBLAS solve of 100 to
@@ -345,7 +352,7 @@ def case_executor(plan: ParallelPlan):
         yield ex
 
 
-def _dispatch_plan(n_panels: int | None, batch: int = 1) -> tuple[int, int, str]:
+def _dispatch_plan(n_panels: int | None, batch: int = 1, family: str | None = None) -> tuple[int, int, str]:
     """Return the plan that runs the calling solve, for the dispatch record.
 
     Call it inside :func:`solve_threads`, so that the kernel thread count is
@@ -357,6 +364,10 @@ def _dispatch_plan(n_panels: int | None, batch: int = 1) -> tuple[int, int, str]
         Panel count of the lattice (it selects the size class).
     batch : int, optional
         Number of cases that the solve computes together.
+    family : str or None, optional
+        Solver family (``"vlm"``, ``"linear"`` or ``"nonlinear"``); it selects
+        the tuned ``batch_threads`` entry with the size class. None uses all
+        cores.
 
     Returns
     -------
@@ -371,8 +382,8 @@ def _dispatch_plan(n_panels: int | None, batch: int = 1) -> tuple[int, int, str]
         that runs alone has one worker; its thread count comes from the
         user (:func:`forced_single_threads`), from the tuned single-case
         setting of the profile, or from the default (all cores). A batch of
-        several cases uses the tuned ``batch_threads`` setting of its size
-        class when the profile has one, else all cores.
+        several cases uses the tuned ``batch_threads`` setting of its solver
+        family and size class when the profile has one, else all cores.
     """
     threads = max(1, kernel_threads())
     plan = getattr(_local, "plan", None)
@@ -383,7 +394,7 @@ def _dispatch_plan(n_panels: int | None, batch: int = 1) -> tuple[int, int, str]
     if _forced_single[0] is not None:
         return 1, threads, "user"
     if batch > 1:
-        return 1, threads, "profile" if _tuned_batch_threads(n_panels) else "default"
+        return 1, threads, "profile" if _tuned_batch_threads(n_panels, family) else "default"
     from ventorum.hardware.profile import size_class, tuned_setting
 
     tuned = tuned_setting("single", size_class(n_panels), "threads")

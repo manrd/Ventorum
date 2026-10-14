@@ -70,7 +70,7 @@ LLT_GE_WARN_H_OVER_C = 2.0
 LARGE_ROTATION_FRACTION = 0.1
 
 
-def _cpu_dispatch(n_panels: int, batch: int, reason: str | None) -> dict:
+def _cpu_dispatch(n_panels: int, batch: int, reason: str | None, family: str | None = None) -> dict:
     """Return the dispatch record of a CPU solve, for all cases of one batch.
 
     Call it inside :func:`ventorum.utils.parallel.solve_threads`, so that the
@@ -85,6 +85,10 @@ def _cpu_dispatch(n_panels: int, batch: int, reason: str | None) -> dict:
     reason : str or None
         Reason of the CPU path (the GPU fallback reason). None gives
         ``"CPU path selected"``.
+    family : str or None, optional
+        Solver family (``"vlm"``, ``"linear"`` or ``"nonlinear"``); it selects
+        the tuned ``batch_threads`` entry with the size class. None uses all
+        cores.
 
     Returns
     -------
@@ -97,7 +101,7 @@ def _cpu_dispatch(n_panels: int, batch: int, reason: str | None) -> dict:
     from ventorum.utils.parallel import _dispatch_plan
 
     prof = active_profile()
-    workers, threads, plan_source = _dispatch_plan(n_panels, batch)
+    workers, threads, plan_source = _dispatch_plan(n_panels, batch, family)
     return {
         "device": "cpu",
         "precision": "float64",
@@ -665,7 +669,7 @@ class LatticeSolver(BaseSolver):
         else:
             gpu_reason = _cpu_reason or "caller requested cpu only"
         explicit = [None] * len(conditions) if grounds is None else list(grounds)
-        with solve_threads(lattice.n_panels, batch=len(conditions)):
+        with solve_threads(lattice.n_panels, batch=len(conditions), family=self.name):
             setups = [self._case_setup(lattice, c, settings, c_ref, g, ref_point) for c, g in zip(conditions, explicit)]
             grounds = [st[0] for st in setups]
             wds = np.array([st[3] for st in setups], dtype=float).reshape(len(conditions), 3)
@@ -679,7 +683,7 @@ class LatticeSolver(BaseSolver):
                 alpha_eff_strips=alpha_effs, wake_dirs=wds,
                 v_controls=None if any(v is None for v in vcs) else np.array(vcs),
             )
-            dispatch = _cpu_dispatch(lattice.n_panels, len(conditions), gpu_reason)
+            dispatch = _cpu_dispatch(lattice.n_panels, len(conditions), gpu_reason, self.name)
             share = (time.perf_counter() - t0) / len(conditions)
             return [
                 self._case_result(

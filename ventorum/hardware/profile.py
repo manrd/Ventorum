@@ -29,7 +29,10 @@ PROFILE_FILENAME = "machine_profile.json"
 SCHEMA_VERSION = 3
 # Schema 2 profiles still load. Schema 2 lacks the keys of schema 3 (the GPU
 # thresholds ``min_work`` and ``min_cases``, ``chunk_mib`` per path and
-# ``batch_threads`` per size class); readers use built-in defaults for them.
+# ``batch_threads`` per solver family and size class); readers use built-in
+# defaults for them. A schema-3 profile with the old flat ``batch_threads``
+# form (per size class, without the family) still loads; the reader ignores
+# that form and uses all cores.
 
 # Case classes by the number of panels of the lattice.
 SIZE_CLASSES = ("small", "medium", "large")
