@@ -14,12 +14,14 @@ a minor version can change a public interface.
   (0 <= M < 1, default None = no correction, results unchanged) applies the Prandtl-Glauert
   transformation in the form of Goethert (NACA TM 1105). The aspect-ratio-8 lift slope follows
   the Helmbold-Diederich formula within 0.5 % up to Mach 0.6. First version: VLM only, free air
-  only, the CPU path (the GPU path and the gradients with Mach > 0 follow); the lifting lines,
-  ground effect and gradients refuse Mach > 0. The trust envelope stays at Mach 0.3 until
+  only, on the CPU and the GPU (equal to round-off in float64); adjoint gradients with Mach > 0
+  and a new gradient input `"mach"` (per unit Mach); the lifting lines and ground effect refuse
+  Mach > 0. The trust envelope stays at Mach 0.3 until
   validation; a warning is given above Mach 0.7.
 - Cross-tool speed harness (`validation/speed/`): times each tool and Ventorum at equal
   accuracy (mesh converged to 0.5 % in CL and CDi) on the same cases, black box only. Adapters
-  for AVL and Ventorum run now; the other adapters skip until their settings are set.
+  for AVL, VSPAERO, AeroSandbox, MachUpX and Ventorum, each at the settings of its public
+  documentation; Flow5 is skipped (no documented batch mode).
 - Body rates on the GPU pipelines: cases with p, q, r run on the selected device for the vortex
   lattice and both lifting lines, in free air and in ground effect (per-point rotation onset at
   the control points, the three-quarter-chord points and the force points). GPU float64 equals
