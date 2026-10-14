@@ -144,3 +144,29 @@ than they could.
 
 **How to remove the limit.** A batched LU kernel for small systems in the
 GPU pipelines, or a choice of the library per call if PyTorch offers one.
+
+## PL-5: The numpy and PyTorch CPU kernels pay for the finite-filament core
+
+**Cause.** The vortex core is applied on the distance to the finite
+filament (the closest point of the segment), not on the distance to its
+infinite line. Each segment evaluation needs the end-point projections and
+one more branch. The compiled kernels (Numba, Cython) do this in the inner
+loop at almost no cost. The numpy reference kernel and the PyTorch kernel
+on the CPU work on whole arrays, so they compute and store the extra
+arrays for every segment and target.
+
+**What Ventorum does now.** The tuner selects the backend per kernel and
+case size. On a 12-core machine it selects Numba or Cython for the
+influence matrix at all the measured sizes, so the default path does not
+use the slower kernels.
+
+**Cost.** Measured on a 12-core Xeon E5 v3 (influence matrix of a
+rectangular wing, no kernel cache, median of 5): the numpy kernel takes 21 %
+to 32 % longer and the PyTorch CPU kernel 26 % to 34 % longer than with the
+core on the infinite line. The Numba and Cython kernels are 14 % to 21 %
+faster than before (fewer operations after the restructuring). The fixed
+timing workloads of `validation/perf_history.py` did not become slower.
+
+**How to remove the limit.** Fuse the projection and the core factor into
+one pass of the numpy and PyTorch kernels (fewer temporary arrays), and
+measure again with the tuner.
