@@ -1,26 +1,49 @@
 # Author: Manuel Alejandro Rodriguez Diaz, PhD
-"""AeroSandbox adapter of the speed harness (black box, pending API check).
+"""AeroSandbox adapter of the speed harness (black box).
 
-AeroSandbox is a Python package. It always runs in a subprocess
-(one case script per case set) so that its import time and its
-threads do not mix with the Ventorum process. The interpreter of
-that subprocess comes from ``--aerosandbox-python`` or the
-``VENTORUM_AEROSANDBOX_PYTHON`` variable. Only the documented
-public API is used; no source file of the package is opened.
+AeroSandbox is a Python package. It always runs in a subprocess (one
+case script per case set) so that its import time and its threads do
+not mix with the Ventorum process. The interpreter of that subprocess
+comes from ``--aerosandbox-python`` or the
+``VENTORUM_AEROSANDBOX_PYTHON`` variable. Only the documented public
+API is used; no source file of the package is opened. The case script
+is :mod:`validation.speed.run_aerosandbox_case`; the case description
+it reads is built by :mod:`validation.speed.case_spec`.
 
-A missing interpreter gives a skipped result. A present
-interpreter still gives a skipped result until the owner confirms
-the documented API calls of the solve script. The helper
-:func:`run_json_script` of :mod:`validation.speed.base` runs the
-script and reads its numbers.
+Settings, each from the public AeroSandbox documentation:
+
+* Analysis class: ``VortexLatticeMethod`` (explicit linear
+  vortex-lattice analysis), documented with a usage example at
+  ``aerosandbox.readthedocs.io/en/master/autoapi/aerosandbox/
+  aerodynamics/aero_3D/vortex_lattice_method/``.
+* Spanwise and chordwise resolution: the documented
+  ``spanwise_resolution`` and ``chordwise_resolution`` parameters;
+  the mesh key sets the spanwise count, the chordwise count keeps the
+  documented default (10). Both spacing functions keep the documented
+  default (cosine spacing).
+* Operating point: one documented ``OperatingPoint`` per angle at the
+  case velocity (SI units; angle of attack in degrees, as the
+  package README documents).
+* Geometry: symmetric wings built as right halves (documented
+  ``symmetric=True``); reference values from the case; default
+  symmetric airfoil.
+* Compared drag: the inviscid drag coefficient ``CD`` (no profile
+  drag model runs), read as ``CDi``.
+
+A missing interpreter gives a skipped result. The timed region covers
+only the solve loop; the import time is measured separately, reported
+in ``result.json``, and stated in the harness README.
 """
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
-from validation.speed.base import SweepResult, skipped_result
+from validation.speed import case_spec
+from validation.speed.base import SweepResult, failed_result, median_seconds, skipped_result
 from validation.speed.base import find_tool as _find_base
+from validation.speed.base import run_json_script, scrub_home
 
 #: Tool name in the reports.
 TOOL_NAME = "aerosandbox"
@@ -28,11 +51,14 @@ TOOL_NAME = "aerosandbox"
 #: Environment variable that holds the subprocess interpreter.
 ENV_VARS = ("VENTORUM_AEROSANDBOX_PYTHON",)
 
-#: Ground effect runs start only after the API check.
+#: No ground effect runs (free air only).
 SUPPORTS_GROUND_EFFECT = False
 
-#: Planned meshes of the convergence study.
+#: Spanwise resolutions of the convergence study.
 MESHES = [20, 40, 80]
+
+#: Case script (runs in the subprocess, next to this file).
+HELPER = Path(__file__).resolve().parent / "run_aerosandbox_case.py"
 
 
 def find_tool(explicit: str | None = None) -> Path | None:
@@ -47,35 +73,43 @@ def is_available(explicit: str | None = None) -> bool:
 
 def describe_mesh(mesh: int) -> str:
     """Return a human readable mesh label."""
-    return f"mesh {mesh}"
+    from validation.speed.run_aerosandbox_case import CHORDWISE_RESOLUTION
+
+    return f"span {int(mesh)} x chord {CHORDWISE_RESOLUTION} cosine"
 
 
 def run_sweep(python_exe: str | Path | None, aircraft, mesh: int,
               angles_deg: list[float], workdir: str | Path | None,
               timeout: float = 300.0) -> SweepResult:
-    """Report a skipped AeroSandbox sweep (API check is pending).
+    """Run one AeroSandbox sweep in a subprocess and time the solve loop.
 
     Parameters
     ----------
     python_exe : str, Path or None
-        Interpreter that would run the case script in a subprocess.
+        Interpreter that runs the case script in a subprocess.
     aircraft : Aircraft
-        Case geometry (unused until the API is confirmed).
+        Case geometry.
     mesh : int
-        Mesh key (kept in the record).
+        Spanwise resolution of the vortex-lattice analysis.
     angles_deg : list of float
-        Sweep angles [deg] (kept in the record).
+        Sweep angles [deg].
     workdir : str, Path or None
-        Unused (kept so all adapters share one call shape).
+        Folder for the run files (``case.json`` in, ``result.json``
+        out; both stay there as the settings record). None uses a
+        temporary folder that is discarded.
     timeout : float
-        Unused (kept so all adapters share one call shape).
+        Wall-time limit [s] of the case script.
 
     Returns
     -------
     SweepResult
-        Always skipped, with the reason in the record.
+        CL [-] and CDi [-] per angle with the solve-loop wall time [s]
+        (import time excluded and reported in ``result.json``).
     """
+    import tempfile
+
     case_id = getattr(aircraft, "name", "")
+    angles = [float(a) for a in angles_deg]
     exe = Path(python_exe) if python_exe is not None else find_tool(None)
     if exe is None or not Path(exe).is_file():
         return skipped_result(
@@ -83,19 +117,45 @@ def run_sweep(python_exe: str | Path | None, aircraft, mesh: int,
             "AeroSandbox interpreter not found: set VENTORUM_AEROSANDBOX_PYTHON "
             "or pass --aerosandbox-python PATH.",
         )
-    out = skipped_result(
-        TOOL_NAME, case_id,
-        "AeroSandbox interpreter is present but its solve script is pending "
-        "a documented public API check; no timed run until the owner confirms it.",
+    try:
+        spec = case_spec.aircraft_spec(aircraft, mesh, angles)
+    except ValueError as exc:
+        return failed_result(TOOL_NAME, case_id, describe_mesh(mesh), angles, scrub_home(exc))
+    with tempfile.TemporaryDirectory(prefix="ventorum_speed_asb_") as tmp:
+        root = Path(workdir) if workdir is not None else Path(tmp)
+        root.mkdir(parents=True, exist_ok=True)
+        (root / "case.json").write_text(json.dumps(spec, indent=1), encoding="utf-8")
+        try:
+            payload = run_json_script(exe, HELPER, root, float(timeout))
+        except RuntimeError as exc:
+            return failed_result(TOOL_NAME, case_id, describe_mesh(mesh), angles, scrub_home(exc))
+    try:
+        cl, cdi, version, elapsed = case_spec.check_result_payload(payload, angles)
+    except (ValueError, TypeError) as exc:
+        return failed_result(TOOL_NAME, case_id, describe_mesh(mesh), angles, scrub_home(exc))
+    return SweepResult(
+        tool=TOOL_NAME, case_id=case_id,
+        mesh_label=f"{describe_mesh(mesh)}, AeroSandbox {version}",
+        mesh=int(mesh), angles_deg=angles, CL=cl, CDi=cdi,
+        ok=True, skipped=False, reason=None, elapsed_s=elapsed,
     )
-    out.mesh = int(mesh)
-    out.mesh_label = describe_mesh(mesh)
-    out.angles_deg = [float(a) for a in angles_deg]
-    return out
 
 
 def time_sweeps(python_exe: str | Path | None, aircraft, mesh: int,
                 angles_deg: list[float], repeats: int, timeout: float = 300.0,
                 workdir: str | Path | None = None) -> tuple[float, list[float], int]:
-    """Return empty timing (the tool is skipped until the API is confirmed)."""
-    return 0.0, [], 0
+    """Time *repeats* AeroSandbox sweeps. Return (median [s], samples [s], failed points)."""
+    import tempfile
+
+    samples: list[float] = []
+    failed = 0
+    with tempfile.TemporaryDirectory(prefix="ventorum_speed_asbtime_") as tmp:
+        root = Path(workdir) if workdir is not None else Path(tmp)
+        for rep in range(int(repeats)):
+            res = run_sweep(python_exe, aircraft, mesh, list(angles_deg),
+                            root / f"rep{rep:02d}", timeout)
+            samples.append(res.elapsed_s)
+            failed += sum(1 for v in res.CL if v is None)
+            if not res.ok:
+                failed += len(res.angles_deg) - sum(1 for v in res.CL if v is None)
+    return median_seconds(samples), samples, failed

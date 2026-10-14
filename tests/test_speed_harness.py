@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pytest
 
-from validation.speed import base, cases, runner
+from validation.speed import base, cases, case_spec, runner
 from validation.speed import adapter_aerosandbox as asbox
 from validation.speed import adapter_avl as avl_adapter
 from validation.speed import adapter_flow5 as flow5
@@ -146,15 +146,257 @@ def test_vspaero_adapter_skips_when_missing(monkeypatch):
     assert "VENTORUM_VSPAERO" in (res.reason or "")
 
 
-def test_vspaero_adapter_present_stays_honest(tmp_path, monkeypatch):
-    """A present VSPAERO without a checked mapping stays skipped, not timed."""
+def test_vspaero_adapter_present_runs_with_stubs(tmp_path, monkeypatch):
+    """With stubbed subprocess calls a present VSPAERO runs, not skips."""
     exe = tmp_path / "vspaero.exe"
     exe.write_text("x", encoding="utf-8")
-    monkeypatch.setenv("VENTORUM_VSPAERO", str(exe))
-    assert vspaero.is_available(str(exe)) is True
+    (tmp_path / "vsp.exe").write_text("x", encoding="utf-8")
+    (tmp_path / "vsp").write_text("x", encoding="utf-8")
+    monkeypatch.setenv("VENTORUM_VSP_PYTHON", str(tmp_path / "vsp_python.exe"))
+    Path(tmp_path / "vsp_python.exe").write_text("x", encoding="utf-8")
+    polar = (
+        "banner one\nbanner two\n"
+        "      CDi             AoA             CLtot\n"
+        "  0.004493481238  -4.000000000000  -0.330047000806\n"
+        "  0.002242413557   3.000000000000   0.234493731993\n"
+    )
+    echo = (
+        "Sref = 8\nCref = 1\nBref = 8\nMach = 0\n"
+        "AoA = -4, 3\nSymmetry = 0\nWakeIters = 5\nVinf = 50\n"
+    )
+
+    class _Done:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+
+    def fake_run(cmd, cwd, timeout):
+        cwd = Path(cwd)
+        if "-script" in cmd:
+            for vsp3 in cwd.glob("*.vsp3"):
+                (cwd / f"{vsp3.stem}.polar").write_text(polar, encoding="utf-8")
+                (cwd / f"{vsp3.stem}.vspaero").write_text(echo, encoding="utf-8")
+        else:
+            out = cmd[cmd.index("--out") + 1]
+            info = cmd[cmd.index("--info") + 1]
+            Path(out).write_text("vsp3", encoding="utf-8")
+            Path(info).write_text('{"tool_version": "OpenVSP 9.9.9-fake"}', encoding="utf-8")
+        return _Done()
+
+    monkeypatch.setattr(vspaero, "_run_capture", fake_run)
+    work = tmp_path / "work"
+    res = vspaero.run_sweep(str(exe), cases.build_rect(), 20, [-4.0, 3.0], work, 10.0)
+    assert res.ok and not res.skipped
+    assert res.CL == [pytest.approx(-0.330047000806), pytest.approx(0.234493731993)]
+    assert res.CDi == [pytest.approx(0.004493481238), pytest.approx(0.002242413557)]
+    assert "9.9.9-fake" in res.mesh_label
+    assert (work / "case.json").is_file()
+
+
+def test_vspaero_adapter_missing_pieces_skip(tmp_path, monkeypatch):
+    """A missing vsp sibling or Python interpreter skips with its name."""
+    exe = tmp_path / "vspaero.exe"
+    exe.write_text("x", encoding="utf-8")
+    monkeypatch.delenv("VENTORUM_VSP_PYTHON", raising=False)
     res = vspaero.run_sweep(str(exe), cases.build_rect(), 20, [4.0], None, 10.0)
-    assert res.skipped and not res.ok
-    assert "mapping" in (res.reason or "").lower()
+    assert res.skipped and "vsp" in (res.reason or "").lower()
+    (tmp_path / "vsp.exe").write_text("x", encoding="utf-8")
+    (tmp_path / "vsp").write_text("x", encoding="utf-8")
+    res2 = vspaero.run_sweep(str(exe), cases.build_rect(), 20, [4.0], None, 10.0)
+    assert res2.skipped and "VENTORUM_VSP_PYTHON" in (res2.reason or "")
+
+
+def test_vspaero_verdict_rejects_wrong_sref(tmp_path, monkeypatch):
+    """A settings echo with the wrong Sref fails the run, never skips."""
+    exe = tmp_path / "vspaero.exe"
+    exe.write_text("x", encoding="utf-8")
+    (tmp_path / "vsp.exe").write_text("x", encoding="utf-8")
+    (tmp_path / "vsp").write_text("x", encoding="utf-8")
+    monkeypatch.setenv("VENTORUM_VSP_PYTHON", str(tmp_path / "vsp_python.exe"))
+    Path(tmp_path / "vsp_python.exe").write_text("x", encoding="utf-8")
+
+    class _Done:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+
+    def fake_run(cmd, cwd, timeout):
+        cwd = Path(cwd)
+        if "-script" in cmd:
+            for vsp3 in cwd.glob("*.vsp3"):
+                (cwd / f"{vsp3.stem}.polar").write_text(
+                    "h\n      AoA             CLtot             CDi\n"
+                    "  4.000000000000   0.300000000000   0.003000000000\n",
+                    encoding="utf-8",
+                )
+                (cwd / f"{vsp3.stem}.vspaero").write_text(
+                    "Sref = 100\nMach = 0\nAoA = 4\nSymmetry = 0\n",
+                    encoding="utf-8",
+                )
+        else:
+            out = cmd[cmd.index("--out") + 1]
+            info = cmd[cmd.index("--info") + 1]
+            Path(out).write_text("vsp3", encoding="utf-8")
+            Path(info).write_text('{"tool_version": "OpenVSP 9.9.9-fake"}', encoding="utf-8")
+        return _Done()
+
+    monkeypatch.setattr(vspaero, "_run_capture", fake_run)
+    res = vspaero.run_sweep(str(exe), cases.build_rect(), 20, [4.0], tmp_path / "w", 10.0)
+    assert not res.ok and not res.skipped
+    assert "Sref" in (res.reason or "")
+
+
+def test_vspaero_analysis_script_uses_documented_inputs():
+    """The sweep script sets the documented inputs and keeps wake defaults."""
+    text = vspaero.analysis_script_text("C:/work/m.vsp3", [-4.0, 3.0, 10.0], 8.0, 8.0, 1.0, 12)
+    for marker in ("VSPAEROComputeGeometry", "ThinGeomSet", "VSPAEROSweep",
+                   "AlphaStart", "AlphaNpts", "MachStart", "Sref", "NCPU", "Symmetry"):
+        assert marker in text
+    assert "WakeNumIter" not in text
+    assert "RefFlag" not in text and "WingID" not in text
+    assert text.startswith("void main()")
+    assert text.rstrip().endswith("}")
+
+
+def test_vspaero_jobs_split_angles():
+    """Uniform angles run once; other lists run one point per angle."""
+    assert vspaero._jobs([-4.0, 3.0, 10.0]) == [[-4.0, 3.0, 10.0]]
+    assert vspaero._jobs([-4.0, 4.0, 10.0]) == [[-4.0], [4.0], [10.0]]
+    assert vspaero._jobs([5.0]) == [[5.0]]
+
+
+def test_vspaero_polar_parser_reads_names():
+    """Column order does not matter; bad files raise ValueError."""
+    text = (
+        "banner\n"
+        "      CDi             AoA             CLtot\n"
+        "  0.004493481238  -4.000000000000  -0.330047000806\n"
+        "  0.002242413557   3.000000000000   0.234493731993\n"
+    )
+    table = vspaero.parse_polar(text)
+    assert table[-4.0] == (pytest.approx(-0.330047000806), pytest.approx(0.004493481238))
+    assert table[3.0] == (pytest.approx(0.234493731993), pytest.approx(0.002242413557))
+    with pytest.raises(ValueError, match="header"):
+        vspaero.parse_polar("      AoA             CLtot\n  4.0 0.3\n")
+    with pytest.raises(ValueError, match="no data"):
+        vspaero.parse_polar("      AoA             CLtot             CDi\n")
+
+
+def test_vspaero_echo_parser_reads_settings():
+    """The echo parser reads Sref, Mach, angles, symmetry and wake count."""
+    settings = vspaero.parse_vspaero_echo(
+        "Sref = 8\nMach = 0\nAoA = -4, 3, 10\nSymmetry = 0\nWakeIters = 5\nVinf = 50\n"
+    )
+    assert settings["Sref"] == pytest.approx(8.0)
+    assert settings["AoA"] == [-4.0, 3.0, 10.0]
+    assert settings["Symmetry"] == 0
+    assert settings["WakeIters"] == 5
+    with pytest.raises(ValueError, match="Sref"):
+        vspaero.parse_vspaero_echo("Mach = 0\n")
+
+
+def test_case_spec_rect_maps_geometry():
+    """The rect wing spec holds reference values and resolved stations."""
+    spec = case_spec.aircraft_spec(cases.build_rect(), 20, [-4.0, 4.0])
+    assert spec["s_ref_m2"] == pytest.approx(8.0)
+    assert spec["b_ref_m"] == pytest.approx(8.0)
+    assert spec["angles_deg"] == [-4.0, 4.0]
+    (surf,) = spec["surfaces"]
+    assert surf["semi_span_m"] == pytest.approx(4.0)
+    assert [s["chord_m"] for s in surf["stations"]] == [pytest.approx(1.0), pytest.approx(1.0)]
+    assert surf["sweep_resolved_deg"] == pytest.approx(0.0)
+    assert case_spec.scaled_counts(spec, 20) == {surf["name"]: 20}
+    assert case_spec.is_uniform_angles([-4.0, 3.0, 10.0]) is True
+    assert case_spec.is_uniform_angles([-4.0, 4.0, 10.0]) is False
+
+
+def test_case_spec_rejects_many_sections():
+    """A three-section surface fails with a clear reason, never silently."""
+    import ventorum as vt
+
+    surf = vt.LiftingSurface(
+        name="Wing",
+        semi_span=4.0,
+        sections=[vt.WingSection(0.0, 1.0), vt.WingSection(0.5, 0.8), vt.WingSection(1.0, 0.6)],
+    )
+    ac = vt.Aircraft(name="three", surfaces=[surf])
+    with pytest.raises(ValueError, match="two-section"):
+        case_spec.aircraft_spec(ac, 20, [0.0])
+
+
+def test_case_spec_tail_scales_by_span():
+    """The tail tessellation scales with semi-span at equal density."""
+    spec = case_spec.aircraft_spec(cases.build_wing_tail(), 20, [0.0])
+    counts = case_spec.scaled_counts(spec, 20)
+    assert counts["Wing"] == 20
+    assert counts["HTail"] == 8
+
+
+def _canned_payload(cl=(0.3, 0.4), cdi=(0.003, 0.004)):
+    """Return a fake case-script payload with version and solve time."""
+    return {"CL": list(cl), "CDi": list(cdi),
+            "tool_version": "9.9.9-fake", "elapsed_solve_s": 0.5, "import_s": 1.0}
+
+
+def test_asb_runs_with_fake_tool(tmp_path, monkeypatch):
+    """A stubbed case script still drives the full adapter path."""
+    seen = {}
+
+    def fake_run(exe, script, workdir, timeout):
+        seen["script"] = Path(script).name
+        assert (Path(workdir) / "case.json").is_file()
+        return _canned_payload()
+
+    monkeypatch.setattr(asbox, "run_json_script", fake_run)
+    work = tmp_path / "work"
+    fake_exe = tmp_path / "py.exe"
+    fake_exe.write_text("x", encoding="utf-8")
+    res = asbox.run_sweep(str(fake_exe), cases.build_rect(), 20,
+                          [-4.0, 4.0], work, 10.0)
+    assert seen["script"] == "run_aerosandbox_case.py"
+    assert res.ok and not res.skipped
+    assert res.CL == [pytest.approx(0.3), pytest.approx(0.4)]
+    assert res.CDi == [pytest.approx(0.003), pytest.approx(0.004)]
+    assert "9.9.9-fake" in res.mesh_label
+    assert res.elapsed_s == pytest.approx(0.5)
+
+
+def test_mx_runs_with_fake_tool(tmp_path, monkeypatch):
+    """A stubbed case script still drives the full adapter path."""
+    seen = {}
+
+    def fake_run(exe, script, workdir, timeout):
+        seen["script"] = Path(script).name
+        assert (Path(workdir) / "case.json").is_file()
+        return _canned_payload((0.5,), (0.01,))
+
+    monkeypatch.setattr(machup, "run_json_script", fake_run)
+    fake_exe = tmp_path / "py.exe"
+    fake_exe.write_text("x", encoding="utf-8")
+    res = machup.run_sweep(str(fake_exe), cases.build_rect(), 20,
+                           [4.0], tmp_path / "work", 10.0)
+    assert seen["script"] == "run_machupx_case.py"
+    assert res.ok and not res.skipped
+    assert res.CL == [pytest.approx(0.5)]
+    with pytest.raises(ValueError, match="points"):
+        case_spec.check_result_payload(_canned_payload((0.5,), (0.01,)), [4.0, 5.0])
+
+
+def test_helper_scripts_hold_documented_calls():
+    """Each helper script compiles and names its documented API calls."""
+    folder = Path(__file__).resolve().parents[1] / "validation" / "speed"
+    checks = {
+        "vsp_make_geom.py": ("SectTess_U", "Sym_Planar_Flag", "Sweep_Location", "GetVSPVersion"),
+        "run_aerosandbox_case.py": ("VortexLatticeMethod", "spanwise_resolution",
+                                    "chordwise_resolution", "OperatingPoint", "result.json"),
+        "run_machupx_case.py": ("Scene", "solve_forces", "cosine_cluster", "result.json"),
+    }
+    for name, markers in checks.items():
+        text = (folder / name).read_text(encoding="utf-8")
+        compile(text, name, "exec")
+        for marker in markers:
+            assert marker in text, f"{name} misses {marker}"
+    assert '"linear"' in (folder / "run_machupx_case.py").read_text(encoding="utf-8")
 
 
 def test_flow5_reports_no_batch_mode(tmp_path, monkeypatch):
