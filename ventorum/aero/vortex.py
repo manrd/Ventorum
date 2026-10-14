@@ -813,6 +813,92 @@ def _chunk_rows(m: int, n: int) -> int:
     return max(1, min(m, _CHUNK_BUDGET // max(1, 36 * n)))
 
 
+# Merge of coincident wake-ray pairs. In a vortex-lattice lattice the
+# chordwise panels of one strip share their two trailing-edge points, and
+# every wake ray leaves in the same wake direction. The panels of one strip
+# therefore share their pair of semi-infinite wake rays when they also share
+# the core radius and the core group. The merge evaluates each shared pair
+# once (see _wake_pair_groups). It never changes a core radius or a group:
+# sources merge only when their keys match bit for bit. Test hook: False
+# keeps the unmerged source sets.
+_WAKE_MERGE_ENABLED = True
+
+
+def _wake_pair_groups(hs: HorseshoeSet) -> tuple[HorseshoeSet, np.ndarray] | None:
+    """Group the sources whose pair of wake rays coincides.
+
+    Two sources share their wake pair when their trailing-edge points
+    (``a_te``, ``b_te``), wake direction, core radius and core group are
+    equal bit for bit. The sign and the unknown column are not keys: the
+    loads apply them when the pair is evaluated (see :func:`_induced_parts`). Sources come ordered strip by strip, so
+    shared pairs form runs of equal rows; only runs merge (a non-adjacent
+    duplicate keeps its own evaluation). The group index enters the key as
+    a float; surface indices are far below 2**53, so the conversion is
+    exact. A NaN key never merges.
+
+    Parameters
+    ----------
+    hs : HorseshoeSet
+        Source horseshoes.
+
+    Returns
+    -------
+    tuple of (HorseshoeSet, numpy.ndarray) or None
+        The representative set (first source of each pair, with unit sign
+        and one column per pair) and the pair index of each source. None
+        when every pair is unique (for example a lattice with one
+        chordwise panel) or when the merge is disabled.
+    """
+    if not _WAKE_MERGE_ENABLED:
+        return None
+    n = hs.n
+    if n < 2:
+        return None
+    key = np.concatenate(
+        [np.asarray(hs.a_te, dtype=float), np.asarray(hs.b_te, dtype=float),
+         np.asarray(hs.wake_dir, dtype=float),
+         np.asarray(hs.rc, dtype=float).reshape(n, 1),
+         (np.zeros((n, 1)) if hs.group is None
+          else np.asarray(hs.group, dtype=np.int64).reshape(n, 1).astype(float))], axis=1)
+    # Sources are ordered strip by strip, so shared pairs form runs of equal
+    # rows. One adjacent-row comparison finds them (a NaN key never merges).
+    same = np.all(key[1:] == key[:-1], axis=1)
+    if not bool(np.any(same)):
+        return None
+    inverse = np.empty(n, dtype=np.int64)
+    inverse[0] = 0
+    inverse[1:] = np.cumsum(~same)
+    first = np.flatnonzero(np.concatenate((np.ones(1, dtype=bool), ~same)))
+    n_groups = int(first.size)
+    rep = HorseshoeSet(
+        a=np.asarray(hs.a)[first],
+        b=np.asarray(hs.b)[first],
+        a_te=np.asarray(hs.a_te)[first],
+        b_te=np.asarray(hs.b_te)[first],
+        wake_dir=np.asarray(hs.wake_dir)[first],
+        rc=np.asarray(hs.rc, dtype=float)[first],
+        sign=np.ones(n_groups),
+        column=np.arange(n_groups),
+        group=None if hs.group is None else np.asarray(hs.group)[first],
+    )
+    return rep, inverse
+
+
+def _fixed_block(P: np.ndarray, hs: HorseshoeSet, tg: Targets | None = None) -> np.ndarray:
+    """Unit-circulation velocity of the bound vortices and chordwise legs: (m, n, 3)."""
+    rc = _core(hs, tg)
+    v = segment_velocity(P, hs.a, hs.b, rc)
+    v += segment_velocity(P, hs.a_te, hs.a, rc)
+    v += segment_velocity(P, hs.b, hs.b_te, rc)
+    return v
+
+
+def _wake_pair_table(P: np.ndarray, rep: HorseshoeSet, tg: Targets | None = None) -> np.ndarray:
+    """Unit-circulation velocity of the wake-ray pairs of a representative set: (m, G, 3)."""
+    rc = _core(rep, tg)
+    return ray_velocity(P, rep.b_te, rep.wake_dir, rc) - ray_velocity(P, rep.a_te, rep.wake_dir, rc)
+
+
 def horseshoe_velocity_tensor(P: np.ndarray, hs: HorseshoeSet, targets: Targets | None = None) -> np.ndarray:
     """Velocity at *P* per source horseshoe, with the source sign applied.
 
@@ -947,7 +1033,19 @@ def induced_velocity(
 
 
 def _induced_parts(P, hs, gamma_unknowns, targets, parts: int) -> np.ndarray:
-    """Return one part (1 fixed legs, 2 wake legs) of the induced velocity with a compiled backend."""
+    """Return one part (1 fixed legs, 2 wake legs) of the induced velocity with a compiled backend.
+
+    With ``parts == 2`` each shared wake-ray pair (see
+    :func:`_wake_pair_groups`) is evaluated once, with the summed signed
+    circulation of its sources. A representative set has unique pairs, so
+    the merged call takes the direct path.
+    """
+    grouped = _wake_pair_groups(hs) if parts == 2 else None
+    if grouped is not None:
+        rep, inverse = grouped
+        g_src = np.asarray(gamma_unknowns, dtype=float)[np.asarray(hs.column)] * np.asarray(hs.sign, dtype=float)
+        merged_gamma = np.bincount(inverse, weights=g_src, minlength=rep.n)
+        return _induced_parts(P, rep, merged_gamma, targets, 2)
     m, n = P.shape[0], hs.n
     g_src = gamma_unknowns[hs.column] * hs.sign
     backend = kernel_backend_for("induced", n)
@@ -993,32 +1091,46 @@ def _induced(P, hs, gamma_unknowns, targets, cache, cache_key, fixed_only: bool)
             v = (T @ g_col).reshape(m, 3)
             if fixed_only:
                 return v
-            if backend == "torch":
-                return v + _torch().induced_velocity_kernel(Pc, a, b, a_te, b_te, d, rc2, grp, gc,
-                                                       tg_group, tg_rc2, use_tg, 2)
-            if backend == "cython":
-                return v + _cy_call("induced_velocity_kernel", Pc, a, b, a_te, b_te, d, rc2, grp, gc,
-                                                       tg_group, tg_rc2, use_tg, 2)
-            return v + _nb.induced_velocity_kernel(Pc, a, b, a_te, b_te, d, rc2, grp, gc,
-                                                   tg_group, tg_rc2, use_tg, 2)
+            return v + _induced_parts(Pc, hs, gamma_unknowns, targets, 2)
         if fixed_only:
             return None
-        if backend == "torch":
-            return _torch().induced_velocity_kernel(Pc, a, b, a_te, b_te, d, rc2, grp, gc,
-                                               tg_group, tg_rc2, use_tg, 0)
-        if backend == "cython":
-            return _cy_call("induced_velocity_kernel", Pc, a, b, a_te, b_te, d, rc2, grp, gc,
-                                               tg_group, tg_rc2, use_tg, 0)
-        return _nb.induced_velocity_kernel(Pc, a, b, a_te, b_te, d, rc2, grp, gc, tg_group, tg_rc2, use_tg)
+        grouped = _wake_pair_groups(hs)
+        if grouped is None:
+            if backend == "torch":
+                return _torch().induced_velocity_kernel(Pc, a, b, a_te, b_te, d, rc2, grp, gc,
+                                                   tg_group, tg_rc2, use_tg, 0)
+            if backend == "cython":
+                return _cy_call("induced_velocity_kernel", Pc, a, b, a_te, b_te, d, rc2, grp, gc,
+                                                   tg_group, tg_rc2, use_tg, 0)
+            return _nb.induced_velocity_kernel(Pc, a, b, a_te, b_te, d, rc2, grp, gc, tg_group, tg_rc2, use_tg)
+        rep, inverse = grouped
+        # The representative set has unique pairs, so its call takes the direct path.
+        merged_gamma = np.bincount(inverse, weights=g_src, minlength=rep.n)
+        return (_induced_parts(Pc, hs, gamma_unknowns, targets, 1)
+                + _induced_parts(Pc, rep, merged_gamma, targets, 2))
     if fixed_only:
         return None
+    grouped = _wake_pair_groups(hs)
+    if grouped is None:
+        out = np.zeros((m, 3))
+        step = _chunk_rows(m, n)
+        for i0 in range(0, m, step):
+            i1 = min(m, i0 + step)
+            tg = targets.rows(i0, i1) if targets is not None else None
+            v = _horseshoe_block(P[i0:i1], hs, tg)
+            out[i0:i1] = np.einsum("mnk,n->mk", v, g_src)
+        return out
+    rep, inverse = grouped
+    merged_gamma = np.bincount(inverse, weights=g_src, minlength=rep.n)
     out = np.zeros((m, 3))
     step = _chunk_rows(m, n)
     for i0 in range(0, m, step):
         i1 = min(m, i0 + step)
         tg = targets.rows(i0, i1) if targets is not None else None
-        v = _horseshoe_block(P[i0:i1], hs, tg)
+        v = _fixed_block(P[i0:i1], hs, tg)
         out[i0:i1] = np.einsum("mnk,n->mk", v, g_src)
+        t = _wake_pair_table(P[i0:i1], rep, tg)
+        out[i0:i1] += np.einsum("mnk,n->mk", t, merged_gamma)
     return out
 
 
