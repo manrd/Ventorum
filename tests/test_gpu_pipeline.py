@@ -580,11 +580,12 @@ def test_gpu_mach_parity_mixed_sweep(gpu_device, precision):
 def test_mach_device_lattice_cache_keeps_one_entry():
     """A Mach sweep over many angles keeps one stretched GPU lattice per precision (no growth)."""
     from ventorum import gpu
-    from ventorum.gpu import engine
 
     if not gpu.available():
         pytest.skip("no GPU")
+    pytest.importorskip("warp")
     import ventorum as vt
+    from ventorum.gpu import engine
 
     wing = vt.LiftingSurface(name="W", semi_span=4.0, sections=[
         vt.WingSection(y_frac=0.0, chord=1.0), vt.WingSection(y_frac=1.0, chord=1.0)])
