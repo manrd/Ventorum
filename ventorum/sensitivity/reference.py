@@ -302,18 +302,31 @@ def _pp_interval(pp: dict, xc: torch.Tensor) -> torch.Tensor:
     return torch.clamp(i, 0, xb.shape[0] - 2)
 
 
+def _clamp_closed(x: torch.Tensor, lo: float, hi: float) -> torch.Tensor:
+    """Clamp *x* to the closed interval [lo, hi] with a fixed derivative convention.
+
+    The derivative is 1 inside the closed interval (the bounds included)
+    and 0 outside it. ``torch.clamp`` does not document its derivative at
+    a bound, and it changed between torch versions (1 in torch 2.6, 0 in
+    torch 2.14 for float bounds). So the clamp is made from
+    ``torch.where``, which passes the gradient to the selected value only.
+    Both bounds are dimensionless here (lift-slope factor, table angle).
+    """
+    lo_t = torch.as_tensor(lo, dtype=x.dtype, device=x.device)
+    hi_t = torch.as_tensor(hi, dtype=x.dtype, device=x.device)
+    return torch.where(x < lo_t, lo_t, torch.where(x > hi_t, hi_t, x))
+
+
 def _pp_clamp(pp: dict, x: torch.Tensor) -> torch.Tensor:
     """Clamp *x* to the table limits with a fixed derivative convention.
 
     The derivative is 1 inside the closed interval ``[lo, hi]`` (the table
-    ends included) and 0 outside it. ``torch.clamp`` does not document its
-    derivative at a bound, and it changed between torch versions (1 in
-    torch 2.6, 0 in torch 2.14 for float bounds). So the clamp is made from
-    ``torch.where``, which passes the gradient to the selected value only.
+    ends included) and 0 outside it. The clamp is made from
+    ``torch.where`` (see :func:`_clamp_closed`), because ``torch.clamp``
+    does not document its derivative at a bound, and it changed between
+    torch versions (1 in torch 2.6, 0 in torch 2.14 for float bounds).
     """
-    lo = torch.as_tensor(pp["lo"], dtype=x.dtype, device=x.device)
-    hi = torch.as_tensor(pp["hi"], dtype=x.dtype, device=x.device)
-    return torch.where(x < lo, lo, torch.where(x > hi, hi, x))
+    return _clamp_closed(x, pp["lo"], pp["hi"])
 
 
 def pp_eval(pp: dict, x: torch.Tensor) -> torch.Tensor:
@@ -536,7 +549,7 @@ class TorchReference:
         normal_bc_strip = rod_rot(normal, span_yz, -aL0)
 
         a0 = t["a0"]
-        claf = torch.clamp(a0 / (2.0 * math.pi), 0.2, 2.0)
+        claf = _clamp_closed(a0 / (2.0 * math.pi), 0.2, 2.0)
         xi = b["xi"]
         frac = b["frac"]
         n_chord = b["n_chord"]
