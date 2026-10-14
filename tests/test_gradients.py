@@ -749,7 +749,7 @@ def test_check_has_no_absolute_floor(float64_precision, monkeypatch) -> None:
 
     def perturbed(*args, **kwargs):  # type: ignore[no-untyped-def]
         res = real(*args, **kwargs)
-        res.jacobian["CD"]["beta"] *= 1.0 + 1e-5
+        res.jacobian["CD"]["beta"] *= 1.0 + 1e-4
         return res
 
     monkeypatch.setattr(adjoint, "gradients", perturbed)
@@ -758,9 +758,12 @@ def test_check_has_no_absolute_floor(float64_precision, monkeypatch) -> None:
     st = vt.SolverSettings(solver_type="linear", n_panels=12)
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
-        out = vt.check_gradients(ac, cond, st, outputs=("CL", "CD"), wrt=("beta",), rtol=1e-6)
+        out = vt.check_gradients(ac, cond, st, outputs=("CL", "CD"), wrt=("beta",), rtol=1e-5)
     info = out["details"]["CD:beta"]
-    # The absolute error is far below 1e-9, but the relative error is 1e-5.
+    # The absolute error is below 1e-9, but the relative error is 1e-4, ten
+    # times rtol. rtol is 1e-5 (not 1e-6) so that the round-off bound of the
+    # central difference (about 2e-13 here) is well below rtol/10 |ref| on
+    # every platform; with 1e-6 the component was skipped on Linux.
     assert abs(info["grad"] - info["ref"]) < 1e-9
     assert info["mode"] == "relative" and info["passed"] is False
     assert out["pass"] is False
