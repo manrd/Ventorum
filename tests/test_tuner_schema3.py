@@ -112,6 +112,20 @@ def test_batch_threads_keep_needs_a_clear_win():
     assert tuner._batch_threads_keep({2: all_cores / 1.05, cores: all_cores}, cores) is None
 
 
+def test_single_threads_keep_needs_a_clear_win():
+    """The tuner keeps a single-case thread count only when it beats all cores by more than 5 %."""
+    cores = 12
+    all_cores = 1.00
+    # A 10 % win is kept, and the fastest count wins.
+    assert tuner._single_threads_keep({1: 1.20, 2: 0.90, cores: all_cores}, cores) == 2
+    # A 4 % win is not enough: no entry (all cores, the default).
+    assert tuner._single_threads_keep({1: 1.20, 2: 0.96, cores: all_cores}, cores) is None
+    # All cores fastest: no entry.
+    assert tuner._single_threads_keep({1: 1.20, 2: 1.10, cores: all_cores}, cores) is None
+    # Exactly 5 % is not more than 5 %: no entry.
+    assert tuner._single_threads_keep({2: all_cores / 1.05, cores: all_cores}, cores) is None
+
+
 def test_self_check_drop_needs_a_clear_loss():
     """The tuner self-check drops the batch entries when a fixed workload is more than 2 % slower."""
     assert tuner._self_check_drop({"sweep": (1.03, 1.00)}) is not None
@@ -120,6 +134,15 @@ def test_self_check_drop_needs_a_clear_loss():
     assert "sweep" in (tuner._self_check_drop({"sweep": (1.05, 1.00)}) or "")
     kept = tuner._self_check_drop({"a": (1.00, 1.00), "b": (1.01, 1.00)})
     assert kept is None
+
+
+def test_self_check_single_threads_drop_needs_a_clear_loss():
+    """The tuner self-check drops the single entries when a fixed workload is more than 2 % slower."""
+    assert tuner._self_check_drop({"single": (1.03, 1.00)}, kind="single") is not None
+    assert tuner._self_check_drop({"single": (1.02, 1.00)}, kind="single") is None
+    assert tuner._self_check_drop({"single": (0.99, 1.00)}, kind="single") is None
+    drop_msg = tuner._self_check_drop({"single": (1.05, 1.00)}, kind="single")
+    assert drop_msg is not None and "single" in drop_msg and "drop the single entries" in drop_msg
 
 
 def test_old_flat_batch_threads_form_is_ignored(config_dir):

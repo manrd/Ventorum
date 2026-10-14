@@ -101,7 +101,7 @@ def test_quick_tuner_writes_a_matching_profile(config_dir, monkeypatch):
     p = tuner.tune_machine(quick=True, verbose=False)
     data = json.loads((config_dir / prof.PROFILE_FILENAME).read_text())
     assert data["fingerprint"] == get_machine_fingerprint() == p["fingerprint"]
-    assert set(data["settings"]["single"]) == {"small", "medium"}
+    assert set(data["settings"]["single"]) <= {"small", "medium"}
     assert set(data["settings"]["kernels"]) == {"small", "medium"}
     for cls in ("small", "medium"):
         assert set(data["settings"]["kernels"][cls]) == set(V.KERNELS)
@@ -402,5 +402,17 @@ def test_gradient_chunk_budget_profile_and_environment(config_dir, monkeypatch):
         # The environment variable still wins over the profile.
         monkeypatch.setenv("VENTORUM_GRAD_CHUNK", "5e5")
         assert _ref.chunk_budget() == 5e5
+    finally:
+        prof.reset_profile_cache()
+
+
+def test_profile_without_single_threads_falls_back_to_all_cores(config_dir):
+    """A profile with no single threads entry uses all cores for single solves."""
+    fp = get_machine_fingerprint()
+    prof.save_profile({"schema": prof.SCHEMA_VERSION, "fingerprint": fp,
+                       "settings": {"single": {}}})
+    try:
+        assert par.single_case_threads(100, batch=1) == par.cpu_cores()
+        assert par.single_case_threads(1000, batch=1) == par.cpu_cores()
     finally:
         prof.reset_profile_cache()
