@@ -127,6 +127,23 @@ rotation. The rates p and r are antisymmetric and use the full system; q keeps t
 The notes give the nondimensional derivatives per unit `p b/(2V)`, `q c/(2V)`,
 `r b/(2V)` (rates in body axes).
 
+### Compressibility correction (Mach number)
+
+The vortex lattice in free air supports the Prandtl-Glauert correction
+(`mach > 0`, see [Compressibility](compressibility.md)). The stretch runs
+inside the differentiable reference: the lattice points and the normals are
+mapped to the stretched wing (rotation `R(alpha, beta)` to free-stream axes,
+`x` by `1/beta` with `beta = sqrt(1 - M^2)` about the moment reference
+point), and the existing kernel products run on the stretched points. The
+chain rule then includes the move of the stretched geometry with `alpha`,
+`beta` and `mach`, not only the move of the right-hand side. The physical
+right-hand side, the physical circulation and the Trefftz plane are
+unchanged. The near-field velocity maps back with `v_x / beta` in
+free-stream axes, and the force-point positions stay physical, so their move
+enters the outputs. The new input `"mach"` is the derivative per unit Mach
+number. At `mach = 0` the derivative is 0 and the other gradients equal the
+incompressible gradients bit for bit; at `mach = None` the input is refused.
+
 ### Tabulated airfoils
 
 The production polars are shape-preserving piecewise cubics (Fritsch and Carlson 1980)
@@ -359,7 +376,9 @@ closed form: central differences are the method there), for a nonlinear lifting-
 solve that did not converge, for the planform input with tabulated airfoils, and for the
 section input (`"sections"`) when a surface has a tabulated airfoil (some of `a0`,
 `alpha_L0`, `Cd0` and `Cm0` do not enter the result on a tabulated strip, so their
-derivatives would be zeros without a meaning). In
+derivatives would be zeros without a meaning). The compressibility correction
+(`mach > 0`) is supported for the vortex lattice in free air; ground effect and the
+lifting lines refuse it, and the `"mach"` input needs a Mach number in the condition. In
 ground effect `h` is the height of the moment reference point, and the ground plane and
 its images follow the inputs; a ground strike raises as in `analyze`.
 
@@ -504,6 +523,11 @@ check fails when a component fails and when an input group has no compared compo
 * `tests/test_vjp_kernels.py`: each VJP backend (numpy, Numba, Cython, Warp) against
   the PyTorch reference VJP for the products and all input gradients (1e-12 float64,
   1e-5 float32), the thread paths, the backend selection and the machine profile.
+* `tests/test_mach_gradients.py`: adjoint gradients with the compressibility
+  correction (vortex lattice in free air, wing and tail with sideslip, control
+  and rates): `check_gradients` at Mach 0.3 and 0.6 for every supported input
+  and for `"mach"` (1e-6 float64), kernel-reference parity, bit-for-bit
+  equality at mach None and 0, and the scope refusals.
 * The values come from `validation/run_verification.py` (unchanged by this feature).
 
 ## References

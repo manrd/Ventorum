@@ -98,7 +98,9 @@ The vortex-lattice solver reproduces this scaling.
 - The VLM solver (`solver_type="vlm"`) supports the compressibility correction on the CPU and GPU paths.
 - The lifting-line solvers (linear, nonlinear, and Fourier) refuse `mach > 0` and raise `ValidityError`.
 - Ground effect refuses `mach > 0` and raises `ValidityError`.
-- Adjoint gradients and gradient checks refuse `mach > 0` and raise `GradientScopeError`.
+- Adjoint gradients support `mach > 0` for the vortex lattice in free air,
+  with the new input `"mach"` (per unit Mach); ground effect and the lifting
+  lines refuse it with `GradientScopeError`.
 
 ## Implementation
 
@@ -107,6 +109,11 @@ The vortex-lattice solver reproduces this scaling.
 - `ventorum.solvers.core.assemble_vlm`: applies the coordinate stretch and normal vector scaling in free-stream axes.
 - `ventorum.aero.loads._near_field_velocity`: computes transformed induced velocities and scales the streamwise component.
 - `ventorum.gpu.pipeline`: solves VLM batches with `mach > 0` on the GPU by transforming coordinates and normals per Mach group.
+- `ventorum.sensitivity.reference`: maps the lattice points and normals to the
+  stretched wing inside the differentiable reference and runs the kernel
+  products there; the near-field velocity maps back with `v_x / beta`.
+- `ventorum.sensitivity.adjoint` and `ventorum.sensitivity.check`: the `"mach"`
+  input and the scope rule (vortex lattice in free air only).
 - `ventorum.solvers.lattice_base`: validates solver compatibility and raises errors for unsupported configurations.
 
 ## Verification
@@ -114,6 +121,8 @@ The vortex-lattice solver reproduces this scaling.
 - Bit-for-bit equality: solves with `mach=None` and `mach=0.0` give identical results.
 - Discrete identity: solving at Mach $M$ matches the incompressible solve on an explicitly stretched geometry.
 - Finite wing: aspect ratio 8 wing scales within 3% of the Helmbold-Diederich formula up to $M = 0.6$.
+- Gradients: `check_gradients` at Mach 0.3 and 0.6 for every supported input
+  and for `"mach"` (wing and tail with sideslip and control, float64, 1e-6).
 - Tests in `tests/test_compressibility.py` verify all rules and error conditions.
 
 ## References

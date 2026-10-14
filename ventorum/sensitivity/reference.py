@@ -625,13 +625,53 @@ class TorchReference:
         src_group = b["src_group"]
         col = b["column"]
         wd_e = wd.expand(n_p, 3)
+        mach_active = bool(b.get("mach_active", False))
+        if mach_active:
+            # Prandtl-Glauert stretch about the moment reference point, in
+            # free-stream axes (Goethert 1946). The map runs inside the
+            # differentiable reference, so the chain rule includes the change
+            # of the stretched geometry with alpha, beta and mach.
+            M_mach = t.get("mach")
+            beta_pg = torch.sqrt(1.0 - M_mach * M_mach)
+            inv_beta = 1.0 / beta_pg
+            one_pg = torch.ones_like(beta_pg)
+            lift_pg = torch.stack((-sa, torch.zeros_like(sa), ca))
+            side_pg = torch.linalg.cross(lift_pg, d)
+            R_pg = torch.stack((d, side_pg, lift_pg))
+
+            def _to_s(pts: torch.Tensor) -> torch.Tensor:
+                p_fs = (pts - rp) @ R_pg.T
+                return p_fs * torch.stack((inv_beta, one_pg, one_pg))
+
+            def _n_eff(n: torch.Tensor) -> torch.Tensor:
+                n_fs = n @ R_pg.T
+                return n_fs * torch.stack((inv_beta, one_pg, one_pg))
+
+            def _v_back(v_s: torch.Tensor) -> torch.Tensor:
+                v_fs = v_s * torch.stack((inv_beta, one_pg, one_pg))
+                return v_fs @ R_pg
+
+            w_fs_pg = torch.tensor([1.0, 0.0, 0.0], dtype=self.dtype,
+                                   device=self.device).expand(n_p, 3)
+        else:
+            _to_s = None  # type: ignore[assignment]
+            _n_eff = None  # type: ignore[assignment]
+            _v_back = None  # type: ignore[assignment]
         if h is None:
-            s_a, s_b, s_ate, s_bte = a, bv, a_te, b_te
-            s_wd = wd_e
-            s_rc = rc_panel
-            s_sign = torch.ones_like(rc_panel)
-            s_group = src_group
-            s_col = col
+            if mach_active:
+                s_a, s_b, s_ate, s_bte = _to_s(a), _to_s(bv), _to_s(a_te), _to_s(b_te)
+                s_wd = w_fs_pg
+                s_rc = rc_panel
+                s_sign = torch.ones_like(rc_panel)
+                s_group = src_group
+                s_col = col
+            else:
+                s_a, s_b, s_ate, s_bte = a, bv, a_te, b_te
+                s_wd = wd_e
+                s_rc = rc_panel
+                s_sign = torch.ones_like(rc_panel)
+                s_group = src_group
+                s_col = col
         else:
             def _refl_pts(p: torch.Tensor) -> torch.Tensor:
                 hh = p @ normal_g - offset
@@ -674,9 +714,16 @@ class TorchReference:
         # --- system matrix and right-hand side -------------------------------
         alpha_u_nl = None
         if b["collocation"] == "vlm":
-            A = self._normal_matrix(cp_u, n_bc_u, s_a, s_b, s_ate, s_bte, s_wd,
-                                    rc2_src, s_group, s_sign, s_col, n_u,
-                                    tg_group, tg_rc)
+            if mach_active:
+                P_s = _to_s(cp_u)
+                n_eff = _n_eff(n_bc_u)
+                A = self._normal_matrix(P_s, n_eff, s_a, s_b, s_ate, s_bte, s_wd,
+                                        rc2_src, s_group, s_sign, s_col, n_u,
+                                        tg_group, tg_rc)
+            else:
+                A = self._normal_matrix(cp_u, n_bc_u, s_a, s_b, s_ate, s_bte, s_wd,
+                                        rc2_src, s_group, s_sign, s_col, n_u,
+                                        tg_group, tg_rc)
             rhs = -V * (n_bc_u * d).sum(-1)
             if rated:
                 rhs = rhs - (n_bc_u * _w_rot(cp_u)).sum(-1)
@@ -747,8 +794,16 @@ class TorchReference:
             g_e = g_panel * s_sign
         else:
             g_e = torch.cat((g_panel, g_panel), dim=0) * s_sign
-        v_e = self._induced(mid_e, s_a, s_b, s_ate, s_bte, s_wd, rc2_src,
-                            s_group, g_e, tgt_ge, tgt_re, own=own_e)
+        if mach_active:
+            # Stretched evaluation with the physical normal map back: the
+            # streamwise component scales with 1/beta (Goethert 1946). The
+            # force points stay physical; their move enters the outputs.
+            v_e_s = self._induced(_to_s(mid_e), s_a, s_b, s_ate, s_bte, s_wd, rc2_src,
+                                  s_group, g_e, tgt_ge, tgt_re, own=own_e)
+            v_e = _v_back(v_e_s)
+        else:
+            v_e = self._induced(mid_e, s_a, s_b, s_ate, s_bte, s_wd, rc2_src,
+                                s_group, g_e, tgt_ge, tgt_re, own=own_e)
         if fold:
             right = b["right_panels"]
             left = b["left_panels"]
@@ -792,8 +847,13 @@ class TorchReference:
                 # A leg mid-point lies on the line of its edge, so also on
                 # the legs of the other panels that use the same edge.
                 ledge = torch.cat((edge_l_panel[right], edge_r_panel[right]), dim=0)
-                v_leg_e = self._induced(leg_e, s_a, s_b, s_ate, s_bte, s_wd, rc2_src,
-                                        s_group, g_leg_src, ltgt_g, ltgt_r, edge=ledge)
+                if mach_active:
+                    v_leg_e_s = self._induced(_to_s(leg_e), s_a, s_b, s_ate, s_bte, s_wd, rc2_src,
+                                              s_group, g_leg_src, ltgt_g, ltgt_r, edge=ledge)
+                    v_leg_e = _v_back(v_leg_e_s)
+                else:
+                    v_leg_e = self._induced(leg_e, s_a, s_b, s_ate, s_bte, s_wd, rc2_src,
+                                            s_group, g_leg_src, ltgt_g, ltgt_r, edge=ledge)
                 n_r = right.shape[0]
                 pos = pos_all
                 mir_right = pos[pm[left]]
@@ -804,9 +864,15 @@ class TorchReference:
                 v_leg[n_p + left] = v_leg_e[mir_right] * mir
             else:
                 ledge = torch.cat((edge_l_panel, edge_r_panel), dim=0)
-                v_leg = self._induced(leg_mid, s_a, s_b, s_ate, s_bte, s_wd, rc2_src,
-                                      s_group, g_leg_src, leg_tgt_group, leg_tgt_rc,
-                                      edge=ledge)
+                if mach_active:
+                    v_leg_s = self._induced(_to_s(leg_mid), s_a, s_b, s_ate, s_bte, s_wd, rc2_src,
+                                            s_group, g_leg_src, leg_tgt_group, leg_tgt_rc,
+                                            edge=ledge)
+                    v_leg = _v_back(v_leg_s)
+                else:
+                    v_leg = self._induced(leg_mid, s_a, s_b, s_ate, s_bte, s_wd, rc2_src,
+                                          s_group, g_leg_src, leg_tgt_group, leg_tgt_rc,
+                                          edge=ledge)
             U_leg = _onset(leg_mid) if rated else (V * d).expand_as(v_leg)
             V_leg = U_leg + v_leg
             Vn = (V_leg * leg_normal).sum(-1)

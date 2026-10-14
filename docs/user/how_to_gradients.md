@@ -42,7 +42,8 @@ defining half), `"alpha"`, `"beta"`, `"V_inf"`, `"rho"`, `"h"`, `"phi"`, `"secti
 (per strip `a0`, `alpha_L0`, `Cd0`, `Cm0` of the lattice), `"reference"`
 (`S_ref`, `b_ref`, `c_ref`, `ref_point`), `"planform"` (per surface and
 per section, see below; it cannot be combined with `"nodes"`), `"controls"` (per
-control name, per unit deflection [1/rad]) and `"p"`, `"q"`, `"r"` (body rates
+control name, per unit deflection [1/rad]), `"mach"` (per unit Mach number,
+see below) and `"p"`, `"q"`, `"r"` (body rates
 [rad/s]; see below).
 
 The input `"sections"` needs linear airfoils. When a surface has a tabulated airfoil,
@@ -271,6 +272,25 @@ the backend, for example `"kernels:numba"`:
 fast = vt.gradients(aircraft, condition, settings, outputs=("CL",), wrt=("alpha",), method="kernels")
 print(fast.partials)
 ```
+
+## Compressibility correction
+
+With `mach > 0` the vortex lattice in free air supports all free-air inputs
+plus `"mach"` (per unit Mach number):
+
+```python
+mcond = vt.FlightCondition(V_inf=50.0, alpha=np.radians(4.0), mach=0.3)
+mres = vt.gradients(
+    aircraft, mcond, settings,
+    outputs=("CL", "CD", "Cm"),
+    wrt=("alpha", "beta", "mach"),
+)
+print(f"dCL/dM = {mres.jacobian['CL']['mach']:.4f} per unit Mach")
+```
+
+At `mach = 0` the `"mach"` derivative is 0; at `mach = None` it is refused.
+Ground effect and the lifting lines refuse `mach > 0`. The gradients run on
+the CPU path with `mach > 0`.
 
 ## Limits
 

@@ -272,11 +272,22 @@ def check_gradients(
     from ventorum.core.datatypes import Aircraft, LiftingSurface, SolverSettings
     from ventorum.sensitivity.adjoint import _check_names, gradients
     from ventorum.sensitivity.errors import GradientScopeError
-
-    if getattr(condition, "mach", None) is not None and condition.mach > 0.0:
-        raise GradientScopeError("check_gradients does not support compressibility correction (mach > 0).")
+    from ventorum.solvers.factory import resolve_solver_type
 
     outs, ins = _check_names(outputs, wrt)
+    st0 = settings.clone() if settings is not None else SolverSettings()
+    mach = getattr(condition, "mach", None)
+    mach_on = mach is not None and float(mach) > 0.0
+    if mach_on:
+        canonical = resolve_solver_type(st0.solver_type)
+        if canonical != "vlm":
+            raise GradientScopeError(
+                f"check_gradients is not supported with compressibility correction "
+                f"(mach > 0) for solver '{canonical}'. Use solver_type 'vlm'.")
+        if getattr(condition, "h", None) is not None:
+            raise GradientScopeError(
+                "check_gradients is not supported with compressibility correction "
+                "(mach > 0) in ground effect.")
     st = settings.clone() if settings is not None else SolverSettings()
     ac = Aircraft(name="SingleWing", surfaces=[geometry]) if isinstance(geometry, LiftingSurface) else geometry
     axes = "body"
@@ -350,15 +361,17 @@ def check_gradients(
                 cnt["skipped"] += 1
 
     base_h = {
-        "alpha": 1e-4, "beta": 1e-4, "phi": 1e-4,
+        "alpha": 1e-4, "beta": 1e-4, "phi": 1e-4, "mach": 1e-4,
         "V_inf": 1e-4 * abs(float(condition.V_inf)),
         "rho": 1e-4 * abs(float(condition.rho)),
         "h": 1e-4 * abs(float(condition.h)) if condition.h is not None else 0.0,
     }
-    for key in ("alpha", "beta", "V_inf", "rho", "h", "phi"):
+    for key in ("alpha", "beta", "V_inf", "rho", "h", "phi", "mach"):
         if key not in ins:
             continue
         if key == "h" and condition.h is None:
+            continue
+        if key == "mach" and getattr(condition, "mach", None) is None:
             continue
         h = base_h[key]
 
@@ -366,8 +379,12 @@ def check_gradients(
             c2 = dataclasses.replace(condition, **{_k: v})
             return _production_scalars(ac, c2, st, axes)
 
-        fd = _ladder(_get, float(getattr(condition, key)), h, _STEP_FACTORS, outs, eps)
+        fd = _ladder(_get, float(getattr(condition, key)), h, _STEP_FACTORS, outs, eps,
+                     side=(1 if key == "mach" and float(getattr(condition, key)) == 0.0 else 0))
         _record(key, key, {o: float(jac[o][key]) for o in outs}, fd, h / 1e-4)
+        if key == "mach" and float(getattr(condition, key)) == 0.0:
+            for o in outs:
+                details[f"{o}:{key}"]["one_sided"] = 1
     if any(k in ins for k in ("p", "q", "r")):
         ac2 = ac.clone()
         ac2.compute_reference_values()

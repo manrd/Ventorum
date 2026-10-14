@@ -141,8 +141,9 @@ def test_gpu_fallback_with_mach():
         gpu.set_precision(old_prec)
 
 
-def test_gradient_refusals_with_mach():
-    """Check that gradients and check_gradients refuse mach > 0."""
+def test_gradient_mach_scope():
+    """Check the gradient scope with mach: VLM in free air works, ground and lifting lines refuse."""
+    from ventorum import gpu
     from ventorum.sensitivity import check_gradients, gradients
 
     wing = LiftingSurface(
@@ -154,12 +155,42 @@ def test_gradient_refusals_with_mach():
         ],
     )
     cond = FlightCondition(V_inf=40.0, alpha=np.radians(3.0), mach=0.5)
+    settings = SolverSettings(solver_type="vlm", n_panels=8, n_chord=2)
+
+    # VLM in free air at mach > 0 gives gradients, including the mach input.
+    old = gpu._precision
+    gpu.set_precision("float64")
+    try:
+        res = gradients(wing, cond, settings, outputs=("CL",), wrt=("alpha", "mach"))
+        assert np.isfinite(float(res.jacobian["CL"]["alpha"]))
+        assert np.isfinite(float(res.jacobian["CL"]["mach"]))
+        out = check_gradients(wing, cond, settings, outputs=("CL",),
+                              wrt=("alpha", "mach"), rtol=1e-6)
+        assert out["pass"], out["reasons"]
+    finally:
+        gpu.set_precision(old)
+
+    # Ground effect keeps refusing mach > 0.
+    cond_ge = FlightCondition(V_inf=40.0, alpha=np.radians(3.0), h=1.5, mach=0.5)
+    with pytest.raises(GradientScopeError):
+        gradients(wing, cond_ge, settings)
 
     with pytest.raises(GradientScopeError):
-        gradients(wing, cond)
+        check_gradients(wing, cond_ge, settings, wrt=("alpha",))
 
+    # Lifting lines keep refusing mach > 0.
+    for solver_name in ("linear", "nonlinear"):
+        st = SolverSettings(solver_type=solver_name)
+        with pytest.raises(GradientScopeError):
+            gradients(wing, cond, st)
+
+        with pytest.raises(GradientScopeError):
+            check_gradients(wing, cond, st, wrt=("alpha",))
+
+    # The mach input needs a Mach number in the condition.
+    cond_none = FlightCondition(V_inf=40.0, alpha=np.radians(3.0), mach=None)
     with pytest.raises(GradientScopeError):
-        check_gradients(wing, cond, wrt=("alpha",))
+        gradients(wing, cond_none, settings, outputs=("CL",), wrt=("mach",))
 
 
 def test_trust_score_compressibility():

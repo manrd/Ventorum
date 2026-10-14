@@ -42,10 +42,10 @@ from ventorum.core.datatypes import SolverSettings as _SolverSettings
 SCALAR_OUTPUTS = ("CL", "CY", "CDi", "CDp", "CD", "Cl", "Cm", "Cn")
 VECTOR_OUTPUTS = ("strip_force", "section_cl")
 ALL_OUTPUTS = SCALAR_OUTPUTS + VECTOR_OUTPUTS
-SCALAR_INPUTS = ("alpha", "beta", "V_inf", "rho", "h", "phi", "p", "q", "r")
+SCALAR_INPUTS = ("alpha", "beta", "V_inf", "rho", "h", "phi", "p", "q", "r", "mach")
 RATE_INPUTS = ("p", "q", "r")
 ALL_WRT = ("nodes", "alpha", "beta", "V_inf", "rho", "h", "phi", "sections", "reference",
-           "planform", "controls", "p", "q", "r")
+           "planform", "controls", "p", "q", "r", "mach")
 
 # Inputs that keep a symmetric state symmetric (no beta, phi, roll or yaw
 # rate, section or reference-point change that breaks the y = 0 symmetry).
@@ -53,7 +53,7 @@ ALL_WRT = ("nodes", "alpha", "beta", "V_inf", "rho", "h", "phi", "sections", "re
 # surface are the nodes of its defining half, mirrored to the other half,
 # so they keep the symmetry too when every surface is symmetric; the control
 # inputs keep it when every control is symmetric (see _adjoint_use_symmetry).
-_SYMMETRIC_WRT = ("alpha", "V_inf", "rho", "h", "q")
+_SYMMETRIC_WRT = ("alpha", "V_inf", "rho", "h", "q", "mach")
 _SYMMETRIC_NODE_WRT = _SYMMETRIC_WRT + ("nodes",)
 # Outputs that keep a symmetric state symmetric (longitudinal only).
 _SYMMETRIC_OUTPUTS = ("CL", "CDi", "CDp", "CD", "Cm")
@@ -164,11 +164,27 @@ def _refuse_configuration(ac: Any, condition: Any, settings: Any, canonical: str
     surface refuses it also on an aircraft with other, linear surfaces;
     the other inputs stay available. A nonlinear lifting-line solve that
     did not converge is refused after the solve (see :func:`_prepare_case`).
+    The compressibility correction (mach > 0) is supported only for the
+    vortex lattice in free air; ground effect and the lifting lines keep
+    refusing it. The ``"mach"`` input needs a Mach number in the condition.
     """
     from ventorum.core.datatypes import TabulatedAirfoil
 
-    if getattr(condition, "mach", None) is not None and condition.mach > 0.0:
-        raise GradientScopeError("Adjoint gradients are not supported with compressibility correction (mach > 0).")
+    mach = getattr(condition, "mach", None)
+    mach_on = mach is not None and float(mach) > 0.0
+    if "mach" in wrt and mach is None:
+        raise GradientScopeError(
+            "Input 'mach' needs a Mach number in the flight condition "
+            "(FlightCondition mach); the condition has mach=None.")
+    if mach_on:
+        if canonical != "vlm":
+            raise GradientScopeError(
+                f"Adjoint gradients are not supported with compressibility correction "
+                f"(mach > 0) for solver '{canonical}'. Use solver_type 'vlm'.")
+        if getattr(condition, "h", None) is not None:
+            raise GradientScopeError(
+                "Adjoint gradients are not supported with compressibility correction "
+                "(mach > 0) in ground effect.")
     if canonical == "fourier":
         raise GradientScopeError(
             "The Fourier solver has no adjoint gradients (closed form): use central differences "
@@ -556,6 +572,8 @@ def build_reference(
     from ventorum.solvers.factory import resolve_solver_type
 
     build["solver"] = resolve_solver_type(settings.solver_type)
+    mach_val = getattr(condition, "mach", None)
+    build["mach_active"] = bool(mach_val is not None and float(mach_val) > 0.0)
     rates = {k: float(getattr(condition, k, 0.0)) for k in RATE_INPUTS}
     # The onset with the rotation is used when a rate is not zero; the
     # gradient functions also set it when a rate is a requested input.
@@ -585,6 +603,7 @@ def build_reference(
         "p": rates["p"],
         "q": rates["q"],
         "r": rates["r"],
+        "mach": None if getattr(condition, "mach", None) is None else float(condition.mach),
         "control_names": list(names),
         "a0": np.asarray(lattice.a0, dtype=float).copy(),
         "alpha_L0": np.asarray(lattice.alpha_L0, dtype=float).copy(),
@@ -642,6 +661,10 @@ def make_input_tensors(
     t["phi"] = _s("phi", base["phi"])
     for key in RATE_INPUTS:
         t[key] = _s(key, base.get(key, 0.0))
+    if base.get("mach") is None:
+        t["mach"] = None
+    else:
+        t["mach"] = _s("mach", base["mach"])
     for name in base.get("control_names", []):
         # The change of the deflection of every control with this name [rad].
         t[f"controls:{name}"] = _s("controls", 0.0)
@@ -1517,9 +1540,9 @@ def gradients(
         Vector outputs go through :func:`gradient_vjp`.
     wrt : tuple of str
         Inputs from ``"nodes", "alpha", "beta", "V_inf", "rho", "h", "phi",
-        "sections", "reference", "planform", "controls", "p", "q", "r"``.
+        "sections", "reference", "planform", "controls", "p", "q", "r", "mach"``.
         Lengths in m, angles in rad, rates in rad/s, ``y_frac``
-        dimensionless. ``"planform"`` gives per surface the semi-span [m],
+        dimensionless, Mach number in [-] per unit Mach. ``"planform"`` gives per surface the semi-span [m],
         sweep_le, dihedral and incidence [rad], position [m] and per-section
         lists (chord [m], twist [rad], x_le [m] or None, z_le [m] or None,
         y_frac [-], alpha_L0 [rad]); it cannot be combined with ``"nodes"``
@@ -1527,7 +1550,9 @@ def gradients(
         derivative per unit deflection [1/rad] (all controls with one name
         move together). ``"p"``, ``"q"``, ``"r"`` are the body rates
         [rad/s] (flight-dynamics body axes); the notes give the
-        nondimensional derivatives.
+        nondimensional derivatives. ``"mach"`` gives the derivative per unit
+        Mach number [-]; it needs mach set in the condition (at mach 0 the
+        derivative is 0, at mach None it is refused).
     axes : str
         Axes of the moments: ``"body"``, ``"stability"`` or ``"wind"``.
     method : str
@@ -1579,6 +1604,13 @@ def gradients(
         notes.extend(prep["model"].b.get("_planform", {}).get("notes", []))
     notes.extend(_case_notes(prep, ins))
     notes.extend(_rate_notes(prep, jacobian, outs, ins))
+    if bool(prep["model"].b.get("mach_active", False)):
+        notes.append(
+            "Compressibility correction (mach > 0): the Prandtl-Glauert stretch "
+            "about the moment reference point is in the differentiable reference; "
+            "the chain rule includes the change of the stretched geometry with "
+            "alpha, beta and mach. The Trefftz plane is unchanged. "
+            "The solve and the gradients run on the CPU path.")
     if prep["precision"] == "float32":
         notes.append(
             "Float32 gradients: the gradient gate of float32 is 1e-3 relative; check the result with "
