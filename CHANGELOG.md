@@ -104,6 +104,12 @@ a minor version can change a public interface.
 
 ### Fixed
 
+- The tuned single-case thread count could make single VLM solves 13 to 20 % slower than all
+  cores: the tuner kept the fastest count of a short timing with no margin, and a tie rule
+  favours fewer threads. The tuner now times each count through the profile reader with at least
+  5 repeats, keeps a value only when it beats all cores by more than 5 %, and the self-check of a
+  full run also times two fixed single solves and drops the single entries when either is more
+  than 2 % slower.
 - The tuned `batch_threads` setting could halve the CPU sweep throughput: the tuner timed an
   8-case linear lifting-line batch and applied the result to every solver family. The tuner now
   times a 33-case batch of each family (vlm, linear, nonlinear) on the sweep path, keeps a value
