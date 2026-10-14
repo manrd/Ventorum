@@ -104,8 +104,10 @@ used.
 * VSPAERO: vortex-lattice mode (thin geometry set only), free air,
   Mach 0 (the program reports Mach 0.001, still incompressible), one
   run over the alpha list of the case (single-point runs only when
-  the angles are not uniform), symmetry off, `NCPU` on all cores,
-  default wake iterations, reference values from the case. Mesh
+  the angles are not uniform), X-Z symmetry on with a half model
+  (right halves only; the program adds the mirror image), `NCPU` on
+  all cores, 12 wake iterations (`WakeNumIter`, default 5), reference
+  values from the case. Mesh
   refinement by `SectTess_U` per wing section at equal spanwise
   density (chordwise tessellation at its default). Each adapter run
   records the tool version, the settings and the mesh: the version
@@ -156,18 +158,21 @@ used.
 * Profile drag is 0 on the Ventorum, AVL, AeroSandbox and MachUpX
   sides; VSPAERO profile drag (`CDo`) is not compared either. Only
   induced drag is compared.
-* VSPAERO symmetry stays off although the tutorial documents an X-Z
-  symmetry option: with symmetry on, the wake does not settle within
-  the default 5 iterations (it settles after about 8), and the
-  converged induced drag at low lift is unphysical (negative at
-  CL 0.24 where the symmetric run gives the textbook value). The
-  owner decides whether to revisit this.
+* VSPAERO runs with X-Z symmetry and a half model, and with 12 wake
+  iterations (owner choice). With symmetry on and the full wing in the
+  model, the lift is about doubled (the mirror image is added twice):
+  the model must hold the right halves only.
+* AeroSandbox runs without its symmetric option: version 4.2.10 raises
+  NotImplementedError for the vortex-lattice method with it on.
 * VSPAERO accepts Mach 0 but reports Mach 0.001; both are
   incompressible. Non-uniform angle lists (the quick list) run one
   single-point sweep per angle at the exact requested angles.
 * MachUpX runs the linear solver (stated in every record); the
   documentation recommends the nonlinear solver for accuracy.
-* The MachUpX vertical offset sign follows the standard body frame
-  (z down); the measured effect of the sign is below 1 % on CL.
+* MachUpX uses the body frame x forward, y right, z down (MachUpX
+  documentation, Developer Notes, Coordinate Systems), so the adapter
+  negates the x and z offsets. The documentation gives no sign for the
+  dihedral input, so the adapter refuses surfaces with dihedral (no
+  harness case has dihedral).
 * Flow5 has no batch mode documented, so the harness skips it and
   never drives its window.

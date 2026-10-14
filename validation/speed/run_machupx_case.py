@@ -43,6 +43,13 @@ def build_aircraft_dict(spec: dict) -> dict:
             main_id = index
             main_key = key
         (root, tip) = surf["stations"]
+        if float(surf["dihedral_deg"]) != 0.0:
+            # The MachUpX documentation gives the body frame (x forward,
+            # y right, z down) but not the sign of the dihedral input.
+            raise ValueError(
+                f"Surface {surf['name']!r} has dihedral; the MachUpX dihedral "
+                "sign is not documented, so the harness maps only flat surfaces."
+            )
         wings[f"wing_{index}"] = {
             "ID": index,
             "side": "both",

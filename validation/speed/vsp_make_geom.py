@@ -47,7 +47,8 @@ def build_case(spec: dict, vsp3_path: str) -> dict[str, int]:
             )
         wid = vsp.AddGeom("WING", "")
         vsp.SetGeomName(wid, surf["name"])
-        vsp.SetParmVal(wid, "Sym_Planar_Flag", "Sym", 2.0)
+        # Half model (right half only) when the analysis uses X-Z symmetry.
+        vsp.SetParmVal(wid, "Sym_Planar_Flag", "Sym", 0.0 if spec.get("half_model") else 2.0)
         vsp.SetParmVal(wid, "CapUMinOption", "EndCap", 0)
         (root, tip) = stations
         vsp.SetParmVal(wid, "Span", "XSec_1", float(surf["semi_span_m"]))

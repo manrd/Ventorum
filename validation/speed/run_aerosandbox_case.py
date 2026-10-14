@@ -78,6 +78,10 @@ def run_sweep(spec: dict) -> dict:
             op_point=op,
             spanwise_resolution=mesh,
             chordwise_resolution=CHORDWISE_RESOLUTION,
+            # The symmetric option stays off: AeroSandbox 4.2.10 raises
+            # NotImplementedError ("VLM with symmetry detection not yet
+            # implemented") when it is on (tested 2026-10-14).
+            run_symmetric_if_possible=False,
         )
         out = analysis.run()
         cl.append(float(out["CL"]))

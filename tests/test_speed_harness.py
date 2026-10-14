@@ -247,12 +247,13 @@ def test_vspaero_verdict_rejects_wrong_sref(tmp_path, monkeypatch):
 
 
 def test_vspaero_analysis_script_uses_documented_inputs():
-    """The sweep script sets the documented inputs and keeps wake defaults."""
+    """The sweep script sets the documented inputs, X-Z symmetry and the wake iterations (owner choice)."""
     text = vspaero.analysis_script_text("C:/work/m.vsp3", [-4.0, 3.0, 10.0], 8.0, 8.0, 1.0, 12)
     for marker in ("VSPAEROComputeGeometry", "ThinGeomSet", "VSPAEROSweep",
                    "AlphaStart", "AlphaNpts", "MachStart", "Sref", "NCPU", "Symmetry"):
         assert marker in text
-    assert "WakeNumIter" not in text
+    assert f"array<int> wakeit = {{{vspaero.WAKE_ITERS}}};" in text and "WakeNumIter" in text
+    assert "array<int> sym = {1};" in text
     assert "RefFlag" not in text and "WingID" not in text
     assert text.startswith("void main()")
     assert text.rstrip().endswith("}")
@@ -577,3 +578,25 @@ def test_speed_files_hold_no_private_ids_or_em_dash():
     assert not hits, f"Forbidden text in speed harness: {hits}"
     test_text = Path(__file__).read_text(encoding="utf-8")
     assert "\u2014" not in test_text
+
+
+def test_vspaero_half_model_when_symmetric(tmp_path, monkeypatch):
+    """With X-Z symmetry the geometry builder makes right halves only (no planar symmetry)."""
+    import sys
+    import types
+
+    from validation.speed import vsp_make_geom
+
+    calls = []
+    fake = types.SimpleNamespace(
+        ClearVSPModel=lambda: None, AddGeom=lambda *a: "W", SetGeomName=lambda *a: None,
+        SetParmVal=lambda gid, name, group, val: calls.append((name, group, val)),
+        Update=lambda: None, WriteVSPFile=lambda *a: None, SET_ALL=0)
+    monkeypatch.setitem(sys.modules, "openvsp", fake)
+    surf = {"name": "W", "symmetric": True, "mirror_y": False, "semi_span_m": 4.0, "sweep_resolved_deg": 0.0,
+            "dihedral_deg": 0.0, "tess_u": 20, "position_m": [0.0, 0.0, 0.0],
+            "stations": [{"chord_m": 1.0, "twist_deg": 0.0}, {"chord_m": 1.0, "twist_deg": 0.0}]}
+    for half, expected in ((True, 0.0), (False, 2.0)):
+        calls.clear()
+        vsp_make_geom.build_case({"surfaces": [dict(surf)], "half_model": half}, str(tmp_path / "m.vsp3"))
+        assert ("Sym_Planar_Flag", "Sym", expected) in calls

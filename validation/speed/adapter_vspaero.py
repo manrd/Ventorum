@@ -31,10 +31,13 @@ plus the API documentation):
   ``AlphaStart``/``AlphaEnd``/``AlphaNpts`` range); a non-uniform
   angle list runs one single-point sweep per angle at the exact
   requested angles.
-* Symmetry off (0): the documented X-Z symmetry option was tested and
-  is not used (see the harness README).
+* X-Z symmetry on (1), the documented option for symmetric geometry:
+  every harness case is symmetric (free air, no sideslip). Owner choice
+  (2026-10-14).
 * Thread option ``NCPU`` set to all CPU cores.
-* Default wake iterations (not set; the ``.vspaero`` echo records 5).
+* Wake iterations ``WakeNumIter`` = ``WAKE_ITERS`` (more than the
+  default 5): with symmetry on, the wake needs about 8 iterations to
+  settle. Owner choice (2026-10-14): allow more wake iterations.
 * Geometry from a ``.vsp3`` file made by the OpenVSP Python API in a
   ``py -3.13`` subprocess. Mesh refinement by the documented
   tessellation settings of the wing: ``SectTess_U`` per section
@@ -74,6 +77,9 @@ SUPPORTS_GROUND_EFFECT = False
 #: Spanwise tessellation of the main surface in the convergence study.
 MESHES = [20, 40, 80]
 
+# Wake iterations of the free-wake solve (the program default is 5).
+WAKE_ITERS = 12
+
 #: Geometry helper (runs under the OpenVSP Python interpreter).
 GEOM_HELPER = Path(__file__).resolve().parent / "vsp_make_geom.py"
 
@@ -102,7 +108,7 @@ def _find_vsp_python() -> Path | None:
 
 def describe_mesh(mesh: int) -> str:
     """Return a human readable mesh label."""
-    return f"SectTess_U {int(mesh)}, Tess_W default, sym 0"
+    return f"SectTess_U {int(mesh)}, Tess_W default"
 
 
 def _run_capture(cmd: list[str], cwd: Path, timeout: float) -> subprocess.CompletedProcess[str]:
@@ -157,8 +163,10 @@ def analysis_script_text(vsp3_path: str, stem_angles: list[float],
         '    SetDoubleAnalysisInput(sweep, "Sref", sref);',
         '    SetDoubleAnalysisInput(sweep, "bref", bref);',
         '    SetDoubleAnalysisInput(sweep, "cref", cref);',
-        "    array<int> sym = {0};",
+        "    array<int> sym = {1};",
         '    SetIntAnalysisInput(sweep, "Symmetry", sym);',
+        f"    array<int> wakeit = {{{int(WAKE_ITERS)}}};",
+        '    SetIntAnalysisInput(sweep, "WakeNumIter", wakeit);',
         f"    array<int> ncpu = {{{int(ncpu)}}};",
         '    SetIntAnalysisInput(sweep, "NCPU", ncpu);',
         "    ExecAnalysis(sweep);",
@@ -299,6 +307,9 @@ def run_sweep(vspaero_exe: str | Path | None, aircraft, mesh: int,
     tess = case_spec.scaled_counts(spec, mesh)
     for surf in spec["surfaces"]:
         surf["tess_u"] = tess[surf["name"]]
+    # With X-Z symmetry on, the model holds the right halves only; the
+    # program adds the mirror image.
+    spec["half_model"] = True
     ncpu = os.cpu_count() or 1
     t0 = time.perf_counter()
     with tempfile.TemporaryDirectory(prefix="ventorum_speed_vsp_") as tmp:
@@ -371,7 +382,7 @@ def run_sweep(vspaero_exe: str | Path | None, aircraft, mesh: int,
     cdi = [found[a][1] for a in angles]
     return SweepResult(
         tool=TOOL_NAME, case_id=case_id,
-        mesh_label=f"{describe_mesh(mesh)}, {version}, NCPU {ncpu}",
+        mesh_label=f"{describe_mesh(mesh)}, {version}, NCPU {ncpu}, sym 1, wake iter {WAKE_ITERS}",
         mesh=int(mesh), angles_deg=angles, CL=cl, CDi=cdi,
         ok=True, skipped=False, reason=None, elapsed_s=elapsed,
     )
