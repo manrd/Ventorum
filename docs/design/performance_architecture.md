@@ -66,7 +66,7 @@ Rules for a change:
 * Each angle of a batch must give the same bits as a single solve (`tests/test_sweep_batch.py`). Use only operations whose result for one case does not depend on the other cases: element-wise operations, reductions along an axis of one case, `einsum` per case, stacked `numpy.linalg.solve`. Matrix products that BLAS computes (`@` with a matrix) stay per case: a batched product can round differently.
 * Trigonometric functions of the angle stay scalar per case (a vectorised `sin` can round differently from the scalar one).
 * The per-case contractions (`einsum`) of large systems run on the kernel threads (`core._map_cases`; numpy releases the GIL in `einsum`). The dense solves do not: OpenBLAS calls from several threads run one after the other.
-* A batch that runs alone uses the tuned `batch_threads` count of its size class for its kernel calls (`solve_threads(n_panels, batch=K)`, all cores by default); in a worker it keeps the threads of the worker. The thread count does not change the results.
+* A batch that runs alone uses the tuned `batch_threads` count of its solver family and size class for its kernel calls (`solve_threads(n_panels, batch=K, family=...)`, all cores by default and when the call gives no family); in a worker it keeps the threads of the worker. The thread count does not change the results.
 * `alpha_sweep` (and `Ventorum.analyze_sweep`) sends lifting-line sweeps to `solve_sweep`; the agent polar tool solves lifting-line polars out of ground effect with `solve_batch(..., continuation=False)`, so each angle equals `vt.analyze`.
 * A new per-case value in the loads must be computed for all cases with the rules above, or in the per-case loop at the end of `compute_loads_batch`.
 
