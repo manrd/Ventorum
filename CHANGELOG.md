@@ -60,6 +60,12 @@ a minor version can change a public interface.
 
 ### Changed
 
+- Machine profile schema 3 (by addition; a schema-2 profile still loads): `ventorum-tune` also
+  writes the GPU limits `min_work` and `min_cases` per solver family (from the measured
+  crossover), the kernel threads of one case inside a multi-case batch per size class
+  (`batch_threads`), and the chunk sizes of the CPU ground batch and the gradient partials
+  (`chunk_mib`). `VENTORUM_GRAD_CHUNK` still wins over the profile. `--quick` takes about 30 s
+  on the test machine. No result changes; see the performance limits (PL-6).
 - Vortex core and leg forces (result change, approved by the owner): the core is applied on the
   distance to the finite filament in every kernel family (numpy, Numba, Cython, PyTorch, Warp,
   and the gradient kernels). The leg force of a strip edge follows the kind of edge: legs on a
