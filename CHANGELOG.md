@@ -85,6 +85,9 @@ a minor version can change a public interface.
 
 ### Fixed
 
+- The lift-slope clamp of the gradient reference (section lift slope between 0.2 and 2 times
+  2 pi) has the same derivative convention for all torch versions: 1 on the closed interval,
+  0 outside it. Before, torch 2.14 gave 0 at the bounds.
 - Adjoint gradients with 24 or more cosine chordwise panels no longer fail the forward check:
   the chordwise panel fractions are now recovered without round-off growth.
 - The mesh-convergence study (`ventorum_mesh_convergence`) gave a recommended mesh that could
