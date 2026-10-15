@@ -52,6 +52,7 @@ __all__ = [
     "source_velocity",
     "doublet_velocity",
     "influence_matrices",
+    "influence_matrices_backend",
 ]
 
 _INV_4PI = 1.0 / (4.0 * np.pi)
@@ -684,3 +685,58 @@ def influence_matrices(
     B = source_potential(collocation, panels, far_ratio=far_ratio)
     C = doublet_potential(collocation, panels, far_ratio=far_ratio)
     return B, C
+
+
+def influence_matrices_backend(
+    collocation: np.ndarray,
+    panels: np.ndarray,
+    backend: str = "numpy",
+    device=None,
+    dtype=None,
+) -> tuple:
+    """Compute aerodynamic influence matrices B and C with a chosen backend.
+
+    The numpy backend is the reference. The numba backend runs the same
+    formulas in compiled code on the CPU. The warp backend runs them on a
+    CUDA GPU and returns PyTorch tensors on the device.
+
+    Parameters
+    ----------
+    collocation : numpy.ndarray
+        Collocation point coordinates with shape (P, 3) in m.
+    panels : numpy.ndarray
+        Panel corner coordinates with shape (M, 4, 3) in m.
+    backend : str, default="numpy"
+        Kernel backend: ``"numpy"``, ``"numba"`` or ``"warp"``.
+    device : optional
+        CUDA device of the warp backend (for example ``"cuda:0"``).
+        None selects the current CUDA device. Other backends ignore it.
+    dtype : optional
+        Target dtype of the outputs. None keeps the dtype of the inputs
+        (numpy and numba) or reads the inputs (warp).
+
+    Returns
+    -------
+    tuple
+        (B, C) where B has shape (P, M) for source potentials and C has shape
+        (P, M) for doublet potentials. Numpy arrays for ``"numpy"`` and
+        ``"numba"``, PyTorch tensors on the device for ``"warp"``.
+    """
+    key = str(backend).strip().lower()
+    if key == "numpy":
+        if dtype is not None:
+            collocation = np.asarray(collocation, dtype=dtype)
+            panels = np.asarray(panels, dtype=dtype)
+        return influence_matrices(collocation, panels)
+    if key == "numba":
+        from ventorum.panel3d.kernels_numba import influence_matrices_numba
+
+        if dtype is not None:
+            collocation = np.asarray(collocation, dtype=dtype)
+            panels = np.asarray(panels, dtype=dtype)
+        return influence_matrices_numba(collocation, panels)
+    if key == "warp":
+        from ventorum.panel3d.kernels_warp import influence_matrices_warp
+
+        return influence_matrices_warp(collocation, panels, device=device, dtype=dtype)
+    raise ValueError(f"Unknown panel backend {backend!r}; use 'numpy', 'numba' or 'warp'.")
