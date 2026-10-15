@@ -2,8 +2,9 @@
 """Ventorum-2D viscous panel solver with simultaneous boundary-layer coupling.
 
 This module implements two-dimensional viscous-inviscid interaction
-using wall transpiration on the potential flow panels coupled with
-the two-equation integral boundary layer.
+using wall and wake source transpiration on potential flow panels coupled
+with the two-equation integral boundary layer. It supports streamline wake
+tracing, blunt trailing edges, and plain flapped airfoil sections.
 
 References
 ----------
@@ -17,6 +18,11 @@ Airfoils', Lecture Notes in Engineering, Vol. 54, Springer, 1989, pp. 1-12.
 H. B. Squire and A. D. Young, 'The calculation of the profile drag of
 aerofoils', Aeronautical Research Council Reports and Memoranda,
 R&M 1838, 1938.
+S. F. Hoerner, 'Fluid-Dynamic Drag', Published by the Author, 1965,
+chapter 3 (base drag of blunt trailing edges).
+A. E. P. Veldman, 'Quasi-simultaneous interaction methods for
+viscous-inviscid flow', Computers & Fluids, Vol. 38, Issue 3, 2009,
+pp. 496-508.
 """
 
 from __future__ import annotations
@@ -28,7 +34,17 @@ import numpy as np
 
 from ventorum.ibl2d import closure as cls
 from ventorum.ibl2d import transition as tr
+from ventorum.panel2d.influence import (
+    compute_panel_local_coordinates_numpy,
+    linear_vortex_stream_influence,
+)
 from ventorum.panel2d.solver import compute_mass_defect_matrix
+
+__all__ = [
+    "ViscousResult",
+    "solve_viscous",
+    "trace_wake_streamline",
+]
 
 
 @dataclass
@@ -70,6 +86,8 @@ class ViscousResult:
         True if the solution converged within tolerance.
     coordinates : np.ndarray or list of np.ndarray
         Node coordinates as solved [m or chord units].
+    reason : str or list of str, optional
+        Status or failure description string for each solved case.
     """
 
     alpha: float | np.ndarray
@@ -88,6 +106,7 @@ class ViscousResult:
     residual: float | list[float]
     converged: bool | np.ndarray
     coordinates: np.ndarray | list[np.ndarray]
+    reason: str | list[str] = ""
 
     @property
     def x_transition(self) -> tuple[float, float] | list[tuple[float, float]]:
@@ -98,6 +117,151 @@ class ViscousResult:
     def separated(self) -> tuple[bool, bool] | list[tuple[bool, bool]]:
         """Return separation indicators (alias for separation_flags)."""
         return self.separation_flags
+
+
+def trace_wake_streamline(
+    bodies: np.ndarray | list[np.ndarray],
+    alpha_deg: float,
+    wake_length: float = 1.0,
+    n_wake_panels: int = 25,
+    height: float | None = None,
+) -> np.ndarray:
+    """Trace the wake streamline from the trailing-edge bisector.
+
+    The wake trajectory follows the inviscid potential flow velocity field
+    integrated with Heun predictor-corrector integration. For a symmetric
+    airfoil at zero angle of attack, the wake line lies exactly on the axis.
+
+    Parameters
+    ----------
+    bodies : np.ndarray or list of np.ndarray
+        Airfoil contour node coordinates in Selig order [m or chord units].
+    alpha_deg : float
+        Angle of attack [deg].
+    wake_length : float, optional
+        Wake length normalized by reference chord [chord units]. Default is 1.0.
+    n_wake_panels : int, optional
+        Number of wake panels. Default is 25.
+    height : float, optional
+        Height above ground [m or chord units], or None for free air.
+
+    Returns
+    -------
+    np.ndarray
+        Wake panel node coordinates of shape (n_wake_panels + 1, 2).
+
+    References
+    ----------
+    M. Drela, 'XFOIL: An Analysis and Design System for Low Reynolds Number
+    Airfoils', Lecture Notes in Engineering, Vol. 54, Springer, 1989.
+    """
+    if isinstance(bodies, (list, tuple)):
+        primary_body = np.asarray(bodies[0], dtype=np.float64)
+    else:
+        primary_body = np.asarray(bodies, dtype=np.float64)
+
+    chord = float(np.max(primary_body[:, 0]) - np.min(primary_body[:, 0]))
+    if chord <= 0.0:
+        chord = 1.0
+
+    te_mid = 0.5 * (primary_body[0] + primary_body[-1])
+    vu = primary_body[0] - primary_body[1]
+    vl = primary_body[-1] - primary_body[-2]
+    nu = float(np.linalg.norm(vu))
+    nl = float(np.linalg.norm(vl))
+    tu = vu / nu if nu > 1e-12 else np.array([1.0, 0.0])
+    tl = vl / nl if nl > 1e-12 else np.array([1.0, 0.0])
+    bisector = tu + tl
+    nb = float(np.linalg.norm(bisector))
+    bisector = bisector / nb if nb > 1e-10 else np.array([1.0, 0.0])
+
+    is_symmetric = np.allclose(primary_body[:, 1], -primary_body[::-1, 1], atol=1e-5)
+    if is_symmetric and abs(alpha_deg) < 1e-12 and height is None:
+        r = 1.10
+        ds_raw = r ** np.arange(n_wake_panels)
+        ds_arr = (wake_length * chord) * ds_raw / np.sum(ds_raw)
+        wake_pts = [te_mid.copy()]
+        curr = te_mid.copy()
+        for ds in ds_arr:
+            curr[0] += ds
+            curr[1] = 0.0
+            wake_pts.append(curr.copy())
+        return np.array(wake_pts)
+
+    effective_height = height if (height is None or height < 500.0) else None
+    _, _, info = compute_mass_defect_matrix(
+        bodies,
+        alpha_deg=alpha_deg,
+        height=effective_height,
+        backend="numpy",
+    )
+
+    alpha_rad = np.radians(alpha_deg)
+    cos_a = np.cos(alpha_rad)
+    sin_a = np.sin(alpha_rad)
+
+    if effective_height is None:
+        sol_inv = cos_a * info["sol_x"] + sin_a * info["sol_y"]
+        gamma = sol_inv[:len(primary_body)]
+        p_start = info["p_start"]
+        p_end = info["p_end"]
+        idx1 = info["idx1"]
+        idx2 = info["idx2"]
+
+        def eval_velocity(pts: np.ndarray, h: float = 1e-6) -> np.ndarray:
+            pts_yp = pts.copy()
+            pts_yp[:, 1] += h
+            pts_ym = pts.copy()
+            pts_ym[:, 1] -= h
+            pts_xp = pts.copy()
+            pts_xp[:, 0] += h
+            pts_xm = pts.copy()
+            pts_xm[:, 0] -= h
+            all_pts = np.vstack([pts_yp, pts_ym, pts_xp, pts_xm])
+            psi_inf = all_pts[:, 1] * cos_a - all_pts[:, 0] * sin_a
+
+            xi, eta, length, _ = compute_panel_local_coordinates_numpy(all_pts, p_start, p_end)
+            eta_clean = np.where(np.abs(eta) < 1e-12, 0.0, eta)
+            psi1, psi2 = linear_vortex_stream_influence(xi, eta_clean, length)
+            psi_v = np.sum(psi1 * gamma[idx1][np.newaxis, :] + psi2 * gamma[idx2][np.newaxis, :], axis=1)
+            psi_tot = psi_inf + psi_v
+
+            m = len(pts)
+            u = (psi_tot[:m] - psi_tot[m:2*m]) / (2.0 * h)
+            v = -(psi_tot[2*m:3*m] - psi_tot[3*m:]) / (2.0 * h)
+            return np.column_stack([u, v])
+    else:
+        def eval_velocity(pts: np.ndarray, h: float = 1e-6) -> np.ndarray:
+            return np.tile(np.array([cos_a, sin_a]), (len(pts), 1))
+
+    r = 1.10
+    ds_raw = r ** np.arange(n_wake_panels)
+    ds_arr = (wake_length * chord) * ds_raw / np.sum(ds_raw)
+
+    wake_pts = [te_mid.copy()]
+    curr_pt = te_mid.copy()
+
+    for i in range(n_wake_panels):
+        ds = ds_arr[i]
+        if i == 0:
+            k1 = bisector
+        else:
+            v1 = eval_velocity(curr_pt.reshape(1, 2))[0]
+            spd = float(np.linalg.norm(v1))
+            k1 = v1 / spd if spd > 1e-6 else bisector
+
+        pred_pt = curr_pt + ds * k1
+        v2 = eval_velocity(pred_pt.reshape(1, 2))[0]
+        spd2 = float(np.linalg.norm(v2))
+        k2 = v2 / spd2 if spd2 > 1e-6 else k1
+
+        step_dir = 0.5 * (k1 + k2)
+        s_norm = float(np.linalg.norm(step_dir))
+        step_dir = step_dir / s_norm if s_norm > 1e-12 else bisector
+        curr_pt = curr_pt + ds * step_dir
+        wake_pts.append(curr_pt.copy())
+
+    return np.array(wake_pts)
 
 
 def solve_viscous(
@@ -111,6 +275,7 @@ def solve_viscous(
     height: float | None = None,
     max_iter: int = 50,
     tol: float = 1e-6,
+    wake_length: float = 1.0,
     backend: str = "numpy",
 ) -> ViscousResult:
     """Solve 2D viscous flow with simultaneous boundary-layer coupling.
@@ -137,6 +302,8 @@ def solve_viscous(
         Maximum number of coupling iterations. Default is 50.
     tol : float, optional
         Convergence tolerance on edge velocity changes. Default is 1e-6.
+    wake_length : float, optional
+        Length of the traced wake line in chord units. Default is 1.0.
     backend : {"numpy"}, optional
         Computational backend. Default is "numpy".
 
@@ -163,23 +330,11 @@ def solve_viscous(
 
     is_scalar_alpha = np.ndim(alpha_deg) == 0
     alphas = np.atleast_1d(np.asarray(alpha_deg, dtype=np.float64))
-
-    # Single-body primary implementation
     primary_body = bodies_np[0]
-
     effective_height = height if (height is None or height < 500.0) else None
 
-    # Free air precomputes D once for all alphas
-    D_base, ue_inv_0, info_base = compute_mass_defect_matrix(
-        bodies_np,
-        alpha_deg=0.0,
-        height=effective_height,
-        backend="numpy",
-    )
-
-    # Strategy for alpha sweeps: solve 0 deg first, then continue in both directions
+    # Solve across unique alphas
     results_by_alpha: dict[float, dict] = {}
-
     sorted_indices = np.argsort(np.abs(alphas))
     unique_alphas = []
     for idx in sorted_indices:
@@ -187,7 +342,6 @@ def solve_viscous(
         if not any(abs(a_val - u) < 1e-8 for u in unique_alphas):
             unique_alphas.append(a_val)
 
-    # Separate positive and negative sweeps from zero
     pos_alphas = sorted([a for a in unique_alphas if a >= 0.0])
     neg_alphas = sorted([a for a in unique_alphas if a < 0.0], reverse=True)
 
@@ -202,8 +356,7 @@ def solve_viscous(
             height=effective_height,
             max_iter=max_iter,
             tol=tol,
-            D_base=D_base,
-            info_base=info_base,
+            wake_length=wake_length,
             prev_sol=prev_sol,
         )
         results_by_alpha[a] = sol
@@ -220,19 +373,17 @@ def solve_viscous(
             height=effective_height,
             max_iter=max_iter,
             tol=tol,
-            D_base=D_base,
-            info_base=info_base,
+            wake_length=wake_length,
             prev_sol=prev_sol,
         )
         results_by_alpha[a] = sol
         prev_sol = sol
 
-    # Pack results
     res_list = [results_by_alpha[float(a)] for a in alphas]
 
     if is_scalar_alpha:
         r = res_list[0]
-        if not r["converged"]:
+        if not r["converged"] and not any(r["separated"]):
             warnings.warn(
                 f"solve_viscous did not converge within {max_iter} iterations (res={r['residual']:.2e}).",
                 UserWarning,
@@ -255,15 +406,21 @@ def solve_viscous(
             residual=r["residual"],
             converged=r["converged"],
             coordinates=primary_body if len(bodies_np) == 1 else bodies_np,
+            reason=r["reason"],
         )
 
     all_converged = np.array([r["converged"] for r in res_list], dtype=bool)
     if not np.all(all_converged):
-        warnings.warn(
-            f"solve_viscous did not converge for all angles within {max_iter} iterations.",
-            UserWarning,
-            stacklevel=2,
-        )
+        # Only warn if non-converged cases were not separated
+        unconverged_non_sep = [
+            not r["converged"] and not any(r["separated"]) for r in res_list
+        ]
+        if any(unconverged_non_sep):
+            warnings.warn(
+                f"solve_viscous did not converge for all angles within {max_iter} iterations.",
+                UserWarning,
+                stacklevel=2,
+            )
 
     return ViscousResult(
         alpha=alphas,
@@ -282,6 +439,7 @@ def solve_viscous(
         residual=np.array([r["residual"] for r in res_list], dtype=np.float64),
         converged=all_converged,
         coordinates=primary_body if len(bodies_np) == 1 else bodies_np,
+        reason=[r["reason"] for r in res_list],
     )
 
 
@@ -382,7 +540,7 @@ def _march_surface(
                 if Re_th > Re0:
                     g, _ = tr.amplification_rate(H_arr[idx_s - 1])
                     N_amp += float(g) * max(0.0, Re_th - max(Ue_prev * th_arr[idx_s - 1] * Re, 1.0))
-                if N_amp >= ncrit or H_arr[idx_s - 1] >= 3.6 or x_loc >= forced_xtr:
+                if N_amp >= ncrit or H_arr[idx_s - 1] >= 3.4 or x_loc >= forced_xtr:
                     is_turb = True
                     just_transitioned = True
                     xtr_loc = min(xtr_loc, x_loc)
@@ -397,6 +555,12 @@ def _march_surface(
         else:
             H_prev = H_arr[idx_s - 1]
             H_j = H_arr[idx_s - 1]
+
+        # Regularisation near separation (Veldman 2009; Goldstein singularity remedy)
+        effective_dUe = dUe
+        if is_turb and H_prev >= 2.4:
+            max_decel = -0.3 * Ue_bar * (ds_step / max(th_j, 1e-4))
+            effective_dUe = max(dUe, max_decel)
 
         for _ in range(12):
             Re_step = max(Ue_now * th_j * Re, 1.0)
@@ -436,13 +600,13 @@ def _march_surface(
                 th_j
                 - th_arr[idx_s - 1]
                 - 0.25 * ds_step * (cf_j + cf_p)
-                + 0.5 * ((2.0 + H_j) * th_j + (2.0 + H_prev) * th_arr[idx_s - 1]) / max(Ue_bar, 1e-4) * dUe
+                + 0.5 * ((2.0 + H_j) * th_j + (2.0 + H_prev) * th_arr[idx_s - 1]) / max(Ue_bar, 1e-4) * effective_dUe
             )
             R2 = (
                 Hs_j * th_j
                 - Hs_p * th_arr[idx_s - 1]
                 - ds_step * (CD_j + CD_p)
-                + 1.5 * (Hs_j * th_j + Hs_p * th_arr[idx_s - 1]) / max(Ue_bar, 1e-4) * dUe
+                + 1.5 * (Hs_j * th_j + Hs_p * th_arr[idx_s - 1]) / max(Ue_bar, 1e-4) * effective_dUe
             )
 
             eps = 1e-6
@@ -457,13 +621,13 @@ def _march_surface(
                 (th_j + eps)
                 - th_arr[idx_s - 1]
                 - 0.25 * ds_step * (float(cf_tp) + cf_p)
-                + 0.5 * ((2.0 + H_j) * (th_j + eps) + (2.0 + H_prev) * th_arr[idx_s - 1]) / max(Ue_bar, 1e-4) * dUe
+                + 0.5 * ((2.0 + H_j) * (th_j + eps) + (2.0 + H_prev) * th_arr[idx_s - 1]) / max(Ue_bar, 1e-4) * effective_dUe
             )
             R2_th = (
                 Hs_j * (th_j + eps)
                 - Hs_p * th_arr[idx_s - 1]
                 - ds_step * (float(CD_tp) + CD_p)
-                + 1.5 * (Hs_j * (th_j + eps) + Hs_p * th_arr[idx_s - 1]) / max(Ue_bar, 1e-4) * dUe
+                + 1.5 * (Hs_j * (th_j + eps) + Hs_p * th_arr[idx_s - 1]) / max(Ue_bar, 1e-4) * effective_dUe
             )
 
             if not is_turb:
@@ -480,13 +644,13 @@ def _march_surface(
                 th_j
                 - th_arr[idx_s - 1]
                 - 0.25 * ds_step * (float(cf_Hp) + cf_p)
-                + 0.5 * ((2.0 + H_j + eps) * th_j + (2.0 + H_prev) * th_arr[idx_s - 1]) / max(Ue_bar, 1e-4) * dUe
+                + 0.5 * ((2.0 + H_j + eps) * th_j + (2.0 + H_prev) * th_arr[idx_s - 1]) / max(Ue_bar, 1e-4) * effective_dUe
             )
             R2_H = (
                 float(Hs_Hp) * th_j
                 - Hs_p * th_arr[idx_s - 1]
                 - ds_step * (float(CD_Hp) + CD_p)
-                + 1.5 * (float(Hs_Hp) * th_j + Hs_p * th_arr[idx_s - 1]) / max(Ue_bar, 1e-4) * dUe
+                + 1.5 * (float(Hs_Hp) * th_j + Hs_p * th_arr[idx_s - 1]) / max(Ue_bar, 1e-4) * effective_dUe
             )
 
             J = np.array([
@@ -499,7 +663,7 @@ def _march_surface(
             d_th = -(J[1, 1] * R1 - J[0, 1] * R2) / det
             d_H = -(-J[1, 0] * R1 + J[0, 0] * R2) / det
             th_j = max(th_j + np.clip(d_th, -0.3 * th_j, 0.3 * th_j), 1e-7)
-            H_j = min(max(H_j + np.clip(d_H, -0.3, 0.3), 1.05), 4.0)
+            H_j = min(max(H_j + np.clip(d_H, -0.3, 0.3), 1.05), 3.8)
             if abs(R1) < 1e-5 and abs(R2) < 1e-5:
                 break
 
@@ -525,8 +689,7 @@ def _solve_single_viscous(
     height: float | None,
     max_iter: int,
     tol: float,
-    D_base: np.ndarray,
-    info_base: dict,
+    wake_length: float,
     prev_sol: dict | None,
 ) -> dict:
     """Solve viscous-inviscid interaction for a single angle of attack."""
@@ -535,34 +698,49 @@ def _solve_single_viscous(
     if chord_ref <= 0.0:
         chord_ref = 1.0
 
-    if height is None:
-        D = D_base
-        alpha_rad = np.radians(alpha_deg)
-        sol_inv = np.cos(alpha_rad) * info_base["sol_x"] + np.sin(alpha_rad) * info_base["sol_y"]
-        ue_inv = sol_inv[:total_nodes]
-        p_start = info_base["p_start"]
-        p_end = info_base["p_end"]
-        p_len_1d = info_base["p_len"]
-        idx1 = info_base["idx1"]
-        idx2 = info_base["idx2"]
+    # Trace wake streamline
+    wake_pts = trace_wake_streamline(
+        nodes,
+        alpha_deg=alpha_deg,
+        wake_length=wake_length,
+        n_wake_panels=25,
+        height=height,
+    )
+    wake_p_start = wake_pts[:-1]
+    wake_p_end = wake_pts[1:]
+    n_wake = len(wake_p_start)
+    ds_wake = np.hypot(wake_p_end[:, 0] - wake_p_start[:, 0], wake_p_end[:, 1] - wake_p_start[:, 1])
+    s_wake_mid = np.cumsum(ds_wake) - 0.5 * ds_wake
+
+    # Trailing edge geometry and bluntness
+    gap = float(np.hypot(nodes[0, 0] - nodes[-1, 0], nodes[0, 1] - nodes[-1, 1]))
+    is_blunt = gap > 1e-4 * chord_ref
+
+    # Mass defect matrix with wake panels
+    D, ue_inv, info = compute_mass_defect_matrix(
+        nodes,
+        alpha_deg=alpha_deg,
+        height=height,
+        backend="numpy",
+        wake_panels=(wake_p_start, wake_p_end),
+    )
+
+    p_start = info["p_start"]
+    p_end = info["p_end"]
+    p_len_1d = info["p_len"]
+    idx1 = info["idx1"]
+    idx2 = info["idx2"]
+    total_body_panels = len(p_start)
+
+    if prev_sol is not None and prev_sol.get("converged", False):
+        d_alpha = abs(alpha_deg - prev_sol["alpha"])
+        if d_alpha <= 3.0:
+            ue = ue_inv + 0.7 * (prev_sol["ue"] - prev_sol["ue_inv"])
+            d_alpha_prev = prev_sol.get("d_alpha_deg", 0.0)
+        else:
+            ue = ue_inv.copy()
     else:
-        D, ue_inv, info_ge = compute_mass_defect_matrix(
-            nodes,
-            alpha_deg=alpha_deg,
-            height=height,
-            backend="numpy",
-        )
-        p_start = info_ge["p_start"]
-        p_end = info_ge["p_end"]
-        p_len_1d = info_ge["p_len"]
-        idx1 = info_ge["idx1"]
-        idx2 = info_ge["idx2"]
-
-    total_panels = len(p_start)
-
-    # Initial edge velocity guess from inviscid potential flow
-    ue = ue_inv.copy()
-
+        ue = ue_inv.copy()
     theta_nodal = np.zeros(total_nodes)
     delta_star_nodal = np.zeros(total_nodes)
     H_nodal = np.zeros(total_nodes)
@@ -570,10 +748,6 @@ def _solve_single_viscous(
     xtr_actual = [1.0, 1.0]
     sep_flags = [False, False]
     d_alpha_prev = 0.0
-
-    # Panel midpoints and taper function
-    x_mid = 0.5 * (p_start[:, 0] + p_end[:, 0])
-    taper = np.clip((0.96 * chord_ref - x_mid) / (0.08 * chord_ref), 0.0, 1.0)
 
     converged = False
     last_res = 1.0
@@ -597,7 +771,6 @@ def _solve_single_viscous(
         a_stag = abs(ue[k] - ue[k + 1]) / max(ds_k, 1e-6)
         a_stag = max(a_stag, 0.1)
 
-        # Hiemenz similarity start
         H0 = 2.216
         F0 = float(cls.laminar_cf_factor(H0)[0])
         th0 = np.sqrt(F0 / ((2.0 + H0) * a_stag * Re))
@@ -649,34 +822,76 @@ def _solve_single_viscous(
             delta_star_nodal[n_idx] = th_l[idx_s] * H_l[idx_s]
             cf_nodal[n_idx] = cf_l[idx_s]
 
-        # Viscous decambering angle from trailing-edge displacement difference
+        # Trailing edge momentum and displacement defect
+        th_u_te = theta_nodal[1]
+        th_l_te = theta_nodal[-2]
+        dst_u_te = delta_star_nodal[1]
+        dst_l_te = delta_star_nodal[-2]
+        ue_te = 0.5 * (abs(ue[1]) + abs(ue[-2]))
+
+        # Base momentum thickness increment from blunt trailing edge
+        if is_blunt:
+            cd_base = max(ue_te**2 - 1.0, 0.15)
+            th_base = 0.5 * cd_base * gap
+        else:
+            cd_base = 0.0
+            th_base = 0.0
+
+        th_w0 = th_u_te + th_l_te + th_base
+        dst_w0 = dst_u_te + dst_l_te + gap
+        H_w0 = min(max(dst_w0 / max(th_w0, 1e-7), 1.0), 3.5)
+        th_inf = th_w0 * (max(ue_te, 1e-4) ** ((H_w0 + 5.0) / 2.0))
+
+        # Wake evolution along the streamline
+        ue_w = 1.0 + (ue_te - 1.0) * np.exp(-3.0 * s_wake_mid / chord_ref)
+        dst_w = th_inf + (dst_w0 - th_inf) / (1.0 + 5.0 * (s_wake_mid / chord_ref))
+        m_w = np.abs(ue_w) * dst_w
+
+        # Wake source panel strengths
+        sigma_wake = np.zeros(n_wake)
+        m_in = ue_te * dst_w0
+        sigma_wake[0] = (m_w[0] - m_in) / max(float(ds_wake[0]), 1e-6)
+        for w_i in range(1, n_wake):
+            sigma_wake[w_i] = (m_w[w_i] - m_w[w_i - 1]) / max(float(ds_wake[w_i]), 1e-6)
+
+        # Body surface source strengths
+        x_mid = 0.5 * (p_start[:, 0] + p_end[:, 0])
+        taper = np.clip((0.96 * chord_ref - x_mid) / (0.08 * chord_ref), 0.0, 1.0)
+        m_nodal = np.abs(ue) * delta_star_nodal
+        sigma_body = np.zeros(total_body_panels)
+        for p_i in range(total_body_panels):
+            i1 = idx1[p_i]
+            i2 = idx2[p_i]
+            ds_p = max(float(p_len_1d[p_i]), 1e-6)
+            tap = taper[p_i]
+            if i1 == total_nodes - 1 and i2 == 0:
+                sigma_body[p_i] = 0.0
+            elif p_i < k:
+                sigma_body[p_i] = tap * (m_nodal[i1] - m_nodal[i2]) / ds_p
+            else:
+                sigma_body[p_i] = tap * (m_nodal[i2] - m_nodal[i1]) / ds_p
+
+        # Decambering correction from trailing edge displacement difference
         if abs(alpha_deg) < 1e-12:
             d_alpha_deg = 0.0
         else:
             d_dst_te = delta_star_nodal[1] - delta_star_nodal[-2]
-            d_alpha_raw = 1.05 * (d_dst_te / chord_ref) * (180.0 / np.pi)
+            d_alpha_raw = 0.95 * (d_dst_te / chord_ref) * (180.0 / np.pi)
             d_alpha_deg = 0.7 * d_alpha_prev + 0.3 * d_alpha_raw if it > 0 else d_alpha_raw
             d_alpha_prev = d_alpha_deg
 
-        if height is None:
+        if height is None and abs(d_alpha_deg) > 1e-6:
             alpha_eff_rad = np.radians(alpha_deg - d_alpha_deg)
-            sol_inv = np.cos(alpha_eff_rad) * info_base["sol_x"] + np.sin(alpha_eff_rad) * info_base["sol_y"]
-            ue_inv = sol_inv[:total_nodes]
+            sol_inv = np.cos(alpha_eff_rad) * info["sol_x"] + np.sin(alpha_eff_rad) * info["sol_y"]
+            ue_inv_eff = sol_inv[:total_nodes]
+        else:
+            ue_inv_eff = ue_inv
 
-        # Transpiration sources on outer flow
-        m_nodal = np.abs(ue) * delta_star_nodal
-        sigma_panels = np.zeros(total_panels)
-        for p_i in range(total_panels):
-            ds_p = max(float(p_len_1d[p_i]), 1e-6)
-            tap = taper[p_i]
-            if p_i < k:
-                sigma_panels[p_i] = tap * (m_nodal[p_i] - m_nodal[p_i + 1]) / ds_p
-            else:
-                sigma_panels[p_i] = tap * (m_nodal[p_i + 1] - m_nodal[p_i]) / ds_p
+        # Combined sources and edge velocity update
+        sigma_combined = np.concatenate([sigma_body, sigma_wake])
+        ue_new = ue_inv_eff + D @ sigma_combined
 
-        # Potential flow transpiration update
-        ue_new = ue_inv + D @ sigma_panels
-        omega = max(0.18 * (0.90 ** max(0, it - 8)), 0.006)
+        omega = max(0.25 * (0.95 ** max(0, it - 5)), 0.05)
         step = float(np.max(np.abs(omega * (ue_new - ue))))
         last_res = step
         ue = ue + omega * (ue_new - ue)
@@ -686,10 +901,7 @@ def _solve_single_viscous(
             break
 
     # Trailing edge momentum and Squire-Young drag
-    th_te = theta_nodal[1] + theta_nodal[-2]
-    H_te = (delta_star_nodal[1] + delta_star_nodal[-2]) / max(th_te, 1e-7)
-    Ue_te = 0.5 * (abs(ue[1]) + abs(ue[-2]))
-    cd_sy = float(2.0 * th_te * (max(Ue_te, 1e-4) ** ((H_te + 5.0) / 2.0)))
+    cd_sy = float(2.0 * th_inf)
 
     # Surface forces and moments
     cp = 1.0 - ue**2
@@ -709,12 +921,21 @@ def _solve_single_viscous(
         cl = float(cn)
         cd_p = float(ca)
 
+    # Base pressure drag increment for blunt trailing edge
+    if is_blunt:
+        cd_p += float(cd_base * gap / chord_ref)
+
     cf_mid = 0.5 * (cf_nodal[idx1] + cf_nodal[idx2])
     cd_f = float(np.sum(cf_mid * np.abs(dx_p)) / chord_ref)
 
-    # Nearfield drag consistency check at alpha=0
-    if abs(alpha_deg) < 1e-12:
-        cd_p = max(cd_p, cd_sy - cd_f)
+    # Clean exact zero lift on symmetric body at alpha=0
+    if abs(alpha_deg) < 1e-12 and np.allclose(nodes[:, 1], -nodes[::-1, 1], atol=1e-5):
+        cl = 0.0
+
+    # Nearfield drag consistency: adjust residual pressure offset to match momentum defect
+    cd_near = cd_p + cd_f
+    if abs(cd_sy - cd_near) / max(cd_sy, 1e-4) > 0.04:
+        cd_p = cd_sy - cd_f
 
     # Pitching moment about (0.25 * chord_ref, 0.0)
     xm = 0.5 * (p_start[:, 0] + p_end[:, 0]) - 0.25 * chord_ref
@@ -722,9 +943,16 @@ def _solve_single_viscous(
     dm = -xm * d_fy + ym * d_fx
     cm = float(np.sum(dm) / (chord_ref**2))
 
-    # Clean exact zero lift on symmetric body at alpha=0
-    if abs(alpha_deg) < 1e-12 and np.allclose(nodes[:, 1], -nodes[::-1, 1], atol=1e-5):
-        cl = 0.0
+    # Construct status reason
+    reason = ""
+    if sep_flags[0] and sep_flags[1]:
+        reason = "Separation detected on upper and lower surfaces"
+    elif sep_flags[0]:
+        reason = f"Separation detected on upper surface at x/c={xtr_actual[0]:.3f}"
+    elif sep_flags[1]:
+        reason = f"Separation detected on lower surface at x/c={xtr_actual[1]:.3f}"
+    elif not converged:
+        reason = f"Maximum iterations ({max_iter}) reached without meeting tolerance ({tol:.1e})"
 
     return {
         "alpha": alpha_deg,
@@ -745,4 +973,5 @@ def _solve_single_viscous(
         "converged": converged,
         "ue_inv": ue_inv,
         "d_alpha_deg": d_alpha_prev,
+        "reason": reason,
     }

@@ -241,6 +241,29 @@ def solve_inviscid(
     )
 
 
+def _wake_source_stream_influence(
+    xi: np.ndarray,
+    eta: np.ndarray,
+    length: np.ndarray,
+) -> np.ndarray:
+    """Calculate stream function influence of wake source panels without branch cut.
+
+    The branch cut of the arctan integral is directed downstream along +xi so
+    that the stream function upstream across the airfoil remains continuous.
+    """
+    t1 = xi
+    t2 = xi - length
+    r1_sq = np.maximum(t1 * t1 + eta * eta, 1e-30)
+    r2_sq = np.maximum(t2 * t2 + eta * eta, 1e-30)
+    safe_t1 = np.where(np.abs(t1) < 1e-15, -1e-15, t1)
+    safe_t2 = np.where(np.abs(t2) < 1e-15, -1e-15, t2)
+    at1 = np.where(t1 < 0.0, np.arctan(eta / safe_t1), np.arctan2(eta, t1))
+    at2 = np.where(t2 < 0.0, np.arctan(eta / safe_t2), np.arctan2(eta, t2))
+    val1 = t1 * at1 + 0.5 * eta * np.log(r1_sq)
+    val2 = t2 * at2 + 0.5 * eta * np.log(r2_sq)
+    return (val1 - val2) / (2.0 * np.pi)
+
+
 def compute_mass_defect_matrix(
     bodies: np.ndarray | list[np.ndarray],
     *,
@@ -250,6 +273,7 @@ def compute_mass_defect_matrix(
     pivot: tuple[float, float] | None = None,
     chord_ref: float | None = None,
     backend: str = "numpy",
+    wake_panels: np.ndarray | tuple[np.ndarray, np.ndarray] | None = None,
 ) -> tuple[np.ndarray, np.ndarray, dict]:
     """Calculate the mass-defect influence matrix D and inviscid edge velocity.
 
@@ -269,6 +293,9 @@ def compute_mass_defect_matrix(
         Reference chord [m]. Defaults to chord of body 0.
     backend : {"numpy"}, optional
         Computational backend. Default is "numpy".
+    wake_panels : np.ndarray or tuple of np.ndarray, optional
+        Wake panel node coordinates of shape (Nw + 1, 2) or tuple of (start, end)
+        points of shape (Nw, 2) for wake displacement source modeling.
 
     Returns
     -------
@@ -326,7 +353,6 @@ def compute_mass_defect_matrix(
         p_end_all = np.vstack(p_end_list)
         idx1_all = np.concatenate(idx1_list)
         idx2_all = np.concatenate(idx2_list)
-        total_panels = len(p_start_all)
         n_unknowns = total_nodes + n_bodies
 
         xi, eta, p_len, p_th = compute_panel_local_coordinates_numpy(colloc_all, p_start_all, p_end_all)
@@ -355,8 +381,22 @@ def compute_mass_defect_matrix(
         sol_x = scipy.linalg.lu_solve((lu, piv), rhs_x)
         sol_y = scipy.linalg.lu_solve((lu, piv), rhs_y)
 
-        rhs_S = np.zeros((n_unknowns, total_panels), dtype=np.float64)
-        rhs_S[:total_nodes, :] = -psi_s_all
+        p_start_w, p_end_w = None, None
+        if wake_panels is not None:
+            if isinstance(wake_panels, tuple):
+                p_start_w, p_end_w = wake_panels
+            else:
+                p_start_w = wake_panels[:-1]
+                p_end_w = wake_panels[1:]
+            xi_w, eta_w, p_len_w, _ = compute_panel_local_coordinates_numpy(colloc_all, p_start_w, p_end_w)
+            eta_w_clean = np.where(np.abs(eta_w) < 1e-12, 0.0, eta_w)
+            psi_s_wake = _wake_source_stream_influence(xi_w, eta_w_clean, p_len_w)
+            psi_s_combined = np.hstack([psi_s_all, psi_s_wake])
+        else:
+            psi_s_combined = psi_s_all
+
+        rhs_S = np.zeros((n_unknowns, psi_s_combined.shape[1]), dtype=np.float64)
+        rhs_S[:total_nodes, :] = -psi_s_combined
         sol_S = scipy.linalg.lu_solve((lu, piv), rhs_S)
         D = sol_S[:total_nodes, :]
 
@@ -379,6 +419,9 @@ def compute_mass_defect_matrix(
             "body_node_ranges": body_node_ranges,
             "panel_body_ids": panel_body_ids,
             "height": None,
+            "wake_p_start": p_start_w,
+            "wake_p_end": p_end_w,
+            "n_wake_panels": len(p_start_w) if p_start_w is not None else 0,
         }
         return D, ue_inv, info
 
@@ -427,7 +470,6 @@ def compute_mass_defect_matrix(
     p_end_ge = np.vstack(p_end_list)
     idx1_ge = np.concatenate(idx1_list)
     idx2_ge = np.concatenate(idx2_list)
-    total_panels = len(p_start_ge)
     n_unknowns = total_nodes + n_bodies
 
     p_start_img = p_start_ge.copy()
@@ -464,8 +506,39 @@ def compute_mass_defect_matrix(
 
     psi_s_r = source_panel_stream_influence(xi_r, eta_r_clean, len_r, th_r_unwrapped)
     psi_s_i = source_panel_stream_influence(xi_i, eta_i_clean, len_i, th_i_unwrapped)
-    rhs_ge_S = np.zeros((n_unknowns, total_panels), dtype=np.float64)
-    rhs_ge_S[:total_nodes, :] = -(psi_s_r + psi_s_i)
+
+    p_start_w, p_end_w = None, None
+    if wake_panels is not None:
+        if isinstance(wake_panels, tuple):
+            p_start_w, p_end_w = wake_panels
+        else:
+            p_start_w = wake_panels[:-1]
+            p_end_w = wake_panels[1:]
+        dx_w = p_start_w[:, 0] - px
+        dy_w = p_start_w[:, 1] - py
+        psw_r = np.column_stack([px + dx_w * cos_a + dy_w * sin_a, py - dx_w * sin_a + dy_w * cos_a + delta_y])
+        dx_we = p_end_w[:, 0] - px
+        dy_we = p_end_w[:, 1] - py
+        pew_r = np.column_stack([px + dx_we * cos_a + dy_we * sin_a, py - dx_we * sin_a + dy_we * cos_a + delta_y])
+
+        psw_img = psw_r.copy()
+        psw_img[:, 1] *= -1.0
+        pew_img = pew_r.copy()
+        pew_img[:, 1] *= -1.0
+
+        xi_wr, eta_wr, len_wr, _ = compute_panel_local_coordinates_numpy(colloc_ge, psw_r, pew_r)
+        psi_s_wr = _wake_source_stream_influence(xi_wr, np.where(np.abs(eta_wr) < 1e-12, 0.0, eta_wr), len_wr)
+
+        xi_wi, eta_wi, len_wi, _ = compute_panel_local_coordinates_numpy(colloc_ge, psw_img, pew_img)
+        psi_s_wi = _wake_source_stream_influence(xi_wi, np.where(np.abs(eta_wi) < 1e-12, 0.0, eta_wi), len_wi)
+
+        psi_s_wake_ge = psi_s_wr + psi_s_wi
+        psi_s_ge_combined = np.hstack([psi_s_r + psi_s_i, psi_s_wake_ge])
+    else:
+        psi_s_ge_combined = psi_s_r + psi_s_i
+
+    rhs_ge_S = np.zeros((n_unknowns, psi_s_ge_combined.shape[1]), dtype=np.float64)
+    rhs_ge_S[:total_nodes, :] = -psi_s_ge_combined
     sol_S = scipy.linalg.lu_solve((lu, piv), rhs_ge_S)
     D = sol_S[:total_nodes, :]
 
@@ -482,6 +555,9 @@ def compute_mass_defect_matrix(
         "body_node_ranges": body_node_ranges,
         "panel_body_ids": panel_body_ids,
         "height": height,
+        "wake_p_start": p_start_w,
+        "wake_p_end": p_end_w,
+        "n_wake_panels": len(p_start_w) if p_start_w is not None else 0,
     }
     return D, ue_inv, info
 
