@@ -117,6 +117,7 @@ def solve_pressure_kutta(
     v_inf: float,
     max_iter: int = 20,
     tol: float = 1e-6,
+    linear_solve=None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, int, float, bool]:
     """Iterate the wake strengths to zero trailing-edge pressure jump.
 
@@ -151,6 +152,12 @@ def solve_pressure_kutta(
         Maximum Newton steps.
     tol : float, default=1e-6
         Convergence threshold on max |delta Cp| [-].
+    linear_solve : callable or None, optional
+        Solve of one right-hand side column through the factored body
+        matrix: ``linear_solve(rhs)`` returns ``x`` with ``A x = rhs``.
+        None uses ``scipy.linalg.lu_solve`` on ``lu_and_piv`` (numpy and
+        numba backends). The gpu backend passes a solve through the torch
+        factorization on the device.
 
     Returns
     -------
@@ -182,7 +189,11 @@ def solve_pressure_kutta(
     # Linear sensitivity of the solved doublets to each wake correction.
     z_solve = np.zeros((mu_s.shape[0], n_s), dtype=float)
     for t in range(n_s):
-        z_solve[:, t] = scipy.linalg.lu_solve(lu_and_piv, -d_mat[:, t])
+        col = -d_mat[:, t]
+        if linear_solve is None:
+            z_solve[:, t] = scipy.linalg.lu_solve(lu_and_piv, col)
+        else:
+            z_solve[:, t] = np.asarray(linear_solve(col), dtype=float).reshape(-1)
 
     # Full mesh sensitivity: equal correction on the mirror side.
     if mu_f.shape[0] == mu_s.shape[0]:
