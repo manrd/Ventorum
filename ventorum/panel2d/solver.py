@@ -241,6 +241,251 @@ def solve_inviscid(
     )
 
 
+def compute_mass_defect_matrix(
+    bodies: np.ndarray | list[np.ndarray],
+    *,
+    alpha_deg: float = 0.0,
+    height: float | None = None,
+    height_reference: str = "pivot",
+    pivot: tuple[float, float] | None = None,
+    chord_ref: float | None = None,
+    backend: str = "numpy",
+) -> tuple[np.ndarray, np.ndarray, dict]:
+    """Calculate the mass-defect influence matrix D and inviscid edge velocity.
+
+    Parameters
+    ----------
+    bodies : np.ndarray or list of np.ndarray
+        Airfoil contour coordinates in Selig order [m].
+    alpha_deg : float, optional
+        Angle of attack [deg]. Default is 0.0.
+    height : float, optional
+        Height above flat ground at y=0 [m], or None for free air.
+    height_reference : {"pivot", "trailing_edge"}, optional
+        Height reference point. Default is "pivot".
+    pivot : tuple of float, optional
+        Pivot point (x, y) [m] for geometry rotation. Defaults to quarter chord.
+    chord_ref : float, optional
+        Reference chord [m]. Defaults to chord of body 0.
+    backend : {"numpy"}, optional
+        Computational backend. Default is "numpy".
+
+    Returns
+    -------
+    tuple of (D, ue_inv, info)
+        D: mass-defect matrix of shape (total_nodes, total_panels).
+        ue_inv: inviscid surface velocity at nodes [dimensionless].
+        info: dictionary containing geometric panels, collocation points, and solutions.
+    """
+    if backend != "numpy":
+        raise ValueError(f"Only backend='numpy' is currently supported in compute_mass_defect_matrix, got '{backend}'.")
+
+    if isinstance(bodies, np.ndarray):
+        bodies_np = [np.asarray(bodies, dtype=np.float64)]
+    elif isinstance(bodies, (list, tuple)):
+        bodies_np = [np.asarray(b, dtype=np.float64) for b in bodies]
+    else:
+        raise TypeError("bodies must be an (N, 2) array or list of (N, 2) arrays.")
+
+    n_bodies = len(bodies_np)
+    b0_xle = float(np.min(bodies_np[0][:, 0]))
+    b0_xte = float(np.max(bodies_np[0][:, 0]))
+    b0_chord = b0_xte - b0_xle
+    if chord_ref is None:
+        chord_ref = b0_chord if b0_chord > 0.0 else 1.0
+
+    if pivot is None:
+        pivot = (b0_xle + 0.25 * chord_ref, 0.0)
+    px, py = pivot
+
+    node_counts = [len(b) for b in bodies_np]
+    total_nodes = sum(node_counts)
+
+    body_node_ranges = []
+    curr = 0
+    for nc in node_counts:
+        body_node_ranges.append((curr, curr + nc))
+        curr += nc
+
+    if height is None:
+        colloc_list, p_start_list, p_end_list, idx1_list, idx2_list = [], [], [], [], []
+        panel_body_ids = []
+        curr_node = 0
+        for b_id, b in enumerate(bodies_np):
+            c, ps, pe, i1, i2 = _build_body_panels_numpy(b, curr_node)
+            colloc_list.append(c)
+            p_start_list.append(ps)
+            p_end_list.append(pe)
+            idx1_list.append(i1)
+            idx2_list.append(i2)
+            panel_body_ids.extend([b_id] * len(ps))
+            curr_node += len(b)
+
+        colloc_all = np.vstack(colloc_list)
+        p_start_all = np.vstack(p_start_list)
+        p_end_all = np.vstack(p_end_list)
+        idx1_all = np.concatenate(idx1_list)
+        idx2_all = np.concatenate(idx2_list)
+        total_panels = len(p_start_all)
+        n_unknowns = total_nodes + n_bodies
+
+        xi, eta, p_len, p_th = compute_panel_local_coordinates_numpy(colloc_all, p_start_all, p_end_all)
+        eta_clean = np.where(np.abs(eta) < 1e-12, 0.0, eta)
+        p_th_unwrapped = np.unwrap(p_th.ravel())[np.newaxis, :]
+        psi1, psi2 = linear_vortex_stream_influence(xi, eta_clean, p_len)
+        psi_s_all = source_panel_stream_influence(xi, eta_clean, p_len, p_th_unwrapped)
+
+        A = np.zeros((n_unknowns, n_unknowns), dtype=np.float64)
+        np.add.at(A[:total_nodes, :total_nodes], (slice(None), idx1_all), psi1)
+        np.add.at(A[:total_nodes, :total_nodes], (slice(None), idx2_all), psi2)
+
+        for b_id, (n_start, n_end) in enumerate(body_node_ranges):
+            A[n_start:n_end, total_nodes + b_id] = -1.0
+            kutta_row = total_nodes + b_id
+            A[kutta_row, n_start] = 1.0
+            A[kutta_row, n_end - 1] = 1.0
+
+        lu, piv = scipy.linalg.lu_factor(A)
+
+        rhs_x = np.zeros(n_unknowns, dtype=np.float64)
+        rhs_y = np.zeros(n_unknowns, dtype=np.float64)
+        rhs_x[:total_nodes] = -colloc_all[:, 1]
+        rhs_y[:total_nodes] = colloc_all[:, 0]
+
+        sol_x = scipy.linalg.lu_solve((lu, piv), rhs_x)
+        sol_y = scipy.linalg.lu_solve((lu, piv), rhs_y)
+
+        rhs_S = np.zeros((n_unknowns, total_panels), dtype=np.float64)
+        rhs_S[:total_nodes, :] = -psi_s_all
+        sol_S = scipy.linalg.lu_solve((lu, piv), rhs_S)
+        D = sol_S[:total_nodes, :]
+
+        alpha_rad = np.radians(alpha_deg)
+        sol_inv = np.cos(alpha_rad) * sol_x + np.sin(alpha_rad) * sol_y
+        ue_inv = sol_inv[:total_nodes]
+
+        info = {
+            "sol_x": sol_x,
+            "sol_y": sol_y,
+            "colloc": colloc_all,
+            "p_start": p_start_all,
+            "p_end": p_end_all,
+            "p_len": p_len.ravel(),
+            "p_th": p_th.ravel(),
+            "idx1": idx1_all,
+            "idx2": idx2_all,
+            "chord_ref": chord_ref,
+            "pivot": pivot,
+            "body_node_ranges": body_node_ranges,
+            "panel_body_ids": panel_body_ids,
+            "height": None,
+        }
+        return D, ue_inv, info
+
+    # Ground effect
+    a_rad = np.radians(alpha_deg)
+    cos_a = np.cos(a_rad)
+    sin_a = np.sin(a_rad)
+
+    rot_bodies = []
+    for b in bodies_np:
+        dx = b[:, 0] - px
+        dy = b[:, 1] - py
+        xr = px + dx * cos_a + dy * sin_a
+        yr = py - dx * sin_a + dy * cos_a
+        rot_bodies.append(np.column_stack([xr, yr]))
+
+    if height_reference == "pivot":
+        delta_y = height - py
+    elif height_reference == "trailing_edge":
+        te_y_vals = [b[0, 1] for b in rot_bodies] + [b[-1, 1] for b in rot_bodies]
+        min_te_y = float(min(te_y_vals))
+        delta_y = height - min_te_y
+    else:
+        raise ValueError(f"Unknown height_reference '{height_reference}'.")
+
+    ge_bodies = [np.column_stack([b[:, 0], b[:, 1] + delta_y]) for b in rot_bodies]
+    for b in ge_bodies:
+        if np.min(b[:, 1]) <= 0.0:
+            raise ValueError("Geometry under or touching the ground")
+
+    colloc_list, p_start_list, p_end_list, idx1_list, idx2_list = [], [], [], [], []
+    panel_body_ids = []
+    curr_node = 0
+    for b_id, b in enumerate(ge_bodies):
+        c, ps, pe, i1, i2 = _build_body_panels_numpy(b, curr_node)
+        colloc_list.append(c)
+        p_start_list.append(ps)
+        p_end_list.append(pe)
+        idx1_list.append(i1)
+        idx2_list.append(i2)
+        panel_body_ids.extend([b_id] * len(ps))
+        curr_node += len(b)
+
+    colloc_ge = np.vstack(colloc_list)
+    p_start_ge = np.vstack(p_start_list)
+    p_end_ge = np.vstack(p_end_list)
+    idx1_ge = np.concatenate(idx1_list)
+    idx2_ge = np.concatenate(idx2_list)
+    total_panels = len(p_start_ge)
+    n_unknowns = total_nodes + n_bodies
+
+    p_start_img = p_start_ge.copy()
+    p_start_img[:, 1] *= -1.0
+    p_end_img = p_end_ge.copy()
+    p_end_img[:, 1] *= -1.0
+
+    xi_r, eta_r, len_r, th_r = compute_panel_local_coordinates_numpy(colloc_ge, p_start_ge, p_end_ge)
+    eta_r_clean = np.where(np.abs(eta_r) < 1e-12, 0.0, eta_r)
+    th_r_unwrapped = np.unwrap(th_r.ravel())[np.newaxis, :]
+    psi1_r, psi2_r = linear_vortex_stream_influence(xi_r, eta_r_clean, len_r)
+
+    xi_i, eta_i, len_i, th_i = compute_panel_local_coordinates_numpy(colloc_ge, p_start_img, p_end_img)
+    eta_i_clean = np.where(np.abs(eta_i) < 1e-12, 0.0, eta_i)
+    th_i_unwrapped = np.unwrap(th_i.ravel())[np.newaxis, :]
+    psi1_i, psi2_i = linear_vortex_stream_influence(xi_i, eta_i_clean, len_i)
+
+    A_ge = np.zeros((n_unknowns, n_unknowns), dtype=np.float64)
+    np.add.at(A_ge[:total_nodes, :total_nodes], (slice(None), idx1_ge), psi1_r - psi1_i)
+    np.add.at(A_ge[:total_nodes, :total_nodes], (slice(None), idx2_ge), psi2_r - psi2_i)
+
+    for b_id, (n_start, n_end) in enumerate(body_node_ranges):
+        A_ge[n_start:n_end, total_nodes + b_id] = -1.0
+        kutta_row = total_nodes + b_id
+        A_ge[kutta_row, n_start] = 1.0
+        A_ge[kutta_row, n_end - 1] = 1.0
+
+    rhs_ge = np.zeros(n_unknowns, dtype=np.float64)
+    rhs_ge[:total_nodes] = -colloc_ge[:, 1]
+
+    lu, piv = scipy.linalg.lu_factor(A_ge)
+    sol_ge = scipy.linalg.lu_solve((lu, piv), rhs_ge)
+    ue_inv = sol_ge[:total_nodes]
+
+    psi_s_r = source_panel_stream_influence(xi_r, eta_r_clean, len_r, th_r_unwrapped)
+    psi_s_i = source_panel_stream_influence(xi_i, eta_i_clean, len_i, th_i_unwrapped)
+    rhs_ge_S = np.zeros((n_unknowns, total_panels), dtype=np.float64)
+    rhs_ge_S[:total_nodes, :] = -(psi_s_r + psi_s_i)
+    sol_S = scipy.linalg.lu_solve((lu, piv), rhs_ge_S)
+    D = sol_S[:total_nodes, :]
+
+    info = {
+        "colloc": colloc_ge,
+        "p_start": p_start_ge,
+        "p_end": p_end_ge,
+        "p_len": len_r.ravel(),
+        "p_th": th_r.ravel(),
+        "idx1": idx1_ge,
+        "idx2": idx2_ge,
+        "chord_ref": chord_ref,
+        "pivot": pivot,
+        "body_node_ranges": body_node_ranges,
+        "panel_body_ids": panel_body_ids,
+        "height": height,
+    }
+    return D, ue_inv, info
+
+
 def _solve_numpy(
     bodies: list[np.ndarray],
     alphas: np.ndarray,
