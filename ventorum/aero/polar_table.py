@@ -24,24 +24,29 @@ check and never by type test. Without the hook the builder calls
 ``source.polar`` once per pair, in parallel threads unless
 ``workers=1``.
 
-Future height axis: ground effect is not an axis yet because XFOIL has
-no ground effect model. The in-house 2D solver will add a height axis
-``h`` [m] (height of the section above the ground) to these tables.
-That change extends the stored arrays to four dimensions
-(n_Re, n_flap, n_h, n_alpha) and adds the height to the interpolation,
-the coverage report and the stored file. No placeholder code is kept
-for it here.
+Height axis: the in-house 2D solver adds an optional height axis
+``h_over_c`` [-] (height of the section above the ground in chords)
+to these tables. When set, stored arrays have four dimensions
+(n_Re, n_flap, n_h, n_alpha). The height axis uses linear
+interpolation in 1/h because the aerodynamic ground effect from
+image singularities scales roughly inversely with the ground height
+(Drela, 1989; Wieselsberger, 1921). Free-air tables keep their
+three-dimensional shape (n_Re, n_flap, n_alpha) for backward
+compatibility.
 
 Sources: Drela, M., 1989, XFOIL: An analysis and design system for low
 Reynolds number airfoils; Abbott, I. H. and Von Doenhoff, A. E., 1959,
-Theory of Wing Sections, Dover; bilinear interpolation on a rectangular
-grid follows the standard multidimensional interpolation described in
-Press, W. H. and others, Numerical Recipes, Cambridge University Press.
+Theory of Wing Sections, Dover; Wieselsberger, C., 1921, Wing resistance
+near the ground, NACA TM-77; bilinear and trilinear interpolation on a
+rectangular grid follows the standard multidimensional interpolation
+described in Press, W. H. and others, Numerical Recipes, Cambridge
+University Press.
 """
 
 from __future__ import annotations
 
 import concurrent.futures
+import inspect
 import json
 import operator
 from dataclasses import dataclass, field
@@ -72,7 +77,7 @@ def _as_sorted_axis(values: Sequence[float] | np.ndarray, name: str) -> np.ndarr
 
 @dataclass(slots=True)
 class PolarTable:
-    """Section polars tabulated over Reynolds number and flap deflection.
+    """Section polars tabulated over Reynolds number, flap deflection and height.
 
     Parameters
     ----------
@@ -86,18 +91,22 @@ class PolarTable:
         The order is kept as built.
     Cl, Cd, Cm : np.ndarray
         Lift, drag and pitching-moment coefficients [-], each of shape
-        (n_Re, n_flap, n_alpha). NaN marks a point where the source did
-        not converge.
+        (n_Re, n_flap, n_alpha) for free air or
+        (n_Re, n_flap, n_h, n_alpha) with a height axis. NaN marks a
+        point where the source did not converge.
     source_info : dict
         Provenance: source name, section, options and version.
     last_dropped : int
         Number of alpha points dropped by the last :meth:`at` call.
+    h_over_c : np.ndarray or None
+        Heights above ground in chords [-], strictly ascending,
+        shape (n_h,). None indicates free air.
 
     Notes
     -----
-    Ground height is not an axis yet. A future height axis will extend
-    the stored arrays with the section height above the ground [m];
-    see the module docstring.
+    The height axis uses linear interpolation in 1/h because the
+    aerodynamic ground effect from image singularities scales roughly
+    inversely with the ground height (Drela, 1989; Wieselsberger, 1921).
     """
 
     Re: np.ndarray
@@ -108,6 +117,7 @@ class PolarTable:
     Cm: np.ndarray
     source_info: dict[str, Any] = field(default_factory=dict)
     last_dropped: int = field(default=0, compare=False)
+    h_over_c: np.ndarray | None = field(default=None)
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "Re", _as_sorted_axis(self.Re, "Re"))
@@ -124,7 +134,15 @@ class PolarTable:
         if np.unique(alpha).size != alpha.size:
             raise ValueError("alpha_deg must hold unique values.")
         object.__setattr__(self, "alpha_deg", alpha)
-        shape = (self.Re.size, self.flap_deg.size, alpha.size)
+        if self.h_over_c is not None:
+            object.__setattr__(
+                self, "h_over_c", _as_sorted_axis(self.h_over_c, "h_over_c")
+            )
+            if np.any(self.h_over_c <= 0.0):
+                raise ValueError("h_over_c must hold positive values only.")
+            shape = (self.Re.size, self.flap_deg.size, self.h_over_c.size, alpha.size)
+        else:
+            shape = (self.Re.size, self.flap_deg.size, alpha.size)
         for name in ("Cl", "Cd", "Cm"):
             arr = np.asarray(getattr(self, name), dtype=float)
             if arr.shape != shape:
@@ -135,21 +153,27 @@ class PolarTable:
         object.__setattr__(self, "source_info", dict(self.source_info))
 
     def coverage(self) -> np.ndarray:
-        """Return the converged fraction of alpha points per (Re, flap).
+        """Return the converged fraction of alpha points.
 
         Returns
         -------
         np.ndarray
             Fraction of converged (non-NaN lift) alpha points [-],
-            shape (n_Re, n_flap).
+            shape (n_Re, n_flap) for free air or (n_Re, n_flap, n_h)
+            with a height axis.
         """
-        return np.mean(np.isfinite(self.Cl), axis=2)
+        return np.mean(np.isfinite(self.Cl), axis=-1)
 
-    def at(self, Re: float, flap_deg: float) -> TabulatedAirfoil:
-        """Interpolate the table at one Reynolds number and flap deflection.
+    def at(
+        self, Re: float, flap_deg: float, h_over_c: float | None = None
+    ) -> TabulatedAirfoil:
+        """Interpolate the table at one operating point.
 
         The interpolation is bilinear in log10(Re) and in flap
-        deflection at each angle of attack. An alpha point is dropped
+        deflection at each angle of attack for free air, and trilinear
+        with linear interpolation in 1/h when a height axis is present.
+        Ground influence scales roughly with 1/h. The interpolation in
+        height is therefore linear in 1/h. An alpha point is dropped
         when any table value used for it is NaN. The dropped count is
         stored in :attr:`last_dropped` and in the polar name.
 
@@ -160,6 +184,9 @@ class PolarTable:
         flap_deg : float
             Flap deflection [deg], positive down. Must lie inside the
             table range.
+        h_over_c : float or None
+            Height above ground in chords [-]. Required if the table
+            holds a height axis. Must be None for a free-air table.
 
         Returns
         -------
@@ -170,8 +197,9 @@ class PolarTable:
         Raises
         ------
         ValueError
-            If the query lies outside the table range. No extrapolation
-            is done.
+            If the query lies outside the table range, or if ``h_over_c``
+            is missing for a table with a height axis, or given for a
+            free-air table. No extrapolation is done.
         """
         query_re = float(Re)
         query_flap = float(flap_deg)
@@ -179,37 +207,91 @@ class PolarTable:
             raise ValueError("The query (Re, flap_deg) must be finite.")
         i_re, weight_re = _bracket(self.Re, query_re, "Re", use_log=True)
         j_flap, weight_flap = _bracket(self.flap_deg, query_flap, "flap_deg")
-        rows = (
-            (0, 0, i_re[0], j_flap[0]),
-            (0, 1, i_re[0], j_flap[1]),
-            (1, 0, i_re[1], j_flap[0]),
-            (1, 1, i_re[1], j_flap[1]),
-        )
-        used_rows = {
-            (di, dj)
-            for di, dj, _, _ in rows
-            if (di == 0 or weight_re > 0.0)
-            and (dj == 0 or weight_flap > 0.0)
-            and (di == 1 or weight_re < 1.0)
-            and (dj == 1 or weight_flap < 1.0)
-        }
-        ok = np.ones(self.alpha_deg.size, dtype=bool)
-        for di, dj, ii, jj in rows:
-            if (di, dj) not in used_rows:
-                continue
-            ok &= (
-                np.isfinite(self.Cl[ii, jj, :])
-                & np.isfinite(self.Cd[ii, jj, :])
-                & np.isfinite(self.Cm[ii, jj, :])
+
+        if self.h_over_c is None:
+            if h_over_c is not None:
+                raise ValueError(
+                    "This polar table has no height axis (free air only)."
+                )
+            rows = (
+                (0, 0, i_re[0], j_flap[0]),
+                (0, 1, i_re[0], j_flap[1]),
+                (1, 0, i_re[1], j_flap[0]),
+                (1, 1, i_re[1], j_flap[1]),
             )
-        cl = _bilinear(self.Cl, i_re, j_flap, weight_re, weight_flap)
-        cd = _bilinear(self.Cd, i_re, j_flap, weight_re, weight_flap)
-        cm = _bilinear(self.Cm, i_re, j_flap, weight_re, weight_flap)
+            used_rows = {
+                (di, dj)
+                for di, dj, _, _ in rows
+                if (di == 0 or weight_re > 0.0)
+                and (dj == 0 or weight_flap > 0.0)
+                and (di == 1 or weight_re < 1.0)
+                and (dj == 1 or weight_flap < 1.0)
+            }
+            ok = np.ones(self.alpha_deg.size, dtype=bool)
+            for di, dj, ii, jj in rows:
+                if (di, dj) not in used_rows:
+                    continue
+                ok &= (
+                    np.isfinite(self.Cl[ii, jj, :])
+                    & np.isfinite(self.Cd[ii, jj, :])
+                    & np.isfinite(self.Cm[ii, jj, :])
+                )
+            cl = _bilinear(self.Cl, i_re, j_flap, weight_re, weight_flap)
+            cd = _bilinear(self.Cd, i_re, j_flap, weight_re, weight_flap)
+            cm = _bilinear(self.Cm, i_re, j_flap, weight_re, weight_flap)
+            name_suffix = ""
+        else:
+            if h_over_c is None:
+                raise ValueError(
+                    "h_over_c is required for a polar table with a height axis."
+                )
+            query_h = float(h_over_c)
+            if not np.isfinite(query_h):
+                raise ValueError("The query h_over_c must be finite.")
+            k_h, weight_h = _bracket(
+                self.h_over_c, query_h, "h_over_c", use_inv=True
+            )
+            rows_3d = tuple(
+                (di, dj, dk, i_re[di], j_flap[dj], k_h[dk])
+                for di in (0, 1)
+                for dj in (0, 1)
+                for dk in (0, 1)
+            )
+            used_3d = {
+                (di, dj, dk)
+                for di, dj, dk, _, _, _ in rows_3d
+                if (di == 0 or weight_re > 0.0)
+                and (dj == 0 or weight_flap > 0.0)
+                and (dk == 0 or weight_h > 0.0)
+                and (di == 1 or weight_re < 1.0)
+                and (dj == 1 or weight_flap < 1.0)
+                and (dk == 1 or weight_h < 1.0)
+            }
+            ok = np.ones(self.alpha_deg.size, dtype=bool)
+            for di, dj, dk, ii, jj, kk in rows_3d:
+                if (di, dj, dk) not in used_3d:
+                    continue
+                ok &= (
+                    np.isfinite(self.Cl[ii, jj, kk, :])
+                    & np.isfinite(self.Cd[ii, jj, kk, :])
+                    & np.isfinite(self.Cm[ii, jj, kk, :])
+                )
+            cl = _trilinear(
+                self.Cl, i_re, j_flap, k_h, weight_re, weight_flap, weight_h
+            )
+            cd = _trilinear(
+                self.Cd, i_re, j_flap, k_h, weight_re, weight_flap, weight_h
+            )
+            cm = _trilinear(
+                self.Cm, i_re, j_flap, k_h, weight_re, weight_flap, weight_h
+            )
+            name_suffix = f", h={query_h:.6g}"
+
         keep = np.flatnonzero(ok)
         dropped = int(self.alpha_deg.size - keep.size)
         object.__setattr__(self, "last_dropped", dropped)
         name = (
-            f"table(Re={query_re:.6g}, flap={query_flap:.6g} deg, "
+            f"table(Re={query_re:.6g}, flap={query_flap:.6g} deg{name_suffix}, "
             f"{dropped} of {self.alpha_deg.size} alpha dropped)"
         )
         return TabulatedAirfoil(
@@ -246,16 +328,18 @@ class PolarTable:
                 "source_info must be JSON serialisable."
             ) from exc
         out = Path(path)
-        np.savez(
-            out,
-            Re=np.asarray(self.Re, dtype=float),
-            flap_deg=np.asarray(self.flap_deg, dtype=float),
-            alpha_deg=np.asarray(self.alpha_deg, dtype=float),
-            Cl=np.asarray(self.Cl, dtype=float),
-            Cd=np.asarray(self.Cd, dtype=float),
-            Cm=np.asarray(self.Cm, dtype=float),
-            source_info=np.asarray(info_text),
-        )
+        save_dict: dict[str, Any] = {
+            "Re": np.asarray(self.Re, dtype=float),
+            "flap_deg": np.asarray(self.flap_deg, dtype=float),
+            "alpha_deg": np.asarray(self.alpha_deg, dtype=float),
+            "Cl": np.asarray(self.Cl, dtype=float),
+            "Cd": np.asarray(self.Cd, dtype=float),
+            "Cm": np.asarray(self.Cm, dtype=float),
+            "source_info": np.asarray(info_text),
+        }
+        if self.h_over_c is not None:
+            save_dict["h_over_c"] = np.asarray(self.h_over_c, dtype=float)
+        np.savez(out, **save_dict)
         return out
 
     @classmethod
@@ -303,6 +387,11 @@ class PolarTable:
                 raise ValueError(
                     f"Polar table {path} has unreadable source_info."
                 ) from exc
+            h_over_c = (
+                np.asarray(stored["h_over_c"], dtype=float)
+                if "h_over_c" in keys
+                else None
+            )
             return cls(
                 Re=np.asarray(stored["Re"], dtype=float),
                 flap_deg=np.asarray(stored["flap_deg"], dtype=float),
@@ -311,11 +400,17 @@ class PolarTable:
                 Cd=np.asarray(stored["Cd"], dtype=float),
                 Cm=np.asarray(stored["Cm"], dtype=float),
                 source_info=info,
+                h_over_c=h_over_c,
             )
 
 
 def _bracket(
-    axis: np.ndarray, query: float, name: str, *, use_log: bool = False
+    axis: np.ndarray,
+    query: float,
+    name: str,
+    *,
+    use_log: bool = False,
+    use_inv: bool = False,
 ) -> tuple[tuple[int, int], float]:
     """Locate the cell of *axis* that holds *query* and its weight.
 
@@ -329,6 +424,8 @@ def _bracket(
         Axis name used in the error message.
     use_log : bool
         Interpolate in log10 of the axis (Reynolds number [-]).
+    use_inv : bool
+        Interpolate linearly in 1 / axis (ground height ratio [-]).
 
     Returns
     -------
@@ -351,6 +448,17 @@ def _bracket(
     query = min(max(query, lo), hi)
     if axis.size == 1:
         return (0, 0), 0.0
+    if use_inv:
+        upper = int(np.searchsorted(axis, query, side="right")) - 1
+        upper = min(max(upper, 0), axis.size - 2)
+        lower = upper
+        upper = lower + 1
+        inv_low = 1.0 / float(axis[lower])
+        inv_high = 1.0 / float(axis[upper])
+        inv_query = 1.0 / float(query)
+        span = inv_high - inv_low
+        weight = 0.0 if span == 0.0 else (inv_query - inv_low) / span
+        return (lower, upper), min(max(weight, 0.0), 1.0)
     if use_log:
         scaled = np.log10(axis)
         value = float(np.log10(query))
@@ -402,6 +510,71 @@ def _bilinear(
 
     low_re = blend(values[i_re[0], j_flap[0], :], values[i_re[0], j_flap[1], :], weight_flap)
     high_re = blend(values[i_re[1], j_flap[0], :], values[i_re[1], j_flap[1], :], weight_flap)
+    return blend(low_re, high_re, weight_re)
+
+
+def _trilinear(
+    values: np.ndarray,
+    i_re: tuple[int, int],
+    j_flap: tuple[int, int],
+    k_h: tuple[int, int],
+    weight_re: float,
+    weight_flap: float,
+    weight_h: float,
+) -> np.ndarray:
+    """Blend one table block across Reynolds, flap, and height.
+
+    Parameters
+    ----------
+    values : np.ndarray
+        Table array of shape (n_Re, n_flap, n_h, n_alpha) [-].
+    i_re : (int, int)
+        Lower and upper Reynolds indices.
+    j_flap : (int, int)
+        Lower and upper flap indices.
+    k_h : (int, int)
+        Lower and upper height indices.
+    weight_re, weight_flap, weight_h : float
+        Upper-node weights in [0, 1].
+
+    Returns
+    -------
+    np.ndarray
+        Blended values [-], shape (n_alpha,). A zero weight skips its
+        corner, so NaN in an unused corner never spreads.
+    """
+
+    def blend(low: np.ndarray, high: np.ndarray, weight: float) -> np.ndarray:
+        if weight <= 0.0:
+            return low
+        if weight >= 1.0:
+            return high
+        return (1.0 - weight) * low + weight * high
+
+    c00 = blend(
+        values[i_re[0], j_flap[0], k_h[0], :],
+        values[i_re[0], j_flap[0], k_h[1], :],
+        weight_h,
+    )
+    c01 = blend(
+        values[i_re[0], j_flap[1], k_h[0], :],
+        values[i_re[0], j_flap[1], k_h[1], :],
+        weight_h,
+    )
+    low_re = blend(c00, c01, weight_flap)
+
+    c10 = blend(
+        values[i_re[1], j_flap[0], k_h[0], :],
+        values[i_re[1], j_flap[0], k_h[1], :],
+        weight_h,
+    )
+    c11 = blend(
+        values[i_re[1], j_flap[1], k_h[0], :],
+        values[i_re[1], j_flap[1], k_h[1], :],
+        weight_h,
+    )
+    high_re = blend(c10, c11, weight_flap)
+
     return blend(low_re, high_re, weight_re)
 
 
@@ -502,6 +675,20 @@ def _place_on_grid(
     return cl, cd, cm
 
 
+def _source_supports_ground(source: Any) -> bool:
+    """Report whether *source* supports ground effect (height keyword)."""
+    if getattr(source, "supports_ground", False):
+        return True
+    polar_fn = getattr(source, "polar", None)
+    if not callable(polar_fn):
+        return False
+    try:
+        sig = inspect.signature(polar_fn)
+        return "height" in sig.parameters
+    except (TypeError, ValueError):
+        return False
+
+
 def build_polar_table(
     source: SectionPolarSource,
     section: str | np.ndarray,
@@ -510,16 +697,18 @@ def build_polar_table(
     flap_deg: Sequence[float] | np.ndarray = (0.0,),
     x_hinge: float | None = None,
     y_hinge: float = 0.5,
+    h_over_c: Sequence[float] | np.ndarray | None = None,
     workers: int | None = None,
 ) -> PolarTable:
-    """Build a polar table over Reynolds number and flap deflection.
+    """Build a polar table over Reynolds number, flap deflection and height.
 
-    One source call runs per (Re, flap) pair. A source that offers a
-    ``run_xfoil_batch`` hook runs its pairs through that hook (found by
-    feature check, never by type test). Other sources run through
-    ``source.polar``, in parallel threads unless ``workers=1``. A pair
-    that fails to converge becomes a NaN slice; any other error stops
-    the build.
+    One source call runs per grid point: (Re, flap) for free air or
+    (Re, flap, height) when a height axis is requested. A source that
+    offers a ``run_xfoil_batch`` hook runs its cases through that hook
+    (found by feature check, never by type test). Other sources run
+    through ``source.polar``, in parallel threads unless ``workers=1``.
+    A case that fails to converge becomes a NaN slice; any other error
+    stops the build.
 
     Parameters
     ----------
@@ -542,6 +731,9 @@ def build_polar_table(
         a nonzero deflection.
     y_hinge : float
         Hinge vertical position, fraction of chord [-].
+    h_over_c : sequence of float or None
+        Heights above ground in chords [-], strictly positive. None
+        builds a free-air table.
     workers : int or None
         Thread pool size for sources without a batch hook, or the
         worker count forwarded to the hook. None uses the pool
@@ -551,6 +743,12 @@ def build_polar_table(
     -------
     PolarTable
         The built table, with NaN where the source did not converge.
+
+    Raises
+    ------
+    ValueError
+        If ``h_over_c`` is requested but ``source`` does not support
+        ground effect.
     """
     res = np.atleast_1d(np.asarray(Re_values, dtype=float))
     if res.size == 0:
@@ -579,6 +777,18 @@ def build_polar_table(
         workers = operator.index(workers)
         if workers < 1:
             raise ValueError(f"workers must be at least 1, got {workers}.")
+
+    if h_over_c is not None:
+        if not _source_supports_ground(source):
+            raise ValueError(
+                f"Source {type(source).__name__} does not support ground effect."
+            )
+        h_sorted: np.ndarray | None = _as_sorted_axis(h_over_c, "h_over_c")
+        if np.any(h_sorted <= 0.0):
+            raise ValueError("h_over_c must hold positive values only.")
+    else:
+        h_sorted = None
+
     order_re = np.argsort(res, kind="stable")
     res = res[order_re]
     flap_sorted = np.sort(requested_flap)
@@ -588,31 +798,62 @@ def build_polar_table(
         tolerance_rad = float(np.radians(0.25 * step))
     else:
         tolerance_rad = 1e-6
-    pairs = [
-        (i_re, j_flap, float(re), float(flap))
-        for i_re, re in enumerate(res)
-        for j_flap, flap in enumerate(flap_sorted)
-    ]
+
+    if h_sorted is None:
+        grid_items = [
+            (i_re, j_flap, None, float(re), float(flap), None)
+            for i_re, re in enumerate(res)
+            for j_flap, flap in enumerate(flap_sorted)
+        ]
+    else:
+        grid_items = [
+            (i_re, j_flap, k_h, float(re), float(flap), float(h))
+            for i_re, re in enumerate(res)
+            for j_flap, flap in enumerate(flap_sorted)
+            for k_h, h in enumerate(h_sorted)
+        ]
     flaps = [
-        _flap_argument(flap, x_hinge, float(y_hinge)) for _, _, _, flap in pairs
+        _flap_argument(flap, x_hinge, float(y_hinge))
+        for _, _, _, _, flap, _ in grid_items
     ]
-    polars = _run_pairs(
-        source, section, requested_alpha, pairs, flaps, workers
+    polars = _run_cases(
+        source, section, requested_alpha, grid_items, flaps, workers
     )
-    n_re, n_flap, n_alpha = res.size, flap_sorted.size, requested_alpha.size
-    cl = np.full((n_re, n_flap, n_alpha), np.nan)
-    cd = np.full((n_re, n_flap, n_alpha), np.nan)
-    cm = np.full((n_re, n_flap, n_alpha), np.nan)
-    for (i_re, j_flap, _, _), polar in zip(pairs, polars):
-        row_cl, row_cd, row_cm = _place_on_grid(polar, alpha_rad, tolerance_rad)
-        cl[i_re, j_flap, :] = row_cl
-        cd[i_re, j_flap, :] = row_cd
-        cm[i_re, j_flap, :] = row_cm
+
+    if h_sorted is None:
+        n_re, n_flap, n_alpha = res.size, flap_sorted.size, requested_alpha.size
+        cl = np.full((n_re, n_flap, n_alpha), np.nan)
+        cd = np.full((n_re, n_flap, n_alpha), np.nan)
+        cm = np.full((n_re, n_flap, n_alpha), np.nan)
+        for (i_re, j_flap, _, _, _, _), polar in zip(grid_items, polars):
+            row_cl, row_cd, row_cm = _place_on_grid(polar, alpha_rad, tolerance_rad)
+            cl[i_re, j_flap, :] = row_cl
+            cd[i_re, j_flap, :] = row_cd
+            cm[i_re, j_flap, :] = row_cm
+    else:
+        n_re, n_flap, n_h, n_alpha = (
+            res.size,
+            flap_sorted.size,
+            h_sorted.size,
+            requested_alpha.size,
+        )
+        cl = np.full((n_re, n_flap, n_h, n_alpha), np.nan)
+        cd = np.full((n_re, n_flap, n_h, n_alpha), np.nan)
+        cm = np.full((n_re, n_flap, n_h, n_alpha), np.nan)
+        for (i_re, j_flap, k_h, _, _, _), polar in zip(grid_items, polars):
+            row_cl, row_cd, row_cm = _place_on_grid(polar, alpha_rad, tolerance_rad)
+            cl[i_re, j_flap, k_h, :] = row_cl
+            cd[i_re, j_flap, k_h, :] = row_cd
+            cm[i_re, j_flap, k_h, :] = row_cm
+
     version = getattr(source, "_version", None) or "unknown"
+    opts: dict[str, Any] = {"x_hinge": x_hinge, "y_hinge": float(y_hinge)}
+    if h_sorted is not None:
+        opts["h_over_c"] = [float(v) for v in h_sorted]
     info: dict[str, Any] = {
         "source": type(source).__name__,
         "section": section if isinstance(section, str) else "coordinates",
-        "options": {"x_hinge": x_hinge, "y_hinge": float(y_hinge)},
+        "options": opts,
         "version": version,
     }
     return PolarTable(
@@ -623,18 +864,19 @@ def build_polar_table(
         Cd=cd,
         Cm=cm,
         source_info=info,
+        h_over_c=h_sorted,
     )
 
 
-def _run_pairs(
+def _run_cases(
     source: SectionPolarSource,
     section: str | np.ndarray,
     requested_alpha: np.ndarray,
-    pairs: list[tuple[int, int, float, float]],
+    grid_items: list[tuple[int, int, int | None, float, float, float | None]],
     flaps: list[tuple[float, float, float] | None],
     workers: int | None,
 ) -> list[TabulatedAirfoil | None]:
-    """Run one source polar per (Re, flap) pair, in input order.
+    """Run one source polar per grid point, in input order.
 
     Parameters
     ----------
@@ -644,17 +886,17 @@ def _run_pairs(
         A NACA name or points (N, 2) in Selig order.
     requested_alpha : np.ndarray
         Requested angles of attack [deg].
-    pairs : list
-        One (Re index, flap index, Re [-], flap [deg]) tuple per pair.
+    grid_items : list
+        Tuples of (i_re, j_flap, k_h, re, flap, height).
     flaps : list
-        One source flap tuple (or None) per pair.
+        One source flap tuple (or None) per case.
     workers : int or None
         Thread pool size, or the count forwarded to the batch hook.
 
     Returns
     -------
     list
-        One TabulatedAirfoil per pair, or None for a pair that did not
+        One TabulatedAirfoil per case, or None for a case that did not
         converge. Any other error propagates.
     """
     hook = getattr(source, "run_xfoil_batch", None)
@@ -665,24 +907,29 @@ def _run_pairs(
                 "Re": re,
                 "alphas_deg": [float(a) for a in requested_alpha],
                 "flap": flap,
+                **({} if h is None else {"height": h}),
             }
-            for (_, _, re, _), flap in zip(pairs, flaps)
+            for (_, _, _, re, _, h), flap in zip(grid_items, flaps)
         ]
         results = hook(cases, workers)
         return [_checked_item(item) for item in results]
 
-    def run_one(args: tuple[float, tuple[float, float, float] | None]):
-        re, flap = args
+    def run_one(args: tuple[float, tuple[float, float, float] | None, float | None]):
+        re, flap, h = args
         try:
+            if h is None:
+                return source.polar(
+                    section, re, requested_alpha, flap=flap
+                )
             return source.polar(
-                section, re, requested_alpha, flap=flap
+                section, re, requested_alpha, flap=flap, height=h
             )
         except RuntimeError as exc:
             if _source_failed_as_gap(exc):
                 return None
             raise
 
-    jobs = [(re, flap) for (_, _, re, _), flap in zip(pairs, flaps)]
+    jobs = [(re, flap, h) for (_, _, _, re, _, h), flap in zip(grid_items, flaps)]
     if workers == 1:
         return [run_one(job) for job in jobs]
     with concurrent.futures.ThreadPoolExecutor(

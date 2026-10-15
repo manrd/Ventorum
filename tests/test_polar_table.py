@@ -426,3 +426,274 @@ def test_xfoil_table_covers_range_and_shows_flap_and_reynolds_effects():
     cd_low = table.at(5e5, 0.0).Cd(np.radians(2.0))
     cd_high = table.at(1e6, 0.0).Cd(np.radians(2.0))
     assert float(cd_low) > float(cd_high)
+
+
+class _AnalyticGroundSource(_AnalyticSource):
+    """Analytic polar source supporting height with linear 1/h effect."""
+
+    @staticmethod
+    def _coeffs(Re, flap_deg, alpha_deg, height=None):
+        cl, cd, cm = _AnalyticSource._coeffs(Re, flap_deg, alpha_deg)
+        if height is not None:
+            inv_h = 1.0 / float(height)
+            cl = cl + 0.05 * inv_h
+            cd = cd + 0.005 * inv_h
+            cm = cm - 0.01 * inv_h
+        return cl, cd, cm
+
+    def _make_polar(self, Re, flap_deg, alphas_deg, height=None):
+        key = (float(Re), float(flap_deg))
+        if key in self.raise_for:
+            raise self.raise_for[key]
+        alphas = np.asarray(list(alphas_deg), dtype=float)
+        cl, cd, cm = self._coeffs(Re, flap_deg, alphas, height=height)
+        for bad in self.drop.get(key, []):
+            hit = np.flatnonzero(np.isclose(alphas, float(bad)))
+            cl[hit] = np.nan
+            cd[hit] = np.nan
+            cm[hit] = np.nan
+        h_str = f" h={height:g}" if height is not None else ""
+        return TabulatedAirfoil(
+            name=f"fake Re={Re:g} flap={flap_deg:g}{h_str}",
+            alpha=np.radians(alphas),
+            Cl_data=np.asarray(cl, dtype=float),
+            Cd_data=np.asarray(cd, dtype=float),
+            Cm_data=None if self.no_cm else np.asarray(cm, dtype=float),
+            Re=float(Re),
+        )
+
+    def polar(
+        self,
+        section,
+        Re,
+        alphas_deg,
+        *,
+        mach=0.0,
+        flap=None,
+        height=None,
+        **options,
+    ):
+        flap_deg = 0.0 if flap is None else float(flap[2])
+        self.calls.append(
+            {
+                "Re": float(Re),
+                "flap_deg": flap_deg,
+                "flap": flap,
+                "height": height,
+            }
+        )
+        return self._make_polar(
+            float(Re), flap_deg, alphas_deg, height=height
+        )
+
+    def run_xfoil_batch(self, cases, workers=None):
+        """Batch hook forwarding height."""
+        self.hook_workers.append(workers)
+        out = []
+        for case in cases:
+            flap = case.get("flap")
+            flap_deg = 0.0 if flap is None else float(flap[2])
+            height = case.get("height")
+            self.calls.append(
+                {
+                    "Re": float(case["Re"]),
+                    "flap_deg": flap_deg,
+                    "flap": flap,
+                    "height": height,
+                }
+            )
+            key = (float(case["Re"]), flap_deg)
+            if key in self.raise_for:
+                out.append(self.raise_for[key])
+                continue
+            out.append(
+                self._make_polar(
+                    case["Re"], flap_deg, case["alphas_deg"], height=height
+                )
+            )
+        return out
+
+
+def test_ground_table_shapes_coverage_and_interpolation():
+    source = _AnalyticGroundSource()
+    alphas = list(range(-2, 3))
+    table = build_polar_table(
+        source,
+        "naca 2412",
+        [5e5, 1e6],
+        alphas,
+        flap_deg=[0.0, 10.0],
+        x_hinge=0.75,
+        h_over_c=[0.2, 0.5, 1e3],
+        workers=1,
+    )
+    assert table.h_over_c is not None
+    assert np.allclose(table.h_over_c, [0.2, 0.5, 1e3])
+    assert table.Cl.shape == (2, 2, 3, 5)
+    assert table.Cd.shape == (2, 2, 3, 5)
+    assert table.Cm.shape == (2, 2, 3, 5)
+
+    cov = table.coverage()
+    assert cov.shape == (2, 2, 3)
+    assert np.all(cov == 1.0)
+
+    for re in (5e5, 1e6):
+        for flap in (0.0, 10.0):
+            for h in (0.2, 0.5, 1e3):
+                polar = table.at(re, flap, h_over_c=h)
+                for deg in (-2.0, 0.0, 2.0):
+                    cl_e, cd_e, cm_e = _AnalyticGroundSource._coeffs(
+                        re, flap, [deg], height=h
+                    )
+                    assert polar.Cl(np.radians(deg)) == pytest.approx(
+                        float(cl_e[0]), rel=1e-12
+                    )
+                    assert polar.Cd(np.radians(deg)) == pytest.approx(
+                        float(cd_e[0]), rel=1e-12
+                    )
+                    assert polar.Cm(np.radians(deg)) == pytest.approx(
+                        float(cm_e[0]), rel=1e-12
+                    )
+
+    h_mid = 0.3
+    polar_interp = table.at(5e5, 0.0, h_over_c=h_mid)
+    cl_mid, cd_mid, cm_mid = _AnalyticGroundSource._coeffs(
+        5e5, 0.0, [0.0], height=h_mid
+    )
+    assert polar_interp.Cl(0.0) == pytest.approx(float(cl_mid[0]), rel=1e-12)
+    assert polar_interp.Cd(0.0) == pytest.approx(float(cd_mid[0]), rel=1e-12)
+    assert polar_interp.Cm(0.0) == pytest.approx(float(cm_mid[0]), rel=1e-12)
+
+    free_source = _AnalyticSource()
+    free_table = build_polar_table(
+        free_source,
+        "naca 2412",
+        [5e5, 1e6],
+        alphas,
+        flap_deg=[0.0, 10.0],
+        x_hinge=0.75,
+        workers=1,
+    )
+    polar_g_inf = table.at(1e6, 0.0, h_over_c=1e3)
+    polar_free = free_table.at(1e6, 0.0)
+    for deg in alphas:
+        cl_g = polar_g_inf.Cl(np.radians(deg))
+        cl_f = polar_free.Cl(np.radians(deg))
+        assert abs(cl_g - cl_f) < 1e-3
+
+
+def test_build_polar_table_rejects_source_without_ground_support():
+    source = _AnalyticSource()
+    with pytest.raises(ValueError, match="does not support ground effect"):
+        build_polar_table(
+            source,
+            "naca 2412",
+            [5e5, 1e6],
+            [-2, 0, 2],
+            h_over_c=[0.2, 0.5],
+            workers=1,
+        )
+
+
+def test_polar_table_at_validates_h_over_c():
+    source_free = _AnalyticSource()
+    table_free = _std_table(source=source_free, workers=1)
+    with pytest.raises(ValueError, match="no height axis"):
+        table_free.at(1e6, 0.0, h_over_c=0.5)
+
+    source_g = _AnalyticGroundSource()
+    table_g = build_polar_table(
+        source_g,
+        "naca 2412",
+        [5e5, 1e6],
+        [-2, 0, 2],
+        flap_deg=[0.0, 10.0],
+        x_hinge=0.75,
+        h_over_c=[0.2, 0.5],
+        workers=1,
+    )
+    with pytest.raises(ValueError, match="h_over_c is required"):
+        table_g.at(1e6, 0.0)
+
+    with pytest.raises(ValueError, match="outside the table range"):
+        table_g.at(1e6, 0.0, h_over_c=0.1)
+    with pytest.raises(ValueError, match="outside the table range"):
+        table_g.at(1e6, 0.0, h_over_c=0.8)
+
+
+def test_polar_table_npz_roundtrip_and_backward_compatibility(tmp_path):
+    table_free = _std_table(workers=1)
+    path_free = tmp_path / "free.npz"
+    table_free.to_npz(path_free)
+    loaded_free = PolarTable.from_npz(path_free)
+    assert loaded_free.h_over_c is None
+    assert loaded_free.Cl.ndim == 3
+    assert loaded_free.Cd.ndim == 3
+    assert loaded_free.Cm.ndim == 3
+    assert loaded_free.at(1e6, 0.0).Cl(0.0) == pytest.approx(
+        table_free.at(1e6, 0.0).Cl(0.0)
+    )
+
+    source_g = _AnalyticGroundSource()
+    table_g = build_polar_table(
+        source_g,
+        "naca 2412",
+        [5e5, 1e6],
+        [-2, 0, 2],
+        flap_deg=[0.0, 10.0],
+        x_hinge=0.75,
+        h_over_c=[0.2, 0.5, 1.0],
+        workers=1,
+    )
+    path_g = tmp_path / "ground.npz"
+    table_g.to_npz(path_g)
+    loaded_g = PolarTable.from_npz(path_g)
+    assert loaded_g.h_over_c is not None
+    assert np.allclose(loaded_g.h_over_c, [0.2, 0.5, 1.0])
+    assert loaded_g.Cl.shape == (2, 2, 3, 3)
+    assert np.allclose(loaded_g.Cl, table_g.Cl)
+    assert np.allclose(loaded_g.Cd, table_g.Cd)
+    assert np.allclose(loaded_g.Cm, table_g.Cm)
+    assert loaded_g.at(5e5, 0.0, h_over_c=0.3).Cl(0.0) == pytest.approx(
+        table_g.at(5e5, 0.0, h_over_c=0.3).Cl(0.0)
+    )
+
+
+def test_table_rejects_bad_ground_axes():
+    good = {
+        "Re": np.array([5e5, 1e6]),
+        "flap_deg": np.array([0.0, 10.0]),
+        "alpha_deg": np.array([-2.0, 0.0, 2.0]),
+    }
+    zeros_4d = np.zeros((2, 2, 2, 3))
+    with pytest.raises(ValueError, match="ascending"):
+        PolarTable(
+            Re=good["Re"],
+            flap_deg=good["flap_deg"],
+            h_over_c=np.array([0.5, 0.2]),
+            alpha_deg=good["alpha_deg"],
+            Cl=zeros_4d,
+            Cd=zeros_4d,
+            Cm=zeros_4d,
+        )
+    with pytest.raises(ValueError, match="positive"):
+        PolarTable(
+            Re=good["Re"],
+            flap_deg=good["flap_deg"],
+            h_over_c=np.array([0.0, 0.5]),
+            alpha_deg=good["alpha_deg"],
+            Cl=zeros_4d,
+            Cd=zeros_4d,
+            Cm=zeros_4d,
+        )
+    with pytest.raises(ValueError, match="shape"):
+        PolarTable(
+            Re=good["Re"],
+            flap_deg=good["flap_deg"],
+            h_over_c=np.array([0.2, 0.5]),
+            alpha_deg=good["alpha_deg"],
+            Cl=np.zeros((2, 2, 3)),
+            Cd=np.zeros((2, 2, 3)),
+            Cm=np.zeros((2, 2, 3)),
+        )
+
