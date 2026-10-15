@@ -1,0 +1,143 @@
+---
+orphan: true
+---
+
+# Ventorum-3DP Influence Kernels
+
+This document gives the mathematical formulation, sign conventions, and asymptotic rules for the constant-strength source and doublet quadrilateral panel kernels of Ventorum-3DP.
+
+## Overview
+
+Ventorum-3DP implements a low-order potential flow panel method with an internal Dirichlet boundary condition. The flow field is represented by singularity distributions of constant source strength $\sigma$ and constant doublet strength $\mu$ distributed over flat polygonal panels.
+
+Each panel is specified by four ordered vertices $\mathbf{p}_1, \mathbf{p}_2, \mathbf{p}_3, \mathbf{p}_4$ with coordinates in meters [m]. Triangular panels are represented as quadrilaterals with the fourth vertex equal to the third vertex ($\mathbf{p}_4 = \mathbf{p}_3$).
+
+## Panel Geometry and Coordinate Systems
+
+### Unit Normal Vector
+
+The panel normal is determined from the diagonal vectors:
+
+$$\mathbf{d}_{13} = \mathbf{p}_3 - \mathbf{p}_1, \quad \mathbf{d}_{24} = \mathbf{p}_4 - \mathbf{p}_2$$
+
+The outward normal vector points into the fluid (out of the body) by the right-hand rule:
+
+$$\mathbf{n}_{\text{raw}} = \mathbf{d}_{13} \times \mathbf{d}_{24}$$
+
+$$\hat{\mathbf{n}} = \frac{\mathbf{n}_{\text{raw}}}{\|\mathbf{n}_{\text{raw}}\|}$$
+
+The projected panel area $A$ in square meters [m^2] satisfies:
+
+$$A = \frac{1}{2} \|\mathbf{n}_{\text{raw}}\|$$
+
+### Planar Projection
+
+Non-planar quadrilaterals are projected onto the mean plane through the corner average $\mathbf{p}_{\text{avg}} = \frac{1}{4} \sum_{k=1}^4 \mathbf{p}_k$ with normal $\hat{\mathbf{n}}$:
+
+$$\mathbf{p}'_k = \mathbf{p}_k - [(\mathbf{p}_k - \mathbf{p}_{\text{avg}}) \cdot \hat{\mathbf{n}}] \hat{\mathbf{n}}$$
+
+The panel centroid $\mathbf{p}_0$ is the area centroid:
+* For quadrilaterals: $\mathbf{p}_0 = \frac{1}{4} \sum_{k=1}^4 \mathbf{p}'_k$.
+* For triangles ($\mathbf{p}_4 = \mathbf{p}_3$): $\mathbf{p}_0 = \frac{1}{3} (\mathbf{p}'_1 + \mathbf{p}'_2 + \mathbf{p}'_3)$.
+
+### Local Coordinate Frame
+
+An orthonormal local reference frame $(\hat{\mathbf{l}}, \hat{\mathbf{m}}, \hat{\mathbf{n}})$ is established on each panel:
+
+$$\hat{\mathbf{l}} = \frac{\mathbf{p}'_2 - \mathbf{p}'_1}{\|\mathbf{p}'_2 - \mathbf{p}'_1\|}, \quad \hat{\mathbf{m}} = \hat{\mathbf{n}} \times \hat{\mathbf{l}}$$
+
+For any target point $\mathbf{x} \in \mathbb{R}^3$, the local coordinates relative to the centroid are:
+
+$$x = (\mathbf{x} - \mathbf{p}_0) \cdot \hat{\mathbf{l}}, \quad y = (\mathbf{x} - \mathbf{p}_0) \cdot \hat{\mathbf{m}}, \quad z = (\mathbf{x} - \mathbf{p}_0) \cdot \hat{\mathbf{n}}$$
+
+Corner positions in the local frame are denoted by $(x_k, y_k, 0)$ for $k = 1, \dots, 4$.
+
+The distance from the target point to corner $k$ is:
+
+$$r_k = \sqrt{(x - x_k)^2 + (y - y_k)^2 + z^2}$$
+
+For each edge $k$ from $(x_k, y_k)$ to $(x_{k+1}, y_{k+1})$ with length $d_k = \sqrt{(x_{k+1} - x_k)^2 + (y_{k+1} - y_k)^2}$, the in-plane perpendicular distance is:
+
+$$r_{\perp, k} = \frac{(x - x_k)(y_{k+1} - y_k) - (y - y_k)(x_{k+1} - x_k)}{d_k}$$
+
+The edge logarithmic integral is:
+
+$$L_k = \ln\left( \frac{r_k + r_{k+1} + d_k}{r_k + r_{k+1} - d_k} \right)$$
+
+When the target point lies on the edge segment ($r_k + r_{k+1} - d_k \le 0$), $L_k = 0$.
+
+## Sign Conventions
+
+1. Source potential: A unit point source produces potential $\Phi_S = -\frac{1}{4 \pi r}$ in the far field.
+2. Doublet potential: A unit doublet oriented along $+\hat{\mathbf{n}}$ produces far-field potential $\Phi_D = -\frac{A (\mathbf{r} \cdot \hat{\mathbf{n}})}{4 \pi r^3}$.
+3. Discontinuity across the panel:
+   * Approaching the panel from the fluid side ($z \to 0^+$), $\Phi_D \to -1/2$.
+   * Approaching the panel from the body side ($z \to 0^-$), $\Phi_D \to +1/2$.
+   * Total potential jump: $\Phi_D^+ - \Phi_D^- = -1$.
+4. Boundary condition limit: When evaluating self-influence at the panel centroid on the panel plane ($z = 0$), the value is taken as the limit from the body (interior) side, giving $+1/2$. Outside the panel on the plane, the doublet potential is 0.
+5. Velocity definition: Fluid velocity is the negative gradient of potential:
+
+$$\mathbf{V} = -\nabla \Phi$$
+
+## Exact Influence Kernels
+
+### Solid Angle
+
+The panel is decomposed into two triangles: $(0, 1, 2)$ and $(0, 2, 3)$. For each triangle with vertices $\mathbf{a}, \mathbf{b}, \mathbf{c}$ relative to the target point, the solid angle is computed with the van Oosterom and Strackee (1983) formula:
+
+$$\tan\left(\frac{\Omega_\Delta}{2}\right) = \frac{\mathbf{a} \cdot (\mathbf{b} \times \mathbf{c})}{\|\mathbf{a}\| \|\mathbf{b}\| \|\mathbf{c}\| + (\mathbf{a}\cdot\mathbf{b})\|\mathbf{c}\| + (\mathbf{a}\cdot\mathbf{c})\|\mathbf{b}\| + (\mathbf{b}\cdot\mathbf{c})\|\mathbf{a}\|}$$
+
+$$\Omega = \Omega_{\Delta, 1} + \Omega_{\Delta, 2}$$
+
+### Doublet Potential
+
+The doublet potential per unit strength is:
+
+$$\Phi_D = \frac{\Omega}{4 \pi}$$
+
+### Doublet Velocity
+
+By Stokes theorem, the velocity induced by a constant-strength doublet panel equals the velocity of an equivalent vortex ring of circulation $\Gamma = 1$ running along the panel perimeter:
+
+$$\mathbf{V}_D = -\mathbf{v}_{\text{ring}} = -\sum_{k=1}^4 \mathbf{v}_{\text{segment}}(\mathbf{p}'_k \to \mathbf{p}'_{k+1})$$
+
+Each straight vortex segment velocity is evaluated via the Biot-Savart law:
+
+$$\mathbf{v}_{\text{segment}} = \frac{1}{4 \pi} \frac{\mathbf{r}_1 \times \mathbf{r}_2}{\|\mathbf{r}_1 \times \mathbf{r}_2\|^2} \left[ \mathbf{r}_0 \cdot \left( \frac{\mathbf{r}_1}{\|\mathbf{r}_1\|} - \frac{\mathbf{r}_2}{\|\mathbf{r}_2\|} \right) \right]$$
+
+### Source Potential
+
+The source potential per unit strength is:
+
+$$\Phi_S = \frac{1}{4 \pi} \left[ \sum_{k=1}^4 r_{\perp, k} L_k - z \Omega \right]$$
+
+### Source Velocity
+
+In local panel coordinates:
+
+$$V_{S, x} = -\frac{1}{4 \pi} \sum_{k=1}^4 \frac{y_{k+1} - y_k}{d_k} L_k$$
+
+$$V_{S, y} = +\frac{1}{4 \pi} \sum_{k=1}^4 \frac{x_{k+1} - x_k}{d_k} L_k$$
+
+$$V_{S, z} = +\frac{1}{4 \pi} \Omega = -\Phi_D$$
+
+In global Cartesian coordinates:
+
+$$\mathbf{V}_S = V_{S, x} \hat{\mathbf{l}} + V_{S, y} \hat{\mathbf{m}} + V_{S, z} \hat{\mathbf{n}}$$
+
+## Far-Field Approximations
+
+When the distance $r = \|\mathbf{x} - \mathbf{p}_0\|$ exceeds `far_ratio` times the panel diameter $D = \max_{i < j} \|\mathbf{p}_i - \mathbf{p}_j\|$, point singularity expansions are used:
+
+$$\Phi_S^{\text{far}} = -\frac{A}{4 \pi r}, \quad \mathbf{V}_S^{\text{far}} = -\frac{A \mathbf{r}}{4 \pi r^3}$$
+
+$$\Phi_D^{\text{far}} = -\frac{A (\mathbf{r} \cdot \hat{\mathbf{n}})}{4 \pi r^3}, \quad \mathbf{V}_D^{\text{far}} = \frac{A}{4 \pi} \left[ \frac{\hat{\mathbf{n}}}{r^3} - \frac{3 (\mathbf{r} \cdot \hat{\mathbf{n}}) \mathbf{r}}{r^5} \right]$$
+
+Setting `far_ratio = np.inf` disables the approximation and uses exact integration everywhere.
+
+## References
+
+* J. L. Hess and A. M. O. Smith, "Calculation of Nonlifting Potential Flow About Arbitrary Three-Dimensional Bodies", Progress in Aeronautical Sciences 8 (1967) 1-138.
+* J. Katz and A. Plotkin, "Low-Speed Aerodynamics", 2nd ed., Cambridge University Press, 2001.
+* J. N. Newman, "Distributions of sources and normal dipoles over a quadrilateral panel", Journal of Engineering Mathematics 20 (1986) 113-126.
+* A. van Oosterom and J. Strackee, "The solid angle of a plane triangle", IEEE Transactions on Biomedical Engineering 30 (1983) 125-126.

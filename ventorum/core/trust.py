@@ -67,6 +67,24 @@ NEAR_FAR_RELATIVE = 0.05
 NEAR_FAR_FLOOR_CY = 0.001
 NEAR_FAR_FLOOR_CN = 0.0002
 
+#: Thresholds and penalties for the 3D panel method (Ventorum-3DP).
+#: These constants are engineering thresholds. To calibrate them later, compare
+#: mesh refinements, skew variations, and near/far-field drag comparisons against
+#: higher-order CFD or experimental wind-tunnel data.
+PANEL3D_MAX_ASPECT_RATIO = 20.0
+PANEL3D_MAX_SKEW = 0.85
+PANEL3D_MAX_WARP = 0.10
+PANEL3D_PENALTY_ASPECT_RATIO = 0.15
+PANEL3D_PENALTY_SKEW = 0.20
+PANEL3D_PENALTY_WARP = 0.20
+PANEL3D_PENALTY_WATERTIGHT = 0.35
+
+#: 3D panel near-field pressure drag against far-field Trefftz induced drag.
+#: Relative tolerance and absolute floor for the drag comparison.
+PANEL3D_DRAG_RELATIVE_TOL = 0.20
+PANEL3D_DRAG_ABSOLUTE_FLOOR = 0.002
+PANEL3D_PENALTY_DRAG_DISCREPANCY = 0.25
+
 
 def _negligible_side_force(CY: float | None, CY_farfield: float | None) -> bool:
     """Return True when the near-field and far-field side forces are below the CY floor."""
@@ -359,6 +377,8 @@ def evaluate_aerodynamic_trust(
     CY_farfield: float | None = None,
     Cn_stability: float | None = None,
     Cn_trefftz: float | None = None,
+    mesh_stats: dict | None = None,
+    CD_nearfield: float | None = None,
 ) -> TrustScore:
     """Evaluate the validity of a solution.
 
@@ -669,6 +689,46 @@ def evaluate_aerodynamic_trust(
 
     # 7. Near-field and far-field lateral values (a warning only, no penalty) -------------------
     warnings.extend(near_far_lateral_warnings(CY, CY_farfield, Cn_stability, Cn_trefftz))
+
+    # 8. 3D Panel method checks (mesh adequacy and near/far drag agreement) --------------------
+    if solver in ("panel3d", "3dp"):
+        if mesh_stats is not None:
+            mesh_pen = 0.0
+            max_ar = float(mesh_stats.get("max_aspect_ratio", 1.0))
+            if max_ar > PANEL3D_MAX_ASPECT_RATIO:
+                mesh_pen += PANEL3D_PENALTY_ASPECT_RATIO
+                warnings.append(
+                    f"Elongated panels: maximum panel aspect ratio reaches {max_ar:.1f} "
+                    f"(above {PANEL3D_MAX_ASPECT_RATIO:g})."
+                )
+            max_sk = float(mesh_stats.get("max_skew", 0.0))
+            if max_sk > PANEL3D_MAX_SKEW:
+                mesh_pen += PANEL3D_PENALTY_SKEW
+                warnings.append(
+                    f"Skewed mesh: maximum panel skew reaches {max_sk:.2f} "
+                    f"(above {PANEL3D_MAX_SKEW:g})."
+                )
+            max_wp = float(mesh_stats.get("max_warp", 0.0))
+            if max_wp > PANEL3D_MAX_WARP:
+                mesh_pen += PANEL3D_PENALTY_WARP
+                warnings.append(
+                    f"Warped panels: maximum panel warp reaches {max_wp:.3f} "
+                    f"(above {PANEL3D_MAX_WARP:g})."
+                )
+            if not bool(mesh_stats.get("watertight", True)):
+                mesh_pen += PANEL3D_PENALTY_WATERTIGHT
+                warnings.append("Panel mesh is not watertight.")
+            penalties["mesh_adequacy"] = mesh_pen
+
+        if CD_nearfield is not None and CDi is not None and _is_finite(CD_nearfield) and _is_finite(CDi):
+            drag_diff = abs(float(CD_nearfield) - float(CDi))
+            drag_ref = max(abs(float(CDi)), 1e-4)
+            if drag_diff > PANEL3D_DRAG_ABSOLUTE_FLOOR and (drag_diff / drag_ref) > PANEL3D_DRAG_RELATIVE_TOL:
+                penalties["drag_agreement"] = PANEL3D_PENALTY_DRAG_DISCREPANCY
+                warnings.append(
+                    f"Near-field pressure drag ({float(CD_nearfield):.4f}) and far-field Trefftz induced drag "
+                    f"({float(CDi):.4f}) differ by {drag_diff:.4f} (relative difference {drag_diff / drag_ref:.1%})."
+                )
 
     for msg in notes or ():
         if msg not in warnings:
