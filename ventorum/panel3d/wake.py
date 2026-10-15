@@ -71,8 +71,9 @@ def build_wake(
     *,
     wake_length: float | None = None,
     n_wake: int = 1,
+    wake_dir: np.ndarray | None = None,
 ) -> PanelWake:
-    """Build flat wake panels shed along the body +x axis from trailing edges.
+    """Build flat wake panels shed along a given direction from trailing edges.
 
     Parameters
     ----------
@@ -90,6 +91,9 @@ def build_wake(
         chord of the mesh.
     n_wake : int, default=1
         Number of panels along each wake strip. Must be at least 1.
+    wake_dir : numpy.ndarray or None, optional
+        Unit direction vector along which wake panels extend. If None,
+        defaults to the body +x axis ([1.0, 0.0, 0.0]).
 
     Returns
     -------
@@ -129,7 +133,14 @@ def build_wake(
             raise ValueError(f"wake_length must be positive, got {wake_len}.")
 
     x_stations = np.linspace(0.0, wake_len, n_wake + 1)
-    x_hat = np.array([1.0, 0.0, 0.0], dtype=float)
+    if wake_dir is None:
+        x_hat = np.array([1.0, 0.0, 0.0], dtype=float)
+    else:
+        d_arr = np.asarray(wake_dir, dtype=float).reshape(3)
+        d_norm = float(np.linalg.norm(d_arr))
+        if d_norm <= 1.0e-12:
+            raise ValueError(f"wake_dir must be a non-zero vector, got {wake_dir}.")
+        x_hat = d_arr / d_norm
 
     wake_panels_list = []
     strip_indices = []

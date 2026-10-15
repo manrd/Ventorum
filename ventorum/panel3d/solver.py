@@ -4,6 +4,8 @@
 This module provides the PanelSolver class and the PanelResult dataclass.
 It solves the potential flow around arbitrary three-dimensional bodies
 and lifting configurations with an internal Dirichlet boundary condition.
+It supports symmetry folding about the y = 0 plane on half meshes and
+ground effect using the method of images.
 
 Published sources
 -----------------
@@ -13,6 +15,8 @@ Published sources
 * Maskew, B., 1987, Program VSAERO Theory Document, NASA CR-4023.
 * Katz, J. and Plotkin, A., 2001, Low-Speed Aerodynamics, 2nd ed.,
   Cambridge University Press, section 9.4 and chapter 12.
+* Wieselsberger, C., 1921, Ueber den Fluegelwiderstand in der Naehe des Bodens,
+  Zeitschrift fuer Flugtechnik und Motorluftschiffahrt, Vol. 12, No. 10.
 
 Conventions
 -----------
@@ -35,11 +39,19 @@ import scipy.linalg
 
 from ventorum.aero.system import freestream_direction, rotation_velocity
 from ventorum.core.datatypes import FlightCondition
+from ventorum.panel3d.images import (
+    check_ground_clearance,
+    ground_plane_parameters,
+    mirror_panels_y,
+    reconstruct_full_mesh,
+    reflect_panels_plane,
+)
 from ventorum.panel3d.kernels import _precompute_geometry, doublet_potential, influence_matrices
 from ventorum.panel3d.mesh import PanelMesh
 from ventorum.panel3d.post import (
     build_edge_neighbourhood,
     compute_surface_gradient,
+    compute_surface_velocity_and_cp,
     compute_trefftz_induced_drag,
     integrate_forces_and_moments,
 )
@@ -125,12 +137,28 @@ def _standardize_panels(panels: np.ndarray, nodes: np.ndarray | None = None) -> 
     return pans
 
 
+def _add_wake_influence(
+    A: np.ndarray,
+    Cw: np.ndarray,
+    wake: PanelWake,
+    sign: float = 1.0,
+) -> np.ndarray:
+    """Add wake strip doublet influences to matrix A."""
+    for s, strip_p_idx in enumerate(wake.strip_panel_indices):
+        up_idx = wake.wake_up[s]
+        lo_idx = wake.wake_lo[s]
+        cs = np.sum(Cw[:, strip_p_idx], axis=1) * sign
+        A[:, up_idx] += cs
+        A[:, lo_idx] -= cs
+    return A
+
+
 class PanelSolver:
     """Three-dimensional source-doublet potential flow panel solver.
 
     This solver uses constant-strength planar source and doublet panels with an
-    internal Dirichlet boundary condition. It solves for six unit onset flows
-    once. Any flight condition is then evaluated by linear superposition.
+    internal Dirichlet boundary condition. It supports symmetry folding on half
+    meshes (PanelMesh.half=True) and ground effect using the method of images.
 
     Parameters
     ----------
@@ -168,50 +196,81 @@ class PanelSolver:
         self.mesh = mesh
         self.far_ratio = float(far_ratio)
 
-        # Standardize triangular panels
-        standardized_panels = _standardize_panels(mesh.panels, mesh.nodes)
-        body_verts = mesh.nodes[standardized_panels]
+        # Standardize triangular panels on given mesh
+        self.standardized_panels = _standardize_panels(mesh.panels, mesh.nodes)
+        self.body_verts = mesh.nodes[self.standardized_panels]
 
-        # Precompute body geometry
-        geom = _precompute_geometry(body_verts)
+        # Precompute body geometry on given mesh
+        geom = _precompute_geometry(self.body_verts)
         self.centroids = geom.centroid
         self.normals = geom.normal
         self.areas = geom.area
 
-        # Build downstream wake
+        # Build downstream wake on given mesh
         self.wake: PanelWake = build_wake(
             mesh.nodes,
-            standardized_panels,
+            self.standardized_panels,
             mesh.wake_edges,
             self.normals,
             wake_length=wake_length,
             n_wake=n_wake,
         )
 
-        # Build panel edge neighbourhood for least-squares surface gradient
-        self.neighbours = build_edge_neighbourhood(standardized_panels, mesh.wake_edges)
+        # Reconstruct full mesh for post-processing and reference geometry if half mesh
+        if mesh.half:
+            self._full_mesh = reconstruct_full_mesh(mesh)
+        else:
+            self._full_mesh = mesh
 
-        # Determine reference geometry and moment reference point
+        # Full mesh geometry and wake for global post-processing
+        self._standardized_full_panels = _standardize_panels(
+            self._full_mesh.panels, self._full_mesh.nodes
+        )
+        self._full_geom = _precompute_geometry(
+            self._full_mesh.nodes[self._standardized_full_panels]
+        )
+        self._full_wake = build_wake(
+            self._full_mesh.nodes,
+            self._standardized_full_panels,
+            self._full_mesh.wake_edges,
+            self._full_geom.normal,
+            wake_length=wake_length,
+            n_wake=n_wake,
+        )
+        self._full_neighbours = build_edge_neighbourhood(
+            self._standardized_full_panels, self._full_mesh.wake_edges
+        )
+
+        # Reference center
         if ref_point is None:
             self.ref_point = np.zeros(3, dtype=np.float64)
         else:
             self.ref_point = np.asarray(ref_point, dtype=np.float64).reshape(3)
 
+        # Reference geometry: estimated from full aircraft configuration
         if S_ref is not None:
             self.S_ref = float(S_ref)
         else:
-            s_proj = float(np.sum(np.maximum(0.0, self.normals[:, 2]) * self.areas))
+            s_proj = float(
+                np.sum(np.maximum(0.0, self._full_geom.normal[:, 2]) * self._full_geom.area)
+            )
             if s_proj > 1e-6:
                 self.S_ref = s_proj
             else:
-                y_span = float(np.max(mesh.nodes[:, 1]) - np.min(mesh.nodes[:, 1]))
-                x_chord = float(np.max(mesh.nodes[:, 0]) - np.min(mesh.nodes[:, 0]))
+                y_span = float(
+                    np.max(self._full_mesh.nodes[:, 1]) - np.min(self._full_mesh.nodes[:, 1])
+                )
+                x_chord = float(
+                    np.max(self._full_mesh.nodes[:, 0]) - np.min(self._full_mesh.nodes[:, 0])
+                )
                 self.S_ref = max(np.pi * 0.25 * y_span * x_chord, 1e-6)
 
         if b_ref is not None:
             self.b_ref = float(b_ref)
         else:
-            y_span = float(np.max(mesh.nodes[:, 1]) - np.min(mesh.nodes[:, 1]))
+            y_span = float(
+                np.max(self._full_mesh.nodes[:, 1]) - np.min(self._full_mesh.nodes[:, 1])
+            )
             self.b_ref = max(y_span, 1e-3)
 
         if c_ref is not None:
@@ -219,86 +278,127 @@ class PanelSolver:
         else:
             self.c_ref = self.S_ref / self.b_ref
 
-        # Assemble aerodynamic influence matrices B and C
-        B, C = influence_matrices(self.centroids, body_verts, far_ratio=self.far_ratio)
-        self.B = B
-
-        # Incorporate wake doublet influence into matrix A via Morino Kutta condition
-        A = np.array(C, copy=True)
-        if len(self.wake.panels) > 0:
-            c_wake = doublet_potential(self.centroids, self.wake.panels, far_ratio=self.far_ratio)
-            for s, strip_p_idx in enumerate(self.wake.strip_panel_indices):
-                up_idx = self.wake.wake_up[s]
-                lo_idx = self.wake.wake_lo[s]
-                c_strip = np.sum(c_wake[:, strip_p_idx], axis=1)
-                A[:, up_idx] += c_strip
-                A[:, lo_idx] -= c_strip
-        self.A = A
-
-        # LU-factorize matrix A once for all solves
-        self._lu, self._piv = scipy.linalg.lu_factor(self.A)
-
-        # Solve six unit right-hand sides: u, v, w, p, q, r
+        # Unit onset flow definitions: 6 onsets (u, v, w, p, q, r)
         n_panels = len(self.centroids)
         r_rel = self.centroids - self.ref_point[None, :]
         rx = r_rel[:, 0]
         ry = r_rel[:, 1]
         rz = r_rel[:, 2]
 
-        # Unit onset flow velocity fields: shape (6, Np, 3)
         v_unit = np.zeros((6, n_panels, 3), dtype=np.float64)
-        # 0: u = 1
         v_unit[0, :, 0] = 1.0
-        # 1: v = 1
         v_unit[1, :, 1] = 1.0
-        # 2: w = 1
         v_unit[2, :, 2] = 1.0
-        # 3: p = 1: omega = [-1, 0, 0], -omega x r = [0, -rz, ry]
         v_unit[3, :, 1] = -rz
         v_unit[3, :, 2] = ry
-        # 4: q = 1: omega = [0, 1, 0], -omega x r = [-rz, 0, rx]
         v_unit[4, :, 0] = -rz
         v_unit[4, :, 2] = rx
-        # 5: r = 1: omega = [0, 0, -1], -omega x r = [-ry, rx, 0]
         v_unit[5, :, 0] = -ry
         v_unit[5, :, 1] = rx
+        self._v_unit = v_unit
 
-        # Source strengths for unit onsets: sigma_j = -n_j . V_onset
+        # Unit onset source strengths on body panels: sigma_j = -n_j . V_onset
         self._unit_sigma = -np.sum(self.normals[None, :, :] * v_unit, axis=-1).T
 
-        # Solve for unit doublet strengths: A @ mu = -B @ sigma
-        rhs = -self.B @ self._unit_sigma
-        self._unit_mu = scipy.linalg.lu_solve((self._lu, self._piv), rhs)
-
-        # Precompute unit surface velocities
-        self._unit_v_surf = np.zeros((n_panels, 6, 3), dtype=np.float64)
-        for k in range(6):
-            grad_k = compute_surface_gradient(
-                self.centroids, self.normals, self._unit_mu[:, k], self.neighbours
+        # Influence matrices for free air
+        if not self.mesh.half:
+            # Full mesh solve
+            B, C = influence_matrices(self.centroids, self.body_verts, far_ratio=self.far_ratio)
+            self.B = B
+            A = np.array(C, copy=True)
+            if len(self.wake.panels) > 0:
+                Cw = doublet_potential(self.centroids, self.wake.panels, far_ratio=self.far_ratio)
+                _add_wake_influence(A, Cw, self.wake, sign=1.0)
+            self.A = A
+            self._free_lu, self._free_piv = scipy.linalg.lu_factor(self.A)
+            self._free_unit_mu = scipy.linalg.lu_solve(
+                (self._free_lu, self._free_piv), -self.B @ self._unit_sigma
             )
-            v_norm_k = np.sum(v_unit[k] * self.normals, axis=-1, keepdims=True)
-            v_tangent_k = v_unit[k] - v_norm_k * self.normals
-            self._unit_v_surf[:, k, :] = v_tangent_k - grad_k
+            self._free_unit_grad = self._compute_full_unit_gradients(self._free_unit_mu)
+        else:
+            # Half mesh with symmetry folding
+            self._body_verts_m = mirror_panels_y(self.body_verts)
+            B_self, C_self = influence_matrices(
+                self.centroids, self.body_verts, far_ratio=self.far_ratio
+            )
+            B_m, C_m = influence_matrices(
+                self.centroids, self._body_verts_m, far_ratio=self.far_ratio
+            )
+
+            A_self = np.array(C_self, copy=True)
+            A_m = np.array(C_m, copy=True)
+            if len(self.wake.panels) > 0:
+                self._wake_panels_m = mirror_panels_y(self.wake.panels)
+                Cw_self = doublet_potential(
+                    self.centroids, self.wake.panels, far_ratio=self.far_ratio
+                )
+                Cw_m = doublet_potential(
+                    self.centroids, self._wake_panels_m, far_ratio=self.far_ratio
+                )
+                _add_wake_influence(A_self, Cw_self, self.wake, sign=1.0)
+                _add_wake_influence(A_m, Cw_m, self.wake, sign=1.0)
+            else:
+                self._wake_panels_m = np.empty((0, 4, 3), dtype=float)
+
+            self._A_self = A_self
+            self._B_self = B_self
+            self._A_m = A_m
+            self._B_m = B_m
+
+            # Free-air factorizations (symmetric and antisymmetric)
+            A_sym = A_self + A_m
+            B_sym = B_self + B_m
+            A_asym = A_self - A_m
+            B_asym = B_self - B_m
+
+            self._free_lu_sym, self._free_piv_sym = scipy.linalg.lu_factor(A_sym)
+            self._free_lu_asym, self._free_piv_asym = scipy.linalg.lu_factor(A_asym)
+
+            unit_mu = np.zeros((n_panels, 6), dtype=np.float64)
+            for k in [0, 2, 4]:  # Symmetric: u, w, q
+                unit_mu[:, k] = scipy.linalg.lu_solve(
+                    (self._free_lu_sym, self._free_piv_sym), -B_sym @ self._unit_sigma[:, k]
+                )
+            for k in [1, 3, 5]:  # Asymmetric: v, p, r
+                unit_mu[:, k] = scipy.linalg.lu_solve(
+                    (self._free_lu_asym, self._free_piv_asym), -B_asym @ self._unit_sigma[:, k]
+                )
+            self._free_unit_mu = unit_mu
+            self._free_unit_grad = self._compute_full_unit_gradients(self._free_unit_mu)
+
+    def _compute_full_unit_gradients(self, unit_mu_half: np.ndarray) -> np.ndarray:
+        """Precompute surface gradient fields on the full mesh for the 6 unit onsets."""
+        n_full = len(self._full_geom.centroid)
+        unit_grad = np.zeros((n_full, 6, 3), dtype=np.float64)
+        if not self.mesh.half:
+            for k in range(6):
+                unit_grad[:, k, :] = compute_surface_gradient(
+                    self._full_geom.centroid,
+                    self._full_geom.normal,
+                    unit_mu_half[:, k],
+                    self._full_neighbours,
+                )
+        else:
+            # Reconstruct full mu for each unit onset
+            for k in range(6):
+                is_sym = k in (0, 2, 4)
+                mu_right = unit_mu_half[:, k]
+                mu_left = mu_right if is_sym else -mu_right
+                mu_full_k = np.concatenate([mu_right, mu_left])
+                unit_grad[:, k, :] = compute_surface_gradient(
+                    self._full_geom.centroid,
+                    self._full_geom.normal,
+                    mu_full_k,
+                    self._full_neighbours,
+                )
+        return unit_grad
 
     def _condition_velocity(
         self,
         condition: FlightCondition,
         points: np.ndarray,
     ) -> np.ndarray:
-        """Return local onset flow velocity at points for the condition.
-
-        Parameters
-        ----------
-        condition : FlightCondition
-            Flight condition.
-        points : numpy.ndarray
-            Coordinates of evaluation points with shape (M, 3) in m.
-
-        Returns
-        -------
-        numpy.ndarray
-            Local onset flow velocities with shape (M, 3) in m/s.
-        """
+        """Return local onset flow velocity at points for the condition."""
         alpha = float(condition.alpha)
         beta = float(condition.beta)
         v_inf = float(condition.V_inf)
@@ -309,6 +409,155 @@ class PanelSolver:
         if w_rot is not None:
             return v_trans + w_rot
         return np.broadcast_to(v_trans, points.shape)
+
+    def _factorize_ground_group(
+        self,
+        normal: np.ndarray,
+        offset: float,
+    ) -> tuple[tuple, np.ndarray]:
+        """Compute factorization and unit doublet strengths for a ground configuration."""
+        if not self.mesh.half:
+            body_verts_g = reflect_panels_plane(self.body_verts, normal, offset)
+            B_g, C_g = influence_matrices(
+                self.centroids, body_verts_g, far_ratio=self.far_ratio
+            )
+            A_g = np.array(C_g, copy=True)
+            if len(self.wake.panels) > 0:
+                wake_panels_g = reflect_panels_plane(self.wake.panels, normal, offset)
+                Cw_g = doublet_potential(
+                    self.centroids, wake_panels_g, far_ratio=self.far_ratio
+                )
+                _add_wake_influence(A_g, Cw_g, self.wake, sign=1.0)
+
+            A_tot = self.A + A_g
+            B_tot = self.B + B_g
+            lu, piv = scipy.linalg.lu_factor(A_tot)
+            unit_mu = scipy.linalg.lu_solve((lu, piv), -B_tot @ self._unit_sigma)
+            unit_grad = self._compute_full_unit_gradients(unit_mu)
+            return (lu, piv), unit_mu, unit_grad
+
+        # Half mesh: four-fold images
+        body_verts_g = reflect_panels_plane(self.body_verts, normal, offset)
+        body_verts_yg = reflect_panels_plane(self._body_verts_m, normal, offset)
+
+        B_g, C_g = influence_matrices(self.centroids, body_verts_g, far_ratio=self.far_ratio)
+        B_yg, C_yg = influence_matrices(
+            self.centroids, body_verts_yg, far_ratio=self.far_ratio
+        )
+
+        A_g = np.array(C_g, copy=True)
+        A_yg = np.array(C_yg, copy=True)
+        if len(self.wake.panels) > 0:
+            wake_panels_g = reflect_panels_plane(self.wake.panels, normal, offset)
+            wake_panels_yg = reflect_panels_plane(self._wake_panels_m, normal, offset)
+            Cw_g = doublet_potential(self.centroids, wake_panels_g, far_ratio=self.far_ratio)
+            Cw_yg = doublet_potential(
+                self.centroids, wake_panels_yg, far_ratio=self.far_ratio
+            )
+            _add_wake_influence(A_g, Cw_g, self.wake, sign=1.0)
+            _add_wake_influence(A_yg, Cw_yg, self.wake, sign=1.0)
+
+        A_sym = self._A_self + self._A_m + A_g + A_yg
+        B_sym = self._B_self + self._B_m + B_g + B_yg
+
+        A_asym = self._A_self - self._A_m + A_g - A_yg
+        B_asym = self._B_self - self._B_m + B_g - B_yg
+
+        lu_sym, piv_sym = scipy.linalg.lu_factor(A_sym)
+        lu_asym, piv_asym = scipy.linalg.lu_factor(A_asym)
+
+        n_panels = len(self.centroids)
+        unit_mu = np.zeros((n_panels, 6), dtype=np.float64)
+        for k in [0, 2, 4]:
+            unit_mu[:, k] = scipy.linalg.lu_solve(
+                (lu_sym, piv_sym), -B_sym @ self._unit_sigma[:, k]
+            )
+        for k in [1, 3, 5]:
+            unit_mu[:, k] = scipy.linalg.lu_solve(
+                (lu_asym, piv_asym), -B_asym @ self._unit_sigma[:, k]
+            )
+
+        unit_grad = self._compute_full_unit_gradients(unit_mu)
+        return (lu_sym, piv_sym, lu_asym, piv_asym), unit_mu, unit_grad
+
+    def _evaluate_result(
+        self,
+        condition: FlightCondition,
+        unit_mu: np.ndarray,
+        unit_grad: np.ndarray,
+    ) -> PanelResult:
+        """Evaluate aerodynamic coefficients and distributions for a condition."""
+        alpha = float(condition.alpha)
+        beta = float(condition.beta)
+        v_inf = float(condition.V_inf)
+        d = freestream_direction(alpha, beta)
+
+        u = v_inf * d[0]
+        v = v_inf * d[1]
+        w = v_inf * d[2]
+        p = float(getattr(condition, "p", 0.0))
+        q = float(getattr(condition, "q", 0.0))
+        r = float(getattr(condition, "r", 0.0))
+
+        coeffs = np.array([u, v, w, p, q, r], dtype=np.float64)
+        mu_body = unit_mu @ coeffs
+        sigma_body = self._unit_sigma @ coeffs
+
+        # Superpose gradient field on the full mesh
+        grad_full = np.einsum("k,nkd->nd", coeffs, unit_grad)
+        v_onset_full = self._condition_velocity(condition, self._full_geom.centroid)
+        v_surf_full, cp_full = compute_surface_velocity_and_cp(
+            v_onset_full, self._full_geom.normal, grad_full, v_inf
+        )
+
+        # Full mesh forces and moments
+        forces = integrate_forces_and_moments(
+            cp=cp_full,
+            areas=self._full_geom.area,
+            normals=self._full_geom.normal,
+            centroids=self._full_geom.centroid,
+            condition=condition,
+            S_ref=self.S_ref,
+            b_ref=self.b_ref,
+            c_ref=self.c_ref,
+            ref_point=self.ref_point,
+        )
+
+        # Trefftz plane induced drag on full wake
+        if not self.mesh.half:
+            mu_full = mu_body
+        else:
+            mu_sym = unit_mu[:, [0, 2, 4]] @ coeffs[[0, 2, 4]]
+            mu_asym = unit_mu[:, [1, 3, 5]] @ coeffs[[1, 3, 5]]
+            mu_left = mu_sym - mu_asym
+            mu_full = np.concatenate([mu_body, mu_left])
+
+        cdi_trefftz = compute_trefftz_induced_drag(
+            wake=self._full_wake,
+            mu=mu_full,
+            V_inf=v_inf,
+            rho=float(condition.rho),
+            S_ref=self.S_ref,
+        )
+
+        n_panels = len(self.centroids)
+        cp_out = cp_full[:n_panels]
+        v_surf_out = v_surf_full[:n_panels]
+
+        return PanelResult(
+            CL=forces["CL"],
+            CD_pressure=forces["CD_pressure"],
+            CDi_trefftz=cdi_trefftz,
+            CY=forces["CY"],
+            Cl=forces["Cl"],
+            Cm=forces["Cm"],
+            Cn=forces["Cn"],
+            cp=cp_out,
+            mu=mu_body,
+            sigma=sigma_body,
+            velocity=v_surf_out,
+            condition=condition,
+        )
 
     def solve(self, condition: FlightCondition) -> PanelResult:
         """Solve potential flow for a given flight condition.
@@ -323,71 +572,13 @@ class PanelSolver:
         PanelResult
             Forces, moments, pressure, doublet and source distributions.
         """
-        alpha = float(condition.alpha)
-        beta = float(condition.beta)
-        v_inf = float(condition.V_inf)
-        d = freestream_direction(alpha, beta)
-
-        u = v_inf * d[0]
-        v = v_inf * d[1]
-        w = v_inf * d[2]
-        p = float(getattr(condition, "p", 0.0))
-        q = float(getattr(condition, "q", 0.0))
-        r = float(getattr(condition, "r", 0.0))
-
-        # Linear superposition coefficients
-        coeffs = np.array([u, v, w, p, q, r], dtype=np.float64)
-
-        mu = self._unit_mu @ coeffs
-        sigma = self._unit_sigma @ coeffs
-        v_surf = np.einsum("k,nkd->nd", coeffs, self._unit_v_surf)
-
-        # Compute surface pressure coefficient
-        if v_inf > 1e-12:
-            speed_sq = np.sum(v_surf**2, axis=-1)
-            cp = 1.0 - speed_sq / (v_inf**2)
-        else:
-            cp = np.zeros(len(self.centroids), dtype=np.float64)
-
-        # Integrate forces and moments
-        forces = integrate_forces_and_moments(
-            cp=cp,
-            areas=self.areas,
-            normals=self.normals,
-            centroids=self.centroids,
-            condition=condition,
-            S_ref=self.S_ref,
-            b_ref=self.b_ref,
-            c_ref=self.c_ref,
-            ref_point=self.ref_point,
-        )
-
-        # Evaluate far-field Trefftz plane induced drag
-        cdi_trefftz = compute_trefftz_induced_drag(
-            wake=self.wake,
-            mu=mu,
-            V_inf=v_inf,
-            rho=float(condition.rho),
-            S_ref=self.S_ref,
-        )
-
-        return PanelResult(
-            CL=forces["CL"],
-            CD_pressure=forces["CD_pressure"],
-            CDi_trefftz=cdi_trefftz,
-            CY=forces["CY"],
-            Cl=forces["Cl"],
-            Cm=forces["Cm"],
-            Cn=forces["Cn"],
-            cp=cp,
-            mu=mu,
-            sigma=sigma,
-            velocity=v_surf,
-            condition=condition,
-        )
+        return self.solve_conditions([condition])[0]
 
     def solve_conditions(self, conditions: Sequence[FlightCondition]) -> list[PanelResult]:
         """Solve potential flow for multiple flight conditions.
+
+        In ground effect, conditions are grouped by (attitude, height) and
+        factorized once per group.
 
         Parameters
         ----------
@@ -399,4 +590,37 @@ class PanelSolver:
         list of PanelResult
             List of solution results corresponding to each condition.
         """
-        return [self.solve(cond) for cond in conditions]
+        if not conditions:
+            return []
+
+        # Validate clearances and build grouping keys
+        groups: dict[tuple, list[int]] = {}
+        for idx, cond in enumerate(conditions):
+            if cond.h is None:
+                key = ("free",)
+            else:
+                gp = ground_plane_parameters(cond, self.ref_point)
+                normal, offset = gp
+                check_ground_clearance(self._full_mesh.nodes, normal, offset)
+                a_round = round(float(cond.alpha), 11)
+                b_round = round(float(cond.beta), 11)
+                p_round = round(float(getattr(cond, "phi", 0.0)), 11)
+                h_round = round(float(cond.h), 11)
+                key = ("ground", a_round, b_round, p_round, h_round)
+            groups.setdefault(key, []).append(idx)
+
+        results: list[PanelResult | None] = [None] * len(conditions)
+
+        for key, indices in groups.items():
+            if key[0] == "free":
+                unit_mu = self._free_unit_mu
+                unit_grad = self._free_unit_grad
+            else:
+                first_cond = conditions[indices[0]]
+                normal, offset = ground_plane_parameters(first_cond, self.ref_point)
+                _, unit_mu, unit_grad = self._factorize_ground_group(normal, offset)
+
+            for idx in indices:
+                results[idx] = self._evaluate_result(conditions[idx], unit_mu, unit_grad)
+
+        return [r for r in results if r is not None]

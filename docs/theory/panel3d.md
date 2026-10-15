@@ -187,10 +187,84 @@ $$D_i = -\frac{1}{2} \rho_{\infty} \sum_{s=1}^{N_{\text{strips}}} \Gamma_s \, w_
 
 $$C_{Di, \text{trefftz}} = \frac{D_i}{q_{\infty} S_{\text{ref}}}$$
 
+## Symmetry Folding about y = 0
+
+When a configuration is symmetric about the x-z plane, the problem can be solved on a right-half mesh (`PanelMesh.half=True`). This divides the number of surface panels by two, matrix assembly work by four, and LU factorization work by eight.
+
+The solver computes two factorizations on the half mesh:
+1. Symmetric system: Unit onsets $u$, $w$, and $q$ produce symmetric normal velocity on the surface. Doublets and sources on the left-half mirror panels have equal strengths:
+
+$$\mu_{\text{mirror}} = +\mu, \quad \sigma_{\text{mirror}} = +\sigma$$
+
+The symmetric aerodynamic influence matrix and source matrix add the influence of the mirror panels:
+
+$$\mathbf{A}^{\text{sym}} = \mathbf{A}_{\text{self}} + \mathbf{A}_{\text{mirror}}, \quad \mathbf{B}^{\text{sym}} = \mathbf{B}_{\text{self}} + \mathbf{B}_{\text{mirror}}$$
+
+2. Antisymmetric system: Unit onsets $v$, $p$, and $r$ produce antisymmetric normal velocity on the surface. Doublets and sources on the left-half mirror panels have opposite strengths:
+
+$$\mu_{\text{mirror}} = -\mu, \quad \sigma_{\text{mirror}} = -\sigma$$
+
+The antisymmetric matrices subtract the mirror panel influences:
+
+$$\mathbf{A}^{\text{asym}} = \mathbf{A}_{\text{self}} - \mathbf{A}_{\text{mirror}}, \quad \mathbf{B}^{\text{asym}} = \mathbf{B}_{\text{self}} - \mathbf{B}_{\text{mirror}}$$
+
+The solver stores the LU factors of both $\mathbf{A}^{\text{sym}}$ and $\mathbf{A}^{\text{asym}}$. Any arbitrary flight condition with sideslip or asymmetric rates is evaluated by linear superposition of the symmetric and antisymmetric unit solutions.
+
+## Ground Effect by Method of Images
+
+Near flat ground, Ventorum-3DP models the ground plane using the classical method of images (Wieselsberger 1921; Katz and Plotkin 2001).
+
+### Ground Plane and Image Geometry
+
+The aircraft remains in its body geometry axes while the ground plane orientation moves with attitude $(\alpha, \beta, \phi)$. The unit normal pointing from the ground to the aircraft is $\hat{\mathbf{k}} = \text{ground\_normal}(\alpha, \beta, \phi)$. The ground plane satisfies $\mathbf{x} \cdot \hat{\mathbf{k}} = o$, where $o = \mathbf{r}_{\text{ref}} \cdot \hat{\mathbf{k}} - h$.
+
+An image body is placed below the ground plane by reflecting every panel corner across the ground:
+
+$$\mathbf{x}' = \mathbf{x} - 2 (\mathbf{x} \cdot \hat{\mathbf{k}} - o) \hat{\mathbf{k}}$$
+
+The loop order of the reflected panel vertices is reversed to preserve an outward-pointing unit normal on the image body: $\hat{\mathbf{n}}' = \mathcal{R} \hat{\mathbf{n}}$.
+
+### Boundary Condition and Mirror Signs
+
+To make the ground plane a stream surface ($\mathbf{V} \cdot \hat{\mathbf{k}} = 0$ on the ground), the image body carries:
+* Equal source strength: $\sigma' = +\sigma$
+* Equal doublet strength: $\mu' = +\mu$
+
+Because the outward normal of the image panel is the mirror image of the real panel normal ($\hat{\mathbf{n}}' = \mathcal{R} \hat{\mathbf{n}}$), equal source and doublet strengths cause the normal velocities from the real and image panels to cancel exactly at the ground plane.
+
+The wake image follows the wake: each wake panel is reflected across the ground plane and sheds downstream with doublet strength $\mu_w' = \mu_w$.
+
+### Attitude Dependence and Condition Grouping
+
+In ground effect, the relative orientation and distance between the aircraft and the ground depend on the attitude $(\alpha, \beta, \phi)$ and height $h$. Consequently, the influence matrix depends on attitude and height. Linear superposition of the six unit onsets remains valid for a fixed attitude and height.
+
+The method `solve_conditions` groups flight conditions by attitude and height $(\alpha, \beta, \phi, h)$, factorizes the system once per unique group, and evaluates all conditions within that group.
+
+Any geometry touching or crossing below the ground plane raises a ValueError.
+
+## Combined Symmetry and Ground Effect
+
+When solving a symmetric aircraft in ground effect on a half mesh (`PanelMesh.half=True`), four-fold images are used:
+1. Real right-half body above ground: $\mathbf{A}_{\text{self}}, \mathbf{B}_{\text{self}}$
+2. Y-mirror body (left wing) above ground: $\mathbf{A}_m, \mathbf{B}_m$
+3. Ground-mirror body (right wing) below ground: $\mathbf{A}_g, \mathbf{B}_g$
+4. YG-mirror body (left wing) below ground: $\mathbf{A}_{yg}, \mathbf{B}_{yg}$
+
+For symmetric onsets ($u, w, q$):
+
+$$\mathbf{A}^{\text{sym}} = \mathbf{A}_{\text{self}} + \mathbf{A}_m + \mathbf{A}_g + \mathbf{A}_{yg}, \quad \mathbf{B}^{\text{sym}} = \mathbf{B}_{\text{self}} + \mathbf{B}_m + \mathbf{B}_g + \mathbf{B}_{yg}$$
+
+For asymmetric onsets ($v, p, r$):
+
+$$\mathbf{A}^{\text{asym}} = \mathbf{A}_{\text{self}} - \mathbf{A}_m + \mathbf{A}_g - \mathbf{A}_{yg}, \quad \mathbf{B}^{\text{asym}} = \mathbf{B}_{\text{self}} - \mathbf{B}_m + \mathbf{B}_g - \mathbf{B}_{yg}$$
+
+This formulation retains the eight-fold reduction in factorization work while modeling ground effect and asymmetric sideslip flows.
+
 ## Published Sources
 
 1. Morino, L. and Kuo, C. C., 1974, "Subsonic potential aerodynamics for complex configurations: A general theory", AIAA Journal, Vol. 12, No. 2, pp. 191-197.
 2. Maskew, B., 1987, "Program VSAERO Theory Document: A Computer Program for Calculating the Non-Linear Aerodynamic Characteristics of Arbitrary Configurations", NASA Contractor Report 4023.
 3. Katz, J. and Plotkin, A., 2001, "Low-Speed Aerodynamics", 2nd ed., Cambridge University Press, Section 9.4 and Chapter 12.
-4. Drela, M., 2014, "Flight Vehicle Aerodynamics", MIT Press, Chapter 5.
-5. Stevens, B. L., Lewis, F. L., and Johnson, E. N., 2016, "Aircraft Control and Simulation", 3rd ed., Wiley, Chapter 2.
+4. Wieselsberger, C., 1921, "Ueber den Fluegelwiderstand in der Naehe des Bodens", Zeitschrift fuer Flugtechnik und Motorluftschiffahrt, Vol. 12, No. 10; English translation: "Wing resistance near the ground", NACA TM 77, 1922.
+5. Drela, M., 2014, "Flight Vehicle Aerodynamics", MIT Press, Chapter 5.
+6. Stevens, B. L., Lewis, F. L., and Johnson, E. N., 2016, "Aircraft Control and Simulation", 3rd ed., Wiley, Chapter 2.
