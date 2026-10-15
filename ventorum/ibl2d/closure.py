@@ -218,8 +218,8 @@ def turbulent_slip_velocity(H, Re_theta, xp=None):
     """Return the turbulent slip velocity and its derivatives.
 
     Slip velocity ``Us = u_s / u_e`` (dimensionless) of the outer wake
-    profile, theory page Eq. (T3). ``Us`` grows with the wake strength
-    (with ``H``) and falls slowly with ``Re_theta``.
+    profile, theory page Eq. (T3). ``Us`` balances the energy shape factor
+    near the equilibrium locus and falls slowly with ``Re_theta``.
 
     Parameters
     ----------
@@ -239,9 +239,9 @@ def turbulent_slip_velocity(H, Re_theta, xp=None):
     H = _f(m, H)
     Re = _f(m, Re_theta)
     hm = H - 1.0
-    val = 1.0 + 0.55 * hm + 0.10 * hm * hm - 0.02 * m.log10(Re / 1e4)
-    dH = 0.55 + 0.20 * hm
-    dRe = -0.02 / (Re * _LN10)
+    val = 0.880 - 0.10 * hm + 0.10 * hm * hm - 0.03 * m.log10(Re / 1e4)
+    dH = -0.10 + 0.20 * hm
+    dRe = -0.03 / (Re * _LN10)
     return val, dH, dRe
 
 
@@ -276,10 +276,10 @@ def equilibrium_shear_coefficient(H, H_star, U_s, xp=None):
     Hs = _f(m, H_star)
     Us = _f(m, U_s)
     q = (Hs - 1.0) / (Hs * Us)
-    val = 0.0095 * q * q
+    val = 0.0050 * q * q
     dH = m.zeros_like(val + 0.0 * H)
-    dHs = 2.0 * 0.0095 * q / (Hs * Hs * Us)
-    dUs = -2.0 * 0.0095 * q * q / Us
+    dHs = 2.0 * 0.0050 * q / (Hs * Hs * Us)
+    dUs = -2.0 * 0.0050 * q * q / Us
     return val, dH, dHs, dUs
 
 

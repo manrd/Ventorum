@@ -78,7 +78,8 @@ friction factor, unless the caller gives `theta0`.
 
 Natural transition occurs where `N` reaches `ncrit`; forced transition
 occurs at the given station. The solver interpolates the transition
-point inside the step, keeps `theta` continuous there, and restarts the
+point inside the step, keeps `theta` continuous there, initializes the
+turbulent shape factor to the attached profile value, and restarts the
 turbulent system with the equilibrium shear coefficient at the
 transition state. Direct mode only: when `H` passes the laminar
 separation limit `H = 4`, or when the turbulent skin friction reaches

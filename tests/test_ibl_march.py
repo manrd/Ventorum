@@ -124,3 +124,14 @@ def test_cuda_float32_theta():
     got = np.asarray(outs[0].theta.detach().cpu().numpy(), dtype=float)
     mask = np.isfinite(ref.theta) & np.isfinite(got)
     np.testing.assert_allclose(got[mask], ref.theta[mask], rtol=1e-4, atol=1e-6)
+
+
+def test_turbulent_flat_plate_shape_factor():
+    """Turbulent flat plate keeps an attached shape factor after transition."""
+    s = np.linspace(0.0, 1.0, 401)
+    ue = _flat(s)
+    re = 1e7
+    res = mr.march_direct(s, ue, re, ncrit=9.0, forced_transition_s=0.01)
+    mask = (s >= 0.1) & np.isfinite(res.H)
+    assert np.all(res.H[mask] >= 1.30)
+    assert np.all(res.H[mask] <= 1.45)

@@ -193,6 +193,10 @@ Source: Drela and Giles (1987). Range of validity: as (E1).
   `gpu`) checks float32 to 1e-5.
 - Continuity holds (1e-6 relative) at the `H = 4` switches; the switch of
   (E3) at the critical Reynolds number is recorded with its exact size.
+- The amplification rate at `H = 2.591` yields natural transition on a
+  flat plate in the validated range between 1e6 and 5e6.
+- The turbulent slip velocity balances the kinetic energy shape factor
+  near the equilibrium shape factor, which provides stable relaxation.
 
 ## References
 

@@ -259,3 +259,37 @@ def test_cuda_float32_parity():
             scale = max(1.0, float(np.max(np.abs(r))))
             np.testing.assert_allclose(gn, r, rtol=1e-5, atol=1e-5 * scale,
                                        err_msg=f"cuda parity of {func.__name__}")
+
+
+def test_amplification_rate_blasius():
+    """Amplification rate on a Blasius plate matches the envelope rate."""
+    slope = _s(tr.amplification_rate(2.591)[0])
+    assert 0.010 <= slope <= 0.012
+
+
+def test_turbulent_slip_velocity_equilibrium_balance():
+    """Slip velocity balances energy shape factor with negative slope."""
+    re = 1e4
+    h_eq = 1.35
+    hs_eq = _s(cls.turbulent_h_star(h_eq, re)[0])
+    us_eq = _s(cls.turbulent_slip_velocity(h_eq, re)[0])
+    diff_eq = 2.0 * us_eq - hs_eq
+    assert abs(diff_eq) < 0.05
+
+    # Negative derivative gives stable relaxation toward equilibrium.
+    h_hi = 1.50
+    hs_hi = _s(cls.turbulent_h_star(h_hi, re)[0])
+    us_hi = _s(cls.turbulent_slip_velocity(h_hi, re)[0])
+    diff_hi = 2.0 * us_hi - hs_hi
+    assert diff_hi < diff_eq
+
+
+def test_equilibrium_shear_flat_plate_balance():
+    """Equilibrium shear coefficient matches half the wall friction."""
+    re = 1e4
+    h = 1.35
+    hs = _s(cls.turbulent_h_star(h, re)[0])
+    us = _s(cls.turbulent_slip_velocity(h, re)[0])
+    cf = _s(cls.turbulent_cf(h, re)[0])
+    te = _s(cls.equilibrium_shear_coefficient(h, hs, us)[0])
+    np.testing.assert_allclose(te, 0.5 * cf, rtol=0.10)

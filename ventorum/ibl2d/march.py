@@ -50,6 +50,7 @@ from typing import Any
 
 H_BLASIUS = 2.591
 H_LAM_SEP = 4.0
+H_TURB_ATTACHED = 1.34
 
 
 @dataclass
@@ -948,18 +949,19 @@ def march_direct_batch(s, ue_batch, Re_ref_batch, xp=None, *,
                 ue_tr = ue_p + 0.0
                 m_tr = m_p + 0.0
             re_tr = ue_tr * th_tr * re_b if ds1 > 1e-14 else ue_p * th_p * re_b
-            Hs_t, _, _ = cls.turbulent_h_star(H_tr, re_tr, xp)
-            Us_t, _, _ = cls.turbulent_slip_velocity(H_tr, re_tr, xp)
-            Te_t, _, _, _ = cls.equilibrium_shear_coefficient(H_tr, Hs_t, Us_t, xp)
+            H_turb = xp.where(H_tr > H_TURB_ATTACHED, H_TURB_ATTACHED, H_tr)
+            Hs_t, _, _ = cls.turbulent_h_star(H_turb, re_tr, xp)
+            Us_t, _, _ = cls.turbulent_slip_velocity(H_turb, re_tr, xp)
+            Te_t, _, _, _ = cls.equilibrium_shear_coefficient(H_turb, Hs_t, Us_t, xp)
             C_tr = xp.where(Te_t > 1e-12, Te_t, 1e-12)
             ue_i2 = ue_x[b, i:i + 1]
             m_i2 = m_x[b, i:i + 1]
             if ds2 > 1e-14:
                 thn2, Hn2, Cn2, Cfn2, ok2 = _newton_turbulent(
-                    xp, th_tr, H_tr, C_tr, ue_tr, m_tr, ue_i2, m_i2,
-                    ds2, re_b, th_tr, H_tr, C_tr)
+                    xp, th_tr, H_turb, C_tr, ue_tr, m_tr, ue_i2, m_i2,
+                    ds2, re_b, th_tr, H_turb, C_tr)
                 if not bool(np.asarray(ok2)[0]):
-                    thn2, Hn2, Cn2 = th_tr + 0.0, H_tr + 0.0, C_tr + 0.0
+                    thn2, Hn2, Cn2 = th_tr + 0.0, H_turb + 0.0, C_tr + 0.0
                     Cfn2, _, _, _, _ = _turb_state(xp, thn2, Hn2, Cn2, ue_i2, re_b)
                     Cfn2 = Cfn2[0:1] if hasattr(Cfn2, "__getitem__") else Cfn2
                     try:
@@ -968,7 +970,7 @@ def march_direct_batch(s, ue_batch, Re_ref_batch, xp=None, *,
                     except Exception:
                         pass
             else:
-                thn2, Hn2, Cn2 = th_tr, H_tr, C_tr
+                thn2, Hn2, Cn2 = th_tr, H_turb, C_tr
                 Cfn2, _, _, _, _ = _turb_state(xp, thn2, Hn2, Cn2, ue_i2, re_b)
                 try:
                     cft, _, _ = cls.turbulent_cf(Hn2, ue_i2 * thn2 * re_b, xp)

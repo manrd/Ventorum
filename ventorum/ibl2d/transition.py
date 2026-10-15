@@ -94,8 +94,8 @@ def amplification_rate(H, xp=None):
     """
     m = _mod(xp)
     H = _f(m, H)
-    val = 0.01 + 0.008 * (H - 1.0)
-    der = m.full_like(val, 0.008)
+    val = 0.003 + 0.005 * (H - 1.0)
+    der = m.full_like(val, 0.005)
     return val, der
 
 
