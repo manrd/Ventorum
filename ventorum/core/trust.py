@@ -85,6 +85,9 @@ PANEL3D_DRAG_RELATIVE_TOL = 0.20
 PANEL3D_DRAG_ABSOLUTE_FLOOR = 0.002
 PANEL3D_PENALTY_DRAG_DISCREPANCY = 0.25
 
+#: Penalty for non-unique post-stall solution branches in viscous coupling.
+POST_STALL_BRANCH_PENALTY = 0.35
+
 
 def _negligible_side_force(CY: float | None, CY_farfield: float | None) -> bool:
     """Return True when the near-field and far-field side forces are below the CY floor."""
@@ -379,6 +382,7 @@ def evaluate_aerodynamic_trust(
     Cn_trefftz: float | None = None,
     mesh_stats: dict | None = None,
     CD_nearfield: float | None = None,
+    post_stall_branch: bool = False,
 ) -> TrustScore:
     """Evaluate the validity of a solution.
 
@@ -434,6 +438,8 @@ def evaluate_aerodynamic_trust(
         [-]. When the near field and the far field do not agree
         (:func:`near_far_lateral_warnings`), the result gets a warning. The
         comparison is a diagnostic: it does not change the score.
+    post_stall_branch : bool, optional
+        True if multiple post-stall equilibrium solution branches exist.
 
     A result with a non-finite coefficient never keeps a trust level above
     LOW: it gets the penalty ``non_finite_result`` and the warning
@@ -729,6 +735,17 @@ def evaluate_aerodynamic_trust(
                     f"Near-field pressure drag ({float(CD_nearfield):.4f}) and far-field Trefftz induced drag "
                     f"({float(CDi):.4f}) differ by {drag_diff:.4f} (relative difference {drag_diff / drag_ref:.1%})."
                 )
+
+    # 8b. Viscous coupling post-stall non-unique branches --------------------------------------
+    branch_pen = 0.0
+    if post_stall_branch:
+        branch_pen = POST_STALL_BRANCH_PENALTY
+        warnings.append(
+            "Non-unique post-stall solution branches: section slope dCl/dalpha is at or below "
+            "zero and multiple solutions exist."
+        )
+        recommendations.append("Treat post-stall aerodynamic forces with caution; compare both solution branches.")
+    penalties["post_stall_branch"] = branch_pen
 
     for msg in notes or ():
         if msg not in warnings:
