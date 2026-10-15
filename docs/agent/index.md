@@ -157,6 +157,30 @@ Example output (abridged: the rows CD, CY, Cl and Cn and the keys `rows`, `notes
 }
 ```
 
+## 2D airfoil tools
+
+- `ventorum_airfoil_geometry` (`section` (NACA designation or Selig / Lednicer text), `n_panels` (optional integer count), `flap` (optional object with `deflection_deg` and `hinge_x_c`)): analyzes an airfoil section. Output includes normalized coordinates, thickness and camber with their positions, trailing-edge gap, and geometry checks. The maximum allowed panel count is 1000 panels.
+- `ventorum_airfoil_polar` (`section` (NACA designation or coordinates), `Re` (Reynolds number, positive float), `alpha_deg` or `alpha_start_deg`/`alpha_end_deg`/`alpha_step_deg`, `flap` (optional object with `deflection_deg` and `hinge_x_c`), `h_c` (optional ground clearance ratio, larger than 0.05), `source` (`"ventorum2d"` or `"xfoil"`, default `"ventorum2d"`)): computes the viscous polar. Output includes `alpha_deg`, `Cl`, `Cd`, `Cm`, `converged` mask, transition points (`xtr_upper`, `xtr_lower`) when available, and warnings.
+- **Work budget.** One polar call allows up to 60 operating point solves. The panel count limit is 1000 panels. When the work exceeds the limit, the tool refuses the request and advises how to reduce or split the query.
+- **XFOIL availability.** When `source` is set to `"xfoil"` and the external XFOIL binary is missing, the tool returns an `invalid_input` error with clear installation instructions.
+
+Example call:
+
+```python
+from ventorum.agent import call_tool
+
+res = call_tool("ventorum_airfoil_polar", {
+    "section": "NACA 0012",
+    "Re": 1e6,
+    "alpha_start_deg": 0.0,
+    "alpha_end_deg": 4.0,
+    "alpha_step_deg": 2.0,
+    "source": "ventorum2d",
+})
+print(res["executive_summary"])
+print("Cl:", res["Cl"])
+```
+
 ## Example
 
 ```python

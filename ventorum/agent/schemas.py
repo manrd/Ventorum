@@ -94,6 +94,62 @@ AIRFOIL_PROPS: dict[str, dict[str, Any]] = {
                 minimum=-1, maximum=1),
 }
 
+AIRFOIL_GEOMETRY_PROPS: dict[str, dict[str, Any]] = {
+    "section": {"type": "string", "description": "NACA designation (for example 'NACA 2412') or coordinate text in Selig or Lednicer format."},
+    "n_panels": _int("Optional panel count for repaneling [-].", minimum=10, maximum=1000),
+    "repanel_count": _int("Optional panel count for repaneling [-] (alias of n_panels).", minimum=10, maximum=1000),
+    "flap": {
+        "type": "object",
+        "description": "Optional plain flap deflection: hinge station x_hinge [0.05, 0.98] chord, deflection_deg [-60, 60] deg (positive down), optional y_hinge [0, 1].",
+        "properties": {
+            "x_hinge": _num("Hinge chord position [-].", minimum=0.05, maximum=0.98),
+            "deflection_deg": _num("Flap deflection [deg], positive down.", minimum=-60.0, maximum=60.0),
+            "y_hinge": _num("Hinge height fraction [-]. Default 0.5.", minimum=0.0, maximum=1.0),
+        },
+        "required": ["x_hinge", "deflection_deg"],
+        "additionalProperties": False,
+    },
+}
+
+AIRFOIL_POLAR_PROPS: dict[str, dict[str, Any]] = {
+    "section": {"type": "string", "description": "NACA designation (for example 'NACA 0012') or coordinate text in Selig or Lednicer format."},
+    "Re": _num("Reynolds number [-].", minimum=1.0, maximum=1.0e9),
+    "alphas_deg": {
+        "type": "array",
+        "items": {"type": "number", "minimum": -30.0, "maximum": 30.0},
+        "description": "List of angles of attack [deg].",
+    },
+    "alpha_start_deg": _num("First angle of attack [deg].", minimum=-30.0, maximum=30.0),
+    "alpha_end_deg": _num("Last angle of attack [deg].", minimum=-30.0, maximum=30.0),
+    "alpha_step_deg": _num(f"Step [deg], at least {MIN_ALPHA_STEP_DEG}.", minimum=MIN_ALPHA_STEP_DEG, maximum=30.0),
+    "alpha_deg": _num("Single angle of attack [deg].", minimum=-30.0, maximum=30.0),
+    "flap": {
+        "type": "object",
+        "description": "Optional plain flap deflection.",
+        "properties": {
+            "x_hinge": _num("Hinge chord position [-].", minimum=0.05, maximum=0.98),
+            "deflection_deg": _num("Flap deflection [deg], positive down.", minimum=-60.0, maximum=60.0),
+            "y_hinge": _num("Hinge height fraction [-]. Default 0.5.", minimum=0.0, maximum=1.0),
+        },
+        "required": ["x_hinge", "deflection_deg"],
+        "additionalProperties": False,
+    },
+    "h_c": _num("Height above ground normalized by chord [-], or omit for free air.", minimum=0.01, maximum=500.0),
+    "source": {
+        "type": "string",
+        "enum": ["ventorum2d", "xfoil"],
+        "default": "ventorum2d",
+        "description": "Polar solver: 'ventorum2d' (default) or 'xfoil'.",
+    },
+    "n_panels": _int("Panel count for repaneling [-]. Default 160.", minimum=10, maximum=1000),
+    "ncrit": _num("Critical amplification exponent [-]. Default 9.0.", minimum=1.0, maximum=20.0),
+    "options": {
+        "type": "object",
+        "description": "Extra solver keywords (tol, max_iter, timeout).",
+    },
+}
+
+
 SECTION_PROPS: dict[str, dict[str, Any]] = {
     "y_frac": _num("Span station as a fraction of the semi-span: 0 = root, 1 = tip.", minimum=0, maximum=1),
     "chord_m": _num("Local chord [m].", exclusiveMinimum=0),
@@ -1303,6 +1359,28 @@ AGENT_TOOL_DEFINITIONS: list[dict[str, Any]] = [
                          "description": "Write the profile to the user configuration folder. "
                                         "Default true."},
             },
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "ventorum_airfoil_geometry",
+        "description": "Normalized geometry, thickness, camber, trailing-edge gap and defects of an "
+                       "airfoil section (NACA designation or coordinate text in Selig or Lednicer format).",
+        "parameters": {
+            "type": "object",
+            "properties": AIRFOIL_GEOMETRY_PROPS,
+            "required": ["section"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "ventorum_airfoil_polar",
+        "description": "Lift, drag and pitching moment polar of an airfoil section (ventorum2d viscous "
+                       "panel solver or XFOIL), with transition positions and convergence status.",
+        "parameters": {
+            "type": "object",
+            "properties": AIRFOIL_POLAR_PROPS,
+            "required": ["section", "Re"],
             "additionalProperties": False,
         },
     },
