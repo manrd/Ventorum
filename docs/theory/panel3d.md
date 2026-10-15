@@ -81,6 +81,28 @@ where $+C_{i, s}^w$ adds to the upper trailing-edge panel column and $-C_{i, s}^
 
 $$\mathbf{A} \boldsymbol{\mu} = -\mathbf{B} \boldsymbol{\sigma}$$
 
+### Pressure Kutta Condition
+
+The Morino condition leaves a pressure jump at a thick trailing edge. The pressure Kutta condition removes it by adjusting the wake strip strengths. The option `kutta="pressure"` in `PanelSolver` selects it. The default `kutta="morino"` keeps the linear result bit for bit.
+
+The unknowns are the wake strip strength corrections $\delta_s$, one per trailing-edge strip of the solved mesh. The residual at each trailing-edge panel pair is the pressure jump:
+
+$$R_s = C_{p, \text{upper}(s)} - C_{p, \text{lower}(s)}$$
+
+The iteration starts from the Morino solution ($\boldsymbol{\delta} = 0$). Each Newton step solves:
+
+$$\mathbf{J} \, \Delta\boldsymbol{\delta} = -\mathbf{R}$$
+
+Each wake strength enters the solved linear system on the right-hand side only. The sensitivity of the body doublets to correction $t$ reuses the factored body matrix with one triangular solve per wake strip:
+
+$$\mathbf{z}_t = \mathbf{A}^{-1} (-\mathbf{D}_{:, t})$$
+
+where $\mathbf{D}_{:, t}$ sums the wake doublet influences of strip $t$. The surface pressure depends on the square of the surface speed, so the Jacobian entry uses the current surface velocity $\mathbf{V}_i$ and the surface gradient $\mathbf{g}_{t, i}$ of the sensitivity:
+
+$$J_{s, t} = \frac{2 \left( \mathbf{V}_{\text{upper}(s)} \cdot \mathbf{g}_{t, \text{upper}(s)} - \mathbf{V}_{\text{lower}(s)} \cdot \mathbf{g}_{t, \text{lower}(s)} \right)}{V_{\infty}^2}$$
+
+The solver takes at most 20 Newton steps with backtracking and stops when $\max |R_s| < 10^{-6}$. The result reports the step count and the final residual. Non-convergence gives a `RuntimeWarning` and a trust note in the result, not an exception. Broyden rank updates are allowed after the first exact Jacobian; the present code recomputes the exact Jacobian at each step. With symmetry folding or ground images, the residual uses the strips of the solved half or full mesh as the solve does. On a half mesh the same correction applies to the mirror strip, which is exact for symmetric flight.
+
 ## Six Unit-Onset Superposition
 
 The aerodynamic influence matrix $\mathbf{A}$ and source influence matrix $\mathbf{B}$ depend only on the surface and wake geometry. They do not depend on the flight condition.
@@ -268,3 +290,4 @@ This formulation retains the eight-fold reduction in factorization work while mo
 4. Wieselsberger, C., 1921, "Ueber den Fluegelwiderstand in der Naehe des Bodens", Zeitschrift fuer Flugtechnik und Motorluftschiffahrt, Vol. 12, No. 10; English translation: "Wing resistance near the ground", NACA TM 77, 1922.
 5. Drela, M., 2014, "Flight Vehicle Aerodynamics", MIT Press, Chapter 5.
 6. Stevens, B. L., Lewis, F. L., and Johnson, E. N., 2016, "Aircraft Control and Simulation", 3rd ed., Wiley, Chapter 2.
+7. Kinnas, S. A. and Hsin, C. Y., 1992, "Boundary element method for the analysis of the unsteady flow around extreme propeller geometries", AIAA Journal, Vol. 30, No. 3 (iterative pressure Kutta).
