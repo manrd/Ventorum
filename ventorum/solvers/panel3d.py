@@ -72,6 +72,31 @@ __all__ = ["PanelMethodSolver"]
 _DEFAULT_N_CHORD = 20
 
 
+def _estimate_panel_mesh_error(aircraft: Aircraft, condition: FlightCondition, settings: SolverSettings):
+    """Run a three-level panel convergence study for the trust notes.
+
+    Parameters
+    ----------
+    aircraft : Aircraft
+        Case geometry.
+    condition : FlightCondition
+        Flight condition of the study.
+    settings : SolverSettings
+        Solver settings of the base (coarsest) mesh.
+
+    Returns
+    -------
+    ConvergenceReport
+        Values per level, observed order, Richardson value and relative
+        error of CL, CDi and Cm.
+    """
+    from ventorum.panel3d.convergence import panel_mesh_convergence
+
+    return panel_mesh_convergence(
+        aircraft, condition, settings, levels=3, ratio=1.5, quantities=("CL", "CDi", "Cm")
+    )
+
+
 def _build_surface_strip_panel_map(
     surf: LiftingSurface,
     n_span: int,
@@ -198,6 +223,13 @@ class PanelMethodSolver(BaseSolver):
         Returns
         -------
         SolverResult or list of SolverResult
+
+        Mesh error estimate. Set the ``estimate_mesh_error`` attribute of
+        the settings to True to run a three-level panel mesh convergence
+        study (ratio 1.5 in both directions) for each condition. The study
+        appends its notes to the trust warnings and stores the report in
+        ``details["mesh_convergence"]``. It costs about 25 to 30 times one
+        base solve, so it is off by default.
         """
         is_single = isinstance(condition, FlightCondition)
         cond_list: list[FlightCondition] = [condition] if is_single else list(condition)
@@ -217,6 +249,7 @@ class PanelMethodSolver(BaseSolver):
         n_chord = int(settings.n_chord) if getattr(settings, "n_chord", None) is not None else _DEFAULT_N_CHORD
         chord_spacing = getattr(settings, "chord_spacing", "cosine")
         use_sym_setting = getattr(settings, "use_symmetry", True)
+        estimate_mesh_error = bool(getattr(settings, "estimate_mesh_error", False))
 
         all_surfs_sym = all(s.is_symmetric for s in ac.surfaces)
         all_conds_sym = all(is_symmetric_condition(c, ground) for c in cond_list)
@@ -561,6 +594,11 @@ class PanelMethodSolver(BaseSolver):
             all_notes = list(notes)
             if p_res.trust_note:
                 all_notes.append(p_res.trust_note)
+            conv_details = None
+            if estimate_mesh_error:
+                conv_report = _estimate_panel_mesh_error(ac, cond, settings)
+                all_notes.extend(conv_report.notes)
+                conv_details = conv_report.to_dict()
 
             main_surf_n_span = ac.surfaces[0].n_panels or settings.n_panels
             h_over_c = (h_min / c_ref) if (h_min is not None and c_ref) else None
@@ -605,6 +643,8 @@ class PanelMethodSolver(BaseSolver):
                 "notes": all_notes,
                 "dispatch": dispatch,
             }
+            if conv_details is not None:
+                result.details["mesh_convergence"] = conv_details
 
             for msg in all_notes:
                 warnings.warn(msg, RuntimeWarning, stacklevel=2)
