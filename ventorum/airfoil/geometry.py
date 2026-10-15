@@ -36,6 +36,8 @@ References
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any
 
 import numpy as np
 
@@ -310,6 +312,178 @@ class AirfoilShape:
         hard = [m for m in self.problems() if "monotonic" not in m.lower()]
         if hard:
             raise AirfoilGeometryError("Bad airfoil shape: " + "; ".join(hard))
+
+    @classmethod
+    def naca(cls, designation: str | int, **kwargs: Any) -> AirfoilShape:
+        """Build a NACA 4-digit or 5-digit section as a shape.
+
+        This method calls :func:`ventorum.airfoil.naca.naca` and stores
+        the points. The thickness follows Abbott and von Doenhoff (1959,
+        section 6.4). The 5-digit mean lines follow Jacobs, Ward and
+        Pinkerton (NACA Report 460, 1933).
+
+        Parameters
+        ----------
+        designation : str or int
+            Designation such as "2412", "NACA 2412" or "23012" [-].
+        **kwargs : Any
+            Extra arguments of :func:`ventorum.airfoil.naca.naca`:
+            ``n_points`` [-], ``spacing`` [-], ``closed_te`` [-].
+            ``name`` [str] sets the shape name.
+
+        Returns
+        -------
+        AirfoilShape
+            Shape with coordinates [chord units] in Selig order.
+        """
+        from ventorum.airfoil.naca import naca as _naca_array
+
+        name = kwargs.pop("name", None)
+        if name is None:
+            text = str(designation).strip()
+            name = text if text.upper().startswith("NACA") else f"NACA {text}"
+        coords = _naca_array(designation, **kwargs)
+        return cls(name=str(name), coords=coords)
+
+    @classmethod
+    def from_file(cls, path: str | Path) -> AirfoilShape:
+        """Read a Selig, Lednicer or plain file as a shape.
+
+        This method calls :func:`ventorum.airfoil.io.read_airfoil`.
+        Selig and co-workers (*Summary of Low-Speed Airfoil Data*, 1995)
+        define the Selig format. Lednicer (AIAA paper 2010-0458, 2010)
+        defines the Lednicer format.
+
+        Parameters
+        ----------
+        path : str or pathlib.Path
+            Path of the file.
+
+        Returns
+        -------
+        AirfoilShape
+            Shape with coordinates [chord units] in Selig order.
+        """
+        from ventorum.airfoil.io import read_airfoil as _read_airfoil
+
+        shape = _read_airfoil(path)
+        return cls(name=shape.name, coords=shape.coords)
+
+    def repanel(self, n_panels: int = 160, **kwargs: Any) -> AirfoilShape:
+        """Redistribute the nodes by equidistribution of a weight function.
+
+        This method calls :func:`ventorum.airfoil.paneling.repanel`.
+        The spline uses not-a-knot end conditions (de Boor, 1978,
+        Chapter IV).
+
+        Parameters
+        ----------
+        n_panels : int
+            Number of panels [-]. Default 160.
+        **kwargs : Any
+            Extra arguments of the array function: ``le_refinement`` [-],
+            ``te_refinement`` [-], ``curvature_weight`` [-].
+
+        Returns
+        -------
+        AirfoilShape
+            Repaneled copy (coordinates [chord units]) in Selig order.
+        """
+        from ventorum.airfoil.paneling import repanel as _repanel_array
+
+        coords = _repanel_array(self.coords, n_panels=n_panels, **kwargs)
+        return AirfoilShape(name=self.name, coords=coords)
+
+    def repanel_cosine(self, n_per_side: int) -> AirfoilShape:
+        """Resample each surface with cosine spacing in arc length.
+
+        This method calls
+        :func:`ventorum.airfoil.paneling.repanel_cosine`. Each surface
+        gets Chebyshev cosine nodes, dense at the leading edge and at
+        the trailing edge.
+
+        Parameters
+        ----------
+        n_per_side : int
+            Panels per surface [-].
+
+        Returns
+        -------
+        AirfoilShape
+            Resampled copy (coordinates [chord units]) in Selig order.
+        """
+        from ventorum.airfoil.paneling import repanel_cosine as _cosine_array
+
+        coords = _cosine_array(self.coords, n_per_side)
+        return AirfoilShape(name=self.name, coords=coords)
+
+    def with_flap(
+        self,
+        x_hinge: float,
+        deflection: float,
+        y_hinge: float = 0.5,
+        n_arc: int | None = None,
+    ) -> AirfoilShape:
+        """Deflect a plain flap about a hinge point.
+
+        This method calls
+        :func:`ventorum.airfoil.flap.deflect_plain_flap`. The flap is a
+        hinged aft portion of the section (Glauert, 1926, chapter VII;
+        Glauert, R&M 1095, 1927).
+
+        Parameters
+        ----------
+        x_hinge : float
+            Hinge chord station [chord units], in (0.05, 0.98).
+        deflection : float
+            Flap deflection [deg], positive when the trailing edge moves
+            down. Values satisfy |deflection| <= 60.
+        y_hinge : float
+            Hinge height as a fraction [-] of the local thickness.
+            Default 0.5.
+        n_arc : int or None
+            Point count [-] of the filler arc on the stretched side.
+            None selects the default of the array function.
+
+        Returns
+        -------
+        AirfoilShape
+            Deflected copy (coordinates [chord units]) in Selig order.
+        """
+        from ventorum.airfoil.flap import deflect_plain_flap as _deflect_array
+
+        coords = _deflect_array(self.coords, x_hinge, deflection, y_hinge=y_hinge, n_arc=n_arc)
+        return AirfoilShape(name=self.name, coords=coords)
+
+    def to_file(self, path: str | Path, fmt: str = "selig", precision: int = 6) -> None:
+        """Write this shape in Selig or Lednicer format.
+
+        This method calls :func:`ventorum.airfoil.io.write_selig` or
+        :func:`ventorum.airfoil.io.write_lednicer`. Selig and
+        co-workers (*Summary of Low-Speed Airfoil Data*, 1995) define
+        the Selig format. Lednicer (AIAA paper 2010-0458, 2010) defines
+        the Lednicer format.
+
+        Parameters
+        ----------
+        path : str or pathlib.Path
+            Output file path.
+        fmt : str
+            Format name [-]: "selig" or "lednicer". Default "selig".
+        precision : int
+            Digits after the decimal point [-]. Default 6.
+        """
+        from ventorum.airfoil.io import write_lednicer as _write_lednicer
+        from ventorum.airfoil.io import write_selig as _write_selig
+
+        key = str(fmt).strip().lower()
+        if key == "selig":
+            _write_selig(self, path, precision=precision)
+            return
+        if key == "lednicer":
+            _write_lednicer(self, path, precision=precision)
+            return
+        raise ValueError(f"Unknown airfoil format {fmt!r}: use 'selig' or 'lednicer'.")
 
     def _self_intersection(self) -> tuple[int, int] | None:
         """Return the first pair of crossing segments, or None."""
