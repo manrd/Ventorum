@@ -12,13 +12,15 @@ _ALIASES = {
     "llt": "linear",
     "nonlinear": "nonlinear",
     "fourier": "fourier",
+    "panel3d": "panel3d",
+    "3dp": "panel3d",
 }
 
 VALID_SOLVER_NAMES = ("auto",) + tuple(_ALIASES)
 
 
 def resolve_solver_type(solver_type: str | None) -> str:
-    """Canonical solver name: ``"vlm"``, ``"linear"``, ``"nonlinear"`` or ``"fourier"``.
+    """Canonical solver name: ``"vlm"``, ``"linear"``, ``"nonlinear"``, ``"fourier"`` or ``"panel3d"``.
 
     ``"auto"`` (or *None*) always gives the vortex-lattice method, so the
     method does not change when a section changes from a linear to a
@@ -48,5 +50,8 @@ def make_solver(canonical: str):
     if canonical == "fourier":
         from ventorum.solvers.fourier import FourierSolver
         return FourierSolver()
+    if canonical == "panel3d":
+        from ventorum.solvers.panel3d import PanelMethodSolver
+        return PanelMethodSolver()
     raise ValueError(f"Unknown canonical solver {canonical!r}.")
 

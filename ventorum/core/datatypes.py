@@ -460,6 +460,10 @@ class WingSection:
         from the surface-level ``dihedral`` parameter during discretisation.
     airfoil : AirfoilType
         Aerodynamic model for this section.
+    shape : Any, optional
+        Airfoil shape specification for 3D panel methods. Accepts any input
+        that ventorum.airfoil.airfoil() supports (NACA string, integer,
+        coordinate array, or AirfoilShape). Default is None (NACA 0012).
     """
 
     y_frac: float = 0.0
@@ -468,10 +472,16 @@ class WingSection:
     x_le: float | None = None
     z_le: float | None = None
     airfoil: AirfoilType = field(default_factory=LinearAirfoil)
+    shape: Any = None
 
     def clone(self) -> WingSection:
         """Fast explicit clone."""
         af = self.airfoil.clone() if hasattr(self.airfoil, "clone") else self.airfoil
+        shape_clone = self.shape
+        if hasattr(self.shape, "clone"):
+            shape_clone = self.shape.clone()
+        elif hasattr(self.shape, "copy"):
+            shape_clone = self.shape.copy()
         return WingSection(
             y_frac=self.y_frac,
             chord=self.chord,
@@ -479,6 +489,7 @@ class WingSection:
             x_le=self.x_le,
             z_le=self.z_le,
             airfoil=af,
+            shape=shape_clone,
         )
 
     def __copy__(self) -> WingSection:
@@ -1534,20 +1545,51 @@ def _airfoil_from_dict(d: dict) -> AirfoilType:
     )
 
 
+def _shape_to_json(shape: Any) -> Any:
+    """Serialise a section shape specification to a JSON-compatible object."""
+    if shape is None:
+        return None
+    if isinstance(shape, (str, int, float, bool)):
+        return shape
+    if hasattr(shape, "coords"):
+        return {"name": getattr(shape, "name", "airfoil"), "coords": np.asarray(shape.coords, dtype=float).tolist()}
+    if isinstance(shape, np.ndarray):
+        return shape.tolist()
+    if hasattr(shape, "__fspath__"):
+        return str(shape)
+    return shape
+
+
+def _shape_from_json(data: Any) -> Any:
+    """Deserialise a section shape specification from JSON data."""
+    if data is None:
+        return None
+    if isinstance(data, dict) and "coords" in data:
+        from ventorum.airfoil.geometry import AirfoilShape
+
+        return AirfoilShape(name=data.get("name", "airfoil"), coords=np.asarray(data["coords"], dtype=float))
+    if isinstance(data, list):
+        return np.asarray(data, dtype=float)
+    return data
+
+
 def aircraft_to_json(ac: Aircraft) -> str:
     """Serialise an :class:`Aircraft` to a JSON string."""
     surfaces = []
     for surf in ac.surfaces:
         sections = []
         for sec in surf.sections:
-            sections.append({
+            sec_dict = {
                 "y_frac": sec.y_frac,
                 "chord": sec.chord,
                 "twist": sec.twist,
                 "x_le": sec.x_le,
                 "z_le": sec.z_le,
                 "airfoil": _airfoil_to_dict(sec.airfoil),
-            })
+            }
+            if getattr(sec, "shape", None) is not None:
+                sec_dict["shape"] = _shape_to_json(sec.shape)
+            sections.append(sec_dict)
         controls = [
             {
                 "name": c.name,
@@ -1610,6 +1652,7 @@ def aircraft_from_json(text: str) -> Aircraft:
                 x_le=sec_d.get("x_le"),
                 z_le=sec_d.get("z_le"),
                 airfoil=_airfoil_from_dict(sec_d["airfoil"]),
+                shape=_shape_from_json(sec_d.get("shape")),
             ))
         controls = [
             ControlSurface(

@@ -282,6 +282,28 @@ $$\mathbf{A}^{\text{asym}} = \mathbf{A}_{\text{self}} - \mathbf{A}_m + \mathbf{A
 
 This formulation retains the eight-fold reduction in factorization work while modeling ground effect and asymmetric sideslip flows.
 
+## Solver Family Interface
+
+Ventorum-3DP connects to the solver architecture of Ventorum through the class `PanelMethodSolver` in `ventorum.solvers.panel3d`. Users and automated tools can select it through the factory with `solver="panel3d"`.
+
+### Inputs
+
+The solver takes three standard input objects:
+* `Aircraft`: One or more lifting surfaces. Each surface definition contains wing sections. The optional field `WingSection.shape` specifies the airfoil geometry (NACA designation, point array, or `AirfoilShape`). When `shape` is None, the solver defaults to NACA 0012 and reports a warning in the result notes. The functions `aircraft_to_json` and `aircraft_from_json` serialize and restore this field.
+* `FlightCondition`: Free-stream velocity $V_{\infty}$, angles $\alpha$ and $\beta$, density $\rho$, optional ground height $h$, bank angle $\phi$, and angular rates $p, q, r$. The solver also accepts a sequence of flight conditions to execute batch evaluations and sweeps.
+* `SolverSettings`: Discretization settings including `n_chord` (chordwise panels per surface), spanwise counts, `kutta` ("morino" or "pressure"), `backend` ("numpy", "numba", or "gpu"), and `wake_length`.
+
+Symmetry plane folding and ground images are used automatically when the geometry and the flight conditions allow them.
+
+### Results
+
+The solve returns a standard `SolverResult`:
+* `totals`: Integrated aerodynamic coefficients ($C_L, C_D, C_Y, C_l, C_m, C_n$). The reported induced drag $C_{Di}$ comes from the far-field Trefftz plane. The surface force integration provides near-field pressure drag as $C_{Di,\text{nearfield}}$.
+* `spanwise`: Spanwise distributions on each lifting surface. Sectional coefficients ($C_l, C_{d,\text{pressure}}, C_m$) are computed by strip integration of panel pressure forces at the lattice strip stations. Strip lift sums to the total aircraft $C_L$.
+* `details["cp"]`: The full surface pressure coefficient distribution on the body panels.
+* `totals.trust`: The physical validity trust score. For the 3D panel method, the score evaluates mesh adequacy (aspect ratio, skew, and warp from `check_mesh`), near-field pressure drag versus far-field induced drag agreement, and ground clearance.
+* `details["dispatch"]`: The execution dispatch record, reporting the selected backend, computing device, arithmetic precision dtype, and linear system factorization count.
+
 ## Published Sources
 
 1. Morino, L. and Kuo, C. C., 1974, "Subsonic potential aerodynamics for complex configurations: A general theory", AIAA Journal, Vol. 12, No. 2, pp. 191-197.
