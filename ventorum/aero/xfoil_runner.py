@@ -2,9 +2,34 @@
 """Run XFOIL and read its polars as tabulated airfoils.
 
 XFOIL is driven as a black box through its documented interactive commands
-(M. Drela and H. Youngren, XFOIL 6.99 user guide): the NACA generator, LOAD,
-PPAR, PANE, GDES with FLAP, OPER with VPAR, PACC, ASEQ and ALFA. No XFOIL
-source code is read or used.
+(M. Drela and H. Youngren, XFOIL 6.99 user guide): PLOP (plotting options),
+the NACA generator, LOAD, PPAR, PANE, GDES with FLAP, OPER with VPAR, PACC,
+ASEQ and ALFA. No XFOIL source code is read or used.
+
+XFOIL runs headless on every platform (Windows, Linux, macOS, servers
+without a display). The rules are in :func:`xfoil_input` and
+:func:`_start_xfoil`, which every XFOIL start uses (runs, both starts of a
+two-direction sweep, batches and the version probe):
+
+* The command stream starts with ``PLOP``, ``G`` and a blank line: the
+  plotting-options menu, the toggle of the graphics-enable flag and the
+  exit of the menu.
+* XFOIL runs in its own new temporary folder, so an ``xfoil.def`` file of
+  the user (XFOIL reads its defaults from the working folder) cannot change
+  the start state.
+* ``G`` is a toggle, so the start state is not assumed: XFOIL prints the
+  flag in the plotting-options menu, and the last printed value must be
+  ``F`` (disabled). Otherwise the run raises a RuntimeError. A build that
+  prints no flag line gets one warning per session.
+* On Windows the process starts without a console window
+  (``CREATE_NO_WINDOW``). On other platforms no creation flag is given and
+  no environment variable (for example ``DISPLAY``) is changed.
+
+Menu rules that the command streams follow: in PPAR, a parameter change
+needs two blank lines to leave the menu (the first blank line applies the
+change and shows the menu again); in VPAR, one blank line after the
+parameters returns to OPER (a second blank line would go to the top level
+and the next OPER commands would be lost).
 
 Sources: Drela, M., 1989, XFOIL: An analysis and design system for low
 Reynolds number airfoils; Drela, M. and Youngren, H., XFOIL 6.99 user guide
@@ -16,8 +41,11 @@ from __future__ import annotations
 import concurrent.futures
 import functools
 import os
+import shutil
 import subprocess
 import tempfile
+import threading
+import warnings
 from pathlib import Path
 
 import numpy as np
@@ -26,23 +54,185 @@ from ventorum.aero.polars import load_xfoil_polar
 from ventorum.core.datatypes import TabulatedAirfoil
 
 
+#: First command lines of every XFOIL session: open the plotting-options
+#: menu (PLOP), toggle the graphics-enable flag (G) and leave the menu
+#: (blank line). See :func:`xfoil_input`.
+XFOIL_HEADLESS_HEADER: tuple[str, ...] = ("PLOP", "G", "")
+
+#: Text of the plotting-options line that shows the graphics-enable flag.
+#: XFOIL prints it as ``G raphics-enable flag:  T`` (or ``F``).
+XFOIL_GRAPHICS_FLAG_TEXT = "raphics-enable flag"
+
+#: Process creation flags that start XFOIL without a console window on
+#: Windows. Other platforms get 0, and then no flag is passed.
+XFOIL_CREATION_FLAGS: int = int(getattr(subprocess, "CREATE_NO_WINDOW", 0))
+
+_GRAPHICS_FLAG_WARNED = False
+_GRAPHICS_FLAG_LOCK = threading.Lock()
+
+
+def xfoil_input(commands: list[str] | tuple[str, ...]) -> str:
+    """Return the standard input text of one headless XFOIL session.
+
+    Headless rule (applied to every XFOIL start by :func:`_start_xfoil`):
+
+    1. Graphics off first: the stream starts with ``PLOP``, ``G`` and a
+       blank line (plotting-options menu, toggle of the graphics-enable
+       flag, exit of the menu; XFOIL 6.99 user guide).
+    2. XFOIL runs in its own new temporary folder, so no ``xfoil.def``
+       file of the user changes the start state.
+    3. ``G`` is a toggle: the printed flag is checked after the run
+       (:func:`check_graphics_disabled`). A flag that is not ``F`` raises
+       a RuntimeError.
+    4. On Windows the process gets ``CREATE_NO_WINDOW`` (no console
+       window); other platforms get no creation flag and no change of the
+       environment.
+
+    Parameters
+    ----------
+    commands : list of str
+        XFOIL command lines, without the trailing newline.
+
+    Returns
+    -------
+    str
+        :data:`XFOIL_HEADLESS_HEADER` (graphics off), then *commands*, one
+        per line, with a final newline.
+    """
+    return "\n".join([*XFOIL_HEADLESS_HEADER, *commands]) + "\n"
+
+
+def check_graphics_disabled(stdout: str) -> bool:
+    """Check from the XFOIL output that the graphics are disabled.
+
+    Parameters
+    ----------
+    stdout : str
+        Standard output of one XFOIL session that starts with the
+        headless header (:func:`xfoil_input`).
+
+    Returns
+    -------
+    bool
+        True when the last printed graphics-enable flag is ``F``. False
+        when the output has no flag line (a build without the
+        plotting-options menu); the caller then continues and warns once.
+
+    Raises
+    ------
+    RuntimeError
+        If the last printed flag is not ``F`` (the graphics stay enabled).
+    """
+    last = None
+    for line in stdout.splitlines():
+        if XFOIL_GRAPHICS_FLAG_TEXT in line:
+            last = line
+    if last is None:
+        return False
+    value = last.split(":", 1)[-1].strip().split()
+    flag = value[0].upper() if value else ""
+    if flag != "F":
+        raise RuntimeError(
+            "XFOIL graphics could not be disabled; the plotting-options menu "
+            f"shows {last.strip()!r} after the PLOP G toggle. Check the "
+            "XFOIL build and its defaults."
+        )
+    return True
+
+
+def _warn_no_graphics_flag() -> None:
+    """Warn once per session that XFOIL printed no graphics-enable flag."""
+    global _GRAPHICS_FLAG_WARNED
+    with _GRAPHICS_FLAG_LOCK:
+        if _GRAPHICS_FLAG_WARNED:
+            return
+        _GRAPHICS_FLAG_WARNED = True
+    warnings.warn(
+        "XFOIL printed no graphics-enable flag after PLOP G: this build may "
+        "have no plotting-options menu, so the graphics state is not checked.",
+        RuntimeWarning,
+        stacklevel=3,
+    )
+
+
+def _start_xfoil(
+    executable: str,
+    commands: list[str] | tuple[str, ...],
+    timeout: float | None,
+    check: bool,
+) -> subprocess.CompletedProcess:
+    """Start one headless XFOIL process and return its completed run.
+
+    The process gets the input of :func:`xfoil_input` (graphics off
+    first), runs in its own new temporary folder and, on Windows, starts
+    without a console window. After the run the printed graphics flag is
+    checked (:func:`check_graphics_disabled`).
+
+    Parameters
+    ----------
+    executable : str
+        Resolved XFOIL executable.
+    commands : list of str
+        XFOIL command lines. The headless header is added in front. File
+        names in the commands must be absolute paths.
+    timeout : float or None
+        Largest run time [s]. None means no limit.
+    check : bool
+        Raise :class:`subprocess.CalledProcessError` on a nonzero exit code.
+
+    Returns
+    -------
+    subprocess.CompletedProcess
+        The run, with the standard output and error as text.
+
+    Raises
+    ------
+    RuntimeError
+        If the graphics could not be disabled.
+    """
+    kwargs: dict = {}
+    if XFOIL_CREATION_FLAGS:
+        kwargs["creationflags"] = XFOIL_CREATION_FLAGS
+    with tempfile.TemporaryDirectory(prefix="ventorum_xfoil_") as workdir:
+        result = subprocess.run(
+            [executable],
+            input=xfoil_input(commands),
+            text=True,
+            check=check,
+            capture_output=True,
+            timeout=timeout,
+            cwd=workdir,
+            **kwargs,
+        )
+    if not check_graphics_disabled(result.stdout or ""):
+        _warn_no_graphics_flag()
+    return result
+
+
 def resolve_xfoil_executable(executable: str | None = None) -> str:
     """Resolve the XFOIL executable name or path.
 
     Parameters
     ----------
     executable : str or None
-        Explicit executable. None uses the environment variable
-        ``VENTORUM_XFOIL``, else ``xfoil`` on PATH.
+        Explicit executable (library calls only; the agent tools never
+        pass one). None uses the environment variable ``VENTORUM_XFOIL``,
+        else the ``xfoil`` program that ``shutil.which`` finds on PATH
+        (``xfoil.exe`` on Windows, ``xfoil`` on Linux and macOS).
 
     Returns
     -------
     str
-        The executable to run. No machine path is stored in the code.
+        The executable to run, or ``"xfoil"`` when nothing is found (the
+        start then fails with a clear FileNotFoundError). No machine path
+        is stored in the code.
     """
     if executable is not None:
         return executable
-    return os.environ.get("VENTORUM_XFOIL", "xfoil")
+    env = os.environ.get("VENTORUM_XFOIL")
+    if env:
+        return env
+    return shutil.which("xfoil") or "xfoil"
 
 
 @functools.lru_cache(maxsize=8)
@@ -59,16 +249,15 @@ def xfoil_version(executable: str | None = None) -> str:
     str
         The banner line that holds ``Version`` (for example
         ``"XFOIL Version 6.99"``), or ``"unknown"`` when XFOIL does not run.
+
+    Raises
+    ------
+    RuntimeError
+        If XFOIL starts but its graphics could not be disabled.
     """
     exe = resolve_xfoil_executable(executable)
     try:
-        result = subprocess.run(
-            [exe],
-            input="quit\n",
-            text=True,
-            capture_output=True,
-            timeout=30.0,
-        )
+        result = _start_xfoil(exe, ["quit"], timeout=30.0, check=False)
     except (OSError, subprocess.SubprocessError):
         return "unknown"
     for line in result.stdout.splitlines():
@@ -234,7 +423,8 @@ def _execute(commands: list[str], executable: str, timeout: float | None) -> str
     Parameters
     ----------
     commands : list[str]
-        XFOIL command lines, without the trailing newline.
+        XFOIL command lines, without the trailing newline. The headless
+        header (graphics off) is added in front.
     executable : str
         Resolved XFOIL executable.
     timeout : float or None
@@ -245,16 +435,8 @@ def _execute(commands: list[str], executable: str, timeout: float | None) -> str
     str
         The standard output of XFOIL.
     """
-    cmd_str = "\n".join(commands) + "\n"
     try:
-        result = subprocess.run(
-            [executable],
-            input=cmd_str,
-            text=True,
-            check=True,
-            capture_output=True,
-            timeout=timeout,
-        )
+        result = _start_xfoil(executable, commands, timeout=timeout, check=True)
     except subprocess.CalledProcessError as e:
         raise RuntimeError(
             f"XFOIL execution failed with exit code {e.returncode}:\n{e.stdout}\n{e.stderr}"

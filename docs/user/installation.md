@@ -19,7 +19,18 @@ The required dependencies are `numpy`, `scipy`, `matplotlib`, `numba` (compiled 
 pip install torch --index-url https://download.pytorch.org/whl/cpu
 ```
 
-The installation also compiles the Cython kernels when a C compiler is present. Without a compiler the installation continues, and Ventorum uses the Numba and numpy kernels. XFOIL is optional: Ventorum can call it to make section polars (`ventorum.run_xfoil`) when it is installed.
+The installation also compiles the Cython kernels when a C compiler is present. Without a compiler the installation continues, and Ventorum uses the Numba and numpy kernels. XFOIL is optional: Ventorum can call it to make section polars (`ventorum.run_xfoil`, `ventorum.aero.polar_source.XfoilPolarSource`) when it is installed.
+
+### XFOIL
+
+Ventorum finds XFOIL in this order: the `executable` argument of a library call, the environment variable `VENTORUM_XFOIL`, then the program `xfoil` on the PATH (`xfoil.exe` on Windows). The agent tools never take an executable from their input; they use only `VENTORUM_XFOIL` or the PATH.
+
+Ventorum runs XFOIL headless on every platform, also on a server without a display:
+
+- Each command stream starts with `PLOP`, `G` and a blank line. This switches the XFOIL graphics off before any other command.
+- Each XFOIL process runs in its own new temporary folder. An `xfoil.def` file in your working folder therefore cannot change the start state.
+- `G` is a toggle. Ventorum does not assume the start state: it reads the graphics-enable flag that XFOIL prints in the plotting-options menu. If the last printed flag is not `F`, the call stops with an error. If the XFOIL build prints no flag, Ventorum continues and gives one warning.
+- On Windows the process starts without a console window. On other platforms Ventorum changes no environment variable (for example `DISPLAY`).
 
 ## After installation
 

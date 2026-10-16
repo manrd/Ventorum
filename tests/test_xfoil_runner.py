@@ -32,6 +32,24 @@ _FAKE_POLAR_HEAD = """\
 """
 
 
+# Plotting-options output recorded from XFOIL 6.99 (black box): the menu
+# shows the graphics flag when it opens (T) and after the G toggle (F).
+_FAKE_PLOP_OUTPUT = """\
+ XFOIL   c>   ...............................................
+
+  G raphics-enable flag:        T
+  S ize of plot object          10.00"
+
+      Option, Value   (or <Return>)    c>   ...............................................
+
+  G raphics-enable flag:        F
+  S ize of plot object          10.00"
+
+      Option, Value   (or <Return>)    c>
+ XFOIL   c>
+"""
+
+
 def _fake_rows_text(rows: list[tuple[float, float, float, float]]) -> str:
     lines = [_FAKE_POLAR_HEAD]
     for alpha, cl, cd, cm in rows:
@@ -70,7 +88,9 @@ def _make_fake_run(rows=None, record=None):
         if path is not None and data is not None:
             with open(path, "w") as handle:
                 handle.write(_fake_rows_text(data))
-        return subprocess.CompletedProcess(argv, 0, stdout="fake xfoil", stderr="")
+        return subprocess.CompletedProcess(
+            argv, 0, stdout=_FAKE_PLOP_OUTPUT + "fake xfoil", stderr=""
+        )
 
     return fake_run
 
@@ -262,6 +282,13 @@ def test_executable_resolution_order(monkeypatch):
     assert resolve_xfoil_executable() == "/env/xfoil"
     assert resolve_xfoil_executable("my-xfoil") == "my-xfoil"
     monkeypatch.delenv("VENTORUM_XFOIL")
+    # Then the program that shutil.which finds on PATH, else the bare name.
+    monkeypatch.setattr(
+        xfoil_runner.shutil, "which",
+        lambda name: "found-by-which" if name == "xfoil" else None,
+    )
+    assert resolve_xfoil_executable() == "found-by-which"
+    monkeypatch.setattr(xfoil_runner.shutil, "which", lambda name: None)
     assert resolve_xfoil_executable() == "xfoil"
 
 
@@ -282,9 +309,11 @@ def test_xfoil_version_reads_banner_and_handles_missing(monkeypatch):
     from ventorum.aero.xfoil_runner import xfoil_version
 
     def fake_run(argv, **kwargs):
-        assert kwargs.get("input") == "quit\n"
+        # Graphics off first, then quit.
+        assert kwargs.get("input") == "PLOP\nG\n\nquit\n"
         return subprocess.CompletedProcess(
-            argv, 0, stdout="\n XFOIL Version 6.99\n more\n", stderr=""
+            argv, 0, stdout="\n XFOIL Version 6.99\n more\n" + _FAKE_PLOP_OUTPUT,
+            stderr="",
         )
 
     monkeypatch.setattr(xfoil_runner.subprocess, "run", fake_run)
@@ -919,3 +948,153 @@ def test_cache_payload_serialises_to_json(tmp_path):
     json.dumps(payload, sort_keys=True)
     cache.put(payload, _flat_polar())
     assert cache.get(payload) is not None
+
+
+# ── Headless XFOIL ───────────────────────────────────────────────────────────
+
+
+def _recording_run(record: list[dict], rows=None):
+    """Fake subprocess.run that records every keyword and checks the folder."""
+
+    inner = _make_fake_run(rows if rows is not None else _aseq_rows)
+
+    def fake_run(argv, **kwargs):
+        cwd = kwargs.get("cwd")
+        record.append(
+            {
+                "input": kwargs.get("input", ""),
+                "kwargs": dict(kwargs),
+                "cwd_exists": cwd is not None and os.path.isdir(cwd),
+                "cwd_files": sorted(os.listdir(cwd)) if cwd and os.path.isdir(cwd) else None,
+            }
+        )
+        return inner(argv, **kwargs)
+
+    return fake_run
+
+
+def _check_headless(entry: dict) -> None:
+    assert entry["input"].startswith("PLOP\nG\n\n"), entry["input"][:40]
+    # Nothing comes before the header: the first command is PLOP.
+    assert entry["input"].splitlines()[:3] == ["PLOP", "G", ""]
+    kwargs = entry["kwargs"]
+    if os.name == "nt":
+        assert kwargs["creationflags"] & subprocess.CREATE_NO_WINDOW
+    else:
+        assert "creationflags" not in kwargs
+    # Own new temporary folder, not the folder of the user, empty at start.
+    assert entry["cwd_exists"]
+    assert os.path.abspath(kwargs["cwd"]) != os.path.abspath(os.getcwd())
+    assert entry["cwd_files"] == []
+    assert "env" not in kwargs
+
+
+def test_every_run_path_is_headless(monkeypatch):
+    """Regression: XFOIL opened its graphics window on every call."""
+    record: list[dict] = []
+    monkeypatch.setattr(xfoil_runner.subprocess, "run", _recording_run(record))
+    # One linear sweep.
+    xfoil_runner.run_xfoil("naca 0012", Re=1e6, alpha_start=0.0, alpha_end=2.0,
+                           alpha_step=1.0, timeout=60.0)
+    assert len(record) == 1
+    # Both starts of the two-direction sweep.
+    xfoil_runner.run_xfoil("naca 0012", Re=1e6, alpha_start=-2.0, alpha_end=2.0,
+                           alpha_step=1.0, sweep="from_zero", timeout=60.0)
+    assert len(record) == 3
+    # The batch path.
+    out = xfoil_runner.run_xfoil_batch(
+        [{"airfoil": "naca 0012", "Re": 1e6, "alpha_start": 0.0, "alpha_end": 1.0},
+         {"airfoil": "naca 2412", "Re": 1e6, "alpha_start": 0.0, "alpha_end": 1.0}],
+        workers=2,
+    )
+    assert all(isinstance(item, TabulatedAirfoil) for item in out)
+    assert len(record) == 5
+    # The version probe.
+    xfoil_runner.xfoil_version.cache_clear()
+    xfoil_runner.xfoil_version("fake-exe-headless")
+    xfoil_runner.xfoil_version.cache_clear()
+    assert len(record) == 6
+    for entry in record:
+        _check_headless(entry)
+    # Each start gets its own folder.
+    folders = [entry["kwargs"]["cwd"] for entry in record]
+    assert len(set(folders)) == len(folders)
+
+
+def test_polar_source_runs_are_headless(monkeypatch, tmp_path):
+    from ventorum.aero.polar_source import XfoilPolarSource
+
+    record: list[dict] = []
+    monkeypatch.setattr(xfoil_runner.subprocess, "run", _recording_run(record))
+    XfoilPolarSource(cache=False).polar("naca 0012", 1e6, [-1.0, 0.0, 1.0])
+    assert len(record) == 2
+    for entry in record:
+        _check_headless(entry)
+
+
+def test_graphics_flag_parser_uses_the_last_flag_line():
+    from ventorum.aero.xfoil_runner import check_graphics_disabled
+
+    # T when the menu opens, F after the toggle: graphics off.
+    assert check_graphics_disabled(_FAKE_PLOP_OUTPUT) is True
+    # F then T: the toggle switched the graphics on.
+    flipped = _FAKE_PLOP_OUTPUT.replace("flag:        T", "flag:        X")
+    flipped = flipped.replace("flag:        F", "flag:        T")
+    flipped = flipped.replace("flag:        X", "flag:        F")
+    with pytest.raises(RuntimeError, match="graphics could not be disabled"):
+        check_graphics_disabled(flipped)
+    # No flag line (a build without the plotting menu): no decision.
+    assert check_graphics_disabled(" XFOIL   c>\n no menu here\n") is False
+
+
+def test_run_raises_when_graphics_stay_enabled(monkeypatch):
+    flipped = _FAKE_PLOP_OUTPUT.replace("flag:        F", "flag:        T")
+
+    def fake_run(argv, **kwargs):
+        return subprocess.CompletedProcess(argv, 0, stdout=flipped, stderr="")
+
+    monkeypatch.setattr(xfoil_runner.subprocess, "run", fake_run)
+    with pytest.raises(RuntimeError, match="graphics could not be disabled"):
+        xfoil_runner.run_xfoil("naca 0012", Re=1e6, alpha_start=0.0, alpha_end=0.0)
+
+
+def test_missing_graphics_flag_warns_once(monkeypatch):
+    rows = [(0.0, 0.0, 0.005, 0.0)]
+    inner = _make_fake_run(rows)
+
+    def fake_run(argv, **kwargs):
+        inner(argv, **kwargs)
+        return subprocess.CompletedProcess(argv, 0, stdout="no plotting menu", stderr="")
+
+    monkeypatch.setattr(xfoil_runner.subprocess, "run", fake_run)
+    monkeypatch.setattr(xfoil_runner, "_GRAPHICS_FLAG_WARNED", False)
+    with pytest.warns(RuntimeWarning, match="graphics-enable flag"):
+        xfoil_runner.run_xfoil("naca 0012", Re=1e6, alpha_start=0.0, alpha_end=0.0)
+    import warnings
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        polar = xfoil_runner.run_xfoil(
+            "naca 0012", Re=1e6, alpha_start=0.0, alpha_end=0.0
+        )
+    assert len(polar.alpha) == 1
+
+
+def test_ppar_and_vpar_blank_line_rules(monkeypatch):
+    """PPAR needs two blank lines to leave after a change; VPAR needs exactly one."""
+    record: list[dict] = []
+    rows = [(0.0, 0.0, 0.005, 0.0)]
+    monkeypatch.setattr(
+        xfoil_runner.subprocess, "run", _make_fake_run(rows, record)
+    )
+    xfoil_runner.run_xfoil(
+        "naca 0012", Re=1e6, alpha_start=0.0, alpha_end=0.0, n_panels=200,
+        ncrit=7.5, xtr_top=0.3, xtr_bottom=0.6, max_iter=80, timeout=60.0,
+    )
+    lines = _stream_lines(record)
+    k = lines.index("ppar")
+    assert lines[k:k + 5] == ["ppar", "n 200", "", "", "pane"]
+    v = lines.index("vpar")
+    # One blank line returns to OPER; the next OPER command follows at once.
+    assert lines[v:v + 5] == ["vpar", "n 7.5", "xtr 0.3 0.6", "", "iter 80"]
+    assert lines[v + 4:v + 7] == ["iter 80", "mach 0.0", "visc 1000000.0"]
