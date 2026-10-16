@@ -151,9 +151,12 @@ def compute_surface_gradient(
     """Compute the tangential surface gradient of doublet strength on each panel.
 
     A least-squares fit over neighbour panels that share an edge is solved in
-    the tangent plane of the panel. The solver uses the more accurate
-    :func:`build_surface_gradient_operator`; this function stays available
-    for comparisons.
+    the tangent plane of the panel. This function does not stop at sharp
+    edges: a neighbour across a fold of about 90 deg (tip cap, base panel,
+    control side closure) gives very large gradients. The solver uses
+    :func:`build_surface_gradient_operator`, which treats sharp edges and
+    the pole fans of latitude-longitude meshes; this function stays
+    available for comparisons.
 
     Parameters
     ----------
