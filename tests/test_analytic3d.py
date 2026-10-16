@@ -293,3 +293,30 @@ def test_sphere_mesh_area_converges_second_order():
     order_2 = np.log2(area_errors[1] / area_errors[2])
     assert order_1 == pytest.approx(2.0, abs=0.2)
     assert order_2 == pytest.approx(2.0, abs=0.2)
+
+
+def test_prolate_spheroid_axial_flow_maximum_speed():
+    """A 2:1 prolate spheroid in axial flow has the maximum surface speed of about 1.210 U.
+
+    Independent value (Lamb 1932, art. 105): for a prolate spheroid with
+    eccentricity e = sqrt(1 - (b/a)^2), alpha0 = 2 (1 - e^2) / e^3
+    (artanh(e) - e), and the axial flow has the largest surface speed
+    2 U / (2 - alpha0) on the equator. The test computes this value here
+    with artanh (not with the module) and checks it against the known
+    value 1.210 U and against the module velocity, both to 1e-3.
+    """
+    a, b, speed = 2.0, 1.0, 1.0
+    ecc = np.sqrt(1.0 - (b / a) ** 2)
+    alpha0 = 2.0 * (1.0 - ecc**2) / ecc**3 * (np.arctanh(ecc) - ecc)
+    v_max = 2.0 * speed / (2.0 - alpha0)
+    assert abs(v_max - 1.210) < 1e-3
+    phi = np.linspace(0.0, 2.0 * np.pi, 24, endpoint=False)
+    equator = np.column_stack([np.zeros_like(phi), b * np.cos(phi), b * np.sin(phi)])
+    vel = ellipsoid_surface_velocity(equator, a, b, b, np.array([speed, 0.0, 0.0]))
+    got = np.linalg.norm(vel, axis=1)
+    assert np.all(np.abs(got - v_max) <= 1e-3 * v_max)
+    theta = np.linspace(0.05, np.pi - 0.05, 41)
+    meridian = np.column_stack([a * np.cos(theta), b * np.sin(theta), np.zeros_like(theta)])
+    along = np.linalg.norm(ellipsoid_surface_velocity(meridian, a, b, b, np.array([speed, 0.0, 0.0])), axis=1)
+    assert int(np.argmax(along)) == 20
+    assert float(np.max(along)) <= v_max * (1.0 + 1e-12)
