@@ -35,10 +35,10 @@ Structure updates between Newton iterations (documented in
   (sqrt(TRANSITION_CTAU_FACTOR Ctau_eq) or the integrated N).
 
 Newton step control (path only, not the converged solution): the step is
-limited so that theta, m and c change by at most 50 %, H - 1 falls by at
-most 50 % and ue stays positive; a backtracking line search then halves the
-step until the 2-norm of the residual decreases (Armijo condition with
-coefficient 1e-4). When the accepted Newton step factor is below LM_SWITCH
+limited so that theta, m and c fall by at most 50 % and rise by at most
+200 %, H - 1 falls by at most 50 % and ue stays positive; a backtracking
+line search then halves the step until the 2-norm of the residual
+decreases (Armijo condition with coefficient 1e-4). When the accepted Newton step factor is below LM_SWITCH
 (a near-singular Jacobian, for example near laminar separation), a
 Levenberg-Marquardt step with adaptive damping is taken instead (Levenberg
 1944; Marquardt 1963). A first estimate far from the solution can give a
@@ -74,12 +74,17 @@ __all__ = ["CaseSetup", "CaseState", "NewtonResult", "newton_solve", "initial_st
 STAGNATION_DROP = 0.1
 #: Largest residual at which the coupling factor omega of a cold start is doubled (path only) [-].
 OMEGA_STEP_RESIDUAL = 0.1
+#: Iterations without halving the residual after which omega is doubled anyway (path only).
+OMEGA_STALL = 4
 #: Largest residual at which the transition intervals are updated (path only) [-].
 STRUCTURE_RESIDUAL = 1e-3
 #: Iterations without halving the residual after which the structure is updated anyway (path only).
 STALL_ITERATIONS = 8
+TRANSITION_EVERY_ITERATION = True
 #: Newton step factor below which a Levenberg-Marquardt step is tried instead (path only) [-].
 LM_SWITCH = 1e-2
+#: Number of quasi-simultaneous sweeps of the second first estimate of a cold start (path only).
+QS_SWEEPS = 3
 
 
 @dataclass
@@ -272,10 +277,16 @@ def _coupling_matrices(setup: CaseSetup, st: CaseState):
     wake-panel midpoint velocities at the other wake stations and a linear
     extrapolation at the last one.
     """
+    P, B = _p_and_b(setup, st)
+    return P @ setup.base, P @ setup.sens @ B
+
+
+def _p_and_b(setup: CaseSetup, st: CaseState):
+    """Return the station-velocity map P and the source matrix B of a structure."""
     P = setup._p_wake.copy()
     n = setup.n
     P[np.arange(n), np.arange(n)] = _signs(setup, st)
-    return P @ setup.base, P @ setup.sens @ _source_matrix(setup, st)
+    return P, _source_matrix(setup, st)
 
 
 def _laminar_rate(setup, th, ds, ue):
@@ -335,8 +346,8 @@ class _Lists:
 
 def _build_lists(setups, states):
     """Return the equation index lists of a batch."""
-    kinds = {k: {"b": [], "g1": [], "g2": [], "dxi": [], "wf": [], "nc": []}
-             for k in (eq.LAMINAR, eq.TURBULENT, eq.WAKE, eq.TRANSITION)}
+    kinds = {k: {"b": [], "g0": [], "g1": [], "g2": [], "dxi": [], "dxi0": [], "wf": [], "nc": []}
+             for k in (eq.LAMINAR, eq.TURBULENT, eq.WAKE, eq.TRANSITION, eq.POST)}
     sim = {"b": [], "g": [], "gu": [], "gl": [], "cu": [], "cl": [], "ds": []}
     te = {"b": [], "gu": [], "gl": [], "gw": [], "gap": [], "tu": [], "tl": []}
     drop = {"b": [], "g": []}
@@ -362,13 +373,23 @@ def _build_lists(setups, states):
             itr = st.itr[side]
             jf, wfv = _forced_interval(su, side, nodes_idx)
             for j in range(len(nodes_idx) - 1):
-                k = eq.LAMINAR if j < itr else (eq.TRANSITION if j == itr else eq.TURBULENT)
+                if j < itr:
+                    k = eq.LAMINAR
+                elif j == itr:
+                    k = eq.TRANSITION
+                elif j == itr + 1:
+                    k = eq.POST
+                else:
+                    k = eq.TURBULENT
                 lst = kinds[k]
+                jw = itr if k == eq.POST else j
                 lst["b"].append(b)
+                lst["g0"].append(nodes_idx[max(j - 1, 0)])
                 lst["g1"].append(nodes_idx[j])
                 lst["g2"].append(nodes_idx[j + 1])
                 lst["dxi"].append(dxi[j])
-                lst["wf"].append(wfv if (jf is not None and jf == j) else 2.0)
+                lst["dxi0"].append(dxi[max(j - 1, 0)])
+                lst["wf"].append(wfv if (jf is not None and jf == jw) else 2.0)
                 lst["nc"].append(su.ncrit)
             turb_te.append(itr < len(nodes_idx) - 1)
         for key, val in zip(("b", "gu", "gl", "gw", "gap", "tu", "tl"),
@@ -377,9 +398,11 @@ def _build_lists(setups, states):
         for j in range(su.nw - 1):
             lst = kinds[eq.WAKE]
             lst["b"].append(b)
+            lst["g0"].append(n + j)
             lst["g1"].append(n + j)
             lst["g2"].append(n + j + 1)
             lst["dxi"].append(su.sys.wake_len[j])
+            lst["dxi0"].append(su.sys.wake_len[j])
             lst["wf"].append(2.0)
             lst["nc"].append(su.ncrit)
     conv = {k: {key: np.asarray(v) for key, v in lst.items()} for k, lst in kinds.items()}
@@ -439,6 +462,12 @@ class _Backend:
             return np.linalg.solve(A, b)
         return self.xp.linalg.solve(A, b)
 
+    def stack(self, arrays):
+        """Stack arrays of this backend along a new first axis."""
+        if not self.torch:
+            return np.stack(arrays)
+        return self.xp.stack(arrays)
+
     def host(self, a):
         """Return a host numpy array (float64)."""
         if not self.torch:
@@ -468,12 +497,22 @@ def _evaluate(be: _Backend, lists: _Lists, Xd, UE, re_b, need_jac: bool):
         v = variables([Xd[bi, g1, 0], Xd[bi, g1, 1], Xd[bi, g1, 2], UE[bi, g1],
                        Xd[bi, g2, 0], Xd[bi, g2, 1], Xd[bi, g2, 2], UE[bi, g2]], xp=xp)
         re = re_b[bi]
-        if kind == eq.TRANSITION:
+        if kind == eq.POST:
+            g0 = be.arr(lst["g0"], True)
+            v = variables([Xd[bi, g1, 0], Xd[bi, g1, 1], Xd[bi, g1, 2], UE[bi, g1],
+                           Xd[bi, g2, 0], Xd[bi, g2, 1], Xd[bi, g2, 2], UE[bi, g2],
+                           Xd[bi, g0, 0], Xd[bi, g0, 1], Xd[bi, g0, 2], UE[bi, g0]], xp=xp)
+            r1, r2, r3 = eq.post_transition_residuals(tuple(v[8:]), tuple(v[:4]), tuple(v[4:8]),
+                                                      be.arr(lst["dxi0"]), dxi, re, be.arr(lst["nc"]),
+                                                      be.arr(lst["wf"]))
+        elif kind == eq.TRANSITION:
             r1, r2, r3, _ = eq.transition_residuals(tuple(v[:4]), tuple(v[4:]), dxi, re,
                                                      be.arr(lst["nc"]), be.arr(lst["wf"]))
         else:
             r1, r2, r3 = eq.interval_residuals(kind, tuple(v[:4]), tuple(v[4:]), dxi, re)
         cols = ((0, g1, 0), (1, g1, 1), (2, g1, 2), (4, g2, 0), (5, g2, 1), (6, g2, 2))
+        if kind == eq.POST:
+            cols = cols + ((8, g0, 0), (9, g0, 1), (10, g0, 2))
         for k, r in enumerate((r1, r2, r3)):
             row = 3 * g2 + k
             R[bi, row] = r.val
@@ -482,6 +521,8 @@ def _evaluate(be: _Backend, lists: _Lists, Xd, UE, re_b, need_jac: bool):
                     be.add_at(J, (bi, row, 3 * gc + jc), r.der[..., j])
                 be.add_at(Ju, (bi, row, g1), r.der[..., 3])
                 be.add_at(Ju, (bi, row, g2), r.der[..., 7])
+                if kind == eq.POST:
+                    be.add_at(Ju, (bi, row, g0), r.der[..., 11])
     sm = lists.sim
     if sm["b"].size:
         bi = be.arr(sm["b"], True)
@@ -575,20 +616,44 @@ def _residual_m(be: _Backend, lists: _Lists, X, ue_inv, D, re_b, S, drop_b, drop
 # ---------------------------------------------------------------------------
 
 
-def _march_side(setup: CaseSetup, nodes_idx, ue, a, side: int):
-    """March one side in direct mode for the first estimate.
+def _law(coupling, g):
+    """Return the local interaction law (a, d) of station g, or None (direct mode).
 
-    Returns the station values (theta, delta_star, c) and the position of
-    the last laminar station. Past a separation point (or a failed station)
-    the march continues with H frozen; this is a first estimate only.
+    ue_g = a + d ue_g delta_star_g, with the mass defects of the other
+    stations held at their current values.
+    """
+    if coupling is None:
+        return None
+    ui, D, mm = coupling
+    a = ui[g] + D[g] @ mm - D[g, g] * mm[g]
+    return np.array([a]), np.array([D[g, g]])
+
+
+def _march_side(setup: CaseSetup, nodes_idx, ue, a, side: int, coupling=None):
+    """March one side for the first estimate.
+
+    Returns the station values (theta, delta_star, c), the position of the
+    last laminar station and the edge velocities of the march. In direct
+    mode (``coupling`` None) the edge velocity is ``ue``. With ``coupling``
+    = (ue_inv, D, m) each station follows the local interaction law of a
+    quasi-simultaneous method (Veldman 2009): its edge velocity is
+    ue_inv + D m with the mass defects of the other stations held at their
+    current values (``m`` is updated in place as the march proceeds). The
+    local law removes the singularity of the direct mode at separation.
+    Past a separation point (or a failed station) the march continues with
+    H frozen; this is a first estimate only.
     """
     re = setup.re_l
     m = len(nodes_idx)
+    ue = np.array(ue, dtype=float)
     out = np.zeros((m, 3))
     hs = mr.stagnation_shape_factor()
     f0 = float(cl.laminar_cf_factor(hs)[0])
     th0 = np.sqrt(f0 / ((2.0 + hs) * re * a))
     out[0] = (th0, hs * th0, 0.0)
+    if coupling is not None:
+        g0 = nodes_idx[0]
+        _march_edge(coupling, _law(coupling, g0), ue, 0, g0, hs * th0)
     dxi, _ = _side_geometry(setup, nodes_idx)
     jf, wfv = _forced_interval(setup, side, nodes_idx)
     turb = False
@@ -596,6 +661,8 @@ def _march_side(setup: CaseSetup, nodes_idx, ue, a, side: int):
     h_frozen = None
     one = np.array([re])
     for j in range(m - 1):
+        g = nodes_idx[j + 1]
+        law = _law(coupling, g)
         st1 = tuple(np.array([v]) for v in (out[j, 0], out[j, 1], out[j, 2], ue[j]))
         u2 = np.array([ue[j + 1]])
         dx = np.array([dxi[j]])
@@ -603,10 +670,10 @@ def _march_side(setup: CaseSetup, nodes_idx, ue, a, side: int):
             r1 = float(_laminar_rate(setup, out[j, 0], out[j, 1], ue[j]))
             forced = jf is not None and jf == j
             if out[j, 2] + dxi[j] * r1 >= setup.ncrit or forced:
-                g_c = _ctau_start(setup, out[j, 0], out[j, 1], ue[j + 1])
+                g_c = _ctau_start(setup, out[j, 0], out[j, 1], ue[j])
                 t, d, c, ok, _ = mr.station_newton(eq.TRANSITION, st1, u2, dx, one, (st1[0], st1[1], g_c),
                                                    ncrit=np.array([setup.ncrit]),
-                                                   w_forced=np.array([wfv if forced else 2.0]))
+                                                   w_forced=np.array([wfv if forced else 2.0]), law=law)
                 turb = True
                 itr = j
                 h_frozen = None
@@ -614,30 +681,49 @@ def _march_side(setup: CaseSetup, nodes_idx, ue, a, side: int):
                     h_frozen = min(out[j, 1] / out[j, 0], 2.5)
                     st1t = (st1[0], st1[1], g_c, st1[3])
                     t, d, c, ok, _ = mr.station_newton(eq.TURBULENT, st1t, u2, dx, one, (st1[0], st1[1], g_c),
-                                                       h_fix=np.array([h_frozen]))
+                                                       h_fix=np.array([h_frozen]), law=law)
                 out[j + 1] = (t[0], d[0], c[0]) if ok[0] else (out[j, 0], out[j, 1], g_c[0])
+                _march_edge(coupling, law, ue, j + 1, g, out[j + 1, 1])
                 continue
             kind = eq.LAMINAR
         else:
             kind = eq.TURBULENT
         hf = None if h_frozen is None else np.array([h_frozen])
-        t, d, c, ok, _ = mr.station_newton(kind, st1, u2, dx, one, (st1[0], st1[1], st1[2]), h_fix=hf)
-        hsep = 4.0 if kind == eq.LAMINAR else float(cl.separation_shape_factor(ue[j + 1] * t[0] * re)[0])
+        t, d, c, ok, _ = mr.station_newton(kind, st1, u2, dx, one, (st1[0], st1[1], st1[2]), h_fix=hf, law=law)
+        u_new = ue[j + 1] if law is None else law[0][0] / max(1.0 - law[1][0] * d[0], 0.1)
+        hsep = 4.0 if kind == eq.LAMINAR else float(cl.separation_shape_factor(u_new * t[0] * re)[0])
         if hf is None and not (ok[0] and d[0] / t[0] < hsep):
             h_frozen = min(out[j, 1] / out[j, 0], hsep - 0.2)
             t, d, c, ok, _ = mr.station_newton(kind, st1, u2, dx, one, (st1[0], st1[1], st1[2]),
-                                               h_fix=np.array([h_frozen]))
+                                               h_fix=np.array([h_frozen]), law=law)
         out[j + 1] = (t[0], d[0], c[0]) if ok[0] else (out[j, 0] * 1.01, out[j, 1] * 1.01, out[j, 2])
-    return out, itr
+        _march_edge(coupling, law, ue, j + 1, g, out[j + 1, 1])
+    return out, itr, ue
 
 
-def initial_state(setup: CaseSetup) -> CaseState:
-    """Return the first estimate of a case from direct marches on the inviscid edge velocity.
+def _march_edge(coupling, law, ue, k, g, ds):
+    """Set the edge velocity and the mass defect of a marched station (interaction law only)."""
+    if coupling is None:
+        return
+    den = 1.0 - law[1][0] * ds
+    if law[0][0] > 0.0 and den > 0.1:
+        ue[k] = law[0][0] / den
+    coupling[2][g] = ue[k] * ds
+
+
+def initial_state(setup: CaseSetup, sweeps: int = 0) -> CaseState:
+    """Return the first estimate of a case from marches on the inviscid edge velocity.
 
     Parameters
     ----------
     setup : CaseSetup
         Case data.
+    sweeps : int
+        0: direct marches on the inviscid edge velocity. k > 0: k sweeps of
+        quasi-simultaneous marches (see :func:`_march_side`) over both
+        sides and the wake, each sweep with the mass defects of the
+        previous one; the edge velocities then include the displacement
+        effect and the march passes separation points.
 
     Returns
     -------
@@ -648,41 +734,49 @@ def initial_state(setup: CaseSetup) -> CaseState:
     panel = _find_stagnation(s.gamma_inv, None)
     i_s, drop = _canonical(panel, _drop_node(s.gamma_inv, panel, s.s))
     st = CaseState(np.zeros((setup.n_st, 3)), i_s, drop, [0, 0], panel)
-    ue_inv, _ = _coupling_matrices(setup, st)
+    ue_inv, D = _coupling_matrices(setup, st)
     up, lo = _sides(setup, st)
     if st.drop >= 0:
         a_u = ue_inv[up[0]] / (s.s[st.drop] - s.s[up[0]])
         a_l = ue_inv[lo[0]] / (s.s[lo[0]] - s.s[st.drop])
     else:
         a_u = a_l = (ue_inv[up[0]] + ue_inv[lo[0]]) / (s.s[st.i_s + 1] - s.s[st.i_s])
-    xu, itr_u = _march_side(setup, up, ue_inv[up], a_u, 0)
-    xl, itr_l = _march_side(setup, lo, ue_inv[lo], a_l, 1)
-    xd = np.zeros((setup.n_st, 3))
-    xd[up] = xu
-    xd[lo] = xl
-    st.itr = [itr_u, itr_l]
-    if st.drop >= 0:
-        xd[st.drop] = xu[0]
     n = setup.n
-    tu, tl = xu[-1], xl[-1]
-
-    def ctau(x, ue_, turb):
-        return x[2] ** 2 if turb else float(_ctau_start(setup, x[0], x[1], ue_)[0]) ** 2
-
-    cu = ctau(tu, ue_inv[up[-1]], itr_u < len(up) - 1)
-    cl_ = ctau(tl, ue_inv[lo[-1]], itr_l < len(lo) - 1)
-    thw = tu[0] + tl[0]
-    xd[n] = (thw, tu[1] + tl[1] + s.te_gap, np.sqrt((tu[0] * cu + tl[0] * cl_) / thw))
+    mm = np.zeros(setup.n_st)
+    coupling = None if sweeps <= 0 else (ue_inv, D, mm)
     one = np.array([setup.re_l])
-    for j in range(setup.nw - 1):
-        g1, g2 = n + j, n + j + 1
-        st1 = (np.array([xd[g1, 0]]), np.array([xd[g1, 1]]), np.array([xd[g1, 2]]), np.array([ue_inv[g1]]))
-        t, d, c, ok, _ = mr.station_newton(eq.WAKE, st1, np.array([ue_inv[g2]]), np.array([s.wake_len[j]]),
-                                           one, st1[:3])
-        xd[g2] = (t[0], d[0], c[0]) if ok[0] else xd[g1]
-    st.x = xd.copy()
-    S = _dstar_mask(setup, st)
-    st.x[:, 1] = np.where(S, xd[:, 1], xd[:, 1] * np.where(_station_mask(setup, st), ue_inv, 0.0))
+    for _ in range(max(sweeps, 1)):
+        xu, itr_u, uu = _march_side(setup, up, ue_inv[up], a_u, 0, coupling)
+        xl, itr_l, ul = _march_side(setup, lo, ue_inv[lo], a_l, 1, coupling)
+        xd = np.zeros((setup.n_st, 3))
+        ue_all = ue_inv.copy()
+        xd[up] = xu
+        xd[lo] = xl
+        ue_all[up] = uu
+        ue_all[lo] = ul
+        st.itr = [itr_u, itr_l]
+        if st.drop >= 0:
+            xd[st.drop] = xu[0]
+        tu, tl = xu[-1], xl[-1]
+
+        def ctau(x, ue_, turb):
+            return x[2] ** 2 if turb else float(_ctau_start(setup, x[0], x[1], ue_)[0]) ** 2
+
+        cu = ctau(tu, uu[-1], itr_u < len(up) - 1)
+        cl_ = ctau(tl, ul[-1], itr_l < len(lo) - 1)
+        thw = tu[0] + tl[0]
+        xd[n] = (thw, tu[1] + tl[1] + s.te_gap, np.sqrt((tu[0] * cu + tl[0] * cl_) / thw))
+        if coupling is not None:
+            _march_edge(coupling, _law(coupling, n), ue_all, n, n, xd[n, 1])
+        for j in range(setup.nw - 1):
+            g1, g2 = n + j, n + j + 1
+            law = _law(coupling, g2)
+            st1 = (np.array([xd[g1, 0]]), np.array([xd[g1, 1]]), np.array([xd[g1, 2]]), np.array([ue_all[g1]]))
+            t, d, c, ok, _ = mr.station_newton(eq.WAKE, st1, np.array([ue_all[g2]]), np.array([s.wake_len[j]]),
+                                               one, st1[:3], law=law)
+            xd[g2] = (t[0], d[0], c[0]) if ok[0] else xd[g1]
+            _march_edge(coupling, law, ue_all, g2, g2, xd[g2, 1])
+    to_mixed(setup, st, xd, ue_all)
     return st
 
 
@@ -752,17 +846,29 @@ def to_mixed(setup: CaseSetup, st: CaseState, xd, ue_est):
     st.x = x
 
 
-def _update_structure(setup: CaseSetup, st: CaseState, omega: float = 1.0, transition: bool = True) -> bool:
-    """Update the stagnation point and (when asked) the transition intervals; return True on a change."""
+def _update_structure(setup: CaseSetup, st: CaseState, omega: float = 1.0, transition: bool = True,
+                      pre=None) -> bool:
+    """Update the stagnation point and (when asked) the transition intervals; return True on a change.
+
+    ``pre`` holds (ue, delta_star, gamma) of the state when the caller has
+    them (the batched solver computes them on its device).
+    """
     changed = False
-    ue, ds, _ = host_edge(setup, st, omega)
-    gam = _gamma_total(setup, st, omega)
+    if pre is None:
+        ue, ds, _ = host_edge(setup, st, omega)
+        gam = _gamma_total(setup, st, omega)
+    else:
+        ue, ds, gam = pre
     panel = _find_stagnation(gam, st.panel)
-    # The node-drop decision is made again only when the stagnation point
-    # moves to another panel, so that it cannot oscillate within a solve.
+    # The node-drop decision is made again when the stagnation point moves
+    # to another panel. On the same panel a node can be dropped (the
+    # stagnation point came too close to it) but not restored, so that the
+    # decision cannot oscillate within a solve.
     if panel != st.panel:
         i_new, d_new = _canonical(panel, _drop_node(gam, panel, setup.sys.s))
         st.panel = panel
+    elif st.drop < 0:
+        i_new, d_new = _canonical(panel, _drop_node(gam, panel, setup.sys.s))
     else:
         i_new, d_new = st.i_s, st.drop
     if i_new != st.i_s or d_new != st.drop:
@@ -818,7 +924,8 @@ def _update_structure(setup: CaseSetup, st: CaseState, omega: float = 1.0, trans
             else:
                 new = itr + 1
             for k in range(itr + 1, new + 1):
-                st.x[nodes_idx[k], 2] = min(xs[itr, 2] + rate[itr] * xi[k - itr], setup.ncrit - 1e-9)                     if rate[itr] > 0.0 else xs[itr, 2]
+                st.x[nodes_idx[k], 2] = (min(xs[itr, 2] + rate[itr] * xi[k - itr], setup.ncrit - 1e-9)
+                                         if rate[itr] > 0.0 else xs[itr, 2])
         if new != itr:
             if new < itr:
                 g = nodes_idx[new + 1:itr + 1]
@@ -844,15 +951,16 @@ def _shape_and_edge(x, ui, D, S, mask):
 def _limit_step(setup, st, x0, d, ui, D, S, mask):
     """Return the step factor of a Newton or Levenberg-Marquardt step.
 
-    The changes of theta, m (or delta_star) and sqrt(Ctau) are at most 50 %,
-    H - 1 falls by at most 50 % and ue stays positive.
+    theta, m (or delta_star) and sqrt(Ctau) fall by at most 50 % and rise
+    by at most 200 %, H - 1 falls by at most 50 % and ue stays positive.
     """
     if not np.all(np.isfinite(d)):
         return 0.0
     third = _third_turbulent(setup, st)
-    rel = np.max(np.concatenate([np.abs(d[mask, 0]) / x0[mask, 0], np.abs(d[mask, 1]) / x0[mask, 1],
-                                 np.abs(d[third, 2]) / np.abs(x0[third, 2])]))
-    lam = min(1.0, 0.5 / rel) if rel > 0.0 else 1.0
+    rel = np.concatenate([d[mask, 0] / x0[mask, 0], d[mask, 1] / x0[mask, 1], d[third, 2] / x0[third, 2]])
+    dec = np.max(-rel, initial=0.0)
+    inc = np.max(rel, initial=0.0)
+    lam = min(1.0, 0.5 / dec if dec > 0.0 else 1.0, 2.0 / inc if inc > 0.0 else 1.0)
     _, h0 = _shape_and_edge(x0, ui, D, S, mask)
     for _ in range(60):
         xt = x0 + lam * d
@@ -979,12 +1087,21 @@ def newton_solve(setups, states, *, tol=1e-6, max_iter=50, xp=np, device=None, d
     best_it = np.zeros(nb, dtype=int)
     lm_mu = np.full(nb, 1e-3)
 
+    sens = {}
+
     def assemble(idx, refresh=True):
         for i in idx:
+            if i not in sens:
+                sens[i] = (be.arr(setups[i].sens), be.arr(setups[i].base))
             if refresh or i not in mats:
-                mats[i] = _coupling_matrices(setups[i], states[i])
-        ue_inv = be.arr(np.stack([mats[i][0] for i in idx]))
-        D = be.arr(np.stack([mats[i][1] * omega[i] for i in idx]))
+                mats[i] = _p_and_b(setups[i], states[i])
+        P = be.arr(np.stack([mats[i][0] for i in idx]))
+        B = be.arr(np.stack([mats[i][1] for i in idx]))
+        sens_b = be.stack([sens[i][0] for i in idx])
+        base_b = be.stack([sens[i][1] for i in idx])
+        om = be.arr(omega[list(idx)])
+        ue_inv = (P @ base_b[:, :, None])[:, :, 0]
+        D = (P @ (sens_b @ B)) * om[:, None, None]
         X = be.arr(np.stack([states[i].x for i in idx]))
         re_b = be.arr(np.array([setups[i].re_l for i in idx]))
         masks = np.stack([_station_mask(setups[i], states[i]) for i in idx])
@@ -999,14 +1116,17 @@ def newton_solve(setups, states, *, tol=1e-6, max_iter=50, xp=np, device=None, d
     def edge_ok(ue_h, masks):
         return np.array([bool(np.all(u[m] > 0.0) and np.all(np.isfinite(u))) for u, m in zip(ue_h, masks)])
 
-    # Start: reduce omega until every edge velocity is positive.
+    # Start: every edge velocity must be positive. A negative edge velocity
+    # next to the stagnation point means that the coupling moves the
+    # stagnation point: the structure is updated first; omega is halved only
+    # when that does not help.
     for _ in range(20):
-        ue_inv, D, X, re_b, masks, _, _, S = assemble(active, refresh=False)
+        ue_inv, D, X, re_b, masks, _, _, S = assemble(active, refresh=True)
         ok = edge_ok(be.host(edge(ue_inv, D, X, S)), masks)
         if np.all(ok):
             break
         for k, i in enumerate(active):
-            if not ok[k]:
+            if not ok[k] and not _update_structure(setups[i], states[i], omega[i], transition=False):
                 omega[i] *= 0.5
     for it in range(max_iter + 1):
         if not active:
@@ -1014,22 +1134,47 @@ def newton_solve(setups, states, *, tol=1e-6, max_iter=50, xp=np, device=None, d
         if it > 0 and np.any(omega[active] < 1.0):
             keep = omega.copy()
             for i in active:
-                if last_res[i] < OMEGA_STEP_RESIDUAL:
+                # A cold start can stall at small omega where the boundary layer
+                # separates: the nearly direct problem has no solution there
+                # (Goldstein singularity). The coupling then grows anyway.
+                if last_res[i] < OMEGA_STEP_RESIDUAL or it - best_it[i] > OMEGA_STALL:
                     omega[i] = min(1.0, 2.0 * omega[i])
-            ue_inv, D, X, re_b, masks, _, _, S = assemble(active, refresh=False)
-            ok = edge_ok(be.host(edge(ue_inv, D, X, S)), masks)
+                    best_it[i] = it
+                    best_res[i] = np.inf
+            for _ in range(3):
+                ue_inv, D, X, re_b, masks, _, _, S = assemble(active, refresh=True)
+                ok = edge_ok(be.host(edge(ue_inv, D, X, S)), masks)
+                moved = False
+                for k, i in enumerate(active):
+                    if not ok[k] and omega[i] != keep[i]:
+                        moved = _update_structure(setups[i], states[i], omega[i], transition=False) or moved
+                if not moved:
+                    break
             for k, i in enumerate(active):
                 if not ok[k]:
                     omega[i] = keep[i]
         changed = np.zeros(len(active), dtype=bool)
         if it > 0:
+            ue_inv, D, X, re_b, masks, _, _, S = assemble(active, refresh=False)
+            UE0, _ = _edge(be, ue_inv, D, X, S)
+            x2 = X[:, :, 1]
+            ds0 = S * x2 + (1.0 - S) * x2 / UE0
+            mfull = S * UE0 * x2 + (1.0 - S) * x2
+            Bm = be.arr(np.stack([mats[i][1] for i in active]))
+            sens_b = be.stack([sens[i][0] for i in active])
+            base_b = be.stack([sens[i][1] for i in active])
+            om = be.arr(omega[active])
+            nn = setups[active[0]].n
+            gam0 = base_b[:, :nn] + om[:, None] * (sens_b[:, :nn] @ (Bm @ mfull[:, :, None]))[:, :, 0]
+            pre_ue, pre_ds, pre_gam = be.host(UE0), be.host(ds0), be.host(gam0)
             for k, i in enumerate(active):
                 # The transition intervals move only when the equations of the
                 # current structure are nearly solved (or the iteration stalls),
                 # so that each move compares converged states.
                 stalled = it - best_it[i] > STALL_ITERATIONS
-                allow = last_res[i] < STRUCTURE_RESIDUAL or stalled
-                changed[k] = _update_structure(setups[i], states[i], omega[i], transition=allow)
+                allow = TRANSITION_EVERY_ITERATION or last_res[i] < STRUCTURE_RESIDUAL or stalled
+                changed[k] = _update_structure(setups[i], states[i], omega[i], transition=allow,
+                                               pre=(pre_ue[k], pre_ds[k], pre_gam[k]))
                 if allow and omega[i] == 1.0:
                     changed[k] = _freeze_cycles(history[i], setups[i], states[i]) or changed[k]
                 if changed[k]:

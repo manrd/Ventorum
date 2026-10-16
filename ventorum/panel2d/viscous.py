@@ -24,7 +24,9 @@ Newton iteration (see :mod:`ventorum.panel2d.vii`).
   upwards and downwards; each solve starts from the converged solution of
   the previous angle (warm start), with the angle step halved (up to
   SUBSTEP_DEPTH times) when the warm start does not converge. A cold start
-  begins from direct marches on the inviscid edge velocity.
+  begins from direct marches on the inviscid edge velocity at the inviscid
+  zero-lift angle and continues to the angle in steps of at most
+  CONTINUATION_STEP (start values only).
 * A case that does not converge returns ``converged=False`` with a reason
   and a warning; its values are those of the last iterate.
 
@@ -54,10 +56,13 @@ from ventorum.panel2d import coupling as cp
 from ventorum.panel2d import vii
 from ventorum.utils.parallel import blas_single_thread
 
-__all__ = ["ViscousResult", "solve_viscous", "trace_wake_streamline", "prepare_case", "warm_state"]
+__all__ = ["ViscousResult", "solve_viscous", "trace_wake_streamline", "prepare_case", "warm_state", "finish_angle",
+           "row_from_result", "sweep_order"]
 
 #: Number of times the angle step of a warm start may be halved.
 SUBSTEP_DEPTH = 3
+#: Largest angle step of the continuation from the zero-lift angle [deg].
+CONTINUATION_STEP = 2.0
 
 
 @dataclass
@@ -220,20 +225,44 @@ def warm_state(setup: vii.CaseSetup, prev_setup: vii.CaseSetup, prev: vii.CaseSt
     return st
 
 
-def _solve_one(setup, start, tol, max_iter, omega0):
+_NUMPY = {"xp": np, "device": None, "dtype": None}
+
+
+def _solve_one(setup, start, tol, max_iter, omega0, bk=None):
     """Run the Newton solve of one case from a start state."""
-    res = vii.newton_solve([setup], [start], tol=tol, max_iter=max_iter, omega0=[omega0])[0]
-    return res
+    bk = _NUMPY if bk is None else bk
+    return vii.newton_solve([setup], [start], tol=tol, max_iter=max_iter, omega0=[omega0], **bk)[0]
 
 
-def _cold_solve(setup, tol, max_iter):
-    """Solve a case from a cold start (two continuation starts)."""
-    first = vii.initial_state(setup)
-    res = _solve_one(setup, first.copy(), tol, max_iter, 1.0 / 64.0)
-    if res.converged:
-        return res
-    alt = _solve_one(setup, first.copy(), tol, max_iter, 1.0)
-    return alt if alt.converged or alt.residual < res.residual else res
+def _cold_solve(setup, tol, max_iter, bk=None):
+    """Solve a case from a cold start.
+
+    Three first estimates are tried in turn until one converges:
+
+    1. direct marches on the inviscid edge velocity, with the coupling
+       factor omega starting at 1/64 (see
+       :func:`ventorum.panel2d.vii.newton_solve`);
+    2. quasi-simultaneous marches (:data:`ventorum.panel2d.vii.QS_SWEEPS`
+       sweeps, see :func:`ventorum.panel2d.vii.initial_state`), which pass
+       a separation point, with omega = 1;
+    3. the direct marches with omega = 1.
+
+    The attempt with the smallest residual is returned when none converges.
+    """
+    best = None
+    for sweeps, omega0 in ((0, 1.0 / 64.0), (vii.QS_SWEEPS, 1.0), (0, 1.0)):
+        try:
+            init = vii.initial_state(setup, sweeps=sweeps)
+        except np.linalg.LinAlgError:
+            if sweeps == 0:
+                raise
+            continue
+        res = _solve_one(setup, init, tol, max_iter, omega0, bk)
+        if res.converged:
+            return res
+        if best is None or res.residual < best.residual:
+            best = res
+    return best
 
 
 def solve_viscous(
@@ -302,8 +331,7 @@ def solve_viscous(
     body = _single_body(bodies)
     is_scalar = np.ndim(alpha_deg) == 0
     alphas = np.atleast_1d(np.asarray(alpha_deg, dtype=np.float64))
-    order_up = sorted({float(a) for a in alphas if a >= 0.0})
-    order_dn = sorted({float(a) for a in alphas if a < 0.0}, reverse=True)
+    order_up, order_dn = sweep_order(alphas)
     out: dict[float, dict] = {}
     kw = dict(ncrit=ncrit, xtr=xtr, height=height, height_reference=height_reference,
               wake_length=wake_length, n_wake=n_wake)
@@ -354,51 +382,137 @@ def solve_viscous(
     )
 
 
+def sweep_order(alphas):
+    """Return the solve order of a sweep: angles >= 0 upwards, then angles < 0 downwards.
+
+    Parameters
+    ----------
+    alphas : array_like
+        Angles of attack [deg].
+
+    Returns
+    -------
+    tuple of list
+        The upward and the downward sequence [deg] (unique values).
+    """
+    a = np.atleast_1d(np.asarray(alphas, dtype=np.float64))
+    return sorted({float(v) for v in a if v >= 0.0}), sorted({float(v) for v in a if v < 0.0}, reverse=True)
+
+
 _FIELDS = ("alpha", "Cl", "Cd", "Cd_friction", "Cd_pressure", "Cm", "transition_positions", "separation_flags",
            "Cp", "H", "theta", "Cf", "iterations", "residual", "converged", "coordinates", "reason",
            "Cl_pressure", "delta_star", "ue", "wake")
 
 
-def _warm_path(body, alpha, re, prev, tol, max_iter, kw, depth):
+def _warm_path(body, alpha, re, prev, tol, max_iter, kw, depth, bk=None, first=None):
     """Solve one angle from the converged state of another angle.
 
     When the solve from ``prev`` does not converge, the angle step is halved
     (intermediate angles solved first), up to SUBSTEP_DEPTH times. The
-    intermediate solutions only serve as start values.
+    intermediate solutions only serve as start values. ``first`` holds the
+    first attempt (setup, result) when the caller already ran it.
     """
-    setup = prepare_case(body, alpha, re, **kw)
-    res = _solve_one(setup, warm_state(setup, prev[0], prev[1]), tol, max_iter, 1.0)
+    if first is None:
+        setup = prepare_case(body, alpha, re, **kw)
+        res = _solve_one(setup, warm_state(setup, prev[0], prev[1]), tol, max_iter, 1.0, bk)
+    else:
+        setup, res = first
     if res.converged or depth >= SUBSTEP_DEPTH:
         return setup, res
     mid = 0.5 * (prev[0].sys.alpha + alpha)
-    s_mid, r_mid = _warm_path(body, mid, re, prev, tol, max_iter, kw, depth + 1)
+    s_mid, r_mid = _warm_path(body, mid, re, prev, tol, max_iter, kw, depth + 1, bk)
     if not r_mid.converged:
         return setup, res
-    s_end, r_end = _warm_path(body, alpha, re, (s_mid, r_mid.state), tol, max_iter, kw, depth + 1)
+    s_end, r_end = _warm_path(body, alpha, re, (s_mid, r_mid.state), tol, max_iter, kw, depth + 1, bk)
     return (s_end, r_end) if r_end.converged or r_end.residual < res.residual else (setup, res)
 
 
-def _solve_angle(body, alpha, re, prev, tol, max_iter, kw):
-    """Solve one angle; return the result row and (setup, final state).
+def finish_angle(body, alpha, re, prev, tol, max_iter, kw, bk=None, first=None):
+    """Complete the solve of one angle; return the result row and (setup, final state).
 
     Start values: the converged state of the previous angle (with halved
     angle steps when needed, see :func:`_warm_path`); a cold start from
-    direct marches when there is no previous state or the warm path fails.
+    direct marches (see :func:`_cold_path`) when there is no previous state
+    or the warm path fails. ``first`` (setup, result) is the first warm
+    attempt when the caller already ran it (batched solver); the remaining
+    steps are then the same as in the sequential solver.
     """
     try:
         if prev is not None:
-            setup, res = _warm_path(body, alpha, re, prev, tol, max_iter, kw, 0)
+            setup, res = _warm_path(body, alpha, re, prev, tol, max_iter, kw, 0, bk, first)
             if not res.converged:
-                cold_setup = prepare_case(body, alpha, re, **kw)
-                cold = _cold_solve(cold_setup, tol, max_iter)
+                cold_setup, cold = _cold_path(body, alpha, re, tol, max_iter, kw, bk)
                 if cold.converged or cold.residual < res.residual:
                     setup, res = cold_setup, cold
         else:
-            setup = prepare_case(body, alpha, re, **kw)
-            res = _cold_solve(setup, tol, max_iter)
+            setup, res = _cold_path(body, alpha, re, tol, max_iter, kw, bk)
     except cp.WakeGroundError as exc:
         return _failed_row(alpha, body, str(exc)), None
     return row_from_result(setup, res, alpha), (setup, res.state)
+
+
+def zero_lift_angle(body, kw) -> float:
+    """Return the inviscid zero-lift angle of a section [deg] (free air or ground effect).
+
+    Parameters
+    ----------
+    body : np.ndarray
+        Airfoil coordinates [m].
+    kw : dict
+        Case settings (height and height reference are used).
+
+    Returns
+    -------
+    float
+        Angle where the inviscid lift is zero [deg], from two inviscid
+        solves (0 and 4 deg).
+    """
+    from ventorum.panel2d.solver import solve_inviscid
+
+    h = kw.get("height")
+    opts = {} if h is None else {"height": h, "height_reference": kw.get("height_reference", "pivot")}
+    cl = solve_inviscid(body, [0.0, 4.0], **opts).Cl
+    return float(-4.0 * cl[0] / (cl[1] - cl[0]))
+
+
+def _cold_path(body, alpha, re, tol, max_iter, kw, bk=None):
+    """Solve an angle without a converged neighbour.
+
+    A cold start (first estimate by direct marches) is reliable near the
+    zero-lift angle, where the edge velocity has no strong suction peak.
+    When the angle is more than CONTINUATION_STEP from the inviscid
+    zero-lift angle, the solver starts cold at the zero-lift angle and
+    continues to the angle in steps of at most CONTINUATION_STEP (each with
+    the halving of :func:`_warm_path`); the intermediate solutions serve as
+    start values only. When that start fails, a cold start at the angle
+    itself is the last attempt.
+    """
+    a0 = zero_lift_angle(body, kw)
+    if abs(alpha - a0) > CONTINUATION_STEP:
+        try:
+            s0 = prepare_case(body, a0, re, **kw)
+            r0 = _cold_solve(s0, tol, max_iter, bk)
+        except cp.WakeGroundError:
+            r0 = None
+        if r0 is not None and r0.converged:
+            n = int(np.ceil(abs(alpha - a0) / CONTINUATION_STEP))
+            prev = (s0, r0.state)
+            setup, res = s0, r0
+            for k in range(1, n + 1):
+                a = a0 + (alpha - a0) * k / n
+                setup, res = _warm_path(body, a, re, prev, tol, max_iter, kw, 0, bk)
+                if not res.converged:
+                    break
+                prev = (setup, res.state)
+            if res.converged:
+                return setup, res
+    setup = prepare_case(body, alpha, re, **kw)
+    return setup, _cold_solve(setup, tol, max_iter, bk)
+
+
+def _solve_angle(body, alpha, re, prev, tol, max_iter, kw):
+    """Solve one angle with the numpy backend (see :func:`finish_angle`)."""
+    return finish_angle(body, alpha, re, prev, tol, max_iter, kw)
 
 
 def row_from_result(setup, res, alpha) -> dict:
