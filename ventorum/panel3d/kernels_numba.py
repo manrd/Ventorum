@@ -4,19 +4,26 @@
 The functions here compute the same quantities as the numpy reference
 kernels, with the same formulas and the same branches: planar projection of
 the corners, the van Oosterom and Strackee solid angle of the two panel
-triangles, the analytic edge sums, the vortex-ring velocity of the doublet,
-and the point far-field expansions beyond ``far_ratio`` panel diameters.
-The outer loop runs over the target points in parallel (``prange``), and no
-temporary array of target-panel pairs is built. The numpy kernels stay the
-reference: the tests require both paths to agree to round-off.
+triangles, the body-side limit in the on-plane band, the analytic edge sums,
+the vortex-ring velocity of the doublet, and the point far-field expansions
+beyond ``far_ratio`` panel diameters. The outer loop runs over the target
+points in parallel (``prange``), and no temporary array of target-panel
+pairs is built. The numpy kernels stay the reference: the tests require
+both paths to agree to round-off.
 
 As in the reference, the computation runs in float64 and the outputs take
-the dtype of the inputs.
+the dtype of the inputs. The on-plane band uses the machine epsilon of the
+input dtype, so float32 inputs (for example collocation points rounded to
+float32) keep the body-side self term +1/2. The velocities are the gradient
+of the potential, V = +grad(Phi).
 
 References
 ----------
-* J. L. Hess and A. M. O. Smith, "Calculation of Nonlifting Potential Flow About
-  Arbitrary Three-Dimensional Bodies", Progress in Aeronautical Sciences 8 (1967) 1-138.
+* J. L. Hess and A. M. O. Smith, "Calculation of non-lifting potential flow
+  about arbitrary three-dimensional bodies", Journal of Ship Research 8 (1964)
+  22-44.
+* J. L. Hess and A. M. O. Smith, "Calculation of potential flow about arbitrary
+  bodies", Progress in Aeronautical Sciences 8 (1967) 1-138, Pergamon Press.
 * J. Katz and A. Plotkin, "Low-Speed Aerodynamics", 2nd ed., Cambridge University
   Press, 2001, section 10.4 and chapter 12.
 * J. N. Newman, "Distributions of sources and normal dipoles over a quadrilateral
@@ -30,6 +37,8 @@ from __future__ import annotations
 import math
 
 import numpy as np
+
+from ventorum.panel3d.kernels import _DEGENERATE_EDGE, _PLANE_TOL_FACTOR, _input_eps
 
 try:
     from numba import njit, prange
@@ -62,32 +71,52 @@ if HAVE_NUMBA:
         return 2.0 * math.atan2(num, den)
 
     @njit(cache=True, inline="always")
-    def _solid_angle(x, y, z, xl, yl, elen, area):
+    def _plane_winding(x, y, xl, yl, elen, act, tol):
+        # Body-side limit in the on-plane band: in-plane angle of the panel.
+        total = 0.0
+        for k in range(4):
+            if act[k]:
+                kn = k + 1 if k < 3 else 0
+                ax = xl[k] - x
+                ay = yl[k] - y
+                bx = xl[kn] - x
+                by = yl[kn] - y
+                cr = ax * by - ay * bx
+                dt = ax * bx + ay * by
+                ra = math.hypot(ax, ay)
+                rb = math.hypot(bx, by)
+                on_edge = (abs(cr) <= tol * elen[k] and dt <= 0.0) or ra <= tol or rb <= tol
+                if not on_edge:
+                    total += math.atan2(cr, dt)
+        return total
+
+    @njit(cache=True, inline="always")
+    def _solid_angle(x, y, z, xl, yl, elen, act, tol):
         # Solid angle of the panel: triangles (0, 1, 2) and (0, 2, 3).
-        # On the panel plane the body-side limit holds: 2 pi inside, 0 outside.
+        # In the on-plane band the body-side limit holds.
+        if abs(z) <= tol:
+            return _plane_winding(x, y, xl, yl, elen, act, tol)
         r0 = math.sqrt((x - xl[0]) ** 2 + (y - yl[0]) ** 2 + z * z)
         r1 = math.sqrt((x - xl[1]) ** 2 + (y - yl[1]) ** 2 + z * z)
         r2 = math.sqrt((x - xl[2]) ** 2 + (y - yl[2]) ** 2 + z * z)
         r3 = math.sqrt((x - xl[3]) ** 2 + (y - yl[3]) ** 2 + z * z)
         om = _tri_omega(x, y, z, xl[0], yl[0], xl[1], yl[1], xl[2], yl[2], r0, r1, r2)
-        if elen[3] > 1e-14:
+        if act[3]:
             om += _tri_omega(x, y, z, xl[0], yl[0], xl[2], yl[2], xl[3], yl[3], r0, r2, r3)
-        if abs(z) < 1e-14:
-            inside = True
-            for k in range(4):
-                if elen[k] > 1e-14:
-                    kn = k + 1 if k < 3 else 0
-                    cross = (xl[kn] - xl[k]) * (y - yl[k]) - (yl[kn] - yl[k]) * (x - xl[k])
-                    if cross < -1e-12 * area:
-                        inside = False
-                        break
-            om = 2.0 * math.pi if inside else 0.0
         return om
 
     @njit(cache=True, inline="always")
-    def _geom_row(pan, cen, nor, lax, maxis, xl, yl, dx, dy, elen, cor):
+    def _geom_row(pan, cen, nor, lax, maxis, xl, yl, dx, dy, elen, act, cor, eps):
         # Geometry of one panel: frame, projection, edges, area, diameter.
-        # Same steps as the reference precompute. Returns (area, diameter).
+        # Same steps as the reference precompute. Returns (area, diameter, tol).
+        diam = 0.0
+        for a in range(4):
+            for b in range(a + 1, 4):
+                dd = math.sqrt((pan[a, 0] - pan[b, 0]) ** 2 + (pan[a, 1] - pan[b, 1]) ** 2
+                               + (pan[a, 2] - pan[b, 2]) ** 2)
+                if dd > diam:
+                    diam = dd
+        tiny = _DEGENERATE_EDGE * diam
         d13x = pan[2, 0] - pan[0, 0]
         d13y = pan[2, 1] - pan[0, 1]
         d13z = pan[2, 2] - pan[0, 2]
@@ -113,7 +142,7 @@ if HAVE_NUMBA:
             cor[k, 2] = pan[k, 2] - dist * nor[2]
         t43 = math.sqrt((pan[3, 0] - pan[2, 0]) ** 2 + (pan[3, 1] - pan[2, 1]) ** 2
                         + (pan[3, 2] - pan[2, 2]) ** 2)
-        if t43 < 1e-12:
+        if t43 <= tiny:
             cen[0] = (cor[0, 0] + cor[1, 0] + cor[2, 0]) / 3.0
             cen[1] = (cor[0, 1] + cor[1, 1] + cor[2, 1]) / 3.0
             cen[2] = (cor[0, 2] + cor[1, 2] + cor[2, 2]) / 3.0
@@ -129,7 +158,7 @@ if HAVE_NUMBA:
         v13y = cor[2, 1] - cor[0, 1]
         v13z = cor[2, 2] - cor[0, 2]
         l13 = math.sqrt(v13x * v13x + v13y * v13y + v13z * v13z)
-        if l12 < 1e-12:
+        if l12 <= tiny:
             lrx, lry, lrz, ln = v13x, v13y, v13z, l13
         else:
             lrx, lry, lrz, ln = v12x, v12y, v12z, l12
@@ -150,28 +179,37 @@ if HAVE_NUMBA:
             kn = k + 1 if k < 3 else 0
             dx[k] = xl[kn] - xl[k]
             dy[k] = yl[kn] - yl[k]
-            elen[k] = math.sqrt(dx[k] * dx[k] + dy[k] * dy[k])
-        diam = 0.0
-        for a in range(4):
-            for b in range(a + 1, 4):
-                dd = math.sqrt((pan[a, 0] - pan[b, 0]) ** 2 + (pan[a, 1] - pan[b, 1]) ** 2
-                               + (pan[a, 2] - pan[b, 2]) ** 2)
-                if dd > diam:
-                    diam = dd
-        return area, diam
+            elen[k] = math.hypot(dx[k], dy[k])
+            act[k] = elen[k] > tiny
+        cnorm = math.sqrt(cen[0] * cen[0] + cen[1] * cen[1] + cen[2] * cen[2])
+        tol = _PLANE_TOL_FACTOR * eps * (cnorm + diam)
+        return area, diam, tol
 
     @njit(cache=True, inline="always")
     def _edge_log(x, y, z, xa, ya, xb, yb, dk):
-        # Log term of one edge: log((rk + rkp1 + dk) / (rk + rkp1 - dk)).
-        rk = math.sqrt((x - xa) ** 2 + (y - ya) ** 2 + z * z)
-        rkp1 = math.sqrt((x - xb) ** 2 + (y - yb) ** 2 + z * z)
-        den = rk + rkp1 - dk
-        if den > 1e-15:
-            return math.log((rk + rkp1 + dk) / den)
+        # Edge logarithm ln((ra + rb + dk) / (ra + rb - dk)) without cancellation.
+        ax = xa - x
+        ay = ya - y
+        bx = xb - x
+        by = yb - y
+        z2 = z * z
+        ra = math.sqrt(ax * ax + ay * ay + z2)
+        rb = math.sqrt(bx * bx + by * by + z2)
+        dot = ax * bx + ay * by + z2
+        rr = ra * rb
+        if dot >= 0.0:
+            s = rr + dot
+        else:
+            cr = ax * by - ay * bx
+            dd = rr - dot
+            s = (cr * cr + z2 * dk * dk) / (dd if dd > _FLOOR else _FLOOR)
+        if s > 0.0:
+            return 2.0 * math.log(ra + rb + dk) - math.log(2.0 * s)
         return 0.0
 
     @njit(cache=True, inline="always")
-    def _pair_bc(tx, ty, tz, cen, nor, lax, maxis, xl, yl, dx, dy, elen, area, diam, far_ratio, use_far):
+    def _pair_bc(tx, ty, tz, cen, nor, lax, maxis, xl, yl, dx, dy, elen, act, area, diam, tol,
+                 far_ratio, use_far):
         # Source (B) and doublet (C) potentials of one target-panel pair.
         rx = tx - cen[0]
         ry = ty - cen[1]
@@ -188,10 +226,10 @@ if HAVE_NUMBA:
         x = rx * lax[0] + ry * lax[1] + rz * lax[2]
         y = rx * maxis[0] + ry * maxis[1] + rz * maxis[2]
         z = rx * nor[0] + ry * nor[1] + rz * nor[2]
-        om = _solid_angle(x, y, z, xl, yl, elen, area)
+        om = _solid_angle(x, y, z, xl, yl, elen, act, tol)
         s = 0.0
         for k in range(4):
-            if elen[k] > 1e-14:
+            if act[k]:
                 kn = k + 1 if k < 3 else 0
                 dk = elen[k]
                 dk_safe = dk if dk > _FLOOR else _FLOOR
@@ -203,9 +241,9 @@ if HAVE_NUMBA:
         return b, c
 
     @njit(cache=True, inline="always")
-    def _pair_source_vel(tx, ty, tz, cen, nor, lax, maxis, xl, yl, dx, dy, elen, area, diam,
-                         far_ratio, use_far):
-        # Induced velocity per unit source strength of one target-panel pair in m/s.
+    def _pair_source_vel(tx, ty, tz, cen, nor, lax, maxis, xl, yl, dx, dy, elen, act, area, diam,
+                         tol, far_ratio, use_far):
+        # Induced velocity (+grad Phi) per unit source strength of one pair in m/s.
         rx = tx - cen[0]
         ry = ty - cen[1]
         rz = tz - cen[2]
@@ -213,32 +251,32 @@ if HAVE_NUMBA:
         if use_far and r > far_ratio * diam:
             r3 = r * r * r
             r3 = r3 if r3 > _FLOOR else _FLOOR
-            f = -_INV_4PI * area / r3
+            f = _INV_4PI * area / r3
             return f * rx, f * ry, f * rz
         x = rx * lax[0] + ry * lax[1] + rz * lax[2]
         y = rx * maxis[0] + ry * maxis[1] + rz * maxis[2]
         z = rx * nor[0] + ry * nor[1] + rz * nor[2]
-        om = _solid_angle(x, y, z, xl, yl, elen, area)
+        om = _solid_angle(x, y, z, xl, yl, elen, act, tol)
         svx = 0.0
         svy = 0.0
         for k in range(4):
-            if elen[k] > 1e-14:
+            if act[k]:
                 kn = k + 1 if k < 3 else 0
                 dk = elen[k]
-                dk_safe = dk if dk > _FLOOR else _FLOOR
+                inv_dk = 1.0 / (dk if dk > _FLOOR else _FLOOR)
                 lk = _edge_log(x, y, z, xl[k], yl[k], xl[kn], yl[kn], dk)
-                svx += -(dy[k] / dk_safe) * lk
-                svy += (dx[k] / dk_safe) * lk
+                svx += dy[k] * inv_dk * lk
+                svy += -dx[k] * inv_dk * lk
         vx = _INV_4PI * svx
         vy = _INV_4PI * svy
-        vz = _INV_4PI * om
+        vz = -_INV_4PI * om
         gx = vx * lax[0] + vy * maxis[0] + vz * nor[0]
         gy = vx * lax[1] + vy * maxis[1] + vz * nor[1]
         gz = vx * lax[2] + vy * maxis[2] + vz * nor[2]
         return gx, gy, gz
 
     @njit(cache=True, inline="always")
-    def _seg_vel(tx, ty, tz, sax, say, saz, eax, eay, eaz):
+    def _seg_vel(tx, ty, tz, sax, say, saz, eax, eay, eaz, tol):
         # Biot-Savart velocity of one straight vortex segment with unit circulation.
         r1x = tx - sax
         r1y = ty - say
@@ -255,20 +293,29 @@ if HAVE_NUMBA:
         cr2 = cx * cx + cy * cy + cz * cz
         n1 = math.sqrt(r1x * r1x + r1y * r1y + r1z * r1z)
         n2 = math.sqrt(r2x * r2x + r2y * r2y + r2z * r2z)
-        inv1 = 1.0 / (n1 if n1 > _FLOOR else _FLOOR)
-        inv2 = 1.0 / (n2 if n2 > _FLOOR else _FLOOR)
-        proj = (r0x * (r1x * inv1 - r2x * inv2) + r0y * (r1y * inv1 - r2y * inv2)
-                + r0z * (r1z * inv1 - r2z * inv2))
-        l0 = math.sqrt(r0x * r0x + r0y * r0y + r0z * r0z)
-        if cr2 > 1e-280 and l0 > 1e-14:
-            f = _INV_4PI * proj / cr2
-            return cx * f, cy * f, cz * f
-        return 0.0, 0.0, 0.0
+        dot = r1x * r2x + r1y * r2y + r1z * r2z
+        nn = n1 * n2
+        r0_sq = r0x * r0x + r0y * r0y + r0z * r0z
+        if n1 <= tol or n2 <= tol:
+            return 0.0, 0.0, 0.0
+        if dot < 0.0 and cr2 <= tol * tol * r0_sq:
+            return 0.0, 0.0, 0.0
+        if dot >= 0.0:
+            den = nn + dot
+        else:
+            dd = nn - dot
+            den = cr2 / (dd if dd > _FLOOR else _FLOOR)
+        q = nn * den
+        if not q > 0.0:
+            return 0.0, 0.0, 0.0
+        f = _INV_4PI * (n1 + n2) / q
+        if not math.isfinite(f):
+            return 0.0, 0.0, 0.0
+        return cx * f, cy * f, cz * f
 
     @njit(cache=True, inline="always")
-    def _pair_doublet_vel(tx, ty, tz, cen, nor, lax, maxis, xl, yl, dx, dy, elen, cor, area, diam,
-                          far_ratio, use_far):
-        # Induced velocity per unit doublet strength of one pair in m/s.
+    def _pair_doublet_vel(tx, ty, tz, cen, nor, act, cor, area, diam, tol, far_ratio, use_far):
+        # Induced velocity (+grad Phi) per unit doublet strength of one pair in m/s.
         rx = tx - cen[0]
         ry = ty - cen[1]
         rz = tz - cen[2]
@@ -279,7 +326,7 @@ if HAVE_NUMBA:
             r3 = r3 if r3 > _FLOOR else _FLOOR
             r5 = r3 * r * r
             r5 = r5 if r5 > _FLOOR else _FLOOR
-            f = _INV_4PI * area
+            f = -_INV_4PI * area
             gx = f * (nor[0] / r3 - 3.0 * rdotn * rx / r5)
             gy = f * (nor[1] / r3 - 3.0 * rdotn * ry / r5)
             gz = f * (nor[2] / r3 - 3.0 * rdotn * rz / r5)
@@ -288,18 +335,18 @@ if HAVE_NUMBA:
         ringy = 0.0
         ringz = 0.0
         for k in range(4):
-            if elen[k] > 1e-14:
+            if act[k]:
                 kn = k + 1 if k < 3 else 0
                 sx, sy, sz = _seg_vel(tx, ty, tz, cor[k, 0], cor[k, 1], cor[k, 2],
-                                      cor[kn, 0], cor[kn, 1], cor[kn, 2])
+                                      cor[kn, 0], cor[kn, 1], cor[kn, 2], tol)
                 ringx += sx
                 ringy += sy
                 ringz += sz
-        return -ringx, -ringy, -ringz
+        return ringx, ringy, ringz
 
-    @njit(cache=True, parallel=True, fastmath=False)
-    def _influence_nb(P, panels, B, C, far_ratio, use_far):
-        # Influence matrices: prange over the target points.
+    @njit(cache=True)
+    def _geometry_nb(panels, eps):
+        # Geometry of all panels (serial loop, cheap next to the pair loop).
         nM = panels.shape[0]
         cen = np.empty((nM, 3), dtype=np.float64)
         nor = np.empty((nM, 3), dtype=np.float64)
@@ -310,85 +357,67 @@ if HAVE_NUMBA:
         dx = np.empty((nM, 4), dtype=np.float64)
         dy = np.empty((nM, 4), dtype=np.float64)
         elen = np.empty((nM, 4), dtype=np.float64)
+        act = np.empty((nM, 4), dtype=np.bool_)
         cor = np.empty((nM, 4, 3), dtype=np.float64)
         area = np.empty(nM, dtype=np.float64)
         diam = np.empty(nM, dtype=np.float64)
+        tol = np.empty(nM, dtype=np.float64)
         for j in range(nM):
-            area[j], diam[j] = _geom_row(panels[j], cen[j], nor[j], lax[j], maxis[j], xl[j],
-                                         yl[j], dx[j], dy[j], elen[j], cor[j])
+            area[j], diam[j], tol[j] = _geom_row(panels[j], cen[j], nor[j], lax[j], maxis[j], xl[j],
+                                                 yl[j], dx[j], dy[j], elen[j], act[j], cor[j], eps)
+        return cen, nor, lax, maxis, xl, yl, dx, dy, elen, act, cor, area, diam, tol
+
+    @njit(cache=True, parallel=True, fastmath=False)
+    def _influence_nb(P, panels, B, C, far_ratio, use_far, eps):
+        # Influence matrices: prange over the target points.
+        cen, nor, lax, maxis, xl, yl, dx, dy, elen, act, cor, area, diam, tol = _geometry_nb(panels, eps)
+        nM = panels.shape[0]
         for i in prange(P.shape[0]):
             for j in range(nM):
                 b, c = _pair_bc(P[i, 0], P[i, 1], P[i, 2], cen[j], nor[j], lax[j], maxis[j],
-                                xl[j], yl[j], dx[j], dy[j], elen[j], area[j], diam[j],
-                                far_ratio, use_far)
+                                xl[j], yl[j], dx[j], dy[j], elen[j], act[j], area[j], diam[j],
+                                tol[j], far_ratio, use_far)
                 B[i, j] = b
                 C[i, j] = c
 
     @njit(cache=True, parallel=True, fastmath=False)
-    def _source_vel_nb(P, panels, V, far_ratio, use_far):
+    def _source_vel_nb(P, panels, V, far_ratio, use_far, eps):
         # Source velocities: prange over the target points.
+        cen, nor, lax, maxis, xl, yl, dx, dy, elen, act, cor, area, diam, tol = _geometry_nb(panels, eps)
         nM = panels.shape[0]
-        cen = np.empty((nM, 3), dtype=np.float64)
-        nor = np.empty((nM, 3), dtype=np.float64)
-        lax = np.empty((nM, 3), dtype=np.float64)
-        maxis = np.empty((nM, 3), dtype=np.float64)
-        xl = np.empty((nM, 4), dtype=np.float64)
-        yl = np.empty((nM, 4), dtype=np.float64)
-        dx = np.empty((nM, 4), dtype=np.float64)
-        dy = np.empty((nM, 4), dtype=np.float64)
-        elen = np.empty((nM, 4), dtype=np.float64)
-        cor = np.empty((nM, 4, 3), dtype=np.float64)
-        area = np.empty(nM, dtype=np.float64)
-        diam = np.empty(nM, dtype=np.float64)
-        for j in range(nM):
-            area[j], diam[j] = _geom_row(panels[j], cen[j], nor[j], lax[j], maxis[j], xl[j],
-                                         yl[j], dx[j], dy[j], elen[j], cor[j])
         for i in prange(P.shape[0]):
             for j in range(nM):
                 gx, gy, gz = _pair_source_vel(P[i, 0], P[i, 1], P[i, 2], cen[j], nor[j], lax[j],
-                                              maxis[j], xl[j], yl[j], dx[j], dy[j], elen[j],
-                                              area[j], diam[j], far_ratio, use_far)
+                                              maxis[j], xl[j], yl[j], dx[j], dy[j], elen[j], act[j],
+                                              area[j], diam[j], tol[j], far_ratio, use_far)
                 V[i, j, 0] = gx
                 V[i, j, 1] = gy
                 V[i, j, 2] = gz
 
     @njit(cache=True, parallel=True, fastmath=False)
-    def _doublet_vel_nb(P, panels, V, far_ratio, use_far):
+    def _doublet_vel_nb(P, panels, V, far_ratio, use_far, eps):
         # Doublet velocities: prange over the target points.
+        cen, nor, lax, maxis, xl, yl, dx, dy, elen, act, cor, area, diam, tol = _geometry_nb(panels, eps)
         nM = panels.shape[0]
-        cen = np.empty((nM, 3), dtype=np.float64)
-        nor = np.empty((nM, 3), dtype=np.float64)
-        lax = np.empty((nM, 3), dtype=np.float64)
-        maxis = np.empty((nM, 3), dtype=np.float64)
-        xl = np.empty((nM, 4), dtype=np.float64)
-        yl = np.empty((nM, 4), dtype=np.float64)
-        dx = np.empty((nM, 4), dtype=np.float64)
-        dy = np.empty((nM, 4), dtype=np.float64)
-        elen = np.empty((nM, 4), dtype=np.float64)
-        cor = np.empty((nM, 4, 3), dtype=np.float64)
-        area = np.empty(nM, dtype=np.float64)
-        diam = np.empty(nM, dtype=np.float64)
-        for j in range(nM):
-            area[j], diam[j] = _geom_row(panels[j], cen[j], nor[j], lax[j], maxis[j], xl[j],
-                                         yl[j], dx[j], dy[j], elen[j], cor[j])
         for i in prange(P.shape[0]):
             for j in range(nM):
-                gx, gy, gz = _pair_doublet_vel(P[i, 0], P[i, 1], P[i, 2], cen[j], nor[j], lax[j],
-                                               maxis[j], xl[j], yl[j], dx[j], dy[j], elen[j],
-                                               cor[j], area[j], diam[j], far_ratio, use_far)
+                gx, gy, gz = _pair_doublet_vel(P[i, 0], P[i, 1], P[i, 2], cen[j], nor[j], act[j],
+                                               cor[j], area[j], diam[j], tol[j], far_ratio, use_far)
                 V[i, j, 0] = gx
                 V[i, j, 1] = gy
                 V[i, j, 2] = gz
 
 
 def _work_arrays(collocation, panels):
-    """Return the target dtype and the float64 contiguous work arrays."""
+    """Return the target dtype, the float64 work arrays and the input epsilon [-]."""
     pts = np.asarray(collocation)
     pans = np.asarray(panels)
     target_dtype = np.result_type(pts.dtype, pans.dtype)
+    eps = _input_eps(pts, pans)
     return (target_dtype,
             np.ascontiguousarray(pts, dtype=np.float64),
-            np.ascontiguousarray(pans, dtype=np.float64))
+            np.ascontiguousarray(pans, dtype=np.float64),
+            eps)
 
 
 def _require_numba():
@@ -405,7 +434,7 @@ def source_velocity_numba(
     """Compute induced velocity per unit source strength at target points.
 
     Same results as :func:`ventorum.panel3d.kernels.source_velocity`,
-    in compiled code on the CPU.
+    in compiled code on the CPU. The velocity is +grad(Phi).
 
     Parameters
     ----------
@@ -420,15 +449,16 @@ def source_velocity_numba(
     Returns
     -------
     numpy.ndarray
-        Induced velocity vectors with shape (P, M, 3) in m/s. Dtype matches input.
+        Induced velocity vectors with shape (P, M, 3) in m/s per unit source
+        strength [m/s]. Dtype matches input.
     """
     _require_numba()
-    target_dtype, pts, pans = _work_arrays(points, panels)
+    target_dtype, pts, pans, eps = _work_arrays(points, panels)
     out = np.empty((pts.shape[0], pans.shape[0], 3), dtype=np.float64)
     if pts.shape[0] == 0 or pans.shape[0] == 0:
         return out.astype(target_dtype)
     use_far = not np.isinf(far_ratio)
-    _source_vel_nb(pts, pans, out, float(far_ratio), use_far)
+    _source_vel_nb(pts, pans, out, float(far_ratio), use_far, eps)
     return out.astype(target_dtype)
 
 
@@ -440,7 +470,7 @@ def doublet_velocity_numba(
     """Compute induced velocity per unit doublet strength at target points.
 
     Same results as :func:`ventorum.panel3d.kernels.doublet_velocity`,
-    in compiled code on the CPU.
+    in compiled code on the CPU. The velocity is +grad(Phi).
 
     Parameters
     ----------
@@ -455,15 +485,16 @@ def doublet_velocity_numba(
     Returns
     -------
     numpy.ndarray
-        Induced velocity vectors with shape (P, M, 3) in m/s. Dtype matches input.
+        Induced velocity vectors with shape (P, M, 3) in m/s per unit doublet
+        strength [m^2/s]. Dtype matches input.
     """
     _require_numba()
-    target_dtype, pts, pans = _work_arrays(points, panels)
+    target_dtype, pts, pans, eps = _work_arrays(points, panels)
     out = np.empty((pts.shape[0], pans.shape[0], 3), dtype=np.float64)
     if pts.shape[0] == 0 or pans.shape[0] == 0:
         return out.astype(target_dtype)
     use_far = not np.isinf(far_ratio)
-    _doublet_vel_nb(pts, pans, out, float(far_ratio), use_far)
+    _doublet_vel_nb(pts, pans, out, float(far_ratio), use_far, eps)
     return out.astype(target_dtype)
 
 
@@ -493,11 +524,11 @@ def influence_matrices_numba(
         (P, M) for doublet potentials. Dtype matches input.
     """
     _require_numba()
-    target_dtype, pts, pans = _work_arrays(collocation, panels)
+    target_dtype, pts, pans, eps = _work_arrays(collocation, panels)
     mat_b = np.empty((pts.shape[0], pans.shape[0]), dtype=np.float64)
     mat_c = np.empty((pts.shape[0], pans.shape[0]), dtype=np.float64)
     if pts.shape[0] == 0 or pans.shape[0] == 0:
         return mat_b.astype(target_dtype), mat_c.astype(target_dtype)
     use_far = not np.isinf(far_ratio)
-    _influence_nb(pts, pans, mat_b, mat_c, float(far_ratio), use_far)
+    _influence_nb(pts, pans, mat_b, mat_c, float(far_ratio), use_far, eps)
     return mat_b.astype(target_dtype), mat_c.astype(target_dtype)

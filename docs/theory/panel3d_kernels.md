@@ -36,9 +36,11 @@ Non-planar quadrilaterals are projected onto the mean plane through the corner a
 
 $$\mathbf{p}'_k = \mathbf{p}_k - [(\mathbf{p}_k - \mathbf{p}_{\text{avg}}) \cdot \hat{\mathbf{n}}] \hat{\mathbf{n}}$$
 
-The panel centroid $\mathbf{p}_0$ is the area centroid:
-* For quadrilaterals: $\mathbf{p}_0 = \frac{1}{4} \sum_{k=1}^4 \mathbf{p}'_k$.
-* For triangles ($\mathbf{p}_4 = \mathbf{p}_3$): $\mathbf{p}_0 = \frac{1}{3} (\mathbf{p}'_1 + \mathbf{p}'_2 + \mathbf{p}'_3)$.
+The panel reference point (collocation point) $\mathbf{p}_0$ is the corner average of the projected corners:
+* For quadrilaterals: $\mathbf{p}_0 = \frac{1}{4} \sum_{k=1}^4 \mathbf{p}'_k$. For a general quadrilateral this point is not the area centroid (for example, the area centroid of a trapezoid is nearer to its longer side).
+* For triangles ($\mathbf{p}_4 = \mathbf{p}_3$): $\mathbf{p}_0 = \frac{1}{3} (\mathbf{p}'_1 + \mathbf{p}'_2 + \mathbf{p}'_3)$, which is also the area centroid.
+
+A corner counts as repeated (triangle) and an edge counts as degenerate when its length is at most $10^{-12}$ times the panel diameter.
 
 ### Local Coordinate Frame
 
@@ -64,7 +66,11 @@ The edge logarithmic integral is:
 
 $$L_k = \ln\left( \frac{r_k + r_{k+1} + d_k}{r_k + r_{k+1} - d_k} \right)$$
 
-When the target point lies on the edge segment ($r_k + r_{k+1} - d_k \le 0$), $L_k = 0$.
+The denominator has cancellation near the edge. The kernels use the identities
+
+$$r_k + r_{k+1} - d_k = \frac{2 (r_k r_{k+1} + \mathbf{a} \cdot \mathbf{b})}{r_k + r_{k+1} + d_k}, \qquad r_k r_{k+1} + \mathbf{a} \cdot \mathbf{b} = \frac{\|\mathbf{a} \times \mathbf{b}\|^2}{r_k r_{k+1} - \mathbf{a} \cdot \mathbf{b}} \ \text{for} \ \mathbf{a} \cdot \mathbf{b} < 0,$$
+
+where $\mathbf{a}$ and $\mathbf{b}$ are the vectors from the target to the two edge ends and $\|\mathbf{a} \times \mathbf{b}\|^2 = d_k^2 (r_{\perp, k}^2 + z^2)$. When the target lies on the edge segment or on an edge end, $L_k$ is infinite; the kernels set $L_k = 0$ there (the finite part). The source potential stays continuous, because $r_{\perp, k} L_k \to 0$.
 
 ## Sign Conventions
 
@@ -74,10 +80,21 @@ When the target point lies on the edge segment ($r_k + r_{k+1} - d_k \le 0$), $L
    * Approaching the panel from the fluid side ($z \to 0^+$), $\Phi_D \to -1/2$.
    * Approaching the panel from the body side ($z \to 0^-$), $\Phi_D \to +1/2$.
    * Total potential jump: $\Phi_D^+ - \Phi_D^- = -1$.
-4. Boundary condition limit: When evaluating self-influence at the panel centroid on the panel plane ($z = 0$), the value is taken as the limit from the body (interior) side, giving $+1/2$. Outside the panel on the plane, the doublet potential is 0.
-5. Velocity definition: Fluid velocity is the negative gradient of potential:
+4. On-plane band: a target counts as a point of the panel plane when
 
-$$\mathbf{V} = -\nabla \Phi$$
+   $$|z| \le \tau = 32 \, \epsilon \, (\|\mathbf{p}_0\| + D),$$
+
+   with $\epsilon$ the machine epsilon of the input dtype (float64 or float32) and $D$ the panel diameter. The band is relative to the panel size and to the coordinate magnitude. So the round-off of collocation points far from the origin, or of float32 inputs, does not move a self term to the other side of the panel.
+5. Body-side limit in the band: the doublet potential is the limit from the body (interior) side. It equals $W / (4 \pi)$, where $W$ is the angle that the panel subtends in its plane at the target:
+
+   $$W = \sum_k \operatorname{atan2}\left(\mathbf{a}_k \times \mathbf{a}_{k+1}, \ \mathbf{a}_k \cdot \mathbf{a}_{k+1}\right), \qquad \mathbf{a}_k = (x_k - x, \ y_k - y).$$
+
+   An edge that holds the target (distance from its line at most $\tau$ and between its ends, or an end within $\tau$) adds nothing. This gives $+1/2$ inside the panel (the self-influence at the own centroid, consistent with the internal Dirichlet condition), $0$ outside, $+1/4$ on an edge and $\theta / (4 \pi)$ at a corner with the interior angle $\theta$. These values are also the limits from the body side along the normal.
+6. Velocity definition: the kernels return the gradient of the potential,
+
+   $$\mathbf{V} = +\nabla \Phi.$$
+
+   This is the convention of the solver and its post-processing (the perturbation velocity is the gradient of the perturbation potential). A unit source pushes the fluid away from the panel, and the normal velocity increases by $1$ from the body side to the fluid side.
 
 ## Exact Influence Kernels
 
@@ -97,13 +114,19 @@ $$\Phi_D = \frac{\Omega}{4 \pi}$$
 
 ### Doublet Velocity
 
-By Stokes theorem, the velocity induced by a constant-strength doublet panel equals the velocity of an equivalent vortex ring of circulation $\Gamma = 1$ running along the panel perimeter:
+By Stokes theorem, the velocity induced by a constant-strength doublet panel equals the velocity of an equivalent vortex ring of circulation $\Gamma = 1$ that runs along the panel perimeter in the corner order (Katz and Plotkin 2001, section 10.4):
 
-$$\mathbf{V}_D = -\mathbf{v}_{\text{ring}} = -\sum_{k=1}^4 \mathbf{v}_{\text{segment}}(\mathbf{p}'_k \to \mathbf{p}'_{k+1})$$
+$$\mathbf{V}_D = \nabla \Phi_D = \mathbf{v}_{\text{ring}} = \sum_{k=1}^4 \mathbf{v}_{\text{segment}}(\mathbf{p}'_k \to \mathbf{p}'_{k+1})$$
 
-Each straight vortex segment velocity is evaluated via the Biot-Savart law:
+Each straight vortex segment velocity comes from the Biot-Savart law. With $\mathbf{r}_1 = \mathbf{x} - \mathbf{p}'_k$, $\mathbf{r}_2 = \mathbf{x} - \mathbf{p}'_{k+1}$ and $\mathbf{r}_0 = \mathbf{r}_1 - \mathbf{r}_2$, the usual form is
 
-$$\mathbf{v}_{\text{segment}} = \frac{1}{4 \pi} \frac{\mathbf{r}_1 \times \mathbf{r}_2}{\|\mathbf{r}_1 \times \mathbf{r}_2\|^2} \left[ \mathbf{r}_0 \cdot \left( \frac{\mathbf{r}_1}{\|\mathbf{r}_1\|} - \frac{\mathbf{r}_2}{\|\mathbf{r}_2\|} \right) \right]$$
+$$\mathbf{v}_{\text{segment}} = \frac{1}{4 \pi} \frac{\mathbf{r}_1 \times \mathbf{r}_2}{\|\mathbf{r}_1 \times \mathbf{r}_2\|^2} \left[ \mathbf{r}_0 \cdot \left( \frac{\mathbf{r}_1}{r_1} - \frac{\mathbf{r}_2}{r_2} \right) \right].$$
+
+The expansions $\mathbf{r}_0 \cdot (\mathbf{r}_1 / r_1 - \mathbf{r}_2 / r_2) = (r_1 + r_2)(r_1 r_2 - \mathbf{r}_1 \cdot \mathbf{r}_2) / (r_1 r_2)$ and $\|\mathbf{r}_1 \times \mathbf{r}_2\|^2 = (r_1 r_2)^2 - (\mathbf{r}_1 \cdot \mathbf{r}_2)^2$ give the identical form that the kernels use:
+
+$$\mathbf{v}_{\text{segment}} = \frac{1}{4 \pi} \frac{(r_1 + r_2) \, (\mathbf{r}_1 \times \mathbf{r}_2)}{r_1 r_2 \, (r_1 r_2 + \mathbf{r}_1 \cdot \mathbf{r}_2)}.$$
+
+This form has no cancellation on the extension of the segment line, where the velocity is zero. For $\mathbf{r}_1 \cdot \mathbf{r}_2 < 0$ the kernels evaluate $r_1 r_2 + \mathbf{r}_1 \cdot \mathbf{r}_2 = \|\mathbf{r}_1 \times \mathbf{r}_2\|^2 / (r_1 r_2 - \mathbf{r}_1 \cdot \mathbf{r}_2)$. A target on the segment (within $\tau$ of its line, between its ends) or within $\tau$ of an end is on the vortex line. The kernels then drop that segment (zero contribution) and keep the finite rest.
 
 ### Source Potential
 
@@ -111,15 +134,19 @@ The source potential per unit strength is:
 
 $$\Phi_S = \frac{1}{4 \pi} \left[ \sum_{k=1}^4 r_{\perp, k} L_k - z \Omega \right]$$
 
+In the on-plane band, $\Omega$ is the body-side limit $W$.
+
 ### Source Velocity
 
-In local panel coordinates:
+In local panel coordinates ($\mathbf{V}_S = +\nabla \Phi_S$):
 
-$$V_{S, x} = -\frac{1}{4 \pi} \sum_{k=1}^4 \frac{y_{k+1} - y_k}{d_k} L_k$$
+$$V_{S, x} = +\frac{1}{4 \pi} \sum_{k=1}^4 \frac{y_{k+1} - y_k}{d_k} L_k$$
 
-$$V_{S, y} = +\frac{1}{4 \pi} \sum_{k=1}^4 \frac{x_{k+1} - x_k}{d_k} L_k$$
+$$V_{S, y} = -\frac{1}{4 \pi} \sum_{k=1}^4 \frac{x_{k+1} - x_k}{d_k} L_k$$
 
-$$V_{S, z} = +\frac{1}{4 \pi} \Omega = -\Phi_D$$
+$$V_{S, z} = -\frac{1}{4 \pi} \Omega = -\Phi_D$$
+
+On the fluid side next to the panel ($\Omega \to -2 \pi$) the normal component tends to $+1/2$; on the body side ($\Omega \to +2 \pi$) it tends to $-1/2$. In the on-plane band the kernels use the body-side value. On an edge the in-plane components have a logarithmic singularity; the kernels drop the singular edge term there.
 
 In global Cartesian coordinates:
 
@@ -129,15 +156,25 @@ $$\mathbf{V}_S = V_{S, x} \hat{\mathbf{l}} + V_{S, y} \hat{\mathbf{m}} + V_{S, z
 
 When the distance $r = \|\mathbf{x} - \mathbf{p}_0\|$ exceeds `far_ratio` times the panel diameter $D = \max_{i < j} \|\mathbf{p}_i - \mathbf{p}_j\|$, point singularity expansions are used:
 
-$$\Phi_S^{\text{far}} = -\frac{A}{4 \pi r}, \quad \mathbf{V}_S^{\text{far}} = -\frac{A \mathbf{r}}{4 \pi r^3}$$
+$$\Phi_S^{\text{far}} = -\frac{A}{4 \pi r}, \quad \mathbf{V}_S^{\text{far}} = +\frac{A \mathbf{r}}{4 \pi r^3}$$
 
-$$\Phi_D^{\text{far}} = -\frac{A (\mathbf{r} \cdot \hat{\mathbf{n}})}{4 \pi r^3}, \quad \mathbf{V}_D^{\text{far}} = \frac{A}{4 \pi} \left[ \frac{\hat{\mathbf{n}}}{r^3} - \frac{3 (\mathbf{r} \cdot \hat{\mathbf{n}}) \mathbf{r}}{r^5} \right]$$
+$$\Phi_D^{\text{far}} = -\frac{A (\mathbf{r} \cdot \hat{\mathbf{n}})}{4 \pi r^3}, \quad \mathbf{V}_D^{\text{far}} = -\frac{A}{4 \pi} \left[ \frac{\hat{\mathbf{n}}}{r^3} - \frac{3 (\mathbf{r} \cdot \hat{\mathbf{n}}) \mathbf{r}}{r^5} \right]$$
 
 Setting `far_ratio = np.inf` disables the approximation and uses exact integration everywhere.
 
+### Documented accuracy of the point approximation
+
+The point formulas leave out the quadrupole term, of relative order $(D / r)^2$. The tests in `tests/test_panel3d_kernels.py` check this accuracy against the exact kernels for a square, a skewed quadrilateral, an aspect-ratio-20 rectangle and a triangle:
+
+* at $r = 10 D$: relative error at most $10^{-3}$ for the source potential, $2 \times 10^{-3}$ for the doublet potential and $3 \times 10^{-3}$ for the velocities;
+* at $r = 25 D$: relative error at most $10^{-3}$ for all four quantities.
+
+The error grows as $(D / r)^2$ toward the switch distance of the default `far_ratio = 5`. Use a larger `far_ratio` (or `np.inf`) when the influence of single panels at 5 to 10 diameters must be more accurate.
+
 ## References
 
-* J. L. Hess and A. M. O. Smith, "Calculation of Nonlifting Potential Flow About Arbitrary Three-Dimensional Bodies", Progress in Aeronautical Sciences 8 (1967) 1-138.
+* J. L. Hess and A. M. O. Smith, "Calculation of non-lifting potential flow about arbitrary three-dimensional bodies", Journal of Ship Research 8 (1964) 22-44.
+* J. L. Hess and A. M. O. Smith, "Calculation of potential flow about arbitrary bodies", Progress in Aeronautical Sciences 8 (1967) 1-138, Pergamon Press.
 * J. Katz and A. Plotkin, "Low-Speed Aerodynamics", 2nd ed., Cambridge University Press, 2001.
 * J. N. Newman, "Distributions of sources and normal dipoles over a quadrilateral panel", Journal of Engineering Mathematics 20 (1986) 113-126.
 * A. van Oosterom and J. Strackee, "The solid angle of a plane triangle", IEEE Transactions on Biomedical Engineering 30 (1983) 125-126.

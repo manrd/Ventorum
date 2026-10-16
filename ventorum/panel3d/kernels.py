@@ -14,24 +14,41 @@ Conventions
   n_raw = (p3 - p1) x (p4 - p2).
 * Triangular panels: Specified with the fourth corner equal to the third corner.
 * Planar projection: Non-planar quadrilaterals are projected onto the mean plane
-  passing through the centroid with normal n_raw.
+  passing through the corner average with normal n_raw.
+* Collocation point: the corner average of the projected corners (the average
+  of the three corners for a triangle). For a general quadrilateral this point
+  is not the area centroid.
 * Source potential: Unit-strength source potential in the far field is -1 / (4 pi r).
 * Doublet potential: Unit-strength doublet with axis along the panel unit normal.
   The potential approaching the panel centroid from the fluid side tends to -1/2,
   and from the body side tends to +1/2.
-* Targets on the panel plane: The self-influence at the own centroid evaluates to the
-  limit from the body (interior) side (+1/2), consistent with the internal Dirichlet
-  boundary condition. On the plane outside the panel, the doublet potential is 0.
-* Velocity: The fluid velocity is defined as the negative gradient of the potential,
-  V = -grad(Phi).
+* Targets on the panel plane: a target is on the plane when its distance from
+  the plane is at most a tolerance relative to the panel size and to the
+  coordinate magnitude (32 times the machine epsilon of the input dtype times
+  the sum of the panel diameter and the distance of the panel centroid from
+  the origin). The doublet potential there is the limit from the body side:
+  +1/2 inside the panel, 0 outside the panel, +1/4 on an edge and
+  theta / (4 pi) at a corner with the interior angle theta [rad]. The
+  self-influence at the own centroid is therefore +1/2, consistent with the
+  internal Dirichlet boundary condition.
+* Velocity: the kernels return the gradient of the potential, V = +grad(Phi),
+  in m/s per unit singularity strength. This is the convention of the solver
+  and its post-processing (the perturbation velocity is +grad of the
+  perturbation potential).
+* Singular target positions: a target on a panel edge or corner gives an
+  infinite velocity. The kernels drop the singular edge term there (the
+  vortex segment or the edge logarithm of that edge) and keep the finite rest.
 * Far field: Beyond far_ratio times the panel diameter (default 5.0), point source
   and point doublet expansions are used. Setting far_ratio=np.inf disables the
   far-field switch and uses exact integration everywhere.
 
 References
 ----------
-* J. L. Hess and A. M. O. Smith, "Calculation of Nonlifting Potential Flow About
-  Arbitrary Three-Dimensional Bodies", Progress in Aeronautical Sciences 8 (1967) 1-138.
+* J. L. Hess and A. M. O. Smith, "Calculation of non-lifting potential flow
+  about arbitrary three-dimensional bodies", Journal of Ship Research 8 (1964)
+  22-44.
+* J. L. Hess and A. M. O. Smith, "Calculation of potential flow about arbitrary
+  bodies", Progress in Aeronautical Sciences 8 (1967) 1-138, Pergamon Press.
 * J. Katz and A. Plotkin, "Low-Speed Aerodynamics", 2nd ed., Cambridge University
   Press, 2001, section 10.4 and chapter 12.
 * J. N. Newman, "Distributions of sources and normal dipoles over a quadrilateral
@@ -57,6 +74,36 @@ __all__ = [
 
 _INV_4PI = 1.0 / (4.0 * np.pi)
 _CHUNK_BUDGET = 2_000_000
+#: On-plane band: this factor times the input machine epsilon times the
+#: panel scale (diameter plus distance of the centroid from the origin).
+_PLANE_TOL_FACTOR = 32.0
+#: Edge length [-] (fraction of the panel diameter) below which an edge
+#: counts as degenerate (the closing edge of a triangle).
+_DEGENERATE_EDGE = 1e-12
+
+
+def _input_eps(*arrays) -> float:
+    """Return the largest machine epsilon of the floating dtypes of the inputs.
+
+    Integer and other non-floating inputs count as float64.
+
+    Parameters
+    ----------
+    *arrays : array_like
+        Input arrays (target points, panel corners) [m].
+
+    Returns
+    -------
+    float
+        Machine epsilon [-] of the coarsest floating input dtype, at least
+        the float64 epsilon.
+    """
+    eps = float(np.finfo(np.float64).eps)
+    for a in arrays:
+        dt = np.asarray(a).dtype
+        if np.issubdtype(dt, np.floating):
+            eps = max(eps, float(np.finfo(dt).eps))
+    return eps
 
 
 @dataclass(slots=True)
@@ -75,25 +122,41 @@ class _PanelGeometry:
     edge_len: np.ndarray        # (M, 4) in m
     area: np.ndarray            # (M,) in m^2
     diameter: np.ndarray        # (M,) in m
+    edge_active: np.ndarray     # (M, 4) bool, False for a degenerate edge
+    plane_tol: np.ndarray       # (M,) in m, on-plane band half width
 
 
-def _precompute_geometry(panels: np.ndarray) -> _PanelGeometry:
+def _precompute_geometry(panels: np.ndarray, eps: float | None = None) -> _PanelGeometry:
     """Precompute frame, projection, and edge parameters for panels.
 
     Parameters
     ----------
     panels : numpy.ndarray
         Array of corner coordinates with shape (M, 4, 3) in m.
+    eps : float or None
+        Machine epsilon [-] of the input data. It sets the on-plane band
+        ``plane_tol``. None uses the epsilon of the dtype of *panels*.
 
     Returns
     -------
     _PanelGeometry
         Precomputed geometric parameters.
     """
+    if eps is None:
+        eps = _input_eps(panels)
     p1 = panels[:, 0, :]
     p2 = panels[:, 1, :]
     p3 = panels[:, 2, :]
     p4 = panels[:, 3, :]
+
+    # Panel diameter: maximum distance between corners
+    diam_sq = np.zeros(panels.shape[0], dtype=panels.dtype)
+    for i in range(4):
+        for j in range(i + 1, 4):
+            d_sq = np.sum((panels[:, i, :] - panels[:, j, :]) ** 2, axis=-1)
+            diam_sq = np.maximum(diam_sq, d_sq)
+    diameter = np.sqrt(diam_sq)
+    tiny = _DEGENERATE_EDGE * diameter
 
     d13 = p3 - p1
     d24 = p4 - p2
@@ -114,8 +177,8 @@ def _precompute_geometry(panels: np.ndarray) -> _PanelGeometry:
     p4_p = p4 - dist_p4 * normal
     corners_p = np.stack([p1_p, p2_p, p3_p, p4_p], axis=1)
 
-    # Panel centroid: true area centroid (average of 3 vertices for triangle where p4 == p3)
-    is_tri = np.linalg.norm(p4 - p3, axis=-1) < 1e-12
+    # Collocation point: corner average (average of 3 corners for a triangle)
+    is_tri = np.linalg.norm(p4 - p3, axis=-1) <= tiny
     centroid = np.where(is_tri[:, None], (p1_p + p2_p + p3_p) / 3.0, 0.25 * (p1_p + p2_p + p3_p + p4_p))
 
     # In-plane orthonormal axes
@@ -124,7 +187,7 @@ def _precompute_geometry(panels: np.ndarray) -> _PanelGeometry:
     # Fallback to p3 - p1 if side 1-2 has zero length
     v13 = p3_p - p1_p
     len13 = np.linalg.norm(v13, axis=-1, keepdims=True)
-    use_13 = len12 < 1e-12
+    use_13 = len12 <= tiny[:, None]
     l_raw = np.where(use_13, v13, v12)
     l_norm = np.where(use_13, len13, len12)
     l_axis = l_raw / np.maximum(l_norm, 1e-300)
@@ -144,15 +207,9 @@ def _precompute_geometry(panels: np.ndarray) -> _PanelGeometry:
         dy[:, k] = y_loc[:, k_next] - y_loc[:, k]
 
     edge_len = np.hypot(dx, dy)
+    edge_active = edge_len > tiny[:, None]
     area = 0.5 * n_norm[:, 0]
-
-    # Panel diameter: maximum distance between corners
-    diam_sq = np.zeros(panels.shape[0], dtype=panels.dtype)
-    for i in range(4):
-        for j in range(i + 1, 4):
-            d_sq = np.sum((panels[:, i, :] - panels[:, j, :]) ** 2, axis=-1)
-            diam_sq = np.maximum(diam_sq, d_sq)
-    diameter = np.sqrt(diam_sq)
+    plane_tol = _PLANE_TOL_FACTOR * float(eps) * (np.linalg.norm(centroid, axis=-1) + diameter)
 
     return _PanelGeometry(
         centroid=centroid,
@@ -167,7 +224,54 @@ def _precompute_geometry(panels: np.ndarray) -> _PanelGeometry:
         edge_len=edge_len,
         area=area,
         diameter=diameter,
+        edge_active=edge_active,
+        plane_tol=plane_tol,
     )
+
+
+def _plane_winding(
+    x: np.ndarray,
+    y: np.ndarray,
+    j: np.ndarray,
+    geom: _PanelGeometry,
+) -> np.ndarray:
+    """Return the body-side solid-angle limit of in-plane targets [sr].
+
+    The limit equals the in-plane angle [rad] that the panel subtends at the
+    target: 2 pi inside, 0 outside, pi on an edge and the interior angle at
+    a corner. An edge that holds the target (within the on-plane band) adds
+    nothing.
+
+    Parameters
+    ----------
+    x, y : numpy.ndarray
+        Local in-plane coordinates of the targets with shape (K,) in m.
+    j : numpy.ndarray
+        Panel index of each target with shape (K,).
+    geom : _PanelGeometry
+        Precomputed panel geometry.
+
+    Returns
+    -------
+    numpy.ndarray
+        Body-side limit of the solid angle with shape (K,) in steradians.
+    """
+    tol = geom.plane_tol[j]
+    total = np.zeros_like(x)
+    for k in range(4):
+        kn = (k + 1) % 4
+        ax = geom.x_loc[j, k] - x
+        ay = geom.y_loc[j, k] - y
+        bx = geom.x_loc[j, kn] - x
+        by = geom.y_loc[j, kn] - y
+        cr = ax * by - ay * bx
+        dt = ax * bx + ay * by
+        ra = np.hypot(ax, ay)
+        rb = np.hypot(bx, by)
+        on_edge = ((np.abs(cr) <= tol * geom.edge_len[j, k]) & (dt <= 0.0)) | (ra <= tol) | (rb <= tol)
+        use = geom.edge_active[j, k] & ~on_edge
+        total += np.where(use, np.arctan2(cr, dt), 0.0)
+    return total
 
 
 def _solid_angle_triangles(
@@ -179,7 +283,8 @@ def _solid_angle_triangles(
     """Compute solid angle subtended by quadrilateral panels at target points.
 
     Uses the van Oosterom and Strackee (1983) formulation for each of the two
-    triangles forming the panel.
+    triangles forming the panel. Targets in the on-plane band get the
+    body-side limit (see :func:`_plane_winding`).
 
     Parameters
     ----------
@@ -201,8 +306,6 @@ def _solid_angle_triangles(
     for k in range(4):
         r.append(np.sqrt((x_rel - xk[None, :, k]) ** 2 + (y_rel - yk[None, :, k]) ** 2 + z_rel**2))
 
-    # Triangle 1: corners 0, 1, 2
-    # Dot products: a . b where a = p_a - x, b = p_b - x
     def tri_angle(k0: int, k1: int, k2: int) -> np.ndarray:
         dx0 = xk[None, :, k0] - x_rel
         dy0 = yk[None, :, k0] - y_rel
@@ -212,7 +315,6 @@ def _solid_angle_triangles(
         dy2 = yk[None, :, k2] - y_rel
 
         # Determinant [a, b, c] = -2 * Area_triangle * z_rel
-        # Area = 0.5 * ((x1 - x0)*(y2 - y0) - (y1 - y0)*(x2 - x0))
         area2 = (xk[:, k1] - xk[:, k0]) * (yk[:, k2] - yk[:, k0]) - (yk[:, k1] - yk[:, k0]) * (xk[:, k2] - xk[:, k0])
         num = -area2[None, :] * z_rel
 
@@ -225,36 +327,82 @@ def _solid_angle_triangles(
         return 2.0 * np.arctan2(num, den)
 
     om1 = tri_angle(0, 1, 2)
-    # Triangle 2: corners 0, 2, 3 (contributes 0 if p4 == p3)
-    has_tri2 = geom.edge_len[:, 3] > 1e-14
-    om2 = np.where(has_tri2[None, :], tri_angle(0, 2, 3), 0.0)
-
+    # Triangle 2: corners 0, 2, 3 (no contribution if p4 == p3)
+    om2 = np.where(geom.edge_active[None, :, 3], tri_angle(0, 2, 3), 0.0)
     total_om = om1 + om2
 
-    # Handle points exactly on the panel plane (z_rel == 0)
-    on_plane = np.abs(z_rel) < 1e-14
+    # Targets in the on-plane band: body-side limit
+    on_plane = np.abs(z_rel) <= geom.plane_tol[None, :]
     if np.any(on_plane):
-        # Point in polygon test via 2D cross products
-        # A point is inside if cross = dx_k * (y - y_k) - dy_k * (x - x_k) >= 0 for all edges
-        inside = np.ones_like(on_plane)
-        for k in range(4):
-            cross = geom.dx[None, :, k] * (y_rel - yk[None, :, k]) - geom.dy[None, :, k] * (x_rel - xk[None, :, k])
-            active_edge = geom.edge_len[None, :, k] > 1e-14
-            inside = inside & ((cross >= -1e-12 * geom.area[None, :]) | (~active_edge))
-
-        # Body side limit: +2 pi if inside, 0 if outside
-        body_side_om = np.where(inside, 2.0 * np.pi, 0.0)
-        total_om = np.where(on_plane, body_side_om, total_om)
-
+        i_idx, j_idx = np.nonzero(on_plane)
+        total_om[i_idx, j_idx] = _plane_winding(x_rel[i_idx, j_idx], y_rel[i_idx, j_idx], j_idx, geom)
     return total_om
 
 
-def _segment_velocity_Chunk(
+def _edge_log(
+    x: np.ndarray,
+    y: np.ndarray,
+    z: np.ndarray,
+    xa: np.ndarray,
+    ya: np.ndarray,
+    xb: np.ndarray,
+    yb: np.ndarray,
+    dk: np.ndarray,
+) -> np.ndarray:
+    """Return the edge logarithm L = ln((ra + rb + d) / (ra + rb - d)) [-].
+
+    The denominator ra + rb - d is evaluated without cancellation:
+    ra + rb - d = 2 (ra rb + a.b) / (ra + rb + d), and for a.b < 0 the term
+    ra rb + a.b is |a x b|^2 / (ra rb - a.b). Here a and b are the vectors
+    from the target to the two edge ends. A target on the edge segment or on
+    an edge end gives the singular value; it returns 0 (the finite part).
+
+    Parameters
+    ----------
+    x, y, z : numpy.ndarray
+        Local target coordinates in m.
+    xa, ya, xb, yb : numpy.ndarray
+        Local coordinates of the edge ends in m.
+    dk : numpy.ndarray
+        Edge length in m.
+
+    Returns
+    -------
+    numpy.ndarray
+        Edge logarithm [-], broadcast shape of the inputs.
+    """
+    ax = xa - x
+    ay = ya - y
+    bx = xb - x
+    by = yb - y
+    z2 = z * z
+    ra = np.sqrt(ax * ax + ay * ay + z2)
+    rb = np.sqrt(bx * bx + by * by + z2)
+    dot = ax * bx + ay * by + z2
+    cr = ax * by - ay * bx
+    rr = ra * rb
+    cross2 = cr * cr + z2 * dk * dk
+    with np.errstate(divide="ignore", invalid="ignore"):
+        s = np.where(dot >= 0.0, rr + dot, cross2 / np.maximum(rr - dot, 1e-300))
+        good = s > 0.0
+        val = 2.0 * np.log(ra + rb + dk) - np.log(2.0 * np.where(good, s, 1.0))
+    return np.where(good, val, 0.0)
+
+
+def _segment_velocity_chunk(
     target_pts: np.ndarray,
     p_start: np.ndarray,
     p_end: np.ndarray,
+    tol: np.ndarray,
 ) -> np.ndarray:
     """Compute Biot-Savart induced velocity from straight vortex segments.
+
+    The form (r1 x r2) (|r1| + |r2|) / (|r1| |r2| (|r1| |r2| + r1.r2)) / (4 pi)
+    has no cancellation on the extension of the segment line, where the
+    velocity is zero. For r1.r2 < 0 the term |r1| |r2| + r1.r2 is evaluated
+    as |r1 x r2|^2 / (|r1| |r2| - r1.r2). A target on the segment (closer
+    than *tol* to its line, between the ends) or on an end gives the
+    singular value; it returns zero.
 
     Parameters
     ----------
@@ -262,6 +410,8 @@ def _segment_velocity_Chunk(
         Target coordinates with shape (P_chunk, 1, 3) in m.
     p_start, p_end : numpy.ndarray
         Segment endpoints with shape (1, M, 3) in m.
+    tol : numpy.ndarray
+        Core radius of each segment with shape (1, M) in m.
 
     Returns
     -------
@@ -278,32 +428,39 @@ def _segment_velocity_Chunk(
     cz = r1[..., 0] * r2[..., 1] - r1[..., 1] * r2[..., 0]
     cr2 = cx * cx + cy * cy + cz * cz
 
-    d1 = np.sum(r1 * r1, axis=-1)
-    d2 = np.sum(r2 * r2, axis=-1)
-    n1 = np.sqrt(d1)
-    n2 = np.sqrt(d2)
-
+    n1 = np.sqrt(np.sum(r1 * r1, axis=-1))
+    n2 = np.sqrt(np.sum(r2 * r2, axis=-1))
+    dot = np.sum(r1 * r2, axis=-1)
+    nn = n1 * n2
     r0_sq = np.sum(r0 * r0, axis=-1)
-    len_r0 = np.sqrt(r0_sq)
 
-    # Project r0 . (r1/n1 - r2/n2)
-    inv1 = 1.0 / np.maximum(n1, 1e-300)
-    inv2 = 1.0 / np.maximum(n2, 1e-300)
-    proj = (
-        r0[..., 0] * (r1[..., 0] * inv1 - r2[..., 0] * inv2)
-        + r0[..., 1] * (r1[..., 1] * inv1 - r2[..., 1] * inv2)
-        + r0[..., 2] * (r1[..., 2] * inv1 - r2[..., 2] * inv2)
-    )
-
-    valid = (cr2 > 1e-280) & (len_r0 > 1e-14)
-    factor = np.zeros_like(cr2)
-    factor[valid] = _INV_4PI * proj[valid] / cr2[valid]
+    core = (n1 <= tol) | (n2 <= tol) | ((dot < 0.0) & (cr2 <= tol * tol * r0_sq))
+    with np.errstate(divide="ignore", invalid="ignore"):
+        den = np.where(dot >= 0.0, nn + dot, cr2 / np.maximum(nn - dot, 1e-300))
+        factor = _INV_4PI * (n1 + n2) / (nn * den)
+    factor = np.where(core | ~np.isfinite(factor), 0.0, factor)
 
     out = np.empty((target_pts.shape[0], p_start.shape[1], 3), dtype=np.float64)
     out[..., 0] = cx * factor
     out[..., 1] = cy * factor
     out[..., 2] = cz * factor
     return out
+
+
+def _prepare(points: np.ndarray, panels: np.ndarray):
+    """Return the output dtype, float64 work arrays and the input epsilon."""
+    pts = np.asarray(points)
+    pans = np.asarray(panels)
+    target_dtype = np.result_type(pts.dtype, pans.dtype)
+    eps = _input_eps(pts, pans)
+    return target_dtype, pts.astype(np.float64, copy=False), pans.astype(np.float64, copy=False), eps
+
+
+def _far_mask(r_dist: np.ndarray, diameter: np.ndarray, far_ratio: float) -> np.ndarray:
+    """Return the mask of target-panel pairs that use the far-field formulas."""
+    if np.isinf(far_ratio):
+        return np.zeros(r_dist.shape, dtype=bool)
+    return r_dist > (far_ratio * diameter[None, :])
 
 
 def source_potential(
@@ -326,14 +483,10 @@ def source_potential(
     Returns
     -------
     numpy.ndarray
-        Source potential with shape (P, M). Dtype matches input points and panels.
+        Source potential with shape (P, M) in m per unit source strength
+        [m/s]. Dtype matches input points and panels.
     """
-    pts = np.asarray(points)
-    pans = np.asarray(panels)
-    target_dtype = np.result_type(pts.dtype, pans.dtype)
-
-    pts_f64 = pts.astype(np.float64, copy=False)
-    pans_f64 = pans.astype(np.float64, copy=False)
+    target_dtype, pts_f64, pans_f64, eps = _prepare(points, panels)
 
     P = pts_f64.shape[0]
     M = pans_f64.shape[0]
@@ -342,7 +495,7 @@ def source_potential(
     if P == 0 or M == 0:
         return out.astype(target_dtype)
 
-    geom = _precompute_geometry(pans_f64)
+    geom = _precompute_geometry(pans_f64, eps)
     chunk_size = max(1, _CHUNK_BUDGET // M)
 
     for p0 in range(0, P, chunk_size):
@@ -352,14 +505,7 @@ def source_potential(
         # Target relative position vectors: (P_chunk, M, 3)
         R_vec = pts_chunk[:, None, :] - geom.centroid[None, :, :]
         r_dist = np.linalg.norm(R_vec, axis=-1)
-
-        # Far-field selection
-        if np.isneginf(far_ratio):
-            far_mask = np.zeros((p1 - p0, M), dtype=bool)
-        elif np.isposinf(far_ratio):
-            far_mask = np.zeros((p1 - p0, M), dtype=bool)
-        else:
-            far_mask = r_dist > (far_ratio * geom.diameter[None, :])
+        far_mask = _far_mask(r_dist, geom.diameter, far_ratio)
 
         # Local coordinates
         x_loc = np.sum(R_vec * geom.l_axis[None, :, :], axis=-1)
@@ -371,27 +517,17 @@ def source_potential(
 
         sum_edge = np.zeros((p1 - p0, M), dtype=np.float64)
         for k in range(4):
-            active = geom.edge_len[None, :, k] > 1e-14
+            active = geom.edge_active[None, :, k]
+            kn = (k + 1) % 4
             xk = geom.x_loc[None, :, k]
             yk = geom.y_loc[None, :, k]
-            xkp1 = geom.x_loc[None, :, (k + 1) % 4]
-            ykp1 = geom.y_loc[None, :, (k + 1) % 4]
             dx = geom.dx[None, :, k]
             dy = geom.dy[None, :, k]
             dk = geom.edge_len[None, :, k]
 
-            rk = np.sqrt((x_loc - xk) ** 2 + (y_loc - yk) ** 2 + z_loc**2)
-            rkp1 = np.sqrt((x_loc - xkp1) ** 2 + (y_loc - ykp1) ** 2 + z_loc**2)
+            Lk = _edge_log(x_loc, y_loc, z_loc, xk, yk, geom.x_loc[None, :, kn], geom.y_loc[None, :, kn], dk)
             r_perp = ((x_loc - xk) * dy - (y_loc - yk) * dx) / np.maximum(dk, 1e-300)
-
-            num_L = rk + rkp1 + dk
-            den_L = rk + rkp1 - dk
-            safe_den = den_L > 1e-15
-            Lk = np.zeros_like(den_L)
-            Lk[safe_den] = np.log(num_L[safe_den] / den_L[safe_den])
-
-            term = r_perp * Lk
-            sum_edge += np.where(active, term, 0.0)
+            sum_edge += np.where(active, r_perp * Lk, 0.0)
 
         # Exact formula: (I - z * Omega) / (4 pi)
         phi_exact = _INV_4PI * (sum_edge - z_loc * poly_om)
@@ -424,14 +560,12 @@ def doublet_potential(
     Returns
     -------
     numpy.ndarray
-        Doublet potential with shape (P, M). Dtype matches input points and panels.
+        Doublet potential [-] per unit doublet strength with shape (P, M).
+        Dtype matches input points and panels. Targets in the on-plane band
+        get the body-side limit (+1/2 inside, 0 outside, +1/4 on an edge,
+        theta / (4 pi) at a corner with interior angle theta [rad]).
     """
-    pts = np.asarray(points)
-    pans = np.asarray(panels)
-    target_dtype = np.result_type(pts.dtype, pans.dtype)
-
-    pts_f64 = pts.astype(np.float64, copy=False)
-    pans_f64 = pans.astype(np.float64, copy=False)
+    target_dtype, pts_f64, pans_f64, eps = _prepare(points, panels)
 
     P = pts_f64.shape[0]
     M = pans_f64.shape[0]
@@ -440,7 +574,7 @@ def doublet_potential(
     if P == 0 or M == 0:
         return out.astype(target_dtype)
 
-    geom = _precompute_geometry(pans_f64)
+    geom = _precompute_geometry(pans_f64, eps)
     chunk_size = max(1, _CHUNK_BUDGET // M)
 
     for p0 in range(0, P, chunk_size):
@@ -449,11 +583,7 @@ def doublet_potential(
 
         R_vec = pts_chunk[:, None, :] - geom.centroid[None, :, :]
         r_dist = np.linalg.norm(R_vec, axis=-1)
-
-        if np.isneginf(far_ratio) or np.isposinf(far_ratio):
-            far_mask = np.zeros((p1 - p0, M), dtype=bool)
-        else:
-            far_mask = r_dist > (far_ratio * geom.diameter[None, :])
+        far_mask = _far_mask(r_dist, geom.diameter, far_ratio)
 
         x_loc = np.sum(R_vec * geom.l_axis[None, :, :], axis=-1)
         y_loc = np.sum(R_vec * geom.m_axis[None, :, :], axis=-1)
@@ -463,9 +593,8 @@ def doublet_potential(
         phi_exact = _INV_4PI * poly_om
 
         # Far-field point doublet: -A * (R . n) / (4 pi r^3)
-        r_dot_n = np.sum(R_vec * geom.normal[None, :, :], axis=-1)
         r_cube = np.maximum(r_dist**3, 1e-300)
-        phi_far = -_INV_4PI * geom.area[None, :] * r_dot_n / r_cube
+        phi_far = -_INV_4PI * geom.area[None, :] * z_loc / r_cube
 
         out[p0:p1] = np.where(far_mask, phi_far, phi_exact)
 
@@ -479,7 +608,9 @@ def source_velocity(
 ) -> np.ndarray:
     """Compute induced velocity per unit source strength at target points.
 
-    Velocity is defined as the negative gradient of potential, V = -grad(Phi).
+    The velocity is the gradient of the source potential, V = +grad(Phi).
+    A unit source with positive strength pushes the fluid away from the
+    panel on both sides.
 
     Parameters
     ----------
@@ -494,14 +625,11 @@ def source_velocity(
     Returns
     -------
     numpy.ndarray
-        Induced velocity vectors with shape (P, M, 3) in m/s. Dtype matches input.
+        Induced velocity vectors with shape (P, M, 3) in m/s per unit source
+        strength [m/s]. Dtype matches input. Targets in the on-plane band
+        get the body-side limit of the normal component.
     """
-    pts = np.asarray(points)
-    pans = np.asarray(panels)
-    target_dtype = np.result_type(pts.dtype, pans.dtype)
-
-    pts_f64 = pts.astype(np.float64, copy=False)
-    pans_f64 = pans.astype(np.float64, copy=False)
+    target_dtype, pts_f64, pans_f64, eps = _prepare(points, panels)
 
     P = pts_f64.shape[0]
     M = pans_f64.shape[0]
@@ -510,7 +638,7 @@ def source_velocity(
     if P == 0 or M == 0:
         return out.astype(target_dtype)
 
-    geom = _precompute_geometry(pans_f64)
+    geom = _precompute_geometry(pans_f64, eps)
     chunk_size = max(1, _CHUNK_BUDGET // M)
 
     for p0 in range(0, P, chunk_size):
@@ -519,11 +647,7 @@ def source_velocity(
 
         R_vec = pts_chunk[:, None, :] - geom.centroid[None, :, :]
         r_dist = np.linalg.norm(R_vec, axis=-1)
-
-        if np.isneginf(far_ratio) or np.isposinf(far_ratio):
-            far_mask = np.zeros((p1 - p0, M), dtype=bool)
-        else:
-            far_mask = r_dist > (far_ratio * geom.diameter[None, :])
+        far_mask = _far_mask(r_dist, geom.diameter, far_ratio)
 
         x_loc = np.sum(R_vec * geom.l_axis[None, :, :], axis=-1)
         y_loc = np.sum(R_vec * geom.m_axis[None, :, :], axis=-1)
@@ -535,34 +659,25 @@ def source_velocity(
         sum_vy = np.zeros((p1 - p0, M), dtype=np.float64)
 
         for k in range(4):
-            active = geom.edge_len[None, :, k] > 1e-14
-            xk = geom.x_loc[None, :, k]
-            yk = geom.y_loc[None, :, k]
-            xkp1 = geom.x_loc[None, :, (k + 1) % 4]
-            ykp1 = geom.y_loc[None, :, (k + 1) % 4]
-            dx = geom.dx[None, :, k]
-            dy = geom.dy[None, :, k]
+            active = geom.edge_active[None, :, k]
+            kn = (k + 1) % 4
             dk = geom.edge_len[None, :, k]
+            Lk = _edge_log(
+                x_loc, y_loc, z_loc,
+                geom.x_loc[None, :, k], geom.y_loc[None, :, k],
+                geom.x_loc[None, :, kn], geom.y_loc[None, :, kn], dk,
+            )
+            inv_dk = 1.0 / np.maximum(dk, 1e-300)
+            sum_vx += np.where(active, geom.dy[None, :, k] * inv_dk * Lk, 0.0)
+            sum_vy += np.where(active, -geom.dx[None, :, k] * inv_dk * Lk, 0.0)
 
-            rk = np.sqrt((x_loc - xk) ** 2 + (y_loc - yk) ** 2 + z_loc**2)
-            rkp1 = np.sqrt((x_loc - xkp1) ** 2 + (y_loc - ykp1) ** 2 + z_loc**2)
-
-            num_L = rk + rkp1 + dk
-            den_L = rk + rkp1 - dk
-            safe_den = den_L > 1e-15
-            Lk = np.zeros_like(den_L)
-            Lk[safe_den] = np.log(num_L[safe_den] / den_L[safe_den])
-
-            sum_vx += np.where(active, -(dy / np.maximum(dk, 1e-300)) * Lk, 0.0)
-            sum_vy += np.where(active, +(dx / np.maximum(dk, 1e-300)) * Lk, 0.0)
-
-        # Local velocity components:
-        # vx = -dPhi/dx = -_INV_4PI * sum_k (dy/dk)*Lk
-        # vy = -dPhi/dy = +_INV_4PI * sum_k (dx/dk)*Lk
-        # vz = -dPhi/dz = +_INV_4PI * Omega
+        # Local velocity components (V = +grad Phi):
+        # vx = dPhi/dx = +_INV_4PI * sum_k (dy/dk) Lk
+        # vy = dPhi/dy = -_INV_4PI * sum_k (dx/dk) Lk
+        # vz = dPhi/dz = -_INV_4PI * Omega
         vx = _INV_4PI * sum_vx
         vy = _INV_4PI * sum_vy
-        vz = _INV_4PI * poly_om
+        vz = -_INV_4PI * poly_om
 
         # Transform to global coordinates
         v_exact = (
@@ -571,9 +686,9 @@ def source_velocity(
             + vz[..., None] * geom.normal[None, :, :]
         )
 
-        # Far-field expansion: -A * R / (4 pi r^3)
+        # Far-field expansion: +A * R / (4 pi r^3)
         r_cube = np.maximum(r_dist**3, 1e-300)
-        v_far = -_INV_4PI * geom.area[None, :, None] * R_vec / r_cube[..., None]
+        v_far = _INV_4PI * geom.area[None, :, None] * R_vec / r_cube[..., None]
 
         out[p0:p1] = np.where(far_mask[..., None], v_far, v_exact)
 
@@ -587,8 +702,9 @@ def doublet_velocity(
 ) -> np.ndarray:
     """Compute induced velocity per unit doublet strength at target points.
 
-    Velocity is defined as the negative gradient of potential, V = -grad(Phi).
-    Uses the mathematically equivalent vortex ring along the panel perimeter.
+    The velocity is the gradient of the doublet potential, V = +grad(Phi).
+    It equals the velocity of the equivalent vortex ring of unit
+    circulation along the panel perimeter, in the corner order.
 
     Parameters
     ----------
@@ -603,14 +719,11 @@ def doublet_velocity(
     Returns
     -------
     numpy.ndarray
-        Induced velocity vectors with shape (P, M, 3) in m/s. Dtype matches input.
+        Induced velocity vectors with shape (P, M, 3) in m/s per unit doublet
+        strength [m^2/s]. Dtype matches input. A target on a panel edge
+        gets the finite part (the singular segment is dropped).
     """
-    pts = np.asarray(points)
-    pans = np.asarray(panels)
-    target_dtype = np.result_type(pts.dtype, pans.dtype)
-
-    pts_f64 = pts.astype(np.float64, copy=False)
-    pans_f64 = pans.astype(np.float64, copy=False)
+    target_dtype, pts_f64, pans_f64, eps = _prepare(points, panels)
 
     P = pts_f64.shape[0]
     M = pans_f64.shape[0]
@@ -619,7 +732,7 @@ def doublet_velocity(
     if P == 0 or M == 0:
         return out.astype(target_dtype)
 
-    geom = _precompute_geometry(pans_f64)
+    geom = _precompute_geometry(pans_f64, eps)
     chunk_size = max(1, _CHUNK_BUDGET // M)
 
     for p0 in range(0, P, chunk_size):
@@ -628,32 +741,28 @@ def doublet_velocity(
 
         R_vec = pts_chunk[:, None, :] - geom.centroid[None, :, :]
         r_dist = np.linalg.norm(R_vec, axis=-1)
-
-        if np.isneginf(far_ratio) or np.isposinf(far_ratio):
-            far_mask = np.zeros((p1 - p0, M), dtype=bool)
-        else:
-            far_mask = r_dist > (far_ratio * geom.diameter[None, :])
+        far_mask = _far_mask(r_dist, geom.diameter, far_ratio)
 
         # Equivalent vortex ring along 4 perimeter segments
         v_ring = np.zeros((p1 - p0, M, 3), dtype=np.float64)
         for k in range(4):
-            active = geom.edge_len[None, :, k] > 1e-14
+            active = geom.edge_active[None, :, k]
             p_start = geom.corners_proj[None, :, k, :]
             p_end = geom.corners_proj[None, :, (k + 1) % 4, :]
-            v_seg = _segment_velocity_Chunk(pts_chunk[:, None, :], p_start, p_end)
+            v_seg = _segment_velocity_chunk(pts_chunk[:, None, :], p_start, p_end, geom.plane_tol[None, :])
             v_ring += np.where(active[..., None], v_seg, 0.0)
 
-        # V_D = -v_ring
-        v_exact = -v_ring
+        # V_D = +grad Phi_D = v_ring
+        v_exact = v_ring
 
-        # Far-field expansion: (A / 4 pi) * [n/r^3 - 3 (R . n) R / r^5]
+        # Far-field expansion: -(A / 4 pi) * [n/r^3 - 3 (R . n) R / r^5]
         r_dot_n = np.sum(R_vec * geom.normal[None, :, :], axis=-1, keepdims=True)
         r_cube = np.maximum(r_dist**3, 1e-300)[..., None]
         r_fifth = np.maximum(r_dist**5, 1e-300)[..., None]
 
         term1 = geom.normal[None, :, :] / r_cube
         term2 = 3.0 * r_dot_n * R_vec / r_fifth
-        v_far = _INV_4PI * geom.area[None, :, None] * (term1 - term2)
+        v_far = -_INV_4PI * geom.area[None, :, None] * (term1 - term2)
 
         out[p0:p1] = np.where(far_mask[..., None], v_far, v_exact)
 
