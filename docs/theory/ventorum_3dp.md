@@ -1,0 +1,485 @@
+---
+orphan: true
+---
+
+# Ventorum-3DP: Three-dimensional potential flow panel method
+
+## Model
+
+Ventorum-3DP solves steady, incompressible, inviscid potential flow around arbitrary three-dimensional lifting configurations and non-lifting bodies. The solver uses a low-order boundary element formulation with flat quadrilateral and triangular panels carrying constant distributions of sources and doublets (Morino and Kuo, 1974; Hess and Smith, 1964; Katz and Plotkin, 2001). The formulation enforces an internal Dirichlet boundary condition of zero perturbation potential inside the closed body. The linear aerodynamic influence matrix is factorized once by LU decomposition and solved for six fundamental unit onset flow states (three translation velocities and three angular rotation rates). Flight conditions at arbitrary angles of attack, sideslip, and rotation rates follow by linear superposition. The method supports Morino and iterative non-linear pressure Kutta conditions, planar symmetry folding, ground effect via the method of images, near-field pressure integration, far-field Trefftz-plane induced drag calculation, grid convergence analysis, and multi-backend execution on CPU (NumPy, Numba) and CUDA GPU (NVIDIA Warp, PyTorch).
+
+## Influence kernels
+
+### Panel geometry and coordinate transformations
+
+A panel is defined by four ordered vertex coordinates $\mathbf{p}_1, \mathbf{p}_2, \mathbf{p}_3, \mathbf{p}_4$ [m] in three-dimensional Cartesian space. Triangular panels repeat the third vertex at the fourth entry ($\mathbf{p}_4 = \mathbf{p}_3$).
+
+Diagonal vectors define the raw normal:
+
+```{math}
+\mathbf{d}_{13} = \mathbf{p}_3 - \mathbf{p}_1, \qquad \mathbf{d}_{24} = \mathbf{p}_4 - \mathbf{p}_2.
+```
+
+The outward unit normal vector points into the fluid:
+
+```{math}
+\mathbf{n}_{\text{raw}} = \mathbf{d}_{13} \times \mathbf{d}_{24}, \qquad \hat{\mathbf{n}} = \frac{\mathbf{n}_{\text{raw}}}{\|\mathbf{n}_{\text{raw}}\|}.
+```
+
+The projected panel area $A$ [m^2] is:
+
+```{math}
+A = \frac{1}{2} \|\mathbf{n}_{\text{raw}}\|.
+```
+
+Non-planar quadrilaterals are projected onto the mean plane passing through the vertex average $\mathbf{p}_{\text{avg}} = \frac{1}{4} \sum_{k=1}^4 \mathbf{p}_k$:
+
+```{math}
+\mathbf{p}'_k = \mathbf{p}_k - \left[(\mathbf{p}_k - \mathbf{p}_{\text{avg}}) \cdot \hat{\mathbf{n}}\right] \hat{\mathbf{n}}.
+```
+
+The panel centroid $\mathbf{p}_0$ is the area centroid:
+- For quadrilaterals: $\mathbf{p}_0 = \frac{1}{4} \sum_{k=1}^4 \mathbf{p}'_k$.
+- For triangles: $\mathbf{p}_0 = \frac{1}{3} (\mathbf{p}'_1 + \mathbf{p}'_2 + \mathbf{p}'_3)$.
+
+An orthonormal local reference frame $(\hat{\mathbf{l}}, \hat{\mathbf{m}}, \hat{\mathbf{n}})$ is defined on the panel:
+
+```{math}
+\hat{\mathbf{l}} = \frac{\mathbf{p}'_2 - \mathbf{p}'_1}{\|\mathbf{p}'_2 - \mathbf{p}'_1\|}, \qquad \hat{\mathbf{m}} = \hat{\mathbf{n}} \times \hat{\mathbf{l}}.
+```
+
+For any target field point $\mathbf{x} \in \mathbb{R}^3$, the local coordinates relative to the panel centroid are:
+
+```{math}
+x = (\mathbf{x} - \mathbf{p}_0) \cdot \hat{\mathbf{l}}, \qquad y = (\mathbf{x} - \mathbf{p}_0) \cdot \hat{\mathbf{m}}, \qquad z = (\mathbf{x} - \mathbf{p}_0) \cdot \hat{\mathbf{n}}.
+```
+
+Corner coordinates in the local plane are denoted $(x_k, y_k, 0)$ for $k = 1, \dots, 4$. The distance from the target point to corner $k$ is:
+
+```{math}
+r_k = \sqrt{(x - x_k)^2 + (y - y_k)^2 + z^2}.
+```
+
+For edge $k$ connecting corner $(x_k, y_k)$ to $(x_{k+1}, y_{k+1})$ with length $d_k = \sqrt{(x_{k+1} - x_k)^2 + (y_{k+1} - y_k)^2}$, the in-plane perpendicular distance is:
+
+```{math}
+r_{\perp, k} = \frac{(x - x_k)(y_{k+1} - y_k) - (y - y_k)(x_{k+1} - x_k)}{d_k}.
+```
+
+The edge logarithmic integral is:
+
+```{math}
+L_k = \ln\left(\frac{r_k + r_{k+1} + d_k}{r_k + r_{k+1} - d_k}\right).
+```
+
+When the target point lies on the edge segment ($r_k + r_{k+1} - d_k \le 0$), $L_k$ is set to 0.
+
+### Exact singularity formulas
+
+1. Solid angle:
+The panel is split into two planar triangles: $(0, 1, 2)$ and $(0, 2, 3)$. For each triangle with vertices $\mathbf{a}, \mathbf{b}, \mathbf{c}$ relative to the target point, the solid angle follows from the van Oosterom and Strackee (1983) formula:
+
+```{math}
+\tan\left(\frac{\Omega_\Delta}{2}\right) = \frac{\mathbf{a} \cdot (\mathbf{b} \times \mathbf{c})}{\|\mathbf{a}\| \|\mathbf{b}\| \|\mathbf{c}\| + (\mathbf{a}\cdot\mathbf{b})\|\mathbf{c}\| + (\mathbf{a}\cdot\mathbf{c})\|\mathbf{b}\| + (\mathbf{b}\cdot\mathbf{c})\|\mathbf{a}\|}.
+```
+
+The total panel solid angle is $\Omega = \Omega_{\Delta, 1} + \Omega_{\Delta, 2}$.
+
+2. Constant-strength doublet potential and velocity:
+The doublet velocity potential per unit strength is:
+
+```{math}
+\Phi_D = \frac{\Omega}{4 \pi}.
+```
+
+Approaching the panel plane from the interior side ($z \to 0^-$) at the centroid gives the self-influence value $C_{ii} = +1/2$.
+By Stokes theorem, the velocity induced by a constant-strength doublet panel equals the velocity of an equivalent vortex ring of unit circulation along the panel perimeter:
+
+```{math}
+\mathbf{V}_D = -\sum_{k=1}^4 \mathbf{v}_{\text{segment}}(\mathbf{p}'_k \to \mathbf{p}'_{k+1}),
+```
+
+where each straight vortex segment velocity is evaluated using the Biot-Savart formula.
+
+3. Constant-strength source potential and velocity:
+The source velocity potential per unit strength is:
+
+```{math}
+\Phi_S = \frac{1}{4 \pi} \left[ \sum_{k=1}^4 r_{\perp, k} L_k - z \Omega \right].
+```
+
+In local panel coordinates, the source-induced velocity components are:
+
+```{math}
+V_{S, x} = -\frac{1}{4 \pi} \sum_{k=1}^4 \frac{y_{k+1} - y_k}{d_k} L_k, \qquad
+V_{S, y} = +\frac{1}{4 \pi} \sum_{k=1}^4 \frac{x_{k+1} - x_k}{d_k} L_k, \qquad
+V_{S, z} = +\frac{1}{4 \pi} \Omega = -\Phi_D.
+```
+
+Transforming to global coordinates yields:
+
+```{math}
+\mathbf{V}_S = V_{S, x} \hat{\mathbf{l}} + V_{S, y} \hat{\mathbf{m}} + V_{S, z} \hat{\mathbf{n}}.
+```
+
+### Far-field point expansions
+
+When the target distance $r = \|\mathbf{x} - \mathbf{p}_0\|$ exceeds `far_ratio` times the panel diameter $D = \max_{i < j} \|\mathbf{p}_i - \mathbf{p}_j\|$, point-singularity expansions are used:
+
+```{math}
+\Phi_S^{\text{far}} = -\frac{A}{4 \pi r}, \qquad \mathbf{V}_S^{\text{far}} = -\frac{A \mathbf{r}}{4 \pi r^3},
+```
+
+```{math}
+\Phi_D^{\text{far}} = -\frac{A (\mathbf{r} \cdot \hat{\mathbf{n}})}{4 \pi r^3}, \qquad \mathbf{V}_D^{\text{far}} = \frac{A}{4 \pi} \left[\frac{\hat{\mathbf{n}}}{r^3} - \frac{3 (\mathbf{r} \cdot \hat{\mathbf{n}}) \mathbf{r}}{r^5}\right].
+```
+
+Setting `far_ratio = np.inf` disables approximations and computes exact integrals everywhere.
+
+## Surface meshes and geometry
+
+### PanelMesh representation
+
+The class `PanelMesh` represents the surface of one or more thick lifting surfaces. The mesh is composed of:
+- `nodes`: Array of 3D node coordinates [m] of shape $(N_n, 3)$.
+- `panels`: Array of four corner node indices of shape $(N_p, 4)$.
+- `component`: Integer component index for each panel.
+- `kind`: Array marking panels as `"surface"`, `"tip"`, or `"base"`.
+- `wake_edges`: Array of wake shedding edge descriptors of shape $(N_w, 4)$ storing upper panel index, lower panel index, and the two trailing-edge node indices.
+- `half`: Boolean flag indicating whether the mesh represents a right-half geometry open at $y = 0$.
+
+### Wing meshing and trailing-edge treatment
+
+Each lifting surface is discretized into spanwise strips. At each span station, the wing section carries its true airfoil coordinates. The upper and lower surfaces are covered with quadrilateral panels. At open trailing edges where the gap exceeds the tolerance ($10^{-6} c$), flat base panels seal the trailing edge. Flat tip caps close the wing tips to guarantee a watertight enclosed volume.
+
+### Deflected plain control surfaces
+
+Plain control surfaces deflect the section geometry inside the specified span range using `ventorum.airfoil.flap.deflect_plain_flap`. Positive deflection rotates the trailing edge downward. Chordwise node distributions insert a node at the hinge line, preserving the geometric corner. Trailing-edge points rotate about the hinge line to floating-point roundoff.
+
+At the lateral spanwise boundaries of the control surface, the surface is discontinuous. The mesh inserts two spanwise stations at the same span station $y$, one deflected and one undeflected. A flat side closure strip connects the two curves, sealing the mesh to preserve watertightness. The side closure models no gap leakage flow.
+
+### Mesh validation
+
+The function `check_mesh` inspects the closed mesh for geometric quality:
+- Panel aspect ratio: $AR = \max(\text{edge}) / \min(\text{edge})$.
+- Panel skewness: angle between panel diagonal vectors.
+- Panel non-planarity (warp): perpendicular distance of vertices from the mean panel plane.
+- Enclosed signed volume: computed by Gauss divergence theorem to verify consistent outward normal orientation.
+
+## Dirichlet formulation and system assembly
+
+### Boundary integral equation
+
+Ventorum-3DP sets the fictitious internal perturbation potential to zero throughout the interior of each closed body ($\phi_{\text{int}} = 0$). By Green's third identity, the perturbation potential at collocation point $\mathbf{c}_i$ approaches the internal boundary:
+
+```{math}
+\phi_{\text{int}}(\mathbf{c}_i) = \sum_{j=1}^{N} \mu_j C_{ij} + \sum_{k=1}^{N_w} \mu_{w, k} C_{ik}^w + \sum_{j=1}^{N} \sigma_j B_{ij} = 0,
+```
+
+where $C_{ij}$ is the doublet influence coefficient of body panel $j$, $C_{ik}^w$ is the doublet influence of wake panel $k$, and $B_{ij}$ is the source influence coefficient of body panel $j$.
+
+The external flow tangency condition requires:
+
+```{math}
+\frac{\partial \phi}{\partial n} = -\mathbf{V}_{\text{onset}} \cdot \hat{\mathbf{n}}.
+```
+
+Because $\phi_{\text{int}} = 0$, the jump in normal velocity across the boundary equals the source strength:
+
+```{math}
+\sigma_j = -\mathbf{V}_{\text{onset}}(\mathbf{c}_j) \cdot \hat{\mathbf{n}}_j.
+```
+
+The source strengths $\sigma_j$ are known directly from the surface geometry and onset flow.
+
+### Wake model and Kutta options
+
+Lifting surfaces shed flat vortex sheets from their trailing edges. The wake panels extend downstream parallel to the body $+x$ axis over a specified wake length (default 50 chords). Because the wake position is fixed in body axes, the influence matrix does not change with flight conditions.
+
+1. Morino Kutta condition (`kutta="morino"`):
+The doublet strength of each wake strip $\mu_w$ equals the difference between upper and lower surface doublet strengths at the trailing edge:
+
+```{math}
+\mu_w = \mu_{\text{upper}} - \mu_{\text{lower}}.
+```
+
+The wake influences fold directly into the body doublet matrix:
+
+```{math}
+A_{ij} = C_{ij} + \sum_{s \in \mathcal{W}_j} \pm C_{i, s}^w.
+```
+
+This yields the linear system:
+
+```{math}
+\mathbf{A} \boldsymbol{\mu} = -\mathbf{B} \boldsymbol{\sigma}.
+```
+
+2. Iterative pressure Kutta condition (`kutta="pressure"`):
+At thick trailing edges, the Morino condition can leave a residual pressure jump. The pressure Kutta option computes wake strip correction doublets $\delta_s$ to eliminate the trailing-edge pressure jump:
+
+```{math}
+R_s = C_{p, \text{upper}(s)} - C_{p, \text{lower}(s)} = 0.
+```
+
+Starting from the Morino solution ($\boldsymbol{\delta} = 0$), a Newton-Raphson iteration updates $\boldsymbol{\delta}$:
+
+```{math}
+\mathbf{J} \, \Delta\boldsymbol{\delta} = -\mathbf{R}.
+```
+
+The sensitivity of body doublets to wake corrections reuses the factored body matrix $\mathbf{A}$:
+
+```{math}
+\mathbf{z}_t = \mathbf{A}^{-1} (-\mathbf{D}_{:, t}),
+```
+
+where $\mathbf{D}_{:, t}$ is the wake doublet influence of strip $t$. The exact Jacobian matrix is:
+
+```{math}
+J_{s, t} = \frac{2 \left(\mathbf{V}_{\text{upper}(s)} \cdot \mathbf{g}_{t, \text{upper}(s)} - \mathbf{V}_{\text{lower}(s)} \cdot \mathbf{g}_{t, \text{lower}(s)}\right)}{V_\infty^2},
+```
+
+where $\mathbf{g}_{t}$ is the surface gradient of sensitivity $\mathbf{z}_t$. The iteration uses line-search backtracking and converges when $\max |R_s| < 10^{-6}$.
+
+## Six unit-onset superposition
+
+Influence matrices $\mathbf{A}$ and $\mathbf{B}$ depend only on geometry. Matrix $\mathbf{A}$ is factored once by LU decomposition:
+
+```{math}
+\mathbf{P} \mathbf{A} = \mathbf{L} \mathbf{U}.
+```
+
+The solver computes six unit-onset solution vectors:
+1. Unit surge ($u = 1$): $\mathbf{V}^{(u)} = [1, 0, 0]^T$.
+2. Unit sway ($v = 1$): $\mathbf{V}^{(v)} = [0, 1, 0]^T$.
+3. Unit heave ($w = 1$): $\mathbf{V}^{(w)} = [0, 0, 1]^T$.
+4. Unit roll rate ($p = 1$): $\mathbf{V}^{(p)} = [0, -(z - z_{\text{ref}}), y - y_{\text{ref}}]^T$.
+5. Unit pitch rate ($q = 1$): $\mathbf{V}^{(q)} = [-(z - z_{\text{ref}}), 0, x - x_{\text{ref}}]^T$.
+6. Unit yaw rate ($r = 1$): $\mathbf{V}^{(r)} = [-(y - y_{\text{ref}}), x - x_{\text{ref}}, 0]^T$.
+
+The unit right-hand sides $\mathbf{b}^{(k)} = -\mathbf{B} \boldsymbol{\sigma}^{(k)}$ are solved simultaneously:
+
+```{math}
+\boldsymbol{\mu}^{(k)} = \mathbf{A}^{-1} \mathbf{b}^{(k)}, \qquad k \in \{u, v, w, p, q, r\}.
+```
+
+For any flight condition $(V_\infty, \alpha, \beta, p, q, r)$, translation velocity components in geometry axes are:
+
+```{math}
+u = V_\infty \cos\alpha \cos\beta, \qquad v = -V_\infty \sin\beta, \qquad w = V_\infty \sin\alpha \cos\beta.
+```
+
+The surface doublets and sources follow by linear superposition:
+
+```{math}
+\boldsymbol{\mu} = u \boldsymbol{\mu}^{(u)} + v \boldsymbol{\mu}^{(v)} + w \boldsymbol{\mu}^{(w)} + p \boldsymbol{\mu}^{(p)} + q \boldsymbol{\mu}^{(q)} + r \boldsymbol{\mu}^{(r)},
+```
+
+```{math}
+\boldsymbol{\sigma} = u \boldsymbol{\sigma}^{(u)} + v \boldsymbol{\sigma}^{(v)} + w \boldsymbol{\sigma}^{(w)} + p \boldsymbol{\sigma}^{(p)} + q \boldsymbol{\sigma}^{(q)} + r \boldsymbol{\sigma}^{(r)}.
+```
+
+## Symmetry folding and ground effect
+
+### Symmetry folding on half meshes
+
+Configurations with geometric mirror symmetry about the x-z plane ($y = 0$) can be solved on a right-half mesh (`PanelMesh.half=True`). This halves panel count $N$, reduces matrix assembly effort fourfold, and reduces LU factorization effort eightfold.
+
+Two systems are solved on the half mesh:
+1. Symmetric system ($u, w, q$): Mirror panels carry equal strengths ($\mu' = +\mu, \sigma' = +\sigma$):
+
+```{math}
+\mathbf{A}^{\text{sym}} = \mathbf{A}_{\text{self}} + \mathbf{A}_{\text{mirror}}, \qquad \mathbf{B}^{\text{sym}} = \mathbf{B}_{\text{self}} + \mathbf{B}_{\text{mirror}}.
+```
+
+2. Antisymmetric system ($v, p, r$): Mirror panels carry opposite strengths ($\mu' = -\mu, \sigma' = -\sigma$):
+
+```{math}
+\mathbf{A}^{\text{asym}} = \mathbf{A}_{\text{self}} - \mathbf{A}_{\text{mirror}}, \qquad \mathbf{B}^{\text{asym}} = \mathbf{B}_{\text{self}} - \mathbf{B}_{\text{mirror}}.
+```
+
+Superposition of the two systems yields exact solutions for arbitrary asymmetric flight conditions.
+
+### Ground effect by method of images
+
+Near a flat boundary, the aircraft keeps its body geometry axes while the ground plane orientation moves with attitude $(\alpha, \beta, \phi)$. The unit normal pointing from the ground to the aircraft is:
+
+```{math}
+\hat{\mathbf{k}} = \hat{\mathbf{l}}_{\text{wind}} \cos\phi + (\hat{\mathbf{u}}_{\text{wind}} \times \hat{\mathbf{l}}_{\text{wind}}) \sin\phi.
+```
+
+The ground plane equation is $\mathbf{x} \cdot \hat{\mathbf{k}} = o$, with $o = \mathbf{r}_{\text{ref}} \cdot \hat{\mathbf{k}} - h$. Panel vertices reflect across the plane:
+
+```{math}
+\mathbf{x}' = \mathbf{x} - 2 (\mathbf{x} \cdot \hat{\mathbf{k}} - o) \hat{\mathbf{k}}.
+```
+
+The image panel vertex order is reversed to keep an outward-pointing unit normal. To cancel normal velocity at the ground, the image body carries:
+
+```{math}
+\mu' = +\mu, \qquad \sigma' = +\sigma.
+```
+
+When solving a symmetric aircraft in ground effect on a half mesh, four-fold images are used: self, Y-mirror, Ground-mirror, and YG-mirror.
+
+## Post-processing
+
+### Tangential velocity and pressure coefficient
+
+On the outer surface of a closed body with zero internal perturbation potential, the tangential perturbation velocity equals the negative surface gradient of the doublet strength:
+
+```{math}
+\mathbf{v}_{\text{pert}, t} = -\nabla_s \mu.
+```
+
+The surface gradient $\nabla_s \mu$ on panel $i$ is calculated from a weighted least-squares fit over all neighbour panels that share an edge with panel $i$. The edge connectivity excludes wake shedding lines to prevent differentiating across the wake jump discontinuity. For each neighbour $j$, the displacement vector is projected onto the tangent plane:
+
+```{math}
+\Delta \mathbf{r}_{ij, t} = \Delta \mathbf{r}_{ij} - (\Delta \mathbf{r}_{ij} \cdot \hat{\mathbf{n}}_i) \hat{\mathbf{n}}_i.
+```
+
+The least-squares gradient solves $\Delta \mathbf{r}_{ij, t} \cdot \mathbf{g}_i \approx \mu_j - \mu_i$, and the result is projected to enforce exact panel tangency:
+
+```{math}
+\nabla_s \mu_i = \mathbf{g}_i - (\mathbf{g}_i \cdot \hat{\mathbf{n}}_i) \hat{\mathbf{n}}_i.
+```
+
+The total surface velocity is:
+
+```{math}
+\mathbf{V}_{\text{surf}, i} = \mathbf{V}_{\text{onset}, t}(\mathbf{c}_i) - \nabla_s \mu_i.
+```
+
+Bernoulli's equation gives the pressure coefficient:
+
+```{math}
+C_p = 1 - \frac{\|\mathbf{V}_{\text{surf}}\|^2}{V_\infty^2}.
+```
+
+### Forces and moments
+
+Integrating surface pressure over all panels gives the aerodynamic force vector:
+
+```{math}
+\mathbf{F} = \sum_{i=1}^{N} -C_{p, i} \, q_\infty \, A_i \, \hat{\mathbf{n}}_i, \qquad q_\infty = \frac{1}{2} \rho_\infty V_\infty^2.
+```
+
+Force coefficients in stability/wind axes are:
+
+```{math}
+C_L = \frac{\mathbf{F} \cdot \hat{\mathbf{l}}_{\text{wind}}}{q_\infty S_{\text{ref}}}, \qquad
+C_Y = \frac{\mathbf{F} \cdot \hat{\mathbf{y}}_{\text{wind}}}{q_\infty S_{\text{ref}}}, \qquad
+C_{D, \text{pressure}} = \frac{\mathbf{F} \cdot \hat{\mathbf{u}}_{\text{wind}}}{q_\infty S_{\text{ref}}}.
+```
+
+The aerodynamic moment vector about reference point $\mathbf{r}_{\text{ref}}$ is:
+
+```{math}
+\mathbf{M} = \sum_{i=1}^{N} (\mathbf{c}_i - \mathbf{r}_{\text{ref}}) \times \left(-C_{p, i} \, q_\infty \, A_i \, \hat{\mathbf{n}}_i\right).
+```
+
+Moments follow AVL flight-dynamics conventions:
+
+```{math}
+C_l = -\frac{M_x}{q_\infty S_{\text{ref}} b_{\text{ref}}}, \qquad
+C_m = +\frac{M_y}{q_\infty S_{\text{ref}} c_{\text{ref}}}, \qquad
+C_n = -\frac{M_z}{q_\infty S_{\text{ref}} b_{\text{ref}}}.
+```
+
+### Trefftz-plane induced drag
+
+Far-field induced drag is computed in the Trefftz plane from trailing vortex sheet circulation $\Gamma_s = \mu_{w, s}$. The downwash $w_{n, s}$ induced at the midpoint of each trailing wake segment of length $l_s$ is evaluated using the 2D Biot-Savart law with regularized core radius $r_c = 0.01 \bar{l}$:
+
+```{math}
+D_i = -\frac{1}{2} \rho_\infty \sum_{s=1}^{N_{\text{strips}}} \Gamma_s \, w_{n, s} \, l_s, \qquad
+C_{Di, \text{trefftz}} = \frac{D_i}{q_\infty S_{\text{ref}}}.
+```
+
+The segment length $l_s$ accounts for sweep and dihedral in three-dimensional space.
+
+## Computational backends
+
+Ventorum-3DP supports three computational backends:
+- `"numpy"` (default): Reference vectorised kernel evaluations and SciPy LAPACK LU solves on CPU.
+- `"numba"`: JIT-compiled CPU kernels executing identical formulas with multithreaded loops and SciPy LU factorizations.
+- `"gpu"`: GPU pipeline using NVIDIA Warp kernels for matrix assembly (one thread per panel-target pair) and PyTorch `torch.linalg.lu_factor` / `lu_solve` on the device. Unit onset solves are batched in a single call. Matrix assembly runs in float64; factorization and post-processing run in the selected precision (float32 or float64). Memory requirements are checked before allocation, refusing solves that exceed device capacity without silent fallbacks.
+
+## Mesh convergence and Richardson extrapolation
+
+The module `ventorum.panel3d.convergence` conducts grid convergence studies over three or four refinement levels:
+- Spanwise and chordwise panel counts are multiplied by a constant refinement ratio $r$.
+- For each aerodynamic coefficient $f$, the observed convergence order $p$ solves:
+
+```{math}
+p = \frac{\ln\left((f_3 - f_2)/(f_2 - f_1)\right)}{\ln(r)}.
+```
+
+- Richardson extrapolation estimates the continuum zero-grid value:
+
+```{math}
+f_{\text{extrap}} = f_1 + \frac{f_1 - f_2}{r^p - 1}.
+```
+
+- The Grid Convergence Index (GCI) applies safety factors (1.25 inside the asymptotic range $p \in [0.5, 4.0]$; 3.0 outside it) following Roache (1998) and Celik et al. (2008).
+
+## Solver interface
+
+`PanelMethodSolver` connects Ventorum-3DP to the standard solver API (`solver="panel3d"`):
+- Inputs: `Aircraft`, `FlightCondition` (or sequences for sweeps), and `SolverSettings`.
+- Outputs: `SolverResult` containing `totals` (`IntegratedResult`), `spanwise` (`SpanwiseResult` strip loads), surface `cp` distribution, trust score, and execution `dispatch` records.
+
+## Assumptions
+
+- Steady, incompressible, irrotational potential flow.
+- Thin vortex wake shedding along the body axis without roll-up.
+- Rigid aircraft geometry and rigid ground plane.
+- Attached potential flow without flow separation or stall.
+
+## Envelope
+
+- Pre-stall flight conditions at Mach below 0.3.
+- Closed, watertight surface meshes without self-intersections.
+- In ground effect, ground clearance above zero (ground strikes raise `ValueError`).
+
+## Implementation
+
+- Mesh generation and quality: `ventorum.panel3d.mesh.PanelMesh`, `mesh_aircraft`, `check_mesh`.
+- Influence kernels: `ventorum.panel3d.kernels`, `ventorum.panel3d.kernels_numba`, `ventorum.panel3d.kernels_warp`.
+- Wake geometry and shedding: `ventorum.panel3d.wake.PanelWake`, `build_wake`.
+- Kutta conditions: `ventorum.panel3d.kutta.solve_pressure_kutta`.
+- Image systems and symmetry: `ventorum.panel3d.images`.
+- Core solver: `ventorum.panel3d.solver.PanelSolver`, `PanelResult`.
+- Post-processing: `ventorum.panel3d.post`.
+- GPU acceleration: `ventorum.panel3d.gpu`.
+- Convergence studies: `ventorum.panel3d.convergence.panel_mesh_convergence`.
+- Solver adapter: `ventorum.solvers.panel3d.PanelMethodSolver`.
+
+## Verification
+
+The 3D panel method implementation is verified by tests in the test suite:
+- Kernel parity and asymptotic limits: `tests/test_panel3d_kernels.py`.
+- Mesh construction and control surface deflections: `tests/test_panel3d_mesh.py`, `tests/test_panel3d_controls.py`.
+- Potential flow solution and unit onsets: `tests/test_panel3d_solver.py`.
+- Symmetry plane and ground effect images: `tests/test_panel3d_images.py`.
+- Iterative pressure Kutta condition: `tests/test_panel3d_kutta.py`.
+- Post-processing and Trefftz induced drag: `tests/test_panel3d_post.py`.
+- Mesh convergence and Richardson extrapolation: `tests/test_panel3d_convergence.py`.
+- Solver family integration and trust scores: `tests/test_panel3d_integration.py`.
+- GPU pipeline parity (when CUDA is available): `tests/test_panel3d_gpu.py`.
+
+## References
+
+- J. D. Anderson, *Fundamentals of Aerodynamics*, 5th ed., McGraw-Hill, New York, 2011.
+- I. B. Celik, U. Ghia, P. J. Roache, C. J. Freitas, H. Coleman and P. E. Raad, "Procedure for Estimation and Reporting of Uncertainty Due to Discretization in CFD Applications", *Journal of Fluids Engineering*, Vol. 130, No. 7, 078001, 2008.
+- M. Drela, *Flight Vehicle Aerodynamics*, MIT Press, Cambridge, MA, 2014.
+- J. L. Hess and A. M. O. Smith, "Calculation of Potential Flow About Arbitrary Bodies", *Progress in Aeronautical Sciences*, Vol. 8, Pergamon Press, 1967, pp. 1-138.
+- J. Katz and A. Plotkin, *Low-Speed Aerodynamics*, 2nd ed., Cambridge University Press, Cambridge, 2001.
+- S. A. Kinnas and C. Y. Hsin, "Boundary Element Method for the Analysis of the Unsteady Flow Around Extreme Propeller Geometries", *AIAA Journal*, Vol. 30, No. 3, 1992, pp. 688-696.
+- B. Maskew, "Program VSAERO Theory Document: A Computer Program for Calculating the Non-Linear Aerodynamic Characteristics of Arbitrary Configurations", NASA Contractor Report 4023, 1987.
+- L. Morino and C. C. Kuo, "Subsonic Potential Aerodynamics for Complex Configurations: A General Theory", *AIAA Journal*, Vol. 12, No. 2, 1974, pp. 191-197.
+- J. N. Newman, "Distributions of Sources and Normal Dipoles Over a Quadrilateral Panel", *Journal of Engineering Mathematics*, Vol. 20, 1986, pp. 113-126.
+- P. J. Roache, *Verification and Validation in Computational Science and Engineering*, Hermosa Publishers, Albuquerque, NM, 1998.
+- B. L. Stevens, F. L. Lewis and E. N. Johnson, *Aircraft Control and Simulation: Dynamics, Controls Design, and Autonomous Systems*, 3rd ed., John Wiley & Sons, Hoboken, NJ, 2016.
+- A. van Oosterom and J. Strackee, "The Solid Angle of a Plane Triangle", *IEEE Transactions on Biomedical Engineering*, Vol. BME-30, No. 2, 1983, pp. 125-126.
+- C. Wieselsberger, "Wing Resistance Near the Ground", NACA TM-77, 1922; translated from *Zeitschrift fuer Flugtechnik und Motorluftschiffahrt*, Vol. 12, No. 10, 1921.
