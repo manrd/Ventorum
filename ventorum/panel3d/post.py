@@ -13,7 +13,7 @@ product. On a panel whose corner nodes all lie inside the surface, the
 doublet values are first interpolated to the corner nodes with inverse
 distance weights (Shepard 1968), and the gradient follows from the node
 values with the Green-Gauss theorem on the panel polygon (Blazek 2015,
-section 5.3). The node values smooth the doublet error of the thin
+chapter 5). The node values smooth the doublet error of the thin
 triangle fans at the poles of latitude-longitude meshes, where the
 edge-neighbour fit is weak. On a panel with a corner on a wake shedding
 edge or on a mesh border, a node mean would sit about half a panel away
@@ -33,7 +33,7 @@ Published sources
   irregularly-spaced data, Proceedings of the 23rd ACM National Conference,
   pp. 517-524 (inverse distance weights).
 * Blazek, J., 2015, Computational Fluid Dynamics: Principles and
-  Applications, 3rd ed., Butterworth-Heinemann, section 5.3 (Green-Gauss
+  Applications, 3rd ed., Butterworth-Heinemann, chapter 5 (Green-Gauss
   gradient).
 
 Conventions
@@ -255,7 +255,7 @@ def build_surface_gradient_operator(
        1 / d with d the distance from the node to the panel centroid).
        The Green-Gauss theorem on the panel polygon then gives
        ``grad_i = (1 / A_i) * sum_e 0.5 * (mu_a + mu_b) * (p_b - p_a) x n_i``
-       over the edges ``e = (a, b)`` (Blazek 2015, section 5.3). The cross
+       over the edges ``e = (a, b)`` (Blazek 2015, chapter 5). The cross
        product with the unit normal keeps the gradient in the panel plane.
     3. Border panels (a corner group is open). The gradient is the
        edge-neighbour least-squares fit of :func:`compute_surface_gradient`
