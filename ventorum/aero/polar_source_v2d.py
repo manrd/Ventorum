@@ -39,6 +39,7 @@ import numpy as np
 from ventorum.aero.polar_cache import PolarCache
 from ventorum.aero.xfoil_runner import check_flap
 from ventorum.airfoil import airfoil
+from ventorum.airfoil.naca import is_naca_designation
 from ventorum.core.datatypes import TabulatedAirfoil
 from ventorum.panel2d.viscous import solve_viscous
 
@@ -337,10 +338,12 @@ class Ventorum2DPolarSource:
         flap_tup = check_flap(flap)
         settings = self._settings(dict(options))
 
-        if isinstance(section, str):
+        if isinstance(section, str) and is_naca_designation(section):
             shape = airfoil(section, n_points=self._n_panels + 1)
             key_section: object = section.strip().lower()
         else:
+            # Coordinates or a coordinate file: the factory takes no generator
+            # options, and the cache key uses the points, not the file name.
             shape = airfoil(section)
             key_section = [
                 [round(float(v), 9) for v in row] for row in shape.coords

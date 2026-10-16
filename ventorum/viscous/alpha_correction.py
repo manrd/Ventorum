@@ -79,7 +79,7 @@ import numpy as np
 import scipy.linalg
 
 from ventorum.aero.loads import compute_loads
-from ventorum.aero.parasite import MU_SL
+from ventorum.core.constants import MU_SL
 from ventorum.aero.polar_table import PolarTable, source_supports_ground
 from ventorum.aero.polars import blend_tabulated
 from ventorum.aero.system import GroundPlane, UnknownMap
@@ -167,7 +167,7 @@ def strip_reynolds_number(
         Local chord [m].
     mu : float
         Dynamic viscosity [Pa s]. Default: the single ISA sea-level
-        constant of the package, :data:`ventorum.aero.parasite.MU_SL`.
+        constant of the package, :data:`ventorum.core.constants.MU_SL`.
 
     Returns
     -------
@@ -790,7 +790,7 @@ def solve_viscous(
     conditions : FlightCondition or sequence of FlightCondition
         One condition or a sweep. The density [kg/m^3] and the speed [m/s]
         of each condition set the strip Reynolds numbers (dynamic
-        viscosity :data:`ventorum.aero.parasite.MU_SL` [Pa s]).
+        viscosity :data:`ventorum.core.constants.MU_SL` [Pa s]).
     settings : SolverSettings
         Discretisation settings of the lattice.
     polars : PolarTable, SectionPolarSource, TabulatedAirfoil, LinearAirfoil or dict

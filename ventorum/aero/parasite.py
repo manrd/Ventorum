@@ -53,12 +53,11 @@ import numpy as np
 
 from ventorum.core.datatypes import FlightCondition, LiftingSurface
 from ventorum.geometry.lattice import surface_reference_line
-from ventorum.viscous.alpha_correction import MU_AIR_15C
+from ventorum.core.constants import MU_SL
 
-#: Dynamic viscosity of air at ISA sea level [Pa s] (ISO 2533:1975). The
-#: value is the package constant of the viscous coupling, so the parasite
-#: drag and the strip Reynolds numbers use the same air.
-MU_SL = MU_AIR_15C
+# MU_SL: dynamic viscosity of air at ISA sea level [Pa s] (ISO 2533:1975),
+# the package constant in ventorum.core.constants. The parasite drag and the
+# strip Reynolds numbers of the viscous coupling use the same air.
 
 #: Largest thickness ratio that the lifting form factors accept [-].
 TC_MAX = 0.4

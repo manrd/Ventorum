@@ -293,9 +293,12 @@ def test_transition_guard_is_the_equal_friction_reynolds_number() -> None:
 
 
 def test_viscosity_constant_and_argument() -> None:
-    from ventorum.viscous.alpha_correction import MU_AIR_15C
+    from ventorum.core import constants
+    from ventorum.viscous import alpha_correction
 
-    assert MU_SL == MU_AIR_15C
+    # One viscosity constant in the package (ventorum.core.constants.MU_SL).
+    assert MU_SL is constants.MU_SL
+    assert alpha_correction.MU_SL is constants.MU_SL
     condition = FlightCondition(V_inf=60.0, rho=1.225)
     comp = DragComponent(name="a", wetted_area=10.0, reference_length=2.0, form_factor=1.2)
     default = parasite_drag([comp], condition, 10.0).cd0_total

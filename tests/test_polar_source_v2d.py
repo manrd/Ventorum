@@ -241,3 +241,23 @@ def test_input_validation():
         Ventorum2DPolarSource(cache=False, xtr=(1.5, 1.0))
     with pytest.raises(ValueError, match="backend"):
         Ventorum2DPolarSource(cache=False, backend="torch")
+
+
+def test_coordinate_file_section_is_keyed_by_its_points(tmp_path, fake_solver):
+    """Regression: a file path got generator options (TypeError) and a key by name.
+
+    A coordinate file must work as a section, and the cache key must use the
+    points, so that an edited file with the same name solves again.
+    """
+    from ventorum.airfoil import airfoil
+    from ventorum.airfoil.io import write_selig
+
+    path = tmp_path / "section.dat"
+    write_selig(airfoil("0012"), path)
+    source = Ventorum2DPolarSource(cache=PolarCache(tmp_path / "cache"), n_panels=80)
+    source.polar(str(path), 1e6, [0.0, 2.0])
+    source.polar(str(path), 1e6, [0.0, 2.0])
+    assert len(fake_solver) == 1
+    write_selig(airfoil("2412"), path)
+    source.polar(str(path), 1e6, [0.0, 2.0])
+    assert len(fake_solver) == 2

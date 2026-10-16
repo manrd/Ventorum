@@ -3,6 +3,7 @@
 
 RHO_SL = 1.225       # Air density at sea level [kg/m^3]
 A_SL = 340.294       # Speed of sound at sea level [m/s]
+MU_SL = 1.7894e-5    # Dynamic viscosity of air at sea level [Pa s] (ISO 2533:1975)
 
 # The methods are incompressible. Above this Mach number the results are out
 # of the valid envelope (no compressibility correction is applied).

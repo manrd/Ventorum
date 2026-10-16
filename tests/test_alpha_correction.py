@@ -9,7 +9,7 @@ import shutil
 import numpy as np
 import pytest
 
-from ventorum.aero.parasite import MU_SL
+from ventorum.core.constants import MU_SL
 from ventorum.aero.polar_cache import PolarCache
 from ventorum.aero.polar_source import XfoilPolarSource
 from ventorum.core.datatypes import (
@@ -444,7 +444,7 @@ def test_source_gets_section_hinge_and_reynolds_number():
     flaps = {c["flap"] for c in source.calls}
     # The hinge of the control and the thickness-fraction rule, not (0.75, 0.5) by default.
     assert flaps == {None, (HINGE, 0.5, FLAP_DEG)}
-    # One viscosity constant in the package: ventorum.aero.parasite.MU_SL.
+    # One viscosity constant in the package: ventorum.core.constants.MU_SL.
     expected_re = 0.9 * 30.0 * 1.0 / MU_SL
     assert all(c["Re"] == pytest.approx(expected_re, rel=1e-12) for c in source.calls)
     assert all("height" not in c for c in source.calls)
