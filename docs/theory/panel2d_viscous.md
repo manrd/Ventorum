@@ -78,7 +78,7 @@ One body only: more bodies raise `ValueError`. A plain flap is part of the singl
 
 ## Comparison with XFOIL 6.99 (black box)
 
-For NACA 0012 at Re 1e6 (160 panels, $n_{crit} = 9$) the drag is above XFOIL 6.99 at small angles and the lift is a few percent lower. Causes found: (1) with the edge velocity of XFOIL as input, the laminar march with the published closures (which match exact Falkner-Skan profiles) gives $H$ 1 to 4 % higher in the adverse gradient, so the $e^N$ transition comes about 0.05 chord earlier; (2) the shear-stress start value $0.7\,C_{\tau,EQ}$ (to be checked against the paper) makes the turbulent layer grow faster just after transition. With transition forced at 5 % chord the drag agrees within 2 %. The tests print the comparison table; the numbers are not stored in the repository.
+At the lower Reynolds numbers the drag is above that of XFOIL 6.99 at small angles. Causes found: (1) with the edge velocity of XFOIL as input, the laminar march with the published closures (which match exact Falkner-Skan profiles) gives a higher $H$ in the adverse gradient, so the $e^N$ transition comes earlier; (2) the shear-stress start value $0.7\,C_{\tau,EQ}$ (to be checked against the paper) makes the turbulent layer grow faster just after transition. With the transition forced at the same position the drag agrees. The tests print the comparison table; the numbers are not stored in the repository.
 
 ## Verification
 
