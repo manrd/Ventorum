@@ -2,10 +2,36 @@
 """Closed quadrilateral meshes of thick lifting surfaces for the 3D panel method.
 
 The mesh wraps a thick section around each lifting surface. Each spanwise
-station carries the true airfoil shape (upper surface, lower surface, blunt
-base at an open trailing edge, flat tip cap). The panels are plane
-quadrilaterals (or triangles) with outward corner order, and the
+station carries the airfoil shape (upper surface, lower surface, flat tip
+cap; an open trailing edge is closed by default, see below). The panels are
+plane quadrilaterals (or triangles) with outward corner order, and the
 trailing-edge strips carry the wake shedding edges for the solver.
+
+Finite trailing edge
+--------------------
+A section with an open (blunt) trailing edge is closed by default
+(``trailing_edge="close"``). The upper and the lower ordinates move toward
+the mid point of the trailing-edge gap g by (g / 2) x^4 (x the chordwise
+station in unit chord), so the camber line does not move and the thickness
+changes by at most the gap. For the NACA 4-digit and 5-digit thickness
+law this is exactly the published closed trailing edge: the coefficient of
+x^4 changes from -0.1015 to -0.1036 (Ladson, Brooks, Hill and Sproles 1996),
+and the difference of the two laws is the half gap times x^4.
+
+The reason: with constant-strength panels and the internal Dirichlet
+condition, a solid base between the two trailing-edge corners has no
+fine-mesh limit that satisfies the Kutta condition at both corners. With
+the wake shed from one corner and the Morino condition, the circulation
+flows around the base from the other corner when the trailing-edge panels
+become shorter than the base height, and the lift falls with chordwise
+refinement toward a limit well below the lift of the closed section. Other
+wake attachments (the other corner, the base centre, both
+corners), a base without its Dirichlet row and a base with outflow give
+the same circulation, because the potential outside the base region does
+not change; an explicit velocity or pressure Kutta condition on the
+trailing-edge panels makes the lift rise without limit, because the
+corner flows are singular. ``trailing_edge="base"`` keeps the former
+blunt base (base panels, wake from the upper corner) for comparisons.
 
 Section placement
 -----------------
@@ -67,6 +93,14 @@ Published sources
   hinged aft portion of the section).
 * Abbott, I. H. and von Doenhoff, A. E., 1959, Theory of Wing Sections,
   Dover (airfoil section geometry used in the tests).
+* Ladson, C. L., Brooks, C. W., Hill, A. S. and Sproles, D. W., 1996,
+  Computer Program To Obtain Ordinates for NACA Airfoils, NASA TM-4741
+  (closed trailing edge of the NACA 4-digit thickness law).
+* Maskew, B., 1987, Program VSAERO Theory Document, NASA CR-4023,
+  sections 2.2 and 3.1.4 (the Kutta condition is implied by the wake
+  doublet; any panel edge may shed a wake and the user chooses a
+  physically realistic wake model; part-span flap with prescribed vortex
+  separations at the flap edge, section 4.4).
 * O'Rourke, J., 1998, Computational Geometry in C, 2nd ed., Cambridge
   University Press, Chapter 1 (triangulation of a simple polygon by ear
   clipping, used for the control side closures).
@@ -120,7 +154,12 @@ import numpy as np
 
 from ventorum.geometry.lattice import _surface_eta, resolve_spacing, surface_reference_line
 
-__all__ = ["PanelMesh", "check_mesh", "mesh_aircraft", "mesh_lifting_surface"]
+__all__ = [
+    "PanelMesh",
+    "check_mesh",
+    "mesh_aircraft",
+    "mesh_lifting_surface",
+]
 
 #: Trailing-edge gap over local chord below which the edge counts as sharp.
 _TE_GAP_TOL = 1e-6
@@ -144,6 +183,8 @@ WARP_LIMIT = 0.05
 #: panel row. A row closer to the vertical has no miter (the two halves of
 #: a symmetric surface coincide), so the root section is not scaled.
 _COS_ROOT_MIN = 1e-9
+#: Accepted values of the trailing-edge option.
+_TRAILING_EDGE_OPTIONS = ("close", "base")
 _XHAT = np.array([1.0, 0.0, 0.0])
 
 
@@ -577,6 +618,38 @@ def _scale_about_camber(yu: np.ndarray, yl: np.ndarray, factor: float) -> tuple[
     camber = 0.5 * (yu + yl)
     half = 0.5 * (yu - yl)
     return camber + factor * half, camber - factor * half
+
+
+def _close_trailing_edge(x: np.ndarray, yu: np.ndarray, yl: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Close an open trailing edge with a quartic thickness change [chord units].
+
+    The upper and the lower ordinates move toward the mid point of the
+    trailing-edge gap g by (g / 2) x^4, so the camber line does not move.
+    For the NACA 4-digit thickness law this gives the closed trailing edge
+    of Ladson et al. (1996): the x^4 coefficient -0.1036 instead of -0.1015.
+    A sharp trailing edge (gap at most the sharp-edge tolerance) is
+    returned unchanged.
+
+    Parameters
+    ----------
+    x : numpy.ndarray
+        Chordwise stations [chord units], from 0 to 1.
+    yu, yl : numpy.ndarray
+        Upper and lower ordinates at *x* [chord units].
+
+    Returns
+    -------
+    tuple of numpy.ndarray
+        Closed upper and lower ordinates [chord units].
+    """
+    x = np.asarray(x, dtype=float)
+    yu = np.asarray(yu, dtype=float)
+    yl = np.asarray(yl, dtype=float)
+    gap = float(yu[-1] - yl[-1])
+    if abs(gap) <= _TE_GAP_TOL:
+        return yu, yl
+    ramp = 0.5 * gap * x**4
+    return yu - ramp, yl + ramp
 
 
 # ---------------------------------------------------------------------------
@@ -1037,6 +1110,7 @@ def _mesh_with_controls(
     tip: str,
     half: bool,
     scale_root_thickness: bool = True,
+    trailing_edge: str = "close",
 ) -> PanelMesh:
     """Build a watertight mesh with deflected plain control surfaces."""
     from ventorum.geometry.controls import validate_controls
@@ -1047,6 +1121,8 @@ def _mesh_with_controls(
     yl_mat = []
     for c in coord_sorted:
         yu, yl = _resample_section(c, xt_new)
+        if trailing_edge == "close":
+            yu, yl = _close_trailing_edge(xt_new, yu, yl)
         yu_mat.append(yu)
         yl_mat.append(yl)
     yu_mat = np.vstack(yu_mat)
@@ -1076,8 +1152,12 @@ def _mesh_with_controls(
     offset = np.asarray(surf.position, dtype=float).reshape(3)
     le_e = np.column_stack([x_ref, y_ref, z_ref]) + offset
     axis_e = _span_axes_for_edges(surf, edge_etas)
-    cdir_e, ndir_e = _section_frames(axis_e, twist_e)
     qc_e = le_e + 0.25 * chord_e[:, None] * _XHAT
+
+    def station_rows(j: int, mirror_side: bool):
+        ctrl = edge_ctrls[j]
+        delta = _right_delta_deg(ctrl, mirror_side)
+        return _deflected_station(xt_new, yu_base[j], yl_base[j], ctrl, delta)
 
     def section_rows(mirror_side: bool):
         xu = np.empty((ns, nc + 1))
@@ -1085,10 +1165,10 @@ def _mesh_with_controls(
         xl = np.empty((ns, nc + 1))
         zl = np.empty((ns, nc + 1))
         for j in range(ns):
-            ctrl = edge_ctrls[j]
-            delta = _right_delta_deg(ctrl, mirror_side)
-            xu[j], zu[j], xl[j], zl[j] = _deflected_station(xt_new, yu_base[j], yl_base[j], ctrl, delta)
+            xu[j], zu[j], xl[j], zl[j] = station_rows(j, mirror_side)
         return xu, zu, xl, zl
+
+    cdir_e, ndir_e = _section_frames(axis_e, twist_e)
 
     if symmetric and has_asym:
         # Full mesh from the left tip to the right tip: the left side is the
@@ -1223,6 +1303,7 @@ def mesh_lifting_surface(
     half: bool = False,
     n_span=None,
     scale_root_thickness: bool = True,
+    trailing_edge: str = "close",
 ) -> PanelMesh:
     """Build a closed quadrilateral mesh of one thick lifting surface.
 
@@ -1252,6 +1333,11 @@ def mesh_lifting_surface(
         that the thickness normal to the local surface equals the section
         thickness. False keeps the thickness of the root section along its
         section normal (the mesh before this option, bit for bit).
+    trailing_edge : str
+        "close" (default) closes an open trailing edge with the quartic
+        thickness change of the module notes; "base" keeps the open edge
+        with base panels and the wake at the upper corner (the former mesh;
+        its results do not converge with chordwise refinement).
 
     Returns
     -------
@@ -1292,6 +1378,8 @@ def mesh_lifting_surface(
         raise ValueError(f"n_chord must be at least 1, got {n_chord}.")
     if tip not in ("flat", "none"):
         raise ValueError(f"Unknown tip {tip!r}; use 'flat' or 'none'.")
+    if trailing_edge not in _TRAILING_EDGE_OPTIONS:
+        raise ValueError(f"Unknown trailing_edge {trailing_edge!r}; use 'close' or 'base'.")
     secs = list(surf.sections)
     if len(secs) < 2:
         raise ValueError("A lifting surface needs at least two sections.")
@@ -1318,6 +1406,7 @@ def mesh_lifting_surface(
         return _mesh_with_controls(
             surf, coord_sorted_c, fr_c, chords_c, twists_c, xt_new_c, eta_base_c, active, tip, half,
             scale_root_thickness=bool(scale_root_thickness),
+            trailing_edge=trailing_edge,
         )
 
     order = sorted(range(len(secs)), key=lambda i: float(secs[i].y_frac))
@@ -1334,6 +1423,8 @@ def mesh_lifting_surface(
     yl_rows = []
     for c in coord_sorted:
         yu, yl = _resample_section(c, xt)
+        if trailing_edge == "close":
+            yu, yl = _close_trailing_edge(xt, yu, yl)
         yu_rows.append(yu)
         yl_rows.append(yl)
     yu_mat = np.vstack(yu_rows)
@@ -1358,7 +1449,6 @@ def mesh_lifting_surface(
     axis /= np.maximum(np.linalg.norm(axis, axis=1, keepdims=True), 1e-300)
     if surf.is_symmetric:
         axis[eta_e <= 1e-12] = np.array([0.0, 1.0, 0.0])
-    cdir, ndir = _section_frames(axis, twist_e)
     qc = le_flat + 0.25 * chord_e[:, None] * _XHAT
     yu_e = _interp_rows(fr, yu_mat, eta_e)
     yl_e = _interp_rows(fr, yl_mat, eta_e)
@@ -1367,6 +1457,7 @@ def mesh_lifting_surface(
         factor = _root_thickness_factor(surf, eta_e)
         if factor != 1.0:
             yu_e[0], yl_e[0] = _scale_about_camber(yu_e[0], yl_e[0], factor)
+    cdir, ndir = _section_frames(axis, twist_e)
 
     upper = np.empty((ns, nc1, 3))
     lower = np.empty((ns, nc1, 3))
@@ -1485,7 +1576,7 @@ def mesh_aircraft(
         every surface (default True).
     **kw
         Extra arguments of :func:`mesh_lifting_surface` (n_chord, n_span,
-        chord_spacing, tip, half).
+        chord_spacing, tip, half, trailing_edge).
 
     Returns
     -------

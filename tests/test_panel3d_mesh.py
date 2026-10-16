@@ -164,16 +164,48 @@ def test_trailing_edge_matches_vlm_and_wake_count():
 
 
 def test_blunt_trailing_edge_base_panels():
+    """The option trailing_edge='base' keeps the base panels of an open trailing edge."""
     coords = _naca4(0.0, 0.0, 0.12, closed=False)
     surf = _rect_wing()
     n_span = 10
-    mesh = mesh_lifting_surface(surf, coords, n_chord=12, n_span=n_span)
+    mesh = mesh_lifting_surface(surf, coords, n_chord=12, n_span=n_span, trailing_edge="base")
     kind = np.asarray(mesh.kind)
     assert int(np.sum(kind == "base")) == 2 * n_span
     assert len(mesh.wake_edges) == 2 * n_span
     info = check_mesh(mesh)
     assert info["watertight"]
     assert info["outward"]
+
+
+def test_open_trailing_edge_is_closed_by_default():
+    """Regression: the default mesh closes an open trailing edge with the quartic thickness change.
+
+    The open NACA 0012 (x^4 coefficient -0.1015) becomes the closed NACA
+    0012 of Ladson et al. (1996) (coefficient -0.1036): the two meshes
+    agree to the interpolation error of the section points. There are no
+    base panels, and the camber line (the mean of the upper and the lower
+    ordinate) does not move. The wake edges stay one per strip.
+    """
+    surf = _rect_wing()
+    n_span = 6
+    open_mesh = mesh_lifting_surface(surf, _naca4(0.0, 0.0, 0.12, closed=False, n=401), n_chord=24, n_span=n_span)
+    closed_mesh = mesh_lifting_surface(surf, _naca4(0.0, 0.0, 0.12, closed=True, n=401), n_chord=24, n_span=n_span)
+    assert "base" not in set(np.asarray(open_mesh.kind).tolist())
+    assert len(open_mesh.wake_edges) == 2 * n_span
+    assert np.asarray(open_mesh.nodes).shape == np.asarray(closed_mesh.nodes).shape
+    np.testing.assert_allclose(np.asarray(open_mesh.nodes), np.asarray(closed_mesh.nodes), rtol=0.0, atol=2e-6)
+    info = check_mesh(open_mesh)
+    assert info["watertight"] and info["outward"] and info["valid_panels"]
+    # Cambered section: the camber line stays, the trailing edge closes at its mid point.
+    from ventorum.panel3d.mesh import _close_trailing_edge
+
+    xt, yu, yl = _resampled_section(_naca4(0.02, 0.4, 0.12, closed=False), 24)
+    cu, cl = _close_trailing_edge(xt, yu, yl)
+    np.testing.assert_allclose(0.5 * (cu + cl), 0.5 * (yu + yl), rtol=0.0, atol=1e-15)
+    assert cu[-1] == pytest.approx(cl[-1], abs=1e-15)
+    assert float(np.max(np.abs((cu - cl) - (yu - yl)))) <= float(yu[-1] - yl[-1]) + 1e-15
+    with pytest.raises(ValueError):
+        mesh_lifting_surface(surf, _naca4(0.0, 0.0, 0.12, closed=False), n_chord=8, n_span=4, trailing_edge="open")
 
 
 def test_mesh_aircraft_two_components():

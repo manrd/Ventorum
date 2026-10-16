@@ -307,19 +307,22 @@ def test_side_closure_self_influence_and_planes() -> None:
     An invalid side closure (bow-tie or non-convex quadrilateral) puts the
     collocation point outside its panel, so the self term of the doublet
     potential drops from +1/2 to 0. The meshes use a library section with
-    a blunt trailing edge.
+    a blunt trailing edge (base panels kept), and the default meshes (the
+    trailing edge closed).
     """
     coords = airfoil("0012").coords
+    options = ({"trailing_edge": "base"}, {})
     for controls in (_flap(10.0), _flap(-20.0), _aileron(5.0)):
-        mesh = mesh_lifting_surface(_plain_wing(controls), coords, n_chord=12, n_span=10)
-        info = check_mesh(mesh)
-        assert info["watertight"] and info["outward"] and info["valid_panels"]
-        verts = np.asarray(mesh.nodes)[np.asarray(mesh.panels)]
-        colloc = _precompute_geometry(verts).centroid
-        _, c_mat = influence_matrices(colloc, verts, far_ratio=np.inf)
-        diag = np.diag(c_mat)
-        assert np.allclose(diag, 0.5, rtol=0.0, atol=1e-12), f"self terms {diag.min():.3f} to {diag.max():.3f}"
-        assert np.allclose(np.sum(c_mat, axis=1), 1.0, rtol=0.0, atol=2e-2)
+        for kw in options:
+            mesh = mesh_lifting_surface(_plain_wing(controls), coords, n_chord=12, n_span=10, **kw)
+            info = check_mesh(mesh)
+            assert info["watertight"] and info["outward"] and info["valid_panels"]
+            verts = np.asarray(mesh.nodes)[np.asarray(mesh.panels)]
+            colloc = _precompute_geometry(verts).centroid
+            _, c_mat = influence_matrices(colloc, verts, far_ratio=np.inf)
+            diag = np.diag(c_mat)
+            assert np.allclose(diag, 0.5, rtol=0.0, atol=1e-12), f"self terms {diag.min():.3f} to {diag.max():.3f}"
+            assert np.allclose(np.sum(c_mat, axis=1), 1.0, rtol=0.0, atol=2e-2)
 
 
 @pytest.mark.parametrize(
@@ -456,7 +459,9 @@ def test_control_meshes_valid_for_mixed_controls(section: str) -> None:
     V-tail elevator, and a rudder on a vertical fin and on its mirror copy.
     The 4415 library section has different upper and lower ordinates at
     x = 0 after the resampling; both sections of a side edge must still
-    share the leading-edge node. Every self term is +1/2.
+    share the leading-edge node. Every self term is +1/2. Each case runs
+    with the open trailing edge and base panels and with the default mesh
+    (closed trailing edge).
     """
 
     def ctrl(a, b, hinge, deg, sym=True):
@@ -488,9 +493,10 @@ def test_control_meshes_valid_for_mixed_controls(section: str) -> None:
     ]
     coords = airfoil(section).coords
     for surf in cases:
-        mesh = mesh_lifting_surface(surf, coords, n_chord=10, n_span=10)
-        info = check_mesh(mesh)
-        assert info["watertight"] and info["outward"] and info["valid_panels"], surf.controls
-        verts = np.asarray(mesh.nodes)[np.asarray(mesh.panels)]
-        _, c_mat = influence_matrices(_precompute_geometry(verts).centroid, verts, far_ratio=np.inf)
-        assert np.allclose(np.diag(c_mat), 0.5, rtol=0.0, atol=1e-12)
+        for kw in ({"trailing_edge": "base"}, {}):
+            mesh = mesh_lifting_surface(surf, coords, n_chord=10, n_span=10, **kw)
+            info = check_mesh(mesh)
+            assert info["watertight"] and info["outward"] and info["valid_panels"], (surf.controls, kw)
+            verts = np.asarray(mesh.nodes)[np.asarray(mesh.panels)]
+            _, c_mat = influence_matrices(_precompute_geometry(verts).centroid, verts, far_ratio=np.inf)
+            assert np.allclose(np.diag(c_mat), 0.5, rtol=0.0, atol=1e-12)

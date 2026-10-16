@@ -150,7 +150,7 @@ The class `PanelMesh` represents the surface of one or more thick lifting surfac
 
 ### Wing meshing and trailing-edge treatment
 
-Each lifting surface is discretized into spanwise strips. At each span station, the wing section carries its true airfoil coordinates. The upper and lower surfaces are covered with quadrilateral panels. At open trailing edges where the gap exceeds the tolerance ($10^{-6} c$), flat base panels seal the trailing edge. Flat tip caps close the wing tips to guarantee a watertight enclosed volume.
+Each lifting surface is discretized into spanwise strips. At each span station, the wing section carries its airfoil coordinates. The upper and lower surfaces are covered with quadrilateral panels. An open trailing edge (gap above the tolerance $10^{-6} c$) is closed by default: the upper and the lower ordinates move toward the mid point of the gap $g$ by $\tfrac{1}{2} g x^4$, which for the NACA 4-digit thickness law is the published closed trailing edge (Ladson et al., 1996). With a solid base between the two trailing-edge corners the Morino Kutta condition puts the Kutta point at the wake corner on fine chordwise meshes, and the lift does not converge to the lift of the closed section (see the [panel solver chapter](panel3d.md), section *Finite (blunt) Trailing Edge*). The option `trailing_edge="base"` keeps flat base panels and the wake at the upper corner. Flat tip caps close the wing tips to guarantee a watertight enclosed volume.
 
 ### Deflected plain control surfaces
 
@@ -466,6 +466,7 @@ The 3D panel method implementation is verified by tests in the test suite:
 - Symmetry plane and ground effect images (explicit mirror with the free-stream wake, Trefftz drag with images, bank and sideslip on a half mesh): `tests/test_panel3d_images.py`.
 - Iterative pressure Kutta condition (stored Morino run, asymmetric half mesh against the full mesh): `tests/test_panel3d_kutta.py`.
 - Mesh convergence and Richardson extrapolation: `tests/test_panel3d_convergence.py`.
+- Refinement regression (open trailing edge with chordwise refinement): `tests/test_panel3d_refinement.py`.
 - Solver family integration, settings, ground plane, strip map and trust scores: `tests/test_panel3d_factory.py`.
 - GPU pipeline parity (when CUDA is available): `tests/test_panel3d_gpu.py`.
 
@@ -478,6 +479,7 @@ The 3D panel method implementation is verified by tests in the test suite:
 - J. L. Hess and A. M. O. Smith, "Calculation of Potential Flow About Arbitrary Bodies", *Progress in Aeronautical Sciences*, Vol. 8, Pergamon Press, 1967, pp. 1-138.
 - J. Katz and A. Plotkin, *Low-Speed Aerodynamics*, 2nd ed., Cambridge University Press, Cambridge, 2001.
 - S. A. Kinnas and C. Y. Hsin, "Boundary Element Method for the Analysis of the Unsteady Flow Around Extreme Propeller Geometries", *AIAA Journal*, Vol. 30, No. 3, 1992, pp. 688-696.
+- C. L. Ladson, C. W. Brooks, A. S. Hill and D. W. Sproles, "Computer Program To Obtain Ordinates for NACA Airfoils", NASA TM-4741, 1996.
 - B. Maskew, "Program VSAERO Theory Document: A Computer Program for Calculating the Non-Linear Aerodynamic Characteristics of Arbitrary Configurations", NASA Contractor Report 4023, 1987.
 - L. Morino and C. C. Kuo, "Subsonic Potential Aerodynamics for Complex Configurations: A General Theory", *AIAA Journal*, Vol. 12, No. 2, 1974, pp. 191-197.
 - J. N. Newman, "Distributions of Sources and Normal Dipoles Over a Quadrilateral Panel", *Journal of Engineering Mathematics*, Vol. 20, 1986, pp. 113-126.
