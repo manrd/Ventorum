@@ -378,15 +378,6 @@ def test_flap_and_aileron_pressure_closed_trailing_edge() -> None:
     assert abs(res2.Cl / roll_vlm - 1.0) < 0.25
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "Pressure integration of the solver: the surface gradient of mu on the base "
-        "panels next to a control side closure (blunt trailing edge) mixes in the "
-        "side panels across the 90 deg edge and gives |cp| of order 1e3 there. The "
-        "circulation lift of the same solution agrees with the VLM (test above)."
-    ),
-)
 @pytest.mark.parametrize("section", ["0012", "2412"])
 def test_flap_pressure_delta_cl_blunt_library_sections(section: str) -> None:
     """Pressure-integrated flap delta CL of library sections (blunt trailing edge) versus VLM."""
