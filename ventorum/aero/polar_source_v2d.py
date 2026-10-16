@@ -5,6 +5,18 @@ This module wraps the in-house two-dimensional coupled viscous-inviscid
 panel solver into the SectionPolarSource protocol. It evaluates clean or
 flapped section polars in free air or in ground effect.
 
+The flap tuple is the same as in every section polar source:
+``(x_hinge, y_hinge, deflection_deg)``, with the hinge position as a
+fraction of the chord [-], the hinge height as a fraction of the local
+thickness [-] (0 lower surface, 1 upper surface) and the deflection [deg],
+positive trailing edge down.
+
+The cache key holds the package version, the solver revision
+(:data:`PANEL2D_SOLVER_REVISION`, or ``ventorum.panel2d.SOLVER_REVISION``
+when that package exports one) and a sha256 fingerprint of the source
+files of the 2D packages (:func:`solver_fingerprint`), so a polar of an
+older solver is never read back.
+
 Sources: Drela, M. and Giles, M. B., 1987, Viscous-inviscid analysis of
 transonic and low Reynolds number airfoils, AIAA Journal; Drela, M., 1989,
 XFOIL: An analysis and design system for low Reynolds number airfoils;
@@ -15,16 +27,107 @@ aerofoil with hinged flap, R&M 1095.
 
 from __future__ import annotations
 
+import functools
+import hashlib
+import inspect
+from collections.abc import Sequence
+from pathlib import Path
 from typing import Any
 
 import numpy as np
 
 from ventorum.aero.polar_cache import PolarCache
+from ventorum.aero.xfoil_runner import check_flap
 from ventorum.airfoil import airfoil
 from ventorum.core.datatypes import TabulatedAirfoil
 from ventorum.panel2d.viscous import solve_viscous
 
-__all__ = ["Ventorum2DPolarSource"]
+__all__ = ["PANEL2D_SOLVER_REVISION", "Ventorum2DPolarSource", "solver_fingerprint"]
+
+#: Revision of the 2D viscous solver for the cache key. Raise it when a
+#: change of ``ventorum.panel2d``, ``ventorum.ibl2d`` or ``ventorum.airfoil``
+#: can change a polar. When ``ventorum.panel2d`` exports
+#: ``SOLVER_REVISION``, that value is used instead.
+PANEL2D_SOLVER_REVISION = "1"
+
+#: Packages whose source files form the solver fingerprint.
+_FINGERPRINT_PACKAGES = ("panel2d", "ibl2d", "airfoil")
+
+#: Inputs of the 2D solver that :meth:`Ventorum2DPolarSource.polar` sets
+#: itself; they are not accepted as options.
+_NAMED_SOLVER_INPUTS = frozenset({"bodies", "alpha_deg", "Re", "mach", "height"})
+
+
+def solver_revision() -> str:
+    """Return the revision of the 2D viscous solver.
+
+    Returns
+    -------
+    str
+        ``ventorum.panel2d.SOLVER_REVISION`` when the package exports it,
+        else :data:`PANEL2D_SOLVER_REVISION`.
+    """
+    import ventorum.panel2d as panel2d
+
+    return str(getattr(panel2d, "SOLVER_REVISION", PANEL2D_SOLVER_REVISION))
+
+
+@functools.lru_cache(maxsize=1)
+def solver_fingerprint() -> str:
+    """Return a sha256 fingerprint of the source files of the 2D solver.
+
+    The fingerprint covers the Python files of ``ventorum.panel2d``,
+    ``ventorum.ibl2d`` and ``ventorum.airfoil`` (names and contents), so
+    every code change of the solver, the boundary layer or the geometry
+    gives a new cache key.
+
+    Returns
+    -------
+    str
+        Hex digest.
+    """
+    root = Path(__file__).resolve().parents[1]
+    digest = hashlib.sha256()
+    for package in _FINGERPRINT_PACKAGES:
+        for path in sorted((root / package).glob("*.py")):
+            digest.update(f"{package}/{path.name}\n".encode())
+            digest.update(path.read_bytes())
+    return digest.hexdigest()
+
+
+def _package_version() -> str:
+    """Return the version of the ventorum package."""
+    import ventorum
+
+    return str(getattr(ventorum, "__version__", "unknown"))
+
+
+def _solver_option_names() -> set[str]:
+    """Return the keyword options that the 2D viscous solver accepts."""
+    params = inspect.signature(solve_viscous).parameters
+    return {
+        name
+        for name, p in params.items()
+        if p.kind in (inspect.Parameter.KEYWORD_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD)
+        and name not in _NAMED_SOLVER_INPUTS
+    }
+
+
+#: Keyword options of the 2D viscous solver, read from its signature.
+_SOLVER_OPTIONS = frozenset(_solver_option_names())
+
+
+def _json_value(value: object) -> object:
+    """Return *value* as a plain JSON type for the cache key."""
+    if value is None or isinstance(value, (bool, str)):
+        return value
+    if isinstance(value, (int, np.integer)):
+        return int(value)
+    if isinstance(value, (float, np.floating)):
+        return float(value)
+    if isinstance(value, (list, tuple, np.ndarray)):
+        return [_json_value(v) for v in np.asarray(value, dtype=object).ravel()]
+    return repr(value)
 
 
 class Ventorum2DPolarSource:
@@ -45,6 +148,15 @@ class Ventorum2DPolarSource:
         Default is (1.0, 1.0).
     backend : {"numpy"}
         Computational backend. Default is "numpy".
+
+    Attributes
+    ----------
+    supports_ground : bool
+        True: :meth:`polar` takes the ``height`` keyword.
+    last_dropped : int
+        Number of requested angles that did not converge in the last
+        :meth:`polar` call that ran the solver (the polar name also
+        states it).
     """
 
     supports_ground: bool = True
@@ -97,11 +209,62 @@ class Ventorum2DPolarSource:
         self._backend = str(backend)
         self.last_dropped: int = 0
 
+    def _settings(self, options: dict[str, object]) -> dict[str, Any]:
+        """Return the solver keywords of one call (defaults, then *options*)."""
+        unknown = set(options) - _SOLVER_OPTIONS
+        if unknown:
+            raise ValueError(
+                f"Unknown Ventorum-2D option(s) {sorted(unknown)}; allowed: "
+                f"{sorted(_SOLVER_OPTIONS)}."
+            )
+        settings: dict[str, Any] = {
+            "ncrit": self._ncrit,
+            "xtr": self._xtr,
+            "backend": self._backend,
+            "tol": 1e-4,
+            "max_iter": 50,
+        }
+        settings.update(options)
+        settings["ncrit"] = float(settings["ncrit"])
+        settings["xtr"] = tuple(float(v) for v in settings["xtr"])  # type: ignore[union-attr]
+        settings["backend"] = str(settings["backend"])
+        return settings
+
+    def describe(self, **options: object) -> dict[str, Any]:
+        """Return the name, the options and the version of this source.
+
+        Polar tables record this dictionary as their provenance.
+
+        Parameters
+        ----------
+        **options
+            Per-call solver options to include (see :meth:`polar`).
+
+        Returns
+        -------
+        dict
+            ``{"source": "Ventorum2DPolarSource", "options": {...},
+            "version": str}``. The version holds the package version, the
+            solver revision and the first 12 characters of the solver
+            fingerprint.
+        """
+        settings = self._settings(dict(options))
+        opts = {"n_panels": self._n_panels}
+        opts.update({k: _json_value(v) for k, v in sorted(settings.items())})
+        version = (
+            f"ventorum {_package_version()}, solver revision {solver_revision()}, "
+            f"fingerprint {solver_fingerprint()[:12]}"
+        )
+        return {"source": type(self).__name__, "options": opts, "version": version}
+
     def polar(
         self,
-        *args: Any,
+        section: Any,
+        Re: float,
+        alphas_deg: Sequence[float] | np.ndarray,
+        *,
         mach: float = 0.0,
-        flap: tuple[float, float, float] | tuple[float, float] | None = None,
+        flap: tuple[float, float, float] | None = None,
         height: float | None = None,
         **options: object,
     ) -> TabulatedAirfoil:
@@ -109,47 +272,38 @@ class Ventorum2DPolarSource:
 
         Parameters
         ----------
-        *args : object
-            Positional inputs: ``section``, ``Re``, and ``alphas_deg``.
-            ``section`` is a NACA designation string, coordinates of shape
-            (N, 2) in Selig order, or an AirfoilShape instance.
-            ``Re`` is the Reynolds number [-].
-            ``alphas_deg`` is a sequence of angles of attack [deg].
+        section : str, np.ndarray or AirfoilShape
+            A NACA designation string, coordinates of shape (N, 2) in
+            Selig order [chord units], or an AirfoilShape instance.
+        Re : float
+            Reynolds number [-].
+        alphas_deg : sequence of float
+            Angles of attack [deg]. The solver sweeps from 0 in both
+            directions with continuation (its own sweep rule).
         mach : float
             Mach number [-]. Must be 0.0.
         flap : tuple or None
-            ``(x_hinge, y_hinge, deflection_deg)`` or
-            ``(x_hinge, deflection_deg)``: hinge chord position [-],
-            optional thickness fraction [-], and deflection [deg]
-            (positive down).
+            ``(x_hinge, y_hinge, deflection_deg)``: hinge position as a
+            fraction of the chord [-], hinge height as a fraction of the
+            local thickness [-] (0 lower surface, 1 upper surface) and
+            deflection [deg], positive down.
         height : float or None
-            Section height above the ground normalized by chord [-],
-            or None for free air.
+            Height above the ground in chords [-] of the reference point
+            of the 2D solver (its default pivot, the quarter chord), for
+            a section of unit chord. None means free air.
         **options
             Extra keywords forwarded to :func:`solve_viscous` (for example
             ``ncrit``, ``xtr``, ``max_iter``, ``tol``, ``wake_length``).
+            Unknown names are refused. A named input given twice (for
+            example ``Re``) is a TypeError of the call itself.
 
         Returns
         -------
         TabulatedAirfoil
             The section polar over the converged requested angles. Angles
-            are in radians. Non-converged angles are dropped.
+            are in radians. Non-converged angles are dropped; the polar
+            name and :attr:`last_dropped` give their number.
         """
-        clash_candidates = {"section", "Re", "alphas_deg", "mach", "flap", "height"}
-        clash = clash_candidates & set(options)
-        if clash:
-            raise ValueError(
-                f"Option(s) {sorted(clash)} clash with the named inputs of polar(); "
-                "pass them as named inputs instead."
-            )
-        if len(args) < 3:
-            raise TypeError(
-                f"polar() takes at least 3 arguments (section, Re, alphas_deg), got {len(args)}."
-            )
-        section = args[0]
-        Re = args[1]
-        alphas_deg = args[2]
-
         try:
             mach_val = float(mach)
         except (TypeError, ValueError):
@@ -180,19 +334,8 @@ class Ventorum2DPolarSource:
             if not np.isfinite(h_val) or h_val <= 0.0:
                 raise ValueError(f"height must be positive, got {height}.")
 
-        flap_tup: tuple[float, float, float] | None = None
-        if flap is not None:
-            try:
-                if len(flap) == 3:
-                    flap_tup = (float(flap[0]), float(flap[1]), float(flap[2]))
-                elif len(flap) == 2:
-                    flap_tup = (float(flap[0]), 0.5, float(flap[1]))
-                else:
-                    raise ValueError(
-                        f"flap must hold 2 or 3 numbers, got {flap}."
-                    )
-            except (TypeError, ValueError, IndexError) as exc:
-                raise ValueError(f"Invalid flap argument: {exc}.") from exc
+        flap_tup = check_flap(flap)
+        settings = self._settings(dict(options))
 
         if isinstance(section, str):
             shape = airfoil(section, n_points=self._n_panels + 1)
@@ -213,23 +356,14 @@ class Ventorum2DPolarSource:
                 y_hinge=flap_tup[1],
             )
 
-        settings: dict[str, Any] = {
-            "ncrit": float(options.get("ncrit", self._ncrit)),
-            "xtr": tuple(options.get("xtr", self._xtr)),
-            "backend": str(options.get("backend", self._backend)),
-        }
-        solver_options = dict(options)
-        solver_options.pop("ncrit", None)
-        solver_options.pop("xtr", None)
-        solver_options.pop("backend", None)
-        solver_options.setdefault("tol", 1e-4)
-        solver_options.setdefault("max_iter", 50)
-
         unique_req = np.sort(np.unique(alphas))
         payload: dict[str, Any] | None = None
         if self._cache is not None:
             payload = {
-                "source": "Ventorum2DPolarSource",
+                "source": type(self).__name__,
+                "package_version": _package_version(),
+                "solver_revision": solver_revision(),
+                "solver_fingerprint": solver_fingerprint(),
                 "section": key_section,
                 "Re": float(re_val),
                 "mach": float(mach_val),
@@ -237,42 +371,26 @@ class Ventorum2DPolarSource:
                 "height": h_val,
                 "alphas_deg": [round(float(v), 9) for v in unique_req],
                 "n_panels": self._n_panels,
-                "ncrit": settings["ncrit"],
-                "xtr": list(settings["xtr"]),
-                "backend": settings["backend"],
+                "options": {k: _json_value(v) for k, v in sorted(settings.items())},
             }
-            for k, v in sorted(solver_options.items()):
-                payload[k] = v
             hit = self._cache.get(payload)
             if hit is not None:
                 return hit
 
-        sweep_alphas = unique_req
-
         res = solve_viscous(
             shape.coords,
-            sweep_alphas,
+            unique_req,
             re_val,
             mach=0.0,
-            ncrit=settings["ncrit"],
-            xtr=settings["xtr"],
             height=h_val,
-            backend=settings["backend"],
-            **solver_options,
+            **settings,
         )
 
-        if np.ndim(res.alpha) == 0:
-            res_alphas = np.array([float(res.alpha)])
-            res_cls = np.array([float(res.Cl)])
-            res_cds = np.array([float(res.Cd)])
-            res_cms = np.array([float(res.Cm)])
-            res_conv = np.array([bool(res.converged)])
-        else:
-            res_alphas = np.asarray(res.alpha, dtype=float)
-            res_cls = np.asarray(res.Cl, dtype=float)
-            res_cds = np.asarray(res.Cd, dtype=float)
-            res_cms = np.asarray(res.Cm, dtype=float)
-            res_conv = np.asarray(res.converged, dtype=bool)
+        res_alphas = np.atleast_1d(np.asarray(res.alpha, dtype=float))
+        res_cls = np.atleast_1d(np.asarray(res.Cl, dtype=float))
+        res_cds = np.atleast_1d(np.asarray(res.Cd, dtype=float))
+        res_cms = np.atleast_1d(np.asarray(res.Cm, dtype=float))
+        res_conv = np.atleast_1d(np.asarray(res.converged, dtype=bool))
 
         kept_alphas: list[float] = []
         kept_cls: list[float] = []
