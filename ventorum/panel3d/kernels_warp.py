@@ -4,8 +4,14 @@
 The kernels compute the same matrices as the numpy reference: the source
 potentials ``B`` and the doublet potentials ``C``, with the same formulas
 and the same branches (planar projection done on the host, the van
-Oosterom and Strackee solid angle, the analytic edge sums, and the point
-far-field expansions beyond ``far_ratio`` panel diameters).
+Oosterom and Strackee solid angle, the body-side limit in the on-plane
+band, the analytic edge sums, and the point far-field expansions beyond
+``far_ratio`` panel diameters).
+
+The on-plane band (the body-side limit of the doublet potential) uses a
+tolerance relative to the panel size and the coordinate magnitude, with the
+machine epsilon of the coarser of the input dtype and the kernel precision.
+So a float32 run keeps the self term +1/2 at the collocation points.
 
 Thread map: one thread computes one (target, panel) pair, so the launch
 has ``(P, M)`` threads. Each precision (float32, float64) builds its own
@@ -15,8 +21,11 @@ PyTorch tensors on the CUDA device (``wp.to_torch``).
 
 References
 ----------
-* J. L. Hess and A. M. O. Smith, "Calculation of Nonlifting Potential Flow About
-  Arbitrary Three-Dimensional Bodies", Progress in Aeronautical Sciences 8 (1967) 1-138.
+* J. L. Hess and A. M. O. Smith, "Calculation of non-lifting potential flow
+  about arbitrary three-dimensional bodies", Journal of Ship Research 8 (1964)
+  22-44.
+* J. L. Hess and A. M. O. Smith, "Calculation of potential flow about arbitrary
+  bodies", Progress in Aeronautical Sciences 8 (1967) 1-138, Pergamon Press.
 * J. Katz and A. Plotkin, "Low-Speed Aerodynamics", 2nd ed., Cambridge University
   Press, 2001, section 10.4 and chapter 12.
 * J. N. Newman, "Distributions of sources and normal dipoles over a quadrilateral
@@ -84,6 +93,41 @@ def _kernels(precision: str):
             return T(2.0) * wp.atan2(num, den)
 
         @wp.func(module=module)
+        def plane_winding(
+            x: T,
+            y: T,
+            j: int,
+            xloc: wp.array2d(dtype=T),
+            yloc: wp.array2d(dtype=T),
+            elen: wp.array2d(dtype=T),
+            act: wp.array2d(dtype=int),
+            tol: T,
+        ):
+            # Body-side limit in the on-plane band: in-plane angle of the panel.
+            total = T(0.0)
+            for k in range(4):
+                if act[j, k] != 0:
+                    kn = k + 1
+                    if kn == 4:
+                        kn = 0
+                    ax = xloc[j, k] - x
+                    ay = yloc[j, k] - y
+                    bx = xloc[j, kn] - x
+                    by = yloc[j, kn] - y
+                    cr = ax * by - ay * bx
+                    dt = ax * bx + ay * by
+                    ra = wp.sqrt(ax * ax + ay * ay)
+                    rb = wp.sqrt(bx * bx + by * by)
+                    on_edge = False
+                    if wp.abs(cr) <= tol * elen[j, k] and dt <= T(0.0):
+                        on_edge = True
+                    if ra <= tol or rb <= tol:
+                        on_edge = True
+                    if not on_edge:
+                        total = total + wp.atan2(cr, dt)
+            return total
+
+        @wp.func(module=module)
         def solid_angle(
             x: T,
             y: T,
@@ -92,45 +136,48 @@ def _kernels(precision: str):
             xloc: wp.array2d(dtype=T),
             yloc: wp.array2d(dtype=T),
             elen: wp.array2d(dtype=T),
-            area: wp.array(dtype=T),
+            act: wp.array2d(dtype=int),
+            tol: T,
         ):
-            r0 = wp.sqrt((x - xloc[j, 0]) * (x - xloc[j, 0]) + (y - yloc[j, 0]) * (y - yloc[j, 0]) + z * z)
-            r1 = wp.sqrt((x - xloc[j, 1]) * (x - xloc[j, 1]) + (y - yloc[j, 1]) * (y - yloc[j, 1]) + z * z)
-            r2 = wp.sqrt((x - xloc[j, 2]) * (x - xloc[j, 2]) + (y - yloc[j, 2]) * (y - yloc[j, 2]) + z * z)
-            r3 = wp.sqrt((x - xloc[j, 3]) * (x - xloc[j, 3]) + (y - yloc[j, 3]) * (y - yloc[j, 3]) + z * z)
-            om = tri_omega(x, y, z, xloc[j, 0], yloc[j, 0], xloc[j, 1], yloc[j, 1],
-                           xloc[j, 2], yloc[j, 2], r0, r1, r2)
-            if elen[j, 3] > T(1e-14):
-                om = om + tri_omega(x, y, z, xloc[j, 0], yloc[j, 0], xloc[j, 2], yloc[j, 2],
-                                    xloc[j, 3], yloc[j, 3], r0, r2, r3)
-            az = z
-            if az < T(0.0):
-                az = T(0.0) - az
-            if az < T(1e-14):
-                inside = True
-                for k in range(4):
-                    if elen[j, k] > T(1e-14):
-                        kn = k + 1
-                        if kn == 4:
-                            kn = 0
-                        cross = (xloc[j, kn] - xloc[j, k]) * (y - yloc[j, k]) - (
-                            yloc[j, kn] - yloc[j, k]) * (x - xloc[j, k])
-                        if cross < T(-1e-12) * area[j]:
-                            inside = False
-                if inside:
-                    om = T(2.0) * T(3.141592653589793)
-                else:
-                    om = T(0.0)
+            om = T(0.0)
+            if wp.abs(z) <= tol:
+                om = plane_winding(x, y, j, xloc, yloc, elen, act, tol)
+            else:
+                r0 = wp.sqrt((x - xloc[j, 0]) * (x - xloc[j, 0]) + (y - yloc[j, 0]) * (y - yloc[j, 0]) + z * z)
+                r1 = wp.sqrt((x - xloc[j, 1]) * (x - xloc[j, 1]) + (y - yloc[j, 1]) * (y - yloc[j, 1]) + z * z)
+                r2 = wp.sqrt((x - xloc[j, 2]) * (x - xloc[j, 2]) + (y - yloc[j, 2]) * (y - yloc[j, 2]) + z * z)
+                r3 = wp.sqrt((x - xloc[j, 3]) * (x - xloc[j, 3]) + (y - yloc[j, 3]) * (y - yloc[j, 3]) + z * z)
+                om = tri_omega(x, y, z, xloc[j, 0], yloc[j, 0], xloc[j, 1], yloc[j, 1],
+                               xloc[j, 2], yloc[j, 2], r0, r1, r2)
+                if act[j, 3] != 0:
+                    om = om + tri_omega(x, y, z, xloc[j, 0], yloc[j, 0], xloc[j, 2], yloc[j, 2],
+                                        xloc[j, 3], yloc[j, 3], r0, r2, r3)
             return om
 
         @wp.func(module=module)
         def edge_log(x: T, y: T, z: T, xa: T, ya: T, xb: T, yb: T, dk: T):
-            rk = wp.sqrt((x - xa) * (x - xa) + (y - ya) * (y - ya) + z * z)
-            rkp1 = wp.sqrt((x - xb) * (x - xb) + (y - yb) * (y - yb) + z * z)
-            den = rk + rkp1 - dk
+            # Edge logarithm ln((ra + rb + dk) / (ra + rb - dk)) without cancellation.
+            ax = xa - x
+            ay = ya - y
+            bx = xb - x
+            by = yb - y
+            z2 = z * z
+            ra = wp.sqrt(ax * ax + ay * ay + z2)
+            rb = wp.sqrt(bx * bx + by * by + z2)
+            dot = ax * bx + ay * by + z2
+            rr = ra * rb
+            s = T(0.0)
+            if dot >= T(0.0):
+                s = rr + dot
+            else:
+                cr = ax * by - ay * bx
+                dd = rr - dot
+                if dd < T(floor):
+                    dd = T(floor)
+                s = (cr * cr + z2 * dk * dk) / dd
             lk = T(0.0)
-            if den > T(1e-15):
-                lk = wp.log((rk + rkp1 + dk) / den)
+            if s > T(0.0):
+                lk = T(2.0) * wp.log(ra + rb + dk) - wp.log(T(2.0) * s)
             return lk
 
         @wp.kernel(module=module)
@@ -145,8 +192,10 @@ def _kernels(precision: str):
             dxe: wp.array2d(dtype=T),
             dye: wp.array2d(dtype=T),
             elen: wp.array2d(dtype=T),
+            act: wp.array2d(dtype=int),
             area: wp.array(dtype=T),
             diam: wp.array(dtype=T),
+            ptol: wp.array(dtype=T),
             far_ratio: T,
             use_far: int,
             B: wp.array2d(dtype=T),
@@ -175,10 +224,10 @@ def _kernels(precision: str):
                 x = rx * lax[j, 0] + ry * lax[j, 1] + rz * lax[j, 2]
                 y = rx * maxis[j, 0] + ry * maxis[j, 1] + rz * maxis[j, 2]
                 z = rx * nor[j, 0] + ry * nor[j, 1] + rz * nor[j, 2]
-                om = solid_angle(x, y, z, j, xloc, yloc, elen, area)
+                om = solid_angle(x, y, z, j, xloc, yloc, elen, act, ptol[j])
                 s = T(0.0)
                 for k in range(4):
-                    if elen[j, k] > T(1e-14):
+                    if act[j, k] != 0:
                         kn = k + 1
                         if kn == 4:
                             kn = 0
@@ -265,7 +314,7 @@ def influence_matrices_warp(
     import torch
     import warp as wp
 
-    from ventorum.panel3d.kernels import _precompute_geometry
+    from ventorum.panel3d.kernels import _input_eps, _precompute_geometry
 
     if device is None:
         if not torch.cuda.is_available():
@@ -293,7 +342,9 @@ def influence_matrices_warp(
         empty_c = torch.empty((n_targets, n_panels), dtype=torch_dtype, device=dev)
         return empty_b, empty_c
 
-    geom = _precompute_geometry(pans)
+    # The on-plane band follows the coarser of the input and the kernel precision.
+    eps = max(_input_eps(collocation, panels), float(np.finfo(numpy_dtype).eps))
+    geom = _precompute_geometry(pans, eps)
 
     def _move(data: np.ndarray):
         return wp.array(np.ascontiguousarray(data, dtype=numpy_dtype), dtype=warp_type, device=dev_str)
@@ -308,8 +359,10 @@ def influence_matrices_warp(
     w_dx = _move(geom.dx)
     w_dy = _move(geom.dy)
     w_el = _move(geom.edge_len)
+    w_act = wp.array(np.ascontiguousarray(geom.edge_active, dtype=np.int32), dtype=wp.int32, device=dev_str)
     w_area = _move(geom.area)
     w_diam = _move(geom.diameter)
+    w_tol = _move(geom.plane_tol)
     w_b = wp.empty((n_targets, n_panels), dtype=warp_type, device=dev_str)
     w_c = wp.empty((n_targets, n_panels), dtype=warp_type, device=dev_str)
 
@@ -317,8 +370,8 @@ def influence_matrices_warp(
     wp.launch(
         kernel,
         dim=(n_targets, n_panels),
-        inputs=[w_pts, w_cen, w_nor, w_lax, w_max, w_xl, w_yl, w_dx, w_dy, w_el, w_area,
-                w_diam, float(far_ratio), use_far, w_b, w_c],
+        inputs=[w_pts, w_cen, w_nor, w_lax, w_max, w_xl, w_yl, w_dx, w_dy, w_el, w_act, w_area,
+                w_diam, w_tol, float(far_ratio), use_far, w_b, w_c],
         device=dev_str,
     )
     if hasattr(wp, "synchronize"):

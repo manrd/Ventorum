@@ -4,7 +4,7 @@
 Verifies:
 * Exact potentials and velocities against 40 x 40 Gauss-Legendre quadrature.
 * Point source and doublet asymptotic behavior in the far field.
-* Physical relation V = -grad(Phi) via central finite differences.
+* Physical relation V = +grad(Phi) via central finite differences.
 * Gauss flux theorem on closed cube and sphere panel meshes.
 * Continuity and finite values on the panel plane, edge extensions, and corners.
 * Symmetry with respect to the y = 0 reflection plane.
@@ -94,13 +94,14 @@ def _gauss_legendre_quad(
         dist5 = dist**5
 
         phi_s[i] = -inv_4pi * np.sum(dA / dist)
-        v_s[i] = -inv_4pi * np.sum((dA / dist3)[:, None] * R, axis=0)
+        # V = +grad(Phi): grad of -1/(4 pi r) with respect to the target is +R/(4 pi r^3)
+        v_s[i] = inv_4pi * np.sum((dA / dist3)[:, None] * R, axis=0)
 
         R_dot_n = np.sum(R * n_hat, axis=-1)
         phi_d[i] = -inv_4pi * np.sum(dA * R_dot_n / dist3)
 
         integrand_vd = n_hat[None, :] / dist3[:, None] - 3.0 * (R_dot_n[:, None] * R) / dist5[:, None]
-        v_d[i] = inv_4pi * np.sum(dA[:, None] * integrand_vd, axis=0)
+        v_d[i] = -inv_4pi * np.sum(dA[:, None] * integrand_vd, axis=0)
 
     return phi_s, v_s, phi_d, v_d
 
@@ -250,7 +251,15 @@ def test_quadrature_exactness(test_panels):
 
 
 def test_far_field_asymptotics(test_panels):
-    """At 10 diameters, point formulas agree with exact ones to 1e-3 relative."""
+    """At 10 diameters, the point formulas agree with the exact ones.
+
+    The documented accuracy of the point approximation at 10 panel
+    diameters is 1e-3 relative for the source potential, 2e-3 for the
+    doublet potential and 3e-3 for the velocities (the quadrupole term of
+    order (D / r)^2 that the point formulas leave out). The value 1e-3
+    holds for all four quantities and all test panels at 25 diameters;
+    see ``test_far_field_rule_at_25_diameters``.
+    """
     for name, p in test_panels.items():
         diam = _panel_diameter(p)
         centroid = _panel_centroid(p)
@@ -290,7 +299,7 @@ def test_far_field_asymptotics(test_panels):
 
 
 def test_gradient_consistency(test_panels):
-    """Velocity equals minus numerical gradient of potential to 1e-6 relative."""
+    """Velocity equals plus the numerical gradient of the potential to 1e-6 relative."""
     for name, p in test_panels.items():
         diam = _panel_diameter(p)
         centroid = _panel_centroid(p)
@@ -318,11 +327,11 @@ def test_gradient_consistency(test_panels):
 
             phi_s_plus = source_potential(tg_plus, p_in, far_ratio=np.inf)[:, 0]
             phi_s_minus = source_potential(tg_minus, p_in, far_ratio=np.inf)[:, 0]
-            v_s_num[:, axis] = -(phi_s_plus - phi_s_minus) / (2.0 * h)
+            v_s_num[:, axis] = (phi_s_plus - phi_s_minus) / (2.0 * h)
 
             phi_d_plus = doublet_potential(tg_plus, p_in, far_ratio=np.inf)[:, 0]
             phi_d_minus = doublet_potential(tg_minus, p_in, far_ratio=np.inf)[:, 0]
-            v_d_num[:, axis] = -(phi_d_plus - phi_d_minus) / (2.0 * h)
+            v_d_num[:, axis] = (phi_d_plus - phi_d_minus) / (2.0 * h)
 
         assert np.allclose(v_s_kernel, v_s_num, rtol=1e-6), f"source gradient failed for {name}"
         assert np.allclose(v_d_kernel, v_d_num, rtol=1e-6), f"doublet gradient failed for {name}"
@@ -500,4 +509,177 @@ def test_empty_inputs():
     assert source_potential(pts, empty_pans).shape == (1, 0)
     assert doublet_velocity(empty_pts, pans).shape == (0, 1, 3)
     assert doublet_velocity(pts, empty_pans).shape == (1, 0, 3)
+
+
+def _rotation(seed: int) -> np.ndarray:
+    """Return a random proper rotation matrix (det +1)."""
+    rng = np.random.default_rng(seed)
+    q, _ = np.linalg.qr(rng.normal(size=(3, 3)))
+    if np.linalg.det(q) < 0.0:
+        q[:, 0] = -q[:, 0]
+    return q
+
+
+def _unique_corners(panel: np.ndarray) -> np.ndarray:
+    """Return the corners of a panel without the repeated triangle corner."""
+    if np.linalg.norm(panel[3] - panel[2]) < 1e-12:
+        return panel[:3]
+    return panel
+
+
+def test_far_field_rule_at_25_diameters(test_panels):
+    """At 25 diameters the point formulas agree with the exact ones to 1e-3 relative.
+
+    Potentials: relative error per target. Velocities: error norm over the
+    norm of the exact vector. No absolute floor.
+    """
+    dirs = [
+        np.array([0.0, 0.0, 1.0]),
+        np.array([1.0, 0.0, 0.0]),
+        np.array([1.0, 1.0, 1.0]) / np.sqrt(3.0),
+        np.array([0.3, -0.5, 0.8]) / np.linalg.norm([0.3, -0.5, 0.8]),
+    ]
+    for name, p in test_panels.items():
+        diam = _panel_diameter(p)
+        targets = np.array([_panel_centroid(p) + 25.0 * diam * u for u in dirs])
+        p_in = p[None, ...]
+        for func in (source_potential, doublet_potential):
+            exact = func(targets, p_in, far_ratio=np.inf)[:, 0]
+            far = func(targets, p_in, far_ratio=5.0)[:, 0]
+            mask = np.abs(exact) > 1e-14
+            err = np.abs(far[mask] - exact[mask]) / np.abs(exact[mask])
+            assert np.all(err <= 1e-3), f"{func.__name__} far rule failed for {name}: {err.max():.2e}"
+        for func in (source_velocity, doublet_velocity):
+            exact = func(targets, p_in, far_ratio=np.inf)[:, 0, :]
+            far = func(targets, p_in, far_ratio=5.0)[:, 0, :]
+            err = np.linalg.norm(far - exact, axis=1) / np.linalg.norm(exact, axis=1)
+            assert np.all(err <= 1e-3), f"{func.__name__} far rule failed for {name}: {err.max():.2e}"
+
+
+def test_on_plane_limits_inside_edge_corner_outside(test_panels):
+    """In-plane targets get the body-side limits of the doublet potential.
+
+    Inside 1/2, on an edge 1/4, at a corner theta / (4 pi) with the
+    interior angle theta, outside 0. The same values hold for a rotated
+    copy far from the origin and for float32 inputs, and they agree with
+    a target 1e-9 diameters on the body side.
+    """
+    rot = _rotation(5)
+    offset = np.array([310.0, -125.0, 47.0])
+    for name, p in test_panels.items():
+        corners = _unique_corners(p)
+        n_c = corners.shape[0]
+        diam = _panel_diameter(p)
+        targets = [_panel_centroid(p)]
+        expected = [0.5]
+        for k in range(n_c):
+            a = corners[k]
+            b = corners[(k + 1) % n_c]
+            prev = corners[k - 1]
+            targets.append(0.5 * (a + b))
+            expected.append(0.25)
+            u = prev - a
+            v = b - a
+            theta = np.arccos(u @ v / (np.linalg.norm(u) * np.linalg.norm(v)))
+            targets.append(a.copy())
+            expected.append(theta / (4.0 * np.pi))
+            targets.append(b + 0.5 * (b - a))
+            expected.append(0.0)
+        targets = np.array(targets)
+        expected = np.array(expected)
+        n_hat = np.cross(p[2] - p[0], p[3] - p[1])
+        n_hat /= np.linalg.norm(n_hat)
+        for pts, pans, label in (
+            (targets, p[None, ...], "base"),
+            (targets @ rot.T + offset, (p @ rot.T + offset)[None, ...], "rotated"),
+            (targets.astype(np.float32), p[None, ...].astype(np.float32), "float32"),
+        ):
+            got = doublet_potential(pts, pans, far_ratio=np.inf)[:, 0]
+            assert np.allclose(got, expected, rtol=0.0, atol=1e-6), f"{name} {label}: {got} vs {expected}"
+        body = targets - 1e-9 * diam * n_hat
+        got_body = doublet_potential(body, p[None, ...], far_ratio=np.inf)[:, 0]
+        assert np.allclose(got_body, expected, rtol=0.0, atol=1e-6), f"{name} body side: {got_body}"
+        assert np.all(np.isfinite(source_potential(targets, p[None, ...], far_ratio=np.inf)))
+        assert np.all(np.isfinite(source_velocity(targets, p[None, ...], far_ratio=np.inf)))
+        assert np.all(np.isfinite(doublet_velocity(targets, p[None, ...], far_ratio=np.inf)))
+
+
+def test_self_terms_relative_plane_band():
+    """Self terms stay +1/2 for rotated panels far from the origin.
+
+    The collocation points come from the unrotated cube and are rotated and
+    moved on their own, so they carry round-off of the order of the
+    coordinate magnitude, far above 1e-14 m. The on-plane band is relative
+    to the panel size and the coordinate magnitude, so no self term flips
+    to the fluid-side value -1/2. The Gauss law row sums (1 for each
+    collocation point of the closed cube) hold as well. The float32 copy
+    uses collocation points rounded to float32 on their own.
+    """
+    cube = _make_cube_mesh(n=4)
+    centroids = np.mean(cube, axis=1)
+    for seed, offset in ((1, np.array([1.0e3, -7.0e2, 4.0e2])), (2, np.array([-3.0e4, 2.0e4, 1.0e4]))):
+        rot = _rotation(seed)
+        panels = cube @ rot.T + offset
+        colloc = (centroids @ rot.T) + offset
+        _, C = influence_matrices(colloc, panels, far_ratio=np.inf)
+        assert np.allclose(np.diag(C), 0.5, rtol=0.0, atol=1e-12), f"self terms flipped at offset {offset}"
+        assert np.allclose(np.sum(C, axis=1), 1.0, rtol=0.0, atol=1e-6)
+    rot = _rotation(3)
+    panels32 = (cube @ rot.T + np.array([12.0, -5.0, 3.0])).astype(np.float32)
+    colloc32 = ((centroids @ rot.T) + np.array([12.0, -5.0, 3.0])).astype(np.float32)
+    _, C32 = influence_matrices(colloc32, panels32, far_ratio=np.inf)
+    assert C32.dtype == np.float32
+    assert np.allclose(np.diag(C32), 0.5, rtol=0.0, atol=1e-6)
+    assert np.allclose(np.sum(C32.astype(np.float64), axis=1), 1.0, rtol=0.0, atol=1e-4)
+
+
+def test_velocities_on_edge_extensions_of_rotated_panels(test_panels):
+    """In-plane targets on edge extensions of rotated panels: exact velocities.
+
+    The doublet velocity (vortex ring) on the line of an edge, outside the
+    edge, must have no spurious term from that segment. The test compares
+    both velocities with Gauss-Legendre quadrature and with the numerical
+    gradient of the potentials, for rotated and moved panels.
+    """
+    rot = _rotation(9)
+    offset = np.array([2.5, -1.0, 0.75])
+    for name, p in test_panels.items():
+        corners = _unique_corners(p)
+        n_c = corners.shape[0]
+        targets = []
+        for k in range(n_c):
+            a = corners[k]
+            b = corners[(k + 1) % n_c]
+            targets.append(b + 0.6 * (b - a))
+            targets.append(a - 0.45 * (b - a))
+        targets = np.array(targets) @ rot.T + offset
+        panel = p @ rot.T + offset
+        p_in = panel[None, ...]
+        _, v_s_ref, _, v_d_ref = _gauss_legendre_quad(panel, targets, order=60)
+        v_s = source_velocity(targets, p_in, far_ratio=np.inf)[:, 0, :]
+        v_d = doublet_velocity(targets, p_in, far_ratio=np.inf)[:, 0, :]
+        scale_s = np.max(np.linalg.norm(v_s_ref, axis=1))
+        scale_d = np.max(np.linalg.norm(v_d_ref, axis=1))
+        assert np.max(np.abs(v_s - v_s_ref)) <= 1e-7 * scale_s, f"source velocity on extension, {name}"
+        assert np.max(np.abs(v_d - v_d_ref)) <= 1e-7 * scale_d, f"doublet velocity on extension, {name}"
+        h = 1e-6 * _panel_diameter(p)
+        grad = np.zeros_like(v_d)
+        for axis in range(3):
+            step = np.zeros(3)
+            step[axis] = h
+            up = doublet_potential(targets + step, p_in, far_ratio=np.inf)[:, 0]
+            dn = doublet_potential(targets - step, p_in, far_ratio=np.inf)[:, 0]
+            grad[:, axis] = (up - dn) / (2.0 * h)
+        assert np.max(np.abs(v_d - grad)) <= 1e-5 * scale_d, f"doublet gradient on extension, {name}"
+
+
+def test_doublet_velocity_on_edge_is_finite():
+    """A target on a panel edge gives a finite doublet velocity (singular segment dropped)."""
+    p = np.array([[[0.0, 0.0, 0.0], [2.0, 0.0, 0.0], [2.0, 1.0, 0.0], [0.0, 1.0, 0.0]]])
+    rot = _rotation(4)
+    panel = p @ rot.T
+    on_edge = np.array([[1.0, 0.0, 0.0], [2.0, 0.5, 0.0], [0.0, 0.0, 0.0]]) @ rot.T
+    v = doublet_velocity(on_edge, panel, far_ratio=np.inf)
+    assert np.all(np.isfinite(v))
+    assert np.max(np.abs(v)) < 1.0
 

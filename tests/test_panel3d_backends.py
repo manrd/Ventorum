@@ -300,6 +300,130 @@ def test_warp_float32_floor() -> None:
         assert err <= 1e-4, f"warp float32 {name} floor {err:.3e} above 1e-4"
 
 
+def _rotated_cube(n: int = 4, seed: int = 4, offset=(7.3, -2.1, 4.4)) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Return a rotated and moved closed cube with outward panels [m].
+
+    Returns the panels (6 n^2, 4, 3), the collocation points (panel corner
+    averages) and the edge midpoints, all in float64 [m]. The collocation
+    points come from the unrotated cube and are rotated and moved on their
+    own, so float32 rounding of the inputs moves them off the panel planes.
+    """
+    u = np.linspace(-1.0, 1.0, n + 1)
+    panels = []
+    for axis in range(3):
+        for sign in (1.0, -1.0):
+            a_u, a_v = (axis + 1) % 3, (axis + 2) % 3
+            if sign < 0.0:
+                a_u, a_v = a_v, a_u
+            for i in range(n):
+                for j in range(n):
+                    quad = []
+                    for du, dv in ((i, j), (i + 1, j), (i + 1, j + 1), (i, j + 1)):
+                        p = np.zeros(3)
+                        p[axis] = sign
+                        p[a_u] = u[du]
+                        p[a_v] = u[dv]
+                        quad.append(p)
+                    panels.append(quad)
+    cube = np.array(panels)
+    colloc = cube.mean(axis=1)
+    mids = 0.5 * (cube + np.roll(cube, -1, axis=1)).reshape(-1, 3)
+    rng = np.random.default_rng(seed)
+    q, _ = np.linalg.qr(rng.normal(size=(3, 3)))
+    if np.linalg.det(q) < 0.0:
+        q[:, 0] = -q[:, 0]
+    off = np.asarray(offset, dtype=float)
+    return cube @ q.T + off, colloc @ q.T + off, mids @ q.T + off
+
+
+def test_float32_on_plane_and_self_terms_numpy_numba() -> None:
+    """float32 inputs keep the on-plane terms and the self terms +1/2.
+
+    The targets are the own collocation points (self terms), the coplanar
+    neighbour collocation points (on-plane, outside) and the edge midpoints
+    (on-plane, on an edge: 1/4 per panel) of a rotated and moved closed
+    cube. The collocation points are rounded to float32 on their own, not
+    recomputed from the rounded corners. Numpy and Numba on float32 inputs
+    stay within the float32 floor of the float64 reference (measured and
+    printed, gate 1e-4), and every self term is +1/2.
+    """
+    panels, colloc, mids = _rotated_cube()
+    targets = np.vstack([colloc, mids])
+    n = panels.shape[0]
+    ref_b, ref_c = ref.influence_matrices(targets, panels, far_ratio=np.inf)
+    ref_vs = ref.source_velocity(colloc, panels, far_ratio=np.inf)
+    ref_vd = ref.doublet_velocity(colloc, panels, far_ratio=np.inf)
+    assert np.allclose(np.diag(ref_c[:n]), 0.5, rtol=0.0, atol=1e-12)
+    pans32 = panels.astype(np.float32)
+    tg32 = targets.astype(np.float32)
+    col32 = colloc.astype(np.float32)
+    floors = {}
+    for label, matrices, vs_fn, vd_fn in (
+        ("numpy", ref.influence_matrices, ref.source_velocity, ref.doublet_velocity),
+        ("numba", nb.influence_matrices_numba, nb.source_velocity_numba, nb.doublet_velocity_numba),
+    ):
+        new_b, new_c = matrices(tg32, pans32, far_ratio=np.inf)
+        assert new_c.dtype == np.float32
+        assert np.allclose(np.diag(new_c[:n]), 0.5, rtol=0.0, atol=1e-6), f"{label} self terms flipped"
+        floors[f"{label} B"] = _rel_err(new_b.astype(np.float64), ref_b)
+        floors[f"{label} C"] = _rel_err(new_c.astype(np.float64), ref_c)
+        floors[f"{label} Vs"] = _rel_err(vs_fn(col32, pans32, far_ratio=np.inf).astype(np.float64), ref_vs)
+        floors[f"{label} Vd"] = _rel_err(vd_fn(col32, pans32, far_ratio=np.inf).astype(np.float64), ref_vd)
+    print(f"float32 on-plane floors: {floors}")
+    for name, err in floors.items():
+        assert err <= 1e-4, f"float32 {name} floor {err:.3e} above 1e-4"
+
+
+def test_numba_float32_full_target_set() -> None:
+    """Numba float32 matches the float64 reference on all targets.
+
+    This set has exactly on-plane targets and the own centroids of
+    non-planar quads and triangles (excluded from the older floor test).
+    """
+    panels = _random_panels()
+    points = _targets_for(panels)
+    ref_b, ref_c = ref.influence_matrices(points, panels, far_ratio=5.0)
+    new_b, new_c = nb.influence_matrices_numba(points.astype(np.float32), panels.astype(np.float32), far_ratio=5.0)
+    floors = {
+        "B": _rel_err(new_b.astype(np.float64), ref_b),
+        "C": _rel_err(new_c.astype(np.float64), ref_c),
+    }
+    print(f"numba float32 full-set floors: {floors}")
+    for name, err in floors.items():
+        assert err <= 1e-4, f"numba float32 full-set {name} floor {err:.3e} above 1e-4"
+
+
+@pytest.mark.gpu
+def test_warp_float32_on_plane_and_self_terms() -> None:
+    """Warp float32 keeps the on-plane terms and the self terms +1/2 on CUDA.
+
+    Same targets as the numpy and Numba float32 test (rotated closed cube,
+    collocation points rounded to float32 on their own). The floor is
+    measured and printed, gate 1e-4.
+    """
+    torch = _need_cuda()
+    from ventorum.panel3d import kernels_warp as wpk
+
+    panels, colloc, mids = _rotated_cube()
+    targets = np.vstack([colloc, mids])
+    n = panels.shape[0]
+    ref_b, ref_c = ref.influence_matrices(targets, panels, far_ratio=np.inf)
+    for inputs in ("float32", "float64"):
+        pts = targets.astype(inputs)
+        pans = panels.astype(inputs)
+        new_b, new_c = wpk.influence_matrices_warp(pts, pans, far_ratio=np.inf, dtype=torch.float32)
+        got_c = new_c.cpu().numpy().astype(np.float64)
+        got_b = new_b.cpu().numpy().astype(np.float64)
+        assert np.allclose(np.diag(got_c[:n]), 0.5, rtol=0.0, atol=1e-6), f"warp self terms flipped ({inputs} inputs)"
+        floors = {"B": _rel_err(got_b, ref_b), "C": _rel_err(got_c, ref_c)}
+        print(f"warp float32 on-plane floors ({inputs} inputs): {floors}")
+        for name, err in floors.items():
+            assert err <= 1e-4, f"warp float32 {name} floor {err:.3e} above 1e-4"
+    new_b, new_c = wpk.influence_matrices_warp(targets, panels, far_ratio=np.inf, dtype=torch.float64)
+    _assert_parity(new_b.cpu().numpy(), ref_b, 1e-12, "warp B cube")
+    _assert_parity(new_c.cpu().numpy(), ref_c, 1e-12, "warp C cube")
+
+
 @pytest.mark.gpu
 def test_backend_selector_warp() -> None:
     """The selector routes to warp on CUDA with results equal to numpy."""
