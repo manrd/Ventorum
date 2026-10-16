@@ -12,8 +12,7 @@ thickness [-] (0 lower surface, 1 upper surface) and the deflection [deg],
 positive trailing edge down.
 
 The cache key holds the package version, the solver revision
-(:data:`PANEL2D_SOLVER_REVISION`, or ``ventorum.panel2d.SOLVER_REVISION``
-when that package exports one) and a sha256 fingerprint of the source
+(``ventorum.panel2d.SOLVER_REVISION``) and a sha256 fingerprint of the source
 files of the 2D packages (:func:`solver_fingerprint`), so a polar of an
 older solver is never read back.
 
@@ -43,13 +42,7 @@ from ventorum.airfoil.naca import is_naca_designation
 from ventorum.core.datatypes import TabulatedAirfoil
 from ventorum.panel2d.viscous import solve_viscous
 
-__all__ = ["PANEL2D_SOLVER_REVISION", "Ventorum2DPolarSource", "solver_fingerprint"]
-
-#: Revision of the 2D viscous solver for the cache key. Raise it when a
-#: change of ``ventorum.panel2d``, ``ventorum.ibl2d`` or ``ventorum.airfoil``
-#: can change a polar. When ``ventorum.panel2d`` exports
-#: ``SOLVER_REVISION``, that value is used instead.
-PANEL2D_SOLVER_REVISION = "1"
+__all__ = ["Ventorum2DPolarSource", "solver_fingerprint", "solver_revision"]
 
 #: Packages whose source files form the solver fingerprint.
 _FINGERPRINT_PACKAGES = ("panel2d", "ibl2d", "airfoil")
@@ -65,12 +58,12 @@ def solver_revision() -> str:
     Returns
     -------
     str
-        ``ventorum.panel2d.SOLVER_REVISION`` when the package exports it,
-        else :data:`PANEL2D_SOLVER_REVISION`.
+        ``ventorum.panel2d.SOLVER_REVISION``, which the 2D package raises
+        when a change of the solver can change a result.
     """
     import ventorum.panel2d as panel2d
 
-    return str(getattr(panel2d, "SOLVER_REVISION", PANEL2D_SOLVER_REVISION))
+    return str(panel2d.SOLVER_REVISION)
 
 
 @functools.lru_cache(maxsize=1)

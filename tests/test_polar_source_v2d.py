@@ -107,12 +107,13 @@ def test_cache_key_holds_package_version_and_solver_revision(tmp_path, fake_solv
     """Regression: the key had no solver version, so a new solver read old polars."""
     import ventorum
     import ventorum.aero.polar_source_v2d as module
+    import ventorum.panel2d as panel2d
 
     source = Ventorum2DPolarSource(cache=PolarCache(tmp_path))
     source.polar("naca 0012", 1e6, [0.0, 2.0])
     source.polar("naca 0012", 1e6, [0.0, 2.0])
     assert len(fake_solver) == 1
-    monkeypatch.setattr(module, "PANEL2D_SOLVER_REVISION", "next")
+    monkeypatch.setattr(panel2d, "SOLVER_REVISION", "next")
     source.polar("naca 0012", 1e6, [0.0, 2.0])
     assert len(fake_solver) == 2
     monkeypatch.setattr(ventorum, "__version__", "99.0.0")
