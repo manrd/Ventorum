@@ -24,10 +24,35 @@ midpoint onto the x axis and scales the chord to one.
 
 The `upper` and `lower` methods each return one surface from the
 leading edge to the trailing edge, both with the leading-edge point
-first. The leading edge is the stored point farthest from the
-trailing-edge midpoint. Thickness is the upper y minus the lower y at
-one chord station, and camber is the mean of the two, both by linear
-interpolation on each surface.
+first. Thickness is the upper y minus the lower y at one chord station,
+and camber is the mean of the two, both by linear interpolation on each
+surface.
+
+## Leading edge
+
+The package has one definition of the leading edge: the point of the
+contour farthest from the trailing-edge midpoint (the midpoint of the
+first and the last point). Every tool uses it, at the resolution that
+the tool works with:
+
+- On a point polygon, the leading edge is the stored point of largest
+  distance (`ventorum.airfoil.geometry.leading_edge_index`).
+  `AirfoilShape.leading_edge_index`, `upper`, `lower`, `normalized` and
+  the surface split of `flap_hinge_point` and `deflect_plain_flap` use
+  this point.
+- On the parametric spline, the leading edge is the continuous maximum
+  of the same distance, where the tangent is normal to the line to the
+  trailing-edge midpoint (`AirfoilSpline.s_leading_edge`). The root
+  search starts from the stored point above and accepts only a change
+  from moving away to moving back (a maximum). A curve without such a
+  maximum raises an error instead of a silent fallback. `repanel` and
+  `repanel_cosine` put a node at this point.
+
+On a clean section the stored point and the minimum-x point agree. On a
+deflected section they can differ: the trailing-edge midpoint moves, so
+the farthest point moves up the nose. The flap tools therefore split the
+surfaces at the farthest point and accept a short run of decreasing x
+forward of the hinge.
 
 The paneling functions accept coordinates in any consistent length
 unit. A physical wing section uses m. A unit section uses chord units.
@@ -39,7 +64,7 @@ Three plain-text formats are read. The reader detects the format from
 the first lines.
 
 - Selig: an optional name line, then x y pairs in Selig order (M. S. Selig and co-workers, *Summary of Low-Speed Airfoil Data*, 1995).
-- Lednicer: a name line, a line with the point counts of the upper and lower surfaces (two numbers larger than 1, for example `61 61`), then the upper surface from the leading edge to the trailing edge, a blank line, and the lower surface from the leading edge to the trailing edge (D. Lednicer, AIAA paper 2010-0458, 2010). The reader merges the duplicated leading-edge point.
+- Lednicer: a name line, a line with the point counts of the upper and lower surfaces (two numbers larger than 1, for example `61 61`), then the upper surface from the leading edge to the trailing edge, a blank line, and the lower surface from the leading edge to the trailing edge (D. Lednicer, AIAA paper 2010-0458, 2010). The reader merges the duplicated leading-edge point. A file without the name line is read when its first line holds two whole numbers of at least 2 whose sum equals the number of data lines that follow; two numbers that fail this count stay a data point.
 - Plain: x y pairs with no header. The name then comes from the file stem.
 
 Separators are spaces, tabs or commas. Lines that start with `#` are
@@ -59,7 +84,7 @@ good:
 - fewer than 10 points;
 - repeated consecutive points (distance below 1e-12 chord units);
 - clockwise order (negative signed area);
-- self-intersection of the polygon (segment pair test);
+- self-intersection of the polygon (segment pair test on the closed ring, the trailing-edge edge included; edges that cross or touch fail);
 - a surface whose x is not monotonic (a note, not an error).
 
 `validate` raises `AirfoilGeometryError` when any hard defect is
@@ -124,7 +149,9 @@ y_c = \frac{k_1 m^3}{6}(1 - x), \qquad
 \frac{dy_c}{dx} = -\frac{k_1 m^3}{6}.
 ```
 
-The parameters for design lift 0.3 (first digit 2) are:
+The parameters for design lift 0.3 (first digit 2) come from the
+five-digit mean-line table of Abbott and von Doenhoff (1959, section 6.5,
+NACA five-digit wing sections):
 
 | Mean line | m | k1 |
 | --- | --- | --- |
@@ -138,6 +165,16 @@ Other design lifts scale $k_1$ linearly with the first digit: a mean
 line with first digit $d$ uses $k_1(d) = k_1(2) \times d / 2$. Reflex
 mean lines (third digit 1) are not built: no published table of $k_1$
 and $k_2/k_1$ is loaded, so they raise an error.
+
+## NACA designations
+
+The generator accepts four or five digits, with an optional "NACA"
+prefix in any letter case and optional spaces between the prefix and
+the digits: "2412", "NACA 2412", "naca2412", "23012", "NACA 23012", or
+the integer 2412. Hyphens, underscores and spaces inside the digits
+raise an error. A designation with zero camber and a nonzero position
+digit ("0412", "01012", "03012") gives the symmetric section of the same
+thickness with a warning, because its position digits have no effect.
 
 ## NACA coordinates
 
@@ -172,10 +209,26 @@ length: the nodes split the cumulative weight integral into equal
 parts. The weight adds normalized curvature and Gaussian refinement
 terms at the leading edge and at both trailing-edge ends. The leading
 edge is always a node. The weight is smoothed until the adjacent panel
-length ratio stays at most 1.5. The fit-and-equidistribute pass repeats
-until the set stops moving, so repaneling an already repaneled set
-returns the same nodes. A closed trailing edge stays closed; an open
-trailing edge keeps its two end points exactly.
+length ratio stays at most 1.5. The limit of the smoothing is the
+uniform weight; when even the uniform weight cannot meet the 1.5 bound
+(very few panels), the function warns and returns the nodes. The
+fit-and-equidistribute pass repeats until the set stops moving, so
+repaneling an already repaneled set returns the same nodes; it fits a
+spline through the nodes, so `n_panels` is at least 3. A closed trailing
+edge stays closed; an open trailing edge keeps its two end points
+exactly.
+
+The accuracy of the nodes depends on the input sampling. For an ellipse
+of thickness ratio 0.12 sampled uniformly in eccentric angle (721
+points), the nodes of 160 panels lie on the exact ellipse within 1e-6
+chord. For the coarse input of 61 uniform-in-x points per surface, the
+spline cannot follow the blunt ends of the ellipse, where the slope is
+infinite and the input points are far apart along the curve. The test
+`test_coarse_ellipse_accuracy_limit` measures node distances of 1.3e-3
+chord near the blunt trailing end (x > 0.95), 3.0e-4 chord near the
+leading edge (x < 0.05) and 1.2e-5 chord between, and checks the bounds
+1.5e-3, 4e-4 and 2e-5 chord. Sections with a sharp trailing edge and
+denser input points near the leading edge are less sensitive.
 
 The `repanel_cosine` function resamples each surface with Chebyshev
 cosine nodes in arc length from the leading edge, dense at the leading
@@ -193,18 +246,31 @@ down. A positive deflection rotates the flap clockwise in the section
 plane, with the chord axis to the right and the normal axis up. This
 matches the control-surface convention of {doc}`control_surfaces`.
 
-The construction has four steps:
+Hinge height. This is the one definition of the package: `y_hinge` is
+a fraction of the local thickness at the hinge station `x_hinge`, from
+the lower surface (0) to the upper surface (1). The default 0.5 is the
+mid-thickness point. The hinge point is
+$(x_h,\; y_l(x_h) + y_{hinge}\,[y_u(x_h) - y_l(x_h)])$ with the upper and
+lower surface heights $y_u$ and $y_l$ at $x_h$. `flap_hinge_point`,
+`deflect_plain_flap` and `AirfoilShape.with_flap` all use it.
 
-1. Hinge point. The function `flap_hinge_point` puts the hinge at the station `x_hinge` in chord units. The height is a fraction `y_hinge` of the local thickness, from the lower surface (0) to the upper surface (1). The default 0.5 is the mid-thickness.
+The construction has five steps:
+
+1. Hinge point. The function `flap_hinge_point` puts the hinge at the station `x_hinge` in chord units, at the height `y_hinge` above. The surfaces are split at the leading edge of the package definition.
 2. Rotation. Every point with x past `x_hinge` rotates about the hinge by the deflection angle, as a rigid body. The trailing-edge points of the output are exactly the rotated input points.
-3. Compressed side. On the side that the rotation compresses (the lower surface for trailing edge down), the moved surface overlaps the fixed surface. Both are cut at the crossing of their polylines nearest to the hinge, and the overlapping points are removed.
-4. Stretched side. On the side that the rotation stretches (the upper surface for trailing edge down), a gap opens between the fixed and the moved surface. A circular arc about the hinge fills the gap, from the last fixed point to the first moved point. The arc radius is the distance from the hinge to that surface at `x_hinge`. The point count `n_arc` includes both end points; the default count keeps the arc panel lengths near the local panel length.
+3. Compressed side. The sign of the deflection selects it: the lower surface for trailing edge down, the upper surface for trailing edge up. The moved surface overlaps the fixed surface there. Both are cut at the crossing of their polylines nearest to the hinge, and the overlapping points are removed. When the polylines do not cross (on coarse input the moved surface can pass the fixed corner), both parts are cut at the hinge line, the line through the hinge point normal to the chord, and joined there.
+4. Stretched side. On the other side a gap opens between the fixed and the moved surface. A circular arc about the hinge fills the gap, from the last fixed point to the first moved point. The arc radius is the distance from the hinge to that surface at `x_hinge`. The point count `n_arc` includes both end points; the default count keeps the arc panel lengths near the local panel length.
+5. Check. The output must be a simple polygon with a positive area; otherwise the function raises `AirfoilGeometryError`.
 
-A zero deflection returns a copy of the input. The hinge station lies
-in (0.05, 0.98) chord units. The deflection satisfies
-|deflection| <= 60 deg. The hinge height fraction lies in [0, 1]. The
-result is a simple polygon. The area changes slightly, and the filler
-arc and the cut are geometric blends without viscous or gap physics.
+A zero deflection returns a copy of the input. The input must be in
+Selig order. The hinge station lies in (0.05, 0.98) chord units. The
+deflection satisfies |deflection| <= 60 deg. The hinge height fraction
+lies in [0, 1]. The area changes slightly, and the filler arc, the cut
+and the hinge-line joint are geometric blends without viscous or gap
+physics. A sweep over NACA 0006, 0012, 2412 and 4415 with 31, 61 and 161
+points, hinges from 0.1 to 0.97, deflections from -60 to 60 deg and hinge
+heights from 0 to 1 checks that every output is a simple polygon with a
+positive area.
 
 ## Unified interface
 
@@ -217,24 +283,26 @@ Users and solvers get airfoils one way, through `AirfoilShape` and the
 - `shape.repanel_cosine(n_per_side)` resamples with cosine spacing.
 - `shape.with_flap(x_hinge, deflection, y_hinge=0.5)` deflects a plain flap.
 - `shape.to_file(path, fmt="selig")` writes a Selig or Lednicer file.
-- `airfoil(spec)` accepts a NACA designation string, a file path, an (N, 2) array or a shape, and returns a shape. A string names a file when the path exists, else it names a NACA section.
+- `airfoil(spec)` accepts a NACA designation string, a file path, an (N, 2) array or a shape, and returns a shape.
 
-The leading-edge definitions of the parts were compared during
-integration. The shape type uses the point farthest from the
-trailing-edge midpoint. The flap tools split the surfaces at the
-minimum-x point. Both definitions select the same stored point on all
-clean integration inputs (NACA 0012, 2412 and 23012, before and after
-repaneling), so no array function was changed. The spline tool locates
-the leading edge by the zero distance gradient to the trailing-edge
-midpoint, starting from the farthest input point, which refines the
-same definition for the smooth curve.
+The factory applies these rules in order. A shape returns a copy. An
+integer, or a string of the NACA designation form (four or five digits
+with an optional "NACA" prefix), builds the NACA section; a designation
+always wins over a file of the same name in the current folder. A
+`pathlib.Path` reads that file. A string reads a file only when it names
+an existing file with an extension (for example "naca2412.dat"). An
+(N, 2) array stores the points. Any other string raises an error. The
+keyword `name` applies to every input; the generator keywords
+`n_points`, `spacing` and `closed_te` apply only to a NACA designation,
+and any keyword that does not apply raises TypeError.
 
 ## Implementation
 
 - `ventorum.airfoil.geometry.AirfoilShape`: storage, `normalized`, `upper`, `lower`, `thickness`, `camber`, `max_thickness`, `max_camber`, `area`, `problems`, `validate`, and the unified methods `naca`, `from_file`, `repanel`, `repanel_cosine`, `with_flap`, `to_file`.
+- `ventorum.airfoil.geometry.leading_edge_index` (the leading-edge definition) and `polygon_self_intersection` (the simple-polygon test).
 - `ventorum.airfoil.airfoil`: factory over designations, files, arrays and shapes.
 - `ventorum.airfoil.io.parse_airfoil`, `read_airfoil`, `write_selig`, `write_lednicer`.
-- `ventorum.airfoil.naca`: `naca4_thickness`, `naca4_camber`, `naca5_camber`, `naca4`, `naca5`, `naca`.
+- `ventorum.airfoil.naca`: `naca4_thickness`, `naca4_camber`, `naca5_camber`, `naca4`, `naca5`, `naca`, `is_naca_designation`.
 - `ventorum.airfoil.paneling.AirfoilSpline`, `repanel`, `repanel_cosine`.
 - `ventorum.airfoil.flap.deflect_plain_flap`, `flap_hinge_point`.
 
@@ -242,7 +310,7 @@ same definition for the smooth curve.
 
 - M. S. Selig, J. J. Guglielmo, A. P. Broeren and P. Giguere, *Summary of Low-Speed Airfoil Data*, Vol. 1, SoarTech Publications, 1995.
 - D. Lednicer, "A CFD evaluation of wind tunnel test sections", AIAA paper 2010-0458, 2010.
-- I. H. Abbott and A. E. von Doenhoff, *Theory of Wing Sections*, Dover, 1959, chapter 6 (1959 McGraw-Hill edition, section 6.4 for the NACA formulas).
+- I. H. Abbott and A. E. von Doenhoff, *Theory of Wing Sections*, Dover, 1959, chapter 6 (1959 McGraw-Hill edition, section 6.4 for the thickness distribution and the 4-digit mean line, section 6.5 for the 5-digit mean lines and the table of $m$ and $k_1$).
 - E. N. Jacobs, K. E. Ward and R. M. Pinkerton, "The characteristics of 78 related airfoil sections from tests in the variable-density wind tunnel", NACA Report 460, 1933.
 - E. N. Jacobs and R. M. Pinkerton, "Tests in the variable-density wind tunnel of related airfoils having the maximum camber unusually far forward", NACA Report 537, 1935.
 - C. L. Ladson, C. W. Brooks, A. S. Hill and D. W. Sproles, "Computer program to obtain ordinates for NACA airfoils", NASA TM-4741, 1996.
