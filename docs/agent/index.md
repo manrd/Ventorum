@@ -159,10 +159,16 @@ Example output (abridged: the rows CD, CY, Cl and Cn and the keys `rows`, `notes
 
 ## 2D airfoil tools
 
-- `ventorum_airfoil_geometry` (`section` (NACA designation or Selig / Lednicer text), `n_panels` (optional integer count), `flap` (optional object with `deflection_deg` and `hinge_x_c`)): analyzes an airfoil section. Output includes normalized coordinates, thickness and camber with their positions, trailing-edge gap, and geometry checks. The maximum allowed panel count is 1000 panels.
-- `ventorum_airfoil_polar` (`section` (NACA designation or coordinates), `Re` (Reynolds number, positive float), `alpha_deg` or `alpha_start_deg`/`alpha_end_deg`/`alpha_step_deg`, `flap` (optional object with `deflection_deg` and `hinge_x_c`), `h_c` (optional ground clearance ratio, larger than 0.05), `source` (`"ventorum2d"` or `"xfoil"`, default `"ventorum2d"`)): computes the viscous polar. Output includes `alpha_deg`, `Cl`, `Cd`, `Cm`, `converged` mask, transition points (`xtr_upper`, `xtr_lower`) when available, and warnings.
-- **Work budget.** One polar call allows up to 60 operating point solves. The panel count limit is 1000 panels. When the work exceeds the limit, the tool refuses the request and advises how to reduce or split the query.
-- **XFOIL availability.** When `source` is set to `"xfoil"` and the external XFOIL binary is missing, the tool returns an `invalid_input` error with clear installation instructions.
+- `ventorum_airfoil_geometry`: normalized geometry of one airfoil section.
+  - Inputs: `section` (required: a NACA designation such as `"NACA 2412"`, or coordinate text in Selig or Lednicer format with at most 2000 points), `n_panels` (optional repaneling count, 10 to 1000 panels), `flap` (optional plain-flap object, see below).
+  - Output: `name`, `coordinates` (normalized: unit chord, leading edge at the origin, Selig order), `n_points`, `max_thickness` and `max_thickness_x`, `max_camber` and `max_camber_x` (fractions of the chord), `trailing_edge_gap` (fraction of the chord), `flap` (the flap used, or null) and `problems` (the geometry checks).
+- `ventorum_airfoil_polar`: lift, drag and pitching-moment polar of one airfoil section.
+  - Inputs: `section` and `Re` (required); the angles as `alphas_deg` (a list) or as `alpha_start_deg`, `alpha_end_deg` and `alpha_step_deg` (a range), not both; `flap` (optional); `h_c` (optional height of the quarter chord above the ground in chords, 0.05 to 500; omit it for free air; only with `ventorum2d`); `source` (`"ventorum2d"`, the default, or `"xfoil"`); `n_panels` (10 to 1000 panels, default 160); `ncrit` (1 to 20, default 9); `xtr_top` and `xtr_bottom` (forced transition, fractions of the chord, default 1: free transition); `max_iter` (viscous iterations per angle, 1 to 200; default 50 for `ventorum2d` and 100 for `xfoil`).
+  - Output: `source`, `alpha_deg`, `Cl`, `Cd`, `Cm`, `converged` (one flag per angle; the coefficients of an angle that did not converge are null), `transition_positions` (`[x_upper, x_lower]` as fractions of the chord per angle from `ventorum2d`; null for `xfoil`), `Re`, `h_c`, `flap`, `options` (the solver options that the call used; for `xfoil` also the XFOIL version line) and `warnings`.
+- **Flap object.** `x_hinge` (hinge position, fraction of the chord, 0.05 to 0.98, required), `y_hinge` (hinge height as a fraction of the local thickness: 0 lower surface, 1 upper surface; default 0.5) and `deflection_deg` (positive trailing edge down, -60 to 60 deg, required). Other keys are refused. The same tuple `(x_hinge, y_hinge, deflection_deg)` is used by every section polar source of the library.
+- **Work budget.** One polar call runs one 2D solve per angle, at most 61 angles. The work estimate is angles x `max_iter` x `n_panels`^2 units and must be at most 200000000 units (the budget of the other tools). The panel limit is 1000 panels. Above a limit the call is refused with `invalid_input`, and the message says how many angles one call can take, so that you can split the request.
+- **Server-side settings.** The solver tolerance of `ventorum2d` (1e-4) and the run-time limit of each XFOIL start (120 s) are fixed by the server. There is no free-form options object.
+- **XFOIL.** `source="xfoil"` runs the XFOIL of the server: the program in the environment variable `VENTORUM_XFOIL`, else `xfoil` on the PATH. A tool call cannot name another program. The section text is parsed to coordinates first; only the coordinates go to XFOIL. XFOIL runs headless (see the installation guide). When XFOIL is missing, the tool returns `invalid_input` and advises `source="ventorum2d"`. XFOIL has no ground effect: `h_c` with `xfoil` gives `invalid_method`.
 
 Example call:
 
@@ -177,8 +183,7 @@ res = call_tool("ventorum_airfoil_polar", {
     "alpha_step_deg": 2.0,
     "source": "ventorum2d",
 })
-print(res["executive_summary"])
-print("Cl:", res["Cl"])
+print(res["alpha_deg"], res["Cl"], res["converged"])
 ```
 
 ## Example
