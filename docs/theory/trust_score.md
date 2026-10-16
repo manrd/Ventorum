@@ -10,7 +10,7 @@ Every result carries a trust score from 0 to 1 and a rating (HIGH, MODERATE, LOW
 
 ## Rules
 
-`ventorum.core.trust.evaluate_aerodynamic_trust` applies these rules. The penalty values and the thresholds are in the code; they are design settings, not calibrated values.
+`ventorum.core.trust.evaluate_aerodynamic_trust` applies these rules. The penalty values and the thresholds are in the code; they are design settings, not calibrated values. The exception is the mesh thresholds of the 3D panel method: a mesh-error study of the method calibrated them (see the section *3D panel method* below).
 
 | Rule (`factors` key) | Applies to | Reason | Chapter |
 | --- | --- | --- | --- |
@@ -22,11 +22,36 @@ Every result carries a trust score from 0 to 1 and a rating (HIGH, MODERATE, LOW
 | `compressibility` | all | The methods are incompressible. The Mach number uses the speed of sound of the ISA atmosphere at the given air density | [Conventions](conventions.md) |
 | `ground_proximity` | all in ground effect | Thickness and viscous effects grow at small $h_\text{min}/c$; vortex-lattice panels longer than the gap | [Ground effect](ground_effect.md) |
 | `numerical` | all | No convergence; a coarse spanwise mesh; a spanwise circulation with many local extrema | all |
+| `mesh_adequacy` | 3D panel method | Panel shape and validity: elongated or skewed panels (the median panel), warped panels, a mesh that is not watertight, folded (non-convex) panels | [Ventorum-3DP](panel3d.md) |
+| `mesh_resolution` | 3D panel method | Discretization error: the near-field and far-field drag differ, or the chordwise panel count is low | [Ventorum-3DP](panel3d.md) |
 | `non_finite_result` | all | A coefficient that is not a finite number caps the rating at LOW | |
 
 The score is $1 - \min(1, \sum \text{penalties})$, and the rating follows from fixed bands of the score. The uncertainty bands grow with $1 - \text{score}$, with fixed coefficients; this is why they are not error bars. A non-positive aspect ratio gives the full penalty for every solver. The notes of the solver (for example a lifting line near the ground) are added to the warnings.
 
 One check adds a warning and no penalty: the near-field side force and yawing moment are compared with the far-field values of the Trefftz plane (`CY_farfield`, `Cn_trefftz`). The rule and its reason are in [Forces and moments](forces_and_moments.md) (section *Far-field lateral diagnostics*).
+
+## 3D panel method
+
+`ventorum.core.trust.panel3d_mesh_checks` gives the mesh rules of Ventorum-3DP. The thresholds are the `PANEL3D_*` constants of `ventorum.core.trust`. A mesh-error study of the method calibrated them.
+
+Error levels. A *warning* means a probable mesh error above 2 % in CL or above 4 % in the Trefftz-plane CDi. A *strong warning* means a probable mesh error above 5 % in CL or above 10 % in CDi. The CDi limits are twice the CL limits because the induced drag goes with the square of the lift: one circulation error gives about twice the relative error in CDi. When no other rule adds a penalty, a warning puts the result in the MODERATE band and a strong warning in the LOW band.
+
+Indicators of the discretization error (factor `mesh_resolution`, the penalty of the worse level):
+
+- Near-field and far-field drag. In potential flow the pressure drag of the surface and the induced drag of the Trefftz plane are equal; on a mesh they differ. The rule compares `|CD_nearfield - CDi| / |CDi|` with a warning limit and a strong limit (`PANEL3D_DRAG_WARN_REL`, `PANEL3D_DRAG_STRONG_REL`). It does not act when the difference is below an absolute floor (`PANEL3D_DRAG_ABSOLUTE_FLOOR`): at zero lift both drags are zero and the relative difference has no meaning.
+- Chordwise panel count. The chordwise count controls most of the mesh error of CL and CDi. The rule compares `n_chord` with two minimum counts (`PANEL3D_N_CHORD_WARN`, `PANEL3D_N_CHORD_STRONG`). It acts only when the caller gives `n_chord`.
+
+Panel shape and validity (factor `mesh_adequacy`, the penalties add):
+
+- Panel aspect ratio and skew. The study found that the largest panel aspect ratio and the largest skew do not predict the mesh error. On a normal wing mesh the largest aspect ratio comes from the trailing-edge base panels, the tip caps and the short panels of the cosine spacing, and the largest skew comes from the triangles of the tip caps and of the control-surface edges. The rules therefore use the median panel (`PANEL3D_ASPECT_RATIO_PERCENTILE`, `PANEL3D_SKEW_PERCENTILE`). At a fixed chordwise count, a large median aspect ratio means few spanwise strips and a larger error, so the aspect-ratio limit (`PANEL3D_MAX_ASPECT_RATIO`) is a calibrated warning that adds to the drag rule. The skew limit (`PANEL3D_MAX_SKEW`) is not calibrated: the median skew of the study meshes stayed well below it.
+- Warp. The limit `PANEL3D_MAX_WARP` is not calibrated: the study meshes had no warped panels.
+- A mesh that is not watertight, and folded panels. A panel that is not convex (`n_nonconvex` of `check_mesh`) comes from a folded strip, and the result of such a mesh has no value. This rule has a large penalty (`PANEL3D_PENALTY_NONCONVEX`).
+
+Calibration method. Wings of different aspect ratio, taper, sweep, dihedral, section (symmetric and cambered), ground clearance and flap deflection were solved on a grid of chordwise and spanwise panel counts, with the default spacings. The reference value of each wing is the Richardson extrapolation of a chordwise refinement and of a spanwise refinement (`ventorum.panel3d.convergence.order_and_extrapolation`), added with a separable error model. The same procedure was checked on a sphere and an ellipsoid against the exact solutions of `ventorum.reference.analytic3d`. Each threshold is the value that best separates the meshes above the error limit of its level from the meshes below it (the largest balanced accuracy; on a flat optimum, a round value inside it).
+
+Recalibration. Repeat the study with the new solver version: the same wing set, the same reference procedure and the same error limits of the two levels. Set each threshold again to the value with the largest balanced accuracy. Keep the error limits, so that the meaning of a warning does not change.
+
+Limits. The indicators give a probable error, not a bound. The thresholds hold for the cases of the study: attached flow, sections with a closed trailing edge, and the default chordwise (cosine) and spanwise spacings. For an error estimate of one result, use `panel_estimate_mesh_error` (Richardson extrapolation of three mesh levels, see [Ventorum-3DP](panel3d.md)).
 
 ## Planned error-bar layers
 

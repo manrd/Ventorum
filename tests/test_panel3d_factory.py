@@ -456,3 +456,55 @@ def test_strip_map_covers_every_panel_of_a_control_mesh():
                 j = n_span - 1 - k
                 y = -centroids[strip, 1]
                 assert np.all(y >= y_e[j] - 1e-9) and np.all(y <= y_e[j + 1] + 1e-9)
+
+
+def _closed_te_wing() -> Aircraft:
+    """Rectangular wing (aspect ratio 8) with a NACA 0012 section with a closed trailing edge."""
+    coords = airfoil("0012", closed_te=True).coords
+    return _simple_wing(shape=coords, semi_span=4.0, chord=1.0)
+
+
+def test_well_resolved_wing_mesh_has_no_mesh_warning():
+    """A mesh that the mesh-error study shows as adequate gets no mesh warning.
+
+    With 16 spanwise and 40 chordwise panels the mesh error of this wing is
+    below the warning level (2 % in CL, 4 % in CDi). The panel aspect ratio,
+    skew and near/far-field drag rules must not warn, although the largest
+    panel aspect ratio and skew of the mesh are large (leading-edge panels
+    and tip caps).
+    """
+    from ventorum.core import trust as tr
+
+    solver = make_solver("panel3d")
+    cond = FlightCondition(V_inf=30.0, alpha=np.radians(5.0))
+    res = solver.solve(_closed_te_wing(), cond, SolverSettings(n_panels=16, n_chord=40))
+    trust = res.totals.trust
+    stats = res.details["mesh_stats"]
+    assert stats["max_aspect_ratio"] > tr.PANEL3D_MAX_ASPECT_RATIO
+    assert stats["max_skew"] > tr.PANEL3D_MAX_SKEW
+    assert trust.factors["mesh_adequacy"] == 0.0
+    assert trust.factors["mesh_resolution"] == 0.0
+    mesh_words = ("Elongated", "Skewed", "Warped", "Folded", "Near-field", "chordwise mesh")
+    assert not any(word in w for w in trust.warnings for word in mesh_words), trust.warnings
+    assert trust.rating == "HIGH"
+
+
+@pytest.mark.parametrize("n_chord, level", [(20, "warn"), (8, "strong")])
+def test_coarse_chordwise_mesh_gets_the_mesh_warning(n_chord, level):
+    """Meshes that the mesh-error study shows as inadequate get the warning of their level.
+
+    With 16 spanwise panels, 20 chordwise panels (the default count) give an
+    error of this wing above the warning level and 8 chordwise panels above
+    the strong level. The near-field/far-field drag rule gives the matching
+    level.
+    """
+    from ventorum.core import trust as tr
+
+    solver = make_solver("panel3d")
+    cond = FlightCondition(V_inf=30.0, alpha=np.radians(5.0))
+    res = solver.solve(_closed_te_wing(), cond, SolverSettings(n_panels=16, n_chord=n_chord))
+    trust = res.totals.trust
+    expected = tr.PANEL3D_PENALTY_RESOLUTION_WARN if level == "warn" else tr.PANEL3D_PENALTY_RESOLUTION_STRONG
+    assert trust.factors["mesh_resolution"] == expected
+    assert any("Near-field pressure drag" in w for w in trust.warnings)
+    assert trust.rating == ("MODERATE" if level == "warn" else "LOW")

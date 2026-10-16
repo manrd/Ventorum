@@ -23,6 +23,11 @@ known to be weak. The rules depend on the method:
   J. E. Lamar, "Extension of leading-edge-suction analogy to wings with
   separated flow around the side edges at subsonic speeds", NASA TR R-428,
   1974.
+* The 3D panel method (``panel3d``) adds mesh rules: the panel shape and
+  validity, and two indicators of the discretization error (the
+  near-field/far-field drag difference and the chordwise panel count). A
+  mesh-error study of the method calibrated their thresholds (see
+  :func:`panel3d_mesh_checks` and the ``PANEL3D_*`` constants).
 
 The uncertainty values (``uncertainty_CL`` and the others) are heuristic
 bands. They are NOT calibrated against experimental data. Do not use them as
@@ -67,23 +72,70 @@ NEAR_FAR_RELATIVE = 0.05
 NEAR_FAR_FLOOR_CY = 0.001
 NEAR_FAR_FLOOR_CN = 0.0002
 
-#: Thresholds and penalties for the 3D panel method (Ventorum-3DP).
-#: These constants are engineering thresholds. To calibrate them later, compare
-#: mesh refinements, skew variations, and near/far-field drag comparisons against
-#: higher-order CFD or experimental wind-tunnel data.
-PANEL3D_MAX_ASPECT_RATIO = 20.0
+#: Mesh-adequacy thresholds of the 3D panel method (Ventorum-3DP).
+#:
+#: These thresholds were calibrated by a mesh-error study of the method. Wings
+#: of different aspect ratio, taper, sweep, dihedral, section (symmetric and
+#: cambered), ground clearance and flap deflection were solved on a grid of
+#: chordwise and spanwise panel counts with the default spacings. The error of
+#: each mesh is the relative difference of CL and of the Trefftz-plane CDi from
+#: a reference value: the Richardson extrapolation of separate chordwise and
+#: spanwise refinements (``ventorum.panel3d.convergence.order_and_extrapolation``),
+#: checked on a sphere and an ellipsoid against the exact solutions
+#: (``ventorum.reference.analytic3d``). Each indicator below was compared with
+#: that error:
+#:
+#: * A *warning* threshold marks the meshes with an error above 2 % in CL or
+#:   4 % in CDi. A *strong* threshold marks an error above 5 % in CL or 10 % in
+#:   CDi. The CDi limits are twice the CL limits because the induced drag goes
+#:   with the square of the lift: one circulation error gives about twice the
+#:   relative error in CDi.
+#: * The chordwise panel count and the near-field/far-field drag difference
+#:   predicted the error. The largest panel aspect ratio and the largest
+#:   skew did not: on a normal wing mesh they come from the trailing-edge
+#:   base panels, the tip caps, the triangles at the edges of a control
+#:   surface and the short panels of the cosine spacing, not from a mesh
+#:   error. The shape rules therefore use the median panel. At a fixed
+#:   chordwise count, a large median aspect ratio means few spanwise strips
+#:   and a larger error, so the aspect-ratio limit is a calibrated warning
+#:   that adds to the drag rule. The skew limit and the warp limit were not
+#:   calibrated: the median skew of the study meshes stayed well below the
+#:   limit (the swept wing had the largest), and no study mesh had warped
+#:   panels.
+#: * Panels that are not convex (a folded strip) gave results with no value.
+#:
+#: Recalibration: solve the same kind of wing set on a grid of panel counts,
+#: compute the reference values in the same way, and set each threshold to
+#: the value that best separates the meshes above the error limit from the
+#: meshes below it (the largest balanced accuracy; on a flat optimum, a
+#: round value inside it). Keep the error limits of the two levels, so that
+#: the meaning of a warning does not change.
+PANEL3D_ASPECT_RATIO_PERCENTILE = 50.0
+PANEL3D_MAX_ASPECT_RATIO = 30.0
+PANEL3D_SKEW_PERCENTILE = 50.0
 PANEL3D_MAX_SKEW = 0.85
 PANEL3D_MAX_WARP = 0.10
 PANEL3D_PENALTY_ASPECT_RATIO = 0.15
 PANEL3D_PENALTY_SKEW = 0.20
 PANEL3D_PENALTY_WARP = 0.20
 PANEL3D_PENALTY_WATERTIGHT = 0.35
+PANEL3D_PENALTY_NONCONVEX = 0.60
 
-#: 3D panel near-field pressure drag against far-field Trefftz induced drag.
-#: Relative tolerance and absolute floor for the drag comparison.
-PANEL3D_DRAG_RELATIVE_TOL = 0.20
-PANEL3D_DRAG_ABSOLUTE_FLOOR = 0.002
-PANEL3D_PENALTY_DRAG_DISCREPANCY = 0.25
+#: Discretization-error indicators of the 3D panel method (calibrated as
+#: above). Near-field pressure drag against far-field Trefftz induced drag:
+#: relative difference ``|CD_nearfield - CDi| / |CDi|`` of the warning and of
+#: the strong warning, and the absolute floor of the difference [-] below
+#: which the rule does not act (at zero lift both drags are zero). Chordwise
+#: panel count per surface: the smallest count without a warning and without
+#: a strong warning [-]. The penalty of the worse of the two indicators is
+#: the factor ``mesh_resolution``.
+PANEL3D_DRAG_WARN_REL = 0.15
+PANEL3D_DRAG_STRONG_REL = 0.45
+PANEL3D_DRAG_ABSOLUTE_FLOOR = 0.0005
+PANEL3D_N_CHORD_WARN = 28
+PANEL3D_N_CHORD_STRONG = 14
+PANEL3D_PENALTY_RESOLUTION_WARN = 0.20
+PANEL3D_PENALTY_RESOLUTION_STRONG = 0.40
 
 #: Penalty for non-unique post-stall solution branches in viscous coupling.
 POST_STALL_BRANCH_PENALTY = 0.35
@@ -152,6 +204,178 @@ def near_far_lateral_warnings(
                 "displacement the Trefftz-plane trace does not include (see the theory manual, forces and moments)."
             )
     return out
+
+
+def _robust_value(stats: dict, array_key: str, max_key: str, percentile: float, default: float) -> tuple[float, bool]:
+    """Return a percentile of a per-panel array of *stats*, or its maximum value.
+
+    Parameters
+    ----------
+    stats : dict
+        Mesh statistics (:func:`ventorum.panel3d.mesh.check_mesh`).
+    array_key : str
+        Key of the per-panel array (for example ``"aspect_ratio"``).
+    max_key : str
+        Key of the maximum value, used when the array is absent or empty.
+    percentile : float
+        Percentile of the array [%], from 0 to 100.
+    default : float
+        Value when the statistics have neither key.
+
+    Returns
+    -------
+    tuple of (float, bool)
+        The value and True when it is the percentile of the array (False
+        when it is the maximum value or the default).
+    """
+    arr = stats.get(array_key)
+    if arr is not None:
+        values = np.asarray(arr, dtype=float).ravel()
+        values = values[np.isfinite(values)]
+        if values.size:
+            return float(np.percentile(values, percentile)), True
+    return float(stats.get(max_key, default)), False
+
+
+#: Texts of the two levels of the 3D panel discretization-error indicators.
+_RESOLUTION_TEXT = {
+    1: "the mesh error is probably above 2 % in CL or 4 % in CDi.",
+    2: "the mesh error is probably above 5 % in CL or 10 % in CDi.",
+}
+
+
+def _percentile_name(percentile: float, quantity: str) -> str:
+    """Return "the median <quantity>" or "the <q>th percentile of the <quantity>"."""
+    if float(percentile) == 50.0:
+        return f"the median {quantity}"
+    return f"the {percentile:g}th percentile of the {quantity}"
+
+
+def panel3d_mesh_checks(
+    mesh_stats: dict | None,
+    CDi: float | None = None,
+    CD_nearfield: float | None = None,
+    n_chord: int | None = None,
+) -> tuple[dict[str, float], list[str], list[str]]:
+    """Return the mesh rules of the 3D panel method: penalties, warnings and recommendations.
+
+    The thresholds are the ``PANEL3D_*`` constants of this module, calibrated
+    by a mesh-error study of the method (see the notes of the constants). Two
+    groups of rules give two factors:
+
+    * ``mesh_adequacy`` (needs *mesh_stats*): the shape and the validity of
+      the panels. A percentile (the median) of the panel aspect ratio and of
+      the panel skew, not the largest value; the largest warp; a mesh that is not
+      watertight, and panels that are not convex (a folded strip). The
+      penalties add.
+    * ``mesh_resolution``: the discretization-error indicators. The relative
+      difference of the near-field pressure drag and the far-field Trefftz
+      induced drag, and the chordwise panel count when it is given. Each
+      indicator gives a level: none, warning (probable error above 2 % in CL
+      or 4 % in CDi) or strong warning (above 5 % in CL or 10 % in CDi). The
+      penalty is that of the worse level.
+
+    Parameters
+    ----------
+    mesh_stats : dict or None
+        Mesh statistics of :func:`ventorum.panel3d.mesh.check_mesh`. The
+        per-panel arrays ``aspect_ratio`` [-] and ``skew`` [-] give the
+        percentiles; without them the largest values are used.
+    CDi : float or None, optional
+        Far-field Trefftz-plane induced drag coefficient [-].
+    CD_nearfield : float or None, optional
+        Near-field pressure drag coefficient [-].
+    n_chord : int or None, optional
+        Chordwise panels per surface [-]. None skips the chordwise rule.
+
+    Returns
+    -------
+    tuple of (dict, list of str, list of str)
+        The penalties by factor name, the warnings and the recommendations.
+    """
+    penalties: dict[str, float] = {}
+    warnings: list[str] = []
+    recommendations: list[str] = []
+
+    if mesh_stats is not None:
+        mesh_pen = 0.0
+        q_ar = PANEL3D_ASPECT_RATIO_PERCENTILE
+        ar, ar_is_pct = _robust_value(mesh_stats, "aspect_ratio", "max_aspect_ratio", q_ar, 1.0)
+        if ar > PANEL3D_MAX_ASPECT_RATIO:
+            mesh_pen += PANEL3D_PENALTY_ASPECT_RATIO
+            what = _percentile_name(q_ar, "panel aspect ratio") if ar_is_pct else "the panel aspect ratio"
+            warnings.append(
+                f"Elongated panels: {what} is {ar:.1f} (above {PANEL3D_MAX_ASPECT_RATIO:g}). The spanwise "
+                "panel count is probably low for the chordwise count; the mesh error is probably above 2 % "
+                "in CL or 4 % in CDi."
+            )
+            recommendations.append("Increase the spanwise panel count (n_panels).")
+        q_sk = PANEL3D_SKEW_PERCENTILE
+        sk, sk_is_pct = _robust_value(mesh_stats, "skew", "max_skew", q_sk, 0.0)
+        if sk > PANEL3D_MAX_SKEW:
+            mesh_pen += PANEL3D_PENALTY_SKEW
+            what = _percentile_name(q_sk, "panel skew") if sk_is_pct else "the panel skew"
+            warnings.append(f"Skewed mesh: {what} is {sk:.2f} (above {PANEL3D_MAX_SKEW:g}).")
+        max_wp = float(mesh_stats.get("max_warp", 0.0))
+        if max_wp > PANEL3D_MAX_WARP:
+            mesh_pen += PANEL3D_PENALTY_WARP
+            warnings.append(
+                f"Warped panels: maximum panel warp reaches {max_wp:.3f} (above {PANEL3D_MAX_WARP:g})."
+            )
+        if not bool(mesh_stats.get("watertight", True)):
+            mesh_pen += PANEL3D_PENALTY_WATERTIGHT
+            warnings.append("Panel mesh is not watertight.")
+        n_nonconvex = int(mesh_stats.get("n_nonconvex", 0) or 0)
+        if n_nonconvex > 0:
+            mesh_pen += PANEL3D_PENALTY_NONCONVEX
+            warnings.append(
+                f"Folded panels: {n_nonconvex} panels are not convex. A folded strip makes the "
+                "result not valid."
+            )
+            recommendations.append(
+                "Change the spanwise panel count or spacing so that no strip folds (for example a "
+                "root strip narrower than the section thickness on a wing with dihedral)."
+            )
+        penalties["mesh_adequacy"] = mesh_pen
+
+    levels: list[int] = []
+    if CD_nearfield is not None and CDi is not None and _is_finite(CD_nearfield) and _is_finite(CDi):
+        drag_diff = abs(float(CD_nearfield) - float(CDi))
+        drag_ref = max(abs(float(CDi)), 1e-4)
+        rel = drag_diff / drag_ref
+        level = 0
+        if drag_diff > PANEL3D_DRAG_ABSOLUTE_FLOOR:
+            if rel > PANEL3D_DRAG_STRONG_REL:
+                level = 2
+            elif rel > PANEL3D_DRAG_WARN_REL:
+                level = 1
+        if level:
+            limit = PANEL3D_DRAG_STRONG_REL if level == 2 else PANEL3D_DRAG_WARN_REL
+            warnings.append(
+                f"Near-field pressure drag ({float(CD_nearfield):.4f}) and far-field Trefftz induced drag "
+                f"({float(CDi):.4f}) differ by {drag_diff:.4f} (relative difference {rel:.1%}, above "
+                f"{limit:.0%}): {_RESOLUTION_TEXT[level]}"
+            )
+        levels.append(level)
+    if n_chord is not None and int(n_chord) > 0:
+        n_c = int(n_chord)
+        level = 2 if n_c < PANEL3D_N_CHORD_STRONG else (1 if n_c < PANEL3D_N_CHORD_WARN else 0)
+        if level:
+            limit = PANEL3D_N_CHORD_STRONG if level == 2 else PANEL3D_N_CHORD_WARN
+            warnings.append(
+                f"Coarse chordwise mesh: {n_c} chordwise panels (below {limit}): {_RESOLUTION_TEXT[level]}"
+            )
+        levels.append(level)
+    if levels:
+        worst = max(levels)
+        penalties["mesh_resolution"] = (0.0, PANEL3D_PENALTY_RESOLUTION_WARN, PANEL3D_PENALTY_RESOLUTION_STRONG)[worst]
+        if worst:
+            recommendations.append(
+                "Increase n_chord: the chordwise panel count controls most of the 3D panel mesh error. "
+                "Set panel_estimate_mesh_error=True for an error estimate of this mesh."
+            )
+    return penalties, warnings, recommendations
+
 
 
 def isa_speed_of_sound(rho: float) -> float:
@@ -410,7 +634,9 @@ def evaluate_aerodynamic_trust(
     h_over_c : float, optional
         Smallest ground clearance divided by the reference chord.
     n_chord : int, optional
-        Chordwise panels of the vortex lattice.
+        Chordwise panels of the vortex lattice, or chordwise panels per
+        surface of the 3D panel method (then also the chordwise rule of
+        :func:`panel3d_mesh_checks`).
     notes : list of str, optional
         Extra warnings from the solver.
     max_chord_over_c : float
@@ -438,6 +664,13 @@ def evaluate_aerodynamic_trust(
         [-]. When the near field and the far field do not agree
         (:func:`near_far_lateral_warnings`), the result gets a warning. The
         comparison is a diagnostic: it does not change the score.
+    mesh_stats : dict or None, optional
+        3D panel method only: the mesh statistics of
+        :func:`ventorum.panel3d.mesh.check_mesh` (see
+        :func:`panel3d_mesh_checks`).
+    CD_nearfield : float or None, optional
+        3D panel method only: the near-field pressure drag coefficient [-],
+        compared with the far-field *CDi* (see :func:`panel3d_mesh_checks`).
     post_stall_branch : bool, optional
         True if multiple post-stall equilibrium solution branches exist.
 
@@ -696,45 +929,12 @@ def evaluate_aerodynamic_trust(
     # 7. Near-field and far-field lateral values (a warning only, no penalty) -------------------
     warnings.extend(near_far_lateral_warnings(CY, CY_farfield, Cn_stability, Cn_trefftz))
 
-    # 8. 3D Panel method checks (mesh adequacy and near/far drag agreement) --------------------
+    # 8. 3D panel method: mesh adequacy and discretization-error indicators -------------------
     if solver in ("panel3d", "3dp"):
-        if mesh_stats is not None:
-            mesh_pen = 0.0
-            max_ar = float(mesh_stats.get("max_aspect_ratio", 1.0))
-            if max_ar > PANEL3D_MAX_ASPECT_RATIO:
-                mesh_pen += PANEL3D_PENALTY_ASPECT_RATIO
-                warnings.append(
-                    f"Elongated panels: maximum panel aspect ratio reaches {max_ar:.1f} "
-                    f"(above {PANEL3D_MAX_ASPECT_RATIO:g})."
-                )
-            max_sk = float(mesh_stats.get("max_skew", 0.0))
-            if max_sk > PANEL3D_MAX_SKEW:
-                mesh_pen += PANEL3D_PENALTY_SKEW
-                warnings.append(
-                    f"Skewed mesh: maximum panel skew reaches {max_sk:.2f} "
-                    f"(above {PANEL3D_MAX_SKEW:g})."
-                )
-            max_wp = float(mesh_stats.get("max_warp", 0.0))
-            if max_wp > PANEL3D_MAX_WARP:
-                mesh_pen += PANEL3D_PENALTY_WARP
-                warnings.append(
-                    f"Warped panels: maximum panel warp reaches {max_wp:.3f} "
-                    f"(above {PANEL3D_MAX_WARP:g})."
-                )
-            if not bool(mesh_stats.get("watertight", True)):
-                mesh_pen += PANEL3D_PENALTY_WATERTIGHT
-                warnings.append("Panel mesh is not watertight.")
-            penalties["mesh_adequacy"] = mesh_pen
-
-        if CD_nearfield is not None and CDi is not None and _is_finite(CD_nearfield) and _is_finite(CDi):
-            drag_diff = abs(float(CD_nearfield) - float(CDi))
-            drag_ref = max(abs(float(CDi)), 1e-4)
-            if drag_diff > PANEL3D_DRAG_ABSOLUTE_FLOOR and (drag_diff / drag_ref) > PANEL3D_DRAG_RELATIVE_TOL:
-                penalties["drag_agreement"] = PANEL3D_PENALTY_DRAG_DISCREPANCY
-                warnings.append(
-                    f"Near-field pressure drag ({float(CD_nearfield):.4f}) and far-field Trefftz induced drag "
-                    f"({float(CDi):.4f}) differ by {drag_diff:.4f} (relative difference {drag_diff / drag_ref:.1%})."
-                )
+        p3_pen, p3_warn, p3_rec = panel3d_mesh_checks(mesh_stats, CDi, CD_nearfield, n_chord)
+        penalties.update(p3_pen)
+        warnings.extend(p3_warn)
+        recommendations.extend(r for r in p3_rec if r not in recommendations)
 
     # 8b. Viscous coupling post-stall non-unique branches --------------------------------------
     branch_pen = 0.0

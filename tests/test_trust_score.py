@@ -333,3 +333,147 @@ def test_mach_uses_altitude():
                       settings=vt.SolverSettings(solver_type="vlm", n_panels=20)).totals.trust
     assert sea.factors["compressibility"] == 0.0
     assert high.factors["compressibility"] > 0.0
+
+
+# ---------------------------------------------------------------------------
+# 3D panel method: mesh rules calibrated by a mesh-error study
+# ---------------------------------------------------------------------------
+
+def _panel_stats(ar_median: float = 4.0, skew_median: float = 0.0, n: int = 200, n_special: int = 12,
+                 n_nonconvex: int = 0, with_arrays: bool = True) -> dict:
+    """Mesh statistics like check_mesh: regular panels plus a few special panels.
+
+    The special panels (trailing-edge base panels, tip-cap and control-edge
+    triangles) have a very large aspect ratio and a skew near 1, as on a
+    normal wing mesh.
+    """
+    ar = np.full(n, float(ar_median))
+    ar[:n_special] = 800.0
+    sk = np.full(n, float(skew_median))
+    sk[:n_special] = 0.99
+    stats = {"max_aspect_ratio": float(ar.max()), "max_skew": float(sk.max()), "max_warp": 0.0,
+             "watertight": True, "n_nonconvex": int(n_nonconvex)}
+    if with_arrays:
+        stats.update({"aspect_ratio": ar, "skew": sk})
+    return stats
+
+
+def _panel_trust(**kw):
+    """Trust of a 3D panel result of a wing with a lift of CL 0.43 and CDi 0.0076."""
+    args = dict(AR=8.0, CL=0.43, CDi=0.0076, solver_type="panel3d", n_panels=16)
+    args.update(kw)
+    return evaluate_aerodynamic_trust(**args)
+
+
+def test_panel3d_special_panels_do_not_give_a_mesh_warning():
+    """A few very elongated or skewed panels (base, caps, control edges) do not warn.
+
+    The largest aspect ratio and skew of a normal wing mesh come from these
+    panels; the rules use the median panel.
+    """
+    t = _panel_trust(mesh_stats=_panel_stats(), CD_nearfield=0.0076 * 0.95)
+    assert t.factors["mesh_adequacy"] == 0.0
+    assert t.factors["mesh_resolution"] == 0.0
+    assert not any("Elongated" in w or "Skewed" in w or "Near-field" in w for w in t.warnings)
+    assert t.rating == "HIGH"
+
+
+def test_panel3d_drag_rule_levels_use_the_named_thresholds():
+    """The near/far-field drag levels follow PANEL3D_DRAG_WARN_REL and PANEL3D_DRAG_STRONG_REL."""
+    from ventorum.core import trust as tr
+
+    cdi = 0.0076
+
+    def level_of(rel):
+        t = _panel_trust(CD_nearfield=cdi * (1.0 - rel))
+        return t, t.factors["mesh_resolution"]
+
+    t, pen = level_of(0.98 * tr.PANEL3D_DRAG_WARN_REL)
+    assert pen == 0.0 and t.rating == "HIGH"
+    t, pen = level_of(1.02 * tr.PANEL3D_DRAG_WARN_REL)
+    assert pen == tr.PANEL3D_PENALTY_RESOLUTION_WARN
+    assert t.rating == "MODERATE"
+    assert any("2 % in CL or 4 % in CDi" in w for w in t.warnings)
+    t, pen = level_of(1.02 * tr.PANEL3D_DRAG_STRONG_REL)
+    assert pen == tr.PANEL3D_PENALTY_RESOLUTION_STRONG
+    assert t.rating == "LOW"
+    assert any("5 % in CL or 10 % in CDi" in w for w in t.warnings)
+
+
+def test_panel3d_drag_rule_floor_at_small_lift():
+    """Below the absolute floor the relative drag difference gives no warning (zero lift)."""
+    from ventorum.core import trust as tr
+
+    small = _panel_trust(CL=0.0, CDi=0.0, CD_nearfield=0.9 * tr.PANEL3D_DRAG_ABSOLUTE_FLOOR)
+    assert small.factors["mesh_resolution"] == 0.0
+    large = _panel_trust(CL=0.0, CDi=0.0, CD_nearfield=1.1 * tr.PANEL3D_DRAG_ABSOLUTE_FLOOR)
+    assert large.factors["mesh_resolution"] == tr.PANEL3D_PENALTY_RESOLUTION_STRONG
+
+
+def test_panel3d_chordwise_count_levels_and_worse_level_counts_once():
+    """The chordwise rule follows the named counts; the worse level of the two indicators counts once."""
+    from ventorum.core import trust as tr
+
+    def pen(n_chord, rel=0.0):
+        return _panel_trust(n_chord=n_chord, CD_nearfield=0.0076 * (1.0 - rel)).factors["mesh_resolution"]
+
+    assert pen(tr.PANEL3D_N_CHORD_WARN) == 0.0
+    assert pen(tr.PANEL3D_N_CHORD_WARN - 1) == tr.PANEL3D_PENALTY_RESOLUTION_WARN
+    assert pen(tr.PANEL3D_N_CHORD_STRONG) == tr.PANEL3D_PENALTY_RESOLUTION_WARN
+    assert pen(tr.PANEL3D_N_CHORD_STRONG - 1) == tr.PANEL3D_PENALTY_RESOLUTION_STRONG
+    # A drag warning and a strong chordwise level: the strong penalty, not the sum.
+    both = pen(tr.PANEL3D_N_CHORD_STRONG - 1, rel=1.02 * tr.PANEL3D_DRAG_WARN_REL)
+    assert both == tr.PANEL3D_PENALTY_RESOLUTION_STRONG
+    # Without n_chord the chordwise rule does not act.
+    assert _panel_trust(CD_nearfield=0.0076).factors["mesh_resolution"] == 0.0
+
+
+def test_panel3d_median_aspect_ratio_and_folded_panels():
+    """The median aspect ratio and folded (non-convex) panels add to mesh_adequacy."""
+    from ventorum.core import trust as tr
+
+    ok = _panel_trust(mesh_stats=_panel_stats(ar_median=0.9 * tr.PANEL3D_MAX_ASPECT_RATIO))
+    assert ok.factors["mesh_adequacy"] == 0.0
+    long_panels = _panel_trust(mesh_stats=_panel_stats(ar_median=1.1 * tr.PANEL3D_MAX_ASPECT_RATIO))
+    assert long_panels.factors["mesh_adequacy"] == pytest.approx(tr.PANEL3D_PENALTY_ASPECT_RATIO)
+    assert any("Elongated panels: the median panel aspect ratio" in w for w in long_panels.warnings)
+    folded = _panel_trust(mesh_stats=_panel_stats(n_nonconvex=2))
+    assert folded.factors["mesh_adequacy"] == pytest.approx(tr.PANEL3D_PENALTY_NONCONVEX)
+    assert any("Folded panels" in w for w in folded.warnings)
+    # Statistics without the per-panel arrays: the largest values are used.
+    no_arrays = _panel_trust(mesh_stats=_panel_stats(with_arrays=False))
+    assert any("Elongated panels: the panel aspect ratio" in w for w in no_arrays.warnings)
+
+
+def test_panel3d_thresholds_are_used_by_name(monkeypatch):
+    """Changing a named threshold changes the result: the rules read the module constants."""
+    from ventorum.core import trust as tr
+
+    stats = _panel_stats(ar_median=10.0)
+    base = _panel_trust(mesh_stats=stats, CD_nearfield=0.0076 * 0.9, n_chord=20)
+    assert base.factors["mesh_adequacy"] == 0.0
+    assert base.factors["mesh_resolution"] == tr.PANEL3D_PENALTY_RESOLUTION_WARN  # n_chord 20
+    monkeypatch.setattr(tr, "PANEL3D_MAX_ASPECT_RATIO", 5.0)
+    monkeypatch.setattr(tr, "PANEL3D_N_CHORD_WARN", 16)
+    monkeypatch.setattr(tr, "PANEL3D_DRAG_WARN_REL", 0.05)
+    monkeypatch.setattr(tr, "PANEL3D_PENALTY_RESOLUTION_WARN", 0.3)
+    changed = _panel_trust(mesh_stats=stats, CD_nearfield=0.0076 * 0.9, n_chord=20)
+    assert changed.factors["mesh_adequacy"] == pytest.approx(tr.PANEL3D_PENALTY_ASPECT_RATIO)
+    assert changed.factors["mesh_resolution"] == 0.3  # the drag rule now, at the new penalty
+    assert any("above 5%" in w for w in changed.warnings)
+
+
+@pytest.mark.parametrize("solver", ["vlm", "linear", "nonlinear", "fourier"])
+def test_panel3d_rules_do_not_change_other_solvers(solver, monkeypatch):
+    """The panel inputs and constants do not change the trust of the other solvers."""
+    from ventorum.core import trust as tr
+
+    kw = dict(AR=8.0, CL=0.43, CDi=0.0076, solver_type=solver, n_panels=16)
+    plain = evaluate_aerodynamic_trust(**kw).to_dict()
+    monkeypatch.setattr(tr, "PANEL3D_MAX_ASPECT_RATIO", 0.5)
+    monkeypatch.setattr(tr, "PANEL3D_DRAG_WARN_REL", 0.0)
+    monkeypatch.setattr(tr, "PANEL3D_DRAG_ABSOLUTE_FLOOR", 0.0)
+    with_panel = evaluate_aerodynamic_trust(mesh_stats=_panel_stats(n_nonconvex=3), CD_nearfield=0.0,
+                                            **kw).to_dict()
+    assert with_panel == plain
+    assert "mesh_resolution" not in plain["factors"] and "mesh_adequacy" not in plain["factors"]
