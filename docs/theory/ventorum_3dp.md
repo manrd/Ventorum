@@ -158,7 +158,7 @@ The section planes are normal to the span, except the root section of a symmetri
 
 Plain control surfaces deflect the section geometry inside the specified span range using `ventorum.airfoil.flap.deflect_plain_flap`. Positive deflection rotates the trailing edge downward. Chordwise node distributions insert a node at the hinge line, preserving the geometric corner. Trailing-edge points rotate about the hinge line to floating-point roundoff.
 
-At the lateral spanwise boundaries of the control surface, the surface is discontinuous. The mesh inserts two spanwise stations at the same span station $y$, one deflected and one undeflected. A flat side closure strip connects the two curves, sealing the mesh to preserve watertightness. The side closure models no gap leakage flow.
+At a lateral spanwise boundary of the control surface that borders an undeflected part, the deflection changes linearly over a transition of 0.2 local chords centred on the boundary (default `control_edge="transition"`), so the surface stays continuous. With `control_edge="gap"`, and at a boundary between two deflected controls, the mesh inserts two spanwise stations at the same span station $y$, one deflected and one undeflected, and flat side panels close the gap between the two curves. The gap closure leaves a window of fluid between the two outlines near the trailing edge, and the flapped wing does not converge with spanwise refinement; the [controls page](panel3d_controls.md) gives the reasons. Neither closure models gap leakage flow.
 
 ### Mesh validation
 
@@ -469,7 +469,7 @@ The 3D panel method implementation is verified by tests in the test suite:
 - Symmetry plane and ground effect images (explicit mirror with the free-stream wake, Trefftz drag with images, bank and sideslip on a half mesh): `tests/test_panel3d_images.py`.
 - Iterative pressure Kutta condition (stored Morino run, asymmetric half mesh against the full mesh): `tests/test_panel3d_kutta.py`.
 - Mesh convergence and Richardson extrapolation: `tests/test_panel3d_convergence.py`.
-- Refinement regressions (open trailing edge with chordwise refinement, dihedral root strip with spanwise refinement): `tests/test_panel3d_refinement.py`.
+- Refinement regressions (open trailing edge with chordwise refinement, dihedral root strip with spanwise refinement): `tests/test_panel3d_refinement.py`; flapped wing with spanwise refinement: `tests/test_panel3d_controls.py`.
 - Solver family integration, settings, ground plane, strip map and trust scores: `tests/test_panel3d_factory.py`.
 - GPU pipeline parity (when CUDA is available): `tests/test_panel3d_gpu.py`.
 

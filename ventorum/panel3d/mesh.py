@@ -138,7 +138,14 @@ hinge to its rotated trailing edge, so no node falls beyond the trailing
 edge. The trailing-edge nodes use the exact rotated trailing-edge point, so
 a check of the rotation about the hinge line passes to round-off.
 
-At the side edges of a deflected control the mesh carries two spanwise
+Side edges of a control (``control_edge``). With "transition" (default)
+the deflection changes linearly over a spanwise transition centred on the
+side edge of the control, of width ``control_transition`` times the local
+chord. The builder adds a station at each end of the transition, and the
+stations inside it carry the deflection times the ramp factor. The
+surface stays continuous (a sealed edge, as the camber step of a vortex
+lattice), so there is no side face and no gap. With "gap" (and always at
+an edge between two deflected controls) the mesh carries two spanwise
 stations at the same y (one deflected, one undeflected). The nodes that
 the two sections share (forward of the hinge) are common. The gap between
 the two sections, in the plane of the station, is closed with flat side
@@ -147,7 +154,25 @@ outlines into simple lobes, and each lobe is triangulated (ear clipping),
 so each side panel is a plane convex triangle. A crossing node on a
 section outline also splits the adjacent surface panel into triangles, so
 the mesh stays watertight with no hanging node. The closure models no gap
-flow. Zero deflection gives the same mesh as before, bit for bit.
+flow.
+
+Why the transition: near the trailing edge of a side gap the two section
+outlines cross (a flap down puts the flap upper surface below the lower
+surface of the fixed part). The region between them in the station plane
+is a window of fluid that joins the flow under the fixed part to the flow
+over the flap. The potential difference across the window is of the order
+of the circulation, so the potential flow through the window is singular
+at its sharp edges, and the circulation of the strips next to the edge
+falls as the strips become narrower: CL falls and the induced drag rises
+with spanwise refinement. The two trailing-edge nodes of the gap are also
+not joined by a wake, so the two wake strips end in two full-strength
+trailing vortices. A side-edge wake (Maskew 1987 prescribes vortex
+separations at the flap edge) between the two trailing-edge nodes bounds
+the induced drag but does not stop the loss of lift; a wake panel over the
+window made the solution unstable. The sealed transition converges with
+spanwise refinement, and its converged result changes very little with the
+transition width (see ``tests/test_panel3d_controls.py``). Zero deflection
+gives the same mesh as before, bit for bit.
 
 Metadata for strip loads
 ------------------------
@@ -176,6 +201,7 @@ import numpy as np
 from ventorum.geometry.lattice import _surface_eta, resolve_spacing, surface_reference_line
 
 __all__ = [
+    "CONTROL_TRANSITION",
     "FOLD_MARGIN",
     "PanelMesh",
     "check_mesh",
@@ -210,8 +236,15 @@ _COS_ROOT_MIN = 1e-9
 #: positive value prevents a fold; 0.05 changes only the stations that
 #: fold or nearly fold. This is a method choice, not a tuned value.
 FOLD_MARGIN = 0.05
-#: Accepted values of the trailing-edge option.
+#: Default width of the deflection transition at the side edge of a
+#: control surface, as a fraction of the local chord [-]. The converged
+#: result changes very little with this width (see the module notes); a
+#: wider transition is resolved by fewer strips, so the spanwise sequence
+#: becomes monotonic at a coarser mesh. This is a method choice.
+CONTROL_TRANSITION = 0.2
+#: Accepted values of the trailing-edge and control-edge options.
 _TRAILING_EDGE_OPTIONS = ("close", "base")
+_CONTROL_EDGE_OPTIONS = ("transition", "gap")
 #: Bisection steps of the fold guard [-].
 _GUARD_STEPS = 60
 _XHAT = np.array([1.0, 0.0, 0.0])
@@ -447,6 +480,145 @@ def _edge_lists(eta_base: np.ndarray, controls: list) -> tuple[np.ndarray, list]
     etas.append(float(uniq[-1]))
     ctrls.append(seg_ctrl[-1])
     return np.array(etas, dtype=float), ctrls
+
+
+def _span_length_rate(surf, eta: float) -> float:
+    """Return the length of the reference line per unit span parameter at *eta* [m]."""
+    h = 1e-6
+    a = max(0.0, float(eta) - h)
+    b = min(1.0, float(eta) + h)
+    _, y_ref, z_ref = surface_reference_line(surf, np.array([a, b]))
+    return float(np.hypot(y_ref[1] - y_ref[0], z_ref[1] - z_ref[0])) / max(b - a, 1e-300)
+
+
+def _transition_edge_lists(
+    surf,
+    eta_base: np.ndarray,
+    controls: list,
+    chord_of,
+    width: float,
+) -> tuple[np.ndarray, list, np.ndarray]:
+    """Return the stations, their control and their deflection factor for sealed control edges.
+
+    At a side edge between a control and an undeflected part of the span,
+    the deflection changes linearly over a transition centred on the edge,
+    of spanwise length *width* times the local chord. Each end of a
+    transition becomes a station. The transition is not longer than the
+    control, does not reach past the root or the tip, and does not reach
+    into the transition of the next edge. At an edge between two deflected
+    controls the two stations at the same span parameter of
+    :func:`_edge_lists` stay (gap with side panels).
+
+    Parameters
+    ----------
+    surf : LiftingSurface
+        Surface definition.
+    eta_base : numpy.ndarray
+        Span parameters of the lattice stations [-].
+    controls : list
+        Controls with nonzero deflection.
+    chord_of : callable
+        Local chord [m] at a span parameter.
+    width : float
+        Transition length over the local chord [-].
+
+    Returns
+    -------
+    tuple
+        Span parameters of the stations [-] (increasing, duplicates at gap
+        edges), the control of each station (or None) and the deflection
+        factor of each station [-] (1 inside a control, 0 to 1 in a
+        transition).
+    """
+    tol = _CTRL_TOL
+
+    def neighbour(b: float, outside: float):
+        e = b + outside * 10.0 * tol
+        if e <= 0.0 or e >= 1.0:
+            return None
+        return _control_at_eta(e, controls)
+
+    # Boundaries: (eta, control, side) with side -1 at the start, +1 at the end.
+    bounds = []
+    for c in controls:
+        for b, sd in ((float(c.eta_start), -1.0), (float(c.eta_end), 1.0)):
+            if _ETA_MERGE_TOL < b < 1.0 - _ETA_MERGE_TOL:
+                bounds.append((b, c, sd))
+    gap_bounds = []
+    ramps = []
+    for b, c, sd in bounds:
+        other = neighbour(b, sd)
+        if other is not None and other is not c:
+            gap_bounds.append(b)
+        else:
+            ramps.append([b, c, sd, float(width) * float(chord_of(b)) / max(_span_length_rate(surf, b), 1e-300)])
+    # Limits of each ramp: inside the control, before the root or the tip,
+    # and before the transition or the gap of the next edge outside.
+    edges = sorted({b for b, _, _ in bounds} | {0.0, 1.0})
+    for r in ramps:
+        b, c, sd, w = r
+        span_c = float(c.eta_end) - float(c.eta_start)
+        w = min(w, span_c)
+        nxt = [e for e in edges if (e - b) * sd > _ETA_MERGE_TOL]
+        room = abs((min(nxt) if sd > 0 else max(nxt)) - b) if nxt else 0.0
+        end_room = (1.0 - b) if sd > 0 else b
+        # Up to the root or the tip the whole room is free; another edge
+        # shares the room with its own transition.
+        w = min(w, 2.0 * room if abs(room - end_room) <= _ETA_MERGE_TOL else room)
+        r[3] = max(w, 0.0)
+    ramps = [r for r in ramps if r[3] > _ETA_MERGE_TOL]
+    extra = []
+    for b, _, _, w in ramps:
+        extra.extend([b - 0.5 * w, b + 0.5 * w])
+    ramp_at = {}
+    for b, c, sd, w in ramps:
+        ramp_at[(id(c), sd)] = (b, w)
+
+    def factor(eta: float, c) -> float:
+        f = 1.0
+        for sd, b0 in ((-1.0, float(c.eta_start)), (1.0, float(c.eta_end))):
+            key = (id(c), sd)
+            if key in ramp_at:
+                b, w = ramp_at[key]
+                t = (eta - (b - 0.5 * w)) / w if sd < 0 else ((b + 0.5 * w) - eta) / w
+                f = min(f, min(max(t, 0.0), 1.0))
+            elif sd < 0 and eta < b0 - tol:
+                f = 0.0
+            elif sd > 0 and eta > b0 + tol:
+                f = 0.0
+        return f
+
+    def station_entry(eta: float, prefer=None):
+        best = (None, 0.0)
+        for c in controls:
+            if prefer is not None and c is not prefer:
+                continue
+            f = factor(eta, c)
+            if f > best[1]:
+                best = (c, f)
+        return best
+
+    uniq = _unique_sorted(list(np.asarray(eta_base, dtype=float).ravel()) + extra + gap_bounds)
+    gaps = _unique_sorted(gap_bounds) if gap_bounds else np.empty(0)
+    etas: list[float] = []
+    ctrls: list = []
+    facs: list[float] = []
+    for e in uniq:
+        e = float(e)
+        if gaps.size and np.min(np.abs(gaps - e)) <= _ETA_MERGE_TOL:
+            left = _control_at_eta(e - 10.0 * tol, controls)
+            right = _control_at_eta(e + 10.0 * tol, controls)
+            for c in (left, right):
+                c_e, f_e = station_entry(e, prefer=c) if c is not None else (None, 0.0)
+                etas.append(e)
+                ctrls.append(c_e)
+                facs.append(f_e)
+            continue
+        c_e, f_e = station_entry(e)
+        etas.append(e)
+        ctrls.append(c_e if f_e > 0.0 else None)
+        facs.append(f_e if f_e > 0.0 else 0.0)
+    return np.array(etas, dtype=float), ctrls, np.array(facs, dtype=float)
 
 
 def _coords_from_rows(xt: np.ndarray, yu: np.ndarray, yl: np.ndarray) -> np.ndarray:
@@ -1280,6 +1452,8 @@ def _mesh_with_controls(
     half: bool,
     scale_root_thickness: bool = True,
     trailing_edge: str = "close",
+    control_edge: str = "transition",
+    control_transition: float = CONTROL_TRANSITION,
     fold_guard: bool = True,
 ) -> PanelMesh:
     """Build a watertight mesh with deflected plain control surfaces."""
@@ -1300,7 +1474,13 @@ def _mesh_with_controls(
     symmetric = bool(getattr(surf, "is_symmetric", False))
     mirror = bool(getattr(surf, "mirror_y", False))
     eta_base = np.asarray(eta_base, dtype=float)
-    edge_etas, edge_ctrls = _edge_lists(eta_base, active)
+    if control_edge == "transition":
+        edge_etas, edge_ctrls, edge_factor = _transition_edge_lists(
+            surf, eta_base, active, lambda e: float(np.interp(e, fr, chords)), control_transition,
+        )
+    else:
+        edge_etas, edge_ctrls = _edge_lists(eta_base, active)
+        edge_factor = np.ones(edge_etas.size)
     ns = int(edge_etas.size)
     yu_base = _interp_rows(fr, yu_mat, edge_etas)
     yl_base = _interp_rows(fr, yl_mat, edge_etas)
@@ -1326,7 +1506,7 @@ def _mesh_with_controls(
 
     def station_rows(j: int, mirror_side: bool):
         ctrl = edge_ctrls[j]
-        delta = _right_delta_deg(ctrl, mirror_side)
+        delta = _right_delta_deg(ctrl, mirror_side) * float(edge_factor[j])
         return _deflected_station(xt_new, yu_base[j], yl_base[j], ctrl, delta)
 
     def section_rows(mirror_side: bool):
@@ -1490,6 +1670,8 @@ def mesh_lifting_surface(
     n_span=None,
     scale_root_thickness: bool = True,
     trailing_edge: str = "close",
+    control_edge: str = "transition",
+    control_transition: float = CONTROL_TRANSITION,
     fold_guard: bool = True,
 ) -> PanelMesh:
     """Build a closed quadrilateral mesh of one thick lifting surface.
@@ -1527,6 +1709,16 @@ def mesh_lifting_surface(
         thickness change of the module notes; "base" keeps the open edge
         with base panels and the wake at the upper corner (the former mesh;
         its results do not converge with chordwise refinement).
+    control_edge : str
+        "transition" (default) changes the deflection of a control linearly
+        over a spanwise transition centred on each side edge that borders
+        an undeflected part; "gap" keeps two stations at the same y with
+        flat side panels (the former mesh). An edge between two deflected
+        controls is always a gap.
+    control_transition : float
+        Length of the transition over the local chord [-] (default
+        ``CONTROL_TRANSITION``). It is shortened where the control, the
+        root, the tip or the next edge leave less room.
     fold_guard : bool
         True (default) turns a station plane toward the plane of its inboard
         neighbour when the two sections would cross (see the module notes);
@@ -1556,9 +1748,10 @@ def mesh_lifting_surface(
     the planes of a few stations next to the root or a dihedral break. The
     control deflection [rad] follows the VLM sign convention (positive
     trailing edge down on a horizontal surface). The chordwise stations
-    gain a node at each active hinge. Control side edges gain flat side
-    triangles between two stations at the same y [m]. Zero deflection keeps
-    the mesh bit for bit.
+    gain a node at each active hinge. A transition edge adds a station at
+    each end of the transition; a gap edge adds flat side triangles between
+    two stations at the same y [m]. Zero deflection keeps the mesh bit for
+    bit.
 
     At the root of a symmetric surface the section lies in the plane y = 0
     (the miter of the two halves). There a thickness t along the section
@@ -1576,6 +1769,11 @@ def mesh_lifting_surface(
         raise ValueError(f"Unknown tip {tip!r}; use 'flat' or 'none'.")
     if trailing_edge not in _TRAILING_EDGE_OPTIONS:
         raise ValueError(f"Unknown trailing_edge {trailing_edge!r}; use 'close' or 'base'.")
+    if control_edge not in _CONTROL_EDGE_OPTIONS:
+        raise ValueError(f"Unknown control_edge {control_edge!r}; use 'transition' or 'gap'.")
+    control_transition = float(control_transition)
+    if not np.isfinite(control_transition) or control_transition <= 0.0:
+        raise ValueError(f"control_transition must be positive, got {control_transition}.")
     secs = list(surf.sections)
     if len(secs) < 2:
         raise ValueError("A lifting surface needs at least two sections.")
@@ -1603,6 +1801,8 @@ def mesh_lifting_surface(
             surf, coord_sorted_c, fr_c, chords_c, twists_c, xt_new_c, eta_base_c, active, tip, half,
             scale_root_thickness=bool(scale_root_thickness),
             trailing_edge=trailing_edge,
+            control_edge=control_edge,
+            control_transition=control_transition,
             fold_guard=bool(fold_guard),
         )
 
@@ -1783,7 +1983,8 @@ def mesh_aircraft(
         every surface (default True).
     **kw
         Extra arguments of :func:`mesh_lifting_surface` (n_chord, n_span,
-        chord_spacing, tip, half, trailing_edge, fold_guard).
+        chord_spacing, tip, half, trailing_edge, control_edge,
+        control_transition, fold_guard).
 
     Returns
     -------
