@@ -4,21 +4,38 @@
 The mesh wraps a thick section around each lifting surface. Each spanwise
 station carries the true airfoil shape (upper surface, lower surface, blunt
 base at an open trailing edge, flat tip cap). The panels are plane
-quadrilaterals with outward corner order, and the trailing-edge strips carry
-the wake shedding edges for the solver.
+quadrilaterals (or triangles) with outward corner order, and the
+trailing-edge strips carry the wake shedding edges for the solver.
+
+Section placement
+-----------------
+Each spanwise station uses the frame of the Ventorum vortex-lattice builder
+(:mod:`ventorum.geometry.lattice`): the same leading-edge reference line,
+the same spanwise stations, and the same twist rotation about the local
+spanwise axis (the untwisted reference line in the y-z plane) through the
+quarter-chord point. The section lies in the plane spanned by the twisted
+chord direction and the section normal, which is the cross product of the
+untwisted chord direction (x) and the local spanwise axis, twisted with the
+chord. This normal is the normal of the lattice surface at that station
+(``z`` for a flat wing, ``-y`` for a vertical fin with the span up). So the
+section thickness follows the dihedral, and the leading-edge and
+trailing-edge nodes are the lattice points: the thin-surface limit matches
+the vortex lattice exactly. At the root of a symmetric surface the lattice
+uses the y axis as the twist axis, so the root section lies in the plane
+y = 0 with the normal z.
 
 Published sources
 -----------------
-* Hess, J. L. and Smith, A. M. O., 1964, Calculation of potential flow about
-  arbitrary bodies, Journal of Ship Research, Vol. 8 (quadrilateral
-  source-doublet panels on a closed body, outward normal convention).
-* Katz, J. and Plotkin, A., 1991, Low-Speed Aerodynamics, McGraw-Hill,
-  Chapters 11 and 12 (panel corner order, plane quadrilateral panels, signed
-  volume of a closed mesh).
-* Phillips, W. F. and Snyder, D. O., 2000, Modern adaptation of Prandtl's
-  classic lifting-line theory, Journal of Aircraft, Vol. 37 (twist rotation
-  about the quarter chord and the leading-edge reference line, shared here
-  with the lattice builder so the thin-surface limit matches the VLM exactly).
+* Hess, J. L. and Smith, A. M. O., 1964, Calculation of non-lifting
+  potential flow about arbitrary three-dimensional bodies, Journal of Ship
+  Research, Vol. 8, No. 2, pp. 22-44 (quadrilateral source panels on a
+  closed body, outward normal convention).
+* Hess, J. L. and Smith, A. M. O., 1967, Calculation of potential flow about
+  arbitrary bodies, Progress in Aeronautical Sciences, Vol. 8, pp. 1-138
+  (panel layout of closed bodies and lifting surfaces).
+* Katz, J. and Plotkin, A., 2001, Low-Speed Aerodynamics, 2nd ed., Cambridge
+  University Press, chapters 10 to 12 (panel corner order, plane
+  quadrilateral panels, signed volume of a closed mesh).
 * Glauert, H., 1926, The Elements of Aerofoil and Airscrew Theory, Cambridge
   University Press, Chapter VII (thin-airfoil theory of a hinged flap,
   flap effectiveness factor).
@@ -27,20 +44,40 @@ Published sources
   hinged aft portion of the section).
 * Abbott, I. H. and von Doenhoff, A. E., 1959, Theory of Wing Sections,
   Dover (airfoil section geometry used in the tests).
+* O'Rourke, J., 1998, Computational Geometry in C, 2nd ed., Cambridge
+  University Press, Chapter 1 (triangulation of a simple polygon by ear
+  clipping, used for the control side closures).
 
 Control surfaces
 ----------------
 A plain control surface deflects the section shapes inside its span range
 with ``ventorum.airfoil.flap.deflect_plain_flap`` at the control chord
 fraction and deflection. The sign follows the VLM controls: positive moves
-the trailing edge down on a horizontal surface. The chordwise resampling runs
-on the deflected shape with a node at the hinge on both surfaces. The
-trailing-edge nodes use the exact rotated trailing-edge point, so a check of
-the rotation about the hinge line passes to round-off. At the side edges of
-a deflected control the mesh carries two spanwise stations at the same y
-(one deflected, one undeflected); the strip between them is a flat side
-closure, so the mesh stays watertight. The closure models no gap flow.
-Zero deflection gives the same mesh as before, bit for bit.
+the trailing edge down on a horizontal surface. The chordwise resampling
+runs on the deflected shape with a node at the hinge on both surfaces. Aft
+of the hinge, the stations of each deflected surface are stretched from the
+hinge to its rotated trailing edge, so no node falls beyond the trailing
+edge. The trailing-edge nodes use the exact rotated trailing-edge point, so
+a check of the rotation about the hinge line passes to round-off.
+
+At the side edges of a deflected control the mesh carries two spanwise
+stations at the same y (one deflected, one undeflected). The nodes that
+the two sections share (forward of the hinge) are common. The gap between
+the two sections, in the plane of the station, is closed with flat side
+panels: the gap polygon is cut at the crossings of the two section
+outlines into simple lobes, and each lobe is triangulated (ear clipping),
+so each side panel is a plane convex triangle. A crossing node on a
+section outline also splits the adjacent surface panel into triangles, so
+the mesh stays watertight with no hanging node. The closure models no gap
+flow. Zero deflection gives the same mesh as before, bit for bit.
+
+Metadata for strip loads
+------------------------
+Each panel carries a spanwise strip index (``strip``), a chordwise index
+(``chord_index``) and a surface side (``side``: +1 upper, -1 lower, 0 for
+base, tip and side panels). Each node carries its spanwise station row
+(``node_station``). The panel order of a mesh with controls differs from
+the order of a plain mesh; use these fields, not the panel order.
 
 Coordinate conventions
 ----------------------
@@ -64,12 +101,23 @@ __all__ = ["PanelMesh", "check_mesh", "mesh_aircraft", "mesh_lifting_surface"]
 
 #: Trailing-edge gap over local chord below which the edge counts as sharp.
 _TE_GAP_TOL = 1e-6
-#: Tolerance [m] to merge a control boundary with an existing span station.
+#: Tolerance [-] to merge a control boundary with an existing span station.
 _ETA_MERGE_TOL = 1e-12
 #: Tolerance [-] to assign a span midpoint to a control range.
 _CTRL_TOL = 1e-9
+#: Distance [-] (fraction of the local chord) below which two nodes of the
+#: two stations of a control side edge are the same node.
+_NODE_MERGE_REL = 1e-9
+#: Parameter tolerance [-] of segment crossings in the side closure.
+_PARAM_TOL = 1e-9
+#: Half-mesh root edges: |y| below this fraction of the mesh size [-].
+_Y_ROOT_REL = 1e-9
+#: Outward: component volume above this fraction of its size cubed [-].
+_VOLUME_REL = 1e-8
+#: Default planarity limit of check_mesh: corner distance from the mean
+#: plane over the panel diameter [-].
+WARP_LIMIT = 0.05
 _XHAT = np.array([1.0, 0.0, 0.0])
-_ZHAT = np.array([0.0, 0.0, 1.0])
 
 
 @dataclass(slots=True)
@@ -86,7 +134,9 @@ class PanelMesh:
     component : numpy.ndarray
         Component index of each panel, shape (Np,).
     kind : numpy.ndarray
-        Panel kind codes, shape (Np,): "surface", "tip" or "base".
+        Panel kind codes, shape (Np,): "surface", "tip", "base" (blunt
+        trailing edge) or "side" (flat side closure at the span edge of a
+        deflected control surface).
     wake_edges : numpy.ndarray
         Wake shedding edges, shape (Nw, 4): upper trailing-edge panel index,
         lower trailing-edge panel index, node a, node b. Nodes a and b span
@@ -94,6 +144,27 @@ class PanelMesh:
         trailing edge is blunt).
     half : bool
         True for a right-half mesh only, open at y = 0 [m].
+    tip : str
+        Tip closure of the mesh builder: "flat" or "none" (open tips, only
+        for tests). :func:`check_mesh` accepts open tip edges only for "none".
+    strip : numpy.ndarray or None
+        Spanwise strip index of each panel, shape (Np,), -1 for tip and side
+        panels. A full symmetric surface numbers its strips from the left
+        tip to the right tip; a half mesh and a one-sided surface from the
+        root to the tip. :func:`mesh_aircraft` offsets the indices so that
+        they are unique over the mesh. None for meshes from other builders.
+    chord_index : numpy.ndarray or None
+        Chordwise index of each panel, shape (Np,): 0 at the leading edge
+        to n_c - 1 at the trailing edge on each surface (n_c includes the
+        hinge stations of controls), n_c for a base panel, -1 for tip and
+        side panels.
+    side : numpy.ndarray or None
+        Surface side of each panel, shape (Np,): +1 upper, -1 lower, 0 for
+        base, tip and side panels.
+    node_station : numpy.ndarray or None
+        Spanwise station row of each node, shape (Nn,). It increases along
+        the span; the smallest and the largest value of a component mark
+        its two ends (tips, or root and tip). Values are per component.
     """
 
     nodes: np.ndarray
@@ -102,6 +173,11 @@ class PanelMesh:
     kind: np.ndarray
     wake_edges: np.ndarray
     half: bool = False
+    tip: str = "flat"
+    strip: np.ndarray | None = None
+    chord_index: np.ndarray | None = None
+    side: np.ndarray | None = None
+    node_station: np.ndarray | None = None
 
 
 def _target_x(n_chord: int, chord_spacing: str) -> np.ndarray:
@@ -145,6 +221,40 @@ def _rotate_vecs(v: np.ndarray, axis: np.ndarray, angle: np.ndarray | float) -> 
     s = np.sin(ang)[:, None]
     kdv = np.sum(axis * v, axis=1)[:, None]
     return v * c + np.cross(axis, v) * s + axis * kdv * (1.0 - c)
+
+
+def _section_frames(axis: np.ndarray, twist: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Return the chord direction and the section normal of each station.
+
+    The chord direction is x twisted about the local spanwise axis. The
+    section normal is x cross the spanwise axis (the normal of the lattice
+    surface), twisted with the chord. A flat wing gives the normal z; a
+    vertical fin with the span up gives -y.
+
+    Parameters
+    ----------
+    axis : numpy.ndarray
+        Unit spanwise axes in the y-z plane, shape (n, 3).
+    twist : numpy.ndarray
+        Twist with incidence [rad], shape (n,).
+
+    Returns
+    -------
+    tuple of numpy.ndarray
+        Chord directions and section normals (unit vectors), shape (n, 3).
+    """
+    n = axis.shape[0]
+    cdir = _rotate_vecs(np.tile(_XHAT, (n, 1)), axis, twist)
+    ndir = _rotate_vecs(np.cross(np.tile(_XHAT, (n, 1)), axis), axis, twist)
+    return cdir, ndir
+
+
+def _flip_panel(row) -> list[int]:
+    """Return the panel with the opposite orientation, triangles kept as (a, b, c, c)."""
+    a, b, c, d = (int(v) for v in row)
+    if c == d:
+        return [a, c, b, b]
+    return [a, d, c, b]
 
 
 def _interp_rows(fr: np.ndarray, mat: np.ndarray, eta: np.ndarray) -> np.ndarray:
@@ -207,8 +317,8 @@ def _unique_sorted(vals: list[float]) -> np.ndarray:
 def _edge_lists(eta_base: np.ndarray, controls: list) -> tuple[np.ndarray, list]:
     """Return augmented edge stations and their control for one half.
 
-    Interior control boundaries appear twice at the same y [m]: the strip
-    between the pair is the flat side closure of the control edge.
+    Interior control boundaries appear twice at the same y [m]: the gap
+    between the pair is closed with flat side panels.
     """
     bounds: list[float] = []
     for c in controls:
@@ -262,55 +372,95 @@ def _right_delta_deg(ctrl, mirror_side: bool) -> float:
     return float(np.degrees(delta))
 
 
-def _deflected_rows_for_edges(
-    xt: np.ndarray,
-    yu_base: np.ndarray,
-    yl_base: np.ndarray,
-    edge_ctrls: list,
-    mirror_side: bool,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    """Return deflected ordinates and trailing-edge stations for edges.
+def _single_valued(surf: np.ndarray) -> np.ndarray:
+    """Return the surface points with increasing x [chord units].
 
-    Interior chordwise nodes stay at the target stations; the trailing-edge
-    nodes use the exact rotated trailing-edge point [chord units].
+    On the compressed side of a deflected flap the moved surface can start
+    forward of the hinge corner without a crossing of the fixed surface
+    (for example when the lower surface rises toward the trailing edge).
+    The moved points that lie forward of a point already kept are dropped,
+    so the surface is single valued in x for the chordwise resampling. The
+    shape changes only inside the small notch at the hinge.
+
+    Parameters
+    ----------
+    surf : numpy.ndarray
+        Surface points from the leading to the trailing edge [chord units],
+        shape (N, 2).
+
+    Returns
+    -------
+    numpy.ndarray
+        Points with strictly increasing x [chord units].
     """
+    keep = [0]
+    for i in range(1, surf.shape[0]):
+        if surf[i, 0] > surf[keep[-1], 0]:
+            keep.append(i)
+    return surf[keep]
+
+
+def _deflected_station(
+    xt: np.ndarray,
+    yu: np.ndarray,
+    yl: np.ndarray,
+    ctrl,
+    delta_deg: float,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Return the chordwise stations and ordinates of one station [chord units].
+
+    Forward of the hinge the stations stay at *xt*. Aft of the hinge the
+    stations of each deflected surface are stretched from the hinge to its
+    rotated trailing edge, so no station falls beyond the trailing edge.
+    The trailing-edge nodes use the exact rotated trailing-edge point.
+
+    Parameters
+    ----------
+    xt : numpy.ndarray
+        Chordwise stations [chord units], from 0 to 1, with the hinge station.
+    yu, yl : numpy.ndarray
+        Undeflected upper and lower ordinates at *xt* [chord units].
+    ctrl : ControlSurface or None
+        Control of the station.
+    delta_deg : float
+        Deflection [deg], positive trailing edge down.
+
+    Returns
+    -------
+    tuple of numpy.ndarray
+        (xu, zu, xl, zl): chordwise stations and ordinates of the upper and
+        the lower surface [chord units].
+    """
+    xt = np.asarray(xt, dtype=float)
+    if ctrl is None or delta_deg == 0.0:
+        return xt.copy(), np.array(yu, dtype=float), xt.copy(), np.array(yl, dtype=float)
     from ventorum.airfoil.flap import deflect_plain_flap, flap_hinge_point
 
-    xt = np.asarray(xt, dtype=float)
-    n_e = yu_base.shape[0]
-    yu_e = np.array(yu_base, dtype=float, copy=True)
-    yl_e = np.array(yl_base, dtype=float, copy=True)
-    xte_up = np.full(n_e, float(xt[-1]), dtype=float)
-    xte_lo = np.full(n_e, float(xt[-1]), dtype=float)
-    for j in range(n_e):
-        ctrl = edge_ctrls[j]
-        if ctrl is None:
-            continue
-        delta_deg = _right_delta_deg(ctrl, mirror_side)
-        if delta_deg == 0.0:
-            continue
-        xh = float(ctrl.hinge_x_c)
-        base = _coords_from_rows(xt, yu_base[j], yl_base[j])
-        hinge = flap_hinge_point(base, xh, 0.5)
-        theta = -float(np.radians(delta_deg))
-        cos_t = float(np.cos(theta))
-        sin_t = float(np.sin(theta))
-        moved = deflect_plain_flap(base, xh, delta_deg)
-        yu_new, yl_new = _resample_section(moved, xt)
-        yu_e[j, :-1] = yu_new[:-1]
-        yl_e[j, :-1] = yl_new[:-1]
-        for key in ("up", "lo"):
-            yb = float(yu_base[j, -1]) if key == "up" else float(yl_base[j, -1])
-            p = np.array([float(xt[-1]), yb])
-            d = p - hinge
-            q = hinge + np.array([cos_t * d[0] - sin_t * d[1], sin_t * d[0] + cos_t * d[1]])
-            if key == "up":
-                xte_up[j] = float(q[0])
-                yu_e[j, -1] = float(q[1])
-            else:
-                xte_lo[j] = float(q[0])
-                yl_e[j, -1] = float(q[1])
-    return yu_e, yl_e, xte_up, xte_lo
+    xh = float(ctrl.hinge_x_c)
+    base = _coords_from_rows(xt, yu, yl)
+    hinge = flap_hinge_point(base, xh, 0.5)
+    theta = -float(np.radians(delta_deg))
+    cos_t = float(np.cos(theta))
+    sin_t = float(np.sin(theta))
+    moved = deflect_plain_flap(base, xh, delta_deg)
+    up_d, lo_d = _split_selig(moved)
+    out = []
+    for surf_d, y_te in ((_single_valued(up_d), float(yu[-1])), (_single_valued(lo_d), float(yl[-1]))):
+        d = np.array([float(xt[-1]), y_te]) - hinge
+        q = hinge + np.array([cos_t * d[0] - sin_t * d[1], sin_t * d[0] + cos_t * d[1]])
+        xs = xt.copy()
+        aft = xt > xh
+        xs[aft] = xh + (xt[aft] - xh) * ((float(q[0]) - xh) / (float(xt[-1]) - xh))
+        zs = np.interp(xs, surf_d[:, 0], surf_d[:, 1])
+        xs[-1] = float(q[0])
+        zs[-1] = float(q[1])
+        out.append((xs, zs))
+    (xu, zu), (xl, zl) = out
+    # The leading edge stays fixed. The Selig polygon of the rows has one
+    # leading-edge point (the upper one), so keep both input ordinates there.
+    zu[0] = float(yu[0])
+    zl[0] = float(yl[0])
+    return xu, zu, xl, zl
 
 
 def _span_axes_for_edges(surf, eta_edges: np.ndarray) -> np.ndarray:
@@ -335,137 +485,218 @@ def _span_axes_for_edges(surf, eta_edges: np.ndarray) -> np.ndarray:
     return out
 
 
-def _frame_for_edges(surf, eta_edges: np.ndarray, fr: np.ndarray, chords: np.ndarray, twists: np.ndarray):
-    """Return chord, twist, quarter-chord, directions for edge stations."""
-    eta_edges = np.asarray(eta_edges, dtype=float)
-    chord_e = np.interp(eta_edges, fr, chords)
-    twist_e = np.interp(eta_edges, fr, twists) + float(surf.incidence)
-    x_ref, y_ref, z_ref = surface_reference_line(surf, eta_edges)
-    offset = np.asarray(surf.position, dtype=float).reshape(3)
-    le_flat = np.column_stack([x_ref, y_ref, z_ref]) + offset
-    axis = _span_axes_for_edges(surf, eta_edges)
-    cdir = _rotate_vecs(np.tile(_XHAT, (len(eta_edges), 1)), axis, twist_e)
-    zdir = _rotate_vecs(np.tile(_ZHAT, (len(eta_edges), 1)), axis, twist_e)
-    qc = le_flat + 0.25 * chord_e[:, None] * _XHAT
-    return chord_e, twist_e, le_flat, axis, cdir, zdir, qc
+# ---------------------------------------------------------------------------
+# Polygon helpers of the control side closures
+# ---------------------------------------------------------------------------
 
 
-def _nodes_panels_controls(
-    ns: int,
-    nc: int,
-    upper: np.ndarray,
-    lower: np.ndarray,
-    sharp: np.ndarray,
-    eta_edges: np.ndarray,
-    tip: str,
-) -> tuple[list, list, list, list, np.ndarray, np.ndarray, np.ndarray, np.ndarray, object]:
-    """Build nodes and panels for a control mesh with shared forward nodes.
+def _cross2(a: np.ndarray, b: np.ndarray) -> float:
+    """Return the z component of the 2D cross product a x b."""
+    return float(a[0] * b[1] - a[1] * b[0])
 
-    Stations at the same y [m] share node indices where the positions match
-    (forward of the hinge), and side strips skip chordwise panels with no
-    area. Wake edges use only strips with nonzero span.
+
+def _ear_clip(ids: list[int], xy: np.ndarray) -> list[tuple[int, int, int]]:
+    """Triangulate a simple polygon by ear clipping; keep its orientation.
+
+    Among the valid ears the one with the largest smallest angle is cut
+    first. An ear is valid when it is convex in the polygon orientation and
+    no other vertex is inside it or on its boundary (O'Rourke 1998,
+    chapter 1).
+
+    Parameters
+    ----------
+    ids : list of int
+        Node indices of the polygon in order.
+    xy : numpy.ndarray
+        Plane coordinates of the polygon vertices [m], shape (n, 2).
+
+    Returns
+    -------
+    list of tuple of int
+        Triangles as node index triples in the polygon orientation.
     """
-    nodes: list[np.ndarray] = []
-    station_of: list[int] = []
-
-    def add_node(p: np.ndarray, station: int) -> int:
-        nodes.append(np.asarray(p, dtype=float).reshape(3))
-        station_of.append(int(station))
-        return len(nodes) - 1
-
-    eta_edges = np.asarray(eta_edges, dtype=float)
-    uid = np.full((ns, nc + 1), -1, dtype=int)
-    lid = np.full((ns, nc + 1), -1, dtype=int)
-    for j in range(ns):
-        dup = j > 0 and abs(float(eta_edges[j]) - float(eta_edges[j - 1])) <= _ETA_MERGE_TOL
-        p_le = 0.5 * (upper[j, 0] + lower[j, 0])
-        if dup and float(np.linalg.norm(p_le - 0.5 * (upper[j - 1, 0] + lower[j - 1, 0]))) <= 1e-12:
-            uid[j, 0] = lid[j, 0] = uid[j - 1, 0]
-        else:
-            uid[j, 0] = lid[j, 0] = add_node(p_le, j)
-        for k in range(1, nc):
-            if dup and float(np.linalg.norm(upper[j, k] - upper[j - 1, k])) <= 1e-12:
-                uid[j, k] = uid[j - 1, k]
-            else:
-                uid[j, k] = add_node(upper[j, k], j)
-            if dup and float(np.linalg.norm(lower[j, k] - lower[j - 1, k])) <= 1e-12:
-                lid[j, k] = lid[j - 1, k]
-            else:
-                lid[j, k] = add_node(lower[j, k], j)
-        if sharp[j]:
-            p_te = 0.5 * (upper[j, nc] + lower[j, nc])
-            if dup and float(np.linalg.norm(p_te - 0.5 * (upper[j - 1, nc] + lower[j - 1, nc]))) <= 1e-12:
-                uid[j, nc] = lid[j, nc] = uid[j - 1, nc]
-            else:
-                uid[j, nc] = lid[j, nc] = add_node(p_te, j)
-        else:
-            if dup and float(np.linalg.norm(upper[j, nc] - upper[j - 1, nc])) <= 1e-12:
-                uid[j, nc] = uid[j - 1, nc]
-            else:
-                uid[j, nc] = add_node(upper[j, nc], j)
-            if dup and float(np.linalg.norm(lower[j, nc] - lower[j - 1, nc])) <= 1e-12:
-                lid[j, nc] = lid[j - 1, nc]
-            else:
-                lid[j, nc] = add_node(lower[j, nc], j)
-    panels: list[list[int]] = []
-    kinds: list[str] = []
-    up_pan = np.full((max(ns - 1, 0), nc), -1, dtype=int)
-    lo_pan = np.full((max(ns - 1, 0), nc), -1, dtype=int)
-
-    def add_panel(p1: int, p2: int, p3: int, p4: int, kind: str) -> int:
-        panels.append([int(p1), int(p2), int(p3), int(p4)])
-        kinds.append(kind)
-        return len(panels) - 1
-
-    for j in range(ns - 1):
-        for k in range(nc):
-            a1, a2, a3, a4 = int(uid[j, k]), int(uid[j, k + 1]), int(uid[j + 1, k + 1]), int(uid[j + 1, k])
-            if len({a1, a2, a3, a4}) >= 3 and not (a1 == a4 and a2 == a3):
-                up_pan[j, k] = add_panel(a1, a2, a3, a4, "surface")
-            b1, b2, b3, b4 = int(lid[j, k]), int(lid[j + 1, k]), int(lid[j + 1, k + 1]), int(lid[j, k + 1])
-            if len({b1, b2, b3, b4}) >= 3 and not (b1 == b2 and b3 == b4):
-                lo_pan[j, k] = add_panel(b1, b2, b3, b4, "surface")
-        if sharp[j] and sharp[j + 1]:
-            pass
-        else:
-            c1, c2, c3, c4 = int(uid[j, nc]), int(lid[j, nc]), int(lid[j + 1, nc]), int(uid[j + 1, nc])
-            if len({c1, c2, c3, c4}) >= 3:
-                add_panel(c1, c2, c3, c4, "base")
-
-    def add_cap(station: int, flip: bool) -> None:
-        """Flat cap of the airfoil loop at one spanwise station."""
-        u = uid[station]
-        v = lid[station]
-        if nc == 1:
-            q: list[tuple[int, int, int, int]] = [(u[0], u[1], v[1], v[1])]
-        else:
-            q = [(u[0], u[1], v[1], v[1])]
-            for k in range(1, nc - 1):
-                q.append((u[k], u[k + 1], v[k + 1], v[k]))
-            if sharp[station]:
-                q.append((u[nc - 1], u[nc], v[nc - 1], v[nc - 1]))
-            else:
-                q.append((u[nc - 1], u[nc], v[nc], v[nc - 1]))
-        for p1, p2, p3, p4 in q:
-            if len({int(p1), int(p2), int(p3), int(p4)}) < 3:
+    n = len(ids)
+    if n < 3:
+        return []
+    area2 = float(np.sum(xy[:, 0] * np.roll(xy[:, 1], -1) - np.roll(xy[:, 0], -1) * xy[:, 1]))
+    sgn = 1.0 if area2 >= 0.0 else -1.0
+    ext = float(np.max(np.ptp(xy, axis=0))) if n else 1.0
+    tol = 1e-14 * max(ext, 1e-300) ** 2
+    idx = list(range(n))
+    tris: list[tuple[int, int, int]] = []
+    while len(idx) > 3:
+        m = len(idx)
+        best = -1
+        best_q = -1.0
+        best_cr = -np.inf
+        best_cr_pos = 0
+        for pos in range(m):
+            i0, i1, i2 = idx[pos - 1], idx[pos], idx[(pos + 1) % m]
+            a, b, c = xy[i0], xy[i1], xy[i2]
+            cr = sgn * _cross2(b - a, c - b)
+            if cr > best_cr:
+                best_cr = cr
+                best_cr_pos = pos
+            if cr <= tol:
                 continue
-            if flip:
-                add_panel(p1, p4, p3, p2, "tip")
+            others = [idx[q] for q in range(m) if q not in ((pos - 1) % m, pos, (pos + 1) % m)]
+            if others:
+                p = xy[others]
+                s0 = sgn * ((b[0] - a[0]) * (p[:, 1] - a[1]) - (b[1] - a[1]) * (p[:, 0] - a[0]))
+                s1 = sgn * ((c[0] - b[0]) * (p[:, 1] - b[1]) - (c[1] - b[1]) * (p[:, 0] - b[0]))
+                s2 = sgn * ((a[0] - c[0]) * (p[:, 1] - c[1]) - (a[1] - c[1]) * (p[:, 0] - c[0]))
+                if np.any((s0 >= -tol) & (s1 >= -tol) & (s2 >= -tol)):
+                    continue
+            q = _min_angle(a, b, c)
+            if q > best_q:
+                best_q = q
+                best = pos
+        if best < 0:
+            best = best_cr_pos
+        m = len(idx)
+        tris.append((ids[idx[best - 1]], ids[idx[best]], ids[idx[(best + 1) % m]]))
+        del idx[best]
+    tris.append((ids[idx[0]], ids[idx[1]], ids[idx[2]]))
+    return tris
+
+
+def _min_angle(a: np.ndarray, b: np.ndarray, c: np.ndarray) -> float:
+    """Return the smallest interior angle [rad] of the triangle (a, b, c)."""
+    out = np.pi
+    for p, q, r in ((a, b, c), (b, c, a), (c, a, b)):
+        u = q - p
+        v = r - p
+        nu = float(np.hypot(u[0], u[1]))
+        nv = float(np.hypot(v[0], v[1]))
+        if nu <= 0.0 or nv <= 0.0:
+            return 0.0
+        cosang = float(np.clip((u[0] * v[0] + u[1] * v[1]) / (nu * nv), -1.0, 1.0))
+        out = min(out, float(np.arccos(cosang)))
+    return out
+
+
+def _split_lobes(poly: list[int]) -> list[list[int]]:
+    """Split a closed polygon with repeated nodes into simple lobes.
+
+    Each repeated node closes a lobe. The lobes keep the traversal order of
+    the polygon. Lobes with fewer than 3 nodes (folds) are dropped.
+    """
+    stack: list[int] = []
+    where: dict[int, int] = {}
+    lobes: list[list[int]] = []
+    for v in list(poly) + [poly[0]]:
+        if v in where:
+            i = where[v]
+            lobe = stack[i:]
+            for u in lobe[1:]:
+                where.pop(u, None)
+            stack = stack[: i + 1]
+            if len(lobe) >= 3:
+                lobes.append(lobe)
+        else:
+            where[v] = len(stack)
+            stack.append(v)
+    return lobes
+
+
+def _strip_triangles(p_chain: list[int], q_chain: list[int], pos: np.ndarray) -> list[list[int]]:
+    """Triangulate the polygon p_chain + reversed(q_chain) between two node chains.
+
+    The diagonal with the shorter length is chosen at each step. The
+    triangles keep the orientation of the polygon.
+    """
+    tris: list[list[int]] = []
+    i = 0
+    m = 0
+    n_p = len(p_chain) - 1
+    n_q = len(q_chain) - 1
+    while i < n_p or m < n_q:
+        if i == n_p:
+            tri = [p_chain[i], q_chain[m + 1], q_chain[m]]
+            m += 1
+        elif m == n_q:
+            tri = [p_chain[i], p_chain[i + 1], q_chain[m]]
+            i += 1
+        else:
+            d1 = float(np.linalg.norm(pos[p_chain[i + 1]] - pos[q_chain[m]]))
+            d2 = float(np.linalg.norm(pos[p_chain[i]] - pos[q_chain[m + 1]]))
+            if d1 <= d2:
+                tri = [p_chain[i], p_chain[i + 1], q_chain[m]]
+                i += 1
             else:
-                add_panel(p1, p2, p3, p4, "tip")
+                tri = [p_chain[i], q_chain[m + 1], q_chain[m]]
+                m += 1
+        if len(set(tri)) == 3:
+            tris.append([tri[0], tri[1], tri[2], tri[2]])
+    return tris
 
-    return nodes, station_of, panels, kinds, up_pan, lo_pan, uid, lid, add_cap
+
+def _polygon_panels(p_chain: list[int], q_chain: list[int], pos: np.ndarray) -> list[list[int]]:
+    """Return the panels of the polygon p_chain + reversed(q_chain).
+
+    Two plain chains (two nodes each) give one quadrilateral, or one
+    triangle when two corners are the same node. Chains with extra nodes
+    (crossing nodes of a side closure) give triangles.
+    """
+    if len(p_chain) == 2 and len(q_chain) == 2:
+        ring = [p_chain[0], p_chain[1], q_chain[1], q_chain[0]]
+        uniq: list[int] = []
+        for v in ring:
+            if not uniq or v != uniq[-1]:
+                uniq.append(v)
+        if len(uniq) > 1 and uniq[-1] == uniq[0]:
+            uniq.pop()
+        if len(set(uniq)) < 3:
+            return []
+        if len(uniq) == 4:
+            return [ring]
+        return [[uniq[0], uniq[1], uniq[2], uniq[2]]]
+    return _strip_triangles(p_chain, q_chain, pos)
 
 
-def _nodes_panels_half(
-    ns: int,
-    nc: int,
+def _build_station_mesh(
     upper: np.ndarray,
     lower: np.ndarray,
     sharp: np.ndarray,
-    tip: str,
-) -> tuple[list, list, list, np.ndarray, np.ndarray, np.ndarray, np.ndarray, list]:
-    """Build nodes, panels and wake edges for one side from 3D rows."""
+    eta: np.ndarray,
+    chord: np.ndarray,
+    origin: np.ndarray,
+    cdir: np.ndarray,
+    ndir: np.ndarray,
+    cap_first: bool,
+    cap_last: bool,
+) -> dict:
+    """Build nodes, panels, metadata and wake edges from station rows.
+
+    Consecutive stations with the same span parameter form a control side
+    edge. Their common nodes are shared, and the gap between the two
+    section outlines is closed with flat side triangles.
+
+    Parameters
+    ----------
+    upper, lower : numpy.ndarray
+        Node positions of the upper and the lower surface [m], shape
+        (ns, nc + 1, 3), from the leading to the trailing edge.
+    sharp : numpy.ndarray
+        Sharp trailing edge flag of each station, shape (ns,).
+    eta : numpy.ndarray
+        Span parameter of each station [-], shape (ns,), increasing.
+    chord : numpy.ndarray
+        Local chord of each station [m], shape (ns,).
+    origin, cdir, ndir : numpy.ndarray
+        Plane origin [m] and unit in-plane axes of each station, shape (ns, 3).
+    cap_first, cap_last : bool
+        Close the first (flipped) or the last station with a flat cap.
+
+    Returns
+    -------
+    dict
+        nodes, station_of, panels, kinds, strip, chord_index, side, wake and
+        n_strips.
+    """
+    ns = upper.shape[0]
+    nc = upper.shape[1] - 1
+    dup_next = [abs(float(eta[j + 1]) - float(eta[j])) <= _ETA_MERGE_TOL for j in range(ns - 1)]
     nodes: list[np.ndarray] = []
     station_of: list[int] = []
 
@@ -477,40 +708,183 @@ def _nodes_panels_half(
     uid = np.full((ns, nc + 1), -1, dtype=int)
     lid = np.full((ns, nc + 1), -1, dtype=int)
     for j in range(ns):
-        uid[j, 0] = lid[j, 0] = add_node(0.5 * (upper[j, 0] + lower[j, 0]), j)
+        cand: list[int] = []
+        if j > 0 and dup_next[j - 1]:
+            cand = sorted({int(v) for v in uid[j - 1]} | {int(v) for v in lid[j - 1]})
+        tol = _NODE_MERGE_REL * float(chord[j])
+
+        def node_for(p: np.ndarray, cand=cand, tol=tol, j=j) -> int:
+            for c in cand:
+                if float(np.linalg.norm(nodes[c] - p)) <= tol:
+                    return c
+            return add_node(p, j)
+
+        uid[j, 0] = lid[j, 0] = node_for(0.5 * (upper[j, 0] + lower[j, 0]))
         for k in range(1, nc):
-            uid[j, k] = add_node(upper[j, k], j)
-            lid[j, k] = add_node(lower[j, k], j)
+            uid[j, k] = node_for(upper[j, k])
+            lid[j, k] = node_for(lower[j, k])
         if sharp[j]:
-            uid[j, nc] = lid[j, nc] = add_node(0.5 * (upper[j, nc] + lower[j, nc]), j)
+            uid[j, nc] = lid[j, nc] = node_for(0.5 * (upper[j, nc] + lower[j, nc]))
         else:
-            uid[j, nc] = add_node(upper[j, nc], j)
-            lid[j, nc] = add_node(lower[j, nc], j)
+            uid[j, nc] = node_for(upper[j, nc])
+            lid[j, nc] = node_for(lower[j, nc])
+
+    # Extra nodes on station edges: key (station, "u" | "l" | "b", k) ->
+    # list of (parameter from the first to the second edge node, node id).
+    extras: dict[tuple[int, str, int], list[tuple[float, int]]] = {}
+    side_tris: list[list[int]] = []
+
+    def loop_of(j: int) -> tuple[list[int], list[tuple[str, int, bool]]]:
+        ring = [int(uid[j, k]) for k in range(nc + 1)]
+        edges: list[tuple[str, int, bool]] = [("u", k, True) for k in range(nc)]
+        if int(lid[j, nc]) != int(uid[j, nc]):
+            ring.append(int(lid[j, nc]))
+            edges.append(("b", nc, True))
+        for k in range(nc - 1, -1, -1):
+            ring.append(int(lid[j, k]))
+            edges.append(("l", k, False))
+        return ring, edges
+
+    for a in range(ns - 1):
+        if not dup_next[a]:
+            continue
+        b = a + 1
+        ring_a, edges_a = loop_of(a)
+        ring_b, edges_b = loop_of(b)
+        if len(ring_a) != len(ring_b):
+            raise RuntimeError("The two stations of a control side edge have different outlines.")
+        diff = [i for i in range(len(ring_a)) if ring_a[i] != ring_b[i]]
+        if not diff:
+            continue
+        i0 = diff[0] - 1
+        i1 = diff[-1] + 1
+        if i0 < 0 or i1 > len(ring_a) - 1:
+            raise RuntimeError("The two sections of a control side edge share no leading-edge node.")
+        chain_a = ring_a[i0: i1 + 1]
+        chain_b = ring_b[i0: i1 + 1]
+        seg_a = edges_a[i0: i1]
+        seg_b = edges_b[i0: i1]
+        pos3 = np.vstack(nodes)
+
+        def to2d(ids: list[int], a=a, pos3=pos3) -> np.ndarray:
+            rel = pos3[ids] - origin[a]
+            return np.column_stack([rel @ cdir[a], rel @ ndir[a]])
+
+        pa = to2d(chain_a)
+        pb = to2d(chain_b)
+        ins_a: list[dict[int, float]] = [dict() for _ in range(len(chain_a) - 1)]
+        ins_b: list[dict[int, float]] = [dict() for _ in range(len(chain_b) - 1)]
+        for i in range(len(chain_a) - 1):
+            ea = {chain_a[i], chain_a[i + 1]}
+            d = pa[i + 1] - pa[i]
+            for m in range(len(chain_b) - 1):
+                if ea & {chain_b[m], chain_b[m + 1]}:
+                    continue
+                e = pb[m + 1] - pb[m]
+                den = _cross2(d, e)
+                if abs(den) <= 1e-14 * float(np.linalg.norm(d)) * float(np.linalg.norm(e)):
+                    continue
+                w = pb[m] - pa[i]
+                t = _cross2(w, e) / den
+                u = _cross2(w, d) / den
+                if t < -_PARAM_TOL or t > 1.0 + _PARAM_TOL or u < -_PARAM_TOL or u > 1.0 + _PARAM_TOL:
+                    continue
+                end_a = t <= _PARAM_TOL or t >= 1.0 - _PARAM_TOL
+                end_b = u <= _PARAM_TOL or u >= 1.0 - _PARAM_TOL
+                if not end_a and not end_b:
+                    p3 = pos3[chain_a[i]] + t * (pos3[chain_a[i + 1]] - pos3[chain_a[i]])
+                    x_id = add_node(p3, a)
+                    pos3 = np.vstack([pos3, p3[None, :]])
+                    ins_a[i][x_id] = t
+                    ins_b[m][x_id] = u
+                elif end_a and not end_b:
+                    v_id = chain_a[i] if t <= 0.5 else chain_a[i + 1]
+                    ins_b[m].setdefault(v_id, u)
+                elif end_b and not end_a:
+                    v_id = chain_b[m] if u <= 0.5 else chain_b[m + 1]
+                    ins_a[i].setdefault(v_id, t)
+
+        def expand(chain, segs, ins, station):
+            out = [chain[0]]
+            for i in range(len(chain) - 1):
+                extra = sorted(ins[i].items(), key=lambda kv: kv[1])
+                out.extend(v for v, _ in extra)
+                out.append(chain[i + 1])
+                if extra:
+                    kind_e, k_e, forward = segs[i]
+                    lst = extras.setdefault((station, kind_e, k_e), [])
+                    for v, t in extra:
+                        lst.append((t if forward else 1.0 - t, v))
+            return out
+
+        full_a = expand(chain_a, seg_a, ins_a, a)
+        full_b = expand(chain_b, seg_b, ins_b, b)
+        poly = full_a + full_b[::-1][1:-1]
+        pos3 = np.vstack(nodes)
+        for lobe in _split_lobes(poly):
+            rel = pos3[lobe] - origin[a]
+            xy = np.column_stack([rel @ cdir[a], rel @ ndir[a]])
+            for t3 in _ear_clip(lobe, xy):
+                side_tris.append([t3[0], t3[1], t3[2], t3[2]])
+
+    pos3 = np.vstack(nodes)
+
+    def edge_chain(j: int, kind_e: str, k: int, first: int, second: int) -> list[int]:
+        extra = sorted(extras.get((j, kind_e, k), []), key=lambda tv: tv[0])
+        return [first] + [v for _, v in extra] + [second]
+
     panels: list[list[int]] = []
     kinds: list[str] = []
-    up_pan = np.full((max(ns - 1, 0), nc), -1, dtype=int)
-    lo_pan = np.full((max(ns - 1, 0), nc), -1, dtype=int)
+    strip_of: list[int] = []
+    chord_of: list[int] = []
+    side_of: list[int] = []
 
-    def add_panel(p1: int, p2: int, p3: int, p4: int, kind: str) -> int:
-        panels.append([int(p1), int(p2), int(p3), int(p4)])
-        kinds.append(kind)
-        return len(panels) - 1
+    def add(rows: list[list[int]], kind: str, s: int, k: int, sd: int, flip: bool = False) -> list[int]:
+        out = []
+        for r in rows:
+            panels.append(_flip_panel(r) if flip else [int(v) for v in r])
+            kinds.append(kind)
+            strip_of.append(s)
+            chord_of.append(k)
+            side_of.append(sd)
+            out.append(len(panels) - 1)
+        return out
 
+    wake: list[list[int]] = []
+    s = 0
     for j in range(ns - 1):
+        if dup_next[j]:
+            continue
+        up_te: list[int] = []
+        lo_te: list[int] = []
         for k in range(nc):
-            up_pan[j, k] = add_panel(uid[j, k], uid[j, k + 1], uid[j + 1, k + 1], uid[j + 1, k], "surface")
-            lo_pan[j, k] = add_panel(lid[j, k], lid[j + 1, k], lid[j + 1, k + 1], lid[j, k + 1], "surface")
-        if sharp[j] and sharp[j + 1]:
-            pass
-        else:
-            add_panel(uid[j, nc], lid[j, nc], lid[j + 1, nc], uid[j + 1, nc], "base")
+            p_u = edge_chain(j, "u", k, int(uid[j, k]), int(uid[j, k + 1]))
+            q_u = edge_chain(j + 1, "u", k, int(uid[j + 1, k]), int(uid[j + 1, k + 1]))
+            got_u = add(_polygon_panels(p_u, q_u, pos3), "surface", s, k, 1)
+            p_l = edge_chain(j, "l", k, int(lid[j, k]), int(lid[j, k + 1]))
+            q_l = edge_chain(j + 1, "l", k, int(lid[j + 1, k]), int(lid[j + 1, k + 1]))
+            got_l = add(_polygon_panels(p_l, q_l, pos3), "surface", s, k, -1, flip=True)
+            if k == nc - 1:
+                up_te, lo_te = got_u, got_l
+        if not (sharp[j] and sharp[j + 1]):
+            p_b = edge_chain(j, "b", nc, int(uid[j, nc]), int(lid[j, nc]))
+            q_b = edge_chain(j + 1, "b", nc, int(uid[j + 1, nc]), int(lid[j + 1, nc]))
+            add(_polygon_panels(p_b, q_b, pos3), "base", s, nc, 0)
+        ua, ub = int(uid[j, nc]), int(uid[j + 1, nc])
+        la, lb = int(lid[j, nc]), int(lid[j + 1, nc])
+        pu = [p for p in up_te if ua in panels[p] and ub in panels[p]]
+        pl = [p for p in lo_te if la in panels[p] and lb in panels[p]]
+        if pu and pl:
+            wake.append([pu[0], pl[0], ua, ub])
+        s += 1
+    n_strips = s
+    add(side_tris, "side", -1, -1, 0)
 
     def add_cap(station: int, flip: bool) -> None:
-        """Flat cap of the airfoil loop at one spanwise station."""
         u = uid[station]
         v = lid[station]
         if nc == 1:
-            q: list[tuple[int, int, int, int]] = [(u[0], u[1], v[1], v[1])]
+            q = [(u[0], u[1], v[1], v[1])]
         else:
             q = [(u[0], u[1], v[1], v[1])]
             for k in range(1, nc - 1):
@@ -519,13 +893,42 @@ def _nodes_panels_half(
                 q.append((u[nc - 1], u[nc], v[nc - 1], v[nc - 1]))
             else:
                 q.append((u[nc - 1], u[nc], v[nc], v[nc - 1]))
+        rows = []
         for p1, p2, p3, p4 in q:
-            if flip:
-                add_panel(p1, p4, p3, p2, "tip")
-            else:
-                add_panel(p1, p2, p3, p4, "tip")
+            ring = [int(p1), int(p2), int(p3), int(p4)]
+            if len(set(ring)) < 3:
+                continue
+            rows.append(ring)
+        add(rows, "tip", -1, -1, 0, flip=flip)
 
-    return nodes, station_of, panels, kinds, up_pan, lo_pan, uid, lid, add_cap
+    if cap_last:
+        add_cap(ns - 1, flip=False)
+    if cap_first:
+        add_cap(0, flip=True)
+    return {
+        "nodes": nodes,
+        "station_of": station_of,
+        "panels": panels,
+        "kinds": kinds,
+        "strip": strip_of,
+        "chord_index": chord_of,
+        "side": side_of,
+        "wake": wake,
+        "n_strips": n_strips,
+    }
+
+
+def _station_rows(qc, chord, cdir, ndir, xu, zu, xl, zl) -> tuple[np.ndarray, np.ndarray]:
+    """Return the 3D upper and lower rows of stations [m]."""
+    ns = qc.shape[0]
+    nc1 = xu.shape[1]
+    upper = np.empty((ns, nc1, 3))
+    lower = np.empty((ns, nc1, 3))
+    for j in range(ns):
+        for k in range(nc1):
+            upper[j, k] = qc[j] + chord[j] * ((xu[j, k] - 0.25) * cdir[j] + zu[j, k] * ndir[j])
+            lower[j, k] = qc[j] + chord[j] * ((xl[j, k] - 0.25) * cdir[j] + zl[j, k] * ndir[j])
+    return upper, lower
 
 
 def _mesh_with_controls(
@@ -562,184 +965,153 @@ def _mesh_with_controls(
     yl_base = _interp_rows(fr, yl_mat, edge_etas)
     sharp_base = np.abs(yu_base[:, -1] - yl_base[:, -1]) <= _TE_GAP_TOL
     has_asym = any(not bool(c.symmetric) for c in active)
+    if symmetric and has_asym and half:
+        raise ValueError(
+            "A half mesh (half=True) needs symmetric control deflections; "
+            "an antisymmetric control makes the geometry asymmetric about y = 0."
+        )
 
-    if symmetric and has_asym and not half:
-        yu_r, yl_r, xte_up_r, xte_lo_r = _deflected_rows_for_edges(xt_new, yu_base, yl_base, edge_ctrls, False)
-        yu_l, yl_l, xte_up_l, xte_lo_l = _deflected_rows_for_edges(xt_new, yu_base, yl_base, edge_ctrls, True)
-        merge_root = bool(
-            np.allclose(yu_r[0], yu_l[0], atol=0.0, rtol=0.0)
-            and np.allclose(yl_r[0], yl_l[0], atol=0.0, rtol=0.0)
-            and float(xte_up_r[0]) == float(xte_up_l[0])
-            and float(xte_lo_r[0]) == float(xte_lo_l[0])
+    chord_e = np.interp(edge_etas, fr, chords)
+    twist_e = np.interp(edge_etas, fr, twists) + float(surf.incidence)
+    x_ref, y_ref, z_ref = surface_reference_line(surf, edge_etas)
+    offset = np.asarray(surf.position, dtype=float).reshape(3)
+    le_e = np.column_stack([x_ref, y_ref, z_ref]) + offset
+    axis_e = _span_axes_for_edges(surf, edge_etas)
+    cdir_e, ndir_e = _section_frames(axis_e, twist_e)
+    qc_e = le_e + 0.25 * chord_e[:, None] * _XHAT
+
+    def section_rows(mirror_side: bool):
+        xu = np.empty((ns, nc + 1))
+        zu = np.empty((ns, nc + 1))
+        xl = np.empty((ns, nc + 1))
+        zl = np.empty((ns, nc + 1))
+        for j in range(ns):
+            ctrl = edge_ctrls[j]
+            delta = _right_delta_deg(ctrl, mirror_side)
+            xu[j], zu[j], xl[j], zl[j] = _deflected_station(xt_new, yu_base[j], yl_base[j], ctrl, delta)
+        return xu, zu, xl, zl
+
+    if symmetric and has_asym:
+        # Full mesh from the left tip to the right tip: the left side is the
+        # mirror image of the right side with the antisymmetric deflection.
+        rows_r = section_rows(False)
+        rows_l = section_rows(True)
+        flip_y = np.array([1.0, -1.0, 1.0])
+        merge_root = all(
+            np.array_equal(rows_r[i][0], rows_l[i][0]) for i in range(4)
         )
-        if merge_root:
-            left_keep = edge_etas[::-1][:-1]
-            full_abs = np.concatenate([left_keep, edge_etas])
-            full_signed = np.concatenate([-left_keep, edge_etas])
-        else:
-            full_abs = np.concatenate([edge_etas[::-1], edge_etas])
-            full_signed = np.concatenate([-edge_etas[::-1], edge_etas])
-        n_full = int(full_abs.size)
-        chord_full = np.interp(full_abs, fr, chords)
-        twist_full = np.interp(full_abs, fr, twists) + float(surf.incidence)
-        x_ref, y_ref, z_ref = surface_reference_line(surf, np.abs(full_abs))
-        y_ref = np.sign(full_signed) * np.abs(y_ref)
-        y_ref[np.abs(full_abs) <= _ETA_MERGE_TOL] = 0.0
-        offset = np.asarray(surf.position, dtype=float).reshape(3)
-        le_flat = np.column_stack([x_ref, y_ref, z_ref]) + offset
-        axis_r = _span_axes_for_edges(surf, edge_etas)
-        if merge_root:
-            axis_full = np.vstack([axis_r[::-1][:-1], axis_r])
-        else:
-            axis_full = np.vstack([axis_r[::-1], axis_r])
-        cdir = _rotate_vecs(np.tile(_XHAT, (n_full, 1)), axis_full, twist_full)
-        zdir = _rotate_vecs(np.tile(_ZHAT, (n_full, 1)), axis_full, twist_full)
-        qc = le_flat + 0.25 * chord_full[:, None] * _XHAT
-        if merge_root:
-            yu_full = np.vstack([yu_l[::-1][:-1], yu_r])
-            yl_full = np.vstack([yl_l[::-1][:-1], yl_r])
-            xte_up = np.concatenate([xte_up_l[::-1][:-1], xte_up_r])
-            xte_lo = np.concatenate([xte_lo_l[::-1][:-1], xte_lo_r])
-            sharp = np.concatenate([sharp_base[::-1][:-1], sharp_base])
-        else:
-            yu_full = np.vstack([yu_l[::-1], yu_r])
-            yl_full = np.vstack([yl_l[::-1], yl_r])
-            xte_up = np.concatenate([xte_up_l[::-1], xte_up_r])
-            xte_lo = np.concatenate([xte_lo_l[::-1], xte_lo_r])
-            sharp = np.concatenate([sharp_base[::-1], sharp_base])
-        upper = np.empty((n_full, nc + 1, 3))
-        lower = np.empty((n_full, nc + 1, 3))
-        for j in range(n_full):
-            for k in range(nc + 1):
-                if k < nc:
-                    xu = float(xt_new[k])
-                    xl = float(xt_new[k])
-                    yu = float(yu_full[j, k])
-                    yl = float(yl_full[j, k])
-                else:
-                    xu = float(xte_up[j])
-                    xl = float(xte_lo[j])
-                    yu = float(yu_full[j, k])
-                    yl = float(yl_full[j, k])
-                upper[j, k] = qc[j] + chord_full[j] * ((xu - 0.25) * cdir[j] + yu * zdir[j])
-                lower[j, k] = qc[j] + chord_full[j] * ((xl - 0.25) * cdir[j] + yl * zdir[j])
-        built = _nodes_panels_controls(n_full, nc, upper, lower, sharp, full_signed, tip)
-        nodes, station_of, panels, kinds, up_pan, lo_pan, uid, lid, add_cap = built
-        if tip == "flat":
-            add_cap(n_full - 1, flip=False)
-            add_cap(0, flip=True)
-        wake: list[list[int]] = []
-        for j in range(n_full - 1):
-            if abs(float(full_signed[j + 1]) - float(full_signed[j])) <= _ETA_MERGE_TOL:
-                continue
-            if int(up_pan[j, nc - 1]) < 0 or int(lo_pan[j, nc - 1]) < 0:
-                continue
-            wake.append([int(up_pan[j, nc - 1]), int(lo_pan[j, nc - 1]), int(uid[j, nc]), int(uid[j + 1, nc])])
-        node_arr = np.vstack(nodes)
-        panel_arr = np.array(panels, dtype=int)
-        wake_arr = np.array(wake, dtype=int).reshape(-1, 4)
-        return PanelMesh(
-            nodes=node_arr,
-            panels=panel_arr,
-            component=np.zeros(panel_arr.shape[0], dtype=int),
-            kind=np.array(kinds, dtype=str),
-            wake_edges=wake_arr,
-            half=False,
+        left = np.arange(ns)[::-1][:-1] if merge_root else np.arange(ns)[::-1]
+        right = np.arange(ns)
+        sel = np.concatenate([left, right])
+        is_left = np.concatenate([np.ones(left.size, dtype=bool), np.zeros(right.size, dtype=bool)])
+        n_full = sel.size
+        signed = np.where(is_left, -edge_etas[sel], edge_etas[sel])
+        qc = np.where(is_left[:, None], qc_e[sel] * flip_y, qc_e[sel])
+        cdir = np.where(is_left[:, None], cdir_e[sel] * flip_y, cdir_e[sel])
+        ndir = np.where(is_left[:, None], ndir_e[sel] * flip_y, ndir_e[sel])
+        chord_f = chord_e[sel]
+        xu = np.where(is_left[:, None], rows_l[0][sel], rows_r[0][sel])
+        zu = np.where(is_left[:, None], rows_l[1][sel], rows_r[1][sel])
+        xl = np.where(is_left[:, None], rows_l[2][sel], rows_r[2][sel])
+        zl = np.where(is_left[:, None], rows_l[3][sel], rows_r[3][sel])
+        upper, lower = _station_rows(qc, chord_f, cdir, ndir, xu, zu, xl, zl)
+        built = _build_station_mesh(
+            upper, lower, sharp_base[sel], signed, chord_f, qc, cdir, ndir,
+            cap_first=(tip == "flat"), cap_last=(tip == "flat"),
         )
+        return _finish_mesh(built, n_full, half=False, tip=tip, mirror_full=False, mirror_flip=False)
 
     mirror_side = bool(mirror and not symmetric)
-    yu_e, yl_e, xte_up, xte_lo = _deflected_rows_for_edges(xt_new, yu_base, yl_base, edge_ctrls, mirror_side)
-    chord_e, _, _, _, cdir, zdir, qc = _frame_for_edges(surf, edge_etas, fr, chords, twists)
-    sharp = np.abs(yu_base[:, -1] - yl_base[:, -1]) <= _TE_GAP_TOL
-    upper = np.empty((ns, nc + 1, 3))
-    lower = np.empty((ns, nc + 1, 3))
-    for j in range(ns):
-        for k in range(nc + 1):
-            if k < nc:
-                xu = float(xt_new[k])
-                xl = float(xt_new[k])
-                yu = float(yu_e[j, k])
-                yl = float(yl_e[j, k])
-            else:
-                xu = float(xte_up[j])
-                xl = float(xte_lo[j])
-                yu = float(yu_e[j, k])
-                yl = float(yl_e[j, k])
-            upper[j, k] = qc[j] + chord_e[j] * ((xu - 0.25) * cdir[j] + yu * zdir[j])
-            lower[j, k] = qc[j] + chord_e[j] * ((xl - 0.25) * cdir[j] + yl * zdir[j])
-    built = _nodes_panels_controls(ns, nc, upper, lower, sharp, edge_etas, tip)
-    nodes, station_of, panels, kinds, up_pan, lo_pan, uid, lid, add_cap = built
-    if tip == "flat":
-        add_cap(ns - 1, flip=False)
-        if not symmetric:
-            add_cap(0, flip=True)
-    wake = []
-    for j in range(ns - 1):
-        if abs(float(edge_etas[j + 1]) - float(edge_etas[j])) <= _ETA_MERGE_TOL:
-            continue
-        if int(up_pan[j, nc - 1]) < 0 or int(lo_pan[j, nc - 1]) < 0:
-            continue
-        wake.append([int(up_pan[j, nc - 1]), int(lo_pan[j, nc - 1]), int(uid[j, nc]), int(uid[j + 1, nc])])
-    right_n = len(nodes)
-    right_panels = list(panels)
-    right_kinds = list(kinds)
-    right_station = list(station_of)
-    up_left = np.full_like(up_pan, -1)
-    lo_left = np.full_like(lo_pan, -1)
-    if symmetric and not half:
+    xu, zu, xl, zl = section_rows(mirror_side)
+    upper, lower = _station_rows(qc_e, chord_e, cdir_e, ndir_e, xu, zu, xl, zl)
+    built = _build_station_mesh(
+        upper, lower, sharp_base, edge_etas, chord_e, qc_e, cdir_e, ndir_e,
+        cap_first=(tip == "flat" and not symmetric), cap_last=(tip == "flat"),
+    )
+    return _finish_mesh(
+        built, ns, half=bool(half and symmetric), tip=tip,
+        mirror_full=bool(symmetric and not half), mirror_flip=bool(mirror and not symmetric),
+    )
+
+
+def _finish_mesh(built: dict, ns: int, half: bool, tip: str, mirror_full: bool, mirror_flip: bool) -> PanelMesh:
+    """Mirror a one-sided build when needed and return the PanelMesh.
+
+    Parameters
+    ----------
+    built : dict
+        Output of :func:`_build_station_mesh`.
+    ns : int
+        Number of station rows of the build.
+    half : bool
+        Half mesh flag of the result.
+    tip : str
+        Tip closure mode.
+    mirror_full : bool
+        Add the mirror image about y = 0 (stations > 0 mirrored, root shared).
+    mirror_flip : bool
+        Replace the build by its mirror image about y = 0.
+
+    Returns
+    -------
+    PanelMesh
+        Mesh with metadata.
+    """
+    nodes = [np.asarray(p, dtype=float) for p in built["nodes"]]
+    station = list(built["station_of"])
+    panels = [list(r) for r in built["panels"]]
+    kinds = list(built["kinds"])
+    strip = list(built["strip"])
+    chord_i = list(built["chord_index"])
+    side = list(built["side"])
+    wake = [list(w) for w in built["wake"]]
+    n_s = int(built["n_strips"])
+    if mirror_full:
+        right_n = len(nodes)
         index_map = np.full(right_n, -1, dtype=int)
+        node_station = []
         for i in range(right_n):
-            if right_station[i] == 0:
+            node_station.append(ns - 1 + station[i])
+        for i in range(right_n):
+            if station[i] == 0:
                 index_map[i] = i
             else:
-                p = np.asarray(nodes[i], dtype=float).copy()
+                p = nodes[i].copy()
                 p[1] = -p[1]
                 nodes.append(p)
-                station_of.append(right_station[i])
+                node_station.append(ns - 1 - station[i])
                 index_map[i] = len(nodes) - 1
-        for pi, quad in enumerate(right_panels):
-            p1, p2, p3, p4 = quad
-            panels.append([int(index_map[p1]), int(index_map[p4]), int(index_map[p3]), int(index_map[p2])])
-            kinds.append(right_kinds[pi])
-        left_of = {}
-        shift = len(right_panels)
-        for offset, pi in enumerate(range(len(right_panels))):
-            left_of[pi] = shift + offset
-        for j in range(ns - 1):
-            for k in range(nc):
-                up_left[j, k] = left_of[int(up_pan[j, k])] if int(up_pan[j, k]) >= 0 else -1
-                lo_left[j, k] = left_of[int(lo_pan[j, k])] if int(lo_pan[j, k]) >= 0 else -1
-        for j in range(ns - 1):
-            if abs(float(edge_etas[j + 1]) - float(edge_etas[j])) <= _ETA_MERGE_TOL:
-                continue
-            if int(up_left[j, nc - 1]) < 0 or int(lo_left[j, nc - 1]) < 0:
-                continue
-            wake.append([
-                int(up_left[j, nc - 1]),
-                int(lo_left[j, nc - 1]),
-                int(index_map[int(uid[j, nc])]),
-                int(index_map[int(uid[j + 1, nc])]),
-            ])
-        half_flag = False
-    elif mirror and not symmetric:
-        for i in range(right_n):
-            p = np.asarray(nodes[i], dtype=float).copy()
-            p[1] = -p[1]
-            nodes[i] = p
-        panels = [[q[0], q[3], q[2], q[1]] for q in panels]
-        half_flag = False
+        n_right = len(panels)
+        for pi in range(n_right):
+            panels.append(_flip_panel([index_map[v] for v in panels[pi]]))
+            kinds.append(kinds[pi])
+            chord_i.append(chord_i[pi])
+            side.append(side[pi])
+            strip.append(n_s - 1 - strip[pi] if strip[pi] >= 0 else -1)
+        for pi in range(n_right):
+            if strip[pi] >= 0:
+                strip[pi] = n_s + strip[pi]
+        for w in list(wake):
+            wake.append([w[0] + n_right, w[1] + n_right, int(index_map[w[2]]), int(index_map[w[3]])])
     else:
-        half_flag = bool(half and symmetric)
-    node_arr = np.vstack(nodes)
-    panel_arr = np.array(panels, dtype=int)
-    wake_arr = np.array(wake, dtype=int).reshape(-1, 4)
+        node_station = list(station)
+        if mirror_flip:
+            for p in nodes:
+                p[1] = -p[1]
+            panels = [_flip_panel(r) for r in panels]
+    panel_arr = np.array(panels, dtype=int).reshape(-1, 4)
     return PanelMesh(
-        nodes=node_arr,
+        nodes=np.vstack(nodes),
         panels=panel_arr,
         component=np.zeros(panel_arr.shape[0], dtype=int),
         kind=np.array(kinds, dtype=str),
-        wake_edges=wake_arr,
-        half=half_flag,
+        wake_edges=np.array(wake, dtype=int).reshape(-1, 4),
+        half=bool(half),
+        tip=str(tip),
+        strip=np.array(strip, dtype=int),
+        chord_index=np.array(chord_i, dtype=int),
+        side=np.array(side, dtype=int),
+        node_station=np.array(node_station, dtype=int),
     )
 
 
@@ -777,17 +1149,27 @@ def mesh_lifting_surface(
     Returns
     -------
     PanelMesh
-        Closed mesh with outward panels and wake shedding edges. When the
-        surface carries control surfaces with nonzero deflection [rad], the
-        sections inside each control range use the deflected shape.
+        Closed mesh with outward panels, wake shedding edges and the strip
+        metadata (``strip``, ``chord_index``, ``side``, ``node_station``).
+        When the surface carries control surfaces with nonzero deflection
+        [rad], the sections inside each control range use the deflected
+        shape.
+
+    Raises
+    ------
+    ValueError
+        For bad inputs, and for ``half=True`` with an antisymmetric control
+        deflection on a symmetric surface.
 
     Notes
     -----
-    The control deflection [rad] follows the VLM sign convention (positive
-    trailing edge down on a horizontal surface). The chordwise stations gain
-    a node at each active hinge. Control side edges gain a flat side closure
-    between two stations at the same y [m]. Zero deflection keeps the mesh
-    bit for bit.
+    Each section lies in the plane of the local chord direction and the
+    local section normal (the normal of the lattice surface at the station),
+    so the section thickness follows the dihedral. The control deflection
+    [rad] follows the VLM sign convention (positive trailing edge down on a
+    horizontal surface). The chordwise stations gain a node at each active
+    hinge. Control side edges gain flat side triangles between two stations
+    at the same y [m]. Zero deflection keeps the mesh bit for bit.
     """
     surf = surface
     n_chord = int(n_chord)
@@ -860,8 +1242,7 @@ def mesh_lifting_surface(
     axis /= np.maximum(np.linalg.norm(axis, axis=1, keepdims=True), 1e-300)
     if surf.is_symmetric:
         axis[eta_e <= 1e-12] = np.array([0.0, 1.0, 0.0])
-    cdir = _rotate_vecs(np.tile(_XHAT, (ns, 1)), axis, twist_e)
-    zdir = _rotate_vecs(np.tile(_ZHAT, (ns, 1)), axis, twist_e)
+    cdir, ndir = _section_frames(axis, twist_e)
     qc = le_flat + 0.25 * chord_e[:, None] * _XHAT
     yu_e = _interp_rows(fr, yu_mat, eta_e)
     yl_e = _interp_rows(fr, yl_mat, eta_e)
@@ -869,8 +1250,8 @@ def mesh_lifting_surface(
     upper = np.empty((ns, nc1, 3))
     lower = np.empty((ns, nc1, 3))
     for j in range(ns):
-        upper[j] = qc[j] + chord_e[j] * ((xt - 0.25)[:, None] * cdir[j] + yu_e[j][:, None] * zdir[j])
-        lower[j] = qc[j] + chord_e[j] * ((xt - 0.25)[:, None] * cdir[j] + yl_e[j][:, None] * zdir[j])
+        upper[j] = qc[j] + chord_e[j] * ((xt - 0.25)[:, None] * cdir[j] + yu_e[j][:, None] * ndir[j])
+        lower[j] = qc[j] + chord_e[j] * ((xt - 0.25)[:, None] * cdir[j] + yl_e[j][:, None] * ndir[j])
     sharp = np.abs(yu_e[:, -1] - yl_e[:, -1]) <= _TE_GAP_TOL
 
     nodes: list[np.ndarray] = []
@@ -896,22 +1277,28 @@ def mesh_lifting_surface(
 
     panels: list[list[int]] = []
     kinds: list[str] = []
+    strip_of: list[int] = []
+    chord_of: list[int] = []
+    side_of: list[int] = []
     up_pan = np.full((ns - 1, n_chord), -1, dtype=int)
     lo_pan = np.full((ns - 1, n_chord), -1, dtype=int)
 
-    def add_panel(p1: int, p2: int, p3: int, p4: int, kind: str) -> int:
-        panels.append([int(p1), int(p2), int(p3), int(p4)])
+    def add_panel(row: list[int], kind: str, s: int, k: int, sd: int) -> int:
+        panels.append([int(v) for v in row])
         kinds.append(kind)
+        strip_of.append(s)
+        chord_of.append(k)
+        side_of.append(sd)
         return len(panels) - 1
 
     for j in range(ns - 1):
         for k in range(n_chord):
-            up_pan[j, k] = add_panel(uid[j, k], uid[j, k + 1], uid[j + 1, k + 1], uid[j + 1, k], "surface")
-            lo_pan[j, k] = add_panel(lid[j, k], lid[j + 1, k], lid[j + 1, k + 1], lid[j, k + 1], "surface")
+            up_pan[j, k] = add_panel([uid[j, k], uid[j, k + 1], uid[j + 1, k + 1], uid[j + 1, k]], "surface", j, k, 1)
+            lo_pan[j, k] = add_panel([lid[j, k], lid[j + 1, k], lid[j + 1, k + 1], lid[j, k + 1]], "surface", j, k, -1)
         if sharp[j] and sharp[j + 1]:
             pass
         else:
-            add_panel(uid[j, n_chord], lid[j, n_chord], lid[j + 1, n_chord], uid[j + 1, n_chord], "base")
+            add_panel([uid[j, n_chord], lid[j, n_chord], lid[j + 1, n_chord], uid[j + 1, n_chord]], "base", j, n_chord, 0)
 
     def add_cap(station: int, flip: bool) -> None:
         """Flat cap of the airfoil loop at one spanwise station."""
@@ -927,11 +1314,8 @@ def mesh_lifting_surface(
                 q.append((u[n_chord - 1], u[n_chord], v[n_chord - 1], v[n_chord - 1]))
             else:
                 q.append((u[n_chord - 1], u[n_chord], v[n_chord], v[n_chord - 1]))
-        for p1, p2, p3, p4 in q:
-            if flip:
-                add_panel(p1, p4, p3, p2, "tip")
-            else:
-                add_panel(p1, p2, p3, p4, "tip")
+        for row in q:
+            add_panel(_flip_panel(row) if flip else list(row), "tip", -1, -1, 0)
 
     symmetric = bool(surf.is_symmetric)
     if tip == "flat":
@@ -943,66 +1327,21 @@ def mesh_lifting_surface(
     for j in range(ns - 1):
         wake.append([int(up_pan[j, n_chord - 1]), int(lo_pan[j, n_chord - 1]), int(uid[j, n_chord]), int(uid[j + 1, n_chord])])
 
-    right_n = len(nodes)
-    right_panels = list(panels)
-    right_kinds = list(kinds)
-    right_station = list(station_of)
-    up_left = np.full_like(up_pan, -1)
-    lo_left = np.full_like(lo_pan, -1)
-
+    built = {
+        "nodes": nodes,
+        "station_of": station_of,
+        "panels": panels,
+        "kinds": kinds,
+        "strip": strip_of,
+        "chord_index": chord_of,
+        "side": side_of,
+        "wake": wake,
+        "n_strips": ns - 1,
+    }
     mirror = bool(getattr(surf, "mirror_y", False))
-    if symmetric and not half:
-        index_map = np.full(right_n, -1, dtype=int)
-        for i in range(right_n):
-            if right_station[i] == 0:
-                index_map[i] = i
-            else:
-                p = np.asarray(nodes[i], dtype=float).copy()
-                p[1] = -p[1]
-                nodes.append(p)
-                station_of.append(right_station[i])
-                index_map[i] = len(nodes) - 1
-        for pi, quad in enumerate(right_panels):
-            p1, p2, p3, p4 = quad
-            panels.append([int(index_map[p1]), int(index_map[p4]), int(index_map[p3]), int(index_map[p2])])
-            kinds.append(right_kinds[pi])
-        # Map left panel indices by rebuilding the same order: upper row then lower row per strip.
-        left_of = {}
-        shift = len(right_panels)
-        for offset, pi in enumerate(range(len(right_panels))):
-            left_of[pi] = shift + offset
-        for j in range(ns - 1):
-            for k in range(n_chord):
-                up_left[j, k] = left_of[int(up_pan[j, k])]
-                lo_left[j, k] = left_of[int(lo_pan[j, k])]
-        for j in range(ns - 1):
-            wake.append([
-                int(up_left[j, n_chord - 1]),
-                int(lo_left[j, n_chord - 1]),
-                int(index_map[int(uid[j, n_chord])]),
-                int(index_map[int(uid[j + 1, n_chord])]),
-            ])
-        half_flag = False
-    elif mirror and not symmetric:
-        for i in range(right_n):
-            p = np.asarray(nodes[i], dtype=float).copy()
-            p[1] = -p[1]
-            nodes[i] = p
-        panels = [[q[0], q[3], q[2], q[1]] for q in panels]
-        half_flag = False
-    else:
-        half_flag = bool(half and symmetric)
-
-    node_arr = np.vstack(nodes)
-    panel_arr = np.array(panels, dtype=int)
-    wake_arr = np.array(wake, dtype=int).reshape(-1, 4)
-    return PanelMesh(
-        nodes=node_arr,
-        panels=panel_arr,
-        component=np.zeros(panel_arr.shape[0], dtype=int),
-        kind=np.array(kinds, dtype=str),
-        wake_edges=wake_arr,
-        half=half_flag,
+    return _finish_mesh(
+        built, ns, half=bool(half and symmetric), tip=tip,
+        mirror_full=bool(symmetric and not half), mirror_flip=bool(mirror and not symmetric),
     )
 
 
@@ -1023,7 +1362,9 @@ def mesh_aircraft(aircraft, section_coords_by_surface, **kw) -> PanelMesh:
     Returns
     -------
     PanelMesh
-        Combined mesh with one component index per surface.
+        Combined mesh with one component index per surface. Strip indices
+        are offset so that they are unique over the mesh; node stations
+        stay per component.
     """
     surfs = list(aircraft.surfaces)
     if isinstance(section_coords_by_surface, dict):
@@ -1046,8 +1387,13 @@ def mesh_aircraft(aircraft, section_coords_by_surface, **kw) -> PanelMesh:
     kind_parts = []
     comp_parts = []
     wake_parts = []
+    strip_parts = []
+    chord_parts = []
+    side_parts = []
+    station_parts = []
     n_nodes = 0
     n_panels = 0
+    n_strips = 0
     half_all = True
     for i, (s, c) in enumerate(zip(surfs, coord_list)):
         sub = mesh_lifting_surface(s, c, **kw)
@@ -1060,6 +1406,12 @@ def mesh_aircraft(aircraft, section_coords_by_surface, **kw) -> PanelMesh:
             w[:, 0:2] += n_panels
             w[:, 2:4] += n_nodes
         wake_parts.append(w.reshape(-1, 4))
+        st = np.asarray(sub.strip, dtype=int)
+        strip_parts.append(np.where(st >= 0, st + n_strips, -1))
+        chord_parts.append(np.asarray(sub.chord_index, dtype=int))
+        side_parts.append(np.asarray(sub.side, dtype=int))
+        station_parts.append(np.asarray(sub.node_station, dtype=int))
+        n_strips += int(np.max(st)) + 1 if np.any(st >= 0) else 0
         n_nodes += int(np.asarray(sub.nodes).shape[0])
         n_panels += int(np.asarray(sub.panels).shape[0])
         half_all = half_all and bool(sub.half)
@@ -1070,11 +1422,16 @@ def mesh_aircraft(aircraft, section_coords_by_surface, **kw) -> PanelMesh:
         kind=np.concatenate(kind_parts),
         wake_edges=np.vstack(wake_parts).reshape(-1, 4),
         half=bool(half_all and len(surfs) > 0),
+        tip=str(kw.get("tip", "flat")),
+        strip=np.concatenate(strip_parts),
+        chord_index=np.concatenate(chord_parts),
+        side=np.concatenate(side_parts),
+        node_station=np.concatenate(station_parts),
     )
 
 
-def _panel_geometry(p: np.ndarray) -> tuple[float, np.ndarray, float, float, float]:
-    """Area [m^2], unit normal, aspect ratio, skew and warp of one panel."""
+def _panel_geometry(p: np.ndarray) -> tuple[float, np.ndarray, float, float, float, bool]:
+    """Area [m^2], unit normal, aspect ratio, skew, warp and convexity of one panel."""
     p1, p2, p3, p4 = (np.asarray(q, dtype=float).reshape(3) for q in p)
     n = np.cross(p3 - p1, p4 - p2)
     n_norm = float(np.linalg.norm(n))
@@ -1107,7 +1464,7 @@ def _panel_geometry(p: np.ndarray) -> tuple[float, np.ndarray, float, float, flo
         na = float(np.linalg.norm(a))
         nb = float(np.linalg.norm(b))
         if na > 0.0 and nb > 0.0:
-            skew = max(skew, abs(float(np.dot(a, b)) / (na * nb)))
+            skew = max(skew, abs(float(np.dot(a, b))) / (na * nb))
     pts = np.vstack(loop)
     diam = 0.0
     for i in range(len(pts)):
@@ -1118,25 +1475,47 @@ def _panel_geometry(p: np.ndarray) -> tuple[float, np.ndarray, float, float, flo
         warp = float(np.max(np.abs((pts - mean) @ unit)) / diam)
     else:
         warp = 0.0
-    return area, unit, aspect, float(skew), float(warp)
+    # Convexity in the mean plane: every corner turns the same way as the normal.
+    convex = m >= 3 and diam > 0.0 and float(np.linalg.norm(unit)) > 0.0
+    if convex:
+        tol = 1e-12 * diam * diam
+        for i in range(m):
+            turn = float(np.dot(np.cross(loop[i] - loop[i - 1], loop[(i + 1) % m] - loop[i]), unit))
+            if turn < -tol:
+                convex = False
+                break
+    return area, unit, aspect, float(skew), float(warp), bool(convex)
 
 
-def check_mesh(mesh: PanelMesh) -> dict:
+def check_mesh(mesh: PanelMesh, warp_limit: float = WARP_LIMIT) -> dict:
     """Check closure, orientation and quality of a panel mesh.
 
     Parameters
     ----------
     mesh : PanelMesh
         Mesh to check.
+    warp_limit : float
+        Planarity limit [-]: largest allowed distance of a corner from the
+        mean plane of its panel over the panel diameter.
 
     Returns
     -------
     dict
-        watertight (every edge is shared by exactly two panels, except the
-        root edges of a half mesh and the open tip of tip "none"), outward
-        (positive signed volume), volume [m^3], min_area [m^2], per-panel
-        aspect_ratio, skew and warp arrays with their max values, and
-        n_open_edges.
+        watertight : every edge is shared by exactly two panels, except the
+        root edges of a half mesh (both nodes on y = 0 within a relative
+        tolerance) and the edges of the end stations when ``mesh.tip`` is
+        "none" (needs ``mesh.node_station``).
+        orientation_consistent : the two panels of each shared edge run
+        along it in opposite directions.
+        outward : orientation consistent and the signed volume of each
+        component above a relative tolerance.
+        volume [m^3] (sum over components) and component_volume [m^3] per
+        component.
+        min_area [m^2]; per-panel aspect_ratio, skew, warp and convex
+        arrays with max_aspect_ratio, max_skew, max_warp and n_nonconvex.
+        planar : max_warp below *warp_limit*.
+        valid_panels : all panels convex, planar and with positive area.
+        n_open_edges : number of edges used by one panel only.
     """
     nodes = np.asarray(mesh.nodes, dtype=float)
     panels = np.asarray(mesh.panels, dtype=int)
@@ -1145,15 +1524,20 @@ def check_mesh(mesh: PanelMesh) -> dict:
     aspects = np.empty(n_p)
     skews = np.empty(n_p)
     warps = np.empty(n_p)
-    volume = 0.0
+    convex = np.empty(n_p, dtype=bool)
+    comp_raw = np.asarray(mesh.component).reshape(-1)
+    comp_of = comp_raw.astype(int) if comp_raw.shape[0] == n_p else np.zeros(n_p, dtype=int)
+    comp_ids = sorted({int(c) for c in comp_of})
+    comp_volume = {c: 0.0 for c in comp_ids}
     for i in range(n_p):
         p = nodes[panels[i]]
-        area, _, aspects[i], skews[i], warps[i] = _panel_geometry(p)
-        areas[i] = area
+        areas[i], _, aspects[i], skews[i], warps[i], convex[i] = _panel_geometry(p)
         p1, p2, p3, p4 = (np.asarray(q, dtype=float).reshape(3) for q in p)
-        volume += float(np.dot(p1, np.cross(p2, p3)) + np.dot(p1, np.cross(p3, p4)))
-    volume /= 6.0
+        comp_volume[int(comp_of[i])] += float(np.dot(p1, np.cross(p2, p3)) + np.dot(p1, np.cross(p3, p4))) / 6.0
+    volume = float(sum(comp_volume.values()))
+
     counts: dict[tuple[int, int], int] = {}
+    direction: dict[tuple[int, int], int] = {}
     owners: dict[tuple[int, int], int] = {}
     for i in range(n_p):
         row = panels[i]
@@ -1163,47 +1547,73 @@ def check_mesh(mesh: PanelMesh) -> dict:
                 continue
             key = (min(a, b), max(a, b))
             counts[key] = counts.get(key, 0) + 1
+            direction[key] = direction.get(key, 0) + (1 if a < b else -1)
             owners.setdefault(key, i)
-    comp_of = np.asarray(mesh.component, dtype=int).reshape(-1) if np.asarray(mesh.component).size else np.zeros(n_p, dtype=int)
-    comp_nodes: dict[int, list[int]] = {}
-    for i in range(n_p):
-        c = int(comp_of[i]) if comp_of.shape[0] == n_p else 0
-        comp_nodes.setdefault(c, []).extend(int(q) for q in panels[i])
-    comp_min_y: dict[int, float] = {}
-    comp_max_y: dict[int, float] = {}
-    for c, ids in comp_nodes.items():
-        ya = np.abs(nodes[np.array(sorted(set(ids)), dtype=int), 1])
-        comp_min_y[c] = float(np.min(ya))
-        comp_max_y[c] = float(np.max(ya))
+
+    comp_nodes: dict[int, np.ndarray] = {}
+    for c in comp_ids:
+        comp_nodes[c] = np.unique(panels[comp_of == c].ravel())
+    station = None if mesh.node_station is None else np.asarray(mesh.node_station, dtype=int)
+    ends: dict[int, tuple[int, int]] = {}
+    if station is not None and station.shape[0] == nodes.shape[0]:
+        for c in comp_ids:
+            st = station[comp_nodes[c]]
+            ends[c] = (int(np.min(st)), int(np.max(st)))
+    else:
+        station = None
+    size = float(np.max(np.ptp(nodes, axis=0))) if nodes.shape[0] else 1.0
+    y_tol = _Y_ROOT_REL * max(size, 1e-300)
+    tip_open = str(getattr(mesh, "tip", "flat")) == "none"
+
     watertight = True
+    consistent = True
     n_open = 0
     for key, cnt in counts.items():
         if cnt == 2:
+            if direction[key] != 0:
+                consistent = False
             continue
         if cnt > 2:
             watertight = False
             continue
         n_open += 1
         a, b = key
-        ya, yb = abs(float(nodes[a, 1])), abs(float(nodes[b, 1]))
-        c = int(comp_of[owners[key]]) if comp_of.shape[0] == n_p else 0
-        lo = comp_min_y.get(c, 0.0)
-        hi = comp_max_y.get(c, 0.0)
-        span = max(1.0, hi)
-        root_ok = bool(mesh.half) and max(ya, yb) <= lo + max(1e-9, 1e-3 * span)
-        tip_ok = min(ya, yb) >= hi - max(1e-9, 1e-3 * span)
+        root_ok = bool(mesh.half) and abs(float(nodes[a, 1])) <= y_tol and abs(float(nodes[b, 1])) <= y_tol
+        tip_ok = False
+        if tip_open and station is not None:
+            c = int(comp_of[owners[key]])
+            lo, hi = ends[c]
+            sa, sb = int(station[a]), int(station[b])
+            tip_ok = (sa == sb) and (sa in (lo, hi))
         if not (root_ok or tip_ok):
             watertight = False
+
+    outward = consistent
+    for c in comp_ids:
+        ext = nodes[comp_nodes[c]]
+        size_c = float(np.max(np.ptp(ext, axis=0))) if ext.shape[0] else 0.0
+        if not comp_volume[c] > _VOLUME_REL * size_c**3:
+            outward = False
+    max_warp = float(np.max(warps)) if n_p else 0.0
+    min_area = float(np.min(areas)) if n_p else 0.0
+    n_nonconvex = int(np.sum(~convex))
+    planar = bool(max_warp <= float(warp_limit))
     return {
         "watertight": bool(watertight),
-        "outward": bool(volume > 0.0),
-        "volume": float(volume),
-        "min_area": float(np.min(areas)) if n_p else 0.0,
+        "orientation_consistent": bool(consistent),
+        "outward": bool(outward),
+        "volume": volume,
+        "component_volume": {int(c): float(v) for c, v in comp_volume.items()},
+        "min_area": min_area,
         "aspect_ratio": aspects,
         "skew": skews,
         "warp": warps,
+        "convex": convex,
         "max_aspect_ratio": float(np.max(aspects)) if n_p else 1.0,
         "max_skew": float(np.max(skews)) if n_p else 0.0,
-        "max_warp": float(np.max(warps)) if n_p else 0.0,
+        "max_warp": max_warp,
+        "n_nonconvex": n_nonconvex,
+        "planar": planar,
+        "valid_panels": bool(n_nonconvex == 0 and planar and min_area > 0.0),
         "n_open_edges": int(n_open),
     }
