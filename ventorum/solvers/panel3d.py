@@ -6,6 +6,28 @@ It takes an Aircraft, FlightCondition (or sweep), and SolverSettings, and
 returns standard SolverResult objects with integrated totals, spanwise strip
 loads, trust scoring, and execution dispatch records.
 
+Settings
+--------
+The panel solver reads these fields of :class:`SolverSettings`:
+``n_panels`` (spanwise panels per semi-span, as the lattice), ``n_chord``
+(chordwise panels per surface, 20 when None), ``spacing``,
+``proportional_panels``, ``min_panels``, ``use_symmetry``,
+``panel_kutta``, ``panel_backend``, ``panel_wake_length``,
+``panel_chord_spacing`` (cosine by default) and
+``panel_estimate_mesh_error``.
+
+Backend selection
+-----------------
+``panel_backend="auto"`` follows the device and precision selection of
+:mod:`ventorum.gpu`, as the lattice solvers do: the device setting
+``"cpu"`` keeps the solve on the CPU; inside a CPU worker thread the
+``"auto"`` device stays on the CPU; otherwise :func:`ventorum.gpu.use_gpu`
+decides with the work of the dense systems (influence evaluations,
+``N^2`` per system, twice in ground effect). The panel method has no cost
+model of its own yet, so the decision uses the thresholds of the vortex
+lattice. On the GPU the precision is :func:`ventorum.gpu.get_precision`.
+On the CPU the numpy reference kernels are used.
+
 Published sources
 -----------------
 * Morino, L. and Kuo, C. C., 1974, Subsonic potential aerodynamics for
@@ -43,7 +65,6 @@ from ventorum.core.datatypes import (
     SolverSettings,
     SpanwiseResult,
 )
-from ventorum.core.errors import ValidityError
 from ventorum.core.trust import evaluate_aerodynamic_trust
 from ventorum.geometry.lattice import (
     _AirfoilBlender,
@@ -71,6 +92,21 @@ __all__ = ["PanelMethodSolver"]
 
 _DEFAULT_N_CHORD = 20
 
+#: Accepted values of the panel options of :class:`SolverSettings`.
+_KUTTA_OPTIONS = ("morino", "pressure")
+_BACKEND_OPTIONS = ("auto", "numpy", "numba", "gpu")
+_CHORD_SPACINGS = ("cosine", "uniform")
+
+#: Names of a per-panel strip index that a mesh may carry (attribute of
+#: PanelMesh). When present and consistent with the lattice strips, it
+#: replaces the geometric strip assignment.
+_STRIP_METADATA_NAMES = ("strip", "strip_index")
+
+#: Per-panel and per-node metadata of the mesh builder that the combined
+#: mesh carries when the PanelMesh class has these fields.
+_PANEL_METADATA = ("chord_index", "side")
+_NODE_METADATA = ("node_station",)
+
 
 def _estimate_panel_mesh_error(aircraft: Aircraft, condition: FlightCondition, settings: SolverSettings):
     """Run a three-level panel convergence study for the trust notes.
@@ -82,13 +118,13 @@ def _estimate_panel_mesh_error(aircraft: Aircraft, condition: FlightCondition, s
     condition : FlightCondition
         Flight condition of the study.
     settings : SolverSettings
-        Solver settings of the base (coarsest) mesh.
+        Solver settings of the base (coarsest) mesh, the mesh of the user.
 
     Returns
     -------
     ConvergenceReport
-        Values per level, observed order, Richardson value and relative
-        error of CL, CDi and Cm.
+        Values per level, observed order, Richardson value and the error
+        estimate of the base mesh for CL, CDi and Cm.
     """
     from ventorum.panel3d.convergence import panel_mesh_convergence
 
@@ -97,76 +133,203 @@ def _estimate_panel_mesh_error(aircraft: Aircraft, condition: FlightCondition, s
     )
 
 
-def _build_surface_strip_panel_map(
+def _option(settings: SolverSettings, name: str, default, allowed: tuple[str, ...]) -> str:
+    """Return a string option of the settings, checked against the allowed values."""
+    value = getattr(settings, name, default)
+    key = str(default if value is None else value).strip().lower()
+    if key not in allowed:
+        raise ValueError(f"settings.{name}={value!r} must be one of {allowed}.")
+    return key
+
+
+def _has_antisymmetric_control(aircraft: Aircraft) -> bool:
+    """Return True if a surface has a deflected antisymmetric control (geometry not symmetric)."""
+    for surf in aircraft.surfaces:
+        for ctrl in getattr(surf, "controls", None) or ():
+            if float(getattr(ctrl, "deflection", 0.0)) != 0.0 and not bool(getattr(ctrl, "symmetric", True)):
+                return True
+    return False
+
+
+def _combined_metadata(subs: list[PanelMesh]) -> dict:
+    """Return the builder metadata of the combined mesh of several surfaces.
+
+    The strips are offset per surface, as :func:`ventorum.panel3d.mesh.mesh_aircraft`
+    does; the other fields are concatenated. Only the fields of the
+    PanelMesh class that all surface meshes carry are returned.
+    """
+    names = {f.name for f in dataclasses.fields(PanelMesh)}
+    out: dict = {}
+    if "tip" in names:
+        out["tip"] = "flat"
+    if "strip" in names and all(getattr(m, "strip", None) is not None for m in subs):
+        parts = []
+        n_strips = 0
+        for m in subs:
+            st = np.asarray(m.strip, dtype=int)
+            parts.append(np.where(st >= 0, st + n_strips, -1))
+            n_strips += int(np.max(st)) + 1 if np.any(st >= 0) else 0
+        out["strip"] = np.concatenate(parts)
+    for name in _PANEL_METADATA + _NODE_METADATA:
+        if name in names and all(getattr(m, name, None) is not None for m in subs):
+            out[name] = np.concatenate([np.asarray(getattr(m, name), dtype=int) for m in subs])
+    return out
+
+
+def _ground_of(condition: FlightCondition, ground: GroundPlane | None, ref_point: np.ndarray):
+    """Return the ground plane of one condition (explicit plane, else condition.h), or None."""
+    if ground is not None:
+        return GroundPlane(normal=np.asarray(ground.normal, dtype=float), offset=float(ground.offset))
+    gp = ground_plane_parameters(condition, ref_point)
+    if gp is None:
+        return None
+    return GroundPlane(normal=np.asarray(gp[0], dtype=float), offset=float(gp[1]))
+
+
+def _strip_metadata(mesh: PanelMesh) -> np.ndarray | None:
+    """Return a per-panel strip index of a mesh, or None when the mesh has none."""
+    for name in _STRIP_METADATA_NAMES:
+        value = getattr(mesh, name, None)
+        if value is None:
+            continue
+        arr = np.asarray(value)
+        if arr.ndim == 1 and arr.shape[0] == np.asarray(mesh.panels).shape[0]:
+            return arr.astype(int)
+    return None
+
+
+def _assign_strips(
+    centroids: np.ndarray,
     surf: LiftingSurface,
-    n_span: int,
-    n_chord: int,
-    half: bool,
-    sharp_te: np.ndarray,
-) -> tuple[list[list[int]], list[list[int]] | None]:
-    """Map panels to spanwise strips for one lifting surface.
+    eta_e: np.ndarray,
+    offset: np.ndarray,
+) -> np.ndarray:
+    """Return the lattice strip index of each panel from its centroid.
+
+    The strips of the lattice are bounded by the station planes at the
+    spanwise stations *eta_e*. A station plane holds the station point of
+    the reference line and is normal to the span direction in the y-z
+    plane (the same plane as the mesh sections). A panel belongs to the
+    strip whose station planes enclose its centroid. Panels in a station
+    plane (tip caps, control side closures) go to the inboard strip, and a
+    cap at the last station to the last strip.
 
     Parameters
     ----------
+    centroids : numpy.ndarray
+        Panel centroids of the right side of the surface with shape (n, 3)
+        in m.
     surf : LiftingSurface
-        Lifting surface definition.
+        Surface definition.
+    eta_e : numpy.ndarray
+        Spanwise stations of the lattice strips with shape (n_strips + 1,)
+        [-].
+    offset : numpy.ndarray
+        Position offset of the surface with shape (3,) in m.
+
+    Returns
+    -------
+    numpy.ndarray
+        Strip index of each panel with shape (n,).
+    """
+    _, y_ref, z_ref = surface_reference_line(surf, eta_e)
+    pts = np.column_stack([y_ref + offset[1], z_ref + offset[2]])
+    n_st = pts.shape[0]
+    axis = np.column_stack([np.gradient(y_ref, eta_e), np.gradient(z_ref, eta_e)])
+    axis /= np.maximum(np.linalg.norm(axis, axis=1, keepdims=True), 1e-300)
+    if surf.is_symmetric:
+        axis[np.asarray(eta_e) <= 1e-12] = np.array([1.0, 0.0])
+    c_yz = np.asarray(centroids, dtype=float)[:, 1:3]
+    tol = 1e-9 * max(1.0, float(surf.semi_span))
+    inner = range(1, n_st - 1)
+    strip = np.zeros(c_yz.shape[0], dtype=int)
+    for j in inner:
+        side = (c_yz - pts[j]) @ axis[j]
+        strip += (side > tol).astype(int)
+    return np.clip(strip, 0, max(n_st - 2, 0))
+
+
+def _surface_strip_maps(
+    sub: PanelMesh,
+    surf: LiftingSurface,
+    n_span: int,
+    eta_e: np.ndarray,
+    first_panel: int,
+    half: bool,
+) -> tuple[list[list[int]], list[list[int]] | None]:
+    """Map the panels of one surface to the lattice strips.
+
+    Parameters
+    ----------
+    sub : PanelMesh
+        Mesh of the surface alone.
+    surf : LiftingSurface
+        Surface definition.
     n_span : int
-        Spanwise panels on the semi-span.
-    n_chord : int
-        Chordwise panels per surface.
+        Spanwise strips on the semi-span [-].
+    eta_e : numpy.ndarray
+        Spanwise stations of the strips with shape (n_span + 1,) [-].
+    first_panel : int
+        Index of the first panel of the surface in the combined mesh.
     half : bool
-        True if meshed as right half only.
-    sharp_te : numpy.ndarray
-        Boolean array of shape (n_span + 1,) indicating sharp trailing edge.
+        True if the surface is meshed as the right half only.
 
     Returns
     -------
     right_strip_panels : list of list of int
-        List of panel indices for each strip on the right half (root to tip).
+        Panel indices (combined mesh) of each strip on the right side, root
+        to tip.
     left_strip_panels : list of list of int or None
-        List of panel indices for each strip on the left half (tip to root),
-        or None if half is True or surface is not symmetric.
+        Panel indices of each strip on the left side, left tip to root, or
+        None on a half mesh or for a surface without a mirror side.
     """
-    p_idx = 0
-    right_strip_panels: list[list[int]] = [[] for _ in range(n_span)]
-
-    for j in range(n_span):
-        for _ in range(n_chord):
-            right_strip_panels[j].append(p_idx)
-            p_idx += 1
-            right_strip_panels[j].append(p_idx)
-            p_idx += 1
-        if not (sharp_te[j] and sharp_te[j + 1]):
-            right_strip_panels[j].append(p_idx)
-            p_idx += 1
-
-    # Tip cap panels at tip station
-    n_cap_panels = 1 if n_chord == 1 else n_chord
-    for _ in range(n_cap_panels):
-        right_strip_panels[-1].append(p_idx)
-        p_idx += 1
-
+    nodes = np.asarray(sub.nodes, dtype=float)
+    panels = np.asarray(sub.panels, dtype=int)
+    centroids = np.mean(nodes[panels], axis=1)
+    # Repeated corners of triangles: use the mean of the distinct corners.
+    for i, row in enumerate(panels):
+        uniq = list(dict.fromkeys(int(a) for a in row))
+        if len(uniq) < 4:
+            centroids[i] = np.mean(nodes[uniq], axis=0)
+    offset = np.asarray(surf.position, dtype=float).reshape(3)
     symmetric = bool(surf.is_symmetric)
-    if not symmetric:
-        # Root cap panels at root station
-        for _ in range(n_cap_panels):
-            right_strip_panels[0].append(p_idx)
-            p_idx += 1
+    mirror_side = symmetric and not half
+    left = np.zeros(panels.shape[0], dtype=bool)
+    c_right = centroids.copy()
+    if mirror_side:
+        # The mirror side of a symmetric surface lies at y < 0.
+        left = centroids[:, 1] < 0.0
+        c_right[left, 1] = -c_right[left, 1]
+    elif bool(getattr(surf, "mirror_y", False)) and not symmetric:
+        c_right[:, 1] = -c_right[:, 1]
 
-    right_n_panels = p_idx
+    strip = _assign_strips(c_right, surf, eta_e, offset)
+    meta = _strip_metadata(sub)
+    if meta is not None:
+        # Strip index of the mesh builder: a full symmetric surface numbers
+        # its strips from the left tip (0) to the right tip (2 n - 1), a half
+        # mesh or a one-sided surface from the root (0) to the tip (n - 1);
+        # tip and side panels have -1. It is used when its strips are the
+        # lattice strips (the stations of a control can add mesh strips).
+        valid = meta >= 0
+        n_meta = int(np.max(meta[valid])) + 1 if np.any(valid) else 0
+        if mirror_side and n_meta == 2 * n_span:
+            left = np.where(valid, meta < n_span, left)
+            strip = np.where(
+                valid, np.where(meta < n_span, n_span - 1 - meta, meta - n_span), strip
+            )
+        elif not mirror_side and n_meta == n_span:
+            strip = np.where(valid, meta, strip)
 
-    if symmetric and not half:
-        left_strip_panels: list[list[int]] = [[] for _ in range(n_span)]
-        shift = right_n_panels
-        # Left strips run from left tip to root (k = 0 at left tip, corresponding
-        # to right strip n_span - 1 - k).
-        for k in range(n_span):
-            j = n_span - 1 - k
-            left_strip_panels[k] = [shift + p for p in right_strip_panels[j]]
-    else:
-        left_strip_panels = None
-
-    return right_strip_panels, left_strip_panels
+    right: list[list[int]] = [[] for _ in range(n_span)]
+    left_map: list[list[int]] = [[] for _ in range(n_span)]
+    for i in range(panels.shape[0]):
+        j = int(strip[i])
+        if mirror_side and left[i]:
+            left_map[n_span - 1 - j].append(first_panel + i)
+        else:
+            right[j].append(first_panel + i)
+    return right, (left_map if mirror_side else None)
 
 
 class PanelMethodSolver(BaseSolver):
@@ -178,23 +341,50 @@ class PanelMethodSolver(BaseSolver):
 
     name: str = "panel3d"
 
-    def _resolve_backend(self, settings: SolverSettings) -> tuple[str, str, str]:
-        """Resolve backend, device, and arithmetic dtype for 3D panel solve."""
-        user_backend = getattr(settings, "backend", None)
-        if user_backend is not None:
-            backend = str(user_backend).strip().lower()
-            if backend not in ("numpy", "numba", "gpu"):
-                raise ValueError(
-                    f"Unknown panel backend {backend!r}; use 'numpy', 'numba' or 'gpu'."
-                )
-            device = "gpu" if backend == "gpu" else "cpu"
-            dtype = "float32" if device == "gpu" else "float64"
-            return backend, device, dtype
+    def _resolve_backend(
+        self,
+        settings: SolverSettings,
+        n_panels: int = 0,
+        n_configs: int = 1,
+        in_ground: bool = False,
+    ) -> tuple[str, str, str, str]:
+        """Resolve the backend, device, precision and reason of one solve.
 
-        if gpu.get_device() == "gpu" and gpu.available():
-            return "gpu", "gpu", "float32"
+        Parameters
+        ----------
+        settings : SolverSettings
+            Settings with ``panel_backend``.
+        n_panels : int, default=0
+            Number of solved panels [-].
+        n_configs : int, default=1
+            Number of systems to factorize (configurations) [-].
+        in_ground : bool, default=False
+            True when a condition is in ground effect.
 
-        return "numpy", "cpu", "float64"
+        Returns
+        -------
+        tuple of str
+            (backend, device, precision, reason): backend "numpy", "numba"
+            or "gpu"; device "cpu" or "gpu"; precision "float32" or
+            "float64"; one sentence that gives the reason.
+        """
+        choice = _option(settings, "panel_backend", "auto", _BACKEND_OPTIONS)
+        if choice in ("numpy", "numba"):
+            return choice, "cpu", "float64", f"panel_backend setting is {choice}"
+        if choice == "gpu":
+            return "gpu", "gpu", gpu.get_precision(), "panel_backend setting is gpu"
+        if gpu.get_device() == "cpu":
+            return "numpy", "cpu", "float64", gpu._REASON_DEVICE_CPU
+        from ventorum.utils.parallel import _local as _par_local
+
+        if gpu.get_device() == "auto" and getattr(_par_local, "worker_threads", None) is not None:
+            return "numpy", "cpu", "float64", "called inside a CPU worker thread"
+        n = int(n_panels)
+        work = float(max(n_configs, 1)) * n * n * (2.0 if in_ground else 1.0)
+        use, reason = gpu.use_gpu(work, "vlm", max(int(n_configs), 1), None, return_reason=True)
+        if use:
+            return "gpu", "gpu", gpu.get_precision(), reason
+        return "numpy", "cpu", "float64", reason
 
     def solve(
         self,
@@ -216,20 +406,31 @@ class PanelMethodSolver(BaseSolver):
         settings : SolverSettings
             Discretization and solution knobs.
         ground : GroundPlane or None, optional
-            Ground plane definition.
+            Ground plane of all conditions (normal and offset in m). If
+            None, ``condition.h`` sets the ground, as for the vortex
+            lattice.
         ref_point : numpy.ndarray or None, optional
             Moment reference point [m].
 
         Returns
         -------
         SolverResult or list of SolverResult
+            ``details["cp"]`` holds the panel pressure coefficients of the
+            solved mesh, ``details["dispatch"]`` the backend, device,
+            precision and the counted factorizations, and
+            ``details["panel"]`` the panel options used (Kutta option,
+            chordwise spacing and count, wake length in m, half mesh).
 
-        Mesh error estimate. Set the ``estimate_mesh_error`` attribute of
-        the settings to True to run a three-level panel mesh convergence
-        study (ratio 1.5 in both directions) for each condition. The study
-        appends its notes to the trust warnings and stores the report in
-        ``details["mesh_convergence"]``. It costs about 25 to 30 times one
-        base solve, so it is off by default.
+        Notes
+        -----
+        Mesh error estimate. ``settings.panel_estimate_mesh_error=True``
+        runs a three-level panel mesh convergence study (ratio 1.5 in both
+        directions) for each condition. The study adds the error estimate
+        of the given mesh to the trust warnings and stores the report in
+        ``details["mesh_convergence"]``. The dense LU work grows with the
+        cube of the panel count, so the study costs about
+        ``1 + 1.5**6 + 1.5**12`` (about 142) times one base solve; it is
+        off by default.
         """
         is_single = isinstance(condition, FlightCondition)
         cond_list: list[FlightCondition] = [condition] if is_single else list(condition)
@@ -243,18 +444,21 @@ class PanelMethodSolver(BaseSolver):
         c_ref = ac.c_ref
         rp = ac.moment_reference() if ref_point is None else np.asarray(ref_point, dtype=float)
 
-        backend, device, dtype = self._resolve_backend(settings)
-        kutta = getattr(settings, "kutta", "morino")
-        wake_length = getattr(settings, "wake_length", None)
+        kutta = _option(settings, "panel_kutta", "morino", _KUTTA_OPTIONS)
+        chord_spacing = _option(settings, "panel_chord_spacing", "cosine", _CHORD_SPACINGS)
+        wake_length = getattr(settings, "panel_wake_length", None)
+        if wake_length is not None:
+            wake_length = float(wake_length)
+            if not np.isfinite(wake_length) or wake_length <= 0.0:
+                raise ValueError(f"settings.panel_wake_length={wake_length} must be positive.")
         n_chord = int(settings.n_chord) if getattr(settings, "n_chord", None) is not None else _DEFAULT_N_CHORD
-        chord_spacing = getattr(settings, "chord_spacing", "cosine")
-        use_sym_setting = getattr(settings, "use_symmetry", True)
-        estimate_mesh_error = bool(getattr(settings, "estimate_mesh_error", False))
+        use_sym_setting = bool(getattr(settings, "use_symmetry", True))
+        estimate_mesh_error = bool(getattr(settings, "panel_estimate_mesh_error", False))
 
-        all_surfs_sym = all(s.is_symmetric for s in ac.surfaces)
-        all_conds_sym = all(is_symmetric_condition(c, ground) for c in cond_list)
-        all_phi_zero = all(getattr(c, "phi", 0.0) == 0.0 for c in cond_list)
-        use_half = bool(use_sym_setting and all_surfs_sym and all_conds_sym and all_phi_zero)
+        grounds = [_ground_of(c, ground, rp) for c in cond_list]
+        all_surfs_sym = all(s.is_symmetric for s in ac.surfaces) and not _has_antisymmetric_control(ac)
+        all_conds_sym = all(is_symmetric_condition(c, g) for c, g in zip(cond_list, grounds))
+        use_half = bool(use_sym_setting and all_surfs_sym and all_conds_sym)
 
         # 1. Section shape extraction and coordinate preparation
         notes: list[str] = []
@@ -285,6 +489,7 @@ class PanelMethodSolver(BaseSolver):
 
         surface_strip_maps: list[tuple[list[list[int]], list[list[int]] | None]] = []
         surface_geom_meta: list[dict] = []
+        sub_meshes: list[PanelMesh] = []
 
         ref_semi = max((s.semi_span for s in ac.surfaces), default=1.0)
         for s_idx, (surf, coords) in enumerate(zip(ac.surfaces, section_coords_by_surface)):
@@ -310,34 +515,14 @@ class PanelMethodSolver(BaseSolver):
                 n_span=n_span,
             )
 
-            # Determine sharp trailing edge array
-            xt = np.linspace(0.0, 1.0, n_chord + 1)
             fr = np.array([float(s.y_frac) for s in _sorted_sections(surf)])
             spacing = resolve_spacing(surf.spacing if surf.spacing is not None else settings.spacing, surf, "vlm")
             eta_e, eta_mid = _surface_eta(surf, n_span, spacing)
-            yu_list = []
-            yl_list = []
-            for c in coords:
-                from ventorum.panel3d.mesh import _resample_section
+            eta_e = np.asarray(eta_e, dtype=float)
 
-                yu, yl = _resample_section(c, xt)
-                yu_list.append(yu)
-                yl_list.append(yl)
-            from ventorum.panel3d.mesh import _interp_rows
-
-            yu_e = _interp_rows(fr, np.vstack(yu_list), eta_e)
-            yl_e = _interp_rows(fr, np.vstack(yl_list), eta_e)
-            sharp_te = np.abs(yu_e[:, -1] - yl_e[:, -1]) <= 1e-6
-
-            r_map, l_map = _build_surface_strip_panel_map(surf, n_span, n_chord, use_half, sharp_te)
-            # Offset panel indices for combined mesh
-            r_map_offset = [[p + n_panels_total for p in strip_p] for strip_p in r_map]
-            l_map_offset = (
-                [[p + n_panels_total for p in strip_p] for strip_p in l_map]
-                if l_map is not None
-                else None
+            surface_strip_maps.append(
+                _surface_strip_maps(sub, surf, int(n_span), eta_e, n_panels_total, use_half)
             )
-            surface_strip_maps.append((r_map_offset, l_map_offset))
 
             # Store geometry stations and properties for strip integration
             x_ref, y_ref, z_ref = surface_reference_line(surf, eta_mid)
@@ -371,6 +556,7 @@ class PanelMethodSolver(BaseSolver):
                 "alpha_L0": alpha_L0,
             })
 
+            sub_meshes.append(sub)
             node_parts.append(np.asarray(sub.nodes, dtype=float))
             panel_parts.append(np.asarray(sub.panels, dtype=int) + n_nodes_total)
             kind_parts.append(np.asarray(sub.kind))
@@ -390,12 +576,22 @@ class PanelMethodSolver(BaseSolver):
             kind=np.concatenate(kind_parts),
             wake_edges=np.vstack(wake_parts).reshape(-1, 4),
             half=use_half,
+            **_combined_metadata(sub_meshes),
         )
 
         # 3. Check mesh quality
         mesh_stats = check_mesh(mesh)
 
         # 4. Solve potential flow with PanelSolver
+        ground_keys = {
+            (tuple(np.round(g.normal, 12)), round(g.offset, 12), round(float(c.alpha), 12), round(float(c.beta), 12))
+            for c, g in zip(cond_list, grounds)
+            if g is not None
+        }
+        n_configs = len(ground_keys) + (1 if any(g is None for g in grounds) else 0)
+        backend, device, precision, reason = self._resolve_backend(
+            settings, n_panels_total, n_configs, bool(ground_keys)
+        )
         t0 = time.perf_counter()
         solver = PanelSolver(
             mesh,
@@ -406,30 +602,32 @@ class PanelMethodSolver(BaseSolver):
             ref_point=rp,
             kutta=kutta,
             backend=backend,
+            dtype=precision if backend == "gpu" else None,
         )
-        panel_results: list[PanelResult] = solver.solve_conditions(cond_list)
-
-        # Factorization count
-        ground_groups: set[tuple] = set()
-        for c in cond_list:
-            if c.h is None:
-                ground_groups.add(("free",))
-            else:
-                ground_groups.add(("ground", round(float(c.alpha), 11), round(float(c.h), 11)))
-        factorization_count = max(1, len(ground_groups))
+        panel_results: list[PanelResult] = solver.solve_conditions(
+            cond_list, grounds=None if ground is None else [ground] * len(cond_list)
+        )
 
         dispatch = {
             "backend": backend,
             "device": device,
-            "dtype": dtype,
-            "factorization_count": factorization_count,
-            "precision": dtype,
+            "dtype": precision,
+            "factorization_count": int(solver.factorization_count),
+            "precision": precision,
             "backends": {"kernel": backend, "solve": "torch" if device == "gpu" else "scipy"},
             "threads": 1,
             "workers": 1,
             "plan_source": "default",
             "profile": None,
-            "reason": "CPU path selected" if device == "cpu" else "GPU path selected",
+            "reason": reason,
+        }
+
+        panel_options = {
+            "kutta": kutta,
+            "chord_spacing": chord_spacing,
+            "n_chord": int(n_chord),
+            "wake_length": float(solver.wake_length),
+            "half_mesh": bool(use_half),
         }
 
         # 5. Build SolverResult per condition with strip integration
@@ -437,7 +635,7 @@ class PanelMethodSolver(BaseSolver):
         dt_per_case = (time.perf_counter() - t0) / max(1, len(cond_list))
         results: list[SolverResult] = []
 
-        for cond, p_res in zip(cond_list, panel_results):
+        for cond, gnd, p_res in zip(cond_list, grounds, panel_results):
             alpha = float(cond.alpha)
             beta = float(cond.beta)
             v_inf = float(cond.V_inf)
@@ -445,15 +643,10 @@ class PanelMethodSolver(BaseSolver):
             l_hat = lift_direction(alpha)
             d_hat = freestream_direction(alpha, beta)
 
-            # Ground clearance check
+            # Ground clearance (a ground strike raises in the solve)
             h_min = None
-            if cond.h is not None:
-                normal, offset = ground_plane_parameters(cond, rp)
-                h_min = check_ground_clearance(solver._full_mesh.nodes, normal, offset)
-                if h_min <= 0.0:
-                    raise ValidityError(
-                        f"Ground strike: minimum clearance is {h_min:.3g} m (<= 0)."
-                    )
+            if gnd is not None:
+                h_min = check_ground_clearance(solver._full_mesh.nodes, gnd.normal, gnd.offset)
 
             # Evaluate forces on mesh panels
             # p_res.cp corresponds to solver.mesh panels (half mesh if use_half)
@@ -642,6 +835,7 @@ class PanelMethodSolver(BaseSolver):
                 "h_min": h_min,
                 "notes": all_notes,
                 "dispatch": dispatch,
+                "panel": panel_options,
             }
             if conv_details is not None:
                 result.details["mesh_convergence"] = conv_details

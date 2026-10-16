@@ -187,8 +187,25 @@ def test_ground_effect_case():
     assert res_ge.details["h_min"] is not None
 
 
-def test_five_angle_sweep_one_factorization():
-    """Five-angle sweep performs and counts exactly one factorization in free air."""
+def test_five_angle_sweep_one_factorization(monkeypatch):
+    """Five-angle sweep: the dispatch record reports the counted factorizations.
+
+    The symmetric free-air sweep runs on a half mesh with only the
+    symmetric system: one factorization. A sweep in ground effect needs one
+    factorization per attitude. A sideslip sweep runs on the full mesh: one
+    factorization. The counts of the dispatch record equal the counts of a
+    wrapper around the LU routine.
+    """
+    import scipy.linalg
+
+    calls = {"n": 0}
+    original = scipy.linalg.lu_factor
+
+    def counting(a, *args, **kwargs):
+        calls["n"] += 1
+        return original(a, *args, **kwargs)
+
+    monkeypatch.setattr(scipy.linalg, "lu_factor", counting)
     solver = make_solver("panel3d")
     ac = _simple_wing(shape="0012", semi_span=3.0, chord=1.0)
     cond = FlightCondition(V_inf=25.0, alpha=0.0)
@@ -203,12 +220,27 @@ def test_five_angle_sweep_one_factorization():
     for i in range(4):
         assert cls[i + 1] > cls[i]
 
+    assert calls["n"] == 1
     for r in results:
         disp = r.details.get("dispatch", {})
         assert disp.get("factorization_count") == 1
         assert disp.get("backend") == "numpy"
         assert disp.get("device") == "cpu"
         assert disp.get("dtype") == "float64"
+        assert r.symmetry_used
+
+    calls["n"] = 0
+    ground_conds = [FlightCondition(V_inf=25.0, alpha=float(a), h=0.8) for a in np.radians([1.0, 3.0, 5.0])]
+    ground_results = solver.solve(ac, ground_conds, st)
+    assert calls["n"] == 3
+    assert all(r.details["dispatch"]["factorization_count"] == 3 for r in ground_results)
+
+    calls["n"] = 0
+    side_conds = [FlightCondition(V_inf=25.0, alpha=float(a), beta=np.radians(4.0)) for a in angles]
+    side_results = solver.solve(ac, side_conds, st)
+    assert calls["n"] == 1
+    assert all(r.details["dispatch"]["factorization_count"] == 1 for r in side_results)
+    assert not side_results[0].symmetry_used
 
 
 def test_json_round_trip_with_and_without_shape():
@@ -242,31 +274,185 @@ def test_json_round_trip_with_and_without_shape():
     assert loaded_old.surfaces[0].sections[0].shape is None
 
 
-def test_trust_score_lower_for_skewed_mesh():
-    """Trust score is present and is lower for a deliberately skewed mesh."""
+def test_trust_score_lower_for_poor_mesh():
+    """Trust score is present and lower for a deliberately poor mesh of the same wing.
+
+    The same wing is solved with a regular mesh and with a mesh of very
+    elongated and skewed panels (four spanwise panels and many chordwise
+    panels). The mesh adequacy penalty must grow and the score must fall.
+    """
     solver = make_solver("panel3d")
     cond = FlightCondition(V_inf=30.0, alpha=np.radians(4.0))
-    st = SolverSettings(n_panels=6, n_chord=6)
+    ac = _simple_wing(shape="0012", semi_span=4.0, chord=1.0, sweep_le=0.0)
 
-    # Straight regular wing
-    ac_clean = _simple_wing(shape="0012", semi_span=4.0, chord=1.0, sweep_le=0.0)
-    res_clean = solver.solve(ac_clean, cond, st)
-
-    # Deliberately skewed wing: large sweep and skewed sections
-    surf_skewed = LiftingSurface(
-        name="SkewedWing",
-        semi_span=2.0,
-        sections=[
-            WingSection(y_frac=0.0, chord=1.0, shape="0012", x_le=0.0),
-            WingSection(y_frac=1.0, chord=1.0, shape="0012", x_le=4.0),
-        ],
-        is_symmetric=True,
-    )
-    ac_skewed = Aircraft(name="SkewedAircraft", surfaces=[surf_skewed])
-    ac_skewed.compute_reference_values()
-    res_skewed = solver.solve(ac_skewed, cond, st)
+    res_clean = solver.solve(ac, cond, SolverSettings(n_panels=8, n_chord=8))
+    res_poor = solver.solve(ac, cond, SolverSettings(n_panels=4, n_chord=40))
 
     assert res_clean.totals.trust is not None
-    assert res_skewed.totals.trust is not None
-    assert res_skewed.totals.trust.score < res_clean.totals.trust.score
-    assert res_skewed.totals.trust.factors.get("mesh_adequacy", 0.0) > 0.0
+    assert res_poor.totals.trust is not None
+    stats_clean = res_clean.details["mesh_stats"]
+    stats_poor = res_poor.details["mesh_stats"]
+    assert stats_poor["max_aspect_ratio"] > stats_clean["max_aspect_ratio"]
+    assert stats_poor["max_skew"] > stats_clean["max_skew"]
+    pen_clean = res_clean.totals.trust.factors.get("mesh_adequacy", 0.0)
+    pen_poor = res_poor.totals.trust.factors.get("mesh_adequacy", 0.0)
+    assert pen_poor > pen_clean
+    assert res_poor.totals.trust.score < res_clean.totals.trust.score
+
+
+def test_panel_settings_reach_the_solver():
+    """The panel fields of SolverSettings reach the solver through the factory and analyze.
+
+    The fields are real dataclass fields: they can be set, clone() keeps
+    them (also for a subclass), and unknown values are refused.
+    """
+    import dataclasses
+
+    import ventorum as vt
+
+    st = SolverSettings(
+        n_panels=6,
+        n_chord=6,
+        solver_type="panel3d",
+        panel_kutta="pressure",
+        panel_backend="numba",
+        panel_wake_length=12.5,
+        panel_chord_spacing="uniform",
+    )
+    copy = st.clone()
+    for name in ("panel_kutta", "panel_backend", "panel_wake_length", "panel_chord_spacing",
+                 "panel_estimate_mesh_error"):
+        assert getattr(copy, name) == getattr(st, name)
+    st.panel_estimate_mesh_error = False
+
+    @dataclasses.dataclass
+    class _MySettings(SolverSettings):
+        extra: int = 3
+
+    sub = _MySettings(n_panels=6, panel_kutta="pressure", extra=7).clone()
+    assert isinstance(sub, _MySettings) and sub.extra == 7 and sub.panel_kutta == "pressure"
+
+    ac = _simple_wing(shape="0012", semi_span=3.0, chord=1.0)
+    cond = FlightCondition(V_inf=25.0, alpha=np.radians(3.0))
+    for res in (make_solver("panel3d").solve(ac, cond, st), vt.analyze(ac, condition=cond, settings=st)):
+        assert res.details["panel_result"].kutta == "pressure"
+        assert res.iterations >= 1
+        assert res.details["dispatch"]["backend"] == "numba"
+        assert res.details["panel"]["wake_length"] == 12.5
+        assert res.details["panel"]["chord_spacing"] == "uniform"
+
+    for name, value in (("panel_kutta", "linear"), ("panel_backend", "cuda"), ("panel_chord_spacing", "sine")):
+        bad = SolverSettings(n_panels=6, n_chord=6)
+        setattr(bad, name, value)
+        with pytest.raises(ValueError, match=name):
+            make_solver("panel3d").solve(ac, cond, bad)
+
+
+def test_default_chord_spacing_is_cosine():
+    """The panel solver clusters the chordwise panels with cosine spacing by default.
+
+    The vortex lattice keeps its own default (``chord_spacing``,
+    uniform); the panel solver reads ``panel_chord_spacing``.
+    """
+    ac = _simple_wing(shape="0012", semi_span=3.0, chord=1.0)
+    cond = FlightCondition(V_inf=25.0, alpha=np.radians(3.0))
+    st = SolverSettings(n_panels=6, n_chord=8)
+    assert st.chord_spacing == "uniform"
+    res = make_solver("panel3d").solve(ac, cond, st)
+    assert res.details["panel"]["chord_spacing"] == "cosine"
+    nodes = np.asarray(res.details["mesh"].nodes)
+    root = nodes[np.abs(nodes[:, 1]) < 1e-12]
+    x_root = np.unique(np.round(root[:, 0], 12))
+    x_cos = 0.5 * (1.0 - np.cos(np.pi * np.arange(0, 9) / 8.0))
+    assert np.allclose(x_root, x_cos, atol=1e-12)
+
+
+def test_ground_keyword_is_honoured():
+    """An explicit ground plane gives the same result as condition.h, as for the VLM."""
+    from ventorum.aero.system import GroundPlane, ground_normal
+
+    solver = make_solver("panel3d")
+    ac = _simple_wing(shape="0012", semi_span=3.0, chord=1.0)
+    st = SolverSettings(n_panels=6, n_chord=6)
+    alpha = np.radians(4.0)
+    res_h = solver.solve(ac, FlightCondition(V_inf=30.0, alpha=alpha, h=0.6), st)
+    k_g = ground_normal(alpha, 0.0, 0.0)
+    plane = GroundPlane(normal=k_g, offset=float(np.dot(ac.moment_reference(), k_g) - 0.6))
+    res_g = solver.solve(ac, FlightCondition(V_inf=30.0, alpha=alpha), st, ground=plane)
+    res_free = solver.solve(ac, FlightCondition(V_inf=30.0, alpha=alpha), st)
+    assert res_g.totals.CL == pytest.approx(res_h.totals.CL, rel=1e-12)
+    assert res_g.totals.CDi == pytest.approx(res_h.totals.CDi, rel=1e-12)
+    assert res_g.details["h_min"] == pytest.approx(res_h.details["h_min"], rel=1e-12)
+    assert res_g.totals.CL > res_free.totals.CL
+
+
+def test_gpu_auto_selection_follows_the_lattice_rule(monkeypatch):
+    """Backend "auto" follows the device and precision selection of ventorum.gpu."""
+    from ventorum import gpu
+
+    solver = make_solver("panel3d")
+    st = SolverSettings()
+    monkeypatch.setattr(gpu, "get_precision", lambda: "float64")
+
+    monkeypatch.setattr(gpu, "get_device", lambda: "cpu")
+    assert solver._resolve_backend(st, 5000, 1, False)[:3] == ("numpy", "cpu", "float64")
+
+    monkeypatch.setattr(gpu, "get_device", lambda: "auto")
+    seen = {}
+
+    def fake_use_gpu(work, family="vlm", n_cases=1, n_panels=None, return_reason=False):
+        seen["work"] = work
+        decision = work >= 1.0e6
+        return (decision, "auto: test rule") if return_reason else decision
+
+    monkeypatch.setattr(gpu, "use_gpu", fake_use_gpu)
+    backend, device, precision, reason = solver._resolve_backend(st, 5000, 2, True)
+    assert (backend, device, precision) == ("gpu", "gpu", "float64")
+    assert seen["work"] == 2 * 5000 * 5000 * 2.0
+    assert reason == "auto: test rule"
+    assert solver._resolve_backend(st, 100, 1, False)[:3] == ("numpy", "cpu", "float64")
+
+    monkeypatch.setattr(gpu, "get_precision", lambda: "float32")
+    explicit = SolverSettings(panel_backend="gpu")
+    assert solver._resolve_backend(explicit, 10, 1, False)[:3] == ("gpu", "gpu", "float32")
+
+
+def test_strip_map_covers_every_panel_of_a_control_mesh():
+    """Every panel of a mesh with a deflected control maps to exactly one lattice strip.
+
+    The control surface adds hinge nodes and side closures, so the panel
+    order of a plain wing does not hold. The map assigns each panel by the
+    position of its centroid between the station planes of the strips.
+    """
+    from ventorum.core.datatypes import ControlSurface
+    from ventorum.geometry.lattice import _surface_eta, resolve_spacing
+    from ventorum.panel3d.mesh import mesh_lifting_surface
+    from ventorum.solvers.panel3d import _surface_strip_maps
+
+    surf = LiftingSurface(
+        name="Wing",
+        semi_span=4.0,
+        sections=[WingSection(y_frac=0.0, chord=1.0), WingSection(y_frac=1.0, chord=1.0)],
+        is_symmetric=True,
+        controls=[ControlSurface(name="flap", eta_start=0.3, eta_end=0.7, hinge_x_c=0.7,
+                                 deflection=np.radians(5.0), symmetric=True)],
+    )
+    n_span = 6
+    eta_e, _ = _surface_eta(surf, n_span, resolve_spacing(surf.spacing or "auto", surf, "vlm"))
+    for half in (False, True):
+        mesh = mesh_lifting_surface(surf, _naca0012_coords(81), n_chord=6, n_span=n_span, half=half)
+        right, left = _surface_strip_maps(mesh, surf, n_span, np.asarray(eta_e), 0, half)
+        mapped = [p for strip in right for p in strip]
+        if left is not None:
+            mapped += [p for strip in left for p in strip]
+        assert sorted(mapped) == list(range(len(mesh.panels)))
+        centroids = np.mean(np.asarray(mesh.nodes)[np.asarray(mesh.panels)], axis=1)
+        y_e = np.asarray(eta_e) * surf.semi_span
+        for j, strip in enumerate(right):
+            y = centroids[strip, 1]
+            assert np.all(y >= y_e[j] - 1e-9) and np.all(y <= y_e[j + 1] + 1e-9)
+        if left is not None:
+            for k, strip in enumerate(left):
+                j = n_span - 1 - k
+                y = -centroids[strip, 1]
+                assert np.all(y >= y_e[j] - 1e-9) and np.all(y <= y_e[j + 1] + 1e-9)
