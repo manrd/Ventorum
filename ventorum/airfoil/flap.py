@@ -53,7 +53,8 @@ the nodes near the hinge after the construction above.
   neighbours). Rule 2: a node with a
   turning angle above 5 deg is removed when this lowers the largest
   turning angle of the node and its two neighbours and the new panel is
-  at most 2 times the mean length of its neighbour panels.
+  at most 1.5 times the mean length of its neighbour panels (the
+  adjacent panel length limit of ``repanel``).
   The kept nodes do not move, so the outline changes only by the chords
   that replace the removed nodes. The panel count goes down by the
   number of removed nodes.
@@ -129,7 +130,7 @@ _MERGE_MIN_FRACTION = 0.5
 #: "merge": turning angle above which a corner node is a candidate [deg].
 _MERGE_MAX_TURN_DEG = 5.0
 #: "merge": largest new panel length over the mean length of its neighbours [-].
-_MERGE_MAX_STRETCH = 2.0
+_MERGE_MAX_STRETCH = 1.5
 
 
 def _as_coords(coords: np.ndarray) -> np.ndarray:
@@ -683,7 +684,7 @@ def _merge_hinge_nodes(out: np.ndarray, xh: float, protect: tuple[int, ...] = ()
     2. Corners. A removable node whose turning angle is larger than
        ``_MERGE_MAX_TURN_DEG`` (5 deg) is removed when this lowers the
        largest turning angle of the node and its two neighbours and the
-       new panel is at most ``_MERGE_MAX_STRETCH`` (2) times the mean
+       new panel is at most ``_MERGE_MAX_STRETCH`` (1.5) times the mean
        length of its neighbour panels. The node with the largest turning
        angle is tried first; one node goes per pass, then rule 1 runs
        again.

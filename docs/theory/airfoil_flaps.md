@@ -96,9 +96,12 @@ default is "none".
      line through its own neighbours goes.
   2. Corners. A node with a turning angle above 5 deg is removed when
      this lowers the largest turning angle of the node and its two
-     neighbours, and the new panel is at most 2 times the mean length of
-     its neighbour panels. The node with the largest turning angle goes
-     first, one node per pass.
+     neighbours, and the new panel is at most 1.5 times the mean length
+     of its neighbour panels (the adjacent panel length limit of
+     `repanel`). The node with the largest turning angle goes first, one
+     node per pass. A longer panel at the hinge corner makes the viscous
+     solution harder, so the stretch limit stops corner removal on
+     coarse input; rule 1 still smooths the corners there.
 
   A removal that makes the polygon touch or cross itself is not done.
   The kept nodes do not move: the outline changes only where a chord
