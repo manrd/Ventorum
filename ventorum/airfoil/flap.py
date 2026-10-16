@@ -36,6 +36,44 @@ surface (see ``docs/theory/control_surfaces.md``).
 
 The construction is pure geometry. It models no aerodynamics.
 
+Hinge treatments: the option ``hinge_treatment`` selects what happens to
+the nodes near the hinge after the construction above.
+
+* "none" (default): the outline stays as constructed. At small
+  deflections the hinge-line joint on the compressed side can be a very
+  short panel between two corners of about 90 deg, and the inserted
+  hinge-station points can make short panels next to the input points.
+* "merge": nodes in the hinge zone (|x - x_hinge| < 0.05 chord units,
+  never the trailing-edge or the leading-edge nodes) are removed by two
+  rules. Rule 1: no panel with a removable end is shorter than 0.5 times
+  the mean length of its two neighbour panels; of the two ends of a
+  short panel, the node nearest to the line through its own neighbours
+  goes (point elimination after Visvalingam and Whyatt, 1993, with the
+  distance in place of their triangle area). Rule 2: a node with a
+  turning angle above 5 deg is removed when this lowers the largest
+  turning angle of the node and its two neighbours and the new panel is
+  at most 2 times the mean length of its neighbour panels.
+  The kept nodes do not move, so the outline changes only by the chords
+  that replace the removed nodes. The panel count goes down by the
+  number of removed nodes.
+* "repanel": rule 1 of "merge" removes the short panels (the two hinge
+  nodes are kept), then a parametric not-a-knot cubic spline
+  (:class:`ventorum.airfoil.paneling.AirfoilSpline`) goes through the
+  remaining points, and the nodes are distributed again along it with
+  the weight function of :func:`ventorum.airfoil.paneling.repanel` in one
+  pass. The trailing-edge points, the leading edge of the spline and the
+  hinge node of each surface (the crossing point on a cut side, else the
+  point of the surface at the hinge station) stay nodes. The panel count
+  is the input count, or ``n_panels``. The spline rounds the corners at
+  the hinge, so the surface near the hinge moves; the theory page
+  ``docs/theory/airfoil_flaps.md`` gives the tested bound of the
+  deviation from the deflected outline.
+
+All treatments keep the trailing-edge points as the exact rotated input
+points and check that the result is a simple polygon with a positive
+area. "none" and "merge" keep the fixed part (x < x_hinge - 0.05)
+unchanged.
+
 References
 ----------
 * H. Glauert, The Elements of Aerofoil and Airscrew Theory, Cambridge
@@ -47,6 +85,13 @@ References
 * I. H. Abbott and A. E. von Doenhoff, Theory of Wing Sections, Dover,
   1959: airfoil section geometry and the NACA 4-digit profile equations
   used in the tests.
+* C. de Boor, A Practical Guide to Splines, Springer, 1978, chapter IV:
+  the not-a-knot cubic spline of the "repanel" treatment.
+* M. Visvalingam and J. D. Whyatt, Line generalisation by repeated
+  elimination of points, The Cartographic Journal 30(1), 1993, pp.
+  46-51: point elimination by a measure of the node and its neighbours
+  ("merge" treatment, here with the distance of the node to the line
+  through its neighbours).
 """
 
 from __future__ import annotations
@@ -55,6 +100,8 @@ import math
 import operator
 
 import numpy as np
+from scipy.interpolate import PchipInterpolator
+from scipy.ndimage import gaussian_filter1d
 
 from ventorum.airfoil.geometry import (
     AirfoilGeometryError,
@@ -62,13 +109,31 @@ from ventorum.airfoil.geometry import (
     polygon_self_intersection,
 )
 
-__all__ = ["deflect_plain_flap", "flap_hinge_point"]
+__all__ = ["HINGE_TREATMENTS", "deflect_plain_flap", "flap_hinge_point"]
+
+#: Names of the hinge treatments of :func:`deflect_plain_flap` [-].
+HINGE_TREATMENTS = ("none", "repanel", "merge")
 
 _X_HINGE_MIN = 0.05
 _X_HINGE_MAX = 0.98
 _MAX_DEFLECTION_DEG = 60.0
 _DEDUPE_TOL = 1e-14
 _CROSS_EPS = 1e-9
+#: Half width of the hinge zone, and the margin of the fixed part [chord units].
+_FIXED_MARGIN = 0.05
+#: Smallest panel count of the "repanel" treatment [-] (one panel per part).
+_MIN_PANELS = 4
+#: Weight function values of the "repanel" treatment [-] (the defaults of
+#: :func:`ventorum.airfoil.paneling.repanel`).
+_LE_REFINEMENT = 4.0
+_TE_REFINEMENT = 3.0
+_CURVATURE_WEIGHT = 2.0
+#: "merge": smallest panel length over the mean length of its neighbours [-].
+_MERGE_MIN_FRACTION = 0.5
+#: "merge": turning angle above which a corner node is a candidate [deg].
+_MERGE_MAX_TURN_DEG = 5.0
+#: "merge": largest new panel length over the mean length of its neighbours [-].
+_MERGE_MAX_STRETCH = 2.0
 
 
 def _as_coords(coords: np.ndarray) -> np.ndarray:
@@ -209,7 +274,12 @@ def _hinge_from_surfaces(upper: np.ndarray, lower: np.ndarray, xh: float, yh: fl
 
 
 def _rotate_points(pts: np.ndarray, hinge: np.ndarray, cos_t: float, sin_t: float) -> np.ndarray:
-    """Rotate points about the hinge by the angle of (cos_t, sin_t)."""
+    """Rotate points about the hinge by the angle of (cos_t, sin_t).
+
+    A zero angle returns a copy, so the points do not change by round-off.
+    """
+    if cos_t == 1.0 and sin_t == 0.0:
+        return pts.copy()
     d = pts - hinge
     return hinge + np.column_stack([cos_t * d[:, 0] - sin_t * d[:, 1],
                                    sin_t * d[:, 0] + cos_t * d[:, 1]])
@@ -307,12 +377,16 @@ def _default_arc_count(fixed: np.ndarray, moved: np.ndarray, hinge: np.ndarray) 
 
 def _deflect_surface(surf: np.ndarray, xh: float, hinge: np.ndarray,
                      cos_t: float, sin_t: float, n_arc: int | None,
-                     compressed: bool) -> np.ndarray:
+                     compressed: bool) -> tuple[np.ndarray, np.ndarray]:
     """Deflect one surface given from the leading to the trailing edge.
 
     ``compressed`` is True for the side that the rotation compresses
     (the lower surface for trailing edge down). That side is cut; the
     other side gets the filler arc.
+
+    Returns the deflected surface [chord units] and its hinge node
+    [chord units]: the crossing point on a cut side, else the point of
+    the fixed surface at the hinge station.
     """
     xs = surf[:, 0]
     k0 = _aft_start(xs, xh)
@@ -329,16 +403,43 @@ def _deflect_surface(surf: np.ndarray, xh: float, hinge: np.ndarray,
         hit = _crossing(fixed, moved)
         if hit is not None:
             i, j, point = hit
-            return _without_close_dups(np.vstack([fixed[: i + 1], point, moved[j + 1:]]))
+            return _without_close_dups(np.vstack([fixed[: i + 1], point, moved[j + 1:]])), point
         j, point = _hinge_line_cut(moved, xh)
-        return _without_close_dups(np.vstack([fixed, point, moved[j + 1:]]))
+        return _without_close_dups(np.vstack([fixed, point, moved[j + 1:]])), fixed[-1]
     n = n_arc if n_arc is not None else _default_arc_count(fixed, moved, hinge)
     arc = _hinge_arc(fixed[-1], moved[0], hinge, n)
-    return _without_close_dups(np.vstack([fixed, arc[1:-1], moved]))
+    return _without_close_dups(np.vstack([fixed, arc[1:-1], moved])), fixed[-1]
+
+
+def _check_treatment(hinge_treatment: str) -> str:
+    """Return the hinge treatment name [-] after a check."""
+    if not isinstance(hinge_treatment, str) or hinge_treatment not in HINGE_TREATMENTS:
+        raise ValueError(
+            f"hinge_treatment must be one of {', '.join(repr(t) for t in HINGE_TREATMENTS)}; "
+            f"got {hinge_treatment!r}."
+        )
+    return hinge_treatment
+
+
+def _check_panel_count(n_panels: int | None, treatment: str) -> int | None:
+    """Return the panel count [-] of the repanel treatment after checks."""
+    if n_panels is None:
+        return None
+    if treatment != "repanel":
+        raise ValueError("n_panels applies only to hinge_treatment='repanel'.")
+    try:
+        n = operator.index(n_panels)
+    except TypeError:
+        raise ValueError(f"n_panels must be an integer of at least {_MIN_PANELS}.") from None
+    if n < _MIN_PANELS:
+        raise ValueError(f"n_panels must be an integer of at least {_MIN_PANELS}.")
+    return n
 
 
 def deflect_plain_flap(coords: np.ndarray, x_hinge: float, deflection: float,
-                       y_hinge: float = 0.5, n_arc: int | None = None) -> np.ndarray:
+                       y_hinge: float = 0.5, n_arc: int | None = None,
+                       hinge_treatment: str = "none",
+                       n_panels: int | None = None) -> np.ndarray:
     """Deflect a plain flap by rotating the points aft of the hinge.
 
     Parameters
@@ -358,6 +459,19 @@ def deflect_plain_flap(coords: np.ndarray, x_hinge: float, deflection: float,
         Point count [-] of the filler arc on the stretched side,
         including both end points. None selects a count with arc panel
         lengths near the local panel length. Minimum 2.
+    hinge_treatment : {"none", "repanel", "merge"}
+        Treatment of the nodes near the hinge after the deflection [-].
+        "none" (default) keeps the deflected outline as constructed.
+        "repanel" fits a spline through the deflected outline and
+        redistributes all nodes on it, with a node kept at the hinge
+        node of each surface, at the leading edge and at the trailing
+        edge. "merge" removes nodes near the hinge until no panel there
+        is short and no isolated sharp corner remains; the kept nodes
+        do not move. The module docstring gives the rules and limits.
+    n_panels : int or None
+        Panel count [-] of the "repanel" treatment, at least 4. None
+        keeps the panel count of the input (N - 1). Only valid with
+        ``hinge_treatment="repanel"``.
 
     Returns
     -------
@@ -374,23 +488,270 @@ def deflect_plain_flap(coords: np.ndarray, x_hinge: float, deflection: float,
     AirfoilGeometryError
         If the deflected section is not a simple polygon with a positive
         area (a subclass of ValueError).
+
+    Notes
+    -----
+    A zero deflection returns a copy of the input with "none". With
+    "repanel" and "merge", a zero deflection applies the treatment to
+    the input with a node added at the hinge station of each surface, so
+    the result changes continuously with the deflection.
     """
     arr = _as_coords(coords)
     xh = _check_station(x_hinge)
     delta = _check_deflection(deflection)
     yh = _check_fraction(y_hinge)
     n = _check_arc_count(n_arc)
-    if delta == 0.0:
+    treatment = _check_treatment(hinge_treatment)
+    n_rep = _check_panel_count(n_panels, treatment)
+    if delta == 0.0 and treatment == "none":
         return arr.copy()
     upper, lower = _surfaces(arr)
     hinge = _hinge_from_surfaces(upper, lower, xh, yh)
     theta = -math.radians(delta)
     cos_t, sin_t = math.cos(theta), math.sin(theta)
-    upper_new = _deflect_surface(upper, xh, hinge, cos_t, sin_t, n, compressed=delta < 0.0)
-    lower_new = _deflect_surface(lower, xh, hinge, cos_t, sin_t, n, compressed=delta > 0.0)
+    upper_new, hinge_up = _deflect_surface(upper, xh, hinge, cos_t, sin_t, n, compressed=delta < 0.0)
+    lower_new, hinge_lo = _deflect_surface(lower, xh, hinge, cos_t, sin_t, n, compressed=delta > 0.0)
     out = np.vstack([upper_new[::-1], lower_new[1:]])
     _check_output(out, xh, delta, yh)
-    return out
+    if treatment == "none":
+        return out
+    i_le = upper_new.shape[0] - 1
+    k_up = int(np.argmin(np.linalg.norm(out[: i_le + 1] - hinge_up, axis=1)))
+    k_lo = i_le + int(np.argmin(np.linalg.norm(out[i_le:] - hinge_lo, axis=1)))
+    if treatment == "repanel":
+        count = arr.shape[0] - 1 if n_rep is None else n_rep
+        kept = _merge_hinge_nodes(out, xh, protect=(k_up, k_lo), corners=False)
+        result = _repanel_deflected(out[kept], (kept.index(k_up), kept.index(k_lo)), xh, count)
+    else:
+        result = out[_merge_hinge_nodes(out, xh)]
+    _check_output(result, xh, delta, yh)
+    return result
+
+
+def _split_at_breaks(grid: np.ndarray, weight: np.ndarray, breaks: np.ndarray,
+                     n_panels: int) -> tuple[np.ndarray, np.ndarray]:
+    """Equidistribute the weight between fixed arc-length breakpoints.
+
+    Each part between two breakpoints gets a panel count proportional to
+    its weight integral (largest remainder rounding, at least one panel
+    per part). Each part splits its integral into equal pieces. Returns
+    the node positions [chord units] and the node index of each
+    breakpoint [-].
+    """
+    step = np.diff(grid)
+    cum = np.concatenate([[0.0], np.cumsum(0.5 * (weight[1:] + weight[:-1]) * step)])
+    inverse = PchipInterpolator(cum, grid)
+    w_b = np.interp(breaks, grid, cum)
+    parts = np.diff(w_b)
+    raw = n_panels * parts / float(np.sum(parts))
+    counts = np.maximum(1, np.round(raw)).astype(int)
+    while int(np.sum(counts)) < n_panels:
+        counts[int(np.argmax(raw - counts))] += 1
+    while int(np.sum(counts)) > n_panels:
+        spare = np.where(counts > 1, raw - counts, np.inf)
+        counts[int(np.argmin(spare))] -= 1
+    pieces = []
+    for p in range(parts.size):
+        s = np.asarray(inverse(np.linspace(w_b[p], w_b[p + 1], counts[p] + 1)), dtype=float)
+        s[0] = breaks[p]
+        s[-1] = breaks[p + 1]
+        pieces.append(s if p == 0 else s[1:])
+    return np.concatenate(pieces), np.concatenate([[0], np.cumsum(counts)])
+
+
+def _repanel_deflected(out: np.ndarray, keep: tuple[int, int], xh: float,
+                       n_panels: int) -> np.ndarray:
+    """Repanel a deflected section on the spline through its points.
+
+    The parametric not-a-knot cubic spline of
+    :class:`ventorum.airfoil.paneling.AirfoilSpline` (de Boor, 1978,
+    chapter IV) passes through every point of ``out`` [chord units] (the
+    deflected outline after rule 1 of :func:`_merge_hinge_nodes`). The
+    new nodes equidistribute the weight
+    function of :func:`ventorum.airfoil.paneling.repanel` (default
+    refinement values) along the arc length of this spline, in one pass.
+    The breakpoints of the equidistribution are the trailing-edge ends,
+    the two hinge nodes ``keep`` (indices into ``out``) and the spline
+    leading edge, so these points stay nodes. The hinge and the
+    trailing-edge nodes are the exact input points.
+
+    The curvature term of the weight uses the peak curvature of the
+    fixed part (x < xh - 0.05) as reference and is clipped at 1, so the
+    corners at the hinge get the node density of the leading edge and do
+    not change the density elsewhere. The weight is smoothed until the
+    adjacent panel length ratio is at most 1.5, as in ``repanel``.
+    The repeated passes of ``repanel`` are not used: each pass fits a new
+    spline through the last nodes, and at the hinge corners this moves
+    the surface away from the deflected outline.
+    """
+    from ventorum.airfoil.paneling import (
+        _FINE_GRID,
+        _MAX_RATIO,
+        _MAX_SIGMA,
+        _MAX_SMOOTHING,
+        AirfoilSpline,
+        _adjacent_ratio,
+        _weight,
+    )
+
+    spline = AirfoilSpline(out)
+    s_pts = np.concatenate([[0.0], np.cumsum(np.linalg.norm(np.diff(out, axis=0), axis=1))])
+    length = spline.length
+    s_le = spline.s_leading_edge
+    k_up, k_lo = keep
+    breaks = np.array([0.0, s_pts[k_up], s_le, s_pts[k_lo], length])
+    if not np.all(np.diff(breaks) > 0.0):
+        raise AirfoilGeometryError(
+            "The hinge nodes and the leading edge are not in Selig order on the deflected section."
+        )
+    grid = np.linspace(0.0, length, _FINE_GRID)
+    kappa = np.asarray(spline.curvature(grid), dtype=float)
+    fixed = spline(grid)[:, 0] < xh - _FIXED_MARGIN
+    ref = float(np.max(kappa[fixed])) if np.any(fixed) else float(np.max(kappa))
+    curvature_norm = np.minimum(kappa / ref, 1.0) if ref > 0.0 else np.zeros_like(kappa)
+    weight = _weight(grid, curvature_norm, s_le, length, _LE_REFINEMENT, _TE_REFINEMENT,
+                     _CURVATURE_WEIGHT)
+    node_s, at = _split_at_breaks(grid, weight, breaks, n_panels)
+    sigma = 2.0
+    for _ in range(_MAX_SMOOTHING):
+        if _adjacent_ratio(spline(node_s)) <= _MAX_RATIO:
+            break
+        mean = float(np.mean(weight))
+        if float(np.ptp(weight)) <= 1e-12 * mean:
+            break
+        if sigma > _MAX_SIGMA:
+            weight = np.full_like(weight, mean)
+        else:
+            smooth = gaussian_filter1d(weight, sigma)
+            weight = 0.5 * (smooth + float(np.mean(smooth)))
+            sigma *= 1.5
+        node_s, at = _split_at_breaks(grid, weight, breaks, n_panels)
+    nodes = spline(node_s)
+    nodes[at[0]] = out[0]
+    nodes[at[1]] = out[k_up]
+    nodes[at[3]] = out[k_lo]
+    nodes[at[4]] = out[-1]
+    return nodes
+
+
+def _turn(p0: np.ndarray, p1: np.ndarray, p2: np.ndarray) -> float:
+    """Signed turning angle [rad] at p1 of the path p0, p1, p2 (left turn positive)."""
+    a = p1 - p0
+    b = p2 - p1
+    return math.atan2(a[0] * b[1] - a[1] * b[0], a[0] * b[0] + a[1] * b[1])
+
+
+def _chord_distance(p0: np.ndarray, p1: np.ndarray, p2: np.ndarray) -> float:
+    """Distance [chord units] from p1 to the line through p0 and p2."""
+    d = p2 - p0
+    norm = math.hypot(d[0], d[1])
+    if norm == 0.0:
+        return math.hypot(p1[0] - p0[0], p1[1] - p0[1])
+    return abs(d[0] * (p1[1] - p0[1]) - d[1] * (p1[0] - p0[0])) / norm
+
+
+def _neighbour_mean(lengths: np.ndarray, i: int) -> float:
+    """Mean length [chord units] of the panels next to panel i."""
+    near = [lengths[j] for j in (i - 1, i + 1) if 0 <= j < lengths.size]
+    return float(np.mean(near))
+
+
+def _merge_hinge_nodes(out: np.ndarray, xh: float, protect: tuple[int, ...] = (),
+                       corners: bool = True) -> list[int]:
+    """Return the indices of the nodes that stay after the merge rules.
+
+    The kept nodes do not move.
+
+    The removable nodes lie in the hinge zone |x - xh| < 0.05 [chord
+    units]; the trailing-edge nodes and the leading-edge node are never
+    removed. Two rules apply in turn until neither removes a node:
+
+    1. Short panels. A panel with a removable end is short when its
+       length is less than ``_MERGE_MIN_FRACTION`` (0.5) times the mean
+       length of its two neighbour panels. The shortest panel (by this
+       ratio) loses the end node that lies nearest to the line through
+       its own two neighbours (point elimination after Visvalingam and
+       Whyatt, 1993, with the distance in place of their triangle
+       area).
+    2. Corners. A removable node whose turning angle is larger than
+       ``_MERGE_MAX_TURN_DEG`` (5 deg) is removed when this lowers the
+       largest turning angle of the node and its two neighbours and the
+       new panel is at most ``_MERGE_MAX_STRETCH`` (2) times the mean
+       length of its neighbour panels. The node with the largest turning
+       angle is tried first; one node goes per pass, then rule 1 runs
+       again.
+
+    A removal that would make the polygon touch or cross itself is not
+    done. The nodes in ``protect`` (indices into ``out``) are never
+    removed. ``corners=False`` applies rule 1 only.
+    """
+    n = out.shape[0]
+    le = leading_edge_index(out)
+    removable = (np.abs(out[:, 0] - xh) < _FIXED_MARGIN)
+    removable[[0, n - 1, le, *protect]] = False
+    idx = list(range(n))
+    min_fraction = _MERGE_MIN_FRACTION
+    max_turn = math.radians(_MERGE_MAX_TURN_DEG)
+
+    def simple_without(pos: int) -> bool:
+        trial = out[idx[:pos] + idx[pos + 1:]]
+        return polygon_self_intersection(trial) is None
+
+    while True:
+        removed = False
+        # Rule 1: short panels.
+        pts = out[idx]
+        lengths = np.linalg.norm(np.diff(pts, axis=0), axis=1)
+        short = []
+        for i in range(lengths.size):
+            if not (removable[idx[i]] or removable[idx[i + 1]]):
+                continue
+            ratio = lengths[i] / _neighbour_mean(lengths, i)
+            if ratio < min_fraction:
+                short.append((ratio, i))
+        for _, i in sorted(short):
+            ends = [p for p in (i, i + 1) if removable[idx[p]]]
+            ends.sort(key=lambda p: _chord_distance(pts[p - 1], pts[p], pts[p + 1]))
+            for p in ends:
+                if simple_without(p):
+                    del idx[p]
+                    removed = True
+                    break
+            if removed:
+                break
+        if removed:
+            continue
+        if not corners:
+            break
+        # Rule 2: isolated sharp corners.
+        pts = out[idx]
+        m = len(idx)
+        turns = np.zeros(m)
+        for p in range(1, m - 1):
+            turns[p] = _turn(pts[p - 1], pts[p], pts[p + 1])
+        order = sorted((p for p in range(1, m - 1)
+                        if removable[idx[p]] and abs(turns[p]) > max_turn),
+                       key=lambda p: -abs(turns[p]))
+        for p in order:
+            before = max(abs(turns[p - 1]), abs(turns[p]), abs(turns[p + 1]))
+            after = 0.0
+            if p - 1 >= 1:
+                after = max(after, abs(_turn(pts[p - 2], pts[p - 1], pts[p + 1])))
+            if p + 1 <= m - 2:
+                after = max(after, abs(_turn(pts[p - 1], pts[p + 1], pts[p + 2])))
+            if after >= before:
+                continue
+            new_len = float(np.linalg.norm(pts[p + 1] - pts[p - 1]))
+            near = [float(np.linalg.norm(pts[q + 1] - pts[q])) for q in (p - 2, p + 1) if 0 <= q < m - 1]
+            if new_len > _MERGE_MAX_STRETCH * float(np.mean(near)):
+                continue
+            if simple_without(p):
+                del idx[p]
+                removed = True
+                break
+        if not removed:
+            break
+    return idx
 
 
 def _check_output(out: np.ndarray, xh: float, delta: float, yh: float) -> None:
