@@ -102,10 +102,12 @@ class AirfoilShape:
 
     @property
     def leading_edge_index(self) -> int:
-        """Index of the point farthest from the trailing-edge midpoint."""
-        mid = self._te_midpoint
-        dist = np.linalg.norm(self.coords - mid, axis=1)
-        return int(np.argmax(dist))
+        """Index of the point farthest from the trailing-edge midpoint.
+
+        This is the package definition of the leading edge on a point
+        polygon (see :func:`leading_edge_index`).
+        """
+        return leading_edge_index(self.coords)
 
     @property
     def chord(self) -> float:
@@ -439,8 +441,10 @@ class AirfoilShape:
             Flap deflection [deg], positive when the trailing edge moves
             down. Values satisfy |deflection| <= 60.
         y_hinge : float
-            Hinge height as a fraction [-] of the local thickness.
-            Default 0.5.
+            Hinge height as a fraction [-] of the local thickness at
+            ``x_hinge``, from the lower surface (0) to the upper surface
+            (1). Default 0.5 (mid-thickness). This is the one hinge-height
+            definition of the package (``docs/theory/airfoils.md``).
         n_arc : int or None
             Point count [-] of the filler arc on the stretched side.
             None selects the default of the array function.
@@ -448,7 +452,14 @@ class AirfoilShape:
         Returns
         -------
         AirfoilShape
-            Deflected copy (coordinates [chord units]) in Selig order.
+            Deflected copy (coordinates [chord units]) in Selig order, a
+            simple polygon.
+
+        Raises
+        ------
+        ValueError
+            If an input is out of range, or the deflected section is not
+            a simple polygon (:class:`AirfoilGeometryError`).
         """
         from ventorum.airfoil.flap import deflect_plain_flap as _deflect_array
 
@@ -487,55 +498,123 @@ class AirfoilShape:
 
     def _self_intersection(self) -> tuple[int, int] | None:
         """Return the first pair of crossing segments, or None."""
-        pts = self.coords
-        nseg = pts.shape[0] - 1
-        if nseg < 4:
-            return None
-        closed = self.is_closed
-        for i in range(nseg):
-            p1, p2 = pts[i], pts[i + 1]
-            if float(np.linalg.norm(p2 - p1)) <= 1e-14:
-                continue
-            for j in range(i + 2, nseg):
-                if i == 0 and j == nseg - 1 and closed:
-                    continue
-                p3, p4 = pts[j], pts[j + 1]
-                if float(np.linalg.norm(p4 - p3)) <= 1e-14:
-                    continue
-                if _segments_cross(p1, p2, p3, p4):
-                    return (i, j)
+        return polygon_self_intersection(self.coords)
+
+
+def leading_edge_index(coords: np.ndarray) -> int:
+    """Return the index of the leading-edge point of a section polygon.
+
+    The leading edge is the point farthest from the trailing-edge
+    midpoint, the midpoint of the first and the last point. This is the
+    one definition of the leading edge in the airfoil package. On a
+    point polygon it selects a stored point (:class:`AirfoilShape`, the
+    surface split of the flap functions). On a spline it is the point
+    where the distance to the trailing-edge midpoint has its maximum,
+    so the tangent is normal to the line to that midpoint
+    (:attr:`ventorum.airfoil.paneling.AirfoilSpline.s_leading_edge`).
+
+    Parameters
+    ----------
+    coords : numpy.ndarray
+        Section points [chord units], shape (N, 2), in Selig order.
+
+    Returns
+    -------
+    int
+        Index of the leading-edge point [-].
+    """
+    pts = np.asarray(coords, dtype=float)
+    if pts.ndim != 2 or pts.shape[1] != 2 or pts.shape[0] == 0:
+        raise AirfoilGeometryError(
+            f"Airfoil coordinates must have shape (N, 2) with N > 0; got {pts.shape}."
+        )
+    mid = 0.5 * (pts[0] + pts[-1])
+    return int(np.argmax(np.linalg.norm(pts - mid, axis=1)))
+
+
+#: Row block size of the vectorized segment-pair test [-].
+_PAIR_BLOCK = 256
+
+
+def polygon_self_intersection(coords: np.ndarray, tol: float = 1e-14) -> tuple[int, int] | None:
+    """Return the first pair of crossing or touching polygon edges, or None.
+
+    The polygon closes from the last point to the first point. When the
+    first and the last point are equal (a closed trailing edge), the
+    repeated point is dropped. Edges that share an end point (neighbours
+    in the ring) are not tested. An edge of zero length is skipped. Two
+    edges fail when they cross, or when an end point of one edge lies on
+    the other edge (orientation test with the tolerance ``tol``).
+
+    Parameters
+    ----------
+    coords : numpy.ndarray
+        Polygon points [chord units], shape (N, 2).
+    tol : float
+        Tolerance [chord^2] of the orientation test. Default 1e-14.
+
+    Returns
+    -------
+    tuple of int or None
+        Indices (i, j), i < j, of the first failing edge pair in row
+        order, where edge k runs from point k to point k + 1 of the
+        ring, or None for a simple polygon.
+    """
+    pts = np.asarray(coords, dtype=float)
+    if pts.shape[0] >= 2 and float(np.linalg.norm(pts[0] - pts[-1])) <= 1e-12:
+        pts = pts[:-1]
+    m = pts.shape[0]
+    if m < 4:
         return None
+    a = pts
+    b = np.roll(pts, -1, axis=0)
+    good = np.linalg.norm(b - a, axis=1) > 1e-14
+    lo = np.minimum(a, b)
+    hi = np.maximum(a, b)
+    cols = np.arange(m)
+    for start in range(0, m, _PAIR_BLOCK):
+        rows = np.arange(start, min(start + _PAIR_BLOCK, m))
+        ii = np.repeat(rows, m)
+        jj = np.tile(cols, rows.size)
+        keep = (jj >= ii + 2) & ~((ii == 0) & (jj == m - 1)) & good[ii] & good[jj]
+        ii = ii[keep]
+        jj = jj[keep]
+        boxes = np.all(lo[ii] <= hi[jj] + tol, axis=1) & np.all(lo[jj] <= hi[ii] + tol, axis=1)
+        ii = ii[boxes]
+        jj = jj[boxes]
+        if ii.size == 0:
+            continue
+        p1, p2, p3, p4 = a[ii], b[ii], a[jj], b[jj]
+        d1 = _orient(p3, p4, p1)
+        d2 = _orient(p3, p4, p2)
+        d3 = _orient(p1, p2, p3)
+        d4 = _orient(p1, p2, p4)
+        proper = (((d1 > 0.0) & (d2 < 0.0)) | ((d1 < 0.0) & (d2 > 0.0))) & (
+            ((d3 > 0.0) & (d4 < 0.0)) | ((d3 < 0.0) & (d4 > 0.0))
+        )
+        touch = (
+            ((np.abs(d1) <= tol) & _within(p3, p1, p4, tol))
+            | ((np.abs(d2) <= tol) & _within(p3, p2, p4, tol))
+            | ((np.abs(d3) <= tol) & _within(p1, p3, p2, tol))
+            | ((np.abs(d4) <= tol) & _within(p1, p4, p2, tol))
+        )
+        bad = np.nonzero(proper | touch)[0]
+        if bad.size:
+            k = int(bad[0])
+            return int(ii[k]), int(jj[k])
+    return None
 
 
-def _orientation(a: np.ndarray, b: np.ndarray, c: np.ndarray) -> float:
-    """Signed area of the triangle (a, b, c) [chord^2]."""
-    return float((b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0]))
+def _orient(a: np.ndarray, b: np.ndarray, c: np.ndarray) -> np.ndarray:
+    """Signed doubled area of the triangles (a, b, c) [chord^2], row by row."""
+    return (b[:, 0] - a[:, 0]) * (c[:, 1] - a[:, 1]) - (b[:, 1] - a[:, 1]) * (c[:, 0] - a[:, 0])
 
 
-def _on_segment(a: np.ndarray, b: np.ndarray, c: np.ndarray) -> bool:
-    """Return True when *b* is collinear with segment a-c and lies in its box."""
-    return bool(
-        min(a[0], c[0]) - 1e-14 <= b[0] <= max(a[0], c[0]) + 1e-14
-        and min(a[1], c[1]) - 1e-14 <= b[1] <= max(a[1], c[1]) + 1e-14
+def _within(a: np.ndarray, p: np.ndarray, c: np.ndarray, tol: float) -> np.ndarray:
+    """Return True where the point p lies in the box of the segment a-c, row by row."""
+    return (
+        (np.minimum(a[:, 0], c[:, 0]) - tol <= p[:, 0])
+        & (p[:, 0] <= np.maximum(a[:, 0], c[:, 0]) + tol)
+        & (np.minimum(a[:, 1], c[:, 1]) - tol <= p[:, 1])
+        & (p[:, 1] <= np.maximum(a[:, 1], c[:, 1]) + tol)
     )
-
-
-def _segments_cross(p1: np.ndarray, p2: np.ndarray, p3: np.ndarray, p4: np.ndarray) -> bool:
-    """Return True when the closed segments p1-p2 and p3-p4 meet away from shared ends."""
-    d1 = _orientation(p3, p4, p1)
-    d2 = _orientation(p3, p4, p2)
-    d3 = _orientation(p1, p2, p3)
-    d4 = _orientation(p1, p2, p4)
-    if ((d1 > 0.0 and d2 < 0.0) or (d1 < 0.0 and d2 > 0.0)) and (
-        (d3 > 0.0 and d4 < 0.0) or (d3 < 0.0 and d4 > 0.0)
-    ):
-        return True
-    if abs(d1) <= 1e-14 and _on_segment(p3, p1, p4):
-        return True
-    if abs(d2) <= 1e-14 and _on_segment(p3, p2, p4):
-        return True
-    if abs(d3) <= 1e-14 and _on_segment(p1, p3, p2):
-        return True
-    if abs(d4) <= 1e-14 and _on_segment(p1, p4, p2):
-        return True
-    return False
