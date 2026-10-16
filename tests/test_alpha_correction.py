@@ -3,31 +3,37 @@
 
 from __future__ import annotations
 
+import os
 import shutil
+
 import numpy as np
 import pytest
 
+from ventorum.aero.parasite import MU_SL
+from ventorum.aero.polar_cache import PolarCache
 from ventorum.aero.polar_source import XfoilPolarSource
-from ventorum.aero.xfoil_runner import xfoil_version
 from ventorum.core.datatypes import (
+    ControlSurface,
     FlightCondition,
     LiftingSurface,
+    LinearAirfoil,
     SolverSettings,
     TabulatedAirfoil,
     WingSection,
 )
+from ventorum.geometry.controls import flap_effectiveness
 from ventorum.viscous.alpha_correction import solve_viscous
 
 
-def make_rectangular_wing(aspect_ratio: float = 8.0, chord: float = 1.0) -> LiftingSurface:
+def make_rectangular_wing(aspect_ratio: float = 8.0, chord: float = 1.0, shape=None) -> LiftingSurface:
     """Return a rectangular wing of given aspect ratio and chord."""
     semi_span = 0.5 * aspect_ratio * chord
     return LiftingSurface(
         name="RectangularWing",
         semi_span=semi_span,
         sections=[
-            WingSection(y_frac=0.0, chord=chord),
-            WingSection(y_frac=1.0, chord=chord),
+            WingSection(y_frac=0.0, chord=chord, shape=shape),
+            WingSection(y_frac=1.0, chord=chord, shape=shape),
         ],
         sweep_le=0.0,
         dihedral=0.0,
@@ -151,18 +157,23 @@ def test_stalling_polar_sweep_and_branches():
     for r in stalled_results:
         assert any(flag == "post-stall, non-unique" for flag in r.details["strip_flags"])
 
-    # At least one case shows two distinct branches
-    branched = [r for r in results if "branches" in r.details and len(r.details["branches"]) > 1]
-    if branched:
-        b0 = branched[0].details["branches"][0]
-        b1 = branched[0].details["branches"][1]
-        assert abs(b0.totals.CL - b1.totals.CL) > 1e-3
-        assert branched[0].totals.trust is not None
-        assert branched[0].totals.trust.factors.get("post_stall_branch", 0.0) > 0.0
+    # Below stall every angle converges.
+    for a, r in zip(alphas_deg, results):
+        if a <= 6.0:
+            assert r.converged, a
+    # Only converged solutions form branches; a non-converged result has none.
+    for r in results:
+        if not r.converged:
+            assert "branches" not in r.details
+            assert not r.details["non_unique"]
+        for b in r.details.get("branches", []):
+            assert b.converged
+    # The search for a second branch is tested on a polar with a known
+    # double solution in test_known_double_solution_finds_both_branches.
 
 
 def test_factorization_count_is_one():
-    """Verify that the system matrix factorization count is exactly 1 per geometry."""
+    """Verify that one condition makes exactly one factorization of the system matrix."""
     wing = make_rectangular_wing(aspect_ratio=8.0, chord=1.0)
     cond = FlightCondition(V_inf=30.0, alpha=np.radians(8.0))
     settings = SolverSettings()
@@ -194,12 +205,18 @@ def test_profile_drag_equals_span_integral():
     assert abs(res.totals.CD_total - (res.totals.CDi + res.totals.CDp)) < 1e-10
 
 
-def test_real_polar_naca2412_sweep():
-    """Sweep with real NACA 2412 polars (skipped when XFOIL is absent)."""
-    if shutil.which("xfoil") is None and xfoil_version() is None:
-        pytest.skip("XFOIL is not installed or not available in PATH.")
+_XFOIL_EXE = shutil.which(os.environ.get("VENTORUM_XFOIL", "xfoil"))
 
-    source = XfoilPolarSource()
+
+@pytest.mark.skipif(_XFOIL_EXE is None, reason="XFOIL executable not found")
+def test_real_polar_naca2412_sweep(tmp_path):
+    """Sweep with real NACA 2412 polars (skipped when XFOIL is absent).
+
+    Regression: the skip condition ``xfoil_version() is None`` was never
+    true; the test now skips when no executable is found and caches in a
+    scratch folder.
+    """
+    source = XfoilPolarSource(cache=PolarCache(tmp_path / "polars"))
     polar = source.polar("naca 2412", 1e6, np.linspace(-8.0, 22.0, 61))
 
     wing = LiftingSurface(
@@ -234,3 +251,437 @@ def test_real_polar_naca2412_sweep():
     cl_max_visc = cl_visc[k_max]
     cl_inv_at_same_angle = cl_inv[k_max]
     assert cl_max_visc < cl_inv_at_same_angle
+
+
+def test_xfoil_skip_condition_follows_the_executable(monkeypatch):
+    """The skip rule of the XFOIL test is the executable lookup, not the version text."""
+    from ventorum.aero import xfoil_runner
+
+    monkeypatch.setattr(xfoil_runner.subprocess, "run", lambda *a, **k: (_ for _ in ()).throw(OSError()))
+    xfoil_runner.xfoil_version.cache_clear()
+    # A missing XFOIL gives "unknown", never None: the old rule could not skip.
+    assert xfoil_runner.xfoil_version("no-such-xfoil") == "unknown"
+    xfoil_runner.xfoil_version.cache_clear()
+
+
+# ── Flaps: the flap is counted once ─────────────────────────────────────────
+
+FLAP_DEG = 10.0
+HINGE = 0.75
+
+
+def make_flapped_wing(eta=(0.0, 1.0), shape=None) -> LiftingSurface:
+    """AR 8 rectangular wing with a plain flap of 10 deg at 75 % chord."""
+    return LiftingSurface(
+        name="FlappedWing",
+        semi_span=4.0,
+        sections=[WingSection(y_frac=0.0, chord=1.0, shape=shape),
+                  WingSection(y_frac=1.0, chord=1.0, shape=shape)],
+        controls=[ControlSurface("flap", eta[0], eta[1], HINGE, np.radians(FLAP_DEG))],
+    )
+
+
+def thin_airfoil_coefficients(alpha_rad, flap_deg, x_hinge=HINGE):
+    """Thin-airfoil lift with the Glauert flap shift (2 pi slope)."""
+    tau = flap_effectiveness(x_hinge)
+    return 2.0 * np.pi * (np.asarray(alpha_rad) + tau * np.radians(flap_deg))
+
+
+class GlauertSource:
+    """Fake section polar source: thin-airfoil polars with the Glauert flap shift.
+
+    It records every call, so the tests see the section, the Reynolds
+    number, the flap tuple and the height that the coupling sends.
+    """
+
+    def __init__(self, supports_ground=False):
+        self.calls = []
+        self.supports_ground = supports_ground
+
+    def polar(self, section, Re, alphas_deg, *, mach=0.0, flap=None, **options):
+        self.calls.append({"section": section, "Re": Re, "flap": flap, **options})
+        alpha = np.radians(np.asarray(alphas_deg, dtype=float))
+        flap_deg = 0.0 if flap is None else float(flap[2])
+        x_hinge = HINGE if flap is None else float(flap[0])
+        return TabulatedAirfoil(
+            name="glauert", alpha=alpha, Cl_data=thin_airfoil_coefficients(alpha, flap_deg, x_hinge),
+            Cd_data=np.full(alpha.shape, 0.01), Cm_data=np.zeros(alpha.shape), Re=float(Re),
+        )
+
+
+def glauert_table(x_hinge=HINGE):
+    """Polar table over Re and flap deflection with thin-airfoil data."""
+    from ventorum.aero.polar_table import build_polar_table
+
+    return build_polar_table(
+        GlauertSource(), "naca 0012", [1e5, 1e7], list(np.arange(-15.0, 25.5, 0.5)),
+        flap_deg=[0.0, 5.0, 10.0], x_hinge=x_hinge, workers=1,
+    )
+
+
+def _thin_polar():
+    alpha = np.radians(np.linspace(-20.0, 25.0, 91))
+    return TabulatedAirfoil(name="thin", alpha=alpha, Cl_data=2.0 * np.pi * alpha,
+                            Cd_data=np.full(alpha.shape, 0.01), Cm_data=np.zeros(alpha.shape), Re=1e6)
+
+
+@pytest.mark.parametrize("eta", [(0.0, 1.0), (0.2, 0.6)])
+@pytest.mark.parametrize("kind", ["airfoil", "table", "source"])
+def test_flap_counted_once_llt(eta, kind):
+    """Thin-airfoil polars with the Glauert flap shift give the inviscid lifting line."""
+    from ventorum.solvers.factory import make_solver
+
+    wing = make_flapped_wing(eta, shape="0012")
+    cond = FlightCondition(V_inf=40.0, alpha=np.radians(2.0))
+    settings = SolverSettings()
+    polars = {"airfoil": _thin_polar(), "table": glauert_table(), "source": GlauertSource()}[kind]
+    inviscid = make_solver("linear").solve(wing, cond, settings).totals.CL
+    viscous = solve_viscous(wing, cond, settings, polars, model="llt")
+    assert viscous.converged
+    assert abs(viscous.totals.CL - inviscid) / inviscid < 1e-6
+
+
+@pytest.mark.parametrize("eta", [(0.0, 1.0), (0.2, 0.6)])
+@pytest.mark.parametrize("kind", ["airfoil", "table", "source"])
+def test_flap_counted_once_vlm(eta, kind):
+    """Regression: the VLM coupling counted the flap twice (CL 1.099 against 0.614).
+
+    The lattice already turns the panel normals behind the hinge. The
+    coupling now takes the zero-lift angle of each strip from the lattice
+    (2D discrete-vortex section of its chordwise panels), so a polar that
+    agrees with thin-airfoil theory gives the inviscid result. The
+    inviscid VLM flap lift converges with the chordwise panel count as
+    1 / n_chord (about 10 % low at 4 panels); the coupling reads the
+    flap lift from the polar, so it matches the converged inviscid value
+    (Richardson extrapolation of n_chord 8 and 16) within 1 % at every
+    n_chord.
+    """
+    from ventorum.solvers.factory import make_solver
+
+    wing = make_flapped_wing(eta, shape="0012")
+    cond = FlightCondition(V_inf=40.0, alpha=np.radians(2.0))
+    polars = {"airfoil": _thin_polar(), "table": glauert_table(), "source": GlauertSource()}[kind]
+    vlm = make_solver("vlm")
+    cl8 = vlm.solve(wing, cond, SolverSettings(n_chord=8)).totals.CL
+    cl16 = vlm.solve(wing, cond, SolverSettings(n_chord=16)).totals.CL
+    converged_inviscid = 2.0 * cl16 - cl8
+    visc4 = solve_viscous(wing, cond, SolverSettings(), polars, model="vlm")
+    visc16 = solve_viscous(wing, cond, SolverSettings(n_chord=16), polars, model="vlm")
+    assert visc4.converged and visc16.converged
+    assert abs(visc4.totals.CL - converged_inviscid) / converged_inviscid < 0.01
+    assert abs(visc16.totals.CL - converged_inviscid) / converged_inviscid < 0.01
+    # The coupled result does not depend on the chordwise panel count.
+    assert abs(visc4.totals.CL - visc16.totals.CL) / visc16.totals.CL < 0.005
+    # The double count gave +79 %.
+    inviscid4 = vlm.solve(wing, cond, SolverSettings()).totals.CL
+    assert visc4.totals.CL < 1.15 * inviscid4
+
+
+#: Measured relative CL difference (viscous with thin-airfoil polars minus
+#: inviscid VLM, both at the same n_chord) of the flapped AR 8 wing at
+#: alpha 2 deg: +0.081 (full span) and +0.061 (partial span) at n_chord
+#: 4. The bound has a small margin.
+SAME_MESH_DEVIATION_BOUND_NCHORD4 = 0.09
+
+
+@pytest.mark.parametrize("eta", [(0.0, 1.0), (0.2, 0.6)])
+def test_flap_vlm_same_mesh_deviation_is_the_lattice_flap_error(eta):
+    """What holds against the inviscid VLM at the same chordwise mesh.
+
+    With thin-airfoil polars (2 pi slope, Glauert flap shift) the coupled
+    VLM result is higher than the inviscid VLM result at the same n_chord:
+    the inviscid lattice flap lift is too low on a coarse chordwise mesh,
+    and the coupling takes the flap lift from the polar. The difference is
+    the chordwise discretization error of the lattice flap: it is below
+    9 % at n_chord 4 and halves when n_chord doubles (first-order
+    convergence). The comparison with the mesh-converged inviscid value is
+    in test_flap_counted_once_vlm (within 1 %). The owner decides which
+    reference the acceptance uses.
+    """
+    from ventorum.solvers.factory import make_solver
+
+    wing = make_flapped_wing(eta, shape="0012")
+    cond = FlightCondition(V_inf=40.0, alpha=np.radians(2.0))
+    vlm = make_solver("vlm")
+    deviation = {}
+    for n_chord in (4, 8, 16):
+        settings = SolverSettings(n_chord=n_chord)
+        inviscid = vlm.solve(wing, cond, settings).totals.CL
+        viscous = solve_viscous(wing, cond, settings, _thin_polar(), model="vlm")
+        assert viscous.converged
+        deviation[n_chord] = (viscous.totals.CL - inviscid) / inviscid
+    assert 0.0 < deviation[4] < SAME_MESH_DEVIATION_BOUND_NCHORD4
+    assert 0.4 < deviation[8] / deviation[4] < 0.6
+    assert 0.4 < deviation[16] / deviation[8] < 0.6
+
+
+def test_vlm_section_relation_of_a_clean_strip_is_thin_airfoil_theory():
+    wing = make_rectangular_wing(aspect_ratio=8.0)
+    res = solve_viscous(wing, FlightCondition(V_inf=40.0, alpha=np.radians(3.0)), SolverSettings(),
+                        _thin_polar(), model="vlm")
+    np.testing.assert_allclose(res.details["lift_slope_section"], 2.0 * np.pi, rtol=1e-12)
+    np.testing.assert_allclose(res.details["alpha0_section"], 0.0, atol=1e-12)
+
+
+def test_table_hinge_must_match_the_control():
+    wing = make_flapped_wing(shape="0012")
+    with pytest.raises(ValueError, match="hinge"):
+        solve_viscous(wing, FlightCondition(V_inf=40.0, alpha=np.radians(2.0)), SolverSettings(),
+                      glauert_table(x_hinge=0.7), model="llt")
+
+
+# ── Section polar source path ───────────────────────────────────────────────
+
+
+def test_source_gets_section_hinge_and_reynolds_number():
+    source = GlauertSource()
+    wing = make_flapped_wing((0.0, 0.5), shape="NACA 2412")
+    cond = FlightCondition(V_inf=30.0, alpha=np.radians(2.0), rho=0.9)
+    res = solve_viscous(wing, cond, SolverSettings(), source, model="llt")
+    assert res.converged
+    sections = {c["section"] for c in source.calls}
+    assert sections == {"naca 2412"}
+    flaps = {c["flap"] for c in source.calls}
+    # The hinge of the control and the thickness-fraction rule, not (0.75, 0.5) by default.
+    assert flaps == {None, (HINGE, 0.5, FLAP_DEG)}
+    # One viscosity constant in the package: ventorum.aero.parasite.MU_SL.
+    expected_re = 0.9 * 30.0 * 1.0 / MU_SL
+    assert all(c["Re"] == pytest.approx(expected_re, rel=1e-12) for c in source.calls)
+    assert all("height" not in c for c in source.calls)
+
+
+def test_source_uses_the_hinge_of_the_control():
+    source = GlauertSource()
+    wing = make_flapped_wing(shape="0012")
+    wing.controls[0].hinge_x_c = 0.7
+    solve_viscous(wing, FlightCondition(V_inf=40.0, alpha=np.radians(2.0)), SolverSettings(),
+                  source, model="llt")
+    assert {c["flap"] for c in source.calls} == {(0.7, 0.5, FLAP_DEG)}
+
+
+def test_source_without_section_shape_is_refused():
+    """Regression: a strip without a shape fell back silently to NACA 0012."""
+    wing = make_rectangular_wing()
+    with pytest.raises(ValueError, match="WingSection.shape"):
+        solve_viscous(wing, FlightCondition(V_inf=40.0, alpha=np.radians(2.0)), SolverSettings(),
+                      GlauertSource(), model="vlm")
+
+
+def test_source_section_from_airfoil_name_and_coordinates():
+    from ventorum.airfoil import airfoil
+
+    named = make_rectangular_wing()
+    for sec in named.sections:
+        sec.airfoil = LinearAirfoil(name="NACA 4412")
+    source = GlauertSource()
+    solve_viscous(named, FlightCondition(V_inf=40.0, alpha=np.radians(2.0)), SolverSettings(),
+                  source, model="llt")
+    assert {c["section"] for c in source.calls} == {"naca 4412"}
+    coords = airfoil("0012").coords
+    shaped = make_rectangular_wing()
+    for sec in shaped.sections:
+        sec.shape = coords
+    source = GlauertSource()
+    solve_viscous(shaped, FlightCondition(V_inf=40.0, alpha=np.radians(2.0)), SolverSettings(),
+                  source, model="llt")
+    assert all(isinstance(c["section"], np.ndarray) for c in source.calls)
+    np.testing.assert_allclose(source.calls[0]["section"], coords)
+
+
+def test_source_in_ground_gets_the_strip_height():
+    source = GlauertSource(supports_ground=True)
+    wing = make_rectangular_wing(shape="0012")
+    cond = FlightCondition(V_inf=40.0, alpha=np.radians(2.0), h=0.6)
+    res = solve_viscous(wing, cond, SolverSettings(), source, model="vlm")
+    assert res.converged
+    heights = [c["height"] for c in source.calls]
+    assert heights and all(h is not None for h in heights)
+    lattice = res.details["lattice"]
+    ground = res.details["ground"]
+    expected = ground.height(lattice.qc_mid) / lattice.chord
+    np.testing.assert_allclose(res.details["strip_h_over_c"], expected, rtol=1e-12)
+    assert min(heights) == pytest.approx(float(np.min(expected)), abs=1e-6)
+    # The 2D section of each strip has its images in the ground: steeper lift slope.
+    assert np.all(res.details["lift_slope_section"] > 2.0 * np.pi * 1.01)
+    # A free-air source gets no height and keeps the free-air section relation.
+    free_source = GlauertSource(supports_ground=False)
+    res_free = solve_viscous(wing, cond, SolverSettings(), free_source, model="vlm")
+    assert all("height" not in c for c in free_source.calls)
+    np.testing.assert_allclose(res_free.details["lift_slope_section"], 2.0 * np.pi, rtol=1e-9)
+
+
+def test_ventorum2d_source_works_in_the_coupling(monkeypatch, tmp_path):
+    """Regression: the Ventorum-2D source refused the keyword call of the coupling."""
+    from types import SimpleNamespace
+
+    import ventorum.aero.polar_source_v2d as v2d
+    from ventorum.aero.polar_source_v2d import Ventorum2DPolarSource
+
+    def fake_solve(bodies, alpha_deg, Re, **kwargs):
+        a = np.atleast_1d(np.asarray(alpha_deg, dtype=float))
+        return SimpleNamespace(alpha=a, Cl=2.0 * np.pi * np.radians(a), Cd=np.full(a.shape, 0.01),
+                               Cm=np.zeros(a.shape), converged=np.ones(a.shape, dtype=bool))
+
+    monkeypatch.setattr(v2d, "solve_viscous", fake_solve)
+    source = Ventorum2DPolarSource(cache=PolarCache(tmp_path))
+    wing = make_rectangular_wing(shape="0012")
+    cond = FlightCondition(V_inf=40.0, alpha=np.radians(3.0))
+    res = solve_viscous(wing, cond, SolverSettings(), source, model="llt")
+    assert res.converged
+    assert np.all(np.abs(res.details["delta"]) < 1e-8)
+
+
+# ── Branches and convergence ─────────────────────────────────────────────────
+
+STALL_START_DEG = 12.0
+STALL_END_DEG = 13.0
+CL_PLATEAU = 0.5
+
+
+def plateau_polar():
+    """Thin-airfoil lift to 12 deg, a sharp drop to Cl 0.5 at 13 deg, then a flat plateau.
+
+    A strip load line crosses this curve more than once above stall, so
+    the coupled equations have more than one solution: one is known
+    exactly, the fully stalled state with Cl = 0.5 on every strip.
+    """
+    deg = np.linspace(-10.0, 60.0, 701)
+    alpha = np.radians(deg)
+    cl_s = 2.0 * np.pi * np.radians(STALL_START_DEG)
+    drop = cl_s + (CL_PLATEAU - cl_s) * (deg - STALL_START_DEG) / (STALL_END_DEG - STALL_START_DEG)
+    cl = np.where(deg <= STALL_START_DEG, 2.0 * np.pi * alpha,
+                  np.where(deg <= STALL_END_DEG, drop, CL_PLATEAU))
+    return TabulatedAirfoil(name="plateau", alpha=alpha, Cl_data=cl, Cd_data=np.full(alpha.shape, 0.01),
+                            Cm_data=np.zeros(alpha.shape), Re=1e6)
+
+
+def _strip_cl_from_circulation(res):
+    lattice = res.details["lattice"]
+    gamma = res.details["gamma"]
+    strip_gamma = np.array([gamma[lattice.panel_strip == s].sum() for s in range(lattice.n_strips)])
+    return 2.0 * strip_gamma / (res.condition.V_inf * lattice.chord)
+
+
+def test_known_double_solution_finds_both_branches():
+    """Both converged branches are found and each one solves the coupled equations."""
+    wing = make_rectangular_wing(aspect_ratio=8.0)
+    settings = SolverSettings(n_panels=2, min_panels=1, spacing="uniform")
+    polar = plateau_polar()
+    res = solve_viscous(wing, FlightCondition(V_inf=40.0, alpha=np.radians(16.0)), settings, polar)
+    assert res.converged
+    assert res.details["non_unique"]
+    branches = res.details["branches"]
+    assert len(branches) >= 2
+    assert branches[0] is res
+    cls = [b.totals.CL for b in branches]
+    for i in range(len(cls)):
+        for j in range(i + 1, len(cls)):
+            assert abs(cls[i] - cls[j]) > 1e-3
+    for b in branches:
+        assert b.converged
+        cl_strip = _strip_cl_from_circulation(b)
+        cl_polar = polar.Cl(b.details["alpha_eff"])
+        np.testing.assert_allclose(cl_strip, cl_polar, atol=1e-5)
+        assert b.totals.trust.factors.get("post_stall_branch", 0.0) > 0.0
+    # The known solution: every strip on the plateau, so every strip Cl is 0.5.
+    stalled = [b for b in branches
+               if np.all(np.degrees(b.details["alpha_eff"]) >= STALL_END_DEG)]
+    assert len(stalled) == 1
+    np.testing.assert_allclose(_strip_cl_from_circulation(stalled[0]), CL_PLATEAU, atol=1e-5)
+    assert stalled[0].totals.CL == pytest.approx(CL_PLATEAU, abs=5e-3)
+    assert all(f == "post-stall, non-unique" for f in stalled[0].details["strip_flags"])
+
+
+def test_non_converged_primary_gives_no_branch_verdict():
+    """Regression: a non-converged state formed branches and a non-unique verdict."""
+    wing = make_rectangular_wing(aspect_ratio=8.0)
+    settings = SolverSettings(n_panels=2, min_panels=1, spacing="uniform")
+    with pytest.warns(RuntimeWarning, match="did not converge"):
+        res = solve_viscous(wing, FlightCondition(V_inf=40.0, alpha=np.radians(16.0)), settings,
+                            plateau_polar(), max_iter=1, tol=1e-12)
+    assert not res.converged
+    assert "branches" not in res.details
+    assert not res.details["non_unique"]
+    assert res.totals.trust.factors.get("post_stall_branch", 0.0) == 0.0
+    assert any("did not converge" in n for n in res.details["notes"])
+
+
+def test_relaxation_option_reaches_the_same_solution():
+    wing = make_rectangular_wing(aspect_ratio=8.0)
+    cond = FlightCondition(V_inf=40.0, alpha=np.radians(9.0))
+    polar = make_stalling_polar(alpha_stall_deg=10.0)
+    full = solve_viscous(wing, cond, SolverSettings(), polar)
+    half = solve_viscous(wing, cond, SolverSettings(), polar, relaxation=0.5)
+    assert full.converged and half.converged
+    assert half.totals.CL == pytest.approx(full.totals.CL, abs=1e-6)
+    with pytest.raises(ValueError, match="relaxation"):
+        solve_viscous(wing, cond, SolverSettings(), polar, relaxation=1.5)
+
+
+# ── Sweeps: continuation and factorizations ────────────────────────────────
+
+
+def test_sweep_continues_both_ways_from_zero(monkeypatch):
+    import ventorum.viscous.alpha_correction as module
+
+    seen = []
+    real = module._solve_condition
+
+    def recording(solver, model, aircraft, condition, *args):
+        delta0 = args[5]  # settings, resolver, factorization, ref_point, main_surface, delta0
+        seen.append((round(float(np.degrees(condition.alpha)), 6), delta0 is None))
+        return real(solver, model, aircraft, condition, *args)
+
+    monkeypatch.setattr(module, "_solve_condition", recording)
+    wing = make_rectangular_wing()
+    alphas = [8.0, -4.0, 0.0, 4.0, -8.0]
+    conds = [FlightCondition(V_inf=40.0, alpha=np.radians(a)) for a in alphas]
+    results = solve_viscous(wing, conds, SolverSettings(), _thin_polar())
+    assert [a for a, _ in seen] == [0.0, 4.0, 8.0, -4.0, -8.0]
+    # Only the first condition starts from zero; the others continue.
+    assert [first for _, first in seen] == [True, False, False, False, False]
+    # The results keep the input order.
+    np.testing.assert_allclose([np.degrees(r.condition.alpha) for r in results], alphas)
+
+
+@pytest.mark.parametrize("model", ["vlm", "llt"])
+def test_factorization_count_is_the_real_count(monkeypatch, model):
+    """Regression: the count was overwritten with 1 (a 4-condition sweep made 4)."""
+    import scipy.linalg
+
+    calls = []
+    real = scipy.linalg.lu_factor
+
+    def counting(*args, **kwargs):
+        calls.append(1)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(scipy.linalg, "lu_factor", counting)
+    wing = make_rectangular_wing()
+    conds = [FlightCondition(V_inf=40.0, alpha=np.radians(a)) for a in (0.0, 2.0, 4.0, 6.0)]
+    # The free-stream wake turns with alpha: the matrix changes in every condition.
+    results = solve_viscous(wing, conds, SolverSettings(), _thin_polar(), model=model)
+    assert len(calls) == 4
+    assert all(r.details["factorization_count"] == 4 for r in results)
+    assert [r.details["factorized"] for r in results] == [True] * 4
+
+
+def test_body_wake_sweep_reuses_one_factorization(monkeypatch):
+    import scipy.linalg
+
+    calls = []
+    real = scipy.linalg.lu_factor
+
+    def counting(*args, **kwargs):
+        calls.append(1)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(scipy.linalg, "lu_factor", counting)
+    wing = make_rectangular_wing()
+    settings = SolverSettings(wake_alignment="body")
+    conds = [FlightCondition(V_inf=40.0, alpha=np.radians(a)) for a in (0.0, 2.0, 4.0, 6.0)]
+    results = solve_viscous(wing, conds, settings, make_stalling_polar(alpha_stall_deg=4.0))
+    # The matrix does not depend on alpha with the body-axis wake.
+    assert len(calls) == 1
+    assert all(r.details["factorization_count"] == 1 for r in results)
+    assert [r.details["factorized"] for r in results] == [True, False, False, False]

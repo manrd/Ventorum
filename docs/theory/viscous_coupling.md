@@ -16,112 +16,85 @@ Both methods operate without altering the underlying linear matrix factorization
 
 ### Physical model and coupling overview
 
-Linear potential-flow methods predict linear lift curves and neglect boundary layer thickening, separation, and stall. The viscous alpha-correction method couples the 3D inviscid response with tabulated or analytical 2D section polars (Tseng and Lan, 1988; van Dam, Vander Kam and Paris, 2001; Gallay and Laurendeau, 2015; Mukherjee and Gopalarathnam, 2006).
+Linear potential-flow methods predict linear lift curves and neglect boundary-layer thickening, separation and stall. The viscous alpha-correction method (V1) couples the vortex-lattice method or the linear lifting line with tabulated or analytical 2D section polars (Tseng and Lan, 1988; van Dam, Vander Kam and Paris, 2001; Gallay and Laurendeau, 2015; Mukherjee and Gopalarathnam, 2006). The detailed page is [Viscous alpha-correction coupling](viscous_alpha_correction.md); this section gives the model.
 
-The lifting surface is divided into $N_s$ spanwise strips. On each strip $j$, viscous decambering and boundary layer displacement reduce the effective circulation. The method introduces a correction angle $\delta_j$ [rad] on each strip, which modifies the boundary condition right-hand side of the inviscid system while preserving the aerodynamic influence matrix.
+Each spanwise strip $j$ gets one correction angle $\delta_j$ [rad]. The correction changes only the right-hand side of the strip (a uniform change of its angle of attack); the influence matrix does not change.
 
 ### Inviscid strip response
 
-The 3D potential solver governs circulation vector $\boldsymbol{\Gamma}$ through the linear system:
+The circulation $\boldsymbol{\Gamma}$ satisfies
 
 ```{math}
-A \boldsymbol{\Gamma} = \mathbf{b}(\alpha, \boldsymbol{\delta}),
+A \boldsymbol{\Gamma} = \mathbf{b}(\alpha, \boldsymbol{\delta}).
 ```
 
-where $A$ is the aerodynamic influence coefficient matrix and $\mathbf{b}$ is the flow-tangency right-hand side. Because the potential system is linear, the strip inviscid lift coefficient vector $\mathbf{C}_{l,\text{inv}}$ responds linearly to strip angle adjustments:
+A correction $\delta_k$ turns the onset direction of the boundary conditions of strip $k$ from $\mathbf{d}(\alpha)$ to $\mathbf{d}(\alpha - \delta_k)$. The strip lift coefficient $C_{l,\text{inv},j} = 2\Gamma_j / (V_\infty c_j)$ is linear in the corrections:
 
 ```{math}
 \mathbf{C}_{l,\text{inv}}(\boldsymbol{\delta}) = \mathbf{C}_{l,\text{inv}}(\mathbf{0}) - D \boldsymbol{\delta},
 ```
 
-where $D \in \mathbb{R}^{N_s \times N_s}$ is the strip influence response matrix. Column $k$ of matrix $D$ represents the reduction in strip lift coefficients when strip $k$ is given a unit decambering angle. Matrix $D$ is computed directly from the LU factorization of $A$ through $N_s$ triangular back-substitutions:
+where column $k$ of $D \in \mathbb{R}^{N_s \times N_s}$ comes from one back-substitution with the LU factors of $A$. A positive correction lowers the lift of the strip.
+
+### Effective angle and viscous section matching
+
+Each strip behaves like a 2D section of the lattice model, $C_l = a_j(\alpha_e - \alpha_{0,j})$. For the vortex-lattice method, $a_j$ [1/rad] and $\alpha_{0,j}$ [rad] come from the lattice itself: the chordwise vortices, control points and boundary normals of the strip (camber and flap panels) form a 2D discrete-vortex section, and two right-hand sides with one factorization give its slope and zero-lift angle (thin-airfoil theory; Katz and Plotkin, 2001). For the lifting line they are the $a_0$ and $\alpha_{L0}$ of the strip airfoil (with the Glauert flap shift on a deflected strip). The effective angle and the viscous section angle are
 
 ```{math}
-D_{:, k} = \Delta \mathbf{C}_{l,\text{inv}}(\mathbf{e}_k).
+\alpha_{e, j} = \alpha_{0,j} + \frac{C_{l,\text{inv}, j}}{a_j}, \qquad
+\alpha_{v, j} = \alpha_{e, j} + \delta_j .
 ```
 
-Because matrix $A$ depends only on geometry, matrix $D$ is computed once per configuration.
-
-### Viscous section matching
-
-For strip $j$, the effective angle of attack seen by the airfoil section is:
+The polar of the strip (the flapped polar on a strip with a deflected control) supplies $C_{l,\text{visc}, j}(\alpha_{v, j}, Re_j)$ and $C_{d,\text{visc}, j}(\alpha_{v, j}, Re_j)$ at the strip Reynolds number
 
 ```{math}
-\alpha_{\text{eff}, j} = \alpha_0 + \frac{C_{l,\text{inv}, j}(\boldsymbol{\delta})}{a_{0, j}},
+Re_j = \frac{\rho V_\infty c_j}{\mu},
 ```
 
-where $\alpha_0$ is the geometric angle of attack and $a_{0, j}$ is the linear 2D section lift slope. Applying decambering correction $\delta_j$, the modified effective angle for section polar lookup is:
+with the density $\rho$ and the speed $V_\infty$ of the flight condition and the ISA sea-level dynamic viscosity $\mu$ of the code (`MU_SL` in `ventorum.aero.parasite`, ISO 2533). Because $\alpha_{0,j}$ comes from the lattice, the inviscid flap effect is counted once: polars that follow thin-airfoil theory give the inviscid result. When the polar holds the ground height, the 2D section of a vortex-lattice strip also has its image vortices in the ground.
+
+The residual of strip $j$ is
 
 ```{math}
-\alpha_{v, j} = \alpha_{\text{eff}, j} - \delta_j.
+r_j(\boldsymbol{\delta}) = C_{l,\text{inv}, j}(\boldsymbol{\delta}) - C_{l,\text{visc}, j}(\alpha_{v, j}, Re_j).
 ```
 
-The 2D section polar supplies the viscous lift coefficient $C_{l,\text{visc}, j}(\alpha_{v, j}, Re_j)$ and profile drag coefficient $C_{d,\text{visc}, j}(\alpha_{v, j}, Re_j)$ at the local strip Reynolds number:
+### Newton-Raphson Jacobian
+
+With $\partial \alpha_{v,j}/\partial \delta_k = -D_{jk}/a_j + \delta_{jk}$, the local polar slope $m_j = \mathrm{d}C_{l,\text{visc}, j}/\mathrm{d}\alpha$ at $\alpha_{v, j}$ and $M = \operatorname{diag}(m_1, \dots, m_{N_s})$, the Jacobian is
 
 ```{math}
-Re_j = \frac{V_\infty c_j}{\nu}.
+J = \frac{\partial \mathbf{r}}{\partial \boldsymbol{\delta}} = -\left(I - M \operatorname{diag}(a)^{-1}\right) D - M.
 ```
-
-The residual equation on strip $j$ enforces equality between the inviscid strip lift and the viscous polar lift:
-
-```{math}
-r_j(\boldsymbol{\delta}) = C_{l,\text{inv}, j}(\boldsymbol{\delta}) - C_{l,\text{visc}, j}(\alpha_{v, j}, Re_j) = 0.
-```
-
-### Exact Newton-Raphson Jacobian
-
-The non-linear system $\mathbf{r}(\boldsymbol{\delta}) = \mathbf{0}$ is solved by Newton-Raphson iteration. Differentiating the residual with respect to the decambering vector $\boldsymbol{\delta}$:
-
-```{math}
-\frac{\partial \mathbf{C}_{l,\text{inv}}}{\partial \boldsymbol{\delta}} = -D,
-```
-
-```{math}
-\frac{\partial \alpha_{v, j}}{\partial \delta_k} = \frac{1}{a_{0, j}} \frac{\partial C_{l,\text{inv}, j}}{\partial \delta_k} - \delta_{jk} = -\frac{1}{a_{0, j}} D_{jk} - \delta_{jk}.
-```
-
-Let $m_j = \left.\frac{d C_{l,\text{visc}, j}}{d \alpha}\right|_{\alpha_{v, j}}$ be the local section lift curve slope, and $M = \operatorname{diag}(m_1, \dots, m_{N_s})$. Differentiating the viscous term gives:
-
-```{math}
-\frac{\partial \mathbf{C}_{l,\text{visc}}}{\partial \boldsymbol{\delta}} = M \left(-\operatorname{diag}(a_0)^{-1} D - I\right).
-```
-
-The exact Jacobian matrix $J = \frac{\partial \mathbf{r}}{\partial \boldsymbol{\delta}}$ is:
-
-```{math}
-J = -D - M \left(-\operatorname{diag}(a_0)^{-1} D - I\right) = -\left(I - M \operatorname{diag}(a_0)^{-1}\right) D + M.
-```
-
-This exact analytical Jacobian enables rapid quadratic convergence in pre-stall regimes.
 
 ### Numerical safeguards and continuation
 
-1. Under-relaxation and line search: A backtracking line search monitors the residual $L_2$ norm $\|\mathbf{r}\|_2$. If a full Newton step increases the residual, step size halving restores monotonic decrease.
-2. Factorization reuse: Matrix $A$ is factorized once. Each iteration requires only the solve of the small $N_s \times N_s$ Jacobian system.
-3. Angle continuation: For angle-of-attack sweeps, the converged decambering vector $\boldsymbol{\delta}$ of the preceding angle initializes the next angle.
+1. Line search and under-relaxation: the Newton step has an under-relaxation factor (input `relaxation`, default 1) and a backtracking line search on $\frac{1}{2}\|\mathbf{r}\|_2^2$; a damped fixed-point step follows when no Newton step lowers the residual.
+2. Factorization reuse: within one condition, $D$, the iteration and the branch search use one factorization. Between the conditions of a sweep the factors are used again when the matrix does not change (for example `wake_alignment="body"` out of ground effect). With the default free-stream wake the matrix depends on the angle of attack, so a sweep factorizes once per condition. The result reports the real count.
+3. Angle continuation: a sweep runs from the angle nearest to zero upward and from there downward; each condition starts from the corrections of its converged neighbour.
 
 ### Post-stall branches and trust reporting
 
-In post-stall conditions, the local section lift slope becomes non-positive ($m_j \le 0$). The governing system can develop multiple solution branches and hysteresis:
-- Strip stall detection: Any strip exhibiting $m_j \le 0$ at the converged state is flagged as post-stall.
-- Secondary branch search: When stall is detected, the solver restarts from an alternate stalled initial guess. If the secondary solve converges to a distinct solution ($\Delta C_L > 10^{-3}$), both branches are reported.
-- Trust penalty: Post-stall solutions receive an aerodynamic trust penalty of 0.35 (`POST_STALL_BRANCH_PENALTY`) to inform the user of increased physical uncertainty.
-- Convergence status: When the iteration reaches `max_iter` without satisfying tolerance, the result is marked `converged=False` with diagnostic warnings.
+In post-stall conditions the local section slope is not positive ($m_j \le 0$), and the coupled equations can have more than one solution:
+- Strip stall detection: a strip with $m_j \le 0$ at a converged solution gets the flag "post-stall, non-unique".
+- Branch search: the solver also runs from a stalled start and from an attached start. Every other converged solution whose CL differs by more than $10^{-3}$ is reported as a branch.
+- Trust penalty: a result with more than one branch gets the trust penalty `POST_STALL_BRANCH_PENALTY`.
+- Convergence status: when the iteration reaches `max_iter` without the tolerance, the result has `converged=False`, a warning and no branch verdict.
 
 ### Drag summation
 
-The coupled solver reports two distinct drag components:
-1. Induced drag ($C_{D,\text{ind}}$): Computed from the converged 3D wake circulation and downwash distributions in the Trefftz plane.
-2. Profile drag ($C_{D,\text{prof}}$): Integrated from 2D section polars at converged effective angles $\alpha_{v, j}$ and Reynolds numbers $Re_j$:
+The coupled solver reports two drag components:
+1. Induced drag ($C_{D_i}$): from the converged circulation in the Trefftz plane.
+2. Profile drag ($C_{D_p}$): from the 2D section polars at the solved angles $\alpha_{v, j}$ and Reynolds numbers $Re_j$:
 
 ```{math}
-C_{D,\text{prof}} = \frac{1}{S_{\text{ref}}} \sum_{j=1}^{N_s} C_{d,\text{visc}, j}(\alpha_{v, j}, Re_j) \, c_j \Delta y_j.
+C_{D_p} = \frac{1}{S_{\text{ref}}} \sum_{j=1}^{N_s} C_{d,\text{visc}, j}(\alpha_{v, j}, Re_j) \, c_j \Delta y_j.
 ```
 
-Total aircraft drag is the sum:
+The total drag is the sum:
 
 ```{math}
-C_D = C_{D,\text{ind}} + C_{D,\text{prof}}.
+C_D = C_{D_i} + C_{D_p}.
 ```
 
 ## Parasite-drag build-up
@@ -139,7 +112,7 @@ where $C_{f, i}$ is the skin-friction coefficient, $FF_i$ is the form factor, $Q
 
 ### Skin friction relations
 
-The Reynolds number is $Re = \rho V_\infty L / \mu$, with reference length $L$ and sea-level dynamic viscosity $\mu = 1.7894 \times 10^{-5}$ Pa s:
+The Reynolds number is $Re = \rho V_\infty L / \mu$, with reference length $L$ and the ISA sea-level dynamic viscosity of the code, $\mu = 1.789 \times 10^{-5}$ Pa s (`MU_SL`, ISO 2533):
 - Laminar flow uses the Blasius (1908) flat-plate solution:
 
 ```{math}
@@ -203,17 +176,14 @@ Lifting surface wetted area is approximated from planform area $S$ (Raymer, 2018
 S_{\text{wet}} \approx 2 S \left(1 + 0.2 \frac{t}{c}\right).
 ```
 
-Interference factor $Q$ accounts for junction interference drag:
-- $Q = 1.0$ for clean, well-faired wing-body junctions and isolated bodies.
-- $Q = 1.05$ to $1.15$ for standard low/mid-wing configurations.
-- $Q = 1.20$ to $1.30$ for unfilleted intersections.
+The interference factor $Q$ accounts for junction interference drag. It is an input of each component (default 1, no interference), never a hidden constant; typical values for a wing-body junction are 1.0 to 1.3 (Raymer, 2018, section 12.5).
 
 ### Uncertainty and trust
 
-Each component carries a relative uncertainty (default 0.10). The total absolute uncertainty is the root sum square of independent component uncertainties:
+Each component carries a relative uncertainty $\epsilon_i$ (an input, default 0.10). The total absolute uncertainty is the root sum square of independent component uncertainties:
 
 ```{math}
-u_{\text{total}} = \sqrt{\sum_i u_i^2}, \qquad u_i = 0.10 \, C_{D0, i}.
+u_{\text{total}} = \sqrt{\sum_i u_i^2}, \qquad u_i = \epsilon_i \, C_{D0, i}.
 ```
 
 This estimate provides conceptual design drag levels and cross-checks profile-drag polar predictions.
@@ -233,23 +203,27 @@ This estimate provides conceptual design drag levels and cross-checks profile-dr
 
 ## Implementation
 
-- Alpha-correction coupling: `ventorum.viscous.alpha_correction.solve_alpha_correction`, `strip_influence_matrix`.
-- Parasite-drag build-up: `ventorum.aero.parasite.compute_parasite_drag`, `component_skin_friction`, `form_factor_wing_raymer`, `form_factor_body_raymer`.
+- Alpha-correction coupling: `ventorum.viscous.alpha_correction.solve_viscous`, `strip_reynolds_number`.
+- Parasite-drag build-up: `ventorum.aero.parasite.parasite_drag`, `DragComponent`, `flat_plate_cf`, `form_factor_lifting`, `form_factor_body`, `wetted_area_lifting_surface`.
+- The coupling runs on the CPU; a GPU path is planned for a later version.
 
 ## Verification
 
 The methods in this chapter are verified by tests in the test suite:
-- Decambering coupling and exact Jacobian: `tests/test_viscous_alpha_correction.py`.
+- Alpha-correction coupling (inviscid limit, lifting-line slope, flaps, branches, factorization count, profile drag): `tests/test_alpha_correction.py`.
 - Parasite drag relations and form factors: `tests/test_parasite_drag.py`.
 
 ## References
 
 - H. Blasius, "Grenzschichten in Fluessigkeiten mit kleiner Reibung", *Zeitschrift fuer Mathematik und Physik*, Vol. 56, 1908, pp. 1-37.
-- R. Gallay and E. Laurendeau, "Nonlinear Generalized Lifting-Line Coupling Algorithms for Pre/Poststall Flows", *AIAA Journal*, Vol. 53, No. 7, 2015, pp. 1904-1915.
+- S. Gallay and E. Laurendeau, "Nonlinear Generalized Lifting-Line Coupling Algorithms for Pre/Poststall Flows", *AIAA Journal*, Vol. 53, No. 7, 2015, pp. 1784-1792.
+- H. Glauert, "Theoretical Relationships for an Aerofoil with Hinged Flap", ARC R&M 1095, 1927.
+- J. Katz and A. Plotkin, *Low-Speed Aerodynamics*, 2nd ed., Cambridge University Press, 2001.
+- ISO 2533:1975, Standard Atmosphere.
 - S. F. Hoerner, *Fluid-Dynamic Drag: Practical Information on Aerodynamic Drag and Hydrodynamic Resistance*, Published by the Author, Midland Park, NJ, 1965.
-- R. Mukherjee and A. Gopalarathnam, "Poststall Aerodynamic Prediction for Wings Using Decambering Approach", *Journal of Aircraft*, Vol. 43, No. 3, 2006, pp. 660-668.
+- R. Mukherjee and A. Gopalarathnam, "Poststall Prediction of Multiple-Lifting-Surface Configurations Using a Decambering Approach", *Journal of Aircraft*, Vol. 43, No. 3, 2006, pp. 660-668.
 - D. P. Raymer, *Aircraft Design: A Conceptual Approach*, 6th ed., AIAA Education Series, Reston, VA, 2018.
 - H. Schlichting and K. Gersten, *Boundary-Layer Theory*, 9th ed., Springer-Verlag, Berlin, 2017.
 - E. Torenbeek, *Synthesis of Subsonic Airplane Design*, Delft University Press, Kluwer Academic Publishers, Dordrecht, 1982.
-- J. B. Tseng and C. E. Lan, "Calculation of Aerodynamic Characteristics of Wings with Flaps in Subsonic Viscous Flow", NASA TP-2828, 1988.
-- C. P. van Dam, J. C. Vander Kam and P. C. Paris, "Design-Oriented High-Lift Methodology for General Aviation and Civil Transport Aircraft", *Journal of Aircraft*, Vol. 38, No. 6, 2001, pp. 1105-1115.
+- J. B. Tseng and C. E. Lan, NASA TP-2828, 1988 (alpha-reduction coupling of a vortex lattice with section data).
+- C. P. van Dam, J. C. Vander Kam and P. C. Paris, "Design-Oriented High-Lift Methodology for General Aviation and Civil Transport Aircraft", *Journal of Aircraft*, Vol. 38, No. 6, 2001, pp. 1076-1084.

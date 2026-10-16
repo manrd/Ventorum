@@ -682,8 +682,21 @@ def _place_on_grid(
     return cl, cd, cm
 
 
-def _source_supports_ground(source: Any) -> bool:
-    """Report whether *source* supports ground effect (height keyword)."""
+def source_supports_ground(source: Any) -> bool:
+    """Report whether *source* supports ground effect (feature check).
+
+    Parameters
+    ----------
+    source : object
+        Section polar provider.
+
+    Returns
+    -------
+    bool
+        True when the source has ``supports_ground = True`` or its
+        ``polar`` method takes a ``height`` keyword [-] (height above the
+        ground in chords).
+    """
     if getattr(source, "supports_ground", False):
         return True
     polar_fn = getattr(source, "polar", None)
@@ -790,7 +803,7 @@ def build_polar_table(
         raise ValueError(f"workers must be at least 1, got {workers}.")
 
     if h_over_c is not None:
-        if not _source_supports_ground(source):
+        if not source_supports_ground(source):
             raise ValueError(
                 f"Source {type(source).__name__} does not support ground effect."
             )
