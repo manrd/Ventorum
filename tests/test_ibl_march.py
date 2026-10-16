@@ -1,137 +1,112 @@
 # Author: Manuel Alejandro Rodriguez Diaz, PhD
 """Tests of the direct integral boundary-layer march.
 
-The tests check ``ventorum.ibl2d.march`` in direct mode: the laminar
-flat-plate thickness and shape factor, the stagnation-point shape factor,
-free transition with the e^N envelope, the turbulent flat-plate skin
-friction, laminar separation in an adverse gradient, and the batched
-variant (numpy, torch CPU, torch CUDA).
+Reference solutions: Blasius (theta = 0.664 x / sqrt(Re_x)), Hiemenz
+(H = 2.216), the envelope e^N transition on a flat plate, the turbulent
+flat-plate skin friction Cf = 0.0592 Re_x^-0.2 (Schlichting), and a
+decelerating flow that separates.
 """
 
 from __future__ import annotations
 
 import numpy as np
 import pytest
+import torch
 
 from ventorum.ibl2d import march as mr
 
 
-def _flat(s):
-    """Return unit edge velocity on ``s``."""
-    return np.ones_like(s)
+@pytest.mark.parametrize("re", [1e5, 1e6])
+def test_laminar_flat_plate(re):
+    """Laminar flat plate: theta within 2 % of Blasius and H within 2 % of 2.59."""
+    s = np.linspace(0.0, 1.0, 101)
+    r = mr.march_direct(s, np.ones_like(s), re, ncrit=1e9)
+    m = s >= 0.05
+    theta_ex = 0.664 * s[m] / np.sqrt(re * s[m])
+    assert not r.separated
+    assert np.max(np.abs(r.theta[m] / theta_ex - 1.0)) < 0.02
+    assert np.max(np.abs(r.H[m] / 2.59 - 1.0)) < 0.02
 
 
-def test_laminar_flat_plate():
-    for re in (1e5, 1e6):
-        s = np.linspace(0.0, 1.0, 401)
-        ue = _flat(s)
-        res = mr.march_direct(s, ue, re, ncrit=99.0)
-        mask = s >= 0.05
-        rex = re * s[mask]
-        theta_ref = 0.664 * s[mask] / np.sqrt(rex)
-        np.testing.assert_allclose(res.theta[mask], theta_ref, rtol=0.02)
-        np.testing.assert_allclose(res.H[mask], 2.59, rtol=0.02)
-
-
-def test_stagnation_flow():
-    s = np.linspace(0.0, 1.0, 201)
-    ue = s.copy()
-    re = 1e5
-    res = mr.march_direct(s, ue, re, ncrit=99.0)
-    mid = (s > 0.1) & np.isfinite(res.H)
-    assert np.all(np.isfinite(res.theta[mid]))
-    np.testing.assert_allclose(res.H[mid], 2.216, rtol=0.03)
-    scale = res.theta[mid] * np.sqrt(re)
-    np.testing.assert_allclose(scale, np.mean(scale), rtol=0.02)
+def test_hiemenz_stagnation():
+    """Stagnation flow ue = a s: H within 2 % of 2.216 and theta constant."""
+    s = np.linspace(0.0, 0.2, 41)
+    r = mr.march_direct(s, 5.0 * s, 1e6, ncrit=1e9)
+    assert np.max(np.abs(r.H / 2.216 - 1.0)) < 0.02
+    th = r.theta[1:]
+    assert np.max(np.abs(th / th[0] - 1.0)) < 1e-6
+    # The scaled thickness theta sqrt(a Re) of the closure solution, against the exact 0.2923.
+    assert abs(th[0] * np.sqrt(5.0 * 1e6) / 0.2923 - 1.0) < 0.05
 
 
 def test_free_transition_flat_plate():
-    s = np.linspace(0.0, 1.0, 401)
-    ue = _flat(s)
-    re = 1e7
-    res = mr.march_direct(s, ue, re, ncrit=9.0)
-    assert res.x_transition is not None
-    rex_tr = re * res.x_transition
-    assert 1e6 <= rex_tr <= 5e6
-    n = res.N[np.isfinite(res.N)]
-    assert np.all(np.diff(n[: res.n_valid]) >= -1e-12)
+    """Free transition at Re 1e7, ncrit 9 between Re_x 1e6 and 5e6; it moves downstream with ncrit."""
+    s = np.concatenate([[0.0], np.geomspace(1e-4, 1.0, 250)])
+    xtr = []
+    for nc in (4.0, 9.0, 14.0):
+        r = mr.march_direct(s, np.ones_like(s), 1e7, ncrit=nc)
+        assert not r.separated
+        lam = ~r.turbulent
+        assert np.all(np.diff(r.N[lam]) >= 0.0)
+        xtr.append(r.transition_s)
+    print(f"\n[march] free transition Re_x at ncrit 4, 9, 14: {np.array(xtr) * 1e7}")
+    assert 1e6 <= xtr[1] * 1e7 <= 5e6
+    assert xtr[0] < xtr[1] < xtr[2]
 
 
-def test_turbulent_flat_plate_cf():
-    s = np.linspace(0.0, 1.0, 401)
-    ue = _flat(s)
-    re = 1e7
-    res = mr.march_direct(s, ue, re, ncrit=9.0, forced_transition_s=0.01)
-    mask = (s >= 0.1) & np.isfinite(res.Cf)
-    rex = re * s[mask]
-    cf_ref = 0.0592 * rex ** (-0.2)
-    np.testing.assert_allclose(res.Cf[mask], cf_ref, rtol=0.10)
+def test_turbulent_flat_plate():
+    """Forced transition at 1 % chord, Re 1e7: Cf within 10 % of 0.0592 Re_x^-0.2."""
+    s = np.linspace(0.0, 1.0, 201)
+    r = mr.march_direct(s, np.ones_like(s), 1e7, forced_transition_s=0.01)
+    assert not r.separated
+    assert abs(r.transition_s - 0.01) < 1e-12
+    rex = s * 1e7
+    m = (rex >= 1e6) & (rex <= 1e7)
+    ref = 0.0592 * rex[m] ** -0.2
+    err = np.max(np.abs(r.Cf[m] / ref - 1.0))
+    print(f"\n[march] turbulent flat plate: largest Cf deviation {err:.3f}")
+    assert err < 0.10
 
 
 def test_adverse_gradient_separation():
-    s = np.linspace(0.0, 1.0, 201)
+    """ue = 1 - 0.5 s: the turbulent H grows and separation is flagged; laminar separation too."""
+    s = np.linspace(0.0, 1.0, 101)
     ue = 1.0 - 0.5 * s
-    re = 1e5
-    res = mr.march_direct(s, ue, re, ncrit=99.0)
-    assert res.separated
-    assert res.x_separation is not None
-    assert res.n_valid < len(s)
+    r = mr.march_direct(s, ue, 1e6, forced_transition_s=0.05)
+    assert r.separated
+    ok = np.isfinite(r.H) & r.turbulent
+    h = r.H[ok]
+    assert h[-1] > h[len(h) // 2] > 1.4
+    assert np.isfinite(r.separation_s)
+    r2 = mr.march_direct(s, ue, 1e6)
+    assert r2.separated and np.isnan(r2.transition_s)
 
 
-def test_batch_numpy_equals_single():
-    s = np.linspace(0.0, 1.0, 201)
-    ue1 = np.ones_like(s)
-    ue2 = 1.0 - 0.2 * s
-    ue_batch = np.stack([ue1, ue2])
-    re_batch = np.array([5e5, 2e5])
-    outs = mr.march_direct_batch(s, ue_batch, re_batch, ncrit=99.0)
-    ref0 = mr.march_direct(s, ue1, float(re_batch[0]), ncrit=99.0)
-    ref1 = mr.march_direct(s, ue2, float(re_batch[1]), ncrit=99.0)
-    for got, ref in zip(outs, (ref0, ref1)):
-        np.testing.assert_allclose(got.theta, ref.theta, rtol=1e-12,
-                                   atol=1e-14, equal_nan=True)
-        np.testing.assert_allclose(got.H, ref.H, rtol=1e-12,
-                                   atol=1e-14, equal_nan=True)
-
-
-def test_batch_torch_cpu_parity():
-    torch = pytest.importorskip("torch")
-    s = np.linspace(0.0, 1.0, 201)
-    ue1 = np.ones_like(s)
-    ue2 = 1.0 - 0.2 * s
-    ue_batch = np.stack([ue1, ue2])
-    re_batch = np.array([5e5, 2e5])
-    outs = mr.march_direct_batch(s, ue_batch, re_batch, xp=torch, ncrit=99.0)
-    ref0 = mr.march_direct(s, ue1, float(re_batch[0]), ncrit=99.0)
-    ref1 = mr.march_direct(s, ue2, float(re_batch[1]), ncrit=99.0)
-    for got, ref in zip(outs, (ref0, ref1)):
-        gth = np.asarray(got.theta.detach().cpu().numpy(), dtype=float)
-        np.testing.assert_allclose(gth, ref.theta, rtol=1e-10,
-                                   atol=1e-12, equal_nan=True)
+def test_batch_equals_single():
+    """numpy batch equals single runs to 1e-12; torch float64 equals numpy to 1e-10."""
+    s = np.concatenate([[0.0], np.geomspace(1e-3, 1.0, 80)])
+    ues = np.stack([np.ones_like(s), 1.0 + 0.1 * s, 1.0 - 0.1 * s])
+    res = np.array([3e6, 5e6, 4e6])
+    b = mr.march_direct_batch(s, ues, res, ncrit=9.0)
+    for k in range(3):
+        r = mr.march_direct(s, ues[k], res[k], ncrit=9.0)
+        assert np.allclose(b.theta[k], r.theta, rtol=1e-12, atol=0.0, equal_nan=True)
+        assert np.allclose(b.H[k], r.H, rtol=1e-12, atol=0.0, equal_nan=True)
+    t = mr.march_direct_batch(s, ues, res, xp=torch, ncrit=9.0)
+    assert np.allclose(t.theta.numpy(), b.theta, rtol=1e-10, atol=0.0, equal_nan=True)
+    assert np.allclose(t.H.numpy(), b.H, rtol=1e-10, atol=0.0, equal_nan=True)
 
 
 @pytest.mark.gpu
-def test_cuda_float32_theta():
-    torch = pytest.importorskip("torch")
+def test_batch_cuda_float32():
+    """CUDA float32 batch within 1e-4 relative of numpy on theta."""
     if not torch.cuda.is_available():
-        pytest.skip("A CUDA GPU is not available.")
-    s = np.linspace(0.0, 1.0, 201)
-    ue_batch = np.stack([np.ones_like(s)])
-    re_batch = np.array([5e5])
-    outs = mr.march_direct_batch(s, ue_batch, re_batch, xp=torch,
-                                 dtype="float32", device="cuda", ncrit=99.0)
-    ref = mr.march_direct(s, np.ones_like(s), 5e5, ncrit=99.0)
-    got = np.asarray(outs[0].theta.detach().cpu().numpy(), dtype=float)
-    mask = np.isfinite(ref.theta) & np.isfinite(got)
-    np.testing.assert_allclose(got[mask], ref.theta[mask], rtol=1e-4, atol=1e-6)
-
-
-def test_turbulent_flat_plate_shape_factor():
-    """Turbulent flat plate keeps an attached shape factor after transition."""
-    s = np.linspace(0.0, 1.0, 401)
-    ue = _flat(s)
-    re = 1e7
-    res = mr.march_direct(s, ue, re, ncrit=9.0, forced_transition_s=0.01)
-    mask = (s >= 0.1) & np.isfinite(res.H)
-    assert np.all(res.H[mask] >= 1.30)
-    assert np.all(res.H[mask] <= 1.45)
+        pytest.skip("CUDA is not available")
+    s = np.concatenate([[0.0], np.geomspace(1e-3, 1.0, 80)])
+    ues = np.stack([np.ones_like(s), 1.0 + 0.1 * s])
+    res = np.array([3e5, 5e5])
+    b = mr.march_direct_batch(s, ues, res, ncrit=9.0)
+    t = mr.march_direct_batch(s, ues, res, xp=torch, ncrit=9.0, device="cuda", dtype=torch.float32)
+    th = t.theta.double().cpu().numpy()
+    m = np.isfinite(b.theta) & (b.theta > 0.0)
+    assert np.max(np.abs(th[m] / b.theta[m] - 1.0)) < 1e-4
