@@ -59,6 +59,7 @@ from ventorum.core.datatypes import FlightCondition
 from ventorum.panel3d.wake import PanelWake
 
 __all__ = [
+    "FOLD_ANGLE_DEG",
     "TREFFTZ_CORE_FRACTION",
     "build_edge_neighbourhood",
     "build_surface_gradient_operator",
@@ -68,6 +69,14 @@ __all__ = [
     "integrate_forces_and_moments",
     "surface_gradient",
 ]
+
+#: Largest angle between the normals of two neighbour panels for the
+#: surface gradient of a mesh without panel kinds [deg]. An edge with a
+#: larger fold is a sharp edge of the surface: the gradient does not use
+#: values across it. A mesh of the wing builder marks its sharp edges with
+#: the panel kinds instead (see :func:`build_surface_gradient_operator`).
+#: This is a method choice, not a tuned value.
+FOLD_ANGLE_DEG = 45.0
 
 #: Core radius of the 2D trailing vortices in the Trefftz plane, as a
 #: fraction of the mean length of the wake strip trailing edges [-]. The
@@ -214,6 +223,8 @@ def build_surface_gradient_operator(
     normals: np.ndarray,
     areas: np.ndarray,
     wake_edges: np.ndarray | None = None,
+    kinds: np.ndarray | None = None,
+    fold_angle_deg: float = FOLD_ANGLE_DEG,
 ) -> scipy.sparse.csr_matrix:
     """Build the sparse operator of the tangential surface gradient.
 
@@ -221,13 +232,24 @@ def build_surface_gradient_operator(
 
     1. Node groups. At each corner node ``v`` of panel ``i`` the group is
        the set of panels around ``v`` that panel ``i`` reaches through
-       edges at ``v`` that are not wake shedding edges. At a node of a
+       edges at ``v`` that are not cut. Wake shedding edges are cut, and
+       so are sharp edges, where a doublet value on the other side does
+       not belong to the tangent plane of the panel. With panel *kinds*
+       (more than one kind in the mesh), a sharp edge is an edge between
+       panels of different kinds: the wing builder gives the flat tip caps,
+       the trailing-edge base panels and the control side closures their
+       own kinds, and they meet the surface at about 90 deg. The folds
+       between surface panels (for example at a coarse leading edge, where
+       the first upper and lower panels can meet at more than 90 deg) stay
+       connected, because the surface is smooth there. Without kinds, a
+       sharp edge is an edge where the normals of two panels differ by
+       more than *fold_angle_deg*. At a node of a
        wake shedding edge, the group of a panel also excludes the panels on
        the other side of the wake: the panel paired with it in a wake edge
        and the panels that share a wake edge with it. A group is closed
        when every edge at ``v`` of its panels is shared by two panels of
        the group (an interior node); it is open at a wake shedding edge or
-       at a mesh border.
+       at a mesh border or at a sharp edge.
     2. Interior panels (all corner groups closed). The node value is the
        inverse-distance mean of the group values (Shepard 1968, weight
        1 / d with d the distance from the node to the panel centroid).
@@ -238,7 +260,7 @@ def build_surface_gradient_operator(
     3. Border panels (a corner group is open). The gradient is the
        edge-neighbour least-squares fit of :func:`compute_surface_gradient`
        in the panel plane, anchored at the panel value, over the panels
-       that share an edge that is not a wake shedding edge. It is exact for
+       that share an edge that is not cut. It is exact for
        a linear doublet field, and the trailing-edge pressure stays
        sensitive to the strength of each wake strip, which the pressure
        Kutta iteration needs.
@@ -258,6 +280,14 @@ def build_surface_gradient_operator(
     wake_edges : numpy.ndarray or None, optional
         Wake shedding edges with shape (Nw, 4): upper panel, lower panel,
         node a, node b.
+    kinds : numpy.ndarray or None, optional
+        Panel kind codes with shape (Np,) (for example "surface", "tip",
+        "base", "side"). With more than one kind, the edges between kinds
+        are the sharp edges.
+    fold_angle_deg : float, optional
+        Largest angle between the normals of two panels across an edge
+        that the gradient connects when the mesh has no kinds [deg].
+        Default ``FOLD_ANGLE_DEG`` (45).
 
     Returns
     -------
@@ -298,6 +328,26 @@ def build_surface_gradient_operator(
         for v in vs:
             incident.setdefault(v, []).append(i)
 
+    # Sharp edges: with panel kinds, an edge between panels of different
+    # kinds; without them, an edge with a fold larger than fold_angle_deg.
+    # The gradient treats them as wake edges (no values across them).
+    kind_arr = None if kinds is None else np.asarray(kinds).reshape(-1)
+    use_kinds = kind_arr is not None and kind_arr.shape[0] == n_p and np.unique(kind_arr).size > 1
+    cos_fold = float(np.cos(np.radians(fold_angle_deg)))
+    cut_set: set[tuple[int, int]] = set(wake_set)
+    for key, ps in edge_panels.items():
+        if key in cut_set or len(ps) < 2:
+            continue
+        for a_i in range(len(ps)):
+            for b_i in range(a_i + 1, len(ps)):
+                pa, pb = ps[a_i], ps[b_i]
+                if use_kinds:
+                    sharp = kind_arr[pa] != kind_arr[pb]
+                else:
+                    sharp = float(np.dot(nrm[pa], nrm[pb])) < cos_fold
+                if sharp:
+                    cut_set.add(key)
+
     # Panels on the other side of the wake for each trailing-edge panel.
     opposite: dict[int, set[int]] = {}
     for edge in wake_set:
@@ -319,7 +369,7 @@ def build_surface_gradient_operator(
                 if v not in (a, b) or a == b:
                     continue
                 key = (min(a, b), max(a, b))
-                if key in wake_set:
+                if key in cut_set:
                     continue
                 for q in edge_panels.get(key, []):
                     if q in parent:
@@ -337,7 +387,7 @@ def build_surface_gradient_operator(
     # solution in the panel plane.
     edge_nbrs: list[set[int]] = [set() for _ in range(n_p)]
     for key, ps in edge_panels.items():
-        if key in wake_set:
+        if key in cut_set:
             continue
         for a in ps:
             for b in ps:
@@ -354,7 +404,9 @@ def build_surface_gradient_operator(
             else:
                 dr = cen[nb] - cen[p]
                 dr_t = dr - np.outer(dr @ nrm[p], nrm[p])
-                pinv = np.linalg.pinv(dr_t)
+                # Displacement directions below 1e-5 of the largest are round-off
+                # (a row of collinear centroids gives the gradient along the row).
+                pinv = np.linalg.pinv(dr_t, rcond=1e-5)
                 idx = np.concatenate([nb, [p]])
                 mat = np.hstack([pinv, -np.sum(pinv, axis=1, keepdims=True)])
                 ls_cache[p] = (idx, mat)
@@ -385,7 +437,7 @@ def build_surface_gradient_operator(
             closed = True
             for p in key[1]:
                 for edge in edges_at(p, v):
-                    shared = edge not in wake_set and any(
+                    shared = edge not in cut_set and any(
                         q != p and q in members for q in edge_panels.get(edge, [])
                     )
                     if not shared:

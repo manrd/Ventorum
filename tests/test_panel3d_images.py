@@ -178,7 +178,8 @@ def test_ground_effect_equals_explicit_mirror():
     # Compare pressure coefficients on real body
     geom_real = _precompute_geometry(nodes_real[panels_real])
     grad_op = build_surface_gradient_operator(
-        nodes_real, panels_real, geom_real.centroid, geom_real.normal, geom_real.area, mesh.wake_edges
+        nodes_real, panels_real, geom_real.centroid, geom_real.normal, geom_real.area, mesh.wake_edges,
+        kinds=mesh.kind,
     )
     grad_both = surface_gradient(grad_op, mu_both[:n_real])
     v_surf_both, cp_both = compute_surface_velocity_and_cp(

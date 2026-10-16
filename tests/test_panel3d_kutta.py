@@ -87,19 +87,20 @@ def _te_jump(solver: PanelSolver, cp: np.ndarray) -> float:
 
 
 # Default (Morino) run stored after the change to the node-based surface
-# gradient. The doublets and the Trefftz drag equal the run of the first
-# solver version; the pressure values follow the present gradient method.
+# gradient with sharp edges at the panel kind changes. The doublets and the
+# Trefftz drag equal the run of the first solver version; the pressure
+# values follow the present gradient method.
 _STORED_MORINO = {
-    "CL": 0.32913829884375495,
-    "CD_pressure": -0.0022952942097927286,
+    "CL": 0.3289444356419643,
+    "CD_pressure": -0.0025505797612635044,
     "CDi_trefftz": 0.004233828611102339,
-    "Cm": -0.07665012280304392,
-    "cp_sum": -271.1126355930909,
-    "cp_abs_sum": 305.16602098296994,
+    "Cm": -0.07633453844471903,
+    "cp_sum": -36.89045346243077,
+    "cp_abs_sum": 70.88762986025384,
     "cp_0": -1.3715636687742108,
     "cp_100": -0.4000422007027551,
     "mu_abs_sum": 783.0904197027365,
-    "velocity_abs_sum": 17887.834801496563,
+    "velocity_abs_sum": 16393.504373839,
 }
 
 

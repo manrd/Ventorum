@@ -506,3 +506,57 @@ def test_factorizations_are_lazy_and_counted(monkeypatch):
     half.solve(FlightCondition(V_inf=30.0, alpha=0.05, r=0.3))
     assert calls["n"] == 2
     assert half.factorization_count == 2
+
+
+def test_surface_gradient_does_not_cross_sharp_edges():
+    """Verify that the gradient does not use values across a sharp edge.
+
+    Two flat faces meet at 90 deg along the y axis (the fold of a flat tip
+    cap or a trailing-edge base panel). The doublet field is linear on each
+    face and continuous at the fold, but its gradient jumps there. With the
+    panel kinds of the two faces (or, without kinds, with the fold above
+    the fold angle), the panels at the fold use only their own face and get
+    the exact gradient. A gradient that mixes the faces does not.
+    """
+    n = 6
+    h = 1.0 / n
+    ys = np.linspace(0.0, 1.0, n + 1)
+    nodes = []
+    index = {}
+    for i in range(-n, n + 1):  # i < 0: face x = i h at z = 0; i > 0: face z = i h at x = 0
+        for j, y in enumerate(ys):
+            index[(i, j)] = len(nodes)
+            nodes.append([i * h, y, 0.0] if i <= 0 else [0.0, y, i * h])
+    nodes = np.asarray(nodes)
+    panels = []
+    for i in range(-n, n):
+        for j in range(n):
+            a, b = index[(i, j)], index[(i + 1, j)]
+            c, d = index[(i + 1, j + 1)], index[(i, j + 1)]
+            panels.append([a, b, c, d])
+    panels = np.asarray(panels)
+    verts = nodes[panels]
+    centroids = verts.mean(axis=1)
+    raw = np.cross(verts[:, 2] - verts[:, 0], verts[:, 3] - verts[:, 1])
+    areas = 0.5 * np.linalg.norm(raw, axis=1)
+    normals = raw / np.linalg.norm(raw, axis=1, keepdims=True)
+    on_face1 = centroids[:, 2] < 1e-12
+    kinds = np.where(on_face1, "surface", "tip")
+    # Arc length from the fold plus a spanwise part.
+    s_arc = np.where(on_face1, -centroids[:, 0], centroids[:, 2])
+    mu = s_arc + 0.5 * centroids[:, 1]
+    g_face1 = np.array([-1.0, 0.5, 0.0])
+    g_face2 = np.array([0.0, 0.5, 1.0])
+    exact = np.where(on_face1[:, None], g_face1, g_face2)
+    at_fold = np.abs(s_arc - 0.5 * h) < 1e-9
+    inner = at_fold & (centroids[:, 1] > h) & (centroids[:, 1] < 1.0 - h)
+
+    for kw in ({"kinds": kinds}, {"kinds": None}):
+        op = build_surface_gradient_operator(nodes, panels, centroids, normals, areas, None, **kw)
+        grad = surface_gradient(op, mu)
+        assert np.max(np.abs(grad[inner] - exact[inner])) < 1e-12
+    mixed = build_surface_gradient_operator(
+        nodes, panels, centroids, normals, areas, None, kinds=None, fold_angle_deg=179.0
+    )
+    grad_mixed = surface_gradient(mixed, mu)
+    assert np.max(np.abs(grad_mixed[inner] - exact[inner])) > 0.1

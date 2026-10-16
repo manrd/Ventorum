@@ -285,23 +285,60 @@ def reconstruct_full_mesh(half_mesh: PanelMesh) -> PanelMesh:
 
     comp = np.concatenate([half_mesh.component, half_mesh.component])
     kind = np.concatenate([half_mesh.kind, half_mesh.kind])
+    mirrored_nodes = [i for i in range(right_n) if index_map[i] != i]
 
-    # Other per-panel metadata of the mesh (for example a strip index) is
-    # repeated for the mirror panels.
+    # Metadata of the mesh builder, when the mesh carries it. The mirror
+    # panels keep the chordwise index and the side. The strips are numbered
+    # from the left tip to the right tip per component, as the builder
+    # numbers a full mesh: left strip n_c - 1 - s, right strip n_c + s, plus
+    # the strips of the components before; tip and side panels keep -1. An
+    # original node gets the station n_st - 1 + st and its mirror node
+    # n_st - 1 - st (n_st station rows of the component). Other per-panel
+    # or per-node arrays are copied to the mirror panels or nodes.
+    field_names = {fld.name for fld in dataclasses.fields(half_mesh) if fld.init}
+    known = {"nodes", "panels", "component", "kind", "wake_edges", "half"}
     extra = {}
     n_half = len(half_mesh.panels)
-    known = {"nodes", "panels", "component", "kind", "wake_edges", "half"}
-    for fld in dataclasses.fields(half_mesh):
-        if fld.name in known or not fld.init:
+    comp_half = np.asarray(half_mesh.component, dtype=int).reshape(-1)
+    node_comp = np.zeros(right_n, dtype=int)
+    for pi, quad in enumerate(np.asarray(half_mesh.panels, dtype=int)):
+        node_comp[quad] = comp_half[pi] if comp_half.size == n_half else 0
+    for name in sorted(field_names - known):
+        value = getattr(half_mesh, name)
+        if value is None:
+            extra[name] = None
             continue
-        value = getattr(half_mesh, fld.name)
-        arr = np.asarray(value) if value is not None else None
-        if arr is not None and arr.ndim >= 1 and arr.shape[0] == n_half:
-            extra[fld.name] = np.concatenate([arr, arr])
+        arr = np.asarray(value)
+        if name == "strip" and arr.ndim == 1 and arr.shape[0] == n_half:
+            strip_half = arr.astype(int)
+            right = np.full(n_half, -1, dtype=int)
+            left = np.full(n_half, -1, dtype=int)
+            offset = 0
+            for c in np.unique(comp_half):
+                sel = (comp_half == c) & (strip_half >= 0)
+                if not np.any(sel):
+                    continue
+                first = int(np.min(strip_half[sel]))
+                n_c = int(np.max(strip_half[sel])) - first + 1
+                local = strip_half[sel] - first
+                right[sel] = offset + n_c + local
+                left[sel] = offset + n_c - 1 - local
+                offset += 2 * n_c
+            extra[name] = np.concatenate([right, left])
+        elif name == "node_station" and arr.ndim == 1 and arr.shape[0] == right_n:
+            st = arr.astype(int)
+            n_st = {int(c): int(np.max(st[node_comp == c])) + 1 for c in np.unique(node_comp)}
+            orig = np.array([n_st[int(node_comp[i])] - 1 + st[i] for i in range(right_n)], dtype=int)
+            mirror = np.array([n_st[int(node_comp[i])] - 1 - st[i] for i in mirrored_nodes], dtype=int)
+            extra[name] = np.concatenate([orig, mirror])
+        elif arr.ndim >= 1 and arr.shape[0] == n_half:
+            extra[name] = np.concatenate([arr, arr])
+        elif arr.ndim >= 1 and arr.shape[0] == right_n:
+            extra[name] = np.concatenate([arr, arr[mirrored_nodes]])
         else:
-            extra[fld.name] = value
+            extra[name] = value
 
-    return PanelMesh(
+    return type(half_mesh)(
         nodes=np.array(nodes, dtype=float),
         panels=np.array(panels, dtype=int),
         component=comp,

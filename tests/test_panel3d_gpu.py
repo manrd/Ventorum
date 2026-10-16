@@ -13,8 +13,8 @@ Published sources
   pp. 191-197.
 * Katz, J. and Plotkin, A., 2001, Low-Speed Aerodynamics, 2nd ed.,
   Cambridge University Press, section 9.4 and chapter 12.
-* Hess, J. L. and Smith, A. M. O., 1964, Calculation of potential flow about
-  arbitrary bodies, Journal of Ship Research, Vol. 8.
+* Hess, J. L. and Smith, A. M. O., 1967, Calculation of potential flow about
+  arbitrary bodies, Progress in Aeronautical Sciences, Vol. 8, pp. 1-138.
 """
 
 from __future__ import annotations

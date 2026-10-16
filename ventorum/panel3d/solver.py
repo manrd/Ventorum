@@ -406,6 +406,7 @@ class PanelSolver:
             self._full_geom.normal,
             self._full_geom.area,
             self._full_mesh.wake_edges,
+            kinds=self._full_mesh.kind,
         )
 
         # Reference center
