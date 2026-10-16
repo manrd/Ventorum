@@ -2,171 +2,94 @@
 orphan: true
 ---
 
-# 2D Viscous-Inviscid Panel Solver
+# 2D viscous-inviscid solver (Ventorum-2D)
 
-This document describes the mathematical formulation of the two-dimensional coupled viscous-inviscid panel solver in Ventorum (`ventorum.panel2d.viscous`).
+## Model
 
-## Physical Model and Coupling Overview
+`solve_viscous` (`ventorum/panel2d/viscous.py`) couples the panel method of [](panel2d.md) with the integral boundary layer of [](ibl2d_march.md) on the upper surface, the lower surface and the wake. The boundary layer acts on the outer flow by wall and wake transpiration (Lighthill 1958): a source sheet of strength $\sigma = dm/d\xi$, $m = u_e\delta^*$ the mass defect. The whole system is solved by one global Newton iteration with the edge velocity eliminated (fully simultaneous coupling; Drela and Giles 1987; Drela 1989, the papers only). The engine is `ventorum/panel2d/vii.py`; the inviscid data are built in `ventorum/panel2d/coupling.py`.
 
-Real fluid flows at moderate and high Reynolds numbers develop thin shear layers near solid walls.
-The flow field divides into two regions:
-1. An outer potential flow region where viscosity is negligible.
-2. An inner boundary layer and wake region where viscous diffusion is significant.
+## Inviscid data of a case
 
-The outer flow governs the pressure field and edge velocity.
-The inner boundary layer retards the fluid, creating a displacement thickness $\delta^*$.
-This displacement deflects the outer streamlines away from the body surface.
+For each angle (and height) the inviscid matrix is factorized once. The solver forms:
 
-The solver models this displacement effect through wall transpiration (Lighthill, 1958).
-Instead of moving the physical mesh, equivalent normal blowing velocities are applied at the original solid surface.
+- the inviscid nodal $\gamma_{inv}$;
+- the wake line: it starts at the trailing edge (the midpoint of a blunt edge) along the bisector of the two trailing-edge panels, then follows the inviscid streamline by Heun predictor-corrector steps along the unit velocity, with panel lengths that grow geometrically from the mean length of the two trailing-edge panels to the wake length (default one chord, 30 panels); in ground effect the velocity includes the mirror images, and a wake line that reaches the ground stops the case with a reason;
+- the source sensitivities: $\partial\gamma/\partial\sigma$ at the nodes for every airfoil and wake source panel (one solve with many right-hand sides, the factorization reused), and the tangential velocity at the wake panel midpoints per unit source strength (vortex and source velocity influences, with images in ground effect).
 
-## Wall Transpiration and Mass Defect
+## Stations and edge velocity
 
-The mass flow defect in the boundary layer across stations is:
-$$m(s) = u_e(s) \delta^*(s)$$
-where:
-- $u_e$ is the outer edge velocity ratio (dimensionless).
-- $\delta^*$ is the boundary layer displacement thickness [m].
-- $s$ is the surface arc length coordinate [m].
+The stagnation point lies on the panel where the total $\gamma$ changes sign, by linear interpolation. The upper stations run from it over the upper nodes to the trailing edge, the lower stations likewise, and the wake stations from the trailing edge downstream. A node closer to the stagnation point than 0.1 of its next interval is not a station (its mass defect is zero; constant `STAGNATION_DROP`): next to the stagnation point $u_e$ is nearly zero and the logarithmic differences of the next interval would be ill-conditioned.
 
-By continuity, the equivalent normal transpiration velocity at the wall is:
-$$v_n(s) = \frac{d}{ds} \left[ u_e(s) \delta^*(s) \right]$$
+Station edge velocities: $u_e = \pm\gamma$ at the airfoil nodes (sign of the side), $\gamma$ of the trailing-edge node at the first wake station (both trailing-edge speeds are equal by the Kutta condition), the mean of the two adjacent wake-panel midpoint velocities at the other wake stations and a linear extrapolation at the last one. Source strengths: on an airfoil panel $\sigma L$ = ($m$ where the layer leaves the panel) - ($m$ where it enters), on the stagnation panel both ends are exits, on a wake panel $\sigma L = m_{down} - m_{up}$. The gap panel of a blunt edge carries no viscous source: the gap thickness is the displacement of its inviscid gap source. Together:
 
-In the panel solver, each panel $j$ carries a constant-strength source of strength:
-$$\sigma_j = \frac{m_{j+1} - m_j}{\Delta s_j}$$
-where $\Delta s_j$ is the panel length [m].
+```{math}
+u_e = u_{e,inv} + D\,m, \qquad D = P\,S\,B,
+```
 
-## Mass-Defect Influence Matrix
+with $P$ the station-velocity map, $S$ the source sensitivities and $B$ the source matrix of the current structure.
 
-The inviscid flow satisfies the stream function Dirichlet boundary condition:
-$$A \gamma = \text{rhs}_{inv} - \Psi_s \sigma$$
-where:
-- $A$ is the inviscid linear vortex influence matrix of shape $(N+1, N+1)$.
-- $\gamma$ is the nodal vortex sheet strength vector of length $N$.
-- $\Psi_s$ is the source panel stream function influence matrix of shape $(N, M)$.
-- $\sigma$ is the panel source strength vector of length $M$.
+## Variables and equations
 
-The linear system decomposes by superposition:
-$$\gamma = \gamma_{inv} + D \sigma$$
-where the mass-defect influence matrix $D$ is:
-$$D = -A^{-1} \Psi_s$$
+Per station: $\theta$, the mass defect $m$ and $c$ ($N$ laminar, $\sqrt{C_\tau}$ turbulent and wake). At the first station of each side the second variable is $\delta^*$ instead of $m$ (there $u_e$ is small and $\delta^* = m/u_e$ would be ill-conditioned); $u_e$ then solves $(I - D\,\mathrm{diag}(\delta^*_S))\,u_e = u_{e,inv} + D\,m_N$. Equations per station:
 
-Because $A$ depends only on the body geometry, its LU factorization is computed once.
-Subsequent boundary layer iterations solve for edge velocity updates using back-substitution without re-factorizing $A$:
-$$u_e = u_{e, inv} + D \sigma$$
+- first station of each side: the stagnation-point similarity equations of [](ibl2d_march.md) with the velocity gradient $a = (u_{e,upper} + u_{e,lower})/\Delta s$ of the stagnation panel (when a node is dropped, $a = u_e/\xi$ of the first station), and $N = 0$;
+- every other airfoil station: the three equations of the interval that ends at it (laminar, transition, post-transition or turbulent);
+- first wake station: $\theta_w = \theta_u + \theta_l$, $\delta^*_w = \delta^*_u + \delta^*_l + h_{TE}$ ($h_{TE}$ the trailing-edge gap normal to the bisector; Drela 1989), and $C_{\tau,w}$ the $\theta$-weighted mean of the two sides (a side that is still laminar at the trailing edge enters with $0.7\,C_{\tau,EQ}$); the weighted mean is the author's choice and is to be checked against the source;
+- other wake stations: the wake interval equations (no skin friction, doubled dissipation).
 
-## Integral Boundary Layer System
+The Jacobian is exact: forward-mode derivatives of the station equations with respect to $(\theta, \delta^*, c, u_e)$, then the chain rule through $\delta^* = m/u_e$ and $u_e(m)$. The linear system is dense ($3 \times$ the number of stations) and is solved directly.
 
-The boundary layer is modeled by two integral equations for momentum and kinetic energy:
-1. Von Karman momentum integral equation:
-$$\frac{d\theta}{ds} + (2 + H) \frac{\theta}{u_e} \frac{du_e}{ds} = \frac{C_f}{2}$$
-2. Kinetic energy shape parameter equation:
-$$\theta \frac{dH^*}{ds} + H^* (1 - H) \frac{\theta}{u_e} \frac{du_e}{ds} = 2 C_D - H^* \frac{C_f}{2}$$
-where:
-- $\theta$ is the momentum thickness [m].
-- $H = \delta^* / \theta$ is the kinematic shape factor (dimensionless).
-- $H^* = \theta^* / \theta$ is the kinetic energy shape factor (dimensionless).
-- $C_f$ is the skin-friction coefficient (dimensionless).
-- $C_D$ is the dissipation coefficient (dimensionless).
+## Structure updates
 
-The equations are closed using the laminar and turbulent closure relations of Drela and Giles (1987).
+Between Newton iterations: the stagnation point is found again from the total $\gamma$ (it follows $\alpha$ and the viscous solution); when it moves to another panel the stations are reassigned ($\theta$, $\delta^*$ and $c$ carried over node by node) and the node-drop decision is made again. On the same panel a node can be dropped (the stagnation point came too close to it) but not restored, so that the decision cannot oscillate. The transition interval of each side is the first interval where $N$ reaches $n_{crit}$ (or the forced position); when the point leaves its interval downstream the new interval is estimated with the growth rate of the last laminar station. With the continuous transition equations of [](ibl2d_march.md) the solution changes continuously when the transition point passes a station. Near convergence (residual below 1e-3), a transition interval that alternates between two positions is held at the downstream one; the point then lies at the station between them.
 
-## Stagnation Point and Surface Marching
+## Newton step control
 
-The stagnation point is located by finding the zero-crossing of the edge velocity:
-$$u_e(s_{stag}) = 0$$
-The node closest to the stagnation point serves as the origin for both the upper and lower surface boundary layer marches.
+These rules change the path, not the converged solution:
 
-At the stagnation point, self-similar Hiemenz flow supplies the initial condition:
-$$H_0 = 2.216$$
-$$\theta_0 = \sqrt{\frac{F_0}{(2 + H_0) a_{stag} Re}}$$
-where:
-- $a_{stag} = |du_e / ds|_{stag}$ is the velocity gradient at the stagnation point [m^-1].
-- $F_0 = (Re_\theta C_f / 2)_0$ is the stagnation skin-friction factor (dimensionless).
-- $Re$ is the Reynolds number based on chord (dimensionless).
+- step limit: $\theta$, $m$ (or $\delta^*$) and $\sqrt{C_\tau}$ fall by at most 50 % and rise by at most 200 %, $H - 1$ falls by at most 50 %, $u_e$ stays positive;
+- backtracking line search on the 2-norm of the residual (Armijo coefficient 1e-4);
+- when the accepted step factor is below 1e-2 (near-singular Jacobian, for example at laminar separation), a Levenberg-Marquardt step with adaptive damping is taken instead (Levenberg 1944; Marquardt 1963);
+- a cold start tries three first estimates in turn until one converges: (1) direct marches on the inviscid edge velocity ($H$ held past a separation point), with the coupling term scaled by $\omega = 1/64$; $\omega$ is doubled when the residual is below 0.1, or when the residual has not halved in 4 iterations (at small $\omega$ the problem is nearly the direct problem, which has no solution past a separation point); a negative edge velocity at the first station moves the stagnation point first; (2) three sweeps of quasi-simultaneous marches, in which each station follows the local interaction law $u_e = u_{e,inv} + D\,m$ with the mass defects of the other stations held (Veldman 2009), with $\omega = 1$; the local law removes the singularity of the direct march at separation, which helps flapped sections; (3) the direct marches with $\omega = 1$;
+- alpha sweeps start each angle from the converged state of the previous angle; when that fails the angle step is halved up to three times; a cold start is made at the inviscid zero-lift angle and continued to the angle in steps of at most 2 deg.
 
-## Transition Prediction
+Converged means: $\omega = 1$, the largest absolute residual of all equations below `tol` (default 1e-6) and no structure change in the last two evaluations. The residuals are relative (logarithmic differences and ratios), except the amplification equation (absolute in $N$). A case that does not converge returns `converged=False`, the reached residual and a reason, with a warning. There are no result overrides.
 
-Boundary layer transition is evaluated by two mechanisms:
-1. Forced transition at user-specified stations $x_{tr} / c$.
-2. Free transition via the $e^N$ envelope amplification method.
+## Loads
 
-The amplification exponent $N$ integrates the spatial amplification rate:
-$$\frac{dN}{ds} = \frac{dN}{dRe_\theta} \frac{dRe_\theta}{ds}$$
-Transition occurs when $N$ reaches the critical threshold $N_{crit}$ (typically 9.0 for quiet wind tunnels), or when laminar separation occurs ($H \ge 3.6$).
+- $C_l$: Kutta-Joukowski of the total circulation (including the gap-panel vortex); $C_{l,pressure}$ and $C_m$ from the surface pressure (wall panels), $C_m$ about the quarter chord, pressure only.
+- $C_d$: Squire-Young at the wake end, $C_d = 2\,\theta_{end}\,u_{e,end}^{(H_{end} + 5)/2}/c$ (Squire and Young 1938).
+- $C_{d,friction}$: $\int C_f u_e^2\,(\hat t_{flow}\cdot\hat e_D)\,ds/c$ over both sides, from the stagnation point.
+- $C_{d,pressure}$: surface pressure integral over the wall panels (exact for $\gamma$ linear on each panel).
 
-Upon transition, the shape factor resets to an attached turbulent value ($H \approx 1.45$), establishing a continuous momentum thickness across the transition front.
+$C_{d,friction} + C_{d,pressure}$ is an independent check of $C_d$; nothing replaces one by the other. For NACA 0012 at Re 1e6 they agree within 2 to 3 % at 0 and 2 deg, but the surface sum falls 6 % below at 4 deg and 12 % at 6 deg (the same at 160 and 320 panels). The difference grows with the lift; it is the difference between the thin-layer surface pressure and the momentum deficit of the wake model, and no correction is applied.
 
-## Profile Drag Calculation
+## Ground effect
 
-Profile drag is calculated by the Squire-Young formula evaluated at the downstream boundary layer state:
-$$C_d = 2 \theta_{TE} \left( \frac{u_{e, TE}}{V_\infty} \right)^{\frac{H_{TE} + 5}{2}}$$
-where:
-- $\theta_{TE} = \theta_{upper} + \theta_{lower} + \theta_{base}$ is the combined momentum thickness at the trailing edge [m].
-- $H_{TE} = (\delta^*_{upper} + \delta^*_{lower} + h_{te}) / \theta_{TE}$ is the trailing edge shape factor (dimensionless).
-- $u_{e, TE}$ is the average edge velocity near the trailing edge (dimensionless).
+The image method of the inviscid solver; the image body carries the mirror image of the real boundary layer and wake (equal source strengths) and there is no boundary layer on the ground. There is no height limit: a large height gives the free-air answer by computation ($h/c$ = 50 is within 1e-4 of free air on $C_l$ for NACA 0012 at 4 deg).
 
-As a consistency check, drag is also computed by nearfield pressure and skin-friction surface integration:
-$$C_{d, near} = C_{d, pressure} + C_{d, friction}$$
-$$C_{d, pressure} = \frac{1}{c} \oint C_p n_x ds + C_{D, base} \frac{h_{te}}{c}$$
-$$C_{d, friction} = \frac{1}{c} \oint C_f t_x ds$$
-where $n_x$ and $t_x$ are the surface normal and tangential components along the drag axis.
+## Multi-element and flaps
 
-## Streamline Wake Tracing and Wake Source Panels
+One body only: more bodies raise `ValueError`. A plain flap is part of the single-element geometry.
 
-The wake trajectory is traced from the trailing-edge bisector along the local potential streamline (Drela, 1989).
-The trajectory integration uses a second-order Runge-Kutta (Heun predictor-corrector) scheme.
-Wake panel lengths expand geometrically away from the trailing edge with ratio $r = 1.10$.
+## Batched solver
 
-For symmetric airfoils at zero angle of attack, the wake follows the chord line exactly ($y = 0$).
-At positive angles of attack, the wake deflects downwash-wise and aligns asymptotically with the free-stream direction.
+`solve_viscous_batch` (`ventorum/panel2d/viscous_batch.py`) runs the same algorithm with torch on the CPU or on CUDA. Cases with the same geometry, Reynolds number, height and transition settings form sequences; pass $p$ solves the $p$-th angle of every sequence; the cases of a pass with the same node and wake counts form one batched Newton iteration (residuals, Jacobians, $D$, edge velocities and `torch.linalg.solve` on the device; converged cases leave the active set). Failed first attempts and the first angle of each sequence follow the sequential fallback path, one case at a time. In float64 the batch equals the sequential solver; in float32 the residual stops near the float32 round-off level, and a case that does not reach the tolerance is reported with its residual.
 
-The wake carries source panels to model its displacement defect:
-$$m_w(s) = |u_{e, w}(s)| \delta^*_w(s)$$
-$$\sigma_{w, j} = \frac{m_w(s_{j+1}) - m_w(s_j)}{\Delta s_{w, j}}$$
-The wake edge velocity relaxes toward the free stream:
-$$u_{e, w}(s) = 1 + (u_{e, TE} - 1) e^{-3 s / c}$$
-The stream function influence of the wake source panels is integrated continuously without branch cuts across the airfoil surface.
+## Comparison with XFOIL 6.99 (black box)
 
-## Blunt Trailing Edge Treatment
+For NACA 0012 at Re 1e6 (160 panels, $n_{crit} = 9$) the drag is above XFOIL 6.99 at small angles and the lift is a few percent lower. Causes found: (1) with the edge velocity of XFOIL as input, the laminar march with the published closures (which match exact Falkner-Skan profiles) gives $H$ 1 to 4 % higher in the adverse gradient, so the $e^N$ transition comes about 0.05 chord earlier; (2) the shear-stress start value $0.7\,C_{\tau,EQ}$ (to be checked against the paper) makes the turbulent layer grow faster just after transition. With transition forced at 5 % chord the drag agrees within 2 %. The tests print the comparison table; the numbers are not stored in the repository.
 
-For airfoils with a finite trailing-edge thickness $h_{te}$, the base creates a separated dead-air region (Hoerner, 1965).
-The wake begins with the geometric gap added to the boundary layer displacement:
-$$\delta^*_{w, 0} = \delta^*_{upper} + \delta^*_{lower} + h_{te}$$
+## Verification
 
-The momentum thickness includes a base momentum defect increment:
-$$\theta_{w, 0} = \theta_{upper} + \theta_{lower} + \frac{1}{2} C_{D, base} h_{te}$$
-where the base pressure drag coefficient is parameterized by the trailing-edge edge velocity:
-$$C_{D, base} = \max(u_{e, TE}^2 - 1.0, 0.15)$$
-
-This base momentum deficit enters the Squire-Young drag integration and produces a drag increment that scales with $h_{te} / c$.
-
-## Flapped Sections and Separation Handling
-
-Plain trailing-edge flap deflections induce concentrated adverse pressure gradients near the hinge line on the suction surface.
-To prevent numerical breakdown from the Goldstein boundary-layer singularity near separation, the march applies a quasi-inverse deceleration limiter (Veldman, 2009):
-$$\left| \frac{du_e}{ds} \right| \le 0.3 \bar{u}_e \frac{\Delta s}{\theta}$$
-
-Separation is detected when either:
-1. Kinematic shape factor $H$ reaches the laminar separation threshold ($H \ge 3.8$) or turbulent separation threshold ($H \ge 2.6$).
-2. Skin-friction coefficient falls to zero ($C_f \le 0$).
-
-When separation occurs, the solver flags the separated surface, records the failure diagnosis reason string in `ViscousResult.reason`, and returns cleanly without raising an unhandled exception.
-
-## Ground Effect Coupling
-
-In ground effect at height $h$ above a flat boundary, the potential flow solver mirrors the body across $y = 0$.
-The boundary layer on the image airfoil mirrors the real airfoil:
-$$\delta^*_{image}(x, -y) = \delta^*_{real}(x, y)$$
-The mass-defect influence matrix accounts for both the direct panels and the image source panels:
-$$D_{GE} = -A_{GE}^{-1} (\Psi_{s, real} + \Psi_{s, image})$$
-At large heights ($h/c \ge 500$), the mirror influence decays as $O(1/h^2)$ and approaches the free-air asymptotic limit.
+`tests/test_panel2d_viscous.py`, `tests/test_panel2d_viscous_wake.py`, `tests/test_panel2d_viscous_batch.py`.
 
 ## References
 
-- M. J. Lighthill, 'On displacement thickness', Journal of Fluid Mechanics, Vol. 4, Issue 4, 1958, pp. 383-392.
-- M. Drela and M. B. Giles, 'Viscous-inviscid analysis of transonic and low Reynolds number airfoils', AIAA Journal, Vol. 25, No. 10, 1987, pp. 1347-1355.
-- M. Drela, 'XFOIL: An Analysis and Design System for Low Reynolds Number Airfoils', Lecture Notes in Engineering, Vol. 54, Springer, 1989, pp. 1-12.
-- H. B. Squire and A. D. Young, 'The calculation of the profile drag of aerofoils', Aeronautical Research Council Reports and Memoranda, R&M 1838, 1938.
-- S. F. Hoerner, 'Fluid-Dynamic Drag', Published by the Author, 1965, chapter 3 (base drag of blunt trailing edges).
-- A. E. P. Veldman, 'Quasi-simultaneous interaction methods for viscous-inviscid flow', Computers & Fluids, Vol. 38, Issue 3, 2009, pp. 496-508.
+- M. J. Lighthill, "On displacement thickness", Journal of Fluid Mechanics 4, 1958, pp. 383-392.
+- M. Drela and M. B. Giles, "Viscous-inviscid analysis of transonic and low Reynolds number airfoils", AIAA Journal 25(10), 1987, pp. 1347-1355.
+- M. Drela, "XFOIL: An analysis and design system for low Reynolds number airfoils", Lecture Notes in Engineering 54, Springer, 1989, pp. 1-12.
+- H. B. Squire and A. D. Young, "The calculation of the profile drag of aerofoils", ARC R and M 1838, 1938.
+- K. Levenberg, "A method for the solution of certain non-linear problems in least squares", Quarterly of Applied Mathematics 2, 1944, pp. 164-168.
+- D. W. Marquardt, "An algorithm for least-squares estimation of nonlinear parameters", SIAM Journal on Applied Mathematics 11, 1963, pp. 431-441.
+- A. E. P. Veldman, "Quasi-simultaneous interaction methods for viscous-inviscid flow", Computers and Fluids 38(3), 2009, pp. 496-508.

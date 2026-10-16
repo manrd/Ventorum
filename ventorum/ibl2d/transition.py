@@ -1,138 +1,177 @@
 # Author: Manuel Alejandro Rodriguez Diaz, PhD
-"""Envelope e^N transition model for Ventorum-2D.
+"""Envelope e^N transition relations of the integral boundary layer.
 
-The model gives the critical momentum-thickness Reynolds number, the
-envelope amplification rate per unit Reynolds number, and the resulting
-growth rate of the amplification exponent along the surface, in
-incompressible flow only. A later viscous-inviscid interaction solver
-integrates the growth rate and trips the boundary layer where the exponent
-reaches its critical value.
-
-Each relation is a pure function of arrays. It returns the value and its
-partial derivatives with respect to every input, as a tuple, with analytic
-derivatives for Newton solves. Each function takes an optional ``xp``
-argument (default numpy); with ``xp=torch`` the same code runs on torch
-tensors on the CPU or on CUDA. There are no Python loops over stations.
-
-Sources (papers only; no program code was read or used):
+The relations give the critical momentum-thickness Reynolds number, the
+envelope amplification rate per unit momentum-thickness Reynolds number,
+and the growth rate of the amplification exponent N along the surface, for
+incompressible flow. They are written from the published papers only:
 
 * M. Drela and M. B. Giles, "Viscous-inviscid analysis of transonic and low
-  Reynolds number airfoils", AIAA Journal 25(10), 1987, pp. 1347-1355: the
-  e^N transition model coupled to the integral boundary layer.
-* M. Drela, doctoral thesis, MIT Gas Turbine Laboratory Report 187, 1986:
-  the critical Reynolds number and the envelope amplification rate.
+  Reynolds number airfoils", AIAA Journal 25(10), 1987, pp. 1347-1355
+  (envelope fits to the Orr-Sommerfeld results of the Falkner-Skan family,
+  and the conversion from dN/dRe_theta to dN/dxi).
+* M. Drela, doctoral thesis, MIT Gas Turbine Laboratory Report 187, 1986.
 
-The equation labels below (E1) to (E3) point to
-``docs/theory/ibl2d_closure.md``, which states every relation, its source
-and its range of validity. The fit coefficients are Ventorum fits; their
-values live in the code below.
+No program source code was read or used. The labels (E1) to (E4) point to
+``docs/theory/ibl2d_closure.md``.
+
+Each function returns the value and its partial derivatives as a tuple and
+takes an optional ``xp`` argument (numpy or torch).
 """
 
 from __future__ import annotations
 
-
-def _mod(xp):
-    """Return the array module (numpy by default)."""
-    if xp is None:
-        import numpy as np
-
-        return np
-    return xp
+import math
 
 
-def _f(xp, x):
-    """Return ``x`` as a float array of the ``xp`` module."""
-    return xp.asarray(x) * 1.0
+from ventorum.ibl2d.closure import _arr, _mod
+
+__all__ = [
+    "critical_re_theta",
+    "amplification_rate",
+    "growth_factor",
+    "transition_growth_rate",
+]
+
+_LN10 = math.log(10.0)
 
 
 def critical_re_theta(H, xp=None):
-    """Return the critical Reynolds number and its derivative.
+    """Return the critical Reynolds number Re_theta0 (E1) and its derivative.
 
-    Critical momentum-thickness Reynolds number ``Re_theta,0`` (theory page
-    Eq. (E1)), below which Tollmien-Schlichting waves do not grow. A
-    favourable pressure gradient (low ``H``) stabilizes the layer, so
-    ``Re_theta,0`` rises as ``H`` falls; it approaches a floor in strongly
-    adverse gradients.
+    Relation of Drela and Giles (1987)::
+
+        log10 Re_theta0 = (1.415 / (H - 1) - 0.489) tanh(20 / (H - 1) - 12.9)
+                          + 3.295 / (H - 1) + 0.44
 
     Parameters
     ----------
     H : array_like
-        Kinematic shape factor ``delta_star / theta`` (dimensionless).
-    xp : module or None
-        Array module (default numpy); pass torch for torch tensors.
+        Shape factor [-], H > 1.
+    xp : module, optional
+        Array module (numpy or torch). Default numpy.
 
     Returns
     -------
     tuple
-        ``(Re0, dRe0_dH)``, both dimensionless.
+        ``(Re_theta0, dRe_theta0_dH)`` [-].
     """
-    m = _mod(xp)
-    H = _f(m, H)
-    e = m.exp(6.91 - H)
-    return 163.0 + e, -e
+    xp = _mod(xp)
+    H = _arr(xp, H)
+    u = 1.0 / (H - 1.0)
+    du = -u * u
+    a = 1.415 * u - 0.489
+    t = xp.tanh(20.0 * u - 12.9)
+    lg = a * t + 3.295 * u + 0.44
+    dlg = (1.415 * t + a * (1.0 - t * t) * 20.0 + 3.295) * du
+    r0 = xp.exp(_LN10 * lg)
+    return r0, r0 * _LN10 * dlg
 
 
 def amplification_rate(H, xp=None):
-    """Return the envelope amplification rate and its derivative.
+    """Return the envelope rate dN/dRe_theta (E2) and its derivative.
 
-    Rate ``g = dN / dRe_theta`` (dimensionless) of the envelope of the
-    spatial amplification curves, theory page Eq. (E2). ``g`` is positive:
-    past the critical Reynolds number every Reynolds-number increment adds
-    to the exponent. Growth is faster in adverse gradients (high ``H``).
+    Relation of Drela and Giles (1987)::
+
+        dN/dRe_theta = 0.01 sqrt([2.4 H - 3.7 + 2.5 tanh(1.5 H - 4.65)]^2 + 0.25)
 
     Parameters
     ----------
     H : array_like
-        Kinematic shape factor ``delta_star / theta`` (dimensionless).
-    xp : module or None
-        Array module (default numpy); pass torch for torch tensors.
+        Shape factor [-].
+    xp : module, optional
+        Array module (numpy or torch). Default numpy.
 
     Returns
     -------
     tuple
-        ``(g, dg_dH)``, both dimensionless.
+        ``(dN_dRe_theta, derivative_dH)`` [-].
     """
-    m = _mod(xp)
-    H = _f(m, H)
-    val = 0.003 + 0.005 * (H - 1.0)
-    der = m.full_like(val, 0.005)
-    return val, der
+    xp = _mod(xp)
+    H = _arr(xp, H)
+    t = xp.tanh(1.5 * H - 4.65)
+    b = 2.4 * H - 3.7 + 2.5 * t
+    db = 2.4 + 3.75 * (1.0 - t * t)
+    s = xp.sqrt(b * b + 0.25)
+    return 0.01 * s, 0.01 * b * db / s
 
 
-def transition_growth_rate(H, Re_theta, dRe_theta_ds, xp=None):
-    """Return the growth rate of the exponent and its derivatives.
+def growth_factor(H, xp=None):
+    """Return theta dRe_theta/dxi of the Falkner-Skan family (E3).
 
-    Rate ``dN/ds`` [1/m] (theory page Eq. (E3)): ``g(H) * dRe_theta/ds``
-    where ``Re_theta`` exceeds its critical value, else zero. The switch at
-    the critical Reynolds number is the source relation itself, so the rate
-    has a jump there by design.
+    Drela and Giles (1987) convert dN/dRe_theta to dN/dxi with the
+    Falkner-Skan relations::
+
+        l(H) = (6.54 H - 14.07) / H^2
+        m(H) = (0.058 (H - 4)^2 / (H - 1) - 0.068) / l(H)
+        theta dRe_theta/dxi = (m + 1) l / 2
+
+    The product (m + 1) l / 2 is evaluated in the form
+    (0.058 (H - 4)^2 / (H - 1) - 0.068 + l) / 2, which has no singular point
+    where l = 0.
 
     Parameters
     ----------
     H : array_like
-        Kinematic shape factor ``delta_star / theta`` (dimensionless).
+        Shape factor [-], H > 1.
+    xp : module, optional
+        Array module (numpy or torch). Default numpy.
+
+    Returns
+    -------
+    tuple
+        ``(rho, drho_dH)`` with rho = theta dRe_theta/dxi [-].
+    """
+    xp = _mod(xp)
+    H = _arr(xp, H)
+    hm1 = H - 1.0
+    h4 = H - 4.0
+    p = 0.058 * h4 * h4 / hm1 - 0.068
+    dp = 0.058 * (2.0 * h4 * hm1 - h4 * h4) / (hm1 * hm1)
+    ell = (6.54 * H - 14.07) / (H * H)
+    dell = (6.54 * H - 2.0 * (6.54 * H - 14.07)) / (H * H * H)
+    return 0.5 * (p + ell), 0.5 * (dp + dell)
+
+
+def transition_growth_rate(H, theta, Re_theta, xp=None):
+    """Return the envelope growth rate dN/dxi (E4) and its derivatives.
+
+    dN/dxi = (dN/dRe_theta)(H) rho(H) / theta for Re_theta > Re_theta0(H),
+    and zero otherwise (Drela and Giles 1987). The switch at Re_theta0 is a
+    jump of the source relation; it is kept as published.
+
+    Parameters
+    ----------
+    H : array_like
+        Shape factor [-].
+    theta : array_like
+        Momentum thickness [m].
     Re_theta : array_like
-        Momentum-thickness Reynolds number (dimensionless).
-    dRe_theta_ds : array_like
-        Streamwise derivative of ``Re_theta`` [1/m].
-    xp : module or None
-        Array module (default numpy); pass torch for torch tensors.
+        Momentum-thickness Reynolds number [-].
+    xp : module, optional
+        Array module (numpy or torch). Default numpy.
 
     Returns
     -------
     tuple
-        ``(dNds, d_dH, d_dRe, d_ddReds)`` with ``dNds`` [1/m], ``d_dH``
-        [1/m], ``d_dRe`` [1/m] and ``d_ddReds`` dimensionless.
+        ``(dN_dxi, d_dH, d_dtheta, d_dRe_theta)``: the rate [1/m] and its
+        partial derivatives. The derivative with respect to Re_theta is
+        zero away from the switch.
     """
-    m = _mod(xp)
-    H = _f(m, H)
-    Re = _f(m, Re_theta)
-    r = _f(m, dRe_theta_ds)
-    Re0, _ = critical_re_theta(H, xp)
-    g, dg_H = amplification_rate(H, xp)
-    on = Re >= Re0
-    val = m.where(on, g * r, 0.0)
-    dH = m.where(on, dg_H * r, 0.0)
-    dRe = m.zeros_like(val)
-    dr = m.where(on, g, 0.0)
-    return val, dH, dRe, dr
+    xp = _mod(xp)
+    H = _arr(xp, H)
+    th = _arr(xp, theta)
+    rt = _arr(xp, Re_theta)
+    a, da = amplification_rate(H, xp=xp)
+    rho, drho = growth_factor(H, xp=xp)
+    r0, _ = critical_re_theta(H, xp=xp)
+    on = rt > r0
+    rate = a * rho / th
+    zero = 0.0 * rate
+    d_h = (da * rho + a * drho) / th
+    return (
+        xp.where(on, rate, zero),
+        xp.where(on, d_h, zero),
+        xp.where(on, -rate / th, zero),
+        zero,
+    )

@@ -2,150 +2,89 @@
 orphan: true
 ---
 
-# 2D Inviscid Panel Solver with Ground Effect
+# 2D inviscid panel solver with ground effect (Ventorum-2D)
 
-This document describes the mathematical formulation of the two-dimensional inviscid panel solver in Ventorum (`ventorum.panel2d`).
+## Model
 
-## Formulation Overview
+The solver (`ventorum/panel2d/solver.py`, influences in `ventorum/panel2d/influence.py`) computes incompressible, inviscid, irrotational flow about one or more bodies in Selig order (counterclockwise), in free air or above flat ground. Sources: Katz and Plotkin (2001), chapters 10 and 11 (panel singularities, stream-function formulation) and section 6.6 (images); Drela (1989), the paper only.
 
-The solver uses a Dirichlet boundary condition on the stream function $\psi$.
-The fluid is incompressible, inviscid, and irrotational.
-The velocity vector $(u, v)$ relates to the stream function by:
-$$u = \frac{\partial \psi}{\partial y}, \quad v = -\frac{\partial \psi}{\partial x}$$
+The stream function is the sum of the free stream, linear-strength vortex panels with node values $\gamma_j$ and constant-strength source panels with prescribed strengths $\sigma_k$:
 
-The total stream function $\psi$ is the superposition of the free stream, vortex panels, and source panels:
-$$\psi(x, y) = \psi_\infty(x, y) + \psi_\gamma(x, y) + \psi_\sigma(x, y)$$
+```{math}
+\psi = \psi_\infty + \sum_j \gamma_j\,\psi^{(\gamma)}_j + \sum_k \sigma_k\,\psi^{(\sigma)}_k,
+\qquad \psi_\infty = y\cos\alpha - x\sin\alpha \;\;\text{(free air)}, \quad \psi_\infty = y \;\;\text{(ground effect)}.
+```
 
-In free air, with angle of attack $\alpha$, the free-stream stream function is:
-$$\psi_\infty(x, y) = V_\infty (y \cos\alpha - x \sin\alpha)$$
+Velocities follow from $u = \partial\psi/\partial y$, $v = -\partial\psi/\partial x$. All values are over the free-stream speed.
 
-The Dirichlet boundary condition enforces that the surface of each lifting body forms a streamline:
-$$\psi(x_i, y_i) = \Psi_b$$
-where $(x_i, y_i)$ are collocation points at the surface nodes of body $b$, and $\Psi_b$ is an unknown constant stream function value for that body.
+## Panel influences
 
-## Panel Singularities and Stream Function Influences
+Local panel frame: $\xi$ along the panel from its start point, $\eta$ along the left normal (for a body in Selig order the left normal points into the body), panel length $L$.
 
-The body contour is discretized into $M$ flat panels connected by $N$ nodes.
-Node coordinates are ordered in Selig convention (from the upper trailing edge, forward around the leading edge, to the lower trailing edge).
+**Linear vortex panel.** With $\gamma(t) = \gamma_1(1 - t/L) + \gamma_2\,t/L$ and $\psi = \frac{1}{4\pi}\int_0^L \gamma(t)\ln\big((\xi - t)^2 + \eta^2\big)\,dt$ (positive $\gamma$ turns clockwise). With the antiderivatives $F_0(u) = u\ln(u^2 + \eta^2) - 2u + 2\eta\arctan(u/\eta)$ and $F_1(u) = \tfrac12(u^2 + \eta^2)\big(\ln(u^2 + \eta^2) - 1\big)$, $I_0 = F_0(\xi) - F_0(\xi - L)$ and $\Delta F_1 = F_1(\xi) - F_1(\xi - L)$:
 
-### Linear-Strength Vortex Panels
+```{math}
+\psi_1 = \frac{1}{4\pi}\left[\left(1 - \frac{\xi}{L}\right) I_0 + \frac{\Delta F_1}{L}\right], \qquad
+\psi_2 = \frac{1}{4\pi}\left[\frac{\xi}{L} I_0 - \frac{\Delta F_1}{L}\right].
+```
 
-Vorticity varies linearly over each panel $j$ from $\gamma_1$ at local coordinate $s = 0$ to $\gamma_2$ at $s = L$:
-$$\gamma(s) = \gamma_1 \left(1 - \frac{s}{L}\right) + \gamma_2 \left(\frac{s}{L}\right)$$
+For field points farther than two panel lengths from the panel middle the end terms cancel strongly (in float32 the influence matrix had errors of 1e-5 relative). An equivalent form is used there: with $x_c = \xi - L/2$, $r_a^2 = \xi^2 + \eta^2$, $r_b^2 = (\xi - L)^2 + \eta^2$, $\Lambda = \ln(r_a^2/r_b^2) = \mathrm{log1p}(2 x_c L/r_b^2)$ and $I = \mathrm{atan2}(\eta L, \eta^2 + \xi(\xi - L))$,
 
-A point vortex of strength $d\Gamma = \gamma(s) ds$ induces a stream function at field point $(\xi, \eta)$:
-$$d\psi = \frac{1}{4\pi} \ln(r^2) d\Gamma = \frac{1}{4\pi} \ln\left((\xi - s)^2 + \eta^2\right) \gamma(s) ds$$
+```{math}
+P_0 = L\ln(r_a r_b) + x_c\Lambda - 2L + 2\eta I, \qquad
+P_1 = \tfrac12\Lambda\,(x_c^2 - L^2/4 - \eta^2) - x_c L + 2 x_c \eta I,
+```
 
-Let $t = \xi - s$, so $dt = -ds$.
-When $s = 0$, $t = \xi$.
-When $s = L$, $t = \xi - L$.
-The required indefinite integrals are:
-$$F_0(t, \eta) = \int \ln(t^2 + \eta^2) dt = t \ln(t^2 + \eta^2) - 2t + 2\eta \arctan\left(\frac{t}{\eta}\right)$$
-$$F_1(t, \eta) = \int t \ln(t^2 + \eta^2) dt = \frac{1}{2}(t^2 + \eta^2) \left(\ln(t^2 + \eta^2) - 1\right)$$
+```{math}
+\psi_1 = \frac{1}{4\pi}\left(\frac{P_0}{2} - \frac{P_1}{L}\right), \qquad \psi_2 = \frac{1}{4\pi}\left(\frac{P_0}{2} + \frac{P_1}{L}\right),
+```
 
-Over the panel length from $s = 0$ to $s = L$:
-$$I_0 = \int_0^L \ln\left((\xi - s)^2 + \eta^2\right) ds = F_0(\xi, \eta) - F_0(\xi - L, \eta)$$
-$$I_1 = \int_0^L s \ln\left((\xi - s)^2 + \eta^2\right) ds = \xi I_0 - \left[F_1(\xi, \eta) - F_1(\xi - L, \eta)\right]$$
+where $P_0 = \int_0^L \ln r^2\,dt$ and $P_1 = \int_0^L (t - L/2)\ln r^2\,dt$. Both forms are exact.
 
-The stream function influence of panel $j$ with unit nodal strengths is:
-$$\psi = \psi_1 \gamma_1 + \psi_2 \gamma_2$$
-where:
-$$\psi_1 = \frac{1}{4\pi} \left[ \left(1 - \frac{\xi}{L}\right) I_0 + \frac{1}{L} \left(F_1(\xi, \eta) - F_1(\xi - L, \eta)\right) \right]$$
-$$\psi_2 = \frac{1}{4\pi} \left[ \frac{\xi}{L} I_0 - \frac{1}{L} \left(F_1(\xi, \eta) - F_1(\xi - L, \eta)\right) \right]$$
+**Constant source panel.** $\psi = \frac{1}{2\pi}\int_0^L \varphi(t)\,dt$ with $\varphi$ the polar angle of the field point seen from the source point. With the branch $(-\pi, \pi]$, $\int_0^L \mathrm{atan2}(\eta, \xi - t)\,dt = G(\xi) - G(\xi - L)$, $G(u) = u\,\mathrm{atan2}(\eta, u) + \tfrac12\eta\ln(u^2 + \eta^2)$ (far form: $\tfrac{L}{2}(\varphi_a + \varphi_b) - x_c I + \tfrac12\eta\Lambda$). The source stream function is multivalued; each use selects a branch cut:
 
-### Constant-Strength Source Panels
+- body panels: the cut runs along the local $-\eta$ direction (the outward normal), so $\varphi \in (-\pi/2, 3\pi/2]$. A field point on the panel line ($\eta$ = 0 or round-off) is taken on the inner side ($+\eta$). This removes the round-off sign of $\eta$ at the panel's own nodes. The function is single-valued over the body interior and over the plane except the strip $\{\eta < 0,\ 0 < \xi < L\}$ outside the panel; for several bodies the solver raises `ValueError` when a node of one body lies in such a strip of another body;
+- wake panels: the cut runs downstream along $+\xi$, so $\varphi \in [0, 2\pi)$; the function is continuous everywhere upstream, also over the airfoil;
+- mirror panels below the ground: the field points (real nodes) are above the ground, so the global polar angle lies in $(0, \pi)$; the branch is fixed from the global angle at the panel start.
 
-A source panel has uniform strength $\sigma$.
-A point source of strength $dQ = \sigma ds$ induces a stream function:
-$$d\psi = \frac{\sigma}{2\pi} \theta(s) ds$$
-where $\theta(s)$ is the angle from the source point $(s, 0)$ to the field point $(\xi, \eta)$ in local coordinates:
-$$\theta(s) = \arctan\left(\frac{\eta}{\xi - s}\right)$$
+**Velocities** (used for the wake): the source panel induces $u = \frac{1}{4\pi}\ln(r_1^2/r_2^2)$, $v = \frac{1}{2\pi}\big(\mathrm{atan2}(\eta, \xi - L) - \mathrm{atan2}(\eta, \xi)\big)$; the linear vortex panel induces $u = \frac{1}{2\pi}\int\gamma\,\eta/r^2\,dt$, $v = -\frac{1}{2\pi}\int\gamma(\xi - t)/r^2\,dt$, which follow in closed form from $I_0 = \int \eta/r^2$, $J_0 = \tfrac12\ln(r_1^2/r_2^2)$, $I_1 = \xi I_0 - \eta J_0$ and $J_1 = \xi J_0 - L + \eta I_0$.
 
-Integrating by parts with $t = \xi - s$:
-$$\int \arctan\left(\frac{\eta}{t}\right) dt = t \arctan\left(\frac{\eta}{t}\right) + \frac{1}{2}\eta \ln(t^2 + \eta^2)$$
+## Boundary conditions
 
-Transforming to global coordinates with panel orientation angle $\theta_{\text{panel}}$ gives the closed-form stream function:
-$$\psi_\sigma = \frac{\sigma}{2\pi} \left[ \xi \arctan\left(\frac{\eta}{\xi}\right) + \frac{1}{2}\eta \ln(\xi^2 + \eta^2) - (\xi - L) \arctan\left(\frac{\eta}{\xi - L}\right) - \frac{1}{2}\eta \ln\left((\xi - L)^2 + \eta^2\right) + \theta_{\text{panel}} L \right]$$
+At each node $\psi = \psi_b$ (the constant of body $b$, an extra unknown). Kutta condition per body: $\gamma_{first} + \gamma_{last} = 0$.
 
-## Boundary Conditions and System of Equations
+**Sharp trailing edge** (gap below $10^{-4}$ chord): the first and last nodes coincide and their two stream-function equations would be the same. Both are replaced by linear extrapolation conditions, $\gamma_1 - 2\gamma_2 + \gamma_3 = 0$ and $\gamma_N - 2\gamma_{N-1} + \gamma_{N-2} = 0$: the trailing-edge values are the linear extrapolations of the next two nodes on each side, and the Kutta condition makes the extrapolated speeds equal. This keeps the symmetry of the problem and is well conditioned also for a cusped edge (a single replaced row is singular there: two coincident sheets of opposite strength at the cusp are invisible to the node conditions). Drela (1989) replaces the equation of the last node by an extrapolation of the mean vorticity; the form used here is the author's and is to be checked against that paper.
 
-### Surface Dirichlet Condition
+**Blunt trailing edge**: a gap panel from the last node to the first node carries a constant vortex sheet $\gamma_{TE} = -\tfrac12(\gamma_{first} - \gamma_{last})(\hat s\cdot\hat t)$ and a constant source sheet $\sigma_{TE} = \tfrac12(\gamma_{first} - \gamma_{last})(\hat t\cdot\hat n_{out})$, where $\hat s$ is the unit vector along the gap panel, $\hat t$ the trailing-edge bisector and $\hat n_{out}$ the outer normal of the gap panel (Drela 1989; the signs follow from the jump conditions of this convention: the flow leaves the gap with the trailing-edge speed along the bisector). The gap panel is not a wall: it is not in the pressure integral.
 
-On each body surface, the stream function satisfies:
-$$\sum_{j=1}^{N_{\text{panels}}} \left( \psi_{1, ij} \gamma_{1, j} + \psi_{2, ij} \gamma_{2, j} \right) - \Psi_b = -\psi_\infty(x_i, y_i) - \sum_{j=1}^{N_{\text{panels}}} \psi_{\sigma, ij} \sigma_j$$
+## Solution
 
-For $N_b$ nodes on body $b$, this provides $N_b$ equations.
-The value $\Psi_b$ is an unknown scalar for each body.
+Free air: the matrix does not depend on $\alpha$; it is factorized once (LU) and two right-hand sides (free stream along $x$ and $y$) are superposed. Source strengths add right-hand-side columns only; zero sources reproduce the inviscid result bit for bit.
 
-### Kutta Condition
+Ground effect (flat ground $y = 0$): each body has a mirror image with opposite vortex strength and equal source strength. The angle of attack rotates the geometry clockwise about the pivot (default the quarter chord of body 0); the free stream is along $+x$; `height_reference="pivot"` places the pivot at the height, `"trailing_edge"` the lowest trailing-edge point. Geometry under or touching the ground raises `ValueError`. Each angle has its own matrix; the torch backend builds and solves them as a batch.
 
-Flow must leave the trailing edge smoothly.
+## Forces and moments
 
-1. **Sharp Trailing Edge (gap $\le 10^{-4} c$)**:
-The upper and lower trailing edge vortex strengths satisfy:
-$$\gamma_{\text{first}} + \gamma_{\text{last}} = 0$$
-This condition closes the circulation.
+$C_l$ from the total circulation (Kutta-Joukowski), including the gap-panel vortex. Pressure forces: $C_p = 1 - \gamma^2$, integrated exactly over each wall panel for $\gamma$ linear on the panel (panel mean $1 - (\gamma_1^2 + \gamma_1\gamma_2 + \gamma_2^2)/3$). $C_m$ about $x_{ref}$ in the body-0 frame before rotation, nose up positive.
 
-2. **Blunt Trailing Edge (gap $> 10^{-4} c$)**:
-A flat base panel connects the lower trailing edge node ($N-1$) to the upper trailing edge node (0).
-The vortex strength on the base panel varies linearly from $\gamma_{N-1}$ to $\gamma_0$.
-The Kutta condition enforces zero net jump in pressure across the base panel.
+## Assumptions and envelope
 
-## Two-Right-Hand-Side Superposition in Free Air
+Potential flow; the Kutta condition fixes the circulation. Ground effect is the inviscid image (moving-ground equivalent). Sources on several bodies need the strip condition above.
 
-In free air, the geometric influence matrix does not depend on the angle of attack $\alpha$.
-The solver factorizes the matrix once with LU decomposition.
-It solves two fundamental right-hand sides:
-1. Unit free stream along $x$: $\psi_{\infty, x} = y$
-2. Unit free stream along $y$: $\psi_{\infty, y} = -x$
+## Verification
 
-For any list of angles of attack, the solution vector is obtained by linear superposition:
-$$\mathbf{x}(\alpha) = \cos\alpha \, \mathbf{x}_x + \sin\alpha \, \mathbf{x}_y + \mathbf{x}_\sigma$$
-Prescribed source strengths $\sigma$ enter as an additional right-hand side term without re-factorizing the matrix.
+`tests/test_panel2d.py`, `tests/test_karman_trefftz.py`:
 
-## Ground Effect via Method of Images
-
-Ground effect simulates flow over an infinite flat wall at $y = 0$.
-The method of images places an inverted mirror geometry at $(x, -y)$ below the ground plane.
-
-### Sign Rules for Image Panels
-
-1. **Vortex image panel**:
-A vortex of strength $\gamma$ at $(x, y)$ induces vertical velocity $u_y \sim \gamma (x - x_0) / r^2$.
-To cancel the normal velocity at the ground plane ($y = 0$), the image panel at $(x, -y)$ must have opposite vorticity:
-$$\gamma_{\text{image}} = -\gamma_{\text{real}}$$
-Because vorticity changes sign, its stream function influence subtracts:
-$$A_{\text{vortex}}^{\text{GE}} = A_{\text{vortex}}^{\text{real}} - A_{\text{vortex}}^{\text{image}}$$
-
-2. **Source image panel**:
-A source of strength $\sigma$ at $(x, y)$ induces normal velocity away from the wall.
-To cancel the normal velocity across the ground plane, the image panel must have equal source strength:
-$$\sigma_{\text{image}} = +\sigma_{\text{real}}$$
-Its stream function influence adds:
-$$A_{\text{source}}^{\text{GE}} = A_{\text{source}}^{\text{real}} + A_{\text{source}}^{\text{image}}$$
-
-In ground effect, the angle of attack rotates the physical body about a pivot point (default quarter chord) and positions it at height $h$.
-The free stream remains parallel to the ground along $+x$.
-Matrices for ground effect are assembled and solved in batches.
-
-## Forces and Moments
-
-1. **Circulation Lift (Kutta-Joukowski)**:
-The circulation of each body is computed by integrating vorticity around its perimeter:
-$$\Gamma = \oint \gamma(s) ds = \sum_{j=1}^{M} \frac{1}{2}(\gamma_{1, j} + \gamma_{2, j}) L_j$$
-The lift coefficient is:
-$$C_l = \frac{2\Gamma}{V_\infty c_{\text{ref}}}$$
-
-2. **Surface Pressure Coefficient**:
-From the Bernoulli equation, the surface tangential velocity is $u_e = \gamma$ (non-dimensionalized by $V_\infty$).
-The pressure coefficient at each node is:
-$$C_p = 1 - \left(\frac{u_e}{V_\infty}\right)^2 = 1 - \gamma^2$$
-
-3. **Pressure Integration**:
-Integrating $C_p$ along panel normal vectors gives normal force $C_n$, axial force $C_a$, and pitching moment $C_m$ about reference point $(x_{\text{ref}}, y_{\text{ref}})$.
+- closed-form stream-function and velocity influences against composite Gauss quadrature (break points at $t = \xi$), 0.1 to 5 panel lengths away, 1e-10 relative; image source influences likewise;
+- Karman-Trefftz airfoil (10 deg trailing edge): $C_l$ within 0.5 % of exact at 200 panels, $C_l$ and $C_{l,pressure}$ within 1 %, $|C_{d,pressure}| < 10^{-3}$; the largest $C_p$ error over all nodes except the trailing-edge node decreases from 100 to 200 to 400 panels with an observed order of at least 1 (at a sharp edge of angle $\tau$ the exact speed is zero but rises as $r^{\tau/(2\pi - \tau)}$, here $r^{0.029}$, so no node value converges to it);
+- symmetric Joukowski section at $\alpha = 0$: $|C_l| < 10^{-10}$; superposition equals a direct solve to 1e-12;
+- prescribed sources against an independent dense assembly by quadrature (written in the test), in free air and in ground effect, sharp and blunt sections, 1e-10; a uniform source sheet on a circle leaves the surface speed unchanged;
+- ground effect against an explicit mirror body (1e-10), $h/c$ = 1000 against free air (1e-4), suction near the ground, geometry under the ground;
+- two sections 20 chords apart; sources with a body in the outer strip of another body raise `ValueError`;
+- torch float64 equals numpy to 1e-10; float32 within 1e-4 on $C_l$ (CPU, and CUDA marked gpu).
 
 ## References
 
-1. J. Katz and A. Plotkin, *Low-Speed Aerodynamics*, 2nd ed., Cambridge University Press, 2001, chapter 11.
-2. M. Drela, "XFOIL: An Analysis and Design System for Low Reynolds Number Airfoils", *Lecture Notes in Engineering*, Vol. 54, Springer, 1989, pp. 1-12.
-3. L. M. Milne-Thomson, *Theoretical Aerodynamics*, 4th ed., Dover Publications, 1958.
+- J. Katz and A. Plotkin, Low-Speed Aerodynamics, 2nd ed., Cambridge University Press, 2001.
+- M. Drela, "XFOIL: An analysis and design system for low Reynolds number airfoils", in Low Reynolds Number Aerodynamics, Lecture Notes in Engineering 54, Springer, 1989, pp. 1-12.
+- L. M. Milne-Thomson, Theoretical Aerodynamics, 4th ed., Macmillan, 1958 (Karman-Trefftz reference).
