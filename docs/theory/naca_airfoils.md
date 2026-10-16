@@ -67,7 +67,9 @@ y_c = \frac{k_1 m^3}{6}(1 - x), \qquad
 \frac{dy_c}{dx} = -\frac{k_1 m^3}{6}.
 ```
 
-The parameters for design lift 0.3 (first digit 2) are:
+The parameters for design lift 0.3 (first digit 2) come from the
+five-digit mean-line table of Abbott and von Doenhoff (1959, section 6.5,
+NACA five-digit wing sections):
 
 | Mean line | m | k1 |
 | --- | --- | --- |
@@ -80,12 +82,27 @@ The parameters for design lift 0.3 (first digit 2) are:
 Other design lifts scale $k_1$ linearly with the first digit: a mean line
 with first digit $d$ uses $k_1(d) = k_1(2) \times d / 2$. Reflex mean lines
 (third digit 1) are not built: no published table of $k_1$ and $k_2/k_1$ is
-loaded, so they raise an error.
+loaded, so they raise an error. A first digit 0 gives $k_1 = 0$, a flat mean
+line, and a warning (see the designation rules below).
+
+## Designations
+
+The function `naca` accepts four or five digits, with an optional "NACA"
+prefix in any letter case and optional spaces between the prefix and the
+digits: "2412", "NACA 2412", "naca2412", "23012", "NACA 23012", or the
+integer 2412. Hyphens, underscores and spaces inside the digits raise an
+error, so "24-12" and "2_4_1_2" are not designations. An integer cannot
+hold leading zeros, so a symmetric section needs a string ("0012").
+
+A designation with zero camber and a nonzero position digit (for example
+"0412", "01012" or "03012") is accepted with a warning. Its mean line is
+flat, the position digits have no effect, and the section is the symmetric
+section of the same thickness (NACA 0012 for these three examples).
 
 ## Coordinates
 
 The thickness acts perpendicular to the mean line. With
-$\theta = \atan(dy_c/dx)$, the upper surface is
+$\theta = \arctan(dy_c/dx)$, the upper surface is
 
 ```{math}
 x_u = x - y_t \sin\theta, \qquad y_u = y_c + y_t \cos\theta,
@@ -102,11 +119,11 @@ slightly off (0, 0), which the docstring states.
 ## Implementation
 
 - `ventorum.airfoil.naca`: `naca4_thickness`, `naca4_camber`,
-  `naca5_camber`, `naca4`, `naca5`, `naca`.
+  `naca5_camber`, `naca4`, `naca5`, `naca`, `is_naca_designation`.
 
 ## References
 
-- I. H. Abbott and A. E. von Doenhoff, *Theory of Wing Sections*, McGraw-Hill, 1959, section 6.4.
+- I. H. Abbott and A. E. von Doenhoff, *Theory of Wing Sections*, McGraw-Hill, 1959, section 6.4 (thickness distribution and 4-digit mean line) and section 6.5 (5-digit mean lines and the table of $m$ and $k_1$).
 - C. L. Ladson, C. W. Brooks, A. S. Hill and D. W. Sproles, "Computer program to obtain ordinates for NACA airfoils", NASA TM-4741, 1996.
 - E. N. Jacobs, K. E. Ward and R. M. Pinkerton, "The characteristics of 78 related airfoil sections from tests in the variable-density wind tunnel", NACA Report 460, 1933.
 - E. N. Jacobs and R. M. Pinkerton, "Tests in the variable-density wind tunnel of related airfoils having the maximum camber unusually far forward", NACA Report 537, 1935.

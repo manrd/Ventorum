@@ -8,8 +8,10 @@ Selig files hold an optional name line and then x y pairs in Selig order
 along the lower surface). Lednicer files hold a name line, a line with the
 point counts of the upper and lower surfaces, the upper surface from the
 leading edge to the trailing edge, a blank line, and the lower surface from
-the leading edge to the trailing edge. Plain files hold x y pairs with no
-header. Separators are spaces, tabs or commas. Lines that start with ``#``
+the leading edge to the trailing edge. A Lednicer file without the name line
+is detected when its first line holds two whole numbers of at least 2 whose
+sum equals the number of data lines that follow. Plain files hold x y pairs
+with no header. Separators are spaces, tabs or commas. Lines that start with ``#``
 are comments. A file in reverse order (lower surface first) is reversed to
 Selig order. Duplicate leading-edge points of Lednicer files are merged.
 
@@ -85,6 +87,8 @@ def parse_airfoil(text: str, name: str | None = None) -> AirfoilShape:
     header: str | None = None
     if first_values is not None and len(first_values) == 2:
         data_lines = kept
+        if _is_lednicer_counts(first_values, len(kept) - 1):
+            return _parse_lednicer(None, data_lines, name)
     else:
         header = kept[0][1]
         data_lines = kept[1:]
@@ -122,22 +126,40 @@ def _parse_point_lines(data_lines: list[tuple[int, str]], header: str | None) ->
     return np.array(pts, dtype=np.float64)
 
 
+def _is_lednicer_counts(values: list[float], n_following: int) -> bool:
+    """Return True when a first line of two numbers is a Lednicer counts line.
+
+    A Lednicer file without a name line starts with the counts line. The
+    line holds two whole numbers of at least 2, and their sum equals the
+    number of data lines that follow. A data point that only looks like
+    counts (for example a first point (6, 6) of a file in other units)
+    fails the sum check and stays a data point.
+    """
+    a, b = values
+    whole = a == round(a) and b == round(b)
+    return bool(whole and a >= 2.0 and b >= 2.0 and int(a) + int(b) == n_following)
+
+
 def _parse_lednicer(
-    header: str, data_lines: list[tuple[int, str]], name: str | None
+    header: str | None, data_lines: list[tuple[int, str]], name: str | None
 ) -> AirfoilShape:
-    """Parse a Lednicer block (counts line first) into Selig order."""
+    """Parse a Lednicer block (counts line first) into Selig order.
+
+    *header* is the name line, or None for a file without a name line.
+    """
+    who = header if header is not None else "airfoil"
     count_values = _numbers(data_lines[0][1])
     assert count_values is not None and len(count_values) == 2
     n_up = int(round(count_values[0]))
     n_low = int(round(count_values[1]))
     if n_up < 2 or n_low < 2:
         raise AirfoilGeometryError(
-            f"Cannot parse airfoil {header!r}: bad Lednicer counts ({data_lines[0][1]!r})."
+            f"Cannot parse airfoil {who!r}: bad Lednicer counts ({data_lines[0][1]!r})."
         )
     point_lines = data_lines[1:]
     if len(point_lines) != n_up + n_low:
         raise AirfoilGeometryError(
-            f"Cannot parse airfoil {header!r}: Lednicer counts say "
+            f"Cannot parse airfoil {who!r}: Lednicer counts say "
             f"{n_up} + {n_low} points but found {len(point_lines)} data lines."
         )
     pts = _parse_point_lines(point_lines, header)
@@ -147,7 +169,7 @@ def _parse_lednicer(
         lower = lower[1:]
     selig = np.vstack([upper[::-1], lower])
     selig = _to_selig_order(selig)
-    final_name = name if name is not None else header
+    final_name = name if name is not None else who
     return AirfoilShape(name=final_name, coords=selig)
 
 

@@ -11,7 +11,11 @@ from ventorum.airfoil.io import parse_airfoil, read_airfoil, write_lednicer, wri
 
 
 def _naca_symmetric_coords(thickness_ratio: float = 0.12, n_each: int = 101) -> np.ndarray:
-    """Symmetric NACA 4-digit section in Selig order (closed trailing edge)."""
+    """Symmetric NACA 4-digit section in Selig order (open trailing edge).
+
+    The last thickness coefficient -0.1015 leaves a finite trailing-edge
+    thickness, so the first and the last point differ.
+    """
     beta = np.linspace(0.0, np.pi, n_each)
     x = 0.5 * (1.0 - np.cos(beta))
     t = float(thickness_ratio)
@@ -25,13 +29,17 @@ def _naca_symmetric_coords(thickness_ratio: float = 0.12, n_each: int = 101) -> 
 
 
 def _ellipse_coords(n: int = 60) -> np.ndarray:
-    """Ellipse section in Selig order (closed trailing edge)."""
-    theta = np.linspace(0.0, 2.0 * np.pi, n)
-    x = 0.5 * (1.0 - np.cos(theta))
+    """Ellipse section of thickness ratio 0.12 in Selig order (closed trailing edge).
+
+    The eccentric angle runs from 0 at the trailing edge (1, 0) over the
+    upper surface to the leading edge (0, 0) at pi and back over the lower
+    surface. The last point repeats the first point exactly.
+    """
+    theta = np.linspace(0.0, 2.0 * np.pi, n + 1)
+    x = 0.5 * (1.0 + np.cos(theta))
     y = 0.06 * np.sin(theta)
-    upper = np.column_stack([x[: n // 2 + 1][::-1], y[: n // 2 + 1][::-1]])
-    lower = np.column_stack([x[n // 2 :], y[n // 2 :]])
-    selig = np.vstack([upper, lower[1:]])
+    selig = np.column_stack([x, y])
+    selig[-1] = selig[0]
     return selig
 
 
@@ -152,3 +160,86 @@ def test_parse_errors_are_clear():
         parse_airfoil("BAD\n1.0 0.0\nabc def\n0.0 0.0")
     with pytest.raises(AirfoilGeometryError, match="fewer than 3"):
         parse_airfoil("ONLY\n1.0 0.0\n0.5 0.01")
+
+
+def test_closed_ellipse_round_trip_and_checks(tmp_path):
+    coords = _ellipse_coords()
+    shape = AirfoilShape(name="ELLIPSE", coords=coords)
+    assert shape.is_closed
+    assert shape.te_gap == 0.0
+    assert shape.problems() == []
+    shape.validate()
+    assert shape.area() > 0.0
+    path = tmp_path / "ellipse.dat"
+    write_selig(shape, path, precision=9)
+    back = read_airfoil(path)
+    assert back.name == "ELLIPSE"
+    assert back.is_closed
+    assert np.allclose(back.coords, coords, atol=1e-9)
+
+
+def test_lednicer_file_without_name_line(tmp_path):
+    """A Lednicer file without the name line starts with its counts line.
+
+    Before the fix, the counts line became the data point (n_up, n_low).
+    """
+    coords = _naca_symmetric_coords(n_each=31)
+    shape = AirfoilShape(name="NACA0012", coords=coords)
+    path = tmp_path / "with_name.dat"
+    write_lednicer(shape, path, precision=8)
+    lines = path.read_text(encoding="utf-8").splitlines()
+    assert lines[1].split() == ["31", "31"]
+    no_name = "\n".join(lines[1:]) + "\n"
+    parsed = parse_airfoil(no_name)
+    assert parsed.n_points == shape.n_points
+    assert np.allclose(parsed.coords, coords, atol=1e-8)
+    assert parsed.coords.max() <= 1.0 + 1e-12
+    named = parse_airfoil(no_name, name="given")
+    assert named.name == "given"
+    nameless_path = tmp_path / "nameless_lednicer.dat"
+    nameless_path.write_text(no_name, encoding="utf-8")
+    from_file = read_airfoil(nameless_path)
+    assert from_file.name == "nameless_lednicer"
+    assert np.allclose(from_file.coords, coords, atol=1e-8)
+
+
+def test_first_point_like_counts_stays_data():
+    """Two whole numbers that do not count the following lines stay a point."""
+    pts = [(6.0, 6.0), (3.0, 1.0), (0.0, 0.0), (3.0, -1.0), (6.0, -6.0)]
+    text = "\n".join(f"{x} {y}" for x, y in pts)
+    parsed = parse_airfoil(text)
+    assert parsed.n_points == 5
+    assert np.allclose(parsed.coords[0], [6.0, 6.0])
+
+
+def test_problems_reports_few_points():
+    coords = _naca_symmetric_coords(n_each=4)
+    shape = AirfoilShape(name="few", coords=coords)
+    assert shape.n_points == 7
+    found = shape.problems()
+    assert any("fewer than 10 points" in item for item in found)
+    with pytest.raises(AirfoilGeometryError, match="fewer than 10 points"):
+        shape.validate()
+
+
+def test_problems_reports_repeated_points():
+    coords = _naca_symmetric_coords(n_each=21)
+    repeated = np.vstack([coords[:5], coords[4:]])
+    shape = AirfoilShape(name="repeat", coords=repeated)
+    found = shape.problems()
+    assert any("repeated consecutive points at index 4 and 5" in item for item in found)
+    with pytest.raises(AirfoilGeometryError, match="repeated"):
+        shape.validate()
+
+
+def test_problems_non_monotonic_note_is_not_an_error():
+    coords = _naca_symmetric_coords(n_each=41)
+    wavy = coords.copy()
+    # Move one upper-surface point aft of its aft neighbour, so x decreases
+    # once from the leading edge to the trailing edge.
+    k = 10
+    wavy[k, 0] = wavy[k - 1, 0] + 0.25 * (wavy[k - 2, 0] - wavy[k - 1, 0])
+    shape = AirfoilShape(name="wavy", coords=wavy)
+    found = shape.problems()
+    assert found == ["note: non-monotonic x on the upper surface"]
+    shape.validate()

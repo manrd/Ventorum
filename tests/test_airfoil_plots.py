@@ -6,7 +6,8 @@ data value. The data checks use a relative tolerance of 1e-12: the plotted
 values come from the same result arrays, so the measured error today is 0,
 and the tolerance floor is 1e-12 relative. The example tests run the example
 scripts as subprocesses with a temporary output folder and check the PNG
-files.
+files; each takes several seconds (a new process and the 2D solves), so
+they carry the slow marker.
 """
 
 import os
@@ -20,6 +21,7 @@ matplotlib.use("Agg")
 
 import matplotlib.pyplot as plt
 import numpy as np
+import pytest
 from matplotlib.axes import Axes
 
 from ventorum.airfoil import AirfoilShape
@@ -183,6 +185,7 @@ def _run_example(name, outdir):
     return proc
 
 
+@pytest.mark.slow
 def test_example_flap_writes_png_files(tmp_path):
     _run_example("airfoil_naca_flap.py", tmp_path)
     for name in ("naca2412_flap_geometry.png", "naca2412_flap_cp.png"):
@@ -191,9 +194,86 @@ def test_example_flap_writes_png_files(tmp_path):
         assert path.stat().st_size > 0, f"empty output file {name}"
 
 
+@pytest.mark.slow
 def test_example_ground_effect_writes_png_files(tmp_path):
     _run_example("airfoil_ground_effect.py", tmp_path)
     for name in ("naca4412_ground_effect_cp.png", "naca4412_cl_vs_height.png"):
         path = tmp_path / name
         assert path.is_file(), f"missing output file {name}"
         assert path.stat().st_size > 0, f"empty output file {name}"
+
+
+def test_ground_effect_cp_uses_the_body_frame():
+    """Ground-effect curves use the body-frame x, not the turned nodes.
+
+    The solver turns the section by the angle of attack in ground effect.
+    For a normalized section (leading edge at (0, 0), unit chord) the
+    plotted x must equal the input x/c. Before the fix, the plot used the
+    turned solver nodes under the label x/c.
+    """
+    shape = AirfoilShape.naca("4412", n_points=81).normalized()
+    coords = shape.coords
+    alpha = 8.0
+    results = {
+        1.0: solve_inviscid(coords, alpha, height=1.0, backend="numpy"),
+        0.3: solve_inviscid(coords, alpha, height=0.3, backend="numpy"),
+    }
+    solved_x = np.asarray(results[0.3].coordinates, dtype=float)[:, 0]
+    assert np.max(np.abs(solved_x - coords[:, 0])) > 1e-3
+    ax = plot_ground_effect_cp(results)
+    try:
+        assert len(ax.lines) == 2
+        for line in ax.lines:
+            np.testing.assert_allclose(
+                line.get_xdata(), coords[:, 0], rtol=DATA_RTOL, atol=DATA_ATOL
+            )
+        assert "body frame" in ax.get_xlabel()
+    finally:
+        plt.close(ax.figure)
+
+
+def test_ground_effect_cp_sweep_uses_each_angle():
+    shape = AirfoilShape.naca("0012", n_points=61).normalized()
+    coords = shape.coords
+    res = solve_inviscid(coords, [2.0, 10.0], height=0.5, backend="numpy")
+    ax = plot_ground_effect_cp({0.5: res}, index=1)
+    try:
+        np.testing.assert_allclose(
+            ax.lines[0].get_xdata(), coords[:, 0], rtol=DATA_RTOL, atol=DATA_ATOL
+        )
+        np.testing.assert_allclose(
+            ax.lines[0].get_ydata(), np.asarray(res.Cp[1], dtype=float),
+            rtol=DATA_RTOL, atol=DATA_ATOL,
+        )
+    finally:
+        plt.close(ax.figure)
+
+
+def test_plot_cp_labels_the_node_frame():
+    coords = _coords()
+    res = solve_inviscid(coords, 5.0, backend="numpy")
+    ax = plot_cp(res)
+    try:
+        assert "frame" in ax.get_xlabel()
+        assert "chord units" in ax.get_xlabel()
+    finally:
+        plt.close(ax.figure)
+
+
+def test_plot_cp_compare_with_fewer_angles_raises():
+    """A compare result without the selected angle raises IndexError.
+
+    Before the fix, the plot fell back to the first angle of the compare
+    result without a signal.
+    """
+    coords = _coords()
+    res = solve_inviscid(coords, [0.0, 5.0], backend="numpy")
+    single = solve_inviscid(coords, 0.0, backend="numpy")
+    with pytest.raises(IndexError, match="out of range"):
+        plot_cp(res, index=1, compare=single)
+    plt.close("all")
+    ax = plot_cp(res, index=0, compare=single)
+    try:
+        assert len(ax.lines) == 2
+    finally:
+        plt.close(ax.figure)

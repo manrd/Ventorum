@@ -252,3 +252,178 @@ def test_bad_coords_raise():
         deflect_plain_flap(bad, 0.7, 10.0)
     with pytest.raises(ValueError):
         deflect_plain_flap([[0.0, 0.0], [0.5, 0.05], [1.0, 0.0]], 0.7, 10.0)
+
+
+SWEEP_SHAPES = {"0006": (0.0, 0.4, 0.06), "0012": (0.0, 0.4, 0.12),
+                "2412": (0.02, 0.4, 0.12), "4415": (0.04, 0.4, 0.15)}
+SWEEP_N_POINTS = [31, 61, 161]
+
+
+def _sweep_section(name, n_points):
+    """Open trailing-edge NACA section with n_points in total (Selig order)."""
+    m, p, t = SWEEP_SHAPES[name]
+    return _naca4_coords(m, p, t, n=(n_points + 1) // 2, closed=False)
+
+
+@pytest.mark.parametrize(
+    "name, n_points, hinge_x, delta, y_hinge",
+    [
+        ("2412", 31, 0.9, -20.0, 0.0),
+        ("2412", 31, 0.1, 15.0, 0.5),
+        ("0006", 31, 0.1, -10.0, 0.0),
+        ("0006", 161, 0.1, 10.0, 1.0),
+        ("0012", 31, 0.1, -15.0, 0.0),
+        ("0012", 61, 0.1, 20.0, 0.5),
+        ("2412", 31, 0.25, -10.0, 0.0),
+        ("2412", 31, 0.1, 10.0, 0.25),
+    ],
+)
+def test_coarse_input_regression_cases_are_simple(name, n_points, hinge_x, delta, y_hinge):
+    """Coarse inputs that gave a self-intersecting polygon before the fix.
+
+    The old construction added the filler arc on any side where the fixed
+    and the moved polylines did not cross. On coarse input the moved
+    surface can pass the fixed corner on the compressed side, so the arc
+    folded the contour over itself.
+    """
+    base = _sweep_section(name, n_points)
+    out = deflect_plain_flap(base, hinge_x, delta, y_hinge=y_hinge)
+    _check_valid_polygon(out, base, hinge_x, delta, y_hinge)
+    _check_hinge_angle(out, base, hinge_x, delta, y_hinge)
+
+
+def _sweep(name, n_points, hinges, deltas, heights):
+    base = _sweep_section(name, n_points)
+    for hinge_x in hinges:
+        for delta in deltas:
+            for y_hinge in heights:
+                out = deflect_plain_flap(base, hinge_x, delta, y_hinge=y_hinge)
+                _check_valid_polygon(out, base, hinge_x, delta, y_hinge)
+
+
+@pytest.mark.parametrize("n_points", SWEEP_N_POINTS)
+@pytest.mark.parametrize("name", list(SWEEP_SHAPES))
+def test_flap_sweep_gives_simple_polygons(name, n_points):
+    """Every hinge, deflection and hinge height gives a simple CCW polygon.
+
+    Grid: hinges 0.1 to 0.97, deflections -60 to 60 deg, hinge heights 0
+    to 1, on NACA 0006, 0012, 2412 and 4415 with 31, 61 and 161 points.
+    """
+    _sweep(name, n_points,
+           hinges=[0.1, 0.25, 0.5, 0.75, 0.9, 0.97],
+           deltas=[-60.0, -20.0, -10.0, 10.0, 15.0, 60.0],
+           heights=[0.0, 0.5, 1.0])
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize("n_points", SWEEP_N_POINTS)
+@pytest.mark.parametrize("name", list(SWEEP_SHAPES))
+def test_flap_dense_sweep_gives_simple_polygons(name, n_points):
+    """The dense grid of the same sweep (12 hinges, 18 deflections, 5 heights)."""
+    _sweep(name, n_points,
+           hinges=[0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.85, 0.9, 0.95, 0.97],
+           deltas=[-60.0, -45.0, -30.0, -20.0, -15.0, -10.0, -5.0, -2.0, -1.0,
+                   1.0, 2.0, 5.0, 10.0, 15.0, 20.0, 30.0, 45.0, 60.0],
+           heights=[0.0, 0.25, 0.5, 0.75, 1.0])
+
+
+def test_compressed_side_follows_the_deflection_sign():
+    """Trailing edge down puts the filler arc on the upper surface.
+
+    With the hinge at 0.3 of the thickness, the arc about the hinge has
+    the radius of the upper corner for trailing edge down (upper surface
+    stretched) and the radius of the lower corner for trailing edge up
+    (lower surface stretched). The arc holds n_arc points.
+    """
+    base = _sweep_section("2412", 61)
+    xh, yh, n_arc = 0.7, 0.3, 8
+    hinge = flap_hinge_point(base, xh, yh)
+    r_up = float(flap_hinge_point(base, xh, 1.0)[1] - hinge[1])
+    r_lo = float(hinge[1] - flap_hinge_point(base, xh, 0.0)[1])
+    assert abs(r_up - r_lo) > 1e-3
+    for delta, r_arc, r_cut in ((20.0, r_up, r_lo), (-20.0, r_lo, r_up)):
+        out = deflect_plain_flap(base, xh, delta, y_hinge=yh, n_arc=n_arc)
+        dist = np.linalg.norm(out - hinge, axis=1)
+        assert int(np.sum(np.abs(dist - r_arc) < 1e-12)) == n_arc
+        assert int(np.sum(np.abs(dist - r_cut) < 1e-12)) == 0
+
+
+def test_flapped_shape_leading_edge_is_the_package_definition():
+    """On a deflected section the flap split uses the shared leading edge.
+
+    A deflected section moves the trailing-edge midpoint, so the point
+    farthest from it (the package leading edge) is no longer the point of
+    minimum x. The flap functions split the surfaces at the farthest
+    point, the same point as AirfoilShape.leading_edge_index and the
+    node nearest to the spline leading edge.
+    """
+    from ventorum.airfoil import AirfoilShape, AirfoilSpline
+    from ventorum.airfoil.flap import _surfaces
+    from ventorum.airfoil.geometry import leading_edge_index
+
+    flapped = AirfoilShape.naca("2412").with_flap(0.7, 30.0)
+    coords = flapped.coords
+    far = leading_edge_index(coords)
+    assert far == flapped.leading_edge_index
+    assert far != int(np.argmin(coords[:, 0]))
+    spline = AirfoilSpline(coords)
+    tip = spline(spline.s_leading_edge)
+    assert int(np.argmin(np.linalg.norm(coords - tip, axis=1))) == far
+    upper, lower = _surfaces(coords)
+    np.testing.assert_array_equal(upper[0], coords[far])
+    np.testing.assert_array_equal(lower[0], coords[far])
+    np.testing.assert_array_equal(upper, flapped.upper())
+    np.testing.assert_array_equal(lower, flapped.lower())
+    # A second flap on the deflected section works on the same split.
+    twice = deflect_plain_flap(coords, 0.3, 10.0)
+    _check_valid_polygon(twice, coords, 0.3, 10.0)
+
+
+def test_clockwise_input_raises():
+    base = _sections()["naca0012"]
+    with pytest.raises(ValueError, match="Selig order"):
+        deflect_plain_flap(base[::-1].copy(), 0.7, 10.0)
+
+
+def test_output_check_raises_for_a_crossing_polygon():
+    from ventorum.airfoil.flap import _check_output
+    from ventorum.airfoil.geometry import AirfoilGeometryError
+
+    t = np.linspace(0.0, 2.0 * np.pi, 40, endpoint=False)
+    eight = np.column_stack([0.5 + 0.5 * np.sin(t), 0.2 * np.sin(t) * np.cos(t)])
+    with pytest.raises(AirfoilGeometryError, match="not a simple polygon"):
+        _check_output(eight, 0.7, 10.0, 0.5)
+
+
+def test_hinge_line_cut_branches():
+    from ventorum.airfoil.flap import _hinge_line_cut
+    from ventorum.airfoil.geometry import AirfoilGeometryError
+
+    moved = np.array([[0.6, 0.0], [0.8, -0.1], [1.0, -0.2]])
+    j, point = _hinge_line_cut(moved, 0.7)
+    assert j == 0
+    np.testing.assert_allclose(point, [0.7, -0.05], rtol=0.0, atol=1e-15)
+    j, point = _hinge_line_cut(moved, 0.6)
+    assert j == -1
+    np.testing.assert_array_equal(point, moved[0])
+    with pytest.raises(AirfoilGeometryError, match="hinge line"):
+        _hinge_line_cut(moved, 1.5)
+
+
+def test_non_monotonic_nose_is_accepted_forward_of_the_hinge():
+    """A short decreasing-x run at the nose does not block the flap."""
+    flapped = deflect_plain_flap(_sweep_section("2412", 161), 0.7, 30.0)
+    upper_like = flapped[: int(np.argmax(np.linalg.norm(
+        flapped - 0.5 * (flapped[0] + flapped[-1]), axis=1))) + 1]
+    assert upper_like.shape[0] > 0
+    out = deflect_plain_flap(flapped, 0.4, -10.0)
+    _check_valid_polygon(out, flapped, 0.4, -10.0)
+
+
+def test_decreasing_x_aft_of_the_hinge_raises():
+    base = _sections()["naca0012"].copy()
+    # Swap two upper-surface points near x = 0.8 so that x decreases there.
+    k = int(np.argmin(np.abs(base[:40, 0] - 0.8)))
+    base[[k, k + 1]] = base[[k + 1, k]]
+    with pytest.raises(ValueError, match="non-decreasing"):
+        deflect_plain_flap(base, 0.7, 10.0)
