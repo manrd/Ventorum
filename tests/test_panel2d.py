@@ -76,34 +76,45 @@ def _field_points(length):
     return pts
 
 
+def _check_point(xi, eta, L):
+    """Compare every closed-form influence at one field point with quadrature."""
+
+    def r2(t):
+        return (xi - t) ** 2 + eta**2
+
+    def quad(f):
+        return _quad(f, 0.0, L, [xi])
+
+    p1, p2 = linear_vortex_stream_influence(xi, eta, L)
+    q1 = quad(lambda t: (1.0 - t / L) * np.log(r2(t)) / (4 * np.pi))
+    q2 = quad(lambda t: (t / L) * np.log(r2(t)) / (4 * np.pi))
+    assert abs(p1 - q1) < 1e-10 * max(abs(q1), 1e-3)
+    assert abs(p2 - q2) < 1e-10 * max(abs(q2), 1e-3)
+    ps = source_panel_stream_influence(xi, eta, L)
+    qs = quad(lambda t: _angle_body(eta, xi - t) / (2 * np.pi))
+    assert abs(ps - qs) < 1e-10 * max(abs(qs), 1e-3), (xi, eta, ps, qs)
+    pw = wake_source_stream_influence(xi, eta, L)
+    qw = quad(lambda t: _angle_wake(eta, xi - t) / (2 * np.pi))
+    assert abs(pw - qw) < 1e-10 * max(abs(qw), 1e-3), (xi, eta, pw, qw)
+    u1, v1, u2, v2 = linear_vortex_velocity_influence(xi, eta, L)
+    qu1 = quad(lambda t: (1 - t / L) * eta / r2(t) / (2 * np.pi))
+    qu2 = quad(lambda t: (t / L) * eta / r2(t) / (2 * np.pi))
+    qv1 = quad(lambda t: -(1 - t / L) * (xi - t) / r2(t) / (2 * np.pi))
+    qv2 = quad(lambda t: -(t / L) * (xi - t) / r2(t) / (2 * np.pi))
+    for a, b in ((u1, qu1), (u2, qu2), (v1, qv1), (v2, qv2)):
+        assert abs(a - b) < 1e-10 * max(abs(b), 1e-3)
+    us, vs = source_panel_velocity_influence(xi, eta, L)
+    qus = quad(lambda t: (xi - t) / r2(t) / (2 * np.pi))
+    qvs = quad(lambda t: eta / r2(t) / (2 * np.pi))
+    assert abs(us - qus) < 1e-10 * max(abs(qus), 1e-3)
+    assert abs(vs - qvs) < 1e-10 * max(abs(qvs), 1e-3)
+
+
 def test_closed_form_influences_against_gauss_quadrature():
     """Closed-form panel influences agree with quadrature to 1e-10 relative."""
     L = 1.3
     for xi, eta in _field_points(L):
-        p1, p2 = linear_vortex_stream_influence(xi, eta, L)
-        q1 = _quad(lambda t: (1.0 - t / L) * np.log((xi - t) ** 2 + eta**2) / (4 * np.pi), 0.0, L, [xi])
-        q2 = _quad(lambda t: (t / L) * np.log((xi - t) ** 2 + eta**2) / (4 * np.pi), 0.0, L, [xi])
-        assert abs(p1 - q1) < 1e-10 * max(abs(q1), 1e-3)
-        assert abs(p2 - q2) < 1e-10 * max(abs(q2), 1e-3)
-        ps = source_panel_stream_influence(xi, eta, L)
-        qs = _quad(lambda t: _angle_body(eta, xi - t) / (2 * np.pi), 0.0, L, [xi])
-        assert abs(ps - qs) < 1e-10 * max(abs(qs), 1e-3), (xi, eta, ps, qs)
-        pw = wake_source_stream_influence(xi, eta, L)
-        qw = _quad(lambda t: _angle_wake(eta, xi - t) / (2 * np.pi), 0.0, L, [xi])
-        assert abs(pw - qw) < 1e-10 * max(abs(qw), 1e-3), (xi, eta, pw, qw)
-        r2 = lambda t: (xi - t) ** 2 + eta**2  # noqa: E731
-        u1, v1, u2, v2 = linear_vortex_velocity_influence(xi, eta, L)
-        qu1 = _quad(lambda t: (1 - t / L) * eta / r2(t) / (2 * np.pi), 0.0, L, [xi])
-        qu2 = _quad(lambda t: (t / L) * eta / r2(t) / (2 * np.pi), 0.0, L, [xi])
-        qv1 = _quad(lambda t: -(1 - t / L) * (xi - t) / r2(t) / (2 * np.pi), 0.0, L, [xi])
-        qv2 = _quad(lambda t: -(t / L) * (xi - t) / r2(t) / (2 * np.pi), 0.0, L, [xi])
-        for a, b in ((u1, qu1), (u2, qu2), (v1, qv1), (v2, qv2)):
-            assert abs(a - b) < 1e-10 * max(abs(b), 1e-3)
-        us, vs = source_panel_velocity_influence(xi, eta, L)
-        qus = _quad(lambda t: (xi - t) / r2(t) / (2 * np.pi), 0.0, L, [xi])
-        qvs = _quad(lambda t: eta / r2(t) / (2 * np.pi), 0.0, L, [xi])
-        assert abs(us - qus) < 1e-10 * max(abs(qus), 1e-3)
-        assert abs(vs - qvs) < 1e-10 * max(abs(qvs), 1e-3)
+        _check_point(xi, eta, L)
 
 
 def test_image_source_influence_against_quadrature():
