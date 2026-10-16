@@ -13,6 +13,12 @@ Reynolds number for rough surfaces. Form factors follow the component
 build-up of Raymer, with the wing option of Torenbeek and the body option
 of Hoerner as alternatives.
 
+Scope limit: the package covers incompressible flow (Mach below 0.3). The
+Mach factor ``1.34 M^0.18`` of the Raymer wing form factor is set to 1 and
+no compressibility correction of the skin friction is applied. This is a
+stated limit of the module, not a result of a low-Mach evaluation of
+Raymer's factor.
+
 References
 ----------
 * H. Blasius, "Grenzschichten in Fluessigkeiten mit kleiner Reibung",
@@ -25,10 +31,13 @@ References
 * D. P. Raymer, "Aircraft Design: A Conceptual Approach", AIAA, 6th ed.
   2018, section 12.5: the parasite-drag build-up, the wing form factor,
   the fuselage form factor, the interference factors and the cutoff
-  Reynolds number ``38.21 (L/k)^1.053``; section 7.9: the wetted-area
-  approximation of a lifting surface.
+  Reynolds number ``38.21 (L/k)^1.053``; chapter 7 (wetted area): a
+  thickness-dependent factor between the exposed planform area and the
+  wetted area of a lifting surface. This module uses the approximation
+  ``2 (1 + 0.2 t/c)`` of that thickness factor (see Raymer).
 * E. Torenbeek, "Synthesis of Subsonic Airplane Design", Delft University
-  Press, 1982, appendix F: the alternative wing form factor.
+  Press, 1982, appendix F: the alternative wing form factor
+  ``1 + 2.7 t/c + 100 (t/c)^4``.
 * S. F. Hoerner, "Fluid-Dynamic Drag", published by the author, 1965,
   chapter 6: the alternative streamlined-body form factor.
 * ISO 2533:1975 (ISA sea level): the air density and dynamic viscosity
@@ -43,12 +52,52 @@ from dataclasses import dataclass
 import numpy as np
 
 from ventorum.core.datatypes import FlightCondition, LiftingSurface
+from ventorum.geometry.lattice import surface_reference_line
+from ventorum.viscous.alpha_correction import MU_AIR_15C
 
-#: Dynamic viscosity of air at ISA sea level [kg/(m s)] (ISO 2533:1975).
-MU_SL = 1.789e-5
+#: Dynamic viscosity of air at ISA sea level [Pa s] (ISO 2533:1975). The
+#: value is the package constant of the viscous coupling, so the parasite
+#: drag and the strip Reynolds numbers use the same air.
+MU_SL = MU_AIR_15C
 
 #: Largest thickness ratio that the lifting form factors accept [-].
 TC_MAX = 0.4
+
+
+def _cf_laminar(re: float) -> float:
+    """Blasius mean skin friction ``1.328 / sqrt(Re)`` [-]."""
+    return float(1.328 / np.sqrt(re))
+
+
+def _cf_turbulent(re: float) -> float:
+    """Prandtl-Schlichting mean skin friction ``0.455 / (log10 Re)^2.58`` [-]."""
+    return float(0.455 / np.log10(re) ** 2.58)
+
+
+def _equal_friction_reynolds() -> float:
+    """Return the Reynolds number where the laminar and turbulent laws agree.
+
+    Bisection in log10(Re) on [3, 6]. Below this Reynolds number the
+    Blasius value is larger than the Prandtl-Schlichting value.
+    """
+    lo, hi = 3.0, 6.0
+    for _ in range(200):
+        mid = 0.5 * (lo + hi)
+        re = 10.0**mid
+        if _cf_turbulent(re) > _cf_laminar(re):
+            hi = mid
+        else:
+            lo = mid
+    return float(10.0 ** (0.5 * (lo + hi)))
+
+
+#: Smallest transition Reynolds number with a laminar run [-]: the Reynolds
+#: number where the Blasius and the Prandtl-Schlichting mean skin friction
+#: agree (about 1.2e4). Below it the composite rule would add drag for a
+#: laminar run (and for a run near Re = 1 it gives a negative value), so the
+#: run counts as turbulent. At this value the composite rule equals the
+#: fully turbulent value, so the skin friction stays continuous.
+RE_TRANSITION_MIN = _equal_friction_reynolds()
 
 
 def flat_plate_cf(
@@ -72,12 +121,26 @@ def flat_plate_cf(
     a correction term of 1612/Re, against the value 1700/Re quoted in
     some textbooks; the difference is a small fraction of the correction.
 
+    Guard of the composite rule: a laminar run counts only when
+    ``Re_tr >= RE_TRANSITION_MIN`` (about 1.2e4, where the laminar and
+    the turbulent law give the same mean skin friction). A shorter run
+    counts as turbulent. With this guard and ``Re >= RE_TRANSITION_MIN``,
+    the skin friction is continuous in ``x_transition``, does not rise
+    when the laminar run grows, and stays between the laminar and the
+    fully turbulent value. Below ``Re = RE_TRANSITION_MIN`` the turbulent
+    law is outside its range: the function returns the turbulent value
+    for ``x_transition < 1`` and the laminar value for 1.
+
     Roughness follows the cutoff Reynolds number of Raymer (2018),
     section 12.5: ``Re_co = 38.21 (L/k)^1.053`` with the reference
-    length ``L`` [m] and the equivalent sand roughness ``k`` [m]. The
-    skin friction is evaluated at ``min(Re, Re_co)``; when the flight
-    Reynolds number exceeds the cutoff, the layer is roughness-limited
-    and treated as fully turbulent at the cutoff Reynolds number.
+    length ``L`` [m] and the equivalent sand roughness ``k`` [m]. Raymer
+    evaluates the turbulent skin friction at ``min(Re, Re_co)``. The
+    cutoff acts on the turbulent part only; the laminar part keeps its
+    value. For mixed flow this module adds the roughness increment of the
+    turbulent law, ``Cf_turb(min(Re, Re_co)) - Cf_turb(Re)``, weighted by
+    the turbulent fraction ``1 - x_transition`` of the length (an
+    approximation of this module). The increment is zero below the
+    cutoff, so the skin friction is continuous across the cutoff.
 
     Parameters
     ----------
@@ -85,7 +148,8 @@ def flat_plate_cf(
         Reynolds number based on the reference length [-].
     x_transition : float
         Fraction of the reference length with laminar run [-], in
-        [0, 1]. Default 0 (fully turbulent).
+        [0, 1]. Default 0 (fully turbulent). A run with a Reynolds number
+        below ``RE_TRANSITION_MIN`` counts as turbulent.
     roughness : float or None
         Equivalent sand roughness height [m]. None (default) means a
         hydraulically smooth surface.
@@ -115,20 +179,24 @@ def flat_plate_cf(
             raise ValueError(f"roughness must be positive, got {roughness}.")
         if length is None or not np.isfinite(float(length)) or float(length) <= 0.0:
             raise ValueError("length [m] must be given and positive when roughness is given.")
+    cf = _cf_smooth(re, x_transition)
+    if roughness is not None:
         re_cutoff = 38.21 * (float(length) / roughness) ** 1.053
         if re > re_cutoff:
-            return float(0.455 / np.log10(re_cutoff) ** 2.58)
-    if x_transition == 0.0:
-        return float(0.455 / np.log10(re) ** 2.58)
+            increment = _cf_turbulent(re_cutoff) - _cf_turbulent(re)
+            cf += (1.0 - x_transition) * increment
+    return float(cf)
+
+
+def _cf_smooth(re: float, x_transition: float) -> float:
+    """Mean skin friction [-] of a smooth plate (composite rule with guard)."""
     if x_transition == 1.0:
-        return float(1.328 / np.sqrt(re))
+        return _cf_laminar(re)
+    cf_turb = _cf_turbulent(re)
     re_transition = x_transition * re
-    if re_transition < 1.0:
-        return float(0.455 / np.log10(re) ** 2.58)
-    cf_turb = float(0.455 / np.log10(re) ** 2.58)
-    cf_turb_tr = float(0.455 / np.log10(re_transition) ** 2.58)
-    cf_lam_tr = float(1.328 / np.sqrt(re_transition))
-    return cf_turb - x_transition * (cf_turb_tr - cf_lam_tr)
+    if x_transition == 0.0 or re_transition < RE_TRANSITION_MIN:
+        return cf_turb
+    return cf_turb - x_transition * (_cf_turbulent(re_transition) - _cf_laminar(re_transition))
 
 
 def form_factor_lifting(
@@ -140,20 +208,21 @@ def form_factor_lifting(
     """Return the form factor of a lifting surface section.
 
     The ``"raymer"`` method (default) uses the wing form factor of Raymer
-    (2018), section 12.5, adapted to incompressible flow: the Mach factor
-    ``1.34 M^0.18`` is set to 1 (this package covers Mach below 0.3 and
-    applies no compressibility correction here) and the sweep factor is
-    kept, so with the thickness ratio ``t/c`` [-], the position of maximum
-    thickness ``x_t`` [-] and the sweep of the maximum-thickness line
-    ``sweep_max_t`` [rad],
+    (2018), section 12.5, in the incompressible scope of this package:
+    the Mach factor ``1.34 M^0.18`` of Raymer is set to 1 (scope limit:
+    Mach below 0.3, no compressibility correction), and the sweep factor
+    is kept, so with the thickness ratio ``t/c`` [-], the position of
+    maximum thickness ``x_t`` [-] and the sweep of the maximum-thickness
+    line ``sweep_max_t`` [rad],
 
     ``FF = (1 + 0.6 / x_t * t/c + 100 (t/c)^4) (cos sweep_max_t)^0.28``.
 
     The ``"torenbeek"`` method uses the wing form factor of Torenbeek
-    (1982), appendix F, evaluated on the thickness ratio normal to the
-    maximum-thickness line ``(t/c)_n = (t/c) / cos(sweep_max_t)``:
+    (1982), appendix F, on the streamwise thickness ratio:
 
-    ``FF = 1 + 2.7 (t/c)_n + 100 (t/c)_n^4``.
+    ``FF = 1 + 2.7 t/c + 100 (t/c)^4``.
+
+    This form has no sweep term, so ``sweep_max_t`` does not change it.
 
     Parameters
     ----------
@@ -164,6 +233,7 @@ def form_factor_lifting(
         Used only by ``method="raymer"``.
     sweep_max_t : float
         Sweep angle of the maximum-thickness line [rad], in [0, pi/2).
+        Used only by ``method="raymer"``.
     method : str
         ``"raymer"`` (default) or ``"torenbeek"``.
 
@@ -191,12 +261,7 @@ def form_factor_lifting(
             (1.0 + 0.6 / x_t * t_c + 100.0 * t_c**4) * np.cos(sweep_max_t) ** 0.28
         )
     if method == "torenbeek":
-        t_cn = t_c / float(np.cos(sweep_max_t))
-        if t_cn > TC_MAX:
-            raise ValueError(
-                f"normal thickness ratio (t/c)/cos(sweep) = {t_cn} exceeds {TC_MAX}."
-            )
-        return float(1.0 + 2.7 * t_cn + 100.0 * t_cn**4)
+        return float(1.0 + 2.7 * t_c + 100.0 * t_c**4)
     raise ValueError(f"Unknown lifting form-factor method {method!r}; use 'raymer' or 'torenbeek'.")
 
 
@@ -337,19 +402,32 @@ class ParasiteDragResult:
     s_ref: float
 
 
-def wetted_area_lifting_surface(surface: LiftingSurface, t_c: float) -> float:
-    """Return the wetted area of a lifting surface.
+def wetted_area_lifting_surface(
+    surface: LiftingSurface,
+    t_c: float,
+    covered_root_span: float = 0.0,
+) -> float:
+    """Return the wetted area of the exposed part of a lifting surface.
 
-    The planform area comes from the section chords by the trapezium
-    rule along the semi-span (both halves when the surface is
-    symmetric). The wetted area is twice the planform area times
-    ``(1 + 0.2 t/c)``, the approximation of Raymer (2018), section 7.9,
-    which adds 20 percent of the thickness ratio for the section
-    curvature. The span uses ``y = y_frac * semi_span`` (flat
-    projection); dihedral and sweep change the true area by a cosine
-    factor that this approximation omits. For a wing-body combination,
-    subtract the fuselage carry-through or pass the exposed area through
-    :class:`DragComponent` directly.
+    The planform area comes from the section chords by the trapezium rule
+    along the span (both halves when the surface is symmetric). The span
+    distance between two sections is the true distance between their
+    leading edges in the y-z plane: ``semi_span`` is measured along the
+    dihedral line (or, when a section sets ``z_le``, the y extent with the
+    z offsets of the sections), as :class:`LiftingSurface` defines it. The
+    chords are streamwise, and two parallel streamwise chords at this
+    distance bound a trapezium of area ``(c1 + c2) / 2`` times the
+    distance, whatever the sweep. So sweep and dihedral need no cosine
+    factor; section twist is neglected.
+
+    The exposed area leaves out the span length ``covered_root_span``
+    [m] next to the root section on each half (the part inside a
+    fuselage). With the default 0 the result is the gross area.
+
+    The wetted area is the exposed area times ``2 (1 + 0.2 t/c)``: the
+    factor 2 counts the upper and the lower surface, and ``0.2 t/c`` is an
+    approximation of the thickness factor between the planform and the
+    wetted area of a section (see Raymer (2018), chapter 7, wetted area).
 
     Parameters
     ----------
@@ -357,17 +435,22 @@ def wetted_area_lifting_surface(surface: LiftingSurface, t_c: float) -> float:
         Lifting surface with at least two sections.
     t_c : float
         Thickness ratio [-], in (0, 0.4].
+    covered_root_span : float
+        Span length [m] from the root section, along the surface, that a
+        fuselage covers on each half. In [0, span length of one half).
+        Default 0 (gross area). For a wing with small dihedral this is
+        about the fuselage half-width at the wing.
 
     Returns
     -------
     float
-        Wetted area [m^2].
+        Wetted area [m^2] of the exposed part.
 
     Raises
     ------
     ValueError
-        If *t_c* is out of range or the surface has fewer than two
-        sections.
+        If *t_c* or *covered_root_span* is out of range or the surface has
+        fewer than two sections.
     """
     t_c = float(t_c)
     if not np.isfinite(t_c) or not 0.0 < t_c <= TC_MAX:
@@ -379,8 +462,18 @@ def wetted_area_lifting_surface(surface: LiftingSurface, t_c: float) -> float:
     chords = np.array([s.chord for s in sections], dtype=float)
     if np.any(chords <= 0.0):
         raise ValueError("All section chords [m] must be positive.")
-    y = eta * float(surface.semi_span)
-    area_half = float(np.sum(0.5 * (chords[:-1] + chords[1:]) * np.abs(np.diff(y))))
+    _, y, z = surface_reference_line(surface, eta)
+    span_step = np.hypot(np.diff(y), np.diff(z))
+    station = np.concatenate([[0.0], np.cumsum(span_step)])
+    covered = float(covered_root_span)
+    if not np.isfinite(covered) or not 0.0 <= covered < float(station[-1]):
+        raise ValueError(
+            f"covered_root_span [m] must be in [0, {float(station[-1])}), got {covered}."
+        )
+    keep = station > covered
+    s_exposed = np.concatenate([[covered], station[keep]])
+    c_exposed = np.concatenate([[float(np.interp(covered, station, chords))], chords[keep]])
+    area_half = float(np.sum(0.5 * (c_exposed[:-1] + c_exposed[1:]) * np.diff(s_exposed)))
     area = 2.0 * area_half if surface.is_symmetric else area_half
     return float(2.0 * area * (1.0 + 0.2 * t_c))
 
@@ -389,12 +482,13 @@ def parasite_drag(
     components: Sequence[DragComponent],
     condition: FlightCondition,
     s_ref: float,
+    mu: float = MU_SL,
 ) -> ParasiteDragResult:
     """Return the parasite drag of a component build-up.
 
     Each component gives, with its Reynolds number
     ``Re = rho V L / mu`` (density [kg/m^3] and velocity [m/s] from the
-    flight condition, viscosity at ISA sea level),
+    flight condition, dynamic viscosity ``mu`` [Pa s]),
 
     ``CD0_i = Cf_i FF_i Q_i S_wet_i / S_ref``,
 
@@ -413,6 +507,10 @@ def parasite_drag(
         Flight condition (uses ``V_inf`` [m/s] and ``rho`` [kg/m^3]).
     s_ref : float
         Reference area of the coefficients [m^2]. Must be positive.
+    mu : float
+        Dynamic viscosity of the air [Pa s]. Default ``MU_SL``, the ISA
+        sea-level value. Give the value of the flight altitude or of the
+        test air.
 
     Returns
     -------
@@ -423,8 +521,8 @@ def parasite_drag(
     Raises
     ------
     ValueError
-        If the component list is empty, two names match, or *s_ref* is
-        not positive.
+        If the component list is empty, two names match, or *s_ref* or
+        *mu* is not positive.
     """
     comps = list(components)
     if not comps:
@@ -441,10 +539,13 @@ def parasite_drag(
         raise ValueError(f"condition.rho [kg/m^3] must be positive, got {rho}.")
     if not np.isfinite(v_inf) or v_inf <= 0.0:
         raise ValueError(f"condition.V_inf [m/s] must be positive, got {v_inf}.")
+    mu = float(mu)
+    if not np.isfinite(mu) or mu <= 0.0:
+        raise ValueError(f"mu [Pa s] must be positive, got {mu}.")
     cd0_by_component: dict[str, float] = {}
     rel_unc: dict[str, float] = {}
     for comp in comps:
-        re = rho * v_inf * float(comp.reference_length) / MU_SL
+        re = rho * v_inf * float(comp.reference_length) / mu
         cf = flat_plate_cf(
             re,
             x_transition=float(comp.laminar_fraction),
