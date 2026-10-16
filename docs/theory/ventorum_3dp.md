@@ -152,6 +152,8 @@ The class `PanelMesh` represents the surface of one or more thick lifting surfac
 
 Each lifting surface is discretized into spanwise strips. At each span station, the wing section carries its airfoil coordinates. The upper and lower surfaces are covered with quadrilateral panels. An open trailing edge (gap above the tolerance $10^{-6} c$) is closed by default: the upper and the lower ordinates move toward the mid point of the gap $g$ by $\tfrac{1}{2} g x^4$, which for the NACA 4-digit thickness law is the published closed trailing edge (Ladson et al., 1996). With a solid base between the two trailing-edge corners the Morino Kutta condition puts the Kutta point at the wake corner on fine chordwise meshes, and the lift does not converge to the lift of the closed section (see the [panel solver chapter](panel3d.md), section *Finite (blunt) Trailing Edge*). The option `trailing_edge="base"` keeps flat base panels and the wake at the upper corner. Flat tip caps close the wing tips to guarantee a watertight enclosed volume.
 
+The section planes are normal to the span, except the root section of a symmetric surface (the plane $y = 0$). Where a narrow strip next to the root or a dihedral break would let two neighbour sections cross, the fold guard turns the plane of the outboard station toward the plane of its inboard neighbour until every node keeps a margin from the other plane (see the panel solver chapter, section *Fold guard*).
+
 ### Deflected plain control surfaces
 
 Plain control surfaces deflect the section geometry inside the specified span range using `ventorum.airfoil.flap.deflect_plain_flap`. Positive deflection rotates the trailing edge downward. Chordwise node distributions insert a node at the hinge line, preserving the geometric corner. Trailing-edge points rotate about the hinge line to floating-point roundoff.
@@ -165,6 +167,7 @@ The function `check_mesh` inspects the closed mesh for geometric quality:
 - Panel skewness: angle between panel diagonal vectors.
 - Panel non-planarity (warp): perpendicular distance of vertices from the mean panel plane.
 - Enclosed signed volume: computed by Gauss divergence theorem to verify consistent outward normal orientation.
+- Folded strips: a node of a station row on the wrong side of the section plane of its neighbour row (needs the station rows of the mesh builder). Folded panels count as non-convex panels.
 
 ## Dirichlet formulation and system assembly
 
@@ -466,7 +469,7 @@ The 3D panel method implementation is verified by tests in the test suite:
 - Symmetry plane and ground effect images (explicit mirror with the free-stream wake, Trefftz drag with images, bank and sideslip on a half mesh): `tests/test_panel3d_images.py`.
 - Iterative pressure Kutta condition (stored Morino run, asymmetric half mesh against the full mesh): `tests/test_panel3d_kutta.py`.
 - Mesh convergence and Richardson extrapolation: `tests/test_panel3d_convergence.py`.
-- Refinement regression (open trailing edge with chordwise refinement): `tests/test_panel3d_refinement.py`.
+- Refinement regressions (open trailing edge with chordwise refinement, dihedral root strip with spanwise refinement): `tests/test_panel3d_refinement.py`.
 - Solver family integration, settings, ground plane, strip map and trust scores: `tests/test_panel3d_factory.py`.
 - GPU pipeline parity (when CUDA is available): `tests/test_panel3d_gpu.py`.
 

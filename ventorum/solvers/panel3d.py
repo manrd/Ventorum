@@ -20,8 +20,9 @@ its thickness normal to the local surface; see
 :mod:`ventorum.panel3d.mesh`).
 
 The mesh uses the defaults of :func:`ventorum.panel3d.mesh.mesh_lifting_surface`:
-an open (blunt) trailing edge is closed. ``details["panel"]`` records this
-choice.
+an open (blunt) trailing edge is closed, and the fold guard keeps the root
+strip of a wing with dihedral open. ``details["panel"]`` records these
+choices.
 
 Backend selection
 -----------------
@@ -427,7 +428,8 @@ class PanelMethodSolver(BaseSolver):
             precision and the counted factorizations, and
             ``details["panel"]`` the panel options used (Kutta option,
             chordwise spacing and count, wake length in m, half mesh,
-            root-thickness scaling, trailing-edge closure of the mesh).
+            root-thickness scaling, trailing-edge closure and fold guard of
+            the mesh).
 
         Notes
         -----
@@ -640,6 +642,7 @@ class PanelMethodSolver(BaseSolver):
             "half_mesh": bool(use_half),
             "scale_root_thickness": scale_root_thickness,
             "trailing_edge": "close",
+            "fold_guard": True,
         }
 
         # 5. Build SolverResult per condition with strip integration

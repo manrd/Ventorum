@@ -1,9 +1,11 @@
 # Author: Manuel Alejandro Rodriguez Diaz, PhD
-"""Refinement regressions of the 3D panel method: open trailing edges.
+"""Refinement regressions of the 3D panel method: open trailing edges and dihedral roots.
 
-The mesh-error study of the 3D panel method found that the open (blunt)
-trailing edge of the library NACA sections did not converge with
-chordwise refinement.
+The mesh-error study of the 3D panel method found two meshes whose
+results did not converge: the open (blunt) trailing edge of the library
+NACA sections with chordwise refinement, and the root strip of a wing
+with dihedral with spanwise refinement. The flapped wing is in
+``tests/test_panel3d_controls.py``.
 """
 
 from __future__ import annotations
@@ -14,20 +16,21 @@ import pytest
 from ventorum.airfoil import airfoil
 from ventorum.core.datatypes import Aircraft, FlightCondition, LiftingSurface, SolverSettings, WingSection
 from ventorum.panel3d.convergence import order_and_extrapolation
-from ventorum.panel3d.mesh import mesh_lifting_surface
+from ventorum.panel3d.mesh import check_mesh, mesh_lifting_surface
 from ventorum.panel3d.solver import PanelSolver
 from ventorum.solvers.factory import make_solver
 
 _COND = FlightCondition(V_inf=30.0, alpha=np.radians(5.0))
 
 
-def _wing(shape=None) -> LiftingSurface:
+def _wing(shape=None, dihedral_deg: float = 0.0) -> LiftingSurface:
     """Rectangular wing of aspect ratio 8 (chord 1 m, semi-span 4 m)."""
     return LiftingSurface(
         name="Wing",
         semi_span=4.0,
         sections=[WingSection(y_frac=0.0, chord=1.0, shape=shape), WingSection(y_frac=1.0, chord=1.0, shape=shape)],
         is_symmetric=True,
+        dihedral=np.radians(dihedral_deg),
     )
 
 
@@ -101,3 +104,32 @@ def test_open_trailing_edge_converges_with_chordwise_refinement(section):
     assert conv.f_extrapolated is not None and conv_closed.f_extrapolated is not None
     assert abs(open_cl[-1] / closed_cl[-1] - 1.0) < 0.005
     assert abs(conv.f_extrapolated / conv_closed.f_extrapolated - 1.0) < 0.005
+
+
+def test_dihedral_root_strip_gives_a_sane_lift_on_fine_spanwise_meshes():
+    """Regression: a 6 deg dihedral wing gave CL about -0.5 from 48 strips on (folded root strip).
+
+    The default cosine spacing makes the root strip narrower than t tan(G);
+    the second section crossed the root plane. With the fold guard the
+    mesh is valid and CL at 48 strips stays within 1 % of CL at 24 strips.
+    """
+    surf = _wing(dihedral_deg=6.0)
+    coords = airfoil("0012", closed_te=True).coords
+    mesh = mesh_lifting_surface(surf, coords, n_chord=8, n_span=48, half=True)
+    info = check_mesh(mesh)
+    assert info["valid_panels"] and info["n_folded"] == 0
+    cl24 = _half_cl(surf, coords, 8, 24)
+    cl48 = _half_cl(surf, coords, 8, 48)
+    print(f"dihedral 6 deg, n_chord 8: CL {cl24:.5f} (24 strips) {cl48:.5f} (48 strips)")
+    assert abs(cl48 / cl24 - 1.0) < 0.01
+
+
+@pytest.mark.slow
+def test_dihedral_wing_converges_with_spanwise_refinement():
+    """CL of the 6 deg dihedral wing converges with spanwise refinement through 96 strips."""
+    surf = _wing(dihedral_deg=6.0)
+    coords = airfoil("0012", closed_te=True).coords
+    cls = [_half_cl(surf, coords, 12, n) for n in (24, 48, 96)]
+    print(f"dihedral 6 deg, n_chord 12: CL {np.round(cls, 5)}")
+    assert all(c > 0.3 for c in cls)
+    assert abs(cls[2] / cls[1] - 1.0) < 0.005
