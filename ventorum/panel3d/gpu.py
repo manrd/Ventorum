@@ -51,7 +51,10 @@ __all__ = [
     "doublet_potential_device",
     "evaluate_condition_on_device",
     "factorize_solve",
+    "free_device_bytes",
     "influence_matrices_device",
+    "lu_factor_device",
+    "lu_solve_device",
     "required_bytes",
     "resolve_device",
     "resolve_dtype",
@@ -97,15 +100,36 @@ def _precision_name(dtype) -> str:
     )
 
 
-def required_bytes(n_panels: int, dtype, n_systems: int = 1) -> int:
-    """Return the device bytes of the dense systems.
+def required_bytes(
+    n_panels: int,
+    dtype,
+    n_systems: int = 1,
+    *,
+    half: bool | None = None,
+    ground: bool = False,
+    body_cached: bool = False,
+) -> int:
+    """Return the device bytes that one configuration of the solver allocates.
 
-    The influence matrices are assembled in float64 (the on-plane self
-    terms need float64 coordinates), then cast to the solve dtype. One
-    system holds the float64 assembly pair B, C (2 x N x N x 8 bytes),
-    the solve triple A, B, LU in the solve dtype, and the right-hand
-    sides and solutions (N, 6) in the solve dtype. The float64 assembly
-    pair is released after the cast.
+    The estimate is the peak of the new allocations while the solver
+    assembles and factorizes the systems of one configuration (free air,
+    or one attitude and height in ground effect). Let ``N`` be the number
+    of solved panels, ``s`` the bytes of the solve dtype (4 or 8) and
+    ``n_body`` the body matrices that the solver keeps for later
+    configurations (B and C, two for a full mesh and four for a half mesh
+    with the mirror pair). The terms are:
+
+    * the float64 assembly pair of one kernel launch, ``2 N^2 8`` (the
+      on-plane self terms need float64 coordinates);
+    * the kept body matrices, ``n_body N^2 s`` (only for the first
+      configuration, see *body_cached*);
+    * the ground image matrices in ground effect, ``n_body N^2 s``;
+    * the two summed matrices of the self and mirror parts on a half mesh,
+      ``2 N^2 s``;
+    * the system matrix, the source matrix and the LU factors of the system
+      that is factorized, ``3 N^2 s``, plus the LU factors that stay from
+      the other systems of the configuration, ``(n_systems - 1) N^2 s``;
+    * the right-hand sides and solutions, ``2 N 6 s`` per system.
 
     Parameters
     ----------
@@ -115,8 +139,15 @@ def required_bytes(n_panels: int, dtype, n_systems: int = 1) -> int:
         Arithmetic of the factorization and solve (torch, numpy or string
         dtype).
     n_systems : int, default=1
-        Number of dense systems kept on the device [-] (2 for the
+        Number of dense systems of the configuration [-] (2 for the
         symmetric and antisymmetric half mesh systems).
+    half : bool or None, optional
+        True for a half mesh (mirror matrices). None takes
+        ``n_systems == 2``.
+    ground : bool, default=False
+        True in ground effect (image matrices).
+    body_cached : bool, default=False
+        True when the body matrices are already on the device.
 
     Returns
     -------
@@ -127,11 +158,20 @@ def required_bytes(n_panels: int, dtype, n_systems: int = 1) -> int:
     n_sys = int(n_systems)
     if n <= 0 or n_sys <= 0:
         return 0
-    if _precision_name(dtype) == "float32":
-        per_system = 16 * n * n + 4 * (3 * n * n + 2 * n * N_ONSETS)
-    else:
-        per_system = 8 * (3 * n * n + 2 * n * N_ONSETS)
-    return int(n_sys) * int(per_system)
+    s = 4 if _precision_name(dtype) == "float32" else 8
+    is_half = (n_sys == 2) if half is None else bool(half)
+    n_body = 4 if is_half else 2
+    nn = n * n
+    total = 2 * nn * 8
+    if not body_cached:
+        total += n_body * nn * s
+    if ground:
+        total += n_body * nn * s
+    if is_half:
+        total += 2 * nn * s
+    total += 3 * nn * s + (n_sys - 1) * nn * s
+    total += n_sys * 2 * n * N_ONSETS * s
+    return int(total)
 
 
 def resolve_device(device=None):
@@ -201,7 +241,40 @@ def resolve_dtype(dtype=None):
     return torch.float32 if name == "float32" else torch.float64
 
 
-def check_device_memory(n_panels: int, dtype, device=None, n_systems: int = 1) -> None:
+def free_device_bytes(device=None) -> int:
+    """Return the device bytes that PyTorch can still use.
+
+    The value is the free memory of the driver plus the memory that the
+    PyTorch caching allocator holds but does not use.
+
+    Parameters
+    ----------
+    device : optional
+        CUDA device. None selects the current CUDA device.
+
+    Returns
+    -------
+    int
+        Usable device memory in bytes.
+    """
+    import torch
+
+    dev = resolve_device(device)
+    free, _ = torch.cuda.mem_get_info(dev)
+    cached = int(torch.cuda.memory_reserved(dev)) - int(torch.cuda.memory_allocated(dev))
+    return int(free) + max(cached, 0)
+
+
+def check_device_memory(
+    n_panels: int,
+    dtype,
+    device=None,
+    n_systems: int = 1,
+    *,
+    half: bool | None = None,
+    ground: bool = False,
+    body_cached: bool = False,
+) -> None:
     """Refuse the solve when the dense systems do not fit in free memory.
 
     Parameters
@@ -213,7 +286,13 @@ def check_device_memory(n_panels: int, dtype, device=None, n_systems: int = 1) -
     device : optional
         CUDA device. None selects the current CUDA device.
     n_systems : int, default=1
-        Number of dense systems kept on the device [-].
+        Number of dense systems of the configuration [-].
+    half : bool or None, optional
+        True for a half mesh (see :func:`required_bytes`).
+    ground : bool, default=False
+        True in ground effect.
+    body_cached : bool, default=False
+        True when the body matrices are already on the device.
 
     Raises
     ------
@@ -223,11 +302,11 @@ def check_device_memory(n_panels: int, dtype, device=None, n_systems: int = 1) -
         If the dense systems do not fit in the free device memory. The
         message reports the required and the free size.
     """
-    import torch
-
     dev = resolve_device(device)
-    need = required_bytes(n_panels, dtype, n_systems=n_systems)
-    free, _ = torch.cuda.mem_get_info(dev)
+    need = required_bytes(
+        n_panels, dtype, n_systems=n_systems, half=half, ground=ground, body_cached=body_cached
+    )
+    free = free_device_bytes(dev)
     if need > int(free):
         raise MemoryError(
             f"The gpu panel backend needs about {need / 2**20:.1f} MiB for "
@@ -274,7 +353,17 @@ def influence_matrices_device(
     dev = resolve_device(device)
     torch_dtype = resolve_dtype(dtype)
     n_targets = int(np.asarray(collocation).shape[0])
-    check_device_memory(n_targets, torch_dtype, dev)
+    n_sources = int(np.asarray(panels).shape[0])
+    item = 4 if _precision_name(torch_dtype) == "float32" else 8
+    need = 2 * n_targets * n_sources * item
+    free = free_device_bytes(dev)
+    if need > free:
+        raise MemoryError(
+            f"The gpu panel backend needs about {need / 2**20:.1f} MiB for "
+            f"the {n_targets} x {n_sources} influence matrices, but only "
+            f"{free / 2**20:.1f} MiB is free on {dev}. Use a coarser mesh "
+            "or a GPU with more memory."
+        )
     return influence_matrices_warp(
         collocation, panels, far_ratio=far_ratio, device=dev, dtype=torch_dtype
     )
@@ -398,6 +487,46 @@ def strip_sum(mat_cw, strip_panel_indices):
     return out
 
 
+def lu_factor_device(mat_a):
+    """Return the LU factors of A on the device.
+
+    Parameters
+    ----------
+    mat_a : torch.Tensor
+        System matrix with shape (N, N) on the CUDA device.
+
+    Returns
+    -------
+    tuple
+        ``(LU, piv)`` of ``torch.linalg.lu_factor``.
+    """
+    import torch
+
+    return torch.linalg.lu_factor(mat_a)
+
+
+def lu_solve_device(lu_info, rhs):
+    """Solve A x = rhs with the LU factors of :func:`lu_factor_device`.
+
+    Parameters
+    ----------
+    lu_info : tuple
+        ``(LU, piv)`` on the CUDA device.
+    rhs : torch.Tensor
+        Right-hand sides with shape (N, K) on the same device.
+
+    Returns
+    -------
+    torch.Tensor
+        Solution with shape (N, K). One ``lu_solve`` call solves all
+        columns.
+    """
+    import torch
+
+    lu, piv = lu_info
+    return torch.linalg.lu_solve(lu, piv, rhs)
+
+
 def factorize_solve(mat_a, rhs):
     """Factorize A on the device and solve all right-hand sides at once.
 
@@ -415,11 +544,8 @@ def factorize_solve(mat_a, rhs):
         factorization for reuse (for example pressure Kutta sensitivities).
         One ``lu_solve`` call solves all K columns.
     """
-    import torch
-
-    lu, piv = torch.linalg.lu_factor(mat_a)
-    sol = torch.linalg.lu_solve(lu, piv, rhs)
-    return sol, (lu, piv)
+    lu_info = lu_factor_device(mat_a)
+    return lu_solve_device(lu_info, rhs), lu_info
 
 
 def evaluate_condition_on_device(

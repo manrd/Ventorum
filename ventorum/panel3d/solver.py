@@ -32,39 +32,58 @@ Conventions
   mu_w = mu_upper - mu_lower. Option "pressure" adjusts the wake strengths
   to zero the trailing-edge pressure jump.
 
+Configurations and factorizations
+---------------------------------
+A configuration is the wake and the image system of a set of conditions.
+In free air the wake follows the body x axis, so one configuration (and one
+factorization of each system) serves all free-air conditions. In ground
+effect the wake follows the free stream, parallel to the ground, and the
+ground images depend on the attitude and the height, so each (attitude,
+height) group is one configuration with its own factorization. The solver
+factorizes a system only when a condition needs it. On a half mesh the
+symmetric system serves the symmetric unit onsets (u, w, q) and the
+antisymmetric system the antisymmetric ones (v, p, r); the antisymmetric
+system is factorized only when a condition has sideslip, roll rate or yaw
+rate. A half mesh needs a flow configuration that is symmetric about
+y = 0: in ground effect with sideslip (the wake follows the free stream)
+or with bank (the ground normal has a y component) the solver solves the
+full mesh instead. ``factorization_count`` counts the factorizations.
+
 Kutta options
 -------------
-* "morino" (default): linear Morino condition, unchanged results.
+* "morino" (default): linear Morino condition.
 * "pressure": Newton iteration on the wake strip strengths with residual
   Cp_upper - Cp_lower at each trailing-edge pair, starting from Morino.
 
 Backends
 --------
 * "numpy" (default): reference kernels and SciPy dense solves on the CPU.
-  Results of this backend never change.
 * "numba": compiled CPU kernels with the same formulas; SciPy solves.
 * "gpu": Warp kernel assembly on the CUDA device, ``torch.linalg``
   factorization on the device, all unit onset right-hand sides in one
   ``lu_solve`` call, array post-processing on the device, results
   returned as numpy. ``dtype=None`` follows the Ventorum precision
   selection (float32 on consumer GPUs is accepted). Assembly runs in
-  float64; factorization, solve and post-processing run in the
-  requested dtype. The dense matrix must fit in the free device memory;
-  otherwise the solve is refused with a clear error that reports
-  the size.
+  float64; the matrices are kept, factorized and solved in the requested
+  dtype. The dense matrices must fit in the free device memory;
+  otherwise the solve is refused with a clear error that reports the
+  size. The gpu backend does no factorization on the CPU and keeps no
+  copy of the matrices on the host.
 """
 
 from __future__ import annotations
 
-from collections.abc import Sequence
-from dataclasses import dataclass
+import dataclasses
 import warnings
+from collections.abc import Sequence
+from dataclasses import dataclass, field
 
 import numpy as np
 import scipy.linalg
 
 from ventorum.aero.system import freestream_direction, rotation_velocity
 from ventorum.core.datatypes import FlightCondition
+from ventorum.core.errors import GroundStrikeError
 from ventorum.panel3d.images import (
     check_ground_clearance,
     ground_plane_parameters,
@@ -76,15 +95,30 @@ from ventorum.panel3d.kernels import _precompute_geometry, doublet_potential, in
 from ventorum.panel3d.kutta import solve_pressure_kutta, strip_influence_matrix
 from ventorum.panel3d.mesh import PanelMesh
 from ventorum.panel3d.post import (
-    build_edge_neighbourhood,
-    compute_surface_gradient,
+    build_surface_gradient_operator,
     compute_surface_velocity_and_cp,
     compute_trefftz_induced_drag,
     integrate_forces_and_moments,
+    surface_gradient,
 )
-from ventorum.panel3d.wake import PanelWake, build_wake
+from ventorum.panel3d.wake import (
+    DEFAULT_WAKE_CHORDS,
+    PanelWake,
+    build_wake,
+    largest_streamwise_chord,
+)
 
 __all__ = ["PanelResult", "PanelSolver"]
+
+#: Unit onsets that are symmetric (u, w, q) and antisymmetric (v, p, r)
+#: about the y = 0 plane.
+_SYM_COLS = (0, 2, 4)
+_ASYM_COLS = (1, 3, 5)
+
+#: Tolerance on the y component of the ground normal and of the wake
+#: direction for symmetry folding [-] (the same as
+#: :func:`ventorum.aero.system.is_symmetric_condition`).
+_SYMMETRY_TOL = 1e-12
 
 
 @dataclass(slots=True)
@@ -151,6 +185,24 @@ class PanelResult:
     mu_w: np.ndarray | None = None
 
 
+@dataclass
+class _Configuration:
+    """Wake, images and factorized systems of one set of conditions."""
+
+    key: tuple
+    wake_dir: np.ndarray | None
+    ground: tuple[np.ndarray, float] | None
+    wake: PanelWake
+    full_wake: PanelWake
+    wake_panels_m: np.ndarray | None
+    systems: dict = field(default_factory=dict)
+    unit_mu: np.ndarray | None = None
+    unit_grad: np.ndarray | None = None
+    unit_mu_t: object = None
+    unit_grad_t: object = None
+    strips: dict = field(default_factory=dict)
+
+
 def _standardize_panels(panels: np.ndarray, nodes: np.ndarray | None = None) -> np.ndarray:
     """Standardize triangle panels to repeat the third vertex in the fourth position.
 
@@ -182,20 +234,35 @@ def _standardize_panels(panels: np.ndarray, nodes: np.ndarray | None = None) -> 
     return pans
 
 
-def _add_wake_influence(
-    A: np.ndarray,
-    Cw: np.ndarray,
-    wake: PanelWake,
-    sign: float = 1.0,
-) -> np.ndarray:
-    """Add wake strip doublet influences to matrix A."""
-    for s, strip_p_idx in enumerate(wake.strip_panel_indices):
-        up_idx = wake.wake_up[s]
-        lo_idx = wake.wake_lo[s]
-        cs = np.sum(Cw[:, strip_p_idx], axis=1) * sign
-        A[:, up_idx] += cs
-        A[:, lo_idx] -= cs
-    return A
+def _fold_wake(mat_a, d_strip, wake: PanelWake):
+    """Add the wake strip influences to the trailing-edge columns of A.
+
+    Each wake strip carries mu_upper - mu_lower (Morino), so its summed
+    potential column adds to the upper panel column and subtracts from the
+    lower panel column. Works on numpy arrays and torch tensors.
+    """
+    for s in range(len(wake.strip_panel_indices)):
+        up_idx = int(wake.wake_up[s])
+        lo_idx = int(wake.wake_lo[s])
+        cs = d_strip[:, s]
+        mat_a[:, up_idx] += cs
+        mat_a[:, lo_idx] -= cs
+    return mat_a
+
+
+def _as_ground(ground) -> tuple[np.ndarray, float] | None:
+    """Return (unit normal, offset [m]) of a ground plane object or tuple, or None."""
+    if ground is None:
+        return None
+    if hasattr(ground, "normal") and hasattr(ground, "offset"):
+        normal, offset = ground.normal, ground.offset
+    else:
+        normal, offset = ground
+    k = np.asarray(normal, dtype=float).reshape(3)
+    k_norm = float(np.linalg.norm(k))
+    if not np.isfinite(k_norm) or k_norm <= 0.0:
+        raise ValueError(f"The ground normal must be a non-zero vector, got {normal}.")
+    return k / k_norm, float(offset)
 
 
 class PanelSolver:
@@ -204,14 +271,17 @@ class PanelSolver:
     This solver uses constant-strength planar source and doublet panels with an
     internal Dirichlet boundary condition. It supports symmetry folding on half
     meshes (PanelMesh.half=True) and ground effect using the method of images.
+    The construction builds the geometry only; each system is assembled
+    and factorized when a condition first needs it (see the module notes).
 
     Parameters
     ----------
     mesh : PanelMesh
         Surface mesh containing nodes, panels, and wake shedding edges.
     wake_length : float or None, optional
-        Length of the downstream body-axis wake in m. If None, defaults to
-        50 times the maximum chord of the mesh.
+        Length of the wake in m. If None, defaults to 50 times the largest
+        streamwise chord of the mesh (see
+        :func:`ventorum.panel3d.wake.largest_streamwise_chord`).
     n_wake : int, default=1
         Number of panels along each wake strip.
     far_ratio : float, default=5.0
@@ -236,6 +306,15 @@ class PanelSolver:
     dtype : optional
         Arithmetic of the "gpu" backend. None follows the Ventorum
         precision selection. Other backends ignore it.
+
+    Attributes
+    ----------
+    factorization_count : int
+        Number of dense LU factorizations done so far (CPU or device),
+        including the factorizations of the full-mesh solve that a half
+        mesh uses for asymmetric configurations in ground effect.
+    wake_length : float
+        Wake length in m.
     """
 
     def __init__(
@@ -261,10 +340,17 @@ class PanelSolver:
             raise ValueError(
                 f"Unknown panel backend {backend!r}; use 'numpy', 'numba' or 'gpu'."
             )
+        if int(n_wake) < 1:
+            raise ValueError(f"n_wake must be at least 1, got {n_wake}.")
         self.backend = key
         self.kutta = str(kutta)
         self.mesh = mesh
         self.far_ratio = float(far_ratio)
+        self.n_wake = int(n_wake)
+        self._device_arg = device
+        self._dtype_arg = dtype
+        self._own_factorizations = 0
+        self._full_solver: PanelSolver | None = None
 
         # Standardize triangular panels on given mesh
         self.standardized_panels = _standardize_panels(mesh.panels, mesh.nodes)
@@ -276,14 +362,21 @@ class PanelSolver:
         self.normals = geom.normal
         self.areas = geom.area
 
-        # Build downstream wake on given mesh
-        self.wake: PanelWake = build_wake(
-            mesh.nodes,
-            self.standardized_panels,
-            mesh.wake_edges,
-            self.normals,
-            wake_length=wake_length,
-            n_wake=n_wake,
+        # Wake length: one value for the solved mesh, the full mesh and
+        # every configuration.
+        if wake_length is None:
+            chord = largest_streamwise_chord(
+                mesh.nodes, self.standardized_panels, mesh.wake_edges, mesh.component
+            )
+            self.wake_length = DEFAULT_WAKE_CHORDS * max(chord, 1.0e-3)
+        else:
+            self.wake_length = float(wake_length)
+            if not np.isfinite(self.wake_length) or self.wake_length <= 0.0:
+                raise ValueError(f"wake_length must be positive and finite, got {wake_length}.")
+
+        # Body-axis wake of free air on the solved mesh
+        self.wake: PanelWake = self._build_wake(
+            mesh.nodes, self.standardized_panels, mesh.wake_edges, self.normals, None
         )
 
         # Reconstruct full mesh for post-processing and reference geometry if half mesh
@@ -299,16 +392,20 @@ class PanelSolver:
         self._full_geom = _precompute_geometry(
             self._full_mesh.nodes[self._standardized_full_panels]
         )
-        self._full_wake = build_wake(
+        self._full_wake = self._build_wake(
             self._full_mesh.nodes,
             self._standardized_full_panels,
             self._full_mesh.wake_edges,
             self._full_geom.normal,
-            wake_length=wake_length,
-            n_wake=n_wake,
+            None,
         )
-        self._full_neighbours = build_edge_neighbourhood(
-            self._standardized_full_panels, self._full_mesh.wake_edges
+        self._grad_op = build_surface_gradient_operator(
+            self._full_mesh.nodes,
+            self._standardized_full_panels,
+            self._full_geom.centroid,
+            self._full_geom.normal,
+            self._full_geom.area,
+            self._full_mesh.wake_edges,
         )
 
         # Reference center
@@ -373,71 +470,100 @@ class PanelSolver:
         # Mirrored body geometry for the half mesh (backend independent)
         if self.mesh.half:
             self._body_verts_m = mirror_panels_y(self.body_verts)
-            if len(self.wake.panels) > 0:
-                self._wake_panels_m = mirror_panels_y(self.wake.panels)
-            else:
-                self._wake_panels_m = np.empty((0, 4, 3), dtype=float)
 
-        # Influence matrices for free air
+        # Device and precision of the gpu backend (no assembly here)
+        self._body_parts: dict | None = None
+        self._configs: dict[tuple, _Configuration] = {}
         if self.backend == "gpu":
-            self._init_free_air_gpu(device, dtype)
-        elif not self.mesh.half:
-            # Full mesh solve
-            B, C = self._matrices(self.centroids, self.body_verts)
-            self.B = B
-            A = np.array(C, copy=True)
-            if len(self.wake.panels) > 0:
-                Cw = self._doublet(self.centroids, self.wake.panels)
-                _add_wake_influence(A, Cw, self.wake, sign=1.0)
-            self.A = A
-            self._free_lu, self._free_piv = scipy.linalg.lu_factor(self.A)
-            self._free_unit_mu = scipy.linalg.lu_solve(
-                (self._free_lu, self._free_piv), -self.B @ self._unit_sigma
+            import torch
+
+            from ventorum.panel3d import gpu as gpu_mod
+
+            self._gpu_device = gpu_mod.resolve_device(device)
+            self._gpu_dtype = gpu_mod.resolve_dtype(dtype)
+            self._gpu_unit_sigma = torch.as_tensor(
+                np.asarray(self._unit_sigma, dtype=np.float64),
+                dtype=self._gpu_dtype,
+                device=self._gpu_device,
             )
-            self._free_unit_grad = self._compute_full_unit_gradients(self._free_unit_mu)
-        else:
-            # Half mesh with symmetry folding
-            B_self, C_self = self._matrices(self.centroids, self.body_verts)
-            B_m, C_m = self._matrices(self.centroids, self._body_verts_m)
 
-            A_self = np.array(C_self, copy=True)
-            A_m = np.array(C_m, copy=True)
-            if len(self.wake.panels) > 0:
-                Cw_self = self._doublet(self.centroids, self.wake.panels)
-                Cw_m = self._doublet(self.centroids, self._wake_panels_m)
-                _add_wake_influence(A_self, Cw_self, self.wake, sign=1.0)
-                _add_wake_influence(A_m, Cw_m, self.wake, sign=1.0)
+    # ------------------------------------------------------------------
+    # Small helpers
+    # ------------------------------------------------------------------
 
-            self._A_self = A_self
-            self._B_self = B_self
-            self._A_m = A_m
-            self._B_m = B_m
+    @property
+    def factorization_count(self) -> int:
+        """Number of dense LU factorizations done so far [-]."""
+        sub = self._full_solver.factorization_count if self._full_solver is not None else 0
+        return int(self._own_factorizations + sub)
 
-            # Free-air factorizations (symmetric and antisymmetric)
-            A_sym = A_self + A_m
-            B_sym = B_self + B_m
-            A_asym = A_self - A_m
-            B_asym = B_self - B_m
+    def _build_wake(self, nodes, panels, wake_edges, normals, wake_dir) -> PanelWake:
+        """Build one wake with the wake length and panel count of the solver."""
+        return build_wake(
+            nodes,
+            panels,
+            wake_edges,
+            normals,
+            wake_length=self.wake_length,
+            n_wake=self.n_wake,
+            wake_dir=wake_dir,
+        )
 
-            self._free_lu_sym, self._free_piv_sym = scipy.linalg.lu_factor(A_sym)
-            self._free_lu_asym, self._free_piv_asym = scipy.linalg.lu_factor(A_asym)
+    def _factorize(self, mat_a):
+        """Factorize one dense system (the only place of a factorization)."""
+        self._own_factorizations += 1
+        if self.backend == "gpu":
+            from ventorum.panel3d import gpu as gpu_mod
 
-            unit_mu = np.zeros((n_panels, 6), dtype=np.float64)
-            for k in [0, 2, 4]:  # Symmetric: u, w, q
-                unit_mu[:, k] = scipy.linalg.lu_solve(
-                    (self._free_lu_sym, self._free_piv_sym), -B_sym @ self._unit_sigma[:, k]
-                )
-            for k in [1, 3, 5]:  # Asymmetric: v, p, r
-                unit_mu[:, k] = scipy.linalg.lu_solve(
-                    (self._free_lu_asym, self._free_piv_asym), -B_asym @ self._unit_sigma[:, k]
-                )
-            self._free_unit_mu = unit_mu
-            self._free_unit_grad = self._compute_full_unit_gradients(self._free_unit_mu)
+            return gpu_mod.lu_factor_device(mat_a)
+        return scipy.linalg.lu_factor(mat_a)
+
+    def _lu_solve(self, lu_info, rhs):
+        """Solve with stored LU factors (numpy or torch right-hand sides)."""
+        if self.backend == "gpu":
+            from ventorum.panel3d import gpu as gpu_mod
+
+            return gpu_mod.lu_solve_device(lu_info, rhs)
+        return scipy.linalg.lu_solve(lu_info, rhs)
+
+    def _solve_host(self, cfg: _Configuration, parity: str, rhs: np.ndarray) -> np.ndarray:
+        """Solve one stored system for host right-hand sides; return float64 numpy."""
+        lu_info = cfg.systems[parity]
+        if self.backend != "gpu":
+            return scipy.linalg.lu_solve(lu_info, rhs)
+        import torch
+
+        rhs_t = torch.as_tensor(
+            np.ascontiguousarray(rhs, dtype=np.float64),
+            dtype=self._gpu_dtype,
+            device=self._gpu_device,
+        )
+        squeeze = rhs_t.ndim == 1
+        if squeeze:
+            rhs_t = rhs_t.reshape(-1, 1)
+        sol = self._lu_solve(lu_info, rhs_t).to(torch.float64).cpu().numpy()
+        return sol.reshape(-1) if squeeze else sol
 
     def _matrices(
         self, collocation: np.ndarray, panels: np.ndarray
     ) -> tuple[np.ndarray, np.ndarray]:
-        """Return (B, C) with the selected CPU backend (numpy or numba)."""
+        """Return (B, C) with the selected backend (device tensors for gpu)."""
+        if self.backend == "gpu":
+            import torch
+
+            from ventorum.panel3d import gpu as gpu_mod
+
+            mat_b, mat_c = gpu_mod.influence_matrices_device(
+                collocation,
+                panels,
+                device=self._gpu_device,
+                dtype=torch.float64,
+                far_ratio=self.far_ratio,
+            )
+            if self._gpu_dtype != torch.float64:
+                mat_b = mat_b.to(self._gpu_dtype)
+                mat_c = mat_c.to(self._gpu_dtype)
+            return mat_b, mat_c
         if self.backend == "numba":
             from ventorum.panel3d.kernels_numba import influence_matrices_numba
 
@@ -463,174 +589,335 @@ class PanelSolver:
             return mat_c
         return doublet_potential(points, panels, far_ratio=self.far_ratio)
 
-    def _init_free_air_gpu(self, device=None, dtype=None) -> None:
-        """Assemble, factorize and solve the free-air systems on the device."""
-        import torch
+    def _strip_matrix(self, wake_panels: np.ndarray, wake: PanelWake) -> tuple:
+        """Return the summed wake strip potentials (host float64, backend array)."""
+        strips = wake.strip_panel_indices
+        n_solve = len(self.centroids)
+        if len(strips) == 0:
+            host = np.zeros((n_solve, 0), dtype=float)
+            if self.backend == "gpu":
+                import torch
 
-        from ventorum.panel3d import gpu as gpu_mod
+                return host, torch.zeros((n_solve, 0), dtype=self._gpu_dtype, device=self._gpu_device)
+            return host, host
+        if self.backend == "gpu":
+            import torch
 
-        dev = gpu_mod.resolve_device(device)
-        torch_dtype = gpu_mod.resolve_dtype(dtype)
-        self._gpu_device = dev
-        self._gpu_dtype = torch_dtype
-        n_panels = len(self.centroids)
-        n_sys = 2 if self.mesh.half else 1
-        gpu_mod.check_device_memory(n_panels, torch_dtype, dev, n_systems=n_sys)
+            from ventorum.panel3d import gpu as gpu_mod
 
-        unit_sigma_t = torch.as_tensor(
-            np.asarray(self._unit_sigma, dtype=np.float64),
-            dtype=torch_dtype,
-            device=dev,
-        )
-        self._gpu_unit_sigma = unit_sigma_t
-
-        def _to_solve(t):
-            return t if t.dtype == torch_dtype else t.to(torch_dtype)
-
-        if not self.mesh.half:
-            mat_b64, mat_c64 = gpu_mod.influence_matrices_device(
+            mat_cw = gpu_mod.doublet_potential_device(
                 self.centroids,
-                self.body_verts,
-                device=dev,
+                wake_panels,
+                device=self._gpu_device,
                 dtype=torch.float64,
                 far_ratio=self.far_ratio,
             )
-            mat_a64 = mat_c64
-            if len(self.wake.panels) > 0:
-                mat_cw = gpu_mod.doublet_potential_device(
-                    self.centroids,
-                    self.wake.panels,
-                    device=dev,
-                    dtype=torch.float64,
-                    far_ratio=self.far_ratio,
-                )
-                gpu_mod.add_wake_influence(
-                    mat_a64, mat_cw, self.wake.wake_up, self.wake.wake_lo,
-                    self.wake.strip_panel_indices, sign=1.0,
-                )
-            mat_b = _to_solve(mat_b64)
-            mat_a = _to_solve(mat_a64)
-            del mat_b64, mat_c64
-            self.A = mat_a.to(torch.float64).cpu().numpy()
-            self.B = mat_b.to(torch.float64).cpu().numpy()
-            rhs = -mat_b @ unit_sigma_t
-            unit_mu_t, lu_info = gpu_mod.factorize_solve(mat_a, rhs)
-            self._gpu_free_lu = lu_info
-            self._gpu_unit_mu_t = unit_mu_t
-            self._free_lu, self._free_piv = scipy.linalg.lu_factor(self.A)
-            self._free_unit_mu = unit_mu_t.to(torch.float64).cpu().numpy()
-            self._free_unit_grad = self._compute_full_unit_gradients(self._free_unit_mu)
-            unit_grad_t = torch.as_tensor(
-                np.asarray(self._free_unit_grad, dtype=np.float64),
-                dtype=torch_dtype,
-                device=dev,
-            )
-            self._gpu_unit_grad_t = unit_grad_t
+            d64 = gpu_mod.strip_sum(mat_cw, strips)
+            del mat_cw
+            host = d64.cpu().numpy()
+            return host, d64.to(self._gpu_dtype)
+        host = strip_influence_matrix(self._doublet(self.centroids, wake_panels), strips)
+        return host, host
+
+    def _copy(self, mat):
+        """Return a copy of a numpy array or torch tensor."""
+        if self.backend == "gpu":
+            return mat.clone()
+        return np.array(mat, copy=True)
+
+    def _check_gpu_memory(self, half: bool, ground: bool, n_systems: int) -> None:
+        """Refuse a configuration that does not fit in the device memory."""
+        if self.backend != "gpu":
             return
+        from ventorum.panel3d import gpu as gpu_mod
 
-        mat_b_self64, mat_c_self64 = gpu_mod.influence_matrices_device(
-            self.centroids, self.body_verts, device=dev,
-            dtype=torch.float64, far_ratio=self.far_ratio,
+        gpu_mod.check_device_memory(
+            len(self.centroids),
+            self._gpu_dtype,
+            self._gpu_device,
+            n_systems=n_systems,
+            half=half,
+            ground=ground,
+            body_cached=self._body_parts is not None,
         )
-        mat_b_m64, mat_c_m64 = gpu_mod.influence_matrices_device(
-            self.centroids, self._body_verts_m, device=dev,
-            dtype=torch.float64, far_ratio=self.far_ratio,
-        )
-        mat_a_self64 = mat_c_self64
-        mat_a_m64 = mat_c_m64
+
+    def _body(self) -> dict:
+        """Return the body influence matrices (computed once, then kept)."""
+        if self._body_parts is None:
+            parts = {}
+            b_self, c_self = self._matrices(self.centroids, self.body_verts)
+            parts["B_self"] = b_self
+            parts["C_self"] = c_self
+            if self.mesh.half:
+                b_m, c_m = self._matrices(self.centroids, self._body_verts_m)
+                parts["B_m"] = b_m
+                parts["C_m"] = c_m
+            self._body_parts = parts
+        return self._body_parts
+
+    # ------------------------------------------------------------------
+    # Free-air matrices on the host (inspection and tests)
+    # ------------------------------------------------------------------
+
+    def _free_matrices_host(self) -> tuple[np.ndarray, np.ndarray]:
+        """Return the free-air full-mesh system (A, B) on the host."""
+        if self.mesh.half:
+            raise AttributeError(
+                "A and B are defined for a full mesh; a half mesh has a symmetric "
+                "and an antisymmetric system."
+            )
+        body = self._body()
+        mat_a = self._copy(body["C_self"])
         if len(self.wake.panels) > 0:
-            mat_cw_self = gpu_mod.doublet_potential_device(
-                self.centroids, self.wake.panels, device=dev,
-                dtype=torch.float64, far_ratio=self.far_ratio,
+            _, d_dev = self._strip_matrix(self.wake.panels, self.wake)
+            _fold_wake(mat_a, d_dev, self.wake)
+        mat_b = body["B_self"]
+        if self.backend == "gpu":
+            import torch
+
+            return (
+                mat_a.to(torch.float64).cpu().numpy(),
+                mat_b.to(torch.float64).cpu().numpy(),
             )
-            mat_cw_m = gpu_mod.doublet_potential_device(
-                self.centroids, self._wake_panels_m, device=dev,
-                dtype=torch.float64, far_ratio=self.far_ratio,
-            )
-            gpu_mod.add_wake_influence(
-                mat_a_self64, mat_cw_self, self.wake.wake_up, self.wake.wake_lo,
-                self.wake.strip_panel_indices, sign=1.0,
-            )
-            gpu_mod.add_wake_influence(
-                mat_a_m64, mat_cw_m, self.wake.wake_up, self.wake.wake_lo,
-                self.wake.strip_panel_indices, sign=1.0,
-            )
-        mat_a_self = _to_solve(mat_a_self64)
-        mat_a_m = _to_solve(mat_a_m64)
-        mat_b_self = _to_solve(mat_b_self64)
-        mat_b_m = _to_solve(mat_b_m64)
-        del mat_a_self64, mat_a_m64, mat_b_self64, mat_b_m64
+        return mat_a, mat_b
 
-        self._A_self = mat_a_self.to(torch.float64).cpu().numpy()
-        self._B_self = mat_b_self.to(torch.float64).cpu().numpy()
-        self._A_m = mat_a_m.to(torch.float64).cpu().numpy()
-        self._B_m = mat_b_m.to(torch.float64).cpu().numpy()
+    @property
+    def A(self) -> np.ndarray:
+        """Free-air doublet system matrix of a full mesh with shape (N, N) [-]."""
+        return self._free_matrices_host()[0]
 
-        mat_a_sym = mat_a_self + mat_a_m
-        mat_b_sym = mat_b_self + mat_b_m
-        mat_a_asym = mat_a_self - mat_a_m
-        mat_b_asym = mat_b_self - mat_b_m
+    @property
+    def B(self) -> np.ndarray:
+        """Source influence matrix of a full mesh with shape (N, N) in m."""
+        return self._free_matrices_host()[1]
 
-        sym_cols = [0, 2, 4]
-        asym_cols = [1, 3, 5]
-        rhs_sym = -mat_b_sym @ unit_sigma_t[:, sym_cols]
-        rhs_asym = -mat_b_asym @ unit_sigma_t[:, asym_cols]
-        mu_sym, lu_sym = gpu_mod.factorize_solve(mat_a_sym, rhs_sym)
-        mu_asym, lu_asym = gpu_mod.factorize_solve(mat_a_asym, rhs_asym)
-        self._gpu_free_lu_sym = lu_sym
-        self._gpu_free_lu_asym = lu_asym
+    # ------------------------------------------------------------------
+    # Configurations
+    # ------------------------------------------------------------------
 
-        unit_mu_t = torch.empty((n_panels, 6), dtype=torch_dtype, device=dev)
-        unit_mu_t[:, sym_cols] = mu_sym
-        unit_mu_t[:, asym_cols] = mu_asym
-        self._gpu_unit_mu_t = unit_mu_t
+    def _ground_of(self, condition: FlightCondition, ground) -> tuple[np.ndarray, float] | None:
+        """Return the ground plane of one condition: explicit plane, else condition.h."""
+        if ground is not None:
+            return _as_ground(ground)
+        gp = ground_plane_parameters(condition, self.ref_point)
+        if gp is None:
+            return None
+        return np.asarray(gp[0], dtype=float), float(gp[1])
 
-        a_sym = mat_a_sym.to(torch.float64).cpu().numpy()
-        a_asym = mat_a_asym.to(torch.float64).cpu().numpy()
-        self._free_lu_sym, self._free_piv_sym = scipy.linalg.lu_factor(a_sym)
-        self._free_lu_asym, self._free_piv_asym = scipy.linalg.lu_factor(a_asym)
-        self._free_unit_mu = unit_mu_t.to(torch.float64).cpu().numpy()
-        self._free_unit_grad = self._compute_full_unit_gradients(self._free_unit_mu)
-        self._gpu_unit_grad_t = torch.as_tensor(
-            np.asarray(self._free_unit_grad, dtype=np.float64),
-            dtype=torch_dtype,
-            device=dev,
+    @staticmethod
+    def _ground_wake_dir(condition: FlightCondition, normal: np.ndarray) -> np.ndarray:
+        """Return the free-stream direction projected on the ground plane.
+
+        The ground of ``condition.h`` is parallel to the free stream, so the
+        projection keeps the free-stream direction. An explicit ground plane
+        that is not parallel to the free stream gets the wake along the
+        projection of the free stream on the ground.
+        """
+        d = freestream_direction(float(condition.alpha), float(condition.beta))
+        dot = float(np.dot(d, normal))
+        if abs(dot) <= 1.0e-12:
+            return d
+        d_t = d - dot * normal
+        n_t = float(np.linalg.norm(d_t))
+        if n_t <= 1.0e-9:
+            raise ValueError("The free stream is normal to the ground plane; no wake direction is defined.")
+        return d_t / n_t
+
+    def _config_key(self, condition: FlightCondition, ground) -> tuple:
+        """Return the configuration key and its data for one condition."""
+        gp = self._ground_of(condition, ground)
+        if gp is None:
+            return ("free",), None, None
+        normal, offset = gp
+        wake_dir = self._ground_wake_dir(condition, normal)
+        key = (
+            "ground",
+            tuple(np.round(normal, 12).tolist()),
+            round(offset, 12),
+            tuple(np.round(wake_dir, 12).tolist()),
         )
+        return key, wake_dir, (normal, offset)
 
-    def _free_gpu_tensors(self):
-        """Return the free-air device tensors for device post-processing."""
-        return (
-            self._gpu_unit_mu_t,
-            self._gpu_unit_sigma,
-            self._gpu_unit_grad_t,
-        )
+    def _symmetric_config(self, wake_dir, ground) -> bool:
+        """Return True if a configuration is symmetric about y = 0."""
+        if wake_dir is not None and abs(float(wake_dir[1])) > _SYMMETRY_TOL:
+            return False
+        if ground is not None and abs(float(ground[0][1])) > _SYMMETRY_TOL:
+            return False
+        return True
 
-    def _compute_full_unit_gradients(self, unit_mu_half: np.ndarray) -> np.ndarray:
-        """Precompute surface gradient fields on the full mesh for the 6 unit onsets."""
-        n_full = len(self._full_geom.centroid)
-        unit_grad = np.zeros((n_full, 6, 3), dtype=np.float64)
-        if not self.mesh.half:
-            for k in range(6):
-                unit_grad[:, k, :] = compute_surface_gradient(
-                    self._full_geom.centroid,
-                    self._full_geom.normal,
-                    unit_mu_half[:, k],
-                    self._full_neighbours,
-                )
+    def _new_config(self, key, wake_dir, ground) -> _Configuration:
+        """Build the wake geometry of a configuration (no matrices yet)."""
+        if wake_dir is None:
+            wake = self.wake
+            full_wake = self._full_wake
         else:
-            # Reconstruct full mu for each unit onset
-            for k in range(6):
-                is_sym = k in (0, 2, 4)
-                mu_right = unit_mu_half[:, k]
-                mu_left = mu_right if is_sym else -mu_right
-                mu_full_k = np.concatenate([mu_right, mu_left])
-                unit_grad[:, k, :] = compute_surface_gradient(
-                    self._full_geom.centroid,
-                    self._full_geom.normal,
-                    mu_full_k,
-                    self._full_neighbours,
+            wake = self._build_wake(
+                self.mesh.nodes, self.standardized_panels, self.mesh.wake_edges, self.normals, wake_dir
+            )
+            full_wake = self._build_wake(
+                self._full_mesh.nodes,
+                self._standardized_full_panels,
+                self._full_mesh.wake_edges,
+                self._full_geom.normal,
+                wake_dir,
+            )
+        if ground is not None:
+            check_ground_clearance(self._full_mesh.nodes, ground[0], ground[1])
+            if len(full_wake.panels) > 0:
+                try:
+                    check_ground_clearance(full_wake.panels.reshape(-1, 3), ground[0], ground[1])
+                except GroundStrikeError as exc:
+                    raise GroundStrikeError(f"The wake goes below the ground plane: {exc}") from None
+        wake_m = None
+        if self.mesh.half:
+            wake_m = (
+                mirror_panels_y(wake.panels)
+                if len(wake.panels) > 0
+                else np.empty((0, 4, 3), dtype=float)
+            )
+        return _Configuration(
+            key=key,
+            wake_dir=wake_dir,
+            ground=ground,
+            wake=wake,
+            full_wake=full_wake,
+            wake_panels_m=wake_m,
+        )
+
+    def _parities_needed(self, coeff_rows: list[np.ndarray]) -> list[str]:
+        """Return the systems that a set of conditions needs."""
+        if not self.mesh.half:
+            return ["full"]
+        needed = ["sym"]
+        if any(np.any(c[list(_ASYM_COLS)] != 0.0) for c in coeff_rows):
+            needed.append("asym")
+        return needed
+
+    def _ensure(self, cfg: _Configuration, parities: list[str]) -> None:
+        """Assemble and factorize the missing systems of a configuration."""
+        missing = [p for p in parities if p not in cfg.systems]
+        if not missing:
+            return
+        half = bool(self.mesh.half)
+        in_ground = cfg.ground is not None
+        self._check_gpu_memory(half, in_ground, len(missing))
+        body = self._body()
+        has_wake = len(cfg.wake.panels) > 0
+        n_panels = len(self.centroids)
+
+        # Self (and mirror) parts with the wake of the configuration.
+        a_self = self._copy(body["C_self"])
+        if has_wake:
+            d_host, d_dev = self._strip_matrix(cfg.wake.panels, cfg.wake)
+            cfg.strips["self"] = d_host
+            _fold_wake(a_self, d_dev, cfg.wake)
+        b_self = body["B_self"]
+        if half:
+            a_m = self._copy(body["C_m"])
+            if has_wake:
+                d_host, d_dev = self._strip_matrix(cfg.wake_panels_m, cfg.wake)
+                cfg.strips["m"] = d_host
+                _fold_wake(a_m, d_dev, cfg.wake)
+            b_m = body["B_m"]
+
+        # Ground images (equal source and doublet strengths, reflected panels).
+        if in_ground:
+            normal, offset = cfg.ground
+            b_g, a_g = self._matrices(
+                self.centroids, reflect_panels_plane(self.body_verts, normal, offset)
+            )
+            if has_wake:
+                d_host, d_dev = self._strip_matrix(
+                    reflect_panels_plane(cfg.wake.panels, normal, offset), cfg.wake
                 )
-        return unit_grad
+                cfg.strips["g"] = d_host
+                _fold_wake(a_g, d_dev, cfg.wake)
+            if half:
+                b_yg, a_yg = self._matrices(
+                    self.centroids, reflect_panels_plane(self._body_verts_m, normal, offset)
+                )
+                if has_wake:
+                    d_host, d_dev = self._strip_matrix(
+                        reflect_panels_plane(cfg.wake_panels_m, normal, offset), cfg.wake
+                    )
+                    cfg.strips["yg"] = d_host
+                    _fold_wake(a_yg, d_dev, cfg.wake)
+
+        if cfg.unit_mu is None:
+            cfg.unit_mu = np.zeros((n_panels, 6), dtype=np.float64)
+        for parity in missing:
+            if parity == "full":
+                mat_a = a_self if not in_ground else a_self + a_g
+                mat_b = b_self if not in_ground else b_self + b_g
+                cols = list(range(6))
+            else:
+                sign = 1.0 if parity == "sym" else -1.0
+                if sign > 0.0:
+                    mat_a = a_self + a_m
+                    mat_b = b_self + b_m
+                else:
+                    mat_a = a_self - a_m
+                    mat_b = b_self - b_m
+                if in_ground:
+                    if sign > 0.0:
+                        mat_a = mat_a + a_g + a_yg
+                        mat_b = mat_b + b_g + b_yg
+                    else:
+                        mat_a = mat_a + a_g - a_yg
+                        mat_b = mat_b + b_g - b_yg
+                cols = list(_SYM_COLS if parity == "sym" else _ASYM_COLS)
+            lu_info = self._factorize(mat_a)
+            del mat_a
+            cfg.systems[parity] = lu_info
+            self._unit_solutions(cfg, lu_info, mat_b, cols, parity)
+            del mat_b
+        self._update_unit_gradients(cfg)
+
+    def _unit_solutions(self, cfg, lu_info, mat_b, cols, parity) -> None:
+        """Solve the unit onset right-hand sides of one system."""
+        if self.backend == "gpu":
+            import torch
+
+            sigma_t = self._gpu_unit_sigma[:, cols]
+            sol = self._lu_solve(lu_info, -mat_b @ sigma_t)
+            if cfg.unit_mu_t is None:
+                cfg.unit_mu_t = torch.zeros(
+                    (len(self.centroids), 6), dtype=self._gpu_dtype, device=self._gpu_device
+                )
+            cfg.unit_mu_t[:, cols] = sol
+            cfg.unit_mu[:, cols] = sol.to(torch.float64).cpu().numpy()
+            return
+        if parity == "full":
+            # Keep the memory layout of the solve output: the superposition
+            # products then round as in every earlier version.
+            cfg.unit_mu = scipy.linalg.lu_solve(lu_info, -mat_b @ self._unit_sigma)
+            return
+        for k in cols:
+            cfg.unit_mu[:, k] = scipy.linalg.lu_solve(lu_info, -mat_b @ self._unit_sigma[:, k])
+
+    def _full_unit_mu(self, unit_mu: np.ndarray) -> np.ndarray:
+        """Return the unit doublets on the full mesh with shape (Nf, 6)."""
+        if not self.mesh.half:
+            return unit_mu
+        left = unit_mu.copy()
+        left[:, list(_ASYM_COLS)] *= -1.0
+        return np.vstack([unit_mu, left])
+
+    def _update_unit_gradients(self, cfg: _Configuration) -> None:
+        """Compute the surface gradients of the six unit solutions on the full mesh."""
+        grad = surface_gradient(self._grad_op, self._full_unit_mu(cfg.unit_mu))
+        cfg.unit_grad = np.ascontiguousarray(np.transpose(grad, (0, 2, 1)))
+        if self.backend == "gpu":
+            import torch
+
+            cfg.unit_grad_t = torch.as_tensor(
+                cfg.unit_grad, dtype=self._gpu_dtype, device=self._gpu_device
+            )
+
+    # ------------------------------------------------------------------
+    # Conditions
+    # ------------------------------------------------------------------
 
     def _condition_velocity(
         self,
@@ -649,244 +936,69 @@ class PanelSolver:
             return v_trans + w_rot
         return np.broadcast_to(v_trans, points.shape)
 
-    def _factorize_ground_group(
-        self,
-        normal: np.ndarray,
-        offset: float,
-    ) -> tuple[tuple, np.ndarray]:
-        """Compute factorization and unit doublet strengths for a ground configuration."""
-        if self.backend == "gpu":
-            return self._factorize_ground_group_gpu(normal, offset)
-        if not self.mesh.half:
-            body_verts_g = reflect_panels_plane(self.body_verts, normal, offset)
-            B_g, C_g = self._matrices(self.centroids, body_verts_g)
-            A_g = np.array(C_g, copy=True)
-            if len(self.wake.panels) > 0:
-                wake_panels_g = reflect_panels_plane(self.wake.panels, normal, offset)
-                Cw_g = self._doublet(self.centroids, wake_panels_g)
-                _add_wake_influence(A_g, Cw_g, self.wake, sign=1.0)
-
-            A_tot = self.A + A_g
-            B_tot = self.B + B_g
-            lu, piv = scipy.linalg.lu_factor(A_tot)
-            unit_mu = scipy.linalg.lu_solve((lu, piv), -B_tot @ self._unit_sigma)
-            unit_grad = self._compute_full_unit_gradients(unit_mu)
-            return (lu, piv), unit_mu, unit_grad
-
-        # Half mesh: four-fold images
-        body_verts_g = reflect_panels_plane(self.body_verts, normal, offset)
-        body_verts_yg = reflect_panels_plane(self._body_verts_m, normal, offset)
-
-        B_g, C_g = self._matrices(self.centroids, body_verts_g)
-        B_yg, C_yg = self._matrices(self.centroids, body_verts_yg)
-
-        A_g = np.array(C_g, copy=True)
-        A_yg = np.array(C_yg, copy=True)
-        if len(self.wake.panels) > 0:
-            wake_panels_g = reflect_panels_plane(self.wake.panels, normal, offset)
-            wake_panels_yg = reflect_panels_plane(self._wake_panels_m, normal, offset)
-            Cw_g = self._doublet(self.centroids, wake_panels_g)
-            Cw_yg = self._doublet(self.centroids, wake_panels_yg)
-            _add_wake_influence(A_g, Cw_g, self.wake, sign=1.0)
-            _add_wake_influence(A_yg, Cw_yg, self.wake, sign=1.0)
-
-        A_sym = self._A_self + self._A_m + A_g + A_yg
-        B_sym = self._B_self + self._B_m + B_g + B_yg
-
-        A_asym = self._A_self - self._A_m + A_g - A_yg
-        B_asym = self._B_self - self._B_m + B_g - B_yg
-
-        lu_sym, piv_sym = scipy.linalg.lu_factor(A_sym)
-        lu_asym, piv_asym = scipy.linalg.lu_factor(A_asym)
-
-        n_panels = len(self.centroids)
-        unit_mu = np.zeros((n_panels, 6), dtype=np.float64)
-        for k in [0, 2, 4]:
-            unit_mu[:, k] = scipy.linalg.lu_solve(
-                (lu_sym, piv_sym), -B_sym @ self._unit_sigma[:, k]
-            )
-        for k in [1, 3, 5]:
-            unit_mu[:, k] = scipy.linalg.lu_solve(
-                (lu_asym, piv_asym), -B_asym @ self._unit_sigma[:, k]
-            )
-
-        unit_grad = self._compute_full_unit_gradients(unit_mu)
-        return (lu_sym, piv_sym, lu_asym, piv_asym), unit_mu, unit_grad
-
-    def _factorize_ground_group_gpu(
-        self,
-        normal: np.ndarray,
-        offset: float,
-    ) -> tuple:
-        """Factorize one ground configuration on the device.
-
-        Returns (lu_info, unit_mu, unit_grad, gpu_tensors) where the first
-        three match the CPU path (numpy) and gpu_tensors holds the device
-        tensors for device post-processing.
-        """
-        import torch
-
-        from ventorum.panel3d import gpu as gpu_mod
-
-        dev = self._gpu_device
-        torch_dtype = self._gpu_dtype
-        n_panels = len(self.centroids)
-        n_sys = 2 if self.mesh.half else 1
-        gpu_mod.check_device_memory(n_panels, torch_dtype, dev, n_systems=n_sys)
-        unit_sigma_t = self._gpu_unit_sigma
-
-        def _to_solve(t):
-            return t if t.dtype == torch_dtype else t.to(torch_dtype)
-
-        if not self.mesh.half:
-            body_verts_g = reflect_panels_plane(self.body_verts, normal, offset)
-            mat_b_g64, mat_c_g64 = gpu_mod.influence_matrices_device(
-                self.centroids, body_verts_g, device=dev,
-                dtype=torch.float64, far_ratio=self.far_ratio,
-            )
-            mat_a_g64 = mat_c_g64
-            if len(self.wake.panels) > 0:
-                wake_panels_g = reflect_panels_plane(self.wake.panels, normal, offset)
-                mat_cw_g = gpu_mod.doublet_potential_device(
-                    self.centroids, wake_panels_g, device=dev,
-                    dtype=torch.float64, far_ratio=self.far_ratio,
-                )
-                gpu_mod.add_wake_influence(
-                    mat_a_g64, mat_cw_g, self.wake.wake_up, self.wake.wake_lo,
-                    self.wake.strip_panel_indices, sign=1.0,
-                )
-            mat_a_g = _to_solve(mat_a_g64)
-            mat_b_g = _to_solve(mat_b_g64)
-            del mat_a_g64, mat_b_g64
-            mat_a_free = torch.as_tensor(self.A, dtype=torch_dtype, device=dev)
-            mat_b_free = torch.as_tensor(self.B, dtype=torch_dtype, device=dev)
-            mat_a_tot = mat_a_free + mat_a_g
-            mat_b_tot = mat_b_free + mat_b_g
-            rhs = -mat_b_tot @ unit_sigma_t
-            unit_mu_t, lu_info = gpu_mod.factorize_solve(mat_a_tot, rhs)
-            unit_mu = unit_mu_t.to(torch.float64).cpu().numpy()
-            unit_grad = self._compute_full_unit_gradients(unit_mu)
-            unit_grad_t = torch.as_tensor(
-                np.asarray(unit_grad, dtype=np.float64),
-                dtype=torch_dtype, device=dev,
-            )
-            return (lu_info, unit_mu, unit_grad, (unit_mu_t, unit_sigma_t, unit_grad_t))
-
-        body_verts_g = reflect_panels_plane(self.body_verts, normal, offset)
-        body_verts_yg = reflect_panels_plane(self._body_verts_m, normal, offset)
-        mat_b_g64, mat_c_g64 = gpu_mod.influence_matrices_device(
-            self.centroids, body_verts_g, device=dev,
-            dtype=torch.float64, far_ratio=self.far_ratio,
-        )
-        mat_b_yg64, mat_c_yg64 = gpu_mod.influence_matrices_device(
-            self.centroids, body_verts_yg, device=dev,
-            dtype=torch.float64, far_ratio=self.far_ratio,
-        )
-        mat_a_g64 = mat_c_g64
-        mat_a_yg64 = mat_c_yg64
-        if len(self.wake.panels) > 0:
-            wake_panels_g = reflect_panels_plane(self.wake.panels, normal, offset)
-            wake_panels_yg = reflect_panels_plane(self._wake_panels_m, normal, offset)
-            mat_cw_g = gpu_mod.doublet_potential_device(
-                self.centroids, wake_panels_g, device=dev,
-                dtype=torch.float64, far_ratio=self.far_ratio,
-            )
-            mat_cw_yg = gpu_mod.doublet_potential_device(
-                self.centroids, wake_panels_yg, device=dev,
-                dtype=torch.float64, far_ratio=self.far_ratio,
-            )
-            gpu_mod.add_wake_influence(
-                mat_a_g64, mat_cw_g, self.wake.wake_up, self.wake.wake_lo,
-                self.wake.strip_panel_indices, sign=1.0,
-            )
-            gpu_mod.add_wake_influence(
-                mat_a_yg64, mat_cw_yg, self.wake.wake_up, self.wake.wake_lo,
-                self.wake.strip_panel_indices, sign=1.0,
-            )
-        mat_a_g = _to_solve(mat_a_g64)
-        mat_a_yg = _to_solve(mat_a_yg64)
-        mat_b_g = _to_solve(mat_b_g64)
-        mat_b_yg = _to_solve(mat_b_yg64)
-        del mat_a_g64, mat_a_yg64, mat_b_g64, mat_b_yg64
-
-        mat_a_self = torch.as_tensor(self._A_self, dtype=torch_dtype, device=dev)
-        mat_b_self = torch.as_tensor(self._B_self, dtype=torch_dtype, device=dev)
-        mat_a_m = torch.as_tensor(self._A_m, dtype=torch_dtype, device=dev)
-        mat_b_m = torch.as_tensor(self._B_m, dtype=torch_dtype, device=dev)
-        mat_a_sym = mat_a_self + mat_a_m + mat_a_g + mat_a_yg
-        mat_b_sym = mat_b_self + mat_b_m + mat_b_g + mat_b_yg
-        mat_a_asym = mat_a_self - mat_a_m + mat_a_g - mat_a_yg
-        mat_b_asym = mat_b_self - mat_b_m + mat_b_g - mat_b_yg
-
-        sym_cols = [0, 2, 4]
-        asym_cols = [1, 3, 5]
-        mu_sym, lu_sym = gpu_mod.factorize_solve(
-            mat_a_sym, -mat_b_sym @ unit_sigma_t[:, sym_cols]
-        )
-        mu_asym, lu_asym = gpu_mod.factorize_solve(
-            mat_a_asym, -mat_b_asym @ unit_sigma_t[:, asym_cols]
-        )
-        unit_mu_t = torch.empty((n_panels, 6), dtype=torch_dtype, device=dev)
-        unit_mu_t[:, sym_cols] = mu_sym
-        unit_mu_t[:, asym_cols] = mu_asym
-        unit_mu = unit_mu_t.to(torch.float64).cpu().numpy()
-        unit_grad = self._compute_full_unit_gradients(unit_mu)
-        unit_grad_t = torch.as_tensor(
-            np.asarray(unit_grad, dtype=np.float64),
-            dtype=torch_dtype, device=dev,
-        )
-        lu_info = (lu_sym[0], lu_sym[1], lu_asym[0], lu_asym[1])
-        return (lu_info, unit_mu, unit_grad, (unit_mu_t, unit_sigma_t, unit_grad_t))
-
-    def _evaluate_result(
-        self,
-        condition: FlightCondition,
-        unit_mu: np.ndarray,
-        unit_grad: np.ndarray,
-        gpu_tensors=None,
-    ) -> PanelResult:
-        """Evaluate aerodynamic coefficients and distributions for a condition."""
+    def _condition_coeffs(self, condition: FlightCondition) -> np.ndarray:
+        """Return the six unit-onset weights for a flight condition."""
         alpha = float(condition.alpha)
         beta = float(condition.beta)
         v_inf = float(condition.V_inf)
         d = freestream_direction(alpha, beta)
-
         u = v_inf * d[0]
         v = v_inf * d[1]
         w = v_inf * d[2]
         p = float(getattr(condition, "p", 0.0))
         q = float(getattr(condition, "q", 0.0))
         r = float(getattr(condition, "r", 0.0))
+        return np.array([u, v, w, p, q, r], dtype=np.float64)
 
-        coeffs = np.array([u, v, w, p, q, r], dtype=np.float64)
-        if gpu_tensors is not None:
+    def _reconstruct_full_mu(self, unit_mu: np.ndarray, coeffs: np.ndarray) -> np.ndarray:
+        """Reconstruct the full mesh Morino doublets from half or full solve."""
+        mu_body = unit_mu @ coeffs
+        if not self.mesh.half:
+            return np.array(mu_body, dtype=float, copy=True)
+        mu_sym = unit_mu[:, list(_SYM_COLS)] @ coeffs[list(_SYM_COLS)]
+        mu_asym = unit_mu[:, list(_ASYM_COLS)] @ coeffs[list(_ASYM_COLS)]
+        mu_left = mu_sym - mu_asym
+        return np.concatenate([mu_body, mu_left])
+
+    def _trefftz(self, cfg: _Configuration, mu_full, condition, wake_gamma=None) -> float:
+        """Trefftz-plane induced drag of a configuration (images in ground effect)."""
+        return compute_trefftz_induced_drag(
+            wake=cfg.full_wake,
+            mu=mu_full,
+            V_inf=float(condition.V_inf),
+            rho=float(condition.rho),
+            S_ref=self.S_ref,
+            wake_dir=cfg.wake_dir,
+            ground=cfg.ground,
+            wake_gamma=wake_gamma,
+        )
+
+    def _evaluate_result(self, cfg: _Configuration, condition: FlightCondition) -> PanelResult:
+        """Evaluate coefficients and distributions of one condition (Morino Kutta)."""
+        v_inf = float(condition.V_inf)
+        coeffs = self._condition_coeffs(condition)
+        unit_mu = cfg.unit_mu
+        v_onset_full = self._condition_velocity(condition, self._full_geom.centroid)
+        if self.backend == "gpu":
             from ventorum.panel3d import gpu as gpu_mod
 
-            unit_mu_t, unit_sigma_t, unit_grad_t = gpu_tensors
-            v_onset_full = self._condition_velocity(condition, self._full_geom.centroid)
-            mu_body, sigma_body, _, v_surf_full, cp_full = (
-                gpu_mod.evaluate_condition_on_device(
-                    unit_mu_t,
-                    unit_sigma_t,
-                    unit_grad_t,
-                    coeffs,
-                    v_onset_full,
-                    self._full_geom.normal,
-                    v_inf,
-                )
+            mu_body, sigma_body, _, v_surf_full, cp_full = gpu_mod.evaluate_condition_on_device(
+                cfg.unit_mu_t,
+                self._gpu_unit_sigma,
+                cfg.unit_grad_t,
+                coeffs,
+                v_onset_full,
+                self._full_geom.normal,
+                v_inf,
             )
         else:
             mu_body = unit_mu @ coeffs
             sigma_body = self._unit_sigma @ coeffs
-
-            # Superpose gradient field on the full mesh
-            grad_full = np.einsum("k,nkd->nd", coeffs, unit_grad)
-            v_onset_full = self._condition_velocity(condition, self._full_geom.centroid)
+            grad_full = np.einsum("k,nkd->nd", coeffs, cfg.unit_grad)
             v_surf_full, cp_full = compute_surface_velocity_and_cp(
                 v_onset_full, self._full_geom.normal, grad_full, v_inf
             )
 
-        # Full mesh forces and moments
         forces = integrate_forces_and_moments(
             cp=cp_full,
             areas=self._full_geom.area,
@@ -899,29 +1011,21 @@ class PanelSolver:
             ref_point=self.ref_point,
         )
 
-        # Trefftz plane induced drag on full wake
         if not self.mesh.half:
             mu_full = mu_body
         else:
-            mu_sym = unit_mu[:, [0, 2, 4]] @ coeffs[[0, 2, 4]]
-            mu_asym = unit_mu[:, [1, 3, 5]] @ coeffs[[1, 3, 5]]
+            mu_sym = unit_mu[:, list(_SYM_COLS)] @ coeffs[list(_SYM_COLS)]
+            mu_asym = unit_mu[:, list(_ASYM_COLS)] @ coeffs[list(_ASYM_COLS)]
             mu_left = mu_sym - mu_asym
             mu_full = np.concatenate([mu_body, mu_left])
-
-        cdi_trefftz = compute_trefftz_induced_drag(
-            wake=self._full_wake,
-            mu=mu_full,
-            V_inf=v_inf,
-            rho=float(condition.rho),
-            S_ref=self.S_ref,
-        )
+        cdi_trefftz = self._trefftz(cfg, mu_full, condition)
 
         n_panels = len(self.centroids)
         cp_out = cp_full[:n_panels]
         v_surf_out = v_surf_full[:n_panels]
 
-        up_te = np.asarray(self.wake.wake_up, dtype=int)
-        lo_te = np.asarray(self.wake.wake_lo, dtype=int)
+        up_te = np.asarray(cfg.wake.wake_up, dtype=int)
+        lo_te = np.asarray(cfg.wake.wake_lo, dtype=int)
         if up_te.size:
             te_resid = float(np.max(np.abs(cp_out[up_te] - cp_out[lo_te])))
             mu_wake = mu_body[up_te] - mu_body[lo_te]
@@ -950,216 +1054,92 @@ class PanelSolver:
             mu_w=mu_wake,
         )
 
-    def _condition_coeffs(self, condition: FlightCondition) -> np.ndarray:
-        """Return the six unit-onset weights for a flight condition."""
-        alpha = float(condition.alpha)
-        beta = float(condition.beta)
-        v_inf = float(condition.V_inf)
-        d = freestream_direction(alpha, beta)
-        u = v_inf * d[0]
-        v = v_inf * d[1]
-        w = v_inf * d[2]
-        p = float(getattr(condition, "p", 0.0))
-        q = float(getattr(condition, "q", 0.0))
-        r = float(getattr(condition, "r", 0.0))
-        return np.array([u, v, w, p, q, r], dtype=np.float64)
-
-    def _reconstruct_full_mu(self, unit_mu: np.ndarray, coeffs: np.ndarray) -> np.ndarray:
-        """Reconstruct the full mesh Morino doublets from half or full solve."""
-        mu_body = unit_mu @ coeffs
-        if not self.mesh.half:
-            return np.array(mu_body, dtype=float, copy=True)
-        mu_sym = unit_mu[:, [0, 2, 4]] @ coeffs[[0, 2, 4]]
-        mu_asym = unit_mu[:, [1, 3, 5]] @ coeffs[[1, 3, 5]]
-        mu_left = mu_sym - mu_asym
-        return np.concatenate([mu_body, mu_left])
-
-    def _strip_matrix_free(self) -> np.ndarray:
-        """Sum wake doublet influences into one column per solved strip in free air."""
-        n_solve = len(self.centroids)
-        strips = self.wake.strip_panel_indices
-        n_strips = len(strips)
-        if n_strips == 0:
-            return np.zeros((n_solve, 0), dtype=float)
-        if self.backend == "gpu":
-            return self._strip_matrix_free_gpu()
-        if not self.mesh.half:
-            cw = self._doublet(self.centroids, self.wake.panels)
-            return strip_influence_matrix(cw, strips)
-        cw_self = self._doublet(self.centroids, self.wake.panels)
-        cw_m = self._doublet(self.centroids, self._wake_panels_m)
-        d_self = strip_influence_matrix(cw_self, strips)
-        d_m = strip_influence_matrix(cw_m, strips)
-        return d_self + d_m
-
-    def _strip_matrix_free_gpu(self) -> np.ndarray:
-        """Strip influence matrix of free air assembled on the device."""
-        import torch
-
-        from ventorum.panel3d import gpu as gpu_mod
-
-        dev = self._gpu_device
-        strips = self.wake.strip_panel_indices
-        if not self.mesh.half:
-            mat_cw = gpu_mod.doublet_potential_device(
-                self.centroids, self.wake.panels, device=dev,
-                dtype=torch.float64, far_ratio=self.far_ratio,
-            )
-            return gpu_mod.strip_sum(mat_cw, strips).to(torch.float64).cpu().numpy()
-        mat_cw_self = gpu_mod.doublet_potential_device(
-            self.centroids, self.wake.panels, device=dev,
-            dtype=torch.float64, far_ratio=self.far_ratio,
-        )
-        mat_cw_m = gpu_mod.doublet_potential_device(
-            self.centroids, self._wake_panels_m, device=dev,
-            dtype=torch.float64, far_ratio=self.far_ratio,
-        )
-        d_self = gpu_mod.strip_sum(mat_cw_self, strips)
-        d_m = gpu_mod.strip_sum(mat_cw_m, strips)
-        return (d_self + d_m).to(torch.float64).cpu().numpy()
-
-    def _strip_matrix_ground(self, normal: np.ndarray, offset: float) -> np.ndarray:
-        """Sum wake and image influences into one column per solved strip."""
-        n_solve = len(self.centroids)
-        strips = self.wake.strip_panel_indices
-        n_strips = len(strips)
-        if n_strips == 0:
-            return np.zeros((n_solve, 0), dtype=float)
-        if self.backend == "gpu":
-            return self._strip_matrix_ground_gpu(normal, offset)
-        if not self.mesh.half:
-            cw = self._doublet(self.centroids, self.wake.panels)
-            wake_g = reflect_panels_plane(self.wake.panels, normal, offset)
-            cw_g = self._doublet(self.centroids, wake_g)
-            return strip_influence_matrix(cw, strips) + strip_influence_matrix(cw_g, strips)
-        cw_self = self._doublet(self.centroids, self.wake.panels)
-        cw_m = self._doublet(self.centroids, self._wake_panels_m)
-        wake_g = reflect_panels_plane(self.wake.panels, normal, offset)
-        wake_yg = reflect_panels_plane(self._wake_panels_m, normal, offset)
-        cw_g = self._doublet(self.centroids, wake_g)
-        cw_yg = self._doublet(self.centroids, wake_yg)
-        d_mat = strip_influence_matrix(cw_self, strips)
-        d_mat = d_mat + strip_influence_matrix(cw_m, strips)
-        d_mat = d_mat + strip_influence_matrix(cw_g, strips)
-        d_mat = d_mat + strip_influence_matrix(cw_yg, strips)
+    def _strip_system(self, cfg: _Configuration, parity: str) -> np.ndarray:
+        """Return the strip influence matrix of one system (host float64)."""
+        sign = -1.0 if parity == "asym" else 1.0
+        d_mat = np.array(cfg.strips["self"], copy=True)
+        if "m" in cfg.strips:
+            d_mat = d_mat + sign * cfg.strips["m"]
+        if "g" in cfg.strips:
+            d_mat = d_mat + cfg.strips["g"]
+        if "yg" in cfg.strips:
+            d_mat = d_mat + sign * cfg.strips["yg"]
         return d_mat
 
-    def _strip_matrix_ground_gpu(self, normal: np.ndarray, offset: float) -> np.ndarray:
-        """Strip influence matrix of body, symmetry and ground images on the device."""
-        import torch
+    def _pressure_sensitivity(self, cfg: _Configuration, coeffs: np.ndarray):
+        """Return (z_solve, z_full, wake_up, wake_lo, expand) of the pressure Kutta.
 
-        from ventorum.panel3d import gpu as gpu_mod
-
-        dev = self._gpu_device
-        strips = self.wake.strip_panel_indices
-
-        def _strip_of(panels: np.ndarray):
-            mat_cw = gpu_mod.doublet_potential_device(
-                self.centroids, panels, device=dev,
-                dtype=torch.float64, far_ratio=self.far_ratio,
-            )
-            return gpu_mod.strip_sum(mat_cw, strips)
-
+        *expand* maps the unknown corrections to the corrections of all
+        strips of the full wake.
+        """
+        n_strips = len(cfg.wake.wake_up)
         if not self.mesh.half:
-            wake_g = reflect_panels_plane(self.wake.panels, normal, offset)
-            total = _strip_of(self.wake.panels) + _strip_of(wake_g)
-            return total.to(torch.float64).cpu().numpy()
-        wake_g = reflect_panels_plane(self.wake.panels, normal, offset)
-        wake_yg = reflect_panels_plane(self._wake_panels_m, normal, offset)
-        total = (
-            _strip_of(self.wake.panels)
-            + _strip_of(self._wake_panels_m)
-            + _strip_of(wake_g)
-            + _strip_of(wake_yg)
-        )
-        return total.to(torch.float64).cpu().numpy()
-
-    def _pressure_lu(self, lu_info) -> tuple:
-        """Select the reused factorization for the pressure update."""
-        if not self.mesh.half:
-            return lu_info
-        lu_sym, piv_sym, _, _ = lu_info
-        return (lu_sym, piv_sym)
+            z = self._solve_host(cfg, "full", -self._strip_system(cfg, "full"))
+            up = np.asarray(cfg.wake.wake_up, dtype=int)
+            lo = np.asarray(cfg.wake.wake_lo, dtype=int)
+            return z, z, up, lo, lambda d: d
+        z_sym = self._solve_host(cfg, "sym", -self._strip_system(cfg, "sym"))
+        if not np.any(coeffs[list(_ASYM_COLS)] != 0.0):
+            # Symmetric flow: one correction per right strip and its mirror.
+            up = np.asarray(cfg.wake.wake_up, dtype=int)
+            lo = np.asarray(cfg.wake.wake_lo, dtype=int)
+            return z_sym, np.vstack([z_sym, z_sym]), up, lo, lambda d: np.concatenate([d, d])
+        # Asymmetric flow: one correction per strip of the full wake.
+        z_asym = self._solve_host(cfg, "asym", -self._strip_system(cfg, "asym"))
+        z_same = 0.5 * (z_sym + z_asym)
+        z_other = 0.5 * (z_sym - z_asym)
+        z_solve = np.hstack([z_same, z_other])
+        z_full = np.block([[z_same, z_other], [z_other, z_same]])
+        up = np.asarray(cfg.full_wake.wake_up, dtype=int)
+        lo = np.asarray(cfg.full_wake.wake_lo, dtype=int)
+        if up.shape[0] != 2 * n_strips:
+            raise RuntimeError("The full wake of a half mesh must hold two strips per half strip.")
+        return z_solve, z_full, up, lo, lambda d: d
 
     def _evaluate_pressure_result(
-        self,
-        condition: FlightCondition,
-        unit_mu: np.ndarray,
-        lu_info,
-        d_solve: np.ndarray,
+        self, cfg: _Configuration, condition: FlightCondition
     ) -> PanelResult:
         """Evaluate one flight condition with the iterative pressure Kutta."""
         coeffs = self._condition_coeffs(condition)
-        mu_solve0 = unit_mu @ coeffs
+        mu_solve0 = cfg.unit_mu @ coeffs
         sigma_body = self._unit_sigma @ coeffs
-        mu_full0 = self._reconstruct_full_mu(unit_mu, coeffs)
+        mu_full0 = self._reconstruct_full_mu(cfg.unit_mu, coeffs)
         v_inf = float(condition.V_inf)
         v_onset_full = self._condition_velocity(condition, self._full_geom.centroid)
 
-        lu = self._pressure_lu(lu_info)
-        up_te = np.asarray(self.wake.wake_up, dtype=int)
-        lo_te = np.asarray(self.wake.wake_lo, dtype=int)
+        if len(cfg.wake.wake_up) == 0:
+            z_solve = np.zeros((len(mu_solve0), 0))
+            z_full = np.zeros((len(mu_full0), 0))
+            up = lo = np.zeros(0, dtype=int)
 
-        if self.backend == "gpu":
-            import torch
-
-            lu_t, piv_t = lu
-            dev = self._gpu_device
-            dt = self._gpu_dtype
-
-            def _solve(rhs_col: np.ndarray) -> np.ndarray:
-                rhs_t = torch.as_tensor(
-                    np.asarray(rhs_col, dtype=np.float64), dtype=dt, device=dev
-                ).reshape(-1, 1)
-                sol_t = torch.linalg.lu_solve(lu_t, piv_t, rhs_t)
-                return sol_t.to(torch.float64).cpu().numpy().reshape(-1)
-
-            mu_solve, mu_full, delta, n_iters, resid, converged = solve_pressure_kutta(
-                mu_solve0,
-                mu_full0,
-                lu,
-                d_solve,
-                up_te,
-                lo_te,
-                self._full_geom.centroid,
-                self._full_geom.normal,
-                self._full_neighbours,
-                v_onset_full,
-                v_inf,
-                linear_solve=_solve,
-            )
+            def expand(d):
+                return d
         else:
-            mu_solve, mu_full, delta, n_iters, resid, converged = solve_pressure_kutta(
-                mu_solve0,
-                mu_full0,
-                lu,
-                d_solve,
-                up_te,
-                lo_te,
-                self._full_geom.centroid,
-                self._full_geom.normal,
-                self._full_neighbours,
-                v_onset_full,
-                v_inf,
-            )
+            z_solve, z_full, up, lo, expand = self._pressure_sensitivity(cfg, coeffs)
 
-        if up_te.size:
-            mu_wake = (mu_solve[up_te] - mu_solve[lo_te]) + delta
-        else:
-            mu_wake = np.zeros(0, dtype=float)
+        kres = solve_pressure_kutta(
+            mu_full0,
+            z_full,
+            self._grad_op,
+            up,
+            lo,
+            self._full_geom.normal,
+            v_onset_full,
+            v_inf,
+        )
+        mu_solve = mu_solve0 + z_solve @ kres.delta
+        mu_full = kres.mu_full
 
         trust_note = ""
-        if not converged:
+        if not kres.converged:
             msg = (
                 "Pressure Kutta did not converge in 20 iterations; "
-                f"final max|delta Cp|={resid:.3e}. Treat the trailing edge with care."
+                f"final max|delta Cp|={kres.residual:.3e}. Treat the trailing edge with care."
             )
             warnings.warn(msg, RuntimeWarning, stacklevel=3)
             trust_note = msg
 
-        grad_full = compute_surface_gradient(
-            self._full_geom.centroid, self._full_geom.normal, mu_full, self._full_neighbours
-        )
+        grad_full = surface_gradient(self._grad_op, mu_full)
         v_surf_full, cp_full = compute_surface_velocity_and_cp(
             v_onset_full, self._full_geom.normal, grad_full, v_inf
         )
@@ -1175,33 +1155,17 @@ class PanelSolver:
             ref_point=self.ref_point,
         )
 
-        # Trefftz drag uses the corrected wake strengths through an adjusted
-        # doublet vector that keeps the surface state unchanged elsewhere.
-        mu_treff = np.array(mu_full, dtype=float, copy=True)
-        if delta.size and len(self._full_wake.wake_up):
-            up_full = np.asarray(self._full_wake.wake_up, dtype=int)
-            lo_full = np.asarray(self._full_wake.wake_lo, dtype=int)
-            n_half_strips = int(delta.shape[0])
-            for s in range(n_half_strips):
-                d_half = float(delta[s]) / 2.0
-                mu_treff[up_full[s]] += d_half
-                mu_treff[lo_full[s]] -= d_half
-                mirror = s + n_half_strips
-                if mirror < up_full.shape[0]:
-                    mu_treff[up_full[mirror]] += d_half
-                    mu_treff[lo_full[mirror]] -= d_half
-        cdi_trefftz = compute_trefftz_induced_drag(
-            wake=self._full_wake,
-            mu=mu_treff,
-            V_inf=v_inf,
-            rho=float(condition.rho),
-            S_ref=self.S_ref,
-        )
+        # Trefftz drag with the corrected wake strengths of all strips.
+        up_f = np.asarray(cfg.full_wake.wake_up, dtype=int)
+        lo_f = np.asarray(cfg.full_wake.wake_lo, dtype=int)
+        if up_f.size:
+            gamma_full = (mu_full[up_f] - mu_full[lo_f]) + expand(kres.delta)
+        else:
+            gamma_full = np.zeros(0, dtype=float)
+        cdi_trefftz = self._trefftz(cfg, mu_full, condition, wake_gamma=gamma_full)
 
         n_panels = len(self.centroids)
-        cp_out = cp_full[:n_panels]
-        v_surf_out = v_surf_full[:n_panels]
-
+        n_strips = len(cfg.wake.wake_up)
         return PanelResult(
             CL=forces["CL"],
             CD_pressure=forces["CD_pressure"],
@@ -1210,129 +1174,140 @@ class PanelSolver:
             Cl=forces["Cl"],
             Cm=forces["Cm"],
             Cn=forces["Cn"],
-            cp=cp_out,
+            cp=cp_full[:n_panels],
             mu=np.array(mu_solve, dtype=float, copy=True),
             sigma=sigma_body,
-            velocity=v_surf_out,
+            velocity=v_surf_full[:n_panels],
             condition=condition,
             kutta="pressure",
-            kutta_iters=int(n_iters),
-            kutta_residual=float(resid),
-            kutta_converged=bool(converged),
+            kutta_iters=int(kres.n_iters),
+            kutta_residual=float(kres.residual),
+            kutta_converged=bool(kres.converged),
             trust_note=trust_note,
-            mu_w=np.array(mu_wake, dtype=float, copy=True),
+            mu_w=np.array(gamma_full[:n_strips], dtype=float, copy=True),
         )
 
-    def solve(self, condition: FlightCondition) -> PanelResult:
+    def _full_mesh_solver(self) -> PanelSolver:
+        """Return the full-mesh solver of a half mesh (built once, when needed)."""
+        if self._full_solver is None:
+            self._full_solver = PanelSolver(
+                self._full_mesh,
+                wake_length=self.wake_length,
+                n_wake=self.n_wake,
+                far_ratio=self.far_ratio,
+                S_ref=self.S_ref,
+                b_ref=self.b_ref,
+                c_ref=self.c_ref,
+                ref_point=self.ref_point,
+                kutta=self.kutta,
+                backend=self.backend,
+                device=self._device_arg,
+                dtype=self._dtype_arg,
+            )
+        return self._full_solver
+
+    def _to_half(self, res: PanelResult) -> PanelResult:
+        """Return a full-mesh result with the distributions of the right half."""
+        n_panels = len(self.centroids)
+        n_strips = len(self.wake.wake_up)
+        return dataclasses.replace(
+            res,
+            cp=np.array(res.cp[:n_panels], copy=True),
+            mu=np.array(res.mu[:n_panels], copy=True),
+            sigma=np.array(res.sigma[:n_panels], copy=True),
+            velocity=np.array(res.velocity[:n_panels], copy=True),
+            mu_w=None if res.mu_w is None else np.array(res.mu_w[:n_strips], copy=True),
+        )
+
+    def solve(self, condition: FlightCondition, ground=None) -> PanelResult:
         """Solve potential flow for a given flight condition.
 
         Parameters
         ----------
         condition : FlightCondition
             Flight condition to evaluate.
+        ground : GroundPlane or tuple or None, optional
+            Explicit ground plane (an object with ``normal`` and ``offset``
+            [m], or a tuple ``(normal, offset)``). None uses ``condition.h``.
 
         Returns
         -------
         PanelResult
             Forces, moments, pressure, doublet and source distributions.
         """
-        return self.solve_conditions([condition])[0]
+        return self.solve_conditions([condition], grounds=None if ground is None else [ground])[0]
 
-    def solve_conditions(self, conditions: Sequence[FlightCondition]) -> list[PanelResult]:
+    def solve_conditions(
+        self,
+        conditions: Sequence[FlightCondition],
+        grounds: Sequence | None = None,
+    ) -> list[PanelResult]:
         """Solve potential flow for multiple flight conditions.
 
-        In ground effect, conditions are grouped by (attitude, height) and
-        factorized once per group.
+        Conditions are grouped by configuration: all free-air conditions
+        share one configuration; in ground effect each (attitude, height)
+        group is one configuration. Each system of a configuration is
+        factorized once.
 
         Parameters
         ----------
         conditions : sequence of FlightCondition
             Flight conditions to solve.
+        grounds : sequence or None, optional
+            Explicit ground plane of each condition (an object with
+            ``normal`` and ``offset`` [m], a tuple ``(normal, offset)``, or
+            None). None for all conditions uses ``condition.h``. An explicit
+            plane replaces ``condition.h``.
 
         Returns
         -------
         list of PanelResult
             List of solution results corresponding to each condition.
         """
-        if not conditions:
+        conds = list(conditions)
+        if not conds:
             return []
-
-        # Validate clearances and build grouping keys
-        groups: dict[tuple, list[int]] = {}
-        for idx, cond in enumerate(conditions):
-            if cond.h is None:
-                key = ("free",)
-            else:
-                gp = ground_plane_parameters(cond, self.ref_point)
-                normal, offset = gp
-                check_ground_clearance(self._full_mesh.nodes, normal, offset)
-                a_round = round(float(cond.alpha), 11)
-                b_round = round(float(cond.beta), 11)
-                p_round = round(float(getattr(cond, "phi", 0.0)), 11)
-                h_round = round(float(cond.h), 11)
-                key = ("ground", a_round, b_round, p_round, h_round)
-            groups.setdefault(key, []).append(idx)
-
-        results: list[PanelResult | None] = [None] * len(conditions)
-
-        for key, indices in groups.items():
-            if key[0] == "free":
-                if self.kutta == "morino":
-                    unit_mu = self._free_unit_mu
-                    unit_grad = self._free_unit_grad
-                    gpu_tensors = (
-                        self._free_gpu_tensors() if self.backend == "gpu" else None
-                    )
-                    for idx in indices:
-                        results[idx] = self._evaluate_result(
-                            conditions[idx], unit_mu, unit_grad, gpu_tensors=gpu_tensors
-                        )
-                    continue
-                unit_mu = self._free_unit_mu
-                if self.backend == "gpu":
-                    if not self.mesh.half:
-                        lu_info = self._gpu_free_lu
-                    else:
-                        lu_info = (
-                            self._gpu_free_lu_sym[0],
-                            self._gpu_free_lu_sym[1],
-                            self._gpu_free_lu_asym[0],
-                            self._gpu_free_lu_asym[1],
-                        )
-                elif not self.mesh.half:
-                    lu_info = (self._free_lu, self._free_piv)
-                else:
-                    lu_info = (
-                        self._free_lu_sym,
-                        self._free_piv_sym,
-                        self._free_lu_asym,
-                        self._free_piv_asym,
-                    )
-                d_free = self._strip_matrix_free()
-                for idx in indices:
-                    results[idx] = self._evaluate_pressure_result(
-                        conditions[idx], unit_mu, lu_info, d_free
-                    )
-                continue
-
-            first_cond = conditions[indices[0]]
-            normal, offset = ground_plane_parameters(first_cond, self.ref_point)
-            factorized = self._factorize_ground_group(normal, offset)
-            if self.backend == "gpu":
-                lu_info, unit_mu, unit_grad, gpu_tensors = factorized
-            else:
-                lu_info, unit_mu, unit_grad = factorized
-                gpu_tensors = None
-            if self.kutta == "morino":
-                for idx in indices:
-                    results[idx] = self._evaluate_result(
-                        conditions[idx], unit_mu, unit_grad, gpu_tensors=gpu_tensors
-                    )
-                continue
-            d_ground = self._strip_matrix_ground(np.asarray(normal, dtype=float), float(offset))
-            for idx in indices:
-                results[idx] = self._evaluate_pressure_result(
-                    conditions[idx], unit_mu, lu_info, d_ground
+        if grounds is None:
+            ground_list = [None] * len(conds)
+        else:
+            ground_list = list(grounds)
+            if len(ground_list) != len(conds):
+                raise ValueError(
+                    f"grounds holds {len(ground_list)} entries for {len(conds)} conditions."
                 )
+
+        # Group the conditions by configuration (checks the clearances).
+        groups: dict[tuple, list[int]] = {}
+        meta: dict[tuple, tuple] = {}
+        for idx, (cond, gnd) in enumerate(zip(conds, ground_list)):
+            key, wake_dir, gp = self._config_key(cond, gnd)
+            if gp is not None:
+                check_ground_clearance(self._full_mesh.nodes, gp[0], gp[1])
+            groups.setdefault(key, []).append(idx)
+            meta[key] = (wake_dir, gp)
+
+        results: list[PanelResult | None] = [None] * len(conds)
+        for key, indices in groups.items():
+            wake_dir, gp = meta[key]
+            if self.mesh.half and not self._symmetric_config(wake_dir, gp):
+                # The wake or the ground breaks the y = 0 symmetry: full mesh.
+                sub = self._full_mesh_solver()
+                sub_res = sub.solve_conditions(
+                    [conds[i] for i in indices], grounds=[gp] * len(indices)
+                )
+                for idx, res in zip(indices, sub_res):
+                    results[idx] = self._to_half(res)
+                continue
+            cfg = self._configs.get(key)
+            if cfg is None:
+                cfg = self._new_config(key, wake_dir, gp)
+                self._configs[key] = cfg
+            coeff_rows = [self._condition_coeffs(conds[i]) for i in indices]
+            self._ensure(cfg, self._parities_needed(coeff_rows))
+            for idx in indices:
+                if self.kutta == "morino":
+                    results[idx] = self._evaluate_result(cfg, conds[idx])
+                else:
+                    results[idx] = self._evaluate_pressure_result(cfg, conds[idx])
 
         return [r for r in results if r is not None]

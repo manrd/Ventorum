@@ -17,10 +17,13 @@ Published sources
 
 from __future__ import annotations
 
+import dataclasses
+
 import numpy as np
 
 from ventorum.aero.system import ground_normal
 from ventorum.core.datatypes import FlightCondition
+from ventorum.core.errors import GroundStrikeError
 from ventorum.panel3d.mesh import PanelMesh
 
 __all__ = [
@@ -216,13 +219,13 @@ def check_ground_clearance(
 
     Raises
     ------
-    ValueError
-        If any node touches or crosses the ground plane.
+    GroundStrikeError
+        If any node touches or crosses the ground plane (a ValueError).
     """
-    h = np.dot(nodes, normal) - float(offset)
+    h = np.asarray(nodes, dtype=float).reshape(-1, 3) @ np.asarray(normal, dtype=float) - float(offset)
     min_h = float(np.min(h))
     if min_h <= 0.0:
-        raise ValueError(
+        raise GroundStrikeError(
             f"Geometry touches or crosses the ground plane (minimum clearance {min_h:.4e} m). "
             "No solution is computed for a ground strike."
         )
@@ -283,6 +286,21 @@ def reconstruct_full_mesh(half_mesh: PanelMesh) -> PanelMesh:
     comp = np.concatenate([half_mesh.component, half_mesh.component])
     kind = np.concatenate([half_mesh.kind, half_mesh.kind])
 
+    # Other per-panel metadata of the mesh (for example a strip index) is
+    # repeated for the mirror panels.
+    extra = {}
+    n_half = len(half_mesh.panels)
+    known = {"nodes", "panels", "component", "kind", "wake_edges", "half"}
+    for fld in dataclasses.fields(half_mesh):
+        if fld.name in known or not fld.init:
+            continue
+        value = getattr(half_mesh, fld.name)
+        arr = np.asarray(value) if value is not None else None
+        if arr is not None and arr.ndim >= 1 and arr.shape[0] == n_half:
+            extra[fld.name] = np.concatenate([arr, arr])
+        else:
+            extra[fld.name] = value
+
     return PanelMesh(
         nodes=np.array(nodes, dtype=float),
         panels=np.array(panels, dtype=int),
@@ -290,4 +308,5 @@ def reconstruct_full_mesh(half_mesh: PanelMesh) -> PanelMesh:
         kind=kind,
         wake_edges=np.array(wake_edges, dtype=int).reshape(-1, 4),
         half=False,
+        **extra,
     )

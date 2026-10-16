@@ -14,6 +14,7 @@ Published sources
 from __future__ import annotations
 
 import numpy as np
+import pytest
 import scipy.linalg
 
 from ventorum.core.datatypes import FlightCondition, LiftingSurface, WingSection
@@ -85,8 +86,32 @@ def _te_jump(solver: PanelSolver, cp: np.ndarray) -> float:
     return float(np.max(np.abs(cp[up_idx] - cp[lo_idx])))
 
 
-def test_default_morino_bit_for_bit():
-    """Verify the default option equals an explicit Morino run bit for bit."""
+# Default (Morino) run stored after the change to the node-based surface
+# gradient. The doublets and the Trefftz drag equal the run of the first
+# solver version; the pressure values follow the present gradient method.
+_STORED_MORINO = {
+    "CL": 0.32913829884375495,
+    "CD_pressure": -0.0022952942097927286,
+    "CDi_trefftz": 0.004233828611102339,
+    "Cm": -0.07665012280304392,
+    "cp_sum": -271.1126355930909,
+    "cp_abs_sum": 305.16602098296994,
+    "cp_0": -1.3715636687742108,
+    "cp_100": -0.4000422007027551,
+    "mu_abs_sum": 783.0904197027365,
+    "velocity_abs_sum": 17887.834801496563,
+}
+
+
+def test_default_morino_matches_stored_run():
+    """Verify the default option against a stored Morino run.
+
+    The default and an explicit ``kutta="morino"`` give the same result bit
+    for bit, and both equal the stored run. On the machine that stored the
+    values they are equal bit for bit; the test allows 1e-12 relative
+    (1e-15 absolute for the coefficients near zero), because other LAPACK
+    and BLAS builds can round the last bits differently.
+    """
     surf = _rectangular_wing_surface()
     coords = _naca0012_coordinates(61)
     mesh = mesh_lifting_surface(surf, coords, n_chord=8, n_span=8)
@@ -107,6 +132,20 @@ def test_default_morino_bit_for_bit():
     assert np.array_equal(res_default.velocity, res_morino.velocity)
     assert res_default.kutta == "morino"
     assert res_morino.kutta_iters == 0
+
+    stored = _STORED_MORINO
+    for name in ("CL", "CD_pressure", "CDi_trefftz", "Cm"):
+        assert getattr(res_default, name) == pytest.approx(stored[name], rel=1e-12), name
+    for name in ("CY", "Cl", "Cn"):
+        assert abs(getattr(res_default, name)) < 1e-13, name
+    assert float(np.sum(res_default.cp)) == pytest.approx(stored["cp_sum"], rel=1e-12)
+    assert float(np.sum(np.abs(res_default.cp))) == pytest.approx(stored["cp_abs_sum"], rel=1e-12)
+    assert float(res_default.cp[0]) == pytest.approx(stored["cp_0"], rel=1e-12)
+    assert float(res_default.cp[100]) == pytest.approx(stored["cp_100"], rel=1e-12)
+    assert float(np.sum(np.abs(res_default.mu))) == pytest.approx(stored["mu_abs_sum"], rel=1e-12)
+    assert float(np.sum(np.abs(res_default.velocity))) == pytest.approx(
+        stored["velocity_abs_sum"], rel=1e-12
+    )
 
 
 def _run_pressure_case(coords: np.ndarray, label: str) -> None:
@@ -136,6 +175,7 @@ def _run_pressure_case(coords: np.ndarray, label: str) -> None:
     print(f"{label}: Morino CL={res_morino.CL:.6f}, pressure CL={res.CL:.6f}")
     print(f"{label}: iters={res.kutta_iters}, residual={res.kutta_residual:.3e}, jump={jump:.3e}")
     assert calls["n"] == 1, f"factorization count is {calls['n']}, expected 1"
+    assert solver.factorization_count == 1
     assert res.kutta_iters <= 20
     assert jump < 1e-6
     assert res.kutta_residual < 1e-6
@@ -200,3 +240,35 @@ def test_pressure_kutta_ground():
     assert res.kutta_iters <= 20
     assert jump < 1e-6
     assert res.kutta_residual < 1e-6
+
+
+def test_pressure_kutta_half_mesh_asymmetric_equals_full_mesh():
+    """Verify the pressure Kutta on a half mesh with sideslip and roll rate.
+
+    The flow is not symmetric, so the wake corrections of the left and the
+    right strips differ. The half mesh solves them with its symmetric and
+    antisymmetric factorizations (no new factorization) and must equal the
+    full-mesh pressure Kutta solve to 1e-10.
+    """
+    surf = _rectangular_wing_surface()
+    coords = _naca0012_coordinates(51)
+    mesh_half = mesh_lifting_surface(surf, coords, n_chord=8, n_span=6, half=True)
+    mesh_full = mesh_lifting_surface(surf, coords, n_chord=8, n_span=6, half=False)
+    cond = FlightCondition(V_inf=50.0, alpha=np.radians(4.0), beta=np.radians(5.0), p=0.5)
+
+    solver_half = PanelSolver(mesh_half, far_ratio=np.inf, kutta="pressure")
+    res_half = solver_half.solve(cond)
+    res_full = PanelSolver(mesh_full, far_ratio=np.inf, kutta="pressure").solve(cond)
+
+    assert res_half.kutta_converged and res_full.kutta_converged
+    assert solver_half.factorization_count == 2
+    n_half = len(mesh_half.panels)
+    for name in ("CL", "CD_pressure", "CDi_trefftz", "CY", "Cl", "Cm", "Cn"):
+        assert abs(getattr(res_half, name) - getattr(res_full, name)) < 1e-10, name
+    assert np.max(np.abs(res_half.cp - res_full.cp[:n_half])) < 1e-10
+    assert np.max(np.abs(res_half.mu - res_full.mu[:n_half])) < 1e-10
+    n_strips = len(res_half.mu_w)
+    assert np.max(np.abs(res_half.mu_w - res_full.mu_w[:n_strips])) < 1e-10
+    # The right and left trailing edges of the full mesh carry no pressure jump.
+    full_jump = np.abs(res_full.cp[mesh_full.wake_edges[:, 0]] - res_full.cp[mesh_full.wake_edges[:, 1]])
+    assert float(np.max(full_jump)) < 1e-6

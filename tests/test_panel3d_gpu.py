@@ -151,15 +151,35 @@ def test_unknown_backend_raises() -> None:
 
 
 def test_required_bytes_reports_size() -> None:
-    """The memory estimate matches the documented dense footprint."""
+    """The memory estimate matches the documented terms of one configuration.
+
+    For N = 100 panels: the float64 assembly pair 2 N^2 8 = 160000 bytes;
+    the kept body matrices (2 on a full mesh, 4 on a half mesh); the
+    ground image matrices (as many as the body matrices); the two summed
+    self and mirror matrices of a half mesh; A, B and LU of the system that
+    is factorized, plus the LU of the other system; 2 N 6 per system for
+    the right-hand sides and solutions.
+    """
     from ventorum.panel3d.gpu import required_bytes
 
-    # float64, N=100: 8 bytes x (3 x N x N + 2 x N x 6 onsets) = 249600.
-    assert required_bytes(100, "float64") == 249600
-    # float32, N=100: float64 assembly pair + float32 solve triple = 284800.
-    assert required_bytes(100, "float32") == 284800
+    nn = 100 * 100
+    # Full mesh, free air, float64.
+    assert required_bytes(100, "float64") == 2 * nn * 8 + 2 * nn * 8 + 3 * nn * 8 + 2 * 100 * 6 * 8
+    # Full mesh, free air, float32 (float64 assembly pair, float32 solve).
+    assert required_bytes(100, "float32") == 2 * nn * 8 + 2 * nn * 4 + 3 * nn * 4 + 2 * 100 * 6 * 4
+    # Half mesh in ground effect with both systems, float64.
+    half_ground = required_bytes(100, "float64", n_systems=2, half=True, ground=True)
+    assert half_ground == (
+        2 * nn * 8 + 4 * nn * 8 + 4 * nn * 8 + 2 * nn * 8 + 3 * nn * 8 + 1 * nn * 8 + 2 * 2 * 100 * 6 * 8
+    )
+    half_free = required_bytes(100, "float64", n_systems=2, half=True)
+    full_free = required_bytes(100, "float64")
+    assert half_ground > half_free > full_free
+    # Body matrices already on the device for a later configuration.
+    assert required_bytes(100, "float64", ground=True, body_cached=True) == (
+        2 * nn * 8 + 2 * nn * 8 + 3 * nn * 8 + 2 * 100 * 6 * 8
+    )
     # Nearly quadratic growth: doubling N nearly quadruples the bytes.
-    assert required_bytes(200, "float64") == 979200
     assert required_bytes(200, "float64") > 3.5 * required_bytes(100, "float64")
     assert required_bytes(0, "float64") == 0
 
@@ -259,3 +279,73 @@ def test_gpu_memory_error_reports_size() -> None:
 
     with pytest.raises(MemoryError, match="MiB"):
         check_device_memory(10_000_000, "float64")
+
+
+@pytest.mark.gpu
+def test_gpu_path_does_no_cpu_factorization(monkeypatch) -> None:
+    """The gpu backend factorizes on the device only and counts it.
+
+    A half mesh in free air (symmetric and antisymmetric systems), a ground
+    configuration and the pressure Kutta option run with a wrapper around
+    the SciPy LU routine (no call allowed) and around the torch LU routine
+    (the count must equal the factorization count of the solver).
+    """
+    torch = _need_cuda()
+    import scipy.linalg
+
+    cpu_calls = {"n": 0}
+    gpu_calls = {"n": 0}
+    scipy_lu = scipy.linalg.lu_factor
+    torch_lu = torch.linalg.lu_factor
+
+    def counting_cpu(a, *args, **kwargs):
+        cpu_calls["n"] += 1
+        return scipy_lu(a, *args, **kwargs)
+
+    def counting_gpu(a, *args, **kwargs):
+        gpu_calls["n"] += 1
+        return torch_lu(a, *args, **kwargs)
+
+    monkeypatch.setattr(scipy.linalg, "lu_factor", counting_cpu)
+    monkeypatch.setattr(torch.linalg, "lu_factor", counting_gpu)
+    surf = _rectangular_wing_surface()
+    mesh = mesh_lifting_surface(surf, _naca0012_coordinates(51), n_chord=6, n_span=6, half=True)
+    solver = PanelSolver(
+        mesh, far_ratio=np.inf, backend="gpu", dtype=torch.float64, kutta="pressure"
+    )
+    assert gpu_calls["n"] == 0
+    solver.solve(FlightCondition(V_inf=30.0, alpha=np.radians(4.0), beta=np.radians(3.0)))
+    solver.solve(FlightCondition(V_inf=30.0, alpha=np.radians(4.0), h=0.6))
+    assert cpu_calls["n"] == 0
+    assert gpu_calls["n"] == 3
+    assert solver.factorization_count == 3
+
+
+@pytest.mark.gpu
+def test_gpu_float64_parity_ground_sideslip_and_pressure() -> None:
+    """Gpu float64 matches numpy to 1e-10 in ground effect with the free-stream wake.
+
+    The sideslip case on a half mesh goes to the full mesh; the pressure
+    Kutta case on a half mesh with sideslip uses both factorizations.
+    """
+    torch = _need_cuda()
+    surf = _rectangular_wing_surface()
+    mesh = mesh_lifting_surface(surf, _naca0012_coordinates(51), n_chord=6, n_span=6, half=True)
+    conds = [
+        FlightCondition(V_inf=30.0, alpha=np.radians(6.0), beta=np.radians(4.0), h=0.5),
+        FlightCondition(V_inf=30.0, alpha=np.radians(4.0), phi=np.radians(3.0), h=0.6),
+    ]
+    for kutta in ("morino", "pressure"):
+        ref = PanelSolver(mesh, far_ratio=np.inf, kutta=kutta).solve_conditions(conds)
+        new = PanelSolver(
+            mesh, far_ratio=np.inf, kutta=kutta, backend="gpu", dtype=torch.float64
+        ).solve_conditions(conds)
+        for r_new, r_ref in zip(new, ref):
+            _check_solver_parity(r_new, r_ref, 1e-10, f"gpu ground {kutta}")
+            _assert_close(r_new.CDi_trefftz, r_ref.CDi_trefftz, 1e-10, f"gpu ground {kutta} CDi")
+    asym = FlightCondition(V_inf=50.0, alpha=np.radians(4.0), beta=np.radians(5.0), p=0.5)
+    ref = PanelSolver(mesh, far_ratio=np.inf, kutta="pressure").solve(asym)
+    new = PanelSolver(
+        mesh, far_ratio=np.inf, kutta="pressure", backend="gpu", dtype=torch.float64
+    ).solve(asym)
+    _check_solver_parity(new, ref, 1e-10, "gpu pressure asymmetric")
