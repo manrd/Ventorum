@@ -3,28 +3,35 @@
 
 The module refines the panel mesh in both directions at once: the
 spanwise count and the chordwise count are both multiplied by the same
-ratio from the base mesh, over three or four levels. For each requested
-quantity the module stores the values per level, the observed order of
-convergence, the Richardson-extrapolated value and a relative error
-estimate. A quantity whose observed order falls outside [0.5, 4.0] is
+ratio from the base mesh (the mesh of the user), over three or four
+levels. For each requested quantity the module stores the values per
+level, the observed order of convergence, the Richardson-extrapolated
+value, the error bar of the finest level, and the error estimate of the
+base mesh. A quantity whose observed order falls outside [0.5, 4.0] is
 flagged as outside the asymptotic range.
 
-The observed order and the Richardson value reuse
-:func:`ventorum.core.error_bars.observed_order` and
-:func:`ventorum.core.error_bars.richardson_extrapolate` (Celik et al.
-2008). The safety factors 1.25 inside the asymptotic range and 3.0
-outside it, the order limits 0.5 and 4.0, and the roundoff,
-oscillatory, divergent and not-converged-order rules follow the same
-conventions as the layer-1 numerical error bars of Ventorum. Per-level
-scaling of surfaces with their own panel count reuses the level helper
-of :mod:`ventorum.geometry.mesh_convergence`.
+The classification, the observed order, the Richardson value and the
+error bar of the finest level come from
+:func:`ventorum.core.error_bars.coefficient_error_bar` (Roache 1998;
+Celik et al. 2008), the layer-1 numerical error bar of Ventorum; this
+module does not copy its rules. The linear refinement measure is the
+spanwise panel count of the main surface: both directions are refined by
+the same ratio. Per-level scaling of surfaces with their own panel count
+reuses the level helper of :mod:`ventorum.geometry.mesh_convergence`.
+
+Error estimate of the base mesh. With a monotonic convergence the
+estimate is ``Fs * |f_ext - f_0|``, the safety factor of the error bar
+times the distance from the base-mesh value to the Richardson value. In
+the other states with an error bar (round-off, oscillatory, order not
+found) the estimate is ``|f_fine - f_0|`` plus the half-width of the
+finest level. A divergent sequence gives no estimate.
 
 Cost. The study solves ``levels`` meshes. Panel counts grow by about
-``ratio**2`` per level because both directions are refined, and dense
-assembly and solve work grows with the square of the count. The cost
-factor ``sum((Nk / N0)**2)`` is about 30 for three levels at ratio 1.5.
-The solver option that attaches this estimate to a result stays off by
-default for this reason.
+``ratio**2`` per level because both directions are refined, and the dense
+LU factorization grows with the cube of the count. The cost factor is
+``sum((Nk / N0)**3)``, about ``1 + 1.5**6 + 1.5**12`` (about 142) for
+three levels at ratio 1.5. The solver option that attaches this estimate
+to a result stays off by default for this reason.
 
 Published sources
 -----------------
@@ -37,8 +44,8 @@ Published sources
   Engineering, Vol. 130, No. 7, 078001, 2008 (fixed-point iteration of
   the observed order for non-constant refinement ratios).
 * J. L. Hess and A. M. O. Smith, "Calculation of potential flow about
-  arbitrary bodies", Journal of Ship Research, Vol. 8, 1964
-  (quadrilateral source-doublet panels on a closed body).
+  arbitrary bodies", Progress in Aeronautical Sciences, Vol. 8, 1967,
+  pp. 1-138 (quadrilateral source panels on a closed body).
 * J. Katz and A. Plotkin, Low-Speed Aerodynamics, 2nd ed., Cambridge
   University Press, 2001, chapter 12 (constant source-doublet panels;
   the surface velocity and Cp error falls with the panel size).
@@ -57,29 +64,16 @@ from typing import Any
 import numpy as np
 
 from ventorum.core.datatypes import Aircraft, FlightCondition, LiftingSurface, SolverResult, SolverSettings
+from ventorum.core.error_bars import ORDER_LOWER, ORDER_UPPER, coefficient_error_bar
 from ventorum.geometry.mesh_convergence import _level_aircraft
-from ventorum.panel3d.mesh import PanelMesh
 
 __all__ = [
     "ConvergenceReport",
     "QuantityConvergence",
-    "build_sphere_mesh",
     "level_counts",
     "order_and_extrapolation",
     "panel_mesh_convergence",
 ]
-
-#: Lower limit of the trusted observed-order range (project decision).
-ORDER_LOWER = 0.5
-
-#: Upper limit of the trusted observed-order range (project decision).
-ORDER_UPPER = 4.0
-
-#: Safety factor inside the asymptotic range (Roache 1998).
-SAFETY_IN_RANGE = 1.25
-
-#: Safety factor outside the asymptotic range (project decision).
-SAFETY_OUT_OF_RANGE = 3.0
 
 #: Smallest spanwise or chordwise panel count of a level.
 MIN_LEVEL_COUNT = 2
@@ -114,28 +108,35 @@ class QuantityConvergence:
     quantity : str
         Quantity name (for example ``"CL"``).
     values : list of float
-        Quantity values per level [-], coarse level first.
+        Quantity values per level [-], coarse level (the base mesh) first.
     total_panels : list of int
         Solved panel count per level [-], coarse level first.
     r21 : float
         Refinement ratio of the two finest levels [-].
     r32 : float
-        Refinement ratio of the two coarsest levels [-].
+        Refinement ratio of the two coarsest levels of the triplet [-].
     observed_order : float or None
         Observed order of convergence [-], or None when not found.
     f_extrapolated : float or None
-        Richardson-extrapolated value [-] (information only).
+        Richardson-extrapolated value [-] (monotonic convergence only).
     abs_error : float or None
-        Absolute error bar of the finest level [-], or None without one.
+        Half-width of the error bar of the finest level [-], or None.
     relative_error : float or None
-        Absolute error divided by the reference value [-].
+        abs_error divided by the reference value [-] (the Richardson value
+        when there is one, else the finest value).
     in_asymptotic_range : bool
-        False when the order is outside [0.5, 4.0] or was not found.
+        True for a monotonic convergence with the order in [0.5, 4.0].
     state : str
         ``"monotonic"``, ``"roundoff"``, ``"oscillatory"``,
         ``"divergent"`` or ``"not_converged_order"``.
     note : str
         Human-readable note about this quantity.
+    base_value : float or None
+        Value on the base mesh (the mesh of the user) [-].
+    base_abs_error : float or None
+        Error estimate of the base-mesh value [-] (see the module notes).
+    base_relative_error : float or None
+        base_abs_error divided by the reference value [-].
     """
 
     quantity: str = "CL"
@@ -150,6 +151,9 @@ class QuantityConvergence:
     in_asymptotic_range: bool = False
     state: str = "divergent"
     note: str = ""
+    base_value: float | None = None
+    base_abs_error: float | None = None
+    base_relative_error: float | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """Return the convergence of this quantity as plain Python values."""
@@ -172,6 +176,9 @@ class QuantityConvergence:
             "in_asymptotic_range": bool(self.in_asymptotic_range),
             "state": str(self.state),
             "note": str(self.note),
+            "base_value": num(self.base_value),
+            "base_abs_error": num(self.base_abs_error),
+            "base_relative_error": num(self.base_relative_error),
         }
 
 
@@ -198,8 +205,8 @@ class ConvergenceReport:
     ratio : float
         Refinement ratio applied in both directions [-].
     cost_factor : float
-        Study cost relative to one base solve [-], as dense work
-        ``sum((Nk / N0)**2)``.
+        Study cost relative to one base solve [-], as dense LU work
+        ``sum((Nk / N0)**3)``.
     notes : list of str
         Human-readable notes, one per quantity plus the study header.
     results : list of SolverResult
@@ -235,13 +242,14 @@ class ConvergenceReport:
         lines = [
             f"Panel mesh convergence: {self.levels} levels, ratio {self.ratio:.3f}, "
             f"cost factor {self.cost_factor:.1f}",
-            f"{'quantity':<8} {'values (coarse to fine)':<42} {'order':<7} {'extrapolated':<13} {'rel err':<9} state",
+            f"{'quantity':<8} {'values (coarse to fine)':<42} {'order':<7} {'extrapolated':<13} "
+            f"{'base err':<9} state",
         ]
         for name, conv in self.quantities.items():
             vals = ", ".join(f"{v:.5f}" for v in conv.values)
             order = "n/a" if conv.observed_order is None else f"{conv.observed_order:.2f}"
             ext = "n/a" if conv.f_extrapolated is None else f"{conv.f_extrapolated:.5f}"
-            err = "n/a" if conv.relative_error is None else f"{conv.relative_error:.2%}"
+            err = "n/a" if conv.base_relative_error is None else f"{conv.base_relative_error:.2%}"
             lines.append(f"{name:<8} {vals:<42} {order:<7} {ext:<13} {err:<9} {conv.state}")
         return "\n".join(lines)
 
@@ -277,123 +285,99 @@ def level_counts(n_base: int, ratio: float, levels: int) -> list[int]:
 
 def order_and_extrapolation(
     values: Sequence[float],
-    r21: float,
-    r32: float,
+    levels: Sequence[int],
     quantity: str = "f",
+    base_value: float | None = None,
 ) -> QuantityConvergence:
-    """Compute the observed order and the Richardson estimate of 3 values.
+    """Compute the observed order, the Richardson estimate and the error bars of 3 values.
 
     This is a pure function of the three level values (coarse level
-    first). It calls :func:`ventorum.core.error_bars.observed_order` and
-    :func:`ventorum.core.error_bars.richardson_extrapolate`; it does not
-    reimplement them.
+    first). It calls :func:`ventorum.core.error_bars.coefficient_error_bar`
+    for the classification, the order, the Richardson value and the bar of
+    the finest level, and adds the error estimate of the base mesh (see the
+    module notes).
 
     Parameters
     ----------
     values : sequence of float
         Quantity values [-] of the coarse, medium and fine levels.
-    r21 : float
-        Refinement ratio of the medium to the fine level [-].
-    r32 : float
-        Refinement ratio of the coarse to the medium level [-].
+    levels : sequence of int
+        Linear panel counts [-] of the coarse, medium and fine levels
+        (strictly increasing); the refinement ratios are their quotients.
     quantity : str
         Quantity name for the report.
+    base_value : float or None, optional
+        Value on the base mesh [-]. None takes the coarse value of the
+        triplet.
 
     Returns
     -------
     QuantityConvergence
-        Observed order, Richardson value, absolute and relative error of
-        the fine level, and the asymptotic-range flag.
+        Observed order, Richardson value, the bar of the finest level, the
+        error estimate of the base mesh and the asymptotic-range flag.
     """
-    from ventorum.core.error_bars import observed_order, richardson_extrapolate
-
     vals = [float(v) for v in values]
-    if len(vals) != 3:
-        raise ValueError(f"order_and_extrapolation needs 3 level values, got {len(vals)}.")
-    f3, f2, f1 = vals[0], vals[1], vals[2]
-    r21 = float(r21)
-    r32 = float(r32)
-    if not (r21 > 1.0 and r32 > 1.0):
-        raise ValueError(f"Refinement ratios must exceed 1, got r21={r21} and r32={r32}.")
-
-    def report(
-        state: str,
-        order: float | None,
-        f_ext: float | None,
-        abs_err: float | None,
-        in_range: bool,
-        note: str,
-    ) -> QuantityConvergence:
-        rel = None
-        if abs_err is not None:
-            ref = abs(f_ext) if f_ext is not None else abs(f1)
-            rel = abs_err / max(ref, 1e-300)
-        return QuantityConvergence(
-            quantity=str(quantity),
-            values=vals,
-            r21=r21,
-            r32=r32,
-            observed_order=order,
-            f_extrapolated=f_ext,
-            abs_error=abs_err,
-            relative_error=rel,
-            in_asymptotic_range=bool(in_range),
-            state=state,
-            note=note,
+    counts = [int(n) for n in levels]
+    if len(vals) != 3 or len(counts) != 3:
+        raise ValueError(
+            f"order_and_extrapolation needs 3 level values and 3 levels, got {len(vals)} and {len(counts)}."
         )
+    if not (counts[2] > counts[1] > counts[0] >= 1):
+        raise ValueError(f"levels={counts} must be strictly increasing positive panel counts, coarse first.")
+    bar = coefficient_error_bar(str(quantity), vals[::-1], counts[::-1])
+    layer = bar.layers["numerical"]
+    f_fine = vals[2]
+    f_base = vals[0] if base_value is None else float(base_value)
+    half = layer.half_width
+    order = layer.observed_order
+    f_ext = layer.f_extrapolated
+    ref = abs(f_ext) if f_ext is not None else abs(f_fine)
+    rel = None if half is None else half / max(ref, 1e-300)
 
-    if not all(math.isfinite(v) for v in vals):
-        return report("divergent", None, None, None, False, f"{quantity}: a level value is not finite.")
+    base_err = None
+    if layer.state == "monotonic" and f_ext is not None and layer.safety_factor is not None:
+        base_err = float(layer.safety_factor) * abs(f_ext - f_base)
+    elif half is not None:
+        base_err = abs(f_fine - f_base) + float(half)
+    base_rel = None if base_err is None else base_err / max(ref, 1e-300)
 
-    eps21 = f2 - f1
-    eps32 = f3 - f2
-    scale = max(1.0, abs(f1), abs(f2), abs(f3))
-    spread = max(abs(eps21), abs(eps32))
-    if spread <= 1e-12 * scale:
-        return report(
-            "roundoff", None, f1, 3.0 * spread, False,
-            f"{quantity}: level changes are at round-off level.",
+    in_range = bool(
+        layer.state == "monotonic" and order is not None and ORDER_LOWER <= order <= ORDER_UPPER
+    )
+    if order is not None:
+        note = f"{quantity}: observed order {order:.3f}"
+        note += (
+            " is in the asymptotic range."
+            if in_range
+            else f" is outside [{ORDER_LOWER}, {ORDER_UPPER}] (not in the asymptotic range)."
         )
-
-    big_r = math.inf if eps32 == 0.0 else eps21 / eps32
-    if big_r < 0.0:
-        return report(
-            "oscillatory", None, None, None, False,
-            f"{quantity}: values oscillate with refinement, so there is no estimate.",
-        )
-    if big_r >= 1.0:
-        return report(
-            "divergent", None, None, None, False,
-            f"{quantity}: the change grows with refinement, so there is no estimate.",
-        )
-
-    order = observed_order(f1, f2, f3, r21, r32)
-    if order is None or not math.isfinite(order):
-        if eps21 == 0.0:
-            half = 3.0 * max(abs(eps21), abs(eps32))
-        else:
-            half = 3.0 * abs(eps21)
-        return report(
-            "not_converged_order", None, None, half, False,
-            f"{quantity}: the observed-order iteration did not converge; the bar uses a conservative rule.",
-        )
-
-    if ORDER_LOWER <= order <= ORDER_UPPER:
-        safety = SAFETY_IN_RANGE
-        p_used = order
-        in_range = True
     else:
-        safety = SAFETY_OUT_OF_RANGE
-        p_used = min(max(order, ORDER_LOWER), ORDER_UPPER)
-        in_range = False
-    f_ext = richardson_extrapolate(f1, f2, r21, p_used)
-    abs_err = safety * abs(f1 - f_ext)
-    note = f"{quantity}: observed order {order:.3f}"
-    if not in_range:
-        note += f" is outside [{ORDER_LOWER}, {ORDER_UPPER}] (not in the asymptotic range)."
+        note = f"{quantity}: convergence state {layer.state}; no observed order."
+    if base_err is not None:
+        note += (
+            f" Error estimate of the given mesh: {f_base:.6g} +/- {base_err:.3g}"
+            + (f" ({base_rel:.2%})." if base_rel is not None else ".")
+        )
     else:
-        note += " is in the asymptotic range."
-    return report("monotonic", order, f_ext, abs_err, in_range, note)
+        note += " No error estimate of the given mesh."
+    for extra in bar.notes:
+        note += f" {extra[0].upper()}{extra[1:]}."
+    return QuantityConvergence(
+        quantity=str(quantity),
+        values=vals,
+        r21=counts[2] / counts[1],
+        r32=counts[1] / counts[0],
+        observed_order=order,
+        f_extrapolated=f_ext,
+        abs_error=half,
+        relative_error=rel,
+        in_asymptotic_range=in_range,
+        state=str(layer.state),
+        note=note,
+        base_value=f_base,
+        base_abs_error=base_err,
+        base_relative_error=base_rel,
+    )
 
 
 def panel_mesh_convergence(
@@ -408,8 +392,10 @@ def panel_mesh_convergence(
 
     The study refines the spanwise and chordwise counts by *ratio* from
     the base mesh over *levels* levels and solves each level with the
-    panel method. The observed order and the Richardson value of each
-    quantity come from the three finest levels.
+    panel method. The observed order, the Richardson value and the bar of
+    the finest level come from the three finest levels; the error
+    estimate of the base mesh (level 0, the mesh of the user) follows the
+    module notes.
 
     Parameters
     ----------
@@ -423,7 +409,8 @@ def panel_mesh_convergence(
         is ``settings.n_panels`` [-] per semi-span; the chordwise count
         is ``settings.n_chord`` [-] per surface, or 20 when None (the
         default of the panel solver). The solver type is set to the
-        panel method on every level.
+        panel method on every level, and the levels do not run a study of
+        their own.
     levels : int
         Number of mesh levels: 3 or 4.
     ratio : float
@@ -435,8 +422,9 @@ def panel_mesh_convergence(
     Returns
     -------
     ConvergenceReport
-        Values per level, observed order, Richardson value and relative
-        error per quantity, with the asymptotic-range flag.
+        Values per level, observed order, Richardson value, the error bar
+        of the finest level and the error estimate of the base mesh per
+        quantity, with the asymptotic-range flag.
     """
     from ventorum import analyze
     from ventorum.solvers.panel3d import _DEFAULT_N_CHORD
@@ -466,6 +454,7 @@ def panel_mesh_convergence(
 
     base = settings.clone()
     base.solver_type = "panel3d"
+    base.panel_estimate_mesh_error = False
     n_base = max(int(settings.n_panels), 1)
 
     results: list[SolverResult] = []
@@ -480,24 +469,20 @@ def panel_mesh_convergence(
     if any(n <= 0 for n in totals):
         totals = [2 * ns * nc for ns, nc in zip(spans, chords)]
 
-    triplet = totals[-3:]
-    r21 = math.sqrt(triplet[2] / triplet[1])
-    r32 = math.sqrt(triplet[1] / triplet[0])
-
     conv_quantities: dict[str, QuantityConvergence] = {}
     for name in names:
         series = [_quantity_value(res, name) for res in results]
-        conv = order_and_extrapolation(series[-3:], r21, r32, quantity=name)
+        conv = order_and_extrapolation(series[-3:], spans[-3:], quantity=name, base_value=series[0])
         conv.values = [float(v) for v in series]
         conv.total_panels = [int(n) for n in totals]
         conv_quantities[name] = conv
 
     n0 = max(totals[0], 1)
-    cost = float(sum((n / n0) ** 2 for n in totals))
+    cost = float(sum((n / n0) ** 3 for n in totals))
     header = (
         f"Panel mesh convergence: {int(levels)} levels, ratio {float(ratio):.3f}, "
         f"span panels {spans}, chord panels {chords}, cost factor {cost:.1f} "
-        f"relative to one base solve."
+        f"relative to one base solve (dense LU work)."
     )
     notes = [header] + [conv.note for conv in conv_quantities.values()]
     return ConvergenceReport(
@@ -510,84 +495,4 @@ def panel_mesh_convergence(
         cost_factor=cost,
         notes=notes,
         results=results,
-    )
-
-
-def build_sphere_mesh(radius_m: float, n_lat: int, n_lon: int) -> PanelMesh:
-    """Build a closed latitude-longitude quadrilateral mesh of a sphere.
-
-    The mesh verifies the panel method against the analytic
-    incompressible flow past a sphere (Anderson 2011, section 4.5): Cp
-    max of 1 at the stagnation point, zero lift and zero drag. Panels
-    point outward and share single nodes at the poles, so the mesh is
-    watertight.
-
-    Parameters
-    ----------
-    radius_m : float
-        Sphere radius [m]. Must be positive and finite.
-    n_lat : int
-        Latitude bands from pole to pole [-]. Must be at least 2.
-    n_lon : int
-        Panels around each latitude ring [-]. Must be at least 3.
-
-    Returns
-    -------
-    PanelMesh
-        Closed sphere mesh with outward panels (no wake edges).
-    """
-    radius = float(radius_m)
-    n_lat = int(n_lat)
-    n_lon = int(n_lon)
-    if not math.isfinite(radius) or radius <= 0.0:
-        raise ValueError(f"radius_m must be positive and finite, got {radius_m}.")
-    if n_lat < 2:
-        raise ValueError(f"n_lat must be at least 2, got {n_lat}.")
-    if n_lon < 3:
-        raise ValueError(f"n_lon must be at least 3, got {n_lon}.")
-
-    nodes: list[list[float]] = [[0.0, 0.0, radius]]
-    index: dict[tuple[int, int], int] = {}
-    for i in range(1, n_lat):
-        theta = math.pi * i / n_lat
-        for j in range(n_lon):
-            phi = 2.0 * math.pi * j / n_lon
-            index[(i, j)] = len(nodes)
-            nodes.append([
-                radius * math.sin(theta) * math.cos(phi),
-                radius * math.sin(theta) * math.sin(phi),
-                radius * math.cos(theta),
-            ])
-    north = 0
-    south = len(nodes)
-    nodes.append([0.0, 0.0, -radius])
-
-    def ring(i: int, j: int) -> int:
-        if i == 0:
-            return north
-        if i == n_lat:
-            return south
-        return index[(i, j % n_lon)]
-
-    panels: list[list[int]] = []
-    for i in range(n_lat):
-        for j in range(n_lon):
-            a = ring(i, j)
-            b = ring(i, j + 1)
-            c = ring(i + 1, j + 1)
-            d = ring(i + 1, j)
-            if i == 0:
-                panels.append([b, c, d, d])
-            elif i == n_lat - 1:
-                panels.append([a, b, c, c])
-            else:
-                panels.append([d, c, b, a])
-    n_panels = len(panels)
-    return PanelMesh(
-        nodes=np.asarray(nodes, dtype=float),
-        panels=np.asarray(panels, dtype=int),
-        component=np.zeros(n_panels, dtype=int),
-        kind=np.array(["surface"] * n_panels),
-        wake_edges=np.zeros((0, 4), dtype=int),
-        half=False,
     )
