@@ -31,17 +31,14 @@ class _AnalyticSource:
     log10(Re) and of the flap deflection, so bilinear table interpolation
     reproduces it exactly. ``drop`` maps (Re, flap_deg) to a list of alpha
     values [deg] returned as NaN. ``raise_for`` maps (Re, flap_deg) to an
-    exception raised by :meth:`polar`. With ``with_hook`` the source also
-    offers a ``run_xfoil_batch`` hook with the same behaviour.
+    exception raised by :meth:`polar`.
     """
 
-    def __init__(self, drop=None, raise_for=None, no_cm=False, with_hook=False):
+    def __init__(self, drop=None, raise_for=None, no_cm=False):
         self.drop = dict(drop or {})
         self.raise_for = dict(raise_for or {})
         self.no_cm = no_cm
-        self.with_hook = with_hook
         self.calls: list[dict] = []
-        self.hook_workers: list = []
 
     @staticmethod
     def _coeffs(Re, flap_deg, alpha_deg):
@@ -95,25 +92,6 @@ class _AnalyticSource:
             {"Re": float(Re), "flap_deg": flap_deg, "flap": flap}
         )
         return self._make_polar(float(Re), flap_deg, alphas_deg)
-
-    def run_xfoil_batch(self, cases, workers=None):
-        """Batch hook with the run_xfoil_batch calling convention."""
-        self.hook_workers.append(workers)
-        out = []
-        for case in cases:
-            flap = case.get("flap")
-            flap_deg = 0.0 if flap is None else float(flap[2])
-            self.calls.append(
-                {"Re": float(case["Re"]), "flap_deg": flap_deg, "flap": flap}
-            )
-            key = (float(case["Re"]), flap_deg)
-            if key in self.raise_for:
-                out.append(self.raise_for[key])
-                continue
-            out.append(
-                self._make_polar(case["Re"], flap_deg, case["alphas_deg"])
-            )
-        return out
 
 
 def _std_table(source=None, **kwargs):
@@ -220,25 +198,50 @@ def test_npz_round_trip_is_exact(tmp_path):
     np.testing.assert_array_equal(second.Cl_data, first.Cl_data)
 
 
-def test_batch_hook_runs_when_source_offers_it():
-    hooked = _AnalyticSource(with_hook=True)
-    plain = _AnalyticSource()
-    assert hooked.with_hook
-    from_hook = _std_table(source=hooked, workers=3)
-    assert hooked.hook_workers == [3]
-    # Six (Re, flap) pairs go through the hook in one call batch.
-    assert len(hooked.calls) == 2 * 2
-    direct = _std_table(source=plain, workers=1)
-    np.testing.assert_array_equal(from_hook.Cl, direct.Cl)
-    np.testing.assert_array_equal(from_hook.Cd, direct.Cd)
+def test_calls_run_in_parallel_threads():
+    """The builder calls source.polar from several threads at once.
+
+    The batch hook path was dead (no source had the hook and its case
+    format did not match). The builder now has one path: a thread pool
+    that calls ``source.polar``. Two calls must meet at a barrier, which
+    is only possible when they run at the same time.
+    """
+    import threading
+
+    class _BarrierSource(_AnalyticSource):
+        def __init__(self):
+            super().__init__()
+            self.barrier = threading.Barrier(2, timeout=10.0)
+            self.threads: set[int] = set()
+
+        def polar(self, section, Re, alphas_deg, *, mach=0.0, flap=None, **options):
+            self.threads.add(threading.get_ident())
+            self.barrier.wait()
+            return super().polar(section, Re, alphas_deg, mach=mach, flap=flap, **options)
+
+    source = _BarrierSource()
+    table = _std_table(source=source, Re_values=[1e6], flap_deg=[0.0, 10.0], workers=2)
+    assert len(source.calls) == 2
+    assert len(source.threads) == 2
+    assert table.Cl.shape == (1, 2, 11)
 
 
-def test_hook_exception_for_one_pair_becomes_nan():
+def test_source_without_hook_still_runs_when_a_batch_attribute_exists():
+    """An attribute named like the old hook is ignored: polar() runs."""
+
+    class _OldHookSource(_AnalyticSource):
+        def run_xfoil_batch(self, cases, workers=None):
+            raise AssertionError("the builder must not call a batch hook")
+
+    table = _std_table(source=_OldHookSource(), workers=2)
+    direct = _std_table(source=_AnalyticSource(), workers=1)
+    np.testing.assert_array_equal(table.Cl, direct.Cl)
+
+
+def test_exception_for_one_pair_becomes_nan_in_threads():
     err = RuntimeError("XFOIL did not converge for this case")
-    hooked = _AnalyticSource(
-        with_hook=True, raise_for={(1e6, 10.0): err}
-    )
-    table = _std_table(source=hooked, workers=1)
+    source = _AnalyticSource(raise_for={(1e6, 10.0): err})
+    table = _std_table(source=source, workers=3)
     assert np.all(np.isnan(table.Cl[1, 1, :]))
     assert np.all(np.isfinite(table.Cl[0, 0, :]))
     cov = table.coverage()
@@ -246,6 +249,29 @@ def test_hook_exception_for_one_pair_becomes_nan():
     gone = table.at(1e6, 10.0)
     assert table.last_dropped == 11
     assert len(gone.alpha) == 0
+
+
+def test_default_workers_is_the_cpu_count_minus_one(monkeypatch):
+    import concurrent.futures
+
+    from ventorum.aero import polar_table as module
+
+    seen: list = []
+    real_pool = concurrent.futures.ThreadPoolExecutor
+
+    def recording_pool(max_workers=None, **kwargs):
+        seen.append(max_workers)
+        return real_pool(max_workers=max_workers, **kwargs)
+
+    monkeypatch.setattr(module.os, "cpu_count", lambda: 5)
+    monkeypatch.setattr(module.concurrent.futures, "ThreadPoolExecutor", recording_pool)
+    _std_table(source=_AnalyticSource())
+    assert seen == [4]
+    monkeypatch.setattr(module.os, "cpu_count", lambda: 1)
+    calls_before = len(seen)
+    _std_table(source=_AnalyticSource())
+    # One worker: the calls run one after the other, without a pool.
+    assert len(seen) == calls_before
 
 
 def test_workers_thread_path_matches_sequential():
@@ -330,6 +356,63 @@ def test_source_info_records_source_options_and_version():
     assert info["section"] == "naca 2412"
     assert info["options"] == {"x_hinge": 0.75, "y_hinge": 0.5}
     assert "version" in info
+
+
+def test_source_info_uses_the_public_describe_method():
+    """Regression: the options of the source were missing and the version came from a private attribute."""
+
+    class _DescribedSource(_AnalyticSource):
+        _version = "private value that must not be read"
+
+        def describe(self):
+            return {
+                "source": "DescribedSource",
+                "options": {"ncrit": 7.0, "xtr_top": 0.4, "xtr_bottom": 1.0,
+                            "n_panels": 200, "sweep": "from_zero"},
+                "version": "fake 1.0",
+            }
+
+    table = _std_table(source=_DescribedSource(), workers=1)
+    info = table.source_info
+    assert info["source"] == "DescribedSource"
+    assert info["version"] == "fake 1.0"
+    assert info["options"] == {
+        "ncrit": 7.0, "xtr_top": 0.4, "xtr_bottom": 1.0, "n_panels": 200,
+        "sweep": "from_zero", "x_hinge": 0.75, "y_hinge": 0.5,
+    }
+    plain = _std_table(source=_AnalyticSource(), workers=1).source_info
+    assert plain["version"] == "unknown"
+
+
+def test_source_info_of_the_xfoil_source_holds_its_options(monkeypatch):
+    from ventorum.aero import polar_source
+
+    monkeypatch.setattr(
+        polar_source, "xfoil_version", lambda executable=None: "XFOIL Version 6.99"
+    )
+
+    class _FakeXfoil(polar_source.XfoilPolarSource):
+        def polar(self, section, Re, alphas_deg, *, mach=0.0, flap=None, **options):
+            flap_deg = 0.0 if flap is None else float(flap[2])
+            return _AnalyticSource()._make_polar(float(Re), flap_deg, alphas_deg)
+
+    source = _FakeXfoil(cache=False, ncrit=7.0, xtr_top=0.4, n_panels=200)
+    info = _std_table(source=source, workers=1).source_info
+    assert info["source"] == "_FakeXfoil"  # the class name of the source
+    assert info["version"] == "XFOIL Version 6.99"
+    opts = info["options"]
+    assert opts["ncrit"] == 7.0 and opts["xtr_top"] == 0.4
+    assert opts["n_panels"] == 200 and opts["sweep"] == "from_zero"
+    assert opts["x_hinge"] == 0.75 and opts["y_hinge"] == 0.5
+
+
+def test_flap_hinge_height_is_a_thickness_fraction():
+    recorded = _AnalyticSource()
+    _std_table(source=recorded, flap_deg=[0.0, 10.0], x_hinge=0.7, y_hinge=0.25, workers=1)
+    flaps = {c["flap"] for c in recorded.calls}
+    assert flaps == {None, (0.7, 0.25, 10.0)}
+    with pytest.raises(ValueError, match="thickness"):
+        _std_table(source=_AnalyticSource(), x_hinge=0.75, y_hinge=1.5, workers=1)
 
 
 def test_from_npz_rejects_bad_input(tmp_path):
@@ -485,33 +568,6 @@ class _AnalyticGroundSource(_AnalyticSource):
         return self._make_polar(
             float(Re), flap_deg, alphas_deg, height=height
         )
-
-    def run_xfoil_batch(self, cases, workers=None):
-        """Batch hook forwarding height."""
-        self.hook_workers.append(workers)
-        out = []
-        for case in cases:
-            flap = case.get("flap")
-            flap_deg = 0.0 if flap is None else float(flap[2])
-            height = case.get("height")
-            self.calls.append(
-                {
-                    "Re": float(case["Re"]),
-                    "flap_deg": flap_deg,
-                    "flap": flap,
-                    "height": height,
-                }
-            )
-            key = (float(case["Re"]), flap_deg)
-            if key in self.raise_for:
-                out.append(self.raise_for[key])
-                continue
-            out.append(
-                self._make_polar(
-                    case["Re"], flap_deg, case["alphas_deg"], height=height
-                )
-            )
-        return out
 
 
 def test_ground_table_shapes_coverage_and_interpolation():

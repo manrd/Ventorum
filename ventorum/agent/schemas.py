@@ -94,59 +94,85 @@ AIRFOIL_PROPS: dict[str, dict[str, Any]] = {
                 minimum=-1, maximum=1),
 }
 
+# Limits of the 2D airfoil tools. One source for the schemas, the tools
+# and the agent guide.
+#: Largest panel count of one airfoil solve [-].
+MAX_AIRFOIL_PANELS = 1000
+#: Largest number of 2D solves (angles x flaps x heights) of one polar call.
+MAX_AIRFOIL_SOLVES = 61
+#: Largest number of viscous iterations per angle [-].
+MAX_AIRFOIL_ITER = 200
+#: Smallest and largest height above the ground in chords [-].
+MIN_AIRFOIL_H_C = 0.05
+MAX_AIRFOIL_H_C = 500.0
+#: Largest number of points of an input coordinate text [-].
+MAX_AIRFOIL_INPUT_POINTS = 2000
+#: Largest length of the section text [characters].
+MAX_AIRFOIL_TEXT_CHARS = 200_000
+#: Run-time limit of each XFOIL start of the polar tool [s]. Fixed by the server.
+AIRFOIL_XFOIL_TIMEOUT_S = 120.0
+
+_SECTION_PROP = {
+    "type": "string",
+    "maxLength": MAX_AIRFOIL_TEXT_CHARS,
+    "description": "NACA designation (for example 'NACA 2412') or coordinate text in Selig or "
+                   f"Lednicer format (at most {MAX_AIRFOIL_INPUT_POINTS} points).",
+}
+
+#: Keys of the plain-flap object of the airfoil tools.
+AIRFOIL_FLAP_PROPS: dict[str, dict[str, Any]] = {
+    "x_hinge": _num("Hinge position, fraction of the chord [-].", minimum=0.05, maximum=0.98),
+    "y_hinge": _num("Hinge height, fraction of the local thickness [-]: 0 lower surface, "
+                    "1 upper surface. Default 0.5.", minimum=0.0, maximum=1.0),
+    "deflection_deg": _num("Flap deflection [deg], positive trailing edge down.",
+                           minimum=-60.0, maximum=60.0),
+}
+
+_FLAP_PROP = {
+    "type": "object",
+    "description": "Optional plain flap: x_hinge [-], y_hinge [-] (fraction of the local thickness) "
+                   "and deflection_deg [deg].",
+    "properties": AIRFOIL_FLAP_PROPS,
+    "required": ["x_hinge", "deflection_deg"],
+    "additionalProperties": False,
+}
+
 AIRFOIL_GEOMETRY_PROPS: dict[str, dict[str, Any]] = {
-    "section": {"type": "string", "description": "NACA designation (for example 'NACA 2412') or coordinate text in Selig or Lednicer format."},
-    "n_panels": _int("Optional panel count for repaneling [-].", minimum=10, maximum=1000),
-    "repanel_count": _int("Optional panel count for repaneling [-] (alias of n_panels).", minimum=10, maximum=1000),
-    "flap": {
-        "type": "object",
-        "description": "Optional plain flap deflection: hinge station x_hinge [0.05, 0.98] chord, deflection_deg [-60, 60] deg (positive down), optional y_hinge [0, 1].",
-        "properties": {
-            "x_hinge": _num("Hinge chord position [-].", minimum=0.05, maximum=0.98),
-            "deflection_deg": _num("Flap deflection [deg], positive down.", minimum=-60.0, maximum=60.0),
-            "y_hinge": _num("Hinge height fraction [-]. Default 0.5.", minimum=0.0, maximum=1.0),
-        },
-        "required": ["x_hinge", "deflection_deg"],
-        "additionalProperties": False,
-    },
+    "section": _SECTION_PROP,
+    "n_panels": _int("Optional panel count for repaneling [-].", minimum=10, maximum=MAX_AIRFOIL_PANELS),
+    "flap": _FLAP_PROP,
 }
 
 AIRFOIL_POLAR_PROPS: dict[str, dict[str, Any]] = {
-    "section": {"type": "string", "description": "NACA designation (for example 'NACA 0012') or coordinate text in Selig or Lednicer format."},
+    "section": _SECTION_PROP,
     "Re": _num("Reynolds number [-].", minimum=1.0, maximum=1.0e9),
     "alphas_deg": {
         "type": "array",
         "items": {"type": "number", "minimum": -30.0, "maximum": 30.0},
-        "description": "List of angles of attack [deg].",
+        "minItems": 1,
+        "maxItems": MAX_AIRFOIL_SOLVES,
+        "description": "List of angles of attack [deg]. Give this list or the three range keys.",
     },
     "alpha_start_deg": _num("First angle of attack [deg].", minimum=-30.0, maximum=30.0),
     "alpha_end_deg": _num("Last angle of attack [deg].", minimum=-30.0, maximum=30.0),
     "alpha_step_deg": _num(f"Step [deg], at least {MIN_ALPHA_STEP_DEG}.", minimum=MIN_ALPHA_STEP_DEG, maximum=30.0),
-    "alpha_deg": _num("Single angle of attack [deg].", minimum=-30.0, maximum=30.0),
-    "flap": {
-        "type": "object",
-        "description": "Optional plain flap deflection.",
-        "properties": {
-            "x_hinge": _num("Hinge chord position [-].", minimum=0.05, maximum=0.98),
-            "deflection_deg": _num("Flap deflection [deg], positive down.", minimum=-60.0, maximum=60.0),
-            "y_hinge": _num("Hinge height fraction [-]. Default 0.5.", minimum=0.0, maximum=1.0),
-        },
-        "required": ["x_hinge", "deflection_deg"],
-        "additionalProperties": False,
-    },
-    "h_c": _num("Height above ground normalized by chord [-], or omit for free air.", minimum=0.01, maximum=500.0),
+    "flap": _FLAP_PROP,
+    "h_c": _num("Height of the quarter chord above the ground, in chords [-]. Omit for free air. "
+                "Only source 'ventorum2d'.", minimum=MIN_AIRFOIL_H_C, maximum=MAX_AIRFOIL_H_C),
     "source": {
         "type": "string",
         "enum": ["ventorum2d", "xfoil"],
         "default": "ventorum2d",
-        "description": "Polar solver: 'ventorum2d' (default) or 'xfoil'.",
+        "description": "Polar solver: 'ventorum2d' (default) or 'xfoil' (the XFOIL of the server).",
     },
-    "n_panels": _int("Panel count for repaneling [-]. Default 160.", minimum=10, maximum=1000),
-    "ncrit": _num("Critical amplification exponent [-]. Default 9.0.", minimum=1.0, maximum=20.0),
-    "options": {
-        "type": "object",
-        "description": "Extra solver keywords (tol, max_iter, timeout).",
-    },
+    "n_panels": _int("Panel count [-]. Default 160.", minimum=10, maximum=MAX_AIRFOIL_PANELS),
+    "ncrit": _num("Critical amplification exponent of free transition [-]. Default 9.", minimum=1.0, maximum=20.0),
+    "xtr_top": _num("Forced transition on the upper surface, fraction of the chord [-]. Default 1 (free).",
+                    minimum=0.0, maximum=1.0),
+    "xtr_bottom": _num("Forced transition on the lower surface, fraction of the chord [-]. Default 1 (free).",
+                       minimum=0.0, maximum=1.0),
+    "max_iter": _int("Viscous iterations per angle [-]. Default 50 (ventorum2d) or 100 (xfoil).",
+                     minimum=1, maximum=MAX_AIRFOIL_ITER),
 }
 
 
@@ -1376,7 +1402,10 @@ AGENT_TOOL_DEFINITIONS: list[dict[str, Any]] = [
     {
         "name": "ventorum_airfoil_polar",
         "description": "Lift, drag and pitching moment polar of an airfoil section (ventorum2d viscous "
-                       "panel solver or XFOIL), with transition positions and convergence status.",
+                       "panel solver, also in ground effect, or the XFOIL of the server), with transition "
+                       f"positions and convergence status. Budget: at most {MAX_AIRFOIL_SOLVES} angles, and "
+                       "angles x max_iter x n_panels^2 at most "
+                       f"{int(MAX_CALL_WORK)} work units per call.",
         "parameters": {
             "type": "object",
             "properties": AIRFOIL_POLAR_PROPS,
