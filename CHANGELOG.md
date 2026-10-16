@@ -8,6 +8,57 @@ a minor version can change a public interface.
 
 ## [Unreleased]
 
+### Added
+
+- Ventorum-3DP, a first version of the three-dimensional panel method (`ventorum.panel3d`,
+  solver name `"panel3d"`): low-order constant-strength source and doublet panels with the
+  internal Dirichlet condition (Morino and Kuo 1974; Maskew, NASA CR-4023; Katz and Plotkin
+  2001). Exact quadrilateral influence kernels with far-field point formulas in numpy, Numba
+  and NVIDIA Warp (equal to round-off in float64); closed thick-surface meshes from the
+  `LiftingSurface` definition and section shapes (new optional `WingSection.shape`), with
+  dihedral, blunt trailing edges, tip closures and deflected plain control surfaces; a
+  prescribed wake along the body axis in free air (one factorization serves a whole sweep by
+  unit-onset superposition) and along the free stream in ground effect; symmetry folding and
+  ground effect by images; the Morino Kutta condition and, as an option, the pressure Kutta
+  condition; a GPU solve path (Warp assembly, torch factorization); a mesh-convergence error
+  estimate. New `SolverSettings` fields `panel_kutta`, `panel_backend`, `panel_wake_length`,
+  `panel_chord_spacing`, `panel_estimate_mesh_error` (no effect on the other solvers).
+- Ventorum-2D, the own airfoil code: `ventorum.airfoil` (shape type, Selig and Lednicer
+  readers and writers, NACA 4-digit and 5-digit generators, spline repaneling, plain-flap
+  deflection), `ventorum.panel2d` (linear-vorticity panel method with source panels, ground
+  effect by images, and a viscous-inviscid solver with a global Newton coupling through the
+  mass-defect matrix, also batched with torch) and `ventorum.ibl2d` (two-equation integral
+  boundary layer with the closures of Drela and Giles 1987, the lag equation and the e^N
+  envelope transition model). Some constants are marked in the theory pages to be checked
+  against the paper.
+- Section polars: `SectionPolarSource` with an XFOIL source and a Ventorum-2D source (the only
+  one with ground effect), a polar cache, and polar tables over Reynolds number, flap
+  deflection and ground height (`ventorum.aero.polar_source`, `polar_source_v2d`,
+  `polar_cache`, `polar_table`).
+- First viscous coupling of the vortex lattice and the linear lifting line with 2D polars by
+  angle-of-attack correction (`ventorum.viscous.solve_viscous`), with post-stall branch flags
+  and a trust entry.
+- Parasite-drag build-up (`ventorum.aero.parasite`): flat-plate skin friction with transition
+  and roughness, form factors, components with an uncertainty field.
+- Agent tools `ventorum_airfoil_geometry` and `ventorum_airfoil_polar` with a work budget;
+  the server resolves XFOIL only from its own configuration.
+- Exact references: Karman-Trefftz airfoils, sphere and ellipsoid surface velocities.
+- 2D plots (`ventorum.visualization.airfoil2d`) and two examples.
+
+### Changed
+
+- `run_xfoil` runs XFOIL headless on every platform: graphics off first (the graphics flag is
+  checked), its own temporary folder, no console window on Windows. New options for
+  coordinates, transition, panel count, flap (hinge height as a fraction of the thickness) and
+  a two-direction sweep; the default sweep stays linear.
+- The air viscosity is one constant, `ventorum.core.constants.MU_SL`.
+
+### Known limits
+
+- Ventorum-2D: some drag and transition cases do not yet meet their limits (marked as expected
+  failures with the reason); plain flaps at small deflections leave a short step panel at the
+  hinge that the viscous solver cannot handle yet.
+
 ## [0.5.0] - 2026-10-14
 
 ### Added
