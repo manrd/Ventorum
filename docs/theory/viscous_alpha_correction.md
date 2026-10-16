@@ -15,8 +15,8 @@ The inviscid solvers give linear lift curves and no stall. The coupling gives ea
 1. J. B. Tseng and C. E. Lan, NASA TP-2828, 1988: alpha-reduction coupling of a vortex lattice with section data.
 2. C. P. van Dam, J. C. Vander Kam and P. C. Paris, "Design-Oriented High-Lift Methodology for General Aviation and Civil Transport Aircraft", *Journal of Aircraft*, 38(6), 2001, pp. 1076-1084.
 3. S. Gallay and E. Laurendeau, "Nonlinear Generalized Lifting-Line Coupling Algorithms for Pre/Poststall Flows", *AIAA Journal*, 53(7), 2015, pp. 1784-1792.
-4. R. Mukherjee and A. Gopalarathnam, "Poststall Prediction of Multiple-Lifting-Surface Configurations Using a Decambering Approach", *Journal of Aircraft*, 43(3), 2006, pp. 660-668.
-5. H. Glauert, "Theoretical Relationships for an Aerofoil with Hinged Flap", ARC R&M 1095, 1927 (thin-airfoil flap shift).
+4. R. Mukherjee and A. Gopalarathnam, "Poststall Prediction of Multiple-Lifting-Surface Configurations Using a Decambering Approach", *Journal of Aircraft*, 43(3), 2006, pp. 660-668 (decambering: the correction is the departure of the section data from the linear model).
+5. H. Glauert, "Theoretical Relationships for an Aerofoil with Hinged Flap", ARC R&M 1095, 1927 (thin-airfoil flap shift); H. Glauert, *The Elements of Aerofoil and Airscrew Theory*, Cambridge University Press, 1926 (thin-airfoil theory, flap effectiveness).
 6. J. Katz and A. Plotkin, *Low-Speed Aerodynamics*, 2nd ed., Cambridge University Press, 2001 (discrete vortex method, method of images).
 7. ISO 2533:1975, Standard Atmosphere (dynamic viscosity of air at sea level).
 
@@ -43,15 +43,46 @@ and the viscous polar is read at the viscous section angle
 
 $$\alpha_{v,j} = \alpha_{e,j} + \delta_j.$$
 
-**Flaps are counted once.** The lattice gives the inviscid flap effect in $C_{l,\text{inv}}$, and $\alpha_{0,j}$ (from the lattice itself) takes it out of the effective angle. The polar of a strip with a deflected control is the flapped polar (a table at the flap deflection, a source with the flap of the control, or a single polar with the Glauert shift). With polars that follow thin-airfoil theory (slope $2\pi$, Glauert flap shift), the lifting-line result equals the inviscid result. The inviscid vortex-lattice flap lift converges with the chordwise panel count as $1/n_	ext{chord}$ and is too low on a coarse chordwise mesh; the coupling takes the flap lift from the polar, so its result equals the mesh-converged inviscid value at every chordwise panel count. Against the inviscid result at the same chordwise panel count, the coupled result is higher by the chordwise discretization error of the lattice flap, which halves when the panel count doubles (tests in `tests/test_alpha_correction.py`).
+**Flaps are counted once.** The lattice gives the inviscid flap effect in $C_{l,\text{inv}}$, and $\alpha_{0,j}$ (from the lattice itself) takes it out of the effective angle. The polar of a strip with a deflected control is the flapped polar (a table at the flap deflection, a source with the flap of the control, or a single polar with the Glauert shift). With polars that follow thin-airfoil theory (slope $2\pi$, Glauert flap shift), the lifting-line result equals the inviscid result.
 
 **Ground effect.** When the polar of a strip holds the ground height (a table with a height axis, or a source with ground support), the 2D section of a vortex-lattice strip also has its image vortices in the ground, so the 2D ground effect is not counted twice. A free-air polar is read with the free-air section relation. The height of a strip is the height of its quarter-chord point above the ground divided by its chord. The lifting line has no chordwise extent: its section relation has no 2D ground effect, and the polar gives it.
+
+### Reference of a flapped vortex-lattice strip
+
+The inviscid flap lift of the vortex lattice converges with the chordwise panel count as $1/n_\text{chord}$: on a coarse chordwise mesh the lattice flap has a smaller zero-lift shift than thin-airfoil theory. A flapped polar carries the full flap effect. If the polar were read as it is, the coupling would replace the flap effect of the lattice by the full flap effect of the polar: with thin-airfoil polars the coupled result would equal the mesh-converged inviscid value and be higher than the inviscid lattice at the same panel count by the chordwise discretization error of the lattice flap, which halves when $n_\text{chord}$ doubles.
+
+**Owner decision (for now): the reference of the coupled vortex-lattice result is the inviscid vortex lattice at the same panel count.** The coupling therefore reads the polar relative to the thin-airfoil model of the same section. This follows the decambering idea of Mukherjee and Gopalarathnam (2006): the linear (thin-airfoil) part of the section lift comes from the potential-flow model, and only the departure of the section data from that linear model is a correction. The thin-airfoil model of strip $j$ is
+
+$$C_{l,\text{TA},j}(\alpha) = a_j \left(\alpha - \alpha_{0,\text{TA},j}\right), \qquad \alpha_{0,\text{TA},j} = \alpha_{0,\text{clean},j} - \tau(x_h)\,\phi_j\,\kappa_j,$$
+
+with:
+
+- $a_j$ the lift slope of the lattice section, and $\alpha_{0,\text{clean},j}$ the zero-lift angle of the clean lattice section (the strip normal before the flap turn, which holds the camber tilt). A uniform panel angle is an angle of attack, so $\alpha_{0,\text{clean},j}$ is exact at any panel count, also with images.
+- $\tau(x_h) = 1 - (\theta_h - \sin\theta_h)/\pi$, $\cos\theta_h = 1 - 2 x_h$, the flap effectiveness of thin-airfoil theory (Glauert 1926, 1927) at the hinge $x_h$ [-] of the control, and $\phi_j$ [rad] the flap deflection of the polar of the strip.
+- $\kappa_j$ the ground factor of the flap shift: 1 in free air and for a free-air polar. When the polar holds the ground height, $\kappa_j$ is the ratio of the flap shifts of a converged 2D discrete-vortex section of the strip with and without its images in the ground (256 lumped vortices, `GROUND_FLAP_REFERENCE_PANELS`, with a panel edge at the hinge). The ratio removes most of the discretization error of this reference section.
+
+The departure of the polar from its thin-airfoil value, $C_{l,\text{visc},j}(\alpha) - C_{l,\text{TA},j}(\alpha)$, is added to the lift of the lattice section $a_j(\alpha - \alpha_{0,j})$. At the viscous section angle this gives the target lift
+
+$$C_{l,\text{target},j} = C_{l,\text{visc},j}(\alpha_{v,j}) - a_j\left(\alpha_{0,j} - \alpha_{0,\text{TA},j}\right).$$
+
+The constant $a_j(\alpha_{0,j} - \alpha_{0,\text{TA},j})$ is the flap lift that the lattice section lacks against thin-airfoil theory. Properties:
+
+- A polar that equals thin-airfoil theory gives $\boldsymbol{\delta} = 0$ at any chordwise panel count, so the coupled result equals the inviscid lattice at the same panel count (`tests/test_alpha_correction.py` checks full-span and partial-span flaps at $n_\text{chord}$ = 4, 8 and 16 and $\alpha$ = 0 and 4 deg).
+- A polar with another flap effect, viscous losses or stall gives the correction of its departure from thin-airfoil theory. This correction does not depend on the chordwise panel count (a test with half of the Glauert flap shift gets $\delta_j = \tau\phi/2$ on every flapped strip at $n_\text{chord}$ = 4 and 16).
+- The coarse lattice keeps its flap deficit also at the maximum lift: the strip lift is lower than the polar lift at $\alpha_{v,j}$ by the constant above. The polar statistics of the trust score compare this strip lift with the maximum lift of the polar.
+- A strip without a deflected control has $\alpha_{0,\text{TA},j} = \alpha_{0,j}$ and the offset is exactly zero: the results of wings without flaps do not change. The lifting line has no chordwise panels, and its strip airfoil already has the Glauert shift, so $\alpha_{0,\text{TA},j} = \alpha_{0,j}$ there too.
+- The hinge and the deflection of the thin-airfoil model are those of the polar, not those of the lattice. A lattice that moves its hinge to a chordwise station, or a swept hinge that turns the section normals by another angle, therefore still gives zero correction with a thin-airfoil polar.
+- The mesh-converged comparison is still available: the tests print the coupled CL at $n_\text{chord} = 4$ against the Richardson extrapolation of the inviscid CL at $n_\text{chord}$ = 8 and 16, without an assertion.
+
+`details["alpha0_thin_airfoil"]` holds $\alpha_{0,\text{TA},j}$ [rad] per strip, next to `alpha0_section` ($\alpha_{0,j}$) and `lift_slope_section` ($a_j$).
 
 ## Residual and Newton iteration
 
 The residual of strip $j$ is
 
-$$r_j(\boldsymbol{\delta}) = C_{l,\text{inv},j}(\boldsymbol{\delta}) - C_{l,\text{visc},j}(\alpha_{v,j}(\boldsymbol{\delta}), Re_j).$$
+$$r_j(\boldsymbol{\delta}) = C_{l,\text{inv},j}(\boldsymbol{\delta}) - C_{l,\text{visc},j}(\alpha_{v,j}(\boldsymbol{\delta}), Re_j) + a_j\left(\alpha_{0,j} - \alpha_{0,\text{TA},j}\right).$$
+
+The last term is the constant flap offset of a vortex-lattice strip with a deflected control (zero elsewhere), so it does not change the Jacobian.
 
 With $\partial \alpha_{v,j} / \partial \delta_k = -D_{jk}/a_j + \delta_{jk}$ and the polar slope $m_j = \mathrm{d}C_{l,\text{visc},j}/\mathrm{d}\alpha$ at $\alpha_{v,j}$, $M = \operatorname{diag}(m_j)$, the Jacobian is
 

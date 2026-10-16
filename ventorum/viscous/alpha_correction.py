@@ -27,6 +27,27 @@ has a deflected control) is read at ``alpha_v,j = alpha_e,j + delta_j``.
 The flap is thus counted once: the lattice gives the inviscid flap effect
 in ``cl_inv``, and ``alpha0_j`` takes it out of the effective angle.
 
+Reference of a flapped lattice strip. The coarse lattice has a smaller
+flap effect than thin-airfoil theory (the error falls as 1 / n_chord),
+while a flapped polar carries the full flap effect. The coupling
+therefore uses the departure of the polar from its own thin-airfoil
+value, added to the lift of the lattice section (the decambering idea of
+Mukherjee and Gopalarathnam 2006: only the departure from the linear
+model is a correction). The thin-airfoil model of strip j has the slope
+``a_j`` and the zero-lift angle
+``alpha0_TA,j = alpha0_clean,j - tau(x_h) phi_j kappa_j``: the clean
+section of the lattice (its camber tilt), the Glauert flap shift of the
+polar flap (hinge ``x_h`` [-], deflection ``phi_j`` [rad]) and, when the
+polar holds the ground height, the ground factor ``kappa_j`` of the flap
+shift from a converged 2D discrete-vortex section with images (1 in free
+air). The target lift is
+``cl_target = cl_visc(alpha_v) - a_j (alpha0_j - alpha0_TA,j)``. A polar
+that equals thin-airfoil theory then gives zero correction at any
+chordwise panel count, and the coupled result equals the inviscid lattice
+at the same panel count (the reference that the owner chose). Strips
+without a deflected control and the lifting line (whose strip airfoil
+already has the Glauert shift) have ``alpha0_TA,j = alpha0_j``: no change.
+
 Ground effect. When the polar of a strip has the ground height (a table
 with a height axis, or a source with ground support), the 2D section of
 the vortex-lattice strip also has its images in the ground, so the 2D
@@ -37,7 +58,7 @@ Residual and Newton iteration::
 
     cl_inv(delta) = cl_inv(0) - D delta
     alpha_v(delta) = alpha0 + cl_inv(delta) / a + delta
-    r(delta) = cl_inv(delta) - cl_visc(alpha_v(delta))
+    r(delta) = cl_inv(delta) - cl_visc(alpha_v(delta)) + a (alpha0 - alpha0_TA)
     J = -(I - diag(m / a)) D - diag(m),   m = dcl_visc / dalpha at alpha_v
 
 with a backtracking line search, an optional under-relaxation factor and
@@ -58,6 +79,8 @@ References
   Journal of Aircraft 43(3), 2006, pp. 660-668.
 * H. Glauert, "Theoretical Relationships for an Aerofoil with Hinged
   Flap", ARC R&M 1095, 1927 (thin-airfoil flap shift).
+* H. Glauert, "The Elements of Aerofoil and Airscrew Theory", Cambridge
+  University Press, 1926 (thin-airfoil theory, flap effectiveness).
 * J. Katz and A. Plotkin, "Low-Speed Aerodynamics", 2nd ed., Cambridge
   University Press, 2001 (discrete vortex method, method of images).
 * ISO 2533:1975 (ISA sea-level dynamic viscosity of air).
@@ -97,7 +120,7 @@ from ventorum.core.trust import (
     polar_limits,
     polar_stats,
 )
-from ventorum.geometry.controls import deflected_airfoil
+from ventorum.geometry.controls import deflected_airfoil, flap_effectiveness
 from ventorum.geometry.lattice import (
     VortexLattice,
     _AirfoilBlender,
@@ -116,7 +139,7 @@ from ventorum.solvers.lattice_base import (
     main_surface_strip_count,
     quarter_chord_sweep_deg,
 )
-from ventorum.utils.parallel import solve_threads
+from ventorum.utils.parallel import blas_single_thread, solve_threads
 from ventorum.utils.validation import validate_aircraft
 
 __all__ = [
@@ -143,6 +166,10 @@ STALL_START_MARGIN_DEG = 5.0
 #: Hinge height of a control surface for a polar source, as a fraction of
 #: the local thickness [-] (ControlSurface has no hinge height).
 SOURCE_Y_HINGE = 0.5
+
+#: Chordwise panels of the converged 2D discrete-vortex section that gives
+#: the ground factor of the thin-airfoil flap shift [-].
+GROUND_FLAP_REFERENCE_PANELS = 256
 
 _NACA_NAME = re.compile(r"^\s*(?:naca)?\s*(\d{4,5})\s*$", re.IGNORECASE)
 
@@ -415,9 +442,18 @@ def _vlm_section_lines(
     ``a = 2 sum(Gamma_alpha) / c`` and the zero-lift angle is
     ``alpha0 = -sum(Gamma_theta) / sum(Gamma_alpha)``. With
     ``with_images`` the section has its image vortices in the ground plane.
+
+    Returns
+    -------
+    tuple of numpy.ndarray
+        Lift slope [1/rad], zero-lift angle [rad] and the zero-lift angle
+        of the clean strip [rad]. The clean strip has the strip normal
+        before the flap turn on all panels: a uniform panel angle, so this
+        angle is its zero-lift angle for any panel count, also with images.
     """
     a_out = np.empty(len(strips))
     a0_out = np.empty(len(strips))
+    clean_out = np.empty(len(strips))
     for i, s in enumerate(strips):
         pidx = np.flatnonzero(lattice.panel_strip == s)
         cdir = lattice.chord_dir[s]
@@ -443,7 +479,132 @@ def _vlm_section_lines(
         g_alpha, g_theta = g[:, 0].sum(), g[:, 1].sum()
         a_out[i] = 2.0 * g_alpha / float(lattice.chord[s])
         a0_out[i] = -g_theta / g_alpha
-    return a_out, a0_out
+        nb_clean = lattice.normal_bc_strip[s]
+        clean_out[i] = float(np.arctan2(-(nb_clean @ cdir), nb_clean @ nrm))
+    return a_out, a0_out, clean_out
+
+
+def _section_flap_shift(
+    lattice: VortexLattice,
+    s: int,
+    x_hinge: float,
+    ground: GroundPlane | None,
+    n_panels: int = GROUND_FLAP_REFERENCE_PANELS,
+) -> float:
+    """Return the zero-lift shift per unit flap angle of a converged 2D strip section.
+
+    The section is the mean chord line of strip *s* with *n_panels* lumped
+    vortices (vortex at the quarter point and control point at the
+    three-quarter point of each panel; thin-airfoil theory, Katz and
+    Plotkin 2001), a panel edge at the hinge and a unit panel angle behind
+    it. With *ground* the vortices have their images in the ground plane.
+    The panel angle has the sign of the angles ``theta_k`` of
+    :func:`_vlm_section_lines` (positive for a trailing-edge-up turn), so in
+    free air the shift tends to ``+tau(x_hinge)`` of Glauert as the panel
+    count grows. The coupling uses only the ratio of two shifts.
+
+    Parameters
+    ----------
+    lattice : VortexLattice
+        The lattice.
+    s : int
+        Strip index.
+    x_hinge : float
+        Hinge position as a fraction of the chord [-], in (0, 1).
+    ground : GroundPlane or None
+        Ground plane for the images, or None for free air.
+    n_panels : int
+        Chordwise panel count of the section [-].
+
+    Returns
+    -------
+    float
+        Change of the zero-lift angle per unit flap angle [rad/rad].
+    """
+    n1 = int(np.clip(round(n_panels * x_hinge), 1, n_panels - 1))
+    edges = np.concatenate([np.linspace(0.0, x_hinge, n1 + 1), np.linspace(x_hinge, 1.0, n_panels - n1 + 1)[1:]])
+    x0, dx = edges[:-1], np.diff(edges)
+    le = 0.5 * (lattice.le_left[s] + lattice.le_right[s])
+    te = 0.5 * (lattice.te_left[s] + lattice.te_right[s])
+    cdir = lattice.chord_dir[s]
+    nrm = lattice.normal[s]
+    q = le + (x0 + 0.25 * dx)[:, None] * (te - le)
+    p = le + (x0 + 0.75 * dx)[:, None] * (te - le)
+    xq, zq = _section_frame(q, le, cdir, nrm)
+    xp, zp = _section_frame(p, le, cdir, nrm)
+    rx = xp[:, None] - xq[None, :]
+    rz = zp[:, None] - zq[None, :]
+    M = -rx / (2.0 * np.pi * (rx * rx + rz * rz))
+    if ground is not None:
+        xi, zi = _section_frame(ground.reflect_points(q), le, cdir, nrm)
+        rxi = xp[:, None] - xi[None, :]
+        rzi = zp[:, None] - zi[None, :]
+        M = M + rxi / (2.0 * np.pi * (rxi * rxi + rzi * rzi))
+    theta = (x0 >= x_hinge - 1e-12).astype(float)
+    g = np.linalg.solve(M, np.column_stack([-np.ones(n_panels), theta]))
+    return float(-g[:, 1].sum() / g[:, 0].sum())
+
+
+def _thin_airfoil_zero_lift(
+    lattice: VortexLattice,
+    aircraft: Aircraft,
+    strips: np.ndarray,
+    alpha0: np.ndarray,
+    alpha0_clean: np.ndarray,
+    ground: GroundPlane | None,
+    with_images: np.ndarray,
+) -> np.ndarray:
+    """Return the zero-lift angle [rad] of the thin-airfoil model of each VLM strip.
+
+    A strip without a deflected control keeps the zero-lift angle of the
+    lattice section, so its lift offset is zero. A strip with a control has
+    ``alpha0_clean - tau(x_h) phi kappa``: the clean lattice section, the
+    Glauert flap shift of the polar flap (hinge ``x_h`` [-], deflection
+    ``phi`` [rad]) and the ground factor ``kappa`` of the flap shift. In
+    free air (or with a free-air polar) ``kappa`` is 1. With a polar that
+    holds the ground height, ``kappa`` is the ratio of the flap shifts of
+    the converged 2D section with and without images
+    (:func:`_section_flap_shift`).
+
+    Parameters
+    ----------
+    lattice : VortexLattice
+        The lattice.
+    aircraft : Aircraft
+        The geometry (controls of the strips).
+    strips : numpy.ndarray
+        Independent strip indices.
+    alpha0 : numpy.ndarray
+        Zero-lift angles of the lattice sections [rad].
+    alpha0_clean : numpy.ndarray
+        Zero-lift angles of the clean lattice sections [rad].
+    ground : GroundPlane or None
+        Ground plane of the case.
+    with_images : numpy.ndarray
+        True for the strips whose polar holds the ground height.
+
+    Returns
+    -------
+    numpy.ndarray
+        Zero-lift angles of the thin-airfoil models [rad].
+    """
+    out = np.asarray(alpha0, dtype=float).copy()
+    free_shift: dict[float, float] = {}
+    for i, s in enumerate(strips):
+        flap_deg, hinge = _strip_control(lattice, aircraft, s)
+        if flap_deg == 0.0 or hinge is None:
+            continue
+        kappa = 1.0
+        if ground is not None and with_images[i] and 0.0 < float(hinge) < 1.0:
+            key = round(float(hinge), 12)
+            # BLAS on one thread: a threaded solve of this size is much slower.
+            with blas_single_thread():
+                if key not in free_shift:
+                    free_shift[key] = _section_flap_shift(lattice, s, float(hinge), None)
+                kappa = _section_flap_shift(lattice, s, float(hinge), ground) / free_shift[key]
+        tau = flap_effectiveness(float(hinge))
+        out[i] = float(alpha0_clean[i]) - tau * np.radians(flap_deg) * kappa
+    return out
 
 
 def _rhs_derivative(
@@ -559,17 +720,25 @@ def _solve_condition(
 
     polars, uses_height, h_over_c = resolver.resolve(lattice, strips, condition, ground)
     if model == "vlm":
-        a_sec, alpha0 = _vlm_section_lines(lattice, strips, ground, uses_height)
+        a_sec, alpha0, alpha0_clean = _vlm_section_lines(lattice, strips, ground, uses_height)
+        alpha0_ta = _thin_airfoil_zero_lift(lattice, aircraft, strips, alpha0, alpha0_clean, ground, uses_height)
     else:
         a_sec = np.maximum(lattice.a0[strips], 1e-6)
         alpha0 = lattice.alpha_L0[strips].astype(float)
+        # The strip airfoil of the lifting line already has the Glauert flap shift.
+        alpha0_ta = alpha0.copy()
+    # Lift of the lattice section minus the lift of its thin-airfoil model.
+    # The polar departs from thin-airfoil theory by cl_visc - cl_TA, and
+    # this departure is added to the lift of the lattice section. The
+    # offset is zero on a strip without a deflected control.
+    cl_offset = a_sec * (alpha0 - alpha0_ta)
 
     def evaluate(delta: np.ndarray):
         cl_inv = cl0 - D @ delta
         alpha_v = alpha0 + cl_inv / a_sec + delta
         cl_v = np.array([float(section_cl(p, a)) for p, a in zip(polars, alpha_v)])
         m = np.array([float(section_cl_slope(p, a)) for p, a in zip(polars, alpha_v)])
-        return cl_inv - cl_v, cl_inv, alpha_v, m
+        return cl_inv - (cl_v - cl_offset), cl_inv, alpha_v, m
 
     def newton(start: np.ndarray):
         delta = start.copy()
@@ -744,6 +913,7 @@ def _solve_condition(
             "delta": full(sol["delta"]),
             "alpha_eff": full(sol["alpha_v"]),
             "alpha0_section": full(alpha0),
+            "alpha0_thin_airfoil": full(alpha0_ta),
             "lift_slope_section": full(a_sec),
             "strip_h_over_c": full(h_over_c),
             "post_stall": bool(np.any(sol["m"] <= 0.0)),
@@ -822,7 +992,10 @@ def solve_viscous(
         the induced drag. ``details`` holds ``delta`` [rad] and
         ``alpha_eff`` [rad] (the viscous section angle of each strip),
         ``alpha0_section`` [rad] and ``lift_slope_section`` [1/rad] (the
-        section relation of the lattice), ``strip_h_over_c`` [-],
+        section relation of the lattice), ``alpha0_thin_airfoil`` [rad]
+        (the zero-lift angle of the thin-airfoil model of each strip; it
+        differs from ``alpha0_section`` only on a vortex-lattice strip with
+        a deflected control), ``strip_h_over_c`` [-],
         ``post_stall_strips``, ``strip_flags``, ``non_unique``,
         ``branches`` (when a post-stall case has more than one converged
         solution), ``factorized`` (True when this condition needed a new
@@ -838,6 +1011,13 @@ def solve_viscous(
     of ground effect). With the default free-stream wake the matrix
     depends on the angle of attack, so a sweep factorizes once per
     condition. The method runs on the CPU.
+
+    On a vortex-lattice strip with a deflected control the polar is read
+    relative to its thin-airfoil model: the target lift is the polar lift
+    minus ``lift_slope_section * (alpha0_section - alpha0_thin_airfoil)``.
+    A polar that follows thin-airfoil theory (slope 2 pi, Glauert flap
+    shift) then gives the inviscid vortex-lattice result at the same
+    chordwise panel count, not the mesh-converged flap effect.
     """
     model_str = str(model).lower()
     if model_str not in ("vlm", "llt"):

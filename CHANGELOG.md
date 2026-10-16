@@ -41,7 +41,9 @@ a minor version can change a public interface.
   `polar_cache`, `polar_table`).
 - First viscous coupling of the vortex lattice and the linear lifting line with 2D polars by
   angle-of-attack correction (`ventorum.viscous.solve_viscous`), with post-stall branch flags
-  and a trust entry.
+  and a trust entry. On a vortex-lattice strip with a deflected control the polar is read
+  relative to its thin-airfoil model (Glauert flap shift), so that polars that follow
+  thin-airfoil theory give the inviscid vortex lattice at the same panel count.
 - Parasite-drag build-up (`ventorum.aero.parasite`): flat-plate skin friction with transition
   and roughness, form factors, components with an uncertainty field.
 - Agent tools `ventorum_airfoil_geometry` and `ventorum_airfoil_polar` with a work budget;

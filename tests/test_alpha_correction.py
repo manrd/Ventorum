@@ -341,78 +341,137 @@ def test_flap_counted_once_llt(eta, kind):
     assert abs(viscous.totals.CL - inviscid) / inviscid < 1e-6
 
 
+#: Spanwise panels per semi-span of the flap tests [-]: the property does not
+#: depend on the spanwise count, and a small count keeps the tests fast.
+FLAP_TEST_N_PANELS = 24
+
+
 @pytest.mark.parametrize("eta", [(0.0, 1.0), (0.2, 0.6)])
 @pytest.mark.parametrize("kind", ["airfoil", "table", "source"])
-def test_flap_counted_once_vlm(eta, kind):
-    """Regression: the VLM coupling counted the flap twice (CL 1.099 against 0.614).
+def test_flap_vlm_equals_inviscid_at_the_same_panel_count(eta, kind):
+    """Regression: the coupled flapped VLM was higher than the inviscid VLM at the same mesh.
 
-    The lattice already turns the panel normals behind the hinge. The
-    coupling now takes the zero-lift angle of each strip from the lattice
-    (2D discrete-vortex section of its chordwise panels), so a polar that
-    agrees with thin-airfoil theory gives the inviscid result. The
-    inviscid VLM flap lift converges with the chordwise panel count as
-    1 / n_chord (about 10 % low at 4 panels); the coupling reads the
-    flap lift from the polar, so it matches the converged inviscid value
-    (Richardson extrapolation of n_chord 8 and 16) within 1 % at every
-    n_chord.
+    Owner decision: the reference of the flapped VLM coupling is the
+    inviscid VLM at the same panel count. With polars that follow
+    thin-airfoil theory (2 pi slope, Glauert flap shift) the coupling read
+    the full flap effect from the polar, while the coarse lattice flap has
+    less: the coupled CL was higher by about 11 % (alpha 0 deg) and 4 to
+    6 % (alpha 4 deg) at n_chord 4, halving when n_chord doubles. The
+    polar is now read relative to its own thin-airfoil model, so the
+    correction is zero at any n_chord and the coupled CL equals the
+    inviscid CL (requirement 1 %, measured below 1e-6; the inviscid solve
+    can run in float32 on a GPU). The comparison with the mesh-converged
+    inviscid value (Richardson extrapolation of n_chord 8 and 16) is
+    printed, not asserted.
     """
     from ventorum.solvers.factory import make_solver
 
     wing = make_flapped_wing(eta, shape="0012")
-    cond = FlightCondition(V_inf=40.0, alpha=np.radians(2.0))
+    conds = [FlightCondition(V_inf=40.0, alpha=np.radians(a)) for a in (0.0, 4.0)]
     polars = {"airfoil": _thin_polar(), "table": glauert_table(), "source": GlauertSource()}[kind]
     vlm = make_solver("vlm")
-    cl8 = vlm.solve(wing, cond, SolverSettings(n_chord=8)).totals.CL
-    cl16 = vlm.solve(wing, cond, SolverSettings(n_chord=16)).totals.CL
-    converged_inviscid = 2.0 * cl16 - cl8
-    visc4 = solve_viscous(wing, cond, SolverSettings(), polars, model="vlm")
-    visc16 = solve_viscous(wing, cond, SolverSettings(n_chord=16), polars, model="vlm")
-    assert visc4.converged and visc16.converged
-    assert abs(visc4.totals.CL - converged_inviscid) / converged_inviscid < 0.01
-    assert abs(visc16.totals.CL - converged_inviscid) / converged_inviscid < 0.01
-    # The coupled result does not depend on the chordwise panel count.
-    assert abs(visc4.totals.CL - visc16.totals.CL) / visc16.totals.CL < 0.005
-    # The double count gave +79 %.
-    inviscid4 = vlm.solve(wing, cond, SolverSettings()).totals.CL
-    assert visc4.totals.CL < 1.15 * inviscid4
-
-
-#: Measured relative CL difference (viscous with thin-airfoil polars minus
-#: inviscid VLM, both at the same n_chord) of the flapped AR 8 wing at
-#: alpha 2 deg: +0.081 (full span) and +0.061 (partial span) at n_chord
-#: 4. The bound has a small margin.
-SAME_MESH_DEVIATION_BOUND_NCHORD4 = 0.09
-
-
-@pytest.mark.parametrize("eta", [(0.0, 1.0), (0.2, 0.6)])
-def test_flap_vlm_same_mesh_deviation_is_the_lattice_flap_error(eta):
-    """What holds against the inviscid VLM at the same chordwise mesh.
-
-    With thin-airfoil polars (2 pi slope, Glauert flap shift) the coupled
-    VLM result is higher than the inviscid VLM result at the same n_chord:
-    the inviscid lattice flap lift is too low on a coarse chordwise mesh,
-    and the coupling takes the flap lift from the polar. The difference is
-    the chordwise discretization error of the lattice flap: it is below
-    9 % at n_chord 4 and halves when n_chord doubles (first-order
-    convergence). The comparison with the mesh-converged inviscid value is
-    in test_flap_counted_once_vlm (within 1 %). The owner decides which
-    reference the acceptance uses.
-    """
-    from ventorum.solvers.factory import make_solver
-
-    wing = make_flapped_wing(eta, shape="0012")
-    cond = FlightCondition(V_inf=40.0, alpha=np.radians(2.0))
-    vlm = make_solver("vlm")
-    deviation = {}
+    cl_inv = {}
+    cl_visc = {}
     for n_chord in (4, 8, 16):
-        settings = SolverSettings(n_chord=n_chord)
-        inviscid = vlm.solve(wing, cond, settings).totals.CL
-        viscous = solve_viscous(wing, cond, settings, _thin_polar(), model="vlm")
-        assert viscous.converged
-        deviation[n_chord] = (viscous.totals.CL - inviscid) / inviscid
-    assert 0.0 < deviation[4] < SAME_MESH_DEVIATION_BOUND_NCHORD4
-    assert 0.4 < deviation[8] / deviation[4] < 0.6
-    assert 0.4 < deviation[16] / deviation[8] < 0.6
+        settings = SolverSettings(n_chord=n_chord, n_panels=FLAP_TEST_N_PANELS)
+        visc = solve_viscous(wing, conds, settings, polars, model="vlm")
+        for cond, res in zip(conds, visc):
+            assert res.converged
+            inv = vlm.solve(wing, cond, settings).totals.CL
+            key = (n_chord, round(float(np.degrees(cond.alpha))))
+            cl_inv[key] = inv
+            cl_visc[key] = res.totals.CL
+            assert abs(res.totals.CL - inv) / abs(inv) < 0.01
+            assert abs(res.totals.CL - inv) / abs(inv) < 1e-4
+            # A thin-airfoil polar needs no correction at any panel count.
+            assert np.max(np.abs(res.details["delta"])) < 1e-6
+    for a in (0, 4):
+        converged = 2.0 * cl_inv[(16, a)] - cl_inv[(8, a)]
+        print(f"eta {eta}, {kind}, alpha {a} deg: coupled CL at n_chord 4 / mesh-converged inviscid CL - 1 = "
+              f"{cl_visc[(4, a)] / converged - 1.0:+.4f}")
+
+
+class ScaledFlapSource(GlauertSource):
+    """Thin-airfoil polars with a flap shift of ``factor`` times the Glauert value."""
+
+    def __init__(self, factor):
+        super().__init__()
+        self.factor = factor
+
+    def polar(self, section, Re, alphas_deg, *, mach=0.0, flap=None, **options):
+        if flap is not None:
+            flap = (flap[0], flap[1], self.factor * float(flap[2]))
+        return super().polar(section, Re, alphas_deg, mach=mach, flap=flap, **options)
+
+
+def test_flap_correction_is_the_departure_of_the_polar_from_thin_airfoil_theory():
+    """The correction of a flapped strip does not depend on the chordwise panel count.
+
+    A polar with half of the Glauert flap shift departs from thin-airfoil
+    theory by -2 pi tau phi / 2 on the flapped strips. The coupling turns
+    this departure into the correction delta = tau phi / 2 on every
+    flapped strip and zero elsewhere, at n_chord 4 and 16 alike. Before,
+    delta also held the chordwise discretization error of the lattice flap.
+    """
+    tau = flap_effectiveness(HINGE)
+    wing = make_flapped_wing((0.2, 0.6), shape="0012")
+    cond = FlightCondition(V_inf=40.0, alpha=np.radians(2.0))
+    for n_chord in (4, 16):
+        res = solve_viscous(wing, cond, SolverSettings(n_chord=n_chord, n_panels=FLAP_TEST_N_PANELS),
+                            ScaledFlapSource(0.5), model="vlm")
+        assert res.converged
+        lattice = res.details["lattice"]
+        eta = np.abs(lattice.eta)
+        flapped = (eta >= 0.2 - 1e-9) & (eta <= 0.6 + 1e-9)
+        np.testing.assert_allclose(res.details["delta"][flapped], 0.5 * tau * np.radians(FLAP_DEG), atol=1e-7)
+        np.testing.assert_allclose(res.details["delta"][~flapped], 0.0, atol=1e-7)
+        # The thin-airfoil model of a flapped strip has the Glauert shift.
+        np.testing.assert_allclose(res.details["alpha0_thin_airfoil"][flapped], -tau * np.radians(FLAP_DEG),
+                                   rtol=1e-12)
+        assert np.array_equal(res.details["alpha0_thin_airfoil"][~flapped], res.details["alpha0_section"][~flapped])
+
+
+def test_flap_reference_section_and_ground_factor():
+    """The converged 2D section gives the Glauert flap shift; its ground factor tends to 1 far up.
+
+    With a polar that holds the ground height, the thin-airfoil model of a
+    flapped strip uses the ground factor of the flap shift (ratio of the
+    converged 2D sections with and without images). A free-air polar in
+    ground effect keeps the factor 1.
+    """
+    from ventorum.aero.system import GroundPlane
+    from ventorum.utils.parallel import blas_single_thread
+    from ventorum.viscous.alpha_correction import _section_flap_shift
+
+    def shift(*args, **kwargs):
+        # BLAS on one thread, as in the coupling: a threaded solve of this size is slow.
+        with blas_single_thread():
+            return _section_flap_shift(*args, **kwargs)
+
+    tau = flap_effectiveness(HINGE)
+    wing = make_flapped_wing((0.0, 1.0), shape="0012")
+    cond = FlightCondition(V_inf=40.0, alpha=np.radians(2.0))
+    res = solve_viscous(wing, cond, SolverSettings(n_panels=FLAP_TEST_N_PANELS), _thin_polar(), model="vlm")
+    lattice = res.details["lattice"]
+    # Unit panel angle in the sign of the lattice section (trailing edge up).
+    free = shift(lattice, 0, HINGE, None)
+    assert free == pytest.approx(tau, rel=3e-3)
+    assert shift(lattice, 0, HINGE, None, n_panels=1024) == pytest.approx(tau, rel=1e-3)
+    far = GroundPlane(normal=np.array([0.0, 0.0, 1.0]), offset=-20.0)
+    assert shift(lattice, 0, HINGE, far) / free == pytest.approx(1.0, abs=1e-3)
+
+    phi = np.radians(FLAP_DEG)
+    cond_ground = FlightCondition(V_inf=40.0, alpha=np.radians(2.0), h=0.5)
+    settings = SolverSettings(n_panels=FLAP_TEST_N_PANELS, n_chord=4)
+    in_ground = solve_viscous(wing, cond_ground, settings, GlauertSource(supports_ground=True), model="vlm")
+    free_polar = solve_viscous(wing, cond_ground, settings, GlauertSource(supports_ground=False), model="vlm")
+    assert in_ground.converged and free_polar.converged
+    np.testing.assert_allclose(free_polar.details["alpha0_thin_airfoil"], -tau * phi, rtol=1e-12)
+    kappa = in_ground.details["alpha0_thin_airfoil"] / (-tau * phi)
+    gl = in_ground.details["lattice"]
+    expected = np.array([shift(gl, s, HINGE, in_ground.details["ground"]) / free for s in range(gl.n_strips)])
+    np.testing.assert_allclose(kappa, expected, rtol=1e-9)
+    assert np.all(np.abs(kappa - 1.0) > 1e-3)
 
 
 def test_vlm_section_relation_of_a_clean_strip_is_thin_airfoil_theory():
@@ -421,6 +480,8 @@ def test_vlm_section_relation_of_a_clean_strip_is_thin_airfoil_theory():
                         _thin_polar(), model="vlm")
     np.testing.assert_allclose(res.details["lift_slope_section"], 2.0 * np.pi, rtol=1e-12)
     np.testing.assert_allclose(res.details["alpha0_section"], 0.0, atol=1e-12)
+    # Without a deflected control the thin-airfoil model is the lattice section: no offset.
+    assert np.array_equal(res.details["alpha0_thin_airfoil"], res.details["alpha0_section"])
 
 
 def test_table_hinge_must_match_the_control():
