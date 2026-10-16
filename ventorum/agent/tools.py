@@ -20,6 +20,7 @@ from collections.abc import Callable
 import numpy as np
 
 import ventorum as vt
+from ventorum.aero.xfoil_runner import resolve_xfoil_executable, xfoil_version
 from ventorum.agent.response import (
     computation_device_precision,
     condition_payload,
@@ -2386,3 +2387,446 @@ def tune_machine(quick: bool = True, save: bool = True) -> dict[str, Any]:
 
         out["profile_path"] = str(profile_path())
     return out
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Airfoil geometry and polar tools
+# ═══════════════════════════════════════════════════════════════════════════════
+
+MAX_AIRFOIL_PANELS = 1000
+MAX_AIRFOIL_SOLVES = 61
+
+
+def _parse_section(section: Any, name: str | None = None) -> Any:
+    """Parse an airfoil section from a NACA designation string, coordinate text, or array."""
+    from ventorum.airfoil.geometry import AirfoilShape
+    from ventorum.airfoil.io import parse_airfoil
+
+    if isinstance(section, AirfoilShape):
+        return section
+    if isinstance(section, str):
+        text = section.strip()
+        if not text:
+            raise InputError("Airfoil section string is empty.")
+        if "\n" in text:
+            try:
+                return parse_airfoil(text, name=name)
+            except Exception:
+                pass
+        try:
+            return AirfoilShape.naca(text, name=name)
+        except Exception:
+            pass
+        try:
+            return parse_airfoil(text, name=name)
+        except Exception as exc:
+            raise InputError(f"Could not parse airfoil section {section!r}: {exc}.") from exc
+    if isinstance(section, (list, tuple, np.ndarray)):
+        arr = np.asarray(section, dtype=float)
+        if arr.ndim != 2 or arr.shape[1] != 2:
+            raise InputError(f"Airfoil coordinates must have shape (N, 2); got {arr.shape}.")
+        return AirfoilShape(name=name or "airfoil", coords=arr)
+    raise InputError(
+        f"section must be a NACA designation string, coordinate text, or (N, 2) array; got {type(section).__name__}."
+    )
+
+
+def _parse_flap_spec(flap: Any) -> tuple[float, float, float] | None:
+    """Parse a plain flap specification as (x_hinge, y_hinge, deflection_deg)."""
+    if flap is None:
+        return None
+    if isinstance(flap, dict):
+        xh = flap.get("x_hinge", flap.get("hinge_x_c", flap.get("x_hinge_c")))
+        delta = flap.get("deflection_deg", flap.get("deflection"))
+        yh = flap.get("y_hinge", 0.5)
+        if xh is None or delta is None:
+            raise InputError("flap dict must contain 'x_hinge' and 'deflection_deg'.")
+        try:
+            xh_val = float(xh)
+            delta_val = float(delta)
+            yh_val = float(yh)
+        except (TypeError, ValueError) as exc:
+            raise InputError(f"flap numbers must be valid floats: {exc}.") from exc
+        if not (0.05 < xh_val < 0.98):
+            raise InputError(f"x_hinge must lie in (0.05, 0.98), got {xh_val}.")
+        if abs(delta_val) > 60.0:
+            raise InputError(f"deflection_deg magnitude must be <= 60 deg, got {delta_val}.")
+        if not (0.0 <= yh_val <= 1.0):
+            raise InputError(f"y_hinge must lie in [0, 1], got {yh_val}.")
+        return (xh_val, yh_val, delta_val)
+    if isinstance(flap, (list, tuple)):
+        if len(flap) == 2:
+            xh_val, delta_val = float(flap[0]), float(flap[1])
+            yh_val = 0.5
+        elif len(flap) == 3:
+            xh_val, yh_val, delta_val = float(flap[0]), float(flap[1]), float(flap[2])
+        else:
+            raise InputError(f"flap list must have length 2 or 3, got {len(flap)}.")
+        if not (0.05 < xh_val < 0.98):
+            raise InputError(f"x_hinge must lie in (0.05, 0.98), got {xh_val}.")
+        if abs(delta_val) > 60.0:
+            raise InputError(f"deflection_deg magnitude must be <= 60 deg, got {delta_val}.")
+        if not (0.0 <= yh_val <= 1.0):
+            raise InputError(f"y_hinge must lie in [0, 1], got {yh_val}.")
+        return (xh_val, yh_val, delta_val)
+    raise InputError(f"flap must be a dict or sequence of numbers; got {type(flap).__name__}.")
+
+
+@_tool
+def airfoil_geometry(
+    section: Any = None,
+    n_panels: int | None = None,
+    repanel_count: int | None = None,
+    flap: dict[str, Any] | list[Any] | None = None,
+) -> dict[str, Any]:
+    """Report normalized geometry, thickness, camber, trailing-edge gap and defects of an airfoil section.
+
+    Parameters
+    ----------
+    section : str or numpy.ndarray
+        NACA designation (for example 'NACA 2412'), coordinate text in Selig or
+        Lednicer format, or coordinate array of shape (N, 2).
+    n_panels : int, optional
+        Panel count [-] for repaneling. Default None.
+    repanel_count : int, optional
+        Alias of n_panels [-]. Default None.
+    flap : dict or list, optional
+        Plain flap deflection: dict with x_hinge [-], deflection_deg [deg],
+        and optional y_hinge [-], or sequence (x_hinge, [y_hinge], deflection_deg).
+
+    Returns
+    -------
+    dict
+        JSON-safe dictionary with normalized coordinates, thickness, camber,
+        trailing-edge gap and check problems.
+    """
+    if section is None:
+        raise InputError("missing required argument 'section'.")
+    pan = repanel_count if n_panels is None else n_panels
+    if pan is not None:
+        pan_val = integer(pan, "n_panels", minimum=10)
+        if pan_val > MAX_AIRFOIL_PANELS:
+            raise InputError(f"Panel count {pan_val} is above the limit of {MAX_AIRFOIL_PANELS} panels.")
+    else:
+        pan_val = None
+
+    flap_tup = _parse_flap_spec(flap)
+    shape = _parse_section(section)
+
+    norm_base = shape.normalized()
+    if pan_val is not None:
+        norm_base = norm_base.repanel(n_panels=pan_val)
+
+    if flap_tup is not None:
+        out_shape = norm_base.with_flap(
+            x_hinge=flap_tup[0],
+            deflection=flap_tup[2],
+            y_hinge=flap_tup[1],
+        )
+    else:
+        out_shape = norm_base
+
+    t_max, x_t_max = out_shape.max_thickness()
+    c_max, x_c_max = out_shape.max_camber()
+
+    coords_list = [[rnd(x, 7), rnd(y, 7)] for x, y in out_shape.coords]
+
+    return {
+        "status": "success",
+        "name": str(out_shape.name),
+        "coordinates": coords_list,
+        "normalized_coordinates": coords_list,
+        "max_thickness": rnd(t_max, 6),
+        "max_thickness_x": rnd(x_t_max, 6),
+        "max_camber": rnd(c_max, 6),
+        "max_camber_x": rnd(x_c_max, 6),
+        "thickness": {
+            "max": rnd(t_max, 6),
+            "x": rnd(x_t_max, 6),
+        },
+        "camber": {
+            "max": rnd(c_max, 6),
+            "x": rnd(x_c_max, 6),
+        },
+        "trailing_edge_gap": rnd(out_shape.te_gap, 7),
+        "te_gap": rnd(out_shape.te_gap, 7),
+        "problems": out_shape.problems(),
+        "n_points": int(out_shape.n_points),
+    }
+
+
+@_tool
+def airfoil_polar(
+    section: Any = None,
+    Re: float | None = None,
+    re: float | None = None,
+    alphas_deg: list[float] | None = None,
+    alpha_start_deg: float | None = None,
+    alpha_end_deg: float | None = None,
+    alpha_step_deg: float | None = None,
+    alpha_deg: float | None = None,
+    flap: dict[str, Any] | list[Any] | None = None,
+    h_c: float | None = None,
+    height: float | None = None,
+    h_over_c: float | None = None,
+    source: str = "ventorum2d",
+    n_panels: int = 160,
+    ncrit: float = 9.0,
+    xtr: tuple[float, float] = (1.0, 1.0),
+    options: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Lift, drag and pitching moment polar of an airfoil section.
+
+    Parameters
+    ----------
+    section : str or numpy.ndarray
+        NACA designation, coordinate text or coordinate array.
+    Re : float
+        Reynolds number [-].
+    re : float, optional
+        Alias of Re [-].
+    alphas_deg : list of float, optional
+        Explicit list of angles of attack [deg].
+    alpha_start_deg, alpha_end_deg, alpha_step_deg : float, optional
+        Angle range definition [deg].
+    alpha_deg : float, optional
+        Single angle of attack [deg].
+    flap : dict or list, optional
+        Plain flap deflection specification.
+    h_c : float, optional
+        Section height normalized by chord [-], or None for free air.
+    height, h_over_c : float, optional
+        Aliases of h_c [-].
+    source : {"ventorum2d", "xfoil"}
+        Polar solver. Default is "ventorum2d".
+    n_panels : int
+        Panel count for repaneling [-]. Default is 160.
+    ncrit : float
+        Critical amplification exponent [-]. Default is 9.0.
+    xtr : tuple of (float, float)
+        Forced transition locations (upper, lower) as fraction of chord [-].
+        Default is (1.0, 1.0).
+    options : dict, optional
+        Extra solver keywords (tol, max_iter, timeout).
+
+    Returns
+    -------
+    dict
+        JSON-safe payload with alpha, Cl, Cd, Cm, transition positions,
+        convergence mask, source options, and warnings.
+    """
+    from ventorum.aero.polar_source import XfoilPolarSource
+    from ventorum.panel2d.viscous import solve_viscous
+
+    if section is None:
+        raise InputError("missing required argument 'section'.")
+    re_in = re if Re is None else Re
+    if re_in is None:
+        raise InputError("missing required argument 'Re'.")
+    re_val = number(re_in, "Re", minimum=1.0, maximum=1.0e9)
+
+    # Resolve alphas
+    if alphas_deg is not None:
+        alphas = [float(a) for a in np.atleast_1d(np.asarray(alphas_deg, dtype=float))]
+    elif alpha_start_deg is not None and alpha_end_deg is not None and alpha_step_deg is not None:
+        a0 = number(alpha_start_deg, "alpha_start_deg", minimum=-30.0, maximum=30.0)
+        a1 = number(alpha_end_deg, "alpha_end_deg", minimum=-30.0, maximum=30.0)
+        da = number(alpha_step_deg, "alpha_step_deg", minimum=MIN_ALPHA_STEP_DEG, maximum=30.0)
+        if a1 < a0:
+            raise InputError(f"alpha_end_deg ({a1}) must be >= alpha_start_deg ({a0}).")
+        n_a = int(np.floor((a1 - a0) / da + 1e-9)) + 1
+        alphas = [round(a0 + k * da, 10) for k in range(n_a)]
+    elif alpha_deg is not None:
+        alphas = [float(alpha_deg)]
+    else:
+        raise InputError(
+            "Must provide alphas_deg, alpha range (alpha_start_deg, alpha_end_deg, alpha_step_deg), or alpha_deg."
+        )
+
+    for a in alphas:
+        if not (-30.0 <= a <= 30.0):
+            raise InputError(f"alpha {a} deg is outside allowed range [-30, 30] deg.")
+
+    h_in = h_c
+    if h_in is None:
+        h_in = height if height is not None else h_over_c
+    h_val = float(h_in) if h_in is not None else None
+    if h_val is not None and h_val <= 0.0:
+        raise InputError(f"h/c must be positive, got {h_val}.")
+
+    flap_tup = _parse_flap_spec(flap)
+
+    n_pan = integer(n_panels, "n_panels", minimum=10)
+    if n_pan > MAX_AIRFOIL_PANELS:
+        raise InputError(f"Panel count {n_pan} is above the limit of {MAX_AIRFOIL_PANELS} panels.")
+
+    n_solves = len(alphas)
+    if n_solves > MAX_AIRFOIL_SOLVES:
+        raise InputError(
+            f"The request has {n_solves} solves, which is above the budget of "
+            f"{MAX_AIRFOIL_SOLVES} solves per call. Split the request into smaller "
+            f"alpha ranges or fewer cases."
+        )
+
+    estimate = int(n_solves * (n_pan ** 2))
+    _check_call_work(
+        estimate,
+        "fewer angles (smaller range or larger alpha_step_deg) or fewer panels",
+    )
+
+    src_name = string(source, "source")
+    if src_name not in ("ventorum2d", "xfoil"):
+        raise InputError(f"source must be 'ventorum2d' or 'xfoil', got {src_name!r}.")
+
+    opts = dict(options or {})
+
+    if src_name == "xfoil":
+        exe = resolve_xfoil_executable(opts.get("executable"))
+        ver = xfoil_version(exe)
+        if ver == "unknown":
+            raise InputError(
+                f"XFOIL executable {exe!r} is not available on this machine "
+                "(version unknown or not found in PATH). Use source='ventorum2d' or install XFOIL."
+            )
+        if h_val is not None:
+            raise ValidityError("XFOIL does not support ground effect (h/c). Use source='ventorum2d'.")
+
+        x_opts = dict(opts)
+        x_opts.setdefault("ncrit", float(ncrit))
+        x_opts.setdefault("n_panels", n_pan)
+        src = XfoilPolarSource(cache=True, **x_opts)
+        polar = src.polar(section=section, Re=re_val, alphas_deg=alphas, flap=flap_tup)
+
+        conv_alphas_deg = np.degrees(polar.alpha)
+        cl_out = []
+        cd_out = []
+        cm_out = []
+        conv_mask = []
+        for req_a in alphas:
+            matches = np.flatnonzero(np.isclose(conv_alphas_deg, req_a, atol=1e-4))
+            if matches.size > 0:
+                idx = int(matches[0])
+                conv_mask.append(True)
+                cl_out.append(rnd(polar.Cl_data[idx], 6))
+                cd_out.append(rnd(polar.Cd_data[idx], 7))
+                cm_out.append(rnd(polar.Cm_data[idx], 6))
+            else:
+                conv_mask.append(False)
+                cl_out.append(None)
+                cd_out.append(None)
+                cm_out.append(None)
+
+        warnings_list = []
+        n_unconv = int(np.sum([not c for c in conv_mask]))
+        if n_unconv > 0:
+            warnings_list.append(f"{n_unconv} of {len(alphas)} angles did not converge in XFOIL.")
+
+        return {
+            "status": "success",
+            "alpha": alphas,
+            "alpha_deg": alphas,
+            "Cl": cl_out,
+            "Cd": cd_out,
+            "Cm": cm_out,
+            "transition_positions": None,
+            "converged": conv_mask,
+            "source": "xfoil",
+            "options": {"n_panels": n_pan, "ncrit": ncrit, **x_opts},
+            "warnings": warnings_list,
+        }
+
+    # source == "ventorum2d"
+    shape = _parse_section(section)
+    norm_base = shape.normalized()
+    norm_base = norm_base.repanel(n_panels=n_pan)
+    if flap_tup is not None:
+        solved_shape = norm_base.with_flap(
+            x_hinge=flap_tup[0],
+            deflection=flap_tup[2],
+            y_hinge=flap_tup[1],
+        )
+    else:
+        solved_shape = norm_base
+
+    v2d_opts = dict(opts)
+    v2d_opts.setdefault("tol", 1e-4)
+    v2d_opts.setdefault("max_iter", 50)
+    v2d_opts.setdefault("ncrit", float(ncrit))
+    v2d_opts.setdefault("xtr", tuple(xtr))
+
+    res = solve_viscous(
+        solved_shape.coords,
+        alphas,
+        Re=re_val,
+        mach=0.0,
+        height=h_val,
+        backend="numpy",
+        **v2d_opts,
+    )
+
+    res_alphas = np.atleast_1d(res.alpha)
+    res_cls = np.atleast_1d(res.Cl)
+    res_cds = np.atleast_1d(res.Cd)
+    res_cms = np.atleast_1d(res.Cm)
+    res_conv = np.atleast_1d(res.converged)
+
+    cl_out = []
+    cd_out = []
+    cm_out = []
+    conv_mask = []
+    xtr_out = []
+
+    res_xtr = res.transition_positions
+    if isinstance(res_xtr, tuple) and len(res_xtr) == 2 and isinstance(res_xtr[0], (int, float)):
+        res_xtr_list = [res_xtr]
+    elif isinstance(res_xtr, list):
+        res_xtr_list = res_xtr
+    else:
+        res_xtr_list = [None] * len(alphas)
+
+    for req_a in alphas:
+        matches = np.flatnonzero(np.isclose(res_alphas, req_a, atol=1e-4))
+        if matches.size > 0:
+            idx = int(matches[0])
+            c_val = bool(res_conv[idx])
+            conv_mask.append(c_val)
+            cl_out.append(rnd(res_cls[idx], 6))
+            cd_out.append(rnd(res_cds[idx], 7))
+            cm_out.append(rnd(res_cms[idx], 6))
+            if idx < len(res_xtr_list) and res_xtr_list[idx] is not None:
+                xtr_pair = res_xtr_list[idx]
+                xtr_out.append([rnd(xtr_pair[0], 5), rnd(xtr_pair[1], 5)])
+            else:
+                xtr_out.append(None)
+        else:
+            conv_mask.append(False)
+            cl_out.append(None)
+            cd_out.append(None)
+            cm_out.append(None)
+            xtr_out.append(None)
+
+    warnings_list = []
+    n_unconv = int(np.sum([not c for c in conv_mask]))
+    if n_unconv > 0:
+        warnings_list.append(f"{n_unconv} of {len(alphas)} angles did not converge.")
+
+    return {
+        "status": "success",
+        "alpha": alphas,
+        "alpha_deg": alphas,
+        "Cl": cl_out,
+        "Cd": cd_out,
+        "Cm": cm_out,
+        "transition_positions": xtr_out,
+        "converged": conv_mask,
+        "source": "ventorum2d",
+        "options": {
+            "n_panels": n_pan,
+            "ncrit": v2d_opts["ncrit"],
+            "xtr": list(v2d_opts["xtr"]),
+            "tol": v2d_opts["tol"],
+            "max_iter": v2d_opts["max_iter"],
+        },
+        "warnings": warnings_list,
+    }
+

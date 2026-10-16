@@ -23,6 +23,8 @@ from collections.abc import Callable
 from ventorum.agent.response import error_payload
 from ventorum.agent.schemas import AGENT_TOOL_DEFINITIONS, TOOL_NAMES, active_tool_context, check_keys
 from ventorum.agent.tools import (
+    airfoil_geometry,
+    airfoil_polar,
     batch_evaluate,
     derivative_matrix,
     error_bars,
@@ -54,6 +56,8 @@ TOOL_FUNCTIONS: dict[str, Callable[..., dict[str, Any]]] = {
     "ventorum_undeformed_nodes": undeformed_nodes,
     "ventorum_machine_capabilities": machine_capabilities,
     "ventorum_tune_machine": tune_machine,
+    "ventorum_airfoil_geometry": airfoil_geometry,
+    "ventorum_airfoil_polar": airfoil_polar,
 }
 _PARAMS = {t["name"]: t["parameters"] for t in AGENT_TOOL_DEFINITIONS}
 assert set(TOOL_FUNCTIONS) == set(TOOL_NAMES)
