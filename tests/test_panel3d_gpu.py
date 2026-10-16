@@ -349,3 +349,41 @@ def test_gpu_float64_parity_ground_sideslip_and_pressure() -> None:
         mesh, far_ratio=np.inf, kutta="pressure", backend="gpu", dtype=torch.float64
     ).solve(asym)
     _check_solver_parity(new, ref, 1e-10, "gpu pressure asymmetric")
+
+
+@pytest.mark.gpu
+def test_factory_auto_backend_uses_the_gpu_selection() -> None:
+    """Backend "auto" of the factory takes the GPU device and its precision.
+
+    With the device setting "gpu" and the precision float64 the factory
+    solves on the GPU, reports the device and the precision in the
+    dispatch record, and matches the numpy backend to 1e-10.
+    """
+    _need_cuda()
+    from ventorum import gpu
+    from ventorum.core.datatypes import Aircraft, SolverSettings
+    from ventorum.solvers.factory import make_solver
+
+    surf = LiftingSurface(
+        name="Wing",
+        semi_span=3.0,
+        sections=[WingSection(y_frac=0.0, chord=1.0, shape="0012"), WingSection(y_frac=1.0, chord=1.0, shape="0012")],
+        is_symmetric=True,
+    )
+    ac = Aircraft(name="W", surfaces=[surf])
+    cond = FlightCondition(V_inf=30.0, alpha=np.radians(4.0))
+    old_device, old_precision = gpu.get_device(), gpu._precision
+    try:
+        gpu.set_device("gpu")
+        gpu.set_precision("float64")
+        res_gpu = make_solver("panel3d").solve(ac, cond, SolverSettings(n_panels=6, n_chord=8))
+    finally:
+        gpu.set_device(old_device)
+        gpu.set_precision(old_precision)
+    res_cpu = make_solver("panel3d").solve(
+        ac, cond, SolverSettings(n_panels=6, n_chord=8, panel_backend="numpy")
+    )
+    disp = res_gpu.details["dispatch"]
+    assert disp["backend"] == "gpu" and disp["device"] == "gpu" and disp["dtype"] == "float64"
+    assert disp["factorization_count"] == 1
+    _assert_close(res_gpu.totals.CL, res_cpu.totals.CL, 1e-10, "factory gpu CL")
