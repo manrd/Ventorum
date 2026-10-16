@@ -13,6 +13,7 @@ incrementally. Some supporting dataclasses in other modules are frozen.
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import warnings
 from dataclasses import dataclass, field
@@ -1012,6 +1013,27 @@ class SolverSettings:
         If True, scales panel counts proportionally across surfaces based on span.
     min_panels : int
         Minimum panels per semi-span when proportional scaling is enabled.
+    panel_kutta : str
+        Kutta condition of the 3D panel solver (``"panel3d"``):
+        ``"morino"`` (default, linear) or ``"pressure"`` (iterative, zero
+        trailing-edge pressure jump). The other solvers ignore it.
+    panel_backend : str
+        Backend of the 3D panel solver: ``"auto"`` (default: the device
+        and precision selection of :mod:`ventorum.gpu`, the numpy kernels
+        on the CPU), ``"numpy"``, ``"numba"`` or ``"gpu"``. The other
+        solvers ignore it.
+    panel_wake_length : float or None
+        Wake length of the 3D panel solver [m]. None (default) gives 50
+        times the largest streamwise chord. The other solvers ignore it.
+    panel_chord_spacing : str
+        Chordwise panel distribution of the 3D panel solver: ``"cosine"``
+        (default) or ``"uniform"``. The other solvers use
+        ``chord_spacing``.
+    panel_estimate_mesh_error : bool
+        If True, the 3D panel solver runs a mesh convergence study for each
+        condition and adds the error estimate of the given mesh to the
+        trust notes. Default False (the study costs much more than one
+        solve). The other solvers ignore it.
     """
 
     solver_type: Literal["auto", "vlm", "linear", "nonlinear", "fourier"] | str = "auto"
@@ -1025,9 +1047,20 @@ class SolverSettings:
     n_chord: int | None = None
     chord_spacing: str = "uniform"
     wake_alignment: str = "freestream"
+    panel_kutta: str = "morino"
+    panel_backend: str = "auto"
+    panel_wake_length: float | None = None
+    panel_chord_spacing: str = "cosine"
+    panel_estimate_mesh_error: bool = False
 
     def clone(self) -> SolverSettings:
-        """Fast explicit clone."""
+        """Fast explicit clone.
+
+        A subclass keeps its type and its own fields (the copy uses
+        :func:`dataclasses.replace`).
+        """
+        if type(self) is not SolverSettings:
+            return dataclasses.replace(self)
         return SolverSettings(
             solver_type=self.solver_type,
             n_panels=self.n_panels,
@@ -1040,6 +1073,11 @@ class SolverSettings:
             proportional_panels=self.proportional_panels,
             min_panels=self.min_panels,
             use_symmetry=self.use_symmetry,
+            panel_kutta=self.panel_kutta,
+            panel_backend=self.panel_backend,
+            panel_wake_length=self.panel_wake_length,
+            panel_chord_spacing=self.panel_chord_spacing,
+            panel_estimate_mesh_error=self.panel_estimate_mesh_error,
         )
 
     def __copy__(self) -> SolverSettings:
