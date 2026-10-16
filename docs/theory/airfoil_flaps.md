@@ -90,10 +90,10 @@ default is "none".
   removed. Two rules apply in turn until neither removes a node.
   1. Short panels. No panel with a removable end is shorter than 0.5
      times the mean length of its two neighbour panels. The shortest
-     panel (by this ratio) loses the end node that lies nearest to the
-     line through its own neighbours. This is the point elimination of
-     Visvalingam and Whyatt (1993), with the distance in place of their
-     triangle area.
+     panel (by this ratio) loses the end node whose removal leaves the
+     smaller largest turning angle at its neighbours, so the removal also
+     smooths the corner. At equal angles, the end node nearest to the
+     line through its own neighbours goes.
   2. Corners. A node with a turning angle above 5 deg is removed when
      this lowers the largest turning angle of the node and its two
      neighbours, and the new panel is at most 2 times the mean length of
@@ -195,6 +195,3 @@ formulas, with 81 cosine-spaced points per surface:
   1959 (airfoil section geometry and the NACA 4-digit profile equations).
 - C. de Boor, *A Practical Guide to Splines*, Springer, 1978, chapter IV
   (not-a-knot cubic spline).
-- M. Visvalingam and J. D. Whyatt, "Line generalisation by repeated
-  elimination of points", *The Cartographic Journal* 30(1), 1993,
-  pp. 46-51.

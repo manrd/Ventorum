@@ -47,9 +47,10 @@ the nodes near the hinge after the construction above.
   never the trailing-edge or the leading-edge nodes) are removed by two
   rules. Rule 1: no panel with a removable end is shorter than 0.5 times
   the mean length of its two neighbour panels; of the two ends of a
-  short panel, the node nearest to the line through its own neighbours
-  goes (point elimination after Visvalingam and Whyatt, 1993, with the
-  distance in place of their triangle area). Rule 2: a node with a
+  short panel, the node whose removal leaves the smaller largest turning
+  angle at its neighbours goes, so the removal also smooths the corner
+  (at equal angles, the node nearest to the line through its own
+  neighbours). Rule 2: a node with a
   turning angle above 5 deg is removed when this lowers the largest
   turning angle of the node and its two neighbours and the new panel is
   at most 2 times the mean length of its neighbour panels.
@@ -87,11 +88,6 @@ References
   used in the tests.
 * C. de Boor, A Practical Guide to Splines, Springer, 1978, chapter IV:
   the not-a-knot cubic spline of the "repanel" treatment.
-* M. Visvalingam and J. D. Whyatt, Line generalisation by repeated
-  elimination of points, The Cartographic Journal 30(1), 1993, pp.
-  46-51: point elimination by a measure of the node and its neighbours
-  ("merge" treatment, here with the distance of the node to the line
-  through its neighbours).
 """
 
 from __future__ import annotations
@@ -650,6 +646,17 @@ def _chord_distance(p0: np.ndarray, p1: np.ndarray, p2: np.ndarray) -> float:
     return abs(d[0] * (p1[1] - p0[1]) - d[1] * (p1[0] - p0[0])) / norm
 
 
+def _turn_after_removal(pts: np.ndarray, p: int) -> float:
+    """Largest turning angle [rad] at the neighbours of node p after its removal."""
+    m = pts.shape[0]
+    worst = 0.0
+    if p - 2 >= 0:
+        worst = max(worst, abs(_turn(pts[p - 2], pts[p - 1], pts[p + 1])))
+    if p + 2 <= m - 1:
+        worst = max(worst, abs(_turn(pts[p - 1], pts[p + 1], pts[p + 2])))
+    return worst
+
+
 def _neighbour_mean(lengths: np.ndarray, i: int) -> float:
     """Mean length [chord units] of the panels next to panel i."""
     near = [lengths[j] for j in (i - 1, i + 1) if 0 <= j < lengths.size]
@@ -669,10 +676,10 @@ def _merge_hinge_nodes(out: np.ndarray, xh: float, protect: tuple[int, ...] = ()
     1. Short panels. A panel with a removable end is short when its
        length is less than ``_MERGE_MIN_FRACTION`` (0.5) times the mean
        length of its two neighbour panels. The shortest panel (by this
-       ratio) loses the end node that lies nearest to the line through
-       its own two neighbours (point elimination after Visvalingam and
-       Whyatt, 1993, with the distance in place of their triangle
-       area).
+       ratio) loses the end node whose removal leaves the smaller
+       largest turning angle at its neighbours, so the removal also
+       smooths the corner; at equal angles, the end node nearest to the
+       line through its own two neighbours goes.
     2. Corners. A removable node whose turning angle is larger than
        ``_MERGE_MAX_TURN_DEG`` (5 deg) is removed when this lowers the
        largest turning angle of the node and its two neighbours and the
@@ -711,7 +718,8 @@ def _merge_hinge_nodes(out: np.ndarray, xh: float, protect: tuple[int, ...] = ()
                 short.append((ratio, i))
         for _, i in sorted(short):
             ends = [p for p in (i, i + 1) if removable[idx[p]]]
-            ends.sort(key=lambda p: _chord_distance(pts[p - 1], pts[p], pts[p + 1]))
+            ends.sort(key=lambda p: (round(_turn_after_removal(pts, p), 12),
+                                     _chord_distance(pts[p - 1], pts[p], pts[p + 1])))
             for p in ends:
                 if simple_without(p):
                     del idx[p]

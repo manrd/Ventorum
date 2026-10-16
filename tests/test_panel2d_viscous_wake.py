@@ -78,13 +78,13 @@ def test_flapped_sections(defl):
 
 
 @pytest.mark.slow
-def test_flapped_section_5deg_repanel_treatment():
-    """The 5 deg case of the flapped-section test converges with the "repanel" hinge treatment."""
+@pytest.mark.parametrize("treatment", ["repanel", "merge"])
+def test_flapped_section_5deg_hinge_treatment(treatment):
+    """The 5 deg case of the flapped-section test converges with the "repanel" and "merge" hinge treatments."""
     base = airfoil("2412").repanel(n_panels=160)
-    coords = base.with_flap(x_hinge=0.75, deflection=5.0, hinge_treatment="repanel").coords
-    assert coords.shape == base.coords.shape
+    coords = base.with_flap(x_hinge=0.75, deflection=5.0, hinge_treatment=treatment).coords
     r = _solve(coords, [0.0, 2.0], 1e6)
-    assert np.all(r.converged), r.reason
+    assert np.all(r.converged), (treatment, r.reason)
 
 
 @pytest.mark.slow

@@ -329,4 +329,3 @@ and any keyword that does not apply raises TypeError.
 - J. Katz and A. Plotkin, *Low-Speed Aerodynamics*, 2nd ed., Cambridge University Press, 2001, chapter 11.
 - H. Glauert, *The Elements of Aerofoil and Airscrew Theory*, Cambridge University Press, 1926, chapter VII (thin-airfoil theory of a hinged flap).
 - H. Glauert, "Theoretical relationships for an aerofoil with hinged flap", Aeronautical Research Committee, R&M 1095, 1927.
-- M. Visvalingam and J. D. Whyatt, "Line generalisation by repeated elimination of points", *The Cartographic Journal* 30(1), 1993, pp. 46-51.
