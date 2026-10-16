@@ -35,7 +35,15 @@ import numpy as np
 from ventorum.airfoil.flap import deflect_plain_flap, flap_hinge_point
 from ventorum.airfoil.geometry import AirfoilGeometryError, AirfoilShape
 from ventorum.airfoil.io import parse_airfoil, read_airfoil, write_lednicer, write_selig
-from ventorum.airfoil.naca import naca, naca4, naca4_camber, naca4_thickness, naca5, naca5_camber
+from ventorum.airfoil.naca import (
+    is_naca_designation,
+    naca,
+    naca4,
+    naca4_camber,
+    naca4_thickness,
+    naca5,
+    naca5_camber,
+)
 from ventorum.airfoil.paneling import AirfoilSpline, repanel, repanel_cosine
 
 __all__ = [
@@ -60,16 +68,29 @@ __all__ = [
 ]
 
 
+#: Keyword arguments of the NACA generator that the factory passes on.
+_NACA_KEYWORDS = frozenset({"n_points", "spacing", "closed_te"})
+
+
 def airfoil(
     spec: AirfoilShape | str | int | Path | np.ndarray, **kwargs: Any
 ) -> AirfoilShape:
     """Build an airfoil shape from a designation, a file, an array or a shape.
 
-    A NACA designation string (for example "2412" or "NACA 23012") calls
-    the NACA generator. An integer designation (for example 2412) works
-    the same way. A file path (string or Path) reads the file when
-    the path exists. An (N, 2) array stores the points. A shape returns
-    a copy. The array functions stay available for direct use.
+    The input kind follows these rules, in this order:
+
+    1. An :class:`AirfoilShape` returns a copy.
+    2. An integer, or a string of the NACA designation form (four or five
+       digits with an optional "NACA" prefix, see
+       :func:`ventorum.airfoil.naca.is_naca_designation`), calls the NACA
+       generator. A NACA designation always wins over a file of the same
+       name in the current folder.
+    3. A :class:`pathlib.Path` reads that file. A string reads a file only
+       when it names an existing file with an extension (for example
+       "naca2412.dat").
+    4. An (N, 2) array stores the points.
+
+    Any other string raises ValueError.
 
     Parameters
     ----------
@@ -77,10 +98,9 @@ def airfoil(
         NACA designation [-], file path, point array [chord units] of
         shape (N, 2) in Selig order, or shape to copy.
     **kwargs : Any
-        Extra arguments of the NACA generator (``n_points`` [-],
-        ``spacing`` [-], ``closed_te`` [-]) when ``spec`` is a NACA
-        designation. ``name`` [str] sets the shape name for any input
-        kind.
+        ``name`` [str] sets the shape name for any input kind. The NACA
+        generator also takes ``n_points`` [-], ``spacing`` [-] and
+        ``closed_te`` [-]. Other keywords raise TypeError.
 
     Returns
     -------
@@ -89,44 +109,52 @@ def airfoil(
 
     Raises
     ------
+    TypeError
+        If a keyword does not apply to the input kind (for example
+        ``n_points`` with a file or an array).
     ValueError
-        If a string is neither a readable file path nor a valid NACA
-        designation, or the array has a bad shape.
+        If a string is neither a NACA designation nor an existing file
+        with an extension, a path does not exist, or the array has a
+        bad shape.
     """
     name = kwargs.pop("name", None)
-    if isinstance(spec, AirfoilShape):
-        out = AirfoilShape(name=spec.name, coords=np.array(spec.coords, dtype=float, copy=True))
-        if name is not None:
-            out.name = str(name)
-        return out
     if isinstance(spec, bool):
         raise ValueError(f"Invalid airfoil spec {spec!r}.")
-    if isinstance(spec, (int, np.integer)):
-        shape = AirfoilShape.naca(int(spec), **kwargs)
-        if name is not None:
-            shape.name = str(name)
-        return shape
-    if isinstance(spec, (str, Path)):
-        candidate = Path(spec)
-        if candidate.exists() and candidate.is_file():
-            shape = read_airfoil(candidate)
-            if name is not None:
-                shape.name = str(name)
-            return shape
-        if isinstance(spec, Path):
+    naca_input = isinstance(spec, (int, np.integer)) or (
+        isinstance(spec, str) and is_naca_designation(spec)
+    )
+    allowed = _NACA_KEYWORDS if naca_input else frozenset()
+    extra = sorted(set(kwargs) - allowed)
+    if extra:
+        kind = "a NACA designation" if naca_input else f"an input of type {type(spec).__name__}"
+        raise TypeError(
+            f"airfoil() got keyword arguments {extra} that do not apply to {kind}; "
+            "only 'name' applies to files, arrays and shapes."
+        )
+    if isinstance(spec, AirfoilShape):
+        out = AirfoilShape(name=spec.name, coords=np.array(spec.coords, dtype=float, copy=True))
+    elif naca_input:
+        out = AirfoilShape.naca(spec if isinstance(spec, str) else int(spec), **kwargs)
+    elif isinstance(spec, Path):
+        if not spec.is_file():
             raise ValueError(f"Airfoil file not found: {spec!r}.")
-        text = str(spec)
-        try:
-            shape = AirfoilShape.naca(text, **kwargs)
-        except ValueError:
+        out = read_airfoil(spec)
+    elif isinstance(spec, str):
+        candidate = Path(spec)
+        if candidate.suffix and candidate.is_file():
+            out = read_airfoil(candidate)
+        else:
             raise ValueError(
-                f"Invalid airfoil spec {spec!r}: no such file and not a NACA designation."
-            ) from None
-        if name is not None:
-            shape.name = str(name)
-        return shape
-    arr = np.asarray(spec, dtype=float)
-    if arr.ndim != 2 or arr.shape[1] != 2:
-        raise ValueError(f"Airfoil array must have shape (N, 2); got {arr.shape}.")
-    shape_name = str(name) if name is not None else "airfoil"
-    return AirfoilShape(name=shape_name, coords=arr)
+                f"Invalid airfoil spec {spec!r}: not a NACA designation (four or five "
+                "digits with an optional 'NACA' prefix) and not an existing file with "
+                "an extension. Give a file as a pathlib.Path or as a name such as "
+                "'section.dat'."
+            )
+    else:
+        arr = np.asarray(spec, dtype=float)
+        if arr.ndim != 2 or arr.shape[1] != 2:
+            raise ValueError(f"Airfoil array must have shape (N, 2); got {arr.shape}.")
+        out = AirfoilShape(name="airfoil", coords=arr)
+    if name is not None:
+        out.name = str(name)
+    return out
