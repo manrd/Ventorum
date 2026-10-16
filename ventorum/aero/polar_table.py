@@ -15,14 +15,18 @@ and Von Doenhoff (1959, Theory of Wing Sections, Dover) show this
 behaviour. Points that the source did not converge stay NaN, and
 queries outside the table range raise an error instead of extrapolating.
 
-A source may offer a ``run_xfoil_batch`` hook with the calling
-convention of :func:`ventorum.aero.xfoil_runner.run_xfoil_batch`
-(a list of case dicts with keys ``section``, ``Re``, ``alphas_deg``
-and ``flap``, plus ``workers``; one tabulated polar or exception object
-per case, in input order). The builder detects the hook by feature
-check and never by type test. Without the hook the builder calls
-``source.polar`` once per pair, in parallel threads unless
-``workers=1``.
+The builder calls ``source.polar`` once per grid point, in a pool of
+threads (``workers`` threads, by default the CPU count minus one;
+``workers=1`` runs the calls one after the other). The XFOIL source
+starts one XFOIL process per call, so its calls run in parallel
+processes. The provenance in ``source_info`` comes from the public
+method ``describe()`` of the source when it has one (feature check,
+never a type test).
+
+The flap of every source is the tuple ``(x_hinge, y_hinge,
+deflection_deg)``: hinge position as a fraction of the chord [-],
+hinge height as a fraction of the local thickness [-] (0 lower
+surface, 1 upper surface) and deflection [deg], positive down.
 
 Height axis: the in-house 2D solver adds an optional height axis
 ``h_over_c`` [-] (height of the section above the ground in chords)
@@ -49,12 +53,14 @@ import concurrent.futures
 import inspect
 import json
 import operator
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
+from ventorum.aero.xfoil_runner import check_flap
 from ventorum.core.datatypes import TabulatedAirfoil
 
 if TYPE_CHECKING:
@@ -590,7 +596,8 @@ def _flap_argument(
     x_hinge : float or None
         Hinge chordwise position, fraction of chord [-].
     y_hinge : float
-        Hinge vertical position, fraction of chord [-].
+        Hinge height, fraction of the local thickness [-] (0 lower
+        surface, 1 upper surface).
 
     Returns
     -------
@@ -601,7 +608,9 @@ def _flap_argument(
     Raises
     ------
     ValueError
-        If the deflection is not zero but no hinge is given.
+        If the deflection is not zero but no hinge is given, or if the
+        flap tuple is not valid (see
+        :func:`ventorum.aero.xfoil_runner.check_flap`).
     """
     if deflection_deg == 0.0:
         return None
@@ -609,9 +618,7 @@ def _flap_argument(
         raise ValueError(
             "x_hinge is required for a nonzero flap deflection."
         )
-    if not np.isfinite(x_hinge) or not np.isfinite(y_hinge):
-        raise ValueError("x_hinge and y_hinge must be finite.")
-    return (float(x_hinge), float(y_hinge), float(deflection_deg))
+    return check_flap((x_hinge, y_hinge, deflection_deg))
 
 
 def _source_failed_as_gap(error: BaseException) -> bool:
@@ -620,7 +627,7 @@ def _source_failed_as_gap(error: BaseException) -> bool:
     Parameters
     ----------
     error : BaseException
-        Error raised by the source (or returned by its batch hook).
+        Error raised by the source.
 
     Returns
     -------
@@ -702,11 +709,10 @@ def build_polar_table(
 ) -> PolarTable:
     """Build a polar table over Reynolds number, flap deflection and height.
 
-    One source call runs per grid point: (Re, flap) for free air or
-    (Re, flap, height) when a height axis is requested. A source that
-    offers a ``run_xfoil_batch`` hook runs its cases through that hook
-    (found by feature check, never by type test). Other sources run
-    through ``source.polar``, in parallel threads unless ``workers=1``.
+    One ``source.polar`` call runs per grid point: (Re, flap) for free
+    air or (Re, flap, height) when a height axis is requested. The calls
+    run in a pool of threads (see *workers*); the XFOIL source starts
+    one XFOIL process per call, so its calls run in parallel processes.
     A case that fails to converge becomes a NaN slice; any other error
     stops the build.
 
@@ -730,19 +736,23 @@ def build_polar_table(
         Hinge chordwise position, fraction of chord [-]. Required for
         a nonzero deflection.
     y_hinge : float
-        Hinge vertical position, fraction of chord [-].
+        Hinge height, fraction of the local thickness [-] (0 lower
+        surface, 1 upper surface). Default 0.5.
     h_over_c : sequence of float or None
         Heights above ground in chords [-], strictly positive. None
         builds a free-air table.
     workers : int or None
-        Thread pool size for sources without a batch hook, or the
-        worker count forwarded to the hook. None uses the pool
-        default. 1 runs sequentially.
+        Number of threads that call the source. None uses the CPU count
+        minus one (at least 1). 1 runs the calls one after the other.
 
     Returns
     -------
     PolarTable
         The built table, with NaN where the source did not converge.
+        ``source_info`` holds the source name, the section, the options
+        (the options of ``source.describe()`` when the source has that
+        method, plus ``x_hinge``, ``y_hinge`` and ``h_over_c``) and the
+        source version (``"unknown"`` without ``describe()``).
 
     Raises
     ------
@@ -773,10 +783,11 @@ def build_polar_table(
         raise ValueError("alpha_deg must hold finite values only.")
     if np.unique(requested_alpha).size != requested_alpha.size:
         raise ValueError("alpha_deg must hold unique values.")
-    if workers is not None:
-        workers = operator.index(workers)
-        if workers < 1:
-            raise ValueError(f"workers must be at least 1, got {workers}.")
+    if workers is None:
+        workers = max(1, (os.cpu_count() or 2) - 1)
+    workers = operator.index(workers)
+    if workers < 1:
+        raise ValueError(f"workers must be at least 1, got {workers}.")
 
     if h_over_c is not None:
         if not _source_supports_ground(source):
@@ -846,15 +857,17 @@ def build_polar_table(
             cd[i_re, j_flap, k_h, :] = row_cd
             cm[i_re, j_flap, k_h, :] = row_cm
 
-    version = getattr(source, "_version", None) or "unknown"
-    opts: dict[str, Any] = {"x_hinge": x_hinge, "y_hinge": float(y_hinge)}
+    described = _describe_source(source)
+    opts: dict[str, Any] = dict(described.get("options", {}))
+    opts["x_hinge"] = x_hinge
+    opts["y_hinge"] = float(y_hinge)
     if h_sorted is not None:
         opts["h_over_c"] = [float(v) for v in h_sorted]
     info: dict[str, Any] = {
-        "source": type(source).__name__,
+        "source": str(described.get("source", type(source).__name__)),
         "section": section if isinstance(section, str) else "coordinates",
         "options": opts,
-        "version": version,
+        "version": str(described.get("version", "unknown")),
     }
     return PolarTable(
         Re=res,
@@ -868,13 +881,44 @@ def build_polar_table(
     )
 
 
+def _describe_source(source: Any) -> dict[str, Any]:
+    """Return the provenance of *source* from its public ``describe()`` method.
+
+    Parameters
+    ----------
+    source : object
+        Section polar provider.
+
+    Returns
+    -------
+    dict
+        The dictionary of ``source.describe()`` (keys ``source``,
+        ``options`` and ``version``), or an empty dictionary when the
+        source has no such method.
+
+    Raises
+    ------
+    TypeError
+        If ``describe()`` does not return a dictionary.
+    """
+    describe = getattr(source, "describe", None)
+    if not callable(describe):
+        return {}
+    out = describe()
+    if not isinstance(out, dict):
+        raise TypeError(
+            f"{type(source).__name__}.describe() must return a dict, got {type(out).__name__}."
+        )
+    return out
+
+
 def _run_cases(
     source: SectionPolarSource,
     section: str | np.ndarray,
     requested_alpha: np.ndarray,
     grid_items: list[tuple[int, int, int | None, float, float, float | None]],
     flaps: list[tuple[float, float, float] | None],
-    workers: int | None,
+    workers: int,
 ) -> list[TabulatedAirfoil | None]:
     """Run one source polar per grid point, in input order.
 
@@ -890,8 +934,9 @@ def _run_cases(
         Tuples of (i_re, j_flap, k_h, re, flap, height).
     flaps : list
         One source flap tuple (or None) per case.
-    workers : int or None
-        Thread pool size, or the count forwarded to the batch hook.
+    workers : int
+        Number of threads that call ``source.polar``. 1 runs the calls
+        one after the other.
 
     Returns
     -------
@@ -899,20 +944,6 @@ def _run_cases(
         One TabulatedAirfoil per case, or None for a case that did not
         converge. Any other error propagates.
     """
-    hook = getattr(source, "run_xfoil_batch", None)
-    if callable(hook):
-        cases = [
-            {
-                "section": section,
-                "Re": re,
-                "alphas_deg": [float(a) for a in requested_alpha],
-                "flap": flap,
-                **({} if h is None else {"height": h}),
-            }
-            for (_, _, _, re, _, h), flap in zip(grid_items, flaps)
-        ]
-        results = hook(cases, workers)
-        return [_checked_item(item) for item in results]
 
     def run_one(args: tuple[float, tuple[float, float, float] | None, float | None]):
         re, flap, h = args
@@ -936,29 +967,3 @@ def _run_cases(
         max_workers=workers
     ) as pool:
         return list(pool.map(run_one, jobs))
-
-
-def _checked_item(item: object) -> TabulatedAirfoil | None:
-    """Map one batch-hook result to a polar or a NaN gap.
-
-    Parameters
-    ----------
-    item : object
-        One entry returned by the ``run_xfoil_batch`` hook: a
-        TabulatedAirfoil or an exception object.
-
-    Returns
-    -------
-    TabulatedAirfoil or None
-        The polar, or None for a pair that did not converge.
-
-    Raises
-    ------
-    BaseException
-        The stored error, when it is not a convergence failure.
-    """
-    if isinstance(item, BaseException):
-        if _source_failed_as_gap(item):
-            return None
-        raise item
-    return item  # type: ignore[return-value]
