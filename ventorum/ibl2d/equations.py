@@ -44,7 +44,10 @@ __all__ = [
     "TURBULENT",
     "WAKE",
     "TRANSITION",
+    "POST",
     "TRANSITION_CTAU_FACTOR",
+    "transition_fraction",
+    "post_transition_residuals",
     "laminar_terms",
     "turbulent_terms",
     "interval_residuals",
@@ -54,8 +57,8 @@ __all__ = [
     "laminar_n_prediction",
 ]
 
-#: Interval kind codes.
-LAMINAR, TURBULENT, WAKE, TRANSITION = 0, 1, 2, 3
+#: Interval kind codes (POST: the turbulent interval after the transition interval).
+LAMINAR, TURBULENT, WAKE, TRANSITION, POST = 0, 1, 2, 3, 4
 
 #: Initial shear-stress coefficient after transition, as a fraction of the
 #: equilibrium value Ctau_eq [-]. Best reading of Drela and Giles (1987);
@@ -199,6 +202,7 @@ def _pair(kind: int, ta: dict, tb: dict, sa, sb, dxi, wb: float = 0.5):
     """
     wa = 1.0 - wb
     tha, _, ca, ua = sa
+    # wb may be a Dual (post-transition interval); the products then carry its derivatives.
     thb, _, cb, ub = sb
     lu = (ub / ua).log()
     q = _inv_log_mean(ua, ub)
@@ -288,6 +292,83 @@ def laminar_n_prediction(s1, s2, dxi, re: float) -> Dual:
     return s1[2] + _amplification_increase(t1, t2, dxi)
 
 
+def _clip01(w: Dual) -> Dual:
+    """Return w clipped to [0, 1]."""
+    return where(w.val < 0.0, constant(0.0, w), where(w.val > 1.0, constant(1.0, w), w))
+
+
+def transition_fraction(s1, dxi, re: float, ncrit, w_forced) -> Dual:
+    """Return the fraction w of an interval at the transition point (not clipped).
+
+    For free transition N grows linearly from N1 by the increase of the
+    laminar N equation with the rate of station 1 (the whole interval grows
+    when Re_theta > Re_theta0 at station 1: the onset of amplification lies
+    upstream of the transition interval), so w = (ncrit - N1) / dN; w = 2
+    when N does not grow. For forced transition w is the given geometric
+    fraction; the smaller value applies.
+
+    Parameters
+    ----------
+    s1 : tuple of Dual
+        ``(theta, delta_star, N, ue)`` of the laminar station 1.
+    dxi : array
+        Interval length [m].
+    re : float
+        Reynolds number [-].
+    ncrit : array
+        Critical amplification exponent [-].
+    w_forced : array
+        Fraction of the forced transition point, or a value above 1.
+
+    Returns
+    -------
+    Dual
+        The fraction w [-].
+    """
+    th1, ds1, n1, u1 = s1
+    ta = laminar_terms(th1, ds1, n1, u1, re)
+    inc = where(ta["exc"].val > 0.0, dxi * ta["rtil"], constant(0.0, th1))
+    grows = inc.val > 0.0
+    incs = where(grows, inc, constant(1.0, inc))
+    w_free = where(grows, (ncrit - n1) / incs, constant(2.0, inc))
+    wf = constant(w_forced, w_free)
+    return where(wf.val < w_free.val, wf, w_free)
+
+
+def post_transition_residuals(s0, s1, s2, dxi0, dxi, re: float, ncrit, w_forced0):
+    """Return the residuals of the turbulent interval that follows the transition interval.
+
+    The transition interval (stations 0 and 1, transition at the fraction w)
+    integrates its turbulent part with the implicit rule. So that the
+    solution changes continuously when the transition point passes station
+    1 (w = 1 here and w = 0 in the next interval give the same equations),
+    this interval uses the downstream weight wb = (1 + w) / 2: implicit at
+    w = 1, trapezoidal at w = 0.
+
+    Parameters
+    ----------
+    s0 : tuple of Dual
+        ``(theta, delta_star, N, ue)`` of the last laminar station.
+    s1, s2 : tuple of Dual
+        ``(theta, delta_star, c, ue)`` of the two turbulent stations.
+    dxi0, dxi : array
+        Lengths of the transition interval and of this interval [m].
+    re : float
+        Reynolds number [-].
+    ncrit, w_forced0 : array
+        Transition data of the transition interval.
+
+    Returns
+    -------
+    tuple of Dual
+        Momentum, kinetic-energy and lag residuals [-].
+    """
+    wc = _clip01(transition_fraction(s0, dxi0, re, ncrit, w_forced0))
+    t1 = turbulent_terms(*s1, re)
+    t2 = turbulent_terms(*s2, re)
+    return _pair(TURBULENT, t1, t2, s1, s2, dxi, wb=0.5 + 0.5 * wc)
+
+
 def transition_residuals(s1, s2, dxi, re: float, ncrit, w_forced):
     """Return the residuals of the interval that holds the transition point.
 
@@ -340,17 +421,8 @@ def transition_residuals(s1, s2, dxi, re: float, ncrit, w_forced):
     xp = s1[0].xp
     th1, ds1, n1, u1 = s1
     th2, ds2, c2, u2 = s2
-    ta = laminar_terms(th1, ds1, n1, u1, re)
-    # Station 2 is turbulent: the onset fraction uses station 1 only (the
-    # onset of amplification lies upstream of the transition interval).
-    inc = where(ta["exc"].val > 0.0, dxi * ta["rtil"], constant(0.0, th1))
-    grows = inc.val > 0.0
-    incs = where(grows, inc, constant(1.0, inc))
-    w_free = where(grows, (ncrit - n1) / incs, constant(2.0, inc))
-    wf = constant(w_forced, w_free)
-    use_forced = wf.val < w_free.val
-    w = where(use_forced, wf, w_free)
-    wc = where(w.val < 0.0, constant(0.0, w), where(w.val > 1.0, constant(1.0, w), w))
+    w = transition_fraction(s1, dxi, re, ncrit, w_forced)
+    wc = _clip01(w)
     tht = th1 + wc * (th2 - th1)
     dst = ds1 + wc * (ds2 - ds1)
     ut = u1 + wc * (u2 - u1)

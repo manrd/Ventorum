@@ -2,209 +2,153 @@
 orphan: true
 ---
 
-# Integral boundary-layer closures (Ventorum-2D)
+# Integral boundary-layer closures and transition (Ventorum-2D)
 
 ## Model
 
-The viscous engine of Ventorum-2D is a two-equation integral boundary layer
-with a shear-stress lag equation and an envelope e^N transition model. The
-flow is incompressible (edge Mach 0), so the density shape factor is not
-needed and the kinematic shape factor equals `H`. This page states the
-closure relations: the laminar fits to the Falkner-Skan profile family, the
-turbulent fits to the Swafford profile family, the lag-entrainment rate
-coefficient, and the transition correlations. The values of the fit
-constants live in the code (`ventorum/ibl2d/closure.py`,
-`ventorum/ibl2d/transition.py`); the equations below use their names.
+The integral boundary layer of Ventorum-2D solves the momentum equation, the kinetic-energy (shape-parameter) equation and, in turbulent flow, the shear-stress lag equation (see [](ibl2d_march.md)). These equations need closure relations: the energy shape factor $H^*$, the skin friction $C_f$, the dissipation coefficient $C_D$, the equilibrium shear-stress coefficient $C_{\tau,EQ}$ and the boundary-layer thickness $\delta$, as functions of the shape factor $H = \delta^*/\theta$ and the momentum-thickness Reynolds number $Re_\theta = u_e \theta / \nu$. Transition comes from the envelope $e^N$ method.
 
-## Equations
+All relations are written from the published papers: Drela and Giles (1987) and Drela (1986). No program source code was read or used. The flow is incompressible (edge Mach number 0), so the kinematic shape factor $H_k$ of the papers equals $H$ and the density shape factor $H^{**}$ is zero.
 
-### Laminar closures (Falkner-Skan family)
+The code is in `ventorum/ibl2d/closure.py` (labels C1 to C10) and `ventorum/ibl2d/transition.py` (labels E1 to E4). Each function returns the value and its analytic partial derivatives, and takes an `xp` argument (numpy or torch).
 
-With `H = delta_star / theta` (dimensionless), `Re_theta` the
-momentum-thickness Reynolds number (dimensionless), `Hstar = theta_star /
-theta` (dimensionless), `Cf` the skin-friction coefficient (dimensionless)
-and `CD` the dissipation coefficient (dimensionless):
+**To be checked against the paper.** The equation numbers of Drela and Giles (1987) are not cited here, because they could not be checked against the printed paper; each relation is named instead. The constants below are the best reading of the paper by the author of the code. They agree with independent checks where such checks exist (Blasius, exact Falkner-Skan profiles, Ludwieg-Tillmann; see Verification).
+
+## Laminar closures (Falkner-Skan family)
+
+(C1) Energy shape factor:
 
 ```{math}
-\text{(L1)} \qquad Hstar(H) = a_1 + b_1 \frac{(4 - H)^2}{H} \quad (H \le 4),
-\qquad Hstar(H) = a_1 - b_2 \frac{(H - 4)^2}{H} \quad (H > 4).
+H^* = 1.515 + 0.076\,\frac{(4 - H)^2}{H} \quad (H < 4), \qquad
+H^* = 1.515 + 0.040\,\frac{(H - 4)^2}{H} \quad (H \ge 4).
+```
+
+(C2) Skin friction:
+
+```{math}
+Re_\theta \frac{C_f}{2} = -0.067 + 0.01977\,\frac{(7.4 - H)^2}{H - 1} \quad (H < 7.4), \qquad
+Re_\theta \frac{C_f}{2} = -0.067 + 0.022\left(1 - \frac{1.4}{H - 6}\right)^2 \quad (H \ge 7.4).
+```
+
+(C3) Dissipation:
+
+```{math}
+Re_\theta \frac{2 C_D}{H^*} = 0.207 + 0.00205\,(4 - H)^{5.5} \quad (H < 4), \qquad
+Re_\theta \frac{2 C_D}{H^*} = 0.207 - \frac{0.003\,(H - 4)^2}{1 + 0.02\,(H - 4)^2} \quad (H \ge 4).
+```
+
+All branch points are continuous in value and first derivative. $H^*$ has its minimum at $H = 4$, and $C_f = 0$ near $H = 4.03$ (Falkner-Skan separation).
+
+## Turbulent closures
+
+(C4) Energy shape factor, with $H_0 = 3 + 400/Re_\theta$ for $Re_\theta > 400$ and $H_0 = 4$ otherwise:
+
+```{math}
+H^* = 1.505 + \frac{4}{Re_\theta} + \left(0.165 - \frac{1.6}{\sqrt{Re_\theta}}\right)\frac{(H_0 - H)^{1.6}}{H} \quad (H < H_0),
 ```
 
 ```{math}
-\text{(L2)} \qquad F(H) = Re_\theta \frac{C_f}{2}
-  = c_0 + c_1 \frac{(7.4 - H)^2}{H - 1}.
+H^* = 1.505 + \frac{4}{Re_\theta} + (H - H_0)^2\left[\frac{0.04}{H} + \frac{0.007 \ln Re_\theta}{(H - H_0 + 4/\ln Re_\theta)^2}\right] \quad (H \ge H_0).
 ```
+
+$H^*$ has its minimum at $H = H_0$ (the separation shape factor of the direct march).
+
+(C5) Skin friction, the fit of Drela and Giles (1987) to the profile family of Swafford (1983):
 
 ```{math}
-\text{(L3)} \qquad G(H) = Re_\theta \frac{2 C_D}{Hstar}
-  = g_0 + g_1 (4 - H)^{5.5} \quad (H \le 4),
+C_f = 0.3\,e^{-1.33 H}\,(\log_{10} Re_\theta)^{-1.74 - 0.31 H} + 0.00011\left[\tanh\left(4 - \frac{H}{0.875}\right) - 1\right].
 ```
+
+(C6) Normalized slip velocity:
 
 ```{math}
-G(H) = g_0 - g_2 \frac{(H - 4)^2}{1 + g_3 (H - 4)^2} \quad (H > 4).
+U_s = \frac{H^*}{2}\left(1 - \frac{4}{3}\,\frac{H - 1}{H}\right).
 ```
 
-(L1) and (L3) keep the switch of the source at `H = 4`, with the same value
-and the same slope on both sides. (L2) is one smooth formula; it is zero
-near `H = 4` (laminar separation) and negative above it. Source: the
-Falkner-Skan fits of M. Drela (1986), as used in Drela and Giles (1987).
-Range of validity: `1 < H <= 7.5`, attached below `H = 4`.
-
-### Turbulent closures (Swafford profile family)
+(C7) Equilibrium shear-stress coefficient (from the equilibrium locus $G = A\sqrt{1 + B\beta}$):
 
 ```{math}
-\text{(T1)} \qquad C_f(H, Re_\theta)
-  = A_0 e^{-A_1 H} (\log_{10} Re_\theta)^{-(E_0 + E_1 H)}
-  + S_0 \left( \tanh(4 - H) - \tfrac{1}{2} \right).
+C_{\tau,EQ} = H^*\,\frac{0.015}{1 - U_s}\,\frac{(H - 1)^3}{H^3}.
 ```
 
-The first term is the attached skin friction from the wall-wake profile
-family; the second term lowers `Cf` through separation and makes it
-negative in reversed flow. Source: the profile fit of T. J. Swafford
-(1983), in the form used by Drela and Giles (1987). Range of validity:
-attached turbulent flow, `1 <= H <= 2.5`, `Re_theta >= 50` (the logarithm
-needs `Re_theta > 1`).
+(C8) Dissipation coefficient, with the shear-stress coefficient $C_\tau$ of the lag equation:
 
 ```{math}
-\text{(T2)} \qquad Hstar(H, Re_\theta)
-  = s_0 + s_1 (H - 1) + s_2 (H - 1)^2 - s_3 \log_{10}(Re_\theta / 10^4).
+C_D = \frac{C_f}{2}\,U_s + C_\tau\,(1 - U_s).
 ```
+
+In the wake the skin friction is zero and the dissipation is doubled (two shear layers): $C_D = 2\,C_\tau (1 - U_s)$.
+
+(C9) Shear-stress lag equation (the lag-entrainment idea of Green, Weeks and Brooman 1977, in the form of Drela and Giles 1987), with the constants $K_C = 5.6$ and $A = 6.7$:
 
 ```{math}
-\text{(T3)} \qquad U_s(H, Re_\theta)
-  = u_0 + u_1 (H - 1) + u_2 (H - 1)^2 - u_3 \log_{10}(Re_\theta / 10^4).
+\frac{\delta}{C_\tau}\frac{dC_\tau}{d\xi} = 5.6\left(C_{\tau,EQ}^{1/2} - C_\tau^{1/2}\right)
++ 2\delta\left\{\frac{4}{3\delta^*}\left[\frac{C_f}{2} - \left(\frac{H - 1}{6.7\,H}\right)^2\right] - \frac{1}{u_e}\frac{du_e}{d\xi}\right\}.
 ```
 
-`Us = u_s / u_e` (dimensionless) is the slip velocity of the outer wake
-profile. Source: the wall-wake profile family of Swafford (1983), as used
-by Drela and Giles (1987). Range of validity: as (T1).
+(C10) Boundary-layer thickness in the lag equation:
 
 ```{math}
-\text{(T4)} \qquad C_{\tau,eq}(H, Hstar, U_s)
-  = k \left( \frac{Hstar - 1}{Hstar \, U_s} \right)^2.
+\delta = \theta\left(3.15 + \frac{1.72}{H - 1}\right) + \delta^*.
 ```
 
-`Ctau_eq = tau_max / (rho_e u_e^2)` (dimensionless) is the equilibrium
-shear-stress coefficient on the equilibrium locus. At a zero-pressure
-gradient flat plate it equals half the local skin-friction coefficient
-(the maximum shear is the wall shear there). `H` enters a coupled solve
-through `Hstar`, so the direct partial with respect to `H` is zero. Source:
-the equilibrium locus behind the lag-entrainment method of Green, Weeks
-and Brooman (1977), as used by Drela and Giles (1987). Range of validity:
-`Hstar > 1`, `Us > 0`.
+## Transition (envelope $e^N$ method)
+
+(E1) Critical momentum-thickness Reynolds number:
 
 ```{math}
-\text{(T5)} \qquad C_D(H, Re_\theta, U_s, C_\tau)
-  = \frac{C_f}{2} U_s + k_d \, (C_\tau - C_{\tau,eq}).
+\log_{10} Re_{\theta 0} = \left(\frac{1.415}{H - 1} - 0.489\right)\tanh\left(\frac{20}{H - 1} - 12.9\right) + \frac{3.295}{H - 1} + 0.44.
 ```
 
-At equilibrium the dissipation is the wall shear work `(Cf / 2) Us`; off
-equilibrium it rises linearly with the shear excess. `Cf` is (T1) and
-`Ctau_eq` is (T4) with `Hstar` from (T2). Source: Drela and Giles (1987).
-Range of validity: as (T1), with `C_tau > 0`.
-
-### Shear lag (Green, Weeks and Brooman idea)
+(E2) Envelope amplification rate:
 
 ```{math}
-\text{(G1)} \qquad \delta_{star} \frac{dC_\tau}{ds}
-  = K \, (\sqrt{C_{\tau,eq}} - \sqrt{C_\tau}), \qquad
-  K(C_\tau) = K_c \sqrt{C_\tau}.
+\frac{dN}{dRe_\theta} = 0.01\left\{\left[2.4 H - 3.7 + 2.5\tanh(1.5 H - 4.65)\right]^2 + 0.25\right\}^{1/2}.
 ```
 
-The rate scales with the turbulence level `sqrt(C_tau)`; `Kc` is the lag
-constant. Source: the lag-entrainment idea of Green, Weeks and Brooman
-(1977), in the form of Drela and Giles (1987). Range of validity:
-`C_tau > 0`.
-
-### Transition (envelope e^N)
+(E3) Conversion to the surface coordinate with the Falkner-Skan relations $\ell(H) = (6.54 H - 14.07)/H^2$ and $m(H) = \left[0.058 (H - 4)^2/(H - 1) - 0.068\right]/\ell(H)$:
 
 ```{math}
-\text{(E1)} \qquad Re_{\theta,0}(H) = r_0 + e^{r_1 - H}.
+\theta\,\frac{dRe_\theta}{d\xi} = \frac{m + 1}{2}\,\ell = \frac{1}{2}\left[0.058\,\frac{(H - 4)^2}{H - 1} - 0.068 + \ell\right].
 ```
 
-The critical Reynolds number falls as `H` rises (an adverse gradient
-destabilizes the layer) and approaches a floor in strongly adverse
-gradients. Source: M. Drela (1986), as used in Drela and Giles (1987).
-Range of validity: `1 <= H <= 7`.
+The second form has no singular point where $\ell = 0$.
 
-```{math}
-\text{(E2)} \qquad g(H) = \frac{dN}{dRe_\theta} = n_0 + n_1 (H - 1).
-```
+(E4) Growth rate: $dN/d\xi = (dN/dRe_\theta)\,(m + 1)\ell/(2\theta)$ for $Re_\theta > Re_{\theta 0}$, and zero below. The switch is a jump of the published relation; the code keeps it. The discrete equations integrate it exactly inside an interval (see [](ibl2d_march.md)), so that the residuals stay continuous.
 
-The envelope slope is positive: past the critical Reynolds number every
-Reynolds-number increment adds to the exponent. Source: M. Drela (1986),
-as used in Drela and Giles (1987). Range of validity: as (E1).
-
-```{math}
-\text{(E3)} \qquad \frac{dN}{ds} = g(H) \frac{dRe_\theta}{ds}
-  \quad (Re_\theta \ge Re_{\theta,0}), \qquad \frac{dN}{ds} = 0
-  \quad \text{else}.
-```
-
-The switch at the critical Reynolds number is the source relation itself.
-Source: Drela and Giles (1987). Range of validity: as (E1).
+At the transition point the shear-stress coefficient starts at $C_\tau = 0.7\,C_{\tau,EQ}$, evaluated with the turbulent closures at the state of the transition point (constant `TRANSITION_CTAU_FACTOR`). **This factor is the best reading of Drela and Giles (1987) and is to be checked against the paper.**
 
 ## Assumptions
 
-- The flow is incompressible (edge Mach 0); no density shape factor is
-  used.
-- The laminar closures describe the Falkner-Skan profile family
-  (attached and separated); the turbulent closures describe the Swafford
-  wall-wake profile family.
-- The lag equation relaxes the maximum shear stress toward its
-  equilibrium value over a few displacement thicknesses.
-- The transition model tracks the envelope of the Tollmien-Schlichting
-  amplification curves; it has no bypass or crossflow terms.
+- Incompressible flow, two-dimensional, attached or mildly separated layers.
+- The laminar relations are fits to similar (Falkner-Skan) profiles; non-similar flows use them as local closures.
+- The turbulent relations are fits to the Swafford profile family and to equilibrium flows; the lag equation models non-equilibrium.
+- The wake is a single layer with the sum of the two trailing-edge layers; its closures are those of a turbulent layer with zero skin friction and doubled dissipation.
 
 ## Envelope
 
-- Laminar relations: valid for `1 < H <= 7.5`; (L2) is singular at `H = 1`.
-- Turbulent relations: valid for attached turbulent flow (`H <= 2.5`,
-  `Re_theta >= 50`); values outside are smooth extrapolations.
-- The lag coefficient needs `C_tau > 0`; the equilibrium locus needs
-  `Hstar > 1` and `Us > 0`.
-- The transition correlations cover `1 <= H <= 7`; the critical Reynolds
-  number keeps a positive floor.
+The relations are valid for $H > 1$ (all relations divide by $H - 1$), $Re_\theta > 1$ in turbulent flow, and $U_s < 1$. The laminar relations cover $H$ from the stagnation value 2.24 to well beyond separation. The transition model is the envelope method for two-dimensional Tollmien-Schlichting waves in low free-stream turbulence; bypass transition is not modelled.
 
 ## Implementation
 
-- `ventorum.ibl2d.closure`: `laminar_h_star`, `laminar_cf_factor`,
-  `laminar_dissipation_factor`, `turbulent_cf`, `turbulent_h_star`,
-  `turbulent_slip_velocity`, `equilibrium_shear_coefficient`,
-  `turbulent_dissipation_coefficient`, `shear_lag_coefficient`.
-- `ventorum.ibl2d.transition`: `critical_re_theta`, `amplification_rate`,
-  `transition_growth_rate`.
-- Each function returns the value and its analytic partial derivatives as
-  a tuple, and takes an optional `xp` array module (numpy by default,
-  torch for CPU or CUDA tensors).
+`ventorum/ibl2d/closure.py` and `ventorum/ibl2d/transition.py`. Every function is vectorized (no loop over stations) and runs with numpy or torch (CPU or CUDA). The partial derivatives are analytic; `ventorum/ibl2d/dual.py` combines them with the chain rule (forward-mode derivatives), so the Newton solvers get the exact Jacobian of the discrete equations.
 
 ## Verification
 
-- `tests/test_ibl_closure.py` checks every partial derivative against a
-  central finite difference (relative step 1e-6, float64) to 1e-6
-  relative on `H` in [1.05, 7] and `Re_theta` in [50, 1e5].
-- The Blasius flat-plate values (`H = 2.591`: `Hstar = 1.5725`,
-  `Re_theta Cf / 2 = 0.2205`) agree within 2 %.
-- The flat-plate skin friction (`H = 1.4`, `Re_theta = 1e4`) agrees with
-  the Ludwieg-Tillmann correlation within 15 %.
-- The critical Reynolds number rises as `H` falls from 3 to 2.2; growth
-  is zero below it and positive above it.
-- numpy and torch (float64, CPU) agree to 1e-12; a CUDA test (marked
-  `gpu`) checks float32 to 1e-5.
-- Continuity holds (1e-6 relative) at the `H = 4` switches; the switch of
-  (E3) at the critical Reynolds number is recorded with its exact size.
-- The amplification rate at `H = 2.591` yields natural transition on a
-  flat plate in the validated range between 1e6 and 5e6.
-- The turbulent slip velocity balances the kinetic energy shape factor
-  near the equilibrium shape factor, which provides stable relaxation.
+`tests/test_ibl_closure.py`:
+
+- every partial derivative against central differences (step 1e-6 relative) on $H$ from 1.05 to 7 and $Re_\theta$ from 50 to 1e5, to 1e-6 relative;
+- Blasius ($H = 2.591$): $H^*$ and $Re_\theta C_f/2$ within 1 % of 1.5725 and 0.2205;
+- exact Falkner-Skan profiles, solved in the test for $\beta$ = 1, 0.3, 0, -0.1, -0.16: $H^*$ within 0.2 %, the dissipation factor within 1 %, the skin-friction factor within 0.01;
+- Ludwieg-Tillmann at $H = 1.4$, $Re_\theta = 10^4$: within 15 %;
+- $Re_{\theta 0}$ against the published closed form written in the test at $H$ = 2.216, 2.6, 3.0 (1e-12), and the other turbulent relations against their closed forms;
+- $Re_{\theta 0}$ rises as $H$ falls from 3 to 2.2; the growth rate is zero below $Re_{\theta 0}$ and positive above;
+- continuity at all branch points; numpy and torch agree to 1e-12; CUDA float32 values within 1e-5 relative (marked gpu).
 
 ## References
 
-- M. Drela and M. B. Giles, "Viscous-inviscid analysis of transonic and
-  low Reynolds number airfoils", AIAA Journal 25(10), 1987, pp. 1347-1355.
-- M. Drela, doctoral thesis, MIT Gas Turbine Laboratory Report 187, 1986.
-- T. J. Swafford, "Analytical approximation of two-dimensional separated
-  turbulent boundary-layer velocity profiles", AIAA Journal 21(6), 1983.
-- P. D. Green, D. G. Weeks and J. W. F. Brooman, "Prediction of turbulent
-  boundary layers and wakes in compressible flow by a lag-entrainment
-  method", ARC R and M 3791, 1977.
+- M. Drela and M. B. Giles, "Viscous-inviscid analysis of transonic and low Reynolds number airfoils", AIAA Journal 25(10), 1987, pp. 1347-1355.
+- M. Drela, "Two-dimensional transonic aerodynamic design and analysis using the Euler equations", doctoral thesis, MIT Gas Turbine Laboratory Report 187, 1986.
+- T. J. Swafford, "Analytical approximation of two-dimensional separated turbulent boundary-layer velocity profiles", AIAA Journal 21(6), 1983, pp. 923-926.
+- P. D. Green, D. G. Weeks and J. W. F. Brooman, "Prediction of turbulent boundary layers and wakes in compressible flow by a lag-entrainment method", ARC R and M 3791, 1977.
+- V. M. Falkner and S. W. Skan, "Some approximate solutions of the boundary layer equations", ARC R and M 1314, 1930.

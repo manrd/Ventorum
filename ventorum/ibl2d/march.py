@@ -22,11 +22,16 @@ uses it for its first estimate.
   solution, the march stops, marks the station as separated and returns
   the partial result. There is no inverse mode here; the coupled solver
   handles separated flow.
+* The station solve (:func:`station_newton`) also accepts a local
+  interaction law instead of a given edge velocity (quasi-simultaneous
+  coupling); the coupled solver uses it for one of its first estimates.
 
 Sources: M. Drela and M. B. Giles, AIAA Journal 25(10), 1987, pp.
 1347-1355; M. Drela, MIT GTL Report 187, 1986; K. Hiemenz (1911) and
 H. Blasius (1908) for the similarity solutions (as given in H. Schlichting,
-Boundary-Layer Theory). No program source code was read or used.
+Boundary-Layer Theory); A. E. P. Veldman, Computers and Fluids 38(3), 2009,
+pp. 496-508 (quasi-simultaneous interaction law). No program source code
+was read or used.
 """
 
 from __future__ import annotations
@@ -189,7 +194,7 @@ def _solve3(xp, J, R):
 
 
 def station_newton(kind, st1, ue2, dxi, re, guess, *, ncrit=None, w_forced=None, h_fix=None,
-                   max_iter=40, tol=None):
+                   max_iter=40, tol=None, st0=None, dxi0=None, law=None):
     """Solve the equations of one interval for the downstream station.
 
     Parameters
@@ -212,12 +217,24 @@ def station_newton(kind, st1, ue2, dxi, re, guess, *, ncrit=None, w_forced=None,
     h_fix : array, optional
         When given, the kinetic-energy equation is replaced by H = h_fix
         (used only to build a first estimate past a separation point).
+    st0, dxi0 : optional
+        For the POST kind: ``(theta, delta_star, N, ue)`` of the last laminar
+        station and the length of the transition interval; ``w_forced`` is
+        then the forced fraction of the transition interval.
     max_iter : int
         Largest number of Newton iterations.
     tol : float or None
         Convergence limit of the largest absolute residual [-]. None selects
         1e-10 in float64 and 1e-5 (about 100 times the unit round-off) in
         float32.
+    law : tuple of array, optional
+        ``(a, d)``: when given, the downstream edge velocity is not fixed but
+        follows the local interaction law ue2 = a + d ue2 delta_star2, that
+        is ue2 = a / (1 - d delta_star2) [-] (quasi-simultaneous coupling,
+        Veldman 2009); ``ue2`` is then ignored. ``a`` [-] holds the inviscid
+        velocity and the influence of the other stations, ``d`` [1/m] the
+        influence of the mass defect of the station on its own edge
+        velocity.
 
     Returns
     -------
@@ -226,21 +243,32 @@ def station_newton(kind, st1, ue2, dxi, re, guess, *, ncrit=None, w_forced=None,
         the converged stations and, for the TRANSITION kind, the fraction w
         of the transition point (else None).
     """
+    if law is not None:
+        ue2 = law[0]
     xp = _xp_of(ue2)
     if tol is None:
         tol = 1e-10 if (xp is np or ue2.dtype == xp.float64) else 1e-5
     th, ds, c = (g * 1.0 for g in guess)
     ok = None
     w_out = None
+
+    def edge(v_ds, like):
+        if law is None:
+            return constant(ue2, like)
+        return constant(law[0], like) / (1.0 - constant(law[1], like) * v_ds)
+
     for _ in range(max_iter):
         v_th, v_ds, v_c = variables([th, ds, c], xp=xp)
         like = v_th
         s1 = tuple(constant(a, like) for a in st1)
-        u2 = constant(ue2, like)
+        u2 = edge(v_ds, like)
         s2 = (v_th, v_ds, v_c, u2)
         if kind == eq.TRANSITION:
             r1, r2, r3, w = eq.transition_residuals(s1, s2, dxi, re, ncrit, w_forced)
             w_out = w.val
+        elif kind == eq.POST:
+            s0 = tuple(constant(a, like) for a in st0)
+            r1, r2, r3 = eq.post_transition_residuals(s0, s1, s2, dxi0, dxi, re, ncrit, w_forced)
         else:
             r1, r2, r3 = eq.interval_residuals(kind, s1, s2, dxi, re)
         if h_fix is not None:
@@ -259,6 +287,9 @@ def station_newton(kind, st1, ue2, dxi, re, guess, *, ncrit=None, w_forced=None,
         for _k in range(30):
             h_new = (ds + lam * d[:, 1]) / (th + lam * d[:, 0])
             bad = h_new < 1.0 + 0.5 * (h_old - 1.0)
+            if law is not None:
+                # The interaction law must keep a positive edge velocity.
+                bad = bad | (law[1] * (ds + lam * d[:, 1]) > 0.9)
             if not bool(xp.any(bad)):
                 break
             lam = xp.where(bad, 0.5 * lam, lam)
@@ -270,10 +301,13 @@ def station_newton(kind, st1, ue2, dxi, re, guess, *, ncrit=None, w_forced=None,
     # Final residual check.
     v_th, v_ds, v_c = variables([th, ds, c], xp=xp)
     s1 = tuple(constant(a, v_th) for a in st1)
-    s2 = (v_th, v_ds, v_c, constant(ue2, v_th))
+    s2 = (v_th, v_ds, v_c, edge(v_ds, v_th))
     if kind == eq.TRANSITION:
         r1, r2, r3, w = eq.transition_residuals(s1, s2, dxi, re, ncrit, w_forced)
         w_out = w.val
+    elif kind == eq.POST:
+        s0 = tuple(constant(a, v_th) for a in st0)
+        r1, r2, r3 = eq.post_transition_residuals(s0, s1, s2, dxi0, dxi, re, ncrit, w_forced)
     else:
         r1, r2, r3 = eq.interval_residuals(kind, s1, s2, dxi, re)
     if h_fix is not None:
@@ -395,7 +429,11 @@ def march_direct_batch(s, ue_batch, Re_ref_batch, xp=None, *, ncrit=9.0, forced_
             DS[:, 1] = hb * th1
             C[:, 1] = 0.0
             start = 2
+    post = (0.0 * re) > 1.0
+    p_th, p_ds, p_n, p_u, p_dx, p_wf = (0.0 * re for _ in range(6))
     for i in range(start, n):
+        post_prev = post | False
+        post = (0.0 * re) > 1.0
         th1, ds1, c1, u1 = TH[:, i - 1], DS[:, i - 1], C[:, i - 1], ue[:, i - 1]
         u2 = ue[:, i]
         dx = (sv[i] - sv[i - 1]) * (1.0 + 0.0 * re)
@@ -435,13 +473,23 @@ def march_direct_batch(s, ue_batch, Re_ref_batch, xp=None, *, ncrit=9.0, forced_
                 new_c[jdx] = c3
                 new_turb[jdx] = True
                 failed[jdx] = ~ok3
+                post[jdx] = True
+                p_th[jdx], p_ds[jdx], p_n[jdx], p_u[jdx] = stj[0], stj[1], stj[2], stj[3]
+                p_dx[jdx] = dx[jdx]
+                p_wf[jdx] = wf[go]
                 wcl = xp.where(w3 < 0.0, 0.0 * w3, xp.where(w3 > 1.0, 1.0 + 0.0 * w3, w3))
                 xtr[jdx] = s1v + wcl * (sv[i] - s1v)
-        if bool(xp.any(trb)):
-            idx = xp.nonzero(trb)[0] if xp is np else xp.nonzero(trb)[:, 0]
+        for kind, sel in ((eq.POST, trb & post_prev), (eq.TURBULENT, trb & ~post_prev)):
+            if not bool(xp.any(sel)):
+                continue
+            idx = xp.nonzero(sel)[0] if xp is np else xp.nonzero(sel)[:, 0]
             st = tuple(a[idx] for a in sub_s)
-            t2, d2, c2, ok, _ = station_newton(eq.TURBULENT, st, u2[idx], dx[idx], re[idx],
-                                               (st[0], st[1], st[2]))
+            extra = {}
+            if kind == eq.POST:
+                extra = dict(st0=(p_th[idx], p_ds[idx], p_n[idx], p_u[idx]), dxi0=p_dx[idx], ncrit=nc[idx],
+                             w_forced=p_wf[idx])
+            t2, d2, c2, ok, _ = station_newton(kind, st, u2[idx], dx[idx], re[idx], (st[0], st[1], st[2]),
+                                               **extra)
             new_th[idx] = t2
             new_ds[idx] = d2
             new_c[idx] = c2

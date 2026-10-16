@@ -110,3 +110,30 @@ def test_batch_cuda_float32():
     th = t.theta.double().cpu().numpy()
     m = np.isfinite(b.theta) & (b.theta > 0.0)
     assert np.max(np.abs(th[m] / b.theta[m] - 1.0)) < 1e-4
+
+
+@pytest.mark.parametrize("kind", [0, 1])
+def test_station_interaction_law(kind):
+    """With a local interaction law the station state solves the interval equations at ue2 = a / (1 - d delta_star2).
+
+    Laminar and turbulent intervals; the residuals at that edge velocity
+    vanish to 1e-10, and the edge velocity differs from a (the law acts).
+    """
+    from ventorum.ibl2d import equations as eq
+    from ventorum.ibl2d.dual import constant, variables
+
+    re = np.array([1e6])
+    if kind == 0:
+        k, st1 = eq.LAMINAR, (np.array([4e-4]), np.array([1.1e-3]), np.array([1.0]), np.array([1.2]))
+    else:
+        k, st1 = eq.TURBULENT, (np.array([1e-3]), np.array([1.5e-3]), np.array([0.03]), np.array([1.1]))
+    dxi = np.array([0.02])
+    law = (np.array([1.1]), np.array([30.0]))
+    t, d, c, ok, _ = mr.station_newton(k, st1, np.array([1.0]), dxi, re, st1[:3], law=law)
+    assert ok[0]
+    ue2 = law[0] / (1.0 - law[1] * d)
+    assert ue2[0] > 1.1 * (1.0 + 1e-3)
+    v = variables([t, d, c])
+    s1 = tuple(constant(x, v[0]) for x in st1)
+    res = eq.interval_residuals(k, s1, (v[0], v[1], v[2], constant(ue2, v[0])), dxi, re)
+    assert max(abs(float(r.val[0])) for r in res) < 1e-10

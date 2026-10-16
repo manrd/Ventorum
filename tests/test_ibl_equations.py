@@ -101,6 +101,43 @@ def test_transition_jacobian():
     assert np.all((w > 0.0) & (w < 1.0)), w
 
 
+def test_post_transition_jacobian_and_continuity():
+    """The post-transition interval: Jacobian against central differences, and continuity.
+
+    With the transition point at the end of the transition interval (w = 1)
+    the next interval is implicit; at w = 0 it is trapezoidal.
+    """
+    lam = _states(eq.LAMINAR)
+    trb = _states(eq.TURBULENT)
+    x0 = [lam[0], lam[0] * np.linspace(2.8, 3.4, 12), lam[2], lam[3]]
+    dxi0 = np.full(12, 0.02)
+    dxi = np.full(12, 0.015)
+    ncrit = np.full(12, 9.0)
+    t0 = eq.laminar_terms(*variables(x0), RE)
+    x0[2] = ncrit - np.linspace(0.2, 0.8, 12) * dxi0 * t0["rtil"].val
+    x = x0 + trb
+
+    def fun(v):
+        return eq.post_transition_residuals(tuple(v[:4]), tuple(v[4:8]), tuple(v[8:]), dxi0, dxi, RE, ncrit,
+                                            np.full(12, 5.0))
+
+    _fd_check(fun, x)
+    xf = [a.copy() for a in x]
+    xf[2] = ncrit - 1.5 * dxi0 * t0["rtil"].val
+    v = variables(xf)
+    s1, s2 = tuple(v[4:8]), tuple(v[8:])
+    w1 = eq.post_transition_residuals(tuple(v[:4]), s1, s2, dxi0, dxi, RE, ncrit, np.full(12, 1.0))
+    t1 = eq.turbulent_terms(*s1, RE)
+    t2 = eq.turbulent_terms(*s2, RE)
+    implicit = eq._pair(eq.TURBULENT, t1, t2, s1, s2, dxi, wb=1.0)
+    for a, b in zip(w1, implicit):
+        assert np.allclose(a.val, b.val, rtol=1e-14, atol=1e-15)
+    w0 = eq.post_transition_residuals(tuple(v[:4]), s1, s2, dxi0, dxi, RE, ncrit, np.full(12, 0.0))
+    trap = eq.interval_residuals(eq.TURBULENT, s1, s2, dxi, RE)
+    for a, b in zip(w0, trap):
+        assert np.allclose(a.val, b.val, rtol=1e-14, atol=1e-15)
+
+
 def test_similarity_and_trailing_edge_jacobians():
     """Stagnation-point and trailing-edge residual Jacobians equal central differences."""
     rng = np.random.default_rng(5)
