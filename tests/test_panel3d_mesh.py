@@ -7,7 +7,7 @@ import numpy as np
 import pytest
 from scipy.spatial import cKDTree
 
-from ventorum.core.datatypes import Aircraft, LiftingSurface, SolverSettings, WingSection
+from ventorum.core.datatypes import Aircraft, ControlSurface, LiftingSurface, SolverSettings, WingSection
 from ventorum.geometry.lattice import build_lattice
 from ventorum.panel3d.mesh import PanelMesh, check_mesh, mesh_aircraft, mesh_lifting_surface
 
@@ -366,6 +366,183 @@ def test_dihedral_sections_lie_normal_to_the_span():
     te = np.asarray(lattice.surfaces[0].edge_te)
     te = te[np.argsort(te[:, 1])]
     np.testing.assert_allclose(_wake_points(full), te, rtol=0.0, atol=1e-12)
+
+
+def _straight_wing(dihedral_deg, symmetric=True):
+    """Rectangular unit-chord wing of semi-span 2 m without twist."""
+    return LiftingSurface(
+        name="Wing",
+        semi_span=2.0,
+        sections=[
+            WingSection(y_frac=0.0, chord=1.0, twist=0.0),
+            WingSection(y_frac=1.0, chord=1.0, twist=0.0),
+        ],
+        is_symmetric=symmetric,
+        dihedral=np.radians(dihedral_deg),
+    )
+
+
+def _same_mesh(a, b):
+    """True when two meshes are equal bit for bit (nodes, panels and metadata)."""
+    for name in ("nodes", "panels", "component", "kind", "wake_edges", "strip", "chord_index", "side",
+                 "node_station"):
+        x, y = np.asarray(getattr(a, name)), np.asarray(getattr(b, name))
+        if x.shape != y.shape or not np.array_equal(x, y):
+            return False
+    return a.half == b.half and a.tip == b.tip
+
+
+def _resampled_section(coords, n_chord):
+    """Upper and lower ordinates of the mesh stations of one section [chord units]."""
+    from ventorum.panel3d.mesh import _resample_section, _target_x
+
+    xt = _target_x(n_chord, "cosine")
+    yu, yl = _resample_section(coords, xt)
+    return xt, yu, yl
+
+
+def test_root_thickness_scaling_keeps_the_half_wing_volume():
+    """Regression: the root section of a 30 deg half wing was thinner normal to the surface.
+
+    The root section lies in the plane y = 0 (the miter of the two halves).
+    Its thickness along z was t cos(30 deg) normal to the first panel row,
+    so the half wing had less volume than the same wing at 0 deg (0.26 %
+    with 8 spanwise panels). With the root offsets from the camber line
+    scaled by 1 / cos(dihedral) the first panel row of a symmetric section
+    is an exact prism: the volumes agree to round-off (requirement 1e-3).
+    """
+    coords = _naca4(0.0, 0.0, 0.12, closed=True)
+    gam = np.radians(30.0)
+    v_flat = check_mesh(mesh_lifting_surface(_straight_wing(0.0), coords, n_chord=60, n_span=8, half=True))
+    mesh = mesh_lifting_surface(_straight_wing(30.0), coords, n_chord=60, n_span=8, half=True)
+    info = check_mesh(mesh)
+    assert info["watertight"] and info["outward"]
+    rel = info["volume"] / v_flat["volume"] - 1.0
+    assert abs(rel) < 1e-3
+    assert abs(rel) < 1e-12
+    old = mesh_lifting_surface(_straight_wing(30.0), coords, n_chord=60, n_span=8, half=True,
+                               scale_root_thickness=False)
+    assert check_mesh(old)["volume"] / v_flat["volume"] - 1.0 < -2e-3
+    # Thickness normal to the first panel row: the root equals the next station.
+    nodes = np.asarray(mesh.nodes)
+    station = np.asarray(mesh.node_station)
+    normal = np.array([0.0, -np.sin(gam), np.cos(gam)])
+    t_root = float(np.ptp(nodes[station == 0] @ normal))
+    t_next = float(np.ptp(nodes[station == 1] @ normal))
+    assert t_root == pytest.approx(t_next, rel=1e-12)
+    old_nodes = np.asarray(old.nodes)
+    t_old = float(np.ptp(old_nodes[np.asarray(old.node_station) == 0] @ normal))
+    assert t_old == pytest.approx(np.cos(gam) * t_next, rel=1e-12)
+
+
+def test_root_thickness_scaling_of_a_cambered_section_leaves_the_miter_wedge():
+    """A cambered root section keeps a known volume difference: the miter wedge.
+
+    The camber line of the root section does not move, so the miter plane
+    y = 0 cuts the cambered slab at an angle. The volume difference to the
+    0 deg wing is -(sin G + tan G (1 - cos G) / 2) Q, with Q the first
+    moment of the section area about the chord line (about -0.42 % for a
+    NACA 2412 half wing of semi-span 2 chords at 30 deg). It does not
+    depend on the spanwise panel count.
+    """
+    coords = _naca4(0.02, 0.4, 0.12, closed=True)
+    gam = np.radians(30.0)
+    xt, yu, yl = _resampled_section(coords, 60)
+    area = float(np.trapezoid(yu - yl, xt))
+    moment = float(0.5 * np.trapezoid(yu**2 - yl**2, xt))
+    expected = -(np.sin(gam) + 0.5 * np.tan(gam) * (1.0 - np.cos(gam))) * moment / (area * 2.0)
+    for n_span in (8, 16):
+        v_flat = check_mesh(mesh_lifting_surface(_straight_wing(0.0), coords, n_chord=60, n_span=n_span,
+                                                 half=True))["volume"]
+        info = check_mesh(mesh_lifting_surface(_straight_wing(30.0), coords, n_chord=60, n_span=n_span,
+                                               half=True))
+        assert info["watertight"] and info["outward"]
+        assert abs((info["volume"] / v_flat - 1.0) - expected) < 1e-6
+
+
+def test_root_thickness_option_off_and_unaffected_surfaces():
+    """Option off keeps the former mesh; surfaces without a miter do not change.
+
+    With the option off only the root section differs from the option on;
+    its thickness lies along z as before. A flat wing (factor 1), a
+    one-sided surface (its root section is normal to its span axis), a
+    vertical fin and a control at the root of a flat wing give the same
+    mesh bit for bit with the option on and off.
+    """
+    coords = _naca4(0.02, 0.4, 0.12, closed=True)
+    on = mesh_lifting_surface(_straight_wing(30.0), coords, n_chord=12, n_span=8)
+    off = mesh_lifting_surface(_straight_wing(30.0), coords, n_chord=12, n_span=8, scale_root_thickness=False)
+    for name in ("panels", "kind", "wake_edges", "strip", "chord_index", "side", "node_station"):
+        assert np.array_equal(np.asarray(getattr(on, name)), np.asarray(getattr(off, name)))
+    station = np.asarray(on.node_station)
+    root = station == int(np.median(station[np.abs(np.asarray(on.nodes)[:, 1]) < 1e-12]))
+    assert np.array_equal(np.asarray(on.nodes)[~root], np.asarray(off.nodes)[~root])
+    assert not np.array_equal(np.asarray(on.nodes)[root], np.asarray(off.nodes)[root])
+    assert np.all(np.abs(np.asarray(on.nodes)[root, 1]) < 1e-15)
+    # Option off: the root offsets lie along z and equal the section ordinates.
+    xt, yu, yl = _resampled_section(coords, 12)
+    z_root = np.sort(np.asarray(off.nodes)[root, 2])
+    np.testing.assert_allclose(z_root, np.sort(np.concatenate([yu[1:-1], yl[1:-1], [0.5 * (yu[0] + yl[0])],
+                                                               [0.5 * (yu[-1] + yl[-1])]])), atol=1e-15)
+    flapped = _straight_wing(0.0)
+    flapped.controls = [ControlSurface("flap", 0.0, 0.5, 0.7, np.radians(10.0))]
+    fin = _straight_wing(90.0, symmetric=False)
+    one_side = _straight_wing(30.0, symmetric=False)
+    for surf in (_straight_wing(0.0), flapped, fin, one_side):
+        for half in (False, True):
+            a = mesh_lifting_surface(surf, coords, n_chord=12, n_span=8, half=half)
+            b = mesh_lifting_surface(surf, coords, n_chord=12, n_span=8, half=half, scale_root_thickness=False)
+            assert _same_mesh(a, b)
+    # mesh_aircraft passes the option to every surface.
+    tail = _straight_wing(30.0)
+    tail.name = "Tail"
+    tail.position = np.array([4.0, 0.0, 0.5])
+    ac = Aircraft(name="T", surfaces=[_straight_wing(30.0), tail])
+    for flag in (True, False):
+        both = mesh_aircraft(ac, [coords, coords], n_chord=12, n_span=8, scale_root_thickness=flag)
+        single = mesh_lifting_surface(ac.surfaces[0], coords, n_chord=12, n_span=8, scale_root_thickness=flag)
+        n0 = np.asarray(single.nodes).shape[0]
+        assert np.array_equal(np.asarray(both.nodes)[:n0], np.asarray(single.nodes))
+
+
+def test_root_thickness_scaling_keeps_edges_on_the_lattice_and_closure():
+    """With the scaled root the leading and trailing edges stay on the lattice points.
+
+    Tapered, swept and twisted wing with 30 deg dihedral. The trailing-edge
+    nodes are the lattice points. The leading-edge nodes are the lattice
+    points for symmetric sections; for a cambered section the leading-edge
+    node is the mean of the resampled ordinates at x = 0, which the scaling
+    about the camber line does not move. The same wing with a plain flap
+    at the root stays watertight and outward.
+    """
+    root = _naca4(0.02, 0.4, 0.12, closed=True)
+    tip = _naca4(0.0, 0.0, 0.12, closed=True)
+    surf = _twisted_wing()
+    surf.dihedral = np.radians(30.0)
+    n_span = 8
+    lattice = build_lattice(Aircraft(name="T", surfaces=[surf]), SolverSettings(n_panels=n_span))
+    te = np.asarray(lattice.surfaces[0].edge_te)
+    te = te[np.argsort(te[:, 1])]
+    le = np.asarray(lattice.surfaces[0].edge_le)
+    symmetric = mesh_lifting_surface(surf, tip, n_chord=12, n_span=n_span)
+    dist, _ = cKDTree(np.asarray(symmetric.nodes)).query(le)
+    assert float(np.max(dist)) < 1e-12
+    np.testing.assert_allclose(_wake_points(symmetric), te, rtol=0.0, atol=1e-12)
+    mesh = mesh_lifting_surface(surf, [root, tip], n_chord=12, n_span=n_span)
+    info = check_mesh(mesh)
+    assert info["watertight"] and info["outward"]
+    np.testing.assert_allclose(_wake_points(mesh), te, rtol=0.0, atol=1e-12)
+    old = mesh_lifting_surface(surf, [root, tip], n_chord=12, n_span=n_span, scale_root_thickness=False)
+    # The root nodes changed (the option is on by default), the leading-edge nodes did not.
+    assert not np.array_equal(np.asarray(mesh.nodes), np.asarray(old.nodes))
+    _, i_new = cKDTree(np.asarray(mesh.nodes)).query(le)
+    _, i_old = cKDTree(np.asarray(old.nodes)).query(le)
+    np.testing.assert_allclose(np.asarray(mesh.nodes)[i_new], np.asarray(old.nodes)[i_old], rtol=0.0, atol=1e-15)
+    surf.controls = [ControlSurface("flap", 0.0, 0.4, 0.7, np.radians(15.0))]
+    for half in (False, True):
+        flapped = mesh_lifting_surface(surf, [root, tip], n_chord=12, n_span=n_span, half=half)
+        info = check_mesh(flapped)
+        assert info["watertight"] and info["outward"]
 
 
 def _drop_panels(mesh, keep):

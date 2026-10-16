@@ -318,11 +318,13 @@ def test_panel_settings_reach_the_solver():
         panel_backend="numba",
         panel_wake_length=12.5,
         panel_chord_spacing="uniform",
+        panel_scale_root_thickness=False,
     )
     copy = st.clone()
     for name in ("panel_kutta", "panel_backend", "panel_wake_length", "panel_chord_spacing",
-                 "panel_estimate_mesh_error"):
+                 "panel_estimate_mesh_error", "panel_scale_root_thickness"):
         assert getattr(copy, name) == getattr(st, name)
+    assert SolverSettings().panel_scale_root_thickness is True
     st.panel_estimate_mesh_error = False
 
     @dataclasses.dataclass
@@ -340,12 +342,36 @@ def test_panel_settings_reach_the_solver():
         assert res.details["dispatch"]["backend"] == "numba"
         assert res.details["panel"]["wake_length"] == 12.5
         assert res.details["panel"]["chord_spacing"] == "uniform"
+        assert res.details["panel"]["scale_root_thickness"] is False
 
     for name, value in (("panel_kutta", "linear"), ("panel_backend", "cuda"), ("panel_chord_spacing", "sine")):
         bad = SolverSettings(n_panels=6, n_chord=6)
         setattr(bad, name, value)
         with pytest.raises(ValueError, match=name):
             make_solver("panel3d").solve(ac, cond, bad)
+
+
+def test_root_thickness_setting_reaches_the_mesh():
+    """panel_scale_root_thickness (default True) scales the root section of a dihedral wing.
+
+    The root section of a symmetric wing with 30 deg dihedral is thicker
+    along z by 1 / cos(30 deg) with the default; False keeps the former
+    mesh. Only the root nodes move.
+    """
+    ac = _simple_wing(shape="0012", semi_span=3.0, chord=1.0)
+    ac.surfaces[0].dihedral = np.radians(30.0)
+    cond = FlightCondition(V_inf=25.0, alpha=np.radians(3.0))
+    solver = make_solver("panel3d")
+    on = solver.solve(ac, cond, SolverSettings(n_panels=6, n_chord=8))
+    off = solver.solve(ac, cond, SolverSettings(n_panels=6, n_chord=8, panel_scale_root_thickness=False))
+    assert on.details["panel"]["scale_root_thickness"] is True
+    assert off.details["panel"]["scale_root_thickness"] is False
+    n_on = np.asarray(on.details["mesh"].nodes)
+    n_off = np.asarray(off.details["mesh"].nodes)
+    root = np.abs(n_off[:, 1]) < 1e-12
+    assert np.array_equal(n_on[~root], n_off[~root])
+    assert float(np.ptp(n_on[root, 2])) == pytest.approx(float(np.ptp(n_off[root, 2])) / np.cos(np.radians(30.0)),
+                                                         rel=1e-12)
 
 
 def test_default_chord_spacing_is_cosine():

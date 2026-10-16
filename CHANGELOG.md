@@ -22,7 +22,11 @@ a minor version can change a public interface.
   ground effect by images; the Morino Kutta condition and, as an option, the pressure Kutta
   condition; a GPU solve path (Warp assembly, torch factorization); a mesh-convergence error
   estimate. New `SolverSettings` fields `panel_kutta`, `panel_backend`, `panel_wake_length`,
-  `panel_chord_spacing`, `panel_estimate_mesh_error` (no effect on the other solvers).
+  `panel_chord_spacing`, `panel_estimate_mesh_error`, `panel_scale_root_thickness` (no effect
+  on the other solvers). The root section of a symmetric surface with dihedral (in the plane
+  y = 0) has its thickness scaled by 1 / cos(dihedral), so that the thickness normal to the
+  local surface equals the section thickness (option `scale_root_thickness` of the mesh
+  builders, default on).
 - Ventorum-2D, the own airfoil code: `ventorum.airfoil` (shape type, Selig and Lednicer
   readers and writers, NACA 4-digit and 5-digit generators, spline repaneling, plain-flap
   deflection), `ventorum.panel2d` (linear-vorticity panel method with source panels, ground

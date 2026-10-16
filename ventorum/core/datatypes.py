@@ -1034,6 +1034,13 @@ class SolverSettings:
         condition and adds the error estimate of the given mesh to the
         trust notes. Default False (the study costs much more than one
         solve). The other solvers ignore it.
+    panel_scale_root_thickness : bool
+        If True (default), the 3D panel mesh multiplies the thickness of
+        the root section of a symmetric surface (in the plane y = 0) by
+        1 / cos(G), with G the dihedral of the first panel row [rad], so
+        that the thickness normal to the local surface equals the section
+        thickness. False keeps the thickness along the root section normal.
+        The other solvers ignore it.
     """
 
     solver_type: Literal["auto", "vlm", "linear", "nonlinear", "fourier"] | str = "auto"
@@ -1052,6 +1059,7 @@ class SolverSettings:
     panel_wake_length: float | None = None
     panel_chord_spacing: str = "cosine"
     panel_estimate_mesh_error: bool = False
+    panel_scale_root_thickness: bool = True
 
     def clone(self) -> SolverSettings:
         """Fast explicit clone.
@@ -1078,6 +1086,7 @@ class SolverSettings:
             panel_wake_length=self.panel_wake_length,
             panel_chord_spacing=self.panel_chord_spacing,
             panel_estimate_mesh_error=self.panel_estimate_mesh_error,
+            panel_scale_root_thickness=self.panel_scale_root_thickness,
         )
 
     def __copy__(self) -> SolverSettings:

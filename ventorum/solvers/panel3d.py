@@ -13,8 +13,11 @@ The panel solver reads these fields of :class:`SolverSettings`:
 (chordwise panels per surface, 20 when None), ``spacing``,
 ``proportional_panels``, ``min_panels``, ``use_symmetry``,
 ``panel_kutta``, ``panel_backend``, ``panel_wake_length``,
-``panel_chord_spacing`` (cosine by default) and
-``panel_estimate_mesh_error``.
+``panel_chord_spacing`` (cosine by default),
+``panel_estimate_mesh_error`` and ``panel_scale_root_thickness`` (True
+by default: the root section of a symmetric surface with dihedral keeps
+its thickness normal to the local surface; see
+:mod:`ventorum.panel3d.mesh`).
 
 Backend selection
 -----------------
@@ -419,7 +422,8 @@ class PanelMethodSolver(BaseSolver):
             solved mesh, ``details["dispatch"]`` the backend, device,
             precision and the counted factorizations, and
             ``details["panel"]`` the panel options used (Kutta option,
-            chordwise spacing and count, wake length in m, half mesh).
+            chordwise spacing and count, wake length in m, half mesh,
+            root-thickness scaling).
 
         Notes
         -----
@@ -454,6 +458,7 @@ class PanelMethodSolver(BaseSolver):
         n_chord = int(settings.n_chord) if getattr(settings, "n_chord", None) is not None else _DEFAULT_N_CHORD
         use_sym_setting = bool(getattr(settings, "use_symmetry", True))
         estimate_mesh_error = bool(getattr(settings, "panel_estimate_mesh_error", False))
+        scale_root_thickness = bool(getattr(settings, "panel_scale_root_thickness", True))
 
         grounds = [_ground_of(c, ground, rp) for c in cond_list]
         all_surfs_sym = all(s.is_symmetric for s in ac.surfaces) and not _has_antisymmetric_control(ac)
@@ -513,6 +518,7 @@ class PanelMethodSolver(BaseSolver):
                 tip="flat",
                 half=use_half,
                 n_span=n_span,
+                scale_root_thickness=scale_root_thickness,
             )
 
             fr = np.array([float(s.y_frac) for s in _sorted_sections(surf)])
@@ -628,6 +634,7 @@ class PanelMethodSolver(BaseSolver):
             "n_chord": int(n_chord),
             "wake_length": float(solver.wake_length),
             "half_mesh": bool(use_half),
+            "scale_root_thickness": scale_root_thickness,
         }
 
         # 5. Build SolverResult per condition with strip integration

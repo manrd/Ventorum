@@ -24,6 +24,29 @@ the vortex lattice exactly. At the root of a symmetric surface the lattice
 uses the y axis as the twist axis, so the root section lies in the plane
 y = 0 with the normal z.
 
+Root section of a symmetric surface
+-----------------------------------
+The root section in the plane y = 0 is the cut of the two half wings at
+the plane of symmetry (a miter joint). With the dihedral G of the first
+panel row, a thickness t along z is only t cos(G) normal to the local
+surface. The option ``scale_root_thickness`` (default True) multiplies the
+offsets of the root section from its camber line, along the section normal
+in the plane y = 0, by 1 / cos(G). The thickness normal to the local
+surface then equals the section thickness. The camber line, and so the
+leading-edge and trailing-edge nodes, do not move. For a symmetric section
+without root twist, the first panel row is then an exact prism: the volume
+of the half wing equals the volume of the same wing with zero dihedral to
+round-off. A cambered section keeps a small volume difference: the miter
+plane cuts the cambered slab at an angle, so the difference is about
+sin(G) times the first moment of the section area about the chord line
+(the integral of thickness times camber). With root twist T the thickness
+normal to the surface is t cos(G) / sqrt(1 - sin(T)^2 sin(G)^2) before
+the scaling, so the scaled thickness has a second-order error in T. The
+option has no effect on a surface with zero dihedral at the root, on a
+one-sided surface (its root section is normal to its span axis, for
+example a vertical fin) and on a surface whose first panel row is
+vertical (the two halves coincide and there is no miter).
+
 Published sources
 -----------------
 * Hess, J. L. and Smith, A. M. O., 1964, Calculation of non-lifting
@@ -117,6 +140,10 @@ _VOLUME_REL = 1e-8
 #: Default planarity limit of check_mesh: corner distance from the mean
 #: plane over the panel diameter [-].
 WARP_LIMIT = 0.05
+#: Root-thickness scaling: smallest cosine [-] of the dihedral of the first
+#: panel row. A row closer to the vertical has no miter (the two halves of
+#: a symmetric surface coincide), so the root section is not scaled.
+_COS_ROOT_MIN = 1e-9
 _XHAT = np.array([1.0, 0.0, 0.0])
 
 
@@ -483,6 +510,73 @@ def _span_axes_for_edges(surf, eta_edges: np.ndarray) -> np.ndarray:
         k = int(np.argmin(np.abs(uniq - float(e))))
         out[j] = axis_u[k]
     return out
+
+
+def _root_thickness_factor(surf, eta: np.ndarray) -> float:
+    """Return the thickness factor [-] of the root section of a symmetric surface.
+
+    The factor is 1 / cos(G), with G the dihedral of the first panel row
+    (the reference line from the root station to the next station, in the
+    y-z plane). It is 1 for a one-sided surface, for stations that do not
+    start at the root, for zero dihedral and for a first panel row that is
+    vertical or turns past the vertical.
+
+    Parameters
+    ----------
+    surf : LiftingSurface
+        Surface definition.
+    eta : numpy.ndarray
+        Span fractions of the stations [-], increasing, with duplicates at
+        control side edges.
+
+    Returns
+    -------
+    float
+        Factor on the offsets of the root section from its camber line [-].
+    """
+    if not bool(getattr(surf, "is_symmetric", False)):
+        return 1.0
+    eta = np.asarray(eta, dtype=float)
+    if eta.size < 2 or float(eta[0]) > 1e-12:
+        return 1.0
+    nxt = eta[eta > float(eta[0]) + _ETA_MERGE_TOL]
+    if nxt.size == 0:
+        return 1.0
+    _, y_ref, z_ref = surface_reference_line(surf, np.array([float(eta[0]), float(nxt[0])]))
+    dy = float(y_ref[1] - y_ref[0])
+    dz = float(z_ref[1] - z_ref[0])
+    length = float(np.hypot(dy, dz))
+    if length <= 0.0:
+        return 1.0
+    cos_g = dy / length
+    if cos_g <= _COS_ROOT_MIN or cos_g >= 1.0:
+        return 1.0
+    return 1.0 / cos_g
+
+
+def _scale_about_camber(yu: np.ndarray, yl: np.ndarray, factor: float) -> tuple[np.ndarray, np.ndarray]:
+    """Scale the offsets of a section from its camber line [chord units].
+
+    The camber line is the mean of the upper and the lower ordinate at
+    each chordwise station, so it does not move.
+
+    Parameters
+    ----------
+    yu, yl : numpy.ndarray
+        Upper and lower ordinates at the same chordwise stations [chord units].
+    factor : float
+        Factor on the offsets from the camber line [-].
+
+    Returns
+    -------
+    tuple of numpy.ndarray
+        Scaled upper and lower ordinates [chord units].
+    """
+    yu = np.asarray(yu, dtype=float)
+    yl = np.asarray(yl, dtype=float)
+    camber = 0.5 * (yu + yl)
+    half = 0.5 * (yu - yl)
+    return camber + factor * half, camber - factor * half
 
 
 # ---------------------------------------------------------------------------
@@ -942,6 +1036,7 @@ def _mesh_with_controls(
     active: list,
     tip: str,
     half: bool,
+    scale_root_thickness: bool = True,
 ) -> PanelMesh:
     """Build a watertight mesh with deflected plain control surfaces."""
     from ventorum.geometry.controls import validate_controls
@@ -964,6 +1059,10 @@ def _mesh_with_controls(
     yu_base = _interp_rows(fr, yu_mat, edge_etas)
     yl_base = _interp_rows(fr, yl_mat, edge_etas)
     sharp_base = np.abs(yu_base[:, -1] - yl_base[:, -1]) <= _TE_GAP_TOL
+    if scale_root_thickness:
+        factor = _root_thickness_factor(surf, edge_etas)
+        if factor != 1.0:
+            yu_base[0], yl_base[0] = _scale_about_camber(yu_base[0], yl_base[0], factor)
     has_asym = any(not bool(c.symmetric) for c in active)
     if symmetric and has_asym and half:
         raise ValueError(
@@ -1123,6 +1222,7 @@ def mesh_lifting_surface(
     tip: str = "flat",
     half: bool = False,
     n_span=None,
+    scale_root_thickness: bool = True,
 ) -> PanelMesh:
     """Build a closed quadrilateral mesh of one thick lifting surface.
 
@@ -1145,6 +1245,13 @@ def mesh_lifting_surface(
     n_span : int or None
         Spanwise panels per semi-span. None uses the surface value when set,
         else 20. The stations match the lattice builder for that count.
+    scale_root_thickness : bool
+        True (default) multiplies the offsets of the root section of a
+        symmetric surface from its camber line (in the plane y = 0) by
+        1 / cos(G), with G the dihedral of the first panel row [rad], so
+        that the thickness normal to the local surface equals the section
+        thickness. False keeps the thickness of the root section along its
+        section normal (the mesh before this option, bit for bit).
 
     Returns
     -------
@@ -1170,6 +1277,14 @@ def mesh_lifting_surface(
     horizontal surface). The chordwise stations gain a node at each active
     hinge. Control side edges gain flat side triangles between two stations
     at the same y [m]. Zero deflection keeps the mesh bit for bit.
+
+    At the root of a symmetric surface the section lies in the plane y = 0
+    (the miter of the two halves). There a thickness t along the section
+    normal is t cos(G) normal to the surface of the first panel row, with G
+    its dihedral. ``scale_root_thickness`` corrects this (see the module
+    notes). Only symmetric surfaces with a nonzero dihedral of the first
+    panel row change; a one-sided surface, for example a vertical fin, has
+    its root section normal to its span axis and does not change.
     """
     surf = surface
     n_chord = int(n_chord)
@@ -1202,6 +1317,7 @@ def mesh_lifting_surface(
         eta_base_c, _ = _surface_eta(surf, n_span_eff, spacing_c)
         return _mesh_with_controls(
             surf, coord_sorted_c, fr_c, chords_c, twists_c, xt_new_c, eta_base_c, active, tip, half,
+            scale_root_thickness=bool(scale_root_thickness),
         )
 
     order = sorted(range(len(secs)), key=lambda i: float(secs[i].y_frac))
@@ -1246,13 +1362,17 @@ def mesh_lifting_surface(
     qc = le_flat + 0.25 * chord_e[:, None] * _XHAT
     yu_e = _interp_rows(fr, yu_mat, eta_e)
     yl_e = _interp_rows(fr, yl_mat, eta_e)
+    sharp = np.abs(yu_e[:, -1] - yl_e[:, -1]) <= _TE_GAP_TOL
+    if scale_root_thickness:
+        factor = _root_thickness_factor(surf, eta_e)
+        if factor != 1.0:
+            yu_e[0], yl_e[0] = _scale_about_camber(yu_e[0], yl_e[0], factor)
 
     upper = np.empty((ns, nc1, 3))
     lower = np.empty((ns, nc1, 3))
     for j in range(ns):
         upper[j] = qc[j] + chord_e[j] * ((xt - 0.25)[:, None] * cdir[j] + yu_e[j][:, None] * ndir[j])
         lower[j] = qc[j] + chord_e[j] * ((xt - 0.25)[:, None] * cdir[j] + yl_e[j][:, None] * ndir[j])
-    sharp = np.abs(yu_e[:, -1] - yl_e[:, -1]) <= _TE_GAP_TOL
 
     nodes: list[np.ndarray] = []
     station_of: list[int] = []
@@ -1345,7 +1465,12 @@ def mesh_lifting_surface(
     )
 
 
-def mesh_aircraft(aircraft, section_coords_by_surface, **kw) -> PanelMesh:
+def mesh_aircraft(
+    aircraft,
+    section_coords_by_surface,
+    scale_root_thickness: bool = True,
+    **kw,
+) -> PanelMesh:
     """Build one panel mesh for all surfaces of an aircraft.
 
     Parameters
@@ -1355,6 +1480,9 @@ def mesh_aircraft(aircraft, section_coords_by_surface, **kw) -> PanelMesh:
     section_coords_by_surface : dict or list
         Dict from surface name (or index) to the section coordinates of
         :func:`mesh_lifting_surface`, or a list in surface order.
+    scale_root_thickness : bool
+        Root-section thickness option of :func:`mesh_lifting_surface` for
+        every surface (default True).
     **kw
         Extra arguments of :func:`mesh_lifting_surface` (n_chord, n_span,
         chord_spacing, tip, half).
@@ -1396,7 +1524,7 @@ def mesh_aircraft(aircraft, section_coords_by_surface, **kw) -> PanelMesh:
     n_strips = 0
     half_all = True
     for i, (s, c) in enumerate(zip(surfs, coord_list)):
-        sub = mesh_lifting_surface(s, c, **kw)
+        sub = mesh_lifting_surface(s, c, scale_root_thickness=scale_root_thickness, **kw)
         node_parts.append(np.asarray(sub.nodes, dtype=float))
         panel_parts.append(np.asarray(sub.panels, dtype=int) + n_nodes)
         kind_parts.append(np.asarray(sub.kind))

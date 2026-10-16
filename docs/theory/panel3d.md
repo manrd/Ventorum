@@ -300,6 +300,24 @@ $$\mathbf{A}^{\text{asym}} = \mathbf{A}_{\text{self}} - \mathbf{A}_m + \mathbf{A
 
 The four-fold images need a configuration that is symmetric about $y = 0$: the ground normal and the wake direction must have no $y$ component. With bank ($\phi \neq 0$) the ground normal has a $y$ component, and with sideslip the free-stream wake has one. In these cases the half-mesh solver solves the full mesh of the configuration instead (a full-mesh solver built once, when needed; its factorizations count in the factorization count) and returns the distributions of the right half. The assembly of a symmetric configuration in ground effect is again half the work of the full mesh, and its factorization one eighth.
 
+## Root Section of a Symmetric Surface with Dihedral
+
+The mesh builder (`ventorum.panel3d.mesh`) puts each section in the plane of the local chord direction and the local normal of the lattice surface, so the section thickness follows the dihedral. At the root of a symmetric surface the vortex lattice twists the section about the $y$ axis, so the root section lies in the plane $y = 0$ with the normal $z$: it is the cut of the two half wings at the plane of symmetry (a miter joint). The local surface of the first panel row has the normal $(0, -\sin\Gamma, \cos\Gamma)$, with $\Gamma$ the dihedral of that row. A thickness $t$ along $z$ is therefore only $t\cos\Gamma$ normal to the surface, and the half wing loses volume in its first panel row.
+
+The option `scale_root_thickness` of `mesh_lifting_surface` and `mesh_aircraft` (setting `panel_scale_root_thickness`, default True, an owner decision) corrects this. It writes the root section as camber line plus offsets, $z_{u,l} = z_c \pm h$, and multiplies the offsets by $1/\cos\Gamma$:
+
+$$z_{u,l}' = z_c \pm \frac{h}{\cos\Gamma},$$
+
+with $\Gamma = \operatorname{atan2}(\Delta z, \Delta y)$ of the reference line from the root station to the next station. The thickness normal to the local surface then equals the section thickness. The camber line does not move, so the leading-edge and trailing-edge nodes stay on the lattice points.
+
+Properties of the scaled root section:
+
+* Symmetric section, no root twist: a root node at the offset $h$ is at the normal offset $h$ and at the span coordinate $h\tan\Gamma$ of the first panel row. The ruled panels of the row are parallel to the span axis, and the row is a prism cut by the plane $y = 0$. The volume of the half wing equals the volume of the same wing with zero dihedral to round-off (`tests/test_panel3d_mesh.py`). Without the option, a 30 deg half wing has less volume; the loss is in the first panel row, so it depends on the spanwise panel count.
+* Cambered section: the miter plane cuts the cambered slab at an angle. The volume difference to the zero-dihedral wing is $-\left(\sin\Gamma + \tfrac{1}{2}\tan\Gamma\,(1 - \cos\Gamma)\right) Q$, with $Q = \int t\,z_c\,\mathrm{d}x$ the first moment of the section area about the chord line (in chord units, times the chord cubed for a volume). This is the geometry of a miter of a cambered surface, not a mesh error: an exact miter, which also scales the camber line, gives $-\tan\Gamma\,Q$. A test checks the formula on a NACA 2412 half wing.
+* Root twist $\theta$: before the scaling, the thickness normal to the surface is $t\cos\Gamma/\sqrt{1 - \sin^2\theta\,\sin^2\Gamma}$. The factor $1/\cos\Gamma$ leaves an error of second order in $\theta$.
+* No effect: a surface with zero dihedral at the root (the mesh stays bit for bit the same), a one-sided surface (its root section is normal to its span axis, for example a vertical fin with $\Gamma = 90$ deg) and a symmetric surface whose first panel row is vertical (the two halves coincide and there is no miter).
+* A deflected control surface at the root deflects the scaled section: the hinge point at half the local thickness does not move.
+
 ## Solver Family Interface
 
 Ventorum-3DP connects to the solver architecture of Ventorum through the class `PanelMethodSolver` in `ventorum.solvers.panel3d`. Users and automated tools can select it through the factory with `solver="panel3d"`.
@@ -309,7 +327,7 @@ Ventorum-3DP connects to the solver architecture of Ventorum through the class `
 The solver takes three standard input objects:
 * `Aircraft`: One or more lifting surfaces. Each surface definition contains wing sections. The optional field `WingSection.shape` specifies the airfoil geometry (NACA designation, point array, or `AirfoilShape`). When `shape` is None, the solver defaults to NACA 0012 and reports a warning in the result notes. The functions `aircraft_to_json` and `aircraft_from_json` serialize and restore this field.
 * `FlightCondition`: Free-stream velocity $V_{\infty}$, angles $\alpha$ and $\beta$, density $\rho$, optional ground height $h$, bank angle $\phi$, and angular rates $p, q, r$. The solver also accepts a sequence of flight conditions to execute batch evaluations and sweeps. The keyword `ground` (a `GroundPlane`) replaces `condition.h` for all conditions.
-* `SolverSettings`: `n_panels` (spanwise panels per semi-span, as the lattice), `n_chord` (chordwise panels per surface, 20 when None), and the panel fields `panel_kutta` ("morino" or "pressure"), `panel_backend` ("auto", "numpy", "numba" or "gpu"), `panel_wake_length` (m; None gives 50 largest chords), `panel_chord_spacing` ("cosine", the default, or "uniform") and `panel_estimate_mesh_error` (False by default). The other solvers ignore the panel fields.
+* `SolverSettings`: `n_panels` (spanwise panels per semi-span, as the lattice), `n_chord` (chordwise panels per surface, 20 when None), and the panel fields `panel_kutta` ("morino" or "pressure"), `panel_backend` ("auto", "numpy", "numba" or "gpu"), `panel_wake_length` (m; None gives 50 largest chords), `panel_chord_spacing` ("cosine", the default, or "uniform"), `panel_estimate_mesh_error` (False by default) and `panel_scale_root_thickness` (True by default; see the root section above). The other solvers ignore the panel fields.
 
 Symmetry plane folding and ground images are used automatically when the geometry and the flight conditions allow them (no sideslip, roll or yaw rate, bank, or deflected antisymmetric control).
 
@@ -321,7 +339,7 @@ The solve returns a standard `SolverResult`:
 * `totals`: Integrated aerodynamic coefficients ($C_L, C_D, C_Y, C_l, C_m, C_n$). The reported induced drag $C_{Di}$ comes from the far-field Trefftz plane. The surface force integration provides near-field pressure drag as $C_{Di,\text{nearfield}}$.
 * `spanwise`: Spanwise distributions on each lifting surface. Sectional coefficients ($C_l, C_{d,\text{pressure}}, C_m$) are computed by strip integration of panel pressure forces at the lattice strip stations. Each panel belongs to the lattice strip whose station planes (normal to the span in the y-z plane) enclose its centroid; a mesh with controls (extra stations, side closures) maps every panel once. When the mesh carries the strip index of the mesh builder and its strips are the lattice strips, the map uses it. Strip lift sums to the total aircraft $C_L$.
 * `details["cp"]`: The surface pressure coefficients of the solved mesh panels.
-* `details["panel"]`: The panel options used (Kutta option, chordwise spacing and count, wake length in m, half mesh).
+* `details["panel"]`: The panel options used (Kutta option, chordwise spacing and count, wake length in m, half mesh, root-thickness scaling).
 * `totals.trust`: The physical validity trust score. For the 3D panel method, the score evaluates mesh adequacy (aspect ratio, skew, and warp from `check_mesh`), near-field pressure drag versus far-field induced drag agreement, and ground clearance. With `panel_estimate_mesh_error`, the notes add the mesh error estimate of the given mesh (see the mesh convergence section of the Ventorum-3DP chapter).
 * `details["dispatch"]`: The execution dispatch record: the selected backend, device, arithmetic precision, the reason of the selection, and the counted number of factorizations.
 
