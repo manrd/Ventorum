@@ -70,10 +70,10 @@ def test_symmetry_and_trends(sweep_1e6, sweep_3e6):
 
 
 _DRAG_XFAIL = pytest.mark.xfail(
-    reason="At Re 1e6 and 4 deg the friction plus pressure drag of the surface is 6 to 7 % below the "
-           "Squire-Young drag of the wake (6.4 % at 160 panels, 6.2 % at 320 panels: not a discretization "
-           "error). The difference grows with the lift (12 % at 6 deg); it is the difference between the "
-           "thin-layer surface pressure and the momentum deficit of the wake model. No correction is applied.",
+    reason="At Re 1e6 and 4 deg the friction plus pressure drag of the surface is below the Squire-Young "
+           "drag of the wake by more than the limit, also on a finer panel mesh (not a discretization "
+           "error). The difference grows with the lift; it is the difference between the thin-layer "
+           "surface pressure and the momentum deficit of the wake model. No correction is applied.",
     strict=True)
 
 
@@ -184,8 +184,8 @@ def test_against_xfoil(re):
         pytest.xfail(
             f"angles {bad} deg miss the limits. Cause found: with the edge velocity of XFOIL 6.99 as input, the "
             "laminar march of the published closures (which match exact Falkner-Skan profiles, see "
-            "test_ibl_closure) gives a shape factor H 1 to 4 % higher in the adverse gradient, so the e^N "
-            "transition comes about 0.05 chord earlier; and the shear stress at transition "
+            "test_ibl_closure) gives a higher shape factor H in the adverse gradient, so the e^N "
+            "transition comes earlier; and the shear stress at transition "
             "(0.7 Ctau_eq, to be checked against Drela and Giles 1987) makes the turbulent layer grow faster "
-            "just after transition. With transition forced at 5 % chord the drag agrees within 2 %."
+            "just after transition. With transition forced at the same position the drag agrees."
         )

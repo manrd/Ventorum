@@ -40,7 +40,7 @@ def test_wake_line_turns_to_free_stream():
 @pytest.mark.slow
 @pytest.mark.xfail(
     reason="At Re 1e6 and 2 deg the 0.5 % chord gap raises the surface pressure drag, but the Squire-Young "
-           "drag at the wake end falls by about 2 %: the momentum thickness at the trailing edge is smaller "
+           "drag at the wake end falls: the momentum thickness at the trailing edge is smaller "
            "than on the closed section, and the model has no base-drag term beyond the gap thickness in the "
            "displacement thickness of the wake start (Drela 1989). The difference is of the same size as the "
            "difference between the Squire-Young drag and the surface drag. No correction is applied.",
@@ -62,8 +62,9 @@ def test_blunt_trailing_edge_drag():
 
 _FLAP5_XFAIL = pytest.mark.xfail(
     reason="The plain-flap geometry at 5 deg has a defect at the hinge on the compressed (lower) side: the "
-           "polyline turns back (a reversed segment, so the inviscid speed changes sign at one node and a "
-           "second stagnation point appears). The viscous solver does not converge on this geometry.",
+           "cut at the hinge leaves a very short step panel between two corners of about 90 deg, so the "
+           "inviscid speed changes sharply at one node. The viscous solver does not converge on this "
+           "geometry. The fix belongs to the flap geometry (repanel after the flap or merge tiny panels).",
     strict=True)
 
 
@@ -87,8 +88,8 @@ def test_large_flap_reports():
 
 _XFAIL_DRAG = pytest.mark.xfail(
     reason="The friction plus pressure drag of the surface falls below the Squire-Young drag of the wake as "
-           "the lift grows (Re 1e6: 7 % at 4 deg and 12 % at 6 deg; Re 3e6: 7 % at 6 deg), the same at 160 "
-           "and 320 panels. No correction is applied.",
+           "the lift grows (Re 1e6 at 4 and 6 deg, Re 3e6 at 6 deg), by more than the limit and the same on a "
+           "finer panel mesh. No correction is applied.",
     strict=True)
 
 

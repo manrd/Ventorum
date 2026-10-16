@@ -62,7 +62,7 @@ Converged means: $\omega = 1$, the largest absolute residual of all equations be
 - $C_{d,friction}$: $\int C_f u_e^2\,(\hat t_{flow}\cdot\hat e_D)\,ds/c$ over both sides, from the stagnation point.
 - $C_{d,pressure}$: surface pressure integral over the wall panels (exact for $\gamma$ linear on each panel).
 
-$C_{d,friction} + C_{d,pressure}$ is an independent check of $C_d$; nothing replaces one by the other. For NACA 0012 at Re 1e6 they agree within 2 to 3 % at 0 and 2 deg, but the surface sum falls 6 % below at 4 deg and 12 % at 6 deg (the same at 160 and 320 panels). The difference grows with the lift; it is the difference between the thin-layer surface pressure and the momentum deficit of the wake model, and no correction is applied.
+$C_{d,friction} + C_{d,pressure}$ is an independent check of $C_d$; nothing replaces one by the other. At small lift they agree; as the lift grows the surface sum falls below the Squire-Young drag, also on a finer panel mesh. The difference grows with the lift; it is the difference between the thin-layer surface pressure and the momentum deficit of the wake model, and no correction is applied.
 
 ## Ground effect
 
