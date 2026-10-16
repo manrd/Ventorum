@@ -13,6 +13,16 @@ then along the lower surface back to the trailing edge). Unit-chord
 sections place the leading edge at (0, 0) and the trailing-edge midpoint
 at (1, 0) chord units.
 
+Frames: in free air the 2D solver keeps the input nodes and turns the
+free stream, so the node x of a result is the body-frame x. In ground
+effect the solver turns the section by the angle of attack (clockwise,
+about a pivot) and moves it to the height, so the stored nodes are in
+the solved frame. :func:`plot_ground_effect_cp` turns the nodes back by
+the angle of attack and measures x from the leading edge (the node
+farthest from the trailing-edge midpoint) in the body frame.
+:func:`plot_cp` plots the node x of the result as stored and labels the
+axis with that frame.
+
 References
 ----------
 - J. Katz and A. Plotkin, Low-Speed Aerodynamics, 2nd ed., Cambridge
@@ -30,7 +40,7 @@ from typing import TYPE_CHECKING, Any
 import matplotlib.pyplot as plt
 import numpy as np
 
-from ventorum.airfoil.geometry import AirfoilShape
+from ventorum.airfoil.geometry import AirfoilShape, leading_edge_index
 
 if TYPE_CHECKING:
     from ventorum.panel2d.solver import Panel2DResult
@@ -203,22 +213,46 @@ def _body_coords_list(
     raise ValueError("Coordinates must have shape (N, 2).")
 
 
+def _body_frame_x(xy_list: list[np.ndarray], alpha_deg: float) -> list[np.ndarray]:
+    """Return the body-frame x [chord units] of solved ground-effect nodes.
+
+    The solver turns the bodies clockwise by the angle of attack. The
+    function turns the nodes back (counterclockwise by ``alpha_deg``
+    [deg]) and moves x so that the leading-edge node of the first body
+    is at x = 0. A turn and a shift keep the shape, so the result is the
+    input x up to that shift.
+    """
+    a = np.radians(float(alpha_deg))
+    cos_a = float(np.cos(a))
+    sin_a = float(np.sin(a))
+    turned = [
+        np.column_stack([xy[:, 0] * cos_a - xy[:, 1] * sin_a,
+                         xy[:, 0] * sin_a + xy[:, 1] * cos_a])
+        for xy in xy_list
+    ]
+    x_le = float(turned[0][leading_edge_index(turned[0]), 0])
+    return [t[:, 0] - x_le for t in turned]
+
+
 def _compare_series(
     compare: Any, index: int
 ) -> list[tuple[np.ndarray, np.ndarray, str]]:
     """Return the (x, Cp, label) series of the compare argument.
 
-    A result object uses the same angle index when it holds a sweep and
-    its single angle otherwise. An (x, Cp) pair of arrays plots as one
-    point series.
+    A result object uses the same angle index; an index out of its range
+    raises IndexError. An (x, Cp) pair of arrays plots as one point
+    series.
     """
     if hasattr(compare, "Cp") and hasattr(compare, "coordinates"):
-        try:
-            cp_list = _body_cp_list(compare, index)
-            xy_list = _body_coords_list(compare, index, len(cp_list))
-        except IndexError:
-            cp_list = _body_cp_list(compare, 0)
-            xy_list = _body_coords_list(compare, 0, len(cp_list))
+        n_compare = _n_angles(compare)
+        if index >= n_compare:
+            raise IndexError(
+                f"compare holds {n_compare} angle(s), so angle index {index} is "
+                "out of range. Give a compare result with the same angles, or "
+                "the (x, Cp) arrays of the wanted angle."
+            )
+        cp_list = _body_cp_list(compare, index)
+        xy_list = _body_coords_list(compare, index, len(cp_list))
         out = []
         for b, (xy, cp) in enumerate(zip(xy_list, cp_list)):
             label = f"compare body {b}" if len(cp_list) > 1 else "compare"
@@ -328,11 +362,15 @@ def plot_cp(
     invert: bool = True,
     compare: Any = None,
 ) -> plt.Axes:
-    """Plot the Cp distribution of a 2D panel result against x/c.
+    """Plot the Cp distribution of a 2D panel result against x.
 
     The curve uses the node Cp values of Katz and Plotkin (2001,
-    chapter 11): Cp = 1 - (V/V_inf)^2. The x stations come from the node
-    coordinates of the selected angle.
+    chapter 11): Cp = 1 - (V/V_inf)^2. The x stations [chord units] are
+    the node x coordinates of the selected angle as the result stores
+    them. A free-air result stores the input nodes (body frame). A
+    ground-effect result stores the nodes turned by the angle of attack
+    (solved frame); :func:`plot_ground_effect_cp` shows those results in
+    the body frame. The axis label names the frame.
 
     Parameters
     ----------
@@ -346,10 +384,10 @@ def plot_cp(
     invert : bool
         True puts suction up (inverted Cp axis). Default True.
     compare : Panel2DResult or (x, Cp) pair or None
-        Second result at the same angle index (its single angle when it
-        holds one angle), or reference stations x [-] with Cp values [-].
-        The compare data draws as points. None draws no compare data.
-        Default None.
+        Second result at the same angle index, or reference stations
+        x [chord units] with Cp values [-]. A compare result with fewer
+        angles than ``index + 1`` raises IndexError. The compare data
+        draws as points. None draws no compare data. Default None.
 
     Returns
     -------
@@ -379,7 +417,7 @@ def plot_cp(
                 markersize=4, label=label,
             )
 
-    ax.set_xlabel("x/c [-]")
+    ax.set_xlabel("x [chord units], node frame of the result")
     ax.set_ylabel("Cp [-]")
     ax.set_title(
         f"Cp distribution at alpha = {alpha:.2f} deg (Cl = {cl:.4f})"
@@ -403,11 +441,19 @@ def plot_ground_effect_cp(
     The curves share the angle index, so one call shows how the suction
     peak and the loading grow near the ground.
 
+    The x stations are in the body frame. The solver stores the nodes
+    turned clockwise by the angle of attack; this function turns them
+    back by the angle of attack of each result and measures x from the
+    leading-edge node of the first body (the node farthest from its
+    trailing-edge midpoint). For a section with the leading edge at
+    (0, 0) and unit chord, this x equals the input x/c.
+
     Parameters
     ----------
     results_by_height : dict or list of pairs
-        Height [m] mapped to its Panel2DResult. A list holds
-        (height [m], result) pairs. Heights sort in increasing order.
+        Height h/c [-] (the height in chord units of a unit-chord
+        section) mapped to its Panel2DResult. A list holds (h/c, result)
+        pairs. Heights sort in increasing order.
     index : int
         Angle index [-] for sweep results. A single-angle result needs
         index 0. Default 0.
@@ -450,14 +496,15 @@ def plot_ground_effect_cp(
     for height, res in pairs:
         cp_list = _body_cp_list(res, idx)
         xy_list = _body_coords_list(res, idx, len(cp_list))
-        for b, (xy, cp) in enumerate(zip(xy_list, cp_list)):
+        x_body = _body_frame_x(xy_list, _scalar_at(res.alpha, idx))
+        for b, (x_b, cp) in enumerate(zip(x_body, cp_list)):
             if len(cp_list) > 1:
                 label = f"h/c = {height:g}, body {b}"
             else:
                 label = f"h/c = {height:g}"
-            ax.plot(xy[:, 0], cp, linewidth=1.8, label=label)
+            ax.plot(x_b, cp, linewidth=1.8, label=label)
 
-    ax.set_xlabel("x/c [-]")
+    ax.set_xlabel("x/c [-], body frame, from the leading edge")
     ax.set_ylabel("Cp [-]")
     ax.set_title(
         f"Ground effect on Cp at alpha = {alpha:.2f} deg"
