@@ -7,16 +7,33 @@ line formulas. The thickness distribution follows Abbott and von Doenhoff
 Brooks, Hill and Sproles (NASA TM-4741, 1996). The 4-digit mean line follows
 Abbott and von Doenhoff (1959, section 6.4). The standard (non-reflex)
 5-digit mean lines 210, 220, 230, 240 and 250 use the parameters m and k1
-of Abbott and von Doenhoff (1959); the design lift scales k1 linearly with
-the first digit as Jacobs, Ward and Pinkerton (NACA Report 460, 1933) and
-Jacobs and Pinkerton (NACA Report 537, 1935) define it.
+of the five-digit mean-line table of Abbott and von Doenhoff (1959,
+section 6.5, NACA five-digit wing sections), given there for the design
+lift coefficient 0.3. The design lift scales k1 linearly with the first
+digit as Jacobs, Ward and Pinkerton (NACA Report 460, 1933) and Jacobs and
+Pinkerton (NACA Report 537, 1935) define it.
+
+Designations
+------------
+The accepted forms are four or five digits, with an optional "NACA"
+prefix in any letter case and optional spaces between the prefix and the
+digits: "2412", "NACA 2412", "naca2412", "23012", "NACA 23012", or the
+integer 2412. Other separators (hyphens, underscores, spaces inside the
+digits) raise ValueError. A designation with zero camber and a nonzero
+position digit ("0412", "01012", "03012") is accepted with a UserWarning:
+the mean line is flat, so the position digits have no effect and the
+section equals the symmetric section of the same thickness.
 """
 
 from __future__ import annotations
 
+import re
+import warnings
+
 import numpy as np
 
 __all__ = [
+    "is_naca_designation",
     "naca",
     "naca4",
     "naca4_camber",
@@ -35,7 +52,9 @@ _A4_OPEN = -0.1015
 #: Last coefficient for a closed trailing edge (Ladson et al., 1996).
 _A4_CLOSED = -0.1036
 
-#: Standard 5-digit mean lines: position code to (m, k1 for design lift 0.3).
+#: Standard 5-digit mean lines: position code to (m, k1 for design lift 0.3),
+#: from the five-digit mean-line table of Abbott and von Doenhoff (1959,
+#: section 6.5).
 _FIVE_DIGIT_TABLE = {
     "10": (0.0580, 361.40),
     "20": (0.1260, 51.64),
@@ -45,13 +64,18 @@ _FIVE_DIGIT_TABLE = {
 }
 
 
+#: Accepted designation text: optional "NACA" prefix, then the digits.
+_DESIGNATION = re.compile(r"^\s*(?:NACA\s*)?(\d+)\s*$", re.IGNORECASE)
+
+
 def _clean(designation: str | int) -> str:
     """Return the digit string of a designation.
 
     Parameters
     ----------
     designation : str or int
-        Designation such as "NACA 2412", "naca2412", "2412" or 2412.
+        Designation such as "NACA 2412", "naca2412", "2412" or 2412. The
+        accepted forms are listed in the module docstring.
 
     Returns
     -------
@@ -63,15 +87,55 @@ def _clean(designation: str | int) -> str:
     if isinstance(designation, (int, np.integer)):
         text = str(int(designation))
     elif isinstance(designation, str):
-        text = designation.strip()
+        text = designation
     else:
         raise ValueError(f"Invalid NACA designation: {designation!r}.")
-    compact = text.upper().replace(" ", "").replace("-", "").replace("_", "")
-    if compact.startswith("NACA"):
-        compact = compact[4:]
-    if not compact.isdigit() or len(compact) == 0:
-        raise ValueError(f"Invalid NACA designation: {designation!r}.")
-    return compact
+    match = _DESIGNATION.match(text)
+    if match is None:
+        raise ValueError(
+            f"Invalid NACA designation: {designation!r}. Use four or five digits "
+            "with an optional 'NACA' prefix, for example 'NACA 2412' or '23012'."
+        )
+    return match.group(1)
+
+
+def is_naca_designation(spec: object) -> bool:
+    """Return True when *spec* has the form of a 4-digit or 5-digit designation.
+
+    The test checks the form only (an optional "NACA" prefix and four or
+    five digits, see the module docstring). A string of this form can
+    still be an invalid section, for example "1012" (camber without a
+    position), which :func:`naca` rejects.
+
+    Parameters
+    ----------
+    spec : object
+        Candidate designation [-]: a string or an integer.
+
+    Returns
+    -------
+    bool
+        True for a string or an integer of the designation form.
+    """
+    if isinstance(spec, bool):
+        return False
+    if isinstance(spec, (int, np.integer)):
+        return 1000 <= int(spec) <= 99999
+    if not isinstance(spec, str):
+        return False
+    match = _DESIGNATION.match(spec)
+    return match is not None and len(match.group(1)) in (4, 5)
+
+
+def _warn_flat_mean_line(designation: str | int, digits: str) -> None:
+    """Warn that a zero-camber designation has a nonzero position digit."""
+    warnings.warn(
+        f"NACA designation {designation!r} has zero camber and a nonzero position "
+        f"digit ({digits}): the mean line is flat, so the position digits have no "
+        "effect and the section is the symmetric section of the same thickness.",
+        UserWarning,
+        stacklevel=3,
+    )
 
 
 def naca4_thickness(
@@ -167,13 +231,16 @@ def naca4_camber(
     return np.asarray(yc, dtype=float), np.asarray(dyc, dtype=float)
 
 
-def _five_digit_parameters(prefix: str) -> tuple[float, float]:
+def _five_digit_parameters(prefix: str, name: str | int | None = None) -> tuple[float, float]:
     """Return the mean line parameters m and k1 of a 3-digit prefix.
 
     Parameters
     ----------
     prefix : str
         Three digits such as "230".
+    name : str or int or None
+        Designation as the caller gave it, for the warning text. None
+        uses the prefix.
 
     Returns
     -------
@@ -197,6 +264,8 @@ def _five_digit_parameters(prefix: str) -> tuple[float, float]:
         )
     m, k1_base = _FIVE_DIGIT_TABLE[pos]
     k1 = k1_base * lift_digit / 2.0
+    if lift_digit == 0:
+        _warn_flat_mean_line(prefix if name is None else name, prefix[1:])
     return m, k1
 
 
@@ -212,7 +281,9 @@ def naca5_camber(
         Chordwise stations as a fraction of chord [-], with values in [0, 1].
     designation : str or int
         Full designation such as "23012" or a 3-digit mean line such as
-        "230". Reflex mean lines (third digit 1) raise ValueError.
+        "230". Reflex mean lines (third digit 1) raise ValueError. A first
+        digit 0 (zero design lift) gives a flat mean line with a
+        UserWarning.
 
     Returns
     -------
@@ -233,7 +304,7 @@ def naca5_camber(
             raise ValueError(f"Invalid NACA designation: {designation!r}.")
     else:
         raise ValueError(f"Invalid NACA designation: {designation!r}.")
-    m, k1 = _five_digit_parameters(prefix)
+    m, k1 = _five_digit_parameters(prefix, designation)
     if k1 == 0.0:
         zeros = np.zeros_like(xc, dtype=float)
         return zeros, zeros.copy()
@@ -275,11 +346,13 @@ def _parse_naca4(designation: str | int) -> tuple[float, float, float]:
         raise ValueError(f"Invalid NACA 4-digit designation: {designation!r}.")
     if p == 0.0 and m != 0.0:
         raise ValueError(f"Invalid NACA 4-digit designation: {designation!r}.")
+    if m == 0.0 and p != 0.0:
+        _warn_flat_mean_line(designation, digits[:2])
     return m, p, t
 
 
-def _parse_naca5(designation: str | int) -> tuple[float, float, float]:
-    """Return the mean line m, k1 and thickness t of a 5-digit name.
+def _parse_naca5(designation: str | int) -> tuple[str, float]:
+    """Return the digits and the thickness t of a 5-digit name.
 
     Parameters
     ----------
@@ -288,17 +361,16 @@ def _parse_naca5(designation: str | int) -> tuple[float, float, float]:
 
     Returns
     -------
-    tuple[float, float, float]
-        Mean line parameter m [-], k1 [-] and thickness ratio t [-].
+    tuple[str, float]
+        All five digits such as "23012" [-] and thickness ratio t [-].
     """
     digits = _clean(designation)
     if len(digits) != 5:
         raise ValueError(f"Invalid NACA 5-digit designation: {designation!r}.")
     if digits[3:5] == "00":
         raise ValueError(f"Invalid NACA 5-digit designation: {designation!r}.")
-    m, k1 = _five_digit_parameters(digits[:3])
     t = int(digits[3:5]) / 100.0
-    return m, k1, t
+    return digits, t
 
 
 def _stations(n_points: int, spacing: str) -> np.ndarray:
@@ -426,26 +498,11 @@ def naca5(
         Points (N, 2) as a fraction of chord [-], in Selig order. The
         points are not re-normalized (see :func:`naca4`).
     """
-    m, k1, t = _parse_naca5(designation)
+    digits, t = _parse_naca5(designation)
     xc = _stations(n_points, spacing)
     yt = naca4_thickness(xc, t, closed_te=closed_te)
-    if k1 == 0.0:
-        yc = np.zeros_like(xc, dtype=float)
-        dyc = np.zeros_like(xc, dtype=float)
-    else:
-        front = xc <= m
-        quad = m**2 * (3.0 - m)
-        yc = np.where(
-            front,
-            k1 / 6.0 * (xc**3 - 3.0 * m * xc**2 + quad * xc),
-            k1 * m**3 / 6.0 * (1.0 - xc),
-        )
-        dyc = np.where(
-            front,
-            k1 / 6.0 * (3.0 * xc**2 - 6.0 * m * xc + quad),
-            np.full_like(xc, -k1 * m**3 / 6.0, dtype=float),
-        )
-    return _assemble(xc, yt, np.asarray(yc, dtype=float), np.asarray(dyc, dtype=float))
+    yc, dyc = naca5_camber(xc, digits)
+    return _assemble(xc, yt, yc, dyc)
 
 
 def naca(
@@ -461,7 +518,8 @@ def naca(
     designation : str or int
         Designation such as "2412", "NACA 2412", 2412, "23012" or
         "NACA 23012". Four digits select the 4-digit series, five digits
-        select the 5-digit series.
+        select the 5-digit series. Hyphens, underscores and spaces inside
+        the digits raise ValueError (see the module docstring).
     n_points : int
         Total points of the loop. It must be odd. Default 161.
     spacing : str
