@@ -16,17 +16,29 @@ distribution.
 
 Coordinate convention: arrays of shape (N, 2) in Selig order, from the
 trailing edge along the upper surface to the leading edge and back along the
-lower surface (counterclockwise, positive signed area). Coordinates use m.
-The common unit-chord case places the leading edge at (0, 0) m and the
-trailing-edge midpoint at (1, 0) m.
+lower surface (counterclockwise, positive signed area). Coordinates use
+chord units, like the rest of the airfoil package: the unit-chord case
+places the leading edge at (0, 0) and the trailing-edge midpoint at (1, 0).
+Arc lengths use the same unit. The functions accept any consistent length
+unit; the results then use that unit.
+
+Leading edge: the leading edge is the point of the curve farthest from the
+trailing-edge midpoint, the package definition of
+:func:`ventorum.airfoil.geometry.leading_edge_index`. The spline refines it
+from the farthest input point to the continuous maximum of the distance,
+where the tangent is normal to the line to the trailing-edge midpoint.
 """
 
 from __future__ import annotations
+
+import warnings
 
 import numpy as np
 from scipy.interpolate import CubicSpline, PchipInterpolator
 from scipy.ndimage import gaussian_filter1d
 from scipy.optimize import brentq
+
+from ventorum.airfoil.geometry import leading_edge_index
 
 #: Samples of the weight function along arc length.
 _FINE_GRID = 4096
@@ -44,9 +56,12 @@ _TE_SIGMA = 0.03
 _MAX_RATIO = 1.5
 #: Maximum weight smoothing iterations in one equidistribution pass.
 _MAX_SMOOTHING = 31
+#: Largest Gaussian width of the weight smoothing (grid samples); above it
+#: the smoothing uses the uniform weight, its limit.
+_MAX_SIGMA = _FINE_GRID / 8.0
 #: Maximum fixed-point passes in `repanel`.
 _MAX_PASSES = 12
-#: Pass-to-pass stop tolerance: maximum node shift in m.
+#: Pass-to-pass stop tolerance: maximum node shift [chord units].
 _FIXED_TOL = 1e-9
 
 
@@ -63,7 +78,7 @@ def _as_array(coords: np.ndarray) -> np.ndarray:
 
 
 def _signed_area(coords: np.ndarray) -> float:
-    """Signed polygon area in m^2 (positive for counterclockwise order)."""
+    """Signed polygon area [chord^2] (positive for counterclockwise order)."""
     x = coords[:, 0]
     y = coords[:, 1]
     return 0.5 * float(np.sum(x * np.roll(y, -1) - np.roll(x, -1) * y))
@@ -90,21 +105,21 @@ def _adjacent_ratio(nodes: np.ndarray) -> float:
 class AirfoilSpline:
     """Parametric cubic spline x(s), y(s) of airfoil coordinates.
 
-    The parameter ``s`` is the cumulative arc length in m of the input
-    polyline. Each component uses a not-a-knot cubic spline (de Boor, 1978,
+    The parameter ``s`` is the cumulative arc length [chord units] of the
+    input polyline. Each component uses a not-a-knot cubic spline (de Boor, 1978,
     Chapter IV).
 
     Parameters
     ----------
     coords : array_like, shape (N, 2)
-        Airfoil coordinates in m in Selig order (counterclockwise).
+        Airfoil coordinates [chord units] in Selig order (counterclockwise).
 
     Attributes
     ----------
     length : float
-        Total arc length in m.
+        Total arc length [chord units].
     s_leading_edge : float
-        Arc length position in m of the leading edge.
+        Arc length position [chord units] of the leading edge.
     """
 
     def __init__(self, coords: np.ndarray) -> None:
@@ -124,12 +139,12 @@ class AirfoilSpline:
 
     @property
     def length(self) -> float:
-        """Total arc length in m."""
+        """Total arc length [chord units]."""
         return float(self._s[-1])
 
     @property
     def s_leading_edge(self) -> float:
-        """Arc length position in m of the leading edge."""
+        """Arc length position [chord units] of the leading edge."""
         return float(self._s_le)
 
     @property
@@ -146,39 +161,55 @@ class AirfoilSpline:
         return tx * (px - self._te_mid[0]) + ty * (py - self._te_mid[1])
 
     def _find_leading_edge(self) -> float:
-        """Arc length where the tangent is normal to the TE direction.
+        """Arc length where the distance to the trailing-edge midpoint is largest.
 
-        The condition is zero distance gradient to the trailing-edge
-        midpoint. The search starts from the input point farthest from the
-        trailing-edge midpoint and solves the scalar root with Brent's
-        method in the sign bracket nearest to that start.
+        The condition is a zero distance gradient to the trailing-edge
+        midpoint with a change of sign from positive (moving away) to
+        negative (moving back), so the root is a maximum of the distance.
+        The search starts from the input point farthest from the
+        trailing-edge midpoint (:func:`leading_edge_index`) and solves the
+        scalar root with Brent's method in the sign bracket nearest to that
+        start.
+
+        Raises
+        ------
+        ValueError
+            If no maximum of the distance lies inside the curve (away from
+            the trailing-edge ends), so the curve has no leading edge.
         """
         length = float(self._s[-1])
-        dist = np.linalg.norm(self._pts - self._te_mid, axis=1)
-        start = float(self._s[int(np.argmax(dist))])
+        start = float(self._s[leading_edge_index(self._pts)])
         grid = np.linspace(0.0, length, _LE_SEARCH_GRID)
         px = self._spline_x(grid)
         py = self._spline_y(grid)
         tx = self._spline_x(grid, 1)
         ty = self._spline_y(grid, 1)
         values = tx * (px - self._te_mid[0]) + ty * (py - self._te_mid[1])
+        dist2 = (px - self._te_mid[0]) ** 2 + (py - self._te_mid[1]) ** 2
         margin = _LE_END_MARGIN * length
         best: tuple[float, float] | None = None
         best_mid = 0.0
+        last = grid.size - 1
         for i in range(grid.size - 1):
             a = float(grid[i])
             b = float(grid[i + 1])
             if b < margin or a > length - margin:
                 continue
-            if values[i] == 0.0:
-                return a
-            if values[i] * values[i + 1] < 0.0:
+            # A change of sign from positive to negative, at a grid peak of
+            # the distance (round-off near a minimum can also flip the sign).
+            peak = max(float(dist2[i]), float(dist2[i + 1]))
+            is_peak = peak >= float(dist2[max(i - 1, 0)]) and peak >= float(dist2[min(i + 2, last)])
+            if values[i] > 0.0 and values[i + 1] <= 0.0 and is_peak:
                 mid = 0.5 * (a + b)
                 if best is None or abs(mid - start) < abs(best_mid - start):
                     best = (a, b)
                     best_mid = mid
         if best is None:
-            return start
+            raise ValueError(
+                "Cannot locate the leading edge: the distance to the trailing-edge "
+                "midpoint has no maximum inside the curve. Check that the points "
+                "run from the trailing edge around the leading edge and back."
+            )
         return float(brentq(self._tangency, best[0], best[1], xtol=1e-14, maxiter=100))
 
     def __call__(self, s: np.ndarray | float) -> np.ndarray:
@@ -187,12 +218,12 @@ class AirfoilSpline:
         Parameters
         ----------
         s : float or array_like
-            Arc length positions in m.
+            Arc length positions [chord units].
 
         Returns
         -------
         numpy.ndarray
-            Points in m, shape (M, 2), or shape (2,) for scalar input.
+            Points [chord units], shape (M, 2), or shape (2,) for scalar input.
         """
         arr = np.asarray(s, dtype=float)
         flat = arr.ravel()
@@ -207,14 +238,14 @@ class AirfoilSpline:
         Parameters
         ----------
         s : float or array_like
-            Arc length positions in m.
+            Arc length positions [chord units].
         order : int
             Derivative order (0, 1, 2 or 3, dimensionless).
 
         Returns
         -------
         numpy.ndarray
-            Derivatives in m**(1 - order), shape (M, 2),
+            Derivatives [chord units**(1 - order)], shape (M, 2),
             or shape (2,) for scalar input.
         """
         if order not in (0, 1, 2, 3):
@@ -236,12 +267,13 @@ class AirfoilSpline:
         Parameters
         ----------
         s : float or array_like
-            Arc length positions in m.
+            Arc length positions [chord units].
 
         Returns
         -------
         numpy.ndarray
-            Curvature magnitude in 1/m, shape (M,), or scalar for scalar input.
+            Curvature magnitude [1/chord units], shape (M,), or scalar for
+            scalar input.
         """
         arr = np.asarray(s, dtype=float)
         flat = arr.ravel()
@@ -292,7 +324,7 @@ def _split_equidistribute(
     The leading edge is always a node: the upper part [0, s_le] and the lower
     part [s_le, length] get node counts proportional to their weight
     integrals, and each part splits its integral into equal pieces. Arc
-    length positions come out in m.
+    length positions come out in chord units.
     """
     step = np.diff(grid)
     cum = np.concatenate([[0.0], np.cumsum(0.5 * (weight[1:] + weight[:-1]) * step)])
@@ -320,7 +352,7 @@ def _equidistribute_pass(
     te_refinement: float,
     curvature_weight: float,
 ) -> np.ndarray:
-    """Node set of one fit-and-equidistribute pass in m.
+    """Node set [chord units] of one fit-and-equidistribute pass.
 
     Build the weight on a fine grid, split its cumulative integral at the
     leading edge, invert each part with a monotone cubic, and smooth the
@@ -341,9 +373,18 @@ def _equidistribute_pass(
         nodes = spline(node_s)
         if _adjacent_ratio(nodes) <= _MAX_RATIO:
             break
-        smooth = gaussian_filter1d(weight, sigma)
-        weight = 0.5 * (smooth + float(np.mean(smooth)))
-        sigma *= 1.5
+        mean = float(np.mean(weight))
+        if float(np.ptp(weight)) <= 1e-12 * mean:
+            # The weight is uniform: more smoothing cannot change the nodes.
+            break
+        if sigma > _MAX_SIGMA:
+            # The limit of the smoothing is the uniform weight. Use it
+            # directly: a wider filter costs more and changes nothing.
+            weight = np.full_like(weight, mean)
+        else:
+            smooth = gaussian_filter1d(weight, sigma)
+            weight = 0.5 * (smooth + float(np.mean(smooth)))
+            sigma *= 1.5
         node_s = _split_equidistribute(grid, weight, s_le, length, n_panels)
     nodes = spline(node_s)
     if spline.closed:
@@ -367,6 +408,9 @@ def repanel(
     weight is smoothed until the adjacent panel length ratio stays at most
     1.5 everywhere.
 
+    When the smoothing cannot reach the 1.5 bound, the function warns
+    (see Warns) and returns the nodes of the last pass.
+
     The fit-and-equidistribute pass repeats through the new nodes until the
     set stops moving (fixed point of the equidistribution), so repaneling an
     already repaneled set returns the same nodes.
@@ -382,9 +426,10 @@ def repanel(
     Parameters
     ----------
     coords : array_like, shape (N, 2)
-        Airfoil coordinates in m in Selig order (counterclockwise).
+        Airfoil coordinates [chord units] in Selig order (counterclockwise).
     n_panels : int
-        Number of panels (dimensionless). The output holds n_panels + 1 nodes.
+        Number of panels (dimensionless, at least 3). The output holds
+        n_panels + 1 nodes.
     le_refinement : float
         Amplitude of the Gaussian refinement at the leading edge
         (dimensionless, nonnegative).
@@ -397,10 +442,21 @@ def repanel(
     Returns
     -------
     numpy.ndarray
-        Paneled coordinates in m, shape (n_panels + 1, 2), in Selig order.
+        Paneled coordinates [chord units], shape (n_panels + 1, 2), in Selig
+        order.
+
+    Warns
+    -----
+    UserWarning
+        When the weight smoothing cannot bring the adjacent panel length
+        ratio to 1.5 or below (for example with very few panels). The
+        nodes are still returned; the warning gives the reached ratio.
     """
-    if n_panels < 2:
-        raise ValueError("n_panels must be at least 2")
+    if n_panels < 3:
+        raise ValueError(
+            "n_panels must be at least 3 (the fixed-point pass fits a spline "
+            "through the n_panels + 1 nodes, which needs four points)"
+        )
     if le_refinement < 0.0 or te_refinement < 0.0 or curvature_weight < 0.0:
         raise ValueError("refinement weights must be nonnegative")
     nodes = _equidistribute_pass(
@@ -418,6 +474,15 @@ def repanel(
         nodes = update
         if shift <= _FIXED_TOL:
             break
+    ratio = _adjacent_ratio(nodes)
+    if ratio > _MAX_RATIO:
+        warnings.warn(
+            f"repanel: the adjacent panel length ratio is {ratio:.4g}, above the "
+            f"limit {_MAX_RATIO} after the weight smoothing (n_panels={n_panels}). "
+            "Use more panels or smaller refinement weights.",
+            UserWarning,
+            stacklevel=2,
+        )
     return nodes
 
 
@@ -434,14 +499,15 @@ def repanel_cosine(coords: np.ndarray, n_per_side: int) -> np.ndarray:
     Parameters
     ----------
     coords : array_like, shape (N, 2)
-        Airfoil coordinates in m in Selig order (counterclockwise).
+        Airfoil coordinates [chord units] in Selig order (counterclockwise).
     n_per_side : int
         Panels per surface (dimensionless, at least 1).
 
     Returns
     -------
     numpy.ndarray
-        Paneled coordinates in m, shape (2 * n_per_side + 1, 2), in Selig order.
+        Paneled coordinates [chord units], shape (2 * n_per_side + 1, 2), in
+        Selig order.
     """
     if n_per_side < 1:
         raise ValueError("n_per_side must be at least 1")

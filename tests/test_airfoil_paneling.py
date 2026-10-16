@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+import warnings
+
 import numpy as np
 import pytest
 
@@ -227,3 +229,87 @@ def test_repanel_cosine_counts() -> None:
         assert nodes.shape == (161, 2)
         le = leading_edge_index(nodes)
         assert 0 < le < len(nodes) - 1
+
+
+def coarse_ellipse_coords(n: int = N_PER_SURFACE) -> np.ndarray:
+    """Ellipse of thickness ratio 0.12 with 61 uniform-in-x points per surface.
+
+    This is the coarse input of the paneling specification. The trailing
+    edge is the blunt end of the ellipse at (1, 0); it is closed.
+    """
+    x = np.linspace(0.0, CHORD, n)
+    y = SEMI_MINOR * np.sqrt(np.clip(1.0 - ((x - SEMI_MAJOR) / SEMI_MAJOR) ** 2, 0.0, None))
+    upper = np.column_stack([x[::-1], y[::-1]])
+    lower = np.column_stack([x[1:], -y[1:]])
+    return np.vstack([upper, lower])
+
+
+def test_coarse_ellipse_accuracy_limit() -> None:
+    """Repaneling the coarse ellipse input meets a looser, measured bound.
+
+    The fine-input checks above (1e-6 chord) need the resolved sampling.
+    With 61 uniform-in-x points per surface, the spline cannot follow the
+    blunt ends of the ellipse, where the slope is infinite and the input
+    points are far apart along the curve. Measured node distances to the
+    exact ellipse for n_panels 160: 1.3e-3 chord near the blunt trailing
+    end (x > 0.95), 3.0e-4 chord near the leading edge (x < 0.05) and
+    1.2e-5 chord between. The bounds below are 1.5e-3, 4e-4 and 2e-5
+    chord. The leading-edge node stays at (0, 0) within 1e-8, and the
+    polygon area of 640 panels is within 5e-4 relative of pi a b
+    (measured 4.1e-4).
+    """
+    coords = coarse_ellipse_coords()
+    assert coords.shape == (2 * N_PER_SURFACE - 1, 2)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        nodes = repanel(coords, n_panels=N_PANELS)
+    dist = ellipse_distance(nodes)
+    x = nodes[:, 0]
+    assert np.max(dist) <= 1.5e-3
+    assert np.max(dist[x < 0.05]) <= 4e-4
+    assert np.max(dist[(x >= 0.05) & (x <= 0.95)]) <= 2e-5
+    assert np.min(np.linalg.norm(nodes, axis=1)) < 1e-8
+    assert max_adjacent_ratio(nodes) <= 1.5
+    fine = repanel(coords, n_panels=640)
+    exact = np.pi * SEMI_MAJOR * SEMI_MINOR
+    assert polygon_area(fine) == pytest.approx(exact, rel=5e-4)
+
+
+def test_leading_edge_search_raises_without_a_distance_maximum() -> None:
+    """A curve whose distance to the trailing-edge midpoint has no maximum.
+
+    Before the fix, the search accepted any sign change of the tangency
+    function and silently returned the distance minimum (the bottom of
+    this bowl) as the leading edge.
+    """
+    x = np.linspace(0.0, 1.0, 21)
+    y = -0.3 + 0.5 * (x - 0.5) ** 2
+    bowl = np.column_stack([x, y])
+    with pytest.raises(ValueError, match="leading edge"):
+        AirfoilSpline(bowl)
+
+
+def test_ratio_warning_when_smoothing_cannot_reach_the_bound() -> None:
+    """Very few panels cannot meet the 1.5 ratio: the function warns.
+
+    Before the fix, the nodes came back with a ratio above 1.5 and no
+    signal.
+    """
+    coords = naca_symmetric_coords()
+    with pytest.warns(UserWarning, match="adjacent panel length ratio"):
+        nodes = repanel(coords, n_panels=3)
+    assert nodes.shape == (4, 2)
+    assert max_adjacent_ratio(nodes) > 1.5
+
+
+def test_default_repanel_does_not_warn() -> None:
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        for coords in (ellipse_coords(), naca_symmetric_coords()):
+            repanel(coords)
+
+
+def test_two_panels_raise_a_clear_error() -> None:
+    """Two panels give three nodes, too few for the spline of the next pass."""
+    with pytest.raises(ValueError, match="at least 3"):
+        repanel(naca_symmetric_coords(), n_panels=2)
