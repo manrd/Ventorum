@@ -825,3 +825,53 @@ def test_fold_guard_margin_and_unchanged_meshes():
         a = mesh_lifting_surface(surf_k, coords, n_chord=12, n_span=n_span)
         b = mesh_lifting_surface(surf_k, coords, n_chord=12, n_span=n_span, fold_guard=False)
         assert _same_mesh(a, b)
+
+
+def _root_scaling_warnings(surf, coords, **kw):
+    """Return the strong root-scaling warnings of one mesh build."""
+    import warnings
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        mesh_lifting_surface(surf, coords, n_chord=12, n_span=8, **kw)
+    return [w for w in caught if issubclass(w.category, UserWarning) and "strongly scaled" in str(w.message)]
+
+
+def test_strong_root_thickness_scaling_warns_above_60_deg():
+    """The root-thickness factor 1 / cos(G) above G = 60 deg gives a UserWarning, without a cap.
+
+    The scaling is not capped (owner decision), so a steep first panel row
+    gives a large factor (above 2 past 60 deg). The builder then warns that
+    the root section is strongly scaled and that the result needs checking.
+    60.5 deg warns, 59.5 deg does not, the option off never warns, and the
+    mesh with a control at the root (the control path of the builder)
+    warns too. The warned mesh still has the full factor.
+    """
+    from ventorum.panel3d.mesh import ROOT_SCALE_WARN_DIHEDRAL_DEG
+
+    assert ROOT_SCALE_WARN_DIHEDRAL_DEG == 60.0
+    coords = _naca4(0.0, 0.0, 0.12, closed=True)
+    for half in (False, True):
+        warned = _root_scaling_warnings(_straight_wing(60.5), coords, half=half)
+        assert len(warned) == 1
+        text = str(warned[0].message)
+        assert "60.5 deg" in text and "needs checking" in text
+        assert f"{1.0 / np.cos(np.radians(60.5)):.2f}" in text
+        assert _root_scaling_warnings(_straight_wing(59.5), coords, half=half) == []
+        for deg in (59.5, 60.5, 75.0):
+            assert _root_scaling_warnings(_straight_wing(deg), coords, half=half, scale_root_thickness=False) == []
+    flapped = _straight_wing(60.5)
+    flapped.controls = [ControlSurface("flap", 0.0, 0.5, 0.7, np.radians(10.0))]
+    assert len(_root_scaling_warnings(flapped, coords)) == 1
+    flapped_low = _straight_wing(59.5)
+    flapped_low.controls = [ControlSurface("flap", 0.0, 0.5, 0.7, np.radians(10.0))]
+    assert _root_scaling_warnings(flapped_low, coords) == []
+    # No cap: the root offsets grow by the full factor 1 / cos(60.5 deg).
+    with pytest.warns(UserWarning, match="strongly scaled"):
+        on = mesh_lifting_surface(_straight_wing(60.5), coords, n_chord=12, n_span=8, half=True)
+    off = mesh_lifting_surface(_straight_wing(60.5), coords, n_chord=12, n_span=8, half=True,
+                               scale_root_thickness=False)
+    root_on = np.asarray(on.nodes)[np.asarray(on.node_station) == 0]
+    root_off = np.asarray(off.nodes)[np.asarray(off.node_station) == 0]
+    assert float(np.ptp(root_on[:, 2])) == pytest.approx(float(np.ptp(root_off[:, 2])) / np.cos(np.radians(60.5)),
+                                                         rel=1e-12)

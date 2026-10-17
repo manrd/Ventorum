@@ -21,7 +21,7 @@ pip install torch --index-url https://download.pytorch.org/whl/cpu
 
 The installation also compiles the Cython kernels when a C compiler is present. Without a compiler the installation continues, and Ventorum uses the Numba and numpy kernels. XFOIL is optional: Ventorum can call it to make section polars (`ventorum.run_xfoil`, `ventorum.aero.polar_source.XfoilPolarSource`) when it is installed.
 
-### XFOIL
+## XFOIL
 
 Ventorum finds XFOIL in this order: the `executable` argument of a library call, the environment variable `VENTORUM_XFOIL`, then the program `xfoil` on the PATH (`xfoil.exe` on Windows). The agent tools never take an executable from their input; they use only `VENTORUM_XFOIL` or the PATH.
 
