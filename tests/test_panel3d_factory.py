@@ -495,6 +495,7 @@ def _closed_te_wing() -> Aircraft:
     return _simple_wing(shape=coords, semi_span=4.0, chord=1.0)
 
 
+@pytest.mark.slow
 def test_well_resolved_wing_mesh_has_no_mesh_warning():
     """A mesh that the mesh-error study shows as adequate gets no mesh warning.
 
@@ -524,7 +525,7 @@ def test_well_resolved_wing_mesh_has_no_mesh_warning():
 def test_coarse_chordwise_mesh_gets_the_mesh_warning(n_chord, level):
     """Meshes that the mesh-error study shows as inadequate get the warning of their level.
 
-    With 16 spanwise panels, 20 chordwise panels (the default count) give an
+    With 16 spanwise panels, 20 chordwise panels (the former default count) give an
     error of this wing above the warning level and 8 chordwise panels above
     the strong level. The near-field/far-field drag rule gives the matching
     level.
@@ -541,6 +542,7 @@ def test_coarse_chordwise_mesh_gets_the_mesh_warning(n_chord, level):
     assert trust.rating == ("MODERATE" if level == "warn" else "LOW")
 
 
+@pytest.mark.slow
 def test_chordwise_count_reaches_the_trust_score():
     """Regression: the panel solver did not give n_chord to the trust score.
 

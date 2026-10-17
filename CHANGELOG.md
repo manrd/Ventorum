@@ -53,6 +53,7 @@ a minor version can change a public interface.
 
 ### Changed
 
+- The 3D panel solver uses 40 chordwise panels per surface by default (was 20). A mesh-error study of the method found 40 the smallest count for which no test wing gets the mesh warning of the trust score; it costs about 8 times the factorization work and 4 times the matrix memory of 20.
 - Ventorum-3DP: the panel solver gives its chordwise panel count (`n_chord`) and its largest
   strip chord to the trust score. The calibrated chordwise rule of the mesh checks and the
   ground rule for chordwise panels longer than the gap now act for the panel method. A result

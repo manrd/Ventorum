@@ -101,6 +101,7 @@ def _closed_mesh(nodes: np.ndarray, panels: np.ndarray) -> PanelMesh:
     )
 
 
+@pytest.mark.slow
 def test_sphere_cp_both_orientations_and_dalembert():
     """Verify the sphere Cp error with the flow across and along the pole axis.
 
@@ -139,6 +140,7 @@ def test_sphere_cp_both_orientations_and_dalembert():
         assert err[1] < 0.03, f"Error at 32x64 not below 0.03 ({name}): {err[1]}"
 
 
+@pytest.mark.slow
 def test_ellipsoid_oblique_surface_velocity():
     """Verify the surface speed on an ellipsoid at oblique onset on all panels.
 

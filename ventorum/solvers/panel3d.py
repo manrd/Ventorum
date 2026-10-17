@@ -10,7 +10,7 @@ Settings
 --------
 The panel solver reads these fields of :class:`SolverSettings`:
 ``n_panels`` (spanwise panels per semi-span, as the lattice), ``n_chord``
-(chordwise panels per surface, 20 when None), ``spacing``,
+(chordwise panels per surface, 40 when None), ``spacing``,
 ``proportional_panels``, ``min_panels``, ``use_symmetry``,
 ``panel_kutta``, ``panel_backend``, ``panel_wake_length``,
 ``panel_chord_spacing`` (cosine by default),
@@ -98,7 +98,10 @@ from ventorum.utils.validation import validate_aircraft
 
 __all__ = ["PanelMethodSolver"]
 
-_DEFAULT_N_CHORD = 20
+#: Default chordwise panel count per surface [-]. A mesh-error study of the
+#: method chose the smallest count for which no test wing gets the mesh
+#: warning of the trust score.
+_DEFAULT_N_CHORD = 40
 
 #: Accepted values of the panel options of :class:`SolverSettings`.
 _KUTTA_OPTIONS = ("morino", "pressure")
@@ -419,7 +422,7 @@ class PanelMethodSolver(BaseSolver):
             Operating free-stream condition(s).
         settings : SolverSettings
             Discretization and solution knobs. The chordwise count
-            ``n_chord`` [-] (20 when None) also goes to the trust score:
+            ``n_chord`` [-] (40 when None) also goes to the trust score:
             it sets the chordwise rule of
             :func:`ventorum.core.trust.panel3d_mesh_checks` and, in ground
             effect, the rule for chordwise panels longer than the gap.

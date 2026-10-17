@@ -440,7 +440,7 @@ The chordwise Richardson value is then $R_c = f(n_{s,0}, \infty)$ and the spanwi
 ## Solver interface
 
 `PanelMethodSolver` connects Ventorum-3DP to the standard solver API (`solver="panel3d"`):
-- Inputs: `Aircraft`, `FlightCondition` (or sequences for sweeps), `SolverSettings`, and an optional `GroundPlane` (keyword `ground`) that replaces `condition.h`. The panel fields of `SolverSettings` are `panel_kutta`, `panel_backend`, `panel_wake_length`, `panel_chord_spacing` (cosine by default), `panel_estimate_mesh_error` and `panel_scale_root_thickness` (True by default; the root section of a symmetric surface with dihedral keeps its thickness normal to the local surface, see the panel solver theory page); `n_chord` is the chordwise panel count per surface (20 when None).
+- Inputs: `Aircraft`, `FlightCondition` (or sequences for sweeps), `SolverSettings`, and an optional `GroundPlane` (keyword `ground`) that replaces `condition.h`. The panel fields of `SolverSettings` are `panel_kutta`, `panel_backend`, `panel_wake_length`, `panel_chord_spacing` (cosine by default), `panel_estimate_mesh_error` and `panel_scale_root_thickness` (True by default; the root section of a symmetric surface with dihedral keeps its thickness normal to the local surface, see the panel solver theory page); `n_chord` is the chordwise panel count per surface (40 when None).
 - Outputs: `SolverResult` containing `totals` (`IntegratedResult`), `spanwise` (`SpanwiseResult` strip loads, each panel assigned to the lattice strip whose station planes enclose its centroid, or by the strip index of the mesh builder), surface `cp` distribution, panel options (`details["panel"]`), trust score, and execution `dispatch` records with the counted factorizations.
 
 ## Assumptions

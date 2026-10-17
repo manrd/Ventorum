@@ -215,6 +215,7 @@ def test_sphere_cp_max_order(sphere_cpmax):
     assert all(abs(v) < 1e-9 for v in sphere_cpmax["cl"])
 
 
+@pytest.mark.slow
 def test_sphere_directional_estimate_against_the_exact_solution():
     """The directional estimate on a sphere covers the exact error and its value is near the exact one.
 

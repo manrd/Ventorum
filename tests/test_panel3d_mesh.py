@@ -757,7 +757,7 @@ def _dihedral_wing(dihedral_deg=6.0, semi_span=4.0):
     )
 
 
-@pytest.mark.parametrize("n_span", [48, 96])
+@pytest.mark.parametrize("n_span", [48, pytest.param(96, marks=pytest.mark.slow)])
 def test_fold_guard_keeps_the_root_strip_of_a_dihedral_wing_open(n_span):
     """Regression: a 6 deg dihedral wing folded its root strip from 48 spanwise panels on.
 
