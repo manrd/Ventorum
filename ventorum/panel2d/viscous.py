@@ -29,6 +29,14 @@ Newton iteration (see :mod:`ventorum.panel2d.vii`).
   CONTINUATION_STEP (start values only).
 * A case that does not converge returns ``converged=False`` with a reason
   and a warning; its values are those of the last iterate.
+* Fail fast: a Newton solve stops early by stagnation or divergence (see
+  :func:`ventorum.panel2d.vii.newton_solve`); an angle has a work budget
+  in Newton iterations over all its attempts (WORK_BUDGET); a failed
+  quasi-simultaneous cold-start attempt far from convergence ends the cold
+  start; a stagnation stop at an intermediate angle ends the halving of
+  the angle step; the cold start at the zero-lift angle is solved once per
+  sweep. Each early stop is named in the reason. The result counts the
+  work of each angle (Newton iterations, linear solves and Newton solves).
 
 Only one body is supported (a plain flap is part of the single-element
 geometry); more bodies raise ValueError.
@@ -56,13 +64,104 @@ from ventorum.panel2d import coupling as cp
 from ventorum.panel2d import vii
 from ventorum.utils.parallel import blas_single_thread
 
-__all__ = ["ViscousResult", "solve_viscous", "trace_wake_streamline", "prepare_case", "warm_state", "finish_angle",
-           "row_from_result", "sweep_order"]
+__all__ = ["ViscousResult", "StopRules", "solve_viscous", "trace_wake_streamline", "prepare_case", "warm_state",
+           "finish_angle", "row_from_result", "sweep_order"]
 
 #: Number of times the angle step of a warm start may be halved.
 SUBSTEP_DEPTH = 3
 #: Largest angle step of the continuation from the zero-lift angle [deg].
 CONTINUATION_STEP = 2.0
+#: Work budget of one angle: largest sum of Newton iterations over all its attempts [-] (0: no budget).
+WORK_BUDGET = 250
+#: A failed quasi-simultaneous cold-start attempt that stops above this residual ends the cold start [-].
+COLD_SKIP_RESIDUAL = 1e-2
+
+
+@dataclass(frozen=True)
+class StopRules:
+    """Early-stop rules of the viscous solver (fail fast).
+
+    Attributes
+    ----------
+    stall_window : int
+        Stagnation stop of a Newton solve: the solve stops when its
+        smallest residual has not fallen by the factor ``stall_factor`` in
+        the last ``stall_window`` iterations (window restarted when omega
+        changes and, at omega = 1, when the structure changes) [-]. 0
+        switches the stagnation stops off, and also the end of the cold
+        start after a failed quasi-simultaneous first estimate.
+    stall_factor : float
+        Factor of the stagnation stop [-], in (0, 1).
+    divergence_factor : float
+        Divergence stop of a Newton solve: the solve stops when, at
+        omega = 1, the residual exceeds this factor times its smallest
+        earlier value [-]. 0 switches the rule off.
+    work_budget : int
+        Largest sum of Newton iterations over all attempts of one angle
+        (warm start, halved angle steps and cold start) [-]. 0 means no
+        budget.
+    """
+
+    stall_window: int = vii.STALL_WINDOW
+    stall_factor: float = vii.STALL_FACTOR
+    divergence_factor: float = vii.DIVERGENCE_FACTOR
+    work_budget: int = WORK_BUDGET
+
+    def __post_init__(self):
+        if int(self.stall_window) != self.stall_window or self.stall_window < 0:
+            raise ValueError(f"stall_window must be an integer >= 0, got {self.stall_window}.")
+        if not 0.0 < self.stall_factor < 1.0:
+            raise ValueError(f"stall_factor must lie in (0, 1), got {self.stall_factor}.")
+        if not (self.divergence_factor == 0.0 or self.divergence_factor > 1.0):
+            raise ValueError(f"divergence_factor must be 0 (off) or larger than 1, got {self.divergence_factor}.")
+        if int(self.work_budget) != self.work_budget or self.work_budget < 0:
+            raise ValueError(f"work_budget must be an integer >= 0, got {self.work_budget}.")
+
+
+class _BudgetUsedUp(Exception):
+    """The work budget of an angle is used up."""
+
+
+class _AngleWork:
+    """Work counters, work budget and early-stop notes of one angle."""
+
+    def __init__(self, alpha, rules: StopRules):
+        self.alpha = float(alpha)
+        self.rules = rules
+        self.iterations = 0
+        self.linear_solves = 0
+        self.solves = 0
+        self.notes = []
+        self.best = None
+
+    def cap(self, max_iter: int) -> int:
+        """Return the iteration limit of the next Newton solve."""
+        if self.rules.work_budget <= 0:
+            return int(max_iter)
+        return int(min(max_iter, self.rules.work_budget - self.iterations))
+
+    def add(self, setup, res, cap: int, max_iter: int):
+        """Count a Newton solve; mark a stop at a limit below max_iter as a budget stop."""
+        if res.status == "max_iter" and cap < max_iter:
+            res.status = "budget"
+            res.reason = (f"work budget of {self.rules.work_budget} Newton iterations per angle used up "
+                          f"(largest residual {res.residual:.3e})")
+            self.note(f"work budget of {self.rules.work_budget} Newton iterations per angle used up")
+        self.iterations += int(res.iterations)
+        self.linear_solves += int(res.linear_solves)
+        self.solves += 1
+        if float(setup.sys.alpha) == self.alpha and (self.best is None or res.residual < self.best[1].residual):
+            self.best = (setup, res)
+
+    def note(self, text: str):
+        """Record an early stop of the chain of attempts."""
+        if text not in self.notes:
+            self.notes.append(text)
+
+    def counters(self) -> dict:
+        """Return the work counters of the angle."""
+        return {"newton_iterations": self.iterations, "linear_solves": self.linear_solves,
+                "newton_solves": self.solves}
 
 
 @dataclass
@@ -117,6 +216,15 @@ class ViscousResult:
         Edge velocity over the free-stream speed at the nodes [-].
     wake : dict or list of dict
         Wake line coordinates [m], theta [m], H [-] and ue [-].
+    newton_iterations : int or np.ndarray
+        Work of the angle: sum of the Newton iterations of all its Newton
+        solves (warm start, halved angle steps, cold start and continuation,
+        failed attempts included) [-].
+    linear_solves : int or np.ndarray
+        Work of the angle: solves of the Newton or Levenberg-Marquardt
+        linear system over all its Newton solves [-].
+    newton_solves : int or np.ndarray
+        Number of Newton solves (attempts) of the angle [-].
     """
 
     alpha: float | np.ndarray
@@ -140,6 +248,9 @@ class ViscousResult:
     delta_star: np.ndarray | list = field(default_factory=list)
     ue: np.ndarray | list = field(default_factory=list)
     wake: dict | list = field(default_factory=dict)
+    newton_iterations: int | np.ndarray = 0
+    linear_solves: int | np.ndarray = 0
+    newton_solves: int | np.ndarray = 0
 
     @property
     def x_transition(self):
@@ -228,13 +339,26 @@ def warm_state(setup: vii.CaseSetup, prev_setup: vii.CaseSetup, prev: vii.CaseSt
 _NUMPY = {"xp": np, "device": None, "dtype": None}
 
 
-def _solve_one(setup, start, tol, max_iter, omega0, bk=None):
-    """Run the Newton solve of one case from a start state."""
+def _solve_one(setup, start, tol, max_iter, omega0, bk=None, ctl=None):
+    """Run the Newton solve of one case from a start state.
+
+    With ``ctl`` (the work record of the angle) the solve uses its stop
+    rules, its iteration limit is cut to the work budget that is left, and
+    its work is counted. _BudgetUsedUp is raised when no budget is left.
+    """
     bk = _NUMPY if bk is None else bk
-    return vii.newton_solve([setup], [start], tol=tol, max_iter=max_iter, omega0=[omega0], **bk)[0]
+    rules = StopRules() if ctl is None else ctl.rules
+    cap = int(max_iter) if ctl is None else ctl.cap(max_iter)
+    if cap <= 0:
+        raise _BudgetUsedUp()
+    res = vii.newton_solve([setup], [start], tol=tol, max_iter=cap, omega0=[omega0], stall_window=rules.stall_window,
+                           stall_factor=rules.stall_factor, divergence_factor=rules.divergence_factor, **bk)[0]
+    if ctl is not None:
+        ctl.add(setup, res, cap, max_iter)
+    return res
 
 
-def _cold_solve(setup, tol, max_iter, bk=None):
+def _cold_solve(setup, tol, max_iter, bk=None, ctl=None):
     """Solve a case from a cold start.
 
     Three first estimates are tried in turn until one converges:
@@ -248,6 +372,13 @@ def _cold_solve(setup, tol, max_iter, bk=None):
     3. the direct marches with omega = 1.
 
     The attempt with the smallest residual is returned when none converges.
+    With ``ctl`` (the work record of the angle) and the stagnation stops
+    on, a failed attempt from the quasi-simultaneous marches that stopped
+    by stagnation, divergence or a non-finite residual with a residual
+    above COLD_SKIP_RESIDUAL ends the cold start: the third first estimate
+    did not rescue such a case in the test sample. A failure of the first
+    estimate does not end the cold start (the quasi-simultaneous marches
+    often rescue it).
     """
     best = None
     for sweeps, omega0 in ((0, 1.0 / 64.0), (vii.QS_SWEEPS, 1.0), (0, 1.0)):
@@ -257,11 +388,16 @@ def _cold_solve(setup, tol, max_iter, bk=None):
             if sweeps == 0:
                 raise
             continue
-        res = _solve_one(setup, init, tol, max_iter, omega0, bk)
+        res = _solve_one(setup, init, tol, max_iter, omega0, bk, ctl)
         if res.converged:
             return res
         if best is None or res.residual < best.residual:
             best = res
+        if (ctl is not None and ctl.rules.stall_window > 0 and sweeps > 0
+                and res.status in ("stagnation", "divergence", "not_finite") and not res.residual <= COLD_SKIP_RESIDUAL):
+            ctl.note(f"cold start ended after a stop ({res.status.replace('_', '-')}) of the quasi-simultaneous "
+                     f"first estimate with a residual above {COLD_SKIP_RESIDUAL:g}")
+            break
     return best
 
 
@@ -280,6 +416,10 @@ def solve_viscous(
     n_wake: int = 30,
     height_reference: str = "pivot",
     backend: str = "numpy",
+    stall_window: int = vii.STALL_WINDOW,
+    stall_factor: float = vii.STALL_FACTOR,
+    divergence_factor: float = vii.DIVERGENCE_FACTOR,
+    work_budget: int = WORK_BUDGET,
 ) -> ViscousResult:
     """Solve 2D viscous flow with fully simultaneous boundary-layer coupling.
 
@@ -315,11 +455,29 @@ def solve_viscous(
         Backend of the sequential solver (the batch solver
         :func:`ventorum.panel2d.viscous_batch.solve_viscous_batch` runs on
         torch).
+    stall_window : int
+        Stagnation stop of each Newton solve: it stops when its smallest
+        residual has not fallen by the factor ``stall_factor`` in the last
+        ``stall_window`` iterations (window restarted when omega changes
+        and, at omega = 1, when the structure changes), or when, at
+        omega = 1, the line search and the Levenberg-Marquardt fallback
+        both fail twice on the same state [-]. 0 switches both rules off,
+        and also the end of the cold start after a failed
+        quasi-simultaneous first estimate.
+    stall_factor : float
+        Factor of the stagnation stop [-], in (0, 1).
+    divergence_factor : float
+        Divergence stop of each Newton solve: it stops when, at omega = 1,
+        the residual exceeds this factor times its smallest earlier value
+        [-]. 0 switches the rule off.
+    work_budget : int
+        Largest sum of Newton iterations over all attempts of one angle
+        [-]. 0 means no budget.
 
     Returns
     -------
     ViscousResult
-        Loads, distributions and convergence data per angle.
+        Loads, distributions, convergence data and work counters per angle.
     """
     if abs(mach) > 1e-12:
         raise ValueError(f"Only mach=0.0 is supported in solve_viscous, got mach={mach}.")
@@ -328,6 +486,8 @@ def solve_viscous(
                          "(solve_viscous_batch runs on torch).")
     if not np.isfinite(Re) or Re <= 0.0:
         raise ValueError(f"Reynolds number must be positive, got {Re}.")
+    rules = StopRules(stall_window=stall_window, stall_factor=stall_factor, divergence_factor=divergence_factor,
+                      work_budget=work_budget)
     body = _single_body(bodies)
     is_scalar = np.ndim(alpha_deg) == 0
     alphas = np.atleast_1d(np.asarray(alpha_deg, dtype=np.float64))
@@ -335,18 +495,19 @@ def solve_viscous(
     out: dict[float, dict] = {}
     kw = dict(ncrit=ncrit, xtr=xtr, height=height, height_reference=height_reference,
               wake_length=wake_length, n_wake=n_wake)
+    cache: dict = {}
     with blas_single_thread():
         first_state = None
         prev = None
         for a in order_up:
-            out[a], state = _solve_angle(body, a, Re, prev, tol, max_iter, kw)
+            out[a], state = _solve_angle(body, a, Re, prev, tol, max_iter, kw, rules, cache)
             if out[a]["converged"]:
                 prev = state
                 if first_state is None:
                     first_state = state
         prev = first_state
         for a in order_dn:
-            out[a], state = _solve_angle(body, a, Re, prev, tol, max_iter, kw)
+            out[a], state = _solve_angle(body, a, Re, prev, tol, max_iter, kw, rules, cache)
             if out[a]["converged"]:
                 prev = state
     rows = [out[float(a)] for a in alphas]
@@ -379,6 +540,9 @@ def solve_viscous(
         delta_star=[r["delta_star"] for r in rows],
         ue=[r["ue"] for r in rows],
         wake=[r["wake"] for r in rows],
+        newton_iterations=np.array([r["newton_iterations"] for r in rows], dtype=int),
+        linear_solves=np.array([r["linear_solves"] for r in rows], dtype=int),
+        newton_solves=np.array([r["newton_solves"] for r in rows], dtype=int),
     )
 
 
@@ -401,33 +565,41 @@ def sweep_order(alphas):
 
 _FIELDS = ("alpha", "Cl", "Cd", "Cd_friction", "Cd_pressure", "Cm", "transition_positions", "separation_flags",
            "Cp", "H", "theta", "Cf", "iterations", "residual", "converged", "coordinates", "reason",
-           "Cl_pressure", "delta_star", "ue", "wake")
+           "Cl_pressure", "delta_star", "ue", "wake", "newton_iterations", "linear_solves", "newton_solves")
 
 
-def _warm_path(body, alpha, re, prev, tol, max_iter, kw, depth, bk=None, first=None):
+def _warm_path(body, alpha, re, prev, tol, max_iter, kw, depth, bk=None, first=None, ctl=None, mid_step=False):
     """Solve one angle from the converged state of another angle.
 
     When the solve from ``prev`` does not converge, the angle step is halved
     (intermediate angles solved first), up to SUBSTEP_DEPTH times. The
     intermediate solutions only serve as start values. ``first`` holds the
-    first attempt (setup, result) when the caller already ran it.
+    first attempt (setup, result) when the caller already ran it. With
+    ``ctl`` (the work record of the angle), the solve at an intermediate
+    angle (``mid_step``) that stops by stagnation is not halved again; the
+    halving at that level then ends. The second half-step (from the
+    intermediate angle to the angle) is always halved again: in the test
+    sample such halvings rescued angles down to the last depth.
     """
     if first is None:
         setup = prepare_case(body, alpha, re, **kw)
-        res = _solve_one(setup, warm_state(setup, prev[0], prev[1]), tol, max_iter, 1.0, bk)
+        res = _solve_one(setup, warm_state(setup, prev[0], prev[1]), tol, max_iter, 1.0, bk, ctl)
     else:
         setup, res = first
     if res.converged or depth >= SUBSTEP_DEPTH:
         return setup, res
+    if ctl is not None and mid_step and res.status == "stagnation":
+        ctl.note("halving of the angle step ended after a stagnation stop at an intermediate angle")
+        return setup, res
     mid = 0.5 * (prev[0].sys.alpha + alpha)
-    s_mid, r_mid = _warm_path(body, mid, re, prev, tol, max_iter, kw, depth + 1, bk)
+    s_mid, r_mid = _warm_path(body, mid, re, prev, tol, max_iter, kw, depth + 1, bk, ctl=ctl, mid_step=True)
     if not r_mid.converged:
         return setup, res
-    s_end, r_end = _warm_path(body, alpha, re, (s_mid, r_mid.state), tol, max_iter, kw, depth + 1, bk)
+    s_end, r_end = _warm_path(body, alpha, re, (s_mid, r_mid.state), tol, max_iter, kw, depth + 1, bk, ctl=ctl)
     return (s_end, r_end) if r_end.converged or r_end.residual < res.residual else (setup, res)
 
 
-def finish_angle(body, alpha, re, prev, tol, max_iter, kw, bk=None, first=None):
+def finish_angle(body, alpha, re, prev, tol, max_iter, kw, bk=None, first=None, rules=None, cache=None):
     """Complete the solve of one angle; return the result row and (setup, final state).
 
     Start values: the converged state of the previous angle (with halved
@@ -435,20 +607,45 @@ def finish_angle(body, alpha, re, prev, tol, max_iter, kw, bk=None, first=None):
     direct marches (see :func:`_cold_path`) when there is no previous state
     or the warm path fails. ``first`` (setup, result) is the first warm
     attempt when the caller already ran it (batched solver); the remaining
-    steps are then the same as in the sequential solver.
+    steps are then the same as in the sequential solver. ``rules``
+    (:class:`StopRules`, default values when None) sets the early stops
+    and the work budget of the angle. When the budget is used up, the
+    attempt at the angle with the smallest residual is returned (NaN
+    values when there is none). The row holds the work counters, and its
+    reason names each early stop of a failed angle. ``cache`` (a dict, one
+    per sweep) keeps the cold start at the zero-lift angle for the next
+    angles (see :func:`_cold_path`).
     """
+    ctl = _AngleWork(alpha, StopRules() if rules is None else rules)
+    if first is not None:
+        ctl.add(first[0], first[1], ctl.cap(max_iter), max_iter)
     try:
         if prev is not None:
-            setup, res = _warm_path(body, alpha, re, prev, tol, max_iter, kw, 0, bk, first)
+            setup, res = _warm_path(body, alpha, re, prev, tol, max_iter, kw, 0, bk, first, ctl=ctl)
             if not res.converged:
-                cold_setup, cold = _cold_path(body, alpha, re, tol, max_iter, kw, bk)
+                cold_setup, cold = _cold_path(body, alpha, re, tol, max_iter, kw, bk, ctl=ctl, cache=cache)
                 if cold.converged or cold.residual < res.residual:
                     setup, res = cold_setup, cold
         else:
-            setup, res = _cold_path(body, alpha, re, tol, max_iter, kw, bk)
+            setup, res = _cold_path(body, alpha, re, tol, max_iter, kw, bk, ctl=ctl, cache=cache)
+    except _BudgetUsedUp:
+        ctl.note(f"work budget of {ctl.rules.work_budget} Newton iterations per angle used up")
+        if ctl.best is None:
+            row = _failed_row(alpha, body, "; ".join(ctl.notes) + " before a solve at this angle")
+            row.update(ctl.counters())
+            return row, None
+        setup, res = ctl.best
     except cp.WakeGroundError as exc:
-        return _failed_row(alpha, body, str(exc)), None
-    return row_from_result(setup, res, alpha), (setup, res.state)
+        row = _failed_row(alpha, body, str(exc))
+        row.update(ctl.counters())
+        return row, None
+    row = row_from_result(setup, res, alpha)
+    row.update(ctl.counters())
+    if not res.converged and ctl.notes:
+        notes = [n for n in ctl.notes if n not in res.reason]
+        if notes:
+            row["reason"] = res.reason + "; " + "; ".join(notes)
+    return row, (setup, res.state)
 
 
 def zero_lift_angle(body, kw) -> float:
@@ -475,7 +672,7 @@ def zero_lift_angle(body, kw) -> float:
     return float(-4.0 * cl[0] / (cl[1] - cl[0]))
 
 
-def _cold_path(body, alpha, re, tol, max_iter, kw, bk=None):
+def _cold_path(body, alpha, re, tol, max_iter, kw, bk=None, ctl=None, cache=None):
     """Solve an angle without a converged neighbour.
 
     A cold start (first estimate by direct marches) is reliable near the
@@ -485,34 +682,42 @@ def _cold_path(body, alpha, re, tol, max_iter, kw, bk=None):
     continues to the angle in steps of at most CONTINUATION_STEP (each with
     the halving of :func:`_warm_path`); the intermediate solutions serve as
     start values only. When that start fails, a cold start at the angle
-    itself is the last attempt.
+    itself is the last attempt. ``cache`` (a dict per sweep) keeps the cold
+    start at the zero-lift angle, which is the same for every angle of a
+    sweep; a later angle reuses it instead of solving it again.
     """
     a0 = zero_lift_angle(body, kw)
     if abs(alpha - a0) > CONTINUATION_STEP:
-        try:
-            s0 = prepare_case(body, a0, re, **kw)
-            r0 = _cold_solve(s0, tol, max_iter, bk)
-        except cp.WakeGroundError:
-            r0 = None
+        if cache is not None and a0 in cache:
+            s0, r0 = cache[a0]
+        else:
+            try:
+                s0 = prepare_case(body, a0, re, **kw)
+                r0 = _cold_solve(s0, tol, max_iter, bk, ctl)
+            except cp.WakeGroundError:
+                s0, r0 = None, None
+            # A cold start cut by the work budget depends on the angle: it is not kept.
+            if cache is not None and (ctl is None or ctl.cap(max_iter) > 0):
+                cache[a0] = (s0, r0)
         if r0 is not None and r0.converged:
             n = int(np.ceil(abs(alpha - a0) / CONTINUATION_STEP))
             prev = (s0, r0.state)
             setup, res = s0, r0
             for k in range(1, n + 1):
                 a = a0 + (alpha - a0) * k / n
-                setup, res = _warm_path(body, a, re, prev, tol, max_iter, kw, 0, bk)
+                setup, res = _warm_path(body, a, re, prev, tol, max_iter, kw, 0, bk, ctl=ctl)
                 if not res.converged:
                     break
                 prev = (setup, res.state)
             if res.converged:
                 return setup, res
     setup = prepare_case(body, alpha, re, **kw)
-    return setup, _cold_solve(setup, tol, max_iter, bk)
+    return setup, _cold_solve(setup, tol, max_iter, bk, ctl)
 
 
-def _solve_angle(body, alpha, re, prev, tol, max_iter, kw):
+def _solve_angle(body, alpha, re, prev, tol, max_iter, kw, rules=None, cache=None):
     """Solve one angle with the numpy backend (see :func:`finish_angle`)."""
-    return finish_angle(body, alpha, re, prev, tol, max_iter, kw)
+    return finish_angle(body, alpha, re, prev, tol, max_iter, kw, rules=rules, cache=cache)
 
 
 def row_from_result(setup, res, alpha) -> dict:
@@ -553,4 +758,5 @@ def _failed_row(alpha, body, reason) -> dict:
         "transition_positions": (nan, nan), "separation_flags": (False, False), "Cp": arr, "H": arr,
         "theta": arr, "Cf": arr, "iterations": 0, "residual": nan, "converged": False,
         "coordinates": body, "reason": reason, "Cl_pressure": nan, "delta_star": arr, "ue": arr, "wake": {},
+        "newton_iterations": 0, "linear_solves": 0, "newton_solves": 0,
     }

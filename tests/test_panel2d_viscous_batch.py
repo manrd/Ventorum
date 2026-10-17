@@ -81,6 +81,26 @@ def test_batch_reports_failures():
         solve_viscous_batch(cases, backend="numpy")
 
 
+@pytest.mark.slow
+def test_batch_work_counters_and_budget():
+    """The batch reports the work per case (batched first attempt included) and applies the work budget."""
+    coords = airfoil("0012").repanel(n_panels=80).coords
+    cases = [ViscousCase(coordinates=coords, alpha=a, Re=1e6) for a in (0.0, 1.0)]
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        r = solve_viscous_batch(cases, device="cpu", dtype=torch.float64)
+        seq = solve_viscous(coords, [0.0, 1.0], 1e6)
+        cut = solve_viscous_batch([ViscousCase(coordinates=coords, alpha=1.0, Re=1e6, work_budget=3)],
+                                  device="cpu", dtype=torch.float64)
+    assert np.all(r.converged)
+    assert np.array_equal(r.newton_iterations, seq.newton_iterations)
+    assert np.all(r.linear_solves >= r.newton_iterations)
+    assert not cut.converged[0] and "work budget" in cut.reason[0]
+    assert cut.newton_iterations[0] <= 3
+    with pytest.raises(ValueError):
+        solve_viscous_batch([ViscousCase(coordinates=coords, alpha=1.0, Re=1e6, stall_factor=2.0)])
+
+
 @pytest.mark.gpu
 @pytest.mark.slow
 def test_batch_cuda():

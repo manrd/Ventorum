@@ -150,6 +150,132 @@ def test_non_convergence_is_reported():
 
 
 @pytest.mark.slow
+def test_work_counters():
+    """Every angle reports its work: Newton iterations, linear solves and Newton solves of all attempts."""
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        r = solve_viscous(_naca("0012", 100), [0.0, 2.0], 1e6)
+        one = solve_viscous(_naca("0012", 100), 2.0, 1e6, max_iter=2)
+    assert np.all(r.converged)
+    assert r.newton_iterations.dtype.kind == "i" and r.newton_iterations.shape == (2,)
+    assert np.all(r.newton_iterations >= r.iterations) and np.all(r.newton_iterations > 0)
+    assert np.all(r.linear_solves >= r.newton_iterations)
+    assert np.all(r.newton_solves >= 1)
+    # A failed angle counts all its attempts: the three first estimates of the cold start.
+    assert not one.converged
+    assert one.newton_solves == 3 and one.newton_iterations == 6
+    assert one.linear_solves >= one.newton_iterations
+
+
+@pytest.mark.slow
+def test_stop_rules_off_give_the_same_result():
+    """The stop rules change the work of failed attempts only: a converged sweep is the same without them."""
+    c = _naca("0012", 100)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        on = solve_viscous(c, [0.0, 2.0], 1e6)
+        off = solve_viscous(c, [0.0, 2.0], 1e6, stall_window=0, divergence_factor=0.0, work_budget=0)
+    assert np.all(on.converged) and np.all(off.converged)
+    assert np.array_equal(on.Cl, off.Cl) and np.array_equal(on.Cd, off.Cd) and np.array_equal(on.Cm, off.Cm)
+    assert np.array_equal(on.newton_iterations, off.newton_iterations)
+
+
+def test_stop_rule_values_are_checked():
+    """Values of the stop rules out of their range raise ValueError."""
+    c = _naca("0012", 60)
+    for kw in ({"stall_window": -1}, {"stall_window": 2.5}, {"stall_factor": 1.0}, {"stall_factor": 0.0},
+               {"divergence_factor": 0.5}, {"work_budget": -10}):
+        with pytest.raises(ValueError):
+            solve_viscous(c, 0.0, 1e6, **kw)
+
+
+def test_early_stop_rules():
+    """The stop rules of one Newton solve: fixed point, divergence and the stagnation window."""
+    from ventorum.panel2d.vii import _early_stop
+
+    # Two failed steps on the same structure at omega = 1: fixed point.
+    assert _early_stop(0.3, [0.3], 0.3, 2, True, 12, 0.5, 1e4)[0] == "stagnation"
+    assert _early_stop(0.3, [0.3], 0.3, 1, True, 12, 0.5, 1e4) is None
+    assert _early_stop(0.3, [0.3], 0.3, 2, False, 12, 0.5, 1e4) is None
+    # Divergence against the smallest earlier residual at omega = 1.
+    assert _early_stop(2e3, [2e3], 0.1, 0, True, 12, 0.5, 1e4)[0] == "divergence"
+    assert _early_stop(2e3, [2e3], 0.1, 0, True, 12, 0.5, 0.0) is None
+    # Stagnation window: the smallest residual must fall by the factor in the window.
+    flat = [1.0] * 13
+    assert _early_stop(1.0, flat, 1.0, 0, True, 12, 0.5, 1e4)[0] == "stagnation"
+    assert _early_stop(1.0, flat, 1.0, 0, False, 12, 0.5, 1e4)[0] == "stagnation"
+    assert _early_stop(1.0, flat[:12], 1.0, 0, True, 12, 0.5, 1e4) is None
+    slow = list(np.minimum.accumulate(0.9 ** np.arange(13)))
+    assert _early_stop(slow[-1], slow, slow[-1], 0, True, 12, 0.5, 1e4) is None
+    assert _early_stop(1.0, flat, 1.0, 5, True, 0, 0.5, 1e4) is None
+    # Near the tolerance (below the floor) the residual may stall at the round-off level: no stop.
+    low = [1e-5] * 13
+    assert _early_stop(1e-5, low, 1e-5, 2, True, 12, 0.5, 1e4, 1e-3) is None
+    assert _early_stop(1e-5, low, 1e-5, 2, True, 12, 0.5, 1e4, 1e-6)[0] == "stagnation"
+
+
+def _step_panel_section(n=120):
+    """Return NACA 2412 with a 5 deg plain flap at x 0.75: the hinge cut leaves a very short step panel."""
+    return airfoil("2412").repanel(n_panels=n).with_flap(x_hinge=0.75, deflection=5.0).coords
+
+
+@pytest.mark.slow
+def test_hopeless_angle_fails_fast():
+    """A case that cannot converge stops by stagnation (or the budget) within the work budget of the angle.
+
+    The 5 deg plain flap has a defect at the hinge (see test_panel2d_viscous_wake). Without the early
+    stops, each angle of this case runs several Newton solves (the cold starts at the zero-lift angle and
+    at the angle, each with its three first estimates) to the iteration limit.
+    """
+    from ventorum.panel2d.viscous import WORK_BUDGET
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        r = solve_viscous(_step_panel_section(), [0.0, 1.0], 1e6)
+    assert not np.any(r.converged)
+    for reason in r.reason:
+        assert "stagnation" in reason or "budget" in reason, reason
+    assert np.all(r.newton_iterations <= WORK_BUDGET)
+    assert np.all(r.newton_iterations <= 100), r.newton_iterations
+    print(f"\n[viscous] step-panel flap: work {r.newton_iterations}, reasons {r.reason}")
+
+
+def test_work_budget_stops_the_angle():
+    """A small work budget ends the chain of attempts of an angle; the reason names the budget."""
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        r = solve_viscous(_naca("0012", 100), 2.0, 1e6, work_budget=5)
+    assert not r.converged
+    assert "work budget of 5 Newton iterations" in r.reason
+    assert r.newton_iterations <= 5
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize("code,defl", [("4415", 0.0), ("2412", 15.0)])
+def test_slow_case_still_converges(code, defl):
+    """Slow but sure solves still converge (and, for the cheaper case, give the result without the stop rules).
+
+    NACA 4415 (120 panels, Re 1e6, alpha 0): the cold start at the zero-lift angle stays long below
+    omega = 1, with long plateaus of the residual. NACA 2412 with a 15 deg flap: after failed attempts,
+    the quasi-simultaneous cold start converges after a slow decrease of the residual. These were the
+    most demanding converged solves of the sample that set the defaults.
+    """
+    shape = airfoil(code).repanel(n_panels=120)
+    if defl:
+        shape = shape.with_flap(x_hinge=0.75, deflection=defl)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        on = solve_viscous(shape.coords, 0.0, 1e6)
+        assert on.converged, on.reason
+        assert on.newton_iterations >= 40
+        if defl == 0.0:
+            off = solve_viscous(shape.coords, 0.0, 1e6, stall_window=0, divergence_factor=0.0, work_budget=0)
+            assert off.converged
+            assert on.Cl == off.Cl and on.Cd == off.Cd and on.Cm == off.Cm
+            assert on.newton_iterations == off.newton_iterations
+
+
+@pytest.mark.slow
 @pytest.mark.skipif(not os.path.exists(XFOIL), reason="XFOIL is not installed")
 @pytest.mark.parametrize("re", [1e6, 3e6])
 def test_against_xfoil(re):

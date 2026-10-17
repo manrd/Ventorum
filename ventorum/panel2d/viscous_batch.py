@@ -17,7 +17,9 @@ Jacobian code (:mod:`ventorum.panel2d.vii` and
   run on the chosen device. Converged cases leave the active set.
 * A case whose first attempt fails continues with the fallback steps of
   the sequential solver (halved angle steps, then a cold start), one case
-  at a time on the same device. The first angle of each sequence has no
+  at a time on the same device. The early stops and the work budget of
+  the sequential solver apply (fields of :class:`ViscousCase`), and the
+  work counters include the batched first attempt. The first angle of each sequence has no
   converged neighbour; it follows the cold path of the sequential solver
   (continuation from the zero-lift angle), one case at a time.
 
@@ -77,6 +79,16 @@ class ViscousCase:
         Wake length over the chord [-].
     n_wake : int
         Number of wake panels.
+    stall_window : int
+        Stagnation stop of each Newton solve [-] (0: off); see
+        :func:`ventorum.panel2d.viscous.solve_viscous`.
+    stall_factor : float
+        Factor of the stagnation stop [-], in (0, 1).
+    divergence_factor : float
+        Divergence stop of each Newton solve [-] (0: off).
+    work_budget : int
+        Largest sum of Newton iterations over all attempts of one angle
+        [-] (0: no budget).
     """
 
     coordinates: np.ndarray
@@ -90,6 +102,10 @@ class ViscousCase:
     tol: float = 1e-6
     wake_length: float = 1.0
     n_wake: int = 30
+    stall_window: int = vii.STALL_WINDOW
+    stall_factor: float = vii.STALL_FACTOR
+    divergence_factor: float = vii.DIVERGENCE_FACTOR
+    work_budget: int = vs.WORK_BUDGET
 
 
 class ViscousBatchResult(list):
@@ -147,6 +163,16 @@ class ViscousBatchResult(list):
         return self._arr("iterations", int)
 
     @property
+    def newton_iterations(self) -> np.ndarray:
+        """Return the work per case: Newton iterations of all attempts."""
+        return self._arr("newton_iterations", int)
+
+    @property
+    def linear_solves(self) -> np.ndarray:
+        """Return the work per case: solves of the Newton or Levenberg-Marquardt linear system."""
+        return self._arr("linear_solves", int)
+
+    @property
     def transition_positions(self) -> list:
         """Return the transition x/c pairs [-]."""
         return [r.transition_positions for r in self]
@@ -174,7 +200,14 @@ def _case(c) -> ViscousCase:
         raise ValueError(f"Only mach=0.0 is supported, got mach={out.mach}.")
     if not np.isfinite(out.Re) or out.Re <= 0.0:
         raise ValueError(f"Reynolds number must be positive, got {out.Re}.")
+    _rules(out)
     return out
+
+
+def _rules(c: ViscousCase) -> vs.StopRules:
+    """Return the stop rules of a case (ValueError for values out of range)."""
+    return vs.StopRules(stall_window=c.stall_window, stall_factor=c.stall_factor,
+                        divergence_factor=c.divergence_factor, work_budget=c.work_budget)
 
 
 def _resolve(device, dtype):
@@ -194,7 +227,8 @@ def _seq_key(c: ViscousCase):
     coords = np.ascontiguousarray(np.asarray(c.coordinates, dtype=np.float64))
     xtr = (float(c.xtr[0]), float(c.xtr[1]))
     return (coords.tobytes(), coords.shape, float(c.Re), c.height, float(c.ncrit), xtr, float(c.wake_length),
-            int(c.n_wake), int(c.max_iter), float(c.tol))
+            int(c.n_wake), int(c.max_iter), float(c.tol), int(c.stall_window), float(c.stall_factor),
+            float(c.divergence_factor), int(c.work_budget))
 
 
 def solve_viscous_batch(cases, *, backend: str = "torch", device=None, dtype=None) -> ViscousBatchResult:
@@ -237,7 +271,7 @@ def solve_viscous_batch(cases, *, backend: str = "torch", device=None, dtype=Non
                   wake_length=c0.wake_length, n_wake=c0.n_wake)
         body = vs._single_body(np.asarray(c0.coordinates, dtype=np.float64))
         plans.append({"idx": idx, "up": up, "dn": dn, "kw": kw, "body": body, "case": c0, "prev": None,
-                      "first": None, "rows": {}})
+                      "first": None, "rows": {}, "rules": _rules(c0), "cache": {}})
     with blas_single_thread():
         n_up = max(len(p["up"]) for p in plans)
         for k in range(n_up):
@@ -262,7 +296,8 @@ def _pass(items, bk, upward):
         c = plan["case"]
         if plan["prev"] is None:
             # No converged neighbour: the cold path of the sequential solver, one case at a time.
-            row, state = vs.finish_angle(plan["body"], alpha, c.Re, None, c.tol, c.max_iter, plan["kw"], bk)
+            row, state = vs.finish_angle(plan["body"], alpha, c.Re, None, c.tol, c.max_iter, plan["kw"], bk,
+                                         rules=plan["rules"], cache=plan["cache"])
             _store(plan, alpha, row, state, upward)
             continue
         try:
@@ -274,16 +309,19 @@ def _pass(items, bk, upward):
         work.append((plan, alpha, setup, start))
     groups: dict = {}
     for w in work:
-        key = (w[2].n, w[2].nw, w[0]["case"].tol, w[0]["case"].max_iter)
+        key = (w[2].n, w[2].nw, w[0]["case"].tol, w[0]["case"].max_iter, w[0]["rules"])
         groups.setdefault(key, []).append(w)
-    for (_, _, tol, max_iter), grp in groups.items():
-        results = vii.newton_solve([w[2] for w in grp], [w[3] for w in grp], tol=tol, max_iter=max_iter,
-                                   omega0=[1.0] * len(grp), **bk)
+    for (_, _, tol, max_iter, rules), grp in groups.items():
+        # The first attempt of the angle: the iteration limit is cut to the work budget.
+        cap = max_iter if rules.work_budget <= 0 else min(max_iter, rules.work_budget)
+        results = vii.newton_solve([w[2] for w in grp], [w[3] for w in grp], tol=tol, max_iter=cap,
+                                   omega0=[1.0] * len(grp), stall_window=rules.stall_window,
+                                   stall_factor=rules.stall_factor, divergence_factor=rules.divergence_factor, **bk)
         for w, res in zip(grp, results):
             plan, alpha, setup, _ = w
             c = plan["case"]
             row, state = vs.finish_angle(plan["body"], alpha, c.Re, plan["prev"], tol, max_iter, plan["kw"], bk,
-                                         first=(setup, res))
+                                         first=(setup, res), rules=rules, cache=plan["cache"])
             _store(plan, alpha, row, state, upward)
 
 
