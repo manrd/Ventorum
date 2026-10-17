@@ -111,6 +111,22 @@ With symmetry folding the residual uses the strips of the full wake:
 
 The Trefftz drag of a pressure Kutta result uses the corrected wake strengths $\mu_w = \mu_{\text{upper}} - \mu_{\text{lower}} + \delta_s$.
 
+### Finite (blunt) Trailing Edge
+
+The mesh builder closes an open trailing edge by default (`trailing_edge="close"` of `mesh_lifting_surface`). With the trailing-edge gap $g$ (in chord units) of a section, the upper and the lower ordinates move toward the mid point of the gap:
+
+$$z_u' = z_u - \tfrac{1}{2} g \, x^4, \qquad z_l' = z_l + \tfrac{1}{2} g \, x^4$$
+
+The camber line does not move, the thickness changes by at most $g$, and for the NACA 4-digit and 5-digit thickness law the result is the published closed trailing edge (the $x^4$ coefficient $-0.1036$ instead of $-0.1015$; Ladson, Brooks, Hill and Sproles, 1996).
+
+The reason is the Kutta condition. Maskew (1987, sections 2.2 and 3.1.4) states that the wake doublet implies the Kutta condition at a trailing edge, that any panel edge may shed a wake, and that the user must choose a physically realistic wake model. With constant-strength panels and the internal Dirichlet condition, a solid base between the two trailing-edge corners has no fine-mesh limit that satisfies the Kutta condition at both corners:
+
+* With the wake shed from the upper corner and the Morino condition, the circulation flows around the base from the lower corner once the trailing-edge panels become shorter than the base height. The Kutta point is then in effect at the upper corner, and the lift falls with chordwise refinement toward a limit well below the lift of the closed section (`tests/test_panel3d_refinement.py`).
+* The wake from the lower corner, from the base centre or from both corners, a base without its Dirichlet equation (doublet tied to the trailing-edge doublets), and a base with an outflow source give the same circulation: the potential outside the region behind the base does not change when the wake moves inside that region, and the outflow changes only the thickness part of the solution.
+* An explicit Kutta condition on the trailing-edge panels (equal chordwise velocity, Maskew 1987 section 2.2) or the pressure Kutta condition make the lift rise without limit: the flow around both corners into the base is singular.
+
+The two-dimensional gap model of Drela (1989), used by Ventorum-2D, avoids this with a gap panel that is not a wall. It has no counterpart in the constant-strength Dirichlet method that converged in these tests, so the 3D panel mesh closes the gap. The option `trailing_edge="base"` keeps the former blunt base (base panels, wake from the upper corner) for comparisons. The base drag of a separated blunt trailing edge is a viscous effect that the potential solution does not give in either case.
+
 ## Six Unit-Onset Superposition
 
 The aerodynamic influence matrix $\mathbf{A}$ and source influence matrix $\mathbf{B}$ depend only on the surface and wake geometry. They do not depend on the flight condition.
@@ -318,6 +334,18 @@ Properties of the scaled root section:
 * No effect: a surface with zero dihedral at the root (the mesh stays bit for bit the same), a one-sided surface (its root section is normal to its span axis, for example a vertical fin with $\Gamma = 90$ deg) and a symmetric surface whose first panel row is vertical (the two halves coincide and there is no miter).
 * A deflected control surface at the root deflects the scaled section: the hinge point at half the local thickness does not move.
 
+### Fold guard
+
+Two neighbour section planes that are not parallel cross on a line parallel to $x$. The root plane $y = 0$ and the next plane (normal to the span) cross at about $d / \tan\Gamma$ from the reference line, with $d$ the width of the root strip. When the section reaches past that line ($t > d / \tan\Gamma$, with $t$ the largest offset of the section from the chord line), the nodes of the second station lie beyond the root plane and the root strip folds: the surface passes through itself. The cosine spanwise spacing makes the root strip narrow, so a wing with a few degrees of dihedral folds on fine spanwise meshes (and the first panel row of the scaled root section is then no prism either). The same can happen at a dihedral break.
+
+The fold guard of the mesh builder (`fold_guard=True`, default) processes the stations from the root outward. The plane of station $j$ (normal: its span axis $\mathbf{a}_j$ in the y-z plane, through its quarter-chord point $\mathbf{q}_j$) must keep every node of station $j - 1$ on its inboard side, and the plane of station $j - 1$ every node of station $j$ on its outboard side, each by at least `FOLD_MARGIN` (0.05, a method choice) times the station spacing $d_j$. A node of station $j$ at the offset $s$ along $\mathbf{m}_j = \hat{\mathbf{x}} \times \mathbf{a}_j$ (with the twist $T$, $s = c\,(z \cos T - (x - 0.25)\sin T)$) has the distance
+
+$$(\mathbf{q}_j - \mathbf{q}_{j-1}) \cdot \mathbf{a}_{j-1} + s \, \mathbf{m}_j \cdot \mathbf{a}_{j-1}$$
+
+from the plane of station $j - 1$. When the condition fails, the axis angle of station $j$ moves toward the angle of station $j - 1$ by the largest fraction that passes (bisection). The guarded station keeps its leading- and trailing-edge nodes (the lattice points); only its thickness direction turns. With `scale_root_thickness` its offsets from the camber line grow by $1/\cos B$, with $B$ the angle between the guarded plane and the plane normal to the span, as at the root. A station that does not fold keeps its plane bit for bit, so coarse meshes do not change.
+
+`check_mesh` detects a fold from the same station planes: for each pair of neighbour station rows (`node_station`) with different planes, a node of the outboard row on the inboard side of the inboard plane (or the reverse) marks the panels at that node as folded (`folded`, `n_folded`). Folded panels count in `n_nonconvex` and make `valid_panels` False, so the trust score reports them as folded panels. Two rows in one plane (a control gap) are skipped.
+
 ## Solver Family Interface
 
 Ventorum-3DP connects to the solver architecture of Ventorum through the class `PanelMethodSolver` in `ventorum.solvers.panel3d`. Users and automated tools can select it through the factory with `solver="panel3d"`.
@@ -337,9 +365,9 @@ Backend "auto" follows the device and precision selection of `ventorum.gpu`, as 
 
 The solve returns a standard `SolverResult`:
 * `totals`: Integrated aerodynamic coefficients ($C_L, C_D, C_Y, C_l, C_m, C_n$). The reported induced drag $C_{Di}$ comes from the far-field Trefftz plane. The surface force integration provides near-field pressure drag as $C_{Di,\text{nearfield}}$.
-* `spanwise`: Spanwise distributions on each lifting surface. Sectional coefficients ($C_l, C_{d,\text{pressure}}, C_m$) are computed by strip integration of panel pressure forces at the lattice strip stations. Each panel belongs to the lattice strip whose station planes (normal to the span in the y-z plane) enclose its centroid; a mesh with controls (extra stations, side closures) maps every panel once. When the mesh carries the strip index of the mesh builder and its strips are the lattice strips, the map uses it. Strip lift sums to the total aircraft $C_L$.
+* `spanwise`: Spanwise distributions on each lifting surface. Sectional coefficients ($C_l, C_{d,\text{pressure}}, C_m$) are computed by strip integration of panel pressure forces at the lattice strip stations. Each panel belongs to the lattice strip whose station planes (normal to the span in the y-z plane) enclose its centroid; a mesh with controls (extra stations at the ends of the side-edge transitions, or side closures) maps every panel once. When the mesh carries the strip index of the mesh builder and its strips are the lattice strips, the map uses it. Strip lift sums to the total aircraft $C_L$.
 * `details["cp"]`: The surface pressure coefficients of the solved mesh panels.
-* `details["panel"]`: The panel options used (Kutta option, chordwise spacing and count, wake length in m, half mesh, root-thickness scaling).
+* `details["panel"]`: The panel options used (Kutta option, chordwise spacing and count, wake length in m, half mesh, root-thickness scaling, and the mesh choices `trailing_edge`, `control_edge` and `fold_guard`).
 * `totals.trust`: The physical validity trust score. For the 3D panel method, the score evaluates the mesh (`ventorum.core.trust.panel3d_mesh_checks`) and the ground clearance. The factor `mesh_resolution` gives the discretization error from the difference of the near-field pressure drag and the far-field Trefftz induced drag (and from the chordwise panel count when the caller gives it): a warning for a probable error above 2 % in CL or 4 % in CDi, a strong warning above 5 % in CL or 10 % in CDi. The factor `mesh_adequacy` gives the panel shape and validity from `check_mesh`: a percentile of the panel aspect ratio and skew, the warp, the closure, and folded (non-convex) panels. A mesh-error study of the method calibrated the thresholds; the [trust score chapter](trust_score.md) (section *3D panel method*) gives the method and the limits. With `panel_estimate_mesh_error`, the notes add the mesh error estimate of the given mesh (see the mesh convergence section of the Ventorum-3DP chapter).
 * `details["dispatch"]`: The execution dispatch record: the selected backend, device, arithmetic precision, the reason of the selection, and the counted number of factorizations.
 
@@ -354,3 +382,5 @@ The solve returns a standard `SolverResult`:
 7. Kinnas, S. A. and Hsin, C. Y., 1992, "Boundary element method for the analysis of the unsteady flow around extreme propeller geometries", AIAA Journal, Vol. 30, No. 3 (iterative pressure Kutta).
 8. Shepard, D., 1968, "A two-dimensional interpolation function for irregularly-spaced data", Proceedings of the 23rd ACM National Conference, pp. 517-524 (inverse distance weights).
 9. Blazek, J., 2015, "Computational Fluid Dynamics: Principles and Applications", 3rd ed., Butterworth-Heinemann, Chapter 5 (Green-Gauss gradient).
+10. Ladson, C. L., Brooks, C. W., Hill, A. S. and Sproles, D. W., 1996, "Computer Program To Obtain Ordinates for NACA Airfoils", NASA TM-4741 (closed trailing edge of the NACA 4-digit thickness law).
+11. Drela, M., 1989, "XFOIL: An analysis and design system for low Reynolds number airfoils", Lecture Notes in Engineering 54, Springer, pp. 1-12 (trailing-edge gap panel of the two-dimensional method).

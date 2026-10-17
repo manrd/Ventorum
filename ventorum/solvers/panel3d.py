@@ -19,6 +19,11 @@ by default: the root section of a symmetric surface with dihedral keeps
 its thickness normal to the local surface; see
 :mod:`ventorum.panel3d.mesh`).
 
+The mesh uses the defaults of :func:`ventorum.panel3d.mesh.mesh_lifting_surface`:
+an open (blunt) trailing edge is closed, the side edges of a deflected
+control are sealed transitions, and the fold guard keeps the root strip
+of a wing with dihedral open. ``details["panel"]`` records these choices.
+
 Backend selection
 -----------------
 ``panel_backend="auto"`` follows the device and precision selection of
@@ -423,7 +428,8 @@ class PanelMethodSolver(BaseSolver):
             precision and the counted factorizations, and
             ``details["panel"]`` the panel options used (Kutta option,
             chordwise spacing and count, wake length in m, half mesh,
-            root-thickness scaling).
+            root-thickness scaling, trailing-edge closure, control side
+            edges and fold guard of the mesh).
 
         Notes
         -----
@@ -635,6 +641,9 @@ class PanelMethodSolver(BaseSolver):
             "wake_length": float(solver.wake_length),
             "half_mesh": bool(use_half),
             "scale_root_thickness": scale_root_thickness,
+            "trailing_edge": "close",
+            "control_edge": "transition",
+            "fold_guard": True,
         }
 
         # 5. Build SolverResult per condition with strip integration

@@ -56,10 +56,14 @@ def cruise() -> vt.FlightCondition:
     return vt.FlightCondition(V_inf=30.0, alpha=np.radians(4.0))
 
 
-# Base mesh of the wing study: 6 spanwise and 12 chordwise panels. With 6
+# Base mesh of the wing study: 6 spanwise and 16 chordwise panels. With 6
 # chordwise panels the pressure lift of the coarsest levels is not yet
-# monotonic (it changes by less than 1 percent between the levels).
-_WING_BASE = {"n_panels": 6, "n_chord": 12}
+# monotonic (it changes by less than 1 percent between the levels). The
+# mesh builder closes the open trailing edge of the library section; for
+# the closed edge the combined refinement from 12 chordwise panels gives
+# an observed CL order below 0.5 (outside the asymptotic range), and from
+# 16 chordwise panels an order near 1 in CL, CDi and Cm.
+_WING_BASE = {"n_panels": 6, "n_chord": 16}
 
 
 @pytest.fixture(scope="module")

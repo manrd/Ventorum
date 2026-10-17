@@ -43,9 +43,45 @@ the deflection turns the flap about the local hinge line also on a surface
 with dihedral. On the left half of a full mesh the section frames are the
 mirror images of the right-side frames.
 
-## Side closures
+## Side edges: sealed transition (default)
 
-At the side edges of a deflected control the surface is not continuous. The
+By default (`control_edge="transition"` of `mesh_lifting_surface`) the
+deflection of a control changes linearly over a spanwise transition centred
+on each side edge that borders an undeflected part of the span. The
+transition is `control_transition` local chords long (`CONTROL_TRANSITION`,
+0.2, a method choice). It is shortened where the control itself, the root,
+the tip or the transition of the next edge leave less room. Each end of the
+transition is a mesh station; the stations inside carry the deflection times
+the ramp factor (0 at the outer end, 1 at the inner end). The surface stays
+continuous: there is no side face and no gap, as for the camber step of a
+vortex lattice at a control edge. An edge between two deflected controls
+keeps the gap closure of the next section.
+
+The reason is the flow through the side gap. Near the trailing edge of a gap
+edge the two section outlines cross: a flap down puts the flap upper surface
+below the lower surface of the fixed part. The region between the two
+outlines in the station plane is then a window of fluid that joins the flow
+under the fixed part to the flow over the flap. The potential difference
+across the window is of the order of the circulation, so the potential flow
+through the window is singular at its sharp edges, and the circulation of
+the strips next to the edge falls as they become narrower. CL falls and the
+Trefftz induced drag rises with spanwise refinement. The two trailing-edge
+nodes of a gap edge are also not joined by a wake, so the two wake strips
+end in two trailing vortices of nearly the full circulation instead of one
+vortex of the circulation difference. Maskew (1987, section 4.4) prescribes
+vortex separations at the flap edge. Two such models were tried: a wake
+strip between the two trailing-edge nodes bounds the induced drag but does
+not stop the loss of lift, and a wake panel over the window made the
+solution unstable. The sealed transition converges with spanwise refinement,
+and its converged result changes very little with the transition width; the
+flap increment of CL is close to the increment of the vortex lattice (the
+thick sections make the flap a little more effective). See
+`tests/test_panel3d_controls.py`.
+
+## Side edges: gap closure (option)
+
+With `control_edge="gap"` (the former mesh), and always at an edge between
+two deflected controls, the surface is not continuous at the side edge. The
 mesh carries two spanwise stations at the same y [m], one with the deflected
 shape and one with the undeflected shape (or two different deflections). The
 nodes that the two sections share (forward of the hinge, where the shapes are
@@ -91,7 +127,9 @@ of `PanelMesh` for strip loads: `strip` (spanwise strip of each panel),
 `chord_index` (chordwise index from the leading edge, the hinge station
 included), `side` (+1 upper, -1 lower, 0 base, tip and side panels) and
 `node_station` (spanwise station row of each node). The zero-width gap
-between the two stations of a side edge is not a strip.
+between the two stations of a gap edge is not a strip. A transition edge adds
+two stations, so the mesh can have more strips than the lattice; the solver
+then assigns the panels to the lattice strips by their centroids.
 
 ## Solver effect
 
@@ -106,7 +144,9 @@ The model uses these assumptions:
 
 - Small deflection angles: the lattice controls assume |deflection| <= 30 deg;
   the section tool allows up to 60 deg.
-- No gap flow at the control side edges; the flat closure seals the gap.
+- No gap flow at the control side edges: the default transition seals the
+  edge with a continuous surface; the gap option closes the gap with flat
+  side panels.
 - No flap-edge vortex model other than the panel mesh itself.
 - Attached inviscid flow only; no viscous separation effects.
 - The hinge height stays at mid thickness; no nose balance.
@@ -116,10 +156,20 @@ The model uses these assumptions:
 `tests/test_panel3d_controls.py` checks:
 
 - zero deflection gives the same mesh (and metadata) bit for bit;
-- 10 and -20 deg flaps over 40 to 80 percent semi-span stay watertight and
-  outward, every panel is convex and planar, the side panels are triangles in
-  the planes of the side edges, and the trailing-edge nodes inside the range
-  are rotated about the hinge line while nodes outside are unchanged;
+- with the default transition edges, a station lies at each end of each
+  transition, there are no side panels, and every trailing-edge node is the
+  trailing edge rotated about the hinge by the deflection times the ramp
+  factor;
+- a flapped wing of aspect ratio 8 converges with spanwise refinement: CL and
+  the Trefftz CDi change by less than 2 percent from 48 to 96 strips, in the
+  same direction as from 24 to 48 strips, and the flap increment of CL agrees
+  with the VLM to 10 percent (slow test); a coarse version checks 24 against
+  48 strips;
+- with the gap option, 10 and -20 deg flaps over 40 to 80 percent semi-span
+  stay watertight and outward, every panel is convex and planar, the side
+  panels are triangles in the planes of the side edges, and the trailing-edge
+  nodes inside the range are rotated about the hinge line while nodes outside
+  are unchanged;
 - the self-influence of every panel (doublet potential at its own
   collocation point) is +1/2 for flap and aileron meshes with library
   sections;
@@ -152,3 +202,5 @@ The model uses these assumptions:
   bodies, Progress in Aeronautical Sciences, Vol. 8, 1967, pp. 1-138.
 - J. O'Rourke, *Computational Geometry in C*, 2nd ed., Cambridge University
   Press, 1998, chapter 1 (polygon triangulation by ear clipping).
+- B. Maskew, Program VSAERO Theory Document, NASA CR-4023, 1987, section 4.4
+  (part-span flap with prescribed vortex separations at the flap edge).

@@ -280,12 +280,17 @@ def test_trust_score_lower_for_poor_mesh():
     The same wing is solved with a regular mesh and with a mesh of very
     elongated and skewed panels (four spanwise panels and many chordwise
     panels). The mesh adequacy penalty must grow and the score must fall.
+    The regular mesh has 24 chordwise panels: the mesh builder now closes
+    the open trailing edge of the library section, and with 8 chordwise
+    panels the near-field drag rule rates the closed wing at the strong
+    level (the mesh-error study puts n_chord 8 at that level). The former
+    base panels of the open edge hid this with their base suction.
     """
     solver = make_solver("panel3d")
     cond = FlightCondition(V_inf=30.0, alpha=np.radians(4.0))
     ac = _simple_wing(shape="0012", semi_span=4.0, chord=1.0, sweep_le=0.0)
 
-    res_clean = solver.solve(ac, cond, SolverSettings(n_panels=8, n_chord=8))
+    res_clean = solver.solve(ac, cond, SolverSettings(n_panels=8, n_chord=24))
     res_poor = solver.solve(ac, cond, SolverSettings(n_panels=4, n_chord=40))
 
     assert res_clean.totals.trust is not None

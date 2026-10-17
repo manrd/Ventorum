@@ -164,16 +164,48 @@ def test_trailing_edge_matches_vlm_and_wake_count():
 
 
 def test_blunt_trailing_edge_base_panels():
+    """The option trailing_edge='base' keeps the base panels of an open trailing edge."""
     coords = _naca4(0.0, 0.0, 0.12, closed=False)
     surf = _rect_wing()
     n_span = 10
-    mesh = mesh_lifting_surface(surf, coords, n_chord=12, n_span=n_span)
+    mesh = mesh_lifting_surface(surf, coords, n_chord=12, n_span=n_span, trailing_edge="base")
     kind = np.asarray(mesh.kind)
     assert int(np.sum(kind == "base")) == 2 * n_span
     assert len(mesh.wake_edges) == 2 * n_span
     info = check_mesh(mesh)
     assert info["watertight"]
     assert info["outward"]
+
+
+def test_open_trailing_edge_is_closed_by_default():
+    """Regression: the default mesh closes an open trailing edge with the quartic thickness change.
+
+    The open NACA 0012 (x^4 coefficient -0.1015) becomes the closed NACA
+    0012 of Ladson et al. (1996) (coefficient -0.1036): the two meshes
+    agree to the interpolation error of the section points. There are no
+    base panels, and the camber line (the mean of the upper and the lower
+    ordinate) does not move. The wake edges stay one per strip.
+    """
+    surf = _rect_wing()
+    n_span = 6
+    open_mesh = mesh_lifting_surface(surf, _naca4(0.0, 0.0, 0.12, closed=False, n=401), n_chord=24, n_span=n_span)
+    closed_mesh = mesh_lifting_surface(surf, _naca4(0.0, 0.0, 0.12, closed=True, n=401), n_chord=24, n_span=n_span)
+    assert "base" not in set(np.asarray(open_mesh.kind).tolist())
+    assert len(open_mesh.wake_edges) == 2 * n_span
+    assert np.asarray(open_mesh.nodes).shape == np.asarray(closed_mesh.nodes).shape
+    np.testing.assert_allclose(np.asarray(open_mesh.nodes), np.asarray(closed_mesh.nodes), rtol=0.0, atol=2e-6)
+    info = check_mesh(open_mesh)
+    assert info["watertight"] and info["outward"] and info["valid_panels"]
+    # Cambered section: the camber line stays, the trailing edge closes at its mid point.
+    from ventorum.panel3d.mesh import _close_trailing_edge
+
+    xt, yu, yl = _resampled_section(_naca4(0.02, 0.4, 0.12, closed=False), 24)
+    cu, cl = _close_trailing_edge(xt, yu, yl)
+    np.testing.assert_allclose(0.5 * (cu + cl), 0.5 * (yu + yl), rtol=0.0, atol=1e-15)
+    assert cu[-1] == pytest.approx(cl[-1], abs=1e-15)
+    assert float(np.max(np.abs((cu - cl) - (yu - yl)))) <= float(yu[-1] - yl[-1]) + 1e-15
+    with pytest.raises(ValueError):
+        mesh_lifting_surface(surf, _naca4(0.0, 0.0, 0.12, closed=False), n_chord=8, n_span=4, trailing_edge="open")
 
 
 def test_mesh_aircraft_two_components():
@@ -314,7 +346,12 @@ def test_dihedral_sections_lie_normal_to_the_span():
 
     The thickness follows the local lattice normal (0, -sin G, cos G), the
     volume is the section area times the true span, and the leading- and
-    trailing-edge nodes stay on the vortex-lattice points.
+    trailing-edge nodes stay on the vortex-lattice points. With 16
+    spanwise panels the root strip of this wing is narrower than
+    t tan(G), so these planes fold the root strip: the fold guard (on by
+    default) turns the planes of the first stations, and the property
+    holds for the stations that the guard keeps and for every station
+    with ``fold_guard=False`` (a folded mesh, which check_mesh flags).
     """
     gam = np.radians(30.0)
     surf = LiftingSurface(
@@ -328,21 +365,34 @@ def test_dihedral_sections_lie_normal_to_the_span():
         dihedral=gam,
     )
     coords = _naca4(0.0, 0.0, 0.12, closed=True)
-    mesh = mesh_lifting_surface(surf, coords, n_chord=60, n_span=16, half=True)
-    info = check_mesh(mesh)
-    assert info["watertight"]
-    assert info["outward"]
-    nodes = np.asarray(mesh.nodes)
-    station = np.asarray(mesh.node_station)
     span_axis = np.array([0.0, np.cos(gam), np.sin(gam)])
     normal = np.array([0.0, -np.sin(gam), np.cos(gam)])
-    for j in range(1, int(station.max()) + 1):
-        pts = nodes[station == j]
+
+    def normal_to_span(pts):
         le = pts[np.argmin(pts[:, 0])]
-        assert float(np.max(np.abs((pts - le) @ span_axis))) < 1e-12
+        along = float(np.max(np.abs((pts - le) @ span_axis)))
         off = (pts - le) - np.outer((pts - le) @ np.array([1.0, 0.0, 0.0]), np.array([1.0, 0.0, 0.0]))
         resid = off - np.outer(off @ normal, normal)
-        assert float(np.max(np.abs(resid))) < 1e-12
+        return along < 1e-12 and float(np.max(np.abs(resid))) < 1e-12
+
+    raw = mesh_lifting_surface(surf, coords, n_chord=60, n_span=16, half=True, fold_guard=False)
+    info = check_mesh(raw)
+    assert info["watertight"]
+    assert info["outward"]
+    assert info["n_folded"] > 0 and not info["valid_panels"]
+    nodes = np.asarray(raw.nodes)
+    station = np.asarray(raw.node_station)
+    for j in range(1, int(station.max()) + 1):
+        assert normal_to_span(nodes[station == j])
+    mesh = mesh_lifting_surface(surf, coords, n_chord=60, n_span=16, half=True)
+    info = check_mesh(mesh)
+    assert info["watertight"] and info["outward"] and info["valid_panels"] and info["n_folded"] == 0
+    nodes = np.asarray(mesh.nodes)
+    station = np.asarray(mesh.node_station)
+    assert float(np.min(nodes[:, 1])) >= 0.0
+    kept = [j for j in range(1, int(station.max()) + 1) if normal_to_span(nodes[station == j])]
+    assert len(kept) >= int(station.max()) - 4
+    assert kept == list(range(int(station.max()) + 1 - len(kept), int(station.max()) + 1))
     # One-sided surface (no root shared with a left half): every section is
     # normal to the span, so the volume is the section area times the span.
     # At the root of a symmetric surface the lattice twists about the y axis,
@@ -443,7 +493,10 @@ def test_root_thickness_scaling_of_a_cambered_section_leaves_the_miter_wedge():
     0 deg wing is -(sin G + tan G (1 - cos G) / 2) Q, with Q the first
     moment of the section area about the chord line (about -0.42 % for a
     NACA 2412 half wing of semi-span 2 chords at 30 deg). It does not
-    depend on the spanwise panel count.
+    depend on the spanwise panel count. The meshes keep every section
+    plane normal to the span (``fold_guard=False``): with 16 spanwise
+    panels the root strip is narrower than t tan(30 deg), the guard would
+    turn the first planes, and the first panel row is then no prism.
     """
     coords = _naca4(0.02, 0.4, 0.12, closed=True)
     gam = np.radians(30.0)
@@ -453,9 +506,9 @@ def test_root_thickness_scaling_of_a_cambered_section_leaves_the_miter_wedge():
     expected = -(np.sin(gam) + 0.5 * np.tan(gam) * (1.0 - np.cos(gam))) * moment / (area * 2.0)
     for n_span in (8, 16):
         v_flat = check_mesh(mesh_lifting_surface(_straight_wing(0.0), coords, n_chord=60, n_span=n_span,
-                                                 half=True))["volume"]
+                                                 half=True, fold_guard=False))["volume"]
         info = check_mesh(mesh_lifting_surface(_straight_wing(30.0), coords, n_chord=60, n_span=n_span,
-                                               half=True))
+                                               half=True, fold_guard=False))
         assert info["watertight"] and info["outward"]
         assert abs((info["volume"] / v_flat - 1.0) - expected) < 1e-6
 
@@ -691,3 +744,84 @@ def test_strip_metadata_plain_meshes():
     comp = np.asarray(both.component)
     assert sorted(set(strip[(comp == 0) & (strip >= 0)].tolist())) == list(range(2 * n_span))
     assert sorted(set(strip[(comp == 1) & (strip >= 0)].tolist())) == list(range(2 * n_span, 4 * n_span))
+
+
+def _dihedral_wing(dihedral_deg=6.0, semi_span=4.0):
+    """Rectangular unit-chord wing with dihedral and the default (cosine) spanwise spacing."""
+    return LiftingSurface(
+        name="Wing",
+        semi_span=semi_span,
+        sections=[WingSection(y_frac=0.0, chord=1.0), WingSection(y_frac=1.0, chord=1.0)],
+        is_symmetric=True,
+        dihedral=np.radians(dihedral_deg),
+    )
+
+
+@pytest.mark.parametrize("n_span", [48, 96])
+def test_fold_guard_keeps_the_root_strip_of_a_dihedral_wing_open(n_span):
+    """Regression: a 6 deg dihedral wing folded its root strip from 48 spanwise panels on.
+
+    With the cosine spacing the root strip becomes narrower than t tan(G)
+    (t the largest offset of the section from the chord line), so the next
+    section plane, normal to the span, crosses the root plane y = 0 inside
+    the section: nodes of the second station lay at y < 0 and the strip
+    folded. check_mesh saw this only on some meshes (as non-convex
+    panels). Now the fold guard turns the first station planes, no node
+    of the half mesh lies at y < 0, and check_mesh flags the folded mesh
+    of ``fold_guard=False`` on every chordwise count.
+    """
+    coords = _naca4(0.0, 0.0, 0.12, closed=True)
+    surf = _dihedral_wing()
+    for n_chord in (8, 16, 32):
+        folded = mesh_lifting_surface(surf, coords, n_chord=n_chord, n_span=n_span, half=True, fold_guard=False)
+        info = check_mesh(folded)
+        assert float(np.min(np.asarray(folded.nodes)[:, 1])) < 0.0
+        assert info["n_folded"] > 0 and info["n_nonconvex"] >= info["n_folded"]
+        assert not info["valid_panels"]
+        mesh = mesh_lifting_surface(surf, coords, n_chord=n_chord, n_span=n_span, half=True)
+        info = check_mesh(mesh)
+        assert info["watertight"] and info["outward"] and info["valid_panels"]
+        assert info["n_folded"] == 0
+        assert float(np.min(np.asarray(mesh.nodes)[:, 1])) >= 0.0
+    # The full mesh too, and the guarded stations keep the lattice points.
+    full = mesh_lifting_surface(surf, coords, n_chord=16, n_span=n_span)
+    assert check_mesh(full)["n_folded"] == 0
+    lattice = build_lattice(Aircraft(name="T", surfaces=[surf]), SolverSettings(n_panels=n_span))
+    te = np.asarray(lattice.surfaces[0].edge_te)
+    te = te[np.argsort(te[:, 1])]
+    np.testing.assert_allclose(_wake_points(full), te, rtol=0.0, atol=1e-12)
+    le = np.asarray(lattice.surfaces[0].edge_le)
+    dist, _ = cKDTree(np.asarray(full.nodes)).query(le)
+    assert float(np.max(dist)) < 1e-12
+
+
+def test_fold_guard_margin_and_unchanged_meshes():
+    """Every node keeps the fold margin from the neighbour section plane; meshes that do not fold stay.
+
+    The fold guard keeps each node of a guarded station at least
+    FOLD_MARGIN times the station spacing on the outboard side of the
+    plane of the station before it (the guard measures the spacing between
+    the quarter-chord points; the test uses the centroid distance of the
+    two sections, so it asks for half the margin). A mesh that does not fold (wider root
+    strip, no dihedral, one-sided surface) is the same with and without
+    the guard, bit for bit.
+    """
+    from ventorum.panel3d.mesh import FOLD_MARGIN
+
+    coords = _naca4(0.02, 0.4, 0.12, closed=True)
+    surf = _dihedral_wing(dihedral_deg=10.0)
+    mesh = mesh_lifting_surface(surf, coords, n_chord=16, n_span=64, half=True)
+    nodes = np.asarray(mesh.nodes)
+    station = np.asarray(mesh.node_station)
+    for j in range(1, 8):
+        prev = nodes[station == j - 1]
+        cur = nodes[station == j]
+        cen = prev.mean(axis=0)
+        _, _, vt = np.linalg.svd(prev - cen)
+        nrm = vt[-1] if float(np.dot(cur.mean(axis=0) - cen, vt[-1])) > 0.0 else -vt[-1]
+        spacing = float(np.dot(cur.mean(axis=0) - cen, nrm))
+        assert float(np.min((cur - cen) @ nrm)) >= 0.5 * FOLD_MARGIN * spacing
+    for surf_k, n_span in ((_dihedral_wing(6.0), 24), (_dihedral_wing(0.0), 96), (_straight_wing(30.0, symmetric=False), 32)):
+        a = mesh_lifting_surface(surf_k, coords, n_chord=12, n_span=n_span)
+        b = mesh_lifting_surface(surf_k, coords, n_chord=12, n_span=n_span, fold_guard=False)
+        assert _same_mesh(a, b)

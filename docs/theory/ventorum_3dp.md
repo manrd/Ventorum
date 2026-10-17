@@ -150,13 +150,15 @@ The class `PanelMesh` represents the surface of one or more thick lifting surfac
 
 ### Wing meshing and trailing-edge treatment
 
-Each lifting surface is discretized into spanwise strips. At each span station, the wing section carries its true airfoil coordinates. The upper and lower surfaces are covered with quadrilateral panels. At open trailing edges where the gap exceeds the tolerance ($10^{-6} c$), flat base panels seal the trailing edge. Flat tip caps close the wing tips to guarantee a watertight enclosed volume.
+Each lifting surface is discretized into spanwise strips. At each span station, the wing section carries its airfoil coordinates. The upper and lower surfaces are covered with quadrilateral panels. An open trailing edge (gap above the tolerance $10^{-6} c$) is closed by default: the upper and the lower ordinates move toward the mid point of the gap $g$ by $\tfrac{1}{2} g x^4$, which for the NACA 4-digit thickness law is the published closed trailing edge (Ladson et al., 1996). With a solid base between the two trailing-edge corners the Morino Kutta condition puts the Kutta point at the wake corner on fine chordwise meshes, and the lift does not converge to the lift of the closed section (see the [panel solver chapter](panel3d.md), section *Finite (blunt) Trailing Edge*). The option `trailing_edge="base"` keeps flat base panels and the wake at the upper corner. Flat tip caps close the wing tips to guarantee a watertight enclosed volume.
+
+The section planes are normal to the span, except the root section of a symmetric surface (the plane $y = 0$). Where a narrow strip next to the root or a dihedral break would let two neighbour sections cross, the fold guard turns the plane of the outboard station toward the plane of its inboard neighbour until every node keeps a margin from the other plane (see the panel solver chapter, section *Fold guard*).
 
 ### Deflected plain control surfaces
 
 Plain control surfaces deflect the section geometry inside the specified span range using `ventorum.airfoil.flap.deflect_plain_flap`. Positive deflection rotates the trailing edge downward. Chordwise node distributions insert a node at the hinge line, preserving the geometric corner. Trailing-edge points rotate about the hinge line to floating-point roundoff.
 
-At the lateral spanwise boundaries of the control surface, the surface is discontinuous. The mesh inserts two spanwise stations at the same span station $y$, one deflected and one undeflected. A flat side closure strip connects the two curves, sealing the mesh to preserve watertightness. The side closure models no gap leakage flow.
+At a lateral spanwise boundary of the control surface that borders an undeflected part, the deflection changes linearly over a transition of 0.2 local chords centred on the boundary (default `control_edge="transition"`), so the surface stays continuous. With `control_edge="gap"`, and at a boundary between two deflected controls, the mesh inserts two spanwise stations at the same span station $y$, one deflected and one undeflected, and flat side panels close the gap between the two curves. The gap closure leaves a window of fluid between the two outlines near the trailing edge, and the flapped wing does not converge with spanwise refinement; the [controls page](panel3d_controls.md) gives the reasons. Neither closure models gap leakage flow.
 
 ### Mesh validation
 
@@ -165,6 +167,7 @@ The function `check_mesh` inspects the closed mesh for geometric quality:
 - Panel skewness: angle between panel diagonal vectors.
 - Panel non-planarity (warp): perpendicular distance of vertices from the mean panel plane.
 - Enclosed signed volume: computed by Gauss divergence theorem to verify consistent outward normal orientation.
+- Folded strips: a node of a station row on the wrong side of the section plane of its neighbour row (needs the station rows of the mesh builder). Folded panels count as non-convex panels.
 
 ## Dirichlet formulation and system assembly
 
@@ -466,6 +469,7 @@ The 3D panel method implementation is verified by tests in the test suite:
 - Symmetry plane and ground effect images (explicit mirror with the free-stream wake, Trefftz drag with images, bank and sideslip on a half mesh): `tests/test_panel3d_images.py`.
 - Iterative pressure Kutta condition (stored Morino run, asymmetric half mesh against the full mesh): `tests/test_panel3d_kutta.py`.
 - Mesh convergence and Richardson extrapolation: `tests/test_panel3d_convergence.py`.
+- Refinement regressions (open trailing edge with chordwise refinement, dihedral root strip with spanwise refinement): `tests/test_panel3d_refinement.py`; flapped wing with spanwise refinement: `tests/test_panel3d_controls.py`.
 - Solver family integration, settings, ground plane, strip map and trust scores: `tests/test_panel3d_factory.py`.
 - GPU pipeline parity (when CUDA is available): `tests/test_panel3d_gpu.py`.
 
@@ -478,6 +482,7 @@ The 3D panel method implementation is verified by tests in the test suite:
 - J. L. Hess and A. M. O. Smith, "Calculation of Potential Flow About Arbitrary Bodies", *Progress in Aeronautical Sciences*, Vol. 8, Pergamon Press, 1967, pp. 1-138.
 - J. Katz and A. Plotkin, *Low-Speed Aerodynamics*, 2nd ed., Cambridge University Press, Cambridge, 2001.
 - S. A. Kinnas and C. Y. Hsin, "Boundary Element Method for the Analysis of the Unsteady Flow Around Extreme Propeller Geometries", *AIAA Journal*, Vol. 30, No. 3, 1992, pp. 688-696.
+- C. L. Ladson, C. W. Brooks, A. S. Hill and D. W. Sproles, "Computer Program To Obtain Ordinates for NACA Airfoils", NASA TM-4741, 1996.
 - B. Maskew, "Program VSAERO Theory Document: A Computer Program for Calculating the Non-Linear Aerodynamic Characteristics of Arbitrary Configurations", NASA Contractor Report 4023, 1987.
 - L. Morino and C. C. Kuo, "Subsonic Potential Aerodynamics for Complex Configurations: A General Theory", *AIAA Journal*, Vol. 12, No. 2, 1974, pp. 191-197.
 - J. N. Newman, "Distributions of Sources and Normal Dipoles Over a Quadrilateral Panel", *Journal of Engineering Mathematics*, Vol. 20, 1986, pp. 113-126.

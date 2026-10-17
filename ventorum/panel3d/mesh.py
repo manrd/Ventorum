@@ -2,10 +2,36 @@
 """Closed quadrilateral meshes of thick lifting surfaces for the 3D panel method.
 
 The mesh wraps a thick section around each lifting surface. Each spanwise
-station carries the true airfoil shape (upper surface, lower surface, blunt
-base at an open trailing edge, flat tip cap). The panels are plane
-quadrilaterals (or triangles) with outward corner order, and the
+station carries the airfoil shape (upper surface, lower surface, flat tip
+cap; an open trailing edge is closed by default, see below). The panels are
+plane quadrilaterals (or triangles) with outward corner order, and the
 trailing-edge strips carry the wake shedding edges for the solver.
+
+Finite trailing edge
+--------------------
+A section with an open (blunt) trailing edge is closed by default
+(``trailing_edge="close"``). The upper and the lower ordinates move toward
+the mid point of the trailing-edge gap g by (g / 2) x^4 (x the chordwise
+station in unit chord), so the camber line does not move and the thickness
+changes by at most the gap. For the NACA 4-digit and 5-digit thickness
+law this is exactly the published closed trailing edge: the coefficient of
+x^4 changes from -0.1015 to -0.1036 (Ladson, Brooks, Hill and Sproles 1996),
+and the difference of the two laws is the half gap times x^4.
+
+The reason: with constant-strength panels and the internal Dirichlet
+condition, a solid base between the two trailing-edge corners has no
+fine-mesh limit that satisfies the Kutta condition at both corners. With
+the wake shed from one corner and the Morino condition, the circulation
+flows around the base from the other corner when the trailing-edge panels
+become shorter than the base height, and the lift falls with chordwise
+refinement toward a limit well below the lift of the closed section. Other
+wake attachments (the other corner, the base centre, both
+corners), a base without its Dirichlet row and a base with outflow give
+the same circulation, because the potential outside the base region does
+not change; an explicit velocity or pressure Kutta condition on the
+trailing-edge panels makes the lift rise without limit, because the
+corner flows are singular. ``trailing_edge="base"`` keeps the former
+blunt base (base panels, wake from the upper corner) for comparisons.
 
 Section placement
 -----------------
@@ -47,6 +73,27 @@ one-sided surface (its root section is normal to its span axis, for
 example a vertical fin) and on a surface whose first panel row is
 vertical (the two halves coincide and there is no miter).
 
+Fold guard
+----------
+Two neighbour section planes that are not parallel cross on a line parallel
+to x. At the root of a symmetric surface with dihedral G the root plane
+(y = 0) and the next plane (normal to the span) cross at a distance of
+about d / tan(G) from the reference line, with d the width of the root
+strip. When the section reaches past that line (thickness t > d / tan(G)),
+the nodes of the next station lie beyond the root plane and the strip
+folds. With the cosine spanwise spacing this happens when the panel count
+grows, because the root strip becomes narrow. The same can happen at a
+dihedral break. With ``fold_guard=True`` (default)
+the builder turns each station plane toward the plane of the station
+before it, from the root outward, only as far as needed to keep every
+node of each of the two sections at least ``FOLD_MARGIN`` times the
+station spacing away from the plane of the other section. A guarded
+station keeps its leading- and trailing-edge nodes (the lattice points);
+only its thickness direction turns, and with ``scale_root_thickness`` its
+offsets from the camber line grow by 1 / cos(B), with B the angle between
+the guarded plane and the plane normal to the span, as at the root. A
+station that does not fold keeps its plane bit for bit.
+
 Published sources
 -----------------
 * Hess, J. L. and Smith, A. M. O., 1964, Calculation of non-lifting
@@ -67,6 +114,14 @@ Published sources
   hinged aft portion of the section).
 * Abbott, I. H. and von Doenhoff, A. E., 1959, Theory of Wing Sections,
   Dover (airfoil section geometry used in the tests).
+* Ladson, C. L., Brooks, C. W., Hill, A. S. and Sproles, D. W., 1996,
+  Computer Program To Obtain Ordinates for NACA Airfoils, NASA TM-4741
+  (closed trailing edge of the NACA 4-digit thickness law).
+* Maskew, B., 1987, Program VSAERO Theory Document, NASA CR-4023,
+  sections 2.2 and 3.1.4 (the Kutta condition is implied by the wake
+  doublet; any panel edge may shed a wake and the user chooses a
+  physically realistic wake model; part-span flap with prescribed vortex
+  separations at the flap edge, section 4.4).
 * O'Rourke, J., 1998, Computational Geometry in C, 2nd ed., Cambridge
   University Press, Chapter 1 (triangulation of a simple polygon by ear
   clipping, used for the control side closures).
@@ -83,7 +138,14 @@ hinge to its rotated trailing edge, so no node falls beyond the trailing
 edge. The trailing-edge nodes use the exact rotated trailing-edge point, so
 a check of the rotation about the hinge line passes to round-off.
 
-At the side edges of a deflected control the mesh carries two spanwise
+Side edges of a control (``control_edge``). With "transition" (default)
+the deflection changes linearly over a spanwise transition centred on the
+side edge of the control, of width ``control_transition`` times the local
+chord. The builder adds a station at each end of the transition, and the
+stations inside it carry the deflection times the ramp factor. The
+surface stays continuous (a sealed edge, as the camber step of a vortex
+lattice), so there is no side face and no gap. With "gap" (and always at
+an edge between two deflected controls) the mesh carries two spanwise
 stations at the same y (one deflected, one undeflected). The nodes that
 the two sections share (forward of the hinge) are common. The gap between
 the two sections, in the plane of the station, is closed with flat side
@@ -92,7 +154,25 @@ outlines into simple lobes, and each lobe is triangulated (ear clipping),
 so each side panel is a plane convex triangle. A crossing node on a
 section outline also splits the adjacent surface panel into triangles, so
 the mesh stays watertight with no hanging node. The closure models no gap
-flow. Zero deflection gives the same mesh as before, bit for bit.
+flow.
+
+Why the transition: near the trailing edge of a side gap the two section
+outlines cross (a flap down puts the flap upper surface below the lower
+surface of the fixed part). The region between them in the station plane
+is a window of fluid that joins the flow under the fixed part to the flow
+over the flap. The potential difference across the window is of the order
+of the circulation, so the potential flow through the window is singular
+at its sharp edges, and the circulation of the strips next to the edge
+falls as the strips become narrower: CL falls and the induced drag rises
+with spanwise refinement. The two trailing-edge nodes of the gap are also
+not joined by a wake, so the two wake strips end in two full-strength
+trailing vortices. A side-edge wake (Maskew 1987 prescribes vortex
+separations at the flap edge) between the two trailing-edge nodes bounds
+the induced drag but does not stop the loss of lift; a wake panel over the
+window made the solution unstable. The sealed transition converges with
+spanwise refinement, and its converged result changes very little with the
+transition width (see ``tests/test_panel3d_controls.py``). Zero deflection
+gives the same mesh as before, bit for bit.
 
 Metadata for strip loads
 ------------------------
@@ -120,7 +200,14 @@ import numpy as np
 
 from ventorum.geometry.lattice import _surface_eta, resolve_spacing, surface_reference_line
 
-__all__ = ["PanelMesh", "check_mesh", "mesh_aircraft", "mesh_lifting_surface"]
+__all__ = [
+    "CONTROL_TRANSITION",
+    "FOLD_MARGIN",
+    "PanelMesh",
+    "check_mesh",
+    "mesh_aircraft",
+    "mesh_lifting_surface",
+]
 
 #: Trailing-edge gap over local chord below which the edge counts as sharp.
 _TE_GAP_TOL = 1e-6
@@ -144,6 +231,22 @@ WARP_LIMIT = 0.05
 #: panel row. A row closer to the vertical has no miter (the two halves of
 #: a symmetric surface coincide), so the root section is not scaled.
 _COS_ROOT_MIN = 1e-9
+#: Fold guard: smallest distance of a section node from the plane of the
+#: neighbour section, as a fraction of the station spacing [-]. Any
+#: positive value prevents a fold; 0.05 changes only the stations that
+#: fold or nearly fold. This is a method choice, not a tuned value.
+FOLD_MARGIN = 0.05
+#: Default width of the deflection transition at the side edge of a
+#: control surface, as a fraction of the local chord [-]. The converged
+#: result changes very little with this width (see the module notes); a
+#: wider transition is resolved by fewer strips, so the spanwise sequence
+#: becomes monotonic at a coarser mesh. This is a method choice.
+CONTROL_TRANSITION = 0.2
+#: Accepted values of the trailing-edge and control-edge options.
+_TRAILING_EDGE_OPTIONS = ("close", "base")
+_CONTROL_EDGE_OPTIONS = ("transition", "gap")
+#: Bisection steps of the fold guard [-].
+_GUARD_STEPS = 60
 _XHAT = np.array([1.0, 0.0, 0.0])
 
 
@@ -379,6 +482,145 @@ def _edge_lists(eta_base: np.ndarray, controls: list) -> tuple[np.ndarray, list]
     return np.array(etas, dtype=float), ctrls
 
 
+def _span_length_rate(surf, eta: float) -> float:
+    """Return the length of the reference line per unit span parameter at *eta* [m]."""
+    h = 1e-6
+    a = max(0.0, float(eta) - h)
+    b = min(1.0, float(eta) + h)
+    _, y_ref, z_ref = surface_reference_line(surf, np.array([a, b]))
+    return float(np.hypot(y_ref[1] - y_ref[0], z_ref[1] - z_ref[0])) / max(b - a, 1e-300)
+
+
+def _transition_edge_lists(
+    surf,
+    eta_base: np.ndarray,
+    controls: list,
+    chord_of,
+    width: float,
+) -> tuple[np.ndarray, list, np.ndarray]:
+    """Return the stations, their control and their deflection factor for sealed control edges.
+
+    At a side edge between a control and an undeflected part of the span,
+    the deflection changes linearly over a transition centred on the edge,
+    of spanwise length *width* times the local chord. Each end of a
+    transition becomes a station. The transition is not longer than the
+    control, does not reach past the root or the tip, and does not reach
+    into the transition of the next edge. At an edge between two deflected
+    controls the two stations at the same span parameter of
+    :func:`_edge_lists` stay (gap with side panels).
+
+    Parameters
+    ----------
+    surf : LiftingSurface
+        Surface definition.
+    eta_base : numpy.ndarray
+        Span parameters of the lattice stations [-].
+    controls : list
+        Controls with nonzero deflection.
+    chord_of : callable
+        Local chord [m] at a span parameter.
+    width : float
+        Transition length over the local chord [-].
+
+    Returns
+    -------
+    tuple
+        Span parameters of the stations [-] (increasing, duplicates at gap
+        edges), the control of each station (or None) and the deflection
+        factor of each station [-] (1 inside a control, 0 to 1 in a
+        transition).
+    """
+    tol = _CTRL_TOL
+
+    def neighbour(b: float, outside: float):
+        e = b + outside * 10.0 * tol
+        if e <= 0.0 or e >= 1.0:
+            return None
+        return _control_at_eta(e, controls)
+
+    # Boundaries: (eta, control, side) with side -1 at the start, +1 at the end.
+    bounds = []
+    for c in controls:
+        for b, sd in ((float(c.eta_start), -1.0), (float(c.eta_end), 1.0)):
+            if _ETA_MERGE_TOL < b < 1.0 - _ETA_MERGE_TOL:
+                bounds.append((b, c, sd))
+    gap_bounds = []
+    ramps = []
+    for b, c, sd in bounds:
+        other = neighbour(b, sd)
+        if other is not None and other is not c:
+            gap_bounds.append(b)
+        else:
+            ramps.append([b, c, sd, float(width) * float(chord_of(b)) / max(_span_length_rate(surf, b), 1e-300)])
+    # Limits of each ramp: inside the control, before the root or the tip,
+    # and before the transition or the gap of the next edge outside.
+    edges = sorted({b for b, _, _ in bounds} | {0.0, 1.0})
+    for r in ramps:
+        b, c, sd, w = r
+        span_c = float(c.eta_end) - float(c.eta_start)
+        w = min(w, span_c)
+        nxt = [e for e in edges if (e - b) * sd > _ETA_MERGE_TOL]
+        room = abs((min(nxt) if sd > 0 else max(nxt)) - b) if nxt else 0.0
+        end_room = (1.0 - b) if sd > 0 else b
+        # Up to the root or the tip the whole room is free; another edge
+        # shares the room with its own transition.
+        w = min(w, 2.0 * room if abs(room - end_room) <= _ETA_MERGE_TOL else room)
+        r[3] = max(w, 0.0)
+    ramps = [r for r in ramps if r[3] > _ETA_MERGE_TOL]
+    extra = []
+    for b, _, _, w in ramps:
+        extra.extend([b - 0.5 * w, b + 0.5 * w])
+    ramp_at = {}
+    for b, c, sd, w in ramps:
+        ramp_at[(id(c), sd)] = (b, w)
+
+    def factor(eta: float, c) -> float:
+        f = 1.0
+        for sd, b0 in ((-1.0, float(c.eta_start)), (1.0, float(c.eta_end))):
+            key = (id(c), sd)
+            if key in ramp_at:
+                b, w = ramp_at[key]
+                t = (eta - (b - 0.5 * w)) / w if sd < 0 else ((b + 0.5 * w) - eta) / w
+                f = min(f, min(max(t, 0.0), 1.0))
+            elif sd < 0 and eta < b0 - tol:
+                f = 0.0
+            elif sd > 0 and eta > b0 + tol:
+                f = 0.0
+        return f
+
+    def station_entry(eta: float, prefer=None):
+        best = (None, 0.0)
+        for c in controls:
+            if prefer is not None and c is not prefer:
+                continue
+            f = factor(eta, c)
+            if f > best[1]:
+                best = (c, f)
+        return best
+
+    uniq = _unique_sorted(list(np.asarray(eta_base, dtype=float).ravel()) + extra + gap_bounds)
+    gaps = _unique_sorted(gap_bounds) if gap_bounds else np.empty(0)
+    etas: list[float] = []
+    ctrls: list = []
+    facs: list[float] = []
+    for e in uniq:
+        e = float(e)
+        if gaps.size and np.min(np.abs(gaps - e)) <= _ETA_MERGE_TOL:
+            left = _control_at_eta(e - 10.0 * tol, controls)
+            right = _control_at_eta(e + 10.0 * tol, controls)
+            for c in (left, right):
+                c_e, f_e = station_entry(e, prefer=c) if c is not None else (None, 0.0)
+                etas.append(e)
+                ctrls.append(c_e)
+                facs.append(f_e)
+            continue
+        c_e, f_e = station_entry(e)
+        etas.append(e)
+        ctrls.append(c_e if f_e > 0.0 else None)
+        facs.append(f_e if f_e > 0.0 else 0.0)
+    return np.array(etas, dtype=float), ctrls, np.array(facs, dtype=float)
+
+
 def _coords_from_rows(xt: np.ndarray, yu: np.ndarray, yl: np.ndarray) -> np.ndarray:
     """Return a Selig ordered polygon from upper and lower rows [chord units]."""
     xt = np.asarray(xt, dtype=float)
@@ -579,6 +821,178 @@ def _scale_about_camber(yu: np.ndarray, yl: np.ndarray, factor: float) -> tuple[
     camber = 0.5 * (yu + yl)
     half = 0.5 * (yu - yl)
     return camber + factor * half, camber - factor * half
+
+
+def _close_trailing_edge(x: np.ndarray, yu: np.ndarray, yl: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Close an open trailing edge with a quartic thickness change [chord units].
+
+    The upper and the lower ordinates move toward the mid point of the
+    trailing-edge gap g by (g / 2) x^4, so the camber line does not move.
+    For the NACA 4-digit thickness law this gives the closed trailing edge
+    of Ladson et al. (1996): the x^4 coefficient -0.1036 instead of -0.1015.
+    A sharp trailing edge (gap at most the sharp-edge tolerance) is
+    returned unchanged.
+
+    Parameters
+    ----------
+    x : numpy.ndarray
+        Chordwise stations [chord units], from 0 to 1.
+    yu, yl : numpy.ndarray
+        Upper and lower ordinates at *x* [chord units].
+
+    Returns
+    -------
+    tuple of numpy.ndarray
+        Closed upper and lower ordinates [chord units].
+    """
+    x = np.asarray(x, dtype=float)
+    yu = np.asarray(yu, dtype=float)
+    yl = np.asarray(yl, dtype=float)
+    gap = float(yu[-1] - yl[-1])
+    if abs(gap) <= _TE_GAP_TOL:
+        return yu, yl
+    ramp = 0.5 * gap * x**4
+    return yu - ramp, yl + ramp
+
+
+def _station_offsets(
+    xu: np.ndarray,
+    zu: np.ndarray,
+    xl: np.ndarray,
+    zl: np.ndarray,
+    chord: float,
+    twist: float,
+    factor: float,
+) -> tuple[float, float]:
+    """Return the smallest and the largest section offset across the span plane [m].
+
+    The offset of a section point is its distance from the quarter-chord
+    point along the direction in the section plane that is normal to x.
+    With the twist T about the span axis, a point (x, z) in chord units
+    has the offset c (z cos T - (x - 0.25) sin T). The offsets from the
+    camber line (mean of the upper and the lower ordinate at each index)
+    are multiplied by *factor* first.
+
+    Parameters
+    ----------
+    xu, zu, xl, zl : numpy.ndarray
+        Chordwise stations and ordinates of the upper and the lower surface
+        [chord units].
+    chord : float
+        Local chord [m].
+    twist : float
+        Twist with incidence [rad].
+    factor : float
+        Factor on the offsets from the camber line [-].
+
+    Returns
+    -------
+    tuple of float
+        Smallest and largest offset [m].
+    """
+    zc = 0.5 * (np.asarray(zu, dtype=float) + np.asarray(zl, dtype=float))
+    h = 0.5 * (np.asarray(zu, dtype=float) - np.asarray(zl, dtype=float))
+    s_t = float(np.sin(twist))
+    c_t = float(np.cos(twist))
+    s_u = chord * ((zc + factor * h) * c_t - (np.asarray(xu, dtype=float) - 0.25) * s_t)
+    s_l = chord * ((zc - factor * h) * c_t - (np.asarray(xl, dtype=float) - 0.25) * s_t)
+    both = np.concatenate([s_u, s_l])
+    return float(np.min(both)), float(np.max(both))
+
+
+def _guard_axes(
+    axis: np.ndarray,
+    qc: np.ndarray,
+    offsets,
+    margin: float = FOLD_MARGIN,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Turn the station planes so that no section crosses the plane of its neighbour.
+
+    The stations are processed from the first to the last. The plane of
+    station j (normal: its span axis a_j in the y-z plane, through its
+    quarter-chord point q_j) must keep every node of station j - 1 on its
+    inboard side and the plane of station j - 1 every node of station j on
+    its outboard side, each by at least *margin* times the station spacing
+    d. A node of station j at the offset s (along m_j = x cross a_j) has
+    the distance (q_j - q_{j-1}) . a_{j-1} + s m_j . a_{j-1} from the plane
+    of station j - 1. When the condition fails, the axis angle of station
+    j moves toward the angle of station j - 1 by the largest fraction that
+    passes (bisection). The first station keeps its plane (the miter at
+    the root of a symmetric surface). Stations at the same span parameter
+    (control side edges) share the plane of the station before them.
+
+    Parameters
+    ----------
+    axis : numpy.ndarray
+        Unit span axes in the y-z plane, shape (n, 3).
+    qc : numpy.ndarray
+        Quarter-chord points of the stations [m], shape (n, 3).
+    offsets : callable
+        ``offsets(j, tilt)`` returns the smallest and the largest section
+        offset [m] of station j when its plane turns by *tilt* [rad] from
+        the plane normal to the span (see :func:`_station_offsets`).
+    margin : float
+        Smallest node distance from the neighbour plane over the station
+        spacing [-].
+
+    Returns
+    -------
+    tuple of numpy.ndarray
+        Guarded axes, shape (n, 3) (unchanged rows bit for bit), and the
+        tilt of each station from its plane normal to the span [rad],
+        shape (n,) (zero for an unchanged station).
+    """
+    axis = np.asarray(axis, dtype=float)
+    n = axis.shape[0]
+    phi = np.arctan2(axis[:, 2], axis[:, 1])
+    phi_hat = phi.copy()
+    tilt = np.zeros(n)
+    out = axis.copy()
+    yz = np.asarray(qc, dtype=float)[:, 1:3]
+    size = float(np.max(np.ptp(yz, axis=0))) if n > 1 else 1.0
+    tol = 1e-12 * max(size, 1e-300)
+
+    def unit(angle: float) -> np.ndarray:
+        return np.array([np.cos(angle), np.sin(angle)])
+
+    def normal_dir(angle: float) -> np.ndarray:
+        return np.array([-np.sin(angle), np.cos(angle)])
+
+    for j in range(1, n):
+        step = yz[j] - yz[j - 1]
+        d = float(np.hypot(step[0], step[1]))
+        if d <= tol:
+            phi_hat[j] = phi_hat[j - 1]
+            tilt[j] = tilt[j - 1]
+            if tilt[j] != 0.0:
+                out[j] = np.array([0.0, np.cos(phi_hat[j]), np.sin(phi_hat[j])])
+            continue
+        ph0 = float(phi_hat[j - 1])
+        a0 = unit(ph0)
+        m0 = normal_dir(ph0)
+        lo0, hi0 = offsets(j - 1, float(tilt[j - 1]))
+
+        def passes(ph1: float, j=j, step=step, d=d, ph0=ph0, a0=a0, m0=m0, lo0=lo0, hi0=hi0) -> bool:
+            a1 = unit(ph1)
+            m1 = normal_dir(ph1)
+            lo1, hi1 = offsets(j, ph1 - float(phi[j]))
+            near1 = min(float(step @ a0) + s * float(m1 @ a0) for s in (lo1, hi1))
+            far0 = max(float(-step @ a1) + s * float(m0 @ a1) for s in (lo0, hi0))
+            return near1 >= margin * d and far0 <= -margin * d
+
+        if passes(float(phi[j])):
+            continue
+        lo_t, hi_t = 0.0, 1.0
+        for _ in range(_GUARD_STEPS):
+            mid = 0.5 * (lo_t + hi_t)
+            if passes(ph0 + mid * (float(phi[j]) - ph0)):
+                lo_t = mid
+            else:
+                hi_t = mid
+        phi_hat[j] = ph0 + lo_t * (float(phi[j]) - ph0)
+        tilt[j] = float(phi_hat[j] - phi[j])
+        out[j] = np.array([0.0, np.cos(phi_hat[j]), np.sin(phi_hat[j])])
+    return out, tilt
 
 
 # ---------------------------------------------------------------------------
@@ -1039,6 +1453,10 @@ def _mesh_with_controls(
     tip: str,
     half: bool,
     scale_root_thickness: bool = True,
+    trailing_edge: str = "close",
+    control_edge: str = "transition",
+    control_transition: float = CONTROL_TRANSITION,
+    fold_guard: bool = True,
 ) -> PanelMesh:
     """Build a watertight mesh with deflected plain control surfaces."""
     from ventorum.geometry.controls import validate_controls
@@ -1049,6 +1467,8 @@ def _mesh_with_controls(
     yl_mat = []
     for c in coord_sorted:
         yu, yl = _resample_section(c, xt_new)
+        if trailing_edge == "close":
+            yu, yl = _close_trailing_edge(xt_new, yu, yl)
         yu_mat.append(yu)
         yl_mat.append(yl)
     yu_mat = np.vstack(yu_mat)
@@ -1056,7 +1476,13 @@ def _mesh_with_controls(
     symmetric = bool(getattr(surf, "is_symmetric", False))
     mirror = bool(getattr(surf, "mirror_y", False))
     eta_base = np.asarray(eta_base, dtype=float)
-    edge_etas, edge_ctrls = _edge_lists(eta_base, active)
+    if control_edge == "transition":
+        edge_etas, edge_ctrls, edge_factor = _transition_edge_lists(
+            surf, eta_base, active, lambda e: float(np.interp(e, fr, chords)), control_transition,
+        )
+    else:
+        edge_etas, edge_ctrls = _edge_lists(eta_base, active)
+        edge_factor = np.ones(edge_etas.size)
     ns = int(edge_etas.size)
     yu_base = _interp_rows(fr, yu_mat, edge_etas)
     yl_base = _interp_rows(fr, yl_mat, edge_etas)
@@ -1078,8 +1504,12 @@ def _mesh_with_controls(
     offset = np.asarray(surf.position, dtype=float).reshape(3)
     le_e = np.column_stack([x_ref, y_ref, z_ref]) + offset
     axis_e = _span_axes_for_edges(surf, edge_etas)
-    cdir_e, ndir_e = _section_frames(axis_e, twist_e)
     qc_e = le_e + 0.25 * chord_e[:, None] * _XHAT
+
+    def station_rows(j: int, mirror_side: bool):
+        ctrl = edge_ctrls[j]
+        delta = _right_delta_deg(ctrl, mirror_side) * float(edge_factor[j])
+        return _deflected_station(xt_new, yu_base[j], yl_base[j], ctrl, delta)
 
     def section_rows(mirror_side: bool):
         xu = np.empty((ns, nc + 1))
@@ -1087,10 +1517,26 @@ def _mesh_with_controls(
         xl = np.empty((ns, nc + 1))
         zl = np.empty((ns, nc + 1))
         for j in range(ns):
-            ctrl = edge_ctrls[j]
-            delta = _right_delta_deg(ctrl, mirror_side)
-            xu[j], zu[j], xl[j], zl[j] = _deflected_station(xt_new, yu_base[j], yl_base[j], ctrl, delta)
+            xu[j], zu[j], xl[j], zl[j] = station_rows(j, mirror_side)
         return xu, zu, xl, zl
+
+    sides = (False, True) if (symmetric and has_asym) else (bool(mirror and not symmetric),)
+    if fold_guard:
+        rows_by_side = [section_rows(m) for m in sides]
+
+        def offsets(j: int, tilt: float):
+            f = 1.0 / np.cos(tilt) if (scale_root_thickness and tilt != 0.0) else 1.0
+            lo, hi = np.inf, -np.inf
+            for xu_s, zu_s, xl_s, zl_s in rows_by_side:
+                a, b = _station_offsets(xu_s[j], zu_s[j], xl_s[j], zl_s[j], float(chord_e[j]), float(twist_e[j]), f)
+                lo, hi = min(lo, a), max(hi, b)
+            return lo, hi
+
+        axis_e, tilt_e = _guard_axes(axis_e, qc_e, offsets)
+        if scale_root_thickness:
+            for j in np.flatnonzero(tilt_e != 0.0):
+                yu_base[j], yl_base[j] = _scale_about_camber(yu_base[j], yl_base[j], 1.0 / np.cos(tilt_e[j]))
+    cdir_e, ndir_e = _section_frames(axis_e, twist_e)
 
     if symmetric and has_asym:
         # Full mesh from the left tip to the right tip: the left side is the
@@ -1225,6 +1671,10 @@ def mesh_lifting_surface(
     half: bool = False,
     n_span=None,
     scale_root_thickness: bool = True,
+    trailing_edge: str = "close",
+    control_edge: str = "transition",
+    control_transition: float = CONTROL_TRANSITION,
+    fold_guard: bool = True,
 ) -> PanelMesh:
     """Build a closed quadrilateral mesh of one thick lifting surface.
 
@@ -1253,7 +1703,29 @@ def mesh_lifting_surface(
         1 / cos(G), with G the dihedral of the first panel row [rad], so
         that the thickness normal to the local surface equals the section
         thickness. False keeps the thickness of the root section along its
-        section normal (the mesh before this option, bit for bit).
+        section normal (the mesh before this option, bit for bit). With
+        ``fold_guard`` the same factor 1 / cos(B) applies to a station that
+        the guard turns by B [rad].
+    trailing_edge : str
+        "close" (default) closes an open trailing edge with the quartic
+        thickness change of the module notes; "base" keeps the open edge
+        with base panels and the wake at the upper corner (the former mesh;
+        its results do not converge with chordwise refinement).
+    control_edge : str
+        "transition" (default) changes the deflection of a control linearly
+        over a spanwise transition centred on each side edge that borders
+        an undeflected part; "gap" keeps two stations at the same y with
+        flat side panels (the former mesh). An edge between two deflected
+        controls is always a gap.
+    control_transition : float
+        Length of the transition over the local chord [-] (default
+        ``CONTROL_TRANSITION``). It is shortened where the control, the
+        root, the tip or the next edge leave less room.
+    fold_guard : bool
+        True (default) turns a station plane toward the plane of its inboard
+        neighbour when the two sections would cross (see the module notes);
+        stations that do not fold do not change. False keeps every section
+        plane normal to the span (the former mesh, bit for bit).
 
     Returns
     -------
@@ -1274,11 +1746,14 @@ def mesh_lifting_surface(
     -----
     Each section lies in the plane of the local chord direction and the
     local section normal (the normal of the lattice surface at the station),
-    so the section thickness follows the dihedral. The control deflection
-    [rad] follows the VLM sign convention (positive trailing edge down on a
-    horizontal surface). The chordwise stations gain a node at each active
-    hinge. Control side edges gain flat side triangles between two stations
-    at the same y [m]. Zero deflection keeps the mesh bit for bit.
+    so the section thickness follows the dihedral; the fold guard can turn
+    the planes of a few stations next to the root or a dihedral break. The
+    control deflection [rad] follows the VLM sign convention (positive
+    trailing edge down on a horizontal surface). The chordwise stations
+    gain a node at each active hinge. A transition edge adds a station at
+    each end of the transition; a gap edge adds flat side triangles between
+    two stations at the same y [m]. Zero deflection keeps the mesh bit for
+    bit.
 
     At the root of a symmetric surface the section lies in the plane y = 0
     (the miter of the two halves). There a thickness t along the section
@@ -1294,6 +1769,13 @@ def mesh_lifting_surface(
         raise ValueError(f"n_chord must be at least 1, got {n_chord}.")
     if tip not in ("flat", "none"):
         raise ValueError(f"Unknown tip {tip!r}; use 'flat' or 'none'.")
+    if trailing_edge not in _TRAILING_EDGE_OPTIONS:
+        raise ValueError(f"Unknown trailing_edge {trailing_edge!r}; use 'close' or 'base'.")
+    if control_edge not in _CONTROL_EDGE_OPTIONS:
+        raise ValueError(f"Unknown control_edge {control_edge!r}; use 'transition' or 'gap'.")
+    control_transition = float(control_transition)
+    if not np.isfinite(control_transition) or control_transition <= 0.0:
+        raise ValueError(f"control_transition must be positive, got {control_transition}.")
     secs = list(surf.sections)
     if len(secs) < 2:
         raise ValueError("A lifting surface needs at least two sections.")
@@ -1320,6 +1802,10 @@ def mesh_lifting_surface(
         return _mesh_with_controls(
             surf, coord_sorted_c, fr_c, chords_c, twists_c, xt_new_c, eta_base_c, active, tip, half,
             scale_root_thickness=bool(scale_root_thickness),
+            trailing_edge=trailing_edge,
+            control_edge=control_edge,
+            control_transition=control_transition,
+            fold_guard=bool(fold_guard),
         )
 
     order = sorted(range(len(secs)), key=lambda i: float(secs[i].y_frac))
@@ -1336,6 +1822,8 @@ def mesh_lifting_surface(
     yl_rows = []
     for c in coord_sorted:
         yu, yl = _resample_section(c, xt)
+        if trailing_edge == "close":
+            yu, yl = _close_trailing_edge(xt, yu, yl)
         yu_rows.append(yu)
         yl_rows.append(yl)
     yu_mat = np.vstack(yu_rows)
@@ -1360,7 +1848,6 @@ def mesh_lifting_surface(
     axis /= np.maximum(np.linalg.norm(axis, axis=1, keepdims=True), 1e-300)
     if surf.is_symmetric:
         axis[eta_e <= 1e-12] = np.array([0.0, 1.0, 0.0])
-    cdir, ndir = _section_frames(axis, twist_e)
     qc = le_flat + 0.25 * chord_e[:, None] * _XHAT
     yu_e = _interp_rows(fr, yu_mat, eta_e)
     yl_e = _interp_rows(fr, yl_mat, eta_e)
@@ -1369,6 +1856,17 @@ def mesh_lifting_surface(
         factor = _root_thickness_factor(surf, eta_e)
         if factor != 1.0:
             yu_e[0], yl_e[0] = _scale_about_camber(yu_e[0], yl_e[0], factor)
+    if fold_guard:
+
+        def offsets(j: int, tilt: float):
+            f = 1.0 / np.cos(tilt) if (scale_root_thickness and tilt != 0.0) else 1.0
+            return _station_offsets(xt, yu_e[j], xt, yl_e[j], float(chord_e[j]), float(twist_e[j]), f)
+
+        axis, tilt_e = _guard_axes(axis, qc, offsets)
+        if scale_root_thickness:
+            for j in np.flatnonzero(tilt_e != 0.0):
+                yu_e[j], yl_e[j] = _scale_about_camber(yu_e[j], yl_e[j], 1.0 / np.cos(tilt_e[j]))
+    cdir, ndir = _section_frames(axis, twist_e)
 
     upper = np.empty((ns, nc1, 3))
     lower = np.empty((ns, nc1, 3))
@@ -1487,7 +1985,8 @@ def mesh_aircraft(
         every surface (default True).
     **kw
         Extra arguments of :func:`mesh_lifting_surface` (n_chord, n_span,
-        chord_spacing, tip, half).
+        chord_spacing, tip, half, trailing_edge, control_edge,
+        control_transition, fold_guard).
 
     Returns
     -------
@@ -1617,6 +2116,84 @@ def _panel_geometry(p: np.ndarray) -> tuple[float, np.ndarray, float, float, flo
     return area, unit, aspect, float(skew), float(warp), bool(convex)
 
 
+def _station_folds(nodes: np.ndarray, panels: np.ndarray, station: np.ndarray, comp_of: np.ndarray) -> np.ndarray:
+    """Return a fold flag for each panel from the planes of the spanwise stations.
+
+    The nodes of one station row (``node_station``) of a component lie in
+    one plane (the section plane). For two neighbour rows with different
+    planes, every node of the outboard row must lie on the outboard side
+    of the inboard plane, and every node of the inboard row on the inboard
+    side of the outboard plane. A node on the wrong side means that the
+    strip between the two rows folds (the surface passes through itself).
+    Rows that are not plane (or have fewer than three nodes) are skipped,
+    and so are two rows in the same plane (the two stations of a control
+    gap).
+
+    Parameters
+    ----------
+    nodes : numpy.ndarray
+        Node positions [m], shape (Nn, 3).
+    panels : numpy.ndarray
+        Panel corner node indices, shape (Np, 4).
+    station : numpy.ndarray
+        Station row of each node, shape (Nn,), increasing along the span.
+    comp_of : numpy.ndarray
+        Component of each panel, shape (Np,).
+
+    Returns
+    -------
+    numpy.ndarray
+        True for each panel with a corner node on the wrong side, shape (Np,).
+    """
+    bad = np.zeros(nodes.shape[0], dtype=bool)
+    for c in np.unique(comp_of):
+        ids = np.unique(panels[comp_of == c].ravel())
+        if ids.size < 4:
+            continue
+        st = station[ids]
+        levels = np.unique(st)
+        if levels.size < 2:
+            continue
+        size = float(np.max(np.ptp(nodes[ids], axis=0)))
+        tol = 1e-9 * max(size, 1e-300)
+        planes: dict = {}
+        for lv in levels:
+            pts = nodes[ids[st == lv]]
+            if pts.shape[0] < 3:
+                continue
+            cen = np.mean(pts, axis=0)
+            _, sv, vt = np.linalg.svd(pts - cen, full_matrices=False)
+            if sv.size < 3 or sv[1] <= 1e-9 * max(float(sv[0]), 1e-300) or sv[2] > 1e-6 * float(sv[0]):
+                continue
+            planes[int(lv)] = (cen, vt[-1])
+        ordered = sorted(planes)
+        if len(ordered) < 2:
+            continue
+        # Orient each normal toward the next row that is not in the same
+        # plane (else away from the previous one): two rows of a control gap
+        # share a plane, and their centroids give no direction.
+        for i, lv in enumerate(ordered):
+            cen, nrm = planes[lv]
+            ref = None
+            for k in list(range(i + 1, len(ordered))) + list(range(i - 1, -1, -1)):
+                step = planes[ordered[k]][0] - cen
+                if abs(float(np.dot(step, nrm))) > tol:
+                    ref = step if k > i else -step
+                    break
+            if ref is not None and float(np.dot(ref, nrm)) < 0.0:
+                planes[lv] = (cen, -nrm)
+        for a, b in zip(ordered[:-1], ordered[1:]):
+            ca, na = planes[a]
+            cb, nb = planes[b]
+            if abs(float(np.dot(cb - ca, na))) <= tol and abs(abs(float(np.dot(na, nb))) - 1.0) <= 1e-9:
+                continue
+            ia = ids[st == a]
+            ib = ids[st == b]
+            bad[ib[(nodes[ib] - ca) @ na < -tol]] = True
+            bad[ia[(nodes[ia] - cb) @ nb > tol]] = True
+    return np.any(bad[panels], axis=1)
+
+
 def check_mesh(mesh: PanelMesh, warp_limit: float = WARP_LIMIT) -> dict:
     """Check closure, orientation and quality of a panel mesh.
 
@@ -1642,9 +2219,18 @@ def check_mesh(mesh: PanelMesh, warp_limit: float = WARP_LIMIT) -> dict:
         volume [m^3] (sum over components) and component_volume [m^3] per
         component.
         min_area [m^2]; per-panel aspect_ratio, skew, warp and convex
-        arrays with max_aspect_ratio, max_skew, max_warp and n_nonconvex.
+        arrays with max_aspect_ratio, max_skew and max_warp.
+        folded : per-panel flag of a folded strip (needs
+        ``mesh.node_station``): a corner node lies on the wrong side of the
+        section plane of the neighbour station row, so the surface passes
+        through itself (see :func:`_station_folds`). A fold need not make a
+        panel non-convex. n_folded : number of folded panels.
+        n_nonconvex : number of panels that are not convex in their mean
+        plane or are folded (both make a surface that is not valid; the
+        trust score reads this count as folded panels).
         planar : max_warp below *warp_limit*.
-        valid_panels : all panels convex, planar and with positive area.
+        valid_panels : no panel non-convex or folded, all planar and with
+        positive area.
         n_open_edges : number of edges used by one panel only.
     """
     nodes = np.asarray(mesh.nodes, dtype=float)
@@ -1726,7 +2312,12 @@ def check_mesh(mesh: PanelMesh, warp_limit: float = WARP_LIMIT) -> dict:
             outward = False
     max_warp = float(np.max(warps)) if n_p else 0.0
     min_area = float(np.min(areas)) if n_p else 0.0
-    n_nonconvex = int(np.sum(~convex))
+    if station is not None and n_p:
+        folded = _station_folds(nodes, panels, station, comp_of)
+    else:
+        folded = np.zeros(n_p, dtype=bool)
+    n_folded = int(np.sum(folded))
+    n_nonconvex = int(np.sum(~convex | folded))
     planar = bool(max_warp <= float(warp_limit))
     return {
         "watertight": bool(watertight),
@@ -1742,6 +2333,8 @@ def check_mesh(mesh: PanelMesh, warp_limit: float = WARP_LIMIT) -> dict:
         "max_aspect_ratio": float(np.max(aspects)) if n_p else 1.0,
         "max_skew": float(np.max(skews)) if n_p else 0.0,
         "max_warp": max_warp,
+        "folded": folded,
+        "n_folded": n_folded,
         "n_nonconvex": n_nonconvex,
         "planar": planar,
         "valid_panels": bool(n_nonconvex == 0 and planar and min_area > 0.0),

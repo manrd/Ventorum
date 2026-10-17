@@ -48,7 +48,7 @@ def _te_nodes(mesh) -> np.ndarray:
 
 
 def _check_flap_case(delta_deg: float) -> None:
-    """Check watertightness and trailing-edge rotation for one deflection."""
+    """Check watertightness and trailing-edge rotation for one deflection (gap side edges)."""
     coords = _naca0012()
     ctrl = ControlSurface(
         name="flap",
@@ -60,7 +60,7 @@ def _check_flap_case(delta_deg: float) -> None:
     )
     surf = _rect_wing()
     surf.controls = [ctrl]
-    mesh = mesh_lifting_surface(surf, coords, n_chord=12, n_span=12)
+    mesh = mesh_lifting_surface(surf, coords, n_chord=12, n_span=12, control_edge="gap")
     info = check_mesh(mesh)
     assert info["watertight"]
     assert info["outward"]
@@ -307,19 +307,22 @@ def test_side_closure_self_influence_and_planes() -> None:
     An invalid side closure (bow-tie or non-convex quadrilateral) puts the
     collocation point outside its panel, so the self term of the doublet
     potential drops from +1/2 to 0. The meshes use a library section with
-    a blunt trailing edge.
+    a blunt trailing edge (base panels kept) and gap side edges, and the
+    default meshes (closed trailing edge, transition side edges).
     """
     coords = airfoil("0012").coords
+    options = ({"trailing_edge": "base", "control_edge": "gap"}, {})
     for controls in (_flap(10.0), _flap(-20.0), _aileron(5.0)):
-        mesh = mesh_lifting_surface(_plain_wing(controls), coords, n_chord=12, n_span=10)
-        info = check_mesh(mesh)
-        assert info["watertight"] and info["outward"] and info["valid_panels"]
-        verts = np.asarray(mesh.nodes)[np.asarray(mesh.panels)]
-        colloc = _precompute_geometry(verts).centroid
-        _, c_mat = influence_matrices(colloc, verts, far_ratio=np.inf)
-        diag = np.diag(c_mat)
-        assert np.allclose(diag, 0.5, rtol=0.0, atol=1e-12), f"self terms {diag.min():.3f} to {diag.max():.3f}"
-        assert np.allclose(np.sum(c_mat, axis=1), 1.0, rtol=0.0, atol=2e-2)
+        for kw in options:
+            mesh = mesh_lifting_surface(_plain_wing(controls), coords, n_chord=12, n_span=10, **kw)
+            info = check_mesh(mesh)
+            assert info["watertight"] and info["outward"] and info["valid_panels"]
+            verts = np.asarray(mesh.nodes)[np.asarray(mesh.panels)]
+            colloc = _precompute_geometry(verts).centroid
+            _, c_mat = influence_matrices(colloc, verts, far_ratio=np.inf)
+            diag = np.diag(c_mat)
+            assert np.allclose(diag, 0.5, rtol=0.0, atol=1e-12), f"self terms {diag.min():.3f} to {diag.max():.3f}"
+            assert np.allclose(np.sum(c_mat, axis=1), 1.0, rtol=0.0, atol=2e-2)
 
 
 @pytest.mark.parametrize(
@@ -456,7 +459,10 @@ def test_control_meshes_valid_for_mixed_controls(section: str) -> None:
     V-tail elevator, and a rudder on a vertical fin and on its mirror copy.
     The 4415 library section has different upper and lower ordinates at
     x = 0 after the resampling; both sections of a side edge must still
-    share the leading-edge node. Every self term is +1/2.
+    share the leading-edge node. Every self term is +1/2. Each case runs
+    with the former mesh (open trailing edge with base panels, gap side
+    edges) and with the default mesh (closed trailing edge, transition
+    side edges; the edge between the two controls stays a gap).
     """
 
     def ctrl(a, b, hinge, deg, sym=True):
@@ -488,9 +494,113 @@ def test_control_meshes_valid_for_mixed_controls(section: str) -> None:
     ]
     coords = airfoil(section).coords
     for surf in cases:
-        mesh = mesh_lifting_surface(surf, coords, n_chord=10, n_span=10)
-        info = check_mesh(mesh)
-        assert info["watertight"] and info["outward"] and info["valid_panels"], surf.controls
-        verts = np.asarray(mesh.nodes)[np.asarray(mesh.panels)]
-        _, c_mat = influence_matrices(_precompute_geometry(verts).centroid, verts, far_ratio=np.inf)
-        assert np.allclose(np.diag(c_mat), 0.5, rtol=0.0, atol=1e-12)
+        for kw in ({"trailing_edge": "base", "control_edge": "gap"}, {}):
+            mesh = mesh_lifting_surface(surf, coords, n_chord=10, n_span=10, **kw)
+            info = check_mesh(mesh)
+            assert info["watertight"] and info["outward"] and info["valid_panels"], (surf.controls, kw)
+            verts = np.asarray(mesh.nodes)[np.asarray(mesh.panels)]
+            _, c_mat = influence_matrices(_precompute_geometry(verts).centroid, verts, far_ratio=np.inf)
+            assert np.allclose(np.diag(c_mat), 0.5, rtol=0.0, atol=1e-12)
+
+
+def test_transition_side_edges_ramp_the_deflection() -> None:
+    """Default side edges: the deflection ramps linearly over the transition, no side panels.
+
+    The transition is centred on each side edge and is CONTROL_TRANSITION
+    local chords long; each of its ends is a mesh station. A trailing-edge
+    node at the span parameter eta is the trailing edge rotated about the
+    hinge by the deflection times the ramp factor. The option "gap" keeps
+    the former side panels (see ``_check_flap_case``).
+    """
+    from ventorum.panel3d.mesh import CONTROL_TRANSITION
+
+    delta = np.radians(10.0)
+    surf = _plain_wing(_flap(10.0))
+    mesh = mesh_lifting_surface(surf, _closed_naca0012(), n_chord=12, n_span=12)
+    info = check_mesh(mesh)
+    assert info["watertight"] and info["outward"] and info["valid_panels"]
+    assert "side" not in set(np.asarray(mesh.kind).tolist())
+    w = CONTROL_TRANSITION * 1.0 / 4.0
+    te = _te_nodes(mesh)
+    eta_te = np.abs(te[:, 1]) / 4.0
+    for edge in (0.4, 0.8):
+        for end in (edge - 0.5 * w, edge + 0.5 * w):
+            assert np.min(np.abs(eta_te - end)) < 1e-9, f"no station at eta {end}"
+    for p, eta in zip(te, eta_te):
+        f = min(max((eta - (0.4 - 0.5 * w)) / w, 0.0), 1.0) * min(max(((0.8 + 0.5 * w) - eta) / w, 0.0), 1.0)
+        x_exp = 0.75 + 0.25 * np.cos(f * delta)
+        z_exp = -0.25 * np.sin(f * delta)
+        assert abs(float(p[0]) - x_exp) < 1e-12 and abs(float(p[2]) - z_exp) < 1e-12, (eta, f)
+    with pytest.raises(ValueError):
+        mesh_lifting_surface(surf, _closed_naca0012(), n_chord=8, n_span=6, control_edge="seal")
+    with pytest.raises(ValueError):
+        mesh_lifting_surface(surf, _closed_naca0012(), n_chord=8, n_span=6, control_transition=0.0)
+
+
+def _flap_wing_ar8() -> LiftingSurface:
+    """Rectangular wing of aspect ratio 8 with a 10 deg flap from 10 to 60 percent of the semi-span."""
+    surf = _rect_wing()
+    surf.controls = [ControlSurface(name="flap", eta_start=0.1, eta_end=0.6, hinge_x_c=0.75,
+                                    deflection=np.radians(10.0), symmetric=True)]
+    return surf
+
+
+def _half_solve(surf, n_chord: int, n_span: int, backend: str = "numpy", **kw):
+    """CL and Trefftz CDi of a half mesh at alpha 5 deg (reference area 8 m^2, span 8 m)."""
+    mesh = mesh_lifting_surface(surf, _closed_naca0012(), n_chord=n_chord, n_span=n_span, half=True, **kw)
+    res = PanelSolver(mesh, S_ref=8.0, b_ref=8.0, c_ref=1.0, backend=backend).solve(
+        FlightCondition(V_inf=30.0, alpha=np.radians(5.0)))
+    return float(res.CL), float(res.CDi_trefftz)
+
+
+def test_flap_converges_with_spanwise_refinement_coarse() -> None:
+    """Regression: the lift of a flapped wing fell with spanwise refinement.
+
+    With gap side edges the flow through the window between the two
+    section outlines at each side edge lowered the circulation of the
+    strips next to the edge more and more as they became narrower (from 24
+    to 48 strips CL fell by several percent and CDi rose by about a fifth
+    on this coarse chordwise mesh). With the default transition side
+    edges, CL changes by less than 1 % and CDi by less than 2 % (the
+    acceptance limit of the fine sequence, see the slow test below).
+    """
+    surf = _flap_wing_ar8()
+    cl24, cdi24 = _half_solve(surf, 8, 24, backend="numba")
+    cl48, cdi48 = _half_solve(surf, 8, 48, backend="numba")
+    print(f"flap n_chord 8: CL {cl24:.5f} -> {cl48:.5f}, CDi {cdi24:.6f} -> {cdi48:.6f}")
+    assert abs(cl48 / cl24 - 1.0) < 0.01
+    assert abs(cdi48 / cdi24 - 1.0) < 0.02
+
+
+@pytest.mark.slow
+def test_flap_spanwise_convergence_and_vlm_increment() -> None:
+    """A deflected plain flap converges with spanwise refinement; its CL increment is near the VLM one.
+
+    Aspect ratio 8, NACA 0012 with a closed trailing edge, flap from 10 to
+    60 percent of the semi-span with the hinge at 75 percent chord, 10 deg
+    down, alpha 5 deg, 24 chordwise panels, 24, 48 and 96 spanwise panels.
+    CL and the Trefftz CDi change by less than 2 % from 48 to 96 strips and
+    move in the same direction as from 24 to 48 (a consistent trend). The
+    flap increment of CL (the same wing without deflection subtracted)
+    agrees with the vortex lattice (same planform and control, thin
+    surface) to 10 %: the thick sections of the panel method make the flap
+    a little more effective than the thin lattice.
+    """
+    surf = _flap_wing_ar8()
+    vals = {n: _half_solve(surf, 24, n, backend="numba") for n in (24, 48, 96)}
+    clean = _half_solve(_rect_wing(), 24, 96, backend="numba")
+    for n, (cl, cdi) in vals.items():
+        print(f"flap n_span {n}: CL {cl:.5f} CDi {cdi:.6f}")
+    for k in (0, 1):
+        f24, f48, f96 = (vals[n][k] for n in (24, 48, 96))
+        assert abs(f96 / f48 - 1.0) < 0.02
+        assert np.sign(f48 - f24) == np.sign(f96 - f48)
+    d_panel = vals[96][0] - clean[0]
+    ac_flap = Aircraft(name="A", surfaces=[_flap_wing_ar8()], ref_point=np.zeros(3))
+    ac_clean = Aircraft(name="A", surfaces=[_rect_wing()], ref_point=np.zeros(3))
+    st = SolverSettings(solver_type="vlm", n_panels=96, n_chord=24)
+    cond = FlightCondition(V_inf=30.0, alpha=np.radians(5.0))
+    d_vlm = float(VortexLatticeSolver().solve(ac_flap, cond, st).totals.CL
+                  - VortexLatticeSolver().solve(ac_clean, cond, st).totals.CL)
+    print(f"flap increment of CL: panel {d_panel:.5f}, VLM {d_vlm:.5f}")
+    assert abs(d_panel / d_vlm - 1.0) < 0.10
