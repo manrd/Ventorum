@@ -29,7 +29,9 @@ Newton iteration (see :mod:`ventorum.panel2d.vii`).
   CONTINUATION_STEP (start values only).
 * A case that does not converge returns ``converged=False`` with a reason
   and a warning; its loads and distributions are NaN (the last iterate is
-  not a solution), its residual and work counters are given.
+  not a solution), its residual and work counters are given. A singular
+  linear system never raises an exception: the angle fails with a reason
+  that names it.
 * Fail fast: a Newton solve stops early by stagnation or divergence (see
   :func:`ventorum.panel2d.vii.newton_solve`); an angle has a work budget
   in Newton iterations over all its attempts (WORK_BUDGET); a failed
@@ -374,7 +376,9 @@ def _cold_solve(setup, tol, max_iter, bk=None, ctl=None):
     3. the direct marches with omega = 1.
 
     The attempt with the smallest residual is returned when none converges.
-    With ``ctl`` (the work record of the angle) and the stagnation stops
+    A first estimate whose marches meet a singular linear system is
+    skipped; when no first estimate exists, the result has the status
+    "singular". With ``ctl`` (the work record of the angle) and the stagnation stops
     on, a failed attempt from the quasi-simultaneous marches that stopped
     by stagnation, divergence or a non-finite residual with a residual
     above COLD_SKIP_RESIDUAL ends the cold start: the third first estimate
@@ -387,8 +391,6 @@ def _cold_solve(setup, tol, max_iter, bk=None, ctl=None):
         try:
             init = vii.initial_state(setup, sweeps=sweeps)
         except np.linalg.LinAlgError:
-            if sweeps == 0:
-                raise
             continue
         res = _solve_one(setup, init, tol, max_iter, omega0, bk, ctl)
         if res.converged:
@@ -400,6 +402,10 @@ def _cold_solve(setup, tol, max_iter, bk=None, ctl=None):
             ctl.note(f"cold start ended after a stop ({res.status.replace('_', '-')}) of the quasi-simultaneous "
                      f"first estimate with a residual above {COLD_SKIP_RESIDUAL:g}")
             break
+    if best is None:
+        best = vii.NewtonResult(None, None, False, 0, float("inf"),
+                                "singular: the marches of every first estimate of the cold start meet a singular "
+                                "linear system", 0, "singular")
     return best
 
 
@@ -613,10 +619,11 @@ def finish_angle(body, alpha, re, prev, tol, max_iter, kw, bk=None, first=None, 
     attempt when the caller already ran it (batched solver); the remaining
     steps are then the same as in the sequential solver. ``rules``
     (:class:`StopRules`, default values when None) sets the early stops
-    and the work budget of the angle. When the budget is used up, the
-    attempt at the angle with the smallest residual gives the convergence
-    data of the row. The loads and distributions of a failed angle are NaN
-    (see :func:`row_from_result`). The row holds the work counters, and its
+    and the work budget of the angle. When the budget is used up (or a
+    linear system outside the Newton solves is singular), the attempt at
+    the angle with the smallest residual gives the convergence data of the
+    row. The loads and distributions of a failed angle are NaN (see
+    :func:`row_from_result`). The row holds the work counters, and its
     reason names each early stop of a failed angle. ``cache`` (a dict, one
     per sweep) keeps the cold start at the zero-lift angle for the next
     angles (see :func:`_cold_path`).
@@ -633,8 +640,11 @@ def finish_angle(body, alpha, re, prev, tol, max_iter, kw, bk=None, first=None, 
                     setup, res = cold_setup, cold
         else:
             setup, res = _cold_path(body, alpha, re, tol, max_iter, kw, bk, ctl=ctl, cache=cache)
-    except _BudgetUsedUp:
-        ctl.note(f"work budget of {ctl.rules.work_budget} Newton iterations per angle used up")
+    except (_BudgetUsedUp, *vii.linalg_errors((bk or _NUMPY)["xp"])) as exc:
+        if isinstance(exc, _BudgetUsedUp):
+            ctl.note(f"work budget of {ctl.rules.work_budget} Newton iterations per angle used up")
+        else:
+            ctl.note(f"singular: a linear system of the angle setup is singular ({exc})")
         if ctl.best is None:
             row = _failed_row(alpha, body, "; ".join(ctl.notes) + " before a solve at this angle")
             row.update(ctl.counters())

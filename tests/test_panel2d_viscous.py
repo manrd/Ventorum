@@ -352,3 +352,93 @@ def test_no_division_warning_at_a_dropped_stagnation_node():
             r = solve_viscous(c, 0.0, 1e6)
     assert r.converged, r.reason
     assert abs(r.Cl) < 1e-6
+
+
+def test_newton_steps_split_a_singular_batch():
+    """A singular matrix in a batch: the other cases get their Newton steps, the singular one a zero step."""
+    import torch
+
+    from ventorum.panel2d import vii
+
+    rng = np.random.default_rng(3)
+    J = rng.normal(size=(3, 6, 6)) + 6.0 * np.eye(6)
+    J[1] = 0.0
+    R = rng.normal(size=(3, 6))
+    for xp in (np, torch):
+        be = vii._Backend(xp)
+        steps, bad = vii._newton_steps(be, be.arr(J), be.arr(R))
+        assert bad.tolist() == [False, True, False]
+        assert np.all(steps[1] == 0.0)
+        for k in (0, 2):
+            assert np.allclose(steps[k], np.linalg.solve(J[k], -R[k]), rtol=1e-12, atol=1e-12)
+
+
+def _singular_newton_matrix(monkeypatch, n_nodes, lm_fails=True):
+    """Make the Newton matrix (size 3 n_st) singular; optionally make the Levenberg-Marquardt fallback fail."""
+    from ventorum.panel2d import vii
+
+    n3 = 3 * (n_nodes + 31)  # stations: nodes and 31 wake nodes (30 wake panels)
+    solve = vii._Backend.solve
+
+    def singular(self, A, b):
+        if A.shape[-1] == n3:
+            raise np.linalg.LinAlgError("Singular matrix")
+        return solve(self, A, b)
+
+    monkeypatch.setattr(vii._Backend, "solve", singular)
+    if lm_fails:
+        monkeypatch.setattr(vii, "_lm_step", lambda *args, **kwargs: (None, 1e-3, 1))
+
+
+def test_singular_newton_matrix_stops_with_a_reason(monkeypatch):
+    """A singular Newton matrix with a failed fallback: converged=False and the reason "singular", no exception.
+
+    Before, numpy.linalg.LinAlgError went out of solve_viscous.
+    """
+    c = _naca("0012", 60)
+    _singular_newton_matrix(monkeypatch, len(c))
+    with pytest.warns(UserWarning, match="did not converge"):
+        r = solve_viscous(c, 1.0, 1e6)
+    assert not r.converged
+    assert r.reason.startswith("singular: the Newton matrix is singular"), r.reason
+    assert np.isnan(r.Cl) and np.isnan(r.Cd) and np.isnan(r.Cm)
+    assert r.newton_solves >= 1
+
+
+def test_singular_newton_matrix_uses_the_fallback(monkeypatch):
+    """A singular Newton matrix is a failed step: the Levenberg-Marquardt fallback continues the solve."""
+    c = _naca("0012", 60)
+    _singular_newton_matrix(monkeypatch, len(c), lm_fails=False)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        r = solve_viscous(c, 0.0, 1e6)
+    assert r.converged or r.reason
+    assert r.linear_solves > r.newton_iterations
+
+
+def test_singular_edge_system_stops_with_a_reason(monkeypatch):
+    """A singular linear system at another place of the Newton solve also ends in a result, not an exception."""
+    from ventorum.panel2d import vii
+
+    def singular(self, A, b):
+        raise np.linalg.LinAlgError("Singular matrix")
+
+    monkeypatch.setattr(vii._Backend, "solve", singular)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        r = solve_viscous(_naca("0012", 60), [0.0, 1.0], 1e6)
+    assert not np.any(r.converged)
+    assert all("singular" in x for x in r.reason), r.reason
+    assert np.all(np.isnan(r.Cl))
+
+
+@pytest.mark.slow
+def test_singular_matrix_case_returns_a_result():
+    """Regression: NACA 0012 (160 panels), 20 deg flap, stop rules off raised LinAlgError ("Singular matrix")."""
+    coords = airfoil("0012").repanel(n_panels=160).with_flap(x_hinge=0.75, deflection=20.0,
+                                                             hinge_treatment="repanel").coords
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        r = solve_viscous(coords, 0.0, 1e6, stall_window=0, divergence_factor=0.0, work_budget=0)
+    assert r.converged or (r.reason and np.isnan(r.Cl))
+    print(f"\n[viscous] singular case: converged {r.converged}, work {r.newton_iterations}, {r.reason}")

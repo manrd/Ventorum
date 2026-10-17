@@ -206,8 +206,8 @@ class NewtonResult:
         Solves of the Newton or Levenberg-Marquardt linear system (size
         three times the station count).
     status : str
-        "converged", "stagnation", "divergence", "not_finite" or
-        "max_iter".
+        "converged", "stagnation", "divergence", "not_finite", "singular"
+        or "max_iter".
     """
 
     state: CaseState
@@ -456,6 +456,61 @@ def _build_lists(setups, states):
                   {k: np.asarray(v) for k, v in te.items()}, {k: np.asarray(v, dtype=int) for k, v in drop.items()})
 
 
+def linalg_errors(xp=np) -> tuple:
+    """Return the exception types of a singular linear system (numpy, and torch for the torch backend).
+
+    Parameters
+    ----------
+    xp : module
+        numpy or torch.
+
+    Returns
+    -------
+    tuple of type
+        numpy.linalg.LinAlgError, and torch.linalg.LinAlgError when ``xp``
+        is torch.
+    """
+    if xp is np:
+        return (np.linalg.LinAlgError,)
+    return (np.linalg.LinAlgError, xp.linalg.LinAlgError)
+
+
+def _newton_steps(be, J, R):
+    """Return the Newton steps of a batch and the mask of the cases with a singular matrix.
+
+    The batch is solved at once. When that solve fails with a singular
+    matrix, the cases are solved one at a time; a case whose matrix is
+    singular gets a zero step and a True entry in the mask.
+
+    Parameters
+    ----------
+    be : _Backend
+        Array backend.
+    J : array
+        Jacobians, shape (B, 3 n_st, 3 n_st).
+    R : array
+        Residuals, shape (B, 3 n_st).
+
+    Returns
+    -------
+    tuple
+        Host steps, shape (B, 3 n_st), and a boolean mask of shape (B,).
+    """
+    nb = int(R.shape[0])
+    try:
+        return be.host(be.solve(J, -R)), np.zeros(nb, dtype=bool)
+    except be.singular_errors:
+        pass
+    out = np.zeros((nb, int(R.shape[1])))
+    bad = np.zeros(nb, dtype=bool)
+    for k in range(nb):
+        try:
+            out[k] = be.host(be.solve(J[k:k + 1], -R[k:k + 1]))[0]
+        except be.singular_errors:
+            bad[k] = True
+    return out, bad
+
+
 class _Backend:
     """Array-module helper (numpy or torch)."""
 
@@ -464,6 +519,8 @@ class _Backend:
         self.torch = xp is not np
         self.device = device
         self.dtype = dtype if dtype is not None else (np.float64 if xp is np else xp.float64)
+        #: Exceptions of a singular linear system on this backend.
+        self.singular_errors = linalg_errors(xp)
 
     def arr(self, a, integer=False):
         """Return a host array as an array of this backend."""
@@ -1198,6 +1255,15 @@ def newton_solve(setups, states, *, tol=1e-6, max_iter=50, xp=np, device=None, d
     structure: the following iterations would repeat the last one exactly.
     The stop rules change the work of a failed solve, not a converged
     solution.
+
+    A singular Newton matrix (a linear-algebra error of its solve) gives
+    no Newton step: the Levenberg-Marquardt fallback is tried instead. When
+    the fallback also fails at omega = 1, the case stops at once with status
+    "singular" (the next iterations would repeat the last one exactly; this
+    stop does not depend on the stop rules). Below omega = 1 it counts as a
+    failed step. A singular linear system at another place of the solve
+    stops the cases that are not finished with status "singular". A
+    singular matrix never raises an exception.
     """
     be = _Backend(xp, device, dtype)
     nb = len(setups)
@@ -1246,188 +1312,211 @@ def newton_solve(setups, states, *, tol=1e-6, max_iter=50, xp=np, device=None, d
     def edge_ok(ue_h, masks):
         return np.array([bool(np.all(u[m] > 0.0) and np.all(np.isfinite(u))) for u, m in zip(ue_h, masks)])
 
-    # Start: every edge velocity must be positive. A negative edge velocity
-    # next to the stagnation point means that the coupling moves the
-    # stagnation point: the structure is updated first; omega is halved only
-    # when that does not help.
-    for _ in range(20):
-        ue_inv, D, X, re_b, masks, _, _, S = assemble(active, refresh=True)
-        ok = edge_ok(be.host(edge(ue_inv, D, X, S)), masks)
-        if np.all(ok):
-            break
-        for k, i in enumerate(active):
-            if not ok[k] and not _update_structure(setups[i], states[i], omega[i], transition=False):
-                omega[i] *= 0.5
-    for it in range(max_iter + 1):
-        if not active:
-            break
-        if it > 0 and np.any(omega[active] < 1.0):
-            keep = omega.copy()
-            for i in active:
-                # A cold start can stall at small omega where the boundary layer
-                # separates: the nearly direct problem has no solution there
-                # (Goldstein singularity). The coupling then grows anyway.
-                if last_res[i] < OMEGA_STEP_RESIDUAL or it - best_it[i] > OMEGA_STALL:
-                    omega[i] = min(1.0, 2.0 * omega[i])
-                    best_it[i] = it
-                    best_res[i] = np.inf
-            for _ in range(3):
-                ue_inv, D, X, re_b, masks, _, _, S = assemble(active, refresh=True)
-                ok = edge_ok(be.host(edge(ue_inv, D, X, S)), masks)
-                moved = False
-                for k, i in enumerate(active):
-                    if not ok[k] and omega[i] != keep[i]:
-                        moved = _update_structure(setups[i], states[i], omega[i], transition=False) or moved
-                if not moved:
-                    break
-            for k, i in enumerate(active):
-                if not ok[k]:
-                    omega[i] = keep[i]
-                if keep[i] < 1.0:
-                    # omega or the structure can change here: the failed-step count starts again.
-                    no_step[i] = 0
-        changed = np.zeros(len(active), dtype=bool)
-        if it > 0:
-            ue_inv, D, X, re_b, masks, _, _, S = assemble(active, refresh=False)
-            UE0, _ = _edge(be, ue_inv, D, X, S)
-            x2 = X[:, :, 1]
-            # A dropped stagnation node has no edge velocity (zero) and no
-            # mass defect: divide by 1 there, as host_edge does.
-            mk = be.arr(masks.astype(float))
-            ds0 = S * x2 + (1.0 - S) * x2 / (UE0 * mk + (1.0 - mk))
-            mfull = S * UE0 * x2 + (1.0 - S) * x2
-            Bm = be.arr(np.stack([mats[i][1] for i in active]))
-            sens_b = be.stack([sens[i][0] for i in active])
-            base_b = be.stack([sens[i][1] for i in active])
-            om = be.arr(omega[active])
-            nn = setups[active[0]].n
-            gam0 = base_b[:, :nn] + om[:, None] * (sens_b[:, :nn] @ (Bm @ mfull[:, :, None]))[:, :, 0]
-            pre_ue, pre_ds, pre_gam = be.host(UE0), be.host(ds0), be.host(gam0)
-            for k, i in enumerate(active):
-                # The transition intervals move only when the equations of the
-                # current structure are nearly solved (or the iteration stalls),
-                # so that each move compares converged states.
-                stalled = it - best_it[i] > STALL_ITERATIONS
-                allow = TRANSITION_EVERY_ITERATION or last_res[i] < STRUCTURE_RESIDUAL or stalled
-                changed[k] = _update_structure(setups[i], states[i], omega[i], transition=allow,
-                                               pre=(pre_ue[k], pre_ds[k], pre_gam[k]))
-                if allow and omega[i] == 1.0:
-                    changed[k] = _freeze_cycles(history[i], setups[i], states[i]) or changed[k]
-                if changed[k]:
-                    best_it[i] = it
-                    best_res[i] = np.inf
-        ue_inv, D, X, re_b, masks, drop_b, drop_g, S = assemble(active, refresh=bool(np.any(changed)) or it == 0)
-        lists = _build_lists([setups[i] for i in active], [states[i] for i in active])
-        R, J, UE = _residual_m(be, lists, X, ue_inv, D, re_b, S, drop_b, drop_g, True)
-        R_h = be.host(R)
-        ue_h = be.host(UE)
-        res = np.max(np.abs(R_h), axis=1)
-        res = np.where(np.isfinite(res), res, np.inf)
-        if verbose:
-            for k, i in enumerate(active):
-                arg = int(np.argmax(np.abs(np.where(np.isfinite(R_h[k]), R_h[k], 1e300))))
-                print(f"it {it} case {i} res {res[k]:.3e} at station {arg // 3} eq {arg % 3} "
-                      f"omega {omega[i]:g} i_s {states[i].i_s} drop {states[i].drop} itr {states[i].itr} "
-                      f"changed {bool(changed[k])}")
-        done = []
-        for k, i in enumerate(active):
-            last_res[i] = res[k]
-            if res[k] < 0.5 * best_res[i]:
-                best_res[i] = res[k]
-                best_it[i] = it
-            # Stop-rule bookkeeping: the stagnation window starts again when
-            # omega changes, and at omega = 1 also when the structure changes
-            # (a different discrete problem). Below omega = 1 the transition
-            # intervals are not frozen and can alternate without end, so a
-            # structure change does not restart the window there.
-            if omega[i] != level_omega[i] or (changed[k] and omega[i] == 1.0):
-                level_min[i] = []
-                level_omega[i] = omega[i]
-                no_step[i] = 0
-            lm = level_min[i]
-            lm.append(min(float(res[k]), lm[-1]) if lm else float(res[k]))
-            at_one = omega[i] == 1.0
-            stop = _early_stop(float(res[k]), lm, smallest[i], int(no_step[i]), at_one, stall_window, stall_factor,
-                               divergence_factor, STALL_FLOOR * tol)
-            if at_one:
-                smallest[i] = min(smallest[i], float(res[k]))
-            if omega[i] == 1.0 and res[k] < tol and not changed[k] and not changed_prev[i]:
-                results[i] = NewtonResult(states[i], ue_h[k], True, it, float(res[k]), "converged",
-                                          int(n_lin[i]), "converged")
-                done.append(k)
-            elif not np.isfinite(res[k]):
-                results[i] = NewtonResult(states[i], ue_h[k], False, it, float(res[k]),
-                                          "the residual is not finite (a closure left its range)", int(n_lin[i]),
-                                          "not_finite")
-                done.append(k)
-            elif stop is not None and it < max_iter:
-                results[i] = NewtonResult(states[i], ue_h[k], False, it, float(res[k]), stop[1], int(n_lin[i]),
-                                          stop[0])
-                done.append(k)
-            elif it == max_iter:
-                results[i] = NewtonResult(states[i], ue_h[k], False, it, float(res[k]),
-                                          f"no convergence to tol={tol:g} in {max_iter} Newton iterations "
-                                          f"(largest residual {res[k]:.3e})", int(n_lin[i]), "max_iter")
-                done.append(k)
-            changed_prev[i] = changed[k]
-        keep = [k for k in range(len(active)) if k not in done]
-        if not keep:
-            break
-        if len(keep) < len(active):
-            kk = be.arr(np.array(keep), True)
-            R, J = R[kk], J[kk]
-            active = [active[k] for k in keep]
-            ue_inv, D, X, re_b, masks, drop_b, drop_g, S = assemble(active, refresh=False)
-            lists = _build_lists([setups[i] for i in active], [states[i] for i in active])
-        dx_h = be.host(be.solve(J, -R)).reshape(len(active), -1, 3)
-        X_h = be.host(X)
-        ui_h = be.host(ue_inv)
-        D_h = be.host(D)
-        S_h = be.host(S)
-        lam = np.ones(len(active))
-        for k, i in enumerate(active):
-            lam[k] = _limit_step(setups[i], states[i], X_h[k], dx_h[k], ui_h[k], D_h[k], S_h[k], masks[k])
-        r0 = np.sqrt(np.sum(be.host(R) ** 2, axis=1))
-        accept = np.zeros(len(active), dtype=bool)
+    it = 0
+    try:
+        # Start: every edge velocity must be positive. A negative edge velocity
+        # next to the stagnation point means that the coupling moves the
+        # stagnation point: the structure is updated first; omega is halved only
+        # when that does not help.
         for _ in range(20):
-            if np.all(accept):
+            ue_inv, D, X, re_b, masks, _, _, S = assemble(active, refresh=True)
+            ok = edge_ok(be.host(edge(ue_inv, D, X, S)), masks)
+            if np.all(ok):
                 break
-            Xt = be.arr(X_h + lam[:, None, None] * dx_h)
-            Rt, _, UEt = _residual_m(be, lists, Xt, ue_inv, D, re_b, S, drop_b, drop_g, False)
-            rn = np.sqrt(np.sum(be.host(Rt) ** 2, axis=1))
-            ok = np.isfinite(rn) & (rn <= (1.0 - 1e-4 * lam) * r0) & edge_ok(be.host(UEt), masks)
-            for k in range(len(active)):
-                if not accept[k]:
-                    if ok[k]:
-                        accept[k] = True
-                    else:
-                        lam[k] *= 0.5
-        J_h = None
-        for k, i in enumerate(active):
-            n_lin[i] += 1
-            if accept[k] and lam[k] >= LM_SWITCH:
-                states[i].x = X_h[k] + lam[k] * dx_h[k]
-                lm_mu[i] = max(lm_mu[i] * 0.1, 1e-12)
-                no_step[i] = 0
-            else:
-                # The Newton direction makes little progress (a near-singular
-                # Jacobian): Levenberg-Marquardt steps instead.
-                if J_h is None:
-                    J_h = be.host(J)
-                    R_hk = be.host(R)
-                xn, lm_mu[i], n_lm = _lm_step(be, setups[i], states[i], X_h[k], J_h[k], R_hk[k], r0[k], ui_h[k],
-                                              D_h[k], S_h[k], masks[k], lm_mu[i])
-                n_lin[i] += n_lm
-                if xn is not None:
-                    states[i].x = xn
+            for k, i in enumerate(active):
+                if not ok[k] and not _update_structure(setups[i], states[i], omega[i], transition=False):
+                    omega[i] *= 0.5
+        for it in range(max_iter + 1):
+            if not active:
+                break
+            if it > 0 and np.any(omega[active] < 1.0):
+                keep = omega.copy()
+                for i in active:
+                    # A cold start can stall at small omega where the boundary layer
+                    # separates: the nearly direct problem has no solution there
+                    # (Goldstein singularity). The coupling then grows anyway.
+                    if last_res[i] < OMEGA_STEP_RESIDUAL or it - best_it[i] > OMEGA_STALL:
+                        omega[i] = min(1.0, 2.0 * omega[i])
+                        best_it[i] = it
+                        best_res[i] = np.inf
+                for _ in range(3):
+                    ue_inv, D, X, re_b, masks, _, _, S = assemble(active, refresh=True)
+                    ok = edge_ok(be.host(edge(ue_inv, D, X, S)), masks)
+                    moved = False
+                    for k, i in enumerate(active):
+                        if not ok[k] and omega[i] != keep[i]:
+                            moved = _update_structure(setups[i], states[i], omega[i], transition=False) or moved
+                    if not moved:
+                        break
+                for k, i in enumerate(active):
+                    if not ok[k]:
+                        omega[i] = keep[i]
+                    if keep[i] < 1.0:
+                        # omega or the structure can change here: the failed-step count starts again.
+                        no_step[i] = 0
+            changed = np.zeros(len(active), dtype=bool)
+            if it > 0:
+                ue_inv, D, X, re_b, masks, _, _, S = assemble(active, refresh=False)
+                UE0, _ = _edge(be, ue_inv, D, X, S)
+                x2 = X[:, :, 1]
+                # A dropped stagnation node has no edge velocity (zero) and no
+                # mass defect: divide by 1 there, as host_edge does.
+                mk = be.arr(masks.astype(float))
+                ds0 = S * x2 + (1.0 - S) * x2 / (UE0 * mk + (1.0 - mk))
+                mfull = S * UE0 * x2 + (1.0 - S) * x2
+                Bm = be.arr(np.stack([mats[i][1] for i in active]))
+                sens_b = be.stack([sens[i][0] for i in active])
+                base_b = be.stack([sens[i][1] for i in active])
+                om = be.arr(omega[active])
+                nn = setups[active[0]].n
+                gam0 = base_b[:, :nn] + om[:, None] * (sens_b[:, :nn] @ (Bm @ mfull[:, :, None]))[:, :, 0]
+                pre_ue, pre_ds, pre_gam = be.host(UE0), be.host(ds0), be.host(gam0)
+                for k, i in enumerate(active):
+                    # The transition intervals move only when the equations of the
+                    # current structure are nearly solved (or the iteration stalls),
+                    # so that each move compares converged states.
+                    stalled = it - best_it[i] > STALL_ITERATIONS
+                    allow = TRANSITION_EVERY_ITERATION or last_res[i] < STRUCTURE_RESIDUAL or stalled
+                    changed[k] = _update_structure(setups[i], states[i], omega[i], transition=allow,
+                                                   pre=(pre_ue[k], pre_ds[k], pre_gam[k]))
+                    if allow and omega[i] == 1.0:
+                        changed[k] = _freeze_cycles(history[i], setups[i], states[i]) or changed[k]
+                    if changed[k]:
+                        best_it[i] = it
+                        best_res[i] = np.inf
+            ue_inv, D, X, re_b, masks, drop_b, drop_g, S = assemble(active, refresh=bool(np.any(changed)) or it == 0)
+            lists = _build_lists([setups[i] for i in active], [states[i] for i in active])
+            R, J, UE = _residual_m(be, lists, X, ue_inv, D, re_b, S, drop_b, drop_g, True)
+            R_h = be.host(R)
+            ue_h = be.host(UE)
+            res = np.max(np.abs(R_h), axis=1)
+            res = np.where(np.isfinite(res), res, np.inf)
+            if verbose:
+                for k, i in enumerate(active):
+                    arg = int(np.argmax(np.abs(np.where(np.isfinite(R_h[k]), R_h[k], 1e300))))
+                    print(f"it {it} case {i} res {res[k]:.3e} at station {arg // 3} eq {arg % 3} "
+                          f"omega {omega[i]:g} i_s {states[i].i_s} drop {states[i].drop} itr {states[i].itr} "
+                          f"changed {bool(changed[k])}")
+            done = []
+            for k, i in enumerate(active):
+                last_res[i] = res[k]
+                if res[k] < 0.5 * best_res[i]:
+                    best_res[i] = res[k]
+                    best_it[i] = it
+                # Stop-rule bookkeeping: the stagnation window starts again when
+                # omega changes, and at omega = 1 also when the structure changes
+                # (a different discrete problem). Below omega = 1 the transition
+                # intervals are not frozen and can alternate without end, so a
+                # structure change does not restart the window there.
+                if omega[i] != level_omega[i] or (changed[k] and omega[i] == 1.0):
+                    level_min[i] = []
+                    level_omega[i] = omega[i]
                     no_step[i] = 0
-                elif accept[k]:
+                lm = level_min[i]
+                lm.append(min(float(res[k]), lm[-1]) if lm else float(res[k]))
+                at_one = omega[i] == 1.0
+                stop = _early_stop(float(res[k]), lm, smallest[i], int(no_step[i]), at_one, stall_window, stall_factor,
+                                   divergence_factor, STALL_FLOOR * tol)
+                if at_one:
+                    smallest[i] = min(smallest[i], float(res[k]))
+                if omega[i] == 1.0 and res[k] < tol and not changed[k] and not changed_prev[i]:
+                    results[i] = NewtonResult(states[i], ue_h[k], True, it, float(res[k]), "converged",
+                                              int(n_lin[i]), "converged")
+                    done.append(k)
+                elif not np.isfinite(res[k]):
+                    results[i] = NewtonResult(states[i], ue_h[k], False, it, float(res[k]),
+                                              "the residual is not finite (a closure left its range)", int(n_lin[i]),
+                                              "not_finite")
+                    done.append(k)
+                elif stop is not None and it < max_iter:
+                    results[i] = NewtonResult(states[i], ue_h[k], False, it, float(res[k]), stop[1], int(n_lin[i]),
+                                              stop[0])
+                    done.append(k)
+                elif it == max_iter:
+                    results[i] = NewtonResult(states[i], ue_h[k], False, it, float(res[k]),
+                                              f"no convergence to tol={tol:g} in {max_iter} Newton iterations "
+                                              f"(largest residual {res[k]:.3e})", int(n_lin[i]), "max_iter")
+                    done.append(k)
+                changed_prev[i] = changed[k]
+            keep = [k for k in range(len(active)) if k not in done]
+            if not keep:
+                break
+            if len(keep) < len(active):
+                kk = be.arr(np.array(keep), True)
+                R, J = R[kk], J[kk]
+                active = [active[k] for k in keep]
+                ue_inv, D, X, re_b, masks, drop_b, drop_g, S = assemble(active, refresh=False)
+                lists = _build_lists([setups[i] for i in active], [states[i] for i in active])
+            dx_h, singular = _newton_steps(be, J, R)
+            dx_h = dx_h.reshape(len(active), -1, 3)
+            res_k = res[keep]
+            ue_k = ue_h[keep]
+            X_h = be.host(X)
+            ui_h = be.host(ue_inv)
+            D_h = be.host(D)
+            S_h = be.host(S)
+            lam = np.ones(len(active))
+            for k, i in enumerate(active):
+                # A singular Newton matrix gives no direction (zero step, no line search).
+                lam[k] = 0.0 if singular[k] else _limit_step(setups[i], states[i], X_h[k], dx_h[k], ui_h[k], D_h[k],
+                                                             S_h[k], masks[k])
+            r0 = np.sqrt(np.sum(be.host(R) ** 2, axis=1))
+            accept = np.zeros(len(active), dtype=bool)
+            for _ in range(20):
+                if np.all(accept):
+                    break
+                Xt = be.arr(X_h + lam[:, None, None] * dx_h)
+                Rt, _, UEt = _residual_m(be, lists, Xt, ue_inv, D, re_b, S, drop_b, drop_g, False)
+                rn = np.sqrt(np.sum(be.host(Rt) ** 2, axis=1))
+                ok = np.isfinite(rn) & (rn <= (1.0 - 1e-4 * lam) * r0) & edge_ok(be.host(UEt), masks)
+                for k in range(len(active)):
+                    if not accept[k]:
+                        if ok[k]:
+                            accept[k] = True
+                        else:
+                            lam[k] *= 0.5
+            J_h = None
+            for k, i in enumerate(active):
+                n_lin[i] += 1
+                if accept[k] and lam[k] >= LM_SWITCH and not singular[k]:
                     states[i].x = X_h[k] + lam[k] * dx_h[k]
+                    lm_mu[i] = max(lm_mu[i] * 0.1, 1e-12)
                     no_step[i] = 0
                 else:
-                    no_step[i] += 1
-            if verbose:
-                print(f"   case {i} step {lam[k]:.3e} accepted {bool(accept[k])} mu {lm_mu[i]:.1e}")
+                    # The Newton direction makes little progress (a near-singular
+                    # Jacobian): Levenberg-Marquardt steps instead.
+                    if J_h is None:
+                        J_h = be.host(J)
+                        R_hk = be.host(R)
+                    xn, lm_mu[i], n_lm = _lm_step(be, setups[i], states[i], X_h[k], J_h[k], R_hk[k], r0[k], ui_h[k],
+                                                  D_h[k], S_h[k], masks[k], lm_mu[i])
+                    n_lin[i] += n_lm
+                    if xn is not None:
+                        states[i].x = xn
+                        no_step[i] = 0
+                    elif accept[k] and not singular[k]:
+                        states[i].x = X_h[k] + lam[k] * dx_h[k]
+                        no_step[i] = 0
+                    else:
+                        no_step[i] += 1
+                        if singular[k] and omega[i] == 1.0:
+                            # No Newton step exists and the fallback fails: the
+                            # next iterations would repeat this one exactly.
+                            results[i] = NewtonResult(
+                                states[i], ue_k[k], False, it, float(res_k[k]),
+                                f"singular: the Newton matrix is singular and the Levenberg-Marquardt fallback does "
+                                f"not reduce the residual (largest residual {res_k[k]:.3e})", int(n_lin[i]), "singular")
+                if verbose:
+                    print(f"   case {i} step {lam[k]:.3e} accepted {bool(accept[k])} mu {lm_mu[i]:.1e}")
+            active = [i for i in active if results[i] is None]
+    except be.singular_errors as exc:
+        # A singular linear system outside the Newton step (edge velocities,
+        # structure update): the cases that are not finished stop here.
+        for i in active:
+            if results[i] is None:
+                results[i] = NewtonResult(states[i], np.zeros(setups[i].n_st), False, it, float(last_res[i]),
+                                          f"singular: a linear system of the solve is singular ({exc})",
+                                          int(n_lin[i]), "singular")
     for i in range(nb):
         if results[i] is None:
             results[i] = NewtonResult(states[i], np.zeros(setups[i].n_st), False, max_iter, float(last_res[i]),
