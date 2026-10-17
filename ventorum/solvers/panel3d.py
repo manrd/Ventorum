@@ -412,7 +412,11 @@ class PanelMethodSolver(BaseSolver):
         condition : FlightCondition or sequence of FlightCondition
             Operating free-stream condition(s).
         settings : SolverSettings
-            Discretization and solution knobs.
+            Discretization and solution knobs. The chordwise count
+            ``n_chord`` [-] (20 when None) also goes to the trust score:
+            it sets the chordwise rule of
+            :func:`ventorum.core.trust.panel3d_mesh_checks` and, in ground
+            effect, the rule for chordwise panels longer than the gap.
         ground : GroundPlane or None, optional
             Ground plane of all conditions (normal and offset in m). If
             None, ``condition.h`` sets the ground, as for the vortex
@@ -646,6 +650,10 @@ class PanelMethodSolver(BaseSolver):
             "fold_guard": True,
         }
 
+        # Largest strip chord over the reference chord [-] (ground rule of the trust).
+        max_chord = max((float(np.max(m["chord"])) for m in surface_geom_meta if np.size(m["chord"])), default=0.0)
+        max_chord_over_c = max_chord / float(c_ref) if (c_ref and max_chord > 0.0) else 1.0
+
         # 5. Build SolverResult per condition with strip integration
         x_hat = np.array([1.0, 0.0, 0.0])
         dt_per_case = (time.perf_counter() - t0) / max(1, len(cond_list))
@@ -812,6 +820,10 @@ class PanelMethodSolver(BaseSolver):
             main_surf_n_span = ac.surfaces[0].n_panels or settings.n_panels
             h_over_c = (h_min / c_ref) if (h_min is not None and c_ref) else None
 
+            # The chordwise count turns on the chordwise rule of the mesh
+            # checks and the ground rule "chordwise panels longer than the
+            # gap"; the largest strip chord scales that ground rule, as for
+            # the vortex lattice.
             totals.trust = evaluate_aerodynamic_trust(
                 AR=ar,
                 condition=cond,
@@ -823,7 +835,9 @@ class PanelMethodSolver(BaseSolver):
                 n_panels=int(main_surf_n_span),
                 solver_type="panel3d",
                 h_over_c=h_over_c,
+                n_chord=int(n_chord),
                 notes=all_notes,
+                max_chord_over_c=max_chord_over_c,
                 mesh_stats=mesh_stats,
                 CD_nearfield=totals.CDi_nearfield,
             )
