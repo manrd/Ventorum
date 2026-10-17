@@ -61,11 +61,13 @@ At each node $\psi = \psi_b$ (the constant of body $b$, an extra unknown). Kutta
 
 Free air: the matrix does not depend on $\alpha$; it is factorized once (LU) and two right-hand sides (free stream along $x$ and $y$) are superposed. Source strengths add right-hand-side columns only; zero sources reproduce the inviscid result bit for bit.
 
-Ground effect (flat ground $y = 0$): each body has a mirror image with opposite vortex strength and equal source strength. The angle of attack rotates the geometry clockwise about the pivot (default the quarter chord of body 0); the free stream is along $+x$; `height_reference="pivot"` places the pivot at the height, `"trailing_edge"` the lowest trailing-edge point. Geometry under or touching the ground raises `ValueError`. Each angle has its own matrix; the torch backend builds and solves them as a batch.
+Ground effect (flat ground $y = 0$): each body has a mirror image with opposite vortex strength and equal source strength. The angle of attack rotates the geometry clockwise about the pivot (default the quarter-chord point of the reference chord of body 0, see below); the free stream is along $+x$; `height_reference="pivot"` places the pivot at the height, `"trailing_edge"` the lowest trailing-edge point. Geometry under or touching the ground raises `ValueError`. Each angle has its own matrix; the torch backend builds and solves them as a batch.
 
 ## Forces and moments
 
 $C_l$ from the total circulation (Kutta-Joukowski), including the gap-panel vortex. Pressure forces: $C_p = 1 - \gamma^2$, integrated exactly over each wall panel for $\gamma$ linear on the panel (panel mean $1 - (\gamma_1^2 + \gamma_1\gamma_2 + \gamma_2^2)/3$). $C_m$ about $x_{ref}$ in the body-0 frame before rotation, nose up positive.
+
+Reference chord $c$ (`chord_ref`): by default the chord of body 0 as given, the distance from its leading edge (the point farthest from the trailing-edge midpoint, the definition of `ventorum.airfoil`) to its trailing-edge midpoint (`section_chord`). A plain flap moves the trailing edge, so a deflected section is shorter than the section before the deflection; for a flapped section the caller passes the chord of the undeflected section, the reference chord of thin-airfoil theory (Glauert 1927) and of XFOIL. Default $x_{ref}$ and pivot: the quarter-chord point of the reference chord, $(x_{min} + c/4,\ 0)$, with $x_{min}$ the most forward point of body 0 (`reference_point`); for a section in the convention of `ventorum.airfoil` (leading edge at the origin, chord along $+x$) this is the quarter chord, also after a flap deflection. For a unit section with the leading edge at the origin, both defaults are the former ones (unit chord and $(0.25, 0)$). A test compares a 2 deg flap on NACA 0006 with the flap effectiveness and the moment of thin-airfoil theory on the undeflected chord (Glauert 1927).
 
 ## Assumptions and envelope
 
@@ -87,4 +89,5 @@ Potential flow; the Kutta condition fixes the circulation. Ground effect is the 
 
 - J. Katz and A. Plotkin, Low-Speed Aerodynamics, 2nd ed., Cambridge University Press, 2001.
 - M. Drela, "XFOIL: An analysis and design system for low Reynolds number airfoils", in Low Reynolds Number Aerodynamics, Lecture Notes in Engineering 54, Springer, 1989, pp. 1-12.
+- H. Glauert, "Theoretical relationships for an aerofoil with hinged flap", ARC R and M 1095, 1927.
 - L. M. Milne-Thomson, Theoretical Aerodynamics, 4th ed., Macmillan, 1958 (Karman-Trefftz reference).

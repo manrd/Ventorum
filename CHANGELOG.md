@@ -59,6 +59,37 @@ a minor version can change a public interface.
   coordinates, transition, panel count, flap (hinge height as a fraction of the thickness) and
   a two-direction sweep; the default sweep stays linear.
 - The air viscosity is one constant, `ventorum.core.constants.MU_SL`.
+- Ventorum-2D viscous solver (also the batched solver): an angle that does not converge has NaN
+  loads (`Cl`, `Cl_pressure`, `Cd`, `Cd_friction`, `Cd_pressure`, `Cm`), NaN transition
+  positions and NaN node and wake distributions; its flag, reason, residual and work counters
+  stay. Before, it carried the values of its last iterate. The polar source and the agent tool
+  already leave such angles out (null in JSON); the Cp plots skip curves without a finite value.
+- Ventorum-2D reference chord: by default the distance from the leading edge to the
+  trailing-edge midpoint of the section as given (before, the x extent). New argument
+  `chord_ref` of `solve_viscous` and `ViscousCase` (it was already in `solve_inviscid`): for a
+  flapped section the caller gives the chord of the undeflected section, as in thin-airfoil
+  theory and XFOIL; the polar source and the agent tool do. The moment is taken about the
+  quarter-chord point of the reference chord (before, the fixed point (0.25, 0)); for a unit
+  section with the leading edge at the origin both defaults are the former ones. The results of
+  flapped sections change, and those of cambered sections change a little (their x extent is
+  not their chord). New functions `ventorum.panel2d.solver.section_chord` and `reference_point`.
+- Ventorum-2D Levenberg-Marquardt fallback: after a fallback step of a Newton solve found no
+  decrease of the residual, the later fallback steps of that solve try at most `lm_trials`
+  damping values (one linear solve each; default 2, before 12). New option of
+  `solve_viscous`, `ViscousCase` and the polar source. Converged angles do not change; failed
+  angles need fewer linear solves.
+- The 2D solver revision is raised, so cached Ventorum-2D polars are computed again.
+
+### Fixed
+
+- Ventorum-2D: a singular Newton matrix raised `numpy.linalg.LinAlgError` out of
+  `solve_viscous` (for example NACA 0012 with a 20 deg flap and the stop rules off). It is now a
+  failed step: the Levenberg-Marquardt fallback is tried, and when that also fails at the full
+  coupling the solve stops with the status "singular". The angle then returns
+  `converged=False` with a reason.
+- Ventorum-2D: the structure update of the Newton solve divided zero by zero at a node next to
+  the stagnation point that is not a station (RuntimeWarning in normal runs). The results do
+  not change.
 
 ### Known limits
 

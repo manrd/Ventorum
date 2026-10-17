@@ -203,6 +203,7 @@ The full description, with the closed-form influences, the branch cuts of the so
 - Free air: one LU factorization per geometry, two right-hand sides superposed for any angle. Sources add right-hand-side columns only.
 - Ground effect: the method of images about the flat ground $y = 0$ (mirror vortices of opposite sign, mirror sources of the same sign); the geometry is rotated about the pivot, and `height_reference="pivot"` places the pivot (default the quarter chord) at the given height.
 - $C_l$ by Kutta-Joukowski of the total circulation; pressure forces by exact integration of $C_p = 1 - \gamma^2$ over each wall panel.
+- Reference chord: by default the distance from the leading edge to the trailing-edge midpoint of the section as given; for a flapped section the chord of the undeflected section (argument `chord_ref`, passed by the polar source), as in thin-airfoil theory (Glauert 1927). The moment is taken about the quarter-chord point of the reference chord.
 
 ## Integral boundary layer
 
@@ -221,7 +222,7 @@ The full description is in [](panel2d_viscous.md). Summary:
 - One global Newton iteration on $(\theta, m, c)$ at all stations of both sides and of the wake (fully simultaneous coupling; Drela and Giles 1987), with the exact Jacobian. The stagnation point and the transition intervals are updated between iterations.
 - The first wake station takes $\theta_w = \theta_u + \theta_l$ and $\delta^*_w = \delta^*_u + \delta^*_l + h_{TE}$ (Drela 1989).
 - Drag: Squire-Young at the wake end (Squire and Young 1938). The skin-friction drag and the surface-pressure drag are given separately as a check.
-- A case that does not converge returns `converged=False`, its residual and a reason. There are no result overrides and no fallback to other models.
+- A case that does not converge returns `converged=False`, its residual, its work counters and a reason; its loads and distributions are NaN (the last iterate is not a solution). A singular linear system gives a failed angle with a reason, not an exception. There are no result overrides and no fallback to other models.
 - One body only: more bodies raise `ValueError`. A plain flap is part of the single-element geometry.
 
 ## Batched execution and angle continuation
