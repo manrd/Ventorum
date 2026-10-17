@@ -219,6 +219,43 @@ def _standardize_panels(panels: np.ndarray, nodes: np.ndarray | None = None) -> 
         Standardized panel corner node indices with shape (Np, 4).
     """
     pans = np.asarray(panels, dtype=int).copy()
+    shifts = np.zeros(len(pans), dtype=int)
+    found = np.zeros(len(pans), dtype=bool)
+    # Search shifts in order. Do not read coordinates after an index match
+    # or after an earlier shift matched, as in the loop reference.
+    for shift in range(4):
+        a, b = (2 + shift) % 4, (3 + shift) % 4
+        match = pans[:, a] == pans[:, b]
+        if nodes is not None:
+            active = ~found & ~match
+            coords = np.asarray(nodes)
+            match[active] = np.all(
+                np.isclose(coords[pans[active, a]], coords[pans[active, b]], atol=1e-12),
+                axis=-1,
+            )
+        choose = ~found & match
+        shifts[choose] = shift
+        found |= match
+    order = (np.arange(4)[None, :] + shifts[:, None]) % 4
+    return pans[np.arange(len(pans))[:, None], order]
+
+
+def _standardize_panels_reference(panels: np.ndarray, nodes: np.ndarray | None = None) -> np.ndarray:
+    """Provide the loop reference of the panel index parity tests.
+
+    Parameters
+    ----------
+    panels : numpy.ndarray
+        Panel corner node indices with shape (Np, 4).
+    nodes : numpy.ndarray or None, optional
+        Mesh node coordinates with shape (Nn, 3) in m.
+
+    Returns
+    -------
+    numpy.ndarray
+        Standardized panel corner node indices with shape (Np, 4).
+    """
+    pans = np.asarray(panels, dtype=int).copy()
     for i in range(len(pans)):
         row = pans[i]
         for shift in range(4):

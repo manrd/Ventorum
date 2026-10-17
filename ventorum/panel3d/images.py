@@ -99,6 +99,31 @@ def standardize_panel_corners(panels: np.ndarray) -> np.ndarray:
         Standardized panel corner coordinates with shape (M, 4, 3) in m.
     """
     out = np.array(panels, dtype=float, copy=True)
+    # These adjacent pairs are corners 2 and 3 after shifts 0, 1, 2, 3.
+    close = np.all(
+        np.isclose(out[:, [2, 3, 0, 1]], out[:, [3, 0, 1, 2]], atol=1e-12),
+        axis=-1,
+    )
+    # argmax returns zero for a row with no match, so its order stays fixed.
+    shifts = np.argmax(close, axis=1)
+    order = (np.arange(4)[None, :] + shifts[:, None]) % 4
+    return out[np.arange(len(out))[:, None], order]
+
+
+def _standardize_panel_corners_reference(panels: np.ndarray) -> np.ndarray:
+    """Provide the loop reference of the panel corner parity tests.
+
+    Parameters
+    ----------
+    panels : numpy.ndarray
+        Panel corner node coordinates with shape (M, 4, 3) in m.
+
+    Returns
+    -------
+    numpy.ndarray
+        Standardized panel corner coordinates with shape (M, 4, 3) in m.
+    """
+    out = np.array(panels, dtype=float, copy=True)
     m = out.shape[0]
     for i in range(m):
         row = out[i]
@@ -234,6 +259,114 @@ def check_ground_clearance(
 
 def reconstruct_full_mesh(half_mesh: PanelMesh) -> PanelMesh:
     """Reconstruct full symmetric PanelMesh from a half mesh.
+
+    Parameters
+    ----------
+    half_mesh : PanelMesh
+        Right-half surface mesh.
+
+    Returns
+    -------
+    PanelMesh
+        Full mesh with both halves and half=False.
+    """
+    if not half_mesh.half:
+        return half_mesh
+
+    right_n = len(half_mesh.nodes)
+    node_array = np.asarray(half_mesh.nodes)
+    mirrored_nodes = np.flatnonzero(~(np.abs(node_array[:, 1]) < 1.0e-12))
+    index_map = np.arange(right_n)
+    index_map[mirrored_nodes] = right_n + np.arange(len(mirrored_nodes))
+    mirror = np.array(node_array[mirrored_nodes], dtype=float, copy=True)
+    mirror[:, 1] = -mirror[:, 1]
+    nodes = np.concatenate([node_array, mirror]) if right_n else np.array([], dtype=float)
+
+    panel_array = np.asarray(half_mesh.panels, dtype=int)
+    shift_pan = len(panel_array)
+    panels = (
+        np.concatenate([panel_array, index_map[panel_array[:, [0, 3, 2, 1]]]])
+        if shift_pan else np.array([], dtype=int)
+    )
+    wake_array = np.asarray(half_mesh.wake_edges, dtype=int).reshape(-1, 4)
+    wake_mirror = np.empty_like(wake_array)
+    wake_mirror[:, :2] = wake_array[:, :2] + shift_pan
+    wake_mirror[:, 2:] = index_map[wake_array[:, 2:]]
+    wake_edges = np.concatenate([wake_array, wake_mirror])
+    comp = np.concatenate([half_mesh.component, half_mesh.component])
+    kind = np.concatenate([half_mesh.kind, half_mesh.kind])
+
+    # Metadata of the mesh builder, when the mesh carries it. The mirror
+    # panels keep the chordwise index and the side. The strips are numbered
+    # from the left tip to the right tip per component, as the builder
+    # numbers a full mesh: left strip n_c - 1 - s, right strip n_c + s, plus
+    # the strips of the components before; tip and side panels keep -1. An
+    # original node gets the station n_st - 1 + st and its mirror node
+    # n_st - 1 - st (n_st station rows of the component). Other per-panel
+    # or per-node arrays are copied to the mirror panels or nodes.
+    field_names = {fld.name for fld in dataclasses.fields(half_mesh) if fld.init}
+    known = {"nodes", "panels", "component", "kind", "wake_edges", "half"}
+    extra = {}
+    n_half = len(half_mesh.panels)
+    comp_half = np.asarray(half_mesh.component, dtype=int).reshape(-1)
+    node_comp = np.zeros(right_n, dtype=int)
+    if comp_half.size == n_half and n_half:
+        # Shared nodes take the component of the last panel that uses them.
+        last_panel = np.full(right_n, -1, dtype=int)
+        np.maximum.at(last_panel, panel_array.ravel(), np.repeat(np.arange(n_half), 4))
+        used = last_panel >= 0
+        node_comp[used] = comp_half[last_panel[used]]
+    for name in sorted(field_names - known):
+        value = getattr(half_mesh, name)
+        if value is None:
+            extra[name] = None
+            continue
+        arr = np.asarray(value)
+        if name == "strip" and arr.ndim == 1 and arr.shape[0] == n_half:
+            strip_half = arr.astype(int)
+            right = np.full(n_half, -1, dtype=int)
+            left = np.full(n_half, -1, dtype=int)
+            offset = 0
+            for c in np.unique(comp_half):
+                sel = (comp_half == c) & (strip_half >= 0)
+                if not np.any(sel):
+                    continue
+                first = int(np.min(strip_half[sel]))
+                n_c = int(np.max(strip_half[sel])) - first + 1
+                local = strip_half[sel] - first
+                right[sel] = offset + n_c + local
+                left[sel] = offset + n_c - 1 - local
+                offset += 2 * n_c
+            extra[name] = np.concatenate([right, left])
+        elif name == "node_station" and arr.ndim == 1 and arr.shape[0] == right_n:
+            st = arr.astype(int)
+            station_max = np.empty(right_n, dtype=int)
+            for c in np.unique(node_comp):
+                sel = node_comp == c
+                station_max[sel] = np.max(st[sel])
+            orig = station_max + st
+            mirror = station_max[mirrored_nodes] - st[mirrored_nodes]
+            extra[name] = np.concatenate([orig, mirror])
+        elif arr.ndim >= 1 and arr.shape[0] == n_half:
+            extra[name] = np.concatenate([arr, arr])
+        elif arr.ndim >= 1 and arr.shape[0] == right_n:
+            extra[name] = np.concatenate([arr, arr[mirrored_nodes]])
+        else:
+            extra[name] = value
+
+    return type(half_mesh)(
+        nodes=np.array(nodes, dtype=float),
+        panels=np.array(panels, dtype=int),
+        component=comp,
+        kind=kind,
+        wake_edges=np.array(wake_edges, dtype=int).reshape(-1, 4),
+        half=False,
+        **extra,
+    )
+
+
+def _reconstruct_full_mesh_reference(half_mesh: PanelMesh) -> PanelMesh:
+    """Provide the loop reference of the full mesh parity tests.
 
     Parameters
     ----------
