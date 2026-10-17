@@ -152,7 +152,7 @@ def test_zero_deflection_returns_same_points(name):
 @pytest.mark.parametrize("delta", DEFLECTIONS)
 def test_deflected_section_stays_valid(name, hinge_x, delta):
     base = _sections()[name]
-    out = deflect_plain_flap(base, hinge_x, delta)
+    out = deflect_plain_flap(base, hinge_x, delta, hinge_treatment="none")
     _check_valid_polygon(out, base, hinge_x, delta)
     _check_hinge_angle(out, base, hinge_x, delta)
     _check_fixed_part(out, base, hinge_x)
@@ -190,7 +190,7 @@ def test_hinge_on_surface_stays_valid(y_hinge, delta):
 @pytest.mark.parametrize("delta", [60.0, -60.0])
 def test_limit_deflection_runs(delta):
     base = _sections()["naca0012"]
-    out = deflect_plain_flap(base, 0.7, delta)
+    out = deflect_plain_flap(base, 0.7, delta, hinge_treatment="none")
     _check_valid_polygon(out, base, 0.7, delta)
 
 
@@ -205,7 +205,7 @@ def test_explicit_arc_count_runs():
 def test_open_trailing_edge_stays_valid(delta):
     base = _naca4_coords(0.04, 0.4, 0.12, closed=False)
     assert not np.array_equal(base[0], base[-1])
-    out = deflect_plain_flap(base, 0.7, delta)
+    out = deflect_plain_flap(base, 0.7, delta, hinge_treatment="none")
     _check_valid_polygon(out, base, 0.7, delta)
     _check_hinge_angle(out, base, 0.7, delta)
     _check_fixed_part(out, base, 0.7)
@@ -343,7 +343,7 @@ def test_compressed_side_follows_the_deflection_sign():
     r_lo = float(hinge[1] - flap_hinge_point(base, xh, 0.0)[1])
     assert abs(r_up - r_lo) > 1e-3
     for delta, r_arc, r_cut in ((20.0, r_up, r_lo), (-20.0, r_lo, r_up)):
-        out = deflect_plain_flap(base, xh, delta, y_hinge=yh, n_arc=n_arc)
+        out = deflect_plain_flap(base, xh, delta, y_hinge=yh, n_arc=n_arc, hinge_treatment="none")
         dist = np.linalg.norm(out - hinge, axis=1)
         assert int(np.sum(np.abs(dist - r_arc) < 1e-12)) == n_arc
         assert int(np.sum(np.abs(dist - r_cut) < 1e-12)) == 0
@@ -488,12 +488,12 @@ def _zone_max_turn(out, hinge_x):
     return float(np.max(turn[zone]))
 
 
-def test_default_treatment_is_none():
+def test_default_treatment_is_repanel():
     base = _package_section("2412", 160)
     for delta in (5.0, -10.0, 20.0):
         np.testing.assert_array_equal(
             deflect_plain_flap(base, 0.75, delta),
-            deflect_plain_flap(base, 0.75, delta, hinge_treatment="none"),
+            deflect_plain_flap(base, 0.75, delta, hinge_treatment="repanel"),
         )
 
 
@@ -521,7 +521,7 @@ def test_merge_keeps_outline_nodes_and_removes_short_panels(name, n_panels):
     base = _package_section(name, n_panels)
     for hinge_x in TREATMENT_HINGES:
         for delta in TREATMENT_DELTAS:
-            none = deflect_plain_flap(base, hinge_x, delta)
+            none = deflect_plain_flap(base, hinge_x, delta, hinge_treatment="none")
             out = deflect_plain_flap(base, hinge_x, delta, hinge_treatment="merge")
             _check_valid_polygon(out, base, hinge_x, delta)
             _check_fixed_part(out, base, hinge_x)
@@ -572,7 +572,7 @@ def test_treatments_at_zero_deflection():
 def test_small_deflection_step_panel_is_removed():
     """The hinge-line step of "none" (NACA 2412, hinge 0.75, 5 deg) is gone with both treatments."""
     base = _package_section("2412", 160)
-    none = deflect_plain_flap(base, 0.75, 5.0)
+    none = deflect_plain_flap(base, 0.75, 5.0, hinge_treatment="none")
     assert np.min(_zone_panel_ratios(none, 0.75)) < 0.01
     assert _zone_max_turn(none, 0.75) > 80.0
     merged = deflect_plain_flap(base, 0.75, 5.0, hinge_treatment="merge")

@@ -469,7 +469,9 @@ def _deflected_station(
     theta = -float(np.radians(delta_deg))
     cos_t = float(np.cos(theta))
     sin_t = float(np.sin(theta))
-    moved = deflect_plain_flap(base, xh, delta_deg)
+    # The mesh resamples the section with a node at the hinge, so it keeps
+    # the outline as constructed (no hinge treatment).
+    moved = deflect_plain_flap(base, xh, delta_deg, hinge_treatment="none")
     up_d, lo_d = _split_selig(moved)
     out = []
     for surf_d, y_te in ((_single_valued(up_d), float(yu[-1])), (_single_valued(lo_d), float(yl[-1]))):

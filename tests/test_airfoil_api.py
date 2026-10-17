@@ -150,7 +150,7 @@ def test_shape_with_flap_passes_the_hinge_treatment(treatment):
         deflect_plain_flap(shape.coords, 0.75, 5.0, hinge_treatment=treatment),
     )
     assert np.array_equal(
-        shape.with_flap(0.75, 5.0, hinge_treatment="none").coords,
+        shape.with_flap(0.75, 5.0, hinge_treatment="repanel").coords,
         shape.with_flap(0.75, 5.0).coords,
     )
 
@@ -165,7 +165,7 @@ def test_shape_with_flap_repanel_count():
     )
     out.validate()
     with pytest.raises(ValueError, match="n_panels"):
-        shape.with_flap(0.75, 5.0, n_panels=100)
+        shape.with_flap(0.75, 5.0, hinge_treatment="none", n_panels=100)
 
 
 def test_to_file_matches_writers(tmp_path):

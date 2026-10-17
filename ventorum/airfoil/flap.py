@@ -37,9 +37,12 @@ surface (see ``docs/theory/control_surfaces.md``).
 The construction is pure geometry. It models no aerodynamics.
 
 Hinge treatments: the option ``hinge_treatment`` selects what happens to
-the nodes near the hinge after the construction above.
+the nodes near the hinge after the construction above. The default is
+"repanel": a study of the method found that it makes the viscous
+solution converge where "none" fails (small deflections) and that its
+mesh does not depend on the input points.
 
-* "none" (default): the outline stays as constructed. At small
+* "none": the outline stays as constructed. At small
   deflections the hinge-line joint on the compressed side can be a very
   short panel between two corners of about 90 deg, and the inserted
   hinge-station points can make short panels next to the input points.
@@ -435,7 +438,7 @@ def _check_panel_count(n_panels: int | None, treatment: str) -> int | None:
 
 def deflect_plain_flap(coords: np.ndarray, x_hinge: float, deflection: float,
                        y_hinge: float = 0.5, n_arc: int | None = None,
-                       hinge_treatment: str = "none",
+                       hinge_treatment: str = "repanel",
                        n_panels: int | None = None) -> np.ndarray:
     """Deflect a plain flap by rotating the points aft of the hinge.
 
@@ -458,11 +461,11 @@ def deflect_plain_flap(coords: np.ndarray, x_hinge: float, deflection: float,
         lengths near the local panel length. Minimum 2.
     hinge_treatment : {"none", "repanel", "merge"}
         Treatment of the nodes near the hinge after the deflection [-].
-        "none" (default) keeps the deflected outline as constructed.
-        "repanel" fits a spline through the deflected outline and
+        "repanel" (default) fits a spline through the deflected outline and
         redistributes all nodes on it, with a node kept at the hinge
         node of each surface, at the leading edge and at the trailing
-        edge. "merge" removes nodes near the hinge until no panel there
+        edge. "none" keeps the deflected outline as constructed. "merge"
+        removes nodes near the hinge until no panel there
         is short and no isolated sharp corner remains; the kept nodes
         do not move. The module docstring gives the rules and limits.
     n_panels : int or None
@@ -500,7 +503,7 @@ def deflect_plain_flap(coords: np.ndarray, x_hinge: float, deflection: float,
     n = _check_arc_count(n_arc)
     treatment = _check_treatment(hinge_treatment)
     n_rep = _check_panel_count(n_panels, treatment)
-    if delta == 0.0 and treatment == "none":
+    if delta == 0.0:
         return arr.copy()
     upper, lower = _surfaces(arr)
     hinge = _hinge_from_surfaces(upper, lower, xh, yh)

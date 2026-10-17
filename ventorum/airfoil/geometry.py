@@ -425,7 +425,7 @@ class AirfoilShape:
         deflection: float,
         y_hinge: float = 0.5,
         n_arc: int | None = None,
-        hinge_treatment: str = "none",
+        hinge_treatment: str = "repanel",
         n_panels: int | None = None,
     ) -> AirfoilShape:
         """Deflect a plain flap about a hinge point.
@@ -451,11 +451,10 @@ class AirfoilShape:
             Point count [-] of the filler arc on the stretched side.
             None selects the default of the array function.
         hinge_treatment : {"none", "repanel", "merge"}
-            Treatment of the nodes near the hinge [-]. "none" (default)
-            keeps the deflected outline; "merge" removes short panels
-            and isolated sharp corners near the hinge by node removal;
-            "repanel" distributes the nodes again on a spline through
-            the outline (see
+            Treatment of the nodes near the hinge [-]. "repanel"
+            (default) distributes the nodes again on a spline through the
+            outline; "none" keeps the deflected outline; "merge" removes short panels
+            and isolated sharp corners near the hinge by node removal (see
             :func:`ventorum.airfoil.flap.deflect_plain_flap`).
         n_panels : int or None
             Panel count [-] of the "repanel" treatment. None keeps the

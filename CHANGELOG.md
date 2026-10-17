@@ -53,6 +53,7 @@ a minor version can change a public interface.
 
 ### Changed
 
+- Plain flaps: the hinge treatment "repanel" (a spline through the deflected outline with nodes kept at the hinge, the leading edge and the trailing edge) is the default of `deflect_plain_flap` and `AirfoilShape.with_flap`; "none" (the outline as constructed) and "merge" (node removal at the hinge) stay options. A zero deflection returns the section unchanged for every treatment. The 3D panel mesh keeps the outline as constructed. The 2D solver revision is raised, so cached flap polars are computed again.
 - `run_xfoil` runs XFOIL headless on every platform: graphics off first (the graphics flag is
   checked), its own temporary folder, no console window on Windows. New options for
   coordinates, transition, panel count, flap (hinge height as a fraction of the thickness) and
