@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import functools
 import math
 
 import numpy as np
@@ -427,3 +428,179 @@ def test_decreasing_x_aft_of_the_hinge_raises():
     base[[k, k + 1]] = base[[k + 1, k]]
     with pytest.raises(ValueError, match="non-decreasing"):
         deflect_plain_flap(base, 0.7, 10.0)
+
+
+# Hinge treatments ---------------------------------------------------------
+
+TREATMENT_NAMES = ["0012", "2412", "4415"]
+TREATMENT_HINGES = [0.6, 0.7, 0.75, 0.8, 0.85]
+TREATMENT_DELTAS = [-20.0, -15.0, -10.0, -5.0, -2.0, 2.0, 5.0, 10.0, 15.0, 20.0]
+#: Largest distance [chord units] from a "repanel" node to the deflected
+#: outline of "none" on these inputs (60 to 240 panels).
+REPANEL_DEVIATION_BOUND = 2.0e-3
+
+
+@functools.cache
+def _package_section(name, n_panels):
+    """Package NACA section, repaneled to n_panels (None keeps the generator points)."""
+    from ventorum.airfoil import airfoil
+
+    shape = airfoil(name)
+    if n_panels is not None:
+        shape = shape.repanel(n_panels=n_panels)
+    coords = np.array(shape.coords, dtype=float)
+    coords.setflags(write=False)
+    return coords
+
+
+def _distance_to_outline(pts, outline):
+    """Distance [chord units] of each point to the closed polyline outline."""
+    a = outline
+    b = np.roll(outline, -1, axis=0)
+    d = b - a
+    l2 = np.maximum((d ** 2).sum(1), 1e-300)
+    t = np.clip(((pts[:, None, :] - a[None]) * d[None]).sum(-1) / l2, 0.0, 1.0)
+    q = a[None] + t[..., None] * d[None]
+    return np.sqrt(((pts[:, None, :] - q) ** 2).sum(-1)).min(1)
+
+
+def _zone_panel_ratios(out, hinge_x):
+    """Panel length over the mean of its neighbours, for panels with an end in the hinge zone."""
+    from ventorum.airfoil.geometry import leading_edge_index
+
+    lengths = np.linalg.norm(np.diff(out, axis=0), axis=1)
+    keep = np.abs(out[:, 0] - hinge_x) < 0.05
+    keep[[0, out.shape[0] - 1, leading_edge_index(out)]] = False
+    ratios = []
+    for i in range(lengths.size):
+        if keep[i] or keep[i + 1]:
+            near = [lengths[j] for j in (i - 1, i + 1) if 0 <= j < lengths.size]
+            ratios.append(lengths[i] / np.mean(near))
+    return np.array(ratios)
+
+
+def _zone_max_turn(out, hinge_x):
+    """Largest turning angle [deg] at the nodes with |x - hinge_x| < 0.05."""
+    d = np.diff(out, axis=0)
+    a = np.arctan2(d[:, 1], d[:, 0])
+    turn = np.degrees(np.abs((np.diff(a) + np.pi) % (2.0 * np.pi) - np.pi))
+    zone = np.abs(out[1:-1, 0] - hinge_x) < 0.05
+    return float(np.max(turn[zone]))
+
+
+def test_default_treatment_is_none():
+    base = _package_section("2412", 160)
+    for delta in (5.0, -10.0, 20.0):
+        np.testing.assert_array_equal(
+            deflect_plain_flap(base, 0.75, delta),
+            deflect_plain_flap(base, 0.75, delta, hinge_treatment="none"),
+        )
+
+
+@pytest.mark.parametrize("treatment", ["repanel", "merge"])
+@pytest.mark.parametrize("name", TREATMENT_NAMES)
+@pytest.mark.parametrize("hinge_x", TREATMENT_HINGES)
+def test_treated_sections_stay_valid(treatment, name, hinge_x):
+    """Simple CCW polygon, exact trailing-edge rotation, exact flap angle (analytic input)."""
+    m, p, t = SWEEP_SHAPES[name]
+    base = _naca4_coords(m, p, t, n=81, closed=False)
+    for delta in TREATMENT_DELTAS:
+        out = deflect_plain_flap(base, hinge_x, delta, hinge_treatment=treatment)
+        _check_valid_polygon(out, base, hinge_x, delta)
+        _check_hinge_angle(out, base, hinge_x, delta)
+        if treatment == "merge":
+            _check_fixed_part(out, base, hinge_x)
+        else:
+            assert out.shape == base.shape
+
+
+@pytest.mark.parametrize("name", TREATMENT_NAMES)
+@pytest.mark.parametrize("n_panels", [None, 120, 160, 240])
+def test_merge_keeps_outline_nodes_and_removes_short_panels(name, n_panels):
+    """The kept nodes are nodes of the deflected outline; no short panel stays near the hinge."""
+    base = _package_section(name, n_panels)
+    for hinge_x in TREATMENT_HINGES:
+        for delta in TREATMENT_DELTAS:
+            none = deflect_plain_flap(base, hinge_x, delta)
+            out = deflect_plain_flap(base, hinge_x, delta, hinge_treatment="merge")
+            _check_valid_polygon(out, base, hinge_x, delta)
+            _check_fixed_part(out, base, hinge_x)
+            outline = {tuple(q) for q in none}
+            assert all(tuple(q) in outline for q in out)
+            assert out.shape[0] <= none.shape[0]
+            assert np.min(_zone_panel_ratios(out, hinge_x)) >= 0.5
+
+
+@pytest.mark.parametrize("name", TREATMENT_NAMES)
+@pytest.mark.parametrize("n_panels", [None, 120, 160, 240])
+def test_repanel_stays_near_the_deflected_outline(name, n_panels):
+    """Panel count kept, hinge and trailing-edge nodes kept, deviation below the bound."""
+    base = _package_section(name, n_panels)
+    for hinge_x in TREATMENT_HINGES:
+        for delta in TREATMENT_DELTAS:
+            none = deflect_plain_flap(base, hinge_x, delta)
+            out = deflect_plain_flap(base, hinge_x, delta, hinge_treatment="repanel")
+            _check_valid_polygon(out, base, hinge_x, delta)
+            _check_hinge_angle(out, base, hinge_x, delta)
+            assert out.shape == base.shape
+            assert np.max(_distance_to_outline(out, none)) < REPANEL_DEVIATION_BOUND
+            le = int(np.argmax(np.linalg.norm(out - 0.5 * (out[0] + out[-1]), axis=1)))
+            outline = {tuple(q) for q in none if abs(q[0] - hinge_x) < 0.02}
+            for half in (out[: le + 1], out[le:]):
+                assert any(tuple(q) in outline for q in half)
+
+
+def test_repanel_with_a_panel_count():
+    base = _package_section("2412", 160)
+    out = deflect_plain_flap(base, 0.75, 10.0, hinge_treatment="repanel", n_panels=200)
+    assert out.shape == (201, 2)
+    _check_valid_polygon(out, base, 0.75, 10.0)
+
+
+def test_treatments_at_zero_deflection():
+    """Zero deflection: "merge" keeps the outline, "repanel" stays on it."""
+    base = _package_section("4415", 160)
+    merged = deflect_plain_flap(base, 0.7, 0.0, hinge_treatment="merge")
+    assert {tuple(q) for q in base} <= {tuple(q) for q in merged}
+    assert np.max(_distance_to_outline(merged, base)) < 1e-15
+    rep = deflect_plain_flap(base, 0.7, 0.0, hinge_treatment="repanel")
+    assert rep.shape == base.shape
+    assert np.max(_distance_to_outline(rep, base)) < 1e-4
+    np.testing.assert_array_equal(rep[[0, -1]], base[[0, -1]])
+
+
+def test_small_deflection_step_panel_is_removed():
+    """The hinge-line step of "none" (NACA 2412, hinge 0.75, 5 deg) is gone with both treatments."""
+    base = _package_section("2412", 160)
+    none = deflect_plain_flap(base, 0.75, 5.0)
+    assert np.min(_zone_panel_ratios(none, 0.75)) < 0.01
+    assert _zone_max_turn(none, 0.75) > 80.0
+    merged = deflect_plain_flap(base, 0.75, 5.0, hinge_treatment="merge")
+    assert np.min(_zone_panel_ratios(merged, 0.75)) >= 0.5
+    assert _zone_max_turn(merged, 0.75) < 10.0
+    rep = deflect_plain_flap(base, 0.75, 5.0, hinge_treatment="repanel")
+    lengths = np.linalg.norm(np.diff(rep, axis=0), axis=1)
+    assert np.max(np.maximum(lengths[1:] / lengths[:-1], lengths[:-1] / lengths[1:])) <= 1.5
+    assert _zone_max_turn(rep, 0.75) < 10.0
+
+
+def test_merge_reduces_the_arc_end_corner():
+    """At 10 deg the largest corner near the hinge gets smaller with "merge"."""
+    base = _package_section("2412", 160)
+    none = deflect_plain_flap(base, 0.75, 10.0)
+    merged = deflect_plain_flap(base, 0.75, 10.0, hinge_treatment="merge")
+    assert _zone_max_turn(merged, 0.75) < _zone_max_turn(none, 0.75)
+
+
+def test_bad_treatment_arguments_raise():
+    base = _sections()["naca0012"]
+    with pytest.raises(ValueError, match="hinge_treatment"):
+        deflect_plain_flap(base, 0.7, 10.0, hinge_treatment="smooth")
+    with pytest.raises(ValueError, match="hinge_treatment"):
+        deflect_plain_flap(base, 0.7, 10.0, hinge_treatment=None)
+    for treatment in ("none", "merge"):
+        with pytest.raises(ValueError, match="n_panels"):
+            deflect_plain_flap(base, 0.7, 10.0, hinge_treatment=treatment, n_panels=100)
+    for bad in (3, 0, -5, 2.5, "100"):
+        with pytest.raises(ValueError, match="n_panels"):
+            deflect_plain_flap(base, 0.7, 10.0, hinge_treatment="repanel", n_panels=bad)

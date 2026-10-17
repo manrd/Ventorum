@@ -142,6 +142,32 @@ def test_shape_with_flap_matches_array_function():
     )
 
 
+@pytest.mark.parametrize("treatment", ["none", "repanel", "merge"])
+def test_shape_with_flap_passes_the_hinge_treatment(treatment):
+    shape = AirfoilShape.naca("2412", n_points=61).repanel(n_panels=80)
+    assert np.array_equal(
+        shape.with_flap(0.75, 5.0, hinge_treatment=treatment).coords,
+        deflect_plain_flap(shape.coords, 0.75, 5.0, hinge_treatment=treatment),
+    )
+    assert np.array_equal(
+        shape.with_flap(0.75, 5.0, hinge_treatment="none").coords,
+        shape.with_flap(0.75, 5.0).coords,
+    )
+
+
+def test_shape_with_flap_repanel_count():
+    shape = AirfoilShape.naca("2412", n_points=61).repanel(n_panels=80)
+    out = shape.with_flap(0.75, 5.0, hinge_treatment="repanel", n_panels=100)
+    assert out.coords.shape == (101, 2)
+    assert np.array_equal(
+        out.coords,
+        deflect_plain_flap(shape.coords, 0.75, 5.0, hinge_treatment="repanel", n_panels=100),
+    )
+    out.validate()
+    with pytest.raises(ValueError, match="n_panels"):
+        shape.with_flap(0.75, 5.0, n_panels=100)
+
+
 def test_to_file_matches_writers(tmp_path):
     from ventorum.airfoil.io import write_lednicer, write_selig
 

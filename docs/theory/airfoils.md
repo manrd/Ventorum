@@ -262,6 +262,17 @@ The construction has five steps:
 4. Stretched side. On the other side a gap opens between the fixed and the moved surface. A circular arc about the hinge fills the gap, from the last fixed point to the first moved point. The arc radius is the distance from the hinge to that surface at `x_hinge`. The point count `n_arc` includes both end points; the default count keeps the arc panel lengths near the local panel length.
 5. Check. The output must be a simple polygon with a positive area; otherwise the function raises `AirfoilGeometryError`.
 
+Hinge treatment. The option `hinge_treatment` selects what happens to
+the nodes near the hinge after the construction: "none" (default) keeps
+the outline as constructed; "merge" removes nodes near the hinge until
+no panel there is shorter than half the mean length of its neighbours
+and no isolated sharp corner remains, and the kept nodes do not move;
+"repanel" fits a spline through the outline and distributes the nodes
+again along it, with nodes kept at the hinge on both surfaces, at the
+leading edge and at the trailing edge (panel count of the input, or
+`n_panels`). The page {doc}`airfoil_flaps` gives the rules, the limits
+and the tested deviation bound of "repanel".
+
 A zero deflection returns a copy of the input. The input must be in
 Selig order. The hinge station lies in (0.05, 0.98) chord units. The
 deflection satisfies |deflection| <= 60 deg. The hinge height fraction
@@ -281,7 +292,7 @@ Users and solvers get airfoils one way, through `AirfoilShape` and the
 - `AirfoilShape.from_file(path)` reads a Selig, Lednicer or plain file.
 - `shape.repanel(n_panels=160, **kw)` redistributes the nodes.
 - `shape.repanel_cosine(n_per_side)` resamples with cosine spacing.
-- `shape.with_flap(x_hinge, deflection, y_hinge=0.5)` deflects a plain flap.
+- `shape.with_flap(x_hinge, deflection, y_hinge=0.5, hinge_treatment="none")` deflects a plain flap.
 - `shape.to_file(path, fmt="selig")` writes a Selig or Lednicer file.
 - `airfoil(spec)` accepts a NACA designation string, a file path, an (N, 2) array or a shape, and returns a shape.
 

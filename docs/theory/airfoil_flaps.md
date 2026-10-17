@@ -68,6 +68,86 @@ compressed side and a self-intersecting contour without an error.
 
 A zero deflection returns a copy of the input.
 
+## Hinge treatments
+
+The construction above gives the exact outline of the rigid rotation,
+but the nodes near the hinge can be bad for a panel method. At small
+deflections the moved surface on the compressed side does not cross the
+fixed surface before the hinge line, so the hinge-line joint is a very
+short panel between two corners of about 90 deg. The points added at the
+hinge station can also make short panels next to the input points, and
+the filler arc meets the surfaces at corners of the size of the local
+surface slope plus a part of the deflection.
+
+The option `hinge_treatment` of `deflect_plain_flap` and
+`AirfoilShape.with_flap` selects what happens to these nodes. The
+default is "none".
+
+- "none": the outline stays as constructed (the behaviour before the
+  option; the output is the same, bit for bit).
+- "merge": nodes in the hinge zone, $|x - x_h| < 0.05$ chord units, are
+  removed. The trailing-edge nodes and the leading-edge node are never
+  removed. Two rules apply in turn until neither removes a node.
+  1. Short panels. No panel with a removable end is shorter than 0.5
+     times the mean length of its two neighbour panels. The shortest
+     panel (by this ratio) loses the end node whose removal leaves the
+     smaller largest turning angle at its neighbours, so the removal also
+     smooths the corner. At equal angles, the end node nearest to the
+     line through its own neighbours goes.
+  2. Corners. A node with a turning angle above 5 deg is removed when
+     this lowers the largest turning angle of the node and its two
+     neighbours, and the new panel is at most 1.5 times the mean length
+     of its neighbour panels (the adjacent panel length limit of
+     `repanel`). The node with the largest turning angle goes first, one
+     node per pass. A longer panel at the hinge corner makes the viscous
+     solution harder, so the stretch limit stops corner removal on
+     coarse input; rule 1 still smooths the corners there.
+
+  A removal that makes the polygon touch or cross itself is not done.
+  The kept nodes do not move: the outline changes only where a chord
+  replaces removed nodes. The panel count goes down by the number of
+  removed nodes. A single corner can only be split into two smaller
+  corners by node removal; the stretch limit of rule 2 stops it when the
+  new panel would be too long.
+- "repanel": rule 1 of "merge" removes the short panels, with the hinge
+  node of each surface kept. The hinge node is the crossing point on a
+  cut side, else the point of the surface at the hinge station. A
+  parametric not-a-knot cubic spline (de Boor, 1978, chapter IV) then
+  goes through the remaining points, and the nodes are distributed
+  again along its arc length in one pass of the equidistribution of
+  `repanel` (same weight function and default values). The trailing-edge
+  points, the leading edge of the spline and the two hinge nodes are
+  breakpoints of the equidistribution, so they stay nodes; the
+  trailing-edge and hinge nodes are the exact input points. The
+  curvature term of the weight uses the peak curvature of the fixed part
+  as reference and is clipped at 1, so a corner at the hinge gets the
+  node density of the leading edge without a change of the density
+  elsewhere. The panel count is the input count, or the argument
+  `n_panels`. The repeated passes of `repanel` are not used, because
+  each new spline through the last nodes moves the surface further from
+  the outline at the hinge corners.
+
+  The spline rounds the corners at the hinge, so the surface there
+  moves away from the deflected outline. The tests measure the largest
+  distance from a node of the result to the outline of "none" on NACA
+  0012, 2412 and 4415 sections with 120 to 240 panels and the 161
+  generator points, hinges from 0.6 to 0.85 and deflections from -20 to
+  20 deg: it stays below $2 \times 10^{-3}$ chord units. The deviation
+  is largest at the large deflections, where the cut side has a real
+  corner.
+
+All treatments keep the trailing-edge points as the exact rotated input
+points, keep the flap rotation exact, and check that the result is a
+simple polygon with a positive area. "none" and "merge" keep the fixed
+part ($x < x_h - 0.05$) unchanged. A zero deflection returns a copy of
+the input with "none"; "merge" and "repanel" treat the input with a
+node added at the hinge station of each surface, so their result changes
+continuously with the deflection ("merge" then returns the input
+outline with these two nodes).
+
+The default stays "none" until a comparison of the treatments with the
+viscous solver decides the default.
+
 ## Limits
 
 - The hinge station lies in (0.05, 0.98) chord units.
@@ -98,7 +178,14 @@ formulas, with 81 cosine-spaced points per surface:
   in every case (a dense grid of the same sweep carries the slow
   marker);
 - the coarse cases that gave a self-intersecting contour before the
-  sign rule are kept as regression cases.
+  sign rule are kept as regression cases;
+- the hinge treatments "merge" and "repanel" give valid sections with
+  the exact trailing-edge rotation on NACA 0012, 2412 and 4415, hinges
+  from 0.6 to 0.85 and deflections from -20 to 20 deg; "merge" keeps
+  only outline nodes, keeps the fixed part and leaves no short panel in
+  the hinge zone; "repanel" keeps the panel count, a node at the hinge
+  on both surfaces, and stays inside the deviation bound above; both
+  remove the hinge-line step of the small-deflection case.
 
 ## References
 
@@ -109,3 +196,5 @@ formulas, with 81 cosine-spaced points per surface:
   flap", Aeronautical Research Committee, R&M 1095, 1927.
 - I. H. Abbott and A. E. von Doenhoff, *Theory of Wing Sections*, Dover,
   1959 (airfoil section geometry and the NACA 4-digit profile equations).
+- C. de Boor, *A Practical Guide to Splines*, Springer, 1978, chapter IV
+  (not-a-knot cubic spline).
