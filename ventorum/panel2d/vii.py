@@ -1291,7 +1291,10 @@ def newton_solve(setups, states, *, tol=1e-6, max_iter=50, xp=np, device=None, d
             ue_inv, D, X, re_b, masks, _, _, S = assemble(active, refresh=False)
             UE0, _ = _edge(be, ue_inv, D, X, S)
             x2 = X[:, :, 1]
-            ds0 = S * x2 + (1.0 - S) * x2 / UE0
+            # A dropped stagnation node has no edge velocity (zero) and no
+            # mass defect: divide by 1 there, as host_edge does.
+            mk = be.arr(masks.astype(float))
+            ds0 = S * x2 + (1.0 - S) * x2 / (UE0 * mk + (1.0 - mk))
             mfull = S * UE0 * x2 + (1.0 - S) * x2
             Bm = be.arr(np.stack([mats[i][1] for i in active]))
             sens_b = be.stack([sens[i][0] for i in active])

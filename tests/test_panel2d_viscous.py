@@ -315,3 +315,18 @@ def test_against_xfoil(re):
             "(0.7 Ctau_eq, to be checked against Drela and Giles 1987) makes the turbulent layer grow faster "
             "just after transition. With transition forced at the same position the drag agrees."
         )
+
+
+def test_no_division_warning_at_a_dropped_stagnation_node():
+    """Regression: the start values of the structure update divided 0 by 0 at a dropped stagnation node.
+
+    NACA 0012 at alpha 0 drops the node next to the stagnation point during the cold start; numpy raised
+    "invalid value encountered in divide" in the Newton solve. The result is the same as before.
+    """
+    c = _naca("0012", 120)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", UserWarning)
+        with np.errstate(divide="raise", invalid="raise"):
+            r = solve_viscous(c, 0.0, 1e6)
+    assert r.converged, r.reason
+    assert abs(r.Cl) < 1e-6
