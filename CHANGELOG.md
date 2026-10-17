@@ -58,6 +58,10 @@ a minor version can change a public interface.
   ground rule for chordwise panels longer than the gap now act for the panel method. A result
   with fewer chordwise panels than the warning count, also with the default count, gets the
   chordwise warning (rating MODERATE when no other rule acts).
+- Ventorum-3DP mesh: when the root-thickness scaling applies with a first-row dihedral above
+  60 deg (factor 1 / cos(dihedral) above 2), the mesh builder issues a `UserWarning` that the
+  root section is strongly scaled and that the result needs checking. The factor is not
+  capped.
 - Plain flaps: the hinge treatment "repanel" (a spline through the deflected outline with nodes kept at the hinge, the leading edge and the trailing edge) is the default of `deflect_plain_flap` and `AirfoilShape.with_flap`; "none" (the outline as constructed) and "merge" (node removal at the hinge) stay options. A zero deflection returns the section unchanged for every treatment. The 3D panel mesh keeps the outline as constructed. The 2D solver revision is raised, so cached flap polars are computed again.
 - `run_xfoil` runs XFOIL headless on every platform: graphics off first (the graphics flag is
   checked), its own temporary folder, no console window on Windows. New options for

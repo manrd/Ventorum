@@ -333,6 +333,7 @@ Properties of the scaled root section:
 * Root twist $\theta$: before the scaling, the thickness normal to the surface is $t\cos\Gamma/\sqrt{1 - \sin^2\theta\,\sin^2\Gamma}$. The factor $1/\cos\Gamma$ leaves an error of second order in $\theta$.
 * No effect: a surface with zero dihedral at the root (the mesh stays bit for bit the same), a one-sided surface (its root section is normal to its span axis, for example a vertical fin with $\Gamma = 90$ deg) and a symmetric surface whose first panel row is vertical (the two halves coincide and there is no miter).
 * A deflected control surface at the root deflects the scaled section: the hinge point at half the local thickness does not move.
+* Steep first panel row: the factor $1/\cos\Gamma$ is not capped (an owner decision). Above $\Gamma = 60$ deg (`ROOT_SCALE_WARN_DIHEDRAL_DEG`, a factor above 2) the builder applies it and issues a `UserWarning`: the root section is strongly scaled and the result needs checking, for example against `scale_root_thickness=False`.
 
 ### Fold guard
 
