@@ -117,7 +117,12 @@ _NODE_METADATA = ("node_station",)
 
 
 def _estimate_panel_mesh_error(aircraft: Aircraft, condition: FlightCondition, settings: SolverSettings):
-    """Run a three-level panel convergence study for the trust notes.
+    """Run a directional panel convergence study for the trust notes.
+
+    The study refines the chordwise and the spanwise panel count
+    separately (three levels each at ratio 1.5, the base mesh first) and
+    adds the two directional error estimates (see
+    :mod:`ventorum.panel3d.convergence`).
 
     Parameters
     ----------
@@ -131,8 +136,9 @@ def _estimate_panel_mesh_error(aircraft: Aircraft, condition: FlightCondition, s
     Returns
     -------
     ConvergenceReport
-        Values per level, observed order, Richardson value and the error
-        estimate of the base mesh for CL, CDi and Cm.
+        Per quantity (CL, CDi and Cm) the error estimate of the base mesh,
+        with the values per level, the observed order and the Richardson
+        value of each direction.
     """
     from ventorum.panel3d.convergence import panel_mesh_convergence
 
@@ -412,7 +418,11 @@ class PanelMethodSolver(BaseSolver):
         condition : FlightCondition or sequence of FlightCondition
             Operating free-stream condition(s).
         settings : SolverSettings
-            Discretization and solution knobs.
+            Discretization and solution knobs. The chordwise count
+            ``n_chord`` [-] (20 when None) also goes to the trust score:
+            it sets the chordwise rule of
+            :func:`ventorum.core.trust.panel3d_mesh_checks` and, in ground
+            effect, the rule for chordwise panels longer than the gap.
         ground : GroundPlane or None, optional
             Ground plane of all conditions (normal and offset in m). If
             None, ``condition.h`` sets the ground, as for the vortex
@@ -434,13 +444,17 @@ class PanelMethodSolver(BaseSolver):
         Notes
         -----
         Mesh error estimate. ``settings.panel_estimate_mesh_error=True``
-        runs a three-level panel mesh convergence study (ratio 1.5 in both
-        directions) for each condition. The study adds the error estimate
-        of the given mesh to the trust warnings and stores the report in
-        ``details["mesh_convergence"]``. The dense LU work grows with the
-        cube of the panel count, so the study costs about
-        ``1 + 1.5**6 + 1.5**12`` (about 142) times one base solve; it is
-        off by default.
+        runs a panel mesh convergence study for each condition: a
+        chordwise and a spanwise refinement of three levels each (ratio
+        1.5, the given mesh first), each with a Richardson extrapolation,
+        added with a separable error model (the error estimate of the
+        given mesh is the sum of the two directional estimates; see
+        :mod:`ventorum.panel3d.convergence`). The study adds the error
+        estimate of the given mesh to the trust warnings and stores the
+        report in ``details["mesh_convergence"]``. It solves five meshes;
+        the dense LU work grows with the cube of the panel count, so the
+        study costs about ``1 + 2 (1.5**3 + 1.5**6)`` (about 30) times one
+        base solve. It is off by default.
         """
         is_single = isinstance(condition, FlightCondition)
         cond_list: list[FlightCondition] = [condition] if is_single else list(condition)
@@ -646,6 +660,10 @@ class PanelMethodSolver(BaseSolver):
             "fold_guard": True,
         }
 
+        # Largest strip chord over the reference chord [-] (ground rule of the trust).
+        max_chord = max((float(np.max(m["chord"])) for m in surface_geom_meta if np.size(m["chord"])), default=0.0)
+        max_chord_over_c = max_chord / float(c_ref) if (c_ref and max_chord > 0.0) else 1.0
+
         # 5. Build SolverResult per condition with strip integration
         x_hat = np.array([1.0, 0.0, 0.0])
         dt_per_case = (time.perf_counter() - t0) / max(1, len(cond_list))
@@ -812,6 +830,10 @@ class PanelMethodSolver(BaseSolver):
             main_surf_n_span = ac.surfaces[0].n_panels or settings.n_panels
             h_over_c = (h_min / c_ref) if (h_min is not None and c_ref) else None
 
+            # The chordwise count turns on the chordwise rule of the mesh
+            # checks and the ground rule "chordwise panels longer than the
+            # gap"; the largest strip chord scales that ground rule, as for
+            # the vortex lattice.
             totals.trust = evaluate_aerodynamic_trust(
                 AR=ar,
                 condition=cond,
@@ -823,7 +845,9 @@ class PanelMethodSolver(BaseSolver):
                 n_panels=int(main_surf_n_span),
                 solver_type="panel3d",
                 h_over_c=h_over_c,
+                n_chord=int(n_chord),
                 notes=all_notes,
+                max_chord_over_c=max_chord_over_c,
                 mesh_stats=mesh_stats,
                 CD_nearfield=totals.CDi_nearfield,
             )

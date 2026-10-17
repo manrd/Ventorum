@@ -71,7 +71,11 @@ the scaling, so the scaled thickness has a second-order error in T. The
 option has no effect on a surface with zero dihedral at the root, on a
 one-sided surface (its root section is normal to its span axis, for
 example a vertical fin) and on a surface whose first panel row is
-vertical (the two halves coincide and there is no miter).
+vertical (the two halves coincide and there is no miter). The factor is
+not capped. When the builder applies it with a first-row dihedral above
+``ROOT_SCALE_WARN_DIHEDRAL_DEG`` (60 deg, a factor above 2), it issues a
+UserWarning: the root section is strongly scaled and the result needs a
+check.
 
 Fold guard
 ----------
@@ -193,6 +197,8 @@ trailing edge repeats the same point at the start and the end.
 
 from __future__ import annotations
 
+import math
+import warnings
 from collections.abc import Sequence
 from dataclasses import dataclass
 
@@ -203,6 +209,7 @@ from ventorum.geometry.lattice import _surface_eta, resolve_spacing, surface_ref
 __all__ = [
     "CONTROL_TRANSITION",
     "FOLD_MARGIN",
+    "ROOT_SCALE_WARN_DIHEDRAL_DEG",
     "PanelMesh",
     "check_mesh",
     "mesh_aircraft",
@@ -231,6 +238,12 @@ WARP_LIMIT = 0.05
 #: panel row. A row closer to the vertical has no miter (the two halves of
 #: a symmetric surface coincide), so the root section is not scaled.
 _COS_ROOT_MIN = 1e-9
+#: Root-thickness scaling: dihedral of the first panel row [deg] above which
+#: the builder issues a UserWarning. Above 60 deg the factor 1 / cos(G) is
+#: above 2, so the root section is strongly scaled and the result needs a
+#: check. The scaling is not capped (owner decision); this limit gives only
+#: the warning.
+ROOT_SCALE_WARN_DIHEDRAL_DEG = 60.0
 #: Fold guard: smallest distance of a section node from the plane of the
 #: neighbour section, as a fraction of the station spacing [-]. Any
 #: positive value prevents a fold; 0.05 changes only the stations that
@@ -796,6 +809,33 @@ def _root_thickness_factor(surf, eta: np.ndarray) -> float:
     if cos_g <= _COS_ROOT_MIN or cos_g >= 1.0:
         return 1.0
     return 1.0 / cos_g
+
+
+def _warn_strong_root_scaling(surf, factor: float) -> None:
+    """Issue a UserWarning when the root-thickness factor comes from a steep first panel row.
+
+    Parameters
+    ----------
+    surf : LiftingSurface
+        Surface definition (for the name in the message).
+    factor : float
+        Applied root-thickness factor 1 / cos(G) [-], with G the dihedral
+        of the first panel row.
+    """
+    if not (math.isfinite(factor) and factor > 1.0):
+        return
+    dihedral_deg = math.degrees(math.acos(min(1.0, 1.0 / factor)))
+    if dihedral_deg <= ROOT_SCALE_WARN_DIHEDRAL_DEG:
+        return
+    name = str(getattr(surf, "name", ""))
+    warnings.warn(
+        f"Surface {name!r}: the root section is strongly scaled. The first panel row has a dihedral of "
+        f"{dihedral_deg:.1f} deg (above {ROOT_SCALE_WARN_DIHEDRAL_DEG:g} deg), so the root-thickness factor "
+        f"1/cos(dihedral) is {factor:.2f}. The result needs checking (for example against "
+        "scale_root_thickness=False).",
+        UserWarning,
+        stacklevel=3,
+    )
 
 
 def _scale_about_camber(yu: np.ndarray, yl: np.ndarray, factor: float) -> tuple[np.ndarray, np.ndarray]:
@@ -1490,6 +1530,7 @@ def _mesh_with_controls(
     if scale_root_thickness:
         factor = _root_thickness_factor(surf, edge_etas)
         if factor != 1.0:
+            _warn_strong_root_scaling(surf, factor)
             yu_base[0], yl_base[0] = _scale_about_camber(yu_base[0], yl_base[0], factor)
     has_asym = any(not bool(c.symmetric) for c in active)
     if symmetric and has_asym and half:
@@ -1705,7 +1746,9 @@ def mesh_lifting_surface(
         thickness. False keeps the thickness of the root section along its
         section normal (the mesh before this option, bit for bit). With
         ``fold_guard`` the same factor 1 / cos(B) applies to a station that
-        the guard turns by B [rad].
+        the guard turns by B [rad]. The factor is not capped; above a
+        first-row dihedral of ``ROOT_SCALE_WARN_DIHEDRAL_DEG`` (60 deg) the
+        builder issues a UserWarning.
     trailing_edge : str
         "close" (default) closes an open trailing edge with the quartic
         thickness change of the module notes; "base" keeps the open edge
@@ -1741,6 +1784,14 @@ def mesh_lifting_surface(
     ValueError
         For bad inputs, and for ``half=True`` with an antisymmetric control
         deflection on a symmetric surface.
+
+    Warns
+    -----
+    UserWarning
+        When ``scale_root_thickness`` scales the root section and the
+        dihedral of the first panel row is above
+        ``ROOT_SCALE_WARN_DIHEDRAL_DEG`` (60 deg): the root section is
+        strongly scaled and the result needs checking.
 
     Notes
     -----
@@ -1855,6 +1906,7 @@ def mesh_lifting_surface(
     if scale_root_thickness:
         factor = _root_thickness_factor(surf, eta_e)
         if factor != 1.0:
+            _warn_strong_root_scaling(surf, factor)
             yu_e[0], yl_e[0] = _scale_about_camber(yu_e[0], yl_e[0], factor)
     if fold_guard:
 

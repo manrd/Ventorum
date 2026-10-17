@@ -539,3 +539,53 @@ def test_coarse_chordwise_mesh_gets_the_mesh_warning(n_chord, level):
     assert trust.factors["mesh_resolution"] == expected
     assert any("Near-field pressure drag" in w for w in trust.warnings)
     assert trust.rating == ("MODERATE" if level == "warn" else "LOW")
+
+
+def test_chordwise_count_reaches_the_trust_score():
+    """Regression: the panel solver did not give n_chord to the trust score.
+
+    The chordwise rule of ``panel3d_mesh_checks`` acted only when the
+    caller gave the chordwise count, and the panel solver did not give it,
+    so the best indicator of the mesh error of the mesh-error study was
+    off. Now a coarse chordwise mesh gets the chordwise warning with its
+    count (also the default count when ``n_chord`` is None), and a fine
+    chordwise mesh does not.
+    """
+    from ventorum.core import trust as tr
+
+    solver = make_solver("panel3d")
+    cond = FlightCondition(V_inf=30.0, alpha=np.radians(5.0))
+    coarse_count = tr.PANEL3D_N_CHORD_WARN - 8
+    fine_count = tr.PANEL3D_N_CHORD_WARN + 4
+    coarse = solver.solve(_closed_te_wing(), cond, SolverSettings(n_panels=16, n_chord=coarse_count)).totals.trust
+    fine = solver.solve(_closed_te_wing(), cond, SolverSettings(n_panels=16, n_chord=fine_count)).totals.trust
+    assert any(w.startswith(f"Coarse chordwise mesh: {coarse_count} chordwise panels") for w in coarse.warnings)
+    assert coarse.factors["mesh_resolution"] == tr.PANEL3D_PENALTY_RESOLUTION_WARN
+    assert not any("Coarse chordwise mesh" in w for w in fine.warnings), fine.warnings
+    assert fine.factors["mesh_resolution"] == 0.0
+    # The default chordwise count (n_chord None) also reaches the rule.
+    from ventorum.solvers.panel3d import _DEFAULT_N_CHORD
+
+    default = solver.solve(_closed_te_wing(), cond, SolverSettings(n_panels=8)).totals.trust
+    expected = _DEFAULT_N_CHORD < tr.PANEL3D_N_CHORD_WARN
+    assert any(f"Coarse chordwise mesh: {_DEFAULT_N_CHORD} chordwise" in w for w in default.warnings) is expected
+
+
+def test_ground_gap_rule_reaches_the_panel_solver():
+    """In ground effect the rule "chordwise panels longer than the gap" acts for the panel method.
+
+    The rule of the ground factor compares the chordwise panel length
+    (largest strip chord over n_chord) with the smallest ground gap. With
+    the trailing edge about 0.12 chord above the ground, 6 chordwise panels
+    are longer than the gap and 12 are not.
+    """
+    solver = make_solver("panel3d")
+    cond = FlightCondition(V_inf=30.0, alpha=np.radians(5.0), h=0.22)
+    messages = {}
+    for n_chord in (6, 12):
+        res = solver.solve(_closed_te_wing(), cond, SolverSettings(n_panels=8, n_chord=n_chord))
+        h_over_c = res.details["h_min"] / res.c_ref
+        assert 1.0 / 12.0 < h_over_c < 1.0 / 6.0
+        messages[n_chord] = [w for w in res.totals.trust.warnings if "longer than the ground gap" in w]
+    assert len(messages[6]) == 1 and messages[6][0].startswith("Chordwise panels (6 on the largest chord")
+    assert messages[12] == []

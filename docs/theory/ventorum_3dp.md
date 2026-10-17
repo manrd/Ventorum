@@ -416,17 +416,26 @@ The solver family layer selects the backend with `panel_backend="auto"` as the l
 
 ## Mesh convergence and Richardson extrapolation
 
-The module `ventorum.panel3d.convergence` conducts grid convergence studies over three or four refinement levels:
-- Spanwise and chordwise panel counts are multiplied by a constant refinement ratio $r$ (default 1.5) from the base mesh, the mesh of the user.
-- The three finest levels go to the layer-1 numerical error bar of Ventorum (`ventorum.core.error_bars.coefficient_error_bar`, Roache 1998; Celik et al. 2008). It classifies the convergence (monotonic, oscillatory, divergent, round-off, order not found), computes the observed order $p$ by the fixed-point iteration of Celik et al. for non-constant ratios, the Richardson value
+The module `ventorum.panel3d.convergence` estimates the mesh error of the base mesh (the mesh of the user, $n_s$ spanwise and $n_c$ chordwise panels) with a refinement in each direction separately:
+- Chordwise refinement: the chordwise count is multiplied by a constant ratio $r$ (default 1.5) over three or four levels at the base spanwise count. Spanwise refinement: the spanwise count is multiplied by $r$ at the base chordwise count. The base mesh is the first level of both sequences.
+- Reason. On a thick wing the chordwise error and the spanwise error of the lift have opposite signs (too little lift from the chordwise discretization, too much from the spanwise one). When both counts grow together, the two errors partly cancel, and the sequence is often not monotonic: a refinement in both directions at once gives no reliable order or Richardson value. Each direction alone has one sign of error, so its sequence is monotonic once that direction is in its asymptotic range.
+- For each direction, the three finest levels go to the layer-1 numerical error bar of Ventorum (`ventorum.core.error_bars.coefficient_error_bar`, Roache 1998; Celik et al. 2008). It classifies the convergence (monotonic, oscillatory, divergent, round-off, order not found), computes the observed order $p$ by the fixed-point iteration of Celik et al. for non-constant ratios, the Richardson value (Richardson and Gaunt 1927)
 
 ```{math}
 f_{\text{extrap}} = \frac{r_{21}^{p} f_1 - f_2}{r_{21}^{p} - 1},
 ```
 
-and the bar of the finest level with the safety factor $F_s$ (1.25 inside the asymptotic range $p \in [0.5, 4.0]$; 3.0 outside it). The linear refinement measure is the spanwise panel count.
-- The error estimate of the base mesh is $F_s \, |f_{\text{extrap}} - f_0|$ for a monotonic convergence, and $|f_1 - f_0|$ plus the bar of the finest level in the other states with a bar. This estimate goes to the trust notes when `panel_estimate_mesh_error` is set.
-- The dense LU work grows with the cube of the panel count, so the study costs $\sum_k (N_k / N_0)^3$ base solves, about $1 + 1.5^6 + 1.5^{12}$ for three levels at $r = 1.5$.
+and the bar of the finest level with the safety factor $F_s$ (1.25 inside the asymptotic range $p \in [0.5, 4.0]$; 3.0 outside it).
+- The error estimate of the base mesh in one direction is $e = F_s \, |f_{\text{extrap}} - f_0|$ for a monotonic convergence, and $|f_1 - f_0|$ plus the bar of the finest level in the other states with a bar. A divergent direction gives no estimate.
+- Separable error model. The error is modelled as the sum of a spanwise and a chordwise term,
+
+```{math}
+f(n_s, n_c) = f_\infty + a\, n_s^{-p_s} + b\, n_c^{-p_c}.
+```
+
+The chordwise Richardson value is then $R_c = f(n_{s,0}, \infty)$ and the spanwise one $R_s = f(\infty, n_{c,0})$, so the converged value is $f_\infty = R_c + R_s - f_0$. The error estimate of the base mesh is the sum of the two directional estimates, $e = e_c + e_s$. The base error is $f_0 - f_\infty = (f_0 - R_c) + (f_0 - R_s)$, and each directional estimate is at least the distance to its Richardson value, so under the model the sum bounds the base error also when the two errors have opposite signs. This estimate goes to the trust notes when `panel_estimate_mesh_error` is set (`MeshErrorEstimate`, with the convergence of each direction).
+- Cost. The study solves the base mesh and $L - 1$ more meshes in each direction ($L$ levels per direction; five meshes for three levels). A directional level multiplies the panel count by about $r$, and the dense LU work grows with the cube of the panel count. The study therefore costs $\sum_k (N_k / N_0)^3$ base solves over the solved meshes, about $1 + 2\,(r^3 + r^6)$ for three levels: about 30 at $r = 1.5$ (four levels add about $2 r^9$, about 107 in total).
+- Checks (`tests/test_panel3d_convergence.py`): a constructed separable function with errors of opposite sign (the limit and the orders are recovered exactly); a sphere refined in latitude and longitude against the exact potential flow (Cp max and the axial force of the upstream half: order near 2 in both directions, the Richardson value more than ten times closer to the exact value than the base value, and the estimate covers the exact error); a rectangular wing, whose estimate covers one more level in each direction.
 
 ## Solver interface
 
@@ -486,6 +495,7 @@ The 3D panel method implementation is verified by tests in the test suite:
 - B. Maskew, "Program VSAERO Theory Document: A Computer Program for Calculating the Non-Linear Aerodynamic Characteristics of Arbitrary Configurations", NASA Contractor Report 4023, 1987.
 - L. Morino and C. C. Kuo, "Subsonic Potential Aerodynamics for Complex Configurations: A General Theory", *AIAA Journal*, Vol. 12, No. 2, 1974, pp. 191-197.
 - J. N. Newman, "Distributions of Sources and Normal Dipoles Over a Quadrilateral Panel", *Journal of Engineering Mathematics*, Vol. 20, 1986, pp. 113-126.
+- L. F. Richardson and J. A. Gaunt, "The Deferred Approach to the Limit", *Philosophical Transactions of the Royal Society of London, Series A*, Vol. 226, 1927, pp. 299-361.
 - P. J. Roache, *Verification and Validation in Computational Science and Engineering*, Hermosa Publishers, Albuquerque, NM, 1998.
 - D. Shepard, "A Two-Dimensional Interpolation Function for Irregularly-Spaced Data", *Proceedings of the 23rd ACM National Conference*, 1968, pp. 517-524.
 - B. L. Stevens, F. L. Lewis and E. N. Johnson, *Aircraft Control and Simulation: Dynamics, Controls Design, and Autonomous Systems*, 3rd ed., John Wiley & Sons, Hoboken, NJ, 2016.

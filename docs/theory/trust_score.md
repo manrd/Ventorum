@@ -20,7 +20,7 @@ Every result carries a trust score from 0 to 1 and a rating (HIGH, MODERATE, LOW
 | `polar_range` | tabulated polars | A section angle outside the table uses the end values of the table | [Numerical lifting line](numerical_lifting_line.md) |
 | `side_edge_vortex` | vortex lattice | A wing of low aspect ratio at high angle of attack gets side-edge vortex lift, which potential flow does not model (Lamar 1974) | [Vortex-lattice method](vortex_lattice.md) |
 | `compressibility` | all | The methods are incompressible. The Mach number uses the speed of sound of the ISA atmosphere at the given air density | [Conventions](conventions.md) |
-| `ground_proximity` | all in ground effect | Thickness and viscous effects grow at small $h_\text{min}/c$; vortex-lattice panels longer than the gap | [Ground effect](ground_effect.md) |
+| `ground_proximity` | all in ground effect | Thickness and viscous effects grow at small $h_\text{min}/c$; chordwise panels longer than the gap (vortex lattice, 3D panel method) | [Ground effect](ground_effect.md) |
 | `numerical` | all | No convergence; a coarse spanwise mesh; a spanwise circulation with many local extrema | all |
 | `mesh_adequacy` | 3D panel method | Panel shape and validity: elongated or skewed panels (the median panel), warped panels, a mesh that is not watertight, folded (non-convex) panels | [Ventorum-3DP](panel3d.md) |
 | `mesh_resolution` | 3D panel method | Discretization error: the near-field and far-field drag differ, or the chordwise panel count is low | [Ventorum-3DP](panel3d.md) |
@@ -39,7 +39,7 @@ Error levels. A *warning* means a probable mesh error above 2 % in CL or above 4
 Indicators of the discretization error (factor `mesh_resolution`, the penalty of the worse level):
 
 - Near-field and far-field drag. In potential flow the pressure drag of the surface and the induced drag of the Trefftz plane are equal; on a mesh they differ. The rule compares `|CD_nearfield - CDi| / |CDi|` with a warning limit and a strong limit (`PANEL3D_DRAG_WARN_REL`, `PANEL3D_DRAG_STRONG_REL`). It does not act when the difference is below an absolute floor (`PANEL3D_DRAG_ABSOLUTE_FLOOR`): at zero lift both drags are zero and the relative difference has no meaning.
-- Chordwise panel count. The chordwise count controls most of the mesh error of CL and CDi. The rule compares `n_chord` with two minimum counts (`PANEL3D_N_CHORD_WARN`, `PANEL3D_N_CHORD_STRONG`). It acts only when the caller gives `n_chord`.
+- Chordwise panel count. The chordwise count controls most of the mesh error of CL and CDi. The rule compares `n_chord` with two minimum counts (`PANEL3D_N_CHORD_WARN`, `PANEL3D_N_CHORD_STRONG`). The panel solver gives its chordwise count per surface (`SolverSettings.n_chord`, or the default count of the solver). With the count, the ground rule "chordwise panels longer than the gap" (factor `ground_proximity`) also acts for the panel method, with the largest strip chord as for the vortex lattice.
 
 Panel shape and validity (factor `mesh_adequacy`, the penalties add):
 
@@ -51,7 +51,7 @@ Calibration method. Wings of different aspect ratio, taper, sweep, dihedral, sec
 
 Recalibration. Repeat the study with the new solver version: the same wing set, the same reference procedure and the same error limits of the two levels. Set each threshold again to the value with the largest balanced accuracy. Keep the error limits, so that the meaning of a warning does not change.
 
-Limits. The indicators give a probable error, not a bound. The thresholds hold for the cases of the study: attached flow, sections with a closed trailing edge, and the default chordwise (cosine) and spanwise spacings. For an error estimate of one result, use `panel_estimate_mesh_error` (Richardson extrapolation of three mesh levels, see [Ventorum-3DP](panel3d.md)).
+Limits. The indicators give a probable error, not a bound. The thresholds hold for the cases of the study: attached flow, sections with a closed trailing edge, and the default chordwise (cosine) and spanwise spacings. For an error estimate of one result, use `panel_estimate_mesh_error` (separate chordwise and spanwise Richardson extrapolations of three mesh levels each, added with a separable error model; see [Ventorum-3DP](ventorum_3dp.md), section *Mesh convergence and Richardson extrapolation*).
 
 ## Planned error-bar layers
 
