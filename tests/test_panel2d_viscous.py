@@ -442,3 +442,33 @@ def test_singular_matrix_case_returns_a_result():
         r = solve_viscous(coords, 0.0, 1e6, stall_window=0, divergence_factor=0.0, work_budget=0)
     assert r.converged or (r.reason and np.isnan(r.Cl))
     print(f"\n[viscous] singular case: converged {r.converged}, work {r.newton_iterations}, {r.reason}")
+
+
+def test_lm_trials_is_checked():
+    """lm_trials must be an integer of at least 1."""
+    c = _naca("0012", 60)
+    for value in (0, -1, 2.5):
+        with pytest.raises(ValueError, match="lm_trials"):
+            solve_viscous(c, 0.0, 1e6, lm_trials=value)
+
+
+def test_lm_trials_cap_after_a_failed_fallback(monkeypatch):
+    """The fallback tries LM_TRIALS damping values until one fallback step of the solve fails, then lm_trials."""
+    from ventorum.panel2d import vii
+    from ventorum.panel2d.viscous import prepare_case
+
+    calls = []
+
+    def no_decrease(*args):
+        calls.append(args[-1])
+        return None, 1e-3, args[-1]
+
+    monkeypatch.setattr(vii, "_lm_step", no_decrease)
+    monkeypatch.setattr(vii, "_limit_step", lambda *args: 0.0)
+    setup = prepare_case(_naca("0012", 60), 1.0, 1e6, ncrit=9.0, xtr=(1.0, 1.0), height=None,
+                         height_reference="pivot", wake_length=1.0, n_wake=30)
+    res = vii.newton_solve([setup], [vii.initial_state(setup)], max_iter=4, omega0=[1.0], stall_window=0,
+                           lm_trials=3)[0]
+    assert not res.converged
+    assert calls[0] == vii.LM_TRIALS and len(calls) > 1 and all(c == 3 for c in calls[1:]), calls
+    assert res.linear_solves == len(calls) + sum(calls)

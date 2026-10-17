@@ -62,7 +62,10 @@ both stagnation stops apply only while the smallest residual is above
 STALL_FLOOR times the tolerance (near the tolerance the residual can stall
 at the round-off level of float32 and still reach it); it
 stops with status "divergence" when, at omega = 1, the residual exceeds
-DIVERGENCE_FACTOR times its smallest earlier value.
+DIVERGENCE_FACTOR times its smallest earlier value. After a
+Levenberg-Marquardt step of a solve found no decrease, the later ones of
+that solve try at most ``lm_trials`` damping values instead of LM_TRIALS.
+A singular Newton matrix is a failed step (see :func:`newton_solve`).
 
 The same code runs with numpy (one case) and with torch (a batch of cases
 with the same node and wake counts, on the CPU or on CUDA).
@@ -96,6 +99,10 @@ STALL_ITERATIONS = 8
 TRANSITION_EVERY_ITERATION = True
 #: Newton step factor below which a Levenberg-Marquardt step is tried instead (path only) [-].
 LM_SWITCH = 1e-2
+#: Largest number of damping values (trials, one linear solve each) of one Levenberg-Marquardt step [-].
+LM_TRIALS = 12
+#: Default trials of a Levenberg-Marquardt step after a step of the same Newton solve found no decrease [-].
+LM_RETRY_TRIALS = 2
 #: Number of quasi-simultaneous sweeps of the second first estimate of a cold start (path only).
 QS_SWEEPS = 3
 #: Window of the stagnation stop [Newton iterations] (0 switches the stagnation stops off).
@@ -1075,13 +1082,14 @@ def _limit_step(setup, st, x0, d, ui, D, S, mask):
     return 0.0
 
 
-def _lm_step(be, setup, st, x0, J, R, r0, ui, D, S, mask, mu):
+def _lm_step(be, setup, st, x0, J, R, r0, ui, D, S, mask, mu, trials=LM_TRIALS):
     """Return a Levenberg-Marquardt step that decreases the residual, and the new damping.
 
     Solves (J^T J + mu diag(J^T J)) dx = -J^T R (Levenberg 1944; Marquardt
-    1963) and raises mu by 10 until the 2-norm of the residual decreases.
-    Returns (None, mu) when no step decreases it. The third value is the
-    number of linear solves.
+    1963) and raises mu by 10 until the 2-norm of the residual decreases,
+    with at most ``trials`` values of mu (one linear solve each). Returns
+    (None, mu) when no step decreases it. The third value is the number of
+    linear solves.
     """
     G = J.T @ J
     g = J.T @ R
@@ -1092,7 +1100,7 @@ def _lm_step(be, setup, st, x0, J, R, r0, ui, D, S, mask, mu):
     drop_g = np.array([st.drop] if st.drop >= 0 else [], dtype=int)
     one = be.arr(np.array([setup.re_l]))
     n_solves = 0
-    for _ in range(12):
+    for _ in range(int(trials)):
         n_solves += 1
         try:
             d = np.linalg.solve(G + mu * np.diag(dg), -g).reshape(-1, 3)
@@ -1205,7 +1213,7 @@ def _early_stop(res, level_min, smallest, no_step, at_one, stall_window, stall_f
 
 def newton_solve(setups, states, *, tol=1e-6, max_iter=50, xp=np, device=None, dtype=None, verbose=False,
                  omega0=None, stall_window=STALL_WINDOW, stall_factor=STALL_FACTOR,
-                 divergence_factor=DIVERGENCE_FACTOR):
+                 divergence_factor=DIVERGENCE_FACTOR, lm_trials=LM_RETRY_TRIALS):
     """Solve a batch of coupled cases by the global Newton method.
 
     Parameters
@@ -1242,6 +1250,11 @@ def newton_solve(setups, states, *, tol=1e-6, max_iter=50, xp=np, device=None, d
         Divergence stop: a case stops with status "divergence" when, at
         omega = 1, the residual exceeds this factor times its smallest
         earlier value [-]. 0 switches the rule off.
+    lm_trials : int
+        Largest number of damping values (one linear solve each) of a
+        Levenberg-Marquardt fallback step after a fallback step of the same
+        solve found no decrease of the residual [-], at least 1. The
+        fallback steps before that try LM_TRIALS values.
 
     Returns
     -------
@@ -1265,6 +1278,8 @@ def newton_solve(setups, states, *, tol=1e-6, max_iter=50, xp=np, device=None, d
     stops the cases that are not finished with status "singular". A
     singular matrix never raises an exception.
     """
+    if int(lm_trials) != lm_trials or lm_trials < 1:
+        raise ValueError(f"lm_trials must be an integer >= 1, got {lm_trials}.")
     be = _Backend(xp, device, dtype)
     nb = len(setups)
     results = [None] * nb
@@ -1277,6 +1292,7 @@ def newton_solve(setups, states, *, tol=1e-6, max_iter=50, xp=np, device=None, d
     best_res = np.full(nb, np.inf)
     best_it = np.zeros(nb, dtype=int)
     lm_mu = np.full(nb, 1e-3)
+    lm_failed = np.zeros(nb, dtype=bool)
     level_min = [[] for _ in range(nb)]
     level_omega = np.full(nb, np.nan)
     smallest = np.full(nb, np.inf)
@@ -1489,8 +1505,10 @@ def newton_solve(setups, states, *, tol=1e-6, max_iter=50, xp=np, device=None, d
                         J_h = be.host(J)
                         R_hk = be.host(R)
                     xn, lm_mu[i], n_lm = _lm_step(be, setups[i], states[i], X_h[k], J_h[k], R_hk[k], r0[k], ui_h[k],
-                                                  D_h[k], S_h[k], masks[k], lm_mu[i])
+                                                  D_h[k], S_h[k], masks[k], lm_mu[i],
+                                                  lm_trials if lm_failed[i] else LM_TRIALS)
                     n_lin[i] += n_lm
+                    lm_failed[i] = lm_failed[i] or xn is None
                     if xn is not None:
                         states[i].x = xn
                         no_step[i] = 0

@@ -103,12 +103,19 @@ class StopRules:
         Largest sum of Newton iterations over all attempts of one angle
         (warm start, halved angle steps and cold start) [-]. 0 means no
         budget.
+    lm_trials : int
+        Largest number of damping values (one linear solve each) of a
+        Levenberg-Marquardt fallback step of a Newton iteration after a
+        fallback step of the same Newton solve found no decrease of the
+        residual [-], at least 1 (the fallback steps before that try
+        :data:`ventorum.panel2d.vii.LM_TRIALS` values).
     """
 
     stall_window: int = vii.STALL_WINDOW
     stall_factor: float = vii.STALL_FACTOR
     divergence_factor: float = vii.DIVERGENCE_FACTOR
     work_budget: int = WORK_BUDGET
+    lm_trials: int = vii.LM_RETRY_TRIALS
 
     def __post_init__(self):
         if int(self.stall_window) != self.stall_window or self.stall_window < 0:
@@ -119,6 +126,8 @@ class StopRules:
             raise ValueError(f"divergence_factor must be 0 (off) or larger than 1, got {self.divergence_factor}.")
         if int(self.work_budget) != self.work_budget or self.work_budget < 0:
             raise ValueError(f"work_budget must be an integer >= 0, got {self.work_budget}.")
+        if int(self.lm_trials) != self.lm_trials or self.lm_trials < 1:
+            raise ValueError(f"lm_trials must be an integer >= 1, got {self.lm_trials}.")
 
 
 class _BudgetUsedUp(Exception):
@@ -356,7 +365,8 @@ def _solve_one(setup, start, tol, max_iter, omega0, bk=None, ctl=None):
     if cap <= 0:
         raise _BudgetUsedUp()
     res = vii.newton_solve([setup], [start], tol=tol, max_iter=cap, omega0=[omega0], stall_window=rules.stall_window,
-                           stall_factor=rules.stall_factor, divergence_factor=rules.divergence_factor, **bk)[0]
+                           stall_factor=rules.stall_factor, divergence_factor=rules.divergence_factor,
+                           lm_trials=rules.lm_trials, **bk)[0]
     if ctl is not None:
         ctl.add(setup, res, cap, max_iter)
     return res
@@ -428,6 +438,7 @@ def solve_viscous(
     stall_factor: float = vii.STALL_FACTOR,
     divergence_factor: float = vii.DIVERGENCE_FACTOR,
     work_budget: int = WORK_BUDGET,
+    lm_trials: int = vii.LM_RETRY_TRIALS,
 ) -> ViscousResult:
     """Solve 2D viscous flow with fully simultaneous boundary-layer coupling.
 
@@ -481,6 +492,14 @@ def solve_viscous(
     work_budget : int
         Largest sum of Newton iterations over all attempts of one angle
         [-]. 0 means no budget.
+    lm_trials : int
+        Largest number of damping values (one linear solve each) of a
+        Levenberg-Marquardt fallback step of a Newton iteration after a
+        fallback step of the same Newton solve found no decrease of the
+        residual [-], at least 1 (the fallback steps before that try
+        :data:`ventorum.panel2d.vii.LM_TRIALS` values). The angles that
+        converge do not depend on it in the test sample; it cuts the
+        linear solves of failed attempts.
 
     Returns
     -------
@@ -497,7 +516,7 @@ def solve_viscous(
     if not np.isfinite(Re) or Re <= 0.0:
         raise ValueError(f"Reynolds number must be positive, got {Re}.")
     rules = StopRules(stall_window=stall_window, stall_factor=stall_factor, divergence_factor=divergence_factor,
-                      work_budget=work_budget)
+                      work_budget=work_budget, lm_trials=lm_trials)
     body = _single_body(bodies)
     is_scalar = np.ndim(alpha_deg) == 0
     alphas = np.atleast_1d(np.asarray(alpha_deg, dtype=np.float64))

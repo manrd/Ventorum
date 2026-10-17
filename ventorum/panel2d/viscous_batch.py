@@ -89,6 +89,10 @@ class ViscousCase:
     work_budget : int
         Largest sum of Newton iterations over all attempts of one angle
         [-] (0: no budget).
+    lm_trials : int
+        Largest number of damping values (one linear solve each) of a
+        Levenberg-Marquardt fallback step after a fallback step of the same
+        Newton solve found no decrease [-], at least 1.
     """
 
     coordinates: np.ndarray
@@ -106,6 +110,7 @@ class ViscousCase:
     stall_factor: float = vii.STALL_FACTOR
     divergence_factor: float = vii.DIVERGENCE_FACTOR
     work_budget: int = vs.WORK_BUDGET
+    lm_trials: int = vii.LM_RETRY_TRIALS
 
 
 class ViscousBatchResult(list):
@@ -207,7 +212,7 @@ def _case(c) -> ViscousCase:
 def _rules(c: ViscousCase) -> vs.StopRules:
     """Return the stop rules of a case (ValueError for values out of range)."""
     return vs.StopRules(stall_window=c.stall_window, stall_factor=c.stall_factor,
-                        divergence_factor=c.divergence_factor, work_budget=c.work_budget)
+                        divergence_factor=c.divergence_factor, work_budget=c.work_budget, lm_trials=c.lm_trials)
 
 
 def _resolve(device, dtype):
@@ -228,7 +233,7 @@ def _seq_key(c: ViscousCase):
     xtr = (float(c.xtr[0]), float(c.xtr[1]))
     return (coords.tobytes(), coords.shape, float(c.Re), c.height, float(c.ncrit), xtr, float(c.wake_length),
             int(c.n_wake), int(c.max_iter), float(c.tol), int(c.stall_window), float(c.stall_factor),
-            float(c.divergence_factor), int(c.work_budget))
+            float(c.divergence_factor), int(c.work_budget), int(c.lm_trials))
 
 
 def solve_viscous_batch(cases, *, backend: str = "torch", device=None, dtype=None) -> ViscousBatchResult:
@@ -316,7 +321,8 @@ def _pass(items, bk, upward):
         cap = max_iter if rules.work_budget <= 0 else min(max_iter, rules.work_budget)
         results = vii.newton_solve([w[2] for w in grp], [w[3] for w in grp], tol=tol, max_iter=cap,
                                    omega0=[1.0] * len(grp), stall_window=rules.stall_window,
-                                   stall_factor=rules.stall_factor, divergence_factor=rules.divergence_factor, **bk)
+                                   stall_factor=rules.stall_factor, divergence_factor=rules.divergence_factor,
+                                   lm_trials=rules.lm_trials, **bk)
         for w, res in zip(grp, results):
             plan, alpha, setup, _ = w
             c = plan["case"]
