@@ -144,3 +144,38 @@ def test_batch_reference_chord_is_checked():
         warnings.simplefilter("ignore")
         r = solve_viscous_batch([case], device="cpu", dtype=torch.float64)
     assert not r.converged[0] and np.isnan(r.Cl[0])
+
+
+@pytest.mark.slow
+def test_batch_takes_shapes_and_reference_values():
+    """ViscousCase takes a flapped shape (undeflected reference) and explicit chord_ref and moment_ref.
+
+    The shape cases, the point-array cases with the undeflected chord and quarter-chord point given, and
+    the shape cases with another moment point form separate sequences; each equals the sequential solver
+    to 1e-8 (torch float64 on the CPU).
+    """
+    flapped = airfoil("0012", n_points=121).with_flap(x_hinge=0.75, deflection=3.0)
+    alphas = [0.0, 2.0]
+    cases = [ViscousCase(coordinates=flapped, alpha=a, Re=1e6, tol=TOL) for a in alphas]
+    cases += [ViscousCase(coordinates=flapped.coords, alpha=a, Re=1e6, tol=TOL, chord_ref=1.0,
+                          moment_ref=(0.25, 0.0)) for a in alphas]
+    cases += [ViscousCase(coordinates=flapped, alpha=a, Re=1e6, tol=TOL, moment_ref=(0.5, 0.1)) for a in alphas]
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        bat = solve_viscous_batch(cases, device="cpu", dtype=torch.float64)
+        seq = solve_viscous(flapped, alphas, 1e6, tol=TOL)
+        moved = solve_viscous(flapped, alphas, 1e6, tol=TOL, moment_ref=(0.5, 0.1))
+    assert np.all(bat.converged) and np.all(seq.converged)
+    for k, ref in ((0, seq), (2, seq), (4, moved)):
+        for i in range(2):
+            b = bat[k + i]
+            assert abs(b.Cl - ref.Cl[i]) < 1e-8 and abs(b.Cd - ref.Cd[i]) < 1e-8
+            assert abs(b.Cm - ref.Cm[i]) < 1e-8
+    assert np.max(np.abs(moved.Cm - seq.Cm)) > 1e-3
+
+
+def test_batch_moment_point_is_checked():
+    """A ViscousCase moment point that is not two finite numbers raises ValueError."""
+    coords = airfoil("0012").repanel(n_panels=80).coords
+    with pytest.raises(ValueError, match="moment_ref"):
+        solve_viscous_batch([ViscousCase(coordinates=coords, alpha=0.0, Re=1e6, moment_ref=(0.25,))])

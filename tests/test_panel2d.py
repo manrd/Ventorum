@@ -342,20 +342,157 @@ def test_backends_gpu():
     assert np.max(np.abs(f32.Cl.double().cpu().numpy() - fref.Cl)) < 1e-4
 
 
-def test_default_reference_chord_keeps_unit_sections_bit_for_bit():
-    """Unflapped NACA 0012: the default reference chord and moment point are the former ones, bit for bit.
+def _former_defaults(c):
+    """Return the former default reference values: chord, moment point (x_min + c/4, 0) and pivot."""
+    chord = sv.section_chord(c)
+    point = (float(np.min(c[:, 0])) + 0.25 * chord, 0.0)
+    return {"chord_ref": chord, "moment_ref": point, "pivot": point}
 
-    The default reference chord is the distance from the leading edge to the trailing-edge midpoint; for
-    this section it equals the former default (the x extent), 1. The moment point is the quarter chord.
+
+@pytest.mark.parametrize("code", ["0012", "2412"])
+def test_default_reference_keeps_unit_sections_bit_for_bit(code):
+    """Unflapped sections with the chord line on y = 0: the defaults give the former results, bit for bit.
+
+    NACA 0012 and 2412 as generated have the leading edge (the point farthest from the trailing-edge
+    midpoint) at (0, 0) and the trailing-edge midpoint at (1, 0). The default reference chord (their
+    distance) is the former default 1, and the default moment point and pivot (the quarter-chord point on
+    the chord line) are the former (x_min + c/4, 0) = (0.25, 0). Free air and ground effect; the array
+    path and the shape path give the same bits.
     """
-    c = airfoil("0012").repanel(n_panels=160).coords
-    assert sv.section_chord(c) == 1.0 == float(np.max(c[:, 0]) - np.min(c[:, 0]))
-    assert sv.reference_point(c, 1.0) == (0.25, 0.0)
+    shape = airfoil(code, n_points=161)
+    c = shape.coords
+    former = _former_defaults(c)
+    assert former["chord_ref"] == 1.0 and former["moment_ref"] == (0.25, 0.0)
+    assert sv.reference_point(c) == (0.25, 0.0) == sv.reference_point(shape)
     for kw in ({}, {"height": 0.5}):
-        new = solve_inviscid(c, [0.0, 4.0], **kw)
-        old = solve_inviscid(c, [0.0, 4.0], chord_ref=1.0, x_ref=(0.25, 0.0), pivot=(0.25, 0.0), **kw)
+        new = solve_inviscid(c, [-2.0, 0.0, 4.0], **kw)
+        via_shape = solve_inviscid(shape, [-2.0, 0.0, 4.0], **kw)
+        old = solve_inviscid(c, [-2.0, 0.0, 4.0], **former, **kw)
         for name in ("Cl", "Cl_pressure", "Cd_pressure", "Cm"):
             assert np.array_equal(getattr(new, name), getattr(old, name)), (kw, name)
+            assert np.array_equal(getattr(via_shape, name), getattr(old, name)), (kw, name)
+
+
+def test_default_reference_of_a_repaneled_section_is_on_its_chord_line():
+    """Repaneled NACA 0012: the chord line is y = 0 to round-off only, so the results agree to round-off.
+
+    The spline repaneling puts the leading-edge node at y = 2e-16, so the quarter-chord point on the
+    chord line has y of the same size (before: exactly 0). The coefficients agree with the former
+    defaults to 1e-12 and are the same bits as with the quarter-chord point of the chord line given.
+    """
+    c = airfoil("0012").repanel(n_panels=160).coords
+    ref = sv.section_reference(c)
+    assert sv.section_chord(c) == 1.0 == ref.chord_ref == float(np.max(c[:, 0]) - np.min(c[:, 0]))
+    point = sv.reference_point(c)
+    assert point == ref.quarter_chord
+    assert point[0] == 0.25 and abs(point[1]) < 1e-15
+    for kw in ({}, {"height": 0.5}):
+        new = solve_inviscid(c, [0.0, 4.0], **kw)
+        given = solve_inviscid(c, [0.0, 4.0], chord_ref=1.0, moment_ref=point, pivot=point, **kw)
+        old = solve_inviscid(c, [0.0, 4.0], **_former_defaults(c), **kw)
+        for name in ("Cl", "Cl_pressure", "Cd_pressure", "Cm"):
+            assert np.array_equal(getattr(new, name), getattr(given, name)), (kw, name)
+            assert np.allclose(getattr(new, name), getattr(old, name), rtol=0.0, atol=1e-12), (kw, name)
+
+
+def test_flapped_shape_gives_the_undeflected_reference_without_user_input():
+    """A flapped AirfoilShape gives the chord and the quarter-chord point of the undeflected section.
+
+    The solve of the flapped shape equals, bit for bit, the solve of its point array with the reference
+    chord and the moment point of the clean section given; in ground effect the pivot is that point too.
+    The point array alone uses the shorter, tilted chord line of the deflected outline.
+    """
+    clean = airfoil("2412", n_points=121)
+    flapped = clean.with_flap(x_hinge=0.75, deflection=10.0)
+    ref = clean.reference_geometry()
+    chord, point, pivot = sv.resolve_reference(flapped)
+    assert chord == ref.chord_ref == 1.0
+    assert point == pivot == ref.quarter_chord == (0.25, 0.0)
+    for kw in ({}, {"height": 0.6}):
+        via_shape = solve_inviscid(flapped, [0.0, 3.0], **kw)
+        given = solve_inviscid(flapped.coords, [0.0, 3.0], chord_ref=1.0, moment_ref=(0.25, 0.0),
+                               pivot=(0.25, 0.0), **kw)
+        for name in ("Cl", "Cl_pressure", "Cd_pressure", "Cm"):
+            assert np.array_equal(getattr(via_shape, name), getattr(given, name)), (kw, name)
+    own = sv.section_reference(flapped.coords)
+    assert own.chord_ref < 0.996 and own.quarter_chord[1] < -0.005
+    array_only = solve_inviscid(flapped.coords, 0.0)
+    shape_res = solve_inviscid(flapped, 0.0)
+    assert abs(array_only.Cl * own.chord_ref - shape_res.Cl * 1.0) < 1e-12
+
+
+def test_explicit_reference_values_win_over_everything():
+    """chord_ref and moment_ref win over the stored reference geometry; x_ref is an alias of moment_ref."""
+    flapped = airfoil("0012", n_points=121).with_flap(x_hinge=0.7, deflection=8.0)
+    chord, point = 0.8, (0.4, 0.05)
+    via_shape = solve_inviscid(flapped, [0.0, 4.0], chord_ref=chord, moment_ref=point)
+    via_array = solve_inviscid(flapped.coords, [0.0, 4.0], chord_ref=chord, moment_ref=point)
+    alias = solve_inviscid(flapped, [0.0, 4.0], chord_ref=chord, x_ref=point)
+    both = solve_inviscid(flapped, [0.0, 4.0], chord_ref=chord, x_ref=point, moment_ref=point)
+    for name in ("Cl", "Cl_pressure", "Cd_pressure", "Cm"):
+        assert np.array_equal(getattr(via_shape, name), getattr(via_array, name)), name
+        assert np.array_equal(getattr(alias, name), getattr(via_shape, name)), name
+        assert np.array_equal(getattr(both, name), getattr(via_shape, name)), name
+    default = solve_inviscid(flapped, [0.0, 4.0])
+    assert np.allclose(via_shape.Cl * chord, default.Cl * 1.0, rtol=0.0, atol=1e-12)
+    assert sv.resolve_reference(flapped, chord, point) == (chord, point, (0.25, 0.0))
+    with pytest.raises(ValueError, match="differ"):
+        solve_inviscid(flapped, 0.0, x_ref=(0.25, 0.0), moment_ref=point)
+    for bad in (0.0, -1.0, float("nan")):
+        with pytest.raises(ValueError, match="chord_ref"):
+            solve_inviscid(flapped, 0.0, chord_ref=bad)
+    for bad in ((0.25,), (0.25, float("inf")), "quarter"):
+        with pytest.raises(ValueError, match="moment_ref"):
+            solve_inviscid(flapped, 0.0, moment_ref=bad)
+
+
+@pytest.mark.parametrize("height", [None, 0.4])
+def test_moment_transfer_between_two_points(height):
+    """Cm about two points obeys the 2D moment transfer rule to 1e-12 (inviscid, free air and ground effect).
+
+    With the body-frame pressure force coefficients Cn = Cl_p cos(alpha) + Cd_p sin(alpha) (along +y)
+    and Ca = Cd_p cos(alpha) - Cl_p sin(alpha) (along +x), the nose-up moment about b is
+    Cm_b = Cm_a + (x_b - x_a) / c Cn - (y_b - y_a) / c Ca. At alpha = 0 and y_b = y_a this is
+    Cm_b = Cm_a + (x_b - x_a) / c Cl_pressure.
+    """
+    shape = airfoil("2412", n_points=121)
+    alphas = np.array([-3.0, 0.0, 2.0, 6.0])
+    kw = {} if height is None else {"height": height}
+    pa, pb = (0.25, 0.0), (0.6, -0.15)
+    ra = solve_inviscid(shape, alphas, moment_ref=pa, **kw)
+    rb = solve_inviscid(shape, alphas, moment_ref=pb, **kw)
+    for name in ("Cl", "Cl_pressure", "Cd_pressure"):
+        assert np.array_equal(getattr(ra, name), getattr(rb, name)), name
+    a = np.radians(alphas)
+    cn = ra.Cl_pressure * np.cos(a) + ra.Cd_pressure * np.sin(a)
+    ca = ra.Cd_pressure * np.cos(a) - ra.Cl_pressure * np.sin(a)
+    expected = ra.Cm + (pb[0] - pa[0]) * cn - (pb[1] - pa[1]) * ca
+    assert np.max(np.abs(rb.Cm - expected)) < 1e-12
+    r0 = solve_inviscid(shape, 0.0, moment_ref=(0.7, 0.0), **kw)
+    ra0 = solve_inviscid(shape, 0.0, **kw)
+    assert abs(r0.Cm - (ra0.Cm + 0.45 * ra0.Cl_pressure)) < 1e-12
+
+
+def test_section_shifted_in_y_gets_the_moment_point_on_its_chord_line():
+    """A section moved by (0.3, 0.2) has its default moment point and pivot at (0.55, 0.2).
+
+    Its coefficients equal those of the unmoved section to 1e-12, in free air and in ground effect (the
+    pivot is on the chord line, so the same height places the same geometry). The former point
+    (x_min + c/4, 0) lay 0.2 below the chord line.
+    """
+    shape = airfoil("2412", n_points=121)
+    moved = shape.coords + np.array([0.3, 0.2])
+    point = sv.reference_point(moved)
+    assert point == pytest.approx((0.55, 0.2), abs=1e-15)
+    assert sv.resolve_reference(moved)[2] == point
+    for kw in ({}, {"height": 0.5}):
+        base = solve_inviscid(shape.coords, [0.0, 5.0], **kw)
+        res = solve_inviscid(moved, [0.0, 5.0], **kw)
+        for name in ("Cl", "Cl_pressure", "Cd_pressure", "Cm"):
+            assert np.allclose(getattr(res, name), getattr(base, name), rtol=0.0, atol=1e-12), (kw, name)
+    # The former point is 0.2 below the chord line: about it, Cm differs by 0.2 Ca at 5 deg.
+    former = solve_inviscid(moved, 5.0, moment_ref=(0.55, 0.0))
+    assert abs(former.Cm - solve_inviscid(moved, 5.0).Cm) > 1e-3
 
 
 def test_coefficients_do_not_depend_on_scale_and_position():
@@ -386,7 +523,8 @@ def test_flap_against_glauert_on_the_original_chord():
     thickness factor of its own lift slope (Cl_alpha / 2 pi of the clean section; 1.05 for 6 % thickness).
     NACA 0006, 160 panels, hinge at 0.75 c, delta = 2 deg: measured deviations 0.6 % (lift) and 0.1 %
     (moment); limit 1 %. The deflected section is shorter than the reference chord: with its own chord as
-    the reference, Cl is larger by the chord ratio.
+    the reference, Cl is larger by the chord ratio. The flapped shape holds the undeflected reference
+    geometry, so it meets the same limits without the chord given.
     """
     x_h = 0.75
     delta = math.radians(2.0)
@@ -405,3 +543,8 @@ def test_flap_against_glauert_on_the_original_chord():
     own = solve_inviscid(flapped, 0.0)
     assert sv.section_chord(flapped) < chord
     assert abs(own.Cl * sv.section_chord(flapped) - res.Cl * chord) < 1e-12
+    # The flapped shape gives the undeflected chord and its quarter-chord point without user input.
+    via_shape = solve_inviscid(shape.with_flap(x_hinge=x_h, deflection=math.degrees(delta)), 0.0)
+    assert via_shape.Cl == res.Cl
+    assert abs(via_shape.Cl / thickness_factor / cl_glauert - 1.0) < 0.01
+    assert abs(via_shape.Cm / thickness_factor / cm_glauert - 1.0) < 0.01
