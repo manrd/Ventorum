@@ -2515,6 +2515,30 @@ def _flap_payload(flap: tuple[float, float, float] | None) -> dict[str, float] |
     return {"x_hinge": flap[0], "y_hinge": flap[1], "deflection_deg": flap[2]}
 
 
+def _parse_moment_ref(value: Any, props: dict[str, dict[str, Any]]) -> tuple[float, float] | None:
+    """Return the moment reference point [chord units] inside the bounds of its schema entry, or None."""
+    if value is None:
+        return None
+    prop = props["moment_ref"]
+    items = prop["items"]
+    pt = number_list(value, "moment_ref", min_len=prop["minItems"], max_len=prop["maxItems"],
+                     minimum=items["minimum"], maximum=items["maximum"])
+    return (pt[0], pt[1])
+
+
+def _reference_payload(shape: Any, chord_ref: float | None = None,
+                       moment_ref: tuple[float, float] | None = None) -> tuple[float, tuple[float, float], dict]:
+    """Return the reference chord, the moment point [chord units] and their payload for a shape.
+
+    Explicit values win; the defaults come from the reference geometry of
+    the shape (with a flap, the section before the deflection).
+    """
+    from ventorum.panel2d.solver import resolve_reference
+
+    chord, point, _ = resolve_reference(shape, chord_ref, moment_ref)
+    return chord, point, {"chord_ref": rnd(chord, 7), "moment_ref": [rnd(point[0], 7), rnd(point[1], 7)]}
+
+
 @_tool
 def airfoil_geometry(
     section: Any = None,
@@ -2540,7 +2564,9 @@ def airfoil_geometry(
     dict
         JSON-safe dictionary with the normalized coordinates (unit chord,
         Selig order), the thickness and camber with their positions, the
-        trailing-edge gap [chord] and the check problems.
+        trailing-edge gap [chord], the default reference chord [chord] and
+        moment reference point [chord] of a polar of this section (with a
+        flap, of the section before the deflection) and the check problems.
     """
     if section is None:
         raise InputError("missing required argument 'section'.")
@@ -2560,6 +2586,7 @@ def airfoil_geometry(
 
     t_max, x_t_max = out_shape.max_thickness()
     c_max, x_c_max = out_shape.max_camber()
+    _, _, ref_out = _reference_payload(out_shape)
     return {
         "status": "success",
         "name": str(out_shape.name),
@@ -2571,6 +2598,7 @@ def airfoil_geometry(
         "max_camber_x": rnd(x_c_max, 6),
         "trailing_edge_gap": rnd(out_shape.te_gap, 7),
         "flap": _flap_payload(flap_tup),
+        **ref_out,
         "problems": out_shape.problems(),
     }
 
@@ -2658,6 +2686,8 @@ def airfoil_polar(
     xtr_top: float = 1.0,
     xtr_bottom: float = 1.0,
     max_iter: int | None = None,
+    chord_ref: float | None = None,
+    moment_ref: list[float] | None = None,
 ) -> dict[str, Any]:
     """Lift, drag and pitching moment polar of an airfoil section.
 
@@ -2690,13 +2720,24 @@ def airfoil_polar(
     max_iter : int, optional
         Viscous iterations per angle [-]. Default 50 (ventorum2d) or 100
         (xfoil).
+    chord_ref : float, optional
+        Reference chord of the coefficients and of the Reynolds number,
+        in chords of the section [-]. Default: the chord of the section;
+        with a flap, the chord before the deflection. Only with
+        ``source="ventorum2d"``.
+    moment_ref : list of float, optional
+        Moment reference point [x, y] in chords [-], in the frame of the
+        normalized section. Default: the quarter-chord point on the chord
+        line (with a flap, of the section before the deflection). Only
+        with ``source="ventorum2d"``.
 
     Returns
     -------
     dict
         JSON-safe payload with ``alpha_deg``, ``Cl``, ``Cd``, ``Cm``,
-        ``transition_positions``, ``converged``, ``source``, ``options``
-        and ``warnings``.
+        ``transition_positions``, ``converged``, ``source``, ``chord_ref``
+        and ``moment_ref`` (the values used; null for XFOIL),
+        ``options`` and ``warnings``.
     """
     from ventorum.aero.polar_cache import PolarCache
     from ventorum.aero.polar_source import XfoilPolarSource
@@ -2718,6 +2759,8 @@ def airfoil_polar(
     xtr_bottom_val = _prop_number(xtr_bottom, "xtr_bottom", props)
     iters = AIRFOIL_DEFAULT_MAX_ITER[src_name] if max_iter is None else _prop_integer(
         max_iter, "max_iter", props)
+    chord_in = None if chord_ref is None else _prop_number(chord_ref, "chord_ref", props)
+    moment_in = _parse_moment_ref(moment_ref, props)
 
     n_solves = len(alphas)  # one flap and one height per call
     _check_airfoil_work(n_solves, iters, n_pan)
@@ -2726,6 +2769,9 @@ def airfoil_polar(
     if src_name == "xfoil":
         if h_val is not None:
             raise ValidityError("XFOIL has no ground effect (h_c). Use source='ventorum2d'.")
+        if chord_in is not None or moment_in is not None:
+            raise ValidityError("chord_ref and moment_ref apply to source='ventorum2d' only; XFOIL uses its "
+                                "own reference values.")
         exe = resolve_xfoil_executable()
         if xfoil_version(exe) == "unknown":
             raise InputError(
@@ -2755,18 +2801,20 @@ def airfoil_polar(
                                 "timeout")},
                     "version": info["version"]}
         warns: list[str] = []
+        ref_out: dict[str, Any] = {"chord_ref": None, "moment_ref": None}
     else:
         solved = shape.repanel(n_panels=n_pan)
-        # Reference chord: the chord of the section before the flap deflection.
-        chord_ref = solved.chord
+        # The flapped shape holds the reference geometry of the section before the deflection.
         if flap_tup is not None:
             solved = solved.with_flap(x_hinge=flap_tup[0], deflection=flap_tup[2], y_hinge=flap_tup[1])
+        chord_used, moment_used, ref_out = _reference_payload(solved, chord_in, moment_in)
         res = solve_viscous(
-            solved.coords,
+            solved,
             np.asarray(alphas, dtype=float),
             re_val,
             mach=0.0,
-            chord_ref=chord_ref,
+            chord_ref=chord_used,
+            moment_ref=moment_used,
             ncrit=ncrit_val,
             xtr=(xtr_top_val, xtr_bottom_val),
             height=h_val,
@@ -2816,6 +2864,7 @@ def airfoil_polar(
         "Re": re_val,
         "h_c": h_val,
         "flap": _flap_payload(flap_tup),
+        **ref_out,
         "options": opts_out,
         "warnings": warns,
     }

@@ -111,6 +111,11 @@ MAX_AIRFOIL_INPUT_POINTS = 2000
 MAX_AIRFOIL_TEXT_CHARS = 200_000
 #: Run-time limit of each XFOIL start of the polar tool [s]. Fixed by the server.
 AIRFOIL_XFOIL_TIMEOUT_S = 120.0
+#: Smallest and largest reference chord of the polar tool, in chords of the section [-].
+MIN_AIRFOIL_CHORD_REF = 0.1
+MAX_AIRFOIL_CHORD_REF = 10.0
+#: Largest absolute coordinate of the moment reference point of the polar tool, in chords [-].
+MAX_AIRFOIL_MOMENT_REF = 10.0
 
 _SECTION_PROP = {
     "type": "string",
@@ -173,6 +178,20 @@ AIRFOIL_POLAR_PROPS: dict[str, dict[str, Any]] = {
                        minimum=0.0, maximum=1.0),
     "max_iter": _int("Viscous iterations per angle [-]. Default 50 (ventorum2d) or 100 (xfoil).",
                      minimum=1, maximum=MAX_AIRFOIL_ITER),
+    "chord_ref": _num("Reference chord of the coefficients and of the Reynolds number, in chords of the "
+                      "section [-]. Default: the chord of the section (with a flap, the chord before the "
+                      "deflection). Only source 'ventorum2d'.",
+                      minimum=MIN_AIRFOIL_CHORD_REF, maximum=MAX_AIRFOIL_CHORD_REF),
+    "moment_ref": {
+        "type": "array",
+        "items": {"type": "number", "minimum": -MAX_AIRFOIL_MOMENT_REF, "maximum": MAX_AIRFOIL_MOMENT_REF},
+        "minItems": 2,
+        "maxItems": 2,
+        "description": "Moment reference point [x, y] in chords [-], in the frame of the normalized section "
+                       "(leading edge at the origin, trailing-edge midpoint at (1, 0)). Default: the "
+                       "quarter-chord point on the chord line (with a flap, of the section before the "
+                       "deflection). Only source 'ventorum2d'.",
+    },
 }
 
 

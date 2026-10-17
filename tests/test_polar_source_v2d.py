@@ -63,8 +63,9 @@ def fake_solver(monkeypatch):
     calls: list[dict] = []
 
     def fake_solve(bodies, alpha_deg, Re, **kwargs):
-        calls.append({"bodies": np.asarray(bodies), "alpha_deg": np.asarray(alpha_deg),
-                      "Re": Re, **kwargs})
+        # The source passes an AirfoilShape (with its reference geometry): record both.
+        calls.append({"bodies": np.asarray(getattr(bodies, "coords", bodies)), "shape": bodies,
+                      "alpha_deg": np.asarray(alpha_deg), "Re": Re, **kwargs})
         return _fake_viscous_result(alpha_deg, kwargs.get("height"))
 
     monkeypatch.setattr(module, "solve_viscous", fake_solve)
@@ -271,8 +272,12 @@ def test_coordinate_file_section_is_keyed_by_its_points(tmp_path, fake_solver):
 
 
 def test_flap_uses_the_undeflected_chord(fake_solver):
-    """The reference chord of a flapped section is the chord before the deflection; it is not an option."""
-    from ventorum.panel2d.solver import section_chord
+    """The reference chord and moment point of a flapped section are those of the section before the deflection.
+
+    The source passes the flapped shape, which holds the reference geometry of the undeflected section;
+    the solver takes its defaults from it. Explicit chord_ref and moment_ref are options that win.
+    """
+    from ventorum.panel2d.solver import resolve_reference, section_chord
 
     source = Ventorum2DPolarSource(cache=False, n_panels=100)
     source.polar("naca 0012", 1e6, [2.0], flap=(0.75, 0.5, 20.0))
@@ -280,11 +285,44 @@ def test_flap_uses_the_undeflected_chord(fake_solver):
     source.polar("naca 0012", 1e6, [2.0])
     clean = fake_solver[-1]
     chord = airfoil("naca 0012", n_points=101).chord
-    assert flapped["chord_ref"] == clean["chord_ref"] == chord
+    assert resolve_reference(flapped["shape"]) == resolve_reference(clean["shape"]) == (chord, (0.25, 0.0),
+                                                                                          (0.25, 0.0))
+    assert "chord_ref" not in flapped and "moment_ref" not in flapped
     # The deflected section is about 1.1 % shorter (20 deg flap of 0.25 chord).
     assert section_chord(flapped["bodies"]) < 0.99 * chord
-    with pytest.raises(ValueError, match="Unknown Ventorum-2D option"):
-        source.polar("naca 0012", 1e6, [0.0], chord_ref=0.5)
+    source.polar("naca 0012", 1e6, [0.0], flap=(0.75, 0.5, 20.0), chord_ref=0.5, moment_ref=(0.3, 0.01))
+    assert fake_solver[-1]["chord_ref"] == 0.5 and fake_solver[-1]["moment_ref"] == (0.3, 0.01)
+
+
+def test_reference_options_are_in_the_cache_key(tmp_path, fake_solver):
+    """chord_ref and moment_ref are options of the polar: each value solves again and is read back."""
+    source = Ventorum2DPolarSource(cache=PolarCache(tmp_path), n_panels=80)
+    source.polar("naca 0012", 1e6, [0.0, 2.0])
+    assert len(fake_solver) == 1
+    source.polar("naca 0012", 1e6, [0.0, 2.0], chord_ref=None, moment_ref=None)
+    assert len(fake_solver) == 1
+    source.polar("naca 0012", 1e6, [0.0, 2.0], chord_ref=2.0)
+    assert len(fake_solver) == 2 and fake_solver[-1]["chord_ref"] == 2.0
+    source.polar("naca 0012", 1e6, [0.0, 2.0], chord_ref=2)
+    assert len(fake_solver) == 2
+    source.polar("naca 0012", 1e6, [0.0, 2.0], moment_ref=(0.5, 0.0))
+    assert len(fake_solver) == 3 and fake_solver[-1]["moment_ref"] == (0.5, 0.0)
+    source.polar("naca 0012", 1e6, [0.0, 2.0], moment_ref=[0.5, 0.0])
+    assert len(fake_solver) == 3
+    source.polar("naca 0012", 1e6, [0.0, 2.0], moment_ref=(0.5, 0.1))
+    assert len(fake_solver) == 4
+    assert source.describe(chord_ref=2.0)["options"]["chord_ref"] == 2.0
+    # A shape with a stored reference geometry is keyed by it too.
+    shape = airfoil("naca 0012", n_points=81)
+    flapped_ref = shape.with_flap(x_hinge=0.75, deflection=0.0)
+    source.polar(shape, 1e6, [0.0, 2.0])
+    assert len(fake_solver) == 5
+    source.polar(flapped_ref, 1e6, [0.0, 2.0])
+    assert len(fake_solver) == 6
+    for bad in ({"chord_ref": 0.0}, {"chord_ref": -1.0}, {"moment_ref": (0.25,)}, {"moment_ref": (0.2, np.nan)}):
+        with pytest.raises(ValueError, match=next(iter(bad))):
+            source.polar("naca 0012", 1e6, [0.0], **bad)
+    assert len(fake_solver) == 6
 
 
 def test_nan_loads_of_failed_angles_are_dropped(monkeypatch):

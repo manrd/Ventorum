@@ -5,6 +5,11 @@ The script builds a NACA 2412 section, deflects a plain flap about a hinge
 at 75 percent chord, solves the 2D inviscid flow at 5 deg angle of attack,
 and saves the geometry picture and the Cp picture (flapped section against
 the clean section) as PNG files in the output folder.
+
+The solver gets the shapes, not their point arrays: the flapped shape
+holds the reference geometry of the clean section, so its coefficients
+use the chord of the undeflected section and its quarter-chord point (the
+reference of thin-airfoil theory, Glauert 1927).
 """
 
 import argparse
@@ -53,8 +58,11 @@ def main(outdir=None):
     clean = AirfoilShape.naca("2412", n_points=161)
     flapped = clean.with_flap(x_hinge=0.75, deflection=15.0)
     alpha_deg = 5.0
-    res_clean = solve_inviscid(clean.coords, alpha_deg, backend="numpy")
-    res_flap = solve_inviscid(flapped.coords, alpha_deg, backend="numpy")
+    res_clean = solve_inviscid(clean, alpha_deg, backend="numpy")
+    res_flap = solve_inviscid(flapped, alpha_deg, backend="numpy")
+    ref = flapped.reference_geometry()
+    print(f"Reference chord {ref.chord_ref:.4f}, moment point "
+          f"({ref.quarter_chord[0]:.4f}, {ref.quarter_chord[1]:.4f})")
 
     print(f"NACA 2412 clean:  Cl = {float(res_clean.Cl):.4f}, "
           f"Cm = {float(res_clean.Cm):.4f}")
