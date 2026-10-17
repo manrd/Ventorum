@@ -51,6 +51,16 @@ change in the last two evaluations. The residuals are relative (logarithmic
 differences and ratios), except the amplification equation, which is
 absolute in N.
 
+Early stops (fail fast; they change the work of a failed solve, not a
+converged solution): a case stops with status "stagnation" when its
+smallest residual has not fallen by the factor STALL_FACTOR in the last
+STALL_WINDOW iterations (the window starts again when omega changes and,
+at omega = 1, when the structure changes), or when, at omega = 1, the line
+search and the Levenberg-Marquardt fallback both fail twice on the same
+state and structure (the iteration would then repeat itself exactly); it
+stops with status "divergence" when, at omega = 1, the residual exceeds
+DIVERGENCE_FACTOR times its smallest earlier value.
+
 The same code runs with numpy (one case) and with torch (a batch of cases
 with the same node and wake counts, on the CPU or on CUDA).
 """
@@ -85,6 +95,12 @@ TRANSITION_EVERY_ITERATION = True
 LM_SWITCH = 1e-2
 #: Number of quasi-simultaneous sweeps of the second first estimate of a cold start (path only).
 QS_SWEEPS = 3
+#: Window of the stagnation stop [Newton iterations] (0 switches the stagnation stops off).
+STALL_WINDOW = 12
+#: Factor by which the smallest residual must fall within STALL_WINDOW iterations [-].
+STALL_FACTOR = 0.5
+#: Growth of the residual over its smallest value at omega = 1 that stops a solve as divergent [-] (0: off).
+DIVERGENCE_FACTOR = 1e4
 
 
 @dataclass
@@ -164,7 +180,30 @@ class CaseState:
 
 @dataclass
 class NewtonResult:
-    """Outcome of a Newton solve of one case."""
+    """Outcome of a Newton solve of one case.
+
+    Attributes
+    ----------
+    state : CaseState
+        Final state.
+    ue : np.ndarray
+        Station edge velocities of the final state [-].
+    converged : bool
+        True when the convergence test is met.
+    iterations : int
+        Newton iterations (evaluations of the residual and the Jacobian
+        after the first one).
+    residual : float
+        Largest absolute residual of the final iterate [-].
+    reason : str
+        Convergence status or failure reason.
+    linear_solves : int
+        Solves of the Newton or Levenberg-Marquardt linear system (size
+        three times the station count).
+    status : str
+        "converged", "stagnation", "divergence", "not_finite" or
+        "max_iter".
+    """
 
     state: CaseState
     ue: np.ndarray
@@ -172,6 +211,8 @@ class NewtonResult:
     iterations: int
     residual: float
     reason: str
+    linear_solves: int = 0
+    status: str = ""
 
 
 # ---------------------------------------------------------------------------
@@ -977,7 +1018,8 @@ def _lm_step(be, setup, st, x0, J, R, r0, ui, D, S, mask, mu):
 
     Solves (J^T J + mu diag(J^T J)) dx = -J^T R (Levenberg 1944; Marquardt
     1963) and raises mu by 10 until the 2-norm of the residual decreases.
-    Returns (None, mu) when no step decreases it.
+    Returns (None, mu) when no step decreases it. The third value is the
+    number of linear solves.
     """
     G = J.T @ J
     g = J.T @ R
@@ -987,7 +1029,9 @@ def _lm_step(be, setup, st, x0, J, R, r0, ui, D, S, mask, mu):
     drop_b = np.array([0] if st.drop >= 0 else [], dtype=int)
     drop_g = np.array([st.drop] if st.drop >= 0 else [], dtype=int)
     one = be.arr(np.array([setup.re_l]))
+    n_solves = 0
     for _ in range(12):
+        n_solves += 1
         try:
             d = np.linalg.solve(G + mu * np.diag(dg), -g).reshape(-1, 3)
         except np.linalg.LinAlgError:
@@ -1001,9 +1045,9 @@ def _lm_step(be, setup, st, x0, J, R, r0, ui, D, S, mask, mu):
             rn = float(np.sqrt(np.sum(be.host(Rt) ** 2)))
             ue_t = be.host(UEt)[0]
             if np.isfinite(rn) and rn < r0 and np.all(ue_t[mask] > 0.0):
-                return xt, max(mu * 0.1, 1e-12)
+                return xt, max(mu * 0.1, 1e-12), n_solves
         mu *= 10.0
-    return None, 1e-3
+    return None, 1e-3, n_solves
 
 
 def _freeze_cycles(hist, setup: CaseSetup, st: CaseState):
@@ -1044,8 +1088,57 @@ def _freeze_cycles(hist, setup: CaseSetup, st: CaseState):
     return moved
 
 
+def _early_stop(res, level_min, smallest, no_step, at_one, stall_window, stall_factor, divergence_factor):
+    """Return (status, reason) of an early stop of a Newton solve, or None.
+
+    Parameters
+    ----------
+    res : float
+        Largest absolute residual of the current iterate [-].
+    level_min : list of float
+        Running minimum of the residual since the last change of omega (or,
+        at omega = 1, of the structure), the current evaluation last [-].
+    smallest : float
+        Smallest residual of the earlier evaluations at omega = 1 [-]
+        (inf when there is none).
+    no_step : int
+        Consecutive iterations without a step (the line search and the
+        Levenberg-Marquardt fallback both failed) on the same structure.
+    at_one : bool
+        True when omega = 1.
+    stall_window : int
+        Window of the stagnation rule [iterations] (0: both stagnation
+        rules off).
+    stall_factor : float
+        Factor by which the smallest residual must fall in the window [-].
+    divergence_factor : float
+        Growth over the smallest earlier residual at omega = 1 that is
+        divergence [-] (0: off).
+
+    Returns
+    -------
+    tuple of str or None
+        The status ("stagnation" or "divergence") and the reason text.
+    """
+    if stall_window > 0 and at_one and no_step >= 2:
+        # Two failed steps on the same state and structure: the next
+        # iterations repeat the last one exactly (fixed point of the loop).
+        return "stagnation", (f"stagnation: neither the Newton line search nor the Levenberg-Marquardt fallback "
+                              f"reduces the residual (largest residual {res:.3e})")
+    if divergence_factor > 0.0 and at_one and res > divergence_factor * smallest:
+        return "divergence", (f"divergence: the residual grew to more than {divergence_factor:g} times its "
+                              f"smallest value (largest residual {res:.3e})")
+    if (stall_window > 0 and len(level_min) > stall_window
+            and level_min[-1] > stall_factor * level_min[-1 - stall_window]):
+        where = "on the same structure" if at_one else "at a coupling factor omega below 1"
+        return "stagnation", (f"stagnation: the smallest residual did not fall by the factor {stall_factor:g} in "
+                              f"{stall_window} Newton iterations {where} (largest residual {res:.3e})")
+    return None
+
+
 def newton_solve(setups, states, *, tol=1e-6, max_iter=50, xp=np, device=None, dtype=None, verbose=False,
-                 omega0=None):
+                 omega0=None, stall_window=STALL_WINDOW, stall_factor=STALL_FACTOR,
+                 divergence_factor=DIVERGENCE_FACTOR):
     """Solve a batch of coupled cases by the global Newton method.
 
     Parameters
@@ -1068,11 +1161,31 @@ def newton_solve(setups, states, *, tol=1e-6, max_iter=50, xp=np, device=None, d
         Start value of the coupling factor per case: 1/64 for a first
         estimate from a direct march (cold start), 1 for a converged
         neighbouring solution (warm start). Default: 1/64 for all.
+    stall_window : int
+        Stagnation stop: a case stops with status "stagnation" when its
+        smallest residual has not fallen by the factor ``stall_factor`` in
+        the last ``stall_window`` iterations [-]. The window starts again
+        when omega changes and, at omega = 1, when the structure changes. 0
+        switches the stagnation stops off.
+    stall_factor : float
+        Factor of the stagnation stop [-], in (0, 1).
+    divergence_factor : float
+        Divergence stop: a case stops with status "divergence" when, at
+        omega = 1, the residual exceeds this factor times its smallest
+        earlier value [-]. 0 switches the rule off.
 
     Returns
     -------
     list of NewtonResult
         One result per case, in input order.
+
+    Notes
+    -----
+    A case also stops with status "stagnation" when the line search and
+    the Levenberg-Marquardt fallback both fail twice in a row on the same
+    structure: the following iterations would repeat the last one exactly.
+    The stop rules change the work of a failed solve, not a converged
+    solution.
     """
     be = _Backend(xp, device, dtype)
     nb = len(setups)
@@ -1086,6 +1199,11 @@ def newton_solve(setups, states, *, tol=1e-6, max_iter=50, xp=np, device=None, d
     best_res = np.full(nb, np.inf)
     best_it = np.zeros(nb, dtype=int)
     lm_mu = np.full(nb, 1e-3)
+    level_min = [[] for _ in range(nb)]
+    level_omega = np.full(nb, np.nan)
+    smallest = np.full(nb, np.inf)
+    no_step = np.zeros(nb, dtype=int)
+    n_lin = np.zeros(nb, dtype=int)
 
     sens = {}
 
@@ -1153,6 +1271,9 @@ def newton_solve(setups, states, *, tol=1e-6, max_iter=50, xp=np, device=None, d
             for k, i in enumerate(active):
                 if not ok[k]:
                     omega[i] = keep[i]
+                if keep[i] < 1.0:
+                    # omega or the structure can change here: the failed-step count starts again.
+                    no_step[i] = 0
         changed = np.zeros(len(active), dtype=bool)
         if it > 0:
             ue_inv, D, X, re_b, masks, _, _, S = assemble(active, refresh=False)
@@ -1199,17 +1320,39 @@ def newton_solve(setups, states, *, tol=1e-6, max_iter=50, xp=np, device=None, d
             if res[k] < 0.5 * best_res[i]:
                 best_res[i] = res[k]
                 best_it[i] = it
+            # Stop-rule bookkeeping: the stagnation window starts again when
+            # omega changes, and at omega = 1 also when the structure changes
+            # (a different discrete problem). Below omega = 1 the transition
+            # intervals are not frozen and can alternate without end, so a
+            # structure change does not restart the window there.
+            if omega[i] != level_omega[i] or (changed[k] and omega[i] == 1.0):
+                level_min[i] = []
+                level_omega[i] = omega[i]
+                no_step[i] = 0
+            lm = level_min[i]
+            lm.append(min(float(res[k]), lm[-1]) if lm else float(res[k]))
+            at_one = omega[i] == 1.0
+            stop = _early_stop(float(res[k]), lm, smallest[i], int(no_step[i]), at_one, stall_window, stall_factor,
+                               divergence_factor)
+            if at_one:
+                smallest[i] = min(smallest[i], float(res[k]))
             if omega[i] == 1.0 and res[k] < tol and not changed[k] and not changed_prev[i]:
-                results[i] = NewtonResult(states[i], ue_h[k], True, it, float(res[k]), "converged")
+                results[i] = NewtonResult(states[i], ue_h[k], True, it, float(res[k]), "converged",
+                                          int(n_lin[i]), "converged")
                 done.append(k)
             elif not np.isfinite(res[k]):
                 results[i] = NewtonResult(states[i], ue_h[k], False, it, float(res[k]),
-                                          "the residual is not finite (a closure left its range)")
+                                          "the residual is not finite (a closure left its range)", int(n_lin[i]),
+                                          "not_finite")
+                done.append(k)
+            elif stop is not None and it < max_iter:
+                results[i] = NewtonResult(states[i], ue_h[k], False, it, float(res[k]), stop[1], int(n_lin[i]),
+                                          stop[0])
                 done.append(k)
             elif it == max_iter:
                 results[i] = NewtonResult(states[i], ue_h[k], False, it, float(res[k]),
                                           f"no convergence to tol={tol:g} in {max_iter} Newton iterations "
-                                          f"(largest residual {res[k]:.3e})")
+                                          f"(largest residual {res[k]:.3e})", int(n_lin[i]), "max_iter")
                 done.append(k)
             changed_prev[i] = changed[k]
         keep = [k for k in range(len(active)) if k not in done]
@@ -1246,27 +1389,34 @@ def newton_solve(setups, states, *, tol=1e-6, max_iter=50, xp=np, device=None, d
                         lam[k] *= 0.5
         J_h = None
         for k, i in enumerate(active):
+            n_lin[i] += 1
             if accept[k] and lam[k] >= LM_SWITCH:
                 states[i].x = X_h[k] + lam[k] * dx_h[k]
                 lm_mu[i] = max(lm_mu[i] * 0.1, 1e-12)
+                no_step[i] = 0
             else:
                 # The Newton direction makes little progress (a near-singular
                 # Jacobian): Levenberg-Marquardt steps instead.
                 if J_h is None:
                     J_h = be.host(J)
                     R_hk = be.host(R)
-                xn, lm_mu[i] = _lm_step(be, setups[i], states[i], X_h[k], J_h[k], R_hk[k], r0[k], ui_h[k],
-                                        D_h[k], S_h[k], masks[k], lm_mu[i])
+                xn, lm_mu[i], n_lm = _lm_step(be, setups[i], states[i], X_h[k], J_h[k], R_hk[k], r0[k], ui_h[k],
+                                              D_h[k], S_h[k], masks[k], lm_mu[i])
+                n_lin[i] += n_lm
                 if xn is not None:
                     states[i].x = xn
+                    no_step[i] = 0
                 elif accept[k]:
                     states[i].x = X_h[k] + lam[k] * dx_h[k]
+                    no_step[i] = 0
+                else:
+                    no_step[i] += 1
             if verbose:
                 print(f"   case {i} step {lam[k]:.3e} accepted {bool(accept[k])} mu {lm_mu[i]:.1e}")
     for i in range(nb):
         if results[i] is None:
             results[i] = NewtonResult(states[i], np.zeros(setups[i].n_st), False, max_iter, float(last_res[i]),
-                                      "no convergence")
+                                      "no convergence", int(n_lin[i]), "max_iter")
     return results
 
 
