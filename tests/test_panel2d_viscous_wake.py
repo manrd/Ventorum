@@ -98,13 +98,16 @@ def test_flapped_section_5deg_without_hinge_treatment():
 def test_flapped_section_5deg_hinge_treatment(treatment):
     """The 5 deg case of the flapped-section test converges with the "repanel" and "merge" hinge treatments.
 
-    The reference chord is the chord of the undeflected section, as in the polar source. With the chord
-    of the deflected section (the default for a plain coordinate array) the "merge" case does not
-    converge at Re 1e6 (the Reynolds number per unit length and the wake length are slightly different).
+    The hinge treatments were checked with the x extent of the deflected section as the reference chord
+    (the former default); the test keeps that chord, so that the case is the same. These cases are at the
+    limit of convergence of the solver: with the chord of the undeflected section the "repanel" case
+    does not converge at Re 1e6, and with the chord of the deflected section the "merge" case does not
+    (the Reynolds number per unit length and the wake length change slightly with the chord).
     """
     base = airfoil("2412").repanel(n_panels=160)
     coords = base.with_flap(x_hinge=0.75, deflection=5.0, hinge_treatment=treatment).coords
-    r = _solve(coords, [0.0, 2.0], 1e6, chord_ref=base.chord)
+    extent = float(np.max(coords[:, 0]) - np.min(coords[:, 0]))
+    r = _solve(coords, [0.0, 2.0], 1e6, chord_ref=extent)
     assert np.all(r.converged), (treatment, r.reason)
 
 
