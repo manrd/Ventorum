@@ -269,13 +269,16 @@ def test_slow_case_still_converges(code, defl):
     if defl:
         # The sample that set the defaults used the outline as constructed.
         shape = shape.with_flap(x_hinge=0.75, deflection=defl, hinge_treatment="none")
+    # The sample that set the defaults used the x extent of the section as the reference chord.
+    extent = float(np.max(shape.coords[:, 0]) - np.min(shape.coords[:, 0]))
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
-        on = solve_viscous(shape.coords, 0.0, 1e6)
+        on = solve_viscous(shape.coords, 0.0, 1e6, chord_ref=extent)
         assert on.converged, on.reason
         assert on.newton_iterations >= 40
         if defl == 0.0:
-            off = solve_viscous(shape.coords, 0.0, 1e6, stall_window=0, divergence_factor=0.0, work_budget=0)
+            off = solve_viscous(shape.coords, 0.0, 1e6, stall_window=0, divergence_factor=0.0, work_budget=0,
+                                chord_ref=extent)
             assert off.converged
             assert on.Cl == off.Cl and on.Cd == off.Cd and on.Cm == off.Cm
             assert on.newton_iterations == off.newton_iterations

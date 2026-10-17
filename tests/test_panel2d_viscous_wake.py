@@ -96,10 +96,15 @@ def test_flapped_section_5deg_without_hinge_treatment():
 @pytest.mark.slow
 @pytest.mark.parametrize("treatment", ["repanel", "merge"])
 def test_flapped_section_5deg_hinge_treatment(treatment):
-    """The 5 deg case of the flapped-section test converges with the "repanel" and "merge" hinge treatments."""
+    """The 5 deg case of the flapped-section test converges with the "repanel" and "merge" hinge treatments.
+
+    The reference chord is the chord of the undeflected section, as in the polar source. With the chord
+    of the deflected section (the default for a plain coordinate array) the "merge" case does not
+    converge at Re 1e6 (the Reynolds number per unit length and the wake length are slightly different).
+    """
     base = airfoil("2412").repanel(n_panels=160)
     coords = base.with_flap(x_hinge=0.75, deflection=5.0, hinge_treatment=treatment).coords
-    r = _solve(coords, [0.0, 2.0], 1e6)
+    r = _solve(coords, [0.0, 2.0], 1e6, chord_ref=base.chord)
     assert np.all(r.converged), (treatment, r.reason)
 
 
