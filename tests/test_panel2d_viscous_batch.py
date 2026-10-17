@@ -157,8 +157,9 @@ def test_batch_takes_shapes_and_reference_values():
     flapped = airfoil("0012", n_points=121).with_flap(x_hinge=0.75, deflection=3.0)
     alphas = [0.0, 2.0]
     cases = [ViscousCase(coordinates=flapped, alpha=a, Re=1e6, tol=TOL) for a in alphas]
-    cases += [ViscousCase(coordinates=flapped.coords, alpha=a, Re=1e6, tol=TOL, chord_ref=1.0,
-                          moment_ref=(0.25, 0.0)) for a in alphas]
+    ref = flapped.reference_geometry()
+    cases += [ViscousCase(coordinates=flapped.coords, alpha=a, Re=1e6, tol=TOL, chord_ref=ref.chord_ref,
+                          moment_ref=ref.quarter_chord) for a in alphas]
     cases += [ViscousCase(coordinates=flapped, alpha=a, Re=1e6, tol=TOL, moment_ref=(0.5, 0.1)) for a in alphas]
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")

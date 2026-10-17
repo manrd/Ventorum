@@ -260,9 +260,11 @@ def test_flap_stores_the_reference_geometry_of_the_undeflected_section():
     assert clean.reference is None
     derived = clean.reference_geometry()
     assert derived == SectionReference.from_coords(clean.coords)
-    assert derived.leading_edge == (0.0, 0.0) and derived.trailing_edge == (1.0, 0.0)
-    assert derived.chord_ref == clean.chord == 1.0
-    assert derived.quarter_chord == (0.25, 0.0)
+    # Computed values: exact to one unit in the last place, depending on the platform.
+    assert np.allclose(derived.leading_edge, (0.0, 0.0), rtol=0.0, atol=1e-15)
+    assert np.allclose(derived.trailing_edge, (1.0, 0.0), rtol=0.0, atol=1e-15)
+    assert derived.chord_ref == clean.chord and abs(derived.chord_ref - 1.0) < 1e-15
+    assert np.allclose(derived.quarter_chord, (0.25, 0.0), rtol=0.0, atol=1e-15)
     flapped = clean.with_flap(x_hinge=0.7, deflection=15.0)
     assert flapped.reference == derived
     # The deflected outline is shorter than the undeflected chord and its chord line is tilted.

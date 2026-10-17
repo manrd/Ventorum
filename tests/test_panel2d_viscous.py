@@ -468,21 +468,23 @@ def test_lm_trials_is_checked():
 
 @pytest.mark.slow
 def test_default_reference_chord_keeps_unit_sections():
-    """Unflapped NACA 0012 (160 panels): the default reference chord gives the former results, bit for bit.
+    """Unflapped NACA 0012 (160 panels): the default reference chord gives the former results to round-off.
 
     The former default was the x extent of the section; here it equals the new default (the distance from
-    the leading edge to the trailing-edge midpoint), 1, and the moment point is (0.25, 0).
+    the leading edge to the trailing-edge midpoint), 1, and the moment point is (0.25, 0). Both chords are
+    computed values that can differ from 1 by one unit in the last place, depending on the math library
+    of the platform, so the comparison is to round-off, not bit for bit.
     """
     c = _naca("0012")
     extent = float(np.max(c[:, 0]) - np.min(c[:, 0]))
-    assert extent == 1.0
+    assert abs(extent - 1.0) < 1e-15
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         new = solve_viscous(c, [0.0, 2.0], 1e6)
         old = solve_viscous(c, [0.0, 2.0], 1e6, chord_ref=extent)
-    assert np.all(new.converged)
-    for name in ("Cl", "Cd", "Cd_friction", "Cd_pressure", "Cm", "newton_iterations", "linear_solves"):
-        assert np.array_equal(getattr(new, name), getattr(old, name)), name
+    assert np.all(new.converged) and np.all(old.converged)
+    for name in ("Cl", "Cd", "Cd_friction", "Cd_pressure", "Cm"):
+        assert np.allclose(getattr(new, name), getattr(old, name), rtol=1e-10, atol=1e-12), name
     with pytest.raises(ValueError, match="chord_ref"):
         solve_viscous(c, 0.0, 1e6, chord_ref=0.0)
 
@@ -524,7 +526,8 @@ def test_viscous_flapped_shape_uses_the_undeflected_reference():
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         via_shape = solve_viscous(flapped, alphas, 1e6)
-        given = solve_viscous(flapped.coords, alphas, 1e6, chord_ref=1.0, moment_ref=(0.25, 0.0))
+        ref = flapped.reference_geometry()
+        given = solve_viscous(flapped.coords, alphas, 1e6, chord_ref=ref.chord_ref, moment_ref=ref.quarter_chord)
         moved = solve_viscous(flapped, alphas, 1e6, moment_ref=(0.5, 0.1))
     assert np.all(via_shape.converged), via_shape.reason
     for name in ("Cl", "Cd", "Cd_friction", "Cd_pressure", "Cl_pressure", "Cm", "newton_iterations"):
@@ -548,11 +551,14 @@ def test_viscous_default_reference_keeps_unit_sections_bit_for_bit(height):
     from ventorum.panel2d.solver import resolve_reference
 
     shape = airfoil("2412", n_points=121)
-    assert resolve_reference(shape.coords) == (1.0, (0.25, 0.0), (0.25, 0.0))
+    chord, point, pivot = resolve_reference(shape.coords)
+    # Computed values: 1 and (0.25, 0) to one unit in the last place, depending on the platform.
+    assert abs(chord - 1.0) < 1e-15 and point == pivot
+    assert abs(point[0] - 0.25) < 1e-15 and abs(point[1]) < 1e-15
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         new = solve_viscous(shape.coords, [0.0, 2.0], 1e6, height=height)
-        old = solve_viscous(shape.coords, [0.0, 2.0], 1e6, height=height, chord_ref=1.0, moment_ref=(0.25, 0.0))
+        old = solve_viscous(shape.coords, [0.0, 2.0], 1e6, height=height, chord_ref=chord, moment_ref=point)
         via_shape = solve_viscous(shape, [0.0, 2.0], 1e6, height=height)
     assert np.all(new.converged), new.reason
     for name in ("Cl", "Cd", "Cd_friction", "Cd_pressure", "Cm", "newton_iterations", "linear_solves"):

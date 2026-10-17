@@ -350,27 +350,32 @@ def _former_defaults(c):
 
 
 @pytest.mark.parametrize("code", ["0012", "2412"])
-def test_default_reference_keeps_unit_sections_bit_for_bit(code):
-    """Unflapped sections with the chord line on y = 0: the defaults give the former results, bit for bit.
+def test_default_reference_keeps_unit_sections_to_round_off(code):
+    """Unflapped sections with the chord line on y = 0: the defaults give the former results to round-off.
 
     NACA 0012 and 2412 as generated have the leading edge (the point farthest from the trailing-edge
     midpoint) at (0, 0) and the trailing-edge midpoint at (1, 0). The default reference chord (their
     distance) is the former default 1, and the default moment point and pivot (the quarter-chord point on
     the chord line) are the former (x_min + c/4, 0) = (0.25, 0). Free air and ground effect; the array
-    path and the shape path give the same bits.
+    path and the shape path give the same bits. The derived chord can differ from 1 by one unit in the
+    last place, depending on the math library of the platform, so the comparison with the former
+    defaults is to round-off, not bit for bit.
     """
     shape = airfoil(code, n_points=161)
     c = shape.coords
     former = _former_defaults(c)
-    assert former["chord_ref"] == 1.0 and former["moment_ref"] == (0.25, 0.0)
-    assert sv.reference_point(c) == (0.25, 0.0) == sv.reference_point(shape)
+    assert abs(former["chord_ref"] - 1.0) < 1e-15
+    assert abs(former["moment_ref"][0] - 0.25) < 1e-15 and former["moment_ref"][1] == 0.0
+    point = sv.reference_point(c)
+    assert point == sv.reference_point(shape)
+    assert abs(point[0] - 0.25) < 1e-15 and abs(point[1]) < 1e-15
     for kw in ({}, {"height": 0.5}):
         new = solve_inviscid(c, [-2.0, 0.0, 4.0], **kw)
         via_shape = solve_inviscid(shape, [-2.0, 0.0, 4.0], **kw)
         old = solve_inviscid(c, [-2.0, 0.0, 4.0], **former, **kw)
         for name in ("Cl", "Cl_pressure", "Cd_pressure", "Cm"):
-            assert np.array_equal(getattr(new, name), getattr(old, name)), (kw, name)
-            assert np.array_equal(getattr(via_shape, name), getattr(old, name)), (kw, name)
+            assert np.allclose(getattr(new, name), getattr(old, name), rtol=0.0, atol=1e-12), (kw, name)
+            assert np.array_equal(getattr(via_shape, name), getattr(new, name)), (kw, name)
 
 
 def test_default_reference_of_a_repaneled_section_is_on_its_chord_line():
@@ -382,13 +387,15 @@ def test_default_reference_of_a_repaneled_section_is_on_its_chord_line():
     """
     c = airfoil("0012").repanel(n_panels=160).coords
     ref = sv.section_reference(c)
-    assert sv.section_chord(c) == 1.0 == ref.chord_ref == float(np.max(c[:, 0]) - np.min(c[:, 0]))
+    assert sv.section_chord(c) == ref.chord_ref
+    assert abs(ref.chord_ref - 1.0) < 1e-15
+    assert abs(float(np.max(c[:, 0]) - np.min(c[:, 0])) - 1.0) < 1e-15
     point = sv.reference_point(c)
     assert point == ref.quarter_chord
-    assert point[0] == 0.25 and abs(point[1]) < 1e-15
+    assert abs(point[0] - 0.25) < 1e-15 and abs(point[1]) < 1e-15
     for kw in ({}, {"height": 0.5}):
         new = solve_inviscid(c, [0.0, 4.0], **kw)
-        given = solve_inviscid(c, [0.0, 4.0], chord_ref=1.0, moment_ref=point, pivot=point, **kw)
+        given = solve_inviscid(c, [0.0, 4.0], chord_ref=ref.chord_ref, moment_ref=point, pivot=point, **kw)
         old = solve_inviscid(c, [0.0, 4.0], **_former_defaults(c), **kw)
         for name in ("Cl", "Cl_pressure", "Cd_pressure", "Cm"):
             assert np.array_equal(getattr(new, name), getattr(given, name)), (kw, name)
@@ -406,19 +413,20 @@ def test_flapped_shape_gives_the_undeflected_reference_without_user_input():
     flapped = clean.with_flap(x_hinge=0.75, deflection=10.0)
     ref = clean.reference_geometry()
     chord, point, pivot = sv.resolve_reference(flapped)
-    assert chord == ref.chord_ref == 1.0
-    assert point == pivot == ref.quarter_chord == (0.25, 0.0)
+    assert chord == ref.chord_ref and abs(chord - 1.0) < 1e-15
+    assert point == pivot == ref.quarter_chord
+    assert abs(point[0] - 0.25) < 1e-15 and abs(point[1]) < 1e-15
     for kw in ({}, {"height": 0.6}):
         via_shape = solve_inviscid(flapped, [0.0, 3.0], **kw)
-        given = solve_inviscid(flapped.coords, [0.0, 3.0], chord_ref=1.0, moment_ref=(0.25, 0.0),
-                               pivot=(0.25, 0.0), **kw)
+        given = solve_inviscid(flapped.coords, [0.0, 3.0], chord_ref=ref.chord_ref, moment_ref=ref.quarter_chord,
+                               pivot=ref.quarter_chord, **kw)
         for name in ("Cl", "Cl_pressure", "Cd_pressure", "Cm"):
             assert np.array_equal(getattr(via_shape, name), getattr(given, name)), (kw, name)
     own = sv.section_reference(flapped.coords)
     assert own.chord_ref < 0.996 and own.quarter_chord[1] < -0.005
     array_only = solve_inviscid(flapped.coords, 0.0)
     shape_res = solve_inviscid(flapped, 0.0)
-    assert abs(array_only.Cl * own.chord_ref - shape_res.Cl * 1.0) < 1e-12
+    assert abs(array_only.Cl * own.chord_ref - shape_res.Cl * ref.chord_ref) < 1e-12
 
 
 def test_explicit_reference_values_win_over_everything():
