@@ -351,3 +351,27 @@ def test_check_mesh_booleans_identical():
         for key in COUNT_KEYS:
             assert new[key] == ref[key], f"{name}: {key}"
             assert isinstance(new[key], int), f"{name}: {key} not int"
+
+
+def test_check_mesh_root_rule_needs_both_nodes_on_the_plane():
+    """An open edge of a half mesh is a root edge only when both nodes lie on y = 0.
+
+    The triangle has one edge on y = 0 and two edges with one node on
+    y = 0 and one node at y > 0: those two edges are open edges that are
+    not root edges, so the mesh is not watertight. A rule that tests one
+    node only would accept them.
+    """
+    nodes = np.array([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.5, 0.5, 0.0]])
+    mesh = PanelMesh(
+        nodes=nodes,
+        panels=np.array([[0, 1, 2, 2]]),
+        component=np.array([0]),
+        kind=np.array(["surface"]),
+        wake_edges=np.empty((0, 4), dtype=int),
+        half=True,
+    )
+    new = check_mesh(mesh)
+    ref = _check_mesh_reference(mesh)
+    assert ref["watertight"] is False
+    assert new["watertight"] is ref["watertight"]
+    assert new["n_open_edges"] == ref["n_open_edges"] == 3
