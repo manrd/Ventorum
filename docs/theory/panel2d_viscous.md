@@ -55,6 +55,30 @@ These rules change the path, not the converged solution:
 
 Converged means: $\omega = 1$, the largest absolute residual of all equations below `tol` (default 1e-6) and no structure change in the last two evaluations. The residuals are relative (logarithmic differences and ratios), except the amplification equation (absolute in $N$). A case that does not converge returns `converged=False`, the reached residual and a reason, with a warning. There are no result overrides.
 
+## Early stops (fail fast)
+
+Without early stops, an angle that cannot converge runs every attempt of the chain above to `max_iter`: the warm start, the halved angle steps, the cold start at the zero-lift angle with its three first estimates, the continuation and the cold start at the angle. That is dozens of full Newton solves, many times the work of a converged angle. The rules below are method choices of Ventorum-2D. They change the work of a failed angle. They do not change a converged solution: a converged angle is the end of a chain of converged Newton solves, and the rules only stop failed solves earlier, skip attempts that did not rescue an angle in the test sample, or reuse a result that is the same for every angle.
+
+Rules of one Newton solve (`vii.newton_solve`):
+
+- stagnation window: the solve stops when its smallest residual has not fallen by the factor `stall_factor` (default 0.5) in the last `stall_window` iterations (default 12). The window starts again when $\omega$ changes. At $\omega = 1$ it also starts again when the structure changes (stagnation panel or transition interval), because the residuals of two structures belong to two different discrete problems. Below $\omega = 1$ a structure change does not restart the window: there the transition intervals are not frozen and can alternate without end;
+- stagnation (fixed point): at $\omega = 1$ the solve stops when the line search and the Levenberg-Marquardt fallback both fail twice in a row on the same state and structure. The next iterations would repeat the last one exactly, so this stop does not change the final iterate;
+- floor: both stagnation stops apply only while the smallest residual is above 1000 times `tol` (constant `STALL_FLOOR`). Near the tolerance the residual can stall at the round-off level of the arithmetic (float32 on a GPU) for some iterations and still reach the tolerance; the failed solves of the test sample stall far above this level;
+- divergence: at $\omega = 1$ the solve stops when the residual is more than `divergence_factor` (default 1e4) times its smallest earlier value at $\omega = 1$; a non-finite residual stops the solve as before.
+
+Rules of the chain of attempts of one angle (`viscous.py`):
+
+- work budget: the sum of the Newton iterations of all attempts of one angle is at most `work_budget` (default 250); each Newton solve gets the iterations that are left as its limit, and the chain ends when none are left;
+- cold start: when the attempt from the quasi-simultaneous marches stops by stagnation, divergence or a non-finite residual with a residual above `COLD_SKIP_RESIDUAL` (1e-2), the third first estimate (direct marches with $\omega = 1$) is not tried. A failure of the first estimate does not end the cold start, because the quasi-simultaneous marches often rescue it;
+- halved angle steps: when the solve at an intermediate angle stops by stagnation, that step is not halved again and the halving at that level ends. The second half-step (from the intermediate angle to the angle) is always halved again;
+- zero-lift cold start: the cold start at the zero-lift angle is the same for every angle of a sweep; it is solved once per sweep and reused (also when it fails). A cold start that the work budget cut is not reused.
+
+Each early stop is named in the reason of a failed angle ("stagnation", "divergence", "work budget", "cold start ended", "halving of the angle step ended"). When the budget ends before any attempt at the angle itself (for example during the continuation from the zero-lift angle), the values of the angle are NaN. `stall_window=0` switches the stagnation stops and the end of the cold start off, `divergence_factor=0` the divergence stop and `work_budget=0` the budget. With all three off, the solver gives the results of the previous revision (the reuse of the zero-lift cold start changes only the work).
+
+Work counters: the result gives per angle `newton_iterations` (sum of the Newton iterations of all its Newton solves, failed attempts included), `linear_solves` (solves of the Newton or Levenberg-Marquardt linear system) and `newton_solves` (number of attempts). They measure the cost independently of the machine load.
+
+How the defaults were chosen: a sample of NACA 0012, 2412 and 4415 sections, 120 and 160 panels, plain flaps of 0 to 20 deg at x/c 0.75, Reynolds numbers 1e6 and 3e6 and sweeps of alpha from -2 to 8 deg was solved with and without the rules. The window is the smallest one, plus a margin of two iterations, with which every converged Newton solve of the sample still converges; shorter windows stopped slow but sure solves (long plateaus of the residual during the coupling continuation, or a slow decrease at $\omega = 1$). The budget is above the work of the costliest converged angle of the sample, with a margin. The quasi-simultaneous first estimate rescued many failed direct first estimates; the third first estimate rescued none. The halving after a failed second half-step rescued angles down to the last halving; the halving after a stagnation at an intermediate angle rescued none.
+
 ## Loads
 
 - $C_l$: Kutta-Joukowski of the total circulation (including the gap-panel vortex); $C_{l,pressure}$ and $C_m$ from the surface pressure (wall panels), $C_m$ about the quarter chord, pressure only.
