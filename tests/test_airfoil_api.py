@@ -8,7 +8,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from ventorum.airfoil import AirfoilShape, airfoil
+from ventorum.airfoil import AirfoilGeometryError, AirfoilShape, SectionReference, airfoil
 from ventorum.airfoil.flap import deflect_plain_flap
 from ventorum.airfoil.io import read_airfoil
 from ventorum.airfoil.naca import naca
@@ -248,3 +248,68 @@ def test_factory_rejects_unknown_keywords_and_keeps_name():
     assert airfoil("2412", n_points=61, name="wing root").name == "wing root"
     assert np.array_equal(airfoil("2412", n_points=61, spacing="uniform").coords,
                           naca("2412", n_points=61, spacing="uniform"))
+
+
+def test_flap_stores_the_reference_geometry_of_the_undeflected_section():
+    """with_flap stores the leading edge, trailing edge and chord of the section before the deflection.
+
+    A plain shape holds no reference geometry; its derived one is the leading edge of the package
+    definition, the trailing-edge midpoint and their distance. A second flap keeps the first reference.
+    """
+    clean = AirfoilShape.naca("2412", n_points=121)
+    assert clean.reference is None
+    derived = clean.reference_geometry()
+    assert derived == SectionReference.from_coords(clean.coords)
+    assert derived.leading_edge == (0.0, 0.0) and derived.trailing_edge == (1.0, 0.0)
+    assert derived.chord_ref == clean.chord == 1.0
+    assert derived.quarter_chord == (0.25, 0.0)
+    flapped = clean.with_flap(x_hinge=0.7, deflection=15.0)
+    assert flapped.reference == derived
+    # The deflected outline is shorter than the undeflected chord and its chord line is tilted.
+    own = SectionReference.from_coords(flapped.coords)
+    assert own.chord_ref < 0.99 * derived.chord_ref and own.trailing_edge[1] < -0.05
+    twice = flapped.with_flap(x_hinge=0.5, deflection=-5.0)
+    assert twice.reference == derived
+
+
+def test_shape_methods_keep_or_map_the_reference_geometry(tmp_path):
+    """repanel, repanel_cosine and the factory copy keep it; normalized maps it with the points; files drop it."""
+    flapped = AirfoilShape.naca("0012", n_points=101).with_flap(x_hinge=0.75, deflection=10.0)
+    ref = flapped.reference
+    assert flapped.repanel(n_panels=80).reference == ref
+    assert flapped.repanel_cosine(40).reference == ref
+    assert airfoil(flapped).reference == ref
+    # Scale by 2, rotate by 30 deg and move: normalized gives back the unit reference geometry.
+    a = np.radians(30.0)
+    rot = np.array([[np.cos(a), -np.sin(a)], [np.sin(a), np.cos(a)]])
+    moved_ref = SectionReference(leading_edge=rot @ np.array([0.0, 0.0]) * 2.0 + [3.0, 1.0],
+                                 trailing_edge=rot @ np.array([1.0, 0.0]) * 2.0 + [3.0, 1.0], chord_ref=2.0)
+    moved = AirfoilShape(name="moved", coords=flapped.coords @ rot.T * 2.0 + [3.0, 1.0], reference=moved_ref)
+    back = moved.normalized()
+    expected = flapped.normalized()
+    assert np.allclose(back.coords, expected.coords, atol=1e-12)
+    assert np.allclose(back.reference.leading_edge, expected.reference.leading_edge, atol=1e-12)
+    assert np.allclose(back.reference.trailing_edge, expected.reference.trailing_edge, atol=1e-12)
+    assert abs(back.reference.chord_ref - expected.reference.chord_ref) < 1e-12
+    path = tmp_path / "flapped.dat"
+    flapped.to_file(path)
+    assert AirfoilShape.from_file(path).reference is None
+
+
+def test_section_reference_checks_its_inputs():
+    """The reference chord must be positive and finite; the points two finite numbers."""
+    ref = SectionReference(leading_edge=(0.5, 0.2), trailing_edge=(1.7, 0.2))
+    assert ref.chord_ref == pytest.approx(1.2, abs=1e-15)
+    assert ref.quarter_chord == pytest.approx((0.8, 0.2), abs=1e-15)
+    assert SectionReference((0.0, 0.0), (1.0, 0.0), chord_ref=2.5).chord_ref == 2.5
+    for bad in (0.0, -1.0, float("nan"), float("inf")):
+        with pytest.raises(AirfoilGeometryError, match="chord_ref"):
+            SectionReference((0.0, 0.0), (1.0, 0.0), chord_ref=bad)
+    with pytest.raises(AirfoilGeometryError, match="coincide"):
+        SectionReference((0.3, 0.0), (0.3, 0.0))
+    with pytest.raises(AirfoilGeometryError, match="leading_edge"):
+        SectionReference((0.0, float("nan")), (1.0, 0.0))
+    with pytest.raises(AirfoilGeometryError, match="trailing_edge"):
+        SectionReference((0.0, 0.0), (1.0, 0.0, 0.0))
+    with pytest.raises(AirfoilGeometryError, match="reference"):
+        AirfoilShape(coords=np.zeros((3, 2)) + [[1.0, 0.0], [0.0, 0.0], [1.0, 0.0]], reference=(0.0, 1.0))

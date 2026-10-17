@@ -292,7 +292,7 @@ Users and solvers get airfoils one way, through `AirfoilShape` and the
 - `AirfoilShape.from_file(path)` reads a Selig, Lednicer or plain file.
 - `shape.repanel(n_panels=160, **kw)` redistributes the nodes.
 - `shape.repanel_cosine(n_per_side)` resamples with cosine spacing.
-- `shape.with_flap(x_hinge, deflection, y_hinge=0.5, hinge_treatment="none")` deflects a plain flap.
+- `shape.with_flap(x_hinge, deflection, y_hinge=0.5, hinge_treatment="repanel")` deflects a plain flap. The result holds the reference geometry of the section before the deflection (see below).
 - `shape.to_file(path, fmt="selig")` writes a Selig or Lednicer file.
 - `airfoil(spec)` accepts a NACA designation string, a file path, an (N, 2) array or a shape, and returns a shape.
 
@@ -307,9 +307,35 @@ keyword `name` applies to every input; the generator keywords
 `n_points`, `spacing` and `closed_te` apply only to a NACA designation,
 and any keyword that does not apply raises TypeError.
 
+## Reference geometry
+
+A shape can hold a reference geometry, `shape.reference`, a
+`SectionReference`: the leading edge and the trailing-edge midpoint of
+the chord line and the reference chord (by default the distance between
+the two points), in chord units. Its quarter-chord point lies 0.25 of
+the way from the leading edge to the trailing-edge midpoint. The 2D
+solvers take the default reference chord, moment reference point and
+pivot from it; explicit `chord_ref` and `moment_ref` arguments win.
+
+- `with_flap` stores the reference geometry of the section before the
+  deflection: the stored one, or the one derived from the points. A
+  plain flap moves the trailing edge, so the deflected outline is
+  shorter than the undeflected chord and its chord line is tilted; the
+  reference of thin-airfoil theory is the undeflected chord (Glauert
+  1927).
+- `repanel`, `repanel_cosine` and the factory copy keep the stored
+  reference geometry; `normalized` maps it with the points.
+- A shape without a stored reference geometry derives it from its points
+  (`shape.reference_geometry()`, `SectionReference.from_coords`): the
+  leading edge of the package definition, the trailing-edge midpoint and
+  their distance.
+- The Selig and Lednicer files hold the points only: the writers do not
+  store the reference geometry.
+
 ## Implementation
 
-- `ventorum.airfoil.geometry.AirfoilShape`: storage, `normalized`, `upper`, `lower`, `thickness`, `camber`, `max_thickness`, `max_camber`, `area`, `problems`, `validate`, and the unified methods `naca`, `from_file`, `repanel`, `repanel_cosine`, `with_flap`, `to_file`.
+- `ventorum.airfoil.geometry.AirfoilShape`: storage, `normalized`, `upper`, `lower`, `thickness`, `camber`, `max_thickness`, `max_camber`, `area`, `problems`, `validate`, `reference_geometry`, and the unified methods `naca`, `from_file`, `repanel`, `repanel_cosine`, `with_flap`, `to_file`.
+- `ventorum.airfoil.geometry.SectionReference`: reference geometry (chord line and reference chord), `from_coords`, `quarter_chord`.
 - `ventorum.airfoil.geometry.leading_edge_index` (the leading-edge definition) and `polygon_self_intersection` (the simple-polygon test).
 - `ventorum.airfoil.airfoil`: factory over designations, files, arrays and shapes.
 - `ventorum.airfoil.io.parse_airfoil`, `read_airfoil`, `write_selig`, `write_lednicer`.
