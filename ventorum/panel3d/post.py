@@ -53,6 +53,7 @@ from __future__ import annotations
 
 import numpy as np
 import scipy.sparse
+import scipy.sparse.csgraph
 
 from ventorum.aero.system import freestream_direction, lift_direction
 from ventorum.core.datatypes import FlightCondition
@@ -219,6 +220,317 @@ def _unique_corners(row: np.ndarray) -> list[int]:
     return out
 
 
+def _distinct_corners(pan: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Return the distinct corners of all panels (the rule of :func:`_unique_corners`).
+
+    Parameters
+    ----------
+    pan : numpy.ndarray
+        Corner node indices with shape (Np, 4).
+
+    Returns
+    -------
+    corner : numpy.ndarray
+        Distinct corner nodes in loop order with shape (Np, 4), padded
+        with -1.
+    count : numpy.ndarray
+        Count of distinct corners of each panel with shape (Np,).
+    """
+    n_p, width = pan.shape
+    corner = np.full((n_p, width), -1, dtype=pan.dtype)
+    corner[:, 0] = pan[:, 0]
+    count = np.ones(n_p, dtype=np.intp)
+    last = pan[:, 0].copy()
+    row = np.arange(n_p)
+    for j in range(1, width):
+        a = pan[:, j]
+        take = (a != last) & (a != pan[:, 0])
+        corner[row[take], count[take]] = a[take]
+        last = np.where(take, a, last)
+        count = count + take
+    return corner, count
+
+
+def _counts_to_ptr(counts: np.ndarray) -> np.ndarray:
+    """Return the CSR row pointer of the row lengths *counts*, shape (n + 1,)."""
+    return np.concatenate([[0], np.cumsum(counts)]).astype(np.intp)
+
+
+def _csr_expand(ptr: np.ndarray, ids: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Return one item per entry of the CSR rows *ids*.
+
+    Parameters
+    ----------
+    ptr : numpy.ndarray
+        CSR row pointer with shape (n + 1,).
+    ids : numpy.ndarray
+        Row indices with shape (m,). A row can occur more than once.
+
+    Returns
+    -------
+    owner : numpy.ndarray
+        Position in *ids* of each item.
+    entry : numpy.ndarray
+        Index of the CSR entry of each item.
+    """
+    start = ptr[ids]
+    count = ptr[ids + 1] - start
+    owner = np.repeat(np.arange(ids.size), count)
+    first = np.cumsum(count) - count
+    entry = np.arange(owner.size) + np.repeat(start - first, count)
+    return owner, entry
+
+
+def _pairs_in_runs(ptr: np.ndarray, run: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Return all index pairs (a, b) with a < b of the entries in one CSR row.
+
+    Parameters
+    ----------
+    ptr : numpy.ndarray
+        CSR row pointer with shape (n + 1,).
+    run : numpy.ndarray
+        Row of each entry with shape (m,), in non-decreasing order.
+
+    Returns
+    -------
+    a, b : numpy.ndarray
+        Entry indices of each pair.
+    """
+    n = run.size
+    after = ptr[run + 1] - 1 - np.arange(n)
+    a = np.repeat(np.arange(n), after)
+    first = np.cumsum(after) - after
+    b = a + 1 + np.arange(a.size) - np.repeat(first, after)
+    return a, b
+
+
+def _fold_pairs(nrm: np.ndarray, pa: np.ndarray, pb: np.ndarray, cos_fold: float) -> np.ndarray:
+    """Return True for each panel pair whose normals fold more than the limit.
+
+    Parameters
+    ----------
+    nrm : numpy.ndarray
+        Panel unit normals with shape (Np, 3) [-].
+    pa, pb : numpy.ndarray
+        Panel indices of the pairs with shape (m,).
+    cos_fold : float
+        Cosine of the fold angle limit [-].
+
+    Returns
+    -------
+    numpy.ndarray
+        True where the dot product of the normals is less than *cos_fold*.
+    """
+    a = nrm[pa]
+    b = nrm[pb]
+    dot = np.einsum("ij,ij->i", a, b)
+    sharp = dot < cos_fold
+    # A product sum in a different order can differ from numpy.dot by
+    # round-off. For the pairs near the limit, numpy.dot decides, as in the
+    # loop version, so that the cut edges do not change.
+    scale = np.einsum("ij,ij->i", np.abs(a), np.abs(b))
+    for j in np.nonzero(np.abs(dot - cos_fold) <= 1e-12 * scale)[0]:
+        sharp[j] = float(np.dot(nrm[pa[j]], nrm[pb[j]])) < cos_fold
+    return sharp
+
+
+def _wake_node_groups(
+    special: np.ndarray,
+    inc_p: np.ndarray,
+    inc_w: np.ndarray,
+    groups: tuple[np.ndarray, np.ndarray, np.ndarray],
+    opp_codes: np.ndarray,
+    inc_edges: tuple[np.ndarray, np.ndarray],
+    key_panels: tuple[np.ndarray, np.ndarray],
+    cut: np.ndarray,
+    n_p: int,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Return the groups at wake nodes without the panels across the wake.
+
+    Parameters
+    ----------
+    special : numpy.ndarray
+        Incidences (node v, panel i) at a wake node of a panel with
+        panels on the other side of the wake, shape (S,).
+    inc_p : numpy.ndarray
+        Panel of each incidence with shape (Ni,).
+    inc_w : numpy.ndarray
+        Inverse-distance weight of each incidence (times its multiplicity)
+        with shape (Ni,) in 1/m.
+    groups : tuple of numpy.ndarray
+        Group CSR pointer, group members (incidences) and group of each
+        incidence.
+    opp_codes : numpy.ndarray
+        Sorted codes ``i * Np + q`` of the panels q on the other side of
+        the wake of panel i.
+    inc_edges : tuple of numpy.ndarray
+        CSR pointer over the incidences and the keys of the edges of the
+        panel at the node of each incidence.
+    key_panels : tuple of numpy.ndarray
+        CSR pointer over the keys and the panels of each key.
+    cut : numpy.ndarray
+        True for each cut key, shape (Nk,).
+    n_p : int
+        Count of panels (the base of the codes).
+
+    Returns
+    -------
+    col : numpy.ndarray
+        Member panels of the S lists.
+    weight : numpy.ndarray
+        Normalized inverse-distance weights of the members [-].
+    ptr : numpy.ndarray
+        CSR pointer of the S lists, shape (S + 1,).
+    closed : numpy.ndarray
+        True for each list whose group is closed, shape (S,).
+    """
+    g_ptr, g_member, inc_grp = groups
+    ie_ptr, ie_key = inc_edges
+    k_ptr, k_pan = key_panels
+    n_s = special.size
+    owner, entry = _csr_expand(g_ptr, inc_grp[special])
+    member = g_member[entry]
+    i_s = inc_p[special][owner]
+    q = inc_p[member]
+    keep = (q == i_s) | ~np.isin(i_s * n_p + q, opp_codes)
+    s_k = owner[keep]
+    m_k = member[keep]
+    q_k = q[keep]
+    w_k = inc_w[m_k]
+    w_sum = np.bincount(s_k, weights=w_k, minlength=n_s)
+    ptr = _counts_to_ptr(np.bincount(s_k, minlength=n_s))
+    kept = np.unique(s_k * n_p + q_k)
+    # Each edge at the node of each kept member is shared when it is not
+    # cut and another kept member lies on it.
+    t_own, t_entry = _csr_expand(ie_ptr, m_k)
+    t_s = s_k[t_own]
+    t_q = q_k[t_own]
+    t_key = ie_key[t_entry]
+    r_own, r_entry = _csr_expand(k_ptr, t_key)
+    r = k_pan[r_entry]
+    other = (r != t_q[r_own]) & np.isin(t_s[r_own] * n_p + r, kept)
+    shared = ~cut[t_key] & (np.bincount(r_own[other], minlength=t_key.size) > 0)
+    closed = np.bincount(t_s[~shared], minlength=n_s) == 0
+    return q_k, w_k / w_sum[s_k], ptr, closed
+
+
+def _green_gauss_corner_weights(
+    pts: np.ndarray,
+    corner: np.ndarray,
+    count: np.ndarray,
+    nrm: np.ndarray,
+    area: np.ndarray,
+) -> np.ndarray:
+    """Return the Green-Gauss weights of the corner node values of panels.
+
+    The edge (a, b) adds ``(p_b - p_a) x n / (2 A)`` to the weights of its
+    two corners (Blazek 2015, chapter 5).
+
+    Parameters
+    ----------
+    pts : numpy.ndarray
+        Node coordinates with shape (Nn, 3) in m.
+    corner : numpy.ndarray
+        Distinct corner nodes with shape (Ng, 4), padded with -1.
+    count : numpy.ndarray
+        Count of distinct corners with shape (Ng,).
+    nrm : numpy.ndarray
+        Panel unit normals with shape (Ng, 3) [-].
+    area : numpy.ndarray
+        Panel areas with shape (Ng,) in m^2.
+
+    Returns
+    -------
+    numpy.ndarray
+        Weights with shape (Ng, 4, 3) in 1/m.
+    """
+    n_g, width = corner.shape
+    scale = 0.5 / area
+    edge_w = np.zeros((n_g, width, 3))
+    for e in range(width):
+        has = np.nonzero(e < count)[0]
+        b = np.where(e + 1 < count[has], e + 1, 0)
+        side = pts[corner[has, b]] - pts[corner[has, e]]
+        edge_w[has, e] = np.cross(side, nrm[has]) * scale[has, None]
+    weight = np.zeros((n_g, width, 3))
+    for e in range(width):
+        has = np.nonzero(e < count)[0]
+        prev = count[has] - 1 if e == 0 else np.full(has.size, e - 1)
+        weight[has, e] = edge_w[has, e] + edge_w[has, prev]
+    return weight
+
+
+def _least_squares_entries(
+    ls: np.ndarray,
+    nb_p: np.ndarray,
+    nb_q: np.ndarray,
+    cen: np.ndarray,
+    nrm: np.ndarray,
+    n_p: int,
+) -> tuple[list[np.ndarray], list[np.ndarray], list[np.ndarray]]:
+    """Return the matrix entries of the edge-neighbour least-squares gradient.
+
+    The panels with the same count of neighbours share one stacked
+    ``numpy.linalg.pinv`` call (the same matrices as one call per panel).
+
+    Parameters
+    ----------
+    ls : numpy.ndarray
+        Border panels with shape (Nl,).
+    nb_p, nb_q : numpy.ndarray
+        Neighbour pairs (panel, neighbour), sorted by panel, then by
+        neighbour.
+    cen : numpy.ndarray
+        Panel centroids with shape (Np, 3) in m.
+    nrm : numpy.ndarray
+        Panel unit normals with shape (Np, 3) [-].
+    n_p : int
+        Count of panels.
+
+    Returns
+    -------
+    rows, cols, vals : list of numpy.ndarray
+        Row indices, column indices and values (in 1/m) of the entries.
+    """
+    nb_ptr = _counts_to_ptr(np.bincount(nb_p, minlength=n_p))
+    n_nb = nb_ptr[ls + 1] - nb_ptr[ls]
+    comp = np.arange(3)
+    rows: list[np.ndarray] = []
+    cols: list[np.ndarray] = []
+    vals: list[np.ndarray] = []
+    for n in np.unique(n_nb):
+        ps = ls[n_nb == n]
+        if n == 0:
+            # No neighbour: explicit zeros on the panel itself.
+            rows.append((3 * ps[:, None] + comp[None, :]).ravel())
+            cols.append(np.repeat(ps, 3))
+            vals.append(np.zeros(3 * ps.size))
+            continue
+        nb = nb_q[nb_ptr[ps][:, None] + np.arange(n)[None, :]]
+        dr = cen[nb] - cen[ps][:, None, :]
+        n_ps = nrm[ps]
+        dr_t = dr - (dr @ n_ps[:, :, None]) * n_ps[:, None, :]
+        # Displacement directions below 1e-5 of the largest are round-off
+        # (a row of collinear centroids gives the gradient along the row).
+        pinv = np.linalg.pinv(dr_t, rcond=1e-5)
+        mat = np.concatenate([pinv, -np.sum(pinv, axis=2, keepdims=True)], axis=2)
+        idx = np.concatenate([nb, ps[:, None]], axis=1)
+        rows.append(np.broadcast_to(3 * ps[:, None, None] + comp[None, :, None], mat.shape).ravel())
+        cols.append(np.broadcast_to(idx[:, None, :], mat.shape).ravel())
+        vals.append(mat.ravel())
+    return rows, cols, vals
+
+
+def _gradient_matrix(rows: list, cols: list, vals: list, n_p: int) -> scipy.sparse.csr_matrix:
+    """Return the (3 Np, Np) CSR matrix of the entries, with duplicates summed."""
+    r = np.concatenate(rows).astype(int) if rows else np.zeros(0, dtype=int)
+    c = np.concatenate(cols).astype(int) if cols else np.zeros(0, dtype=int)
+    v = np.concatenate(vals).astype(float) if vals else np.zeros(0, dtype=float)
+    op = scipy.sparse.csr_matrix((v, (r, c)), shape=(3 * n_p, n_p))
+    op.sum_duplicates()
+    return op
+
+
 def build_surface_gradient_operator(
     nodes: np.ndarray,
     panels: np.ndarray,
@@ -291,6 +603,223 @@ def build_surface_gradient_operator(
         Largest angle between the normals of two panels across an edge
         that the gradient connects when the mesh has no kinds [deg].
         Default ``FOLD_ANGLE_DEG`` (45).
+
+    Returns
+    -------
+    scipy.sparse.csr_matrix
+        Operator with shape (3 Np, Np) in 1/m.
+    """
+    # Array version of the loop build in
+    # _build_surface_gradient_operator_reference: the same groups, the same
+    # sparsity pattern, and values equal to round-off.
+    pts = np.asarray(nodes, dtype=float)
+    pan = np.asarray(panels, dtype=int)
+    cen = np.asarray(centroids, dtype=float)
+    nrm = np.asarray(normals, dtype=float)
+    area = np.asarray(areas, dtype=float)
+    n_p = pan.shape[0]
+    w_rows = (
+        np.empty((0, 4), dtype=int)
+        if wake_edges is None
+        else np.asarray(wake_edges, dtype=int).reshape(-1, 4)
+    )
+    if n_p == 0:
+        return _gradient_matrix([], [], [], 0)
+
+    # Distinct corners of each panel in loop order, and their count.
+    corner, n_corner = _distinct_corners(pan)
+    has_corner = np.arange(corner.shape[1])[None, :] < n_corner[:, None]
+    c_pan, c_pos = np.nonzero(has_corner)
+    c_node = corner[c_pan, c_pos]
+
+    # Edge incidences (panel, low node, high node) and their undirected keys.
+    nxt = np.where(c_pos + 1 < n_corner[c_pan], c_pos + 1, 0)
+    c_next = corner[c_pan, nxt]
+    is_edge = c_node != c_next
+    e_pan = c_pan[is_edge]
+    e_lo = np.minimum(c_node[is_edge], c_next[is_edge])
+    e_hi = np.maximum(c_node[is_edge], c_next[is_edge])
+    n_code = int(max(pan.max(), w_rows[:, 2:].max(initial=0))) + 1
+    keys, e_key = np.unique(e_lo * n_code + e_hi, return_inverse=True)
+    e_key = e_key.reshape(-1)
+    n_key = keys.size
+
+    # Panels of each key (CSR), and all pairs of two entries of one key.
+    k_order = np.argsort(e_key, kind="stable")
+    k_pan = e_pan[k_order]
+    k_key = e_key[k_order]
+    k_ptr = _counts_to_ptr(np.bincount(e_key, minlength=n_key))
+    pair_a, pair_b = _pairs_in_runs(k_ptr, k_key)
+    pa = k_pan[pair_a]
+    pb = k_pan[pair_b]
+    pair_key = k_key[pair_a]
+    n_distinct = np.bincount(np.unique(e_key * n_p + e_pan) // n_p, minlength=n_key)
+
+    # Cut keys: wake shedding edges, and sharp edges (kinds differ, or a
+    # fold larger than fold_angle_deg without kinds).
+    w_lo = np.minimum(w_rows[:, 2], w_rows[:, 3])
+    w_hi = np.maximum(w_rows[:, 2], w_rows[:, 3])
+    is_wake_key = np.isin(keys, w_lo * n_code + w_hi)
+    kind_arr = None if kinds is None else np.asarray(kinds).reshape(-1)
+    use_kinds = kind_arr is not None and kind_arr.shape[0] == n_p and np.unique(kind_arr).size > 1
+    if use_kinds:
+        sharp_pair = np.asarray(kind_arr[pa] != kind_arr[pb], dtype=bool)
+    else:
+        sharp_pair = _fold_pairs(nrm, pa, pb, float(np.cos(np.radians(fold_angle_deg))))
+    cut = is_wake_key | (np.bincount(pair_key[sharp_pair], minlength=n_key) > 0)
+    ok_key = ~cut & (n_distinct >= 2)
+
+    # Corner incidences (node v, panel p) and their multiplicity.
+    inc_codes, c_inc = np.unique(c_node * n_p + c_pan, return_inverse=True)
+    c_inc = c_inc.reshape(-1)
+    n_inc = inc_codes.size
+    inc_mult = np.bincount(c_inc, minlength=n_inc).astype(float)
+    inc_v = inc_codes // n_p
+    inc_p = inc_codes % n_p
+    e_inc_lo = np.searchsorted(inc_codes, e_lo * n_p + e_pan)
+    e_inc_hi = np.searchsorted(inc_codes, e_hi * n_p + e_pan)
+
+    # Node groups: connected components of the incidences. Two incidences
+    # at node v connect through a key at v that is not cut (one extra graph
+    # vertex for each end of each key).
+    joined = ~cut[e_key]
+    link_a = np.concatenate([e_inc_lo[joined], e_inc_hi[joined]])
+    link_b = n_inc + np.concatenate([2 * e_key[joined], 2 * e_key[joined] + 1])
+    n_vert = n_inc + 2 * n_key
+    graph = scipy.sparse.coo_matrix((np.ones(link_a.size), (link_a, link_b)), shape=(n_vert, n_vert))
+    _, label = scipy.sparse.csgraph.connected_components(graph, directed=False)
+    _, inc_grp = np.unique(label[:n_inc], return_inverse=True)
+    inc_grp = inc_grp.reshape(-1)
+    n_grp = int(inc_grp.max()) + 1
+    g_member = np.argsort(inc_grp, kind="stable")
+    g_ptr = _counts_to_ptr(np.bincount(inc_grp, minlength=n_grp))
+
+    # A group is closed when each edge at the node of each member is not
+    # cut and has a second panel (that panel is then in the group).
+    bad = ~ok_key[e_key]
+    inc_bad = np.zeros(n_inc, dtype=bool)
+    inc_bad[e_inc_lo[bad]] = True
+    inc_bad[e_inc_hi[bad]] = True
+    closed = (np.bincount(inc_grp[inc_bad], minlength=n_grp) == 0)[inc_grp]
+
+    # Inverse-distance weights (Shepard 1968) of the group members.
+    dist = np.linalg.norm(cen[inc_p] - pts[inc_v], axis=1)
+    inc_w = inc_mult * (1.0 / np.maximum(dist, 1e-300))
+    grp_sum = np.bincount(inc_grp, weights=inc_w, minlength=n_grp)
+
+    # Member lists: one for each group, then one for each incidence at a
+    # wake node whose group loses the panels on the other side of the wake.
+    list_of_inc = inc_grp.copy()
+    list_col = [inc_p[g_member]]
+    list_w = [inc_w[g_member] / grp_sum[inc_grp[g_member]]]
+    list_ptr = [g_ptr]
+    on_wake = is_wake_key[pair_key] & (pa != pb)
+    opp_i = np.concatenate([pa[on_wake], pb[on_wake], w_rows[:, 0], w_rows[:, 1]])
+    opp_q = np.concatenate([pb[on_wake], pa[on_wake], w_rows[:, 1], w_rows[:, 0]])
+    valid = (opp_i != opp_q) & (opp_i >= 0) & (opp_i < n_p) & (opp_q >= 0) & (opp_q < n_p)
+    opp_codes = np.unique(opp_i[valid] * n_p + opp_q[valid])
+    special = np.nonzero(np.isin(inc_v, w_rows[:, 2:]) & np.isin(inc_p, opp_codes // n_p))[0]
+    if special.size > 0:
+        ie_inc = np.concatenate([e_inc_lo, e_inc_hi])
+        ie_key = np.concatenate([e_key, e_key])[np.argsort(ie_inc, kind="stable")]
+        ie_ptr = _counts_to_ptr(np.bincount(ie_inc, minlength=n_inc))
+        f_col, f_w, f_ptr, f_closed = _wake_node_groups(
+            special,
+            inc_p,
+            inc_w,
+            (g_ptr, g_member, inc_grp),
+            opp_codes,
+            (ie_ptr, ie_key),
+            (k_ptr, k_pan),
+            cut,
+            n_p,
+        )
+        list_of_inc[special] = n_grp + np.arange(special.size)
+        closed[special] = f_closed
+        list_col.append(f_col)
+        list_w.append(f_w)
+        list_ptr.append(g_ptr[-1] + f_ptr[1:])
+    all_col = np.concatenate(list_col)
+    all_w = np.concatenate(list_w)
+    all_ptr = np.concatenate(list_ptr)
+
+    # Panels with a row: at least three distinct corners and an area that
+    # is not zero or negative.
+    open_corners = np.bincount(c_pan[~closed[c_inc]], minlength=n_p)
+    has_row = (n_corner >= 3) & ~(area <= 0.0)
+    rows: list[np.ndarray] = []
+    cols: list[np.ndarray] = []
+    vals: list[np.ndarray] = []
+
+    # Interior panels: node values and Green-Gauss (Blazek 2015). A corner
+    # weight component that is exactly zero gives no entry.
+    gg = np.nonzero(has_row & (open_corners == 0))[0]
+    if gg.size > 0:
+        c_gg = corner[gg]
+        corner_w = _green_gauss_corner_weights(pts, c_gg, n_corner[gg], nrm[gg], area[gg])
+        g_slot, g_pos = np.nonzero(has_corner[gg])
+        g_inc = np.searchsorted(inc_codes, c_gg[g_slot, g_pos] * n_p + gg[g_slot])
+        owner, entry = _csr_expand(all_ptr, list_of_inc[g_inc])
+        o_slot = g_slot[owner]
+        o_pos = g_pos[owner]
+        for comp in range(3):
+            cw = corner_w[o_slot, o_pos, comp]
+            use = cw != 0.0
+            rows.append(3 * gg[o_slot[use]] + comp)
+            cols.append(all_col[entry[use]])
+            vals.append(cw[use] * all_w[entry[use]])
+
+    # Border panels: edge-neighbour least squares, anchored at the panel value.
+    ls = np.nonzero(has_row & (open_corners > 0))[0]
+    if ls.size > 0:
+        nb_pair = ~cut[pair_key] & (pa != pb)
+        nb_codes = np.unique(np.concatenate([pa[nb_pair] * n_p + pb[nb_pair], pb[nb_pair] * n_p + pa[nb_pair]]))
+        ls_rows, ls_cols, ls_vals = _least_squares_entries(ls, nb_codes // n_p, nb_codes % n_p, cen, nrm, n_p)
+        rows.extend(ls_rows)
+        cols.extend(ls_cols)
+        vals.extend(ls_vals)
+    return _gradient_matrix(rows, cols, vals, n_p)
+
+
+def _build_surface_gradient_operator_reference(
+    nodes: np.ndarray,
+    panels: np.ndarray,
+    centroids: np.ndarray,
+    normals: np.ndarray,
+    areas: np.ndarray,
+    wake_edges: np.ndarray | None = None,
+    kinds: np.ndarray | None = None,
+    fold_angle_deg: float = FOLD_ANGLE_DEG,
+) -> scipy.sparse.csr_matrix:
+    """Build the surface gradient operator with Python loops (reference).
+
+    This is the first implementation of
+    :func:`build_surface_gradient_operator`, with dictionaries, a
+    union-find per node and one Python step per matrix entry. The solver
+    does not call it. The parity tests compare the array version with it:
+    the sparsity pattern must be the same and the values equal to
+    round-off.
+
+    Parameters
+    ----------
+    nodes : numpy.ndarray
+        Node coordinates with shape (Nn, 3) in m.
+    panels : numpy.ndarray
+        Corner node indices with shape (Np, 4). A triangle repeats a node.
+    centroids : numpy.ndarray
+        Panel centroids with shape (Np, 3) in m.
+    normals : numpy.ndarray
+        Panel unit normals with shape (Np, 3) [-].
+    areas : numpy.ndarray
+        Panel areas with shape (Np,) in m^2.
+    wake_edges : numpy.ndarray or None, optional
+        Wake shedding edges with shape (Nw, 4): upper panel, lower panel,
+        node a, node b.
+    kinds : numpy.ndarray or None, optional
+        Panel kind codes with shape (Np,).
+    fold_angle_deg : float, optional
+        Largest angle between the normals of two panels across an edge
+        that the gradient connects when the mesh has no kinds [deg].
 
     Returns
     -------
