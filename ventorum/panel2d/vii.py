@@ -57,7 +57,10 @@ smallest residual has not fallen by the factor STALL_FACTOR in the last
 STALL_WINDOW iterations (the window starts again when omega changes and,
 at omega = 1, when the structure changes), or when, at omega = 1, the line
 search and the Levenberg-Marquardt fallback both fail twice on the same
-state and structure (the iteration would then repeat itself exactly); it
+state and structure (the iteration would then repeat itself exactly);
+both stagnation stops apply only while the smallest residual is above
+STALL_FLOOR times the tolerance (near the tolerance the residual can stall
+at the round-off level of float32 and still reach it); it
 stops with status "divergence" when, at omega = 1, the residual exceeds
 DIVERGENCE_FACTOR times its smallest earlier value.
 
@@ -99,6 +102,8 @@ QS_SWEEPS = 3
 STALL_WINDOW = 12
 #: Factor by which the smallest residual must fall within STALL_WINDOW iterations [-].
 STALL_FACTOR = 0.5
+#: The stagnation stops apply only while the smallest residual is above this factor times tol [-].
+STALL_FLOOR = 1e3
 #: Growth of the residual over its smallest value at omega = 1 that stops a solve as divergent [-] (0: off).
 DIVERGENCE_FACTOR = 1e4
 
@@ -1088,7 +1093,8 @@ def _freeze_cycles(hist, setup: CaseSetup, st: CaseState):
     return moved
 
 
-def _early_stop(res, level_min, smallest, no_step, at_one, stall_window, stall_factor, divergence_factor):
+def _early_stop(res, level_min, smallest, no_step, at_one, stall_window, stall_factor, divergence_factor,
+                floor=0.0):
     """Return (status, reason) of an early stop of a Newton solve, or None.
 
     Parameters
@@ -1114,13 +1120,18 @@ def _early_stop(res, level_min, smallest, no_step, at_one, stall_window, stall_f
     divergence_factor : float
         Growth over the smallest earlier residual at omega = 1 that is
         divergence [-] (0: off).
+    floor : float
+        The stagnation rules apply only while the smallest residual of the
+        window is above this value [-]. Near the tolerance the residual can
+        stall at the round-off level (float32) and still reach it.
 
     Returns
     -------
     tuple of str or None
         The status ("stagnation" or "divergence") and the reason text.
     """
-    if stall_window > 0 and at_one and no_step >= 2:
+    stall = stall_window > 0 and level_min[-1] > floor
+    if stall and at_one and no_step >= 2:
         # Two failed steps on the same state and structure: the next
         # iterations repeat the last one exactly (fixed point of the loop).
         return "stagnation", (f"stagnation: neither the Newton line search nor the Levenberg-Marquardt fallback "
@@ -1128,8 +1139,7 @@ def _early_stop(res, level_min, smallest, no_step, at_one, stall_window, stall_f
     if divergence_factor > 0.0 and at_one and res > divergence_factor * smallest:
         return "divergence", (f"divergence: the residual grew to more than {divergence_factor:g} times its "
                               f"smallest value (largest residual {res:.3e})")
-    if (stall_window > 0 and len(level_min) > stall_window
-            and level_min[-1] > stall_factor * level_min[-1 - stall_window]):
+    if stall and len(level_min) > stall_window and level_min[-1] > stall_factor * level_min[-1 - stall_window]:
         where = "on the same structure" if at_one else "at a coupling factor omega below 1"
         return "stagnation", (f"stagnation: the smallest residual did not fall by the factor {stall_factor:g} in "
                               f"{stall_window} Newton iterations {where} (largest residual {res:.3e})")
@@ -1168,7 +1178,9 @@ def newton_solve(setups, states, *, tol=1e-6, max_iter=50, xp=np, device=None, d
         when omega changes and, at omega = 1, when the structure changes. 0
         switches the stagnation stops off.
     stall_factor : float
-        Factor of the stagnation stop [-], in (0, 1).
+        Factor of the stagnation stop [-], in (0, 1). The stagnation stops
+        apply only while the smallest residual is above STALL_FLOOR times
+        ``tol``.
     divergence_factor : float
         Divergence stop: a case stops with status "divergence" when, at
         omega = 1, the residual exceeds this factor times its smallest
@@ -1333,7 +1345,7 @@ def newton_solve(setups, states, *, tol=1e-6, max_iter=50, xp=np, device=None, d
             lm.append(min(float(res[k]), lm[-1]) if lm else float(res[k]))
             at_one = omega[i] == 1.0
             stop = _early_stop(float(res[k]), lm, smallest[i], int(no_step[i]), at_one, stall_window, stall_factor,
-                               divergence_factor)
+                               divergence_factor, STALL_FLOOR * tol)
             if at_one:
                 smallest[i] = min(smallest[i], float(res[k]))
             if omega[i] == 1.0 and res[k] < tol and not changed[k] and not changed_prev[i]:
