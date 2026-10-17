@@ -233,14 +233,26 @@ def _damaged_meshes():
     return out
 
 
+#: Quality metrics that are ratios with a natural scale of 1 [-]. On a flat
+#: panel the warp is round-off noise (about 1e-16), so a bound relative to its
+#: own magnitude compares noise with noise; these keys use the scale 1.
+DIMENSIONLESS_KEYS = ("aspect_ratio", "skew", "warp", "max_aspect_ratio", "max_skew", "max_warp")
+
+
 def _assert_close_roundoff(name, key, new_val, ref_val):
-    """Assert that two float scalars or arrays agree to round-off (relative 1e-12)."""
+    """Assert that two float scalars or arrays agree to round-off (relative 1e-12).
+
+    Dimensionless quality metrics use at least the scale 1, so that round-off
+    noise on flat panels does not count as a difference.
+    """
     a = np.asarray(ref_val, dtype=float)
     b = np.asarray(new_val, dtype=float)
     assert a.shape == b.shape, f"{name}: {key} shape {b.shape} != {a.shape}"
     if a.size == 0:
         return
     scale = max(float(np.max(np.abs(a))), float(np.max(np.abs(b))))
+    if key in DIMENSIONLESS_KEYS:
+        scale = max(scale, 1.0)
     diff = float(np.max(np.abs(b - a)))
     assert diff <= 1e-12 * scale, f"{name}: {key} differs by {diff:.3e} (scale {scale:.3e})"
 
