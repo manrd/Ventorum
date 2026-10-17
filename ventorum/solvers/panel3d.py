@@ -117,7 +117,12 @@ _NODE_METADATA = ("node_station",)
 
 
 def _estimate_panel_mesh_error(aircraft: Aircraft, condition: FlightCondition, settings: SolverSettings):
-    """Run a three-level panel convergence study for the trust notes.
+    """Run a directional panel convergence study for the trust notes.
+
+    The study refines the chordwise and the spanwise panel count
+    separately (three levels each at ratio 1.5, the base mesh first) and
+    adds the two directional error estimates (see
+    :mod:`ventorum.panel3d.convergence`).
 
     Parameters
     ----------
@@ -131,8 +136,9 @@ def _estimate_panel_mesh_error(aircraft: Aircraft, condition: FlightCondition, s
     Returns
     -------
     ConvergenceReport
-        Values per level, observed order, Richardson value and the error
-        estimate of the base mesh for CL, CDi and Cm.
+        Per quantity (CL, CDi and Cm) the error estimate of the base mesh,
+        with the values per level, the observed order and the Richardson
+        value of each direction.
     """
     from ventorum.panel3d.convergence import panel_mesh_convergence
 
@@ -438,13 +444,17 @@ class PanelMethodSolver(BaseSolver):
         Notes
         -----
         Mesh error estimate. ``settings.panel_estimate_mesh_error=True``
-        runs a three-level panel mesh convergence study (ratio 1.5 in both
-        directions) for each condition. The study adds the error estimate
-        of the given mesh to the trust warnings and stores the report in
-        ``details["mesh_convergence"]``. The dense LU work grows with the
-        cube of the panel count, so the study costs about
-        ``1 + 1.5**6 + 1.5**12`` (about 142) times one base solve; it is
-        off by default.
+        runs a panel mesh convergence study for each condition: a
+        chordwise and a spanwise refinement of three levels each (ratio
+        1.5, the given mesh first), each with a Richardson extrapolation,
+        added with a separable error model (the error estimate of the
+        given mesh is the sum of the two directional estimates; see
+        :mod:`ventorum.panel3d.convergence`). The study adds the error
+        estimate of the given mesh to the trust warnings and stores the
+        report in ``details["mesh_convergence"]``. It solves five meshes;
+        the dense LU work grows with the cube of the panel count, so the
+        study costs about ``1 + 2 (1.5**3 + 1.5**6)`` (about 30) times one
+        base solve. It is off by default.
         """
         is_single = isinstance(condition, FlightCondition)
         cond_list: list[FlightCondition] = [condition] if is_single else list(condition)

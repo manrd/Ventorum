@@ -51,7 +51,7 @@ Calibration method. Wings of different aspect ratio, taper, sweep, dihedral, sec
 
 Recalibration. Repeat the study with the new solver version: the same wing set, the same reference procedure and the same error limits of the two levels. Set each threshold again to the value with the largest balanced accuracy. Keep the error limits, so that the meaning of a warning does not change.
 
-Limits. The indicators give a probable error, not a bound. The thresholds hold for the cases of the study: attached flow, sections with a closed trailing edge, and the default chordwise (cosine) and spanwise spacings. For an error estimate of one result, use `panel_estimate_mesh_error` (Richardson extrapolation of three mesh levels, see [Ventorum-3DP](panel3d.md)).
+Limits. The indicators give a probable error, not a bound. The thresholds hold for the cases of the study: attached flow, sections with a closed trailing edge, and the default chordwise (cosine) and spanwise spacings. For an error estimate of one result, use `panel_estimate_mesh_error` (separate chordwise and spanwise Richardson extrapolations of three mesh levels each, added with a separable error model; see [Ventorum-3DP](ventorum_3dp.md), section *Mesh convergence and Richardson extrapolation*).
 
 ## Planned error-bar layers
 

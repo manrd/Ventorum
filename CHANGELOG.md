@@ -62,6 +62,15 @@ a minor version can change a public interface.
   60 deg (factor 1 / cos(dihedral) above 2), the mesh builder issues a `UserWarning` that the
   root section is strongly scaled and that the result needs checking. The factor is not
   capped.
+- Ventorum-3DP mesh-error estimate (`panel_mesh_convergence`, `panel_estimate_mesh_error`):
+  the chordwise and the spanwise panel counts are refined separately (three levels each, the
+  base mesh first), each with its own Richardson extrapolation, and the error estimate of the
+  base mesh is the sum of the two directional estimates (separable error model). The former
+  refinement of both counts at once did not converge on thick wings, because the chordwise
+  and the spanwise lift errors have opposite signs. The study now solves five meshes (cost
+  about 30 base solves at ratio 1.5, before about 142). New `directional_estimate` and
+  `MeshErrorEstimate`; `ConvergenceReport.quantities` holds a `MeshErrorEstimate` per
+  quantity with the convergence of each direction, and the report has the solved `meshes`.
 - Plain flaps: the hinge treatment "repanel" (a spline through the deflected outline with nodes kept at the hinge, the leading edge and the trailing edge) is the default of `deflect_plain_flap` and `AirfoilShape.with_flap`; "none" (the outline as constructed) and "merge" (node removal at the hinge) stay options. A zero deflection returns the section unchanged for every treatment. The 3D panel mesh keeps the outline as constructed. The 2D solver revision is raised, so cached flap polars are computed again.
 - `run_xfoil` runs XFOIL headless on every platform: graphics off first (the graphics flag is
   checked), its own temporary folder, no console window on Windows. New options for
