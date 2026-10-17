@@ -27,7 +27,7 @@ from ventorum.panel3d.convergence import (
 )
 from ventorum.panel3d.mesh import PanelMesh, check_mesh
 from ventorum.panel3d.solver import PanelSolver
-from ventorum.reference.analytic3d import sphere_quad_mesh
+from ventorum.reference.analytic3d import sphere_cp, sphere_quad_mesh
 
 
 def _sphere_mesh(n_lat: int, n_lon: int) -> PanelMesh:
@@ -221,9 +221,11 @@ def test_sphere_directional_estimate_against_the_exact_solution():
     The two mesh directions of the sphere are the latitude and the
     longitude counts. From the base mesh (12 latitude, 24 longitude
     panels) each direction is refined by 2 (the planes x = 0 stay mesh
-    lines). Exact values (``ventorum.reference.analytic3d``; Anderson,
-    section 4.5): Cp max 1 and the axial force of the upstream half,
-    ``C_front = -1/8`` (over q pi a^2). Each direction converges at order
+    lines). Exact values from the exact surface pressure of
+    ``ventorum.reference.analytic3d.sphere_cp`` (Anderson, section 4.5):
+    Cp max 1 at the stagnation point and the axial force of the upstream
+    half, ``C_front = -1/8`` (over q pi a^2, by Gauss-Legendre quadrature
+    of the exact Cp). Each direction converges at order
     near 2, the Richardson value of the separable model is closer to the
     exact value than the base value by more than ten times, and the error
     estimate of the base mesh covers the exact error without being more
@@ -243,7 +245,16 @@ def test_sphere_directional_estimate_against_the_exact_solution():
     base = solve(lats[0], lons[0])
     lat_seq = [base] + [solve(n, lons[0]) for n in lats[1:]]
     lon_seq = [base] + [solve(lats[0], n) for n in lons[1:]]
-    exact = {"C_front": -0.125, "Cp_max": 1.0}
+    # Exact values: the flow is axisymmetric about x; psi is the angle from +x.
+    xg, wg = np.polynomial.legendre.leggauss(64)
+    psi = 0.25 * np.pi * (xg + 3.0)  # (pi/2, pi): the upstream half
+    w_psi = 0.25 * np.pi * wg
+    ring = np.column_stack([np.cos(psi), np.sin(psi), np.zeros_like(psi)])
+    cp_ring = sphere_cp(ring, 1.0, 1.0)
+    c_front = -float(np.sum(cp_ring * np.cos(psi) * 2.0 * np.pi * np.sin(psi) * w_psi)) / np.pi
+    assert c_front == pytest.approx(-0.125, abs=1e-12)
+    cp_stag = float(sphere_cp(np.array([[-1.0, 0.0, 0.0]]), 1.0, 1.0)[0])
+    exact = {"C_front": c_front, "Cp_max": cp_stag}
     for name, value in exact.items():
         est = directional_estimate(
             [r[name] for r in lat_seq], lats, [r[name] for r in lon_seq], lons, quantity=name,
