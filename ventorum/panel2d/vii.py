@@ -1547,7 +1547,7 @@ def newton_solve(setups, states, *, tol=1e-6, max_iter=50, xp=np, device=None, d
 # ---------------------------------------------------------------------------
 
 
-def case_outputs(setup: CaseSetup, st: CaseState, ue: np.ndarray, x_ref=(0.25, 0.0)) -> dict:
+def case_outputs(setup: CaseSetup, st: CaseState, ue: np.ndarray, x_ref=None) -> dict:
     """Return the loads and the distributions of a solved case.
 
     Parameters
@@ -1558,8 +1558,9 @@ def case_outputs(setup: CaseSetup, st: CaseState, ue: np.ndarray, x_ref=(0.25, 0
         Final state.
     ue : np.ndarray
         Station edge velocities [-].
-    x_ref : tuple of float
-        Moment reference point in the body frame [m].
+    x_ref : tuple of float, optional
+        Moment reference point in the body frame [m]. Default: the
+        quarter-chord point of the reference chord (``setup.sys.x_ref``).
 
     Returns
     -------
@@ -1574,6 +1575,8 @@ def case_outputs(setup: CaseSetup, st: CaseState, ue: np.ndarray, x_ref=(0.25, 0
     n = setup.n
     c = s.chord_ref
     re = setup.re_l
+    if x_ref is None:
+        x_ref = s.x_ref
     gam = _gamma_total(setup, st)
     alpha = None if s.ground else np.array([np.radians(s.alpha)])
     cl_, clp, cdp, cm, _, cp = _loads(np, gam[None, :], s.nodes, s.nodes_ref, s.layout, c, x_ref, alpha, s.ground)

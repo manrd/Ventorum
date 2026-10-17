@@ -92,6 +92,10 @@ class CouplingSystem:
         Drag and lift directions in the solved frame.
     ground : bool
         True in ground effect.
+    x_ref : tuple of float
+        Moment reference point in the body frame [m]: the quarter-chord
+        point of the reference chord (see
+        :func:`ventorum.panel2d.solver.reference_point`).
     """
 
     alpha: float
@@ -112,6 +116,7 @@ class CouplingSystem:
     e_drag: np.ndarray
     e_lift: np.ndarray
     ground: bool
+    x_ref: tuple = (0.25, 0.0)
 
     @property
     def n_nodes(self) -> int:
@@ -257,9 +262,13 @@ def build_coupling_system(body, alpha_deg: float, *, height=None, height_referen
     height_reference : {"pivot", "trailing_edge"}
         Reference point of the height.
     pivot : tuple of float or None
-        Rotation point [m]; default the quarter chord.
+        Rotation point [m]; default the quarter-chord point of the
+        reference chord (see :func:`ventorum.panel2d.solver.reference_point`).
     chord_ref : float or None
-        Reference chord [m]; default the chord of the body.
+        Reference chord [m] of the coefficients, of the Reynolds number,
+        of x/c and of the wake length; default the chord of the body as
+        given (see :func:`ventorum.panel2d.solver.section_chord`). For a
+        deflected plain flap, give the chord of the undeflected section.
     wake_length : float
         Wake length over the reference chord [-].
     n_wake : int
@@ -273,11 +282,11 @@ def build_coupling_system(body, alpha_deg: float, *, height=None, height_referen
     b = np.asarray(body, dtype=np.float64)
     layout = sv.panel_layout([b])
     xle = float(np.min(b[:, 0]))
-    c0 = float(np.max(b[:, 0]) - xle)
     if chord_ref is None:
-        chord_ref = c0 if c0 > 0.0 else 1.0
+        chord_ref = sv.section_chord(b)
+    x_ref = sv.reference_point(b, chord_ref)
     if pivot is None:
-        pivot = (xle + 0.25 * chord_ref, 0.0)
+        pivot = x_ref
     ground = height is not None
     a = np.radians(alpha_deg)
     if ground:
@@ -339,4 +348,5 @@ def build_coupling_system(body, alpha_deg: float, *, height=None, height_referen
         e_drag=e_drag,
         e_lift=e_lift,
         ground=ground,
+        x_ref=x_ref,
     )

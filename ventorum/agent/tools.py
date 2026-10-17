@@ -2757,6 +2757,8 @@ def airfoil_polar(
         warns: list[str] = []
     else:
         solved = shape.repanel(n_panels=n_pan)
+        # Reference chord: the chord of the section before the flap deflection.
+        chord_ref = solved.chord
         if flap_tup is not None:
             solved = solved.with_flap(x_hinge=flap_tup[0], deflection=flap_tup[2], y_hinge=flap_tup[1])
         res = solve_viscous(
@@ -2764,6 +2766,7 @@ def airfoil_polar(
             np.asarray(alphas, dtype=float),
             re_val,
             mach=0.0,
+            chord_ref=chord_ref,
             ncrit=ncrit_val,
             xtr=(xtr_top_val, xtr_bottom_val),
             height=h_val,

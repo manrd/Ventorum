@@ -93,6 +93,9 @@ class ViscousCase:
         Largest number of damping values (one linear solve each) of a
         Levenberg-Marquardt fallback step after a fallback step of the same
         Newton solve found no decrease [-], at least 1.
+    chord_ref : float or None
+        Reference chord [m] (None: the chord of the section as given); see
+        :func:`ventorum.panel2d.viscous.solve_viscous`.
     """
 
     coordinates: np.ndarray
@@ -111,6 +114,7 @@ class ViscousCase:
     divergence_factor: float = vii.DIVERGENCE_FACTOR
     work_budget: int = vs.WORK_BUDGET
     lm_trials: int = vii.LM_RETRY_TRIALS
+    chord_ref: float | None = None
 
 
 class ViscousBatchResult(list):
@@ -205,6 +209,7 @@ def _case(c) -> ViscousCase:
         raise ValueError(f"Only mach=0.0 is supported, got mach={out.mach}.")
     if not np.isfinite(out.Re) or out.Re <= 0.0:
         raise ValueError(f"Reynolds number must be positive, got {out.Re}.")
+    vs.check_chord_ref(out.chord_ref)
     _rules(out)
     return out
 
@@ -233,7 +238,7 @@ def _seq_key(c: ViscousCase):
     xtr = (float(c.xtr[0]), float(c.xtr[1]))
     return (coords.tobytes(), coords.shape, float(c.Re), c.height, float(c.ncrit), xtr, float(c.wake_length),
             int(c.n_wake), int(c.max_iter), float(c.tol), int(c.stall_window), float(c.stall_factor),
-            float(c.divergence_factor), int(c.work_budget), int(c.lm_trials))
+            float(c.divergence_factor), int(c.work_budget), int(c.lm_trials), vs.check_chord_ref(c.chord_ref))
 
 
 def solve_viscous_batch(cases, *, backend: str = "torch", device=None, dtype=None) -> ViscousBatchResult:
@@ -273,7 +278,7 @@ def solve_viscous_batch(cases, *, backend: str = "torch", device=None, dtype=Non
         c0 = parsed[idx[0]]
         up, dn = vs.sweep_order([parsed[i].alpha for i in idx])
         kw = dict(ncrit=c0.ncrit, xtr=tuple(c0.xtr), height=c0.height, height_reference="pivot",
-                  wake_length=c0.wake_length, n_wake=c0.n_wake)
+                  wake_length=c0.wake_length, n_wake=c0.n_wake, chord_ref=vs.check_chord_ref(c0.chord_ref))
         body = vs._single_body(np.asarray(c0.coordinates, dtype=np.float64))
         plans.append({"idx": idx, "up": up, "dn": dn, "kw": kw, "body": body, "case": c0, "prev": None,
                       "first": None, "rows": {}, "rules": _rules(c0), "cache": {}})

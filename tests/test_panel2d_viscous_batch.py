@@ -132,3 +132,15 @@ def test_batch_cuda():
     assert ok.sum() >= 0.8 * len(ok)
     assert d_cl.max() < 1e-4
     assert d_cd.max() < 1e-3
+
+
+def test_batch_reference_chord_is_checked():
+    """ViscousCase takes the reference chord of solve_viscous; a value that is not positive raises ValueError."""
+    coords = airfoil("0012").repanel(n_panels=80).coords
+    with pytest.raises(ValueError, match="chord_ref"):
+        solve_viscous_batch([ViscousCase(coordinates=coords, alpha=0.0, Re=1e6, chord_ref=-1.0)])
+    case = ViscousCase(coordinates=coords, alpha=2.0, Re=1e6, max_iter=1, chord_ref=1.0)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        r = solve_viscous_batch([case], device="cpu", dtype=torch.float64)
+    assert not r.converged[0] and np.isnan(r.Cl[0])

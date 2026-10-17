@@ -340,3 +340,68 @@ def test_backends_gpu():
     f32 = solve_inviscid(coords, alphas, backend="torch", device="cuda", dtype=torch.float32)
     fref = solve_inviscid(coords, alphas)
     assert np.max(np.abs(f32.Cl.double().cpu().numpy() - fref.Cl)) < 1e-4
+
+
+def test_default_reference_chord_keeps_unit_sections_bit_for_bit():
+    """Unflapped NACA 0012: the default reference chord and moment point are the former ones, bit for bit.
+
+    The default reference chord is the distance from the leading edge to the trailing-edge midpoint; for
+    this section it equals the former default (the x extent), 1. The moment point is the quarter chord.
+    """
+    c = airfoil("0012").repanel(n_panels=160).coords
+    assert sv.section_chord(c) == 1.0 == float(np.max(c[:, 0]) - np.min(c[:, 0]))
+    assert sv.reference_point(c, 1.0) == (0.25, 0.0)
+    for kw in ({}, {"height": 0.5}):
+        new = solve_inviscid(c, [0.0, 4.0], **kw)
+        old = solve_inviscid(c, [0.0, 4.0], chord_ref=1.0, x_ref=(0.25, 0.0), pivot=(0.25, 0.0), **kw)
+        for name in ("Cl", "Cl_pressure", "Cd_pressure", "Cm"):
+            assert np.array_equal(getattr(new, name), getattr(old, name)), (kw, name)
+
+
+def test_coefficients_do_not_depend_on_scale_and_position():
+    """A section of chord 2 m that starts at x = 3 m has the coefficients of the unit section (1e-12).
+
+    Before, the moment point was (0.25, 0) m for every section.
+    """
+    c = airfoil("2412").repanel(n_panels=120).coords
+    big = 2.0 * c + np.array([3.0, 0.0])
+    assert abs(sv.section_chord(big) - 2.0 * sv.section_chord(c)) < 1e-14
+    unit = solve_inviscid(c, [0.0, 4.0])
+    scaled = solve_inviscid(big, [0.0, 4.0])
+    for name in ("Cl", "Cl_pressure", "Cd_pressure", "Cm"):
+        assert np.allclose(getattr(scaled, name), getattr(unit, name), rtol=0.0, atol=1e-12), name
+
+
+def test_flap_against_glauert_on_the_original_chord():
+    """Plain flap: lift and moment per unit deflection against thin-airfoil theory on the undeflected chord.
+
+    Thin-airfoil theory (Glauert, R and M 1095, 1927) for a flap hinged at x_h on the chord c, with
+    x_h / c = (1 - cos theta_h) / 2: the camber slope is 0 ahead of the hinge and -delta on the flap, so
+    A_n = 2 delta sin(n theta_h) / (n pi) and A_0 = alpha + delta (pi - theta_h) / pi. Then
+
+        Cl = 2 pi alpha + 2 (pi - theta_h + sin theta_h) delta,
+        Cm_c/4 = pi (A_2 - A_1) / 4 = -sin(theta_h) (1 - cos theta_h) delta / 2,
+
+    with the coefficients on the chord c of the undeflected section. The panel result is divided by the
+    thickness factor of its own lift slope (Cl_alpha / 2 pi of the clean section; 1.05 for 6 % thickness).
+    NACA 0006, 160 panels, hinge at 0.75 c, delta = 2 deg: measured deviations 0.6 % (lift) and 0.1 %
+    (moment); limit 1 %. The deflected section is shorter than the reference chord: with its own chord as
+    the reference, Cl is larger by the chord ratio.
+    """
+    x_h = 0.75
+    delta = math.radians(2.0)
+    theta_h = math.acos(1.0 - 2.0 * x_h)
+    cl_glauert = 2.0 * (math.pi - theta_h + math.sin(theta_h)) * delta
+    cm_glauert = -0.5 * math.sin(theta_h) * (1.0 - math.cos(theta_h)) * delta
+
+    shape = airfoil("0006").repanel(n_panels=160)
+    chord = shape.chord
+    clean = solve_inviscid(shape.coords, [0.0, 1.0])
+    thickness_factor = (clean.Cl[1] - clean.Cl[0]) / math.radians(1.0) / (2.0 * math.pi)
+    flapped = shape.with_flap(x_hinge=x_h, deflection=math.degrees(delta)).coords
+    res = solve_inviscid(flapped, 0.0, chord_ref=chord)
+    assert abs(res.Cl / thickness_factor / cl_glauert - 1.0) < 0.01
+    assert abs(res.Cm / thickness_factor / cm_glauert - 1.0) < 0.01
+    own = solve_inviscid(flapped, 0.0)
+    assert sv.section_chord(flapped) < chord
+    assert abs(own.Cl * sv.section_chord(flapped) - res.Cl * chord) < 1e-12

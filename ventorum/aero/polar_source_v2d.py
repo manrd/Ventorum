@@ -9,7 +9,10 @@ The flap tuple is the same as in every section polar source:
 ``(x_hinge, y_hinge, deflection_deg)``, with the hinge position as a
 fraction of the chord [-], the hinge height as a fraction of the local
 thickness [-] (0 lower surface, 1 upper surface) and the deflection [deg],
-positive trailing edge down.
+positive trailing edge down. The coefficients and the Reynolds number use
+the chord of the section before the flap deflection (the reference chord
+of thin-airfoil theory, Glauert 1927); the moment is taken about its
+quarter-chord point.
 
 The cache key holds the package version, the solver revision
 (``ventorum.panel2d.SOLVER_REVISION``) and a sha256 fingerprint of the source
@@ -49,7 +52,7 @@ _FINGERPRINT_PACKAGES = ("panel2d", "ibl2d", "airfoil")
 
 #: Inputs of the 2D solver that :meth:`Ventorum2DPolarSource.polar` sets
 #: itself; they are not accepted as options.
-_NAMED_SOLVER_INPUTS = frozenset({"bodies", "alpha_deg", "Re", "mach", "height"})
+_NAMED_SOLVER_INPUTS = frozenset({"bodies", "alpha_deg", "Re", "mach", "height", "chord_ref"})
 
 
 def solver_revision() -> str:
@@ -345,6 +348,8 @@ class Ventorum2DPolarSource:
         if len(shape.coords) != self._n_panels + 1:
             shape = shape.repanel(n_panels=self._n_panels)
 
+        # Reference chord: the chord of the section before the flap deflection.
+        chord_ref = shape.chord
         if flap_tup is not None:
             shape = shape.with_flap(
                 x_hinge=flap_tup[0],
@@ -379,6 +384,7 @@ class Ventorum2DPolarSource:
             re_val,
             mach=0.0,
             height=h_val,
+            chord_ref=chord_ref,
             **settings,
         )
 

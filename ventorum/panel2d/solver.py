@@ -29,6 +29,9 @@ stream-function formulation) and section 6.6 (method of images).
 M. Drela, XFOIL: An analysis and design system for low Reynolds number
 airfoils, Lecture Notes in Engineering 54, Springer, 1989, pp. 1-12
 (the paper only).
+H. Glauert, Theoretical relationships for an aerofoil with hinged flap,
+ARC R and M 1095, 1927 (the chord of the undeflected section is the
+reference chord of a flapped section).
 """
 
 from __future__ import annotations
@@ -39,6 +42,7 @@ import numpy as np
 import scipy.linalg
 import torch
 
+from ventorum.airfoil.geometry import leading_edge_index
 from ventorum.panel2d.influence import (
     compute_panel_local_coordinates_numpy,
     compute_panel_local_coordinates_torch,
@@ -48,7 +52,7 @@ from ventorum.panel2d.influence import (
     wake_source_stream_influence,
 )
 
-__all__ = ["Panel2DResult", "solve_inviscid"]
+__all__ = ["Panel2DResult", "solve_inviscid", "section_chord", "reference_point"]
 
 #: Trailing-edge gap below which a trailing edge is sharp, over the body chord [-].
 SHARP_TE_GAP = 1e-4
@@ -71,8 +75,9 @@ class Panel2DResult:
         Pressure drag coefficient from surface pressure integration [-]
         (wall panels only).
     Cm : float, np.ndarray, or torch.Tensor
-        Pitching moment coefficient about x_ref (nose up positive, in the
-        body-0 frame before rotation) [-].
+        Pitching moment coefficient about x_ref (by default the quarter
+        chord of the reference chord, see :func:`reference_point`; nose up
+        positive, in the body-0 frame before rotation) [-].
     Cp : np.ndarray, torch.Tensor, or list
         Pressure coefficients at the nodes [-].
     ue : np.ndarray, torch.Tensor, or list
@@ -202,6 +207,61 @@ def panel_layout(bodies_np: list) -> PanelLayout:
             ks.append(0.5 * float(t @ n_out))
         start += n
     return PanelLayout(ranges, sharp, np.concatenate(i1), np.concatenate(i2), np.concatenate(pb), te, kv, ks)
+
+
+def section_chord(body) -> float:
+    """Return the chord of a section as given: the distance from the leading edge to the trailing-edge midpoint.
+
+    The trailing-edge midpoint is the midpoint of the first and the last
+    point. The leading edge is the point farthest from it, the definition
+    of the airfoil package (:func:`ventorum.airfoil.geometry.leading_edge_index`).
+    For a section with the leading edge at (0, 0) and the trailing-edge
+    midpoint at (1, 0) the chord is 1. A plain flap moves the trailing
+    edge: the chord of a deflected section is shorter than the chord of
+    the section before the deflection (see :func:`solve_inviscid`,
+    ``chord_ref``).
+
+    Parameters
+    ----------
+    body : array_like
+        Section coordinates in Selig order, shape (N, 2) [m].
+
+    Returns
+    -------
+    float
+        Chord [m]; 1.0 for a section of zero size.
+    """
+    pts = np.asarray(body, dtype=np.float64)
+    mid = 0.5 * (pts[0] + pts[-1])
+    chord = float(np.linalg.norm(pts[leading_edge_index(pts)] - mid))
+    return chord if chord > 0.0 else 1.0
+
+
+def reference_point(body, chord_ref: float) -> tuple[float, float]:
+    """Return the quarter-chord point of the reference chord [m].
+
+    The point lies a quarter of the reference chord behind the most
+    forward point of the section, on y = 0: (x_min + chord_ref / 4, 0).
+    For a section in the convention of the airfoil package (leading edge
+    at (0, 0), chord along +x) this is the quarter chord, also after a
+    plain-flap deflection (the flap does not move the leading edge). It is
+    the default moment reference point and the default pivot of the
+    ground-effect placement.
+
+    Parameters
+    ----------
+    body : array_like
+        Section coordinates, shape (N, 2) [m].
+    chord_ref : float
+        Reference chord [m].
+
+    Returns
+    -------
+    tuple of float
+        (x, y) of the point [m].
+    """
+    pts = np.asarray(body, dtype=np.float64)
+    return (float(np.min(pts[:, 0])) + 0.25 * float(chord_ref), 0.0)
 
 
 def _xp(a):
@@ -668,7 +728,7 @@ def solve_inviscid(
     height_reference: str = "pivot",
     pivot: tuple[float, float] | None = None,
     sigma=None,
-    x_ref: tuple[float, float] = (0.25, 0.0),
+    x_ref: tuple[float, float] | None = None,
     chord_ref: float | None = None,
     backend: str = "numpy",
     device=None,
@@ -688,7 +748,8 @@ def solve_inviscid(
         Height reference point. Default "pivot".
     pivot : tuple of float, optional
         Pivot point (x, y) [m] for the geometry rotation. Default: the
-        quarter chord of body 0.
+        quarter-chord point of the reference chord of body 0 (see
+        :func:`reference_point`).
     sigma : array or list of arrays, optional
         Prescribed constant source strengths of all panels (over the
         free-stream speed) [-], in panel order (a blunt trailing edge adds
@@ -696,8 +757,15 @@ def solve_inviscid(
         the right-hand side.
     x_ref : tuple of float, optional
         Moment reference point [m] in the body-0 frame before rotation.
+        Default: the quarter-chord point of the reference chord of body 0
+        (see :func:`reference_point`).
     chord_ref : float, optional
-        Reference chord [m]. Default: the chord of body 0.
+        Reference chord [m] of the coefficients. Default: the chord of
+        body 0 as given (distance from the leading edge to the
+        trailing-edge midpoint, see :func:`section_chord`). For a section
+        with a deflected plain flap, give the chord of the section before
+        the deflection, as in thin-airfoil theory (Glauert 1927) and XFOIL;
+        the chord of the deflected section is shorter.
     backend : {"numpy", "torch"}, optional
         Computational backend. Default "numpy".
     device : str or torch.device, optional
@@ -717,12 +785,12 @@ def solve_inviscid(
                  else np.asarray(b, dtype=np.float64) for b in blist]
     layout = panel_layout(bodies_np)
     b0 = bodies_np[0]
-    xle = float(np.min(b0[:, 0]))
-    c0 = float(np.max(b0[:, 0]) - xle)
     if chord_ref is None:
-        chord_ref = c0 if c0 > 0.0 else 1.0
+        chord_ref = section_chord(b0)
     if pivot is None:
-        pivot = (xle + 0.25 * chord_ref, 0.0)
+        pivot = reference_point(b0, chord_ref)
+    if x_ref is None:
+        x_ref = reference_point(b0, chord_ref)
     is_scalar = np.ndim(alpha_deg) == 0 if not isinstance(alpha_deg, torch.Tensor) else alpha_deg.ndim == 0
     alphas = np.atleast_1d(np.asarray(
         alpha_deg.detach().cpu().numpy() if isinstance(alpha_deg, torch.Tensor) else alpha_deg, dtype=np.float64))

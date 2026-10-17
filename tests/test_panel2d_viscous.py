@@ -434,12 +434,17 @@ def test_singular_edge_system_stops_with_a_reason(monkeypatch):
 
 @pytest.mark.slow
 def test_singular_matrix_case_returns_a_result():
-    """Regression: NACA 0012 (160 panels), 20 deg flap, stop rules off raised LinAlgError ("Singular matrix")."""
+    """Regression: NACA 0012 (160 panels), 20 deg flap, stop rules off raised LinAlgError ("Singular matrix").
+
+    The reference chord is the x extent of the deflected section, the default of the solver when the
+    error was found, so that the iterations are the same.
+    """
     coords = airfoil("0012").repanel(n_panels=160).with_flap(x_hinge=0.75, deflection=20.0,
                                                              hinge_treatment="repanel").coords
+    chord = float(np.max(coords[:, 0]) - np.min(coords[:, 0]))
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
-        r = solve_viscous(coords, 0.0, 1e6, stall_window=0, divergence_factor=0.0, work_budget=0)
+        r = solve_viscous(coords, 0.0, 1e6, stall_window=0, divergence_factor=0.0, work_budget=0, chord_ref=chord)
     assert r.converged or (r.reason and np.isnan(r.Cl))
     print(f"\n[viscous] singular case: converged {r.converged}, work {r.newton_iterations}, {r.reason}")
 
@@ -450,6 +455,27 @@ def test_lm_trials_is_checked():
     for value in (0, -1, 2.5):
         with pytest.raises(ValueError, match="lm_trials"):
             solve_viscous(c, 0.0, 1e6, lm_trials=value)
+
+
+@pytest.mark.slow
+def test_default_reference_chord_keeps_unit_sections():
+    """Unflapped NACA 0012 (160 panels): the default reference chord gives the former results, bit for bit.
+
+    The former default was the x extent of the section; here it equals the new default (the distance from
+    the leading edge to the trailing-edge midpoint), 1, and the moment point is (0.25, 0).
+    """
+    c = _naca("0012")
+    extent = float(np.max(c[:, 0]) - np.min(c[:, 0]))
+    assert extent == 1.0
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        new = solve_viscous(c, [0.0, 2.0], 1e6)
+        old = solve_viscous(c, [0.0, 2.0], 1e6, chord_ref=extent)
+    assert np.all(new.converged)
+    for name in ("Cl", "Cd", "Cd_friction", "Cd_pressure", "Cm", "newton_iterations", "linear_solves"):
+        assert np.array_equal(getattr(new, name), getattr(old, name)), name
+    with pytest.raises(ValueError, match="chord_ref"):
+        solve_viscous(c, 0.0, 1e6, chord_ref=0.0)
 
 
 def test_lm_trials_cap_after_a_failed_fallback(monkeypatch):

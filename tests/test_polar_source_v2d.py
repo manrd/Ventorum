@@ -270,6 +270,23 @@ def test_coordinate_file_section_is_keyed_by_its_points(tmp_path, fake_solver):
     assert len(fake_solver) == 2
 
 
+def test_flap_uses_the_undeflected_chord(fake_solver):
+    """The reference chord of a flapped section is the chord before the deflection; it is not an option."""
+    from ventorum.panel2d.solver import section_chord
+
+    source = Ventorum2DPolarSource(cache=False, n_panels=100)
+    source.polar("naca 0012", 1e6, [2.0], flap=(0.75, 0.5, 20.0))
+    flapped = fake_solver[-1]
+    source.polar("naca 0012", 1e6, [2.0])
+    clean = fake_solver[-1]
+    chord = airfoil("naca 0012", n_points=101).chord
+    assert flapped["chord_ref"] == clean["chord_ref"] == chord
+    # The deflected section is about 1.1 % shorter (20 deg flap of 0.25 chord).
+    assert section_chord(flapped["bodies"]) < 0.99 * chord
+    with pytest.raises(ValueError, match="Unknown Ventorum-2D option"):
+        source.polar("naca 0012", 1e6, [0.0], chord_ref=0.5)
+
+
 def test_nan_loads_of_failed_angles_are_dropped(monkeypatch):
     """A failed angle has NaN loads in the solver result; the polar drops it and holds finite values only."""
     import ventorum.aero.polar_source_v2d as module

@@ -68,7 +68,7 @@ from ventorum.panel2d import vii
 from ventorum.utils.parallel import blas_single_thread
 
 __all__ = ["ViscousResult", "StopRules", "solve_viscous", "trace_wake_streamline", "prepare_case", "warm_state",
-           "finish_angle", "row_from_result", "sweep_order"]
+           "finish_angle", "row_from_result", "sweep_order", "check_chord_ref"]
 
 #: Number of times the angle step of a warm start may be halved.
 SUBSTEP_DEPTH = 3
@@ -181,8 +181,9 @@ class ViscousResult:
     """Results of the 2D viscous panel solver.
 
     For an array of angles every field is an array (or a list) with one
-    entry per angle, in the input order. The loads and distributions of
-    an angle that did not converge are NaN.
+    entry per angle, in the input order. The coefficients use the
+    reference chord (see :func:`solve_viscous`, ``chord_ref``). The loads
+    and distributions of an angle that did not converge are NaN.
 
     Attributes
     ----------
@@ -197,7 +198,8 @@ class ViscousResult:
     Cd_pressure : float or np.ndarray
         Pressure drag coefficient from the surface pressure integration [-].
     Cm : float or np.ndarray
-        Pitching moment coefficient about x_ref (pressure only) [-].
+        Pitching moment coefficient about the quarter-chord point of the
+        reference chord (pressure only) [-].
     transition_positions : tuple of float or list of tuple
         Transition x/c on the upper and lower side [-] (1.0 when the layer
         stays laminar to the trailing edge).
@@ -322,10 +324,10 @@ def _single_body(bodies) -> np.ndarray:
     return arr
 
 
-def prepare_case(body, alpha, re, *, ncrit, xtr, height, height_reference, wake_length, n_wake):
+def prepare_case(body, alpha, re, *, ncrit, xtr, height, height_reference, wake_length, n_wake, chord_ref=None):
     """Return the CaseSetup of one angle, or raise a ValueError with the reason."""
     sys_ = cp.build_coupling_system(body, alpha, height=height, height_reference=height_reference,
-                                    wake_length=wake_length, n_wake=n_wake)
+                                    chord_ref=chord_ref, wake_length=wake_length, n_wake=n_wake)
     return vii.CaseSetup(sys_, float(re), float(ncrit), (float(xtr[0]), float(xtr[1])))
 
 
@@ -439,6 +441,7 @@ def solve_viscous(
     divergence_factor: float = vii.DIVERGENCE_FACTOR,
     work_budget: int = WORK_BUDGET,
     lm_trials: int = vii.LM_RETRY_TRIALS,
+    chord_ref: float | None = None,
 ) -> ViscousResult:
     """Solve 2D viscous flow with fully simultaneous boundary-layer coupling.
 
@@ -449,17 +452,18 @@ def solve_viscous(
     alpha_deg : float or array_like
         Angle of attack [deg].
     Re : float
-        Reynolds number of the chord [-].
+        Reynolds number of the reference chord [-].
     mach : float
         Free-stream Mach number [-]; only 0 is supported.
     ncrit : float
         Critical amplification exponent of the e^N method [-].
     xtr : tuple of float
-        Forced transition x/c on the upper and lower side [-]; 1.0 (or
-        more) means free transition only.
+        Forced transition x/c on the upper and lower side [-] (x from the
+        most forward point, over the reference chord); 1.0 (or more) means
+        free transition only.
     height : float or None
-        Height above the ground [m] (of the pivot, the quarter chord, by
-        default), or None for free air.
+        Height above the ground [m] (of the pivot, the quarter-chord point
+        of the reference chord, by default), or None for free air.
     max_iter : int
         Largest number of Newton iterations per angle.
     tol : float
@@ -500,6 +504,16 @@ def solve_viscous(
         :data:`ventorum.panel2d.vii.LM_TRIALS` values). The angles that
         converge do not depend on it in the test sample; it cuts the
         linear solves of failed attempts.
+    chord_ref : float or None
+        Reference chord [m] of the coefficients, of the Reynolds number,
+        of x/c and of the wake length. Default: the chord of the section
+        as given, the distance from the leading edge to the trailing-edge
+        midpoint (see :func:`ventorum.panel2d.solver.section_chord`). For a
+        section with a deflected plain flap, give the chord of the section
+        before the deflection, as in thin-airfoil theory and XFOIL: the
+        chord of the deflected section is shorter. The pitching moment is
+        taken about the quarter-chord point of the reference chord (see
+        :func:`ventorum.panel2d.solver.reference_point`).
 
     Returns
     -------
@@ -515,6 +529,7 @@ def solve_viscous(
                          "(solve_viscous_batch runs on torch).")
     if not np.isfinite(Re) or Re <= 0.0:
         raise ValueError(f"Reynolds number must be positive, got {Re}.")
+    chord_ref = check_chord_ref(chord_ref)
     rules = StopRules(stall_window=stall_window, stall_factor=stall_factor, divergence_factor=divergence_factor,
                       work_budget=work_budget, lm_trials=lm_trials)
     body = _single_body(bodies)
@@ -523,7 +538,7 @@ def solve_viscous(
     order_up, order_dn = sweep_order(alphas)
     out: dict[float, dict] = {}
     kw = dict(ncrit=ncrit, xtr=xtr, height=height, height_reference=height_reference,
-              wake_length=wake_length, n_wake=n_wake)
+              wake_length=wake_length, n_wake=n_wake, chord_ref=chord_ref)
     cache: dict = {}
     with blas_single_thread():
         first_state = None
@@ -573,6 +588,27 @@ def solve_viscous(
         linear_solves=np.array([r["linear_solves"] for r in rows], dtype=int),
         newton_solves=np.array([r["newton_solves"] for r in rows], dtype=int),
     )
+
+
+def check_chord_ref(chord_ref):
+    """Return the reference chord as a float, or None; raise ValueError when it is not positive and finite.
+
+    Parameters
+    ----------
+    chord_ref : float or None
+        Reference chord [m], or None for the chord of the section.
+
+    Returns
+    -------
+    float or None
+        The reference chord [m].
+    """
+    if chord_ref is None:
+        return None
+    c = float(chord_ref)
+    if not np.isfinite(c) or c <= 0.0:
+        raise ValueError(f"chord_ref must be a positive length, got {chord_ref}.")
+    return c
 
 
 def sweep_order(alphas):
@@ -702,7 +738,7 @@ def zero_lift_angle(body, kw) -> float:
 
     h = kw.get("height")
     opts = {} if h is None else {"height": h, "height_reference": kw.get("height_reference", "pivot")}
-    cl = solve_inviscid(body, [0.0, 4.0], **opts).Cl
+    cl = solve_inviscid(body, [0.0, 4.0], chord_ref=kw.get("chord_ref"), **opts).Cl
     return float(-4.0 * cl[0] / (cl[1] - cl[0]))
 
 

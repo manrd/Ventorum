@@ -487,7 +487,7 @@ def test_agent_guide_agrees_with_the_code():
 
 
 def test_airfoil_polar_failed_angles_are_null(monkeypatch):
-    """Failed Ventorum-2D angles (NaN loads) are null in strict JSON."""
+    """Failed Ventorum-2D angles (NaN loads) are null in strict JSON; a flap uses the undeflected chord."""
     from types import SimpleNamespace
 
     import ventorum.panel2d.viscous as viscous
@@ -518,6 +518,7 @@ def test_airfoil_polar_failed_angles_are_null(monkeypatch):
     assert res["Cl"][1] is None and res["Cd"][1] is None and res["Cm"][1] is None
     assert res["transition_positions"][1] is None
     assert res["Cl"][0] == pytest.approx(0.3)
+    assert calls[0]["chord_ref"] == pytest.approx(1.0, abs=1e-6)
 
 
 def test_airfoil_polar_real_failed_angles_are_null():
