@@ -484,3 +484,51 @@ def test_agent_guide_agrees_with_the_code():
         assert f"`{key}`" in section, key
     for gone in ("hinge_x_c", "xtr_upper", "repanel_count", "executive_summary"):
         assert gone not in section, gone
+
+
+def test_airfoil_polar_failed_angles_are_null(monkeypatch):
+    """Failed Ventorum-2D angles (NaN loads) are null in strict JSON."""
+    from types import SimpleNamespace
+
+    import ventorum.panel2d.viscous as viscous
+
+    calls: list[dict[str, Any]] = []
+
+    def fake_solve(bodies, alpha_deg, Re, **kwargs):
+        calls.append(kwargs)
+        nan = float("nan")
+        return SimpleNamespace(alpha=np.atleast_1d(alpha_deg), Cl=np.array([0.3, nan]), Cd=np.array([0.01, nan]),
+                               Cm=np.array([-0.05, nan]), converged=np.array([True, False]),
+                               transition_positions=[(0.5, 0.6), (nan, nan)])
+
+    monkeypatch.setattr(viscous, "solve_viscous", fake_solve)
+    res = call_tool(
+        "ventorum_airfoil_polar",
+        {
+            "section": "NACA 0012",
+            "Re": 1.0e6,
+            "alphas_deg": [0.0, 2.0],
+            "flap": {"x_hinge": 0.75, "deflection_deg": 10.0},
+            "source": "ventorum2d",
+        },
+    )
+    strict_json(res)
+    assert res["status"] == "success", res
+    assert res["converged"] == [True, False]
+    assert res["Cl"][1] is None and res["Cd"][1] is None and res["Cm"][1] is None
+    assert res["transition_positions"][1] is None
+    assert res["Cl"][0] == pytest.approx(0.3)
+
+
+def test_airfoil_polar_real_failed_angles_are_null():
+    """Angles that do not converge in the iteration limit are null (strict JSON), with a warning."""
+    res = call_tool(
+        "ventorum_airfoil_polar",
+        {"section": "NACA 0012", "Re": 1.0e6, "alphas_deg": [0.0, 2.0], "n_panels": 60, "max_iter": 1,
+         "source": "ventorum2d"},
+    )
+    strict_json(res)
+    assert res["status"] == "success", res
+    assert res["converged"] == [False, False]
+    assert res["Cl"] == [None, None] and res["Cd"] == [None, None] and res["Cm"] == [None, None]
+    assert any("did not converge" in w for w in res["warnings"])

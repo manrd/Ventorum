@@ -277,3 +277,50 @@ def test_plot_cp_compare_with_fewer_angles_raises():
         assert len(ax.lines) == 2
     finally:
         plt.close(ax.figure)
+
+
+def test_plot_cp_skips_an_angle_without_converged_values():
+    """An angle with NaN Cp (a failed viscous angle) draws no line, no legend; the title says so."""
+    import warnings
+
+    from ventorum.panel2d.viscous import solve_viscous
+
+    coords = AirfoilShape.naca("0012", n_points=61).coords
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        failed = solve_viscous(coords, 2.0, 1e6, max_iter=1)
+    assert not failed.converged and np.all(np.isnan(failed.Cp))
+    ax = plot_cp(failed)
+    try:
+        assert len(ax.lines) == 0
+        assert ax.get_legend() is None
+        assert "no converged solution" in ax.get_title()
+    finally:
+        plt.close(ax.figure)
+    res = solve_inviscid(coords, [0.0, 5.0], backend="numpy")
+    res.Cp = np.array(res.Cp, dtype=float)
+    res.Cp[1] = np.nan
+    ax = plot_cp(res, index=0, compare=res)
+    try:
+        assert len(ax.lines) == 2
+    finally:
+        plt.close(ax.figure)
+    ax = plot_cp(res, index=1, compare=res)
+    try:
+        assert len(ax.lines) == 0
+    finally:
+        plt.close(ax.figure)
+
+
+def test_ground_effect_cp_skips_heights_without_converged_values():
+    """A height whose Cp has no finite value at the angle gets no line."""
+    coords = _coords()
+    good = solve_inviscid(coords, 4.0, height=0.5)
+    bad = solve_inviscid(coords, 4.0, height=0.3)
+    bad.Cp = np.full_like(np.asarray(bad.Cp, dtype=float), np.nan)
+    ax = plot_ground_effect_cp({0.5: good, 0.3: bad})
+    try:
+        assert len(ax.lines) == 1
+        assert ax.lines[0].get_label() == "h/c = 0.5"
+    finally:
+        plt.close(ax.figure)

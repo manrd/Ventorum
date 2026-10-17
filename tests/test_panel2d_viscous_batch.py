@@ -77,6 +77,10 @@ def test_batch_reports_failures():
     assert not r.converged[0]
     assert "no convergence" in r.reason[0]
     assert r.residual[0] > 1e-6
+    # The loads and distributions of a failed case are NaN (not the last iterate).
+    assert np.isnan(r.Cl[0]) and np.isnan(r.Cd[0]) and np.isnan(r.Cm[0])
+    assert np.isnan(r.Cd_friction[0]) and np.isnan(r.Cd_pressure[0])
+    assert np.all(np.isnan(r[0].Cp)) and np.all(np.isnan(r[0].theta))
     with pytest.raises(ValueError):
         solve_viscous_batch(cases, backend="numpy")
 

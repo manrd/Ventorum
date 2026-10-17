@@ -317,6 +317,28 @@ def test_against_xfoil(re):
         )
 
 
+def test_failed_angle_has_nan_loads():
+    """A failed angle has NaN loads and distributions; its flag, reason, residual and work counters stay.
+
+    Before, a failed angle carried the values of its last iterate (for example Cl about 9.8).
+    """
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        r = solve_viscous(_naca("0012", 100), [0.0, 1.0], 1e6, max_iter=2)
+    assert not np.any(r.converged)
+    for name in ("Cl", "Cl_pressure", "Cd", "Cd_friction", "Cd_pressure", "Cm"):
+        assert np.all(np.isnan(getattr(r, name))), name
+    for name in ("Cp", "H", "theta", "Cf", "delta_star", "ue"):
+        assert all(np.all(np.isnan(v)) for v in getattr(r, name)), name
+    for w in r.wake:
+        assert w["x"].shape == (31, 2) and np.all(np.isfinite(w["x"]))
+        assert all(np.all(np.isnan(w[k])) for k in ("theta", "H", "ue"))
+    assert np.all(np.isnan(np.asarray(r.transition_positions)))
+    assert np.all(np.isfinite(r.residual)) and np.all(r.residual > 1e-6)
+    assert np.all(r.newton_iterations > 0) and np.all(r.linear_solves > 0) and np.all(r.newton_solves > 0)
+    assert all("no convergence" in x for x in r.reason)
+
+
 def test_no_division_warning_at_a_dropped_stagnation_node():
     """Regression: the start values of the structure update divided 0 by 0 at a dropped stagnation node.
 

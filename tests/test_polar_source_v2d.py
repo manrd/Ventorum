@@ -268,3 +268,21 @@ def test_coordinate_file_section_is_keyed_by_its_points(tmp_path, fake_solver):
     write_selig(airfoil("2412"), path)
     source.polar(str(path), 1e6, [0.0, 2.0])
     assert len(fake_solver) == 2
+
+
+def test_nan_loads_of_failed_angles_are_dropped(monkeypatch):
+    """A failed angle has NaN loads in the solver result; the polar drops it and holds finite values only."""
+    import ventorum.aero.polar_source_v2d as module
+
+    def fake_solve(bodies, alpha_deg, Re, **kwargs):
+        res = _fake_viscous_result(alpha_deg)
+        res.converged = np.array([True, False])
+        for name in ("Cl", "Cd", "Cm"):
+            getattr(res, name)[1] = np.nan
+        return res
+
+    monkeypatch.setattr(module, "solve_viscous", fake_solve)
+    polar = Ventorum2DPolarSource(cache=False).polar("naca 0012", 1e6, [0.0, 4.0])
+    assert "1 of 2 alpha dropped" in polar.name
+    assert np.all(np.isfinite(polar.Cl_data)) and np.all(np.isfinite(polar.Cd_data))
+    np.testing.assert_allclose(np.degrees(polar.alpha), [0.0])

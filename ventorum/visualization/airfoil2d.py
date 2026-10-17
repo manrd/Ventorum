@@ -213,6 +213,15 @@ def _body_coords_list(
     raise ValueError("Coordinates must have shape (N, 2).")
 
 
+def _has_values(cp: np.ndarray) -> bool:
+    """Return True when a Cp curve holds at least one finite value.
+
+    The viscous solver gives NaN distributions at an angle that did not
+    converge; such a curve is not drawn.
+    """
+    return bool(np.any(np.isfinite(np.asarray(cp, dtype=float))))
+
+
 def _body_frame_x(xy_list: list[np.ndarray], alpha_deg: float) -> list[np.ndarray]:
     """Return the body-frame x [chord units] of solved ground-effect nodes.
 
@@ -393,7 +402,10 @@ def plot_cp(
     -------
     matplotlib Axes
         The axes with one line per body, plus one point series per
-        compare body (or one point series for array data).
+        compare body (or one point series for array data). A curve without
+        a finite Cp value (an angle of the viscous solver that did not
+        converge has NaN values) is not drawn; the title then says that
+        the angle has no converged solution.
     """
     idx = _check_index(index)
     cp_list = _body_cp_list(result, idx)
@@ -405,6 +417,8 @@ def plot_cp(
         _, ax = plt.subplots(figsize=(8.0, 5.0))
 
     for b, (xy, cp) in enumerate(zip(xy_list, cp_list)):
+        if not _has_values(cp):
+            continue
         label = f"body {b}" if len(cp_list) > 1 else "panel method"
         ax.plot(
             xy[:, 0], cp, color="#2563eb", linewidth=1.8, label=label,
@@ -412,6 +426,8 @@ def plot_cp(
 
     if compare is not None:
         for x_c, cp_c, label in _compare_series(compare, idx):
+            if not _has_values(cp_c):
+                continue
             ax.plot(
                 x_c, cp_c, color="black", marker="o", linestyle="None",
                 markersize=4, label=label,
@@ -419,13 +435,15 @@ def plot_cp(
 
     ax.set_xlabel("x [chord units], node frame of the result")
     ax.set_ylabel("Cp [-]")
+    load = f"Cl = {cl:.4f}" if np.isfinite(cl) else "no converged solution"
     ax.set_title(
-        f"Cp distribution at alpha = {alpha:.2f} deg (Cl = {cl:.4f})"
+        f"Cp distribution at alpha = {alpha:.2f} deg ({load})"
     )
     if invert:
         ax.invert_yaxis()
     ax.grid(True, alpha=0.3)
-    ax.legend(fontsize=9)
+    if ax.get_legend_handles_labels()[0]:
+        ax.legend(fontsize=9)
     return ax
 
 
@@ -465,7 +483,9 @@ def plot_ground_effect_cp(
     Returns
     -------
     matplotlib Axes
-        The axes with one line per height (times the body count).
+        The axes with one line per height (times the body count). A
+        height whose Cp has no finite value at the angle (an angle of the
+        viscous solver that did not converge) gets no line.
     """
     if hasattr(results_by_height, "items"):
         items = list(results_by_height.items())
@@ -498,6 +518,8 @@ def plot_ground_effect_cp(
         xy_list = _body_coords_list(res, idx, len(cp_list))
         x_body = _body_frame_x(xy_list, _scalar_at(res.alpha, idx))
         for b, (x_b, cp) in enumerate(zip(x_body, cp_list)):
+            if not _has_values(cp):
+                continue
             if len(cp_list) > 1:
                 label = f"h/c = {height:g}, body {b}"
             else:
@@ -512,5 +534,6 @@ def plot_ground_effect_cp(
     if invert:
         ax.invert_yaxis()
     ax.grid(True, alpha=0.3)
-    ax.legend(fontsize=9, title="height")
+    if ax.get_legend_handles_labels()[0]:
+        ax.legend(fontsize=9, title="height")
     return ax

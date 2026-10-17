@@ -28,7 +28,8 @@ Newton iteration (see :mod:`ventorum.panel2d.vii`).
   zero-lift angle and continues to the angle in steps of at most
   CONTINUATION_STEP (start values only).
 * A case that does not converge returns ``converged=False`` with a reason
-  and a warning; its values are those of the last iterate.
+  and a warning; its loads and distributions are NaN (the last iterate is
+  not a solution), its residual and work counters are given.
 * Fail fast: a Newton solve stops early by stagnation or divergence (see
   :func:`ventorum.panel2d.vii.newton_solve`); an angle has a work budget
   in Newton iterations over all its attempts (WORK_BUDGET); a failed
@@ -169,7 +170,8 @@ class ViscousResult:
     """Results of the 2D viscous panel solver.
 
     For an array of angles every field is an array (or a list) with one
-    entry per angle, in the input order.
+    entry per angle, in the input order. The loads and distributions of
+    an angle that did not converge are NaN.
 
     Attributes
     ----------
@@ -478,6 +480,8 @@ def solve_viscous(
     -------
     ViscousResult
         Loads, distributions, convergence data and work counters per angle.
+        The loads and distributions of an angle that did not converge are
+        NaN.
     """
     if abs(mach) > 1e-12:
         raise ValueError(f"Only mach=0.0 is supported in solve_viscous, got mach={mach}.")
@@ -610,8 +614,9 @@ def finish_angle(body, alpha, re, prev, tol, max_iter, kw, bk=None, first=None, 
     steps are then the same as in the sequential solver. ``rules``
     (:class:`StopRules`, default values when None) sets the early stops
     and the work budget of the angle. When the budget is used up, the
-    attempt at the angle with the smallest residual is returned (NaN
-    values when there is none). The row holds the work counters, and its
+    attempt at the angle with the smallest residual gives the convergence
+    data of the row. The loads and distributions of a failed angle are NaN
+    (see :func:`row_from_result`). The row holds the work counters, and its
     reason names each early stop of a failed angle. ``cache`` (a dict, one
     per sweep) keeps the cold start at the zero-lift angle for the next
     angles (see :func:`_cold_path`).
@@ -721,7 +726,18 @@ def _solve_angle(body, alpha, re, prev, tol, max_iter, kw, rules=None, cache=Non
 
 
 def row_from_result(setup, res, alpha) -> dict:
-    """Return the output row of a Newton result."""
+    """Return the output row of a Newton result.
+
+    The last iterate of a result that did not converge is not a solution:
+    its loads (Cl, Cl_pressure, Cd, Cd_friction, Cd_pressure, Cm), its
+    transition positions and its node and wake distributions are NaN. The
+    convergence flag, the reason, the residual and the iteration count
+    stay.
+    """
+    if not res.converged:
+        row = _failed_row(alpha, setup.sys.nodes, res.reason, wake_x=setup.sys.wake_nodes)
+        row.update(iterations=int(res.iterations), residual=float(res.residual))
+        return row
     o = vii.case_outputs(setup, res.state, res.ue)
     return {
         "alpha": float(alpha),
@@ -748,15 +764,24 @@ def row_from_result(setup, res, alpha) -> dict:
     }
 
 
-def _failed_row(alpha, body, reason) -> dict:
-    """Return the output row of a case that could not be set up."""
+def _failed_row(alpha, body, reason, wake_x=None) -> dict:
+    """Return the output row of a failed angle: NaN loads and distributions.
+
+    ``wake_x`` holds the wake line [m] when the case was set up; the wake
+    distributions are then NaN arrays, else the wake dict is empty.
+    """
     nan = float("nan")
     n = len(body)
-    arr = np.full(n, nan)
+
+    def arr(k=n):
+        return np.full(k, nan)
+
+    wake = {} if wake_x is None else {"x": wake_x, "theta": arr(len(wake_x)), "H": arr(len(wake_x)),
+                                      "ue": arr(len(wake_x))}
     return {
         "alpha": float(alpha), "Cl": nan, "Cd": nan, "Cd_friction": nan, "Cd_pressure": nan, "Cm": nan,
-        "transition_positions": (nan, nan), "separation_flags": (False, False), "Cp": arr, "H": arr,
-        "theta": arr, "Cf": arr, "iterations": 0, "residual": nan, "converged": False,
-        "coordinates": body, "reason": reason, "Cl_pressure": nan, "delta_star": arr, "ue": arr, "wake": {},
+        "transition_positions": (nan, nan), "separation_flags": (False, False), "Cp": arr(), "H": arr(),
+        "theta": arr(), "Cf": arr(), "iterations": 0, "residual": nan, "converged": False,
+        "coordinates": body, "reason": reason, "Cl_pressure": nan, "delta_star": arr(), "ue": arr(), "wake": wake,
         "newton_iterations": 0, "linear_solves": 0, "newton_solves": 0,
     }
