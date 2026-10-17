@@ -2168,6 +2168,97 @@ def _panel_geometry(p: np.ndarray) -> tuple[float, np.ndarray, float, float, flo
     return area, unit, aspect, float(skew), float(warp), bool(convex)
 
 
+def _panel_geometry_batch(p: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Area [m^2], unit normal, aspect ratio [-], skew [-], warp [-] and convexity of each panel.
+
+    Vectorized twin of :func:`_panel_geometry`: all panels at once, with the
+    same special cases. The normal falls back through the three cross
+    products when the diagonals are degenerate. The distinct-corner loop
+    drops the consecutive repeats and one closing repeat. Edge lengths count
+    only above zero; the aspect ratio is 1.0 with fewer than two edges. The
+    diameter runs over the up to six corner pairs of the distinct loop. The
+    warp is 0 for a zero diameter or a zero normal. The convexity test turns
+    every corner of the distinct loop the same way as the normal, with the
+    tolerance 1e-12 * diam**2.
+
+    Parameters
+    ----------
+    p : numpy.ndarray
+        Corner positions [m], shape (Np, 4, 3).
+
+    Returns
+    -------
+    tuple of numpy.ndarray
+        (area, unit, aspect, skew, warp, convex): areas [m^2] shape (Np,),
+        unit normals shape (Np, 3), aspect ratios [-], skews [-] and warps
+        [-] each shape (Np,), and the convex flags shape (Np,).
+    """
+    p1, p2, p3, p4 = p[:, 0], p[:, 1], p[:, 2], p[:, 3]
+    n0 = np.cross(p3 - p1, p4 - p2)
+    n1 = np.cross(p2 - p1, p3 - p1)
+    n2 = np.cross(p3 - p1, p4 - p1)
+    nrm0 = np.linalg.norm(n0, axis=1)
+    nrm1 = np.linalg.norm(n1, axis=1)
+    nrm2 = np.linalg.norm(n2, axis=1)
+    take1 = nrm0 <= 1e-300
+    take2 = np.where(take1, nrm1, nrm0) <= 1e-300
+    nvec = np.where(take2[:, None], n2, np.where(take1[:, None], n1, n0))
+    nrm = np.where(take2, nrm2, np.where(take1, nrm1, nrm0))
+    live = nrm > 1e-300
+    unit = np.where(live[:, None], nvec / np.where(live, nrm, 1.0)[:, None], 0.0)
+    area = 0.5 * (nrm1 + nrm2)
+
+    n_p = p.shape[0]
+    rows = np.arange(n_p)
+    # The distinct-corner loop of each panel: drop the consecutive repeats,
+    # then one closing repeat (the last kept corner equal to the first).
+    keep = np.empty(p.shape[:2], dtype=bool)
+    keep[:, 0] = True
+    keep[:, 1:] = np.any(p[:, 1:] != p[:, :-1], axis=2)
+    last = 3 - np.argmax(keep[:, ::-1], axis=1)
+    closing = (np.sum(keep, axis=1) > 1) & np.all(p[rows, last] == p[:, 0], axis=1)
+    keep[rows[closing], last[closing]] = False
+
+    # Neighbour of each kept corner in the distinct loop (wrap at both ends).
+    kk = np.arange(4)
+    nxt = keep[:, :, None] & keep[:, None, :] & (kk[None, :] > kk[:, None])
+    no_nxt = ~np.any(nxt, axis=2)
+    nxt |= keep[:, None, :] & no_nxt[:, :, None]
+    prv = keep[:, :, None] & keep[:, None, :] & (kk[None, :] < kk[:, None])
+    no_prv = ~np.any(prv, axis=2)
+    prv |= keep[:, None, :] & no_prv[:, :, None]
+    nxt_p = np.take_along_axis(p, np.argmax(nxt, axis=2)[:, :, None], axis=1)
+    prv_p = np.take_along_axis(p, (3 - np.argmax(prv[:, :, ::-1], axis=2))[:, :, None], axis=1)
+
+    edges = np.linalg.norm(nxt_p - p, axis=2)
+    live_edge = keep & (edges > 0.0)
+    lengths = np.where(live_edge, edges, np.inf)
+    e_min = np.min(lengths, axis=1)
+    aspect = np.where(np.isfinite(e_min), np.max(np.where(live_edge, edges, 0.0), axis=1) / e_min, 1.0)
+
+    va = prv_p - p
+    vb = nxt_p - p
+    na = np.linalg.norm(va, axis=2)
+    nb = np.linalg.norm(vb, axis=2)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        corner = np.where(keep & (na > 0.0) & (nb > 0.0), np.abs(np.sum(va * vb, axis=2)) / (na * nb), 0.0)
+    skew = np.max(corner, axis=1)
+
+    ii, jj = np.triu_indices(4, k=1)
+    diam = np.max(np.where(keep[:, ii] & keep[:, jj], np.linalg.norm(p[:, ii] - p[:, jj], axis=2), 0.0), axis=1)
+    count = np.sum(keep, axis=1)
+    mean = np.sum(np.where(keep[:, :, None], p, 0.0), axis=1) / count[:, None]
+    dev = np.abs((p - mean[:, None, :]) @ unit[:, :, None])[:, :, 0]
+    dev = np.where(keep, dev, 0.0)
+    live_unit = np.any(unit != 0.0, axis=1)
+    warp = np.where((diam > 0.0) & live_unit, np.max(dev, axis=1) / np.where(diam > 0.0, diam, 1.0), 0.0)
+
+    # Convexity in the mean plane: every corner turns the same way as the normal.
+    turn = np.sum(np.cross(p - prv_p, nxt_p - p) * unit[:, None, :], axis=2)
+    convex = (count >= 3) & (diam > 0.0) & live_unit & ~np.any(keep & (turn < -(1e-12 * diam * diam)[:, None]), axis=1)
+    return area, unit, aspect, skew, warp, convex
+
+
 def _station_folds(nodes: np.ndarray, panels: np.ndarray, station: np.ndarray, comp_of: np.ndarray) -> np.ndarray:
     """Return a fold flag for each panel from the planes of the spanwise stations.
 
@@ -2246,8 +2337,131 @@ def _station_folds(nodes: np.ndarray, panels: np.ndarray, station: np.ndarray, c
     return np.any(bad[panels], axis=1)
 
 
-def check_mesh(mesh: PanelMesh, warp_limit: float = WARP_LIMIT) -> dict:
-    """Check closure, orientation and quality of a panel mesh.
+def _station_folds_batch(nodes: np.ndarray, panels: np.ndarray, station: np.ndarray, comp_of: np.ndarray) -> np.ndarray:
+    """Fold flag for each panel from the station planes, with array operations.
+
+    Vectorized twin of :func:`_station_folds`: the plane of each station row
+    comes from one stacked SVD of the rows with equal point count, the
+    orientation of the normals runs on the centroid matrix, and the node
+    tests run on the two neighbour planes of each row. The rules match the
+    loop. Rows with fewer than three points are skipped, and so are rows
+    that fail the singular-value guards, two rows in one plane, and rows
+    without a neighbour plane. A node on the wrong side of a neighbour
+    plane means that the strip folds.
+
+    Parameters
+    ----------
+    nodes : numpy.ndarray
+        Node positions [m], shape (Nn, 3).
+    panels : numpy.ndarray
+        Panel corner node indices, shape (Np, 4).
+    station : numpy.ndarray
+        Station row of each node, shape (Nn,), increasing along the span.
+    comp_of : numpy.ndarray
+        Component of each panel, shape (Np,).
+
+    Returns
+    -------
+    numpy.ndarray
+        True for each panel with a corner node on the wrong side, shape (Np,).
+    """
+    bad = np.zeros(nodes.shape[0], dtype=bool)
+    for c in np.unique(comp_of):
+        ids = np.unique(panels[comp_of == c].ravel())
+        if ids.size < 4:
+            continue
+        st = station[ids]
+        levels = np.unique(st)
+        if levels.size < 2:
+            continue
+        size = float(np.max(np.ptp(nodes[ids], axis=0)))
+        tol = 1e-9 * max(size, 1e-300)
+        # The points of every row, ordered by station and then by node id,
+        # the same order as nodes[ids[st == level]] in the loop.
+        order = np.argsort(st, kind="stable")
+        flat = nodes[ids[order]]
+        counts = np.bincount(np.searchsorted(levels, st[order]), minlength=levels.size)
+        groups: list[tuple[np.ndarray, np.ndarray]] = []
+        if int(counts.min()) == int(counts.max()):
+            groups.append((np.arange(levels.size), flat.reshape(levels.size, int(counts[0]), 3)))
+        else:
+            # Rare: rows of one component with different point counts.
+            rows = np.split(flat, np.cumsum(counts)[:-1])
+            for g in np.unique(counts):
+                sel = np.flatnonzero(counts == g)
+                pts = rows[int(sel[0])][None, :, :] if sel.size == 1 else np.stack([rows[int(i)] for i in sel])
+                groups.append((sel, pts))
+        cen_all = np.zeros((levels.size, 3))
+        nrm_all = np.zeros((levels.size, 3))
+        ok_all = np.zeros(levels.size, dtype=bool)
+        for sel, pts in groups:
+            g = pts.shape[1]
+            if g < 3:
+                continue
+            cen = pts.sum(axis=1) / float(g)
+            _, sv, vt = np.linalg.svd(pts - cen[:, None, :], full_matrices=False)
+            ok_all[sel] = (sv[:, 1] > 1e-9 * np.maximum(sv[:, 0], 1e-300)) & (sv[:, 2] <= 1e-6 * sv[:, 0])
+            cen_all[sel] = cen
+            nrm_all[sel] = vt[:, -1, :]
+        plane = np.flatnonzero(ok_all)
+        if plane.size < 2:
+            continue
+        cens = cen_all[plane]
+        nrms = nrm_all[plane]
+        m = plane.size
+        rows_i = np.arange(m)
+        # Orient each normal toward the next row that is not in the same
+        # plane (else away from the previous one): two rows of a control gap
+        # share a plane, and their centroids give no direction.
+        diff = cens[None, :, :] - cens[:, None, :]
+        turn = (diff * nrms[:, None, :]).sum(axis=2)
+        big = np.abs(turn) > tol
+        higher = big & (rows_i[None, :] > rows_i[:, None])
+        lower = big & (rows_i[None, :] < rows_i[:, None])
+        first_up = np.argmax(higher, axis=1)
+        first_dn = m - 1 - np.argmax(lower[:, ::-1], axis=1)
+        up_ok = higher[rows_i, first_up]
+        dn_ok = lower[rows_i, first_dn]
+        flip = np.where(up_ok, turn[rows_i, first_up] < 0.0,
+                        np.where(dn_ok, turn[rows_i, first_dn] > 0.0, False))
+        nrms = np.where(flip[:, None], -nrms, nrms)
+        # The neighbour planes of a row: pair j joins plane j and plane j+1
+        # and is skipped when the two rows share a plane.
+        step = cens[1:] - cens[:-1]
+        pair_d = (step * nrms[:-1]).sum(axis=1)
+        pair_n = (nrms[:-1] * nrms[1:]).sum(axis=1)
+        skip = (np.abs(pair_d) <= tol) & (np.abs(np.abs(pair_n) - 1.0) <= 1e-9)
+        # Each node is tested against the row below and the row above it.
+        lvl = np.searchsorted(levels, st)
+        pos = np.searchsorted(plane, lvl)
+        in_plane = np.zeros(ids.size, dtype=bool)
+        has = pos < m
+        in_plane[has] = plane[pos[has]] == lvl[has]
+        at = nodes[ids]
+        below = pos - 1
+        above = pos + 1
+        prev_on = in_plane & (below >= 0)
+        next_on = in_plane & (above <= m - 1)
+        ip = np.where(prev_on, below, 0)
+        rel = at - cens[ip]
+        d_prev = (rel * nrms[ip]).sum(axis=1)
+        jn = np.where(next_on, above, 0)
+        jp = np.where(next_on, pos, 0)
+        rel2 = at - cens[jn]
+        d_next = (rel2 * nrms[jn]).sum(axis=1)
+        hit = (prev_on & ~skip[np.where(prev_on, below, 0)] & (d_prev < -tol)) | (
+            next_on & ~skip[jp] & (d_next > tol))
+        bad[ids[hit]] = True
+    return np.any(bad[panels], axis=1)
+
+
+def _check_mesh_reference(mesh: PanelMesh, warp_limit: float = WARP_LIMIT) -> dict:
+    """Loop reference of :func:`check_mesh`, kept only for the parity tests.
+
+    The per-panel geometry runs :func:`_panel_geometry` in a Python loop and
+    the edge bookkeeping uses Python dicts. The solver never calls this
+    function. The vectorized :func:`check_mesh` must return the same
+    booleans and counts, and the float metrics equal to round-off.
 
     Parameters
     ----------
@@ -2366,6 +2580,156 @@ def check_mesh(mesh: PanelMesh, warp_limit: float = WARP_LIMIT) -> dict:
     min_area = float(np.min(areas)) if n_p else 0.0
     if station is not None and n_p:
         folded = _station_folds(nodes, panels, station, comp_of)
+    else:
+        folded = np.zeros(n_p, dtype=bool)
+    n_folded = int(np.sum(folded))
+    n_nonconvex = int(np.sum(~convex | folded))
+    planar = bool(max_warp <= float(warp_limit))
+    return {
+        "watertight": bool(watertight),
+        "orientation_consistent": bool(consistent),
+        "outward": bool(outward),
+        "volume": volume,
+        "component_volume": {int(c): float(v) for c, v in comp_volume.items()},
+        "min_area": min_area,
+        "aspect_ratio": aspects,
+        "skew": skews,
+        "warp": warps,
+        "convex": convex,
+        "max_aspect_ratio": float(np.max(aspects)) if n_p else 1.0,
+        "max_skew": float(np.max(skews)) if n_p else 0.0,
+        "max_warp": max_warp,
+        "folded": folded,
+        "n_folded": n_folded,
+        "n_nonconvex": n_nonconvex,
+        "planar": planar,
+        "valid_panels": bool(n_nonconvex == 0 and planar and min_area > 0.0),
+        "n_open_edges": int(n_open),
+    }
+
+
+def check_mesh(mesh: PanelMesh, warp_limit: float = WARP_LIMIT) -> dict:
+    """Check closure, orientation and quality of a panel mesh.
+
+    The check runs with array operations: the per-panel geometry of
+    :func:`_panel_geometry_batch` for all panels at once, the edge
+    bookkeeping on the flat directed edge list with ``numpy.unique`` and
+    ``numpy.bincount``, and the fold detection of
+    :func:`_station_folds_batch`. The decisions match the loop reference
+    :func:`_check_mesh_reference` (kept for the parity tests): every
+    boolean and count is identical, and the float metrics are equal to
+    round-off.
+
+    Parameters
+    ----------
+    mesh : PanelMesh
+        Mesh to check.
+    warp_limit : float
+        Planarity limit [-]: largest allowed distance of a corner from the
+        mean plane of its panel over the panel diameter.
+
+    Returns
+    -------
+    dict
+        watertight : every edge is shared by exactly two panels, except the
+        root edges of a half mesh (both nodes on y = 0 within a relative
+        tolerance) and the edges of the end stations when ``mesh.tip`` is
+        "none" (needs ``mesh.node_station``).
+        orientation_consistent : the two panels of each shared edge run
+        along it in opposite directions.
+        outward : orientation consistent and the signed volume of each
+        component above a relative tolerance.
+        volume [m^3] (sum over components) and component_volume [m^3] per
+        component.
+        min_area [m^2]; per-panel aspect_ratio, skew, warp and convex
+        arrays with max_aspect_ratio, max_skew and max_warp.
+        folded : per-panel flag of a folded strip (needs
+        ``mesh.node_station``): a corner node lies on the wrong side of the
+        section plane of the neighbour station row, so the surface passes
+        through itself (see :func:`_station_folds_batch`). A fold need not make a
+        panel non-convex. n_folded : number of folded panels.
+        n_nonconvex : number of panels that are not convex in their mean
+        plane or are folded (both make a surface that is not valid; the
+        trust score reads this count as folded panels).
+        planar : max_warp below *warp_limit*.
+        valid_panels : no panel non-convex or folded, all planar and with
+        positive area.
+        n_open_edges : number of edges used by one panel only.
+    """
+    nodes = np.asarray(mesh.nodes, dtype=float)
+    panels = np.asarray(mesh.panels, dtype=int).reshape(-1, 4)
+    n_p = panels.shape[0]
+    corners = nodes[panels]
+    areas, _, aspects, skews, warps, convex = _panel_geometry_batch(corners)
+    comp_raw = np.asarray(mesh.component).reshape(-1)
+    comp_of = comp_raw.astype(int) if comp_raw.shape[0] == n_p else np.zeros(n_p, dtype=int)
+    comp_ids = sorted({int(c) for c in comp_of})
+    comp_index = np.asarray(comp_ids, dtype=int)
+    # Signed volume of each panel: the two tetrahedra of the corner fan.
+    contrib = (
+        np.sum(corners[:, 0] * np.cross(corners[:, 1], corners[:, 2]), axis=1)
+        + np.sum(corners[:, 0] * np.cross(corners[:, 2], corners[:, 3]), axis=1)
+    ) / 6.0
+    comp_volume = {
+        int(c): float(v) for c, v in zip(comp_ids, np.bincount(np.searchsorted(comp_index, comp_of),
+                                                               weights=contrib, minlength=len(comp_ids)))
+    }
+    volume = float(sum(comp_volume.values()))
+
+    # The 4 Np directed edges; the undirected keys give the count, the
+    # direction sum and the first owner of each edge.
+    ea = panels.ravel()
+    eb = panels[:, [1, 2, 3, 0]].ravel()
+    used = ea != eb
+    ea, eb = ea[used], eb[used]
+    lo = np.minimum(ea, eb)
+    hi = np.maximum(ea, eb)
+    owner_of = np.repeat(np.arange(n_p, dtype=int), 4)[used]
+    keys = lo.astype(np.int64) * max(int(nodes.shape[0]), 1) + hi.astype(np.int64)
+    _, first, inv, counts = np.unique(keys, return_index=True, return_inverse=True, return_counts=True)
+    inv = np.asarray(inv).reshape(-1)
+    dir_sum = np.bincount(inv, weights=np.where(ea < eb, 1.0, -1.0))
+
+    comp_nodes = {c: np.unique(panels[comp_of == c].ravel()) for c in comp_ids}
+    station = None if mesh.node_station is None else np.asarray(mesh.node_station, dtype=int)
+    ends: dict[int, tuple[int, int]] = {}
+    if station is not None and station.shape[0] == nodes.shape[0]:
+        for c in comp_ids:
+            st = station[comp_nodes[c]]
+            ends[c] = (int(np.min(st)), int(np.max(st)))
+    else:
+        station = None
+    size = float(np.max(np.ptp(nodes, axis=0))) if nodes.shape[0] else 1.0
+    y_tol = _Y_ROOT_REL * max(size, 1e-300)
+    tip_open = str(getattr(mesh, "tip", "flat")) == "none"
+
+    # The root rule of a half mesh and the open-tip rule work on the edge arrays.
+    first_edge = first[counts == 1]
+    a_open = lo[first_edge]
+    b_open = hi[first_edge]
+    root_ok = bool(mesh.half) & (np.abs(nodes[a_open, 1]) <= y_tol) & (np.abs(nodes[b_open, 1]) <= y_tol)
+    tip_ok = np.zeros(first_edge.size, dtype=bool)
+    if tip_open and station is not None:
+        ends_lo = np.asarray([ends[c][0] for c in comp_ids])
+        ends_hi = np.asarray([ends[c][1] for c in comp_ids])
+        slot = np.searchsorted(comp_index, comp_of[owner_of[first_edge]])
+        sa = station[a_open]
+        sb = station[b_open]
+        tip_ok = (sa == sb) & ((sa == ends_lo[slot]) | (sa == ends_hi[slot]))
+    n_open = int(first_edge.size)
+    watertight = not (bool(np.any(counts > 2)) or bool(np.any(~(root_ok | tip_ok))))
+    consistent = not bool(np.any(dir_sum[counts == 2] != 0.0))
+
+    outward = consistent
+    for c in comp_ids:
+        ext = nodes[comp_nodes[c]]
+        size_c = float(np.max(np.ptp(ext, axis=0))) if ext.shape[0] else 0.0
+        if not comp_volume[c] > _VOLUME_REL * size_c**3:
+            outward = False
+    max_warp = float(np.max(warps)) if n_p else 0.0
+    min_area = float(np.min(areas)) if n_p else 0.0
+    if station is not None and n_p:
+        folded = _station_folds_batch(nodes, panels, station, comp_of)
     else:
         folded = np.zeros(n_p, dtype=bool)
     n_folded = int(np.sum(folded))
