@@ -107,8 +107,9 @@ class StopRules:
         Largest number of damping values (one linear solve each) of a
         Levenberg-Marquardt fallback step of a Newton iteration after a
         fallback step of the same Newton solve found no decrease of the
-        residual [-], at least 1 (the fallback steps before that try
-        :data:`ventorum.panel2d.vii.LM_TRIALS` values).
+        residual above the stagnation floor [-], at least 1 (the fallback
+        steps before that try :data:`ventorum.panel2d.vii.LM_TRIALS`
+        values; see :func:`ventorum.panel2d.vii.newton_solve`).
     """
 
     stall_window: int = vii.STALL_WINDOW
@@ -500,9 +501,10 @@ def solve_viscous(
         Largest number of damping values (one linear solve each) of a
         Levenberg-Marquardt fallback step of a Newton iteration after a
         fallback step of the same Newton solve found no decrease of the
-        residual [-], at least 1 (the fallback steps before that try
-        :data:`ventorum.panel2d.vii.LM_TRIALS` values). The angles that
-        converge do not depend on it in the test sample; it cuts the
+        residual above the stagnation floor [-], at least 1 (the fallback
+        steps before that try :data:`ventorum.panel2d.vii.LM_TRIALS`
+        values; see :func:`ventorum.panel2d.vii.newton_solve`). The angles
+        that converge do not depend on it in the test sample; it cuts the
         linear solves of failed attempts.
     chord_ref : float or None
         Reference chord [m] of the coefficients, of the Reynolds number,

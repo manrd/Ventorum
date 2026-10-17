@@ -63,8 +63,9 @@ STALL_FLOOR times the tolerance (near the tolerance the residual can stall
 at the round-off level of float32 and still reach it); it
 stops with status "divergence" when, at omega = 1, the residual exceeds
 DIVERGENCE_FACTOR times its smallest earlier value. After a
-Levenberg-Marquardt step of a solve found no decrease, the later ones of
-that solve try at most ``lm_trials`` damping values instead of LM_TRIALS.
+Levenberg-Marquardt step of a solve found no decrease while the residual
+was above STALL_FLOOR times the tolerance, the later ones of that solve
+try at most ``lm_trials`` damping values instead of LM_TRIALS.
 A singular Newton matrix is a failed step (see :func:`newton_solve`).
 
 The same code runs with numpy (one case) and with torch (a batch of cases
@@ -1253,8 +1254,10 @@ def newton_solve(setups, states, *, tol=1e-6, max_iter=50, xp=np, device=None, d
     lm_trials : int
         Largest number of damping values (one linear solve each) of a
         Levenberg-Marquardt fallback step after a fallback step of the same
-        solve found no decrease of the residual [-], at least 1. The
-        fallback steps before that try LM_TRIALS values.
+        solve found no decrease of the residual while the residual was above
+        STALL_FLOOR times ``tol`` [-], at least 1. The fallback steps before
+        that try LM_TRIALS values. Near the tolerance (the round-off level of
+        float32) a failed fallback step does not set the cap.
 
     Returns
     -------
@@ -1508,7 +1511,8 @@ def newton_solve(setups, states, *, tol=1e-6, max_iter=50, xp=np, device=None, d
                                                   D_h[k], S_h[k], masks[k], lm_mu[i],
                                                   lm_trials if lm_failed[i] else LM_TRIALS)
                     n_lin[i] += n_lm
-                    lm_failed[i] = lm_failed[i] or xn is None
+                    # Near the tolerance (round-off level of float32) a failed step does not set the cap.
+                    lm_failed[i] = lm_failed[i] or (xn is None and res_k[k] > STALL_FLOOR * tol)
                     if xn is not None:
                         states[i].x = xn
                         no_step[i] = 0

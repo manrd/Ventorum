@@ -92,7 +92,8 @@ a minor version can change a public interface.
   flapped sections change, and those of cambered sections change a little (their x extent is
   not their chord). New functions `ventorum.panel2d.solver.section_chord` and `reference_point`.
 - Ventorum-2D Levenberg-Marquardt fallback: after a fallback step of a Newton solve found no
-  decrease of the residual, the later fallback steps of that solve try at most `lm_trials`
+  decrease of the residual (above the floor of the stagnation stops), the later fallback steps
+  of that solve try at most `lm_trials`
   damping values (one linear solve each; default 2, before 12). New option of
   `solve_viscous`, `ViscousCase` and the polar source. Converged angles do not change; failed
   angles need fewer linear solves.
