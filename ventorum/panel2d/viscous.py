@@ -63,12 +63,14 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
+from ventorum.airfoil.geometry import AirfoilShape
 from ventorum.panel2d import coupling as cp
 from ventorum.panel2d import vii
+from ventorum.panel2d.solver import resolve_reference
 from ventorum.utils.parallel import blas_single_thread
 
 __all__ = ["ViscousResult", "StopRules", "solve_viscous", "trace_wake_streamline", "prepare_case", "warm_state",
-           "finish_angle", "row_from_result", "sweep_order", "check_chord_ref"]
+           "finish_angle", "row_from_result", "sweep_order", "check_chord_ref", "resolve_body"]
 
 #: Number of times the angle step of a warm start may be halved.
 SUBSTEP_DEPTH = 3
@@ -199,8 +201,10 @@ class ViscousResult:
     Cd_pressure : float or np.ndarray
         Pressure drag coefficient from the surface pressure integration [-].
     Cm : float or np.ndarray
-        Pitching moment coefficient about the quarter-chord point of the
-        reference chord (pressure only) [-].
+        Pitching moment coefficient about the moment reference point
+        (pressure only) [-]: ``moment_ref`` of :func:`solve_viscous`, by
+        default the quarter-chord point on the chord line of the
+        reference geometry.
     transition_positions : tuple of float or list of tuple
         Transition x/c on the upper and lower side [-] (1.0 when the layer
         stays laminar to the trailing edge).
@@ -289,8 +293,8 @@ def trace_wake_streamline(bodies, alpha_deg: float, wake_length: float = 1.0, n_
 
     Parameters
     ----------
-    bodies : np.ndarray or list of np.ndarray
-        Airfoil coordinates in Selig order [m] (one body).
+    bodies : np.ndarray, AirfoilShape, or list of one of them
+        Airfoil coordinates in Selig order [m] (one body), or a shape.
     alpha_deg : float
         Angle of attack [deg].
     wake_length : float
@@ -310,8 +314,8 @@ def trace_wake_streamline(bodies, alpha_deg: float, wake_length: float = 1.0, n_
                                     n_wake=n_wake_panels).wake_nodes
 
 
-def _single_body(bodies) -> np.ndarray:
-    """Return the only body, or raise ValueError for several bodies."""
+def _single_body(bodies):
+    """Return the only body (an (N, 2) array or an AirfoilShape), or raise ValueError for several bodies."""
     if isinstance(bodies, (list, tuple)):
         if len(bodies) != 1:
             raise ValueError(
@@ -319,16 +323,52 @@ def _single_body(bodies) -> np.ndarray:
                 f"got {len(bodies)} bodies."
             )
         bodies = bodies[0]
+    if isinstance(bodies, AirfoilShape):
+        return bodies
     arr = np.asarray(bodies, dtype=np.float64)
     if arr.ndim != 2 or arr.shape[1] != 2:
         raise ValueError(f"The body must be an (N, 2) array, got shape {arr.shape}.")
     return arr
 
 
-def prepare_case(body, alpha, re, *, ncrit, xtr, height, height_reference, wake_length, n_wake, chord_ref=None):
+def resolve_body(bodies, chord_ref=None, moment_ref=None):
+    """Return the coordinates and the reference values of the one body of a viscous solve.
+
+    Parameters
+    ----------
+    bodies : np.ndarray, AirfoilShape, or list of one of them
+        Airfoil coordinates in Selig order [m], or a shape.
+    chord_ref : float or None
+        Explicit reference chord [m], or None for the default.
+    moment_ref : tuple of float or None
+        Explicit moment reference point (x, y) [m], or None for the
+        default.
+
+    Returns
+    -------
+    body : np.ndarray
+        Coordinates, shape (N, 2) [m].
+    chord_ref : float
+        Reference chord [m] (see
+        :func:`ventorum.panel2d.solver.resolve_reference`).
+    moment_ref : tuple of float
+        Moment reference point (x, y) [m].
+    pivot : tuple of float
+        Default pivot of the ground-effect placement [m]: the quarter-chord
+        point on the chord line of the reference geometry.
+    """
+    body = _single_body(bodies)
+    chord, moment, pivot = resolve_reference(body, check_chord_ref(chord_ref), moment_ref)
+    coords = body.coords if isinstance(body, AirfoilShape) else body
+    return coords, chord, moment, pivot
+
+
+def prepare_case(body, alpha, re, *, ncrit, xtr, height, height_reference, wake_length, n_wake, chord_ref=None,
+                 moment_ref=None, pivot=None):
     """Return the CaseSetup of one angle, or raise a ValueError with the reason."""
-    sys_ = cp.build_coupling_system(body, alpha, height=height, height_reference=height_reference,
-                                    chord_ref=chord_ref, wake_length=wake_length, n_wake=n_wake)
+    sys_ = cp.build_coupling_system(body, alpha, height=height, height_reference=height_reference, pivot=pivot,
+                                    chord_ref=chord_ref, moment_ref=moment_ref, wake_length=wake_length,
+                                    n_wake=n_wake)
     return vii.CaseSetup(sys_, float(re), float(ncrit), (float(xtr[0]), float(xtr[1])))
 
 
@@ -443,13 +483,19 @@ def solve_viscous(
     work_budget: int = WORK_BUDGET,
     lm_trials: int = vii.LM_RETRY_TRIALS,
     chord_ref: float | None = None,
+    moment_ref: tuple[float, float] | None = None,
 ) -> ViscousResult:
     """Solve 2D viscous flow with fully simultaneous boundary-layer coupling.
 
     Parameters
     ----------
-    bodies : np.ndarray or list of one np.ndarray
-        Airfoil coordinates in Selig order [m or chord units].
+    bodies : np.ndarray, AirfoilShape, or list of one of them
+        Airfoil coordinates in Selig order [m or chord units], or an
+        :class:`ventorum.airfoil.AirfoilShape`. The reference geometry of
+        the section (:func:`ventorum.panel2d.solver.section_reference`)
+        gives the default reference chord, moment reference point and
+        pivot; a shape with a deflected plain flap holds the geometry of
+        the section before the deflection.
     alpha_deg : float or array_like
         Angle of attack [deg].
     Re : float
@@ -464,7 +510,8 @@ def solve_viscous(
         free transition only.
     height : float or None
         Height above the ground [m] (of the pivot, the quarter-chord point
-        of the reference chord, by default), or None for free air.
+        on the chord line of the reference geometry, by default), or None
+        for free air.
     max_iter : int
         Largest number of Newton iterations per angle.
     tol : float
@@ -508,14 +555,23 @@ def solve_viscous(
         linear solves of failed attempts.
     chord_ref : float or None
         Reference chord [m] of the coefficients, of the Reynolds number,
-        of x/c and of the wake length. Default: the chord of the section
-        as given, the distance from the leading edge to the trailing-edge
-        midpoint (see :func:`ventorum.panel2d.solver.section_chord`). For a
-        section with a deflected plain flap, give the chord of the section
-        before the deflection, as in thin-airfoil theory and XFOIL: the
-        chord of the deflected section is shorter. The pitching moment is
-        taken about the quarter-chord point of the reference chord (see
-        :func:`ventorum.panel2d.solver.reference_point`).
+        of x/c and of the wake length, positive. It wins over the
+        reference geometry. Default: the reference chord of the section
+        (see :func:`ventorum.panel2d.solver.section_reference`): for a
+        flapped shape the chord of the section before the deflection, as
+        in thin-airfoil theory (Glauert 1927); else the chord of the
+        section as given, the distance from the leading edge to the
+        trailing-edge midpoint (see
+        :func:`ventorum.panel2d.solver.section_chord`). A flapped section
+        given as an array has a shorter chord than the undeflected
+        section: give ``chord_ref``, or give the flapped shape.
+    moment_ref : tuple of float or None
+        Moment reference point (x, y) [m] in the section frame. It wins
+        over the reference geometry. Default: the quarter-chord point on
+        the chord line of the reference geometry, 0.25 of the way from
+        its leading edge to its trailing-edge midpoint (see
+        :func:`ventorum.panel2d.solver.reference_point`). It does not move
+        the pivot.
 
     Returns
     -------
@@ -531,16 +587,15 @@ def solve_viscous(
                          "(solve_viscous_batch runs on torch).")
     if not np.isfinite(Re) or Re <= 0.0:
         raise ValueError(f"Reynolds number must be positive, got {Re}.")
-    chord_ref = check_chord_ref(chord_ref)
     rules = StopRules(stall_window=stall_window, stall_factor=stall_factor, divergence_factor=divergence_factor,
                       work_budget=work_budget, lm_trials=lm_trials)
-    body = _single_body(bodies)
+    body, chord_ref, moment_ref, pivot = resolve_body(bodies, chord_ref, moment_ref)
     is_scalar = np.ndim(alpha_deg) == 0
     alphas = np.atleast_1d(np.asarray(alpha_deg, dtype=np.float64))
     order_up, order_dn = sweep_order(alphas)
     out: dict[float, dict] = {}
     kw = dict(ncrit=ncrit, xtr=xtr, height=height, height_reference=height_reference,
-              wake_length=wake_length, n_wake=n_wake, chord_ref=chord_ref)
+              wake_length=wake_length, n_wake=n_wake, chord_ref=chord_ref, moment_ref=moment_ref, pivot=pivot)
     cache: dict = {}
     with blas_single_thread():
         first_state = None
@@ -728,7 +783,8 @@ def zero_lift_angle(body, kw) -> float:
     body : np.ndarray
         Airfoil coordinates [m].
     kw : dict
-        Case settings (height and height reference are used).
+        Case settings (height, height reference, reference chord and
+        pivot are used).
 
     Returns
     -------
@@ -739,7 +795,8 @@ def zero_lift_angle(body, kw) -> float:
     from ventorum.panel2d.solver import solve_inviscid
 
     h = kw.get("height")
-    opts = {} if h is None else {"height": h, "height_reference": kw.get("height_reference", "pivot")}
+    opts = {} if h is None else {"height": h, "height_reference": kw.get("height_reference", "pivot"),
+                                 "pivot": kw.get("pivot")}
     cl = solve_inviscid(body, [0.0, 4.0], chord_ref=kw.get("chord_ref"), **opts).Cl
     return float(-4.0 * cl[0] / (cl[1] - cl[0]))
 

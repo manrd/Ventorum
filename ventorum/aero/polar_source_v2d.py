@@ -9,10 +9,13 @@ The flap tuple is the same as in every section polar source:
 ``(x_hinge, y_hinge, deflection_deg)``, with the hinge position as a
 fraction of the chord [-], the hinge height as a fraction of the local
 thickness [-] (0 lower surface, 1 upper surface) and the deflection [deg],
-positive trailing edge down. The coefficients and the Reynolds number use
-the chord of the section before the flap deflection (the reference chord
-of thin-airfoil theory, Glauert 1927); the moment is taken about its
-quarter-chord point.
+positive trailing edge down. By default the coefficients and the Reynolds
+number use the reference chord of the section, and the moment is taken
+about the quarter-chord point on its chord line; for a flapped section
+both belong to the section before the flap deflection (the reference of
+thin-airfoil theory, Glauert 1927): the source passes the flapped
+:class:`ventorum.airfoil.AirfoilShape`, which holds that reference
+geometry. The options ``chord_ref`` and ``moment_ref`` override them.
 
 The cache key holds the package version, the solver revision
 (``ventorum.panel2d.SOLVER_REVISION``) and a sha256 fingerprint of the source
@@ -43,7 +46,8 @@ from ventorum.aero.xfoil_runner import check_flap
 from ventorum.airfoil import airfoil
 from ventorum.airfoil.naca import is_naca_designation
 from ventorum.core.datatypes import TabulatedAirfoil
-from ventorum.panel2d.viscous import solve_viscous
+from ventorum.panel2d.solver import check_point
+from ventorum.panel2d.viscous import check_chord_ref, solve_viscous
 
 __all__ = ["Ventorum2DPolarSource", "solver_fingerprint", "solver_revision"]
 
@@ -52,7 +56,7 @@ _FINGERPRINT_PACKAGES = ("panel2d", "ibl2d", "airfoil")
 
 #: Inputs of the 2D solver that :meth:`Ventorum2DPolarSource.polar` sets
 #: itself; they are not accepted as options.
-_NAMED_SOLVER_INPUTS = frozenset({"bodies", "alpha_deg", "Re", "mach", "height", "chord_ref"})
+_NAMED_SOLVER_INPUTS = frozenset({"bodies", "alpha_deg", "Re", "mach", "height"})
 
 
 def solver_revision() -> str:
@@ -125,6 +129,14 @@ def _json_value(value: object) -> object:
     if isinstance(value, (list, tuple, np.ndarray)):
         return [_json_value(v) for v in np.asarray(value, dtype=object).ravel()]
     return repr(value)
+
+
+def _reference_key(shape: Any) -> list[float] | None:
+    """Return the stored reference geometry of a shape for the cache key, or None."""
+    ref = getattr(shape, "reference", None)
+    if ref is None:
+        return None
+    return [*ref.leading_edge, *ref.trailing_edge, float(ref.chord_ref)]
 
 
 class Ventorum2DPolarSource:
@@ -225,6 +237,16 @@ class Ventorum2DPolarSource:
         settings["ncrit"] = float(settings["ncrit"])
         settings["xtr"] = tuple(float(v) for v in settings["xtr"])  # type: ignore[union-attr]
         settings["backend"] = str(settings["backend"])
+        # The reference values: None is the default (left out of the key);
+        # a given value is checked and stored as plain floats.
+        if settings.get("chord_ref") is None:
+            settings.pop("chord_ref", None)
+        else:
+            settings["chord_ref"] = check_chord_ref(settings["chord_ref"])
+        if settings.get("moment_ref") is None:
+            settings.pop("moment_ref", None)
+        else:
+            settings["moment_ref"] = check_point(settings["moment_ref"], "moment_ref")
         return settings
 
     def describe(self, **options: object) -> dict[str, Any]:
@@ -286,13 +308,21 @@ class Ventorum2DPolarSource:
             deflection [deg], positive down.
         height : float or None
             Height above the ground in chords [-] of the reference point
-            of the 2D solver (its default pivot, the quarter chord), for
+            of the 2D solver (its default pivot, the quarter-chord point on
+            the chord line of the section before a flap deflection), for
             a section of unit chord. None means free air.
         **options
             Extra keywords forwarded to :func:`solve_viscous` (for example
-            ``ncrit``, ``xtr``, ``max_iter``, ``tol``, ``wake_length``).
-            Unknown names are refused. A named input given twice (for
-            example ``Re``) is a TypeError of the call itself.
+            ``ncrit``, ``xtr``, ``max_iter``, ``tol``, ``wake_length``,
+            ``chord_ref`` and ``moment_ref``). ``chord_ref`` [chord units]
+            is the reference chord of the coefficients and of the
+            Reynolds number; ``moment_ref`` [chord units] is the moment
+            reference point (x, y) in the frame of the section as given
+            (before the repaneling and the flap deflection, which do not
+            move the frame). Both win over the reference geometry of the
+            section and are part of the cache key. Unknown names are
+            refused. A named input given twice (for example ``Re``) is a
+            TypeError of the call itself.
 
         Returns
         -------
@@ -345,11 +375,12 @@ class Ventorum2DPolarSource:
                 [round(float(v), 9) for v in row] for row in shape.coords
             ]
 
+        reference_key = _reference_key(shape)
         if len(shape.coords) != self._n_panels + 1:
             shape = shape.repanel(n_panels=self._n_panels)
 
-        # Reference chord: the chord of the section before the flap deflection.
-        chord_ref = shape.chord
+        # The flapped shape holds the reference geometry of the section
+        # before the deflection (reference chord and moment point).
         if flap_tup is not None:
             shape = shape.with_flap(
                 x_hinge=flap_tup[0],
@@ -366,6 +397,7 @@ class Ventorum2DPolarSource:
                 "solver_revision": solver_revision(),
                 "solver_fingerprint": solver_fingerprint(),
                 "section": key_section,
+                "reference": reference_key,
                 "Re": float(re_val),
                 "mach": float(mach_val),
                 "flap": None if flap_tup is None else list(flap_tup),
@@ -379,12 +411,11 @@ class Ventorum2DPolarSource:
                 return hit
 
         res = solve_viscous(
-            shape.coords,
+            shape,
             unique_req,
             re_val,
             mach=0.0,
             height=h_val,
-            chord_ref=chord_ref,
             **settings,
         )
 

@@ -42,7 +42,7 @@ import numpy as np
 import scipy.linalg
 import torch
 
-from ventorum.airfoil.geometry import leading_edge_index
+from ventorum.airfoil.geometry import AirfoilShape, SectionReference, leading_edge_index
 from ventorum.panel2d.influence import (
     compute_panel_local_coordinates_numpy,
     compute_panel_local_coordinates_torch,
@@ -52,7 +52,8 @@ from ventorum.panel2d.influence import (
     wake_source_stream_influence,
 )
 
-__all__ = ["Panel2DResult", "solve_inviscid", "section_chord", "reference_point"]
+__all__ = ["Panel2DResult", "solve_inviscid", "section_chord", "section_reference", "reference_point",
+           "resolve_reference"]
 
 #: Trailing-edge gap below which a trailing edge is sharp, over the body chord [-].
 SHARP_TE_GAP = 1e-4
@@ -75,9 +76,10 @@ class Panel2DResult:
         Pressure drag coefficient from surface pressure integration [-]
         (wall panels only).
     Cm : float, np.ndarray, or torch.Tensor
-        Pitching moment coefficient about x_ref (by default the quarter
-        chord of the reference chord, see :func:`reference_point`; nose up
-        positive, in the body-0 frame before rotation) [-].
+        Pitching moment coefficient about the moment reference point
+        (``moment_ref``; by default the quarter-chord point on the chord
+        line of the reference geometry, see :func:`reference_point`; nose
+        up positive, in the body-0 frame before rotation) [-].
     Cp : np.ndarray, torch.Tensor, or list
         Pressure coefficients at the nodes [-].
     ue : np.ndarray, torch.Tensor, or list
@@ -218,8 +220,10 @@ def section_chord(body) -> float:
     For a section with the leading edge at (0, 0) and the trailing-edge
     midpoint at (1, 0) the chord is 1. A plain flap moves the trailing
     edge: the chord of a deflected section is shorter than the chord of
-    the section before the deflection (see :func:`solve_inviscid`,
-    ``chord_ref``).
+    the section before the deflection. The reference chord of the solvers
+    comes from :func:`resolve_reference`: a flapped
+    :class:`ventorum.airfoil.AirfoilShape` holds the chord of the section
+    before the deflection.
 
     Parameters
     ----------
@@ -237,31 +241,146 @@ def section_chord(body) -> float:
     return chord if chord > 0.0 else 1.0
 
 
-def reference_point(body, chord_ref: float) -> tuple[float, float]:
-    """Return the quarter-chord point of the reference chord [m].
+def _as_numpy(body) -> np.ndarray:
+    """Return the coordinates of a body (array, tensor or shape) as a float64 numpy array."""
+    if isinstance(body, AirfoilShape):
+        return body.coords
+    if isinstance(body, torch.Tensor):
+        return body.detach().cpu().numpy().astype(np.float64)
+    return np.asarray(body, dtype=np.float64)
 
-    The point lies a quarter of the reference chord behind the most
-    forward point of the section, on y = 0: (x_min + chord_ref / 4, 0).
-    For a section in the convention of the airfoil package (leading edge
-    at (0, 0), chord along +x) this is the quarter chord, also after a
-    plain-flap deflection (the flap does not move the leading edge). It is
-    the default moment reference point and the default pivot of the
-    ground-effect placement.
+
+def section_reference(body) -> SectionReference:
+    """Return the reference geometry of a section.
 
     Parameters
     ----------
-    body : array_like
-        Section coordinates, shape (N, 2) [m].
-    chord_ref : float
-        Reference chord [m].
+    body : array_like or AirfoilShape
+        Section coordinates in Selig order, shape (N, 2) [m], or a shape.
+
+    Returns
+    -------
+    SectionReference
+        The stored reference geometry of a shape (for example the section
+        before a plain-flap deflection, see
+        :meth:`ventorum.airfoil.AirfoilShape.with_flap`), else the one of
+        the section as given: the leading edge (the point farthest from
+        the trailing-edge midpoint), the trailing-edge midpoint and their
+        distance (:func:`section_chord`) [m].
+    """
+    if isinstance(body, AirfoilShape):
+        return body.reference_geometry()
+    return SectionReference.from_coords(_as_numpy(body))
+
+
+def reference_point(body) -> tuple[float, float]:
+    """Return the quarter-chord point on the chord line of the reference geometry [m].
+
+    The point lies 0.25 of the way from the leading edge to the
+    trailing-edge midpoint of the reference geometry
+    (:func:`section_reference`). For a section with the leading edge at
+    (0, 0) and the trailing-edge midpoint at (1, 0) it is (0.25, 0); for a
+    shape with a deflected plain flap it is the quarter-chord point of the
+    section before the deflection. It is the default moment reference
+    point and the default pivot of the ground-effect placement.
+
+    Parameters
+    ----------
+    body : array_like or AirfoilShape
+        Section coordinates, shape (N, 2) [m], or a shape.
 
     Returns
     -------
     tuple of float
         (x, y) of the point [m].
     """
-    pts = np.asarray(body, dtype=np.float64)
-    return (float(np.min(pts[:, 0])) + 0.25 * float(chord_ref), 0.0)
+    return section_reference(body).quarter_chord
+
+
+def resolve_reference(body, chord_ref=None, moment_ref=None):
+    """Return the reference chord, the moment reference point and the default pivot of a section.
+
+    Explicit values win over everything. The defaults come from the
+    reference geometry of the section (:func:`section_reference`): its
+    reference chord, and the quarter-chord point on its chord line
+    (:func:`reference_point`).
+
+    Parameters
+    ----------
+    body : array_like or AirfoilShape
+        Section coordinates, shape (N, 2) [m], or a shape.
+    chord_ref : float or None
+        Reference chord [m], positive and finite, or None for the default.
+    moment_ref : tuple of float or None
+        Moment reference point (x, y) [m] in the section frame, or None
+        for the default.
+
+    Returns
+    -------
+    chord_ref : float
+        Reference chord [m].
+    moment_ref : tuple of float
+        Moment reference point (x, y) [m].
+    pivot : tuple of float
+        Default pivot of the ground-effect placement: the quarter-chord
+        point on the chord line of the reference geometry [m] (it does not
+        follow an explicit ``moment_ref``).
+
+    Raises
+    ------
+    ValueError
+        If ``chord_ref`` is not positive and finite, or ``moment_ref`` is
+        not a point of two finite numbers.
+    """
+    ref = section_reference(body)
+    pivot = ref.quarter_chord
+    if chord_ref is None:
+        chord = float(ref.chord_ref)
+    else:
+        chord = float(chord_ref)
+        if not np.isfinite(chord) or chord <= 0.0:
+            raise ValueError(f"chord_ref must be a positive length, got {chord_ref}.")
+    if moment_ref is None:
+        point = pivot
+    else:
+        point = check_point(moment_ref, "moment_ref")
+    return chord, point, pivot
+
+
+def _moment_alias(x_ref, moment_ref):
+    """Return the moment reference point from ``moment_ref`` and its former name ``x_ref``."""
+    if x_ref is None:
+        return moment_ref
+    if moment_ref is None:
+        return x_ref
+    if check_point(x_ref, "x_ref") != check_point(moment_ref, "moment_ref"):
+        raise ValueError(f"x_ref {x_ref!r} and moment_ref {moment_ref!r} differ; x_ref is the former name of "
+                         "moment_ref: give one of them.")
+    return moment_ref
+
+
+def check_point(value, name: str) -> tuple[float, float]:
+    """Return a point (x, y) as two floats; raise ValueError when it is not two finite numbers.
+
+    Parameters
+    ----------
+    value : array_like
+        The point (x, y) [m].
+    name : str
+        Argument name for the error message.
+
+    Returns
+    -------
+    tuple of float
+        (x, y) [m].
+    """
+    try:
+        arr = np.asarray(value, dtype=np.float64)
+    except (TypeError, ValueError):
+        raise ValueError(f"{name} must be a point (x, y) of two finite numbers, got {value!r}.") from None
+    if arr.shape != (2,) or not np.all(np.isfinite(arr)):
+        raise ValueError(f"{name} must be a point (x, y) of two finite numbers, got {value!r}.")
+    return (float(arr[0]), float(arr[1]))
 
 
 def _xp(a):
@@ -586,11 +705,11 @@ def strip_check(nodes_np: np.ndarray, layout: PanelLayout) -> None:
 
 def _body_list(bodies):
     """Return the bodies as a list."""
-    if isinstance(bodies, (np.ndarray, torch.Tensor)):
+    if isinstance(bodies, (np.ndarray, torch.Tensor, AirfoilShape)):
         return [bodies]
     if isinstance(bodies, (list, tuple)):
         return list(bodies)
-    raise TypeError("bodies must be an (N, 2) array or list of (N, 2) arrays.")
+    raise TypeError("bodies must be an (N, 2) array, an AirfoilShape or a list of them.")
 
 
 def place_in_ground_effect(bodies_np, alpha_deg, height, height_reference, pivot):
@@ -730,6 +849,7 @@ def solve_inviscid(
     sigma=None,
     x_ref: tuple[float, float] | None = None,
     chord_ref: float | None = None,
+    moment_ref: tuple[float, float] | None = None,
     backend: str = "numpy",
     device=None,
     dtype=None,
@@ -738,8 +858,13 @@ def solve_inviscid(
 
     Parameters
     ----------
-    bodies : np.ndarray, list of np.ndarray, torch.Tensor, or list of torch.Tensor
-        One or more bodies, each an (N, 2) array in Selig order [m].
+    bodies : np.ndarray, torch.Tensor, AirfoilShape, or list of them
+        One or more bodies, each an (N, 2) array in Selig order [m] or an
+        :class:`ventorum.airfoil.AirfoilShape`. The reference geometry of
+        body 0 (:func:`section_reference`) gives the default reference
+        chord, moment reference point and pivot; a shape with a deflected
+        plain flap holds the geometry of the section before the
+        deflection (:meth:`ventorum.airfoil.AirfoilShape.with_flap`).
     alpha_deg : float, list of float, np.ndarray, or torch.Tensor
         Angle of attack [deg].
     height : float, optional
@@ -748,24 +873,33 @@ def solve_inviscid(
         Height reference point. Default "pivot".
     pivot : tuple of float, optional
         Pivot point (x, y) [m] for the geometry rotation. Default: the
-        quarter-chord point of the reference chord of body 0 (see
-        :func:`reference_point`).
+        quarter-chord point on the chord line of the reference geometry of
+        body 0 (see :func:`reference_point`). An explicit ``moment_ref``
+        does not move it.
     sigma : array or list of arrays, optional
         Prescribed constant source strengths of all panels (over the
         free-stream speed) [-], in panel order (a blunt trailing edge adds
         one panel per body, last). Default None (zero). Sources change only
         the right-hand side.
     x_ref : tuple of float, optional
-        Moment reference point [m] in the body-0 frame before rotation.
-        Default: the quarter-chord point of the reference chord of body 0
-        (see :func:`reference_point`).
+        Former name of ``moment_ref``, kept as an alias: give one of them
+        (both only when they are equal).
     chord_ref : float, optional
-        Reference chord [m] of the coefficients. Default: the chord of
-        body 0 as given (distance from the leading edge to the
-        trailing-edge midpoint, see :func:`section_chord`). For a section
-        with a deflected plain flap, give the chord of the section before
-        the deflection, as in thin-airfoil theory (Glauert 1927) and XFOIL;
-        the chord of the deflected section is shorter.
+        Reference chord [m] of the coefficients, positive. It wins over
+        the reference geometry. Default: the reference chord of body 0
+        (see :func:`section_reference`): the chord of the section before
+        the deflection for a flapped shape, as in thin-airfoil theory
+        (Glauert 1927); else the chord of body 0 as given (distance from
+        the leading edge to the trailing-edge midpoint, see
+        :func:`section_chord`). A flapped section given as an array has a
+        shorter chord than the undeflected section: give ``chord_ref``,
+        or give the flapped shape.
+    moment_ref : tuple of float, optional
+        Moment reference point (x, y) [m] in the body-0 frame before
+        rotation. It wins over the reference geometry. Default: the
+        quarter-chord point on the chord line of the reference geometry
+        of body 0, 0.25 of the way from its leading edge to its
+        trailing-edge midpoint (see :func:`reference_point`).
     backend : {"numpy", "torch"}, optional
         Computational backend. Default "numpy".
     device : str or torch.device, optional
@@ -777,20 +911,23 @@ def solve_inviscid(
     -------
     Panel2DResult
         Aerodynamic results and node distributions.
+
+    Raises
+    ------
+    ValueError
+        If the backend is unknown, ``chord_ref`` is not positive and
+        finite, ``moment_ref`` (or ``x_ref``) is not a point of two finite
+        numbers, or ``x_ref`` and ``moment_ref`` differ.
     """
     if backend not in ("numpy", "torch"):
         raise ValueError(f"Unknown backend '{backend}'. Supported backends: 'numpy', 'torch'.")
     blist = _body_list(bodies)
-    bodies_np = [b.detach().cpu().numpy().astype(np.float64) if isinstance(b, torch.Tensor)
-                 else np.asarray(b, dtype=np.float64) for b in blist]
+    bodies_np = [_as_numpy(b) for b in blist]
     layout = panel_layout(bodies_np)
-    b0 = bodies_np[0]
-    if chord_ref is None:
-        chord_ref = section_chord(b0)
+    moment_ref = _moment_alias(x_ref, moment_ref)
+    chord_ref, x_ref, quarter = resolve_reference(blist[0], chord_ref, moment_ref)
     if pivot is None:
-        pivot = reference_point(b0, chord_ref)
-    if x_ref is None:
-        x_ref = reference_point(b0, chord_ref)
+        pivot = quarter
     is_scalar = np.ndim(alpha_deg) == 0 if not isinstance(alpha_deg, torch.Tensor) else alpha_deg.ndim == 0
     alphas = np.atleast_1d(np.asarray(
         alpha_deg.detach().cpu().numpy() if isinstance(alpha_deg, torch.Tensor) else alpha_deg, dtype=np.float64))

@@ -533,3 +533,91 @@ def test_airfoil_polar_real_failed_angles_are_null():
     assert res["converged"] == [False, False]
     assert res["Cl"] == [None, None] and res["Cd"] == [None, None] and res["Cm"] == [None, None]
     assert any("did not converge" in w for w in res["warnings"])
+
+
+def _recording_solver(monkeypatch) -> list[dict[str, Any]]:
+    """Replace the viscous solver by a recorder that returns converged canned values."""
+    from types import SimpleNamespace
+
+    import ventorum.panel2d.viscous as viscous
+
+    calls: list[dict[str, Any]] = []
+
+    def fake_solve(bodies, alpha_deg, Re, **kwargs):
+        calls.append({"bodies": bodies, **kwargs})
+        a = np.atleast_1d(alpha_deg)
+        return SimpleNamespace(alpha=a, Cl=0.1 * a, Cd=0.01 + 0.0 * a, Cm=-0.02 + 0.0 * a,
+                               converged=np.ones(a.shape, dtype=bool), transition_positions=[(0.5, 0.6)] * a.size)
+
+    monkeypatch.setattr(viscous, "solve_viscous", fake_solve)
+    return calls
+
+
+def test_airfoil_polar_reports_and_forwards_the_reference_values(monkeypatch):
+    """The output states the reference chord and moment point used; explicit values win and reach the solver.
+
+    Default: the chord of the normalized section and the quarter-chord point on its chord line (with a
+    flap, of the section before the deflection; the solver gets the flapped shape for the pivot too).
+    """
+    from ventorum.airfoil import AirfoilShape
+
+    calls = _recording_solver(monkeypatch)
+    base = {"section": "NACA 2412", "Re": 1.0e6, "alphas_deg": [0.0, 2.0]}
+    from ventorum.panel2d.solver import resolve_reference
+
+    res = call_tool("ventorum_airfoil_polar", base)
+    assert res["status"] == "success", res
+    # The repaneled nose of the cambered section moves the leading edge by about 1e-3 chord.
+    chord, point, _ = resolve_reference(airfoil("NACA 2412").normalized().repanel(n_panels=160))
+    assert res["chord_ref"] == pytest.approx(chord, abs=1e-7) and abs(chord - 1.0) < 1e-3
+    assert res["moment_ref"] == pytest.approx(list(point), abs=1e-7)
+    assert res["moment_ref"] == pytest.approx([0.25, 0.0], abs=2e-3)
+    assert calls[-1]["chord_ref"] == pytest.approx(res["chord_ref"], abs=1e-7)
+    assert calls[-1]["moment_ref"] == pytest.approx(tuple(res["moment_ref"]), abs=1e-7)
+    flap = {"x_hinge": 0.75, "deflection_deg": 15.0}
+    res_flap = call_tool("ventorum_airfoil_polar", {**base, "flap": flap})
+    assert res_flap["status"] == "success", res_flap
+    assert res_flap["chord_ref"] == res["chord_ref"] and res_flap["moment_ref"] == res["moment_ref"]
+    shape = calls[-1]["bodies"]
+    assert isinstance(shape, AirfoilShape) and shape.reference is not None
+    assert shape.reference.chord_ref == pytest.approx(chord, abs=1e-12)
+    given = call_tool("ventorum_airfoil_polar", {**base, "flap": flap, "chord_ref": 0.8, "moment_ref": [0.4, 0.02]})
+    strict_json(given)
+    assert given["status"] == "success", given
+    assert given["chord_ref"] == 0.8 and given["moment_ref"] == [0.4, 0.02]
+    assert calls[-1]["chord_ref"] == 0.8 and calls[-1]["moment_ref"] == (0.4, 0.02)
+
+
+def test_airfoil_polar_refuses_reference_values_out_of_bounds(monkeypatch):
+    """chord_ref and moment_ref are checked against their schema bounds; XFOIL refuses them."""
+    from ventorum.agent import schemas
+
+    calls = _recording_solver(monkeypatch)
+    base = {"section": "NACA 0012", "Re": 1.0e6, "alphas_deg": [0.0]}
+    for value in (schemas.MIN_AIRFOIL_CHORD_REF / 2.0, schemas.MAX_AIRFOIL_CHORD_REF * 2.0, 0.0, -1.0, "1.0", True):
+        res = call_tool("ventorum_airfoil_polar", {**base, "chord_ref": value})
+        assert res["status"] == "error" and res["error"]["type"] == "invalid_input", value
+        assert "chord_ref" in res["error"]["message"]
+    big = schemas.MAX_AIRFOIL_MOMENT_REF + 1.0
+    for value in ([big, 0.0], [0.25, -big], [0.25], [0.25, 0.0, 0.0], [0.25, "0"], 0.25, None):
+        res = call_tool("ventorum_airfoil_polar", {**base, "moment_ref": value})
+        assert res["status"] == "error" and res["error"]["type"] == "invalid_input", value
+        assert "moment_ref" in res["error"]["message"]
+    assert calls == []
+    xf = call_tool("ventorum_airfoil_polar", {**base, "source": "xfoil", "chord_ref": 1.0})
+    assert xf["status"] == "error" and xf["error"]["type"] == "invalid_method"
+    assert "chord_ref" in xf["error"]["message"]
+    schema = schemas.AIRFOIL_POLAR_PROPS
+    assert schema["chord_ref"]["minimum"] == schemas.MIN_AIRFOIL_CHORD_REF
+    assert schema["moment_ref"]["minItems"] == schema["moment_ref"]["maxItems"] == 2
+
+
+def test_airfoil_geometry_reports_the_reference_values():
+    """The geometry tool states the default reference chord and moment point (undeflected with a flap)."""
+    clean = call_tool("ventorum_airfoil_geometry", {"section": "NACA 2412"})
+    flapped = call_tool("ventorum_airfoil_geometry",
+                        {"section": "NACA 2412", "flap": {"x_hinge": 0.7, "deflection_deg": 20.0}})
+    assert clean["status"] == "success" and flapped["status"] == "success"
+    assert clean["chord_ref"] == pytest.approx(1.0, abs=1e-7)
+    assert clean["moment_ref"] == pytest.approx([0.25, 0.0], abs=1e-7)
+    assert flapped["chord_ref"] == clean["chord_ref"] and flapped["moment_ref"] == clean["moment_ref"]

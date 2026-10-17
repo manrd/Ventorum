@@ -43,6 +43,7 @@ from dataclasses import dataclass
 import numpy as np
 import torch
 
+from ventorum.airfoil.geometry import AirfoilShape
 from ventorum.panel2d import coupling as cp
 from ventorum.panel2d import vii
 from ventorum.panel2d import viscous as vs
@@ -57,8 +58,11 @@ class ViscousCase:
 
     Attributes
     ----------
-    coordinates : np.ndarray
-        Airfoil coordinates in Selig order, shape (N, 2) [m or chord units].
+    coordinates : np.ndarray or AirfoilShape
+        Airfoil coordinates in Selig order, shape (N, 2) [m or chord
+        units], or a shape (its reference geometry gives the default
+        reference chord, moment reference point and pivot, see
+        :func:`ventorum.panel2d.viscous.solve_viscous`).
     alpha : float
         Angle of attack [deg].
     Re : float
@@ -94,7 +98,11 @@ class ViscousCase:
         Levenberg-Marquardt fallback step after a fallback step of the same
         Newton solve found no decrease [-], at least 1.
     chord_ref : float or None
-        Reference chord [m] (None: the chord of the section as given); see
+        Reference chord [m] (None: the reference chord of the section);
+        see :func:`ventorum.panel2d.viscous.solve_viscous`.
+    moment_ref : tuple of float or None
+        Moment reference point (x, y) [m] (None: the quarter-chord point
+        on the chord line of the reference geometry); see
         :func:`ventorum.panel2d.viscous.solve_viscous`.
     """
 
@@ -115,6 +123,7 @@ class ViscousCase:
     work_budget: int = vs.WORK_BUDGET
     lm_trials: int = vii.LM_RETRY_TRIALS
     chord_ref: float | None = None
+    moment_ref: tuple | None = None
 
 
 class ViscousBatchResult(list):
@@ -209,9 +218,15 @@ def _case(c) -> ViscousCase:
         raise ValueError(f"Only mach=0.0 is supported, got mach={out.mach}.")
     if not np.isfinite(out.Re) or out.Re <= 0.0:
         raise ValueError(f"Reynolds number must be positive, got {out.Re}.")
-    vs.check_chord_ref(out.chord_ref)
+    _reference(out)
     _rules(out)
     return out
+
+
+def _reference(c: ViscousCase):
+    """Return the coordinates [m], reference chord [m], moment reference point [m] and default pivot [m] of a case."""
+    body = c.coordinates if isinstance(c.coordinates, AirfoilShape) else np.asarray(c.coordinates, dtype=np.float64)
+    return vs.resolve_body(body, c.chord_ref, c.moment_ref)
 
 
 def _rules(c: ViscousCase) -> vs.StopRules:
@@ -233,12 +248,13 @@ def _resolve(device, dtype):
 
 
 def _seq_key(c: ViscousCase):
-    """Return the key of the sequence of a case."""
-    coords = np.ascontiguousarray(np.asarray(c.coordinates, dtype=np.float64))
+    """Return the key of the sequence of a case (with the resolved reference chord, moment point and pivot)."""
+    body, chord, moment, pivot = _reference(c)
+    coords = np.ascontiguousarray(body)
     xtr = (float(c.xtr[0]), float(c.xtr[1]))
     return (coords.tobytes(), coords.shape, float(c.Re), c.height, float(c.ncrit), xtr, float(c.wake_length),
             int(c.n_wake), int(c.max_iter), float(c.tol), int(c.stall_window), float(c.stall_factor),
-            float(c.divergence_factor), int(c.work_budget), int(c.lm_trials), vs.check_chord_ref(c.chord_ref))
+            float(c.divergence_factor), int(c.work_budget), int(c.lm_trials), chord, moment, pivot)
 
 
 def solve_viscous_batch(cases, *, backend: str = "torch", device=None, dtype=None) -> ViscousBatchResult:
@@ -277,9 +293,9 @@ def solve_viscous_batch(cases, *, backend: str = "torch", device=None, dtype=Non
     for idx in seqs.values():
         c0 = parsed[idx[0]]
         up, dn = vs.sweep_order([parsed[i].alpha for i in idx])
+        body, chord, moment, pivot = _reference(c0)
         kw = dict(ncrit=c0.ncrit, xtr=tuple(c0.xtr), height=c0.height, height_reference="pivot",
-                  wake_length=c0.wake_length, n_wake=c0.n_wake, chord_ref=vs.check_chord_ref(c0.chord_ref))
-        body = vs._single_body(np.asarray(c0.coordinates, dtype=np.float64))
+                  wake_length=c0.wake_length, n_wake=c0.n_wake, chord_ref=chord, moment_ref=moment, pivot=pivot)
         plans.append({"idx": idx, "up": up, "dn": dn, "kw": kw, "body": body, "case": c0, "prev": None,
                       "first": None, "rows": {}, "rules": _rules(c0), "cache": {}})
     with blas_single_thread():

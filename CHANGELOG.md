@@ -92,6 +92,27 @@ a minor version can change a public interface.
   section with the leading edge at the origin both defaults are the former ones. The results of
   flapped sections change, and those of cambered sections change a little (their x extent is
   not their chord). New functions `ventorum.panel2d.solver.section_chord` and `reference_point`.
+- Ventorum-2D reference chord and moment reference point are inputs everywhere: `chord_ref`
+  and the new `moment_ref` (a point (x, y) in the section frame) of `solve_inviscid`,
+  `solve_viscous`, `ViscousCase` and `build_coupling_system`, options of the Ventorum-2D polar
+  source (part of its cache key), and optional inputs of the agent tool
+  `ventorum_airfoil_polar` (bounds in the schema; the output states the values used, and
+  `ventorum_airfoil_geometry` states the defaults). Explicit values win over everything. The
+  former name `x_ref` of `solve_inviscid` stays as an alias of `moment_ref`. When no value is
+  given, the defaults come from the reference geometry of the section: the solvers accept an
+  `AirfoilShape`, and `AirfoilShape.with_flap` stores the reference geometry of the section
+  before the deflection (new `SectionReference`: leading edge, trailing-edge midpoint and
+  reference chord; `repanel`, `repanel_cosine`, `normalized` and the factory copy keep it). The
+  default moment point and the default pivot are the quarter-chord point on the chord line of
+  the reference geometry, 0.25 of the way from the leading edge to the trailing-edge midpoint;
+  before, the point was (x_min + c/4, 0). The polar source, the agent tool and the example
+  `airfoil_naca_flap.py` give the flapped shape to the solver, so a flapped section uses the
+  undeflected chord and its quarter-chord point. Sections with the leading edge at (0, 0) and
+  the trailing-edge midpoint at (1, 0) keep their results bit for bit; for other sections the
+  moment and, in ground effect, the pivot move to the chord line. A flapped section given as a
+  point array uses the chord line of the deflected outline: give the shape or the values.
+  `reference_point(body)` has no chord argument now; new `section_reference` and
+  `resolve_reference`.
 - Ventorum-2D Levenberg-Marquardt fallback: after a fallback step of a Newton solve found no
   decrease of the residual (above the floor of the stagnation stops), the later fallback steps
   of that solve try at most `lm_trials`

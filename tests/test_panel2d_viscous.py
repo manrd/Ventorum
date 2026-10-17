@@ -507,3 +507,64 @@ def test_lm_trials_cap_after_a_failed_fallback(monkeypatch):
     assert not res.converged
     assert calls[0] == vii.LM_TRIALS and len(calls) > 1 and all(c == 3 for c in calls[1:]), calls
     assert res.linear_solves == len(calls) + sum(calls)
+
+
+@pytest.mark.slow
+def test_viscous_flapped_shape_uses_the_undeflected_reference():
+    """solve_viscous of a flapped shape: the chord and quarter-chord point of the undeflected section.
+
+    The result equals, bit for bit, the solve of the point array with that chord and point given
+    (the reference chord also sets the Reynolds number per unit length and the wake length). A second
+    moment point changes only Cm, by the 2D moment transfer with the pressure forces (1e-12):
+    Cm_b = Cm_a + (x_b - x_a) / c Cn - (y_b - y_a) / c Ca, Cn = Cl_p cos(alpha) + Cd_p sin(alpha),
+    Ca = Cd_p cos(alpha) - Cl_p sin(alpha).
+    """
+    flapped = airfoil("0012", n_points=121).with_flap(x_hinge=0.75, deflection=3.0)
+    alphas = [0.0, 2.0]
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        via_shape = solve_viscous(flapped, alphas, 1e6)
+        given = solve_viscous(flapped.coords, alphas, 1e6, chord_ref=1.0, moment_ref=(0.25, 0.0))
+        moved = solve_viscous(flapped, alphas, 1e6, moment_ref=(0.5, 0.1))
+    assert np.all(via_shape.converged), via_shape.reason
+    for name in ("Cl", "Cd", "Cd_friction", "Cd_pressure", "Cl_pressure", "Cm", "newton_iterations"):
+        assert np.array_equal(getattr(via_shape, name), getattr(given, name)), name
+    for name in ("Cl", "Cd", "Cd_friction", "Cd_pressure", "Cl_pressure", "newton_iterations"):
+        assert np.array_equal(getattr(moved, name), getattr(via_shape, name)), name
+    a = np.radians(alphas)
+    cn = via_shape.Cl_pressure * np.cos(a) + via_shape.Cd_pressure * np.sin(a)
+    ca = via_shape.Cd_pressure * np.cos(a) - via_shape.Cl_pressure * np.sin(a)
+    assert np.max(np.abs(moved.Cm - (via_shape.Cm + 0.25 * cn - 0.1 * ca))) < 1e-12
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize("height", [None, 0.5])
+def test_viscous_default_reference_keeps_unit_sections_bit_for_bit(height):
+    """NACA 2412 as generated (chord line on y = 0): the defaults are the former values, bit for bit.
+
+    The former defaults were the chord 1 and the moment point and pivot (x_min + c/4, 0) = (0.25, 0);
+    the new defaults (the quarter-chord point on the chord line) are the same point for this section.
+    """
+    from ventorum.panel2d.solver import resolve_reference
+
+    shape = airfoil("2412", n_points=121)
+    assert resolve_reference(shape.coords) == (1.0, (0.25, 0.0), (0.25, 0.0))
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        new = solve_viscous(shape.coords, [0.0, 2.0], 1e6, height=height)
+        old = solve_viscous(shape.coords, [0.0, 2.0], 1e6, height=height, chord_ref=1.0, moment_ref=(0.25, 0.0))
+        via_shape = solve_viscous(shape, [0.0, 2.0], 1e6, height=height)
+    assert np.all(new.converged), new.reason
+    for name in ("Cl", "Cd", "Cd_friction", "Cd_pressure", "Cm", "newton_iterations", "linear_solves"):
+        assert np.array_equal(getattr(new, name), getattr(old, name)), name
+        assert np.array_equal(getattr(via_shape, name), getattr(old, name)), name
+
+
+def test_viscous_reference_inputs_are_checked():
+    """A bad moment_ref or chord_ref raises ValueError before any solve."""
+    c = airfoil("0012", n_points=61).coords
+    for bad in ((0.25,), (0.25, float("nan")), "quarter"):
+        with pytest.raises(ValueError, match="moment_ref"):
+            solve_viscous(c, 0.0, 1e6, moment_ref=bad)
+    with pytest.raises(ValueError, match="chord_ref"):
+        solve_viscous(airfoil("0012", n_points=61), 0.0, 1e6, chord_ref=-1.0)

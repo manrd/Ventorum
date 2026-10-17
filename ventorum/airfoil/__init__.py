@@ -13,6 +13,11 @@ edge at (0, 0) and the trailing-edge midpoint at (1, 0), unless the
 function says otherwise. A closed trailing edge repeats the same point
 at the start and the end.
 
+A shape can hold a reference geometry (:class:`SectionReference`: chord
+line and reference chord). A plain-flap deflection stores the one of the
+section before the deflection, so that the 2D solvers use the chord of
+the undeflected section and its quarter-chord point.
+
 Sources: Selig and co-workers, *Summary of Low-Speed Airfoil Data*,
 1995 (Selig file format); Lednicer, AIAA paper 2010-0458, 2010
 (Lednicer file format); Abbott and von Doenhoff, *Theory of Wing
@@ -33,7 +38,7 @@ from typing import Any
 import numpy as np
 
 from ventorum.airfoil.flap import deflect_plain_flap, flap_hinge_point
-from ventorum.airfoil.geometry import AirfoilGeometryError, AirfoilShape
+from ventorum.airfoil.geometry import AirfoilGeometryError, AirfoilShape, SectionReference
 from ventorum.airfoil.io import parse_airfoil, read_airfoil, write_lednicer, write_selig
 from ventorum.airfoil.naca import (
     is_naca_designation,
@@ -63,6 +68,7 @@ __all__ = [
     "read_airfoil",
     "repanel",
     "repanel_cosine",
+    "SectionReference",
     "write_lednicer",
     "write_selig",
 ]
@@ -79,7 +85,8 @@ def airfoil(
 
     The input kind follows these rules, in this order:
 
-    1. An :class:`AirfoilShape` returns a copy.
+    1. An :class:`AirfoilShape` returns a copy (with its stored reference
+       geometry, see :class:`SectionReference`).
     2. An integer, or a string of the NACA designation form (four or five
        digits with an optional "NACA" prefix, see
        :func:`ventorum.airfoil.naca.is_naca_designation`), calls the NACA
@@ -132,7 +139,8 @@ def airfoil(
             "only 'name' applies to files, arrays and shapes."
         )
     if isinstance(spec, AirfoilShape):
-        out = AirfoilShape(name=spec.name, coords=np.array(spec.coords, dtype=float, copy=True))
+        out = AirfoilShape(name=spec.name, coords=np.array(spec.coords, dtype=float, copy=True),
+                           reference=spec.reference)
     elif naca_input:
         out = AirfoilShape.naca(spec if isinstance(spec, str) else int(spec), **kwargs)
     elif isinstance(spec, Path):

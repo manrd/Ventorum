@@ -93,8 +93,9 @@ class CouplingSystem:
     ground : bool
         True in ground effect.
     x_ref : tuple of float
-        Moment reference point in the body frame [m]: the quarter-chord
-        point of the reference chord (see
+        Moment reference point in the body frame [m]: ``moment_ref`` of
+        :func:`build_coupling_system`, by default the quarter-chord point
+        on the chord line of the reference geometry (see
         :func:`ventorum.panel2d.solver.reference_point`).
     """
 
@@ -247,13 +248,16 @@ def _trace_wake(nodes, layout, gamma, ground, v_inf, lengths):
 
 
 def build_coupling_system(body, alpha_deg: float, *, height=None, height_reference="pivot", pivot=None,
-                          chord_ref=None, wake_length: float = 1.0, n_wake: int = 30) -> CouplingSystem:
+                          chord_ref=None, wake_length: float = 1.0, n_wake: int = 30,
+                          moment_ref=None) -> CouplingSystem:
     """Build the inviscid data of one coupled case.
 
     Parameters
     ----------
-    body : np.ndarray
-        Airfoil coordinates in Selig order, shape (N, 2) [m].
+    body : np.ndarray or AirfoilShape
+        Airfoil coordinates in Selig order, shape (N, 2) [m], or a shape
+        (its reference geometry gives the defaults, see
+        :func:`ventorum.panel2d.solver.resolve_reference`).
     alpha_deg : float
         Angle of attack [deg].
     height : float or None
@@ -262,31 +266,34 @@ def build_coupling_system(body, alpha_deg: float, *, height=None, height_referen
     height_reference : {"pivot", "trailing_edge"}
         Reference point of the height.
     pivot : tuple of float or None
-        Rotation point [m]; default the quarter-chord point of the
-        reference chord (see :func:`ventorum.panel2d.solver.reference_point`).
+        Rotation point [m]; default the quarter-chord point on the chord
+        line of the reference geometry (see
+        :func:`ventorum.panel2d.solver.reference_point`).
     chord_ref : float or None
         Reference chord [m] of the coefficients, of the Reynolds number,
-        of x/c and of the wake length; default the chord of the body as
-        given (see :func:`ventorum.panel2d.solver.section_chord`). For a
-        deflected plain flap, give the chord of the undeflected section.
+        of x/c and of the wake length; default the reference chord of the
+        body (see :func:`ventorum.panel2d.solver.section_reference`): for
+        a flapped shape the chord of the undeflected section, else the
+        chord of the body as given.
     wake_length : float
         Wake length over the reference chord [-].
     n_wake : int
         Number of wake panels.
+    moment_ref : tuple of float or None
+        Moment reference point (x, y) [m] in the body frame; default the
+        quarter-chord point on the chord line of the reference geometry.
 
     Returns
     -------
     CouplingSystem
         The inviscid data.
     """
-    b = np.asarray(body, dtype=np.float64)
+    chord_ref, x_ref, quarter = sv.resolve_reference(body, chord_ref, moment_ref)
+    b = sv._as_numpy(body)
     layout = sv.panel_layout([b])
     xle = float(np.min(b[:, 0]))
-    if chord_ref is None:
-        chord_ref = sv.section_chord(b)
-    x_ref = sv.reference_point(b, chord_ref)
     if pivot is None:
-        pivot = x_ref
+        pivot = quarter
     ground = height is not None
     a = np.radians(alpha_deg)
     if ground:
