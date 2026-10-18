@@ -1206,6 +1206,141 @@ def _trefftz_plane_basis(wake_dir: np.ndarray) -> tuple[np.ndarray, np.ndarray, 
     return d, e1, e2
 
 
+def _condition_arrays(conditions):
+    """Return onset weights, speeds, densities and wind axes for K conditions.
+
+    Speeds are in m/s, rates in rad/s, densities in kg/m^3 and axes are
+    dimensionless. Weights have shape (K, 6); axes have shape (K, 3).
+    """
+    data = np.array([
+        [c.alpha, c.beta, c.V_inf, c.rho, c.p, c.q, c.r] for c in conditions
+    ], dtype=float)
+    alpha, beta, speed, rho = data[:, :4].T
+    ca, sa = np.cos(alpha), np.sin(alpha)
+    cb, sb = np.cos(beta), np.sin(beta)
+    drag = np.column_stack([ca * cb, -sb, sa * cb])
+    lift = np.column_stack([-sa, np.zeros_like(sa), ca])
+    coeffs = np.column_stack([speed[:, None] * drag, data[:, 4:]])
+    return coeffs, speed, rho, lift, drag
+
+
+def _surface_velocity_batch(onset, normals, gradient, speed):
+    """Return velocity [m/s] (K, N, 3) and Cp [-] (K, N).
+
+    Onset and gradient have shape (K, N, 3) in m/s. Normals have shape
+    (N, 3) [-]. Speed has shape (K,) in m/s. Use the single-panel formulas
+    of :func:`compute_surface_velocity_and_cp` for each condition.
+    """
+    normal_speed = np.sum(onset * normals, axis=-1, keepdims=True)
+    velocity = (onset - normal_speed * normals) - gradient
+    valid = speed > 1e-12
+    cp = np.zeros(velocity.shape[:2])
+    np.divide(np.sum(velocity**2, axis=-1), speed[:, None] ** 2,
+              out=cp, where=valid[:, None])
+    cp = np.where(valid[:, None], 1.0 - cp, 0.0)
+    return velocity, cp
+
+
+def _force_coefficients_batch(force, moment, speed, rho, lift, drag, S_ref, b_ref, c_ref):
+    """Return six coefficient arrays [-], one value per condition.
+
+    Force and moment have shape (K, 3) in N and N m. Speed and density
+    have shape (K,) in m/s and kg/m^3. Lift and drag are unit axes [-].
+    S_ref is in m^2; b_ref and c_ref are in m. Follow the force and moment
+    conventions of :func:`integrate_forces_and_moments`.
+    """
+    ref = 0.5 * rho * speed**2 * S_ref
+    valid = ref > 1e-14
+    out = {}
+    for name, axis in (("CL", lift), ("CY", np.cross(lift, drag)), ("CD_pressure", drag)):
+        out[name] = np.divide(np.sum(force * axis, axis=-1), ref,
+                              out=np.zeros_like(ref), where=valid)
+    valid_m = valid & (b_ref > 1e-14) & (c_ref > 1e-14)
+    for j, name, length, sign in ((0, "Cl", b_ref, -1), (1, "Cm", c_ref, 1),
+                                  (2, "Cn", b_ref, -1)):
+        out[name] = np.divide(sign * moment[:, j], ref * length,
+                              out=np.zeros_like(ref), where=valid_m)
+    return out
+
+
+def _integrate_batch(cp, geom, speed, rho, lift, drag, S_ref, b_ref, c_ref, ref_point):
+    """Integrate Cp [-] (K, N) on geometry in m and m^2 into coefficients [-].
+
+    Speed is in m/s and density in kg/m^3. Reference lengths and point
+    are in m; reference area is in m^2. Wind axes are dimensionless.
+    """
+    q = 0.5 * rho * speed**2
+    force = -cp[..., None] * geom.area[:, None] * geom.normal * q[:, None, None]
+    moment = np.cross(geom.centroid - ref_point, force)
+    return _force_coefficients_batch(
+        np.sum(force, axis=1), np.sum(moment, axis=1), speed, rho, lift, drag,
+        S_ref, b_ref, c_ref,
+    )
+
+
+def _trefftz_factors(wake, wake_dir=None, ground=None):
+    """Return the shared Trefftz velocity factors in 1/m and strip lengths in m.
+
+    The two velocity matrices have shape (Ns, Nv). The two in-plane
+    normal components have shape (Ns,) [-]. Ground is a unit normal and
+    an offset in m. Use the endpoint vortices and core of
+    :func:`compute_trefftz_induced_drag` (Katz and Plotkin, chapter 12).
+    """
+    pl = np.array(wake.p_left, dtype=float, copy=True)
+    pr = np.array(wake.p_right, dtype=float, copy=True)
+    d = (np.array([1.0, 0.0, 0.0]) if wake_dir is None
+         else np.asarray(wake_dir) / np.linalg.norm(wake_dir))
+    if len(wake.panels):
+        first = np.fromiter((idx[0] for idx in wake.strip_panel_indices), dtype=int)
+        quad = np.asarray(wake.panels)[first]
+        nw = np.cross(quad[:, 2] - quad[:, 0], quad[:, 3] - quad[:, 1])
+        flip = np.sum((pr - pl) * np.cross(nw, d), axis=1) < 0.0
+        pl[flip], pr[flip] = wake.p_right[flip], wake.p_left[flip]
+    segment = pr - pl
+    length = np.linalg.norm(segment, axis=-1)
+    safe = np.maximum(length, 1e-12)
+    vertices = np.vstack([pr, pl])
+    if wake_dir is None and ground is None:
+        q = (0.5 * (pl + pr))[:, 1:]
+        pv = vertices[:, 1:]
+        seg = segment[:, 1:]
+    else:
+        _, e1, e2 = _trefftz_plane_basis(d)
+        basis = np.column_stack([e1, e2])
+        q = (0.5 * (pl + pr)) @ basis
+        seg = segment @ basis
+        if ground is not None:
+            normal, offset = ground
+            height = vertices @ normal - offset
+            vertices = np.vstack([vertices, vertices - 2.0 * height[:, None] * normal])
+        pv = vertices @ basis
+    normal = np.column_stack([-seg[:, 1], seg[:, 0]]) / safe[:, None]
+    rq = q[:, None, :] - pv[None, :, :]
+    rc_sq = (TREFFTZ_CORE_FRACTION * float(np.mean(safe))) ** 2
+    denom = 2.0 * np.pi * (rq[..., 0] ** 2 + rq[..., 1] ** 2 + rc_sq)
+    return -rq[..., 1] / denom, rq[..., 0] / denom, normal[:, 0], normal[:, 1], length
+
+
+def _trefftz_batch(gamma, speed, rho, S_ref, factors, ground=False):
+    """Return Trefftz drag coefficients [-] for circulation (K, Ns) in m^2/s.
+
+    Speed and density have shape (K,) in m/s and kg/m^3. S_ref is in m^2.
+    Factors are from :func:`_trefftz_factors`. Ground selects image vortices.
+    """
+    if gamma.shape[1] == 0 or S_ref <= 1e-12:
+        return np.zeros(len(speed))
+    gamma = np.ascontiguousarray(gamma)
+    vy, vz, ny, nz, length = factors
+    gv = np.concatenate([gamma, -gamma], axis=1)
+    if ground:
+        gv = np.concatenate([gv, -gv], axis=1)
+    wash = (np.sum(gv[:, None, :] * vy[None], axis=-1) * ny
+            + np.sum(gv[:, None, :] * vz[None], axis=-1) * nz)
+    drag = -0.5 * rho * np.sum(gamma * wash * length, axis=1)
+    ref = 0.5 * rho * speed**2 * S_ref
+    return np.divide(drag, ref, out=np.zeros_like(speed), where=speed > 1e-12)
+
+
 def compute_trefftz_induced_drag(
     wake: PanelWake,
     mu: np.ndarray,

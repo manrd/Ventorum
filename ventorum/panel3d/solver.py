@@ -95,6 +95,12 @@ from ventorum.panel3d.kernels import _precompute_geometry, doublet_potential, in
 from ventorum.panel3d.kutta import solve_pressure_kutta, strip_influence_matrix
 from ventorum.panel3d.mesh import PanelMesh
 from ventorum.panel3d.post import (
+    _condition_arrays,
+    _force_coefficients_batch,
+    _integrate_batch,
+    _surface_velocity_batch,
+    _trefftz_batch,
+    _trefftz_factors,
     build_surface_gradient_operator,
     compute_surface_velocity_and_cp,
     compute_trefftz_induced_drag,
@@ -119,6 +125,9 @@ _ASYM_COLS = (1, 3, 5)
 #: direction for symmetry folding [-] (the same as
 #: :func:`ventorum.aero.system.is_symmetric_condition`).
 _SYMMETRY_TOL = 1e-12
+
+#: Temporary array budget per host or device condition chunk [bytes].
+_CONDITION_BATCH_BYTES = 256 * 2**20
 
 
 @dataclass(slots=True)
@@ -201,6 +210,8 @@ class _Configuration:
     unit_mu_t: object = None
     unit_grad_t: object = None
     strips: dict = field(default_factory=dict)
+    trefftz_factors: object = None
+    gpu_post: object = None
 
 
 def _standardize_panels(panels: np.ndarray, nodes: np.ndarray | None = None) -> np.ndarray:
@@ -1113,6 +1124,98 @@ class PanelSolver:
             mu_w=mu_wake,
         )
 
+    def _condition_bytes(self) -> int:
+        """Return a conservative temporary array size per condition [bytes].
+
+        Count float64 host and device fields, pressure force work arrays,
+        superposition work arrays and the endpoint circulation vectors.
+        Returned result arrays are not temporary storage.
+        """
+        strips = len(self._full_wake.wake_up)
+        return 8 * (48 * len(self._full_geom.area) + 16 * strips + 12 * strips**2 + 256)
+
+    def _evaluate_results_batch(self, cfg, conditions, coeffs):
+        """Evaluate one Morino chunk with onset weights in m/s and rad/s.
+
+        Conditions have one wake and image configuration. Coeffs has
+        shape (K, 6). Return PanelResult objects in condition order.
+        """
+        _, speed, rho, lift, drag = _condition_arrays(conditions)
+        n = len(self.centroids)
+        wake = cfg.full_wake
+        if len(wake.wake_up) and cfg.trefftz_factors is None:
+            cfg.trefftz_factors = _trefftz_factors(wake, cfg.wake_dir, cfg.ground)
+        if self.backend == "gpu":
+            import torch
+
+            from ventorum.panel3d.gpu import _evaluate_conditions_on_device
+
+            def device_array(a, dtype=torch.float64):
+                return torch.as_tensor(a, dtype=dtype, device=self._gpu_device)
+
+            if cfg.gpu_post is None:
+                geometry = {
+                    "normal": device_array(self._full_geom.normal),
+                    "area": device_array(self._full_geom.area),
+                    "arm": device_array(self._full_geom.centroid - self.ref_point),
+                    "unit_mu": device_array(cfg.unit_mu),
+                    "half": self.mesh.half,
+                }
+                trefftz = None
+                if len(wake.wake_up):
+                    trefftz = (
+                        tuple(device_array(a) for a in cfg.trefftz_factors),
+                        device_array(wake.wake_up, torch.int64),
+                        device_array(wake.wake_lo, torch.int64), self.S_ref, cfg.ground is not None,
+                    )
+                cfg.gpu_post = geometry, trefftz
+            else:
+                # An antisymmetric solve can fill new unit columns on a
+                # later call. Refresh only this small linear field.
+                cfg.gpu_post[0]["unit_mu"] = device_array(cfg.unit_mu)
+            mu, sigma, velocity, cp, force, moment, cdi = _evaluate_conditions_on_device(
+                cfg.unit_mu_t, self._gpu_unit_sigma, cfg.unit_grad_t,
+                coeffs, speed, rho, *cfg.gpu_post,
+            )
+            forces = _force_coefficients_batch(
+                force, moment, speed, rho, lift, drag, self.S_ref, self.b_ref, self.c_ref,
+            )
+        else:
+            # Fixed contractions keep each result independent of chunk size.
+            mu = np.einsum("nk,ck->cn", cfg.unit_mu, coeffs, order="C")
+            sigma = np.einsum("nk,ck->cn", self._unit_sigma, coeffs, order="C")
+            gradient = np.einsum("ck,nkd->cnd", coeffs, cfg.unit_grad, order="C")
+            omega = coeffs[:, 3:] * np.array([-1.0, 1.0, -1.0])
+            onset = coeffs[:, None, :3] - np.cross(
+                omega[:, None, :], self._full_geom.centroid - self.ref_point,
+            )
+            velocity, cp = _surface_velocity_batch(onset, self._full_geom.normal, gradient, speed)
+            forces = _integrate_batch(
+                cp, self._full_geom, speed, rho, lift, drag,
+                self.S_ref, self.b_ref, self.c_ref, self.ref_point,
+            )
+            mu_full = mu
+            if self.mesh.half:
+                left = (np.einsum("nk,ck->cn", cfg.unit_mu[:, _SYM_COLS],
+                                  coeffs[:, _SYM_COLS], order="C")
+                        - np.einsum("nk,ck->cn", cfg.unit_mu[:, _ASYM_COLS],
+                                    coeffs[:, _ASYM_COLS], order="C"))
+                mu_full = np.concatenate([mu, left], axis=1)
+            gamma = mu_full[:, wake.wake_up] - mu_full[:, wake.wake_lo]
+            cdi = _trefftz_batch(
+                gamma, speed, rho, self.S_ref, cfg.trefftz_factors, cfg.ground is not None,
+            )
+        up, lo = cfg.wake.wake_up, cfg.wake.wake_lo
+        mu_w = mu[:, up] - mu[:, lo]
+        residual = (np.max(np.abs(cp[:, up] - cp[:, lo]), axis=1)
+                    if len(up) else np.zeros(len(conditions)))
+        return [PanelResult(
+            **{name: float(values[i]) for name, values in forces.items()},
+            CDi_trefftz=float(cdi[i]), cp=cp[i, :n], mu=mu[i], sigma=sigma[i],
+            velocity=velocity[i, :n], condition=condition,
+            kutta_residual=float(residual[i]), mu_w=mu_w[i],
+        ) for i, condition in enumerate(conditions)]
+
     def _strip_system(self, cfg: _Configuration, parity: str) -> np.ndarray:
         """Return the strip influence matrix of one system (host float64)."""
         sign = -1.0 if parity == "asym" else 1.0
@@ -1341,7 +1444,7 @@ class PanelSolver:
         meta: dict[tuple, tuple] = {}
         for idx, (cond, gnd) in enumerate(zip(conds, ground_list)):
             key, wake_dir, gp = self._config_key(cond, gnd)
-            if gp is not None:
+            if gp is not None and key not in groups:
                 check_ground_clearance(self._full_mesh.nodes, gp[0], gp[1])
             groups.setdefault(key, []).append(idx)
             meta[key] = (wake_dir, gp)
@@ -1362,12 +1465,20 @@ class PanelSolver:
             if cfg is None:
                 cfg = self._new_config(key, wake_dir, gp)
                 self._configs[key] = cfg
-            coeff_rows = [self._condition_coeffs(conds[i]) for i in indices]
+            group_conditions = [conds[i] for i in indices]
+            coeff_rows = _condition_arrays(group_conditions)[0]
             self._ensure(cfg, self._parities_needed(coeff_rows))
-            for idx in indices:
-                if self.kutta == "morino":
-                    results[idx] = self._evaluate_result(cfg, conds[idx])
-                else:
+            if self.kutta == "morino":
+                size = max(1, _CONDITION_BATCH_BYTES // self._condition_bytes())
+                for start in range(0, len(indices), size):
+                    chunk = indices[start:start + size]
+                    evaluated = self._evaluate_results_batch(
+                        cfg, group_conditions[start:start + size], coeff_rows[start:start + size],
+                    )
+                    for idx, res in zip(chunk, evaluated):
+                        results[idx] = res
+            else:
+                for idx in indices:
                     results[idx] = self._evaluate_pressure_result(cfg, conds[idx])
 
         return [r for r in results if r is not None]
