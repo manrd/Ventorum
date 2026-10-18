@@ -14,10 +14,20 @@ The panel solver reads these fields of :class:`SolverSettings`:
 ``proportional_panels``, ``min_panels``, ``use_symmetry``,
 ``panel_kutta``, ``panel_backend``, ``panel_wake_length``,
 ``panel_chord_spacing`` (cosine by default),
-``panel_estimate_mesh_error`` and ``panel_scale_root_thickness`` (True
+``panel_estimate_mesh_error``, ``panel_scale_root_thickness`` (True
 by default: the root section of a symmetric surface with dihedral keeps
 its thickness normal to the local surface; see
-:mod:`ventorum.panel3d.mesh`).
+:mod:`ventorum.panel3d.mesh`) and ``panel_cache``.
+
+Solver cache
+------------
+With ``panel_cache=True`` (default) a solve keeps its mesh, its mesh check
+and its :class:`ventorum.panel3d.solver.PanelSolver` with the factorized
+systems in the cache of :mod:`ventorum.panel3d.cache`. A later solve of the
+same geometry with the same mesh and solver settings uses them again: a
+new angle of attack, sideslip or body rate in free air needs no new
+factorization. The results are the same bits as without the cache.
+``ventorum.panel3d.clear_cache()`` frees the cache.
 
 The mesh uses the defaults of :func:`ventorum.panel3d.mesh.mesh_lifting_surface`:
 an open (blunt) trailing edge is closed, the side edges of a deflected
@@ -49,6 +59,7 @@ Published sources
 
 from __future__ import annotations
 
+import copy
 import dataclasses
 import time
 import warnings
@@ -92,7 +103,9 @@ from ventorum.panel3d.mesh import (
     check_mesh,
     mesh_lifting_surface,
 )
+from ventorum.panel3d import cache as panel_cache
 from ventorum.panel3d import solver as panel_solver_module
+from ventorum.panel3d.cache import CachedGeometry
 from ventorum.panel3d.post import _condition_arrays
 from ventorum.panel3d.solver import PanelResult, PanelSolver
 from ventorum.solvers.base import BaseSolver
@@ -120,6 +133,91 @@ _STRIP_METADATA_NAMES = ("strip", "strip_index")
 #: mesh carries when the PanelMesh class has these fields.
 _PANEL_METADATA = ("chord_index", "side")
 _NODE_METADATA = ("node_station",)
+
+
+#: Module functions that build the mesh data of a solve. The objects
+#: themselves are part of the key of the solver cache, so that code which
+#: replaces one (for example a test that counts calls) never gets mesh data
+#: built with the original. Add each new helper of :func:`_build_geometry`.
+_GEOMETRY_HELPERS = (
+    "_build_geometry", "mesh_lifting_surface", "check_mesh", "_surface_strip_maps", "_assign_strips",
+    "_strip_metadata", "_combined_metadata", "_sorted_sections", "_surface_eta", "resolve_spacing",
+    "surface_reference_line", "_AirfoilBlender", "airfoil_linear_properties",
+)
+
+
+def _geometry_helpers() -> tuple:
+    """Return the helper objects of the mesh data (this module and the lattice module)."""
+    from ventorum.geometry import lattice as lattice_module
+
+    module = globals()
+    return tuple(module.get(name) for name in _GEOMETRY_HELPERS) + (
+        getattr(lattice_module, "compute_surface_n_panels", None),
+    )
+
+
+#: Functions whose output a cached solver keeps (geometry, wakes, gradient
+#: operator, influence matrices, factorizations and unit solutions), per
+#: module. As for the mesh helpers, the objects themselves enter the key of
+#: the solver cache: code that replaces one (for example a test that counts
+#: the factorizations) never gets a solver built with the original.
+_SOLVER_HELPERS = {
+    "ventorum.panel3d.solver": (
+        "_standardize_panels", "_precompute_geometry", "largest_streamwise_chord", "build_wake",
+        "reconstruct_full_mesh", "build_surface_gradient_operator", "mirror_panels_y", "reflect_panels_plane",
+        "influence_matrices", "doublet_potential", "strip_influence_matrix", "_fold_wake", "surface_gradient",
+        "_trefftz_factors",
+    ),
+    "scipy.linalg": ("lu_factor", "lu_solve"),
+}
+_SOLVER_HELPERS_NUMBA = {"ventorum.panel3d.kernels_numba": ("influence_matrices_numba",)}
+_SOLVER_HELPERS_GPU = {
+    "ventorum.panel3d.gpu": (
+        "influence_matrices_device", "doublet_potential_device", "strip_sum", "lu_factor_device",
+        "lu_solve_device",
+    ),
+}
+
+
+def _solver_helpers(backend: str) -> tuple:
+    """Return the helper objects of a solver with the given backend (see ``_SOLVER_HELPERS``)."""
+    import importlib
+
+    table = dict(_SOLVER_HELPERS)
+    if backend == "numba":
+        table.update(_SOLVER_HELPERS_NUMBA)
+    elif backend == "gpu":
+        table.update(_SOLVER_HELPERS_GPU)
+    out = []
+    for module_name, names in table.items():
+        module = importlib.import_module(module_name)
+        out.extend(getattr(module, name, None) for name in names)
+    return tuple(out)
+
+
+def _cuda_device_index(backend: str) -> int | None:
+    """Return the current CUDA device index of the gpu backend, or None for a CPU backend."""
+    if backend != "gpu":
+        return None
+    import torch
+
+    return int(torch.cuda.current_device()) if torch.cuda.is_available() else None
+
+
+def _thread_settings(backend: str) -> tuple:
+    """Return the thread settings that can change the bits of a factorization.
+
+    The Numba thread count of the calling thread (numba backend) and the
+    BLAS limit of :func:`ventorum.utils.parallel.blas_single_thread` (CPU
+    backends) enter the key of the solver cache, so that a cached solver
+    has the bits of an uncached solve with the same thread settings.
+    """
+    if backend == "gpu":
+        return (None, None)
+    from ventorum.utils import parallel
+
+    numba_threads = parallel.kernel_threads() if backend == "numba" else None
+    return (numba_threads, parallel._blas_depth > 0)
 
 
 def _estimate_panel_mesh_error(
@@ -592,6 +690,160 @@ def _spanwise_reference(solver, p_res, cond, surface_strip_maps, surface_geom_me
     return spanwise_list
 
 
+def _build_geometry(
+    ac: Aircraft,
+    settings: SolverSettings,
+    section_coords_by_surface: list[list[np.ndarray]],
+    n_chord: int,
+    chord_spacing: str,
+    use_half: bool,
+    scale_root_thickness: bool,
+) -> CachedGeometry:
+    """Build the panel mesh, the strip maps and the strip data, and check the mesh.
+
+    The data depend only on the geometry, the mesh settings and the half-mesh
+    flag, so the solver cache keeps them with the solvers (see
+    :mod:`ventorum.panel3d.cache`).
+
+    Parameters
+    ----------
+    ac : Aircraft
+        Case geometry.
+    settings : SolverSettings
+        Settings with the spanwise mesh fields (``n_panels``, ``spacing``,
+        ``proportional_panels``, ``min_panels``).
+    section_coords_by_surface : list of list of numpy.ndarray
+        Unit-chord coordinates of each section of each surface [-].
+    n_chord : int
+        Chordwise panels per surface [-].
+    chord_spacing : str
+        Chordwise panel distribution ("cosine" or "uniform").
+    use_half : bool
+        True to mesh the right half only (symmetry plane y = 0).
+    scale_root_thickness : bool
+        Root-thickness scaling of the mesh (see
+        :func:`ventorum.panel3d.mesh.mesh_lifting_surface`).
+
+    Returns
+    -------
+    CachedGeometry
+        Mesh, strip maps, strip data (positions in m, chords, widths in m,
+        areas in m^2, lift slopes in 1/rad, zero-lift angles in rad), the
+        number of solved panels and the mesh statistics.
+    """
+    # 2. Build panel mesh and track strip-to-panel associations
+    node_parts = []
+    panel_parts = []
+    kind_parts = []
+    comp_parts = []
+    wake_parts = []
+    n_nodes_total = 0
+    n_panels_total = 0
+
+    surface_strip_maps: list[tuple[list[list[int]], list[list[int]] | None]] = []
+    surface_geom_meta: list[dict] = []
+    sub_meshes: list[PanelMesh] = []
+
+    ref_semi = max((s.semi_span for s in ac.surfaces), default=1.0)
+    for s_idx, (surf, coords) in enumerate(zip(ac.surfaces, section_coords_by_surface)):
+        if getattr(settings, "proportional_panels", False) and surf.n_panels is None:
+            from ventorum.geometry.lattice import compute_surface_n_panels
+
+            n_span = compute_surface_n_panels(
+                surf,
+                base_n_panels=settings.n_panels,
+                reference_semi_span=ref_semi,
+                min_panels=getattr(settings, "min_panels", 8),
+            )
+        else:
+            n_span = surf.n_panels if surf.n_panels is not None else settings.n_panels
+
+        sub = mesh_lifting_surface(
+            surf,
+            coords,
+            n_chord=n_chord,
+            chord_spacing=chord_spacing,
+            tip="flat",
+            half=use_half,
+            n_span=n_span,
+            scale_root_thickness=scale_root_thickness,
+        )
+
+        fr = np.array([float(s.y_frac) for s in _sorted_sections(surf)])
+        spacing = resolve_spacing(surf.spacing if surf.spacing is not None else settings.spacing, surf, "vlm")
+        eta_e, eta_mid = _surface_eta(surf, n_span, spacing)
+        eta_e = np.asarray(eta_e, dtype=float)
+
+        surface_strip_maps.append(
+            _surface_strip_maps(sub, surf, int(n_span), eta_e, n_panels_total, use_half)
+        )
+
+        # Store geometry stations and properties for strip integration
+        x_ref, y_ref, z_ref = surface_reference_line(surf, eta_mid)
+        offset = np.asarray(surf.position, dtype=float).reshape(3)
+        pos_mid = np.column_stack([x_ref, y_ref, z_ref]) + offset
+
+        chords_def = np.array([float(s.chord) for s in _sorted_sections(surf)])
+        strip_chords = np.interp(eta_mid, fr, chords_def)
+        x_e, y_e, z_e = surface_reference_line(surf, eta_e)
+        pos_e = np.column_stack([x_e, y_e, z_e]) + offset
+        dl = pos_e[1:] - pos_e[:-1]
+        strip_width = np.sqrt(dl[:, 1] ** 2 + dl[:, 2] ** 2)
+        edge_ch = np.interp(eta_e, fr, chords_def)
+        strip_area = 0.5 * (edge_ch[:-1] + edge_ch[1:]) * strip_width
+
+        # Linear airfoil properties for alpha_eff
+        blender = _AirfoilBlender(_sorted_sections(surf))
+        afs = [blender.at(float(e)) for e in eta_mid]
+        props = [airfoil_linear_properties(af) for af in afs]
+        a0 = np.array([p[0] for p in props], dtype=float)
+        alpha_L0 = np.array([p[1] for p in props], dtype=float)
+
+        surface_geom_meta.append({
+            "name": surf.name,
+            "is_symmetric": bool(surf.is_symmetric),
+            "pos_mid": pos_mid,
+            "chord": strip_chords,
+            "width": strip_width,
+            "area": strip_area,
+            "a0": a0,
+            "alpha_L0": alpha_L0,
+        })
+
+        sub_meshes.append(sub)
+        node_parts.append(np.asarray(sub.nodes, dtype=float))
+        panel_parts.append(np.asarray(sub.panels, dtype=int) + n_nodes_total)
+        kind_parts.append(np.asarray(sub.kind))
+        comp_parts.append(np.full(np.asarray(sub.panels).shape[0], s_idx, dtype=int))
+        w = np.asarray(sub.wake_edges, dtype=int).copy()
+        if w.size:
+            w[:, 0:2] += n_panels_total
+            w[:, 2:4] += n_nodes_total
+        wake_parts.append(w.reshape(-1, 4))
+        n_nodes_total += int(np.asarray(sub.nodes).shape[0])
+        n_panels_total += int(np.asarray(sub.panels).shape[0])
+
+    mesh = PanelMesh(
+        nodes=np.vstack(node_parts),
+        panels=np.vstack(panel_parts),
+        component=np.concatenate(comp_parts),
+        kind=np.concatenate(kind_parts),
+        wake_edges=np.vstack(wake_parts).reshape(-1, 4),
+        half=use_half,
+        **_combined_metadata(sub_meshes),
+    )
+
+    # 3. Check mesh quality
+    mesh_stats = check_mesh(mesh)
+    return CachedGeometry(
+        mesh=mesh,
+        strip_maps=surface_strip_maps,
+        geom_meta=surface_geom_meta,
+        n_panels=n_panels_total,
+        mesh_stats=mesh_stats,
+    )
+
+
 class PanelMethodSolver(BaseSolver):
     """Inviscid three-dimensional potential flow panel solver.
 
@@ -684,11 +936,15 @@ class PanelMethodSolver(BaseSolver):
         SolverResult or list of SolverResult
             ``details["cp"]`` holds the panel pressure coefficients of the
             solved mesh, ``details["dispatch"]`` the backend, device,
-            precision and the counted factorizations, and
+            precision, the factorizations of this call
+            (``factorization_count``) and whether the call used a cached
+            solver (``cached_solver``), and
             ``details["panel"]`` the panel options used (Kutta option,
             chordwise spacing and count, wake length in m, half mesh,
             root-thickness scaling, trailing-edge closure, control side
-            edges and fold guard of the mesh).
+            edges and fold guard of the mesh). With the solver cache
+            the arrays of ``details["mesh"]`` are read-only when a cached
+            solver uses that mesh; the other arrays belong to the call.
 
         Notes
         -----
@@ -752,110 +1008,32 @@ class PanelMethodSolver(BaseSolver):
                 surf_coords.append(shape_obj.coords)
             section_coords_by_surface.append(surf_coords)
 
-        # 2. Build panel mesh and track strip-to-panel associations
-        node_parts = []
-        panel_parts = []
-        kind_parts = []
-        comp_parts = []
-        wake_parts = []
-        n_nodes_total = 0
-        n_panels_total = 0
-
-        surface_strip_maps: list[tuple[list[list[int]], list[list[int]] | None]] = []
-        surface_geom_meta: list[dict] = []
-        sub_meshes: list[PanelMesh] = []
-
-        ref_semi = max((s.semi_span for s in ac.surfaces), default=1.0)
-        for s_idx, (surf, coords) in enumerate(zip(ac.surfaces, section_coords_by_surface)):
-            if getattr(settings, "proportional_panels", False) and surf.n_panels is None:
-                from ventorum.geometry.lattice import compute_surface_n_panels
-
-                n_span = compute_surface_n_panels(
-                    surf,
-                    base_n_panels=settings.n_panels,
-                    reference_semi_span=ref_semi,
-                    min_panels=getattr(settings, "min_panels", 8),
-                )
-            else:
-                n_span = surf.n_panels if surf.n_panels is not None else settings.n_panels
-
-            sub = mesh_lifting_surface(
-                surf,
-                coords,
-                n_chord=n_chord,
-                chord_spacing=chord_spacing,
-                tip="flat",
-                half=use_half,
-                n_span=n_span,
-                scale_root_thickness=scale_root_thickness,
+        # 2. Mesh, strip data and mesh check (from the solver cache when it has them)
+        use_cache = bool(getattr(settings, "panel_cache", True))
+        geom_key = None
+        geometry = None
+        if use_cache:
+            mesh_settings = (
+                int(n_chord), chord_spacing, settings.n_panels, settings.spacing,
+                bool(getattr(settings, "proportional_panels", False)), getattr(settings, "min_panels", 8),
+                scale_root_thickness, use_half,
             )
-
-            fr = np.array([float(s.y_frac) for s in _sorted_sections(surf)])
-            spacing = resolve_spacing(surf.spacing if surf.spacing is not None else settings.spacing, surf, "vlm")
-            eta_e, eta_mid = _surface_eta(surf, n_span, spacing)
-            eta_e = np.asarray(eta_e, dtype=float)
-
-            surface_strip_maps.append(
-                _surface_strip_maps(sub, surf, int(n_span), eta_e, n_panels_total, use_half)
+            geom_key = panel_cache.geometry_key(ac, section_coords_by_surface, mesh_settings, _geometry_helpers())
+            geometry = panel_cache.find_geometry(geom_key)
+        if geometry is None:
+            geometry = _build_geometry(
+                ac, settings, section_coords_by_surface, n_chord, chord_spacing, use_half, scale_root_thickness
             )
-
-            # Store geometry stations and properties for strip integration
-            x_ref, y_ref, z_ref = surface_reference_line(surf, eta_mid)
-            offset = np.asarray(surf.position, dtype=float).reshape(3)
-            pos_mid = np.column_stack([x_ref, y_ref, z_ref]) + offset
-
-            chords_def = np.array([float(s.chord) for s in _sorted_sections(surf)])
-            strip_chords = np.interp(eta_mid, fr, chords_def)
-            x_e, y_e, z_e = surface_reference_line(surf, eta_e)
-            pos_e = np.column_stack([x_e, y_e, z_e]) + offset
-            dl = pos_e[1:] - pos_e[:-1]
-            strip_width = np.sqrt(dl[:, 1] ** 2 + dl[:, 2] ** 2)
-            edge_ch = np.interp(eta_e, fr, chords_def)
-            strip_area = 0.5 * (edge_ch[:-1] + edge_ch[1:]) * strip_width
-
-            # Linear airfoil properties for alpha_eff
-            blender = _AirfoilBlender(_sorted_sections(surf))
-            afs = [blender.at(float(e)) for e in eta_mid]
-            props = [airfoil_linear_properties(af) for af in afs]
-            a0 = np.array([p[0] for p in props], dtype=float)
-            alpha_L0 = np.array([p[1] for p in props], dtype=float)
-
-            surface_geom_meta.append({
-                "name": surf.name,
-                "is_symmetric": bool(surf.is_symmetric),
-                "pos_mid": pos_mid,
-                "chord": strip_chords,
-                "width": strip_width,
-                "area": strip_area,
-                "a0": a0,
-                "alpha_L0": alpha_L0,
-            })
-
-            sub_meshes.append(sub)
-            node_parts.append(np.asarray(sub.nodes, dtype=float))
-            panel_parts.append(np.asarray(sub.panels, dtype=int) + n_nodes_total)
-            kind_parts.append(np.asarray(sub.kind))
-            comp_parts.append(np.full(np.asarray(sub.panels).shape[0], s_idx, dtype=int))
-            w = np.asarray(sub.wake_edges, dtype=int).copy()
-            if w.size:
-                w[:, 0:2] += n_panels_total
-                w[:, 2:4] += n_nodes_total
-            wake_parts.append(w.reshape(-1, 4))
-            n_nodes_total += int(np.asarray(sub.nodes).shape[0])
-            n_panels_total += int(np.asarray(sub.panels).shape[0])
-
-        mesh = PanelMesh(
-            nodes=np.vstack(node_parts),
-            panels=np.vstack(panel_parts),
-            component=np.concatenate(comp_parts),
-            kind=np.concatenate(kind_parts),
-            wake_edges=np.vstack(wake_parts).reshape(-1, 4),
-            half=use_half,
-            **_combined_metadata(sub_meshes),
-        )
-
-        # 3. Check mesh quality
-        mesh_stats = check_mesh(mesh)
+        mesh = geometry.mesh
+        n_panels_total = geometry.n_panels
+        surface_strip_maps = geometry.strip_maps
+        # Each call gets its own strip data and mesh statistics: the results
+        # hold these arrays, and the cached ones must not change.
+        surface_geom_meta = [
+            {k: (np.array(v, copy=True) if isinstance(v, np.ndarray) else v) for k, v in meta.items()}
+            for meta in geometry.geom_meta
+        ]
+        mesh_stats = copy.deepcopy(geometry.mesh_stats) if use_cache else geometry.mesh_stats
 
         # 4. Solve potential flow with PanelSolver
         ground_keys = {
@@ -868,153 +1046,174 @@ class PanelMethodSolver(BaseSolver):
             settings, n_panels_total, n_configs, bool(ground_keys)
         )
         t0 = time.perf_counter()
-        solver = PanelSolver(
-            mesh,
-            wake_length=wake_length,
-            S_ref=s_ref,
-            b_ref=b_ref,
-            c_ref=c_ref,
-            ref_point=rp,
-            kutta=kutta,
-            backend=backend,
-            dtype=precision if backend == "gpu" else None,
-        )
-        panel_results: list[PanelResult] = solver.solve_conditions(
-            cond_list, grounds=None if ground is None else [ground] * len(cond_list)
-        )
+        solver_class = PanelSolver
 
-        dispatch = {
-            "backend": backend,
-            "device": device,
-            "dtype": precision,
-            "factorization_count": int(solver.factorization_count),
-            "precision": precision,
-            "backends": {"kernel": backend, "solve": "torch" if device == "gpu" else "scipy"},
-            "threads": 1,
-            "workers": 1,
-            "plan_source": "default",
-            "profile": None,
-            "reason": reason,
-        }
-
-        panel_options = {
-            "kutta": kutta,
-            "chord_spacing": chord_spacing,
-            "n_chord": int(n_chord),
-            "wake_length": float(solver.wake_length),
-            "half_mesh": bool(use_half),
-            "scale_root_thickness": scale_root_thickness,
-            "trailing_edge": "close",
-            "control_edge": "transition",
-            "fold_guard": True,
-        }
-
-        # Largest strip chord over the reference chord [-] (ground rule of the trust).
-        max_chord = max((float(np.max(m["chord"])) for m in surface_geom_meta if np.size(m["chord"])), default=0.0)
-        max_chord_over_c = max_chord / float(c_ref) if (c_ref and max_chord > 0.0) else 1.0
-
-        # 5. Build SolverResult per condition with strip integration
-        dt_per_case = (time.perf_counter() - t0) / max(1, len(cond_list))
-        spanwise_batches = _spanwise_results_batch(
-            solver, panel_results, cond_list, surface_strip_maps, surface_geom_meta,
-        )
-        clearance = {}
-        for gnd in grounds:
-            if gnd is not None:
-                key = (tuple(gnd.normal), gnd.offset)
-                if key not in clearance:
-                    clearance[key] = check_ground_clearance(
-                        solver._full_mesh.nodes, gnd.normal, gnd.offset,
-                    )
-        results: list[SolverResult] = []
-
-        for case_index, (cond, gnd, p_res) in enumerate(zip(cond_list, grounds, panel_results)):
-
-            # Ground clearance (a ground strike raises in the solve)
-            h_min = None
-            if gnd is not None:
-                h_min = clearance[(tuple(gnd.normal), gnd.offset)]
-
-            spanwise_list = spanwise_batches[case_index]
-
-            # Integrated totals
-            ar = float(b_ref**2 / s_ref)
-            cdi = float(p_res.CDi_trefftz)
-            cl = float(p_res.CL)
-            e_factor = cl**2 / (np.pi * ar * cdi) if cdi > 1e-12 else float("nan")
-
-            totals = IntegratedResult(
-                CL=cl,
-                CDi=cdi,
-                CDp=None,
-                CD_total=cdi,
-                e=e_factor,
-                AR=ar,
-                Cl=float(p_res.Cl),
-                Cm=float(p_res.Cm),
-                Cn=float(p_res.Cn),
-                CY=float(p_res.CY),
-                CDi_nearfield=float(p_res.CD_pressure),
+        def build_solver():
+            return solver_class(
+                mesh,
+                wake_length=wake_length,
+                S_ref=s_ref,
+                b_ref=b_ref,
+                c_ref=c_ref,
+                ref_point=rp,
+                kutta=kutta,
+                backend=backend,
+                dtype=precision if backend == "gpu" else None,
             )
 
-            # Trust score evaluation
-            all_notes = list(notes)
-            if p_res.trust_note:
-                all_notes.append(p_res.trust_note)
-            main_surf_n_span = ac.surfaces[0].n_panels or settings.n_panels
-            h_over_c = (h_min / c_ref) if (h_min is not None and c_ref) else None
-
-            # The chordwise count turns on the chordwise rule of the mesh
-            # checks and the ground rule "chordwise panels longer than the
-            # gap"; the largest strip chord scales that ground rule, as for
-            # the vortex lattice.
-            totals.trust = evaluate_aerodynamic_trust(
-                AR=ar,
-                condition=cond,
-                spanwise_list=spanwise_list,
-                CL=totals.CL,
-                CDi=totals.CDi,
-                CD_total=totals.CD_total,
-                converged=p_res.kutta_converged,
-                n_panels=int(main_surf_n_span),
-                solver_type="panel3d",
-                h_over_c=h_over_c,
-                n_chord=int(n_chord),
-                notes=all_notes,
-                max_chord_over_c=max_chord_over_c,
-                mesh_stats=mesh_stats,
-                CD_nearfield=totals.CDi_nearfield,
+        key = None
+        if use_cache:
+            key = panel_cache.solver_key(geom_key, (
+                solver_class, wake_length, kutta, backend, _cuda_device_index(backend), precision,
+                float(s_ref), float(b_ref), float(c_ref), np.asarray(rp, dtype=float).tobytes(),
+            ) + _thread_settings(backend) + _solver_helpers(backend))
+        # A solver in use by another thread is not shared: acquire builds a
+        # second one for this call (see ventorum.panel3d.cache).
+        lease = panel_cache.acquire(key, geom_key, geometry, build_solver, gpu=backend == "gpu")
+        solver = lease.solver
+        factorizations_before = int(solver.factorization_count)
+        solve_ok = False
+        try:
+            panel_results: list[PanelResult] = solver.solve_conditions(
+                cond_list, grounds=None if ground is None else [ground] * len(cond_list)
             )
 
-            result = SolverResult(
-                spanwise=spanwise_list,
-                totals=totals,
-                solver_type="panel3d",
-                converged=p_res.kutta_converged,
-                iterations=p_res.kutta_iters,
-                residual_history=[p_res.kutta_residual],
-                condition=cond,
-                execution_time=dt_per_case,
-                symmetry_used=use_half,
-                b_ref=float(b_ref),
-                c_ref=float(c_ref),
-            )
-
-            result.details = {
-                "cp": p_res.cp,
-                "panel_cp": p_res.cp,
-                "mesh": mesh,
-                "panel_result": p_res,
-                "mesh_stats": mesh_stats,
-                "h_min": h_min,
-                "notes": all_notes,
-                "dispatch": dispatch,
-                "panel": panel_options,
+            dispatch = {
+                "backend": backend,
+                "device": device,
+                "dtype": precision,
+                "factorization_count": int(solver.factorization_count) - factorizations_before,
+                "cached_solver": bool(lease.cached),
+                "precision": precision,
+                "backends": {"kernel": backend, "solve": "torch" if device == "gpu" else "scipy"},
+                "threads": 1,
+                "workers": 1,
+                "plan_source": "default",
+                "profile": None,
+                "reason": reason,
             }
-            for msg in all_notes:
-                warnings.warn(msg, RuntimeWarning, stacklevel=2)
 
-            results.append(result)
+            panel_options = {
+                "kutta": kutta,
+                "chord_spacing": chord_spacing,
+                "n_chord": int(n_chord),
+                "wake_length": float(solver.wake_length),
+                "half_mesh": bool(use_half),
+                "scale_root_thickness": scale_root_thickness,
+                "trailing_edge": "close",
+                "control_edge": "transition",
+                "fold_guard": True,
+            }
+
+            # Largest strip chord over the reference chord [-] (ground rule of the trust).
+            max_chord = max((float(np.max(m["chord"])) for m in surface_geom_meta if np.size(m["chord"])), default=0.0)
+            max_chord_over_c = max_chord / float(c_ref) if (c_ref and max_chord > 0.0) else 1.0
+
+            # 5. Build SolverResult per condition with strip integration
+            dt_per_case = (time.perf_counter() - t0) / max(1, len(cond_list))
+            spanwise_batches = _spanwise_results_batch(
+                solver, panel_results, cond_list, surface_strip_maps, surface_geom_meta,
+            )
+            clearance = {}
+            for gnd in grounds:
+                if gnd is not None:
+                    key = (tuple(gnd.normal), gnd.offset)
+                    if key not in clearance:
+                        clearance[key] = check_ground_clearance(
+                            solver._full_mesh.nodes, gnd.normal, gnd.offset,
+                        )
+            results: list[SolverResult] = []
+
+            for case_index, (cond, gnd, p_res) in enumerate(zip(cond_list, grounds, panel_results)):
+
+                # Ground clearance (a ground strike raises in the solve)
+                h_min = None
+                if gnd is not None:
+                    h_min = clearance[(tuple(gnd.normal), gnd.offset)]
+
+                spanwise_list = spanwise_batches[case_index]
+
+                # Integrated totals
+                ar = float(b_ref**2 / s_ref)
+                cdi = float(p_res.CDi_trefftz)
+                cl = float(p_res.CL)
+                e_factor = cl**2 / (np.pi * ar * cdi) if cdi > 1e-12 else float("nan")
+
+                totals = IntegratedResult(
+                    CL=cl,
+                    CDi=cdi,
+                    CDp=None,
+                    CD_total=cdi,
+                    e=e_factor,
+                    AR=ar,
+                    Cl=float(p_res.Cl),
+                    Cm=float(p_res.Cm),
+                    Cn=float(p_res.Cn),
+                    CY=float(p_res.CY),
+                    CDi_nearfield=float(p_res.CD_pressure),
+                )
+
+                # Trust score evaluation
+                all_notes = list(notes)
+                if p_res.trust_note:
+                    all_notes.append(p_res.trust_note)
+                main_surf_n_span = ac.surfaces[0].n_panels or settings.n_panels
+                h_over_c = (h_min / c_ref) if (h_min is not None and c_ref) else None
+
+                # The chordwise count turns on the chordwise rule of the mesh
+                # checks and the ground rule "chordwise panels longer than the
+                # gap"; the largest strip chord scales that ground rule, as for
+                # the vortex lattice.
+                totals.trust = evaluate_aerodynamic_trust(
+                    AR=ar,
+                    condition=cond,
+                    spanwise_list=spanwise_list,
+                    CL=totals.CL,
+                    CDi=totals.CDi,
+                    CD_total=totals.CD_total,
+                    converged=p_res.kutta_converged,
+                    n_panels=int(main_surf_n_span),
+                    solver_type="panel3d",
+                    h_over_c=h_over_c,
+                    n_chord=int(n_chord),
+                    notes=all_notes,
+                    max_chord_over_c=max_chord_over_c,
+                    mesh_stats=mesh_stats,
+                    CD_nearfield=totals.CDi_nearfield,
+                )
+
+                result = SolverResult(
+                    spanwise=spanwise_list,
+                    totals=totals,
+                    solver_type="panel3d",
+                    converged=p_res.kutta_converged,
+                    iterations=p_res.kutta_iters,
+                    residual_history=[p_res.kutta_residual],
+                    condition=cond,
+                    execution_time=dt_per_case,
+                    symmetry_used=use_half,
+                    b_ref=float(b_ref),
+                    c_ref=float(c_ref),
+                )
+
+                result.details = {
+                    "cp": p_res.cp,
+                    "panel_cp": p_res.cp,
+                    "mesh": mesh,
+                    "panel_result": p_res,
+                    "mesh_stats": mesh_stats,
+                    "h_min": h_min,
+                    "notes": all_notes,
+                    "dispatch": dispatch,
+                    "panel": panel_options,
+                }
+                for msg in all_notes:
+                    warnings.warn(msg, RuntimeWarning, stacklevel=2)
+
+                results.append(result)
+            solve_ok = True
+        finally:
+            panel_cache.release(lease, solve_ok)
 
         if estimate_mesh_error:
             # The study solves its levels with the aircraft moment reference and the

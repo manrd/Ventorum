@@ -1042,6 +1042,15 @@ class SolverSettings:
         that the thickness normal to the local surface equals the section
         thickness. False keeps the thickness along the root section normal.
         The other solvers ignore it.
+    panel_cache : bool
+        If True (default), the 3D panel solver keeps the mesh, the solver
+        and its factorized systems of the last solves
+        (:mod:`ventorum.panel3d.cache`), so that a repeated solve of the same
+        geometry with the same mesh settings skips the setup and, for a
+        known configuration, the factorization. The results are the same
+        bits as without the cache. False builds everything again for each
+        solve. ``ventorum.panel3d.clear_cache()`` frees the cache. The other
+        solvers ignore it.
     """
 
     solver_type: Literal["auto", "vlm", "linear", "nonlinear", "fourier"] | str = "auto"
@@ -1061,6 +1070,7 @@ class SolverSettings:
     panel_chord_spacing: str = "cosine"
     panel_estimate_mesh_error: bool = False
     panel_scale_root_thickness: bool = True
+    panel_cache: bool = True
 
     def clone(self) -> SolverSettings:
         """Fast explicit clone.
@@ -1088,6 +1098,7 @@ class SolverSettings:
             panel_chord_spacing=self.panel_chord_spacing,
             panel_estimate_mesh_error=self.panel_estimate_mesh_error,
             panel_scale_root_thickness=self.panel_scale_root_thickness,
+            panel_cache=self.panel_cache,
         )
 
     def __copy__(self) -> SolverSettings:

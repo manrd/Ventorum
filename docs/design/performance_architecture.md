@@ -27,6 +27,7 @@ The Fourier solver (`ventorum/solvers/fourier.py`) uses steps 1 to 3 and caches 
 | Fourier basis | `fourier._fourier_basis` | number of terms N | collocation and quadrature angles, sine tables | read-only |
 | Fourier system | `fourier._fourier_system` | surfaces fingerprint, N, helper functions | section data, system matrix, quadrature data, exact span integrals | read-only; the moment reference point is applied per call |
 | Gauss nodes | `fourier._gauss_legendre` | order | nodes and weights | read-only |
+| Panel solver cache | `ventorum/panel3d/cache.py` | geometry key: surfaces fingerprint, section coordinates, objects of unknown type, mesh settings, half-mesh flag, mesh helper functions; solver key: solver class, wake length, Kutta option, backend, CUDA device, precision, reference values, moment reference point, thread settings, solver helper functions | the last 2 `PanelSolver` objects of Ventorum-3DP (geometry, wakes, gradient operator, influence matrices, factorized configurations) with their mesh, strip data and mesh check | at most 2 solvers, 2 GiB of host memory and 1 solver with device arrays; see "The panel solver cache" |
 
 ### The fingerprint
 
@@ -38,6 +39,21 @@ Rules for a change:
 * A new module-level helper that `build_lattice` calls must be added to `_BUILD_HELPERS`. The key holds the function objects themselves, not their `id`: code that replaces a helper (the verification case V10 replaces `core_groups` to force the core groups) must never get a lattice built with the original. Python can give the `id` of a freed function to a new one, so an `id` is not enough (this was a bug, see `tests/test_lattice_cache.py`).
 * Never write into the arrays of a lattice. The arrays of a cached lattice are read-only; a write raises `ValueError`.
 * Put data into `geom_cache` only if it depends on the lattice alone (not on the flight condition, the wake direction or the ground).
+
+### The panel solver cache
+
+`PanelMethodSolver.solve` (Ventorum-3DP) takes its mesh data and its `PanelSolver` from `ventorum.panel3d.cache` when the setting `panel_cache` is True (the default). A repeated solve of the same geometry with the same settings skips the mesh, the mesh check and the solver construction. A new free-air condition (angle of attack, body rates, speed, density; sideslip on the full mesh) needs no new factorization: one factorization serves all free-air conditions of a mesh (unit-onset superposition). A new ground configuration adds only its own factorization. `details["dispatch"]` gives `cached_solver` (True when the call used a cached solver) and `factorization_count` (the factorizations of this call). `ventorum.panel3d.clear_cache()` removes all solvers.
+
+Rules for a change:
+
+* A cached solve gives the same bits as an uncached solve with the same thread settings (`tests/test_panel3d_cache.py`). The Numba thread count (numba backend) and the BLAS limit of `blas_single_thread` (CPU backends) are part of the key: they can change the bits of the kernels and of the factorization. A BLAS limit that other code sets with `threadpoolctl` is not seen.
+* The geometry key holds the surfaces fingerprint and also the section coordinates that the mesh uses (a shape given as a file name is seen when the file changes) and the objects of unknown type themselves, not their `id`.
+* A new input of the mesh, the mesh check or the strip data goes into the geometry key; a new input of `PanelSolver` goes into the solver key. A new module function that builds cached data goes into `_GEOMETRY_HELPERS` or `_SOLVER_HELPERS` of `ventorum/solvers/panel3d.py`. The key holds the function objects, so code that replaces one (for example a test that counts factorizations with a replaced `scipy.linalg.lu_factor`) never gets a solver built with the original.
+* The arrays of a cached mesh (`details["mesh"]`) are read-only. Each call gets its own copies of the strip data and of the mesh statistics; the panel results are new arrays of each call.
+* A solver that one thread uses is not given to another thread at the same time: the other thread builds a second solver for its call, does not wait, and does not store it.
+* Bounds: at most `MAX_SOLVERS` (2) solvers, `MAX_BYTES` (2 GiB) of host memory in all cached solvers (measured at the end of each call; each numpy buffer and torch storage counts once) and `MAX_GPU_SOLVERS` (1) solver with device arrays. The least recently used solver goes first; a solver larger than the budget is not kept. A call that builds a new device solver (also with `panel_cache=False`) first evicts the cached device solvers, so that the new solve has the device memory. An evicted solver drops its matrices, factorizations and device arrays, and the cache gives the free PyTorch device blocks back to the driver.
+* A solve that raises an error drops the solver that it used (its state can be incomplete).
+* The cache holds memory between solves, up to the budget. Set `panel_cache=False` or call `clear_cache()` when that memory is needed elsewhere.
 
 ## Dense solves: BLAS on one thread
 
