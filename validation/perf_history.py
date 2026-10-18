@@ -43,6 +43,7 @@ import subprocess
 import sys
 import time
 from collections.abc import Callable, Sequence
+import dataclasses
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -310,6 +311,15 @@ def build_workload(name: str, tiny: bool, device: str = "cpu") -> Workload:
             cases = n_cases
             unit = "cases/s"
 
+        # Cold solves: a tree with the panel solver cache would serve every
+        # timed call after the warm-up call from the cache. Older trees have
+        # no cache and no such setting.
+        cache_off = (
+            {"panel_cache": False}
+            if "panel_cache" in {f.name for f in dataclasses.fields(vt.SolverSettings)}
+            else {}
+        )
+
         def run_panel() -> Any:
             from ventorum.solvers.factory import make_solver
 
@@ -318,6 +328,7 @@ def build_workload(name: str, tiny: bool, device: str = "cpu") -> Workload:
                 n_panels=n_panels,
                 n_chord=n_chord,
                 panel_backend=panel_backend,
+                **cache_off,
             )
             solver = make_solver("panel3d")
             return solver.solve(wing, conditions, settings)

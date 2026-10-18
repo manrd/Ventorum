@@ -473,3 +473,24 @@ def test_git_status_takes_no_optional_locks(tmp_path, monkeypatch):
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+
+def test_panel3d_workloads_solve_cold(monkeypatch):
+    """The panel workloads switch the panel solver cache off (cold solves).
+
+    With the cache on, every timed call after the warm-up call would be a
+    cache hit, and the workload would no longer time a solve.
+    """
+    from ventorum.solvers import factory
+
+    captured = []
+
+    class FakeSolver:
+        def solve(self, geometry, condition, settings):
+            captured.append(settings.panel_cache)
+            return types.SimpleNamespace(solver_type="panel3d")
+
+    monkeypatch.setattr(factory, "make_solver", lambda solver_type: FakeSolver())
+    for name in ("panel3d_single_c40_n80", "panel3d_sweep_c40_n80_33", "panel3d_ground_c20_n40_9"):
+        ph.build_workload(name, tiny=True).call()
+    assert captured == [False, False, False]
