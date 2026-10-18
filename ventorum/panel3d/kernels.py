@@ -41,6 +41,13 @@ Conventions
 * Far field: Beyond far_ratio times the panel diameter (default 5.0), point source
   and point doublet expansions are used. Setting far_ratio=np.inf disables the
   far-field switch and uses exact integration everywhere.
+* Pair kernels: a half mesh with symmetry about y = 0 (and the ground images)
+  solves systems of the form ``C_a + sign * C_b``, where ``b`` is the mirror
+  (or image) of the panel set ``a`` and ``sign`` is +1 (symmetric) or -1
+  (antisymmetric). :func:`doublet_pair_matrix` returns this sum without the
+  two separate matrices, and :func:`source_pair_rhs` returns the source
+  right-hand sides ``(B_a + sign * B_b) @ sigma`` without the source matrix.
+  :func:`pair_system` returns both from one pass over the targets.
 
 References
 ----------
@@ -70,6 +77,10 @@ __all__ = [
     "doublet_velocity",
     "influence_matrices",
     "influence_matrices_backend",
+    "doublet_pair_matrix",
+    "source_rhs",
+    "source_pair_rhs",
+    "pair_system",
 ]
 
 _INV_4PI = 1.0 / (4.0 * np.pi)
@@ -463,6 +474,98 @@ def _far_mask(r_dist: np.ndarray, diameter: np.ndarray, far_ratio: float) -> np.
     return r_dist > (far_ratio * diameter[None, :])
 
 
+def _source_block(pts_chunk: np.ndarray, geom: _PanelGeometry, far_ratio: float) -> np.ndarray:
+    """Return the source potentials of one chunk of targets [m].
+
+    Parameters
+    ----------
+    pts_chunk : numpy.ndarray
+        Float64 target coordinates with shape (P_chunk, 3) in m.
+    geom : _PanelGeometry
+        Precomputed geometry of the M panels.
+    far_ratio : float
+        Distance-to-diameter ratio of the point far-field expansion [-].
+
+    Returns
+    -------
+    numpy.ndarray
+        Source potential per unit source strength with shape (P_chunk, M)
+        in m.
+    """
+    M = geom.area.shape[0]
+
+    # Target relative position vectors: (P_chunk, M, 3)
+    R_vec = pts_chunk[:, None, :] - geom.centroid[None, :, :]
+    r_dist = np.linalg.norm(R_vec, axis=-1)
+    far_mask = _far_mask(r_dist, geom.diameter, far_ratio)
+
+    # Local coordinates
+    x_loc = np.sum(R_vec * geom.l_axis[None, :, :], axis=-1)
+    y_loc = np.sum(R_vec * geom.m_axis[None, :, :], axis=-1)
+    z_loc = np.sum(R_vec * geom.normal[None, :, :], axis=-1)
+
+    # Near-field exact integration
+    poly_om = _solid_angle_triangles(x_loc, y_loc, z_loc, geom)
+
+    sum_edge = np.zeros((pts_chunk.shape[0], M), dtype=np.float64)
+    for k in range(4):
+        active = geom.edge_active[None, :, k]
+        kn = (k + 1) % 4
+        xk = geom.x_loc[None, :, k]
+        yk = geom.y_loc[None, :, k]
+        dx = geom.dx[None, :, k]
+        dy = geom.dy[None, :, k]
+        dk = geom.edge_len[None, :, k]
+
+        Lk = _edge_log(x_loc, y_loc, z_loc, xk, yk, geom.x_loc[None, :, kn], geom.y_loc[None, :, kn], dk)
+        r_perp = ((x_loc - xk) * dy - (y_loc - yk) * dx) / np.maximum(dk, 1e-300)
+        sum_edge += np.where(active, r_perp * Lk, 0.0)
+
+    # Exact formula: (I - z * Omega) / (4 pi)
+    phi_exact = _INV_4PI * (sum_edge - z_loc * poly_om)
+
+    # Far-field expansion: -A / (4 pi r)
+    phi_far = -_INV_4PI * geom.area[None, :] / np.maximum(r_dist, 1e-300)
+
+    return np.where(far_mask, phi_far, phi_exact)
+
+
+def _doublet_block(pts_chunk: np.ndarray, geom: _PanelGeometry, far_ratio: float) -> np.ndarray:
+    """Return the doublet potentials of one chunk of targets [-].
+
+    Parameters
+    ----------
+    pts_chunk : numpy.ndarray
+        Float64 target coordinates with shape (P_chunk, 3) in m.
+    geom : _PanelGeometry
+        Precomputed geometry of the M panels.
+    far_ratio : float
+        Distance-to-diameter ratio of the point far-field expansion [-].
+
+    Returns
+    -------
+    numpy.ndarray
+        Doublet potential per unit doublet strength with shape
+        (P_chunk, M) [-].
+    """
+    R_vec = pts_chunk[:, None, :] - geom.centroid[None, :, :]
+    r_dist = np.linalg.norm(R_vec, axis=-1)
+    far_mask = _far_mask(r_dist, geom.diameter, far_ratio)
+
+    x_loc = np.sum(R_vec * geom.l_axis[None, :, :], axis=-1)
+    y_loc = np.sum(R_vec * geom.m_axis[None, :, :], axis=-1)
+    z_loc = np.sum(R_vec * geom.normal[None, :, :], axis=-1)
+
+    poly_om = _solid_angle_triangles(x_loc, y_loc, z_loc, geom)
+    phi_exact = _INV_4PI * poly_om
+
+    # Far-field point doublet: -A * (R . n) / (4 pi r^3)
+    r_cube = np.maximum(r_dist**3, 1e-300)
+    phi_far = -_INV_4PI * geom.area[None, :] * z_loc / r_cube
+
+    return np.where(far_mask, phi_far, phi_exact)
+
+
 def source_potential(
     points: np.ndarray,
     panels: np.ndarray,
@@ -500,42 +603,7 @@ def source_potential(
 
     for p0 in range(0, P, chunk_size):
         p1 = min(p0 + chunk_size, P)
-        pts_chunk = pts_f64[p0:p1]
-
-        # Target relative position vectors: (P_chunk, M, 3)
-        R_vec = pts_chunk[:, None, :] - geom.centroid[None, :, :]
-        r_dist = np.linalg.norm(R_vec, axis=-1)
-        far_mask = _far_mask(r_dist, geom.diameter, far_ratio)
-
-        # Local coordinates
-        x_loc = np.sum(R_vec * geom.l_axis[None, :, :], axis=-1)
-        y_loc = np.sum(R_vec * geom.m_axis[None, :, :], axis=-1)
-        z_loc = np.sum(R_vec * geom.normal[None, :, :], axis=-1)
-
-        # Near-field exact integration
-        poly_om = _solid_angle_triangles(x_loc, y_loc, z_loc, geom)
-
-        sum_edge = np.zeros((p1 - p0, M), dtype=np.float64)
-        for k in range(4):
-            active = geom.edge_active[None, :, k]
-            kn = (k + 1) % 4
-            xk = geom.x_loc[None, :, k]
-            yk = geom.y_loc[None, :, k]
-            dx = geom.dx[None, :, k]
-            dy = geom.dy[None, :, k]
-            dk = geom.edge_len[None, :, k]
-
-            Lk = _edge_log(x_loc, y_loc, z_loc, xk, yk, geom.x_loc[None, :, kn], geom.y_loc[None, :, kn], dk)
-            r_perp = ((x_loc - xk) * dy - (y_loc - yk) * dx) / np.maximum(dk, 1e-300)
-            sum_edge += np.where(active, r_perp * Lk, 0.0)
-
-        # Exact formula: (I - z * Omega) / (4 pi)
-        phi_exact = _INV_4PI * (sum_edge - z_loc * poly_om)
-
-        # Far-field expansion: -A / (4 pi r)
-        phi_far = -_INV_4PI * geom.area[None, :] / np.maximum(r_dist, 1e-300)
-
-        out[p0:p1] = np.where(far_mask, phi_far, phi_exact)
+        out[p0:p1] = _source_block(pts_f64[p0:p1], geom, far_ratio)
 
     return out.astype(target_dtype)
 
@@ -579,24 +647,7 @@ def doublet_potential(
 
     for p0 in range(0, P, chunk_size):
         p1 = min(p0 + chunk_size, P)
-        pts_chunk = pts_f64[p0:p1]
-
-        R_vec = pts_chunk[:, None, :] - geom.centroid[None, :, :]
-        r_dist = np.linalg.norm(R_vec, axis=-1)
-        far_mask = _far_mask(r_dist, geom.diameter, far_ratio)
-
-        x_loc = np.sum(R_vec * geom.l_axis[None, :, :], axis=-1)
-        y_loc = np.sum(R_vec * geom.m_axis[None, :, :], axis=-1)
-        z_loc = np.sum(R_vec * geom.normal[None, :, :], axis=-1)
-
-        poly_om = _solid_angle_triangles(x_loc, y_loc, z_loc, geom)
-        phi_exact = _INV_4PI * poly_om
-
-        # Far-field point doublet: -A * (R . n) / (4 pi r^3)
-        r_cube = np.maximum(r_dist**3, 1e-300)
-        phi_far = -_INV_4PI * geom.area[None, :] * z_loc / r_cube
-
-        out[p0:p1] = np.where(far_mask, phi_far, phi_exact)
+        out[p0:p1] = _doublet_block(pts_f64[p0:p1], geom, far_ratio)
 
     return out.astype(target_dtype)
 
@@ -794,6 +845,275 @@ def influence_matrices(
     B = source_potential(collocation, panels, far_ratio=far_ratio)
     C = doublet_potential(collocation, panels, far_ratio=far_ratio)
     return B, C
+
+
+#: Largest number of right-hand-side columns of the source kernels [-]
+#: (the six unit onsets u, v, w, p, q, r).
+MAX_RHS_COLUMNS = 6
+
+
+def _pair_inputs(points, panels_a, panels_b, sigma=None):
+    """Check and convert the inputs of the pair kernels.
+
+    Parameters
+    ----------
+    points : array_like
+        Target coordinates with shape (P, 3) in m.
+    panels_a : array_like
+        First panel set with shape (M, 4, 3) in m.
+    panels_b : array_like or None
+        Second panel set with shape (M, 4, 3) in m, or None.
+    sigma : array_like or None, optional
+        Source strengths with shape (M, K) or (M,) in m/s, or None.
+
+    Returns
+    -------
+    tuple
+        (target dtype, float64 points, float64 panels_a, float64 panels_b or
+        None, float64 sigma with shape (M, K) or None, True when *sigma* was
+        one-dimensional, the right-hand-side dtype, input epsilon [-]).
+    """
+    pts = np.asarray(points)
+    pa = np.asarray(panels_a)
+    arrays = [pts, pa]
+    pb = None
+    if panels_b is not None:
+        pb = np.asarray(panels_b)
+        if pb.shape != pa.shape:
+            raise ValueError(
+                "The two panel sets of a pair kernel must have the same shape, "
+                f"got {pa.shape} and {pb.shape}."
+            )
+        arrays.append(pb)
+    target_dtype = np.result_type(*[a.dtype for a in arrays])
+    eps = _input_eps(*arrays)
+    sig = None
+    flat = False
+    rhs_dtype = target_dtype
+    if sigma is not None:
+        raw = np.asarray(sigma)
+        rhs_dtype = np.result_type(target_dtype, raw.dtype)
+        sig = raw.astype(np.float64, copy=False)
+        flat = sig.ndim == 1
+        if flat:
+            sig = sig.reshape(-1, 1)
+        if sig.ndim != 2 or sig.shape[0] != pa.shape[0]:
+            raise ValueError(
+                f"sigma must have shape (M, K) with M = {pa.shape[0]} panels, got {raw.shape}."
+            )
+        if sig.shape[1] > MAX_RHS_COLUMNS:
+            raise ValueError(f"sigma may have at most {MAX_RHS_COLUMNS} columns, got {sig.shape[1]}.")
+    return (
+        target_dtype,
+        pts.astype(np.float64, copy=False),
+        pa.astype(np.float64, copy=False),
+        None if pb is None else pb.astype(np.float64, copy=False),
+        sig,
+        flat,
+        rhs_dtype,
+        eps,
+    )
+
+
+def _pair_reference(points, panels_a, panels_b, sign, sigma, far_ratio, want_c, want_rhs):
+    """Return the doublet pair matrix and the source pair right-hand sides.
+
+    One loop over chunks of targets evaluates both panel sets for the same
+    targets. No full source matrix is kept: each chunk of
+    ``B_a + sign * B_b`` is multiplied by *sigma* and dropped.
+
+    Returns
+    -------
+    tuple
+        (C_a + sign * C_b with shape (P, M) or None, (B_a + sign * B_b) @
+        sigma with shape (P, K) or (P,) or None, the target dtype, the
+        right-hand-side dtype).
+    """
+    target_dtype, pts, pa, pb, sig, flat, rhs_dtype, eps = _pair_inputs(
+        points, panels_a, panels_b, sigma if want_rhs else None
+    )
+    sign = float(sign)
+    P = pts.shape[0]
+    M = pa.shape[0]
+    mat = np.empty((P, M), dtype=np.float64) if want_c else None
+    rhs = np.zeros((P, sig.shape[1]), dtype=np.float64) if want_rhs else None
+    if P > 0 and M > 0:
+        geom_a = _precompute_geometry(pa, eps)
+        geom_b = None if pb is None else _precompute_geometry(pb, eps)
+        chunk_size = max(1, _CHUNK_BUDGET // M)
+        for p0 in range(0, P, chunk_size):
+            p1 = min(p0 + chunk_size, P)
+            chunk = pts[p0:p1]
+            if want_c:
+                block = _doublet_block(chunk, geom_a, far_ratio)
+                if geom_b is not None:
+                    block = block + sign * _doublet_block(chunk, geom_b, far_ratio)
+                mat[p0:p1] = block
+            if want_rhs:
+                block = _source_block(chunk, geom_a, far_ratio)
+                if geom_b is not None:
+                    block = block + sign * _source_block(chunk, geom_b, far_ratio)
+                rhs[p0:p1] = block @ sig
+    if rhs is not None and flat:
+        rhs = rhs.reshape(-1)
+    return mat, rhs, target_dtype, rhs_dtype
+
+
+def doublet_pair_matrix(
+    points: np.ndarray,
+    panels_a: np.ndarray,
+    panels_b: np.ndarray | None,
+    sign: float = 1.0,
+    far_ratio: float = 5.0,
+) -> np.ndarray:
+    """Compute the doublet potentials of a panel set and its mirror in one pass.
+
+    The result is ``C(points, panels_a) + sign * C(points, panels_b)``,
+    without the two separate matrices. On a half mesh with symmetry about
+    y = 0, ``panels_b`` is the mirror of ``panels_a`` and ``sign`` is +1
+    for the symmetric system and -1 for the antisymmetric system (Katz and
+    Plotkin 2001, chapter 12). The ground images use the same form with
+    the reflected panels.
+
+    Parameters
+    ----------
+    points : numpy.ndarray
+        Target coordinates with shape (P, 3) in m.
+    panels_a : numpy.ndarray
+        Panel corner coordinates with shape (M, 4, 3) in m.
+    panels_b : numpy.ndarray or None
+        Second panel set with shape (M, 4, 3) in m. None gives
+        ``C(points, panels_a)``.
+    sign : float, default=1.0
+        Factor of the second panel set [-] (+1 or -1).
+    far_ratio : float, default=5.0
+        Distance-to-diameter ratio beyond which point doublet expansion is used.
+
+    Returns
+    -------
+    numpy.ndarray
+        Doublet potential sum [-] per unit doublet strength with shape
+        (P, M). Dtype matches the inputs.
+    """
+    mat, _, target_dtype, _ = _pair_reference(
+        points, panels_a, panels_b, sign, None, far_ratio, want_c=True, want_rhs=False
+    )
+    return mat.astype(target_dtype, copy=False)
+
+
+def source_pair_rhs(
+    points: np.ndarray,
+    panels_a: np.ndarray,
+    panels_b: np.ndarray | None,
+    sign: float,
+    sigma: np.ndarray,
+    far_ratio: float = 5.0,
+) -> np.ndarray:
+    """Compute the source potential products of a panel set and its mirror.
+
+    The result is ``(B(points, panels_a) + sign * B(points, panels_b)) @
+    sigma``. The source matrices are never stored: each chunk of target
+    rows is multiplied by *sigma* and dropped. The solver uses the result
+    as the known part of the internal Dirichlet boundary condition
+    (Morino and Kuo 1974; Katz and Plotkin 2001, chapter 12).
+
+    Parameters
+    ----------
+    points : numpy.ndarray
+        Target coordinates with shape (P, 3) in m.
+    panels_a : numpy.ndarray
+        Panel corner coordinates with shape (M, 4, 3) in m.
+    panels_b : numpy.ndarray or None
+        Second panel set with shape (M, 4, 3) in m. None uses only
+        *panels_a*.
+    sign : float
+        Factor of the second panel set [-] (+1 or -1).
+    sigma : numpy.ndarray
+        Source strengths with shape (M, K), K at most 6, or (M,) in m/s.
+    far_ratio : float, default=5.0
+        Distance-to-diameter ratio beyond which point source expansion is used.
+
+    Returns
+    -------
+    numpy.ndarray
+        Source potentials with shape (P, K), or (P,) for a one-dimensional
+        *sigma*, in m^2/s.
+    """
+    _, rhs, _, rhs_dtype = _pair_reference(
+        points, panels_a, panels_b, sign, sigma, far_ratio, want_c=False, want_rhs=True
+    )
+    return rhs.astype(rhs_dtype, copy=False)
+
+
+def source_rhs(
+    points: np.ndarray,
+    panels: np.ndarray,
+    sigma: np.ndarray,
+    far_ratio: float = 5.0,
+) -> np.ndarray:
+    """Compute the source potential products ``B(points, panels) @ sigma``.
+
+    The source matrix is never stored (see :func:`source_pair_rhs`).
+
+    Parameters
+    ----------
+    points : numpy.ndarray
+        Target coordinates with shape (P, 3) in m.
+    panels : numpy.ndarray
+        Panel corner coordinates with shape (M, 4, 3) in m.
+    sigma : numpy.ndarray
+        Source strengths with shape (M, K), K at most 6, or (M,) in m/s.
+    far_ratio : float, default=5.0
+        Distance-to-diameter ratio beyond which point source expansion is used.
+
+    Returns
+    -------
+    numpy.ndarray
+        Source potentials with shape (P, K), or (P,) for a one-dimensional
+        *sigma*, in m^2/s.
+    """
+    return source_pair_rhs(points, panels, None, 1.0, sigma, far_ratio=far_ratio)
+
+
+def pair_system(
+    points: np.ndarray,
+    panels_a: np.ndarray,
+    panels_b: np.ndarray | None,
+    sign: float,
+    sigma: np.ndarray,
+    far_ratio: float = 5.0,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Compute the doublet pair matrix and the source pair right-hand sides.
+
+    Returns the results of :func:`doublet_pair_matrix` and
+    :func:`source_pair_rhs` for the same inputs from one loop over the
+    targets.
+
+    Parameters
+    ----------
+    points : numpy.ndarray
+        Target coordinates with shape (P, 3) in m.
+    panels_a : numpy.ndarray
+        Panel corner coordinates with shape (M, 4, 3) in m.
+    panels_b : numpy.ndarray or None
+        Second panel set with shape (M, 4, 3) in m, or None.
+    sign : float
+        Factor of the second panel set [-] (+1 or -1).
+    sigma : numpy.ndarray
+        Source strengths with shape (M, K), K at most 6, or (M,) in m/s.
+    far_ratio : float, default=5.0
+        Distance-to-diameter ratio of the point far-field expansions.
+
+    Returns
+    -------
+    tuple of numpy.ndarray
+        (C, R): C with shape (P, M) [-] is ``C_a + sign * C_b`` and R with
+        shape (P, K) in m^2/s is ``(B_a + sign * B_b) @ sigma``.
+    """
+    mat, rhs, target_dtype, rhs_dtype = _pair_reference(
+        points, panels_a, panels_b, sign, sigma, far_ratio, want_c=True, want_rhs=True
+    )
+    return mat.astype(target_dtype, copy=False), rhs.astype(rhs_dtype, copy=False)
 
 
 def influence_matrices_backend(

@@ -44,7 +44,14 @@ factorizes a system only when a condition needs it. On a half mesh the
 symmetric system serves the symmetric unit onsets (u, w, q) and the
 antisymmetric system the antisymmetric ones (v, p, r); the antisymmetric
 system is factorized only when a condition has sideslip, roll rate or yaw
-rate. A half mesh needs a flow configuration that is symmetric about
+rate. The solver assembles only the systems that it factorizes: one pass
+of the pair kernels of :mod:`ventorum.panel3d.kernels` gives the parity
+matrix ``C_self + sign * C_mirror`` and the unit onset right-hand sides
+``-(B_self + sign * B_mirror) @ sigma_unit``; the source matrix is never
+stored. The free-air parity matrices of the body are kept (without the
+wake) for the later configurations; a ground configuration adds its image
+parity matrix ``C_image + sign * C_mirror_image`` and the wake strips. A
+half mesh needs a flow configuration that is symmetric about
 y = 0: in ground effect with sideslip (the wake follows the free stream)
 or with bank (the ground normal has a y component) the solver solves the
 full mesh instead. ``factorization_count`` counts the factorizations.
@@ -91,7 +98,12 @@ from ventorum.panel3d.images import (
     reconstruct_full_mesh,
     reflect_panels_plane,
 )
-from ventorum.panel3d.kernels import _precompute_geometry, doublet_potential, influence_matrices
+from ventorum.panel3d.kernels import (
+    _precompute_geometry,
+    doublet_potential,
+    influence_matrices,
+    pair_system,
+)
 from ventorum.panel3d.kutta import solve_pressure_kutta, strip_influence_matrix
 from ventorum.panel3d.mesh import PanelMesh
 from ventorum.panel3d.post import (
@@ -580,13 +592,17 @@ class PanelSolver:
         )
 
     def _factorize(self, mat_a):
-        """Factorize one dense system (the only place of a factorization)."""
+        """Factorize one dense system (the only place of a factorization).
+
+        The solver passes its own work copy of the system, so the CPU
+        factorization overwrites it (no second copy of the matrix).
+        """
         self._own_factorizations += 1
         if self.backend == "gpu":
             from ventorum.panel3d import gpu as gpu_mod
 
             return gpu_mod.lu_factor_device(mat_a)
-        return scipy.linalg.lu_factor(mat_a)
+        return scipy.linalg.lu_factor(mat_a, overwrite_a=True)
 
     def _lu_solve(self, lu_info, rhs):
         """Solve with stored LU factors (numpy or torch right-hand sides)."""
@@ -646,17 +662,48 @@ class PanelSolver:
             collocation, panels, far_ratio=self.far_ratio
         )
 
+    def _pair_system(self, panels_a: np.ndarray, panels_b: np.ndarray | None, sign: float, cols) -> tuple:
+        """Return one parity system at the collocation points with the selected backend.
+
+        Returns ``(C_a + sign * C_b, (B_a + sign * B_b) @ sigma_unit[:, cols])``:
+        the doublet matrix with shape (N, N) [-] and the source sums with
+        shape (N, K) in m^2/s per unit onset. The gpu backend returns
+        device tensors: the matrix in the solve dtype and the sums in
+        float64.
+        """
+        sigma = np.ascontiguousarray(self._unit_sigma[:, list(cols)])
+        if self.backend == "gpu":
+            from ventorum.panel3d import gpu as gpu_mod
+
+            return gpu_mod.pair_system_device(
+                self.centroids,
+                panels_a,
+                panels_b,
+                sign,
+                sigma,
+                device=self._gpu_device,
+                dtype=self._gpu_dtype,
+                far_ratio=self.far_ratio,
+            )
+        if self.backend == "numba":
+            from ventorum.panel3d.kernels_numba import pair_system_numba
+
+            return pair_system_numba(
+                self.centroids, panels_a, panels_b, sign, sigma, far_ratio=self.far_ratio
+            )
+        return pair_system(self.centroids, panels_a, panels_b, sign, sigma, far_ratio=self.far_ratio)
+
     def _doublet(self, points: np.ndarray, panels: np.ndarray) -> np.ndarray:
         """Return the doublet potentials with the selected CPU backend."""
         if self.backend == "numba":
-            from ventorum.panel3d.kernels_numba import influence_matrices_numba
+            from ventorum.panel3d.kernels_numba import doublet_pair_matrix_numba
 
-            _, mat_c = influence_matrices_numba(
+            return doublet_pair_matrix_numba(
                 np.asarray(points),
                 np.asarray(panels),
+                None,
                 far_ratio=self.far_ratio,
             )
-            return mat_c
         return doublet_potential(points, panels, far_ratio=self.far_ratio)
 
     def _strip_matrix(self, wake_panels: np.ndarray, wake: PanelWake) -> tuple:
@@ -690,12 +737,21 @@ class PanelSolver:
         return host, host
 
     def _copy(self, mat):
-        """Return a copy of a numpy array or torch tensor."""
+        """Return a work copy of a numpy array (Fortran order) or torch tensor.
+
+        The Fortran order lets the CPU factorization overwrite the copy.
+        """
         if self.backend == "gpu":
             return mat.clone()
-        return np.array(mat, copy=True)
+        return np.array(mat, order="F", copy=True)
 
-    def _check_gpu_memory(self, half: bool, ground: bool, n_systems: int) -> None:
+    def _add(self, mat_a, mat_b):
+        """Return the sum of two matrices as a new work matrix (see :meth:`_copy`)."""
+        if self.backend == "gpu":
+            return mat_a + mat_b
+        return np.add(mat_a, mat_b, order="F")
+
+    def _check_gpu_memory(self, half: bool, ground: bool, n_systems: int, body_cached: bool) -> None:
         """Refuse a configuration that does not fit in the device memory."""
         if self.backend != "gpu":
             return
@@ -708,22 +764,35 @@ class PanelSolver:
             n_systems=n_systems,
             half=half,
             ground=ground,
-            body_cached=self._body_parts is not None,
+            body_cached=body_cached,
+            assembly="fused",
         )
 
-    def _body(self) -> dict:
-        """Return the body influence matrices (computed once, then kept)."""
-        if self._body_parts is None:
-            parts = {}
-            b_self, c_self = self._matrices(self.centroids, self.body_verts)
-            parts["B_self"] = b_self
-            parts["C_self"] = c_self
-            if self.mesh.half:
-                b_m, c_m = self._matrices(self.centroids, self._body_verts_m)
-                parts["B_m"] = b_m
-                parts["C_m"] = c_m
+    @staticmethod
+    def _parity_sign_cols(parity: str) -> tuple[float, tuple[int, ...]]:
+        """Return the mirror sign [-] and the unit onset columns of one system."""
+        if parity == "full":
+            return 1.0, tuple(range(6))
+        if parity == "sym":
+            return 1.0, _SYM_COLS
+        return -1.0, _ASYM_COLS
+
+    def _body_system(self, parity: str) -> tuple:
+        """Return the free-air body system of one parity (computed once, then kept).
+
+        Returns ``(A, R)``: ``A = C_self + sign * C_mirror`` without the
+        wake (``C_self`` on a full mesh) and ``R = (B_self + sign *
+        B_mirror) @ sigma_unit`` for the unit onset columns of the system.
+        """
+        parts = self._body_parts if self._body_parts is not None else {}
+        if f"A_{parity}" not in parts:
+            sign, cols = self._parity_sign_cols(parity)
+            panels_m = self._body_verts_m if self.mesh.half else None
+            mat_a, rhs = self._pair_system(self.body_verts, panels_m, sign, cols)
+            parts[f"A_{parity}"] = mat_a
+            parts[f"rhs_{parity}"] = rhs
             self._body_parts = parts
-        return self._body_parts
+        return parts[f"A_{parity}"], parts[f"rhs_{parity}"]
 
     # ------------------------------------------------------------------
     # Free-air matrices on the host (inspection and tests)
@@ -736,12 +805,11 @@ class PanelSolver:
                 "A and B are defined for a full mesh; a half mesh has a symmetric "
                 "and an antisymmetric system."
             )
-        body = self._body()
-        mat_a = self._copy(body["C_self"])
+        # The solver keeps no source matrix, so the separate kernels give B and C.
+        mat_b, mat_a = self._matrices(self.centroids, self.body_verts)
         if len(self.wake.panels) > 0:
             _, d_dev = self._strip_matrix(self.wake.panels, self.wake)
             _fold_wake(mat_a, d_dev, self.wake)
-        mat_b = body["B_self"]
         if self.backend == "gpu":
             import torch
 
@@ -864,107 +932,104 @@ class PanelSolver:
             needed.append("asym")
         return needed
 
+    def _config_strips(self, cfg: _Configuration) -> None:
+        """Compute the wake strip matrices of a configuration once (host float64).
+
+        The keys are "self" (the wake), "m" (its mirror on a half mesh),
+        "g" (its ground image) and "yg" (the ground image of the mirror).
+        """
+        if len(cfg.wake.panels) == 0 or "self" in cfg.strips:
+            return
+        cfg.strips["self"] = self._strip_matrix(cfg.wake.panels, cfg.wake)[0]
+        if self.mesh.half:
+            cfg.strips["m"] = self._strip_matrix(cfg.wake_panels_m, cfg.wake)[0]
+        if cfg.ground is not None:
+            normal, offset = cfg.ground
+            cfg.strips["g"] = self._strip_matrix(
+                reflect_panels_plane(cfg.wake.panels, normal, offset), cfg.wake
+            )[0]
+            if self.mesh.half:
+                cfg.strips["yg"] = self._strip_matrix(
+                    reflect_panels_plane(cfg.wake_panels_m, normal, offset), cfg.wake
+                )[0]
+
     def _ensure(self, cfg: _Configuration, parities: list[str]) -> None:
-        """Assemble and factorize the missing systems of a configuration."""
+        """Assemble and factorize the missing systems of a configuration.
+
+        Each system is ``A = A_body + A_image + fold(D)``: the kept
+        free-air body parity matrix, the image parity matrix of the pair
+        kernel in ground effect, and the summed wake strips of the system
+        on the trailing-edge columns. Only the factorized systems, the
+        body parity matrices and the strip matrices are kept.
+        """
         missing = [p for p in parities if p not in cfg.systems]
         if not missing:
             return
         half = bool(self.mesh.half)
         in_ground = cfg.ground is not None
-        self._check_gpu_memory(half, in_ground, len(missing))
-        body = self._body()
+        parts = self._body_parts or {}
+        body_cached = all(f"A_{p}" in parts for p in missing)
+        self._check_gpu_memory(half, in_ground, len(missing), body_cached)
         has_wake = len(cfg.wake.panels) > 0
         n_panels = len(self.centroids)
-
-        # Self (and mirror) parts with the wake of the configuration.
-        a_self = self._copy(body["C_self"])
-        if has_wake:
-            d_host, d_dev = self._strip_matrix(cfg.wake.panels, cfg.wake)
-            cfg.strips["self"] = d_host
-            _fold_wake(a_self, d_dev, cfg.wake)
-        b_self = body["B_self"]
-        if half:
-            a_m = self._copy(body["C_m"])
-            if has_wake:
-                d_host, d_dev = self._strip_matrix(cfg.wake_panels_m, cfg.wake)
-                cfg.strips["m"] = d_host
-                _fold_wake(a_m, d_dev, cfg.wake)
-            b_m = body["B_m"]
-
-        # Ground images (equal source and doublet strengths, reflected panels).
+        self._config_strips(cfg)
         if in_ground:
             normal, offset = cfg.ground
-            b_g, a_g = self._matrices(
-                self.centroids, reflect_panels_plane(self.body_verts, normal, offset)
+            image = reflect_panels_plane(self.body_verts, normal, offset)
+            image_m = (
+                reflect_panels_plane(self._body_verts_m, normal, offset) if half else None
             )
-            if has_wake:
-                d_host, d_dev = self._strip_matrix(
-                    reflect_panels_plane(cfg.wake.panels, normal, offset), cfg.wake
-                )
-                cfg.strips["g"] = d_host
-                _fold_wake(a_g, d_dev, cfg.wake)
-            if half:
-                b_yg, a_yg = self._matrices(
-                    self.centroids, reflect_panels_plane(self._body_verts_m, normal, offset)
-                )
-                if has_wake:
-                    d_host, d_dev = self._strip_matrix(
-                        reflect_panels_plane(cfg.wake_panels_m, normal, offset), cfg.wake
-                    )
-                    cfg.strips["yg"] = d_host
-                    _fold_wake(a_yg, d_dev, cfg.wake)
 
         if cfg.unit_mu is None:
             cfg.unit_mu = np.zeros((n_panels, 6), dtype=np.float64)
         for parity in missing:
-            if parity == "full":
-                mat_a = a_self if not in_ground else a_self + a_g
-                mat_b = b_self if not in_ground else b_self + b_g
-                cols = list(range(6))
+            sign, cols = self._parity_sign_cols(parity)
+            a_body, rhs = self._body_system(parity)
+            if in_ground:
+                # Ground images: equal source and doublet strengths, reflected panels.
+                a_img, rhs_img = self._pair_system(image, image_m, sign, cols)
+                mat_a = self._add(a_body, a_img)
+                del a_img
+                rhs = rhs + rhs_img
             else:
-                sign = 1.0 if parity == "sym" else -1.0
-                if sign > 0.0:
-                    mat_a = a_self + a_m
-                    mat_b = b_self + b_m
-                else:
-                    mat_a = a_self - a_m
-                    mat_b = b_self - b_m
-                if in_ground:
-                    if sign > 0.0:
-                        mat_a = mat_a + a_g + a_yg
-                        mat_b = mat_b + b_g + b_yg
-                    else:
-                        mat_a = mat_a + a_g - a_yg
-                        mat_b = mat_b + b_g - b_yg
-                cols = list(_SYM_COLS if parity == "sym" else _ASYM_COLS)
+                mat_a = self._copy(a_body)
+            if has_wake:
+                d_mat = self._strip_system(cfg, parity)
+                if self.backend == "gpu":
+                    import torch
+
+                    d_mat = torch.as_tensor(d_mat, dtype=self._gpu_dtype, device=self._gpu_device)
+                _fold_wake(mat_a, d_mat, cfg.wake)
             lu_info = self._factorize(mat_a)
             del mat_a
             cfg.systems[parity] = lu_info
-            self._unit_solutions(cfg, lu_info, mat_b, cols, parity)
-            del mat_b
+            self._unit_solutions(cfg, lu_info, rhs, cols, parity)
         self._update_unit_gradients(cfg)
 
-    def _unit_solutions(self, cfg, lu_info, mat_b, cols, parity) -> None:
-        """Solve the unit onset right-hand sides of one system."""
+    def _unit_solutions(self, cfg, lu_info, rhs, cols, parity) -> None:
+        """Solve the unit onset right-hand sides of one system.
+
+        *rhs* holds the source sums ``B @ sigma_unit[:, cols]`` with shape
+        (N, K) in m^2/s per unit onset; the right-hand sides are ``-rhs``.
+        """
         if self.backend == "gpu":
             import torch
 
-            sigma_t = self._gpu_unit_sigma[:, cols]
-            sol = self._lu_solve(lu_info, -mat_b @ sigma_t)
+            sol = self._lu_solve(lu_info, (-rhs).to(self._gpu_dtype))
             if cfg.unit_mu_t is None:
                 cfg.unit_mu_t = torch.zeros(
                     (len(self.centroids), 6), dtype=self._gpu_dtype, device=self._gpu_device
                 )
-            cfg.unit_mu_t[:, cols] = sol
-            cfg.unit_mu[:, cols] = sol.to(torch.float64).cpu().numpy()
+            cfg.unit_mu_t[:, list(cols)] = sol
+            cfg.unit_mu[:, list(cols)] = sol.to(torch.float64).cpu().numpy()
             return
         if parity == "full":
             # Keep the memory layout of the solve output: the superposition
             # products then round as in every earlier version.
-            cfg.unit_mu = scipy.linalg.lu_solve(lu_info, -mat_b @ self._unit_sigma)
+            cfg.unit_mu = scipy.linalg.lu_solve(lu_info, -np.ascontiguousarray(rhs))
             return
-        for k in cols:
-            cfg.unit_mu[:, k] = scipy.linalg.lu_solve(lu_info, -mat_b @ self._unit_sigma[:, k])
+        for idx, k in enumerate(cols):
+            cfg.unit_mu[:, k] = scipy.linalg.lu_solve(lu_info, -rhs[:, idx])
 
     def _full_unit_mu(self, unit_mu: np.ndarray) -> np.ndarray:
         """Return the unit doublets on the full mesh with shape (Nf, 6)."""

@@ -11,6 +11,13 @@ points in parallel (``prange``), and no temporary array of target-panel
 pairs is built. The numpy kernels stay the reference: the tests require
 both paths to agree to round-off.
 
+The pair kernels (:func:`doublet_pair_matrix_numba`,
+:func:`source_pair_rhs_numba`, :func:`pair_system_numba`) evaluate a panel
+and its mirror (or image) for the same target in one pass. They return the
+parity system ``C_a + sign * C_b`` and the source right-hand sides
+``(B_a + sign * B_b) @ sigma`` without storing the separate matrices or
+the source matrix.
+
 As in the reference, the computation runs in float64 and the outputs take
 the dtype of the inputs. The on-plane band uses the machine epsilon of the
 input dtype, so float32 inputs (for example collocation points rounded to
@@ -51,6 +58,10 @@ __all__ = [
     "source_velocity_numba",
     "doublet_velocity_numba",
     "influence_matrices_numba",
+    "doublet_pair_matrix_numba",
+    "source_rhs_numba",
+    "source_pair_rhs_numba",
+    "pair_system_numba",
 ]
 
 _INV_4PI = 1.0 / (4.0 * math.pi)
@@ -407,6 +418,72 @@ if HAVE_NUMBA:
                 V[i, j, 1] = gy
                 V[i, j, 2] = gz
 
+    @njit(cache=True, inline="always")
+    def _pair_c(tx, ty, tz, cen, nor, lax, maxis, xl, yl, elen, act, area, diam, tol, far_ratio,
+                use_far):
+        # Doublet (C) potential of one target-panel pair: the same steps as the
+        # C part of _pair_bc, without the edge sums of the source potential.
+        rx = tx - cen[0]
+        ry = ty - cen[1]
+        rz = tz - cen[2]
+        r = math.sqrt(rx * rx + ry * ry + rz * rz)
+        if use_far and r > far_ratio * diam:
+            r_safe = r if r > _FLOOR else _FLOOR
+            rdotn = rx * nor[0] + ry * nor[1] + rz * nor[2]
+            r3 = r_safe * r_safe * r_safe
+            r3 = r3 if r3 > _FLOOR else _FLOOR
+            return -_INV_4PI * area * rdotn / r3
+        x = rx * lax[0] + ry * lax[1] + rz * lax[2]
+        y = rx * maxis[0] + ry * maxis[1] + rz * maxis[2]
+        z = rx * nor[0] + ry * nor[1] + rz * nor[2]
+        om = _solid_angle(x, y, z, xl, yl, elen, act, tol)
+        return _INV_4PI * om
+
+    @njit(cache=True, parallel=True, fastmath=False)
+    def _pair_nb(P, pan_a, pan_b, sign, has_b, S, C, R, want_c, want_rhs, far_ratio, use_far, eps):
+        # Pair kernel: C = C_a + sign * C_b and R = (B_a + sign * B_b) @ S.
+        # prange over the target points; each row of R is private to one
+        # target, so the sums need no atomic additions. With has_b False
+        # the second panel set is not read.
+        ga = _geometry_nb(pan_a, eps)
+        gb = _geometry_nb(pan_b, eps)
+        cen_a, nor_a, lax_a, max_a, xl_a, yl_a, dx_a, dy_a, el_a, act_a, cor_a, ar_a, di_a, tol_a = ga
+        cen_b, nor_b, lax_b, max_b, xl_b, yl_b, dx_b, dy_b, el_b, act_b, cor_b, ar_b, di_b, tol_b = gb
+        nM = pan_a.shape[0]
+        nK = S.shape[1]
+        for i in prange(P.shape[0]):
+            px = P[i, 0]
+            py = P[i, 1]
+            pz = P[i, 2]
+            acc = np.zeros(nK, dtype=np.float64)
+            for j in range(nM):
+                if want_rhs:
+                    b, c = _pair_bc(px, py, pz, cen_a[j], nor_a[j], lax_a[j], max_a[j], xl_a[j],
+                                    yl_a[j], dx_a[j], dy_a[j], el_a[j], act_a[j], ar_a[j], di_a[j],
+                                    tol_a[j], far_ratio, use_far)
+                    if has_b:
+                        b2, c2 = _pair_bc(px, py, pz, cen_b[j], nor_b[j], lax_b[j], max_b[j],
+                                          xl_b[j], yl_b[j], dx_b[j], dy_b[j], el_b[j], act_b[j],
+                                          ar_b[j], di_b[j], tol_b[j], far_ratio, use_far)
+                        b = b + sign * b2
+                        c = c + sign * c2
+                    for k in range(nK):
+                        acc[k] += b * S[j, k]
+                else:
+                    c = _pair_c(px, py, pz, cen_a[j], nor_a[j], lax_a[j], max_a[j], xl_a[j],
+                                yl_a[j], el_a[j], act_a[j], ar_a[j], di_a[j], tol_a[j], far_ratio,
+                                use_far)
+                    if has_b:
+                        c2 = _pair_c(px, py, pz, cen_b[j], nor_b[j], lax_b[j], max_b[j], xl_b[j],
+                                     yl_b[j], el_b[j], act_b[j], ar_b[j], di_b[j], tol_b[j],
+                                     far_ratio, use_far)
+                        c = c + sign * c2
+                if want_c:
+                    C[i, j] = c
+            if want_rhs:
+                for k in range(nK):
+                    R[i, k] = acc[k]
+
 
 def _work_arrays(collocation, panels):
     """Return the target dtype, the float64 work arrays and the input epsilon [-]."""
@@ -532,3 +609,185 @@ def influence_matrices_numba(
     use_far = not np.isinf(far_ratio)
     _influence_nb(pts, pans, mat_b, mat_c, float(far_ratio), use_far, eps)
     return mat_b.astype(target_dtype), mat_c.astype(target_dtype)
+
+
+def _run_pair_numba(points, panels_a, panels_b, sign, sigma, far_ratio, want_c, want_rhs):
+    """Run the compiled pair kernel and return (C, R, target dtype, R dtype)."""
+    from ventorum.panel3d.kernels import _pair_inputs
+
+    _require_numba()
+    target_dtype, pts, pa, pb, sig, flat, rhs_dtype, eps = _pair_inputs(
+        points, panels_a, panels_b, sigma if want_rhs else None
+    )
+    pts = np.ascontiguousarray(pts)
+    pa = np.ascontiguousarray(pa)
+    has_b = pb is not None
+    pb = np.ascontiguousarray(pb) if has_b else np.empty((0, 4, 3), dtype=np.float64)
+    n_p, n_m = pts.shape[0], pa.shape[0]
+    mat = np.empty((n_p, n_m) if want_c else (1, 1), dtype=np.float64)
+    if want_rhs:
+        sig = np.ascontiguousarray(sig)
+        rhs = np.zeros((n_p, sig.shape[1]), dtype=np.float64)
+    else:
+        sig = np.zeros((1, 0), dtype=np.float64)
+        rhs = np.zeros((1, 0), dtype=np.float64)
+    if n_p > 0 and n_m > 0:
+        use_far = not np.isinf(far_ratio)
+        _pair_nb(pts, pa, pb, float(sign), has_b, sig, mat, rhs, bool(want_c), bool(want_rhs),
+                 float(far_ratio), use_far, eps)
+    if want_rhs and flat:
+        rhs = rhs.reshape(-1)
+    return (mat if want_c else None), (rhs if want_rhs else None), target_dtype, rhs_dtype
+
+
+def doublet_pair_matrix_numba(
+    points: np.ndarray,
+    panels_a: np.ndarray,
+    panels_b: np.ndarray | None,
+    sign: float = 1.0,
+    far_ratio: float = 5.0,
+) -> np.ndarray:
+    """Compute ``C(points, panels_a) + sign * C(points, panels_b)`` in compiled code.
+
+    Same results as :func:`ventorum.panel3d.kernels.doublet_pair_matrix`,
+    in compiled code on the CPU. Each target evaluates a panel and its
+    mirror (or image) in the same pass; the two separate matrices are
+    never stored.
+
+    Parameters
+    ----------
+    points : numpy.ndarray
+        Target coordinates with shape (P, 3) in m.
+    panels_a : numpy.ndarray
+        Panel corner coordinates with shape (M, 4, 3) in m.
+    panels_b : numpy.ndarray or None
+        Second panel set with shape (M, 4, 3) in m. None gives
+        ``C(points, panels_a)``.
+    sign : float, default=1.0
+        Factor of the second panel set [-] (+1 or -1).
+    far_ratio : float, default=5.0
+        Distance-to-diameter ratio beyond which point doublet expansion is used.
+
+    Returns
+    -------
+    numpy.ndarray
+        Doublet potential sum [-] with shape (P, M). Dtype matches the inputs.
+    """
+    mat, _, target_dtype, _ = _run_pair_numba(
+        points, panels_a, panels_b, sign, None, far_ratio, True, False
+    )
+    return mat.astype(target_dtype, copy=False)
+
+
+def source_pair_rhs_numba(
+    points: np.ndarray,
+    panels_a: np.ndarray,
+    panels_b: np.ndarray | None,
+    sign: float,
+    sigma: np.ndarray,
+    far_ratio: float = 5.0,
+) -> np.ndarray:
+    """Compute ``(B(points, panels_a) + sign * B(points, panels_b)) @ sigma`` in compiled code.
+
+    Same results as :func:`ventorum.panel3d.kernels.source_pair_rhs` to
+    round-off (the sum over the panels runs in panel order). The source
+    matrix is never stored.
+
+    Parameters
+    ----------
+    points : numpy.ndarray
+        Target coordinates with shape (P, 3) in m.
+    panels_a : numpy.ndarray
+        Panel corner coordinates with shape (M, 4, 3) in m.
+    panels_b : numpy.ndarray or None
+        Second panel set with shape (M, 4, 3) in m, or None.
+    sign : float
+        Factor of the second panel set [-] (+1 or -1).
+    sigma : numpy.ndarray
+        Source strengths with shape (M, K), K at most 6, or (M,) in m/s.
+    far_ratio : float, default=5.0
+        Distance-to-diameter ratio beyond which point source expansion is used.
+
+    Returns
+    -------
+    numpy.ndarray
+        Source potentials with shape (P, K), or (P,) for a one-dimensional
+        *sigma*, in m^2/s.
+    """
+    _, rhs, _, rhs_dtype = _run_pair_numba(
+        points, panels_a, panels_b, sign, sigma, far_ratio, False, True
+    )
+    return rhs.astype(rhs_dtype, copy=False)
+
+
+def source_rhs_numba(
+    points: np.ndarray,
+    panels: np.ndarray,
+    sigma: np.ndarray,
+    far_ratio: float = 5.0,
+) -> np.ndarray:
+    """Compute ``B(points, panels) @ sigma`` in compiled code.
+
+    Same results as :func:`ventorum.panel3d.kernels.source_rhs` to
+    round-off. The source matrix is never stored.
+
+    Parameters
+    ----------
+    points : numpy.ndarray
+        Target coordinates with shape (P, 3) in m.
+    panels : numpy.ndarray
+        Panel corner coordinates with shape (M, 4, 3) in m.
+    sigma : numpy.ndarray
+        Source strengths with shape (M, K), K at most 6, or (M,) in m/s.
+    far_ratio : float, default=5.0
+        Distance-to-diameter ratio beyond which point source expansion is used.
+
+    Returns
+    -------
+    numpy.ndarray
+        Source potentials with shape (P, K), or (P,) for a one-dimensional
+        *sigma*, in m^2/s.
+    """
+    return source_pair_rhs_numba(points, panels, None, 1.0, sigma, far_ratio=far_ratio)
+
+
+def pair_system_numba(
+    points: np.ndarray,
+    panels_a: np.ndarray,
+    panels_b: np.ndarray | None,
+    sign: float,
+    sigma: np.ndarray,
+    far_ratio: float = 5.0,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Compute the doublet pair matrix and the source pair right-hand sides in one pass.
+
+    Same results as :func:`ventorum.panel3d.kernels.pair_system` to
+    round-off. Each target-panel pair computes the source and the doublet
+    potential together (they share the solid angle), so one pass gives
+    the system matrix and the right-hand sides of a parity system.
+
+    Parameters
+    ----------
+    points : numpy.ndarray
+        Target coordinates with shape (P, 3) in m.
+    panels_a : numpy.ndarray
+        Panel corner coordinates with shape (M, 4, 3) in m.
+    panels_b : numpy.ndarray or None
+        Second panel set with shape (M, 4, 3) in m, or None.
+    sign : float
+        Factor of the second panel set [-] (+1 or -1).
+    sigma : numpy.ndarray
+        Source strengths with shape (M, K), K at most 6, or (M,) in m/s.
+    far_ratio : float, default=5.0
+        Distance-to-diameter ratio of the point far-field expansions.
+
+    Returns
+    -------
+    tuple of numpy.ndarray
+        (C, R): C with shape (P, M) [-] is ``C_a + sign * C_b`` and R with
+        shape (P, K) in m^2/s is ``(B_a + sign * B_b) @ sigma``.
+    """
+    mat, rhs, target_dtype, rhs_dtype = _run_pair_numba(
+        points, panels_a, panels_b, sign, sigma, far_ratio, True, True
+    )
+    return mat.astype(target_dtype, copy=False), rhs.astype(rhs_dtype, copy=False)
