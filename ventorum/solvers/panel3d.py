@@ -55,6 +55,7 @@ import warnings
 from collections.abc import Sequence
 
 import numpy as np
+import scipy.sparse
 
 from ventorum import gpu
 from ventorum.aero.system import (
@@ -91,6 +92,8 @@ from ventorum.panel3d.mesh import (
     check_mesh,
     mesh_lifting_surface,
 )
+from ventorum.panel3d import solver as panel_solver_module
+from ventorum.panel3d.post import _condition_arrays
 from ventorum.panel3d.solver import PanelResult, PanelSolver
 from ventorum.solvers.base import BaseSolver
 from ventorum.solvers.lattice_base import as_aircraft
@@ -357,6 +360,216 @@ def _surface_strip_maps(
         else:
             right[j].append(first_panel + i)
     return right, (left_map if mirror_side else None)
+
+
+def _spanwise_results_batch(solver, panel_results, conditions, strip_maps, metadata):
+    """Integrate all strips and conditions with one shared incidence matrix.
+
+    Solver geometry is in m and m^2. Pressures are dimensionless. Return
+    per-condition SpanwiseResult objects with their documented SI units.
+    Quarter-chord arms are formed before reduction, as in the scalar path.
+    """
+    maps, quarter_chords, surfaces = [], [], []
+    for (right, left), meta in zip(strip_maps, metadata):
+        first = len(maps)
+        qc = meta["pos_mid"].copy()
+        qc[:, 0] += 0.25 * meta["chord"]
+        maps.extend(right)
+        quarter_chords.extend(qc)
+        if left is not None:
+            qc_left = qc[::-1].copy()
+            qc_left[:, 1] *= -1
+            maps.extend(left)
+            quarter_chords.extend(qc_left)
+        surfaces.append((first, len(right), left is not None))
+    lengths = np.fromiter(map(len, maps), dtype=int)
+    row = np.repeat(np.arange(len(maps)), lengths)
+    col = np.concatenate([np.asarray(ids, dtype=int) for ids in maps])
+    incidence = scipy.sparse.csr_matrix(
+        (np.ones(len(col)), (row, col)), shape=(len(maps), len(solver.areas)),
+    )
+    owner = np.zeros(len(solver.areas), dtype=int)
+    owner[col] = row
+    arm = solver.centroids - np.asarray(quarter_chords)[owner]
+    out = [[] for _ in conditions]
+    size = max(1, panel_solver_module._CONDITION_BATCH_BYTES // solver._condition_bytes())
+    for start in range(0, len(conditions), size):
+        chunk = conditions[start:start + size]
+        _, speed, rho, lift_axis, drag_axis = _condition_arrays(chunk)
+        q = 0.5 * rho * speed**2
+        cp = np.array([r.cp for r in panel_results[start:start + size]])
+        force = -cp[..., None] * solver.areas[:, None] * solver.normals * q[:, None, None]
+        moment = np.cross(arm, force)
+
+        def reduce_panels(values):
+            flat = values.transpose(1, 0, 2).reshape(len(solver.areas), -1)
+            return (incidence @ flat).reshape(len(maps), values.shape[0], 3).transpose(1, 0, 2)
+
+        strip_force = reduce_panels(force)
+        strip_moment = reduce_panels(moment)
+        lift = np.sum(strip_force * lift_axis[:, None, :], axis=-1)
+        drag = np.sum(strip_force * drag_axis[:, None, :], axis=-1)
+        alpha = np.array([c.alpha for c in chunk])[:, None]
+        for meta, (first, n, has_left) in zip(metadata, surfaces):
+            stop = first + n * (2 if has_left else 1)
+            ids = np.arange(first, stop)
+            area, chord, width = meta["area"], meta["chord"], meta["width"]
+            a0, alpha0 = meta["a0"], meta["alpha_L0"]
+            y = meta["pos_mid"][:, 1]
+            if has_left:
+                # The incidence rows are right then left. Public strips
+                # are left tip to right tip.
+                ids = np.concatenate([ids[n:], ids[:n]])
+                area = np.concatenate([area[::-1], area])
+                chord = np.concatenate([chord[::-1], chord])
+                width = np.concatenate([width[::-1], width])
+                a0 = np.concatenate([a0[::-1], a0])
+                alpha0 = np.concatenate([alpha0[::-1], alpha0])
+                y = np.concatenate([-y[::-1], y])
+            cl = lift[:, ids] / np.maximum(q[:, None] * area, 1e-300)
+            cdi = drag[:, ids] / np.maximum(q[:, None] * area, 1e-300)
+            cm = strip_moment[:, ids, 1] / np.maximum(q[:, None] * area * chord, 1e-300)
+            local = lift[:, ids] / np.maximum(width, 1e-300)
+            gamma = local / np.maximum(rho * speed, 1e-300)[:, None]
+            effective = alpha0 + cl / np.maximum(a0, 1e-9)
+            induced = alpha - effective
+            arrays = dict(Cl=cl, Cd_i=cdi, Cm_section=cm, local_lift=local,
+                          gamma=gamma, alpha_eff=effective, alpha_i=induced)
+            if meta["is_symmetric"] and not has_left:
+                arrays = {key: np.concatenate([a[:, ::-1], a], axis=1)
+                          for key, a in arrays.items()}
+                y = np.concatenate([-y[::-1], y])
+                chord = np.concatenate([chord[::-1], chord])
+            for i in range(len(chunk)):
+                out[start + i].append(SpanwiseResult(
+                    y=y, chord=chord, surface_name=meta["name"],
+                    **{key: a[i] for key, a in arrays.items()},
+                ))
+    return out
+
+
+def _spanwise_reference(solver, p_res, cond, surface_strip_maps, surface_geom_meta):
+    """Retain the scalar strip integration for parity tests (SI units)."""
+    alpha, beta, v_inf = float(cond.alpha), float(cond.beta), float(cond.V_inf)
+    q_inf = 0.5 * float(cond.rho) * v_inf**2
+    l_hat, d_hat = lift_direction(alpha), freestream_direction(alpha, beta)
+    x_hat = np.array([1.0, 0.0, 0.0])
+    # Evaluate forces on mesh panels
+    # p_res.cp corresponds to solver.mesh panels (half mesh if use_half)
+    cp_arr = p_res.cp
+    areas = solver.areas
+    normals = solver.normals
+    centroids = solver.centroids
+
+    # Panel pressure forces in geometry axes: dF = -Cp * q_inf * Area * n
+    dF_panel = -cp_arr[:, None] * areas[:, None] * normals * q_inf
+
+    # Build SpanwiseResult for each surface
+    spanwise_list: list[SpanwiseResult] = []
+    for s_idx, meta in enumerate(surface_geom_meta):
+        r_map, l_map = surface_strip_maps[s_idx]
+        n_sp = len(r_map)
+
+        r_mid = meta["pos_mid"]
+        r_chord = meta["chord"]
+        r_width = meta["width"]
+        r_area = meta["area"]
+
+        # Right half strip forces and moments
+        r_lift = np.empty(n_sp)
+        r_drag = np.empty(n_sp)
+        r_cm = np.empty(n_sp)
+        for j in range(n_sp):
+            p_ids = r_map[j]
+            fj = np.sum(dF_panel[p_ids], axis=0) if p_ids else np.zeros(3)
+            r_lift[j] = float(np.dot(fj, l_hat))
+            r_drag[j] = float(np.dot(fj, d_hat))
+
+            # Quarter-chord point
+            qc_j = r_mid[j] + 0.25 * r_chord[j] * x_hat
+            arm = centroids[p_ids] - qc_j[None, :] if p_ids else np.zeros((0, 3))
+            mj = np.sum(np.cross(arm, dF_panel[p_ids]), axis=0) if p_ids else np.zeros(3)
+            # Pitching moment (nose up): My in body axes
+            r_cm[j] = float(mj[1]) / max(q_inf * r_area[j] * r_chord[j], 1e-300)
+
+        r_cl = r_lift / np.maximum(q_inf * r_area, 1e-300)
+        r_cdi = r_drag / np.maximum(q_inf * r_area, 1e-300)
+        r_local_lift = r_lift / np.maximum(r_width, 1e-300)
+        r_gamma = r_local_lift / max(float(cond.rho) * v_inf, 1e-300)
+        r_alpha_eff = meta["alpha_L0"] + r_cl / np.maximum(meta["a0"], 1e-9)
+        r_alpha_i = alpha - r_alpha_eff
+
+        if meta["is_symmetric"]:
+            if l_map is not None:
+                # Direct integration on full mesh left strips
+                l_lift = np.empty(n_sp)
+                l_drag = np.empty(n_sp)
+                l_cm = np.empty(n_sp)
+                for k in range(n_sp):
+                    p_ids = l_map[k]
+                    j = n_sp - 1 - k
+                    fk = np.sum(dF_panel[p_ids], axis=0) if p_ids else np.zeros(3)
+                    l_lift[k] = float(np.dot(fk, l_hat))
+                    l_drag[k] = float(np.dot(fk, d_hat))
+
+                    qc_k = np.array([r_mid[j, 0], -r_mid[j, 1], r_mid[j, 2]]) + 0.25 * r_chord[j] * x_hat
+                    arm = centroids[p_ids] - qc_k[None, :] if p_ids else np.zeros((0, 3))
+                    mk = np.sum(np.cross(arm, dF_panel[p_ids]), axis=0) if p_ids else np.zeros(3)
+                    l_cm[k] = float(mk[1]) / max(q_inf * r_area[j] * r_chord[j], 1e-300)
+
+                l_cl = l_lift / np.maximum(q_inf * r_area[::-1], 1e-300)
+                l_cdi = l_drag / np.maximum(q_inf * r_area[::-1], 1e-300)
+                l_local_lift = l_lift / np.maximum(r_width[::-1], 1e-300)
+                l_gamma = l_local_lift / max(float(cond.rho) * v_inf, 1e-300)
+                l_alpha_eff = meta["alpha_L0"][::-1] + l_cl / np.maximum(meta["a0"][::-1], 1e-9)
+                l_alpha_i = alpha - l_alpha_eff
+            else:
+                # Symmetric flow reflection on half mesh
+                l_lift = r_lift[::-1]
+                l_cl = r_cl[::-1]
+                l_cdi = r_cdi[::-1]
+                l_cm = r_cm[::-1]
+                l_local_lift = r_local_lift[::-1]
+                l_gamma = r_gamma[::-1]
+                l_alpha_eff = r_alpha_eff[::-1]
+                l_alpha_i = r_alpha_i[::-1]
+
+            y_full = np.concatenate([-r_mid[::-1, 1], r_mid[:, 1]])
+            chord_full = np.concatenate([r_chord[::-1], r_chord])
+            cl_full = np.concatenate([l_cl, r_cl])
+            cdi_full = np.concatenate([l_cdi, r_cdi])
+            cm_full = np.concatenate([l_cm, r_cm])
+            local_lift_full = np.concatenate([l_local_lift, r_local_lift])
+            gamma_full = np.concatenate([l_gamma, r_gamma])
+            alpha_eff_full = np.concatenate([l_alpha_eff, r_alpha_eff])
+            alpha_i_full = np.concatenate([l_alpha_i, r_alpha_i])
+        else:
+            y_full = r_mid[:, 1]
+            chord_full = r_chord
+            cl_full = r_cl
+            cdi_full = r_cdi
+            cm_full = r_cm
+            local_lift_full = r_local_lift
+            gamma_full = r_gamma
+            alpha_eff_full = r_alpha_eff
+            alpha_i_full = r_alpha_i
+
+        spanwise_list.append(
+            SpanwiseResult(
+                y=y_full,
+                gamma=gamma_full,
+                Cl=cl_full,
+                Cd_i=cdi_full,
+                alpha_eff=alpha_eff_full,
+                alpha_i=alpha_i_full,
+                local_lift=local_lift_full,
+                surface_name=meta["name"],
+                chord=chord_full,
+                Cm_section=cm_full,
+            )
+        )
+
+    return spanwise_list
 
 
 class PanelMethodSolver(BaseSolver):
@@ -678,137 +891,28 @@ class PanelMethodSolver(BaseSolver):
         max_chord_over_c = max_chord / float(c_ref) if (c_ref and max_chord > 0.0) else 1.0
 
         # 5. Build SolverResult per condition with strip integration
-        x_hat = np.array([1.0, 0.0, 0.0])
         dt_per_case = (time.perf_counter() - t0) / max(1, len(cond_list))
+        spanwise_batches = _spanwise_results_batch(
+            solver, panel_results, cond_list, surface_strip_maps, surface_geom_meta,
+        )
+        clearance = {}
+        for gnd in grounds:
+            if gnd is not None:
+                key = (tuple(gnd.normal), gnd.offset)
+                if key not in clearance:
+                    clearance[key] = check_ground_clearance(
+                        solver._full_mesh.nodes, gnd.normal, gnd.offset,
+                    )
         results: list[SolverResult] = []
 
-        for cond, gnd, p_res in zip(cond_list, grounds, panel_results):
-            alpha = float(cond.alpha)
-            beta = float(cond.beta)
-            v_inf = float(cond.V_inf)
-            q_inf = 0.5 * float(cond.rho) * v_inf**2
-            l_hat = lift_direction(alpha)
-            d_hat = freestream_direction(alpha, beta)
+        for case_index, (cond, gnd, p_res) in enumerate(zip(cond_list, grounds, panel_results)):
 
             # Ground clearance (a ground strike raises in the solve)
             h_min = None
             if gnd is not None:
-                h_min = check_ground_clearance(solver._full_mesh.nodes, gnd.normal, gnd.offset)
+                h_min = clearance[(tuple(gnd.normal), gnd.offset)]
 
-            # Evaluate forces on mesh panels
-            # p_res.cp corresponds to solver.mesh panels (half mesh if use_half)
-            cp_arr = p_res.cp
-            areas = solver.areas
-            normals = solver.normals
-            centroids = solver.centroids
-
-            # Panel pressure forces in geometry axes: dF = -Cp * q_inf * Area * n
-            dF_panel = -cp_arr[:, None] * areas[:, None] * normals * q_inf
-
-            # Build SpanwiseResult for each surface
-            spanwise_list: list[SpanwiseResult] = []
-            for s_idx, meta in enumerate(surface_geom_meta):
-                r_map, l_map = surface_strip_maps[s_idx]
-                n_sp = len(r_map)
-
-                r_mid = meta["pos_mid"]
-                r_chord = meta["chord"]
-                r_width = meta["width"]
-                r_area = meta["area"]
-
-                # Right half strip forces and moments
-                r_lift = np.empty(n_sp)
-                r_drag = np.empty(n_sp)
-                r_cm = np.empty(n_sp)
-                for j in range(n_sp):
-                    p_ids = r_map[j]
-                    fj = np.sum(dF_panel[p_ids], axis=0) if p_ids else np.zeros(3)
-                    r_lift[j] = float(np.dot(fj, l_hat))
-                    r_drag[j] = float(np.dot(fj, d_hat))
-
-                    # Quarter-chord point
-                    qc_j = r_mid[j] + 0.25 * r_chord[j] * x_hat
-                    arm = centroids[p_ids] - qc_j[None, :] if p_ids else np.zeros((0, 3))
-                    mj = np.sum(np.cross(arm, dF_panel[p_ids]), axis=0) if p_ids else np.zeros(3)
-                    # Pitching moment (nose up): My in body axes
-                    r_cm[j] = float(mj[1]) / max(q_inf * r_area[j] * r_chord[j], 1e-300)
-
-                r_cl = r_lift / np.maximum(q_inf * r_area, 1e-300)
-                r_cdi = r_drag / np.maximum(q_inf * r_area, 1e-300)
-                r_local_lift = r_lift / np.maximum(r_width, 1e-300)
-                r_gamma = r_local_lift / max(float(cond.rho) * v_inf, 1e-300)
-                r_alpha_eff = meta["alpha_L0"] + r_cl / np.maximum(meta["a0"], 1e-9)
-                r_alpha_i = alpha - r_alpha_eff
-
-                if meta["is_symmetric"]:
-                    if l_map is not None:
-                        # Direct integration on full mesh left strips
-                        l_lift = np.empty(n_sp)
-                        l_drag = np.empty(n_sp)
-                        l_cm = np.empty(n_sp)
-                        for k in range(n_sp):
-                            p_ids = l_map[k]
-                            j = n_sp - 1 - k
-                            fk = np.sum(dF_panel[p_ids], axis=0) if p_ids else np.zeros(3)
-                            l_lift[k] = float(np.dot(fk, l_hat))
-                            l_drag[k] = float(np.dot(fk, d_hat))
-
-                            qc_k = np.array([r_mid[j, 0], -r_mid[j, 1], r_mid[j, 2]]) + 0.25 * r_chord[j] * x_hat
-                            arm = centroids[p_ids] - qc_k[None, :] if p_ids else np.zeros((0, 3))
-                            mk = np.sum(np.cross(arm, dF_panel[p_ids]), axis=0) if p_ids else np.zeros(3)
-                            l_cm[k] = float(mk[1]) / max(q_inf * r_area[j] * r_chord[j], 1e-300)
-
-                        l_cl = l_lift / np.maximum(q_inf * r_area[::-1], 1e-300)
-                        l_cdi = l_drag / np.maximum(q_inf * r_area[::-1], 1e-300)
-                        l_local_lift = l_lift / np.maximum(r_width[::-1], 1e-300)
-                        l_gamma = l_local_lift / max(float(cond.rho) * v_inf, 1e-300)
-                        l_alpha_eff = meta["alpha_L0"][::-1] + l_cl / np.maximum(meta["a0"][::-1], 1e-9)
-                        l_alpha_i = alpha - l_alpha_eff
-                    else:
-                        # Symmetric flow reflection on half mesh
-                        l_lift = r_lift[::-1]
-                        l_cl = r_cl[::-1]
-                        l_cdi = r_cdi[::-1]
-                        l_cm = r_cm[::-1]
-                        l_local_lift = r_local_lift[::-1]
-                        l_gamma = r_gamma[::-1]
-                        l_alpha_eff = r_alpha_eff[::-1]
-                        l_alpha_i = r_alpha_i[::-1]
-
-                    y_full = np.concatenate([-r_mid[::-1, 1], r_mid[:, 1]])
-                    chord_full = np.concatenate([r_chord[::-1], r_chord])
-                    cl_full = np.concatenate([l_cl, r_cl])
-                    cdi_full = np.concatenate([l_cdi, r_cdi])
-                    cm_full = np.concatenate([l_cm, r_cm])
-                    local_lift_full = np.concatenate([l_local_lift, r_local_lift])
-                    gamma_full = np.concatenate([l_gamma, r_gamma])
-                    alpha_eff_full = np.concatenate([l_alpha_eff, r_alpha_eff])
-                    alpha_i_full = np.concatenate([l_alpha_i, r_alpha_i])
-                else:
-                    y_full = r_mid[:, 1]
-                    chord_full = r_chord
-                    cl_full = r_cl
-                    cdi_full = r_cdi
-                    cm_full = r_cm
-                    local_lift_full = r_local_lift
-                    gamma_full = r_gamma
-                    alpha_eff_full = r_alpha_eff
-                    alpha_i_full = r_alpha_i
-
-                spanwise_list.append(
-                    SpanwiseResult(
-                        y=y_full,
-                        gamma=gamma_full,
-                        Cl=cl_full,
-                        Cd_i=cdi_full,
-                        alpha_eff=alpha_eff_full,
-                        alpha_i=alpha_i_full,
-                        local_lift=local_lift_full,
-                        surface_name=meta["name"],
-                        chord=chord_full,
-                        Cm_section=cm_full,
-                    )
-                )
+            spanwise_list = spanwise_batches[case_index]
 
             # Integrated totals
             ar = float(b_ref**2 / s_ref)

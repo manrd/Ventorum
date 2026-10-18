@@ -631,3 +631,118 @@ def evaluate_condition_on_device(
         _to_host(v_surf_t),
         _to_host(cp_t),
     )
+
+
+def _sum_batch_axis(values, axis):
+    """Sum an axis with a fixed binary tree; output units equal input units.
+
+    The addition order does not depend on the other dimensions, including
+    the condition count. This keeps mesh-error reports bit-identical for
+    scalar and batched studies.
+    """
+    import torch
+
+    work = values.movedim(axis, -1)
+    while work.shape[-1] > 1:
+        count = work.shape[-1]
+        paired = count - count % 2
+        reduced = work[..., :paired:2] + work[..., 1:paired:2]
+        work = torch.cat([reduced, work[..., -1:]], dim=-1) if count % 2 else reduced
+    return work[..., 0]
+
+
+def _evaluate_conditions_on_device(
+    unit_mu, unit_sigma, unit_grad, coeffs, speed, rho, geometry, trefftz,
+):
+    """Evaluate a chunk on the device and copy the required outputs to the host.
+
+    Unit fields have the units of :func:`evaluate_condition_on_device`.
+    Coeffs has shape (K, 6), with translations in m/s and rates in rad/s.
+    Speed and rho have shape (K,) in m/s and kg/m^3. Geometry holds cached
+    full-mesh normals [-], areas [m^2], relative centroids [m] and the host
+    unit doublets [m^2/s per unit onset] as device tensors. Trefftz holds
+    velocity factors [1/m], strip normals [-], lengths [m], panel indices
+    and the reference area [m^2], or None for a body without a wake.
+
+    Return host float64 arrays: mu (K, N) [m^2/s], sigma (K, N) [m/s],
+    velocity (K, Nf, 3) [m/s], Cp (K, Nf) [-], total force (K, 3) [N],
+    total moment (K, 3) [N m] and Trefftz drag (K,) [-]. Pressure loads
+    and Trefftz drag use float64, as in the old host post-processing.
+    """
+    import torch
+
+    dev, dt = unit_mu.device, unit_mu.dtype
+    c64 = torch.as_tensor(coeffs, dtype=torch.float64, device=dev)
+    c = c64.to(dt)
+    speeds = torch.as_tensor(speed, dtype=torch.float64, device=dev)
+    densities = torch.as_tensor(rho, dtype=torch.float64, device=dev)
+    # Keep the six-term multiply-add order of the old device matvec.
+    # Loop over unit onsets, with all conditions and panels in each step.
+    mu = torch.zeros((len(coeffs), unit_mu.shape[0]), dtype=dt, device=dev)
+    sigma = torch.zeros_like(mu)
+    for k in range(N_ONSETS):
+        mu = torch.addcmul(mu, c[:, None, k], unit_mu[None, :, k])
+        sigma = torch.addcmul(sigma, c[:, None, k], unit_sigma[None, :, k])
+    if dt == torch.float32:
+        # Match the reference contraction: four terms, then the two-term
+        # tail. Round each multiply-add once to float32. Float64 holds
+        # each float32 product and sum before this rounding step.
+        gradient = torch.zeros((len(coeffs), unit_grad.shape[0], 3), dtype=dt, device=dev)
+        for first, stop in ((0, 4), (4, N_ONSETS)):
+            partial = torch.zeros_like(gradient)
+            for k in range(first, stop):
+                partial = (partial.to(torch.float64)
+                           + c[:, None, None, k].to(torch.float64)
+                           * unit_grad[None, :, k, :].to(torch.float64)).to(dt)
+            gradient = gradient + partial
+    else:
+        gradient = torch.zeros((len(coeffs), unit_grad.shape[0], 3), dtype=dt, device=dev)
+        for k in range(N_ONSETS):
+            gradient = torch.addcmul(gradient, c[:, None, None, k], unit_grad[None, :, k, :])
+    # Compute the onset in float64 before conversion, as in the old helper.
+    omega = c64[:, 3:] * torch.tensor([-1.0, 1.0, -1.0], device=dev)
+    onset = (c64[:, None, :3] - torch.linalg.cross(
+        omega[:, None, :], geometry["arm"][None, :, :], dim=-1,
+    )).to(dt)
+    normals = geometry["normal"].to(dt)
+    velocity = (onset - (onset * normals).sum(dim=-1, keepdim=True) * normals) - gradient
+    valid = speeds > 1e-12
+    # Tensor/scalar division in the reference uses a rounded reciprocal.
+    # Tensor/tensor division rounds differently on CUDA.
+    inverse_speed_sq = np.divide(
+        1.0, speed**2, out=np.zeros_like(speed), where=speed > 1e-12,
+    )
+    inverse_speed_sq = torch.as_tensor(inverse_speed_sq, dtype=dt, device=dev)
+    cp = torch.where(valid[:, None],
+                     1.0 - (velocity**2).sum(dim=-1) * inverse_speed_sq[:, None], 0.0)
+    q = 0.5 * densities * speeds**2
+    force = -cp.to(torch.float64)[..., None] * geometry["area"][:, None]
+    force = force * geometry["normal"] * q[:, None, None]
+    moment = torch.linalg.cross(geometry["arm"][None, :, :], force, dim=-1)
+    cdi = torch.zeros_like(speeds)
+    if trefftz is not None:
+        factors, up, lo, s_ref, ground = trefftz
+        mu_full = mu.to(torch.float64)
+        if geometry["half"]:
+            host_mu = geometry["unit_mu"]
+            symmetric = torch.zeros_like(mu_full)
+            asymmetric = torch.zeros_like(mu_full)
+            for k in (0, 2, 4):
+                symmetric = torch.addcmul(symmetric, c64[:, None, k], host_mu[None, :, k])
+            for k in (1, 3, 5):
+                asymmetric = torch.addcmul(asymmetric, c64[:, None, k], host_mu[None, :, k])
+            left = symmetric - asymmetric
+            mu_full = torch.cat([mu_full, left], dim=1)
+        gamma = mu_full[:, up] - mu_full[:, lo]
+        gv = torch.cat([gamma, -gamma], dim=1)
+        if ground:
+            gv = torch.cat([gv, -gv], dim=1)
+        vy, vz, ny, nz, length = factors
+        wash = (_sum_batch_axis(gv[:, None, :] * vy[None], -1) * ny
+                + _sum_batch_axis(gv[:, None, :] * vz[None], -1) * nz)
+        drag = -0.5 * densities * _sum_batch_axis(gamma * wash * length, 1)
+        if s_ref > 1e-12:
+            cdi = torch.where(valid, drag / (q * s_ref), 0.0)
+    return tuple(t.to(torch.float64).cpu().numpy() for t in (
+        mu, sigma, velocity, cp, _sum_batch_axis(force, 1), _sum_batch_axis(moment, 1), cdi,
+    ))
