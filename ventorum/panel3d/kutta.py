@@ -113,10 +113,12 @@ def strip_influence_matrix(
     c = np.asarray(cw, dtype=float)
     n_s = len(strip_panel_indices)
     d_mat = np.zeros((c.shape[0], n_s), dtype=float)
-    for s, idx in enumerate(strip_panel_indices):
-        cols = np.asarray(idx, dtype=int)
-        if cols.size:
-            d_mat[:, s] = np.sum(c[:, cols], axis=1)
+    lengths = np.fromiter(map(len, strip_panel_indices), dtype=np.intp, count=n_s)
+    active = lengths > 0
+    if np.any(active):
+        cols = np.concatenate(strip_panel_indices).astype(np.intp, copy=False)
+        starts = np.cumsum(lengths) - lengths
+        d_mat[:, active] = np.add.reduceat(c[:, cols], starts[active], axis=1)
     return d_mat
 
 
