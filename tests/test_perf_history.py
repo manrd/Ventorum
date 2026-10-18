@@ -207,7 +207,7 @@ def test_compare_checks_the_imported_tree(tmp_path):
 
 def test_workload_names_are_fixed():
     """The workload names are exactly the names of the task card."""
-    assert list(ph.WORKLOAD_NAMES) == [
+    assert list(ph.WORKLOAD_NAMES[:8]) == [
         "single_vlm_n20_c4",
         "single_vlm_n80_c4",
         "single_linear_n80",
@@ -218,6 +218,102 @@ def test_workload_names_are_fixed():
         "ground_vlm_n40_6x9",
     ]
     assert set(ph.SWEEP_WORKLOADS) <= set(ph.WORKLOAD_NAMES)
+
+
+def test_panel3d_workload_names_are_appended():
+    """The panel workloads follow the original fixed workloads."""
+    old_names = [
+        "single_vlm_n20_c4",
+        "single_vlm_n80_c4",
+        "single_linear_n80",
+        "single_nonlinear_n80",
+        "sweep_vlm_n40_c4_33",
+        "sweep_linear_n80_33",
+        "wingtail_vlm_n40_c4_33",
+        "ground_vlm_n40_6x9",
+    ]
+    assert ph.WORKLOAD_NAMES[:8] == old_names
+    assert ph.WORKLOAD_NAMES[8:] == [
+        "panel3d_single_c40_n80",
+        "panel3d_sweep_c40_n80_33",
+        "panel3d_ground_c20_n40_9",
+    ]
+
+
+@pytest.mark.slow
+def test_panel3d_tiny_workloads_run():
+    """Each tiny panel workload runs and returns the expected cases."""
+    expected_cases = {
+        "panel3d_single_c40_n80": 1,
+        "panel3d_sweep_c40_n80_33": 5,
+        "panel3d_ground_c20_n40_9": 3,
+    }
+    for name, n_cases in expected_cases.items():
+        workload = ph.build_workload(name, tiny=True)
+        results = workload.call()
+        if n_cases == 1:
+            results = [results]
+        assert len(results) == n_cases
+        assert all(result.solver_type == "panel3d" for result in results)
+
+
+@pytest.mark.parametrize(
+    ("device", "backend"), [("gpu", "gpu"), ("cpu", "numba")]
+)
+def test_panel3d_gpu_rows_follow_the_device(monkeypatch, device, backend):
+    """The selected device sets the panel backend of the solver settings."""
+    from ventorum.solvers import factory
+
+    captured = []
+
+    class FakeSolver:
+        def solve(self, geometry, condition, settings):
+            captured.append(settings.panel_backend)
+            return types.SimpleNamespace(solver_type="panel3d")
+
+    monkeypatch.setattr(factory, "make_solver", lambda solver_type: FakeSolver())
+    monkeypatch.setattr(ph.gpu, "set_device", lambda device: None)
+    monkeypatch.setattr(
+        ph,
+        "measure",
+        lambda workload, tiny: workload.call() and {"unit": workload.unit, "median": 1},
+    )
+
+    ph.run_workload("panel3d_single_c40_n80", tiny=True, device=device)
+    assert captured == [backend]
+
+
+def test_compare_reports_unknown_workload_of_old_tree(monkeypatch):
+    """Compare reports an old tree's unknown panel workload and keeps known rows."""
+    tree_a = REPO_ROOT
+    tree_b = REPO_ROOT / "tests"
+
+    def fake_child(options, tree, timeout=None):
+        tree = Path(tree).resolve()
+        if "--probe" in options:
+            return {
+                "version": "0.3.0",
+                "cython": False,
+                "file": str(tree / "ventorum" / "__init__.py"),
+            }
+        name = options[options.index("--run") + 1]
+        if tree == tree_a.resolve() and name.startswith("panel3d_"):
+            raise ph.UnknownWorkloadError(name)
+        return {"unit": "ms", "median": 10.0, "min": 9.0, "max": 11.0}
+
+    monkeypatch.setattr(ph, "_child", fake_child)
+    result = ph.run_compare(
+        tree_a,
+        tree_b,
+        rounds=1,
+        workloads=["single_vlm_n20_c4", "panel3d_single_c40_n80"],
+        tiny=True,
+    )
+    text = ph.render_compare(result)
+    assert len(result.rows) == 1
+    assert result.rows[0].workload == "single_vlm_n20_c4"
+    assert "panel3d_single_c40_n80" in text
+    assert "unknown in tree A" in text
 
 
 def test_record_times_the_ventorum_of_its_own_tree(tmp_path, monkeypatch):
