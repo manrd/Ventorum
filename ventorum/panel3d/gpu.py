@@ -444,15 +444,12 @@ def add_wake_influence(
     """
     import torch
 
-    up_idx = np.asarray(wake_up, dtype=int).reshape(-1)
-    lo_idx = np.asarray(wake_lo, dtype=int).reshape(-1)
-    for s, cols in enumerate(strip_panel_indices):
-        col_idx = torch.as_tensor(
-            np.asarray(cols, dtype=np.int64), device=mat_a.device
-        )
-        cs = mat_cw.index_select(1, col_idx).sum(dim=1) * float(sign)
-        mat_a[:, int(up_idx[s])] += cs
-        mat_a[:, int(lo_idx[s])] -= cs
+    up_idx = torch.as_tensor(np.asarray(wake_up, dtype=np.int64), device=mat_a.device)
+    lo_idx = torch.as_tensor(np.asarray(wake_lo, dtype=np.int64), device=mat_a.device)
+    cs = strip_sum(mat_cw, strip_panel_indices) * float(sign)
+    # Accumulate repeated panel indices, including upper/lower overlap.
+    mat_a.index_add_(1, up_idx, cs)
+    mat_a.index_add_(1, lo_idx, -cs)
     return mat_a
 
 
@@ -478,11 +475,20 @@ def strip_sum(mat_cw, strip_panel_indices):
     out = torch.zeros(
         (n_targets, n_strips), dtype=mat_cw.dtype, device=mat_cw.device
     )
-    for s, cols in enumerate(strip_panel_indices):
-        col_idx = torch.as_tensor(
-            np.asarray(cols, dtype=np.int64), device=mat_cw.device
+    lengths = np.fromiter(map(len, strip_panel_indices), dtype=np.int64, count=n_strips)
+    if not np.any(lengths):
+        return out
+    # Deterministic segment sums: index_add_ on the GPU uses atomic additions,
+    # whose order (and so the float result) can change from run to run.
+    if np.all(lengths == lengths[0]):
+        cols = torch.as_tensor(
+            np.concatenate(strip_panel_indices).astype(np.int64, copy=False), device=mat_cw.device
         )
-        if col_idx.numel():
+        gathered = mat_cw.index_select(1, cols)
+        return gathered.reshape(n_targets, n_strips, int(lengths[0])).sum(dim=2)
+    for s, cols in enumerate(strip_panel_indices):
+        if len(cols):
+            col_idx = torch.as_tensor(np.asarray(cols, dtype=np.int64), device=mat_cw.device)
             out[:, s] = mat_cw.index_select(1, col_idx).sum(dim=1)
     return out
 

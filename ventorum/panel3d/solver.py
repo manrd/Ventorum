@@ -278,12 +278,16 @@ def _fold_wake(mat_a, d_strip, wake: PanelWake):
     potential column adds to the upper panel column and subtracts from the
     lower panel column. Works on numpy arrays and torch tensors.
     """
-    for s in range(len(wake.strip_panel_indices)):
-        up_idx = int(wake.wake_up[s])
-        lo_idx = int(wake.wake_lo[s])
-        cs = d_strip[:, s]
-        mat_a[:, up_idx] += cs
-        mat_a[:, lo_idx] -= cs
+    if isinstance(mat_a, np.ndarray):
+        np.add.at(mat_a.T, wake.wake_up, d_strip.T)
+        np.subtract.at(mat_a.T, wake.wake_lo, d_strip.T)
+    else:
+        import torch
+
+        up_idx = torch.as_tensor(wake.wake_up, dtype=torch.int64, device=mat_a.device)
+        lo_idx = torch.as_tensor(wake.wake_lo, dtype=torch.int64, device=mat_a.device)
+        mat_a.index_add_(1, up_idx, d_strip)
+        mat_a.index_add_(1, lo_idx, -d_strip)
     return mat_a
 
 
@@ -369,6 +373,7 @@ class PanelSolver:
         backend: str = "numpy",
         device=None,
         dtype=None,
+        _reuse_full_from: PanelSolver | None = None,
     ) -> None:
         if kutta not in ("morino", "pressure"):
             raise ValueError(f"Unknown kutta option {kutta!r}; use 'morino' or 'pressure'.")
@@ -390,11 +395,17 @@ class PanelSolver:
         self._full_solver: PanelSolver | None = None
 
         # Standardize triangular panels on given mesh
-        self.standardized_panels = _standardize_panels(mesh.panels, mesh.nodes)
+        if _reuse_full_from is None:
+            self.standardized_panels = _standardize_panels(mesh.panels, mesh.nodes)
+        else:
+            self.standardized_panels = _reuse_full_from._standardized_full_panels
         self.body_verts = mesh.nodes[self.standardized_panels]
 
         # Precompute body geometry on given mesh
-        geom = _precompute_geometry(self.body_verts)
+        geom = (
+            _precompute_geometry(self.body_verts)
+            if _reuse_full_from is None else _reuse_full_from._full_geom
+        )
         self.centroids = geom.centroid
         self.normals = geom.normal
         self.areas = geom.area
@@ -412,8 +423,11 @@ class PanelSolver:
                 raise ValueError(f"wake_length must be positive and finite, got {wake_length}.")
 
         # Body-axis wake of free air on the solved mesh
-        self.wake: PanelWake = self._build_wake(
-            mesh.nodes, self.standardized_panels, mesh.wake_edges, self.normals, None
+        self.wake: PanelWake = (
+            self._build_wake(
+                mesh.nodes, self.standardized_panels, mesh.wake_edges, self.normals, None
+            )
+            if _reuse_full_from is None else _reuse_full_from._full_wake
         )
 
         # Reconstruct full mesh for post-processing and reference geometry if half mesh
@@ -423,28 +437,35 @@ class PanelSolver:
             self._full_mesh = mesh
 
         # Full mesh geometry and wake for global post-processing
-        self._standardized_full_panels = _standardize_panels(
-            self._full_mesh.panels, self._full_mesh.nodes
-        )
-        self._full_geom = _precompute_geometry(
-            self._full_mesh.nodes[self._standardized_full_panels]
-        )
-        self._full_wake = self._build_wake(
-            self._full_mesh.nodes,
-            self._standardized_full_panels,
-            self._full_mesh.wake_edges,
-            self._full_geom.normal,
-            None,
-        )
-        self._grad_op = build_surface_gradient_operator(
-            self._full_mesh.nodes,
-            self._standardized_full_panels,
-            self._full_geom.centroid,
-            self._full_geom.normal,
-            self._full_geom.area,
-            self._full_mesh.wake_edges,
-            kinds=self._full_mesh.kind,
-        )
+        if _reuse_full_from is None:
+            self._standardized_full_panels = _standardize_panels(
+                self._full_mesh.panels, self._full_mesh.nodes
+            )
+            self._full_geom = _precompute_geometry(
+                self._full_mesh.nodes[self._standardized_full_panels]
+            )
+            self._full_wake = self._build_wake(
+                self._full_mesh.nodes,
+                self._standardized_full_panels,
+                self._full_mesh.wake_edges,
+                self._full_geom.normal,
+                None,
+            )
+            self._grad_op = build_surface_gradient_operator(
+                self._full_mesh.nodes,
+                self._standardized_full_panels,
+                self._full_geom.centroid,
+                self._full_geom.normal,
+                self._full_geom.area,
+                self._full_mesh.wake_edges,
+                kinds=self._full_mesh.kind,
+            )
+        else:
+            # The parent already prepared these full-mesh pieces.
+            self._standardized_full_panels = _reuse_full_from._standardized_full_panels
+            self._full_geom = _reuse_full_from._full_geom
+            self._full_wake = _reuse_full_from._full_wake
+            self._grad_op = _reuse_full_from._grad_op
 
         # Reference center
         if ref_point is None:
@@ -1241,6 +1262,7 @@ class PanelSolver:
                 backend=self.backend,
                 device=self._device_arg,
                 dtype=self._dtype_arg,
+                _reuse_full_from=self,
             )
         return self._full_solver
 
