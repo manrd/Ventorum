@@ -127,6 +127,15 @@ How a batch runs:
 8. One transfer brings all arrays to the host. `loads.loads_result` and `_case_result` make the result objects (the same functions as the CPU path); the statistics of the trust score come from the per-case kernel (the same rules as `trust.spanwise_stats_batch`). Each result includes the `dispatch` dictionary.
 9. The ground-effect sweeps (`ground_effect.sweep._gpu_batch`) check each case and place its ground as `analyze_ground_effect` does (`prepare_ground_case`), solve the valid cases as one batch with explicit ground planes, and make the results with `ground_case_result`. When the GPU does not take the batch, the CPU path batches small lattices and serial runs in chunks, and larger lattices keep the worker pool.
 
+## Float32 panel kernels: a developer path only
+
+The 3D panel kernels refuse float32 inputs and float32 Warp arithmetic (see `docs/user/performance_limits.md`, PL-7): the float32 on-plane band zeroes real influences near long panels. The float32 behaviour stays runnable for the investigation of that band, through a path that a user cannot open by accident:
+
+1. Set the environment variable `VENTORUM_DEV_UNSAFE_FLOAT32_PANEL_KERNELS=1`.
+2. Call the kernels inside `with ventorum.panel3d.kernels.unsafe_float32_kernels(reason="..."):` (a non-empty reason; a `RuntimeWarning` on every entry; it holds for the calling context only).
+
+Either step alone does not open the path. Tests of the float32 band use the fixture `unsafe_float32_kernels` of `tests/conftest.py`; `tests/test_panel3d_float32_refusal.py` holds a regression fixture of the zeroing (a 50 m panel, a target 0.1 mm above it) that must change on purpose when the band rule changes. Never use this path in the solver, the agent tools or an example.
+
 ## Dispatch recording and reasons
 
 Lattice solver results record dispatch decisions in `result.details["dispatch"]`:

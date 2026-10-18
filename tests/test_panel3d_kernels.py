@@ -445,7 +445,7 @@ def test_mirror_symmetry(test_panels):
         assert np.isclose(phi_d, phi_d_refl, rtol=0.0, atol=1e-14), f"mirror phi_d failed for {name}"
 
 
-def test_float32_inputs(test_panels):
+def test_float32_inputs(test_panels, unsafe_float32_kernels):
     """float32 inputs preserve dtype and match float64 to 1e-5 relative."""
     p_f64 = test_panels["skewed"]
     diam = _panel_diameter(p_f64)
@@ -556,7 +556,7 @@ def test_far_field_rule_at_25_diameters(test_panels):
             assert np.all(err <= 1e-3), f"{func.__name__} far rule failed for {name}: {err.max():.2e}"
 
 
-def test_on_plane_limits_inside_edge_corner_outside(test_panels):
+def test_on_plane_limits_inside_edge_corner_outside(test_panels, unsafe_float32_kernels):
     """In-plane targets get the body-side limits of the doublet potential.
 
     Inside 1/2, on an edge 1/4, at a corner theta / (4 pi) with the
@@ -604,7 +604,7 @@ def test_on_plane_limits_inside_edge_corner_outside(test_panels):
         assert np.all(np.isfinite(doublet_velocity(targets, p[None, ...], far_ratio=np.inf)))
 
 
-def test_self_terms_relative_plane_band():
+def test_self_terms_relative_plane_band(unsafe_float32_kernels):
     """Self terms stay +1/2 for rotated panels far from the origin.
 
     The collocation points come from the unrotated cube and are rotated and

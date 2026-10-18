@@ -26,3 +26,24 @@ def _cpu_device_for_cpu_tests(request):
         yield
     finally:
         gpu.set_device(old)
+
+
+@pytest.fixture
+def unsafe_float32_kernels(monkeypatch):
+    """Open the developer path of the float32 panel kernels for one test.
+
+    The panel kernels refuse float32 (the float32 on-plane band zeroes real
+    influences near long panels). Tests of that float32 behaviour run through
+    the developer path: the environment variable plus the context manager,
+    whose entry warning the fixture checks.
+    """
+    from ventorum.panel3d.kernels import UNSAFE_FLOAT32_ENV, unsafe_float32_kernels
+
+    monkeypatch.setenv(UNSAFE_FLOAT32_ENV, "1")
+    with pytest.warns(RuntimeWarning, match="Unsafe float32 panel kernels"):
+        cm = unsafe_float32_kernels("tests of the float32 on-plane band")
+        cm.__enter__()
+    try:
+        yield
+    finally:
+        cm.__exit__(None, None, None)

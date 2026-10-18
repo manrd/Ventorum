@@ -73,8 +73,18 @@ _initialised = False
 
 
 def _kernels(precision: str):
-    """Build and cache the Warp kernels of one precision."""
+    """Build and cache the Warp kernels of one precision.
+
+    Float32 arithmetic is refused outside the developer path
+    :func:`ventorum.panel3d.kernels.unsafe_float32_kernels` (the float32
+    on-plane band zeroes real influences near long panels).
+    """
     import warp as wp
+
+    from ventorum.panel3d.kernels import _require_float64
+
+    if precision == "float32":
+        _require_float64("float32 arithmetic of the Warp panel kernels")
 
     global _initialised
     with _lock:

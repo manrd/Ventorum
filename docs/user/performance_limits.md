@@ -204,3 +204,13 @@ GPU would be faster. To see the crossovers on a machine, run
 1. Resolve the panel count before every device decision, so the cost model
    always decides (a change of the call structure: owner decision).
 2. Thresholds per lattice size class instead of one per family.
+
+## PL-7: The 3D panel kernels run in float64 only
+
+**What happens.** The panel kernels decide whether a target point lies on the plane of a panel with a tolerance that follows the precision of the inputs and the size of the panel. In float32 this band is about 1e-5 of the panel scale. A wake panel of the default wake is long (50 times the largest chord), so its float32 band is about 0.3 mm for a 1 m chord. On a fine mesh, the body points near the trailing edge lie closer than that to the wake plane: in float32 their wake influence becomes zero, and the lift of the wing is wrong (by most of its value at the default mesh).
+
+**What Ventorum does now.** The numpy, Numba and Warp panel kernels refuse float32 inputs and float32 kernel arithmetic with a `ValueError`. The panel solver builds its geometry and assembles its matrices in float64 on every backend; on the GPU it rounds the assembled matrix to the solve precision (float32 by default) after the float64 assembly. Results of the solver do not change.
+
+**Cost.** The GPU assembly runs in float64, which consumer GPUs run at a fraction of their float32 rate.
+
+**How to remove the limit.** A precision-aware on-plane rule (for example a band from the local panel scale near the target, or from the distance to the nearest edge) is an open question; it needs a method study before float32 assembly can be considered.
