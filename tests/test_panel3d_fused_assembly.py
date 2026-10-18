@@ -202,7 +202,7 @@ def test_numba_pair_doublet_equals_influence_doublet():
     assert np.array_equal(nb.doublet_pair_matrix_numba(points, panels_a, None), c_old)
 
 
-def test_numba_pair_kernels_shapes():
+def test_numba_pair_kernels_shapes(unsafe_float32_kernels):
     """A one-dimensional sigma, empty targets and the float32 output dtype."""
     panels_a, panels_b = _pair_sets("mirror")
     points = _targets(panels_a)

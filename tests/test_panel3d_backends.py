@@ -170,7 +170,7 @@ def test_numba_self_terms_equal_numpy_float64() -> None:
 
 
 @pytest.mark.parametrize("far_ratio", [5.0, np.inf])
-def test_numba_float32_matches_numpy_on_float32_inputs(far_ratio: float) -> None:
+def test_numba_float32_matches_numpy_on_float32_inputs(far_ratio: float, unsafe_float32_kernels) -> None:
     """Numba on float32 inputs equals numpy on the same float32 inputs to 1e-12.
 
     This covers the full target set (near-field, on-plane, far-field, own
@@ -195,7 +195,7 @@ def test_numba_float32_matches_numpy_on_float32_inputs(far_ratio: float) -> None
     _assert_parity(new_vd, ref_vd, 1e-12, "Vd f32 inputs")
 
 
-def test_numba_float32_floor() -> None:
+def test_numba_float32_floor(unsafe_float32_kernels) -> None:
     """Numba float32 stays within float32 round-off of the float64 reference.
 
     The test measures the error floor and states it. The gate is 1e-4;
@@ -276,7 +276,7 @@ def test_warp_matrices_equal_numpy_float64(far_ratio: float) -> None:
 
 
 @pytest.mark.gpu
-def test_warp_float32_floor() -> None:
+def test_warp_float32_floor(unsafe_float32_kernels) -> None:
     """Warp float32 stays within float32 round-off of the float64 reference.
 
     The test measures the error floor and states it. The gate is 1e-4;
@@ -336,7 +336,7 @@ def _rotated_cube(n: int = 4, seed: int = 4, offset=(7.3, -2.1, 4.4)) -> tuple[n
     return cube @ q.T + off, colloc @ q.T + off, mids @ q.T + off
 
 
-def test_float32_on_plane_and_self_terms_numpy_numba() -> None:
+def test_float32_on_plane_and_self_terms_numpy_numba(unsafe_float32_kernels) -> None:
     """float32 inputs keep the on-plane terms and the self terms +1/2.
 
     The targets are the own collocation points (self terms), the coplanar
@@ -374,7 +374,7 @@ def test_float32_on_plane_and_self_terms_numpy_numba() -> None:
         assert err <= 1e-4, f"float32 {name} floor {err:.3e} above 1e-4"
 
 
-def test_numba_float32_full_target_set() -> None:
+def test_numba_float32_full_target_set(unsafe_float32_kernels) -> None:
     """Numba float32 matches the float64 reference on all targets.
 
     This set has exactly on-plane targets and the own centroids of
@@ -394,7 +394,7 @@ def test_numba_float32_full_target_set() -> None:
 
 
 @pytest.mark.gpu
-def test_warp_float32_on_plane_and_self_terms() -> None:
+def test_warp_float32_on_plane_and_self_terms(unsafe_float32_kernels) -> None:
     """Warp float32 keeps the on-plane terms and the self terms +1/2 on CUDA.
 
     Same targets as the numpy and Numba float32 test (rotated closed cube,

@@ -48,6 +48,15 @@ Conventions
   two separate matrices, and :func:`source_pair_rhs` returns the source
   right-hand sides ``(B_a + sign * B_b) @ sigma`` without the source matrix.
   :func:`pair_system` returns both from one pass over the targets.
+* Precision: the kernels accept float64 (and integer) inputs only, and the
+  Warp kernels float64 arithmetic only (a float32 output dtype after float64
+  arithmetic is allowed). The on-plane band follows the input precision: with
+  float32 inputs it is about 1e-5 of the panel scale, so near a long panel
+  (a 50 m wake panel: about 0.3 mm) real off-plane targets count as on-plane
+  and their influence becomes zero. The kernels raise a ``ValueError`` for
+  float32 inputs and float32 arithmetic. The developer context manager
+  :func:`unsafe_float32_kernels` keeps the float32 behaviour runnable for the
+  investigation of this band (see ``docs/design/performance_architecture.md``).
 
 References
 ----------
@@ -66,6 +75,11 @@ References
 
 from __future__ import annotations
 
+import contextlib
+import contextvars
+import os
+import warnings
+from collections.abc import Iterator
 from dataclasses import dataclass
 
 import numpy as np
@@ -93,10 +107,84 @@ _PLANE_TOL_FACTOR = 32.0
 _DEGENERATE_EDGE = 1e-12
 
 
+#: Environment variable of the developer path for float32 kernels. The path
+#: needs this variable set to "1" and the context manager
+#: :func:`unsafe_float32_kernels`; either one alone does not open it.
+UNSAFE_FLOAT32_ENV = "VENTORUM_DEV_UNSAFE_FLOAT32_PANEL_KERNELS"
+
+_unsafe_float32 = contextvars.ContextVar("ventorum_unsafe_float32_panel_kernels", default=False)
+
+_FLOAT32_REFUSAL = (
+    "The 3D panel kernels refuse {what}. The on-plane tolerance of the kernels "
+    "follows the precision, and near long panels (for example the wake panels) "
+    "a float32 tolerance sets real influences to zero. Pass float64 arrays and "
+    "use float64 kernel arithmetic."
+)
+
+
+@contextlib.contextmanager
+def unsafe_float32_kernels(reason: str) -> Iterator[None]:
+    """Run the panel kernels with float32 inputs or arithmetic (developer path).
+
+    The float32 kernels give wrong results: near a long panel the float32
+    on-plane band sets real influences to zero (a 50 m wake panel zeroes the
+    doublet potential at targets within about 0.3 mm of its plane). The
+    kernels refuse float32 for this reason. This context manager keeps the
+    float32 behaviour runnable for the investigation of that band; it is not
+    a user setting.
+
+    It opens only when the environment variable ``UNSAFE_FLOAT32_ENV``
+    (``VENTORUM_DEV_UNSAFE_FLOAT32_PANEL_KERNELS``) is ``"1"``, and it warns on
+    every entry. It holds for the calling thread and context only.
+
+    Parameters
+    ----------
+    reason : str
+        Why the float32 behaviour is needed (written to the warning). An empty
+        reason is refused.
+
+    Raises
+    ------
+    RuntimeError
+        If the environment variable is not set to "1".
+    ValueError
+        If *reason* is empty.
+
+    Warns
+    -----
+    RuntimeWarning
+        On every entry, with the reason.
+    """
+    if os.environ.get(UNSAFE_FLOAT32_ENV) != "1":
+        raise RuntimeError(
+            f"The unsafe float32 panel kernels need the environment variable {UNSAFE_FLOAT32_ENV}=1."
+        )
+    if not str(reason).strip():
+        raise ValueError("unsafe_float32_kernels needs a reason.")
+    warnings.warn(
+        f"Unsafe float32 panel kernels enabled ({reason}). Influences near long panels are wrong.",
+        RuntimeWarning,
+        stacklevel=3,
+    )
+    token = _unsafe_float32.set(True)
+    try:
+        yield
+    finally:
+        _unsafe_float32.reset(token)
+
+
+def _require_float64(what: str) -> None:
+    """Raise ValueError for a float32 use outside the developer path."""
+    if not _unsafe_float32.get():
+        raise ValueError(_FLOAT32_REFUSAL.format(what=what))
+
+
 def _input_eps(*arrays) -> float:
     """Return the largest machine epsilon of the floating dtypes of the inputs.
 
-    Integer and other non-floating inputs count as float64.
+    Integer and other non-floating inputs count as float64. A floating input
+    coarser than float64 is refused (see the module notes on precision),
+    except inside :func:`unsafe_float32_kernels`.
 
     Parameters
     ----------
@@ -108,12 +196,20 @@ def _input_eps(*arrays) -> float:
     float
         Machine epsilon [-] of the coarsest floating input dtype, at least
         the float64 epsilon.
+
+    Raises
+    ------
+    ValueError
+        If an input has a floating dtype coarser than float64.
     """
-    eps = float(np.finfo(np.float64).eps)
+    f64 = float(np.finfo(np.float64).eps)
+    eps = f64
     for a in arrays:
         dt = np.asarray(a).dtype
         if np.issubdtype(dt, np.floating):
             eps = max(eps, float(np.finfo(dt).eps))
+    if eps > f64:
+        _require_float64("float32 (or coarser) input arrays")
     return eps
 
 
