@@ -224,7 +224,8 @@ def test_five_angle_sweep_one_factorization(monkeypatch):
     for r in results:
         disp = r.details.get("dispatch", {})
         assert disp.get("factorization_count") == 1
-        assert disp.get("backend") == "numpy"
+        # "auto" runs the compiled Numba kernels on the CPU.
+        assert disp.get("backend") == "numba"
         assert disp.get("device") == "cpu"
         assert disp.get("dtype") == "float64"
         assert r.symmetry_used
@@ -426,7 +427,7 @@ def test_gpu_auto_selection_follows_the_lattice_rule(monkeypatch):
     monkeypatch.setattr(gpu, "get_precision", lambda: "float64")
 
     monkeypatch.setattr(gpu, "get_device", lambda: "cpu")
-    assert solver._resolve_backend(st, 5000, 1, False)[:3] == ("numpy", "cpu", "float64")
+    assert solver._resolve_backend(st, 5000, 1, False)[:3] == ("numba", "cpu", "float64")
 
     monkeypatch.setattr(gpu, "get_device", lambda: "auto")
     seen = {}
@@ -441,7 +442,7 @@ def test_gpu_auto_selection_follows_the_lattice_rule(monkeypatch):
     assert (backend, device, precision) == ("gpu", "gpu", "float64")
     assert seen["work"] == 2 * 5000 * 5000 * 2.0
     assert reason == "auto: test rule"
-    assert solver._resolve_backend(st, 100, 1, False)[:3] == ("numpy", "cpu", "float64")
+    assert solver._resolve_backend(st, 100, 1, False)[:3] == ("numba", "cpu", "float64")
 
     monkeypatch.setattr(gpu, "get_precision", lambda: "float32")
     explicit = SolverSettings(panel_backend="gpu")
@@ -591,3 +592,61 @@ def test_ground_gap_rule_reaches_the_panel_solver():
         messages[n_chord] = [w for w in res.totals.trust.warnings if "longer than the ground gap" in w]
     assert len(messages[6]) == 1 and messages[6][0].startswith("Chordwise panels (6 on the largest chord")
     assert messages[12] == []
+
+
+def test_auto_backend_uses_numba_on_cpu(monkeypatch):
+    """With the device setting "cpu", "auto" runs the Numba kernels and says so."""
+    from ventorum import gpu
+
+    monkeypatch.setattr(gpu, "get_device", lambda: "cpu")
+    backend, device, precision, reason = make_solver("panel3d")._resolve_backend(SolverSettings(), 500)
+    assert (backend, device, precision) == ("numba", "cpu", "float64")
+    assert reason.endswith("CPU kernels: numba")
+
+
+def test_auto_backend_falls_back_to_numpy_without_numba(monkeypatch):
+    """Without Numba, "auto" on the CPU uses the numpy reference kernels."""
+    import builtins
+
+    from ventorum import gpu
+
+    real_import = builtins.__import__
+
+    def no_numba(name, *args, **kwargs):
+        if name == "numba" or name.startswith("numba."):
+            raise ImportError("no numba in this test")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(gpu, "get_device", lambda: "cpu")
+    monkeypatch.setattr(builtins, "__import__", no_numba)
+    backend, _, _, reason = make_solver("panel3d")._resolve_backend(SolverSettings(), 500)
+    assert backend == "numpy"
+    assert "Numba is not available" in reason
+
+
+def test_auto_backend_in_worker_thread_uses_numba(monkeypatch):
+    """Inside a CPU worker thread "auto" also runs the Numba kernels."""
+    from ventorum import gpu
+    from ventorum.utils.parallel import _local
+
+    monkeypatch.setattr(gpu, "get_device", lambda: "auto")
+    monkeypatch.setattr(_local, "worker_threads", 2, raising=False)
+    backend, device, _, reason = make_solver("panel3d")._resolve_backend(SolverSettings(), 500)
+    assert (backend, device) == ("numba", "cpu")
+    assert reason.startswith("called inside a CPU worker thread")
+
+
+def test_auto_numba_matches_numpy():
+    """The default CPU path (Numba) agrees with the numpy reference to round-off."""
+    surf = LiftingSurface(
+        name="W", semi_span=3.0,
+        sections=[WingSection(y_frac=0.0, chord=1.0, shape="0012"), WingSection(y_frac=1.0, chord=1.0, shape="0012")],
+    )
+    cond = FlightCondition(alpha=float(np.radians(4.0)), V_inf=30.0)
+    solver = make_solver("panel3d")
+    res = {b: solver.solve(surf, cond, SolverSettings(n_panels=6, n_chord=8, panel_backend=b)) for b in ("numpy", "numba")}
+    for name in ("CL", "CDi", "Cm"):
+        a, b = getattr(res["numba"].totals, name), getattr(res["numpy"].totals, name)
+        assert abs(a - b) <= 1e-12 * max(abs(b), 1e-3)
+    cp_a, cp_b = res["numba"].details["cp"], res["numpy"].details["cp"]
+    assert np.max(np.abs(cp_a - cp_b)) <= 1e-12 * max(float(np.max(np.abs(cp_b))), 1.0)
