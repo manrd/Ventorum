@@ -67,6 +67,9 @@ WORKLOAD_NAMES = [
     "sweep_linear_n80_33",
     "wingtail_vlm_n40_c4_33",
     "ground_vlm_n40_6x9",
+    "panel3d_single_c40_n80",
+    "panel3d_sweep_c40_n80_33",
+    "panel3d_ground_c20_n40_9",
 ]
 
 #: Sweep workloads. They run again on the GPU as rows with the suffix "_gpu".
@@ -75,10 +78,14 @@ SWEEP_WORKLOADS = [
     "sweep_linear_n80_33",
     "wingtail_vlm_n40_c4_33",
     "ground_vlm_n40_6x9",
+    "panel3d_sweep_c40_n80_33",
+    "panel3d_ground_c20_n40_9",
 ]
 
 #: Timed calls per workload in a normal run (one warm-up call comes first).
 TIMED_CALLS = 7
+#: Timed calls per 3D panel workload in a normal run.
+PANEL3D_TIMED_CALLS = 3
 #: Warm-up time [s] of the GPU before the GPU rows.
 GPU_WARMUP_S = 0.5
 #: Timeout [s] of one subprocess of the compare mode.
@@ -135,10 +142,10 @@ _TINY_GROUND_ALPHAS = 3
 class _Spec:
     """Definition of one workload: its solver and its mesh."""
 
-    kind: str  # "single", "sweep", "wingtail" or "ground"
-    solver: str  # "vlm", "linear" or "nonlinear"
+    kind: str  # "single", "sweep", "wingtail", "ground" or a panel3d kind
+    solver: str  # "vlm", "linear", "nonlinear" or "panel3d"
     panels: int  # spanwise panels per semi-span
-    chord: int | None  # chordwise panels (VLM only, None = automatic)
+    chord: int | None  # chordwise panels, or None for the solver default
 
 
 #: The fixed workload table. A change here changes the meaning of the history.
@@ -151,6 +158,9 @@ _SPECS: dict[str, _Spec] = {
     "sweep_linear_n80_33": _Spec("sweep", "linear", 80, None),
     "wingtail_vlm_n40_c4_33": _Spec("wingtail", "vlm", 40, 4),
     "ground_vlm_n40_6x9": _Spec("ground", "vlm", 40, None),
+    "panel3d_single_c40_n80": _Spec("panel_single", "panel3d", 80, 40),
+    "panel3d_sweep_c40_n80_33": _Spec("panel_sweep", "panel3d", 80, 40),
+    "panel3d_ground_c20_n40_9": _Spec("panel_ground", "panel3d", 40, 20),
 }
 
 
@@ -174,6 +184,7 @@ class Workload:
     call: Callable[[], Any]
     unit: str
     cases: int
+    timed_calls: int | None = None
 
 
 def _rect_wing() -> vt.LiftingSurface:
@@ -190,6 +201,24 @@ def _rect_wing() -> vt.LiftingSurface:
         sections=[
             vt.WingSection(y_frac=0.0, chord=_CHORD, airfoil=vt.LinearAirfoil()),
             vt.WingSection(y_frac=1.0, chord=_CHORD, airfoil=vt.LinearAirfoil()),
+        ],
+    )
+
+
+def _panel_wing() -> vt.LiftingSurface:
+    """Return the rectangular NACA 0012 wing for the panel workloads.
+
+    Returns
+    -------
+    LiftingSurface
+        Symmetric wing with semi-span 5 m and chord 1.25 m.
+    """
+    return vt.LiftingSurface(
+        name="PerfPanelWing",
+        semi_span=5.0,
+        sections=[
+            vt.WingSection(y_frac=0.0, chord=_CHORD, shape="0012"),
+            vt.WingSection(y_frac=1.0, chord=_CHORD, shape="0012"),
         ],
     )
 
@@ -234,7 +263,7 @@ def _settings(solver: str, panels: int, n_chord: int | None) -> vt.SolverSetting
     return vt.SolverSettings(solver_type=solver, n_panels=panels, n_chord=n_chord)
 
 
-def build_workload(name: str, tiny: bool) -> Workload:
+def build_workload(name: str, tiny: bool, device: str = "cpu") -> Workload:
     """Return the fixed workload *name* with its call, unit and case count.
 
     Parameters
@@ -256,6 +285,45 @@ def build_workload(name: str, tiny: bool) -> Workload:
     if name not in _SPECS:
         raise ValueError(f"unknown workload {name!r}; the fixed names are {WORKLOAD_NAMES}")
     spec = _SPECS[name]
+    if spec.kind.startswith("panel_"):
+        panel_backend = "gpu" if device == "gpu" else "numba"
+        n_panels = 6 if tiny else spec.panels
+        n_chord = 6 if tiny else spec.chord
+        wing = _panel_wing()
+
+        if spec.kind == "panel_single":
+            conditions = vt.FlightCondition(alpha=np.radians(_ALPHA_SINGLE_DEG))
+            cases = 1
+            unit = "ms"
+        elif spec.kind == "panel_sweep":
+            n_cases = _TINY_SWEEP_CASES if tiny else _SWEEP_CASES
+            angles = np.linspace(_ALPHA_MIN_DEG, _ALPHA_MAX_DEG, n_cases)
+            conditions = [vt.FlightCondition(alpha=np.radians(angle)) for angle in angles]
+            cases = n_cases
+            unit = "cases/s"
+        else:
+            n_cases = _TINY_GROUND_ALPHAS if tiny else 9
+            angles = np.linspace(0.0, 8.0, n_cases)
+            conditions = [
+                vt.FlightCondition(alpha=np.radians(angle), h=0.5 * _CHORD) for angle in angles
+            ]
+            cases = n_cases
+            unit = "cases/s"
+
+        def run_panel() -> Any:
+            from ventorum.solvers.factory import make_solver
+
+            settings = vt.SolverSettings(
+                solver_type="panel3d",
+                n_panels=n_panels,
+                n_chord=n_chord,
+                panel_backend=panel_backend,
+            )
+            solver = make_solver("panel3d")
+            return solver.solve(wing, conditions, settings)
+
+        return Workload(name, run_panel, unit, cases, PANEL3D_TIMED_CALLS)
+
     panels = _TINY_PANELS if tiny else spec.panels
     n_chord = None if spec.chord is None else (_TINY_CHORD_PANELS if tiny else spec.chord)
 
@@ -312,7 +380,7 @@ def measure(workload: Workload, tiny: bool) -> dict[str, Any]:
     """
     workload.call()  # warm-up: caches and compiled kernels
     gc.collect()  # collect the garbage of the warm-up before the timed calls
-    calls = 1 if tiny else TIMED_CALLS
+    calls = 1 if tiny else (workload.timed_calls or TIMED_CALLS)
     values = np.empty(calls, dtype=float)
     for index in range(calls):
         start = time.perf_counter()
@@ -345,7 +413,7 @@ def run_workload(name: str, tiny: bool, device: str) -> dict[str, Any]:
         ``unit``, ``median``, ``min`` and ``max``.
     """
     gpu.set_device(device)
-    return measure(build_workload(name, tiny), tiny)
+    return measure(build_workload(name, tiny, device=device), tiny)
 
 
 def run_workloads(tiny: bool) -> dict[str, dict[str, Any]]:
@@ -372,6 +440,9 @@ def run_workloads(tiny: bool) -> dict[str, dict[str, Any]]:
             warm_gpu()
             for name in SWEEP_WORKLOADS:
                 rows[name + "_gpu"] = run_workload(name, tiny, "gpu")
+            rows["panel3d_single_c40_n80_gpu"] = run_workload(
+                "panel3d_single_c40_n80", tiny, "gpu"
+            )
     finally:
         gpu.set_device(previous)
     return rows
@@ -884,6 +955,15 @@ class CompareResult:
     tree_a: TreeInfo
     tree_b: TreeInfo
     rows: list[CompareRow]
+    unknown_workloads: dict[str, str] | None = None
+
+
+class UnknownWorkloadError(Exception):
+    """A source tree does not know one requested fixed workload."""
+
+    def __init__(self, workload: str):
+        self.workload = workload
+        super().__init__(workload)
 
 
 def _have_cython() -> bool:
@@ -967,6 +1047,10 @@ def _child(options: Sequence[str], tree: Path, timeout: float = CHILD_TIMEOUT_S)
         ) from exc
     if proc.returncode != 0:
         detail = (proc.stderr or proc.stdout).strip()
+        if "--run" in options:
+            name = str(options[options.index("--run") + 1])
+            if "unknown workload" in detail.lower() and name in detail:
+                raise UnknownWorkloadError(name)
         raise SystemExit(f"error: the run in the tree {tree} failed:\n{detail}")
     for line in proc.stdout.splitlines():
         if line.startswith(JSON_MARKER):
@@ -1058,6 +1142,7 @@ def run_compare(
     info_a = _probe(left)
     info_b = _probe(right)
     rows: list[CompareRow] = []
+    unknown_workloads: dict[str, str] = {}
     for name in names:
         medians_a: list[float] = []
         medians_b: list[float] = []
@@ -1070,7 +1155,15 @@ def run_compare(
             order = ((left, "a"), (right, "b")) if index % 2 == 0 else ((right, "b"), (left, "a"))
             runs: dict[str, dict[str, Any]] = {}
             for tree, side in order:
-                runs[side] = _child([*options, "--expect-tree", str(tree)], tree)
+                try:
+                    runs[side] = _child([*options, "--expect-tree", str(tree)], tree)
+                except UnknownWorkloadError as exc:
+                    if exc.workload != name:
+                        raise
+                    unknown_workloads[name] = side.upper()
+                    break
+            if name in unknown_workloads:
+                break
             run_a, run_b = runs["a"], runs["b"]
             if not unit:
                 unit = str(run_a["unit"])
@@ -1083,6 +1176,8 @@ def run_compare(
             medians_a.append(median_a)
             medians_b.append(median_b)
             ratios.append(median_b / median_a)
+        if name in unknown_workloads:
+            continue
         median_a = float(np.median(medians_a))
         median_b = float(np.median(medians_b))
         rows.append(
@@ -1095,7 +1190,14 @@ def run_compare(
                 spread=float(max(ratios) - min(ratios)),
             )
         )
-    return CompareResult(rounds=rounds, tiny=tiny, tree_a=info_a, tree_b=info_b, rows=rows)
+    return CompareResult(
+        rounds=rounds,
+        tiny=tiny,
+        tree_a=info_a,
+        tree_b=info_b,
+        rows=rows,
+        unknown_workloads=unknown_workloads,
+    )
 
 
 def _cython_text(cython: bool) -> str:
@@ -1140,6 +1242,8 @@ def render_compare(result: CompareResult) -> str:
     ]
     if result.tiny:
         lines.append("Test meshes and one timed call (--tiny): the table does not show the full workloads.")
+    for name, side in (result.unknown_workloads or {}).items():
+        lines.append(f"Workload {name} is unknown in tree {side}.")
     lines.append("")
     header = ["workload", "unit", "median A", "median B", "ratio B/A", "spread of rounds"]
     lines.append("| " + " | ".join(header) + " |")
