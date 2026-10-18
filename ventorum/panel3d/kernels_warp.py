@@ -13,6 +13,13 @@ tolerance relative to the panel size and the coordinate magnitude, with the
 machine epsilon of the coarser of the input dtype and the kernel precision.
 So a float32 run keeps the self term +1/2 at the collocation points.
 
+The pair kernels evaluate a panel and its mirror (or image) for the same
+target: :func:`doublet_pair_matrix_warp` returns ``C_a + sign * C_b`` and
+:func:`source_pair_rhs_warp` returns ``(B_a + sign * B_b) @ sigma``
+without the source matrix. The source sums use a fixed chunk of panels
+per thread and a plain reduction over the chunks (no atomic additions),
+so the result does not change from run to run.
+
 Thread map: one thread computes one (target, panel) pair, so the launch
 has ``(P, M)`` threads. Each precision (float32, float64) builds its own
 kernels once per process. Warp and PyTorch are imported lazily inside the
@@ -41,9 +48,24 @@ import threading
 
 import numpy as np
 
-__all__ = ["influence_matrices_warp"]
+from ventorum.panel3d.kernels import MAX_RHS_COLUMNS
+
+__all__ = [
+    "influence_matrices_warp",
+    "doublet_pair_matrix_warp",
+    "source_rhs_warp",
+    "source_pair_rhs_warp",
+    "pair_system_warp",
+]
 
 _INV_4PI = 1.0 / (4.0 * math.pi)
+
+#: Device bytes of one block of rows of the doublet pair kernel when the
+#: output dtype differs from the kernel precision.
+BLOCK_BYTES = 64 * 2**20
+
+#: Panels summed by one GPU thread of the source pair kernel [-].
+RHS_CHUNK = 128
 
 _lock = threading.Lock()
 _built: dict[str, object] = {}
@@ -243,8 +265,241 @@ def _kernels(precision: str):
             B[i, j] = b
             C[i, j] = c
 
-        _built[precision] = bc_kernel
-        return bc_kernel
+        @wp.func(module=module)
+        def pair_c(
+            px: T,
+            py: T,
+            pz: T,
+            j: int,
+            cen: wp.array2d(dtype=T),
+            nor: wp.array2d(dtype=T),
+            lax: wp.array2d(dtype=T),
+            maxis: wp.array2d(dtype=T),
+            xloc: wp.array2d(dtype=T),
+            yloc: wp.array2d(dtype=T),
+            elen: wp.array2d(dtype=T),
+            act: wp.array2d(dtype=int),
+            area: wp.array(dtype=T),
+            diam: wp.array(dtype=T),
+            ptol: wp.array(dtype=T),
+            far_ratio: T,
+            use_far: int,
+        ):
+            # Doublet potential of one target-panel pair (the C part of bc_kernel).
+            rx = px - cen[j, 0]
+            ry = py - cen[j, 1]
+            rz = pz - cen[j, 2]
+            r = wp.sqrt(rx * rx + ry * ry + rz * rz)
+            is_far = False
+            if use_far != 0:
+                if r > far_ratio * diam[j]:
+                    is_far = True
+            c = T(0.0)
+            if is_far:
+                rs = r
+                if rs < T(floor):
+                    rs = T(floor)
+                rdotn = rx * nor[j, 0] + ry * nor[j, 1] + rz * nor[j, 2]
+                r3 = rs * rs * rs
+                if r3 < T(floor):
+                    r3 = T(floor)
+                c = T(0.0) - T(_INV_4PI) * area[j] * rdotn / r3
+            else:
+                x = rx * lax[j, 0] + ry * lax[j, 1] + rz * lax[j, 2]
+                y = rx * maxis[j, 0] + ry * maxis[j, 1] + rz * maxis[j, 2]
+                z = rx * nor[j, 0] + ry * nor[j, 1] + rz * nor[j, 2]
+                om = solid_angle(x, y, z, j, xloc, yloc, elen, act, ptol[j])
+                c = T(_INV_4PI) * om
+            return c
+
+        @wp.func(module=module)
+        def pair_b(
+            px: T,
+            py: T,
+            pz: T,
+            j: int,
+            cen: wp.array2d(dtype=T),
+            nor: wp.array2d(dtype=T),
+            lax: wp.array2d(dtype=T),
+            maxis: wp.array2d(dtype=T),
+            xloc: wp.array2d(dtype=T),
+            yloc: wp.array2d(dtype=T),
+            dxe: wp.array2d(dtype=T),
+            dye: wp.array2d(dtype=T),
+            elen: wp.array2d(dtype=T),
+            act: wp.array2d(dtype=int),
+            area: wp.array(dtype=T),
+            diam: wp.array(dtype=T),
+            ptol: wp.array(dtype=T),
+            far_ratio: T,
+            use_far: int,
+        ):
+            # Source potential of one target-panel pair (the B part of bc_kernel).
+            rx = px - cen[j, 0]
+            ry = py - cen[j, 1]
+            rz = pz - cen[j, 2]
+            r = wp.sqrt(rx * rx + ry * ry + rz * rz)
+            is_far = False
+            if use_far != 0:
+                if r > far_ratio * diam[j]:
+                    is_far = True
+            b = T(0.0)
+            if is_far:
+                rs = r
+                if rs < T(floor):
+                    rs = T(floor)
+                b = T(0.0) - T(_INV_4PI) * area[j] / rs
+            else:
+                x = rx * lax[j, 0] + ry * lax[j, 1] + rz * lax[j, 2]
+                y = rx * maxis[j, 0] + ry * maxis[j, 1] + rz * maxis[j, 2]
+                z = rx * nor[j, 0] + ry * nor[j, 1] + rz * nor[j, 2]
+                om = solid_angle(x, y, z, j, xloc, yloc, elen, act, ptol[j])
+                s = T(0.0)
+                for k in range(4):
+                    if act[j, k] != 0:
+                        kn = k + 1
+                        if kn == 4:
+                            kn = 0
+                        dk = elen[j, k]
+                        dk_safe = dk
+                        if dk_safe < T(floor):
+                            dk_safe = T(floor)
+                        lk = edge_log(x, y, z, xloc[j, k], yloc[j, k], xloc[j, kn], yloc[j, kn], dk)
+                        rperp = ((x - xloc[j, k]) * dye[j, k] - (y - yloc[j, k]) * dxe[j, k]) / dk_safe
+                        s = s + rperp * lk
+                b = T(_INV_4PI) * (s - z * om)
+            return b
+
+        @wp.kernel(module=module)
+        def doublet_pair_kernel(
+            P: wp.array2d(dtype=T),
+            row0: int,
+            cen_a: wp.array2d(dtype=T),
+            nor_a: wp.array2d(dtype=T),
+            lax_a: wp.array2d(dtype=T),
+            max_a: wp.array2d(dtype=T),
+            xl_a: wp.array2d(dtype=T),
+            yl_a: wp.array2d(dtype=T),
+            el_a: wp.array2d(dtype=T),
+            act_a: wp.array2d(dtype=int),
+            ar_a: wp.array(dtype=T),
+            di_a: wp.array(dtype=T),
+            tol_a: wp.array(dtype=T),
+            cen_b: wp.array2d(dtype=T),
+            nor_b: wp.array2d(dtype=T),
+            lax_b: wp.array2d(dtype=T),
+            max_b: wp.array2d(dtype=T),
+            xl_b: wp.array2d(dtype=T),
+            yl_b: wp.array2d(dtype=T),
+            el_b: wp.array2d(dtype=T),
+            act_b: wp.array2d(dtype=int),
+            ar_b: wp.array(dtype=T),
+            di_b: wp.array(dtype=T),
+            tol_b: wp.array(dtype=T),
+            has_b: int,
+            sign: T,
+            far_ratio: T,
+            use_far: int,
+            C: wp.array2d(dtype=T),
+        ):
+            # One thread per (target row of the block, panel) pair.
+            i, j = wp.tid()
+            t = row0 + i
+            px = P[t, 0]
+            py = P[t, 1]
+            pz = P[t, 2]
+            c = pair_c(px, py, pz, j, cen_a, nor_a, lax_a, max_a, xl_a, yl_a, el_a, act_a, ar_a, di_a,
+                       tol_a, far_ratio, use_far)
+            c2 = T(0.0)
+            if has_b != 0:
+                c2 = pair_c(px, py, pz, j, cen_b, nor_b, lax_b, max_b, xl_b, yl_b, el_b, act_b, ar_b,
+                            di_b, tol_b, far_ratio, use_far)
+                c = c + sign * c2
+            C[i, j] = c
+
+        @wp.kernel(module=module)
+        def source_pair_kernel(
+            P: wp.array2d(dtype=T),
+            cen_a: wp.array2d(dtype=T),
+            nor_a: wp.array2d(dtype=T),
+            lax_a: wp.array2d(dtype=T),
+            max_a: wp.array2d(dtype=T),
+            xl_a: wp.array2d(dtype=T),
+            yl_a: wp.array2d(dtype=T),
+            dx_a: wp.array2d(dtype=T),
+            dy_a: wp.array2d(dtype=T),
+            el_a: wp.array2d(dtype=T),
+            act_a: wp.array2d(dtype=int),
+            ar_a: wp.array(dtype=T),
+            di_a: wp.array(dtype=T),
+            tol_a: wp.array(dtype=T),
+            cen_b: wp.array2d(dtype=T),
+            nor_b: wp.array2d(dtype=T),
+            lax_b: wp.array2d(dtype=T),
+            max_b: wp.array2d(dtype=T),
+            xl_b: wp.array2d(dtype=T),
+            yl_b: wp.array2d(dtype=T),
+            dx_b: wp.array2d(dtype=T),
+            dy_b: wp.array2d(dtype=T),
+            el_b: wp.array2d(dtype=T),
+            act_b: wp.array2d(dtype=int),
+            ar_b: wp.array(dtype=T),
+            di_b: wp.array(dtype=T),
+            tol_b: wp.array(dtype=T),
+            has_b: int,
+            sign: T,
+            sigma: wp.array2d(dtype=T),
+            chunk: int,
+            n_panels: int,
+            far_ratio: T,
+            use_far: int,
+            partial: wp.array3d(dtype=T),
+        ):
+            # One thread per (panel chunk, target): the partial sum over the
+            # panels of one chunk. The chunk index is the slow index, so the
+            # threads of a warp read the same panel at the same time. A
+            # deterministic sum over the chunks follows on the device.
+            q, i = wp.tid()
+            px = P[i, 0]
+            py = P[i, 1]
+            pz = P[i, 2]
+            j0 = q * chunk
+            j1 = j0 + chunk
+            if j1 > n_panels:
+                j1 = n_panels
+            s0 = T(0.0)
+            s1 = T(0.0)
+            s2 = T(0.0)
+            s3 = T(0.0)
+            s4 = T(0.0)
+            s5 = T(0.0)
+            for j in range(j0, j1):
+                b = pair_b(px, py, pz, j, cen_a, nor_a, lax_a, max_a, xl_a, yl_a, dx_a, dy_a, el_a, act_a,
+                           ar_a, di_a, tol_a, far_ratio, use_far)
+                if has_b != 0:
+                    b2 = pair_b(px, py, pz, j, cen_b, nor_b, lax_b, max_b, xl_b, yl_b, dx_b, dy_b, el_b,
+                                act_b, ar_b, di_b, tol_b, far_ratio, use_far)
+                    b = b + sign * b2
+                s0 = s0 + b * sigma[j, 0]
+                s1 = s1 + b * sigma[j, 1]
+                s2 = s2 + b * sigma[j, 2]
+                s3 = s3 + b * sigma[j, 3]
+                s4 = s4 + b * sigma[j, 4]
+                s5 = s5 + b * sigma[j, 5]
+            partial[q, i, 0] = s0
+            partial[q, i, 1] = s1
+            partial[q, i, 2] = s2
+            partial[q, i, 3] = s3
+            partial[q, i, 4] = s4
+            partial[q, i, 5] = s5
+
+        found = {
+            "bc": bc_kernel,
+            "doublet_pair": doublet_pair_kernel,
+            "source_pair": source_pair_kernel,
+        }
+        _built[precision] = found
+        return found
 
 
 def _resolve_precision(dtype, collocation, panels) -> str:
@@ -316,22 +571,12 @@ def influence_matrices_warp(
 
     from ventorum.panel3d.kernels import _input_eps, _precompute_geometry
 
-    if device is None:
-        if not torch.cuda.is_available():
-            raise RuntimeError("The Warp panel kernels need a CUDA GPU, but PyTorch finds none.")
-        dev = torch.device("cuda", torch.cuda.current_device())
-    else:
-        dev = device if isinstance(device, torch.device) else torch.device(device)
-        if dev.type != "cuda":
-            raise ValueError(f"The Warp panel kernels run on a CUDA device, not on {dev}.")
-        if not torch.cuda.is_available():
-            raise RuntimeError("The Warp panel kernels need a CUDA GPU, but PyTorch finds none.")
-    dev_str = f"cuda:{dev.index}" if dev.index is not None else "cuda"
+    dev, dev_str = _cuda_device(device)
 
     precision = _resolve_precision(dtype, collocation, panels)
     torch_dtype = torch.float32 if precision == "float32" else torch.float64
     numpy_dtype = np.float32 if precision == "float32" else np.float64
-    kernel = _kernels(precision)
+    kernel = _kernels(precision)["bc"]
     warp_type = wp.float32 if precision == "float32" else wp.float64
 
     pts = np.ascontiguousarray(np.asarray(collocation, dtype=np.float64))
@@ -377,3 +622,393 @@ def influence_matrices_warp(
     if hasattr(wp, "synchronize"):
         wp.synchronize()
     return wp.to_torch(w_b), wp.to_torch(w_c)
+
+
+def _cuda_device(device):
+    """Return (torch device, Warp device string) of the CUDA device to use.
+
+    Raises
+    ------
+    RuntimeError
+        If no CUDA GPU is available.
+    ValueError
+        If *device* is not a CUDA device.
+    """
+    import torch
+
+    if device is None:
+        if not torch.cuda.is_available():
+            raise RuntimeError("The Warp panel kernels need a CUDA GPU, but PyTorch finds none.")
+        dev = torch.device("cuda", torch.cuda.current_device())
+    else:
+        dev = device if isinstance(device, torch.device) else torch.device(device)
+        if dev.type != "cuda":
+            raise ValueError(f"The Warp panel kernels run on a CUDA device, not on {dev}.")
+        if not torch.cuda.is_available():
+            raise RuntimeError("The Warp panel kernels need a CUDA GPU, but PyTorch finds none.")
+    dev_str = f"cuda:{dev.index}" if dev.index is not None else "cuda"
+    return dev, dev_str
+
+
+def _geometry_arrays(pans: np.ndarray, eps: float, numpy_dtype, dev_str: str) -> dict:
+    """Move the precomputed geometry of a panel set to the device.
+
+    Parameters
+    ----------
+    pans : numpy.ndarray
+        Float64 panel corners with shape (M, 4, 3) in m.
+    eps : float
+        Machine epsilon [-] of the on-plane band.
+    numpy_dtype
+        Kernel precision (numpy.float32 or numpy.float64).
+    dev_str : str
+        Warp device string.
+
+    Returns
+    -------
+    dict
+        Warp arrays of the panel geometry, keyed by the field name.
+    """
+    import warp as wp
+
+    from ventorum.panel3d.kernels import _precompute_geometry
+
+    warp_type = wp.float32 if numpy_dtype == np.float32 else wp.float64
+    geom = _precompute_geometry(pans, eps)
+
+    def _move(data: np.ndarray):
+        return wp.array(np.ascontiguousarray(data, dtype=numpy_dtype), dtype=warp_type, device=dev_str)
+
+    return {
+        "cen": _move(geom.centroid),
+        "nor": _move(geom.normal),
+        "lax": _move(geom.l_axis),
+        "max": _move(geom.m_axis),
+        "xl": _move(geom.x_loc),
+        "yl": _move(geom.y_loc),
+        "dx": _move(geom.dx),
+        "dy": _move(geom.dy),
+        "el": _move(geom.edge_len),
+        "act": wp.array(np.ascontiguousarray(geom.edge_active, dtype=np.int32), dtype=wp.int32,
+                        device=dev_str),
+        "area": _move(geom.area),
+        "diam": _move(geom.diameter),
+        "tol": _move(geom.plane_tol),
+    }
+
+
+def _doublet_args(g: dict) -> list:
+    """Return the geometry arguments of the doublet pair kernel."""
+    return [g["cen"], g["nor"], g["lax"], g["max"], g["xl"], g["yl"], g["el"], g["act"], g["area"],
+            g["diam"], g["tol"]]
+
+
+def _source_args(g: dict) -> list:
+    """Return the geometry arguments of the source pair kernel."""
+    return [g["cen"], g["nor"], g["lax"], g["max"], g["xl"], g["yl"], g["dx"], g["dy"], g["el"],
+            g["act"], g["area"], g["diam"], g["tol"]]
+
+
+def _torch_dtype(dtype, default):
+    """Return the torch dtype for a torch, numpy or string *dtype* (None gives *default*)."""
+    import torch
+
+    if dtype is None:
+        return default
+    return torch.float32 if _resolve_precision(dtype, None, None) == "float32" else torch.float64
+
+
+class _PairSetup:
+    """Device, precision and uploaded geometry of one pair kernel call."""
+
+    def __init__(self, points, panels_a, panels_b, sigma, device, dtype):
+        import torch
+
+        from ventorum.panel3d.kernels import _pair_inputs
+
+        _, pts, pa, pb, sig, flat, _, in_eps = _pair_inputs(points, panels_a, panels_b, sigma)
+        self.dev, self.dev_str = _cuda_device(device)
+        inputs = [points, panels_a] + ([] if panels_b is None else [panels_b])
+        if dtype is None:
+            target = np.result_type(*[np.asarray(a).dtype for a in inputs])
+            self.precision = "float32" if target == np.dtype(np.float32) else "float64"
+        else:
+            self.precision = _resolve_precision(dtype, None, None)
+        self.torch_dtype = torch.float32 if self.precision == "float32" else torch.float64
+        self.numpy_dtype = np.float32 if self.precision == "float32" else np.float64
+        self.kernels = _kernels(self.precision)
+        self.pts = np.ascontiguousarray(pts)
+        self.n_targets = int(pts.shape[0])
+        self.n_panels = int(pa.shape[0])
+        self.has_b = pb is not None
+        self.sigma = sig
+        self.flat = flat
+        self.empty = self.n_targets == 0 or self.n_panels == 0
+        if self.empty:
+            return
+        import warp as wp
+
+        warp_type = wp.float32 if self.precision == "float32" else wp.float64
+        # The on-plane band follows the coarser of the input and the kernel precision.
+        eps = max(in_eps, float(np.finfo(self.numpy_dtype).eps))
+        self.w_pts = wp.array(self.pts.astype(self.numpy_dtype), dtype=warp_type, device=self.dev_str)
+        self.geom_a = _geometry_arrays(pa, eps, self.numpy_dtype, self.dev_str)
+        self.geom_b = _geometry_arrays(pb, eps, self.numpy_dtype, self.dev_str) if self.has_b else self.geom_a
+
+
+def _doublet_pair(setup: _PairSetup, sign, far_ratio, out_dtype, block_rows):
+    """Run the doublet pair kernel of one set-up; return a torch tensor (P, M)."""
+    import torch
+    import warp as wp
+
+    out_t = _torch_dtype(out_dtype, setup.torch_dtype)
+    n_p, n_m = setup.n_targets, setup.n_panels
+    if setup.empty:
+        return torch.empty((n_p, n_m), dtype=out_t, device=setup.dev)
+    kernel = setup.kernels["doublet_pair"]
+    warp_type = wp.float32 if setup.precision == "float32" else wp.float64
+    use_far = 0 if np.isinf(far_ratio) else 1
+    tail = [1 if setup.has_b else 0, float(sign), float(far_ratio), use_far]
+    geo = _doublet_args(setup.geom_a) + _doublet_args(setup.geom_b)
+    if out_t == setup.torch_dtype:
+        w_c = wp.empty((n_p, n_m), dtype=warp_type, device=setup.dev_str)
+        wp.launch(kernel, dim=(n_p, n_m), inputs=[setup.w_pts, 0, *geo, *tail, w_c],
+                  device=setup.dev_str)
+        if hasattr(wp, "synchronize"):
+            wp.synchronize()
+        return wp.to_torch(w_c)
+    # Kernel precision differs from the output dtype: compute blocks of
+    # target rows in the kernel precision, then round each block to the
+    # output dtype. Only one block of the kernel precision is on the device.
+    item = 4 if setup.precision == "float32" else 8
+    rows = int(block_rows) if block_rows is not None else max(1, BLOCK_BYTES // (n_m * item))
+    rows = max(1, min(rows, n_p))
+    out = torch.empty((n_p, n_m), dtype=out_t, device=setup.dev)
+    w_block = wp.empty((rows, n_m), dtype=warp_type, device=setup.dev_str)
+    block_t = wp.to_torch(w_block)
+    for r0 in range(0, n_p, rows):
+        r1 = min(r0 + rows, n_p)
+        wp.launch(kernel, dim=(r1 - r0, n_m), inputs=[setup.w_pts, r0, *geo, *tail, w_block],
+                  device=setup.dev_str)
+        wp.synchronize()
+        out[r0:r1] = block_t[: r1 - r0].to(out_t)
+        torch.cuda.synchronize(setup.dev)
+    del block_t, w_block
+    return out
+
+
+def _source_pair(setup: _PairSetup, sign, far_ratio):
+    """Run the source pair kernel of one set-up; return a torch tensor (P, K)."""
+    import torch
+    import warp as wp
+
+    n_p, n_m = setup.n_targets, setup.n_panels
+    n_k = setup.sigma.shape[1]
+    if setup.empty:
+        out = torch.zeros((n_p, n_k), dtype=setup.torch_dtype, device=setup.dev)
+        return out.reshape(-1) if setup.flat else out
+    warp_type = wp.float32 if setup.precision == "float32" else wp.float64
+    padded = np.zeros((n_m, MAX_RHS_COLUMNS), dtype=setup.numpy_dtype)
+    padded[:, :n_k] = setup.sigma
+    w_sigma = wp.array(padded, dtype=warp_type, device=setup.dev_str)
+    n_chunks = -(-n_m // RHS_CHUNK)
+    w_part = wp.zeros((n_chunks, n_p, MAX_RHS_COLUMNS), dtype=warp_type, device=setup.dev_str)
+    use_far = 0 if np.isinf(far_ratio) else 1
+    geo = _source_args(setup.geom_a) + _source_args(setup.geom_b)
+    wp.launch(
+        setup.kernels["source_pair"],
+        dim=(n_chunks, n_p),
+        inputs=[setup.w_pts, *geo, 1 if setup.has_b else 0, float(sign), w_sigma, RHS_CHUNK, n_m,
+                float(far_ratio), use_far, w_part],
+        device=setup.dev_str,
+    )
+    wp.synchronize()
+    # A plain reduction over the chunk axis (no atomic additions): the
+    # result does not change from run to run.
+    out = wp.to_torch(w_part).sum(dim=0)[:, :n_k].contiguous()
+    torch.cuda.synchronize(setup.dev)
+    del w_part
+    return out.reshape(-1) if setup.flat else out
+
+
+def doublet_pair_matrix_warp(
+    points,
+    panels_a,
+    panels_b,
+    sign: float = 1.0,
+    far_ratio: float = 5.0,
+    device=None,
+    dtype=None,
+    out_dtype=None,
+    block_rows: int | None = None,
+):
+    """Compute ``C(points, panels_a) + sign * C(points, panels_b)`` on a CUDA GPU.
+
+    Same results as :func:`ventorum.panel3d.kernels.doublet_pair_matrix`.
+    One GPU thread computes one target, one panel and its mirror (or
+    image); the two separate matrices are never stored.
+
+    Parameters
+    ----------
+    points : array_like
+        Target coordinates with shape (P, 3) in m.
+    panels_a : array_like
+        Panel corner coordinates with shape (M, 4, 3) in m.
+    panels_b : array_like or None
+        Second panel set with shape (M, 4, 3) in m. None gives
+        ``C(points, panels_a)``.
+    sign : float, default=1.0
+        Factor of the second panel set [-] (+1 or -1).
+    far_ratio : float, default=5.0
+        Distance-to-diameter ratio for point far-field transition.
+    device : optional
+        CUDA device (for example ``"cuda:0"``). None selects the current
+        CUDA device.
+    dtype : optional
+        Arithmetic of the kernel: ``"float32"`` or ``"float64"`` (also as
+        torch or numpy dtypes). None reads the inputs.
+    out_dtype : optional
+        Dtype of the output. None keeps the kernel precision. A different
+        dtype (for example float64 arithmetic and a float32 output) rounds
+        blocks of rows; only one block of the kernel precision is kept.
+    block_rows : int or None, optional
+        Rows of one block [-] when *out_dtype* differs from the kernel
+        precision. None uses blocks of about 64 MiB.
+
+    Returns
+    -------
+    torch.Tensor
+        Doublet potential sum [-] on the CUDA device with shape (P, M).
+    """
+    setup = _PairSetup(points, panels_a, panels_b, None, device, dtype)
+    return _doublet_pair(setup, sign, far_ratio, out_dtype, block_rows)
+
+
+def source_pair_rhs_warp(
+    points,
+    panels_a,
+    panels_b,
+    sign: float,
+    sigma,
+    far_ratio: float = 5.0,
+    device=None,
+    dtype=None,
+):
+    """Compute ``(B(points, panels_a) + sign * B(points, panels_b)) @ sigma`` on a CUDA GPU.
+
+    Same results as :func:`ventorum.panel3d.kernels.source_pair_rhs` to
+    round-off. One GPU thread sums one target over a chunk of panels;
+    a reduction over the chunks follows. The source matrix is never
+    stored.
+
+    Parameters
+    ----------
+    points : array_like
+        Target coordinates with shape (P, 3) in m.
+    panels_a : array_like
+        Panel corner coordinates with shape (M, 4, 3) in m.
+    panels_b : array_like or None
+        Second panel set with shape (M, 4, 3) in m, or None.
+    sign : float
+        Factor of the second panel set [-] (+1 or -1).
+    sigma : array_like
+        Source strengths with shape (M, K), K at most 6, or (M,) in m/s.
+    far_ratio : float, default=5.0
+        Distance-to-diameter ratio for point far-field transition.
+    device : optional
+        CUDA device. None selects the current CUDA device.
+    dtype : optional
+        Arithmetic of the kernel. None reads the inputs.
+
+    Returns
+    -------
+    torch.Tensor
+        Source potentials on the CUDA device with shape (P, K), or (P,)
+        for a one-dimensional *sigma*, in m^2/s.
+    """
+    setup = _PairSetup(points, panels_a, panels_b, sigma, device, dtype)
+    return _source_pair(setup, sign, far_ratio)
+
+
+def source_rhs_warp(points, panels, sigma, far_ratio: float = 5.0, device=None, dtype=None):
+    """Compute ``B(points, panels) @ sigma`` on a CUDA GPU.
+
+    Same results as :func:`ventorum.panel3d.kernels.source_rhs` to
+    round-off (see :func:`source_pair_rhs_warp`).
+
+    Parameters
+    ----------
+    points : array_like
+        Target coordinates with shape (P, 3) in m.
+    panels : array_like
+        Panel corner coordinates with shape (M, 4, 3) in m.
+    sigma : array_like
+        Source strengths with shape (M, K), K at most 6, or (M,) in m/s.
+    far_ratio : float, default=5.0
+        Distance-to-diameter ratio for point far-field transition.
+    device : optional
+        CUDA device. None selects the current CUDA device.
+    dtype : optional
+        Arithmetic of the kernel. None reads the inputs.
+
+    Returns
+    -------
+    torch.Tensor
+        Source potentials on the CUDA device with shape (P, K), or (P,),
+        in m^2/s.
+    """
+    return source_pair_rhs_warp(points, panels, None, 1.0, sigma, far_ratio=far_ratio, device=device,
+                                dtype=dtype)
+
+
+def pair_system_warp(
+    points,
+    panels_a,
+    panels_b,
+    sign: float,
+    sigma,
+    far_ratio: float = 5.0,
+    device=None,
+    dtype=None,
+    out_dtype=None,
+    block_rows: int | None = None,
+):
+    """Compute the doublet pair matrix and the source pair right-hand sides on a CUDA GPU.
+
+    Same results as :func:`ventorum.panel3d.kernels.pair_system` to
+    round-off. The geometry of both panel sets goes to the device once.
+
+    Parameters
+    ----------
+    points : array_like
+        Target coordinates with shape (P, 3) in m.
+    panels_a : array_like
+        Panel corner coordinates with shape (M, 4, 3) in m.
+    panels_b : array_like or None
+        Second panel set with shape (M, 4, 3) in m, or None.
+    sign : float
+        Factor of the second panel set [-] (+1 or -1).
+    sigma : array_like
+        Source strengths with shape (M, K), K at most 6, or (M,) in m/s.
+    far_ratio : float, default=5.0
+        Distance-to-diameter ratio for point far-field transition.
+    device : optional
+        CUDA device. None selects the current CUDA device.
+    dtype : optional
+        Arithmetic of the kernels. None reads the inputs.
+    out_dtype : optional
+        Dtype of the doublet matrix (see :func:`doublet_pair_matrix_warp`).
+        The right-hand sides keep the kernel precision.
+    block_rows : int or None, optional
+        Rows of one block of the doublet matrix [-] (see
+        :func:`doublet_pair_matrix_warp`).
+
+    Returns
+    -------
+    tuple of torch.Tensor
+        (C, R) on the CUDA device: C with shape (P, M) [-] and R with
+        shape (P, K) in m^2/s.
+    """
+    setup = _PairSetup(points, panels_a, panels_b, sigma, device, dtype)
+    return (_doublet_pair(setup, sign, far_ratio, out_dtype, block_rows),
+            _source_pair(setup, sign, far_ratio))

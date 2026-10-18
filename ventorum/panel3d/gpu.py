@@ -8,7 +8,11 @@ The factorization uses ``torch.linalg.lu_factor`` on the device, and all
 unit onset right-hand sides are solved in one ``lu_solve`` call per system.
 The influence matrices are assembled in float64 (the on-plane self terms
 need float64 coordinates); the factorization, the solve and the array
-post-processing run in the requested dtype. Array work of the
+post-processing run in the requested dtype. The solver assembles only the
+systems that it factorizes: the pair kernels give the parity matrix
+``C_a + sign * C_b`` of a panel set and its mirror (or image) in one pass,
+rounded to the solve dtype block by block, and the source right-hand
+sides ``(B_a + sign * B_b) @ sigma`` in float64 without the source matrix. Array work of the
 post-processing (superposition of the unit solutions, surface velocity
 and pressure coefficient) runs on the device with PyTorch. Results
 return to the host as numpy arrays. Warp and PyTorch are imported lazily
@@ -48,6 +52,7 @@ import numpy as np
 __all__ = [
     "add_wake_influence",
     "check_device_memory",
+    "doublet_pair_matrix_device",
     "doublet_potential_device",
     "evaluate_condition_on_device",
     "factorize_solve",
@@ -55,6 +60,7 @@ __all__ = [
     "influence_matrices_device",
     "lu_factor_device",
     "lu_solve_device",
+    "pair_system_device",
     "required_bytes",
     "resolve_device",
     "resolve_dtype",
@@ -108,16 +114,35 @@ def required_bytes(
     half: bool | None = None,
     ground: bool = False,
     body_cached: bool = False,
+    assembly: str = "parts",
 ) -> int:
     """Return the device bytes that one configuration of the solver allocates.
 
     The estimate is the peak of the new allocations while the solver
     assembles and factorizes the systems of one configuration (free air,
     or one attitude and height in ground effect). Let ``N`` be the number
-    of solved panels, ``s`` the bytes of the solve dtype (4 or 8) and
-    ``n_body`` the body matrices that the solver keeps for later
-    configurations (B and C, two for a full mesh and four for a half mesh
-    with the mirror pair). The terms are:
+    of solved panels and ``s`` the bytes of the solve dtype (4 or 8).
+
+    With ``assembly="fused"`` (the assembly of
+    :class:`ventorum.panel3d.solver.PanelSolver`) the pair kernels give
+    only the systems that are factorized. The terms are:
+
+    * the parity matrices of the body that the solver keeps for later
+      configurations, ``n_systems N^2 s`` (only when they are not on the
+      device yet, see *body_cached*);
+    * the image parity matrix in ground effect, ``N^2 s``;
+    * the system matrix that is factorized and its LU factors,
+      ``2 N^2 s``, plus the LU factors that stay from the other systems
+      of the configuration, ``(n_systems - 1) N^2 s``;
+    * one float64 block of rows of the doublet pair kernel,
+      ``min(BLOCK_BYTES, 8 N^2)``, when the solve dtype is float32;
+    * the float64 partial sums of the source kernel,
+      ``8 N 6 ceil(N / RHS_CHUNK)``, and the right-hand sides and
+      solutions, ``2 N 6 s`` per system.
+
+    With ``assembly="parts"`` (the default; separate source and doublet
+    matrices B and C of the body, ``n_body`` of them: two for a full mesh
+    and four for a half mesh with the mirror pair) the terms are:
 
     * the float64 assembly pair of one kernel launch, ``2 N^2 8`` (the
       on-plane self terms need float64 coordinates);
@@ -148,20 +173,42 @@ def required_bytes(
         True in ground effect (image matrices).
     body_cached : bool, default=False
         True when the body matrices are already on the device.
+    assembly : str, default="parts"
+        ``"fused"`` for the parity systems of the pair kernels, or
+        ``"parts"`` for separate B and C matrices of the body.
 
     Returns
     -------
     int
         Required device memory in bytes.
+
+    Raises
+    ------
+    ValueError
+        If *assembly* is not ``"parts"`` or ``"fused"``.
     """
+    if assembly not in ("parts", "fused"):
+        raise ValueError(f"Unknown assembly {assembly!r}; use 'parts' or 'fused'.")
     n = int(n_panels)
     n_sys = int(n_systems)
     if n <= 0 or n_sys <= 0:
         return 0
     s = 4 if _precision_name(dtype) == "float32" else 8
+    nn = n * n
+    if assembly == "fused":
+        from ventorum.panel3d.kernels_warp import BLOCK_BYTES, RHS_CHUNK
+
+        total = 0 if body_cached else n_sys * nn * s
+        if ground:
+            total += nn * s
+        total += 2 * nn * s + (n_sys - 1) * nn * s
+        if s != 8:
+            total += min(BLOCK_BYTES, 8 * nn)
+        total += 8 * n * N_ONSETS * (-(-n // RHS_CHUNK))
+        total += n_sys * 2 * n * N_ONSETS * s
+        return int(total)
     is_half = (n_sys == 2) if half is None else bool(half)
     n_body = 4 if is_half else 2
-    nn = n * n
     total = 2 * nn * 8
     if not body_cached:
         total += n_body * nn * s
@@ -274,6 +321,7 @@ def check_device_memory(
     half: bool | None = None,
     ground: bool = False,
     body_cached: bool = False,
+    assembly: str = "parts",
 ) -> None:
     """Refuse the solve when the dense systems do not fit in free memory.
 
@@ -293,6 +341,8 @@ def check_device_memory(
         True in ground effect.
     body_cached : bool, default=False
         True when the body matrices are already on the device.
+    assembly : str, default="parts"
+        Storage layout of the estimate (see :func:`required_bytes`).
 
     Raises
     ------
@@ -304,7 +354,13 @@ def check_device_memory(
     """
     dev = resolve_device(device)
     need = required_bytes(
-        n_panels, dtype, n_systems=n_systems, half=half, ground=ground, body_cached=body_cached
+        n_panels,
+        dtype,
+        n_systems=n_systems,
+        half=half,
+        ground=ground,
+        body_cached=body_cached,
+        assembly=assembly,
     )
     free = free_device_bytes(dev)
     if need > int(free):
@@ -380,7 +436,8 @@ def doublet_potential_device(
     """Compute the doublet potentials C on the device with the Warp kernels.
 
     Same results as :func:`ventorum.panel3d.kernels.doublet_potential`.
-    The source potentials of the same kernel launch are discarded.
+    The doublet pair kernel runs with one panel set, so no source
+    potential is computed.
 
     Parameters
     ----------
@@ -401,10 +458,147 @@ def doublet_potential_device(
     torch.Tensor
         Doublet potentials on the CUDA device with shape (P, M).
     """
-    _, mat_c = influence_matrices_device(
-        points, panels, device=device, dtype=dtype, far_ratio=far_ratio
+    torch_dtype = resolve_dtype(dtype)
+    return doublet_pair_matrix_device(
+        points, panels, None, device=device, dtype=torch_dtype, assembly_dtype=torch_dtype,
+        far_ratio=far_ratio,
     )
-    return mat_c
+
+
+def _check_pair_memory(dev, n_targets: int, n_sources: int, item: int, item_assembly: int) -> None:
+    """Refuse a pair kernel call whose output does not fit in free device memory."""
+    from ventorum.panel3d.kernels_warp import BLOCK_BYTES, RHS_CHUNK
+
+    need = n_targets * n_sources * item
+    if item_assembly != item:
+        need += min(BLOCK_BYTES, n_targets * n_sources * item_assembly)
+    need += 8 * n_targets * N_ONSETS * (-(-n_sources // RHS_CHUNK))
+    free = free_device_bytes(dev)
+    if need > free:
+        raise MemoryError(
+            f"The gpu panel backend needs about {need / 2**20:.1f} MiB for "
+            f"the {n_targets} x {n_sources} pair matrix, but only "
+            f"{free / 2**20:.1f} MiB is free on {dev}. Use a coarser mesh "
+            "or a GPU with more memory."
+        )
+
+
+def doublet_pair_matrix_device(
+    points,
+    panels_a,
+    panels_b,
+    sign: float = 1.0,
+    *,
+    device=None,
+    dtype=None,
+    assembly_dtype=None,
+    far_ratio: float = 5.0,
+):
+    """Compute ``C(points, panels_a) + sign * C(points, panels_b)`` on the device.
+
+    Same results as :func:`ventorum.panel3d.kernels.doublet_pair_matrix`.
+    The Warp kernel runs in the assembly precision (float64 by default)
+    and the output is rounded to *dtype* block by block, so the device
+    never holds the full matrix in both precisions.
+
+    Parameters
+    ----------
+    points : numpy.ndarray
+        Target coordinates with shape (P, 3) in m.
+    panels_a : numpy.ndarray
+        Panel corner coordinates with shape (M, 4, 3) in m.
+    panels_b : numpy.ndarray or None
+        Second panel set with shape (M, 4, 3) in m, or None.
+    sign : float, default=1.0
+        Factor of the second panel set [-] (+1 or -1).
+    device : optional
+        CUDA device. None selects the current CUDA device.
+    dtype : optional
+        Dtype of the output. None follows the Ventorum precision selection.
+    assembly_dtype : optional
+        Arithmetic of the kernel. None gives float64.
+    far_ratio : float, default=5.0
+        Distance-to-diameter ratio for point far-field transition.
+
+    Returns
+    -------
+    torch.Tensor
+        Doublet potential sum [-] on the CUDA device with shape (P, M).
+    """
+    import torch
+
+    from ventorum.panel3d.kernels_warp import doublet_pair_matrix_warp
+
+    dev = resolve_device(device)
+    torch_dtype = resolve_dtype(dtype)
+    kernel_dtype = torch.float64 if assembly_dtype is None else resolve_dtype(assembly_dtype)
+    item = 4 if torch_dtype == torch.float32 else 8
+    item_k = 4 if kernel_dtype == torch.float32 else 8
+    _check_pair_memory(dev, int(np.asarray(points).shape[0]), int(np.asarray(panels_a).shape[0]),
+                       item, item_k)
+    return doublet_pair_matrix_warp(
+        points, panels_a, panels_b, sign, far_ratio=far_ratio, device=dev, dtype=kernel_dtype,
+        out_dtype=torch_dtype,
+    )
+
+
+def pair_system_device(
+    points,
+    panels_a,
+    panels_b,
+    sign: float,
+    sigma,
+    *,
+    device=None,
+    dtype=None,
+    far_ratio: float = 5.0,
+):
+    """Compute one parity system on the device: the doublet pair matrix and the source sums.
+
+    The Warp kernels run in float64 (the on-plane self terms need float64
+    coordinates). The doublet matrix ``C_a + sign * C_b`` is rounded to
+    *dtype* block by block; the source sums ``(B_a + sign * B_b) @ sigma``
+    stay in float64. The source matrix is never stored.
+
+    Parameters
+    ----------
+    points : numpy.ndarray
+        Target coordinates with shape (P, 3) in m.
+    panels_a : numpy.ndarray
+        Panel corner coordinates with shape (M, 4, 3) in m.
+    panels_b : numpy.ndarray or None
+        Second panel set with shape (M, 4, 3) in m, or None.
+    sign : float
+        Factor of the second panel set [-] (+1 or -1).
+    sigma : numpy.ndarray
+        Source strengths with shape (M, K), K at most 6, in m/s.
+    device : optional
+        CUDA device. None selects the current CUDA device.
+    dtype : optional
+        Dtype of the doublet matrix. None follows the Ventorum precision
+        selection.
+    far_ratio : float, default=5.0
+        Distance-to-diameter ratio for point far-field transition.
+
+    Returns
+    -------
+    tuple of torch.Tensor
+        (C, R) on the CUDA device: C with shape (P, M) [-] in *dtype* and
+        R with shape (P, K) in m^2/s in float64.
+    """
+    import torch
+
+    from ventorum.panel3d.kernels_warp import pair_system_warp
+
+    dev = resolve_device(device)
+    torch_dtype = resolve_dtype(dtype)
+    item = 4 if torch_dtype == torch.float32 else 8
+    _check_pair_memory(dev, int(np.asarray(points).shape[0]), int(np.asarray(panels_a).shape[0]),
+                       item, 8)
+    return pair_system_warp(
+        points, panels_a, panels_b, sign, sigma, far_ratio=far_ratio, device=dev,
+        dtype=torch.float64, out_dtype=torch_dtype,
+    )
 
 
 def add_wake_influence(
