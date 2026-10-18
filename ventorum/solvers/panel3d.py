@@ -119,7 +119,13 @@ _PANEL_METADATA = ("chord_index", "side")
 _NODE_METADATA = ("node_station",)
 
 
-def _estimate_panel_mesh_error(aircraft: Aircraft, condition: FlightCondition, settings: SolverSettings):
+def _estimate_panel_mesh_error(
+    aircraft: Aircraft,
+    condition: Sequence[FlightCondition],
+    settings: SolverSettings,
+    *,
+    base_results: Sequence[SolverResult] | None,
+):
     """Run a directional panel convergence study for the trust notes.
 
     The study refines the chordwise and the spanwise panel count
@@ -131,22 +137,26 @@ def _estimate_panel_mesh_error(aircraft: Aircraft, condition: FlightCondition, s
     ----------
     aircraft : Aircraft
         Case geometry.
-    condition : FlightCondition
-        Flight condition of the study.
+    condition : sequence of FlightCondition
+        Flight conditions of the study, solved together on each mesh.
     settings : SolverSettings
         Solver settings of the base (coarsest) mesh, the mesh of the user.
+    base_results : sequence of SolverResult or None
+        Factory results of the base mesh, in condition order, before the
+        study adds its trust notes, or None to solve the base mesh again.
 
     Returns
     -------
-    ConvergenceReport
+    list of ConvergenceReport
         Per quantity (CL, CDi and Cm) the error estimate of the base mesh,
         with the values per level, the observed order and the Richardson
-        value of each direction.
+        value of each direction, one report per condition.
     """
     from ventorum.panel3d.convergence import panel_mesh_convergence
 
     return panel_mesh_convergence(
-        aircraft, condition, settings, levels=3, ratio=1.5, quantities=("CL", "CDi", "Cm")
+        aircraft, condition, settings, levels=3, ratio=1.5, quantities=("CL", "CDi", "Cm"),
+        base_results=base_results,
     )
 
 
@@ -824,12 +834,6 @@ class PanelMethodSolver(BaseSolver):
             all_notes = list(notes)
             if p_res.trust_note:
                 all_notes.append(p_res.trust_note)
-            conv_details = None
-            if estimate_mesh_error:
-                conv_report = _estimate_panel_mesh_error(ac, cond, settings)
-                all_notes.extend(conv_report.notes)
-                conv_details = conv_report.to_dict()
-
             main_surf_n_span = ac.surfaces[0].n_panels or settings.n_panels
             h_over_c = (h_min / c_ref) if (h_min is not None and c_ref) else None
 
@@ -880,13 +884,28 @@ class PanelMethodSolver(BaseSolver):
                 "dispatch": dispatch,
                 "panel": panel_options,
             }
-            if conv_details is not None:
-                result.details["mesh_convergence"] = conv_details
-
             for msg in all_notes:
                 warnings.warn(msg, RuntimeWarning, stacklevel=2)
 
             results.append(result)
+
+        if estimate_mesh_error:
+            # The study solves its levels with the aircraft moment reference and the
+            # ground of condition.h. Its base level is the solve above only when this
+            # call has no explicit ground plane or moment reference point.
+            reuse = ground is None and ref_point is None
+            conv_reports = _estimate_panel_mesh_error(
+                ac, cond_list, settings, base_results=results if reuse else None
+            )
+            for result, conv_report in zip(results, conv_reports):
+                result.details["mesh_convergence"] = conv_report.to_dict()
+                result.details["notes"].extend(conv_report.notes)
+                # Study notes add warnings only, as in evaluate_aerodynamic_trust.
+                trust = result.totals.trust
+                for msg in conv_report.notes:
+                    if msg not in trust.warnings:
+                        trust.warnings.append(msg)
+                    warnings.warn(msg, RuntimeWarning, stacklevel=2)
 
         return results[0] if is_single else results
 

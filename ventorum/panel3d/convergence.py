@@ -620,14 +620,35 @@ def directional_estimate(
     )
 
 
+def _symmetry_groups(aircraft: Aircraft, conditions: Sequence[FlightCondition]) -> list[list[int]]:
+    """Return the condition indices grouped by flow symmetry about y = 0.
+
+    The first group holds the symmetric conditions, the second the
+    asymmetric ones (sideslip, roll or yaw rate, a tilted ground); empty
+    groups are left out. The rule is the condition rule of the panel
+    factory (:class:`ventorum.solvers.panel3d.PanelMethodSolver`), with the
+    ground plane of ``condition.h``.
+    """
+    from ventorum.solvers.panel3d import _ground_of, is_symmetric_condition
+
+    ref = aircraft.clone() if hasattr(aircraft, "clone") else aircraft
+    ref.compute_reference_values()
+    rp = ref.moment_reference()
+    sym = [is_symmetric_condition(c, _ground_of(c, None, rp)) for c in conditions]
+    groups = [[i for i, s in enumerate(sym) if s], [i for i, s in enumerate(sym) if not s]]
+    return [g for g in groups if g]
+
+
 def panel_mesh_convergence(
     aircraft: Aircraft | LiftingSurface,
-    condition: FlightCondition | None,
+    condition: FlightCondition | Sequence[FlightCondition] | None,
     settings: SolverSettings,
     levels: int = 3,
     ratio: float = 1.5,
     quantities: Sequence[str] = ("CL", "CDi", "Cm"),
-) -> ConvergenceReport:
+    *,
+    base_results: Sequence[SolverResult] | None = None,
+) -> ConvergenceReport | list[ConvergenceReport]:
     """Run a mesh convergence study of the 3D panel method with separate directions.
 
     The study solves the base mesh, a chordwise refinement (the chordwise
@@ -643,9 +664,10 @@ def panel_mesh_convergence(
     ----------
     aircraft : Aircraft or LiftingSurface
         Case geometry. A single surface is wrapped into an aircraft.
-    condition : FlightCondition or None
-        Flight condition, the same for all levels. None uses the default
-        condition (alpha 5 deg, V_inf 50 m/s, free air).
+    condition : FlightCondition, sequence of FlightCondition or None
+        Flight conditions, the same for all levels. Each level solves all
+        conditions in one solver call. None uses the default condition
+        (alpha 5 deg, V_inf 50 m/s, free air).
     settings : SolverSettings
         Solver settings of the base mesh, the mesh of the user. The
         spanwise count is ``settings.n_panels`` [-] per semi-span; the
@@ -661,16 +683,25 @@ def panel_mesh_convergence(
     quantities : sequence of str
         Tracked quantities (any of ``"CL"``, ``"CDi"``, ``"CD_total"``,
         ``"CY"``, ``"Cl"``, ``"Cm"``, ``"Cn"``).
+    base_results : sequence of SolverResult or None, optional
+        One result per condition, in order, from the same aircraft and
+        settings. When given, reuse these results as the base level.
+        The cost factor still includes the base solve. They are not
+        reused when the conditions mix symmetric and asymmetric flow:
+        then the base mesh is solved again per symmetry group.
 
     Returns
     -------
-    ConvergenceReport
+    ConvergenceReport or list of ConvergenceReport
         Per quantity the error estimate of the base mesh with the
         convergence of each direction, the levels, the solved meshes and
-        the cost factor.
+        the cost factor. A sequence gives one report per condition, in
+        order. One condition or None gives one report.
     """
     from ventorum import analyze
+    from ventorum.solvers.factory import make_solver
     from ventorum.solvers.panel3d import _DEFAULT_N_CHORD
+    from ventorum.utils.validation import validate_flight_condition, validate_solver_settings
 
     if int(levels) not in (3, 4):
         raise ValueError(f"levels must be 3 or 4, got {levels}.")
@@ -688,7 +719,17 @@ def panel_mesh_convergence(
         if isinstance(aircraft, LiftingSurface)
         else aircraft
     )
-    cond = condition.clone() if condition is not None else FlightCondition()
+    is_single = condition is None or isinstance(condition, FlightCondition)
+    if is_single:
+        conditions = [condition.clone() if condition is not None else FlightCondition()]
+    else:
+        conditions = [cond.clone() for cond in condition]
+    if base_results is not None and len(base_results) != len(conditions):
+        raise ValueError("base_results must hold one result per condition, in order.")
+    if not conditions:
+        return []
+    for cond in conditions:
+        validate_flight_condition(cond)
 
     n_span0 = int(settings.n_panels)
     n_chord0 = int(settings.n_chord) if settings.n_chord is not None else int(_DEFAULT_N_CHORD)
@@ -703,48 +744,74 @@ def panel_mesh_convergence(
     base.panel_estimate_mesh_error = False
     n_base = max(int(settings.n_panels), 1)
 
-    results: list[SolverResult] = []
-    for n_span, n_chord in meshes:
+    # The factory solves a half mesh only when every condition of the call is
+    # symmetric. Solve the symmetric and the asymmetric conditions in separate
+    # calls, so that each condition gets the same mesh as a study of its own.
+    groups = _symmetry_groups(ac, conditions)
+    # Reuse the base results only when they come from one mesh for all
+    # conditions (one group); otherwise their mesh can differ from the mesh
+    # of a study of one condition.
+    reuse_base = base_results is not None and len(groups) == 1
+
+    level_results: list[list[SolverResult]] = []
+    if reuse_base:
+        level_results.append(list(base_results))
+    for n_span, n_chord in meshes[len(level_results):]:
         level_settings = base.clone()
         level_settings.n_panels = n_span
         level_settings.n_chord = n_chord
         level_aircraft = _level_aircraft(ac, n_span, n_base)
-        results.append(analyze(level_aircraft, condition=cond, settings=level_settings))
+        if is_single:
+            solved = [analyze(level_aircraft, condition=conditions[0], settings=level_settings)]
+        else:
+            validate_solver_settings(level_settings)
+            solved: list[SolverResult | None] = [None] * len(conditions)
+            for idx in groups:
+                group_res = make_solver("panel3d").solve(
+                    level_aircraft, [conditions[i] for i in idx], level_settings
+                )
+                for i, res in zip(idx, group_res):
+                    solved[i] = res
+        level_results.append(solved)
 
-    totals = [int(np.size(res.details.get("cp", []))) for res in results]
-    if any(n <= 0 for n in totals):
-        totals = [2 * ns * nc for ns, nc in meshes]
     n_lv = int(levels)
     chord_idx = list(range(0, n_lv))
     span_idx = [0] + list(range(n_lv, 2 * n_lv - 1))
 
-    estimates: dict[str, MeshErrorEstimate] = {}
-    for name in names:
-        series = [_quantity_value(res, name) for res in results]
-        est = directional_estimate(
-            [series[i] for i in chord_idx], chords, [series[i] for i in span_idx], spans, quantity=name,
-        )
-        est.chordwise.total_panels = [int(totals[i]) for i in chord_idx]
-        est.spanwise.total_panels = [int(totals[i]) for i in span_idx]
-        estimates[name] = est
+    reports: list[ConvergenceReport] = []
+    for condition_results in zip(*level_results):
+        results = list(condition_results)
+        totals = [int(np.size(res.details.get("cp", []))) for res in results]
+        if any(n <= 0 for n in totals):
+            totals = [2 * ns * nc for ns, nc in meshes]
+        estimates: dict[str, MeshErrorEstimate] = {}
+        for name in names:
+            series = [_quantity_value(res, name) for res in results]
+            est = directional_estimate(
+                [series[i] for i in chord_idx], chords, [series[i] for i in span_idx], spans, quantity=name,
+            )
+            est.chordwise.total_panels = [int(totals[i]) for i in chord_idx]
+            est.spanwise.total_panels = [int(totals[i]) for i in span_idx]
+            estimates[name] = est
 
-    n0 = max(totals[0], 1)
-    cost = float(sum((n / n0) ** 3 for n in totals))
-    header = (
-        f"Panel mesh convergence (chordwise and spanwise refinement, {n_lv} levels each, ratio "
-        f"{float(ratio):.3f}): chord panels {chords} at {spans[0]} span panels, span panels {spans} at "
-        f"{chords[0]} chord panels, cost factor {cost:.1f} relative to one base solve (dense LU work)."
-    )
-    notes = [header] + [est.note for est in estimates.values()]
-    return ConvergenceReport(
-        quantities=estimates,
-        n_span_levels=[int(n) for n in spans],
-        n_chord_levels=[int(n) for n in chords],
-        meshes=[(int(a), int(b)) for a, b in meshes],
-        total_panels=[int(n) for n in totals],
-        levels=n_lv,
-        ratio=float(ratio),
-        cost_factor=cost,
-        notes=notes,
-        results=results,
-    )
+        n0 = max(totals[0], 1)
+        cost = float(sum((n / n0) ** 3 for n in totals))
+        header = (
+            f"Panel mesh convergence (chordwise and spanwise refinement, {n_lv} levels each, ratio "
+            f"{float(ratio):.3f}): chord panels {chords} at {spans[0]} span panels, span panels {spans} at "
+            f"{chords[0]} chord panels, cost factor {cost:.1f} relative to one base solve (dense LU work)."
+        )
+        notes = [header] + [est.note for est in estimates.values()]
+        reports.append(ConvergenceReport(
+            quantities=estimates,
+            n_span_levels=[int(n) for n in spans],
+            n_chord_levels=[int(n) for n in chords],
+            meshes=[(int(a), int(b)) for a, b in meshes],
+            total_panels=[int(n) for n in totals],
+            levels=n_lv,
+            ratio=float(ratio),
+            cost_factor=cost,
+            notes=notes,
+            results=results,
+        ))
+    return reports[0] if is_single else reports
