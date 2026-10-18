@@ -12,7 +12,7 @@ The panel solver reads these fields of :class:`SolverSettings`:
 ``n_panels`` (spanwise panels per semi-span, as the lattice), ``n_chord``
 (chordwise panels per surface, 40 when None), ``spacing``,
 ``proportional_panels``, ``min_panels``, ``use_symmetry``,
-``panel_kutta``, ``panel_backend``, ``panel_wake_length``,
+``panel_kutta``, ``panel_backend``, ``panel_ground_solver``, ``panel_wake_length``,
 ``panel_chord_spacing`` (cosine by default),
 ``panel_estimate_mesh_error``, ``panel_scale_root_thickness`` (True
 by default: the root section of a symmetric surface with dihedral keeps
@@ -169,6 +169,7 @@ _SOLVER_HELPERS = {
         "_trefftz_factors",
     ),
     "scipy.linalg": ("lu_factor", "lu_solve"),
+    "scipy.sparse.linalg": ("gmres",),
 }
 _SOLVER_HELPERS_NUMBA = {"ventorum.panel3d.kernels_numba": ("influence_matrices_numba",)}
 _SOLVER_HELPERS_GPU = {
@@ -974,6 +975,7 @@ class PanelMethodSolver(BaseSolver):
         rp = ac.moment_reference() if ref_point is None else np.asarray(ref_point, dtype=float)
 
         kutta = _option(settings, "panel_kutta", "morino", _KUTTA_OPTIONS)
+        ground_solver = _option(settings, "panel_ground_solver", "direct", ("direct", "krylov"))
         chord_spacing = _option(settings, "panel_chord_spacing", "cosine", _CHORD_SPACINGS)
         wake_length = getattr(settings, "panel_wake_length", None)
         if wake_length is not None:
@@ -1058,13 +1060,14 @@ class PanelMethodSolver(BaseSolver):
                 ref_point=rp,
                 kutta=kutta,
                 backend=backend,
+                ground_solver=ground_solver,
                 dtype=precision if backend == "gpu" else None,
             )
 
         key = None
         if use_cache:
             key = panel_cache.solver_key(geom_key, (
-                solver_class, wake_length, kutta, backend, _cuda_device_index(backend), precision,
+                solver_class, wake_length, kutta, backend, _cuda_device_index(backend), precision, ground_solver,
                 float(s_ref), float(b_ref), float(c_ref), np.asarray(rp, dtype=float).tobytes(),
             ) + _thread_settings(backend) + _solver_helpers(backend))
         # A solver in use by another thread is not shared: acquire builds a
@@ -1204,9 +1207,21 @@ class PanelMethodSolver(BaseSolver):
                     "mesh_stats": mesh_stats,
                     "h_min": h_min,
                     "notes": all_notes,
-                    "dispatch": dispatch,
+                    "dispatch": dict(dispatch),
                     "panel": panel_options,
                 }
+                config_solver = solver
+                config_key, wake_dir, gp = solver._config_key(cond, gnd)
+                if solver.mesh.half and not solver._symmetric_config(wake_dir, gp):
+                    config_solver = solver._full_solver
+                cfg = config_solver._configs[config_key]
+                result.details["dispatch"].update({
+                    "ground_solver": cfg.ground_solver,
+                    "ground_solver_reason": cfg.ground_solver_reason,
+                    "iterations": dict(cfg.iterations),
+                    "relative_residuals": dict(cfg.relative_residuals),
+                    "fallbacks": copy.deepcopy(cfg.fallbacks),
+                })
                 for msg in all_notes:
                     warnings.warn(msg, RuntimeWarning, stacklevel=2)
 

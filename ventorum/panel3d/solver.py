@@ -81,12 +81,14 @@ Backends
 from __future__ import annotations
 
 import dataclasses
+import inspect
 import warnings
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 
 import numpy as np
 import scipy.linalg
+import scipy.sparse.linalg
 
 from ventorum.aero.system import freestream_direction, rotation_velocity
 from ventorum.core.datatypes import FlightCondition
@@ -140,6 +142,14 @@ _SYMMETRY_TOL = 1e-12
 
 #: Temporary array budget per host or device condition chunk [bytes].
 _CONDITION_BATCH_BYTES = 256 * 2**20
+
+#: Ground GMRES relative true-residual limit [-] and inner iteration cap [-].
+_GROUND_GMRES_RTOL = 1e-10
+_GROUND_GMRES_MAXITER = 100
+#: GMRES stops on its own (preconditioned) residual. This inner limit is a
+#: decade below the true-residual limit, so that a converged solve passes the
+#: final true-residual check instead of falling back to a direct factorization.
+_GROUND_GMRES_INNER_RTOL = 0.1 * _GROUND_GMRES_RTOL
 
 
 @dataclass(slots=True)
@@ -208,7 +218,14 @@ class PanelResult:
 
 @dataclass
 class _Configuration:
-    """Wake, images and factorized systems of one set of conditions."""
+    """Wake, images and solved systems of one set of conditions.
+
+    Iteration counts [-] and relative true residuals [-] use unit-onset
+    indices (u, v, w, p, q, r). Direct solves have zero iterations.
+    Residuals are checked for eligible opt-in ground solves. Fallbacks
+    keep the failed iterative attempt before the direct solve replaces it.
+    A system value of None marks solved units whose matrix was dropped.
+    """
 
     key: tuple
     wake_dir: np.ndarray | None
@@ -224,6 +241,12 @@ class _Configuration:
     strips: dict = field(default_factory=dict)
     trefftz_factors: object = None
     gpu_post: object = None
+    ground_solver: str = "direct"
+    ground_solver_reason: str = ""
+    iterations: dict = field(default_factory=dict)
+    relative_residuals: dict = field(default_factory=dict)
+    fallbacks: list = field(default_factory=list)
+    ground_anchor: bool = False
 
 
 def _standardize_panels(panels: np.ndarray, nodes: np.ndarray | None = None) -> np.ndarray:
@@ -370,6 +393,9 @@ class PanelSolver:
     dtype : optional
         Arithmetic of the "gpu" backend. None follows the Ventorum
         precision selection. Other backends ignore it.
+    ground_solver : str, default="direct"
+        Ground solve: "direct" or "krylov". Krylov reuses an anchor LU
+        per ground offset [m] on CPU float64 with Morino Kutta.
 
     Attributes
     ----------
@@ -396,6 +422,7 @@ class PanelSolver:
         backend: str = "numpy",
         device=None,
         dtype=None,
+        ground_solver: str = "direct",
         _reuse_full_from: PanelSolver | None = None,
     ) -> None:
         if kutta not in ("morino", "pressure"):
@@ -407,6 +434,9 @@ class PanelSolver:
             )
         if int(n_wake) < 1:
             raise ValueError(f"n_wake must be at least 1, got {n_wake}.")
+        if ground_solver not in ("direct", "krylov"):
+            raise ValueError(f"Unknown ground_solver {ground_solver!r}; use 'direct' or 'krylov'.")
+        self.ground_solver = ground_solver
         self.backend = key
         self.kutta = str(kutta)
         self.mesh = mesh
@@ -921,6 +951,12 @@ class PanelSolver:
             wake=wake,
             full_wake=full_wake,
             wake_panels_m=wake_m,
+            ground_solver_reason=(
+                "krylov not used: gpu backend" if self.ground_solver == "krylov" and self.backend == "gpu"
+                else "krylov not used: pressure Kutta" if self.ground_solver == "krylov" and self.kutta == "pressure"
+                else "krylov not used: free air" if self.ground_solver == "krylov" and ground is None
+                else ""
+            ),
         )
 
     def _parities_needed(self, coeff_rows: list[np.ndarray]) -> list[str]:
@@ -953,7 +989,130 @@ class PanelSolver:
                     reflect_panels_plane(cfg.wake_panels_m, normal, offset), cfg.wake
                 )[0]
 
+    def _uses_ground_krylov(self, cfg: _Configuration) -> bool:
+        """Return whether this configuration can use CPU float64 GMRES."""
+        return (self.ground_solver == "krylov" and cfg.ground is not None
+                and self.backend != "gpu" and self.kutta == "morino")
+
+    def _ground_height(self, cfg: _Configuration) -> float:
+        """Return the height [m] of the moment reference point above the ground of *cfg*.
+
+        Ground configurations with the same height share one anchor LU. The
+        plane offset itself is not a height: with a reference point away
+        from the origin it changes with the attitude at a fixed height.
+        """
+        normal, offset = cfg.ground
+        return round(float(np.dot(self.ref_point, normal)) - float(offset), 12)
+
+    def _ground_matrix(self, cfg, parity):
+        """Assemble one ground system [-] and source sums [m^2/s per onset]."""
+        sign, cols = self._parity_sign_cols(parity)
+        a_body, rhs = self._body_system(parity)
+        normal, offset = cfg.ground
+        image = reflect_panels_plane(self.body_verts, normal, offset)
+        image_m = (reflect_panels_plane(self._body_verts_m, normal, offset)
+                   if self.mesh.half else None)
+        a_img, rhs_img = self._pair_system(image, image_m, sign, cols)
+        mat_a = self._add(a_body, a_img)
+        self._config_strips(cfg)
+        if len(cfg.wake.panels):
+            _fold_wake(mat_a, self._strip_system(cfg, parity), cfg.wake)
+        return mat_a, rhs + rhs_img
+
+    def _ground_gmres(self, mat_a, lu_info, rhs, initial):
+        """Solve A x = b with right preconditioning and an anchor initial guess.
+
+        Use Saad and Schultz (1986), SIAM J. Sci. Stat. Comput. 7(3),
+        pp. 856-869, and Saad (2003), Iterative Methods for Sparse Linear
+        Systems, second edition, chapters 6 and 9. Specific page and
+        equation numbers for right preconditioning: to be checked.
+        Solve A M^-1 y = b - A x_anchor, then x = x_anchor + M^-1 y.
+        Inputs are A [-] and unit doublets and right-hand sides in
+        m^2/s per unit onset. Return x, inner iterations [-], relative
+        true residual [-], and convergence status.
+        """
+        norm_b = float(np.linalg.norm(rhs))
+        if norm_b == 0.0:
+            return np.zeros_like(rhs), 0, 0.0, True
+
+        def inverse(v):
+            return scipy.linalg.lu_solve(lu_info, v)
+
+        operator = scipy.sparse.linalg.LinearOperator(
+            mat_a.shape, matvec=lambda v: mat_a @ inverse(v), dtype=np.float64,
+        )
+        count = 0
+
+        def iteration(_):
+            nonlocal count
+            count += 1
+
+        # SciPy before 1.12 calls the relative tolerance "tol".
+        parameters = inspect.signature(scipy.sparse.linalg.gmres).parameters
+        tolerance = "tol" if "tol" in parameters and "rtol" not in parameters else "rtol"
+        correction, info = scipy.sparse.linalg.gmres(
+            operator, rhs - mat_a @ initial, restart=50,
+            maxiter=_GROUND_GMRES_MAXITER, atol=0.0,
+            callback=iteration, callback_type="legacy", **{tolerance: _GROUND_GMRES_INNER_RTOL},
+        )
+        solution = initial + inverse(correction)
+        residual = float(np.linalg.norm(rhs - mat_a @ solution) / norm_b)
+        return solution, count, residual, info == 0 and np.isfinite(residual) and residual <= _GROUND_GMRES_RTOL
+
     def _ensure(self, cfg: _Configuration, parities: list[str]) -> None:
+        """Solve missing unit systems, with an optional ground LU anchor."""
+        if not self._uses_ground_krylov(cfg):
+            self._ensure_direct(cfg, parities)
+            return
+        missing = [p for p in parities if p not in cfg.systems]
+        if not missing:
+            return
+        height = self._ground_height(cfg)
+        anchor = next((c for c in self._configs.values()
+                       if c.ground_anchor and self._ground_height(c) == height), None)
+        if anchor is None or anchor is cfg:
+            self._ensure_direct(cfg, missing)
+            cfg.ground_anchor = True
+            cfg.strips.clear()
+            return
+        # An onset added on a later call also needs its anchor unit solution.
+        self._ensure_direct(anchor, missing)
+        anchor.strips.clear()
+        if cfg.unit_mu is None:
+            cfg.unit_mu = np.zeros((len(self.centroids), 6), dtype=np.float64)
+        cfg.ground_solver = "krylov"
+        for parity in missing:
+            _, cols = self._parity_sign_cols(parity)
+            mat_a, rhs = self._ground_matrix(cfg, parity)
+            converged = True
+            for idx, col in enumerate(cols):
+                sol, count, residual, ok = self._ground_gmres(
+                    mat_a, anchor.systems[parity], -rhs[:, idx], anchor.unit_mu[:, col],
+                )
+                cfg.unit_mu[:, col] = sol
+                cfg.iterations[col] = count
+                cfg.relative_residuals[col] = residual
+                converged = converged and ok
+            del mat_a
+            if not converged:
+                cfg.fallbacks.append({"parity": parity, "iterations": dict(cfg.iterations),
+                                      "relative_residuals": dict(cfg.relative_residuals)})
+                # All unit solutions of this configuration must become direct.
+                needed = list(dict.fromkeys([*cfg.systems, *parities]))
+                cfg.systems.clear()
+                cfg.ground_solver = "direct"
+                self._ensure_direct(cfg, needed)
+                anchor.systems = dict.fromkeys(anchor.systems)
+                anchor.ground_anchor = False
+                cfg.ground_anchor = True
+                cfg.strips.clear()
+                return
+            # The unit solutions suffice for later conditions. Drop the matrix.
+            cfg.systems[parity] = None
+        self._update_unit_gradients(cfg)
+        cfg.strips.clear()
+
+    def _ensure_direct(self, cfg: _Configuration, parities: list[str]) -> None:
         """Assemble and factorize the missing systems of a configuration.
 
         Each system is ``A = A_body + A_image + fold(D)``: the kept
@@ -1000,10 +1159,22 @@ class PanelSolver:
 
                     d_mat = torch.as_tensor(d_mat, dtype=self._gpu_dtype, device=self._gpu_device)
                 _fold_wake(mat_a, d_mat, cfg.wake)
-            lu_info = self._factorize(mat_a)
+            check_residual = self._uses_ground_krylov(cfg)
+            lu_info = self._factorize(self._copy(mat_a) if check_residual else mat_a)
+            if check_residual:
+                self._unit_solutions(cfg, lu_info, rhs, cols, parity)
+                for idx, col in enumerate(cols):
+                    norm_b = float(np.linalg.norm(rhs[:, idx]))
+                    cfg.iterations[col] = 0
+                    cfg.relative_residuals[col] = (
+                        float(np.linalg.norm(-rhs[:, idx] - mat_a @ cfg.unit_mu[:, col]) / norm_b)
+                        if norm_b else 0.0
+                    )
             del mat_a
             cfg.systems[parity] = lu_info
-            self._unit_solutions(cfg, lu_info, rhs, cols, parity)
+            if not check_residual:
+                self._unit_solutions(cfg, lu_info, rhs, cols, parity)
+                cfg.iterations.update(dict.fromkeys(cols, 0))
         self._update_unit_gradients(cfg)
 
     def _unit_solutions(self, cfg, lu_info, rhs, cols, parity) -> None:
@@ -1430,6 +1601,7 @@ class PanelSolver:
                 backend=self.backend,
                 device=self._device_arg,
                 dtype=self._dtype_arg,
+                ground_solver=self.ground_solver,
                 _reuse_full_from=self,
             )
         return self._full_solver
@@ -1475,7 +1647,8 @@ class PanelSolver:
         Conditions are grouped by configuration: all free-air conditions
         share one configuration; in ground effect each (attitude, height)
         group is one configuration. Each system of a configuration is
-        factorized once.
+        factorized once with the default direct option. The opt-in Krylov
+        ground option reuses one anchor per ground offset [m].
 
         Parameters
         ----------

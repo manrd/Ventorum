@@ -1051,6 +1051,11 @@ class SolverSettings:
         bits as without the cache. False builds everything again for each
         solve. ``ventorum.panel3d.clear_cache()`` frees the cache. The other
         solvers ignore it.
+    panel_ground_solver : str
+        Ground-effect linear solve of the 3D panel solver: ``"direct"``
+        (default) or ``"krylov"`` (reuse an anchor LU with GMRES).
+        Krylov applies to CPU float64 with Morino Kutta only. Free air,
+        GPU backends and pressure Kutta use the direct solve.
     """
 
     solver_type: Literal["auto", "vlm", "linear", "nonlinear", "fourier"] | str = "auto"
@@ -1071,6 +1076,7 @@ class SolverSettings:
     panel_estimate_mesh_error: bool = False
     panel_scale_root_thickness: bool = True
     panel_cache: bool = True
+    panel_ground_solver: str = "direct"
 
     def clone(self) -> SolverSettings:
         """Fast explicit clone.
@@ -1099,6 +1105,7 @@ class SolverSettings:
             panel_estimate_mesh_error=self.panel_estimate_mesh_error,
             panel_scale_root_thickness=self.panel_scale_root_thickness,
             panel_cache=self.panel_cache,
+            panel_ground_solver=self.panel_ground_solver,
         )
 
     def __copy__(self) -> SolverSettings:
