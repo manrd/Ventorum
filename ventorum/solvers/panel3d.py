@@ -160,6 +160,26 @@ def _estimate_panel_mesh_error(
     )
 
 
+def _auto_cpu_backend() -> tuple[str, str]:
+    """Return the CPU kernel backend of ``panel_backend="auto"`` and a reason suffix.
+
+    The compiled Numba kernels agree with the numpy reference kernels to
+    round-off and run on all kernel threads, so "auto" uses them on the
+    CPU. Without Numba it uses the numpy reference kernels.
+
+    Returns
+    -------
+    tuple of str
+        ("numba", "; CPU kernels: numba") or ("numpy", "; CPU kernels:
+        numpy (Numba is not available)").
+    """
+    try:
+        import numba  # noqa: F401
+    except ImportError:
+        return "numpy", "; CPU kernels: numpy (Numba is not available)"
+    return "numba", "; CPU kernels: numba"
+
+
 def _option(settings: SolverSettings, name: str, default, allowed: tuple[str, ...]) -> str:
     """Return a string option of the settings, checked against the allowed values."""
     value = getattr(settings, name, default)
@@ -400,18 +420,21 @@ class PanelMethodSolver(BaseSolver):
             return choice, "cpu", "float64", f"panel_backend setting is {choice}"
         if choice == "gpu":
             return "gpu", "gpu", gpu.get_precision(), "panel_backend setting is gpu"
+        cpu_backend, cpu_note = _auto_cpu_backend()
         if gpu.get_device() == "cpu":
-            return "numpy", "cpu", "float64", gpu._REASON_DEVICE_CPU
+            return cpu_backend, "cpu", "float64", gpu._REASON_DEVICE_CPU + cpu_note
         from ventorum.utils.parallel import _local as _par_local
 
         if gpu.get_device() == "auto" and getattr(_par_local, "worker_threads", None) is not None:
-            return "numpy", "cpu", "float64", "called inside a CPU worker thread"
+            # A worker thread keeps its own Numba thread count (set when the
+            # worker starts), so the compiled kernels use the share of that worker.
+            return cpu_backend, "cpu", "float64", "called inside a CPU worker thread" + cpu_note
         n = int(n_panels)
         work = float(max(n_configs, 1)) * n * n * (2.0 if in_ground else 1.0)
         use, reason = gpu.use_gpu(work, "vlm", max(int(n_configs), 1), None, return_reason=True)
         if use:
             return "gpu", "gpu", gpu.get_precision(), reason
-        return "numpy", "cpu", "float64", reason
+        return cpu_backend, "cpu", "float64", reason + cpu_note
 
     def solve(
         self,

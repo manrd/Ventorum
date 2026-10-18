@@ -1019,8 +1019,9 @@ class SolverSettings:
         trailing-edge pressure jump). The other solvers ignore it.
     panel_backend : str
         Backend of the 3D panel solver: ``"auto"`` (default: the device
-        and precision selection of :mod:`ventorum.gpu`, the numpy kernels
-        on the CPU), ``"numpy"``, ``"numba"`` or ``"gpu"``. The other
+        and precision selection of :mod:`ventorum.gpu`, the Numba kernels
+        on the CPU, or the numpy kernels when Numba is not installed),
+        ``"numpy"``, ``"numba"`` or ``"gpu"``. The other
         solvers ignore it.
     panel_wake_length : float or None
         Wake length of the 3D panel solver [m]. None (default) gives 50

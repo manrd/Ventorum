@@ -412,7 +412,7 @@ Ventorum-3DP supports three computational backends:
 - `"numba"`: JIT-compiled CPU kernels executing identical formulas with multithreaded loops and SciPy LU factorizations.
 - `"gpu"`: GPU pipeline using NVIDIA Warp kernels for matrix assembly (one thread per panel-target pair) and PyTorch `torch.linalg.lu_factor` / `lu_solve` on the device. Unit onset solves are batched in a single call. Matrix assembly runs in float64; the matrices are kept, factorized and solved in the selected precision (float32 or float64). The gpu backend does no factorization on the CPU and keeps no copy of the matrices on the host. Before each configuration the solver estimates the device memory of its body, mirror and image matrices, systems and factors, and refuses a solve that does not fit (no silent fallback).
 
-The solver family layer selects the backend with `panel_backend="auto"` as the lattice solvers do (`ventorum.gpu`: device setting, CPU worker threads, and `use_gpu` with the work of the dense systems and the thresholds of the vortex lattice); the precision on the GPU is the selected precision.
+The solver family layer selects the backend with `panel_backend="auto"` as the lattice solvers do (`ventorum.gpu`: device setting, CPU worker threads, and `use_gpu` with the work of the dense systems and the thresholds of the vortex lattice); the precision on the GPU is the selected precision. On the CPU, "auto" runs the compiled Numba kernels (they agree with the numpy reference kernels to round-off), or the numpy reference kernels when Numba is not installed; the dispatch reason names the CPU kernels.
 
 ## Mesh convergence and Richardson extrapolation
 
