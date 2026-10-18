@@ -19,7 +19,7 @@ Rules (see ``docs/design/performance_architecture.md``, section "Caches"):
   the section coordinates that the mesh uses, the objects of unknown type
   of the surfaces, the mesh settings, the half-mesh flag and the module
   functions that build the mesh. The solver key (:func:`solver_key`) adds
-  the solver class, the wake length, the Kutta option, the backend, the
+  the solver class, the wake length, the Kutta and ground-solver options, the backend, the
   device and the precision, the reference values, the moment reference
   point, the thread settings that can change the bits of a
   factorization and the functions whose output the solver keeps (kernels,

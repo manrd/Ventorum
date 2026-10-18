@@ -443,6 +443,28 @@ The chordwise Richardson value is then $R_c = f(n_{s,0}, \infty)$ and the spanwi
 - Inputs: `Aircraft`, `FlightCondition` (or sequences for sweeps), `SolverSettings`, and an optional `GroundPlane` (keyword `ground`) that replaces `condition.h`. The panel fields of `SolverSettings` are `panel_kutta`, `panel_backend`, `panel_wake_length`, `panel_chord_spacing` (cosine by default), `panel_estimate_mesh_error` and `panel_scale_root_thickness` (True by default; the root section of a symmetric surface with dihedral keeps its thickness normal to the local surface, see the panel solver theory page); `n_chord` is the chordwise panel count per surface (40 when None).
 - Outputs: `SolverResult` containing `totals` (`IntegratedResult`), `spanwise` (`SpanwiseResult` strip loads, each panel assigned to the lattice strip whose station planes enclose its centroid, or by the strip index of the mesh builder), surface `cp` distribution, panel options (`details["panel"]`), trust score, and execution `dispatch` records with the counted factorizations.
 
+### Optional Krylov solve in ground effect
+
+The default ground solve uses direct LU. The opt-in Krylov option uses
+right-preconditioned GMRES for CPU float64 configurations with Morino
+Kutta. The first configuration at each ground offset is a direct anchor.
+Later configurations use that anchor LU as the right preconditioner and
+its corresponding unit-onset solution as the initial guess. Each system
+matrix is still assembled. The solver checks the final residual of the
+original system against its relative tolerance. A restart length and an
+inner iteration cap bound the solve. If any onset fails, the whole
+configuration uses direct LU and becomes the new anchor for that offset.
+The solver keeps only the current anchor factors at each offset. It drops
+finished work matrices and keeps unit solutions for cached configurations.
+Free air, GPU backends and pressure Kutta use direct LU.
+
+The method follows Y. Saad and M. H. Schultz,
+["GMRES: A Generalized Minimal Residual Algorithm for Solving Nonsymmetric
+Linear Systems"](https://doi.org/10.1137/0907058), SIAM Journal on Scientific and Statistical Computing,
+and Y. Saad, [*Iterative Methods for Sparse Linear Systems*](https://www-users.cse.umn.edu/~saad/books.html), second edition,
+SIAM, chapters on Krylov methods and preconditioned iterations. Specific
+page and equation numbers for right preconditioning: to be checked.
+
 ## Assumptions
 
 - Steady, incompressible, irrotational potential flow.
