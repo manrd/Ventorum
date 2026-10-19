@@ -1222,6 +1222,7 @@ class PanelMethodSolver(BaseSolver):
                     "ground_solver_reason": cfg.ground_solver_reason,
                     "iterations": dict(cfg.iterations),
                     "matrix_passes": cfg.matrix_passes,
+                    "wake_shared": cfg.wake_shared,
                     "relative_residuals": dict(cfg.relative_residuals),
                     "fallbacks": copy.deepcopy(cfg.fallbacks),
                 })
