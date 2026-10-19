@@ -326,6 +326,8 @@ The image panel vertex order is reversed to keep an outward-pointing unit normal
 
 The image wake is the reflection of the wake. The wake follows the free stream in ground effect, so it stays parallel to the ground and keeps the height of the trailing edge. The influence matrix depends on the attitude and the height; the solver groups the conditions by configuration (ground normal, offset and wake direction) and factorizes once per group. An explicit ground plane can replace `condition.h`. Geometry or wake on or below the ground raises `GroundStrikeError`.
 
+The solver builds the wake of one attitude once and shares it between heights while that attitude is cached.
+
 When solving a symmetric aircraft in ground effect on a half mesh, four-fold images are used: self, Y-mirror, Ground-mirror, and YG-mirror. They need a configuration that is symmetric about $y = 0$: with bank the ground normal has a $y$ component, and with sideslip the free-stream wake has one. The half-mesh solver then solves the full mesh of that configuration instead and returns the right half.
 
 ## Post-processing

@@ -83,6 +83,7 @@ from __future__ import annotations
 import dataclasses
 import inspect
 import warnings
+from collections import OrderedDict
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 
@@ -142,6 +143,9 @@ _SYMMETRY_TOL = 1e-12
 
 #: Temporary array budget per host or device condition chunk [bytes].
 _CONDITION_BATCH_BYTES = 256 * 2**20
+
+#: Host strip budget of the ground attitude LRU cache [bytes].
+_ATTITUDE_CACHE_BYTES = 512 * 2**20
 
 #: Ground GMRES relative true-residual limit [-] and inner iteration cap [-].
 _GROUND_GMRES_RTOL = 1e-10
@@ -217,6 +221,16 @@ class PanelResult:
 
 
 @dataclass
+class _AttitudeWake:
+    """Wake geometry in m and host float64 strips [-] shared between heights."""
+
+    wake: PanelWake
+    full_wake: PanelWake
+    wake_panels_m: np.ndarray | None
+    strips: dict = field(default_factory=dict)
+
+
+@dataclass
 class _Configuration:
     """Wake, images and solved systems of one set of conditions.
 
@@ -226,6 +240,7 @@ class _Configuration:
     keep the failed iterative attempt before the direct solve replaces it.
     Matrix passes [-] count lockstep products across all parity systems,
     including residual checks and failed attempts. Direct anchors use none.
+    Wake sharing records a geometry hit in the ground attitude cache.
     A system value of None marks solved units whose matrix was dropped.
     """
 
@@ -249,6 +264,7 @@ class _Configuration:
     relative_residuals: dict = field(default_factory=dict)
     fallbacks: list = field(default_factory=list)
     matrix_passes: int = 0
+    wake_shared: bool = False
     ground_anchor: bool = False
 
 
@@ -589,6 +605,7 @@ class PanelSolver:
         # Device and precision of the gpu backend (no assembly here)
         self._body_parts: dict | None = None
         self._configs: dict[tuple, _Configuration] = {}
+        self._attitude_cache: OrderedDict[tuple, _AttitudeWake] = OrderedDict()
         if self.backend == "gpu":
             import torch
 
@@ -919,7 +936,12 @@ class PanelSolver:
 
     def _new_config(self, key, wake_dir, ground) -> _Configuration:
         """Build the wake geometry of a configuration (no matrices yet)."""
-        if wake_dir is None:
+        attitude_key = (key[1], key[3]) if ground is not None else None
+        shared = self._attitude_cache.get(attitude_key)
+        if shared is not None:
+            self._attitude_cache.move_to_end(attitude_key)
+            wake, full_wake = shared.wake, shared.full_wake
+        elif wake_dir is None:
             wake = self.wake
             full_wake = self._full_wake
         else:
@@ -940,13 +962,19 @@ class PanelSolver:
                     check_ground_clearance(full_wake.panels.reshape(-1, 3), ground[0], ground[1])
                 except GroundStrikeError as exc:
                     raise GroundStrikeError(f"The wake goes below the ground plane: {exc}") from None
-        wake_m = None
-        if self.mesh.half:
+        wake_m = shared.wake_panels_m if shared is not None else None
+        if self.mesh.half and shared is None:
             wake_m = (
                 mirror_panels_y(wake.panels)
                 if len(wake.panels) > 0
                 else np.empty((0, 4, 3), dtype=float)
             )
+        if ground is not None and shared is None:
+            # The strip shapes are known before assembly. Do not retain
+            # geometry for an entry whose strips cannot fit by themselves.
+            strip_bytes = len(self.centroids) * len(wake.wake_up) * 8 * (2 if self.mesh.half else 1)
+            if strip_bytes <= _ATTITUDE_CACHE_BYTES:
+                self._attitude_cache[attitude_key] = _AttitudeWake(wake, full_wake, wake_m)
         return _Configuration(
             key=key,
             wake_dir=wake_dir,
@@ -954,6 +982,7 @@ class PanelSolver:
             wake=wake,
             full_wake=full_wake,
             wake_panels_m=wake_m,
+            wake_shared=shared is not None,
             ground_solver_reason=(
                 "krylov not used: gpu backend" if self.ground_solver == "krylov" and self.backend == "gpu"
                 else "krylov not used: pressure Kutta" if self.ground_solver == "krylov" and self.kutta == "pressure"
@@ -979,9 +1008,23 @@ class PanelSolver:
         """
         if len(cfg.wake.panels) == 0 or "self" in cfg.strips:
             return
-        cfg.strips["self"] = self._strip_matrix(cfg.wake.panels, cfg.wake)[0]
-        if self.mesh.half:
-            cfg.strips["m"] = self._strip_matrix(cfg.wake_panels_m, cfg.wake)[0]
+        attitude_key = (cfg.key[1], cfg.key[3]) if cfg.ground is not None else None
+        shared = self._attitude_cache.get(attitude_key)
+        if shared is not None:
+            self._attitude_cache.move_to_end(attitude_key)
+        if shared is not None and shared.strips:
+            cfg.strips.update(shared.strips)
+        else:
+            cfg.strips["self"] = self._strip_matrix(cfg.wake.panels, cfg.wake)[0]
+            if self.mesh.half:
+                cfg.strips["m"] = self._strip_matrix(cfg.wake_panels_m, cfg.wake)[0]
+            if shared is not None:
+                shared.strips.update(cfg.strips)
+                total = sum(a.nbytes for entry in self._attitude_cache.values()
+                            for a in entry.strips.values())
+                while total > _ATTITUDE_CACHE_BYTES:
+                    _, oldest = self._attitude_cache.popitem(last=False)
+                    total -= sum(a.nbytes for a in oldest.strips.values())
         if cfg.ground is not None:
             normal, offset = cfg.ground
             cfg.strips["g"] = self._strip_matrix(
@@ -1307,6 +1350,8 @@ class PanelSolver:
                 self._unit_solutions(cfg, lu_info, rhs, cols, parity)
                 cfg.iterations.update(dict.fromkeys(cols, 0))
         self._update_unit_gradients(cfg)
+        if self.kutta == "morino":
+            cfg.strips.clear()
 
     def _unit_solutions(self, cfg, lu_info, rhs, cols, parity) -> None:
         """Solve the unit onset right-hand sides of one system.
@@ -1601,6 +1646,7 @@ class PanelSolver:
         *expand* maps the unknown corrections to the corrections of all
         strips of the full wake.
         """
+        self._config_strips(cfg)
         n_strips = len(cfg.wake.wake_up)
         if not self.mesh.half:
             z = self._solve_host(cfg, "full", -self._strip_system(cfg, "full"))
@@ -1849,5 +1895,7 @@ class PanelSolver:
             else:
                 for idx in indices:
                     results[idx] = self._evaluate_pressure_result(cfg, conds[idx])
+                # Keep the strips for all conditions of the group, then drop them.
+                cfg.strips.clear()
 
         return [r for r in results if r is not None]
