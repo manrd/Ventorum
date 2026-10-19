@@ -793,12 +793,20 @@ class PanelSolver:
         """
         if self.backend == "gpu":
             return mat.clone()
+        if self.backend == "numba":
+            from ventorum.panel3d.kernels_numba import copy_to_fortran_numba
+
+            return copy_to_fortran_numba(mat)
         return np.array(mat, order="F", copy=True)
 
     def _add(self, mat_a, mat_b):
         """Return the sum of two matrices as a new work matrix (see :meth:`_copy`)."""
         if self.backend == "gpu":
             return mat_a + mat_b
+        if self.backend == "numba":
+            from ventorum.panel3d.kernels_numba import add_to_fortran_numba
+
+            return add_to_fortran_numba(mat_a, mat_b)
         return np.add(mat_a, mat_b, order="F")
 
     def _check_gpu_memory(self, half: bool, ground: bool, n_systems: int, body_cached: bool) -> None:

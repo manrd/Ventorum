@@ -55,6 +55,8 @@ except ImportError:  # pragma: no cover - numba is an allowed dependency
     HAVE_NUMBA = False
 
 __all__ = [
+    "add_to_fortran_numba",
+    "copy_to_fortran_numba",
     "source_velocity_numba",
     "doublet_velocity_numba",
     "influence_matrices_numba",
@@ -66,9 +68,32 @@ __all__ = [
 
 _INV_4PI = 1.0 / (4.0 * math.pi)
 _FLOOR = 1e-300
+_FORTRAN_TILE_SIZE = 64
 
 
 if HAVE_NUMBA:
+
+    @njit(cache=True, parallel=True, fastmath=False)
+    def _add_to_fortran_nb(a, b, out):
+        # Each thread owns column tiles. Both layouts reuse cache within a tile.
+        rows, cols = a.shape
+        for tile in prange((cols + _FORTRAN_TILE_SIZE - 1) // _FORTRAN_TILE_SIZE):
+            j0 = tile * _FORTRAN_TILE_SIZE
+            for i0 in range(0, rows, _FORTRAN_TILE_SIZE):
+                for i in range(i0, min(i0 + _FORTRAN_TILE_SIZE, rows)):
+                    for j in range(j0, min(j0 + _FORTRAN_TILE_SIZE, cols)):
+                        out[i, j] = a[i, j] + b[i, j]
+
+    @njit(cache=True, parallel=True, fastmath=False)
+    def _copy_to_fortran_nb(a, out):
+        # Read and write only a small tile before moving to the next row block.
+        rows, cols = a.shape
+        for tile in prange((cols + _FORTRAN_TILE_SIZE - 1) // _FORTRAN_TILE_SIZE):
+            j0 = tile * _FORTRAN_TILE_SIZE
+            for i0 in range(0, rows, _FORTRAN_TILE_SIZE):
+                for i in range(i0, min(i0 + _FORTRAN_TILE_SIZE, rows)):
+                    for j in range(j0, min(j0 + _FORTRAN_TILE_SIZE, cols)):
+                        out[i, j] = a[i, j]
 
     @njit(cache=True, inline="always")
     def _tri_omega(x, y, z, x0, y0, x1, y1, x2, y2, r0, r1, r2):
@@ -501,6 +526,88 @@ def _require_numba():
     """Raise a clear error when Numba is missing."""
     if not HAVE_NUMBA:
         raise RuntimeError("Numba is not installed, so the Numba panel kernels cannot run.")
+
+
+def _fortran_input(a, name):
+    """Refuse inputs that need a dtype or dimension conversion."""
+    if not isinstance(a, np.ndarray) or a.ndim != 2 or a.dtype != np.float64:
+        raise ValueError(f"{name} must be a 2D float64 array.")
+
+
+def _fortran_output(a, out):
+    """Allocate or validate a writable Fortran-order float64 work matrix."""
+    if out is None:
+        return np.empty(a.shape, dtype=np.float64, order="F")
+    _fortran_input(out, "out")
+    if out.shape != a.shape or not out.flags.f_contiguous or not out.flags.writeable:
+        raise ValueError("out must have the input shape and be writable in Fortran order.")
+    return out
+
+
+def add_to_fortran_numba(a: np.ndarray, b: np.ndarray, out: np.ndarray | None = None) -> np.ndarray:
+    """Add two float64 matrices into a Fortran-order work matrix.
+
+    Use square tiles and the current Numba thread setting. Each element
+    uses one addition with fastmath disabled, as in the NumPy reference.
+
+    Parameters
+    ----------
+    a, b : numpy.ndarray
+        Two-dimensional float64 arrays of the same shape, in any layout.
+        Both arrays must use the same units.
+    out : numpy.ndarray or None, optional
+        Writable Fortran-order float64 array of the input shape. None
+        allocates a new array.
+
+    Returns
+    -------
+    numpy.ndarray
+        Element sums in Fortran order, with the same units as the inputs.
+
+    Raises
+    ------
+    ValueError
+        If a dtype, dimension, shape or output layout is invalid.
+    """
+    _require_numba()
+    _fortran_input(a, "a")
+    _fortran_input(b, "b")
+    if a.shape != b.shape:
+        raise ValueError("a and b must have the same shape.")
+    out = _fortran_output(a, out)
+    _add_to_fortran_nb(a, b, out)
+    return out
+
+
+def copy_to_fortran_numba(a: np.ndarray, out: np.ndarray | None = None) -> np.ndarray:
+    """Copy a float64 matrix into a Fortran-order work matrix.
+
+    Use square tiles and the current Numba thread setting. Values keep
+    their original bit patterns.
+
+    Parameters
+    ----------
+    a : numpy.ndarray
+        Two-dimensional float64 array in any layout, in the input units.
+    out : numpy.ndarray or None, optional
+        Writable Fortran-order float64 array of the input shape. None
+        allocates a new array.
+
+    Returns
+    -------
+    numpy.ndarray
+        Copied values in Fortran order, with the same units as the input.
+
+    Raises
+    ------
+    ValueError
+        If a dtype, dimension, shape or output layout is invalid.
+    """
+    _require_numba()
+    _fortran_input(a, "a")
+    out = _fortran_output(a, out)
+    _copy_to_fortran_nb(a, out)
+    return out
 
 
 def source_velocity_numba(
