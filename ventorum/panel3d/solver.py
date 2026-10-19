@@ -224,6 +224,8 @@ class _Configuration:
     indices (u, v, w, p, q, r). Direct solves have zero iterations.
     Residuals are checked for eligible opt-in ground solves. Fallbacks
     keep the failed iterative attempt before the direct solve replaces it.
+    Matrix passes [-] count lockstep products across all parity systems,
+    including residual checks and failed attempts. Direct anchors use none.
     A system value of None marks solved units whose matrix was dropped.
     """
 
@@ -246,6 +248,7 @@ class _Configuration:
     iterations: dict = field(default_factory=dict)
     relative_residuals: dict = field(default_factory=dict)
     fallbacks: list = field(default_factory=list)
+    matrix_passes: int = 0
     ground_anchor: bool = False
 
 
@@ -1020,7 +1023,7 @@ class PanelSolver:
         return mat_a, rhs + rhs_img
 
     def _ground_gmres(self, mat_a, lu_info, rhs, initial):
-        """Solve A x = b with right preconditioning and an anchor initial guess.
+        """Retain the single-column SciPy reference for parity tests only.
 
         Use Saad and Schultz (1986), SIAM J. Sci. Stat. Comput. 7(3),
         pp. 856-869, and Saad (2003), Iterative Methods for Sparse Linear
@@ -1059,6 +1062,135 @@ class PanelSolver:
         residual = float(np.linalg.norm(rhs - mat_a @ solution) / norm_b)
         return solution, count, residual, info == 0 and np.isfinite(residual) and residual <= _GROUND_GMRES_RTOL
 
+    def _ground_gmres_lockstep(self, mat_a, lu_info, rhs, initial):
+        """Solve independent right-preconditioned GMRES columns in lockstep.
+
+        Follow Saad and Schultz (1986), SIAM J. Sci. Stat. Comput. 7(3),
+        pp. 856-869, and Saad (2003), Iterative Methods for Sparse Linear
+        Systems, second edition, chapters 6 and 9. Use modified
+        Gram-Schmidt and Givens rotations. Algorithm and equation
+        numbers: to be checked. Each column has its own Krylov space.
+
+        Parameters
+        ----------
+        mat_a : numpy.ndarray
+            System matrix with shape (N, N) [-].
+        lu_info : tuple
+            Anchor LU factors and pivots of the right preconditioner [-].
+        rhs : numpy.ndarray
+            Right-hand sides with shape (N, K) in m^2/s per unit onset.
+        initial : numpy.ndarray
+            Anchor solutions with shape (N, K) in m^2/s per unit onset.
+
+        Returns
+        -------
+        solution : numpy.ndarray
+            Solutions with shape (N, K) in m^2/s per unit onset.
+        counts : numpy.ndarray
+            Inner iteration counts per column [-].
+        residuals : numpy.ndarray
+            Relative true residuals per column [-].
+        accepted : numpy.ndarray
+            Inner convergence and true-residual acceptance per column.
+        matrix_passes : int
+            Products with mat_a [-]. Count each initial, restart and final
+            residual pass, and each shared Arnoldi pass. All-zero right-hand
+            sides need no passes. Direct solves do not use this counter.
+        """
+        n, k = rhs.shape
+        solution = np.array(initial, dtype=np.float64, copy=True)
+        counts = np.zeros(k, dtype=int)
+        residuals = np.zeros(k)
+        inner_done = np.zeros(k, dtype=bool)
+        norm_b = np.linalg.norm(rhs, axis=0)
+        nonzero = np.flatnonzero(norm_b != 0.0)
+        solution[:, norm_b == 0.0] = 0.0
+        inner_done[norm_b == 0.0] = True
+        if not len(nonzero):
+            return solution, counts, residuals, inner_done, 0
+
+        residual = np.zeros_like(solution)
+        residual[:, nonzero] = rhs[:, nonzero] - mat_a @ solution[:, nonzero]
+        matrix_passes = 1
+        # Match the reference correction solve: its RHS is b - A x_anchor.
+        limit = _GROUND_GMRES_INNER_RTOL * np.linalg.norm(residual, axis=0)
+        inner_done[nonzero] = np.linalg.norm(residual[:, nonzero], axis=0) == 0.0
+        active = np.flatnonzero(~inner_done)
+        restart = min(50, n)
+        for start in range(0, _GROUND_GMRES_MAXITER, restart):
+            if not len(active):
+                break
+            steps = min(restart, _GROUND_GMRES_MAXITER - start)
+            basis = np.zeros((k, n, steps + 1))
+            preconditioned = np.zeros((k, n, steps))
+            hessenberg = np.zeros((k, steps + 1, steps))
+            cosine = np.zeros((k, steps))
+            sine = np.zeros((k, steps))
+            projected = np.zeros((k, steps + 1))
+            for col in active:
+                beta = float(np.linalg.norm(residual[:, col]))
+                basis[col, :, 0] = residual[:, col] / beta
+                projected[col, 0] = beta
+            remaining = []
+            for step in range(steps):
+                # The only dense inverse and matrix passes of this iteration.
+                vectors = basis[active, :, step].T
+                z = scipy.linalg.lu_solve(lu_info, vectors)
+                work = mat_a @ z
+                matrix_passes += 1
+                next_active = []
+                for j, col in enumerate(active):
+                    counts[col] += 1
+                    preconditioned[col, :, step] = z[:, j]
+                    w = work[:, j].copy()
+                    before = float(np.linalg.norm(w))
+                    h = hessenberg[col]
+                    for row in range(step + 1):
+                        h[row, step] = np.dot(basis[col, :, row], w)
+                        w -= h[row, step] * basis[col, :, row]
+                    h[step + 1, step] = np.linalg.norm(w)
+                    breakdown = h[step + 1, step] <= np.finfo(float).eps * before
+                    if not breakdown:
+                        basis[col, :, step + 1] = w / h[step + 1, step]
+                    for row in range(step):
+                        upper, lower = h[row:row + 2, step].copy()
+                        h[row, step] = cosine[col, row] * upper + sine[col, row] * lower
+                        h[row + 1, step] = -sine[col, row] * upper + cosine[col, row] * lower
+                    diagonal = float(np.hypot(h[step, step], h[step + 1, step]))
+                    if diagonal == 0.0 or not np.isfinite(diagonal):
+                        # No valid correction exists in this column's space.
+                        continue
+                    cosine[col, step] = h[step, step] / diagonal
+                    sine[col, step] = h[step + 1, step] / diagonal
+                    h[step, step] = diagonal
+                    h[step + 1, step] = 0.0
+                    projected[col, step + 1] = -sine[col, step] * projected[col, step]
+                    projected[col, step] *= cosine[col, step]
+                    inner_done[col] = abs(projected[col, step + 1]) <= limit[col]
+                    if inner_done[col] or breakdown or step + 1 == steps:
+                        size = step + 1
+                        weights = scipy.linalg.solve_triangular(h[:size, :size], projected[col, :size])
+                        solution[:, col] += preconditioned[col, :, :size] @ weights
+                        if not inner_done[col] and not breakdown:
+                            remaining.append(col)
+                    else:
+                        next_active.append(col)
+                active = np.asarray(next_active, dtype=int)
+                if not len(active):
+                    break
+            active = np.asarray(remaining, dtype=int)
+            if len(active) and start + steps < _GROUND_GMRES_MAXITER:
+                residual[:, active] = rhs[:, active] - mat_a @ solution[:, active]
+                matrix_passes += 1
+                inner_done[active] = np.linalg.norm(residual[:, active], axis=0) <= limit[active]
+                active = active[~inner_done[active]]
+
+        final = rhs[:, nonzero] - mat_a @ solution[:, nonzero]
+        matrix_passes += 1
+        residuals[nonzero] = np.linalg.norm(final, axis=0) / norm_b[nonzero]
+        accepted = inner_done & np.isfinite(residuals) & (residuals <= _GROUND_GMRES_RTOL)
+        return solution, counts, residuals, accepted, matrix_passes
+
     def _ensure(self, cfg: _Configuration, parities: list[str]) -> None:
         """Solve missing unit systems, with an optional ground LU anchor."""
         if not self._uses_ground_krylov(cfg):
@@ -1084,17 +1216,16 @@ class PanelSolver:
         for parity in missing:
             _, cols = self._parity_sign_cols(parity)
             mat_a, rhs = self._ground_matrix(cfg, parity)
-            converged = True
+            sol, counts, residuals, ok, passes = self._ground_gmres_lockstep(
+                mat_a, anchor.systems[parity], -rhs, anchor.unit_mu[:, list(cols)],
+            )
+            cfg.unit_mu[:, list(cols)] = sol
+            cfg.matrix_passes += passes
             for idx, col in enumerate(cols):
-                sol, count, residual, ok = self._ground_gmres(
-                    mat_a, anchor.systems[parity], -rhs[:, idx], anchor.unit_mu[:, col],
-                )
-                cfg.unit_mu[:, col] = sol
-                cfg.iterations[col] = count
-                cfg.relative_residuals[col] = residual
-                converged = converged and ok
+                cfg.iterations[col] = int(counts[idx])
+                cfg.relative_residuals[col] = float(residuals[idx])
             del mat_a
-            if not converged:
+            if not np.all(ok):
                 cfg.fallbacks.append({"parity": parity, "iterations": dict(cfg.iterations),
                                       "relative_residuals": dict(cfg.relative_residuals)})
                 # All unit solutions of this configuration must become direct.

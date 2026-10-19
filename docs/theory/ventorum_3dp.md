@@ -458,6 +458,15 @@ The solver keeps only the current anchor factors at each offset. It drops
 finished work matrices and keeps unit solutions for cached configurations.
 Free air, GPU backends and pressure Kutta use direct LU.
 
+The unit onsets of each system run in lockstep. Each onset keeps its own
+Arnoldi basis, Hessenberg matrix and Givens rotations. Modified
+Gram-Schmidt forms each basis independently. The active columns share
+each matrix product and each solve with the anchor LU factors. An onset
+that reaches the inner limit leaves the active group. The remaining
+onsets continue in their own spaces. The configuration and the dispatch
+record count these matrix passes, including the initial, restart and
+final true-residual products. Direct solves have no lockstep passes.
+
 The method follows Y. Saad and M. H. Schultz,
 ["GMRES: A Generalized Minimal Residual Algorithm for Solving Nonsymmetric
 Linear Systems"](https://doi.org/10.1137/0907058), SIAM Journal on Scientific and Statistical Computing,

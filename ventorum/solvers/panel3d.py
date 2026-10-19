@@ -1219,6 +1219,7 @@ class PanelMethodSolver(BaseSolver):
                     "ground_solver": cfg.ground_solver,
                     "ground_solver_reason": cfg.ground_solver_reason,
                     "iterations": dict(cfg.iterations),
+                    "matrix_passes": cfg.matrix_passes,
                     "relative_residuals": dict(cfg.relative_residuals),
                     "fallbacks": copy.deepcopy(cfg.fallbacks),
                 })
