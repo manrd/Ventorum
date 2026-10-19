@@ -896,8 +896,10 @@ class PanelMethodSolver(BaseSolver):
             # worker starts), so the compiled kernels use the share of that worker.
             return cpu_backend, "cpu", "float64", "called inside a CPU worker thread" + cpu_note
         n = int(n_panels)
-        work = float(max(n_configs, 1)) * n * n * (2.0 if in_ground else 1.0)
-        use, reason = gpu.use_gpu(work, "vlm", max(int(n_configs), 1), None, return_reason=True)
+        # Each ground configuration needs its own assembly and factorization.
+        # Count it once, as in the cold single-configuration panel cost model.
+        work = float(max(n_configs, 1)) * n * n
+        use, reason = gpu.use_gpu(work, "panel3d", max(int(n_configs), 1), n, return_reason=True)
         if use:
             return "gpu", "gpu", gpu.get_precision(), reason
         return cpu_backend, "cpu", "float64", reason + cpu_note

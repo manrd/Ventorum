@@ -26,8 +26,10 @@ from pathlib import Path
 from typing import Any
 
 PROFILE_FILENAME = "machine_profile.json"
-SCHEMA_VERSION = 3
-# Schema 2 profiles still load. Schema 2 lacks the keys of schema 3 (the GPU
+SCHEMA_VERSION = 4
+# Schemas 2 and 3 still load. Schema 4 adds the GPU ``panel3d`` cost model,
+# per precision. Without that entry the panel method uses its fixed default
+# crossover. Schema 2 lacks the keys of schema 3 (the GPU
 # thresholds ``min_work`` and ``min_cases``, ``chunk_mib`` per path and
 # ``batch_threads`` per solver family and size class); readers use built-in
 # defaults for them. A schema-3 profile with the old flat ``batch_threads``
@@ -124,7 +126,7 @@ def active_profile() -> dict[str, Any] | None:
         if data is not None:
             from ventorum.hardware.detector import get_machine_fingerprint
 
-            ok = data.get("schema") in (2, SCHEMA_VERSION) and data.get("fingerprint") == get_machine_fingerprint()
+            ok = data.get("schema") in (2, 3, SCHEMA_VERSION) and data.get("fingerprint") == get_machine_fingerprint()
             data = data if ok else None
         _cached, _cached_loaded = data, True
         return _cached

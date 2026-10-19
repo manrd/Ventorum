@@ -21,6 +21,9 @@ It measures, for each case size (see :data:`ventorum.hardware.profile.SIZE_CLASS
 * with a CUDA GPU and the GPU pipelines (:mod:`ventorum.gpu`), a cost
   model of the CPU and GPU paths per solver family (the rule of the
   ``"auto"`` device);
+* in full mode, cold panel solves on three half meshes, with Numba on the
+  CPU and the default solve precision on the GPU; a separate gain gate
+  and self-check keep only GPU winners that beat the CPU by more than 5 %;
 * the backend of the vector-Jacobian products of the adjoint gradients
   (entry ``grad_vjp``: per size class and device, the fastest of the
   compiled VJP kernels and the PyTorch reference copy, see
@@ -296,6 +299,101 @@ _GPU_CASES = {
 # not fill the GPU), so the GPU has a third, large batch. A quick run keeps
 # the first two GPU batches (the cost model needs at least two sizes).
 _GPU_BATCHES = {"cpu": (1, 33), "gpu": (1, 33, 257)}
+
+# Half meshes of the panel step: (spanwise panels, chordwise panels).
+# The last mesh is the factory default. These are not vortex lattices.
+_PANEL3D_CASES = [(25, 10), (40, 25), (80, 40)]
+_PANEL3D_REPEATS = 3
+
+
+def _panel3d_workload(n_span: int, n_chord: int, backend: str, precision: str):
+    """Return a half mesh and a cold free-air panel solve callable.
+
+    The rectangular wing has semi-span 4 m and chord 1 m. The condition is
+    4 deg angle of attack at 30 m/s. Each call constructs a new PanelSolver:
+    assembly, LU and evaluation all run, without the factory solver cache,
+    and with all BLAS threads, as in the factory.
+    """
+    import ventorum as vt
+    from ventorum.airfoil import airfoil
+    from ventorum.panel3d.mesh import mesh_lifting_surface
+    from ventorum.panel3d.solver import PanelSolver
+
+    wing = vt.LiftingSurface(name="PanelTuningWing", semi_span=4.0, sections=[
+        vt.WingSection(y_frac=0.0, chord=1.0, shape="0012"),
+        vt.WingSection(y_frac=1.0, chord=1.0, shape="0012"),
+    ])
+    mesh = mesh_lifting_surface(wing, airfoil("0012").coords, n_chord=n_chord, n_span=n_span, half=True)
+    cond = vt.FlightCondition(V_inf=30.0, alpha=float(np.radians(4.0)))
+
+    def run():
+        # Time the solve as the panel factory runs it: the dense LU of a panel
+        # solve uses all BLAS threads (the one-thread BLAS rule is for many
+        # small lattice solves, not for one large panel system).
+        solver = PanelSolver(mesh, backend=backend, dtype=precision, S_ref=8.0, b_ref=8.0, c_ref=1.0)
+        result = solver.solve(cond)
+        if backend == "gpu":
+            import torch
+
+            torch.cuda.synchronize()
+        return {"cp": result.cp, "factorizations": solver.factorization_count}
+
+    return mesh, run
+
+
+def _measure_panel3d(quick: bool, say) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Measure cold CPU and GPU panel solves and check each GPU winner again.
+
+    Return the profile entries per precision and the raw times [s]. A GPU
+    median must beat the CPU median by more than 5 % in both measurements.
+    The table keeps the smaller CPU and larger GPU median of the two, so
+    interpolation cannot turn a rejected measured GPU row into a winner.
+    A quick run keeps the default crossover and does not time panel solves.
+    """
+    from ventorum import gpu
+
+    if quick:
+        return {}, {"skipped": "quick mode"}
+    if not gpu.available():
+        return {}, {"skipped": "GPU is not available"}
+    try:
+        import numba  # noqa: F401 - the measured CPU backend is required
+    except ImportError:
+        return {}, {"skipped": "Numba is not available"}
+    start = time.perf_counter()
+    precision = gpu.get_precision()
+    entry: dict[str, Any] = {"n": [], "cpu": [], "gpu": [], "winner": []}
+    rows = []
+    for n_span, n_chord in _PANEL3D_CASES:
+        mesh, cpu_fn = _panel3d_workload(n_span, n_chord, "numba", precision)
+        _, gpu_fn = _panel3d_workload(n_span, n_chord, "gpu", precision)
+        n = len(mesh.panels)
+        cpu = _time(cpu_fn, _PANEL3D_REPEATS)
+        device = _time_warm(gpu_fn, _PANEL3D_REPEATS)
+        row = {"panels": n, "cpu_s": cpu, "gpu_s": device}
+        if device * (1.0 + gpu.PANEL3D_MIN_GAIN) < cpu:
+            # Reverse the order for the independent check. Each timed call
+            # still constructs a cold solver; the GPU stays at active clocks.
+            check_gpu = _time_warm(gpu_fn, _PANEL3D_REPEATS)
+            check_cpu = _time(cpu_fn, _PANEL3D_REPEATS)
+            cpu, device = min(cpu, check_cpu), max(device, check_gpu)
+            kept = device * (1.0 + gpu.PANEL3D_MIN_GAIN) < cpu
+            row["self_check"] = {"cpu_s": check_cpu, "gpu_s": check_gpu, "kept": kept}
+        else:
+            row["self_check"] = {"skipped": "CPU wins the gain gate"}
+        winner = "gpu" if device * (1.0 + gpu.PANEL3D_MIN_GAIN) < cpu else "cpu"
+        entry["n"].append(n)
+        entry["cpu"].append(cpu)
+        entry["gpu"].append(device)
+        entry["winner"].append(winner)
+        rows.append(row)
+        say(f"panel3d {n:5d} panels: CPU {cpu:.4f} s, GPU {device:.4f} s; {winner} after gain gate and self-check")
+    entry["crossover_panels"] = crossover_work(
+        entry["n"], entry["cpu"], [t * (1.0 + gpu.PANEL3D_MIN_GAIN) for t in entry["gpu"]],
+    )
+    elapsed = time.perf_counter() - start
+    say(f"panel3d crossover {entry['crossover_panels']} panels; tuner step {elapsed:.2f} s")
+    return {precision: entry}, {"rows": rows, "seconds": elapsed}
 
 
 def crossover_work(works: list[float], cpu_times: list[float], gpu_times: list[float]) -> float | None:
@@ -1008,6 +1106,10 @@ def _tune_steps(quick, say, hw, cores, classes, meas, settings, t_start, prof, p
                                   quick, 0.0, vt)
             with _profile_in_process(step3):
                 gpu_settings, gpu_meas = _measure_gpu(quick, say)
+                panel_settings, panel_meas = _measure_panel3d(quick, say)
+                if panel_settings:
+                    gpu_settings["panel3d"] = panel_settings
+                meas["panel3d"] = panel_meas
 
                 # 6. GPU thresholds from the measured crossover: the smallest
                 # work where the GPU median beats the CPU median per family,
