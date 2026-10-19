@@ -113,8 +113,8 @@ def test_fallback_replaces_anchor_and_releases_old_lu(monkeypatch, failure):
     if failure == "cap":
         monkeypatch.setattr(module, "_GROUND_GMRES_MAXITER", 1)
     else:
-        monkeypatch.setattr(scipy.sparse.linalg, "gmres",
-                            lambda op, rhs, **kw: (np.zeros_like(rhs), 0))
+        # The true-residual check fails: no residual reaches a limit of zero.
+        monkeypatch.setattr(module, "_GROUND_GMRES_RTOL", 0.0)
     result = solver.solve(conditions[1])
     reference = PanelSolver(_mesh()).solve(conditions[1])
     _panel_parity(result, reference, bits=True)
@@ -294,3 +294,225 @@ def test_converged_gmres_does_not_fall_back():
     results = PanelMethodSolver().solve(aircraft, conds, settings)
     assert results[0].details["dispatch"]["factorization_count"] == 2
     assert not any(r.details["dispatch"]["fallbacks"] for r in results)
+
+
+class _CountedMatrix(np.ndarray):
+    """Count actual matrix products and retain their column counts."""
+
+    def __new__(cls, values):
+        obj = np.asarray(values).view(cls)
+        obj.widths = []
+        return obj
+
+    def __matmul__(self, other):
+        self.widths.append(other.shape[1] if other.ndim == 2 else 1)
+        return np.asarray(self) @ other
+
+
+@pytest.mark.parametrize("columns", [1, 2, 3])
+def test_lockstep_random_reference_parity(columns, monkeypatch):
+    """Independent Arnoldi solves share each matrix and inverse pass."""
+    rng = np.random.default_rng(572)
+    matrix = np.eye(32) + 0.02 * rng.normal(size=(32, 32))
+    anchor = matrix + 0.015 * rng.normal(size=matrix.shape)
+    lu = scipy.linalg.lu_factor(anchor)
+    rhs = rng.normal(size=(32, columns))
+    initial = scipy.linalg.lu_solve(lu, rhs)
+    solver = PanelSolver(_mesh(), ground_solver="krylov")
+    reference = [solver._ground_gmres(matrix, lu, rhs[:, j], initial[:, j])
+                 for j in range(columns)]
+    inverse_widths = []
+    original = scipy.linalg.lu_solve
+
+    def inverse(factors, values):
+        assert values.ndim == 2
+        inverse_widths.append(values.shape[1])
+        return original(factors, values)
+
+    monkeypatch.setattr(scipy.linalg, "lu_solve", inverse)
+    counted = _CountedMatrix(matrix)
+    solution, counts, residuals, ok, passes = solver._ground_gmres_lockstep(
+        counted, lu, rhs, initial,
+    )
+    assert np.all(ok)
+    for j, (expected, count, _, accepted) in enumerate(reference):
+        assert accepted
+        np.testing.assert_allclose(solution[:, j], expected, rtol=1e-10, atol=1e-12)
+        assert counts[j] == count
+    np.testing.assert_allclose(solution, np.linalg.solve(matrix, rhs), rtol=1e-9, atol=1e-12)
+    np.testing.assert_allclose(residuals, np.linalg.norm(rhs - matrix @ solution, axis=0)
+                               / np.linalg.norm(rhs, axis=0), rtol=1e-3, atol=1e-15)
+    # No restart: one initial residual, max(counts) Arnoldi passes, one final residual.
+    assert passes == len(counted.widths) == max(counts) + 2
+    assert len(inverse_widths) == max(counts)
+    assert inverse_widths[0] == columns
+    repeated = solver._ground_gmres_lockstep(matrix, lu, rhs, initial)
+    for actual, expected in zip(repeated, (solution, counts, residuals, ok, passes)):
+        assert np.array_equal(actual, expected)
+
+
+def test_lockstep_locks_early_zero_and_exact_columns():
+    """Completed columns leave the active matrix and LU solves."""
+    matrix = _CountedMatrix(np.diag(np.linspace(1.0, 2.0, 20)))
+    rhs = np.ones((20, 4))
+    rhs[:, 0] = 0.0
+    rhs[0, 0] = 1.0
+    rhs[:, 2] = 0.0
+    initial = np.zeros_like(rhs)
+    initial[:, 2] = 7.0  # A zero RHS must return zero, regardless of the guess.
+    initial[0, 3] = 1.0
+    rhs[:, 3] = initial[:, 3]  # An exactly representable solved column.
+    solver = PanelSolver(_mesh())
+    lu = scipy.linalg.lu_factor(np.eye(20))
+    solution, counts, residuals, ok, passes = solver._ground_gmres_lockstep(
+        matrix, lu, rhs, initial,
+    )
+    assert np.all(ok)
+    assert counts[0] == 1 and counts[1] > 1
+    assert counts[2] == counts[3] == 0
+    assert residuals[2] == 0.0
+    assert np.array_equal(solution[:, 2], np.zeros(20))
+    assert matrix.widths[1] == 2 and matrix.widths[2] == 1
+    assert passes == len(matrix.widths) == max(counts) + 2
+    np.testing.assert_allclose(solution, np.linalg.solve(matrix, rhs), rtol=1e-10, atol=1e-12)
+    for col in range(rhs.shape[1]):
+        expected, count, _, accepted = solver._ground_gmres(
+            np.asarray(matrix), lu, rhs[:, col], initial[:, col],
+        )
+        assert accepted and counts[col] == count
+        np.testing.assert_allclose(solution[:, col], expected, rtol=1e-10, atol=1e-12)
+    matrix.widths.clear()
+    zeros = solver._ground_gmres_lockstep(matrix, lu, np.zeros((20, 3)), np.ones((20, 3)))
+    assert np.array_equal(zeros[0], np.zeros((20, 3)))
+    assert np.all(zeros[1] == 0) and np.all(zeros[2] == 0) and np.all(zeros[3])
+    assert zeros[4] == 0 and matrix.widths == []
+    exact = np.zeros((20, 2))
+    exact[0] = 1.0
+    solved = solver._ground_gmres_lockstep(matrix, lu, exact, exact)
+    assert np.array_equal(solved[0], exact)
+    assert np.all(solved[1] == 0) and np.all(solved[2] == 0) and np.all(solved[3])
+    assert solved[4] == 2 and matrix.widths == [2, 2]
+
+
+def test_lockstep_restart_cap_and_breakdown(monkeypatch):
+    """A restarted solve respects the per-column cap and detects breakdown."""
+    import ventorum.panel3d.solver as module
+
+    solver = PanelSolver(_mesh())
+    rng = np.random.default_rng(351)
+    matrix = _CountedMatrix(np.diag(np.linspace(1.0, 80.0, 80)))
+    rhs = rng.normal(size=(80, 2))
+    lu = scipy.linalg.lu_factor(np.eye(80))
+    monkeypatch.setattr(module, "_GROUND_GMRES_MAXITER", 53)
+    solution, counts, residuals, ok, passes = solver._ground_gmres_lockstep(
+        matrix, lu, rhs, np.zeros_like(rhs),
+    )
+    assert np.all(counts == 53) and not np.any(ok)
+    assert np.all(np.isfinite(solution)) and np.all(np.isfinite(residuals))
+    # One restart adds one true-residual pass to the initial and final passes.
+    assert passes == len(matrix.widths) == 53 + 3
+    matrix = _CountedMatrix(np.zeros((2, 2)))
+    solution, counts, residuals, ok, passes = solver._ground_gmres_lockstep(
+        matrix, scipy.linalg.lu_factor(np.eye(2)), np.ones((2, 1)), np.zeros((2, 1)),
+    )
+    assert not np.any(ok) and counts[0] == 1
+    assert np.all(np.isfinite(solution)) and residuals[0] == 1.0
+    assert passes == len(matrix.widths) == 3
+
+
+def test_lockstep_one_column_failure_falls_back(monkeypatch):
+    """One rejected column replaces all configuration solutions with direct LU."""
+    solver = PanelSolver(_mesh(), ground_solver="krylov")
+    solver.solve(_conditions()[0])
+    original = solver._ground_gmres_lockstep
+
+    def rejected(*args):
+        solution, counts, residuals, ok, passes = original(*args)
+        assert np.all(ok)
+        ok[1] = False
+        residuals[1] = 1.0
+        return solution, counts, residuals, ok, passes
+
+    monkeypatch.setattr(solver, "_ground_gmres_lockstep", rejected)
+    result = solver.solve(_conditions()[1])
+    _panel_parity(result, PanelSolver(_mesh()).solve(_conditions()[1]), bits=True)
+    first, second = solver._configs.values()
+    assert solver.factorization_count == 2
+    assert second.ground_solver == "direct" and len(second.fallbacks) == 1
+    assert second.fallbacks[0]["relative_residuals"][2] == 1.0
+    assert second.matrix_passes > 0 and first.systems == {"sym": None}
+
+
+def test_lockstep_sweep_reference_and_matrix_passes(monkeypatch):
+    """Report deterministic passes for each configuration, with result parity."""
+    solver = PanelSolver(_mesh(), ground_solver="krylov")
+    direct = PanelSolver(_mesh()).solve_conditions(_conditions())
+    results = solver.solve_conditions(_conditions())
+    reference_solver = PanelSolver(_mesh(), ground_solver="krylov")
+    reference_counts = []
+
+    def scipy_reference(matrix, lu, rhs, initial):
+        counted = _CountedMatrix(matrix)
+        columns = [reference_solver._ground_gmres(counted, lu, rhs[:, j], initial[:, j])
+                   for j in range(rhs.shape[1])]
+        solution, counts, residuals, ok = zip(*columns)
+        reference_counts.append((counts, len(counted.widths)))
+        return np.column_stack(solution), np.array(counts), np.array(residuals), np.array(ok), len(counted.widths)
+
+    monkeypatch.setattr(reference_solver, "_ground_gmres_lockstep", scipy_reference)
+    references = reference_solver.solve_conditions(_conditions())
+    repeated = PanelSolver(_mesh(), ground_solver="krylov").solve_conditions(_conditions())
+    assert solver.factorization_count == reference_solver.factorization_count == 2
+    configs = list(solver._configs.values())
+    ref_configs = list(reference_solver._configs.values())
+    ref_index = 0
+    for i, (cfg, ref_cfg, actual, expected, reference, repeat) in enumerate(zip(
+        configs, ref_configs, results, direct, references, repeated, strict=True,
+    )):
+        assert not cfg.fallbacks and not ref_cfg.fallbacks
+        _panel_parity(actual, expected)
+        _panel_parity(actual, repeat, bits=True)
+        for name in ("CL", "CD_pressure", "CDi_trefftz", "CY", "Cl", "Cm", "Cn",
+                     "cp", "mu", "sigma", "velocity", "mu_w"):
+            np.testing.assert_allclose(getattr(actual, name), getattr(reference, name),
+                                       rtol=1e-10, atol=1e-12)
+        if i in (0, 9):
+            assert cfg.matrix_passes == 0
+            print("lockstep sweep", i, "anchor", cfg.iterations, "matrix_passes", cfg.matrix_passes)
+            continue
+        counts = list(cfg.iterations.values())
+        assert cfg.matrix_passes < sum(counts)
+        # These systems do not restart. Initial and final checks each cost one pass.
+        assert cfg.matrix_passes == max(counts) + 2
+        before_counts, before_passes = reference_counts[ref_index]
+        assert counts == list(before_counts)
+        print("lockstep sweep", i, "scipy iterations", before_counts,
+              "scipy iteration passes", sum(before_counts), "scipy all passes", before_passes,
+              "lockstep iterations", counts, "matrix_passes", cfg.matrix_passes)
+        ref_index += 1
+    settings = SolverSettings(n_panels=5, n_chord=6, panel_backend="numpy",
+                              panel_cache=False, panel_ground_solver="krylov")
+    factory = PanelMethodSolver().solve(_wing(), _conditions(), settings)
+    for result, cfg in zip(factory, configs, strict=True):
+        assert result.details["dispatch"]["matrix_passes"] == cfg.matrix_passes
+
+
+def test_lockstep_rejects_failed_true_residual():
+    """The final original-system residual can reject an inner convergence."""
+    class FailedResidual(_CountedMatrix):
+        def __matmul__(self, other):
+            product = super().__matmul__(other)
+            if len(self.widths) == 3:
+                product[:, 1] += 1.0
+            return product
+
+    matrix = FailedResidual(np.eye(4))
+    rhs = np.ones((4, 2))
+    solution, counts, residuals, ok, passes = PanelSolver(_mesh())._ground_gmres_lockstep(
+        matrix, scipy.linalg.lu_factor(np.eye(4)), rhs, np.zeros_like(rhs),
+    )
+    np.testing.assert_allclose(solution, rhs, rtol=1e-10, atol=1e-12)
+    assert np.array_equal(counts, [1, 1])
+    assert np.array_equal(ok, [True, False])
+    assert residuals[0] <= 1e-10 and residuals[1] > 1e-10
+    assert passes == 3
