@@ -57,8 +57,16 @@ AUTO_PRECISION = "float32"
 # replaces the rule with a cost model of the machine (key "gpu", "model").
 DEFAULT_MIN_WORK = {"vlm": 5.0e4, "linear": 3.0e5, "nonlinear": 3.0e5}
 DEFAULT_MIN_CASES = {"vlm": 24, "linear": 20, "nonlinear": 12}
+# Panel kernels do much more work per unknown than vortex kernels. Keep
+# small meshes on the CPU to avoid device launch and transfer costs; above
+# the medium mesh size, dense assembly and LU justify a GPU trial. This is
+# a conservative fallback, not a measured crossover of the current machine.
+DEFAULT_PANEL3D_CROSSOVER = 2000
+PANEL3D_MIN_GAIN = 0.05
 # Dispatch reason of every solve that the device setting "cpu" keeps on the CPU.
 _REASON_DEVICE_CPU = "device setting is cpu"
+# Lattice families use work and batch thresholds. The panel family uses a
+# separate panel-count crossover and one cold solve per configuration.
 FAMILIES = ("vlm", "linear", "nonlinear")
 
 
@@ -230,10 +238,16 @@ def cost_model(family: str):
     ``"cpu"`` and ``"gpu"`` each hold ``"k"`` (batch sizes, cases, the first
     one 1) and ``"t"`` (``t[i][j]``: the time [s] of a batch of ``k[j]``
     cases on the lattice of ``n[i]`` panels). An entry that does not have
-    this form is ignored.
+    this form is ignored. The ``"panel3d"`` family instead reads
+    ``gpu.panel3d.<precision>``. Its ``cpu`` and ``gpu`` lists contain cold
+    single-configuration times [s] at each count in ``n``. It also stores
+    ``winner`` per size and ``crossover_panels`` (None if the CPU wins).
     """
     from ventorum.hardware.profile import tuned_setting
 
+    if family == "panel3d":
+        model = tuned_setting("gpu", "panel3d", get_precision(), default=None)
+        return model if _valid_panel3d_model(model) else None
     model = tuned_setting("gpu", "model", family, get_precision(), default=None)
     if not isinstance(model, dict) or not isinstance(model.get("n"), list) or not model["n"]:
         return None
@@ -247,14 +261,44 @@ def cost_model(family: str):
     return model
 
 
+def _valid_panel3d_model(model) -> bool:
+    """Return True for a finite, ordered panel timing table in seconds."""
+    import math
+
+    if not isinstance(model, dict) or not isinstance(model.get("n"), list) or not model["n"]:
+        return False
+    ns = model["n"]
+    try:
+        if any(not math.isfinite(float(n)) or float(n) < 1.0 for n in ns):
+            return False
+        if any(float(b) <= float(a) for a, b in zip(ns, ns[1:])):
+            return False
+        for dev in ("cpu", "gpu"):
+            ts = model.get(dev)
+            if not isinstance(ts, list) or len(ts) != len(ns):
+                return False
+            if any(not math.isfinite(float(t)) or float(t) <= 0.0 for t in ts):
+                return False
+        winners = model.get("winner")
+        if not isinstance(winners, list) or len(winners) != len(ns) or any(w not in ("cpu", "gpu") for w in winners):
+            return False
+        cross = model.get("crossover_panels")
+        return cross is None or (math.isfinite(float(cross)) and float(cross) >= 1.0)
+    except (TypeError, ValueError, OverflowError):
+        return False
+
+
 def estimate_time(model: dict, device: str, n_panels: int, n_cases: int) -> float:
     """Return the estimated time [s] of a batch of *n_cases* on a lattice of *n_panels* panels on *device*.
 
     A power law in the panel count between the panel counts of the model,
     and linear in the cases between its batch sizes. Outside the model, the
-    end slopes continue.
+    end slopes continue. Panel tables contain single-configuration times:
+    each configuration counts one assembly, factorization and evaluation.
     """
     table = model[device]
+    if isinstance(table, list):
+        return _interp_loglog(model["n"], table, n_panels) * max(int(n_cases), 1)
     ks = [float(k) for k in table["k"]]
     ts = [_interp_loglog(model["n"], [float(row[j]) for row in table["t"]], n_panels) for j in range(len(ks))]
     K = max(float(n_cases), 1.0)
@@ -263,6 +307,29 @@ def estimate_time(model: dict, device: str, n_panels: int, n_cases: int) -> floa
         j += 1
     slope = max((ts[j + 1] - ts[j]) / (ks[j + 1] - ks[j]), 0.0)
     return ts[j] + slope * (K - ks[j])
+
+
+def _use_gpu_panel3d(work: float, n_configs: int, n_panels: int | None, return_reason: bool):
+    """Select the panel device from its profile or its fixed panel crossover."""
+    import math
+
+    configs = max(int(n_configs), 1)
+    n = int(n_panels) if n_panels is not None else math.sqrt(max(work, 0.0) / configs)
+    model = cost_model("panel3d")
+    if model is not None:
+        t_gpu = estimate_time(model, "gpu", n, configs)
+        t_cpu = estimate_time(model, "cpu", n, configs)
+        decision = t_gpu * (1.0 + PANEL3D_MIN_GAIN) < t_cpu
+        if not return_reason:
+            return decision
+        return decision, (f"auto: profile gpu.panel3d.{get_precision()}, {configs} configuration(s): "
+                          f"GPU {t_gpu * 1e3:.1f} ms, CPU {t_cpu * 1e3:.1f} ms; "
+                          f"GPU {'passes' if decision else 'fails'} the 5 % gain gate")
+    decision = n >= DEFAULT_PANEL3D_CROSSOVER
+    if not return_reason:
+        return decision
+    return decision, (f"auto: panel3d default, {n:g} panels {'>=' if decision else '<'} "
+                      f"crossover {DEFAULT_PANEL3D_CROSSOVER} panels")
 
 
 def use_gpu(
@@ -278,21 +345,26 @@ def use_gpu(
     :func:`ventorum.gpu.pipeline.work_estimate`), *n_cases* its number of
     cases and *n_panels* the panel count of its lattice. With the ``"auto"``
     device, a tuned cost model of the machine (:func:`cost_model`) compares
-    the estimated times; without one, the built-in rule
-    (``DEFAULT_MIN_WORK``, ``DEFAULT_MIN_CASES``) decides.
+    the estimated times; without one, the lattice work and case thresholds
+    or the fixed panel crossover decide.
 
     Parameters
     ----------
     work : float
         Work estimate of the solve: the number of horseshoe evaluations
-        (dimensionless count).
+        (dimensionless count). For ``"panel3d"``, configurations times
+        solved panels squared (dimensionless count).
     family : str, optional
-        Solver family: ``"vlm"`` (default), ``"linear"`` or ``"nonlinear"``.
+        Solver family: ``"vlm"`` (default), ``"linear"``, ``"nonlinear"``
+        or ``"panel3d"``. The panel family compares cold solve costs with a
+        5 % GPU gain gate. Its default is a fixed crossover in panel count.
     n_cases : int, optional
-        Number of cases of the solve (default 1).
+        Number of cases of the solve (default 1). For ``"panel3d"``, the
+        number of distinct configurations, each assembled and factorized once.
     n_panels : int or None, optional
         Panel count of the lattice. None disables the cost model, and the
-        built-in rule decides.
+        built-in rule decides. The panel family can recover its panel count
+        from *work* and the configuration count when this argument is None.
     return_reason : bool, optional
         If False (default), return only the decision. If True, return the
         tuple ``(use, reason)``.
@@ -317,6 +389,8 @@ def use_gpu(
         return (False, f"GPU requested but unavailable: {unavailable_reason()}") if return_reason else False
     if not available():
         return (False, f"GPU is not available: {unavailable_reason()}") if return_reason else False
+    if family == "panel3d":
+        return _use_gpu_panel3d(work, n_cases, n_panels, return_reason)
     model = cost_model(family) if n_panels is not None else None
     if model is not None:
         t_gpu = estimate_time(model, "gpu", n_panels, n_cases)
@@ -343,7 +417,7 @@ def info() -> dict:
     ok, reason = _check()
     out = {"device": _device, "precision": get_precision(), "available": ok, "reason": reason,
            "min_work": {f: min_work(f) for f in FAMILIES}, "min_cases": {f: min_cases(f) for f in FAMILIES},
-           "cost_model": {f: cost_model(f) is not None for f in FAMILIES}}
+           "cost_model": {f: cost_model(f) is not None for f in (*FAMILIES, "panel3d")}}
     if ok:
         import torch
 

@@ -418,7 +418,7 @@ def test_ground_keyword_is_honoured():
     assert res_g.totals.CL > res_free.totals.CL
 
 
-def test_gpu_auto_selection_follows_the_lattice_rule(monkeypatch):
+def test_gpu_auto_selection_follows_the_panel_rule(monkeypatch):
     """Backend "auto" follows the device and precision selection of ventorum.gpu."""
     from ventorum import gpu
 
@@ -434,13 +434,17 @@ def test_gpu_auto_selection_follows_the_lattice_rule(monkeypatch):
 
     def fake_use_gpu(work, family="vlm", n_cases=1, n_panels=None, return_reason=False):
         seen["work"] = work
+        seen["family"] = family
+        seen["panels"] = n_panels
         decision = work >= 1.0e6
         return (decision, "auto: test rule") if return_reason else decision
 
     monkeypatch.setattr(gpu, "use_gpu", fake_use_gpu)
     backend, device, precision, reason = solver._resolve_backend(st, 5000, 2, True)
     assert (backend, device, precision) == ("gpu", "gpu", "float64")
-    assert seen["work"] == 2 * 5000 * 5000 * 2.0
+    assert seen["work"] == 2 * 5000 * 5000
+    assert seen["family"] == "panel3d"
+    assert seen["panels"] == 5000
     assert reason == "auto: test rule"
     assert solver._resolve_backend(st, 100, 1, False)[:3] == ("numba", "cpu", "float64")
 
@@ -650,3 +654,44 @@ def test_auto_numba_matches_numpy():
         assert abs(a - b) <= 1e-12 * max(abs(b), 1e-3)
     cp_a, cp_b = res["numba"].details["cp"], res["numpy"].details["cp"]
     assert np.max(np.abs(cp_a - cp_b)) <= 1e-12 * max(float(np.max(np.abs(cp_b))), 1.0)
+
+
+@pytest.mark.parametrize("in_ground", [False, True])
+def test_auto_backend_dispatches_panel_family(monkeypatch, in_ground):
+    """Each configuration uses one panel assembly and factorization estimate."""
+    from ventorum import gpu
+
+    seen = []
+
+    def dispatch(work, family, n_cases, n_panels, return_reason=False):
+        seen.append((work, family, n_cases, n_panels, return_reason))
+        return False, "panel profile test"
+
+    monkeypatch.setattr(gpu, "get_device", lambda: "auto")
+    monkeypatch.setattr(gpu, "use_gpu", dispatch)
+    backend, device, _, reason = make_solver("panel3d")._resolve_backend(
+        SolverSettings(), 500, n_configs=3, in_ground=in_ground,
+    )
+    assert seen == [(750000.0, "panel3d", 3, 500, True)]
+    assert (backend, device) == ("numba", "cpu")
+    assert reason.startswith("panel profile test")
+
+
+@pytest.mark.parametrize("gpu_seconds, expected", [(0.5, "gpu"), (2.0, "cpu")])
+def test_auto_backend_follows_panel_profile(monkeypatch, gpu_seconds, expected):
+    """The panel profile can select either device and appears in the reason."""
+    from ventorum import gpu
+    from ventorum.hardware import profile as prof
+
+    model = {"n": [100, 500], "cpu": [1.0, 1.0], "gpu": [gpu_seconds, gpu_seconds],
+             "winner": [expected, expected], "crossover_panels": 100 if expected == "gpu" else None}
+    monkeypatch.setattr(prof, "_cached_loaded", True)
+    monkeypatch.setattr(prof, "_cached", {"settings": {"gpu": {"panel3d": {"float32": model}}}})
+    monkeypatch.setattr(gpu, "_device", "auto")
+    monkeypatch.setattr(gpu, "_precision", "float32")
+    monkeypatch.setattr(gpu, "available", lambda: True)
+    backend, device, precision, reason = make_solver("panel3d")._resolve_backend(SolverSettings(), 500)
+    assert device == expected
+    assert backend == ("gpu" if expected == "gpu" else "numba")
+    assert precision == ("float32" if expected == "gpu" else "float64")
+    assert "profile gpu.panel3d.float32" in reason

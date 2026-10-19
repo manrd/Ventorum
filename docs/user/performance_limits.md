@@ -195,6 +195,17 @@ measured lattice (`min_cases`), stored in the profile (schema 3). The cost
 model decides whenever the panel count is known; the thresholds only decide
 when it is not known.
 
+The 3D panel method has a separate schema-4 entry,
+`settings.gpu.panel3d.<precision>`. A full tuner run measures cold Numba and
+GPU solves, checks each GPU winner again, and stores the per-size winners
+and the crossover panel count. The GPU must beat the CPU by more than 5 %.
+The device decision uses these panel costs, with one assembly and
+factorization per configuration, also in ground effect. A profile without
+this entry uses the fixed panel crossover in
+`ventorum.gpu.DEFAULT_PANEL3D_CROSSOVER`. It does not use the VLM thresholds.
+The fallback still cannot fit every GPU. The dispatch reason states whether
+the panel profile or the fixed default decided.
+
 **Cost.** A solve without a known panel count can run on the CPU while the
 GPU would be faster. To see the crossovers on a machine, run
 `ventorum-tune`: its step 6 prints them.

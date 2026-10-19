@@ -77,7 +77,7 @@ def test_schema_3_profile_marks_new_keys(config_dir):
 
 @pytest.mark.slow
 def test_quick_tuner_writes_schema_3_keys(config_dir, monkeypatch):
-    """A quick tuner run writes schema 3 with the new entries."""
+    """A quick tuner run retains the schema-3 keys in the current schema."""
     from ventorum.hardware import tuner as tuner_mod
 
     monkeypatch.setattr(tuner_mod, "_CASES", {"small": (6, 2), "medium": (8, 2), "large": (10, 2)})
@@ -85,7 +85,7 @@ def test_quick_tuner_writes_schema_3_keys(config_dir, monkeypatch):
     monkeypatch.setattr(tuner_mod, "_QUICK_REPEATS", {"small": 1, "medium": 1})
     monkeypatch.setattr(tuner_mod, "_GPU_CASES", {True: {"vlm": [(6, 2)]}, False: {"vlm": [(6, 2)]}})
     p = tuner_mod.tune_machine(quick=True, verbose=False)
-    assert p["schema"] == prof.SCHEMA_VERSION == 3
+    assert p["schema"] == prof.SCHEMA_VERSION == 4
     assert set(p["settings"]["batch_threads"]) <= {"vlm", "linear", "nonlinear"}
     for _family, cells in p["settings"]["batch_threads"].items():
         assert set(cells) <= {"small", "medium"}
