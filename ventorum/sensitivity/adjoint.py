@@ -189,7 +189,16 @@ def _refuse_configuration(ac: Any, condition: Any, settings: Any, canonical: str
         raise GradientScopeError(
             "The Fourier solver has no adjoint gradients (closed form): use central differences "
             "of the production solve, or solver_type 'vlm', 'linear' or 'nonlinear'.")
+    lattice_mean_line = canonical == "vlm" and getattr(settings, "n_chord", None) != 1
+    shapes_given = lattice_mean_line and any(
+        surf.sections and all(sec.shape is not None for sec in surf.sections) for surf in ac.surfaces
+    )
+    mean_line_model = lattice_mean_line and any(_has_camber_offset(surf) for surf in ac.surfaces)
     if "sections" in wrt:
+        if shapes_given:
+            raise GradientScopeError(
+                "Input 'sections' includes alpha_L0. A given mean line sets the VLM boundary condition, "
+                "so its alpha_L0 is not an independent section input. Remove 'sections' from wrt.")
         tab = [surf.name for surf in ac.surfaces
                if any(isinstance(sec.airfoil, TabulatedAirfoil) for sec in surf.sections)]
         if tab:
@@ -205,6 +214,12 @@ def _refuse_configuration(ac: Any, condition: Any, settings: Any, canonical: str
                 f"{tab}: {why}. Their derivatives would be zeros without a meaning. Remove "
                 "'sections' from wrt, use linear airfoils for section gradients, or change the "
                 "table data and use differences of the production solve.")
+    if mean_line_model:
+        raise GradientScopeError(
+            "The differentiable reference does not carry the mean-line offset. Adjoint gradients "
+            "of geometric-camber surfaces are not available, including the node and planform chains. "
+            "No partial gradient is returned. Use differences of the production solve."
+        )
     if "planform" in wrt:
         for surf in ac.surfaces:
             for sec in surf.sections:
@@ -214,6 +229,31 @@ def _refuse_configuration(ac: Any, condition: Any, settings: Any, canonical: str
                         "linear airfoils (the planform chain interpolates their linear section "
                         "properties). Use wrt='nodes' or 'sections' for tabulated airfoils.")
 
+
+
+def _has_camber_offset(surf) -> bool:
+    """Return True if the differentiable reference cannot rebuild the lattice of *surf*.
+
+    As in the lattice: when every section gives a shape, the mean line sets
+    the boundary condition and the polar alpha_L0 and Cm0 do not enter. The
+    reference (chord-line points, normals turned by the polar alpha_L0) then
+    equals the production lattice only if every mean line is flat and every
+    polar has alpha_L0 = 0 and Cm0 = 0. Symmetric shapes with such polars
+    keep their gradients; all other shaped surfaces are refused.
+    """
+    from ventorum.core.datatypes import LinearAirfoil
+
+    if not surf.sections or any(sec.shape is None for sec in surf.sections):
+        return False
+    from ventorum.geometry.lattice import _MeanLine
+
+    for sec in surf.sections:
+        if bool(np.any(_MeanLine(sec.shape).z != 0.0)):
+            return True
+        af = sec.airfoil
+        if not isinstance(af, LinearAirfoil) or float(af.alpha_L0) != 0.0 or float(af.Cm0) != 0.0:
+            return True
+    return False
 
 # Relative tolerance (to the smallest chordwise panel fraction of the strip)
 # within which a recovered chordwise fraction is the same node as a

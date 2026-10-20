@@ -48,6 +48,10 @@ from ventorum.utils.validation import validate_aircraft
 # the centre is always at c/4, about 0.08 c wrong at aspect ratio 1).
 DEFAULT_N_CHORD = 4
 MAX_AUTO_N_CHORD = 32
+_CAMBER_GROUND_NOTE = (
+    "camber modelled by a turned normal (no mean line given); near the ground the chordwise "
+    "load and the camber height are approximate"
+)
 
 # Phillips & Snyder lifting line is not grid convergent when the quarter-chord
 # line has a kink (sweep): the lift keeps falling as the mesh is refined
@@ -353,6 +357,8 @@ class LatticeSolver(BaseSolver):
                     f"h_min/c = {LLT_GE_MIN_H_OVER_C} (here {hc:.3f}). Use solver='vlm'."
                 )
         notes: list[str] = list(lattice.join_warnings)
+        if ground is not None and lattice.camber_fallback:
+            notes.append(_CAMBER_GROUND_NOTE)
         if self.collocation == "llt" and h_min is not None and c_ref and h_min / c_ref < LLT_GE_WARN_H_OVER_C:
             notes.append(
                 f"Lifting line in ground effect at h_min/c = {h_min / c_ref:.2f}: it under-predicts the "
@@ -510,6 +516,8 @@ class LatticeSolver(BaseSolver):
             "dispatch": {**dispatch, "backends": dict(dispatch["backends"])},
         }
         for msg in notes:
+            if msg == _CAMBER_GROUND_NOTE:
+                continue  # This is a result trust note, not a run-time warning.
             warnings.warn(msg, RuntimeWarning, stacklevel=4)
         return res
 

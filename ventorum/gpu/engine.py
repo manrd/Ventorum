@@ -1495,7 +1495,32 @@ def loads(dl: DeviceLattice, lattice, G: torch.Tensor, v_points: list[torch.Tens
             "surf1": _i32([sf.strips.stop for sf in lattice.surfaces]),
         }
         dl._cache["loads_geo"] = geo
-    pol, _ = polar_struct(dl, lattice.airfoils, role="all")
+    airfoils = lattice.airfoils
+    geometric = lattice.geometric_camber
+    if geometric is not None and np.any(geometric):
+        # CPU loads exclude the polar moment on the mean surface. Keep the
+        # solve polars and any fallback strip that shares a polar unchanged.
+        token, refs = _airfoil_token(airfoils)
+        key = (token, geometric.tobytes())
+        hit = dl._cache.get("camber_load_airfoils")
+        if hit is None or hit[0] != key:
+            copies = {}
+            masked = []
+            for af, on_mean_line in zip(airfoils, geometric):
+                if on_mean_line:
+                    if id(af) not in copies:
+                        copy = af.clone()
+                        if isinstance(copy, LinearAirfoil):
+                            copy.Cm0 = 0.0
+                        else:
+                            copy.Cm_data = None
+                        copies[id(af)] = copy
+                    af = copies[id(af)]
+                masked.append(af)
+            hit = (key, refs, masked)
+            dl._cache["camber_load_airfoils"] = hit
+        airfoils = hit[2]
+    pol, _ = polar_struct(dl, airfoils, role="camber_loads" if airfoils is not lattice.airfoils else "all")
     rp = np.zeros(3) if ref_point is None else np.asarray(ref_point, dtype=float)
     strip_gamma = G.reshape(K, n_s, n_c).sum(dim=2) if n_c > 1 else G
     w_n, seg_len = trefftz(dl, lattice, strip_gamma, WD, grounds, symmetric=symmetric, GK=GK, GO=GO)

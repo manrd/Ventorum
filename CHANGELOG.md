@@ -53,6 +53,18 @@ a minor version can change a public interface.
 
 ### Changed
 
+- Vortex lattice on the real mean line of cambered sections. When every section of a surface
+  gives a shape (`WingSection.shape`), the lattice points lie on the section mean surface and the
+  boundary-condition normals are the normals of that surface (Katz and Plotkin 2001; Coulliette
+  and Plotkin 1996 in ground effect), in free air and in ground effect. The section polar
+  alpha_L0 and Cm0 then do not enter the boundary condition or the loads (the geometry gives
+  them; a warning when the shape and the polar differ by more than 0.5 deg). Surfaces without
+  shapes, surfaces with some sections without a shape (with a result note), one chordwise panel
+  and the lifting lines keep the turned-normal model; in ground effect a cambered section
+  without a shape gets a trust note. Uncambered wings give the same results in bits. Adjoint
+  gradients of surfaces with a cambered mean line are refused for now (the gradient chains do
+  not yet carry the mean-line offset); symmetric shapes with an uncambered polar keep them.
+
 - The 3D panel solver uses 40 chordwise panels per surface by default (was 20). A mesh-error study of the method found 40 the smallest count for which no test wing gets the mesh warning of the trust score; it costs about 8 times the factorization work and 4 times the matrix memory of 20.
 - Ventorum-3DP: the panel solver gives its chordwise panel count (`n_chord`) and its largest
   strip chord to the trust score. The calibrated chordwise rule of the mesh checks and the

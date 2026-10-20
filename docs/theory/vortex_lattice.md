@@ -49,7 +49,33 @@ Derivation of the shift: consider one panel of chord $c$ in two-dimensional flow
 
 ### Camber
 
-Camber enters through the zero-lift angle. The normal of the boundary condition, $\hat{\mathbf n}_{bc}$, is the geometric normal of the strip turned nose up by $-\alpha_{L0}$ about the spanwise axis in the y-z plane (the same axis as the twist). The section data are defined in streamwise sections, so camber then acts as the same incidence also on a swept surface.
+When all defining sections give `WingSection.shape` and the vortex lattice has more than one chordwise panel, it uses the section mean lines. The shape is normalized to the chord from the leading edge to the trailing-edge midpoint. The mean-line height $z_c(\xi)$ [chord units] is the mean of the two surface ordinates at the same chord fraction. Heights at a fixed chord fraction are interpolated linearly between the defining spanwise sections.
+
+The bound-vortex endpoints and the control points move from their chord-plane positions to
+
+```{math}
+\mathbf p(\xi) = \mathbf p_{\mathrm{chord}}(\xi) + c z_c(\xi)\hat{\mathbf n}_{\mathrm{strip}}.
+```
+
+The chord and the geometric normal come from the rotated and displaced section frame. Thus the camber rotates with incidence, twist and dihedral. The normal of a panel follows the mean-line tangent at its control point:
+
+```{math}
+\mathbf t = \hat{\mathbf c} + z_c'(\xi_{cp})\hat{\mathbf n}_{\mathrm{strip}},
+\qquad
+\hat{\mathbf n}_{bc} = \frac{\mathbf t\times\hat{\mathbf s}}{|\mathbf t\times\hat{\mathbf s}|}.
+```
+
+The slope is the exact slope of the piecewise linear section mean line between its knots. The panel count, chordwise spacing and CLAF collocation rule do not change. Chordwise legs remain straight from the bound endpoints to the trailing edge. Flap panels retain the normal rotation about the hinge axis.
+
+The forces on a geometric mean surface already produce its camber moment. The CPU and GPU therefore exclude the section polar moment on these strips. A shape and a polar can still give different zero-lift angles. A difference greater than 0.5 deg gives one warning per defining section; the shape sets the inviscid boundary condition.
+
+A surface with a missing section shape retains the zero-lift-line approximation over the whole surface. Its boundary-condition normal is the geometric normal of the strip turned nose up by $-\alpha_{L0}$ about the spanwise axis in the y-z plane. Its section pitching moment is still added. A mix of supplied and missing shapes adds a result note in free air and in ground effect. Lifting-line collocation and a vortex lattice with one chordwise panel retain this model, including their section-mode controls.
+
+At a joined edge, each distinct incident edge contributes its camber offset to one arithmetic mean. Vortex endpoints and the hinge line use that shared offset. A difference above the lower geometric join tolerance adds a warning. The mean changes the offset only; the chord reference points keep the existing join rule. Node displacements change the chord length and the local frame before the offset is applied. The control-point offset uses the chord at its span station.
+
+The differentiable reference does not carry the mean-line offset. Adjoint gradients of geometric mean surfaces are therefore refused with `GradientScopeError`, including the node, planform and section inputs. No partial gradient is returned. Use differences of production solves for these surfaces. Node and planform gradients remain available for the turned-normal fallback and for one-panel lattices. Their checks compare with differences of production results.
+
+The mean-surface and lumped-vortex models follow J. Katz and A. Plotkin (2001). C. Coulliette and A. Plotkin (1996) apply discrete vortices on a real camber line in ground effect. The mean-plane approximation has additional limits near the ground (S. E. Widnall and T. M. Barrows, 1970). The independent two-dimensional reference in `ventorum.reference.cambered_plate` solves both the image-reduced system and an explicit two-plate system.
 
 ### Deformed geometry
 
@@ -114,3 +140,5 @@ where $\mathbf v_{ij}$ [1/m] is the velocity at $\mathbf P_i$ from the horseshoe
 - E. C. Polhamus, "A concept of the vortex lift of sharp-edge delta wings based on a leading-edge-suction analogy", NASA TN D-3767, 1966.
 - J. E. Lamar, "Extension of leading-edge-suction analogy to wings with separated flow around the side edges at subsonic speeds", NASA TR R-428, 1974.
 - W. Kinner, "Die kreisförmige Tragfläche auf potentialtheoretischer Grundlage", *Ingenieur-Archiv* 8, 1937, pp. 47-80.
+- C. Coulliette and A. Plotkin, ["Aerofoil ground effect revisited"](https://www.cambridge.org/core/journals/aeronautical-journal/article/abs/aerofoil-ground-effectrevisited/561E5C4DD13ED87435EF7B438859EE20), *The Aeronautical Journal* 100, 1996.
+- S. E. Widnall and T. M. Barrows, ["An analytic solution for two- and three-dimensional wings in ground effect"](https://doi.org/10.1017/S0022112070000915), *Journal of Fluid Mechanics* 41, 1970, pp. 769-792.

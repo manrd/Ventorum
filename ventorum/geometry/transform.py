@@ -278,4 +278,7 @@ def transform_lattice(
         join_warnings=list(lattice.join_warnings),
         kernel_cache=None,
         control_info=[dict(c) for c in getattr(lattice, "control_info", [])],
+        geometric_camber=None if lattice.geometric_camber is None else lattice.geometric_camber.copy(),
+        camber_fallback=lattice.camber_fallback,
+        has_camber_offset=lattice.has_camber_offset,
     )

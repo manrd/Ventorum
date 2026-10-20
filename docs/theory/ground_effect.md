@@ -37,6 +37,10 @@ Derivation of the wall condition: let $\mathcal R$ be the reflection in the plan
 
 The image vortices enter every part of the solution: the influence matrix (equation {eq}`eq-vlm` of [Vortex-lattice method](vortex_lattice.md)), the near-field forces and the Trefftz plane, where the image trailing vortices are projected with the real ones.
 
+When a section mean line is given, the image points are the reflections of the real mean-surface points. The clearance check includes the bound endpoints, control points and trailing-edge points. The camber offset changes the real distance to the ground as well as the boundary normal. C. Coulliette and A. Plotkin (1996) use the real camber line for a two-dimensional discrete-vortex model. A chord-plane model with a uniformly turned normal omits this height and the chordwise camber loading. Near the ground this is an additional approximation, even when its free-air section lift agrees with the given polar. S. E. Widnall and T. M. Barrows (1970) describe the small-clearance lifting-surface limit.
+
+A surface without all its section mean lines uses the turned-normal model over the whole surface. In ground effect the result states that its chordwise load and camber height are approximate. The note is included in the trust assessment.
+
 The vortex lattice selects the chordwise panel count from the gap (see [Vortex-lattice method](vortex_lattice.md)). A sweep in ground effect uses one count for all its cases (the count of the case with the smallest gap), so that differences between the cases contain no mesh change.
 
 ## Height and bank derivatives
@@ -115,6 +119,8 @@ The moment rows in the stability or wind axes turn the dimensional moments with 
 
 - C. Wieselsberger, "Über den Flügelwiderstand in der Nähe des Bodens", *Zeitschrift für Flugtechnik und Motorluftschiffahrt* 12(10), 1921; English translation: "Wing resistance near the ground", NACA TM 77, 1922.
 - J. Katz and A. Plotkin, *Low-Speed Aerodynamics*, 2nd ed., Cambridge University Press, 2001 (method of images).
+- C. Coulliette and A. Plotkin, ["Aerofoil ground effect revisited"](https://www.cambridge.org/core/journals/aeronautical-journal/article/abs/aerofoil-ground-effectrevisited/561E5C4DD13ED87435EF7B438859EE20), *The Aeronautical Journal* 100, 1996.
+- S. E. Widnall and T. M. Barrows, ["An analytic solution for two- and three-dimensional wings in ground effect"](https://doi.org/10.1017/S0022112070000915), *Journal of Fluid Mechanics* 41, 1970, pp. 769-792.
 - K. V. Rozhdestvensky, *Aerodynamics of a Lifting System in Extreme Ground Effect*, Springer, 2000.
 - K. V. Rozhdestvensky, "Wing-in-ground effect vehicles", *Progress in Aerospace Sciences* 42, 2006, pp. 211-283.
 - R. D. Irodov, "Criteria of longitudinal stability of ekranoplan", *Uchenye Zapiski TsAGI* 1(4), 1970, pp. 63-72 (in Russian); English machine translation "Criteria of the longitudinal stability of the ekranoplan", Foreign Technology Division, 1974, DTIC AD-A002918.
