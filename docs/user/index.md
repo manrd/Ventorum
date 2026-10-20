@@ -21,6 +21,7 @@ Task-oriented guides. Each guide solves one practical task.
 ```{toctree}
 :maxdepth: 1
 
+how_to_panel3d
 how_to_tune
 how_to_backends
 how_to_gpu
