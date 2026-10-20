@@ -38,13 +38,21 @@ In the spanwise direction the control point is at the mid parameter of the
 spacing function (the "theta" midpoint for cosine spacing), not at the mean
 of the strip edges. See :mod:`ventorum.geometry.discretization`.
 
-Camber is modelled by the zero-lift line: the boundary-condition normal is
-the geometric normal turned nose-up by ``-alpha_L0``.
+Known section mean lines carry the vortex lattice and its local normals.
+Sections without a shape keep the zero-lift line: the boundary-condition
+normal is the geometric normal turned nose-up by ``-alpha_L0``.
+
+Sources: J. Katz and A. Plotkin, Low-Speed Aerodynamics, 2nd ed., 2001
+(camber-surface lattice and lumped vortices); C. Coulliette and A. Plotkin,
+The Aeronautical Journal 100, 1996 (real camber line in ground effect);
+S. E. Widnall and T. M. Barrows, J. Fluid Mech. 41, 1970 (limits of the
+mean-plane boundary condition near the ground).
 """
 
 from __future__ import annotations
 
 import bisect
+import warnings
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -362,6 +370,9 @@ class VortexLattice:
     # lattice cache hands out, so they are computed once per geometry.
     geom_cache: dict = field(default_factory=dict, repr=False, compare=False)
     control_info: list[dict] = field(default_factory=list)
+    geometric_camber: np.ndarray | None = None
+    camber_fallback: bool = False
+    has_camber_offset: bool = False
 
     @property
     def n_panels(self) -> int:
@@ -390,8 +401,10 @@ class VortexLattice:
         return any(isinstance(af, TabulatedAirfoil) for af in self.airfoils)
 
     def all_points(self) -> np.ndarray:
-        """Leading- and trailing-edge nodes of every strip (for clearance checks)."""
+        """Return edge nodes and non-flat mean-surface points for clearance checks [m]."""
         pts = [s.edge_le for s in self.surfaces] + [s.edge_te for s in self.surfaces]
+        if self.has_camber_offset:
+            pts.extend([self.a, self.b, self.cp, self.a_te, self.b_te])
         return np.vstack(pts)
 
     def can_fold_symmetry(self) -> bool:
@@ -864,6 +877,135 @@ def _chordwise_fractions(n_chord: int, chord_spacing: str) -> np.ndarray:
     return np.linspace(0.0, 1.0, n_chord + 1)
 
 
+class _MeanLine:
+    """Piecewise linear section mean line in chord units.
+
+    Katz and Plotkin (2001) place the lumped vortices on this line.
+    The union of the two surface grids gives the exact slope of
+    ``AirfoilShape.camber`` between its knots.
+    """
+
+    def __init__(self, spec: Any):
+        from ventorum.airfoil import airfoil
+
+        shape = airfoil(spec).normalized()
+        self.x = np.unique(np.concatenate([shape.upper()[:, 0], shape.lower()[:, 0], [0.0, 1.0]]))
+        self.z = np.asarray(shape.camber(self.x))
+        self.slope = np.diff(self.z) / np.diff(self.x)
+
+    def at(self, xi: np.ndarray, *, derivative: bool = False) -> np.ndarray:
+        """Return height [chord units] or slope [-] at chord fractions *xi*."""
+        if derivative:
+            k = np.clip(np.searchsorted(self.x, xi, side="right") - 1, 0, self.slope.size - 1)
+            return np.where((xi < self.x[0]) | (xi > self.x[-1]), 0.0, self.slope[k])
+        return np.interp(xi, self.x, self.z)
+
+    def alpha_l0(self) -> float:
+        """Return the thin-airfoil zero-lift angle [rad].
+
+        Integrate each constant slope exactly with x = (1 - cos(theta))/2
+        (Katz and Plotkin, 2001, thin-airfoil Fourier coefficients).
+        """
+        theta = np.arccos(1.0 - 2.0 * np.clip(self.x, 0.0, 1.0))
+        return float(np.sum(self.slope * np.diff(theta - np.sin(theta))) / np.pi)
+
+
+def _mean_line_at(
+    sections: list[WingSection], lines: list[_MeanLine | None], eta: np.ndarray, xi: np.ndarray,
+    *, derivative: bool = False,
+) -> np.ndarray:
+    """Interpolate mean-line heights [chord units] or slopes [-] at fixed *xi*."""
+    eta, xi = np.broadcast_arrays(eta, xi)
+    fr = np.array([s.y_frac for s in sections])
+    values = np.array([np.zeros_like(xi) if line is None else line.at(xi, derivative=derivative) for line in lines])
+    j = np.clip(np.searchsorted(fr, eta, side="right") - 1, 0, len(fr) - 2)
+    w = np.clip((eta - fr[j]) / (fr[j + 1] - fr[j]), 0.0, 1.0)
+    lo = np.take_along_axis(values, j[None], axis=0)[0]
+    hi = np.take_along_axis(values, (j + 1)[None], axis=0)[0]
+    return (1.0 - w) * lo + w * hi
+
+
+def _camber_edge_offset(frames: list[dict], surface: int, edge: int, xi: np.ndarray) -> np.ndarray:
+    """Return a section mean-line offset [m] in the displaced edge frame."""
+    f = frames[surface]
+    z = _mean_line_at(f["sections"], f["lines"], np.abs(f["eta"][edge]), np.asarray(xi))
+    return f["chord"][edge] * z[..., None] * f["normal"][edge]
+
+
+def _joined_camber_offset(frames: list[dict], surface: int, edge: int, xi: np.ndarray) -> np.ndarray:
+    """Return the mean offset [m] of the distinct edges at a junction."""
+    members = frames[surface]["joined"].get(edge, [(surface, edge)])
+    return np.mean([_camber_edge_offset(frames, s, e, xi) for s, e in members], axis=0)
+
+
+def _camber_edge_frames(
+    surfaces: list[SurfaceSlice], mean_surfaces: list[tuple], aircraft: Aircraft,
+) -> tuple[list[dict] | None, list[str]]:
+    """Build chord frames and shared-edge groups for mean-line offsets [m].
+
+    The existing surface join rule defines the groups. Each distinct edge
+    contributes once to the mean, including an edge with zero offset.
+    """
+    if not any(all(line is not None for line in lines) for _, lines, _ in mean_surfaces):
+        return None, []
+    frames = []
+    parent = {}
+    for si, (sf, (secs, lines, eta_e)) in enumerate(zip(surfaces, mean_surfaces)):
+        edge_c = np.linalg.norm(sf.edge_te - sf.edge_le, axis=1)
+        edge_dir = (sf.edge_te - sf.edge_le) / np.maximum(edge_c[:, None], 1e-300)
+        q = sf.edge_le + 0.25 * (sf.edge_te - sf.edge_le)
+        span = np.gradient(q, axis=0)
+        span[:, 0] = 0.0
+        normal = cross3(edge_dir, span)
+        normal /= np.maximum(np.linalg.norm(normal, axis=1, keepdims=True), 1e-300)
+        if sf.is_symmetric:
+            eta = np.concatenate([-eta_e[::-1], eta_e[1:]])
+        elif getattr(aircraft.surfaces[sf.index], "mirror_y", False):
+            eta = -eta_e[::-1]
+        else:
+            eta = eta_e
+        frames.append({"sections": secs, "lines": lines, "eta": eta, "chord": edge_c,
+                       "normal": normal, "le": sf.edge_le.copy(), "te": sf.edge_te.copy(), "joined": {}})
+        for e in range(len(eta)):
+            parent[si, e] = (si, e)
+
+    def find(edge):
+        while parent[edge] != edge:
+            parent[edge] = parent[parent[edge]]
+            edge = parent[edge]
+        return edge
+
+    for i, si in enumerate(surfaces):
+        for j in range(i + 1, len(surfaces)):
+            joined, _, info = _relate_surfaces(si, surfaces[j])
+            if joined:
+                for ei, ej in info["edges"]:
+                    parent[find((j, ej))] = find((i, ei))
+    groups = {}
+    for edge in parent:
+        groups.setdefault(find(edge), []).append(edge)
+    warnings_out = []
+    for members in groups.values():
+        if len(members) < 2:
+            continue
+        knots = [np.array([0.0, 1.0])]
+        for s, e in members:
+            frames[s]["joined"][e] = members
+            knots.extend(line.x for line in frames[s]["lines"] if line is not None)
+        xi = np.unique(np.concatenate(knots))
+        offsets = [_camber_edge_offset(frames, s, e, xi) for s, e in members]
+        gap = max(float(np.max(np.linalg.norm(a - b, axis=-1))) for a in offsets for b in offsets)
+        chord = min(frames[s]["chord"][e] for s, e in members)
+        # Report a difference above the lower geometric join tolerance.
+        if gap > JOIN_TOL_CHORD_FRACTION * chord:
+            names = ", ".join(repr(surfaces[s].name) for s in sorted({s for s, _ in members}))
+            warnings_out.append(
+                f"Shared-edge camber offsets of surfaces {names} differ by {gap:.6g} m. "
+                "The joined edge uses their mean offset."
+            )
+    return frames, warnings_out
+
+
 def build_lattice(
     aircraft: Aircraft,
     settings: SolverSettings | None = None,
@@ -911,6 +1053,9 @@ def build_lattice(
     strip_ctrl_all: list[ControlSurface | None] = []
     strip_hinge_eff_all: list[float | None] = []
     control_info: list[dict[str, Any]] = []
+    mean_surfaces: list[tuple[list[WingSection], list[_MeanLine | None], np.ndarray]] = []
+    camber_warnings: list[str] = []
+    camber_fallback = False
 
     airfoils: list[AirfoilType] = []
     surfaces: list[SurfaceSlice] = []
@@ -932,6 +1077,28 @@ def build_lattice(
 
     for s_idx, surf in enumerate(aircraft.surfaces):
         eta_e, eta_mid = _surface_mesh_eta(surf, settings, collocation, ref_semi)
+        secs = _sorted_sections(surf)
+        supplied = [sec.shape is not None for sec in secs]
+        # The ground-effect note concerns cambered sections that keep the
+        # turned normal: a section without a mean line and with a nonzero
+        # polar alpha_L0 or Cm0 (an uncambered section has no camber error).
+        camber_fallback |= not all(supplied) and any(
+            any(v != 0.0 for v in airfoil_linear_properties(sec.airfoil)[1::2]) for sec in secs
+        )
+        if any(supplied) and not all(supplied):
+            camber_warnings.append(
+                f"camber of surface {surf.name} modelled by a turned normal: not every section gives a mean line"
+            )
+        use_mean_line = collocation == "vlm" and n_chord > 1 and all(supplied)
+        lines = [_MeanLine(sec.shape) if use_mean_line else None for sec in secs]
+        for sec, line in zip(secs, lines):
+            if line is not None and abs(line.alpha_l0() - sec.airfoil.alpha_L0) > np.radians(0.5):
+                warnings.warn(
+                    f"[{surf.name}] section at eta={sec.y_frac:g}: mean line and polar alpha_L0 "
+                    "differ by more than 0.5 deg. The mean line sets the VLM boundary condition.",
+                    RuntimeWarning, stacklevel=2,
+                )
+        mean_surfaces.append((secs, lines, eta_e))
         geo = surface_edge_geometry(surf, eta_e)
         d = getattr(surf, "node_displacements", None)
         if d is not None:
@@ -1274,6 +1441,58 @@ def build_lattice(
     )
 
     normal_bc = normal_bc_strip[panel_strip].copy()
+    geometric_camber = np.zeros(n_strips, dtype=bool)
+    camber_frames, offset_warnings = _camber_edge_frames(surfaces, mean_surfaces, aircraft)
+    # Keep the old arithmetic for sections without a mean line and for
+    # symmetric mean lines. This preserves the uncambered results in bits.
+    for si, (sf, (secs, lines, _eta_e)) in enumerate(zip(surfaces, mean_surfaces)):
+        active = all(line is not None for line in lines)
+        if camber_frames is None or (not active and not camber_frames[si]["joined"]):
+            continue
+        idx = np.arange(sf.strips.start, sf.strips.stop)
+        known = np.full(len(idx), active)
+        geometric_camber[idx] = known
+        # The strip chord remains the reference geometry. Its normals and
+        # chord lengths carry the mean-line offset after node displacements.
+        frame = camber_frames[si]
+        edge_c, edge_n, eta_full = frame["chord"], frame["normal"], frame["eta"]
+        p_idx = (idx[:, None] * n_chord + np.arange(n_chord)).ravel()
+        x0, dx = strip_xi_arr[idx, :-1], np.diff(strip_xi_arr[idx], axis=1)
+        xb = x0 + 0.25 * dx
+        xc = xb + 0.5 * dx * claf[idx, None]
+        z_l = _mean_line_at(secs, lines, np.abs(eta_full[:-1, None]), xb)
+        z_r = _mean_line_at(secs, lines, np.abs(eta_full[1:, None]), xb)
+        z_c = _mean_line_at(secs, lines, np.abs(cat["eta"][idx, None]), xc)
+        slope = _mean_line_at(secs, lines, np.abs(cat["eta"][idx, None]), xc, derivative=True)
+        off_l = edge_c[:-1, None, None] * z_l[..., None] * edge_n[:-1, None, :]
+        off_r = edge_c[1:, None, None] * z_r[..., None] * edge_n[1:, None, :]
+        for e in frame["joined"]:
+            if e < len(idx):
+                off_l[e] = _joined_camber_offset(camber_frames, si, e, xb[e])
+            if e > 0:
+                off_r[e - 1] = _joined_camber_offset(camber_frames, si, e, xb[e - 1])
+        a[p_idx] += off_l.reshape(-1, 3)
+        b[p_idx] += off_r.reshape(-1, 3)
+        f_mid = cat["frac"][idx, None]
+        edge_vec = frame["te"] - frame["le"]
+        cp_chord = np.linalg.norm((1.0 - f_mid) * edge_vec[:-1] + f_mid * edge_vec[1:], axis=1)
+        cp[p_idx] += (cp_chord[:, None, None] * z_c[..., None] * normal[idx, None, :]).reshape(-1, 3)
+        tangent = cdir[idx, None, :] + slope[..., None] * normal[idx, None, :]
+        nb = cross3(tangent.reshape(-1, 3), np.repeat(s_hat[idx], n_chord, axis=0))
+        nb /= np.maximum(np.linalg.norm(nb, axis=1, keepdims=True), 1e-300)
+        use = np.repeat(known, n_chord)
+        normal_bc[p_idx[use]] = nb[use]
+        normal_bc_strip[idx[known]] = normal[idx[known]]
+        z_le = _mean_line_at(secs, lines, np.abs(eta_full), np.zeros_like(eta_full))
+        z_te = _mean_line_at(secs, lines, np.abs(eta_full), np.ones_like(eta_full))
+        off_le, off_te = edge_c[:, None] * z_le[:, None] * edge_n, edge_c[:, None] * z_te[:, None] * edge_n
+        for e in frame["joined"]:
+            off_le[e] = _joined_camber_offset(camber_frames, si, e, np.array(0.0))
+            off_te[e] = _joined_camber_offset(camber_frames, si, e, np.array(1.0))
+        sf.edge_le = sf.edge_le + off_le
+        sf.edge_te = sf.edge_te + off_te
+        le_l[idx], le_r[idx] = sf.edge_le[:-1], sf.edge_le[1:]
+        te_l[idx], te_r[idx] = sf.edge_te[:-1], sf.edge_te[1:]
     if is_chordwise:
         is_right_arr = cat["is_right"].astype(bool)
         for s in range(n_strips):
@@ -1282,6 +1501,15 @@ def build_lattice(
                 hinge_eff = strip_hinge_eff_all[s]
                 H_l = le_l[s] + hinge_eff * (te_l[s] - le_l[s])
                 H_r = le_r[s] + hinge_eff * (te_r[s] - le_r[s])
+                if camber_frames is not None:
+                    si = int(cat["surface"][s])
+                    frame = camber_frames[si]
+                    e = s - surfaces[si].strips.start
+                    hf = np.array(hinge_eff)
+                    H_l = frame["le"][e] + hinge_eff * (frame["te"][e] - frame["le"][e])
+                    H_r = frame["le"][e + 1] + hinge_eff * (frame["te"][e + 1] - frame["le"][e + 1])
+                    H_l += _joined_camber_offset(camber_frames, si, e, hf)
+                    H_r += _joined_camber_offset(camber_frames, si, e + 1, hf)
                 H_axis = H_r - H_l
                 norm_H = float(np.linalg.norm(H_axis))
                 # H_l and H_r are at the same point only on a degenerate strip,
@@ -1334,8 +1562,12 @@ def build_lattice(
         cp_frac=cat["frac"],
         surfaces=surfaces,
         strip_core_group=core_groups(surfaces)[cat["surface"].astype(int)],
-        join_warnings=near_miss_warnings(surfaces),
+        join_warnings=near_miss_warnings(surfaces) + camber_warnings + offset_warnings,
         control_info=control_info,
+        geometric_camber=geometric_camber,
+        camber_fallback=camber_fallback,
+        has_camber_offset=any(line is not None and np.any(line.z != 0.0)
+                              for _, lines, _ in mean_surfaces for line in lines),
     )
     mark_joined_edges(surfaces)
     check_overlaps(lattice)

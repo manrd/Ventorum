@@ -462,9 +462,13 @@ class WingSection:
     airfoil : AirfoilType
         Aerodynamic model for this section.
     shape : Any, optional
-        Airfoil shape specification for 3D panel methods. Accepts any input
-        that ventorum.airfoil.airfoil() supports (NACA string, integer,
-        coordinate array, or AirfoilShape). Default is None (NACA 0012).
+        Airfoil shape of the section. Accepts any input that
+        ventorum.airfoil.airfoil() supports (NACA string, integer,
+        coordinate array, or AirfoilShape). The 3D panel method meshes it
+        (None: NACA 0012). The vortex lattice (two or more chordwise panels)
+        puts its lattice on the mean line of the shape when every section of
+        the surface gives one; the polar alpha_L0 and Cm0 then do not enter
+        the boundary condition. Default is None.
     """
 
     y_frac: float = 0.0

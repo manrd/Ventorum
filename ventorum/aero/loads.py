@@ -1011,6 +1011,10 @@ def compute_loads_batch(
         a_idx = alpha_eff[:, idx].ravel()
         Cd_p[:, idx] = section_cd(af, a_idx).reshape(K, idx.size)
         Cm_s[:, idx] = section_cm(af, a_idx).reshape(K, idx.size)
+    if lattice.geometric_camber is not None:
+        # Katz and Plotkin (2001): loads on the mean surface already give
+        # the camber moment. A section moment here would count it twice.
+        Cm_s[:, lattice.geometric_camber] = 0.0
     if rated and lattice.n_chord == 1:
         # One chordwise panel has no chordwise load. Thin-airfoil theory: a
         # normal velocity that grows along the chord at the rate k [1/s]
