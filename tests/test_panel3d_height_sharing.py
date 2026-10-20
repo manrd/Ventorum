@@ -124,7 +124,7 @@ def test_height_map_counts_and_shared_arrays(monkeypatch):
 
 def test_lru_eviction_and_rebuild(monkeypatch):
     """A hit refreshes the LRU order; an evicted attitude is rebuilt."""
-    solver = _solver()
+    solver = _solver(ground_solver="direct")
     builds = []
     build = solver._build_wake
 
@@ -145,10 +145,10 @@ def test_lru_eviction_and_rebuild(monkeypatch):
     assert len(builds) == 8
     assert [cfg.wake_shared for cfg in solver._configs.values()] == [False, False, True, False, False]
     for a, c in zip(actual, conditions, strict=True):
-        _bits(a, _solver().solve(c))
+        _bits(a, _solver(ground_solver="direct").solve(c))
     # An old configuration can need its strips again for a new parity.
     c = replace(conditions[0], p=0.01)
-    _bits(solver.solve(c), _solver().solve(c))
+    _bits(solver.solve(c), _solver(ground_solver="direct").solve(c))
 
 
 def test_oversized_entry_is_not_stored(monkeypatch):

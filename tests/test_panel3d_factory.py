@@ -209,7 +209,7 @@ def test_five_angle_sweep_one_factorization(monkeypatch):
     solver = make_solver("panel3d")
     ac = _simple_wing(shape="0012", semi_span=3.0, chord=1.0)
     cond = FlightCondition(V_inf=25.0, alpha=0.0)
-    st = SolverSettings(n_panels=6, n_chord=6)
+    st = SolverSettings(n_panels=6, n_chord=6, panel_ground_solver="direct")
 
     angles = np.radians([-2.0, 0.0, 2.0, 4.0, 6.0])
     results = solver.solve_sweep(ac, cond, st, angles)

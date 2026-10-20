@@ -226,16 +226,20 @@ GPU would be faster. To see the crossovers on a machine, run
 
 **How to remove the limit.** A precision-aware on-plane rule (for example a band from the local panel scale near the target, or from the distance to the nearest edge) is an open question; it needs a method study before float32 assembly can be considered.
 
-## Optional ground-sweep solve
+## Ground-sweep solve
 
-The 3D panel ground solve has an opt-in setting,
-`SolverSettings.panel_ground_solver="krylov"` (`PanelSolver` keyword
-`ground_solver="krylov"`). It reuses an anchor LU at each ground offset
-for CPU ground sweeps with Morino Kutta. The default is `"direct"`.
-Free air, GPU backends and pressure Kutta keep direct LU. The dispatch
-record gives the method used, the exclusion reason, unit-onset iteration
-counts, relative residuals and any direct fallback. The Krylov option
-still assembles the dense matrix for each configuration.
+The 3D panel ground solve defaults to
+`SolverSettings.panel_ground_solver="auto"` (`PanelSolver` keyword
+`ground_solver="auto"`). It reuses an anchor LU at each ground height
+for CPU ground sweeps with Morino Kutta. Free air, GPU backends and
+pressure Kutta use direct LU. The values `"direct"` and `"krylov"`
+remain selectable. The dispatch record gives the method used, the
+resolution reason, unit-onset iteration counts, relative residuals and
+any direct fallback. Direct unit onsets, including anchors, record zero
+iterations and a relative residual of `None`. This means direct LU,
+residual not computed. Anchors factorize the work matrix in place, with
+no extra copy or residual products. The Krylov solve still assembles
+the dense matrix for each configuration.
 
 ## Panel factor storage and configuration limits
 
