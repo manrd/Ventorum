@@ -236,3 +236,25 @@ Free air, GPU backends and pressure Kutta keep direct LU. The dispatch
 record gives the method used, the exclusion reason, unit-onset iteration
 counts, relative residuals and any direct fallback. The Krylov option
 still assembles the dense matrix for each configuration.
+
+## Panel factor storage and configuration limits
+
+The panel solver releases Morino LU factors after the unit solutions are
+available, unless the configuration is a CPU Krylov anchor. It retains
+pressure Kutta factors and anchor factors in order of most recent use.
+At each solve call, the host factor budget is 25 % of physical memory.
+The device factor budget is 50 % of free device memory plus the device
+factors already held. The running group and its anchor stay available
+until the group ends, even when they exceed a budget.
+
+The solver retains at most 256 configurations, including free air. It
+applies this bound at the start of each solve call, so one call can hold
+more configurations until the next call. A later request rebuilds an
+evicted configuration. Pressure Kutta also
+refactorizes a retained configuration when its factors were released.
+Direct results keep the same bits on the same machine and thread setting.
+Retained Morino unit solutions need no new factorization for a repeated
+condition. Dispatch records count released parity factors in
+`factors_dropped` and evicted configurations in `configurations_evicted`.
+These limits bound retained data. They do not replace the GPU memory fit
+check or change the solver cache limits.

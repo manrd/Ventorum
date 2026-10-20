@@ -523,8 +523,13 @@ def _dense_bytes(solver: PanelSolver, n: int) -> tuple[int, int]:
 
 @pytest.mark.parametrize("backend", ["numpy", "numba"])
 def test_half_mesh_free_air_keeps_one_matrix_and_the_lu(backend):
-    """A symmetric free-air solve keeps A_sym and the LU factors, nothing else of size N x N."""
-    solver = PanelSolver(_mesh(True), backend=backend, far_ratio=5.0)
+    """A symmetric free-air solve keeps A_sym and the LU factors, nothing else of size N x N.
+
+    The pressure Kutta condition keeps the LU for its iterations; with the
+    Morino condition the solver drops it after the unit solutions (see
+    tests/test_panel3d_configuration_budget.py).
+    """
+    solver = PanelSolver(_mesh(True), backend=backend, far_ratio=5.0, kutta="pressure")
     solver.solve(FlightCondition(V_inf=30.0, alpha=np.radians(4.0)))
     n = len(solver.centroids)
     lu, _ = solver._configs[("free",)].systems["sym"]
@@ -547,9 +552,12 @@ def test_gpu_solver_systems_match_old_assembly(monkeypatch, half):
 
 @pytest.mark.gpu
 def test_gpu_float32_keeps_one_matrix_and_the_lu(monkeypatch):
-    """The float32 gpu solve keeps A_sym and the LU on the device, at the float32 floor."""
+    """The float32 gpu solve keeps A_sym and the LU on the device, at the float32 floor.
+
+    The pressure Kutta condition keeps the LU (see the CPU test above).
+    """
     torch = _need_cuda()
-    solver = PanelSolver(_mesh(True), backend="gpu", dtype=torch.float32, far_ratio=5.0)
+    solver = PanelSolver(_mesh(True), backend="gpu", dtype=torch.float32, far_ratio=5.0, kutta="pressure")
     captured = _capture_systems(monkeypatch, solver)
     solver.solve(FlightCondition(V_inf=30.0, alpha=np.radians(4.0)))
     n = len(solver.centroids)

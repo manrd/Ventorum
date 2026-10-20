@@ -147,6 +147,12 @@ _CONDITION_BATCH_BYTES = 256 * 2**20
 #: Host strip budget of the ground attitude LRU cache [bytes].
 _ATTITUDE_CACHE_BYTES = 512 * 2**20
 
+#: Retained factor budgets as fractions of device free and host physical memory [-].
+_FACTOR_BUDGET_DEVICE_FRACTION = 0.5
+_FACTOR_BUDGET_HOST_FRACTION = 0.25
+#: Maximum number of solved configurations, including free air [-].
+_MAX_CONFIGURATIONS = 256
+
 #: Ground GMRES relative true-residual limit [-] and inner iteration cap [-].
 _GROUND_GMRES_RTOL = 1e-10
 _GROUND_GMRES_MAXITER = 100
@@ -266,6 +272,7 @@ class _Configuration:
     matrix_passes: int = 0
     wake_shared: bool = False
     ground_anchor: bool = False
+    factor_use: int = 0
 
 
 def _standardize_panels(panels: np.ndarray, nodes: np.ndarray | None = None) -> np.ndarray:
@@ -604,8 +611,14 @@ class PanelSolver:
 
         # Device and precision of the gpu backend (no assembly here)
         self._body_parts: dict | None = None
-        self._configs: dict[tuple, _Configuration] = {}
+        self._configs: OrderedDict[tuple, _Configuration] = OrderedDict()
         self._attitude_cache: OrderedDict[tuple, _AttitudeWake] = OrderedDict()
+        self._factor_budget_host = float("inf")
+        self._factor_budget_device = float("inf")
+        self._factor_clock = 0
+        self._protected_factors: set[tuple] = set()
+        self._factors_dropped = 0
+        self._configurations_evicted = 0
         if self.backend == "gpu":
             import torch
 
@@ -628,6 +641,74 @@ class PanelSolver:
         """Number of dense LU factorizations done so far [-]."""
         sub = self._full_solver.factorization_count if self._full_solver is not None else 0
         return int(self._own_factorizations + sub)
+
+    @staticmethod
+    def _factor_bytes(cfg: _Configuration) -> tuple[int, int]:
+        """Return host and device bytes held by the LU and pivot arrays [bytes]."""
+        host = device = 0
+        for factors in cfg.systems.values():
+            for array in factors or ():
+                if isinstance(array, np.ndarray):
+                    host += int(array.nbytes)
+                elif array.device.type == "cpu":
+                    host += array.numel() * array.element_size()
+                else:
+                    device += array.numel() * array.element_size()
+        return host, device
+
+    def _read_factor_budgets(self) -> None:
+        """Read the factor pool limits [bytes] at the start of a solve call."""
+        from ventorum.hardware.detector import _get_total_ram_gb
+
+        self._factor_budget_host = int(_FACTOR_BUDGET_HOST_FRACTION * _get_total_ram_gb() * 2**30)
+        if self.backend == "gpu":
+            import torch
+
+            free, _ = torch.cuda.mem_get_info(self._gpu_device)
+            held = sum(self._factor_bytes(c)[1] for c in self._configs.values())
+            self._factor_budget_device = int(_FACTOR_BUDGET_DEVICE_FRACTION * free) + held
+
+    def _touch_factors(self, cfg: _Configuration) -> None:
+        """Record the most recent group or preconditioner use of factors."""
+        self._factor_clock += 1
+        cfg.factor_use = self._factor_clock
+
+    def _drop_factors(self, cfg: _Configuration) -> None:
+        """Drop each retained parity factor and release the anchor role."""
+        for parity, factors in cfg.systems.items():
+            if factors is not None:
+                cfg.systems[parity] = None
+                self._factors_dropped += 1
+        cfg.ground_anchor = False
+
+    def _trim_factors(self, incoming: tuple[int, int] = (0, 0)) -> None:
+        """Make room for incoming host and device factors [bytes], in LRU order.
+
+        The running group and its anchor can exceed a budget. Trim again
+        after the group releases them, so a zero budget still permits a solve.
+        """
+        pool = [(cfg, self._factor_bytes(cfg)) for cfg in self._configs.values()]
+        host = incoming[0] + sum(size[0] for _, size in pool)
+        device = incoming[1] + sum(size[1] for _, size in pool)
+        for cfg, size in sorted(pool, key=lambda item: item[0].factor_use):
+            if host <= self._factor_budget_host and device <= self._factor_budget_device:
+                break
+            if cfg.key in self._protected_factors or size == (0, 0):
+                continue
+            self._drop_factors(cfg)
+            host -= size[0]
+            device -= size[1]
+
+    def _bound_configurations(self) -> None:
+        """Evict the least recently used configurations at the start of a call.
+
+        The configurations of the running call stay until the next call:
+        the factory reads their dispatch records after the call.
+        """
+        while len(self._configs) > _MAX_CONFIGURATIONS:
+            _, cfg = self._configs.popitem(last=False)
+            self._drop_factors(cfg)
+            self._configurations_evicted += 1
 
     def _build_wake(self, nodes, panels, wake_edges, normals, wake_dir) -> PanelWake:
         """Build one wake with the wake length and panel count of the solver."""
@@ -1254,10 +1335,18 @@ class PanelSolver:
         anchor = next((c for c in self._configs.values()
                        if c.ground_anchor and self._ground_height(c) == height), None)
         if anchor is None or anchor is cfg:
-            self._ensure_direct(cfg, missing)
             cfg.ground_anchor = True
+            if cfg.ground_solver == "krylov":
+                # A cached iterative configuration needs direct units before
+                # it can supply the initial guess of a new anchor.
+                missing = list(dict.fromkeys([*cfg.systems, *parities]))
+                cfg.systems.clear()
+                cfg.ground_solver = "direct"
+            self._ensure_direct(cfg, missing)
             cfg.strips.clear()
             return
+        self._protected_factors.add(anchor.key)
+        self._touch_factors(anchor)
         # An onset added on a later call also needs its anchor unit solution.
         self._ensure_direct(anchor, missing)
         anchor.strips.clear()
@@ -1283,10 +1372,9 @@ class PanelSolver:
                 needed = list(dict.fromkeys([*cfg.systems, *parities]))
                 cfg.systems.clear()
                 cfg.ground_solver = "direct"
-                self._ensure_direct(cfg, needed)
-                anchor.systems = dict.fromkeys(anchor.systems)
-                anchor.ground_anchor = False
                 cfg.ground_anchor = True
+                self._ensure_direct(cfg, needed)
+                self._drop_factors(anchor)
                 cfg.strips.clear()
                 return
             # The unit solutions suffice for later conditions. Drop the matrix.
@@ -1303,16 +1391,22 @@ class PanelSolver:
         on the trailing-edge columns. Only the factorized systems, the
         body parity matrices and the strip matrices are kept.
         """
-        missing = [p for p in parities if p not in cfg.systems]
+        keep_factors = self.kutta == "pressure" or cfg.ground_anchor
+        missing = [p for p in parities if p not in cfg.systems
+                   or (keep_factors and cfg.systems[p] is None)]
         if not missing:
             return
         half = bool(self.mesh.half)
         in_ground = cfg.ground is not None
         parts = self._body_parts or {}
         body_cached = all(f"A_{p}" in parts for p in missing)
+        n_panels = len(self.centroids)
+        itemsize = self._gpu_dtype.itemsize if self.backend == "gpu" else 8
+        incoming = (len(missing) * (n_panels * n_panels * itemsize + n_panels * 4)
+                    if keep_factors else 0)
+        self._trim_factors((0, incoming) if self.backend == "gpu" else (incoming, 0))
         self._check_gpu_memory(half, in_ground, len(missing), body_cached)
         has_wake = len(cfg.wake.panels) > 0
-        n_panels = len(self.centroids)
         self._config_strips(cfg)
         if in_ground:
             normal, offset = cfg.ground
@@ -1357,6 +1451,10 @@ class PanelSolver:
             if not check_residual:
                 self._unit_solutions(cfg, lu_info, rhs, cols, parity)
                 cfg.iterations.update(dict.fromkeys(cols, 0))
+            if not keep_factors:
+                cfg.systems[parity] = None
+                self._factors_dropped += 1
+            del lu_info
         self._update_unit_gradients(cfg)
         if self.kutta == "morino":
             cfg.strips.clear()
@@ -1851,6 +1949,10 @@ class PanelSolver:
             List of solution results corresponding to each condition.
         """
         conds = list(conditions)
+        self._factors_dropped = 0
+        self._configurations_evicted = 0
+        self._bound_configurations()
+        self._read_factor_budgets()
         if not conds:
             return []
         if grounds is None:
@@ -1881,6 +1983,8 @@ class PanelSolver:
                 sub_res = sub.solve_conditions(
                     [conds[i] for i in indices], grounds=[gp] * len(indices)
                 )
+                self._factors_dropped += sub._factors_dropped
+                self._configurations_evicted += sub._configurations_evicted
                 for idx, res in zip(indices, sub_res):
                     results[idx] = self._to_half(res)
                 continue
@@ -1888,6 +1992,9 @@ class PanelSolver:
             if cfg is None:
                 cfg = self._new_config(key, wake_dir, gp)
                 self._configs[key] = cfg
+            self._configs.move_to_end(key)
+            self._protected_factors = {key}
+            self._touch_factors(cfg)
             group_conditions = [conds[i] for i in indices]
             coeff_rows = _condition_arrays(group_conditions)[0]
             self._ensure(cfg, self._parities_needed(coeff_rows))
@@ -1905,5 +2012,8 @@ class PanelSolver:
                     results[idx] = self._evaluate_pressure_result(cfg, conds[idx])
                 # Keep the strips for all conditions of the group, then drop them.
                 cfg.strips.clear()
+
+            self._protected_factors.clear()
+            self._trim_factors()
 
         return [r for r in results if r is not None]

@@ -1088,6 +1088,8 @@ class PanelMethodSolver(BaseSolver):
                 "device": device,
                 "dtype": precision,
                 "factorization_count": int(solver.factorization_count) - factorizations_before,
+                "factors_dropped": int(solver._factors_dropped),
+                "configurations_evicted": int(solver._configurations_evicted),
                 "cached_solver": bool(lease.cached),
                 "precision": precision,
                 "backends": {"kernel": backend, "solve": "torch" if device == "gpu" else "scipy"},
