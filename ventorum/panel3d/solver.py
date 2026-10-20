@@ -419,9 +419,12 @@ class PanelSolver:
     dtype : optional
         Arithmetic of the "gpu" backend. None follows the Ventorum
         precision selection. Other backends ignore it.
-    ground_solver : str, default="direct"
-        Ground solve: "direct" or "krylov". Krylov reuses an anchor LU
-        per ground offset [m] on CPU float64 with Morino Kutta.
+    ground_solver : str, default="auto"
+        Ground solve: "auto", "direct" or "krylov". Auto uses Krylov
+        for CPU ground configurations with Morino Kutta and direct LU
+        elsewhere. Krylov reuses an anchor LU per ground height [m].
+        Direct unit onsets, including anchors, record zero iterations and
+        a relative residual of None: direct LU, residual not computed.
 
     Attributes
     ----------
@@ -448,7 +451,7 @@ class PanelSolver:
         backend: str = "numpy",
         device=None,
         dtype=None,
-        ground_solver: str = "direct",
+        ground_solver: str = "auto",
         _reuse_full_from: PanelSolver | None = None,
     ) -> None:
         if kutta not in ("morino", "pressure"):
@@ -460,8 +463,8 @@ class PanelSolver:
             )
         if int(n_wake) < 1:
             raise ValueError(f"n_wake must be at least 1, got {n_wake}.")
-        if ground_solver not in ("direct", "krylov"):
-            raise ValueError(f"Unknown ground_solver {ground_solver!r}; use 'direct' or 'krylov'.")
+        if ground_solver not in ("auto", "direct", "krylov"):
+            raise ValueError(f"Unknown ground_solver {ground_solver!r}; use 'auto', 'direct' or 'krylov'.")
         self.ground_solver = ground_solver
         self.backend = key
         self.kutta = str(kutta)
@@ -1073,7 +1076,10 @@ class PanelSolver:
             wake_panels_m=wake_m,
             wake_shared=shared is not None,
             ground_solver_reason=(
-                "krylov not used: gpu backend" if self.ground_solver == "krylov" and self.backend == "gpu"
+                "auto: direct on gpu backend" if self.ground_solver == "auto" and self.backend == "gpu"
+                else "auto: direct with pressure Kutta" if self.ground_solver == "auto" and self.kutta == "pressure"
+                else "auto: direct in free air" if self.ground_solver == "auto" and ground is None
+                else "krylov not used: gpu backend" if self.ground_solver == "krylov" and self.backend == "gpu"
                 else "krylov not used: pressure Kutta" if self.ground_solver == "krylov" and self.kutta == "pressure"
                 else "krylov not used: free air" if self.ground_solver == "krylov" and ground is None
                 else ""
@@ -1126,7 +1132,7 @@ class PanelSolver:
 
     def _uses_ground_krylov(self, cfg: _Configuration) -> bool:
         """Return whether this configuration can use CPU float64 GMRES."""
-        return (self.ground_solver == "krylov" and cfg.ground is not None
+        return (self.ground_solver in ("auto", "krylov") and cfg.ground is not None
                 and self.backend != "gpu" and self.kutta == "morino")
 
     def _ground_height(self, cfg: _Configuration) -> float:
@@ -1353,6 +1359,8 @@ class PanelSolver:
         if cfg.unit_mu is None:
             cfg.unit_mu = np.zeros((len(self.centroids), 6), dtype=np.float64)
         cfg.ground_solver = "krylov"
+        if self.ground_solver == "auto":
+            cfg.ground_solver_reason = "auto: krylov in ground effect"
         for parity in missing:
             _, cols = self._parity_sign_cols(parity)
             mat_a, rhs = self._ground_matrix(cfg, parity)
@@ -1396,6 +1404,8 @@ class PanelSolver:
                    or (keep_factors and cfg.systems[p] is None)]
         if not missing:
             return
+        if self.ground_solver == "auto" and cfg.ground_anchor:
+            cfg.ground_solver_reason = "auto: direct anchor"
         half = bool(self.mesh.half)
         in_ground = cfg.ground is not None
         parts = self._body_parts or {}
@@ -1435,22 +1445,12 @@ class PanelSolver:
 
                     d_mat = torch.as_tensor(d_mat, dtype=self._gpu_dtype, device=self._gpu_device)
                 _fold_wake(mat_a, d_mat, cfg.wake)
-            check_residual = self._uses_ground_krylov(cfg)
-            lu_info = self._factorize(self._copy(mat_a) if check_residual else mat_a)
-            if check_residual:
-                self._unit_solutions(cfg, lu_info, rhs, cols, parity)
-                for idx, col in enumerate(cols):
-                    norm_b = float(np.linalg.norm(rhs[:, idx]))
-                    cfg.iterations[col] = 0
-                    cfg.relative_residuals[col] = (
-                        float(np.linalg.norm(-rhs[:, idx] - mat_a @ cfg.unit_mu[:, col]) / norm_b)
-                        if norm_b else 0.0
-                    )
+            lu_info = self._factorize(mat_a)
             del mat_a
             cfg.systems[parity] = lu_info
-            if not check_residual:
-                self._unit_solutions(cfg, lu_info, rhs, cols, parity)
-                cfg.iterations.update(dict.fromkeys(cols, 0))
+            self._unit_solutions(cfg, lu_info, rhs, cols, parity)
+            cfg.iterations.update(dict.fromkeys(cols, 0))
+            cfg.relative_residuals.update(dict.fromkeys(cols))
             if not keep_factors:
                 cfg.systems[parity] = None
                 self._factors_dropped += 1

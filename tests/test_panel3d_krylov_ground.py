@@ -71,7 +71,8 @@ def test_ground_sweep_parity_and_counters(backend, monkeypatch):
         return original(*args, **kwargs)
 
     monkeypatch.setattr(scipy.linalg, "lu_factor", counted)
-    settings = SolverSettings(n_panels=5, n_chord=6, panel_backend=backend, panel_cache=False)
+    settings = SolverSettings(n_panels=5, n_chord=6, panel_backend=backend, panel_cache=False,
+                              panel_ground_solver="direct")
     method = PanelMethodSolver()
     direct = method.solve(_wing(), _conditions(), settings)
     assert len(calls) == 18
@@ -94,7 +95,10 @@ def test_ground_sweep_parity_and_counters(backend, monkeypatch):
         assert disp["factorization_count"] == 2
         assert b.details["dispatch"]["factorization_count"] == 18
         assert disp["fallbacks"] == []
-        assert all(r <= 1e-10 for r in disp["relative_residuals"].values())
+        if anchor:
+            assert all(r is None for r in disp["relative_residuals"].values())
+        else:
+            assert all(r <= 1e-10 for r in disp["relative_residuals"].values())
         assert all(0 <= n <= 100 for n in disp["iterations"].values())
         if not anchor:
             assert max(disp["iterations"].values()) > 0
@@ -116,7 +120,7 @@ def test_fallback_replaces_anchor_and_releases_old_lu(monkeypatch, failure):
         # The true-residual check fails: no residual reaches a limit of zero.
         monkeypatch.setattr(module, "_GROUND_GMRES_RTOL", 0.0)
     result = solver.solve(conditions[1])
-    reference = PanelSolver(_mesh()).solve(conditions[1])
+    reference = PanelSolver(_mesh(), ground_solver="direct").solve(conditions[1])
     _panel_parity(result, reference, bits=True)
     first, second = solver._configs.values()
     assert second.ground_solver == "direct"
@@ -130,13 +134,13 @@ def test_fallback_replaces_anchor_and_releases_old_lu(monkeypatch, failure):
     assert solver.factorization_count == 2
     assert list(solver._configs.values())[-1].ground_solver == "krylov"
     # Cached unit solutions still work after their factors are dropped.
-    _panel_parity(solver.solve(conditions[0]), PanelSolver(_mesh()).solve(conditions[0]), bits=True)
+    _panel_parity(solver.solve(conditions[0]), PanelSolver(_mesh(), ground_solver="direct").solve(conditions[0]), bits=True)
 
 
 def test_full_mesh_sideslip_and_incremental_parities():
     """Ground sideslip reaches the full sub-solver with the same option."""
     conditions = [dataclasses.replace(c, beta=0.04, p=0.01, r=0.02) for c in _conditions()[:3]]
-    direct = PanelSolver(_mesh())
+    direct = PanelSolver(_mesh(), ground_solver="direct")
     solver = PanelSolver(_mesh(), ground_solver="krylov")
     for a, b in zip(solver.solve_conditions(conditions), direct.solve_conditions(conditions), strict=True):
         _panel_parity(a, b)
@@ -147,13 +151,13 @@ def test_full_mesh_sideslip_and_incremental_parities():
     solver = PanelSolver(_mesh(), ground_solver="krylov")
     solver.solve_conditions(_conditions()[:2])
     cond = dataclasses.replace(_conditions()[1], p=0.01)
-    _panel_parity(solver.solve(cond), PanelSolver(_mesh()).solve(cond))
+    _panel_parity(solver.solve(cond), PanelSolver(_mesh(), ground_solver="direct").solve(cond))
     assert solver.factorization_count == 2
 
 
 def test_defaults_cache_clone_and_free_air():
     """The option is validated, cloned, keyed, and inactive in free air."""
-    settings = SolverSettings(n_panels=5, n_chord=6, panel_backend="numpy")
+    settings = SolverSettings(n_panels=5, n_chord=6, panel_backend="numpy", panel_ground_solver="direct")
     assert settings.panel_ground_solver == "direct"
     settings.panel_ground_solver = "krylov"
     assert settings.clone().panel_ground_solver == "krylov"
@@ -173,7 +177,7 @@ def test_defaults_cache_clone_and_free_air():
     assert method.solve(_wing(), cond, settings).details["dispatch"]["cached_solver"]
     free = [dataclasses.replace(c, h=None) for c in _conditions()[:3]]
     solver = PanelSolver(_mesh(), ground_solver="krylov")
-    reference = PanelSolver(_mesh())
+    reference = PanelSolver(_mesh(), ground_solver="direct")
     for x, y in zip(solver.solve_conditions(free), reference.solve_conditions(free), strict=True):
         _panel_parity(x, y, bits=True)
     assert solver.factorization_count == 1
@@ -435,7 +439,7 @@ def test_lockstep_one_column_failure_falls_back(monkeypatch):
 
     monkeypatch.setattr(solver, "_ground_gmres_lockstep", rejected)
     result = solver.solve(_conditions()[1])
-    _panel_parity(result, PanelSolver(_mesh()).solve(_conditions()[1]), bits=True)
+    _panel_parity(result, PanelSolver(_mesh(), ground_solver="direct").solve(_conditions()[1]), bits=True)
     first, second = solver._configs.values()
     assert solver.factorization_count == 2
     assert second.ground_solver == "direct" and len(second.fallbacks) == 1
@@ -446,7 +450,7 @@ def test_lockstep_one_column_failure_falls_back(monkeypatch):
 def test_lockstep_sweep_reference_and_matrix_passes(monkeypatch):
     """Report deterministic passes for each configuration, with result parity."""
     solver = PanelSolver(_mesh(), ground_solver="krylov")
-    direct = PanelSolver(_mesh()).solve_conditions(_conditions())
+    direct = PanelSolver(_mesh(), ground_solver="direct").solve_conditions(_conditions())
     results = solver.solve_conditions(_conditions())
     reference_solver = PanelSolver(_mesh(), ground_solver="krylov")
     reference_counts = []
@@ -516,3 +520,20 @@ def test_lockstep_rejects_failed_true_residual():
     assert np.array_equal(ok, [True, False])
     assert residuals[0] <= 1e-10 and residuals[1] > 1e-10
     assert passes == 3
+
+
+def test_auto_resolves_each_configuration():
+    """One solver resolves free air and two ground heights independently."""
+    free = dataclasses.replace(_conditions()[0], h=None)
+    conditions = [free, *_conditions()[:2], *_conditions()[9:11], free]
+    solver = PanelSolver(_mesh())
+    results = solver.solve_conditions(conditions)
+    direct = PanelSolver(_mesh(), ground_solver="direct").solve_conditions(conditions)
+    assert solver.factorization_count == 3
+    for i, (actual, reference) in enumerate(zip(results, direct, strict=True)):
+        _panel_parity(actual, reference, bits=i in (0, 1, 3, 5))
+    configs = list(solver._configs.values())
+    assert [cfg.ground_solver for cfg in configs] == [
+        "direct", "direct", "krylov", "direct", "krylov",
+    ]
+    assert configs[0].ground_solver_reason == "auto: direct in free air"

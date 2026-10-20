@@ -460,7 +460,7 @@ def test_ground_factorizations_one_per_group(monkeypatch, half: bool):
     monkeypatch.setattr(scipy.linalg, "lu_factor", counting)
     surf = _rectangular_wing_surface(semi_span=2.5, chord=1.0)
     mesh = mesh_lifting_surface(surf, _naca0012_coordinates(31), n_chord=6, n_span=6, half=half)
-    solver = PanelSolver(mesh, far_ratio=np.inf)
+    solver = PanelSolver(mesh, far_ratio=np.inf, ground_solver="direct")
     conds = [
         FlightCondition(V_inf=20.0, alpha=np.radians(2.0), h=0.8),
         FlightCondition(V_inf=30.0, alpha=np.radians(2.0), h=0.8, q=0.1),

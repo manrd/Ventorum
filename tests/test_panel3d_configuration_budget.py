@@ -68,7 +68,7 @@ def _pool(solver):
 
 @pytest.mark.parametrize("backend", ["numpy", "numba"])
 def test_direct_map_bits_and_repeat(mesh, backend):
-    solver = PanelSolver(mesh, backend=backend)
+    solver = PanelSolver(mesh, backend=backend, ground_solver="direct")
     conditions = _map()
     actual = solver.solve_conditions(conditions)
     assert len(solver._configs) == 9
@@ -76,7 +76,7 @@ def test_direct_map_bits_and_repeat(mesh, backend):
     assert solver._factors_dropped == 9
     assert _pool(solver) == (0, 0)
     for a, c in zip(actual, conditions, strict=True):
-        _equal(a, PanelSolver(mesh, backend=backend).solve(c))
+        _equal(a, PanelSolver(mesh, backend=backend, ground_solver="direct").solve(c))
     _equal(solver.solve(conditions[0]), actual[0])
     assert solver.factorization_count == 9
     assert solver._factors_dropped == 0
@@ -85,14 +85,14 @@ def test_direct_map_bits_and_repeat(mesh, backend):
     free = replace(conditions[0], h=None)
     solver.solve(free)
     asymmetric = replace(free, p=0.01)
-    _equal(solver.solve(asymmetric), PanelSolver(mesh, backend=backend).solve(asymmetric))
+    _equal(solver.solve(asymmetric), PanelSolver(mesh, backend=backend, ground_solver="direct").solve(asymmetric))
     assert solver.factorization_count == 11
     assert _pool(solver) == (0, 0)
 
 
 def test_map_memory_and_solver_cache(mesh, monkeypatch):
     """The removed LU and pivot buffers reduce solver_bytes by their exact sizes."""
-    solver = PanelSolver(mesh)
+    solver = PanelSolver(mesh, ground_solver="direct")
     retained = PanelSolver(mesh, kutta="pressure")
     # Keep the same Morino evaluation and arrays, but retain factors as before.
     monkeypatch.setattr(retained, "_evaluate_pressure_result", lambda cfg, c: retained._evaluate_results_batch(
@@ -240,9 +240,9 @@ def test_cached_krylov_units_can_become_a_new_direct_anchor(mesh, monkeypatch):
 
 def test_configuration_lru_bound_and_rebuild(mesh, monkeypatch):
     monkeypatch.setattr(module, "_MAX_CONFIGURATIONS", 2)
-    solver = PanelSolver(mesh)
+    solver = PanelSolver(mesh, ground_solver="direct")
     conditions = [replace(_map()[0], h=None), *_map()[:3]]
-    expected = [PanelSolver(mesh).solve(c) for c in conditions]
+    expected = [PanelSolver(mesh, ground_solver="direct").solve(c) for c in conditions]
     actual = solver.solve_conditions(conditions)
     # The bound applies at the start of the next call: the running call keeps its 4.
     assert len(solver._configs) == 4 and solver._configurations_evicted == 0
@@ -292,7 +292,7 @@ def test_factory_dispatch_counters(monkeypatch, full):
     conditions = _map()[:2]
     if full:
         conditions = [replace(c, beta=0.02) for c in conditions]
-    settings = SolverSettings(n_chord=6, n_panels=5, panel_backend="numpy")
+    settings = SolverSettings(n_chord=6, n_panels=5, panel_backend="numpy", panel_ground_solver="direct")
     method, aircraft = PanelMethodSolver(), Aircraft(surfaces=[_wing()])
     first = method.solve(aircraft, conditions, settings)
     for result in first:

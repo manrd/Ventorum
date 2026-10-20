@@ -977,7 +977,7 @@ class PanelMethodSolver(BaseSolver):
         rp = ac.moment_reference() if ref_point is None else np.asarray(ref_point, dtype=float)
 
         kutta = _option(settings, "panel_kutta", "morino", _KUTTA_OPTIONS)
-        ground_solver = _option(settings, "panel_ground_solver", "direct", ("direct", "krylov"))
+        ground_solver = _option(settings, "panel_ground_solver", "auto", ("auto", "direct", "krylov"))
         chord_spacing = _option(settings, "panel_chord_spacing", "cosine", _CHORD_SPACINGS)
         wake_length = getattr(settings, "panel_wake_length", None)
         if wake_length is not None:
