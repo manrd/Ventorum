@@ -13,7 +13,7 @@ Ventorum has a tool interface for AI agents and automated design loops: Python c
 - **Keys carry their unit**, for example `span_m`, `root_chord_m`, `sweep_le_deg`, `V_inf_m_s`, `alpha_deg`, `rho_kg_m3`, `h_m`. Unknown or ambiguous keys (`alpha`, `aoa`, `span`, ...) are refused with a hint and the list of allowed keys.
 - **Types are strict.** Numbers must be numbers and booleans must be booleans.
 - **No explicit null in the input.** A key with the value `null` is refused with `invalid_input` that names the key, at the top level and in nested objects. Omit the key to get its default.
-- **Mesh limit.** A mesh larger than 4000 panels is refused.
+- **Mesh limit.** A mesh larger than 4000 panels is refused for lattice solvers (15000 half-mesh panels for the 3D panel solver).
 - **Every result has a status:** `"success"`, or `"error"` with `error.type` from the table below.
 - **Moment axes.** Every tool that returns moments takes an optional `axes` input (`"body"`, `"stability"`, `"wind"` or `"all"`, default `"body"`); each success result carries the field `"axes"`. `body` is fixed to the aircraft, `stability` is turned by alpha about y, `wind` is turned by beta about z so that x lies along the free stream (see `docs/user/conventions.md`). `CL`, `CD` and `CY` are relative to the free stream in every set. With `"all"` the result keeps the body-axis values and adds the three sets under `"moments"` (per row for tables). Stability derivatives give the moment derivatives (Cm_alpha, Cl_beta, Cn_beta) in the selected axes: the axes of the reference condition, held fixed while alpha and beta change. CL_alpha and CY_beta are relative to the free stream in every set; static margin and neutral point use the body-axis Cm_alpha.
 - **Strict JSON output.** A value that is not defined (for example L/D at zero drag) is `null`.
@@ -62,6 +62,7 @@ Example with `aircraft`:
 - **Work units.** One solve of a lattice with N panels costs N^2 units. The work of a call is the sum over all solves that the call will run (sweep angles, heights, mesh levels, batch candidates, derivative steps).
 - **Budget.** A call whose estimated work is above 200000000 units is refused with `error.type` `invalid_input` before any solve. The message gives the estimate, the budget and how to reduce the work: fewer angles (smaller range or larger `alpha_step_deg`), fewer heights, fewer mesh levels or spacing schemes, fewer candidates, or fewer panels (smaller `n_panels` or `n_chord`).
 - **Scope.** The budget covers `ventorum_wing_analysis`, `ventorum_polar_sweep`, `ventorum_ground_effect` (heights plus free air plus the Irodov height-pitch sweep), `ventorum_stability_derivatives` (5 solves), `ventorum_derivative_matrix` (the real solves times N^2: in free air 5 static, 1 + 2 n control (n controls) and 7 rate solves, so 13 + 2 n with all groups; in ground effect 9 static and height solves instead of 5, so 17 + 2 n), `ventorum_batch_evaluate`, `ventorum_mesh_convergence` (levels times the angles that are really solved), `ventorum_trim` (`(1 + max_iterations * (1 + 2 * n_unknowns)) * N^2`, with 2 unknowns in longitudinal trim and 4 in lateral trim) and `ventorum_error_bars` (`N1^2 + N2^2 + N3^2` of the three spanwise levels, plus `(1 + 2 max(1, k)) N1^2` with `input_uncertainties`, k = number of flow inputs). `ventorum_tune_machine` and `ventorum_undeformed_nodes` are outside the budget: they run no solve (their duration or mesh is stated in their description instead).
+- **Panel method budget.** Dense LU factorization costs N^3 / 3 operations for N half-mesh panels per configuration. `ventorum_panel_analysis` uses module constants `MAX_PANEL_PANELS = 15000` panels and `MAX_PANEL_CALL_WORK = 2.0e12` operations. A call that exceeds either limit is refused before any solve.
 
 ## Error types
 
@@ -184,6 +185,48 @@ res = call_tool("ventorum_airfoil_polar", {
     "source": "ventorum2d",
 })
 print(res["alpha_deg"], res["Cl"], res["converged"])
+```
+
+## 3D panel analysis
+
+- `ventorum_panel_analysis`: 3D potential flow panel solver (Ventorum-3DP) for closed thick lifting surfaces in free air and in ground effect.
+- **Inputs:**
+  - `wing` or `aircraft` (required: exactly one of the two). Surfaces can define airfoil sections with `shape` (for example `"NACA 0012"`) or `sections`.
+  - `flight_condition` (one flight condition) or `flight_conditions` (a list of conditions). Optional `h_m` (ground clearance height in metres) activates ground effect.
+  - Optional reference values: `ref_area_m2` [m^2], `ref_chord_m` [m], `ref_span_m` [m], `ref_point_m` [m].
+  - `settings`: optional panel settings object with `n_chord` (chordwise panels per surface, default 40, minimum 4) and `n_span` (spanwise panels per surface, default 80, minimum 4).
+  - `cp`: optional boolean (default false). When true, the output contains the surface pressure coefficients (`Cp`) per panel.
+  - `axes`: optional moment axes (`"body"`, `"stability"`, `"wind"`, or `"all"`, default `"body"`).
+  - `detail_level`: optional detail level (`"summary"` or `"full"`).
+- **Outputs:**
+  - Aerodynamic force and moment coefficients: `CL`, `CD` (pressure drag), `CDi` (Trefftz induced drag), `CY`, `Cl`, `Cm`, `Cn` per condition.
+  - `trust`: trust score and warnings.
+  - `dispatch`: execution record (`backend`, `device`, `ground_solver`).
+  - `cp`: pressure coefficient array per condition when `cp` is true.
+- **Work budget and limits:**
+  - Each configuration with N half-mesh panels requires dense LU factorization costing N^3 / 3 operations.
+  - The tool refuses a mesh larger than `MAX_PANEL_PANELS = 15000` half-mesh panels.
+  - The tool refuses total call work above `MAX_PANEL_CALL_WORK = 2.0e12` operations before any solve. The refusal message gives the estimate and how to reduce it.
+- **Defaults and unexposed features:**
+  - Defaults use backend `"auto"`, ground solver `"auto"`, and the solver cache enabled.
+  - The pressure Kutta condition is not exposed yet. The tool uses the Morino Kutta condition and refuses pressure Kutta requests.
+  - Control surfaces are not exposed for the panel solver yet. Calls with control surface deflections are refused with `invalid_input`.
+
+Example call:
+
+```python
+from ventorum.agent import call_tool
+
+res = call_tool("ventorum_panel_analysis", {
+    "wing": {
+        "span_m": 10.0,
+        "chord_m": 1.0,
+        "shape": "NACA 0012",
+    },
+    "flight_condition": {"V_inf_m_s": 30.0, "alpha_deg": 4.0},
+    "settings": {"n_chord": 20, "n_span": 30},
+})
+print("CL:", res["CL"], "CD (pressure):", res["CD"], "CDi (Trefftz):", res["CDi"])
 ```
 
 ## Example

@@ -54,6 +54,8 @@ from ventorum.agent.schemas import (
     INPUT_UNCERTAINTY_FLOW_PROPS,
     INPUT_UNCERTAINTY_SECTION_PROPS,
     MAX_CALL_WORK,
+    MAX_PANEL_CALL_WORK,
+    MAX_PANEL_PANELS,
     MAX_TOTAL_PANELS,
     MIN_ALPHA_STEP_DEG,
     InputError,
@@ -405,6 +407,206 @@ def wing_analysis(
     if dl == "full":
         out["spanwise_distributions"] = spanwise_payload(res)
         out["dispatch"] = dispatch_payload(res)
+    return out
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 3D panel analysis
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def _check_panel_mesh(n_panels: int) -> None:
+    """Refuse a panel mesh larger than MAX_PANEL_PANELS."""
+    import ventorum.agent.tools as _tools
+
+    limit = getattr(_tools, "MAX_PANEL_PANELS", MAX_PANEL_PANELS)
+    if int(n_panels) > int(limit):
+        raise InputError(
+            f"The mesh is too large: {int(n_panels)} half-mesh panels. The limit is {int(limit)} "
+            f"panels. Use a smaller n_span or n_chord."
+        )
+
+
+def _check_panel_work(estimate: float, n_configs: int, n_panels: int) -> None:
+    """Refuse a panel call whose estimated factorization work is above MAX_PANEL_CALL_WORK."""
+    import ventorum.agent.tools as _tools
+
+    limit = getattr(_tools, "MAX_PANEL_CALL_WORK", MAX_PANEL_CALL_WORK)
+    if float(estimate) > float(limit):
+        raise InputError(
+            f"The estimated work is {int(estimate)} operations "
+            f"({n_configs} configuration(s) of {n_panels} half-mesh panels at N^3 / 3 operations per configuration), "
+            f"above the budget {int(limit)} operations. "
+            f"Reduce the work with fewer configurations, or fewer panels (smaller n_span or n_chord)."
+        )
+
+
+@_tool
+def panel_analysis(
+    wing: Any = None,
+    aircraft: Any = None,
+    flight_condition: dict[str, Any] | None = None,
+    n_chord: int | None = None,
+    n_span: int | None = None,
+    cp: bool = False,
+    return_cp: bool = False,
+    settings: dict[str, Any] | None = None,
+    detail_level: str = "standard",
+    axes: str = "body",
+) -> dict[str, Any]:
+    """Aerodynamic analysis with the 3D potential-flow panel method (Ventorum-3DP).
+
+    Parameters
+    ----------
+    wing : dict or None
+        One surface specification.
+    aircraft : dict or None
+        Several surfaces with reference values and moment reference point.
+    flight_condition : dict or None
+        Free-stream flight condition (speed, angles, density, optional ground height).
+    n_chord : int or None
+        Chordwise panel count per surface [-]. Default 40.
+    n_span : int or None
+        Spanwise panels per semi-span [-]. Default 80.
+    cp : bool, default=False
+        True to return panel pressure coefficients Cp in the result.
+    return_cp : bool, default=False
+        Alias for cp.
+    settings : dict or None
+        Panel solver settings (n_chord, n_span, backend, ground_solver, panel_cache).
+    detail_level : 'summary', 'standard' or 'full'
+        Detail level of the output.
+    axes : 'body', 'stability', 'wind' or 'all'
+        Axis system of the moment coefficients.
+    """
+    ac = build_aircraft_from_spec(wing=wing, aircraft=aircraft)
+    for surf in ac.surfaces:
+        if getattr(surf, "controls", None):
+            raise InputError(
+                "The controls of the panel method are not exposed yet in the agent tools. "
+                "Remove 'controls' from the surface definition."
+            )
+    sett_dict = dict(settings or {})
+    kutta = str(sett_dict.get("panel_kutta", sett_dict.get("kutta", "morino"))).lower()
+    if kutta == "pressure":
+        raise InputError(
+            "The pressure Kutta condition is not exposed yet in the agent tools. "
+            "Use the default Morino Kutta condition."
+        )
+
+    c = parse_condition(flight_condition)
+    dl = parse_detail_level(detail_level)
+    ax = parse_axes(axes)
+
+    if n_chord is not None:
+        nc = integer(n_chord, "n_chord", minimum=4, maximum=200)
+    elif "n_chord" in sett_dict and sett_dict["n_chord"] is not None:
+        nc = integer(sett_dict["n_chord"], "settings.n_chord", minimum=4, maximum=200)
+    else:
+        nc = 40
+
+    if n_span is not None:
+        ns = integer(n_span, "n_span", minimum=4, maximum=400)
+    elif "n_span" in sett_dict and sett_dict["n_span"] is not None:
+        ns = integer(sett_dict["n_span"], "settings.n_span", minimum=4, maximum=400)
+    elif "n_panels" in sett_dict and sett_dict["n_panels"] is not None:
+        ns = integer(sett_dict["n_panels"], "settings.n_panels", minimum=4, maximum=400)
+    else:
+        ns = 80
+
+    total_half_panels = sum(
+        (2 * int(s.n_panels if s.n_panels is not None else ns) + 1) * int(nc)
+        for s in ac.surfaces
+    )
+    _check_panel_mesh(total_half_panels)
+
+    n_configs = 1
+    est_ops = n_configs * (float(total_half_panels) ** 3 / 3.0)
+    _check_panel_work(est_ops, n_configs, total_half_panels)
+
+    backend = str(sett_dict.get("panel_backend", sett_dict.get("backend", "auto")))
+    ground_solver = str(sett_dict.get("panel_ground_solver", sett_dict.get("ground_solver", "auto")))
+    cache = bool(sett_dict.get("panel_cache", True))
+
+    solver_sett = SolverSettings(
+        solver_type="panel3d",
+        n_panels=ns,
+        n_chord=nc,
+        panel_kutta="morino",
+        panel_backend=backend,
+        panel_ground_solver=ground_solver,
+        panel_cache=cache,
+    )
+
+    fc = make_flight_condition(c)
+    from ventorum.solvers.factory import make_solver
+
+    solver = make_solver("panel3d")
+    res = solver.solve(ac, fc, solver_sett)
+
+    m = metrics_payload(res)
+    cd_press = float(res.totals.CDi_nearfield)
+    m["CD"] = rnd(cd_press)
+    m["CD_pressure"] = rnd(cd_press)
+    m["CDi"] = rnd(res.totals.CDi)
+    m["CDi_trefftz"] = rnd(res.totals.CDi)
+    m["drag_basis"] = "pressure integral"
+
+    b_ref, c_ref = float(res.b_ref), float(res.c_ref)
+    m["Cl"], m["Cm"], m["Cn"] = _apply_axes(
+        res.totals.Cl, res.totals.Cm, res.totals.Cn, c["alpha_deg"], c["beta_deg"], ax,
+        b_ref=b_ref, c_ref=c_ref,
+    )
+    if ax == "all":
+        m["moments"] = moments_all_sets(
+            res.totals.Cl, res.totals.Cm, res.totals.Cn, c["alpha_deg"], c["beta_deg"],
+            b_ref=b_ref, c_ref=c_ref,
+        )
+
+    include_cp = bool(cp or return_cp or sett_dict.get("cp") or sett_dict.get("return_cp"))
+    trust = trust_payload(res.totals.trust)
+    dispatch = dict(res.details.get("dispatch", {}))
+
+    rp = ac.moment_reference()
+    where = "free air" if c["h_m"] is None else f"h={c['h_m']:g} m above the ground"
+    device, precision = result_device_precision(res)
+    summary = (
+        f"[Ventorum RESULT] {ac.name}: CL={fmt(m['CL'], '.4f')}, CD={fmt(m['CD'], '.5f')} (pressure), "
+        f"CDi={fmt(m['CDi'], '.5f')} (Trefftz), L/D={fmt(m['L_over_D'], '.2f')}, "
+        f"Cm={fmt(m['Cm'], '.4f')} about {_fmt_point(rp)} m. "
+        f"Condition: alpha={c['alpha_deg']:g} deg, beta={c['beta_deg']:g} deg, V={c['V_inf_m_s']:g} m/s, "
+        f"{where}. Solver: panel3d, converged={bool(res.converged)}. "
+        f"{device_summary_text(device, precision)}"
+    )
+    if res.totals.trust is not None:
+        t = res.totals.trust
+        summary += f" Trust {t.score:.2f} ({t.rating}), {len(t.warnings)} warning(s)."
+
+    out: dict[str, Any] = {
+        "status": "success",
+        "executive_summary": summary,
+        "metrics": m,
+        "trust": trust,
+        "dispatch": dispatch,
+        "condition_used": condition_payload(c),
+        "settings_used": {
+            "solver": "panel3d",
+            "n_chord": nc,
+            "n_span": ns,
+            "half_mesh_panels": total_half_panels,
+            "panel_backend": solver_sett.panel_backend,
+            "panel_ground_solver": solver_sett.panel_ground_solver,
+            "panel_cache": solver_sett.panel_cache,
+        },
+        "axes": ax,
+    }
+    if include_cp:
+        raw_cp = res.details.get("cp")
+        out["cp"] = raw_cp.tolist() if hasattr(raw_cp, "tolist") else raw_cp
+    if dl in ("standard", "full"):
+        out["geometry"] = geometry_payload(ac)
+        out["sectional_diagnostics"] = sectional_payload(res)
+    if dl == "full":
+        out["spanwise_distributions"] = spanwise_payload(res)
     return out
 
 

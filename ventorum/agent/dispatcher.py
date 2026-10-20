@@ -31,6 +31,7 @@ from ventorum.agent.tools import (
     ground_effect,
     machine_capabilities,
     mesh_convergence,
+    panel_analysis,
     polar_sweep,
     stability_derivatives,
     trim,
@@ -44,6 +45,7 @@ AUDIT_ENV_VAR = "VENTORUM_AGENT_AUDIT_LOG"
 PREFIX = "ventorum_"
 
 TOOL_FUNCTIONS: dict[str, Callable[..., dict[str, Any]]] = {
+    "ventorum_panel_analysis": panel_analysis,
     "ventorum_wing_analysis": wing_analysis,
     "ventorum_polar_sweep": polar_sweep,
     "ventorum_ground_effect": ground_effect,
