@@ -167,8 +167,12 @@ def _bound_forces(result: SolverResult, panels: np.ndarray) -> tuple[np.ndarray,
 
 def _hinge_line(lattice: VortexLattice, s: int, h: float) -> tuple[np.ndarray, np.ndarray]:
     """Return the mid-point [m] and the unit axis of the hinge line of strip *s* (lattice order)."""
-    H_l = lattice.le_left[s] + h * (lattice.te_left[s] - lattice.le_left[s])
-    H_r = lattice.le_right[s] + h * (lattice.te_right[s] - lattice.le_right[s])
+    hinges = lattice.geom_cache.get("flap_hinges", {})
+    if s in hinges:
+        H_l, H_r = hinges[s]
+    else:
+        H_l = lattice.le_left[s] + h * (lattice.te_left[s] - lattice.le_left[s])
+        H_r = lattice.le_right[s] + h * (lattice.te_right[s] - lattice.le_right[s])
     axis = H_r - H_l
     return 0.5 * (H_l + H_r), axis / max(float(np.linalg.norm(axis)), 1e-300)
 

@@ -111,6 +111,31 @@ def _rotate(v: np.ndarray, axis: np.ndarray, angle: np.ndarray | float) -> np.nd
     return v * c + cross3(axis, v) * s + axis * k_dot_v * (1.0 - c)
 
 
+def _rotate_flap_points(points: np.ndarray, hinge: np.ndarray, axis: np.ndarray, delta: float) -> np.ndarray:
+    """Rotate flap points [m] about the unit hinge axis by *delta* [rad].
+
+    Use the rigid camber-surface rotation of Katz and Plotkin (2001).
+    The caller selects points strictly aft of the effective hinge.
+
+    Parameters
+    ----------
+    points : numpy.ndarray
+        Points in body axes [m], shape (n, 3).
+    hinge : numpy.ndarray
+        Point on the hinge axis [m], shape (3,).
+    axis : numpy.ndarray
+        Unit hinge direction [-], shape (3,).
+    delta : float
+        Signed deflection [rad].
+
+    Returns
+    -------
+    numpy.ndarray
+        Rotated points in body axes [m], shape (n, 3).
+    """
+    return hinge + _rotate(points - hinge, axis[None, :], delta)
+
+
 def surface_reference_line(surf: LiftingSurface, eta: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Leading-edge line of the flat (untwisted) right half, without the position offset.
 
@@ -402,8 +427,16 @@ class VortexLattice:
 
     def all_points(self) -> np.ndarray:
         """Return edge nodes and non-flat mean-surface points for clearance checks [m]."""
-        pts = [s.edge_le for s in self.surfaces] + [s.edge_te for s in self.surfaces]
-        if self.has_camber_offset:
+        deflected = any(
+            info["mode"] == "chordwise" and info["deflection_rad"] != 0.0 for info in self.control_info
+        )
+        pts = [s.edge_le for s in self.surfaces]
+        if deflected:
+            pts.extend([self.te_left, self.te_right])
+            pts.extend(p[None, :] for pair in self.geom_cache.get("flap_hinges", {}).values() for p in pair)
+        else:
+            pts.extend(s.edge_te for s in self.surfaces)
+        if self.has_camber_offset or deflected:
             pts.extend([self.a, self.b, self.cp, self.a_te, self.b_te])
         return np.vstack(pts)
 
@@ -1493,6 +1526,7 @@ def build_lattice(
         sf.edge_te = sf.edge_te + off_te
         le_l[idx], le_r[idx] = sf.edge_le[:-1], sf.edge_le[1:]
         te_l[idx], te_r[idx] = sf.edge_te[:-1], sf.edge_te[1:]
+    flap_hinges = {}
     if is_chordwise:
         is_right_arr = cat["is_right"].astype(bool)
         for s in range(n_strips):
@@ -1517,13 +1551,27 @@ def build_lattice(
                 # refuse it, but build_lattice accepts it, and its normal is
                 # zero). The fallback axis only prevents a division by zero.
                 u_hinge = (H_axis / norm_H) if norm_H > 1e-300 else np.array([0.0, 1.0, 0.0])
+                flap_hinges[s] = (H_l.copy(), H_r.copy())
                 delta = c.deflection if (is_right_arr[s] or c.symmetric) else -c.deflection
                 if delta != 0.0:
                     for k in range(n_chord):
                         x0_k = strip_xi_arr[s, k]
+                        dx_k = strip_xi_arr[s, k + 1] - x0_k
+                        xb_k = x0_k + 0.25 * dx_k
+                        xc_k = xb_k + 0.5 * dx_k * claf[s]
+                        p_idx = s * n_chord + k
+                        for points, fraction in ((a, xb_k), (b, xb_k), (cp, xc_k)):
+                            if fraction > hinge_eff:
+                                points[p_idx:p_idx + 1] = _rotate_flap_points(
+                                    points[p_idx:p_idx + 1], H_l, u_hinge, delta,
+                                )
                         if x0_k >= hinge_eff - 1e-12:
-                            p_idx = s * n_chord + k
                             normal_bc[p_idx] = _rotate(normal_bc[p_idx:p_idx + 1], u_hinge[None, :], delta)[0]
+                    # Keep each strip's side edge. A neighbour can have a
+                    # different deflection. The surface edge arrays keep
+                    # the reference geometry used by the core-group rule.
+                    te_l[s:s + 1] = _rotate_flap_points(te_l[s:s + 1], H_l, u_hinge, delta)
+                    te_r[s:s + 1] = _rotate_flap_points(te_r[s:s + 1], H_l, u_hinge, delta)
 
     lattice = VortexLattice(
         collocation=collocation,
@@ -1569,6 +1617,7 @@ def build_lattice(
         has_camber_offset=any(line is not None and np.any(line.z != 0.0)
                               for _, lines, _ in mean_surfaces for line in lines),
     )
+    lattice.geom_cache["flap_hinges"] = flap_hinges
     mark_joined_edges(surfaces)
     check_overlaps(lattice)
     if collocation == "vlm":

@@ -460,7 +460,15 @@ def test_cambered_chordwise_control_turns_geometric_normals():
     ac.surfaces[0].controls[0].deflection = 0.12
     flap = build_lattice(ac, st, n_chord=8)
     for name in ("a", "b", "cp", "a_te", "b_te"):
-        np.testing.assert_array_equal(getattr(flap, name), getattr(clean, name))
+        points = getattr(clean, name)
+        expected = points.copy()
+        for s in range(flap.n_strips):
+            origin, end = clean.geom_cache["flap_hinges"][s]
+            axis = (end - origin) / np.linalg.norm(end - origin)
+            indices = np.arange(s * 8, (s + 1) * 8)
+            indices = indices[points[indices, 0] > origin[0]]
+            expected[indices] = origin + _rotate(points[indices] - origin, axis[None, :], 0.12)
+        np.testing.assert_allclose(getattr(flap, name), expected, rtol=0, atol=2e-15)
     for s in range(flap.n_strips):
         for k in range(8):
             p = s * 8 + k

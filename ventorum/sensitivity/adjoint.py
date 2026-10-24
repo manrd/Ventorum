@@ -1427,7 +1427,8 @@ def _case_notes(prep: dict, ins: tuple[str, ...]) -> list[str]:
         if model.b.get("ctrl_chord") is not None:
             notes.append(
                 "Controls (chordwise mode): the derivative per unit deflection [1/rad] turns the "
-                "normals of the panels aft of the hinge about the hinge line. All controls with one "
+                "points and normals of the panels aft of the hinge about the hinge line, including "
+                "the trailing edges and the node chain. All controls with one "
                 "name move together; the left half of an antisymmetric control moves the opposite way.")
         else:
             notes.append(

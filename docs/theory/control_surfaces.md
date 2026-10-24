@@ -18,13 +18,21 @@ On the left half of a symmetric surface and on a mirror copy, deflection depends
 
 When a symmetric surface has an antisymmetric control (`symmetric=False`) with non-zero deflection, Ventorum does not fold symmetry. The full aircraft lattice is solved.
 
-## Vortex lattice: rotated boundary condition
+## Vortex lattice: geometric deflection
 
 The vortex lattice method uses the chordwise mode when `n_chord >= 2`.
 
 The mesh moves the interior chordwise panel edge nearest to the hinge onto the hinge coordinate `hinge_x_c`. This move occurs only when both neighbouring panels keep a length between 0.5 and 1.25 times their length before the move. If this length rule fails, the edge does not move. The move applies to the strips of that control only. The effective hinge coordinate `hinge_x_c_eff` is then the nearest existing interior edge.
 
-A panel is on the flap when its leading chordwise edge fraction is at or behind `hinge_x_c_eff`. For each flap panel, the boundary-condition normal vector turns by the signed deflection angle about the strip hinge axis. The panel node positions, the wake geometry, the strip normal vector and the chord direction vector do not change. The airfoil data do not change in this mode.
+A panel is on the flap when its leading chordwise edge fraction is at or behind `hinge_x_c_eff`. The hinge axis joins the two strip-edge points at this fraction on the section mean surface. A section without a mean line uses its chord line. All bound endpoints, control points and trailing-edge points aft of the hinge rotate rigidly about this axis. Points at or ahead of the hinge stay fixed. The local mean-surface normals rotate with the flap; no second normal rotation is applied. This is a camber-surface vortex lattice (Katz and Plotkin 2001).
+
+The wake starts at the deflected trailing edge and follows the selected wake direction. The same geometric model applies in free air and in ground effect. The ground images, clearance check and Trefftz plane use the deflected points. The strip reference chord, area, normal and airfoil data keep their reference values. A control with zero deflection keeps the previous geometry and integrated coefficients. Hinge moments of cambered sections use the mean-line hinge even at zero deflection; these replace the former chord-line hinge moments. Rigid lattice transforms carry the hinge endpoints with the other geometry.
+
+At a change of deflection each strip keeps its own edge points. There is no ramp or added filament between separated edges. The existing core-group and leg-force rules apply: unmatched interior legs keep the shared-edge tangential rule. A boundary edge that is not joined keeps the free-edge rule. See [Forces and moments](forces_and_moments.md).
+
+The adjoint control derivative includes the motion of these points, the wake origins and the hinge axis through the node chain. The existing refusal of gradients for cambered mean lines still applies. All controls with the same name move together.
+
+Some strict float64 backend comparisons fail their relative bounds for small gradient components. Some float32 accuracy checks also fail. At zero deflection on fine chordwise meshes, the finite-difference error estimate can be too large to verify the control derivative. The geometric-control gradients are not fully verified across those cases.
 
 ## Lifting line: thin-airfoil flap theory
 
@@ -95,7 +103,7 @@ Here $\alpha_{L0,i}$ is the zero-lift angle of the deflected strip section and $
 
 ### Chordwise mode
 
-The vortex lattice with `n_chord >= 2` uses the panel loads. The force on the bound vortex of each flap panel is the Kutta-Joukowski force $\rho\,\Gamma\,(\mathbf V_\infty + \mathbf v_\Omega + \mathbf v) \times \mathbf l$ (Katz and Plotkin 2001), with the onset $\mathbf v_\Omega$ of the body rates about the moment reference point (see [Body rates](rotation_rates.md)) and the induced velocity $\mathbf v$ at the force point from all horseshoes, the ground images and the wake of the case. $H$ is the sum of the moments of these forces about the hinge line of each strip. The forces on the chordwise legs are not included: the two legs of one horseshoe carry opposite vorticity over the same chordwise interval, so their moments about the hinge cancel, except for the difference of the induced velocity at the two legs.
+The vortex lattice with `n_chord >= 2` uses the panel loads. The force on the bound vortex of each flap panel is the Kutta-Joukowski force $\rho\,\Gamma\,(\mathbf V_\infty + \mathbf v_\Omega + \mathbf v) \times \mathbf l$ (Katz and Plotkin 2001), with the onset $\mathbf v_\Omega$ of the body rates about the moment reference point (see [Body rates](rotation_rates.md)) and the induced velocity $\mathbf v$ at the force point from all horseshoes, the ground images and the wake of the case. $H$ is the sum of the moments of these forces about the hinge line of each strip. This is the same axis on the mean surface that rotates the flap; it is not interpolated from the deflected trailing edge. The force points and bound segments belong to the deflected geometry. The forces on the chordwise legs are not included: the two legs of one horseshoe carry opposite vorticity over the same chordwise interval, so their moments about the hinge cancel, except for the difference of the induced velocity at the two legs.
 
 The thin-airfoil load is logarithmic at the hinge, so the lattice hinge moment converges slowly with the number of chordwise panels. On a rectangular wing of aspect ratio 40 (hinge 0.75, uniform chordwise panels, $\delta = 5$ deg, $\alpha = 3$ deg, 20 spanwise panels per half), the lattice value approaches the thin-airfoil value at the lift of each strip as the chordwise count increases. `test_vlm_hinge_moment_converges_to_thin_airfoil` in `tests/test_control_derivatives.py` computes this case and checks that the difference decreases.
 
@@ -116,15 +124,18 @@ The control surface model uses these assumptions:
 - No gap between flap and main wing surface.
 - No flap-edge vortex model other than the vortex lattice itself.
 - No viscous separation effects: profile drag shifts with the effective angle of attack only.
-- In chordwise mode, the trailing edge nodes do not translate. Ground-clearance checks do not detect deflected flap positions.
 - A snapped panel can be up to 1.25 times its normal length. The ground-effect rule that limits chordwise panel length to the gap height does not see this extension.
 - At control side edges, the bound vortices of neighbouring strips can end at different chordwise locations.
-- The side force of an antisymmetric deflection (aileron) on a flat wing is not modelled: the rotated-normal model has no flap side edges, and the leg forces use the tangential velocity only (see [Forces and moments](forces_and_moments.md)). On a thin wing this side force is small and proportional to the angle of attack times the deflection; DATCOM (Finck 1978, section 6.2.3) neglects it for plain wings. The far-field `CY_farfield` does not show it either: the Trefftz trace uses the trailing edges of the lattice, which a deflection does not move.
+- The aileron side force follows the existing leg rules. Separated interior edges still use tangential velocity relative to the reference strip normal. This is not a resolved flap-edge flow model. On the rectangular flat-wing test at positive incidence, the near-field side force is positive for right flap down. It is finite and changes sign when the aileron deflection changes sign. The Trefftz plane uses the moved trailing edges, but a rectangular strip with a spanwise hinge still has a spanwise trailing-edge segment, so this displacement alone does not give a lateral far-field force. DATCOM (Finck 1978, section 6.2.3) neglects the plain-wing control side force.
 - The classical Fourier solver does not support deflected control surfaces.
 - The section hinge moment is the thin-airfoil value of a plain flap: no gap, no nose balance, no camber term, attached flow only. Past stall it has no physical meaning.
 - The chordwise hinge moment converges slowly with the number of chordwise panels (see *Chordwise mode* above). Use 16 or more chordwise panels for hinge moments.
 
 ## Verification
+
+`tests/test_geometric_flap.py` checks the moved points and normals, wake origins, flap clearance, hinge axis, control gradients, backend parity and the aileron side-force sign reversal. Its slow comparison with the thin-wing panel method keeps explicit lift and moment limits in free air and ground effect. The rigid full-chord rotation is checked at the geometry-operation level: the public control validator excludes a hinge at the leading edge, and the snap rule selects interior edges only.
+
+The thin-wing panel comparison in ground effect still exceeds its lift bound.
 
 The implementation is verified in `tests/test_control_surfaces.py`:
 - `test_flap_effectiveness_matches_thin_airfoil_table`

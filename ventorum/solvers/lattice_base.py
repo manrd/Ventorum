@@ -198,10 +198,11 @@ class LatticeSolver(BaseSolver):
             return DEFAULT_N_CHORD
         # In ground effect a chordwise panel should not be longer than the gap.
         chord_spacing = getattr(settings, "chord_spacing", "uniform")
-        key = lattice_cache.lattice_key(aircraft, settings, "vlm", 1, chord_spacing,
+        probe_count = DEFAULT_N_CHORD if any(s.controls for s in aircraft.surfaces) else 1
+        key = lattice_cache.lattice_key(aircraft, settings, "vlm", probe_count, chord_spacing,
                                         fingerprint=fingerprint)
         probe = lattice_cache.get_or_build(key, lambda: build_lattice(
-            aircraft, settings, collocation="vlm", n_chord=1, chord_spacing=chord_spacing,
+            aircraft, settings, collocation="vlm", n_chord=probe_count, chord_spacing=chord_spacing,
         ))
         rp = aircraft.moment_reference() if ref_point is None else ref_point
         gp = ground if ground is not None else ground_plane_from_condition(probe, condition, rp)

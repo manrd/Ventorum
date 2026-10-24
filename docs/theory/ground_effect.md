@@ -17,7 +17,7 @@ that is, the lift direction turned about the free stream by $\phi$. $\hat{\mathb
 | `height_ref` | The point at height $h$ |
 | --- | --- |
 | `ref` (default) | the moment reference point |
-| `min` | the lowest leading- or trailing-edge node |
+| `min` | the lowest point of the lattice used for the ground plane |
 | `qc`, `te` | the root quarter-chord or trailing-edge point of the main surface |
 
 A geometry that touches or crosses the plane is refused (`GroundStrikeError`). The bank angle of the first contact is found by bisection, with the reference point at a constant height.
@@ -40,6 +40,10 @@ The image vortices enter every part of the solution: the influence matrix (equat
 When a section mean line is given, the image points are the reflections of the real mean-surface points. The clearance check includes the bound endpoints, control points and trailing-edge points. The camber offset changes the real distance to the ground as well as the boundary normal. C. Coulliette and A. Plotkin (1996) use the real camber line for a two-dimensional discrete-vortex model. A chord-plane model with a uniformly turned normal omits this height and the chordwise camber loading. Near the ground this is an additional approximation, even when its free-air section lift agrees with the given polar. S. E. Widnall and T. M. Barrows (1970) describe the small-clearance lifting-surface limit.
 
 A surface without all its section mean lines uses the turned-normal model over the whole surface. In ground effect the result states that its chordwise load and camber height are approximate. The note is included in the trust assessment.
+
+In chordwise control mode, the flap points rotate about the hinge on the mean surface. The image vortices and the Trefftz plane use the deflected bound endpoints and trailing edges. The clearance check includes the deflected control points and both copies of a separated strip edge. A flap that touches or crosses the plane raises `GroundStrikeError`. A zero-deflection control keeps the same geometry and integrated coefficients. Cambered hinge moments use the mean-line hinge at zero deflection too. The single-panel vortex lattice and the lifting lines retain the thin-airfoil section control model.
+
+For chordwise controls, the automatic panel-count probe starts with the default chordwise count and includes the deflected flap points. The ground-effect entry point then uses the selected count for its clearance, tip heights and bank-limit geometry. It refuses a strike before it calls the aerodynamic solver. The root `qc` and `te` height points rotate about the effective root-strip hinge when they lie aft of it. On a symmetric surface with an antisymmetric control, these height points belong to the original half of the main surface. Single-panel and lifting-line controls retain their section model.
 
 The vortex lattice selects the chordwise panel count from the gap (see [Vortex-lattice method](vortex_lattice.md)). A sweep in ground effect uses one count for all its cases (the count of the case with the smallest gap), so that differences between the cases contain no mesh change.
 
