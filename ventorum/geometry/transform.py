@@ -96,6 +96,31 @@ def rotation_matrix(
     return Rx @ (Ry @ Rz)
 
 
+def _transformed_cache(lattice: VortexLattice, points, directions) -> dict:
+    """Return the cache entries of a lattice with chordwise flaps that a rigid transform keeps.
+
+    The hinge endpoints of the flap strips move with the lattice. The
+    leg-force rules of such a lattice come from the lattice before the
+    flap turn (see :func:`ventorum.geometry.lattice.build_lattice`), so the
+    transformed lattice keeps them, with the normals turned; they cannot be
+    found again from the deflected points.
+    """
+    cache = {"flap_hinges": {
+        strip: tuple(points(np.asarray(pts)))
+        for strip, pts in lattice.geom_cache.get("flap_hinges", {}).items()
+    }}
+    if "flap_field" in lattice.geom_cache:
+        cache["flap_field"] = lattice.geom_cache["flap_field"]
+        clean = lattice.geom_cache.get("flap_points_clean")
+        if clean is not None:
+            cache["flap_points_clean"] = tuple(points(np.asarray(x)) for x in clean)
+        rules = lattice.geom_cache.get("leg_force_rules")
+        if rules is not None:
+            normal, scale, kind = rules
+            cache["leg_force_rules"] = (directions(normal), scale.copy(), kind.copy())
+    return cache
+
+
 def transform_lattice(
     lattice: VortexLattice,
     rotation: np.ndarray | None = None,
@@ -241,6 +266,8 @@ def transform_lattice(
         b=_transform_points(lattice.b),
         a_te=_transform_points(lattice.a_te),
         b_te=_transform_points(lattice.b_te),
+        a_kink=None if lattice.a_kink is None else _transform_points(lattice.a_kink),
+        b_kink=None if lattice.b_kink is None else _transform_points(lattice.b_kink),
         cp=_transform_points(lattice.cp),
         normal_bc=_transform_directions(lattice.normal_bc),
         panel_strip=lattice.panel_strip.copy(),
@@ -277,10 +304,7 @@ def transform_lattice(
         ),
         join_warnings=list(lattice.join_warnings),
         kernel_cache=None,
-        geom_cache={"flap_hinges": {
-            strip: tuple(_transform_points(np.asarray(points)))
-            for strip, points in lattice.geom_cache.get("flap_hinges", {}).items()
-        }},
+        geom_cache=_transformed_cache(lattice, _transform_points, _transform_directions),
         control_info=[dict(c) for c in getattr(lattice, "control_info", [])],
         geometric_camber=None if lattice.geometric_camber is None else lattice.geometric_camber.copy(),
         normal_bc_clean=(

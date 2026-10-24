@@ -586,45 +586,77 @@ class TorchReference:
 
         n_bc = normal_bc_strip[panel_strip]
         cc = b.get("ctrl_chord")
+        kink_geom = None
+        leg_turn = None
         if cc is not None:
             # Chordwise mode (vortex lattice, two or more chordwise panels):
-            # rotate the flap points and normals about the moving hinge.
-            # The node chain carries the motion of the hinge itself.
+            # the points aft of the hinge turn about the hinge axis of their
+            # strip edge (the geometry of build_lattice). The axis of an edge
+            # node is the central difference of the hinge points of its
+            # neighbour nodes; the angle of an edge node is its base angle
+            # plus the coefficients of the control increments (the joins at
+            # the side edges of the controls). The node chain carries the
+            # motion of the hinge points and of the axes.
             s_c = cc["strip"]
             hf = cc["hinge"][:, None]
-            h_l = le_l[s_c] + hf * (te_l[s_c] - le_l[s_c])
-            h_r = le_r[s_c] + hf * (te_r[s_c] - le_r[s_c])
-            u_hinge = _norm_rows(h_r - h_l)
-            delta_p = cc["delta0"]
+
+            def _hp(le, te, idx):
+                return le[idx] + hf * (te[idx] - le[idx])
+
+            def _hp_node(node):
+                # Hinge point at the node (strip, side) with the hinge of each flap strip.
+                idx, side = node[:, 0], (node[:, 1] == 1)[:, None]
+                return torch.where(side, _hp(le_r, te_r, idx), _hp(le_l, te_l, idx))
+
+            h_l = _hp(le_l, te_l, s_c)
+            h_r = _hp(le_r, te_r, s_c)
+            ax_l = _norm_rows(h_r - _hp_node(cc["far"][:, 0]))
+            ax_r = _norm_rows(_hp_node(cc["far"][:, 1]) - h_l)
+            ang = cc["angle0"]
             if inc is not None:
-                delta_p = delta_p + inc[cc["ctrl"]]
-            angle = cc["sign"] * delta_p
+                ang = ang + torch.einsum("fsc,c->fs", cc["coef"], inc)
+            d_l, d_r = ang[:, 0], ang[:, 1]
+            f_cp = frac[s_c][:, None]
+            h_f = h_l + f_cp * (h_r - h_l)
+            ax_f = _norm_rows(ax_l + f_cp * (ax_r - ax_l))
+            d_f = d_l + f_cp[:, 0] * (d_r - d_l)
+            x0_s = xi[s_c, :-1]
+            dx_s = xi[s_c, 1:] - x0_s
+            xb_s = x0_s + 0.25 * dx_s
+            xc_s = xb_s + 0.5 * dx_s * claf[s_c, None]
+            hcol = cc["hinge"][:, None]
+
+            def _turn(points, mask, H, ax, da):
+                row, col = torch.where(mask)
+                idx = s_c[row] * n_chord + col
+                return points.index_copy(0, idx, H[row] + rod_rot(points[idx] - H[row], ax[row], da[row]))
+
+            a = _turn(a, xb_s > hcol, h_l, ax_l, d_l)
+            bv = _turn(bv, xb_s > hcol, h_r, ax_r, d_r)
+            # A high CLAF can put the control point of a panel ahead of the
+            # hinge aft of it: the point moves, its normal does not turn.
+            cp = _turn(cp, xc_s > hcol, h_f, ax_f, d_f)
             panels = cc["panels"]
-            n_bc = n_bc.index_copy(0, panels, rod_rot(n_bc[panels], u_hinge, angle))
-
-            def _flap_points(points):
-                return points.index_copy(0, panels, h_l + rod_rot(points[panels] - h_l, u_hinge, angle))
-
-            a, bv, cp = _flap_points(a), _flap_points(bv), _flap_points(cp)
-            # The wake starts at the deflected trailing edge for every
-            # horseshoe, including those ahead of the hinge. Select one
-            # row per controlled strip to avoid repeated indexed writes.
-            first = torch.cat((torch.ones(1, dtype=torch.bool, device=self.device), s_c[1:] != s_c[:-1]))
-            strips = s_c[first]
-            hl, axis, da = h_l[first], u_hinge[first], angle[first]
-            # A high CLAF can put the control point of the preceding panel
-            # aft of the hinge. Move that point too, without turning the
-            # normal of a panel whose leading edge is ahead of the hinge.
-            x0_s = xi[strips, :-1]
-            dx_s = xi[strips, 1:] - x0_s
-            xc_s = x0_s + 0.25 * dx_s + 0.5 * dx_s * claf[strips, None]
-            extra = (x0_s < cc["hinge"][first, None]) & (xc_s > cc["hinge"][first, None])
-            row, col_extra = torch.where(extra)
-            cp_extra = strips[row] * n_chord + col_extra
-            cp = cp.index_copy(0, cp_extra, hl[row] + rod_rot(cp[cp_extra] - hl[row], axis[row], da[row]))
-            te_l = te_l.index_copy(0, strips, hl + rod_rot(te_l[strips] - hl, axis, da))
-            te_r = te_r.index_copy(0, strips, hl + rod_rot(te_r[strips] - hl, axis, da))
+            row_n = torch.searchsorted(s_c, cc["panel_strip"])
+            n_bc = n_bc.index_copy(0, panels, rod_rot(n_bc[panels], ax_f[row_n], d_f[row_n]))
+            # The wake starts at the deflected trailing edge.
+            te_l = te_l.index_copy(0, s_c, h_l + rod_rot(te_l[s_c] - h_l, ax_l, d_l))
+            te_r = te_r.index_copy(0, s_c, h_r + rod_rot(te_r[s_c] - h_r, ax_r, d_r))
             a_te, b_te = te_l[panel_strip], te_r[panel_strip]
+            # The legs of the panels ahead of the hinge run bound point ->
+            # hinge point of the strip edge -> deflected trailing edge, as
+            # in the production lattice (also at zero deflection).
+            row_f, col_f = torch.where(xb_s <= hcol)
+            p_f = s_c[row_f] * n_chord + col_f
+            a_k = a_te.index_copy(0, p_f, h_l[row_f])
+            b_k = b_te.index_copy(0, p_f, h_r[row_f])
+            kink_panel = torch.zeros(n_p, dtype=torch.bool, device=self.device)
+            kink_panel[p_f] = True
+            kink_geom = (a_k, b_k, kink_panel)
+            # The rule normal of a leg on the flap turns with its edge node
+            # (production: build_lattice). Aft panel: the whole legs (sets 0,
+            # 1); panel ahead of the hinge: the aft segments (sets 2, 3).
+            leg_turn = (xb_s > hcol, s_c, ax_l, d_l, ax_r, d_r)
         cp_u = cp[b["unknown_panels"]]
         n_bc_u = n_bc[b["unknown_panels"]]
         # Target cross-core radii follow the strip widths (they are not fixed:
@@ -650,6 +682,7 @@ class TorchReference:
         src_group = b["src_group"]
         col = b["column"]
         wd_e = wd.expand(n_p, 3)
+        s_kink = None
         mach_active = bool(b.get("mach_active", False))
         if mach_active:
             # Prandtl-Glauert stretch about the moment reference point, in
@@ -683,6 +716,9 @@ class TorchReference:
             _n_eff = None  # type: ignore[assignment]
             _v_back = None  # type: ignore[assignment]
         if h is None:
+            if kink_geom is not None:
+                s_kink = ((_to_s(kink_geom[0]), _to_s(kink_geom[1])) if mach_active
+                          else (kink_geom[0], kink_geom[1]))
             if mach_active:
                 s_a, s_b, s_ate, s_bte = _to_s(a), _to_s(bv), _to_s(a_te), _to_s(b_te)
                 s_wd = w_fs_pg
@@ -705,6 +741,9 @@ class TorchReference:
             def _refl_dir(vv: torch.Tensor) -> torch.Tensor:
                 return vv - 2.0 * (vv @ normal_g)[:, None] * normal_g
 
+            if kink_geom is not None:
+                s_kink = (torch.cat((kink_geom[0], _refl_pts(kink_geom[0])), dim=0),
+                          torch.cat((kink_geom[1], _refl_pts(kink_geom[1])), dim=0))
             s_a = torch.cat((a, _refl_pts(a)), dim=0)
             s_b = torch.cat((bv, _refl_pts(bv)), dim=0)
             s_ate = torch.cat((a_te, _refl_pts(a_te)), dim=0)
@@ -724,26 +763,40 @@ class TorchReference:
         eb = edges[panel_strip, 1]
         if cc is not None:
             # Uncontrolled edges keep their common line for all node moves.
-            # On a controlled strip, forward bound points stay fixed while
-            # the TE moves. Each forward leg then has its own line. All
-            # aft bound points and the TE undergo the same rigid rotation,
-            # so the aft legs of one strip keep a common line. Adjacent
-            # strips can rotate about different axes after a node move.
-            controlled = torch.zeros(n_s, dtype=torch.bool, device=self.device)
-            controlled[cc["strip"]] = True
-            line_offset = 2 * n_p
-            ea = torch.where(controlled[panel_strip], line_offset + 2 * pid, ea)
-            eb = torch.where(controlled[panel_strip], line_offset + 2 * pid + 1, eb)
-            aft_line = line_offset + 2 * n_p + 2 * cc["strip"]
-            ea = ea.index_copy(0, cc["panels"], aft_line)
-            eb = eb.index_copy(0, cc["panels"], aft_line + 1)
+            # On a flap strip the forward segments of the legs stay on the
+            # edge line (they end at the hinge node). The aft points of an
+            # edge and its trailing edge turn about the line of the edge
+            # node, so the aft legs and the aft segments of the edge keep a
+            # common line; two flap strips with the same hinge share it
+            # (see adjoint._aft_line_ids).
+            row_a = torch.searchsorted(s_c, cc["panel_strip"])
+            ea = ea.index_copy(0, cc["panels"], cc["aft_edge"][row_a, 0])
+            eb = eb.index_copy(0, cc["panels"], cc["aft_edge"][row_a, 1])
+            kink_panel = kink_geom[2]
+            none = torch.full((n_p,), -1, dtype=torch.int64, device=self.device)
+            row_k = torch.searchsorted(s_c, panel_strip.clamp_max(int(s_c.max())))
+            row_k = torch.where(kink_panel, row_k, torch.zeros_like(row_k))
+            eka = torch.where(kink_panel, cc["aft_edge"][row_k, 0], none)
+            ekb = torch.where(kink_panel, cc["aft_edge"][row_k, 1], none)
         edge_l_panel, edge_r_panel = ea, eb
+        src_kink = None
+        if kink_geom is not None:
+            kfl = kink_geom[2].to(torch.int64)
+            edge_ka_panel, edge_kb_panel = eka, ekb
+            src_kink = {"kink": kfl, "edge_ka": eka, "edge_kb": ekb}
         if h is not None:
             img = torch.full((n_p,), -2, dtype=torch.int64, device=self.device)
             pid = torch.cat((pid, img))
             ea = torch.cat((ea, img))
             eb = torch.cat((eb, img))
+            if src_kink is not None:
+                src_kink = {"kink": torch.cat((src_kink["kink"], src_kink["kink"])),
+                            "edge_ka": torch.cat((src_kink["edge_ka"], img)),
+                            "edge_kb": torch.cat((src_kink["edge_kb"], img))}
         b["_src_ids"] = {"panel": pid, "edge_a": ea, "edge_b": eb}
+        if src_kink is not None:
+            b["_src_ids"].update(src_kink)
+        b["_src_kinks"] = s_kink
         panel_ids = torch.arange(n_p, dtype=torch.int64, device=self.device)
 
         rc2_src = s_rc * s_rc
@@ -858,19 +911,36 @@ class TorchReference:
         f_panel = rho * g_panel[:, None] * torch.linalg.cross(U + v_ind, l_vec)
         m_geo = torch.linalg.cross(mid - rp, f_panel).sum(0)
         if use_leg:
-            leg_a_mid = 0.5 * (a_te + a)
-            leg_b_mid = 0.5 * (bv + b_te)
-            leg_start = torch.cat((a_te, bv), dim=0)
-            leg_end = torch.cat((a, b_te), dim=0)
-            leg_mid = torch.cat((leg_a_mid, leg_b_mid), dim=0)
+            # The leg segment sets of the production loads (leg_segments):
+            # without hinge nodes the legs a_te -> a and b -> b_te; with them
+            # the forward segments to the nodes and the aft segments.
+            if kink_geom is None:
+                seg_sets = [(a_te, a, edge_l_panel), (bv, b_te, edge_r_panel)]
+            else:
+                a_k, b_k = kink_geom[0], kink_geom[1]
+                seg_sets = [(a_k, a, edge_l_panel), (bv, b_k, edge_r_panel),
+                            (a_te, a_k, edge_ka_panel), (b_k, b_te, edge_kb_panel)]
+            n_sets = len(seg_sets)
+            set_mid = [0.5 * (s0 + s1) for s0, s1, _ in seg_sets]
+            leg_start = torch.cat([s0 for s0, _, _ in seg_sets], dim=0)
+            leg_end = torch.cat([s1 for _, s1, _ in seg_sets], dim=0)
+            leg_mid = torch.cat(set_mid, dim=0)
             leg_vec = leg_end - leg_start
             # Leg rule of the production loads (leg_force_rules): the strip
             # normal is removed on a shared edge, nothing on a free edge (the
             # full velocity), and a kink leg has no force (scale 0).
             strip_normal = normal[panel_strip]
-            leg_normal = torch.cat((strip_normal, strip_normal), dim=0) * b["leg_keep_normal"][:, None]
-            leg_tgt_group = torch.cat((tgt_group_panel, tgt_group_panel), dim=0)
-            leg_tgt_rc = torch.cat((tgt_rc_panel, tgt_rc_panel), dim=0)
+            leg_normal = torch.cat([strip_normal] * n_sets, dim=0) * b["leg_keep_normal"][:, None]
+            if leg_turn is not None and n_sets == 4:
+                aft_m, s_t, axl, dl_, axr, dr_ = leg_turn
+                for mask, sets in ((aft_m, (0, 1)), (~aft_m, (2, 3))):
+                    row, col = torch.where(mask)
+                    idx = s_t[row] * n_chord + col
+                    for k, ax, da in ((sets[0], axl, dl_), (sets[1], axr, dr_)):
+                        rows = k * n_p + idx
+                        leg_normal = leg_normal.index_copy(0, rows, rod_rot(leg_normal[rows], ax[row], da[row]))
+            leg_tgt_group = torch.cat([tgt_group_panel] * n_sets, dim=0)
+            leg_tgt_rc = torch.cat([tgt_rc_panel] * n_sets, dim=0)
             if h is None:
                 g_leg_src = g_panel * s_sign
             else:
@@ -878,14 +948,12 @@ class TorchReference:
             if fold:
                 # Right panels only; left panels mirror with the leg swap:
                 # the a-leg of a left panel mirrors the b-leg of its mirror.
-                la_e = leg_a_mid[right]
-                lb_e = leg_b_mid[right]
-                leg_e = torch.cat((la_e, lb_e), dim=0)
-                ltgt_g = torch.cat((tgt_ge, tgt_ge), dim=0)
-                ltgt_r = torch.cat((tgt_re, tgt_re), dim=0)
+                leg_e = torch.cat([m[right] for m in set_mid], dim=0)
+                ltgt_g = torch.cat([tgt_ge] * n_sets, dim=0)
+                ltgt_r = torch.cat([tgt_re] * n_sets, dim=0)
                 # A leg mid-point lies on the line of its edge, so also on
                 # the legs of the other panels that use the same edge.
-                ledge = torch.cat((edge_l_panel[right], edge_r_panel[right]), dim=0)
+                ledge = torch.cat([e[right] for _, _, e in seg_sets], dim=0)
                 if mach_active:
                     v_leg_e_s = self._induced(_to_s(leg_e), s_a, s_b, s_ate, s_bte, s_wd, rc2_src,
                                               s_group, g_leg_src, ltgt_g, ltgt_r, edge=ledge)
@@ -897,12 +965,11 @@ class TorchReference:
                 pos = pos_all
                 mir_right = pos[pm[left]]
                 v_leg = torch.empty_like(leg_mid)
-                v_leg[right] = v_leg_e[:n_r]
-                v_leg[n_p + right] = v_leg_e[n_r:]
-                v_leg[left] = v_leg_e[n_r + mir_right] * mir
-                v_leg[n_p + left] = v_leg_e[mir_right] * mir
+                for k, sw in enumerate((1, 0, 3, 2)[:n_sets]):
+                    v_leg[k * n_p + right] = v_leg_e[k * n_r:(k + 1) * n_r]
+                    v_leg[k * n_p + left] = v_leg_e[sw * n_r + mir_right] * mir
             else:
-                ledge = torch.cat((edge_l_panel, edge_r_panel), dim=0)
+                ledge = torch.cat([e for _, _, e in seg_sets], dim=0)
                 if mach_active:
                     v_leg_s = self._induced(_to_s(leg_mid), s_a, s_b, s_ate, s_bte, s_wd, rc2_src,
                                             s_group, g_leg_src, leg_tgt_group, leg_tgt_rc,
@@ -916,10 +983,11 @@ class TorchReference:
             V_leg = U_leg + v_leg
             Vn = (V_leg * leg_normal).sum(-1)
             V_leg = V_leg - Vn[:, None] * leg_normal
-            g_leg_only = torch.cat((g_panel, g_panel), dim=0) * b["leg_scale"]
+            g_leg_only = torch.cat([g_panel] * n_sets, dim=0) * b["leg_scale"]
             f_leg = rho * g_leg_only[:, None] * torch.linalg.cross(V_leg, leg_vec)
             m_geo = m_geo + torch.linalg.cross(leg_mid - rp, f_leg).sum(0)
-            f_panel = f_panel + f_leg[:n_p] + f_leg[n_p:]
+            for k in range(n_sets):
+                f_panel = f_panel + f_leg[k * n_p:(k + 1) * n_p]
         f_strip = f_panel.reshape(n_s, n_chord, 3).sum(1)
         strip_gamma = g_panel.reshape(n_s, n_chord).sum(1)
 
@@ -1188,7 +1256,8 @@ class TorchReference:
         src = self.b["_src_ids"]
         use_tg = tg_group is not None and tg_rc is not None
         return Topology(grp, tg_group if use_tg else None, own, edge, src["panel"], src["edge_a"],
-                        src["edge_b"], col, n_u, use_tg, m, self.device)
+                        src["edge_b"], col, n_u, use_tg, m, self.device,
+                        src.get("kink"), src.get("edge_ka"), src.get("edge_kb"))
 
     def _horseshoe(
         self,
@@ -1202,6 +1271,7 @@ class TorchReference:
         own: torch.Tensor | None = None,
         edge: torch.Tensor | None = None,
         src: dict | None = None,
+        kink: tuple | None = None,
     ) -> torch.Tensor:
         """Unit-circulation velocity of bent horseshoes at P (differentiable).
 
@@ -1220,8 +1290,13 @@ class TorchReference:
         edge : torch.Tensor or None
             Per target the lattice edge whose line holds the target, or -1.
         src : dict or None
-            Topology ids of the sources (panel, edge_a, edge_b); None takes
-            the ids of the last forward pass.
+            Topology ids of the sources (panel, edge_a, edge_b, and kink,
+            edge_ka, edge_kb with leg nodes); None takes the ids of the last
+            forward pass.
+        kink : tuple or None
+            Leg nodes ``(a_k, b_k)`` [m], shape (n_src, 3), of the sources
+            flagged in ``src["kink"]`` (see
+            :class:`ventorum.aero.vortex.HorseshoeSet`), or None.
 
         Returns
         -------
@@ -1239,11 +1314,12 @@ class TorchReference:
         mesh topology (index masks), not by a distance threshold: a
         threshold would also remove real collinear terms of other strips.
         """
-        bound = seg_vel(P, a, b, rc2)
-        leg_a = seg_vel(P, a_te, a, rc2)
-        leg_b = seg_vel(P, b, b_te, rc2)
         if src is None:
             src = self.b.get("_src_ids")
+        a_k, b_k = (a_te, b_te) if kink is None else kink
+        bound = seg_vel(P, a, b, rc2)
+        leg_a = seg_vel(P, a_k, a, rc2)
+        leg_b = seg_vel(P, b, b_k, rc2)
         if src is not None and own is not None:
             keep = own[:, None] != src["panel"][None, :]
             bound = torch.where(keep[..., None], bound, torch.zeros_like(bound))
@@ -1252,6 +1328,19 @@ class TorchReference:
             keep_b = edge[:, None] != src["edge_b"][None, :]
             leg_a = torch.where(keep_a[..., None], leg_a, torch.zeros_like(leg_a))
             leg_b = torch.where(keep_b[..., None], leg_b, torch.zeros_like(leg_b))
+        if kink is not None:
+            # Aft segments of the legs with a node (zero on the other sources).
+            idx = torch.nonzero(src["kink"] != 0).reshape(-1)
+            rck = rc2[:, idx]
+            aft_a = seg_vel(P, a_te[idx], a_k[idx], rck)
+            aft_b = seg_vel(P, b_k[idx], b_te[idx], rck)
+            if edge is not None:
+                ka = edge[:, None] != src["edge_ka"][None, idx]
+                kb = edge[:, None] != src["edge_kb"][None, idx]
+                aft_a = torch.where(ka[..., None], aft_a, torch.zeros_like(aft_a))
+                aft_b = torch.where(kb[..., None], aft_b, torch.zeros_like(aft_b))
+            leg_a = leg_a.index_add(1, idx, aft_a)
+            leg_b = leg_b.index_add(1, idx, aft_b)
         ray_b = ray_vel(P, b_te, d, rc2)
         ray_a = ray_vel(P, a_te, d, rc2)
         mode = self.b.get("accum", "sequential")
@@ -1294,22 +1383,29 @@ class TorchReference:
 
             topo = self._topology(m, grp, col, n_u, tg_group, tg_rc, own, edge)
             tg_rc2 = tg_rc * tg_rc if topo.use_tg else None
-            return horseshoe_rows(backend, topo, P, N, a, bv, a_te, b_te, wd, rc2_src, tg_rc2, sign)
+            kink = self.b.get("_src_kinks")
+            return horseshoe_rows(backend, topo, P, N, a, bv, a_te, b_te, wd, rc2_src, tg_rc2, sign,
+                                  *(kink if kink is not None else (None, None)))
         src = self.b.get("_src_ids")
         tgr = tg_rc if tg_group is not None else None
+        kink = self.b.get("_src_kinks")
+        nk = 0 if kink is None else 2
 
         def _fn(i0: int, i1: int, P: torch.Tensor, N: torch.Tensor, a: torch.Tensor,
                 bv: torch.Tensor, a_te: torch.Tensor, b_te: torch.Tensor, wd: torch.Tensor,
                 rc2_src: torch.Tensor, *rest: torch.Tensor) -> torch.Tensor:
+            kn = tuple(rest[:nk]) if nk else None
+            rest = rest[nk:]
             tg = rest[0] if rest else None
             rc2 = self._rc2_chunk(rc2_src, grp, tg_group, tg, i0, i1)
             v = self._horseshoe(P[i0:i1], a, bv, a_te, b_te, wd, rc2,
-                                _rows(own, i0, i1), _rows(edge, i0, i1), src=src)
+                                _rows(own, i0, i1), _rows(edge, i0, i1), src=src, kink=kn)
             a_src = (v * N[i0:i1, None, :]).sum(-1) * sign[None, :]
             acc = torch.zeros((i1 - i0, n_u), dtype=self.dtype, device=self.device)
             return acc.index_add(1, col, a_src)
 
-        args = (P, N, a, bv, a_te, b_te, wd, rc2_src) + ((tgr,) if tgr is not None else ())
+        args = ((P, N, a, bv, a_te, b_te, wd, rc2_src) + (tuple(kink) if nk else ())
+                + ((tgr,) if tgr is not None else ()))
         return _chunked(_fn, m, chunk_rows(m, a.shape[0]), *args)
 
     def _tensor_unknowns(self, P: torch.Tensor, a: torch.Tensor, bv: torch.Tensor,
@@ -1322,19 +1418,24 @@ class TorchReference:
         m = P.shape[0]
         src = self.b.get("_src_ids")
         tgr = tg_rc if tg_group is not None else None
+        kink = self.b.get("_src_kinks")
+        nk = 0 if kink is None else 2
 
         def _fn(i0: int, i1: int, P: torch.Tensor, a: torch.Tensor, bv: torch.Tensor,
                 a_te: torch.Tensor, b_te: torch.Tensor, wd: torch.Tensor,
                 rc2_src: torch.Tensor, *rest: torch.Tensor) -> torch.Tensor:
+            kn = tuple(rest[:nk]) if nk else None
+            rest = rest[nk:]
             tg = rest[0] if rest else None
             rc2 = self._rc2_chunk(rc2_src, grp, tg_group, tg, i0, i1)
             v = self._horseshoe(P[i0:i1], a, bv, a_te, b_te, wd, rc2,
-                                _rows(own, i0, i1), _rows(edge, i0, i1), src=src)
+                                _rows(own, i0, i1), _rows(edge, i0, i1), src=src, kink=kn)
             v = v * sign[None, :, None]
             acc = torch.zeros((i1 - i0, n_u, 3), dtype=self.dtype, device=self.device)
             return acc.index_add(1, col, v)
 
-        args = (P, a, bv, a_te, b_te, wd, rc2_src) + ((tgr,) if tgr is not None else ())
+        args = ((P, a, bv, a_te, b_te, wd, rc2_src) + (tuple(kink) if nk else ())
+                + ((tgr,) if tgr is not None else ()))
         return _chunked(_fn, m, chunk_rows(m, a.shape[0]), *args)
 
     def _induced(self, P: torch.Tensor, a: torch.Tensor, bv: torch.Tensor,
@@ -1351,20 +1452,27 @@ class TorchReference:
 
             topo = self._topology(m, grp, None, a.shape[0], tg_group, tg_rc, own, edge)
             tg_rc2 = tg_rc * tg_rc if topo.use_tg else None
-            return horseshoe_induced(backend, topo, P, a, bv, a_te, b_te, wd, rc2_src, tg_rc2, g_src)
+            kink = self.b.get("_src_kinks")
+            return horseshoe_induced(backend, topo, P, a, bv, a_te, b_te, wd, rc2_src, tg_rc2, g_src,
+                                     *(kink if kink is not None else (None, None)))
         src = self.b.get("_src_ids")
         tgr = tg_rc if tg_group is not None else None
+        kink = self.b.get("_src_kinks")
+        nk = 0 if kink is None else 2
 
         def _fn(i0: int, i1: int, P: torch.Tensor, a: torch.Tensor, bv: torch.Tensor,
                 a_te: torch.Tensor, b_te: torch.Tensor, wd: torch.Tensor,
                 rc2_src: torch.Tensor, g_src: torch.Tensor, *rest: torch.Tensor) -> torch.Tensor:
+            kn = tuple(rest[:nk]) if nk else None
+            rest = rest[nk:]
             tg = rest[0] if rest else None
             rc2 = self._rc2_chunk(rc2_src, grp, tg_group, tg, i0, i1)
             v = self._horseshoe(P[i0:i1], a, bv, a_te, b_te, wd, rc2,
-                                _rows(own, i0, i1), _rows(edge, i0, i1), src=src)
+                                _rows(own, i0, i1), _rows(edge, i0, i1), src=src, kink=kn)
             return self._src_sum(v * g_src[None, :, None], 1)
 
-        args = (P, a, bv, a_te, b_te, wd, rc2_src, g_src) + ((tgr,) if tgr is not None else ())
+        args = ((P, a, bv, a_te, b_te, wd, rc2_src, g_src) + (tuple(kink) if nk else ())
+                + ((tgr,) if tgr is not None else ()))
         return _chunked(_fn, m, chunk_rows(m, a.shape[0]), *args)
 
     def _trefftz(self, te_l: torch.Tensor, te_r: torch.Tensor, sg: torch.Tensor,

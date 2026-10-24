@@ -316,14 +316,24 @@ def _build(precision: str) -> SimpleNamespace:  # noqa: C901 - one closure per k
     def hs_v(i: int, j: int, p: vec, a: wp.array(dtype=vec), b: wp.array(dtype=vec),
              ate: wp.array(dtype=vec), bte: wp.array(dtype=vec), d: wp.array(dtype=vec), rc2: T,
              own: wp.array(dtype=wp.int64), spanel: wp.array(dtype=wp.int64), edge: wp.array(dtype=wp.int64),
-             sea: wp.array(dtype=wp.int64), seb: wp.array(dtype=wp.int64)):
+             sea: wp.array(dtype=wp.int64), seb: wp.array(dtype=wp.int64),
+             ak: wp.array(dtype=vec), bk: wp.array(dtype=vec), kfl: wp.array(dtype=wp.int64),
+             seka: wp.array(dtype=wp.int64), sekb: wp.array(dtype=wp.int64)):
+        # A leg with a node (kfl[j] != 0) runs ate -> ak -> a and b -> bk -> bte;
+        # on the other sources ak is ate and bk is bte.
         v = vec()
         if own[i] != spanel[j]:
             v = v + seg_v(p, a[j], b[j], rc2)
         if edge[i] != sea[j]:
-            v = v + seg_v(p, ate[j], a[j], rc2)
+            v = v + seg_v(p, ak[j], a[j], rc2)
+        if kfl[j] != wp.int64(0):
+            if edge[i] != seka[j]:
+                v = v + seg_v(p, ate[j], ak[j], rc2)
         if edge[i] != seb[j]:
-            v = v + seg_v(p, b[j], bte[j], rc2)
+            v = v + seg_v(p, b[j], bk[j], rc2)
+        if kfl[j] != wp.int64(0):
+            if edge[i] != sekb[j]:
+                v = v + seg_v(p, bk[j], bte[j], rc2)
         return v + ray_v(p, bte[j], d[j], rc2) - ray_v(p, ate[j], d[j], rc2)
 
     @wp.kernel(module=module)
@@ -334,7 +344,8 @@ def _build(precision: str) -> SimpleNamespace:  # noqa: C901 - one closure per k
                  spanel: wp.array(dtype=wp.int64), edge: wp.array(dtype=wp.int64),
                  sea: wp.array(dtype=wp.int64), seb: wp.array(dtype=wp.int64), s: wp.array(dtype=T),
                  off: wp.array(dtype=wp.int64), order: wp.array(dtype=wp.int64), use_tg: int,
-                 out: wp.array2d(dtype=T)):
+                 out: wp.array2d(dtype=T), ak: wp.array(dtype=vec), bk: wp.array(dtype=vec), kfl: wp.array(dtype=wp.int64),
+             seka: wp.array(dtype=wp.int64), sekb: wp.array(dtype=wp.int64)):
         # System rows: one thread per (target, unknown); the sources of the unknown in source order.
         i, u = wp.tid()
         p = P[i]
@@ -343,7 +354,7 @@ def _build(precision: str) -> SimpleNamespace:  # noqa: C901 - one closure per k
         for k in range(int(off[u]), int(off[u + 1])):
             j = int(order[k])
             rc2 = pair_rc2(i, j, rc2s, tgrc2, sgrp, tgrp, use_tg)
-            v = hs_v(i, j, p, a, b, ate, bte, d, rc2, own, spanel, edge, sea, seb)
+            v = hs_v(i, j, p, a, b, ate, bte, d, rc2, own, spanel, edge, sea, seb, ak, bk, kfl, seka, sekb)
             acc = acc + s[j] * wp.dot(v, x)
         out[i, u] = acc
 
@@ -354,7 +365,8 @@ def _build(precision: str) -> SimpleNamespace:  # noqa: C901 - one closure per k
                     tgrp: wp.array(dtype=wp.int64), own: wp.array(dtype=wp.int64),
                     spanel: wp.array(dtype=wp.int64), edge: wp.array(dtype=wp.int64),
                     sea: wp.array(dtype=wp.int64), seb: wp.array(dtype=wp.int64), s: wp.array(dtype=T),
-                    use_tg: int, buf: wp.array3d(dtype=T)):
+                    use_tg: int, buf: wp.array3d(dtype=T), ak: wp.array(dtype=vec), bk: wp.array(dtype=vec), kfl: wp.array(dtype=wp.int64),
+             seka: wp.array(dtype=wp.int64), sekb: wp.array(dtype=wp.int64)):
         # Induced velocity: one thread per (target, source block); one partial sum per block.
         i, jb = wp.tid()
         n = a.shape[0]
@@ -362,7 +374,8 @@ def _build(precision: str) -> SimpleNamespace:  # noqa: C901 - one closure per k
         acc = vec()
         for j in range(jb * BJ, wp.min((jb + 1) * BJ, n)):
             rc2 = pair_rc2(i, j, rc2s, tgrc2, sgrp, tgrp, use_tg)
-            acc = acc + hs_v(i, j, p, a, b, ate, bte, d, rc2, own, spanel, edge, sea, seb) * s[j]
+            acc = acc + hs_v(i, j, p, a, b, ate, bte, d, rc2, own, spanel, edge, sea, seb,
+                             ak, bk, kfl, seka, sekb) * s[j]
         buf[jb, i, 0] = acc[0]
         buf[jb, i, 1] = acc[1]
         buf[jb, i, 2] = acc[2]
@@ -371,8 +384,11 @@ def _build(precision: str) -> SimpleNamespace:  # noqa: C901 - one closure per k
     def hs_fb(i: int, j: int, p: vec, u: vec, a: wp.array(dtype=vec), b: wp.array(dtype=vec),
               ate: wp.array(dtype=vec), bte: wp.array(dtype=vec), d: wp.array(dtype=vec), rc2: T,
               own: wp.array(dtype=wp.int64), spanel: wp.array(dtype=wp.int64), edge: wp.array(dtype=wp.int64),
-              sea: wp.array(dtype=wp.int64), seb: wp.array(dtype=wp.int64)):
-        # Velocity and VJP of horseshoe j at point i. Returns v, gP, ga, gb, gat, gbt, gd, grc2.
+              sea: wp.array(dtype=wp.int64), seb: wp.array(dtype=wp.int64),
+              ak: wp.array(dtype=vec), bk: wp.array(dtype=vec), kfl: wp.array(dtype=wp.int64),
+             seka: wp.array(dtype=wp.int64), sekb: wp.array(dtype=wp.int64)):
+        # Velocity and VJP of horseshoe j at point i. Returns v, gP, ga, gb, gat, gbt, gd, grc2,
+        # gak, gbk (the node derivatives are zero on a source without a node).
         aj = a[j]
         bj = b[j]
         tj = ate[j]
@@ -392,20 +408,45 @@ def _build(precision: str) -> SimpleNamespace:  # noqa: C901 - one closure per k
             ga = ga + A1
             gb = gb + B1
             grc = grc + r1
+        gak = vec()
+        gbk = vec()
+        kj = kfl[j] != wp.int64(0)
         if edge[i] != sea[j]:
-            v2, p2, A2, B2, r2 = seg_fb(p, tj, aj, rc2, u)
+            v2, p2, A2, B2, r2 = seg_fb(p, ak[j], aj, rc2, u)
             v = v + v2
             gP = gP + p2
-            gat = gat + A2
+            if kj:
+                gak = gak + A2
+            else:
+                gat = gat + A2
             ga = ga + B2
             grc = grc + r2
+        if kj:
+            if edge[i] != seka[j]:
+                v6, p6, A6, B6, r6 = seg_fb(p, tj, ak[j], rc2, u)
+                v = v + v6
+                gP = gP + p6
+                gat = gat + A6
+                gak = gak + B6
+                grc = grc + r6
         if edge[i] != seb[j]:
-            v3, p3, A3, B3, r3 = seg_fb(p, bj, uj, rc2, u)
+            v3, p3, A3, B3, r3 = seg_fb(p, bj, bk[j], rc2, u)
             v = v + v3
             gP = gP + p3
             gb = gb + A3
-            gbt = gbt + B3
+            if kj:
+                gbk = gbk + B3
+            else:
+                gbt = gbt + B3
             grc = grc + r3
+        if kj:
+            if edge[i] != sekb[j]:
+                v7, p7, A7, B7, r7 = seg_fb(p, bk[j], uj, rc2, u)
+                v = v + v7
+                gP = gP + p7
+                gbk = gbk + A7
+                gbt = gbt + B7
+                grc = grc + r7
         v4, p4, d4, r4 = ray_fb(p, uj, dj, rc2, u)
         v5, p5, d5, r5 = ray_fb(p, tj, dj, rc2, -u)
         v = v + v4 - v5
@@ -413,7 +454,7 @@ def _build(precision: str) -> SimpleNamespace:  # noqa: C901 - one closure per k
         gbt = gbt - p4
         gat = gat - p5
         grc = grc + r4 + r5
-        return v, gP, ga, gb, gat, gbt, d4 + d5, grc
+        return v, gP, ga, gb, gat, gbt, d4 + d5, grc, gak, gbk
 
     @wp.kernel(module=module)
     def vjp_rows(P: wp.array(dtype=vec), X: wp.array(dtype=vec), a: wp.array(dtype=vec),
@@ -423,7 +464,8 @@ def _build(precision: str) -> SimpleNamespace:  # noqa: C901 - one closure per k
                  spanel: wp.array(dtype=wp.int64), edge: wp.array(dtype=wp.int64),
                  sea: wp.array(dtype=wp.int64), seb: wp.array(dtype=wp.int64), s: wp.array(dtype=T),
                  col: wp.array(dtype=wp.int64), W: wp.array2d(dtype=T), use_W: int, use_tg: int,
-                 buf: wp.array3d(dtype=T)):
+                 ak: wp.array(dtype=vec), bk: wp.array(dtype=vec), kfl: wp.array(dtype=wp.int64),
+             seka: wp.array(dtype=wp.int64), sekb: wp.array(dtype=wp.int64), buf: wp.array3d(dtype=T)):
         # Target derivatives: one thread per (target, source block). buf[jb, i] = gP, gX, g_tg_rc2.
         i, jb = wp.tid()
         n = a.shape[0]
@@ -438,8 +480,8 @@ def _build(precision: str) -> SimpleNamespace:  # noqa: C901 - one closure per k
                 wf = W[i, int(col[j])]
             cij = wf * s[j]
             rc2 = pair_rc2(i, j, rc2s, tgrc2, sgrp, tgrp, use_tg)
-            v, gP, ga, gb, gat, gbt, gd, grc = hs_fb(i, j, p, x * cij, a, b, ate, bte, d, rc2,
-                                                    own, spanel, edge, sea, seb)
+            v, gP, ga, gb, gat, gbt, gd, grc, gak, gbk = hs_fb(i, j, p, x * cij, a, b, ate, bte, d, rc2,
+                                                              own, spanel, edge, sea, seb, ak, bk, kfl, seka, sekb)
             aP = aP + gP
             aX = aX + v * cij
             atg = atg + grc * is_other(i, j, sgrp, tgrp, use_tg)
@@ -459,9 +501,10 @@ def _build(precision: str) -> SimpleNamespace:  # noqa: C901 - one closure per k
                  spanel: wp.array(dtype=wp.int64), edge: wp.array(dtype=wp.int64),
                  sea: wp.array(dtype=wp.int64), seb: wp.array(dtype=wp.int64), s: wp.array(dtype=T),
                  col: wp.array(dtype=wp.int64), W: wp.array2d(dtype=T), use_W: int, use_tg: int,
-                 buf: wp.array3d(dtype=T)):
+                 ak: wp.array(dtype=vec), bk: wp.array(dtype=vec), kfl: wp.array(dtype=wp.int64),
+             seka: wp.array(dtype=wp.int64), sekb: wp.array(dtype=wp.int64), buf: wp.array3d(dtype=T)):
         # Source derivatives: one thread per (source, target block).
-        # buf[ib, j] = ga, gb, ga_te, gb_te, gd, g_rc2_src, gs.
+        # buf[ib, j] = ga, gb, ga_te, gb_te, gd, g_rc2_src, gs, ga_k, gb_k.
         j, ib = wp.tid()
         m = P.shape[0]
         sj = s[j]
@@ -473,6 +516,8 @@ def _build(precision: str) -> SimpleNamespace:  # noqa: C901 - one closure per k
         ad = vec()
         arc = T(0.0)
         asg = T(0.0)
+        aak = vec()
+        abk = vec()
         for i in range(ib * BJ, wp.min((ib + 1) * BJ, m)):
             wf = T(1.0)
             if use_W != 0:
@@ -480,8 +525,10 @@ def _build(precision: str) -> SimpleNamespace:  # noqa: C901 - one closure per k
             cij = wf * sj
             x = X[i]
             rc2 = pair_rc2(i, j, rc2s, tgrc2, sgrp, tgrp, use_tg)
-            v, gP, ga, gb, gat, gbt, gd, grc = hs_fb(i, j, P[i], x * cij, a, b, ate, bte, d, rc2,
-                                                    own, spanel, edge, sea, seb)
+            v, gP, ga, gb, gat, gbt, gd, grc, gak, gbk = hs_fb(i, j, P[i], x * cij, a, b, ate, bte, d, rc2,
+                                                              own, spanel, edge, sea, seb, ak, bk, kfl, seka, sekb)
+            aak = aak + gak
+            abk = abk + gbk
             aa = aa + ga
             ab = ab + gb
             aat = aat + gat
@@ -495,6 +542,8 @@ def _build(precision: str) -> SimpleNamespace:  # noqa: C901 - one closure per k
             buf[ib, j, 6 + c] = aat[c]
             buf[ib, j, 9 + c] = abt[c]
             buf[ib, j, 12 + c] = ad[c]
+            buf[ib, j, 17 + c] = aak[c]
+            buf[ib, j, 20 + c] = abk[c]
         buf[ib, j, 15] = arc
         buf[ib, j, 16] = asg
 
@@ -635,8 +684,24 @@ def _csr(topo, dev) -> tuple:  # type: ignore[no-untyped-def]
     return cache
 
 
-def horseshoe_forward(mode, P, X, a, b, a_te, b_te, d, rc2_src, tg_rc2, s, topo):  # type: ignore[no-untyped-def]
-    """Return the system rows (mode 0, (m, n_u)) or the induced velocity (mode 1, (m, 3)) on the GPU."""
+def _kink_args(topo, a_te, b_te, a_k, b_k, ns, dev, sea, seb) -> list:  # type: ignore[no-untyped-def]
+    """Return the Warp leg-node arguments (ak, bk, flags, seka, sekb); without nodes ak is a_te and bk is b_te."""
+    if getattr(topo, "kink", None) is None or a_k is None:
+        n = int(a_te.shape[0])
+        return [_v(a_te, ns), _v(b_te, ns), _i(torch.zeros(n, dtype=torch.int64, device=dev)), sea, seb]
+    cache = getattr(topo, "_wp_kink", None)
+    if cache is None:
+        cache = tuple(_i(x.to(dev)) for x in (topo.kink, topo.src_edge_ka, topo.src_edge_kb))
+        topo._wp_kink = cache
+    return [_v(a_k, ns), _v(b_k, ns), *cache]
+
+
+def horseshoe_forward(mode, P, X, a, b, a_te, b_te, d, rc2_src, tg_rc2, s, topo,
+                      a_k=None, b_k=None):  # type: ignore[no-untyped-def]
+    """Return the system rows (mode 0, (m, n_u)) or the induced velocity (mode 1, (m, 3)) on the GPU.
+
+    *a_k*, *b_k* are the leg nodes of the sources with the flags of *topo*, or None.
+    """
     ns = kernels(_prec(P))
     m, n = int(P.shape[0]), int(a.shape[0])
     dev = P.device
@@ -644,22 +709,27 @@ def horseshoe_forward(mode, P, X, a, b, a_te, b_te, d, rc2_src, tg_rc2, s, topo)
     tg2 = tg_rc2 if tg_rc2 is not None else torch.zeros(m, dtype=P.dtype, device=dev)
     sg, tg, own, sp, edge, sea, seb, _col = _topo_arrays(topo, m, dev)
     geo = (_v(a, ns), _v(b, ns), _v(a_te, ns), _v(b_te, ns), _v(d, ns), _s(rc2_src), _s(tg2))
+    kink = _kink_args(topo, a_te, b_te, a_k, b_k, ns, dev, sea, seb)
     if mode == 0:
         out = torch.zeros((m, topo.n_u), dtype=P.dtype, device=dev)
         off, order = _csr(topo, dev)
         _launch(ns.fwd_rows, (m, topo.n_u),
                 [_v(P, ns), _v(X, ns), *geo, sg, tg, own, sp, edge, sea, seb, _s(s), off, order, use_tg,
-                 wp.from_torch(out)])
+                 wp.from_torch(out), *kink])
         return out
     nb = _blocks(n)
     buf = torch.empty((nb, m, 3), dtype=P.dtype, device=dev)
     _launch(ns.fwd_induced, (m, nb),
-            [_v(P, ns), *geo, sg, tg, own, sp, edge, sea, seb, _s(s), use_tg, wp.from_torch(buf)])
+            [_v(P, ns), *geo, sg, tg, own, sp, edge, sea, seb, _s(s), use_tg, wp.from_torch(buf), *kink])
     return _sum_blocks(buf, P.dtype)
 
 
-def horseshoe_vjp(P, X, a, b, a_te, b_te, d, rc2_src, tg_rc2, s, W, topo):  # type: ignore[no-untyped-def]
-    """Return the VJP (gP, gX, g_tg_rc2, ga, gb, ga_te, gb_te, gd, g_rc2_src, gs) on the GPU."""
+def horseshoe_vjp(P, X, a, b, a_te, b_te, d, rc2_src, tg_rc2, s, W, topo,
+                  a_k=None, b_k=None):  # type: ignore[no-untyped-def]
+    """Return the VJP (gP, gX, g_tg_rc2, ga, gb, ga_te, gb_te, gd, g_rc2_src, gs) on the GPU.
+
+    With leg nodes (*a_k*, *b_k*) the tuple has two more items, ``ga_k`` and ``gb_k``.
+    """
     ns = kernels(_prec(P))
     m, n = int(P.shape[0]), int(a.shape[0])
     dev = P.device
@@ -670,16 +740,20 @@ def horseshoe_vjp(P, X, a, b, a_te, b_te, d, rc2_src, tg_rc2, s, W, topo):  # ty
     Wt = W.contiguous() if W is not None else torch.zeros((1, 1), dtype=P.dtype, device=dev)
     args = [_v(P, ns), _v(X, ns), _v(a, ns), _v(b, ns), _v(a_te, ns), _v(b_te, ns), _v(d, ns), _s(rc2_src),
             _s(tg2), sg, tg, own, sp, edge, sea, seb, _s(s), col, wp.from_torch(Wt), use_w, use_tg]
+    args = args + _kink_args(topo, a_te, b_te, a_k, b_k, ns, dev, sea, seb)
     nbj = _blocks(n)
     rbuf = torch.empty((nbj, m, 7), dtype=P.dtype, device=dev)
     _launch(ns.vjp_rows, (m, nbj), args + [wp.from_torch(rbuf)])
     nbi = _blocks(m)
-    cbuf = torch.empty((nbi, n, 17), dtype=P.dtype, device=dev)
+    cbuf = torch.empty((nbi, n, 23), dtype=P.dtype, device=dev)
     _launch(ns.vjp_cols, (n, nbi), args + [wp.from_torch(cbuf)])
     r = _sum_blocks(rbuf, P.dtype)
     c = _sum_blocks(cbuf, P.dtype)
-    return (r[:, 0:3], r[:, 3:6], r[:, 6], c[:, 0:3], c[:, 3:6], c[:, 6:9], c[:, 9:12], c[:, 12:15],
-            c[:, 15], c[:, 16])
+    out = (r[:, 0:3], r[:, 3:6], r[:, 6], c[:, 0:3], c[:, 3:6], c[:, 6:9], c[:, 9:12], c[:, 12:15],
+           c[:, 15], c[:, 16])
+    if getattr(topo, "kink", None) is None or a_k is None:
+        return out
+    return out + (c[:, 17:20], c[:, 20:23])
 
 
 def _tz_args(q, qn, p, gamma, d, rc2, tg_rc2, groups, ns):  # type: ignore[no-untyped-def]

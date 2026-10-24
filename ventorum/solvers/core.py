@@ -157,6 +157,8 @@ def assemble_vlm(
             sign=np.ones(lattice.n_panels),
             column=umap.panel_column.copy(),
             group=group,
+            a_kink=None if lattice.a_kink is None else to_s(lattice.a_kink),
+            b_kink=None if lattice.b_kink is None else to_s(lattice.b_kink),
         )
         P = lattice.cp[umap.unknown_panels]
         P_s = to_s(P)
@@ -530,6 +532,8 @@ def _batch_sources(
         sign=np.tile(base.sign, K),
         column=(base.column[None, :] + n * np.arange(K)[:, None]).ravel(),
         group=None if base.group is None else np.tile(base.group, K),
+        a_kink=None if base.a_kink is None else np.tile(base.a_kink, (K, 1)),
+        b_kink=None if base.b_kink is None else np.tile(base.b_kink, (K, 1)),
     )
 
 
@@ -545,6 +549,8 @@ def _stack_sources(sets: list[HorseshoeSet]) -> HorseshoeSet:
         sign=np.concatenate([s.sign for s in sets]),
         column=np.concatenate([s.column for s in sets]),
         group=None if any(s.group is None for s in sets) else np.concatenate([s.group for s in sets]),
+        a_kink=None if not any(s.has_kinks for s in sets) else np.concatenate([s.kinks()[0] for s in sets]),
+        b_kink=None if not any(s.has_kinks for s in sets) else np.concatenate([s.kinks()[1] for s in sets]),
     )
 
 

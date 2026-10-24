@@ -205,7 +205,18 @@ def strip_reynolds_number(
 
 
 def _strip_control(lattice: VortexLattice, aircraft: Aircraft, s: int) -> tuple[float, float | None]:
-    """Return the flap deflection [deg] and the hinge [-] of strip *s* (0 and None without a control)."""
+    """Return the flap deflection [deg] and the hinge [-] of strip *s* (0 and None without a control).
+
+    On a vortex lattice with chordwise controls the deflection is the one of
+    the lattice strip at the span fraction of its control point, so a strip
+    in the join at a control side edge has the partial deflection of the
+    join (see :class:`ventorum.geometry.controls.ControlJoinField`).
+    """
+    field = lattice.geom_cache.get("flap_field")
+    if field is not None:
+        if not np.isfinite(field["hinge"][s]) or field["strip_angle"][s] == 0.0:
+            return 0.0, None
+        return float(np.degrees(field["strip_angle"][s])), float(field["hinge_x_c"][s])
     surf = aircraft.surfaces[int(lattice.strip_surface[s])]
     eta = abs(float(lattice.eta[s]))
     is_right = bool(lattice.strip_is_right[s])
@@ -447,7 +458,10 @@ def _vlm_section_lines(
     -------
     tuple of numpy.ndarray
         Lift slope [1/rad], zero-lift angle [rad] and the zero-lift angle
-        of the clean strip [rad]. The clean strip has the panel normals
+        of the clean strip [rad]. The points of the section are the lattice
+        points before the turn of a chordwise flap: the section is the
+        linear model, with the flap in the boundary normals (the lattice
+        itself has the turned points). The clean strip has the panel normals
         before the flap turn. Without a mean line, all its panels have the
         strip normal: a uniform panel angle, so this angle is its zero-lift
         angle for any panel count, also with images. On a mean line, the
@@ -457,13 +471,17 @@ def _vlm_section_lines(
     a_out = np.empty(len(strips))
     a0_out = np.empty(len(strips))
     clean_out = np.empty(len(strips))
+    clean = lattice.geom_cache.get("flap_points_clean")
     for i, s in enumerate(strips):
         pidx = np.flatnonzero(lattice.panel_strip == s)
         cdir = lattice.chord_dir[s]
         nrm = lattice.normal[s]
         origin = 0.5 * (lattice.le_left[s] + lattice.le_right[s])
-        q = 0.5 * (lattice.a[pidx] + lattice.b[pidx])
-        p = lattice.cp[pidx]
+        # The section is linear (thin-airfoil theory): the points before the
+        # turn of a chordwise flap, the flap in the boundary normals.
+        pa, pb, pc = clean if clean is not None else (lattice.a, lattice.b, lattice.cp)
+        q = 0.5 * (pa[pidx] + pb[pidx])
+        p = pc[pidx]
 
         xq, zq = _section_frame(q, origin, cdir, nrm)
         xp, zp = _section_frame(p, origin, cdir, nrm)
@@ -805,8 +823,14 @@ def _solve_condition(
         start = np.asarray(delta0, dtype=float).copy()
     primary = newton(start)
 
+    # The airfoils change, so the cache starts empty, except the entries of
+    # the flap geometry: the leg-force rules of a lattice with chordwise
+    # controls come from the lattice before the flap turn and cannot be
+    # found again from its points.
+    keep = ("flap_hinges", "flap_field", "flap_points_clean", "leg_force_rules")
     loads_lattice = dataclasses.replace(
-        lattice, airfoils=list(lattice.airfoils), geom_cache={}, kernel_cache=None,
+        lattice, airfoils=list(lattice.airfoils),
+        geom_cache={k: lattice.geom_cache[k] for k in keep if k in lattice.geom_cache}, kernel_cache=None,
     )
     for i, s in enumerate(strips):
         loads_lattice.airfoils[s] = polars[i]

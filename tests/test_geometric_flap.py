@@ -17,6 +17,7 @@ from ventorum.aero.system import build_sources, make_unknown_map
 from ventorum.core.errors import GroundStrikeError
 from ventorum.geometry import lattice as mesh_mod
 from ventorum.geometry import lattice_cache
+from ventorum.geometry.controls import CONTROL_JOIN, ControlJoinField
 
 
 def _aircraft(delta=0.0, *, shape=None, symmetric=True, partial=False):
@@ -161,7 +162,13 @@ def test_flap_points_on_rotated_surface(shape, symmetric):
     from ventorum.airfoil import airfoil
 
     zh = 0.0 if shape is None else airfoil(shape).normalized().camber(0.7)
+    # An antisymmetric control through the root has a join there (from -delta
+    # to +delta over 0.2 chords, see test_root_join_antisymmetric); the strips
+    # next to the root are checked there.
+    half = 0.5 * CONTROL_JOIN * 1.0
     for s in range(lat.n_strips):
+        if not symmetric and min(abs(lat.le_left[s, 1]), abs(lat.le_right[s, 1])) < half:
+            continue
         angle = delta if (lat.strip_is_right[s] or symmetric) else -delta
         origin = np.array([0.7, 0.0, zh])
         c, sn = np.cos(angle), np.sin(angle)
@@ -208,16 +215,30 @@ def test_swept_twisted_hinge(shape):
         base = mesh_mod.build_lattice(ac, _settings(), n_chord=10)
         ac.set_deflection("flap", 0.13)
         lat = mesh_mod.build_lattice(ac, _settings(), n_chord=10)
-    for s in range(lat.n_strips):
-        hinge, axis = _hinge_line(base, s, 0.7)
-        da = 0.13 if lat.strip_is_right[s] else -0.13
+    hinges = lat.geom_cache["flap_hinges"]
+    angle = lat.geom_cache["flap_field"]["angle"]
+
+    def turn(p, hinge, axis, da):
         c, sn = np.cos(da), np.sin(da)
-        for name in ("a", "b", "cp"):
-            panels = slice(s * 10 + 7, (s + 1) * 10)
-            v = getattr(base, name)[panels] - hinge
-            expected = hinge + c * v + sn * np.cross(axis, v) + (1 - c) * (v @ axis)[:, None] * axis
-            np.testing.assert_allclose(getattr(lat, name)[panels], expected, rtol=0, atol=3e-15)
+        v = p - hinge
+        return hinge + c * v + sn * np.cross(axis, v) + (1 - c) * (v @ axis)[:, None] * axis
+
+    n = lat.n_strips
+    for s in range(n):
+        # The axis of an edge node is the central difference of the hinge
+        # points of its neighbour nodes.
+        h_l, h_r = hinges[s]
+        ax_l = h_r - (hinges[s - 1][0] if s > 0 else h_l)
+        ax_r = (hinges[s + 1][1] if s + 1 < n else h_r) - h_l
+        ax_l, ax_r = ax_l / np.linalg.norm(ax_l), ax_r / np.linalg.norm(ax_r)
+        panels = slice(s * 10 + 7, (s + 1) * 10)
+        np.testing.assert_allclose(lat.a[panels], turn(base.a[panels], h_l, ax_l, angle[s, 0]), rtol=0, atol=3e-15)
+        np.testing.assert_allclose(lat.b[panels], turn(base.b[panels], h_r, ax_r, angle[s, 1]), rtol=0, atol=3e-15)
+        hinge, _ = _hinge_line(base, s, 0.7)
         np.testing.assert_allclose(_hinge_line(lat, s, 0.7)[0], hinge, rtol=0, atol=3e-15)
+        if s + 1 < n:
+            # The two strips at a node turn it about the same line: no gap.
+            np.testing.assert_allclose(lat.te_right[s], lat.te_left[s + 1], rtol=0, atol=3e-15)
 
 
 def test_small_deflection_limit(monkeypatch):
@@ -399,3 +420,275 @@ def test_thin_flapped_wing_against_panel3d(monkeypatch, h):
     finally:
         # Check the moment bound even when the lift bound fails.
         assert abs(new.Cm - p.Cm) <= max(0.10 * abs(p.Cm), 0.003)
+
+
+# --- hinge nodes of the chordwise legs ------------------------------------------
+
+def _kinked_sources(h=None):
+    """Return a lattice with a deflected part-span flap, its sources and the evaluation points."""
+    ac = _aircraft(0.2, symmetric=False, partial=True)
+    lat = mesh_mod.build_lattice(ac, _settings(6, 6), n_chord=6)
+    ground = None
+    if h is not None:
+        from ventorum.aero.system import make_ground_plane
+        ground = make_ground_plane(lat, h, 0.05, ref_point=ac.ref_point)
+    wake = np.array([np.cos(0.05), 0.0, np.sin(0.05)])
+    src = build_sources(lat, wake, make_unknown_map(lat, False), ground)
+    points = np.vstack([lat.cp, 0.5 * (lat.a_te + lat.a_kink), 0.5 * (lat.a + lat.b)])
+    return lat, src, points
+
+
+def test_hinge_nodes_on_deflected_surface():
+    """The forward legs of a deflected strip run bound point -> hinge point -> deflected TE."""
+    lat, src, _ = _kinked_sources()
+    assert src.has_kinks
+    n_c = lat.n_chord
+    hinges = lat.geom_cache["flap_hinges"]
+    kinked = set(src.kinked().tolist())
+    for s in range(lat.n_strips):
+        for k in range(n_c):
+            p = s * n_c + k
+            forward = s in hinges and lat.a[p, 0] < 0.7
+            if forward:
+                np.testing.assert_array_equal(lat.a_kink[p], hinges[s][0])
+                np.testing.assert_array_equal(lat.b_kink[p], hinges[s][1])
+                assert p in kinked
+            else:
+                np.testing.assert_array_equal(lat.a_kink[p], lat.a_te[p])
+                np.testing.assert_array_equal(lat.b_kink[p], lat.b_te[p])
+                assert p not in kinked
+    # An undeflected chordwise control keeps its nodes on the straight legs
+    # (continuous loads in the deflection); a wing without controls has none.
+    zero = mesh_mod.build_lattice(_aircraft(0.0), _settings(), n_chord=10)
+    assert zero.a_kink is not None
+    np.testing.assert_allclose(zero.a_kink[zero.a[:, 0] < 0.7, 0], 0.7, rtol=0, atol=1e-15)
+    plain = _aircraft(0.0)
+    plain.surfaces[0].controls = []
+    assert mesh_mod.build_lattice(plain, _settings(), n_chord=10).a_kink is None
+
+
+def _cpu_backends():
+    out = ["numba"]
+    if vortex._HAVE_CYTHON and vortex._cy_has_kinks():
+        out.append("cython")
+    if vortex._HAVE_TORCH:
+        out.append("torch")
+    return out
+
+
+@pytest.mark.parametrize("h", [None, 0.2])
+@pytest.mark.parametrize("backend", _cpu_backends())
+def test_hinge_node_kernel_parity(h, backend):
+    """Every compiled kernel with leg nodes agrees with the numpy reference to round-off."""
+    lat, src, P = _kinked_sources(h)
+    n = lat.n_panels
+    normals = np.tile(lat.normal_bc, (3, 1))
+    g = np.linspace(0.3, 1.7, n)
+    tg = vortex.Targets(group=np.zeros(P.shape[0], dtype=np.int64), rc=np.full(P.shape[0], 0.01))
+
+    def run():
+        return (vortex.influence_matrix(P, normals, src, n),
+                vortex.influence_matrix(P, normals, src, n, cache={}, cache_key="k"),
+                vortex.induced_velocity(P, src, g),
+                vortex.induced_velocity(P, src, g, cache={}, cache_key="k"),
+                vortex.induced_velocity(P, src, g, tg),
+                vortex.horseshoe_velocity_tensor(P, src),
+                vortex.velocity_tensor_unknowns(P, src, n))
+
+    vortex.set_kernel_backend("numpy")
+    ref = run()
+    vortex.set_kernel_backend(backend)
+    for r, x in zip(ref, run()):
+        scale = max(float(np.max(np.abs(r))), 1.0)
+        np.testing.assert_allclose(x, r, rtol=0, atol=1e-12 * scale)
+
+
+def test_hinge_node_matches_split_legs():
+    """A leg with a node equals the straight horseshoe plus the two leg segments, minus the straight leg."""
+    lat, src, P = _kinked_sources()
+    idx = src.kinked()
+    vortex.set_kernel_backend("numpy")
+    v = vortex.horseshoe_velocity_tensor(P, src)[:, idx]
+    straight = vortex.HorseshoeSet(a=src.a, b=src.b, a_te=src.a_te, b_te=src.b_te, wake_dir=src.wake_dir,
+                                   rc=src.rc, sign=src.sign, column=src.column, group=src.group)
+    v0 = vortex.horseshoe_velocity_tensor(P, straight)[:, idx]
+    rc = src.rc[idx]
+    seg = vortex.segment_velocity
+    expected = (v0 - seg(P, src.a_te[idx], src.a[idx], rc) - seg(P, src.b[idx], src.b_te[idx], rc)
+                + seg(P, src.a_te[idx], src.a_kink[idx], rc) + seg(P, src.a_kink[idx], src.a[idx], rc)
+                + seg(P, src.b[idx], src.b_kink[idx], rc) + seg(P, src.b_kink[idx], src.b_te[idx], rc))
+    np.testing.assert_allclose(v, expected, rtol=0, atol=1e-10 * np.max(np.abs(v)))
+
+
+def _flap_slope(monkeypatch, old, alpha, n_span=20, n_chord=16):
+    """Return dCL/ddelta [1/rad] at a small deflection by a central difference."""
+    st = vt.SolverSettings(n_chord=n_chord, n_panels=n_span, chord_spacing="uniform")
+    d = np.radians(0.1)
+    cl = []
+    for sign in (1.0, -1.0):
+        ac = _aircraft(sign * d)
+        ac.surfaces[0].controls[0].hinge_x_c = 0.75
+        res = _old_solve(monkeypatch, ac, alpha=alpha, settings=st) if old else _solve(ac, alpha=alpha, settings=st)
+        cl.append(res.totals.CL)
+    lattice_cache.clear()
+    return (cl[0] - cl[1]) / (2 * d)
+
+
+def test_small_deflection_slope_at_incidence(monkeypatch):
+    """At 3 deg incidence the flap slope dCL/ddelta matches the normal-turn model within 1 %.
+
+    With straight forward legs the leg forces made the slope 24 % low. The
+    test at zero incidence does not see that error.
+    """
+    new = _flap_slope(monkeypatch, False, np.radians(3.0))
+    old = _flap_slope(monkeypatch, True, np.radians(3.0))
+    print(f"dCL/ddelta at alpha 3 deg: geometric {new:.6f}, normal turn {old:.6f}")
+    assert abs(new - old) <= 0.01 * abs(old)
+
+
+@pytest.mark.slow
+def test_full_span_flap_spanwise_refinement(monkeypatch):
+    """A full-span flap converges with the spanwise mesh and stays near the normal-turn model."""
+    ac = _aircraft(np.radians(10.0))
+    out = {}
+    for n_span in (24, 160):
+        st = vt.SolverSettings(n_chord=20, n_panels=n_span)
+        out[n_span] = (_solve(ac, settings=st).totals.CL, _old_solve(monkeypatch, ac, settings=st).totals.CL)
+    print(f"full-span flap CL (geometric, normal turn): {out}")
+    assert abs(out[160][0] - out[24][0]) <= 0.02 * abs(out[160][0])
+    assert abs(out[160][0] - out[160][1]) <= 0.03 * abs(out[160][1])
+
+
+# --- sealed side edges (joins) and leg-force rules -------------------------------
+
+def test_join_field_geometry():
+    """The join is linear over 0.2 local chords, centred on the control edge, on every mesh."""
+    c = vt.ControlSurface("flap", 0.25, 0.75, 0.7, 0.2)
+    field = ControlJoinField([c], "plain", lambda e: 2.0, lambda e: 4.0)
+    half = 0.5 * CONTROL_JOIN * 2.0 / 4.0
+
+    def delta(f, e):
+        return sum(k * cc.deflection for cc, k in f.at(e)[0])
+
+    for e0, sgn in ((0.25, 1.0), (0.75, -1.0)):
+        assert delta(field, e0) == pytest.approx(0.1, abs=1e-15)
+        assert delta(field, e0 - sgn * half) == 0.0
+        assert delta(field, e0 + sgn * half) == pytest.approx(0.2, abs=1e-15)
+        assert delta(field, e0 + sgn * 0.5 * half) == pytest.approx(0.15, abs=1e-15)
+        assert field.at(e0 - sgn * 0.5 * half)[1] is c
+    assert delta(field, 0.5) == 0.2 and delta(field, 0.0) == 0.0 and delta(field, 1.0) == 0.0
+    # A symmetric control through the root has no join there; an
+    # antisymmetric one goes from -delta to +delta over the root.
+    sym = ControlJoinField([vt.ControlSurface("f", 0.0, 0.5, 0.7, 0.2)], "symmetric",
+                           lambda e: 2.0, lambda e: 4.0)
+    assert delta(sym, 0.0) == 0.2
+    anti = ControlJoinField([vt.ControlSurface("f", 0.0, 0.5, 0.7, 0.2, symmetric=False)], "symmetric",
+                            lambda e: 2.0, lambda e: 4.0)
+    assert delta(anti, 0.0) == 0.0
+    assert delta(anti, -0.5 * half) == pytest.approx(-0.1, abs=1e-15)
+
+
+@pytest.mark.parametrize("n_span", [8, 13])
+def test_join_sealed_side_edges(n_span):
+    """A part-span flap has no gap at its side edges, and the join is the same on every mesh."""
+    delta = np.radians(10.0)
+    lat = mesh_mod.build_lattice(_aircraft(delta, partial=True), _settings(10, n_span), n_chord=10)
+    np.testing.assert_allclose(lat.te_right[:-1], lat.te_left[1:], rtol=0, atol=3e-15)
+    field = lat.geom_cache["flap_field"]
+    half = 0.5 * CONTROL_JOIN / 4.0
+    for s in range(lat.n_strips):
+        y = abs(lat.le_left[s, 1]) / 4.0
+        if np.isfinite(field["hinge"][s]):
+            expected = delta * min(1.0, max(0.0, (y - (0.25 - half)) / (2 * half),)) * min(
+                1.0, max(0.0, ((0.75 + half) - y) / (2 * half)))
+            assert field["angle"][s, 0] == pytest.approx(expected, abs=1e-14)
+        else:
+            assert y <= 0.25 - half + 1e-12 or y >= 0.75 + half - 1e-12
+
+
+def test_root_join_dihedral():
+    """A symmetric flap through the root of a wing with dihedral keeps the root points together."""
+    ac = _aircraft(np.radians(10.0))
+    ac.surfaces[0].dihedral = np.radians(5.0)
+    lat = mesh_mod.build_lattice(ac, _settings(), n_chord=10)
+    root = int(np.argmin(np.abs(lat.le_right[:, 1])))
+    np.testing.assert_allclose(lat.te_right[root], lat.te_left[root + 1], rtol=0, atol=3e-15)
+    assert abs(lat.te_right[root, 1]) <= 1e-15
+
+
+def test_root_join_antisymmetric():
+    """An antisymmetric control through the root turns the root node by zero (the middle of its join)."""
+    lat = mesh_mod.build_lattice(_aircraft(0.2, symmetric=False), _settings(), n_chord=10)
+    root = int(np.argmin(np.abs(lat.le_right[:, 1])))
+    field = lat.geom_cache["flap_field"]
+    assert field["angle"][root, 1] == pytest.approx(0.0, abs=1e-15)
+    assert field["angle"][root + 1, 0] == pytest.approx(0.0, abs=1e-15)
+    np.testing.assert_allclose(lat.te_right[root], lat.te_left[root + 1], rtol=0, atol=3e-15)
+
+
+def test_leg_rules_shared_aft_segments():
+    """Regression: the copies of the shared aft leg segment of one strip are not a fold.
+
+    All forward panels of a strip share the aft segment of their legs (hinge
+    node to trailing edge). The fold test of the leg-force rule took two
+    copies of one strip as a fold of pi, and the aft segments became kink
+    legs with no force.
+    """
+    from ventorum.aero.loads import LEG_KINK, _leg_force_rules_geometric, leg_segments
+
+    lat = mesh_mod.build_lattice(_aircraft(0.0), _settings(), n_chord=10)
+    start, _ = leg_segments(lat)
+    assert start.shape[0] == 4 * lat.n_panels
+    # The matching on the four segment sets (the rules themselves use the
+    # whole legs, see test_leg_rules_whole_legs).
+    _, scale, kind = _leg_force_rules_geometric(lat)
+    assert not np.any(kind == LEG_KINK)
+    assert np.all(scale == 1.0)
+
+
+def test_leg_rules_from_undeflected_lattice():
+    """The leg-force rules of a deflected flap are those of the undeflected lattice, so CL is smooth."""
+    ac = _aircraft(0.0)
+    ac.surfaces[0].dihedral = np.radians(5.0)
+    st = _settings(10, 8)
+    rules0 = leg_force_rules(mesh_mod.build_lattice(ac, st, n_chord=10))
+    for d in (1e-4, 0.2):
+        ac.set_deflection("flap", d)
+        rules = leg_force_rules(mesh_mod.build_lattice(ac, st, n_chord=10))
+        np.testing.assert_array_equal(rules[2], rules0[2])
+        np.testing.assert_array_equal(rules[1], rules0[1])
+    cl = {}
+    for d in (-1e-3, -1e-5, 1e-5, 1e-3):
+        ac.set_deflection("flap", d)
+        lattice_cache.clear()
+        cl[d] = _solve(ac, alpha=0.07, settings=st).totals.CL
+    slope_small = (cl[1e-5] - cl[-1e-5]) / 2e-5
+    slope_large = (cl[1e-3] - cl[-1e-3]) / 2e-3
+    assert abs(slope_large - slope_small) <= 1e-4 * abs(slope_small)
+
+
+@pytest.mark.slow
+def test_part_span_flap_spanwise_refinement(monkeypatch):
+    """A part-span flap converges with the spanwise mesh and stays near the normal-turn model."""
+    ac = _aircraft(np.radians(10.0))
+    ac.surfaces[0].controls[0].eta_start = 0.2
+    ac.surfaces[0].controls[0].eta_end = 0.6
+    out = {}
+    for n_span in (24, 160):
+        st = vt.SolverSettings(n_chord=20, n_panels=n_span)
+        out[n_span] = (_solve(ac, settings=st).totals.CL, _old_solve(monkeypatch, ac, settings=st).totals.CL)
+    print(f"part-span flap CL (geometric, normal turn): {out}")
+    assert abs(out[160][0] - out[24][0]) <= 0.03 * abs(out[160][0])
+    assert abs(out[160][0] - out[160][1]) <= 0.03 * abs(out[160][1])
+
+
+def test_leg_rules_whole_legs():
+    """Both segments of a leg with a hinge node get the rule of the whole leg."""
+    lat = mesh_mod.build_lattice(_aircraft(0.0, partial=True), _settings(), n_chord=10)
+    plain = mesh_mod.build_lattice(_aircraft(0.0, partial=True), _settings(), n_chord=10)
+    plain.a_kink = plain.b_kink = None
+    plain.geom_cache.pop("leg_force_rules")
+    _, scale0, kind0 = leg_force_rules(plain)
+    _, scale, kind = leg_force_rules(lat)
+    np.testing.assert_array_equal(kind, np.concatenate([kind0, kind0]))
+    np.testing.assert_array_equal(scale, np.concatenate([scale0, scale0]))

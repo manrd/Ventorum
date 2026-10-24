@@ -228,10 +228,15 @@ class Topology:
         Number of unknowns.
     use_tg : bool
         Apply the cross-group target core.
+    kink, src_edge_ka, src_edge_kb : torch.Tensor or None
+        Flags (n,) of the sources whose legs have a node (see
+        :class:`ventorum.aero.vortex.HorseshoeSet`), and the edge ids of
+        their aft segments (n,). None when no source has a node.
     """
 
     def __init__(self, src_group, tg_group, own, edge, src_panel, src_edge_a, src_edge_b, col,
-                 n_u: int, use_tg: bool, m: int, device) -> None:  # type: ignore[no-untyped-def]
+                 n_u: int, use_tg: bool, m: int, device, kink=None, src_edge_ka=None,
+                 src_edge_kb=None) -> None:  # type: ignore[no-untyped-def]
         def _full(x):  # type: ignore[no-untyped-def]
             if x is None:
                 return torch.full((m,), -1, dtype=torch.int64, device=device)
@@ -251,7 +256,11 @@ class Topology:
             n, dtype=torch.int64, device=device)
         self.n_u = int(n_u)
         self.use_tg = bool(use_tg)
+        self.kink = None if kink is None else kink.to(torch.int64)
+        self.src_edge_ka = None if src_edge_ka is None else src_edge_ka.to(torch.int64)
+        self.src_edge_kb = None if src_edge_kb is None else src_edge_kb.to(torch.int64)
         self._np: tuple | None = None
+        self._np_kink: tuple | None = None
 
     def numpy(self) -> tuple:
         """Return (src_group, tg_group, own, src_panel, edge, src_edge_a, src_edge_b, col) as int64 arrays."""
@@ -260,33 +269,55 @@ class Topology:
                                                self.edge, self.src_edge_a, self.src_edge_b, self.col))
         return self._np
 
+    def numpy_kink(self) -> tuple | None:
+        """Return (flags as int8, src_edge_ka, src_edge_kb) as arrays, or None without leg nodes."""
+        if self.kink is None:
+            return None
+        if self._np_kink is None:
+            self._np_kink = (np.ascontiguousarray(_npi(self.kink), dtype=np.int8),
+                             _npi(self.src_edge_ka), _npi(self.src_edge_kb))
+        return self._np_kink
+
 
 def _cpu_impl(backend: str):  # type: ignore[no-untyped-def]
     """Return (forward, vjp, trefftz_forward, trefftz_vjp) of a CPU backend on float64 arrays."""
     if backend == "numpy":
         from ventorum.aero import vortex_vjp as m
 
-        def fwd(mode, P, X, a, b, at, bt, d, rc2s, tgrc2, sg, tg, own, sp, edge, sea, seb, s, col, n_u, use_tg):
-            return m.horseshoe_forward(P, X, a, b, at, bt, d, rc2s, tgrc2, sg, tg, own, sp, edge, sea, seb,
-                                       s, col, n_u, mode, use_tg)
+        def _kink(kink):  # type: ignore[no-untyped-def]
+            return None if kink is None else (kink[0], kink[1], kink[3], kink[4], kink[2])
 
-        def vjp(P, X, a, b, at, bt, d, rc2s, tgrc2, sg, tg, own, sp, edge, sea, seb, s, col, W, use_tg):
+        def fwd(mode, P, X, a, b, at, bt, d, rc2s, tgrc2, sg, tg, own, sp, edge, sea, seb, s, col, n_u, use_tg,
+                kink=None):
+            return m.horseshoe_forward(P, X, a, b, at, bt, d, rc2s, tgrc2, sg, tg, own, sp, edge, sea, seb,
+                                       s, col, n_u, mode, use_tg, _kink(kink))
+
+        def vjp(P, X, a, b, at, bt, d, rc2s, tgrc2, sg, tg, own, sp, edge, sea, seb, s, col, W, use_tg,
+                kink=None):
             return m.horseshoe_vjp(P, X, a, b, at, bt, d, rc2s, tgrc2, sg, tg, own, sp, edge, sea, seb,
-                                   s, col, W, use_tg)
+                                   s, col, W, use_tg, _kink(kink))
 
         return fwd, vjp, m.trefftz_forward, m.trefftz_vjp
     if backend == "numba":
         from ventorum.aero import vortex_vjp_numba as m
 
-        def fwd(mode, P, X, a, b, at, bt, d, rc2s, tgrc2, sg, tg, own, sp, edge, sea, seb, s, col, n_u, use_tg):
-            return m.horseshoe_forward_kernel(mode, P, X, a, b, at, bt, d, rc2s, tgrc2, sg, tg, own, sp, edge,
-                                              sea, seb, s, col, int(n_u), bool(use_tg))
+        def fwd(mode, P, X, a, b, at, bt, d, rc2s, tgrc2, sg, tg, own, sp, edge, sea, seb, s, col, n_u, use_tg,
+                kink=None):
+            if kink is None:
+                return m.horseshoe_forward_kernel(mode, P, X, a, b, at, bt, d, rc2s, tgrc2, sg, tg, own, sp, edge,
+                                                  sea, seb, s, col, int(n_u), bool(use_tg))
+            return m.horseshoe_forward_kink_kernel(mode, P, X, a, b, at, bt, d, rc2s, tgrc2, sg, tg, own, sp,
+                                                   edge, sea, seb, s, col, int(n_u), bool(use_tg), *kink)
 
-        def vjp(P, X, a, b, at, bt, d, rc2s, tgrc2, sg, tg, own, sp, edge, sea, seb, s, col, W, use_tg):
+        def vjp(P, X, a, b, at, bt, d, rc2s, tgrc2, sg, tg, own, sp, edge, sea, seb, s, col, W, use_tg,
+                kink=None):
             use_w = W is not None
             Wc = W if use_w else np.zeros((1, 1))
-            return m.horseshoe_vjp_kernel(P, X, a, b, at, bt, d, rc2s, tgrc2, sg, tg, own, sp, edge, sea, seb,
-                                          s, col, Wc, use_w, bool(use_tg), m.blocks(P.shape[0]))
+            if kink is None:
+                return m.horseshoe_vjp_kernel(P, X, a, b, at, bt, d, rc2s, tgrc2, sg, tg, own, sp, edge, sea, seb,
+                                              s, col, Wc, use_w, bool(use_tg), m.blocks(P.shape[0]))
+            return m.horseshoe_vjp_kink_kernel(P, X, a, b, at, bt, d, rc2s, tgrc2, sg, tg, own, sp, edge, sea,
+                                               seb, s, col, Wc, use_w, bool(use_tg), m.blocks(P.shape[0]), *kink)
 
         def tfwd(q, qn, p, gamma, d, rc2, tgrc2, sg, tg, use_tg):
             return m.trefftz_forward_kernel(q, qn, p, gamma, d, rc2, tgrc2, sg, tg, bool(use_tg))
@@ -352,14 +383,21 @@ def _cython_impl():  # type: ignore[no-untyped-def]
         edges = row_block_edges(m)
         return None if len(edges) <= 2 else edges
 
-    def fwd(mode, P, X, a, b, at, bt, d, rc2s, tgrc2, sg, tg, own, sp, edge, sea, seb, s, col, n_u, use_tg):
+    def _kw(kink):  # type: ignore[no-untyped-def]
+        if kink is None:
+            return {}
+        return {"ak": kink[0], "bk": kink[1], "kfl": kink[2], "seka": kink[3], "sekb": kink[4]}
+
+    def fwd(mode, P, X, a, b, at, bt, d, rc2s, tgrc2, sg, tg, own, sp, edge, sea, seb, s, col, n_u, use_tg,
+            kink=None):
         threads = kernel_threads()
         args = (a, b, at, bt, d, rc2s)
+        kw = _kw(kink)
 
         def call(i0, i1, nt):  # type: ignore[no-untyped-def]
             return cy.horseshoe_forward(int(mode), P[i0:i1], X[i0:i1], *args, tgrc2[i0:i1], sg, tg[i0:i1],
                                         own[i0:i1], sp, edge[i0:i1], sea, seb, s, col, int(n_u),
-                                        bool(use_tg), nt)
+                                        bool(use_tg), nt, **kw)
 
         m = P.shape[0]
         edges = None if omp else _row_edges(m, threads)
@@ -368,16 +406,19 @@ def _cython_impl():  # type: ignore[no-untyped-def]
         parts = list(_cython_pool().map(lambda k: call(edges[k], edges[k + 1], 1), range(len(edges) - 1)))
         return np.concatenate(parts, axis=0)
 
-    def vjp(P, X, a, b, at, bt, d, rc2s, tgrc2, sg, tg, own, sp, edge, sea, seb, s, col, W, use_tg):
+    def vjp(P, X, a, b, at, bt, d, rc2s, tgrc2, sg, tg, own, sp, edge, sea, seb, s, col, W, use_tg,
+            kink=None):
         threads = kernel_threads()
         use_w = W is not None
         Wc = W if use_w else np.zeros((1, 1))
         args = (a, b, at, bt, d, rc2s)
+        kw = _kw(kink)
+        n_out = 10 if kink is None else 12
 
         def call(i0, i1, nb, nt):  # type: ignore[no-untyped-def]
             Wr = Wc[i0:i1] if use_w else Wc
             return cy.horseshoe_vjp(P[i0:i1], X[i0:i1], *args, tgrc2[i0:i1], sg, tg[i0:i1], own[i0:i1], sp,
-                                    edge[i0:i1], sea, seb, s, col, Wr, use_w, bool(use_tg), nb, nt)
+                                    edge[i0:i1], sea, seb, s, col, Wr, use_w, bool(use_tg), nb, nt, **kw)
 
         m = P.shape[0]
         edges = None if omp else _vjp_edges(m)
@@ -386,7 +427,7 @@ def _cython_impl():  # type: ignore[no-untyped-def]
         parts = list(_cython_pool().map(lambda k: call(edges[k], edges[k + 1], 1, 1), range(len(edges) - 1)))
         rows = [np.concatenate([p[k] for p in parts], axis=0) for k in range(3)]
         srcs = []
-        for k in range(3, 10):
+        for k in range(3, n_out):
             acc = parts[0][k].copy()
             for p in parts[1:]:
                 acc += p[k]
@@ -447,59 +488,71 @@ class _HorseshoeFn(torch.autograd.Function if _HAVE_TORCH else object):  # type:
     """
 
     @staticmethod
-    def forward(ctx, backend, topo, mode, P, X, a, b, a_te, b_te, d, rc2_src, tg_rc2, s):  # type: ignore[no-untyped-def]
-        """Evaluate the product with the compiled forward kernel."""
+    def forward(ctx, backend, topo, mode, P, X, a, b, a_te, b_te, d, rc2_src, tg_rc2, s,
+                a_k=None, b_k=None):  # type: ignore[no-untyped-def]
+        """Evaluate the product with the compiled forward kernel (*a_k*, *b_k*: the leg nodes, or None)."""
         ctx.backend = backend
         ctx.topo = topo
         ctx.mode = mode
-        ctx.save_for_backward(P, X, a, b, a_te, b_te, d, rc2_src, tg_rc2, s)
-        return _hs_forward(backend, topo, mode, P, X, a, b, a_te, b_te, d, rc2_src, tg_rc2, s)
+        ctx.save_for_backward(P, X, a, b, a_te, b_te, d, rc2_src, tg_rc2, s, a_k, b_k)
+        return _hs_forward(backend, topo, mode, P, X, a, b, a_te, b_te, d, rc2_src, tg_rc2, s, a_k, b_k)
 
     @staticmethod
     def backward(ctx, gout):  # type: ignore[no-untyped-def]
         """Return the input gradients from one compiled VJP call."""
-        P, X, a, b, a_te, b_te, d, rc2_src, tg_rc2, s = ctx.saved_tensors
+        P, X, a, b, a_te, b_te, d, rc2_src, tg_rc2, s, a_k, b_k = ctx.saved_tensors
         if ctx.mode == 0:
             g = _hs_vjp(ctx.backend, ctx.topo, P, X, a, b, a_te, b_te, d, rc2_src, tg_rc2, s,
-                        gout.contiguous())
+                        gout.contiguous(), a_k, b_k)
             gX = g[1]
         else:
             g = _hs_vjp(ctx.backend, ctx.topo, P, gout.contiguous(), a, b, a_te, b_te, d, rc2_src,
-                        tg_rc2, s, None)
+                        tg_rc2, s, None, a_k, b_k)
             gX = None
-        gP, _, gtg, ga, gb, gat, gbt, gd, grc, gs = g
+        gP, _, gtg, ga, gb, gat, gbt, gd, grc, gs = g[:10]
+        gak, gbk = (g[10], g[11]) if len(g) > 10 else (None, None)
         need = ctx.needs_input_grad
-        out = [gP, gX, ga, gb, gat, gbt, gd, grc, gtg if tg_rc2 is not None else None, gs]
+        out = [gP, gX, ga, gb, gat, gbt, gd, grc, gtg if tg_rc2 is not None else None, gs, gak, gbk]
         out = [o if (o is not None and need[3 + k]) else None for k, o in enumerate(out)]
         return (None, None, None, *out)
 
 
-def _hs_forward(backend, topo, mode, P, X, a, b, a_te, b_te, d, rc2_src, tg_rc2, s):  # type: ignore[no-untyped-def]
+def _np_kink(topo, a_k, b_k):  # type: ignore[no-untyped-def]
+    """Return the leg nodes of a CPU call: (a_k, b_k, flags, src_edge_ka, src_edge_kb), or None."""
+    kt = topo.numpy_kink()
+    if kt is None or a_k is None:
+        return None
+    return (_np64(a_k), _np64(b_k)) + kt
+
+
+def _hs_forward(backend, topo, mode, P, X, a, b, a_te, b_te, d, rc2_src, tg_rc2, s,
+                a_k=None, b_k=None):  # type: ignore[no-untyped-def]
     m = P.shape[0]
     if backend in GPU_BACKENDS:
         impl = _gpu_impl(backend)
-        return impl.horseshoe_forward(mode, P, X, a, b, a_te, b_te, d, rc2_src, tg_rc2, s, topo)
+        return impl.horseshoe_forward(mode, P, X, a, b, a_te, b_te, d, rc2_src, tg_rc2, s, topo, a_k, b_k)
     fwd, _, _, _ = _cpu_impl(backend)
     sg, tg, own, sp, edge, sea, seb, col = topo.numpy()
     Xn = _np64(X) if X is not None else np.zeros((m, 3))
     tg2 = _np64(tg_rc2) if tg_rc2 is not None else np.zeros(m)
     out = fwd(mode, _np64(P), Xn, _np64(a), _np64(b), _np64(a_te), _np64(b_te), _np64(d), _np64(rc2_src),
               tg2, sg, tg, own, sp, edge, sea, seb, _np64(s), col, topo.n_u,
-              bool(topo.use_tg and tg_rc2 is not None))
+              bool(topo.use_tg and tg_rc2 is not None), kink=_np_kink(topo, a_k, b_k))
     return _to(out, P)
 
 
-def _hs_vjp(backend, topo, P, X, a, b, a_te, b_te, d, rc2_src, tg_rc2, s, W):  # type: ignore[no-untyped-def]
+def _hs_vjp(backend, topo, P, X, a, b, a_te, b_te, d, rc2_src, tg_rc2, s, W,
+            a_k=None, b_k=None):  # type: ignore[no-untyped-def]
     m = P.shape[0]
     if backend in GPU_BACKENDS:
         impl = _gpu_impl(backend)
-        return impl.horseshoe_vjp(P, X, a, b, a_te, b_te, d, rc2_src, tg_rc2, s, W, topo)
+        return impl.horseshoe_vjp(P, X, a, b, a_te, b_te, d, rc2_src, tg_rc2, s, W, topo, a_k, b_k)
     _, vjp, _, _ = _cpu_impl(backend)
     sg, tg, own, sp, edge, sea, seb, col = topo.numpy()
     tg2 = _np64(tg_rc2) if tg_rc2 is not None else np.zeros(m)
     g = vjp(_np64(P), _np64(X), _np64(a), _np64(b), _np64(a_te), _np64(b_te), _np64(d), _np64(rc2_src),
             tg2, sg, tg, own, sp, edge, sea, seb, _np64(s), col, None if W is None else _np64(W),
-            bool(topo.use_tg and tg_rc2 is not None))
+            bool(topo.use_tg and tg_rc2 is not None), kink=_np_kink(topo, a_k, b_k))
     return tuple(_to(x, P) for x in g)
 
 
@@ -540,14 +593,23 @@ class _TrefftzFn(torch.autograd.Function if _HAVE_TORCH else object):  # type: i
         return (None, None, *out)
 
 
-def horseshoe_rows(backend: str, topo: Topology, P, N, a, b, a_te, b_te, d, rc2_src, tg_rc2, sign):  # type: ignore[no-untyped-def]
-    """Return the system rows ``A[i, col[j]] += sign[j] dot(N[i], v_ij)`` (differentiable), shape (m, n_u)."""
-    return _HorseshoeFn.apply(backend, topo, 0, P, N, a, b, a_te, b_te, d, rc2_src, tg_rc2, sign)
+def horseshoe_rows(backend: str, topo: Topology, P, N, a, b, a_te, b_te, d, rc2_src, tg_rc2, sign,
+                   a_k=None, b_k=None):  # type: ignore[no-untyped-def]
+    """Return the system rows ``A[i, col[j]] += sign[j] dot(N[i], v_ij)`` (differentiable), shape (m, n_u).
+
+    *a_k*, *b_k* are the leg nodes (n, 3) of the sources with the flags of
+    *topo*, or None.
+    """
+    return _HorseshoeFn.apply(backend, topo, 0, P, N, a, b, a_te, b_te, d, rc2_src, tg_rc2, sign, a_k, b_k)
 
 
-def horseshoe_induced(backend: str, topo: Topology, P, a, b, a_te, b_te, d, rc2_src, tg_rc2, g_src):  # type: ignore[no-untyped-def]
-    """Return the induced velocity ``V[i] = sum_j g_src[j] v_ij`` (differentiable), shape (m, 3)."""
-    return _HorseshoeFn.apply(backend, topo, 1, P, None, a, b, a_te, b_te, d, rc2_src, tg_rc2, g_src)
+def horseshoe_induced(backend: str, topo: Topology, P, a, b, a_te, b_te, d, rc2_src, tg_rc2, g_src,
+                      a_k=None, b_k=None):  # type: ignore[no-untyped-def]
+    """Return the induced velocity ``V[i] = sum_j g_src[j] v_ij`` (differentiable), shape (m, 3).
+
+    *a_k*, *b_k* are the leg nodes, as in :func:`horseshoe_rows`.
+    """
+    return _HorseshoeFn.apply(backend, topo, 1, P, None, a, b, a_te, b_te, d, rc2_src, tg_rc2, g_src, a_k, b_k)
 
 
 def trefftz_wash(backend: str, groups: tuple, q, qn, p, gamma, d, rc2, tg_rc2):  # type: ignore[no-untyped-def]

@@ -280,7 +280,18 @@ class DeviceLattice:
         # The target core changes the result only between different groups.
         self.use_tg = 1 if np.unique(self.panel_group).size > 1 else 0
         T = self.T
+        a_k, b_k = lattice.a_kink, lattice.b_kink
+        if a_k is None:
+            a_k, b_k = lattice.a_te, lattice.b_te
+        kink = np.any(a_k != lattice.a_te, axis=1) | np.any(b_k != lattice.b_te, axis=1)
+        # All panels of a strip with leg nodes take the node path of the
+        # kernels (a straight leg has a zero aft segment there). Their legs
+        # lie on the oblique lines of the deflected flap, so the float32
+        # kernels compute their cross products in float64.
+        kink = np.isin(lattice.panel_strip, lattice.panel_strip[kink])
         if mach_transform is not None:
+            a_k = mach_transform.to_s(a_k)
+            b_k = mach_transform.to_s(b_k)
             a_s = mach_transform.to_s(lattice.a)
             b_s = mach_transform.to_s(lattice.b)
             a_te_s = mach_transform.to_s(lattice.a_te)
@@ -302,6 +313,16 @@ class DeviceLattice:
                 "rc2": _f64(np.asarray(lattice.rc, dtype=float) ** 2).to(T).contiguous(),
                 "group": _i32(self.panel_group),
             }
+        a_p = a_s if mach_transform is not None else lattice.a
+        b_p = b_s if mach_transform is not None else lattice.b
+        self.t["AK"], self.t["BK"] = _f64(a_k), _f64(b_k)
+        self.t["r0ka"] = _f64(a_p - a_k).to(T).contiguous()
+        self.t["r0kb"] = _f64(b_k - b_p).to(T).contiguous()
+        te_a = a_te_s if mach_transform is not None else lattice.a_te
+        te_b = b_te_s if mach_transform is not None else lattice.b_te
+        self.t["r0ta"] = _f64(a_k - te_a).to(T).contiguous()
+        self.t["r0tb"] = _f64(te_b - b_k).to(T).contiguous()
+        self.t["kink"] = _i32(kink.astype(np.int32))
         self.t["Ah"], self.t["Al"] = split2(self.t["A"])
         self.TE = torch.stack([self.t["ATE"], self.t["BTE"]], dim=1)   # (n, 2, 3)
         k = self.k
@@ -310,8 +331,12 @@ class DeviceLattice:
             setattr(s, name, view(self.t[name], wp.vec3d))
         s.Ah = view(self.t["Ah"], wp.vec3f)
         s.Al = view(self.t["Al"], wp.vec3f)
-        for name in ("r0b", "r0a", "r0t"):
+        for name in ("r0b", "r0a", "r0t", "r0ka", "r0kb", "r0ta", "r0tb"):
             setattr(s, name, view(self.t[name], k.vec))
+        s.AK = view(self.t["AK"], wp.vec3d)
+        s.BK = view(self.t["BK"], wp.vec3d)
+        s.kink = view(self.t["kink"], wp.int32)
+        s.n_kink = int(np.count_nonzero(kink))
         s.rc2 = view(self.t["rc2"], k.T)
         s.group = view(self.t["group"], wp.int32)
         self.sources = s
@@ -1202,18 +1227,18 @@ def load_points(dl: DeviceLattice, lattice, fold: bool) -> dict:
     only the panels of the right half are evaluated; a left panel gets the
     mirror image of the point set ``swap[k]`` of its mirror panel.
     """
-    from ventorum.aero.loads import _symmetric_fold
+    from ventorum.aero.loads import _symmetric_fold, leg_segments
 
     key = ("load_points", fold)
     data = dl._cache.get(key)
     if data is None:
         mid = lattice.force_points
-        leg_a = 0.5 * (lattice.a_te + lattice.a)
-        leg_b = 0.5 * (lattice.b + lattice.b_te)
-        points = [mid, leg_a, leg_b]
+        start, end = leg_segments(lattice)
+        # One point set per leg segment set (two, or four with hinge nodes).
+        points = [mid] + list((0.5 * (start + end)).reshape(-1, lattice.n_panels, 3))
         if dl.mach_transform is not None:
             points = [dl.mach_transform.to_s(pk) for pk in points]
-        swap = [0, 2, 1]
+        swap = [0, 2, 1] if len(points) == 3 else [0, 2, 1, 4, 3]
         geo = _symmetric_fold(lattice, np.ones(lattice.n_panels), points, swap, leg_forces=True) if fold else None
         eval_panels = np.arange(lattice.n_panels) if geo is None else geo[0]
         P = np.vstack([pk[eval_panels] for pk in points])
@@ -1318,7 +1343,7 @@ def vlm_load_velocities(dl: DeviceLattice, lattice, cs: CaseData, G: torch.Tenso
                                                 view(G[k0:k1].contiguous(), wp.float64), view(o, wp.vec3d)])
     n_e, n_p = lp["n_e"], lattice.n_panels
     sets = []
-    for j in range(3):
+    for j in range(len(lp["swap"])):
         v = torch.empty((K, n_p, 3), dtype=_F64, device=_dev())
         v[:, lp["eval"]] = out[:, j * n_e:(j + 1) * n_e]
         sets.append(v)
@@ -1329,7 +1354,7 @@ def vlm_load_velocities(dl: DeviceLattice, lattice, cs: CaseData, G: torch.Tenso
     if dl.mach_transform is not None:
         R_dev = _f64(dl.mach_transform.R)
         beta_val = dl.mach_transform.beta
-        for j in range(3):
+        for j in range(len(sets)):
             sets[j][..., 0] /= beta_val
             sets[j] = sets[j] @ R_dev
     return sets
@@ -1481,19 +1506,24 @@ def loads(dl: DeviceLattice, lattice, G: torch.Tensor, v_points: list[torch.Tens
     dev = _dev()
     geo = dl._cache.get("loads_geo")
     if geo is None:
-        from ventorum.aero.loads import leg_force_rules
+        from ventorum.aero.loads import leg_force_rules, leg_segments
 
         n_p = lattice.n_panels
         leg_n, leg_s, _ = leg_force_rules(lattice)
+        start, end = leg_segments(lattice)
+        # A kink leg carries no force: its vector is zero (see leg_force_rules).
+        leg_v = (end - start) * leg_s[:, None]
+        leg_mid = 0.5 * (start + end)
         geo = {
-            # A kink leg carries no force: its vector is zero (see leg_force_rules).
-            "lega": _f64((lattice.a - lattice.a_te) * leg_s[:n_p, None]),
-            "legb": _f64((lattice.b_te - lattice.b) * leg_s[n_p:, None]),
-            "nlega": _f64(leg_n[:n_p]), "nlegb": _f64(leg_n[n_p:]),
-            "lmida": _f64(0.5 * (lattice.a_te + lattice.a)), "lmidb": _f64(0.5 * (lattice.b + lattice.b_te)),
             "surf0": _i32([sf.strips.start for sf in lattice.surfaces]),
             "surf1": _i32([sf.strips.stop for sf in lattice.surfaces]),
+            "n_sets": start.shape[0] // n_p,
         }
+        for j, c in enumerate("abcd"[:geo["n_sets"]]):
+            rows = slice(j * n_p, (j + 1) * n_p)
+            geo["leg" + c] = _f64(leg_v[rows])
+            geo["nleg" + c] = _f64(leg_n[rows])
+            geo["lmid" + c] = _f64(leg_mid[rows])
         dl._cache["loads_geo"] = geo
     airfoils = lattice.airfoils
     geometric = lattice.geometric_camber
@@ -1528,6 +1558,16 @@ def loads(dl: DeviceLattice, lattice, G: torch.Tensor, v_points: list[torch.Tens
     vm = v_points[0].contiguous()
     vla = v_points[1].contiguous() if use_leg else vm
     vlb = v_points[2].contiguous() if use_leg else vm
+    # Aft segments of the legs with hinge nodes (four leg sets); without them
+    # the kernels get the forward-leg arrays and do not read them.
+    use_aft = 1 if (use_leg and geo["n_sets"] == 4) else 0
+    vlc = v_points[3].contiguous() if use_aft else vla
+    vld = v_points[4].contiguous() if use_aft else vlb
+    c_aft, d_aft = ("c", "d") if use_aft else ("a", "b")
+    aft_args = [use_aft, view(vlc, v3), view(vld, v3),
+                cview(geo, "leg" + c_aft, v3), cview(geo, "leg" + d_aft, v3),
+                cview(geo, "nleg" + c_aft, v3), cview(geo, "nleg" + d_aft, v3),
+                cview(geo, "lmid" + c_aft, v3), cview(geo, "lmid" + d_aft, v3)]
     ae = alpha_eff.contiguous() if alpha_eff is not None else w_n
     span = torch.empty((K, 8, n_s), dtype=_F64, device=dev)
     sforce = torch.empty((K, n_s, 3), dtype=_F64, device=dev)
@@ -1549,7 +1589,7 @@ def loads(dl: DeviceLattice, lattice, G: torch.Tensor, v_points: list[torch.Tens
             cview(lt, "chord_dir", v3), cview(lt, "dl", v3), cview(lt, "qc_mid", v3), cview(lt, "a0", wp.float64),
             cview(lt, "alpha_L0", wp.float64), view(ae, wp.float64), 1 if alpha_eff is not None else 0, pol,
             view(w_n.contiguous(), wp.float64), view(seg_len.contiguous(), wp.float64),
-            w_span, view(sforce, v3), w_part])
+            w_span, view(sforce, v3), w_part] + aft_args)
     else:
         launch(k.loads_strip, (K, n_s), [
             view(G.contiguous(), wp.float64), view(vm, v3), view(vla, v3), view(vlb, v3), 1 if use_leg else 0,
@@ -1561,7 +1601,7 @@ def loads(dl: DeviceLattice, lattice, G: torch.Tensor, v_points: list[torch.Tens
             cview(lt, "chord_dir", v3), cview(lt, "dl", v3), cview(lt, "qc_mid", v3), cview(lt, "a0", wp.float64),
             cview(lt, "alpha_L0", wp.float64), view(ae, wp.float64), 1 if alpha_eff is not None else 0, pol,
             view(w_n.contiguous(), wp.float64), view(seg_len.contiguous(), wp.float64),
-            w_span, view(sforce, v3), w_part])
+            w_span, view(sforce, v3), w_part] + aft_args)
     tot = torch.empty((K, 22), dtype=_F64, device=dev)
     launch(k.loads_totals, (K,), [w_part, w_D, w_V, w_rho, view(alpha.contiguous(), wp.float64), float(S_ref),
                                   float(b_ref), float(c_ref), w_span, cview(geo, "surf0", wp.int32),

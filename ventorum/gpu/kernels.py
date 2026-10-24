@@ -125,6 +125,18 @@ def _build(precision: str) -> SimpleNamespace:  # noqa: C901 - one closure per k
         r0t: wp.array(dtype=vec)         # b_te - b
         rc2: wp.array(dtype=T)           # squared core radius [m^2]
         group: wp.array(dtype=wp.int32)  # core group
+        # Leg nodes (see ventorum.aero.vortex.HorseshoeSet): the a leg runs
+        # a_te -> AK -> a and the b leg b -> BK -> b_te where kink[s] != 0
+        # (AK is a_te and BK is b_te on a straight leg of such a strip).
+        # n_kink = 0: no source has a node (the arrays are then not read).
+        n_kink: int
+        kink: wp.array(dtype=wp.int32)
+        AK: wp.array(dtype=wp.vec3d)     # node of the a leg [m]
+        BK: wp.array(dtype=wp.vec3d)     # node of the b leg [m]
+        r0ka: wp.array(dtype=vec)        # a - AK
+        r0kb: wp.array(dtype=vec)        # BK - b
+        r0ta: wp.array(dtype=vec)        # AK - a_te
+        r0tb: wp.array(dtype=vec)        # b_te - BK
 
     class Points:
         """Evaluation points (float64 and float32 pair), their normals, and their cross-surface core data."""
@@ -406,7 +418,61 @@ def _build(precision: str) -> SimpleNamespace:  # noqa: C901 - one closure per k
                     v = seg(r1, r2, vb, i1, i2, rc2)
                 else:
                     v = seg_c(cbound, r1, r2, vb, i1, i2, rc2)
-                v = v + seg(q1, r1, va, iq, i1, rc2) + seg(r2, w2, vt, i2, iw, rc2)
+                has_kink = 0
+                if src.n_kink != 0:
+                    has_kink = src.kink[s]
+                if has_kink != 0:
+                    # Legs with a node: forward segment to the node, then
+                    # the aft segment from the node to the trailing edge.
+                    vka = vec()
+                    vkb = vec()
+                    vta = vec()
+                    vtb = vec()
+                    if wp.static(is64):
+                        pak = src.AK[s]
+                        pbk = src.BK[s]
+                        if wp.static(IMG == 1):
+                            pak = mirror_point(pak, cs.GK[k], cs.GO[k])
+                            pbk = mirror_point(pbk, cs.GK[k], cs.GO[k])
+                        vka = pa - pak
+                        vkb = pbk - pb
+                        vta = pak - pat
+                        vtb = pbt - pbk
+                    else:
+                        vka = src.r0ka[s]
+                        vkb = src.r0kb[s]
+                        vta = src.r0ta[s]
+                        vtb = src.r0tb[s]
+                        if wp.static(IMG == 1):
+                            gkk = tvec(cs.GK[k])
+                            vka = mirror_dir(vka, gkk)
+                            vkb = mirror_dir(vkb, gkk)
+                            vta = mirror_dir(vta, gkk)
+                            vtb = mirror_dir(vtb, gkk)
+                    qk = r1 + vka
+                    wk = r2 - vkb
+                    iqk = inv_norm(qk)
+                    iwk = inv_norm(wk)
+                    if wp.static(is64 or IMG == 1):
+                        v = v + seg(qk, r1, vka, iqk, i1, rc2) + seg(q1, qk, vta, iq, iqk, rc2)
+                        v = v + seg(r2, wk, vkb, i2, iwk, rc2) + seg(wk, w2, vtb, iwk, iw, rc2)
+                    else:
+                        # The load points lie on the oblique leg lines of a
+                        # deflected flap: the cross products in float64, as
+                        # for the bound vortex (see the module notes).
+                        P64 = pts.P[i]
+                        ra = P64 - src.A[s]
+                        rb = P64 - src.B[s]
+                        rka = P64 - src.AK[s]
+                        rkb = P64 - src.BK[s]
+                        rta = P64 - src.ATE[s]
+                        rtb = P64 - src.BTE[s]
+                        v = v + seg_c(tvec(wp.cross(rka, ra)), qk, r1, vka, iqk, i1, rc2)
+                        v = v + seg_c(tvec(wp.cross(rta, rka)), q1, qk, vta, iq, iqk, rc2)
+                        v = v + seg_c(tvec(wp.cross(rb, rkb)), r2, wk, vkb, i2, iwk, rc2)
+                        v = v + seg_c(tvec(wp.cross(rkb, rtb)), wk, w2, vtb, iwk, iw, rc2)
+                else:
+                    v = v + seg(q1, r1, va, iq, i1, rc2) + seg(r2, w2, vt, i2, iw, rc2)
             if wp.static(PARTS != 1):
                 if wp.static(is64):
                     v = v + ray(w2, iw, d, rc2) - ray(q1, iq, d, rc2)
@@ -872,7 +938,11 @@ def _build(precision: str) -> SimpleNamespace:  # noqa: C901 - one closure per k
                     ae_in: wp.array2d(dtype=wp.float64), has_ae: int, pol: Polars,
                     wn: wp.array2d(dtype=wp.float64), segl: wp.array2d(dtype=wp.float64),
                     span: wp.array3d(dtype=wp.float64), sforce: wp.array2d(dtype=wp.vec3d),
-                    part: wp.array3d(dtype=wp.float64)):
+                    part: wp.array3d(dtype=wp.float64), use_aft: int,
+                    vlc: wp.array2d(dtype=wp.vec3d), vld: wp.array2d(dtype=wp.vec3d),
+                    legc: wp.array(dtype=wp.vec3d), legd: wp.array(dtype=wp.vec3d),
+                    nlc: wp.array(dtype=wp.vec3d), nld: wp.array(dtype=wp.vec3d),
+                    lmidc: wp.array(dtype=wp.vec3d), lmidd: wp.array(dtype=wp.vec3d)):
         # The loads of strip s of case k (the equations of compute_loads_batch):
         # Kutta-Joukowski forces on the bound vortices (and on the chordwise
         # legs with use_leg), their moments about rp, the section values, the
@@ -907,6 +977,17 @@ def _build(precision: str) -> SimpleNamespace:  # noqa: C901 - one closure per k
                 Fb = (rk * g) * wp.cross(vb, legb[p])
                 M = M + wp.cross(lmida[p] - rp, Fa) + wp.cross(lmidb[p] - rp, Fb)
                 Fp = Fp + Fa + Fb
+                if use_aft != 0:
+                    # Aft segments of the legs with a hinge node (zero
+                    # vectors on straight legs), see leg_segments.
+                    vc = Vd + vlc[k, p]
+                    vd = Vd + vld[k, p]
+                    vc = vc - wp.dot(vc, nlc[p]) * nlc[p]
+                    vd = vd - wp.dot(vd, nld[p]) * nld[p]
+                    Fc = (rk * g) * wp.cross(vc, legc[p])
+                    Fd = (rk * g) * wp.cross(vd, legd[p])
+                    M = M + wp.cross(lmidc[p] - rp, Fc) + wp.cross(lmidd[p] - rp, Fd)
+                    Fp = Fp + Fc + Fd
             F = F + Fp
         c = chord[s]
         w = width[s]
@@ -960,7 +1041,11 @@ def _build(precision: str) -> SimpleNamespace:  # noqa: C901 - one closure per k
                           ae_in: wp.array2d(dtype=wp.float64), has_ae: int, pol: Polars,
                           wn: wp.array2d(dtype=wp.float64), segl: wp.array2d(dtype=wp.float64),
                           span: wp.array3d(dtype=wp.float64), sforce: wp.array2d(dtype=wp.vec3d),
-                          part: wp.array3d(dtype=wp.float64)):
+                          part: wp.array3d(dtype=wp.float64), use_aft: int,
+                          vlc: wp.array2d(dtype=wp.vec3d), vld: wp.array2d(dtype=wp.vec3d),
+                          legc: wp.array(dtype=wp.vec3d), legd: wp.array(dtype=wp.vec3d),
+                          nlc: wp.array(dtype=wp.vec3d), nld: wp.array(dtype=wp.vec3d),
+                          lmidc: wp.array(dtype=wp.vec3d), lmidd: wp.array(dtype=wp.vec3d)):
         # The loads of strip s of case k with body rates (the equations of compute_loads_batch).
         k, s = wp.tid()
         d = D[k]
@@ -989,6 +1074,17 @@ def _build(precision: str) -> SimpleNamespace:  # noqa: C901 - one closure per k
                 Fb = (rk * g) * wp.cross(vb, legb[p])
                 M = M + wp.cross(lmida[p] - rp, Fa) + wp.cross(lmidb[p] - rp, Fb)
                 Fp = Fp + Fa + Fb
+                if use_aft != 0:
+                    uc = Vd - wp.cross(om, lmidc[p] - rp)
+                    ud = Vd - wp.cross(om, lmidd[p] - rp)
+                    vc = uc + vlc[k, p]
+                    vd = ud + vld[k, p]
+                    vc = vc - wp.dot(vc, nlc[p]) * nlc[p]
+                    vd = vd - wp.dot(vd, nld[p]) * nld[p]
+                    Fc = (rk * g) * wp.cross(vc, legc[p])
+                    Fd = (rk * g) * wp.cross(vd, legd[p])
+                    M = M + wp.cross(lmidc[p] - rp, Fc) + wp.cross(lmidd[p] - rp, Fd)
+                    Fp = Fp + Fc + Fd
             F = F + Fp
         c = chord[s]
         w = width[s]

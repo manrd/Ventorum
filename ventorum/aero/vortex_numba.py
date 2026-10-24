@@ -55,6 +55,18 @@ def pack_sources(hs) -> tuple:
     )
 
 
+def pack_kinks(hs) -> tuple:
+    """Return the leg nodes of a horseshoe set in the layout of the kernels.
+
+    The order is: a_kink, b_kink, and a flag that says if the set has nodes.
+    Without nodes the arrays are ``a_te`` and ``b_te``, and the kernels
+    compute the legs as before.
+    """
+    a_k, b_k = hs.kinks()
+    return (np.ascontiguousarray(a_k, dtype=np.float64), np.ascontiguousarray(b_k, dtype=np.float64),
+            bool(hs.has_kinks))
+
+
 def pack_targets(m: int, hs, targets) -> tuple:
     """Return the target arrays: group, added squared core, and a flag that says if they apply."""
     if targets is None or hs.group is None:
@@ -164,9 +176,12 @@ if HAVE_NUMBA:
         return vx + ux - ex, vy + uy - ey, vz + uz - ez
 
     @njit(cache=True, inline="always")
-    def _horseshoe_generic(P, i, a, b, a_te, b_te, d, j, rc2, parts):
+    def _horseshoe_generic(P, i, a, b, a_te, b_te, d, j, rc2, parts, a_k, b_k, kink):
         # Bent horseshoe, part 0 all, 1 fixed legs, 2 wake legs. Vectors and
         # norms are shared between the legs; straight chordwise legs add nothing.
+        # With kink True, a leg with a node runs a_te -> a_k -> a (and
+        # b -> b_k -> b_te): the forward segment ends at the node, and the
+        # aft segment is added.
         px = P[i, 0]
         py = P[i, 1]
         pz = P[i, 2]
@@ -209,25 +224,55 @@ if HAVE_NUMBA:
             vx, vy, vz = _seg_terms(r1x, r1y, r1z, r2x, r2y, r2z,
                                     bx - ax, by - ay, bz - az, n1, n2, rc2)
             if not straight_left:
-                q1x = px - tax
-                q1y = py - tay
-                q1z = pz - taz
+                kax, kay, kaz = tax, tay, taz
+                if kink:
+                    kax = a_k[j, 0]
+                    kay = a_k[j, 1]
+                    kaz = a_k[j, 2]
+                q1x = px - kax
+                q1y = py - kay
+                q1z = pz - kaz
                 nq = math.sqrt(q1x * q1x + q1y * q1y + q1z * q1z + 1e-300)
                 ux, uy, uz = _seg_terms(q1x, q1y, q1z, r1x, r1y, r1z,
-                                        ax - tax, ay - tay, az - taz, nq, n1, rc2)
+                                        ax - kax, ay - kay, az - kaz, nq, n1, rc2)
                 vx += ux
                 vy += uy
                 vz += uz
+                if kink and (kax != tax or kay != tay or kaz != taz):
+                    t1x = px - tax
+                    t1y = py - tay
+                    t1z = pz - taz
+                    nt = math.sqrt(t1x * t1x + t1y * t1y + t1z * t1z + 1e-300)
+                    ux, uy, uz = _seg_terms(t1x, t1y, t1z, q1x, q1y, q1z,
+                                            kax - tax, kay - tay, kaz - taz, nt, nq, rc2)
+                    vx += ux
+                    vy += uy
+                    vz += uz
             if not straight_right:
-                w2x = px - tbx
-                w2y = py - tby
-                w2z = pz - tbz
+                kbx, kby, kbz = tbx, tby, tbz
+                if kink:
+                    kbx = b_k[j, 0]
+                    kby = b_k[j, 1]
+                    kbz = b_k[j, 2]
+                w2x = px - kbx
+                w2y = py - kby
+                w2z = pz - kbz
                 nw = math.sqrt(w2x * w2x + w2y * w2y + w2z * w2z + 1e-300)
                 ux, uy, uz = _seg_terms(r2x, r2y, r2z, w2x, w2y, w2z,
-                                        tbx - bx, tby - by, tbz - bz, n2, nw, rc2)
+                                        kbx - bx, kby - by, kbz - bz, n2, nw, rc2)
                 vx += ux
                 vy += uy
                 vz += uz
+                if kink and (kbx != tbx or kby != tby or kbz != tbz):
+                    t2x = px - tbx
+                    t2y = py - tby
+                    t2z = pz - tbz
+                    nt = math.sqrt(t2x * t2x + t2y * t2y + t2z * t2z + 1e-300)
+                    ux, uy, uz = _seg_terms(w2x, w2y, w2z, t2x, t2y, t2z,
+                                            tbx - kbx, tby - kby, tbz - kbz, nw, nt, rc2)
+                    vx += ux
+                    vy += uy
+                    vz += uz
         if parts == 1:
             return vx, vy, vz
         dx = d[j, 0]
@@ -275,7 +320,8 @@ if HAVE_NUMBA:
         return True
 
     @njit(cache=True, parallel=True)
-    def induced_velocity_kernel(P, a, b, a_te, b_te, d, rc2_src, src_group, g_src, tg_group, tg_rc2, use_tg, parts=0):
+    def _induced_velocity_kernel_k(P, a, b, a_te, b_te, d, rc2_src, src_group, g_src, tg_group, tg_rc2, use_tg, parts,
+                                a_k, b_k, kink):
         """Return the total induced velocity (m, 3) for the source strengths *g_src* (sign included).
 
         Straight horseshoes with one unknown per source take a short path with
@@ -284,7 +330,7 @@ if HAVE_NUMBA:
         """
         m = P.shape[0]
         n = a.shape[0]
-        if parts == 0 and not use_tg and _is_straight(a, b, a_te, b_te, n):
+        if parts == 0 and not use_tg and not kink and _is_straight(a, b, a_te, b_te, n):
             out = np.empty((m, 3))
             for i in prange(m):
                 sx = 0.0
@@ -309,7 +355,7 @@ if HAVE_NUMBA:
                 rc2 = rc2_src[j]
                 if use_tg and tg_group[i] != src_group[j]:
                     rc2 += tg_rc2[i]
-                vx, vy, vz = _horseshoe_generic(P, i, a, b, a_te, b_te, d, j, rc2, parts)
+                vx, vy, vz = _horseshoe_generic(P, i, a, b, a_te, b_te, d, j, rc2, parts, a_k, b_k, kink)
                 g = g_src[j]
                 sx += vx * g
                 sy += vy * g
@@ -320,8 +366,8 @@ if HAVE_NUMBA:
         return out
 
     @njit(cache=True, parallel=True)
-    def normal_influence_kernel(P, normals, a, b, a_te, b_te, d, rc2_src, src_group, sign, column, n_unknowns,
-                                tg_group, tg_rc2, use_tg, parts=0):
+    def _normal_influence_kernel_k(P, normals, a, b, a_te, b_te, d, rc2_src, src_group, sign, column, n_unknowns,
+                                tg_group, tg_rc2, use_tg, parts, a_k, b_k, kink):
         """Return the normal-velocity influence matrix (m, n_unknowns).
 
         The sources that map to the same unknown (mirror and ground images)
@@ -332,7 +378,7 @@ if HAVE_NUMBA:
         """
         m = P.shape[0]
         n = a.shape[0]
-        if parts == 0 and not use_tg and _is_direct(column, sign, n_unknowns, n) \
+        if parts == 0 and not use_tg and not kink and _is_direct(column, sign, n_unknowns, n) \
                 and _is_straight(a, b, a_te, b_te, n):
             out = np.empty((m, n_unknowns))
             for i in prange(m):
@@ -352,12 +398,13 @@ if HAVE_NUMBA:
                 rc2 = rc2_src[j]
                 if use_tg and tg_group[i] != src_group[j]:
                     rc2 += tg_rc2[i]
-                vx, vy, vz = _horseshoe_generic(P, i, a, b, a_te, b_te, d, j, rc2, parts)
+                vx, vy, vz = _horseshoe_generic(P, i, a, b, a_te, b_te, d, j, rc2, parts, a_k, b_k, kink)
                 out[i, column[j]] += (vx * nx + vy * ny + vz * nz) * sign[j]
         return out
 
     @njit(cache=True, parallel=True)
-    def velocity_tensor_kernel(P, a, b, a_te, b_te, d, rc2_src, src_group, sign, tg_group, tg_rc2, use_tg, parts=0):
+    def _velocity_tensor_kernel_k(P, a, b, a_te, b_te, d, rc2_src, src_group, sign, tg_group, tg_rc2, use_tg, parts,
+                               a_k, b_k, kink):
         """Return the velocity (m, n_sources, 3) per unit source circulation (sign included)."""
         m = P.shape[0]
         n = a.shape[0]
@@ -367,7 +414,7 @@ if HAVE_NUMBA:
                 rc2 = rc2_src[j]
                 if use_tg and tg_group[i] != src_group[j]:
                     rc2 += tg_rc2[i]
-                vx, vy, vz = _horseshoe_generic(P, i, a, b, a_te, b_te, d, j, rc2, parts)
+                vx, vy, vz = _horseshoe_generic(P, i, a, b, a_te, b_te, d, j, rc2, parts, a_k, b_k, kink)
                 s = sign[j]
                 out[i, j, 0] = vx * s
                 out[i, j, 1] = vy * s
@@ -375,8 +422,8 @@ if HAVE_NUMBA:
         return out
 
     @njit(cache=True, parallel=True)
-    def velocity_unknowns_kernel(P, a, b, a_te, b_te, d, rc2_src, src_group, sign, column, n_unknowns,
-                                 tg_group, tg_rc2, use_tg, parts=0):
+    def _velocity_unknowns_kernel_k(P, a, b, a_te, b_te, d, rc2_src, src_group, sign, column, n_unknowns,
+                                 tg_group, tg_rc2, use_tg, parts, a_k, b_k, kink):
         """Return the velocity (m, n_unknowns, 3) per unit circulation of each unknown.
 
         The same velocities as ``velocity_tensor_kernel``, added into the
@@ -391,7 +438,7 @@ if HAVE_NUMBA:
                 rc2 = rc2_src[j]
                 if use_tg and tg_group[i] != src_group[j]:
                     rc2 += tg_rc2[i]
-                vx, vy, vz = _horseshoe_generic(P, i, a, b, a_te, b_te, d, j, rc2, parts)
+                vx, vy, vz = _horseshoe_generic(P, i, a, b, a_te, b_te, d, j, rc2, parts, a_k, b_k, kink)
                 s = sign[j]
                 c = column[j]
                 out[i, c, 0] += vx * s
@@ -434,3 +481,38 @@ if HAVE_NUMBA:
                 acc += (vx * nx + vy * ny + vz * nz) * k
             out[i] = acc
         return out
+
+    def _kink_args(a_te, b_te, a_k, b_k, kink):
+        # Without leg nodes the node arrays are a_te and b_te (not read).
+        if a_k is None:
+            return a_te, b_te, False
+        return a_k, b_k, bool(kink)
+
+    def induced_velocity_kernel(P, a, b, a_te, b_te, d, rc2_src, src_group, g_src, tg_group, tg_rc2, use_tg,
+                                parts=0, a_k=None, b_k=None, kink=False):
+        """Return the total induced velocity (m, 3) for the source strengths *g_src* (sign included).
+
+        *a_k*, *b_k* are the leg nodes (see ``a_kink`` in
+        :class:`ventorum.aero.vortex.HorseshoeSet`) with *kink* True, or None.
+        """
+        return _induced_velocity_kernel_k(P, a, b, a_te, b_te, d, rc2_src, src_group, g_src, tg_group, tg_rc2,
+                                          use_tg, parts, *_kink_args(a_te, b_te, a_k, b_k, kink))
+
+    def normal_influence_kernel(P, normals, a, b, a_te, b_te, d, rc2_src, src_group, sign, column, n_unknowns,
+                                tg_group, tg_rc2, use_tg, parts=0, a_k=None, b_k=None, kink=False):
+        """Return the normal-velocity influence matrix (m, n_unknowns); leg nodes as in :func:`induced_velocity_kernel`."""
+        return _normal_influence_kernel_k(P, normals, a, b, a_te, b_te, d, rc2_src, src_group, sign, column,
+                                          n_unknowns, tg_group, tg_rc2, use_tg, parts,
+                                          *_kink_args(a_te, b_te, a_k, b_k, kink))
+
+    def velocity_tensor_kernel(P, a, b, a_te, b_te, d, rc2_src, src_group, sign, tg_group, tg_rc2, use_tg,
+                               parts=0, a_k=None, b_k=None, kink=False):
+        """Return the velocity (m, n_sources, 3) per unit source circulation; leg nodes as above."""
+        return _velocity_tensor_kernel_k(P, a, b, a_te, b_te, d, rc2_src, src_group, sign, tg_group, tg_rc2,
+                                         use_tg, parts, *_kink_args(a_te, b_te, a_k, b_k, kink))
+
+    def velocity_unknowns_kernel(P, a, b, a_te, b_te, d, rc2_src, src_group, sign, column, n_unknowns,
+                                 tg_group, tg_rc2, use_tg, parts=0, a_k=None, b_k=None, kink=False):
+        """Return the velocity (m, n_unknowns, 3) per unit circulation of each unknown; leg nodes as above."""
+        return _velocity_unknowns_kernel_k(P, a, b, a_te, b_te, d, rc2_src, src_group, sign, column, n_unknowns,
+                                           tg_group, tg_rc2, use_tg, parts, *_kink_args(a_te, b_te, a_k, b_k, kink))

@@ -30,6 +30,14 @@ whose target lies on a source segment by the mesh topology (the own panel
 of a load point, the edge line of a leg mid-point) are zero, with zero
 derivatives.
 
+A source can have nodes on its legs (``a_k``, ``b_k``, see
+:class:`ventorum.aero.vortex.HorseshoeSet`): its left leg is then
+``a_te -> a_k -> a`` and its right leg ``b -> b_k -> b_te``. The forward
+segments keep the edge ids of the legs; the aft segments have their own
+ids (``src_edge_ka``, ``src_edge_kb``). On a source without a node,
+``a_k`` is ``a_te`` and ``b_k`` is ``b_te``: the leg is computed as
+without nodes.
+
 The pair core is ``rc2 = rc2_src[j] + tg_rc2[i]`` for a target and a source
 of different core groups (``use_tg``), else ``rc2_src[j]``.
 
@@ -324,25 +332,65 @@ def _keep(own, src_panel, edge, src_edge_a, src_edge_b, i0, i1):
     return keep_b, keep_la, keep_lb
 
 
-def _horseshoe_rows(P, a, b, a_te, b_te, d, rc2, keeps, floor):
-    """Return the pair velocity (rows, n, 3) and the states of the five filaments."""
+def _kinked(a_te, b_te, kink):
+    """Return the indices of the sources with a leg node, shape (k,); None without nodes.
+
+    The flags ``kink[4]`` give them when present; else a source has a node
+    where its node differs from its trailing-edge point.
+    """
+    if kink is None:
+        return None
+    if len(kink) > 4 and kink[4] is not None:
+        return np.flatnonzero(np.asarray(kink[4]) != 0)
+    a_k, b_k = kink[0], kink[1]
+    return np.flatnonzero(np.any(a_k != a_te, axis=1) | np.any(b_k != b_te, axis=1))
+
+
+def _horseshoe_rows(P, a, b, a_te, b_te, d, rc2, keeps, floor, kink=None, kidx=None, kkeeps=None):
+    """Return the pair velocity (rows, n, 3) and the states of the filaments.
+
+    With leg nodes (*kink* = ``(a_k, b_k, ...)``), the forward segments of
+    the legs end at the nodes, and the aft segments of the sources *kidx*
+    (masks *kkeeps*) are added; their states are the sixth item.
+    """
     Pr = P[:, None, :]
     A, B, AT, BT, D = a[None], b[None], a_te[None], b_te[None], d[None]
+    AK, BK = (AT, BT) if kink is None else (kink[0][None], kink[1][None])
     keep_b, keep_la, keep_lb = keeps
     v_b, s_b = _seg_forward(Pr, A, B, rc2, floor)
-    v_la, s_la = _seg_forward(Pr, AT, A, rc2, floor)
-    v_lb, s_lb = _seg_forward(Pr, B, BT, rc2, floor)
+    v_la, s_la = _seg_forward(Pr, AK, A, rc2, floor)
+    v_lb, s_lb = _seg_forward(Pr, B, BK, rc2, floor)
     v_rb, s_rb = _ray_forward(Pr, BT, D, rc2, floor)
     v_ra, s_ra = _ray_forward(Pr, AT, D, rc2, floor)
     v_b = np.where(keep_b[..., None], v_b, 0.0)
     v_la = np.where(keep_la[..., None], v_la, 0.0)
     v_lb = np.where(keep_lb[..., None], v_lb, 0.0)
+    if kink is None or kidx.size == 0:
+        v = (v_b + v_la + v_lb) + v_rb - v_ra
+        return v, (s_b, s_la, s_lb, s_rb, s_ra, None)
+    rck = rc2[:, kidx]
+    v_ka, s_ka = _seg_forward(Pr, AT[:, kidx], AK[:, kidx], rck, floor)
+    v_kb, s_kb = _seg_forward(Pr, BK[:, kidx], BT[:, kidx], rck, floor)
+    v_ka = np.where(kkeeps[0][..., None], v_ka, 0.0)
+    v_kb = np.where(kkeeps[1][..., None], v_kb, 0.0)
+    v_la = v_la.copy()
+    v_lb = v_lb.copy()
+    v_la[:, kidx] += v_ka
+    v_lb[:, kidx] += v_kb
     v = (v_b + v_la + v_lb) + v_rb - v_ra
-    return v, (s_b, s_la, s_lb, s_rb, s_ra)
+    return v, (s_b, s_la, s_lb, s_rb, s_ra, (s_ka, s_kb))
+
+
+def _kink_keeps(edge, kink, kidx, i0, i1):
+    """Return the keep masks (rows, k) of the aft segments of the sources *kidx*."""
+    if kink is None or kidx.size == 0:
+        return None
+    sea_k, seb_k = kink[2], kink[3]
+    return (edge[i0:i1, None] != sea_k[None, kidx], edge[i0:i1, None] != seb_k[None, kidx])
 
 
 def horseshoe_forward(P, X, a, b, a_te, b_te, d, rc2_src, tg_rc2, src_group, tg_group,
-                      own, src_panel, edge, src_edge_a, src_edge_b, s, col, n_u, mode, use_tg):
+                      own, src_panel, edge, src_edge_a, src_edge_b, s, col, n_u, mode, use_tg, kink=None):
     """Return the system rows (mode 0) or the induced velocity (mode 1) of the horseshoes.
 
     Parameters
@@ -377,6 +425,11 @@ def horseshoe_forward(P, X, a, b, a_te, b_te, d, rc2_src, tg_rc2, src_group, tg_
         0 for the system rows, 1 for the induced velocity.
     use_tg : bool
         Apply the cross-group target core.
+    kink : tuple or None
+        Leg nodes ``(a_k, b_k, src_edge_ka, src_edge_kb[, flags])``: the
+        nodes [m], shape (n, 3), the edge ids of the aft segments, shape
+        (n,), and optionally the flags (n,) of the sources with a node.
+        None for straight legs.
 
     Returns
     -------
@@ -386,13 +439,15 @@ def horseshoe_forward(P, X, a, b, a_te, b_te, d, rc2_src, tg_rc2, src_group, tg_
     """
     floor = floor_of(P.dtype)
     m, n = P.shape[0], a.shape[0]
+    kidx = _kinked(a_te, b_te, kink)
     out = np.zeros((m, int(n_u)) if mode == 0 else (m, 3), dtype=P.dtype)
     step = _chunk(m, n)
     for i0 in range(0, m, step):
         i1 = min(m, i0 + step)
         rc2, _ = _pair_core(rc2_src, tg_rc2, src_group, tg_group, i0, i1, use_tg)
         keeps = _keep(own, src_panel, edge, src_edge_a, src_edge_b, i0, i1)
-        v, _ = _horseshoe_rows(P[i0:i1], a, b, a_te, b_te, d, rc2, keeps, floor)
+        v, _ = _horseshoe_rows(P[i0:i1], a, b, a_te, b_te, d, rc2, keeps, floor,
+                               kink, kidx, _kink_keeps(edge, kink, kidx, i0, i1))
         if mode == 0:
             a_src = _dot(v, X[i0:i1, None, :]) * s[None, :]
             acc = np.zeros((i1 - i0, int(n_u)), dtype=P.dtype)
@@ -405,7 +460,7 @@ def horseshoe_forward(P, X, a, b, a_te, b_te, d, rc2_src, tg_rc2, src_group, tg_
 
 
 def horseshoe_vjp(P, X, a, b, a_te, b_te, d, rc2_src, tg_rc2, src_group, tg_group,
-                  own, src_panel, edge, src_edge_a, src_edge_b, s, col, W, use_tg):
+                  own, src_panel, edge, src_edge_a, src_edge_b, s, col, W, use_tg, kink=None):
     """Return the vector-Jacobian product of the horseshoe products.
 
     The arguments are those of :func:`horseshoe_forward`, with *W* the
@@ -420,7 +475,10 @@ def horseshoe_vjp(P, X, a, b, a_te, b_te, d, rc2_src, tg_rc2, src_group, tg_grou
         the derivatives with respect to the target points (m, 3), the
         target vectors X (m, 3), the squared target cores (m,), the source
         corners and wake directions (n, 3), the squared source cores (n,)
-        and the source weights (n,).
+        and the source weights (n,). With *kink*, two more items: the
+        derivatives with respect to the leg nodes ``a_k`` and ``b_k``
+        (n, 3); they are zero on a source without a node, whose leg
+        derivative is in ``ga_te`` and ``gb_te``.
     """
     floor = floor_of(P.dtype)
     m, n = P.shape[0], a.shape[0]
@@ -435,13 +493,18 @@ def horseshoe_vjp(P, X, a, b, a_te, b_te, d, rc2_src, tg_rc2, src_group, tg_grou
     gd = np.zeros((n, 3), dtype=dt)
     grc = np.zeros(n, dtype=dt)
     gs = np.zeros(n, dtype=dt)
+    kidx = _kinked(a_te, b_te, kink)
+    if kink is not None:
+        gak = np.zeros((n, 3), dtype=dt)
+        gbk = np.zeros((n, 3), dtype=dt)
     step = _chunk(m, n)
     for i0 in range(0, m, step):
         i1 = min(m, i0 + step)
         rc2, other = _pair_core(rc2_src, tg_rc2, src_group, tg_group, i0, i1, use_tg)
         keeps = _keep(own, src_panel, edge, src_edge_a, src_edge_b, i0, i1)
-        v, (s_b, s_la, s_lb, s_rb, s_ra) = _horseshoe_rows(P[i0:i1], a, b, a_te, b_te, d, rc2,
-                                                          keeps, floor)
+        kkeeps = _kink_keeps(edge, kink, kidx, i0, i1)
+        v, (s_b, s_la, s_lb, s_rb, s_ra, s_k) = _horseshoe_rows(P[i0:i1], a, b, a_te, b_te, d, rc2,
+                                                               keeps, floor, kink, kidx, kkeeps)
         wf = W[i0:i1][:, col] if W is not None else np.ones((i1 - i0, n), dtype=dt)
         cij = wf * s[None, :]
         Xr = X[i0:i1, None, :]
@@ -454,17 +517,49 @@ def horseshoe_vjp(P, X, a, b, a_te, b_te, d, rc2_src, tg_rc2, src_group, tg_grou
         gP_lb, gA_lb, gB_lb, gr_lb = _seg_backward(u * keep_lb[..., None], s_lb)
         gP_rb, gA_rb, gd_rb, gr_rb = _ray_backward(u, s_rb)
         gP_ra, gA_ra, gd_ra, gr_ra = _ray_backward(-u, s_ra)
-        gP[i0:i1] = (gP_b + gP_la + gP_lb + gP_rb + gP_ra).sum(axis=1)
+        if s_k is None:
+            gP[i0:i1] = (gP_b + gP_la + gP_lb + gP_rb + gP_ra).sum(axis=1)
+        else:
+            # Aft segments of the legs with a node (sources kidx).
+            uk = u[:, kidx]
+            gP_ka, gA_ka, gB_ka, gr_ka = _seg_backward(uk * kkeeps[0][..., None], s_k[0])
+            gP_kb, gA_kb, gB_kb, gr_kb = _seg_backward(uk * kkeeps[1][..., None], s_k[1])
+            gP_la = gP_la.copy()
+            gP_la[:, kidx] += gP_ka + gP_kb
+            gr_la = gr_la.copy()
+            gr_la[:, kidx] += gr_ka + gr_kb
+            gP[i0:i1] = (gP_b + gP_la + gP_lb + gP_rb + gP_ra).sum(axis=1)
         ga += (gA_b + gB_la).sum(axis=0)
         gb += (gB_b + gA_lb).sum(axis=0)
-        gat += (gA_la + gA_ra).sum(axis=0)
-        gbt += (gB_lb + gA_rb).sum(axis=0)
+        if kink is None:
+            gat += (gA_la + gA_ra).sum(axis=0)
+            gbt += (gB_lb + gA_rb).sum(axis=0)
+        else:
+            # The forward segments start (a leg) and end (b leg) at the nodes.
+            gak += gA_la.sum(axis=0)
+            gbk += gB_lb.sum(axis=0)
+            gat += gA_ra.sum(axis=0)
+            gbt += gA_rb.sum(axis=0)
+            if s_k is not None:
+                gat[kidx] += gA_ka.sum(axis=0)
+                gak[kidx] += gB_ka.sum(axis=0)
+                gbk[kidx] += gA_kb.sum(axis=0)
+                gbt[kidx] += gB_kb.sum(axis=0)
         gd += (gd_rb + gd_ra).sum(axis=0)
         grc2 = gr_b + gr_la + gr_lb + gr_rb + gr_ra
         grc += grc2.sum(axis=0)
         if other is not None:
             gtg[i0:i1] = np.where(other, grc2, 0.0).sum(axis=1)
-    return gP, gX, gtg, ga, gb, gat, gbt, gd, grc, gs
+    if kink is None:
+        return gP, gX, gtg, ga, gb, gat, gbt, gd, grc, gs
+    # On a source without a node the forward segment is the whole leg.
+    straight = np.ones(n, dtype=bool)
+    straight[kidx] = False
+    gat[straight] += gak[straight]
+    gbt[straight] += gbk[straight]
+    gak[straight] = 0.0
+    gbk[straight] = 0.0
+    return gP, gX, gtg, ga, gb, gat, gbt, gd, grc, gs, gak, gbk
 
 
 def trefftz_forward(q, qn, p, gamma, d, rc2, tg_rc2, src_group, tg_group, use_tg):
