@@ -431,6 +431,38 @@ def test_flap_correction_is_the_departure_of_the_polar_from_thin_airfoil_theory(
         assert np.array_equal(res.details["alpha0_thin_airfoil"][~flapped], res.details["alpha0_section"][~flapped])
 
 
+def test_flap_thin_airfoil_model_keeps_the_camber_of_the_mean_line():
+    """Regression: a flapped strip on a cambered mean line lost its camber in the thin-airfoil model.
+
+    With the lattice on the section mean line, the strip normal has no
+    camber turn. The clean zero-lift angle of a flapped strip came from
+    that normal, so it was 0 and not the camber angle (about -2.1 deg for
+    a NACA 2412). The lift offset of the flapped strips was then about
+    -0.2 in Cl, and the coupled CL of an AR 8 wing with a 10 deg flap rose
+    from 0.96 to 1.17. The clean angle is now the zero-lift angle of the
+    strip section with its panel normals before the flap turn: the
+    lattice section of the same wing without the flap.
+    """
+    tau = flap_effectiveness(HINGE)
+    cond = FlightCondition(V_inf=40.0, alpha=np.radians(2.0))
+    settings = SolverSettings(n_chord=8, n_panels=FLAP_TEST_N_PANELS)
+    clean_wing = make_rectangular_wing(aspect_ratio=8.0, shape="2412")
+    clean = solve_viscous(clean_wing, cond, settings, GlauertSource(), model="vlm")
+    flapped = solve_viscous(make_flapped_wing((0.2, 0.6), shape="2412"), cond, settings, GlauertSource(),
+                            model="vlm")
+    assert clean.converged and flapped.converged
+    lattice = flapped.details["lattice"]
+    assert np.all(lattice.geometric_camber)
+    clean_alpha0 = clean.details["alpha0_section"]
+    assert np.all(clean_alpha0 < np.radians(-1.9))
+    eta = np.abs(lattice.eta)
+    on_flap = (eta >= 0.2 - 1e-9) & (eta <= 0.6 + 1e-9)
+    np.testing.assert_allclose(flapped.details["alpha0_thin_airfoil"][on_flap],
+                               clean_alpha0[on_flap] - tau * np.radians(FLAP_DEG), rtol=1e-10)
+    assert np.array_equal(flapped.details["alpha0_thin_airfoil"][~on_flap],
+                          flapped.details["alpha0_section"][~on_flap])
+
+
 def test_flap_reference_section_and_ground_factor():
     """The converged 2D section gives the Glauert flap shift; its ground factor tends to 1 far up.
 

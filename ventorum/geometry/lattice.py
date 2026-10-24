@@ -371,6 +371,9 @@ class VortexLattice:
     geom_cache: dict = field(default_factory=dict, repr=False, compare=False)
     control_info: list[dict] = field(default_factory=list)
     geometric_camber: np.ndarray | None = None
+    # Boundary-condition normals before the turn of the chordwise flaps.
+    # None when no chordwise control turns a panel.
+    normal_bc_clean: np.ndarray | None = None
     camber_fallback: bool = False
     has_camber_offset: bool = False
 
@@ -1493,7 +1496,9 @@ def build_lattice(
         sf.edge_te = sf.edge_te + off_te
         le_l[idx], le_r[idx] = sf.edge_le[:-1], sf.edge_le[1:]
         te_l[idx], te_r[idx] = sf.edge_te[:-1], sf.edge_te[1:]
+    normal_bc_clean = None
     if is_chordwise:
+        normal_bc_clean = normal_bc.copy()
         is_right_arr = cat["is_right"].astype(bool)
         for s in range(n_strips):
             c = strip_ctrl_all[s]
@@ -1565,6 +1570,9 @@ def build_lattice(
         join_warnings=near_miss_warnings(surfaces) + camber_warnings + offset_warnings,
         control_info=control_info,
         geometric_camber=geometric_camber,
+        normal_bc_clean=(
+            normal_bc_clean if normal_bc_clean is not None and np.any(normal_bc_clean != normal_bc) else None
+        ),
         camber_fallback=camber_fallback,
         has_camber_offset=any(line is not None and np.any(line.z != 0.0)
                               for _, lines, _ in mean_surfaces for line in lines),

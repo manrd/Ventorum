@@ -279,6 +279,9 @@ def transform_lattice(
         kernel_cache=None,
         control_info=[dict(c) for c in getattr(lattice, "control_info", [])],
         geometric_camber=None if lattice.geometric_camber is None else lattice.geometric_camber.copy(),
+        normal_bc_clean=(
+            None if lattice.normal_bc_clean is None else _transform_directions(lattice.normal_bc_clean)
+        ),
         camber_fallback=lattice.camber_fallback,
         has_camber_offset=lattice.has_camber_offset,
     )

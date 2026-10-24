@@ -447,9 +447,12 @@ def _vlm_section_lines(
     -------
     tuple of numpy.ndarray
         Lift slope [1/rad], zero-lift angle [rad] and the zero-lift angle
-        of the clean strip [rad]. The clean strip has the strip normal
-        before the flap turn on all panels: a uniform panel angle, so this
-        angle is its zero-lift angle for any panel count, also with images.
+        of the clean strip [rad]. The clean strip has the panel normals
+        before the flap turn. Without a mean line, all its panels have the
+        strip normal: a uniform panel angle, so this angle is its zero-lift
+        angle for any panel count, also with images. On a mean line, the
+        panel angles follow the camber, and a third right-hand side gives
+        the zero-lift angle of the clean section.
     """
     a_out = np.empty(len(strips))
     a0_out = np.empty(len(strips))
@@ -474,13 +477,25 @@ def _vlm_section_lines(
             M = M + rxi / (2.0 * np.pi * (rxi * rxi + rzi * rzi))
         nb = lattice.normal_bc[pidx]
         theta = np.arctan2(-(nb @ cdir), nb @ nrm)
-        # One factorization for both right-hand sides.
-        g = np.linalg.solve(M, np.column_stack([-np.ones(len(pidx)), theta]))
+        rhs = [-np.ones(len(pidx)), theta]
+        on_mean_line = (
+            lattice.normal_bc_clean is not None
+            and lattice.geometric_camber is not None
+            and bool(lattice.geometric_camber[s])
+        )
+        if on_mean_line:
+            nb_c = lattice.normal_bc_clean[pidx]
+            rhs.append(np.arctan2(-(nb_c @ cdir), nb_c @ nrm))
+        # One factorization for all right-hand sides.
+        g = np.linalg.solve(M, np.column_stack(rhs))
         g_alpha, g_theta = g[:, 0].sum(), g[:, 1].sum()
         a_out[i] = 2.0 * g_alpha / float(lattice.chord[s])
         a0_out[i] = -g_theta / g_alpha
-        nb_clean = lattice.normal_bc_strip[s]
-        clean_out[i] = float(np.arctan2(-(nb_clean @ cdir), nb_clean @ nrm))
+        if on_mean_line:
+            clean_out[i] = -g[:, 2].sum() / g_alpha
+        else:
+            nb_clean = lattice.normal_bc_strip[s]
+            clean_out[i] = float(np.arctan2(-(nb_clean @ cdir), nb_clean @ nrm))
     return a_out, a0_out, clean_out
 
 

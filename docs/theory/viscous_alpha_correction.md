@@ -57,7 +57,7 @@ $$C_{l,\text{TA},j}(\alpha) = a_j \left(\alpha - \alpha_{0,\text{TA},j}\right), 
 
 with:
 
-- $a_j$ the lift slope of the lattice section, and $\alpha_{0,\text{clean},j}$ the zero-lift angle of the clean lattice section (the strip normal before the flap turn, which holds the camber tilt). A uniform panel angle is an angle of attack, so $\alpha_{0,\text{clean},j}$ is exact at any panel count, also with images.
+- $a_j$ the lift slope of the lattice section, and $\alpha_{0,\text{clean},j}$ the zero-lift angle of the clean lattice section (the panel normals before the flap turn). Without a mean line, all panels have the strip normal, which holds the camber tilt. A uniform panel angle is an angle of attack, so $\alpha_{0,\text{clean},j}$ is then exact at any panel count, also with images. On a lattice on the section mean line, the panel normals follow the camber, and $\alpha_{0,\text{clean},j}$ is the zero-lift angle of the discrete section with these normals, from the same factorization.
 - $\tau(x_h) = 1 - (\theta_h - \sin\theta_h)/\pi$, $\cos\theta_h = 1 - 2 x_h$, the flap effectiveness of thin-airfoil theory (Glauert 1926, 1927) at the hinge $x_h$ [-] of the control, and $\phi_j$ [rad] the flap deflection of the polar of the strip.
 - $\kappa_j$ the ground factor of the flap shift: 1 in free air and for a free-air polar. When the polar holds the ground height, $\kappa_j$ is the ratio of the flap shifts of a converged 2D discrete-vortex section of the strip with and without its images in the ground (256 lumped vortices, `GROUND_FLAP_REFERENCE_PANELS`, with a panel edge at the hinge). The ratio removes most of the discretization error of this reference section.
 

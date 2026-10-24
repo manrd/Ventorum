@@ -135,6 +135,13 @@ a minor version can change a public interface.
 
 ### Fixed
 
+- Viscous alpha-correction coupling (VLM): on a lattice on the section mean line, the
+  thin-airfoil model of a strip with a deflected chordwise flap lost the camber of the section
+  (its clean zero-lift angle was that of the uncambered strip normal). The lift offset of the
+  flapped strips was then wrong by about 0.2 in Cl: an AR 8 NACA 2412 wing with a 10 deg flap at
+  4 deg gave CL 1.17, now 1.00. The clean angle is now the zero-lift angle of the discrete
+  section with the panel normals before the flap turn (new lattice field `normal_bc_clean`).
+  Strips without a mean line do not change.
 - Ventorum-2D: a singular Newton matrix raised `numpy.linalg.LinAlgError` out of
   `solve_viscous` (for example NACA 0012 with a 20 deg flap and the stop rules off). It is now a
   failed step: the Levenberg-Marquardt fallback is tried, and when that also fails at the full
