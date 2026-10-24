@@ -53,6 +53,17 @@ a minor version can change a public interface.
 
 ### Changed
 
+- Geometric chordwise controls in the vortex lattice (`n_chord >= 2`). The mean surface aft of
+  the hinge turns about the hinge axis of each strip edge node, with the moved points in the
+  wake, the ground images, the clearance and ground-strike checks and the Trefftz plane. The
+  chordwise legs of the panels ahead of the hinge have a node at the hinge point (one extra
+  straight segment per leg, in every kernel backend, the GPU pipelines and the gradient
+  kernels), so they follow the deflected surface; with straight legs the leg forces made
+  the flap slope at incidence too low. A join of 0.2 local chords seals each control side edge (the
+  transition of the 3D panel method), so part-span flaps converge with the spanwise mesh. The
+  leg-force rules of a lattice with a chordwise control come from the undeflected lattice. The
+  results of chordwise controls change, also at zero deflection at the level of the leg-force
+  integration; lattices without chordwise controls do not change.
 - Vortex lattice on the real mean line of cambered sections. When every section of a surface
   gives a shape (`WingSection.shape`), the lattice points lie on the section mean surface and the
   boundary-condition normals are the normals of that surface (Katz and Plotkin 2001; Coulliette
