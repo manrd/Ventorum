@@ -588,8 +588,8 @@ class TorchReference:
         cc = b.get("ctrl_chord")
         if cc is not None:
             # Chordwise mode (vortex lattice, two or more chordwise panels):
-            # the normals of the panels aft of the hinge turn by the local
-            # deflection about the hinge line, as in the mesh builder.
+            # rotate the flap points and normals about the moving hinge.
+            # The node chain carries the motion of the hinge itself.
             s_c = cc["strip"]
             hf = cc["hinge"][:, None]
             h_l = le_l[s_c] + hf * (te_l[s_c] - le_l[s_c])
@@ -598,8 +598,33 @@ class TorchReference:
             delta_p = cc["delta0"]
             if inc is not None:
                 delta_p = delta_p + inc[cc["ctrl"]]
-            turned = rod_rot(n_bc[cc["panels"]], u_hinge, cc["sign"] * delta_p)
-            n_bc = n_bc.index_copy(0, cc["panels"], turned)
+            angle = cc["sign"] * delta_p
+            panels = cc["panels"]
+            n_bc = n_bc.index_copy(0, panels, rod_rot(n_bc[panels], u_hinge, angle))
+
+            def _flap_points(points):
+                return points.index_copy(0, panels, h_l + rod_rot(points[panels] - h_l, u_hinge, angle))
+
+            a, bv, cp = _flap_points(a), _flap_points(bv), _flap_points(cp)
+            # The wake starts at the deflected trailing edge for every
+            # horseshoe, including those ahead of the hinge. Select one
+            # row per controlled strip to avoid repeated indexed writes.
+            first = torch.cat((torch.ones(1, dtype=torch.bool, device=self.device), s_c[1:] != s_c[:-1]))
+            strips = s_c[first]
+            hl, axis, da = h_l[first], u_hinge[first], angle[first]
+            # A high CLAF can put the control point of the preceding panel
+            # aft of the hinge. Move that point too, without turning the
+            # normal of a panel whose leading edge is ahead of the hinge.
+            x0_s = xi[strips, :-1]
+            dx_s = xi[strips, 1:] - x0_s
+            xc_s = x0_s + 0.25 * dx_s + 0.5 * dx_s * claf[strips, None]
+            extra = (x0_s < cc["hinge"][first, None]) & (xc_s > cc["hinge"][first, None])
+            row, col_extra = torch.where(extra)
+            cp_extra = strips[row] * n_chord + col_extra
+            cp = cp.index_copy(0, cp_extra, hl[row] + rod_rot(cp[cp_extra] - hl[row], axis[row], da[row]))
+            te_l = te_l.index_copy(0, strips, hl + rod_rot(te_l[strips] - hl, axis, da))
+            te_r = te_r.index_copy(0, strips, hl + rod_rot(te_r[strips] - hl, axis, da))
+            a_te, b_te = te_l[panel_strip], te_r[panel_strip]
         cp_u = cp[b["unknown_panels"]]
         n_bc_u = n_bc[b["unknown_panels"]]
         # Target cross-core radii follow the strip widths (they are not fixed:
@@ -697,6 +722,22 @@ class TorchReference:
         pid = torch.arange(n_p, dtype=torch.int64, device=self.device)
         ea = edges[panel_strip, 0]
         eb = edges[panel_strip, 1]
+        if cc is not None:
+            # Uncontrolled edges keep their common line for all node moves.
+            # On a controlled strip, forward bound points stay fixed while
+            # the TE moves. Each forward leg then has its own line. All
+            # aft bound points and the TE undergo the same rigid rotation,
+            # so the aft legs of one strip keep a common line. Adjacent
+            # strips can rotate about different axes after a node move.
+            controlled = torch.zeros(n_s, dtype=torch.bool, device=self.device)
+            controlled[cc["strip"]] = True
+            line_offset = 2 * n_p
+            ea = torch.where(controlled[panel_strip], line_offset + 2 * pid, ea)
+            eb = torch.where(controlled[panel_strip], line_offset + 2 * pid + 1, eb)
+            aft_line = line_offset + 2 * n_p + 2 * cc["strip"]
+            ea = ea.index_copy(0, cc["panels"], aft_line)
+            eb = eb.index_copy(0, cc["panels"], aft_line + 1)
+        edge_l_panel, edge_r_panel = ea, eb
         if h is not None:
             img = torch.full((n_p,), -2, dtype=torch.int64, device=self.device)
             pid = torch.cat((pid, img))
@@ -704,8 +745,6 @@ class TorchReference:
             eb = torch.cat((eb, img))
         b["_src_ids"] = {"panel": pid, "edge_a": ea, "edge_b": eb}
         panel_ids = torch.arange(n_p, dtype=torch.int64, device=self.device)
-        edge_l_panel = edges[panel_strip, 0]
-        edge_r_panel = edges[panel_strip, 1]
 
         rc2_src = s_rc * s_rc
         tg_group = tgt_group_unk

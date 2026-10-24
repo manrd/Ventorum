@@ -277,6 +277,10 @@ def transform_lattice(
         ),
         join_warnings=list(lattice.join_warnings),
         kernel_cache=None,
+        geom_cache={"flap_hinges": {
+            strip: tuple(_transform_points(np.asarray(points)))
+            for strip, points in lattice.geom_cache.get("flap_hinges", {}).items()
+        }},
         control_info=[dict(c) for c in getattr(lattice, "control_info", [])],
         geometric_camber=None if lattice.geometric_camber is None else lattice.geometric_camber.copy(),
         normal_bc_clean=(
