@@ -590,12 +590,41 @@ def _leg_edge_data(lattice: VortexLattice) -> tuple[np.ndarray, np.ndarray, np.n
     return surf, edge, into, narrow
 
 
+def leg_segments(lattice: VortexLattice) -> tuple[np.ndarray, np.ndarray]:
+    """Return the start and end points [m] of the chordwise leg segments of every panel.
+
+    Without leg nodes (``lattice.a_kink`` is None) the rows are the legs
+    ``a_te -> a`` (first ``n_panels`` rows) and ``b -> b_te`` (next
+    ``n_panels`` rows). With leg nodes the rows are ``a_kink -> a``,
+    ``b -> b_kink``, ``a_te -> a_kink`` and ``b_kink -> b_te``, ``n_panels``
+    rows each. A straight leg then has a zero-length aft segment, which
+    carries no force.
+
+    Parameters
+    ----------
+    lattice : VortexLattice
+        The lattice. Lengths in metres.
+
+    Returns
+    -------
+    start, end : numpy.ndarray
+        Segment end points [m], shape (2 n_panels, 3) or (4 n_panels, 3).
+    """
+    if lattice.a_kink is None:
+        return np.vstack([lattice.a_te, lattice.b]), np.vstack([lattice.a, lattice.b_te])
+    return (np.vstack([lattice.a_kink, lattice.b, lattice.a_te, lattice.b_kink]),
+            np.vstack([lattice.a, lattice.b_kink, lattice.a_kink, lattice.b_te]))
+
+
 def leg_force_rules(lattice: VortexLattice) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Return the rule of the Kutta-Joukowski force on each chordwise leg.
 
     The legs are the segments ``a_te -> a`` (first ``n_panels`` rows) and
-    ``b -> b_te`` (last ``n_panels`` rows) of every panel horseshoe. Each
-    leg lies on a strip edge. The rule depends on the edge:
+    ``b -> b_te`` (last ``n_panels`` rows) of every panel horseshoe. A
+    lattice with leg nodes has the four segment sets of
+    :func:`leg_segments` (``4 n_panels`` rows); both segments of a leg get
+    the rule of the whole leg, found without the nodes. Each leg lies on a
+    strip edge. The rule depends on the edge:
 
     * Shared edge (``LEG_SHARED``): the leg coincides with a leg of a strip
       of the same core group (the neighbour strip, the mirror strip at the
@@ -639,12 +668,13 @@ def leg_force_rules(lattice: VortexLattice) -> tuple[np.ndarray, np.ndarray, np.
     -------
     normal : numpy.ndarray
         Unit normal whose velocity component is removed, shape
-        (2 n_panels, 3). Zero for a free edge.
+        (n_legs, 3), with ``n_legs`` the rows of :func:`leg_segments`.
+        Zero for a free edge.
     scale : numpy.ndarray
-        Scale of the leg force, shape (2 n_panels,): 1.0, 0.0 on a kink
+        Scale of the leg force, shape (n_legs,): 1.0, 0.0 on a kink
         edge, between them on a kink edge with a small fold.
     kind : numpy.ndarray
-        ``LEG_FREE``, ``LEG_SHARED`` or ``LEG_KINK``, shape (2 n_panels,).
+        ``LEG_FREE``, ``LEG_SHARED`` or ``LEG_KINK``, shape (n_legs,).
 
     Notes
     -----
@@ -674,6 +704,23 @@ def leg_force_rules(lattice: VortexLattice) -> tuple[np.ndarray, np.ndarray, np.
     cached = lattice.geom_cache.get("leg_force_rules")
     if cached is not None:
         return cached
+    if lattice.a_kink is not None:
+        # A leg with a hinge node keeps the rule of the whole leg: the rule
+        # comes from the legs without the nodes, and both segments of a leg
+        # get it (rows of leg_segments: forward a, forward b, aft a, aft b).
+        from dataclasses import replace
+
+        normal, scale, kind = _leg_force_rules_geometric(replace(lattice, a_kink=None, b_kink=None, geom_cache={}))
+        out = (np.vstack([normal, normal]), np.concatenate([scale, scale]), np.concatenate([kind, kind]))
+        lattice.geom_cache["leg_force_rules"] = out
+        return out
+    out = _leg_force_rules_geometric(lattice)
+    lattice.geom_cache["leg_force_rules"] = out
+    return out
+
+
+def _leg_force_rules_geometric(lattice: VortexLattice) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Return the leg-force rules of :func:`leg_force_rules` from the leg segments of *lattice* (no cache)."""
     from scipy.spatial import cKDTree
 
     from ventorum.geometry.lattice import (
@@ -683,19 +730,20 @@ def leg_force_rules(lattice: VortexLattice) -> tuple[np.ndarray, np.ndarray, np.
     )
 
     n_p = lattice.n_panels
-    strip = np.concatenate([lattice.panel_strip, lattice.panel_strip])
-    start = np.vstack([lattice.a_te, lattice.b])
-    end = np.vstack([lattice.a, lattice.b_te])
+    start, end = leg_segments(lattice)
+    n_rep = start.shape[0] // (2 * n_p)
+    strip = np.tile(lattice.panel_strip, 2 * n_rep)
     seg = end - start
     length = np.linalg.norm(seg, axis=1)
     strip_normal = lattice.normal[strip]
     group = _core_group_of(lattice)[strip]
     chord = np.asarray(lattice.chord, dtype=float)[strip]
-    surf, edge, into, narrow = _leg_edge_data(lattice)
+    surf, edge, into, narrow = (np.tile(x, (n_rep,) + (1,) * (x.ndim - 1)) for x in _leg_edge_data(lattice))
     tol_join = np.clip(JOIN_TOL_STRIP_FRACTION * narrow, JOIN_TOL_CHORD_FRACTION * chord,
                        JOIN_TOL_CHORD_MAX_FRACTION * chord)
     mid = 0.5 * (start + end)
-    parent = np.arange(2 * n_p)
+    n_legs = start.shape[0]
+    parent = np.arange(n_legs)
 
     def find(i: int) -> int:
         while parent[i] != i:
@@ -737,10 +785,10 @@ def leg_force_rules(lattice: VortexLattice) -> tuple[np.ndarray, np.ndarray, np.
                 ri, rj = find(i), find(j)
                 if ri != rj:
                     parent[max(ri, rj)] = min(ri, rj)
-    roots = np.array([find(i) for i in range(2 * n_p)], dtype=np.int64)
-    kind = np.full(2 * n_p, LEG_FREE, dtype=np.int64)
-    scale = np.ones(2 * n_p)
-    counts = np.bincount(roots, minlength=2 * n_p)
+    roots = np.array([find(i) for i in range(n_legs)], dtype=np.int64)
+    kind = np.full(n_legs, LEG_FREE, dtype=np.int64)
+    scale = np.ones(n_legs)
+    counts = np.bincount(roots, minlength=n_legs)
     shared = valid & (counts[roots] > 1)
     kind[shared] = LEG_SHARED
     for r in np.unique(roots[shared]):
@@ -749,6 +797,11 @@ def leg_force_rules(lattice: VortexLattice) -> tuple[np.ndarray, np.ndarray, np.
         fold = 0.0
         for a in range(members.size):
             for b in range(a + 1, members.size):
+                # The forward panels of a strip share the aft segment of
+                # their legs (hinge node to trailing edge): copies of one
+                # strip are not a fold.
+                if strip[members[a]] == strip[members[b]]:
+                    continue
                 # Angle between u_a and -u_b (no loss of digits near 0).
                 fold = max(fold, float(np.arctan2(np.linalg.norm(np.cross(u[a], u[b])), -(u[a] @ u[b]))))
         if fold > LEG_KINK_ROUNDOFF_RAD:
@@ -778,9 +831,7 @@ def leg_force_rules(lattice: VortexLattice) -> tuple[np.ndarray, np.ndarray, np.
         if msg not in lattice.join_warnings:
             lattice.join_warnings.append(msg)
     normal = np.where((kind == LEG_FREE)[:, None], 0.0, strip_normal)
-    out = (normal, scale, kind)
-    lattice.geom_cache["leg_force_rules"] = out
-    return out
+    return normal, scale, kind
 
 
 def compute_loads(
@@ -922,13 +973,12 @@ def compute_loads_batch(
         points = [mid]
         swap = [0]
         if use_leg:
-            leg_a_mid = 0.5 * (lattice.a_te + lattice.a)
-            leg_b_mid = 0.5 * (lattice.b + lattice.b_te)
-            points += [leg_a_mid, leg_b_mid]
-            swap += [2, 1]  # the a-leg of a left panel mirrors the b-leg of its mirror panel
-            leg_start = np.vstack([lattice.a_te, lattice.b])
-            leg_end = np.vstack([lattice.a, lattice.b_te])
-            leg_mid = np.vstack([points[1], points[2]])
+            leg_start, leg_end = leg_segments(lattice)
+            leg_mid = 0.5 * (leg_start + leg_end)
+            # One point set per segment set; the a-leg of a left panel
+            # mirrors the b-leg of its mirror panel.
+            points += list(leg_mid.reshape(-1, n_p, 3))
+            swap += [2, 1] if len(points) == 3 else [2, 1, 4, 3]
             leg_vec = leg_end - leg_start
             leg_normal, leg_scale, _ = leg_force_rules(lattice)
         else:
@@ -953,8 +1003,8 @@ def compute_loads_batch(
     F_panel = rho[:, None, None] * G[:, :, None] * _cross(U_mid + v_ind, l_vec)
     M_geo = np.sum(_cross(mid - rp, F_panel), axis=1)
     if use_leg:
-        v_leg = np.concatenate([v_all[1], v_all[2]], axis=1)
-        g_leg = np.concatenate([G, G], axis=1)
+        v_leg = np.concatenate(v_all[1:], axis=1)
+        g_leg = np.concatenate([G] * (len(v_all) - 1), axis=1)
         # The rule of each edge (leg_force_rules). Shared edge: only the
         # velocity tangent to the strip acts. The normal velocity at the leg
         # points is the leak of the discrete lattice between its control
@@ -968,7 +1018,8 @@ def compute_loads_batch(
         V_leg = V_leg - np.sum(V_leg * leg_normal, axis=-1)[:, :, None] * leg_normal
         F_leg = (rho[:, None, None] * (g_leg * leg_scale)[:, :, None]) * _cross(V_leg, leg_vec)
         M_geo += np.sum(_cross(leg_mid - rp, F_leg), axis=1)
-        F_panel = F_panel + F_leg[:, :n_p] + F_leg[:, n_p:]
+        for r in range(0, F_leg.shape[1], n_p):
+            F_panel = F_panel + F_leg[:, r:r + n_p]
     F_strip = F_panel.reshape(K, n_s, n_c, 3).sum(axis=2)
     F_near = F_panel.sum(axis=1)
 
@@ -1292,6 +1343,8 @@ def _near_field_velocity(
             sign=np.ones(n_p),
             column=np.arange(n_p),
             group=group,
+            a_kink=None if lattice.a_kink is None else to_s(lattice.a_kink),
+            b_kink=None if lattice.b_kink is None else to_s(lattice.b_kink),
         )
         points_s = [to_s(pk) for pk in points]
         P_s, tgt, repeat = _load_points(lattice, eval_panels, points_s)

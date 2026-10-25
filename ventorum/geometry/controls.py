@@ -32,7 +32,15 @@ __all__ = [
     "hinge_moment_derivatives",
     "deflected_airfoil",
     "validate_controls",
+    "CONTROL_JOIN",
+    "ControlJoinField",
 ]
+
+#: Spanwise width of the join of a chordwise control at its side edge, as a
+#: fraction of the local chord [-]. The value is the default transition of
+#: the 3D panel method (``ventorum.panel3d.mesh.CONTROL_TRANSITION``), so
+#: both models seal the side edge with the same geometry.
+CONTROL_JOIN = 0.2
 
 
 def flap_effectiveness(hinge_x_c: float) -> float:
@@ -316,3 +324,127 @@ def validate_controls(surface: LiftingSurface) -> None:
                     f"({c1.eta_start}..{c1.eta_end} and {c2.eta_start}..{c2.eta_end}); "
                     f"field 'eta_end' of {c1.name!r} exceeds field 'eta_start' of {c2.name!r}."
                 )
+
+
+class ControlJoinField:
+    """Spanwise deflection field of the chordwise controls of one surface.
+
+    The vortex lattice deflects a chordwise control as geometry: the mean
+    surface aft of the hinge turns about the hinge line. At a side edge of a
+    control the deflection changes linearly over a join of spanwise length
+    ``CONTROL_JOIN`` times the local chord, centred on the edge, so the
+    deflected surface stays continuous (a sealed edge, as the transition of
+    the 3D panel method). The join is a property of the geometry, not of
+    the mesh: a node at span parameter ``eta`` gets the same deflection on
+    every mesh.
+
+    The rules of the join follow the 3D panel method
+    (:func:`ventorum.panel3d.mesh._transition_edge_lists`): the join is not
+    longer than the control; it does not reach past the root or the tip;
+    and it shares the room to the next control edge with the join of that
+    edge. A join also lies between two controls with different deflections
+    (linear from one to the other), and at the root of a symmetric surface
+    under an antisymmetric control (from -delta on the left to +delta on the
+    right). The deflection is linear in the control deflections, so its
+    derivative is a fixed coefficient per control.
+
+    Parameters
+    ----------
+    controls : list of ControlSurface
+        Controls of the surface (they do not overlap in span).
+    kind : str
+        ``"plain"`` (span parameter 0 to 1), ``"symmetric"`` (-1 to 1, the
+        left half negative) or ``"mirror"`` (a left copy, -1 to 0).
+    chord_of : callable
+        Local chord [m] at a span parameter of the right half.
+    rate_of : callable
+        Length of the reference line [m] per unit span parameter.
+    width : float
+        Join length over the local chord [-].
+    """
+
+    _TOL = 1e-9
+
+    def __init__(self, controls: list, kind: str, chord_of, rate_of, width: float = CONTROL_JOIN) -> None:
+        self.pieces = []
+        for c in controls:
+            e0, e1 = float(c.eta_start), float(c.eta_end)
+            sgn_left = 1.0 if c.symmetric else -1.0
+            if kind in ("plain", "symmetric"):
+                self.pieces.append((e0, e1, c, 1.0))
+            if kind in ("symmetric", "mirror"):
+                self.pieces.append((-e1, -e0, c, sgn_left))
+        self.lo = 0.0 if kind == "plain" else -1.0
+        self.hi = 0.0 if kind == "mirror" else 1.0
+        tol = self._TOL
+        cuts = sorted({b for p in self.pieces for b in p[:2] if self.lo + tol < b < self.hi - tol})
+        merged: list[float] = []
+        for b in cuts:
+            if not merged or b - merged[-1] > tol:
+                merged.append(b)
+        joins = []
+        for i, b in enumerate(merged):
+            left, right = self.piece(b - 10.0 * tol), self.piece(b + 10.0 * tol)
+            if (left is None and right is None) or (
+                    left is not None and right is not None and left[2] is right[2] and left[3] == right[3]):
+                continue
+            w = float(width) * float(chord_of(abs(b))) / max(float(rate_of(abs(b))), 1e-300)
+            half = 0.5 * w
+            # Not longer than each control next to the edge.
+            for side in (left, right):
+                if side is not None:
+                    half = min(half, 0.5 * (side[1] - side[0]))
+            # Up to the root or the tip the whole room is free; the room to
+            # another edge is shared with the join of that edge.
+            prev = merged[i - 1] if i > 0 else None
+            nxt = merged[i + 1] if i + 1 < len(merged) else None
+            half = min(half, (b - self.lo) if prev is None else 0.5 * (b - prev))
+            half = min(half, (self.hi - b) if nxt is None else 0.5 * (nxt - b))
+            if half > tol:
+                joins.append((b, half, left, right))
+        self.joins = joins
+
+    def piece(self, eta: float):
+        """Return ``(start, end, control, side sign)`` of the control at signed span parameter *eta*, or None."""
+        for p in self.pieces:
+            if p[0] - self._TOL <= eta <= p[1] + self._TOL:
+                return p
+        return None
+
+    def at(self, eta: float) -> tuple[list, object]:
+        """Return the deflection terms and the hinge control at signed span parameter *eta*.
+
+        Parameters
+        ----------
+        eta : float
+            Signed span parameter [-] (negative on the left half).
+
+        Returns
+        -------
+        terms : list of (ControlSurface, float)
+            The deflection at *eta* is ``sum(coef * control.deflection)``
+            [rad]; the coefficient holds the side sign and the join factor.
+        hinge : ControlSurface or None
+            The control whose hinge line the point uses (None: no deflected
+            geometry at *eta*).
+        """
+        eta = float(eta)
+        for b, half, left, right in self.joins:
+            if b - half < eta < b + half:
+                t = (eta - (b - half)) / (2.0 * half)
+                terms: list = []
+                for side, f in ((left, 1.0 - t), (right, t)):
+                    if side is None:
+                        continue
+                    for k, (c, coef) in enumerate(terms):
+                        if c is side[2]:
+                            terms[k] = (c, coef + side[3] * f)
+                            break
+                    else:
+                        terms.append((side[2], side[3] * f))
+                own = left if (eta < b and left is not None) or right is None else right
+                return terms, own[2]
+        p = self.piece(eta)
+        if p is None:
+            return [], None
+        return [(p[2], p[3])], p[2]

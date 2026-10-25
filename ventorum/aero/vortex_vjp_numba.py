@@ -46,8 +46,9 @@ _INV_2PI = 1.0 / (2.0 * math.pi)
 _FLOOR = 1e-300
 
 # Values per source in the block buffers of the horseshoe VJP:
-# ga (3), gb (3), ga_te (3), gb_te (3), gd (3), g_rc2_src, gs.
-_NSRC = 17
+# ga (3), gb (3), ga_te (3), gb_te (3), gd (3), g_rc2_src, gs, and the leg
+# nodes ga_k (3), gb_k (3).
+_NSRC = 23
 # Values per vortex in the block buffers of the Trefftz VJP: gp (3), ggamma, g_rc2.
 _NVTX = 5
 
@@ -391,8 +392,10 @@ if HAVE_NUMBA:
         return rc2s[j], False
 
     @njit(cache=True, inline="always")
-    def _hs_v(i, j, P, a, b, ate, bte, d, rc2, own, spanel, edge, sea, seb):
+    def _hs_v(i, j, P, a, b, ate, bte, d, rc2, own, spanel, edge, sea, seb, ak, bk, kfl, seka, sekb):
         # Unit-circulation velocity of horseshoe j at point i (masked pairs zero).
+        # A leg with a node (kfl[j] != 0) runs ate -> ak -> a and b -> bk -> bte;
+        # on the other sources ak is ate and bk is bte.
         px = P[i, 0]
         py = P[i, 1]
         pz = P[i, 2]
@@ -405,20 +408,30 @@ if HAVE_NUMBA:
         vay = 0.0
         vaz = 0.0
         if edge[i] != sea[j]:
-            vax, vay, vaz = _seg_v(px, py, pz, ate[j, 0], ate[j, 1], ate[j, 2], a[j, 0], a[j, 1], a[j, 2], rc2)
+            vax, vay, vaz = _seg_v(px, py, pz, ak[j, 0], ak[j, 1], ak[j, 2], a[j, 0], a[j, 1], a[j, 2], rc2)
+        if kfl[j] != 0 and edge[i] != seka[j]:
+            kx, ky, kz = _seg_v(px, py, pz, ate[j, 0], ate[j, 1], ate[j, 2], ak[j, 0], ak[j, 1], ak[j, 2], rc2)
+            vax += kx
+            vay += ky
+            vaz += kz
         vlx = 0.0
         vly = 0.0
         vlz = 0.0
         if edge[i] != seb[j]:
-            vlx, vly, vlz = _seg_v(px, py, pz, b[j, 0], b[j, 1], b[j, 2], bte[j, 0], bte[j, 1], bte[j, 2], rc2)
+            vlx, vly, vlz = _seg_v(px, py, pz, b[j, 0], b[j, 1], b[j, 2], bk[j, 0], bk[j, 1], bk[j, 2], rc2)
+        if kfl[j] != 0 and edge[i] != sekb[j]:
+            kx, ky, kz = _seg_v(px, py, pz, bk[j, 0], bk[j, 1], bk[j, 2], bte[j, 0], bte[j, 1], bte[j, 2], rc2)
+            vlx += kx
+            vly += ky
+            vlz += kz
         wbx, wby, wbz = _ray_v(px, py, pz, bte[j, 0], bte[j, 1], bte[j, 2], d[j, 0], d[j, 1], d[j, 2], rc2)
         wax, way, waz = _ray_v(px, py, pz, ate[j, 0], ate[j, 1], ate[j, 2], d[j, 0], d[j, 1], d[j, 2], rc2)
         return ((vbx + vax + vlx) + wbx - wax, (vby + vay + vly) + wby - way,
                 (vbz + vaz + vlz) + wbz - waz)
 
     @njit(cache=True, parallel=True)
-    def horseshoe_forward_kernel(mode, P, X, a, b, ate, bte, d, rc2s, tgrc2, sgrp, tgrp, own, spanel,
-                                 edge, sea, seb, s, col, n_u, use_tg):
+    def horseshoe_forward_kink_kernel(mode, P, X, a, b, ate, bte, d, rc2s, tgrc2, sgrp, tgrp, own, spanel,
+                                      edge, sea, seb, s, col, n_u, use_tg, ak, bk, kfl, seka, sekb):
         """Return the system rows (mode 0, (m, n_u)) or the induced velocity (mode 1, (m, 3))."""
         m = P.shape[0]
         n = a.shape[0]
@@ -432,7 +445,8 @@ if HAVE_NUMBA:
             oz = 0.0
             for j in range(n):
                 rc2, _ = _pair_rc2(i, j, rc2s, tgrc2, sgrp, tgrp, use_tg)
-                vx, vy, vz = _hs_v(i, j, P, a, b, ate, bte, d, rc2, own, spanel, edge, sea, seb)
+                vx, vy, vz = _hs_v(i, j, P, a, b, ate, bte, d, rc2, own, spanel, edge, sea, seb,
+                                   ak, bk, kfl, seka, sekb)
                 if mode == 0:
                     out[i, col[j]] += s[j] * (vx * X[i, 0] + vy * X[i, 1] + vz * X[i, 2])
                 else:
@@ -446,9 +460,13 @@ if HAVE_NUMBA:
         return out
 
     @njit(cache=True, parallel=True)
-    def horseshoe_vjp_kernel(P, X, a, b, ate, bte, d, rc2s, tgrc2, sgrp, tgrp, own, spanel, edge, sea, seb,
-                             s, col, W, use_W, use_tg, nblocks):
-        """Return the VJP (gP, gX, g_tg_rc2, ga, gb, ga_te, gb_te, gd, g_rc2_src, gs) in float64."""
+    def horseshoe_vjp_kink_kernel(P, X, a, b, ate, bte, d, rc2s, tgrc2, sgrp, tgrp, own, spanel, edge, sea, seb,
+                                  s, col, W, use_W, use_tg, nblocks, ak, bk, kfl, seka, sekb):
+        """Return the VJP (gP, gX, g_tg_rc2, ga, gb, ga_te, gb_te, gd, g_rc2_src, gs, ga_k, gb_k) in float64.
+
+        ga_k and gb_k are zero on a source without a leg node (kfl[j] == 0):
+        its leg derivative is in ga_te and gb_te.
+        """
         m = P.shape[0]
         n = a.shape[0]
         gP = np.zeros((m, 3))
@@ -514,8 +532,28 @@ if HAVE_NUMBA:
                         bu[4] += r[10]
                         bu[5] += r[11]
                         grc += r[12]
+                    kj = kfl[j] != 0
+                    # Start of the forward a-leg segment: the node, or a_te.
+                    ka = 17 if kj else 6
+                    # End of the forward b-leg segment: the node, or b_te.
+                    kb = 20 if kj else 9
                     if edge[i] != sea[j]:
-                        r = _seg_fb(px, py, pz, tax, tay, taz, ax, ay, az, rc2, ux, uy, uz)
+                        r = _seg_fb(px, py, pz, ak[j, 0], ak[j, 1], ak[j, 2], ax, ay, az, rc2, ux, uy, uz)
+                        vx += r[0]
+                        vy += r[1]
+                        vz += r[2]
+                        aPx += r[3]
+                        aPy += r[4]
+                        aPz += r[5]
+                        bu[ka] += r[6]
+                        bu[ka + 1] += r[7]
+                        bu[ka + 2] += r[8]
+                        bu[0] += r[9]
+                        bu[1] += r[10]
+                        bu[2] += r[11]
+                        grc += r[12]
+                    if kj and edge[i] != seka[j]:
+                        r = _seg_fb(px, py, pz, tax, tay, taz, ak[j, 0], ak[j, 1], ak[j, 2], rc2, ux, uy, uz)
                         vx += r[0]
                         vy += r[1]
                         vz += r[2]
@@ -525,12 +563,12 @@ if HAVE_NUMBA:
                         bu[6] += r[6]
                         bu[7] += r[7]
                         bu[8] += r[8]
-                        bu[0] += r[9]
-                        bu[1] += r[10]
-                        bu[2] += r[11]
+                        bu[17] += r[9]
+                        bu[18] += r[10]
+                        bu[19] += r[11]
                         grc += r[12]
                     if edge[i] != seb[j]:
-                        r = _seg_fb(px, py, pz, bx, by, bz, tbx, tby, tbz, rc2, ux, uy, uz)
+                        r = _seg_fb(px, py, pz, bx, by, bz, bk[j, 0], bk[j, 1], bk[j, 2], rc2, ux, uy, uz)
                         vx += r[0]
                         vy += r[1]
                         vz += r[2]
@@ -540,6 +578,21 @@ if HAVE_NUMBA:
                         bu[3] += r[6]
                         bu[4] += r[7]
                         bu[5] += r[8]
+                        bu[kb] += r[9]
+                        bu[kb + 1] += r[10]
+                        bu[kb + 2] += r[11]
+                        grc += r[12]
+                    if kj and edge[i] != sekb[j]:
+                        r = _seg_fb(px, py, pz, bk[j, 0], bk[j, 1], bk[j, 2], tbx, tby, tbz, rc2, ux, uy, uz)
+                        vx += r[0]
+                        vy += r[1]
+                        vz += r[2]
+                        aPx += r[3]
+                        aPy += r[4]
+                        aPz += r[5]
+                        bu[20] += r[6]
+                        bu[21] += r[7]
+                        bu[22] += r[8]
                         bu[9] += r[9]
                         bu[10] += r[10]
                         bu[11] += r[11]
@@ -592,7 +645,22 @@ if HAVE_NUMBA:
                 for k in range(_NSRC):
                     acc[j, k] += buf[t, j, k]
         return (gP, gX, gtg, acc[:, 0:3].copy(), acc[:, 3:6].copy(), acc[:, 6:9].copy(),
-                acc[:, 9:12].copy(), acc[:, 12:15].copy(), acc[:, 15].copy(), acc[:, 16].copy())
+                acc[:, 9:12].copy(), acc[:, 12:15].copy(), acc[:, 15].copy(), acc[:, 16].copy(),
+                acc[:, 17:20].copy(), acc[:, 20:23].copy())
+
+    def horseshoe_forward_kernel(mode, P, X, a, b, ate, bte, d, rc2s, tgrc2, sgrp, tgrp, own, spanel,
+                                 edge, sea, seb, s, col, n_u, use_tg):
+        """Return the product of :func:`horseshoe_forward_kink_kernel` for sources without leg nodes."""
+        return horseshoe_forward_kink_kernel(mode, P, X, a, b, ate, bte, d, rc2s, tgrc2, sgrp, tgrp, own, spanel,
+                                             edge, sea, seb, s, col, n_u, use_tg, ate, bte,
+                                             np.zeros(a.shape[0], dtype=np.int8), sea, seb)
+
+    def horseshoe_vjp_kernel(P, X, a, b, ate, bte, d, rc2s, tgrc2, sgrp, tgrp, own, spanel, edge, sea, seb,
+                             s, col, W, use_W, use_tg, nblocks):
+        """Return the first ten items of :func:`horseshoe_vjp_kink_kernel` for sources without leg nodes."""
+        return horseshoe_vjp_kink_kernel(P, X, a, b, ate, bte, d, rc2s, tgrc2, sgrp, tgrp, own, spanel, edge,
+                                         sea, seb, s, col, W, use_W, use_tg, nblocks, ate, bte,
+                                         np.zeros(a.shape[0], dtype=np.int8), sea, seb)[:10]
 
     @njit(cache=True, parallel=True)
     def trefftz_forward_kernel(q, qn, p, gamma, d, rc2, tgrc2, sgrp, tgrp, use_tg):

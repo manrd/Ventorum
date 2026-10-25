@@ -293,7 +293,8 @@ def test_unmatched_legs_on_a_joined_edge_keep_the_tangential_rule(monkeypatch):
     monkeypatch.setattr(lattice_module, "JOIN_TOL_CHORD_MAX_FRACTION", 1e-3)
     lat.geom_cache.pop("leg_force_rules")
     _, scale, kind = L.leg_force_rules(lat)
-    mid = 0.5 * (np.vstack([lat.a_te, lat.b]) + np.vstack([lat.a, lat.b_te]))
-    junction = np.abs(np.abs(mid[:, 1]) - 2.0) < 1e-9
+    start, end = L.leg_segments(lat)
+    mid = 0.5 * (start + end)
+    junction = (np.abs(np.abs(mid[:, 1]) - 2.0) < 1e-9) & np.any(end != start, axis=1)
     assert np.all(kind[junction] == L.LEG_SHARED) and np.all(scale[junction] == 1.0)
     assert any("do not lie on the legs of the other surface" in w for w in lat.join_warnings)

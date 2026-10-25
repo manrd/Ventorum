@@ -56,10 +56,11 @@ def openmp_enabled():
 cdef double _INV_4PI = 1.0 / (4.0 * pi)
 cdef double _INV_2PI = 1.0 / (2.0 * pi)
 cdef double _FLOOR = 1e-300
-# Values per source in the block buffers: ga, gb, ga_te, gb_te, gd (3 each), g_rc2_src, gs.
+# Values per source in the block buffers: ga, gb, ga_te, gb_te, gd (3 each), g_rc2_src, gs,
+# and the leg nodes ga_k, gb_k (3 each).
 # Values per vortex in the Trefftz block buffers: gp (3), ggamma, g_rc2.
 cdef enum:
-    NSRC = 17
+    NSRC = 23
     NVTX = 5
 
 
@@ -394,8 +395,13 @@ cdef void _forward_row(Py_ssize_t i, int mode, const double[:, ::1] P, const dou
                        const double[::1] tgrc2, const cnp.int64_t[::1] sgrp, const cnp.int64_t[::1] tgrp,
                        const cnp.int64_t[::1] own, const cnp.int64_t[::1] spanel, const cnp.int64_t[::1] edge,
                        const cnp.int64_t[::1] sea, const cnp.int64_t[::1] seb, const double[::1] s,
-                       const cnp.int64_t[::1] col, bint use_tg, double[:, ::1] out) noexcept nogil:
+                       const cnp.int64_t[::1] col, bint use_tg,
+                       const double[:, ::1] ak, const double[:, ::1] bk, const signed char[::1] kfl,
+                       const cnp.int64_t[::1] seka, const cnp.int64_t[::1] sekb,
+                       double[:, ::1] out) noexcept nogil:
     # One row of the forward product (mode 0: system rows, mode 1: induced velocity).
+    # A leg with a node (kfl[j] != 0) runs ate -> ak -> a and b -> bk -> bte;
+    # on the other sources ak is ate and bk is bte.
     cdef Py_ssize_t n = a.shape[0]
     cdef Py_ssize_t j
     cdef double v[3]
@@ -415,12 +421,22 @@ cdef void _forward_row(Py_ssize_t i, int mode, const double[:, ::1] P, const dou
             vy = v[1]
             vz = v[2]
         if edge[i] != sea[j]:
-            _seg_v(px, py, pz, ate[j, 0], ate[j, 1], ate[j, 2], a[j, 0], a[j, 1], a[j, 2], rc2, v)
+            _seg_v(px, py, pz, ak[j, 0], ak[j, 1], ak[j, 2], a[j, 0], a[j, 1], a[j, 2], rc2, v)
+            vx = vx + v[0]
+            vy = vy + v[1]
+            vz = vz + v[2]
+        if kfl[j] != 0 and edge[i] != seka[j]:
+            _seg_v(px, py, pz, ate[j, 0], ate[j, 1], ate[j, 2], ak[j, 0], ak[j, 1], ak[j, 2], rc2, v)
             vx = vx + v[0]
             vy = vy + v[1]
             vz = vz + v[2]
         if edge[i] != seb[j]:
-            _seg_v(px, py, pz, b[j, 0], b[j, 1], b[j, 2], bte[j, 0], bte[j, 1], bte[j, 2], rc2, v)
+            _seg_v(px, py, pz, b[j, 0], b[j, 1], b[j, 2], bk[j, 0], bk[j, 1], bk[j, 2], rc2, v)
+            vx = vx + v[0]
+            vy = vy + v[1]
+            vz = vz + v[2]
+        if kfl[j] != 0 and edge[i] != sekb[j]:
+            _seg_v(px, py, pz, bk[j, 0], bk[j, 1], bk[j, 2], bte[j, 0], bte[j, 1], bte[j, 2], rc2, v)
             vx = vx + v[0]
             vy = vy + v[1]
             vz = vz + v[2]
@@ -447,11 +463,13 @@ def horseshoe_forward(int mode, const double[:, ::1] P, const double[:, ::1] X, 
                       const cnp.int64_t[::1] sgrp, const cnp.int64_t[::1] tgrp, const cnp.int64_t[::1] own,
                       const cnp.int64_t[::1] spanel, const cnp.int64_t[::1] edge, const cnp.int64_t[::1] sea,
                       const cnp.int64_t[::1] seb, const double[::1] s, const cnp.int64_t[::1] col,
-                      int n_u, bint use_tg, int num_threads):
+                      int n_u, bint use_tg, int num_threads, ak=None, bk=None, kfl=None, seka=None, sekb=None):
     """Return the system rows (mode 0, (m, n_u)) or the induced velocity (mode 1, (m, 3)).
 
     The arguments are those of :func:`ventorum.aero.vortex_vjp.horseshoe_forward`
-    (with *mode* first), plus the OpenMP thread count *num_threads*.
+    (with *mode* first), plus the OpenMP thread count *num_threads*. The
+    leg nodes *ak*, *bk* (n, 3), their flags *kfl* (int8, n) and the edge
+    ids *seka*, *sekb* of the aft segments are optional (None: no nodes).
 
     Returns
     -------
@@ -461,11 +479,16 @@ def horseshoe_forward(int mode, const double[:, ::1] P, const double[:, ::1] X, 
     cdef Py_ssize_t m = P.shape[0]
     cdef Py_ssize_t i
     cdef Py_ssize_t ncol = n_u if mode == 0 else 3
+    cdef const double[:, ::1] ak_v = ate if ak is None else ak
+    cdef const double[:, ::1] bk_v = bte if bk is None else bk
+    cdef const signed char[::1] kfl_v = np.zeros(a.shape[0], dtype=np.int8) if kfl is None else kfl
+    cdef const cnp.int64_t[::1] seka_v = sea if seka is None else seka
+    cdef const cnp.int64_t[::1] sekb_v = seb if sekb is None else sekb
     out = np.zeros((m, ncol), dtype=np.float64)
     cdef double[:, ::1] out_v = out
     for i in prange(m, num_threads=num_threads, nogil=True, schedule="static"):
         _forward_row(i, mode, P, X, a, b, ate, bte, d, rc2s, tgrc2, sgrp, tgrp, own, spanel, edge,
-                     sea, seb, s, col, use_tg, out_v)
+                     sea, seb, s, col, use_tg, ak_v, bk_v, kfl_v, seka_v, sekb_v, out_v)
     return out
 
 
@@ -476,6 +499,8 @@ cdef void _vjp_block(Py_ssize_t t, Py_ssize_t nblocks, const double[:, ::1] P, c
                      const cnp.int64_t[::1] own, const cnp.int64_t[::1] spanel, const cnp.int64_t[::1] edge,
                      const cnp.int64_t[::1] sea, const cnp.int64_t[::1] seb, const double[::1] s,
                      const cnp.int64_t[::1] col, const double[:, ::1] W, bint use_W, bint use_tg,
+                     const double[:, ::1] ak, const double[:, ::1] bk, const signed char[::1] kfl,
+                     const cnp.int64_t[::1] seka, const cnp.int64_t[::1] sekb,
                      double[:, ::1] gP, double[:, ::1] gX, double[::1] gtg,
                      double[:, :, ::1] buf) noexcept nogil:
     # The rows of block t: target derivatives into gP, gX, gtg; source derivatives into buf[t].
@@ -488,7 +513,8 @@ cdef void _vjp_block(Py_ssize_t t, Py_ssize_t nblocks, const double[:, ::1] P, c
     cdef double px, py, pz, xx, xy, xz, aPx, aPy, aPz, aXx, aXy, aXz, atg
     cdef double wf, cij, rc2, ux, uy, uz, vx, vy, vz, grc
     cdef double ax, ay, az, bx, by, bz, tax, tay, taz, tbx, tby, tbz, dx, dy, dz
-    cdef bint oth
+    cdef bint oth, kj
+    cdef int ka, kb
     for i in range(i0, i1):
         px = P[i, 0]
         py = P[i, 1]
@@ -545,8 +571,28 @@ cdef void _vjp_block(Py_ssize_t t, Py_ssize_t nblocks, const double[:, ::1] P, c
                 buf[t, j, 4] += r[10]
                 buf[t, j, 5] += r[11]
                 grc = grc + r[12]
+            kj = kfl[j] != 0
+            # Start of the forward a-leg segment (the node, or a_te) and end
+            # of the forward b-leg segment (the node, or b_te) in the buffer.
+            ka = 17 if kj else 6
+            kb = 20 if kj else 9
             if edge[i] != sea[j]:
-                _seg_fb(px, py, pz, tax, tay, taz, ax, ay, az, rc2, ux, uy, uz, r)
+                _seg_fb(px, py, pz, ak[j, 0], ak[j, 1], ak[j, 2], ax, ay, az, rc2, ux, uy, uz, r)
+                vx = vx + r[0]
+                vy = vy + r[1]
+                vz = vz + r[2]
+                aPx = aPx + r[3]
+                aPy = aPy + r[4]
+                aPz = aPz + r[5]
+                buf[t, j, ka] += r[6]
+                buf[t, j, ka + 1] += r[7]
+                buf[t, j, ka + 2] += r[8]
+                buf[t, j, 0] += r[9]
+                buf[t, j, 1] += r[10]
+                buf[t, j, 2] += r[11]
+                grc = grc + r[12]
+            if kj and edge[i] != seka[j]:
+                _seg_fb(px, py, pz, tax, tay, taz, ak[j, 0], ak[j, 1], ak[j, 2], rc2, ux, uy, uz, r)
                 vx = vx + r[0]
                 vy = vy + r[1]
                 vz = vz + r[2]
@@ -556,12 +602,12 @@ cdef void _vjp_block(Py_ssize_t t, Py_ssize_t nblocks, const double[:, ::1] P, c
                 buf[t, j, 6] += r[6]
                 buf[t, j, 7] += r[7]
                 buf[t, j, 8] += r[8]
-                buf[t, j, 0] += r[9]
-                buf[t, j, 1] += r[10]
-                buf[t, j, 2] += r[11]
+                buf[t, j, 17] += r[9]
+                buf[t, j, 18] += r[10]
+                buf[t, j, 19] += r[11]
                 grc = grc + r[12]
             if edge[i] != seb[j]:
-                _seg_fb(px, py, pz, bx, by, bz, tbx, tby, tbz, rc2, ux, uy, uz, r)
+                _seg_fb(px, py, pz, bx, by, bz, bk[j, 0], bk[j, 1], bk[j, 2], rc2, ux, uy, uz, r)
                 vx = vx + r[0]
                 vy = vy + r[1]
                 vz = vz + r[2]
@@ -571,6 +617,21 @@ cdef void _vjp_block(Py_ssize_t t, Py_ssize_t nblocks, const double[:, ::1] P, c
                 buf[t, j, 3] += r[6]
                 buf[t, j, 4] += r[7]
                 buf[t, j, 5] += r[8]
+                buf[t, j, kb] += r[9]
+                buf[t, j, kb + 1] += r[10]
+                buf[t, j, kb + 2] += r[11]
+                grc = grc + r[12]
+            if kj and edge[i] != sekb[j]:
+                _seg_fb(px, py, pz, bk[j, 0], bk[j, 1], bk[j, 2], tbx, tby, tbz, rc2, ux, uy, uz, r)
+                vx = vx + r[0]
+                vy = vy + r[1]
+                vz = vz + r[2]
+                aPx = aPx + r[3]
+                aPy = aPy + r[4]
+                aPz = aPz + r[5]
+                buf[t, j, 20] += r[6]
+                buf[t, j, 21] += r[7]
+                buf[t, j, 22] += r[8]
                 buf[t, j, 9] += r[9]
                 buf[t, j, 10] += r[10]
                 buf[t, j, 11] += r[11]
@@ -625,13 +686,16 @@ def horseshoe_vjp(const double[:, ::1] P, const double[:, ::1] X, const double[:
                   const cnp.int64_t[::1] sgrp, const cnp.int64_t[::1] tgrp, const cnp.int64_t[::1] own,
                   const cnp.int64_t[::1] spanel, const cnp.int64_t[::1] edge, const cnp.int64_t[::1] sea,
                   const cnp.int64_t[::1] seb, const double[::1] s, const cnp.int64_t[::1] col,
-                  const double[:, ::1] W, bint use_W, bint use_tg, int nblocks, int num_threads):
+                  const double[:, ::1] W, bint use_W, bint use_tg, int nblocks, int num_threads,
+                  ak=None, bk=None, kfl=None, seka=None, sekb=None):
     """Return the VJP (gP, gX, g_tg_rc2, ga, gb, ga_te, gb_te, gd, g_rc2_src, gs) in float64.
 
     The arguments are those of :func:`ventorum.aero.vortex_vjp.horseshoe_vjp`,
     with *W* a (1, 1) dummy and *use_W* False for the induced velocity,
     plus the number of row blocks *nblocks* and the OpenMP thread count
-    *num_threads*.
+    *num_threads*. The leg nodes are optional, as in :func:`horseshoe_forward`;
+    with them the tuple has two more items, ``ga_k`` and ``gb_k`` (zero on a
+    source without a node).
 
     Returns
     -------
@@ -645,21 +709,29 @@ def horseshoe_vjp(const double[:, ::1] P, const double[:, ::1] X, const double[:
     gX = np.zeros((m, 3))
     gtg = np.zeros(m)
     buf = np.zeros((nblocks, n, NSRC))
+    cdef const double[:, ::1] ak_v = ate if ak is None else ak
+    cdef const double[:, ::1] bk_v = bte if bk is None else bk
+    cdef const signed char[::1] kfl_v = np.zeros(n, dtype=np.int8) if kfl is None else kfl
+    cdef const cnp.int64_t[::1] seka_v = sea if seka is None else seka
+    cdef const cnp.int64_t[::1] sekb_v = seb if sekb is None else sekb
     cdef double[:, ::1] gP_v = gP
     cdef double[:, ::1] gX_v = gX
     cdef double[::1] gtg_v = gtg
     cdef double[:, :, ::1] buf_v = buf
     for t in prange(nblocks, num_threads=num_threads, nogil=True, schedule="static", chunksize=1):
         _vjp_block(t, nblocks, P, X, a, b, ate, bte, d, rc2s, tgrc2, sgrp, tgrp, own, spanel, edge, sea, seb,
-                   s, col, W, use_W, use_tg, gP_v, gX_v, gtg_v, buf_v)
+                   s, col, W, use_W, use_tg, ak_v, bk_v, kfl_v, seka_v, sekb_v, gP_v, gX_v, gtg_v, buf_v)
     acc = np.zeros((n, NSRC))
     cdef double[:, ::1] acc_v = acc
     for t in range(nblocks):
         for j in range(n):
             for k in range(NSRC):
                 acc_v[j, k] += buf_v[t, j, k]
-    return (gP, gX, gtg, acc[:, 0:3].copy(), acc[:, 3:6].copy(), acc[:, 6:9].copy(),
-            acc[:, 9:12].copy(), acc[:, 12:15].copy(), acc[:, 15].copy(), acc[:, 16].copy())
+    out = (gP, gX, gtg, acc[:, 0:3].copy(), acc[:, 3:6].copy(), acc[:, 6:9].copy(),
+           acc[:, 9:12].copy(), acc[:, 12:15].copy(), acc[:, 15].copy(), acc[:, 16].copy())
+    if ak is None:
+        return out
+    return out + (acc[:, 17:20].copy(), acc[:, 20:23].copy())
 
 
 cdef void _trefftz_row(Py_ssize_t i, const double[:, ::1] q, const double[:, ::1] qn, const double[:, ::1] p,

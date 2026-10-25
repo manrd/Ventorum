@@ -50,13 +50,13 @@ from ventorum.core.datatypes import (
 )
 from ventorum.core.constants import RHO_SL
 from ventorum.geometry import lattice_cache
-from ventorum.geometry.lattice import VortexLattice, build_lattice, lattice_to_discretized
+from ventorum.geometry.lattice import VortexLattice, _rotate_flap_points, build_lattice, lattice_to_discretized
 from ventorum.ground_effect.state import GroundEffectCondition, GroundEffectResult
 from ventorum.solvers.factory import make_solver, resolve_solver_type
 from ventorum.core.errors import GroundStrikeError, ValidityError
 from ventorum.utils.validation import validate_aircraft
 
-from ventorum.solvers.lattice_base import LLT_GE_MIN_H_OVER_C  # noqa: E402
+from ventorum.solvers.lattice_base import DEFAULT_N_CHORD, LLT_GE_MIN_H_OVER_C  # noqa: E402
 
 
 def _as_aircraft(geometry: Aircraft | LiftingSurface) -> Aircraft:
@@ -126,16 +126,61 @@ def place_ground(
     gp : GroundPlane
         The ground plane in body axes.
     probe : VortexLattice
-        Lattice with one chordwise panel that was used to place the ground.
+        Probe lattice used to place the ground, with deflected flap points.
     """
     chord_spacing = getattr(settings, "chord_spacing", "uniform")
-    key = lattice_cache.lattice_key(aircraft, settings, "vlm", 1, chord_spacing)
+    controlled = any(s.controls for s in aircraft.surfaces)
+    chordwise = resolve_solver_type(settings.solver_type) == "vlm"
+    count = (settings.n_chord or DEFAULT_N_CHORD) if controlled and chordwise else 1
+    key = lattice_cache.lattice_key(aircraft, settings, "vlm", count, chord_spacing)
     probe = lattice_cache.get_or_build(
-        key, lambda: build_lattice(aircraft, settings, collocation="vlm", n_chord=1, chord_spacing=chord_spacing)
+        key, lambda: build_lattice(aircraft, settings, collocation="vlm", n_chord=count, chord_spacing=chord_spacing)
     )
-    p, mode = plane_reference(aircraft, ref_point, height_ref)
+    p, mode = _probe_reference(aircraft, ref_point, height_ref, probe)
     gp = make_ground_plane(probe, h, alpha, beta, phi, ref_point=p, height_ref=mode)
+    if controlled and chordwise and settings.n_chord is None:
+        condition = FlightCondition(V_inf=1.0, alpha=alpha, beta=beta, phi=phi)
+        count = make_solver("vlm").resolve_n_chord(aircraft, settings, condition, gp, ref_point)
+        final_settings = settings.clone()
+        final_settings.n_chord = count
+        return place_ground(aircraft, final_settings, h, alpha, beta, phi, ref_point, height_ref)
     return gp, probe
+
+
+def _probe_reference(aircraft, ref_point, height_ref, probe):
+    """Return the height reference point [m] after the root flap rotation."""
+    point, mode = plane_reference(aircraft, ref_point, height_ref)
+    if height_ref not in ("qc", "te") or probe.n_chord < 2:
+        return point, mode
+    main = aircraft.main_surface_index()
+    root_le = aircraft.root_point("te") - (aircraft.root_point("te") - aircraft.root_point("qc")) / 0.75
+    # Select the original half of the main surface at its root. The two
+    # copies of an antisymmetric control can have different root points.
+    strips = np.flatnonzero(probe.strip_surface == main)
+    surface = aircraft.surfaces[main]
+    right = not surface.mirror_y
+    candidates = strips[probe.strip_is_right[strips] == right]
+    if candidates.size:
+        strips = candidates
+    distances = np.minimum(np.linalg.norm(probe.le_left[strips] - root_le, axis=1),
+                           np.linalg.norm(probe.le_right[strips] - root_le, axis=1))
+    strip = int(strips[np.argmin(distances)])
+    fraction = 0.25 if height_ref == "qc" else 1.0
+    for info in probe.control_info:
+        eta = abs(probe.eta[strip])
+        if (info["mode"] != "chordwise" or info["surface"] != surface.name
+                or not info["eta_start_eff"] - 1e-9 < eta < info["eta_end_eff"] + 1e-9):
+            continue
+        if fraction <= info["hinge_x_c_eff"]:
+            break
+        origin, end = probe.geom_cache["flap_hinges"][strip]
+        axis = (end - origin) / np.linalg.norm(end - origin)
+        delta = info["deflection_rad"]
+        if not info["symmetric"] and not probe.strip_is_right[strip]:
+            delta = -delta
+        point = _rotate_flap_points(point[None, :], origin, axis, delta)[0]
+        break
+    return point, mode
 
 
 def reference_surface_indices(aircraft: Aircraft) -> list[int]:
@@ -160,8 +205,9 @@ def clearance_info(
     pts = probe.all_points()
     heights = gp.height(pts)
     slices = [s for s in probe.surfaces if s.index in set(surface_indices)] or probe.surfaces[:1]
-    le = np.vstack([s.edge_le for s in slices])
-    te = np.vstack([s.edge_te for s in slices])
+    strips = np.concatenate([np.arange(probe.n_strips)[s.strips] for s in slices])
+    le = np.vstack([probe.le_left[strips], probe.le_right[strips]])
+    te = np.vstack([probe.te_left[strips], probe.te_right[strips]])
     i_l, i_r = int(np.argmin(le[:, 1])), int(np.argmax(le[:, 1]))
     tip_l = float(min(gp.height(le[[i_l]])[0], gp.height(te[[i_l]])[0]))
     tip_r = float(min(gp.height(le[[i_r]])[0], gp.height(te[[i_r]])[0]))
@@ -207,17 +253,11 @@ def find_bank_strike_limit(
     up to the search limit, so the true limit is larger), and 0 if the level
     attitude already touches.
     """
-    chord_spacing = getattr(settings, "chord_spacing", "uniform")
-    key = lattice_cache.lattice_key(aircraft, settings, "vlm", 1, chord_spacing)
-    probe = lattice_cache.get_or_build(
-        key, lambda: build_lattice(aircraft, settings, collocation="vlm", n_chord=1, chord_spacing=chord_spacing)
-    )
-    pts = probe.all_points()
     alpha, beta = np.radians(alpha_deg), np.radians(beta_deg)
     rp = np.asarray(ref_point, dtype=float)
     # Height of the reference point at zero bank, in this height convention.
-    p, mode = plane_reference(aircraft, rp, height_ref)
-    gp0 = make_ground_plane(probe, h, alpha, beta, 0.0, ref_point=p, height_ref=mode)
+    gp0, probe = place_ground(aircraft, settings, h, alpha, beta, 0.0, rp, height_ref)
+    pts = probe.all_points()
     h_rp = float(gp0.height(rp[None, :])[0])
 
     def margin(phi_deg: float) -> float:
@@ -313,8 +353,8 @@ def analyze_ground_effect(
     height_ref : {'ref', 'min', 'qc', 'te'}
         * ``'ref'``: height of *ref_point*.
         * ``'min'``: smallest clearance of any leading- or trailing-edge node.
-        * ``'qc'`` / ``'te'``: root quarter-chord / trailing-edge point of the main surface
-          (:meth:`Aircraft.root_point`).
+        * ``'qc'`` / ``'te'``: root quarter-chord / trailing-edge point of the main surface,
+          rotated with the root flap when it lies aft of the effective hinge.
     solver : str or None
         ``None``/``"auto"``: VLM. The lifting-line solvers are refused below
         h_min/c = 1.
@@ -365,9 +405,9 @@ def prepare_ground_case(
     """Check one case of :func:`analyze_ground_effect` and place its ground; return the case data.
 
     The arguments are those of :func:`analyze_ground_effect`; *probe* is
-    the lattice with one chordwise panel that places the ground, when the
-    caller has it (a sweep builds it once). The checks and the errors are
-    those of :func:`analyze_ground_effect`.
+    the lattice that places the ground, when the caller has it from a sweep.
+    Controlled geometry gets a probe at its final chordwise count.
+    The checks and the errors are those of :func:`analyze_ground_effect`.
     """
     h = check_height(h)
     for name, val in (("alpha_deg", alpha_deg), ("phi_deg", phi_deg), ("beta_deg", beta_deg)):
@@ -391,11 +431,13 @@ def prepare_ground_case(
 
     alpha, beta, phi = np.radians(alpha_deg), np.radians(beta_deg), np.radians(phi_deg)
     rp = aircraft.moment_reference() if ref_point is None else np.asarray(ref_point, dtype=float)
-    if probe is None:
+    if probe is None or any(s.controls for s in aircraft.surfaces):
         gp, probe = place_ground(aircraft, sett, h, alpha, beta, phi, rp, height_ref)
     else:
-        p, mode = plane_reference(aircraft, rp, height_ref)
+        p, mode = _probe_reference(aircraft, rp, height_ref, probe)
         gp = make_ground_plane(probe, h, alpha, beta, phi, ref_point=p, height_ref=mode)
+    if canonical == "vlm" and sett.n_chord is None and any(s.controls for s in aircraft.surfaces):
+        sett.n_chord = probe.n_chord
     clear = clearance_info(probe, gp, rp, reference_surface_indices(aircraft))
     if clear["h_min"] <= 0.0:
         raise GroundStrikeError(

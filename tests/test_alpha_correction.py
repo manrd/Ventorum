@@ -404,6 +404,12 @@ class ScaledFlapSource(GlauertSource):
         return super().polar(section, Re, alphas_deg, mach=mach, flap=flap, **options)
 
 
+def _strip_deflection(lattice):
+    """Return the flap deflection [rad] of each lattice strip at its control point (0 without a flap)."""
+    field = lattice.geom_cache["flap_field"]
+    return np.where(np.isfinite(field["hinge"]), field["strip_angle"], 0.0)
+
+
 def test_flap_correction_is_the_departure_of_the_polar_from_thin_airfoil_theory():
     """The correction of a flapped strip does not depend on the chordwise panel count.
 
@@ -412,6 +418,8 @@ def test_flap_correction_is_the_departure_of_the_polar_from_thin_airfoil_theory(
     this departure into the correction delta = tau phi / 2 on every
     flapped strip and zero elsewhere, at n_chord 4 and 16 alike. Before,
     delta also held the chordwise discretization error of the lattice flap.
+    phi is the deflection of the lattice strip: in the joins at the side
+    edges of the control it is a part of the control deflection.
     """
     tau = flap_effectiveness(HINGE)
     wing = make_flapped_wing((0.2, 0.6), shape="0012")
@@ -421,12 +429,13 @@ def test_flap_correction_is_the_departure_of_the_polar_from_thin_airfoil_theory(
                             ScaledFlapSource(0.5), model="vlm")
         assert res.converged
         lattice = res.details["lattice"]
+        phi = _strip_deflection(lattice)
+        flapped = phi != 0.0
         eta = np.abs(lattice.eta)
-        flapped = (eta >= 0.2 - 1e-9) & (eta <= 0.6 + 1e-9)
-        np.testing.assert_allclose(res.details["delta"][flapped], 0.5 * tau * np.radians(FLAP_DEG), atol=1e-7)
-        np.testing.assert_allclose(res.details["delta"][~flapped], 0.0, atol=1e-7)
+        assert np.all(flapped[(eta >= 0.2 - 1e-9) & (eta <= 0.6 + 1e-9)])
+        np.testing.assert_allclose(res.details["delta"], 0.5 * tau * phi, atol=1e-7)
         # The thin-airfoil model of a flapped strip has the Glauert shift.
-        np.testing.assert_allclose(res.details["alpha0_thin_airfoil"][flapped], -tau * np.radians(FLAP_DEG),
+        np.testing.assert_allclose(res.details["alpha0_thin_airfoil"][flapped], -tau * phi[flapped],
                                    rtol=1e-12)
         assert np.array_equal(res.details["alpha0_thin_airfoil"][~flapped], res.details["alpha0_section"][~flapped])
 
@@ -455,10 +464,10 @@ def test_flap_thin_airfoil_model_keeps_the_camber_of_the_mean_line():
     assert np.all(lattice.geometric_camber)
     clean_alpha0 = clean.details["alpha0_section"]
     assert np.all(clean_alpha0 < np.radians(-1.9))
-    eta = np.abs(lattice.eta)
-    on_flap = (eta >= 0.2 - 1e-9) & (eta <= 0.6 + 1e-9)
+    phi = _strip_deflection(lattice)
+    on_flap = phi != 0.0
     np.testing.assert_allclose(flapped.details["alpha0_thin_airfoil"][on_flap],
-                               clean_alpha0[on_flap] - tau * np.radians(FLAP_DEG), rtol=1e-10)
+                               clean_alpha0[on_flap] - tau * phi[on_flap], rtol=1e-10)
     assert np.array_equal(flapped.details["alpha0_thin_airfoil"][~on_flap],
                           flapped.details["alpha0_section"][~on_flap])
 

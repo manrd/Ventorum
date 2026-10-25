@@ -244,16 +244,20 @@ def _aileron_result():
 
 
 def test_aileron_far_field():
-    """AR 8 flat wing, antisymmetric aileron 5 deg, alpha 3 deg: small near-field CY; the trust follows the rule.
+    """AR 8 flat wing, antisymmetric aileron 5 deg, alpha 3 deg: positive CY near and far; the trust follows the rule.
 
     The aileron reaches the tip. The full velocity on the legs of the free tip
     edges gives a side-edge force: CY_delta is positive (side force to the
     right for the right trailing edge down), and CY stays below the CY floor.
-    The tangential rule on all legs gave CY = 0 here.
+    The tangential rule on all legs gave CY = 0 here. The geometric flap moves
+    the trailing edge, and the join at the inboard end of the aileron makes
+    the step of the trailing edge continuous, so the Trefftz trace also gives
+    a positive side force.
     """
     res = _aileron_result()
     t = res.totals
     assert 1e-6 < t.CY < NEAR_FAR_FLOOR_CY
+    assert t.CY_farfield > 1e-6
     assert t.CY_farfield is not None and math.isfinite(t.CY_farfield)
     assert t.Cn_trefftz is not None and math.isfinite(t.Cn_trefftz)
     expected = _near_far(res)
@@ -261,10 +265,6 @@ def test_aileron_far_field():
     assert got == expected
 
 
-@pytest.mark.xfail(strict=True, reason=(
-    "Known limit, not resolved: the Trefftz trace of the induced drag does not include the "
-    "trailing-edge displacement of a deflected control (the controls turn the panel normals). Adding it would "
-    "change the induced drag of every deflected case, so it is not added; the flat trace gives no side force."))
 def test_aileron_far_field_side_force_sign():
     """Thin-wing theory with the real deflected trailing edge: the side force is not 0 and is positive.
 

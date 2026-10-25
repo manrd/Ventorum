@@ -342,6 +342,7 @@ def build_sources(
     real = HorseshoeSet(
         a=lattice.a, b=lattice.b, a_te=lattice.a_te, b_te=lattice.b_te,
         wake_dir=d, rc=lattice.rc, sign=np.ones(n), column=umap.panel_column.copy(), group=group,
+        a_kink=lattice.a_kink, b_kink=lattice.b_kink,
     )
     if ground is None:
         return real
@@ -355,6 +356,8 @@ def build_sources(
         sign=-np.ones(n),
         column=umap.panel_column.copy(),
         group=group,
+        a_kink=None if lattice.a_kink is None else ground.reflect_points(lattice.a_kink),
+        b_kink=None if lattice.b_kink is None else ground.reflect_points(lattice.b_kink),
     )
     return real.concatenate(img)
 

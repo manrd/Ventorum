@@ -55,6 +55,20 @@ def openmp_enabled():
     """
     return bool(VENTORUM_HAVE_OPENMP)
 
+def has_leg_kinks():
+    """Return True: the kernels of this build take the leg nodes ``a_kink`` and ``b_kink``.
+
+    The leg of a source with a node runs ``a_te -> a_kink -> a`` (and
+    ``b -> b_kink -> b_te``), see :class:`ventorum.aero.vortex.HorseshoeSet`.
+
+    Returns
+    -------
+    bool
+        Always True for this source.
+    """
+    return True
+
+
 cdef double _INV_4PI = 1.0 / (4.0 * pi)
 cdef double _INV_2PI = 1.0 / (2.0 * pi)
 
@@ -134,7 +148,7 @@ def induced_velocity_kernel(const double[:, ::1] P, const double[:, ::1] a, cons
                             const double[:, ::1] a_te, const double[:, ::1] b_te, const double[:, ::1] d,
                             const double[::1] rc2_src, const cnp.int64_t[::1] src_group, const double[::1] g_src,
                             const cnp.int64_t[::1] tg_group, const double[::1] tg_rc2, bint use_tg,
-                            int parts, int num_threads):
+                            int parts, int num_threads, a_kink=None, b_kink=None):
     """Return the total induced velocity at the evaluation points.
 
     Parameters
@@ -163,6 +177,9 @@ def induced_velocity_kernel(const double[:, ::1] P, const double[:, ::1] a, cons
         0: all legs, 1: bound vortex and chordwise legs, 2: wake legs.
     num_threads : int
         Number of OpenMP threads.
+    a_kink, b_kink : (n, 3) or None
+        Nodes of the chordwise legs [m] (see ``a_kink`` in
+        :class:`ventorum.aero.vortex.HorseshoeSet`), or None for straight legs.
 
     Returns
     -------
@@ -179,12 +196,18 @@ def induced_velocity_kernel(const double[:, ::1] P, const double[:, ::1] a, cons
     cdef double r1x, r1y, r1z, r2x, r2y, r2z, r0x, r0y, r0z, n1, n2
     cdef double cx, cy, cz, cr2, r0sq, k
     cdef double q1x, q1y, q1z, nq, w2x, w2y, w2z, nw
+    cdef double kax, kay, kaz, kbx, kby, kbz, t1x, t1y, t1z, t2x, t2y, t2z, nt
+    # Leg nodes (see ventorum.aero.vortex.HorseshoeSet); without them the
+    # node arrays are a_te and b_te and the legs are computed as before.
+    cdef bint kink = a_kink is not None
+    cdef const double[:, ::1] ak = a_te if a_kink is None else a_kink
+    cdef const double[:, ::1] bk = b_te if b_kink is None else b_kink
     cdef double dx, dy, dz
     cdef double rbrx, rbry, rbrz, rbrn, larx, lary, larz, larn
     cdef double qx, qy, qz, qcr2, qdr, qk
     cdef double ex, ey, ez, ecr2, edr, ek
     cdef double ux, uy, uz
-    if parts == 0 and not use_tg and _is_straight(a, b, a_te, b_te, n):
+    if parts == 0 and not use_tg and not kink and _is_straight(a, b, a_te, b_te, n):
         out = np.empty((m, 3), dtype=np.float64)
         out_v = out
         for i in prange(m, num_threads=num_threads, nogil=True, schedule="static"):
@@ -345,13 +368,20 @@ def induced_velocity_kernel(const double[:, ::1] P, const double[:, ::1] a, cons
                     vy = cy * k
                     vz = cz * k
                 if not straight_left:
-                    q1x = px - tax
-                    q1y = py - tay
-                    q1z = pz - taz
+                    kax = tax
+                    kay = tay
+                    kaz = taz
+                    if kink:
+                        kax = ak[j, 0]
+                        kay = ak[j, 1]
+                        kaz = ak[j, 2]
+                    q1x = px - kax
+                    q1y = py - kay
+                    q1z = pz - kaz
                     nq = sqrt(q1x * q1x + q1y * q1y + q1z * q1z + 1e-300)
-                    r0x = ax - tax
-                    r0y = ay - tay
-                    r0z = az - taz
+                    r0x = ax - kax
+                    r0y = ay - kay
+                    r0z = az - kaz
                     cx = q1y * r1z - q1z * r1y
                     cy = q1z * r1x - q1x * r1z
                     cz = q1x * r1y - q1y * r1x
@@ -362,14 +392,40 @@ def induced_velocity_kernel(const double[:, ::1] P, const double[:, ::1] a, cons
                     vx = vx + cx * k
                     vy = vy + cy * k
                     vz = vz + cz * k
+                    if kink and (kax != tax or kay != tay or kaz != taz):
+                        # Aft segment a_te -> node of a leg with a node.
+                        t1x = px - tax
+                        t1y = py - tay
+                        t1z = pz - taz
+                        nt = sqrt(t1x * t1x + t1y * t1y + t1z * t1z + 1e-300)
+                        r0x = kax - tax
+                        r0y = kay - tay
+                        r0z = kaz - taz
+                        cx = t1y * q1z - t1z * q1y
+                        cy = t1z * q1x - t1x * q1z
+                        cz = t1x * q1y - t1y * q1x
+                        cr2 = cx * cx + cy * cy + cz * cz
+                        r0sq = r0x * r0x + r0y * r0y + r0z * r0z
+                        k = _seg_k(t1x, t1y, t1z, q1x, q1y, q1z, r0x, r0y, r0z,
+                                   nt, nq, cr2, r0sq, rc2)
+                        vx = vx + cx * k
+                        vy = vy + cy * k
+                        vz = vz + cz * k
                 if not straight_right:
-                    w2x = px - tbx
-                    w2y = py - tby
-                    w2z = pz - tbz
+                    kbx = tbx
+                    kby = tby
+                    kbz = tbz
+                    if kink:
+                        kbx = bk[j, 0]
+                        kby = bk[j, 1]
+                        kbz = bk[j, 2]
+                    w2x = px - kbx
+                    w2y = py - kby
+                    w2z = pz - kbz
                     nw = sqrt(w2x * w2x + w2y * w2y + w2z * w2z + 1e-300)
-                    r0x = tbx - bx
-                    r0y = tby - by
-                    r0z = tbz - bz
+                    r0x = kbx - bx
+                    r0y = kby - by
+                    r0z = kbz - bz
                     cx = r2y * w2z - r2z * w2y
                     cy = r2z * w2x - r2x * w2z
                     cz = r2x * w2y - r2y * w2x
@@ -380,6 +436,25 @@ def induced_velocity_kernel(const double[:, ::1] P, const double[:, ::1] a, cons
                     vx = vx + cx * k
                     vy = vy + cy * k
                     vz = vz + cz * k
+                    if kink and (kbx != tbx or kby != tby or kbz != tbz):
+                        # Aft segment node -> b_te of a leg with a node.
+                        t2x = px - tbx
+                        t2y = py - tby
+                        t2z = pz - tbz
+                        nt = sqrt(t2x * t2x + t2y * t2y + t2z * t2z + 1e-300)
+                        r0x = tbx - kbx
+                        r0y = tby - kby
+                        r0z = tbz - kbz
+                        cx = w2y * t2z - w2z * t2y
+                        cy = w2z * t2x - w2x * t2z
+                        cz = w2x * t2y - w2y * t2x
+                        cr2 = cx * cx + cy * cy + cz * cz
+                        r0sq = r0x * r0x + r0y * r0y + r0z * r0z
+                        k = _seg_k(w2x, w2y, w2z, t2x, t2y, t2z, r0x, r0y, r0z,
+                                   nw, nt, cr2, r0sq, rc2)
+                        vx = vx + cx * k
+                        vy = vy + cy * k
+                        vz = vz + cz * k
             if parts != 1:
                 if straight_right:
                     rbrx = r2x
@@ -459,7 +534,7 @@ def normal_influence_kernel(const double[:, ::1] P, const double[:, ::1] normals
                             const double[::1] rc2_src, const cnp.int64_t[::1] src_group, const double[::1] sign,
                             const cnp.int64_t[::1] column, int n_unknowns,
                             const cnp.int64_t[::1] tg_group, const double[::1] tg_rc2, bint use_tg,
-                            int parts, int num_threads):
+                            int parts, int num_threads, a_kink=None, b_kink=None):
     """Return the normal-velocity influence matrix.
 
     ``A[i, j]`` is the velocity normal to ``normals[i]`` at ``P[i]`` for unit
@@ -499,6 +574,9 @@ def normal_influence_kernel(const double[:, ::1] P, const double[:, ::1] normals
         0: all legs, 1: bound vortex and chordwise legs, 2: wake legs.
     num_threads : int
         Number of OpenMP threads.
+    a_kink, b_kink : (n, 3) or None
+        Nodes of the chordwise legs [m] (see ``a_kink`` in
+        :class:`ventorum.aero.vortex.HorseshoeSet`), or None for straight legs.
 
     Returns
     -------
@@ -515,12 +593,18 @@ def normal_influence_kernel(const double[:, ::1] P, const double[:, ::1] normals
     cdef double r1x, r1y, r1z, r2x, r2y, r2z, r0x, r0y, r0z, n1, n2
     cdef double cx, cy, cz, cr2, r0sq, k
     cdef double q1x, q1y, q1z, nq, w2x, w2y, w2z, nw
+    cdef double kax, kay, kaz, kbx, kby, kbz, t1x, t1y, t1z, t2x, t2y, t2z, nt
+    # Leg nodes (see ventorum.aero.vortex.HorseshoeSet); without them the
+    # node arrays are a_te and b_te and the legs are computed as before.
+    cdef bint kink = a_kink is not None
+    cdef const double[:, ::1] ak = a_te if a_kink is None else a_kink
+    cdef const double[:, ::1] bk = b_te if b_kink is None else b_kink
     cdef double dx, dy, dz
     cdef double rbrx, rbry, rbrz, rbrn, larx, lary, larz, larn
     cdef double qx, qy, qz, qcr2, qdr, qk
     cdef double ex, ey, ez, ecr2, edr, ek
     cdef double ux, uy, uz
-    if parts == 0 and not use_tg and _is_direct(column, sign, n_unknowns, n) \
+    if parts == 0 and not use_tg and not kink and _is_direct(column, sign, n_unknowns, n) \
             and _is_straight(a, b, a_te, b_te, n):
         out = np.empty((m, n_unknowns), dtype=np.float64)
         out_v = out
@@ -678,13 +762,20 @@ def normal_influence_kernel(const double[:, ::1] P, const double[:, ::1] normals
                     vy = cy * k
                     vz = cz * k
                 if not straight_left:
-                    q1x = px - tax
-                    q1y = py - tay
-                    q1z = pz - taz
+                    kax = tax
+                    kay = tay
+                    kaz = taz
+                    if kink:
+                        kax = ak[j, 0]
+                        kay = ak[j, 1]
+                        kaz = ak[j, 2]
+                    q1x = px - kax
+                    q1y = py - kay
+                    q1z = pz - kaz
                     nq = sqrt(q1x * q1x + q1y * q1y + q1z * q1z + 1e-300)
-                    r0x = ax - tax
-                    r0y = ay - tay
-                    r0z = az - taz
+                    r0x = ax - kax
+                    r0y = ay - kay
+                    r0z = az - kaz
                     cx = q1y * r1z - q1z * r1y
                     cy = q1z * r1x - q1x * r1z
                     cz = q1x * r1y - q1y * r1x
@@ -695,14 +786,40 @@ def normal_influence_kernel(const double[:, ::1] P, const double[:, ::1] normals
                     vx = vx + cx * k
                     vy = vy + cy * k
                     vz = vz + cz * k
+                    if kink and (kax != tax or kay != tay or kaz != taz):
+                        # Aft segment a_te -> node of a leg with a node.
+                        t1x = px - tax
+                        t1y = py - tay
+                        t1z = pz - taz
+                        nt = sqrt(t1x * t1x + t1y * t1y + t1z * t1z + 1e-300)
+                        r0x = kax - tax
+                        r0y = kay - tay
+                        r0z = kaz - taz
+                        cx = t1y * q1z - t1z * q1y
+                        cy = t1z * q1x - t1x * q1z
+                        cz = t1x * q1y - t1y * q1x
+                        cr2 = cx * cx + cy * cy + cz * cz
+                        r0sq = r0x * r0x + r0y * r0y + r0z * r0z
+                        k = _seg_k(t1x, t1y, t1z, q1x, q1y, q1z, r0x, r0y, r0z,
+                                   nt, nq, cr2, r0sq, rc2)
+                        vx = vx + cx * k
+                        vy = vy + cy * k
+                        vz = vz + cz * k
                 if not straight_right:
-                    w2x = px - tbx
-                    w2y = py - tby
-                    w2z = pz - tbz
+                    kbx = tbx
+                    kby = tby
+                    kbz = tbz
+                    if kink:
+                        kbx = bk[j, 0]
+                        kby = bk[j, 1]
+                        kbz = bk[j, 2]
+                    w2x = px - kbx
+                    w2y = py - kby
+                    w2z = pz - kbz
                     nw = sqrt(w2x * w2x + w2y * w2y + w2z * w2z + 1e-300)
-                    r0x = tbx - bx
-                    r0y = tby - by
-                    r0z = tbz - bz
+                    r0x = kbx - bx
+                    r0y = kby - by
+                    r0z = kbz - bz
                     cx = r2y * w2z - r2z * w2y
                     cy = r2z * w2x - r2x * w2z
                     cz = r2x * w2y - r2y * w2x
@@ -713,6 +830,25 @@ def normal_influence_kernel(const double[:, ::1] P, const double[:, ::1] normals
                     vx = vx + cx * k
                     vy = vy + cy * k
                     vz = vz + cz * k
+                    if kink and (kbx != tbx or kby != tby or kbz != tbz):
+                        # Aft segment node -> b_te of a leg with a node.
+                        t2x = px - tbx
+                        t2y = py - tby
+                        t2z = pz - tbz
+                        nt = sqrt(t2x * t2x + t2y * t2y + t2z * t2z + 1e-300)
+                        r0x = tbx - kbx
+                        r0y = tby - kby
+                        r0z = tbz - kbz
+                        cx = w2y * t2z - w2z * t2y
+                        cy = w2z * t2x - w2x * t2z
+                        cz = w2x * t2y - w2y * t2x
+                        cr2 = cx * cx + cy * cy + cz * cz
+                        r0sq = r0x * r0x + r0y * r0y + r0z * r0z
+                        k = _seg_k(w2x, w2y, w2z, t2x, t2y, t2z, r0x, r0y, r0z,
+                                   nw, nt, cr2, r0sq, rc2)
+                        vx = vx + cx * k
+                        vy = vy + cy * k
+                        vz = vz + cz * k
             if parts != 1:
                 if straight_right:
                     rbrx = r2x
@@ -784,7 +920,7 @@ def velocity_tensor_kernel(const double[:, ::1] P, const double[:, ::1] a, const
                            const double[:, ::1] a_te, const double[:, ::1] b_te, const double[:, ::1] d,
                            const double[::1] rc2_src, const cnp.int64_t[::1] src_group, const double[::1] sign,
                            const cnp.int64_t[::1] tg_group, const double[::1] tg_rc2, bint use_tg,
-                           int parts, int num_threads):
+                           int parts, int num_threads, a_kink=None, b_kink=None):
     """Return the velocity per source horseshoe, with the source sign applied.
 
     Parameters
@@ -813,6 +949,9 @@ def velocity_tensor_kernel(const double[:, ::1] P, const double[:, ::1] a, const
         0: all legs, 1: bound vortex and chordwise legs, 2: wake legs.
     num_threads : int
         Number of OpenMP threads.
+    a_kink, b_kink : (n, 3) or None
+        Nodes of the chordwise legs [m] (see ``a_kink`` in
+        :class:`ventorum.aero.vortex.HorseshoeSet`), or None for straight legs.
 
     Returns
     -------
@@ -829,6 +968,12 @@ def velocity_tensor_kernel(const double[:, ::1] P, const double[:, ::1] a, const
     cdef double r1x, r1y, r1z, r2x, r2y, r2z, r0x, r0y, r0z, n1, n2
     cdef double cx, cy, cz, cr2, r0sq, k
     cdef double q1x, q1y, q1z, nq, w2x, w2y, w2z, nw
+    cdef double kax, kay, kaz, kbx, kby, kbz, t1x, t1y, t1z, t2x, t2y, t2z, nt
+    # Leg nodes (see ventorum.aero.vortex.HorseshoeSet); without them the
+    # node arrays are a_te and b_te and the legs are computed as before.
+    cdef bint kink = a_kink is not None
+    cdef const double[:, ::1] ak = a_te if a_kink is None else a_kink
+    cdef const double[:, ::1] bk = b_te if b_kink is None else b_kink
     cdef double dx, dy, dz
     cdef double rbrx, rbry, rbrz, rbrn, larx, lary, larz, larn
     cdef double qx, qy, qz, qcr2, qdr, qk
@@ -909,13 +1054,20 @@ def velocity_tensor_kernel(const double[:, ::1] P, const double[:, ::1] a, const
                     vy = cy * k
                     vz = cz * k
                 if not straight_left:
-                    q1x = px - tax
-                    q1y = py - tay
-                    q1z = pz - taz
+                    kax = tax
+                    kay = tay
+                    kaz = taz
+                    if kink:
+                        kax = ak[j, 0]
+                        kay = ak[j, 1]
+                        kaz = ak[j, 2]
+                    q1x = px - kax
+                    q1y = py - kay
+                    q1z = pz - kaz
                     nq = sqrt(q1x * q1x + q1y * q1y + q1z * q1z + 1e-300)
-                    r0x = ax - tax
-                    r0y = ay - tay
-                    r0z = az - taz
+                    r0x = ax - kax
+                    r0y = ay - kay
+                    r0z = az - kaz
                     cx = q1y * r1z - q1z * r1y
                     cy = q1z * r1x - q1x * r1z
                     cz = q1x * r1y - q1y * r1x
@@ -926,14 +1078,40 @@ def velocity_tensor_kernel(const double[:, ::1] P, const double[:, ::1] a, const
                     vx = vx + cx * k
                     vy = vy + cy * k
                     vz = vz + cz * k
+                    if kink and (kax != tax or kay != tay or kaz != taz):
+                        # Aft segment a_te -> node of a leg with a node.
+                        t1x = px - tax
+                        t1y = py - tay
+                        t1z = pz - taz
+                        nt = sqrt(t1x * t1x + t1y * t1y + t1z * t1z + 1e-300)
+                        r0x = kax - tax
+                        r0y = kay - tay
+                        r0z = kaz - taz
+                        cx = t1y * q1z - t1z * q1y
+                        cy = t1z * q1x - t1x * q1z
+                        cz = t1x * q1y - t1y * q1x
+                        cr2 = cx * cx + cy * cy + cz * cz
+                        r0sq = r0x * r0x + r0y * r0y + r0z * r0z
+                        k = _seg_k(t1x, t1y, t1z, q1x, q1y, q1z, r0x, r0y, r0z,
+                                   nt, nq, cr2, r0sq, rc2)
+                        vx = vx + cx * k
+                        vy = vy + cy * k
+                        vz = vz + cz * k
                 if not straight_right:
-                    w2x = px - tbx
-                    w2y = py - tby
-                    w2z = pz - tbz
+                    kbx = tbx
+                    kby = tby
+                    kbz = tbz
+                    if kink:
+                        kbx = bk[j, 0]
+                        kby = bk[j, 1]
+                        kbz = bk[j, 2]
+                    w2x = px - kbx
+                    w2y = py - kby
+                    w2z = pz - kbz
                     nw = sqrt(w2x * w2x + w2y * w2y + w2z * w2z + 1e-300)
-                    r0x = tbx - bx
-                    r0y = tby - by
-                    r0z = tbz - bz
+                    r0x = kbx - bx
+                    r0y = kby - by
+                    r0z = kbz - bz
                     cx = r2y * w2z - r2z * w2y
                     cy = r2z * w2x - r2x * w2z
                     cz = r2x * w2y - r2y * w2x
@@ -944,6 +1122,25 @@ def velocity_tensor_kernel(const double[:, ::1] P, const double[:, ::1] a, const
                     vx = vx + cx * k
                     vy = vy + cy * k
                     vz = vz + cz * k
+                    if kink and (kbx != tbx or kby != tby or kbz != tbz):
+                        # Aft segment node -> b_te of a leg with a node.
+                        t2x = px - tbx
+                        t2y = py - tby
+                        t2z = pz - tbz
+                        nt = sqrt(t2x * t2x + t2y * t2y + t2z * t2z + 1e-300)
+                        r0x = tbx - kbx
+                        r0y = tby - kby
+                        r0z = tbz - kbz
+                        cx = w2y * t2z - w2z * t2y
+                        cy = w2z * t2x - w2x * t2z
+                        cz = w2x * t2y - w2y * t2x
+                        cr2 = cx * cx + cy * cy + cz * cz
+                        r0sq = r0x * r0x + r0y * r0y + r0z * r0z
+                        k = _seg_k(w2x, w2y, w2z, t2x, t2y, t2z, r0x, r0y, r0z,
+                                   nw, nt, cr2, r0sq, rc2)
+                        vx = vx + cx * k
+                        vy = vy + cy * k
+                        vz = vz + cz * k
             if parts != 1:
                 if straight_right:
                     rbrx = r2x
@@ -1020,7 +1217,7 @@ def velocity_unknowns_kernel(const double[:, ::1] P, const double[:, ::1] a, con
                            const double[::1] rc2_src, const cnp.int64_t[::1] src_group, const double[::1] sign,
                            const cnp.int64_t[::1] column, Py_ssize_t n_unknowns,
                            const cnp.int64_t[::1] tg_group, const double[::1] tg_rc2, bint use_tg,
-                           int parts, int num_threads):
+                           int parts, int num_threads, a_kink=None, b_kink=None):
     """Return the velocity per unknown: the sources of each unknown added in source order (sign applied).
 
     The same velocities as ``velocity_tensor_kernel``, accumulated into
@@ -1057,6 +1254,9 @@ def velocity_unknowns_kernel(const double[:, ::1] P, const double[:, ::1] a, con
         0: all legs, 1: bound vortex and chordwise legs, 2: wake legs.
     num_threads : int
         Number of OpenMP threads.
+    a_kink, b_kink : (n, 3) or None
+        Nodes of the chordwise legs [m] (see ``a_kink`` in
+        :class:`ventorum.aero.vortex.HorseshoeSet`), or None for straight legs.
 
     Returns
     -------
@@ -1073,6 +1273,12 @@ def velocity_unknowns_kernel(const double[:, ::1] P, const double[:, ::1] a, con
     cdef double r1x, r1y, r1z, r2x, r2y, r2z, r0x, r0y, r0z, n1, n2
     cdef double cx, cy, cz, cr2, r0sq, k
     cdef double q1x, q1y, q1z, nq, w2x, w2y, w2z, nw
+    cdef double kax, kay, kaz, kbx, kby, kbz, t1x, t1y, t1z, t2x, t2y, t2z, nt
+    # Leg nodes (see ventorum.aero.vortex.HorseshoeSet); without them the
+    # node arrays are a_te and b_te and the legs are computed as before.
+    cdef bint kink = a_kink is not None
+    cdef const double[:, ::1] ak = a_te if a_kink is None else a_kink
+    cdef const double[:, ::1] bk = b_te if b_kink is None else b_kink
     cdef double dx, dy, dz
     cdef double rbrx, rbry, rbrz, rbrn, larx, lary, larz, larn
     cdef double qx, qy, qz, qcr2, qdr, qk
@@ -1153,13 +1359,20 @@ def velocity_unknowns_kernel(const double[:, ::1] P, const double[:, ::1] a, con
                     vy = cy * k
                     vz = cz * k
                 if not straight_left:
-                    q1x = px - tax
-                    q1y = py - tay
-                    q1z = pz - taz
+                    kax = tax
+                    kay = tay
+                    kaz = taz
+                    if kink:
+                        kax = ak[j, 0]
+                        kay = ak[j, 1]
+                        kaz = ak[j, 2]
+                    q1x = px - kax
+                    q1y = py - kay
+                    q1z = pz - kaz
                     nq = sqrt(q1x * q1x + q1y * q1y + q1z * q1z + 1e-300)
-                    r0x = ax - tax
-                    r0y = ay - tay
-                    r0z = az - taz
+                    r0x = ax - kax
+                    r0y = ay - kay
+                    r0z = az - kaz
                     cx = q1y * r1z - q1z * r1y
                     cy = q1z * r1x - q1x * r1z
                     cz = q1x * r1y - q1y * r1x
@@ -1170,14 +1383,40 @@ def velocity_unknowns_kernel(const double[:, ::1] P, const double[:, ::1] a, con
                     vx = vx + cx * k
                     vy = vy + cy * k
                     vz = vz + cz * k
+                    if kink and (kax != tax or kay != tay or kaz != taz):
+                        # Aft segment a_te -> node of a leg with a node.
+                        t1x = px - tax
+                        t1y = py - tay
+                        t1z = pz - taz
+                        nt = sqrt(t1x * t1x + t1y * t1y + t1z * t1z + 1e-300)
+                        r0x = kax - tax
+                        r0y = kay - tay
+                        r0z = kaz - taz
+                        cx = t1y * q1z - t1z * q1y
+                        cy = t1z * q1x - t1x * q1z
+                        cz = t1x * q1y - t1y * q1x
+                        cr2 = cx * cx + cy * cy + cz * cz
+                        r0sq = r0x * r0x + r0y * r0y + r0z * r0z
+                        k = _seg_k(t1x, t1y, t1z, q1x, q1y, q1z, r0x, r0y, r0z,
+                                   nt, nq, cr2, r0sq, rc2)
+                        vx = vx + cx * k
+                        vy = vy + cy * k
+                        vz = vz + cz * k
                 if not straight_right:
-                    w2x = px - tbx
-                    w2y = py - tby
-                    w2z = pz - tbz
+                    kbx = tbx
+                    kby = tby
+                    kbz = tbz
+                    if kink:
+                        kbx = bk[j, 0]
+                        kby = bk[j, 1]
+                        kbz = bk[j, 2]
+                    w2x = px - kbx
+                    w2y = py - kby
+                    w2z = pz - kbz
                     nw = sqrt(w2x * w2x + w2y * w2y + w2z * w2z + 1e-300)
-                    r0x = tbx - bx
-                    r0y = tby - by
-                    r0z = tbz - bz
+                    r0x = kbx - bx
+                    r0y = kby - by
+                    r0z = kbz - bz
                     cx = r2y * w2z - r2z * w2y
                     cy = r2z * w2x - r2x * w2z
                     cz = r2x * w2y - r2y * w2x
@@ -1188,6 +1427,25 @@ def velocity_unknowns_kernel(const double[:, ::1] P, const double[:, ::1] a, con
                     vx = vx + cx * k
                     vy = vy + cy * k
                     vz = vz + cz * k
+                    if kink and (kbx != tbx or kby != tby or kbz != tbz):
+                        # Aft segment node -> b_te of a leg with a node.
+                        t2x = px - tbx
+                        t2y = py - tby
+                        t2z = pz - tbz
+                        nt = sqrt(t2x * t2x + t2y * t2y + t2z * t2z + 1e-300)
+                        r0x = tbx - kbx
+                        r0y = tby - kby
+                        r0z = tbz - kbz
+                        cx = w2y * t2z - w2z * t2y
+                        cy = w2z * t2x - w2x * t2z
+                        cz = w2x * t2y - w2y * t2x
+                        cr2 = cx * cx + cy * cy + cz * cz
+                        r0sq = r0x * r0x + r0y * r0y + r0z * r0z
+                        k = _seg_k(w2x, w2y, w2z, t2x, t2y, t2z, r0x, r0y, r0z,
+                                   nw, nt, cr2, r0sq, rc2)
+                        vx = vx + cx * k
+                        vy = vy + cy * k
+                        vz = vz + cz * k
             if parts != 1:
                 if straight_right:
                     rbrx = r2x

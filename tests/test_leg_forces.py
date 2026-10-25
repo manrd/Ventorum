@@ -74,18 +74,46 @@ def _free_edge_loads(res, fc):
     g = np.asarray(res.details["gamma"], dtype=float)
     n_p = lat.n_panels
     _, _, kind = L.leg_force_rules(lat)
-    pts = [lat.force_points, 0.5 * (lat.a_te + lat.a), 0.5 * (lat.b + lat.b_te)]
+    # The leg segments of the loads: two sets, or four with the hinge nodes
+    # of a chordwise control (see L.leg_segments).
+    start, end = L.leg_segments(lat)
+    n_sets = start.shape[0] // n_p
+    mid = 0.5 * (start + end)
+    pts = [lat.force_points] + list(mid.reshape(n_sets, n_p, 3))
     vel = [np.empty((n_p, 3)) for _ in pts]
     wd = np.asarray(res.details["wake_dir"], dtype=float)
-    L._near_field_velocity(lat, g, fc, res.details["ground"], wd, pts, [0, 2, 1], True, vel)
-    v_leg = fc.V_inf * freestream_direction(fc.alpha, fc.beta) + np.vstack([vel[1], vel[2]])
-    seg = np.vstack([lat.a - lat.a_te, lat.b_te - lat.b])
-    mid = np.vstack([pts[1], pts[2]])
+    swap = [0, 2, 1] if n_sets == 2 else [0, 2, 1, 4, 3]
+    L._near_field_velocity(lat, g, fc, res.details["ground"], wd, pts, swap, True, vel)
+    v_leg = fc.V_inf * freestream_direction(fc.alpha, fc.beta) + np.vstack(vel[1:])
+    seg = end - start
     free = kind == L.LEG_FREE
-    f = fc.rho * np.concatenate([g, g])[free, None] * np.cross(v_leg[free], seg[free])
+    f = fc.rho * np.concatenate([g] * n_sets)[free, None] * np.cross(v_leg[free], seg[free])
     rp = res.details["ref_point"]
     rp = np.zeros(3) if rp is None else rp
     return f.sum(axis=0), np.cross(mid[free] - rp, f).sum(axis=0)
+
+
+def _shared_leg_and_bound_forces(res, fc):
+    """Force [N] of the shared-edge legs (tangential rule) and of the bound vortices."""
+    lat = res.details["lattice"]
+    g = np.asarray(res.details["gamma"], dtype=float)
+    n_p = lat.n_panels
+    normal, scale, kind = L.leg_force_rules(lat)
+    start, end = L.leg_segments(lat)
+    n_sets = start.shape[0] // n_p
+    pts = [lat.force_points] + list((0.5 * (start + end)).reshape(n_sets, n_p, 3))
+    vel = [np.empty((n_p, 3)) for _ in pts]
+    swap = [0, 2, 1] if n_sets == 2 else [0, 2, 1, 4, 3]
+    L._near_field_velocity(lat, g, fc, res.details["ground"], np.asarray(res.details["wake_dir"], dtype=float),
+                           pts, swap, True, vel)
+    onset = fc.V_inf * freestream_direction(fc.alpha, fc.beta)
+    v_leg = onset + np.vstack(vel[1:])
+    v_leg = v_leg - np.sum(v_leg * normal, axis=1)[:, None] * normal
+    shared = kind == L.LEG_SHARED
+    f_leg = fc.rho * (np.concatenate([g] * n_sets) * scale)[shared, None] * np.cross(v_leg[shared],
+                                                                                     (end - start)[shared])
+    f_bound = fc.rho * g[:, None] * np.cross(onset + vel[0], lat.b - lat.a)
+    return f_leg.sum(axis=0), f_bound.sum(axis=0)
 
 
 def test_aileron_side_force_on_a_flat_wing_comes_from_the_free_edges():
@@ -93,6 +121,9 @@ def test_aileron_side_force_on_a_flat_wing_comes_from_the_free_edges():
 
     The shared edges carry no in-plane force; the side force is the side-edge
     force of the free tip edges (full velocity), antisymmetric in the deflection.
+    The geometric aileron also tilts the bound vortices in the join at its
+    inboard end (a warped surface, as a dihedral): their side force is the
+    rest of the near-field CY.
     """
     cy = {}
     for delta in (2.0, -2.0):
@@ -102,7 +133,10 @@ def test_aileron_side_force_on_a_flat_wing_comes_from_the_free_edges():
         side = np.cross(lift_direction(fc.alpha), freestream_direction(fc.alpha, fc.beta))
         cy_free = float(f_free @ side) / (0.5 * fc.rho * fc.V_inf ** 2 * ac.S_ref)
         assert abs(cy_free) > 1e-6
-        assert res.totals.CY == pytest.approx(cy_free, rel=1e-9, abs=1e-14)
+        f_shared, f_bound = _shared_leg_and_bound_forces(res, fc)
+        q = 0.5 * fc.rho * fc.V_inf ** 2 * ac.S_ref
+        assert abs(float(f_shared @ side) / q) <= 1e-12 * abs(cy_free)
+        assert res.totals.CY == pytest.approx(cy_free + float(f_bound @ side) / q, rel=1e-9, abs=1e-14)
         cy[delta] = res.totals.CY
     assert cy[2.0] == pytest.approx(-cy[-2.0], rel=1e-9)
 

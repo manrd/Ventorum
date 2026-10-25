@@ -180,6 +180,12 @@ but its partial derivatives are terms of order 1/rc^2 that cancel only in exact
 arithmetic. The reference copy sets these pairs to zero by the mesh topology (index
 masks of the own panel and of the edge line), not by a distance threshold.
 
+On a flap strip of the chordwise control mode the forward leg segments (bound point to
+hinge node) stay on the edge line. The aft legs and the aft leg segments of an edge turn
+about the line of the edge node, so they keep a common line; two flap strips with the
+same hinge fraction share it. A node that never turns (the outer end of a control join)
+keeps the edge line. These line ids are the masks of the aft segments.
+
 Over the segment (the foot of the perpendicular on the segment), the segment kernel uses
 the projection `r0 . (t1 - t2)` where `r1 . r2 <= 0`, and the equal value `|r1 x r2|^2
 (n1 + n2) / (n1 n2 (n1 n2 + r1 . r2))` elsewhere (Katz and Plotkin 2001, the two forms of
@@ -259,7 +265,10 @@ g_P = g_r,  g_A = -g_r
 ```
 
 The horseshoe is the bound segment `a -> b`, the legs `a_te -> a` and `b -> b_te`, plus
-the ray from `b_te` minus the ray from `a_te` (adjoint `-u`). The derivatives of the
+the ray from `b_te` minus the ray from `a_te` (adjoint `-u`). A source with leg nodes
+(`a_k`, `b_k`, the hinge nodes of a flap strip) has the legs `a_te -> a_k -> a` and
+`b -> b_k -> b_te`: one more finite segment per leg, with the same formulas; the node
+derivatives are two more source outputs. The derivatives of the
 corners add the end-point derivatives of the filaments that share them. The pair core is
 `rc2 = rc_src^2 + rc_tg^2` for a target and a source of different core groups, else
 `rc_src^2`; `g_rc2` goes to the source core and, for the pairs of different groups, to

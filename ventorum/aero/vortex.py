@@ -302,21 +302,22 @@ def _cython_pool() -> ThreadPoolExecutor:
     return _cy_pool
 
 
-def _cy_call(name: str, *args) -> np.ndarray:
+def _cy_call(name: str, *args, **kwargs) -> np.ndarray:
     """Call the Cython kernel *name* with the kernel threads of the calling thread.
 
     With OpenMP the kernel gets the thread count. Without OpenMP the rows
     are split into blocks that run on Python threads (see ``_CY_OPENMP``).
+    The keyword arguments (the leg nodes) go to every call unchanged.
     """
     kernel = getattr(_cy, name)
     threads = _kernel_threads()
     if _CY_OPENMP:
-        return kernel(*args, threads)
+        return kernel(*args, threads, **kwargs)
     rows = _CY_ROW_ARGS[name]
     m = args[rows[0]].shape[0]
     blocks = min(threads, m // _CY_MIN_ROWS)
     if blocks <= 1:
-        return kernel(*args, 1)
+        return kernel(*args, 1, **kwargs)
     edges = np.linspace(0, m, blocks + 1).astype(int)
 
     def run(k: int) -> np.ndarray:
@@ -324,18 +325,41 @@ def _cy_call(name: str, *args) -> np.ndarray:
         part = list(args)
         for r in rows:
             part[r] = args[r][i0:i1]
-        return kernel(*part, 1)
+        return kernel(*part, 1, **kwargs)
 
     return np.concatenate(list(_cython_pool().map(run, range(blocks))), axis=0)
 
 
-def _normal_influence(backend: str, args: tuple, parts: int) -> np.ndarray:
-    """Call the normal-influence kernel of *backend* on the packed *args* with the part selector *parts*."""
+def _cy_has_kinks() -> bool:
+    """Return True if the compiled Cython kernels take the leg nodes (``a_kink``, ``b_kink``)."""
+    return bool(_HAVE_CYTHON and getattr(_cy, "has_leg_kinks", lambda: False)())
+
+
+def _kernel_call(name: str, backend: str, args: tuple, parts: int, kin: tuple) -> np.ndarray:
+    """Call the compiled kernel *name* of *backend* on the packed *args* with the part selector *parts*.
+
+    *kin* is ``(a_kink, b_kink, has_kinks)`` of :func:`ventorum.aero.vortex_numba.pack_kinks`.
+    Without nodes the Cython and torch kernels get the arguments of the
+    kernels without nodes. A Cython build without node support (compiled
+    from an older source) is not used for a set with nodes: the Numba
+    kernel computes it.
+    """
+    a_k, b_k, kink = kin
+    if backend == "cython" and kink and not _cy_has_kinks():
+        backend = "numba"
     if backend == "torch":
-        return _torch().normal_influence_kernel(*args, parts)
+        fn = getattr(_torch(), name)
+        return fn(*args, parts, a_kink=a_k, b_kink=b_k) if kink else fn(*args, parts)
     if backend == "cython":
-        return _cy_call("normal_influence_kernel", *args, parts)
-    return _nb.normal_influence_kernel(*args, parts)
+        if kink:
+            return _cy_call(name, *args, parts, a_kink=a_k, b_kink=b_k)
+        return _cy_call(name, *args, parts)
+    return getattr(_nb, name)(*args, parts, a_k, b_k, kink)
+
+
+def _normal_influence(backend: str, args: tuple, parts: int, kin: tuple) -> np.ndarray:
+    """Call the normal-influence kernel of *backend* on the packed *args* with the part selector *parts*."""
+    return _kernel_call("normal_influence_kernel", backend, args, parts, kin)
 
 
 @dataclass(slots=True)
@@ -360,6 +384,13 @@ class HorseshoeSet:
     group : (n,) or None
         Surface index of each horseshoe (images keep the index of their
         surface). Used for the cross-surface core, see :class:`Targets`.
+    a_kink, b_kink : (n, 3) or None
+        Nodes of the chordwise legs. The left leg runs ``a_te -> a_kink ->
+        a`` and the right leg ``b -> b_kink -> b_te``: one extra straight
+        segment per leg. A horseshoe with straight legs has ``a_kink`` equal
+        to ``a_te`` and ``b_kink`` equal to ``b_te``, bit for bit; its legs
+        are then computed as without the nodes. None means no horseshoe of
+        the set has a node.
     """
 
     a: np.ndarray
@@ -371,14 +402,34 @@ class HorseshoeSet:
     sign: np.ndarray
     column: np.ndarray
     group: np.ndarray | None = None
+    a_kink: np.ndarray | None = None
+    b_kink: np.ndarray | None = None
 
     @property
     def n(self) -> int:
         """Return the number of horseshoes."""
         return int(self.a.shape[0])
 
+    @property
+    def has_kinks(self) -> bool:
+        """Return True if the set has leg nodes (``a_kink`` and ``b_kink`` are not None)."""
+        return self.a_kink is not None
+
+    def kinks(self) -> tuple[np.ndarray, np.ndarray]:
+        """Return the leg nodes ``(a_kink, b_kink)``; without nodes, ``(a_te, b_te)``."""
+        if self.a_kink is None:
+            return self.a_te, self.b_te
+        return self.a_kink, self.b_kink
+
+    def kinked(self) -> np.ndarray:
+        """Return the indices of the horseshoes with a leg node, shape (k,)."""
+        if self.a_kink is None:
+            return np.zeros(0, dtype=np.int64)
+        return np.flatnonzero(np.any(self.a_kink != self.a_te, axis=1) | np.any(self.b_kink != self.b_te, axis=1))
+
     def concatenate(self, other: HorseshoeSet) -> HorseshoeSet:
         """Return a new set with the horseshoes of this set, then of *other*."""
+        kinks = self.has_kinks or other.has_kinks
         return HorseshoeSet(
             a=np.vstack([self.a, other.a]),
             b=np.vstack([self.b, other.b]),
@@ -390,6 +441,8 @@ class HorseshoeSet:
             column=np.concatenate([self.column, other.column]),
             group=(None if self.group is None or other.group is None
                    else np.concatenate([self.group, other.group])),
+            a_kink=np.vstack([self.kinks()[0], other.kinks()[0]]) if kinks else None,
+            b_kink=np.vstack([self.kinks()[1], other.kinks()[1]]) if kinks else None,
         )
 
 
@@ -800,12 +853,24 @@ def _horseshoe_block(P: np.ndarray, hs: HorseshoeSet, tg: Targets | None = None)
     """Unit-circulation velocity of every horseshoe at every point: (m, n, 3)."""
     a, b, a_te, b_te, d = hs.a, hs.b, hs.a_te, hs.b_te, hs.wake_dir
     rc = _core(hs, tg)
+    a_k, b_k = hs.kinks()
     v = segment_velocity(P, a, b, rc)
-    v += segment_velocity(P, a_te, a, rc)
-    v += segment_velocity(P, b, b_te, rc)
+    v += segment_velocity(P, a_k, a, rc)
+    v += segment_velocity(P, b, b_k, rc)
+    _add_kink_legs(v, P, hs, rc)
     v += ray_velocity(P, b_te, d, rc)
     v -= ray_velocity(P, a_te, d, rc)
     return v
+
+
+def _add_kink_legs(v: np.ndarray, P: np.ndarray, hs: HorseshoeSet, rc) -> None:
+    """Add the aft segments ``a_te -> a_kink`` and ``b_kink -> b_te`` of the legs with a node to *v* (m, n, 3)."""
+    idx = hs.kinked()
+    if idx.size == 0:
+        return
+    rc_k = rc[:, idx] if np.ndim(rc) == 2 else np.broadcast_to(np.asarray(rc, dtype=float), (hs.n,))[idx]
+    v[:, idx] += (segment_velocity(P, hs.a_te[idx], hs.a_kink[idx], rc_k)
+                  + segment_velocity(P, hs.b_kink[idx], hs.b_te[idx], rc_k))
 
 
 def _chunk_rows(m: int, n: int) -> int:
@@ -880,6 +945,8 @@ def _wake_pair_groups(hs: HorseshoeSet) -> tuple[HorseshoeSet, np.ndarray] | Non
         sign=np.ones(n_groups),
         column=np.arange(n_groups),
         group=None if hs.group is None else np.asarray(hs.group)[first],
+        a_kink=None if hs.a_kink is None else np.asarray(hs.a_kink)[first],
+        b_kink=None if hs.b_kink is None else np.asarray(hs.b_kink)[first],
     )
     return rep, inverse
 
@@ -887,9 +954,11 @@ def _wake_pair_groups(hs: HorseshoeSet) -> tuple[HorseshoeSet, np.ndarray] | Non
 def _fixed_block(P: np.ndarray, hs: HorseshoeSet, tg: Targets | None = None) -> np.ndarray:
     """Unit-circulation velocity of the bound vortices and chordwise legs: (m, n, 3)."""
     rc = _core(hs, tg)
+    a_k, b_k = hs.kinks()
     v = segment_velocity(P, hs.a, hs.b, rc)
-    v += segment_velocity(P, hs.a_te, hs.a, rc)
-    v += segment_velocity(P, hs.b, hs.b_te, rc)
+    v += segment_velocity(P, a_k, hs.a, rc)
+    v += segment_velocity(P, hs.b, b_k, rc)
+    _add_kink_legs(v, P, hs, rc)
     return v
 
 
@@ -911,13 +980,9 @@ def horseshoe_velocity_tensor(P: np.ndarray, hs: HorseshoeSet, targets: Targets 
         a, b, a_te, b_te, d, rc2, grp, sign = _nb.pack_sources(hs)
         tg_group, tg_rc2, use_tg = _nb.pack_targets(m, hs, targets)
         Pc = np.ascontiguousarray(P, dtype=float)
-        if backend == "torch":
-            return _torch().velocity_tensor_kernel(Pc, a, b, a_te, b_te, d, rc2, grp, sign,
-                                              tg_group, tg_rc2, use_tg, 0)
-        if backend == "cython":
-            return _cy_call("velocity_tensor_kernel", Pc, a, b, a_te, b_te, d, rc2, grp, sign,
-                                              tg_group, tg_rc2, use_tg, 0)
-        return _nb.velocity_tensor_kernel(Pc, a, b, a_te, b_te, d, rc2, grp, sign, tg_group, tg_rc2, use_tg)
+        return _kernel_call("velocity_tensor_kernel", backend,
+                            (Pc, a, b, a_te, b_te, d, rc2, grp, sign, tg_group, tg_rc2, use_tg), 0,
+                            _nb.pack_kinks(hs))
     out = np.empty((m, n, 3))
     step = _chunk_rows(m, n)
     for i0 in range(0, m, step):
@@ -960,13 +1025,14 @@ def influence_matrix(
         args = (np.ascontiguousarray(P, dtype=float), np.ascontiguousarray(normals, dtype=float),
                 a, b, a_te, b_te, d, rc2, grp, sign,
                 np.ascontiguousarray(hs.column, dtype=np.int64), int(n_unknowns), tg_group, tg_rc2, use_tg)
+        kin = _nb.pack_kinks(hs)
         if cache is not None and cache_key is not None and m * n_unknowns * 8 <= _CACHE_LIMIT_BYTES:
             fixed = cache.get(("A", cache_key))
             if fixed is None:
-                fixed = _normal_influence(backend, args, 1)
+                fixed = _normal_influence(backend, args, 1, kin)
                 cache[("A", cache_key)] = fixed
-            return fixed + _normal_influence(backend, args, 2)
-        return _normal_influence(backend, args, 0)
+            return fixed + _normal_influence(backend, args, 2, kin)
+        return _normal_influence(backend, args, 0, kin)
     A_src = np.empty((m, n))
     step = _chunk_rows(m, n)
     for i0 in range(0, m, step):
@@ -993,11 +1059,9 @@ def velocity_tensor_unknowns(
         tg_group, tg_rc2, use_tg = _nb.pack_targets(m, hs, targets)
         Pc = np.ascontiguousarray(P, dtype=float)
         col = np.ascontiguousarray(hs.column, dtype=np.int64)
-        if backend == "cython":
-            return _cy_call("velocity_unknowns_kernel", Pc, a, b, a_te, b_te, d, rc2, grp, sign, col,
-                            int(n_unknowns), tg_group, tg_rc2, use_tg, 0)
-        return _nb.velocity_unknowns_kernel(Pc, a, b, a_te, b_te, d, rc2, grp, sign, col, int(n_unknowns),
-                                            tg_group, tg_rc2, use_tg)
+        return _kernel_call("velocity_unknowns_kernel", backend,
+                            (Pc, a, b, a_te, b_te, d, rc2, grp, sign, col, int(n_unknowns), tg_group, tg_rc2,
+                             use_tg), 0, _nb.pack_kinks(hs))
     V = horseshoe_velocity_tensor(P, hs, targets)
     return _fold_columns(V, hs.column, n_unknowns)
 
@@ -1053,13 +1117,9 @@ def _induced_parts(P, hs, gamma_unknowns, targets, parts: int) -> np.ndarray:
     tg_group, tg_rc2, use_tg = _nb.pack_targets(m, hs, targets)
     Pc = np.ascontiguousarray(P, dtype=float)
     gc = np.ascontiguousarray(g_src, dtype=float)
-    if backend == "torch":
-        return _torch().induced_velocity_kernel(Pc, a, b, a_te, b_te, d, rc2, grp, gc,
-                                                tg_group, tg_rc2, use_tg, parts)
-    if backend == "cython":
-        return _cy_call("induced_velocity_kernel", Pc, a, b, a_te, b_te, d, rc2, grp, gc,
-                        tg_group, tg_rc2, use_tg, parts)
-    return _nb.induced_velocity_kernel(Pc, a, b, a_te, b_te, d, rc2, grp, gc, tg_group, tg_rc2, use_tg, parts)
+    return _kernel_call("induced_velocity_kernel", backend,
+                        (Pc, a, b, a_te, b_te, d, rc2, grp, gc, tg_group, tg_rc2, use_tg), parts,
+                        _nb.pack_kinks(hs))
 
 
 def _induced(P, hs, gamma_unknowns, targets, cache, cache_key, fixed_only: bool) -> np.ndarray | None:
@@ -1075,15 +1135,9 @@ def _induced(P, hs, gamma_unknowns, targets, cache, cache_key, fixed_only: bool)
         if cache is not None and cache_key is not None and m * n * 3 * 8 <= _CACHE_LIMIT_BYTES:
             T = cache.get(("T", cache_key))
             if T is None:
-                if backend == "torch":
-                    T3 = _torch().velocity_tensor_kernel(Pc, a, b, a_te, b_te, d, rc2, grp, sign,
-                                                    tg_group, tg_rc2, use_tg, 1)
-                elif backend == "cython":
-                    T3 = _cy_call("velocity_tensor_kernel", Pc, a, b, a_te, b_te, d, rc2, grp, sign,
-                                                    tg_group, tg_rc2, use_tg, 1)
-                else:
-                    T3 = _nb.velocity_tensor_kernel(Pc, a, b, a_te, b_te, d, rc2, grp, sign,
-                                                    tg_group, tg_rc2, use_tg, 1)
+                T3 = _kernel_call("velocity_tensor_kernel", backend,
+                                  (Pc, a, b, a_te, b_te, d, rc2, grp, sign, tg_group, tg_rc2, use_tg), 1,
+                                  _nb.pack_kinks(hs))
                 # Rows (point, component), columns source: one matrix-vector product per call.
                 T = np.ascontiguousarray(T3.transpose(0, 2, 1).reshape(m * 3, n))
                 cache[("T", cache_key)] = T
@@ -1096,13 +1150,9 @@ def _induced(P, hs, gamma_unknowns, targets, cache, cache_key, fixed_only: bool)
             return None
         grouped = _wake_pair_groups(hs)
         if grouped is None:
-            if backend == "torch":
-                return _torch().induced_velocity_kernel(Pc, a, b, a_te, b_te, d, rc2, grp, gc,
-                                                   tg_group, tg_rc2, use_tg, 0)
-            if backend == "cython":
-                return _cy_call("induced_velocity_kernel", Pc, a, b, a_te, b_te, d, rc2, grp, gc,
-                                                   tg_group, tg_rc2, use_tg, 0)
-            return _nb.induced_velocity_kernel(Pc, a, b, a_te, b_te, d, rc2, grp, gc, tg_group, tg_rc2, use_tg)
+            return _kernel_call("induced_velocity_kernel", backend,
+                                (Pc, a, b, a_te, b_te, d, rc2, grp, gc, tg_group, tg_rc2, use_tg), 0,
+                                _nb.pack_kinks(hs))
         rep, inverse = grouped
         # The representative set has unique pairs, so its call takes the direct path.
         merged_gamma = np.bincount(inverse, weights=g_src, minlength=rep.n)

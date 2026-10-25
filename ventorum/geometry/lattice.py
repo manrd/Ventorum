@@ -53,7 +53,7 @@ from __future__ import annotations
 
 import bisect
 import warnings
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 import numpy as np
@@ -69,6 +69,7 @@ from ventorum.core.datatypes import (
     WingSection,
 )
 from ventorum.geometry.controls import (
+    ControlJoinField,
     deflected_airfoil,
     flap_effectiveness,  # noqa: F401 (re-exported for lattice_cache builder helpers)
     flap_moment_derivative,  # noqa: F401 (re-exported for lattice_cache builder helpers)
@@ -109,6 +110,31 @@ def _rotate(v: np.ndarray, axis: np.ndarray, angle: np.ndarray | float) -> np.nd
     s = np.sin(angle)[:, None]
     k_dot_v = np.sum(axis * v, axis=1)[:, None]
     return v * c + cross3(axis, v) * s + axis * k_dot_v * (1.0 - c)
+
+
+def _rotate_flap_points(points: np.ndarray, hinge: np.ndarray, axis: np.ndarray, delta: float) -> np.ndarray:
+    """Rotate flap points [m] about the unit hinge axis by *delta* [rad].
+
+    Use the rigid camber-surface rotation of Katz and Plotkin (2001).
+    The caller selects points strictly aft of the effective hinge.
+
+    Parameters
+    ----------
+    points : numpy.ndarray
+        Points in body axes [m], shape (n, 3).
+    hinge : numpy.ndarray
+        Point on the hinge axis [m], shape (3,).
+    axis : numpy.ndarray
+        Unit hinge direction [-], shape (3,).
+    delta : float
+        Signed deflection [rad].
+
+    Returns
+    -------
+    numpy.ndarray
+        Rotated points in body axes [m], shape (n, 3).
+    """
+    return hinge + _rotate(points - hinge, axis[None, :], delta)
 
 
 def surface_reference_line(surf: LiftingSurface, eta: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -305,6 +331,14 @@ class VortexLattice:
 
     Attributes
     ----------
+    a_kink, b_kink : numpy.ndarray or None
+        Hinge nodes of the chordwise legs [m], shape (n_panels, 3), or None
+        when no leg has one. The left leg of a panel runs ``a_te -> a_kink
+        -> a`` and the right leg ``b -> b_kink -> b_te``. A panel ahead of
+        the hinge of a deflected chordwise flap has the hinge point of its
+        strip edge here, so its legs follow the deflected mean surface. On
+        all other panels ``a_kink`` is ``a_te`` and ``b_kink`` is ``b_te``
+        (the legs are straight).
     chord : numpy.ndarray
         Strip chord [m].
     twist : numpy.ndarray
@@ -371,6 +405,10 @@ class VortexLattice:
     geom_cache: dict = field(default_factory=dict, repr=False, compare=False)
     control_info: list[dict] = field(default_factory=list)
     geometric_camber: np.ndarray | None = None
+    # Hinge nodes of the chordwise legs (see ``a_kink`` in the class notes).
+    # None when no leg has a hinge node.
+    a_kink: np.ndarray | None = None
+    b_kink: np.ndarray | None = None
     # Boundary-condition normals before the turn of the chordwise flaps.
     # None when no chordwise control turns a panel.
     normal_bc_clean: np.ndarray | None = None
@@ -405,8 +443,16 @@ class VortexLattice:
 
     def all_points(self) -> np.ndarray:
         """Return edge nodes and non-flat mean-surface points for clearance checks [m]."""
-        pts = [s.edge_le for s in self.surfaces] + [s.edge_te for s in self.surfaces]
-        if self.has_camber_offset:
+        deflected = any(
+            info["mode"] == "chordwise" and info["deflection_rad"] != 0.0 for info in self.control_info
+        )
+        pts = [s.edge_le for s in self.surfaces]
+        if deflected:
+            pts.extend([self.te_left, self.te_right])
+            pts.extend(p[None, :] for pair in self.geom_cache.get("flap_hinges", {}).values() for p in pair)
+        else:
+            pts.extend(s.edge_te for s in self.surfaces)
+        if self.has_camber_offset or deflected:
             pts.extend([self.a, self.b, self.cp, self.a_te, self.b_te])
         return np.vstack(pts)
 
@@ -1055,6 +1101,12 @@ def build_lattice(
     strip_xi_all: list[np.ndarray] = []
     strip_ctrl_all: list[ControlSurface | None] = []
     strip_hinge_eff_all: list[float | None] = []
+    # Chordwise mode: the effective hinge fraction of every strip with a
+    # deflected geometry (control strips and join strips), and the
+    # deflection terms of its two edge nodes (see ControlJoinField).
+    strip_flap_hinge_all: list[float | None] = []
+    strip_flap_nominal_all: list[float] = []
+    strip_side_terms_all: list[tuple[list, list]] = []
     control_info: list[dict[str, Any]] = []
     mean_surfaces: list[tuple[list[WingSection], list[_MeanLine | None], np.ndarray]] = []
     camber_warnings: list[str] = []
@@ -1176,6 +1228,7 @@ def build_lattice(
         ctrl_for_k: list[ControlSurface | None] = [None] * n_r
         hinge_eff_for_k: list[float | None] = [None] * n_r
         xi_for_k: list[np.ndarray] = [xi] * n_r
+        snap_of: dict[int, tuple[float | None, np.ndarray]] = {}
 
         for c in controls:
             k_ctrl = np.flatnonzero((eta_mid >= c.eta_start - 1e-9) & (eta_mid <= c.eta_end + 1e-9))
@@ -1218,10 +1271,51 @@ def build_lattice(
                 "symmetric": bool(c.symmetric),
             })
 
+            snap_of[id(c)] = (hinge_x_c_eff, ctrl_xi)
             for k in k_ctrl:
                 ctrl_for_k[k] = c
                 hinge_eff_for_k[k] = hinge_x_c_eff
                 xi_for_k[k] = ctrl_xi
+
+        # Chordwise mode: the deflected geometry of the controls and of
+        # their joins (sealed side edges, see ControlJoinField). A strip in
+        # a join outside its control takes the hinge and the chordwise nodes
+        # of that control.
+        if surf.is_symmetric:
+            kind = "symmetric"
+        elif getattr(surf, "mirror_y", False):
+            kind = "mirror"
+        else:
+            kind = "plain"
+        side_sign = -1.0 if kind == "mirror" else 1.0
+        join_field = None
+        flap_hinge_for_k: list[float | None] = [None] * n_r
+        flap_nominal_for_k: list[float] = [np.nan] * n_r
+        if is_chordwise and controls:
+            def chord_of(e: float, _surf=surf) -> float:
+                return float(surface_edge_geometry(_surf, np.array([e]))["chord"][0])
+
+            def rate_of(e: float, _surf=surf) -> float:
+                # Length of the reference line per unit span parameter [m].
+                h_ = 1e-6
+                lo_, hi_ = max(0.0, e - h_), min(1.0, e + h_)
+                _, y_r, z_r = surface_reference_line(_surf, np.array([lo_, hi_]))
+                return float(np.hypot(y_r[1] - y_r[0], z_r[1] - z_r[0])) / max(hi_ - lo_, 1e-300)
+
+            join_field = ControlJoinField(controls, kind, chord_of, rate_of)
+            for k in range(n_r):
+                hc = None
+                for e in (eta_mid[k], eta_e[k], eta_e[k + 1]):
+                    hc = join_field.at(side_sign * float(e))[1]
+                    if hc is not None:
+                        break
+                if hc is None:
+                    continue
+                h_eff, c_xi = snap_of[id(hc)]
+                flap_hinge_for_k[k] = h_eff
+                flap_nominal_for_k[k] = float(hc.hinge_x_c)
+                if ctrl_for_k[k] is None:
+                    xi_for_k[k] = c_xi
 
         props_of: dict[int, tuple[float, float, float, float]] = {}
         if not is_chordwise and controls:
@@ -1298,6 +1392,9 @@ def build_lattice(
             xi_surf = [xi_for_k[n_r - 1 - j] for j in range(n_r)] + xi_for_k
             hinge_eff_surf = [hinge_eff_for_k[n_r - 1 - j] for j in range(n_r)] + hinge_eff_for_k
             ctrl_surf = [ctrl_for_k[n_r - 1 - j] for j in range(n_r)] + ctrl_for_k
+            flap_hinge_surf = flap_hinge_for_k[::-1] + flap_hinge_for_k
+            flap_nominal_surf = flap_nominal_for_k[::-1] + flap_nominal_for_k
+            node_eta = np.concatenate([-eta_e[::-1], eta_e[1:]])
         elif getattr(surf, "mirror_y", False):
             # Mirror image (y -> -y) of the surface; strips run left to right
             # (tip to root), as on the left half of a symmetric surface.
@@ -1330,6 +1427,9 @@ def build_lattice(
             xi_surf = [xi_for_k[n_r - 1 - j] for j in range(n_r)]
             hinge_eff_surf = [hinge_eff_for_k[n_r - 1 - j] for j in range(n_r)]
             ctrl_surf = [ctrl_for_k[n_r - 1 - j] for j in range(n_r)]
+            flap_hinge_surf = flap_hinge_for_k[::-1]
+            flap_nominal_surf = flap_nominal_for_k[::-1]
+            node_eta = -eta_e[::-1]
         else:
             edge_le, edge_te = le_e, te_e
             edge_ref = geo["qc"]
@@ -1344,6 +1444,9 @@ def build_lattice(
             xi_surf = list(xi_for_k)
             hinge_eff_surf = list(hinge_eff_for_k)
             ctrl_surf = list(ctrl_for_k)
+            flap_hinge_surf = list(flap_hinge_for_k)
+            flap_nominal_surf = list(flap_nominal_for_k)
+            node_eta = np.asarray(eta_e, dtype=float)
 
         n_s = edge_le.shape[0] - 1
         strip_parts["surface"].append(np.full(n_s, s_idx))
@@ -1364,6 +1467,13 @@ def build_lattice(
         strip_xi_all.extend(xi_surf)
         strip_hinge_eff_all.extend(hinge_eff_surf)
         strip_ctrl_all.extend(ctrl_surf)
+        strip_flap_hinge_all.extend(flap_hinge_surf)
+        strip_flap_nominal_all.extend(flap_nominal_surf)
+        if join_field is not None:
+            node_terms = [join_field.at(float(e))[0] for e in node_eta]
+            strip_side_terms_all.extend((node_terms[j], node_terms[j + 1]) for j in range(len(node_eta) - 1))
+        else:
+            strip_side_terms_all.extend(([], []) for _ in range(len(node_eta) - 1))
         airfoils.extend(afs)
         # The untwisted reference line has the chord along x: its spanwise
         # direction in the y-z plane is the dihedral direction of the strip.
@@ -1497,38 +1607,145 @@ def build_lattice(
         le_l[idx], le_r[idx] = sf.edge_le[:-1], sf.edge_le[1:]
         te_l[idx], te_r[idx] = sf.edge_te[:-1], sf.edge_te[1:]
     normal_bc_clean = None
+    flap_hinges = {}
+    leg_kinks = {}
+    flap_field = None
+    # Lattice before the flap turn: the leg-force rules come from it.
+    undeflected = None
     if is_chordwise:
         normal_bc_clean = normal_bc.copy()
-        is_right_arr = cat["is_right"].astype(bool)
+        undeflected = (a.copy(), b.copy(), te_l.copy(), te_r.copy(), cp.copy())
+        strip_surf = cat["surface"].astype(int)
+
+        def hinge_point(s: int, side: int, h: float) -> np.ndarray:
+            # Hinge point [m] at fraction h of the left (0) or right (1) edge
+            # of strip s, on the mean line when the surface has one.
+            # The trailing edges before the turn (the loop turns te_l, te_r).
+            le, te = (le_l, undeflected[2]) if side == 0 else (le_r, undeflected[3])
+            if camber_frames is None:
+                return le[s] + h * (te[s] - le[s])
+            si = int(strip_surf[s])
+            frame = camber_frames[si]
+            e = s - surfaces[si].strips.start + side
+            return (frame["le"][e] + h * (frame["te"][e] - frame["le"][e])
+                    + _joined_camber_offset(camber_frames, si, e, np.array(h)))
+
+        def unit(v: np.ndarray) -> np.ndarray:
+            n = float(np.linalg.norm(v))
+            # Two hinge points at the same place only on a degenerate strip
+            # (zero width: the solvers refuse it, build_lattice accepts it).
+            return v / n if n > 1e-300 else np.array([0.0, 1.0, 0.0])
+
+        angle = np.zeros((n_strips, 2))
+        hinge_of = np.full(n_strips, np.nan)
         for s in range(n_strips):
-            c = strip_ctrl_all[s]
-            if c is not None:
-                hinge_eff = strip_hinge_eff_all[s]
-                H_l = le_l[s] + hinge_eff * (te_l[s] - le_l[s])
-                H_r = le_r[s] + hinge_eff * (te_r[s] - le_r[s])
-                if camber_frames is not None:
-                    si = int(cat["surface"][s])
-                    frame = camber_frames[si]
-                    e = s - surfaces[si].strips.start
-                    hf = np.array(hinge_eff)
-                    H_l = frame["le"][e] + hinge_eff * (frame["te"][e] - frame["le"][e])
-                    H_r = frame["le"][e + 1] + hinge_eff * (frame["te"][e + 1] - frame["le"][e + 1])
-                    H_l += _joined_camber_offset(camber_frames, si, e, hf)
-                    H_r += _joined_camber_offset(camber_frames, si, e + 1, hf)
-                H_axis = H_r - H_l
-                norm_H = float(np.linalg.norm(H_axis))
-                # H_l and H_r are at the same point only on a degenerate strip,
-                # for example a strip of zero width (semi_span = 0: the solvers
-                # refuse it, but build_lattice accepts it, and its normal is
-                # zero). The fallback axis only prevents a division by zero.
-                u_hinge = (H_axis / norm_H) if norm_H > 1e-300 else np.array([0.0, 1.0, 0.0])
-                delta = c.deflection if (is_right_arr[s] or c.symmetric) else -c.deflection
-                if delta != 0.0:
-                    for k in range(n_chord):
-                        x0_k = strip_xi_arr[s, k]
-                        if x0_k >= hinge_eff - 1e-12:
-                            p_idx = s * n_chord + k
-                            normal_bc[p_idx] = _rotate(normal_bc[p_idx:p_idx + 1], u_hinge[None, :], delta)[0]
+            if strip_flap_hinge_all[s] is not None:
+                hinge_of[s] = strip_flap_hinge_all[s]
+        # Neighbours of each edge node of the flap strips: ``partner`` is
+        # the (strip, side) of the other strip at the same node, ``far`` the
+        # (strip, side) of the next node beyond it (for the hinge axis); -1
+        # where there is none. Inside a surface they are the neighbour
+        # strip. An end node of a surface takes them from a coincident end
+        # node of another surface with a flap strip of the same hinge (a
+        # surface joined to its mirror copy at the root): the two surfaces
+        # then turn the node about the same line, as one symmetric surface.
+        partner = np.full((n_strips, 2, 2), -1, dtype=np.int64)
+        far = np.full((n_strips, 2, 2), -1, dtype=np.int64)
+        ends = []
+        for si, sl in enumerate(surfaces):
+            if sl.strips.stop > sl.strips.start:
+                ends += [(sl.strips.start, 0, si), (sl.strips.stop - 1, 1, si)]
+        for s in range(n_strips):
+            if np.isnan(hinge_of[s]):
+                continue
+            if s > 0 and strip_surf[s - 1] == strip_surf[s] and np.isfinite(hinge_of[s - 1]):
+                partner[s, 0] = (s - 1, 1)
+                far[s, 0] = (s - 1, 0)
+            if s + 1 < n_strips and strip_surf[s + 1] == strip_surf[s] and np.isfinite(hinge_of[s + 1]):
+                partner[s, 1] = (s + 1, 0)
+                far[s, 1] = (s + 1, 1)
+        for s, side, si in ends:
+            if np.isnan(hinge_of[s]) or partner[s, side, 0] >= 0:
+                continue
+            le_s = (le_l, le_r)[side][s]
+            te_s = undeflected[2 + side][s]
+            tol = 1e-9 * max(1.0, float(chord[s]))
+            for q, jq, sq in ends:
+                if sq == si or hinge_of[q] != hinge_of[s]:
+                    continue
+                if (np.max(np.abs((le_l, le_r)[jq][q] - le_s)) <= tol
+                        and np.max(np.abs(undeflected[2 + jq][q] - te_s)) <= tol):
+                    partner[s, side] = (q, jq)
+                    far[s, side] = (q, 1 - jq)
+                    break
+        coef: dict[str, np.ndarray] = {}
+        # Turn of the two edges of each flap strip: (axis, angle) left and right.
+        edge_turn: dict[int, tuple] = {}
+        for s in range(n_strips):
+            h = strip_flap_hinge_all[s]
+            if h is None:
+                continue
+            H_l = hinge_point(s, 0, h)
+            H_r = hinge_point(s, 1, h)
+            flap_hinges[s] = (H_l.copy(), H_r.copy())
+            # The hinge axis of an edge node is the central difference of
+            # the hinge points of its neighbour nodes, so the two strips at
+            # a node turn it about the same line: the deflected surface has
+            # no gap between strips (also at the root of a surface with
+            # dihedral).
+            fl, fr = far[s, 0], far[s, 1]
+            ax_l = unit(H_r - (hinge_point(int(fl[0]), int(fl[1]), h) if fl[0] >= 0 else H_l))
+            ax_r = unit((hinge_point(int(fr[0]), int(fr[1]), h) if fr[0] >= 0 else H_r) - H_l)
+            for side, terms in enumerate(strip_side_terms_all[s]):
+                for c, f in terms:
+                    angle[s, side] += f * c.deflection
+                    coef.setdefault(c.name, np.zeros((n_strips, 2)))[s, side] += f
+            d_l, d_r = angle[s]
+            edge_turn[s] = (ax_l, d_l, ax_r, d_r, h)
+            f_cp = float(cat["frac"][s])
+            H_f = H_l + f_cp * (H_r - H_l)
+            ax_f = unit(ax_l + f_cp * (ax_r - ax_l))
+            d_f = d_l + f_cp * (d_r - d_l)
+            for k in range(n_chord):
+                x0_k = strip_xi_arr[s, k]
+                dx_k = strip_xi_arr[s, k + 1] - x0_k
+                xb_k = x0_k + 0.25 * dx_k
+                xc_k = xb_k + 0.5 * dx_k * claf[s]
+                p_idx = s * n_chord + k
+                for points, fraction, H, ax, dd in ((a, xb_k, H_l, ax_l, d_l), (b, xb_k, H_r, ax_r, d_r),
+                                                    (cp, xc_k, H_f, ax_f, d_f)):
+                    if fraction > h and dd != 0.0:
+                        points[p_idx:p_idx + 1] = _rotate_flap_points(points[p_idx:p_idx + 1], H, ax, dd)
+                if x0_k >= h - 1e-12 and d_f != 0.0:
+                    normal_bc[p_idx] = _rotate(normal_bc[p_idx:p_idx + 1], ax_f[None, :], d_f)[0]
+                # The chordwise legs of the panels ahead of the hinge follow
+                # the deflected mean surface: bound point, hinge point of the
+                # strip edge, deflected trailing edge. The node is there also
+                # at zero deflection (on the straight leg), so the loads and
+                # their derivatives are continuous in the deflection.
+                if xb_k <= h:
+                    leg_kinks[p_idx] = (H_l, H_r)
+            # The surface edge arrays keep the reference geometry used by
+            # the core-group rule.
+            if d_l != 0.0:
+                te_l[s:s + 1] = _rotate_flap_points(te_l[s:s + 1], H_l, ax_l, d_l)
+            if d_r != 0.0:
+                te_r[s:s + 1] = _rotate_flap_points(te_r[s:s + 1], H_r, ax_r, d_r)
+        if flap_hinges:
+            # Per flap strip: the deflection at the span fraction of its
+            # control point [rad] and the hinge of its control as defined.
+            frac_s = np.asarray(cat["frac"], dtype=float)
+            flap_field = {"hinge": hinge_of, "angle": angle, "coef": coef, "partner": partner, "far": far,
+                          "strip_angle": angle[:, 0] + frac_s * (angle[:, 1] - angle[:, 0]),
+                          "hinge_x_c": np.asarray(strip_flap_nominal_all, dtype=float)}
+
+    a_kink = b_kink = None
+    if leg_kinks:
+        a_kink = te_l[panel_strip]
+        b_kink = te_r[panel_strip]
+        for p_idx, (H_l, H_r) in leg_kinks.items():
+            a_kink[p_idx] = H_l
+            b_kink[p_idx] = H_r
 
     lattice = VortexLattice(
         collocation=collocation,
@@ -1570,6 +1787,8 @@ def build_lattice(
         join_warnings=near_miss_warnings(surfaces) + camber_warnings + offset_warnings,
         control_info=control_info,
         geometric_camber=geometric_camber,
+        a_kink=a_kink,
+        b_kink=b_kink,
         normal_bc_clean=(
             normal_bc_clean if normal_bc_clean is not None and np.any(normal_bc_clean != normal_bc) else None
         ),
@@ -1577,6 +1796,12 @@ def build_lattice(
         has_camber_offset=any(line is not None and np.any(line.z != 0.0)
                               for _, lines, _ in mean_surfaces for line in lines),
     )
+    lattice.geom_cache["flap_hinges"] = flap_hinges
+    if flap_field is not None:
+        lattice.geom_cache["flap_field"] = flap_field
+        # Bound points and control points before the flap turn (the linear
+        # 2D section model of the viscous coupling uses them).
+        lattice.geom_cache["flap_points_clean"] = (undeflected[0], undeflected[1], undeflected[4])
     mark_joined_edges(surfaces)
     check_overlaps(lattice)
     if collocation == "vlm":
@@ -1584,7 +1809,41 @@ def build_lattice(
         # notes of every result of this lattice.
         from ventorum.aero.loads import leg_force_rules
 
-        leg_force_rules(lattice)
+        if flap_field is not None:
+            # The rules of a lattice with chordwise controls come from the
+            # lattice before the flap turn (the same topology). The legs of
+            # two strips that turn about different lines separate a little
+            # with the deflection; a rule from the deflected points would
+            # change when the gap passes the join tolerance, and the loads
+            # would jump.
+            a0, b0, te_l0, te_r0, _ = undeflected
+            a_k0, b_k0 = te_l0[panel_strip], te_r0[panel_strip]
+            for p_idx, (H_l, H_r) in leg_kinks.items():
+                a_k0[p_idx] = H_l
+                b_k0[p_idx] = H_r
+            flat = replace(lattice, a=a0, b=b0, a_te=te_l0[panel_strip], b_te=te_r0[panel_strip],
+                           a_kink=a_k0, b_kink=b_k0, te_left=te_l0, te_right=te_r0, geom_cache={})
+            normal, scale, kind = leg_force_rules(flat)
+            # The rule normal of a leg on the flap (aft of the hinge) turns
+            # with its edge node: only the velocity tangent to the deflected
+            # surface acts there. The two strips at a node use the same turn.
+            normal = normal.copy()
+            n_p = panel_strip.size
+            for s, (ax_l, d_l, ax_r, d_r, h) in edge_turn.items():
+                for k in range(n_chord):
+                    x0_k = strip_xi_arr[s, k]
+                    p_idx = s * n_chord + k
+                    aft = x0_k + 0.25 * (strip_xi_arr[s, k + 1] - x0_k) > h
+                    # Aft panel: the whole legs (rows 0, 1); panel ahead of
+                    # the hinge: the aft segments (rows 2, 3).
+                    rows = ((0, ax_l, d_l), (1, ax_r, d_r)) if aft else ((2, ax_l, d_l), (3, ax_r, d_r))
+                    for r, ax, dd in rows:
+                        if dd != 0.0:
+                            i = r * n_p + p_idx
+                            normal[i] = _rotate(normal[i:i + 1], ax[None, :], dd)[0]
+            lattice.geom_cache["leg_force_rules"] = (normal, scale, kind)
+        else:
+            leg_force_rules(lattice)
     return lattice
 
 

@@ -67,7 +67,17 @@ def test_flap_effectiveness_matches_thin_airfoil_table():
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def test_zero_deflection_full_span_gives_the_same_bits():
-    """Prove that a zero-deflection control surface produces bit-identical results."""
+    """Prove that a zero-deflection control surface produces bit-identical results.
+
+    The lifting lines give the same bits. The vortex lattice in chordwise
+    mode keeps the hinge node of the legs also at zero deflection (owner
+    decision: continuous loads in the deflection); the node lies on the
+    straight leg. The core of a segment acts also beyond its end points
+    (the factor D^2 / (D^2 + rc^2)), so the split leg changes the panel
+    circulation at the order (rc / d)^2 of the core (about 1e-4 of the
+    largest circulation here), and the leg force integrated over the two
+    segments changes the coefficients a little.
+    """
     lattice_cache.clear()
     wing_clean = vt.LiftingSurface(
         name="wing",
@@ -96,6 +106,14 @@ def test_zero_deflection_full_span_gives_the_same_bits():
         r_clean = s_inst.solve(vt.Aircraft(surfaces=[wing_clean]), cond, st)
         lattice_cache.clear()
         r_ctrl = s_inst.solve(vt.Aircraft(surfaces=[wing_ctrl]), cond, st)
+        if name == "vlm":
+            assert r_ctrl.details["lattice"].a_kink is not None
+            g_ctrl, g_clean = r_ctrl.details["gamma"], r_clean.details["gamma"]
+            assert np.max(np.abs(g_ctrl - g_clean)) <= 1e-4 * np.max(np.abs(g_clean))
+            for coef in ("CL", "CDi", "Cm"):
+                a, b = getattr(r_clean.totals, coef), getattr(r_ctrl.totals, coef)
+                assert abs(a - b) <= 1e-4 * abs(a), f"{name}: {coef} {a} vs {b}"
+            continue
 
         assert r_clean.totals.CL == r_ctrl.totals.CL, f"{name}: CL not bit-identical"
         assert r_clean.totals.CDi == r_ctrl.totals.CDi, f"{name}: CDi not bit-identical"
@@ -510,7 +528,13 @@ def test_span_limits_snap_to_strip_edges():
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def test_hinge_snaps_on_control_strips_only():
-    """Prove that interior chordwise hinge snapping applies exclusively to strips on the control."""
+    """Prove that interior chordwise hinge snapping applies exclusively to the strips of the control and its joins.
+
+    The joins that seal the side edges of a chordwise control (0.2 local
+    chords, centred on each edge) reach a strip outside the control; that
+    strip takes the hinge node of the control. All other strips keep their
+    chordwise nodes.
+    """
     lattice_cache.clear()
     wing = vt.LiftingSurface(
         semi_span=5.0,
@@ -525,9 +549,12 @@ def test_hinge_snaps_on_control_strips_only():
     info = lat.control_info[0]
     assert info["hinge_x_c_eff"] == 0.7
 
-    # Find strips on the control and strips outside
-    ctrl_strips = [s for s in range(lat.n_strips) if 0.2 - 1e-9 <= abs(lat.eta[s]) <= 0.8 + 1e-9]
+    # Find strips on the control or its joins and strips outside
+    in_join = np.isfinite(lat.geom_cache["flap_field"]["hinge"])
+    ctrl_strips = [s for s in range(lat.n_strips) if in_join[s]]
+    assert all(in_join[s] for s in range(lat.n_strips) if 0.2 - 1e-9 <= abs(lat.eta[s]) <= 0.8 + 1e-9)
     other_strips = [s for s in range(lat.n_strips) if s not in ctrl_strips]
+    assert other_strips
 
     # For control strips, panel lengths of chord=1.0 at k=2 and k=3 are 0.2 and 0.3
     for s in ctrl_strips:

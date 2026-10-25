@@ -167,6 +167,11 @@ def _refuse_configuration(ac: Any, condition: Any, settings: Any, canonical: str
     The compressibility correction (mach > 0) is supported only for the
     vortex lattice in free air; ground effect and the lifting lines keep
     refusing it. The ``"mach"`` input needs a Mach number in the condition.
+    The planform input is refused when a chordwise control of the vortex
+    lattice is deflected: the width of the control joins (see
+    :class:`ventorum.geometry.controls.ControlJoinField`) follows the
+    planform, and the gradient chain keeps it fixed. At zero deflection the
+    join does not move a point, so the planform input stays available.
     """
     from ventorum.core.datatypes import TabulatedAirfoil
 
@@ -220,6 +225,17 @@ def _refuse_configuration(ac: Any, condition: Any, settings: Any, canonical: str
             "of geometric-camber surfaces are not available, including the node and planform chains. "
             "No partial gradient is returned. Use differences of the production solve."
         )
+    if "planform" in wrt and lattice_mean_line:
+        deflected = [(surf.name, c.name) for surf in ac.surfaces for c in getattr(surf, "controls", [])
+                     if c.deflection != 0.0]
+        if deflected:
+            raise GradientScopeError(
+                f"Input 'planform' is not available with the deflected chordwise controls {deflected}. "
+                "The join at each side edge of a chordwise control (0.2 local chords) has a width that "
+                "changes with the planform, and the gradient chain keeps that width fixed, so the "
+                "planform derivative would miss a term. No partial gradient is returned. Use "
+                "differences of the production solve, or the planform gradient at zero deflection. "
+                "The other inputs (nodes, sections, controls) stay available.")
     if "planform" in wrt:
         for surf in ac.surfaces:
             for sec in surf.sections:
@@ -271,7 +287,8 @@ def _recover_xi(lattice: Any, aircraft: Any = None) -> np.ndarray:
     the round-off of each panel; it does not amplify it. Each strip is then
     compared with the fractions of the mesh builder (uniform and cosine
     spacing, with the hinge node of a chordwise control moved to its
-    effective hinge fraction): when one of them agrees within
+    effective hinge fraction, also on the strips of a control join): when
+    one of them agrees within
     ``_XI_NODE_RTOL`` of the smallest panel fraction, the exact production
     fractions are used. Without *aircraft* the hinge nodes are not known,
     and a strip with a moved hinge node keeps the summed fractions.
@@ -304,6 +321,12 @@ def _recover_xi(lattice: Any, aircraft: Any = None) -> np.ndarray:
         for k, v in enumerate(_strip_controls(aircraft, lattice)):
             if v is not None and v[1] is not None:
                 hinge[k] = float(v[1])
+        # The strips of a join outside its control have the hinge node of
+        # that control too (see ventorum.geometry.controls.ControlJoinField).
+        field = lattice.geom_cache.get("flap_field")
+        if field is not None:
+            for k in np.flatnonzero(np.isfinite(field["hinge"])):
+                hinge[int(k)] = float(field["hinge"][k])
     bases = [_chordwise_fractions(n_c, "uniform"), _chordwise_fractions(n_c, "cosine")]
     for s in range(n_s):
         for base in bases:
@@ -351,18 +374,20 @@ def _strip_controls(aircraft: Any, lattice: Any) -> list[tuple[Any, float | None
 
 
 def _control_maps(aircraft: Any, lattice: Any, xi: np.ndarray, names: list[str], device: str,
-                  dtype: Any) -> tuple[dict | None, dict | None]:
+                  dtype: Any, strip_edges: np.ndarray | None = None) -> tuple[dict | None, dict | None]:
     """Return the section-mode and the chordwise-mode control maps of the reference model.
 
     Section mode (lifting lines, or the vortex lattice with one chordwise
     panel): per control strip the strip index, the control index, the
     signed flap effectiveness ``sign tau`` and the signed moment derivative
     ``sign dCm/ddelta`` (Glauert 1926). Chordwise mode (vortex lattice with
-    two or more chordwise panels): per flap panel (the panels whose leading
-    fraction is aft of the effective hinge) the panel and strip indices,
-    the effective hinge fraction, the sign, the control index and the base
-    deflection [rad]. The sign is +1 on a right strip and for a symmetric
-    control, else -1 (the left half of an antisymmetric control).
+    two or more chordwise panels): the flap strips of the lattice (controls
+    and their joins), their effective hinge fractions, the base angle of
+    their edge nodes [rad] and its coefficient per control name, the
+    neighbour nodes of the hinge axes, and the flap panels (the panels
+    whose leading fraction is aft of the effective hinge) with their strips.
+    ``aft_edge`` gives per flap strip edge the line id of its aft legs
+    (``strip_edges`` gives the node ids, see :func:`_aft_line_ids`).
     """
     import torch
 
@@ -398,34 +423,88 @@ def _control_maps(aircraft: Any, lattice: Any, xi: np.ndarray, names: list[str],
                       "tau_sign": np.asarray(tau_s), "dcm_sign": np.asarray(dcm_s),
                       "delta0": np.asarray(delta0)}}
         return sec, None
-    panels, pstrip, hinge, sign, ctrl, delta0 = [], [], [], [], [], []
-    for k, v in enumerate(per_strip):
-        if v is None:
-            continue
-        c, h_eff = v
-        sgn = 1.0 if (is_right[k] or c.symmetric) else -1.0
+    field = lattice.geom_cache.get("flap_field")
+    if field is None:
+        return None, None
+    # Chordwise mode: the deflected geometry of the lattice (controls and
+    # their joins, see ventorum.geometry.controls.ControlJoinField). Each
+    # flap strip has its effective hinge fraction; each of its two edge
+    # nodes has the base angle [rad] and its derivative per unit deflection
+    # of each control name (the join factor and the side sign).
+    strips = np.flatnonzero(np.isfinite(field["hinge"]))
+    hinge = np.asarray(field["hinge"], dtype=float)[strips]
+    coef = np.zeros((strips.size, 2, len(names)))
+    for name, arr in field["coef"].items():
+        coef[:, :, index[name]] = np.asarray(arr)[strips]
+    panels, pstrip = [], []
+    for row, k in enumerate(strips):
         # The mesh builder turns the panels whose leading node is the hinge
         # node or aft of it. The hinge node is the node at the effective
         # hinge fraction; the recovered fraction of that node agrees with
         # it within the round-off, far below the panel size.
-        kh = 1 + int(np.argmin(np.abs(xi[k, 1:n_chord] - float(h_eff))))
+        kh = 1 + int(np.argmin(np.abs(xi[k, 1:n_chord] - float(hinge[row]))))
         tol = _XI_NODE_RTOL * float(np.min(np.diff(xi[k])))
-        if abs(float(xi[k, kh]) - float(h_eff)) > tol:
+        if abs(float(xi[k, kh]) - float(hinge[row])) > tol:
             raise RuntimeError(
                 f"Strip {k}: no chordwise node of the lattice is at the effective hinge fraction "
-                f"{float(h_eff):.15g} (nearest {float(xi[k, kh]):.15g}).")
+                f"{float(hinge[row]):.15g} (nearest {float(xi[k, kh]):.15g}).")
         for j in range(kh, n_chord):
             panels.append(k * n_chord + j)
             pstrip.append(k)
-            hinge.append(float(h_eff))
-            sign.append(sgn)
-            ctrl.append(index[c.name])
-            delta0.append(float(c.deflection))
-    if not panels:
-        return None, None
-    chord = {"panels": _t(panels, True), "strip": _t(pstrip, True), "hinge": _t(hinge),
-             "sign": _t(sign), "ctrl": _t(ctrl, True), "delta0": _t(delta0)}
+    aft_edge = _aft_line_ids(field, strips, strip_edges)
+    chord = {"strip": _t(list(strips), True), "hinge": _t(list(hinge)), "aft_edge": _t(aft_edge, True),
+             "angle0": _t(np.asarray(field["angle"], dtype=float)[strips]),
+             "coef": torch.as_tensor(coef, dtype=dtype, device=device),
+             "far": _t(_far_nodes(field, strips), True),
+             "panels": _t(panels, True), "panel_strip": _t(pstrip, True)}
     return None, chord
+
+
+def _far_nodes(field: dict, strips: np.ndarray) -> np.ndarray:
+    """Return per flap strip edge the (strip, side) of the node beyond it for the hinge axis, shape (n_f, 2, 2).
+
+    An edge without a neighbour node gives its own node (left edge: the
+    strip itself, side 0; right edge: side 1), so the axis is one-sided.
+    """
+    far = np.asarray(field["far"], dtype=np.int64)[strips].copy()
+    for side in (0, 1):
+        none = far[:, side, 0] < 0
+        far[none, side, 0] = strips[none]
+        far[none, side, 1] = side
+    return far
+
+
+def _aft_line_ids(field: dict, strips: np.ndarray, strip_edges: np.ndarray) -> np.ndarray:
+    """Return the line id of the aft legs at the two edge nodes of each flap strip, shape (n_f, 2).
+
+    The masks of the on-line pairs of the gradient kernels need one id per
+    line that holds its points for every input. A node that never turns
+    (zero base angle and zero coefficients: the outer end of a join) keeps
+    its aft legs on the edge line: the id of that edge line. A node that two
+    flap strips with the same hinge fraction turn about the same line gets
+    one id for both strips (also across two joined surfaces). Any other node
+    gets an id of its own strip side.
+    """
+    edges = np.asarray(strip_edges, dtype=np.int64)
+    n_nodes = int(edges.max()) + 1
+    hinge = np.asarray(field["hinge"], dtype=float)
+    angle = np.asarray(field["angle"], dtype=float)
+    coef = list(field["coef"].values())
+    out = np.empty((strips.size, 2), dtype=np.int64)
+    partner = np.asarray(field["partner"], dtype=np.int64)
+    for row, s in enumerate(strips):
+        for side in (0, 1):
+            node = int(edges[s, side])
+            q, jq = int(partner[s, side, 0]), int(partner[s, side, 1])
+            if angle[s, side] == 0.0 and all(c[s, side] == 0.0 for c in coef):
+                out[row, side] = node
+            elif q < 0:
+                out[row, side] = n_nodes + node
+            elif hinge[q] == hinge[s]:
+                out[row, side] = n_nodes + min(node, int(edges[q, jq]))
+            else:
+                out[row, side] = 2 * n_nodes + 2 * int(s) + side
+    return out
 
 
 def _airfoil_tables(lattice: Any, unknown_panels: np.ndarray, device: str,
@@ -620,7 +699,7 @@ def build_reference(
     build["rates"] = any(v != 0.0 for v in rates.values())
     names = control_names(aircraft)
     build["control_names"] = names
-    sec_map, chord_map = _control_maps(aircraft, lattice, xi, names, device, dtype)
+    sec_map, chord_map = _control_maps(aircraft, lattice, xi, names, device, dtype, strip_edges)
     build["ctrl_section"] = sec_map
     build["ctrl_chord"] = chord_map
     tables, lin_mask = _airfoil_tables(lattice, unknown_panels, device, dtype)
@@ -1427,7 +1506,8 @@ def _case_notes(prep: dict, ins: tuple[str, ...]) -> list[str]:
         if model.b.get("ctrl_chord") is not None:
             notes.append(
                 "Controls (chordwise mode): the derivative per unit deflection [1/rad] turns the "
-                "normals of the panels aft of the hinge about the hinge line. All controls with one "
+                "points and normals of the panels aft of the hinge about the hinge line, including "
+                "the trailing edges and the node chain. All controls with one "
                 "name move together; the left half of an antisymmetric control moves the opposite way.")
         else:
             notes.append(

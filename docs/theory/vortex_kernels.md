@@ -15,6 +15,7 @@ infinity --(along d)--> TE_a --(along chord)--> A --(bound)--> B --(along chord)
 - The bound vortex $A \to B$ lies on the quarter-chord line of the panel. Positive $\Gamma$ runs from $A$ to $B$.
 - The two chordwise legs $A \to \text{TE}_a$ and $B \to \text{TE}_b$ follow the strip edges to the trailing edge, in the plane of the surface.
 - From the trailing edge, two semi-infinite legs go to infinity along the unit wake direction $\hat{\mathbf d}$.
+- On a strip of a chordwise control, the legs of a panel ahead of the hinge have a node at the hinge point of the strip edge: $A \to H_a \to \text{TE}_a$ and $B \to H_b \to \text{TE}_b$, one extra straight segment per leg, so the legs follow the deflected mean surface (see [Control surfaces](control_surfaces.md)). All kernel backends (numpy reference, Numba, Cython, PyTorch, NVIDIA Warp) evaluate the extra segment only for the sources that have a node; the other sources are computed as before.
 
 The chordwise legs stay on the surface. Thus a control point never sits just above or below a trailing leg at angle of attack, and the matrix does not become nearly singular for narrow panels (see [V6](../verification_report.md)).
 
