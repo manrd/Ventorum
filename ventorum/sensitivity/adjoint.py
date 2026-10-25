@@ -167,6 +167,11 @@ def _refuse_configuration(ac: Any, condition: Any, settings: Any, canonical: str
     The compressibility correction (mach > 0) is supported only for the
     vortex lattice in free air; ground effect and the lifting lines keep
     refusing it. The ``"mach"`` input needs a Mach number in the condition.
+    The planform input is refused when a chordwise control of the vortex
+    lattice is deflected: the width of the control joins (see
+    :class:`ventorum.geometry.controls.ControlJoinField`) follows the
+    planform, and the gradient chain keeps it fixed. At zero deflection the
+    join does not move a point, so the planform input stays available.
     """
     from ventorum.core.datatypes import TabulatedAirfoil
 
@@ -220,6 +225,17 @@ def _refuse_configuration(ac: Any, condition: Any, settings: Any, canonical: str
             "of geometric-camber surfaces are not available, including the node and planform chains. "
             "No partial gradient is returned. Use differences of the production solve."
         )
+    if "planform" in wrt and lattice_mean_line:
+        deflected = [(surf.name, c.name) for surf in ac.surfaces for c in getattr(surf, "controls", [])
+                     if c.deflection != 0.0]
+        if deflected:
+            raise GradientScopeError(
+                f"Input 'planform' is not available with the deflected chordwise controls {deflected}. "
+                "The join at each side edge of a chordwise control (0.2 local chords) has a width that "
+                "changes with the planform, and the gradient chain keeps that width fixed, so the "
+                "planform derivative would miss a term. No partial gradient is returned. Use "
+                "differences of the production solve, or the planform gradient at zero deflection. "
+                "The other inputs (nodes, sections, controls) stay available.")
     if "planform" in wrt:
         for surf in ac.surfaces:
             for sec in surf.sections:

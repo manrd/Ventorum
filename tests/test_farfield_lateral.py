@@ -248,14 +248,15 @@ def test_aileron_far_field():
 
     The aileron reaches the tip. The full velocity on the legs of the free tip
     edges gives a side-edge force: CY_delta is positive (side force to the
-    right for the right trailing edge down). The tangential rule on all legs
-    gave CY = 0 here. The geometric flap moves the trailing edge, and the
-    join at the inboard end of the aileron makes the step of the trailing
-    edge continuous, so the Trefftz trace also gives a positive side force.
+    right for the right trailing edge down), and CY stays below the CY floor.
+    The tangential rule on all legs gave CY = 0 here. The geometric flap moves
+    the trailing edge, and the join at the inboard end of the aileron makes
+    the step of the trailing edge continuous, so the Trefftz trace also gives
+    a positive side force.
     """
     res = _aileron_result()
     t = res.totals
-    assert t.CY > 1e-6
+    assert 1e-6 < t.CY < NEAR_FAR_FLOOR_CY
     assert t.CY_farfield > 1e-6
     assert t.CY_farfield is not None and math.isfinite(t.CY_farfield)
     assert t.Cn_trefftz is not None and math.isfinite(t.Cn_trefftz)

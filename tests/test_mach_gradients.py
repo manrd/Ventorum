@@ -178,8 +178,14 @@ def test_check_mach_free_air(mach: float) -> None:
 @pytest.mark.slow
 @pytest.mark.parametrize("mach", [0.3, 0.6])
 def test_check_mach_planform(mach: float) -> None:
-    """check_gradients passes at mach 0.3 and 0.6 for the planform input."""
+    """check_gradients passes at mach 0.3 and 0.6 for the planform input.
+
+    The planform input is refused with a deflected chordwise control (the
+    width of the control joins is not in the gradient chain), so this check
+    sets the flap to zero deflection.
+    """
     ac = _make_wing_tail()
+    ac.set_deflection("flap", 0.0)
     st = _settings()
     cond = _condition(mach)
     with _float64():
