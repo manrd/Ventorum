@@ -1735,6 +1735,7 @@ def mesh_lifting_surface(
     tip: str = "flat",
     half: bool = False,
     n_span=None,
+    spacing: str | None = None,
     scale_root_thickness: bool = True,
     trailing_edge: str = "close",
     control_edge: str = "transition",
@@ -1762,6 +1763,9 @@ def mesh_lifting_surface(
     n_span : int or None
         Spanwise panels per semi-span. None uses the surface value when set,
         else 20. The stations match the lattice builder for that count.
+    spacing : str or None, optional
+        Spanwise spacing scheme ("cosine", "half-cosine", "uniform", etc.).
+        None uses the surface spacing when set, else the solver default.
     scale_root_thickness : bool
         True (default) multiplies the offsets of the root section of a
         symmetric surface from its camber line (in the plane y = 0) by
@@ -1873,7 +1877,8 @@ def mesh_lifting_surface(
         twists_c = np.array([float(s.twist) for s in secs_sorted_c])
         xt_base_c = _target_x(n_chord, chord_spacing)
         xt_new_c = _union_xt(xt_base_c, active)
-        spacing_c = resolve_spacing(surf.spacing, surf, "vlm")
+        spacing_rule = surf.spacing if surf.spacing is not None else spacing
+        spacing_c = resolve_spacing(spacing_rule, surf, "vlm")
         eta_base_c, _ = _surface_eta(surf, n_span_eff, spacing_c)
         return _mesh_with_controls(
             surf, coord_sorted_c, fr_c, chords_c, twists_c, xt_new_c, eta_base_c, active, tip, half,
@@ -1905,8 +1910,9 @@ def mesh_lifting_surface(
     yu_mat = np.vstack(yu_rows)
     yl_mat = np.vstack(yl_rows)
 
-    spacing = resolve_spacing(surf.spacing, surf, "vlm")
-    eta_e, _ = _surface_eta(surf, n_span_eff, spacing)
+    spacing_rule = surf.spacing if surf.spacing is not None else spacing
+    spacing_resolved = resolve_spacing(spacing_rule, surf, "vlm")
+    eta_e, _ = _surface_eta(surf, n_span_eff, spacing_resolved)
     eta_e = np.asarray(eta_e, dtype=float)
     ns = len(eta_e)
     chord_e = np.interp(eta_e, fr, chords)
@@ -2062,7 +2068,7 @@ def mesh_aircraft(
         every surface (default True).
     **kw
         Extra arguments of :func:`mesh_lifting_surface` (n_chord, n_span,
-        chord_spacing, tip, half, trailing_edge, control_edge,
+        spacing, chord_spacing, tip, half, trailing_edge, control_edge,
         control_transition, fold_guard).
 
     Returns

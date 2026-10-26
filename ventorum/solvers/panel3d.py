@@ -768,6 +768,7 @@ def _build_geometry(
             tip="flat",
             half=use_half,
             n_span=n_span,
+            spacing=settings.spacing,
             scale_root_thickness=scale_root_thickness,
         )
 
