@@ -91,6 +91,7 @@ from typing import Any
 
 import numpy as np
 
+from ventorum.aero.system import GroundPlane
 from ventorum.core.datatypes import Aircraft, FlightCondition, LiftingSurface, SolverResult, SolverSettings
 from ventorum.core.error_bars import ORDER_LOWER, ORDER_UPPER, coefficient_error_bar
 from ventorum.geometry.mesh_convergence import _level_aircraft
@@ -620,21 +621,27 @@ def directional_estimate(
     )
 
 
-def _symmetry_groups(aircraft: Aircraft, conditions: Sequence[FlightCondition]) -> list[list[int]]:
+def _symmetry_groups(
+    aircraft: Aircraft,
+    conditions: Sequence[FlightCondition],
+    ground: GroundPlane | None = None,
+    ref_point: np.ndarray | None = None,
+) -> list[list[int]]:
     """Return the condition indices grouped by flow symmetry about y = 0.
 
     The first group holds the symmetric conditions, the second the
     asymmetric ones (sideslip, roll or yaw rate, a tilted ground); empty
     groups are left out. The rule is the condition rule of the panel
     factory (:class:`ventorum.solvers.panel3d.PanelMethodSolver`), with the
-    ground plane of ``condition.h``.
+    explicit ground plane or the plane from ``condition.h``. The moment
+    reference point [m] sets the height reference when no plane is given.
     """
     from ventorum.solvers.panel3d import _ground_of, is_symmetric_condition
 
     ref = aircraft.clone() if hasattr(aircraft, "clone") else aircraft
     ref.compute_reference_values()
-    rp = ref.moment_reference()
-    sym = [is_symmetric_condition(c, _ground_of(c, None, rp)) for c in conditions]
+    rp = ref.moment_reference() if ref_point is None else np.asarray(ref_point, dtype=float)
+    sym = [is_symmetric_condition(c, _ground_of(c, ground, rp)) for c in conditions]
     groups = [[i for i, s in enumerate(sym) if s], [i for i, s in enumerate(sym) if not s]]
     return [g for g in groups if g]
 
@@ -648,6 +655,8 @@ def panel_mesh_convergence(
     quantities: Sequence[str] = ("CL", "CDi", "Cm"),
     *,
     base_results: Sequence[SolverResult] | None = None,
+    ground: GroundPlane | None = None,
+    ref_point: np.ndarray | None = None,
 ) -> ConvergenceReport | list[ConvergenceReport]:
     """Run a mesh convergence study of the 3D panel method with separate directions.
 
@@ -689,6 +698,13 @@ def panel_mesh_convergence(
         The cost factor still includes the base solve. They are not
         reused when the conditions mix symmetric and asymmetric flow:
         then the base mesh is solved again per symmetry group.
+    ground : GroundPlane or None, optional
+        Explicit ground plane for every level (unit normal [-], offset
+        [m]). None uses the ground from each condition.h.
+    ref_point : numpy.ndarray or None, optional
+        Moment reference point [m] for every level. None uses the aircraft
+        reference. It also sets the height reference for condition.h,
+        as in the main solve.
 
     Returns
     -------
@@ -747,7 +763,7 @@ def panel_mesh_convergence(
     # The factory solves a half mesh only when every condition of the call is
     # symmetric. Solve the symmetric and the asymmetric conditions in separate
     # calls, so that each condition gets the same mesh as a study of its own.
-    groups = _symmetry_groups(ac, conditions)
+    groups = _symmetry_groups(ac, conditions, ground, ref_point)
     # Reuse the base results only when they come from one mesh for all
     # conditions (one group); otherwise their mesh can differ from the mesh
     # of a study of one condition.
@@ -761,14 +777,15 @@ def panel_mesh_convergence(
         level_settings.n_panels = n_span
         level_settings.n_chord = n_chord
         level_aircraft = _level_aircraft(ac, n_span, n_base)
-        if is_single:
+        if is_single and ground is None and ref_point is None:
             solved = [analyze(level_aircraft, condition=conditions[0], settings=level_settings)]
         else:
             validate_solver_settings(level_settings)
             solved: list[SolverResult | None] = [None] * len(conditions)
             for idx in groups:
                 group_res = make_solver("panel3d").solve(
-                    level_aircraft, [conditions[i] for i in idx], level_settings
+                    level_aircraft, [conditions[i] for i in idx], level_settings,
+                    ground=ground, ref_point=ref_point,
                 )
                 for i, res in zip(idx, group_res):
                     solved[i] = res

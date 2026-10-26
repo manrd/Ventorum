@@ -190,16 +190,16 @@ def test_mixed_symmetry_reports_equal_single_studies(aircraft):
     assert reused[0].results[0] is not mixed_base[0]
 
 
-def test_factory_override_keeps_the_study_of_the_aircraft_reference(aircraft, conditions):
-    """With an explicit moment reference point the study does not reuse the base solve.
+def test_factory_override_gives_the_study_of_the_same_reference(aircraft, conditions):
+    """With an explicit moment reference point the study uses the same point.
 
-    The study solves its levels with the aircraft moment reference (as
-    before), so its base level must come from the same reference.
+    Every level of the study solves with the moment reference point of the
+    call (owner decision 2026-10-26: the estimate belongs to the case that
+    the user solves), so it equals a study that is given the same point.
     """
+    rp = np.array([0.25, 0.0, 0.0])
     settings = _settings()
-    expected = [panel_mesh_convergence(aircraft, c, settings).to_dict() for c in conditions]
+    expected = [panel_mesh_convergence(aircraft, c, settings, ref_point=rp).to_dict() for c in conditions]
     settings.panel_estimate_mesh_error = True
-    results = factory.PanelMethodSolver().solve(
-        aircraft, conditions, settings, ref_point=np.array([0.25, 0.0, 0.0])
-    )
+    results = factory.PanelMethodSolver().solve(aircraft, conditions, settings, ref_point=rp)
     assert [r.details["mesh_convergence"] for r in results] == expected
