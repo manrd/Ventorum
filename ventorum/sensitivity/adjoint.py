@@ -198,12 +198,12 @@ def _refuse_configuration(ac: Any, condition: Any, settings: Any, canonical: str
     shapes_given = lattice_mean_line and any(
         surf.sections and all(sec.shape is not None for sec in surf.sections) for surf in ac.surfaces
     )
-    mean_line_model = lattice_mean_line and any(_has_camber_offset(surf) for surf in ac.surfaces)
     if "sections" in wrt:
         if shapes_given:
             raise GradientScopeError(
                 "Input 'sections' includes alpha_L0. A given mean line sets the VLM boundary condition, "
-                "so its alpha_L0 is not an independent section input. Remove 'sections' from wrt.")
+                "so its alpha_L0 is not an independent section input. "
+                "Remove 'sections' from wrt.")
         tab = [surf.name for surf in ac.surfaces
                if any(isinstance(sec.airfoil, TabulatedAirfoil) for sec in surf.sections)]
         if tab:
@@ -219,12 +219,6 @@ def _refuse_configuration(ac: Any, condition: Any, settings: Any, canonical: str
                 f"{tab}: {why}. Their derivatives would be zeros without a meaning. Remove "
                 "'sections' from wrt, use linear airfoils for section gradients, or change the "
                 "table data and use differences of the production solve.")
-    if mean_line_model:
-        raise GradientScopeError(
-            "The differentiable reference does not carry the mean-line offset. Adjoint gradients "
-            "of geometric-camber surfaces are not available, including the node and planform chains. "
-            "No partial gradient is returned. Use differences of the production solve."
-        )
     if "planform" in wrt and lattice_mean_line:
         deflected = [(surf.name, c.name) for surf in ac.surfaces for c in getattr(surf, "controls", [])
                      if c.deflection != 0.0]
@@ -248,14 +242,12 @@ def _refuse_configuration(ac: Any, condition: Any, settings: Any, canonical: str
 
 
 def _has_camber_offset(surf) -> bool:
-    """Return True if the differentiable reference cannot rebuild the lattice of *surf*.
+    """Return True if a fully shaped surface needs the mean-line offset model.
 
     As in the lattice: when every section gives a shape, the mean line sets
     the boundary condition and the polar alpha_L0 and Cm0 do not enter. The
-    reference (chord-line points, normals turned by the polar alpha_L0) then
-    equals the production lattice only if every mean line is flat and every
-    polar has alpha_L0 = 0 and Cm0 = 0. Symmetric shapes with such polars
-    keep their gradients; all other shaped surfaces are refused.
+    chord-line model equals this model only if every mean line is flat and
+    every polar has alpha_L0 = 0 rad and Cm0 = 0 [-].
     """
     from ventorum.core.datatypes import LinearAirfoil
 
@@ -546,6 +538,191 @@ def _airfoil_tables(lattice: Any, unknown_panels: np.ndarray, device: str,
     return tables, torch.as_tensor(lin, dtype=dtype, device=device)
 
 
+def _camber_matrices(
+    lattice: Any,
+    xi: np.ndarray,
+    chord_map: dict | None,
+    device: str,
+    dtype: Any,
+    planform: tuple | None = None,
+) -> dict | None:
+    """Build mean-line offsets [chord units] and slopes [-] for the reference.
+
+    Section mean-line values at each chord fraction are constants. With
+    *planform*, the spanwise weights follow the section and mesh stations
+    of ``(PlanformGeometry, PlanformTensors)`` through the torch chain.
+    """
+    camber_frames = getattr(lattice, "camber_frames", None)
+    if camber_frames is None:
+        camber_frames = lattice.geom_cache.get("camber_frames")
+    if camber_frames is None:
+        return None
+    mean_surfaces = lattice.geom_cache.get("mean_surfaces")
+    if not getattr(lattice, "has_camber_offset", False):
+        return None
+    if not any(all(line is not None for line in lines) for _, lines, _ in mean_surfaces):
+        return None
+
+    import torch
+
+    n_s = int(lattice.n_strips)
+    n_p = int(lattice.n_panels)
+    n_chord = int(lattice.n_chord)
+
+    edge_start = [0]
+    for sf in lattice.surfaces:
+        edge_start.append(edge_start[-1] + int(sf.edge_le.shape[0]))
+    E_total = edge_start[-1]
+
+    def _tensor(value: Any) -> Any:
+        return torch.as_tensor(value, dtype=dtype, device=device)
+
+    def _zeros(shape: tuple) -> Any:
+        return torch.zeros(shape, dtype=dtype, device=device)
+
+    section_fr, edge_eta = [], []
+    strip_eta = _tensor(np.abs(np.asarray(lattice.eta, dtype=float)))
+    for si, sf in enumerate(lattice.surfaces):
+        if planform is None:
+            frame = camber_frames[si]
+            section_fr.append(_tensor([sec.y_frac for sec in frame["sections"]]))
+            edge_eta.append(_tensor(np.abs(frame["eta"])))
+        else:
+            geom, pt = planform
+            name = sf.name
+            tr = geom.surfaces[name]
+            section_fr.append(torch.stack([sec["y_frac"] for sec in pt.params[name]["sec"]]))
+            eta = pt.nodes[name]["eta"]
+            if tr.is_symmetric:
+                eta = torch.cat((eta.flip(0), eta[1:]))
+            elif tr.mirror_y:
+                eta = eta.flip(0)
+            edge_eta.append(eta)
+            strip_eta[sf.strips] = pt.strips[name]["eta"][tr.full_perm]
+
+    def _mean_at(si: int, eta: Any, xi_val: Any, *, derivative: bool = False) -> Any:
+        xi_arr = np.asarray(xi_val, dtype=float)
+        lines = camber_frames[si]["lines"]
+        values = _tensor(np.array([
+            np.zeros_like(xi_arr) if line is None else line.at(xi_arr, derivative=derivative)
+            for line in lines
+        ]))
+        fr = section_fr[si]
+        eta = torch.broadcast_to(eta, values.shape[1:]).contiguous()
+        j = torch.clamp(torch.searchsorted(fr.detach(), eta.detach(), right=True) - 1,
+                        0, len(lines) - 2)
+        w = torch.clamp((eta - fr[j]) / (fr[j + 1] - fr[j]), 0.0, 1.0)
+        lo = torch.gather(values, 0, j[None])[0]
+        hi = torch.gather(values, 0, (j + 1)[None])[0]
+        return (1.0 - w) * lo + w * hi
+
+    def _joined_offset_weights(si: int, e: int, xi_val: np.ndarray | float) -> Any:
+        xi_arr = np.asarray(xi_val, dtype=float)
+        single = xi_arr.ndim == 0
+        if single:
+            xi_arr = xi_arr[None]
+        K = xi_arr.shape[0]
+        w = _zeros((K, E_total))
+        members = camber_frames[si]["joined"].get(e, [(si, e)])
+        scale = 1.0 / len(members)
+        for s_m, e_m in members:
+            z_m = _mean_at(s_m, edge_eta[s_m][e_m], xi_arr)
+            w[:, edge_start[s_m] + e_m] += scale * z_m
+        return w[0] if single else w
+
+    W_a = _zeros((n_p, E_total))
+    W_b = _zeros((n_p, E_total))
+    W_le_l = _zeros((n_s, E_total))
+    W_le_r = _zeros((n_s, E_total))
+    W_te_l = _zeros((n_s, E_total))
+    W_te_r = _zeros((n_s, E_total))
+    z_c = _zeros((n_s, n_chord))
+    slope = _zeros((n_s, n_chord))
+    strip_camber = np.zeros(n_s, dtype=bool)
+
+    claf = np.clip(np.asarray(lattice.a0, dtype=float) / (2.0 * np.pi), 0.2, 2.0)
+    for si, (sf, (_secs, lines, _eta_e)) in enumerate(zip(lattice.surfaces, mean_surfaces)):
+        active = all(line is not None for line in lines)
+        frame = camber_frames[si]
+        if not active and not frame["joined"]:
+            continue
+        idx = np.arange(sf.strips.start, sf.strips.stop)
+        known = np.full(len(idx), active)
+        strip_camber[idx] = known
+
+        x0 = xi[idx, :-1]
+        dx = np.diff(xi[idx], axis=1)
+        xb = x0 + 0.25 * dx
+        xc = xb + 0.5 * dx * claf[idx, None]
+
+        z_c[idx] = _mean_at(si, strip_eta[idx, None], xc)
+        slope[idx] = _mean_at(si, strip_eta[idx, None], xc, derivative=True)
+
+        for k_idx, s in enumerate(idx):
+            e = k_idx
+            for j in range(n_chord):
+                p = s * n_chord + j
+                W_a[p] = _joined_offset_weights(si, e, xb[k_idx, j])
+                W_b[p] = _joined_offset_weights(si, e + 1, xb[k_idx, j])
+            W_le_l[s] = _joined_offset_weights(si, e, 0.0)
+            W_le_r[s] = _joined_offset_weights(si, e + 1, 0.0)
+            W_te_l[s] = _joined_offset_weights(si, e, 1.0)
+            W_te_r[s] = _joined_offset_weights(si, e + 1, 1.0)
+
+    W_hl, W_hr, W_hfar0, W_hfar1 = None, None, None, None
+    if chord_map is not None:
+        strips = chord_map["strip"].cpu().numpy()
+        hinge = chord_map["hinge"].cpu().numpy()
+        far = chord_map["far"].cpu().numpy()
+        strip_surf = np.asarray(lattice.strip_surface, dtype=np.int64)
+        n_f = len(strips)
+        W_hl_arr = _zeros((n_f, E_total))
+        W_hr_arr = _zeros((n_f, E_total))
+        W_hfar0_arr = _zeros((n_f, E_total))
+        W_hfar1_arr = _zeros((n_f, E_total))
+        for row, s in enumerate(strips):
+            h_val = float(hinge[row])
+            si_s = int(strip_surf[s])
+            e_l = s - lattice.surfaces[si_s].strips.start
+            e_r = e_l + 1
+            W_hl_arr[row] = _joined_offset_weights(si_s, e_l, h_val)
+            W_hr_arr[row] = _joined_offset_weights(si_s, e_r, h_val)
+
+            s_f0, side_f0 = int(far[row, 0, 0]), int(far[row, 0, 1])
+            si_f0 = int(strip_surf[s_f0])
+            e_f0 = s_f0 - lattice.surfaces[si_f0].strips.start + side_f0
+            W_hfar0_arr[row] = _joined_offset_weights(si_f0, e_f0, h_val)
+
+            s_f1, side_f1 = int(far[row, 1, 0]), int(far[row, 1, 1])
+            si_f1 = int(strip_surf[s_f1])
+            e_f1 = s_f1 - lattice.surfaces[si_f1].strips.start + side_f1
+            W_hfar1_arr[row] = _joined_offset_weights(si_f1, e_f1, h_val)
+
+        W_hl = torch.as_tensor(W_hl_arr, dtype=dtype, device=device)
+        W_hr = torch.as_tensor(W_hr_arr, dtype=dtype, device=device)
+        W_hfar0 = torch.as_tensor(W_hfar0_arr, dtype=dtype, device=device)
+        W_hfar1 = torch.as_tensor(W_hfar1_arr, dtype=dtype, device=device)
+
+    camber_panel_mask = np.repeat(strip_camber, n_chord)
+
+    return {
+        "W_a": torch.as_tensor(W_a, dtype=dtype, device=device),
+        "W_b": torch.as_tensor(W_b, dtype=dtype, device=device),
+        "W_le_l": torch.as_tensor(W_le_l, dtype=dtype, device=device),
+        "W_le_r": torch.as_tensor(W_le_r, dtype=dtype, device=device),
+        "W_te_l": torch.as_tensor(W_te_l, dtype=dtype, device=device),
+        "W_te_r": torch.as_tensor(W_te_r, dtype=dtype, device=device),
+        "W_hl": W_hl,
+        "W_hr": W_hr,
+        "W_hfar0": W_hfar0,
+        "W_hfar1": W_hfar1,
+        "z_c": torch.as_tensor(z_c, dtype=dtype, device=device),
+        "slope": torch.as_tensor(slope, dtype=dtype, device=device),
+        "strip_camber": torch.as_tensor(strip_camber, dtype=torch.bool, device=device),
+        "camber_panel_mask": torch.as_tensor(camber_panel_mask, dtype=torch.bool, device=device),
+    }
+
+
 def build_reference(
     aircraft: Any,
     condition: Any,
@@ -613,8 +790,8 @@ def build_reference(
     strip_edges = np.zeros((n_s, 2), dtype=np.int64)
     offset = 0
     for sl in lattice.surfaces:
-        full_le = np.asarray(sl.edge_le, dtype=float)
-        full_te = np.asarray(sl.edge_te, dtype=float)
+        full_le = np.asarray(sl.edge_le_chord if sl.edge_le_chord is not None else sl.edge_le, dtype=float)
+        full_te = np.asarray(sl.edge_te_chord if sl.edge_te_chord is not None else sl.edge_te, dtype=float)
         name = sl.name
         # Find the aircraft surface for the mirror flag.
         ac_s = next((s for s in aircraft.surfaces if s.name == name), None)
@@ -702,6 +879,10 @@ def build_reference(
     sec_map, chord_map = _control_maps(aircraft, lattice, xi, names, device, dtype, strip_edges)
     build["ctrl_section"] = sec_map
     build["ctrl_chord"] = chord_map
+    camber_data = _camber_matrices(lattice, xi, chord_map, device, dtype)
+    build["camber_data"] = camber_data
+    if camber_data is not None:
+        build["strip_camber"] = camber_data["strip_camber"]
     tables, lin_mask = _airfoil_tables(lattice, unknown_panels, device, dtype)
     build["tables"] = tables
     build["lin_strip_mask"] = lin_mask
@@ -893,6 +1074,11 @@ def _attach_planform(model: TorchReference, t: dict, prep: dict, wrt: tuple[str,
         raise RuntimeError("The planform port gives a fraction array of a wrong shape.")
     model.b["frac"] = frac_full
     model.b["cp_frac_panel"] = frac_full[model.b["panel_strip"]]
+    if model.b.get("camber_data") is not None:
+        t["camber_data"] = _camber_matrices(
+            prep["lattice"], model.b["xi"].detach().cpu().numpy(), model.b.get("ctrl_chord"),
+            device, dtype, planform=(geom, pt),
+        )
     extra = []
     if "sections" in wrt:
         extra += [t[prop] for prop in ("a0", "alpha_L0", "Cd0", "Cm0")]

@@ -34,7 +34,7 @@ The wake starts at the deflected trailing edge and follows the selected wake dir
 
 The leg-force rules of a lattice with a chordwise control come from the lattice before the flap turn, which has the same topology, and are kept for every deflection (see [Forces and moments](forces_and_moments.md)). The legs of two strips that turn about slightly different lines separate a little with the deflection; a rule from the deflected points would change when the gap passes the join tolerance, and the loads would jump (`test_leg_rules_from_undeflected_lattice`).
 
-The adjoint control derivative includes the motion of these points, the hinge nodes, the wake origins and the hinge axes through the node chain; the coefficient of a node angle per unit deflection holds the join factor. The kernels of the gradients carry the extra leg segment. The existing refusal of gradients for cambered mean lines still applies. All controls with the same name move together. The width of a join comes from the defined geometry (section chords and reference line); the gradients keep it fixed.
+The adjoint control derivative includes the motion of these points, the hinge nodes, the wake origins and the hinge axes through the node chain; the coefficient of a node angle per unit deflection holds the join factor. The kernels of the gradients carry the extra leg segment. Mean-line camber offsets carry through the adjoint control derivatives. All controls with the same name move together. The width of a join comes from the defined geometry (section chords and reference line); the gradients keep it fixed.
 
 ## Lifting line: thin-airfoil flap theory
 

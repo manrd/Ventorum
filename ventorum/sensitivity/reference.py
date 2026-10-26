@@ -504,7 +504,10 @@ class TorchReference:
                 return V * d + _w_rot(pts)
 
         # --- lattice from the edge nodes ------------------------------------
-        le_l, le_r, te_l, te_r = self._strips(t)
+        le_l, le_r, te_l, te_r, V_all = self._strips(t)
+        cd = t.get("camber_data", b.get("camber_data"))
+        chord_le_l, chord_le_r = le_l, le_r
+        chord_te_l, chord_te_r = te_l, te_r
         chord_l = torch.linalg.norm(te_l - le_l, dim=1)
         chord_r = torch.linalg.norm(te_r - le_r, dim=1)
         chord = 0.5 * (chord_l + chord_r)
@@ -547,6 +550,8 @@ class TorchReference:
             shift_strip = zero.index_add(0, cs["strips"], cs["tau_sign"] * inc_s)
             cm_shift_strip = zero.index_add(0, cs["strips"], cs["dcm_sign"] * inc_s)
         normal_bc_strip = rod_rot(normal, span_yz, -aL0)
+        if cd is not None:
+            normal_bc_strip = torch.where(cd["strip_camber"][:, None], normal, normal_bc_strip)
 
         a0 = t["a0"]
         claf = _clamp_closed(a0 / (2.0 * math.pi), 0.2, 2.0)
@@ -578,13 +583,32 @@ class TorchReference:
         bv = pb_s.reshape(-1, 3)
         cp = pcp_s.reshape(-1, 3)
         panel_strip = b["panel_strip"]
+        if cd is not None:
+            a = a + cd["W_a"] @ V_all
+            bv = bv + cd["W_b"] @ V_all
+            edge_vec_l = chord_te_l - chord_le_l
+            edge_vec_r = chord_te_r - chord_le_r
+            cp_chord = torch.linalg.norm(
+                (1.0 - frac[:, None]) * edge_vec_l + frac[:, None] * edge_vec_r, dim=1
+            )
+            off_cp = (cp_chord[:, None] * cd["z_c"]).reshape(-1, 1) * normal[panel_strip]
+            cp = cp + off_cp
+            te_l = te_l + cd["W_te_l"] @ V_all
+            te_r = te_r + cd["W_te_r"] @ V_all
         a_te = te_l[panel_strip]
         b_te = te_r[panel_strip]
         d_xi = xi[:, 1:] - xi[:, :-1]
         panel_length = (d_xi * chord[:, None]).reshape(-1)
         rc_panel = 0.01 * torch.minimum(width[panel_strip], panel_length)
 
-        n_bc = normal_bc_strip[panel_strip]
+        n_bc = normal_bc_strip[panel_strip].clone()
+        if cd is not None:
+            tangent = cdir[:, None, :] + cd["slope"][..., None] * normal[:, None, :]
+            nb = torch.linalg.cross(
+                tangent.reshape(-1, 3), torch.repeat_interleave(s_hat, n_chord, dim=0)
+            )
+            nb = _norm_rows(nb)
+            n_bc = torch.where(cd["camber_panel_mask"][:, None], nb, n_bc)
         cc = b.get("ctrl_chord")
         kink_geom = None
         leg_turn = None
@@ -606,12 +630,19 @@ class TorchReference:
             def _hp_node(node):
                 # Hinge point at the node (strip, side) with the hinge of each flap strip.
                 idx, side = node[:, 0], (node[:, 1] == 1)[:, None]
-                return torch.where(side, _hp(le_r, te_r, idx), _hp(le_l, te_l, idx))
+                return torch.where(side, _hp(chord_le_r, chord_te_r, idx), _hp(chord_le_l, chord_te_l, idx))
 
-            h_l = _hp(le_l, te_l, s_c)
-            h_r = _hp(le_r, te_r, s_c)
-            ax_l = _norm_rows(h_r - _hp_node(cc["far"][:, 0]))
-            ax_r = _norm_rows(_hp_node(cc["far"][:, 1]) - h_l)
+            h_l = _hp(chord_le_l, chord_te_l, s_c)
+            h_r = _hp(chord_le_r, chord_te_r, s_c)
+            hp_far0 = _hp_node(cc["far"][:, 0])
+            hp_far1 = _hp_node(cc["far"][:, 1])
+            if cd is not None and cd["W_hl"] is not None:
+                h_l = h_l + cd["W_hl"] @ V_all
+                h_r = h_r + cd["W_hr"] @ V_all
+                hp_far0 = hp_far0 + cd["W_hfar0"] @ V_all
+                hp_far1 = hp_far1 + cd["W_hfar1"] @ V_all
+            ax_l = _norm_rows(h_r - hp_far0)
+            ax_r = _norm_rows(hp_far1 - h_l)
             ang = cc["angle0"]
             if inc is not None:
                 ang = ang + torch.einsum("fsc,c->fs", cc["coef"], inc)
@@ -778,6 +809,16 @@ class TorchReference:
             row_k = torch.where(kink_panel, row_k, torch.zeros_like(row_k))
             eka = torch.where(kink_panel, cc["aft_edge"][row_k, 0], none)
             ekb = torch.where(kink_panel, cc["aft_edge"][row_k, 1], none)
+        if cd is not None:
+            # On a strip with mean-line camber offsets, the chordwise horseshoe
+            # legs curve along chord with the non-linear mean line. The legs of
+            # different panels on that edge do not share a common line, and only
+            # each panel's own leg contains its leg mid-point. Assign unique
+            # negative line ids to cambered panels so only each panel's own leg
+            # is masked on itself, matching the production near-field velocity.
+            c_mask = cd["camber_panel_mask"]
+            ea = torch.where(c_mask, -10 - 2 * pid, ea)
+            eb = torch.where(c_mask, -11 - 2 * pid, eb)
         edge_l_panel, edge_r_panel = ea, eb
         src_kink = None
         if kink_geom is not None:
@@ -1002,6 +1043,8 @@ class TorchReference:
         else:
             alpha_eff = aL0 + cl_strip / torch.clamp_min(a0, 1e-9)
         cd_p, cm_s = self._section_drag_moment(t["Cd0"], cm0, alpha_eff, shift_strip, cm_shift_strip)
+        if b.get("strip_camber") is not None:
+            cm_s = torch.where(b["strip_camber"], torch.zeros_like(cm_s), cm_s)
         q_inf = 0.5 * rho * V * V
         S_ref = t["S_ref"]
         b_ref = t["b_ref"]
@@ -1055,8 +1098,8 @@ class TorchReference:
         _ = alpha_geom, alpha_eff, w_n
         return outputs, A, rhs
 
-    def _strips(self, t: dict) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Return (le_l, le_r, te_l, te_r) of all strips from the node inputs."""
+    def _strips(self, t: dict) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor | None]:
+        """Return (le_l, le_r, te_l, te_r, V_all) of all strips from the node inputs."""
         b = self.b
         le_parts, te_parts = [], []
         for s in b["surfaces"]:
@@ -1085,7 +1128,30 @@ class TorchReference:
             edge_le = edge_le - origin
             edge_te = edge_te - origin
         idx = b["strip_edges"]
-        return edge_le[idx[:, 0]], edge_le[idx[:, 1]], edge_te[idx[:, 0]], edge_te[idx[:, 1]]
+        V_all = None
+        if b.get("camber_data") is not None:
+            V_parts = []
+            for fle, fte in zip(le_parts, te_parts):
+                edge_c = torch.linalg.norm(fte - fle, dim=1)
+                edge_dir = (fte - fle) / torch.clamp_min(edge_c[:, None], 1e-300)
+                q = fle + 0.25 * (fte - fle)
+                n_pts = q.shape[0]
+                if n_pts == 1:
+                    span = torch.zeros_like(q)
+                elif n_pts == 2:
+                    g = q[1:2] - q[0:1]
+                    span = torch.cat((g, g), dim=0)
+                else:
+                    g0 = q[1:2] - q[0:1]
+                    gend = q[-1:] - q[-2:-1]
+                    gmid = 0.5 * (q[2:] - q[:-2])
+                    span = torch.cat((g0, gmid, gend), dim=0)
+                span_yz = torch.cat((torch.zeros_like(span[:, :1]), span[:, 1:]), dim=1)
+                normal = torch.linalg.cross(edge_dir, span_yz)
+                normal = normal / torch.clamp_min(torch.linalg.norm(normal, dim=1, keepdim=True), 1e-300)
+                V_parts.append(edge_c[:, None] * normal)
+            V_all = torch.cat(V_parts, dim=0)
+        return edge_le[idx[:, 0]], edge_le[idx[:, 1]], edge_te[idx[:, 0]], edge_te[idx[:, 1]], V_all
 
     def _control_increments(self, t: dict) -> torch.Tensor | None:
         """Return the deflection changes [rad] per control name, or None without controls."""

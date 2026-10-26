@@ -321,6 +321,10 @@ class SurfaceSlice:
     strip_span_def: np.ndarray | None = None
     # True for each edge that is joined to an edge of another surface: (n_edges,).
     edge_joined: np.ndarray | None = None
+    # Chord-line leading-edge nodes before camber offset [m]: (n_edges, 3).
+    edge_le_chord: np.ndarray | None = None
+    # Chord-line trailing-edge nodes before camber offset [m]: (n_edges, 3).
+    edge_te_chord: np.ndarray | None = None
 
 
 @dataclass
@@ -414,6 +418,7 @@ class VortexLattice:
     normal_bc_clean: np.ndarray | None = None
     camber_fallback: bool = False
     has_camber_offset: bool = False
+    camber_frames: list[dict] | None = None
 
     @property
     def n_panels(self) -> int:
@@ -1485,6 +1490,8 @@ def build_lattice(
             strips=slice(strip_offset, strip_offset + n_s),
             edge_le=edge_le, edge_te=edge_te, edge_chord=edge_chord, edge_twist=edge_twist,
             strip_span_def=span_def,
+            edge_le_chord=edge_le.copy(),
+            edge_te_chord=edge_te.copy(),
         ))
         strip_offset += n_s
 
@@ -1795,7 +1802,11 @@ def build_lattice(
         camber_fallback=camber_fallback,
         has_camber_offset=any(line is not None and np.any(line.z != 0.0)
                               for _, lines, _ in mean_surfaces for line in lines),
+        camber_frames=camber_frames,
     )
+    if camber_frames is not None:
+        lattice.geom_cache["camber_frames"] = camber_frames
+        lattice.geom_cache["mean_surfaces"] = mean_surfaces
     lattice.geom_cache["flap_hinges"] = flap_hinges
     if flap_field is not None:
         lattice.geom_cache["flap_field"] = flap_field
