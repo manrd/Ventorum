@@ -158,6 +158,11 @@ a minor version can change a public interface.
 
 ### Fixed
 
+- Vortex lattice on a cambered section mean line: with narrow strips (the default 80 spanwise
+  panels, or more) the straight horseshoe legs pass close to control points of other strips and the
+  solve can be ill-conditioned (a NACA 6409 wing gave CL 7.74 at 0 deg with the default settings,
+  about 0.50 on wider strips). Until the legs follow the mean surface, the trust score warns when the
+  strip lift oscillates between neighbouring strips of such a surface.
 - Ventorum-3DP: the mesh-error estimate (`panel_estimate_mesh_error`) and `panel_mesh_convergence`
   dropped an explicit ground plane and the `ref_point` of the call, so they estimated free air or the
   moment about the aircraft reference. Both inputs now reach every level of the study.

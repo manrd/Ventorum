@@ -36,7 +36,13 @@ from ventorum.core.datatypes import (
     SolverSettings,
 )
 from ventorum.core.errors import ValidityError
-from ventorum.core.trust import evaluate_aerodynamic_trust, polar_limits, polar_stats, trailing_edge_clearance
+from ventorum.core.trust import (
+    evaluate_aerodynamic_trust,
+    mean_line_strip_jump,
+    polar_limits,
+    polar_stats,
+    trailing_edge_clearance,
+)
 from ventorum.geometry import lattice_cache
 from ventorum.geometry.lattice import VortexLattice, build_lattice
 from ventorum.solvers.base import BaseSolver
@@ -488,6 +494,7 @@ class LatticeSolver(BaseSolver):
             Cn_stability=self._cn_stability(totals, condition, b_ref, c_ref),
             Cn_trefftz=totals.Cn_trefftz,
             te_clearance=trailing_edge_clearance(lattice, ground),
+            mean_line_jump=mean_line_strip_jump(lattice, loads.spanwise),
         )
         res = SolverResult(
             spanwise=loads.spanwise,

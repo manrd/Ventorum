@@ -70,6 +70,10 @@ _GAMMA_R_AIR = 1.4 * 287.05287   # Ratio of specific heats times the gas constan
 #: Threshold for the trailing-edge clearance trust warning on Trefftz CDi [-].
 _CDI_TE_CLEARANCE = 0.15
 
+#: Largest change of the strip lift between neighbouring strips of a mean-line lattice before the
+#: conditioning warning [-]. Converged cambered wings stay below about 0.25 (NACA 2412 to 6409).
+_MEAN_LINE_STRIP_JUMP = 0.3
+
 #: Thresholds of the low-aspect-ratio side-edge vortex rule (vortex lattice).
 LOW_AR_SIDE_EDGE_AR = 2.0
 LOW_AR_SIDE_EDGE_ALPHA_DEG = 10.0
@@ -239,6 +243,59 @@ def trailing_edge_clearance(lattice: VortexLattice | None, ground: GroundPlane |
     h_min = np.minimum(h_l, h_r)
     chord = np.maximum(np.asarray(lattice.chord, dtype=float), 1e-300)
     return float(np.min(h_min / chord))
+
+
+def mean_line_strip_jump(lattice: VortexLattice | None, spanwise_list: Sequence | None) -> float | None:
+    """Return the largest change of the strip lift between neighbouring strips on a mean-line lattice.
+
+    Only surfaces whose lattice lies on a cambered section mean line count,
+    and strips at a deflected control (and their neighbours) are left out,
+    because a deflection changes the strip lift by design. On such a
+    lattice the straight horseshoe legs leave the curved mean surface; with
+    narrow strips they pass close to the control points of other strips,
+    the linear system is near-singular, and the strip lift oscillates from
+    strip to strip.
+
+    Parameters
+    ----------
+    lattice : VortexLattice or None
+        Vortex lattice geometry.
+    spanwise_list : sequence of SpanwiseResult or None
+        Spanwise results, one per surface of the lattice.
+
+    Returns
+    -------
+    float or None
+        Largest absolute difference of the strip lift coefficient between
+        neighbouring strips of one surface [-], or None when no surface lies
+        on a cambered mean line.
+    """
+    camber = getattr(lattice, "geometric_camber", None)
+    if lattice is None or spanwise_list is None or camber is None or not np.any(camber):
+        return None
+    if not getattr(lattice, "has_camber_offset", True):
+        return None
+    control = np.zeros(lattice.n_strips, dtype=bool)
+    eta = np.abs(np.asarray(lattice.eta, dtype=float))
+    names = [s.name for s in lattice.surfaces]
+    for info in getattr(lattice, "control_info", []) or []:
+        if float(info.get("deflection_rad", 0.0)) == 0.0 or info.get("surface") not in names:
+            continue
+        sf = lattice.surfaces[names.index(info["surface"])]
+        idx = np.arange(sf.strips.start, sf.strips.stop)
+        lo = float(info.get("eta_start_eff", 0.0)) - 0.05
+        hi = float(info.get("eta_end_eff", 1.0)) + 0.05
+        control[idx[(eta[idx] >= lo) & (eta[idx] <= hi)]] = True
+    jump = 0.0
+    for sf, sw in zip(lattice.surfaces, spanwise_list):
+        cl = np.asarray(getattr(sw, "Cl", []), dtype=float)
+        idx = np.arange(sf.strips.start, sf.strips.stop)
+        if cl.shape[0] != idx.shape[0] or idx.shape[0] < 2:
+            continue
+        use = camber[idx[:-1]] & camber[idx[1:]] & ~control[idx[:-1]] & ~control[idx[1:]]
+        if np.any(use):
+            jump = max(jump, float(np.max(np.abs(np.diff(cl))[use])))
+    return jump
 
 
 def _robust_value(stats: dict, array_key: str, max_key: str, percentile: float, default: float) -> tuple[float, bool]:
@@ -643,6 +700,7 @@ def evaluate_aerodynamic_trust(
     CD_nearfield: float | None = None,
     post_stall_branch: bool = False,
     te_clearance: float | None = None,
+    mean_line_jump: float | None = None,
 ) -> TrustScore:
     """Evaluate the validity of a solution.
 
@@ -712,6 +770,10 @@ def evaluate_aerodynamic_trust(
     te_clearance : float or None, optional
         Smallest trailing-edge height above the ground divided by the local
         chord [-]. None in free air or when not evaluated.
+    mean_line_jump : float or None, optional
+        Largest change of the strip lift coefficient between neighbouring
+        strips of a mean-line lattice [-] (see :func:`mean_line_strip_jump`).
+        None when no surface lies on a cambered mean line.
 
     A result with a non-finite coefficient never keeps a trust level above
     LOW: it gets the penalty ``non_finite_result`` and the warning
@@ -949,6 +1011,15 @@ def evaluate_aerodynamic_trust(
         warnings.append(
             f"Small trailing-edge clearance (h_te/c={float(te_clearance):.3f} < {_CDI_TE_CLEARANCE:g}): "
             "Trefftz CDi (and drag-derived outputs) depends on the height of the far wake."
+        )
+
+    # 5c. Mean-line lattice conditioning (straight legs near the curved mean surface)
+    if mean_line_jump is not None and _is_finite(mean_line_jump) and float(mean_line_jump) > _MEAN_LINE_STRIP_JUMP:
+        warnings.append(
+            f"Cambered mean-line lattice: the strip lift changes by up to {float(mean_line_jump):.3g} between "
+            "neighbouring strips. The straight horseshoe legs leave the curved mean surface, and with narrow "
+            "strips the solve can be ill-conditioned, so the loads (also the totals) can be wrong. Use fewer, "
+            "wider spanwise panels or a larger n_chord, and compare."
         )
 
     # 6. Numerical health -------------------------------------------------------------------
