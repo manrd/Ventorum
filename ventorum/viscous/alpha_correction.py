@@ -127,6 +127,8 @@ from ventorum.geometry.lattice import (
     _sorted_sections,
     section_cl,
     section_cl_slope,
+    section_cd,
+    section_cm,
 )
 from ventorum.solvers.core import (
     _assemble_llt_linear,
@@ -985,7 +987,7 @@ def solve_viscous(
     settings: SolverSettings,
     polars: Any,
     *,
-    model: Literal["vlm", "llt"] = "vlm",
+    model: Literal["vlm", "llt", "panel3d"] = "vlm",
     max_iter: int = 50,
     tol: float = 1e-6,
     relaxation: float = 1.0,
@@ -1013,9 +1015,9 @@ def solve_viscous(
         flap shift on a deflected strip. A dict maps a strip index, a
         surface name, an airfoil name or ``"default"`` to one of these;
         strips without an entry use their section airfoil.
-    model : {"vlm", "llt"}
-        Linear solver: the vortex-lattice method or the linear lifting
-        line.
+    model : {"vlm", "llt", "panel3d"}
+        Potential-flow solver. The panel method matches surface-pressure
+        strip lift and also closes the pressure Kutta residual when selected.
     max_iter : int
         Largest number of Newton iterations per condition.
     tol : float
@@ -1051,6 +1053,13 @@ def solve_viscous(
     depends on the angle of attack, so a sweep factorizes once per
     condition. The method runs on the CPU.
 
+    For ``panel3d``, free-air conditions share the fixed panel wake and
+    one body factorization. Strip lift comes from surface pressure. The
+    section relation comes from a 2D Morino solve of the mesh section.
+    Ground ``auto`` uses a direct solve per configuration; explicit
+    ``krylov`` and GPU requests are refused. ``solve_count`` counts body
+    triangular-solve calls; ``solve_rhs_count`` counts their columns.
+
     On a vortex-lattice strip with a deflected control the polar is read
     relative to its thin-airfoil model: the target lift is the polar lift
     minus ``lift_slope_section * (alpha0_section - alpha0_thin_airfoil)``.
@@ -1059,14 +1068,17 @@ def solve_viscous(
     chordwise panel count, not the mesh-converged flap effect.
     """
     model_str = str(model).lower()
-    if model_str not in ("vlm", "llt"):
-        raise ValueError(f"model must be 'vlm' or 'llt', got {model!r}.")
+    if model_str not in ("vlm", "llt", "panel3d"):
+        raise ValueError(f"model must be 'vlm', 'llt' or 'panel3d', got {model!r}.")
     if not 0.0 < float(relaxation) <= 1.0:
         raise ValueError(f"relaxation must lie in (0, 1], got {relaxation}.")
     if int(max_iter) < 0:
         raise ValueError(f"max_iter must not be negative, got {max_iter}.")
     if not float(tol) > 0.0:
         raise ValueError(f"tol must be positive, got {tol}.")
+    if model_str == "panel3d":
+        return _solve_panel_viscous(aircraft, conditions, settings, polars,
+                                    int(max_iter), float(tol), float(relaxation))
 
     aircraft_obj = as_aircraft(aircraft)
     validate_aircraft(aircraft_obj)
@@ -1114,3 +1126,417 @@ def _independent(res: SolverResult) -> np.ndarray:
     if res.symmetry_used:
         return np.asarray(delta[np.flatnonzero(lattice.strip_is_right)], dtype=float)
     return np.asarray(delta, dtype=float)
+
+
+def _panel_residual(x, velocity0, dv, speed, incidence, weights, area,
+                    zero, slope, polars, offset, up, lo, pressure):
+    """Return the coupled residual and its analytic Jacobian.
+
+    Body velocities and their columns are in m/s; speed is in m/s. The
+    first unknowns are strip angles [rad], followed by optional wake
+    strengths [m^2/s]. Cl and the trailing-edge Cp jump are dimensionless.
+    The chain rule uses dCp/dx = -2 V dot (dV/dx) / V_inf^2.
+    """
+    ns = len(area)
+    n = len(weights)
+    velocity = velocity0 + np.einsum("ijk,k->ij", dv, x)
+    cp = 1 - np.sum(velocity**2, axis=1) / speed**2
+    dcp = -2 * np.einsum("ij,ijk->ik", velocity, dv) / speed**2
+    cl = (incidence @ (weights * cp[:n])) / area
+    dc = (incidence @ (weights[:, None] * dcp[:n])) / area[:, None]
+    alpha_v = zero + cl / slope + x[:ns]
+    clv = np.array([float(section_cl(p, a)) for p, a in zip(polars, alpha_v)])
+    m = np.array([float(section_cl_slope(p, a)) for p, a in zip(polars, alpha_v)])
+    residual = cl - clv + offset
+    jac = (1 - m / slope)[:, None] * dc
+    jac[np.arange(ns), np.arange(ns)] -= m
+    jump = cp[up] - cp[lo]
+    if pressure:
+        residual = np.concatenate([residual, jump])
+        jac = np.vstack([jac, dcp[up] - dcp[lo]])
+        dc = np.vstack([dc, dcp[up] - dcp[lo]])
+    return dict(r=residual, jac=jac, dc=dc, cl=cl, alpha_v=alpha_v, m=m,
+                cp=cp, velocity=velocity, jump=jump)
+
+
+class _PanelCoupling:
+    """Pressure-based strip correction and simultaneous pressure Kutta closure.
+
+    The onset change is the linear transpiration equivalent of an angle
+    reduction (Lighthill 1958). Source and doublet responses use the Morino
+    system (Katz and Plotkin 2001). Wake shifts enforce the pressure Kutta
+    condition of Kinnas and Hsin (1992). All angles are in rad.
+    """
+
+    def __init__(self, polars, max_iter, tol, relaxation):
+        self.polars = polars
+        self.max_iter = max_iter
+        self.tol = tol
+        self.relaxation = relaxation
+        self.states = {}
+        self.previous = None
+        self.first_positive = None
+        self.negative_started = False
+        self.last_factorization_count = 0
+
+    def prepare(self, solver, geometry, aircraft, settings, conditions):
+        """Prepare strip metadata and 2D Morino references before assembly."""
+        import scipy.sparse
+
+        from ventorum.airfoil import airfoil
+        from ventorum.solvers.panel3d import _build_geometry, _panel_section_lines
+
+        # The lattice supplies only section/polar metadata, never aerodynamic
+        # loads or section slopes. Its strips have the same reporting stations.
+        self.lattice = make_solver("vlm").build(
+            aircraft, dataclasses.replace(settings, n_chord=1), conditions[0], None, solver.ref_point,
+        )
+        self.strips = (np.flatnonzero(self.lattice.strip_is_right) if solver.mesh.half
+                       else np.arange(self.lattice.n_strips))
+        self.maps = []
+        areas = []
+        for (right, left), meta in zip(geometry.strip_maps, geometry.geom_meta):
+            self.maps.extend((left or []) + right)
+            areas.extend(np.concatenate([meta["area"][::-1], meta["area"]])
+                         if left is not None else meta["area"])
+        self.area = np.asarray(areas)
+        self.slope, self.zero, self.moment = _panel_section_lines(
+            geometry.mesh, self.maps, self.lattice, self.strips,
+        )
+        self.geometry = geometry
+        self.clean_geometry = None
+        self.clean_zero = self.zero.copy()
+        if any(s.controls for s in aircraft.surfaces):
+            clean = dataclasses.replace(aircraft, surfaces=[dataclasses.replace(s, controls=[]) for s in aircraft.surfaces])
+            coords = [[airfoil(sec.shape if sec.shape is not None else "0012").coords
+                       for sec in s.sections] for s in clean.surfaces]
+            geom = _build_geometry(clean, settings, coords, settings.n_chord or 40,
+                                   settings.panel_chord_spacing, solver.mesh.half, settings.panel_scale_root_thickness)
+            clean_maps = [ids for right, left in geom.strip_maps for ids in (left or []) + right]
+            _, self.clean_zero, _ = _panel_section_lines(geom.mesh, clean_maps, self.lattice, self.strips)
+            self.clean_geometry = geom, clean_maps
+        self.resolver = _StripPolars(self.polars, aircraft)
+        self.aircraft = aircraft
+        row = np.repeat(np.arange(len(self.maps)), [len(ids) for ids in self.maps])
+        col = np.concatenate(self.maps)
+        self.incidence = scipy.sparse.csr_matrix(
+            (np.ones(len(col)), (row, col)), shape=(len(self.maps), len(solver.centroids)),
+        )
+        self.owner = np.empty(len(col), dtype=int)
+        self.owner[col] = row
+        solver._set_viscous_strips(self.maps)
+        solver._viscous_evaluator = self.evaluate
+
+    def full(self, values):
+        """Expand independent values to public strip order (same units)."""
+        values = np.asarray(values)
+        result = np.empty((self.lattice.n_strips, *values.shape[1:]), dtype=values.dtype)
+        result[self.strips] = values
+        if len(self.strips) < self.lattice.n_strips:
+            left = np.flatnonzero(~self.lattice.strip_is_right)
+            result[left] = result[self.lattice.strip_mirror[left]]
+        return result
+
+    def evaluate(self, solver, cfg, condition):
+        """Solve one condition with analytic Cp and strip-lift Jacobians."""
+        from ventorum.panel3d.post import (
+            compute_surface_velocity_and_cp, integrate_forces_and_moments, surface_gradient,
+        )
+        from ventorum.panel3d.solver import PanelResult
+        from ventorum.solvers.panel3d import _panel_section_lines
+
+        ns = len(self.maps)
+        n = len(solver.centroids)
+        factorized = solver.factorization_count != self.last_factorization_count
+        self.last_factorization_count = solver.factorization_count
+        speed = float(condition.V_inf)
+        coeffs = solver._condition_coeffs(condition)
+        mu0 = cfg.unit_mu @ coeffs
+        mu_full0 = solver._reconstruct_full_mu(cfg.unit_mu, coeffs)
+        g = solver._viscous_response(cfg, condition)
+        gf = np.vstack([g, g]) if solver.mesh.half else g
+        if solver.kutta == "pressure":
+            z, zf, up, lo, expand = solver._viscous_pressure_response(cfg, coeffs)
+        else:
+            z, zf = np.zeros((n, 0)), np.zeros((len(mu_full0), 0))
+            up, lo = cfg.wake.wake_up, cfg.wake.wake_lo
+            def expand(values):
+                return values
+        response = np.column_stack([g, z])
+        response_full = np.column_stack([gf, zf])
+        dv = -surface_gradient(solver._grad_op, response_full)
+        ua = np.cos(condition.beta) * np.array([-np.sin(condition.alpha), 0, np.cos(condition.alpha)])
+        onset_delta = -speed * ua
+        normal = solver._full_geom.normal
+        tangential = onset_delta - (normal @ onset_delta)[:, None] * normal
+        owners = np.tile(self.owner, 2) if solver.mesh.half else self.owner
+        dv[np.arange(len(owners)), :, owners] += tangential
+        velocity0, _ = compute_surface_velocity_and_cp(
+            solver._condition_velocity(condition, solver._full_geom.centroid), normal,
+            surface_gradient(solver._grad_op, mu_full0), speed,
+        )
+        lift_axis = np.array([-np.sin(condition.alpha), 0, np.cos(condition.alpha)])
+        weights = -solver.areas * (solver.normals @ lift_axis)
+        ground = None if cfg.ground is None else GroundPlane(*cfg.ground)
+        polars, uses_height, h_over_c = self.resolver.resolve(self.lattice, self.strips, condition, ground)
+        slope, zero, moment = self.slope, self.zero, self.moment
+        clean_zero = self.clean_zero
+        if np.any(uses_height):
+            slope, zero, moment = _panel_section_lines(
+                self.geometry.mesh, self.maps, self.lattice, self.strips, ground, uses_height,
+            )
+            clean_zero = zero
+            if self.clean_geometry is not None:
+                clean_geom, clean_maps = self.clean_geometry
+                _, clean_zero, _ = _panel_section_lines(
+                    clean_geom.mesh, clean_maps, self.lattice, self.strips, ground, uses_height,
+                )
+        zero_target = _thin_airfoil_zero_lift(
+            self.lattice, self.aircraft, self.strips, zero, clean_zero, ground, uses_height,
+        )
+        offset = slope * (zero - zero_target)
+
+        def evaluate(x):
+            return _panel_residual(x, velocity0, dv, speed, self.incidence, weights, self.area,
+                                   zero, slope, polars, offset, up, lo, solver.kutta == "pressure")
+
+        def newton(start, budget=None):
+            x = start.copy()
+            state = evaluate(x)
+            hist = [float(np.max(np.abs(state["r"])))]
+            target_tol = min(self.tol, 1e-9) if solver.kutta == "pressure" else self.tol
+            for _ in range(self.max_iter if budget is None else budget):
+                if hist[-1] < target_tol:
+                    break
+                accepted = False
+                for matrix in (state["jac"], state["dc"]):
+                    try:
+                        step = self.relaxation * np.linalg.solve(matrix, -state["r"])
+                    except np.linalg.LinAlgError:
+                        continue
+                    if not np.all(np.isfinite(step)):
+                        continue
+                    f0 = float(state["r"] @ state["r"])
+                    lam = 1.0
+                    while lam >= 1 / 1024:
+                        trial = evaluate(x + lam * step)
+                        if float(trial["r"] @ trial["r"]) <= (1 - 1e-4 * lam) * f0:
+                            x += lam * step
+                            state = trial
+                            accepted = True
+                            break
+                        lam *= 0.5
+                    if accepted:
+                        break
+                if not accepted:
+                    break
+                hist.append(float(np.max(np.abs(state["r"]))))
+            state.update(x=x, hist=hist, converged=hist[-1] < self.tol and (
+                solver.kutta != "pressure" or np.max(np.abs(state["jump"])) < 1e-8))
+            state.update(section_slope=slope, section_zero=zero, section_moment=moment)
+            return state
+
+        def panel_result(state):
+            mu = mu0 + response @ state["x"]
+            muf = mu_full0 + response_full @ state["x"]
+            force = integrate_forces_and_moments(
+                state["cp"], solver._full_geom.area, normal, solver._full_geom.centroid,
+                condition, solver.S_ref, solver.b_ref, solver.c_ref, solver.ref_point,
+            )
+            wake = muf[cfg.full_wake.wake_up] - muf[cfg.full_wake.wake_lo]
+            if solver.kutta == "pressure":
+                wake += expand(state["x"][ns:])
+            sigma = solver._unit_sigma @ coeffs + speed * (solver.normals @ ua) * state["x"][:ns][self.owner]
+            return PanelResult(
+                CL=force["CL"], CD_pressure=force["CD_pressure"], CY=force["CY"],
+                Cl=force["Cl"], Cm=force["Cm"], Cn=force["Cn"],
+                CDi_trefftz=solver._trefftz(cfg, muf, condition, wake_gamma=wake),
+                cp=state["cp"][:n], mu=mu, sigma=sigma, velocity=state["velocity"][:n],
+                condition=condition, kutta=solver.kutta,
+                kutta_iters=state.get("primary_iterations", len(state["hist"]) - 1),
+                kutta_residual=float(np.max(np.abs(state["jump"]))), kutta_converged=state["converged"],
+                mu_w=wake[:len(cfg.wake.wake_up)],
+            )
+
+        def branch_seed(state, sign):
+            seed = state["x"].copy()
+            for j, polar in enumerate(polars):
+                maximum = _alpha_cl_max(polar)
+                if maximum is not None:
+                    shift = maximum + sign * np.radians(STALL_START_MARGIN_DEG) - state["alpha_v"][j]
+                    seed[j] += max(0, shift) if sign == 1 else min(0, shift)
+            return seed
+
+        start = np.zeros(response.shape[1])
+        if condition.alpha < 0 and not self.negative_started:
+            self.previous = self.first_positive
+            self.negative_started = True
+        if self.previous is not None:
+            start[:ns] = self.previous
+        primary = newton(start)
+        # A sharp polar turnover can stop a mixed attached/stalled start
+        # at a local residual minimum. Reuse the V1 branch seeds within
+        # the remaining primary iteration budget. Failed attempts are
+        # never reported as branches.
+        used = len(primary["hist"]) - 1
+        recovery_runs = 0
+        recovery_histories = []
+        if not primary["converged"] and np.any(primary["m"] <= 0):
+            for sign in (1, -1):
+                if used >= self.max_iter:
+                    break
+                recovered = newton(branch_seed(primary, sign), self.max_iter - used)
+                recovery_histories.append(recovered["hist"].copy())
+                recovery_runs += 1
+                used += len(recovered["hist"]) - 1
+                if recovered["converged"]:
+                    primary = recovered
+                    break
+        primary["recovery_runs"] = recovery_runs
+        primary["recovery_residual_histories"] = recovery_histories
+        primary["primary_iterations"] = used
+        primary["factorized"] = factorized
+        primary["panel"] = panel_result(primary)
+        branches = []
+        branch_runs = 0
+        if primary["converged"]:
+            self.previous = primary["x"][:ns].copy()
+            if condition.alpha >= 0 and self.first_positive is None:
+                self.first_positive = self.previous.copy()
+            if np.any(primary["m"] <= 0):
+                for sign in (1, -1):
+                    seed = branch_seed(primary, sign)
+                    branch_runs += 1
+                    other = newton(seed)
+                    if other["converged"]:
+                        other["panel"] = panel_result(other)
+                        if all(abs(other["panel"].CL - s["panel"].CL) > BRANCH_CL_DIFFERENCE
+                               for s in [primary, *branches]):
+                            branches.append(other)
+        self.states[id(condition)] = (primary, branches, polars, offset, h_over_c, branch_runs)
+        for state in [primary, *branches]:
+            state.pop("jac")
+            state.pop("dc")
+        return primary["panel"]
+
+    def finish_result(self, result, solver, geometry, aircraft):
+        """Add polar drag, the lumped moment correction, and branch reports."""
+        from ventorum.solvers.panel3d import _spanwise_results_batch
+
+        primary, branches, polars, offset, heights, branch_runs = self.states[id(result.condition)]
+        area = self.full(self.area)
+        chord = self.lattice.chord
+        axis = np.cross(self.lattice.normal, self.lattice.chord_dir)
+
+        def finish(res, state):
+            slope, zero = state["section_slope"], state["section_zero"]
+            alpha_e = zero + state["cl"] / slope
+            co, si = np.cos(alpha_e), np.sin(alpha_e)
+            cm_inv = np.sum(state["section_moment"] * np.column_stack([np.ones_like(co), co**2, co * si, si**2]), axis=1)
+            cm_visc = np.array([float(section_cm(p, a)) for p, a in zip(polars, state["alpha_v"])])
+            cd = np.array([float(section_cd(p, a)) for p, a in zip(polars, state["alpha_v"])])
+            delta_cm = self.full(cm_visc - cm_inv)
+            pressure_cm = np.concatenate([sw.Cm_section.copy() for sw in res.spanwise])
+            cd_full = self.full(cd)
+            av = self.full(state["alpha_v"])
+            for surf, sw in zip(self.lattice.surfaces, res.spanwise):
+                ids = surf.strips
+                sw.Cm_section = sw.Cm_section + delta_cm[ids] * axis[ids, 1]
+                sw.alpha_eff = av[ids]
+                sw.alpha_i = res.condition.alpha - sw.alpha_eff
+            moment = np.sum((area * chord * delta_cm)[:, None] * axis, axis=0) / aircraft.S_ref
+            res.totals.Cl -= moment[0] / aircraft.b_ref
+            res.totals.Cm += moment[1] / aircraft.c_ref
+            res.totals.Cn -= moment[2] / aircraft.b_ref
+            res.totals.CDp = float(area @ cd_full / aircraft.S_ref)
+            res.totals.CD_total = res.totals.CDi + res.totals.CDp
+            res.totals.e = (res.totals.CL**2 / (np.pi * res.totals.AR * res.totals.CDi)
+                            if res.totals.CDi > 1e-12 else float("nan"))
+            res.solver_type = "viscous_panel3d"
+            res.converged = state["converged"]
+            res.iterations = state.get("primary_iterations", len(state["hist"]) - 1)
+            res.residual_history = state["hist"].copy()
+            res.details.update(
+                delta=self.full(state["x"][:len(self.maps)]), alpha_eff=av,
+                alpha0_section=self.full(zero), lift_slope_section=self.full(slope),
+                alpha0_thin_airfoil=self.full(zero - offset / slope),
+                cl_inviscid=self.full(state["cl"]), cl_viscous=self.full(state["cl"] - state["r"][:len(self.maps)] + offset),
+                flap_offset=self.full(offset), strip_area=area, strip_h_over_c=self.full(heights),
+                cd_profile=cd_full,
+                cm_section_inviscid=self.full(cm_inv), cm_section_pressure=pressure_cm,
+                trailing_edge_pressure_jump=state["jump"].copy(),
+                post_stall=bool(np.any(state["m"] <= 0)), post_stall_strips=self.full(state["m"] <= 0),
+                strip_flags=list(self.full(np.where(state["m"] <= 0, "post-stall, non-unique", "attached"))),
+                non_unique=bool(branches), branch_search_runs=branch_runs,
+                recovery_runs=state.get("recovery_runs", 0),
+                recovery_residual_histories=state.get("recovery_residual_histories", []),
+                factorized=state.get("factorized", False),
+                factorization_count=solver.factorization_count, solve_count=solver._viscous_solve_count,
+                solve_rhs_count=solver._viscous_rhs_count,
+                viscous_iterations=res.iterations, viscous_residual_history=res.residual_history.copy(),
+            )
+            if not res.converged:
+                res.details["notes"].append(_not_converged_note(state, self.max_iter, self.tol))
+            if branches:
+                res.details["notes"].append("Non-unique post-stall solution; see details['branches'].")
+            limits = polar_limits(list(self.full(np.asarray(polars, dtype=object))))
+            res.totals.trust = evaluate_aerodynamic_trust(
+                AR=res.totals.AR, condition=res.condition, spanwise_list=res.spanwise,
+                CL=res.totals.CL, CDi=res.totals.CDi, CD_total=res.totals.CD_total,
+                converged=res.converged, n_panels=len(self.maps), solver_type="panel3d",
+                n_chord=res.details["panel"]["n_chord"], mesh_stats=geometry.mesh_stats,
+                h_over_c=None if res.details["h_min"] is None else res.details["h_min"] / aircraft.c_ref,
+                notes=res.details["notes"], CD_nearfield=res.totals.CDi_nearfield,
+                polar=None if limits is None else polar_stats(limits, self.full(state["cl"]), av),
+                post_stall_branch=bool(branches),
+            )
+            return res
+
+        branch_results = []
+        for branch in branches:
+            panel = branch["panel"]
+            totals = dataclasses.replace(result.totals, CL=panel.CL, CDi=panel.CDi_trefftz,
+                                          Cm=panel.Cm, Cl=panel.Cl, Cn=panel.Cn, CY=panel.CY,
+                                          CDi_nearfield=panel.CD_pressure)
+            sw = _spanwise_results_batch(solver, [panel], [result.condition], geometry.strip_maps, geometry.geom_meta)[0]
+            details = {**result.details, "panel_result": panel, "cp": panel.cp, "panel_cp": panel.cp,
+                       "notes": list(result.details["notes"])}
+            branch_results.append(finish(dataclasses.replace(result, totals=totals, spanwise=sw, details=details), branch))
+        finish(result, primary)
+        if branch_results:
+            result.details["branches"] = [result, *branch_results]
+
+
+def _solve_panel_viscous(aircraft, conditions, settings, polars, max_iter, tol, relaxation):
+    """Dispatch the CPU panel coupling with one LU per configuration."""
+    from ventorum import gpu
+    from ventorum.solvers.panel3d import _auto_cpu_backend
+
+    if settings.panel_estimate_mesh_error:
+        raise ValueError(
+            "panel_estimate_mesh_error is not supported with the viscous panel coupling; "
+            "run the mesh study inviscid"
+        )
+    backend = str(settings.panel_backend).lower()
+    if backend == "gpu" or gpu.get_device() == "gpu":
+        raise ValueError("Viscous panel coupling requires a CPU backend; GPU is not supported.")
+    if settings.panel_ground_solver == "krylov":
+        raise ValueError("Viscous panel coupling needs one direct LU per configuration; Krylov is not supported.")
+    if backend == "auto":
+        backend = _auto_cpu_backend()[0]
+    settings = dataclasses.replace(settings, panel_backend=backend)
+    single = isinstance(conditions, FlightCondition)
+    conds = [conditions] if single else list(conditions)
+    if not conds:
+        return []
+    coupling = _PanelCoupling(polars, max_iter, tol, relaxation)
+    solver = make_solver("panel3d")
+    solver._viscous_coupling = coupling
+    up = sorted((i for i, c in enumerate(conds) if c.alpha >= 0), key=lambda i: conds[i].alpha)
+    down = sorted((i for i, c in enumerate(conds) if c.alpha < 0), key=lambda i: -conds[i].alpha)
+    order = up + down
+    solved = solver.solve(aircraft, [conds[i] for i in order], settings)
+    results = [None] * len(conds)
+    for i, result in zip(order, solved):
+        results[i] = result
+    return results[0] if single else results
