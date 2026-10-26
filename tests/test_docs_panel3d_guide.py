@@ -116,8 +116,8 @@ def test_panel3d_guide_code_blocks_run() -> None:
     assert res_flap.totals.CL > 0.0
 
 
-def test_panel3d_guide_cpu_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Verify that code blocks execute cleanly when GPU is reported unavailable."""
+def test_panel3d_guide_runs_when_gpu_reported_unavailable(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verify that the code blocks run when ``gpu.available()`` reports no GPU (the GPU branch is skipped)."""
     monkeypatch.setattr(gpu, "available", lambda: False)
     namespace = _run_guide_blocks()
 
@@ -125,3 +125,19 @@ def test_panel3d_guide_cpu_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
     assert isinstance(res_free, SolverResult)
     assert res_free.converged
     assert not gpu.available()
+
+
+def test_panel3d_guide_numbers_match_the_code() -> None:
+    """The numbers that the guide states are the values in the code."""
+    from ventorum.core.datatypes import SolverSettings
+    from ventorum.panel3d import mesh, solver, wake
+    from ventorum.solvers import panel3d
+
+    text = GUIDE_PATH.read_text(encoding="utf-8")
+    assert f"{solver._FACTOR_BUDGET_HOST_FRACTION * 100:.0f} % of physical system memory" in text
+    assert f"{solver._FACTOR_BUDGET_DEVICE_FRACTION * 100:.0f} % of free GPU memory" in text
+    assert f"at most {solver._MAX_CONFIGURATIONS} configurations" in text
+    assert f"CONTROL_TRANSITION = {mesh.CONTROL_TRANSITION}" in text
+    assert f"default: {wake.DEFAULT_WAKE_CHORDS:.0f} times the largest streamwise chord" in text
+    assert f"default: {panel3d._DEFAULT_N_CHORD} when None" in text
+    assert f"default: {SolverSettings().n_panels})" in text

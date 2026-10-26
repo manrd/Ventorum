@@ -12,7 +12,7 @@ The vortex-lattice method (VLM) models thin lifting surfaces with horseshoe vort
 * **Use the 3D panel method** when you need:
   * Detailed surface pressure distributions ($C_p$) across upper and lower surfaces;
   * Accurate capture of section thickness and displacement effects;
-  * Suction peaks and cavitation margins;
+  * Suction peaks;
   * Physical ground clearance defined by the lower surface skin;
   * Near-field surface pressure integration alongside far-field Trefftz-plane drag.
 
@@ -131,7 +131,14 @@ if gpu.available():
     print(f"GPU device: {res_gpu.details['dispatch']['device']}")
 ```
 
-On the GPU, influence kernels assemble in `float64` to prevent on-plane singular tolerance issues near long wake panels. The assembled matrix is then cast to the solve precision (`float32` by default; see [Run solves on the GPU](how_to_gpu)).
+On the GPU, the influence matrices are assembled in `float64`, because the on-plane self terms need `float64` coordinates. The factorization, the solve and the post-processing then run in the solve precision (`float32` by default).
+
+The GPU device and the solve precision are global choices of `ventorum.gpu`. Read them with `gpu.get_device()` and `gpu.get_precision()`, and set them with `gpu.set_device(...)` and `gpu.set_precision(...)` (for example `"float64"` when you compare with the CPU to round-off). See [Run solves on the GPU](how_to_gpu) for the device selection rules.
+
+```python
+print(f"GPU device setting: {gpu.get_device()}")
+print(f"GPU solve precision: {gpu.get_precision()}")
+```
 
 ## Solver settings reference
 
