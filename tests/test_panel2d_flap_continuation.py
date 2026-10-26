@@ -129,14 +129,21 @@ def test_failure_at_zero_deflection_reports_details():
     assert isinstance(r.step_history[0][2], (int, np.integer))
 
 
+@pytest.mark.slow
 def test_hinge_treatment_none_does_not_raise():
-    """Changing node count with hinge_treatment='none' starts cold without raising."""
-    base = airfoil("2412").repanel(n_panels=60)
-    r = solve_viscous_flapped(
-        base, 0.0, 1e6, x_hinge=0.75, deflection_deg=5.0, hinge_treatment="none", max_iter=2
-    )
-    assert isinstance(r, ViscousResult)
-    assert isinstance(r.details, dict)
-    assert "reached_deflection" in r.details
-    assert "step_history" in r.details
+    """With hinge_treatment='none' the node count changes between steps: no exception.
 
+    The flapped shape has more nodes than the clean one, so each step starts
+    cold. The steps beyond 0 deg are really tried (default iteration limit),
+    and a failure is reported with the reached deflection.
+    """
+    base = airfoil("2412").repanel(n_panels=60)
+    r = solve_viscous_flapped(base, 0.0, 1e6, x_hinge=0.75, deflection_deg=5.0, hinge_treatment="none")
+    assert isinstance(r, ViscousResult)
+    history = r.details["step_history"]  # (deflection [deg], converged, Newton iterations)
+    assert len(history) >= 2
+    assert history[0][0] == 0.0
+    assert any(step[0] > 0.0 for step in history)
+    if not np.all(r.converged):
+        assert r.details["reached_deflection"] < 5.0
+        assert "reached" in str(r.reason)

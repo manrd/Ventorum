@@ -1327,4 +1327,3 @@ def solve_viscous_flapped(
         newton_solves=np.array([r["newton_solves"] for r in rows], dtype=int),
         details=[r.get("details", {}) for r in rows],
     )
-

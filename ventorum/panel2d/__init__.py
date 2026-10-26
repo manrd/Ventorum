@@ -21,4 +21,3 @@ def __getattr__(name: str):
 def __dir__() -> list[str]:
     """Return module attribute names, including lazy exports."""
     return sorted(set(globals().keys()) | set(__all__))
-
