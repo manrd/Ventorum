@@ -86,6 +86,10 @@ a minor version can change a public interface.
   60 deg (factor 1 / cos(dihedral) above 2), the mesh builder issues a `UserWarning` that the
   root section is strongly scaled and that the result needs checking. The factor is not
   capped.
+- Ventorum-3DP mesh: the panel mesh builders and the solver factory raise `ValueError`
+  when a surface has non-zero node displacements. The message states that the 3D panel method
+  does not yet support them, and that the vortex lattice does. Zero or absent displacements
+  change nothing.
 - Ventorum-3DP mesh-error estimate (`panel_mesh_convergence`, `panel_estimate_mesh_error`):
   the chordwise and the spanwise panel counts are refined separately (three levels each, the
   base mesh first), each with its own Richardson extrapolation, and the error estimate of the

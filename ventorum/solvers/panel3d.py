@@ -100,6 +100,7 @@ from ventorum.panel3d.images import (
 )
 from ventorum.panel3d.mesh import (
     PanelMesh,
+    _check_no_node_displacements,
     check_mesh,
     mesh_lifting_surface,
 )
@@ -969,6 +970,8 @@ class PanelMethodSolver(BaseSolver):
 
         ac = as_aircraft(aircraft)
         validate_aircraft(ac)
+        for surf in ac.surfaces:
+            _check_no_node_displacements(surf)
         ac.compute_reference_values()
 
         s_ref = ac.S_ref
