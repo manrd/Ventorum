@@ -10,6 +10,8 @@ a minor version can change a public interface.
 
 ### Added
 
+- The lattice solvers add a trust warning on Trefftz induced drag CDi (and drag-derived outputs) when the smallest trailing-edge height above the ground is below 0.15 of the local chord (constant `_CDI_TE_CLEARANCE`). The warning states the clearance and notes the dependence of Trefftz CDi on the height of the far wake.
+
 - Ventorum-3DP, a first version of the three-dimensional panel method (`ventorum.panel3d`,
   solver name `"panel3d"`): low-order constant-strength source and doublet panels with the
   internal Dirichlet condition (Morino and Kuo 1974; Maskew, NASA CR-4023; Katz and Plotkin

@@ -40,9 +40,14 @@ import math
 
 from ventorum.core.constants import A_SL, MACH_LIMIT_INCOMPRESSIBLE, RHO_SL
 
+from typing import TYPE_CHECKING
 from collections.abc import Sequence
 
 import numpy as np
+
+if TYPE_CHECKING:
+    from ventorum.aero.system import GroundPlane
+    from ventorum.geometry.lattice import VortexLattice
 
 from ventorum.core.datatypes import (
     DiscretizedSurface,
@@ -61,6 +66,9 @@ _ISA_RHO_TROPOPAUSE = 0.36392    # Density at 11 000 m [kg/m^3]
 _ISA_T_TROPOPAUSE = 216.65       # Temperature at and above 11 000 m [K]
 _ISA_DENSITY_EXPONENT = 4.25588  # rho/rho0 = (T/T0)^4.25588 in the troposphere
 _GAMMA_R_AIR = 1.4 * 287.05287   # Ratio of specific heats times the gas constant of air [J/(kg K)]
+
+#: Threshold for the trailing-edge clearance trust warning on Trefftz CDi [-].
+_CDI_TE_CLEARANCE = 0.15
 
 #: Thresholds of the low-aspect-ratio side-edge vortex rule (vortex lattice).
 LOW_AR_SIDE_EDGE_AR = 2.0
@@ -204,6 +212,33 @@ def near_far_lateral_warnings(
                 "displacement the Trefftz-plane trace does not include (see the theory manual, forces and moments)."
             )
     return out
+
+
+def trailing_edge_clearance(lattice: VortexLattice | None, ground: GroundPlane | None) -> float | None:
+    """Return the smallest trailing-edge height divided by the local chord.
+
+    Parameters
+    ----------
+    lattice : VortexLattice or None
+        Vortex lattice geometry.
+    ground : GroundPlane or None
+        Ground plane, or None for free air.
+
+    Returns
+    -------
+    float or None
+        Smallest trailing-edge clearance as a fraction of the local chord [-],
+        or None in free air (when *ground* is None).
+    """
+    if ground is None or lattice is None or getattr(lattice, "n_strips", 0) == 0:
+        return None
+    if not (hasattr(lattice, "te_left") and hasattr(lattice, "te_right") and hasattr(lattice, "chord")):
+        return None
+    h_l = ground.height(lattice.te_left)
+    h_r = ground.height(lattice.te_right)
+    h_min = np.minimum(h_l, h_r)
+    chord = np.maximum(np.asarray(lattice.chord, dtype=float), 1e-300)
+    return float(np.min(h_min / chord))
 
 
 def _robust_value(stats: dict, array_key: str, max_key: str, percentile: float, default: float) -> tuple[float, bool]:
@@ -607,6 +642,7 @@ def evaluate_aerodynamic_trust(
     mesh_stats: dict | None = None,
     CD_nearfield: float | None = None,
     post_stall_branch: bool = False,
+    te_clearance: float | None = None,
 ) -> TrustScore:
     """Evaluate the validity of a solution.
 
@@ -673,6 +709,9 @@ def evaluate_aerodynamic_trust(
         compared with the far-field *CDi* (see :func:`panel3d_mesh_checks`).
     post_stall_branch : bool, optional
         True if multiple post-stall equilibrium solution branches exist.
+    te_clearance : float or None, optional
+        Smallest trailing-edge height above the ground divided by the local
+        chord [-]. None in free air or when not evaluated.
 
     A result with a non-finite coefficient never keeps a trust level above
     LOW: it gets the penalty ``non_finite_result`` and the warning
@@ -904,6 +943,13 @@ def evaluate_aerodynamic_trust(
             )
             recommendations.append("Increase n_chord so that c/n_chord < h_min.")
     penalties["ground_proximity"] = ground_pen
+
+    # 5b. Trailing-edge ground clearance (Trefftz CDi far-wake height dependence)
+    if te_clearance is not None and _is_finite(te_clearance) and float(te_clearance) < _CDI_TE_CLEARANCE:
+        warnings.append(
+            f"Small trailing-edge clearance (h_te/c={float(te_clearance):.3f} < {_CDI_TE_CLEARANCE:g}): "
+            "Trefftz CDi (and drag-derived outputs) depends on the height of the far wake."
+        )
 
     # 6. Numerical health -------------------------------------------------------------------
     num_pen = 0.0
