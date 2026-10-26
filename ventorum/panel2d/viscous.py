@@ -74,7 +74,7 @@ from ventorum.panel2d import vii
 from ventorum.panel2d.solver import resolve_reference
 from ventorum.utils.parallel import blas_single_thread
 
-__all__ = ["ViscousResult", "StopRules", "solve_viscous", "trace_wake_streamline", "prepare_case", "warm_state",
+__all__ = ["ViscousResult", "StopRules", "solve_viscous", "solve_viscous_flapped", "trace_wake_streamline", "prepare_case", "warm_state",
            "finish_angle", "row_from_result", "sweep_order", "check_chord_ref", "resolve_body"]
 
 #: Number of times the angle step of a warm start may be halved.
@@ -922,3 +922,271 @@ def _failed_row(alpha, body, reason, wake_x=None) -> dict:
         "coordinates": body, "reason": reason, "Cl_pressure": nan, "delta_star": arr(), "ue": arr(), "wake": wake,
         "newton_iterations": 0, "linear_solves": 0, "newton_solves": 0,
     }
+
+
+def solve_viscous_flapped(
+    shape,
+    alpha_deg,
+    Re: float,
+    *,
+    x_hinge: float,
+    deflection_deg: float,
+    y_hinge: float | None = None,
+    step_deg: float = 2.5,
+    mach: float = 0.0,
+    **options,
+) -> ViscousResult:
+    """Solve 2D viscous flow of a flapped airfoil by deflection continuation.
+
+    The solver steps the flap deflection from 0 deg to ``deflection_deg``
+    in steps of at most ``step_deg`` [deg]. Each step starts from the
+    converged state of the previous deflection (warm start). A step that
+    fails is halved (down to 0.25 deg). When that also fails, the solver
+    returns a result with ``converged=False`` and the reached deflection
+    in its details (loads set to NaN).
+
+    Parameters
+    ----------
+    shape : AirfoilShape or array_like
+        Airfoil section coordinates [m or chord units] in Selig order, or
+        an :class:`ventorum.airfoil.AirfoilShape`.
+    alpha_deg : float or array_like
+        Angle of attack [deg].
+    Re : float
+        Reynolds number of the reference chord [-].
+    x_hinge : float
+        Hinge chord station [chord units], in (0.05, 0.98).
+    deflection_deg : float
+        Final flap deflection [deg], positive when the trailing edge moves
+        down.
+    y_hinge : float or None
+        Hinge height as a fraction [-] of local thickness at ``x_hinge``,
+        from lower (0) to upper (1) surface. Default None selects 0.5
+        (mid-thickness).
+    step_deg : float
+        Largest deflection step of the continuation [deg], positive.
+        Default 2.5.
+    mach : float
+        Free-stream Mach number [-]; only 0 is supported.
+    **options
+        Options passed to :func:`solve_viscous` (such as ``tol``,
+        ``max_iter``, ``ncrit``, ``xtr``, ``height``, ``chord_ref``,
+        ``moment_ref``, etc.).
+
+    Returns
+    -------
+    ViscousResult
+        Loads, distributions, convergence status and work counters at the
+        final deflection.
+    """
+    if abs(mach) > 1e-12:
+        raise ValueError(f"Only mach=0.0 is supported in solve_viscous_flapped, got mach={mach}.")
+    if not np.isfinite(Re) or Re <= 0.0:
+        raise ValueError(f"Reynolds number must be positive, got {Re}.")
+    if not np.isfinite(step_deg) or step_deg <= 0.0:
+        raise ValueError(f"step_deg must be positive, got {step_deg}.")
+
+    hinge_treatment = options.pop("hinge_treatment", "repanel")
+    n_arc = options.pop("n_arc", None)
+    n_panels = options.pop("n_panels", None)
+
+    if abs(deflection_deg) < 1e-12:
+        return solve_viscous(shape, alpha_deg, Re, mach=mach, **options)
+
+    if isinstance(shape, AirfoilShape):
+        base_shape = shape
+    else:
+        arr = np.asarray(shape, dtype=np.float64)
+        if arr.ndim != 2 or arr.shape[1] != 2:
+            raise ValueError(f"shape must be an (N, 2) array or AirfoilShape, got shape {arr.shape}.")
+        base_shape = AirfoilShape(coords=arr)
+
+    chord_ref_opt = options.pop("chord_ref", None)
+    moment_ref_opt = options.pop("moment_ref", None)
+    _, chord_ref, moment_ref, pivot = resolve_body(base_shape, chord_ref_opt, moment_ref_opt)
+
+    ncrit = options.pop("ncrit", 9.0)
+    xtr = options.pop("xtr", (1.0, 1.0))
+    height = options.pop("height", None)
+    max_iter = options.pop("max_iter", 50)
+    tol = options.pop("tol", 1e-6)
+    wake_length = options.pop("wake_length", 1.0)
+    n_wake = options.pop("n_wake", 30)
+    height_reference = options.pop("height_reference", "pivot")
+    backend = options.pop("backend", "numpy")
+    stall_window = options.pop("stall_window", vii.STALL_WINDOW)
+    stall_factor = options.pop("stall_factor", vii.STALL_FACTOR)
+    divergence_factor = options.pop("divergence_factor", vii.DIVERGENCE_FACTOR)
+    work_budget = options.pop("work_budget", WORK_BUDGET)
+    lm_trials = options.pop("lm_trials", vii.LM_RETRY_TRIALS)
+
+    if backend != "numpy":
+        raise ValueError(f"backend '{backend}' is not supported by solve_viscous_flapped; use 'numpy'.")
+    if options:
+        raise TypeError(f"solve_viscous_flapped got unexpected keyword argument(s): {list(options.keys())}")
+
+    rules = StopRules(stall_window=stall_window, stall_factor=stall_factor, divergence_factor=divergence_factor,
+                      work_budget=work_budget, lm_trials=lm_trials)
+    kw = dict(ncrit=ncrit, xtr=xtr, height=height, height_reference=height_reference,
+              wake_length=wake_length, n_wake=n_wake, chord_ref=chord_ref, moment_ref=moment_ref, pivot=pivot)
+
+    yh = 0.5 if y_hinge is None else float(y_hinge)
+
+    def _deflect(d: float) -> AirfoilShape:
+        if abs(d) < 1e-12:
+            return base_shape
+        return base_shape.with_flap(
+            x_hinge=x_hinge,
+            deflection=d,
+            y_hinge=yh,
+            hinge_treatment=hinge_treatment,
+            n_arc=n_arc,
+            n_panels=n_panels,
+        )
+
+    def _continue_deflection(alpha: float) -> tuple[dict, tuple | None]:
+        ctl = _AngleWork(alpha, rules)
+        try:
+            row0, state0 = finish_angle(base_shape, alpha, Re, None, tol, max_iter, kw, rules=rules)
+        except (_BudgetUsedUp, *vii.linalg_errors(np), cp.WakeGroundError) as exc:
+            row = _failed_row(alpha, base_shape.coords, f"continuation failed at deflection 0 deg: {exc}")
+            row.update(ctl.counters())
+            return row, None
+
+        if not row0["converged"]:
+            row0["reason"] = f"continuation did not converge at deflection 0 deg: {row0['reason']}"
+            return row0, None
+
+        ctl.iterations = int(row0["newton_iterations"])
+        ctl.linear_solves = int(row0["linear_solves"])
+        ctl.solves = int(row0["newton_solves"])
+
+        target_d = float(deflection_deg)
+        step_max = float(step_deg)
+        min_step = 0.25
+        sgn = 1.0 if target_d > 0.0 else -1.0
+
+        current_d = 0.0
+        prev = state0
+        current_step = step_max
+        last_setup = prev[0]
+        last_res = None
+
+        while abs(target_d - current_d) > 1e-9:
+            step_to_try = min(current_step, abs(target_d - current_d))
+            next_d = current_d + sgn * step_to_try
+
+            setup = None
+            try:
+                shape_next = _deflect(next_d)
+                setup = prepare_case(shape_next, alpha, Re, **kw)
+                start = warm_state(setup, prev[0], prev[1])
+                res = _solve_one(setup, start, tol, max_iter, 1.0, bk=_NUMPY, ctl=ctl)
+            except (_BudgetUsedUp, *vii.linalg_errors(np), cp.WakeGroundError) as exc:
+                res = vii.NewtonResult(
+                    None, None, False, 0, float("nan"),
+                    f"exception during solve ({exc})", 0, "error"
+                )
+
+            if res.converged:
+                current_d = next_d
+                prev = (setup, res.state)
+                last_setup = setup
+                last_res = res
+                current_step = step_max
+            else:
+                half = step_to_try * 0.5
+                if half >= min_step - 1e-9:
+                    current_step = half
+                elif step_to_try > min_step + 1e-9:
+                    current_step = min_step
+                else:
+                    res_reason = res.reason if res is not None else "step failed"
+                    reason = (
+                        f"continuation did not converge at deflection {next_d:g} deg "
+                        f"(reached {current_d:g} deg): {res_reason}"
+                    )
+                    wake_nodes = setup.sys.wake_nodes if setup is not None and hasattr(setup, "sys") else None
+                    nodes = setup.sys.nodes if setup is not None and hasattr(setup, "sys") else base_shape.coords
+                    row = _failed_row(alpha, nodes, reason, wake_x=wake_nodes)
+                    row.update(ctl.counters())
+                    row["residual"] = float(res.residual) if res is not None else float("nan")
+                    return row, None
+
+        row = row_from_result(last_setup, last_res, alpha)
+        row.update(ctl.counters())
+        row["iterations"] = int(last_res.iterations)
+        row["residual"] = float(last_res.residual)
+        row["converged"] = True
+        return row, (last_setup, last_res.state)
+
+    is_scalar = np.ndim(alpha_deg) == 0
+    alphas = np.atleast_1d(np.asarray(alpha_deg, dtype=np.float64))
+    order_up, order_dn = sweep_order(alphas)
+    out: dict[float, dict] = {}
+
+    with blas_single_thread():
+        first_state = None
+        prev = None
+        target_shape = _deflect(float(deflection_deg))
+        for a in order_up:
+            if prev is not None:
+                row, state = finish_angle(target_shape, a, Re, prev, tol, max_iter, kw, rules=rules)
+                if not row["converged"]:
+                    row, state = _continue_deflection(a)
+            else:
+                row, state = _continue_deflection(a)
+            out[a] = row
+            if row["converged"]:
+                prev = state
+                if first_state is None:
+                    first_state = state
+
+        prev = first_state
+        for a in order_dn:
+            if prev is not None:
+                row, state = finish_angle(target_shape, a, Re, prev, tol, max_iter, kw, rules=rules)
+                if not row["converged"]:
+                    row, state = _continue_deflection(a)
+            else:
+                row, state = _continue_deflection(a)
+            out[a] = row
+            if row["converged"]:
+                prev = state
+
+    rows = [out[float(a)] for a in alphas]
+    bad = [r for r in rows if not r["converged"]]
+    for r in bad:
+        warnings.warn(f"solve_viscous_flapped: alpha = {r['alpha']:g} deg did not converge: {r['reason']}",
+                      UserWarning, stacklevel=2)
+    if is_scalar:
+        r = rows[0]
+        return ViscousResult(**{k: r[k] for k in _FIELDS})
+    return ViscousResult(
+        alpha=alphas,
+        Cl=np.array([r["Cl"] for r in rows]),
+        Cl_circulation=np.array([r["Cl_circulation"] for r in rows]),
+        Cd=np.array([r["Cd"] for r in rows]),
+        Cd_friction=np.array([r["Cd_friction"] for r in rows]),
+        Cd_pressure=np.array([r["Cd_pressure"] for r in rows]),
+        Cm=np.array([r["Cm"] for r in rows]),
+        transition_positions=[r["transition_positions"] for r in rows],
+        separation_flags=[r["separation_flags"] for r in rows],
+        Cp=[r["Cp"] for r in rows],
+        H=[r["H"] for r in rows],
+        theta=[r["theta"] for r in rows],
+        Cf=[r["Cf"] for r in rows],
+        iterations=np.array([r["iterations"] for r in rows], dtype=int),
+        residual=np.array([r["residual"] for r in rows]),
+        converged=np.array([r["converged"] for r in rows], dtype=bool),
+        coordinates=[r["coordinates"] for r in rows],
+        reason=[r["reason"] for r in rows],
+        Cl_pressure=np.array([r["Cl_pressure"] for r in rows]),
+        delta_star=[r["delta_star"] for r in rows],
+        ue=[r["ue"] for r in rows],
+        wake=[r["wake"] for r in rows],
+        newton_iterations=np.array([r["newton_iterations"] for r in rows], dtype=int),
+        linear_solves=np.array([r["linear_solves"] for r in rows], dtype=int),
+        newton_solves=np.array([r["newton_solves"] for r in rows], dtype=int),
+    )
+
