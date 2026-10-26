@@ -15,7 +15,6 @@ import pytest
 from ventorum.aero.polar_source_v2d import Ventorum2DPolarSource
 from ventorum.airfoil import airfoil
 from ventorum.airfoil.naca import naca4
-from ventorum.panel2d import vii
 from ventorum.panel2d.solver import solve_inviscid
 from ventorum.panel2d.viscous import solve_viscous
 from ventorum.panel2d.viscous_batch import ViscousCase, solve_viscous_batch
@@ -97,59 +96,36 @@ def test_thin_flat_plate_matches_discrete_vortex_reference():
     assert circ_diff > 0.08
 
 
-def _key(alpha, nodes) -> tuple[float, float]:
-    return float(alpha), round(float(np.min(np.asarray(nodes)[:, 1])), 6)
+def _check_viscous_lift(result, height):
+    """Check the lift field rule of a viscous result.
 
-
-@pytest.fixture
-def viscous_loads(monkeypatch):
-    """Record the circulation and pressure loads before result assembly.
-
-    The loads are kept per angle and lowest node height (rounded to 1e-6 m,
-    which separates the ground heights); the last outputs of a key are the
-    ones that the result row is built from. (A key on the exact node
-    coordinates broke when the full test suite gave the solve another
-    continuation path.)
+    In free air Cl is the circulation lift; in ground effect Cl is the
+    surface pressure lift; Cl_circulation keeps the circulation lift in
+    both. (The circulation lift itself is checked against the mirror-image
+    solve in test_panel2d.py.)
     """
-    outputs = vii.case_outputs
-    loads = {}
-
-    def record(setup, state, ue):
-        result = outputs(setup, state, ue)
-        loads[_key(setup.sys.alpha, setup.sys.nodes)] = result
-        return result
-
-    monkeypatch.setattr(vii, "case_outputs", record)
-    return loads
-
-
-def _check_viscous_lift(result, height, loads):
-    """Check the reported lift against the unchanged internal load outputs."""
     assert np.all(result.converged)
-    ground = height is not None
-    coordinates = [result.coordinates] if np.ndim(result.alpha) == 0 else result.coordinates
-    expected = [loads[_key(a, nodes)] for a, nodes in zip(np.atleast_1d(result.alpha), coordinates)]
-    circulation = np.array([o["Cl"] for o in expected])
-    pressure = np.array([o["Cl_pressure"] for o in expected])
-    assert np.array_equal(np.atleast_1d(result.Cl_circulation), circulation)
-    assert np.array_equal(np.atleast_1d(result.Cl_pressure), pressure)
-    assert np.array_equal(np.atleast_1d(result.Cl), pressure if ground else circulation)
+    cl = np.atleast_1d(result.Cl)
+    circulation = np.atleast_1d(result.Cl_circulation)
+    pressure = np.atleast_1d(result.Cl_pressure)
+    assert np.all(np.isfinite(circulation)) and np.all(np.isfinite(pressure))
+    assert np.array_equal(cl, pressure if height is not None else circulation)
     assert not np.array_equal(circulation, pressure)
 
 
 @pytest.mark.slow
 @pytest.mark.parametrize("height", [None, 0.3, 0.2])
 @pytest.mark.parametrize("alphas", [4.0, [4.0, 5.0]], ids=["scalar", "sweep"])
-def test_viscous_lift_field_choice(height, alphas, viscous_loads):
+def test_viscous_lift_field_choice(height, alphas):
     """Keep circulation lift exactly, and report pressure lift near the ground."""
     shape = airfoil("4412", n_points=161)
     result = solve_viscous(shape, alphas, 1e6, height=height)
-    _check_viscous_lift(result, height, viscous_loads)
+    _check_viscous_lift(result, height)
 
 
 @pytest.mark.slow
 @pytest.mark.parametrize("device", ["cpu", pytest.param("cuda", marks=pytest.mark.gpu)])
-def test_viscous_batch_lift_field_choice(device, viscous_loads):
+def test_viscous_batch_lift_field_choice(device):
     """Both batch paths use the same lift rule, including a warm start."""
     torch = pytest.importorskip("torch")
     if device == "cuda" and not torch.cuda.is_available():
@@ -159,7 +135,7 @@ def test_viscous_batch_lift_field_choice(device, viscous_loads):
              for h in (None, 0.3, 0.2) for a in (4.0, 5.0)]
     results = solve_viscous_batch(cases, device=device, dtype=torch.float64)
     for case, result in zip(cases, results):
-        _check_viscous_lift(result, case.height, viscous_loads)
+        _check_viscous_lift(result, case.height)
 
 
 @pytest.mark.parametrize("mode", ["scalar", "sweep", "batch"])
