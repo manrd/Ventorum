@@ -20,6 +20,9 @@ Newton iteration (see :mod:`ventorum.panel2d.vii`).
   carries the mirror image of the real boundary layer and wake (equal
   source strengths), and there is no boundary layer on the ground. There is
   no height limit: a large height gives the free-air result by computation.
+  ``Cl`` is the surface pressure lift in ground effect (Coulliette and
+  Plotkin 1996, eq. 30). ``Cl_circulation`` keeps 2 Gamma / c. In free air
+  ``Cl`` stays equal to ``Cl_circulation``.
 * Alpha sweeps: the angles are solved from the angle closest to zero
   upwards and downwards; each solve starts from the converged solution of
   the previous angle (warm start), with the angle step halved (up to
@@ -54,6 +57,8 @@ M. J. Lighthill, On displacement thickness, Journal of Fluid Mechanics 4,
 1958, pp. 383-392.
 H. B. Squire and A. D. Young, The calculation of the profile drag of
 aerofoils, ARC R and M 1838, 1938.
+C. Coulliette and A. Plotkin, Aerofoil ground effect revisited,
+The Aeronautical Journal 100, 1996.
 """
 
 from __future__ import annotations
@@ -193,7 +198,10 @@ class ViscousResult:
     alpha : float or np.ndarray
         Angle of attack [deg].
     Cl : float or np.ndarray
-        Lift coefficient from the circulation (Kutta-Joukowski) [-].
+        Lift coefficient [-]: circulation lift in free air, surface
+        pressure lift in ground effect.
+    Cl_circulation : float or np.ndarray
+        Lift coefficient from the total circulation (2 Gamma / c) [-].
     Cd : float or np.ndarray
         Profile drag coefficient, Squire-Young at the wake end [-].
     Cd_friction : float or np.ndarray
@@ -271,6 +279,7 @@ class ViscousResult:
     newton_iterations: int | np.ndarray = 0
     linear_solves: int | np.ndarray = 0
     newton_solves: int | np.ndarray = 0
+    Cl_circulation: float | np.ndarray = 0.0
 
     @property
     def x_transition(self):
@@ -622,6 +631,7 @@ def solve_viscous(
     return ViscousResult(
         alpha=alphas,
         Cl=np.array([r["Cl"] for r in rows]),
+        Cl_circulation=np.array([r["Cl_circulation"] for r in rows]),
         Cd=np.array([r["Cd"] for r in rows]),
         Cd_friction=np.array([r["Cd_friction"] for r in rows]),
         Cd_pressure=np.array([r["Cd_pressure"] for r in rows]),
@@ -687,7 +697,8 @@ def sweep_order(alphas):
 
 _FIELDS = ("alpha", "Cl", "Cd", "Cd_friction", "Cd_pressure", "Cm", "transition_positions", "separation_flags",
            "Cp", "H", "theta", "Cf", "iterations", "residual", "converged", "coordinates", "reason",
-           "Cl_pressure", "delta_star", "ue", "wake", "newton_iterations", "linear_solves", "newton_solves")
+           "Cl_pressure", "delta_star", "ue", "wake", "newton_iterations", "linear_solves", "newton_solves",
+           "Cl_circulation")
 
 
 def _warm_path(body, alpha, re, prev, tol, max_iter, kw, depth, bk=None, first=None, ctl=None, mid_step=False):
@@ -853,7 +864,7 @@ def row_from_result(setup, res, alpha) -> dict:
     """Return the output row of a Newton result.
 
     The last iterate of a result that did not converge is not a solution:
-    its loads (Cl, Cl_pressure, Cd, Cd_friction, Cd_pressure, Cm), its
+    its loads (Cl, Cl_circulation, Cl_pressure, Cd, Cd_friction, Cd_pressure, Cm), its
     transition positions and its node and wake distributions are NaN. The
     convergence flag, the reason, the residual and the iteration count
     stay.
@@ -865,7 +876,8 @@ def row_from_result(setup, res, alpha) -> dict:
     o = vii.case_outputs(setup, res.state, res.ue)
     return {
         "alpha": float(alpha),
-        "Cl": o["Cl"],
+        "Cl": o["Cl_pressure"] if setup.sys.ground else o["Cl"],
+        "Cl_circulation": o["Cl"],
         "Cd": o["Cd"],
         "Cd_friction": o["Cd_friction"],
         "Cd_pressure": o["Cd_pressure"],
@@ -903,7 +915,8 @@ def _failed_row(alpha, body, reason, wake_x=None) -> dict:
     wake = {} if wake_x is None else {"x": wake_x, "theta": arr(len(wake_x)), "H": arr(len(wake_x)),
                                       "ue": arr(len(wake_x))}
     return {
-        "alpha": float(alpha), "Cl": nan, "Cd": nan, "Cd_friction": nan, "Cd_pressure": nan, "Cm": nan,
+        "alpha": float(alpha), "Cl": nan, "Cl_circulation": nan, "Cd": nan, "Cd_friction": nan,
+        "Cd_pressure": nan, "Cm": nan,
         "transition_positions": (nan, nan), "separation_flags": (False, False), "Cp": arr(), "H": arr(),
         "theta": arr(), "Cf": arr(), "iterations": 0, "residual": nan, "converged": False,
         "coordinates": body, "reason": reason, "Cl_pressure": nan, "delta_star": arr(), "ue": arr(), "wake": wake,

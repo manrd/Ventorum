@@ -7,11 +7,18 @@ against the lumped-vortex reference with ground images.
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import numpy as np
 import pytest
 
+from ventorum.aero.polar_source_v2d import Ventorum2DPolarSource
+from ventorum.airfoil import airfoil
 from ventorum.airfoil.naca import naca4
+from ventorum.panel2d import vii
 from ventorum.panel2d.solver import solve_inviscid
+from ventorum.panel2d.viscous import solve_viscous
+from ventorum.panel2d.viscous_batch import ViscousCase, solve_viscous_batch
 from ventorum.reference.cambered_plate import cambered_plate
 from ventorum.reference.karman_trefftz import karman_trefftz_airfoil
 
@@ -88,3 +95,89 @@ def test_thin_flat_plate_matches_discrete_vortex_reference():
 
     circ_diff = abs(res.Cl_circulation - ref_cl) / ref_cl
     assert circ_diff > 0.08
+
+
+@pytest.fixture
+def viscous_loads(monkeypatch):
+    """Record the circulation and pressure loads before result assembly."""
+    outputs = vii.case_outputs
+    loads = {}
+
+    def record(setup, state, ue):
+        result = outputs(setup, state, ue)
+        loads[(setup.sys.alpha, setup.sys.nodes.tobytes())] = result
+        return result
+
+    monkeypatch.setattr(vii, "case_outputs", record)
+    return loads
+
+
+def _check_viscous_lift(result, height, loads):
+    """Check the reported lift against the unchanged internal load outputs."""
+    assert np.all(result.converged)
+    ground = height is not None
+    coordinates = [result.coordinates] if np.ndim(result.alpha) == 0 else result.coordinates
+    expected = [loads[(a, nodes.tobytes())]
+                for a, nodes in zip(np.atleast_1d(result.alpha), coordinates)]
+    circulation = np.array([o["Cl"] for o in expected])
+    pressure = np.array([o["Cl_pressure"] for o in expected])
+    assert np.array_equal(np.atleast_1d(result.Cl_circulation), circulation)
+    assert np.array_equal(np.atleast_1d(result.Cl_pressure), pressure)
+    assert np.array_equal(np.atleast_1d(result.Cl), pressure if ground else circulation)
+    assert not np.array_equal(circulation, pressure)
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize("height", [None, 0.3, 0.2])
+@pytest.mark.parametrize("alphas", [4.0, [4.0, 5.0]], ids=["scalar", "sweep"])
+def test_viscous_lift_field_choice(height, alphas, viscous_loads):
+    """Keep circulation lift exactly, and report pressure lift near the ground."""
+    shape = airfoil("4412", n_points=161)
+    result = solve_viscous(shape, alphas, 1e6, height=height)
+    _check_viscous_lift(result, height, viscous_loads)
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize("device", ["cpu", pytest.param("cuda", marks=pytest.mark.gpu)])
+def test_viscous_batch_lift_field_choice(device, viscous_loads):
+    """Both batch paths use the same lift rule, including a warm start."""
+    torch = pytest.importorskip("torch")
+    if device == "cuda" and not torch.cuda.is_available():
+        pytest.skip("CUDA is not available")
+    shape = airfoil("4412", n_points=161)
+    cases = [ViscousCase(shape, a, 1e6, height=h)
+             for h in (None, 0.3, 0.2) for a in (4.0, 5.0)]
+    results = solve_viscous_batch(cases, device=device, dtype=torch.float64)
+    for case, result in zip(cases, results):
+        _check_viscous_lift(result, case.height, viscous_loads)
+
+
+@pytest.mark.parametrize("mode", ["scalar", "sweep", "batch"])
+def test_failed_viscous_circulation_is_nan(mode):
+    """Failed results keep all lift fields as NaN on every assembly path."""
+    shape = airfoil("4412", n_points=81)
+    if mode == "batch":
+        result = solve_viscous_batch(
+            [ViscousCase(shape, 4.0, 1e6, height=0.3, work_budget=1)], device="cpu"
+        )[0]
+    else:
+        with pytest.warns(UserWarning, match="did not converge"):
+            result = solve_viscous(shape, 4.0 if mode == "scalar" else [4.0],
+                                   1e6, height=0.3, work_budget=1)
+    assert not np.any(result.converged)
+    assert np.all(np.isnan(result.Cl))
+    assert np.all(np.isnan(result.Cl_pressure))
+    assert np.all(np.isnan(result.Cl_circulation))
+
+
+@pytest.mark.parametrize("height", [None, 0.3, 0.2])
+def test_polar_source_uses_reported_viscous_lift(monkeypatch, height):
+    """The polar source reads Cl from the solver for every height."""
+    def solve(*args, **kwargs):
+        return SimpleNamespace(alpha=np.array([4.0]), Cl=np.array([0.5]),
+                               Cl_pressure=np.array([0.4]), Cd=np.array([0.01]),
+                               Cm=np.array([0.0]), converged=np.array([True]))
+
+    monkeypatch.setattr("ventorum.aero.polar_source_v2d.solve_viscous", solve)
+    polar = Ventorum2DPolarSource(cache=False).polar("4412", 1e6, [4.0], height=height)
+    assert np.array_equal(polar.Cl_data, [0.5])

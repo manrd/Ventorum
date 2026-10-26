@@ -420,8 +420,7 @@ class Ventorum2DPolarSource:
         )
 
         res_alphas = np.atleast_1d(np.asarray(res.alpha, dtype=float))
-        cl_raw = getattr(res, "Cl_pressure", res.Cl) if h_val is not None else res.Cl
-        res_cls = np.atleast_1d(np.asarray(cl_raw, dtype=float))
+        res_cls = np.atleast_1d(np.asarray(res.Cl, dtype=float))
         res_cds = np.atleast_1d(np.asarray(res.Cd, dtype=float))
         res_cms = np.atleast_1d(np.asarray(res.Cm, dtype=float))
         res_conv = np.atleast_1d(np.asarray(res.converged, dtype=bool))
