@@ -66,6 +66,7 @@ import warnings
 from collections.abc import Sequence
 
 import numpy as np
+import scipy.linalg
 import scipy.sparse
 
 from ventorum import gpu
@@ -854,6 +855,163 @@ def _build_geometry(
     )
 
 
+def _morino_section_line(polygon, ground=None):
+    """Return the lift line and moment quadratic of a unit-chord polygon.
+
+    The constant source/doublet Dirichlet method uses the two-dimensional
+    logarithmic Green function and its normal derivative. The wake is a
+    semi-infinite doublet sheet along +x. Its strength is the upper minus
+    lower trailing-edge doublet. See Katz and Plotkin (2001), chapters 11
+    and 12, and Morino and Kuo (1974). Coordinates are in chord units in
+    upper-TE, LE, lower-TE order. Two unit onsets share one factorization.
+    An optional ground line has a unit normal and an offset in chord
+    units. Equal-strength source and reflected doublet images impose
+    zero normal velocity there (Katz and Plotkin, method of images).
+
+    Returns
+    -------
+    tuple
+        Lift slope [1/rad], zero-lift angle [rad], and coefficients [-]
+        of Cm = c0 + cxx cos(alpha)^2 + cxz cos(alpha) sin(alpha)
+        + czz sin(alpha)^2. The moment reference is the clean quarter chord.
+    """
+    points = np.asarray(polygon, dtype=float)
+    edges = np.diff(points, axis=0)
+    length = np.linalg.norm(edges, axis=1)
+    tangent = edges / length[:, None]
+    normal = np.column_stack([tangent[:, 1], -tangent[:, 0]])
+    center = 0.5 * (points[:-1] + points[1:])
+    def matrices(vertices, tangents, normals):
+        rel = center[:, None, :] - vertices[None, :-1, :]
+        x = np.sum(rel * tangents, axis=-1)
+        h = np.sum(rel * normals, axis=-1)
+        ah = np.abs(h)
+
+        def primitive(u):
+            return 0.5 * u * np.log(np.maximum(u * u + h * h, 1e-300)) - u + ah * np.arctan2(u, ah)
+
+        b = (primitive(x) - primitive(x - length)) / (2 * np.pi)
+        c = -np.sign(h) * (np.arctan2(x, ah) - np.arctan2(x - length, ah)) / (2 * np.pi)
+        return b, c
+
+    def wake_column(origin, direction, wake_normal):
+        relative = center - origin
+        x, h = relative @ direction, relative @ wake_normal
+        return -np.sign(h) * (np.arctan2(x, np.abs(h)) + np.pi / 2) / (2 * np.pi)
+
+    b, c = matrices(points, tangent, normal)
+    np.fill_diagonal(c, 0.5)
+    direction = np.array([1.0, 0.0])
+    if ground is not None:
+        ng, offset = ground
+        reflection = np.eye(2) - 2 * np.outer(ng, ng)
+        image = points @ reflection + 2 * offset * ng
+        bi, ci = matrices(image, tangent @ reflection, normal @ reflection)
+        b += bi
+        c += ci
+        direction -= (direction @ ng) * ng
+        direction /= np.linalg.norm(direction)
+    wake_normal = np.array([-direction[1], direction[0]])
+    wake = wake_column(points[0], direction, wake_normal)
+    if ground is not None:
+        wake += wake_column(image[0], direction @ reflection, wake_normal @ reflection)
+    c[:, 0] += wake
+    c[:, -1] -= wake
+    mu = scipy.linalg.lu_solve(scipy.linalg.lu_factor(c), b @ normal)
+    # Interior nodes use inverse-distance interpolation, as the panel
+    # surface gradient. The trailing edge cuts the upper/lower connection.
+    node = (length[1:, None] * mu[:-1] + length[:-1, None] * mu[1:]) / (
+        length[:-1] + length[1:]
+    )[:, None]
+    gradient = np.empty_like(mu)
+    gradient[1:-1] = (node[1:] - node[:-1]) / length[1:-1, None]
+    gradient[0] = (mu[1] - mu[0]) / np.dot(center[1] - center[0], tangent[0])
+    gradient[-1] = (mu[-1] - mu[-2]) / np.dot(center[-1] - center[-2], tangent[-1])
+    velocity = tangent - gradient
+
+    def lift(angle):
+        direction = np.array([np.cos(angle), np.sin(angle)])
+        cp = 1 - (velocity @ direction)**2
+        force = -np.sum(cp[:, None] * length[:, None] * normal, axis=0)
+        return force @ np.array([-np.sin(angle), np.cos(angle)])
+
+    step = np.radians(1.0)
+    cl0 = lift(0.0)
+    slope = (lift(step) - cl0) / step
+    # Positive pitch is z Fx - x Fz in the geometry x-z plane.
+    arm = center - np.array([0.25, 0.0])
+    weight = -length * (arm[:, 1] * normal[:, 0] - arm[:, 0] * normal[:, 1])
+    moment = np.array([np.sum(weight), -np.sum(weight * velocity[:, 0]**2),
+                       -2 * np.sum(weight * velocity[:, 0] * velocity[:, 1]),
+                       -np.sum(weight * velocity[:, 1]**2)])
+    return float(slope), float(-cl0 / slope), moment
+
+
+def _panel_section_lines(mesh, maps, lattice, strips, ground=None, with_images=None):
+    """Solve the actual midspan section polygons of reporting strips in 2D.
+
+    Panel metadata selects the upper and lower chordwise segments. The
+    intersection with the reporting section plane gives its polygon. Coordinates
+    are projected into the clean section frame and divided by chord [m].
+    Return slopes [1/rad], zero-lift angles [rad], and moment quadratics [-].
+    """
+    slopes, zeros, moments = [], [], []
+    memo = {}
+    for index, (ids, strip) in enumerate(zip(maps, strips)):
+        ids = np.asarray(ids, dtype=int)
+        skin = ids[np.asarray(mesh.side)[ids] != 0]
+        rows = np.unique(np.asarray(mesh.strip)[skin])
+        target = lattice.qc_mid[strip]
+        axis = np.cross(lattice.normal[strip], lattice.chord_dir[strip])
+        distances = []
+        for row in rows:
+            vertices = mesh.nodes[mesh.panels[skin[mesh.strip[skin] == row]]]
+            span = (vertices - target) @ axis
+            distances.append(max(float(np.min(span)), -float(np.max(span)), 0.0))
+        row = rows[np.argmin(distances)]
+        skin = skin[mesh.strip[skin] == row]
+        chains = []
+        for side in (1, -1):
+            panels = skin[mesh.side[skin] == side]
+            panels = panels[np.argsort(mesh.chord_index[panels])]
+            chain = []
+            for pid in panels:
+                vertices = mesh.panels[pid]
+                stations = mesh.node_station[vertices]
+                segments = []
+                for station in np.unique(stations):
+                    p = mesh.nodes[vertices[stations == station]]
+                    p = p[np.argsort(p @ lattice.chord_dir[strip])]
+                    segments.append(p)
+                mids = np.mean(segments, axis=1)
+                fraction = np.dot(target - mids[0], axis) / np.dot(mids[1] - mids[0], axis)
+                segment = segments[0] + fraction * (segments[1] - segments[0])
+                chain.append(segment[0])
+            chain.append(segment[-1])
+            chains.append(np.asarray(chain))
+        polygon = np.vstack([chains[0][::-1], chains[1][1:]])
+        origin = 0.5 * (lattice.le_left[strip] + lattice.le_right[strip])
+        relative = (polygon - origin) / lattice.chord[strip]
+        coords = np.column_stack([relative @ lattice.chord_dir[strip], relative @ lattice.normal[strip]])
+        section_ground = None
+        if ground is not None and with_images[index]:
+            ng = np.array([ground.normal @ lattice.chord_dir[strip], ground.normal @ lattice.normal[strip]])
+            norm = np.linalg.norm(ng)
+            if norm < 1e-12:
+                raise ValueError("The ground plane has no normal in this 2D section plane.")
+            offset = (ground.offset - ground.normal @ origin) / (lattice.chord[strip] * norm)
+            section_ground = ng / norm, offset
+        key = (np.round(coords, 12).tobytes(), None if section_ground is None
+               else tuple(np.round(np.r_[section_ground[0], section_ground[1]], 12)))
+        if key not in memo:
+            memo[key] = _morino_section_line(coords, section_ground)
+        a, a0, cm = memo[key]
+        slopes.append(a)
+        zeros.append(a0)
+        moments.append(cm)
+    return np.asarray(slopes), np.asarray(zeros), np.asarray(moments)
+
+
 class PanelMethodSolver(BaseSolver):
     """Inviscid three-dimensional potential flow panel solver.
 
@@ -1025,6 +1183,9 @@ class PanelMethodSolver(BaseSolver):
 
         # 2. Mesh, strip data and mesh check (from the solver cache when it has them)
         use_cache = bool(getattr(settings, "panel_cache", True))
+        coupling = getattr(self, "_viscous_coupling", None)
+        if coupling is not None:
+            use_cache = False
         geom_key = None
         geometry = None
         if use_cache:
@@ -1064,7 +1225,7 @@ class PanelMethodSolver(BaseSolver):
         solver_class = PanelSolver
 
         def build_solver():
-            return solver_class(
+            panel_solver = solver_class(
                 mesh,
                 wake_length=wake_length,
                 S_ref=s_ref,
@@ -1076,6 +1237,9 @@ class PanelMethodSolver(BaseSolver):
                 ground_solver=ground_solver,
                 dtype=precision if backend == "gpu" else None,
             )
+            if coupling is not None:
+                coupling.prepare(panel_solver, geometry, ac, settings, cond_list)
+            return panel_solver
 
         key = None
         if use_cache:
@@ -1239,6 +1403,8 @@ class PanelMethodSolver(BaseSolver):
                     "relative_residuals": dict(cfg.relative_residuals),
                     "fallbacks": copy.deepcopy(cfg.fallbacks),
                 })
+                if coupling is not None:
+                    coupling.finish_result(result, solver, geometry, ac)
                 for msg in all_notes:
                     warnings.warn(msg, RuntimeWarning, stacklevel=2)
 

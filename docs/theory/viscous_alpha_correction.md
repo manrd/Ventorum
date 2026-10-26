@@ -121,3 +121,160 @@ It is reported as `totals.CDp`, apart from the induced drag `totals.CDi` (Trefft
 ## Hardware
 
 The coupling runs on the CPU. A GPU path is planned for a later version.
+
+## Thick-surface panel coupling
+
+`solve_viscous(..., model="panel3d")` matches the pressure-integrated lift of
+each reporting strip. It uses the existing body panel partition, including
+tip and control closure panels. Its area-weighted strip lift is the lift
+reported in `totals.CL`. The vortex-lattice and lifting-line paths keep
+their own section models.
+
+The panel coupling uses these published methods:
+
+- M. J. Lighthill, "On Displacement Thickness", *Journal of Fluid
+  Mechanics*, 4(4), 1958, pp. 383-392: the normal transpiration equivalent
+  of a displacement of the flow boundary.
+- L. Morino and C. C. Kuo, "Subsonic Potential Aerodynamics for Complex
+  Configurations: A General Theory", *AIAA Journal*, 12(2), 1974,
+  pp. 191-197: the interior Dirichlet formulation.
+- J. Katz and A. Plotkin, *Low-Speed Aerodynamics*, 2nd ed., 2001,
+  chapters 11 and 12: source and doublet panels, surface pressure, and
+  the Kutta condition. The method of images supplies the ground boundary.
+- S. A. Kinnas and C. Y. Hsin, "Boundary Element Method for the Analysis
+  of the Unsteady Flow Around Extreme Propeller Geometries", *AIAA
+  Journal*, 30(3), 1992: iterative pressure Kutta closure.
+
+### Source response and reuse of the factorization
+
+The interior system is $A\mu=-B\sigma$, with
+$\sigma_i=-\mathbf n_i\cdot\mathbf V_i$. A positive strip correction
+$\delta_k$ [rad] reduces the onset angle. To first order,
+
+$$\Delta\mathbf V_i=-V_\infty\mathbf u_\alpha\delta_k,
+\qquad S_{ik}=V_\infty\mathbf n_i\cdot\mathbf u_\alpha,
+\quad i\in\mathcal P_k,$$
+
+where $\mathbf u_\alpha=\cos\beta[-\sin\alpha,0,\cos\alpha]^T$.
+The change is applied to both the source boundary condition and the
+tangential onset used for pressure. The ground images have the same
+source strengths and reflected doublet geometry as the inviscid solver.
+
+During each bounded source-matrix chunk, the assembly also accumulates
+
+$$R_{x,:,k}=\sum_{i\in\mathcal P_k}B_{:,i}\sigma_{\mathrm{unit},i,0},
+\qquad
+R_{z,:,k}=\sum_{i\in\mathcal P_k}B_{:,i}\sigma_{\mathrm{unit},i,2}.$$
+
+No source matrix is retained and no influence pair is evaluated again
+for the strip response. Before the Morino factors are released, the same
+LU factors solve $U_x=-A^{-1}R_x$ and $U_z=-A^{-1}R_z$. Then
+
+$$G(\alpha,\beta)=V_\infty\cos\beta
+\left(\sin\alpha\,U_x-\cos\alpha\,U_z\right),
+\qquad \mu(\delta)=\mu_0+G\delta.$$
+
+For a fixed free-air configuration, $\sum_kG_{:,k}=-\partial\mu/\partial\alpha$.
+Every angle of a sweep uses these unit responses without another body
+triangular solve. Response arrays count toward the factor pool budget
+and are released with their configuration. The shared body source sums
+also count toward that budget. As for the inviscid factor pool, a running
+configuration may exceed the budget until its condition group finishes.
+Only one condition's velocity-response columns are formed at a time.
+
+### The thick section reference
+
+The reporting section plane cuts the actual upper and lower mesh panels.
+The resulting polygon is expressed in the clean chord frame. A 2D Morino
+solve on this polygon supplies the pressure lift at zero and one degree,
+which define $a_{j,2D}$ [1/rad] and $\alpha_{0,j,2D}$ [rad]. This is a
+constant-source/doublet Dirichlet solve with the logarithmic 2D Green
+function and a semi-infinite wake. It does not use the slope of the
+viscous polar, a prescribed thin-airfoil slope, or a finite-span substitute.
+Two unit onsets share one section factorization. Section factorizations
+are separate from the 3D body factorization count.
+
+Surface gradients use adjacent panel values and inverse-distance node
+interpolation. The upper and lower trailing-edge connections are cut.
+The same two unit responses give the inviscid section moment as a
+quadratic in the sine and cosine of the section angle. If a polar has a
+ground-height axis, the section reference includes the corresponding
+source and doublet images. A free-air polar uses the free-air reference.
+
+### Pressure residual and Jacobian
+
+The coupled strip equations are
+
+$$r_j=C_{l,p,j}(\delta)-C_{l,\mathrm{visc},j}(\alpha_{v,j})+o_j,
+\qquad
+\alpha_{v,j}=\alpha_{0,j,2D}+\frac{C_{l,p,j}}{a_{j,2D}}+\delta_j.$$
+
+The flap offset $o_j$ uses the clean thick-section zero-lift angle and
+the polar's Glauert flap shift, with the same ground factor as the
+lattice coupling. It is zero without a deflected control.
+
+Let $H_{jk}=\partial C_{l,p,j}/\partial x_k$, where $x$ holds the strip
+angles and, for pressure Kutta, the wake shifts. The surface gradient
+columns of the body response are computed once per condition. The
+velocity is affine in $x$, so its exact pressure derivative is
+
+$$\frac{\partial C_{p,i}}{\partial x_k}
+=-\frac{2}{V_\infty^2}\mathbf V_i\cdot
+\frac{\partial\mathbf V_i}{\partial x_k}.$$
+
+Strip pressure integration gives $H$. If $m_j=dC_{l,\mathrm{visc},j}/d\alpha$,
+then the lift rows of the Jacobian are
+
+$$J_{jk}=\left(1-\frac{m_j}{a_{j,2D}}\right)H_{jk}
+-m_j I_{jk},$$
+
+where $I$ selects the strip-angle columns. The Newton solve uses a
+backtracking line search and a damped step on the inviscid response when
+the Newton step fails. At a sharp stall turnover, the attached and
+stalled seeds can restart a failed primary iteration within its remaining
+iteration budget. Only converged solutions form reported branches.
+`recovery_runs` and `branch_search_runs` report the two kinds of attempts.
+
+With `panel_kutta="pressure"`, the body doublets are
+
+$$\mu=\mu_0+G\delta+Z\Delta\mu_w,\qquad Z=-A^{-1}D^w.$$
+
+The Newton residual also contains $C_{p,\mathrm{up}}-C_{p,\mathrm{lo}}$
+at each wake strip. Its Jacobian is the difference of the corresponding
+pressure derivatives. Thus lift matching and pressure Kutta closure are
+solved together. The wake response uses the same body LU and is cached
+once per configuration. Corrected wake strengths supply the Trefftz drag.
+
+### Profile drag, moment, and supported execution
+
+Profile drag is $\sum_j S_j C_{d,j}(\alpha_{v,j})/S_\mathrm{ref}$.
+The lumped section moment correction is
+
+$$\Delta C_{m,j}=C_{m,\mathrm{visc},j}(\alpha_{v,j})
+-C_{m,2D,\mathrm{inv},j}(\alpha_{e,j}),\qquad
+\alpha_{e,j}=\alpha_{0,j,2D}+C_{l,p,j}/a_{j,2D}.$$
+
+The strip moment receives this correction about its local span axis.
+The area-and-chord integral corrects the total body moments. The pressure
+distribution itself keeps its one-variable correction. A polar with the
+section lift line gives zero angle correction; matching the inviscid
+moment and zero profile drag also reproduces all inviscid loads.
+
+NumPy and Numba CPU backends are supported. A GPU request raises an error.
+In ground effect, `auto` selects one direct LU per configuration and
+records this choice in the dispatch report. An explicit `krylov` request
+raises an error because that mode does not supply the required direct
+strip responses. Different ground attitudes can have different wakes and
+therefore different factorizations. Free-air sweeps share one body LU.
+The viscous call owns its solver for the sweep; it does not share an
+inviscid solver from the global cache.
+
+A direct `PanelSolver` call with viscous strips on a half mesh rejects
+asymmetric flow. Use a full mesh for that flow. Only symmetric half-mesh
+responses or full-mesh responses are stored. The pressure-response cache
+applies the same restriction, including when a response is already cached.
+
+The optional `panel_estimate_mesh_error=True` setting raises `ValueError`
+with this coupling because its refinement driver uses inviscid panel
+solves. Run the mesh study inviscid. Keep this setting at its default value,
+`False`, for the coupled solve.

@@ -273,6 +273,8 @@ class _Configuration:
     wake_shared: bool = False
     ground_anchor: bool = False
     factor_use: int = 0
+    viscous_units: np.ndarray | None = None
+    viscous_wake: tuple | None = None
 
 
 def _standardize_panels(panels: np.ndarray, nodes: np.ndarray | None = None) -> np.ndarray:
@@ -622,6 +624,10 @@ class PanelSolver:
         self._protected_factors: set[tuple] = set()
         self._factors_dropped = 0
         self._configurations_evicted = 0
+        self._viscous_strips = None
+        self._viscous_evaluator = None
+        self._viscous_solve_count = 0
+        self._viscous_rhs_count = 0
         if self.backend == "gpu":
             import torch
 
@@ -647,7 +653,7 @@ class PanelSolver:
 
     @staticmethod
     def _factor_bytes(cfg: _Configuration) -> tuple[int, int]:
-        """Return host and device bytes held by the LU and pivot arrays [bytes]."""
+        """Return bytes held by factors and optional viscous responses [bytes]."""
         host = device = 0
         for factors in cfg.systems.values():
             for array in factors or ():
@@ -657,6 +663,12 @@ class PanelSolver:
                     host += array.numel() * array.element_size()
                 else:
                     device += array.numel() * array.element_size()
+        arrays = [cfg.viscous_units, *(cfg.viscous_wake or ())]
+        seen = set()
+        for array in arrays:
+            if isinstance(array, np.ndarray) and id(array) not in seen:
+                host += int(array.nbytes)
+                seen.add(id(array))
         return host, device
 
     def _read_factor_budgets(self) -> None:
@@ -683,6 +695,10 @@ class PanelSolver:
                 cfg.systems[parity] = None
                 self._factors_dropped += 1
         cfg.ground_anchor = False
+        if self._viscous_strips is not None:
+            cfg.viscous_units = None
+            cfg.viscous_wake = None
+            cfg.systems.clear()
 
     def _trim_factors(self, incoming: tuple[int, int] = (0, 0)) -> None:
         """Make room for incoming host and device factors [bytes], in LRU order.
@@ -692,6 +708,10 @@ class PanelSolver:
         """
         pool = [(cfg, self._factor_bytes(cfg)) for cfg in self._configs.values()]
         host = incoming[0] + sum(size[0] for _, size in pool)
+        if self._viscous_strips is not None:
+            # The free-air source sums belong to the shared body geometry.
+            host += sum(a[:, -2 * len(self._viscous_strips):].nbytes
+                        for key, a in (self._body_parts or {}).items() if key.startswith("rhs_"))
         device = incoming[1] + sum(size[1] for _, size in pool)
         for cfg, size in sorted(pool, key=lambda item: item[0].factor_use):
             if host <= self._factor_budget_host and device <= self._factor_budget_device:
@@ -806,6 +826,8 @@ class PanelSolver:
         float64.
         """
         sigma = np.ascontiguousarray(self._unit_sigma[:, list(cols)])
+        if self._viscous_strips is not None:
+            return self._viscous_pair_system(panels_a, panels_b, sign, sigma)
         if self.backend == "gpu":
             from ventorum.panel3d import gpu as gpu_mod
 
@@ -826,6 +848,73 @@ class PanelSolver:
                 self.centroids, panels_a, panels_b, sign, sigma, far_ratio=self.far_ratio
             )
         return pair_system(self.centroids, panels_a, panels_b, sign, sigma, far_ratio=self.far_ratio)
+
+    def _set_viscous_strips(self, strips) -> None:
+        """Enable strip source sums before assembly (panel indices, no units)."""
+        if self.backend == "gpu":
+            raise ValueError("Viscous panel coupling requires a CPU backend; GPU is not supported.")
+        if self.ground_solver == "krylov":
+            raise ValueError("Viscous panel coupling requires one direct LU per configuration.")
+        if self._configs or self._body_parts is not None:
+            raise ValueError("Set viscous strips before the first panel solve.")
+        maps = [np.asarray(ids, dtype=int) for ids in strips]
+        if not maps or not np.array_equal(np.sort(np.concatenate(maps)), np.arange(len(self.centroids))):
+            raise ValueError("Viscous strips must partition every body panel exactly once.")
+        self._viscous_strips = maps
+
+    def _viscous_pair_system(self, panels_a, panels_b, sign, sigma):
+        """Accumulate unit and strip source sums from each bounded kernel chunk.
+
+        Each source/doublet pair is evaluated once. The source matrix is
+        discarded after its target chunk. The two strip columns hold the
+        x and z unit source sums (m^2/s per unit onset).
+        """
+        from ventorum.panel3d.kernels import _CHUNK_BUDGET
+
+        n = len(self.centroids)
+        ns = len(self._viscous_strips)
+        k = sigma.shape[1]
+        matrix = np.empty((n, n))
+        rhs = np.empty((n, k + 2 * ns))
+        size = max(1, _CHUNK_BUDGET // n)
+        for start in range(0, n, size):
+            stop = min(n, start + size)
+            b, c = self._matrices(self.centroids[start:stop], panels_a)
+            if panels_b is not None:
+                bm, cm = self._matrices(self.centroids[start:stop], panels_b)
+                b += sign * bm
+                c += sign * cm
+                del bm, cm
+            matrix[start:stop] = c
+            rhs[start:stop, :k] = b @ sigma
+            for j, ids in enumerate(self._viscous_strips):
+                rhs[start:stop, k + j] = b[:, ids] @ self._unit_sigma[ids, 0]
+                rhs[start:stop, k + ns + j] = b[:, ids] @ self._unit_sigma[ids, 2]
+        return matrix, rhs
+
+    def _viscous_response(self, cfg, condition):
+        """Return body doublet sensitivity (m^2/s per rad) to strip corrections.
+
+        The source change is V n dot u_alpha. With U = -A^-1 R,
+        G = V (sin(alpha) U_x - cos(alpha) U_z). No angle needs an LU solve.
+        """
+        ns = len(self._viscous_strips)
+        return float(condition.V_inf) * np.cos(condition.beta) * (
+            np.sin(condition.alpha) * cfg.viscous_units[:, :ns]
+            - np.cos(condition.alpha) * cfg.viscous_units[:, ns:]
+        )
+
+    def _viscous_pressure_response(self, cfg, coeffs):
+        """Cache the wake response once per configuration (m^2/s per m^2/s)."""
+        if self._viscous_strips is not None and self.mesh.half and np.any(coeffs[list(_ASYM_COLS)] != 0.0):
+            raise ValueError(
+                "Viscous panel coupling does not support asymmetric flow on a half mesh; use a full mesh."
+            )
+        if cfg.viscous_wake is None:
+            cfg.viscous_wake = self._pressure_sensitivity(cfg, coeffs)
+            self._viscous_solve_count += 1
+            self._viscous_rhs_count += cfg.viscous_wake[0].shape[1]
+        return cfg.viscous_wake
 
     def _doublet(self, points: np.ndarray, panels: np.ndarray) -> np.ndarray:
         """Return the doublet potentials with the selected CPU backend."""
@@ -1133,7 +1222,8 @@ class PanelSolver:
     def _uses_ground_krylov(self, cfg: _Configuration) -> bool:
         """Return whether this configuration can use CPU float64 GMRES."""
         return (self.ground_solver in ("auto", "krylov") and cfg.ground is not None
-                and self.backend != "gpu" and self.kutta == "morino")
+                and self.backend != "gpu" and self.kutta == "morino"
+                and self._viscous_strips is None)
 
     def _ground_height(self, cfg: _Configuration) -> float:
         """Return the height [m] of the moment reference point above the ground of *cfg*.
@@ -1332,6 +1422,8 @@ class PanelSolver:
     def _ensure(self, cfg: _Configuration, parities: list[str]) -> None:
         """Solve missing unit systems, with an optional ground LU anchor."""
         if not self._uses_ground_krylov(cfg):
+            if self._viscous_strips is not None and cfg.ground is not None:
+                cfg.ground_solver_reason = "viscous coupling: one direct LU per configuration"
             self._ensure_direct(cfg, parities)
             return
         missing = [p for p in parities if p not in cfg.systems]
@@ -1399,6 +1491,10 @@ class PanelSolver:
         on the trailing-edge columns. Only the factorized systems, the
         body parity matrices and the strip matrices are kept.
         """
+        if self._viscous_strips is not None and "asym" in parities:
+            raise ValueError(
+                "Viscous panel coupling does not support asymmetric flow on a half mesh; use a full mesh."
+            )
         keep_factors = self.kutta == "pressure" or cfg.ground_anchor
         missing = [p for p in parities if p not in cfg.systems
                    or (keep_factors and cfg.systems[p] is None)]
@@ -1414,6 +1510,8 @@ class PanelSolver:
         itemsize = self._gpu_dtype.itemsize if self.backend == "gpu" else 8
         incoming = (len(missing) * (n_panels * n_panels * itemsize + n_panels * 4)
                     if keep_factors else 0)
+        if self._viscous_strips is not None:
+            incoming += n_panels * 2 * len(self._viscous_strips) * 8
         self._trim_factors((0, incoming) if self.backend == "gpu" else (incoming, 0))
         self._check_gpu_memory(half, in_ground, len(missing), body_cached)
         has_wake = len(cfg.wake.panels) > 0
@@ -1448,7 +1546,13 @@ class PanelSolver:
             lu_info = self._factorize(mat_a)
             del mat_a
             cfg.systems[parity] = lu_info
-            self._unit_solutions(cfg, lu_info, rhs, cols, parity)
+            if self._viscous_strips is None:
+                self._unit_solutions(cfg, lu_info, rhs, cols, parity)
+            elif parity in ("sym", "full"):
+                self._unit_solutions(cfg, lu_info, rhs[:, :len(cols)], cols, parity)
+                cfg.viscous_units = scipy.linalg.lu_solve(lu_info, -rhs[:, len(cols):])
+                self._viscous_solve_count += (1 if parity == "full" else len(cols)) + 1
+                self._viscous_rhs_count += rhs.shape[1]
             cfg.iterations.update(dict.fromkeys(cols, 0))
             cfg.relative_residuals.update(dict.fromkeys(cols))
             if not keep_factors:
@@ -1998,7 +2102,11 @@ class PanelSolver:
             group_conditions = [conds[i] for i in indices]
             coeff_rows = _condition_arrays(group_conditions)[0]
             self._ensure(cfg, self._parities_needed(coeff_rows))
-            if self.kutta == "morino":
+            if self._viscous_evaluator is not None:
+                for idx in indices:
+                    results[idx] = self._viscous_evaluator(self, cfg, conds[idx])
+                cfg.strips.clear()
+            elif self.kutta == "morino":
                 size = max(1, _CONDITION_BATCH_BYTES // self._condition_bytes())
                 for start in range(0, len(indices), size):
                     chunk = indices[start:start + size]
