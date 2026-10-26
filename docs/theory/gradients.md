@@ -385,7 +385,11 @@ closed form: central differences are the method there), for a nonlinear lifting-
 solve that did not converge, for the planform input with tabulated airfoils, and for the
 section input (`"sections"`) when a surface has a tabulated airfoil (some of `a0`,
 `alpha_L0`, `Cd0` and `Cm0` do not enter the result on a tabulated strip, so their
-derivatives would be zeros without a meaning). The compressibility correction
+derivatives would be zeros without a meaning) or when all sections of a surface have a
+shape given (until section shapes admit shape derivatives). Mean-line camber offsets carry
+through the adjoint gradient chains (`nodes`, `planform`, `controls`) just like geometric
+flaps. The section pitching moment $C_{m0}$ is dropped on cambered strips because the
+camber line carries it. The compressibility correction
 (`mach > 0`) is supported for the vortex lattice in free air; ground effect and the
 lifting lines refuse it, and the `"mach"` input needs a Mach number in the condition. In
 ground effect `h` is the height of the moment reference point, and the ground plane and

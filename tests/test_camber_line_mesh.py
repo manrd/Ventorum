@@ -480,17 +480,40 @@ def test_cambered_chordwise_control_turns_geometric_normals():
 
 @pytest.mark.parametrize("wrt", [("nodes",), ("planform",), ("alpha",), ("nodes", "alpha")])
 @pytest.mark.parametrize("entry", ["gradients", "gradient_vjp", "check_gradients"])
-def test_mean_line_gradient_chain_refusal_is_explicit(wrt, entry):
+def test_mean_line_gradient_chains(wrt, entry):
     import ventorum.sensitivity as sensitivity
+
+    def _assert_finite(obj):
+        if obj is None:
+            return
+        if isinstance(obj, dict):
+            for v in obj.values():
+                _assert_finite(v)
+        elif isinstance(obj, (list, tuple)):
+            for v in obj:
+                _assert_finite(v)
+        else:
+            assert np.all(np.isfinite(obj))
 
     kwargs = {"wrt": wrt}
     if entry == "gradient_vjp":
         kwargs["seeds"] = {"CL": 1.0}
+        res = getattr(sensitivity, entry)(_aircraft(), FlightCondition(V_inf=30.0, alpha=0.05),
+                                         SolverSettings(n_panels=4, n_chord=4), **kwargs)
+        for name in wrt:
+            _assert_finite(res[name])
+    elif entry == "gradients":
+        kwargs["outputs"] = ("CL",)
+        res = getattr(sensitivity, entry)(_aircraft(), FlightCondition(V_inf=30.0, alpha=0.05),
+                                         SolverSettings(n_panels=4, n_chord=4), **kwargs)
+        for name in wrt:
+            _assert_finite(res.jacobian["CL"][name])
     else:
         kwargs["outputs"] = ("CL",)
-    with pytest.raises(sensitivity.GradientScopeError, match="mean.line offset"):
-        getattr(sensitivity, entry)(_aircraft(), FlightCondition(V_inf=30.0, alpha=0.05),
-                                    SolverSettings(n_panels=4, n_chord=4), **kwargs)
+        kwargs["rtol"] = 1e-4
+        res = getattr(sensitivity, entry)(_aircraft(), FlightCondition(V_inf=30.0, alpha=0.05),
+                                         SolverSettings(n_panels=4, n_chord=4), **kwargs)
+        assert res["pass"], res.get("reasons")
 
 
 @pytest.mark.parametrize("n_chord,mixed", [(1, False), (4, True)])
