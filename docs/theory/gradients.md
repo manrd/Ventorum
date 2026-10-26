@@ -268,7 +268,17 @@ The horseshoe is the bound segment `a -> b`, the legs `a_te -> a` and `b -> b_te
 the ray from `b_te` minus the ray from `a_te` (adjoint `-u`). A source with leg nodes
 (`a_k`, `b_k`, the hinge nodes of a flap strip) has the legs `a_te -> a_k -> a` and
 `b -> b_k -> b_te`: one more finite segment per leg, with the same formulas; the node
-derivatives are two more source outputs. The derivatives of the
+derivatives are two more source outputs. On a leg chain (`leg_next`, the legs of a
+cambered strip that follow the mean surface) the own segments of source `j` end at `a_e`,
+`b_e` (the bound points of source `j + 1`) instead of the trailing edge, and source `j`
+adds the own segments of the sources after it on its chain (a suffix sum along the chain).
+The adjoint of a suffix sum is a prefix sum: the own segments of source `j` take the sum
+of the pair adjoints `u_ij` of `j` and of the sources before it on its chain. The
+derivatives with respect to `a_e`, `b_e` are two more source outputs; the reference copy
+builds `a_e`, `b_e` and the first nodes from the bound points of the next panel, so the
+chain rule gives them to those points. A target that lies on a chain segment by the mesh
+topology (a leg mid-point) has the id of that segment, so the mask removes that segment
+for every source of the chain. The derivatives of the
 corners add the end-point derivatives of the filaments that share them. The pair core is
 `rc2 = rc_src^2 + rc_tg^2` for a target and a source of different core groups, else
 `rc_src^2`; `g_rc2` goes to the source core and, for the pairs of different groups, to

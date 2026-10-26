@@ -180,11 +180,19 @@ a minor version can change a public interface.
 
 ### Fixed
 
-- Vortex lattice on a cambered section mean line: with narrow strips (the default 80 spanwise
-  panels, or more) the straight horseshoe legs pass close to control points of other strips and the
-  solve can be ill-conditioned (a NACA 6409 wing gave CL 7.74 at 0 deg with the default settings,
-  about 0.50 on wider strips). Until the legs follow the mean surface, the trust score warns when the
-  strip lift oscillates between neighbouring strips of such a surface.
+- Vortex lattice on a cambered section mean line: the horseshoe legs now follow the mean surface.
+  The legs of a panel run from its bound points through the bound points of the panels aft of it on
+  the same strip edge to the trailing edge (new lattice and source field `leg_next`; the hinge node
+  of a chordwise flap is the node between the two bound points around the hinge). The straight legs
+  left the curved mean surface and, on narrow strips, passed close to control points of other
+  strips, so the solve was ill-conditioned: an AR 8 NACA 6409 wing gave CL 7.74 at 0 deg with the
+  default settings (now 0.504) and a NACA 4412 wing 0.078 (now 0.336). All kernel backends (numpy,
+  Numba, Cython, torch, NVIDIA Warp), the leg forces on the CPU and the GPU, the VJP kernels of the
+  gradients and the gradient reference copy carry the chains. The leg forces of a chain segment use
+  the circulation sum of the panels ahead of it. Strips without a mean line and strips with a zero
+  mean line keep their results bit for bit. The trust-score warning on oscillating strip lift stays
+  as a diagnostic; the default settings no longer give it. A rebuilt Cython extension is needed for
+  the Cython kernels; an older build falls back to Numba for sets with chains.
 - Ventorum-3DP: the mesh-error estimate (`panel_estimate_mesh_error`) and `panel_mesh_convergence`
   dropped an explicit ground plane and the `ref_point` of the call, so they estimated free air or the
   moment about the aircraft reference. Both inputs now reach every level of the study.

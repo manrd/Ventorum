@@ -65,7 +65,7 @@ The chord and the geometric normal come from the rotated and displaced section f
 \hat{\mathbf n}_{bc} = \frac{\mathbf t\times\hat{\mathbf s}}{|\mathbf t\times\hat{\mathbf s}|}.
 ```
 
-The slope is the exact slope of the piecewise linear section mean line between its knots. The panel count, chordwise spacing and CLAF collocation rule do not change. Chordwise legs remain straight from the bound endpoints to the trailing edge. Flap panels retain the normal rotation about the hinge axis.
+The slope is the exact slope of the piecewise linear section mean line between its knots. The panel count, chordwise spacing and CLAF collocation rule do not change. The chordwise legs follow the mean surface: the legs of a panel run from its bound points through the bound points of the panels aft of it on the same strip edge to the trailing edge (see [Vortex kernels](vortex_kernels.md)). A straight leg from a bound point on the curved mean line to the trailing edge would leave the mean surface and pass close to the control points of narrow strips. Flap panels retain the normal rotation about the hinge axis.
 
 The forces on a geometric mean surface already produce its camber moment. The CPU and GPU therefore exclude the section polar moment on these strips. A shape and a polar can still give different zero-lift angles. A difference greater than 0.5 deg gives one warning per defining section; the shape sets the inviscid boundary condition.
 

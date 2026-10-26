@@ -32,7 +32,7 @@ Three checks add a warning and no penalty:
 
 - The near-field side force and yawing moment are compared with the far-field values of the Trefftz plane (`CY_farfield`, `Cn_trefftz`). The rule and its reason are in [Forces and moments](forces_and_moments.md) (section *Far-field lateral diagnostics*).
 - Small trailing-edge clearance: the lattice solvers warn when the smallest trailing-edge height above the ground is below 0.15 of the local chord. At small trailing-edge clearance the Trefftz induced drag CDi depends on the height of the far wake.
-- Mean-line lattice conditioning: on a vortex lattice on a cambered section mean line, the straight horseshoe legs leave the curved mean surface. With narrow strips they pass close to control points of other strips, and the solve can be near-singular. The vortex lattice warns when the strip lift changes by more than 0.3 between neighbouring strips of such a surface (strips at a deflected control are left out). This is a temporary check until the legs follow the mean surface.
+- Mean-line lattice conditioning: on a vortex lattice on a cambered section mean line, straight horseshoe legs would leave the curved mean surface; with narrow strips they passed close to control points of other strips, and the solve was near-singular. The legs now follow the mean surface (see [Vortex kernels](vortex_kernels.md)). The rule stays as a diagnostic: the vortex lattice warns when the strip lift changes by more than 0.3 between neighbouring strips of such a surface (strips at a deflected control are left out).
 
 ## 3D panel method
 
