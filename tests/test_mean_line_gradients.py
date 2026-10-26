@@ -22,10 +22,12 @@ import ventorum.gpu as gpu
 
 @pytest.fixture(autouse=True)
 def _float64_precision():
-    old = gpu._precision
+    old_device, old = gpu.get_device(), gpu._precision
+    gpu.set_device("cpu")
     gpu.set_precision("float64")
     yield
     gpu.set_precision(old)
+    gpu.set_device(old_device)
 
 
 def _cambered_wing(
@@ -102,7 +104,7 @@ def test_cambered_wing_alpha_and_nodes_check_gradients(h):
     cond = FlightCondition(V_inf=30.0, alpha=0.05, h=h)
     st = SolverSettings(n_panels=4, n_chord=4)
     report = check_gradients(
-        ac, cond, st, wrt=("alpha", "nodes"), outputs=("CL", "CDi", "Cm"), rtol=1e-4
+        ac, cond, st, wrt=("alpha", "nodes"), outputs=("CL", "CDi", "Cm")
     )
     assert report["pass"], report.get("reasons")
 
@@ -114,7 +116,7 @@ def test_cambered_wing_planform_check_gradients(h):
     cond = FlightCondition(V_inf=30.0, alpha=0.05, h=h)
     st = SolverSettings(n_panels=4, n_chord=4)
     report = check_gradients(
-        ac, cond, st, wrt=("planform",), outputs=("CL", "CDi", "Cm"), rtol=1e-4
+        ac, cond, st, wrt=("planform",), outputs=("CL", "CDi", "Cm")
     )
     assert report["pass"], report.get("reasons")
 
@@ -126,7 +128,7 @@ def test_cambered_wing_deflected_flap_check_gradients(h):
     cond = FlightCondition(V_inf=30.0, alpha=0.05, h=h)
     st = SolverSettings(n_panels=4, n_chord=4)
     report = check_gradients(
-        ac, cond, st, wrt=("alpha", "nodes", "controls"), outputs=("CL", "CDi", "Cm"), rtol=1e-4
+        ac, cond, st, wrt=("alpha", "nodes", "controls"), outputs=("CL", "CDi", "Cm")
     )
     assert report["pass"], report.get("reasons")
 
@@ -145,7 +147,7 @@ def test_span_varying_mean_lines_check_gradients():
     cond = FlightCondition(V_inf=30.0, alpha=0.05)
     st = SolverSettings(n_panels=4, n_chord=4)
     report = check_gradients(
-        ac, cond, st, wrt=("alpha", "planform"), outputs=("CL", "CDi", "Cm"), rtol=1e-4
+        ac, cond, st, wrt=("alpha", "planform"), outputs=("CL", "CDi", "Cm")
     )
     assert report["pass"], report.get("reasons")
 
@@ -175,7 +177,7 @@ def test_joined_surfaces_averaged_camber_check_gradients():
     cond = FlightCondition(V_inf=30.0, alpha=0.05)
     st = SolverSettings(n_panels=4, n_chord=4)
     report = check_gradients(
-        ac, cond, st, wrt=("alpha", "nodes"), outputs=("CL", "CDi", "Cm"), rtol=1e-4
+        ac, cond, st, wrt=("alpha", "nodes"), outputs=("CL", "CDi", "Cm")
     )
     assert report["pass"], report.get("reasons")
 
@@ -207,22 +209,28 @@ def test_gradient_vjp_matches_gradients_to_roundoff():
     )
 
 
-@pytest.mark.parametrize("backend", ["numpy", "numba", "cython", "torch"])
+@pytest.mark.parametrize("backend", ["numpy", "numba", "cython", "torch",
+                                     pytest.param("warp", marks=pytest.mark.gpu)])
 def test_vjp_backends_agree_with_torch_path(backend):
     """Every VJP backend gives the same gradients as the reference torch path."""
     from ventorum.sensitivity.kernels import available, set_vjp_backend
 
-    if not available(backend, "cpu"):
+    device = "cuda" if backend == "warp" else "cpu"
+    if backend == "warp" and not gpu.available():
+        pytest.skip(f"The GPU pipelines cannot run: {gpu.unavailable_reason()}")
+    if not available(backend, device):
         pytest.skip(f"Backend '{backend}' is not installed or available.")
+    gpu.set_device("gpu" if backend == "warp" else "cpu")
 
-    ac = _cambered_wing()
+    ac = _cambered_wing(controls=[_flap(10.0)])
     cond = FlightCondition(V_inf=30.0, alpha=0.05)
     st = SolverSettings(n_panels=4, n_chord=4)
 
-    g_torch = gradients(ac, cond, st, outputs=("CL", "Cm"), wrt=("alpha",), method="reference")
+    wrt = ("alpha", "nodes", "controls")
+    g_torch = gradients(ac, cond, st, outputs=("CL", "Cm"), wrt=wrt, method="reference")
     try:
         set_vjp_backend(backend)
-        g_backend = gradients(ac, cond, st, outputs=("CL", "Cm"), wrt=("alpha",), method="kernels" if backend != "torch" else "reference")
+        g_backend = gradients(ac, cond, st, outputs=("CL", "Cm"), wrt=wrt, method="kernels" if backend != "torch" else "reference")
     finally:
         set_vjp_backend(None)
 
@@ -230,8 +238,18 @@ def test_vjp_backends_agree_with_torch_path(backend):
         np.testing.assert_allclose(
             g_backend.jacobian[out]["alpha"],
             g_torch.jacobian[out]["alpha"],
-            rtol=1e-10,
-            atol=1e-12,
+            rtol=1e-12,
+            atol=1e-14,
+        )
+        for surface in g_torch.jacobian[out]["nodes"]:
+            for edge in ("le", "te"):
+                ref = g_torch.jacobian[out]["nodes"][surface][edge]
+                new = g_backend.jacobian[out]["nodes"][surface][edge]
+                np.testing.assert_allclose(new, ref, rtol=1e-12, atol=1e-14)
+        np.testing.assert_allclose(
+            g_backend.jacobian[out]["controls"]["flap"],
+            g_torch.jacobian[out]["controls"]["flap"],
+            rtol=1e-12, atol=1e-14,
         )
 
 
@@ -258,6 +276,64 @@ def test_mixed_surface_uses_old_chain_and_passes_check_gradients():
     cond = FlightCondition(V_inf=30.0, alpha=0.05)
     st = SolverSettings(n_panels=4, n_chord=4)
     report = check_gradients(
-        ac, cond, st, wrt=("alpha", "nodes"), outputs=("CL", "Cm"), rtol=1e-4
+        ac, cond, st, wrt=("alpha", "nodes"), outputs=("CL", "Cm")
     )
     assert report["pass"], report.get("reasons")
+
+
+@pytest.mark.parametrize("h_over_c", [None, 0.3])
+@pytest.mark.parametrize("wrt", [("alpha", "nodes"), ("planform",)])
+def test_three_section_mean_line_span_fractions(h_over_c, wrt):
+    """Carry section span fractions and moving stations through the mean line."""
+    ac = _cambered_wing()
+    ac.surfaces[0].sections.insert(
+        1, WingSection(y_frac=0.5, chord=0.85, twist=np.radians(-0.7), shape="4412"),
+    )
+    ac.surfaces[0].sections[-1].shape = "2412"
+    ac.compute_reference_values()
+    h = None if h_over_c is None else h_over_c * ac.c_ref
+    report = check_gradients(
+        ac, FlightCondition(V_inf=30.0, alpha=0.05, h=h),
+        SolverSettings(n_panels=4, n_chord=4), wrt=wrt, outputs=("CL", "CDi", "Cm"),
+    )
+    assert report["pass"], report
+    if "planform" in wrt:
+        for output in ("CL", "CDi", "Cm"):
+            info = report["details"][f"{output}:planform.wing.sec[1].y_frac"]
+            assert info["compared"] and info["passed"], info
+
+
+def test_shaped_lifting_line_accepts_section_inputs():
+    """The lifting line keeps alpha_L0 as an independent section input [rad]."""
+    ac = _cambered_wing()
+    for section in ac.surfaces[0].sections:
+        section.airfoil = LinearAirfoil(alpha_L0=-0.03, Cm0=-0.04)
+    st = SolverSettings(solver_type="linear", n_panels=4)
+    cond = FlightCondition(V_inf=30.0, alpha=0.05)
+    result = gradients(ac, cond, st, wrt=("sections",), outputs=("CL", "CDi", "Cm"))
+    _assert_finite(result.jacobian)
+    report = check_gradients(ac, cond, st, wrt=("sections",), outputs=("CL", "CDi", "Cm"))
+    assert report["pass"], report
+
+
+def test_joined_mean_lines_with_deflected_flap():
+    """Turn a chordwise flap after the shared mean-line offsets are averaged."""
+    inner = LiftingSurface(
+        name="inner", semi_span=2.0, is_symmetric=True,
+        sections=[WingSection(y_frac=0.0, chord=1.0, shape="4412"),
+                  WingSection(y_frac=1.0, chord=0.8, shape="4412")],
+        controls=[ControlSurface(name="flap", eta_start=0.2, eta_end=0.6,
+                                 hinge_x_c=0.75, deflection=np.radians(10.0))],
+    )
+    outer = LiftingSurface(
+        name="outer", semi_span=2.0, is_symmetric=False, position=np.array([0.0, 2.0, 0.0]),
+        sections=[WingSection(y_frac=0.0, chord=0.8, shape="2412"),
+                  WingSection(y_frac=1.0, chord=0.5, shape="0012")],
+    )
+    ac = Aircraft(surfaces=[inner, outer, outer.mirrored()],
+                  ref_point=np.array([0.25, 0.0, 0.0]))
+    report = check_gradients(
+        ac, FlightCondition(V_inf=30.0, alpha=0.05), SolverSettings(n_panels=4, n_chord=4),
+        wrt=("alpha", "nodes", "controls"), outputs=("CL", "CDi", "Cm"),
+    )
+    assert report["pass"], report

@@ -195,15 +195,14 @@ def _refuse_configuration(ac: Any, condition: Any, settings: Any, canonical: str
             "The Fourier solver has no adjoint gradients (closed form): use central differences "
             "of the production solve, or solver_type 'vlm', 'linear' or 'nonlinear'.")
     lattice_mean_line = canonical == "vlm" and getattr(settings, "n_chord", None) != 1
-    shapes_given = any(
+    shapes_given = lattice_mean_line and any(
         surf.sections and all(sec.shape is not None for sec in surf.sections) for surf in ac.surfaces
     )
-    mean_line_model = lattice_mean_line and any(_has_camber_offset(surf) for surf in ac.surfaces)
     if "sections" in wrt:
-        if shapes_given or mean_line_model:
+        if shapes_given:
             raise GradientScopeError(
                 "Input 'sections' includes alpha_L0. A given mean line sets the VLM boundary condition, "
-                "so section-mode camber and geometric camber cannot be mixed on the same surface. "
+                "so its alpha_L0 is not an independent section input. "
                 "Remove 'sections' from wrt.")
         tab = [surf.name for surf in ac.surfaces
                if any(isinstance(sec.airfoil, TabulatedAirfoil) for sec in surf.sections)]
@@ -243,14 +242,12 @@ def _refuse_configuration(ac: Any, condition: Any, settings: Any, canonical: str
 
 
 def _has_camber_offset(surf) -> bool:
-    """Return True if the differentiable reference cannot rebuild the lattice of *surf*.
+    """Return True if a fully shaped surface needs the mean-line offset model.
 
     As in the lattice: when every section gives a shape, the mean line sets
     the boundary condition and the polar alpha_L0 and Cm0 do not enter. The
-    reference (chord-line points, normals turned by the polar alpha_L0) then
-    equals the production lattice only if every mean line is flat and every
-    polar has alpha_L0 = 0 and Cm0 = 0. Symmetric shapes with such polars
-    keep their gradients; all other shaped surfaces are refused.
+    chord-line model equals this model only if every mean line is flat and
+    every polar has alpha_L0 = 0 rad and Cm0 = 0 [-].
     """
     from ventorum.core.datatypes import LinearAirfoil
 
@@ -547,8 +544,14 @@ def _camber_matrices(
     chord_map: dict | None,
     device: str,
     dtype: Any,
+    planform: tuple | None = None,
 ) -> dict | None:
-    """Build the linear offset matrices and camber data for the torch reference."""
+    """Build mean-line offsets [chord units] and slopes [-] for the reference.
+
+    Section mean-line values at each chord fraction are constants. With
+    *planform*, the spanwise weights follow the section and mesh stations
+    of ``(PlanformGeometry, PlanformTensors)`` through the torch chain.
+    """
     camber_frames = getattr(lattice, "camber_frames", None)
     if camber_frames is None:
         camber_frames = lattice.geom_cache.get("camber_frames")
@@ -562,8 +565,6 @@ def _camber_matrices(
 
     import torch
 
-    from ventorum.geometry.lattice import _mean_line_at
-
     n_s = int(lattice.n_strips)
     n_p = int(lattice.n_panels)
     n_chord = int(lattice.n_chord)
@@ -573,37 +574,74 @@ def _camber_matrices(
         edge_start.append(edge_start[-1] + int(sf.edge_le.shape[0]))
     E_total = edge_start[-1]
 
-    def _joined_offset_weights(si: int, e: int, xi_val: np.ndarray | float) -> np.ndarray:
+    def _tensor(value: Any) -> Any:
+        return torch.as_tensor(value, dtype=dtype, device=device)
+
+    def _zeros(shape: tuple) -> Any:
+        return torch.zeros(shape, dtype=dtype, device=device)
+
+    section_fr, edge_eta = [], []
+    strip_eta = _tensor(np.abs(np.asarray(lattice.eta, dtype=float)))
+    for si, sf in enumerate(lattice.surfaces):
+        if planform is None:
+            frame = camber_frames[si]
+            section_fr.append(_tensor([sec.y_frac for sec in frame["sections"]]))
+            edge_eta.append(_tensor(np.abs(frame["eta"])))
+        else:
+            geom, pt = planform
+            name = sf.name
+            tr = geom.surfaces[name]
+            section_fr.append(torch.stack([sec["y_frac"] for sec in pt.params[name]["sec"]]))
+            eta = pt.nodes[name]["eta"]
+            if tr.is_symmetric:
+                eta = torch.cat((eta.flip(0), eta[1:]))
+            elif tr.mirror_y:
+                eta = eta.flip(0)
+            edge_eta.append(eta)
+            strip_eta[sf.strips] = pt.strips[name]["eta"][tr.full_perm]
+
+    def _mean_at(si: int, eta: Any, xi_val: Any, *, derivative: bool = False) -> Any:
+        xi_arr = np.asarray(xi_val, dtype=float)
+        lines = camber_frames[si]["lines"]
+        values = _tensor(np.array([
+            np.zeros_like(xi_arr) if line is None else line.at(xi_arr, derivative=derivative)
+            for line in lines
+        ]))
+        fr = section_fr[si]
+        eta = torch.broadcast_to(eta, values.shape[1:]).contiguous()
+        j = torch.clamp(torch.searchsorted(fr.detach(), eta.detach(), right=True) - 1,
+                        0, len(lines) - 2)
+        w = torch.clamp((eta - fr[j]) / (fr[j + 1] - fr[j]), 0.0, 1.0)
+        lo = torch.gather(values, 0, j[None])[0]
+        hi = torch.gather(values, 0, (j + 1)[None])[0]
+        return (1.0 - w) * lo + w * hi
+
+    def _joined_offset_weights(si: int, e: int, xi_val: np.ndarray | float) -> Any:
         xi_arr = np.asarray(xi_val, dtype=float)
         single = xi_arr.ndim == 0
         if single:
             xi_arr = xi_arr[None]
         K = xi_arr.shape[0]
-        w = np.zeros((K, E_total), dtype=float)
+        w = _zeros((K, E_total))
         members = camber_frames[si]["joined"].get(e, [(si, e)])
         scale = 1.0 / len(members)
         for s_m, e_m in members:
-            f_m = camber_frames[s_m]
-            z_m = _mean_line_at(
-                f_m["sections"], f_m["lines"], np.abs(f_m["eta"][e_m]), xi_arr
-            )
+            z_m = _mean_at(s_m, edge_eta[s_m][e_m], xi_arr)
             w[:, edge_start[s_m] + e_m] += scale * z_m
         return w[0] if single else w
 
-    W_a = np.zeros((n_p, E_total), dtype=float)
-    W_b = np.zeros((n_p, E_total), dtype=float)
-    W_le_l = np.zeros((n_s, E_total), dtype=float)
-    W_le_r = np.zeros((n_s, E_total), dtype=float)
-    W_te_l = np.zeros((n_s, E_total), dtype=float)
-    W_te_r = np.zeros((n_s, E_total), dtype=float)
-    z_c = np.zeros((n_s, n_chord), dtype=float)
-    slope = np.zeros((n_s, n_chord), dtype=float)
+    W_a = _zeros((n_p, E_total))
+    W_b = _zeros((n_p, E_total))
+    W_le_l = _zeros((n_s, E_total))
+    W_le_r = _zeros((n_s, E_total))
+    W_te_l = _zeros((n_s, E_total))
+    W_te_r = _zeros((n_s, E_total))
+    z_c = _zeros((n_s, n_chord))
+    slope = _zeros((n_s, n_chord))
     strip_camber = np.zeros(n_s, dtype=bool)
 
     claf = np.clip(np.asarray(lattice.a0, dtype=float) / (2.0 * np.pi), 0.2, 2.0)
-    cat_eta = np.asarray(lattice.eta, dtype=float)
-
-    for si, (sf, (secs, lines, _eta_e)) in enumerate(zip(lattice.surfaces, mean_surfaces)):
+    for si, (sf, (_secs, lines, _eta_e)) in enumerate(zip(lattice.surfaces, mean_surfaces)):
         active = all(line is not None for line in lines)
         frame = camber_frames[si]
         if not active and not frame["joined"]:
@@ -617,8 +655,8 @@ def _camber_matrices(
         xb = x0 + 0.25 * dx
         xc = xb + 0.5 * dx * claf[idx, None]
 
-        z_c[idx] = _mean_line_at(secs, lines, np.abs(cat_eta[idx, None]), xc)
-        slope[idx] = _mean_line_at(secs, lines, np.abs(cat_eta[idx, None]), xc, derivative=True)
+        z_c[idx] = _mean_at(si, strip_eta[idx, None], xc)
+        slope[idx] = _mean_at(si, strip_eta[idx, None], xc, derivative=True)
 
         for k_idx, s in enumerate(idx):
             e = k_idx
@@ -638,10 +676,10 @@ def _camber_matrices(
         far = chord_map["far"].cpu().numpy()
         strip_surf = np.asarray(lattice.strip_surface, dtype=np.int64)
         n_f = len(strips)
-        W_hl_arr = np.zeros((n_f, E_total), dtype=float)
-        W_hr_arr = np.zeros((n_f, E_total), dtype=float)
-        W_hfar0_arr = np.zeros((n_f, E_total), dtype=float)
-        W_hfar1_arr = np.zeros((n_f, E_total), dtype=float)
+        W_hl_arr = _zeros((n_f, E_total))
+        W_hr_arr = _zeros((n_f, E_total))
+        W_hfar0_arr = _zeros((n_f, E_total))
+        W_hfar1_arr = _zeros((n_f, E_total))
         for row, s in enumerate(strips):
             h_val = float(hinge[row])
             si_s = int(strip_surf[s])
@@ -1036,6 +1074,11 @@ def _attach_planform(model: TorchReference, t: dict, prep: dict, wrt: tuple[str,
         raise RuntimeError("The planform port gives a fraction array of a wrong shape.")
     model.b["frac"] = frac_full
     model.b["cp_frac_panel"] = frac_full[model.b["panel_strip"]]
+    if model.b.get("camber_data") is not None:
+        t["camber_data"] = _camber_matrices(
+            prep["lattice"], model.b["xi"].detach().cpu().numpy(), model.b.get("ctrl_chord"),
+            device, dtype, planform=(geom, pt),
+        )
     extra = []
     if "sections" in wrt:
         extra += [t[prop] for prop in ("a0", "alpha_L0", "Cd0", "Cm0")]

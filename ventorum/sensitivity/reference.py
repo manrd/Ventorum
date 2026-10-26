@@ -505,7 +505,7 @@ class TorchReference:
 
         # --- lattice from the edge nodes ------------------------------------
         le_l, le_r, te_l, te_r, V_all = self._strips(t)
-        cd = b.get("camber_data")
+        cd = t.get("camber_data", b.get("camber_data"))
         chord_le_l, chord_le_r = le_l, le_r
         chord_te_l, chord_te_r = te_l, te_r
         chord_l = torch.linalg.norm(te_l - le_l, dim=1)

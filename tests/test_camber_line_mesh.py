@@ -483,6 +483,8 @@ def test_cambered_chordwise_control_turns_geometric_normals():
 def test_mean_line_gradient_chains(wrt, entry):
     import ventorum.sensitivity as sensitivity
 
+    gpu.set_precision("float64")
+
     def _assert_finite(obj):
         if obj is None:
             return
@@ -510,7 +512,6 @@ def test_mean_line_gradient_chains(wrt, entry):
             _assert_finite(res.jacobian["CL"][name])
     else:
         kwargs["outputs"] = ("CL",)
-        kwargs["rtol"] = 1e-4
         res = getattr(sensitivity, entry)(_aircraft(), FlightCondition(V_inf=30.0, alpha=0.05),
                                          SolverSettings(n_panels=4, n_chord=4), **kwargs)
         assert res["pass"], res.get("reasons")
