@@ -10,6 +10,12 @@ a minor version can change a public interface.
 
 ### Added
 
+- Adjoint gradients (`gradients`, `gradient_vjp`, `check_gradients`) of vortex-lattice surfaces whose
+  lattice lies on a cambered section mean line: the reference copy builds the same mean-line points
+  and normals as the solver (also with geometric flaps, joined surfaces and span-varying sections),
+  so the earlier refusal for these surfaces is removed. The input `sections` stays refused for a
+  shaped vortex-lattice surface (the mean line, not alpha_L0, sets its boundary condition).
+
 - The lattice solvers add a trust warning on Trefftz induced drag CDi (and drag-derived outputs) when the smallest trailing-edge height above the ground is below 0.15 of the local chord (constant `_CDI_TE_CLEARANCE`). The warning states the clearance and notes the dependence of Trefftz CDi on the height of the far wake.
 
 - Ventorum-3DP, a first version of the three-dimensional panel method (`ventorum.panel3d`,
