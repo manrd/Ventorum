@@ -1,12 +1,14 @@
 # Author: Manuel Alejandro Rodriguez Diaz, PhD
 """Trust warning on an ill-conditioned mean-line vortex lattice.
 
-On a lattice on the cambered section mean line, the straight horseshoe
-legs leave the curved mean surface. With narrow strips they pass close to
+On a lattice on the cambered section mean line, straight horseshoe legs
+leave the curved mean surface. With narrow strips they pass close to
 control points of other strips, and the solve can be near-singular: with
 the default settings a NACA 6409 wing gave CL 7.74 at alpha 0 (about 0.50
-on wider strips). Until the legs follow the mean surface, the trust score
-warns when the strip lift oscillates between neighbouring strips.
+on wider strips). The legs now follow the mean surface (the node chains of
+``VortexLattice.leg_next``), and the default settings give smooth strip
+loads. The trust score keeps the rule as a diagnostic: it warns when the
+strip lift oscillates between neighbouring strips.
 """
 
 from __future__ import annotations
@@ -44,10 +46,34 @@ def _warned(res) -> bool:
 
 
 @pytest.mark.parametrize("shape", ["6409", "4412"])
-def test_default_settings_on_strong_camber_warn(shape):
-    """The default mesh of a strongly cambered wing gets the warning (the loads oscillate)."""
+def test_default_settings_on_strong_camber_do_not_warn(shape):
+    """The default mesh of a strongly cambered wing gives smooth strip loads and no warning."""
     res = _solve(_wing(shape), SolverSettings())
     lattice = res.details["lattice"]
+    assert lattice.leg_next is not None
+    assert mean_line_strip_jump(lattice, res.spanwise) < _MEAN_LINE_STRIP_JUMP
+    assert not _warned(res)
+
+
+@pytest.mark.parametrize("shape", ["6409", "4412"])
+def test_straight_legs_on_strong_camber_warn(monkeypatch, shape):
+    """With the former straight legs (no node chains) the default mesh oscillates and gets the warning."""
+    from ventorum.geometry import lattice as mesh_mod
+    from ventorum.geometry import lattice_cache
+
+    orig = mesh_mod._leg_nodes
+
+    def straight(a, b, a_te, b_te, hinge_nodes, chain_strips, n_chord):
+        return orig(a, b, a_te, b_te, hinge_nodes, chain_strips[:0], n_chord)
+
+    monkeypatch.setattr(mesh_mod, "_leg_nodes", straight)
+    lattice_cache.clear()
+    try:
+        res = _solve(_wing(shape), SolverSettings())
+    finally:
+        lattice_cache.clear()
+    lattice = res.details["lattice"]
+    assert lattice.leg_next is None
     assert mean_line_strip_jump(lattice, res.spanwise) > _MEAN_LINE_STRIP_JUMP
     assert _warned(res)
 

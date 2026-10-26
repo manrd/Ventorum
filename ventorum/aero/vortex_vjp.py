@@ -38,6 +38,15 @@ ids (``src_edge_ka``, ``src_edge_kb``). On a source without a node,
 ``a_k`` is ``a_te`` and ``b_k`` is ``b_te``: the leg is computed as
 without nodes.
 
+A source can also be on a leg chain (``leg_next``, see
+:class:`ventorum.aero.vortex.HorseshoeSet`): its own leg segments then end
+at ``a_e``, ``b_e`` (the bound points of the next source) instead of the
+trailing edge, and its legs continue on the legs of the next source. The
+own segments of a source are on the legs of every source before it on its
+chain, so in the VJP their adjoint is the sum of the pair adjoints of these
+sources (a prefix sum along the chain, the adjoint of the suffix sum of the
+forward product).
+
 The pair core is ``rc2 = rc2_src[j] + tg_rc2[i]`` for a target and a source
 of different core groups (``use_tg``), else ``rc2_src[j]``.
 
@@ -346,16 +355,31 @@ def _kinked(a_te, b_te, kink):
     return np.flatnonzero(np.any(a_k != a_te, axis=1) | np.any(b_k != b_te, axis=1))
 
 
+def _chain(kink):
+    """Return ``(a_e, b_e, leg_next)`` of the leg chains in *kink*, or None."""
+    if kink is None or len(kink) < 8 or kink[7] is None:
+        return None
+    nxt = np.asarray(kink[7]) != 0
+    if not np.any(nxt):
+        return None
+    return kink[5], kink[6], nxt
+
+
 def _horseshoe_rows(P, a, b, a_te, b_te, d, rc2, keeps, floor, kink=None, kidx=None, kkeeps=None):
     """Return the pair velocity (rows, n, 3) and the states of the filaments.
 
     With leg nodes (*kink* = ``(a_k, b_k, ...)``), the forward segments of
     the legs end at the nodes, and the aft segments of the sources *kidx*
-    (masks *kkeeps*) are added; their states are the sixth item.
+    (masks *kkeeps*) are added; their states are the sixth item. With leg
+    chains the aft segments start (a leg) and end (b leg) at ``a_e``,
+    ``b_e``, and each source adds the own leg segments of the sources after
+    it on its chain.
     """
     Pr = P[:, None, :]
     A, B, AT, BT, D = a[None], b[None], a_te[None], b_te[None], d[None]
     AK, BK = (AT, BT) if kink is None else (kink[0][None], kink[1][None])
+    chain = _chain(kink)
+    AE, BE = (AT, BT) if chain is None else (chain[0][None], chain[1][None])
     keep_b, keep_la, keep_lb = keeps
     v_b, s_b = _seg_forward(Pr, A, B, rc2, floor)
     v_la, s_la = _seg_forward(Pr, AK, A, rc2, floor)
@@ -369,8 +393,8 @@ def _horseshoe_rows(P, a, b, a_te, b_te, d, rc2, keeps, floor, kink=None, kidx=N
         v = (v_b + v_la + v_lb) + v_rb - v_ra
         return v, (s_b, s_la, s_lb, s_rb, s_ra, None)
     rck = rc2[:, kidx]
-    v_ka, s_ka = _seg_forward(Pr, AT[:, kidx], AK[:, kidx], rck, floor)
-    v_kb, s_kb = _seg_forward(Pr, BK[:, kidx], BT[:, kidx], rck, floor)
+    v_ka, s_ka = _seg_forward(Pr, AE[:, kidx], AK[:, kidx], rck, floor)
+    v_kb, s_kb = _seg_forward(Pr, BK[:, kidx], BE[:, kidx], rck, floor)
     v_ka = np.where(kkeeps[0][..., None], v_ka, 0.0)
     v_kb = np.where(kkeeps[1][..., None], v_kb, 0.0)
     v_la = v_la.copy()
@@ -378,6 +402,10 @@ def _horseshoe_rows(P, a, b, a_te, b_te, d, rc2, keeps, floor, kink=None, kidx=N
     v_la[:, kidx] += v_ka
     v_lb[:, kidx] += v_kb
     v = (v_b + v_la + v_lb) + v_rb - v_ra
+    if chain is not None:
+        from ventorum.aero.vortex import chain_suffix
+
+        v = v + chain_suffix(v_la + v_lb, chain[2], axis=1)
     return v, (s_b, s_la, s_lb, s_rb, s_ra, (s_ka, s_kb))
 
 
@@ -426,10 +454,11 @@ def horseshoe_forward(P, X, a, b, a_te, b_te, d, rc2_src, tg_rc2, src_group, tg_
     use_tg : bool
         Apply the cross-group target core.
     kink : tuple or None
-        Leg nodes ``(a_k, b_k, src_edge_ka, src_edge_kb[, flags])``: the
-        nodes [m], shape (n, 3), the edge ids of the aft segments, shape
-        (n,), and optionally the flags (n,) of the sources with a node.
-        None for straight legs.
+        Leg nodes ``(a_k, b_k, src_edge_ka, src_edge_kb[, flags[, a_e, b_e,
+        leg_next]])``: the nodes [m], shape (n, 3), the edge ids of the aft
+        segments, shape (n,), optionally the flags (n,) of the sources with
+        a node, and the leg chains: the ends of the own leg segments [m],
+        shape (n, 3), and the chain flags (n,). None for straight legs.
 
     Returns
     -------
@@ -478,7 +507,9 @@ def horseshoe_vjp(P, X, a, b, a_te, b_te, d, rc2_src, tg_rc2, src_group, tg_grou
         and the source weights (n,). With *kink*, two more items: the
         derivatives with respect to the leg nodes ``a_k`` and ``b_k``
         (n, 3); they are zero on a source without a node, whose leg
-        derivative is in ``ga_te`` and ``gb_te``.
+        derivative is in ``ga_te`` and ``gb_te``. With leg chains, two
+        more items: the derivatives with respect to the ends ``a_e`` and
+        ``b_e`` of the own leg segments (n, 3).
     """
     floor = floor_of(P.dtype)
     m, n = P.shape[0], a.shape[0]
@@ -494,9 +525,15 @@ def horseshoe_vjp(P, X, a, b, a_te, b_te, d, rc2_src, tg_rc2, src_group, tg_grou
     grc = np.zeros(n, dtype=dt)
     gs = np.zeros(n, dtype=dt)
     kidx = _kinked(a_te, b_te, kink)
+    chain = _chain(kink)
     if kink is not None:
         gak = np.zeros((n, 3), dtype=dt)
         gbk = np.zeros((n, 3), dtype=dt)
+    if chain is not None:
+        from ventorum.aero.vortex import chain_prefix
+
+        gae = np.zeros((n, 3), dtype=dt)
+        gbe = np.zeros((n, 3), dtype=dt)
     step = _chunk(m, n)
     for i0 in range(0, m, step):
         i1 = min(m, i0 + step)
@@ -513,15 +550,18 @@ def horseshoe_vjp(P, X, a, b, a_te, b_te, d, rc2_src, tg_rc2, src_group, tg_grou
         gs += (wf * _dot(Xr, v)).sum(axis=0)
         keep_b, keep_la, keep_lb = keeps
         gP_b, gA_b, gB_b, gr_b = _seg_backward(u * keep_b[..., None], s_b)
-        gP_la, gA_la, gB_la, gr_la = _seg_backward(u * keep_la[..., None], s_la)
-        gP_lb, gA_lb, gB_lb, gr_lb = _seg_backward(u * keep_lb[..., None], s_lb)
+        # The own leg segments carry the adjoint of every source before them
+        # on their chain.
+        u_leg = u if chain is None else chain_prefix(u, chain[2], axis=1)
+        gP_la, gA_la, gB_la, gr_la = _seg_backward(u_leg * keep_la[..., None], s_la)
+        gP_lb, gA_lb, gB_lb, gr_lb = _seg_backward(u_leg * keep_lb[..., None], s_lb)
         gP_rb, gA_rb, gd_rb, gr_rb = _ray_backward(u, s_rb)
         gP_ra, gA_ra, gd_ra, gr_ra = _ray_backward(-u, s_ra)
         if s_k is None:
             gP[i0:i1] = (gP_b + gP_la + gP_lb + gP_rb + gP_ra).sum(axis=1)
         else:
             # Aft segments of the legs with a node (sources kidx).
-            uk = u[:, kidx]
+            uk = u_leg[:, kidx]
             gP_ka, gA_ka, gB_ka, gr_ka = _seg_backward(uk * kkeeps[0][..., None], s_k[0])
             gP_kb, gA_kb, gB_kb, gr_kb = _seg_backward(uk * kkeeps[1][..., None], s_k[1])
             gP_la = gP_la.copy()
@@ -541,10 +581,12 @@ def horseshoe_vjp(P, X, a, b, a_te, b_te, d, rc2_src, tg_rc2, src_group, tg_grou
             gat += gA_ra.sum(axis=0)
             gbt += gA_rb.sum(axis=0)
             if s_k is not None:
-                gat[kidx] += gA_ka.sum(axis=0)
+                # The aft segments end at the trailing edge, or on a chain
+                # at the ends of the own legs.
+                (gat if chain is None else gae)[kidx] += gA_ka.sum(axis=0)
                 gak[kidx] += gB_ka.sum(axis=0)
                 gbk[kidx] += gA_kb.sum(axis=0)
-                gbt[kidx] += gB_kb.sum(axis=0)
+                (gbt if chain is None else gbe)[kidx] += gB_kb.sum(axis=0)
         gd += (gd_rb + gd_ra).sum(axis=0)
         grc2 = gr_b + gr_la + gr_lb + gr_rb + gr_ra
         grc += grc2.sum(axis=0)
@@ -559,6 +601,8 @@ def horseshoe_vjp(P, X, a, b, a_te, b_te, d, rc2_src, tg_rc2, src_group, tg_grou
     gbt[straight] += gbk[straight]
     gak[straight] = 0.0
     gbk[straight] = 0.0
+    if chain is not None:
+        return gP, gX, gtg, ga, gb, gat, gbt, gd, grc, gs, gak, gbk, gae, gbe
     return gP, gX, gtg, ga, gb, gat, gbt, gd, grc, gs, gak, gbk
 
 

@@ -862,6 +862,9 @@ def build_reference(
         "left_panels": _l(left_panels),
         "leg_keep_normal": _t("lkn", leg_keep_normal),
         "leg_scale": _t("lsc", np.asarray(leg_scale, dtype=float)),
+        # Leg chains of the strips with geometric camber (VortexLattice.leg_next).
+        "leg_next": (None if getattr(lattice, "leg_next", None) is None or not np.any(lattice.leg_next)
+                     else torch.as_tensor(np.asarray(lattice.leg_next, dtype=bool), device=device)),
         "accum": accum,
         "origin": None,
     }

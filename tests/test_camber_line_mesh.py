@@ -96,8 +96,10 @@ def test_ground_mirror_explicit():
     ground = GroundPlane(k, float(np.array([0.25, 0.0, 0.0]) @ k - 0.2))
     real = build_sources(lat, np.array([np.cos(cond.alpha), 0.0, np.sin(cond.alpha)]), make_unknown_map(lat, False))
     image = copy.deepcopy(real)
-    for name in ("a", "b", "a_te", "b_te"):
-        setattr(image, name, ground.reflect_points(getattr(real, name)))
+    # The leg nodes (the bound points of the next panel on the leg chains) are points too.
+    for name in ("a", "b", "a_te", "b_te", "a_kink", "b_kink"):
+        if getattr(real, name) is not None:
+            setattr(image, name, ground.reflect_points(getattr(real, name)))
     image.wake_dir = ground.reflect_directions(real.wake_dir)
     v_real = vortex.horseshoe_velocity_tensor(lat.cp, real)
     v_image = vortex.horseshoe_velocity_tensor(lat.cp, image)

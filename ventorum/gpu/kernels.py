@@ -135,8 +135,17 @@ def _build(precision: str) -> SimpleNamespace:  # noqa: C901 - one closure per k
         BK: wp.array(dtype=wp.vec3d)     # node of the b leg [m]
         r0ka: wp.array(dtype=vec)        # a - AK
         r0kb: wp.array(dtype=vec)        # BK - b
-        r0ta: wp.array(dtype=vec)        # AK - a_te
-        r0tb: wp.array(dtype=vec)        # b_te - BK
+        r0ta: wp.array(dtype=vec)        # AK - AE
+        r0tb: wp.array(dtype=vec)        # BE - BK
+        # Leg chains (see ventorum.aero.vortex.HorseshoeSet.leg_next): the
+        # aft segments of the own legs end at AE, BE (the trailing edge, or
+        # the bound points of the next source where nxt[s] != 0), and the
+        # legs continue on the legs of source s + 1. n_chain = 0: no chains
+        # (nxt is then not read).
+        n_chain: int
+        nxt: wp.array(dtype=wp.int32)
+        AE: wp.array(dtype=wp.vec3d)     # end of the own a leg [m]
+        BE: wp.array(dtype=wp.vec3d)     # end of the own b leg [m]
 
     class Points:
         """Evaluation points (float64 and float32 pair), their normals, and their cross-surface core data."""
@@ -350,13 +359,121 @@ def _build(precision: str) -> SimpleNamespace:  # noqa: C901 - one closure per k
         h = wp.float32(x)
         return h, wp.float32(x - wp.float64(h))
 
+    def make_own_legs(IMG: int):
+        """Return the function of the own leg segments of a source with a node (a chain step).
+
+        The segments are ``AE -> AK -> A`` and ``B -> BK -> BE``, as the node
+        path of the horseshoe function, with the core *rc2* of the source.
+        """
+
+        def own(src: Sources, pts: Points, cs: Cases, k: int, i: int, s: int, rc2: T):
+            P = pts.P[i]
+            v = vec()
+            if wp.static(is64):
+                pa = src.A[s]
+                pb = src.B[s]
+                pak = src.AK[s]
+                pbk = src.BK[s]
+                pae = src.AE[s]
+                pbe = src.BE[s]
+                if wp.static(IMG == 1):
+                    gk = cs.GK[k]
+                    go = cs.GO[k]
+                    pa = mirror_point(pa, gk, go)
+                    pb = mirror_point(pb, gk, go)
+                    pak = mirror_point(pak, gk, go)
+                    pbk = mirror_point(pbk, gk, go)
+                    pae = mirror_point(pae, gk, go)
+                    pbe = mirror_point(pbe, gk, go)
+                r1 = P - pa
+                r2 = P - pb
+                qk = P - pak
+                wk = P - pbk
+                qe = P - pae
+                we = P - pbe
+                i1 = inv_norm(r1)
+                i2 = inv_norm(r2)
+                iqk = inv_norm(qk)
+                iwk = inv_norm(wk)
+                v = seg(qk, r1, pa - pak, iqk, i1, rc2) + seg(qe, qk, pak - pae, inv_norm(qe), iqk, rc2)
+                v = v + seg(r2, wk, pbk - pb, i2, iwk, rc2) + seg(wk, we, pbe - pbk, iwk, inv_norm(we), rc2)
+            else:
+                vb = src.r0b[s]
+                vka = src.r0ka[s]
+                vkb = src.r0kb[s]
+                vta = src.r0ta[s]
+                vtb = src.r0tb[s]
+                r1 = vec()
+                if wp.static(IMG == 1):
+                    gkt = tvec(cs.GK[k])
+                    vb = mirror_dir(vb, gkt)
+                    vka = mirror_dir(vka, gkt)
+                    vkb = mirror_dir(vkb, gkt)
+                    vta = mirror_dir(vta, gkt)
+                    vtb = mirror_dir(vtb, gkt)
+                    r1 = diff2(pts.Ph[i], pts.Pl[i], cs.Aih[k, s], cs.Ail[k, s])
+                else:
+                    r1 = diff2(pts.Ph[i], pts.Pl[i], src.Ah[s], src.Al[s])
+                r2 = r1 - vb
+                qk = r1 + vka
+                wk = r2 - vkb
+                qe = qk + vta
+                we = wk - vtb
+                i1 = inv_norm(r1)
+                i2 = inv_norm(r2)
+                iqk = inv_norm(qk)
+                iwk = inv_norm(wk)
+                iqe = inv_norm(qe)
+                iwe = inv_norm(we)
+                if wp.static(IMG == 1):
+                    v = seg(qk, r1, vka, iqk, i1, rc2) + seg(qe, qk, vta, iqe, iqk, rc2)
+                    v = v + seg(r2, wk, vkb, i2, iwk, rc2) + seg(wk, we, vtb, iwk, iwe, rc2)
+                else:
+                    # Cross products in float64, as on the node path.
+                    P64 = pts.P[i]
+                    ra = P64 - src.A[s]
+                    rb = P64 - src.B[s]
+                    rka = P64 - src.AK[s]
+                    rkb = P64 - src.BK[s]
+                    rea = P64 - src.AE[s]
+                    reb = P64 - src.BE[s]
+                    v = seg_c(tvec(wp.cross(rka, ra)), qk, r1, vka, iqk, i1, rc2)
+                    v = v + seg_c(tvec(wp.cross(rea, rka)), qe, qk, vta, iqe, iqk, rc2)
+                    v = v + seg_c(tvec(wp.cross(rb, rkb)), r2, wk, vkb, i2, iwk, rc2)
+                    v = v + seg_c(tvec(wp.cross(rkb, reb)), wk, we, vtb, iwk, iwe, rc2)
+            return v
+
+        return wp.func(own, name=f"own_legs_{precision}_{IMG}", module=module)
+
+    def make_chain_tail(IMG: int):
+        """Return the function of the legs that source s takes from the sources after it on its chain."""
+        own = make_own_legs(IMG)
+
+        def tail(src: Sources, pts: Points, cs: Cases, k: int, i: int, s: int):
+            v = vec()
+            t = s
+            while src.nxt[t] != 0:
+                t = t + 1
+                c = src.rc2[t]
+                if pts.use_tg != 0:
+                    if pts.group[i] != src.group[t]:
+                        c = c + pts.rc2[i]
+                v = v + own(src, pts, cs, k, i, t, c)
+            return v
+
+        return wp.func(tail, name=f"chain_tail_{precision}_{IMG}", module=module)
+
+    chain_tails = {0: make_chain_tail(0), 1: make_chain_tail(1)}
+
     def make_horseshoe(PARTS: int, IMG: int):
         """Return the horseshoe function for the legs PARTS (0 all, 1 bound vortex and chordwise legs, 2 wake legs).
 
         IMG = 1 gives the ground image of the horseshoe (without the sign
         change). Both are compile-time constants: each variant computes only
-        what it needs.
+        what it needs. A source on a leg chain adds the legs of the sources
+        after it on the chain (one step per source).
         """
+        chain_tail = chain_tails[IMG]
 
         def hs(src: Sources, pts: Points, cs: Cases, k: int, i: int, s: int, rc2: T):
             d = cs.D[k]
@@ -428,16 +545,35 @@ def _build(precision: str) -> SimpleNamespace:  # noqa: C901 - one closure per k
                     vkb = vec()
                     vta = vec()
                     vtb = vec()
+                    # Start of the a aft segment and end of the b aft
+                    # segment: the trailing edge, or on a chain the bound
+                    # points of the next source.
+                    qe = q1
+                    we = w2
+                    chained = 0
+                    if src.n_chain != 0:
+                        chained = src.nxt[s]
                     if wp.static(is64):
                         pak = src.AK[s]
                         pbk = src.BK[s]
+                        pae = pat
+                        pbe = pbt
+                        if chained != 0:
+                            pae = src.AE[s]
+                            pbe = src.BE[s]
                         if wp.static(IMG == 1):
                             pak = mirror_point(pak, cs.GK[k], cs.GO[k])
                             pbk = mirror_point(pbk, cs.GK[k], cs.GO[k])
+                            if chained != 0:
+                                pae = mirror_point(pae, cs.GK[k], cs.GO[k])
+                                pbe = mirror_point(pbe, cs.GK[k], cs.GO[k])
                         vka = pa - pak
                         vkb = pbk - pb
-                        vta = pak - pat
-                        vtb = pbt - pbk
+                        vta = pak - pae
+                        vtb = pbe - pbk
+                        if chained != 0:
+                            qe = P - pae
+                            we = P - pbe
                     else:
                         vka = src.r0ka[s]
                         vkb = src.r0kb[s]
@@ -453,9 +589,17 @@ def _build(precision: str) -> SimpleNamespace:  # noqa: C901 - one closure per k
                     wk = r2 - vkb
                     iqk = inv_norm(qk)
                     iwk = inv_norm(wk)
+                    iqe = iq
+                    iwe = iw
+                    if chained != 0:
+                        if wp.static(not is64):
+                            qe = qk + vta
+                            we = wk - vtb
+                        iqe = inv_norm(qe)
+                        iwe = inv_norm(we)
                     if wp.static(is64 or IMG == 1):
-                        v = v + seg(qk, r1, vka, iqk, i1, rc2) + seg(q1, qk, vta, iq, iqk, rc2)
-                        v = v + seg(r2, wk, vkb, i2, iwk, rc2) + seg(wk, w2, vtb, iwk, iw, rc2)
+                        v = v + seg(qk, r1, vka, iqk, i1, rc2) + seg(qe, qk, vta, iqe, iqk, rc2)
+                        v = v + seg(r2, wk, vkb, i2, iwk, rc2) + seg(wk, we, vtb, iwk, iwe, rc2)
                     else:
                         # The load points lie on the oblique leg lines of a
                         # deflected flap: the cross products in float64, as
@@ -465,12 +609,14 @@ def _build(precision: str) -> SimpleNamespace:  # noqa: C901 - one closure per k
                         rb = P64 - src.B[s]
                         rka = P64 - src.AK[s]
                         rkb = P64 - src.BK[s]
-                        rta = P64 - src.ATE[s]
-                        rtb = P64 - src.BTE[s]
+                        rta = P64 - src.AE[s]
+                        rtb = P64 - src.BE[s]
                         v = v + seg_c(tvec(wp.cross(rka, ra)), qk, r1, vka, iqk, i1, rc2)
-                        v = v + seg_c(tvec(wp.cross(rta, rka)), q1, qk, vta, iq, iqk, rc2)
+                        v = v + seg_c(tvec(wp.cross(rta, rka)), qe, qk, vta, iqe, iqk, rc2)
                         v = v + seg_c(tvec(wp.cross(rb, rkb)), r2, wk, vkb, i2, iwk, rc2)
-                        v = v + seg_c(tvec(wp.cross(rkb, rtb)), wk, w2, vtb, iwk, iw, rc2)
+                        v = v + seg_c(tvec(wp.cross(rkb, rtb)), wk, we, vtb, iwk, iwe, rc2)
+                    if chained != 0:
+                        v = v + chain_tail(src, pts, cs, k, i, s)
                 else:
                     v = v + seg(q1, r1, va, iq, i1, rc2) + seg(r2, w2, vt, i2, iw, rc2)
             if wp.static(PARTS != 1):
@@ -942,7 +1088,8 @@ def _build(precision: str) -> SimpleNamespace:  # noqa: C901 - one closure per k
                     vlc: wp.array2d(dtype=wp.vec3d), vld: wp.array2d(dtype=wp.vec3d),
                     legc: wp.array(dtype=wp.vec3d), legd: wp.array(dtype=wp.vec3d),
                     nlc: wp.array(dtype=wp.vec3d), nld: wp.array(dtype=wp.vec3d),
-                    lmidc: wp.array(dtype=wp.vec3d), lmidd: wp.array(dtype=wp.vec3d)):
+                    lmidc: wp.array(dtype=wp.vec3d), lmidd: wp.array(dtype=wp.vec3d),
+                    GL: wp.array2d(dtype=wp.float64)):
         # The loads of strip s of case k (the equations of compute_loads_batch):
         # Kutta-Joukowski forces on the bound vortices (and on the chordwise
         # legs with use_leg), their moments about rp, the section values, the
@@ -962,6 +1109,9 @@ def _build(precision: str) -> SimpleNamespace:  # noqa: C901 - one closure per k
         for r in range(n_c):
             p = s * n_c + r
             g = G[k, p]
+            # Circulation of the own leg segments (the chain sum, see
+            # ventorum.aero.loads.leg_strength).
+            gl = GL[k, p]
             sg = sg + g
             Fp = (rk * g) * wp.cross(Vd + vmid[k, p], lvec[p])
             M = M + wp.cross(mid[p] - rp, Fp)
@@ -973,8 +1123,8 @@ def _build(precision: str) -> SimpleNamespace:  # noqa: C901 - one closure per k
                 vb = Vd + vlb[k, p]
                 va = va - wp.dot(va, nla[p]) * nla[p]
                 vb = vb - wp.dot(vb, nlb[p]) * nlb[p]
-                Fa = (rk * g) * wp.cross(va, lega[p])
-                Fb = (rk * g) * wp.cross(vb, legb[p])
+                Fa = (rk * gl) * wp.cross(va, lega[p])
+                Fb = (rk * gl) * wp.cross(vb, legb[p])
                 M = M + wp.cross(lmida[p] - rp, Fa) + wp.cross(lmidb[p] - rp, Fb)
                 Fp = Fp + Fa + Fb
                 if use_aft != 0:
@@ -984,8 +1134,8 @@ def _build(precision: str) -> SimpleNamespace:  # noqa: C901 - one closure per k
                     vd = Vd + vld[k, p]
                     vc = vc - wp.dot(vc, nlc[p]) * nlc[p]
                     vd = vd - wp.dot(vd, nld[p]) * nld[p]
-                    Fc = (rk * g) * wp.cross(vc, legc[p])
-                    Fd = (rk * g) * wp.cross(vd, legd[p])
+                    Fc = (rk * gl) * wp.cross(vc, legc[p])
+                    Fd = (rk * gl) * wp.cross(vd, legd[p])
                     M = M + wp.cross(lmidc[p] - rp, Fc) + wp.cross(lmidd[p] - rp, Fd)
                     Fp = Fp + Fc + Fd
             F = F + Fp
@@ -1045,7 +1195,8 @@ def _build(precision: str) -> SimpleNamespace:  # noqa: C901 - one closure per k
                           vlc: wp.array2d(dtype=wp.vec3d), vld: wp.array2d(dtype=wp.vec3d),
                           legc: wp.array(dtype=wp.vec3d), legd: wp.array(dtype=wp.vec3d),
                           nlc: wp.array(dtype=wp.vec3d), nld: wp.array(dtype=wp.vec3d),
-                          lmidc: wp.array(dtype=wp.vec3d), lmidd: wp.array(dtype=wp.vec3d)):
+                          lmidc: wp.array(dtype=wp.vec3d), lmidd: wp.array(dtype=wp.vec3d),
+                    GL: wp.array2d(dtype=wp.float64)):
         # The loads of strip s of case k with body rates (the equations of compute_loads_batch).
         k, s = wp.tid()
         d = D[k]
@@ -1059,6 +1210,9 @@ def _build(precision: str) -> SimpleNamespace:  # noqa: C901 - one closure per k
         for r in range(n_c):
             p = s * n_c + r
             g = G[k, p]
+            # Circulation of the own leg segments (the chain sum, see
+            # ventorum.aero.loads.leg_strength).
+            gl = GL[k, p]
             sg = sg + g
             u_mid = Vd - wp.cross(om, mid[p] - rp)
             Fp = (rk * g) * wp.cross(u_mid + vmid[k, p], lvec[p])
@@ -1070,8 +1224,8 @@ def _build(precision: str) -> SimpleNamespace:  # noqa: C901 - one closure per k
                 vb = ub + vlb[k, p]
                 va = va - wp.dot(va, nla[p]) * nla[p]
                 vb = vb - wp.dot(vb, nlb[p]) * nlb[p]
-                Fa = (rk * g) * wp.cross(va, lega[p])
-                Fb = (rk * g) * wp.cross(vb, legb[p])
+                Fa = (rk * gl) * wp.cross(va, lega[p])
+                Fb = (rk * gl) * wp.cross(vb, legb[p])
                 M = M + wp.cross(lmida[p] - rp, Fa) + wp.cross(lmidb[p] - rp, Fb)
                 Fp = Fp + Fa + Fb
                 if use_aft != 0:
@@ -1081,8 +1235,8 @@ def _build(precision: str) -> SimpleNamespace:  # noqa: C901 - one closure per k
                     vd = ud + vld[k, p]
                     vc = vc - wp.dot(vc, nlc[p]) * nlc[p]
                     vd = vd - wp.dot(vd, nld[p]) * nld[p]
-                    Fc = (rk * g) * wp.cross(vc, legc[p])
-                    Fd = (rk * g) * wp.cross(vd, legd[p])
+                    Fc = (rk * gl) * wp.cross(vc, legc[p])
+                    Fd = (rk * gl) * wp.cross(vd, legd[p])
                     M = M + wp.cross(lmidc[p] - rp, Fc) + wp.cross(lmidd[p] - rp, Fd)
                     Fp = Fp + Fc + Fd
             F = F + Fp

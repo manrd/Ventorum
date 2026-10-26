@@ -28,6 +28,8 @@ from __future__ import annotations
 import math
 import os
 
+import numpy as np
+
 try:
     import torch
 
@@ -359,6 +361,38 @@ def pp_slope(pp: dict, x: torch.Tensor) -> torch.Tensor:
         return torch.where(inside, val, torch.zeros_like(val))
 
 
+def _chain_steps(leg_next: torch.Tensor, reverse: bool) -> list[torch.Tensor]:
+    """Return per chain step the indices of the sources at that step (from the chain end, or from its start)."""
+    from ventorum.aero.vortex import chain_depth, chain_position
+
+    flags = leg_next.detach().cpu().numpy() != 0
+    pos = chain_depth(flags) if reverse else chain_position(flags)
+    return [torch.as_tensor(np.flatnonzero(pos == t), device=leg_next.device)
+            for t in range(1, int(pos.max(initial=0)) + 1)]
+
+
+def _chain_suffix(x: torch.Tensor, leg_next: torch.Tensor) -> torch.Tensor:
+    """Return per source (axis 1 of *x*) the sum over the sources after it on its leg chain.
+
+    The differentiable form of :func:`ventorum.aero.vortex.chain_suffix`.
+    """
+    out = torch.zeros_like(x)
+    for j in _chain_steps(leg_next, True):
+        out = out.index_copy(1, j, x[:, j + 1] + out[:, j + 1])
+    return out
+
+
+def _chain_prefix(x: torch.Tensor, leg_next: torch.Tensor) -> torch.Tensor:
+    """Return per panel (axis 0 of *x*) the sum over it and the panels before it on its leg chain.
+
+    The differentiable form of :func:`ventorum.aero.vortex.chain_prefix`.
+    """
+    out = x
+    for j in _chain_steps(leg_next, False):
+        out = out.index_copy(0, j, x[j] + out[j - 1])
+    return out
+
+
 def _rows(x: torch.Tensor | None, i0: int, i1: int) -> torch.Tensor | None:
     """Return rows i0:i1 of *x*, or None."""
     return None if x is None else x[i0:i1]
@@ -688,6 +722,28 @@ class TorchReference:
             # (production: build_lattice). Aft panel: the whole legs (sets 0,
             # 1); panel ahead of the hinge: the aft segments (sets 2, 3).
             leg_turn = (xb_s > hcol, s_c, ax_l, d_l, ax_r, d_r)
+        chain_geom = None
+        nxt_p = b.get("leg_next")
+        if nxt_p is not None:
+            # Leg chains on the strips with geometric camber (production:
+            # geometry.lattice._leg_nodes): the legs of a panel end at the
+            # bound points of the next panel and continue on its legs. The
+            # first node is the bound point of the next panel, or the hinge
+            # point where the hinge lies between the two bound points.
+            a_nx = torch.cat((a[1:], a[-1:]), dim=0)
+            b_nx = torch.cat((bv[1:], bv[-1:]), dim=0)
+            if kink_geom is None:
+                a_k0, b_k0 = a_te, b_te
+                hinge = torch.zeros(n_p, dtype=torch.bool, device=self.device)
+            else:
+                a_k0, b_k0, hinge = kink_geom
+            no = torch.zeros(1, dtype=torch.bool, device=self.device)
+            hinge_next = torch.cat((hinge[1:], no))
+            take = (nxt_p & ~(hinge & ~hinge_next))[:, None]
+            on_chain = nxt_p | torch.cat((no, nxt_p[:-1]))
+            kink_geom = (torch.where(take, a_nx, a_k0), torch.where(take, b_nx, b_k0), hinge | on_chain)
+            chain_geom = (torch.where(nxt_p[:, None], a_nx, a_te), torch.where(nxt_p[:, None], b_nx, b_te),
+                          on_chain)
         cp_u = cp[b["unknown_panels"]]
         n_bc_u = n_bc[b["unknown_panels"]]
         # Target cross-core radii follow the strip widths (they are not fixed:
@@ -748,8 +804,8 @@ class TorchReference:
             _v_back = None  # type: ignore[assignment]
         if h is None:
             if kink_geom is not None:
-                s_kink = ((_to_s(kink_geom[0]), _to_s(kink_geom[1])) if mach_active
-                          else (kink_geom[0], kink_geom[1]))
+                pts_k = (kink_geom[0], kink_geom[1]) + (() if chain_geom is None else chain_geom[:2])
+                s_kink = tuple(_to_s(x) for x in pts_k) if mach_active else pts_k
             if mach_active:
                 s_a, s_b, s_ate, s_bte = _to_s(a), _to_s(bv), _to_s(a_te), _to_s(b_te)
                 s_wd = w_fs_pg
@@ -773,8 +829,8 @@ class TorchReference:
                 return vv - 2.0 * (vv @ normal_g)[:, None] * normal_g
 
             if kink_geom is not None:
-                s_kink = (torch.cat((kink_geom[0], _refl_pts(kink_geom[0])), dim=0),
-                          torch.cat((kink_geom[1], _refl_pts(kink_geom[1])), dim=0))
+                pts_k = (kink_geom[0], kink_geom[1]) + (() if chain_geom is None else chain_geom[:2])
+                s_kink = tuple(torch.cat((x, _refl_pts(x)), dim=0) for x in pts_k)
             s_a = torch.cat((a, _refl_pts(a)), dim=0)
             s_b = torch.cat((bv, _refl_pts(bv)), dim=0)
             s_ate = torch.cat((a_te, _refl_pts(a_te)), dim=0)
@@ -819,21 +875,35 @@ class TorchReference:
             c_mask = cd["camber_panel_mask"]
             ea = torch.where(c_mask, -10 - 2 * pid, ea)
             eb = torch.where(c_mask, -11 - 2 * pid, eb)
+        if chain_geom is not None:
+            # The aft segments of the chain legs (node to the next bound
+            # point) are curved like the forward ones: unique ids too.
+            if cc is None:
+                eka = torch.full((n_p,), -1, dtype=torch.int64, device=self.device)
+                ekb = eka.clone()
+            on_chain = chain_geom[2]
+            eka = torch.where(on_chain, -(10 + 2 * n_p) - 2 * pid, eka)
+            ekb = torch.where(on_chain, -(11 + 2 * n_p) - 2 * pid, ekb)
         edge_l_panel, edge_r_panel = ea, eb
         src_kink = None
         if kink_geom is not None:
             kfl = kink_geom[2].to(torch.int64)
             edge_ka_panel, edge_kb_panel = eka, ekb
             src_kink = {"kink": kfl, "edge_ka": eka, "edge_kb": ekb}
+            if chain_geom is not None:
+                src_kink["leg_next"] = nxt_p.to(torch.int64)
         if h is not None:
             img = torch.full((n_p,), -2, dtype=torch.int64, device=self.device)
             pid = torch.cat((pid, img))
             ea = torch.cat((ea, img))
             eb = torch.cat((eb, img))
             if src_kink is not None:
+                chain_ids = src_kink.get("leg_next")
                 src_kink = {"kink": torch.cat((src_kink["kink"], src_kink["kink"])),
                             "edge_ka": torch.cat((src_kink["edge_ka"], img)),
                             "edge_kb": torch.cat((src_kink["edge_kb"], img))}
+                if chain_ids is not None:
+                    src_kink["leg_next"] = torch.cat((chain_ids, chain_ids))
         b["_src_ids"] = {"panel": pid, "edge_a": ea, "edge_b": eb}
         if src_kink is not None:
             b["_src_ids"].update(src_kink)
@@ -959,8 +1029,11 @@ class TorchReference:
                 seg_sets = [(a_te, a, edge_l_panel), (bv, b_te, edge_r_panel)]
             else:
                 a_k, b_k = kink_geom[0], kink_geom[1]
+                # The aft segments end at the trailing edge, or on a chain
+                # at the bound points of the next panel.
+                a_e, b_e = (a_te, b_te) if chain_geom is None else chain_geom[:2]
                 seg_sets = [(a_k, a, edge_l_panel), (bv, b_k, edge_r_panel),
-                            (a_te, a_k, edge_ka_panel), (b_k, b_te, edge_kb_panel)]
+                            (a_e, a_k, edge_ka_panel), (b_k, b_e, edge_kb_panel)]
             n_sets = len(seg_sets)
             set_mid = [0.5 * (s0 + s1) for s0, s1, _ in seg_sets]
             leg_start = torch.cat([s0 for s0, _, _ in seg_sets], dim=0)
@@ -1024,7 +1097,10 @@ class TorchReference:
             V_leg = U_leg + v_leg
             Vn = (V_leg * leg_normal).sum(-1)
             V_leg = V_leg - Vn[:, None] * leg_normal
-            g_leg_only = torch.cat([g_panel] * n_sets, dim=0) * b["leg_scale"]
+            # On a chain the own leg segments of a panel carry the circulation
+            # of every panel before them (production: loads.leg_strength).
+            g_own = g_panel if chain_geom is None else _chain_prefix(g_panel, nxt_p)
+            g_leg_only = torch.cat([g_own] * n_sets, dim=0) * b["leg_scale"]
             f_leg = rho * g_leg_only[:, None] * torch.linalg.cross(V_leg, leg_vec)
             m_geo = m_geo + torch.linalg.cross(leg_mid - rp, f_leg).sum(0)
             for k in range(n_sets):
@@ -1323,7 +1399,7 @@ class TorchReference:
         use_tg = tg_group is not None and tg_rc is not None
         return Topology(grp, tg_group if use_tg else None, own, edge, src["panel"], src["edge_a"],
                         src["edge_b"], col, n_u, use_tg, m, self.device,
-                        src.get("kink"), src.get("edge_ka"), src.get("edge_kb"))
+                        src.get("kink"), src.get("edge_ka"), src.get("edge_kb"), src.get("leg_next"))
 
     def _horseshoe(
         self,
@@ -1362,7 +1438,9 @@ class TorchReference:
         kink : tuple or None
             Leg nodes ``(a_k, b_k)`` [m], shape (n_src, 3), of the sources
             flagged in ``src["kink"]`` (see
-            :class:`ventorum.aero.vortex.HorseshoeSet`), or None.
+            :class:`ventorum.aero.vortex.HorseshoeSet`), or None. With leg
+            chains (``src["leg_next"]``) also the ends ``(a_e, b_e)`` of the
+            own leg segments.
 
         Returns
         -------
@@ -1382,7 +1460,9 @@ class TorchReference:
         """
         if src is None:
             src = self.b.get("_src_ids")
-        a_k, b_k = (a_te, b_te) if kink is None else kink
+        a_k, b_k = (a_te, b_te) if kink is None else kink[:2]
+        a_e, b_e = (a_te, b_te) if kink is None or len(kink) < 4 else kink[2:4]
+        nxt = None if src is None or kink is None or len(kink) < 4 else src.get("leg_next")
         bound = seg_vel(P, a, b, rc2)
         leg_a = seg_vel(P, a_k, a, rc2)
         leg_b = seg_vel(P, b, b_k, rc2)
@@ -1398,8 +1478,8 @@ class TorchReference:
             # Aft segments of the legs with a node (zero on the other sources).
             idx = torch.nonzero(src["kink"] != 0).reshape(-1)
             rck = rc2[:, idx]
-            aft_a = seg_vel(P, a_te[idx], a_k[idx], rck)
-            aft_b = seg_vel(P, b_k[idx], b_te[idx], rck)
+            aft_a = seg_vel(P, a_e[idx], a_k[idx], rck)
+            aft_b = seg_vel(P, b_k[idx], b_e[idx], rck)
             if edge is not None:
                 ka = edge[:, None] != src["edge_ka"][None, idx]
                 kb = edge[:, None] != src["edge_kb"][None, idx]
@@ -1410,10 +1490,13 @@ class TorchReference:
         ray_b = ray_vel(P, b_te, d, rc2)
         ray_a = ray_vel(P, a_te, d, rc2)
         mode = self.b.get("accum", "sequential")
+        tail = None if nxt is None else _chain_suffix(leg_a + leg_b, nxt)
         if mode == "sequential":
             # Same order of addition as horseshoe_vel.
-            return (bound + leg_a + leg_b) + ray_b - ray_a
-        terms = torch.stack((bound, leg_a, leg_b, ray_b, -ray_a), dim=0)
+            v = (bound + leg_a + leg_b) + ray_b - ray_a
+            return v if tail is None else v + tail
+        terms = (bound, leg_a, leg_b, ray_b, -ray_a) + (() if tail is None else (tail,))
+        terms = torch.stack(terms, dim=0)
         if mode == "pairwise":
             return pairwise_sum(terms, 0)
         return kahan_sum(terms, 0)
@@ -1455,7 +1538,7 @@ class TorchReference:
         src = self.b.get("_src_ids")
         tgr = tg_rc if tg_group is not None else None
         kink = self.b.get("_src_kinks")
-        nk = 0 if kink is None else 2
+        nk = 0 if kink is None else len(kink)
 
         def _fn(i0: int, i1: int, P: torch.Tensor, N: torch.Tensor, a: torch.Tensor,
                 bv: torch.Tensor, a_te: torch.Tensor, b_te: torch.Tensor, wd: torch.Tensor,
@@ -1485,7 +1568,7 @@ class TorchReference:
         src = self.b.get("_src_ids")
         tgr = tg_rc if tg_group is not None else None
         kink = self.b.get("_src_kinks")
-        nk = 0 if kink is None else 2
+        nk = 0 if kink is None else len(kink)
 
         def _fn(i0: int, i1: int, P: torch.Tensor, a: torch.Tensor, bv: torch.Tensor,
                 a_te: torch.Tensor, b_te: torch.Tensor, wd: torch.Tensor,
@@ -1524,7 +1607,7 @@ class TorchReference:
         src = self.b.get("_src_ids")
         tgr = tg_rc if tg_group is not None else None
         kink = self.b.get("_src_kinks")
-        nk = 0 if kink is None else 2
+        nk = 0 if kink is None else len(kink)
 
         def _fn(i0: int, i1: int, P: torch.Tensor, a: torch.Tensor, bv: torch.Tensor,
                 a_te: torch.Tensor, b_te: torch.Tensor, wd: torch.Tensor,

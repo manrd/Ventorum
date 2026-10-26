@@ -612,8 +612,49 @@ def leg_segments(lattice: VortexLattice) -> tuple[np.ndarray, np.ndarray]:
     """
     if lattice.a_kink is None:
         return np.vstack([lattice.a_te, lattice.b]), np.vstack([lattice.a, lattice.b_te])
-    return (np.vstack([lattice.a_kink, lattice.b, lattice.a_te, lattice.b_kink]),
-            np.vstack([lattice.a, lattice.b_kink, lattice.a_kink, lattice.b_te]))
+    a_e, b_e = leg_ends(lattice)
+    return (np.vstack([lattice.a_kink, lattice.b, a_e, lattice.b_kink]),
+            np.vstack([lattice.a, lattice.b_kink, lattice.a_kink, b_e]))
+
+
+def leg_ends(lattice: VortexLattice) -> tuple[np.ndarray, np.ndarray]:
+    """Return the aft ends ``(a_end, b_end)`` [m] of the own leg segments of every panel, shape (n_panels, 3).
+
+    The ends are the trailing-edge points, or on a leg chain the bound
+    points of the next panel (see ``VortexLattice.leg_next``).
+    """
+    if lattice.leg_next is None:
+        return lattice.a_te, lattice.b_te
+    from ventorum.aero.vortex import chain_ends
+
+    return chain_ends(lattice.a, lattice.b, lattice.a_te, lattice.b_te, lattice.leg_next)
+
+
+def leg_strength(lattice: VortexLattice, gamma_panel: np.ndarray) -> np.ndarray:
+    """Return the circulation [m^2/s] of the own leg segments of every panel.
+
+    Without leg chains it is the panel circulation. On a chain the own
+    segments of a panel are on the legs of every panel before it on the
+    chain, so their circulation is the sum over these panels (the shared
+    filament of a vortex-ring lattice).
+
+    Parameters
+    ----------
+    lattice : VortexLattice
+        The lattice.
+    gamma_panel : numpy.ndarray
+        Panel circulations [m^2/s], shape (..., n_panels).
+
+    Returns
+    -------
+    numpy.ndarray
+        Circulations [m^2/s] with the shape of *gamma_panel*.
+    """
+    if lattice.leg_next is None or not np.any(lattice.leg_next):
+        return gamma_panel
+    from ventorum.aero.vortex import chain_prefix
+
+    return chain_prefix(gamma_panel, lattice.leg_next, axis=-1)
 
 
 def leg_force_rules(lattice: VortexLattice) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -710,7 +751,8 @@ def leg_force_rules(lattice: VortexLattice) -> tuple[np.ndarray, np.ndarray, np.
         # get it (rows of leg_segments: forward a, forward b, aft a, aft b).
         from dataclasses import replace
 
-        normal, scale, kind = _leg_force_rules_geometric(replace(lattice, a_kink=None, b_kink=None, geom_cache={}))
+        normal, scale, kind = _leg_force_rules_geometric(
+            replace(lattice, a_kink=None, b_kink=None, leg_next=None, geom_cache={}))
         out = (np.vstack([normal, normal]), np.concatenate([scale, scale]), np.concatenate([kind, kind]))
         lattice.geom_cache["leg_force_rules"] = out
         return out
@@ -1004,7 +1046,7 @@ def compute_loads_batch(
     M_geo = np.sum(_cross(mid - rp, F_panel), axis=1)
     if use_leg:
         v_leg = np.concatenate(v_all[1:], axis=1)
-        g_leg = np.concatenate([G] * (len(v_all) - 1), axis=1)
+        g_leg = np.concatenate([leg_strength(lattice, G)] * (len(v_all) - 1), axis=1)
         # The rule of each edge (leg_force_rules). Shared edge: only the
         # velocity tangent to the strip acts. The normal velocity at the leg
         # points is the leak of the discrete lattice between its control
@@ -1345,6 +1387,7 @@ def _near_field_velocity(
             group=group,
             a_kink=None if lattice.a_kink is None else to_s(lattice.a_kink),
             b_kink=None if lattice.b_kink is None else to_s(lattice.b_kink),
+            leg_next=lattice.leg_next,
         )
         points_s = [to_s(pk) for pk in points]
         P_s, tgt, repeat = _load_points(lattice, eval_panels, points_s)

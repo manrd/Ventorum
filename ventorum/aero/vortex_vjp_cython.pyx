@@ -57,10 +57,10 @@ cdef double _INV_4PI = 1.0 / (4.0 * pi)
 cdef double _INV_2PI = 1.0 / (2.0 * pi)
 cdef double _FLOOR = 1e-300
 # Values per source in the block buffers: ga, gb, ga_te, gb_te, gd (3 each), g_rc2_src, gs,
-# and the leg nodes ga_k, gb_k (3 each).
+# the leg nodes ga_k, gb_k (3 each), and the ends of the own legs of a chain ga_e, gb_e (3 each).
 # Values per vortex in the Trefftz block buffers: gp (3), ggamma, g_rc2.
 cdef enum:
-    NSRC = 23
+    NSRC = 29
     NVTX = 5
 
 
@@ -398,23 +398,32 @@ cdef void _forward_row(Py_ssize_t i, int mode, const double[:, ::1] P, const dou
                        const cnp.int64_t[::1] col, bint use_tg,
                        const double[:, ::1] ak, const double[:, ::1] bk, const signed char[::1] kfl,
                        const cnp.int64_t[::1] seka, const cnp.int64_t[::1] sekb,
-                       double[:, ::1] out) noexcept nogil:
+                       const double[:, ::1] ae, const double[:, ::1] be, const signed char[::1] nxt,
+                       bint chain, double[:, ::1] out) noexcept nogil:
     # One row of the forward product (mode 0: system rows, mode 1: induced velocity).
-    # A leg with a node (kfl[j] != 0) runs ate -> ak -> a and b -> bk -> bte;
-    # on the other sources ak is ate and bk is bte.
+    # A leg with a node (kfl[j] != 0) runs ae -> ak -> a and b -> bk -> be;
+    # on the other sources ak is ate and bk is bte. ae, be are the trailing
+    # edge, or on a leg chain the bound points of the next source. With
+    # chain the sources run from the last to the first, and a source adds
+    # the legs of the next source of its chain (nxt).
     cdef Py_ssize_t n = a.shape[0]
-    cdef Py_ssize_t j
+    cdef Py_ssize_t j, jj
     cdef double v[3]
     cdef double w[3]
     cdef double vx, vy, vz, rc2, px = P[i, 0], py = P[i, 1], pz = P[i, 2]
     cdef double ox = 0.0, oy = 0.0, oz = 0.0
+    cdef double lx, ly, lz, cx = 0.0, cy = 0.0, cz = 0.0
     cdef bint oth
-    for j in range(n):
+    for jj in range(n):
+        j = n - 1 - jj if chain else jj
         oth = use_tg and tgrp[i] != sgrp[j]
         rc2 = rc2s[j] + tgrc2[i] if oth else rc2s[j]
         vx = 0.0
         vy = 0.0
         vz = 0.0
+        lx = 0.0
+        ly = 0.0
+        lz = 0.0
         if own[i] != spanel[j]:
             _seg_v(px, py, pz, a[j, 0], a[j, 1], a[j, 2], b[j, 0], b[j, 1], b[j, 2], rc2, v)
             vx = v[0]
@@ -422,24 +431,55 @@ cdef void _forward_row(Py_ssize_t i, int mode, const double[:, ::1] P, const dou
             vz = v[2]
         if edge[i] != sea[j]:
             _seg_v(px, py, pz, ak[j, 0], ak[j, 1], ak[j, 2], a[j, 0], a[j, 1], a[j, 2], rc2, v)
-            vx = vx + v[0]
-            vy = vy + v[1]
-            vz = vz + v[2]
+            if chain:
+                lx = lx + v[0]
+                ly = ly + v[1]
+                lz = lz + v[2]
+            else:
+                vx = vx + v[0]
+                vy = vy + v[1]
+                vz = vz + v[2]
         if kfl[j] != 0 and edge[i] != seka[j]:
-            _seg_v(px, py, pz, ate[j, 0], ate[j, 1], ate[j, 2], ak[j, 0], ak[j, 1], ak[j, 2], rc2, v)
-            vx = vx + v[0]
-            vy = vy + v[1]
-            vz = vz + v[2]
+            _seg_v(px, py, pz, ae[j, 0], ae[j, 1], ae[j, 2], ak[j, 0], ak[j, 1], ak[j, 2], rc2, v)
+            if chain:
+                lx = lx + v[0]
+                ly = ly + v[1]
+                lz = lz + v[2]
+            else:
+                vx = vx + v[0]
+                vy = vy + v[1]
+                vz = vz + v[2]
         if edge[i] != seb[j]:
             _seg_v(px, py, pz, b[j, 0], b[j, 1], b[j, 2], bk[j, 0], bk[j, 1], bk[j, 2], rc2, v)
-            vx = vx + v[0]
-            vy = vy + v[1]
-            vz = vz + v[2]
+            if chain:
+                lx = lx + v[0]
+                ly = ly + v[1]
+                lz = lz + v[2]
+            else:
+                vx = vx + v[0]
+                vy = vy + v[1]
+                vz = vz + v[2]
         if kfl[j] != 0 and edge[i] != sekb[j]:
-            _seg_v(px, py, pz, bk[j, 0], bk[j, 1], bk[j, 2], bte[j, 0], bte[j, 1], bte[j, 2], rc2, v)
-            vx = vx + v[0]
-            vy = vy + v[1]
-            vz = vz + v[2]
+            _seg_v(px, py, pz, bk[j, 0], bk[j, 1], bk[j, 2], be[j, 0], be[j, 1], be[j, 2], rc2, v)
+            if chain:
+                lx = lx + v[0]
+                ly = ly + v[1]
+                lz = lz + v[2]
+            else:
+                vx = vx + v[0]
+                vy = vy + v[1]
+                vz = vz + v[2]
+        if chain:
+            if nxt[j] != 0:
+                lx = lx + cx
+                ly = ly + cy
+                lz = lz + cz
+            cx = lx
+            cy = ly
+            cz = lz
+            vx = vx + lx
+            vy = vy + ly
+            vz = vz + lz
         _ray_v(px, py, pz, bte[j, 0], bte[j, 1], bte[j, 2], d[j, 0], d[j, 1], d[j, 2], rc2, v)
         _ray_v(px, py, pz, ate[j, 0], ate[j, 1], ate[j, 2], d[j, 0], d[j, 1], d[j, 2], rc2, w)
         vx = vx + v[0] - w[0]
@@ -463,13 +503,16 @@ def horseshoe_forward(int mode, const double[:, ::1] P, const double[:, ::1] X, 
                       const cnp.int64_t[::1] sgrp, const cnp.int64_t[::1] tgrp, const cnp.int64_t[::1] own,
                       const cnp.int64_t[::1] spanel, const cnp.int64_t[::1] edge, const cnp.int64_t[::1] sea,
                       const cnp.int64_t[::1] seb, const double[::1] s, const cnp.int64_t[::1] col,
-                      int n_u, bint use_tg, int num_threads, ak=None, bk=None, kfl=None, seka=None, sekb=None):
+                      int n_u, bint use_tg, int num_threads, ak=None, bk=None, kfl=None, seka=None, sekb=None,
+                      ae=None, be=None, nxt=None):
     """Return the system rows (mode 0, (m, n_u)) or the induced velocity (mode 1, (m, 3)).
 
     The arguments are those of :func:`ventorum.aero.vortex_vjp.horseshoe_forward`
     (with *mode* first), plus the OpenMP thread count *num_threads*. The
     leg nodes *ak*, *bk* (n, 3), their flags *kfl* (int8, n) and the edge
     ids *seka*, *sekb* of the aft segments are optional (None: no nodes).
+    The leg chains *ae*, *be* (n, 3) and *nxt* (int8, n) are optional too
+    (None: no chains).
 
     Returns
     -------
@@ -484,11 +527,15 @@ def horseshoe_forward(int mode, const double[:, ::1] P, const double[:, ::1] X, 
     cdef const signed char[::1] kfl_v = np.zeros(a.shape[0], dtype=np.int8) if kfl is None else kfl
     cdef const cnp.int64_t[::1] seka_v = sea if seka is None else seka
     cdef const cnp.int64_t[::1] sekb_v = seb if sekb is None else sekb
+    cdef bint chain = nxt is not None
+    cdef const double[:, ::1] ae_v = ate if ae is None else ae
+    cdef const double[:, ::1] be_v = bte if be is None else be
+    cdef const signed char[::1] nxt_v = np.zeros(1, dtype=np.int8) if nxt is None else nxt
     out = np.zeros((m, ncol), dtype=np.float64)
     cdef double[:, ::1] out_v = out
     for i in prange(m, num_threads=num_threads, nogil=True, schedule="static"):
         _forward_row(i, mode, P, X, a, b, ate, bte, d, rc2s, tgrc2, sgrp, tgrp, own, spanel, edge,
-                     sea, seb, s, col, use_tg, ak_v, bk_v, kfl_v, seka_v, sekb_v, out_v)
+                     sea, seb, s, col, use_tg, ak_v, bk_v, kfl_v, seka_v, sekb_v, ae_v, be_v, nxt_v, chain, out_v)
     return out
 
 
@@ -501,9 +548,15 @@ cdef void _vjp_block(Py_ssize_t t, Py_ssize_t nblocks, const double[:, ::1] P, c
                      const cnp.int64_t[::1] col, const double[:, ::1] W, bint use_W, bint use_tg,
                      const double[:, ::1] ak, const double[:, ::1] bk, const signed char[::1] kfl,
                      const cnp.int64_t[::1] seka, const cnp.int64_t[::1] sekb,
+                     const double[:, ::1] ae, const double[:, ::1] be, const signed char[::1] nxt,
+                     bint chain, double[:, ::1] xo,
                      double[:, ::1] gP, double[:, ::1] gX, double[::1] gtg,
                      double[:, :, ::1] buf) noexcept nogil:
     # The rows of block t: target derivatives into gP, gX, gtg; source derivatives into buf[t].
+    # With chain the aft segments end at ae, be (derivatives in the slots
+    # 23 to 28), and the own leg segments of a source take the adjoint of
+    # every source before them on their chain (cw); xo[t] holds X . (own
+    # legs) of each source of the row for the gs suffix pass.
     cdef Py_ssize_t m = P.shape[0]
     cdef Py_ssize_t n = a.shape[0]
     cdef Py_ssize_t i0 = (t * m) // nblocks
@@ -513,8 +566,12 @@ cdef void _vjp_block(Py_ssize_t t, Py_ssize_t nblocks, const double[:, ::1] P, c
     cdef double px, py, pz, xx, xy, xz, aPx, aPy, aPz, aXx, aXy, aXz, atg
     cdef double wf, cij, rc2, ux, uy, uz, vx, vy, vz, grc
     cdef double ax, ay, az, bx, by, bz, tax, tay, taz, tbx, tby, tbz, dx, dy, dz
+    cdef double cw, lux, luy, luz, ox, oy, oz, tail
     cdef bint oth, kj
     cdef int ka, kb
+    cdef int sa = 23 if chain else 6
+    cdef int sb = 26 if chain else 9
+    cdef Py_ssize_t jj
     for i in range(i0, i1):
         px = P[i, 0]
         py = P[i, 1]
@@ -529,6 +586,7 @@ cdef void _vjp_block(Py_ssize_t t, Py_ssize_t nblocks, const double[:, ::1] P, c
         aXy = 0.0
         aXz = 0.0
         atg = 0.0
+        cw = 0.0
         for j in range(n):
             wf = W[i, col[j]] if use_W else 1.0
             cij = wf * s[j]
@@ -537,6 +595,17 @@ cdef void _vjp_block(Py_ssize_t t, Py_ssize_t nblocks, const double[:, ::1] P, c
             ux = cij * xx
             uy = cij * xy
             uz = cij * xz
+            # Adjoint of the own leg segments: the sum over the chain.
+            if chain and j > 0 and nxt[j - 1] != 0:
+                cw = cij + cw
+            else:
+                cw = cij
+            lux = cw * xx
+            luy = cw * xy
+            luz = cw * xz
+            ox = 0.0
+            oy = 0.0
+            oz = 0.0
             ax = a[j, 0]
             ay = a[j, 1]
             az = a[j, 2]
@@ -577,10 +646,15 @@ cdef void _vjp_block(Py_ssize_t t, Py_ssize_t nblocks, const double[:, ::1] P, c
             ka = 17 if kj else 6
             kb = 20 if kj else 9
             if edge[i] != sea[j]:
-                _seg_fb(px, py, pz, ak[j, 0], ak[j, 1], ak[j, 2], ax, ay, az, rc2, ux, uy, uz, r)
-                vx = vx + r[0]
-                vy = vy + r[1]
-                vz = vz + r[2]
+                _seg_fb(px, py, pz, ak[j, 0], ak[j, 1], ak[j, 2], ax, ay, az, rc2, lux, luy, luz, r)
+                if chain:
+                    ox = ox + r[0]
+                    oy = oy + r[1]
+                    oz = oz + r[2]
+                else:
+                    vx = vx + r[0]
+                    vy = vy + r[1]
+                    vz = vz + r[2]
                 aPx = aPx + r[3]
                 aPy = aPy + r[4]
                 aPz = aPz + r[5]
@@ -592,25 +666,36 @@ cdef void _vjp_block(Py_ssize_t t, Py_ssize_t nblocks, const double[:, ::1] P, c
                 buf[t, j, 2] += r[11]
                 grc = grc + r[12]
             if kj and edge[i] != seka[j]:
-                _seg_fb(px, py, pz, tax, tay, taz, ak[j, 0], ak[j, 1], ak[j, 2], rc2, ux, uy, uz, r)
-                vx = vx + r[0]
-                vy = vy + r[1]
-                vz = vz + r[2]
+                _seg_fb(px, py, pz, ae[j, 0], ae[j, 1], ae[j, 2], ak[j, 0], ak[j, 1], ak[j, 2], rc2,
+                        lux, luy, luz, r)
+                if chain:
+                    ox = ox + r[0]
+                    oy = oy + r[1]
+                    oz = oz + r[2]
+                else:
+                    vx = vx + r[0]
+                    vy = vy + r[1]
+                    vz = vz + r[2]
                 aPx = aPx + r[3]
                 aPy = aPy + r[4]
                 aPz = aPz + r[5]
-                buf[t, j, 6] += r[6]
-                buf[t, j, 7] += r[7]
-                buf[t, j, 8] += r[8]
+                buf[t, j, sa] += r[6]
+                buf[t, j, sa + 1] += r[7]
+                buf[t, j, sa + 2] += r[8]
                 buf[t, j, 17] += r[9]
                 buf[t, j, 18] += r[10]
                 buf[t, j, 19] += r[11]
                 grc = grc + r[12]
             if edge[i] != seb[j]:
-                _seg_fb(px, py, pz, bx, by, bz, bk[j, 0], bk[j, 1], bk[j, 2], rc2, ux, uy, uz, r)
-                vx = vx + r[0]
-                vy = vy + r[1]
-                vz = vz + r[2]
+                _seg_fb(px, py, pz, bx, by, bz, bk[j, 0], bk[j, 1], bk[j, 2], rc2, lux, luy, luz, r)
+                if chain:
+                    ox = ox + r[0]
+                    oy = oy + r[1]
+                    oz = oz + r[2]
+                else:
+                    vx = vx + r[0]
+                    vy = vy + r[1]
+                    vz = vz + r[2]
                 aPx = aPx + r[3]
                 aPy = aPy + r[4]
                 aPz = aPz + r[5]
@@ -622,19 +707,25 @@ cdef void _vjp_block(Py_ssize_t t, Py_ssize_t nblocks, const double[:, ::1] P, c
                 buf[t, j, kb + 2] += r[11]
                 grc = grc + r[12]
             if kj and edge[i] != sekb[j]:
-                _seg_fb(px, py, pz, bk[j, 0], bk[j, 1], bk[j, 2], tbx, tby, tbz, rc2, ux, uy, uz, r)
-                vx = vx + r[0]
-                vy = vy + r[1]
-                vz = vz + r[2]
+                _seg_fb(px, py, pz, bk[j, 0], bk[j, 1], bk[j, 2], be[j, 0], be[j, 1], be[j, 2], rc2,
+                        lux, luy, luz, r)
+                if chain:
+                    ox = ox + r[0]
+                    oy = oy + r[1]
+                    oz = oz + r[2]
+                else:
+                    vx = vx + r[0]
+                    vy = vy + r[1]
+                    vz = vz + r[2]
                 aPx = aPx + r[3]
                 aPy = aPy + r[4]
                 aPz = aPz + r[5]
                 buf[t, j, 20] += r[6]
                 buf[t, j, 21] += r[7]
                 buf[t, j, 22] += r[8]
-                buf[t, j, 9] += r[9]
-                buf[t, j, 10] += r[10]
-                buf[t, j, 11] += r[11]
+                buf[t, j, sb] += r[9]
+                buf[t, j, sb + 1] += r[10]
+                buf[t, j, sb + 2] += r[11]
                 grc = grc + r[12]
             _ray_fb(px, py, pz, tbx, tby, tbz, dx, dy, dz, rc2, ux, uy, uz, r)
             vx = vx + r[0]
@@ -664,13 +755,27 @@ cdef void _vjp_block(Py_ssize_t t, Py_ssize_t nblocks, const double[:, ::1] P, c
             buf[t, j, 13] += r[7]
             buf[t, j, 14] += r[8]
             grc = grc + r[9]
-            aXx = aXx + cij * vx
-            aXy = aXy + cij * vy
-            aXz = aXz + cij * vz
+            # Without chains ox is zero and the own legs are in v.
+            aXx = aXx + (cij * vx + cw * ox)
+            aXy = aXy + (cij * vy + cw * oy)
+            aXz = aXz + (cij * vz + cw * oz)
             buf[t, j, 15] += grc
-            buf[t, j, 16] += wf * (xx * vx + xy * vy + xz * vz)
+            buf[t, j, 16] += wf * (xx * (vx + ox) + xy * (vy + oy) + xz * (vz + oz))
+            if chain:
+                xo[t, j] = xx * ox + xy * oy + xz * oz
             if oth:
                 atg = atg + grc
+        if chain:
+            # gs: the own legs of the sources after each source on its chain.
+            tail = 0.0
+            for jj in range(n):
+                j = n - 1 - jj
+                if nxt[j] != 0:
+                    tail = xo[t, j + 1] + tail
+                    wf = W[i, col[j]] if use_W else 1.0
+                    buf[t, j, 16] += wf * tail
+                else:
+                    tail = 0.0
         gP[i, 0] = aPx
         gP[i, 1] = aPy
         gP[i, 2] = aPz
@@ -687,7 +792,7 @@ def horseshoe_vjp(const double[:, ::1] P, const double[:, ::1] X, const double[:
                   const cnp.int64_t[::1] spanel, const cnp.int64_t[::1] edge, const cnp.int64_t[::1] sea,
                   const cnp.int64_t[::1] seb, const double[::1] s, const cnp.int64_t[::1] col,
                   const double[:, ::1] W, bint use_W, bint use_tg, int nblocks, int num_threads,
-                  ak=None, bk=None, kfl=None, seka=None, sekb=None):
+                  ak=None, bk=None, kfl=None, seka=None, sekb=None, ae=None, be=None, nxt=None):
     """Return the VJP (gP, gX, g_tg_rc2, ga, gb, ga_te, gb_te, gd, g_rc2_src, gs) in float64.
 
     The arguments are those of :func:`ventorum.aero.vortex_vjp.horseshoe_vjp`,
@@ -695,7 +800,8 @@ def horseshoe_vjp(const double[:, ::1] P, const double[:, ::1] X, const double[:
     plus the number of row blocks *nblocks* and the OpenMP thread count
     *num_threads*. The leg nodes are optional, as in :func:`horseshoe_forward`;
     with them the tuple has two more items, ``ga_k`` and ``gb_k`` (zero on a
-    source without a node).
+    source without a node). With the leg chains *ae*, *be*, *nxt* it has two
+    more items, ``ga_e`` and ``gb_e``.
 
     Returns
     -------
@@ -714,13 +820,20 @@ def horseshoe_vjp(const double[:, ::1] P, const double[:, ::1] X, const double[:
     cdef const signed char[::1] kfl_v = np.zeros(n, dtype=np.int8) if kfl is None else kfl
     cdef const cnp.int64_t[::1] seka_v = sea if seka is None else seka
     cdef const cnp.int64_t[::1] sekb_v = seb if sekb is None else sekb
+    cdef bint chain = nxt is not None
+    cdef const double[:, ::1] ae_v = ate if ae is None else ae
+    cdef const double[:, ::1] be_v = bte if be is None else be
+    cdef const signed char[::1] nxt_v = np.zeros(1, dtype=np.int8) if nxt is None else nxt
+    xo = np.zeros((nblocks, n if chain else 1))
+    cdef double[:, ::1] xo_v = xo
     cdef double[:, ::1] gP_v = gP
     cdef double[:, ::1] gX_v = gX
     cdef double[::1] gtg_v = gtg
     cdef double[:, :, ::1] buf_v = buf
     for t in prange(nblocks, num_threads=num_threads, nogil=True, schedule="static", chunksize=1):
         _vjp_block(t, nblocks, P, X, a, b, ate, bte, d, rc2s, tgrc2, sgrp, tgrp, own, spanel, edge, sea, seb,
-                   s, col, W, use_W, use_tg, ak_v, bk_v, kfl_v, seka_v, sekb_v, gP_v, gX_v, gtg_v, buf_v)
+                   s, col, W, use_W, use_tg, ak_v, bk_v, kfl_v, seka_v, sekb_v, ae_v, be_v, nxt_v, chain, xo_v,
+                   gP_v, gX_v, gtg_v, buf_v)
     acc = np.zeros((n, NSRC))
     cdef double[:, ::1] acc_v = acc
     for t in range(nblocks):
@@ -731,7 +844,10 @@ def horseshoe_vjp(const double[:, ::1] P, const double[:, ::1] X, const double[:
            acc[:, 9:12].copy(), acc[:, 12:15].copy(), acc[:, 15].copy(), acc[:, 16].copy())
     if ak is None:
         return out
-    return out + (acc[:, 17:20].copy(), acc[:, 20:23].copy())
+    out = out + (acc[:, 17:20].copy(), acc[:, 20:23].copy())
+    if not chain:
+        return out
+    return out + (acc[:, 23:26].copy(), acc[:, 26:29].copy())
 
 
 cdef void _trefftz_row(Py_ssize_t i, const double[:, ::1] q, const double[:, ::1] qn, const double[:, ::1] p,

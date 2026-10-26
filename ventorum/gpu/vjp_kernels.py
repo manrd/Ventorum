@@ -18,6 +18,11 @@ Layout
   twice; that costs less than the atomic additions of one launch.
 * The system rows (forward) have one thread per matrix entry; it adds the
   sources of its unknown in source order (the order of the reference copy).
+* Leg chains (``leg_next`` of :class:`ventorum.aero.vortex.HorseshoeSet`):
+  the own leg segments of a source end at ``ae``, ``be``, and a source adds
+  the own legs of the sources after it on its chain (each thread walks the
+  chain). In the VJP the own legs of a source take the sum of the adjoint
+  weights of the sources before them on the chain.
 * Each kernel is made for float32 or float64 (the type ``T``). In float32
   each pair is computed in float32 (the speed of consumer GPUs); the block
   sums have at most ``BLOCK`` terms and the sums of the blocks are made in
@@ -318,9 +323,11 @@ def _build(precision: str) -> SimpleNamespace:  # noqa: C901 - one closure per k
              own: wp.array(dtype=wp.int64), spanel: wp.array(dtype=wp.int64), edge: wp.array(dtype=wp.int64),
              sea: wp.array(dtype=wp.int64), seb: wp.array(dtype=wp.int64),
              ak: wp.array(dtype=vec), bk: wp.array(dtype=vec), kfl: wp.array(dtype=wp.int64),
-             seka: wp.array(dtype=wp.int64), sekb: wp.array(dtype=wp.int64)):
-        # A leg with a node (kfl[j] != 0) runs ate -> ak -> a and b -> bk -> bte;
-        # on the other sources ak is ate and bk is bte.
+             seka: wp.array(dtype=wp.int64), sekb: wp.array(dtype=wp.int64),
+             ae: wp.array(dtype=vec), be: wp.array(dtype=vec)):
+        # A leg with a node (kfl[j] != 0) runs ae -> ak -> a and b -> bk -> be;
+        # on the other sources ak is ate and bk is bte. ae, be are the
+        # trailing edge, or on a leg chain the bound points of the next source.
         v = vec()
         if own[i] != spanel[j]:
             v = v + seg_v(p, a[j], b[j], rc2)
@@ -328,13 +335,67 @@ def _build(precision: str) -> SimpleNamespace:  # noqa: C901 - one closure per k
             v = v + seg_v(p, ak[j], a[j], rc2)
         if kfl[j] != wp.int64(0):
             if edge[i] != seka[j]:
-                v = v + seg_v(p, ate[j], ak[j], rc2)
+                v = v + seg_v(p, ae[j], ak[j], rc2)
         if edge[i] != seb[j]:
             v = v + seg_v(p, b[j], bk[j], rc2)
         if kfl[j] != wp.int64(0):
             if edge[i] != sekb[j]:
-                v = v + seg_v(p, bk[j], bte[j], rc2)
+                v = v + seg_v(p, bk[j], be[j], rc2)
         return v + ray_v(p, bte[j], d[j], rc2) - ray_v(p, ate[j], d[j], rc2)
+
+    @wp.func(module=module)
+    def own_v(i: int, t: int, p: vec, a: wp.array(dtype=vec), b: wp.array(dtype=vec), rc2: T,
+              edge: wp.array(dtype=wp.int64), sea: wp.array(dtype=wp.int64), seb: wp.array(dtype=wp.int64),
+              ak: wp.array(dtype=vec), bk: wp.array(dtype=vec), kfl: wp.array(dtype=wp.int64),
+              seka: wp.array(dtype=wp.int64), sekb: wp.array(dtype=wp.int64),
+              ae: wp.array(dtype=vec), be: wp.array(dtype=vec)):
+        # The own leg segments of source t (masked pairs zero).
+        v = vec()
+        if edge[i] != sea[t]:
+            v = v + seg_v(p, ak[t], a[t], rc2)
+        if kfl[t] != wp.int64(0):
+            if edge[i] != seka[t]:
+                v = v + seg_v(p, ae[t], ak[t], rc2)
+        if edge[i] != seb[t]:
+            v = v + seg_v(p, b[t], bk[t], rc2)
+        if kfl[t] != wp.int64(0):
+            if edge[i] != sekb[t]:
+                v = v + seg_v(p, bk[t], be[t], rc2)
+        return v
+
+    @wp.func(module=module)
+    def tail_v(i: int, j: int, p: vec, a: wp.array(dtype=vec), b: wp.array(dtype=vec),
+               rc2s: wp.array(dtype=T), tgrc2: wp.array(dtype=T), sgrp: wp.array(dtype=wp.int64),
+               tgrp: wp.array(dtype=wp.int64), use_tg: int,
+               edge: wp.array(dtype=wp.int64), sea: wp.array(dtype=wp.int64), seb: wp.array(dtype=wp.int64),
+               ak: wp.array(dtype=vec), bk: wp.array(dtype=vec), kfl: wp.array(dtype=wp.int64),
+               seka: wp.array(dtype=wp.int64), sekb: wp.array(dtype=wp.int64),
+               ae: wp.array(dtype=vec), be: wp.array(dtype=vec), nxt: wp.array(dtype=wp.int64)):
+        # The own legs of the sources after source j on its chain, each with its own core.
+        v = vec()
+        t = j
+        while nxt[t] != wp.int64(0):
+            t = t + 1
+            v = v + own_v(i, t, p, a, b, pair_rc2(i, t, rc2s, tgrc2, sgrp, tgrp, use_tg), edge, sea, seb,
+                          ak, bk, kfl, seka, sekb, ae, be)
+        return v
+
+    @wp.func(module=module)
+    def chain_w(i: int, j: int, cij: T, s: wp.array(dtype=T), col: wp.array(dtype=wp.int64),
+                W: wp.array2d(dtype=T), use_W: int, nxt: wp.array(dtype=wp.int64)):
+        # The adjoint weight of the own legs of source j: the sum of the
+        # weights of j and of the sources before it on its chain.
+        c = cij
+        t = j
+        while t > 0:
+            if nxt[t - 1] == wp.int64(0):
+                break
+            t = t - 1
+            wf = T(1.0)
+            if use_W != 0:
+                wf = W[i, int(col[t])]
+            c = c + wf * s[t]
+        return c
 
     @wp.kernel(module=module)
     def fwd_rows(P: wp.array(dtype=vec), X: wp.array(dtype=vec), a: wp.array(dtype=vec),
@@ -344,8 +405,9 @@ def _build(precision: str) -> SimpleNamespace:  # noqa: C901 - one closure per k
                  spanel: wp.array(dtype=wp.int64), edge: wp.array(dtype=wp.int64),
                  sea: wp.array(dtype=wp.int64), seb: wp.array(dtype=wp.int64), s: wp.array(dtype=T),
                  off: wp.array(dtype=wp.int64), order: wp.array(dtype=wp.int64), use_tg: int,
-                 out: wp.array2d(dtype=T), ak: wp.array(dtype=vec), bk: wp.array(dtype=vec), kfl: wp.array(dtype=wp.int64),
-             seka: wp.array(dtype=wp.int64), sekb: wp.array(dtype=wp.int64)):
+                 out: wp.array2d(dtype=T), ak: wp.array(dtype=vec), bk: wp.array(dtype=vec),
+                 kfl: wp.array(dtype=wp.int64), seka: wp.array(dtype=wp.int64), sekb: wp.array(dtype=wp.int64),
+                 ae: wp.array(dtype=vec), be: wp.array(dtype=vec), nxt: wp.array(dtype=wp.int64), chain: int):
         # System rows: one thread per (target, unknown); the sources of the unknown in source order.
         i, u = wp.tid()
         p = P[i]
@@ -354,7 +416,10 @@ def _build(precision: str) -> SimpleNamespace:  # noqa: C901 - one closure per k
         for k in range(int(off[u]), int(off[u + 1])):
             j = int(order[k])
             rc2 = pair_rc2(i, j, rc2s, tgrc2, sgrp, tgrp, use_tg)
-            v = hs_v(i, j, p, a, b, ate, bte, d, rc2, own, spanel, edge, sea, seb, ak, bk, kfl, seka, sekb)
+            v = hs_v(i, j, p, a, b, ate, bte, d, rc2, own, spanel, edge, sea, seb, ak, bk, kfl, seka, sekb, ae, be)
+            if chain != 0:
+                v = v + tail_v(i, j, p, a, b, rc2s, tgrc2, sgrp, tgrp, use_tg, edge, sea, seb, ak, bk, kfl,
+                               seka, sekb, ae, be, nxt)
             acc = acc + s[j] * wp.dot(v, x)
         out[i, u] = acc
 
@@ -365,8 +430,9 @@ def _build(precision: str) -> SimpleNamespace:  # noqa: C901 - one closure per k
                     tgrp: wp.array(dtype=wp.int64), own: wp.array(dtype=wp.int64),
                     spanel: wp.array(dtype=wp.int64), edge: wp.array(dtype=wp.int64),
                     sea: wp.array(dtype=wp.int64), seb: wp.array(dtype=wp.int64), s: wp.array(dtype=T),
-                    use_tg: int, buf: wp.array3d(dtype=T), ak: wp.array(dtype=vec), bk: wp.array(dtype=vec), kfl: wp.array(dtype=wp.int64),
-             seka: wp.array(dtype=wp.int64), sekb: wp.array(dtype=wp.int64)):
+                    use_tg: int, buf: wp.array3d(dtype=T), ak: wp.array(dtype=vec), bk: wp.array(dtype=vec),
+                    kfl: wp.array(dtype=wp.int64), seka: wp.array(dtype=wp.int64), sekb: wp.array(dtype=wp.int64),
+                    ae: wp.array(dtype=vec), be: wp.array(dtype=vec), nxt: wp.array(dtype=wp.int64), chain: int):
         # Induced velocity: one thread per (target, source block); one partial sum per block.
         i, jb = wp.tid()
         n = a.shape[0]
@@ -374,32 +440,43 @@ def _build(precision: str) -> SimpleNamespace:  # noqa: C901 - one closure per k
         acc = vec()
         for j in range(jb * BJ, wp.min((jb + 1) * BJ, n)):
             rc2 = pair_rc2(i, j, rc2s, tgrc2, sgrp, tgrp, use_tg)
-            acc = acc + hs_v(i, j, p, a, b, ate, bte, d, rc2, own, spanel, edge, sea, seb,
-                             ak, bk, kfl, seka, sekb) * s[j]
+            v = hs_v(i, j, p, a, b, ate, bte, d, rc2, own, spanel, edge, sea, seb, ak, bk, kfl, seka, sekb, ae, be)
+            if chain != 0:
+                v = v + tail_v(i, j, p, a, b, rc2s, tgrc2, sgrp, tgrp, use_tg, edge, sea, seb, ak, bk, kfl,
+                               seka, sekb, ae, be, nxt)
+            acc = acc + v * s[j]
         buf[jb, i, 0] = acc[0]
         buf[jb, i, 1] = acc[1]
         buf[jb, i, 2] = acc[2]
 
     @wp.func(module=module)
-    def hs_fb(i: int, j: int, p: vec, u: vec, a: wp.array(dtype=vec), b: wp.array(dtype=vec),
+    def hs_fb(i: int, j: int, p: vec, u: vec, uo: vec, a: wp.array(dtype=vec), b: wp.array(dtype=vec),
               ate: wp.array(dtype=vec), bte: wp.array(dtype=vec), d: wp.array(dtype=vec), rc2: T,
               own: wp.array(dtype=wp.int64), spanel: wp.array(dtype=wp.int64), edge: wp.array(dtype=wp.int64),
               sea: wp.array(dtype=wp.int64), seb: wp.array(dtype=wp.int64),
               ak: wp.array(dtype=vec), bk: wp.array(dtype=vec), kfl: wp.array(dtype=wp.int64),
-             seka: wp.array(dtype=wp.int64), sekb: wp.array(dtype=wp.int64)):
-        # Velocity and VJP of horseshoe j at point i. Returns v, gP, ga, gb, gat, gbt, gd, grc2,
-        # gak, gbk (the node derivatives are zero on a source without a node).
+              seka: wp.array(dtype=wp.int64), sekb: wp.array(dtype=wp.int64),
+              ae: wp.array(dtype=vec), be: wp.array(dtype=vec), chain: int):
+        # Velocity and VJP of horseshoe j at point i (without the legs of the
+        # sources after j on its chain). u is the adjoint of the bound vortex
+        # and the rays, uo the adjoint of the own leg segments (u without a
+        # chain). Returns v, vo (the own legs), gP, ga, gb, gat, gbt, gd,
+        # grc2, gak, gbk, gae, gbe (the node derivatives are zero on a source
+        # without a node; with a chain the aft-segment ends are in gae, gbe).
         aj = a[j]
         bj = b[j]
         tj = ate[j]
         uj = bte[j]
         dj = d[j]
         v = vec()
+        vo = vec()
         gP = vec()
         ga = vec()
         gb = vec()
         gat = vec()
         gbt = vec()
+        gae = vec()
+        gbe = vec()
         grc = T(0.0)
         if own[i] != spanel[j]:
             v1, p1, A1, B1, r1 = seg_fb(p, aj, bj, rc2, u)
@@ -412,8 +489,9 @@ def _build(precision: str) -> SimpleNamespace:  # noqa: C901 - one closure per k
         gbk = vec()
         kj = kfl[j] != wp.int64(0)
         if edge[i] != sea[j]:
-            v2, p2, A2, B2, r2 = seg_fb(p, ak[j], aj, rc2, u)
+            v2, p2, A2, B2, r2 = seg_fb(p, ak[j], aj, rc2, uo)
             v = v + v2
+            vo = vo + v2
             gP = gP + p2
             if kj:
                 gak = gak + A2
@@ -423,15 +501,20 @@ def _build(precision: str) -> SimpleNamespace:  # noqa: C901 - one closure per k
             grc = grc + r2
         if kj:
             if edge[i] != seka[j]:
-                v6, p6, A6, B6, r6 = seg_fb(p, tj, ak[j], rc2, u)
+                v6, p6, A6, B6, r6 = seg_fb(p, ae[j], ak[j], rc2, uo)
                 v = v + v6
+                vo = vo + v6
                 gP = gP + p6
-                gat = gat + A6
+                if chain != 0:
+                    gae = gae + A6
+                else:
+                    gat = gat + A6
                 gak = gak + B6
                 grc = grc + r6
         if edge[i] != seb[j]:
-            v3, p3, A3, B3, r3 = seg_fb(p, bj, bk[j], rc2, u)
+            v3, p3, A3, B3, r3 = seg_fb(p, bj, bk[j], rc2, uo)
             v = v + v3
+            vo = vo + v3
             gP = gP + p3
             gb = gb + A3
             if kj:
@@ -441,11 +524,15 @@ def _build(precision: str) -> SimpleNamespace:  # noqa: C901 - one closure per k
             grc = grc + r3
         if kj:
             if edge[i] != sekb[j]:
-                v7, p7, A7, B7, r7 = seg_fb(p, bk[j], uj, rc2, u)
+                v7, p7, A7, B7, r7 = seg_fb(p, bk[j], be[j], rc2, uo)
                 v = v + v7
+                vo = vo + v7
                 gP = gP + p7
                 gbk = gbk + A7
-                gbt = gbt + B7
+                if chain != 0:
+                    gbe = gbe + B7
+                else:
+                    gbt = gbt + B7
                 grc = grc + r7
         v4, p4, d4, r4 = ray_fb(p, uj, dj, rc2, u)
         v5, p5, d5, r5 = ray_fb(p, tj, dj, rc2, -u)
@@ -454,7 +541,7 @@ def _build(precision: str) -> SimpleNamespace:  # noqa: C901 - one closure per k
         gbt = gbt - p4
         gat = gat - p5
         grc = grc + r4 + r5
-        return v, gP, ga, gb, gat, gbt, d4 + d5, grc, gak, gbk
+        return v, vo, gP, ga, gb, gat, gbt, d4 + d5, grc, gak, gbk, gae, gbe
 
     @wp.kernel(module=module)
     def vjp_rows(P: wp.array(dtype=vec), X: wp.array(dtype=vec), a: wp.array(dtype=vec),
@@ -465,7 +552,9 @@ def _build(precision: str) -> SimpleNamespace:  # noqa: C901 - one closure per k
                  sea: wp.array(dtype=wp.int64), seb: wp.array(dtype=wp.int64), s: wp.array(dtype=T),
                  col: wp.array(dtype=wp.int64), W: wp.array2d(dtype=T), use_W: int, use_tg: int,
                  ak: wp.array(dtype=vec), bk: wp.array(dtype=vec), kfl: wp.array(dtype=wp.int64),
-             seka: wp.array(dtype=wp.int64), sekb: wp.array(dtype=wp.int64), buf: wp.array3d(dtype=T)):
+                 seka: wp.array(dtype=wp.int64), sekb: wp.array(dtype=wp.int64),
+                 ae: wp.array(dtype=vec), be: wp.array(dtype=vec), nxt: wp.array(dtype=wp.int64), chain: int,
+                 buf: wp.array3d(dtype=T)):
         # Target derivatives: one thread per (target, source block). buf[jb, i] = gP, gX, g_tg_rc2.
         i, jb = wp.tid()
         n = a.shape[0]
@@ -479,11 +568,19 @@ def _build(precision: str) -> SimpleNamespace:  # noqa: C901 - one closure per k
             if use_W != 0:
                 wf = W[i, int(col[j])]
             cij = wf * s[j]
+            cw = cij
+            if chain != 0:
+                cw = chain_w(i, j, cij, s, col, W, use_W, nxt)
             rc2 = pair_rc2(i, j, rc2s, tgrc2, sgrp, tgrp, use_tg)
-            v, gP, ga, gb, gat, gbt, gd, grc, gak, gbk = hs_fb(i, j, p, x * cij, a, b, ate, bte, d, rc2,
-                                                              own, spanel, edge, sea, seb, ak, bk, kfl, seka, sekb)
+            v, vo, gP, ga, gb, gat, gbt, gd, grc, gak, gbk, gae, gbe = hs_fb(
+                i, j, p, x * cij, x * cw, a, b, ate, bte, d, rc2, own, spanel, edge, sea, seb, ak, bk, kfl,
+                seka, sekb, ae, be, chain)
             aP = aP + gP
-            aX = aX + v * cij
+            if chain != 0:
+                # The legs of the sources after j are in their own chain weights.
+                aX = aX + (v - vo) * cij + vo * cw
+            else:
+                aX = aX + v * cij
             atg = atg + grc * is_other(i, j, sgrp, tgrp, use_tg)
         buf[jb, i, 0] = aP[0]
         buf[jb, i, 1] = aP[1]
@@ -502,9 +599,11 @@ def _build(precision: str) -> SimpleNamespace:  # noqa: C901 - one closure per k
                  sea: wp.array(dtype=wp.int64), seb: wp.array(dtype=wp.int64), s: wp.array(dtype=T),
                  col: wp.array(dtype=wp.int64), W: wp.array2d(dtype=T), use_W: int, use_tg: int,
                  ak: wp.array(dtype=vec), bk: wp.array(dtype=vec), kfl: wp.array(dtype=wp.int64),
-             seka: wp.array(dtype=wp.int64), sekb: wp.array(dtype=wp.int64), buf: wp.array3d(dtype=T)):
+                 seka: wp.array(dtype=wp.int64), sekb: wp.array(dtype=wp.int64),
+                 ae: wp.array(dtype=vec), be: wp.array(dtype=vec), nxt: wp.array(dtype=wp.int64), chain: int,
+                 buf: wp.array3d(dtype=T)):
         # Source derivatives: one thread per (source, target block).
-        # buf[ib, j] = ga, gb, ga_te, gb_te, gd, g_rc2_src, gs, ga_k, gb_k.
+        # buf[ib, j] = ga, gb, ga_te, gb_te, gd, g_rc2_src, gs, ga_k, gb_k, ga_e, gb_e.
         j, ib = wp.tid()
         m = P.shape[0]
         sj = s[j]
@@ -518,23 +617,36 @@ def _build(precision: str) -> SimpleNamespace:  # noqa: C901 - one closure per k
         asg = T(0.0)
         aak = vec()
         abk = vec()
+        aae = vec()
+        abe = vec()
         for i in range(ib * BJ, wp.min((ib + 1) * BJ, m)):
             wf = T(1.0)
             if use_W != 0:
                 wf = W[i, cj]
             cij = wf * sj
+            cw = cij
+            if chain != 0:
+                cw = chain_w(i, j, cij, s, col, W, use_W, nxt)
             x = X[i]
+            p = P[i]
             rc2 = pair_rc2(i, j, rc2s, tgrc2, sgrp, tgrp, use_tg)
-            v, gP, ga, gb, gat, gbt, gd, grc, gak, gbk = hs_fb(i, j, P[i], x * cij, a, b, ate, bte, d, rc2,
-                                                              own, spanel, edge, sea, seb, ak, bk, kfl, seka, sekb)
+            v, vo, gP, ga, gb, gat, gbt, gd, grc, gak, gbk, gae, gbe = hs_fb(
+                i, j, p, x * cij, x * cw, a, b, ate, bte, d, rc2, own, spanel, edge, sea, seb, ak, bk, kfl,
+                seka, sekb, ae, be, chain)
             aak = aak + gak
             abk = abk + gbk
+            aae = aae + gae
+            abe = abe + gbe
             aa = aa + ga
             ab = ab + gb
             aat = aat + gat
             abt = abt + gbt
             ad = ad + gd
             arc = arc + grc
+            if chain != 0:
+                # gs: the whole legs of j, also those of the sources after it.
+                v = v + tail_v(i, j, p, a, b, rc2s, tgrc2, sgrp, tgrp, use_tg, edge, sea, seb, ak, bk, kfl,
+                               seka, sekb, ae, be, nxt)
             asg = asg + wf * wp.dot(x, v)
         for c in range(3):
             buf[ib, j, c] = aa[c]
@@ -544,6 +656,8 @@ def _build(precision: str) -> SimpleNamespace:  # noqa: C901 - one closure per k
             buf[ib, j, 12 + c] = ad[c]
             buf[ib, j, 17 + c] = aak[c]
             buf[ib, j, 20 + c] = abk[c]
+            buf[ib, j, 23 + c] = aae[c]
+            buf[ib, j, 26 + c] = abe[c]
         buf[ib, j, 15] = arc
         buf[ib, j, 16] = asg
 
@@ -684,23 +798,38 @@ def _csr(topo, dev) -> tuple:  # type: ignore[no-untyped-def]
     return cache
 
 
-def _kink_args(topo, a_te, b_te, a_k, b_k, ns, dev, sea, seb) -> list:  # type: ignore[no-untyped-def]
-    """Return the Warp leg-node arguments (ak, bk, flags, seka, sekb); without nodes ak is a_te and bk is b_te."""
+def _kink_args(topo, a_te, b_te, a_k, b_k, ns, dev, sea, seb, a_e=None, b_e=None) -> list:  # type: ignore[no-untyped-def]
+    """Return the Warp leg-node arguments (ak, bk, flags, seka, sekb, ae, be, nxt, chain).
+
+    Without nodes ak is a_te and bk is b_te; without chains ae is a_te, be
+    is b_te and chain is 0.
+    """
+    n = int(a_te.shape[0])
+    chain = getattr(topo, "leg_next", None) is not None and a_e is not None
+    if chain:
+        cache = getattr(topo, "_wp_chain", None)
+        if cache is None:
+            cache = _i(topo.leg_next.to(dev))
+            topo._wp_chain = cache
+        ends = [_v(a_e, ns), _v(b_e, ns), cache, 1]
+    else:
+        ends = [_v(a_te, ns), _v(b_te, ns), _i(torch.zeros(n, dtype=torch.int64, device=dev)), 0]
     if getattr(topo, "kink", None) is None or a_k is None:
-        n = int(a_te.shape[0])
-        return [_v(a_te, ns), _v(b_te, ns), _i(torch.zeros(n, dtype=torch.int64, device=dev)), sea, seb]
+        return [_v(a_te, ns), _v(b_te, ns), _i(torch.zeros(n, dtype=torch.int64, device=dev)), sea, seb] + ends
     cache = getattr(topo, "_wp_kink", None)
     if cache is None:
         cache = tuple(_i(x.to(dev)) for x in (topo.kink, topo.src_edge_ka, topo.src_edge_kb))
         topo._wp_kink = cache
-    return [_v(a_k, ns), _v(b_k, ns), *cache]
+    return [_v(a_k, ns), _v(b_k, ns), *cache] + ends
 
 
 def horseshoe_forward(mode, P, X, a, b, a_te, b_te, d, rc2_src, tg_rc2, s, topo,
-                      a_k=None, b_k=None):  # type: ignore[no-untyped-def]
+                      a_k=None, b_k=None, a_e=None, b_e=None):  # type: ignore[no-untyped-def]
     """Return the system rows (mode 0, (m, n_u)) or the induced velocity (mode 1, (m, 3)) on the GPU.
 
-    *a_k*, *b_k* are the leg nodes of the sources with the flags of *topo*, or None.
+    *a_k*, *b_k* are the leg nodes of the sources with the flags of *topo*,
+    or None; *a_e*, *b_e* the ends of the own leg segments of a set with
+    leg chains (the chain flags of *topo*), or None.
     """
     ns = kernels(_prec(P))
     m, n = int(P.shape[0]), int(a.shape[0])
@@ -709,7 +838,7 @@ def horseshoe_forward(mode, P, X, a, b, a_te, b_te, d, rc2_src, tg_rc2, s, topo,
     tg2 = tg_rc2 if tg_rc2 is not None else torch.zeros(m, dtype=P.dtype, device=dev)
     sg, tg, own, sp, edge, sea, seb, _col = _topo_arrays(topo, m, dev)
     geo = (_v(a, ns), _v(b, ns), _v(a_te, ns), _v(b_te, ns), _v(d, ns), _s(rc2_src), _s(tg2))
-    kink = _kink_args(topo, a_te, b_te, a_k, b_k, ns, dev, sea, seb)
+    kink = _kink_args(topo, a_te, b_te, a_k, b_k, ns, dev, sea, seb, a_e, b_e)
     if mode == 0:
         out = torch.zeros((m, topo.n_u), dtype=P.dtype, device=dev)
         off, order = _csr(topo, dev)
@@ -725,10 +854,11 @@ def horseshoe_forward(mode, P, X, a, b, a_te, b_te, d, rc2_src, tg_rc2, s, topo,
 
 
 def horseshoe_vjp(P, X, a, b, a_te, b_te, d, rc2_src, tg_rc2, s, W, topo,
-                  a_k=None, b_k=None):  # type: ignore[no-untyped-def]
+                  a_k=None, b_k=None, a_e=None, b_e=None):  # type: ignore[no-untyped-def]
     """Return the VJP (gP, gX, g_tg_rc2, ga, gb, ga_te, gb_te, gd, g_rc2_src, gs) on the GPU.
 
-    With leg nodes (*a_k*, *b_k*) the tuple has two more items, ``ga_k`` and ``gb_k``.
+    With leg nodes (*a_k*, *b_k*) the tuple has two more items, ``ga_k`` and
+    ``gb_k``; with leg chains (*a_e*, *b_e*) two more, ``ga_e`` and ``gb_e``.
     """
     ns = kernels(_prec(P))
     m, n = int(P.shape[0]), int(a.shape[0])
@@ -740,12 +870,12 @@ def horseshoe_vjp(P, X, a, b, a_te, b_te, d, rc2_src, tg_rc2, s, W, topo,
     Wt = W.contiguous() if W is not None else torch.zeros((1, 1), dtype=P.dtype, device=dev)
     args = [_v(P, ns), _v(X, ns), _v(a, ns), _v(b, ns), _v(a_te, ns), _v(b_te, ns), _v(d, ns), _s(rc2_src),
             _s(tg2), sg, tg, own, sp, edge, sea, seb, _s(s), col, wp.from_torch(Wt), use_w, use_tg]
-    args = args + _kink_args(topo, a_te, b_te, a_k, b_k, ns, dev, sea, seb)
+    args = args + _kink_args(topo, a_te, b_te, a_k, b_k, ns, dev, sea, seb, a_e, b_e)
     nbj = _blocks(n)
     rbuf = torch.empty((nbj, m, 7), dtype=P.dtype, device=dev)
     _launch(ns.vjp_rows, (m, nbj), args + [wp.from_torch(rbuf)])
     nbi = _blocks(m)
-    cbuf = torch.empty((nbi, n, 23), dtype=P.dtype, device=dev)
+    cbuf = torch.empty((nbi, n, 29), dtype=P.dtype, device=dev)
     _launch(ns.vjp_cols, (n, nbi), args + [wp.from_torch(cbuf)])
     r = _sum_blocks(rbuf, P.dtype)
     c = _sum_blocks(cbuf, P.dtype)
@@ -753,7 +883,10 @@ def horseshoe_vjp(P, X, a, b, a_te, b_te, d, rc2_src, tg_rc2, s, W, topo,
            c[:, 15], c[:, 16])
     if getattr(topo, "kink", None) is None or a_k is None:
         return out
-    return out + (c[:, 17:20], c[:, 20:23])
+    out = out + (c[:, 17:20], c[:, 20:23])
+    if getattr(topo, "leg_next", None) is None or a_e is None:
+        return out
+    return out + (c[:, 23:26], c[:, 26:29])
 
 
 def _tz_args(q, qn, p, gamma, d, rc2, tg_rc2, groups, ns):  # type: ignore[no-untyped-def]

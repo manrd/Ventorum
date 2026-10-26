@@ -72,10 +72,31 @@ def _model_cases() -> list[tuple]:
     cond = vt.FlightCondition(V_inf=30.0, alpha=np.radians(4.0), beta=np.radians(3.0))
     st = vt.SolverSettings(solver_type="linear", n_panels=12)
     cases.append(("linear", ac, cond, st, ("nodes", "alpha"), ("CL", "CY", "CDi", "Cm")))
+    # Leg chains of a cambered mean-line lattice, with the hinge node of a
+    # deflected part-span flap on the chain, in ground effect.
+    flap = vt.ControlSurface("flap", 0.25, 0.75, 0.7, np.radians(8.0), symmetric=False)
+    ac = vt.Aircraft(surfaces=[vt.LiftingSurface(
+        name="Wing", semi_span=4.0, dihedral=np.radians(3.0), controls=[flap],
+        sections=[vt.WingSection(y_frac=0.0, chord=1.0, shape="4412"),
+                  vt.WingSection(y_frac=1.0, chord=0.8, shape="6409")])])
+    ac.compute_reference_values()
+    st = vt.SolverSettings(solver_type="vlm", n_panels=6, n_chord=4)
+    cond = vt.FlightCondition(V_inf=30.0, alpha=np.radians(3.0), beta=np.radians(2.0))
+    cases.append(("vlm-chain", ac, cond, st, ("nodes", "alpha"), ("CL", "CY", "CDi", "Cm")))
+    cond = vt.FlightCondition(V_inf=30.0, alpha=np.radians(3.0), beta=np.radians(2.0), h=2.0)
+    cases.append(("vlm-chain-ground", ac, cond, st, ("nodes", "alpha", "h"), ("CL", "CY", "CDi", "Cm")))
     return cases
 
 
 _CASE_IDS = [c[0] for c in _model_cases()]
+
+# Cases checked in float64 only. In the ground case of this wing the float32
+# PyTorch reference itself is 6 % from the float64 reference in the
+# wake-direction gradient at the leg points (the same without camber and
+# without the chains, so a property of the geometry in float32); the float32
+# kernels and the float32 reference then differ by more than the float32
+# tolerance. The float64 products agree to about 1e-15.
+_FLOAT64_ONLY = {"vlm-chain-ground"}
 
 
 def _captured_calls(case_id: str, device: str, precision: str):  # type: ignore[no-untyped-def]
@@ -192,6 +213,8 @@ def _check_parity(case_id: str, backend: str, device: str, precision: str) -> No
 def test_vjp_parity(case_id: str, backend: str, precision: str) -> None:
     """Each CPU VJP backend equals the PyTorch reference VJP (products and all input gradients)."""
     pytest.importorskip("torch")
+    if case_id in _FLOAT64_ONLY and precision == "float32":
+        pytest.skip("float64 only (see _FLOAT64_ONLY)")
     if backend == "cython":
         pytest.importorskip("ventorum.aero.vortex_vjp_cython")
     _check_parity(case_id, backend, "cpu", precision)
@@ -203,6 +226,8 @@ def test_vjp_parity(case_id: str, backend: str, precision: str) -> None:
 def test_vjp_parity_warp(case_id: str, precision: str) -> None:
     """The Warp VJP kernels equal the PyTorch reference VJP on the GPU (float64 and float32)."""
     _need_cuda()
+    if case_id in _FLOAT64_ONLY and precision == "float32":
+        pytest.skip("float64 only (see _FLOAT64_ONLY)")
     _check_parity(case_id, "warp", "cuda", precision)
 
 
