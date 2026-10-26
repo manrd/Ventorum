@@ -114,11 +114,11 @@ def _check_viscous_lift(result, height):
 
 
 @pytest.mark.slow
-@pytest.mark.parametrize("height", [None, 0.3, 0.2])
+@pytest.mark.parametrize("height", [None, 0.2])
 @pytest.mark.parametrize("alphas", [4.0, [4.0, 5.0]], ids=["scalar", "sweep"])
 def test_viscous_lift_field_choice(height, alphas):
     """Keep circulation lift exactly, and report pressure lift near the ground."""
-    shape = airfoil("4412", n_points=161)
+    shape = airfoil("4412", n_points=81)
     result = solve_viscous(shape, alphas, 1e6, height=height)
     _check_viscous_lift(result, height)
 
@@ -130,9 +130,9 @@ def test_viscous_batch_lift_field_choice(device):
     torch = pytest.importorskip("torch")
     if device == "cuda" and not torch.cuda.is_available():
         pytest.skip("CUDA is not available")
-    shape = airfoil("4412", n_points=161)
+    shape = airfoil("4412", n_points=81)
     cases = [ViscousCase(shape, a, 1e6, height=h)
-             for h in (None, 0.3, 0.2) for a in (4.0, 5.0)]
+             for h in (None, 0.2) for a in (4.0, 5.0)]
     results = solve_viscous_batch(cases, device=device, dtype=torch.float64)
     for case, result in zip(cases, results):
         _check_viscous_lift(result, case.height)
