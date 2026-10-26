@@ -97,15 +97,26 @@ def test_thin_flat_plate_matches_discrete_vortex_reference():
     assert circ_diff > 0.08
 
 
+def _key(alpha, nodes) -> tuple[float, float]:
+    return float(alpha), round(float(np.min(np.asarray(nodes)[:, 1])), 6)
+
+
 @pytest.fixture
 def viscous_loads(monkeypatch):
-    """Record the circulation and pressure loads before result assembly."""
+    """Record the circulation and pressure loads before result assembly.
+
+    The loads are kept per angle and lowest node height (rounded to 1e-6 m,
+    which separates the ground heights); the last outputs of a key are the
+    ones that the result row is built from. (A key on the exact node
+    coordinates broke when the full test suite gave the solve another
+    continuation path.)
+    """
     outputs = vii.case_outputs
     loads = {}
 
     def record(setup, state, ue):
         result = outputs(setup, state, ue)
-        loads[(setup.sys.alpha, setup.sys.nodes.tobytes())] = result
+        loads[_key(setup.sys.alpha, setup.sys.nodes)] = result
         return result
 
     monkeypatch.setattr(vii, "case_outputs", record)
@@ -117,8 +128,7 @@ def _check_viscous_lift(result, height, loads):
     assert np.all(result.converged)
     ground = height is not None
     coordinates = [result.coordinates] if np.ndim(result.alpha) == 0 else result.coordinates
-    expected = [loads[(a, nodes.tobytes())]
-                for a, nodes in zip(np.atleast_1d(result.alpha), coordinates)]
+    expected = [loads[_key(a, nodes)] for a, nodes in zip(np.atleast_1d(result.alpha), coordinates)]
     circulation = np.array([o["Cl"] for o in expected])
     pressure = np.array([o["Cl_pressure"] for o in expected])
     assert np.array_equal(np.atleast_1d(result.Cl_circulation), circulation)
