@@ -10,6 +10,16 @@ a minor version can change a public interface.
 
 ### Added
 
+- Viscous alpha-correction coupling for the 3D panel method: `solve_viscous(..., model="panel3d")`
+  matches the surface-pressure lift of each spanwise strip to its section polar by rotating the onset on
+  the strip's body panels (one factorization for a whole sweep), closes the trailing-edge pressure jump
+  with the pressure Kutta condition, takes the section lift lines from a 2D Morino solve of each strip
+  section, and adds the viscous section moment and the profile drag from the polar. A half mesh with
+  asymmetric flow, a GPU backend and the mesh-error estimate are refused.
+- Ventorum-2D in ground effect: `Cl` is the surface pressure lift (inviscid and viscous results), and
+  the new field `Cl_circulation` keeps 2 Gamma / c (Coulliette and Plotkin 1996). Free-air results do
+  not change. Near the ground the circulation lift was 12 % (h/c 0.2) to 33 % (h/c 0.1) too high.
+
 - Adjoint gradients (`gradients`, `gradient_vjp`, `check_gradients`) of vortex-lattice surfaces whose
   lattice lies on a cambered section mean line: the reference copy builds the same mean-line points
   and normals as the solver (also with geometric flaps, joined surfaces and span-varying sections),
