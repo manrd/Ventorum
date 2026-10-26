@@ -40,8 +40,8 @@ import math
 
 from ventorum.core.constants import A_SL, MACH_LIMIT_INCOMPRESSIBLE, RHO_SL
 
-from typing import TYPE_CHECKING
 from collections.abc import Sequence
+from typing import TYPE_CHECKING
 
 import numpy as np
 
