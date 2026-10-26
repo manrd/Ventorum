@@ -202,7 +202,7 @@ The full description, with the closed-form influences, the branch cuts of the so
 - Exact closed forms of all influences, with an equivalent far-field form (log1p and atan2) that keeps float32 accuracy.
 - Free air: one LU factorization per geometry, two right-hand sides superposed for any angle. Sources add right-hand-side columns only.
 - Ground effect: the method of images about the flat ground $y = 0$ (mirror vortices of opposite sign, mirror sources of the same sign); the geometry is rotated about the pivot, and `height_reference="pivot"` places the pivot (default the quarter chord) at the given height.
-- $C_l$ by Kutta-Joukowski of the total circulation; pressure forces by exact integration of $C_p = 1 - \gamma^2$ over each wall panel.
+- $C_l$ by Kutta-Joukowski of the total circulation in free air, and by surface pressure integration in ground effect ($C_{l,circulation}$ keeps the circulation lift); pressure forces by exact integration of $C_p = 1 - \gamma^2$ over each wall panel.
 - Reference values: the reference chord (`chord_ref`) and the moment reference point (`moment_ref`) are inputs of the solvers, the batch solver, the polar source and the agent tool. By default they come from the reference geometry of the section: the chord line from the leading edge to the trailing-edge midpoint of the section as given, its length, and the quarter-chord point on it. A flapped `AirfoilShape` holds the reference geometry of the section before the deflection, as in thin-airfoil theory (Glauert 1927); the polar source and the agent tool pass the flapped shape. The default pivot of the ground-effect placement is the same quarter-chord point.
 
 ## Integral boundary layer
@@ -221,6 +221,7 @@ The full description is in [](panel2d_viscous.md). Summary:
 - The edge velocity is eliminated: $u_e = u_{e,inv} + D\,m$, with $D$ built from the source sensitivities of the factorized inviscid system (with images in ground effect).
 - One global Newton iteration on $(\theta, m, c)$ at all stations of both sides and of the wake (fully simultaneous coupling; Drela and Giles 1987), with the exact Jacobian. The stagnation point and the transition intervals are updated between iterations.
 - The first wake station takes $\theta_w = \theta_u + \theta_l$ and $\delta^*_w = \delta^*_u + \delta^*_l + h_{TE}$ (Drela 1989).
+- Lift: `Cl` is the surface pressure lift (`Cl_pressure`) in ground effect, as in the inviscid solver (Coulliette and Plotkin 1996, eq. 30; see [](panel2d.md)). `Cl_circulation` keeps $2\Gamma/c$ in both solvers. In free air, the viscous `Cl` stays equal to `Cl_circulation`, with the same bits as before. The sequential and batched solvers use this rule.
 - Drag: Squire-Young at the wake end (Squire and Young 1938). The skin-friction drag and the surface-pressure drag are given separately as a check.
 - A case that does not converge returns `converged=False`, its residual, its work counters and a reason; its loads and distributions are NaN (the last iterate is not a solution). A singular linear system gives a failed angle with a reason, not an exception. There are no result overrides and no fallback to other models.
 - One body only: more bodies raise `ValueError`. A plain flap is part of the single-element geometry.

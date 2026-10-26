@@ -109,13 +109,14 @@ def test_ncrit_changes_transition_and_drag():
 
 @pytest.mark.slow
 def test_ground_effect():
-    """Ground effect: h/c 0.3 converges; h/c 50 gives the free-air Cl within 1e-3."""
+    """Ground effect: h/c 0.3 converges; h/c 50 recovers each free-air lift within 1e-3."""
     free = _sweep("0012", 1e6, 4.0)
     near = _sweep("0012", 1e6, 4.0, height=0.3)
     far = _sweep("0012", 1e6, 4.0, height=50.0)
     assert near.converged, near.reason
     assert far.converged and free.converged
-    assert abs(far.Cl - free.Cl) < 1e-3
+    assert abs(far.Cl_circulation - free.Cl_circulation) < 1e-3
+    assert abs(far.Cl - free.Cl_pressure) < 1e-3
     print(f"\n[viscous] 4 deg Cl: free {free.Cl:.4f}, h/c 50 {far.Cl:.4f}, h/c 0.3 {near.Cl:.4f}")
 
 

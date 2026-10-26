@@ -277,7 +277,8 @@ def test_ground_effect_properties():
     mirror = rot.copy()
     mirror[:, 1] *= -1.0
     two = solve_inviscid([rot, mirror], 0.0)
-    assert abs(res_ge.Cl - 2.0 * two.circulation[0]) < 1e-10
+    assert abs(res_ge.Cl_circulation - 2.0 * two.circulation[0]) < 1e-10
+    assert res_ge.Cl == res_ge.Cl_pressure
     fa = solve_inviscid(coords, 0.0)
     assert abs(solve_inviscid(coords, 0.0, height=1000.0).Cl - fa.Cl) < 1e-4
     assert solve_inviscid(coords, 0.0, height=0.1).Cl < 0.0

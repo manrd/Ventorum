@@ -2,8 +2,9 @@
 """NACA 4412 in ground effect: Cl against h/c and Cp pictures.
 
 The script solves the 2D inviscid flow over a NACA 4412 section at 4 deg
-angle of attack at heights h/c of 1.0, 0.3 and 0.1 above the ground. It
-saves the Cp picture of the three heights and the Cl against h/c picture
+angle of attack at heights h/c of 1.0, 0.3 and 0.1 above the ground. In
+ground effect Cl is the surface pressure lift (Coulliette and Plotkin 1996).
+It saves the Cp picture of the three heights and the Cl against h/c picture
 as PNG files in the output folder.
 """
 

@@ -65,7 +65,7 @@ Ground effect (flat ground $y = 0$): each body has a mirror image with opposite 
 
 ## Forces and moments
 
-$C_l$ from the total circulation (Kutta-Joukowski), including the gap-panel vortex. Pressure forces: $C_p = 1 - \gamma^2$, integrated exactly over each wall panel for $\gamma$ linear on the panel (panel mean $1 - (\gamma_1^2 + \gamma_1\gamma_2 + \gamma_2^2)/3$). $C_m$ about the moment reference point in the body-0 frame before rotation, nose up positive.
+In free air, $C_l$ is the circulation lift from Kutta-Joukowski ($2\Gamma/c$), including the gap-panel vortex. In ground effect, near a wall the Kutta-Joukowski relation does not hold; $C_l$ is the surface pressure lift ($C_{l,pressure}$, Coulliette and Plotkin 1996, eq. 30). The field $C_{l,circulation}$ keeps the circulation lift ($2\Gamma/c$) in both cases. Pressure forces: $C_p = 1 - \gamma^2$, integrated exactly over each wall panel for $\gamma$ linear on the panel (panel mean $1 - (\gamma_1^2 + \gamma_1\gamma_2 + \gamma_2^2)/3$). $C_m$ about the moment reference point in the body-0 frame before rotation, nose up positive.
 
 Reference geometry: the chord line from the leading edge to the trailing-edge midpoint, and the reference chord $c$. Body 0 gives it (`section_reference`). An `AirfoilShape` can hold one; `AirfoilShape.with_flap` stores the one of the section before the deflection, the reference of thin-airfoil theory (Glauert 1927). Otherwise it is the one of body 0 as given: the leading edge is the point farthest from the trailing-edge midpoint (the definition of `ventorum.airfoil`), and $c$ is the distance between them (`section_chord`). A plain flap moves the trailing edge, so a deflected section given as an array is shorter than the section before the deflection and its chord line is tilted; give the flapped shape, or the explicit values.
 
@@ -97,3 +97,4 @@ Potential flow; the Kutta condition fixes the circulation. Ground effect is the 
 - M. Drela, "XFOIL: An analysis and design system for low Reynolds number airfoils", in Low Reynolds Number Aerodynamics, Lecture Notes in Engineering 54, Springer, 1989, pp. 1-12.
 - H. Glauert, "Theoretical relationships for an aerofoil with hinged flap", ARC R and M 1095, 1927.
 - L. M. Milne-Thomson, Theoretical Aerodynamics, 4th ed., Macmillan, 1958 (Karman-Trefftz reference).
+- C. Coulliette and A. Plotkin, "Aerofoil ground effect revisited", The Aeronautical Journal 100, 1996.
