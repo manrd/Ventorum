@@ -202,7 +202,7 @@ The full description, with the closed-form influences, the branch cuts of the so
 - Exact closed forms of all influences, with an equivalent far-field form (log1p and atan2) that keeps float32 accuracy.
 - Free air: one LU factorization per geometry, two right-hand sides superposed for any angle. Sources add right-hand-side columns only.
 - Ground effect: the method of images about the flat ground $y = 0$ (mirror vortices of opposite sign, mirror sources of the same sign); the geometry is rotated about the pivot, and `height_reference="pivot"` places the pivot (default the quarter chord) at the given height.
-- $C_l$ by Kutta-Joukowski of the total circulation; pressure forces by exact integration of $C_p = 1 - \gamma^2$ over each wall panel.
+- $C_l$ by Kutta-Joukowski of the total circulation in free air, and by surface pressure integration in ground effect ($C_{l,circulation}$ keeps the circulation lift); pressure forces by exact integration of $C_p = 1 - \gamma^2$ over each wall panel.
 - Reference values: the reference chord (`chord_ref`) and the moment reference point (`moment_ref`) are inputs of the solvers, the batch solver, the polar source and the agent tool. By default they come from the reference geometry of the section: the chord line from the leading edge to the trailing-edge midpoint of the section as given, its length, and the quarter-chord point on it. A flapped `AirfoilShape` holds the reference geometry of the section before the deflection, as in thin-airfoil theory (Glauert 1927); the polar source and the agent tool pass the flapped shape. The default pivot of the ground-effect placement is the same quarter-chord point.
 
 ## Integral boundary layer

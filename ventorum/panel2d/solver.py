@@ -68,7 +68,11 @@ class Panel2DResult:
     alpha : float, np.ndarray, or torch.Tensor
         Angle of attack [deg].
     Cl : float, np.ndarray, or torch.Tensor
-        Lift coefficient from the total circulation (Kutta-Joukowski) [-].
+        Lift coefficient [-] (in free air from the total circulation,
+        in ground effect from surface pressure integration).
+    Cl_circulation : float, np.ndarray, or torch.Tensor
+        Lift coefficient from the total circulation (Kutta-Joukowski,
+        2 Gamma / c) [-].
     Cl_pressure : float, np.ndarray, or torch.Tensor
         Lift coefficient from surface pressure integration [-] (wall panels
         only: the trailing-edge gap panel of a blunt edge is not a wall).
@@ -95,6 +99,7 @@ class Panel2DResult:
 
     alpha: float | np.ndarray | torch.Tensor
     Cl: float | np.ndarray | torch.Tensor
+    Cl_circulation: float | np.ndarray | torch.Tensor
     Cl_pressure: float | np.ndarray | torch.Tensor
     Cd_pressure: float | np.ndarray | torch.Tensor
     Cm: float | np.ndarray | torch.Tensor
@@ -1026,7 +1031,8 @@ def _pack(xp, alphas, is_scalar, layout, cl, clp, cdp, cm, circ, cp, gamma, coor
         return Panel2DResult(
             alpha=float(alphas[0]) if xp is np else torch.as_tensor(alphas[0], dtype=gamma.dtype,
                                                                      device=gamma.device),
-            Cl=num(cl[0]),
+            Cl=num(clp[0]) if ground else num(cl[0]),
+            Cl_circulation=num(cl[0]),
             Cl_pressure=num(clp[0]),
             Cd_pressure=num(cdp[0]),
             Cm=num(cm[0]),
@@ -1039,7 +1045,8 @@ def _pack(xp, alphas, is_scalar, layout, cl, clp, cdp, cm, circ, cp, gamma, coor
     alpha_out = alphas if xp is np else torch.as_tensor(alphas, dtype=gamma.dtype, device=gamma.device)
     return Panel2DResult(
         alpha=alpha_out,
-        Cl=cl,
+        Cl=clp if ground else cl,
+        Cl_circulation=cl,
         Cl_pressure=clp,
         Cd_pressure=cdp,
         Cm=cm,

@@ -53,6 +53,13 @@ a minor version can change a public interface.
 
 ### Changed
 
+- Ventorum-2D lift in ground effect: `Panel2DResult.Cl` is the surface pressure lift in ground
+  effect (`Cl_pressure`, Coulliette and Plotkin 1996, eq. 30). Near a wall the Kutta-Joukowski
+  relation does not hold; the circulation lift is 12 % (h/c = 0.2) to 33 % (h/c = 0.1) too high
+  for a thin section. A new field `Panel2DResult.Cl_circulation` keeps the circulation lift
+  (2 Gamma / c). In free air, `Cl` stays the circulation lift bit for bit. The 2D polar source
+  (`Ventorum2DPolarSource`) reports the pressure lift for polars with a ground height.
+
 - Geometric chordwise controls in the vortex lattice (`n_chord >= 2`). The mean surface aft of
   the hinge turns about the hinge axis of each strip edge node, with the moved points in the
   wake, the ground images, the clearance and ground-strike checks and the Trefftz plane. The
