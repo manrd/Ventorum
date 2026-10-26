@@ -56,6 +56,7 @@ from ventorum.agent.schemas import (
     MAX_CALL_WORK,
     MAX_PANEL_CALL_WORK,
     MAX_PANEL_PANELS,
+    PANEL_SETTINGS_PROPS,
     MAX_TOTAL_PANELS,
     MIN_ALPHA_STEP_DEG,
     InputError,
@@ -434,7 +435,7 @@ def _check_panel_work(estimate: float, n_configs: int, n_panels: int) -> None:
     if float(estimate) > float(limit):
         raise InputError(
             f"The estimated work is {int(estimate)} operations "
-            f"({n_configs} configuration(s) of {n_panels} half-mesh panels at N^3 / 3 operations per configuration), "
+            f"({n_configs} configuration(s) of {n_panels} panels at N^3 / 3 operations per configuration), "
             f"above the budget {int(limit)} operations. "
             f"Reduce the work with fewer configurations, or fewer panels (smaller n_span or n_chord)."
         )
@@ -448,7 +449,6 @@ def panel_analysis(
     n_chord: int | None = None,
     n_span: int | None = None,
     cp: bool = False,
-    return_cp: bool = False,
     settings: dict[str, Any] | None = None,
     detail_level: str = "standard",
     axes: str = "body",
@@ -468,11 +468,9 @@ def panel_analysis(
     n_span : int or None
         Spanwise panels per semi-span [-]. Default 80.
     cp : bool, default=False
-        True to return panel pressure coefficients Cp in the result.
-    return_cp : bool, default=False
-        Alias for cp.
+        True to return panel pressure coefficients Cp [-] and panel centroids [m] in the result.
     settings : dict or None
-        Panel solver settings (n_chord, n_span, backend, ground_solver, panel_cache).
+        Panel solver settings (n_chord, n_panels, panel_kutta, panel_backend, panel_ground_solver, panel_cache).
     detail_level : 'summary', 'standard' or 'full'
         Detail level of the output.
     axes : 'body', 'stability', 'wind' or 'all'
@@ -485,8 +483,11 @@ def panel_analysis(
                 "The controls of the panel method are not exposed yet in the agent tools. "
                 "Remove 'controls' from the surface definition."
             )
-    sett_dict = dict(settings or {})
-    kutta = str(sett_dict.get("panel_kutta", sett_dict.get("kutta", "morino"))).lower()
+
+    include_cp = boolean(cp, "cp") if cp is not None else False
+    sett_dict = check_keys({} if settings is None else settings, PANEL_SETTINGS_PROPS, "settings")
+
+    kutta = string(sett_dict.get("panel_kutta", "morino"), "settings.panel_kutta", ["morino", "pressure"]).lower()
     if kutta == "pressure":
         raise InputError(
             "The pressure Kutta condition is not exposed yet in the agent tools. "
@@ -497,18 +498,27 @@ def panel_analysis(
     dl = parse_detail_level(detail_level)
     ax = parse_axes(axes)
 
+    if n_chord is not None and "n_chord" in sett_dict and int(n_chord) != int(sett_dict["n_chord"]):
+        raise InputError(
+            f"Top-level 'n_chord' ({n_chord}) differs from 'settings.n_chord' ({sett_dict['n_chord']}). "
+            "Give only one or use the same value."
+        )
+    if n_span is not None and "n_panels" in sett_dict and int(n_span) != int(sett_dict["n_panels"]):
+        raise InputError(
+            f"Top-level 'n_span' ({n_span}) differs from 'settings.n_panels' ({sett_dict['n_panels']}). "
+            "Give only one or use the same value."
+        )
+
     if n_chord is not None:
         nc = integer(n_chord, "n_chord", minimum=4, maximum=200)
-    elif "n_chord" in sett_dict and sett_dict["n_chord"] is not None:
+    elif "n_chord" in sett_dict:
         nc = integer(sett_dict["n_chord"], "settings.n_chord", minimum=4, maximum=200)
     else:
         nc = 40
 
     if n_span is not None:
         ns = integer(n_span, "n_span", minimum=4, maximum=400)
-    elif "n_span" in sett_dict and sett_dict["n_span"] is not None:
-        ns = integer(sett_dict["n_span"], "settings.n_span", minimum=4, maximum=400)
-    elif "n_panels" in sett_dict and sett_dict["n_panels"] is not None:
+    elif "n_panels" in sett_dict:
         ns = integer(sett_dict["n_panels"], "settings.n_panels", minimum=4, maximum=400)
     else:
         ns = 80
@@ -519,13 +529,28 @@ def panel_analysis(
     )
     _check_panel_mesh(total_half_panels)
 
-    n_configs = 1
-    est_ops = n_configs * (float(total_half_panels) ** 3 / 3.0)
-    _check_panel_work(est_ops, n_configs, total_half_panels)
+    is_symmetric_mesh = (
+        all(s.is_symmetric for s in ac.surfaces)
+        and abs(float(c.get("beta_deg", 0.0))) <= 1e-12
+    )
 
-    backend = str(sett_dict.get("panel_backend", sett_dict.get("backend", "auto")))
-    ground_solver = str(sett_dict.get("panel_ground_solver", sett_dict.get("ground_solver", "auto")))
-    cache = bool(sett_dict.get("panel_cache", True))
+    if is_symmetric_mesh:
+        solved_panels = total_half_panels
+    else:
+        solved_panels = sum(
+            (2 * (2 * int(s.n_panels if s.n_panels is not None else ns) + 1) * int(nc))
+            if s.is_symmetric
+            else ((2 * int(s.n_panels if s.n_panels is not None else ns) + 2) * int(nc))
+            for s in ac.surfaces
+        )
+
+    n_configs = 1
+    est_ops = n_configs * (float(solved_panels) ** 3 / 3.0)
+    _check_panel_work(est_ops, n_configs, solved_panels)
+
+    backend = string(sett_dict.get("panel_backend", "auto"), "settings.panel_backend", ["auto", "numpy", "numba", "gpu"])
+    ground_solver = string(sett_dict.get("panel_ground_solver", "auto"), "settings.panel_ground_solver", ["auto", "direct", "krylov"])
+    cache = boolean(sett_dict["panel_cache"], "settings.panel_cache") if "panel_cache" in sett_dict else True
 
     solver_sett = SolverSettings(
         solver_type="panel3d",
@@ -562,7 +587,6 @@ def panel_analysis(
             b_ref=b_ref, c_ref=c_ref,
         )
 
-    include_cp = bool(cp or return_cp or sett_dict.get("cp") or sett_dict.get("return_cp"))
     trust = trust_payload(res.totals.trust)
     dispatch = dict(res.details.get("dispatch", {}))
 
@@ -592,6 +616,7 @@ def panel_analysis(
             "solver": "panel3d",
             "n_chord": nc,
             "n_span": ns,
+            "solved_panels": solved_panels,
             "half_mesh_panels": total_half_panels,
             "panel_backend": solver_sett.panel_backend,
             "panel_ground_solver": solver_sett.panel_ground_solver,
@@ -602,6 +627,15 @@ def panel_analysis(
     if include_cp:
         raw_cp = res.details.get("cp")
         out["cp"] = raw_cp.tolist() if hasattr(raw_cp, "tolist") else raw_cp
+        mesh = res.details.get("mesh")
+        if mesh is not None:
+            from ventorum.panel3d.kernels import _precompute_geometry
+
+            corners = np.asarray(mesh.nodes)[np.asarray(mesh.panels)]
+            geom = _precompute_geometry(corners)
+            centroids_list = [[rnd(coord, 6) for coord in pt] for pt in geom.centroid]
+            out["panel_centroids_m"] = centroids_list
+            out["centroids_m"] = centroids_list
     if dl in ("standard", "full"):
         out["geometry"] = geometry_payload(ac)
         out["sectional_diagnostics"] = sectional_payload(res)

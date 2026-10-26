@@ -854,8 +854,7 @@ def _parse_sections(val: Any, where: str, default_af: LinearAirfoil, default_sha
                 raise InputError(f"{w}: '{req}' is required.")
         x_le = _num_key(d, "x_le_m", SECTION_PROPS, w)
         z_le = _num_key(d, "z_le_m", SECTION_PROPS, w)
-        shape_val = d.get("shape", default_shape)
-        shape = string(shape_val, f"{w}.shape") if isinstance(shape_val, str) else shape_val
+        shape = string(d["shape"], f"{w}.shape") if "shape" in d else default_shape
         out.append(WingSection(
             y_frac=_num_key(d, "y_frac", SECTION_PROPS, w),
             chord=_num_key(d, "chord_m", SECTION_PROPS, w),
@@ -1111,32 +1110,16 @@ INPUT_UNCERTAINTIES_SCHEMA: dict[str, Any] = {
 
 PANEL_SETTINGS_PROPS: dict[str, dict[str, Any]] = {
     "n_chord": _int("Chordwise panels per surface [-]. Default 40.", minimum=4, maximum=200),
-    "n_span": _int("Spanwise panels per semi-span [-]. Default 80.", minimum=4, maximum=400),
     "n_panels": _int("Spanwise panels per semi-span [-]. Default 80.", minimum=4, maximum=400),
-    "kutta": {
-        "type": "string",
-        "enum": ["morino", "pressure"],
-        "description": "Kutta condition: 'morino' (default) or 'pressure' (not exposed yet).",
-    },
     "panel_kutta": {
         "type": "string",
         "enum": ["morino", "pressure"],
         "description": "Kutta condition: 'morino' (default) or 'pressure' (not exposed yet).",
     },
-    "backend": {
-        "type": "string",
-        "enum": ["auto", "numpy", "numba", "gpu"],
-        "description": "Kernel backend. Default 'auto'.",
-    },
     "panel_backend": {
         "type": "string",
         "enum": ["auto", "numpy", "numba", "gpu"],
         "description": "Kernel backend. Default 'auto'.",
-    },
-    "ground_solver": {
-        "type": "string",
-        "enum": ["auto", "direct", "krylov"],
-        "description": "Ground linear solver: 'auto' (default), 'direct' or 'krylov'.",
     },
     "panel_ground_solver": {
         "type": "string",
@@ -1514,11 +1497,7 @@ AGENT_TOOL_DEFINITIONS: list[dict[str, Any]] = [
                 "n_span": _int("Spanwise panels per semi-span [-]. Default 80.", minimum=4, maximum=400),
                 "cp": {
                     "type": "boolean",
-                    "description": "True to include the panel pressure coefficients Cp in the result. Default false.",
-                },
-                "return_cp": {
-                    "type": "boolean",
-                    "description": "True to include the panel pressure coefficients Cp in the result. Default false.",
+                    "description": "True to include the panel pressure coefficients Cp and centroids in the result. Default false.",
                 },
                 "settings": PANEL_SETTINGS_SCHEMA,
                 "detail_level": {**DETAIL_LEVEL, "default": "standard"},

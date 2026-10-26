@@ -26,6 +26,7 @@ The schema has no `anyOf` for `wing` and `aircraft`, because some clients drop i
 
 - `wing`: one lifting surface (for example a main wing).
 - `aircraft`: several surfaces, with reference values and a moment reference point (`surfaces` is required).
+- `shape`: optional airfoil section shape string on surfaces and sections (for example `"NACA 0012"` or `"NACA 2412"`). For vortex-lattice tools, cambered shapes place the lattice on the mean camber line; symmetric shapes give the flat mean line. For the 3D panel solver, section shapes define the thick closed surface mesh.
 
 A call must give exactly one of the two. A call with both or neither is refused with `invalid_input`.
 
@@ -191,26 +192,28 @@ print(res["alpha_deg"], res["Cl"], res["converged"])
 
 - `ventorum_panel_analysis`: 3D potential flow panel solver (Ventorum-3DP) for closed thick lifting surfaces in free air and in ground effect.
 - **Inputs:**
-  - `wing` or `aircraft` (required: exactly one of the two). Surfaces can define airfoil sections with `shape` (for example `"NACA 0012"`) or `sections`.
-  - `flight_condition` (one flight condition) or `flight_conditions` (a list of conditions). Optional `h_m` (ground clearance height in metres) activates ground effect.
-  - Optional reference values: `ref_area_m2` [m^2], `ref_chord_m` [m], `ref_span_m` [m], `ref_point_m` [m].
-  - `settings`: optional panel settings object with `n_chord` (chordwise panels per surface, default 40, minimum 4) and `n_span` (spanwise panels per surface, default 80, minimum 4).
-  - `cp`: optional boolean (default false). When true, the output contains the surface pressure coefficients (`Cp`) per panel.
+  - `wing` or `aircraft` (required: exactly one of the two). Surfaces can define airfoil sections with `shape` (for example `"NACA 0012"`) or `sections`. Control surfaces are not exposed yet and are refused when present at all.
+  - `flight_condition`: one flight condition object (`V_inf_m_s`, `alpha_deg`, optional `beta_deg`, `rho_kg_m3` or `altitude_m`). Optional `h_m` (ground clearance height in metres) activates ground effect. A list of conditions is refused.
+  - Optional top-level `n_chord` (chordwise panel count per surface [-], default 40, minimum 4) and `n_span` (spanwise panels per semi-span [-], default 80, minimum 4).
+  - Optional reference values in `aircraft`: `S_ref_m2` [m^2], `c_ref_m` [m], `b_ref_m` [m], `ref_point_m` [m].
+  - `settings`: optional panel settings object with `n_chord` (chordwise panels per surface [-], default 40, minimum 4), `n_panels` (spanwise panels per semi-span [-], default 80, minimum 4), `panel_kutta`, `panel_backend`, `panel_ground_solver`, `panel_cache`.
+  - `cp`: optional boolean (default false). When true, the output contains the surface pressure coefficients (`cp`) [-] per panel and the panel centroids `panel_centroids_m` [m].
   - `axes`: optional moment axes (`"body"`, `"stability"`, `"wind"`, or `"all"`, default `"body"`).
-  - `detail_level`: optional detail level (`"summary"` or `"full"`).
+  - `detail_level`: optional detail level (`"summary"`, `"standard"` (the default), or `"full"`).
 - **Outputs:**
-  - Aerodynamic force and moment coefficients: `CL`, `CD` (pressure drag), `CDi` (Trefftz induced drag), `CY`, `Cl`, `Cm`, `Cn` per condition.
+  - Aerodynamic force and moment coefficients: `CL`, `CD` (pressure drag), `CDi` (Trefftz induced drag), `CY`, `Cl`, `Cm`, `Cn` for the flight condition.
   - `trust`: trust score and warnings.
   - `dispatch`: execution record (`backend`, `device`, `ground_solver`).
-  - `cp`: pressure coefficient array per condition when `cp` is true.
+  - `cp`: surface pressure coefficient array [-] per panel when `cp` is true.
+  - `panel_centroids_m`: panel centroid coordinates [x, y, z] in metres [m], geometry axes (x aft, y right, z up), when `cp` is true.
 - **Work budget and limits:**
-  - Each configuration with N half-mesh panels requires dense LU factorization costing N^3 / 3 operations.
+  - Factorization work is N^3 / 3 operations for N solved panels. When sideslip `beta != 0` or any surface has `symmetric: false`, the full mesh is solved instead of the half mesh.
   - The tool refuses a mesh larger than `MAX_PANEL_PANELS = 15000` half-mesh panels.
   - The tool refuses total call work above `MAX_PANEL_CALL_WORK = 2.0e12` operations before any solve. The refusal message gives the estimate and how to reduce it.
 - **Defaults and unexposed features:**
   - Defaults use backend `"auto"`, ground solver `"auto"`, and the solver cache enabled.
   - The pressure Kutta condition is not exposed yet. The tool uses the Morino Kutta condition and refuses pressure Kutta requests.
-  - Control surfaces are not exposed for the panel solver yet. Calls with control surface deflections are refused with `invalid_input`.
+  - Control surfaces are not exposed for the panel solver yet. Calls with control surfaces defined on any surface are refused when present at all with `invalid_input`.
 
 Example call:
 
@@ -224,9 +227,9 @@ res = call_tool("ventorum_panel_analysis", {
         "shape": "NACA 0012",
     },
     "flight_condition": {"V_inf_m_s": 30.0, "alpha_deg": 4.0},
-    "settings": {"n_chord": 20, "n_span": 30},
+    "settings": {"n_chord": 20, "n_panels": 30},
 })
-print("CL:", res["CL"], "CD (pressure):", res["CD"], "CDi (Trefftz):", res["CDi"])
+print("CL:", res["metrics"]["CL"], "CD (pressure):", res["metrics"]["CD"], "CDi (Trefftz):", res["metrics"]["CDi"])
 ```
 
 ## Example
