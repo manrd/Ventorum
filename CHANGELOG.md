@@ -152,6 +152,9 @@ a minor version can change a public interface.
 
 ### Fixed
 
+- Ventorum-3DP: the mesh-error estimate (`panel_estimate_mesh_error`) and `panel_mesh_convergence`
+  dropped an explicit ground plane and the `ref_point` of the call, so they estimated free air or the
+  moment about the aircraft reference. Both inputs now reach every level of the study.
 - Ventorum-3DP: with a spanwise `spacing` in the solver settings and none on the surface, the
   panel mesh used the default spacing while the strip loads used the settings spacing, so panels
   were assigned to the wrong strips (root strip Cl about 2.4 to 20 instead of about 0.39 on an AR 8
