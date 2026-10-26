@@ -108,7 +108,7 @@ One body only: more bodies raise `ValueError`. A plain flap is part of the singl
 
 Each step warm-starts from the converged boundary-layer state of the previous deflection. When a step does not converge, the step size is halved (down to 0.25 deg). If a step fails at 0.25 deg, the solver stops and returns `converged=False` with the reached deflection in its details, and all loads set to NaN.
 
-Limits: continuation converges for plain flaps up to at least 15 deg on NACA 2412 (and reaches 17.5 deg without fairing). At larger deflections without a hinge fairing, the sharp corner causes strong adverse pressure gradients and numerical separation that stop convergence.
+Limits: continuation converges for plain flaps across moderate and high deflections where the direct cold solve fails. At very large deflections without a hinge fairing, severe boundary-layer separation and strong interaction at the hinge corner can stop convergence when the step budget or the halving limit is reached.
 
 ## Batched solver
 

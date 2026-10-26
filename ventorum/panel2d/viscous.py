@@ -253,6 +253,8 @@ class ViscousResult:
         linear system over all its Newton solves [-].
     newton_solves : int or np.ndarray
         Number of Newton solves (attempts) of the angle [-].
+    details : dict or list of dict
+        Continuation details (reached deflection and step history).
     """
 
     alpha: float | np.ndarray
@@ -280,6 +282,21 @@ class ViscousResult:
     linear_solves: int | np.ndarray = 0
     newton_solves: int | np.ndarray = 0
     Cl_circulation: float | np.ndarray = 0.0
+    details: dict | list = field(default_factory=dict)
+
+    @property
+    def reached_deflection(self):
+        """Return the reached flap deflection [deg]."""
+        if isinstance(self.details, list):
+            return [d.get("reached_deflection") if isinstance(d, dict) else None for d in self.details]
+        return self.details.get("reached_deflection") if isinstance(self.details, dict) else None
+
+    @property
+    def step_history(self):
+        """Return the continuation step history (deflection, converged, iterations)."""
+        if isinstance(self.details, list):
+            return [d.get("step_history") if isinstance(d, dict) else None for d in self.details]
+        return self.details.get("step_history") if isinstance(self.details, dict) else None
 
     @property
     def x_transition(self):
@@ -907,7 +924,8 @@ def _failed_row(alpha, body, reason, wake_x=None) -> dict:
     distributions are then NaN arrays, else the wake dict is empty.
     """
     nan = float("nan")
-    n = len(body)
+    coords = body.coords if hasattr(body, "coords") else body
+    n = len(coords)
 
     def arr(k=n):
         return np.full(k, nan)
@@ -919,7 +937,7 @@ def _failed_row(alpha, body, reason, wake_x=None) -> dict:
         "Cd_pressure": nan, "Cm": nan,
         "transition_positions": (nan, nan), "separation_flags": (False, False), "Cp": arr(), "H": arr(),
         "theta": arr(), "Cf": arr(), "iterations": 0, "residual": nan, "converged": False,
-        "coordinates": body, "reason": reason, "Cl_pressure": nan, "delta_star": arr(), "ue": arr(), "wake": wake,
+        "coordinates": coords, "reason": reason, "Cl_pressure": nan, "delta_star": arr(), "ue": arr(), "wake": wake,
         "newton_iterations": 0, "linear_solves": 0, "newton_solves": 0,
     }
 
@@ -972,6 +990,9 @@ def solve_viscous_flapped(
         Options passed to :func:`solve_viscous` (such as ``tol``,
         ``max_iter``, ``ncrit``, ``xtr``, ``height``, ``chord_ref``,
         ``moment_ref``, etc.).
+        ``work_budget`` (int, default :data:`WORK_BUDGET`) sets the
+        iteration budget per continuation step [-]. The whole continuation
+        has a total cap of 20 times the per-step budget.
 
     Returns
     -------
@@ -991,7 +1012,22 @@ def solve_viscous_flapped(
     n_panels = options.pop("n_panels", None)
 
     if abs(deflection_deg) < 1e-12:
-        return solve_viscous(shape, alpha_deg, Re, mach=mach, **options)
+        res = solve_viscous(shape, alpha_deg, Re, mach=mach, **options)
+        is_scalar = np.ndim(alpha_deg) == 0
+        if is_scalar:
+            res.details = {
+                "reached_deflection": 0.0,
+                "step_history": [(0.0, bool(res.converged), int(res.iterations))],
+            }
+        else:
+            res.details = [
+                {
+                    "reached_deflection": 0.0,
+                    "step_history": [(0.0, bool(c), int(it))],
+                }
+                for c, it in zip(res.converged, res.iterations)
+            ]
+        return res
 
     if isinstance(shape, AirfoilShape):
         base_shape = shape
@@ -1027,6 +1063,7 @@ def solve_viscous_flapped(
 
     rules = StopRules(stall_window=stall_window, stall_factor=stall_factor, divergence_factor=divergence_factor,
                       work_budget=work_budget, lm_trials=lm_trials)
+    total_cap = 20 * work_budget if work_budget > 0 else 0
     kw = dict(ncrit=ncrit, xtr=xtr, height=height, height_reference=height_reference,
               wake_length=wake_length, n_wake=n_wake, chord_ref=chord_ref, moment_ref=moment_ref, pivot=pivot)
 
@@ -1045,21 +1082,52 @@ def solve_viscous_flapped(
         )
 
     def _continue_deflection(alpha: float) -> tuple[dict, tuple | None]:
-        ctl = _AngleWork(alpha, rules)
+        total_iterations = 0
+        total_linear_solves = 0
+        total_solves = 0
+        step_history: list[tuple[float, bool, int]] = []
+
+        step0_budget = work_budget if work_budget > 0 else 0
+        if total_cap > 0 and step0_budget > 0:
+            step0_budget = min(step0_budget, total_cap)
+        step0_rules = StopRules(
+            stall_window=rules.stall_window,
+            stall_factor=rules.stall_factor,
+            divergence_factor=rules.divergence_factor,
+            work_budget=step0_budget,
+            lm_trials=rules.lm_trials,
+        )
         try:
-            row0, state0 = finish_angle(base_shape, alpha, Re, None, tol, max_iter, kw, rules=rules)
-        except (_BudgetUsedUp, *vii.linalg_errors(np), cp.WakeGroundError) as exc:
-            row = _failed_row(alpha, base_shape.coords, f"continuation failed at deflection 0 deg: {exc}")
-            row.update(ctl.counters())
+            row0, state0 = finish_angle(base_shape, alpha, Re, None, tol, max_iter, kw, rules=step0_rules)
+        except (_BudgetUsedUp, *vii.linalg_errors(np), cp.WakeGroundError, ValueError) as exc:
+            if isinstance(exc, _BudgetUsedUp):
+                reason = "work budget used up at 0 deg (reached 0 deg)"
+            else:
+                reason = f"continuation failed at deflection 0 deg (reached 0 deg): {exc}"
+            row = _failed_row(alpha, base_shape.coords, reason)
+            row["details"] = {
+                "reached_deflection": 0.0,
+                "step_history": [(0.0, False, 0)],
+            }
             return row, None
 
-        if not row0["converged"]:
-            row0["reason"] = f"continuation did not converge at deflection 0 deg: {row0['reason']}"
-            return row0, None
+        iters0 = int(row0["newton_iterations"])
+        total_iterations += iters0
+        total_linear_solves += int(row0["linear_solves"])
+        total_solves += int(row0["newton_solves"])
+        step_history.append((0.0, bool(row0["converged"]), iters0))
 
-        ctl.iterations = int(row0["newton_iterations"])
-        ctl.linear_solves = int(row0["linear_solves"])
-        ctl.solves = int(row0["newton_solves"])
+        if not row0["converged"]:
+            reason_0 = row0["reason"]
+            if "work budget" in reason_0 or row0.get("reason") == "budget":
+                row0["reason"] = "work budget used up at 0 deg (reached 0 deg)"
+            else:
+                row0["reason"] = f"continuation did not converge at deflection 0 deg (reached 0 deg): {reason_0}"
+            row0["details"] = {
+                "reached_deflection": 0.0,
+                "step_history": step_history,
+            }
+            return row0, None
 
         target_d = float(deflection_deg)
         step_max = float(step_deg)
@@ -1076,19 +1144,60 @@ def solve_viscous_flapped(
             step_to_try = min(current_step, abs(target_d - current_d))
             next_d = current_d + sgn * step_to_try
 
+            if total_cap > 0 and total_iterations >= total_cap:
+                reason = f"work budget used up at {current_d:g} deg (reached {current_d:g} deg)"
+                nodes = last_setup.sys.nodes if last_setup is not None and hasattr(last_setup, "sys") else base_shape.coords
+                wake_nodes = last_setup.sys.wake_nodes if last_setup is not None and hasattr(last_setup, "sys") else None
+                row = _failed_row(alpha, nodes, reason, wake_x=wake_nodes)
+                row["newton_iterations"] = total_iterations
+                row["linear_solves"] = total_linear_solves
+                row["newton_solves"] = total_solves
+                row["details"] = {
+                    "reached_deflection": float(current_d),
+                    "step_history": step_history,
+                }
+                return row, None
+
+            step_budget = work_budget if work_budget > 0 else 0
+            if total_cap > 0 and step_budget > 0:
+                step_budget = min(step_budget, total_cap - total_iterations)
+
+            step_rules = StopRules(
+                stall_window=rules.stall_window,
+                stall_factor=rules.stall_factor,
+                divergence_factor=rules.divergence_factor,
+                work_budget=step_budget,
+                lm_trials=rules.lm_trials,
+            )
+            step_ctl = _AngleWork(alpha, step_rules)
+
             setup = None
             try:
                 shape_next = _deflect(next_d)
                 setup = prepare_case(shape_next, alpha, Re, **kw)
-                start = warm_state(setup, prev[0], prev[1])
-                res = _solve_one(setup, start, tol, max_iter, 1.0, bk=_NUMPY, ctl=ctl)
-            except (_BudgetUsedUp, *vii.linalg_errors(np), cp.WakeGroundError) as exc:
+                if prev is not None and setup.n_st == prev[0].n_st and len(setup.sys.nodes) == len(prev[0].sys.nodes):
+                    start = warm_state(setup, prev[0], prev[1])
+                    res = _solve_one(setup, start, tol, max_iter, 1.0, bk=_NUMPY, ctl=step_ctl)
+                else:
+                    res = _cold_solve(setup, tol, max_iter, bk=_NUMPY, ctl=step_ctl)
+            except _BudgetUsedUp:
                 res = vii.NewtonResult(
-                    None, None, False, 0, float("nan"),
-                    f"exception during solve ({exc})", 0, "error"
+                    None, None, False, step_ctl.iterations, float("nan"),
+                    f"work budget used up at {next_d:g} deg", step_ctl.linear_solves, "budget"
+                )
+            except (*vii.linalg_errors(np), cp.WakeGroundError, ValueError) as exc:
+                res = vii.NewtonResult(
+                    None, None, False, step_ctl.iterations, float("nan"),
+                    f"exception during solve ({exc})", step_ctl.linear_solves, "error"
                 )
 
-            if res.converged:
+            step_iters = int(res.iterations) if res is not None else step_ctl.iterations
+            total_iterations += step_iters
+            total_linear_solves += int(res.linear_solves) if res is not None else step_ctl.linear_solves
+            total_solves += 1
+            step_history.append((float(next_d), bool(res.converged) if res is not None else False, step_iters))
+
+            if res is not None and res.converged:
                 current_d = next_d
                 prev = (setup, res.state)
                 last_setup = setup
@@ -1102,22 +1211,40 @@ def solve_viscous_flapped(
                     current_step = min_step
                 else:
                     res_reason = res.reason if res is not None else "step failed"
-                    reason = (
-                        f"continuation did not converge at deflection {next_d:g} deg "
-                        f"(reached {current_d:g} deg): {res_reason}"
-                    )
+                    if res is not None and (res.status == "budget" or "work budget" in res_reason):
+                        reason = (
+                            f"continuation did not converge at deflection {next_d:g} deg "
+                            f"(reached {current_d:g} deg): work budget used up at {next_d:g} deg"
+                        )
+                    else:
+                        reason = (
+                            f"continuation did not converge at deflection {next_d:g} deg "
+                            f"(reached {current_d:g} deg): {res_reason}"
+                        )
                     wake_nodes = setup.sys.wake_nodes if setup is not None and hasattr(setup, "sys") else None
                     nodes = setup.sys.nodes if setup is not None and hasattr(setup, "sys") else base_shape.coords
                     row = _failed_row(alpha, nodes, reason, wake_x=wake_nodes)
-                    row.update(ctl.counters())
+                    row["newton_iterations"] = total_iterations
+                    row["linear_solves"] = total_linear_solves
+                    row["newton_solves"] = total_solves
                     row["residual"] = float(res.residual) if res is not None else float("nan")
+                    row["details"] = {
+                        "reached_deflection": float(current_d),
+                        "step_history": step_history,
+                    }
                     return row, None
 
         row = row_from_result(last_setup, last_res, alpha)
-        row.update(ctl.counters())
+        row["newton_iterations"] = total_iterations
+        row["linear_solves"] = total_linear_solves
+        row["newton_solves"] = total_solves
         row["iterations"] = int(last_res.iterations)
         row["residual"] = float(last_res.residual)
         row["converged"] = True
+        row["details"] = {
+            "reached_deflection": float(current_d),
+            "step_history": step_history,
+        }
         return row, (last_setup, last_res.state)
 
     is_scalar = np.ndim(alpha_deg) == 0
@@ -1134,6 +1261,11 @@ def solve_viscous_flapped(
                 row, state = finish_angle(target_shape, a, Re, prev, tol, max_iter, kw, rules=rules)
                 if not row["converged"]:
                     row, state = _continue_deflection(a)
+                else:
+                    row["details"] = {
+                        "reached_deflection": float(deflection_deg),
+                        "step_history": [(float(deflection_deg), True, int(row["iterations"]))],
+                    }
             else:
                 row, state = _continue_deflection(a)
             out[a] = row
@@ -1148,6 +1280,11 @@ def solve_viscous_flapped(
                 row, state = finish_angle(target_shape, a, Re, prev, tol, max_iter, kw, rules=rules)
                 if not row["converged"]:
                     row, state = _continue_deflection(a)
+                else:
+                    row["details"] = {
+                        "reached_deflection": float(deflection_deg),
+                        "step_history": [(float(deflection_deg), True, int(row["iterations"]))],
+                    }
             else:
                 row, state = _continue_deflection(a)
             out[a] = row
@@ -1161,7 +1298,7 @@ def solve_viscous_flapped(
                       UserWarning, stacklevel=2)
     if is_scalar:
         r = rows[0]
-        return ViscousResult(**{k: r[k] for k in _FIELDS})
+        return ViscousResult(**{k: r[k] for k in _FIELDS}, details=r.get("details", {}))
     return ViscousResult(
         alpha=alphas,
         Cl=np.array([r["Cl"] for r in rows]),
@@ -1188,5 +1325,6 @@ def solve_viscous_flapped(
         newton_iterations=np.array([r["newton_iterations"] for r in rows], dtype=int),
         linear_solves=np.array([r["linear_solves"] for r in rows], dtype=int),
         newton_solves=np.array([r["newton_solves"] for r in rows], dtype=int),
+        details=[r.get("details", {}) for r in rows],
     )
 
