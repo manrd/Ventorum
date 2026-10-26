@@ -228,6 +228,8 @@ def _estimate_panel_mesh_error(
     settings: SolverSettings,
     *,
     base_results: Sequence[SolverResult] | None,
+    ground: GroundPlane | None = None,
+    ref_point: np.ndarray | None = None,
 ):
     """Run a directional panel convergence study for the trust notes.
 
@@ -247,6 +249,11 @@ def _estimate_panel_mesh_error(
     base_results : sequence of SolverResult or None
         Factory results of the base mesh, in condition order, before the
         study adds its trust notes, or None to solve the base mesh again.
+    ground : GroundPlane or None, optional
+        Explicit ground plane (unit normal [-], offset [m]). None uses
+        the ground from each condition.h.
+    ref_point : numpy.ndarray or None, optional
+        Moment reference point [m]. None uses the aircraft reference.
 
     Returns
     -------
@@ -259,7 +266,7 @@ def _estimate_panel_mesh_error(
 
     return panel_mesh_convergence(
         aircraft, condition, settings, levels=3, ratio=1.5, quantities=("CL", "CDi", "Cm"),
-        base_results=base_results,
+        base_results=base_results, ground=ground, ref_point=ref_point,
     )
 
 
@@ -1241,12 +1248,15 @@ class PanelMethodSolver(BaseSolver):
             panel_cache.release(lease, solve_ok)
 
         if estimate_mesh_error:
-            # The study solves its levels with the aircraft moment reference and the
-            # ground of condition.h. Its base level is the solve above only when this
-            # call has no explicit ground plane or moment reference point.
+            # Keep the default base reuse and pass explicit inputs to every level.
             reuse = ground is None and ref_point is None
+            estimate_inputs = {}
+            if ground is not None:
+                estimate_inputs["ground"] = ground
+            if ref_point is not None:
+                estimate_inputs["ref_point"] = ref_point
             conv_reports = _estimate_panel_mesh_error(
-                ac, cond_list, settings, base_results=results if reuse else None
+                ac, cond_list, settings, base_results=results if reuse else None, **estimate_inputs,
             )
             for result, conv_report in zip(results, conv_reports):
                 result.details["mesh_convergence"] = conv_report.to_dict()
