@@ -152,6 +152,11 @@ a minor version can change a public interface.
 
 ### Fixed
 
+- Ventorum-3DP: with a spanwise `spacing` in the solver settings and none on the surface, the
+  panel mesh used the default spacing while the strip loads used the settings spacing, so panels
+  were assigned to the wrong strips (root strip Cl about 2.4 to 20 instead of about 0.39 on an AR 8
+  NACA 0012 wing at 4 deg; the totals moved by less than 0.1 %). The mesh now uses the same rule:
+  the surface spacing when set, else the settings spacing. Default settings do not change.
 - Viscous alpha-correction coupling (VLM): on a lattice on the section mean line, the
   thin-airfoil model of a strip with a deflected chordwise flap lost the camber of the section
   (its clean zero-lift angle was that of the uncambered strip normal). The lift offset of the
