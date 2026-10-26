@@ -63,7 +63,7 @@ Example with `aircraft`:
 - **Work units.** One solve of a lattice with N panels costs N^2 units. The work of a call is the sum over all solves that the call will run (sweep angles, heights, mesh levels, batch candidates, derivative steps).
 - **Budget.** A call whose estimated work is above 200000000 units is refused with `error.type` `invalid_input` before any solve. The message gives the estimate, the budget and how to reduce the work: fewer angles (smaller range or larger `alpha_step_deg`), fewer heights, fewer mesh levels or spacing schemes, fewer candidates, or fewer panels (smaller `n_panels` or `n_chord`).
 - **Scope.** The budget covers `ventorum_wing_analysis`, `ventorum_polar_sweep`, `ventorum_ground_effect` (heights plus free air plus the Irodov height-pitch sweep), `ventorum_stability_derivatives` (5 solves), `ventorum_derivative_matrix` (the real solves times N^2: in free air 5 static, 1 + 2 n control (n controls) and 7 rate solves, so 13 + 2 n with all groups; in ground effect 9 static and height solves instead of 5, so 17 + 2 n), `ventorum_batch_evaluate`, `ventorum_mesh_convergence` (levels times the angles that are really solved), `ventorum_trim` (`(1 + max_iterations * (1 + 2 * n_unknowns)) * N^2`, with 2 unknowns in longitudinal trim and 4 in lateral trim) and `ventorum_error_bars` (`N1^2 + N2^2 + N3^2` of the three spanwise levels, plus `(1 + 2 max(1, k)) N1^2` with `input_uncertainties`, k = number of flow inputs). `ventorum_tune_machine` and `ventorum_undeformed_nodes` are outside the budget: they run no solve (their duration or mesh is stated in their description instead).
-- **Panel method budget.** Dense LU factorization costs N^3 / 3 operations for N half-mesh panels per configuration. `ventorum_panel_analysis` uses module constants `MAX_PANEL_PANELS = 15000` panels and `MAX_PANEL_CALL_WORK = 2.0e12` operations. A call that exceeds either limit is refused before any solve.
+- **Panel method budget.** Dense LU factorization costs N^3 / 3 operations for N solved panels per configuration (the half mesh when the solver folds the symmetry; the full mesh with sideslip or an asymmetric surface). `ventorum_panel_analysis` uses module constants `MAX_PANEL_PANELS = 15000` panels and `MAX_PANEL_CALL_WORK = 2.0e12` operations. A call that exceeds either limit is refused before any solve.
 
 ## Error types
 
@@ -204,7 +204,7 @@ print(res["alpha_deg"], res["Cl"], res["converged"])
   - Aerodynamic force and moment coefficients: `CL`, `CD` (pressure drag), `CDi` (Trefftz induced drag), `CY`, `Cl`, `Cm`, `Cn` for the flight condition.
   - `trust`: trust score and warnings.
   - `dispatch`: execution record (`backend`, `device`, `ground_solver`).
-  - `cp`: surface pressure coefficient array [-] per panel when `cp` is true.
+  - `cp`: surface pressure coefficient array [-] per panel when `cp` is true. With a symmetric solve (no sideslip and every surface symmetric) it covers the solved right half (y >= 0) only.
   - `panel_centroids_m`: panel centroid coordinates [x, y, z] in metres [m], geometry axes (x aft, y right, z up), when `cp` is true.
 - **Work budget and limits:**
   - Factorization work is N^3 / 3 operations for N solved panels. When sideslip `beta != 0` or any surface has `symmetric: false`, the full mesh is solved instead of the half mesh.

@@ -65,7 +65,8 @@ MAX_PANEL_PANELS = 15000
 MAX_CALL_WORK = 2.0e8
 
 # Largest total work of one 3D panel tool call, in operations. The dense
-# factorization costs N^3 / 3 operations for N half-mesh panels per configuration.
+# factorization costs N^3 / 3 operations for N solved panels per configuration (the half
+# mesh when the solver folds the symmetry, else the full mesh).
 MAX_PANEL_CALL_WORK = 2.0e12
 
 # Smallest step of a polar sweep [deg].
@@ -1484,7 +1485,8 @@ AGENT_TOOL_DEFINITIONS: list[dict[str, Any]] = [
                        "(Ventorum-3DP, Morino Kutta condition). Computes CL, CD (pressure), CDi (Trefftz), "
                        "CY, Cl, Cm and Cn, the trust score, and the execution dispatch record. Ground effect "
                        "is supported through flight_condition.h_m. Factorization work is N^3 / 3 operations "
-                       f"for N half-mesh panels. Refuses meshes above {MAX_PANEL_PANELS} half-mesh panels "
+                       f"for N solved panels (the full mesh with sideslip or an asymmetric surface). Refuses "
+                       f"meshes above {MAX_PANEL_PANELS} half-mesh panels "
                        f"and calls above {int(MAX_PANEL_CALL_WORK):.0e} operations. Not exposed yet: "
                        "the pressure Kutta condition and control surfaces are not supported and are refused.",
         "parameters": {

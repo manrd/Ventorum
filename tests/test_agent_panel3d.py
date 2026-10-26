@@ -162,7 +162,7 @@ def test_panel_analysis_cp_option():
     assert isinstance(with_cp["cp"], list)
     assert len(with_cp["cp"]) > 0
     assert "panel_centroids_m" in with_cp
-    assert "centroids_m" in with_cp
+    assert "centroids_m" not in with_cp
     assert isinstance(with_cp["panel_centroids_m"], list)
     assert len(with_cp["panel_centroids_m"]) == len(with_cp["cp"])
     assert len(with_cp["panel_centroids_m"][0]) == 3

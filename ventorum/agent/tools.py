@@ -498,6 +498,19 @@ def panel_analysis(
     dl = parse_detail_level(detail_level)
     ax = parse_axes(axes)
 
+    def _whole(name: str, value) -> int:
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or float(value) != int(value):
+            raise InputError(f"'{name}' must be a whole number, got {value!r}.")
+        return int(value)
+
+    if n_chord is not None:
+        n_chord = _whole("n_chord", n_chord)
+    if n_span is not None:
+        n_span = _whole("n_span", n_span)
+    if "n_chord" in sett_dict:
+        sett_dict["n_chord"] = _whole("settings.n_chord", sett_dict["n_chord"])
+    if "n_panels" in sett_dict:
+        sett_dict["n_panels"] = _whole("settings.n_panels", sett_dict["n_panels"])
     if n_chord is not None and "n_chord" in sett_dict and int(n_chord) != int(sett_dict["n_chord"]):
         raise InputError(
             f"Top-level 'n_chord' ({n_chord}) differs from 'settings.n_chord' ({sett_dict['n_chord']}). "
@@ -635,7 +648,6 @@ def panel_analysis(
             geom = _precompute_geometry(corners)
             centroids_list = [[rnd(coord, 6) for coord in pt] for pt in geom.centroid]
             out["panel_centroids_m"] = centroids_list
-            out["centroids_m"] = centroids_list
     if dl in ("standard", "full"):
         out["geometry"] = geometry_payload(ac)
         out["sectional_diagnostics"] = sectional_payload(res)
