@@ -102,6 +102,14 @@ The image method of the inviscid solver; the image body carries the mirror image
 
 One body only: more bodies raise `ValueError`. A plain flap is part of the single-element geometry.
 
+## Plain flap continuation in deflection
+
+`solve_viscous_flapped` (`ventorum/panel2d/viscous.py`) solves a section with a deflected plain flap by continuation in the deflection angle. A direct cold solve often fails at large deflections because of strong suction peaks and local boundary-layer separation at the hinge corner. The continuation starts at 0 deg deflection and advances to the target deflection in steps of at most `step_deg` (default 2.5 deg).
+
+Each step warm-starts from the converged boundary-layer state of the previous deflection. When a step does not converge, the step size is halved (down to 0.25 deg). If a step fails at 0.25 deg, the solver stops and returns `converged=False` with the reached deflection in its details, and all loads set to NaN.
+
+Limits: continuation converges for plain flaps across moderate and high deflections where the direct cold solve fails. At very large deflections without a hinge fairing, severe boundary-layer separation and strong interaction at the hinge corner can stop convergence when the step budget or the halving limit is reached. With `hinge_treatment="none"` the flapped section has more nodes than the clean one, so each step starts cold and the continuation gives no warm-start benefit.
+
 ## Batched solver
 
 `solve_viscous_batch` (`ventorum/panel2d/viscous_batch.py`) runs the same algorithm with torch on the CPU or on CUDA. Cases with the same geometry, Reynolds number, height and transition settings form sequences; pass $p$ solves the $p$-th angle of every sequence; the cases of a pass with the same node and wake counts form one batched Newton iteration (residuals, Jacobians, $D$, edge velocities and `torch.linalg.solve` on the device; converged cases leave the active set). Failed first attempts and the first angle of each sequence follow the sequential fallback path, one case at a time. In float64 the batch equals the sequential solver; in float32 the residual stops near the float32 round-off level, and a case that does not reach the tolerance is reported with its residual.
@@ -112,7 +120,7 @@ At the lower Reynolds numbers the drag is above that of XFOIL 6.99 at small angl
 
 ## Verification
 
-`tests/test_panel2d_viscous.py`, `tests/test_panel2d_viscous_wake.py`, `tests/test_panel2d_viscous_batch.py`.
+`tests/test_panel2d_viscous.py`, `tests/test_panel2d_viscous_wake.py`, `tests/test_panel2d_viscous_batch.py`, `tests/test_panel2d_flap_continuation.py`.
 
 ## References
 
