@@ -28,7 +28,10 @@ Every result carries a trust score from 0 to 1 and a rating (HIGH, MODERATE, LOW
 
 The score is $1 - \min(1, \sum \text{penalties})$, and the rating follows from fixed bands of the score. The uncertainty bands grow with $1 - \text{score}$, with fixed coefficients; this is why they are not error bars. A non-positive aspect ratio gives the full penalty for every solver. The notes of the solver (for example a lifting line near the ground) are added to the warnings.
 
-One check adds a warning and no penalty: the near-field side force and yawing moment are compared with the far-field values of the Trefftz plane (`CY_farfield`, `Cn_trefftz`). The rule and its reason are in [Forces and moments](forces_and_moments.md) (section *Far-field lateral diagnostics*).
+Two checks add a warning and no penalty:
+
+- The near-field side force and yawing moment are compared with the far-field values of the Trefftz plane (`CY_farfield`, `Cn_trefftz`). The rule and its reason are in [Forces and moments](forces_and_moments.md) (section *Far-field lateral diagnostics*).
+- Small trailing-edge clearance: the lattice solvers warn when the smallest trailing-edge height above the ground is below 0.15 of the local chord. At small trailing-edge clearance the Trefftz induced drag CDi depends on the height of the far wake.
 
 ## 3D panel method
 
