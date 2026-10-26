@@ -54,12 +54,20 @@ class InputError(VentorumError):
 # A dense vortex-lattice solve of this size takes up to some tens of seconds and a few hundred MB.
 MAX_TOTAL_PANELS = 4000
 
+# Largest half-mesh panel count that the 3D panel tool solves [-].
+MAX_PANEL_PANELS = 15000
+
 # Largest total work of one tool call, in work units. One solve of a
 # lattice with N panels costs N^2 units. The work of a call is the sum
 # over all solves that the call will run (sweep points, heights, mesh
 # levels, batch cases, derivative steps). This is about 12 solves of
 # 4000 panels. A call above this budget is refused before any solve.
 MAX_CALL_WORK = 2.0e8
+
+# Largest total work of one 3D panel tool call, in operations. The dense
+# factorization costs N^3 / 3 operations for N solved panels per configuration (the half
+# mesh when the solver folds the symmetry, else the full mesh).
+MAX_PANEL_CALL_WORK = 2.0e12
 
 # Smallest step of a polar sweep [deg].
 MIN_ALPHA_STEP_DEG = 0.01
@@ -206,6 +214,8 @@ SECTION_PROPS: dict[str, dict[str, Any]] = {
                    "Default: from dihedral_deg. If set, the semi-span is the projected (y) span."),
     "airfoil": {"type": "object", "properties": AIRFOIL_PROPS, "additionalProperties": False,
                 "description": "Linear airfoil model of this section. Default: the surface airfoil."},
+    "shape": {"type": "string",
+              "description": "Airfoil section shape (e.g. NACA designation '0012' or '2412'). Default: NACA 0012."},
 }
 
 CONTROL_PROPS: dict[str, dict[str, Any]] = {
@@ -306,6 +316,9 @@ SURFACE_PROPS: dict[str, dict[str, Any]] = {
                        "equal the number of strip edges of the defining half for the solver and settings "
                        "of the call; use ventorum_undeformed_nodes to get them.",
     },
+    "shape": {"type": "string",
+              "description": "Airfoil section shape for all sections of this surface (e.g. '0012' or '2412'). "
+                             "Default: NACA 0012."},
 }
 
 AIRCRAFT_PROPS: dict[str, dict[str, Any]] = {
@@ -764,6 +777,7 @@ def parse_surface(spec: Any, where: str = "wing", index: int = 0) -> list[Liftin
         semi_span = _num_key(d, "semi_span_m", SURFACE_PROPS, where)
 
     default_af = parse_airfoil(d["airfoil"], f"{where}.airfoil") if "airfoil" in d else LinearAirfoil()
+    default_shape = string(d["shape"], f"{where}.shape") if "shape" in d else None
 
     # Chords and twist
     has_const = "chord_m" in d
@@ -776,7 +790,7 @@ def parse_surface(spec: Any, where: str = "wing", index: int = 0) -> list[Liftin
         if "tip_twist_deg" in d:
             raise InputError(f"{where}: with 'sections', give the twist in each section ('twist_deg'), "
                              "not 'tip_twist_deg'.")
-        sections = _parse_sections(d["sections"], f"{where}.sections", default_af)
+        sections = _parse_sections(d["sections"], f"{where}.sections", default_af, default_shape)
     else:
         if has_const:
             c_root = c_tip = _num_key(d, "chord_m", SURFACE_PROPS, where)
@@ -788,8 +802,8 @@ def parse_surface(spec: Any, where: str = "wing", index: int = 0) -> list[Liftin
             c_tip = _num_key(d, "tip_chord_m", SURFACE_PROPS, where)
         tip_twist = float(np.radians(_num_key(d, "tip_twist_deg", SURFACE_PROPS, where, 0.0)))
         sections = [
-            WingSection(y_frac=0.0, chord=c_root, twist=0.0, airfoil=default_af.clone()),
-            WingSection(y_frac=1.0, chord=c_tip, twist=tip_twist, airfoil=default_af.clone()),
+            WingSection(y_frac=0.0, chord=c_root, twist=0.0, airfoil=default_af.clone(), shape=default_shape),
+            WingSection(y_frac=1.0, chord=c_tip, twist=tip_twist, airfoil=default_af.clone(), shape=default_shape),
         ]
 
     position = vector3(d["position_m"], f"{where}.position_m") if "position_m" in d else np.zeros(3)
@@ -829,7 +843,7 @@ def parse_surface(spec: Any, where: str = "wing", index: int = 0) -> list[Liftin
     return out
 
 
-def _parse_sections(val: Any, where: str, default_af: LinearAirfoil) -> list[WingSection]:
+def _parse_sections(val: Any, where: str, default_af: LinearAirfoil, default_shape: Any = None) -> list[WingSection]:
     if not isinstance(val, list) or not (2 <= len(val) <= 50):
         raise InputError(f"'{where}' must be a list of 2 to 50 section objects.")
     out: list[WingSection] = []
@@ -841,6 +855,7 @@ def _parse_sections(val: Any, where: str, default_af: LinearAirfoil) -> list[Win
                 raise InputError(f"{w}: '{req}' is required.")
         x_le = _num_key(d, "x_le_m", SECTION_PROPS, w)
         z_le = _num_key(d, "z_le_m", SECTION_PROPS, w)
+        shape = string(d["shape"], f"{w}.shape") if "shape" in d else default_shape
         out.append(WingSection(
             y_frac=_num_key(d, "y_frac", SECTION_PROPS, w),
             chord=_num_key(d, "chord_m", SECTION_PROPS, w),
@@ -848,6 +863,7 @@ def _parse_sections(val: Any, where: str, default_af: LinearAirfoil) -> list[Win
             x_le=x_le,
             z_le=z_le,
             airfoil=parse_airfoil(d["airfoil"], f"{w}.airfoil") if "airfoil" in d else default_af.clone(),
+            shape=shape,
         ))
     fr = [s.y_frac for s in out]
     if fr[0] != 0.0 or fr[-1] != 1.0 or any(b <= a for a, b in zip(fr[:-1], fr[1:])):
@@ -1090,6 +1106,37 @@ INPUT_UNCERTAINTIES_SCHEMA: dict[str, Any] = {
             },
         },
     },
+    "additionalProperties": False,
+}
+
+PANEL_SETTINGS_PROPS: dict[str, dict[str, Any]] = {
+    "n_chord": _int("Chordwise panels per surface [-]. Default 40.", minimum=4, maximum=200),
+    "n_panels": _int("Spanwise panels per semi-span [-]. Default 80.", minimum=4, maximum=400),
+    "panel_kutta": {
+        "type": "string",
+        "enum": ["morino", "pressure"],
+        "description": "Kutta condition: 'morino' (default) or 'pressure' (not exposed yet).",
+    },
+    "panel_backend": {
+        "type": "string",
+        "enum": ["auto", "numpy", "numba", "gpu"],
+        "description": "Kernel backend. Default 'auto'.",
+    },
+    "panel_ground_solver": {
+        "type": "string",
+        "enum": ["auto", "direct", "krylov"],
+        "description": "Ground linear solver: 'auto' (default), 'direct' or 'krylov'.",
+    },
+    "panel_cache": {
+        "type": "boolean",
+        "description": "True (default) to cache factorized systems and meshes.",
+    },
+}
+
+PANEL_SETTINGS_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "description": "Solver settings for the 3D panel method.",
+    "properties": PANEL_SETTINGS_PROPS,
     "additionalProperties": False,
 }
 
@@ -1429,6 +1476,35 @@ AGENT_TOOL_DEFINITIONS: list[dict[str, Any]] = [
             "type": "object",
             "properties": AIRFOIL_POLAR_PROPS,
             "required": ["section", "Re"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "ventorum_panel_analysis",
+        "description": "Aerodynamic analysis with the 3D source-doublet potential-flow panel method "
+                       "(Ventorum-3DP, Morino Kutta condition). Computes CL, CD (pressure), CDi (Trefftz), "
+                       "CY, Cl, Cm and Cn, the trust score, and the execution dispatch record. Ground effect "
+                       "is supported through flight_condition.h_m. Factorization work is N^3 / 3 operations "
+                       f"for N solved panels (the full mesh with sideslip or an asymmetric surface). Refuses "
+                       f"meshes above {MAX_PANEL_PANELS} half-mesh panels "
+                       f"and calls above {int(MAX_PANEL_CALL_WORK):.0e} operations. Not exposed yet: "
+                       "the pressure Kutta condition and control surfaces are not supported and are refused.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "wing": _SURFACE_SCHEMA,
+                "aircraft": _AIRCRAFT_SCHEMA,
+                "flight_condition": CONDITION_SCHEMA,
+                "n_chord": _int("Chordwise panel count per surface [-]. Default 40.", minimum=4, maximum=200),
+                "n_span": _int("Spanwise panels per semi-span [-]. Default 80.", minimum=4, maximum=400),
+                "cp": {
+                    "type": "boolean",
+                    "description": "True to include the panel pressure coefficients Cp and centroids in the result. Default false.",
+                },
+                "settings": PANEL_SETTINGS_SCHEMA,
+                "detail_level": {**DETAIL_LEVEL, "default": "standard"},
+                "axes": {**AXES_SCHEMA, "default": "body"},
+            },
             "additionalProperties": False,
         },
     },

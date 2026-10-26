@@ -16,6 +16,8 @@ from ventorum.agent.dispatcher import call_tool
 from ventorum.agent.mcp_server import handle_message, handle_request, run_mcp_server
 from ventorum.agent.schemas import (
     AGENT_TOOL_DEFINITIONS,
+    MAX_PANEL_CALL_WORK,
+    MAX_PANEL_PANELS,
     InputError,
     build_aircraft_from_spec,
     build_flight_condition_from_spec,
@@ -27,6 +29,7 @@ from ventorum.agent.tools import (
     error_bars,
     ground_effect,
     mesh_convergence,
+    panel_analysis,
     polar_sweep,
     stability_derivatives,
     trim,
@@ -37,6 +40,8 @@ from ventorum.agent.tools import (
 __all__ = [
     "AGENT_TOOL_DEFINITIONS",
     "InputError",
+    "MAX_PANEL_CALL_WORK",
+    "MAX_PANEL_PANELS",
     "batch_evaluate",
     "build_aircraft_from_spec",
     "build_flight_condition_from_spec",
@@ -48,6 +53,7 @@ __all__ = [
     "handle_message",
     "handle_request",
     "mesh_convergence",
+    "panel_analysis",
     "polar_sweep",
     "run_mcp_server",
     "stability_derivatives",

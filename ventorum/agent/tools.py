@@ -54,6 +54,9 @@ from ventorum.agent.schemas import (
     INPUT_UNCERTAINTY_FLOW_PROPS,
     INPUT_UNCERTAINTY_SECTION_PROPS,
     MAX_CALL_WORK,
+    MAX_PANEL_CALL_WORK,
+    MAX_PANEL_PANELS,
+    PANEL_SETTINGS_PROPS,
     MAX_TOTAL_PANELS,
     MIN_ALPHA_STEP_DEG,
     InputError,
@@ -405,6 +408,251 @@ def wing_analysis(
     if dl == "full":
         out["spanwise_distributions"] = spanwise_payload(res)
         out["dispatch"] = dispatch_payload(res)
+    return out
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 3D panel analysis
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def _check_panel_mesh(n_panels: int) -> None:
+    """Refuse a panel mesh larger than MAX_PANEL_PANELS."""
+    import ventorum.agent.tools as _tools
+
+    limit = getattr(_tools, "MAX_PANEL_PANELS", MAX_PANEL_PANELS)
+    if int(n_panels) > int(limit):
+        raise InputError(
+            f"The mesh is too large: {int(n_panels)} half-mesh panels. The limit is {int(limit)} "
+            f"panels. Use a smaller n_span or n_chord."
+        )
+
+
+def _check_panel_work(estimate: float, n_configs: int, n_panels: int) -> None:
+    """Refuse a panel call whose estimated factorization work is above MAX_PANEL_CALL_WORK."""
+    import ventorum.agent.tools as _tools
+
+    limit = getattr(_tools, "MAX_PANEL_CALL_WORK", MAX_PANEL_CALL_WORK)
+    if float(estimate) > float(limit):
+        raise InputError(
+            f"The estimated work is {int(estimate)} operations "
+            f"({n_configs} configuration(s) of {n_panels} panels at N^3 / 3 operations per configuration), "
+            f"above the budget {int(limit)} operations. "
+            f"Reduce the work with fewer configurations, or fewer panels (smaller n_span or n_chord)."
+        )
+
+
+@_tool
+def panel_analysis(
+    wing: Any = None,
+    aircraft: Any = None,
+    flight_condition: dict[str, Any] | None = None,
+    n_chord: int | None = None,
+    n_span: int | None = None,
+    cp: bool = False,
+    settings: dict[str, Any] | None = None,
+    detail_level: str = "standard",
+    axes: str = "body",
+) -> dict[str, Any]:
+    """Aerodynamic analysis with the 3D potential-flow panel method (Ventorum-3DP).
+
+    Parameters
+    ----------
+    wing : dict or None
+        One surface specification.
+    aircraft : dict or None
+        Several surfaces with reference values and moment reference point.
+    flight_condition : dict or None
+        Free-stream flight condition (speed, angles, density, optional ground height).
+    n_chord : int or None
+        Chordwise panel count per surface [-]. Default 40.
+    n_span : int or None
+        Spanwise panels per semi-span [-]. Default 80.
+    cp : bool, default=False
+        True to return panel pressure coefficients Cp [-] and panel centroids [m] in the result.
+    settings : dict or None
+        Panel solver settings (n_chord, n_panels, panel_kutta, panel_backend, panel_ground_solver, panel_cache).
+    detail_level : 'summary', 'standard' or 'full'
+        Detail level of the output.
+    axes : 'body', 'stability', 'wind' or 'all'
+        Axis system of the moment coefficients.
+    """
+    ac = build_aircraft_from_spec(wing=wing, aircraft=aircraft)
+    for surf in ac.surfaces:
+        if getattr(surf, "controls", None):
+            raise InputError(
+                "The controls of the panel method are not exposed yet in the agent tools. "
+                "Remove 'controls' from the surface definition."
+            )
+
+    include_cp = boolean(cp, "cp") if cp is not None else False
+    sett_dict = check_keys({} if settings is None else settings, PANEL_SETTINGS_PROPS, "settings")
+
+    kutta = string(sett_dict.get("panel_kutta", "morino"), "settings.panel_kutta", ["morino", "pressure"]).lower()
+    if kutta == "pressure":
+        raise InputError(
+            "The pressure Kutta condition is not exposed yet in the agent tools. "
+            "Use the default Morino Kutta condition."
+        )
+
+    c = parse_condition(flight_condition)
+    dl = parse_detail_level(detail_level)
+    ax = parse_axes(axes)
+
+    def _whole(name: str, value) -> int:
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or float(value) != int(value):
+            raise InputError(f"'{name}' must be a whole number, got {value!r}.")
+        return int(value)
+
+    if n_chord is not None:
+        n_chord = _whole("n_chord", n_chord)
+    if n_span is not None:
+        n_span = _whole("n_span", n_span)
+    if "n_chord" in sett_dict:
+        sett_dict["n_chord"] = _whole("settings.n_chord", sett_dict["n_chord"])
+    if "n_panels" in sett_dict:
+        sett_dict["n_panels"] = _whole("settings.n_panels", sett_dict["n_panels"])
+    if n_chord is not None and "n_chord" in sett_dict and int(n_chord) != int(sett_dict["n_chord"]):
+        raise InputError(
+            f"Top-level 'n_chord' ({n_chord}) differs from 'settings.n_chord' ({sett_dict['n_chord']}). "
+            "Give only one or use the same value."
+        )
+    if n_span is not None and "n_panels" in sett_dict and int(n_span) != int(sett_dict["n_panels"]):
+        raise InputError(
+            f"Top-level 'n_span' ({n_span}) differs from 'settings.n_panels' ({sett_dict['n_panels']}). "
+            "Give only one or use the same value."
+        )
+
+    if n_chord is not None:
+        nc = integer(n_chord, "n_chord", minimum=4, maximum=200)
+    elif "n_chord" in sett_dict:
+        nc = integer(sett_dict["n_chord"], "settings.n_chord", minimum=4, maximum=200)
+    else:
+        nc = 40
+
+    if n_span is not None:
+        ns = integer(n_span, "n_span", minimum=4, maximum=400)
+    elif "n_panels" in sett_dict:
+        ns = integer(sett_dict["n_panels"], "settings.n_panels", minimum=4, maximum=400)
+    else:
+        ns = 80
+
+    total_half_panels = sum(
+        (2 * int(s.n_panels if s.n_panels is not None else ns) + 1) * int(nc)
+        for s in ac.surfaces
+    )
+    _check_panel_mesh(total_half_panels)
+
+    is_symmetric_mesh = (
+        all(s.is_symmetric for s in ac.surfaces)
+        and abs(float(c.get("beta_deg", 0.0))) <= 1e-12
+    )
+
+    if is_symmetric_mesh:
+        solved_panels = total_half_panels
+    else:
+        solved_panels = sum(
+            (2 * (2 * int(s.n_panels if s.n_panels is not None else ns) + 1) * int(nc))
+            if s.is_symmetric
+            else ((2 * int(s.n_panels if s.n_panels is not None else ns) + 2) * int(nc))
+            for s in ac.surfaces
+        )
+
+    n_configs = 1
+    est_ops = n_configs * (float(solved_panels) ** 3 / 3.0)
+    _check_panel_work(est_ops, n_configs, solved_panels)
+
+    backend = string(sett_dict.get("panel_backend", "auto"), "settings.panel_backend", ["auto", "numpy", "numba", "gpu"])
+    ground_solver = string(sett_dict.get("panel_ground_solver", "auto"), "settings.panel_ground_solver", ["auto", "direct", "krylov"])
+    cache = boolean(sett_dict["panel_cache"], "settings.panel_cache") if "panel_cache" in sett_dict else True
+
+    solver_sett = SolverSettings(
+        solver_type="panel3d",
+        n_panels=ns,
+        n_chord=nc,
+        panel_kutta="morino",
+        panel_backend=backend,
+        panel_ground_solver=ground_solver,
+        panel_cache=cache,
+    )
+
+    fc = make_flight_condition(c)
+    from ventorum.solvers.factory import make_solver
+
+    solver = make_solver("panel3d")
+    res = solver.solve(ac, fc, solver_sett)
+
+    m = metrics_payload(res)
+    cd_press = float(res.totals.CDi_nearfield)
+    m["CD"] = rnd(cd_press)
+    m["CD_pressure"] = rnd(cd_press)
+    m["CDi"] = rnd(res.totals.CDi)
+    m["CDi_trefftz"] = rnd(res.totals.CDi)
+    m["drag_basis"] = "pressure integral"
+
+    b_ref, c_ref = float(res.b_ref), float(res.c_ref)
+    m["Cl"], m["Cm"], m["Cn"] = _apply_axes(
+        res.totals.Cl, res.totals.Cm, res.totals.Cn, c["alpha_deg"], c["beta_deg"], ax,
+        b_ref=b_ref, c_ref=c_ref,
+    )
+    if ax == "all":
+        m["moments"] = moments_all_sets(
+            res.totals.Cl, res.totals.Cm, res.totals.Cn, c["alpha_deg"], c["beta_deg"],
+            b_ref=b_ref, c_ref=c_ref,
+        )
+
+    trust = trust_payload(res.totals.trust)
+    dispatch = dict(res.details.get("dispatch", {}))
+
+    rp = ac.moment_reference()
+    where = "free air" if c["h_m"] is None else f"h={c['h_m']:g} m above the ground"
+    device, precision = result_device_precision(res)
+    summary = (
+        f"[Ventorum RESULT] {ac.name}: CL={fmt(m['CL'], '.4f')}, CD={fmt(m['CD'], '.5f')} (pressure), "
+        f"CDi={fmt(m['CDi'], '.5f')} (Trefftz), L/D={fmt(m['L_over_D'], '.2f')}, "
+        f"Cm={fmt(m['Cm'], '.4f')} about {_fmt_point(rp)} m. "
+        f"Condition: alpha={c['alpha_deg']:g} deg, beta={c['beta_deg']:g} deg, V={c['V_inf_m_s']:g} m/s, "
+        f"{where}. Solver: panel3d, converged={bool(res.converged)}. "
+        f"{device_summary_text(device, precision)}"
+    )
+    if res.totals.trust is not None:
+        t = res.totals.trust
+        summary += f" Trust {t.score:.2f} ({t.rating}), {len(t.warnings)} warning(s)."
+
+    out: dict[str, Any] = {
+        "status": "success",
+        "executive_summary": summary,
+        "metrics": m,
+        "trust": trust,
+        "dispatch": dispatch,
+        "condition_used": condition_payload(c),
+        "settings_used": {
+            "solver": "panel3d",
+            "n_chord": nc,
+            "n_span": ns,
+            "solved_panels": solved_panels,
+            "half_mesh_panels": total_half_panels,
+            "panel_backend": solver_sett.panel_backend,
+            "panel_ground_solver": solver_sett.panel_ground_solver,
+            "panel_cache": solver_sett.panel_cache,
+        },
+        "axes": ax,
+    }
+    if include_cp:
+        raw_cp = res.details.get("cp")
+        out["cp"] = raw_cp.tolist() if hasattr(raw_cp, "tolist") else raw_cp
+        mesh = res.details.get("mesh")
+        if mesh is not None:
+            from ventorum.panel3d.kernels import _precompute_geometry
+
+            corners = np.asarray(mesh.nodes)[np.asarray(mesh.panels)]
+            geom = _precompute_geometry(corners)
+            centroids_list = [[rnd(coord, 6) for coord in pt] for pt in geom.centroid]
+            out["panel_centroids_m"] = centroids_list
+    if dl in ("standard", "full"):
+        out["geometry"] = geometry_payload(ac)
+        out["sectional_diagnostics"] = sectional_payload(res)
+    if dl == "full":
+        out["spanwise_distributions"] = spanwise_payload(res)
     return out
 
 

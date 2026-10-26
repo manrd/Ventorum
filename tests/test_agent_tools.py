@@ -43,7 +43,7 @@ def assert_error(payload, kind, text=None):
 
 def test_schema_exporters():
     n = len(AGENT_TOOL_DEFINITIONS)
-    assert n == 14  # six analysis tools, derivative matrix, trim, error bars, undeformed nodes, the two machine tools,
+    assert n == 15  # six analysis tools, derivative matrix, trim, error bars, undeformed nodes, the two machine tools,
     # and the two 2D airfoil tools
     assert {"ventorum_airfoil_geometry", "ventorum_airfoil_polar"} <= {t["name"] for t in AGENT_TOOL_DEFINITIONS}
     openai = get_tool_schemas("openai")
@@ -349,7 +349,7 @@ def test_mcp_initialize_list_and_call():
                          "params": {"protocolVersion": "2024-11-05"}}))
     assert r["result"]["protocolVersion"] == "2024-11-05"
     r = _rpc(json.dumps({"jsonrpc": "2.0", "id": "b", "method": "tools/list"}))
-    assert len(r["result"]["tools"]) == 14  # with derivative matrix, trim, error bars, undeformed nodes, the two machine
+    assert len(r["result"]["tools"]) == 15  # with derivative matrix, trim, error bars, undeformed nodes, the two machine
     # tools and the two 2D airfoil tools
     call = {"jsonrpc": "2.0", "id": 7, "method": "tools/call",
             "params": {"name": "ventorum_wing_analysis",
