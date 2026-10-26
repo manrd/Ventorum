@@ -235,21 +235,30 @@ def test_vjp_backends_agree_with_torch_path(backend):
         set_vjp_backend(None)
 
     for out in ("CL", "Cm"):
+        jac = g_torch.jacobian[out]
+        # The absolute tolerance follows the size of the Jacobian (round-off
+        # factor times its largest element), as in the other parity tests:
+        # the backends sum the chain terms in a different order, and a fixed
+        # absolute tolerance would be below the round-off of a small element
+        # (1.6e-14 on an element of -0.0018 in the numpy backend).
+        scale = max(float(np.max(np.abs(jac["alpha"]))), float(np.max(np.abs(jac["controls"]["flap"]))),
+                    *(float(np.max(np.abs(jac["nodes"][s][e]))) for s in jac["nodes"] for e in ("le", "te")))
+        atol = 1e-12 * scale
         np.testing.assert_allclose(
             g_backend.jacobian[out]["alpha"],
-            g_torch.jacobian[out]["alpha"],
+            jac["alpha"],
             rtol=1e-12,
-            atol=1e-14,
+            atol=atol,
         )
-        for surface in g_torch.jacobian[out]["nodes"]:
+        for surface in jac["nodes"]:
             for edge in ("le", "te"):
-                ref = g_torch.jacobian[out]["nodes"][surface][edge]
+                ref = jac["nodes"][surface][edge]
                 new = g_backend.jacobian[out]["nodes"][surface][edge]
-                np.testing.assert_allclose(new, ref, rtol=1e-12, atol=1e-14)
+                np.testing.assert_allclose(new, ref, rtol=1e-12, atol=atol)
         np.testing.assert_allclose(
             g_backend.jacobian[out]["controls"]["flap"],
-            g_torch.jacobian[out]["controls"]["flap"],
-            rtol=1e-12, atol=1e-14,
+            jac["controls"]["flap"],
+            rtol=1e-12, atol=atol,
         )
 
 

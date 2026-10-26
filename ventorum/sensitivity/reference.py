@@ -593,6 +593,16 @@ class TorchReference:
         frac = b["frac"]
         n_chord = b["n_chord"]
         pa_list, pb_list, pcp_list = [], [], []
+        # Planform points of the leg nodes between two bound points (the
+        # middle chord fraction; zero on the last panel of a strip).
+        nb_mid = None
+        if n_chord > 1 and b.get("leg_next") is not None:
+            xb_all = xi[:, :-1] + 0.25 * (xi[:, 1:] - xi[:, :-1])
+            xm_all = torch.cat((0.5 * (xb_all[:, :-1] + xb_all[:, 1:]), xb_all[:, -1:]), dim=1)
+            last = torch.zeros(n_chord, dtype=self.dtype, device=self.device)
+            last[-1] = 1.0
+            keep = (1.0 - last)[None, :, None]
+            nb_mid = ((le_l[:, None] + xm_all[..., None] * (te_l - le_l)[:, None]) * keep).reshape(-1, 3),                 ((le_r[:, None] + xm_all[..., None] * (te_r - le_r)[:, None]) * keep).reshape(-1, 3), xm_all
         for k in range(n_chord):
             x0 = xi[:, k]
             x1 = xi[:, k + 1]
@@ -620,6 +630,8 @@ class TorchReference:
         if cd is not None:
             a = a + cd["W_a"] @ V_all
             bv = bv + cd["W_b"] @ V_all
+            if nb_mid is not None:
+                nb_mid = (nb_mid[0] + cd["W_ma"] @ V_all, nb_mid[1] + cd["W_mb"] @ V_all, nb_mid[2])
             edge_vec_l = chord_te_l - chord_le_l
             edge_vec_r = chord_te_r - chord_le_r
             cp_chord = torch.linalg.norm(
@@ -698,6 +710,11 @@ class TorchReference:
 
             a = _turn(a, xb_s > hcol, h_l, ax_l, d_l)
             bv = _turn(bv, xb_s > hcol, h_r, ax_r, d_r)
+            if nb_mid is not None:
+                # The mean-surface leg nodes aft of the hinge turn with the flap.
+                xm_s = nb_mid[2][s_c]
+                nb_mid = (_turn(nb_mid[0], xm_s > hcol, h_l, ax_l, d_l),
+                          _turn(nb_mid[1], xm_s > hcol, h_r, ax_r, d_r), nb_mid[2])
             # A high CLAF can put the control point of a panel ahead of the
             # hinge aft of it: the point moves, its normal does not turn.
             cp = _turn(cp, xc_s > hcol, h_f, ax_f, d_f)
@@ -728,10 +745,11 @@ class TorchReference:
             # Leg chains on the strips with geometric camber (production:
             # geometry.lattice._leg_nodes): the legs of a panel end at the
             # bound points of the next panel and continue on its legs. The
-            # first node is the bound point of the next panel, or the hinge
-            # point where the hinge lies between the two bound points.
+            # first node is the mean-surface node between the two bound
+            # points, or the hinge point where the hinge lies between them.
             a_nx = torch.cat((a[1:], a[-1:]), dim=0)
             b_nx = torch.cat((bv[1:], bv[-1:]), dim=0)
+            a_md, b_md = nb_mid[0], nb_mid[1]
             if kink_geom is None:
                 a_k0, b_k0 = a_te, b_te
                 hinge = torch.zeros(n_p, dtype=torch.bool, device=self.device)
@@ -741,7 +759,7 @@ class TorchReference:
             hinge_next = torch.cat((hinge[1:], no))
             take = (nxt_p & ~(hinge & ~hinge_next))[:, None]
             on_chain = nxt_p | torch.cat((no, nxt_p[:-1]))
-            kink_geom = (torch.where(take, a_nx, a_k0), torch.where(take, b_nx, b_k0), hinge | on_chain)
+            kink_geom = (torch.where(take, a_md, a_k0), torch.where(take, b_md, b_k0), hinge | on_chain)
             chain_geom = (torch.where(nxt_p[:, None], a_nx, a_te), torch.where(nxt_p[:, None], b_nx, b_te),
                           on_chain)
         cp_u = cp[b["unknown_panels"]]

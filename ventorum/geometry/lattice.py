@@ -1582,6 +1582,9 @@ def build_lattice(
     # follow the curved mean surface (see _leg_nodes). A zero mean line
     # (a symmetric section) keeps the straight legs, bit for bit.
     curved = np.zeros(n_strips, dtype=bool)
+    # Mean-surface node of the leg of each panel between its bound point and
+    # the bound point of the next panel of its strip [m] (see _leg_nodes).
+    mid_a = mid_b = None
     camber_frames, offset_warnings = _camber_edge_frames(surfaces, mean_surfaces, aircraft)
     # Keep the old arithmetic for sections without a mean line and for
     # symmetric mean lines. This preserves the uncambered results in bits.
@@ -1612,6 +1615,25 @@ def build_lattice(
             if e > 0:
                 off_r[e - 1] = _joined_camber_offset(camber_frames, si, e, xb[e - 1])
         curved[idx] = known & (np.any(off_l != 0.0, axis=(1, 2)) | np.any(off_r != 0.0, axis=(1, 2)))
+        if n_chord > 1:
+            # The node at the middle chord fraction between two bound points,
+            # on the mean line of the strip edge.
+            xm = 0.5 * (xb[:, :-1] + xb[:, 1:])
+            z_ml = _mean_line_at(secs, lines, np.abs(eta_full[:-1, None]), xm)
+            z_mr = _mean_line_at(secs, lines, np.abs(eta_full[1:, None]), xm)
+            off_ml = edge_c[:-1, None, None] * z_ml[..., None] * edge_n[:-1, None, :]
+            off_mr = edge_c[1:, None, None] * z_mr[..., None] * edge_n[1:, None, :]
+            for e in frame["joined"]:
+                if e < len(idx):
+                    off_ml[e] = _joined_camber_offset(camber_frames, si, e, xm[e])
+                if e > 0:
+                    off_mr[e - 1] = _joined_camber_offset(camber_frames, si, e, xm[e - 1])
+            if mid_a is None:
+                mid_a = np.zeros_like(a)
+                mid_b = np.zeros_like(b)
+            m_idx = (idx[:, None] * n_chord + np.arange(n_chord - 1)).ravel()
+            mid_a[m_idx] = (le_l[idx, None] + xm[..., None] * (te_l[idx] - le_l[idx])[:, None] + off_ml).reshape(-1, 3)
+            mid_b[m_idx] = (le_r[idx, None] + xm[..., None] * (te_r[idx] - le_r[idx])[:, None] + off_mr).reshape(-1, 3)
         a[p_idx] += off_l.reshape(-1, 3)
         b[p_idx] += off_r.reshape(-1, 3)
         f_mid = cat["frac"][idx, None]
@@ -1643,6 +1665,7 @@ def build_lattice(
     if is_chordwise:
         normal_bc_clean = normal_bc.copy()
         undeflected = (a.copy(), b.copy(), te_l.copy(), te_r.copy(), cp.copy())
+        mid_undeflected = None if mid_a is None else (mid_a.copy(), mid_b.copy())
         strip_surf = cat["surface"].astype(int)
 
         def hinge_point(s: int, side: int, h: float) -> np.ndarray:
@@ -1744,6 +1767,13 @@ def build_lattice(
                                                     (cp, xc_k, H_f, ax_f, d_f)):
                     if fraction > h and dd != 0.0:
                         points[p_idx:p_idx + 1] = _rotate_flap_points(points[p_idx:p_idx + 1], H, ax, dd)
+                if mid_a is not None and k < n_chord - 1:
+                    # The mean-surface node aft of the hinge turns with the flap.
+                    x1_k = strip_xi_arr[s, k + 1]
+                    xm_k = 0.5 * (xb_k + x1_k + 0.25 * (strip_xi_arr[s, k + 2] - x1_k))
+                    for points, H, ax, dd in ((mid_a, H_l, ax_l, d_l), (mid_b, H_r, ax_r, d_r)):
+                        if xm_k > h and dd != 0.0:
+                            points[p_idx:p_idx + 1] = _rotate_flap_points(points[p_idx:p_idx + 1], H, ax, dd)
                 if x0_k >= h - 1e-12 and d_f != 0.0:
                     normal_bc[p_idx] = _rotate(normal_bc[p_idx:p_idx + 1], ax_f[None, :], d_f)[0]
                 # The chordwise legs of the panels ahead of the hinge follow
@@ -1772,7 +1802,7 @@ def build_lattice(
     chain_strips = np.flatnonzero(curved) if n_chord > 1 else np.zeros(0, dtype=np.int64)
     if leg_kinks or chain_strips.size:
         a_kink, b_kink, leg_next = _leg_nodes(a, b, te_l[panel_strip], te_r[panel_strip], leg_kinks,
-                                              chain_strips, n_chord)
+                                              chain_strips, n_chord, mid_a, mid_b)
 
     lattice = VortexLattice(
         collocation=collocation,
@@ -1849,8 +1879,9 @@ def build_lattice(
             # change when the gap passes the join tolerance, and the loads
             # would jump.
             a0, b0, te_l0, te_r0, _ = undeflected
+            mid0 = (None, None) if mid_undeflected is None else mid_undeflected
             a_k0, b_k0, next0 = _leg_nodes(a0, b0, te_l0[panel_strip], te_r0[panel_strip], leg_kinks,
-                                           chain_strips, n_chord)
+                                           chain_strips, n_chord, *mid0)
             flat = replace(lattice, a=a0, b=b0, a_te=te_l0[panel_strip], b_te=te_r0[panel_strip],
                            a_kink=a_k0, b_kink=b_k0, leg_next=next0, te_left=te_l0, te_right=te_r0,
                            geom_cache={})
@@ -1886,15 +1917,19 @@ def _leg_nodes(
     hinge_nodes: dict,
     chain_strips: np.ndarray,
     n_chord: int,
+    mid_a: np.ndarray | None = None,
+    mid_b: np.ndarray | None = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray | None]:
     """Return the first leg nodes and the chain flags of the panels (see ``VortexLattice.leg_next``).
 
     One mechanism gives the hinge nodes of the chordwise flaps and the nodes
     of the mean surface: the legs of a panel pass through the nodes of its
     strip edge, in chordwise order, to the trailing edge. On a strip with
-    geometric camber the nodes are the bound points of the panels aft of it
-    and the hinge point of a flap; on a strip without a mean line only the
-    hinge point.
+    geometric camber the nodes are the bound points of the panels aft of it,
+    one mean-surface node between each two bound points (at the middle chord
+    fraction) and the hinge point of a flap; on a strip without a mean line
+    only the hinge point. Where the hinge point lies between two bound
+    points, it is the node between them (one node per segment pair).
 
     Parameters
     ----------
@@ -1911,6 +1946,10 @@ def _leg_nodes(
         Strips with geometric camber.
     n_chord : int
         Chordwise panels per strip.
+    mid_a, mid_b : numpy.ndarray or None
+        Mean-surface nodes [m], shape (n_panels, 3), between the bound points
+        of each panel and of the next panel of its strip, after the flap
+        turn; None to use the bound point of the next panel as the node.
 
     Returns
     -------
@@ -1934,8 +1973,8 @@ def _leg_nodes(
             # The hinge point is a node of this leg only if it lies between
             # the bound points of this panel and of the next one.
             if p not in hinge_nodes or p + 1 in hinge_nodes:
-                a_kink[p] = a[p + 1]
-                b_kink[p] = b[p + 1]
+                a_kink[p] = a[p + 1] if mid_a is None else mid_a[p]
+                b_kink[p] = b[p + 1] if mid_b is None else mid_b[p]
     return a_kink, b_kink, leg_next
 
 

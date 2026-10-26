@@ -182,11 +182,12 @@ a minor version can change a public interface.
 
 - Vortex lattice on a cambered section mean line: the horseshoe legs now follow the mean surface.
   The legs of a panel run from its bound points through the bound points of the panels aft of it on
-  the same strip edge to the trailing edge (new lattice and source field `leg_next`; the hinge node
-  of a chordwise flap is the node between the two bound points around the hinge). The straight legs
+  the same strip edge to the trailing edge, with one node on the mean surface between each two
+  bound points (new lattice and source field `leg_next`; the hinge node of a chordwise flap takes
+  the place of the mean-surface node between the two bound points around the hinge). The straight legs
   left the curved mean surface and, on narrow strips, passed close to control points of other
   strips, so the solve was ill-conditioned: an AR 8 NACA 6409 wing gave CL 7.74 at 0 deg with the
-  default settings (now 0.504) and a NACA 4412 wing 0.078 (now 0.336). All kernel backends (numpy,
+  default settings (now 0.502) and a NACA 4412 wing 0.078 (now 0.334). All kernel backends (numpy,
   Numba, Cython, torch, NVIDIA Warp), the leg forces on the CPU and the GPU, the VJP kernels of the
   gradients and the gradient reference copy carry the chains. The leg forces of a chain segment use
   the circulation sum of the panels ahead of it. Strips without a mean line and strips with a zero

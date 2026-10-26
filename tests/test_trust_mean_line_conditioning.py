@@ -63,7 +63,7 @@ def test_straight_legs_on_strong_camber_warn(monkeypatch, shape):
 
     orig = mesh_mod._leg_nodes
 
-    def straight(a, b, a_te, b_te, hinge_nodes, chain_strips, n_chord):
+    def straight(a, b, a_te, b_te, hinge_nodes, chain_strips, n_chord, *nodes):
         return orig(a, b, a_te, b_te, hinge_nodes, chain_strips[:0], n_chord)
 
     monkeypatch.setattr(mesh_mod, "_leg_nodes", straight)

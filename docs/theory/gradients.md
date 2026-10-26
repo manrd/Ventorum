@@ -275,8 +275,9 @@ adds the own segments of the sources after it on its chain (a suffix sum along t
 The adjoint of a suffix sum is a prefix sum: the own segments of source `j` take the sum
 of the pair adjoints `u_ij` of `j` and of the sources before it on its chain. The
 derivatives with respect to `a_e`, `b_e` are two more source outputs; the reference copy
-builds `a_e`, `b_e` and the first nodes from the bound points of the next panel, so the
-chain rule gives them to those points. A target that lies on a chain segment by the mesh
+builds `a_e`, `b_e` from the bound points of the next panel and the first nodes (the
+mean-surface nodes between two bound points) from the strip edges and the mean-line
+offsets, so the chain rule gives them to those points. A target that lies on a chain segment by the mesh
 topology (a leg mid-point) has the id of that segment, so the mask removes that segment
 for every source of the chain. The derivatives of the
 corners add the end-point derivatives of the filaments that share them. The pair core is
