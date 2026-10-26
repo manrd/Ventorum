@@ -10,6 +10,11 @@ a minor version can change a public interface.
 
 ### Added
 
+- Ventorum-2D: `solve_viscous_flapped` solves a section with a deflected plain flap by
+  continuation in the deflection (from 0 deg, warm-started steps, halved on a failure), where a
+  direct cold solve often fails. Each step has its own work budget, with a total cap; the result
+  reports the reached deflection and the step history. `solve_viscous` does not change.
+
 - Viscous alpha-correction coupling for the 3D panel method: `solve_viscous(..., model="panel3d")`
   matches the surface-pressure lift of each spanwise strip to its section polar by rotating the onset on
   the strip's body panels (one factorization for a whole sweep), closes the trailing-edge pressure jump
