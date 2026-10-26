@@ -262,3 +262,7 @@ condition. Dispatch records count released parity factors in
 `factors_dropped` and evicted configurations in `configurations_evicted`.
 These limits bound retained data. They do not replace the GPU memory fit
 check or change the solver cache limits.
+
+## Panel mesh node displacements
+
+The 3D panel mesh builders and factory refuse non-zero node displacements with `ValueError`; the vortex lattice supports them.

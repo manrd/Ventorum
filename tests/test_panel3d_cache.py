@@ -209,8 +209,7 @@ def _set_chord(ac):
     ac.surfaces[0].sections[0].chord = 0.85
 
 
-@pytest.mark.parametrize("change", [_set_twist, _set_flap, _set_displacement, _set_shape, _set_shape_coords,
-                                    _set_chord])
+@pytest.mark.parametrize("change", [_set_twist, _set_flap, _set_shape, _set_shape_coords, _set_chord])
 def test_geometry_change_misses(change):
     """A change of the geometry (also in place on the same object) misses the cache."""
     st = _settings()
@@ -223,6 +222,23 @@ def test_geometry_change_misses(change):
     fresh = _wing()
     change(fresh)
     _assert_same_bits(changed, _solve(fresh, _cond(3.0), _uncached(st)))
+
+
+def test_node_displacement_refused_after_a_cached_solve():
+    """Non-zero node displacements are refused, also on a surface whose geometry is cached.
+
+    The 3D panel method does not support node displacements (the vortex
+    lattice does), so the change cannot reach the cache.
+    """
+    st = _settings()
+    ac = _wing()
+    first = _solve(ac, _cond(3.0), st)
+    _set_displacement(ac)
+    with pytest.raises(ValueError, match="node displacements"):
+        _solve(ac, _cond(3.0), st)
+    ac.surfaces[0].node_displacements = None
+    again = _solve(ac, _cond(3.0), st)
+    _assert_same_bits(first, again)
 
 
 @pytest.mark.parametrize("change", [

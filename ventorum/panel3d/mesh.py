@@ -1703,6 +1703,30 @@ def _finish_mesh(built: dict, ns: int, half: bool, tip: str, mirror_full: bool, 
     )
 
 
+def _has_nonzero_node_displacements(surf) -> bool:
+    """Return True if the surface has non-zero node displacements."""
+    d = getattr(surf, "node_displacements", None)
+    if d is None:
+        return False
+    le = getattr(d, "le", None)
+    te = getattr(d, "te", None)
+    if le is not None and np.any(np.asarray(le) != 0.0):
+        return True
+    if te is not None and np.any(np.asarray(te) != 0.0):
+        return True
+    return False
+
+
+def _check_no_node_displacements(surf) -> None:
+    """Raise ValueError when the surface has non-zero node displacements."""
+    if _has_nonzero_node_displacements(surf):
+        name = getattr(surf, "name", "surface")
+        raise ValueError(
+            f"Surface '{name}' has non-zero node displacements. The 3D panel method "
+            "does not yet support node displacements; the vortex lattice does."
+        )
+
+
 def mesh_lifting_surface(
     surface,
     section_coords,
@@ -1815,6 +1839,7 @@ def mesh_lifting_surface(
     its root section normal to its span axis and does not change.
     """
     surf = surface
+    _check_no_node_displacements(surf)
     n_chord = int(n_chord)
     if n_chord < 1:
         raise ValueError(f"n_chord must be at least 1, got {n_chord}.")
@@ -2048,6 +2073,8 @@ def mesh_aircraft(
         stay per component.
     """
     surfs = list(aircraft.surfaces)
+    for s in surfs:
+        _check_no_node_displacements(s)
     if isinstance(section_coords_by_surface, dict):
         coord_list = []
         for i, s in enumerate(surfs):
