@@ -98,6 +98,7 @@ The vortex-lattice solver reproduces this scaling.
 - The VLM solver (`solver_type="vlm"`) supports the compressibility correction on the CPU and GPU paths.
 - The lifting-line solvers (linear, nonlinear, and Fourier) refuse `mach > 0` and raise `ValidityError`.
 - Ground effect refuses `mach > 0` and raises `ValidityError`.
+- The 3D panel method has no compressibility correction: it refuses `mach > 0` and raises `ValidityError`.
 - Adjoint gradients support `mach > 0` for the vortex lattice in free air,
   with the new input `"mach"` (per unit Mach); ground effect and the lifting
   lines refuse it with `GradientScopeError`.

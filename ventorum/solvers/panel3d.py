@@ -78,6 +78,7 @@ from ventorum.aero.system import (
     lift_direction,
 )
 from ventorum.airfoil import airfoil
+from ventorum.core.errors import ValidityError
 from ventorum.core.datatypes import (
     Aircraft,
     FlightCondition,
@@ -1239,6 +1240,11 @@ class PanelMethodSolver(BaseSolver):
         """
         is_single = isinstance(condition, FlightCondition)
         cond_list: list[FlightCondition] = [condition] if is_single else list(condition)
+        if any(getattr(c, "mach", None) is not None and float(c.mach) > 0.0 for c in cond_list):
+            raise ValidityError(
+                "The 3D panel method does not support compressibility (mach > 0): it has no "
+                "Prandtl-Glauert correction. Use solver='vlm' for a compressible case, or mach=None."
+            )
 
         ac = as_aircraft(aircraft)
         validate_aircraft(ac)
