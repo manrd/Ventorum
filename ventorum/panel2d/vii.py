@@ -51,8 +51,7 @@ change in the last two evaluations. The residuals are relative (logarithmic
 differences and ratios), except the amplification equation, which is
 absolute in N.
 
-Early stops (fail fast; they change the work of a failed solve, not a
-converged solution): a case stops with status "stagnation" when its
+Early stops (fail fast): a case stops with status "stagnation" when its
 smallest residual has not fallen by the factor STALL_FACTOR in the last
 STALL_WINDOW iterations (the window starts again when omega changes and,
 at omega = 1, when the structure changes), or when, at omega = 1, the line
@@ -67,6 +66,11 @@ Levenberg-Marquardt step of a solve found no decrease while the residual
 was above STALL_FLOOR times the tolerance, the later ones of that solve
 try at most ``lm_trials`` damping values instead of LM_TRIALS.
 A singular Newton matrix is a failed step (see :func:`newton_solve`).
+When enabled for the quasi-simultaneous first estimate of a cold start,
+the first residual-window stop retries in place with that window rule off.
+The stage retains its original iteration limit;
+the failed-step and divergence rules still apply. The retry preserves all
+state and step-control data and reports both its first stop and its outcome.
 
 The same code runs with numpy (one case) and with torch (a batch of cases
 with the same node and wake counts, on the CPU or on CUDA).
@@ -75,6 +79,7 @@ with the same node and wake counts, on the CPU or on CUDA).
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import NamedTuple
 
 import numpy as np
 
@@ -226,6 +231,7 @@ class NewtonResult:
     reason: str
     linear_solves: int = 0
     status: str = ""
+    _first_stop: str = field(default="", init=False, repr=False, compare=False)
 
 
 # ---------------------------------------------------------------------------
@@ -1159,9 +1165,17 @@ def _freeze_cycles(hist, setup: CaseSetup, st: CaseState):
     return moved
 
 
+class _EarlyStop(NamedTuple):
+    """Stop status, reason and whether only the residual window caused it."""
+
+    status: str
+    reason: str
+    window: bool = False
+
+
 def _early_stop(res, level_min, smallest, no_step, at_one, stall_window, stall_factor, divergence_factor,
-                floor=0.0):
-    """Return (status, reason) of an early stop of a Newton solve, or None.
+                floor=0.0, *, window_stop=True):
+    """Return the status and cause of an early stop, or None.
 
     Parameters
     ----------
@@ -1190,31 +1204,35 @@ def _early_stop(res, level_min, smallest, no_step, at_one, stall_window, stall_f
         The stagnation rules apply only while the smallest residual of the
         window is above this value [-]. Near the tolerance the residual can
         stall at the round-off level (float32) and still reach it.
+    window_stop : bool
+        Apply the residual-window rule. False keeps the failed-step and
+        divergence rules but disables the window for a retry.
 
     Returns
     -------
-    tuple of str or None
-        The status ("stagnation" or "divergence") and the reason text.
+    _EarlyStop or None
+        Status, reason and whether the residual-window rule caused the stop.
     """
     stall = stall_window > 0 and level_min[-1] > floor
     if stall and at_one and no_step >= 2:
         # Two failed steps on the same state and structure: the next
         # iterations repeat the last one exactly (fixed point of the loop).
-        return "stagnation", (f"stagnation: neither the Newton line search nor the Levenberg-Marquardt fallback "
-                              f"reduces the residual (largest residual {res:.3e})")
+        return _EarlyStop("stagnation", (f"stagnation: neither the Newton line search nor the Levenberg-Marquardt fallback "
+                                        f"reduces the residual (largest residual {res:.3e})"))
     if divergence_factor > 0.0 and at_one and res > divergence_factor * smallest:
-        return "divergence", (f"divergence: the residual grew to more than {divergence_factor:g} times its "
-                              f"smallest value (largest residual {res:.3e})")
-    if stall and len(level_min) > stall_window and level_min[-1] > stall_factor * level_min[-1 - stall_window]:
+        return _EarlyStop("divergence", (f"divergence: the residual grew to more than {divergence_factor:g} times its "
+                                        f"smallest value (largest residual {res:.3e})"))
+    if (window_stop and stall and len(level_min) > stall_window
+            and level_min[-1] > stall_factor * level_min[-1 - stall_window]):
         where = "on the same structure" if at_one else "at a coupling factor omega below 1"
-        return "stagnation", (f"stagnation: the smallest residual did not fall by the factor {stall_factor:g} in "
-                              f"{stall_window} Newton iterations {where} (largest residual {res:.3e})")
+        return _EarlyStop("stagnation", (f"stagnation: the smallest residual did not fall by the factor {stall_factor:g} in "
+                                        f"{stall_window} Newton iterations {where} (largest residual {res:.3e})"), True)
     return None
 
 
 def newton_solve(setups, states, *, tol=1e-6, max_iter=50, xp=np, device=None, dtype=None, verbose=False,
                  omega0=None, stall_window=STALL_WINDOW, stall_factor=STALL_FACTOR,
-                 divergence_factor=DIVERGENCE_FACTOR, lm_trials=LM_RETRY_TRIALS):
+                 divergence_factor=DIVERGENCE_FACTOR, lm_trials=LM_RETRY_TRIALS, retry_window=False):
     """Solve a batch of coupled cases by the global Newton method.
 
     Parameters
@@ -1258,6 +1276,10 @@ def newton_solve(setups, states, *, tol=1e-6, max_iter=50, xp=np, device=None, d
         STALL_FLOOR times ``tol`` [-], at least 1. The fallback steps before
         that try LM_TRIALS values. Near the tolerance (the round-off level of
         float32) a failed fallback step does not set the cap.
+    retry_window : bool
+        Permit one retry after a residual-window stop. Only the caller
+        of the quasi-simultaneous first estimate of a cold start enables
+        this option. Other stages keep the residual-window stop.
 
     Returns
     -------
@@ -1269,8 +1291,11 @@ def newton_solve(setups, states, *, tol=1e-6, max_iter=50, xp=np, device=None, d
     A case also stops with status "stagnation" when the line search and
     the Levenberg-Marquardt fallback both fail twice in a row on the same
     structure: the following iterations would repeat the last one exactly.
-    The stop rules change the work of a failed solve, not a converged
-    solution.
+    With ``retry_window``, a residual-window stop retries once from that state
+    with only the window rule off. It retains the coupling factor,
+    damping and structure history. The retry uses the remaining iterations
+    of this stage, within ``max_iter``. Other stops do not start a retry.
+    The reason names the first stop and the outcome of the retry.
 
     A singular Newton matrix (a linear-algebra error of its solve) gives
     no Newton step: the Levenberg-Marquardt fallback is tried instead. When
@@ -1301,6 +1326,7 @@ def newton_solve(setups, states, *, tol=1e-6, max_iter=50, xp=np, device=None, d
     smallest = np.full(nb, np.inf)
     no_step = np.zeros(nb, dtype=int)
     n_lin = np.zeros(nb, dtype=int)
+    first_stop = [""] * nb
 
     sens = {}
 
@@ -1435,7 +1461,13 @@ def newton_solve(setups, states, *, tol=1e-6, max_iter=50, xp=np, device=None, d
                 lm.append(min(float(res[k]), lm[-1]) if lm else float(res[k]))
                 at_one = omega[i] == 1.0
                 stop = _early_stop(float(res[k]), lm, smallest[i], int(no_step[i]), at_one, stall_window, stall_factor,
-                                   divergence_factor, STALL_FLOOR * tol)
+                                   divergence_factor, STALL_FLOOR * tol, window_stop=not first_stop[i])
+                if (retry_window and stop is not None and getattr(stop, "window", False) and not first_stop[i]
+                        and np.isfinite(res[k]) and it < max_iter):
+                    # Resume this state in place. No step, damping value, history
+                    # or iteration allowance is reset at the retry boundary.
+                    first_stop[i] = stop[1]
+                    stop = None
                 if at_one:
                     smallest[i] = min(smallest[i], float(res[k]))
                 if omega[i] == 1.0 and res[k] < tol and not changed[k] and not changed_prev[i]:
@@ -1543,6 +1575,12 @@ def newton_solve(setups, states, *, tol=1e-6, max_iter=50, xp=np, device=None, d
         if results[i] is None:
             results[i] = NewtonResult(states[i], np.zeros(setups[i].n_st), False, max_iter, float(last_res[i]),
                                       "no convergence", int(n_lin[i]), "max_iter")
+        if first_stop[i]:
+            res = results[i]
+            res._first_stop = first_stop[i]
+            outcome = "converged" if res.converged else f"failed ({res.reason})"
+            res.reason = (f"{outcome} after one retry without the residual-window stagnation stop "
+                          f"(first stop: {first_stop[i]})")
     return results
 
 

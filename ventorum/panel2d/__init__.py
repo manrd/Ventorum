@@ -3,7 +3,7 @@
 
 #: Revision of the 2D inviscid and viscous solvers. It changes whenever a
 #: change of the solvers can change results (polar caches use it in their key).
-SOLVER_REVISION = "2026-10-17.3"
+SOLVER_REVISION = "2026-10-27.1"
 
 __all__ = ["SOLVER_REVISION", "solve_viscous_flapped"]
 

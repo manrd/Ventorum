@@ -180,6 +180,10 @@ a minor version can change a public interface.
 
 ### Fixed
 
+- Ventorum-2D retries a residual-window stop once for the cold quasi-simultaneous first estimate at the
+  requested angle (not at the zero-lift start of an angle continuation). The stage limit and angle
+  budget stay unchanged. This lets slow cold starts converge in ground effect (NACA 4412 at 4 deg failed
+  before at five heights from h/c 0.7 to 1.3). The solver revision for result caches is now 2026-10-27.1.
 - Vortex lattice on a cambered section mean line: the horseshoe legs now follow the mean surface.
   The legs of a panel run from its bound points through the bound points of the panels aft of it on
   the same strip edge to the trailing edge, with one node on the mean surface between each two
