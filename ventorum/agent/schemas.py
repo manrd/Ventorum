@@ -1162,8 +1162,11 @@ AGENT_TOOL_DEFINITIONS: list[dict[str, Any]] = [
     {
         "name": "ventorum_polar_sweep",
         "description": "Sweep of the angle of attack: CL, CDi, CD, Cm and L/D per angle, the lift slope "
-                       "from a linear fit and the maximum L/D. When every angle fails, the top-level "
-                       "error copies the first row's error.",
+                       "from a linear fit and the maximum L/D. Each row gives trust_score, trust_rating and "
+                       "the short labels of its warnings; polar_summary gives the lowest rating "
+                       "(trust_rating_lowest) and the warnings of the sweep, each once with the angles "
+                       "that have it (at most 6, the rest counted in warnings_not_shown). When every "
+                       "angle fails, the top-level error copies the first row's error.",
         "parameters": {
             "type": "object",
             "properties": {

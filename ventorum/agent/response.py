@@ -12,6 +12,7 @@ NaN and infinity become null.
 from __future__ import annotations
 
 import math
+import re
 from typing import Any
 
 import numpy as np
@@ -122,6 +123,131 @@ def trust_payload(trust: TrustScore | None) -> dict[str, Any]:
         },
         "note": TRUST_NOTE,
     }
+
+
+#: Largest number of warning labels in one table row of a compact payload.
+ROW_WARNINGS_CAP = 3
+#: Largest number of warnings in the summary of a compact payload.
+SUMMARY_WARNINGS_CAP = 6
+
+_HEAD_RE = re.compile(r"^(.*?)(?::\s|\s\(|\.\s|\.$|$)")
+
+
+def warning_label(text: str) -> str:
+    """Return the short label of a trust warning.
+
+    The label is the text before the first colon, opening parenthesis or
+    end of sentence, for example ``"Severe stall risk"`` for
+    ``"Severe stall risk: peak section Cl=1.72 (...)"``. Warnings of the
+    same kind at different conditions have the same label.
+
+    Parameters
+    ----------
+    text : str
+        Full warning text.
+
+    Returns
+    -------
+    str
+        The label, or the full text if no label is found.
+    """
+    m = _HEAD_RE.match(text.strip())
+    head = m.group(1).strip() if m else ""
+    return head or text.strip()
+
+
+def row_warnings(warnings: list[str], cap: int = ROW_WARNINGS_CAP) -> tuple[list[str], int]:
+    """Return the deduplicated warning labels of one row and the count of the labels not shown.
+
+    Parameters
+    ----------
+    warnings : list of str
+        Full warning texts of the row.
+    cap : int
+        Largest number of labels to return.
+
+    Returns
+    -------
+    tuple of (list of str, int)
+        At most *cap* labels in their first order, and the number of the
+        other labels.
+    """
+    labels = list(dict.fromkeys(warning_label(w) for w in warnings))
+    return labels[:cap], max(0, len(labels) - cap)
+
+
+def merge_warnings(items: list[tuple[Any, float | None, list[str]]], at_key: str,
+                   cap: int = SUMMARY_WARNINGS_CAP) -> tuple[list[dict[str, Any]], int]:
+    """Return the union of the warnings of several results, grouped by label.
+
+    Parameters
+    ----------
+    items : list of (Any, float or None, list of str)
+        One item per result: its position (for example the angle of
+        attack [deg]), its trust score and its full warning texts.
+    at_key : str
+        Name of the key that lists the positions of each warning, for
+        example ``"alpha_deg"``.
+    cap : int
+        Largest number of warnings to return.
+
+    Returns
+    -------
+    tuple of (list of dict, int)
+        One dict per label: ``"warning"``, the full text at the position
+        with the lowest trust score, and *at_key*, the positions that have
+        the warning. The labels of the lowest score come first. The int is
+        the number of the labels not shown.
+    """
+    groups: dict[str, dict[str, Any]] = {}
+    for pos, score, warns in items:
+        s = float("inf") if score is None else float(score)
+        for w in warns:
+            lab = warning_label(w)
+            g = groups.get(lab)
+            if g is None:
+                groups[lab] = {"text": w, "score": s, "at": [pos]}
+                continue
+            if pos not in g["at"]:
+                g["at"].append(pos)
+            if s < g["score"]:
+                g["text"], g["score"] = w, s
+    order = sorted(groups.values(), key=lambda g: g["score"])
+    out = [{"warning": g["text"], at_key: g["at"]} for g in order[:cap]]
+    return out, max(0, len(order) - cap)
+
+
+def compact_trust(trust: TrustScore | dict[str, Any] | None,
+                  cap: int = SUMMARY_WARNINGS_CAP) -> dict[str, Any]:
+    """Return the trust score, the rating and the deduplicated warnings, without the bands.
+
+    Parameters
+    ----------
+    trust : TrustScore, dict or None
+        Trust assessment of the result, or a payload of
+        :func:`trust_payload` (for example with the warnings of several
+        cases).
+    cap : int
+        Largest number of warnings to return.
+
+    Returns
+    -------
+    dict
+        ``score``, ``rating``, ``warnings`` (full texts, deduplicated, at
+        most *cap*) and ``warnings_not_shown``; or ``available`` false when
+        there is no trust assessment.
+    """
+    if isinstance(trust, dict):
+        if "rating" not in trust:
+            return dict(trust)
+        score, rating, warns = trust.get("score"), trust["rating"], trust.get("warnings", [])
+    elif trust is None:
+        return {"available": False, "note": "The solver gave no trust assessment."}
+    else:
+        score, rating, warns = trust.score, trust.rating, trust.warnings
+    warns = list(dict.fromkeys(warns))
+    return {"score": rnd(score, 4), "rating": rating, "warnings": warns[:cap],
+            "warnings_not_shown": max(0, len(warns) - cap)}
 
 
 def drag_and_ld(tot: IntegratedResult) -> tuple[float, str, float | None]:

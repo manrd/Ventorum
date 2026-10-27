@@ -22,6 +22,7 @@ import numpy as np
 import ventorum as vt
 from ventorum.aero.xfoil_runner import resolve_xfoil_executable, xfoil_version
 from ventorum.agent.response import (
+    compact_trust,
     computation_device_precision,
     condition_payload,
     device_summary_text,
@@ -32,15 +33,18 @@ from ventorum.agent.response import (
     fmt,
     geometry_payload,
     lift_to_drag,
+    merge_warnings,
     metrics_payload,
     moments_all_sets,
     moments_in_axes,
     result_device_precision,
     rnd,
+    row_warnings,
     sectional_payload,
     settings_payload,
     spanwise_payload,
     trust_payload,
+    warning_label,
 )
 from ventorum.agent.schemas import (
     _CANDIDATE_SCHEMA,
@@ -721,6 +725,15 @@ def polar_sweep(
     sets to each row). With ``detail_level="full"``, ``dispatch`` is a list
     with one entry per row of ``polar_table``: the dispatch record of that
     angle, or None for a failed angle or a solver without a record.
+
+    Each row of ``polar_table`` gives ``trust_score``, ``trust_rating`` and
+    ``warnings``, the short labels of its trust warnings (at most 3, the
+    count of the others in ``warnings_not_shown``). ``polar_summary`` gives
+    ``trust_rating_lowest``, ``trust_score_min``,
+    ``trust_alpha_deg_at_lowest`` and ``warnings``: each kind of warning
+    once, with the full text at the angle of the lowest score and the
+    angles that have it (at most 6, the count of the others in
+    ``warnings_not_shown``). These keys are at every detail level.
     """
     ac = build_aircraft_from_spec(wing=wing, aircraft=aircraft)
     missing = [k for k, v in (("alpha_start_deg", alpha_start_deg), ("alpha_end_deg", alpha_end_deg),
@@ -817,11 +830,17 @@ def polar_sweep(
         _, cm_ax, _ = _apply_axes(res.totals.Cl, res.totals.Cm, res.totals.Cn, a, c["beta_deg"],
                                   ax, b_ref=b_ref, c_ref=c_ref)
         device, precision = result_device_precision(res)
+        tr = res.totals.trust
+        labels, n_more = row_warnings(list(tr.warnings)) if tr else ([], 0)
         row: dict[str, Any] = {
             "alpha_deg": a, "CL": m["CL"], "CDi": m["CDi"], "CD": m["CD"],
             "L_over_D": m["L_over_D"], "Cm": cm_ax, "e": m["e"], "converged": m["converged"],
-            "trust_score": rnd(res.totals.trust.score, 3) if res.totals.trust else None,
+            "trust_score": rnd(tr.score, 3) if tr else None,
+            "trust_rating": tr.rating if tr else None,
+            "warnings": labels,
             "status": "ok", "device": device, "precision": precision}
+        if n_more:
+            row["warnings_not_shown"] = n_more
         if in_ground:
             row["n_chord"] = _used_n_chord(res)
         if ax == "all":
@@ -876,6 +895,22 @@ def polar_sweep(
     if best_ld is not None and best_a is not None and best_a in (alphas[0], alphas[-1]):
         summary["max_L_over_D_at_sweep_end"] = True
 
+    # Trust of the sweep: the lowest rating and the union of the warnings.
+    rated = [(a, r.totals.trust) for a, r in ok
+             if r.totals.trust is not None and r.totals.trust.rating in _RATING_ORDER]
+    low = min(rated, key=lambda it: (_RATING_ORDER[it[1].rating], it[1].score)) if rated else None
+    union, n_more = merge_warnings(
+        [(a, r.totals.trust.score, list(r.totals.trust.warnings)) for a, r in ok if r.totals.trust is not None],
+        "alpha_deg")
+    summary["trust_rating_lowest"] = low[1].rating if low else None
+    summary["trust_score_min"] = rnd(low[1].score, 3) if low else None
+    summary["trust_alpha_deg_at_lowest"] = low[0] if low else None
+    summary["warnings"] = union
+    summary["warnings_not_shown"] = n_more
+    summary["trust_note"] = ("warnings lists each kind of warning once: the text at the angle with the "
+                             "lowest trust score, and every angle that has it. The rows give the short "
+                             "labels of their warnings.")
+
     slope_txt = (f"CL_alpha={fmt(summary['CL_alpha_per_rad'], '.3f')}/rad"
                  if summary.get("CL_alpha_per_rad") is not None else "CL_alpha not available")
     ld_txt = (f"max L/D={best_ld:.2f} at alpha={best_a:g} deg ({summary['drag_basis']})" if best_ld is not None
@@ -884,6 +919,10 @@ def polar_sweep(
                     f"({len(ok)} of {n} angles valid): {slope_txt}, {ld_txt}.")
     if len(ok) < n:
         exec_summary += f" {n - len(ok)} angle(s) failed; see polar_table."
+    if low is not None:
+        low_labels = list(dict.fromkeys(warning_label(w) for w in low[1].warnings))[:2]
+        exec_summary += (f" Lowest trust {low[1].rating} ({low[1].score:.3f}) at alpha={low[0]:g} deg"
+                         + (f": {'; '.join(low_labels)}." if low_labels else "."))
     device_all, precision_all = computation_device_precision([r for _, r in ok])
     exec_summary += f" {device_summary_text(device_all, precision_all)}"
 
@@ -1918,6 +1957,15 @@ def mesh_convergence(
         "device": device_all,
         "precision": precision_all,
     }
+    # Trust of the recommended mesh (when the study converged), else of the
+    # reference mesh. The physical warnings (stall, ground) are the same at
+    # every level.
+    trust_res = rec.result if (study.converged and rec.result is not None) else study.reference_result
+    out["trust"] = trust_payload(trust_res.totals.trust if trust_res is not None else None)
+    out["trust_of"] = ("recommended_mesh" if (study.converged and rec.result is not None)
+                       else "reference mesh")
+    if dl == "summary":
+        out["trust"] = compact_trust(out["trust"])
     if dl in ("standard", "full"):
         out["summary_markdown"] = study.summary(as_markdown=True)
     if dl == "full":
@@ -2320,6 +2368,7 @@ def error_bars(
         "levels": [int(n) for n in levels],
         "notes": list(res.notes),
         "status_of_bars": status_of_bars,
+        "trust": trust_payload(res.results[0].totals.trust if res.results else None),
         "device": device,
         "precision": precision,
         "condition_used": condition_payload(c),
