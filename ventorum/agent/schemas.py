@@ -1189,9 +1189,13 @@ AGENT_TOOL_DEFINITIONS: list[dict[str, Any]] = [
         "name": "ventorum_ground_effect",
         "description": "Ground effect at a list of heights compared with free air, with the same "
                        "chordwise mesh for all cases. Reports ground strikes per height, the bank angle "
-                       "for a wingtip strike and, with 2 or more valid heights, the Irodov height-pitch "
-                       "stability margin (valid when ref_point_m is the centre of gravity). Each row carries trust_score, trust_rating, warnings and "
-                       "converged; the summary gives the lowest rating. Two heights closer than "
+                       "for a wingtip strike and the Irodov height-pitch stability margin at each valid "
+                       "height (valid when ref_point_m is the centre of gravity). The margin uses local "
+                       "derivatives with a small step (height_derivatives, 9 solves per height), so the "
+                       "spacing of heights_m does not change it; when the work budget is short, only the "
+                       "lowest valid height gets a margin (irodov.computed_at). Each row carries "
+                       "trust_score, trust_rating, warnings and converged; the summary gives the lowest "
+                       "rating. Two heights closer than "
                        "1e-6 * c_ref are refused. Fourier solver and wake_alignment 'body' are not allowed.",
         "parameters": {
             "type": "object",

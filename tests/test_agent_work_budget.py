@@ -65,7 +65,9 @@ def test_ground_effect_heights_count_in_the_budget(monkeypatch):
 
     monkeypatch.setattr(tools.vt, "analyze", _fail)
     heights = [2.0 + 0.5 * k for k in range(20)]
-    p = ground_effect(dict(RECT), heights, alpha_deg=4.0, settings=settings)
+    # The Irodov cases fall back to the lowest height when the budget is short, so the
+    # refusal needs a mesh where the heights, free air and those 9 cases exceed the budget.
+    p = ground_effect(dict(RECT), heights, alpha_deg=4.0, settings={"n_panels": 170, "n_chord": 8})
     assert p["status"] == "error", p
     assert p["error"]["type"] == "invalid_input", p
     assert "height" in p["error"]["message"].lower(), p["error"]["message"]
