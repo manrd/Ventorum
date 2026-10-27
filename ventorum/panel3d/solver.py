@@ -93,7 +93,7 @@ import scipy.sparse.linalg
 
 from ventorum.aero.system import freestream_direction, has_rates, rotation_velocity
 from ventorum.core.datatypes import FlightCondition
-from ventorum.core.errors import GroundStrikeError
+from ventorum.core.errors import GroundStrikeError, ValidityError
 from ventorum.panel3d.images import (
     check_ground_clearance,
     ground_plane_parameters,
@@ -126,6 +126,7 @@ from ventorum.panel3d.wake import (
     DEFAULT_WAKE_CHORDS,
     PanelWake,
     build_wake,
+    check_wake_crossing,
     largest_streamwise_chord,
 )
 
@@ -1156,6 +1157,45 @@ class PanelSolver:
             return False
         return True
 
+    def _check_wake_crossing(self, full_wake: PanelWake) -> None:
+        """Refuse a wake sheet that touches or crosses another closed surface.
+
+        The rigid flat wake of constant doublet strength makes the
+        perturbation potential jump inside a closed surface that it
+        crosses, and the internal Dirichlet condition then has no solution
+        (see :func:`ventorum.panel3d.wake.check_wake_crossing`). A tandem
+        wing at the height of the front wing, 2 m behind it, gave CL of
+        about -2.5 at alpha 4 deg instead of about 0.54.
+
+        Parameters
+        ----------
+        full_wake : PanelWake
+            Wake of the full mesh of the configuration.
+
+        Raises
+        ------
+        ValidityError
+            If a wake sheet touches or crosses another component.
+        """
+        crossing = check_wake_crossing(
+            self._full_mesh.nodes,
+            self._standardized_full_panels,
+            self._full_mesh.component,
+            full_wake,
+        )
+        if not crossing["crossing_pairs"]:
+            return
+        src, dst, n_edges = crossing["crossing_pairs"][0]
+        raise ValidityError(
+            f"The wake of 3D panel component {src} touches or passes through component {dst} "
+            f"({n_edges} panel edges of component {dst} touch or cross the wake sheet; the "
+            "component index is the order of the surfaces in the aircraft). The 3D panel "
+            "method sheds a rigid flat wake (along the body x axis in free air, along the free "
+            "stream in ground effect). A wake sheet inside a closed surface makes the potential "
+            "jump inside that surface, and the loads are then wrong. Move the surface above or "
+            "below the wake of the surface in front of it."
+        )
+
     def _new_config(self, key, wake_dir, ground) -> _Configuration:
         """Build the wake geometry of a configuration (no matrices yet)."""
         attitude_key = (key[1], key[3]) if ground is not None else None
@@ -1177,6 +1217,8 @@ class PanelSolver:
                 self._full_geom.normal,
                 wake_dir,
             )
+        if shared is None:
+            self._check_wake_crossing(full_wake)
         if ground is not None:
             check_ground_clearance(self._full_mesh.nodes, ground[0], ground[1])
             if len(full_wake.panels) > 0:

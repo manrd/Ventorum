@@ -509,12 +509,13 @@ page and equation numbers for right preconditioning: to be checked.
 - Pre-stall flight conditions at Mach below 0.3.
 - Closed, watertight surface meshes without self-intersections.
 - In ground effect, ground clearance of the body and the wake above zero (ground strikes raise `GroundStrikeError`, a `ValueError`).
+- No wake sheet touches or crosses another closed surface: the wake is rigid and flat, so a surface directly behind another surface at the same height is refused with `ValidityError` (see the panel solver chapter, section *Wake Through Another Surface*).
 
 ## Implementation
 
 - Mesh generation and quality: `ventorum.panel3d.mesh.PanelMesh`, `mesh_aircraft`, `check_mesh`.
 - Influence kernels: `ventorum.panel3d.kernels`, `ventorum.panel3d.kernels_numba`, `ventorum.panel3d.kernels_warp`.
-- Wake geometry and shedding: `ventorum.panel3d.wake.PanelWake`, `build_wake`.
+- Wake geometry and shedding: `ventorum.panel3d.wake.PanelWake`, `build_wake`, `check_wake_crossing`.
 - Kutta conditions: `ventorum.panel3d.kutta.solve_pressure_kutta`.
 - Image systems and symmetry: `ventorum.panel3d.images`.
 - Core solver: `ventorum.panel3d.solver.PanelSolver`, `PanelResult`.
@@ -529,6 +530,7 @@ The 3D panel method implementation is verified by tests in the test suite:
 - Kernel parity and asymptotic limits: `tests/test_panel3d_kernels.py`, `tests/test_panel3d_backends.py`.
 - Mesh construction and control surface deflections: `tests/test_panel3d_mesh.py`, `tests/test_panel3d_controls.py`.
 - Potential flow solution, unit onsets, surface gradient and Trefftz drag (sphere in two orientations, ellipsoid on all panels, stored free-air run, factorization count): `tests/test_panel3d_solver.py`.
+- Wake sheets through another surface (refused tandem, unchanged offset tandem, wing and tail, biplane): `tests/test_panel3d_wake_crossing.py`.
 - Symmetry plane and ground effect images (explicit mirror with the free-stream wake, Trefftz drag with images, bank and sideslip on a half mesh): `tests/test_panel3d_images.py`.
 - Iterative pressure Kutta condition (stored Morino run, asymmetric half mesh against the full mesh): `tests/test_panel3d_kutta.py`.
 - Mesh convergence and Richardson extrapolation: `tests/test_panel3d_convergence.py`.
