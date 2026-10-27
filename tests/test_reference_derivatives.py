@@ -320,3 +320,38 @@ def test_old_cases_unchanged(tmp_path):
         assert line in text.splitlines(), line
     assert counted["synthetic_points"] == 4
     assert counted["points"] == 0
+
+
+def test_alpha_for_cl_warns_when_not_converged(monkeypatch):
+    """alpha_for_cl warns when CL does not reach the target within the step limit.
+
+    Regression: the function returned the last interpolation step with no
+    message. Here CL jumps from 0.4 to 0.6 at alpha = 3 deg, so the target
+    CL 0.5 is inside a bracket of the sweep but no angle of attack gives it.
+    A target that a smooth CL reaches gives no warning.
+    """
+    import types
+    import warnings
+
+    from ventorum.reference.derivatives import CL_MAX_STEPS, alpha_for_cl
+
+    def fake_analyze(aircraft, condition=None, settings=None):
+        a = float(condition.alpha_deg)
+        cl = 0.1 * a if a < 3.0 else 0.1 * a + 0.2
+        return types.SimpleNamespace(totals=types.SimpleNamespace(CL=cl))
+
+    def make(alpha_deg, beta_deg):
+        return types.SimpleNamespace(alpha_deg=alpha_deg, beta_deg=beta_deg, h=None)
+
+    monkeypatch.setattr(vt, "analyze", fake_analyze)
+    ac = vt.Aircraft(surfaces=[vt.LiftingSurface(semi_span=3.0, sections=[vt.WingSection(0.0, 1.0),
+                                                                          vt.WingSection(1.0, 1.0)])])
+    st = vt.SolverSettings(solver_type="linear")
+    grid = [0.0, 2.0, 4.0, 6.0]
+    with pytest.warns(RuntimeWarning, match=f"after {CL_MAX_STEPS} interpolation steps"):
+        alpha, _, _ = alpha_for_cl(ac, 0.5, 0.0, make, st, alpha_grid_deg=grid)
+    assert 2.0 <= alpha <= 4.0
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", RuntimeWarning)
+        alpha, _, _ = alpha_for_cl(ac, 0.15, 0.0, make, st, alpha_grid_deg=grid)
+    assert abs(alpha - 1.5) < 1e-9

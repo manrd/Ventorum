@@ -38,6 +38,7 @@ Simulation, 3rd ed., Wiley, 2016, chapter 2 (axis transformations).
 from __future__ import annotations
 
 import math
+import warnings
 from collections.abc import Callable, Sequence
 from typing import Any
 
@@ -307,6 +308,14 @@ def alpha_for_cl(
         ``(alpha_deg, (cl_min, cl_max), sweep_settings)``: the angle of
         attack [deg] (None when the target is not reached), the CL range of
         the solved sweep points, and the one-mesh settings of the sweep.
+
+    Warns
+    -----
+    RuntimeWarning
+        When CL does not agree with the target within
+        :data:`CL_TOLERANCE` after :data:`CL_MAX_STEPS` interpolation
+        steps (for example at a jump of CL inside the bracket). The last
+        interpolated angle of attack is then returned.
     """
     import ventorum as vt
 
@@ -339,6 +348,7 @@ def alpha_for_cl(
         return None, cl_range, sweep_settings
     (a_lo, c_lo), (a_hi, c_hi) = brackets[0]
     alpha = a_lo
+    cl = c_lo
     for _ in range(CL_MAX_STEPS):
         alpha = a_lo + (target - c_lo) * (a_hi - a_lo) / (c_hi - c_lo)
         cl = lift(alpha)
@@ -348,6 +358,13 @@ def alpha_for_cl(
             a_hi, c_hi = alpha, cl
         else:
             a_lo, c_lo = alpha, cl
+    else:
+        warnings.warn(
+            f"alpha_for_cl: CL {target:.10g} not found within the tolerance {CL_TOLERANCE:g} after "
+            f"{CL_MAX_STEPS} interpolation steps. The last step gives alpha = {alpha:.10g} deg with "
+            f"CL = {cl:.10g} (residual {abs(cl - target):.3e}).",
+            RuntimeWarning, stacklevel=2,
+        )
     return alpha, cl_range, sweep_settings
 
 
