@@ -211,7 +211,9 @@ __all__ = [
     "FOLD_MARGIN",
     "ROOT_SCALE_WARN_DIHEDRAL_DEG",
     "ROOT_SCALE_TRUST_WARN_DIHEDRAL_DEG",
+    "CONTACT_GAP_FRACTION",
     "PanelMesh",
+    "check_contact",
     "check_mesh",
     "mesh_aircraft",
     "mesh_lifting_surface",
@@ -235,6 +237,14 @@ _VOLUME_REL = 1e-8
 #: Default planarity limit of check_mesh: corner distance from the mean
 #: plane over the panel diameter [-].
 WARP_LIMIT = 0.05
+#: Contact check of distinct closed surfaces (:func:`check_contact`): the
+#: smallest allowed gap between a panel centroid and another closed surface,
+#: over the local panel size [-]. A wing with 90 deg winglets meshed as
+#: separate closed surfaces gives wrong loads only when the surfaces touch
+#: or pass through each other; with a clearance down to 0.005 times the
+#: local panel size the lift is consistent with the larger gaps and with
+#: mesh refinement. The value 0.1 keeps a margin above that.
+CONTACT_GAP_FRACTION = 0.1
 #: Root-thickness scaling: smallest cosine [-] of the dihedral of the first
 #: panel row. A row closer to the vertical has no miter (the two halves of
 #: a symmetric surface coincide), so the root section is not scaled.
@@ -2835,3 +2845,232 @@ def check_mesh(mesh: PanelMesh, warp_limit: float = WARP_LIMIT) -> dict:
         "valid_panels": bool(n_nonconvex == 0 and planar and min_area > 0.0),
         "n_open_edges": int(n_open),
     }
+
+
+def _component_triangles(nodes: np.ndarray, panels: np.ndarray, half: bool) -> tuple[np.ndarray, np.ndarray]:
+    """Return the triangles of the panels of one component and their panel index.
+
+    Each quadrilateral gives the two triangles (0, 1, 2) and (0, 2, 3); a
+    triangle panel (fourth node equal to the third) gives one. With
+    *half* True the mirror image in y = 0 is added with the corner order
+    reversed, so the triangles close the full component.
+
+    Parameters
+    ----------
+    nodes : numpy.ndarray
+        Node positions [m], shape (Nn, 3).
+    panels : numpy.ndarray
+        Panel corner node indices of the component, shape (Np, 4).
+    half : bool
+        True to add the mirror image in y = 0.
+
+    Returns
+    -------
+    tuple of numpy.ndarray
+        Triangle corners [m], shape (Nt, 3, 3), and the row in *panels* of
+        each triangle, shape (Nt,). A row of the mirror image has the
+        offset Np.
+    """
+    n = panels.shape[0]
+    p = nodes[panels]
+    tri = np.concatenate([p[:, [0, 1, 2]], p[:, [0, 2, 3]]], axis=0)
+    owner = np.concatenate([np.arange(n), np.arange(n)])
+    keep = np.concatenate([np.ones(n, dtype=bool), panels[:, 2] != panels[:, 3]])
+    tri, owner = tri[keep], owner[keep]
+    if half:
+        mirror = tri[:, ::-1].copy()
+        mirror[..., 1] *= -1.0
+        tri = np.concatenate([tri, mirror], axis=0)
+        owner = np.concatenate([owner, owner + n])
+    return tri, owner
+
+
+def _winding_number(points: np.ndarray, tri: np.ndarray, rows: int | None = None) -> np.ndarray:
+    """Return the winding number of a closed triangle surface about each point.
+
+    The solid angle of each triangle seen from the point comes from the
+    formula of Van Oosterom and Strackee (1983). Their sum over a closed
+    outward surface, divided by 4 pi, is 1 for a point inside and 0 for a
+    point outside.
+
+    Parameters
+    ----------
+    points : numpy.ndarray
+        Points [m], shape (Np, 3).
+    tri : numpy.ndarray
+        Triangle corners [m] with outward corner order, shape (Nt, 3, 3).
+    rows : int or None
+        Number of points per block (memory limit). None sets about
+        500 000 point-triangle pairs per block.
+
+    Returns
+    -------
+    numpy.ndarray
+        Winding number of each point [-], shape (Np,).
+    """
+    if rows is None:
+        rows = max(1, 500_000 // max(tri.shape[0], 1))
+    out = np.zeros(points.shape[0])
+    for s0 in range(0, points.shape[0], rows):
+        r = tri[None] - points[s0:s0 + rows][:, None, None, :]
+        a, b, c = r[:, :, 0], r[:, :, 1], r[:, :, 2]
+        la, lb, lc = (np.linalg.norm(v, axis=-1) for v in (a, b, c))
+        num = np.sum(a * np.cross(b, c), axis=-1)
+        den = (la * lb * lc + np.sum(a * b, axis=-1) * lc + np.sum(a * c, axis=-1) * lb
+               + np.sum(b * c, axis=-1) * la)
+        out[s0:s0 + rows] = np.sum(2.0 * np.arctan2(num, den), axis=1) / (4.0 * np.pi)
+    return out
+
+
+def _point_triangle_distance(p: np.ndarray, tri: np.ndarray) -> np.ndarray:
+    """Return the distance from each point to the triangle of the same row.
+
+    Parameters
+    ----------
+    p : numpy.ndarray
+        Points [m], shape (N, 3).
+    tri : numpy.ndarray
+        Triangle corners [m], shape (N, 3, 3).
+
+    Returns
+    -------
+    numpy.ndarray
+        Distance [m], shape (N,).
+    """
+    a, b, c = tri[:, 0], tri[:, 1], tri[:, 2]
+    n = np.cross(b - a, c - a)
+    nn = np.sum(n * n, axis=-1)
+    h = np.sum((p - a) * n, axis=-1) / np.where(nn > 0.0, nn, 1.0)
+    q = p - h[:, None] * n
+    inside = nn > 0.0
+    for u, v in ((a, b), (b, c), (c, a)):
+        inside &= np.sum(np.cross(v - u, q - u) * n, axis=-1) >= 0.0
+    d_plane = np.abs(h) * np.sqrt(nn)
+
+    def seg(u: np.ndarray, v: np.ndarray) -> np.ndarray:
+        e = v - u
+        ee = np.sum(e * e, axis=-1)
+        t = np.clip(np.sum((p - u) * e, axis=-1) / np.where(ee > 0.0, ee, 1.0), 0.0, 1.0)
+        return np.linalg.norm(p - (u + t[:, None] * e), axis=-1)
+
+    d_edge = np.minimum(np.minimum(seg(a, b), seg(b, c)), seg(c, a))
+    return np.where(inside, d_plane, d_edge)
+
+
+def check_contact(mesh: PanelMesh, gap_fraction: float | None = None, n_near: int = 8) -> dict:
+    """Find the panels of a closed surface that touch or enter another closed surface.
+
+    The panel method takes each component of the mesh as one closed body.
+    When two bodies touch or pass through each other, panels of the two
+    bodies have almost the same position, or panels of one body are inside
+    the other. The influence matrix is then close to singular and the
+    loads can be wrong by orders of magnitude, although each component is
+    watertight. The check flags a panel of one component when
+
+    * its centroid or one of its corner nodes is inside another component
+      (winding number of the other closed surface above 0.5, from the
+      solid angles of Van Oosterom and Strackee 1983), or
+    * the distance from its centroid to the surface of another component
+      is less than *gap_fraction* times the local panel size. The local
+      panel size [m] is the larger of the square roots of the areas of the
+      panel and of the nearest panel (by centroid) of the other component.
+
+    With ``mesh.half`` True each component also has its mirror image in
+    y = 0 (the solver models the full aircraft).
+
+    Parameters
+    ----------
+    mesh : PanelMesh
+        Mesh with one component index per closed surface.
+    gap_fraction : float or None
+        Smallest allowed gap over the local panel size [-]. None uses
+        :data:`CONTACT_GAP_FRACTION`.
+    n_near : int
+        Number of nearest panels (by centroid) of the other component that
+        the distance test examines [-].
+
+    Returns
+    -------
+    dict
+        n_contact_panels : number of flagged panels.
+        contact_pairs : list of tuples (component a, component b, number of
+        panels of a flagged against b, smallest gap [m], smallest gap over
+        the local panel size [-]).
+        min_gap : smallest distance [m] from a panel centroid to another
+        component (inf with one component).
+        min_gap_ratio : smallest gap over the local panel size [-] (inf
+        with one component).
+    """
+    from scipy.spatial import cKDTree
+
+    frac = CONTACT_GAP_FRACTION if gap_fraction is None else float(gap_fraction)
+    nodes = np.asarray(mesh.nodes, dtype=float)
+    panels = np.asarray(mesh.panels, dtype=int).reshape(-1, 4)
+    n_p = panels.shape[0]
+    comp_raw = np.asarray(mesh.component).reshape(-1)
+    comp_of = comp_raw.astype(int) if comp_raw.shape[0] == n_p else np.zeros(n_p, dtype=int)
+    comp_ids = sorted({int(c) for c in comp_of})
+    result = {"n_contact_panels": 0, "contact_pairs": [], "min_gap": float("inf"), "min_gap_ratio": float("inf")}
+    if len(comp_ids) < 2:
+        return result
+    half = bool(mesh.half)
+    corners = nodes[panels]
+    centroid = corners.mean(axis=1)
+    area = _panel_geometry_batch(corners)[0]
+    size = np.sqrt(np.maximum(np.asarray(area, dtype=float), 0.0))
+    flip = np.array([1.0, -1.0, 1.0])
+    data = {}
+    for c in comp_ids:
+        idx = np.flatnonzero(comp_of == c)
+        tri, owner = _component_triangles(nodes, panels[idx], half)
+        cen, sz = centroid[idx], size[idx]
+        if half:
+            cen, sz = np.concatenate([cen, cen * flip]), np.concatenate([sz, sz])
+        order = np.argsort(owner, kind="stable")
+        flat = tri.reshape(-1, 3)
+        data[c] = {
+            "idx": idx, "tri": tri[order], "start": np.searchsorted(owner[order], np.arange(cen.shape[0] + 1)),
+            "size": sz, "tree": cKDTree(cen), "lo": flat.min(axis=0), "hi": flat.max(axis=0),
+            "node_ids": np.unique(panels[idx].ravel()),
+        }
+    flagged = np.zeros(n_p, dtype=bool)
+    for a in comp_ids:
+        da = data[a]
+        pa = centroid[da["idx"]]
+        for b in comp_ids:
+            if a == b:
+                continue
+            db = data[b]
+            k = min(int(n_near), db["size"].shape[0])
+            near = np.asarray(db["tree"].query(pa, k=k)[1]).reshape(pa.shape[0], k)
+            gap = np.full(pa.shape[0], np.inf)
+            for j in range(k):
+                first, last = db["start"][near[:, j]], db["start"][near[:, j] + 1]
+                for t in range(2):
+                    ok = first + t < last
+                    if np.any(ok):
+                        d = _point_triangle_distance(pa[ok], db["tri"][first[ok] + t])
+                        gap[ok] = np.minimum(gap[ok], d)
+            ratio = gap / np.maximum(size[da["idx"]], db["size"][near[:, 0]])
+            hit = ratio < frac
+            # Inside tests, only for points in the box of the other component.
+            pad = 1e-9 * float(np.max(db["hi"] - db["lo"]))
+            box = np.all((pa >= db["lo"] - pad) & (pa <= db["hi"] + pad), axis=1)
+            if np.any(box):
+                hit[box] |= _winding_number(pa[box], db["tri"]) > 0.5
+            pts = nodes[da["node_ids"]]
+            box = np.all((pts >= db["lo"] - pad) & (pts <= db["hi"] + pad), axis=1)
+            if np.any(box):
+                node_in = np.zeros(pts.shape[0], dtype=bool)
+                node_in[box] = _winding_number(pts[box], db["tri"]) > 0.5
+                if np.any(node_in):
+                    hit |= np.any(np.isin(panels[da["idx"]], da["node_ids"][node_in]), axis=1)
+            result["min_gap"] = min(result["min_gap"], float(np.min(gap)))
+            result["min_gap_ratio"] = min(result["min_gap_ratio"], float(np.min(ratio)))
+            if np.any(hit):
+                flagged[da["idx"][hit]] = True
+                result["contact_pairs"].append(
+                    (int(a), int(b), int(np.sum(hit)), float(np.min(gap)), float(np.min(ratio)))
+                )
+    result["n_contact_panels"] = int(np.sum(flagged))
+    return result
