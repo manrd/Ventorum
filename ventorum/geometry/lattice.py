@@ -437,6 +437,11 @@ class VortexLattice:
     # lattice cache hands out, so they are computed once per geometry.
     geom_cache: dict = field(default_factory=dict, repr=False, compare=False)
     control_info: list[dict] = field(default_factory=list)
+    # Warnings that build_lattice issues about the mesh (a hinge that snaps
+    # to a node, a hinge that moves a node of a cambered strip). The lattice
+    # cache issues them again when it returns a cached lattice, and the
+    # solvers give them to the trust score as notes.
+    mesh_warnings: list[str] = field(default_factory=list)
     geometric_camber: np.ndarray | None = None
     # Hinge nodes of the chordwise legs (see ``a_kink`` in the class notes).
     # None when no leg has a hinge node.
@@ -1209,6 +1214,8 @@ def build_lattice(
     strip_flap_nominal_all: list[float] = []
     strip_side_terms_all: list[tuple[list, list]] = []
     control_info: list[dict[str, Any]] = []
+    # Warnings of the mesh construction (VortexLattice.mesh_warnings).
+    mesh_warnings: list[str] = []
     mean_surfaces: list[tuple[list[WingSection], list[_MeanLine | None], np.ndarray]] = []
     camber_warnings: list[str] = []
     camber_fallback = False
@@ -1352,16 +1359,16 @@ def build_lattice(
                     )
                     if cambered and abs(float(c.hinge_x_c) - float(xi[k_hinge])) > 1e-12:
                         counts = _hinge_chord_counts(float(c.hinge_x_c), n_chord, chord_spacing)
-                        warnings.warn(
+                        mesh_warnings.append(
                             f"[{surf.name}] control {c.name!r}: the hinge at x/c = {float(c.hinge_x_c):.4g} "
                             f"moves a chordwise node of the control strips (n_chord = {n_chord}). On a "
                             "cambered mean line the legs of the control strips and of their clean "
                             "neighbours then do not coincide at the control side edges, and the leg "
                             "forces there do not converge with the spanwise mesh. Use a chordwise count "
                             "with a node at the hinge"
-                            + (f", for example n_chord = {', '.join(str(n) for n in counts)}." if counts else "."),
-                            RuntimeWarning, stacklevel=2,
+                            + (f", for example n_chord = {', '.join(str(n) for n in counts)}." if counts else ".")
                         )
+                        warnings.warn(mesh_warnings[-1], RuntimeWarning, stacklevel=2)
                 else:
                     hinge_x_c_eff = float(xi[k_hinge])
                     ctrl_xi = xi.copy()
@@ -1371,13 +1378,13 @@ def build_lattice(
                         f"n_chord = {', '.join(str(n) for n in counts)} ({chord_spacing} spacing)."
                         if counts else "Use a chordwise count that puts a node near the hinge."
                     )
-                    warnings.warn(
+                    mesh_warnings.append(
                         f"[{surf.name}] control {c.name!r}: no lattice node can move onto the hinge at "
                         f"x/c = {float(c.hinge_x_c):.4g} with n_chord = {n_chord}. The hinge snaps to the "
                         f"nearest node at x/c = {hinge_x_c_eff:.4g} (lattice control_info 'hinge_x_c_eff'). "
-                        + advice,
-                        RuntimeWarning, stacklevel=2,
+                        + advice
                     )
+                    warnings.warn(mesh_warnings[-1], RuntimeWarning, stacklevel=2)
             else:
                 hinge_x_c_eff = None
                 ctrl_xi = xi.copy()
@@ -1831,17 +1838,20 @@ def build_lattice(
             if s + 1 < n_strips and strip_surf[s + 1] == strip_surf[s] and np.isfinite(hinge_of[s + 1]):
                 partner[s, 1] = (s + 1, 0)
                 far[s, 1] = (s + 1, 1)
+        def coincident(s: int, side: int, q: int, jq: int) -> bool:
+            # True when edge jq of strip q is at the place of edge side of
+            # strip s (leading and trailing edge before the flap turn).
+            tol = 1e-9 * max(1.0, float(chord[s]))
+            return bool(np.max(np.abs((le_l, le_r)[jq][q] - (le_l, le_r)[side][s])) <= tol
+                        and np.max(np.abs(undeflected[2 + jq][q] - undeflected[2 + side][s])) <= tol)
+
         for s, side, si in ends:
             if np.isnan(hinge_of[s]) or partner[s, side, 0] >= 0:
                 continue
-            le_s = (le_l, le_r)[side][s]
-            te_s = undeflected[2 + side][s]
-            tol = 1e-9 * max(1.0, float(chord[s]))
             for q, jq, sq in ends:
                 if sq == si or hinge_of[q] != hinge_of[s]:
                     continue
-                if (np.max(np.abs((le_l, le_r)[jq][q] - le_s)) <= tol
-                        and np.max(np.abs(undeflected[2 + jq][q] - te_s)) <= tol):
+                if coincident(s, side, q, jq):
                     partner[s, side] = (q, jq)
                     far[s, side] = (q, 1 - jq)
                     break
@@ -1909,21 +1919,28 @@ def build_lattice(
             # Per flap strip: the deflection at the span fraction of its
             # control point [rad] and the hinge of its control as defined.
             frac_s = np.asarray(cat["frac"], dtype=float)
-            # An edge that a flap strip shares with a strip of the same
-            # surface without a hinge (the outer edge of the join at a side
-            # edge of a control) has no hinge point on the legs of the other
-            # strip. On a leg chain the legs of the two strips must pass
-            # through the same nodes, so the hinge point is not a node of
-            # the flap strip at that edge: its legs use the mean-surface
-            # node, as the other strip. The deflection of such an edge is
-            # zero (it is outside the join), so the hinge point is not a
-            # kink of the surface there. On a symmetric section the two
-            # nodes are on one straight line and the legs coincide also
-            # with the hinge node.
+            # An edge that a flap strip shares with a strip of a different
+            # hinge has a different hinge point on the legs of the other
+            # strip: a strip without a hinge (the outer edge of the join at
+            # a side edge of a control) or a strip of a control with another
+            # hinge fraction. The other strip can be the neighbour strip of
+            # the same surface or the end strip of another surface whose end
+            # edge is at the same place (a joined surface). On a leg chain
+            # the legs of the two strips must pass through the same nodes,
+            # so the hinge point is not a node of either strip at that edge:
+            # the legs of both use the mean-surface node. On a symmetric
+            # section the hinge point and the mean-surface node are on one
+            # straight line and the legs coincide also with the hinge node.
             hinge_off = np.zeros((n_strips, 2), dtype=bool)
             for s in np.flatnonzero(np.isfinite(hinge_of)):
                 for side, q in ((0, s - 1), (1, s + 1)):
-                    if 0 <= q < n_strips and strip_surf[q] == strip_surf[s] and np.isnan(hinge_of[q]):
+                    if 0 <= q < n_strips and strip_surf[q] == strip_surf[s] and hinge_of[q] != hinge_of[s]:
+                        hinge_off[s, side] = True
+            for s, side, si in ends:
+                if np.isnan(hinge_of[s]):
+                    continue
+                for q, jq, sq in ends:
+                    if sq != si and hinge_of[q] != hinge_of[s] and coincident(s, side, q, jq):
                         hinge_off[s, side] = True
             flap_field = {"hinge": hinge_of, "angle": angle, "coef": coef, "partner": partner, "far": far,
                           "strip_angle": angle[:, 0] + frac_s * (angle[:, 1] - angle[:, 0]),
@@ -1975,6 +1992,7 @@ def build_lattice(
         surfaces=surfaces,
         strip_core_group=core_groups(surfaces)[cat["surface"].astype(int)],
         join_warnings=near_miss_warnings(surfaces) + camber_warnings + offset_warnings,
+        mesh_warnings=mesh_warnings,
         control_info=control_info,
         geometric_camber=geometric_camber,
         a_kink=a_kink,
@@ -2082,9 +2100,10 @@ def _leg_nodes(
     points, it is the node between them (one node per segment pair). The
     two strips at an edge must have the same nodes there, so that their
     legs coincide. Thus on a leg chain the hinge point is not a node at an
-    edge that the flap strip shares with a strip without a hinge
-    (*hinge_off*); the mean-surface node is the node there, as on the other
-    strip.
+    edge that the flap strip shares with a strip of a different hinge (no
+    hinge or another hinge fraction, on the same surface or on a joined
+    surface; *hinge_off*); the mean-surface node is the node there, as on
+    the other strip.
 
     Parameters
     ----------

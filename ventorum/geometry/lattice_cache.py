@@ -24,6 +24,7 @@ from __future__ import annotations
 import copy
 import dataclasses
 import threading
+import warnings
 from collections import OrderedDict
 from typing import Any
 from collections.abc import Callable
@@ -134,12 +135,20 @@ def _freeze(obj: Any) -> None:
 
 
 def get_or_build(key: tuple, build: Callable[[], Any]) -> Any:
-    """Return a shallow copy of the cached lattice for *key*, building it with *build* if needed."""
+    """Return a shallow copy of the cached lattice for *key*, building it with *build* if needed.
+
+    *build* issues the warnings of the mesh construction. A cached lattice
+    issues its ``mesh_warnings`` again, so that each solve of the same
+    geometry gives the same warnings.
+    """
     with _lock:
         hit = _cache.get(key)
         if hit is not None:
             _cache.move_to_end(key)
-    if hit is None:
+    if hit is not None:
+        for msg in getattr(hit, "mesh_warnings", None) or ():
+            warnings.warn(msg, RuntimeWarning, stacklevel=2)
+    else:
         hit = build()
         _freeze(hit)
         with _lock:

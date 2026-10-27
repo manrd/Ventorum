@@ -1524,9 +1524,11 @@ def _forward_check(prep: dict, outputs: dict, prod: dict[str, float],
     vector (the normwise relative error of the vector). The round-off of a
     vector component is relative to the vector, so a small component (CY
     in a small sideslip, or CY, Cl and Cn of a symmetric state, which are
-    zero by symmetry) has no relative scale of its own. An output with an
-    exact zero production value (for example CDp with Cd0 = 0) uses the
-    force scale.
+    zero by symmetry) has no relative scale of its own. The moment scale
+    is not smaller than the force scale, so a moment vector that is zero
+    as a whole (all its components at the round-off) does not give a
+    false mismatch. An output with an exact zero production value (for
+    example CDp with Cd0 = 0) uses the force scale.
 
     A requested vector output (``strip_force`` [N], ``section_cl``) is
     compared with its production array: the largest difference relative
@@ -1537,7 +1539,12 @@ def _forward_check(prep: dict, outputs: dict, prod: dict[str, float],
     both64 = precision == "float64" and prep["precision_primal"] == "float64"
     tol = 1e-10 if both64 else 1e-4
     force_scale = max(abs(prod[k]) for k in _FORCE_VECTOR)
-    moment_scale = max(abs(prod[k]) for k in _MOMENT_VECTOR)
+    # The force scale is the lower limit of the moment scale: a moment is a
+    # sum of forces times arms, so its round-off is at most of the order of
+    # the round-off of the forces. A state whose whole moment vector is zero
+    # by geometry (reference point on the quarter-chord line of a straight
+    # wing) has moments at the round-off only, with no relative scale.
+    moment_scale = max(max(abs(prod[k]) for k in _MOMENT_VECTOR), force_scale)
     worst = 0.0
     bad = []
     for k, p in prod.items():

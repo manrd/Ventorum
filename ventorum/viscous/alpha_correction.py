@@ -1048,7 +1048,10 @@ def _solve_condition(
         warnings.warn(_not_converged_note(primary, max_iter, tol), RuntimeWarning, stacklevel=3)
     if non_unique:
         result.details["branches"] = [result] + [make_result(sol, bl, False) for sol, bl in branches]
+    mesh = getattr(lattice, "mesh_warnings", ())
     for msg in notes:
+        if msg in mesh:
+            continue  # Issued by build_lattice or by the lattice cache.
         if warned is not None and msg == _THICK_GROUND_FLAP_NOTE:
             if msg in warned:
                 continue

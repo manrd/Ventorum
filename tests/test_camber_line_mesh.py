@@ -665,3 +665,64 @@ def test_claf_normals_follow_clamped_mean_line_outside_chord():
     z = airfoil("4412").normalized().camber(lat.cp[outside, 0])
     np.testing.assert_allclose(lat.cp[outside, 2], z, rtol=0, atol=2e-15)
     np.testing.assert_allclose(lat.normal_bc[outside], lat.normal[lat.panel_strip[outside]], rtol=0, atol=2e-15)
+
+
+# --- spanwise refinement with dihedral (open defect) ------------------------------
+#
+# A clean cambered wing with dihedral does not converge with the spanwise
+# panels when the strips at the root or at the tips get narrow (NACA 6409,
+# dihedral 5 deg, 4 chordwise panels, cosine spacing: CL 0.665, 0.675,
+# 0.768, 0.620 and 0.543 at 32, 48, 64, 96 and 128 panels; the default
+# spacing gives 0.661 and 0.632 at 96 and 128). Two causes:
+#
+# * Root: the mean-line offset of the root node is along the bisector of the
+#   two halves; the offset of the next node is along the normal of its half.
+#   The bound vortex of the root strip is therefore shorter by z c sin(dihedral)
+#   (5e-3 m at the 6 % camber of a NACA 6409, 5 deg). A narrower strip turns
+#   over.
+# * Tips: the legs of the last chordwise panel run straight from its bound
+#   point to the trailing edge, but its control point is on the curved mean
+#   line, 1.3e-3 chord from the plane of the legs. On a tip strip narrower
+#   than that, the influence of the own legs at the control point collapses,
+#   and the circulation of that panel grows (0.74, 1.52 and 2.83 m^2/s at 48,
+#   96 and 128 panels). The full velocity acts on a free tip leg, and with
+#   dihedral its large side-edge force has a vertical component.
+#
+# The fix needs a decision of the owner (the shape of the mean surface at a
+# kink, a node on the last panel). These tests fail until it is made.
+
+def _dihedral_wing(shape="6409", dihedral_deg=5.0):
+    return Aircraft(surfaces=[LiftingSurface(
+        name="wing", semi_span=4.0, dihedral=np.radians(dihedral_deg),
+        sections=[WingSection(y_frac=e, chord=1.0, shape=shape) for e in (0.0, 1.0)],
+    )], ref_point=np.array([0.25, 0.0, 0.0]))
+
+
+@pytest.mark.xfail(strict=True, reason="Open defect: the camber offset turns over the root strip of a wing "
+                                       "with dihedral when the strip is narrow (owner decision needed).")
+def test_dihedral_root_strip_keeps_its_direction():
+    """The bound vortices of the root strip of a cambered wing with dihedral point along its span."""
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)
+        lat = build_lattice(_dihedral_wing(), SolverSettings(n_panels=64, spacing="cosine"), n_chord=4)
+    s = lat.n_strips // 2
+    p = s * lat.n_chord + np.arange(lat.n_chord)
+    span = np.array([0.0, np.cos(np.radians(5.0)), np.sin(np.radians(5.0))])
+    assert np.all((lat.b[p] - lat.a[p]) @ span > 0.0)
+
+
+@pytest.mark.xfail(strict=True, reason="Open defect: narrow root and tip strips of a cambered wing with "
+                                       "dihedral (owner decision needed).")
+@pytest.mark.parametrize("spacing", ["cosine", "auto"])
+def test_dihedral_camber_converges_spanwise(spacing):
+    """CL of a cambered wing with dihedral converges with the spanwise panels."""
+    cl = {}
+    for n in (32, 64, 128):
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", RuntimeWarning)
+            cl[n] = float(VortexLatticeSolver().solve(
+                _dihedral_wing(), FlightCondition(V_inf=30.0, alpha=np.radians(2.0)),
+                SolverSettings(n_panels=n, n_chord=4, spacing=spacing)).totals.CL)
+    # Without dihedral the same wing changes by about 3e-4 over these
+    # meshes.
+    assert max(cl.values()) - min(cl.values()) < 2e-3, cl
