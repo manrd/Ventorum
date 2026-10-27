@@ -455,6 +455,7 @@ class PanelSolver:
         device=None,
         dtype=None,
         ground_solver: str = "auto",
+        cpu_lu: str | None = None,
         _reuse_full_from: PanelSolver | None = None,
     ) -> None:
         if kutta not in ("morino", "pressure"):
@@ -471,6 +472,15 @@ class PanelSolver:
         self.ground_solver = ground_solver
         self.backend = key
         self.kutta = str(kutta)
+        if cpu_lu is None:
+            from ventorum import gpu
+
+            cpu_lu = gpu.cpu_lu()
+        cpu_lu_key = str(cpu_lu).strip().lower()
+        if cpu_lu_key not in ("scipy", "torch"):
+            raise ValueError(f"Unknown cpu_lu option {cpu_lu!r}; use 'scipy' or 'torch'.")
+        self.cpu_lu = cpu_lu_key
+        self._cpu_lu = cpu_lu_key
         self.mesh = mesh
         self.far_ratio = float(far_ratio)
         self.n_wake = int(n_wake)
@@ -759,21 +769,54 @@ class PanelSolver:
             from ventorum.panel3d import gpu as gpu_mod
 
             return gpu_mod.lu_factor_device(mat_a)
+        if self.cpu_lu == "torch":
+            import torch
+
+            if isinstance(mat_a, torch.Tensor):
+                t = mat_a
+            else:
+                try:
+                    t = torch.from_numpy(mat_a)
+                except ValueError:
+                    t = torch.as_tensor(mat_a, dtype=torch.float64, device="cpu")
+            piv = torch.empty(t.shape[0], dtype=torch.int32, device=t.device)
+            torch.linalg.lu_factor(t, out=(t, piv))
+            return (t, piv)
         return scipy.linalg.lu_factor(mat_a, overwrite_a=True)
 
     def _lu_solve(self, lu_info, rhs):
         """Solve with stored LU factors (numpy or torch right-hand sides)."""
-        if self.backend == "gpu":
-            from ventorum.panel3d import gpu as gpu_mod
+        import torch
 
-            return gpu_mod.lu_solve_device(lu_info, rhs)
+        if isinstance(lu_info[0], torch.Tensor):
+            lu, piv = lu_info
+            if isinstance(rhs, np.ndarray):
+                is_1d = rhs.ndim == 1
+                rhs_arr = rhs if rhs.flags.c_contiguous else np.ascontiguousarray(rhs)
+                rhs_t = torch.from_numpy(rhs_arr)
+                if is_1d:
+                    rhs_t = rhs_t.unsqueeze(-1)
+                if lu.device.type != "cpu" or rhs_t.dtype != lu.dtype:
+                    rhs_t = rhs_t.to(device=lu.device, dtype=lu.dtype)
+                sol_t = torch.linalg.lu_solve(lu, piv, rhs_t)
+                if lu.device.type != "cpu":
+                    sol_t = sol_t.to(torch.float64).cpu()
+                return sol_t.squeeze(-1).numpy() if is_1d else sol_t.numpy()
+            is_1d = rhs.ndim == 1
+            rhs_t = rhs.unsqueeze(-1) if is_1d else rhs
+            if rhs_t.device != lu.device or rhs_t.dtype != lu.dtype:
+                rhs_t = rhs_t.to(device=lu.device, dtype=lu.dtype)
+            sol_t = torch.linalg.lu_solve(lu, piv, rhs_t)
+            return sol_t.squeeze(-1) if is_1d else sol_t
         return scipy.linalg.lu_solve(lu_info, rhs)
 
     def _solve_host(self, cfg: _Configuration, parity: str, rhs: np.ndarray) -> np.ndarray:
         """Solve one stored system for host right-hand sides; return float64 numpy."""
         lu_info = cfg.systems[parity]
         if self.backend != "gpu":
-            return scipy.linalg.lu_solve(lu_info, rhs)
+            if isinstance(lu_info[0], np.ndarray):
+                return scipy.linalg.lu_solve(lu_info, rhs)
+            return self._lu_solve(lu_info, rhs)
         import torch
 
         rhs_t = torch.as_tensor(
@@ -1350,7 +1393,7 @@ class PanelSolver:
             return np.zeros_like(rhs), 0, 0.0, True
 
         def inverse(v):
-            return scipy.linalg.lu_solve(lu_info, v)
+            return self._lu_solve(lu_info, v)
 
         operator = scipy.sparse.linalg.LinearOperator(
             mat_a.shape, matvec=lambda v: mat_a @ inverse(v), dtype=np.float64,
@@ -1446,7 +1489,7 @@ class PanelSolver:
             for step in range(steps):
                 # The only dense inverse and matrix passes of this iteration.
                 vectors = basis[active, :, step].T
-                z = scipy.linalg.lu_solve(lu_info, vectors)
+                z = self._lu_solve(lu_info, vectors)
                 work = mat_a @ z
                 matrix_passes += 1
                 next_active = []
@@ -1633,7 +1676,7 @@ class PanelSolver:
                 self._unit_solutions(cfg, lu_info, rhs, cols, parity)
             elif parity in ("sym", "full"):
                 self._unit_solutions(cfg, lu_info, rhs[:, :len(cols)], cols, parity)
-                cfg.viscous_units = scipy.linalg.lu_solve(lu_info, -rhs[:, len(cols):])
+                cfg.viscous_units = self._lu_solve(lu_info, -rhs[:, len(cols):])
                 self._viscous_solve_count += (1 if parity == "full" else len(cols)) + 1
                 self._viscous_rhs_count += rhs.shape[1]
             cfg.iterations.update(dict.fromkeys(cols, 0))
@@ -1666,10 +1709,10 @@ class PanelSolver:
         if parity == "full":
             # Keep the memory layout of the solve output: the superposition
             # products then round as in every earlier version.
-            cfg.unit_mu = scipy.linalg.lu_solve(lu_info, -np.ascontiguousarray(rhs))
+            cfg.unit_mu = self._lu_solve(lu_info, -np.ascontiguousarray(rhs))
             return
         for idx, k in enumerate(cols):
-            cfg.unit_mu[:, k] = scipy.linalg.lu_solve(lu_info, -rhs[:, idx])
+            cfg.unit_mu[:, k] = self._lu_solve(lu_info, -rhs[:, idx])
 
     def _full_unit_mu(self, unit_mu: np.ndarray) -> np.ndarray:
         """Return the unit doublets on the full mesh with shape (Nf, 6)."""
@@ -2077,6 +2120,7 @@ class PanelSolver:
                 device=self._device_arg,
                 dtype=self._dtype_arg,
                 ground_solver=self.ground_solver,
+                cpu_lu=self.cpu_lu,
                 _reuse_full_from=self,
             )
         return self._full_solver

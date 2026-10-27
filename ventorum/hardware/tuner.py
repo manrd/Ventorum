@@ -341,6 +341,72 @@ def _panel3d_workload(n_span: int, n_chord: int, backend: str, precision: str):
     return mesh, run
 
 
+def _time_lu(fn, repeats: int) -> float:
+    """Return the median time of LU factorization callable *fn*."""
+    fn()
+    ts = []
+    for _ in range(repeats):
+        t0 = time.perf_counter()
+        fn()
+        ts.append(time.perf_counter() - t0)
+    return float(np.median(ts))
+
+
+def _measure_cpu_lu(say) -> tuple[str, dict[str, Any]]:
+    """Measure SciPy and PyTorch CPU LU at the panel3d workload sizes.
+
+    Return the chosen backend ("scipy" or "torch") and the measurements dict.
+    Both LUs run at each panel size for 3 repeats (median time).
+    PyTorch wins if it is faster; ties and missing PyTorch fall back to SciPy.
+    """
+    import importlib.util
+    import scipy.linalg
+
+    if importlib.util.find_spec("torch") is None:
+        say("cpu_lu: PyTorch is not available: scipy default")
+        return "scipy", {"choice": "scipy", "reason": "PyTorch is not available"}
+
+    import torch
+
+    scipy_times = {}
+    torch_times = {}
+    sizes = []
+    for n_span, n_chord in _PANEL3D_CASES:
+        n = (2 * n_span + 1) * n_chord
+        sizes.append(n)
+        rng = np.random.default_rng(42)
+        base = np.asfortranarray(rng.standard_normal((n, n), dtype=np.float64))
+        base.flat[::n + 1] += float(n)
+
+        def scipy_fn(mat=base):
+            a = mat.copy(order="F")
+            return scipy.linalg.lu_factor(a, overwrite_a=True)
+
+        def torch_fn(mat=base, size=n):
+            a = mat.copy(order="F")
+            t = torch.from_numpy(a)
+            piv = torch.empty(size, dtype=torch.int32, device="cpu")
+            torch.linalg.lu_factor(t, out=(t, piv))
+            return t, piv
+
+        t_s = _time_lu(scipy_fn, _PANEL3D_REPEATS)
+        t_t = _time_lu(torch_fn, _PANEL3D_REPEATS)
+        scipy_times[str(n)] = t_s
+        torch_times[str(n)] = t_t
+        say(f"cpu_lu {n:5d} panels: SciPy {t_s:.4f} s, PyTorch {t_t:.4f} s")
+
+    largest = str(sizes[-1])
+    winner = "torch" if torch_times[largest] * (1.0 + _TIE) < scipy_times[largest] else "scipy"
+    say(f"cpu_lu winner: {winner}")
+    meas = {
+        "sizes": sizes,
+        "scipy_seconds": scipy_times,
+        "torch_seconds": torch_times,
+        "choice": winner,
+    }
+    return winner, meas
+
+
 def _measure_panel3d(quick: bool, say) -> tuple[dict[str, Any], dict[str, Any]]:
     """Measure cold CPU and GPU panel solves and check each GPU winner again.
 
@@ -393,7 +459,9 @@ def _measure_panel3d(quick: bool, say) -> tuple[dict[str, Any], dict[str, Any]]:
     )
     elapsed = time.perf_counter() - start
     say(f"panel3d crossover {entry['crossover_panels']} panels; tuner step {elapsed:.2f} s")
-    return {precision: entry}, {"rows": rows, "seconds": elapsed}
+    cpu_lu_choice, cpu_lu_meas = _measure_cpu_lu(say)
+    entry["cpu_lu"] = cpu_lu_choice
+    return {precision: entry, "cpu_lu": cpu_lu_choice}, {"rows": rows, "seconds": elapsed, "cpu_lu": cpu_lu_meas}
 
 
 def crossover_work(works: list[float], cpu_times: list[float], gpu_times: list[float]) -> float | None:
