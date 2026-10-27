@@ -963,6 +963,10 @@ def _chordwise_fractions(n_chord: int, chord_spacing: str) -> np.ndarray:
     return np.linspace(0.0, 1.0, n_chord + 1)
 
 
+#: Chordwise stations [-] that test whether a mean line has camber.
+_CAMBER_PROBE = np.linspace(0.0, 1.0, 21)
+
+
 def _hinge_node(xi: np.ndarray, hinge_x_c: float) -> tuple[int, bool]:
     """Return the chordwise node nearest to a hinge and if it can move there.
 
@@ -1342,6 +1346,22 @@ def build_lattice(
                     hinge_x_c_eff = float(c.hinge_x_c)
                     ctrl_xi = xi.copy()
                     ctrl_xi[k_hinge] = c.hinge_x_c
+                    cambered = any(
+                        line is not None and float(np.max(np.abs(line.at(_CAMBER_PROBE)))) > 0.0
+                        for line in lines
+                    )
+                    if cambered and abs(float(c.hinge_x_c) - float(xi[k_hinge])) > 1e-12:
+                        counts = _hinge_chord_counts(float(c.hinge_x_c), n_chord, chord_spacing)
+                        warnings.warn(
+                            f"[{surf.name}] control {c.name!r}: the hinge at x/c = {float(c.hinge_x_c):.4g} "
+                            f"moves a chordwise node of the control strips (n_chord = {n_chord}). On a "
+                            "cambered mean line the legs of the control strips and of their clean "
+                            "neighbours then do not coincide at the control side edges, and the leg "
+                            "forces there do not converge with the spanwise mesh. Use a chordwise count "
+                            "with a node at the hinge"
+                            + (f", for example n_chord = {', '.join(str(n) for n in counts)}." if counts else "."),
+                            RuntimeWarning, stacklevel=2,
+                        )
                 else:
                     hinge_x_c_eff = float(xi[k_hinge])
                     ctrl_xi = xi.copy()

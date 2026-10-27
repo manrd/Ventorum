@@ -215,3 +215,30 @@ def test_unaffected_cases_keep_their_results(case):
     t = _totals(shape, 24, controls)
     got = [float(getattr(t, k)) for k in ("CL", "CDi", "Cm", "CY", "Cl", "Cn")]
     np.testing.assert_allclose(got, expected, rtol=1e-10, atol=1e-12)
+
+
+@pytest.mark.parametrize("shape,hinge,n_chord,expect", [
+    ("2412", 0.7, 4, True),
+    ("2412", 0.75, 4, False),
+    ("0012", 0.7, 4, False),
+    ("2412", 0.7, 10, False),
+])
+def test_moved_hinge_on_cambered_strip_warns(shape, hinge, n_chord, expect):
+    """A hinge that moves a chordwise node of a cambered strip gives a warning."""
+    import warnings as _w
+
+    import ventorum as vt
+    from ventorum.core.datatypes import ControlSurface
+
+    wing = vt.LiftingSurface(
+        name="w", semi_span=4.0,
+        sections=[vt.WingSection(y_frac=e, chord=1.0, shape=shape) for e in (0.0, 1.0)],
+        controls=[ControlSurface("flap", 0.1, 0.4, hinge, np.radians(10.0))],
+    )
+    with _w.catch_warnings(record=True) as caught:
+        _w.simplefilter("always")
+        vt.VortexLatticeSolver().solve(
+            vt.Aircraft(surfaces=[wing]), vt.FlightCondition(V_inf=30.0, alpha=np.radians(2.0)),
+            vt.SolverSettings(n_panels=24, n_chord=n_chord),
+        )
+    assert any("do not coincide" in str(w.message) for w in caught) is expect
