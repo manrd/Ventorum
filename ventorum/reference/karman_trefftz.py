@@ -206,8 +206,11 @@ def karman_trefftz_solution(
         v_surface[0] = 0.0
         v_surface[-1] = 0.0
     else:
-        # Joukowski trailing edge limit
-        te_speed = v_inf * abs(np.cos(alpha - theta_te)) / abs(np.cos(theta_te))
+        # Joukowski trailing-edge limit. Both dW/dzeta and dz/dzeta are zero
+        # at zeta = b. L'Hopital's rule with d2W/dzeta2 =
+        # (2 V / R) exp(-2 i theta_te) cos(alpha - theta_te) and
+        # d2z/dzeta2 = 2 / b gives |dW/dz| = V b |cos(alpha - theta_te)| / R.
+        te_speed = v_inf * b * abs(np.cos(alpha - theta_te)) / radius
         v_surface[0] = te_speed
         v_surface[-1] = te_speed
 
