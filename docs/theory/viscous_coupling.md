@@ -28,7 +28,7 @@ The circulation $\boldsymbol{\Gamma}$ satisfies
 A \boldsymbol{\Gamma} = \mathbf{b}(\alpha, \boldsymbol{\delta}).
 ```
 
-A correction $\delta_k$ turns the onset direction of the boundary conditions of strip $k$ from $\mathbf{d}(\alpha)$ to $\mathbf{d}(\alpha - \delta_k)$. The strip lift coefficient $C_{l,\text{inv},j} = 2\Gamma_j / (V_\infty c_j)$ is linear in the corrections:
+A correction $\delta_k$ lowers the section angle of strip $k$: the onset of its boundary conditions turns by $-\delta_k$ about the span axis of the strip, in its section plane. For a planar strip this turns the onset direction from $\mathbf{d}(\alpha)$ to $\mathbf{d}(\alpha - \delta_k)$. The strip lift coefficient $C_{l,\text{inv},j} = 2\Gamma_j / (V_\infty c_j)$ is linear in the corrections:
 
 ```{math}
 \mathbf{C}_{l,\text{inv}}(\boldsymbol{\delta}) = \mathbf{C}_{l,\text{inv}}(\mathbf{0}) - D \boldsymbol{\delta},

@@ -4,7 +4,9 @@
 This module couples the linear potential-flow solvers (vortex-lattice
 method and linear lifting line) with two-dimensional section polars. One
 correction angle ``delta_j`` [rad] per spanwise strip changes the
-right-hand side of that strip (a uniform change of its angle of attack).
+right-hand side of that strip (a uniform change of its section angle of
+attack: the onset turns about the span axis ``n x c`` of the strip, in
+the plane of its 2D section).
 The system matrix does not change, so its LU factorization is reused in
 every iteration, for the response matrix of the corrections, for the
 second branch of a post-stall case and for every condition of a sweep
