@@ -15,7 +15,7 @@ Every result carries a trust score from 0 to 1 and a rating (HIGH, MODERATE, LOW
 | Rule (`factors` key) | Applies to | Reason | Chapter |
 | --- | --- | --- | --- |
 | `aspect_ratio` | lifting-line solvers | Lanchester–Prandtl lifting-line theory needs a high aspect ratio; chordwise effects grow at low aspect ratio | [Classical lifting line](classical_lifting_line.md), [Numerical lifting line](numerical_lifting_line.md) |
-| `sweep` | lifting-line solvers; slender wings for the vortex lattice | The numerical lifting line is not grid convergent with sweep. Slender, highly swept wings have leading-edge vortex lift (Polhamus 1966) | [Numerical lifting line](numerical_lifting_line.md), [Vortex-lattice method](vortex_lattice.md) |
+| `sweep` | lifting-line solvers; slender wings for the vortex lattice | The numerical lifting line is not grid convergent with sweep. Slender, highly swept wings have leading-edge vortex lift (Polhamus 1966). For the lattice solvers the sweep is the area-weighted mean quarter-chord sweep of all bound-vortex segments of all surfaces (`ventorum.solvers.lattice_base.quarter_chord_sweep_deg`) | [Numerical lifting line](numerical_lifting_line.md), [Vortex-lattice method](vortex_lattice.md) |
 | `stall_proximity` | all | Linear sections have no stall. With tabulated polars, each polar gives its own maximum lift and stall angle | [Numerical lifting line](numerical_lifting_line.md) |
 | `polar_range` | tabulated polars | A section angle outside the table uses the end values of the table | [Numerical lifting line](numerical_lifting_line.md) |
 | `side_edge_vortex` | vortex lattice | A wing of low aspect ratio at high angle of attack gets side-edge vortex lift, which potential flow does not model (Lamar 1974) | [Vortex-lattice method](vortex_lattice.md) |
@@ -25,6 +25,7 @@ Every result carries a trust score from 0 to 1 and a rating (HIGH, MODERATE, LOW
 | `mesh_adequacy` | 3D panel method | Panel shape and validity: elongated or skewed panels (the median panel), warped panels, a mesh that is not watertight, folded (non-convex) panels | [Ventorum-3DP](panel3d.md) |
 | `mesh_resolution` | 3D panel method | Discretization error: the near-field and far-field drag differ, or the chordwise panel count is low | [Ventorum-3DP](panel3d.md) |
 | `non_finite_result` | all | A coefficient that is not a finite number caps the rating at LOW | |
+| `post_stall_branch` | viscous coupling by angle-of-attack correction (lattice solvers and 3D panel method) | A strip is past the maximum lift of its polar (section slope at or below zero), and the branch search finds more than one converged solution: their CL differ by more than `ventorum.viscous.alpha_correction.BRANCH_CL_DIFFERENCE`. The post-stall result is not unique. The penalty is `ventorum.core.trust.POST_STALL_BRANCH_PENALTY` | [Viscous alpha correction](viscous_alpha_correction.md) |
 
 The score is $1 - \min(1, \sum \text{penalties})$, and the rating follows from fixed bands of the score. The uncertainty bands grow with $1 - \text{score}$, with fixed coefficients; this is why they are not error bars. A non-positive aspect ratio gives the full penalty for every solver. The notes of the solver (for example a lifting line near the ground) are added to the warnings.
 
