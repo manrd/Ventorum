@@ -521,3 +521,98 @@ def test_vlm_mean_line_mismatch_is_a_trust_warning():
     msgs = [w for w in res.totals.trust.warnings if "mean line and polar alpha_L0" in w]
     assert len(msgs) == 2  # root and tip sections
     assert not any("lifting line does not use it" in w for w in res.totals.trust.warnings)
+
+
+def test_fourier_notes_an_unused_section_shape():
+    """The Fourier lifting line ignores WingSection.shape; the result says so in a note with no penalty.
+
+    Regression: the Fourier solver ignored the shape with no note.
+    """
+    cond = FlightCondition(V_inf=30.0, alpha=np.radians(4.0))
+    settings = vt.SolverSettings(solver_type="fourier", n_panels=24)
+    with pytest.warns(RuntimeWarning, match="Fourier lifting line does not use it"):
+        res = vt.analyze(_shaped_wing(), cond, settings)
+    plain = vt.analyze(_shaped_wing(shape=None), cond, settings)
+    msgs = [w for w in res.totals.trust.warnings if "Fourier lifting line does not use it" in w]
+    assert len(msgs) == 1
+    assert "section polar only" in msgs[0]
+    assert any("Fourier lifting line does not use it" in n for n in res.details["notes"])
+    # A note only: no score penalty and the same loads as without the shape.
+    assert res.totals.trust.score == pytest.approx(plain.totals.trust.score)
+    assert res.totals.CL == plain.totals.CL
+    assert res.totals.CDi == plain.totals.CDi
+    assert res.totals.Cm == plain.totals.Cm
+    assert not any("does not use it" in w for w in plain.totals.trust.warnings)
+    assert not any("does not use it" in n for n in plain.details.get("notes", []))
+
+
+def test_fourier_sweep_notes_an_unused_section_shape():
+    """Each result of a Fourier sweep carries the note of an unused section shape."""
+    from ventorum.solvers.fourier import FourierSolver
+
+    cond = FlightCondition(V_inf=30.0, alpha=0.0)
+    settings = vt.SolverSettings(solver_type="fourier", n_panels=24)
+    alphas = np.radians([0.0, 4.0])
+    with pytest.warns(RuntimeWarning, match="Fourier lifting line does not use it"):
+        res = FourierSolver().solve_sweep(_shaped_wing(), cond, settings, alphas)
+    plain = FourierSolver().solve_sweep(_shaped_wing(shape=None), cond, settings, alphas)
+    for r, p in zip(res, plain):
+        assert any("Fourier lifting line does not use it" in w for w in r.totals.trust.warnings)
+        assert r.totals.CL == p.totals.CL
+        assert not any("does not use it" in w for w in p.totals.trust.warnings)
+
+
+def test_vlm_single_chord_panel_notes_an_unused_section_shape():
+    """The VLM with n_chord = 1 ignores WingSection.shape; the result says so in a note with no penalty.
+
+    The mean line needs two or more chordwise panels. With one panel the
+    lattice keeps the polar alpha_L0 (turned normal) and the polar Cm0.
+    Regression: it ignored the shape with no note.
+    """
+    cond = FlightCondition(V_inf=30.0, alpha=np.radians(4.0))
+    settings = vt.SolverSettings(solver_type="vlm", n_panels=16, n_chord=1)
+    with pytest.warns(RuntimeWarning, match="n_chord = 1 does not use it"):
+        res = vt.analyze(_shaped_wing(), cond, settings)
+    plain = vt.analyze(_shaped_wing(shape=None), cond, settings)
+    msgs = [w for w in res.totals.trust.warnings if "n_chord = 1 does not use it" in w]
+    assert len(msgs) == 1
+    assert "polar alpha_L0" in msgs[0]
+    assert any("n_chord = 1 does not use it" in n for n in res.details["notes"])
+    # A note only: no score penalty and the same loads as without the shape.
+    assert res.totals.trust.score == pytest.approx(plain.totals.trust.score)
+    assert res.totals.CL == plain.totals.CL
+    assert res.totals.CDi == plain.totals.CDi
+    assert res.totals.Cm == plain.totals.Cm
+    assert not any("does not use it" in w for w in plain.totals.trust.warnings)
+    assert not any("does not use it" in n for n in plain.details["notes"])
+    # No mean-line warning: the mean line is not used.
+    assert not any("mean line and polar alpha_L0" in w for w in res.totals.trust.warnings)
+
+
+def test_vlm_with_chordwise_panels_gives_no_single_panel_note():
+    """The VLM with n_chord > 1 uses the shape, so the note of one chordwise panel does not appear."""
+    cond = FlightCondition(V_inf=30.0, alpha=np.radians(4.0))
+    settings = vt.SolverSettings(solver_type="vlm", n_panels=16, n_chord=4)
+    with pytest.warns(RuntimeWarning, match="mean line and polar alpha_L0"):
+        res = vt.analyze(_shaped_wing(), cond, settings)
+    assert not any("does not use it" in w for w in res.totals.trust.warnings)
+
+
+def test_one_panel_lattice_build_gives_no_shape_warning():
+    """A one-panel lattice build alone issues no warning about the shape; only a solve does.
+
+    Many callers (mesh-size checks, ground clearance probes, the strip data
+    of the panel-method coupling) build a lattice with one chordwise panel
+    and use the shape elsewhere. They must not get the note.
+    """
+    import warnings
+
+    from ventorum.core.datatypes import Aircraft
+    from ventorum.geometry.lattice import build_lattice
+
+    ac = Aircraft(surfaces=[_shaped_wing()])
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        lat = build_lattice(ac, vt.SolverSettings(n_panels=8), collocation="vlm", n_chord=1)
+    assert not any("does not use it" in m for m in lat.mesh_warnings)
+    assert sum("n_chord = 1 does not use it" in m for m in lat.join_warnings) == 1

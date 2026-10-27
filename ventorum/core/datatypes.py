@@ -470,9 +470,12 @@ class WingSection:
         the surface gives one; the polar alpha_L0 and Cm0 then do not enter
         the boundary condition. A mean line alpha_L0 that differs from the
         polar alpha_L0 by more than 0.5 deg gives a trust warning. The
-        lifting-line solvers (linear and nonlinear) do not use the shape:
-        they use the section polar (``airfoil``) only, and a section with a
-        shape gives a note in the trust warnings. Default is None.
+        lifting-line solvers (linear, nonlinear and Fourier) do not use the
+        shape: they use the section polar (``airfoil``) only, and a section
+        with a shape gives a note in the trust warnings. The vortex lattice
+        with one chordwise panel does not use the shape either: it turns the
+        normal by the polar alpha_L0 and uses the polar Cm0, with a note in
+        the trust warnings. Default is None.
     """
 
     y_frac: float = 0.0
