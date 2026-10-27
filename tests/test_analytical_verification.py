@@ -21,6 +21,7 @@ from ventorum.aero.vortex import induced_velocity
 from ventorum.geometry.lattice import build_lattice
 from ventorum.reference import (
     circular_wing_cl_alpha,
+    elliptic_ground_drag_ratio,
     elliptic_wing_cl_alpha,
     glauert_monoplane,
     helmbold_cl_alpha,
@@ -401,6 +402,31 @@ def test_ground_effect_recovers_free_air_far_from_ground():
     far = vt.analyze_ground_effect(w, h=1.0e4, alpha_deg=4.0, settings=sett, compute_strike_limit=False)
     assert abs(far.CL / free.CL - 1.0) < 1e-4
     assert abs(far.CDi / free.CDi - 1.0) < 1e-3
+
+
+@pytest.mark.parametrize("AR,tol", [(10.0, 2.5e-3), (6.0, 6e-3)])
+def test_vlm_ground_effect_drag_matches_image_trefftz_theory(AR, tol):
+    """Induced-drag ratio k_GE / k_free of an elliptic wing against the
+    Trefftz-plane image theory of an elliptic loading (Wieselsberger 1921;
+    exact evaluation in ventorum.reference.ground_effect).
+
+    The wing is planar and parallel to the ground (alpha = 0, alpha_L0 = -1 deg),
+    so the lattice and the wake are at the given height. The reference holds
+    for an elliptic loading. Near the ground the loading departs from elliptic:
+    the measured difference (n_panels 40, n_chord 6; the same to 1e-5 with
+    80 and 12) is, at h/b = 0.5, 0.3, 0.2: AR 10 +0.055 %, +0.060 %, -0.070 %;
+    AR 6 +0.096 %, +0.154 %, +0.083 %. At h/b = 0.1 it is -1.2 % (AR 10), thus
+    the test stops at h/b = 0.2. The tolerance is about four times the largest
+    measured difference."""
+    ac = _elliptic(AR, airfoil=vt.LinearAirfoil(alpha_L0=np.radians(-1.0)))
+    sett = vt.SolverSettings(solver_type="vlm", n_panels=40, n_chord=6)
+    free = vt.analyze(ac, settings=sett, alpha_deg=0.0).totals
+    k_free = free.CDi / free.CL ** 2
+    for h_over_b in (0.5, 0.3, 0.2):
+        g = vt.analyze_ground_effect(ac, h=h_over_b * ac.b_ref, alpha_deg=0.0, height_ref="qc",
+                                     settings=sett, compute_strike_limit=False)
+        ratio = g.CDi / g.CL ** 2 / k_free
+        assert abs(ratio / elliptic_ground_drag_ratio(h_over_b) - 1.0) < tol
 
 
 def test_ground_effect_bank_moment_is_restoring_and_limits_are_enforced():
