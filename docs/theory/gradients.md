@@ -422,6 +422,9 @@ force vector. CL and CY are components of one force vector, and
 Cl, Cm and Cn of one moment vector: they are compared relative to the largest production
 magnitude among the components of the same vector, because the round-off of a component
 is relative to its vector (CY, Cl and Cn of a symmetric state are zero by symmetry). The
+scale of the moment vector is not smaller than the scale of the force vector: the moments
+of a straight wing about a point on its quarter-chord line are all at the round-off, and
+without this floor their round-off gave a false mismatch. The
 requested vector outputs (`strip_force`, `section_cl`) are compared relative to the
 largest production magnitude of the array.
 
