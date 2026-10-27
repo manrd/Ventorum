@@ -1,7 +1,3 @@
----
-orphan: true
----
-
 # Ventorum-3DP Influence Kernels
 
 This document gives the mathematical formulation, sign conventions, and asymptotic rules for the constant-strength source and doublet quadrilateral panel kernels of Ventorum-3DP.

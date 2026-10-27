@@ -1,7 +1,3 @@
----
-orphan: true
----
-
 # Ventorum-3DP Potential Flow Panel Solver
 
 This document describes the theory, boundary conditions, wake model, unit-onset superposition, and post-processing of the three-dimensional source-doublet panel solver in Ventorum-3DP.
@@ -304,7 +300,7 @@ The wake image follows the wake: each wake panel is reflected across the ground 
 
 In ground effect, the relative orientation and distance between the aircraft and the ground depend on the attitude $(\alpha, \beta, \phi)$ and height $h$, and the wake follows the free stream. Consequently, the influence matrix depends on attitude and height. Linear superposition of the six unit onsets remains valid for a fixed attitude and height.
 
-The method `solve_conditions` groups flight conditions by configuration (ground normal, ground offset and wake direction), factorizes the system once per group, and evaluates all conditions within that group.
+The method `solve_conditions` groups flight conditions by configuration (ground normal, ground offset and wake direction), factorizes the system once per group, and evaluates all conditions within that group. This is the direct ground solve. The default ground solve (`panel_ground_solver="auto"`) uses a Krylov method for CPU configurations with the Morino Kutta condition: the first configuration at each ground offset is factorized as an anchor, and GMRES, preconditioned by the anchor LU, solves the later configurations at that offset without a new factorization. Free air, the GPU backend and the pressure Kutta condition use the direct solve (see the Ventorum-3DP chapter, section *Krylov solve in ground effect*).
 
 Any geometry or wake touching or crossing below the ground plane raises a `GroundStrikeError` (a `ValueError`).
 
@@ -370,11 +366,11 @@ Ventorum-3DP connects to the solver architecture of Ventorum through the class `
 The solver takes three standard input objects:
 * `Aircraft`: One or more lifting surfaces. Each surface definition contains wing sections. The optional field `WingSection.shape` specifies the airfoil geometry (NACA designation, point array, or `AirfoilShape`). When `shape` is None, the solver defaults to NACA 0012 and reports a warning in the result notes. The functions `aircraft_to_json` and `aircraft_from_json` serialize and restore this field.
 * `FlightCondition`: Free-stream velocity $V_{\infty}$, angles $\alpha$ and $\beta$, density $\rho$, optional ground height $h$, bank angle $\phi$, and angular rates $p, q, r$. The solver also accepts a sequence of flight conditions to execute batch evaluations and sweeps. The keyword `ground` (a `GroundPlane`) replaces `condition.h` for all conditions.
-* `SolverSettings`: `n_panels` (spanwise panels per semi-span, as the lattice), `n_chord` (chordwise panels per surface, 40 when None), and the panel fields `panel_kutta` ("morino" or "pressure"), `panel_backend` ("auto", "numpy", "numba" or "gpu"), `panel_wake_length` (m; None gives 50 largest chords), `panel_chord_spacing` ("cosine", the default, or "uniform"), `panel_estimate_mesh_error` (False by default) and `panel_scale_root_thickness` (True by default; see the root section above). The other solvers ignore the panel fields.
+* `SolverSettings`: `n_panels` (spanwise panels per semi-span, as the lattice), `n_chord` (chordwise panels per surface, 40 when None), and the panel fields `panel_kutta` ("morino" or "pressure"), `panel_backend` ("auto", "numpy", "numba" or "gpu"), `panel_wake_length` (m; None gives 50 largest chords), `panel_chord_spacing` ("cosine", the default, or "uniform"), `panel_estimate_mesh_error` (False by default), `panel_scale_root_thickness` (True by default; see the root section above), `panel_ground_solver` ("auto", the default, "direct" or "krylov"; see the ground effect section above) and `panel_cache` (True by default; keeps the mesh, the solver and its factorized systems of the last solves). The other solvers ignore the panel fields.
 
 Symmetry plane folding and ground images are used automatically when the geometry and the flight conditions allow them (no sideslip, roll or yaw rate, bank, or deflected antisymmetric control).
 
-Backend "auto" follows the device and precision selection of `ventorum.gpu`, as the lattice solvers do: the device setting "cpu" keeps the solve on the CPU, a CPU worker thread stays on the CPU, and otherwise `ventorum.gpu.use_gpu` decides with the work of the dense systems ($N^2$ influence evaluations per configuration, twice in ground effect). The panel method has no cost model of its own yet, so the decision uses the thresholds of the vortex lattice. On the GPU the precision is `ventorum.gpu.get_precision()`; on the CPU the numpy reference kernels are used.
+Backend "auto" follows the device and precision selection of `ventorum.gpu`, as the lattice solvers do: the device setting "cpu" keeps the solve on the CPU, a CPU worker thread stays on the CPU, and otherwise `ventorum.gpu.use_gpu` decides with the work of the dense systems ($N^2$ influence evaluations per configuration, twice in ground effect). The panel method has no cost model of its own yet, so the decision uses the thresholds of the vortex lattice. On the GPU the precision is `ventorum.gpu.get_precision()`; on the CPU the compiled Numba kernels are used (they agree with the numpy reference kernels to round-off), or the numpy reference kernels when Numba is not installed.
 
 ### Results
 

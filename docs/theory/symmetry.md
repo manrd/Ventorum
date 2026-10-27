@@ -10,6 +10,7 @@ The solver uses the symmetry (`SolverSettings.use_symmetry`, on by default) only
 
 - every panel has a mirror panel: all surfaces are symmetric (`LiftingSurface.is_symmetric`);
 - no sideslip, $\beta = 0$;
+- no roll rate and no yaw rate, $p = r = 0$ (a pitch rate $q$ keeps the flow symmetric);
 - the ground plane, if any, has a normal with no y component (no bank, $\phi = 0$).
 
 Two separate surfaces that are mirror copies of each other (`mirror_y`) are solved without the reduction.
@@ -33,7 +34,7 @@ After the solve, the velocity at a left control point is the mirror image of the
 
 ## Envelope
 
-- Antisymmetric cases (sideslip, bank, roll) use the full solve.
+- Antisymmetric cases (sideslip, bank, roll rate, yaw rate) use the full solve.
 - Past the maximum lift, a symmetric case can have asymmetric solutions (stall on one side). The reduction does not look for them.
 
 ## Implementation

@@ -101,7 +101,7 @@ where $\mathbf v_{ij}$ [1/m] is the velocity at $\mathbf P_i$ from the horseshoe
 
 ## Assumptions
 
-- Thin surfaces: thickness enters only through the section data. Inviscid, incompressible, attached flow.
+- Thin surfaces: thickness enters only through the section data. Inviscid, attached flow. The flow is incompressible unless `mach` is set (see the envelope below).
 - Linear section data. A tabulated polar enters through its linear fit, with a warning; stall is not modelled.
 - Small disturbances: the boundary condition is applied on the mean surface, and the wake is rigid and straight (along the free stream by default).
 
@@ -109,8 +109,8 @@ where $\mathbf v_{ij}$ [1/m] is the velocity at $\mathbf P_i$ from the horseshoe
 
 - No stall: for the start of stall on an unswept wing use the nonlinear lifting line.
 - No leading-edge or side-edge vortex lift. The trust score lowers the rating for slender, highly swept wings and for low-aspect-ratio wings at high angle of attack (E. C. Polhamus 1966; J. E. Lamar 1974).
-- No compressibility correction. Above the Mach number `ventorum.core.constants.MACH_LIMIT_INCOMPRESSIBLE` the case is outside the envelope.
-- Two surfaces that overlap (control points of different surfaces closer than a small fraction of the local chord) are refused (`check_overlaps`).
+- Compressibility: with `FlightCondition.mach` set, the vortex lattice applies the Prandtl-Glauert rule in the form of Goethert in free air, on the CPU and on the GPU (see [Compressibility correction](compressibility.md)). Ground effect refuses `mach > 0`. Above the Mach number `ventorum.core.constants.MACH_LIMIT_INCOMPRESSIBLE` the case is outside the envelope and the trust score lowers the rating.
+- Two surfaces that overlap are refused (`check_overlaps`): two control points of different surfaces are closer than the smaller of 1e-3 times the smaller local chord and 0.25 times the smaller local strip width of the two strips.
 - In ground effect, panels longer than the gap get a trust penalty.
 - Geometric camber with dihedral: CL does not converge when the strips at the root or at the tips get narrow (open defect, `test_dihedral_camber_converges_spanwise`). At the root, the camber offset of the root node is along the bisector of the two halves and that of the next node along the normal of its half, so the root strip is shorter by $c z_c \sin\Gamma$ and turns over when it is narrower. At a tip, the straight legs of the last chordwise panel are off the curved mean line at its control point; on a tip strip narrower than that offset the circulation of the panel grows, and with dihedral the side-edge force of the free tip edge has a vertical component. Uniform spacing, or a spanwise count that keeps the root and tip strips wider than about $c z_c \sin\Gamma$ and the mean-line offset of the last panel (about 1e-3 chord), avoids it.
 

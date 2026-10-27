@@ -12,7 +12,7 @@ The theory manual gives, for each model in the code, the equations, the assumpti
 6. The verification cases that check it, in the [verification report](../verification_report.md).
 7. The references.
 
-The chapters contain no result values. The values of the model parameters come from the code (the API reference shows them); the results come from `validation/run_verification.py`.
+The values of the model parameters come from the code (the API reference shows them). The verification results come from `validation/run_verification.py` and are in the verification report, not in the chapters. Where a chapter gives a result value to explain a method or a limit, the value comes from a test that the chapter names or from a study of the method; such a value is rounded and is not a verification result.
 
 | Chapter | Model | Main references |
 | --- | --- | --- |
@@ -24,12 +24,16 @@ The chapters contain no result values. The values of the model parameters come f
 | [Compressibility](compressibility.md) | Prandtl-Glauert rule and Goethert transformation for subsonic flow | B. H. Goethert (1946); M. Drela (2014); J. Katz and A. Plotkin (2001) |
 | [Forces and moments](forces_and_moments.md) | Kutta-Joukowski near-field forces, Trefftz-plane induced drag, section data, static derivatives | Katz and Plotkin (2001); Drela (2014); E. Trefftz (1921) |
 | [Ground effect](ground_effect.md) | Method of images over flat ground, height and bank derivatives (one state or a sweep), Irodov criterion | C. Wieselsberger (1921); K. V. Rozhdestvensky (2000, 2006); R. D. Irodov (1970) |
-| [Adjoint gradients](gradients.md) | Discrete adjoint gradients of the vortex lattice and the linear lifting line | J. R. R. A. Martins and J. T. Hwang (2013); J. R. R. A. Martins and A. Ning (2021) |
+| [Adjoint gradients](gradients.md) | Discrete adjoint gradients of the vortex lattice and the linear and nonlinear lifting lines | J. R. R. A. Martins and J. T. Hwang (2013); J. R. R. A. Martins and A. Ning (2021) |
 | [Control surfaces](control_surfaces.md) | Thin-airfoil flap theory, panel deflection and section modification, hinge moments, control derivatives | H. Glauert (1926); Katz and Plotkin (2001); Etkin and Reid (1996) |
 | [Body rates](rotation_rates.md) | Quasi-steady rotation in the boundary condition and the loads, rate derivatives p, q, r | Katz and Plotkin (2001); Etkin and Reid (1996); Phillips and Snyder (2000) |
 | [Trim solver](trim.md) | Longitudinal and lateral trim for target lift and zero moments | B. Etkin and L. D. Reid (1996); J. E. Dennis and R. B. Schnabel (1996) |
 | [Symmetry](symmetry.md) | Use of the mirror symmetry of the flow | Katz and Plotkin (2001) |
 | [Trust score and error bars](trust_score.md) | Envelope checks (experimental) and the planned error-bar layers | W. L. Oberkampf and C. J. Roy (2010); ASME V&V 20 (2009); P. J. Roache (1998) |
+| [3D panel method (Ventorum-3DP)](ventorum_3dp.md) | Source and doublet panels on closed surfaces, Dirichlet condition, Kutta conditions, symmetry and ground images, Trefftz drag | L. Morino and C. C. Kuo (1974); J. L. Hess and A. M. O. Smith (1967); Katz and Plotkin (2001) |
+| [3D panel solver](panel3d.md) | Solver details of Ventorum-3DP: ground images, condition grouping, root section with dihedral, fold guard, solver interface | Morino and Kuo (1974); B. Maskew (1987); Katz and Plotkin (2001) |
+| [3D panel influence kernels](panel3d_kernels.md) | Exact and far-field influences of the constant source and doublet panels | Hess and Smith (1964, 1967); J. N. Newman (1986); Katz and Plotkin (2001) |
+| [3D panel control surfaces](panel3d_controls.md) | Plain control surfaces in 3D panel meshes | H. Glauert (1926, 1927); Katz and Plotkin (2001); B. Maskew (1987) |
 
 ```{toctree}
 :maxdepth: 1
@@ -49,6 +53,8 @@ rotation_rates
 trim
 symmetry
 trust_score
+ventorum_3dp
+panel3d
+panel3d_kernels
+panel3d_controls
 ```
-
-The 3D panel method is planned for a later phase. It has no chapter yet.

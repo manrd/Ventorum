@@ -45,7 +45,7 @@ Amplification: $N_2 = N_1 + \Delta\xi\,\phi\,r_1$, with $r_1$ the growth rate (w
 
 ## Start
 
-- Stagnation point (Hiemenz flow, $u_e = a\xi$): $\theta$ and $H$ are constant; the two equations give $(2 + H)\,Re\,a\,\theta^2 = f(H)$ and $3 f(H) = (2 + H) g(H)$, with $f = Re_\theta C_f/2$ and $g = Re_\theta\,2C_D/H^*$ of the laminar closure. The closure gives $H = 2.240$ (exact Hiemenz value 2.216) and $\theta\sqrt{a\,Re} = 0.287$ (exact 0.2923).
+- Stagnation point (Hiemenz flow, $u_e = a\xi$): $\theta$ and $H$ are constant; the two equations give $(2 + H)\,Re\,a\,\theta^2 = f(H)$ and $3 f(H) = (2 + H) g(H)$, with $f = Re_\theta C_f/2$ and $g = Re_\theta\,2C_D/H^*$ of the laminar closure. The closure gives $H = 2.240$ (exact Hiemenz value 2.216) and $\theta\sqrt{a\,Re} = \sqrt{f(H)/(2 + H)} = 0.290$ (exact 0.2923; `tests/test_ibl_march.py::test_hiemenz_stagnation` checks the marched value against the exact one).
 - Flat plate ($u_e$ constant, Blasius): $\theta^2 = 2 f(H)\,\xi/(Re\,u_e)$ and $g(H) = f(H)$, which gives $H = 2.590$. A given $\theta_0$ uses this shape factor.
 
 ## Transition
