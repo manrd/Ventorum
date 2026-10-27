@@ -437,6 +437,11 @@ class VortexLattice:
     # lattice cache hands out, so they are computed once per geometry.
     geom_cache: dict = field(default_factory=dict, repr=False, compare=False)
     control_info: list[dict] = field(default_factory=list)
+    # Warnings that build_lattice issues about the mesh (a hinge that snaps
+    # to a node, a hinge that moves a node of a cambered strip). The lattice
+    # cache issues them again when it returns a cached lattice, and the
+    # solvers give them to the trust score as notes.
+    mesh_warnings: list[str] = field(default_factory=list)
     geometric_camber: np.ndarray | None = None
     # Hinge nodes of the chordwise legs (see ``a_kink`` in the class notes).
     # None when no leg has a hinge node.
@@ -1209,6 +1214,8 @@ def build_lattice(
     strip_flap_nominal_all: list[float] = []
     strip_side_terms_all: list[tuple[list, list]] = []
     control_info: list[dict[str, Any]] = []
+    # Warnings of the mesh construction (VortexLattice.mesh_warnings).
+    mesh_warnings: list[str] = []
     mean_surfaces: list[tuple[list[WingSection], list[_MeanLine | None], np.ndarray]] = []
     camber_warnings: list[str] = []
     camber_fallback = False
@@ -1352,16 +1359,16 @@ def build_lattice(
                     )
                     if cambered and abs(float(c.hinge_x_c) - float(xi[k_hinge])) > 1e-12:
                         counts = _hinge_chord_counts(float(c.hinge_x_c), n_chord, chord_spacing)
-                        warnings.warn(
+                        mesh_warnings.append(
                             f"[{surf.name}] control {c.name!r}: the hinge at x/c = {float(c.hinge_x_c):.4g} "
                             f"moves a chordwise node of the control strips (n_chord = {n_chord}). On a "
                             "cambered mean line the legs of the control strips and of their clean "
                             "neighbours then do not coincide at the control side edges, and the leg "
                             "forces there do not converge with the spanwise mesh. Use a chordwise count "
                             "with a node at the hinge"
-                            + (f", for example n_chord = {', '.join(str(n) for n in counts)}." if counts else "."),
-                            RuntimeWarning, stacklevel=2,
+                            + (f", for example n_chord = {', '.join(str(n) for n in counts)}." if counts else ".")
                         )
+                        warnings.warn(mesh_warnings[-1], RuntimeWarning, stacklevel=2)
                 else:
                     hinge_x_c_eff = float(xi[k_hinge])
                     ctrl_xi = xi.copy()
@@ -1371,13 +1378,13 @@ def build_lattice(
                         f"n_chord = {', '.join(str(n) for n in counts)} ({chord_spacing} spacing)."
                         if counts else "Use a chordwise count that puts a node near the hinge."
                     )
-                    warnings.warn(
+                    mesh_warnings.append(
                         f"[{surf.name}] control {c.name!r}: no lattice node can move onto the hinge at "
                         f"x/c = {float(c.hinge_x_c):.4g} with n_chord = {n_chord}. The hinge snaps to the "
                         f"nearest node at x/c = {hinge_x_c_eff:.4g} (lattice control_info 'hinge_x_c_eff'). "
-                        + advice,
-                        RuntimeWarning, stacklevel=2,
+                        + advice
                     )
+                    warnings.warn(mesh_warnings[-1], RuntimeWarning, stacklevel=2)
             else:
                 hinge_x_c_eff = None
                 ctrl_xi = xi.copy()
@@ -1985,6 +1992,7 @@ def build_lattice(
         surfaces=surfaces,
         strip_core_group=core_groups(surfaces)[cat["surface"].astype(int)],
         join_warnings=near_miss_warnings(surfaces) + camber_warnings + offset_warnings,
+        mesh_warnings=mesh_warnings,
         control_info=control_info,
         geometric_camber=geometric_camber,
         a_kink=a_kink,

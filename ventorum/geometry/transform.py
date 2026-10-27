@@ -306,6 +306,7 @@ def transform_lattice(
             else None
         ),
         join_warnings=list(lattice.join_warnings),
+        mesh_warnings=list(getattr(lattice, "mesh_warnings", [])),
         kernel_cache=None,
         geom_cache=_transformed_cache(lattice, _transform_points, _transform_directions),
         control_info=[dict(c) for c in getattr(lattice, "control_info", [])],
