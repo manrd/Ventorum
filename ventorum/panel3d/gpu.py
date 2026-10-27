@@ -397,7 +397,7 @@ def influence_matrices_device(
         Arithmetic of the kernels. None follows the Ventorum precision
         selection.
     far_ratio : float, default=5.0
-        Distance-to-diameter ratio for point far-field transition.
+        Distance-to-diameter ratio of the far-field transition.
 
     Returns
     -------
@@ -451,7 +451,7 @@ def doublet_potential_device(
         Arithmetic of the kernels. None follows the Ventorum precision
         selection.
     far_ratio : float, default=5.0
-        Distance-to-diameter ratio for point far-field transition.
+        Distance-to-diameter ratio of the far-field transition.
 
     Returns
     -------
@@ -518,7 +518,7 @@ def doublet_pair_matrix_device(
     assembly_dtype : optional
         Arithmetic of the kernel. None gives float64.
     far_ratio : float, default=5.0
-        Distance-to-diameter ratio for point far-field transition.
+        Distance-to-diameter ratio of the far-field transition.
 
     Returns
     -------
@@ -578,7 +578,7 @@ def pair_system_device(
         Dtype of the doublet matrix. None follows the Ventorum precision
         selection.
     far_ratio : float, default=5.0
-        Distance-to-diameter ratio for point far-field transition.
+        Distance-to-diameter ratio of the far-field transition.
 
     Returns
     -------

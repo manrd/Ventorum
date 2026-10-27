@@ -154,25 +154,21 @@ $$\mathbf{V}_S = V_{S, x} \hat{\mathbf{l}} + V_{S, y} \hat{\mathbf{m}} + V_{S, z
 
 ## Far-Field Approximations
 
-When the distance $r = \|\mathbf{x} - \mathbf{p}_0\|$ exceeds `far_ratio` times the panel diameter $D = \max_{i < j} \|\mathbf{p}_i - \mathbf{p}_j\|$, point singularity expansions are used:
+When the distance $r = \|\mathbf{x} - \mathbf{p}_c\|$ from the area centroid $\mathbf{p}_c$ of the panel exceeds `far_ratio` times the panel diameter $D = \max_{i < j} \|\mathbf{p}_i - \mathbf{p}_j\|$, a multipole expansion about $\mathbf{p}_c$ replaces the exact integrals. It keeps the area $A$ and the second moments of area $\mathbf{Q} = \int \mathbf{s} \mathbf{s}^{\mathsf{T}} \, dA$ of the panel (Cartesian multipole expansion, Jackson 1999, section 4.1). With $a = \mathbf{r}^{\mathsf{T}} \mathbf{Q} \mathbf{r}$, $q = \operatorname{tr} \mathbf{Q}$ and $z = \mathbf{r} \cdot \hat{\mathbf{n}}$:
 
-$$\Phi_S^{\text{far}} = -\frac{A}{4 \pi r}, \quad \mathbf{V}_S^{\text{far}} = +\frac{A \mathbf{r}}{4 \pi r^3}$$
+$$\Phi_S^{\text{far}} = -\frac{1}{4 \pi} \left[ \frac{A}{r} + \frac{3 a - r^2 q}{2 r^5} \right], \quad \Phi_D^{\text{far}} = \frac{z}{4 \pi} \left[ \frac{3 q / 2 - 15 a / (2 r^2)}{r^5} - \frac{A}{r^3} \right]$$
 
-$$\Phi_D^{\text{far}} = -\frac{A (\mathbf{r} \cdot \hat{\mathbf{n}})}{4 \pi r^3}, \quad \mathbf{V}_D^{\text{far}} = -\frac{A}{4 \pi} \left[ \frac{\hat{\mathbf{n}}}{r^3} - \frac{3 (\mathbf{r} \cdot \hat{\mathbf{n}}) \mathbf{r}}{r^5} \right]$$
+The velocities are the gradients of these potentials. The first terms ($A$ only) are the point source $-A / (4 \pi r)$ and the point doublet $-A z / (4 \pi r^3)$. The full formulas, the moments of the panel and the error table are in the [Ventorum-3DP chapter](ventorum_3dp.md) (section *Far-field multipole expansions*). The collocation point stays at the corner mean.
 
 Setting `far_ratio = np.inf` disables the approximation and uses exact integration everywhere.
 
-### Documented accuracy of the point approximation
+### Accuracy of the expansion
 
-The point formulas leave out the quadrupole term, of relative order $(D / r)^2$. The tests in `tests/test_panel3d_kernels.py` check this accuracy against the exact kernels for a square, a skewed quadrilateral, an aspect-ratio-20 rectangle and a triangle:
-
-* at $r = 10 D$: relative error at most $10^{-3}$ for the source potential, $2 \times 10^{-3}$ for the doublet potential and $3 \times 10^{-3}$ for the velocities;
-* at $r = 25 D$: relative error at most $10^{-3}$ for all four quantities.
-
-The error grows as $(D / r)^2$ toward the switch distance of the default `far_ratio = 5`. Use a larger `far_ratio` (or `np.inf`) when the influence of single panels at 5 to 10 diameters must be more accurate.
+The relative error of one pair is $O((D / r)^3)$ for a general quadrilateral and $O((D / r)^4)$ for a parallelogram. The point singularities alone have the relative error $O((D / r)^2)$, and $O(D / r)$ when they are taken about the corner mean of a quadrilateral that is not a parallelogram. `tests/test_panel3d_far_field.py` checks these orders against the exact kernels. The tests in `tests/test_panel3d_kernels.py` check the accuracy at $r = 10 D$ and $r = 25 D$ for a square, a skewed quadrilateral, an aspect-ratio-20 rectangle and a triangle.
 
 ## References
 
+* J. D. Jackson, "Classical Electrodynamics", 3rd ed., John Wiley & Sons, 1999, section 4.1.
 * J. L. Hess and A. M. O. Smith, "Calculation of non-lifting potential flow about arbitrary three-dimensional bodies", Journal of Ship Research 8 (1964) 22-44.
 * J. L. Hess and A. M. O. Smith, "Calculation of potential flow about arbitrary bodies", Progress in Aeronautical Sciences 8 (1967) 1-138, Pergamon Press.
 * J. Katz and A. Plotkin, "Low-Speed Aerodynamics", 2nd ed., Cambridge University Press, 2001.

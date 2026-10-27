@@ -38,7 +38,7 @@ Non-planar quadrilaterals are projected onto the mean plane passing through the 
 \mathbf{p}'_k = \mathbf{p}_k - \left[(\mathbf{p}_k - \mathbf{p}_{\text{avg}}) \cdot \hat{\mathbf{n}}\right] \hat{\mathbf{n}}.
 ```
 
-The panel centroid $\mathbf{p}_0$ is the mean of the corner points (for a quadrilateral that is not a parallelogram, this is not the area centroid):
+The panel centroid $\mathbf{p}_0$ (the collocation point and the origin of the local frame) is the mean of the corner points (for a quadrilateral that is not a parallelogram, this is not the area centroid; the far-field expansions use the area centroid, see below):
 - For quadrilaterals: $\mathbf{p}_0 = \frac{1}{4} \sum_{k=1}^4 \mathbf{p}'_k$.
 - For triangles: $\mathbf{p}_0 = \frac{1}{3} (\mathbf{p}'_1 + \mathbf{p}'_2 + \mathbf{p}'_3)$.
 
@@ -124,19 +124,49 @@ Transforming to global coordinates yields:
 \mathbf{V}_S = V_{S, x} \hat{\mathbf{l}} + V_{S, y} \hat{\mathbf{m}} + V_{S, z} \hat{\mathbf{n}}.
 ```
 
-### Far-field point expansions
+### Far-field multipole expansions
 
-When the target distance $r = \|\mathbf{x} - \mathbf{p}_0\|$ exceeds `far_ratio` times the panel diameter $D = \max_{i < j} \|\mathbf{p}_i - \mathbf{p}_j\|$, point-singularity expansions are used:
+A pair of a target and a panel uses the far-field formulas when the distance $r = \|\mathbf{x} - \mathbf{p}_c\|$ from the area centroid $\mathbf{p}_c$ of the panel exceeds `far_ratio` times the panel diameter $D = \max_{i < j} \|\mathbf{p}_i - \mathbf{p}_j\|$ (default `far_ratio = 5`). The far-field formulas are the Taylor (Cartesian multipole) expansion of $1/\|\mathbf{x} - \mathbf{y}\|$ about $\mathbf{p}_c$, integrated over the panel, up to the second moments of area (the derivation of the Cartesian multipole expansion is in Jackson 1999, section 4.1).
+
+With $\mathbf{y} = \mathbf{p}_c + \mathbf{s}$ on the panel and $\mathbf{r} = \mathbf{x} - \mathbf{p}_c$:
 
 ```{math}
-\Phi_S^{\text{far}} = -\frac{A}{4 \pi r}, \qquad \mathbf{V}_S^{\text{far}} = +\frac{A \mathbf{r}}{4 \pi r^3},
+\frac{1}{\|\mathbf{r} - \mathbf{s}\|} = \frac{1}{r} + \frac{\mathbf{r} \cdot \mathbf{s}}{r^3} + \frac{3 (\mathbf{r} \cdot \mathbf{s})^2 - r^2 s^2}{2 r^5} + O\!\left(\frac{s^3}{r^4}\right).
+```
+
+The integral of $\mathbf{s}$ over the panel is zero about the area centroid, so the first-moment term drops out. The panel moments are the area $A$ [m^2] and the second-moment tensor $\mathbf{Q} = \int \mathbf{s} \mathbf{s}^{\mathsf{T}} \, dA$ [m^4]. $\mathbf{Q}$ lies in the panel plane ($\mathbf{Q} \hat{\mathbf{n}} = 0$). With the scalars $a = \mathbf{r}^{\mathsf{T}} \mathbf{Q} \mathbf{r}$ [m^6] and $q = \operatorname{tr} \mathbf{Q}$ [m^4], the integrated kernel is:
+
+```{math}
+S(\mathbf{r}) = \int \frac{dA}{\|\mathbf{r} - \mathbf{s}\|} = \frac{A}{r} + \frac{3 a - r^2 q}{2 r^5} + O\!\left(\frac{A D^3}{r^4}\right).
+```
+
+The source and doublet potentials and their gradients follow from $S$: $\Phi_S = -S / (4 \pi)$ and $\Phi_D = (\hat{\mathbf{n}} \cdot \nabla S) / (4 \pi)$. With $z = \mathbf{r} \cdot \hat{\mathbf{n}}$ and $f = (3 q / 2 - 15 a / (2 r^2)) / r^5$:
+
+```{math}
+\Phi_S^{\text{far}} = -\frac{1}{4 \pi} \left[\frac{A}{r} + \frac{3 a - r^2 q}{2 r^5}\right], \qquad
+\mathbf{V}_S^{\text{far}} = \frac{1}{4 \pi} \left[\left(\frac{A}{r^3} - f\right) \mathbf{r} - \frac{3 \mathbf{Q} \mathbf{r}}{r^5}\right],
 ```
 
 ```{math}
-\Phi_D^{\text{far}} = -\frac{A (\mathbf{r} \cdot \hat{\mathbf{n}})}{4 \pi r^3}, \qquad \mathbf{V}_D^{\text{far}} = -\frac{A}{4 \pi} \left[\frac{\hat{\mathbf{n}}}{r^3} - \frac{3 (\mathbf{r} \cdot \hat{\mathbf{n}}) \mathbf{r}}{r^5}\right].
+\Phi_D^{\text{far}} = \frac{z}{4 \pi} \left[f - \frac{A}{r^3}\right], \qquad
+\mathbf{V}_D^{\text{far}} = \frac{1}{4 \pi} \left[\left(f - \frac{A}{r^3}\right) \hat{\mathbf{n}} + z \left(\frac{105 a / 2 - 15 r^2 q / 2}{r^9} + \frac{3 A}{r^5}\right) \mathbf{r} - \frac{15 z}{r^7} \mathbf{Q} \mathbf{r}\right].
 ```
 
-Setting `far_ratio = np.inf` disables approximations and computes exact integrals everywhere.
+The first terms ($A$ only) are the point source and the point doublet. The area centroid and the moments come from the projected corners in the local frame with Green's theorem in the plane (sums over the four edges, a derivation): with $c_k = x_k y_{k+1} - x_{k+1} y_k$, $A = \frac{1}{2} \sum c_k$, $x_c = \frac{1}{6 A} \sum (x_k + x_{k+1}) c_k$, $\int x^2 dA = \frac{1}{12} \sum (x_k^2 + x_k x_{k+1} + x_{k+1}^2) c_k$, $\int x y \, dA = \frac{1}{24} \sum (x_k y_{k+1} + 2 x_k y_k + 2 x_{k+1} y_{k+1} + x_{k+1} y_k) c_k$, and the same for $y$. The parallel-axis rule moves the moments to the area centroid. A triangle (the fourth corner equal to the third) has an edge of zero length that adds zero.
+
+Truncation error of one pair, relative to the size of the leading term:
+
+| Expansion | General quadrilateral | Parallelogram |
+| --- | --- | --- |
+| Point singularity about the corner mean $\mathbf{p}_0$ | $O(D / r)$ | $O((D / r)^2)$ |
+| Point singularity about the area centroid $\mathbf{p}_c$ | $O((D / r)^2)$ | $O((D / r)^2)$ |
+| Area centroid with the second moments (used) | $O((D / r)^3)$ | $O((D / r)^4)$ |
+
+For a parallelogram the third moments are zero (point symmetry about $\mathbf{p}_c$), so the error is one order smaller. The expansion centre is used only for the far-field formulas. The collocation point and the local frame of the exact formulas stay at the corner mean $\mathbf{p}_0$. So the results with `far_ratio = np.inf` do not depend on the far-field formulas.
+
+Why the second moments are necessary: the switch distance is a fixed multiple of the panel diameter. On a refined mesh, more of the surface is in the far set of each target, and the far-set panels at a few diameters from the target carry a relative error that does not decrease with the panel size. The panels of a rectangular wing are parallelograms, so for them the area centroid alone changes nothing. With the point singularities alone, the lift of an aspect-ratio-6 rectangular wing moved away from the exact-integration value as the spanwise panel count grew, in free air and more in ground effect. With the second moments, `tests/test_panel3d_far_field.py` holds this difference below a small bound from 8 to 64 spanwise panels per semi-span.
+
+Setting `far_ratio = np.inf` disables the far-field formulas and computes exact integrals everywhere.
 
 ## Surface meshes and geometry
 
@@ -527,6 +557,7 @@ page and equation numbers for right preconditioning: to be checked.
 
 The 3D panel method implementation is verified by tests in the test suite:
 - Kernel parity and asymptotic limits: `tests/test_panel3d_kernels.py`, `tests/test_panel3d_backends.py`.
+- Far-field multipole expansions (order of the per-pair error, lift with spanwise refinement against exact integration, backend parity): `tests/test_panel3d_far_field.py`.
 - Mesh construction and control surface deflections: `tests/test_panel3d_mesh.py`, `tests/test_panel3d_controls.py`.
 - Potential flow solution, unit onsets, surface gradient and Trefftz drag (sphere in two orientations, ellipsoid on all panels, stored free-air run, factorization count): `tests/test_panel3d_solver.py`.
 - Symmetry plane and ground effect images (explicit mirror with the free-stream wake, Trefftz drag with images, bank and sideslip on a half mesh): `tests/test_panel3d_images.py`.
@@ -543,6 +574,7 @@ The 3D panel method implementation is verified by tests in the test suite:
 - M. Drela, *Flight Vehicle Aerodynamics*, MIT Press, Cambridge, MA, 2014.
 - J. Blazek, *Computational Fluid Dynamics: Principles and Applications*, 3rd ed., Butterworth-Heinemann, Oxford, 2015, chapter 5.
 - J. L. Hess and A. M. O. Smith, "Calculation of Potential Flow About Arbitrary Bodies", *Progress in Aeronautical Sciences*, Vol. 8, Pergamon Press, 1967, pp. 1-138.
+- J. D. Jackson, *Classical Electrodynamics*, 3rd ed., John Wiley & Sons, New York, 1999, section 4.1.
 - J. Katz and A. Plotkin, *Low-Speed Aerodynamics*, 2nd ed., Cambridge University Press, Cambridge, 2001.
 - S. A. Kinnas and C. Y. Hsin, "Boundary Element Method for the Analysis of the Unsteady Flow Around Extreme Propeller Geometries", *AIAA Journal*, Vol. 30, No. 3, 1992, pp. 688-696.
 - C. L. Ladson, C. W. Brooks, A. S. Hill and D. W. Sproles, "Computer Program To Obtain Ordinates for NACA Airfoils", NASA TM-4741, 1996.
