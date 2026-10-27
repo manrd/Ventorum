@@ -114,48 +114,13 @@ def shared_hinge_topology(lattice: Any) -> SharedHingeTopology:
         else None
     )
 
-    if flap_field is not None and "partner" in flap_field:
+    # The production lattice stores its hinge-node partners (its own
+    # matching rule and tolerance) in the flap field. A lattice without a
+    # flap field has no hinge, so no strip shares a hinge node.
+    if flap_field is not None:
         partner = np.array(flap_field["partner"], dtype=np.int64, copy=True)
     else:
-        chord = np.asarray(getattr(lattice, "chord", np.ones(n_strips)), dtype=float)
-        if flap_field is not None and "hinge" in flap_field:
-            hinge_of = np.asarray(flap_field["hinge"], dtype=float)
-        else:
-            hinge_of = np.full(n_strips, np.nan)
-
         partner = np.full((n_strips, 2, 2), -1, dtype=np.int64)
-        ends: list[tuple[int, int, int]] = []
-        for si, sl in enumerate(surfaces):
-            if sl.strips.stop > sl.strips.start:
-                ends += [(sl.strips.start, 0, si), (sl.strips.stop - 1, 1, si)]
-
-        for s in range(n_strips):
-            if np.isnan(hinge_of[s]):
-                continue
-            if s > 0 and strip_surf[s - 1] == strip_surf[s] and np.isfinite(hinge_of[s - 1]):
-                partner[s, 0] = (s - 1, 1)
-            if s + 1 < n_strips and strip_surf[s + 1] == strip_surf[s] and np.isfinite(hinge_of[s + 1]):
-                partner[s, 1] = (s + 1, 0)
-
-        for s, side, si in ends:
-            if np.isnan(hinge_of[s]) or partner[s, side, 0] >= 0:
-                continue
-            sl = surfaces[si]
-            le_s = sl.edge_le[0] if side == 0 else sl.edge_le[-1]
-            te_s = sl.edge_te[0] if side == 0 else sl.edge_te[-1]
-            tol = 1e-9 * max(1.0, float(chord[s]))
-            for q, jq, sq in ends:
-                if sq == si or hinge_of[q] != hinge_of[s]:
-                    continue
-                sql = surfaces[sq]
-                le_q = sql.edge_le[0] if jq == 0 else sql.edge_le[-1]
-                te_q = sql.edge_te[0] if jq == 0 else sql.edge_te[-1]
-                if (
-                    np.max(np.abs(le_q - le_s)) <= tol
-                    and np.max(np.abs(te_q - te_s)) <= tol
-                ):
-                    partner[s, side] = (q, jq)
-                    break
 
     # Find pairs of distinct surfaces that share at least one hinge node
     shared_surfs: set[tuple[str, str]] = set()
