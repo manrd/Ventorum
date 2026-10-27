@@ -78,6 +78,13 @@ from ventorum.geometry.controls import (
 from ventorum.geometry.discretization import compute_surface_n_panels, get_spacing
 from ventorum.utils.vec import cross3
 
+#: Limits of the control-point factor CLAF = a0 / (2 pi) of the vortex lattice
+#: [-]. They keep the control point away from the bound vortex (lower limit)
+#: and within about one panel length (upper limit). They are a code setting
+#: with no published source; a warning tells the user when they act.
+CLAF_MIN = 0.2
+CLAF_MAX = 2.0
+
 # Core radius of a horseshoe as a fraction of the smaller panel dimension
 # (strip width or chordwise panel length). The nearest control point is half
 # a panel dimension away, so the velocity there changes by about 4e-4 of its
@@ -1542,7 +1549,17 @@ def build_lattice(
 
     # --- panels ---------------------------------------------------------------
     n_strips = chord.shape[0]
-    claf = np.clip(cat["a0"] / (2.0 * np.pi), 0.2, 2.0)
+    claf_raw = cat["a0"] / (2.0 * np.pi)
+    claf = np.clip(claf_raw, CLAF_MIN, CLAF_MAX)
+    if collocation != "llt" and np.any(claf != claf_raw):
+        warnings.warn(
+            f"Section lift slope a0 outside {CLAF_MIN:g} to {CLAF_MAX:g} times 2 pi on some strips "
+            f"(a0/(2 pi) from {float(np.min(claf_raw)):.3g} to {float(np.max(claf_raw)):.3g}): the vortex-lattice "
+            "control point is limited to that range, so the 2D lift slope of the lattice is not a0 on those "
+            "strips and the lattice and the lifting line do not agree there.",
+            RuntimeWarning,
+            stacklevel=2,
+        )
     pa, pb, pcp, pstrip = [], [], [], []
     frac = cat["frac"][:, None]
     strip_xi_arr = np.array(strip_xi_all)  # shape (n_strips, n_chord + 1)

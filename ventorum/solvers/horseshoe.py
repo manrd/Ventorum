@@ -19,7 +19,9 @@ What it does not model
 ----------------------
 * Thickness, viscosity and stall: the section lift stays linear. Use the
   nonlinear solver with tabulated polars for stall.
-* Compressibility (no Prandtl-Glauert correction).
+* Compressibility in ground effect, and compressibility beyond the linear
+  subsonic range. In free air the solver applies the Prandtl-Glauert
+  (Goethert) transformation for ``mach > 0`` (see ``assemble_vlm``).
 * Leading-edge vortex lift of slender wings.
 
 References
