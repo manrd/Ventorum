@@ -173,6 +173,13 @@ SOURCE_Y_HINGE = 0.5
 #: the ground factor of the thin-airfoil flap shift [-].
 GROUND_FLAP_REFERENCE_PANELS = 256
 
+#: Trust and runtime warning when a thick section polar runs with a flap in ground effect.
+_THICK_GROUND_FLAP_NOTE = (
+    "The ground factor of the flap increment is a thin-airfoil value; "
+    "for thick sections below h/c 0.30 it can differ by more than 2 % "
+    "(about 0.1 to 0.2 deg of flap shift)."
+)
+
 _NACA_NAME = re.compile(r"^\s*(?:naca)?\s*(\d{4,5})\s*$", re.IGNORECASE)
 
 
@@ -296,6 +303,50 @@ def _strip_sections(aircraft: Aircraft, lattice: VortexLattice, s: int) -> list[
             )
         out.append((spec, float(w)))
     return out
+
+
+def _strip_thickness_ratio(aircraft: Aircraft, lattice: VortexLattice, s: int, cand: Any = None) -> float:
+    """Return the thickness-to-chord ratio t/c [-] of strip *s*, or 0.0 if not found."""
+    surf = aircraft.surfaces[int(lattice.strip_surface[s])]
+    secs = _sorted_sections(surf)
+    eta = abs(float(lattice.eta[s]))
+    fr = [float(sec.y_frac) for sec in secs]
+    if eta <= fr[0]:
+        picks = [(secs[0], 1.0)]
+    elif eta >= fr[-1]:
+        picks = [(secs[-1], 1.0)]
+    else:
+        j = int(np.clip(np.searchsorted(fr, eta, side="right") - 1, 0, len(fr) - 2))
+        span = fr[j + 1] - fr[j]
+        w = 0.0 if span <= 0.0 else (eta - fr[j]) / span
+        picks = [(secs[j], 1.0 - w), (secs[j + 1], w)]
+
+    t_vals = []
+    w_sum = 0.0
+    for sec, w in picks:
+        if w <= 1e-12:
+            continue
+        spec = _section_spec(sec)
+        if spec is not None:
+            try:
+                from ventorum.airfoil import airfoil
+
+                af = airfoil(spec)
+            except (KeyError, ValueError):
+                continue
+            t_vals.append(w * float(af.max_thickness()[0]))
+            w_sum += w
+    if w_sum > 0.0:
+        return float(sum(t_vals) / w_sum)
+
+    if isinstance(cand, PolarTable) and isinstance(cand.source_info.get("section"), str):
+        try:
+            from ventorum.airfoil import airfoil
+
+            return float(airfoil(cand.source_info["section"]).max_thickness()[0])
+        except (KeyError, ValueError):
+            pass
+    return 0.0
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -555,12 +606,25 @@ def _section_flap_shift(
     -------
     float
         Change of the zero-lift angle per unit flap angle [rad/rad].
+
+    Raises
+    ------
+    ValueError
+        If *ground* is given and the trailing edge of strip *s* is at or
+        below the ground plane (height <= 0).
     """
     n1 = int(np.clip(round(n_panels * x_hinge), 1, n_panels - 1))
     edges = np.concatenate([np.linspace(0.0, x_hinge, n1 + 1), np.linspace(x_hinge, 1.0, n_panels - n1 + 1)[1:]])
     x0, dx = edges[:-1], np.diff(edges)
     le = 0.5 * (lattice.le_left[s] + lattice.le_right[s])
     te = 0.5 * (lattice.te_left[s] + lattice.te_right[s])
+    if ground is not None:
+        h_te = float(ground.height(te))
+        if h_te <= 0.0:
+            raise ValueError(
+                f"Strip {s} trailing edge is at or below the ground (height {h_te:.4g} m <= 0); "
+                "increase the height or reduce the angle."
+            )
     cdir = lattice.chord_dir[s]
     nrm = lattice.normal[s]
     q = le + (x0 + 0.25 * dx)[:, None] * (te - le)
@@ -723,6 +787,7 @@ def _solve_condition(
     max_iter: int,
     tol: float,
     relaxation: float,
+    warned: set[str] | None = None,
 ) -> SolverResult:
     """Solve one condition with the alpha-correction coupling."""
     t0 = time.perf_counter()
@@ -754,6 +819,17 @@ def _solve_condition(
     D = -np.array([np.sum(G[unk_strip == s, :], axis=0) for s in strips]) * scale[:, None]
 
     polars, uses_height, h_over_c = resolver.resolve(lattice, strips, condition, ground)
+    if ground is not None and model in ("vlm", "llt"):
+        h_vals = h_over_c[np.isfinite(h_over_c)]
+        if h_vals.size > 0 and float(np.min(h_vals)) < 0.30:
+            for s in strips:
+                flap_deg, hinge = _strip_control(lattice, aircraft, int(s))
+                if flap_deg != 0.0 and hinge is not None:
+                    cand = resolver._candidate(lattice, int(s))
+                    if _strip_thickness_ratio(aircraft, lattice, int(s), cand) > 0.04:
+                        if _THICK_GROUND_FLAP_NOTE not in notes:
+                            notes.append(_THICK_GROUND_FLAP_NOTE)
+                        break
     if model == "vlm":
         a_sec, alpha0, alpha0_clean = _vlm_section_lines(lattice, strips, ground, uses_height)
         alpha0_ta = _thin_airfoil_zero_lift(lattice, aircraft, strips, alpha0, alpha0_clean, ground, uses_height)
@@ -973,6 +1049,10 @@ def _solve_condition(
     if non_unique:
         result.details["branches"] = [result] + [make_result(sol, bl, False) for sol, bl in branches]
     for msg in notes:
+        if warned is not None and msg == _THICK_GROUND_FLAP_NOTE:
+            if msg in warned:
+                continue
+            warned.add(msg)
         warnings.warn(msg, RuntimeWarning, stacklevel=3)
     return result
 
@@ -1094,6 +1174,7 @@ def solve_viscous(
     solver = make_solver("vlm" if model_str == "vlm" else "linear")
     resolver = _StripPolars(polars, aircraft_obj)
     fact = _Factorization()
+    warned: set[str] = set()
     results: list[SolverResult | None] = [None] * len(cond_list)
     alphas = np.array([float(c.alpha) for c in cond_list])
     up = [int(i) for i in np.argsort(alphas, kind="stable") if alphas[i] >= 0.0]
@@ -1104,7 +1185,7 @@ def solve_viscous(
         for i in order:
             res = _solve_condition(
                 solver, model_str, aircraft_obj, cond_list[i], settings, resolver, fact, rp,
-                main_surface, delta, int(max_iter), float(tol), float(relaxation),
+                main_surface, delta, int(max_iter), float(tol), float(relaxation), warned,
             )
             results[i] = res
             if res.converged:
