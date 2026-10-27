@@ -185,14 +185,26 @@ def test_thin_cambered_wing_against_panel3d(h):
 
 @pytest.mark.parametrize("h", [None, 0.2])
 def test_high_aspect_ratio_moment_against_2d(h):
-    """At aspect ratio 40 the wing moment approaches the 2D section moment.
+    """The wing moment goes to the 2D section moment as 1/AR goes to zero.
 
     In thin-airfoil theory the quarter-chord moment of a cambered section
-    does not depend on the angle of attack to first order, so the induced
-    angle changes it little; the tip effects are of order 1/AR (2.5 %).
-    Limits: 3 % against the 2D lumped-vortex plate on the same mean line,
-    5 % against Ventorum-2D on the real 2 % thick section (thickness alone
-    changes the 2D moment by about 3 % in free air).
+    does not depend on the angle of attack to first order, so the wing
+    moment differs from the section moment by tip effects of order 1/AR.
+    A single aspect ratio cannot separate this physical gap from a mesh
+    error, so the test solves AR 20, 40 and 80 on the same 16-panel chord
+    mesh and fits Cm = a + b/AR + c/AR^2. Checks:
+
+    * the limit a agrees within 0.05 % with the 2D lumped-vortex plate on
+      the same mean line and the same 16 chordwise panels (the method
+      check);
+    * at AR 40 the wing moment is less negative than the limit, by 1.5 %
+      to 5 % of the limit (the finite-span gap of order 1/AR);
+    * the limit agrees within 4 % with Ventorum-2D on the real 2 % thick
+      section (thickness alone changes the 2D moment by about 3 % in free
+      air).
+
+    The span panel counts keep the width of the tip strip in proportion
+    to the chord panel length.
     """
     from ventorum.panel2d.solver import solve_inviscid
     from ventorum.reference.cambered_plate import cambered_plate
@@ -200,12 +212,19 @@ def test_high_aspect_ratio_moment_against_2d(h):
     alpha = np.radians(5.0)
     shape = airfoil("2402").normalized()
     slope = lambda x: (shape.camber(x + 1e-7) - shape.camber(x - 1e-7)) / 2e-7  # noqa: E731
-    plate = cambered_plate(shape.camber, slope, alpha=alpha, h=h, n_panels=256)
-    panel2d = solve_inviscid(airfoil("2402").coords, 5.0, height=h, backend="numpy")
-    v = _solve(_aircraft("2402", semi_span=20.0), h=h, alpha=alpha, n_chord=16, n_span=60).totals
-    print(f"AR 40 h={h}: VLM Cm={v.Cm:.6f}; 2D plate Cm={plate['Cm']:.6f}; Ventorum-2D Cm={float(panel2d.Cm):.6f}")
-    assert abs(v.Cm - plate["Cm"]) <= 0.03 * abs(plate["Cm"])
-    assert abs(v.Cm - float(panel2d.Cm)) <= 0.05 * abs(float(panel2d.Cm))
+    plate = cambered_plate(shape.camber, slope, alpha=alpha, h=h, n_panels=16)["Cm"]
+    panel2d = float(solve_inviscid(airfoil("2402").coords, 5.0, height=h, backend="numpy").Cm)
+    cm = {}
+    for ar, n_span in ((20, 42), (40, 60), (80, 85)):
+        ac = _aircraft("2402", semi_span=ar / 2.0)
+        cm[ar] = _solve(ac, h=h, alpha=alpha, n_chord=16, n_span=n_span).totals.Cm
+    limit = np.polyfit([1.0 / ar for ar in cm], list(cm.values()), 2)[-1]
+    gap = (cm[40] - limit) / abs(limit)
+    print(f"h={h}: VLM Cm {cm}; 1/AR limit {limit:.8f}; same-mesh plate {plate:.8f}; "
+          f"Ventorum-2D {panel2d:.8f}; AR 40 gap {100 * gap:.3f} %")
+    assert abs(limit - plate) <= 5e-4 * abs(plate)
+    assert 0.015 <= gap <= 0.05
+    assert abs(limit - panel2d) <= 0.04 * abs(panel2d)
 
 
 def test_symmetric_shape_keeps_gradients():
