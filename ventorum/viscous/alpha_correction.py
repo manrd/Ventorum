@@ -354,7 +354,14 @@ def _strip_thickness_ratio(aircraft: Aircraft, lattice: VortexLattice, s: int, c
 # ═══════════════════════════════════════════════════════════════════════════════
 
 class _StripPolars:
-    """Resolve the section polar of each strip; memo over the conditions of one call."""
+    """Resolve the section polar of each strip; memo over the conditions of one call.
+
+    A dict of polars maps a strip index, a surface name, an airfoil name or
+    ``"default"`` to a polar. A key that matches none of these raises a
+    ``ValueError``. A strip without an entry uses the section airfoil of the
+    geometry; ``last_fallback`` flags these strips of the last
+    :meth:`resolve` call, and :meth:`fallback_note` gives the trust note.
+    """
 
     def __init__(self, polars: Any, aircraft: Aircraft) -> None:
         if polars is None:
@@ -362,16 +369,69 @@ class _StripPolars:
         self.polars = polars
         self.aircraft = aircraft
         self._memo: dict[Any, TabulatedAirfoil] = {}
+        self._keys_checked = False
+        self.last_fallback = np.zeros(0, dtype=bool)
 
-    def _candidate(self, lattice: VortexLattice, s: int) -> Any:
+    def check_keys(self, lattice: VortexLattice) -> None:
+        """Refuse dict keys that match no strip, surface or airfoil name.
+
+        Raises
+        ------
+        ValueError
+            If a key of the polar dict is not a strip index of *lattice*, a
+            surface name, an airfoil name of a section or ``"default"``. The
+            message lists the valid keys.
+        """
+        if self._keys_checked or not isinstance(self.polars, dict):
+            return
+        surfaces = {str(surf.name) for surf in self.aircraft.surfaces if surf.name}
+        airfoils = {str(getattr(sec.airfoil, "name", "") or "")
+                    for surf in self.aircraft.surfaces for sec in surf.sections}
+        airfoils |= {str(getattr(_base_airfoil(self.aircraft, lattice, s), "name", "") or "")
+                     for s in range(lattice.n_strips)}
+        airfoils.discard("")
+        n = int(lattice.n_strips)
+        unknown = []
+        for key in self.polars:
+            if isinstance(key, (int, np.integer)) and not isinstance(key, bool):
+                if 0 <= int(key) < n:
+                    continue
+            elif isinstance(key, str) and (key == "default" or key in surfaces or key in airfoils):
+                continue
+            unknown.append(key)
+        if unknown:
+            raise ValueError(
+                f"The polar dict keys {unknown!r} match no strip, surface or airfoil. Valid keys: "
+                f"strip indices 0 to {n - 1}, surface names {sorted(surfaces)}, airfoil names "
+                f"{sorted(airfoils)} and 'default'."
+            )
+        self._keys_checked = True
+
+    def _entry(self, lattice: VortexLattice, s: int) -> tuple[Any, bool]:
+        """Return the polar of strip *s* and True when it falls back to the section airfoil."""
         if not isinstance(self.polars, dict):
-            return self.polars
+            return self.polars, False
         surf = self.aircraft.surfaces[int(lattice.strip_surface[s])]
         base = _base_airfoil(self.aircraft, lattice, s)
         for key in (s, surf.name, getattr(base, "name", None), "default"):
             if key is not None and key in self.polars:
-                return self.polars[key]
-        return base
+                return self.polars[key], False
+        return base, True
+
+    def _candidate(self, lattice: VortexLattice, s: int) -> Any:
+        return self._entry(lattice, s)[0]
+
+    def fallback_note(self, lattice: VortexLattice, strips: np.ndarray) -> str | None:
+        """Return the trust note of the strips of the last resolve without a dict entry, or None."""
+        flags = self.last_fallback
+        if flags.size == 0 or not np.any(flags):
+            return None
+        names = sorted({str(self.aircraft.surfaces[int(lattice.strip_surface[s])].name)
+                        for s in np.asarray(strips)[flags]})
+        return (
+            f"{int(np.sum(flags))} of {len(flags)} strips (surfaces {', '.join(names)}) have no entry "
+            "in the polar dict; they use the section airfoil of the geometry."
+        )
 
     def resolve(
         self,
@@ -381,7 +441,9 @@ class _StripPolars:
         ground: GroundPlane | None,
     ) -> tuple[list[Any], np.ndarray, np.ndarray]:
         """Return the polar of each strip, the flags "polar uses the height" and the strip h/c [-]."""
+        self.check_keys(lattice)
         n = len(strips)
+        self.last_fallback = np.zeros(n, dtype=bool)
         out: list[Any] = [None] * n
         uses_height = np.zeros(n, dtype=bool)
         h_over_c = np.full(n, np.nan)
@@ -393,7 +455,7 @@ class _StripPolars:
             flap_deg, hinge = _strip_control(lattice, self.aircraft, s)
             if ground is not None:
                 h_over_c[i] = float(ground.height(lattice.qc_mid[s][None, :])[0]) / chord
-            cand = self._candidate(lattice, s)
+            cand, self.last_fallback[i] = self._entry(lattice, s)
             if isinstance(cand, PolarTable):
                 out[i], uses_height[i] = self._from_table(cand, re_s, flap_deg, hinge, h_over_c[i], ground)
             elif isinstance(cand, (TabulatedAirfoil, LinearAirfoil)):
@@ -881,6 +943,9 @@ def _solve_condition(
     D = -np.array([np.sum(G[unk_strip == s, :], axis=0) for s in strips]) * scale[:, None]
 
     polars, uses_height, h_over_c = resolver.resolve(lattice, strips, condition, ground)
+    fallback = resolver.fallback_note(lattice, strips)
+    if fallback is not None:
+        notes = [*notes, fallback]
     if ground is not None and model in ("vlm", "llt"):
         h_vals = h_over_c[np.isfinite(h_over_c)]
         if h_vals.size > 0 and float(np.min(h_vals)) < 0.30:
@@ -1158,8 +1223,9 @@ def solve_viscous(
         comes from ``WingSection.shape`` or a NACA airfoil name (no default
         section). A single airfoil is used on every strip, with the Glauert
         flap shift on a deflected strip. A dict maps a strip index, a
-        surface name, an airfoil name or ``"default"`` to one of these;
-        strips without an entry use their section airfoil.
+        surface name, an airfoil name or ``"default"`` to one of these.
+        A key that matches none of them raises ``ValueError``. Strips
+        without an entry use their section airfoil, with a trust note.
     model : {"vlm", "llt", "panel3d"}
         Potential-flow solver. The panel method matches surface-pressure
         strip lift and also closes the pressure Kutta residual when selected.
@@ -1456,6 +1522,7 @@ class _PanelCoupling:
         onset_sq = np.sum(onset**2, axis=1) if has_rates(condition) else None
         ground = None if cfg.ground is None else GroundPlane(*cfg.ground)
         polars, uses_height, h_over_c = self.resolver.resolve(self.lattice, self.strips, condition, ground)
+        fallback = self.resolver.fallback_note(self.lattice, self.strips)
         slope, zero, moment = self.slope, self.zero, self.moment
         clean_zero = self.clean_zero
         if np.any(uses_height):
@@ -1591,7 +1658,7 @@ class _PanelCoupling:
                         if all(abs(other["panel"].CL - s["panel"].CL) > BRANCH_CL_DIFFERENCE
                                for s in [primary, *branches]):
                             branches.append(other)
-        self.states[id(condition)] = (primary, branches, polars, offset, h_over_c, branch_runs)
+        self.states[id(condition)] = (primary, branches, polars, offset, h_over_c, branch_runs, fallback)
         for state in [primary, *branches]:
             state.pop("jac")
             state.pop("dc")
@@ -1601,7 +1668,9 @@ class _PanelCoupling:
         """Add polar drag, the lumped moment correction, and branch reports."""
         from ventorum.solvers.panel3d import _spanwise_results_batch
 
-        primary, branches, polars, offset, heights, branch_runs = self.states[id(result.condition)]
+        primary, branches, polars, offset, heights, branch_runs, fallback = self.states[id(result.condition)]
+        if fallback is not None and fallback not in result.details["notes"]:
+            result.details["notes"].append(fallback)
         area = self.full(self.area)
         chord = self.lattice.chord
         axis = np.cross(self.lattice.normal, self.lattice.chord_dir)
