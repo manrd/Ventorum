@@ -347,7 +347,10 @@ def test_ground_height_grid_converges(height, cl, cd, iterations):
     assert result.residual < 1e-6
     assert result.newton_iterations <= vs.WORK_BUDGET
     if cl is None:
-        assert "retry" in result.reason
+        # These heights failed before the retry. On this machine they converge
+        # through the retry; other numpy and BLAS builds (CI) can converge
+        # them directly. Convergence is the requirement.
+        pass
     elif "retry" not in result.reason:
         # Bit-identical on the machine that made the baseline. Other numpy and
         # BLAS builds (CI) take another Newton path: the loads agree to the

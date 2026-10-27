@@ -115,8 +115,10 @@ def test_symmetric_section_does_not_change(dihedral_deg):
     mesh, res = _solve("0012", dihedral_deg, "flat", n_chord=12, n_span=8)
     coeffs, cap_cp = _BASE_0012[dihedral_deg]
     got = (res.CL, res.CD_pressure, res.CDi_trefftz, res.Cm, res.Cl)
-    np.testing.assert_allclose(got, coeffs, rtol=1e-12, atol=1e-14)
-    np.testing.assert_allclose(res.cp[np.asarray(mesh.kind) == "tip"], cap_cp, rtol=1e-12, atol=1e-14)
+    # Bit-identical on the machine that stored the values; other numpy and BLAS
+    # builds (CI) change the dense solve in the last digits (about 3e-12 seen).
+    np.testing.assert_allclose(got, coeffs, rtol=1e-10, atol=1e-12)
+    np.testing.assert_allclose(res.cp[np.asarray(mesh.kind) == "tip"], cap_cp, rtol=1e-10, atol=1e-12)
 
 
 def test_cap_gradient_array_build_matches_reference():
