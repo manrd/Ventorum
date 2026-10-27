@@ -1489,7 +1489,18 @@ def stability_derivatives(
     ``"b-"``) to its dispatch record. The ``trust`` output covers all five
     cases: the score of the weakest case, the warnings of every case, and a
     warning when CY_beta and the CY_beta of the Trefftz plane do not agree
-    (see :func:`_stability_trust`).
+    (see :func:`_stability_trust`). At ``detail_level="summary"`` the
+    ``trust`` output is compact: score, rating and the warnings (at most 6,
+    the count of the others in ``warnings_not_shown``).
+
+    In ground effect (``flight_condition.h_m``) the tool also computes the
+    Irodov height-pitch margin of the same state with
+    :func:`ventorum.height_derivatives` (9 more solves, the CG as the pivot,
+    the same chordwise mesh). The output ``irodov`` gives ``x_alpha_m``,
+    ``x_h_m``, ``irodov_margin``, ``verdict`` and the steps. Near the
+    ground the static margin alone is not the static stability criterion,
+    so the pitch verdict (``stability_assessment.pitch`` and the executive
+    summary) is the Irodov verdict, with the static margin as information.
     """
     ac = build_aircraft_from_spec(wing=wing, aircraft=aircraft)
     c = parse_condition(flight_condition)
@@ -1503,8 +1514,11 @@ def stability_derivatives(
     c_ref = float(ac.c_ref)
     _check_method(ac, sett.solver_type, sett.wake_alignment, c["h_m"] is not None)
     strips = _check_mesh(ac, sett)
+    in_ground = c["h_m"] is not None
+    # 5 cases, plus the Irodov cases (height_derivatives) in ground effect.
     _check_call_work(
-        5 * (_planned_panels(ac, sett, make_flight_condition(c)) ** 2),
+        (5 + (HEIGHT_DERIVATIVE_SOLVES if in_ground else 0))
+        * (_planned_panels(ac, sett, make_flight_condition(c)) ** 2),
         "fewer panels (smaller n_panels or n_chord)")
     d_a, d_b = 0.5, 1.0
     a, b = c["alpha_deg"], c["beta_deg"]
@@ -1522,6 +1536,30 @@ def stability_derivatives(
             raise GroundStrikeError(f"Case alpha={aa:g} deg, beta={bb:g} deg: {exc}") from exc
 
     res = dict(run_cases(run, list(cases.items()), estimate_panels(ac, sett), "auto"))
+
+    # In ground effect the static margin alone is not the static stability
+    # criterion: compute the Irodov height-pitch margin of the same state,
+    # with the CG as the pivot and the same chordwise mesh.
+    irodov: dict[str, Any] | None = None
+    if in_ground:
+        s_ir = case_sett.clone()
+        used = _used_n_chord(res["base"])
+        if s_ir.n_chord is None and used is not None:
+            s_ir.n_chord = int(used)
+        hd, hd_err = _irodov_state(ac, make_flight_condition(c), s_ir)
+        iro = hd.irodov if hd is not None else {}
+        mg = iro.get("margin")
+        irodov = {
+            "x_alpha_m": rnd(iro.get("x_alpha_m"), 5), "x_h_m": rnd(iro.get("x_h_m"), 5),
+            "irodov_margin": rnd(mg, 5),
+            "verdict": _irodov_verdict(rnd(mg, 12), hd_err if hd is None else "a lift slope is near zero"),
+            "h_step_m": rnd(hd.steps["h_m"], 6) if hd is not None else None,
+            "alpha_step_deg": 0.5,
+            "pivot_point_m": [rnd(v, 5) for v in ac.moment_reference()],
+            "note": f"{_IRODOV_DEFINITION} Here the pivot is the CG point [x_cg_m, 0, z_ref]. Local central "
+                    "differences of height_derivatives (alpha +/- 0.5 deg at constant height of the CG, h "
+                    "+/- 5 % of the smallest clearance at constant attitude), same chordwise mesh.",
+        }
 
     t = {k: r.totals for k, r in res.items()}
     da, db = np.radians(2 * d_a), np.radians(2 * d_b)
@@ -1576,7 +1614,19 @@ def stability_derivatives(
     Cl_b_sel = float(d_m_db_sel[0])
     Cn_b_sel = float(d_m_db_sel[2])
 
-    if sm is None:
+    if irodov is not None:
+        mg = irodov["irodov_margin"]
+        sm_part = (f"static margin {sm * 100:+.1f} % of c_ref (neutral point {x_np:.4f} m, CG {x_cg:.4f} m)"
+                   if sm is not None else "static margin not available (CL_alpha is near zero)")
+        if mg is None:
+            pitch = (f"not assessed in ground effect: Irodov margin {irodov['verdict']}; {sm_part}. Near "
+                     "the ground the static margin alone is not the static stability criterion")
+        else:
+            word = "statically stable" if mg > 0 else "statically UNSTABLE"
+            pitch = (f"{word} in height and pitch (ground effect): Irodov margin {mg:+.4f} (stable needs "
+                     f"> 0); {sm_part}. Near the ground the static margin alone is not the static stability "
+                     "criterion")
+    elif sm is None:
         pitch = "not available (CL_alpha is near zero)"
     elif sm > 0:
         pitch = (f"statically stable: static margin {sm * 100:+.1f} % of c_ref; the neutral point "
@@ -1604,18 +1654,29 @@ def stability_derivatives(
     ]
     if c["h_m"] is not None:
         notes.append(f"In ground effect: the CG stays {c['h_m']:g} m above the ground in every case (alpha "
-                     "and beta change at constant height). The Irodov height-pitch criterion needs the "
-                     "derivatives with respect to height: use the ventorum_ground_effect tool.")
+                     "and beta change at constant height). The static margin uses only the pitch derivative; "
+                     "near the ground the lift also changes with height, so the pitch verdict uses the Irodov "
+                     "height-pitch margin (see irodov). Use the ventorum_ground_effect tool for several "
+                     "heights.")
 
     derivs = by_axes["body"] if ax == "all" else by_axes[ax]
     sm_txt = f"{sm * 100:+.1f} %" if sm is not None else "n/a"
+    if irodov is None:
+        pitch_txt = f"Pitch: {pitch.split(':')[0]}."
+    elif irodov["irodov_margin"] is None:
+        pitch_txt = (f"Pitch in ground effect: Irodov margin {irodov['verdict']}; the static margin alone is "
+                     "not the static stability criterion near the ground.")
+    else:
+        pitch_txt = (f"Pitch in ground effect: {pitch.split(' (')[0]}, Irodov margin "
+                     f"{irodov['irodov_margin']:+.3f}; the static margin alone is not the static stability "
+                     "criterion near the ground.")
     xnp_txt = f"{x_np:.4f} m" if x_np is not None else "n/a"
     h_txt = "" if c["h_m"] is None else f", h={c['h_m']:g} m"
     device_all, precision_all = computation_device_precision(list(res.values()))
     exec_summary = (
         f"[Ventorum RESULT] Stability of {ac.name} at alpha={a:g} deg, beta={b:g} deg{h_txt}: "
         f"CL_alpha={CL_a:.3f}/rad, Cm_alpha={Cm_a_sel:.4f}/rad about x_cg={x_cg:.4f} m, neutral point "
-        f"{xnp_txt}, static margin {sm_txt} of c_ref. Pitch: {pitch.split(':')[0]}. "
+        f"{xnp_txt}, static margin {sm_txt} of c_ref. {pitch_txt} "
         f"Roll (Cl_beta): {roll.split(' (')[0]}. Yaw (Cn_beta): {yaw.split(' (')[0]}. "
         f"{device_summary_text(device_all, precision_all)}"
     )
@@ -1642,10 +1703,13 @@ def stability_derivatives(
         "trust": _stability_trust(t, cases, CY_b, db),
         "axes": ax,
     }
+    if irodov is not None:
+        out["irodov"] = irodov
+        out["stability_assessment"]["height_pitch_irodov"] = irodov["verdict"]
     if ax == "all":
         out["derivatives_by_axes"] = by_axes
     if dl == "summary":
-        out.pop("trust")
+        out["trust"] = compact_trust(out["trust"])
     else:
         out["geometry"] = geometry_payload(ac)
     if dl == "full":

@@ -1233,7 +1233,10 @@ AGENT_TOOL_DEFINITIONS: list[dict[str, Any]] = [
         "description": "Static stability derivatives by central differences (alpha +/- 0.5 deg, beta "
                        "+/- 1 deg) about the centre of gravity: CL_alpha, Cm_alpha, neutral point, static "
                        "margin, Cl_beta, Cn_beta, CY_beta. With flight_condition.h_m the derivatives are "
-                       "in ground effect at constant height.",
+                       "in ground effect at constant height, and the tool also computes the Irodov "
+                       "height-pitch margin (irodov, 9 more solves): near the ground the pitch verdict is "
+                       "the Irodov margin, because the static margin alone is not the static stability "
+                       "criterion. Every detail level gives the trust rating and the warnings.",
         "parameters": {
             "type": "object",
             "properties": {
