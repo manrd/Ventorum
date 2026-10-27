@@ -270,6 +270,7 @@ def transform_lattice(
         b_te=_transform_points(lattice.b_te),
         a_kink=None if lattice.a_kink is None else _transform_points(lattice.a_kink),
         b_kink=None if lattice.b_kink is None else _transform_points(lattice.b_kink),
+        leg_next=None if lattice.leg_next is None else lattice.leg_next.copy(),
         cp=_transform_points(lattice.cp),
         normal_bc=_transform_directions(lattice.normal_bc),
         panel_strip=lattice.panel_strip.copy(),

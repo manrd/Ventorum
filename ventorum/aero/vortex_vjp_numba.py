@@ -46,9 +46,10 @@ _INV_2PI = 1.0 / (2.0 * math.pi)
 _FLOOR = 1e-300
 
 # Values per source in the block buffers of the horseshoe VJP:
-# ga (3), gb (3), ga_te (3), gb_te (3), gd (3), g_rc2_src, gs, and the leg
-# nodes ga_k (3), gb_k (3).
-_NSRC = 23
+# ga (3), gb (3), ga_te (3), gb_te (3), gd (3), g_rc2_src, gs, the leg
+# nodes ga_k (3), gb_k (3), and the ends of the own legs of a chain
+# ga_e (3), gb_e (3).
+_NSRC = 29
 # Values per vortex in the block buffers of the Trefftz VJP: gp (3), ggamma, g_rc2.
 _NVTX = 5
 
@@ -392,10 +393,12 @@ if HAVE_NUMBA:
         return rc2s[j], False
 
     @njit(cache=True, inline="always")
-    def _hs_v(i, j, P, a, b, ate, bte, d, rc2, own, spanel, edge, sea, seb, ak, bk, kfl, seka, sekb):
+    def _hs_v(i, j, P, a, b, ate, bte, d, rc2, own, spanel, edge, sea, seb, ak, bk, kfl, seka, sekb, ae, be):
         # Unit-circulation velocity of horseshoe j at point i (masked pairs zero).
-        # A leg with a node (kfl[j] != 0) runs ate -> ak -> a and b -> bk -> bte;
-        # on the other sources ak is ate and bk is bte.
+        # A leg with a node (kfl[j] != 0) runs ae -> ak -> a and b -> bk -> be;
+        # on the other sources ak is ate and bk is bte. ae, be are the
+        # trailing-edge points, or on a leg chain the bound points of the
+        # next source. The last three values are the own leg segments alone.
         px = P[i, 0]
         py = P[i, 1]
         pz = P[i, 2]
@@ -410,7 +413,7 @@ if HAVE_NUMBA:
         if edge[i] != sea[j]:
             vax, vay, vaz = _seg_v(px, py, pz, ak[j, 0], ak[j, 1], ak[j, 2], a[j, 0], a[j, 1], a[j, 2], rc2)
         if kfl[j] != 0 and edge[i] != seka[j]:
-            kx, ky, kz = _seg_v(px, py, pz, ate[j, 0], ate[j, 1], ate[j, 2], ak[j, 0], ak[j, 1], ak[j, 2], rc2)
+            kx, ky, kz = _seg_v(px, py, pz, ae[j, 0], ae[j, 1], ae[j, 2], ak[j, 0], ak[j, 1], ak[j, 2], rc2)
             vax += kx
             vay += ky
             vaz += kz
@@ -420,19 +423,24 @@ if HAVE_NUMBA:
         if edge[i] != seb[j]:
             vlx, vly, vlz = _seg_v(px, py, pz, b[j, 0], b[j, 1], b[j, 2], bk[j, 0], bk[j, 1], bk[j, 2], rc2)
         if kfl[j] != 0 and edge[i] != sekb[j]:
-            kx, ky, kz = _seg_v(px, py, pz, bk[j, 0], bk[j, 1], bk[j, 2], bte[j, 0], bte[j, 1], bte[j, 2], rc2)
+            kx, ky, kz = _seg_v(px, py, pz, bk[j, 0], bk[j, 1], bk[j, 2], be[j, 0], be[j, 1], be[j, 2], rc2)
             vlx += kx
             vly += ky
             vlz += kz
         wbx, wby, wbz = _ray_v(px, py, pz, bte[j, 0], bte[j, 1], bte[j, 2], d[j, 0], d[j, 1], d[j, 2], rc2)
         wax, way, waz = _ray_v(px, py, pz, ate[j, 0], ate[j, 1], ate[j, 2], d[j, 0], d[j, 1], d[j, 2], rc2)
         return ((vbx + vax + vlx) + wbx - wax, (vby + vay + vly) + wby - way,
-                (vbz + vaz + vlz) + wbz - waz)
+                (vbz + vaz + vlz) + wbz - waz, vax + vlx, vay + vly, vaz + vlz)
 
     @njit(cache=True, parallel=True)
-    def horseshoe_forward_kink_kernel(mode, P, X, a, b, ate, bte, d, rc2s, tgrc2, sgrp, tgrp, own, spanel,
-                                      edge, sea, seb, s, col, n_u, use_tg, ak, bk, kfl, seka, sekb):
-        """Return the system rows (mode 0, (m, n_u)) or the induced velocity (mode 1, (m, 3))."""
+    def horseshoe_forward_chain_kernel(mode, P, X, a, b, ate, bte, d, rc2s, tgrc2, sgrp, tgrp, own, spanel,
+                                       edge, sea, seb, s, col, n_u, use_tg, ak, bk, kfl, seka, sekb, ae, be, nxt,
+                                       chain):
+        """Return the system rows (mode 0, (m, n_u)) or the induced velocity (mode 1, (m, 3)).
+
+        With *chain* the sources of each row run from the last to the first:
+        a source adds the legs of the next source of its chain (``nxt``).
+        """
         m = P.shape[0]
         n = a.shape[0]
         if mode == 0:
@@ -443,10 +451,25 @@ if HAVE_NUMBA:
             ox = 0.0
             oy = 0.0
             oz = 0.0
-            for j in range(n):
+            cx = 0.0
+            cy = 0.0
+            cz = 0.0
+            for jj in range(n):
+                j = n - 1 - jj if chain else jj
                 rc2, _ = _pair_rc2(i, j, rc2s, tgrc2, sgrp, tgrp, use_tg)
-                vx, vy, vz = _hs_v(i, j, P, a, b, ate, bte, d, rc2, own, spanel, edge, sea, seb,
-                                   ak, bk, kfl, seka, sekb)
+                vx, vy, vz, lx, ly, lz = _hs_v(i, j, P, a, b, ate, bte, d, rc2, own, spanel, edge, sea, seb,
+                                               ak, bk, kfl, seka, sekb, ae, be)
+                if chain:
+                    if nxt[j] != 0:
+                        vx += cx
+                        vy += cy
+                        vz += cz
+                        lx += cx
+                        ly += cy
+                        lz += cz
+                    cx = lx
+                    cy = ly
+                    cz = lz
                 if mode == 0:
                     out[i, col[j]] += s[j] * (vx * X[i, 0] + vy * X[i, 1] + vz * X[i, 2])
                 else:
@@ -460,12 +483,15 @@ if HAVE_NUMBA:
         return out
 
     @njit(cache=True, parallel=True)
-    def horseshoe_vjp_kink_kernel(P, X, a, b, ate, bte, d, rc2s, tgrc2, sgrp, tgrp, own, spanel, edge, sea, seb,
-                                  s, col, W, use_W, use_tg, nblocks, ak, bk, kfl, seka, sekb):
-        """Return the VJP (gP, gX, g_tg_rc2, ga, gb, ga_te, gb_te, gd, g_rc2_src, gs, ga_k, gb_k) in float64.
+    def horseshoe_vjp_chain_kernel(P, X, a, b, ate, bte, d, rc2s, tgrc2, sgrp, tgrp, own, spanel, edge, sea, seb,
+                                   s, col, W, use_W, use_tg, nblocks, ak, bk, kfl, seka, sekb, ae, be, nxt, chain):
+        """Return the VJP (gP, gX, g_tg_rc2, ga, gb, ga_te, gb_te, gd, g_rc2_src, gs, ga_k, gb_k, ga_e, gb_e).
 
         ga_k and gb_k are zero on a source without a leg node (kfl[j] == 0):
-        its leg derivative is in ga_te and gb_te.
+        its leg derivative is in ga_te and gb_te. With *chain* the aft
+        segments end at ``ae``, ``be`` (their derivatives are ga_e, gb_e;
+        zero without chains), and the own leg segments of a source take the
+        adjoint of every source before them on their chain (``nxt``).
         """
         m = P.shape[0]
         n = a.shape[0]
@@ -473,10 +499,16 @@ if HAVE_NUMBA:
         gX = np.zeros((m, 3))
         gtg = np.zeros(m)
         buf = np.zeros((nblocks, n, _NSRC))
+        # Slots of the aft-segment ends: a_te and b_te, or the chain ends.
+        sa = 23 if chain else 6
+        sb = 26 if chain else 9
         for t in prange(nblocks):
             i0 = (t * m) // nblocks
             i1 = ((t + 1) * m) // nblocks
+            # X . (own legs) of each source of the row (chains only).
+            xo = np.zeros(n if chain else 1)
             for i in range(i0, i1):
+                cw = 0.0
                 px = P[i, 0]
                 py = P[i, 1]
                 pz = P[i, 2]
@@ -497,6 +529,17 @@ if HAVE_NUMBA:
                     ux = cij * xx
                     uy = cij * xy
                     uz = cij * xz
+                    # Adjoint of the own leg segments: the sum over the chain.
+                    if chain and j > 0 and nxt[j - 1] != 0:
+                        cw = cij + cw
+                    else:
+                        cw = cij
+                    lux = cw * xx
+                    luy = cw * xy
+                    luz = cw * xz
+                    ox = 0.0
+                    oy = 0.0
+                    oz = 0.0
                     ax = a[j, 0]
                     ay = a[j, 1]
                     az = a[j, 2]
@@ -538,10 +581,15 @@ if HAVE_NUMBA:
                     # End of the forward b-leg segment: the node, or b_te.
                     kb = 20 if kj else 9
                     if edge[i] != sea[j]:
-                        r = _seg_fb(px, py, pz, ak[j, 0], ak[j, 1], ak[j, 2], ax, ay, az, rc2, ux, uy, uz)
-                        vx += r[0]
-                        vy += r[1]
-                        vz += r[2]
+                        r = _seg_fb(px, py, pz, ak[j, 0], ak[j, 1], ak[j, 2], ax, ay, az, rc2, lux, luy, luz)
+                        if chain:
+                            ox += r[0]
+                            oy += r[1]
+                            oz += r[2]
+                        else:
+                            vx += r[0]
+                            vy += r[1]
+                            vz += r[2]
                         aPx += r[3]
                         aPy += r[4]
                         aPz += r[5]
@@ -553,25 +601,36 @@ if HAVE_NUMBA:
                         bu[2] += r[11]
                         grc += r[12]
                     if kj and edge[i] != seka[j]:
-                        r = _seg_fb(px, py, pz, tax, tay, taz, ak[j, 0], ak[j, 1], ak[j, 2], rc2, ux, uy, uz)
-                        vx += r[0]
-                        vy += r[1]
-                        vz += r[2]
+                        r = _seg_fb(px, py, pz, ae[j, 0], ae[j, 1], ae[j, 2], ak[j, 0], ak[j, 1], ak[j, 2], rc2,
+                                    lux, luy, luz)
+                        if chain:
+                            ox += r[0]
+                            oy += r[1]
+                            oz += r[2]
+                        else:
+                            vx += r[0]
+                            vy += r[1]
+                            vz += r[2]
                         aPx += r[3]
                         aPy += r[4]
                         aPz += r[5]
-                        bu[6] += r[6]
-                        bu[7] += r[7]
-                        bu[8] += r[8]
+                        bu[sa] += r[6]
+                        bu[sa + 1] += r[7]
+                        bu[sa + 2] += r[8]
                         bu[17] += r[9]
                         bu[18] += r[10]
                         bu[19] += r[11]
                         grc += r[12]
                     if edge[i] != seb[j]:
-                        r = _seg_fb(px, py, pz, bx, by, bz, bk[j, 0], bk[j, 1], bk[j, 2], rc2, ux, uy, uz)
-                        vx += r[0]
-                        vy += r[1]
-                        vz += r[2]
+                        r = _seg_fb(px, py, pz, bx, by, bz, bk[j, 0], bk[j, 1], bk[j, 2], rc2, lux, luy, luz)
+                        if chain:
+                            ox += r[0]
+                            oy += r[1]
+                            oz += r[2]
+                        else:
+                            vx += r[0]
+                            vy += r[1]
+                            vz += r[2]
                         aPx += r[3]
                         aPy += r[4]
                         aPz += r[5]
@@ -583,19 +642,25 @@ if HAVE_NUMBA:
                         bu[kb + 2] += r[11]
                         grc += r[12]
                     if kj and edge[i] != sekb[j]:
-                        r = _seg_fb(px, py, pz, bk[j, 0], bk[j, 1], bk[j, 2], tbx, tby, tbz, rc2, ux, uy, uz)
-                        vx += r[0]
-                        vy += r[1]
-                        vz += r[2]
+                        r = _seg_fb(px, py, pz, bk[j, 0], bk[j, 1], bk[j, 2], be[j, 0], be[j, 1], be[j, 2], rc2,
+                                    lux, luy, luz)
+                        if chain:
+                            ox += r[0]
+                            oy += r[1]
+                            oz += r[2]
+                        else:
+                            vx += r[0]
+                            vy += r[1]
+                            vz += r[2]
                         aPx += r[3]
                         aPy += r[4]
                         aPz += r[5]
                         bu[20] += r[6]
                         bu[21] += r[7]
                         bu[22] += r[8]
-                        bu[9] += r[9]
-                        bu[10] += r[10]
-                        bu[11] += r[11]
+                        bu[sb] += r[9]
+                        bu[sb + 1] += r[10]
+                        bu[sb + 2] += r[11]
                         grc += r[12]
                     q = _ray_fb(px, py, pz, tbx, tby, tbz, dx, dy, dz, rc2, ux, uy, uz)
                     vx += q[0]
@@ -625,13 +690,30 @@ if HAVE_NUMBA:
                     bu[13] += q[7]
                     bu[14] += q[8]
                     grc += q[9]
-                    aXx += cij * vx
-                    aXy += cij * vy
-                    aXz += cij * vz
+                    # The legs of the sources after j on its chain are in the
+                    # chain sum cw of their own segments (gX) and in the
+                    # suffix pass below (gs).
+                    # Without chains ox is zero and the own legs are in v.
+                    aXx += cij * vx + cw * ox
+                    aXy += cij * vy + cw * oy
+                    aXz += cij * vz + cw * oz
                     bu[15] += grc
-                    bu[16] += wf * (xx * vx + xy * vy + xz * vz)
+                    bu[16] += wf * (xx * (vx + ox) + xy * (vy + oy) + xz * (vz + oz))
+                    if chain:
+                        xo[j] = xx * ox + xy * oy + xz * oz
                     if oth:
                         atg += grc
+                if chain:
+                    # gs: the own legs of the sources after each source on its chain.
+                    tail = 0.0
+                    for jj in range(n):
+                        j = n - 1 - jj
+                        if nxt[j] != 0:
+                            tail = xo[j + 1] + tail
+                            wf = W[i, col[j]] if use_W else 1.0
+                            buf[t, j, 16] += wf * tail
+                        else:
+                            tail = 0.0
                 gP[i, 0] = aPx
                 gP[i, 1] = aPy
                 gP[i, 2] = aPz
@@ -646,7 +728,37 @@ if HAVE_NUMBA:
                     acc[j, k] += buf[t, j, k]
         return (gP, gX, gtg, acc[:, 0:3].copy(), acc[:, 3:6].copy(), acc[:, 6:9].copy(),
                 acc[:, 9:12].copy(), acc[:, 12:15].copy(), acc[:, 15].copy(), acc[:, 16].copy(),
-                acc[:, 17:20].copy(), acc[:, 20:23].copy())
+                acc[:, 17:20].copy(), acc[:, 20:23].copy(), acc[:, 23:26].copy(), acc[:, 26:29].copy())
+
+    _NO_CHAIN = np.zeros(1, dtype=np.int8)
+
+    def horseshoe_forward_kink_kernel(mode, P, X, a, b, ate, bte, d, rc2s, tgrc2, sgrp, tgrp, own, spanel,
+                                      edge, sea, seb, s, col, n_u, use_tg, ak, bk, kfl, seka, sekb,
+                                      ae=None, be=None, nxt=None):
+        """Return the system rows (mode 0) or the induced velocity (mode 1) of sources with leg nodes.
+
+        *ae*, *be*, *nxt* are the leg chains (see
+        :func:`horseshoe_forward_chain_kernel`), or None.
+        """
+        if nxt is None:
+            return horseshoe_forward_chain_kernel(mode, P, X, a, b, ate, bte, d, rc2s, tgrc2, sgrp, tgrp, own,
+                                                  spanel, edge, sea, seb, s, col, n_u, use_tg, ak, bk, kfl, seka,
+                                                  sekb, ate, bte, _NO_CHAIN, False)
+        return horseshoe_forward_chain_kernel(mode, P, X, a, b, ate, bte, d, rc2s, tgrc2, sgrp, tgrp, own, spanel,
+                                              edge, sea, seb, s, col, n_u, use_tg, ak, bk, kfl, seka, sekb,
+                                              ae, be, nxt, True)
+
+    def horseshoe_vjp_kink_kernel(P, X, a, b, ate, bte, d, rc2s, tgrc2, sgrp, tgrp, own, spanel, edge, sea, seb,
+                                  s, col, W, use_W, use_tg, nblocks, ak, bk, kfl, seka, sekb,
+                                  ae=None, be=None, nxt=None):
+        """Return the VJP of sources with leg nodes: 12 items, or 14 with the leg chains *ae*, *be*, *nxt*."""
+        if nxt is None:
+            return horseshoe_vjp_chain_kernel(P, X, a, b, ate, bte, d, rc2s, tgrc2, sgrp, tgrp, own, spanel, edge,
+                                              sea, seb, s, col, W, use_W, use_tg, nblocks, ak, bk, kfl, seka, sekb,
+                                              ate, bte, _NO_CHAIN, False)[:12]
+        return horseshoe_vjp_chain_kernel(P, X, a, b, ate, bte, d, rc2s, tgrc2, sgrp, tgrp, own, spanel, edge,
+                                          sea, seb, s, col, W, use_W, use_tg, nblocks, ak, bk, kfl, seka, sekb,
+                                          ae, be, nxt, True)
 
     def horseshoe_forward_kernel(mode, P, X, a, b, ate, bte, d, rc2s, tgrc2, sgrp, tgrp, own, spanel,
                                  edge, sea, seb, s, col, n_u, use_tg):

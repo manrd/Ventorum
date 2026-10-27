@@ -55,6 +55,24 @@ def openmp_enabled():
     """
     return bool(VENTORUM_HAVE_OPENMP)
 
+_NO_CHAIN = np.zeros(1, dtype=np.int8)
+
+
+def has_leg_chains():
+    """Return True: the kernels of this build take the leg chains ``a_end``, ``b_end`` and ``leg_next``.
+
+    The legs of a source with ``leg_next`` True continue on the legs of the
+    next source, see :class:`ventorum.aero.vortex.HorseshoeSet`. The kernels
+    then run the sources of each row from the last to the first.
+
+    Returns
+    -------
+    bool
+        Always True for this source.
+    """
+    return True
+
+
 def has_leg_kinks():
     """Return True: the kernels of this build take the leg nodes ``a_kink`` and ``b_kink``.
 
@@ -148,7 +166,8 @@ def induced_velocity_kernel(const double[:, ::1] P, const double[:, ::1] a, cons
                             const double[:, ::1] a_te, const double[:, ::1] b_te, const double[:, ::1] d,
                             const double[::1] rc2_src, const cnp.int64_t[::1] src_group, const double[::1] g_src,
                             const cnp.int64_t[::1] tg_group, const double[::1] tg_rc2, bint use_tg,
-                            int parts, int num_threads, a_kink=None, b_kink=None):
+                            int parts, int num_threads, a_kink=None, b_kink=None,
+                            a_end=None, b_end=None, leg_next=None):
     """Return the total induced velocity at the evaluation points.
 
     Parameters
@@ -180,6 +199,10 @@ def induced_velocity_kernel(const double[:, ::1] P, const double[:, ::1] a, cons
     a_kink, b_kink : (n, 3) or None
         Nodes of the chordwise legs [m] (see ``a_kink`` in
         :class:`ventorum.aero.vortex.HorseshoeSet`), or None for straight legs.
+    a_end, b_end, leg_next : arrays or None
+        Ends of the own leg segments [m], shape (n, 3), and chain flags (n,)
+        int8 of a set with leg chains (see ``leg_next`` in
+        :class:`ventorum.aero.vortex.HorseshoeSet`), or None.
 
     Returns
     -------
@@ -202,6 +225,16 @@ def induced_velocity_kernel(const double[:, ::1] P, const double[:, ::1] a, cons
     cdef bint kink = a_kink is not None
     cdef const double[:, ::1] ak = a_te if a_kink is None else a_kink
     cdef const double[:, ::1] bk = b_te if b_kink is None else b_kink
+    # Leg chains: the own leg segments end at ae, be (the trailing edge, or
+    # the bound points of the next source); the legs of the next source of
+    # a chain are added from the running sum of the row (sources run from
+    # the last to the first).
+    cdef bint walk = leg_next is not None and parts != 2
+    cdef const double[:, ::1] ae = a_te if a_end is None else a_end
+    cdef const double[:, ::1] be = b_te if b_end is None else b_end
+    cdef const signed char[::1] nxt = _NO_CHAIN if leg_next is None else leg_next
+    cdef Py_ssize_t jj
+    cdef double lx, ly, lz, ccx, ccy, ccz, eax, eay, eaz, ebx, eby, ebz
     cdef double dx, dy, dz
     cdef double rbrx, rbry, rbrz, rbrn, larx, lary, larz, larn
     cdef double qx, qy, qz, qcr2, qdr, qk
@@ -301,7 +334,11 @@ def induced_velocity_kernel(const double[:, ::1] P, const double[:, ::1] a, cons
         px = P[i, 0]
         py = P[i, 1]
         pz = P[i, 2]
-        for j in range(n):
+        ccx = 0.0
+        ccy = 0.0
+        ccz = 0.0
+        for jj in range(n):
+            j = n - 1 - jj if walk else jj
             rc2 = rc2_src[j]
             if use_tg and tg_group[i] != src_group[j]:
                 rc2 = rc2 + tg_rc2[i]
@@ -319,6 +356,9 @@ def induced_velocity_kernel(const double[:, ::1] P, const double[:, ::1] a, cons
             tbz = b_te[j, 2]
             straight_left = tax == ax and tay == ay and taz == az
             straight_right = tbx == bx and tby == by and tbz == bz
+            lx = 0.0
+            ly = 0.0
+            lz = 0.0
             r1x = 0.0
             r1y = 0.0
             r1z = 0.0
@@ -392,15 +432,21 @@ def induced_velocity_kernel(const double[:, ::1] P, const double[:, ::1] a, cons
                     vx = vx + cx * k
                     vy = vy + cy * k
                     vz = vz + cz * k
-                    if kink and (kax != tax or kay != tay or kaz != taz):
-                        # Aft segment a_te -> node of a leg with a node.
-                        t1x = px - tax
-                        t1y = py - tay
-                        t1z = pz - taz
+                    lx = lx + cx * k
+                    ly = ly + cy * k
+                    lz = lz + cz * k
+                    eax = ae[j, 0]
+                    eay = ae[j, 1]
+                    eaz = ae[j, 2]
+                    if kink and (kax != eax or kay != eay or kaz != eaz):
+                        # Aft segment end -> node of a leg with a node.
+                        t1x = px - eax
+                        t1y = py - eay
+                        t1z = pz - eaz
                         nt = sqrt(t1x * t1x + t1y * t1y + t1z * t1z + 1e-300)
-                        r0x = kax - tax
-                        r0y = kay - tay
-                        r0z = kaz - taz
+                        r0x = kax - eax
+                        r0y = kay - eay
+                        r0z = kaz - eaz
                         cx = t1y * q1z - t1z * q1y
                         cy = t1z * q1x - t1x * q1z
                         cz = t1x * q1y - t1y * q1x
@@ -411,6 +457,9 @@ def induced_velocity_kernel(const double[:, ::1] P, const double[:, ::1] a, cons
                         vx = vx + cx * k
                         vy = vy + cy * k
                         vz = vz + cz * k
+                        lx = lx + cx * k
+                        ly = ly + cy * k
+                        lz = lz + cz * k
                 if not straight_right:
                     kbx = tbx
                     kby = tby
@@ -436,15 +485,21 @@ def induced_velocity_kernel(const double[:, ::1] P, const double[:, ::1] a, cons
                     vx = vx + cx * k
                     vy = vy + cy * k
                     vz = vz + cz * k
-                    if kink and (kbx != tbx or kby != tby or kbz != tbz):
-                        # Aft segment node -> b_te of a leg with a node.
-                        t2x = px - tbx
-                        t2y = py - tby
-                        t2z = pz - tbz
+                    lx = lx + cx * k
+                    ly = ly + cy * k
+                    lz = lz + cz * k
+                    ebx = be[j, 0]
+                    eby = be[j, 1]
+                    ebz = be[j, 2]
+                    if kink and (kbx != ebx or kby != eby or kbz != ebz):
+                        # Aft segment node -> end of a leg with a node.
+                        t2x = px - ebx
+                        t2y = py - eby
+                        t2z = pz - ebz
                         nt = sqrt(t2x * t2x + t2y * t2y + t2z * t2z + 1e-300)
-                        r0x = tbx - kbx
-                        r0y = tby - kby
-                        r0z = tbz - kbz
+                        r0x = ebx - kbx
+                        r0y = eby - kby
+                        r0z = ebz - kbz
                         cx = w2y * t2z - w2z * t2y
                         cy = w2z * t2x - w2x * t2z
                         cz = w2x * t2y - w2y * t2x
@@ -455,6 +510,9 @@ def induced_velocity_kernel(const double[:, ::1] P, const double[:, ::1] a, cons
                         vx = vx + cx * k
                         vy = vy + cy * k
                         vz = vz + cz * k
+                        lx = lx + cx * k
+                        ly = ly + cy * k
+                        lz = lz + cz * k
             if parts != 1:
                 if straight_right:
                     rbrx = r2x
@@ -518,6 +576,17 @@ def induced_velocity_kernel(const double[:, ::1] P, const double[:, ::1] a, cons
                     vx = vx - ex
                     vy = vy - ey
                     vz = vz - ez
+            if walk:
+                if nxt[j] != 0:
+                    vx = vx + ccx
+                    vy = vy + ccy
+                    vz = vz + ccz
+                    lx = lx + ccx
+                    ly = ly + ccy
+                    lz = lz + ccz
+                ccx = lx
+                ccy = ly
+                ccz = lz
             g = g_src[j]
             sx = sx + vx * g
             sy = sy + vy * g
@@ -534,7 +603,8 @@ def normal_influence_kernel(const double[:, ::1] P, const double[:, ::1] normals
                             const double[::1] rc2_src, const cnp.int64_t[::1] src_group, const double[::1] sign,
                             const cnp.int64_t[::1] column, int n_unknowns,
                             const cnp.int64_t[::1] tg_group, const double[::1] tg_rc2, bint use_tg,
-                            int parts, int num_threads, a_kink=None, b_kink=None):
+                            int parts, int num_threads, a_kink=None, b_kink=None,
+                            a_end=None, b_end=None, leg_next=None):
     """Return the normal-velocity influence matrix.
 
     ``A[i, j]`` is the velocity normal to ``normals[i]`` at ``P[i]`` for unit
@@ -577,6 +647,10 @@ def normal_influence_kernel(const double[:, ::1] P, const double[:, ::1] normals
     a_kink, b_kink : (n, 3) or None
         Nodes of the chordwise legs [m] (see ``a_kink`` in
         :class:`ventorum.aero.vortex.HorseshoeSet`), or None for straight legs.
+    a_end, b_end, leg_next : arrays or None
+        Ends of the own leg segments [m], shape (n, 3), and chain flags (n,)
+        int8 of a set with leg chains (see ``leg_next`` in
+        :class:`ventorum.aero.vortex.HorseshoeSet`), or None.
 
     Returns
     -------
@@ -599,6 +673,16 @@ def normal_influence_kernel(const double[:, ::1] P, const double[:, ::1] normals
     cdef bint kink = a_kink is not None
     cdef const double[:, ::1] ak = a_te if a_kink is None else a_kink
     cdef const double[:, ::1] bk = b_te if b_kink is None else b_kink
+    # Leg chains: the own leg segments end at ae, be (the trailing edge, or
+    # the bound points of the next source); the legs of the next source of
+    # a chain are added from the running sum of the row (sources run from
+    # the last to the first).
+    cdef bint walk = leg_next is not None and parts != 2
+    cdef const double[:, ::1] ae = a_te if a_end is None else a_end
+    cdef const double[:, ::1] be = b_te if b_end is None else b_end
+    cdef const signed char[::1] nxt = _NO_CHAIN if leg_next is None else leg_next
+    cdef Py_ssize_t jj
+    cdef double lx, ly, lz, ccx, ccy, ccz, eax, eay, eaz, ebx, eby, ebz
     cdef double dx, dy, dz
     cdef double rbrx, rbry, rbrz, rbrn, larx, lary, larz, larn
     cdef double qx, qy, qz, qcr2, qdr, qk
@@ -695,7 +779,11 @@ def normal_influence_kernel(const double[:, ::1] P, const double[:, ::1] normals
         px = P[i, 0]
         py = P[i, 1]
         pz = P[i, 2]
-        for j in range(n):
+        ccx = 0.0
+        ccy = 0.0
+        ccz = 0.0
+        for jj in range(n):
+            j = n - 1 - jj if walk else jj
             rc2 = rc2_src[j]
             if use_tg and tg_group[i] != src_group[j]:
                 rc2 = rc2 + tg_rc2[i]
@@ -713,6 +801,9 @@ def normal_influence_kernel(const double[:, ::1] P, const double[:, ::1] normals
             tbz = b_te[j, 2]
             straight_left = tax == ax and tay == ay and taz == az
             straight_right = tbx == bx and tby == by and tbz == bz
+            lx = 0.0
+            ly = 0.0
+            lz = 0.0
             r1x = 0.0
             r1y = 0.0
             r1z = 0.0
@@ -786,15 +877,21 @@ def normal_influence_kernel(const double[:, ::1] P, const double[:, ::1] normals
                     vx = vx + cx * k
                     vy = vy + cy * k
                     vz = vz + cz * k
-                    if kink and (kax != tax or kay != tay or kaz != taz):
-                        # Aft segment a_te -> node of a leg with a node.
-                        t1x = px - tax
-                        t1y = py - tay
-                        t1z = pz - taz
+                    lx = lx + cx * k
+                    ly = ly + cy * k
+                    lz = lz + cz * k
+                    eax = ae[j, 0]
+                    eay = ae[j, 1]
+                    eaz = ae[j, 2]
+                    if kink and (kax != eax or kay != eay or kaz != eaz):
+                        # Aft segment end -> node of a leg with a node.
+                        t1x = px - eax
+                        t1y = py - eay
+                        t1z = pz - eaz
                         nt = sqrt(t1x * t1x + t1y * t1y + t1z * t1z + 1e-300)
-                        r0x = kax - tax
-                        r0y = kay - tay
-                        r0z = kaz - taz
+                        r0x = kax - eax
+                        r0y = kay - eay
+                        r0z = kaz - eaz
                         cx = t1y * q1z - t1z * q1y
                         cy = t1z * q1x - t1x * q1z
                         cz = t1x * q1y - t1y * q1x
@@ -805,6 +902,9 @@ def normal_influence_kernel(const double[:, ::1] P, const double[:, ::1] normals
                         vx = vx + cx * k
                         vy = vy + cy * k
                         vz = vz + cz * k
+                        lx = lx + cx * k
+                        ly = ly + cy * k
+                        lz = lz + cz * k
                 if not straight_right:
                     kbx = tbx
                     kby = tby
@@ -830,15 +930,21 @@ def normal_influence_kernel(const double[:, ::1] P, const double[:, ::1] normals
                     vx = vx + cx * k
                     vy = vy + cy * k
                     vz = vz + cz * k
-                    if kink and (kbx != tbx or kby != tby or kbz != tbz):
-                        # Aft segment node -> b_te of a leg with a node.
-                        t2x = px - tbx
-                        t2y = py - tby
-                        t2z = pz - tbz
+                    lx = lx + cx * k
+                    ly = ly + cy * k
+                    lz = lz + cz * k
+                    ebx = be[j, 0]
+                    eby = be[j, 1]
+                    ebz = be[j, 2]
+                    if kink and (kbx != ebx or kby != eby or kbz != ebz):
+                        # Aft segment node -> end of a leg with a node.
+                        t2x = px - ebx
+                        t2y = py - eby
+                        t2z = pz - ebz
                         nt = sqrt(t2x * t2x + t2y * t2y + t2z * t2z + 1e-300)
-                        r0x = tbx - kbx
-                        r0y = tby - kby
-                        r0z = tbz - kbz
+                        r0x = ebx - kbx
+                        r0y = eby - kby
+                        r0z = ebz - kbz
                         cx = w2y * t2z - w2z * t2y
                         cy = w2z * t2x - w2x * t2z
                         cz = w2x * t2y - w2y * t2x
@@ -849,6 +955,9 @@ def normal_influence_kernel(const double[:, ::1] P, const double[:, ::1] normals
                         vx = vx + cx * k
                         vy = vy + cy * k
                         vz = vz + cz * k
+                        lx = lx + cx * k
+                        ly = ly + cy * k
+                        lz = lz + cz * k
             if parts != 1:
                 if straight_right:
                     rbrx = r2x
@@ -912,6 +1021,17 @@ def normal_influence_kernel(const double[:, ::1] P, const double[:, ::1] normals
                     vx = vx - ex
                     vy = vy - ey
                     vz = vz - ez
+            if walk:
+                if nxt[j] != 0:
+                    vx = vx + ccx
+                    vy = vy + ccy
+                    vz = vz + ccz
+                    lx = lx + ccx
+                    ly = ly + ccy
+                    lz = lz + ccz
+                ccx = lx
+                ccy = ly
+                ccz = lz
             out_v[i, column[j]] += (vx * nx + vy * ny + vz * nz) * sign[j]
     return out
 
@@ -920,7 +1040,8 @@ def velocity_tensor_kernel(const double[:, ::1] P, const double[:, ::1] a, const
                            const double[:, ::1] a_te, const double[:, ::1] b_te, const double[:, ::1] d,
                            const double[::1] rc2_src, const cnp.int64_t[::1] src_group, const double[::1] sign,
                            const cnp.int64_t[::1] tg_group, const double[::1] tg_rc2, bint use_tg,
-                           int parts, int num_threads, a_kink=None, b_kink=None):
+                           int parts, int num_threads, a_kink=None, b_kink=None,
+                            a_end=None, b_end=None, leg_next=None):
     """Return the velocity per source horseshoe, with the source sign applied.
 
     Parameters
@@ -952,6 +1073,10 @@ def velocity_tensor_kernel(const double[:, ::1] P, const double[:, ::1] a, const
     a_kink, b_kink : (n, 3) or None
         Nodes of the chordwise legs [m] (see ``a_kink`` in
         :class:`ventorum.aero.vortex.HorseshoeSet`), or None for straight legs.
+    a_end, b_end, leg_next : arrays or None
+        Ends of the own leg segments [m], shape (n, 3), and chain flags (n,)
+        int8 of a set with leg chains (see ``leg_next`` in
+        :class:`ventorum.aero.vortex.HorseshoeSet`), or None.
 
     Returns
     -------
@@ -974,6 +1099,16 @@ def velocity_tensor_kernel(const double[:, ::1] P, const double[:, ::1] a, const
     cdef bint kink = a_kink is not None
     cdef const double[:, ::1] ak = a_te if a_kink is None else a_kink
     cdef const double[:, ::1] bk = b_te if b_kink is None else b_kink
+    # Leg chains: the own leg segments end at ae, be (the trailing edge, or
+    # the bound points of the next source); the legs of the next source of
+    # a chain are added from the running sum of the row (sources run from
+    # the last to the first).
+    cdef bint walk = leg_next is not None and parts != 2
+    cdef const double[:, ::1] ae = a_te if a_end is None else a_end
+    cdef const double[:, ::1] be = b_te if b_end is None else b_end
+    cdef const signed char[::1] nxt = _NO_CHAIN if leg_next is None else leg_next
+    cdef Py_ssize_t jj
+    cdef double lx, ly, lz, ccx, ccy, ccz, eax, eay, eaz, ebx, eby, ebz
     cdef double dx, dy, dz
     cdef double rbrx, rbry, rbrz, rbrn, larx, lary, larz, larn
     cdef double qx, qy, qz, qcr2, qdr, qk
@@ -987,7 +1122,11 @@ def velocity_tensor_kernel(const double[:, ::1] P, const double[:, ::1] a, const
         px = P[i, 0]
         py = P[i, 1]
         pz = P[i, 2]
-        for j in range(n):
+        ccx = 0.0
+        ccy = 0.0
+        ccz = 0.0
+        for jj in range(n):
+            j = n - 1 - jj if walk else jj
             rc2 = rc2_src[j]
             if use_tg and tg_group[i] != src_group[j]:
                 rc2 = rc2 + tg_rc2[i]
@@ -1005,6 +1144,9 @@ def velocity_tensor_kernel(const double[:, ::1] P, const double[:, ::1] a, const
             tbz = b_te[j, 2]
             straight_left = tax == ax and tay == ay and taz == az
             straight_right = tbx == bx and tby == by and tbz == bz
+            lx = 0.0
+            ly = 0.0
+            lz = 0.0
             r1x = 0.0
             r1y = 0.0
             r1z = 0.0
@@ -1078,15 +1220,21 @@ def velocity_tensor_kernel(const double[:, ::1] P, const double[:, ::1] a, const
                     vx = vx + cx * k
                     vy = vy + cy * k
                     vz = vz + cz * k
-                    if kink and (kax != tax or kay != tay or kaz != taz):
-                        # Aft segment a_te -> node of a leg with a node.
-                        t1x = px - tax
-                        t1y = py - tay
-                        t1z = pz - taz
+                    lx = lx + cx * k
+                    ly = ly + cy * k
+                    lz = lz + cz * k
+                    eax = ae[j, 0]
+                    eay = ae[j, 1]
+                    eaz = ae[j, 2]
+                    if kink and (kax != eax or kay != eay or kaz != eaz):
+                        # Aft segment end -> node of a leg with a node.
+                        t1x = px - eax
+                        t1y = py - eay
+                        t1z = pz - eaz
                         nt = sqrt(t1x * t1x + t1y * t1y + t1z * t1z + 1e-300)
-                        r0x = kax - tax
-                        r0y = kay - tay
-                        r0z = kaz - taz
+                        r0x = kax - eax
+                        r0y = kay - eay
+                        r0z = kaz - eaz
                         cx = t1y * q1z - t1z * q1y
                         cy = t1z * q1x - t1x * q1z
                         cz = t1x * q1y - t1y * q1x
@@ -1097,6 +1245,9 @@ def velocity_tensor_kernel(const double[:, ::1] P, const double[:, ::1] a, const
                         vx = vx + cx * k
                         vy = vy + cy * k
                         vz = vz + cz * k
+                        lx = lx + cx * k
+                        ly = ly + cy * k
+                        lz = lz + cz * k
                 if not straight_right:
                     kbx = tbx
                     kby = tby
@@ -1122,15 +1273,21 @@ def velocity_tensor_kernel(const double[:, ::1] P, const double[:, ::1] a, const
                     vx = vx + cx * k
                     vy = vy + cy * k
                     vz = vz + cz * k
-                    if kink and (kbx != tbx or kby != tby or kbz != tbz):
-                        # Aft segment node -> b_te of a leg with a node.
-                        t2x = px - tbx
-                        t2y = py - tby
-                        t2z = pz - tbz
+                    lx = lx + cx * k
+                    ly = ly + cy * k
+                    lz = lz + cz * k
+                    ebx = be[j, 0]
+                    eby = be[j, 1]
+                    ebz = be[j, 2]
+                    if kink and (kbx != ebx or kby != eby or kbz != ebz):
+                        # Aft segment node -> end of a leg with a node.
+                        t2x = px - ebx
+                        t2y = py - eby
+                        t2z = pz - ebz
                         nt = sqrt(t2x * t2x + t2y * t2y + t2z * t2z + 1e-300)
-                        r0x = tbx - kbx
-                        r0y = tby - kby
-                        r0z = tbz - kbz
+                        r0x = ebx - kbx
+                        r0y = eby - kby
+                        r0z = ebz - kbz
                         cx = w2y * t2z - w2z * t2y
                         cy = w2z * t2x - w2x * t2z
                         cz = w2x * t2y - w2y * t2x
@@ -1141,6 +1298,9 @@ def velocity_tensor_kernel(const double[:, ::1] P, const double[:, ::1] a, const
                         vx = vx + cx * k
                         vy = vy + cy * k
                         vz = vz + cz * k
+                        lx = lx + cx * k
+                        ly = ly + cy * k
+                        lz = lz + cz * k
             if parts != 1:
                 if straight_right:
                     rbrx = r2x
@@ -1204,6 +1364,17 @@ def velocity_tensor_kernel(const double[:, ::1] P, const double[:, ::1] a, const
                     vx = vx - ex
                     vy = vy - ey
                     vz = vz - ez
+            if walk:
+                if nxt[j] != 0:
+                    vx = vx + ccx
+                    vy = vy + ccy
+                    vz = vz + ccz
+                    lx = lx + ccx
+                    ly = ly + ccy
+                    lz = lz + ccz
+                ccx = lx
+                ccy = ly
+                ccz = lz
             s = sign[j]
             out_v[i, j, 0] = vx * s
             out_v[i, j, 1] = vy * s
@@ -1217,7 +1388,8 @@ def velocity_unknowns_kernel(const double[:, ::1] P, const double[:, ::1] a, con
                            const double[::1] rc2_src, const cnp.int64_t[::1] src_group, const double[::1] sign,
                            const cnp.int64_t[::1] column, Py_ssize_t n_unknowns,
                            const cnp.int64_t[::1] tg_group, const double[::1] tg_rc2, bint use_tg,
-                           int parts, int num_threads, a_kink=None, b_kink=None):
+                           int parts, int num_threads, a_kink=None, b_kink=None,
+                            a_end=None, b_end=None, leg_next=None):
     """Return the velocity per unknown: the sources of each unknown added in source order (sign applied).
 
     The same velocities as ``velocity_tensor_kernel``, accumulated into
@@ -1257,6 +1429,10 @@ def velocity_unknowns_kernel(const double[:, ::1] P, const double[:, ::1] a, con
     a_kink, b_kink : (n, 3) or None
         Nodes of the chordwise legs [m] (see ``a_kink`` in
         :class:`ventorum.aero.vortex.HorseshoeSet`), or None for straight legs.
+    a_end, b_end, leg_next : arrays or None
+        Ends of the own leg segments [m], shape (n, 3), and chain flags (n,)
+        int8 of a set with leg chains (see ``leg_next`` in
+        :class:`ventorum.aero.vortex.HorseshoeSet`), or None.
 
     Returns
     -------
@@ -1279,6 +1455,16 @@ def velocity_unknowns_kernel(const double[:, ::1] P, const double[:, ::1] a, con
     cdef bint kink = a_kink is not None
     cdef const double[:, ::1] ak = a_te if a_kink is None else a_kink
     cdef const double[:, ::1] bk = b_te if b_kink is None else b_kink
+    # Leg chains: the own leg segments end at ae, be (the trailing edge, or
+    # the bound points of the next source); the legs of the next source of
+    # a chain are added from the running sum of the row (sources run from
+    # the last to the first).
+    cdef bint walk = leg_next is not None and parts != 2
+    cdef const double[:, ::1] ae = a_te if a_end is None else a_end
+    cdef const double[:, ::1] be = b_te if b_end is None else b_end
+    cdef const signed char[::1] nxt = _NO_CHAIN if leg_next is None else leg_next
+    cdef Py_ssize_t jj
+    cdef double lx, ly, lz, ccx, ccy, ccz, eax, eay, eaz, ebx, eby, ebz
     cdef double dx, dy, dz
     cdef double rbrx, rbry, rbrz, rbrn, larx, lary, larz, larn
     cdef double qx, qy, qz, qcr2, qdr, qk
@@ -1292,7 +1478,11 @@ def velocity_unknowns_kernel(const double[:, ::1] P, const double[:, ::1] a, con
         px = P[i, 0]
         py = P[i, 1]
         pz = P[i, 2]
-        for j in range(n):
+        ccx = 0.0
+        ccy = 0.0
+        ccz = 0.0
+        for jj in range(n):
+            j = n - 1 - jj if walk else jj
             rc2 = rc2_src[j]
             if use_tg and tg_group[i] != src_group[j]:
                 rc2 = rc2 + tg_rc2[i]
@@ -1310,6 +1500,9 @@ def velocity_unknowns_kernel(const double[:, ::1] P, const double[:, ::1] a, con
             tbz = b_te[j, 2]
             straight_left = tax == ax and tay == ay and taz == az
             straight_right = tbx == bx and tby == by and tbz == bz
+            lx = 0.0
+            ly = 0.0
+            lz = 0.0
             r1x = 0.0
             r1y = 0.0
             r1z = 0.0
@@ -1383,15 +1576,21 @@ def velocity_unknowns_kernel(const double[:, ::1] P, const double[:, ::1] a, con
                     vx = vx + cx * k
                     vy = vy + cy * k
                     vz = vz + cz * k
-                    if kink and (kax != tax or kay != tay or kaz != taz):
-                        # Aft segment a_te -> node of a leg with a node.
-                        t1x = px - tax
-                        t1y = py - tay
-                        t1z = pz - taz
+                    lx = lx + cx * k
+                    ly = ly + cy * k
+                    lz = lz + cz * k
+                    eax = ae[j, 0]
+                    eay = ae[j, 1]
+                    eaz = ae[j, 2]
+                    if kink and (kax != eax or kay != eay or kaz != eaz):
+                        # Aft segment end -> node of a leg with a node.
+                        t1x = px - eax
+                        t1y = py - eay
+                        t1z = pz - eaz
                         nt = sqrt(t1x * t1x + t1y * t1y + t1z * t1z + 1e-300)
-                        r0x = kax - tax
-                        r0y = kay - tay
-                        r0z = kaz - taz
+                        r0x = kax - eax
+                        r0y = kay - eay
+                        r0z = kaz - eaz
                         cx = t1y * q1z - t1z * q1y
                         cy = t1z * q1x - t1x * q1z
                         cz = t1x * q1y - t1y * q1x
@@ -1402,6 +1601,9 @@ def velocity_unknowns_kernel(const double[:, ::1] P, const double[:, ::1] a, con
                         vx = vx + cx * k
                         vy = vy + cy * k
                         vz = vz + cz * k
+                        lx = lx + cx * k
+                        ly = ly + cy * k
+                        lz = lz + cz * k
                 if not straight_right:
                     kbx = tbx
                     kby = tby
@@ -1427,15 +1629,21 @@ def velocity_unknowns_kernel(const double[:, ::1] P, const double[:, ::1] a, con
                     vx = vx + cx * k
                     vy = vy + cy * k
                     vz = vz + cz * k
-                    if kink and (kbx != tbx or kby != tby or kbz != tbz):
-                        # Aft segment node -> b_te of a leg with a node.
-                        t2x = px - tbx
-                        t2y = py - tby
-                        t2z = pz - tbz
+                    lx = lx + cx * k
+                    ly = ly + cy * k
+                    lz = lz + cz * k
+                    ebx = be[j, 0]
+                    eby = be[j, 1]
+                    ebz = be[j, 2]
+                    if kink and (kbx != ebx or kby != eby or kbz != ebz):
+                        # Aft segment node -> end of a leg with a node.
+                        t2x = px - ebx
+                        t2y = py - eby
+                        t2z = pz - ebz
                         nt = sqrt(t2x * t2x + t2y * t2y + t2z * t2z + 1e-300)
-                        r0x = tbx - kbx
-                        r0y = tby - kby
-                        r0z = tbz - kbz
+                        r0x = ebx - kbx
+                        r0y = eby - kby
+                        r0z = ebz - kbz
                         cx = w2y * t2z - w2z * t2y
                         cy = w2z * t2x - w2x * t2z
                         cz = w2x * t2y - w2y * t2x
@@ -1446,6 +1654,9 @@ def velocity_unknowns_kernel(const double[:, ::1] P, const double[:, ::1] a, con
                         vx = vx + cx * k
                         vy = vy + cy * k
                         vz = vz + cz * k
+                        lx = lx + cx * k
+                        ly = ly + cy * k
+                        lz = lz + cz * k
             if parts != 1:
                 if straight_right:
                     rbrx = r2x
@@ -1509,6 +1720,17 @@ def velocity_unknowns_kernel(const double[:, ::1] P, const double[:, ::1] a, con
                     vx = vx - ex
                     vy = vy - ey
                     vz = vz - ez
+            if walk:
+                if nxt[j] != 0:
+                    vx = vx + ccx
+                    vy = vy + ccy
+                    vz = vz + ccz
+                    lx = lx + ccx
+                    ly = ly + ccy
+                    lz = lz + ccz
+                ccx = lx
+                ccy = ly
+                ccz = lz
             s = sign[j]
             out_v[i, column[j], 0] += vx * s
             out_v[i, column[j], 1] += vy * s

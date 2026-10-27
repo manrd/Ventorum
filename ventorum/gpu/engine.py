@@ -289,9 +289,18 @@ class DeviceLattice:
         # lie on the oblique lines of the deflected flap, so the float32
         # kernels compute their cross products in float64.
         kink = np.isin(lattice.panel_strip, lattice.panel_strip[kink])
+        # Leg chains (see VortexLattice.leg_next): the ends of the own leg
+        # segments are the bound points of the next panel on a chain.
+        from ventorum.aero.loads import leg_ends
+
+        a_e, b_e = leg_ends(lattice)
+        nxt = np.zeros(self.n_panels, dtype=np.int32) if lattice.leg_next is None else \
+            np.asarray(lattice.leg_next, dtype=np.int32)
         if mach_transform is not None:
             a_k = mach_transform.to_s(a_k)
             b_k = mach_transform.to_s(b_k)
+            a_e = mach_transform.to_s(a_e)
+            b_e = mach_transform.to_s(b_e)
             a_s = mach_transform.to_s(lattice.a)
             b_s = mach_transform.to_s(lattice.b)
             a_te_s = mach_transform.to_s(lattice.a_te)
@@ -318,11 +327,11 @@ class DeviceLattice:
         self.t["AK"], self.t["BK"] = _f64(a_k), _f64(b_k)
         self.t["r0ka"] = _f64(a_p - a_k).to(T).contiguous()
         self.t["r0kb"] = _f64(b_k - b_p).to(T).contiguous()
-        te_a = a_te_s if mach_transform is not None else lattice.a_te
-        te_b = b_te_s if mach_transform is not None else lattice.b_te
-        self.t["r0ta"] = _f64(a_k - te_a).to(T).contiguous()
-        self.t["r0tb"] = _f64(te_b - b_k).to(T).contiguous()
+        self.t["AE"], self.t["BE"] = _f64(a_e), _f64(b_e)
+        self.t["r0ta"] = _f64(a_k - a_e).to(T).contiguous()
+        self.t["r0tb"] = _f64(b_e - b_k).to(T).contiguous()
         self.t["kink"] = _i32(kink.astype(np.int32))
+        self.t["nxt"] = _i32(nxt)
         self.t["Ah"], self.t["Al"] = split2(self.t["A"])
         self.TE = torch.stack([self.t["ATE"], self.t["BTE"]], dim=1)   # (n, 2, 3)
         k = self.k
@@ -337,6 +346,11 @@ class DeviceLattice:
         s.BK = view(self.t["BK"], wp.vec3d)
         s.kink = view(self.t["kink"], wp.int32)
         s.n_kink = int(np.count_nonzero(kink))
+        s.AE = view(self.t["AE"], wp.vec3d)
+        s.BE = view(self.t["BE"], wp.vec3d)
+        s.nxt = view(self.t["nxt"], wp.int32)
+        s.n_chain = int(np.count_nonzero(nxt))
+        self.leg_next = None if s.n_chain == 0 else nxt.astype(bool)
         s.rc2 = view(self.t["rc2"], k.T)
         s.group = view(self.t["group"], wp.int32)
         self.sources = s
@@ -1568,6 +1582,18 @@ def loads(dl: DeviceLattice, lattice, G: torch.Tensor, v_points: list[torch.Tens
                 cview(geo, "leg" + c_aft, v3), cview(geo, "leg" + d_aft, v3),
                 cview(geo, "nleg" + c_aft, v3), cview(geo, "nleg" + d_aft, v3),
                 cview(geo, "lmid" + c_aft, v3), cview(geo, "lmid" + d_aft, v3)]
+    GL = G
+    if dl.leg_next is not None:
+        # Circulation of the own leg segments: the sum over the panels
+        # before them on their chain (ventorum.aero.loads.leg_strength).
+        from ventorum.aero.vortex import chain_position
+
+        pos = chain_position(dl.leg_next)
+        GL = G.clone()
+        for t in range(1, int(pos.max()) + 1):
+            j = torch.as_tensor(np.flatnonzero(pos == t), device=dev)
+            GL[:, j] = G[:, j] + GL[:, j - 1]
+    aft_args.append(view(GL.contiguous(), wp.float64))
     ae = alpha_eff.contiguous() if alpha_eff is not None else w_n
     span = torch.empty((K, 8, n_s), dtype=_F64, device=dev)
     sforce = torch.empty((K, n_s, 3), dtype=_F64, device=dev)

@@ -335,26 +335,34 @@ def _cy_has_kinks() -> bool:
     return bool(_HAVE_CYTHON and getattr(_cy, "has_leg_kinks", lambda: False)())
 
 
+def _cy_has_chains() -> bool:
+    """Return True if the compiled Cython kernels take the leg chains (``leg_next``)."""
+    return bool(_HAVE_CYTHON and getattr(_cy, "has_leg_chains", lambda: False)())
+
+
 def _kernel_call(name: str, backend: str, args: tuple, parts: int, kin: tuple) -> np.ndarray:
     """Call the compiled kernel *name* of *backend* on the packed *args* with the part selector *parts*.
 
-    *kin* is ``(a_kink, b_kink, has_kinks)`` of :func:`ventorum.aero.vortex_numba.pack_kinks`.
+    *kin* is the tuple of :func:`ventorum.aero.vortex_numba.pack_kinks`:
+    ``(a_kink, b_kink, has_kinks, a_end, b_end, leg_next, has_chains)``.
     Without nodes the Cython and torch kernels get the arguments of the
-    kernels without nodes. A Cython build without node support (compiled
-    from an older source) is not used for a set with nodes: the Numba
-    kernel computes it.
+    kernels without nodes, and without chains the arguments without chains.
+    A Cython build without node or chain support (compiled from an older
+    source) is not used for such a set: the Numba kernel computes it.
     """
-    a_k, b_k, kink = kin
-    if backend == "cython" and kink and not _cy_has_kinks():
+    a_k, b_k, kink, a_e, b_e, nxt, chain = kin
+    if backend == "cython" and ((kink and not _cy_has_kinks()) or (chain and not _cy_has_chains())):
         backend = "numba"
-    if backend == "torch":
-        fn = getattr(_torch(), name)
-        return fn(*args, parts, a_kink=a_k, b_kink=b_k) if kink else fn(*args, parts)
-    if backend == "cython":
+    if backend in ("torch", "cython"):
+        kw = {}
         if kink:
-            return _cy_call(name, *args, parts, a_kink=a_k, b_kink=b_k)
-        return _cy_call(name, *args, parts)
-    return getattr(_nb, name)(*args, parts, a_k, b_k, kink)
+            kw = {"a_kink": a_k, "b_kink": b_k}
+        if chain:
+            kw.update(a_end=a_e, b_end=b_e, leg_next=nxt)
+        if backend == "torch":
+            return getattr(_torch(), name)(*args, parts, **kw)
+        return _cy_call(name, *args, parts, **kw)
+    return getattr(_nb, name)(*args, parts, a_k, b_k, kink, a_e, b_e, nxt, chain)
 
 
 def _normal_influence(backend: str, args: tuple, parts: int, kin: tuple) -> np.ndarray:
@@ -391,6 +399,20 @@ class HorseshoeSet:
         to ``a_te`` and ``b_kink`` equal to ``b_te``, bit for bit; its legs
         are then computed as without the nodes. None means no horseshoe of
         the set has a node.
+    leg_next : (n,) bool or None
+        Node chains of the legs (needs ``a_kink``). Where ``leg_next[j]`` is
+        True, the legs of horseshoe ``j`` end at the bound points of
+        horseshoe ``j + 1`` and continue on its legs: the left leg runs
+        ``(left leg of j + 1) -> a[j + 1] -> a_kink[j] -> a[j]``, the right
+        leg ``b[j] -> b_kink[j] -> b[j + 1] -> (right leg of j + 1)``. The
+        chain ends at a horseshoe with ``leg_next`` False, whose legs end at
+        its trailing-edge points. The horseshoes of one chain have the same
+        trailing-edge points, wake direction and core group. Each segment of
+        a chain has the core of the horseshoe that owns it (the one whose
+        bound point starts it), so the segments are shared filaments, as in
+        a vortex-ring lattice (Katz and Plotkin 2001, section 12.3). A node
+        equal to the end of its segment adds no segment. None means no
+        chains.
     """
 
     a: np.ndarray
@@ -404,6 +426,7 @@ class HorseshoeSet:
     group: np.ndarray | None = None
     a_kink: np.ndarray | None = None
     b_kink: np.ndarray | None = None
+    leg_next: np.ndarray | None = None
 
     @property
     def n(self) -> int:
@@ -421,15 +444,41 @@ class HorseshoeSet:
             return self.a_te, self.b_te
         return self.a_kink, self.b_kink
 
+    @property
+    def has_chains(self) -> bool:
+        """Return True if some legs continue on the legs of the next horseshoe (see ``leg_next``)."""
+        return self.leg_next is not None and bool(np.any(self.leg_next))
+
+    def chain_flags(self) -> np.ndarray:
+        """Return ``leg_next`` as a bool array, shape (n,) (all False without chains)."""
+        if self.leg_next is None:
+            return np.zeros(self.n, dtype=bool)
+        return np.asarray(self.leg_next, dtype=bool)
+
+    def leg_ends(self) -> tuple[np.ndarray, np.ndarray]:
+        """Return the aft end points ``(a_end, b_end)`` [m] of the own leg segments, shape (n, 3).
+
+        The own segments of the left leg of horseshoe ``j`` run ``a_end ->
+        a_kink -> a``, those of the right leg ``b -> b_kink -> b_end``.
+        ``a_end`` is ``a[j + 1]`` where ``leg_next[j]`` is True, else
+        ``a_te[j]`` (the same for ``b_end``). Without chains the arrays are
+        ``a_te`` and ``b_te``.
+        """
+        if not self.has_chains:
+            return self.a_te, self.b_te
+        return chain_ends(self.a, self.b, self.a_te, self.b_te, self.leg_next)
+
     def kinked(self) -> np.ndarray:
-        """Return the indices of the horseshoes with a leg node, shape (k,)."""
+        """Return the indices of the horseshoes whose own legs have an aft segment (node to end), shape (k,)."""
         if self.a_kink is None:
             return np.zeros(0, dtype=np.int64)
-        return np.flatnonzero(np.any(self.a_kink != self.a_te, axis=1) | np.any(self.b_kink != self.b_te, axis=1))
+        a_e, b_e = self.leg_ends()
+        return np.flatnonzero(np.any(self.a_kink != a_e, axis=1) | np.any(self.b_kink != b_e, axis=1))
 
     def concatenate(self, other: HorseshoeSet) -> HorseshoeSet:
         """Return a new set with the horseshoes of this set, then of *other*."""
         kinks = self.has_kinks or other.has_kinks
+        chains = self.has_chains or other.has_chains
         return HorseshoeSet(
             a=np.vstack([self.a, other.a]),
             b=np.vstack([self.b, other.b]),
@@ -443,7 +492,124 @@ class HorseshoeSet:
                    else np.concatenate([self.group, other.group])),
             a_kink=np.vstack([self.kinks()[0], other.kinks()[0]]) if kinks else None,
             b_kink=np.vstack([self.kinks()[1], other.kinks()[1]]) if kinks else None,
+            leg_next=np.concatenate([self.chain_flags(), other.chain_flags()]) if chains else None,
         )
+
+
+def chain_ends(a, b, a_te, b_te, leg_next) -> tuple[np.ndarray, np.ndarray]:
+    """Return the aft end points of the own leg segments (see :meth:`HorseshoeSet.leg_ends`).
+
+    Parameters
+    ----------
+    a, b, a_te, b_te : numpy.ndarray
+        Bound-vortex and trailing-edge points [m], shape (n, 3).
+    leg_next : numpy.ndarray
+        Chain flags, shape (n,).
+
+    Returns
+    -------
+    a_end, b_end : numpy.ndarray
+        ``a[j + 1]`` (``b[j + 1]``) where ``leg_next[j]`` is True, else the
+        trailing-edge point [m], shape (n, 3).
+    """
+    nxt = np.asarray(leg_next, dtype=bool)[:, None]
+    a_next = np.concatenate([a[1:], a[-1:]])
+    b_next = np.concatenate([b[1:], b[-1:]])
+    return np.where(nxt, a_next, a_te), np.where(nxt, b_next, b_te)
+
+
+def chain_depth(leg_next: np.ndarray) -> np.ndarray:
+    """Return per horseshoe the number of horseshoes after it on its leg chain.
+
+    Parameters
+    ----------
+    leg_next : numpy.ndarray
+        Chain flags of :class:`HorseshoeSet`, shape (n,).
+
+    Returns
+    -------
+    numpy.ndarray
+        Integer depth, shape (n,): 0 at the end of a chain and on a
+        horseshoe without a chain, ``depth[j + 1] + 1`` where
+        ``leg_next[j]`` is True.
+    """
+    nxt = np.asarray(leg_next, dtype=bool)
+    depth = np.zeros(nxt.size, dtype=np.int64)
+    for j in range(nxt.size - 2, -1, -1):
+        if nxt[j]:
+            depth[j] = depth[j + 1] + 1
+    return depth
+
+
+def chain_position(leg_next: np.ndarray) -> np.ndarray:
+    """Return per horseshoe the number of horseshoes before it on its leg chain, shape (n,)."""
+    nxt = np.asarray(leg_next, dtype=bool)
+    pos = np.zeros(nxt.size, dtype=np.int64)
+    for j in range(1, nxt.size):
+        if nxt[j - 1]:
+            pos[j] = pos[j - 1] + 1
+    return pos
+
+
+def chain_suffix(x: np.ndarray, leg_next: np.ndarray, axis: int = 1) -> np.ndarray:
+    """Return per horseshoe the sum of *x* over the horseshoes after it on its leg chain.
+
+    ``out[j] = x[j + 1] + out[j + 1]`` where ``leg_next[j]`` is True, else
+    zero. The sums run from the end of each chain to its start.
+
+    Parameters
+    ----------
+    x : numpy.ndarray
+        Values per horseshoe along *axis* (for example the velocity of the
+        own leg segments).
+    leg_next : numpy.ndarray
+        Chain flags, shape (n,).
+    axis : int
+        Axis of the horseshoes in *x*.
+
+    Returns
+    -------
+    numpy.ndarray
+        Array with the shape of *x*.
+    """
+    x = np.moveaxis(np.asarray(x), axis, 0)
+    out = np.zeros_like(x)
+    depth = chain_depth(leg_next)
+    for t in range(1, int(depth.max(initial=0)) + 1):
+        j = np.flatnonzero(depth == t)
+        out[j] = x[j + 1] + out[j + 1]
+    return np.moveaxis(out, 0, axis)
+
+
+def chain_prefix(x: np.ndarray, leg_next: np.ndarray, axis: int = 0) -> np.ndarray:
+    """Return per horseshoe the sum of *x* over it and the horseshoes before it on its leg chain.
+
+    ``out[j] = x[j] + out[j - 1]`` where ``leg_next[j - 1]`` is True, else
+    ``x[j]``. The own leg segments of horseshoe ``j`` are on the legs of
+    every horseshoe before it on its chain: with the circulations as *x*,
+    the result is the strength of these shared segments.
+
+    Parameters
+    ----------
+    x : numpy.ndarray
+        Values per horseshoe along *axis*.
+    leg_next : numpy.ndarray
+        Chain flags, shape (n,).
+    axis : int
+        Axis of the horseshoes in *x*.
+
+    Returns
+    -------
+    numpy.ndarray
+        Array with the shape of *x*.
+    """
+    x = np.moveaxis(np.asarray(x), axis, 0)
+    out = x.copy()
+    pos = chain_position(leg_next)
+    for t in range(1, int(pos.max(initial=0)) + 1):
+        j = np.flatnonzero(pos == t)
+        out[j] = x[j] + out[j - 1]
+    return np.moveaxis(out, 0, axis)
 
 
 @dataclass(slots=True)
@@ -858,19 +1024,41 @@ def _horseshoe_block(P: np.ndarray, hs: HorseshoeSet, tg: Targets | None = None)
     v += segment_velocity(P, a_k, a, rc)
     v += segment_velocity(P, b, b_k, rc)
     _add_kink_legs(v, P, hs, rc)
+    _add_chain_legs(v, P, hs, rc)
     v += ray_velocity(P, b_te, d, rc)
     v -= ray_velocity(P, a_te, d, rc)
     return v
 
 
 def _add_kink_legs(v: np.ndarray, P: np.ndarray, hs: HorseshoeSet, rc) -> None:
-    """Add the aft segments ``a_te -> a_kink`` and ``b_kink -> b_te`` of the legs with a node to *v* (m, n, 3)."""
+    """Add the aft segments ``a_end -> a_kink`` and ``b_kink -> b_end`` of the legs with a node to *v* (m, n, 3).
+
+    The ends are the trailing-edge points, or on a chain the bound points of
+    the next horseshoe (:meth:`HorseshoeSet.leg_ends`).
+    """
     idx = hs.kinked()
     if idx.size == 0:
         return
+    a_e, b_e = hs.leg_ends()
     rc_k = rc[:, idx] if np.ndim(rc) == 2 else np.broadcast_to(np.asarray(rc, dtype=float), (hs.n,))[idx]
-    v[:, idx] += (segment_velocity(P, hs.a_te[idx], hs.a_kink[idx], rc_k)
-                  + segment_velocity(P, hs.b_kink[idx], hs.b_te[idx], rc_k))
+    v[:, idx] += (segment_velocity(P, a_e[idx], hs.a_kink[idx], rc_k)
+                  + segment_velocity(P, hs.b_kink[idx], b_e[idx], rc_k))
+
+
+def _own_legs(P: np.ndarray, hs: HorseshoeSet, rc) -> np.ndarray:
+    """Return the velocity of the own leg segments of every horseshoe (no bound vortex, no rays): (m, n, 3)."""
+    a_k, b_k = hs.kinks()
+    v = segment_velocity(P, a_k, hs.a, rc)
+    v += segment_velocity(P, hs.b, b_k, rc)
+    _add_kink_legs(v, P, hs, rc)
+    return v
+
+
+def _add_chain_legs(v: np.ndarray, P: np.ndarray, hs: HorseshoeSet, rc) -> None:
+    """Add to *v* (m, n, 3) the leg segments that each horseshoe has from the horseshoes after it on its chain."""
+    if not hs.has_chains:
+        return
+    v += chain_suffix(_own_legs(P, hs, rc), hs.leg_next, axis=1)
 
 
 def _chunk_rows(m: int, n: int) -> int:
@@ -959,6 +1147,7 @@ def _fixed_block(P: np.ndarray, hs: HorseshoeSet, tg: Targets | None = None) -> 
     v += segment_velocity(P, a_k, hs.a, rc)
     v += segment_velocity(P, hs.b, b_k, rc)
     _add_kink_legs(v, P, hs, rc)
+    _add_chain_legs(v, P, hs, rc)
     return v
 
 

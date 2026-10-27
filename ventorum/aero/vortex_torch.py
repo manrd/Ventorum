@@ -202,41 +202,74 @@ def _ray(P, A, d, rc2):
     return torch.stack((cx * k, cy * k, cz * k), dim=-1)
 
 
-def _kink_tensors(a_kink, b_kink, ta_te, tb_te, device):
-    """Return the leg nodes on *device* and the indices of the horseshoes with a node, or None."""
+def _kink_tensors(a_kink, b_kink, ta_te, tb_te, device, a_end=None, b_end=None, leg_next=None):
+    """Return the leg nodes on *device* and the indices of the horseshoes with an aft segment, or None.
+
+    With chains (*a_end*, *b_end*, *leg_next*), the aft segments end at the
+    ends of the own leg segments, and the last item lists per chain step
+    the indices of the horseshoes at that step from the chain end (see
+    :func:`ventorum.aero.vortex.chain_suffix`). Without chains it is None.
+    """
     if a_kink is None:
         return None
     ta_k, tb_k = _f64(a_kink, device), _f64(b_kink, device)
-    idx = torch.nonzero(torch.any(ta_k != ta_te, dim=1) | torch.any(tb_k != tb_te, dim=1)).reshape(-1)
-    return ta_k, tb_k, idx
+    steps = None
+    if a_end is not None:
+        ta_e, tb_e = _f64(a_end, device), _f64(b_end, device)
+        from ventorum.aero.vortex import chain_depth
+
+        depth = chain_depth(np.asarray(leg_next) != 0)
+        steps = [torch.as_tensor(np.flatnonzero(depth == t), device=device)
+                 for t in range(1, int(depth.max(initial=0)) + 1)]
+    else:
+        ta_e, tb_e = ta_te, tb_te
+    idx = torch.nonzero(torch.any(ta_k != ta_e, dim=1) | torch.any(tb_k != tb_e, dim=1)).reshape(-1)
+    return ta_k, tb_k, idx, ta_e, tb_e, steps
 
 
 def _horseshoe(P, a, b, a_te, b_te, d, rc2, parts: int, kinks=None):
     """Return the unit-circulation velocity of the horseshoes: (m, n, 3).
 
     *parts* selects the legs: 0 all, 1 fixed (bound vortex and chordwise
-    legs), 2 wake legs. *kinks* is None or ``(a_k, b_k, idx)``: the leg
-    nodes and the indices of the horseshoes whose legs have a node (see
-    ``a_kink`` in :class:`ventorum.aero.vortex.HorseshoeSet`).
+    legs), 2 wake legs. *kinks* is None or the tuple of
+    :func:`_kink_tensors`: the leg nodes, the indices of the horseshoes
+    whose own legs have an aft segment, the ends of the own leg segments
+    and the chain steps (see ``a_kink`` and ``leg_next`` in
+    :class:`ventorum.aero.vortex.HorseshoeSet`).
     """
     if parts == 2:
         return _ray(P, b_te, d, rc2) - _ray(P, a_te, d, rc2)
+    a_k, b_k, idx, a_e, b_e, steps = (None,) * 6 if kinks is None else kinks
     if kinks is None:
         fixed = (_segment(P, a, b, rc2) + _segment(P, a_te, a, rc2) + _segment(P, b, b_te, rc2))
-    else:
-        a_k, b_k, idx = kinks
+    elif steps is None:
+        # Nodes without chains: the arithmetic of the sets with hinge nodes.
         fixed = (_segment(P, a, b, rc2) + _segment(P, a_k, a, rc2) + _segment(P, b, b_k, rc2))
         if idx.numel() > 0:
             rc2_k = rc2[..., idx]
-            fixed[:, idx] += (_segment(P, a_te[idx], a_k[idx], rc2_k)
-                              + _segment(P, b_k[idx], b_te[idx], rc2_k))
+            fixed[:, idx] += (_segment(P, a_e[idx], a_k[idx], rc2_k)
+                              + _segment(P, b_k[idx], b_e[idx], rc2_k))
+    else:
+        own = _segment(P, a_k, a, rc2) + _segment(P, b, b_k, rc2)
+        if idx.numel() > 0:
+            rc2_k = rc2[..., idx]
+            own[:, idx] += (_segment(P, a_e[idx], a_k[idx], rc2_k)
+                            + _segment(P, b_k[idx], b_e[idx], rc2_k))
+        if steps:
+            # Legs of the next horseshoes of each chain, from the chain end.
+            tail = torch.zeros_like(own)
+            for j in steps:
+                tail[:, j] = own[:, j + 1] + tail[:, j + 1]
+            own = own + tail
+        fixed = _segment(P, a, b, rc2) + own
     if parts == 1:
         return fixed
     return fixed + (_ray(P, b_te, d, rc2) - _ray(P, a_te, d, rc2))
 
 
 def induced_velocity_kernel(P, a, b, a_te, b_te, d, rc2_src, src_group, g_src,
-                            tg_group, tg_rc2, use_tg, parts=0, a_kink=None, b_kink=None) -> np.ndarray:
+                            tg_group, tg_rc2, use_tg, parts=0, a_kink=None, b_kink=None,
+                            a_end=None, b_end=None, leg_next=None) -> np.ndarray:
     """Return the total induced velocity [m/s] for the source strengths *g_src* (sign included).
 
     Parameters
@@ -266,6 +299,10 @@ def induced_velocity_kernel(P, a, b, a_te, b_te, d, rc2_src, src_group, g_src,
     a_kink, b_kink : (n, 3) arrays or None
         Nodes of the chordwise legs [m] (see ``a_kink`` in
         :class:`ventorum.aero.vortex.HorseshoeSet`), or None for straight legs.
+    a_end, b_end, leg_next : arrays or None
+        Ends of the own leg segments [m] and chain flags of a set with leg
+        chains (see ``leg_next`` in :class:`ventorum.aero.vortex.HorseshoeSet`),
+        or None.
 
     Returns
     -------
@@ -283,7 +320,7 @@ def induced_velocity_kernel(P, a, b, a_te, b_te, d, rc2_src, src_group, g_src,
         tg = _f64(g_src, device)
         ttg = _i64(tg_group, device)
         ttrc2 = _f64(tg_rc2, device)
-        kinks = _kink_tensors(a_kink, b_kink, ta_te, tb_te, device)
+        kinks = _kink_tensors(a_kink, b_kink, ta_te, tb_te, device, a_end, b_end, leg_next)
         m, n = tP.shape[0], ta.shape[0]
         out = np.empty((m, 3))
         for i0 in range(0, m, _chunk_rows(m, n)):
@@ -295,7 +332,8 @@ def induced_velocity_kernel(P, a, b, a_te, b_te, d, rc2_src, src_group, g_src,
 
 
 def normal_influence_kernel(P, normals, a, b, a_te, b_te, d, rc2_src, src_group, sign,
-                            column, n_unknowns, tg_group, tg_rc2, use_tg, parts=0, a_kink=None, b_kink=None) -> np.ndarray:
+                            column, n_unknowns, tg_group, tg_rc2, use_tg, parts=0, a_kink=None, b_kink=None,
+                            a_end=None, b_end=None, leg_next=None) -> np.ndarray:
     """Return the normal-velocity influence matrix [1/m].
 
     Sources that map to the same unknown (mirror and ground images) are added
@@ -334,6 +372,10 @@ def normal_influence_kernel(P, normals, a, b, a_te, b_te, d, rc2_src, src_group,
     a_kink, b_kink : (n, 3) arrays or None
         Nodes of the chordwise legs [m] (see ``a_kink`` in
         :class:`ventorum.aero.vortex.HorseshoeSet`), or None for straight legs.
+    a_end, b_end, leg_next : arrays or None
+        Ends of the own leg segments [m] and chain flags of a set with leg
+        chains (see ``leg_next`` in :class:`ventorum.aero.vortex.HorseshoeSet`),
+        or None.
 
     Returns
     -------
@@ -353,7 +395,7 @@ def normal_influence_kernel(P, normals, a, b, a_te, b_te, d, rc2_src, src_group,
         tcol = _i64(column, device)
         ttg = _i64(tg_group, device)
         ttrc2 = _f64(tg_rc2, device)
-        kinks = _kink_tensors(a_kink, b_kink, ta_te, tb_te, device)
+        kinks = _kink_tensors(a_kink, b_kink, ta_te, tb_te, device, a_end, b_end, leg_next)
         m, n = tP.shape[0], ta.shape[0]
         out = np.empty((m, int(n_unknowns)))
         for i0 in range(0, m, _chunk_rows(m, n)):
@@ -368,7 +410,8 @@ def normal_influence_kernel(P, normals, a, b, a_te, b_te, d, rc2_src, src_group,
 
 
 def velocity_tensor_kernel(P, a, b, a_te, b_te, d, rc2_src, src_group, sign,
-                           tg_group, tg_rc2, use_tg, parts=0, a_kink=None, b_kink=None) -> np.ndarray:
+                           tg_group, tg_rc2, use_tg, parts=0, a_kink=None, b_kink=None,
+                            a_end=None, b_end=None, leg_next=None) -> np.ndarray:
     """Return the velocity per unit source circulation [1/m], with the sign applied.
 
     Parameters
@@ -398,6 +441,10 @@ def velocity_tensor_kernel(P, a, b, a_te, b_te, d, rc2_src, src_group, sign,
     a_kink, b_kink : (n, 3) arrays or None
         Nodes of the chordwise legs [m] (see ``a_kink`` in
         :class:`ventorum.aero.vortex.HorseshoeSet`), or None for straight legs.
+    a_end, b_end, leg_next : arrays or None
+        Ends of the own leg segments [m] and chain flags of a set with leg
+        chains (see ``leg_next`` in :class:`ventorum.aero.vortex.HorseshoeSet`),
+        or None.
 
     Returns
     -------
@@ -415,7 +462,7 @@ def velocity_tensor_kernel(P, a, b, a_te, b_te, d, rc2_src, src_group, sign,
         tsign = _f64(sign, device)
         ttg = _i64(tg_group, device)
         ttrc2 = _f64(tg_rc2, device)
-        kinks = _kink_tensors(a_kink, b_kink, ta_te, tb_te, device)
+        kinks = _kink_tensors(a_kink, b_kink, ta_te, tb_te, device, a_end, b_end, leg_next)
         m, n = tP.shape[0], ta.shape[0]
         out = np.empty((m, n, 3))
         for i0 in range(0, m, _chunk_rows(m, n)):

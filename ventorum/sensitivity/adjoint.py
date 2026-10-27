@@ -632,6 +632,10 @@ def _camber_matrices(
 
     W_a = _zeros((n_p, E_total))
     W_b = _zeros((n_p, E_total))
+    # Mean-line offsets of the leg nodes between two bound points (the
+    # middle chord fraction; geometry.lattice._leg_nodes).
+    W_ma = _zeros((n_p, E_total))
+    W_mb = _zeros((n_p, E_total))
     W_le_l = _zeros((n_s, E_total))
     W_le_r = _zeros((n_s, E_total))
     W_te_l = _zeros((n_s, E_total))
@@ -664,6 +668,10 @@ def _camber_matrices(
                 p = s * n_chord + j
                 W_a[p] = _joined_offset_weights(si, e, xb[k_idx, j])
                 W_b[p] = _joined_offset_weights(si, e + 1, xb[k_idx, j])
+                if j < n_chord - 1:
+                    xm = 0.5 * (xb[k_idx, j] + xb[k_idx, j + 1])
+                    W_ma[p] = _joined_offset_weights(si, e, xm)
+                    W_mb[p] = _joined_offset_weights(si, e + 1, xm)
             W_le_l[s] = _joined_offset_weights(si, e, 0.0)
             W_le_r[s] = _joined_offset_weights(si, e + 1, 0.0)
             W_te_l[s] = _joined_offset_weights(si, e, 1.0)
@@ -708,6 +716,8 @@ def _camber_matrices(
     return {
         "W_a": torch.as_tensor(W_a, dtype=dtype, device=device),
         "W_b": torch.as_tensor(W_b, dtype=dtype, device=device),
+        "W_ma": torch.as_tensor(W_ma, dtype=dtype, device=device),
+        "W_mb": torch.as_tensor(W_mb, dtype=dtype, device=device),
         "W_le_l": torch.as_tensor(W_le_l, dtype=dtype, device=device),
         "W_le_r": torch.as_tensor(W_le_r, dtype=dtype, device=device),
         "W_te_l": torch.as_tensor(W_te_l, dtype=dtype, device=device),
@@ -862,6 +872,9 @@ def build_reference(
         "left_panels": _l(left_panels),
         "leg_keep_normal": _t("lkn", leg_keep_normal),
         "leg_scale": _t("lsc", np.asarray(leg_scale, dtype=float)),
+        # Leg chains of the strips with geometric camber (VortexLattice.leg_next).
+        "leg_next": (None if getattr(lattice, "leg_next", None) is None or not np.any(lattice.leg_next)
+                     else torch.as_tensor(np.asarray(lattice.leg_next, dtype=bool), device=device)),
         "accum": accum,
         "origin": None,
     }

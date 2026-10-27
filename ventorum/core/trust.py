@@ -250,11 +250,13 @@ def mean_line_strip_jump(lattice: VortexLattice | None, spanwise_list: Sequence 
 
     Only surfaces whose lattice lies on a cambered section mean line count,
     and strips at a deflected control (and their neighbours) are left out,
-    because a deflection changes the strip lift by design. On such a
-    lattice the straight horseshoe legs leave the curved mean surface; with
-    narrow strips they pass close to the control points of other strips,
-    the linear system is near-singular, and the strip lift oscillates from
-    strip to strip.
+    because a deflection changes the strip lift by design. Straight
+    horseshoe legs on such a lattice left the curved mean surface; with
+    narrow strips they passed close to the control points of other strips,
+    the linear system was near-singular, and the strip lift oscillated from
+    strip to strip. The legs now follow the mean surface
+    (``VortexLattice.leg_next``); the value stays as a diagnostic of an
+    ill-conditioned mean-line solve.
 
     Parameters
     ----------
@@ -1013,13 +1015,12 @@ def evaluate_aerodynamic_trust(
             "Trefftz CDi (and drag-derived outputs) depends on the height of the far wake."
         )
 
-    # 5c. Mean-line lattice conditioning (straight legs near the curved mean surface)
+    # 5c. Mean-line lattice conditioning (oscillating strip loads on the mean surface)
     if mean_line_jump is not None and _is_finite(mean_line_jump) and float(mean_line_jump) > _MEAN_LINE_STRIP_JUMP:
         warnings.append(
             f"Cambered mean-line lattice: the strip lift changes by up to {float(mean_line_jump):.3g} between "
-            "neighbouring strips. The straight horseshoe legs leave the curved mean surface, and with narrow "
-            "strips the solve can be ill-conditioned, so the loads (also the totals) can be wrong. Use fewer, "
-            "wider spanwise panels or a larger n_chord, and compare."
+            "neighbouring strips. The solve on the curved mean surface can be ill-conditioned, so the loads "
+            "(also the totals) can be wrong. Use fewer, wider spanwise panels or a larger n_chord, and compare."
         )
 
     # 6. Numerical health -------------------------------------------------------------------
