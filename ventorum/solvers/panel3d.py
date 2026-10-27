@@ -94,7 +94,6 @@ from ventorum.core.trust import (
     PANEL3D_ROOT_SCALE_WARNING,
     evaluate_aerodynamic_trust,
 )
-
 from ventorum.geometry.lattice import (
     _AirfoilBlender,
     _sorted_sections,
@@ -1096,7 +1095,6 @@ class PanelMethodSolver(BaseSolver):
         *,
         ground: GroundPlane | None = None,
         ref_point: np.ndarray | None = None,
-        far_ratio: float | None = None,
     ) -> SolverResult | list[SolverResult]:
         """Solve one flight condition or a sequence of conditions.
 
@@ -1241,9 +1239,6 @@ class PanelMethodSolver(BaseSolver):
         )
         t0 = time.perf_counter()
         solver_class = PanelSolver
-        far_ratio_val = float(far_ratio) if far_ratio is not None else float(
-            getattr(settings, "panel_far_ratio", getattr(settings, "far_ratio", 5.0))
-        )
 
         def build_solver():
             panel_solver = solver_class(
@@ -1257,7 +1252,6 @@ class PanelMethodSolver(BaseSolver):
                 backend=backend,
                 ground_solver=ground_solver,
                 dtype=precision if backend == "gpu" else None,
-                far_ratio=far_ratio_val,
             )
             if coupling is not None:
                 coupling.prepare(panel_solver, geometry, ac, settings, cond_list)
@@ -1267,7 +1261,6 @@ class PanelMethodSolver(BaseSolver):
         if use_cache:
             key = panel_cache.solver_key(geom_key, (
                 solver_class, wake_length, kutta, backend, _cuda_device_index(backend), precision, ground_solver,
-                far_ratio_val,
                 float(s_ref), float(b_ref), float(c_ref), np.asarray(rp, dtype=float).tobytes(),
             ) + _thread_settings(backend) + _solver_helpers(backend))
         # A solver in use by another thread is not shared: acquire builds a

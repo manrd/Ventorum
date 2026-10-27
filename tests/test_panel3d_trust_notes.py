@@ -38,6 +38,18 @@ def _straight_wing(dihedral_deg: float = 0.0, semi_span: float = 4.0) -> Lifting
     )
 
 
+def _exact_far_field(monkeypatch):
+    """Make the solver use exact integration everywhere (far_ratio = inf)."""
+    import ventorum.solvers.panel3d as p3
+
+    class ExactPanelSolver(p3.PanelSolver):
+        def __init__(self, *args, **kwargs):
+            kwargs["far_ratio"] = np.inf
+            super().__init__(*args, **kwargs)
+
+    monkeypatch.setattr(p3, "PanelSolver", ExactPanelSolver)
+
+
 def test_far_field_note_ground_with_finite_far_ratio():
     """In ground effect with finite far_ratio, the far-field note appears without a RuntimeWarning."""
     wing = _straight_wing()
@@ -60,14 +72,15 @@ def test_far_field_note_ground_with_finite_far_ratio():
     assert any("far_ratio=inf" in w for w in trust_warns)
 
 
-def test_far_field_note_ground_with_inf_far_ratio():
+def test_far_field_note_ground_with_inf_far_ratio(monkeypatch):
     """In ground effect with infinite far_ratio, the far-field note does not appear."""
     wing = _straight_wing()
     cond = FlightCondition(V_inf=30.0, alpha=np.radians(3.0), h=0.20)
     settings = SolverSettings(solver_type="panel3d", n_panels=8, n_chord=6)
+    _exact_far_field(monkeypatch)
     solver = make_solver("panel3d")
 
-    res = solver.solve(wing, cond, settings, far_ratio=np.inf)
+    res = solver.solve(wing, cond, settings)
     trust_warns = res.totals.trust.warnings
     assert PANEL3D_FAR_FIELD_GROUND_NOTE not in trust_warns
     assert not any("far-field kernel" in w.lower() for w in trust_warns)
@@ -109,14 +122,15 @@ def test_far_field_note_free_air_ns_at_or_below_80():
     assert not any("far-field kernel" in w.lower() for w in res_16.totals.trust.warnings)
 
 
-def test_far_field_note_free_air_ns_above_80_inf_far_ratio():
+def test_far_field_note_free_air_ns_above_80_inf_far_ratio(monkeypatch):
     """In free air with ns > 80 and infinite far_ratio, the far-field note does not appear."""
     wing = _straight_wing()
     cond = FlightCondition(V_inf=30.0, alpha=np.radians(3.0))
     settings = SolverSettings(solver_type="panel3d", n_panels=82, n_chord=4)
+    _exact_far_field(monkeypatch)
     solver = make_solver("panel3d")
 
-    res = solver.solve(wing, cond, settings, far_ratio=np.inf)
+    res = solver.solve(wing, cond, settings)
     assert not any("far-field kernel" in w.lower() for w in res.totals.trust.warnings)
 
 
