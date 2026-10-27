@@ -63,6 +63,12 @@ In free air the wake follows the body $+x$ axis. It does not rotate with angle o
 
 In ground effect the wake follows the free stream, parallel to the ground (owner decision). The matrix depends on the attitude in ground effect anyway (see below), so this costs no extra factorization, and no wake panel goes below the ground plane: every wake panel keeps the height of its trailing edge. With an explicit ground plane that is not parallel to the free stream, the wake follows the projection of the free stream on the ground plane. The solver checks that the body and the wake stay above the ground. Far from the ground the image solve therefore tends to a free-air solve with a free-stream wake, not to the body-axis free-air solve; the difference is the effect of the wake direction.
 
+### Wake Through Another Surface
+
+The wake is a rigid flat sheet of constant doublet strength. It does not deflect around a surface behind it. When the wake of one surface passes through another closed surface (for example a tandem wing at the height of the front wing), the potential of the sheet jumps by the wake strength inside that surface. The internal Dirichlet condition (zero perturbation potential inside each body) then has no solution, and the discrete system gives loads that are wrong by orders of magnitude and change sign with the mesh. A wake that passes near a surface without touching it is not a problem: the potential of the sheet is continuous on each side of the sheet.
+
+For each configuration (the free-air wake, and each attitude in ground effect) the solver therefore checks the wake of each component against the panels of the other components (`ventorum.panel3d.wake.check_wake_crossing`). A panel edge that touches or crosses a wake panel (tolerance $10^{-9}$ times the mesh size) makes the solver raise `ValidityError`. The check does not use a margin around the sheet, because tandem wings with the wake below the rear wing by much less than one panel size gave the same lift as with a larger gap (`tests/test_panel3d_wake_crossing.py`). In ground effect the wake follows the free stream, so the same geometry can pass at one angle of attack and be refused at another.
+
 ### Morino Kutta Condition
 
 The Kutta condition enforces finite velocity at the trailing edge. In the Morino potential formulation, this condition sets the doublet strength of each wake strip $\mu_w$ equal to the difference between the upper and lower surface doublet strengths at the trailing edge:
