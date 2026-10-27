@@ -153,7 +153,7 @@ def test_guard_raises_for_trailing_edge_under_ground_study_case():
 
 
 def test_guard_passes_valid_case_bit_identical():
-    """A valid case keeps the flap shift of the code before the guard, bit for bit."""
+    """A valid case keeps the flap shift of the code before the guard."""
     wing = _make_flapped_wing(shape="0012", deflection_deg=10.0, hinge=0.75)
     ac = Aircraft(name="ValidCase", surfaces=[wing])
     cond = FlightCondition(V_inf=40.0, alpha=np.radians(2.0), h=0.5)
@@ -162,9 +162,11 @@ def test_guard_passes_valid_case_bit_identical():
     lat = solver.build(ac, settings, cond, None, np.zeros(3))
     ground = ground_plane_from_condition(lat, cond, np.zeros(3))
     assert ground is not None
-    # Values of the code before the guard (commit 609547b), same case.
-    assert _section_flap_shift(lat, 0, 0.75, ground) == 0.5725625381466319
-    assert _section_flap_shift(lat, 0, 0.75, None) == 0.607922146145465
+    # Values of the code before the guard (commit 609547b), same case. They are
+    # bit-identical on the machine that made them; other numpy and BLAS builds
+    # (CI) change the last bits, so the check uses a round-off tolerance.
+    assert _section_flap_shift(lat, 0, 0.75, ground) == pytest.approx(0.5725625381466319, rel=1e-12)
+    assert _section_flap_shift(lat, 0, 0.75, None) == pytest.approx(0.607922146145465, rel=1e-12)
 
 
 def test_warning_from_polar_source_section():
