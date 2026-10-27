@@ -1511,7 +1511,8 @@ def loads(dl: DeviceLattice, lattice, G: torch.Tensor, v_points: list[torch.Tens
         Host arrays: ``totals`` (K, 12), ``F_total`` and ``M`` (K, 3),
         ``span`` (K, 8, n_strips), ``strip_force`` (K, n_strips, 3),
         ``w_n`` (K, n_strips), ``stats`` (K, 4) (finite, the maximum of abs(Cl),
-        the maximum of abs(alpha_eff) [deg], extrema), and the arrays of *extra* (2-D, (K, -1)).
+        the maximum of abs(alpha_eff) [deg], the longest run of sign changes
+        of the circulation step), and the arrays of *extra* (2-D, (K, -1)).
     """
     k = dl.k
     lt = dl.lat
