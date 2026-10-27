@@ -758,7 +758,8 @@ class TorchReference:
             no = torch.zeros(1, dtype=torch.bool, device=self.device)
             hinge_next = torch.cat((hinge[1:], no))
             at_hinge = hinge & ~hinge_next
-            # At an edge shared with a strip without a hinge the hinge point
+            # At an edge shared with a strip of a different hinge (no hinge,
+            # another hinge fraction, or a joined surface end) the hinge point
             # is not a node: the mean-surface node is (production: the
             # hinge_off edges of _leg_nodes).
             off = b.get("hinge_off_panel")

@@ -1831,17 +1831,20 @@ def build_lattice(
             if s + 1 < n_strips and strip_surf[s + 1] == strip_surf[s] and np.isfinite(hinge_of[s + 1]):
                 partner[s, 1] = (s + 1, 0)
                 far[s, 1] = (s + 1, 1)
+        def coincident(s: int, side: int, q: int, jq: int) -> bool:
+            # True when edge jq of strip q is at the place of edge side of
+            # strip s (leading and trailing edge before the flap turn).
+            tol = 1e-9 * max(1.0, float(chord[s]))
+            return bool(np.max(np.abs((le_l, le_r)[jq][q] - (le_l, le_r)[side][s])) <= tol
+                        and np.max(np.abs(undeflected[2 + jq][q] - undeflected[2 + side][s])) <= tol)
+
         for s, side, si in ends:
             if np.isnan(hinge_of[s]) or partner[s, side, 0] >= 0:
                 continue
-            le_s = (le_l, le_r)[side][s]
-            te_s = undeflected[2 + side][s]
-            tol = 1e-9 * max(1.0, float(chord[s]))
             for q, jq, sq in ends:
                 if sq == si or hinge_of[q] != hinge_of[s]:
                     continue
-                if (np.max(np.abs((le_l, le_r)[jq][q] - le_s)) <= tol
-                        and np.max(np.abs(undeflected[2 + jq][q] - te_s)) <= tol):
+                if coincident(s, side, q, jq):
                     partner[s, side] = (q, jq)
                     far[s, side] = (q, 1 - jq)
                     break
@@ -1909,21 +1912,28 @@ def build_lattice(
             # Per flap strip: the deflection at the span fraction of its
             # control point [rad] and the hinge of its control as defined.
             frac_s = np.asarray(cat["frac"], dtype=float)
-            # An edge that a flap strip shares with a strip of the same
-            # surface without a hinge (the outer edge of the join at a side
-            # edge of a control) has no hinge point on the legs of the other
-            # strip. On a leg chain the legs of the two strips must pass
-            # through the same nodes, so the hinge point is not a node of
-            # the flap strip at that edge: its legs use the mean-surface
-            # node, as the other strip. The deflection of such an edge is
-            # zero (it is outside the join), so the hinge point is not a
-            # kink of the surface there. On a symmetric section the two
-            # nodes are on one straight line and the legs coincide also
-            # with the hinge node.
+            # An edge that a flap strip shares with a strip of a different
+            # hinge has a different hinge point on the legs of the other
+            # strip: a strip without a hinge (the outer edge of the join at
+            # a side edge of a control) or a strip of a control with another
+            # hinge fraction. The other strip can be the neighbour strip of
+            # the same surface or the end strip of another surface whose end
+            # edge is at the same place (a joined surface). On a leg chain
+            # the legs of the two strips must pass through the same nodes,
+            # so the hinge point is not a node of either strip at that edge:
+            # the legs of both use the mean-surface node. On a symmetric
+            # section the hinge point and the mean-surface node are on one
+            # straight line and the legs coincide also with the hinge node.
             hinge_off = np.zeros((n_strips, 2), dtype=bool)
             for s in np.flatnonzero(np.isfinite(hinge_of)):
                 for side, q in ((0, s - 1), (1, s + 1)):
-                    if 0 <= q < n_strips and strip_surf[q] == strip_surf[s] and np.isnan(hinge_of[q]):
+                    if 0 <= q < n_strips and strip_surf[q] == strip_surf[s] and hinge_of[q] != hinge_of[s]:
+                        hinge_off[s, side] = True
+            for s, side, si in ends:
+                if np.isnan(hinge_of[s]):
+                    continue
+                for q, jq, sq in ends:
+                    if sq != si and hinge_of[q] != hinge_of[s] and coincident(s, side, q, jq):
                         hinge_off[s, side] = True
             flap_field = {"hinge": hinge_of, "angle": angle, "coef": coef, "partner": partner, "far": far,
                           "strip_angle": angle[:, 0] + frac_s * (angle[:, 1] - angle[:, 0]),
@@ -2082,9 +2092,10 @@ def _leg_nodes(
     points, it is the node between them (one node per segment pair). The
     two strips at an edge must have the same nodes there, so that their
     legs coincide. Thus on a leg chain the hinge point is not a node at an
-    edge that the flap strip shares with a strip without a hinge
-    (*hinge_off*); the mean-surface node is the node there, as on the other
-    strip.
+    edge that the flap strip shares with a strip of a different hinge (no
+    hinge or another hinge fraction, on the same surface or on a joined
+    surface; *hinge_off*); the mean-surface node is the node there, as on
+    the other strip.
 
     Parameters
     ----------
