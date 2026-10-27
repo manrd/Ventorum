@@ -85,6 +85,15 @@ from ventorum.utils.vec import cross3
 CLAF_MIN = 0.2
 CLAF_MAX = 2.0
 
+#: Window of a moved hinge node [-]. In chordwise control mode, the lattice
+#: node nearest to the hinge moves onto the hinge only when the two panels
+#: next to it then have between HINGE_PANEL_MIN_FACTOR and
+#: HINGE_PANEL_MAX_FACTOR times their initial lengths. Otherwise the hinge
+#: snaps to the nearest node and a warning gives the effective hinge. These
+#: factors are a code setting with no published source or study.
+HINGE_PANEL_MIN_FACTOR = 0.5
+HINGE_PANEL_MAX_FACTOR = 1.25
+
 # Core radius of a horseshoe as a fraction of the smaller panel dimension
 # (strip width or chordwise panel length). The nearest control point is half
 # a panel dimension away, so the velocity there changes by about 4e-4 of its
@@ -954,6 +963,66 @@ def _chordwise_fractions(n_chord: int, chord_spacing: str) -> np.ndarray:
     return np.linspace(0.0, 1.0, n_chord + 1)
 
 
+def _hinge_node(xi: np.ndarray, hinge_x_c: float) -> tuple[int, bool]:
+    """Return the chordwise node nearest to a hinge and if it can move there.
+
+    Parameters
+    ----------
+    xi : np.ndarray
+        Chordwise node fractions from 0 to 1 [-].
+    hinge_x_c : float
+        Hinge position as a fraction of the chord [-].
+
+    Returns
+    -------
+    tuple of (int, bool)
+        Index of the interior node nearest to the hinge, and True when the
+        node can move onto the hinge inside the window of
+        ``HINGE_PANEL_MIN_FACTOR`` and ``HINGE_PANEL_MAX_FACTOR``.
+    """
+    n_chord = len(xi) - 1
+    k_hinge = 1 + int(np.argmin(np.abs(xi[1:n_chord] - hinge_x_c)))
+    len_before_old = xi[k_hinge] - xi[k_hinge - 1]
+    len_after_old = xi[k_hinge + 1] - xi[k_hinge]
+    len_before_new = hinge_x_c - xi[k_hinge - 1]
+    len_after_new = xi[k_hinge + 1] - hinge_x_c
+    tol = 1e-12
+    lo, hi = HINGE_PANEL_MIN_FACTOR, HINGE_PANEL_MAX_FACTOR
+    fits = (lo * len_before_old - tol <= len_before_new <= hi * len_before_old + tol and
+            lo * len_after_old - tol <= len_after_new <= hi * len_after_old + tol)
+    return k_hinge, bool(fits)
+
+
+def _hinge_chord_counts(hinge_x_c: float, n_chord: int, chord_spacing: str, n_max: int = 3) -> list[int]:
+    """Return chordwise panel counts near *n_chord* that can hold a hinge node.
+
+    Parameters
+    ----------
+    hinge_x_c : float
+        Hinge position as a fraction of the chord [-].
+    n_chord : int
+        Present chordwise panel count.
+    chord_spacing : str
+        Chordwise panel distribution.
+    n_max : int, optional
+        Largest number of counts to return.
+
+    Returns
+    -------
+    list of int
+        Counts between 2 and ``max(4 * n_chord, 100)`` for which a lattice node can
+        move onto the hinge. They are the counts nearest to *n_chord*, in
+        increasing order.
+    """
+    out = []
+    for n in sorted(range(2, max(4 * n_chord, 100) + 1), key=lambda m: (abs(m - n_chord), m)):
+        if _hinge_node(_chordwise_fractions(n, chord_spacing), hinge_x_c)[1]:
+            out.append(n)
+            if len(out) >= n_max:
+                break
+    return sorted(out)
+
+
 class _MeanLine:
     """Piecewise linear section mean line in chord units.
 
@@ -1268,20 +1337,27 @@ def build_lattice(
             eta_start_eff = float(eta_e[k_ctrl[0]])
             eta_end_eff = float(eta_e[k_ctrl[-1] + 1])
             if is_chordwise:
-                k_hinge = 1 + int(np.argmin(np.abs(xi[1:n_chord] - c.hinge_x_c)))
-                len_before_old = xi[k_hinge] - xi[k_hinge - 1]
-                len_after_old = xi[k_hinge + 1] - xi[k_hinge]
-                len_before_new = c.hinge_x_c - xi[k_hinge - 1]
-                len_after_new = xi[k_hinge + 1] - c.hinge_x_c
-                tol = 1e-12
-                if (0.5 * len_before_old - tol <= len_before_new <= 1.25 * len_before_old + tol and
-                        0.5 * len_after_old - tol <= len_after_new <= 1.25 * len_after_old + tol):
+                k_hinge, fits = _hinge_node(xi, c.hinge_x_c)
+                if fits:
                     hinge_x_c_eff = float(c.hinge_x_c)
                     ctrl_xi = xi.copy()
                     ctrl_xi[k_hinge] = c.hinge_x_c
                 else:
                     hinge_x_c_eff = float(xi[k_hinge])
                     ctrl_xi = xi.copy()
+                    counts = _hinge_chord_counts(float(c.hinge_x_c), n_chord, chord_spacing)
+                    advice = (
+                        f"Use a chordwise count that puts a node near the hinge, for example "
+                        f"n_chord = {', '.join(str(n) for n in counts)} ({chord_spacing} spacing)."
+                        if counts else "Use a chordwise count that puts a node near the hinge."
+                    )
+                    warnings.warn(
+                        f"[{surf.name}] control {c.name!r}: no lattice node can move onto the hinge at "
+                        f"x/c = {float(c.hinge_x_c):.4g} with n_chord = {n_chord}. The hinge snaps to the "
+                        f"nearest node at x/c = {hinge_x_c_eff:.4g} (lattice control_info 'hinge_x_c_eff'). "
+                        + advice,
+                        RuntimeWarning, stacklevel=2,
+                    )
             else:
                 hinge_x_c_eff = None
                 ctrl_xi = xi.copy()

@@ -19,12 +19,24 @@ import numpy as np
 # are 1e-4 of a typical magnitude of each property.
 _SECTION_STEP_FLOOR = {"a0": 1e-4 * 2.0 * np.pi, "alpha_L0": 1e-4, "Cd0": 1e-6, "Cm0": 1e-5}
 
-# Factors of the step ladders. The node step is 1e-3 of the smallest core
-# radius of the lattice (one step); the other steps are relative to the
-# base step of the input. Each component uses the step with the smallest
-# error bound (the larger of the Richardson estimate and the round-off).
+# Factors of the step ladders. The vortex-lattice node step is 1e-3 of the
+# smallest core radius of the lattice (one step); the other steps are
+# relative to the base step of the input. Each component uses the step with
+# the smallest error bound (the larger of the Richardson estimate and the
+# round-off).
 _NODE_STEP_FACTORS = (1.0,)
 _STEP_FACTORS = (1.0, 0.3, 0.1)
+
+# Base node step of the lifting line as a fraction of its smallest strip
+# width; the steps are this base step times _STEP_FACTORS. The lifting-line
+# control point lies on its bound vortex, at least half a strip width from
+# every trailing leg, so the core radius is not a length scale of the
+# solution and the strip width is. A step tied to the core radius (1e-2 of
+# the strip width) is so small that the noise of the solve hides the
+# derivative. This fraction is a code setting without a published source
+# or study; on a tapered test wing the Richardson values agree to about
+# 1e-8 for steps from 1e-4 to 1e-1 of the strip width.
+_LL_NODE_STEP_FRACTION = 1e-2
 
 # Zero-derivative check: a reference that is zero within this factor times
 # its error bound cannot be compared relatively (see check_gradients).
@@ -236,8 +248,9 @@ def check_gradients(
     reference is the larger of the estimate and the round-off of the
     differences (two times the machine epsilon of the production solve times
     the output magnitude over the step); with a step ladder, the spread to the
-    Richardson value of the neighbour step joins the bound. The node
-    directions have one step and no spread: their round-off is also at
+    Richardson value of the neighbour step joins the bound. The
+    vortex-lattice node directions have one step and no spread. The
+    round-off of all node directions is also at
     least 6 sigma / h, where sigma is the noise level of the production
     solve, measured per output with 10 solves at a spacing of 1e-3 of the
     step along the same direction (the residual of a quadratic fit). A
@@ -259,9 +272,13 @@ def check_gradients(
       almost any gradient, so the component is skipped, with a reason.
     * Every other component is skipped.
 
-    The node step is 1e-3 of the smallest core radius of the lattice (or
-    *node_step* when specified). A larger step crosses the core-radius length
-    scale, where the differences do not converge. The other inputs use the steps 1, 0.3 and
+    The vortex-lattice node step is 1e-3 of the smallest core radius of the
+    lattice. A larger step crosses the core-radius length scale, where the
+    differences do not converge. The lifting-line node steps are 1, 0.3 and
+    0.1 times 1e-2 of the smallest strip width: the lifting-line control
+    point lies on its bound vortex, so the core radius is not a length
+    scale of its solution. *node_step*, when given, replaces the base node
+    step of either solver. The other inputs use the steps 1, 0.3 and
     0.1 times the base step (1e-4 of the base value, angles 1e-4 rad, with
     an absolute floor per section property for a zero base value); each
     component uses the step with the smallest error bound.
@@ -592,8 +609,16 @@ def check_gradients(
                     for c in range(3):
                         flat.append((s.name, tag, i, c))
         dim = len(flat)
-        rc_min = float(np.min(np.asarray(base_res.details["lattice"].rc, dtype=float)))
-        h0 = 1e-3 * rc_min if node_step is None else float(node_step)
+        if canonical == "vlm":
+            rc_min = float(np.min(np.asarray(base_res.details["lattice"].rc, dtype=float)))
+            h0 = 1e-3 * rc_min
+            node_factors = _NODE_STEP_FACTORS
+        else:
+            w_min = float(np.min(np.asarray(base_res.details["lattice"].width, dtype=float)))
+            h0 = _LL_NODE_STEP_FRACTION * w_min
+            node_factors = _STEP_FACTORS
+        if node_step is not None:
+            h0 = float(node_step)
         span = max(float(s.semi_span) for s in ac2.surfaces)
         # A symmetric surface is mirrored about y = 0 and must start there:
         # freeze the root y-displacements of symmetric surfaces, else the
@@ -612,7 +637,7 @@ def check_gradients(
                 return _evaluate(ac3, condition, "nodes", v)
 
             noise = _noise_level(_get, 0.0, _NOISE_SPACING * h0, outs)
-            fd = _ladder(_get, 0.0, h0, _NODE_STEP_FACTORS, outs, eps, noise)
+            fd = _ladder(_get, 0.0, h0, node_factors, outs, eps, noise)
             grads = {o: float(_gather_node_grad(jac[o], flat) @ u) for o in outs}
             _record("nodes", f"nodes.dir{dj}", grads, fd, span)
     reasons = [f"input group {g!r} has no compared component" for g, c in groups.items()

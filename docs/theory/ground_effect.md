@@ -45,7 +45,7 @@ In chordwise control mode, the flap points rotate about the hinge on the mean su
 
 For chordwise controls, the automatic panel-count probe starts with the default chordwise count and includes the deflected flap points. The ground-effect entry point then uses the selected count for its clearance, tip heights and bank-limit geometry. It refuses a strike before it calls the aerodynamic solver. The root `qc` and `te` height points rotate about the effective root-strip hinge when they lie aft of it. On a symmetric surface with an antisymmetric control, these height points belong to the original half of the main surface. Single-panel and lifting-line controls retain their section model.
 
-The vortex lattice selects the chordwise panel count from the gap (see [Vortex-lattice method](vortex_lattice.md)). A sweep in ground effect uses one count for all its cases (the count of the case with the smallest gap), so that differences between the cases contain no mesh change.
+The vortex lattice selects the chordwise panel count from the gap (see [Vortex-lattice method](vortex_lattice.md)). A sweep in ground effect uses one count for all its cases (the count of the case with the smallest gap), so that differences between the cases contain no mesh change. The automatic count is an integer, so $C_L(h)$ and the other results of separate solves jump at the heights where the count changes. For your own finite differences (for example $\partial C_L/\partial h$ from separate solves), set `SolverSettings.n_chord` so that all cases use one mesh.
 
 ## Height and bank derivatives
 
@@ -53,7 +53,7 @@ The vortex lattice selects the chordwise panel count from the gap (see [Vortex-l
 
 - $C_{L\alpha}$, $C_{m\alpha}$ [1/rad] at each height, from a least-squares line over the angles of the grid with $|\alpha| \le$ 8 deg at the bank angle of the grid nearest to 0 (with fewer than two angles in this window, all angles of the grid), and the aerodynamic centre $x_{ac} = -c\,C_{m\alpha}/C_{L\alpha}$ [m] aft of the reference point. These are at constant height of the `height_ref` point, without the chain-rule correction below; thus $x_{ac}$ can differ from $x_\alpha$.
 - $C_{Lh} = \partial C_L/\partial(h/c)$ and $C_{mh} = \partial C_m/\partial(h/c)$ at constant $\alpha$, by finite differences on the height grid (`numpy.gradient`: second-order central differences inside, first-order one-sided differences at the end points).
-- $C_{l\phi}$, $C_{n\phi}$, $C_{Y\phi}$ [1/rad] from a least-squares line over the bank angles with $|\phi| \le$ 5 deg (with fewer than two bank angles in this window, all bank angles of the grid), at the angle of attack of the grid nearest to 4 deg. A bank-restoring rolling moment has $C_{l\phi} < 0$; $C_l$ and $C_n$ are in the stability axes.
+- $C_{l\phi}$, $C_{n\phi}$, $C_{Y\phi}$ [1/rad] from a least-squares line over the bank angles with $|\phi| \le$ 5 deg (with fewer than two bank angles in this window, all bank angles of the grid), at the angle of attack of the grid nearest to 4 deg. $C_l$ and $C_n$ are the stability-axis rolling and yawing moments about the moment reference point ($C_l > 0$ right wing down, $C_n > 0$ nose right); $C_Y$ is the side force, positive to the right. The bank angle $\phi$ turns the ground about the free-stream direction; the aircraft keeps its body axes, and the `height_ref` point keeps the height of the grid. A bank-restoring rolling moment has $C_{l\phi} < 0$.
 
 ### Irodov criterion
 

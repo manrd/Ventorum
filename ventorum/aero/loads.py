@@ -536,7 +536,13 @@ def _symmetric_fold(
 #: Fold angle [rad] about the edge line at which a kink edge carries no leg
 #: force at all. Below it, the leg force of the tangential rule is scaled by
 #: ``1 - fold / LEG_KINK_BLEND_RAD``, so the loads stay continuous when the
-#: dihedral of a surface goes through zero.
+#: dihedral of a surface goes through zero. The value 1 deg is a code
+#: setting without a published source or study. At the root of a symmetric
+#: surface the fold is twice the dihedral, so the blend acts for a dihedral
+#: below 0.5 deg. Inside the blend only CY_beta changes its trend: on a
+#: rectangular test wing (VLM) its slope against the dihedral is of the
+#: order of 1e-3 per rad per deg of dihedral. Cl_beta and Cn_beta stay
+#: linear in the dihedral through the blend.
 LEG_KINK_BLEND_RAD = float(np.radians(1.0))
 #: Fold angles [rad] below this value are round-off of the geometry
 #: definition, not a kink.

@@ -113,3 +113,21 @@ def test_karman_trefftz_lift_slope():
     dcl_da1 = (cls[1] - cls[0]) / 4.0
     dcl_da2 = (cls[2] - cls[1]) / 4.0
     assert abs(dcl_da1 - dcl_da2) < 0.01
+
+
+def test_joukowski_trailing_edge_cp_matches_neighbour_limit():
+    """The cusped (Joukowski) trailing-edge Cp is the limit of the nodes next to it.
+
+    At zeta = b both dW/dzeta and dz/dzeta are zero. L'Hopital's rule gives the
+    trailing-edge speed V b |cos(alpha - theta_te)| / R. A linear extrapolation
+    of the two nodes next to the edge, on the upper and on the lower surface,
+    must agree with the trailing-edge value. The cases include a cambered
+    section with thickness and a thin circular-arc section.
+    """
+    cases = [((-0.1, 0.0), 0.0), ((-0.1, 0.05), 4.0), ((0.0, 0.1), 5.0)]
+    for center, alpha_deg in cases:
+        cp, _ = karman_trefftz_solution(center, 0.0, 2001, alpha_deg=alpha_deg)
+        upper = 2.0 * cp[1] - cp[2]
+        lower = 2.0 * cp[-2] - cp[-3]
+        assert abs(upper - cp[0]) < 1e-4, (center, alpha_deg, upper, cp[0])
+        assert abs(lower - cp[-1]) < 1e-4, (center, alpha_deg, lower, cp[-1])

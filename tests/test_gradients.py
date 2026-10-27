@@ -255,27 +255,39 @@ def test_adjoint_vs_richardson(case_id: str, ac: vt.Aircraft, cond: vt.FlightCon
                                st: vt.SolverSettings, float64_precision) -> None:
     """check_gradients passes (1e-6) for all scalar inputs and 3 node directions.
 
-    Every input group has compared components (the node step follows the
-    core radius, so the node directions are compared too).
+    Every input group has compared components. The vortex-lattice node step
+    follows the core radius and the lifting-line node step follows the strip
+    width, so the node directions are compared too.
     """
     wrt, outputs = _case_io(case_id, cond, check=True)
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         out = vt.check_gradients(ac, cond, st, outputs=outputs, wrt=wrt,
                                  n_directions=3, rtol=1e-6, seed=0)
-    groups = {g: c for g, c in out["groups"].items() if not (case_id == "linear" and g == "nodes")}
-    assert all(c["compared"] > 0 for c in groups.values()), (case_id, out["groups"])
-    if "nodes" in wrt and case_id != "linear":
+    assert all(c["compared"] > 0 for c in out["groups"].values()), (case_id, out["groups"])
+    if "nodes" in wrt:
         assert out["groups"]["nodes"]["compared"] > 0, case_id
-    if case_id == "linear":
-        # The Richardson steps cannot resolve the node directions of the linear
-        # lifting line above the measured noise of the solve: the check skips
-        # them. test_linear_node_gradients_polynomial_fit verifies them.
-        reasons = [r for r in out["reasons"] if "'nodes'" not in r]
-        failed = [k for k, v in out["details"].items() if v["compared"] and not v["passed"]]
-        assert not failed and not reasons, (case_id, _failed(out))
-    else:
-        assert out["pass"], (case_id, _failed(out))
+    assert out["pass"], (case_id, _failed(out))
+
+
+def test_check_linear_lifting_line_nodes(float64_precision) -> None:
+    """check_gradients compares and passes (1e-6) the node directions of the linear lifting line.
+
+    Regression: the node step was 1e-3 of the smallest core radius (here
+    about 4e-7 m). At that step the noise of the solve hides the
+    derivative, so the check skipped every node direction and failed with
+    "no compared component". The lifting-line node step now follows the
+    strip width.
+    """
+    ac = vt.Aircraft(surfaces=[_plain_wing()])
+    cond = vt.FlightCondition(V_inf=30.0, alpha=np.radians(4.0))
+    st = vt.SolverSettings(solver_type="linear", n_panels=12)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        out = vt.check_gradients(ac, cond, st, outputs=("CL", "CD", "Cm"), wrt=("nodes",),
+                                 n_directions=3, rtol=1e-6, seed=0)
+    assert out["groups"]["nodes"]["compared"] > 0, out["groups"]
+    assert out["pass"], _failed(out)
 
 
 def test_linear_node_gradients_polynomial_fit(float64_precision) -> None:

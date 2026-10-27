@@ -144,7 +144,13 @@ def main_surface_strip_count(lattice: VortexLattice, index: int = 0) -> int:
 
 
 def quarter_chord_sweep_deg(lattice: VortexLattice) -> float:
-    """Return the area-weighted mean of abs(sweep) of the bound-vortex line [deg]."""
+    """Return the area-weighted mean of abs(sweep) of the bound-vortex line [deg].
+
+    The mean is over the bound-vortex segments of all panels of all
+    surfaces, each weighted by its panel area. The sweep of a segment is
+    the angle between the segment and the y-z plane. The trust score uses
+    this value as the "sweep" of the lattice solvers.
+    """
     dl = lattice.dl
     lam = np.degrees(np.arctan2(np.abs(dl[:, 0]), np.sqrt(dl[:, 1] ** 2 + dl[:, 2] ** 2)))
     w = lattice.area
@@ -173,6 +179,11 @@ class LatticeSolver(BaseSolver):
         given. Out of ground effect the default is used. In ground effect a
         chordwise panel is not longer than the smallest gap to the ground,
         within the default and the maximum automatic count.
+
+        The automatic count is an integer, so CL(h) and the other results
+        jump at the heights (and attitudes) where the count changes. For a
+        derivative by finite differences (for example dCL/dh), set
+        ``settings.n_chord`` so that all cases use one mesh.
 
         Parameters
         ----------
