@@ -115,6 +115,16 @@ class TabulatedAirfoil:
         Pitching-moment array (optional).
     Re : float | None
         Reynolds number this polar was generated / measured at.
+    Cl_circulation_data : np.ndarray | None
+        Circulation lift coefficient ``2 Gamma / (V c)`` [-] at *alpha*
+        (optional, same length as *alpha*). A section in ground effect has
+        two lift definitions: ``Cl_data`` holds the force (pressure) lift,
+        this array the lift of the total circulation. They differ near a
+        wall because the Kutta-Joukowski relation on the total circulation
+        does not give the force there (C. Coulliette and A. Plotkin,
+        "Aerofoil ground effect revisited", The Aeronautical Journal 100,
+        1996). None (default) means that the polar gives no circulation lift. In free
+        air the two definitions are equal for a single section.
     """
 
     name: str = "Tabulated Airfoil"
@@ -123,10 +133,12 @@ class TabulatedAirfoil:
     Cd_data: np.ndarray = field(default_factory=lambda: np.array([]))
     Cm_data: np.ndarray | None = None
     Re: float | None = None
+    Cl_circulation_data: np.ndarray | None = None
     _cached_a0: float | None = field(default=None, init=False, repr=False)
     _cached_alpha_L0: float | None = field(default=None, init=False, repr=False)
     _interp: dict | None = field(default=None, init=False, repr=False)
     _prepared_arrays: tuple | None = field(default=None, init=False, repr=False)
+    _prepared_circulation: np.ndarray | None = field(default=None, init=False, repr=False)
 
     def __setattr__(self, name: str, value: Any) -> None:
         object.__setattr__(self, name, value)
@@ -136,6 +148,7 @@ class TabulatedAirfoil:
             object.__setattr__(self, "_cached_a0", None)
             object.__setattr__(self, "_cached_alpha_L0", None)
             object.__setattr__(self, "_prepared_arrays", None)
+            object.__setattr__(self, "_prepared_circulation", None)
 
     def __post_init__(self) -> None:
         # Initialisation does not prepare arrays; they are prepared on first use.
@@ -150,10 +163,14 @@ class TabulatedAirfoil:
             Cd_data=self.Cd_data.copy(),
             Cm_data=self.Cm_data.copy() if self.Cm_data is not None else None,
             Re=self.Re,
+            Cl_circulation_data=(
+                self.Cl_circulation_data.copy() if self.Cl_circulation_data is not None else None
+            ),
         )
         inst._cached_a0 = self._cached_a0
         inst._cached_alpha_L0 = self._cached_alpha_L0
         inst._prepared_arrays = self._prepared_arrays
+        inst._prepared_circulation = self._prepared_circulation
         return inst
 
     def __copy__(self) -> TabulatedAirfoil:
@@ -173,7 +190,12 @@ class TabulatedAirfoil:
 
         a = np.atleast_1d(np.asarray(self.alpha, dtype=float))
         n = a.size
-        tables = {"Cl_data": self.Cl_data, "Cd_data": self.Cd_data, "Cm_data": self.Cm_data}
+        tables = {
+            "Cl_data": self.Cl_data,
+            "Cd_data": self.Cd_data,
+            "Cm_data": self.Cm_data,
+            "Cl_circulation_data": self.Cl_circulation_data,
+        }
         arrs: dict[str, np.ndarray | None] = {}
         for key, val in tables.items():
             if val is None:
@@ -209,6 +231,7 @@ class TabulatedAirfoil:
         cl = arrs["Cl_data"]
         cd = arrs["Cd_data"]
         cm = arrs["Cm_data"]
+        self._prepared_circulation = arrs["Cl_circulation_data"]
         self._prepared_arrays = (a, cl, cd, cm)
         return self._prepared_arrays
 
@@ -246,6 +269,9 @@ class TabulatedAirfoil:
             if cm is not None:
                 f["Cm"] = PchipInterpolator(a, np.asarray(cm, dtype=float), extrapolate=False)
             f["dCl"] = f["Cl"].derivative()
+            if self._prepared_circulation is not None:
+                f["Clc"] = PchipInterpolator(a, np.asarray(self._prepared_circulation, dtype=float), extrapolate=False)
+                f["dClc"] = f["Clc"].derivative()
             self._interp = f
         return self._interp
 
@@ -280,6 +306,40 @@ class TabulatedAirfoil:
         prep = self._prepare_arrays()
         lo, hi = float(prep[0][0]), float(prep[0][-1])
         out = np.where((a >= lo) & (a <= hi), f["dCl"](np.clip(a, lo, hi)), 0.0)
+        return out if np.ndim(alpha) else float(out)
+
+    @property
+    def has_circulation_lift(self) -> bool:
+        """True when the polar holds the circulation lift (``Cl_circulation_data``)."""
+        return self.Cl_circulation_data is not None
+
+    def Cl_circulation(self, alpha: float | np.ndarray) -> float | np.ndarray:
+        """Return the circulation lift coefficient at *alpha* [rad]; end values outside the table.
+
+        Raises
+        ------
+        ValueError
+            If the polar has no circulation lift data.
+        """
+        if self.Cl_circulation_data is None:
+            raise ValueError(f"TabulatedAirfoil {self.name!r} has no circulation lift data.")
+        return self._eval("Clc", alpha, self.Cl_circulation_data)
+
+    def Cl_circulation_slope(self, alpha: float | np.ndarray) -> float | np.ndarray:
+        """Return d(Cl_circulation)/dalpha [1/rad]; zero outside the table.
+
+        Raises
+        ------
+        ValueError
+            If the polar has no circulation lift data.
+        """
+        if self.Cl_circulation_data is None:
+            raise ValueError(f"TabulatedAirfoil {self.name!r} has no circulation lift data.")
+        a = np.asarray(alpha, dtype=float)
+        f = self._pchip()
+        prep = self._prepare_arrays()
+        lo, hi = float(prep[0][0]), float(prep[0][-1])
+        out = np.where((a >= lo) & (a <= hi), f["dClc"](np.clip(a, lo, hi)), 0.0)
         return out if np.ndim(alpha) else float(out)
 
     def _compute_linear_fit(self) -> None:
@@ -327,7 +387,7 @@ class TabulatedAirfoil:
 
 
 # Fields of TabulatedAirfoil whose change clears the cached interpolation.
-_TABLE_FIELDS = frozenset({"alpha", "Cl_data", "Cd_data", "Cm_data"})
+_TABLE_FIELDS = frozenset({"alpha", "Cl_data", "Cd_data", "Cm_data", "Cl_circulation_data"})
 
 # Type alias for convenience
 AirfoilType = LinearAirfoil | TabulatedAirfoil

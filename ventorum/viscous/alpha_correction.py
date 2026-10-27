@@ -54,6 +54,19 @@ the vortex-lattice strip also has its images in the ground, so the 2D
 ground effect is not counted twice. A free-air polar is read with the
 free-air section relation.
 
+Lift definitions in ground effect. The lift ``cl_inv`` of a lattice strip
+is its circulation lift ``2 Gamma / (V c)``, and the section relation and
+the ground factor ``kappa`` also come from circulations. Near a wall the
+force (pressure) lift of a section differs from its circulation lift
+(Coulliette and Plotkin 1996). So on a strip whose polar holds the ground
+height, the residual reads the circulation lift of the polar
+(``TabulatedAirfoil.Cl_circulation``) when the polar has it. A ground
+polar without circulation data is read with its ``Cl`` as before, and the
+result gets a trust note. In free air the two definitions are equal and
+the residual reads ``Cl``. The reported loads are the Kutta-Joukowski
+forces of the lattice with the local velocity, images included: the force
+on the wing.
+
 Residual and Newton iteration::
 
     cl_inv(delta) = cl_inv(0) - D delta
@@ -83,6 +96,9 @@ References
   University Press, 1926 (thin-airfoil theory, flap effectiveness).
 * J. Katz and A. Plotkin, "Low-Speed Aerodynamics", 2nd ed., Cambridge
   University Press, 2001 (discrete vortex method, method of images).
+* C. Coulliette and A. Plotkin, "Aerofoil ground effect revisited", The
+  Aeronautical Journal 100, 1996 (pressure lift and circulation lift of a
+  section in ground effect).
 * ISO 2533:1975 (ISA sea-level dynamic viscosity of air).
 """
 
@@ -179,6 +195,17 @@ _THICK_GROUND_FLAP_NOTE = (
     "for thick sections below h/c 0.30 it can differ by more than 2 % "
     "(about 0.1 to 0.2 deg of flap shift)."
 )
+
+#: Trust and runtime warning when a ground-effect polar gives no circulation lift.
+_GROUND_LIFT_NOTE = (
+    "A section polar in ground effect gives no circulation lift (Cl_circulation); "
+    "the coupling compares the circulation lift of the lattice with the Cl of the polar. "
+    "When that Cl is the pressure lift, the two lift definitions differ near the ground "
+    "(Coulliette and Plotkin 1996) and the coupled lift is too low at small h/c."
+)
+
+#: Notes that warn once per call of :func:`solve_viscous`.
+_ONCE_PER_CALL_NOTES = frozenset({_THICK_GROUND_FLAP_NOTE, _GROUND_LIFT_NOTE})
 
 _NACA_NAME = re.compile(r"^\s*(?:naca)?\s*(\d{4,5})\s*$", re.IGNORECASE)
 
@@ -765,12 +792,32 @@ def _not_converged_note(sol: dict, max_iter: int, tol: float) -> str:
     )
 
 
-def _alpha_cl_max(polar: Any) -> float | None:
-    """Return the angle [rad] of the largest Cl of a tabulated polar, or None."""
+def _alpha_cl_max(polar: Any, circulation: bool = False) -> float | None:
+    """Return the angle [rad] of the largest Cl of a tabulated polar, or None.
+
+    With *circulation* the largest circulation lift is used.
+    """
     if not isinstance(polar, TabulatedAirfoil):
         return None
     alpha, cl, _, _ = polar.tables()
+    if circulation:
+        cl = polar.Cl_circulation(alpha)
     return float(np.asarray(alpha)[int(np.argmax(np.asarray(cl)))])
+
+
+def _uses_circulation_lift(polars: Sequence[Any], uses_height: np.ndarray) -> np.ndarray:
+    """Return True for the strips whose residual reads the circulation lift of the polar.
+
+    A strip reads the circulation lift when its polar holds the ground
+    height and has circulation lift data.
+    """
+    return np.array(
+        [
+            bool(h) and isinstance(p, TabulatedAirfoil) and p.has_circulation_lift
+            for p, h in zip(polars, uses_height)
+        ],
+        dtype=bool,
+    )
 
 
 def _solve_condition(
@@ -819,6 +866,11 @@ def _solve_condition(
     D = -np.array([np.sum(G[unk_strip == s, :], axis=0) for s in strips]) * scale[:, None]
 
     polars, uses_height, h_over_c = resolver.resolve(lattice, strips, condition, ground)
+    # Circulation with circulation: a ground polar is read with its
+    # circulation lift when it has one (see the module notes).
+    use_circ = _uses_circulation_lift(polars, uses_height)
+    if np.any(uses_height & ~use_circ) and _GROUND_LIFT_NOTE not in notes:
+        notes.append(_GROUND_LIFT_NOTE)
     if ground is not None and model in ("vlm", "llt"):
         h_vals = h_over_c[np.isfinite(h_over_c)]
         if h_vals.size > 0 and float(np.min(h_vals)) < 0.30:
@@ -847,8 +899,14 @@ def _solve_condition(
     def evaluate(delta: np.ndarray):
         cl_inv = cl0 - D @ delta
         alpha_v = alpha0 + cl_inv / a_sec + delta
-        cl_v = np.array([float(section_cl(p, a)) for p, a in zip(polars, alpha_v)])
-        m = np.array([float(section_cl_slope(p, a)) for p, a in zip(polars, alpha_v)])
+        cl_v = np.array([
+            float(p.Cl_circulation(a)) if c else float(section_cl(p, a))
+            for p, a, c in zip(polars, alpha_v, use_circ)
+        ])
+        m = np.array([
+            float(p.Cl_circulation_slope(a)) if c else float(section_cl_slope(p, a))
+            for p, a, c in zip(polars, alpha_v, use_circ)
+        ])
         return cl_inv - (cl_v - cl_offset), cl_inv, alpha_v, m
 
     def newton(start: np.ndarray):
@@ -940,7 +998,7 @@ def _solve_condition(
         up_shift = np.zeros(n_ind)
         down_shift = np.zeros(n_ind)
         for i, p in enumerate(polars):
-            a_max = _alpha_cl_max(p)
+            a_max = _alpha_cl_max(p, bool(use_circ[i]))
             if a_max is not None:
                 a_v = float(primary["alpha_v"][i])
                 up_shift[i] = max(0.0, a_max + margin - a_v)
@@ -1033,6 +1091,7 @@ def _solve_condition(
             "alpha0_thin_airfoil": full(alpha0_ta),
             "lift_slope_section": full(a_sec),
             "strip_h_over_c": full(h_over_c),
+            "strip_circulation_lift": full(use_circ, dtype=bool),
             "post_stall": bool(np.any(sol["m"] <= 0.0)),
             "post_stall_strips": full(sol["m"] <= 0.0, dtype=bool),
             "strip_flags": list(full(flags, dtype=object)),
@@ -1049,7 +1108,7 @@ def _solve_condition(
     if non_unique:
         result.details["branches"] = [result] + [make_result(sol, bl, False) for sol, bl in branches]
     for msg in notes:
-        if warned is not None and msg == _THICK_GROUND_FLAP_NOTE:
+        if warned is not None and msg in _ONCE_PER_CALL_NOTES:
             if msg in warned:
                 continue
             warned.add(msg)
@@ -1117,6 +1176,8 @@ def solve_viscous(
         (the zero-lift angle of the thin-airfoil model of each strip; it
         differs from ``alpha0_section`` only on a vortex-lattice strip with
         a deflected control), ``strip_h_over_c`` [-],
+        ``strip_circulation_lift`` (True on a strip whose residual reads
+        the circulation lift of a ground-effect polar),
         ``post_stall_strips``, ``strip_flags``, ``non_unique``,
         ``branches`` (when a post-stall case has more than one converged
         solution), ``factorized`` (True when this condition needed a new
@@ -1146,6 +1207,13 @@ def solve_viscous(
     A polar that follows thin-airfoil theory (slope 2 pi, Glauert flap
     shift) then gives the inviscid vortex-lattice result at the same
     chordwise panel count, not the mesh-converged flap effect.
+
+    In ground effect the strip lift of the lattice is a circulation lift.
+    A polar that holds the ground height is read with its circulation lift
+    (``Cl_circulation_data``, which the in-house 2D source and its tables
+    give) when it has one. A ground polar without it is read with its
+    ``Cl``, and the result gets a trust note: the pressure lift of a
+    section near the ground is smaller than its circulation lift.
     """
     model_str = str(model).lower()
     if model_str not in ("vlm", "llt", "panel3d"):

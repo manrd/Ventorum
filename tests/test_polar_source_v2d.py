@@ -43,12 +43,17 @@ def test_naca0012_re1e6_sweep_minus4_to_8():
 
 
 def _fake_viscous_result(alpha_deg, height=None):
-    """Canned solver result: thin-airfoil lift, constant drag, all converged."""
+    """Canned solver result: thin-airfoil lift, constant drag, all converged.
+
+    In ground effect the circulation lift differs from the pressure lift, as
+    in the real solver.
+    """
     alphas = np.atleast_1d(np.asarray(alpha_deg, dtype=float))
     shift = 0.0 if height is None else 0.01 / float(height)
     return SimpleNamespace(
         alpha=alphas,
         Cl=2.0 * np.pi * np.radians(alphas) + shift,
+        Cl_circulation=2.0 * np.pi * np.radians(alphas) + 2.0 * shift,
         Cd=np.full(alphas.shape, 0.008),
         Cm=np.zeros(alphas.shape),
         converged=np.ones(alphas.shape, dtype=bool),

@@ -17,6 +17,14 @@ thin-airfoil theory, Glauert 1927): the source passes the flapped
 :class:`ventorum.airfoil.AirfoilShape`, which holds that reference
 geometry. The options ``chord_ref`` and ``moment_ref`` override them.
 
+Lift definitions. In ground effect the 2D solver gives two lift
+coefficients: ``Cl`` is the surface pressure (force) lift and
+``Cl_circulation`` is ``2 Gamma / c`` of the total circulation. They
+differ near a wall (Coulliette and Plotkin 1996). A polar in ground effect
+keeps the pressure lift in ``Cl_data`` and stores the circulation lift in
+``Cl_circulation_data``. A free-air polar has only ``Cl_data``: there the
+two definitions are equal.
+
 The cache key holds the package version, the solver revision
 (``ventorum.panel2d.SOLVER_REVISION``) and a sha256 fingerprint of the source
 files of the 2D packages (:func:`solver_fingerprint`), so a polar of an
@@ -27,7 +35,9 @@ transonic and low Reynolds number airfoils, AIAA Journal; Drela, M., 1989,
 XFOIL: An analysis and design system for low Reynolds number airfoils;
 Katz, J. and Plotkin, A., 2001, Low-Speed Aerodynamics, 2nd ed. (ground effect
 by method of images); Glauert, H., 1927, Theoretical relationships for an
-aerofoil with hinged flap, R&M 1095.
+aerofoil with hinged flap, R&M 1095; Coulliette, C. and Plotkin, A., 1996,
+Aerofoil ground effect revisited, The Aeronautical Journal 100 (lift
+definitions in ground effect).
 """
 
 from __future__ import annotations
@@ -329,7 +339,10 @@ class Ventorum2DPolarSource:
         TabulatedAirfoil
             The section polar over the converged requested angles. Angles
             are in radians. Non-converged angles are dropped; the polar
-            name and :attr:`last_dropped` give their number.
+            name and :attr:`last_dropped` give their number. ``Cl_data`` is
+            the pressure lift. With a *height*, ``Cl_circulation_data``
+            holds the circulation lift ``2 Gamma / c`` [-]; in free air it
+            is None.
         """
         try:
             mach_val = float(mach)
@@ -407,7 +420,9 @@ class Ventorum2DPolarSource:
                 "options": {k: _json_value(v) for k, v in sorted(settings.items())},
             }
             hit = self._cache.get(payload)
-            if hit is not None:
+            # A ground-effect entry written before the circulation lift was
+            # stored is a miss: the solver runs again and replaces it.
+            if hit is not None and (h_val is None or hit.Cl_circulation_data is not None):
                 return hit
 
         res = solve_viscous(
@@ -423,12 +438,17 @@ class Ventorum2DPolarSource:
         res_cls = np.atleast_1d(np.asarray(res.Cl, dtype=float))
         res_cds = np.atleast_1d(np.asarray(res.Cd, dtype=float))
         res_cms = np.atleast_1d(np.asarray(res.Cm, dtype=float))
+        # The circulation lift is stored in ground effect only (equal to Cl in free air).
+        res_circ = (
+            None if h_val is None else np.atleast_1d(np.asarray(res.Cl_circulation, dtype=float))
+        )
         res_conv = np.atleast_1d(np.asarray(res.converged, dtype=bool))
 
         kept_alphas: list[float] = []
         kept_cls: list[float] = []
         kept_cds: list[float] = []
         kept_cms: list[float] = []
+        kept_circ: list[float] = []
 
         for a in unique_req:
             matches = np.flatnonzero(np.isclose(res_alphas, a, atol=1e-6))
@@ -439,6 +459,8 @@ class Ventorum2DPolarSource:
                     kept_cls.append(float(res_cls[idx]))
                     kept_cds.append(float(res_cds[idx]))
                     kept_cms.append(float(res_cms[idx]))
+                    if res_circ is not None:
+                        kept_circ.append(float(res_circ[idx]))
 
         n_requested = unique_req.size
         dropped = n_requested - len(kept_alphas)
@@ -456,6 +478,7 @@ class Ventorum2DPolarSource:
             Cd_data=np.asarray(kept_cds, dtype=float),
             Cm_data=np.asarray(kept_cms, dtype=float),
             Re=re_val,
+            Cl_circulation_data=None if h_val is None else np.asarray(kept_circ, dtype=float),
         )
 
         if payload is not None and self._cache is not None:

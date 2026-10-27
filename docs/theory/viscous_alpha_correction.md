@@ -19,6 +19,7 @@ The inviscid solvers give linear lift curves and no stall. The coupling gives ea
 5. H. Glauert, "Theoretical Relationships for an Aerofoil with Hinged Flap", ARC R&M 1095, 1927 (thin-airfoil flap shift); H. Glauert, *The Elements of Aerofoil and Airscrew Theory*, Cambridge University Press, 1926 (thin-airfoil theory, flap effectiveness).
 6. J. Katz and A. Plotkin, *Low-Speed Aerodynamics*, 2nd ed., Cambridge University Press, 2001 (discrete vortex method, method of images).
 7. ISO 2533:1975, Standard Atmosphere (dynamic viscosity of air at sea level).
+8. C. Coulliette and A. Plotkin, ["Aerofoil ground effect revisited"](https://www.cambridge.org/core/journals/aeronautical-journal/article/abs/aerofoil-ground-effectrevisited/561E5C4DD13ED87435EF7B438859EE20), *The Aeronautical Journal* 100, 1996 (the surface pressure lift of a section in ground effect, eq. 30, and its difference from the circulation lift).
 
 ## Inviscid response of the strips
 
@@ -46,6 +47,21 @@ $$\alpha_{v,j} = \alpha_{e,j} + \delta_j.$$
 **Flaps are counted once.** The lattice gives the inviscid flap effect in $C_{l,\text{inv}}$, and $\alpha_{0,j}$ (from the lattice itself) takes it out of the effective angle. The polar of a strip with a deflected control is the flapped polar (a table at the flap deflection, a source with the flap of the control, or a single polar with the Glauert shift). With polars that follow thin-airfoil theory (slope $2\pi$, Glauert flap shift), the lifting-line result equals the inviscid result.
 
 **Ground effect.** When the polar of a strip holds the ground height (a table with a height axis, or a source with ground support), the 2D section of a vortex-lattice strip also has its image vortices in the ground, so the 2D ground effect is not counted twice. A free-air polar is read with the free-air section relation. The height of a strip is the height of its quarter-chord point above the ground divided by its chord. The lifting line has no chordwise extent: its section relation has no 2D ground effect, and the polar gives it.
+
+### Lift definitions in ground effect
+
+A 2D section near a wall has two lift coefficients. The circulation lift is $C_{l,\Gamma} = 2\Gamma/(V_\infty c)$, from the total circulation $\Gamma$ of the section. The pressure lift $C_{l,p}$ is the integral of the surface pressure: it is the force on the section. In free air the Kutta-Joukowski relation makes the two equal for a single section. Near a wall it does not give the force from the total circulation, and the two differ (Coulliette and Plotkin 1996, eq. 30). Ventorum-2D reports $C_{l,p}$ as `Cl` in ground effect and keeps $C_{l,\Gamma}$ as `Cl_circulation` (see [](panel2d.md)).
+
+The coupling uses these definitions:
+
+- **Residual: circulation with circulation.** The strip lift $C_{l,\text{inv},j} = 2\Gamma_j/(V_\infty c_j)$ of the lattice is a circulation lift. The section relation $(a_j, \alpha_{0,j})$ of a vortex-lattice strip with images, and the ground factor $\kappa_j$ of the flap shift, also come from sums of circulations. On a strip whose polar holds the ground height, the residual therefore reads the circulation lift of the polar, $C_{l,\Gamma,\text{visc}}$, and its slope in the Jacobian. A ground polar of Ventorum-2D has it: `Ventorum2DPolarSource` stores it in `TabulatedAirfoil.Cl_circulation_data`, `build_polar_table` stores it in `PolarTable.Cl_circulation`, and `PolarTable.at` interpolates it as `Cl`. The branch search uses the angle of the largest circulation lift. `details["strip_circulation_lift"]` marks these strips.
+- **The ground factor is consistent.** $\kappa_j$ is the ratio of two zero-lift shifts of a 2D discrete-vortex section, and each shift is a ratio of circulation sums. It is thus a circulation quantity, and it agrees with a polar that gives the circulation lift. No change of $\kappa_j$ is necessary for this definition.
+- **Reported loads: the force.** The loads of the result are the Kutta-Joukowski forces on the bound vortices with the local velocity, the velocity of the ground images included ([](forces_and_moments.md)). This is the force on the wing, the 3D equivalent of the pressure lift. The polar `Cl` (the pressure lift in ground effect) stays in the polar for reports.
+- **Polar without circulation lift.** A ground polar without circulation lift data (for example a user table with a height axis) is read with its `Cl`, as before. The result then gets a trust note and one `RuntimeWarning` per call: when that `Cl` is a pressure lift, the residual compares two lift definitions, and the coupled lift is too low at small $h/c$.
+- **Free air.** A free-air polar is read with `Cl`. A free-air polar of Ventorum-2D has no circulation lift data, because there the two definitions are equal. Free-air results do not change.
+- **Thick-surface panel coupling.** `model="panel3d"` matches the pressure lift of each strip with the polar `Cl`: pressure with pressure. It does not read the circulation lift.
+
+**Assumption: the pitch of the polar section.** A ground-effect polar is a set of 2D solutions at one height $h/c$ of the reference point. Ventorum-2D turns the section about its quarter-chord point on the chord line and keeps the height of that point. The coupling reads the polar at the height of the strip quarter-chord point and at the viscous section angle $\alpha_{v,j}$. So it assumes that the strip section has the attitude of the polar section: pitched about $c/4$ to $\alpha_{v,j}$. The lattice strip has its geometric attitude, and $\alpha_{v,j}$ differs from it by the induced angle and the correction $\delta_j$. Near the ground the height of the trailing edge, and so the 2D ground effect, therefore differ between the strip and the polar section. The coupling has no correction for this difference.
 
 ### Reference of a flapped vortex-lattice strip
 
@@ -84,7 +100,7 @@ The residual of strip $j$ is
 
 $$r_j(\boldsymbol{\delta}) = C_{l,\text{inv},j}(\boldsymbol{\delta}) - C_{l,\text{visc},j}(\alpha_{v,j}(\boldsymbol{\delta}), Re_j) + a_j\left(\alpha_{0,j} - \alpha_{0,\text{TA},j}\right).$$
 
-The last term is the constant flap offset of a vortex-lattice strip with a deflected control (zero elsewhere), so it does not change the Jacobian.
+The last term is the constant flap offset of a vortex-lattice strip with a deflected control (zero elsewhere), so it does not change the Jacobian. On a strip whose polar holds the ground height and has circulation lift data, $C_{l,\text{visc},j}$ is the circulation lift of the polar (see "Lift definitions in ground effect").
 
 With $\partial \alpha_{v,j} / \partial \delta_k = -D_{jk}/a_j + \delta_{jk}$ and the polar slope $m_j = \mathrm{d}C_{l,\text{visc},j}/\mathrm{d}\alpha$ at $\alpha_{v,j}$, $M = \operatorname{diag}(m_j)$, the Jacobian is
 
