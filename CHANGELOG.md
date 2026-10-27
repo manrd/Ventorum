@@ -184,6 +184,7 @@ a minor version can change a public interface.
 
 ### Fixed
 
+- Ventorum-3DP with body rates p, q, r: the surface pressure now includes the kinematic term of the rotating body, Cp = (|V_k|^2 - |V|^2) / V_inf^2, with V_k the local onset velocity. The flow is steady in the body frame, so the unsteady Bernoulli equation of the earth frame applies. The former Cp = 1 - |V|^2 / V_inf^2 gave three times the added-mass force of a sphere on a circular path. On a wing the pitch-rate derivatives CL_q and Cm_q grow by several percent, and the yaw-rate side force CY_r falls by about an order of magnitude, close to the vortex-lattice values. The fix applies to the CPU and GPU paths, the pressure Kutta and the viscous strip coupling. Results without rates do not change.
 - Ventorum-3DP: the flat tip cap of a cambered section gave cap pressures of order 1e3 to 1e4, and with dihedral the cap force made the lift too high (NACA 2412 at 30 deg dihedral: CL 0.556 instead of about 0.43). A tip cap panel now keeps the surface gradient along its row of neighbours only. Symmetric sections do not change.
 - Ventorum-2D retries a residual-window stop once for the cold quasi-simultaneous first estimate at the
   requested angle (not at the zero-lift start of an angle continuation). The stage limit and angle

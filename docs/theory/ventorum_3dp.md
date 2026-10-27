@@ -362,11 +362,29 @@ The total surface velocity is:
 \mathbf{V}_{\text{surf}, i} = \mathbf{V}_{\text{onset}, t}(\mathbf{c}_i) - \nabla_s \mu_i.
 ```
 
-Bernoulli's equation gives the pressure coefficient:
+Without body rates, Bernoulli's equation gives the pressure coefficient:
 
 ```{math}
 C_p = 1 - \frac{\|\mathbf{V}_{\text{surf}}\|^2}{V_\infty^2}.
 ```
+
+#### Pressure with body rates
+
+With body rates $p, q, r$ the body turns with the angular velocity $\boldsymbol{\Omega}$ (in geometry axes $\boldsymbol{\Omega} = (-p, q, -r)$). The point $\mathbf{x}$ of the body moves with the velocity $\mathbf{v}_b(\mathbf{x})$ in the earth frame. The local onset velocity of the solver is $\mathbf{V}_k(\mathbf{x}) = -\mathbf{v}_b(\mathbf{x}) = V_\infty \hat{\mathbf{d}} - \boldsymbol{\Omega} \times (\mathbf{x} - \mathbf{x}_{\text{ref}})$. The quasi-steady model takes the flow as steady in the body frame. The flow is then not steady in the earth frame, and the pressure follows from the unsteady Bernoulli equation for the perturbation potential $\phi$ in the earth frame, where the air is at rest far from the body:
+
+```{math}
+p - p_\infty = -\rho \left( \frac{\partial \phi}{\partial t} + \frac{1}{2} \|\nabla \phi\|^2 \right).
+```
+
+The potential is steady in the body frame. Thus at a point fixed in the earth frame $\partial \phi / \partial t = -\mathbf{v}_b \cdot \nabla \phi$. The velocity relative to the body is $\mathbf{V}_{\text{surf}} = \nabla \phi - \mathbf{v}_b = \nabla \phi + \mathbf{V}_k$, so $\|\mathbf{V}_{\text{surf}}\|^2 = \|\nabla \phi\|^2 - 2\, \mathbf{v}_b \cdot \nabla \phi + \|\mathbf{V}_k\|^2$. Substitution gives:
+
+```{math}
+C_p = \frac{p - p_\infty}{\frac{1}{2} \rho V_\infty^2} = \frac{\|\mathbf{V}_k(\mathbf{x})\|^2 - \|\mathbf{V}_{\text{surf}}\|^2}{V_\infty^2}.
+```
+
+Without rates $\|\mathbf{V}_k\| = V_\infty$ and the two forms are the same. The solver keeps the first form in that case, so results without rates do not change. The kinematic term $\|\mathbf{V}_k\|^2 / V_\infty^2 - 1$ does not depend on the doublets, so the pressure Kutta Jacobian does not change; the pressure Kutta sets the jump of the full $C_p$ above to zero. The Morino batch path, the single-condition path, the pressure Kutta and the viscous strip coupling use this $C_p$, on the CPU and on the GPU. In ground effect the same quasi-steady formula applies; the model does not include the change of height and attitude in time.
+
+Check (`tests/test_panel3d_rotation_pressure.py`): a sphere of radius $a$ flies a circle with the pitch rate $q$ (or the yaw rate $r$) about its centre. In the earth frame the flow is the flow of a translating sphere whose velocity turns, so the only force is the added-mass force $-m_a\, d\mathbf{U}/dt$. Here $m_a = \frac{2}{3} \pi \rho a^3$ (half the displaced mass) and the centripetal acceleration is $\|d\mathbf{U}/dt\| = \Omega V_\infty$. With $S_{\text{ref}} = \pi a^2$ the coefficient of the force towards the centre of the turn is $-\frac{4}{3} a \Omega / V_\infty$. A 16 x 32 mesh gives this value to 2.1 %. The former formula $1 - \|\mathbf{V}_{\text{surf}}\|^2 / V_\infty^2$ gave about three times this value ($-4 a \Omega / V_\infty$).
 
 ### Forces and moments
 

@@ -756,6 +756,7 @@ def evaluate_condition_on_device(
     v_onset,
     normals,
     v_inf: float,
+    rates: bool = False,
 ):
     """Superpose the unit solutions and the surface Cp on the device.
 
@@ -781,7 +782,11 @@ def evaluate_condition_on_device(
     normals : array_like
         Full mesh unit normals with shape (Nf, 3).
     v_inf : float
-        Free-stream speed in m/s.
+        Free-stream speed in m/s. At or below 1e-12 m/s, Cp is set to zero.
+    rates : bool, default=False
+        True when the condition has a body rate. Cp then includes the
+        kinematic term of the rotating body,
+        ``Cp = (|V_onset|^2 - |V_surf|^2) / V_inf^2``.
 
     Returns
     -------
@@ -809,12 +814,14 @@ def evaluate_condition_on_device(
     v_norm = (von_t * nrm_t).sum(dim=-1, keepdim=True)
     v_surf_t = (von_t - v_norm * nrm_t) - grad_t
     v_inf_f = float(v_inf)
-    if v_inf_f > 1.0e-12:
-        cp_t = 1.0 - (v_surf_t**2).sum(dim=-1) / (v_inf_f**2)
-    else:
+    if not v_inf_f > 1.0e-12:
         cp_t = torch.zeros(
             (int(nrm_t.shape[0]),), dtype=dt, device=dev
         )
+    elif rates:
+        cp_t = ((von_t**2).sum(dim=-1) - (v_surf_t**2).sum(dim=-1)) / (v_inf_f**2)
+    else:
+        cp_t = 1.0 - (v_surf_t**2).sum(dim=-1) / (v_inf_f**2)
     def _to_host(t):
         return t.to(torch.float64).cpu().numpy()
 
@@ -857,6 +864,8 @@ def _evaluate_conditions_on_device(
     unit doublets [m^2/s per unit onset] as device tensors. Trefftz holds
     velocity factors [1/m], strip normals [-], lengths [m], panel indices
     and the reference area [m^2], or None for a body without a wake.
+    Cp is zero for a speed at or below 1e-12 m/s. A condition with a body rate
+    gets the Cp of the rotating body, ``(|V_onset|^2 - |V_surf|^2) / V_inf^2``.
 
     Return host float64 arrays: mu (K, N) [m^2/s], sigma (K, N) [m/s],
     velocity (K, Nf, 3) [m/s], Cp (K, Nf) [-], total force (K, 3) [N],
@@ -907,8 +916,16 @@ def _evaluate_conditions_on_device(
         1.0, speed**2, out=np.zeros_like(speed), where=speed > 1e-12,
     )
     inverse_speed_sq = torch.as_tensor(inverse_speed_sq, dtype=dt, device=dev)
-    cp = torch.where(valid[:, None],
-                     1.0 - (velocity**2).sum(dim=-1) * inverse_speed_sq[:, None], 0.0)
+    speed_sq = (velocity**2).sum(dim=-1)
+    cp = torch.where(valid[:, None], 1.0 - speed_sq * inverse_speed_sq[:, None], 0.0)
+    rates = np.any(np.asarray(coeffs)[:, 3:] != 0.0, axis=1) & (np.asarray(speed) > 1e-12)
+    if np.any(rates):
+        # Body rates: Cp = (|V_onset|^2 - |V_surf|^2) / V_inf^2, the
+        # kinematic term of the rotating body (see
+        # ventorum.panel3d.post.compute_surface_velocity_and_cp).
+        rotating = torch.as_tensor(rates, device=dev)
+        kinematic = ((onset**2).sum(dim=-1) - speed_sq) * inverse_speed_sq[:, None]
+        cp = torch.where(rotating[:, None], kinematic, cp)
     q = 0.5 * densities * speeds**2
     force = -cp.to(torch.float64)[..., None] * geometry["area"][:, None]
     force = force * geometry["normal"] * q[:, None, None]

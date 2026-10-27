@@ -105,7 +105,7 @@ from ventorum.aero.loads import compute_loads
 from ventorum.core.constants import MU_SL
 from ventorum.aero.polar_table import PolarTable, source_supports_ground
 from ventorum.aero.polars import blend_tabulated
-from ventorum.aero.system import GroundPlane, UnknownMap
+from ventorum.aero.system import GroundPlane, UnknownMap, has_rates
 from ventorum.core.datatypes import (
     Aircraft,
     FlightCondition,
@@ -1210,18 +1210,25 @@ def _independent(res: SolverResult) -> np.ndarray:
 
 
 def _panel_residual(x, velocity0, dv, speed, incidence, weights, area,
-                    zero, slope, polars, offset, up, lo, pressure):
+                    zero, slope, polars, offset, up, lo, pressure, onset_sq=None):
     """Return the coupled residual and its analytic Jacobian.
 
     Body velocities and their columns are in m/s; speed is in m/s. The
     first unknowns are strip angles [rad], followed by optional wake
     strengths [m^2/s]. Cl and the trailing-edge Cp jump are dimensionless.
-    The chain rule uses dCp/dx = -2 V dot (dV/dx) / V_inf^2.
+    The chain rule uses dCp/dx = -2 V dot (dV/dx) / V_inf^2. With body
+    rates, onset_sq holds the squared onset speed |V_k|^2 [m^2/s^2] of each
+    panel and Cp = (|V_k|^2 - |V|^2) / V_inf^2 (see
+    :func:`ventorum.panel3d.post.compute_surface_velocity_and_cp`); None
+    means no rates.
     """
     ns = len(area)
     n = len(weights)
     velocity = velocity0 + np.einsum("ijk,k->ij", dv, x)
-    cp = 1 - np.sum(velocity**2, axis=1) / speed**2
+    if onset_sq is None:
+        cp = 1 - np.sum(velocity**2, axis=1) / speed**2
+    else:
+        cp = (onset_sq - np.sum(velocity**2, axis=1)) / speed**2
     dcp = -2 * np.einsum("ij,ijk->ik", velocity, dv) / speed**2
     cl = (incidence @ (weights * cp[:n])) / area
     dc = (incidence @ (weights[:, None] * dcp[:n])) / area[:, None]
@@ -1352,10 +1359,11 @@ class _PanelCoupling:
         tangential = onset_delta - (normal @ onset_delta)[:, None] * normal
         owners = np.tile(self.owner, 2) if solver.mesh.half else self.owner
         dv[np.arange(len(owners)), :, owners] += tangential
+        onset = solver._condition_velocity(condition, solver._full_geom.centroid)
         velocity0, _ = compute_surface_velocity_and_cp(
-            solver._condition_velocity(condition, solver._full_geom.centroid), normal,
-            surface_gradient(solver._grad_op, mu_full0), speed,
+            onset, normal, surface_gradient(solver._grad_op, mu_full0), speed,
         )
+        onset_sq = np.sum(onset**2, axis=1) if has_rates(condition) else None
         lift_axis = np.array([-np.sin(condition.alpha), 0, np.cos(condition.alpha)])
         weights = -solver.areas * (solver.normals @ lift_axis)
         ground = None if cfg.ground is None else GroundPlane(*cfg.ground)
@@ -1379,7 +1387,8 @@ class _PanelCoupling:
 
         def evaluate(x):
             return _panel_residual(x, velocity0, dv, speed, self.incidence, weights, self.area,
-                                   zero, slope, polars, offset, up, lo, solver.kutta == "pressure")
+                                   zero, slope, polars, offset, up, lo, solver.kutta == "pressure",
+                                   onset_sq)
 
         def newton(start, budget=None):
             x = start.copy()
