@@ -878,6 +878,12 @@ def build_reference(
         "accum": accum,
         "origin": None,
     }
+    # Strip edges of the flap strips whose hinge point is not a leg node
+    # (geometry.lattice._leg_nodes), per panel, shape (n_panels, 2).
+    off = (lattice.geom_cache.get("flap_field") or {}).get("hinge_off")
+    build["hinge_off_panel"] = (None if off is None else
+                                torch.as_tensor(np.asarray(off, dtype=bool)[np.asarray(lattice.panel_strip)],
+                                                device=device))
     from ventorum.solvers.factory import resolve_solver_type
 
     build["solver"] = resolve_solver_type(settings.solver_type)
