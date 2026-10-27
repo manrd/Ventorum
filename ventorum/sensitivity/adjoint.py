@@ -1860,6 +1860,7 @@ def gradients(
     wrt : tuple of str
         Inputs from ``"nodes", "alpha", "beta", "V_inf", "rho", "h", "phi",
         "sections", "reference", "planform", "controls", "p", "q", "r", "mach"``.
+        Derivatives with node inputs are taken at a fixed shared-hinge topology.
         Lengths in m, angles in rad, rates in rad/s, ``y_frac``
         dimensionless, Mach number in [-] per unit Mach. ``"planform"`` gives per surface the semi-span [m],
         sweep_le, dihedral and incidence [rad], position [m] and per-section
@@ -1912,6 +1913,8 @@ def gradients(
         "Discrete adjoint of the production solve (Martins and Hwang 2013; Martins and Ning 2021, ch. 6).",
         "The mesh topology is fixed (spanwise stations, chordwise count and fractions).",
     ]
+    if "nodes" in ins:
+        notes.append("Derivatives with node inputs are taken at a fixed shared-hinge topology.")
     if "planform" in ins:
         notes.append(
             "The planform chain runs through a differentiable port of the geometry builder: "

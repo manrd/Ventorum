@@ -176,6 +176,7 @@ def check_gradients(
     rtol: float = 1e-6,
     seed: int = 0,
     method: str = "auto",
+    node_step: float | None = None,
 ) -> dict:
     """Check adjoint gradients against Richardson finite differences.
 
@@ -213,6 +214,9 @@ def check_gradients(
     method : str
         Path of the partial derivatives of the adjoint gradients (see
         :func:`ventorum.sensitivity.gradients`).
+    node_step : float or None, optional
+        Finite-difference step for node directions [m]. If None (default),
+        1e-3 of the smallest core radius of the lattice is used.
 
     Returns
     -------
@@ -255,9 +259,9 @@ def check_gradients(
       almost any gradient, so the component is skipped, with a reason.
     * Every other component is skipped.
 
-    The node step is 1e-3 of the smallest core radius of the lattice. A
-    larger step crosses the core-radius length scale, where the
-    differences do not converge. The other inputs use the steps 1, 0.3 and
+    The node step is 1e-3 of the smallest core radius of the lattice (or
+    *node_step* when specified). A larger step crosses the core-radius length
+    scale, where the differences do not converge. The other inputs use the steps 1, 0.3 and
     0.1 times the base step (1e-4 of the base value, angles 1e-4 rad, with
     an absolute floor per section property for a zero base value); each
     component uses the step with the smallest error bound.
@@ -302,6 +306,28 @@ def check_gradients(
     ok_all = True
 
     f0 = _production_scalars(ac, condition, st, axes)
+
+    from ventorum.sensitivity.topology import shared_hinge_topology
+    from ventorum.solvers.factory import make_solver
+
+    solver = make_solver(resolve_solver_type(st.solver_type))
+    base_lat = base_res.details.get("lattice")
+    base_topo = shared_hinge_topology(base_lat) if base_lat is not None else None
+
+    def _evaluate(geometry_pert: Any, condition_pert: Any, input_name: str, step: float) -> dict[str, float]:
+        if base_topo is not None:
+            pert_lat = solver.build(geometry_pert, st, condition_pert)
+            pert_topo = shared_hinge_topology(pert_lat)
+            if pert_topo != base_topo:
+                changed = base_topo.diff_surfaces(pert_topo)
+                surfs = ", ".join(repr(s) for s in sorted(changed))
+                step_val = abs(float(step))
+                raise GradientScopeError(
+                    f"Finite-difference step {step_val:g} for input {input_name!r} changed the "
+                    f"shared-hinge topology of surface(s) {surfs}. Adjoint gradients are "
+                    "defined at a fixed shared-hinge topology. Use a smaller finite-difference step."
+                )
+        return _production_scalars(geometry_pert, condition_pert, st, axes)
 
     def _record(group: str, suffix: str, grads: dict[str, float],
                 fd: dict[str, list[tuple[float, float, float, float]]], x_scale: float) -> None:
@@ -377,7 +403,7 @@ def check_gradients(
 
         def _get(v: float, _k: str = key) -> dict[str, float]:
             c2 = dataclasses.replace(condition, **{_k: v})
-            return _production_scalars(ac, c2, st, axes)
+            return _evaluate(ac, c2, _k, v - float(getattr(condition, _k)))
 
         fd = _ladder(_get, float(getattr(condition, key)), h, _STEP_FACTORS, outs, eps,
                      side=(1 if key == "mach" and float(getattr(condition, key)) == 0.0 else 0))
@@ -400,7 +426,7 @@ def check_gradients(
 
             def _get(v: float, _k: str = key) -> dict[str, float]:
                 c2 = dataclasses.replace(condition, **{_k: v})
-                return _production_scalars(ac, c2, st, axes)
+                return _evaluate(ac, c2, _k, v - float(getattr(condition, _k, 0.0)))
 
             fd = _ladder(_get, float(getattr(condition, key, 0.0)), h, _STEP_FACTORS, outs, eps)
             _record(key, key, {o: float(jac[o][key]) for o in outs}, fd, to_rate[key])
@@ -419,7 +445,7 @@ def check_gradients(
                     for c in getattr(s, "controls", []):
                         if c.name == _n:
                             c.deflection = float(c.deflection) + float(v)
-                return _production_scalars(ac3, condition, st, axes)
+                return _evaluate(ac3, condition, f"controls.{_n}", v)
 
             fd = _ladder(_get, 0.0, h, _STEP_FACTORS, outs, eps, side=side)
             _record("controls", f"controls.{name}",
@@ -449,10 +475,10 @@ def check_gradients(
                     w = weights[prop]
 
                     def _get(v: float, _n: str = surf.name, _j: int = j,
-                             _p: str = prop) -> dict[str, float]:
+                             _p: str = prop, _x0: float = x0) -> dict[str, float]:
                         ac3 = ac.clone()
                         _set_section_prop(ac3, _n, _j, _p, v)
-                        return _production_scalars(ac3, condition, st, axes)
+                        return _evaluate(ac3, condition, f"sections.{_n}[{_j}].{_p}", v - _x0)
 
                     fd = _ladder(_get, x0, h, _STEP_FACTORS, outs, eps)
                     grads = {o: float(np.asarray(jac[o]["sections"][prop], dtype=float).reshape(-1) @ w)
@@ -471,7 +497,7 @@ def check_gradients(
                 ac3 = ac.clone()
                 setattr(ac3, _k, v)
                 ac3._auto_ref.discard(_k)
-                return _production_scalars(ac3, condition, st, axes)
+                return _evaluate(ac3, condition, f"reference.{_k}", v - ref_base[_k])
 
             fd = _ladder(_get, ref_base[key], h, _STEP_FACTORS, outs, eps)
             _record("reference", f"reference.{key}",
@@ -484,7 +510,7 @@ def check_gradients(
                 rp = rp0.copy()
                 rp[_kk] = v
                 ac3.ref_point = rp
-                return _production_scalars(ac3, condition, st, axes)
+                return _evaluate(ac3, condition, f"reference.ref_point[{_kk}]", v - float(rp0[_kk]))
 
             fd = _ladder(_get, float(rp0[k]), h, _STEP_FACTORS, outs, eps)
             grads = {o: float(np.asarray(jac[o]["reference"]["ref_point"], dtype=float).reshape(3)[k])
@@ -533,7 +559,7 @@ def check_gradients(
             def _get(v: float, _t: dict = tgt) -> dict[str, float]:
                 ac3 = ac.clone()
                 _set_planform_param(ac3, _t["surf"], _t["sec"], _t["key"], _t.get("sub"), v)
-                return _production_scalars(ac3, condition, st, axes)
+                return _evaluate(ac3, condition, f"planform.{_t['suffix']}", v - _t["x0"])
 
             fd = _ladder(_get, tgt["x0"], tgt["h"], _STEP_FACTORS, outs, eps)
             grads = {}
@@ -567,7 +593,7 @@ def check_gradients(
                         flat.append((s.name, tag, i, c))
         dim = len(flat)
         rc_min = float(np.min(np.asarray(base_res.details["lattice"].rc, dtype=float)))
-        h0 = 1e-3 * rc_min
+        h0 = 1e-3 * rc_min if node_step is None else float(node_step)
         span = max(float(s.semi_span) for s in ac2.surfaces)
         # A symmetric surface is mirrored about y = 0 and must start there:
         # freeze the root y-displacements of symmetric surfaces, else the
@@ -583,7 +609,7 @@ def check_gradients(
             def _get(v: float, _u: Any = u) -> dict[str, float]:
                 ac3 = ac.clone()
                 _apply_node_step(ac3, base_nodes, disp0, flat, _u, v)
-                return _production_scalars(ac3, condition, st, axes)
+                return _evaluate(ac3, condition, "nodes", v)
 
             noise = _noise_level(_get, 0.0, _NOISE_SPACING * h0, outs)
             fd = _ladder(_get, 0.0, h0, _NODE_STEP_FACTORS, outs, eps, noise)
