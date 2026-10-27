@@ -183,7 +183,7 @@ The node values smooth the doublet error of the thin triangle fans at the poles 
 
 $$\Delta \mathbf{r}_{ij, t} \cdot \nabla_s \mu_i \approx \mu_j - \mu_i, \qquad \Delta \mathbf{r}_{ij, t} = \Delta \mathbf{r}_{ij} - (\Delta \mathbf{r}_{ij} \cdot \hat{\mathbf{n}}_i) \hat{\mathbf{n}}_i.$$
 
-The minimum-norm solution keeps the gradient in the panel plane; displacement directions below $10^{-5}$ of the largest are treated as round-off (a row of collinear centroids, as on a tip cap, gives the gradient along the row only).
+The minimum-norm solution keeps the gradient in the panel plane; displacement directions below $10^{-5}$ of the largest are treated as round-off (a row of collinear centroids gives the gradient along the row only). A flat tip cap panel (kind "tip") always keeps only the leading singular direction of its stencil, with no threshold, so its gradient is along its row of neighbours. The cut edges leave a cap panel with its two chordwise cap neighbours only. On a symmetric section their centroids lie on the chord line, and the threshold already gives this result. On a cambered section the centroids follow the camber line, and the second singular value is $10^{-4}$ to $10^{-1}$ of the first. A fit in that weak direction multiplies the round-off of the doublet values, and it gave cap pressures of order $10^3$. A fixed threshold cannot remove it: the stencils of the trailing-edge surface panels have ratios down to about $7 	imes 10^{-3}$ on a fine cosine spacing.
 
 The total surface velocity on panel $i$ is:
 

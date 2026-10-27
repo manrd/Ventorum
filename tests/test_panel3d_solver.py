@@ -543,7 +543,9 @@ def test_surface_gradient_does_not_cross_sharp_edges():
     areas = 0.5 * np.linalg.norm(raw, axis=1)
     normals = raw / np.linalg.norm(raw, axis=1, keepdims=True)
     on_face1 = centroids[:, 2] < 1e-12
-    kinds = np.where(on_face1, "surface", "tip")
+    # The second face is a two-dimensional grid, so it is not a tip cap
+    # (a "tip" panel keeps only the gradient along its row of neighbours).
+    kinds = np.where(on_face1, "surface", "base")
     # Arc length from the fold plus a spanwise part.
     s_arc = np.where(on_face1, -centroids[:, 0], centroids[:, 2])
     mu = s_arc + 0.5 * centroids[:, 1]
