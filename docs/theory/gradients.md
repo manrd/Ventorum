@@ -226,7 +226,9 @@ k = (n1 + n2) F / (4 pi D),  v = k c
 
 The floor `f` is 1e-300 in float64 arithmetic (all CPU kernels, which compute in
 float64) and 1e-30 in the float32 Warp kernels and in the numpy reference with float32
-arrays. The PyTorch reference copy adds 1e-300 in both precisions. A pair with `den` at or below
+arrays. The PyTorch reference copy adds the larger of 1e-300 and the smallest normal
+number of its dtype (`torch.finfo(dtype).tiny`): 1e-300 in float64, and the float32
+floor in float32, where 1e-300 rounds to zero. A pair with `den` at or below
 the floor has `v = 0` and zero derivatives. The reverse sweep:
 
 ```text
@@ -498,9 +500,13 @@ results carry a note that names the 1e-3 gate.
 
 `check_gradients` compares a component relatively when the error bound of its reference
 (the larger of the Richardson estimate and the round-off of the differences) is at most
-rtol/10 times the magnitude of the reference. The node step is 1e-3 of the smallest core radius of the lattice:
+rtol/10 times the magnitude of the reference. The node step has two rules. For the
+vortex lattice, the node step is 1e-3 of the smallest core radius of the lattice:
 a larger step crosses the core-radius length scale, where the differences do not
-converge. The node directions have one step and no spread term, so their round-off
+converge. For the lifting lines, the base node step is 1e-2 of the smallest strip
+width, and the check uses this step times 1, 0.3 and 0.1, as for the other inputs.
+An explicit `node_step` replaces the base step of both rules. On the vortex lattice
+the node directions have one step and no spread term, so their round-off
 bound is also at least 6 sigma / h, where sigma is the noise level of the production
 solve per output: the standard deviation of the residuals of a quadratic fit through 10
 solves at a spacing of 1e-3 of the node step along the same direction. A node motion
