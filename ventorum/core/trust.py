@@ -149,6 +149,29 @@ PANEL3D_N_CHORD_STRONG = 14
 PANEL3D_PENALTY_RESOLUTION_WARN = 0.20
 PANEL3D_PENALTY_RESOLUTION_STRONG = 0.40
 
+#: Far-field kernel trust note in ground effect [-].
+PANEL3D_FAR_FIELD_GROUND_NOTE = (
+    "The default far-field kernel can bias the lift low by about 1 to 4 % in ground effect "
+    "and the moment more, growing with spanwise refinement; use far_ratio=inf for reference values."
+)
+
+#: Far-field kernel trust note in free air with fine spanwise refinement [-].
+PANEL3D_FAR_FIELD_FREE_AIR_NOTE = (
+    "The default far-field kernel can bias the lift low by about 1 % in free air with "
+    "more than 80 spanwise panels; use far_ratio=inf for reference values."
+)
+
+#: Outer-strip section load trust note in ground effect [-].
+PANEL3D_OUTER_STRIP_GROUND_NOTE = (
+    "In ground effect, the strip loads of the outermost strip of a closed tip are not "
+    "resolved (sharp-edge feature); CL and Cm are not affected by more than the mesh error."
+)
+
+#: Dihedral root thickness scaling trust warning [-].
+PANEL3D_ROOT_SCALE_WARNING = (
+    "The root thickness scaling is not verified above 75 deg dihedral (lift can change by more than 10 %)."
+)
+
 #: Penalty for non-unique post-stall solution branches in viscous coupling.
 POST_STALL_BRANCH_PENALTY = 0.35
 
@@ -430,6 +453,8 @@ def panel3d_mesh_checks(
                 "Change the spanwise panel count or spacing so that no strip folds (for example a "
                 "root strip narrower than the section thickness on a wing with dihedral)."
             )
+        if bool(mesh_stats.get("root_scale_warning", False)):
+            warnings.append(PANEL3D_ROOT_SCALE_WARNING)
         penalties["mesh_adequacy"] = mesh_pen
 
     levels: list[int] = []
