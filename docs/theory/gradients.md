@@ -105,7 +105,8 @@ of a control follow the rule of the mesh builder.
   exact fractions of the mesh builder (uniform or cosine, with the moved hinge node) when
   they agree within 1e-6 of the smallest panel fraction. The hinge node is the node
   nearest to the effective hinge; its fraction must agree with the effective hinge
-  within the same tolerance, else the call raises `RuntimeError`.
+  within the same tolerance, else the call raises `RuntimeError`. Derivatives with
+  node inputs are taken at a fixed shared-hinge topology.
 
 The derivative at zero deflection is included. The fold applies only when every control
 is symmetric.
@@ -516,8 +517,19 @@ for example dCL/drho). A zero derivative counts as compared only when 10 times i
 error bound is below rtol times that scale; else it is skipped, with a reason. The
 check fails when a component fails and when an input group has no compared component.
 
+Before each finite-difference evaluation, `check_gradients` compares the shared-hinge
+topology of the perturbed lattice with the base configuration. The adjoint gradients
+with node inputs are defined at a fixed shared-hinge topology. When an independent node
+move separates the shared hinge across joined surfaces, the production lattice loses the
+shared neighbor. If a perturbation changes the shared-hinge topology, `check_gradients`
+raises `GradientScopeError` naming the surfaces, the input and the step, and advises a
+smaller finite-difference step.
+
 ## Verification
 
+* `tests/test_gradients_hinge_topology.py`: shared-hinge topology matching with the
+  production lattice, `GradientScopeError` when a node perturbation breaks the shared
+  hinge, passing check when topology is preserved, and bit-identical parity on existing fixtures.
 * `tests/test_gradients.py`: forward parity to 1e-12 (float64), also with the fold in
   the production solve and in the adjoint, adjoint against Richardson references (1e-6
   float64, 1e-3 float32, node directions included), translation and rotation
