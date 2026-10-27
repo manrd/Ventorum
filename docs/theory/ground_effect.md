@@ -45,7 +45,7 @@ In chordwise control mode, the flap points rotate about the hinge on the mean su
 
 For chordwise controls, the automatic panel-count probe starts with the default chordwise count and includes the deflected flap points. The ground-effect entry point then uses the selected count for its clearance, tip heights and bank-limit geometry. It refuses a strike before it calls the aerodynamic solver. The root `qc` and `te` height points rotate about the effective root-strip hinge when they lie aft of it. On a symmetric surface with an antisymmetric control, these height points belong to the original half of the main surface. Single-panel and lifting-line controls retain their section model.
 
-The vortex lattice selects the chordwise panel count from the gap (see [Vortex-lattice method](vortex_lattice.md)). A sweep in ground effect uses one count for all its cases (the count of the case with the smallest gap), so that differences between the cases contain no mesh change.
+The vortex lattice selects the chordwise panel count from the gap (see [Vortex-lattice method](vortex_lattice.md)). A sweep in ground effect uses one count for all its cases (the count of the case with the smallest gap), so that differences between the cases contain no mesh change. The automatic count is an integer, so $C_L(h)$ and the other results of separate solves jump at the heights where the count changes. For your own finite differences (for example $\partial C_L/\partial h$ from separate solves), set `SolverSettings.n_chord` so that all cases use one mesh.
 
 ## Height and bank derivatives
 
@@ -53,7 +53,7 @@ The vortex lattice selects the chordwise panel count from the gap (see [Vortex-l
 
 - $C_{L\alpha}$, $C_{m\alpha}$ [1/rad] at each height, from a least-squares line over the angles of the grid with $|\alpha| \le$ 8 deg at the bank angle of the grid nearest to 0 (with fewer than two angles in this window, all angles of the grid), and the aerodynamic centre $x_{ac} = -c\,C_{m\alpha}/C_{L\alpha}$ [m] aft of the reference point. These are at constant height of the `height_ref` point, without the chain-rule correction below; thus $x_{ac}$ can differ from $x_\alpha$.
 - $C_{Lh} = \partial C_L/\partial(h/c)$ and $C_{mh} = \partial C_m/\partial(h/c)$ at constant $\alpha$, by finite differences on the height grid (`numpy.gradient`: second-order central differences inside, first-order one-sided differences at the end points).
-- $C_{l\phi}$, $C_{n\phi}$, $C_{Y\phi}$ [1/rad] from a least-squares line over the bank angles with $|\phi| \le$ 5 deg (with fewer than two bank angles in this window, all bank angles of the grid), at the angle of attack of the grid nearest to 4 deg. A bank-restoring rolling moment has $C_{l\phi} < 0$; $C_l$ and $C_n$ are in the stability axes.
+- $C_{l\phi}$, $C_{n\phi}$, $C_{Y\phi}$ [1/rad] from a least-squares line over the bank angles with $|\phi| \le$ 5 deg (with fewer than two bank angles in this window, all bank angles of the grid), at the angle of attack of the grid nearest to 4 deg. $C_l$ and $C_n$ are the stability-axis rolling and yawing moments about the moment reference point ($C_l > 0$ right wing down, $C_n > 0$ nose right); $C_Y$ is the side force, positive to the right. The bank angle $\phi$ turns the ground about the free-stream direction; the aircraft keeps its body axes, and the `height_ref` point keeps the height of the grid. A bank-restoring rolling moment has $C_{l\phi} < 0$.
 
 ### Irodov criterion
 
@@ -112,10 +112,38 @@ The moment rows in the stability or wind axes turn the dimensional moments with 
 - `ventorum.ground_effect.analyze_ground_effect`; `ventorum.ground_effect.solver.find_bank_strike_limit` and `clearance_info`. The result also gives the force coefficient along the ground normal (`vertical_force_coefficient`), the body-axis force coefficients, and $C_l$ and $C_n$ in the stability axes.
 - `ventorum.ground_effect.GroundEffectSweep`, `GroundEffectSweepResult.compute_stability_derivatives`.
 - `ventorum.height_derivatives` (`ventorum/solvers/height_derivatives.py`): the derivative matrix and the Irodov terms of one state.
+- `ventorum.reference.ground_effect`: the independent reference of the induced drag of an elliptic loading near the ground (see below).
+
+## Reference: elliptic loading with an image wake
+
+`ventorum.reference.ground_effect` gives an independent reference for the induced drag in ground effect. It does not use the production kernels, the lattice or the Trefftz-plane code. C. Wieselsberger (1921) replaced the ground by the mirror image of the wing and calculated the change of the induced drag of an elliptic loading from the vertical velocity of the image wing. This module evaluates the same model exactly in the Trefftz plane.
+
+The wing of span $b = 2a$ [m] has the circulation $\Gamma(y) = \Gamma_0\sqrt{1 - (y/a)^2}$. Its wake is a flat sheet at the height $h$ [m], parallel to the ground. The image sheet has the circulation $-\Gamma$ at the distance $H = 2h$ below the sheet. In the Trefftz plane, with $z = y + \mathrm i\,z_v$, the complex velocity of the elliptic sheet alone is
+
+```{math}
+W(z) = u - \mathrm i\,v = \mathrm i\,w_0\left(1 - \frac{z}{\sqrt{z^2 - a^2}}\right), \qquad w_0 = \frac{\Gamma_0}{b} ,
+```
+
+with the branch of the root that is $z$ at infinity and has its cut on the sheet. $W$ goes to zero at infinity, the vertical velocity on the sheet is the uniform downwash $-w_0$, and the potential jump across the sheet is $2w_0\sqrt{a^2 - y^2} = \Gamma(y)$. Thus $W$ is the flow of the sheet (the flow of a flat plate that moves normal to itself). The image gives the upwash $v_\text{img}(y) = w_0\,(1 - \mathrm{Re}[\zeta/\sqrt{\zeta^2 - a^2}])$ on the real sheet, with $\zeta = y + \mathrm i H$. The Trefftz-plane drag $D_i = \tfrac{\rho}{2}\int \Gamma\,(w_0 - v_\text{img})\,dy$ at the same circulation (the same lift) gives the ratio
+
+```{math}
+R = \frac{k_\text{GE}}{k_\text{free}} = \frac{2}{\pi a^2}\int_{-a}^{a}\sqrt{a^2 - y^2}\;\mathrm{Re}\,\frac{\zeta}{\sqrt{\zeta^2 - a^2}}\,dy , \qquad k = \frac{C_{D_i}}{C_L^2} .
+```
+
+$R = 1 - \sigma$, where $\sigma$ is the influence coefficient of Wieselsberger (his equation 3). With $y = a\cos\theta$ the integrand is a smooth periodic function of $\theta$ for $h > 0$, and the midpoint rule converges exponentially. A second evaluation uses the Fourier transform of the loading ($\pi a J_1(ka)/|k|$) and of the interaction kernel of two parallel sheets ($\pi |k| e^{-H|k|}$):
+
+```{math}
+R = 1 - 2\int_0^\infty \frac{J_1(x)^2}{x}\,e^{-\beta x}\,dx, \qquad \beta = \frac{H}{a} = \frac{4h}{b} .
+```
+
+The two limits are $1 - R \sim (b/h)^2/32$ for $h \to \infty$ (the far field of the image is a vortex pair) and $R \sim (2\beta/\pi)(\ln(8/\beta) - 1)$ for $\beta \to 0$. These two asymptotes were derived for this reference. The tests check both evaluations against each other, the convergence of the quadrature and both asymptotes. Wieselsberger also gives Prandtl's approximation $\sigma = (1 - 0.66\,g/b)/(1.05 + 3.7\,g/b)$ with $g = 2h$, for $g/b$ from 1/15 to 1/2 (his equation 4); the tests compare it with the exact value in that range.
+
+The reference holds for an elliptic loading. A wing near the ground changes its loading, so the comparison with the vortex lattice uses only heights at which the loading stays near elliptic. `tests/test_analytical_verification.py` compares $k_\text{GE}/k_\text{free}$ of planar elliptic wings (aspect ratios 6 and 10) with $R$ at $h/b$ = 0.5, 0.3 and 0.2. The wing is parallel to the ground ($\alpha = 0$, with the zero-lift angle of the section), so the lattice and the wake are both at the height $h$. A wing at an angle of attack has its trailing edge and its wake below the reference point, which decreases the ratio.
 
 ## Verification
 
 - [V7](../verification_report.md): zero normal velocity on a tilted and banked plane; the free-air limit at large height; chordwise convergence of the vortex lattice; lifting line against the vortex lattice.
+- `tests/test_analytical_verification.py`: the induced-drag ratio of elliptic wings against the image Trefftz-plane theory of an elliptic loading (see above). `tests/test_reference_ground_effect.py` checks the reference itself.
 - Tests compare an explicit mirror wing with the image method, and the Irodov terms with direct differences.
 - `tests/test_height_derivatives.py`: the derivatives of one state against single solves and against the sweep; the chain rule of the $\alpha$ derivative between two pivots; symmetry; the free-air limit; the axes transform with the reference lengths; the GPU path.
 

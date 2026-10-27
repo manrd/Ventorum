@@ -85,6 +85,15 @@ from ventorum.utils.vec import cross3
 CLAF_MIN = 0.2
 CLAF_MAX = 2.0
 
+#: Window of a moved hinge node [-]. In chordwise control mode, the lattice
+#: node nearest to the hinge moves onto the hinge only when the two panels
+#: next to it then have between HINGE_PANEL_MIN_FACTOR and
+#: HINGE_PANEL_MAX_FACTOR times their initial lengths. Otherwise the hinge
+#: snaps to the nearest node and a warning gives the effective hinge. These
+#: factors are a code setting with no published source or study.
+HINGE_PANEL_MIN_FACTOR = 0.5
+HINGE_PANEL_MAX_FACTOR = 1.25
+
 # Core radius of a horseshoe as a fraction of the smaller panel dimension
 # (strip width or chordwise panel length). The nearest control point is half
 # a panel dimension away, so the velocity there changes by about 4e-4 of its
@@ -428,6 +437,11 @@ class VortexLattice:
     # lattice cache hands out, so they are computed once per geometry.
     geom_cache: dict = field(default_factory=dict, repr=False, compare=False)
     control_info: list[dict] = field(default_factory=list)
+    # Warnings that build_lattice issues about the mesh (a hinge that snaps
+    # to a node, a hinge that moves a node of a cambered strip). The lattice
+    # cache issues them again when it returns a cached lattice, and the
+    # solvers give them to the trust score as notes.
+    mesh_warnings: list[str] = field(default_factory=list)
     geometric_camber: np.ndarray | None = None
     # Hinge nodes of the chordwise legs (see ``a_kink`` in the class notes).
     # None when no leg has a hinge node.
@@ -954,6 +968,70 @@ def _chordwise_fractions(n_chord: int, chord_spacing: str) -> np.ndarray:
     return np.linspace(0.0, 1.0, n_chord + 1)
 
 
+#: Chordwise stations [-] that test whether a mean line has camber.
+_CAMBER_PROBE = np.linspace(0.0, 1.0, 21)
+
+
+def _hinge_node(xi: np.ndarray, hinge_x_c: float) -> tuple[int, bool]:
+    """Return the chordwise node nearest to a hinge and if it can move there.
+
+    Parameters
+    ----------
+    xi : np.ndarray
+        Chordwise node fractions from 0 to 1 [-].
+    hinge_x_c : float
+        Hinge position as a fraction of the chord [-].
+
+    Returns
+    -------
+    tuple of (int, bool)
+        Index of the interior node nearest to the hinge, and True when the
+        node can move onto the hinge inside the window of
+        ``HINGE_PANEL_MIN_FACTOR`` and ``HINGE_PANEL_MAX_FACTOR``.
+    """
+    n_chord = len(xi) - 1
+    k_hinge = 1 + int(np.argmin(np.abs(xi[1:n_chord] - hinge_x_c)))
+    len_before_old = xi[k_hinge] - xi[k_hinge - 1]
+    len_after_old = xi[k_hinge + 1] - xi[k_hinge]
+    len_before_new = hinge_x_c - xi[k_hinge - 1]
+    len_after_new = xi[k_hinge + 1] - hinge_x_c
+    tol = 1e-12
+    lo, hi = HINGE_PANEL_MIN_FACTOR, HINGE_PANEL_MAX_FACTOR
+    fits = (lo * len_before_old - tol <= len_before_new <= hi * len_before_old + tol and
+            lo * len_after_old - tol <= len_after_new <= hi * len_after_old + tol)
+    return k_hinge, bool(fits)
+
+
+def _hinge_chord_counts(hinge_x_c: float, n_chord: int, chord_spacing: str, n_max: int = 3) -> list[int]:
+    """Return chordwise panel counts near *n_chord* that can hold a hinge node.
+
+    Parameters
+    ----------
+    hinge_x_c : float
+        Hinge position as a fraction of the chord [-].
+    n_chord : int
+        Present chordwise panel count.
+    chord_spacing : str
+        Chordwise panel distribution.
+    n_max : int, optional
+        Largest number of counts to return.
+
+    Returns
+    -------
+    list of int
+        Counts between 2 and ``max(4 * n_chord, 100)`` for which a lattice node can
+        move onto the hinge. They are the counts nearest to *n_chord*, in
+        increasing order.
+    """
+    out = []
+    for n in sorted(range(2, max(4 * n_chord, 100) + 1), key=lambda m: (abs(m - n_chord), m)):
+        if _hinge_node(_chordwise_fractions(n, chord_spacing), hinge_x_c)[1]:
+            out.append(n)
+            if len(out) >= n_max:
+                break
+    return sorted(out)
+
+
 class _MeanLine:
     """Piecewise linear section mean line in chord units.
 
@@ -1136,6 +1214,8 @@ def build_lattice(
     strip_flap_nominal_all: list[float] = []
     strip_side_terms_all: list[tuple[list, list]] = []
     control_info: list[dict[str, Any]] = []
+    # Warnings of the mesh construction (VortexLattice.mesh_warnings).
+    mesh_warnings: list[str] = []
     mean_surfaces: list[tuple[list[WingSection], list[_MeanLine | None], np.ndarray]] = []
     camber_warnings: list[str] = []
     camber_fallback = False
@@ -1268,20 +1348,43 @@ def build_lattice(
             eta_start_eff = float(eta_e[k_ctrl[0]])
             eta_end_eff = float(eta_e[k_ctrl[-1] + 1])
             if is_chordwise:
-                k_hinge = 1 + int(np.argmin(np.abs(xi[1:n_chord] - c.hinge_x_c)))
-                len_before_old = xi[k_hinge] - xi[k_hinge - 1]
-                len_after_old = xi[k_hinge + 1] - xi[k_hinge]
-                len_before_new = c.hinge_x_c - xi[k_hinge - 1]
-                len_after_new = xi[k_hinge + 1] - c.hinge_x_c
-                tol = 1e-12
-                if (0.5 * len_before_old - tol <= len_before_new <= 1.25 * len_before_old + tol and
-                        0.5 * len_after_old - tol <= len_after_new <= 1.25 * len_after_old + tol):
+                k_hinge, fits = _hinge_node(xi, c.hinge_x_c)
+                if fits:
                     hinge_x_c_eff = float(c.hinge_x_c)
                     ctrl_xi = xi.copy()
                     ctrl_xi[k_hinge] = c.hinge_x_c
+                    cambered = any(
+                        line is not None and float(np.max(np.abs(line.at(_CAMBER_PROBE)))) > 0.0
+                        for line in lines
+                    )
+                    if cambered and abs(float(c.hinge_x_c) - float(xi[k_hinge])) > 1e-12:
+                        counts = _hinge_chord_counts(float(c.hinge_x_c), n_chord, chord_spacing)
+                        mesh_warnings.append(
+                            f"[{surf.name}] control {c.name!r}: the hinge at x/c = {float(c.hinge_x_c):.4g} "
+                            f"moves a chordwise node of the control strips (n_chord = {n_chord}). On a "
+                            "cambered mean line the legs of the control strips and of their clean "
+                            "neighbours then do not coincide at the control side edges, and the leg "
+                            "forces there do not converge with the spanwise mesh. Use a chordwise count "
+                            "with a node at the hinge"
+                            + (f", for example n_chord = {', '.join(str(n) for n in counts)}." if counts else ".")
+                        )
+                        warnings.warn(mesh_warnings[-1], RuntimeWarning, stacklevel=2)
                 else:
                     hinge_x_c_eff = float(xi[k_hinge])
                     ctrl_xi = xi.copy()
+                    counts = _hinge_chord_counts(float(c.hinge_x_c), n_chord, chord_spacing)
+                    advice = (
+                        f"Use a chordwise count that puts a node near the hinge, for example "
+                        f"n_chord = {', '.join(str(n) for n in counts)} ({chord_spacing} spacing)."
+                        if counts else "Use a chordwise count that puts a node near the hinge."
+                    )
+                    mesh_warnings.append(
+                        f"[{surf.name}] control {c.name!r}: no lattice node can move onto the hinge at "
+                        f"x/c = {float(c.hinge_x_c):.4g} with n_chord = {n_chord}. The hinge snaps to the "
+                        f"nearest node at x/c = {hinge_x_c_eff:.4g} (lattice control_info 'hinge_x_c_eff'). "
+                        + advice
+                    )
+                    warnings.warn(mesh_warnings[-1], RuntimeWarning, stacklevel=2)
             else:
                 hinge_x_c_eff = None
                 ctrl_xi = xi.copy()
@@ -1677,6 +1780,9 @@ def build_lattice(
     flap_hinges = {}
     leg_kinks = {}
     flap_field = None
+    # Strip edges (n_strips, 2) of the flap strips whose hinge point is not a
+    # leg node (see _leg_nodes); None without chordwise flaps.
+    hinge_off = None
     # Lattice before the flap turn: the leg-force rules come from it.
     undeflected = None
     if is_chordwise:
@@ -1732,17 +1838,20 @@ def build_lattice(
             if s + 1 < n_strips and strip_surf[s + 1] == strip_surf[s] and np.isfinite(hinge_of[s + 1]):
                 partner[s, 1] = (s + 1, 0)
                 far[s, 1] = (s + 1, 1)
+        def coincident(s: int, side: int, q: int, jq: int) -> bool:
+            # True when edge jq of strip q is at the place of edge side of
+            # strip s (leading and trailing edge before the flap turn).
+            tol = 1e-9 * max(1.0, float(chord[s]))
+            return bool(np.max(np.abs((le_l, le_r)[jq][q] - (le_l, le_r)[side][s])) <= tol
+                        and np.max(np.abs(undeflected[2 + jq][q] - undeflected[2 + side][s])) <= tol)
+
         for s, side, si in ends:
             if np.isnan(hinge_of[s]) or partner[s, side, 0] >= 0:
                 continue
-            le_s = (le_l, le_r)[side][s]
-            te_s = undeflected[2 + side][s]
-            tol = 1e-9 * max(1.0, float(chord[s]))
             for q, jq, sq in ends:
                 if sq == si or hinge_of[q] != hinge_of[s]:
                     continue
-                if (np.max(np.abs((le_l, le_r)[jq][q] - le_s)) <= tol
-                        and np.max(np.abs(undeflected[2 + jq][q] - te_s)) <= tol):
+                if coincident(s, side, q, jq):
                     partner[s, side] = (q, jq)
                     far[s, side] = (q, 1 - jq)
                     break
@@ -1810,16 +1919,40 @@ def build_lattice(
             # Per flap strip: the deflection at the span fraction of its
             # control point [rad] and the hinge of its control as defined.
             frac_s = np.asarray(cat["frac"], dtype=float)
+            # An edge that a flap strip shares with a strip of a different
+            # hinge has a different hinge point on the legs of the other
+            # strip: a strip without a hinge (the outer edge of the join at
+            # a side edge of a control) or a strip of a control with another
+            # hinge fraction. The other strip can be the neighbour strip of
+            # the same surface or the end strip of another surface whose end
+            # edge is at the same place (a joined surface). On a leg chain
+            # the legs of the two strips must pass through the same nodes,
+            # so the hinge point is not a node of either strip at that edge:
+            # the legs of both use the mean-surface node. On a symmetric
+            # section the hinge point and the mean-surface node are on one
+            # straight line and the legs coincide also with the hinge node.
+            hinge_off = np.zeros((n_strips, 2), dtype=bool)
+            for s in np.flatnonzero(np.isfinite(hinge_of)):
+                for side, q in ((0, s - 1), (1, s + 1)):
+                    if 0 <= q < n_strips and strip_surf[q] == strip_surf[s] and hinge_of[q] != hinge_of[s]:
+                        hinge_off[s, side] = True
+            for s, side, si in ends:
+                if np.isnan(hinge_of[s]):
+                    continue
+                for q, jq, sq in ends:
+                    if sq != si and hinge_of[q] != hinge_of[s] and coincident(s, side, q, jq):
+                        hinge_off[s, side] = True
             flap_field = {"hinge": hinge_of, "angle": angle, "coef": coef, "partner": partner, "far": far,
                           "strip_angle": angle[:, 0] + frac_s * (angle[:, 1] - angle[:, 0]),
-                          "hinge_x_c": np.asarray(strip_flap_nominal_all, dtype=float)}
+                          "hinge_x_c": np.asarray(strip_flap_nominal_all, dtype=float),
+                          "hinge_off": hinge_off}
 
     a_kink = b_kink = None
     leg_next = None
     chain_strips = np.flatnonzero(curved) if n_chord > 1 else np.zeros(0, dtype=np.int64)
     if leg_kinks or chain_strips.size:
         a_kink, b_kink, leg_next = _leg_nodes(a, b, te_l[panel_strip], te_r[panel_strip], leg_kinks,
-                                              chain_strips, n_chord, mid_a, mid_b)
+                                              chain_strips, n_chord, mid_a, mid_b, hinge_off)
 
     lattice = VortexLattice(
         collocation=collocation,
@@ -1859,6 +1992,7 @@ def build_lattice(
         surfaces=surfaces,
         strip_core_group=core_groups(surfaces)[cat["surface"].astype(int)],
         join_warnings=near_miss_warnings(surfaces) + camber_warnings + offset_warnings,
+        mesh_warnings=mesh_warnings,
         control_info=control_info,
         geometric_camber=geometric_camber,
         a_kink=a_kink,
@@ -1898,7 +2032,7 @@ def build_lattice(
             a0, b0, te_l0, te_r0, _ = undeflected
             mid0 = (None, None) if mid_undeflected is None else mid_undeflected
             a_k0, b_k0, next0 = _leg_nodes(a0, b0, te_l0[panel_strip], te_r0[panel_strip], leg_kinks,
-                                           chain_strips, n_chord, *mid0)
+                                           chain_strips, n_chord, *mid0, hinge_off)
             flat = replace(lattice, a=a0, b=b0, a_te=te_l0[panel_strip], b_te=te_r0[panel_strip],
                            a_kink=a_k0, b_kink=b_k0, leg_next=next0, te_left=te_l0, te_right=te_r0,
                            geom_cache={})
@@ -1909,13 +2043,29 @@ def build_lattice(
             normal = normal.copy()
             n_p = panel_strip.size
             for s, (ax_l, d_l, ax_r, d_r, h) in edge_turn.items():
+                xb_s = [strip_xi_arr[s, k] + 0.25 * (strip_xi_arr[s, k + 1] - strip_xi_arr[s, k])
+                        for k in range(n_chord)]
                 for k in range(n_chord):
-                    x0_k = strip_xi_arr[s, k]
                     p_idx = s * n_chord + k
-                    aft = x0_k + 0.25 * (strip_xi_arr[s, k + 1] - x0_k) > h
-                    # Aft panel: the whole legs (rows 0, 1); panel ahead of
-                    # the hinge: the aft segments (rows 2, 3).
-                    rows = ((0, ax_l, d_l), (1, ax_r, d_r)) if aft else ((2, ax_l, d_l), (3, ax_r, d_r))
+                    chained = bool(curved[s]) and k < n_chord - 1
+                    # Rows 0, 1 are the forward segments of the legs (bound
+                    # point to the first node), rows 2, 3 the aft segments
+                    # (first node to the end of the leg), see leg_segments
+                    # and _leg_nodes. A segment turns when it lies aft of
+                    # the hinge. Aft panel: the forward segments, and on a
+                    # chain also the aft segments (mean-surface node to the
+                    # next bound point; without a chain the aft segments
+                    # have zero length). Panel ahead of the hinge: the aft
+                    # segments only when the first node is the hinge point.
+                    # On a chain that is only the last panel ahead of the
+                    # hinge: the panels ahead of it have a mean-surface node
+                    # ahead of the hinge, and their legs stay.
+                    if xb_s[k] > h:
+                        rows = ((0, ax_l, d_l), (1, ax_r, d_r)) + (((2, ax_l, d_l), (3, ax_r, d_r)) if chained else ())
+                    elif chained and xb_s[k + 1] <= h:
+                        rows = ()
+                    else:
+                        rows = ((2, ax_l, d_l), (3, ax_r, d_r))
                     for r, ax, dd in rows:
                         if dd != 0.0:
                             i = r * n_p + p_idx
@@ -1936,6 +2086,7 @@ def _leg_nodes(
     n_chord: int,
     mid_a: np.ndarray | None = None,
     mid_b: np.ndarray | None = None,
+    hinge_off: np.ndarray | None = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray | None]:
     """Return the first leg nodes and the chain flags of the panels (see ``VortexLattice.leg_next``).
 
@@ -1946,7 +2097,13 @@ def _leg_nodes(
     one mean-surface node between each two bound points (at the middle chord
     fraction) and the hinge point of a flap; on a strip without a mean line
     only the hinge point. Where the hinge point lies between two bound
-    points, it is the node between them (one node per segment pair).
+    points, it is the node between them (one node per segment pair). The
+    two strips at an edge must have the same nodes there, so that their
+    legs coincide. Thus on a leg chain the hinge point is not a node at an
+    edge that the flap strip shares with a strip of a different hinge (no
+    hinge or another hinge fraction, on the same surface or on a joined
+    surface; *hinge_off*); the mean-surface node is the node there, as on
+    the other strip.
 
     Parameters
     ----------
@@ -1967,6 +2124,9 @@ def _leg_nodes(
         Mean-surface nodes [m], shape (n_panels, 3), between the bound points
         of each panel and of the next panel of its strip, after the flap
         turn; None to use the bound point of the next panel as the node.
+    hinge_off : numpy.ndarray or None
+        Strip edges whose hinge point is not a node of a leg chain, shape
+        (n_strips, 2) bool (left and right edge); None for none.
 
     Returns
     -------
@@ -1989,8 +2149,13 @@ def _leg_nodes(
             leg_next[p] = True
             # The hinge point is a node of this leg only if it lies between
             # the bound points of this panel and of the next one.
-            if p not in hinge_nodes or p + 1 in hinge_nodes:
+            hinge = p in hinge_nodes and p + 1 not in hinge_nodes
+            off_a = off_b = not hinge
+            if hinge and hinge_off is not None:
+                off_a, off_b = bool(hinge_off[s, 0]), bool(hinge_off[s, 1])
+            if off_a:
                 a_kink[p] = a[p + 1] if mid_a is None else mid_a[p]
+            if off_b:
                 b_kink[p] = b[p + 1] if mid_b is None else mid_b[p]
     return a_kink, b_kink, leg_next
 

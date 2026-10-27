@@ -423,6 +423,8 @@ class Ventorum2DPolarSource:
             # A ground-effect entry written before the circulation lift was
             # stored is a miss: the solver runs again and replaces it.
             if hit is not None and (h_val is None or hit.Cl_circulation_data is not None):
+                # The cached polar holds the converged angles only.
+                self.last_dropped = int(unique_req.size - np.atleast_1d(hit.alpha).size)
                 return hit
 
         res = solve_viscous(

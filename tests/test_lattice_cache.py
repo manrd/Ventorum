@@ -110,3 +110,47 @@ def test_cached_none_value_is_computed_once():
     assert LatticeSolver._cached(lattice, "polar_limits", compute) is None
     assert LatticeSolver._cached(lattice, "polar_limits", compute) is None
     assert len(calls) == 1
+
+
+@pytest.mark.parametrize("shape,hinge,n_chord,text", [
+    ("0012", 0.70, 8, "snaps to the nearest node"),
+    ("6409", 0.70, 4, "moves a chordwise node"),
+])
+def test_mesh_warnings_on_every_solve(shape, hinge, n_chord, text):
+    """The hinge warnings of the mesh come on every solve, also from a cached lattice, and go to the trust score.
+
+    build_lattice issued them only when it built the lattice: a second solve
+    of the same geometry gave no warning.
+    """
+    import warnings
+
+    lattice_cache.clear()
+    wing = vt.LiftingSurface(
+        name="w", semi_span=4.0,
+        sections=[vt.WingSection(y_frac=e, chord=1.0, shape=shape) for e in (0.0, 1.0)],
+        controls=[vt.ControlSurface("flap", 0.1, 0.4, hinge, np.radians(10.0))],
+    )
+    settings = vt.SolverSettings(n_panels=32, n_chord=n_chord)
+    for alpha in (2.0, 3.0, 2.0):
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            res = vt.VortexLatticeSolver().solve(
+                vt.Aircraft(surfaces=[wing]), vt.FlightCondition(V_inf=30.0, alpha=np.radians(alpha)), settings)
+        hinge_msgs = [str(w.message) for w in caught if text in str(w.message)]
+        assert len(hinge_msgs) == 1, hinge_msgs
+        assert hinge_msgs[0] in res.details["lattice"].mesh_warnings
+        assert hinge_msgs[0] in res.totals.trust.warnings
+    # The note does not change the score: the same lattice without its mesh
+    # warnings gives the same score.
+    import dataclasses
+
+    ac = vt.Aircraft(surfaces=[wing])
+    ac.compute_reference_values()
+    bare = dataclasses.replace(res.details["lattice"], mesh_warnings=[], geom_cache={})
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        res0 = vt.VortexLatticeSolver().solve_lattice(
+            bare, vt.FlightCondition(V_inf=30.0, alpha=np.radians(2.0)), settings, ac.S_ref, ac.b_ref, ac.c_ref)
+    assert not any(text in w for w in res0.totals.trust.warnings)
+    assert res0.totals.trust.score == res.totals.trust.score
+    lattice_cache.clear()

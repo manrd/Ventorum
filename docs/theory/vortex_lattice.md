@@ -112,6 +112,7 @@ where $\mathbf v_{ij}$ [1/m] is the velocity at $\mathbf P_i$ from the horseshoe
 - No compressibility correction. Above the Mach number `ventorum.core.constants.MACH_LIMIT_INCOMPRESSIBLE` the case is outside the envelope.
 - Two surfaces that overlap (control points of different surfaces closer than a small fraction of the local chord) are refused (`check_overlaps`).
 - In ground effect, panels longer than the gap get a trust penalty.
+- Geometric camber with dihedral: CL does not converge when the strips at the root or at the tips get narrow (open defect, `test_dihedral_camber_converges_spanwise`). At the root, the camber offset of the root node is along the bisector of the two halves and that of the next node along the normal of its half, so the root strip is shorter by $c z_c \sin\Gamma$ and turns over when it is narrower. At a tip, the straight legs of the last chordwise panel are off the curved mean line at its control point; on a tip strip narrower than that offset the circulation of the panel grows, and with dihedral the side-edge force of the free tip edge has a vertical component. Uniform spacing, or a spanwise count that keeps the root and tip strips wider than about $c z_c \sin\Gamma$ and the mean-line offset of the last panel (about 1e-3 chord), avoids it.
 
 ## Implementation
 

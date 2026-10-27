@@ -8,7 +8,7 @@ This page describes the first viscous variant (V1) of the lattice solvers: an an
 
 ## Overview
 
-The inviscid solvers give linear lift curves and no stall. The coupling gives each spanwise strip $j$ one correction angle $\delta_j$ [rad]. The correction changes only the right-hand side of the strip (a uniform change of its angle of attack); the system matrix does not change. The coupling finds the corrections for which the lift of every strip in the lattice equals the lift of its viscous section polar at the effective angle of the strip.
+The inviscid solvers give linear lift curves and no stall. The coupling gives each spanwise strip $j$ one correction angle $\delta_j$ [rad]. The correction changes only the right-hand side of the strip (a uniform change of its section angle of attack); the system matrix does not change. The coupling finds the corrections for which the lift of every strip in the lattice equals the lift of its viscous section polar at the effective angle of the strip.
 
 ## Published sources
 
@@ -21,9 +21,19 @@ The inviscid solvers give linear lift curves and no stall. The coupling gives ea
 7. ISO 2533:1975, Standard Atmosphere (dynamic viscosity of air at sea level).
 8. C. Coulliette and A. Plotkin, ["Aerofoil ground effect revisited"](https://www.cambridge.org/core/journals/aeronautical-journal/article/abs/aerofoil-ground-effectrevisited/561E5C4DD13ED87435EF7B438859EE20), *The Aeronautical Journal* 100, 1996 (the surface pressure lift of a section in ground effect, eq. 30, and its difference from the circulation lift).
 
+## Section plane of a strip
+
+The section plane of strip $j$ holds its chord direction $\mathbf{c}_j$ and its normal $\mathbf{n}_j$. Its span axis is the unit vector $\mathbf{e}_j = \mathbf{n}_j \times \mathbf{c}_j$, normal to the section plane: $+y$ for a planar strip, $(0, \cos\Gamma, \sin\Gamma)$ for a strip with the dihedral $\Gamma$, $+z$ for a vertical fin. The 2D section relation of a strip (below) is a 2D problem in this plane, and its section angle of attack is the angle of the in-plane onset from the chord towards the normal.
+
+The unit free-stream direction $\mathbf{d}(\alpha, \beta)$ has the in-plane part $\mathbf{d}_{p,j} = \mathbf{d} - (\mathbf{d} \cdot \mathbf{e}_j)\,\mathbf{e}_j$. A change of the section angle turns $\mathbf{d}_{p,j}$ about $\mathbf{e}_j$; the spanwise part does not change. Per radian the onset changes by
+
+$$\mathbf{u}_j = \mathbf{d}_{p,j} \times \mathbf{e}_j .$$
+
+The norm of $\mathbf{u}_j$ is that of $\mathbf{d}_{p,j}$, and $\mathbf{u}_j$ lies in the section plane, normal to the in-plane onset: $\mathbf{l}_j = \mathbf{u}_j / |\mathbf{u}_j|$ is the section lift direction. For a planar strip, $\mathbf{e}_j = +y$ and $\mathbf{u}_j = \partial \mathbf{d}/\partial \alpha = \cos\beta\,(-\sin\alpha, 0, \cos\alpha)$: the correction is a change of the angle of attack, as before. For a strip with dihedral, $\mathbf{n}_j \cdot \partial \mathbf{d}/\partial \alpha$ is only $\cos\Gamma$ times $\mathbf{n}_j \cdot \mathbf{u}_j$, and on a vertical fin it is zero. A correction about the global $y$ axis would therefore change the section angle by $\delta_j \cos\Gamma$ instead of $\delta_j$, and a fin would keep its inviscid side force whatever its polar. With $\mathbf{u}_j$, a rigid rotation of a configuration together with its onset does not change the corrections or the loads (`tests/test_alpha_correction_section_frame.py`).
+
 ## Inviscid response of the strips
 
-The circulation $\boldsymbol{\Gamma}$ of the lattice satisfies $A \boldsymbol{\Gamma} = \mathbf{b}$. A correction $\delta_k$ of strip $k$ turns the onset direction of the boundary conditions of that strip from $\mathbf{d}(\alpha)$ to $\mathbf{d}(\alpha - \delta_k)$. To first order the right-hand side of the strip changes by $\delta_k \, \partial \mathbf{b} / \partial \delta_k$, with $\partial \mathbf{b}/\partial \delta_k = V_\infty \, \mathbf{n} \cdot \partial \mathbf{d}/\partial \alpha$ (vortex lattice, boundary normals $\mathbf{n}$) or $-V_\infty \, \mathbf{n} \cdot \partial \mathbf{d}/\partial \alpha$ (linear lifting line, whose right-hand side has the opposite sign). The strip lift coefficient $C_{l,\text{inv},j} = 2 \Gamma_j / (V_\infty c_j)$, with $\Gamma_j$ the total circulation of the strip, is therefore linear in the corrections:
+The circulation $\boldsymbol{\Gamma}$ of the lattice satisfies $A \boldsymbol{\Gamma} = \mathbf{b}$. A correction $\delta_k$ of strip $k$ turns the in-plane onset of the boundary conditions of that strip by $-\delta_k$ about its span axis: the onset direction changes by $-\delta_k \mathbf{u}_k$. To first order the right-hand side of the strip changes by $\delta_k \, \partial \mathbf{b} / \partial \delta_k$, with $\partial \mathbf{b}/\partial \delta_k = V_\infty \, \mathbf{n} \cdot \mathbf{u}_k$ (vortex lattice, boundary normals $\mathbf{n}$) or $-V_\infty \, \mathbf{n} \cdot \mathbf{u}_k$ (linear lifting line, whose right-hand side has the opposite sign). The strip lift coefficient $C_{l,\text{inv},j} = 2 \Gamma_j / (V_\infty c_j)$, with $\Gamma_j$ the total circulation of the strip, is therefore linear in the corrections:
 
 $$\mathbf{C}_{l,\text{inv}}(\boldsymbol{\delta}) = \mathbf{C}_{l,\text{inv}}(\mathbf{0}) - D \boldsymbol{\delta}.$$
 
@@ -31,7 +41,7 @@ Column $k$ of $D$ comes from one back-substitution with the LU factors of $A$ fo
 
 ## Section relation of a lattice strip and the effective angle
 
-Each strip of the lattice behaves like a 2D section of the lattice model, $C_l = a_j (\alpha_e - \alpha_{0,j})$:
+Each strip of the lattice behaves like a 2D section of the lattice model in its section plane, $C_l = a_j (\alpha_e - \alpha_{0,j})$:
 
 - **Vortex-lattice method.** The chordwise bound vortices, the control points and the boundary normals of the strip form a 2D discrete-vortex section (thin-airfoil theory with small angles; Katz and Plotkin 2001). The normals give the panel angles $\theta_k$, which hold the camber (the zero-lift turn of the normals) and the flap (the turn of the panels behind the hinge). Two right-hand sides with one factorization, a unit angle and the panel angles, give the circulations $\Gamma_\alpha$ and $\Gamma_\theta$. Then $a_j = 2 \sum \Gamma_\alpha / c_j$ and $\alpha_{0,j} = -\sum \Gamma_\theta / \sum \Gamma_\alpha$. For a clean thin strip this gives $a_j = 2\pi$ and $\alpha_{0,j} = 0$ to round-off.
 - **Linear lifting line.** The section relation is the strip airfoil of the lattice: its $a_0$ and $\alpha_{L0}$. On a strip with a deflected control, $\alpha_{L0}$ already has the Glauert flap shift.
@@ -48,6 +58,8 @@ $$\alpha_{v,j} = \alpha_{e,j} + \delta_j.$$
 
 **Ground effect.** When the polar of a strip holds the ground height (a table with a height axis, or a source with ground support), the 2D section of a vortex-lattice strip also has its image vortices in the ground, so the 2D ground effect is not counted twice. A free-air polar is read with the free-air section relation. The height of a strip is the height of its quarter-chord point above the ground divided by its chord. The lifting line has no chordwise extent: its section relation has no 2D ground effect, and the polar gives it.
 
+The ground plane of a condition is parallel to the free stream, so in the section frame it is tilted by the attitude of the strip. A polar with a height axis is a pitch curve: the section pitches about its quarter chord at a fixed height, with the onset parallel to the ground. The vortex-lattice section is linear in the angle (small angles) and keeps the image positions of the attitude. Its line therefore has the value of the section at its own attitude, but its slope is the slope at a fixed ground line, not the slope of the pitch curve. An identity polar from a converged flat-plate pitch curve thus leaves a small correction that is proportional to the downwash of the strip; it converges to a small value when the mesh is refined. The thick-surface coupling uses the tangent of the pitch curve itself (see "The thick section reference" below).
+
 ### Lift definitions in ground effect
 
 A 2D section near a wall has two lift coefficients. The circulation lift is $C_{l,\Gamma} = 2\Gamma/(V_\infty c)$, from the total circulation $\Gamma$ of the section. The pressure lift $C_{l,p}$ is the integral of the surface pressure: it is the force on the section. In free air the Kutta-Joukowski relation makes the two equal for a single section. Near a wall it does not give the force from the total circulation, and the two differ (Coulliette and Plotkin 1996, eq. 30). Ventorum-2D reports $C_{l,p}$ as `Cl` in ground effect and keeps $C_{l,\Gamma}$ as `Cl_circulation` (see [](panel2d.md)).
@@ -61,7 +73,7 @@ The coupling uses these definitions:
 - **Free air.** A free-air polar is read with `Cl`. A free-air polar of Ventorum-2D has no circulation lift data, because there the two definitions are equal. Free-air results do not change.
 - **Thick-surface panel coupling.** `model="panel3d"` matches the pressure lift of each strip with the polar `Cl`: pressure with pressure. It does not read the circulation lift.
 
-**Assumption: the pitch of the polar section.** A ground-effect polar is a set of 2D solutions at one height $h/c$ of the reference point. Ventorum-2D turns the section about its quarter-chord point on the chord line and keeps the height of that point. The coupling reads the polar at the height of the strip quarter-chord point and at the viscous section angle $\alpha_{v,j}$. So it assumes that the strip section has the attitude of the polar section: pitched about $c/4$ to $\alpha_{v,j}$. The lattice strip has its geometric attitude, and $\alpha_{v,j}$ differs from it by the induced angle and the correction $\delta_j$. Near the ground the height of the trailing edge, and so the 2D ground effect, therefore differ between the strip and the polar section. The coupling has no correction for this difference.
+**Assumption: the pitch of the polar section.** A ground-effect polar is a set of 2D solutions at one height $h/c$ of the reference point. Ventorum-2D turns the section about its quarter-chord point on the chord line and keeps the height of that point. The coupling reads the polar at the height of the strip quarter-chord point and at the viscous section angle $\alpha_{v,j}$. So it assumes that the strip section has the attitude of the polar section: pitched about $c/4$ to $\alpha_{v,j}$. The lattice strip has its geometric attitude, and $\alpha_{v,j}$ differs from it by the induced angle and the correction $\delta_j$. Near the ground the height of the trailing edge, and so the 2D ground effect, therefore differ between the strip and the polar section. The vortex-lattice and lifting-line couplings have no correction for this difference; the thick-surface coupling takes the tangent of the pitch curve at the strip attitude (see "The thick section reference" below).
 
 ### Reference of a flapped vortex-lattice strip
 
@@ -135,6 +147,7 @@ It is reported as `totals.CDp`, apart from the induced drag `totals.CDi` (Trefft
 - `PolarTable`: the polar at the strip Reynolds number and flap deflection [deg] (and the strip height h/c [-] with a height axis). The flap hinge of the table must be the hinge of the control.
 - A section polar source (XFOIL or Ventorum-2D): the strip section comes from `WingSection.shape` or from a NACA designation in the name of the section airfoil. A strip without a section shape is refused: there is no default section. The flap is `(hinge_x_c, 0.5, deflection_deg)` of the control (hinge height at half the local thickness). A source with ground support also gets the strip height. Between two sections with different shapes, the two polars are blended linearly.
 - A single `TabulatedAirfoil` or `LinearAirfoil`: used on every strip, with the Glauert flap shift on a deflected strip.
+- A dict: maps a strip index, a surface name, a section airfoil name or `"default"` to one of the polars above. A key that matches none of them (for example a misspelt surface name) raises a `ValueError` that lists the valid keys. A strip without an entry uses the airfoil of its wing section; the result then has a trust note (and the lattice paths a `RuntimeWarning`).
 
 ## Hardware
 
@@ -167,30 +180,40 @@ The panel coupling uses these published methods:
 
 The interior system is $A\mu=-B\sigma$, with
 $\sigma_i=-\mathbf n_i\cdot\mathbf V_i$. A positive strip correction
-$\delta_k$ [rad] reduces the onset angle. To first order,
+$\delta_k$ [rad] reduces the section angle of strip $k$. To first order,
 
-$$\Delta\mathbf V_i=-V_\infty\mathbf u_\alpha\delta_k,
-\qquad S_{ik}=V_\infty\mathbf n_i\cdot\mathbf u_\alpha,
+$$\Delta\mathbf V_i=-V_\infty\mathbf u_k\delta_k,
+\qquad S_{ik}=V_\infty\mathbf n_i\cdot\mathbf u_k,
 \quad i\in\mathcal P_k,$$
 
-where $\mathbf u_\alpha=\cos\beta[-\sin\alpha,0,\cos\alpha]^T$.
+where $\mathbf u_k$ is the onset change per unit section angle of the
+reporting section of strip $k$ (see "Section plane of a strip"). For a
+planar strip $\mathbf u_k=\cos\beta[-\sin\alpha,0,\cos\alpha]^T$.
 The change is applied to both the source boundary condition and the
-tangential onset used for pressure. The ground images have the same
-source strengths and reflected doublet geometry as the inviscid solver.
+tangential onset used for pressure. On a half mesh the mirrored panels
+get the mirrored change. The ground images have the same source
+strengths and reflected doublet geometry as the inviscid solver.
 
 During each bounded source-matrix chunk, the assembly also accumulates
 
 $$R_{x,:,k}=\sum_{i\in\mathcal P_k}B_{:,i}\sigma_{\mathrm{unit},i,0},
 \qquad
-R_{z,:,k}=\sum_{i\in\mathcal P_k}B_{:,i}\sigma_{\mathrm{unit},i,2}.$$
+R_{z,:,k}=\sum_{i\in\mathcal P_k}B_{:,i}\sigma_{\mathrm{unit},i,2},$$
+
+and, when a span axis is not $+y$ (dihedral, fins), also
+$R_{y,:,k}=\sum_{i\in\mathcal P_k}B_{:,i}\sigma_{\mathrm{unit},i,1}$.
 
 No source matrix is retained and no influence pair is evaluated again
 for the strip response. Before the Morino factors are released, the same
-LU factors solve $U_x=-A^{-1}R_x$ and $U_z=-A^{-1}R_z$. Then
+LU factors solve $U_x=-A^{-1}R_x$, $U_z=-A^{-1}R_z$ (and
+$U_y=-A^{-1}R_y$). Then column $k$ of the doublet response is
 
-$$G(\alpha,\beta)=V_\infty\cos\beta
-\left(\sin\alpha\,U_x-\cos\alpha\,U_z\right),
+$$G_{:,k}=-V_\infty\left(u_{k,x}U_{x,:,k}+u_{k,y}U_{y,:,k}
++u_{k,z}U_{z,:,k}\right),
 \qquad \mu(\delta)=\mu_0+G\delta.$$
+
+For planar strips this is
+$G=V_\infty\cos\beta\left(\sin\alpha\,U_x-\cos\alpha\,U_z\right)$.
 
 For a fixed free-air configuration, $\sum_kG_{:,k}=-\partial\mu/\partial\alpha$.
 Every angle of a sweep uses these unit responses without another body
@@ -212,6 +235,18 @@ viscous polar, a prescribed thin-airfoil slope, or a finite-span substitute.
 Two unit onsets share one section factorization. Section factorizations
 are separate from the 3D body factorization count.
 
+The free-air line is a property of the cut polygon of the mesh. Its
+slope differs from the slope of the converged section by a
+discretization error that falls as the chordwise and spanwise panel
+counts grow. An identity polar (the polar equals the converged inviscid
+2D section) therefore does not give zero correction on a finite mesh:
+the coupled CL differs from the inviscid 3DP CL by a residual that falls
+about in proportion to the panel size (first order in the mesh). The
+reference rule of the flapped vortex-lattice strips (the inviscid result
+at the same mesh) is not applied to this section line. The slow test
+`tests/test_alpha_correction_ground_reference.py::test_ground_identity_polar_residual_does_not_grow_with_the_mesh`
+prints this free-air residual on three meshes.
+
 Surface gradients use adjacent panel values and inverse-distance node
 interpolation. The upper and lower trailing-edge connections are cut.
 The same two unit responses give the inviscid section moment as a
@@ -219,7 +254,51 @@ quadratic in the sine and cosine of the section angle. If a polar has a
 ground-height axis, the section reference includes the corresponding
 source and doublet images. A free-air polar uses the free-air reference.
 
+**Attitude of the ground reference.** The ground line of the section
+plane is tilted by the attitude $\theta_j$ of the strip: the onset is
+parallel to the ground at the angle $\theta_j$ from the chord. The
+section line must not come from the onsets 0 and 1 deg with this tilted
+ground line: those onsets cross the ground, and the line does not give
+the section at its own attitude (its value there was too high, the more
+so near the ground and at high attitude). The reference is the pitch
+curve $C_l(\alpha; h)$ of a polar with a height axis: the section
+pitches about its quarter chord at the fixed quarter-chord height $h$,
+with its own ground line and an onset parallel to it. Three 2D solves
+at $\theta_j-\varepsilon$, $\theta_j$ and $\theta_j+\varepsilon$
+($\varepsilon$ = `GROUND_SECTION_STEP`, 0.5 deg) give the tangent at
+the attitude,
+
+$$a_{j,2D}=\frac{C_l(\theta_j+\varepsilon)-C_l(\theta_j-\varepsilon)}{2\varepsilon},
+\qquad
+\alpha_{0,j,2D}=\theta_j-\frac{C_l(\theta_j)}{a_{j,2D}},$$
+
+and the moment quadratic $A+B\cos2\alpha+C\sin2\alpha$ through the
+three pitch-curve moments. The tangent is exact at the attitude. Away
+from it, its error grows with the square of $\alpha_{e,j}-\theta_j$
+and with the curvature of the pitch curve, which is large near the
+ground. Strips with a large downwash (near the tips) have their
+effective angle far from the attitude, so an identity polar leaves a
+local correction there that does not fall with the mesh, although the
+integrated lift residual falls as in free air. An inversion of the
+effective angle on the full nonlinear pitch curve would remove this
+local error; it is not implemented.
+
 ### Pressure residual and Jacobian
+
+The strip lift is the pressure force of the strip panels along the
+section lift direction $\mathbf l_j$ (see "Section plane of a strip"),
+
+$$C_{l,p,j}=-\frac{1}{S_j}\sum_{i\in\mathcal P_j}C_{p,i}A_i\,
+\mathbf n_i\cdot\mathbf l_j,$$
+
+with the strip area $S_j$ [m^2] and the panel areas $A_i$ [m^2]. This
+is the lift of the 2D section reference: the 2D Morino lift is the
+force in the section plane normal to the in-plane onset. For a planar
+strip, $\mathbf l_j=[-\sin\alpha,0,\cos\alpha]^T$ is the global lift
+axis. On a strip with dihedral the global lift axis would give only
+about $\cos\Gamma$ of the section lift, and on a fin no lift at all.
+The spanwise `Cl` of the panel result keeps the global lift axis;
+`details["cl_inviscid"]` holds $C_{l,p,j}$.
 
 The coupled strip equations are
 

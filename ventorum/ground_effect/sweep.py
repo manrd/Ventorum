@@ -191,7 +191,11 @@ class GroundEffectSweepResult:
             keys include:
 
             * ``CL_alpha``, ``Cm_alpha`` [1/rad] and ``x_ac`` [m] vs height
-              (linear fit over abs(alpha) <= 8 deg, phi = 0).
+              (linear fit over abs(alpha) <= 8 deg, phi = 0). These fits
+              use the alpha columns of the grid as they are: they are at
+              constant height of the ``height_ref`` point, with no chain
+              rule. ``x_ac`` is thus not ``x_alpha`` (constant height of
+              the moment reference point) unless ``height_ref='ref'``.
             * ``CL_h``, ``Cm_h``: derivatives with respect to h/c, shape
               (n_h, n_alpha).
             * ``x_alpha``, ``x_h``: local pitch and height aerodynamic
@@ -203,7 +207,13 @@ class GroundEffectSweepResult:
               ``height_ref``. The criterion applies only when that point is
               the centre of gravity.
             * ``Cl_phi``, ``Cn_phi``, ``CY_phi`` [1/rad] vs height (bank fit
-              over abs(phi) <= 5 deg at the alpha nearest 4 deg). A
+              over abs(phi) <= 5 deg at the alpha nearest 4 deg). ``Cl``
+              and ``Cn`` are the stability-axis rolling and yawing moments
+              about the moment reference point (Cl > 0 right wing down,
+              Cn > 0 nose right); ``CY`` is the side force, positive to the
+              right. The bank angle phi turns the ground about the
+              free-stream direction; the aircraft keeps its body axes, and
+              the ``height_ref`` point keeps the grid height. A
               bank-restoring moment has Cl_phi < 0.
         """
         out: dict[str, Any] = {}

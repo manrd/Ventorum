@@ -871,25 +871,28 @@ def _build_geometry(
     )
 
 
-def _morino_section_line(polygon, ground=None):
-    """Return the lift line and moment quadratic of a unit-chord polygon.
+def _morino_section_solution(polygon, ground=None):
+    """Solve a unit-chord polygon for the two unit onsets.
 
     The constant source/doublet Dirichlet method uses the two-dimensional
     logarithmic Green function and its normal derivative. The wake is a
-    semi-infinite doublet sheet along +x. Its strength is the upper minus
-    lower trailing-edge doublet. See Katz and Plotkin (2001), chapters 11
-    and 12, and Morino and Kuo (1974). Coordinates are in chord units in
-    upper-TE, LE, lower-TE order. Two unit onsets share one factorization.
-    An optional ground line has a unit normal and an offset in chord
-    units. Equal-strength source and reflected doublet images impose
-    zero normal velocity there (Katz and Plotkin, method of images).
+    semi-infinite doublet sheet along +x (along the ground line with a
+    ground). Its strength is the upper minus lower trailing-edge doublet.
+    See Katz and Plotkin (2001), chapters 11 and 12, and Morino and Kuo
+    (1974). Coordinates are in chord units in upper-TE, LE, lower-TE
+    order. Two unit onsets share one factorization. An optional ground
+    line has a unit normal and an offset in chord units. Equal-strength
+    source and reflected doublet images impose zero normal velocity there
+    (Katz and Plotkin, method of images).
 
     Returns
     -------
     tuple
-        Lift slope [1/rad], zero-lift angle [rad], and coefficients [-]
-        of Cm = c0 + cxx cos(alpha)^2 + cxz cos(alpha) sin(alpha)
-        + czz sin(alpha)^2. The moment reference is the clean quarter chord.
+        The lift coefficient [-] as a function of the onset angle [rad]
+        from the chord, and coefficients [-] of
+        Cm = c0 + cxx cos(alpha)^2 + cxz cos(alpha) sin(alpha)
+        + czz sin(alpha)^2 about the clean quarter chord. With a ground,
+        the onset of a physical solution is parallel to the ground line.
     """
     points = np.asarray(polygon, dtype=float)
     edges = np.diff(points, axis=0)
@@ -951,16 +954,99 @@ def _morino_section_line(polygon, ground=None):
         force = -np.sum(cp[:, None] * length[:, None] * normal, axis=0)
         return force @ np.array([-np.sin(angle), np.cos(angle)])
 
-    step = np.radians(1.0)
-    cl0 = lift(0.0)
-    slope = (lift(step) - cl0) / step
     # Positive pitch is z Fx - x Fz in the geometry x-z plane.
     arm = center - np.array([0.25, 0.0])
     weight = -length * (arm[:, 1] * normal[:, 0] - arm[:, 0] * normal[:, 1])
     moment = np.array([np.sum(weight), -np.sum(weight * velocity[:, 0]**2),
                        -2 * np.sum(weight * velocity[:, 0] * velocity[:, 1]),
                        -np.sum(weight * velocity[:, 1]**2)])
+    return lift, moment
+
+
+def _section_moment(moment, angle):
+    """Return Cm [-] of a moment quadratic at the onset angle *angle* [rad]."""
+    co, si = np.cos(angle), np.sin(angle)
+    return moment[0] + moment[1] * co**2 + moment[2] * co * si + moment[3] * si**2
+
+
+def _morino_section_line(polygon, ground=None):
+    """Return the lift line and moment quadratic of a unit-chord polygon.
+
+    The line comes from the onsets 0 and 1 deg of one factorization of
+    :func:`_morino_section_solution`. With a fixed ground line these
+    onsets cross the ground unless the ground is parallel to the chord;
+    :func:`_morino_section_ground_line` gives the reference of a section
+    in ground effect.
+
+    Returns
+    -------
+    tuple
+        Lift slope [1/rad], zero-lift angle [rad], and coefficients [-]
+        of Cm = c0 + cxx cos(alpha)^2 + cxz cos(alpha) sin(alpha)
+        + czz sin(alpha)^2. The moment reference is the clean quarter chord.
+    """
+    lift, moment = _morino_section_solution(polygon, ground)
+    step = np.radians(1.0)
+    cl0 = lift(0.0)
+    slope = (lift(step) - cl0) / step
     return float(slope), float(-cl0 / slope), moment
+
+
+#: Half step [rad] of the central difference of the ground section line.
+GROUND_SECTION_STEP = np.radians(0.5)
+
+
+def _morino_section_ground_line(polygon, ground, step=GROUND_SECTION_STEP):
+    """Return the lift line and moment quadratic of a section in ground effect.
+
+    The ground line fixes the attitude of the section: the onset is
+    parallel to the ground, at the angle ``theta = atan2(-n_x, n_z)`` [rad]
+    from the chord, where ``n`` is the unit ground normal in the chord
+    frame. The quarter-chord height ``h`` [chord] above the ground stays
+    fixed. The section pitches about its quarter chord to the attitudes
+    ``theta - step``, ``theta`` and ``theta + step``. Each attitude has its
+    own ground line and an onset parallel to it, so each needs one
+    factorization. This is the pitch curve ``Cl(alpha; h)`` of a 2D polar
+    with a height axis. The line is its tangent at the attitude: the slope
+    ``(Cl(theta + step) - Cl(theta - step)) / (2 step)`` and the zero-lift
+    angle ``theta - Cl(theta) / slope``. The moment quadratic
+    ``A + B cos(2 alpha) + C sin(2 alpha)`` goes through the three
+    pitch-curve moments.
+
+    Parameters
+    ----------
+    polygon : numpy.ndarray
+        Section coordinates in chord units, upper-TE, LE, lower-TE order.
+    ground : tuple
+        Unit ground normal, shape (2,), and offset [chord] of the ground
+        line ``n . x = offset``.
+    step : float
+        Half step of the central difference [rad].
+
+    Returns
+    -------
+    tuple
+        Lift slope [1/rad], zero-lift angle [rad], and the moment
+        coefficients [-] as in :func:`_morino_section_line`.
+    """
+    normal, offset = ground
+    normal = np.asarray(normal, dtype=float)
+    attitude = float(np.arctan2(-normal[0], normal[1]))
+    quarter = np.array([0.25, 0.0])
+    height = float(quarter @ normal - offset)
+    angles = attitude + np.array([-step, 0.0, step])
+    lifts, moments = [], []
+    for angle in angles:
+        tilted = np.array([-np.sin(angle), np.cos(angle)])
+        lift, moment = _morino_section_solution(polygon, (tilted, float(quarter @ tilted) - height))
+        lifts.append(lift(angle))
+        moments.append(_section_moment(moment, angle))
+    slope = (lifts[2] - lifts[0]) / (2.0 * step)
+    fit = np.linalg.solve(np.column_stack([np.ones(3), np.cos(2 * angles), np.sin(2 * angles)]),
+                          np.asarray(moments))
+    # A + B cos(2a) + C sin(2a) = A + B cos^2 + 2 C cos sin - B sin^2.
+    moment = np.array([fit[0], fit[1], 2.0 * fit[2], -fit[1]])
+    return float(slope), float(attitude - lifts[1] / slope), moment
 
 
 def _panel_section_lines(mesh, maps, lattice, strips, ground=None, with_images=None):
@@ -969,6 +1055,9 @@ def _panel_section_lines(mesh, maps, lattice, strips, ground=None, with_images=N
     Panel metadata selects the upper and lower chordwise segments. The
     intersection with the reporting section plane gives its polygon. Coordinates
     are projected into the clean section frame and divided by chord [m].
+    A strip with images uses the ground line of its section plane. Its line
+    is the tangent of the pitch curve at the attitude of the strip (onset
+    parallel to the ground, see :func:`_morino_section_ground_line`).
     Return slopes [1/rad], zero-lift angles [rad], and moment quadratics [-].
     """
     slopes, zeros, moments = [], [], []
@@ -1020,7 +1109,8 @@ def _panel_section_lines(mesh, maps, lattice, strips, ground=None, with_images=N
         key = (np.round(coords, 12).tobytes(), None if section_ground is None
                else tuple(np.round(np.r_[section_ground[0], section_ground[1]], 12)))
         if key not in memo:
-            memo[key] = _morino_section_line(coords, section_ground)
+            memo[key] = (_morino_section_line(coords) if section_ground is None
+                         else _morino_section_ground_line(coords, section_ground))
         a, a0, cm = memo[key]
         slopes.append(a)
         zeros.append(a0)

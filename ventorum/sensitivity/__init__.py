@@ -17,17 +17,21 @@ from ventorum.sensitivity.errors import GradientScopeError
 __all__ = [
     "GradientResult",
     "GradientScopeError",
-    "gradients",
-    "gradient_vjp",
+    "SharedHingeTopology",
     "check_gradients",
+    "gradient_vjp",
+    "gradients",
+    "shared_hinge_topology",
 ]
 
 # Public name -> module that defines it (loaded on first access).
 _LAZY = {
     "GradientResult": "ventorum.sensitivity.adjoint",
-    "gradients": "ventorum.sensitivity.adjoint",
-    "gradient_vjp": "ventorum.sensitivity.adjoint",
+    "SharedHingeTopology": "ventorum.sensitivity.topology",
     "check_gradients": "ventorum.sensitivity.check",
+    "gradient_vjp": "ventorum.sensitivity.adjoint",
+    "gradients": "ventorum.sensitivity.adjoint",
+    "shared_hinge_topology": "ventorum.sensitivity.topology",
 }
 
 

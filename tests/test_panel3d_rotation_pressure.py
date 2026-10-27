@@ -278,9 +278,11 @@ def test_results_without_rates_are_unchanged(case):
     res = vt.analyze(_baseline_wing(), condition=condition, settings=settings)
     got = tuple(float(getattr(res.totals, k)) for k in _KEYS)
     cp = np.asarray(res.details["cp"])
-    np.testing.assert_allclose(got, totals, rtol=1e-12, atol=1e-14)
+    # Bit-identical on the machine that stored the values; other numpy and BLAS
+    # builds (CI) change the dense solve in the last digits (about 3e-12 seen).
+    np.testing.assert_allclose(got, totals, rtol=1e-10, atol=1e-12)
     np.testing.assert_allclose([float(np.sum(cp)), float(cp[3])], [cp_sum, cp3],
-                               rtol=1e-12, atol=1e-14)
+                               rtol=1e-10, atol=1e-12)
 
 
 # ---------------------------------------------------------------------------

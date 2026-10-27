@@ -255,27 +255,39 @@ def test_adjoint_vs_richardson(case_id: str, ac: vt.Aircraft, cond: vt.FlightCon
                                st: vt.SolverSettings, float64_precision) -> None:
     """check_gradients passes (1e-6) for all scalar inputs and 3 node directions.
 
-    Every input group has compared components (the node step follows the
-    core radius, so the node directions are compared too).
+    Every input group has compared components. The vortex-lattice node step
+    follows the core radius and the lifting-line node step follows the strip
+    width, so the node directions are compared too.
     """
     wrt, outputs = _case_io(case_id, cond, check=True)
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         out = vt.check_gradients(ac, cond, st, outputs=outputs, wrt=wrt,
                                  n_directions=3, rtol=1e-6, seed=0)
-    groups = {g: c for g, c in out["groups"].items() if not (case_id == "linear" and g == "nodes")}
-    assert all(c["compared"] > 0 for c in groups.values()), (case_id, out["groups"])
-    if "nodes" in wrt and case_id != "linear":
+    assert all(c["compared"] > 0 for c in out["groups"].values()), (case_id, out["groups"])
+    if "nodes" in wrt:
         assert out["groups"]["nodes"]["compared"] > 0, case_id
-    if case_id == "linear":
-        # The Richardson steps cannot resolve the node directions of the linear
-        # lifting line above the measured noise of the solve: the check skips
-        # them. test_linear_node_gradients_polynomial_fit verifies them.
-        reasons = [r for r in out["reasons"] if "'nodes'" not in r]
-        failed = [k for k, v in out["details"].items() if v["compared"] and not v["passed"]]
-        assert not failed and not reasons, (case_id, _failed(out))
-    else:
-        assert out["pass"], (case_id, _failed(out))
+    assert out["pass"], (case_id, _failed(out))
+
+
+def test_check_linear_lifting_line_nodes(float64_precision) -> None:
+    """check_gradients compares and passes (1e-6) the node directions of the linear lifting line.
+
+    Regression: the node step was 1e-3 of the smallest core radius (here
+    about 4e-7 m). At that step the noise of the solve hides the
+    derivative, so the check skipped every node direction and failed with
+    "no compared component". The lifting-line node step now follows the
+    strip width.
+    """
+    ac = vt.Aircraft(surfaces=[_plain_wing()])
+    cond = vt.FlightCondition(V_inf=30.0, alpha=np.radians(4.0))
+    st = vt.SolverSettings(solver_type="linear", n_panels=12)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        out = vt.check_gradients(ac, cond, st, outputs=("CL", "CD", "Cm"), wrt=("nodes",),
+                                 n_directions=3, rtol=1e-6, seed=0)
+    assert out["groups"]["nodes"]["compared"] > 0, out["groups"]
+    assert out["pass"], _failed(out)
 
 
 def test_linear_node_gradients_polynomial_fit(float64_precision) -> None:
@@ -1346,3 +1358,44 @@ def test_reference_segment_derivative_at_collinear_point(t: float) -> None:
         fd = (seg_vel(P0 + dz, A, B, rc2) - seg_vel(P0 - dz, A, B, rc2))[0, 0] / (2.0 * h)
         err = float(torch.abs(fd - jac).max()) / float(torch.abs(jac).max())
         assert err <= 1e-5, (h, err)
+
+
+def test_forward_check_moment_scale_has_force_floor() -> None:
+    """A moment vector at the round-off is compared relative to the force vector, not to itself."""
+    torch = pytest.importorskip("torch")
+    from ventorum.sensitivity.adjoint import _forward_check
+
+    prep = {"precision": "float64", "precision_primal": "float64",
+            "result": vt.SolverResult(details={"loads": None})}
+    prod = {"CL": 0.17, "CY": 0.0, "Cl": 1.4e-18, "Cm": 0.0, "Cn": -1.9e-20}
+    # Moments of 1e-12: round-off relative to the forces (6e-12 of CL). The
+    # moment scale alone (1.4e-18) gave a mismatch of about 7e5.
+    outputs = {k: torch.tensor(v, dtype=torch.float64) for k, v in prod.items()}
+    for k in ("Cl", "Cm", "Cn"):
+        outputs[k] = torch.tensor(1e-12, dtype=torch.float64)
+    assert _forward_check(prep, outputs, prod, ()) == pytest.approx(1e-12 / 0.17, rel=1e-6)
+    # A moment error of 1e-9 of the force scale is still found.
+    outputs["Cm"] = torch.tensor(0.17e-9, dtype=torch.float64)
+    with pytest.raises(RuntimeError, match="Cm"):
+        _forward_check(prep, outputs, prod, ())
+
+
+@pytest.mark.parametrize("precision", ["float32", "float64"])
+def test_gradients_with_zero_moment_vector(precision) -> None:
+    """A straight wing with the reference point on its quarter-chord line has a gradient (formerly refused)."""
+    pytest.importorskip("torch")
+    sec = [vt.WingSection(y_frac=e, chord=1.0, shape="2412") for e in (0.0, 1.0)]
+    wing = vt.LiftingSurface(name="w", semi_span=4.0, sections=sec, controls=[
+        vt.ControlSurface("flap", 0.1, 0.4, 0.75, 0.0),
+        vt.ControlSurface("ail", 0.6, 0.95, 0.75, 0.0, symmetric=False)])
+    ac = vt.Aircraft(surfaces=[wing], ref_point=np.array([0.25, 0.0, 0.0]))
+    cond = vt.FlightCondition(V_inf=30.0, alpha=np.radians(2.0))
+    st = vt.SolverSettings(solver_type="linear", n_panels=24, n_chord=1)
+    with _gpu_settings(device="cpu", precision=precision), warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        res = vt.analyze(ac, cond, st)
+        assert max(abs(float(getattr(res.totals, k))) for k in ("Cl", "Cm", "Cn")) < 1e-15
+        for outputs in (("CL",), ("CL", "Cl", "Cm")):
+            gr = vt.gradients(ac, cond, st, outputs=outputs, wrt=("controls",))
+            assert gr.forward_mismatch <= (1e-10 if precision == "float64" else 1e-4)
+            assert gr.jacobian["CL"]["controls"]["flap"] > 0.5

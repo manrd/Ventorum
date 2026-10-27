@@ -579,6 +579,38 @@ def test_hinge_snaps_on_control_strips_only():
     assert lat2.control_info[0]["hinge_x_c_eff"] == 0.5
 
 
+def test_hinge_snap_warns():
+    """A hinge that no lattice node can reach gives a RuntimeWarning.
+
+    With 8 uniform chordwise panels, a hinge at x/c = 0.70 snaps to the node
+    at 0.75 (the panel after the hinge would grow to 1.4 times its length).
+    The warning names the control, the requested and the effective hinge, and
+    a chordwise count that puts a node near the hinge. A hinge at 0.75 lies on
+    a node and gives no warning. The lattice geometry does not change.
+    """
+    def wing(h):
+        return vt.LiftingSurface(
+            semi_span=5.0,
+            sections=[vt.WingSection(0.0, 1.0), vt.WingSection(1.0, 1.0)],
+            controls=[vt.ControlSurface(name="flap", eta_start=0.0, eta_end=1.0, hinge_x_c=h)],
+            n_panels=6,
+            spacing="uniform",
+        )
+
+    lattice_cache.clear()
+    with pytest.warns(RuntimeWarning, match="hinge") as rec:
+        lat = vt.build_lattice(vt.Aircraft(surfaces=[wing(0.70)]), n_chord=8, chord_spacing="uniform")
+    msg = " ".join(str(w.message) for w in rec if "hinge" in str(w.message))
+    assert "'flap'" in msg and "0.7" in msg and "0.75" in msg and "n_chord =" in msg
+    assert lat.control_info[0]["hinge_x_c_eff"] == 0.75
+
+    lattice_cache.clear()
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", RuntimeWarning)
+        lat = vt.build_lattice(vt.Aircraft(surfaces=[wing(0.75)]), n_chord=8, chord_spacing="uniform")
+    assert lat.control_info[0]["hinge_x_c_eff"] == 0.75
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # 11. Cache key follows every control field
 # ═══════════════════════════════════════════════════════════════════════════════

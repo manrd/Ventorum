@@ -757,9 +757,19 @@ class TorchReference:
                 a_k0, b_k0, hinge = kink_geom
             no = torch.zeros(1, dtype=torch.bool, device=self.device)
             hinge_next = torch.cat((hinge[1:], no))
-            take = (nxt_p & ~(hinge & ~hinge_next))[:, None]
+            at_hinge = hinge & ~hinge_next
+            # At an edge shared with a strip of a different hinge (no hinge,
+            # another hinge fraction, or a joined surface end) the hinge point
+            # is not a node: the mean-surface node is (production: the
+            # hinge_off edges of _leg_nodes).
+            off = b.get("hinge_off_panel")
+            if off is None:
+                take_a = take_b = (nxt_p & ~at_hinge)[:, None]
+            else:
+                take_a = (nxt_p & ~(at_hinge & ~off[:, 0]))[:, None]
+                take_b = (nxt_p & ~(at_hinge & ~off[:, 1]))[:, None]
             on_chain = nxt_p | torch.cat((no, nxt_p[:-1]))
-            kink_geom = (torch.where(take, a_md, a_k0), torch.where(take, b_md, b_k0), hinge | on_chain)
+            kink_geom = (torch.where(take_a, a_md, a_k0), torch.where(take_b, b_md, b_k0), hinge | on_chain)
             chain_geom = (torch.where(nxt_p[:, None], a_nx, a_te), torch.where(nxt_p[:, None], b_nx, b_te),
                           on_chain)
         cp_u = cp[b["unknown_panels"]]
@@ -1065,7 +1075,17 @@ class TorchReference:
             leg_normal = torch.cat([strip_normal] * n_sets, dim=0) * b["leg_keep_normal"][:, None]
             if leg_turn is not None and n_sets == 4:
                 aft_m, s_t, axl, dl_, axr, dr_ = leg_turn
-                for mask, sets in ((aft_m, (0, 1)), (~aft_m, (2, 3))):
+                # Production (build_lattice): the forward segments of the
+                # aft panels turn; the aft segments turn where the first
+                # node is the hinge point or aft of it (aft panels on a
+                # chain, and panels ahead of the hinge except those on a
+                # chain whose next panel is ahead of the hinge too).
+                fwd_m, aft_s = aft_m, ~aft_m
+                if nxt_p is not None:
+                    chain_m = nxt_p.reshape(-1, n_chord)[s_t]
+                    ahead_next = torch.cat((~aft_m[:, 1:], torch.zeros_like(aft_m[:, :1])), dim=1)
+                    aft_s = (aft_m & chain_m) | (~aft_m & ~(chain_m & ahead_next))
+                for mask, sets in ((fwd_m, (0, 1)), (aft_s, (2, 3))):
                     row, col = torch.where(mask)
                     idx = s_t[row] * n_chord + col
                     for k, ax, da in ((sets[0], axl, dl_), (sets[1], axr, dr_)):
