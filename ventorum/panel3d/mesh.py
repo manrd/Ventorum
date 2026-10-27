@@ -210,6 +210,7 @@ __all__ = [
     "CONTROL_TRANSITION",
     "FOLD_MARGIN",
     "ROOT_SCALE_WARN_DIHEDRAL_DEG",
+    "ROOT_SCALE_TRUST_WARN_DIHEDRAL_DEG",
     "PanelMesh",
     "check_mesh",
     "mesh_aircraft",
@@ -244,6 +245,13 @@ _COS_ROOT_MIN = 1e-9
 #: check. The scaling is not capped (owner decision); this limit gives only
 #: the warning.
 ROOT_SCALE_WARN_DIHEDRAL_DEG = 60.0
+#: Dihedral of the first panel row or fold-guard tilt [deg] above which
+#: the root thickness scaling is not verified and raises a RuntimeWarning.
+ROOT_SCALE_TRUST_WARN_DIHEDRAL_DEG = 75.0
+_ROOT_SCALE_TRUST_WARN_FACTOR = 1.0 / math.cos(math.radians(ROOT_SCALE_TRUST_WARN_DIHEDRAL_DEG))
+_ROOT_SCALE_TRUST_WARNING = (
+    "The root thickness scaling is not verified above 75 deg dihedral (lift can change by more than 10 %)."
+)
 #: Fold guard: smallest distance of a section node from the plane of the
 #: neighbour section, as a fraction of the station spacing [-]. Any
 #: positive value prevents a fold; 0.05 changes only the stations that
@@ -321,6 +329,7 @@ class PanelMesh:
     chord_index: np.ndarray | None = None
     side: np.ndarray | None = None
     node_station: np.ndarray | None = None
+    root_scale_warning: bool = False
 
 
 def _target_x(n_chord: int, chord_spacing: str) -> np.ndarray:
@@ -811,8 +820,8 @@ def _root_thickness_factor(surf, eta: np.ndarray) -> float:
     return 1.0 / cos_g
 
 
-def _warn_strong_root_scaling(surf, factor: float) -> None:
-    """Issue a UserWarning when the root-thickness factor comes from a steep first panel row.
+def _warn_strong_root_scaling(surf, factor: float) -> bool:
+    """Issue a RuntimeWarning and/or UserWarning when the root-thickness factor is strong.
 
     Parameters
     ----------
@@ -821,12 +830,25 @@ def _warn_strong_root_scaling(surf, factor: float) -> None:
     factor : float
         Applied root-thickness factor 1 / cos(G) [-], with G the dihedral
         of the first panel row.
+
+    Returns
+    -------
+    bool
+        True when factor is above 1 / cos(75 deg) (dihedral above 75 deg).
     """
     if not (math.isfinite(factor) and factor > 1.0):
-        return
+        return False
+    warned_75 = False
+    if factor > _ROOT_SCALE_TRUST_WARN_FACTOR:
+        warned_75 = True
+        warnings.warn(
+            _ROOT_SCALE_TRUST_WARNING,
+            RuntimeWarning,
+            stacklevel=3,
+        )
     dihedral_deg = math.degrees(math.acos(min(1.0, 1.0 / factor)))
     if dihedral_deg <= ROOT_SCALE_WARN_DIHEDRAL_DEG:
-        return
+        return warned_75
     name = str(getattr(surf, "name", ""))
     warnings.warn(
         f"Surface {name!r}: the root section is strongly scaled. The first panel row has a dihedral of "
@@ -836,6 +858,7 @@ def _warn_strong_root_scaling(surf, factor: float) -> None:
         UserWarning,
         stacklevel=3,
     )
+    return warned_75
 
 
 def _scale_about_camber(yu: np.ndarray, yl: np.ndarray, factor: float) -> tuple[np.ndarray, np.ndarray]:
@@ -1527,10 +1550,11 @@ def _mesh_with_controls(
     yu_base = _interp_rows(fr, yu_mat, edge_etas)
     yl_base = _interp_rows(fr, yl_mat, edge_etas)
     sharp_base = np.abs(yu_base[:, -1] - yl_base[:, -1]) <= _TE_GAP_TOL
+    has_root_scale_warn = False
     if scale_root_thickness:
         factor = _root_thickness_factor(surf, edge_etas)
         if factor != 1.0:
-            _warn_strong_root_scaling(surf, factor)
+            has_root_scale_warn = _warn_strong_root_scaling(surf, factor)
             yu_base[0], yl_base[0] = _scale_about_camber(yu_base[0], yl_base[0], factor)
     has_asym = any(not bool(c.symmetric) for c in active)
     if symmetric and has_asym and half:
@@ -1577,6 +1601,11 @@ def _mesh_with_controls(
         if scale_root_thickness:
             for j in np.flatnonzero(tilt_e != 0.0):
                 yu_base[j], yl_base[j] = _scale_about_camber(yu_base[j], yl_base[j], 1.0 / np.cos(tilt_e[j]))
+            fg_angles = np.abs(tilt_e[np.flatnonzero(tilt_e != 0.0)])
+            if fg_angles.size > 0 and np.any(fg_angles > math.radians(ROOT_SCALE_TRUST_WARN_DIHEDRAL_DEG)):
+                if not has_root_scale_warn:
+                    warnings.warn(_ROOT_SCALE_TRUST_WARNING, RuntimeWarning, stacklevel=3)
+                has_root_scale_warn = True
     cdir_e, ndir_e = _section_frames(axis_e, twist_e)
 
     if symmetric and has_asym:
@@ -1607,7 +1636,7 @@ def _mesh_with_controls(
             upper, lower, sharp_base[sel], signed, chord_f, qc, cdir, ndir,
             cap_first=(tip == "flat"), cap_last=(tip == "flat"),
         )
-        return _finish_mesh(built, n_full, half=False, tip=tip, mirror_full=False, mirror_flip=False)
+        return _finish_mesh(built, n_full, half=False, tip=tip, mirror_full=False, mirror_flip=False, root_scale_warning=bool(has_root_scale_warn))
 
     mirror_side = bool(mirror and not symmetric)
     xu, zu, xl, zl = section_rows(mirror_side)
@@ -1619,10 +1648,11 @@ def _mesh_with_controls(
     return _finish_mesh(
         built, ns, half=bool(half and symmetric), tip=tip,
         mirror_full=bool(symmetric and not half), mirror_flip=bool(mirror and not symmetric),
+        root_scale_warning=bool(has_root_scale_warn),
     )
 
 
-def _finish_mesh(built: dict, ns: int, half: bool, tip: str, mirror_full: bool, mirror_flip: bool) -> PanelMesh:
+def _finish_mesh(built: dict, ns: int, half: bool, tip: str, mirror_full: bool, mirror_flip: bool, root_scale_warning: bool = False) -> PanelMesh:
     """Mirror a one-sided build when needed and return the PanelMesh.
 
     Parameters
@@ -1700,6 +1730,7 @@ def _finish_mesh(built: dict, ns: int, half: bool, tip: str, mirror_full: bool, 
         chord_index=np.array(chord_i, dtype=int),
         side=np.array(side, dtype=int),
         node_station=np.array(node_station, dtype=int),
+        root_scale_warning=bool(root_scale_warning),
     )
 
 
@@ -1820,6 +1851,11 @@ def mesh_lifting_surface(
         dihedral of the first panel row is above
         ``ROOT_SCALE_WARN_DIHEDRAL_DEG`` (60 deg): the root section is
         strongly scaled and the result needs checking.
+    RuntimeWarning
+        When ``scale_root_thickness`` scales any station with a factor
+        above 1 / cos(75 deg) (about 3.86) from the first-row dihedral
+        or a fold-guard tilt: the root thickness scaling is not verified
+        above 75 deg dihedral (lift can change by more than 10 %).
 
     Notes
     -----
@@ -1934,10 +1970,11 @@ def mesh_lifting_surface(
     yu_e = _interp_rows(fr, yu_mat, eta_e)
     yl_e = _interp_rows(fr, yl_mat, eta_e)
     sharp = np.abs(yu_e[:, -1] - yl_e[:, -1]) <= _TE_GAP_TOL
+    has_root_scale_warn = False
     if scale_root_thickness:
         factor = _root_thickness_factor(surf, eta_e)
         if factor != 1.0:
-            _warn_strong_root_scaling(surf, factor)
+            has_root_scale_warn = _warn_strong_root_scaling(surf, factor)
             yu_e[0], yl_e[0] = _scale_about_camber(yu_e[0], yl_e[0], factor)
     if fold_guard:
 
@@ -1949,6 +1986,11 @@ def mesh_lifting_surface(
         if scale_root_thickness:
             for j in np.flatnonzero(tilt_e != 0.0):
                 yu_e[j], yl_e[j] = _scale_about_camber(yu_e[j], yl_e[j], 1.0 / np.cos(tilt_e[j]))
+            fg_angles = np.abs(tilt_e[np.flatnonzero(tilt_e != 0.0)])
+            if fg_angles.size > 0 and np.any(fg_angles > math.radians(ROOT_SCALE_TRUST_WARN_DIHEDRAL_DEG)):
+                if not has_root_scale_warn:
+                    warnings.warn(_ROOT_SCALE_TRUST_WARNING, RuntimeWarning, stacklevel=3)
+                has_root_scale_warn = True
     cdir, ndir = _section_frames(axis, twist_e)
 
     upper = np.empty((ns, nc1, 3))
@@ -2045,6 +2087,7 @@ def mesh_lifting_surface(
     return _finish_mesh(
         built, ns, half=bool(half and symmetric), tip=tip,
         mirror_full=bool(symmetric and not half), mirror_flip=bool(mirror and not symmetric),
+        root_scale_warning=bool(has_root_scale_warn),
     )
 
 
@@ -2109,6 +2152,7 @@ def mesh_aircraft(
     n_panels = 0
     n_strips = 0
     half_all = True
+    root_scale_all = False
     for i, (s, c) in enumerate(zip(surfs, coord_list)):
         sub = mesh_lifting_surface(s, c, scale_root_thickness=scale_root_thickness, **kw)
         node_parts.append(np.asarray(sub.nodes, dtype=float))
@@ -2129,6 +2173,7 @@ def mesh_aircraft(
         n_nodes += int(np.asarray(sub.nodes).shape[0])
         n_panels += int(np.asarray(sub.panels).shape[0])
         half_all = half_all and bool(sub.half)
+        root_scale_all = root_scale_all or bool(getattr(sub, "root_scale_warning", False))
     return PanelMesh(
         nodes=np.vstack(node_parts),
         panels=np.vstack(panel_parts),
@@ -2141,6 +2186,7 @@ def mesh_aircraft(
         chord_index=np.concatenate(chord_parts),
         side=np.concatenate(side_parts),
         node_station=np.concatenate(station_parts),
+        root_scale_warning=bool(root_scale_all),
     )
 
 

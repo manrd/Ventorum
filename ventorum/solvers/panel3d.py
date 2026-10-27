@@ -61,6 +61,7 @@ from __future__ import annotations
 
 import copy
 import dataclasses
+import math
 import time
 import warnings
 from collections.abc import Sequence
@@ -86,7 +87,14 @@ from ventorum.core.datatypes import (
     SolverSettings,
     SpanwiseResult,
 )
-from ventorum.core.trust import evaluate_aerodynamic_trust
+from ventorum.core.trust import (
+    PANEL3D_FAR_FIELD_FREE_AIR_NOTE,
+    PANEL3D_FAR_FIELD_GROUND_NOTE,
+    PANEL3D_OUTER_STRIP_GROUND_NOTE,
+    PANEL3D_ROOT_SCALE_WARNING,
+    evaluate_aerodynamic_trust,
+)
+
 from ventorum.geometry.lattice import (
     _AirfoilBlender,
     _sorted_sections,
@@ -115,6 +123,12 @@ from ventorum.solvers.lattice_base import as_aircraft
 from ventorum.utils.validation import validate_aircraft
 
 __all__ = ["PanelMethodSolver"]
+
+_TRUST_NOTES_NO_WARN = {
+    PANEL3D_FAR_FIELD_GROUND_NOTE,
+    PANEL3D_FAR_FIELD_FREE_AIR_NOTE,
+    PANEL3D_OUTER_STRIP_GROUND_NOTE,
+}
 
 #: Default chordwise panel count per surface [-]. A mesh-error study of the
 #: method chose the smallest count for which no test wing gets the mesh
@@ -331,6 +345,8 @@ def _combined_metadata(subs: list[PanelMesh]) -> dict:
     for name in _PANEL_METADATA + _NODE_METADATA:
         if name in names and all(getattr(m, name, None) is not None for m in subs):
             out[name] = np.concatenate([np.asarray(getattr(m, name), dtype=int) for m in subs])
+    if "root_scale_warning" in names:
+        out["root_scale_warning"] = any(getattr(m, "root_scale_warning", False) for m in subs)
     return out
 
 
@@ -846,6 +862,7 @@ def _build_geometry(
 
     # 3. Check mesh quality
     mesh_stats = check_mesh(mesh)
+    mesh_stats["root_scale_warning"] = bool(getattr(mesh, "root_scale_warning", False))
     return CachedGeometry(
         mesh=mesh,
         strip_maps=surface_strip_maps,
@@ -1079,6 +1096,7 @@ class PanelMethodSolver(BaseSolver):
         *,
         ground: GroundPlane | None = None,
         ref_point: np.ndarray | None = None,
+        far_ratio: float | None = None,
     ) -> SolverResult | list[SolverResult]:
         """Solve one flight condition or a sequence of conditions.
 
@@ -1223,6 +1241,9 @@ class PanelMethodSolver(BaseSolver):
         )
         t0 = time.perf_counter()
         solver_class = PanelSolver
+        far_ratio_val = float(far_ratio) if far_ratio is not None else float(
+            getattr(settings, "panel_far_ratio", getattr(settings, "far_ratio", 5.0))
+        )
 
         def build_solver():
             panel_solver = solver_class(
@@ -1236,6 +1257,7 @@ class PanelMethodSolver(BaseSolver):
                 backend=backend,
                 ground_solver=ground_solver,
                 dtype=precision if backend == "gpu" else None,
+                far_ratio=far_ratio_val,
             )
             if coupling is not None:
                 coupling.prepare(panel_solver, geometry, ac, settings, cond_list)
@@ -1245,6 +1267,7 @@ class PanelMethodSolver(BaseSolver):
         if use_cache:
             key = panel_cache.solver_key(geom_key, (
                 solver_class, wake_length, kutta, backend, _cuda_device_index(backend), precision, ground_solver,
+                far_ratio_val,
                 float(s_ref), float(b_ref), float(c_ref), np.asarray(rp, dtype=float).tobytes(),
             ) + _thread_settings(backend) + _solver_helpers(backend))
         # A solver in use by another thread is not shared: acquire builds a
@@ -1340,6 +1363,18 @@ class PanelMethodSolver(BaseSolver):
                 if p_res.trust_note:
                     all_notes.append(p_res.trust_note)
                 main_surf_n_span = ac.surfaces[0].n_panels or settings.n_panels
+                far_ratio_active = solver.far_ratio
+                if math.isfinite(far_ratio_active):
+                    if gnd is not None:
+                        all_notes.append(PANEL3D_FAR_FIELD_GROUND_NOTE)
+                    elif main_surf_n_span > 80:
+                        all_notes.append(PANEL3D_FAR_FIELD_FREE_AIR_NOTE)
+
+                if gnd is not None and getattr(mesh, "tip", "flat") != "none":
+                    all_notes.append(PANEL3D_OUTER_STRIP_GROUND_NOTE)
+
+                if getattr(mesh, "root_scale_warning", False):
+                    all_notes.append(PANEL3D_ROOT_SCALE_WARNING)
                 h_over_c = (h_min / c_ref) if (h_min is not None and c_ref) else None
 
                 # The chordwise count turns on the chordwise rule of the mesh
@@ -1406,6 +1441,10 @@ class PanelMethodSolver(BaseSolver):
                 if coupling is not None:
                     coupling.finish_result(result, solver, geometry, ac)
                 for msg in all_notes:
+                    if msg in _TRUST_NOTES_NO_WARN:
+                        continue
+                    if msg == PANEL3D_ROOT_SCALE_WARNING:
+                        continue
                     warnings.warn(msg, RuntimeWarning, stacklevel=2)
 
                 results.append(result)

@@ -10,6 +10,8 @@ a minor version can change a public interface.
 
 ### Added
 
+- Ventorum-3DP: trust notes for far-field kernel and outer-strip ground effects, and dihedral root scaling warning. A finite `far_ratio` in ground effect adds a trust note on far-field kernel lift bias (about 1 to 4 %); in free air, the note appears when spanwise panel count exceeds 80. In ground effect with a closed tip, a trust note reports that outermost strip loads are not resolved. When station root thickness scaling exceeds $1/\cos(75^\circ) \approx 3.86$, a `RuntimeWarning` is raised and a trust warning is recorded.
+
 - Viscous alpha-correction coupling (V1): trust warning and `RuntimeWarning` when a thick section polar ($t/c > 0.04$) runs with a flap deflection in ground effect below $h/c = 0.30$. The ground factor $\kappa$ of the flap increment is a thin-airfoil value; for thick sections below $h/c = 0.30$ it can differ by more than 2 % (about 0.1 to 0.2 deg of flap shift). `_section_flap_shift` guards against trailing-edge ground strike, raising `ValueError` when the strip trailing edge is at or below the ground ($h \le 0$).
 
 - Ventorum-2D: `solve_viscous_flapped` solves a section with a deflected plain flap by

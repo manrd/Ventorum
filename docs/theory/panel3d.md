@@ -213,6 +213,8 @@ $$C_L = \frac{\mathbf{F} \cdot \hat{\mathbf{l}}_{\text{wind}}}{q_{\infty} S_{\te
 
 where $\hat{\mathbf{u}}_{\text{wind}} = [\cos\alpha \cos\beta, -\sin\beta, \sin\alpha \cos\beta]^T$, $\hat{\mathbf{l}}_{\text{wind}} = [-\sin\alpha, 0, \cos\alpha]^T$, and $\hat{\mathbf{y}}_{\text{wind}} = \hat{\mathbf{l}}_{\text{wind}} \times \hat{\mathbf{u}}_{\text{wind}}$.
 
+In ground effect, the strip loads of the outermost strip of a closed tip are not resolved (sharp-edge feature); $C_L$ and $C_m$ are not affected by more than the mesh error.
+
 ### Moments
 
 The total aerodynamic moment vector about the reference point $\mathbf{r}_{\text{ref}}$ in geometry axes is:
@@ -280,6 +282,8 @@ $$\mathbf{x}' = \mathbf{x} - 2 (\mathbf{x} \cdot \hat{\mathbf{k}} - o) \hat{\mat
 
 The loop order of the reflected panel vertices is reversed to preserve an outward-pointing unit normal on the image body: $\hat{\mathbf{n}}' = \mathcal{R} \hat{\mathbf{n}}$.
 
+The default far-field kernel can bias the lift low by about 1 to 4 % in ground effect and the moment more, growing with spanwise refinement; use `far_ratio=inf` for reference values.
+
 ### Boundary Condition and Mirror Signs
 
 To make the ground plane a stream surface ($\mathbf{V} \cdot \hat{\mathbf{k}} = 0$ on the ground), the image body carries:
@@ -337,7 +341,7 @@ Properties of the scaled root section:
 * Root twist $\theta$: before the scaling, the thickness normal to the surface is $t\cos\Gamma/\sqrt{1 - \sin^2\theta\,\sin^2\Gamma}$. The factor $1/\cos\Gamma$ leaves an error of second order in $\theta$.
 * No effect: a surface with zero dihedral at the root (the mesh stays bit for bit the same), a one-sided surface (its root section is normal to its span axis, for example a vertical fin with $\Gamma = 90$ deg) and a symmetric surface whose first panel row is vertical (the two halves coincide and there is no miter).
 * A deflected control surface at the root deflects the scaled section: the hinge point at half the local thickness does not move.
-* Steep first panel row: the factor $1/\cos\Gamma$ is not capped (an owner decision). Above $\Gamma = 60$ deg (`ROOT_SCALE_WARN_DIHEDRAL_DEG`, a factor above 2) the builder applies it and issues a `UserWarning`: the root section is strongly scaled and the result needs checking, for example against `scale_root_thickness=False`.
+* Steep first panel row: the factor $1/\cos\Gamma$ is not capped (an owner decision). Above $\Gamma = 60$ deg (`ROOT_SCALE_WARN_DIHEDRAL_DEG`, a factor above 2) the builder applies it and issues a `UserWarning`: the root section is strongly scaled and the result needs checking, for example against `scale_root_thickness=False`. The root thickness scaling is not verified above 75 deg dihedral (lift can change by more than 10 %).
 
 ### Fold guard
 
