@@ -438,7 +438,9 @@ class VortexLattice:
     geom_cache: dict = field(default_factory=dict, repr=False, compare=False)
     control_info: list[dict] = field(default_factory=list)
     # Warnings that build_lattice issues about the mesh (a hinge that snaps
-    # to a node, a hinge that moves a node of a cambered strip). The lattice
+    # to a node, a hinge that moves a node of a cambered strip, a mean line
+    # that does not match the polar alpha_L0, a section shape that the
+    # lifting line does not use). The lattice
     # cache issues them again when it returns a cached lattice, and the
     # solvers give them to the trust score as notes.
     mesh_warnings: list[str] = field(default_factory=list)
@@ -659,17 +661,27 @@ def _relate_surfaces(si: SurfaceSlice, sj: SurfaceSlice) -> tuple[bool, tuple[fl
 def check_overlaps(lattice: VortexLattice) -> None:
     """Refuse a lattice where two surfaces overlap.
 
-    Two control points of different surfaces closer than 1.0e-3 times the
-    smaller local chord of the two strips mean that the surfaces overlap
-    (they share more than an edge). The strips of one surface never count
-    as an overlap with each other. Two surfaces that only share an edge
-    still pass: their control points are not at the same place.
+    Two control points of different surfaces closer than a limit mean that
+    the surfaces overlap (they share more than an edge). The limit is the
+    smaller of two values: 1.0e-3 times the smaller local chord of the two
+    strips (``OVERLAP_FRACTION``), and 0.25 times the smaller local strip
+    width of the two strips (``OVERLAP_WIDTH_FRACTION``). The strips of one
+    surface never count as an overlap with each other.
+
+    Two surfaces that only share an edge still pass. Each control point is
+    at the spanwise middle of its strip, so two control points across a
+    shared edge are at least half of the smaller strip width apart. The
+    width limit keeps this true on fine meshes that cluster strips at the
+    shared edge (cosine spacing at a root or at a winglet join), where the
+    strips are narrower than the chord limit. Two surfaces that lie on each
+    other have control points at the same place and are refused.
 
     Parameters
     ----------
     lattice : VortexLattice
-        Built lattice; control points ``cp`` are in body axes [m] and
-        ``chord`` holds the strip chords [m].
+        Built lattice; control points ``cp`` are in body axes [m],
+        ``chord`` holds the strip chords [m] and ``width`` the strip
+        widths [m].
 
     Raises
     ------
@@ -682,18 +694,21 @@ def check_overlaps(lattice: VortexLattice) -> None:
     from scipy.spatial import cKDTree
 
     OVERLAP_FRACTION = 1.0e-3
+    OVERLAP_WIDTH_FRACTION = 0.25
     cp = np.asarray(lattice.cp, dtype=float)
     if cp.shape[0] < 2:
         return
     panels = np.asarray(lattice.panel_strip, dtype=int)
     panel_surface = np.asarray(lattice.strip_surface, dtype=int)[panels]
     panel_chord = np.asarray(lattice.chord, dtype=float)[panels]
+    panel_width = np.abs(np.asarray(lattice.width, dtype=float))[panels]
     keep = np.flatnonzero(np.all(np.isfinite(cp), axis=1))
     if keep.size < 2:
         return
     pts = cp[keep]
     surf_of = panel_surface[keep]
     chord = panel_chord[keep]
+    width = panel_width[keep]
     r_max = OVERLAP_FRACTION * float(np.max(chord))
     if not np.isfinite(r_max) or r_max <= 0.0:
         return
@@ -702,14 +717,16 @@ def check_overlaps(lattice: VortexLattice) -> None:
         if surf_of[i] == surf_of[j]:
             continue
         dist = float(np.linalg.norm(pts[i] - pts[j]))
-        limit = OVERLAP_FRACTION * min(float(chord[i]), float(chord[j]))
+        limit = min(OVERLAP_FRACTION * min(float(chord[i]), float(chord[j])),
+                    OVERLAP_WIDTH_FRACTION * min(float(width[i]), float(width[j])))
         if dist < limit:
             name_i = lattice.surfaces[int(surf_of[i])].name
             name_j = lattice.surfaces[int(surf_of[j])].name
             raise ValueError(
                 f"Surfaces '{name_i}' and '{name_j}' overlap: control points "
                 f"{int(keep[i])} and {int(keep[j])} are {dist:.3g} m apart "
-                f"(closer than 1.0e-3 times the smaller local chord, {limit:.3g} m). "
+                f"(closer than {limit:.3g} m: the smaller of 1.0e-3 times the smaller "
+                "local chord and 0.25 times the smaller local strip width). "
                 "Two surfaces at the same place are not valid: move them apart "
                 "or join them into one surface."
             )
@@ -1252,15 +1269,26 @@ def build_lattice(
             camber_warnings.append(
                 f"camber of surface {surf.name} modelled by a turned normal: not every section gives a mean line"
             )
+        if collocation == "llt" and any(supplied):
+            # The lifting line has no chordwise mesh: it takes alpha_L0, the
+            # lift slope, Cd0 and Cm0 from the section polar, never from the
+            # shape. The note goes to the trust warnings (no penalty).
+            mesh_warnings.append(
+                f"[{surf.name}] the sections give an airfoil shape, but the lifting line does not use it: "
+                "the lifting line uses the section polar only (WingSection.airfoil: alpha_L0, lift slope, "
+                "Cd0, Cm0). Give each section a polar that matches its shape, or use the VLM."
+            )
+            warnings.warn(mesh_warnings[-1], RuntimeWarning, stacklevel=2)
         use_mean_line = collocation == "vlm" and n_chord > 1 and all(supplied)
         lines = [_MeanLine(sec.shape) if use_mean_line else None for sec in secs]
         for sec, line in zip(secs, lines):
             if line is not None and abs(line.alpha_l0() - sec.airfoil.alpha_L0) > np.radians(0.5):
-                warnings.warn(
+                # The warning is also a note of the trust score (no penalty).
+                mesh_warnings.append(
                     f"[{surf.name}] section at eta={sec.y_frac:g}: mean line and polar alpha_L0 "
-                    "differ by more than 0.5 deg. The mean line sets the VLM boundary condition.",
-                    RuntimeWarning, stacklevel=2,
+                    "differ by more than 0.5 deg. The mean line sets the VLM boundary condition."
                 )
+                warnings.warn(mesh_warnings[-1], RuntimeWarning, stacklevel=2)
         mean_surfaces.append((secs, lines, eta_e))
         geo = surface_edge_geometry(surf, eta_e)
         d = getattr(surf, "node_displacements", None)

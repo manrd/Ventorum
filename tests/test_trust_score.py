@@ -477,3 +477,47 @@ def test_panel3d_rules_do_not_change_other_solvers(solver, monkeypatch):
                                             **kw).to_dict()
     assert with_panel == plain
     assert "mesh_resolution" not in plain["factors"] and "mesh_adequacy" not in plain["factors"]
+
+
+def _shaped_wing(shape="4412"):
+    return LiftingSurface(
+        name="ShapedWing",
+        semi_span=4.0,
+        sections=[WingSection(y_frac=0.0, chord=1.0, shape=shape), WingSection(y_frac=1.0, chord=1.0, shape=shape)],
+    )
+
+
+@pytest.mark.parametrize("solver", ["linear", "nonlinear"])
+def test_lifting_line_notes_an_unused_section_shape(solver):
+    """The lifting line ignores WingSection.shape; the result says so in a note with no penalty.
+
+    Regression: a NACA 4412 shape with the default LinearAirfoil gave the
+    LLT result of an uncambered wing with HIGH trust and no note.
+    """
+    cond = FlightCondition(V_inf=30.0, alpha=np.radians(4.0))
+    settings = vt.SolverSettings(solver_type=solver, n_panels=24)
+    with pytest.warns(RuntimeWarning, match="lifting line does not use it"):
+        res = vt.analyze(_shaped_wing(), cond, settings)
+    plain = vt.analyze(_shaped_wing(shape=None), cond, settings)
+    msgs = [w for w in res.totals.trust.warnings if "lifting line does not use it" in w]
+    assert len(msgs) == 1
+    assert "section polar only" in msgs[0]
+    assert any("section polar only" in n for n in res.details["notes"])
+    # A note only: no score penalty and the same loads as without the shape.
+    assert res.totals.trust.score == pytest.approx(plain.totals.trust.score)
+    assert res.totals.CL == pytest.approx(plain.totals.CL)
+    assert not any("lifting line does not use it" in w for w in plain.totals.trust.warnings)
+
+
+def test_vlm_mean_line_mismatch_is_a_trust_warning():
+    """The VLM warning about a mean line alpha_L0 far from the polar alpha_L0 is also a trust warning.
+
+    Regression: it was only a Python warning.
+    """
+    cond = FlightCondition(V_inf=30.0, alpha=np.radians(4.0))
+    settings = vt.SolverSettings(solver_type="vlm", n_panels=16, n_chord=4)
+    with pytest.warns(RuntimeWarning, match="mean line and polar alpha_L0"):
+        res = vt.analyze(_shaped_wing(), cond, settings)
+    msgs = [w for w in res.totals.trust.warnings if "mean line and polar alpha_L0" in w]
+    assert len(msgs) == 2  # root and tip sections
+    assert not any("lifting line does not use it" in w for w in res.totals.trust.warnings)

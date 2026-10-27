@@ -108,8 +108,10 @@ from ventorum.panel3d.images import (
     ground_plane_parameters,
 )
 from ventorum.panel3d.mesh import (
+    CONTACT_GAP_FRACTION,
     PanelMesh,
     _check_no_node_displacements,
+    check_contact,
     check_mesh,
     mesh_lifting_surface,
 )
@@ -716,6 +718,46 @@ def _spanwise_reference(solver, p_res, cond, surface_strip_maps, surface_geom_me
     return spanwise_list
 
 
+def _check_surface_contact(mesh: PanelMesh, names: list[str]) -> None:
+    """Refuse a panel mesh where two distinct closed surfaces touch.
+
+    Each surface of a 3D panel model is one closed body. Two bodies that
+    touch, or that pass through each other, make the influence matrix
+    close to singular: a wing with winglets meshed as separate surfaces
+    that touch the wing tip gives lift coefficients of the order of -1e3
+    to -1e5, although each surface is watertight. The rule of
+    :func:`ventorum.panel3d.mesh.check_contact` with
+    :data:`ventorum.panel3d.mesh.CONTACT_GAP_FRACTION` finds such panels:
+    a panel centroid or a panel node inside another surface, or a panel
+    centroid nearer to another surface than ``CONTACT_GAP_FRACTION`` times
+    the local panel size.
+
+    Parameters
+    ----------
+    mesh : PanelMesh
+        Combined mesh with one component index per surface.
+    names : list of str
+        Surface name of each component index.
+
+    Raises
+    ------
+    ValueError
+        If a panel of one surface touches or enters another surface. The
+        message names the two surfaces.
+    """
+    contact = check_contact(mesh)
+    if contact["n_contact_panels"] == 0:
+        return
+    a, b, n_hit, gap, _ = contact["contact_pairs"][0]
+    raise ValueError(
+        f"3D panel surfaces '{names[a]}' and '{names[b]}' touch or pass through each other: "
+        f"{n_hit} panels of '{names[a]}' are inside '{names[b]}' or nearer to it than "
+        f"{CONTACT_GAP_FRACTION:g} times the local panel size (smallest gap {gap:.3g} m). "
+        "The 3D panel method does not support joined closed surfaces: each surface is one "
+        "closed body. Leave a gap between the surfaces, or define them as one surface."
+    )
+
+
 def _build_geometry(
     ac: Aircraft,
     settings: SolverSettings,
@@ -756,6 +798,12 @@ def _build_geometry(
         Mesh, strip maps, strip data (positions in m, chords, widths in m,
         areas in m^2, lift slopes in 1/rad, zero-lift angles in rad), the
         number of solved panels and the mesh statistics.
+
+    Raises
+    ------
+    ValueError
+        If two distinct closed surfaces touch or pass through each other
+        (see :func:`_check_surface_contact`).
     """
     # 2. Build panel mesh and track strip-to-panel associations
     node_parts = []
@@ -861,6 +909,7 @@ def _build_geometry(
     )
 
     # 3. Check mesh quality
+    _check_surface_contact(mesh, [surf.name for surf in ac.surfaces])
     mesh_stats = check_mesh(mesh)
     mesh_stats["root_scale_warning"] = bool(getattr(mesh, "root_scale_warning", False))
     return CachedGeometry(

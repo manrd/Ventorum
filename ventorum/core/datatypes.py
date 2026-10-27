@@ -468,7 +468,11 @@ class WingSection:
         (None: NACA 0012). The vortex lattice (two or more chordwise panels)
         puts its lattice on the mean line of the shape when every section of
         the surface gives one; the polar alpha_L0 and Cm0 then do not enter
-        the boundary condition. Default is None.
+        the boundary condition. A mean line alpha_L0 that differs from the
+        polar alpha_L0 by more than 0.5 deg gives a trust warning. The
+        lifting-line solvers (linear and nonlinear) do not use the shape:
+        they use the section polar (``airfoil``) only, and a section with a
+        shape gives a note in the trust warnings. Default is None.
     """
 
     y_frac: float = 0.0
