@@ -77,14 +77,16 @@ def test_chain_nodes_on_mean_surface():
         k = p % n_c
         last = k == n_c - 1
         assert bool(lat.leg_next[p]) is not last
+        # The node at the middle chord fraction between the two bound points;
+        # on the last panel half a panel length aft of its bound point (the
+        # same fraction with uniform chordwise panels).
+        xm = (k + 0.75) / n_c
+        np.testing.assert_allclose(lat.a_kink[p], _mean_point(lat, p // n_c, 0, xm), rtol=0, atol=1e-14)
+        np.testing.assert_allclose(lat.b_kink[p], _mean_point(lat, p // n_c, 1, xm), rtol=0, atol=1e-14)
         if last:
-            np.testing.assert_array_equal(lat.a_kink[p], lat.a_te[p])
-            np.testing.assert_array_equal(lat.b_kink[p], lat.b_te[p])
+            np.testing.assert_array_equal(a_e[p], lat.a_te[p])
+            np.testing.assert_array_equal(b_e[p], lat.b_te[p])
         else:
-            # The node at the middle chord fraction between the two bound points.
-            xm = (k + 0.75) / n_c
-            np.testing.assert_allclose(lat.a_kink[p], _mean_point(lat, p // n_c, 0, xm), rtol=0, atol=1e-14)
-            np.testing.assert_allclose(lat.b_kink[p], _mean_point(lat, p // n_c, 1, xm), rtol=0, atol=1e-14)
             np.testing.assert_array_equal(a_e[p], lat.a[p + 1])
             np.testing.assert_array_equal(b_e[p], lat.b[p + 1])
 
@@ -219,7 +221,8 @@ def _chained_sources(h=None, flap=False):
 def test_chain_matches_explicit_segments():
     """A chained horseshoe equals the straight horseshoe with its legs replaced by the segments of its chain.
 
-    Each leg of the chain runs bound point, mean-surface node, next bound point.
+    Each leg of the chain runs bound point, mean-surface node, next bound point;
+    the last leg runs bound point, mean-surface node, trailing edge.
     """
     lat, src, P = _chained_sources()
     vortex.set_kernel_backend("numpy")
@@ -235,12 +238,10 @@ def test_chain_matches_explicit_segments():
             end_a = src.a[q + 1:q + 2] if q < s0 + n_c - 1 else src.a_te[q:q + 1]
             end_b = src.b[q + 1:q + 2] if q < s0 + n_c - 1 else src.b_te[q:q + 1]
             rc = src.rc[q:q + 1]
-            if q < s0 + n_c - 1:
-                ka, kb = lat.a_kink[q:q + 1], lat.b_kink[q:q + 1]
-                expected = (expected + seg(P, ka, src.a[q:q + 1], rc) + seg(P, end_a, ka, rc)
-                            + seg(P, src.b[q:q + 1], kb, rc) + seg(P, kb, end_b, rc))
-            else:
-                expected = expected + seg(P, end_a, src.a[q:q + 1], rc) + seg(P, src.b[q:q + 1], end_b, rc)
+            # The last panel has a node between its bound point and the trailing edge.
+            ka, kb = lat.a_kink[q:q + 1], lat.b_kink[q:q + 1]
+            expected = (expected + seg(P, ka, src.a[q:q + 1], rc) + seg(P, end_a, ka, rc)
+                        + seg(P, src.b[q:q + 1], kb, rc) + seg(P, kb, end_b, rc))
         np.testing.assert_allclose(v[:, j:j + 1], expected, rtol=0, atol=1e-11 * np.max(np.abs(expected)))
 
 
