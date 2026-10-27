@@ -206,6 +206,15 @@ this entry uses the fixed panel crossover in
 The fallback still cannot fit every GPU. The dispatch reason states whether
 the panel profile or the fixed default decided.
 
+A full tuner run also measures the dense LU factorization of the 3D panel
+method on the CPU with SciPy and PyTorch at the panel workload sizes. The
+tuner writes the faster backend to `settings.gpu.panel3d.cpu_lu` (or
+`settings.panel3d.cpu_lu`). Without a profile entry, SciPy is the default.
+The PyTorch path uses `torch.linalg.lu_factor` and `torch.linalg.lu_solve`
+on CPU float64 tensors that share memory with the numpy work matrix where
+possible. The Krylov ground preconditioner and pressure Kutta support both
+factor types.
+
 **Cost.** A solve without a known panel count can run on the CPU while the
 GPU would be faster. To see the crossovers on a machine, run
 `ventorum-tune`: its step 6 prints them.

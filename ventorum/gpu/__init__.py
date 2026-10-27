@@ -287,6 +287,30 @@ def _valid_panel3d_model(model) -> bool:
     except (TypeError, ValueError, OverflowError):
         return False
 
+def cpu_lu() -> str:
+    """Return the tuned CPU LU backend: "scipy" or "torch".
+
+    Reads from the profile key "panel3d.cpu_lu" (or "gpu.panel3d.cpu_lu").
+    If PyTorch is not available, or without a matching profile entry,
+    returns "scipy".
+
+    Returns
+    -------
+    str
+        "scipy" or "torch".
+    """
+    from ventorum.hardware.profile import tuned_setting
+
+    choice = tuned_setting("panel3d", "cpu_lu", default=None)
+    if choice is None:
+        choice = tuned_setting("gpu", "panel3d", "cpu_lu", default=None)
+    if choice == "torch":
+        if importlib.util.find_spec("torch") is None:
+            return "scipy"
+        return "torch"
+    return "scipy"
+
+
 
 def estimate_time(model: dict, device: str, n_panels: int, n_cases: int) -> float:
     """Return the estimated time [s] of a batch of *n_cases* on a lattice of *n_panels* panels on *device*.
