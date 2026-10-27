@@ -251,7 +251,7 @@ The protocol `SectionPolarSource` defines the standard interface for 2D section 
 `PolarTable` provides multidimensional interpolation over Reynolds number, flap deflection, ground height, and angle of attack:
 - Free-air tables store data in three dimensions: $(n_{Re}, n_{\text{flap}}, n_\alpha)$.
 - Ground-effect tables store data in four dimensions: $(n_{Re}, n_{\text{flap}}, n_h, n_\alpha)$.
-- Interpolation is linear in $\log_{10} Re$, linear in flap deflection $\delta_{\text{flap}}$, linear in inverse height $1/h$ (reflecting image singularity decay), and linear in angle of attack $\alpha$.
+- Interpolation is linear in $\log_{10} Re$, linear in flap deflection $\delta_{\text{flap}}$, and linear in inverse height $1/h$ (reflecting image singularity decay). The result at one operating point is a tabulated polar: in angle of attack $\alpha$ it uses shape-preserving cubic (PCHIP) interpolation, and outside its angle range it holds the end values (no extrapolation in $\alpha$).
 - Unconverged points are recorded as NaN. Queries outside the table bounds raise errors rather than extrapolating unverified data.
 
 ## Assumptions

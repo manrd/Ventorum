@@ -38,7 +38,7 @@ Non-planar quadrilaterals are projected onto the mean plane passing through the 
 \mathbf{p}'_k = \mathbf{p}_k - \left[(\mathbf{p}_k - \mathbf{p}_{\text{avg}}) \cdot \hat{\mathbf{n}}\right] \hat{\mathbf{n}}.
 ```
 
-The panel centroid $\mathbf{p}_0$ is the area centroid:
+The panel centroid $\mathbf{p}_0$ is the mean of the corner points (for a quadrilateral that is not a parallelogram, this is not the area centroid):
 - For quadrilaterals: $\mathbf{p}_0 = \frac{1}{4} \sum_{k=1}^4 \mathbf{p}'_k$.
 - For triangles: $\mathbf{p}_0 = \frac{1}{3} (\mathbf{p}'_1 + \mathbf{p}'_2 + \mathbf{p}'_3)$.
 
@@ -111,10 +111,12 @@ The source velocity potential per unit strength is:
 In local panel coordinates, the source-induced velocity components are:
 
 ```{math}
-V_{S, x} = -\frac{1}{4 \pi} \sum_{k=1}^4 \frac{y_{k+1} - y_k}{d_k} L_k, \qquad
-V_{S, y} = +\frac{1}{4 \pi} \sum_{k=1}^4 \frac{x_{k+1} - x_k}{d_k} L_k, \qquad
-V_{S, z} = +\frac{1}{4 \pi} \Omega = -\Phi_D.
+V_{S, x} = +\frac{1}{4 \pi} \sum_{k=1}^4 \frac{y_{k+1} - y_k}{d_k} L_k, \qquad
+V_{S, y} = -\frac{1}{4 \pi} \sum_{k=1}^4 \frac{x_{k+1} - x_k}{d_k} L_k, \qquad
+V_{S, z} = -\frac{1}{4 \pi} \Omega = -\Phi_D,
 ```
+
+with $L_k = \ln\left((r_k + r_{k+1} + d_k)/(r_k + r_{k+1} - d_k)\right)$, where $r_k$ and $r_{k+1}$ are the distances from the target to the two ends of edge $k$ and $d_k$ is the edge length. Each velocity is $\mathbf{V} = +\nabla \Phi$, so the far-field velocities below are the gradients of the far-field potentials.
 
 Transforming to global coordinates yields:
 
@@ -127,11 +129,11 @@ Transforming to global coordinates yields:
 When the target distance $r = \|\mathbf{x} - \mathbf{p}_0\|$ exceeds `far_ratio` times the panel diameter $D = \max_{i < j} \|\mathbf{p}_i - \mathbf{p}_j\|$, point-singularity expansions are used:
 
 ```{math}
-\Phi_S^{\text{far}} = -\frac{A}{4 \pi r}, \qquad \mathbf{V}_S^{\text{far}} = -\frac{A \mathbf{r}}{4 \pi r^3},
+\Phi_S^{\text{far}} = -\frac{A}{4 \pi r}, \qquad \mathbf{V}_S^{\text{far}} = +\frac{A \mathbf{r}}{4 \pi r^3},
 ```
 
 ```{math}
-\Phi_D^{\text{far}} = -\frac{A (\mathbf{r} \cdot \hat{\mathbf{n}})}{4 \pi r^3}, \qquad \mathbf{V}_D^{\text{far}} = \frac{A}{4 \pi} \left[\frac{\hat{\mathbf{n}}}{r^3} - \frac{3 (\mathbf{r} \cdot \hat{\mathbf{n}}) \mathbf{r}}{r^5}\right].
+\Phi_D^{\text{far}} = -\frac{A (\mathbf{r} \cdot \hat{\mathbf{n}})}{4 \pi r^3}, \qquad \mathbf{V}_D^{\text{far}} = -\frac{A}{4 \pi} \left[\frac{\hat{\mathbf{n}}}{r^3} - \frac{3 (\mathbf{r} \cdot \hat{\mathbf{n}}) \mathbf{r}}{r^5}\right].
 ```
 
 Setting `far_ratio = np.inf` disables approximations and computes exact integrals everywhere.

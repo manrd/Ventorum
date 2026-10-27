@@ -7,10 +7,11 @@ bodies. Boundary condition: constant stream function on each body, applied
 at the nodes (Dirichlet), with the stream-function constant of each body as
 an extra unknown. Kutta condition per body: gamma_first + gamma_last = 0.
 At a sharp trailing edge the first and last nodes coincide and their two
-stream-function equations are the same; the equation of the last node is
-then replaced by an extrapolation condition: the second differences of
-gamma at the two trailing-edge ends add to zero (Drela 1989, section 2;
-the exact form is to be checked against the paper, see
+stream-function equations are the same. Both equations are replaced by
+linear extrapolation conditions: the second difference of gamma at each
+trailing-edge end is zero (gamma_1 - 2 gamma_2 + gamma_3 = 0 and
+gamma_N - 2 gamma_N-1 + gamma_N-2 = 0). Drela (1989) replaces only the
+equation of the last node; this form is the author's (see
 ``docs/theory/panel2d.md``). A blunt trailing edge is closed by a panel from
 the last node to the first node.
 

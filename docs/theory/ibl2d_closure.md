@@ -37,7 +37,7 @@ Re_\theta \frac{2 C_D}{H^*} = 0.207 + 0.00205\,(4 - H)^{5.5} \quad (H < 4), \qqu
 Re_\theta \frac{2 C_D}{H^*} = 0.207 - \frac{0.003\,(H - 4)^2}{1 + 0.02\,(H - 4)^2} \quad (H \ge 4).
 ```
 
-All branch points are continuous in value and first derivative. $H^*$ has its minimum at $H = 4$, and $C_f = 0$ near $H = 4.03$ (Falkner-Skan separation).
+All branch points are continuous in value and first derivative. $H^*$ has its minimum at $H = 4$. The fit (C2) gives $C_f = 0$ at $H pprox 4.14$, near the shape factor of the Falkner-Skan separation profile ($H pprox 4.03$).
 
 ## Turbulent closures
 
