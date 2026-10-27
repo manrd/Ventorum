@@ -94,6 +94,8 @@ How the defaults were chosen: a sample of NACA 0012, 2412 and 4415 sections, 120
 
 $C_{d,friction} + C_{d,pressure}$ is an independent check of $C_d$; nothing replaces one by the other. At small lift they agree; as the lift grows the surface sum falls below the Squire-Young drag, also on a finer panel mesh. The difference grows with the lift; it is the difference between the thin-layer surface pressure and the momentum deficit of the wake model, and no correction is applied.
 
+Wake length: the Squire-Young drag changes very little with the wake length. For NACA 4412 at Re 1e6 and 4 deg it changes by less than 0.1 % from a wake of 0.5 c to 1.5 c (`tests/test_panel2d_viscous_wake.py`). A wake longer than about 1.5 c does not converge. The wake equations have no skin friction and an outer dissipation $2\,C_\tau(1 - U_s)$ that stays positive as $H$ approaches 1, and the lag equation relaxes $C_\tau$ more and more slowly because the layer thickness $\delta$ grows as $1/(H - 1)$. The wake shape factor thus reaches 1 at a finite distance behind the trailing edge (about 1.5 to 2 c at 4 deg, farther at a larger lift), and past that point the station equations have no solution with $H > 1$. A finer wake mesh does not change this. Use a wake of at most 1.5 c; the default wake of 1 c ends at $H pprox 1.03$ at 4 deg.
+
 ## Ground effect
 
 The image method of the inviscid solver; the image body carries the mirror image of the real boundary layer and wake (equal source strengths) and there is no boundary layer on the ground. There is no height limit: a large height gives the free-air answer by computation ($h/c$ = 50 is within 1e-4 of free air on $C_{l,circulation}$ for NACA 0012 at 4 deg).
