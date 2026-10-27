@@ -147,10 +147,10 @@ class PressureKuttaResult:
     converged: bool
 
 
-def _surface_cp(grad_op, mu_full, v_onset, normals, v_inf):
+def _surface_cp(grad_op, mu_full, v_onset, normals, v_inf, rates=False):
     """Return the surface velocity (Nf, 3) in m/s and Cp (Nf,) of a doublet vector."""
     grad = surface_gradient(grad_op, mu_full)
-    return compute_surface_velocity_and_cp(v_onset, normals, grad, v_inf)
+    return compute_surface_velocity_and_cp(v_onset, normals, grad, v_inf, rates)
 
 
 def solve_pressure_kutta(
@@ -164,6 +164,7 @@ def solve_pressure_kutta(
     v_inf: float,
     max_iter: int = MAX_ITERATIONS,
     tol: float = TOLERANCE,
+    rates: bool = False,
 ) -> PressureKuttaResult:
     """Iterate the wake strengths to zero trailing-edge pressure jump.
 
@@ -199,6 +200,12 @@ def solve_pressure_kutta(
         Maximum Newton steps.
     tol : float, default=1e-6
         Convergence threshold on max |delta Cp| [-].
+    rates : bool, default=False
+        True when the condition has a body rate. Cp then includes the
+        kinematic term of the rotating body (see
+        :func:`ventorum.panel3d.post.compute_surface_velocity_and_cp`).
+        The term does not depend on the doublets, so the Jacobian does not
+        change.
 
     Returns
     -------
@@ -228,7 +235,7 @@ def solve_pressure_kutta(
     g_up = g_z[up_idx]
     g_lo = g_z[lo_idx]
 
-    v_surf, cp = _surface_cp(grad_op, mu_f, v_on, normals_full, v_inf_f)
+    v_surf, cp = _surface_cp(grad_op, mu_f, v_on, normals_full, v_inf_f, rates)
     resid = trailing_edge_residual(cp, up_idx, lo_idx)
     max_res = float(np.max(np.abs(resid)))
     if max_res < tol:
@@ -254,14 +261,14 @@ def solve_pressure_kutta(
         for halve in range(6):
             frac = 0.5**halve
             trial = mu_f + z_f @ (frac * step)
-            _, cp_try = _surface_cp(grad_op, trial, v_on, normals_full, v_inf_f)
+            _, cp_try = _surface_cp(grad_op, trial, v_on, normals_full, v_inf_f, rates)
             m_try = float(np.max(np.abs(trailing_edge_residual(cp_try, up_idx, lo_idx))))
             if m_try < max_res:
                 frac_used = frac
                 break
         delta = delta + frac_used * step
         mu_f = mu_f + z_f @ (frac_used * step)
-        v_surf, cp = _surface_cp(grad_op, mu_f, v_on, normals_full, v_inf_f)
+        v_surf, cp = _surface_cp(grad_op, mu_f, v_on, normals_full, v_inf_f, rates)
         resid = trailing_edge_residual(cp, up_idx, lo_idx)
         max_res = float(np.max(np.abs(resid)))
         if max_res < tol:

@@ -193,9 +193,15 @@ where $\mathbf{V}_{\text{onset}, t} = \mathbf{V}_{\text{onset}} - (\mathbf{V}_{\
 
 ### Pressure Coefficient
 
-The local pressure coefficient $C_p$ is determined from Bernoulli's equation:
+Without body rates, the local pressure coefficient $C_p$ is determined from Bernoulli's equation:
 
 $$C_p = 1 - \frac{\|\mathbf{V}_{\text{surf}}\|^2}{V_{\infty}^2}$$
+
+With body rates the flow is steady in the body frame but not in the earth frame. The unsteady Bernoulli equation in the earth frame then gives
+
+$$C_p = \frac{\|\mathbf{V}_k(\mathbf{x})\|^2 - \|\mathbf{V}_{\text{surf}}\|^2}{V_{\infty}^2}, \qquad \mathbf{V}_k(\mathbf{x}) = V_\infty \hat{\mathbf{d}} - \boldsymbol{\Omega} \times (\mathbf{x} - \mathbf{x}_{\text{ref}}),$$
+
+where $\mathbf{V}_k$ is the local onset velocity (the velocity of the body point with the opposite sign). Without rates $\|\mathbf{V}_k\| = V_\infty$ and the two forms are the same. The [Ventorum-3DP chapter](ventorum_3dp.md) gives the derivation and the check on a sphere that flies a circle.
 
 ## Force and Moment Integration
 

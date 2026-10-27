@@ -39,7 +39,10 @@ Published sources
 Conventions
 -----------
 * Surface velocity: V = V_onset_tangential - grad(mu).
-* Pressure coefficient: Cp = 1 - |V|^2 / V_inf^2.
+* Pressure coefficient: Cp = 1 - |V|^2 / V_inf^2 without body rates. With
+  body rates, Cp = (|V_k|^2 - |V|^2) / V_inf^2, where V_k is the onset
+  velocity at the panel (free stream minus Omega x (x - x_ref)); see
+  :func:`compute_surface_velocity_and_cp`.
 * Pressure force on panel: dF = -Cp * q_inf * Area * n.
 * Wind axes: Lift along L_hat = [-sin(alpha), 0, cos(alpha)], side force
   along Y_hat = L_hat x u_hat, drag along u_hat.
@@ -1115,6 +1118,7 @@ def compute_surface_velocity_and_cp(
     normals: np.ndarray,
     grad_mu: np.ndarray,
     V_inf: float,
+    rates: bool = False,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Compute local surface velocity and pressure coefficient on each panel.
 
@@ -1122,19 +1126,46 @@ def compute_surface_velocity_and_cp(
     ----------
     V_onset : numpy.ndarray
         Onset velocity vector at panel centroids with shape (Np, 3) in m/s.
+        With body rates it includes the rotation term
+        ``-Omega x (x - x_ref)``.
     normals : numpy.ndarray
         Panel unit normal vectors with shape (Np, 3).
     grad_mu : numpy.ndarray
         Tangential gradient of doublet potential with shape (Np, 3) in m/s.
     V_inf : float
-        Free-stream speed in m/s.
+        Free-stream speed in m/s. At or below 1e-12 m/s, Cp is set to zero.
+    rates : bool, default=False
+        True when the flight condition has a body rate (p, q or r not
+        zero). The pressure then includes the kinematic term of the
+        rotating body (see Notes).
 
     Returns
     -------
     V_surf : numpy.ndarray
-        Surface velocity vectors with shape (Np, 3) in m/s.
+        Surface velocity vectors relative to the body with shape (Np, 3)
+        in m/s.
     cp : numpy.ndarray
         Pressure coefficients on panels with shape (Np,).
+
+    Notes
+    -----
+    Without body rates the flow is steady in the earth frame and the
+    Bernoulli equation gives ``Cp = 1 - |V_surf|^2 / V_inf^2``.
+
+    With body rates the flow is steady in the body frame (quasi-steady
+    rotation), but not in the earth frame. The unsteady Bernoulli equation
+    in the earth frame, ``p - p_inf = -rho (d(phi)/dt + |grad(phi)|^2 / 2)``,
+    applies to the perturbation potential phi (the air is at rest far
+    away). At a point fixed in the earth frame, ``d(phi)/dt = -v_b .
+    grad(phi)``, with ``v_b`` the velocity of the body point there. With
+    ``V_k = -v_b`` (the local onset velocity V_onset) and the velocity
+    relative to the body ``V_surf = V_k + grad(phi)``, the result is::
+
+        Cp = (|V_k|^2 - |V_surf|^2) / V_inf^2.
+
+    Without rates ``|V_k| = V_inf`` and the two forms are the same; the
+    first form is kept in that case, so results without rates do not
+    change.
     """
     # Tangential component of onset flow: V_onset - (V_onset . n) * n
     v_norm = np.sum(V_onset * normals, axis=-1, keepdims=True)
@@ -1144,10 +1175,13 @@ def compute_surface_velocity_and_cp(
     V_surf = V_onset_t - grad_mu
 
     speed_sq = np.sum(V_surf**2, axis=-1)
-    if V_inf > 1.0e-12:
-        cp = 1.0 - speed_sq / (V_inf**2)
-    else:
+    if not V_inf > 1.0e-12:
         cp = np.zeros(V_onset.shape[0], dtype=float)
+    elif rates:
+        onset_sq = np.sum(np.asarray(V_onset) ** 2, axis=-1)
+        cp = (onset_sq - speed_sq) / (V_inf**2)
+    else:
+        cp = 1.0 - speed_sq / (V_inf**2)
 
     return V_surf, cp
 
@@ -1279,20 +1313,26 @@ def _condition_arrays(conditions):
     return coeffs, speed, rho, lift, drag
 
 
-def _surface_velocity_batch(onset, normals, gradient, speed):
+def _surface_velocity_batch(onset, normals, gradient, speed, rates=None):
     """Return velocity [m/s] (K, N, 3) and Cp [-] (K, N).
 
     Onset and gradient have shape (K, N, 3) in m/s. Normals have shape
-    (N, 3) [-]. Speed has shape (K,) in m/s. Use the single-panel formulas
-    of :func:`compute_surface_velocity_and_cp` for each condition.
+    (N, 3) [-]. Speed has shape (K,) in m/s; Cp is zero for a speed at or
+    below 1e-12 m/s. Rates has shape (K,) (bool), True for a condition with
+    a body rate, or None for no rates. Use the formulas of
+    :func:`compute_surface_velocity_and_cp` for each condition.
     """
     normal_speed = np.sum(onset * normals, axis=-1, keepdims=True)
     velocity = (onset - normal_speed * normals) - gradient
     valid = speed > 1e-12
+    speed_sq = np.sum(velocity**2, axis=-1)
     cp = np.zeros(velocity.shape[:2])
-    np.divide(np.sum(velocity**2, axis=-1), speed[:, None] ** 2,
-              out=cp, where=valid[:, None])
+    np.divide(speed_sq, speed[:, None] ** 2, out=cp, where=valid[:, None])
     cp = np.where(valid[:, None], 1.0 - cp, 0.0)
+    if rates is not None and np.any(rates & valid):
+        rows = np.flatnonzero(rates & valid)
+        onset_sq = np.sum(onset[rows] ** 2, axis=-1)
+        cp[rows] = (onset_sq - speed_sq[rows]) / speed[rows, None] ** 2
     return velocity, cp
 
 

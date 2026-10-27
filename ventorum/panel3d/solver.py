@@ -91,7 +91,7 @@ import numpy as np
 import scipy.linalg
 import scipy.sparse.linalg
 
-from ventorum.aero.system import freestream_direction, rotation_velocity
+from ventorum.aero.system import freestream_direction, has_rates, rotation_velocity
 from ventorum.core.datatypes import FlightCondition
 from ventorum.core.errors import GroundStrikeError
 from ventorum.panel3d.images import (
@@ -1682,13 +1682,14 @@ class PanelSolver:
                 v_onset_full,
                 self._full_geom.normal,
                 v_inf,
+                has_rates(condition),
             )
         else:
             mu_body = unit_mu @ coeffs
             sigma_body = self._unit_sigma @ coeffs
             grad_full = np.einsum("k,nkd->nd", coeffs, cfg.unit_grad)
             v_surf_full, cp_full = compute_surface_velocity_and_cp(
-                v_onset_full, self._full_geom.normal, grad_full, v_inf
+                v_onset_full, self._full_geom.normal, grad_full, v_inf, has_rates(condition)
             )
 
         forces = integrate_forces_and_moments(
@@ -1811,7 +1812,10 @@ class PanelSolver:
             onset = coeffs[:, None, :3] - np.cross(
                 omega[:, None, :], self._full_geom.centroid - self.ref_point,
             )
-            velocity, cp = _surface_velocity_batch(onset, self._full_geom.normal, gradient, speed)
+            rates = np.any(coeffs[:, 3:] != 0.0, axis=1)
+            velocity, cp = _surface_velocity_batch(
+                onset, self._full_geom.normal, gradient, speed, rates,
+            )
             forces = _integrate_batch(
                 cp, self._full_geom, speed, rho, lift, drag,
                 self.S_ref, self.b_ref, self.c_ref, self.ref_point,
@@ -1911,6 +1915,7 @@ class PanelSolver:
             self._full_geom.normal,
             v_onset_full,
             v_inf,
+            rates=has_rates(condition),
         )
         mu_solve = mu_solve0 + z_solve @ kres.delta
         mu_full = kres.mu_full
@@ -1926,7 +1931,7 @@ class PanelSolver:
 
         grad_full = surface_gradient(self._grad_op, mu_full)
         v_surf_full, cp_full = compute_surface_velocity_and_cp(
-            v_onset_full, self._full_geom.normal, grad_full, v_inf
+            v_onset_full, self._full_geom.normal, grad_full, v_inf, has_rates(condition)
         )
         forces = integrate_forces_and_moments(
             cp=cp_full,
