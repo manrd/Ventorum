@@ -29,7 +29,7 @@ from ventorum.panel3d.mesh import (
 #: Keys that the two implementations must return equal bit for bit.
 BOOL_KEYS = ("watertight", "orientation_consistent", "outward", "planar", "valid_panels")
 ARRAY_BOOL_KEYS = ("convex", "folded")
-COUNT_KEYS = ("n_folded", "n_nonconvex", "n_open_edges")
+COUNT_KEYS = ("n_folded", "n_nonconvex", "n_open_edges", "n_self_intersections")
 #: Keys that the two implementations must return equal to round-off.
 FLOAT_SCALAR_KEYS = ("volume", "min_area", "max_aspect_ratio", "max_skew", "max_warp")
 FLOAT_ARRAY_KEYS = ("aspect_ratio", "skew", "warp")

@@ -160,7 +160,7 @@ _NODE_METADATA = ("node_station",)
 _GEOMETRY_HELPERS = (
     "_build_geometry", "mesh_lifting_surface", "check_mesh", "_surface_strip_maps", "_assign_strips",
     "_strip_metadata", "_combined_metadata", "_sorted_sections", "_surface_eta", "resolve_spacing",
-    "surface_reference_line", "_AirfoilBlender", "airfoil_linear_properties",
+    "surface_reference_line", "_AirfoilBlender", "airfoil_linear_properties", "_check_self_intersection",
 )
 
 
@@ -758,6 +758,46 @@ def _check_surface_contact(mesh: PanelMesh, names: list[str]) -> None:
     )
 
 
+def _check_self_intersection(mesh_stats: dict, names: list[str]) -> None:
+    """Refuse a panel mesh where a closed surface passes through itself or its mirror image.
+
+    The key ``n_self_intersections`` of
+    :func:`ventorum.panel3d.mesh.check_mesh` counts the panel edges that
+    cross a panel of the same surface (or of its mirror image in y = 0)
+    with which they share no node. A symmetric wing with steep dihedral and
+    ``scale_root_thickness=False`` can give such a mesh: stations near the
+    root put the upper surface nodes past the plane of symmetry, so the two
+    halves pass through each other. The fold test of neighbour station rows
+    does not find this. The lift of such a mesh does not converge with the
+    spanwise panel count.
+
+    Parameters
+    ----------
+    mesh_stats : dict
+        Output of :func:`ventorum.panel3d.mesh.check_mesh`.
+    names : list of str
+        Surface name of each component index.
+
+    Raises
+    ------
+    ValueError
+        If a surface intersects itself or its mirror image. The message
+        names the surface.
+    """
+    n_x = int(mesh_stats.get("n_self_intersections", 0) or 0)
+    if n_x == 0:
+        return
+    comps = list(mesh_stats.get("self_intersecting_components", []))
+    shown = ", ".join(f"'{names[c]}'" for c in comps) if comps else "a surface"
+    raise ValueError(
+        f"3D panel surface {shown} intersects itself or its mirror image (plane of symmetry y = 0): "
+        f"{n_x} panel edges cross panels of the same closed surface. The influence matrix of such a "
+        "mesh is not valid and the loads can be wrong by orders of magnitude. Use "
+        "panel_scale_root_thickness=True (scale_root_thickness=True, the default), or change the "
+        "spanwise panel count or the dihedral."
+    )
+
+
 def _build_geometry(
     ac: Aircraft,
     settings: SolverSettings,
@@ -803,7 +843,8 @@ def _build_geometry(
     ------
     ValueError
         If two distinct closed surfaces touch or pass through each other
-        (see :func:`_check_surface_contact`).
+        (see :func:`_check_surface_contact`), or if a surface intersects
+        itself or its mirror image (see :func:`_check_self_intersection`).
     """
     # 2. Build panel mesh and track strip-to-panel associations
     node_parts = []
@@ -911,6 +952,7 @@ def _build_geometry(
     # 3. Check mesh quality
     _check_surface_contact(mesh, [surf.name for surf in ac.surfaces])
     mesh_stats = check_mesh(mesh)
+    _check_self_intersection(mesh_stats, [surf.name for surf in ac.surfaces])
     mesh_stats["root_scale_warning"] = bool(getattr(mesh, "root_scale_warning", False))
     return CachedGeometry(
         mesh=mesh,

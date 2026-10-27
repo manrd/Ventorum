@@ -383,8 +383,9 @@ def panel3d_mesh_checks(
     * ``mesh_adequacy`` (needs *mesh_stats*): the shape and the validity of
       the panels. A percentile (the median) of the panel aspect ratio and of
       the panel skew, not the largest value; the largest warp; a mesh that is not
-      watertight, and panels that are not convex (a folded strip). The
-      penalties add.
+      watertight, panels that are not convex (a folded strip), and a surface
+      that intersects itself or its mirror image (``n_self_intersections``,
+      same penalty as the folded panels). The penalties add.
     * ``mesh_resolution``: the discretization-error indicators. The relative
       difference of the near-field pressure drag and the far-field Trefftz
       induced drag, and the chordwise panel count when it is given. Each
@@ -452,6 +453,19 @@ def panel3d_mesh_checks(
             recommendations.append(
                 "Change the spanwise panel count or spacing so that no strip folds (for example a "
                 "root strip narrower than the section thickness on a wing with dihedral)."
+            )
+        n_self_x = int(mesh_stats.get("n_self_intersections", 0) or 0)
+        if n_self_x > 0:
+            mesh_pen += PANEL3D_PENALTY_NONCONVEX
+            warnings.append(
+                f"Self-intersecting surface: {n_self_x} panel edges cross panels of the same closed "
+                "surface or of its mirror image. A surface that passes through itself makes the result "
+                "not valid."
+            )
+            recommendations.append(
+                "Use the root thickness scaling (panel_scale_root_thickness=True, the default), or change "
+                "the spanwise panel count or the dihedral, so that the surface does not pass through "
+                "itself or its mirror image."
             )
         if bool(mesh_stats.get("root_scale_warning", False)):
             warnings.append(PANEL3D_ROOT_SCALE_WARNING)
