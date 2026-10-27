@@ -438,7 +438,9 @@ class VortexLattice:
     geom_cache: dict = field(default_factory=dict, repr=False, compare=False)
     control_info: list[dict] = field(default_factory=list)
     # Warnings that build_lattice issues about the mesh (a hinge that snaps
-    # to a node, a hinge that moves a node of a cambered strip). The lattice
+    # to a node, a hinge that moves a node of a cambered strip, a mean line
+    # that does not match the polar alpha_L0, a section shape that the
+    # lifting line does not use). The lattice
     # cache issues them again when it returns a cached lattice, and the
     # solvers give them to the trust score as notes.
     mesh_warnings: list[str] = field(default_factory=list)
@@ -1267,15 +1269,26 @@ def build_lattice(
             camber_warnings.append(
                 f"camber of surface {surf.name} modelled by a turned normal: not every section gives a mean line"
             )
+        if collocation == "llt" and any(supplied):
+            # The lifting line has no chordwise mesh: it takes alpha_L0, the
+            # lift slope, Cd0 and Cm0 from the section polar, never from the
+            # shape. The note goes to the trust warnings (no penalty).
+            mesh_warnings.append(
+                f"[{surf.name}] the sections give an airfoil shape, but the lifting line does not use it: "
+                "the lifting line uses the section polar only (WingSection.airfoil: alpha_L0, lift slope, "
+                "Cd0, Cm0). Give each section a polar that matches its shape, or use the VLM."
+            )
+            warnings.warn(mesh_warnings[-1], RuntimeWarning, stacklevel=2)
         use_mean_line = collocation == "vlm" and n_chord > 1 and all(supplied)
         lines = [_MeanLine(sec.shape) if use_mean_line else None for sec in secs]
         for sec, line in zip(secs, lines):
             if line is not None and abs(line.alpha_l0() - sec.airfoil.alpha_L0) > np.radians(0.5):
-                warnings.warn(
+                # The warning is also a note of the trust score (no penalty).
+                mesh_warnings.append(
                     f"[{surf.name}] section at eta={sec.y_frac:g}: mean line and polar alpha_L0 "
-                    "differ by more than 0.5 deg. The mean line sets the VLM boundary condition.",
-                    RuntimeWarning, stacklevel=2,
+                    "differ by more than 0.5 deg. The mean line sets the VLM boundary condition."
                 )
+                warnings.warn(mesh_warnings[-1], RuntimeWarning, stacklevel=2)
         mean_surfaces.append((secs, lines, eta_e))
         geo = surface_edge_geometry(surf, eta_e)
         d = getattr(surf, "node_displacements", None)
