@@ -105,7 +105,7 @@ from ventorum.aero.loads import compute_loads
 from ventorum.core.constants import MU_SL
 from ventorum.aero.polar_table import PolarTable, source_supports_ground
 from ventorum.aero.polars import blend_tabulated
-from ventorum.aero.system import GroundPlane, UnknownMap, has_rates
+from ventorum.aero.system import GroundPlane, UnknownMap, freestream_direction, has_rates
 from ventorum.core.datatypes import (
     Aircraft,
     FlightCondition,
@@ -706,27 +706,88 @@ def _thin_airfoil_zero_lift(
     return out
 
 
+def _strip_span_axes(lattice: VortexLattice, strips: np.ndarray) -> np.ndarray:
+    """Return the unit span axis ``n x c`` [-] of each strip, shape (n_strips, 3).
+
+    The axis is normal to the section plane of the strip: the plane of its
+    chord direction ``c`` and its normal ``n``. The 2D section relation of
+    the strip and the section cut of the panel coupling use this plane. An
+    axis within 1e-12 of +y is set to +y exactly, so a planar strip keeps
+    the arithmetic of the global angle of attack.
+    """
+    axes = np.cross(lattice.normal[strips], lattice.chord_dir[strips])
+    axes = axes / np.linalg.norm(axes, axis=1)[:, None]
+    planar = (np.abs(axes[:, 0]) < 1e-12) & (np.abs(axes[:, 2]) < 1e-12) & (axes[:, 1] > 0.0)
+    axes[planar] = (0.0, 1.0, 0.0)
+    return axes
+
+
+def _section_onset_derivative(direction: np.ndarray, axes: np.ndarray) -> np.ndarray:
+    """Return the change of the onset direction per unit section angle [1/rad].
+
+    The section angle of a strip is the angle of the onset in its section
+    plane, measured from the chord towards the strip normal. A change of
+    this angle turns the in-plane part of the onset ``d_p = d - (d . e) e``
+    about the span axis ``e``. Thus the onset changes by ``d_p x e`` per
+    radian. The spanwise part of the onset does not change. For a planar
+    strip (``e`` = +y) this is the derivative of the free-stream direction
+    with respect to the angle of attack,
+    ``cos(beta) [-sin(alpha), 0, cos(alpha)]``.
+
+    Parameters
+    ----------
+    direction : numpy.ndarray
+        Unit free-stream direction [-], shape (3,).
+    axes : numpy.ndarray
+        Unit span axes of the strips [-], shape (n_strips, 3).
+
+    Returns
+    -------
+    numpy.ndarray
+        Onset change per unit section angle [1/rad], shape (n_strips, 3).
+        Its norm is the in-plane part of the unit onset; it is parallel to
+        the section lift direction.
+    """
+    direction = np.asarray(direction, dtype=float)
+    in_plane = direction[None, :] - (axes @ direction)[:, None] * axes
+    return np.cross(in_plane, axes)
+
+
 def _rhs_derivative(
     lattice: VortexLattice,
     model: str,
     umap: UnknownMap,
     V_inf: float,
-    u_alpha: np.ndarray,
+    u_strip: np.ndarray,
     strips: np.ndarray,
 ) -> np.ndarray:
     """Return the right-hand-side change per unit correction of each strip.
 
-    A correction ``delta_s`` lowers the angle of strip s: the onset direction
-    of its boundary condition becomes ``d(alpha - delta_s)``. The columns are
-    ``d rhs / d delta_s``, shape (n_unknowns, n_strips).
+    A correction ``delta_s`` lowers the section angle of strip s: the
+    in-plane onset of its boundary condition turns about the strip span
+    axis by ``-delta_s``. The onset changes by ``-delta_s u_s``, with
+    ``u_s`` from :func:`_section_onset_derivative` (one row per strip of
+    *strips*, [1/rad]; a single vector applies to all strips). The columns
+    are ``d rhs / d delta_s``, shape (n_unknowns, n_strips).
     """
+    u_strip = np.atleast_2d(np.asarray(u_strip, dtype=float))
+    unk_strip = lattice.panel_strip[umap.unknown_panels]
     if model == "vlm":
         n_vec = lattice.normal_bc[umap.unknown_panels]
-        w = V_inf * (n_vec @ u_alpha)
+        sign = 1.0
     else:
-        sd = _llt_strip_data(lattice, umap)
-        w = -V_inf * (sd["normal"] @ u_alpha)
-    unk_strip = lattice.panel_strip[umap.unknown_panels]
+        n_vec = _llt_strip_data(lattice, umap)["normal"]
+        sign = -1.0
+    if np.all(u_strip == u_strip[0]):
+        # One onset change for all strips (a planar configuration).
+        w = sign * V_inf * (n_vec @ u_strip[0])
+    else:
+        col_of = np.full(lattice.n_strips, -1)
+        col_of[strips] = np.arange(len(strips))
+        cols = col_of[unk_strip]
+        w = np.zeros(len(unk_strip))
+        own = cols >= 0
+        w[own] = sign * V_inf * np.sum(n_vec[own] * u_strip[cols[own]], axis=1)
     B = np.zeros((umap.n, len(strips)))
     for col, s in enumerate(strips):
         mask = unk_strip == s
@@ -803,11 +864,12 @@ def _solve_condition(
         else:
             A, rhs0, umap, _ = _assemble_llt_linear(lattice, condition, ground, use_sym, wd, ref_point)
         lu, factorized = fact.get(A)
-        ca, sa = np.cos(condition.alpha), np.sin(condition.alpha)
-        cb = np.cos(condition.beta)
-        u_alpha = np.array([-sa * cb, 0.0, ca * cb])
         strips = np.flatnonzero(lattice.strip_is_right) if umap.symmetric else np.arange(lattice.n_strips)
-        B = _rhs_derivative(lattice, model, umap, V_inf, u_alpha, strips)
+        # The correction turns the onset in the section plane of each strip.
+        u_strip = _section_onset_derivative(
+            freestream_direction(condition.alpha, condition.beta), _strip_span_axes(lattice, strips),
+        )
+        B = _rhs_derivative(lattice, model, umap, V_inf, u_strip, strips)
         G = scipy.linalg.lu_solve(lu, B)
         gamma0 = scipy.linalg.lu_solve(lu, rhs0)
 
@@ -1315,7 +1377,11 @@ class _PanelCoupling:
         )
         self.owner = np.empty(len(col), dtype=int)
         self.owner[col] = row
-        solver._set_viscous_strips(self.maps)
+        # Span axes of the reporting sections. A strip whose axis is not +y
+        # (dihedral, fin) needs the y onset response of its panels.
+        self.axes = _strip_span_axes(self.lattice, self.strips)
+        self.lateral = bool(np.any(self.axes != np.array([0.0, 1.0, 0.0])))
+        solver._set_viscous_strips(self.maps, lateral=self.lateral)
         solver._viscous_evaluator = self.evaluate
 
     def full(self, values):
@@ -1344,7 +1410,14 @@ class _PanelCoupling:
         coeffs = solver._condition_coeffs(condition)
         mu0 = cfg.unit_mu @ coeffs
         mu_full0 = solver._reconstruct_full_mu(cfg.unit_mu, coeffs)
-        g = solver._viscous_response(cfg, condition)
+        if self.lateral:
+            # Section onset change and section lift direction of each strip.
+            u_strip = _section_onset_derivative(freestream_direction(condition.alpha, condition.beta), self.axes)
+            norm = np.linalg.norm(u_strip, axis=1)
+            lift_strip = u_strip / np.where(norm > 1e-12, norm, np.inf)[:, None]
+        else:
+            u_strip = lift_strip = None
+        g = solver._viscous_response(cfg, condition, u_strip)
         gf = np.vstack([g, g]) if solver.mesh.half else g
         if solver.kutta == "pressure":
             z, zf, up, lo, expand = solver._viscous_pressure_response(cfg, coeffs)
@@ -1356,19 +1429,31 @@ class _PanelCoupling:
         response = np.column_stack([g, z])
         response_full = np.column_stack([gf, zf])
         dv = -surface_gradient(solver._grad_op, response_full)
-        ua = np.cos(condition.beta) * np.array([-np.sin(condition.alpha), 0, np.cos(condition.alpha)])
-        onset_delta = -speed * ua
         normal = solver._full_geom.normal
-        tangential = onset_delta - (normal @ onset_delta)[:, None] * normal
         owners = np.tile(self.owner, 2) if solver.mesh.half else self.owner
+        if self.lateral:
+            onset_delta = -speed * u_strip[owners]
+            if solver.mesh.half:
+                # The mirrored panels have the mirrored onset change.
+                onset_delta[n:, 1] *= -1.0
+            tangential = onset_delta - np.sum(normal * onset_delta, axis=1)[:, None] * normal
+            # Strip lift along the section lift direction: in the section
+            # plane, normal to the in-plane onset (the 2D section reference).
+            weights = -solver.areas * np.sum(solver.normals * lift_strip[self.owner], axis=1)
+            source_rate = speed * np.sum(solver.normals * u_strip[self.owner], axis=1)
+        else:
+            ua = np.cos(condition.beta) * np.array([-np.sin(condition.alpha), 0, np.cos(condition.alpha)])
+            onset_delta = -speed * ua
+            tangential = onset_delta - (normal @ onset_delta)[:, None] * normal
+            lift_axis = np.array([-np.sin(condition.alpha), 0, np.cos(condition.alpha)])
+            weights = -solver.areas * (solver.normals @ lift_axis)
+            source_rate = speed * (solver.normals @ ua)
         dv[np.arange(len(owners)), :, owners] += tangential
         onset = solver._condition_velocity(condition, solver._full_geom.centroid)
         velocity0, _ = compute_surface_velocity_and_cp(
             onset, normal, surface_gradient(solver._grad_op, mu_full0), speed,
         )
         onset_sq = np.sum(onset**2, axis=1) if has_rates(condition) else None
-        lift_axis = np.array([-np.sin(condition.alpha), 0, np.cos(condition.alpha)])
-        weights = -solver.areas * (solver.normals @ lift_axis)
         ground = None if cfg.ground is None else GroundPlane(*cfg.ground)
         polars, uses_height, h_over_c = self.resolver.resolve(self.lattice, self.strips, condition, ground)
         slope, zero, moment = self.slope, self.zero, self.moment
@@ -1439,7 +1524,7 @@ class _PanelCoupling:
             wake = muf[cfg.full_wake.wake_up] - muf[cfg.full_wake.wake_lo]
             if solver.kutta == "pressure":
                 wake += expand(state["x"][ns:])
-            sigma = solver._unit_sigma @ coeffs + speed * (solver.normals @ ua) * state["x"][:ns][self.owner]
+            sigma = solver._unit_sigma @ coeffs + source_rate * state["x"][:ns][self.owner]
             return PanelResult(
                 CL=force["CL"], CD_pressure=force["CD_pressure"], CY=force["CY"],
                 Cl=force["Cl"], Cm=force["Cm"], Cn=force["Cn"],

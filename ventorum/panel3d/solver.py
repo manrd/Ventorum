@@ -625,6 +625,7 @@ class PanelSolver:
         self._factors_dropped = 0
         self._configurations_evicted = 0
         self._viscous_strips = None
+        self._viscous_components = (0, 2)
         self._viscous_evaluator = None
         self._viscous_solve_count = 0
         self._viscous_rhs_count = 0
@@ -710,7 +711,8 @@ class PanelSolver:
         host = incoming[0] + sum(size[0] for _, size in pool)
         if self._viscous_strips is not None:
             # The free-air source sums belong to the shared body geometry.
-            host += sum(a[:, -2 * len(self._viscous_strips):].nbytes
+            columns = len(self._viscous_components) * len(self._viscous_strips)
+            host += sum(a[:, -columns:].nbytes
                         for key, a in (self._body_parts or {}).items() if key.startswith("rhs_"))
         device = incoming[1] + sum(size[1] for _, size in pool)
         for cfg, size in sorted(pool, key=lambda item: item[0].factor_use):
@@ -849,8 +851,14 @@ class PanelSolver:
             )
         return pair_system(self.centroids, panels_a, panels_b, sign, sigma, far_ratio=self.far_ratio)
 
-    def _set_viscous_strips(self, strips) -> None:
-        """Enable strip source sums before assembly (panel indices, no units)."""
+    def _set_viscous_strips(self, strips, lateral: bool = False) -> None:
+        """Enable strip source sums before assembly (panel indices, no units).
+
+        The strip source sums hold the x and z unit onsets. With *lateral*
+        they also hold the y unit onset, for strips whose span axis is not
+        the y axis (dihedral, fins): their section angle turns the onset
+        about another axis.
+        """
         if self.backend == "gpu":
             raise ValueError("Viscous panel coupling requires a CPU backend; GPU is not supported.")
         if self.ground_solver == "krylov":
@@ -861,13 +869,15 @@ class PanelSolver:
         if not maps or not np.array_equal(np.sort(np.concatenate(maps)), np.arange(len(self.centroids))):
             raise ValueError("Viscous strips must partition every body panel exactly once.")
         self._viscous_strips = maps
+        self._viscous_components = (0, 2, 1) if lateral else (0, 2)
 
     def _viscous_pair_system(self, panels_a, panels_b, sign, sigma):
         """Accumulate unit and strip source sums from each bounded kernel chunk.
 
         Each source/doublet pair is evaluated once. The source matrix is
-        discarded after its target chunk. The two strip columns hold the
-        x and z unit source sums (m^2/s per unit onset).
+        discarded after its target chunk. The strip column blocks hold the
+        x, z and (for lateral strips) y unit source sums (m^2/s per unit
+        onset).
         """
         from ventorum.panel3d.kernels import _CHUNK_BUDGET
 
@@ -875,7 +885,8 @@ class PanelSolver:
         ns = len(self._viscous_strips)
         k = sigma.shape[1]
         matrix = np.empty((n, n))
-        rhs = np.empty((n, k + 2 * ns))
+        components = self._viscous_components
+        rhs = np.empty((n, k + len(components) * ns))
         size = max(1, _CHUNK_BUDGET // n)
         for start in range(0, n, size):
             stop = min(n, start + size)
@@ -888,21 +899,51 @@ class PanelSolver:
             matrix[start:stop] = c
             rhs[start:stop, :k] = b @ sigma
             for j, ids in enumerate(self._viscous_strips):
-                rhs[start:stop, k + j] = b[:, ids] @ self._unit_sigma[ids, 0]
-                rhs[start:stop, k + ns + j] = b[:, ids] @ self._unit_sigma[ids, 2]
+                for block, component in enumerate(components):
+                    rhs[start:stop, k + block * ns + j] = b[:, ids] @ self._unit_sigma[ids, component]
         return matrix, rhs
 
-    def _viscous_response(self, cfg, condition):
+    def _viscous_response(self, cfg, condition, directions=None):
         """Return body doublet sensitivity (m^2/s per rad) to strip corrections.
 
-        The source change is V n dot u_alpha. With U = -A^-1 R,
-        G = V (sin(alpha) U_x - cos(alpha) U_z). No angle needs an LU solve.
+        A correction of strip k changes the onset of its panels by
+        ``-V u_k``. The source change is ``V n dot u_k``. With
+        ``U = -A^-1 R`` per unit onset component,
+        ``G_k = -V (u_kx U_x + u_ky U_y + u_kz U_z)``. Without *directions*,
+        ``u_k = cos(beta) [-sin(alpha), 0, cos(alpha)]`` for every strip, so
+        ``G = V cos(beta) (sin(alpha) U_x - cos(alpha) U_z)``. No angle needs
+        an LU solve.
+
+        Parameters
+        ----------
+        cfg : _Configuration
+            Configuration with the strip responses ``viscous_units``.
+        condition : FlightCondition
+            Flight condition (speed V_inf [m/s], alpha and beta [rad]).
+        directions : numpy.ndarray or None
+            Onset change per unit strip angle ``u_k`` [1/rad], shape
+            (n_strips, 3). A y component needs lateral strip responses.
+
+        Returns
+        -------
+        numpy.ndarray
+            Doublet change per unit strip angle [m^2/s per rad], shape
+            (n_panels, n_strips).
         """
         ns = len(self._viscous_strips)
-        return float(condition.V_inf) * np.cos(condition.beta) * (
-            np.sin(condition.alpha) * cfg.viscous_units[:, :ns]
-            - np.cos(condition.alpha) * cfg.viscous_units[:, ns:]
-        )
+        units = cfg.viscous_units
+        if directions is None:
+            return float(condition.V_inf) * np.cos(condition.beta) * (
+                np.sin(condition.alpha) * units[:, :ns]
+                - np.cos(condition.alpha) * units[:, ns:2 * ns]
+            )
+        directions = np.asarray(directions, dtype=float)
+        response = units[:, :ns] * directions[:, 0] + units[:, ns:2 * ns] * directions[:, 2]
+        if len(self._viscous_components) > 2:
+            response = response + units[:, 2 * ns:3 * ns] * directions[:, 1]
+        elif np.any(directions[:, 1] != 0.0):
+            raise ValueError("Strip corrections with a y onset need lateral strip responses.")
+        return -float(condition.V_inf) * response
 
     def _viscous_pressure_response(self, cfg, coeffs):
         """Cache the wake response once per configuration (m^2/s per m^2/s)."""
@@ -1511,7 +1552,7 @@ class PanelSolver:
         incoming = (len(missing) * (n_panels * n_panels * itemsize + n_panels * 4)
                     if keep_factors else 0)
         if self._viscous_strips is not None:
-            incoming += n_panels * 2 * len(self._viscous_strips) * 8
+            incoming += n_panels * len(self._viscous_components) * len(self._viscous_strips) * 8
         self._trim_factors((0, incoming) if self.backend == "gpu" else (incoming, 0))
         self._check_gpu_memory(half, in_ground, len(missing), body_cached)
         has_wake = len(cfg.wake.panels) > 0
