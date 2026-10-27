@@ -21,6 +21,7 @@ from ventorum.aero.vortex import induced_velocity
 from ventorum.geometry.lattice import build_lattice
 from ventorum.reference import (
     circular_wing_cl_alpha,
+    elliptic_ground_drag_ratio,
     elliptic_wing_cl_alpha,
     glauert_monoplane,
     helmbold_cl_alpha,
@@ -78,16 +79,23 @@ def _sweep_warning(solver: str):
 # 1. Elliptic wing (Lanchester–Prandtl theory): e = 1 and CL_alpha = a0 / (1 + a0 / (pi AR))
 # ═══════════════════════════════════════════════════════════════════════════════
 
+# Tolerances (e, CL_alpha) per solver: about four times the measured
+# largest error over both a0 values (e: 1.2e-5, 1.2e-5, 1.6e-6;
+# CL_alpha: 4.2e-4, 2.3e-4, 1.9e-5).
+_PRANDTL_TOL = {"linear": (5e-5, 1.5e-3), "nonlinear": (5e-5, 1e-3), "fourier": (6e-6, 8e-5)}
+
+
 @pytest.mark.parametrize("solver", ["linear", "nonlinear", "fourier"])
 @pytest.mark.parametrize("a0_factor", [1.0, 0.9])
 def test_elliptic_wing_lifting_line_matches_prandtl(solver, a0_factor):
+    tol_e, tol_cla = _PRANDTL_TOL[solver]
     a0 = a0_factor * 2.0 * np.pi
     ac = _elliptic(8.0, airfoil=vt.LinearAirfoil(a0=a0))
     alpha = np.radians(2.0)
     res = vt.analyze(ac, alpha_deg=2.0, solver=solver, n_panels=40)
     cla = res.totals.CL / alpha
-    assert abs(res.totals.e - 1.0) < 0.005
-    assert abs(cla / elliptic_wing_cl_alpha(_ar(ac), a0) - 1.0) < 0.005
+    assert abs(res.totals.e - 1.0) < tol_e
+    assert abs(cla / elliptic_wing_cl_alpha(_ar(ac), a0) - 1.0) < tol_cla
 
 
 def test_elliptic_wing_vlm_has_elliptic_loading():
@@ -108,10 +116,12 @@ def test_lifting_line_matches_glauert_monoplane(AR, taper):
     alpha = np.radians(2.0)
     four = vt.analyze(ac, alpha_deg=2.0, solver="fourier", n_panels=60).totals
     ps = vt.analyze(ac, alpha_deg=2.0, solver="linear", n_panels=40).totals
-    assert abs(four.CL / alpha / cla_ref - 1.0) < 1e-3
-    assert abs(four.e / e_ref - 1.0) < 1e-3
+    # Tolerances: about four times the largest measured error of the nine
+    # cases (Fourier CL_alpha 1.3e-4, e 7.8e-5; lifting line 2.6e-4, 5.3e-4).
+    assert abs(four.CL / alpha / cla_ref - 1.0) < 5e-4
+    assert abs(four.e / e_ref - 1.0) < 3e-4
     # The Phillips & Snyder system is linear in sin(alpha).
-    assert abs(ps.CL / np.sin(alpha) / cla_ref - 1.0) < 2e-3
+    assert abs(ps.CL / np.sin(alpha) / cla_ref - 1.0) < 1e-3
     assert abs(ps.e / e_ref - 1.0) < 2e-3
 
 
@@ -128,7 +138,9 @@ def test_vlm_circular_wing_matches_kinner():
     sett = vt.SolverSettings(solver_type="vlm", n_panels=30, n_chord=16, wake_alignment="body")
     res = vt.analyze(ac, settings=sett, alpha_deg=0.5)
     cla = res.totals.CL / np.sin(np.radians(0.5))
-    assert abs(cla / circular_wing_cl_alpha() - 1.0) < 0.002
+    # Measured: -5.2e-5. The reference value 1.790 has four digits (rounding
+    # up to 2.8e-4), so the tolerance is about four times the rounding.
+    assert abs(cla / circular_wing_cl_alpha() - 1.0) < 1e-3
 
 
 @pytest.mark.parametrize("AR", [1.0, 2.0, 6.0, 20.0])
@@ -243,7 +255,7 @@ def test_dihedral_gives_negative_cl_beta_and_is_antisymmetric():
     # has a Cl_beta of its own, from the force on the on-surface chordwise legs.)
     d_pos, d_neg = clb_pos - clb_0, clb_neg - clb_0
     assert d_pos < 0.0 < d_neg
-    assert abs(d_pos + d_neg) < 2e-2 * abs(d_pos)
+    assert abs(d_pos + d_neg) < 1e-2 * abs(d_pos)  # measured 3.1e-3
     # The lifting line has forces on the bound vortex only: no flat-wing term with a body-axis wake.
     assert abs(_derivs(wing(0.0), wake="body", solver="linear")[0]) < 1e-10
     for solver in ("vlm", "linear"):
@@ -267,10 +279,10 @@ def test_leg_forces_converge_and_close_the_drag_balance():
         t = [vt.analyze(ac, condition=vt.FlightCondition(alpha=np.radians(5.0), beta=np.radians(b)), settings=sett).totals
              for b in (-2.0, 2.0)]
         clb.append((t[1].Cl - t[0].Cl) / np.radians(4.0))
-    assert abs(clb[1] / clb[0] - 1.0) < 0.02
+    assert abs(clb[1] / clb[0] - 1.0) < 3e-3  # measured 8.0e-4
     t = vt.analyze(ac, condition=vt.FlightCondition(alpha=np.radians(5.0), beta=np.radians(5.0)),
                     settings=vt.SolverSettings(solver_type="vlm", n_panels=20, n_chord=4)).totals
-    assert abs(t.CDi_nearfield / t.CDi - 1.0) < 0.01
+    assert abs(t.CDi_nearfield / t.CDi - 1.0) < 5e-3  # measured -1.3e-3
 
 
 def test_aft_fin_gives_weathercock_stability():
@@ -335,11 +347,12 @@ def test_mesh_convergence_and_smooth_circulation(solver, spacing):
             assert _monotone_half(g), f"oscillating circulation at n={n}"
     cl80, cl160 = out[80].totals.CL, out[160].totals.CL
     e80, e160 = out[80].totals.e, out[160].totals.e
-    assert abs(cl80 / cl160 - 1.0) < 1e-3
-    assert abs(e80 / e160 - 1.0) < 1e-3
+    # Measured over the six cases: CL 1.1e-5, e 2.1e-5; condition number 1.05e4.
+    assert abs(cl80 / cl160 - 1.0) < 1e-4
+    assert abs(e80 / e160 - 1.0) < 1e-4
     cond = np.linalg.cond(assemble_system_matrix(w, vt.FlightCondition(alpha=np.radians(5.0)),
                                                  vt.SolverSettings(solver_type=solver, n_panels=160, spacing=spacing)))
-    assert cond < 1e6
+    assert cond < 5e4
 
 
 @pytest.mark.parametrize("sweep_deg", [0.0, 30.0, 45.0])
@@ -348,7 +361,7 @@ def test_vlm_converges_for_swept_wings(sweep_deg):
                            sections=[vt.WingSection(0, 1.0), vt.WingSection(1, 1.0)])
     cl = [vt.analyze(w, settings=vt.SolverSettings(solver_type="vlm", n_panels=n, n_chord=1), alpha_deg=2.0).totals.CL
           for n in (20, 80)]
-    assert abs(cl[0] / cl[1] - 1.0) < 1e-3
+    assert abs(cl[0] / cl[1] - 1.0) < 3e-4  # measured 2.7e-5, 7.7e-5, 7.1e-5
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -399,8 +412,36 @@ def test_ground_effect_recovers_free_air_far_from_ground():
     sett = vt.SolverSettings(n_panels=16, n_chord=4)
     free = vt.analyze(w, settings=sett, alpha_deg=4.0).totals
     far = vt.analyze_ground_effect(w, h=1.0e4, alpha_deg=4.0, settings=sett, compute_strike_limit=False)
-    assert abs(far.CL / free.CL - 1.0) < 1e-4
-    assert abs(far.CDi / free.CDi - 1.0) < 1e-3
+    # The remaining image effect at h = 1e4 c (h/b = 1667) is physical:
+    # 1 - k_GE / k_free = (b/h)^2 / 32 = 1.1e-8 for an elliptic loading.
+    # Measured: CL +2.2e-9, CDi -6.4e-9.
+    assert abs(far.CL / free.CL - 1.0) < 1e-8
+    assert abs(far.CDi / free.CDi - 1.0) < 3e-8
+
+
+@pytest.mark.parametrize("AR,tol", [(10.0, 2.5e-3), (6.0, 6e-3)])
+def test_vlm_ground_effect_drag_matches_image_trefftz_theory(AR, tol):
+    """Induced-drag ratio k_GE / k_free of an elliptic wing against the
+    Trefftz-plane image theory of an elliptic loading (Wieselsberger 1921;
+    exact evaluation in ventorum.reference.ground_effect).
+
+    The wing is planar and parallel to the ground (alpha = 0, alpha_L0 = -1 deg),
+    so the lattice and the wake are at the given height. The reference holds
+    for an elliptic loading. Near the ground the loading departs from elliptic:
+    the measured difference (n_panels 40, n_chord 6; the same to 1e-5 with
+    80 and 12) is, at h/b = 0.5, 0.3, 0.2: AR 10 +0.055 %, +0.060 %, -0.070 %;
+    AR 6 +0.096 %, +0.154 %, +0.083 %. At h/b = 0.1 it is -1.2 % (AR 10), thus
+    the test stops at h/b = 0.2. The tolerance is about four times the largest
+    measured difference."""
+    ac = _elliptic(AR, airfoil=vt.LinearAirfoil(alpha_L0=np.radians(-1.0)))
+    sett = vt.SolverSettings(solver_type="vlm", n_panels=40, n_chord=6)
+    free = vt.analyze(ac, settings=sett, alpha_deg=0.0).totals
+    k_free = free.CDi / free.CL ** 2
+    for h_over_b in (0.5, 0.3, 0.2):
+        g = vt.analyze_ground_effect(ac, h=h_over_b * ac.b_ref, alpha_deg=0.0, height_ref="qc",
+                                     settings=sett, compute_strike_limit=False)
+        ratio = g.CDi / g.CL ** 2 / k_free
+        assert abs(ratio / elliptic_ground_drag_ratio(h_over_b) - 1.0) < tol
 
 
 def test_ground_effect_bank_moment_is_restoring_and_limits_are_enforced():
