@@ -196,8 +196,8 @@ viscous polar, a prescribed thin-airfoil slope, or a finite-span substitute.
 Two unit onsets share one section factorization. Section factorizations
 are separate from the 3D body factorization count.
 
-Surface gradients use adjacent panel values and inverse-distance node
-interpolation. The upper and lower trailing-edge connections are cut.
+Surface gradients use adjacent panel values and least-squares node
+values. The upper and lower trailing-edge connections are cut.
 The same two unit responses give the inviscid section moment as a
 quadratic in the sine and cosine of the section angle. If a polar has a
 ground-height axis, the section reference includes the corresponding

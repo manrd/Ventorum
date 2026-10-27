@@ -10,17 +10,20 @@ Surface gradient
 The solver uses :func:`build_surface_gradient_operator`, a sparse matrix
 built once per mesh, so the gradient of any doublet vector is one sparse
 product. On a panel whose corner nodes all lie inside the surface, the
-doublet values are first interpolated to the corner nodes with inverse
-distance weights (Shepard 1968), and the gradient follows from the node
-values with the Green-Gauss theorem on the panel polygon (Blazek 2015,
-chapter 5). The node values smooth the doublet error of the thin
-triangle fans at the poles of latitude-longitude meshes, where the
-edge-neighbour fit is weak. On a panel with a corner on a wake shedding
-edge or on a mesh border, a node mean would sit about half a panel away
-from the node, and a node mean is blind to a spanwise saw-tooth of the
-trailing-edge doublets; these panels use the edge-neighbour least-squares
-fit of :func:`compute_surface_gradient`, anchored at the panel value. No
-step differentiates across the doublet jump of the wake.
+doublet values are first reconstructed at the corner nodes with a
+least-squares linear fit in the node tangent plane, and the gradient
+follows from the node values with the Green-Gauss theorem on the panel
+polygon (Blazek 2015, chapter 5). The node values are exact for a field
+that is linear in the tangent plane, also at irregular nodes (three
+panels at a node, planform kinks, cosine end strips). On a panel with a
+corner on a wake shedding edge or on a mesh border, a node value would
+sit about half a panel away from the node, and a node value is blind to
+a spanwise saw-tooth of the trailing-edge doublets; these panels use the
+edge-neighbour least-squares fit of :func:`compute_surface_gradient`,
+anchored at the panel value. No step differentiates across the doublet
+jump of the wake. The previous operator (inverse-distance node values,
+Shepard 1968) is kept for comparison in
+``_build_surface_gradient_operator_shepard``.
 
 Published sources
 -----------------
@@ -33,8 +36,8 @@ Published sources
   irregularly-spaced data, Proceedings of the 23rd ACM National Conference,
   pp. 517-524 (inverse distance weights).
 * Blazek, J., 2015, Computational Fluid Dynamics: Principles and
-  Applications, 3rd ed., Butterworth-Heinemann, chapter 5 (Green-Gauss
-  gradient).
+  Applications, 3rd ed., Butterworth-Heinemann, chapter 5 (least-squares
+  and Green-Gauss gradients).
 
 Conventions
 -----------
@@ -501,6 +504,106 @@ def _stencil_pinv(dr_t: np.ndarray, row_only: np.ndarray | bool) -> np.ndarray:
     return np.matmul(np.swapaxes(vt, -1, -2), s[..., None] * np.swapaxes(u, -1, -2))
 
 
+#: Largest magnitude of a least-squares node weight [-]. A node with a larger
+#: weight keeps the inverse-distance weights (a node far outside its panel
+#: centroids). This is a method choice, not a tuned value.
+NODE_WEIGHT_LIMIT = 2.0
+
+
+def _linear_node_weights(dd: np.ndarray, nrm: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Return the least-squares linear node weights of panel groups.
+
+    The node value is the value at the node of the least-squares fit
+    ``mu_j = a + b . d_j`` over the group, with ``d_j`` the displacement
+    from the node to the centroid of panel ``j`` projected on the node
+    tangent plane (least-squares reconstruction, Blazek 2015, chapter 5).
+    The node normal is the normalized sum of the group normals. The
+    weights are the first row of the pseudo-inverse of the matrix
+    ``[1, d_j / L]``, with ``L`` the root-mean-square length of the
+    projected displacements, so that the threshold LS_RCOND does not
+    depend on the panel size. They sum to 1, and they give the exact node
+    value of every field that is linear in the node tangent plane. A
+    group is valid when the matrix has rank 3 and no weight is larger
+    than NODE_WEIGHT_LIMIT in magnitude.
+
+    Parameters
+    ----------
+    dd : numpy.ndarray
+        Displacements from the node to the member centroids with shape
+        (..., k, 3) in m.
+    nrm : numpy.ndarray
+        Unit normals of the members with shape (..., k, 3) [-].
+
+    Returns
+    -------
+    weights : numpy.ndarray
+        Weights with shape (..., k) [-].
+    valid : numpy.ndarray
+        True for each valid group, with the batch shape of *dd*.
+    """
+    n_v = np.sum(nrm, axis=-2)
+    n_v = n_v / np.maximum(np.linalg.norm(n_v, axis=-1, keepdims=True), 1e-300)
+    dt = dd - (dd @ n_v[..., :, None]) * n_v[..., None, :]
+    size = np.sqrt(np.mean(np.sum(dt * dt, axis=-1), axis=-1))
+    x = np.concatenate([np.ones(dt.shape[:-1] + (1,)), dt / np.maximum(size, 1e-300)[..., None, None]], axis=-1)
+    u, sv, vt = np.linalg.svd(x, full_matrices=False)
+    large = sv > LS_RCOND * sv[..., :1]
+    inv = np.where(large, 1.0 / np.where(large, sv, 1.0), 0.0)
+    weights = np.einsum("...j,...j,...kj->...k", vt[..., :, 0], inv, u)
+    valid = (np.sum(large, axis=-1) >= 3) & (np.max(np.abs(weights), axis=-1) <= NODE_WEIGHT_LIMIT)
+    return weights, valid
+
+
+def _list_node_weights(
+    col: np.ndarray,
+    ptr: np.ndarray,
+    node: np.ndarray,
+    pts: np.ndarray,
+    cen: np.ndarray,
+    nrm: np.ndarray,
+    fallback: np.ndarray,
+) -> np.ndarray:
+    """Return the least-squares node weights of CSR member lists.
+
+    The lists with the same length share one stacked call of
+    :func:`_linear_node_weights`.
+
+    Parameters
+    ----------
+    col : numpy.ndarray
+        Member panels of all lists with shape (M,).
+    ptr : numpy.ndarray
+        CSR pointer of the lists with shape (L + 1,).
+    node : numpy.ndarray
+        Node of each list with shape (L,).
+    pts : numpy.ndarray
+        Node coordinates with shape (Nn, 3) in m.
+    cen : numpy.ndarray
+        Panel centroids with shape (Np, 3) in m.
+    nrm : numpy.ndarray
+        Panel unit normals with shape (Np, 3) [-].
+    fallback : numpy.ndarray
+        Inverse-distance weights of the members with shape (M,) [-]. A
+        list that is not valid keeps them.
+
+    Returns
+    -------
+    numpy.ndarray
+        Weights of the members with shape (M,) [-].
+    """
+    out = np.array(fallback, dtype=float, copy=True)
+    length = np.diff(ptr)
+    for k in np.unique(length):
+        if k == 0:
+            continue
+        lists = np.nonzero(length == k)[0]
+        idx = ptr[lists][:, None] + np.arange(k)[None, :]
+        members = col[idx]
+        w, valid = _linear_node_weights(cen[members] - pts[node[lists]][:, None, :], nrm[members])
+        out[idx[valid]] = w[valid]
+    return out
+
+
 def _least_squares_entries(
     ls: np.ndarray,
     nb_p: np.ndarray,
@@ -615,19 +718,33 @@ def build_surface_gradient_operator(
        the group (an interior node); it is open at a wake shedding edge or
        at a mesh border or at a sharp edge.
     2. Interior panels (all corner groups closed). The node value is the
-       inverse-distance mean of the group values (Shepard 1968, weight
-       1 / d with d the distance from the node to the panel centroid).
-       The Green-Gauss theorem on the panel polygon then gives
+       value at the node of the least-squares linear fit of the group
+       values in the node tangent plane (see :func:`_linear_node_weights`;
+       least-squares reconstruction, Blazek 2015, chapter 5). It is exact
+       for every field that is linear in that plane, on any mesh: also at
+       nodes with three panels, planform kinks and cosine end strips,
+       where the weighted centroids do not average to the node. A group
+       whose fit has rank below 3 (fewer than three panels or collinear
+       centroids) or a weight larger than NODE_WEIGHT_LIMIT in magnitude
+       keeps the inverse-distance weights (Shepard 1968, weight 1 / d with
+       d the distance from the node to the panel centroid). The
+       Green-Gauss theorem on the panel polygon then gives
        ``grad_i = (1 / A_i) * sum_e 0.5 * (mu_a + mu_b) * (p_b - p_a) x n_i``
        over the edges ``e = (a, b)`` (Blazek 2015, chapter 5). The cross
        product with the unit normal keeps the gradient in the panel plane.
+       With exact node values the theorem is exact for a linear field on
+       a planar polygon.
     3. Border panels (a corner group is open). The gradient is the
        edge-neighbour least-squares fit of :func:`compute_surface_gradient`
        in the panel plane, anchored at the panel value, over the panels
        that share an edge that is not cut. It is exact for
-       a linear doublet field, and the trailing-edge pressure stays
-       sensitive to the strength of each wake strip, which the pressure
-       Kutta iteration needs.
+       a linear doublet field on a flat stencil, and the trailing-edge
+       pressure stays sensitive to the strength of each wake strip, which
+       the pressure Kutta iteration needs.
+
+    The previous operator (inverse-distance node values for all groups) is
+    kept in :func:`_build_surface_gradient_operator_shepard` for
+    comparison.
 
     Parameters
     ----------
@@ -658,9 +775,90 @@ def build_surface_gradient_operator(
     scipy.sparse.csr_matrix
         Operator with shape (3 Np, Np) in 1/m.
     """
-    # Array version of the loop build in
-    # _build_surface_gradient_operator_reference: the same groups, the same
-    # sparsity pattern, and values equal to round-off.
+    return _gradient_operator_arrays(
+        nodes, panels, centroids, normals, areas, wake_edges, kinds, fold_angle_deg, shepard=False
+    )
+
+
+def _build_surface_gradient_operator_shepard(
+    nodes: np.ndarray,
+    panels: np.ndarray,
+    centroids: np.ndarray,
+    normals: np.ndarray,
+    areas: np.ndarray,
+    wake_edges: np.ndarray | None = None,
+    kinds: np.ndarray | None = None,
+    fold_angle_deg: float = FOLD_ANGLE_DEG,
+) -> scipy.sparse.csr_matrix:
+    """Build the previous surface gradient operator (reference for tests).
+
+    This is the operator that the solver used before the least-squares
+    node values. Interior panels interpolate the doublet values to their corner
+    nodes with inverse-distance weights (Shepard 1968) and apply the
+    Green-Gauss theorem on the panel polygon (Blazek 2015, chapter 5).
+    Border panels use the edge-neighbour least-squares fit in the panel
+    plane. The inverse-distance node value is not exact for a linear field
+    where the weighted centroids do not average to the node (nodes with
+    three panels, planform kinks, dihedral creases, cosine end strips), and
+    there the gradient error does not decrease with refinement. The solver
+    does not call this function. Tests use it to measure the change.
+
+    Parameters
+    ----------
+    nodes : numpy.ndarray
+        Node coordinates with shape (Nn, 3) in m.
+    panels : numpy.ndarray
+        Corner node indices with shape (Np, 4). A triangle repeats a node.
+    centroids : numpy.ndarray
+        Panel centroids with shape (Np, 3) in m.
+    normals : numpy.ndarray
+        Panel unit normals with shape (Np, 3) [-].
+    areas : numpy.ndarray
+        Panel areas with shape (Np,) in m^2.
+    wake_edges : numpy.ndarray or None, optional
+        Wake shedding edges with shape (Nw, 4): upper panel, lower panel,
+        node a, node b.
+    kinds : numpy.ndarray or None, optional
+        Panel kind codes with shape (Np,).
+    fold_angle_deg : float, optional
+        Largest angle between the normals of two panels across an edge
+        that the gradient connects when the mesh has no kinds [deg].
+
+    Returns
+    -------
+    scipy.sparse.csr_matrix
+        Operator with shape (3 Np, Np) in 1/m.
+    """
+    return _gradient_operator_arrays(
+        nodes, panels, centroids, normals, areas, wake_edges, kinds, fold_angle_deg, shepard=True
+    )
+
+
+def _gradient_operator_arrays(
+    nodes: np.ndarray,
+    panels: np.ndarray,
+    centroids: np.ndarray,
+    normals: np.ndarray,
+    areas: np.ndarray,
+    wake_edges: np.ndarray | None,
+    kinds: np.ndarray | None,
+    fold_angle_deg: float,
+    shepard: bool,
+) -> scipy.sparse.csr_matrix:
+    """Build the surface gradient operator with array operations.
+
+    This is the array version of the loop build in
+    :func:`_build_surface_gradient_operator_reference`: the same groups,
+    the same sparsity pattern, and values equal to round-off. The
+    arguments are those of :func:`build_surface_gradient_operator`.
+    *shepard* True gives the previous operator (see
+    :func:`_build_surface_gradient_operator_shepard`).
+
+    Returns
+    -------
+    scipy.sparse.csr_matrix
+        Operator with shape (3 Np, Np) in 1/m.
+    """
     pts = np.asarray(nodes, dtype=float)
     pan = np.asarray(panels, dtype=int)
     cen = np.asarray(centroids, dtype=float)
@@ -791,11 +989,25 @@ def build_surface_gradient_operator(
     all_col = np.concatenate(list_col)
     all_w = np.concatenate(list_w)
     all_ptr = np.concatenate(list_ptr)
+    if not shepard:
+        # Node of each member list: the node of its group, then the node of
+        # each incidence at a wake node.
+        list_node = inc_v[g_member[g_ptr[:-1]]]
+        if special.size > 0:
+            list_node = np.concatenate([list_node, inc_v[special]])
+        all_w = _list_node_weights(all_col, all_ptr, list_node, pts, cen, nrm, all_w)
 
     # Panels with a row: at least three distinct corners and an area that
     # is not zero or negative.
     open_corners = np.bincount(c_pan[~closed[c_inc]], minlength=n_p)
     has_row = (n_corner >= 3) & ~(area <= 0.0)
+    row_only = (
+        kind_arr == ROW_GRADIENT_KIND
+        if kind_arr is not None and kind_arr.shape[0] == n_p
+        else np.zeros(n_p, dtype=bool)
+    )
+    nb_pair = ~cut[pair_key] & (pa != pb)
+    nb_codes = np.unique(np.concatenate([pa[nb_pair] * n_p + pb[nb_pair], pb[nb_pair] * n_p + pa[nb_pair]]))
     rows: list[np.ndarray] = []
     cols: list[np.ndarray] = []
     vals: list[np.ndarray] = []
@@ -821,13 +1033,6 @@ def build_surface_gradient_operator(
     # Border panels: edge-neighbour least squares, anchored at the panel value.
     ls = np.nonzero(has_row & (open_corners > 0))[0]
     if ls.size > 0:
-        nb_pair = ~cut[pair_key] & (pa != pb)
-        nb_codes = np.unique(np.concatenate([pa[nb_pair] * n_p + pb[nb_pair], pb[nb_pair] * n_p + pa[nb_pair]]))
-        row_only = (
-            kind_arr == ROW_GRADIENT_KIND
-            if kind_arr is not None and kind_arr.shape[0] == n_p
-            else np.zeros(n_p, dtype=bool)
-        )
         ls_rows, ls_cols, ls_vals = _least_squares_entries(
             ls, nb_codes // n_p, nb_codes % n_p, cen, nrm, n_p, row_only
         )
@@ -846,6 +1051,7 @@ def _build_surface_gradient_operator_reference(
     wake_edges: np.ndarray | None = None,
     kinds: np.ndarray | None = None,
     fold_angle_deg: float = FOLD_ANGLE_DEG,
+    shepard: bool = False,
 ) -> scipy.sparse.csr_matrix:
     """Build the surface gradient operator with Python loops (reference).
 
@@ -854,7 +1060,8 @@ def _build_surface_gradient_operator_reference(
     union-find per node and one Python step per matrix entry. The solver
     does not call it. The parity tests compare the array version with it:
     the sparsity pattern must be the same and the values equal to
-    round-off.
+    round-off. *shepard* True gives the loop build of the previous
+    operator (:func:`_build_surface_gradient_operator_shepard`).
 
     Parameters
     ----------
@@ -876,6 +1083,9 @@ def _build_surface_gradient_operator_reference(
     fold_angle_deg : float, optional
         Largest angle between the normals of two panels across an edge
         that the gradient connects when the mesh has no kinds [deg].
+    shepard : bool, optional
+        True builds the previous operator (inverse-distance node values and
+        Green-Gauss). Default False.
 
     Returns
     -------
@@ -1016,13 +1226,21 @@ def _build_surface_gradient_operator_reference(
     node_cache: dict[tuple[int, tuple[int, ...]], tuple[np.ndarray, np.ndarray, bool]] = {}
 
     def node_weights(v: int, grp: list[int]) -> tuple[np.ndarray, np.ndarray, bool]:
-        """Inverse-distance weights of a group at node v, and True if the group closes."""
+        """Node weights of a group at node v, and True if the group closes."""
         key = (v, tuple(sorted(grp)))
         if key not in node_cache:
             g_idx = np.asarray(key[1], dtype=int)
             dist = np.linalg.norm(cen[g_idx] - pts[v], axis=1)
             w = 1.0 / np.maximum(dist, 1e-300)
             w = w / np.sum(w)
+            if not shepard:
+                # A panel with the node at two corners occurs two times in
+                # the group; the fit uses each panel once and splits its
+                # weight between the two entries.
+                uniq, inverse, count = np.unique(g_idx, return_inverse=True, return_counts=True)
+                w_ls, valid = _linear_node_weights(cen[uniq] - pts[v], nrm[uniq])
+                if valid:
+                    w = w_ls[inverse] / count[inverse]
             members = set(key[1])
             closed = True
             for p in key[1]:
