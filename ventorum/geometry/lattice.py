@@ -1279,6 +1279,20 @@ def build_lattice(
                 "Cd0, Cm0). Give each section a polar that matches its shape, or use the VLM."
             )
             warnings.warn(mesh_warnings[-1], RuntimeWarning, stacklevel=2)
+        if collocation == "vlm" and n_chord == 1 and any(supplied):
+            # The mean line needs two or more chordwise panels. With one panel
+            # the strip keeps the zero-lift line of its section polar: the
+            # normal turned by the polar alpha_L0 and the polar Cm0 as the
+            # section moment. The note goes to the trust warnings (no
+            # penalty) and each solve issues it. It is not a mesh warning:
+            # many callers build a one-panel lattice only to read the strips
+            # or the ground clearance, and they use the shape elsewhere.
+            camber_warnings.append(
+                f"[{surf.name}] the sections give an airfoil shape, but the vortex lattice with n_chord = 1 "
+                "does not use it: the mean line needs two or more chordwise panels. The lattice uses the "
+                "section polar (WingSection.airfoil): the normal is turned by the polar alpha_L0, and the "
+                "polar Cm0 gives the section moment. Use n_chord = 2 or more to use the shape."
+            )
         use_mean_line = collocation == "vlm" and n_chord > 1 and all(supplied)
         lines = [_MeanLine(sec.shape) if use_mean_line else None for sec in secs]
         for sec, line in zip(secs, lines):
