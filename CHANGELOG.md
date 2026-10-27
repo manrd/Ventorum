@@ -184,6 +184,7 @@ a minor version can change a public interface.
 
 ### Fixed
 
+- Ventorum-3DP: the flat tip cap of a cambered section gave cap pressures of order 1e3 to 1e4, and with dihedral the cap force made the lift too high (NACA 2412 at 30 deg dihedral: CL 0.556 instead of about 0.43). A tip cap panel now keeps the surface gradient along its row of neighbours only. Symmetric sections do not change.
 - Ventorum-2D retries a residual-window stop once for the cold quasi-simultaneous first estimate at the
   requested angle (not at the zero-lift start of an angle continuation). The stage limit and angle
   budget stay unchanged. This lets slow cold starts converge in ground effect (NACA 4412 at 4 deg failed
