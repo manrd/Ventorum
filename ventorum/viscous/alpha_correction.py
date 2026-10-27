@@ -332,40 +332,20 @@ def _strip_thickness_ratio(aircraft: Aircraft, lattice: VortexLattice, s: int, c
                 from ventorum.airfoil import airfoil
 
                 af = airfoil(spec)
-                t_vals.append(w * float(af.max_thickness()[0]))
-                w_sum += w
-            except Exception:
-                pass
+            except (KeyError, ValueError):
+                continue
+            t_vals.append(w * float(af.max_thickness()[0]))
+            w_sum += w
     if w_sum > 0.0:
         return float(sum(t_vals) / w_sum)
 
-    if cand is not None:
-        if isinstance(cand, PolarTable) and cand.source_info.get("section") is not None:
-            try:
-                from ventorum.airfoil import airfoil
+    if isinstance(cand, PolarTable) and isinstance(cand.source_info.get("section"), str):
+        try:
+            from ventorum.airfoil import airfoil
 
-                return float(airfoil(cand.source_info["section"]).max_thickness()[0])
-            except Exception:
-                pass
-        for attr in ("shape", "section"):
-            val = getattr(cand, attr, None)
-            if val is not None:
-                try:
-                    from ventorum.airfoil import airfoil
-
-                    return float(airfoil(val).max_thickness()[0])
-                except Exception:
-                    pass
-        if hasattr(cand, "t_over_c") and cand.t_over_c is not None:
-            return float(cand.t_over_c)
-        name = getattr(cand, "name", "")
-        if name and _NACA_NAME.match(str(name)):
-            try:
-                from ventorum.airfoil import airfoil
-
-                return float(airfoil(name).max_thickness()[0])
-            except Exception:
-                pass
+            return float(airfoil(cand.source_info["section"]).max_thickness()[0])
+        except (KeyError, ValueError):
+            pass
     return 0.0
 
 
@@ -1069,7 +1049,7 @@ def _solve_condition(
     if non_unique:
         result.details["branches"] = [result] + [make_result(sol, bl, False) for sol, bl in branches]
     for msg in notes:
-        if warned is not None:
+        if warned is not None and msg == _THICK_GROUND_FLAP_NOTE:
             if msg in warned:
                 continue
             warned.add(msg)

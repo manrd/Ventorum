@@ -9,6 +9,7 @@ import warnings
 import numpy as np
 import pytest
 
+from ventorum.aero.polar_table import PolarTable
 from ventorum.aero.system import ground_plane_from_condition
 from ventorum.core.datatypes import (
     Aircraft,
@@ -152,7 +153,7 @@ def test_guard_raises_for_trailing_edge_under_ground_study_case():
 
 
 def test_guard_passes_valid_case_bit_identical():
-    """Verify that valid cases pass and results remain bit-identical."""
+    """A valid case keeps the flap shift of the code before the guard, bit for bit."""
     wing = _make_flapped_wing(shape="0012", deflection_deg=10.0, hinge=0.75)
     ac = Aircraft(name="ValidCase", surfaces=[wing])
     cond = FlightCondition(V_inf=40.0, alpha=np.radians(2.0), h=0.5)
@@ -161,9 +162,24 @@ def test_guard_passes_valid_case_bit_identical():
     lat = solver.build(ac, settings, cond, None, np.zeros(3))
     ground = ground_plane_from_condition(lat, cond, np.zeros(3))
     assert ground is not None
+    # Values of the code before the guard (commit 609547b), same case.
+    assert _section_flap_shift(lat, 0, 0.75, ground) == 0.5725625381466319
+    assert _section_flap_shift(lat, 0, 0.75, None) == 0.607922146145465
 
-    val1 = _section_flap_shift(lat, 0, 0.75, ground)
-    val2 = _section_flap_shift(lat, 0, 0.75, ground)
-    assert np.isfinite(val1)
-    assert val1 > 0.0
-    assert val1 == val2
+
+def test_warning_from_polar_source_section():
+    """A sweep with a thick polar source section warns once, also without a section shape."""
+    wing = _make_flapped_wing(shape=None, deflection_deg=10.0)
+    alpha = np.linspace(-20.0, 25.0, 91)
+    cl = np.broadcast_to(2.0 * np.pi * np.radians(alpha), (2, 3, alpha.size)).copy()
+    table = PolarTable(
+        Re=np.array([1e5, 1e7]), flap_deg=np.array([-20.0, 0.0, 20.0]), alpha_deg=alpha,
+        Cl=cl, Cd=np.full(cl.shape, 0.01), Cm=np.zeros(cl.shape),
+        source_info={"source": "test", "section": "0012"},
+    )
+    conds = [FlightCondition(V_inf=40.0, alpha=np.radians(a), h=0.25) for a in (1.0, 2.0, 3.0)]
+    with warnings_recorder() as recorded:
+        results = solve_viscous(wing, conds, SolverSettings(n_chord=4, n_panels=24), table, model="vlm")
+    matching = [w for w in recorded if "ground factor of the flap increment" in str(w.message)]
+    assert len(matching) == 1
+    assert all(_THICK_GROUND_FLAP_NOTE in r.totals.trust.warnings for r in results)
