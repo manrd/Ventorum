@@ -10,6 +10,8 @@ a minor version can change a public interface.
 
 ### Added
 
+- Viscous alpha-correction coupling (V1): trust warning and `RuntimeWarning` when a thick section polar ($t/c > 0.04$) runs with a flap deflection in ground effect below $h/c = 0.30$. The ground factor $\kappa$ of the flap increment is a thin-airfoil value; for thick sections below $h/c = 0.30$ it can differ by more than 2 % (about 0.1 to 0.2 deg of flap shift). `_section_flap_shift` guards against trailing-edge ground strike, raising `ValueError` when the strip trailing edge is at or below the ground ($h \le 0$).
+
 - Ventorum-2D: `solve_viscous_flapped` solves a section with a deflected plain flap by
   continuation in the deflection (from 0 deg, warm-started steps, halved on a failure), where a
   direct cold solve often fails. Each step has its own work budget, with a total cap; the result
