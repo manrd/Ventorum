@@ -152,6 +152,7 @@ class _AngleWork:
         self.linear_solves = 0
         self.solves = 0
         self.notes = []
+        self.retry_notes = []
         self.best = None
 
     def cap(self, max_iter: int) -> int:
@@ -163,13 +164,18 @@ class _AngleWork:
     def add(self, setup, res, cap: int, max_iter: int):
         """Count a Newton solve; mark a stop at a limit below max_iter as a budget stop."""
         if res.status == "max_iter" and cap < max_iter:
+            retry_reason = res.reason if res._first_stop else ""
             res.status = "budget"
             res.reason = (f"work budget of {self.rules.work_budget} Newton iterations per angle used up "
                           f"(largest residual {res.residual:.3e})")
+            if retry_reason:
+                res.reason += "; " + retry_reason
             self.note(f"work budget of {self.rules.work_budget} Newton iterations per angle used up")
         self.iterations += int(res.iterations)
         self.linear_solves += int(res.linear_solves)
-        self.solves += 1
+        self.solves += 1 + bool(res._first_stop)
+        if res._first_stop:
+            self.retry_notes.append(f"stage at alpha = {setup.sys.alpha:g} deg: {res.reason}")
         if float(setup.sys.alpha) == self.alpha and (self.best is None or res.residual < self.best[1].residual):
             self.best = (setup, res)
 
@@ -421,7 +427,7 @@ def warm_state(setup: vii.CaseSetup, prev_setup: vii.CaseSetup, prev: vii.CaseSt
 _NUMPY = {"xp": np, "device": None, "dtype": None}
 
 
-def _solve_one(setup, start, tol, max_iter, omega0, bk=None, ctl=None):
+def _solve_one(setup, start, tol, max_iter, omega0, bk=None, ctl=None, *, retry_window=False):
     """Run the Newton solve of one case from a start state.
 
     With ``ctl`` (the work record of the angle) the solve uses its stop
@@ -435,13 +441,13 @@ def _solve_one(setup, start, tol, max_iter, omega0, bk=None, ctl=None):
         raise _BudgetUsedUp()
     res = vii.newton_solve([setup], [start], tol=tol, max_iter=cap, omega0=[omega0], stall_window=rules.stall_window,
                            stall_factor=rules.stall_factor, divergence_factor=rules.divergence_factor,
-                           lm_trials=rules.lm_trials, **bk)[0]
+                           lm_trials=rules.lm_trials, retry_window=retry_window, **bk)[0]
     if ctl is not None:
         ctl.add(setup, res, cap, max_iter)
     return res
 
 
-def _cold_solve(setup, tol, max_iter, bk=None, ctl=None):
+def _cold_solve(setup, tol, max_iter, bk=None, ctl=None, *, retry=True):
     """Solve a case from a cold start.
 
     Three first estimates are tried in turn until one converges:
@@ -464,6 +470,11 @@ def _cold_solve(setup, tol, max_iter, bk=None, ctl=None):
     did not rescue such a case in the test sample. A failure of the first
     estimate does not end the cold start (the quasi-simultaneous marches
     often rescue it).
+    Only the quasi-simultaneous estimate may retry once after a
+    residual-window stop, within the same stage limit and angle budget.
+    ``retry=False`` removes this retry. The cold start at the zero-lift
+    angle of a continuation uses it: in the test sample no retry there
+    converged, and each one used its full stage limit.
     """
     best = None
     for sweeps, omega0 in ((0, 1.0 / 64.0), (vii.QS_SWEEPS, 1.0), (0, 1.0)):
@@ -471,7 +482,7 @@ def _cold_solve(setup, tol, max_iter, bk=None, ctl=None):
             init = vii.initial_state(setup, sweeps=sweeps)
         except np.linalg.LinAlgError:
             continue
-        res = _solve_one(setup, init, tol, max_iter, omega0, bk, ctl)
+        res = _solve_one(setup, init, tol, max_iter, omega0, bk, ctl, retry_window=retry and sweeps > 0)
         if res.converged:
             return res
         if best is None or res.residual < best.residual:
@@ -786,7 +797,7 @@ def finish_angle(body, alpha, re, prev, tol, max_iter, kw, bk=None, first=None, 
         else:
             ctl.note(f"singular: a linear system of the angle setup is singular ({exc})")
         if ctl.best is None:
-            row = _failed_row(alpha, body, "; ".join(ctl.notes) + " before a solve at this angle")
+            row = _failed_row(alpha, body, "; ".join(ctl.notes + ctl.retry_notes) + " before a solve at this angle")
             row.update(ctl.counters())
             return row, None
         setup, res = ctl.best
@@ -796,10 +807,13 @@ def finish_angle(body, alpha, re, prev, tol, max_iter, kw, bk=None, first=None, 
         return row, None
     row = row_from_result(setup, res, alpha)
     row.update(ctl.counters())
+    retry_notes = [n for n in ctl.retry_notes if res.reason not in n or not res._first_stop]
+    if retry_notes:
+        row["reason"] += "; " + "; ".join(retry_notes)
     if not res.converged and ctl.notes:
-        notes = [n for n in ctl.notes if n not in res.reason]
+        notes = [n for n in ctl.notes if n not in row["reason"]]
         if notes:
-            row["reason"] = res.reason + "; " + "; ".join(notes)
+            row["reason"] += "; " + "; ".join(notes)
     return row, (setup, res.state)
 
 
@@ -850,7 +864,7 @@ def _cold_path(body, alpha, re, tol, max_iter, kw, bk=None, ctl=None, cache=None
         else:
             try:
                 s0 = prepare_case(body, a0, re, **kw)
-                r0 = _cold_solve(s0, tol, max_iter, bk, ctl)
+                r0 = _cold_solve(s0, tol, max_iter, bk, ctl, retry=False)
             except cp.WakeGroundError:
                 s0, r0 = None, None
             # A cold start cut by the work budget depends on the angle: it is not kept.
