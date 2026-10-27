@@ -460,6 +460,44 @@ def _green_gauss_corner_weights(
     return weight
 
 
+#: Relative singular value below which a displacement direction of the
+#: edge-neighbour least-squares fit is round-off [-].
+LS_RCOND = 1e-5
+
+#: Panel kind whose least-squares gradient keeps only the direction along its
+#: row of neighbours (the flat tip caps of the wing builder).
+ROW_GRADIENT_KIND = "tip"
+
+
+def _stencil_pinv(dr_t: np.ndarray, row_only: np.ndarray | bool) -> np.ndarray:
+    """Return the pseudo-inverse of in-plane stencil displacements.
+
+    Parameters
+    ----------
+    dr_t : numpy.ndarray
+        In-plane displacements from the panel centroid to its neighbour
+        centroids with shape (..., k, 3) in m.
+    row_only : numpy.ndarray or bool
+        Flag with the batch shape of *dr_t* (or one flag). True keeps only
+        the leading singular direction (the gradient along the row of
+        neighbours). False keeps every direction with a singular value
+        above ``LS_RCOND`` times the largest.
+
+    Returns
+    -------
+    numpy.ndarray
+        Pseudo-inverse with shape (..., 3, k) in 1/m. False flags give the
+        result of ``numpy.linalg.pinv(dr_t, rcond=LS_RCOND)``.
+    """
+    u, s, vt = np.linalg.svd(dr_t, full_matrices=False)
+    large = s > LS_RCOND * np.max(s, axis=-1, keepdims=True)
+    flag = np.broadcast_to(np.asarray(row_only, dtype=bool), s.shape[:-1])
+    large[flag, 1:] = False
+    s = np.divide(1.0, s, where=large, out=s)
+    s[~large] = 0.0
+    return np.matmul(np.swapaxes(vt, -1, -2), s[..., None] * np.swapaxes(u, -1, -2))
+
+
 def _least_squares_entries(
     ls: np.ndarray,
     nb_p: np.ndarray,
@@ -467,11 +505,12 @@ def _least_squares_entries(
     cen: np.ndarray,
     nrm: np.ndarray,
     n_p: int,
+    row_only: np.ndarray | None = None,
 ) -> tuple[list[np.ndarray], list[np.ndarray], list[np.ndarray]]:
     """Return the matrix entries of the edge-neighbour least-squares gradient.
 
     The panels with the same count of neighbours share one stacked
-    ``numpy.linalg.pinv`` call (the same matrices as one call per panel).
+    pseudo-inverse call (the same matrices as one call per panel).
 
     Parameters
     ----------
@@ -486,12 +525,18 @@ def _least_squares_entries(
         Panel unit normals with shape (Np, 3) [-].
     n_p : int
         Count of panels.
+    row_only : numpy.ndarray or None, optional
+        Flag of each panel with shape (Np,): True keeps only the gradient
+        along the row of neighbours (see :func:`_stencil_pinv`). None
+        gives False for all panels.
 
     Returns
     -------
     rows, cols, vals : list of numpy.ndarray
         Row indices, column indices and values (in 1/m) of the entries.
     """
+    if row_only is None:
+        row_only = np.zeros(n_p, dtype=bool)
     nb_ptr = _counts_to_ptr(np.bincount(nb_p, minlength=n_p))
     n_nb = nb_ptr[ls + 1] - nb_ptr[ls]
     comp = np.arange(3)
@@ -510,9 +555,10 @@ def _least_squares_entries(
         dr = cen[nb] - cen[ps][:, None, :]
         n_ps = nrm[ps]
         dr_t = dr - (dr @ n_ps[:, :, None]) * n_ps[:, None, :]
-        # Displacement directions below 1e-5 of the largest are round-off
+        # Displacement directions below LS_RCOND of the largest are round-off
         # (a row of collinear centroids gives the gradient along the row).
-        pinv = np.linalg.pinv(dr_t, rcond=1e-5)
+        # A tip cap keeps only the direction along its row.
+        pinv = _stencil_pinv(dr_t, row_only[ps])
         mat = np.concatenate([pinv, -np.sum(pinv, axis=2, keepdims=True)], axis=2)
         idx = np.concatenate([nb, ps[:, None]], axis=1)
         rows.append(np.broadcast_to(3 * ps[:, None, None] + comp[None, :, None], mat.shape).ravel())
@@ -774,7 +820,14 @@ def build_surface_gradient_operator(
     if ls.size > 0:
         nb_pair = ~cut[pair_key] & (pa != pb)
         nb_codes = np.unique(np.concatenate([pa[nb_pair] * n_p + pb[nb_pair], pb[nb_pair] * n_p + pa[nb_pair]]))
-        ls_rows, ls_cols, ls_vals = _least_squares_entries(ls, nb_codes // n_p, nb_codes % n_p, cen, nrm, n_p)
+        row_only = (
+            kind_arr == ROW_GRADIENT_KIND
+            if kind_arr is not None and kind_arr.shape[0] == n_p
+            else np.zeros(n_p, dtype=bool)
+        )
+        ls_rows, ls_cols, ls_vals = _least_squares_entries(
+            ls, nb_codes // n_p, nb_codes % n_p, cen, nrm, n_p, row_only
+        )
         rows.extend(ls_rows)
         cols.extend(ls_cols)
         vals.extend(ls_vals)
@@ -936,9 +989,11 @@ def _build_surface_gradient_operator_reference(
             else:
                 dr = cen[nb] - cen[p]
                 dr_t = dr - np.outer(dr @ nrm[p], nrm[p])
-                # Displacement directions below 1e-5 of the largest are round-off
-                # (a row of collinear centroids gives the gradient along the row).
-                pinv = np.linalg.pinv(dr_t, rcond=1e-5)
+                # Displacement directions below LS_RCOND of the largest are
+                # round-off (a row of collinear centroids gives the gradient
+                # along the row). A tip cap keeps only the direction along its row.
+                row = kind_arr is not None and kind_arr.shape[0] == n_p and kind_arr[p] == ROW_GRADIENT_KIND
+                pinv = _stencil_pinv(dr_t, bool(row))
                 idx = np.concatenate([nb, [p]])
                 mat = np.hstack([pinv, -np.sum(pinv, axis=1, keepdims=True)])
                 ls_cache[p] = (idx, mat)
