@@ -428,6 +428,36 @@ def test_panel3d_chordwise_count_levels_and_worse_level_counts_once():
     assert _panel_trust(CD_nearfield=0.0076).factors["mesh_resolution"] == 0.0
 
 
+def test_panel3d_pressure_drag_note_below_the_named_chordwise_count():
+    """Below PANEL3D_CD_PRESSURE_MIN_N_CHORD a note says to use the Trefftz CDi, with no penalty.
+
+    With least-squares node values in the surface gradient, the near-field
+    pressure drag overshoots the Trefftz CDi on coarse chordwise meshes. The
+    note must not change the penalty of the chordwise rule, and no value is
+    removed from the result.
+    """
+    from ventorum.core import trust as tr
+
+    n_min = tr.PANEL3D_CD_PRESSURE_MIN_N_CHORD
+    assert n_min == 16
+
+    def notes(t):
+        return [w for w in t.warnings if "CD_pressure" in w and "Trefftz-plane CDi" in w]
+
+    coarse = _panel_trust(n_chord=n_min - 1, CD_nearfield=0.0076)
+    assert len(notes(coarse)) == 1
+    assert f"{n_min - 1} chordwise panels" in notes(coarse)[0]
+    assert coarse.factors["mesh_resolution"] == tr.PANEL3D_PENALTY_RESOLUTION_WARN
+    fine = _panel_trust(n_chord=n_min, CD_nearfield=0.0076)
+    assert notes(fine) == []
+    assert fine.factors["mesh_resolution"] == coarse.factors["mesh_resolution"]
+    # The note acts also without a near-field drag value, and not without n_chord.
+    assert len(notes(_panel_trust(n_chord=8))) == 1
+    assert notes(_panel_trust(CD_nearfield=0.0076)) == []
+    # The note is for the 3D panel method only.
+    assert notes(_panel_trust(n_chord=8, solver_type="vlm")) == []
+
+
 def test_panel3d_median_aspect_ratio_and_folded_panels():
     """The median aspect ratio and folded (non-convex) panels add to mesh_adequacy."""
     from ventorum.core import trust as tr

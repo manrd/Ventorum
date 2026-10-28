@@ -149,6 +149,26 @@ PANEL3D_N_CHORD_STRONG = 14
 PANEL3D_PENALTY_RESOLUTION_WARN = 0.20
 PANEL3D_PENALTY_RESOLUTION_STRONG = 0.40
 
+#: Smallest chordwise panel count per surface [-] at which the near-field
+#: pressure drag (``CD_pressure``, ``CDi_nearfield``) of the 3D panel method
+#: is a usable drag value. The surface gradient uses least-squares node
+#: values. On the wing meshes of the gradient study, with 16 or more chordwise
+#: panels, the near-field pressure drag was 0.99 to 1.05 times the Trefftz
+#: CDi. With 12 or fewer chordwise panels it was up to 1.8 times the Trefftz
+#: CDi (the previous inverse-distance node values gave negative values
+#: there). Below this count the trust score gets a note that names the Trefftz
+#: CDi as the drag value to use. The note adds no penalty, and no result is
+#: removed.
+PANEL3D_CD_PRESSURE_MIN_N_CHORD = 16
+
+#: Note of a near-field pressure drag on a coarse chordwise mesh [-]. The
+#: placeholder ``{n_chord}`` takes the chordwise panel count.
+PANEL3D_CD_PRESSURE_COARSE_NOTE = (
+    "Near-field pressure drag (CD_pressure) is not reliable with {n_chord} chordwise panels "
+    "(below " + str(PANEL3D_CD_PRESSURE_MIN_N_CHORD) + "): on this mesh it can be much larger "
+    "than the far-field value. Use the Trefftz-plane CDi as the induced drag."
+)
+
 #: Far-field kernel trust note in ground effect [-].
 PANEL3D_FAR_FIELD_GROUND_NOTE = (
     "The default far-field kernel can bias the lift low by about 1 to 4 % in ground effect "
@@ -404,6 +424,9 @@ def panel3d_mesh_checks(
         Near-field pressure drag coefficient [-].
     n_chord : int or None, optional
         Chordwise panels per surface [-]. None skips the chordwise rule.
+        Below :data:`PANEL3D_CD_PRESSURE_MIN_N_CHORD` the warnings also get
+        :data:`PANEL3D_CD_PRESSURE_COARSE_NOTE` (no penalty): the
+        near-field pressure drag is not reliable on that mesh.
 
     Returns
     -------
@@ -485,6 +508,8 @@ def panel3d_mesh_checks(
                 f"Coarse chordwise mesh: {n_c} chordwise panels (below {limit}): {_RESOLUTION_TEXT[level]}"
             )
         levels.append(level)
+        if n_c < PANEL3D_CD_PRESSURE_MIN_N_CHORD:
+            warnings.append(PANEL3D_CD_PRESSURE_COARSE_NOTE.format(n_chord=n_c))
     if levels:
         worst = max(levels)
         penalties["mesh_resolution"] = (0.0, PANEL3D_PENALTY_RESOLUTION_WARN, PANEL3D_PENALTY_RESOLUTION_STRONG)[worst]
