@@ -842,7 +842,7 @@ def test_strong_root_thickness_scaling_warns_above_60_deg():
 
     The scaling is not capped (owner decision), so a steep first panel row
     gives a large factor (above 2 past 60 deg). The builder then warns that
-    the root section is strongly scaled and that the result needs checking.
+    the root section is strongly scaled and that the result needs a spanwise convergence study.
     60.5 deg warns, 59.5 deg does not, the option off never warns, and the
     mesh with a control at the root (the control path of the builder)
     warns too. The warned mesh still has the full factor.
@@ -855,7 +855,7 @@ def test_strong_root_thickness_scaling_warns_above_60_deg():
         warned = _root_scaling_warnings(_straight_wing(60.5), coords, half=half)
         assert len(warned) == 1
         text = str(warned[0].message)
-        assert "60.5 deg" in text and "needs checking" in text
+        assert "60.5 deg" in text and "spanwise convergence study" in text
         assert f"{1.0 / np.cos(np.radians(60.5)):.2f}" in text
         assert _root_scaling_warnings(_straight_wing(59.5), coords, half=half) == []
         for deg in (59.5, 60.5, 75.0):

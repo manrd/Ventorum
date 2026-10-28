@@ -174,6 +174,21 @@ PANEL3D_ROOT_SCALE_WARNING = (
     "The root thickness scaling is not verified above 75 deg dihedral (lift can change by more than 10 %)."
 )
 
+#: Trust warning of a steep root dihedral without the root thickness scaling
+#: [-]. The limit is ``ventorum.panel3d.mesh.STEEP_ROOT_DIHEDRAL_DEG``.
+PANEL3D_STEEP_ROOT_UNSCALED_WARNING = (
+    "Steep root without the root thickness scaling: the first panel row of a symmetric surface has a "
+    "dihedral of 60 deg or more and scale_root_thickness is False. The pressure coefficient at the root is "
+    "singular, so the loads are not reliable."
+)
+
+#: Trust note of a steep root dihedral with the root thickness scaling [-].
+#: The limit is ``ventorum.panel3d.mesh.STEEP_ROOT_DIHEDRAL_DEG``.
+PANEL3D_STEEP_ROOT_CONVERGENCE_NOTE = (
+    "Steep root: the first panel row of a symmetric surface has a dihedral of 60 deg or more. The lift "
+    "converges slowly with the spanwise panel count, so the result needs a spanwise convergence study."
+)
+
 #: Penalty for non-unique post-stall solution branches in viscous coupling.
 POST_STALL_BRANCH_PENALTY = 0.35
 
@@ -385,8 +400,13 @@ def panel3d_mesh_checks(
     * ``mesh_adequacy`` (needs *mesh_stats*): the shape and the validity of
       the panels. A percentile (the median) of the panel aspect ratio and of
       the panel skew, not the largest value; the largest warp; a mesh that is not
-      watertight, and panels that are not convex (a folded strip). The
-      penalties add.
+      watertight, panels that are not convex (a folded strip), and a surface
+      that intersects itself or its mirror image (``n_self_intersections``,
+      same penalty as the folded panels). The penalties add. A steep root
+      dihedral (``steep_root_dihedral``) gives a warning without a
+      penalty: without the root thickness scaling
+      (``scale_root_thickness`` False) the root pressure coefficient is
+      singular; with it the lift needs a spanwise convergence study.
     * ``mesh_resolution``: the discretization-error indicators. The relative
       difference of the near-field pressure drag and the far-field Trefftz
       induced drag, and the chordwise panel count when it is given. Each
@@ -455,8 +475,32 @@ def panel3d_mesh_checks(
                 "Change the spanwise panel count or spacing so that no strip folds (for example a "
                 "root strip narrower than the section thickness on a wing with dihedral)."
             )
+        n_self_x = int(mesh_stats.get("n_self_intersections", 0) or 0)
+        if n_self_x > 0:
+            mesh_pen += PANEL3D_PENALTY_NONCONVEX
+            warnings.append(
+                f"Self-intersecting surface: {n_self_x} panel edges cross panels of the same closed "
+                "surface or of its mirror image. A surface that passes through itself makes the result "
+                "not valid."
+            )
+            recommendations.append(
+                "Use the root thickness scaling (panel_scale_root_thickness=True, the default), or change "
+                "the spanwise panel count or the dihedral, so that the surface does not pass through "
+                "itself or its mirror image."
+            )
         if bool(mesh_stats.get("root_scale_warning", False)):
             warnings.append(PANEL3D_ROOT_SCALE_WARNING)
+        if bool(mesh_stats.get("steep_root_dihedral", False)):
+            if bool(mesh_stats.get("scale_root_thickness", True)):
+                warnings.append(PANEL3D_STEEP_ROOT_CONVERGENCE_NOTE)
+                recommendations.append(
+                    "Solve with at least two spanwise panel counts and compare the lift."
+                )
+            else:
+                warnings.append(PANEL3D_STEEP_ROOT_UNSCALED_WARNING)
+                recommendations.append(
+                    "Use the root thickness scaling (panel_scale_root_thickness=True, the default)."
+                )
         penalties["mesh_adequacy"] = mesh_pen
 
     levels: list[int] = []

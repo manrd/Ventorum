@@ -77,6 +77,16 @@ not capped. When the builder applies it with a first-row dihedral above
 UserWarning: the root section is strongly scaled and the result needs a
 check.
 
+Steep root dihedral
+-------------------
+At a first-row dihedral of ``STEEP_ROOT_DIHEDRAL_DEG`` (60 deg) or more
+of a symmetric surface, the builder issues a RuntimeWarning when
+``scale_root_thickness`` is False: the root section is then too thin
+normal to the surface, and the pressure coefficient at the root is
+singular. With the root scaling the mesh is valid, but the lift converges
+slowly with the spanwise panel count; the 3D panel solver then adds a
+trust note that asks for a spanwise convergence study.
+
 Fold guard
 ----------
 Two neighbour section planes that are not parallel cross on a line parallel
@@ -211,6 +221,7 @@ __all__ = [
     "FOLD_MARGIN",
     "ROOT_SCALE_WARN_DIHEDRAL_DEG",
     "ROOT_SCALE_TRUST_WARN_DIHEDRAL_DEG",
+    "STEEP_ROOT_DIHEDRAL_DEG",
     "CONTACT_GAP_FRACTION",
     "PanelMesh",
     "check_contact",
@@ -245,6 +256,17 @@ WARP_LIMIT = 0.05
 #: local panel size the lift is consistent with the larger gaps and with
 #: mesh refinement. The value 0.1 keeps a margin above that.
 CONTACT_GAP_FRACTION = 0.1
+#: Self-intersection test (:func:`_self_intersections`): tolerance [-] of the
+#: barycentric coordinates and of the edge parameter. The bounds are
+#: inclusive, because a symmetric surface that crosses its mirror image
+#: crosses it exactly on panel edges (y = 0).
+_SELF_X_PARAM_TOL = 1e-9
+#: Self-intersection test: an edge is parallel to a triangle plane when the
+#: triple product of the edge and the two triangle sides is below this
+#: fraction of the product of their lengths [-].
+_SELF_X_PARALLEL_REL = 1e-6
+#: Self-intersection test: largest number of edge-triangle pairs per array block [-].
+_SELF_X_BLOCK = 400_000
 #: Root-thickness scaling: smallest cosine [-] of the dihedral of the first
 #: panel row. A row closer to the vertical has no miter (the two halves of
 #: a symmetric surface coincide), so the root section is not scaled.
@@ -262,6 +284,15 @@ _ROOT_SCALE_TRUST_WARN_FACTOR = 1.0 / math.cos(math.radians(ROOT_SCALE_TRUST_WAR
 _ROOT_SCALE_TRUST_WARNING = (
     "The root thickness scaling is not verified above 75 deg dihedral (lift can change by more than 10 %)."
 )
+#: Steep root dihedral [deg]: a code setting, not a calibrated value. At
+#: this dihedral of the first panel row of a symmetric surface or more, a
+#: mesh without the root thickness scaling gets a RuntimeWarning (the root
+#: pressure coefficient is singular), and a mesh with the scaling gets a
+#: trust note (the lift converges slowly with the spanwise panel count).
+STEEP_ROOT_DIHEDRAL_DEG = 60.0
+#: Round-off tolerance [deg] of the steep-root test, so that a surface
+#: defined with exactly STEEP_ROOT_DIHEDRAL_DEG counts as steep.
+_STEEP_ROOT_TOL_DEG = 1e-6
 #: Fold guard: smallest distance of a section node from the plane of the
 #: neighbour section, as a fraction of the station spacing [-]. Any
 #: positive value prevents a fold; 0.05 changes only the stations that
@@ -810,24 +841,117 @@ def _root_thickness_factor(surf, eta: np.ndarray) -> float:
     float
         Factor on the offsets of the root section from its camber line [-].
     """
-    if not bool(getattr(surf, "is_symmetric", False)):
+    cos_g = _root_row_cosine(surf, eta)
+    if cos_g is None or cos_g <= _COS_ROOT_MIN or cos_g >= 1.0:
         return 1.0
+    return 1.0 / cos_g
+
+
+def _root_row_cosine(surf, eta: np.ndarray) -> float | None:
+    """Return cos(G) [-] of the first panel row of a symmetric surface, or None.
+
+    G is the dihedral of the first panel row: the angle of the reference
+    line from the root station to the next station, in the y-z plane.
+
+    Parameters
+    ----------
+    surf : LiftingSurface
+        Surface definition.
+    eta : numpy.ndarray
+        Span fractions of the stations [-], increasing, with duplicates at
+        control side edges.
+
+    Returns
+    -------
+    float or None
+        cos(G) [-]. None for a one-sided surface, for stations that do not
+        start at the root, and for a first panel row of zero length.
+    """
+    if not bool(getattr(surf, "is_symmetric", False)):
+        return None
     eta = np.asarray(eta, dtype=float)
     if eta.size < 2 or float(eta[0]) > 1e-12:
-        return 1.0
+        return None
     nxt = eta[eta > float(eta[0]) + _ETA_MERGE_TOL]
     if nxt.size == 0:
-        return 1.0
+        return None
     _, y_ref, z_ref = surface_reference_line(surf, np.array([float(eta[0]), float(nxt[0])]))
     dy = float(y_ref[1] - y_ref[0])
     dz = float(z_ref[1] - z_ref[0])
     length = float(np.hypot(dy, dz))
     if length <= 0.0:
-        return 1.0
-    cos_g = dy / length
-    if cos_g <= _COS_ROOT_MIN or cos_g >= 1.0:
-        return 1.0
-    return 1.0 / cos_g
+        return None
+    return dy / length
+
+
+def _root_row_dihedral_deg(surf, eta: np.ndarray) -> float:
+    """Return the dihedral [deg] of the first panel row of a symmetric surface.
+
+    The value is the fold angle of the two halves at the root (see
+    :func:`_root_row_cosine`). It is 0 for a one-sided surface, for
+    stations that do not start at the root and for a first panel row of
+    zero length.
+
+    Parameters
+    ----------
+    surf : LiftingSurface
+        Surface definition.
+    eta : numpy.ndarray
+        Span fractions of the stations [-], increasing.
+
+    Returns
+    -------
+    float
+        Dihedral of the first panel row [deg], from 0 to 180.
+    """
+    cos_g = _root_row_cosine(surf, eta)
+    if cos_g is None:
+        return 0.0
+    return math.degrees(math.acos(min(1.0, max(-1.0, cos_g))))
+
+
+def _steep_root(surf, eta: np.ndarray) -> bool:
+    """Return True when the first panel row of a symmetric surface is steep.
+
+    Parameters
+    ----------
+    surf : LiftingSurface
+        Surface definition.
+    eta : numpy.ndarray
+        Span fractions of the stations [-], increasing.
+
+    Returns
+    -------
+    bool
+        True when the dihedral of the first panel row is
+        ``STEEP_ROOT_DIHEDRAL_DEG`` (60 deg) or more, with a round-off
+        tolerance of ``_STEEP_ROOT_TOL_DEG``.
+    """
+    return _root_row_dihedral_deg(surf, eta) >= STEEP_ROOT_DIHEDRAL_DEG - _STEEP_ROOT_TOL_DEG
+
+
+def _warn_steep_unscaled_root(surf, eta: np.ndarray) -> None:
+    """Issue a RuntimeWarning for a steep root dihedral without the root thickness scaling.
+
+    Parameters
+    ----------
+    surf : LiftingSurface
+        Surface definition (for the name in the message).
+    eta : numpy.ndarray
+        Span fractions of the stations [-], increasing.
+    """
+    if not _steep_root(surf, eta):
+        return
+    dihedral_deg = _root_row_dihedral_deg(surf, eta)
+    name = str(getattr(surf, "name", ""))
+    warnings.warn(
+        f"Surface {name!r}: the first panel row has a dihedral of {dihedral_deg:.1f} deg "
+        f"({STEEP_ROOT_DIHEDRAL_DEG:g} deg or more) and scale_root_thickness is False. The pressure coefficient "
+        "at the root is singular, so the loads are not reliable. Use scale_root_thickness=True (the "
+        "default).",
+        RuntimeWarning,
+        stacklevel=3,
+    )
 
 
 def _warn_strong_root_scaling(surf, factor: float) -> bool:
@@ -863,8 +987,8 @@ def _warn_strong_root_scaling(surf, factor: float) -> bool:
     warnings.warn(
         f"Surface {name!r}: the root section is strongly scaled. The first panel row has a dihedral of "
         f"{dihedral_deg:.1f} deg (above {ROOT_SCALE_WARN_DIHEDRAL_DEG:g} deg), so the root-thickness factor "
-        f"1/cos(dihedral) is {factor:.2f}. The result needs checking (for example against "
-        "scale_root_thickness=False).",
+        f"1/cos(dihedral) is {factor:.2f}. The result needs a spanwise convergence study. Do not "
+        "check it against scale_root_thickness=False: at this dihedral the unscaled root pressure is singular.",
         UserWarning,
         stacklevel=3,
     )
@@ -1566,6 +1690,8 @@ def _mesh_with_controls(
         if factor != 1.0:
             has_root_scale_warn = _warn_strong_root_scaling(surf, factor)
             yu_base[0], yl_base[0] = _scale_about_camber(yu_base[0], yl_base[0], factor)
+    else:
+        _warn_steep_unscaled_root(surf, edge_etas)
     has_asym = any(not bool(c.symmetric) for c in active)
     if symmetric and has_asym and half:
         raise ValueError(
@@ -1866,6 +1992,10 @@ def mesh_lifting_surface(
         above 1 / cos(75 deg) (about 3.86) from the first-row dihedral
         or a fold-guard tilt: the root thickness scaling is not verified
         above 75 deg dihedral (lift can change by more than 10 %).
+        When ``scale_root_thickness`` is False and the dihedral of the
+        first panel row of a symmetric surface is
+        ``STEEP_ROOT_DIHEDRAL_DEG`` (60 deg) or more: the pressure
+        coefficient at the root is singular.
 
     Notes
     -----
@@ -1986,6 +2116,8 @@ def mesh_lifting_surface(
         if factor != 1.0:
             has_root_scale_warn = _warn_strong_root_scaling(surf, factor)
             yu_e[0], yl_e[0] = _scale_about_camber(yu_e[0], yl_e[0], factor)
+    else:
+        _warn_steep_unscaled_root(surf, eta_e)
     if fold_guard:
 
         def offsets(j: int, tilt: float):
@@ -2544,6 +2676,288 @@ def _station_folds_batch(nodes: np.ndarray, panels: np.ndarray, station: np.ndar
     return np.any(bad[panels], axis=1)
 
 
+def _mirror_closure(nodes: np.ndarray, panels: np.ndarray, y_tol: float) -> tuple[np.ndarray, np.ndarray]:
+    """Return a half mesh together with its mirror image in y = 0.
+
+    A node on y = 0 (within *y_tol*) is the same node in the two halves,
+    so a panel of the mirror image that touches the root shares its root
+    nodes with the panel of the half mesh. The mirror panels have the
+    reversed corner order.
+
+    Parameters
+    ----------
+    nodes : numpy.ndarray
+        Node positions [m], shape (Nn, 3).
+    panels : numpy.ndarray
+        Panel corner node indices, shape (Np, 4).
+    y_tol : float
+        Largest |y| [m] of a node on the plane of symmetry.
+
+    Returns
+    -------
+    tuple of numpy.ndarray
+        Nodes [m], shape (2 Nn, 3), and panels, shape (2 Np, 4). Rows
+        Np to 2 Np - 1 are the mirror images of rows 0 to Np - 1.
+    """
+    n = nodes.shape[0]
+    ids = np.arange(n)
+    mirror_id = np.where(np.abs(nodes[:, 1]) <= y_tol, ids, ids + n)
+    mirrored = nodes * np.array([1.0, -1.0, 1.0])
+    return np.vstack([nodes, mirrored]), np.vstack([panels, mirror_id[panels[:, ::-1]]])
+
+
+def _edge_triangle_hits(nodes: np.ndarray, edges: np.ndarray, tri: np.ndarray, owner_nodes: np.ndarray) -> int:
+    """Count the crossings of edge-triangle pairs (row by row).
+
+    The segment-triangle test is the ray-triangle test of Moller and
+    Trumbore (1997), limited to the segment. All bounds are inclusive
+    (tolerance :data:`_SELF_X_PARAM_TOL`), so that a crossing exactly on
+    a triangle side or at a segment end counts. An edge nearly parallel to
+    the triangle plane (:data:`_SELF_X_PARALLEL_REL`) does not count. A
+    pair where the edge shares a node with the panel of the triangle does
+    not count.
+
+    Parameters
+    ----------
+    nodes : numpy.ndarray
+        Node positions [m], shape (Nn, 3).
+    edges : numpy.ndarray
+        Node indices of the edge of each pair, shape (K, 2).
+    tri : numpy.ndarray
+        Node indices of the triangle of each pair, shape (K, 3).
+    owner_nodes : numpy.ndarray
+        Corner node indices of the panel of each triangle, shape (K, 4).
+
+    Returns
+    -------
+    int
+        Number of pairs where the edge crosses or touches the triangle [-].
+    """
+    count = 0
+    eps = _SELF_X_PARAM_TOL
+    for s0 in range(0, edges.shape[0], _SELF_X_BLOCK):
+        e = edges[s0:s0 + _SELF_X_BLOCK]
+        t3 = tri[s0:s0 + _SELF_X_BLOCK]
+        own = owner_nodes[s0:s0 + _SELF_X_BLOCK]
+        shared = np.any((own == e[:, :1]) | (own == e[:, 1:]), axis=1)
+        e, t3 = e[~shared], t3[~shared]
+        o = nodes[e[:, 0]]
+        d = nodes[e[:, 1]] - o
+        v0 = nodes[t3[:, 0]]
+        e1 = nodes[t3[:, 1]] - v0
+        e2 = nodes[t3[:, 2]] - v0
+        h = np.cross(d, e2)
+        det = np.sum(e1 * h, axis=1)
+        scale = np.linalg.norm(d, axis=1) * np.linalg.norm(e1, axis=1) * np.linalg.norm(e2, axis=1)
+        ok = np.abs(det) > _SELF_X_PARALLEL_REL * scale
+        inv = np.where(ok, 1.0 / np.where(ok, det, 1.0), 0.0)
+        s = o - v0
+        u = np.sum(s * h, axis=1) * inv
+        q = np.cross(s, e1)
+        v = np.sum(d * q, axis=1) * inv
+        t = np.sum(e2 * q, axis=1) * inv
+        hit = ok & (u >= -eps) & (v >= -eps) & (u + v <= 1.0 + eps) & (t >= -eps) & (t <= 1.0 + eps)
+        count += int(np.sum(hit))
+    return count
+
+
+def _grid_cells(lo: np.ndarray, hi: np.ndarray, origin: np.ndarray, h: float, dims: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Return the grid cells that each axis-aligned box overlaps.
+
+    Parameters
+    ----------
+    lo, hi : numpy.ndarray
+        Lower and upper corners of the boxes [m], shape (N, 3).
+    origin : numpy.ndarray
+        Lower corner of the grid [m], shape (3,).
+    h : float
+        Cell size [m].
+    dims : numpy.ndarray
+        Number of cells along x, y and z [-], shape (3,).
+
+    Returns
+    -------
+    tuple of numpy.ndarray
+        Box row and flat cell key of each (box, cell) entry, shapes (K,).
+    """
+    a = np.clip(np.floor((lo - origin) / h).astype(np.int64), 0, dims - 1)
+    b = np.clip(np.floor((hi - origin) / h).astype(np.int64), 0, dims - 1)
+    n = b - a + 1
+    cnt = np.prod(n, axis=1)
+    row = np.repeat(np.arange(lo.shape[0]), cnt)
+    k = np.arange(int(np.sum(cnt)), dtype=np.int64) - np.repeat(np.cumsum(cnt) - cnt, cnt)
+    nx, ny = n[row, 0], n[row, 1]
+    ix = a[row, 0] + k % nx
+    iy = a[row, 1] + (k // nx) % ny
+    iz = a[row, 2] + k // (nx * ny)
+    return row, (ix * dims[1] + iy) * dims[2] + iz
+
+
+def _candidate_pairs(nodes: np.ndarray, edges: np.ndarray, tri: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Return the edge-triangle pairs whose bounding boxes overlap.
+
+    Each edge and each triangle has its axis-aligned bounding box (the
+    edge box grows by 1e-6 times the mesh size, so that the inclusive
+    bounds of the exact test lose no pair). A uniform grid (spatial hash)
+    gives the pairs that share a grid cell; the box test then keeps the
+    pairs whose boxes overlap. The cell size is the median box size of the
+    triangles; it doubles while a few large boxes (tip caps) fill too many
+    cells. Pairs that this filter removes cannot intersect.
+
+    Parameters
+    ----------
+    nodes : numpy.ndarray
+        Node positions [m], shape (Nn, 3).
+    edges : numpy.ndarray
+        Edge node indices, shape (Ne, 2).
+    tri : numpy.ndarray
+        Triangle node indices, shape (Nt, 3).
+
+    Returns
+    -------
+    tuple of numpy.ndarray
+        Edge row and triangle row of each candidate pair, shapes (K,).
+    """
+    ep = nodes[edges]
+    tp = nodes[tri]
+    size = float(np.max(np.ptp(nodes, axis=0))) if nodes.shape[0] else 1.0
+    pad = 1e-6 * max(size, 1e-300)
+    elo, ehi = ep.min(axis=1) - pad, ep.max(axis=1) + pad
+    tlo, thi = tp.min(axis=1), tp.max(axis=1)
+    origin = np.minimum(elo.min(axis=0), tlo.min(axis=0))
+    top = np.maximum(ehi.max(axis=0), thi.max(axis=0))
+    h = max(float(np.median(np.max(thi - tlo, axis=1))), 1e-3 * max(size, 1e-300))
+    n_box = edges.shape[0] + tri.shape[0]
+    while True:
+        dims = np.maximum(np.floor((top - origin) / h).astype(np.int64) + 1, 1)
+        cells = 0
+        for lo, hi in ((elo, ehi), (tlo, thi)):
+            a = np.clip(np.floor((lo - origin) / h).astype(np.int64), 0, dims - 1)
+            b = np.clip(np.floor((hi - origin) / h).astype(np.int64), 0, dims - 1)
+            cells += int(np.sum(np.prod(b - a + 1, axis=1)))
+        if cells <= 32 * n_box:
+            break
+        h *= 2.0
+    e_row, e_key = _grid_cells(elo, ehi, origin, h, dims)
+    t_row, t_key = _grid_cells(tlo, thi, origin, h, dims)
+    order = np.argsort(t_key, kind="stable")
+    t_key, t_row = t_key[order], t_row[order]
+    first = np.searchsorted(t_key, e_key, side="left")
+    cnt = np.searchsorted(t_key, e_key, side="right") - first
+    ie = np.repeat(e_row, cnt)
+    it = t_row[np.repeat(first, cnt) + np.arange(int(np.sum(cnt))) - np.repeat(np.cumsum(cnt) - cnt, cnt)]
+    ok = np.all((elo[ie] <= thi[it]) & (ehi[ie] >= tlo[it]), axis=1)
+    pair = np.unique(ie[ok].astype(np.int64) * tri.shape[0] + it[ok])
+    return pair // tri.shape[0], pair % tri.shape[0]
+
+
+def _self_intersections(
+    nodes: np.ndarray,
+    panels: np.ndarray,
+    comp_of: np.ndarray,
+    half: bool,
+    y_tol: float,
+    prefilter: bool = True,
+) -> dict[int, int]:
+    """Count the self-intersections of each closed surface of a mesh.
+
+    The count of a component is the number of pairs (panel edge,
+    panel triangle) where the edge crosses or touches the triangle and
+    shares no node with the panel of the triangle. Each quadrilateral
+    panel gives the two triangles (0, 1, 2) and (0, 2, 3). A valid closed
+    surface has no such pair: neighbour panels share nodes, and panels
+    that share no node are apart. With *half* True each component is
+    tested together with its mirror image in y = 0 (see
+    :func:`_mirror_closure`), so a half wing that crosses the plane of
+    symmetry counts. Two different components are not tested against
+    each other (:func:`check_contact` does that).
+
+    Parameters
+    ----------
+    nodes : numpy.ndarray
+        Node positions [m], shape (Nn, 3).
+    panels : numpy.ndarray
+        Panel corner node indices, shape (Np, 4).
+    comp_of : numpy.ndarray
+        Component index of each panel, shape (Np,).
+    half : bool
+        True for a right-half mesh (add the mirror image).
+    y_tol : float
+        Largest |y| [m] of a node on the plane of symmetry.
+    prefilter : bool
+        True to test only the pairs of :func:`_candidate_pairs` (bounding
+        boxes that overlap); False to test all pairs (reference).
+
+    Returns
+    -------
+    dict
+        Number of crossing pairs [-] of each component index.
+    """
+    out: dict[int, int] = {}
+    for c in sorted({int(k) for k in comp_of}):
+        sub = panels[comp_of == c]
+        x = nodes
+        if half:
+            x, sub = _mirror_closure(nodes, sub, y_tol)
+        tri = np.concatenate([sub[:, [0, 1, 2]], sub[:, [0, 2, 3]]])
+        owner = np.concatenate([np.arange(sub.shape[0]), np.arange(sub.shape[0])])
+        keep = (tri[:, 0] != tri[:, 1]) & (tri[:, 1] != tri[:, 2]) & (tri[:, 0] != tri[:, 2])
+        tri, owner = tri[keep], owner[keep]
+        e = np.concatenate([sub[:, [0, 1]], sub[:, [1, 2]], sub[:, [2, 3]], sub[:, [3, 0]]])
+        e = np.unique(np.sort(e[e[:, 0] != e[:, 1]], axis=1), axis=0)
+        if tri.shape[0] == 0 or e.shape[0] == 0:
+            out[c] = 0
+            continue
+        if prefilter:
+            ie, it = _candidate_pairs(x, e, tri)
+            out[c] = _edge_triangle_hits(x, e[ie], tri[it], sub[owner[it]])
+            continue
+        # All pairs, in blocks of edges (memory limit).
+        rows = max(1, _SELF_X_BLOCK // tri.shape[0])
+        it = np.arange(tri.shape[0])
+        total = 0
+        for s0 in range(0, e.shape[0], rows):
+            eb = e[s0:s0 + rows]
+            total += _edge_triangle_hits(x, np.repeat(eb, tri.shape[0], axis=0), np.tile(tri, (eb.shape[0], 1)),
+                                         np.tile(sub[owner[it]], (eb.shape[0], 1)))
+        out[c] = total
+    return out
+
+
+def _self_intersection_stats(mesh: PanelMesh, nodes: np.ndarray, panels: np.ndarray, comp_of: np.ndarray,
+                             y_tol: float, prefilter: bool = True) -> dict:
+    """Return the self-intersection keys of :func:`check_mesh`.
+
+    Parameters
+    ----------
+    mesh : PanelMesh
+        Mesh (for the half-mesh flag).
+    nodes : numpy.ndarray
+        Node positions [m], shape (Nn, 3).
+    panels : numpy.ndarray
+        Panel corner node indices, shape (Np, 4).
+    comp_of : numpy.ndarray
+        Component index of each panel, shape (Np,).
+    y_tol : float
+        Largest |y| [m] of a node on the plane of symmetry.
+    prefilter : bool
+        See :func:`_self_intersections`.
+
+    Returns
+    -------
+    dict
+        n_self_intersections [-] and self_intersecting_components (sorted
+        list of component indices with a count above zero).
+    """
+    if panels.shape[0] == 0:
+        return {"n_self_intersections": 0, "self_intersecting_components": []}
+    per = _self_intersections(nodes, panels, comp_of, bool(mesh.half), y_tol, prefilter=prefilter)
+    return {
+        "n_self_intersections": int(sum(per.values())),
+        "self_intersecting_components": [c for c in sorted(per) if per[c] > 0],
+    }
+
+
 def _check_mesh_reference(mesh: PanelMesh, warp_limit: float = WARP_LIMIT) -> dict:
     """Loop reference of :func:`check_mesh`, kept only for the parity tests.
 
@@ -2584,8 +2998,18 @@ def _check_mesh_reference(mesh: PanelMesh, warp_limit: float = WARP_LIMIT) -> di
         plane or are folded (both make a surface that is not valid; the
         trust score reads this count as folded panels).
         planar : max_warp below *warp_limit*.
-        valid_panels : no panel non-convex or folded, all planar and with
-        positive area.
+        n_self_intersections : number of pairs (panel edge, panel
+        triangle) of one component where the edge crosses or touches the
+        triangle and shares no node with its panel (see
+        :func:`_self_intersections`). With ``mesh.half`` True each
+        component is tested together with its mirror image in y = 0. A
+        count above zero means that the surface passes through itself or
+        through its mirror image. The fold test above compares only
+        neighbour station rows, so it does not find all of these cases.
+        self_intersecting_components : sorted list of the component
+        indices with self-intersections.
+        valid_panels : no panel non-convex or folded, all planar, with
+        positive area, and no self-intersection.
         n_open_edges : number of edges used by one panel only.
     """
     nodes = np.asarray(mesh.nodes, dtype=float)
@@ -2674,6 +3098,7 @@ def _check_mesh_reference(mesh: PanelMesh, warp_limit: float = WARP_LIMIT) -> di
     n_folded = int(np.sum(folded))
     n_nonconvex = int(np.sum(~convex | folded))
     planar = bool(max_warp <= float(warp_limit))
+    self_x = _self_intersection_stats(mesh, nodes, panels, comp_of, y_tol, prefilter=False)
     return {
         "watertight": bool(watertight),
         "orientation_consistent": bool(consistent),
@@ -2692,8 +3117,11 @@ def _check_mesh_reference(mesh: PanelMesh, warp_limit: float = WARP_LIMIT) -> di
         "n_folded": n_folded,
         "n_nonconvex": n_nonconvex,
         "planar": planar,
-        "valid_panels": bool(n_nonconvex == 0 and planar and min_area > 0.0),
+        "valid_panels": bool(
+            n_nonconvex == 0 and planar and min_area > 0.0 and self_x["n_self_intersections"] == 0
+        ),
         "n_open_edges": int(n_open),
+        **self_x,
     }
 
 
@@ -2741,9 +3169,47 @@ def check_mesh(mesh: PanelMesh, warp_limit: float = WARP_LIMIT) -> dict:
         plane or are folded (both make a surface that is not valid; the
         trust score reads this count as folded panels).
         planar : max_warp below *warp_limit*.
-        valid_panels : no panel non-convex or folded, all planar and with
-        positive area.
+        n_self_intersections : number of pairs (panel edge, panel
+        triangle) of one component where the edge crosses or touches the
+        triangle and shares no node with its panel (see
+        :func:`_self_intersections`). With ``mesh.half`` True each
+        component is tested together with its mirror image in y = 0. A
+        count above zero means that the surface passes through itself or
+        through its mirror image. The fold test above compares only
+        neighbour station rows, so it does not find all of these cases.
+        self_intersecting_components : sorted list of the component
+        indices with self-intersections.
+        valid_panels : no panel non-convex or folded, all planar, with
+        positive area, and no self-intersection.
         n_open_edges : number of edges used by one panel only.
+    """
+    return _check_mesh(mesh, warp_limit)
+
+
+def _check_mesh(mesh: PanelMesh, warp_limit: float = WARP_LIMIT, self_intersections: bool = True) -> dict:
+    """Return the statistics of :func:`check_mesh`, with an option to skip the self-intersection count.
+
+    The 3D panel solver skips the count when all its surfaces have the root
+    thickness scaling (see :func:`ventorum.solvers.panel3d._build_geometry`):
+    the count is the most expensive part of the check, and no test mesh
+    with the root scaling had a self-intersection.
+
+    Parameters
+    ----------
+    mesh : PanelMesh
+        Mesh to check.
+    warp_limit : float
+        Planarity limit [-] (see :func:`check_mesh`).
+    self_intersections : bool
+        True (as :func:`check_mesh`) counts the self-intersections. False
+        skips the count: the keys ``n_self_intersections`` and
+        ``self_intersecting_components`` are then absent, and
+        ``valid_panels`` does not include the self-intersection test.
+
+    Returns
+    -------
+    dict
+        The keys of :func:`check_mesh` (see *self_intersections*).
     """
     nodes = np.asarray(mesh.nodes, dtype=float)
     panels = np.asarray(mesh.panels, dtype=int).reshape(-1, 4)
@@ -2824,6 +3290,10 @@ def check_mesh(mesh: PanelMesh, warp_limit: float = WARP_LIMIT) -> dict:
     n_folded = int(np.sum(folded))
     n_nonconvex = int(np.sum(~convex | folded))
     planar = bool(max_warp <= float(warp_limit))
+    if self_intersections:
+        self_x = _self_intersection_stats(mesh, nodes, panels, comp_of, y_tol, prefilter=True)
+    else:
+        self_x = {}
     return {
         "watertight": bool(watertight),
         "orientation_consistent": bool(consistent),
@@ -2842,8 +3312,11 @@ def check_mesh(mesh: PanelMesh, warp_limit: float = WARP_LIMIT) -> dict:
         "n_folded": n_folded,
         "n_nonconvex": n_nonconvex,
         "planar": planar,
-        "valid_panels": bool(n_nonconvex == 0 and planar and min_area > 0.0),
+        "valid_panels": bool(
+            n_nonconvex == 0 and planar and min_area > 0.0 and self_x.get("n_self_intersections", 0) == 0
+        ),
         "n_open_edges": int(n_open),
+        **self_x,
     }
 
 

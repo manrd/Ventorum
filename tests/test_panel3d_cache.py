@@ -276,14 +276,14 @@ def test_replaced_mesh_builder_misses(monkeypatch):
 
     st = _settings()
     _solve(_wing(), _cond(3.0), st)
-    original = factory.check_mesh
+    original = factory._check_mesh
     calls = []
 
-    def counted(mesh):
+    def counted(mesh, **kwargs):
         calls.append(1)
-        return original(mesh)
+        return original(mesh, **kwargs)
 
-    monkeypatch.setattr(factory, "check_mesh", counted)
+    monkeypatch.setattr(factory, "_check_mesh", counted)
     res = _solve(_wing(), _cond(3.0), st)
     assert calls == [1]
     assert res.details["dispatch"]["cached_solver"] is False
