@@ -77,6 +77,16 @@ not capped. When the builder applies it with a first-row dihedral above
 UserWarning: the root section is strongly scaled and the result needs a
 check.
 
+Steep root dihedral
+-------------------
+At a first-row dihedral of ``STEEP_ROOT_DIHEDRAL_DEG`` (60 deg) or more
+of a symmetric surface, the builder issues a RuntimeWarning when
+``scale_root_thickness`` is False: the root section is then too thin
+normal to the surface, and the pressure coefficient at the root is
+singular. With the root scaling the mesh is valid, but the lift converges
+slowly with the spanwise panel count; the 3D panel solver then adds a
+trust note that asks for a spanwise convergence study.
+
 Fold guard
 ----------
 Two neighbour section planes that are not parallel cross on a line parallel
@@ -211,6 +221,7 @@ __all__ = [
     "FOLD_MARGIN",
     "ROOT_SCALE_WARN_DIHEDRAL_DEG",
     "ROOT_SCALE_TRUST_WARN_DIHEDRAL_DEG",
+    "STEEP_ROOT_DIHEDRAL_DEG",
     "CONTACT_GAP_FRACTION",
     "PanelMesh",
     "check_contact",
@@ -273,6 +284,15 @@ _ROOT_SCALE_TRUST_WARN_FACTOR = 1.0 / math.cos(math.radians(ROOT_SCALE_TRUST_WAR
 _ROOT_SCALE_TRUST_WARNING = (
     "The root thickness scaling is not verified above 75 deg dihedral (lift can change by more than 10 %)."
 )
+#: Steep root dihedral [deg]: a code setting, not a calibrated value. At
+#: this dihedral of the first panel row of a symmetric surface or more, a
+#: mesh without the root thickness scaling gets a RuntimeWarning (the root
+#: pressure coefficient is singular), and a mesh with the scaling gets a
+#: trust note (the lift converges slowly with the spanwise panel count).
+STEEP_ROOT_DIHEDRAL_DEG = 60.0
+#: Round-off tolerance [deg] of the steep-root test, so that a surface
+#: defined with exactly STEEP_ROOT_DIHEDRAL_DEG counts as steep.
+_STEEP_ROOT_TOL_DEG = 1e-6
 #: Fold guard: smallest distance of a section node from the plane of the
 #: neighbour section, as a fraction of the station spacing [-]. Any
 #: positive value prevents a fold; 0.05 changes only the stations that
@@ -821,24 +841,117 @@ def _root_thickness_factor(surf, eta: np.ndarray) -> float:
     float
         Factor on the offsets of the root section from its camber line [-].
     """
-    if not bool(getattr(surf, "is_symmetric", False)):
+    cos_g = _root_row_cosine(surf, eta)
+    if cos_g is None or cos_g <= _COS_ROOT_MIN or cos_g >= 1.0:
         return 1.0
+    return 1.0 / cos_g
+
+
+def _root_row_cosine(surf, eta: np.ndarray) -> float | None:
+    """Return cos(G) [-] of the first panel row of a symmetric surface, or None.
+
+    G is the dihedral of the first panel row: the angle of the reference
+    line from the root station to the next station, in the y-z plane.
+
+    Parameters
+    ----------
+    surf : LiftingSurface
+        Surface definition.
+    eta : numpy.ndarray
+        Span fractions of the stations [-], increasing, with duplicates at
+        control side edges.
+
+    Returns
+    -------
+    float or None
+        cos(G) [-]. None for a one-sided surface, for stations that do not
+        start at the root, and for a first panel row of zero length.
+    """
+    if not bool(getattr(surf, "is_symmetric", False)):
+        return None
     eta = np.asarray(eta, dtype=float)
     if eta.size < 2 or float(eta[0]) > 1e-12:
-        return 1.0
+        return None
     nxt = eta[eta > float(eta[0]) + _ETA_MERGE_TOL]
     if nxt.size == 0:
-        return 1.0
+        return None
     _, y_ref, z_ref = surface_reference_line(surf, np.array([float(eta[0]), float(nxt[0])]))
     dy = float(y_ref[1] - y_ref[0])
     dz = float(z_ref[1] - z_ref[0])
     length = float(np.hypot(dy, dz))
     if length <= 0.0:
-        return 1.0
-    cos_g = dy / length
-    if cos_g <= _COS_ROOT_MIN or cos_g >= 1.0:
-        return 1.0
-    return 1.0 / cos_g
+        return None
+    return dy / length
+
+
+def _root_row_dihedral_deg(surf, eta: np.ndarray) -> float:
+    """Return the dihedral [deg] of the first panel row of a symmetric surface.
+
+    The value is the fold angle of the two halves at the root (see
+    :func:`_root_row_cosine`). It is 0 for a one-sided surface, for
+    stations that do not start at the root and for a first panel row of
+    zero length.
+
+    Parameters
+    ----------
+    surf : LiftingSurface
+        Surface definition.
+    eta : numpy.ndarray
+        Span fractions of the stations [-], increasing.
+
+    Returns
+    -------
+    float
+        Dihedral of the first panel row [deg], from 0 to 180.
+    """
+    cos_g = _root_row_cosine(surf, eta)
+    if cos_g is None:
+        return 0.0
+    return math.degrees(math.acos(min(1.0, max(-1.0, cos_g))))
+
+
+def _steep_root(surf, eta: np.ndarray) -> bool:
+    """Return True when the first panel row of a symmetric surface is steep.
+
+    Parameters
+    ----------
+    surf : LiftingSurface
+        Surface definition.
+    eta : numpy.ndarray
+        Span fractions of the stations [-], increasing.
+
+    Returns
+    -------
+    bool
+        True when the dihedral of the first panel row is
+        ``STEEP_ROOT_DIHEDRAL_DEG`` (60 deg) or more, with a round-off
+        tolerance of ``_STEEP_ROOT_TOL_DEG``.
+    """
+    return _root_row_dihedral_deg(surf, eta) >= STEEP_ROOT_DIHEDRAL_DEG - _STEEP_ROOT_TOL_DEG
+
+
+def _warn_steep_unscaled_root(surf, eta: np.ndarray) -> None:
+    """Issue a RuntimeWarning for a steep root dihedral without the root thickness scaling.
+
+    Parameters
+    ----------
+    surf : LiftingSurface
+        Surface definition (for the name in the message).
+    eta : numpy.ndarray
+        Span fractions of the stations [-], increasing.
+    """
+    if not _steep_root(surf, eta):
+        return
+    dihedral_deg = _root_row_dihedral_deg(surf, eta)
+    name = str(getattr(surf, "name", ""))
+    warnings.warn(
+        f"Surface {name!r}: the first panel row has a dihedral of {dihedral_deg:.1f} deg "
+        f"({STEEP_ROOT_DIHEDRAL_DEG:g} deg or more) and scale_root_thickness is False. The pressure coefficient "
+        "at the root is singular, so the loads are not reliable. Use scale_root_thickness=True (the "
+        "default).",
+        RuntimeWarning,
+        stacklevel=3,
+    )
 
 
 def _warn_strong_root_scaling(surf, factor: float) -> bool:
@@ -1577,6 +1690,8 @@ def _mesh_with_controls(
         if factor != 1.0:
             has_root_scale_warn = _warn_strong_root_scaling(surf, factor)
             yu_base[0], yl_base[0] = _scale_about_camber(yu_base[0], yl_base[0], factor)
+    else:
+        _warn_steep_unscaled_root(surf, edge_etas)
     has_asym = any(not bool(c.symmetric) for c in active)
     if symmetric and has_asym and half:
         raise ValueError(
@@ -1877,6 +1992,10 @@ def mesh_lifting_surface(
         above 1 / cos(75 deg) (about 3.86) from the first-row dihedral
         or a fold-guard tilt: the root thickness scaling is not verified
         above 75 deg dihedral (lift can change by more than 10 %).
+        When ``scale_root_thickness`` is False and the dihedral of the
+        first panel row of a symmetric surface is
+        ``STEEP_ROOT_DIHEDRAL_DEG`` (60 deg) or more: the pressure
+        coefficient at the root is singular.
 
     Notes
     -----
@@ -1997,6 +2116,8 @@ def mesh_lifting_surface(
         if factor != 1.0:
             has_root_scale_warn = _warn_strong_root_scaling(surf, factor)
             yu_e[0], yl_e[0] = _scale_about_camber(yu_e[0], yl_e[0], factor)
+    else:
+        _warn_steep_unscaled_root(surf, eta_e)
     if fold_guard:
 
         def offsets(j: int, tilt: float):
@@ -3062,6 +3183,34 @@ def check_mesh(mesh: PanelMesh, warp_limit: float = WARP_LIMIT) -> dict:
         positive area, and no self-intersection.
         n_open_edges : number of edges used by one panel only.
     """
+    return _check_mesh(mesh, warp_limit)
+
+
+def _check_mesh(mesh: PanelMesh, warp_limit: float = WARP_LIMIT, self_intersections: bool = True) -> dict:
+    """Return the statistics of :func:`check_mesh`, with an option to skip the self-intersection count.
+
+    The 3D panel solver skips the count when all its surfaces have the root
+    thickness scaling (see :func:`ventorum.solvers.panel3d._build_geometry`):
+    the count is the most expensive part of the check, and no test mesh
+    with the root scaling had a self-intersection.
+
+    Parameters
+    ----------
+    mesh : PanelMesh
+        Mesh to check.
+    warp_limit : float
+        Planarity limit [-] (see :func:`check_mesh`).
+    self_intersections : bool
+        True (as :func:`check_mesh`) counts the self-intersections. False
+        skips the count: the keys ``n_self_intersections`` and
+        ``self_intersecting_components`` are then absent, and
+        ``valid_panels`` does not include the self-intersection test.
+
+    Returns
+    -------
+    dict
+        The keys of :func:`check_mesh` (see *self_intersections*).
+    """
     nodes = np.asarray(mesh.nodes, dtype=float)
     panels = np.asarray(mesh.panels, dtype=int).reshape(-1, 4)
     n_p = panels.shape[0]
@@ -3141,7 +3290,10 @@ def check_mesh(mesh: PanelMesh, warp_limit: float = WARP_LIMIT) -> dict:
     n_folded = int(np.sum(folded))
     n_nonconvex = int(np.sum(~convex | folded))
     planar = bool(max_warp <= float(warp_limit))
-    self_x = _self_intersection_stats(mesh, nodes, panels, comp_of, y_tol, prefilter=True)
+    if self_intersections:
+        self_x = _self_intersection_stats(mesh, nodes, panels, comp_of, y_tol, prefilter=True)
+    else:
+        self_x = {}
     return {
         "watertight": bool(watertight),
         "orientation_consistent": bool(consistent),
@@ -3161,7 +3313,7 @@ def check_mesh(mesh: PanelMesh, warp_limit: float = WARP_LIMIT) -> dict:
         "n_nonconvex": n_nonconvex,
         "planar": planar,
         "valid_panels": bool(
-            n_nonconvex == 0 and planar and min_area > 0.0 and self_x["n_self_intersections"] == 0
+            n_nonconvex == 0 and planar and min_area > 0.0 and self_x.get("n_self_intersections", 0) == 0
         ),
         "n_open_edges": int(n_open),
         **self_x,

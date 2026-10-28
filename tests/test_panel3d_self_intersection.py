@@ -166,3 +166,55 @@ def test_two_components_are_not_tested_against_each_other():
     mesh = PanelMesh(nodes=nodes, panels=panels, component=np.array([0, 1]), kind=np.array(["surface"] * 2),
                      wake_edges=np.zeros((0, 4), dtype=int))
     assert check_mesh(mesh)["n_self_intersections"] == 0
+
+
+def _count_self_intersection_calls(monkeypatch):
+    """Replace the counting function of the mesh module by a counter; return the call list."""
+    from ventorum.panel3d import mesh as mesh_mod
+
+    calls = []
+    original = mesh_mod._self_intersections
+
+    def counted(*args, **kwargs):
+        calls.append(1)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(mesh_mod, "_self_intersections", counted)
+    return calls
+
+
+def _shallow_aircraft():
+    """Wing with 5 deg dihedral: no crossing with or without the root scaling."""
+    wing = vt.LiftingSurface(
+        name="W",
+        semi_span=4.0,
+        dihedral=np.radians(5.0),
+        sections=[vt.WingSection(y_frac=0.0, chord=1.0, shape=_naca()),
+                  vt.WingSection(y_frac=1.0, chord=1.0, shape=_naca())],
+    )
+    return vt.Aircraft(name="Shallow", surfaces=[wing])
+
+
+def test_default_build_skips_the_self_intersection_count(monkeypatch):
+    """With the root scaling (the default) the solver does not run the count: it costs time on every build."""
+    calls = _count_self_intersection_calls(monkeypatch)
+    res = vt.analyze(_shallow_aircraft(), alpha_deg=4.0, settings=_settings(True))
+    assert calls == []
+    assert "n_self_intersections" not in res.details["mesh_stats"]
+    assert np.isfinite(res.totals.CL)
+
+
+def test_unscaled_build_runs_the_self_intersection_count(monkeypatch):
+    """Without the root scaling the solver runs the count on the mesh."""
+    calls = _count_self_intersection_calls(monkeypatch)
+    res = vt.analyze(_shallow_aircraft(), alpha_deg=4.0, settings=_settings(False))
+    assert len(calls) >= 1
+    assert res.details["mesh_stats"]["n_self_intersections"] == 0
+
+
+def test_check_mesh_always_counts(monkeypatch):
+    """A direct call of check_mesh is an explicit check: it counts also on a mesh with the root scaling."""
+    calls = _count_self_intersection_calls(monkeypatch)
+    stats = check_mesh(_mesh(5.0, 8, True))
+    assert len(calls) == 1
+    assert stats["n_self_intersections"] == 0

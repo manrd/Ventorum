@@ -1,7 +1,8 @@
 # Author: Manuel Alejandro Rodriguez Diaz, PhD
 """
 Tests for 3DP trust notes: far-field kernel bias, outer-strip Cl,
-and root thickness scaling above 75 deg dihedral.
+root thickness scaling above 75 deg dihedral, and a steep root dihedral
+with and without the root thickness scaling.
 """
 
 from __future__ import annotations
@@ -18,9 +19,11 @@ from ventorum.core.trust import (
     PANEL3D_FAR_FIELD_GROUND_NOTE,
     PANEL3D_OUTER_STRIP_GROUND_NOTE,
     PANEL3D_ROOT_SCALE_WARNING,
+    PANEL3D_STEEP_ROOT_CONVERGENCE_NOTE,
+    PANEL3D_STEEP_ROOT_UNSCALED_WARNING,
     panel3d_mesh_checks,
 )
-from ventorum.panel3d.mesh import mesh_lifting_surface
+from ventorum.panel3d.mesh import STEEP_ROOT_DIHEDRAL_DEG, mesh_lifting_surface
 from ventorum.solvers.factory import make_solver
 
 
@@ -283,3 +286,86 @@ def test_parity_coefficients_bit_identical():
     assert res1.totals.CL == res2.totals.CL
     assert res1.totals.Cm == res2.totals.Cm
     assert res1.totals.CDi == res2.totals.CDi
+
+
+def _singular_root_warnings(caught) -> list:
+    """Return the RuntimeWarnings of a steep root without the root thickness scaling."""
+    return [w for w in caught if issubclass(w.category, RuntimeWarning) and "singular" in str(w.message)]
+
+
+def test_steep_root_constant_is_60_deg():
+    """The steep-root limit is one code setting of 60 deg."""
+    assert STEEP_ROOT_DIHEDRAL_DEG == 60.0
+
+
+def test_steep_unscaled_root_mesh_warning():
+    """Without the root scaling, a first-row dihedral of 60 deg or more gives a RuntimeWarning."""
+    from ventorum.airfoil import airfoil
+
+    coords = airfoil("0012").coords
+    for dihedral, scale, expected in ((55.0, False, 0), (60.0, False, 1), (65.0, False, 1), (65.0, True, 0)):
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            mesh_lifting_surface(_straight_wing(dihedral), coords, n_chord=6, n_span=8,
+                                 scale_root_thickness=scale)
+        found = _singular_root_warnings(caught)
+        assert len(found) == expected, (dihedral, scale)
+        if expected:
+            assert "'Wing'" in str(found[0].message)
+            assert "scale_root_thickness=True" in str(found[0].message)
+
+
+def test_steep_unscaled_root_trust_warning():
+    """Without the root scaling, a steep root gives the trust warning and the Python warning in a solve."""
+    cond = FlightCondition(V_inf=30.0, alpha=np.radians(3.0))
+    settings = SolverSettings(solver_type="panel3d", n_panels=8, n_chord=6, panel_cache=False,
+                              panel_scale_root_thickness=False)
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        res = vt.analyze(_straight_wing(65.0), condition=cond, settings=settings)
+    assert len(_singular_root_warnings(caught)) >= 1
+    assert PANEL3D_STEEP_ROOT_UNSCALED_WARNING in res.totals.trust.warnings
+    assert PANEL3D_STEEP_ROOT_CONVERGENCE_NOTE not in res.totals.trust.warnings
+    assert res.details["mesh_stats"]["steep_root_dihedral"] is True
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        res = vt.analyze(_straight_wing(55.0), condition=cond, settings=settings)
+    assert _singular_root_warnings(caught) == []
+    assert PANEL3D_STEEP_ROOT_UNSCALED_WARNING not in res.totals.trust.warnings
+
+
+def test_steep_scaled_root_convergence_note():
+    """With the root scaling (the default), a steep root gives the trust note of a spanwise convergence study."""
+    cond = FlightCondition(V_inf=30.0, alpha=np.radians(3.0))
+    settings = SolverSettings(solver_type="panel3d", n_panels=8, n_chord=6, panel_cache=False)
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        res = vt.analyze(_straight_wing(65.0), condition=cond, settings=settings)
+    assert PANEL3D_STEEP_ROOT_CONVERGENCE_NOTE in res.totals.trust.warnings
+    assert PANEL3D_STEEP_ROOT_UNSCALED_WARNING not in res.totals.trust.warnings
+    assert _singular_root_warnings(caught) == []
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        res = vt.analyze(_straight_wing(55.0), condition=cond, settings=settings)
+    assert PANEL3D_STEEP_ROOT_CONVERGENCE_NOTE not in res.totals.trust.warnings
+
+
+def test_steep_root_mesh_checks_direct():
+    """panel3d_mesh_checks selects the note or the warning from the scaling flag; neither adds a penalty."""
+    pen, warns, recs = panel3d_mesh_checks({"steep_root_dihedral": True, "scale_root_thickness": True})
+    assert PANEL3D_STEEP_ROOT_CONVERGENCE_NOTE in warns
+    assert PANEL3D_STEEP_ROOT_UNSCALED_WARNING not in warns
+    assert any("spanwise panel count" in r for r in recs)
+    assert pen["mesh_adequacy"] == 0.0
+
+    pen, warns, recs = panel3d_mesh_checks({"steep_root_dihedral": True, "scale_root_thickness": False})
+    assert PANEL3D_STEEP_ROOT_UNSCALED_WARNING in warns
+    assert PANEL3D_STEEP_ROOT_CONVERGENCE_NOTE not in warns
+    assert any("panel_scale_root_thickness=True" in r for r in recs)
+    assert pen["mesh_adequacy"] == 0.0
+
+    _, warns, _ = panel3d_mesh_checks({"steep_root_dihedral": False, "scale_root_thickness": False})
+    assert PANEL3D_STEEP_ROOT_UNSCALED_WARNING not in warns
+    assert PANEL3D_STEEP_ROOT_CONVERGENCE_NOTE not in warns
