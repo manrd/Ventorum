@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import warnings
 
 import numpy as np
 import pytest
@@ -787,3 +788,52 @@ def test_body_wake_sweep_reuses_one_factorization(monkeypatch):
     assert len(calls) == 1
     assert all(r.details["factorization_count"] == 1 for r in results)
     assert [r.details["factorized"] for r in results] == [True, False, False, False]
+
+
+# ---------------------------------------------------------------------------
+# Keys of a polar dict
+# ---------------------------------------------------------------------------
+
+def _named_thick_wing() -> LiftingSurface:
+    return LiftingSurface(
+        name="Wing", semi_span=4.0, spacing="uniform",
+        sections=[WingSection(y_frac=0.0, chord=1.0, x_le=-0.25, shape="0012"),
+                  WingSection(y_frac=1.0, chord=1.0, x_le=-0.25, shape="0012")],
+    )
+
+
+def _key_settings(model: str) -> SolverSettings:
+    if model == "panel3d":
+        return SolverSettings(solver_type="panel3d", n_panels=3, n_chord=8, spacing="uniform",
+                              panel_backend="numpy", panel_cache=False)
+    return SolverSettings(n_panels=8, n_chord=4, spacing="uniform")
+
+
+@pytest.mark.parametrize("model", ["vlm", "llt", "panel3d"])
+def test_polar_dict_key_without_match_is_refused(model):
+    """A misspelt surface name is an error, not a silent use of the section airfoil."""
+    cond = FlightCondition(V_inf=30.0, alpha=np.radians(6.0))
+    with pytest.raises(ValueError, match=r"'Wnig'.*match no strip, surface or airfoil.*'Wing'"):
+        solve_viscous(_named_thick_wing(), cond, _key_settings(model), {"Wnig": LinearAirfoil(a0=4.0)},
+                      model=model, tol=1e-10)
+    with pytest.raises(ValueError, match=r"\[99\].*strip indices 0 to"):
+        solve_viscous(_named_thick_wing(), cond, _key_settings(model), {99: LinearAirfoil(a0=4.0)},
+                      model=model, tol=1e-10)
+
+
+@pytest.mark.parametrize("model", ["vlm", "llt", "panel3d"])
+def test_polar_dict_fallback_has_a_trust_note(model):
+    """Strips without a dict entry use their section airfoil and the result says so."""
+    cond = FlightCondition(V_inf=30.0, alpha=np.radians(6.0))
+    settings = _key_settings(model)
+    polar = LinearAirfoil(a0=4.0)
+    note = "have no entry in the polar dict; they use the section airfoil of the geometry"
+    named = solve_viscous(_named_thick_wing(), cond, settings, {"Wing": polar}, model=model, tol=1e-10)
+    single = solve_viscous(_named_thick_wing(), cond, settings, polar, model=model, tol=1e-10)
+    assert not any(note in n for n in named.details["notes"])
+    assert named.totals.CL == pytest.approx(single.totals.CL, abs=1e-12)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)
+        partial = solve_viscous(_named_thick_wing(), cond, settings, {0: polar}, model=model, tol=1e-10)
+    assert any(note in n for n in partial.details["notes"])
+    assert any(note in w for w in partial.totals.trust.warnings)

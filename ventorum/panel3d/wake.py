@@ -36,6 +36,7 @@ __all__ = [
     "DEFAULT_WAKE_CHORDS",
     "PanelWake",
     "build_wake",
+    "check_wake_crossing",
     "largest_streamwise_chord",
 ]
 
@@ -146,6 +147,163 @@ def largest_streamwise_chord(
             if on_plane.shape[0] >= 2:
                 best = max(best, float(np.max(on_plane[:, 0]) - np.min(on_plane[:, 0])))
     return best if best > 0.0 else x_extent
+
+
+def _component_edges(panels: np.ndarray) -> np.ndarray:
+    """Return the unique edges (node index pairs) of a set of panels, shape (Ne, 2)."""
+    pan = np.asarray(panels, dtype=int).reshape(-1, 4)
+    edges = np.concatenate([pan[:, [k, (k + 1) % 4]] for k in range(4)])
+    edges = np.sort(edges, axis=1)
+    edges = edges[edges[:, 0] != edges[:, 1]]
+    return np.unique(edges, axis=0)
+
+
+def check_wake_crossing(
+    nodes: np.ndarray,
+    panels: np.ndarray,
+    component: np.ndarray | None,
+    wake: PanelWake,
+    *,
+    chunk: int = 32,
+) -> dict:
+    """Find the closed surfaces that the wake sheet of another surface touches or crosses.
+
+    The wake is a rigid flat sheet of constant doublet strength. When the
+    sheet of one component passes through another closed component, the
+    perturbation potential of the sheet jumps by the wake strength inside
+    that component. The internal Dirichlet condition (zero perturbation
+    potential inside each body) then has no solution, and the discrete
+    system gives loads that can be wrong by orders of magnitude. The check
+    flags an edge of a panel of one component when the edge touches or
+    crosses a wake panel of another component (segment and triangle
+    intersection, with a tolerance of 1e-9 times the mesh size [m]). A wake
+    sheet that passes near a surface without touching it is not flagged:
+    the potential of the sheet is continuous on each side of the sheet.
+
+    The check does not examine the wake of a component against the same
+    component.
+
+    Parameters
+    ----------
+    nodes : numpy.ndarray
+        Mesh node coordinates with shape (Nn, 3) in m.
+    panels : numpy.ndarray
+        Panel corner node indices with shape (Np, 4). The trailing-edge
+        panel indices of the wake refer to these panels.
+    component : numpy.ndarray or None
+        Component index of each panel with shape (Np,). None puts all
+        panels in one component (nothing to check).
+    wake : PanelWake
+        Wake of the mesh (for example from :func:`build_wake`).
+    chunk : int, default=32
+        Number of wake triangles that one vectorized pass examines [-].
+
+    Returns
+    -------
+    dict
+        n_crossing_edges : number of flagged panel edges.
+        crossing_pairs : list of tuples (wake component, crossed component,
+        number of flagged edges of the crossed component).
+        min_gap : smallest distance [m] from a node of a component to a
+        wake panel of another component, over the nodes whose projection on
+        the plane of the wake panel falls inside the wake panel (inf when
+        there is none).
+    """
+    pts = np.asarray(nodes, dtype=float)
+    pan = np.asarray(panels, dtype=int).reshape(-1, 4)
+    result = {"n_crossing_edges": 0, "crossing_pairs": [], "min_gap": float("inf")}
+    wake_pan = np.asarray(wake.panels, dtype=float).reshape(-1, 4, 3)
+    if component is None or wake_pan.shape[0] == 0 or pan.shape[0] == 0:
+        return result
+    comp = np.asarray(component, dtype=int).reshape(-1)
+    if comp.shape[0] != pan.shape[0]:
+        return result
+    comp_ids = sorted({int(c) for c in comp})
+    if len(comp_ids) < 2:
+        return result
+    tol = 1.0e-9 * max(float(np.max(np.ptp(pts, axis=0))), 1.0)
+    step = max(int(chunk), 1)
+
+    # Component of each wake panel: the component of its upper trailing-edge panel.
+    wake_comp = np.empty(wake_pan.shape[0], dtype=int)
+    for k, idx in enumerate(wake.strip_panel_indices):
+        wake_comp[np.asarray(idx, dtype=int)] = comp[int(wake.wake_up[k])]
+
+    # Two triangles per wake panel (each wake panel is a plane parallelogram).
+    tri = np.concatenate([wake_pan[:, [0, 1, 2]], wake_pan[:, [0, 2, 3]]])
+    tri_comp = np.concatenate([wake_comp, wake_comp])
+    e1 = tri[:, 1] - tri[:, 0]
+    e2 = tri[:, 2] - tri[:, 0]
+    nrm = np.cross(e1, e2)
+    nrm_len = np.linalg.norm(nrm, axis=1)
+    good = nrm_len > tol * tol
+    tri, tri_comp, e1, e2 = tri[good], tri_comp[good], e1[good], e2[good]
+    nrm = nrm[good] / nrm_len[good, None]
+    lo = tri.min(axis=1) - tol
+    hi = tri.max(axis=1) + tol
+    g11 = np.einsum("ij,ij->i", e1, e1)
+    g12 = np.einsum("ij,ij->i", e1, e2)
+    g22 = np.einsum("ij,ij->i", e2, e2)
+    det = g11 * g22 - g12 * g12
+
+    def inside(points, t_idx):
+        """Return True where a point projects inside its triangle (one triangle per point)."""
+        r = points - tri[t_idx, 0]
+        b1 = np.einsum("...j,...j->...", r, e1[t_idx])
+        b2 = np.einsum("...j,...j->...", r, e2[t_idx])
+        u = (g22[t_idx] * b1 - g12[t_idx] * b2) / det[t_idx]
+        v = (g11[t_idx] * b2 - g12[t_idx] * b1) / det[t_idx]
+        eps = 1.0e-9
+        return (u >= -eps) & (v >= -eps) & (u + v <= 1.0 + eps)
+
+    for c in comp_ids:
+        others = np.flatnonzero(tri_comp != c)
+        if others.size == 0:
+            continue
+        edges = _component_edges(pan[comp == c])
+        a_pts = pts[edges[:, 0]]
+        b_pts = pts[edges[:, 1]]
+        e_lo = np.minimum(a_pts, b_pts)
+        e_hi = np.maximum(a_pts, b_pts)
+        n_pts = pts[np.unique(edges.reshape(-1))]
+        hit_by: dict[int, set] = {}
+        for start in range(0, others.size, step):
+            t_set = others[start:start + step]
+            # Edges that touch or cross a triangle: endpoints on the two
+            # sides of the triangle plane, crossing point inside the triangle.
+            box = np.all(
+                (e_hi[None, :, :] >= lo[t_set, None, :]) & (e_lo[None, :, :] <= hi[t_set, None, :]),
+                axis=2,
+            )
+            ti, ei = np.nonzero(box)
+            if ti.size:
+                t_idx = t_set[ti]
+                da = np.einsum("ij,ij->i", a_pts[ei] - tri[t_idx, 0], nrm[t_idx])
+                db = np.einsum("ij,ij->i", b_pts[ei] - tri[t_idx, 0], nrm[t_idx])
+                cand = (np.minimum(da, db) <= tol) & (np.maximum(da, db) >= -tol)
+                if np.any(cand):
+                    ei_c, t_c, da_c, db_c = ei[cand], t_idx[cand], da[cand], db[cand]
+                    den = da_c - db_c
+                    safe = np.abs(den) > tol
+                    frac = np.where(safe, da_c / np.where(safe, den, 1.0), 0.5)
+                    frac = np.clip(frac, 0.0, 1.0)
+                    p = a_pts[ei_c] + frac[:, None] * (b_pts[ei_c] - a_pts[ei_c])
+                    ok = inside(p, t_c)
+                    for src, e in zip(tri_comp[t_c[ok]], ei_c[ok]):
+                        hit_by.setdefault(int(src), set()).add(int(e))
+            # Smallest gap of the nodes that project inside a triangle.
+            t_grid = np.broadcast_to(t_set[:, None], (t_set.size, n_pts.shape[0]))
+            p_grid = np.broadcast_to(n_pts[None, :, :], (t_set.size, n_pts.shape[0], 3))
+            gap = np.abs(np.einsum("tnj,tj->tn", p_grid - tri[t_set, 0][:, None, :], nrm[t_set]))
+            ok = inside(p_grid, t_grid)
+            if np.any(ok):
+                result["min_gap"] = min(result["min_gap"], float(np.min(gap[ok])))
+        flagged = set()
+        for src in sorted(hit_by):
+            flagged |= hit_by[src]
+            result["crossing_pairs"].append((src, int(c), len(hit_by[src])))
+        result["n_crossing_edges"] += len(flagged)
+    return result
 
 
 def build_wake(

@@ -554,7 +554,10 @@ def solve_viscous(
     tol : float
         Convergence limit of the largest absolute residual [-].
     wake_length : float
-        Wake length over the chord [-].
+        Wake length over the chord [-]. A wake longer than about 1.5
+        does not converge: the wake shape factor of the wake model
+        reaches 1 at a finite distance behind the trailing edge (see
+        ``docs/theory/panel2d_viscous.md``).
     n_wake : int
         Number of wake panels.
     height_reference : {"pivot", "trailing_edge"}

@@ -22,6 +22,7 @@ import numpy as np
 import ventorum as vt
 from ventorum.aero.xfoil_runner import resolve_xfoil_executable, xfoil_version
 from ventorum.agent.response import (
+    compact_trust,
     computation_device_precision,
     condition_payload,
     device_summary_text,
@@ -32,15 +33,18 @@ from ventorum.agent.response import (
     fmt,
     geometry_payload,
     lift_to_drag,
+    merge_warnings,
     metrics_payload,
     moments_all_sets,
     moments_in_axes,
     result_device_precision,
     rnd,
+    row_warnings,
     sectional_payload,
     settings_payload,
     spanwise_payload,
     trust_payload,
+    warning_label,
 )
 from ventorum.agent.schemas import (
     _CANDIDATE_SCHEMA,
@@ -89,6 +93,10 @@ from ventorum.utils.parallel import estimate_panels, run_cases
 from ventorum.utils.validation import MIN_SPEED_M_S
 
 MAX_POLAR_POINTS = 61
+
+#: Number of solves of one call of :func:`ventorum.height_derivatives`: the
+#: base state and two steps in each of alpha, beta, phi and h.
+HEIGHT_DERIVATIVE_SOLVES = 9
 
 # Only one tuning run at a time. A second call while one runs is refused
 # with "a tuning run is in progress" (see tune_machine).
@@ -721,6 +729,15 @@ def polar_sweep(
     sets to each row). With ``detail_level="full"``, ``dispatch`` is a list
     with one entry per row of ``polar_table``: the dispatch record of that
     angle, or None for a failed angle or a solver without a record.
+
+    Each row of ``polar_table`` gives ``trust_score``, ``trust_rating`` and
+    ``warnings``, the short labels of its trust warnings (at most 3, the
+    count of the others in ``warnings_not_shown``). ``polar_summary`` gives
+    ``trust_rating_lowest``, ``trust_score_min``,
+    ``trust_alpha_deg_at_lowest`` and ``warnings``: each kind of warning
+    once, with the full text at the angle of the lowest score and the
+    angles that have it (at most 6, the count of the others in
+    ``warnings_not_shown``). These keys are at every detail level.
     """
     ac = build_aircraft_from_spec(wing=wing, aircraft=aircraft)
     missing = [k for k, v in (("alpha_start_deg", alpha_start_deg), ("alpha_end_deg", alpha_end_deg),
@@ -817,11 +834,17 @@ def polar_sweep(
         _, cm_ax, _ = _apply_axes(res.totals.Cl, res.totals.Cm, res.totals.Cn, a, c["beta_deg"],
                                   ax, b_ref=b_ref, c_ref=c_ref)
         device, precision = result_device_precision(res)
+        tr = res.totals.trust
+        labels, n_more = row_warnings(list(tr.warnings)) if tr else ([], 0)
         row: dict[str, Any] = {
             "alpha_deg": a, "CL": m["CL"], "CDi": m["CDi"], "CD": m["CD"],
             "L_over_D": m["L_over_D"], "Cm": cm_ax, "e": m["e"], "converged": m["converged"],
-            "trust_score": rnd(res.totals.trust.score, 3) if res.totals.trust else None,
+            "trust_score": rnd(tr.score, 3) if tr else None,
+            "trust_rating": tr.rating if tr else None,
+            "warnings": labels,
             "status": "ok", "device": device, "precision": precision}
+        if n_more:
+            row["warnings_not_shown"] = n_more
         if in_ground:
             row["n_chord"] = _used_n_chord(res)
         if ax == "all":
@@ -876,6 +899,22 @@ def polar_sweep(
     if best_ld is not None and best_a is not None and best_a in (alphas[0], alphas[-1]):
         summary["max_L_over_D_at_sweep_end"] = True
 
+    # Trust of the sweep: the lowest rating and the union of the warnings.
+    rated = [(a, r.totals.trust) for a, r in ok
+             if r.totals.trust is not None and r.totals.trust.rating in _RATING_ORDER]
+    low = min(rated, key=lambda it: (_RATING_ORDER[it[1].rating], it[1].score)) if rated else None
+    union, n_more = merge_warnings(
+        [(a, r.totals.trust.score, list(r.totals.trust.warnings)) for a, r in ok if r.totals.trust is not None],
+        "alpha_deg")
+    summary["trust_rating_lowest"] = low[1].rating if low else None
+    summary["trust_score_min"] = rnd(low[1].score, 3) if low else None
+    summary["trust_alpha_deg_at_lowest"] = low[0] if low else None
+    summary["warnings"] = union
+    summary["warnings_not_shown"] = n_more
+    summary["trust_note"] = ("warnings lists each kind of warning once: the text at the angle with the "
+                             "lowest trust score, and every angle that has it. The rows give the short "
+                             "labels of their warnings.")
+
     slope_txt = (f"CL_alpha={fmt(summary['CL_alpha_per_rad'], '.3f')}/rad"
                  if summary.get("CL_alpha_per_rad") is not None else "CL_alpha not available")
     ld_txt = (f"max L/D={best_ld:.2f} at alpha={best_a:g} deg ({summary['drag_basis']})" if best_ld is not None
@@ -884,6 +923,10 @@ def polar_sweep(
                     f"({len(ok)} of {n} angles valid): {slope_txt}, {ld_txt}.")
     if len(ok) < n:
         exec_summary += f" {n - len(ok)} angle(s) failed; see polar_table."
+    if low is not None:
+        low_labels = list(dict.fromkeys(warning_label(w) for w in low[1].warnings))[:2]
+        exec_summary += (f" Lowest trust {low[1].rating} ({low[1].score:.3f}) at alpha={low[0]:g} deg"
+                         + (f": {'; '.join(low_labels)}." if low_labels else "."))
     device_all, precision_all = computation_device_precision([r for _, r in ok])
     exec_summary += f" {device_summary_text(device_all, precision_all)}"
 
@@ -936,78 +979,120 @@ def _row_trust(res: Any) -> tuple[float | None, str | None, list[str], bool | No
     return rnd(trust.score, 3), trust.rating, list(trust.warnings), bool(sol.converged)
 
 
-def _irodov(ac, ok, alpha, phi, beta, V, rho, rp, href, fixed, c_ref, dl, sweep_cls, result_cls):
+_IRODOV_DEFINITION = (
+    "x_alpha and x_h are the pitch and height aerodynamic centres in metres aft of the moment reference "
+    "point (the pivot). irodov_margin = (x_alpha - x_h)/c_ref; height-pitch static stability needs a "
+    "margin > 0 (x_h ahead of x_alpha; R. D. Irodov 1970). The criterion applies when the moment "
+    "reference point is the centre of gravity.")
+
+
+def _irodov_verdict(margin: float | None, error: str | None = None) -> str:
+    """Return the verdict text of an Irodov margin."""
+    if margin is None:
+        return f"not available ({error})" if error else "not available"
+    return "stable (margin > 0)" if margin > 0 else "unstable (margin <= 0)"
+
+
+def _irodov_state(ac: Aircraft, condition: FlightCondition, settings: SolverSettings) -> tuple[Any, str | None]:
+    """Compute the Irodov margin of one flight state with :func:`ventorum.height_derivatives`.
+
+    The derivatives are local central differences about *condition*: alpha
+    +/- 0.5 deg at constant height of the pivot (the moment reference point
+    of *ac*) and h +/- 5 % of the smallest clearance at constant attitude,
+    on the mesh of *settings*.
+
+    Parameters
+    ----------
+    ac : Aircraft
+        Geometry. Its moment reference point is the pivot.
+    condition : FlightCondition
+        Flight state. ``condition.h`` [m] is the height of the pivot.
+    settings : SolverSettings
+        Solver settings of the cases (give a fixed ``n_chord`` for the same
+        mesh as the other cases of the tool).
+
+    Returns
+    -------
+    tuple of (HeightDerivativesResult or None, str or None)
+        The result, or None and the reason when a stepped case touches the
+        ground or the solver refuses a case.
+    """
+    try:
+        return vt.height_derivatives(ac.clone(), condition, settings), None
+    except (GroundStrikeError, ValidityError, ValueError) as exc:
+        return None, str(exc) or type(exc).__name__
+
+
+def _irodov(ac, ok, alpha, phi, beta, V, rho, rp, fixed, c_ref, dl, only_lowest):
     """Irodov height-pitch margins at the valid heights. Return (payload, summary text).
 
-    The centre-alpha cases of the height rows are reused when beta = 0 (the
-    sweep is at beta = 0). Only alpha - 1 and alpha + 1 deg are new cases.
+    The derivatives at each height come from :func:`ventorum.height_derivatives`
+    (local central differences with a small step, same mesh), not from the
+    height grid of the call. With *only_lowest*, only the lowest valid height
+    is computed (the work budget does not allow all heights).
     """
-    hs = [h for h, _ in ok]
-    side = [alpha - 1.0, alpha + 1.0]
-    alphas = [alpha - 1.0, alpha, alpha + 1.0]
-    reuse = beta == 0.0
-    sweep = sweep_cls(ac.clone(), settings=fixed).run_sweep(
-        hs, side if reuse else alphas, [phi], V_inf=V, rho=rho, ref_point=rp,
-        height_ref=href, compute_strike_limit=False)
-    shape = (len(hs), 3, 1)
-    CL, Cm, HR = np.full(shape, np.nan), np.full(shape, np.nan), np.full(shape, np.nan)
-    if reuse:
-        CL[:, [0, 2], 0], Cm[:, [0, 2], 0] = sweep.CL[:, :, 0], sweep.Cm[:, :, 0]
-        HR[:, [0, 2], 0] = sweep.h_ref_grid[:, :, 0]
-        CL[:, 1, 0] = [r.CL for _, r in ok]
-        Cm[:, 1, 0] = [r.Cm for _, r in ok]
-        HR[:, 1, 0] = [r.h_ref for _, r in ok]
-    else:
-        CL, Cm, HR = sweep.CL, sweep.Cm, sweep.h_ref_grid
-    grid = result_cls(heights=np.asarray(hs, dtype=float), alphas_deg=np.asarray(alphas, dtype=float),
-                      phis_deg=np.asarray([phi], dtype=float), grid_shape=shape, CL=CL, Cm=Cm,
-                      c_ref=c_ref, ref_point=np.asarray(rp, dtype=float), height_ref=href, h_ref_grid=HR)
-    der = grid.compute_stability_derivatives()
-    n = len(hs)
+    a_rad, b_rad, p_rad = (float(np.radians(v)) for v in (alpha, beta, phi))
+    targets = ok[:1] if only_lowest else list(ok)
+
+    def one(item):
+        h, res = item
+        fc = FlightCondition(V_inf=V, alpha=a_rad, beta=b_rad, phi=p_rad, rho=rho, h=float(res.h_ref))
+        return (h, *_irodov_state(ac, fc, fixed))
+
+    done = {h: (hd, err) for h, hd, err in run_cases(one, targets, estimate_panels(ac, fixed), "auto")}
     irows = []
-    for i, h in enumerate(hs):
-        xa = float(der["x_alpha"][i, 1]) if "x_alpha" in der else float("nan")
-        xh = float(der["x_h"][i, 1]) if "x_h" in der else float("nan")
-        mg = float(der["irodov_margin"][i, 1]) if "irodov_margin" in der else float("nan")
-        verdict = ("stable (margin > 0)" if mg > 0 else "unstable (margin <= 0)") if np.isfinite(mg) \
-            else "not available (a neighbour case failed)"
-        irows.append({"h_m": h, "h_over_c": rnd(h / c_ref, 5),
-                      "x_alpha_m": rnd(xa, 5), "x_h_m": rnd(xh, 5),
-                      "x_alpha_over_c": rnd(xa / c_ref, 5), "x_h_over_c": rnd(xh / c_ref, 5),
-                      "irodov_margin": rnd(mg, 5), "verdict": verdict,
-                      "height_difference": "central" if 0 < i < n - 1 else "one-sided"})
+    for h, res in ok:
+        row: dict[str, Any] = {"h_m": h, "h_over_c": rnd(h / c_ref, 5), "pivot_h_m": rnd(res.h_ref, 5)}
+        if h not in done:
+            row.update(x_alpha_m=None, x_h_m=None, x_alpha_over_c=None, x_h_over_c=None, irodov_margin=None,
+                       verdict="not computed (work budget: only the lowest valid height)", h_step_m=None)
+            irows.append(row)
+            continue
+        hd, err = done[h]
+        iro = hd.irodov if hd is not None else {}
+        xa, xh, mg = iro.get("x_alpha_m"), iro.get("x_h_m"), iro.get("margin")
+        row.update(x_alpha_m=rnd(xa, 5), x_h_m=rnd(xh, 5),
+                   x_alpha_over_c=rnd(xa / c_ref, 5) if xa is not None else None,
+                   x_h_over_c=rnd(xh / c_ref, 5) if xh is not None else None,
+                   irodov_margin=rnd(mg, 5),
+                   verdict=_irodov_verdict(rnd(mg, 12), err if hd is None else "a lift slope is near zero"),
+                   h_step_m=rnd(hd.steps["h_m"], 6) if hd is not None else None)
+        if dl == "full" and hd is not None:
+            row["derivatives"] = {"CL_alpha_per_rad": rnd(hd.derivatives["CL_alpha"]),
+                                  "Cm_alpha_per_rad": rnd(hd.derivatives["Cm_alpha"]),
+                                  "CL_h": rnd(hd.derivatives["CL_h"]), "Cm_h": rnd(hd.derivatives["Cm_h"])}
+        irows.append(row)
     notes = [
-        "x_alpha and x_h are the pitch and height aerodynamic centres in metres aft of the moment "
-        f"reference point (the pivot, {[rnd(v, 5) for v in rp]} m). irodov_margin = (x_alpha - x_h)/c_ref; "
-        "height-pitch static stability needs a margin > 0 (x_h ahead of x_alpha; R. D. Irodov 1970). "
-        "The criterion applies when the moment reference point is the centre of gravity: give the "
-        "centre of gravity as ref_point_m.",
-        f"Pitch derivatives: alpha {alpha - 1:g}, {alpha:g}, {alpha + 1:g} deg at constant height of the "
-        f"moment reference point. Height derivatives: constant alpha. The margin of one flight state does "
-        f"not depend on height_ref. {der.get('note', '')}",
-        f"Bank angle {phi:g} deg for all cases; same chordwise mesh (n_chord={fixed.n_chord}).",
+        f"{_IRODOV_DEFINITION} Pivot: {[rnd(v, 5) for v in rp]} m; give the centre of gravity as ref_point_m.",
+        "Derivatives at each height from height_derivatives: local central differences about the flight "
+        "state of the row, alpha +/- 0.5 deg at constant height of the pivot and h +/- 5 % of the smallest "
+        f"clearance (h_step_m) at constant attitude, with the same chordwise mesh (n_chord={fixed.n_chord}) "
+        "as the rows. The height grid of the call gives only the rows; it does not set the difference step, "
+        "so the margin does not depend on the spacing of heights_m or on height_ref.",
+        f"The Irodov cases use the bank angle ({phi:g} deg) and the sideslip ({beta:g} deg) of the rows. "
+        "pivot_h_m is the height of the pivot above the ground in the row state.",
     ]
-    if not reuse:
-        notes.append(f"The Irodov sweep is at beta = 0 deg (the rows above use beta = {beta:g} deg).")
-    if sweep.errors:
-        notes.append(f"{len(sweep.errors)} case(s) of the Irodov sweep failed (strike or refusal); "
-                     "the margins next to them are null.")
-    # Headline: the lowest height with a central height difference and a valid margin.
-    head = next((r for r in irows[1:-1] if r["irodov_margin"] is not None), None)
-    if head is None and n == 2 and irows[0]["irodov_margin"] is not None:
-        head = irows[0]
-        notes.append("Only 2 valid heights: the height derivative is a one-sided (first-order) difference. "
-                     "Give 3 or more heights for a central difference.")
+    if only_lowest:
+        notes.append("The work budget does not allow the Irodov cases at every height: the margin is computed "
+                     "only at the lowest valid height. Give fewer heights or fewer panels for all heights.")
+    failed = [r for r in irows if r["verdict"].startswith("not available")]
+    if failed:
+        notes.append(f"{len(failed)} height(s) have no margin; the verdict of each row gives the reason.")
+    # Headline: the lowest height with a valid margin.
+    head = next((r for r in irows if r["irodov_margin"] is not None), None)
+    verdicts = {r["verdict"] for r in irows if r["irodov_margin"] is not None}
     payload: dict[str, Any] = {"rows": irows, "c_ref_m": rnd(c_ref, 5), "notes": notes,
                                "pivot_point_m": [rnd(v, 5) for v in rp],
-                               "headline_h_m": head["h_m"] if head else None}
-    if dl == "full":
-        payload["derivative_grids"] = json_safe({k: v for k, v in der.items() if k not in ("note",)})
+                               "alpha_step_deg": 0.5,
+                               "headline_h_m": head["h_m"] if head else None,
+                               "computed_at": "lowest valid height" if only_lowest else "every valid height"}
     txt = ""
     if head is not None:
-        kind = "central" if head["height_difference"] == "central" else "one-sided"
-        txt = (f" Irodov margin at h={head['h_m']:g} m ({kind} height difference): "
-               f"{head['irodov_margin']:+.3f} ({head['verdict']}).")
+        txt = f" Irodov margin at h={head['h_m']:g} m: {head['irodov_margin']:+.3f} ({head['verdict']})."
+        if len(verdicts) > 1:
+            txt += " The Irodov verdict changes with height (see irodov.rows)."
+    elif irows:
+        txt = " Irodov margin: not available (see irodov.rows)."
     return payload, txt
 
 
@@ -1063,11 +1148,20 @@ def ground_effect(
         As in the MCP schema. With ``detail_level="full"``, ``dispatch`` is
         ``{"rows": [...], "free_air": ...}``: one dispatch record per entry
         of ``rows`` (None for a failed height) and the record of the
-        free-air case. The cases of the Irodov sweep are not included.
+        free-air case. The cases of the Irodov derivatives are not included.
+
+    Notes
+    -----
+    The Irodov margin of each valid height comes from
+    :func:`ventorum.height_derivatives` about the flight state of that row
+    (local central differences: alpha +/- 0.5 deg, h +/- 5 % of the smallest
+    clearance, the same chordwise mesh). The spacing of ``heights_m`` does
+    not change it. When the work budget does not allow these 9 solves at
+    every height, only the lowest valid height gets a margin, and
+    ``irodov.computed_at`` says so.
     """
-    from ventorum.ground_effect import GroundEffectSweep, analyze_ground_effect
+    from ventorum.ground_effect import analyze_ground_effect
     from ventorum.ground_effect.solver import place_ground
-    from ventorum.ground_effect.sweep import GroundEffectSweepResult
 
     ac = build_aircraft_from_spec(wing=wing, aircraft=aircraft)
     if heights_m is None:
@@ -1101,16 +1195,19 @@ def ground_effect(
 
     # Work budget before any solve. All heights share the mesh fixed at
     # the lowest height (the largest automatic n_chord), plus free air
-    # and the Irodov height-pitch sweep (2 extra solves per height at
-    # beta = 0, else 3 per height).
+    # and the Irodov height-pitch cases.
     _fc_free = FlightCondition(V_inf=V, alpha=a_rad, beta=b_rad, rho=rho)
     _n_fixed = 0
     for _h in heights:
         _gp, _ = place_ground(ac, sett, _h, a_rad, b_rad, p_rad, rp, href)
         _n_fixed = max(_n_fixed, _planned_panels(ac, sett, _fc_free, ground=_gp, ref_point=rp))
-    _n_extra = (2 * len(heights) if beta == 0.0 else 3 * len(heights)) if len(heights) >= 2 else 0
+    # The Irodov cases (height_derivatives, 9 solves per height) run at every
+    # height when the budget allows it, else only at the lowest valid height.
+    _base_work = (len(heights) + 1) * (_n_fixed ** 2)
+    irodov_lowest_only = (
+        _base_work + HEIGHT_DERIVATIVE_SOLVES * len(heights) * (_n_fixed ** 2) > MAX_CALL_WORK)
     _check_call_work(
-        (len(heights) + 1 + _n_extra) * (_n_fixed ** 2),
+        _base_work + HEIGHT_DERIVATIVE_SOLVES * (1 if irodov_lowest_only else len(heights)) * (_n_fixed ** 2),
         "fewer heights or fewer panels (smaller n_panels or n_chord)")
 
     def first_settings(h: float):
@@ -1267,12 +1364,8 @@ def ground_effect(
     out["free_air"]["precision"] = free_precision
 
     # Irodov height-pitch criterion.
-    irodov_txt = ""
-    if len(ok) >= 2:
-        out["irodov"], irodov_txt = _irodov(ac, ok, alpha, phi, beta, V, rho, rp, href, fixed, c_ref, dl,
-                                            GroundEffectSweep, GroundEffectSweepResult)
-    else:
-        out["irodov"] = {"rows": [], "notes": ["The Irodov criterion needs at least 2 valid heights."]}
+    out["irodov"], irodov_txt = _irodov(ac, ok, alpha, phi, beta, V, rho, rp, fixed, c_ref, dl,
+                                        irodov_lowest_only)
 
     fail_txt = ""
     if n_strike or n_refused:
@@ -1299,7 +1392,6 @@ def ground_effect(
                                               "device", "precision",
                                               "trust_score", "trust_rating", "warnings", "converged")
                         if k in r} for r in rows]
-        out["irodov"].pop("derivative_grids", None)
     else:
         out["geometry"] = geometry_payload(ac)
     if dl == "full":
@@ -1397,7 +1489,18 @@ def stability_derivatives(
     ``"b-"``) to its dispatch record. The ``trust`` output covers all five
     cases: the score of the weakest case, the warnings of every case, and a
     warning when CY_beta and the CY_beta of the Trefftz plane do not agree
-    (see :func:`_stability_trust`).
+    (see :func:`_stability_trust`). At ``detail_level="summary"`` the
+    ``trust`` output is compact: score, rating and the warnings (at most 6,
+    the count of the others in ``warnings_not_shown``).
+
+    In ground effect (``flight_condition.h_m``) the tool also computes the
+    Irodov height-pitch margin of the same state with
+    :func:`ventorum.height_derivatives` (9 more solves, the CG as the pivot,
+    the same chordwise mesh). The output ``irodov`` gives ``x_alpha_m``,
+    ``x_h_m``, ``irodov_margin``, ``verdict`` and the steps. Near the
+    ground the static margin alone is not the static stability criterion,
+    so the pitch verdict (``stability_assessment.pitch`` and the executive
+    summary) is the Irodov verdict, with the static margin as information.
     """
     ac = build_aircraft_from_spec(wing=wing, aircraft=aircraft)
     c = parse_condition(flight_condition)
@@ -1411,8 +1514,11 @@ def stability_derivatives(
     c_ref = float(ac.c_ref)
     _check_method(ac, sett.solver_type, sett.wake_alignment, c["h_m"] is not None)
     strips = _check_mesh(ac, sett)
+    in_ground = c["h_m"] is not None
+    # 5 cases, plus the Irodov cases (height_derivatives) in ground effect.
     _check_call_work(
-        5 * (_planned_panels(ac, sett, make_flight_condition(c)) ** 2),
+        (5 + (HEIGHT_DERIVATIVE_SOLVES if in_ground else 0))
+        * (_planned_panels(ac, sett, make_flight_condition(c)) ** 2),
         "fewer panels (smaller n_panels or n_chord)")
     d_a, d_b = 0.5, 1.0
     a, b = c["alpha_deg"], c["beta_deg"]
@@ -1430,6 +1536,30 @@ def stability_derivatives(
             raise GroundStrikeError(f"Case alpha={aa:g} deg, beta={bb:g} deg: {exc}") from exc
 
     res = dict(run_cases(run, list(cases.items()), estimate_panels(ac, sett), "auto"))
+
+    # In ground effect the static margin alone is not the static stability
+    # criterion: compute the Irodov height-pitch margin of the same state,
+    # with the CG as the pivot and the same chordwise mesh.
+    irodov: dict[str, Any] | None = None
+    if in_ground:
+        s_ir = case_sett.clone()
+        used = _used_n_chord(res["base"])
+        if s_ir.n_chord is None and used is not None:
+            s_ir.n_chord = int(used)
+        hd, hd_err = _irodov_state(ac, make_flight_condition(c), s_ir)
+        iro = hd.irodov if hd is not None else {}
+        mg = iro.get("margin")
+        irodov = {
+            "x_alpha_m": rnd(iro.get("x_alpha_m"), 5), "x_h_m": rnd(iro.get("x_h_m"), 5),
+            "irodov_margin": rnd(mg, 5),
+            "verdict": _irodov_verdict(rnd(mg, 12), hd_err if hd is None else "a lift slope is near zero"),
+            "h_step_m": rnd(hd.steps["h_m"], 6) if hd is not None else None,
+            "alpha_step_deg": 0.5,
+            "pivot_point_m": [rnd(v, 5) for v in ac.moment_reference()],
+            "note": f"{_IRODOV_DEFINITION} Here the pivot is the CG point [x_cg_m, 0, z_ref]. Local central "
+                    "differences of height_derivatives (alpha +/- 0.5 deg at constant height of the CG, h "
+                    "+/- 5 % of the smallest clearance at constant attitude), same chordwise mesh.",
+        }
 
     t = {k: r.totals for k, r in res.items()}
     da, db = np.radians(2 * d_a), np.radians(2 * d_b)
@@ -1484,7 +1614,19 @@ def stability_derivatives(
     Cl_b_sel = float(d_m_db_sel[0])
     Cn_b_sel = float(d_m_db_sel[2])
 
-    if sm is None:
+    if irodov is not None:
+        mg = irodov["irodov_margin"]
+        sm_part = (f"static margin {sm * 100:+.1f} % of c_ref (neutral point {x_np:.4f} m, CG {x_cg:.4f} m)"
+                   if sm is not None else "static margin not available (CL_alpha is near zero)")
+        if mg is None:
+            pitch = (f"not assessed in ground effect: Irodov margin {irodov['verdict']}; {sm_part}. Near "
+                     "the ground the static margin alone is not the static stability criterion")
+        else:
+            word = "statically stable" if mg > 0 else "statically UNSTABLE"
+            pitch = (f"{word} in height and pitch (ground effect): Irodov margin {mg:+.4f} (stable needs "
+                     f"> 0); {sm_part}. Near the ground the static margin alone is not the static stability "
+                     "criterion")
+    elif sm is None:
         pitch = "not available (CL_alpha is near zero)"
     elif sm > 0:
         pitch = (f"statically stable: static margin {sm * 100:+.1f} % of c_ref; the neutral point "
@@ -1512,18 +1654,29 @@ def stability_derivatives(
     ]
     if c["h_m"] is not None:
         notes.append(f"In ground effect: the CG stays {c['h_m']:g} m above the ground in every case (alpha "
-                     "and beta change at constant height). The Irodov height-pitch criterion needs the "
-                     "derivatives with respect to height: use the ventorum_ground_effect tool.")
+                     "and beta change at constant height). The static margin uses only the pitch derivative; "
+                     "near the ground the lift also changes with height, so the pitch verdict uses the Irodov "
+                     "height-pitch margin (see irodov). Use the ventorum_ground_effect tool for several "
+                     "heights.")
 
     derivs = by_axes["body"] if ax == "all" else by_axes[ax]
     sm_txt = f"{sm * 100:+.1f} %" if sm is not None else "n/a"
+    if irodov is None:
+        pitch_txt = f"Pitch: {pitch.split(':')[0]}."
+    elif irodov["irodov_margin"] is None:
+        pitch_txt = (f"Pitch in ground effect: Irodov margin {irodov['verdict']}; the static margin alone is "
+                     "not the static stability criterion near the ground.")
+    else:
+        pitch_txt = (f"Pitch in ground effect: {pitch.split(' (')[0]}, Irodov margin "
+                     f"{irodov['irodov_margin']:+.3f}; the static margin alone is not the static stability "
+                     "criterion near the ground.")
     xnp_txt = f"{x_np:.4f} m" if x_np is not None else "n/a"
     h_txt = "" if c["h_m"] is None else f", h={c['h_m']:g} m"
     device_all, precision_all = computation_device_precision(list(res.values()))
     exec_summary = (
         f"[Ventorum RESULT] Stability of {ac.name} at alpha={a:g} deg, beta={b:g} deg{h_txt}: "
         f"CL_alpha={CL_a:.3f}/rad, Cm_alpha={Cm_a_sel:.4f}/rad about x_cg={x_cg:.4f} m, neutral point "
-        f"{xnp_txt}, static margin {sm_txt} of c_ref. Pitch: {pitch.split(':')[0]}. "
+        f"{xnp_txt}, static margin {sm_txt} of c_ref. {pitch_txt} "
         f"Roll (Cl_beta): {roll.split(' (')[0]}. Yaw (Cn_beta): {yaw.split(' (')[0]}. "
         f"{device_summary_text(device_all, precision_all)}"
     )
@@ -1550,10 +1703,13 @@ def stability_derivatives(
         "trust": _stability_trust(t, cases, CY_b, db),
         "axes": ax,
     }
+    if irodov is not None:
+        out["irodov"] = irodov
+        out["stability_assessment"]["height_pitch_irodov"] = irodov["verdict"]
     if ax == "all":
         out["derivatives_by_axes"] = by_axes
     if dl == "summary":
-        out.pop("trust")
+        out["trust"] = compact_trust(out["trust"])
     else:
         out["geometry"] = geometry_payload(ac)
     if dl == "full":
@@ -1918,6 +2074,15 @@ def mesh_convergence(
         "device": device_all,
         "precision": precision_all,
     }
+    # Trust of the recommended mesh (when the study converged), else of the
+    # reference mesh. The physical warnings (stall, ground) are the same at
+    # every level.
+    trust_res = rec.result if (study.converged and rec.result is not None) else study.reference_result
+    out["trust"] = trust_payload(trust_res.totals.trust if trust_res is not None else None)
+    out["trust_of"] = ("recommended_mesh" if (study.converged and rec.result is not None)
+                       else "reference mesh")
+    if dl == "summary":
+        out["trust"] = compact_trust(out["trust"])
     if dl in ("standard", "full"):
         out["summary_markdown"] = study.summary(as_markdown=True)
     if dl == "full":
@@ -2320,6 +2485,7 @@ def error_bars(
         "levels": [int(n) for n in levels],
         "notes": list(res.notes),
         "status_of_bars": status_of_bars,
+        "trust": trust_payload(res.results[0].totals.trust if res.results else None),
         "device": device,
         "precision": precision,
         "condition_used": condition_payload(c),

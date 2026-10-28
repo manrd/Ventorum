@@ -7,7 +7,7 @@ orphan: true
 ## Model
 
 Ventorum incorporates viscous aerodynamic effects into three-dimensional potential-flow solutions through two complementary methods:
-1. Viscous alpha-correction coupling (decambering): couples 3D potential-flow solvers (vortex-lattice method and linear lifting-line theory) with non-linear 2D section polars. The method modifies the boundary conditions of each spanwise strip using an effective angle-of-attack correction while keeping the 3D potential influence matrix unchanged.
+1. Viscous alpha-correction coupling (decambering): couples 3D potential-flow solvers (vortex-lattice method, linear lifting-line theory and, with `model="panel3d"`, the 3D panel method) with non-linear 2D section polars. The method modifies the boundary conditions of each spanwise strip using an effective angle-of-attack correction while keeping the 3D potential influence matrix unchanged.
 2. Parasite-drag component build-up: computes the zero-lift friction and form drag of non-lifting bodies (fuselages, nacelles, hulls, and struts) and provides independent profile-drag cross-checks for lifting surfaces using classical empirical form factors.
 
 Both methods operate without altering the underlying linear matrix factorizations, preserving high computational speed and enabling honest physical trust estimation.
@@ -16,7 +16,7 @@ Both methods operate without altering the underlying linear matrix factorization
 
 ### Physical model and coupling overview
 
-Linear potential-flow methods predict linear lift curves and neglect boundary-layer thickening, separation and stall. The viscous alpha-correction method (V1) couples the vortex-lattice method or the linear lifting line with tabulated or analytical 2D section polars (Tseng and Lan, 1988; van Dam, Vander Kam and Paris, 2001; Gallay and Laurendeau, 2015; Mukherjee and Gopalarathnam, 2006). The detailed page is [Viscous alpha-correction coupling](viscous_alpha_correction.md); this section gives the model.
+Linear potential-flow methods predict linear lift curves and neglect boundary-layer thickening, separation and stall. The viscous alpha-correction method (V1) couples the vortex-lattice method, the linear lifting line or the 3D panel method (`model="panel3d"`, which matches the pressure-integrated lift of each strip; see the detailed page, section *Thick-surface panel coupling*) with tabulated or analytical 2D section polars (Tseng and Lan, 1988; van Dam, Vander Kam and Paris, 2001; Gallay and Laurendeau, 2015; Mukherjee and Gopalarathnam, 2006). The detailed page is [Viscous alpha-correction coupling](viscous_alpha_correction.md); this section gives the model.
 
 Each spanwise strip $j$ gets one correction angle $\delta_j$ [rad]. The correction changes only the right-hand side of the strip (a uniform change of its angle of attack); the influence matrix does not change.
 
@@ -28,7 +28,7 @@ The circulation $\boldsymbol{\Gamma}$ satisfies
 A \boldsymbol{\Gamma} = \mathbf{b}(\alpha, \boldsymbol{\delta}).
 ```
 
-A correction $\delta_k$ turns the onset direction of the boundary conditions of strip $k$ from $\mathbf{d}(\alpha)$ to $\mathbf{d}(\alpha - \delta_k)$. The strip lift coefficient $C_{l,\text{inv},j} = 2\Gamma_j / (V_\infty c_j)$ is linear in the corrections:
+A correction $\delta_k$ lowers the section angle of strip $k$: the onset of its boundary conditions turns by $-\delta_k$ about the span axis of the strip, in its section plane. For a planar strip this turns the onset direction from $\mathbf{d}(\alpha)$ to $\mathbf{d}(\alpha - \delta_k)$. The strip lift coefficient $C_{l,\text{inv},j} = 2\Gamma_j / (V_\infty c_j)$ is linear in the corrections:
 
 ```{math}
 \mathbf{C}_{l,\text{inv}}(\boldsymbol{\delta}) = \mathbf{C}_{l,\text{inv}}(\mathbf{0}) - D \boldsymbol{\delta},
@@ -56,8 +56,10 @@ with the density $\rho$ and the speed $V_\infty$ of the flight condition and the
 The residual of strip $j$ is
 
 ```{math}
-r_j(\boldsymbol{\delta}) = C_{l,\text{inv}, j}(\boldsymbol{\delta}) - C_{l,\text{visc}, j}(\alpha_{v, j}, Re_j).
+r_j(\boldsymbol{\delta}) = C_{l,\text{inv}, j}(\boldsymbol{\delta}) - C_{l,\text{visc}, j}(\alpha_{v, j}, Re_j) + a_j\left(\alpha_{0,j} - \alpha_{0,\text{TA},j}\right).
 ```
+
+The last term is the constant flap offset of a vortex-lattice strip with a deflected control, with $\alpha_{0,\text{TA},j}$ the zero-lift angle of the thin-airfoil model of the strip. It is zero on every other strip and does not change the Jacobian (see [Viscous alpha-correction coupling](viscous_alpha_correction.md)).
 
 ### Newton-Raphson Jacobian
 
@@ -134,11 +136,16 @@ C_f = C_{f, \text{turb}}(Re) - x_{\text{tr}} \left[C_{f, \text{turb}}(Re_{\text{
 - Surface roughness cutoff uses the Raymer (2018) cutoff Reynolds number based on equivalent sand grain roughness $k$ [m]:
 
 ```{math}
-Re_{\text{co}} = 38.21 \left(\frac{L}{k}\right)^{1.053}, \qquad
-C_f = C_f(\min(Re, Re_{\text{co}})).
+Re_{\text{co}} = 38.21 \left(\frac{L}{k}\right)^{1.053}.
 ```
 
-When $Re > Re_{\text{co}}$, the boundary layer is treated as fully turbulent at $Re_{\text{co}}$.
+Raymer evaluates the turbulent skin friction at $\min(Re, Re_{\text{co}})$. The cutoff acts on the turbulent part only; the laminar part keeps its value. For mixed flow the module adds the roughness increment of the turbulent law, weighted by the turbulent fraction of the length (an approximation of this module):
+
+```{math}
+C_f = C_{f,\text{smooth}}(Re, x_{\text{tr}}) + (1 - x_{\text{tr}}) \left[C_{f,\text{turb}}(\min(Re, Re_{\text{co}})) - C_{f,\text{turb}}(Re)\right].
+```
+
+The increment is zero below the cutoff, so $C_f$ is continuous across the cutoff. A fully laminar plate keeps $C_{f,\text{lam}}(Re)$ (see [Parasite drag](parasite_drag.md)).
 
 ### Form factors
 
@@ -149,11 +156,13 @@ The default wing form factor follows Raymer (2018, section 12.5) for incompressi
 FF = \left[1 + \frac{0.6}{x_t}\left(\frac{t}{c}\right) + 100 \left(\frac{t}{c}\right)^4\right] (\cos\Lambda)^{0.28}.
 ```
 
-An alternative wing form factor follows Torenbeek (1982, appendix F), evaluated on the normal thickness ratio $(t/c)_n = (t/c) / \cos\Lambda$:
+An alternative wing form factor follows Torenbeek (1982, appendix F), evaluated on the streamwise thickness ratio $t/c$:
 
 ```{math}
-FF = 1 + 2.7 (t/c)_n + 100 (t/c)_n^4.
+FF = 1 + 2.7 \frac{t}{c} + 100 \left(\frac{t}{c}\right)^4.
 ```
+
+This form has no sweep term.
 
 2. Fuselages and streamlined bodies:
 The default body form factor follows Raymer (2018) with fineness ratio $f = l/d$:
@@ -170,11 +179,13 @@ FF = 1 + 1.5 \left(\frac{d}{l}\right)^{3/2} + 7 \left(\frac{d}{l}\right)^3.
 
 ### Wetted area and interference factors
 
-Lifting surface wetted area is approximated from planform area $S$ (Raymer, 2018):
+Lifting surface wetted area comes from the exposed planform area $S_{\text{exposed}}$:
 
 ```{math}
-S_{\text{wet}} \approx 2 S \left(1 + 0.2 \frac{t}{c}\right).
+S_{\text{wet}} = 2 S_{\text{exposed}} \left(1 + 0.2 \frac{t}{c}\right).
 ```
+
+The factor 2 counts the upper and the lower surface. The term $0.2\,t/c$ is an approximation of the thickness factor between the planform and the wetted area of a section (see [Parasite drag](parasite_drag.md)).
 
 The interference factor $Q$ accounts for junction interference drag. It is an input of each component (default 1, no interference), never a hidden constant; typical values for a wing-body junction are 1.0 to 1.3 (Raymer, 2018, section 12.5).
 

@@ -408,6 +408,8 @@ class Ventorum2DPolarSource:
             }
             hit = self._cache.get(payload)
             if hit is not None:
+                # The cached polar holds the converged angles only.
+                self.last_dropped = int(unique_req.size - np.atleast_1d(hit.alpha).size)
                 return hit
 
         res = solve_viscous(

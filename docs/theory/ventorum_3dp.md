@@ -1,12 +1,8 @@
----
-orphan: true
----
-
 # Ventorum-3DP: Three-dimensional potential flow panel method
 
 ## Model
 
-Ventorum-3DP solves steady, incompressible, inviscid potential flow around arbitrary three-dimensional lifting configurations and non-lifting bodies. The solver uses a low-order boundary element formulation with flat quadrilateral and triangular panels carrying constant distributions of sources and doublets (Morino and Kuo, 1974; Hess and Smith, 1967; Katz and Plotkin, 2001). The formulation enforces an internal Dirichlet boundary condition of zero perturbation potential inside the closed body. The linear aerodynamic influence matrix is factorized once per configuration (once for all free-air conditions) by LU decomposition and solved for six fundamental unit onset flow states (three translation velocities and three angular rotation rates). Flight conditions at arbitrary angles of attack, sideslip, and rotation rates follow by linear superposition. The method supports Morino and iterative non-linear pressure Kutta conditions, planar symmetry folding, ground effect via the method of images, near-field pressure integration, far-field Trefftz-plane induced drag calculation, grid convergence analysis, and multi-backend execution on CPU (NumPy, Numba) and CUDA GPU (NVIDIA Warp, PyTorch).
+Ventorum-3DP solves steady, incompressible, inviscid potential flow around arbitrary three-dimensional lifting configurations and non-lifting bodies. The solver uses a low-order boundary element formulation with flat quadrilateral and triangular panels carrying constant distributions of sources and doublets (Morino and Kuo, 1974; Hess and Smith, 1967; Katz and Plotkin, 2001). The formulation enforces an internal Dirichlet boundary condition of zero perturbation potential inside the closed body. The linear aerodynamic influence matrix is factorized once per configuration (once for all free-air conditions) by LU decomposition and solved for six fundamental unit onset flow states (three translation velocities and three angular rotation rates). In ground effect on the CPU with the Morino Kutta condition, the default ground solve (`panel_ground_solver="auto"`) factorizes only one anchor configuration per ground offset and solves the other configurations with GMRES, preconditioned by the anchor LU (see *Krylov solve in ground effect*). Flight conditions at arbitrary angles of attack, sideslip, and rotation rates follow by linear superposition. The method supports Morino and iterative non-linear pressure Kutta conditions, planar symmetry folding, ground effect via the method of images, near-field pressure integration, far-field Trefftz-plane induced drag calculation, grid convergence analysis, and multi-backend execution on CPU (NumPy, Numba) and CUDA GPU (NVIDIA Warp, PyTorch).
 
 ## Influence kernels
 
@@ -96,7 +92,7 @@ Approaching the panel plane from the interior side ($z \to 0^-$) at the centroid
 By Stokes theorem, the velocity induced by a constant-strength doublet panel equals the velocity of an equivalent vortex ring of unit circulation along the panel perimeter:
 
 ```{math}
-\mathbf{V}_D = -\sum_{k=1}^4 \mathbf{v}_{\text{segment}}(\mathbf{p}'_k \to \mathbf{p}'_{k+1}),
+\mathbf{V}_D = \nabla \Phi_D = \sum_{k=1}^4 \mathbf{v}_{\text{segment}}(\mathbf{p}'_k \to \mathbf{p}'_{k+1}),
 ```
 
 where each straight vortex segment velocity is evaluated using the Biot-Savart formula.
@@ -326,7 +322,7 @@ The image panel vertex order is reversed to keep an outward-pointing unit normal
 \mu' = +\mu, \qquad \sigma' = +\sigma.
 ```
 
-The image wake is the reflection of the wake. The wake follows the free stream in ground effect, so it stays parallel to the ground and keeps the height of the trailing edge. The influence matrix depends on the attitude and the height; the solver groups the conditions by configuration (ground normal, offset and wake direction) and factorizes once per group. An explicit ground plane can replace `condition.h`. Geometry or wake on or below the ground raises `GroundStrikeError`.
+The image wake is the reflection of the wake. The wake follows the free stream in ground effect, so it stays parallel to the ground and keeps the height of the trailing edge. The influence matrix depends on the attitude and the height; the solver groups the conditions by configuration (ground normal, offset and wake direction) and factorizes once per group with the direct solve. With the default Krylov ground solve on the CPU, only the anchor group of each ground offset is factorized, and GMRES solves the other groups (see *Krylov solve in ground effect*). An explicit ground plane can replace `condition.h`. Geometry or wake on or below the ground raises `GroundStrikeError`.
 
 The solver builds the wake of one attitude once and shares it between heights while that attitude is cached.
 
@@ -462,7 +458,7 @@ The chordwise Richardson value is then $R_c = f(n_{s,0}, \infty)$ and the spanwi
 ## Solver interface
 
 `PanelMethodSolver` connects Ventorum-3DP to the standard solver API (`solver="panel3d"`):
-- Inputs: `Aircraft`, `FlightCondition` (or sequences for sweeps), `SolverSettings`, and an optional `GroundPlane` (keyword `ground`) that replaces `condition.h`. The panel fields of `SolverSettings` are `panel_kutta`, `panel_backend`, `panel_wake_length`, `panel_chord_spacing` (cosine by default), `panel_estimate_mesh_error` and `panel_scale_root_thickness` (True by default; the root section of a symmetric surface with dihedral keeps its thickness normal to the local surface, see the panel solver theory page); `n_chord` is the chordwise panel count per surface (40 when None).
+- Inputs: `Aircraft`, `FlightCondition` (or sequences for sweeps), `SolverSettings`, and an optional `GroundPlane` (keyword `ground`) that replaces `condition.h`. The panel fields of `SolverSettings` are `panel_kutta`, `panel_backend`, `panel_ground_solver` (`"auto"` by default), `panel_wake_length`, `panel_chord_spacing` (cosine by default), `panel_estimate_mesh_error`, `panel_scale_root_thickness` (True by default; the root section of a symmetric surface with dihedral keeps its thickness normal to the local surface, see the panel solver theory page) and `panel_cache` (True by default; keeps the mesh and the factorized systems of the last solves); `n_chord` is the chordwise panel count per surface (40 when None).
 - Outputs: `SolverResult` containing `totals` (`IntegratedResult`), `spanwise` (`SpanwiseResult` strip loads, each panel assigned to the lattice strip whose station planes enclose its centroid, or by the strip index of the mesh builder), surface `cp` distribution, panel options (`details["panel"]`), trust score, and execution `dispatch` records with the counted factorizations.
 
 ### Krylov solve in ground effect
@@ -509,12 +505,13 @@ page and equation numbers for right preconditioning: to be checked.
 - Pre-stall flight conditions at Mach below 0.3.
 - Closed, watertight surface meshes without self-intersections.
 - In ground effect, ground clearance of the body and the wake above zero (ground strikes raise `GroundStrikeError`, a `ValueError`).
+- No wake sheet touches or crosses another closed surface: the wake is rigid and flat, so a surface directly behind another surface at the same height is refused with `ValidityError` (see the panel solver chapter, section *Wake Through Another Surface*).
 
 ## Implementation
 
 - Mesh generation and quality: `ventorum.panel3d.mesh.PanelMesh`, `mesh_aircraft`, `check_mesh`.
 - Influence kernels: `ventorum.panel3d.kernels`, `ventorum.panel3d.kernels_numba`, `ventorum.panel3d.kernels_warp`.
-- Wake geometry and shedding: `ventorum.panel3d.wake.PanelWake`, `build_wake`.
+- Wake geometry and shedding: `ventorum.panel3d.wake.PanelWake`, `build_wake`, `check_wake_crossing`.
 - Kutta conditions: `ventorum.panel3d.kutta.solve_pressure_kutta`.
 - Image systems and symmetry: `ventorum.panel3d.images`.
 - Core solver: `ventorum.panel3d.solver.PanelSolver`, `PanelResult`.
@@ -529,6 +526,7 @@ The 3D panel method implementation is verified by tests in the test suite:
 - Kernel parity and asymptotic limits: `tests/test_panel3d_kernels.py`, `tests/test_panel3d_backends.py`.
 - Mesh construction and control surface deflections: `tests/test_panel3d_mesh.py`, `tests/test_panel3d_controls.py`.
 - Potential flow solution, unit onsets, surface gradient and Trefftz drag (sphere in two orientations, ellipsoid on all panels, stored free-air run, factorization count): `tests/test_panel3d_solver.py`.
+- Wake sheets through another surface (refused tandem, unchanged offset tandem, wing and tail, biplane): `tests/test_panel3d_wake_crossing.py`.
 - Symmetry plane and ground effect images (explicit mirror with the free-stream wake, Trefftz drag with images, bank and sideslip on a half mesh): `tests/test_panel3d_images.py`.
 - Iterative pressure Kutta condition (stored Morino run, asymmetric half mesh against the full mesh): `tests/test_panel3d_kutta.py`.
 - Mesh convergence and Richardson extrapolation: `tests/test_panel3d_convergence.py`.

@@ -64,7 +64,7 @@ Three plain-text formats are read. The reader detects the format from
 the first lines.
 
 - Selig: an optional name line, then x y pairs in Selig order (M. S. Selig and co-workers, *Summary of Low-Speed Airfoil Data*, 1995).
-- Lednicer: a name line, a line with the point counts of the upper and lower surfaces (two numbers larger than 1, for example `61 61`), then the upper surface from the leading edge to the trailing edge, a blank line, and the lower surface from the leading edge to the trailing edge (D. Lednicer, AIAA paper 2010-0458, 2010). The reader merges the duplicated leading-edge point. A file without the name line is read when its first line holds two whole numbers of at least 2 whose sum equals the number of data lines that follow; two numbers that fail this count stay a data point.
+- Lednicer: a name line, a line with the point counts of the upper and lower surfaces (two numbers larger than 1, for example `61 61`), then the upper surface from the leading edge to the trailing edge, a blank line, and the lower surface from the leading edge to the trailing edge. The reader merges the duplicated leading-edge point. A file without the name line is read when its first line holds two whole numbers of at least 2 whose sum equals the number of data lines that follow; two numbers that fail this count stay a data point.
 - Plain: x y pairs with no header. The name then comes from the file stem.
 
 Separators are spaces, tabs or commas. Lines that start with `#` are
@@ -133,8 +133,9 @@ The standard (non-reflex) 5-digit mean lines follow Abbott and von
 Doenhoff (1959). Jacobs, Ward and Pinkerton (NACA Report 460, 1933) and
 Jacobs and Pinkerton (NACA Report 537, 1935) define the series. The
 first digit sets the design lift coefficient ($0.15$ times the digit),
-the second and third digits set the camber position, and the last two
-digits set $t$. With the parameters $m$ [-] and $k_1$ [-], the mean
+the second digit sets the camber position, the third digit is the reflex
+flag (0 for a standard mean line, 1 for a reflex mean line), and the last
+two digits set $t$. With the parameters $m$ [-] and $k_1$ [-], the mean
 line is, for $x \le m$,
 
 ```{math}
@@ -263,14 +264,17 @@ The construction has five steps:
 5. Check. The output must be a simple polygon with a positive area; otherwise the function raises `AirfoilGeometryError`.
 
 Hinge treatment. The option `hinge_treatment` selects what happens to
-the nodes near the hinge after the construction: "none" (default) keeps
+the nodes near the hinge after the construction: "none" keeps
 the outline as constructed; "merge" removes nodes near the hinge until
 no panel there is shorter than half the mean length of its neighbours
 and no isolated sharp corner remains, and the kept nodes do not move;
 "repanel" fits a spline through the outline and distributes the nodes
 again along it, with nodes kept at the hinge on both surfaces, at the
 leading edge and at the trailing edge (panel count of the input, or
-`n_panels`). The page {doc}`airfoil_flaps` gives the rules, the limits
+`n_panels`). The default is "repanel": a study of the method found that
+it makes the viscous solution converge where "none" fails (small
+deflections), and that its mesh does not depend on the input points.
+The page {doc}`airfoil_flaps` gives the rules, the limits
 and the tested deviation bound of "repanel".
 
 A zero deflection returns a copy of the input. The input must be in
@@ -346,7 +350,6 @@ pivot from it; explicit `chord_ref` and `moment_ref` arguments win.
 ## References
 
 - M. S. Selig, J. J. Guglielmo, A. P. Broeren and P. Giguere, *Summary of Low-Speed Airfoil Data*, Vol. 1, SoarTech Publications, 1995.
-- D. Lednicer, "A CFD evaluation of wind tunnel test sections", AIAA paper 2010-0458, 2010.
 - I. H. Abbott and A. E. von Doenhoff, *Theory of Wing Sections*, Dover, 1959, chapter 6 (1959 McGraw-Hill edition, section 6.4 for the thickness distribution and the 4-digit mean line, section 6.5 for the 5-digit mean lines and the table of $m$ and $k_1$).
 - E. N. Jacobs, K. E. Ward and R. M. Pinkerton, "The characteristics of 78 related airfoil sections from tests in the variable-density wind tunnel", NACA Report 460, 1933.
 - E. N. Jacobs and R. M. Pinkerton, "Tests in the variable-density wind tunnel of related airfoils having the maximum camber unusually far forward", NACA Report 537, 1935.

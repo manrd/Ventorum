@@ -375,6 +375,9 @@ class LatticeSolver(BaseSolver):
                     f"h_min/c = {LLT_GE_MIN_H_OVER_C} (here {hc:.3f}). Use solver='vlm'."
                 )
         notes: list[str] = list(lattice.join_warnings)
+        # The mesh warnings (build_lattice issues them, and the lattice cache
+        # again on a cached lattice) are notes of the trust score too.
+        notes += [m for m in getattr(lattice, "mesh_warnings", ()) if m not in notes]
         if ground is not None and lattice.camber_fallback:
             notes.append(_CAMBER_GROUND_NOTE)
         if self.collocation == "llt" and h_min is not None and c_ref and h_min / c_ref < LLT_GE_WARN_H_OVER_C:
@@ -535,9 +538,12 @@ class LatticeSolver(BaseSolver):
             "ref_point": None if ref_point is None else np.asarray(ref_point, dtype=float),
             "dispatch": {**dispatch, "backends": dict(dispatch["backends"])},
         }
+        mesh = getattr(lattice, "mesh_warnings", ())
         for msg in notes:
             if msg == _CAMBER_GROUND_NOTE:
                 continue  # This is a result trust note, not a run-time warning.
+            if msg in mesh:
+                continue  # Issued by build_lattice or by the lattice cache.
             warnings.warn(msg, RuntimeWarning, stacklevel=4)
         return res
 

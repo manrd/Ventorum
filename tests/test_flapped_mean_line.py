@@ -194,11 +194,13 @@ def test_flap_and_aileron_on_6409():
 # wing with a flap do not have an edge where the fix applies, so the
 # results stay the same. rtol 1e-10 and an absolute floor of 1e-12 accept
 # other BLAS builds (CI).
+# The clean cambered values come from the lattice with the blended camber
+# offset at folds and the mean-surface node on the last panel's legs.
 _STORED = {
-    "clean_2412": ("2412", (), (0.33641999107023657, 0.00467789703698421, -0.128160158481824,
-                                -1.5105075164968115e-19, -3.498113159053798e-18, -3.006263983027834e-19)),
-    "clean_6409": ("6409", (), (0.661392731373163, 0.018218398097771118, -0.30090120005641846,
-                                4.028020043991498e-19, -2.4884037888955287e-18, -1.346082479544815e-18)),
+    "clean_2412": ("2412", (), (0.33640884030827095, 0.004677109685232716, -0.12815500732586582,
+                                4.028020043991498e-19, 9.486449403165572e-18, -1.6054059379433887e-20)),
+    "clean_6409": ("6409", (), (0.6611982936074127, 0.018187794679258042, -0.3007990358655166,
+                                0.0, 9.94378112227159e-18, -2.881666780983468e-18)),
     "flap_0012": ("0012", ("flap",), (0.3021835647263291, 0.0047381579972962055, -0.10544650849510419,
                                       -8.732621579747192e-20, -1.3333474064076837e-18, 2.858246416027368e-20)),
     "flap_aileron_0012": ("0012", ("flap", "aileron"),
@@ -242,3 +244,134 @@ def test_moved_hinge_on_cambered_strip_warns(shape, hinge, n_chord, expect):
             vt.SolverSettings(n_panels=24, n_chord=n_chord),
         )
     assert any("do not coincide" in str(w.message) for w in caught) is expect
+
+
+# --- edges between different hinges ---------------------------------------------
+#
+# The hinge point was not a node only at an edge that a flap strip shares
+# with a strip without a hinge on the same surface. At an edge between two
+# controls with different hinge fractions, and at the end of a surface
+# joined to another surface (clean, or with another hinge), each strip kept
+# its own node. On a NACA 6409 the legs were 3.1e-2 chord apart, and CL
+# diverged with the spanwise panels also at zero deflection (0.83, 0.90,
+# 1.45 and 2.50 at 20, 40, 80 and 160 panels for two controls with hinges at
+# 0.75 and 0.625 chord; the clean wing gives 0.66).
+
+def _two_hinges(d1=0.0, d2=0.0, gap=0.0) -> list:
+    return [vt.ControlSurface("f1", 0.1, 0.4, 0.75, np.radians(d1)),
+            vt.ControlSurface("f2", 0.4 + gap, 0.7, 0.625, np.radians(d2))]
+
+
+def _joined(shape, outer_controls=()) -> vt.Aircraft:
+    """Inner symmetric surface (span 2 m each side) with a flap at its tip, joined to an outer surface."""
+    def surface(name, controls, symmetric):
+        return vt.LiftingSurface(
+            name=name, semi_span=2.0, is_symmetric=symmetric,
+            sections=[vt.WingSection(y_frac=e, chord=1.0, shape=shape) for e in (0.0, 1.0)],
+            controls=list(controls),
+        )
+    inner = surface("in", [vt.ControlSurface("flap", 0.5, 1.0, _HINGE, 0.0)], True)
+    outer = surface("out", outer_controls, False)
+    outer.position = np.array([0.0, 2.0, 0.0])
+    return vt.Aircraft(surfaces=[inner, outer, outer.mirrored()])
+
+
+def _solve_ac(aircraft, n_panels) -> object:
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)
+        return vt.VortexLatticeSolver().solve(
+            aircraft, vt.FlightCondition(V_inf=30.0, alpha=np.radians(2.0)),
+            vt.SolverSettings(n_panels=n_panels, n_chord=8, spacing="uniform"),
+        ).totals
+
+
+def _assert_legs_coincide(lat):
+    """The legs of the two strips at each shared edge (also between surfaces) have the same nodes."""
+    n_c = lat.n_chord
+    a_e, b_e = vortex.chain_ends(lat.a, lat.b, lat.a_te, lat.b_te, lat.leg_next)
+    n_edges = 0
+    for s in range(lat.n_strips):
+        for t in range(lat.n_strips):
+            if t == s or np.max(np.abs(lat.le_right[s] - lat.le_left[t])) > 1e-9:
+                continue
+            if np.max(np.abs(lat.te_right[s] - lat.te_left[t])) > 1e-9:
+                continue
+            right = s * n_c + np.arange(n_c)
+            left = t * n_c + np.arange(n_c)
+            for p_r, p_l in ((lat.b, lat.a), (lat.b_kink, lat.a_kink), (b_e, a_e)):
+                np.testing.assert_allclose(p_r[right], p_l[left], rtol=0, atol=1e-12, err_msg=f"edge {s}|{t}")
+            n_edges += 1
+    return n_edges
+
+
+@pytest.mark.parametrize("d1,d2", [(0.0, 0.0), (10.0, -10.0)])
+def test_legs_coincide_between_different_hinges(d1, d2):
+    """Two adjacent controls with different hinges share the leg nodes of their edge where it is not deflected."""
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)
+        lat = mesh_mod.build_lattice(vt.Aircraft(surfaces=[_wing("6409", _two_hinges(d1, d2))]),
+                                     vt.SolverSettings(n_panels=40, spacing="uniform"), n_chord=8)
+    # With opposite deflections the join between the controls has zero
+    # deflection at their common edge.
+    assert _assert_legs_coincide(lat) == lat.n_strips - 1
+    # Two outer join edges and the edge between the controls, on each half,
+    # seen from both strips at the edge between the controls.
+    assert int(lat.geom_cache["flap_field"]["hinge_off"].sum()) == 8
+
+
+@pytest.mark.parametrize("outer", ["clean", "other_hinge"])
+def test_legs_coincide_at_a_joined_surface_end(outer):
+    """A flap at the end of a surface shares the leg nodes with the joined surface of a different hinge."""
+    outer_controls = [] if outer == "clean" else [vt.ControlSurface("f", 0.0, 0.5, 0.625, 0.0)]
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)
+        lat = mesh_mod.build_lattice(_joined("6409", outer_controls),
+                                     vt.SolverSettings(n_panels=10, spacing="uniform"), n_chord=8)
+    # 19 edges inside the inner surface, 9 inside each outer surface and the
+    # two joints.
+    assert _assert_legs_coincide(lat) == 19 + 2 * 9 + 2
+    off = lat.geom_cache["flap_field"]["hinge_off"]
+    inner = lat.surfaces[0].strips
+    # Both tips of the inner surface (the joints) and the outer edges of the
+    # two joins at the inboard ends of the flap.
+    assert bool(off[inner.start, 0]) and bool(off[inner.stop - 1, 1])
+    assert int(off[inner].sum()) == 4
+
+
+#: Largest CL change [-] between 80 and 160 spanwise panels for the cases
+#: below. A symmetric section with the same controls changes by 3e-4 or
+#: less; the defect gave 0.4 to 2.3 on a NACA 6409.
+_FINE_TOL = 3e-3
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize("shape", ["6409", "0012"])
+@pytest.mark.parametrize("case", ["zero", "opposite", "apart"])
+def test_different_hinges_converge_spanwise(shape, case):
+    """CL with two controls of different hinges converges up to 160 spanwise panels (formerly 0.83 to 2.50)."""
+    controls = {"zero": lambda: _two_hinges(),
+                "opposite": lambda: _two_hinges(10.0, -10.0),
+                "apart": lambda: _two_hinges(10.0, 10.0, gap=0.05)}[case]
+    cl = {ns: float(_solve_ac(vt.Aircraft(surfaces=[_wing(shape, controls())]), ns).CL) for ns in (20, 40, 80, 160)}
+    if case == "zero":
+        # At zero deflection the controls do not change the wing.
+        for ns in (20, 160):
+            clean = float(_solve_ac(vt.Aircraft(surfaces=[_wing(shape)]), ns).CL)
+            assert abs(cl[ns] - clean) < 1e-4, (ns, cl[ns], clean)
+    assert abs(cl[160] - cl[80]) < _FINE_TOL, cl
+    assert max(cl.values()) - min(cl.values()) < 0.02, cl
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize("shape", ["6409", "0012"])
+@pytest.mark.parametrize("outer", ["clean", "other_hinge"])
+def test_joined_surface_end_converges_spanwise(shape, outer):
+    """A flap at zero deflection at a joined surface end gives the clean CL up to 160 panels (formerly 0.76 to 1.69)."""
+    outer_controls = [] if outer == "clean" else [vt.ControlSurface("f", 0.0, 0.5, 0.625, 0.0)]
+    for ns in (20, 40, 80, 160):
+        # The reference area is the area of the inner surface, half of the
+        # wing area: 0.5 CL is on the wing area, as for the one-surface wing
+        # with the same strips.
+        cl = 0.5 * float(_solve_ac(_joined(shape, outer_controls), ns // 2).CL)
+        clean = float(_solve_ac(vt.Aircraft(surfaces=[_wing(shape)]), ns).CL)
+        assert abs(cl - clean) < 1e-4, (ns, cl, clean)

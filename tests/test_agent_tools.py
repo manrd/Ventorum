@@ -649,34 +649,37 @@ def test_alpha_step_has_a_minimum():
     assert p["status"] == "success" and p["polar_summary"]["n_points"] == 3
 
 
-def test_ground_effect_irodov_headline_uses_central_difference():
-    """Defect 6: the headline margin is at the lowest height with a central difference, and the
-    reused centre-alpha cases give the same margins as a full 3-alpha sweep."""
+def test_ground_effect_irodov_uses_local_height_derivatives():
+    """Each Irodov row equals height_derivatives of its own flight state (same mesh), and the
+    headline is the lowest valid height. The spacing of the height grid does not change it."""
     import numpy as np
 
+    import ventorum as vt
     from ventorum.agent.schemas import build_aircraft_from_spec
-    from ventorum.core.datatypes import SolverSettings
-    from ventorum.ground_effect import GroundEffectSweep
+    from ventorum.core.datatypes import FlightCondition, SolverSettings
 
     hs = [0.3, 0.6, 1.0, 1.5]
     p = ground_effect(RECT, hs, alpha_deg=4.0, settings=SMALL, detail_level="summary")
     strict_json(p)
     assert p["status"] == "success"
     ir = p["irodov"]
-    assert [r["height_difference"] for r in ir["rows"]] == ["one-sided", "central", "central", "one-sided"]
-    assert ir["headline_h_m"] == 0.6
-    assert "Irodov margin at h=0.6 m (central height difference)" in p["executive_summary"]
+    assert ir["headline_h_m"] == 0.3
+    assert ir["computed_at"] == "every valid height"
+    assert "Irodov margin at h=0.3 m:" in p["executive_summary"]
+    assert all("height_difference" not in r for r in ir["rows"])
 
-    ref = GroundEffectSweep(build_aircraft_from_spec(RECT), settings=SolverSettings(n_panels=12, n_chord=2))
-    der = ref.run_sweep(hs, [3.0, 4.0, 5.0], [0.0], compute_strike_limit=False).compute_stability_derivatives()
-    got = [r["irodov_margin"] for r in ir["rows"]]
-    assert got == pytest.approx(np.round(der["irodov_margin"][:, 1], 5).tolist(), abs=2e-5)
+    ac = build_aircraft_from_spec(RECT)
+    st = SolverSettings(n_panels=12, n_chord=2)
+    for row in ir["rows"]:
+        fc = FlightCondition(alpha=np.radians(4.0), h=row["pivot_h_m"])
+        ref = vt.height_derivatives(ac, fc, st)
+        assert row["irodov_margin"] == pytest.approx(ref.irodov["margin"], abs=2e-5)
+        assert row["h_step_m"] == pytest.approx(ref.steps["h_m"], abs=1e-6)
 
     two = ground_effect(RECT, [0.5, 1.0], alpha_deg=4.0, settings=SMALL)
     assert two["status"] == "success" and len(two["irodov"]["rows"]) == 2
+    assert all(r["irodov_margin"] is not None for r in two["irodov"]["rows"])
     assert two["irodov"]["headline_h_m"] == 0.5
-    assert any("one-sided" in n for n in two["irodov"]["notes"])
-    assert "one-sided height difference" in two["executive_summary"]
 
 
 def test_ground_effect_bank_strike_limit_not_found_is_null():

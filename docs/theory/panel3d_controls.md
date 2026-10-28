@@ -1,7 +1,3 @@
----
-orphan: true
----
-
 # Plain control surfaces in 3D panel meshes
 
 This page describes deflected plain control surfaces in thick 3D panel meshes.

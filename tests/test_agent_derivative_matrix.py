@@ -417,6 +417,8 @@ def _error_bars_before_change(wing, flight_condition, settings, axes="body"):
         "levels": [int(n) for n in levels],
         "notes": list(res.notes),
         "status_of_bars": "numerical_only",
+        # The tool gives the trust of the fine level (the user mesh) since the trust audit.
+        "trust": t.trust_payload(res.results[0].totals.trust if res.results else None),
         "device": device,
         "precision": precision,
         "condition_used": t.condition_payload(c),

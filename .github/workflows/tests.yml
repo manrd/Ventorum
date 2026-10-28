@@ -11,7 +11,9 @@ permissions:
 jobs:
   test:
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 60
+    # The Windows runner is slower: the full suite, two verification reports
+    # and the examples take about 60 minutes there, so it gets more time.
+    timeout-minutes: ${{ matrix.os == 'windows-latest' && 90 || 60 }}
     strategy:
       fail-fast: false
       matrix:

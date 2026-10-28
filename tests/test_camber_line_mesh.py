@@ -665,3 +665,253 @@ def test_claf_normals_follow_clamped_mean_line_outside_chord():
     z = airfoil("4412").normalized().camber(lat.cp[outside, 0])
     np.testing.assert_allclose(lat.cp[outside, 2], z, rtol=0, atol=2e-15)
     np.testing.assert_allclose(lat.normal_bc[outside], lat.normal[lat.panel_strip[outside]], rtol=0, atol=2e-15)
+
+
+# --- spanwise refinement with dihedral --------------------------------------------
+#
+# A clean cambered wing with dihedral had two defects at narrow root and tip
+# strips (NACA 6409, dihedral 5 deg, 4 chordwise panels, cosine spacing: CL
+# 0.665, 0.675, 0.768, 0.620 and 0.543 at 32, 48, 64, 96 and 128 panels).
+#
+# * Root: the mean-line offset of the root node was along the bisector of
+#   the two halves, the offset of the next node along the normal of its half.
+#   A narrow root strip turned over. The offset now turns from the bisector
+#   to the half normal over a span length that depends only on the geometry
+#   (CAMBER_FOLD_BLEND_FACTOR), so the mean surface is the same at every
+#   mesh and no strip turns over.
+# * Tips: the legs of the last chordwise panel ran straight from its bound
+#   point to the trailing edge, 1.3e-3 chord from its control point on the
+#   curved mean line. On a narrower tip strip the circulation of that panel
+#   grew without limit. The legs now pass through a mean-surface node half a
+#   panel length aft of the bound point.
+
+def _dihedral_wing(shape="6409", dihedral_deg=5.0):
+    return Aircraft(surfaces=[LiftingSurface(
+        name="wing", semi_span=4.0, dihedral=np.radians(dihedral_deg),
+        sections=[WingSection(y_frac=e, chord=1.0, shape=shape) for e in (0.0, 1.0)],
+    )], ref_point=np.array([0.25, 0.0, 0.0]))
+
+
+def _strip_span_turnover(lat):
+    """Return the smallest ratio of the width at a chord station to the reference width, over all strips."""
+    worst = np.inf
+    span = lat.dl.copy()
+    span[:, 0] = 0.0
+    span /= np.linalg.norm(span, axis=1, keepdims=True)
+    width = lat.dl[:, 1] * span[:, 1] + lat.dl[:, 2] * span[:, 2]
+    s_p = span[lat.panel_strip]
+    pairs = [(lat.a, lat.b), (lat.le_left[lat.panel_strip], lat.le_right[lat.panel_strip]),
+             (lat.a_te, lat.b_te)]
+    if lat.a_kink is not None:
+        pairs.append((lat.a_kink, lat.b_kink))
+    for left, right in pairs:
+        ratio = np.sum((right - left) * s_p, axis=1) / width[lat.panel_strip]
+        worst = min(worst, float(np.min(ratio)))
+    return worst
+
+
+def test_dihedral_root_strip_keeps_its_direction():
+    """The bound vortices of the root strip of a cambered wing with dihedral point along its span."""
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)
+        lat = build_lattice(_dihedral_wing(), SolverSettings(n_panels=64, spacing="cosine"), n_chord=4)
+    s = lat.n_strips // 2
+    p = s * lat.n_chord + np.arange(lat.n_chord)
+    span = np.array([0.0, np.cos(np.radians(5.0)), np.sin(np.radians(5.0))])
+    assert np.all((lat.b[p] - lat.a[p]) @ span > 0.0)
+
+
+@pytest.mark.parametrize("shape, dihedral_deg, n_span", [
+    ("6409", 5.0, 512), ("6409", 10.0, 1024), ("4412", 45.0, 256), ("6409", 89.0, 128),
+])
+def test_no_strip_turns_over(shape, dihedral_deg, n_span):
+    """No strip width becomes negative at a chord station, down to very narrow root strips.
+
+    The blend keeps at least 1 - 1.5 / K of the reference width (K =
+    CAMBER_FOLD_BLEND_FACTOR) at the bound points, the leg nodes and the
+    leading and trailing edges; a small margin allows for the change of
+    chord and camber inside the blend.
+    """
+    from ventorum.geometry.lattice import CAMBER_FOLD_BLEND_FACTOR
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)
+        lat = build_lattice(_dihedral_wing(shape, dihedral_deg),
+                            SolverSettings(n_panels=n_span, spacing="cosine"), n_chord=8)
+    root = lat.width[lat.n_strips // 2]
+    assert root < 1e-3 * lat.chord[lat.n_strips // 2]
+    assert _strip_span_turnover(lat) > 0.95 * (1.0 - 1.5 / CAMBER_FOLD_BLEND_FACTOR)
+
+
+def test_no_strip_turns_over_at_section_break_and_junction():
+    """A dihedral break between sections and between two joined surfaces keeps every strip width positive."""
+    bent = LiftingSurface(
+        name="bent", semi_span=4.0, spacing="cosine",
+        sections=[WingSection(y_frac=0.0, chord=1.0, shape="6409"),
+                  WingSection(y_frac=0.5, chord=0.8, shape="6409", z_le=0.0),
+                  WingSection(y_frac=1.0, chord=0.5, shape="4412", z_le=1.2)],
+    )
+    # Uniform strips at the junction: with cosine spacing the narrow end
+    # strips of two joined surfaces have control points closer than the
+    # overlap limit of check_overlaps (also for a flat plate).
+    inner = LiftingSurface(name="inner", semi_span=2.0, is_symmetric=False, spacing="uniform",
+                           sections=[WingSection(y_frac=e, chord=1.0, shape="6409") for e in (0.0, 1.0)])
+    outer = LiftingSurface(name="outer", semi_span=1.0, is_symmetric=False, spacing="uniform",
+                           dihedral=np.radians(60.0), position=np.array([0.0, 2.0, 0.0]),
+                           sections=[WingSection(y_frac=e, chord=1.0, shape="6409") for e in (0.0, 1.0)])
+    for ac, n_span in ((Aircraft(surfaces=[bent]), 256), (Aircraft(surfaces=[inner, outer]), 400)):
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", RuntimeWarning)
+            lat = build_lattice(ac, SolverSettings(n_panels=n_span), n_chord=6)
+        folds = [f for frame in lat.camber_frames for f in frame["folds"]]
+        assert folds and all(f["node"] > 0 or len(f["members"]) == 2 for f in folds)
+        assert _strip_span_turnover(lat) > 0.45
+
+
+def test_mean_surface_does_not_depend_on_the_mesh():
+    """Nodes at the same span station have the same mean-line offset on two meshes, also inside a blend."""
+    from ventorum.geometry.lattice import camber_span_field  # noqa: F401  (the field under test)
+
+    ac = _dihedral_wing("6409", 30.0)
+    ac.surfaces[0].semi_span = 0.25
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)
+        coarse = build_lattice(ac, SolverSettings(n_panels=8, spacing="uniform"), n_chord=4)
+        fine = build_lattice(ac, SolverSettings(n_panels=16, spacing="uniform"), n_chord=4)
+    # The blend reaches past the first node of the coarse mesh.
+    length = 3.0 * np.radians(30.0) * float(np.max(np.abs(airfoil("6409").normalized().camber(np.linspace(0, 1, 401)))))
+    assert coarse.width[coarse.n_strips // 2] < length
+    le_c = coarse.surfaces[0].edge_le
+    le_f = fine.surfaces[0].edge_le[::2]
+    te_c = coarse.surfaces[0].edge_te
+    te_f = fine.surfaces[0].edge_te[::2]
+    np.testing.assert_allclose(le_c, le_f, rtol=0, atol=1e-14)
+    np.testing.assert_allclose(te_c, te_f, rtol=0, atol=1e-14)
+    # The root node takes the bisector (vertical) and the field turns to the
+    # normal of each half outside the blend length.
+    frame = fine.camber_frames[0]
+    root = fine.n_strips // 2
+    np.testing.assert_allclose(frame["normal"][root], [0.0, 0.0, 1.0], atol=1e-15)
+    half = np.array([0.0, -np.sin(np.radians(30.0)), np.cos(np.radians(30.0))])
+    far = root + 1 + int(np.searchsorted(np.cumsum(fine.width[root:]), length))
+    np.testing.assert_allclose(frame["normal"][far:], np.tile(half, (frame["normal"].shape[0] - far, 1)), atol=1e-15)
+    turn = np.degrees(np.arccos(np.clip(frame["normal"][root:far] @ [0.0, 0.0, 1.0], -1, 1)))
+    assert np.all(np.diff(turn) > 0.0)
+
+
+def test_last_panel_legs_pass_through_the_control_point_station():
+    """The legs of the last panel pass through the mean-surface node at the chord fraction of its control point."""
+    lat = build_lattice(_aircraft("6409"), SolverSettings(n_panels=6, spacing="uniform"), n_chord=4)
+    last = np.arange(lat.n_strips) * lat.n_chord + lat.n_chord - 1
+    shape = airfoil("6409").normalized()
+    np.testing.assert_allclose(lat.a_kink[last, 0], 0.875 + 0.0625, rtol=0, atol=1e-15)
+    np.testing.assert_allclose(lat.a_kink[last, 2], shape.camber(lat.a_kink[last, 0]), rtol=0, atol=2e-15)
+    np.testing.assert_allclose(lat.b_kink[last, 2], shape.camber(lat.b_kink[last, 0]), rtol=0, atol=2e-15)
+    # The control point (CLAF = 1) lies on the straight line between the two leg nodes.
+    f = lat.cp_frac[:, None]
+    np.testing.assert_allclose(lat.cp[last], lat.a_kink[last] + f * (lat.b_kink[last] - lat.a_kink[last]),
+                               rtol=0, atol=2e-15)
+    assert lat.leg_next is not None and not np.any(lat.leg_next[last])
+
+
+def test_narrow_tip_strip_keeps_its_circulation():
+    """The trailing-edge panel of a very narrow tip strip does not take a large circulation."""
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)
+        result = VortexLatticeSolver().solve(
+            _dihedral_wing("6409", 0.0), FlightCondition(V_inf=30.0, alpha=np.radians(2.0)),
+            SolverSettings(n_panels=192, n_chord=4, spacing="half-cosine"))
+    lat = result.details["lattice"]
+    gamma = result.details["gamma"].reshape(lat.n_strips, lat.n_chord)
+    assert lat.width[-1] < 2e-4 * lat.chord[-1]
+    # The circulation falls toward the tip on every chordwise row.
+    assert np.all(np.abs(gamma[-1]) <= np.abs(gamma[-2]))
+    assert np.all(np.abs(gamma[0]) <= np.abs(gamma[1]))
+
+
+@pytest.mark.parametrize("spacing", ["cosine", "auto"])
+def test_dihedral_camber_converges_spanwise(spacing):
+    """CL of a cambered wing with dihedral converges with the spanwise panels."""
+    cl = {}
+    for n in (32, 64, 128):
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", RuntimeWarning)
+            cl[n] = float(VortexLatticeSolver().solve(
+                _dihedral_wing(), FlightCondition(V_inf=30.0, alpha=np.radians(2.0)),
+                SolverSettings(n_panels=n, n_chord=4, spacing=spacing)).totals.CL)
+    # Without dihedral the same wing changes by about 3e-4 over these
+    # meshes.
+    assert max(cl.values()) - min(cl.values()) < 2e-3, cl
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize("spacing", ["cosine", "auto"])
+@pytest.mark.parametrize("dihedral_deg", [0.0, 5.0, 10.0])
+@pytest.mark.parametrize("shape", ["6409", "4412"])
+def test_cambered_wing_converges_to_128_spanwise_panels(shape, dihedral_deg, spacing):
+    """CL and Cm of cambered wings with dihedral converge from 32 to 128 spanwise panels.
+
+    The flat plate with the same dihedral changes by up to about 1e-3 in CL
+    over these meshes (the fold of the root); the bound covers that.
+    """
+    cl, cm = [], []
+    for n in (32, 48, 64, 96, 128):
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", RuntimeWarning)
+            t = VortexLatticeSolver().solve(
+                _dihedral_wing(shape, dihedral_deg), FlightCondition(V_inf=30.0, alpha=np.radians(2.0)),
+                SolverSettings(n_panels=n, n_chord=4, spacing=spacing)).totals
+        cl.append(float(t.CL))
+        cm.append(float(t.Cm))
+    assert max(cl) - min(cl) < 1e-3, cl
+    assert max(cm) - min(cm) < 1e-3, cm
+    # No step between two meshes is larger than the steady drift of the fold.
+    assert np.max(np.abs(np.diff(cl))) < 3e-4, cl
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize("dihedral_deg", [5.0, 7.0])
+def test_sideslip_side_force_near_and_far_field_converge(dihedral_deg):
+    """The near-field side force minus the Trefftz-plane side force converges in sideslip."""
+    diff = []
+    for n in (32, 48, 64, 96, 128):
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", RuntimeWarning)
+            t = VortexLatticeSolver().solve(
+                _dihedral_wing("4412", dihedral_deg),
+                FlightCondition(V_inf=30.0, alpha=np.radians(5.0), beta=np.radians(5.0)),
+                SolverSettings(n_panels=n, n_chord=10, spacing="cosine")).totals
+        diff.append(float(t.CY) - float(t.CY_farfield))
+    # Before the fix: -3.3e-3 and 0.34 at 64 and 128 panels (5 deg), -0.65
+    # at 64 panels (7 deg). The difference is now the side-edge force of the
+    # tips, about 1e-3 and the same on every mesh.
+    assert max(diff) - min(diff) < 5e-5, diff
+    assert max(abs(d) for d in diff) < 2e-3, diff
+
+
+@pytest.mark.parametrize("h", [None, 0.5])
+def test_flat_and_symmetric_sections_keep_stored_results(h):
+    """A flat plate and a symmetric section with dihedral keep their results bit for bit.
+
+    The stored values come from the lattice before the blend of the
+    mean-line offset and the last-panel leg node.
+    """
+    stored = {
+        None: (0.3172042966423574, 0.00419988835862114, -0.0003302581649564726,
+               -0.0017721514480607027, -0.008018982347403007, -0.0006578816935913857),
+        0.5: (0.37152570408440627, 0.0030724201405939277, -0.0055541827078806035,
+              -0.0022480709668625497, -0.009217386459386818, -0.0008229020856308123),
+    }[h]
+    results = []
+    for shape in (None, "0012"):
+        result = VortexLatticeSolver().solve(
+            _dihedral_wing(shape, 5.0), FlightCondition(V_inf=30.0, alpha=np.radians(4.0), beta=np.radians(5.0), h=h),
+            SolverSettings(n_panels=32, n_chord=4, spacing="cosine"))
+        values = [float(getattr(result.totals, k)) for k in ("CL", "CDi", "Cm", "CY", "Cl", "Cn")]
+        np.testing.assert_allclose(values, stored, rtol=1e-10, atol=1e-12)
+        results.append(result)
+    plain, shaped = (r.details["lattice"] for r in results)
+    for name in ("a", "b", "a_te", "b_te", "cp", "normal_bc"):
+        assert np.array_equal(getattr(plain, name), getattr(shaped, name)), name
+    assert shaped.a_kink is None and shaped.leg_next is None
+    assert np.array_equal(results[0].details["gamma"], results[1].details["gamma"])

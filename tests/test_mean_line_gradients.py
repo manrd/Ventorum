@@ -346,3 +346,57 @@ def test_joined_mean_lines_with_deflected_flap():
         wrt=("alpha", "nodes", "controls"), outputs=("CL", "CDi", "Cm"),
     )
     assert report["pass"], report
+
+
+def _folded_wing(dihedral_deg: float = 30.0) -> Aircraft:
+    """Return a short cambered wing whose root strip lies inside the fold blend of the mean-line offset."""
+    wing = LiftingSurface(
+        name="wing", semi_span=1.0, dihedral=np.radians(dihedral_deg), spacing="cosine",
+        sections=[WingSection(y_frac=0.0, chord=0.5, shape="6409", airfoil=LinearAirfoil()),
+                  WingSection(y_frac=1.0, chord=0.3, twist=np.radians(-2.0), shape="6409", airfoil=LinearAirfoil())],
+    )
+    return Aircraft(surfaces=[wing], ref_point=np.array([0.1, 0.0, 0.0]))
+
+
+def _folded_junction() -> Aircraft:
+    """Return two joined cambered surfaces at a dihedral break, with their mirror copies."""
+    inner = LiftingSurface(
+        name="inner", semi_span=0.6, is_symmetric=False, dihedral=np.radians(5.0), spacing="cosine",
+        sections=[WingSection(y_frac=0.0, chord=0.5, shape="6409", airfoil=LinearAirfoil()),
+                  WingSection(y_frac=1.0, chord=0.4, shape="6409", airfoil=LinearAirfoil())],
+    )
+    outer = LiftingSurface(
+        name="outer", semi_span=0.5, is_symmetric=False, dihedral=np.radians(35.0), spacing="cosine",
+        position=np.array([0.0, 0.6 * np.cos(np.radians(5.0)), 0.6 * np.sin(np.radians(5.0))]),
+        sections=[WingSection(y_frac=0.0, chord=0.4, shape="4412", airfoil=LinearAirfoil()),
+                  WingSection(y_frac=1.0, chord=0.25, shape="4412", airfoil=LinearAirfoil())],
+    )
+    return Aircraft(surfaces=[inner, outer, inner.mirrored(), outer.mirrored()], ref_point=np.array([0.1, 0.0, 0.0]))
+
+
+@pytest.mark.parametrize("make", [_folded_wing, _folded_junction])
+@pytest.mark.parametrize("h", [None, 0.4])
+def test_camber_fold_blend_reference_matches_production(make, h):
+    """The torch reference follows the fold blend and the last-panel leg node to round-off."""
+    from ventorum.geometry.lattice import build_lattice
+
+    ac = make()
+    st = SolverSettings(n_panels=8, n_chord=4)
+    lat = build_lattice(ac, st, n_chord=4)
+    folds = [f for frame in lat.camber_frames for f in frame["folds"]]
+    assert folds
+    res = gradients(ac, FlightCondition(V_inf=30.0, alpha=0.05, beta=0.03, h=h), st,
+                    wrt=("alpha", "nodes"), outputs=("CL", "CDi", "Cm", "CY", "Cl"))
+    assert res.forward_mismatch < 1e-11
+
+
+@pytest.mark.parametrize("make", [_folded_wing, _folded_junction])
+def test_camber_fold_blend_check_gradients(make):
+    """Check the node and planform gradients with strips inside the fold blend."""
+    ac = make()
+    cond = FlightCondition(V_inf=30.0, alpha=0.05, beta=0.03)
+    st = SolverSettings(n_panels=8, n_chord=4)
+    for wrt in (("alpha", "nodes"), ("planform",)):
+        report = check_gradients(ac, cond, st, wrt=wrt, outputs=("CL", "CDi", "Cm", "CY", "Cl"))
+        assert report["pass"], report.get("reasons")
+        assert report["groups"][wrt[-1]]["compared"] > 0

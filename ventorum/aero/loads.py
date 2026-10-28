@@ -537,7 +537,9 @@ def _symmetric_fold(
 #: force at all. Below it, the leg force of the tangential rule is scaled by
 #: ``1 - fold / LEG_KINK_BLEND_RAD``, so the loads stay continuous when the
 #: dihedral of a surface goes through zero. The value 1 deg is a code
-#: setting without a published source or study. At the root of a symmetric
+#: setting without a published source or study (see "Leg forces:
+#: derivation" in docs/theory/forces_and_moments.md, item 5, for the kink
+#: rule and the reason for the blend). At the root of a symmetric
 #: surface the fold is twice the dihedral, so the blend acts for a dihedral
 #: below 0.5 deg. Inside the blend only CY_beta changes its trend: on a
 #: rectangular test wing (VLM) its slope against the dihedral is of the
@@ -694,7 +696,8 @@ def leg_force_rules(lattice: VortexLattice) -> tuple[np.ndarray, np.ndarray, np.
     * Free edge (``LEG_FREE``): no other leg of the core group lies on the
       edge (a tip, or the root of a surface that is not mirrored or
       joined). The full velocity acts on the leg. This in-plane force is
-      the side-edge force of the free edge.
+      the discrete form of the side-edge force of the free edge (an
+      approximation that is smaller than the edge-singularity estimate).
 
     A leg that matches no other leg on an interior strip edge of its surface
     (for example at the end of a control, where the chordwise panels of the
@@ -725,6 +728,16 @@ def leg_force_rules(lattice: VortexLattice) -> tuple[np.ndarray, np.ndarray, np.
 
     Notes
     -----
+    The derivation of the three rules from the force on a thin vortex sheet,
+    the points where they are modelling choices, and their numerical checks
+    are in "Leg forces: derivation" in docs/theory/forces_and_moments.md.
+    In short: the force on an impermeable sheet is the pressure force
+    ``rho * W_t x gamma``, which equals the Kutta-Joukowski form only when
+    the normal velocity is zero. The lattice has a normal velocity at the
+    legs between its control points, so the shared rule uses the pressure
+    form. We found no published statement of the shared-edge rule or of
+    the kink rule.
+
     Two legs of different strips of one core group share an edge when they
     lie on each other by the join measure of
     :func:`ventorum.geometry.lattice.core_groups`: the distance of each end

@@ -1,10 +1,16 @@
 # Author: Manuel Alejandro Rodriguez Diaz, PhD
 """Viscous-inviscid coupling by angle-of-attack correction (V1, decambering with 2D polars).
 
-This module couples the linear potential-flow solvers (vortex-lattice
-method and linear lifting line) with two-dimensional section polars. One
+This module couples the linear potential-flow solvers with
+two-dimensional section polars: the vortex-lattice method
+(``model="vlm"``), the linear lifting line (``model="llt"``) and the 3D
+panel method of the thick surface (``model="panel3d"``, strip lift from
+the surface pressure). The nonlinear lifting line is not a model of this
+coupling: it reads the section polars itself. One
 correction angle ``delta_j`` [rad] per spanwise strip changes the
-right-hand side of that strip (a uniform change of its angle of attack).
+right-hand side of that strip (a uniform change of its section angle of
+attack: the onset turns about the span axis ``n x c`` of the strip, in
+the plane of its 2D section).
 The system matrix does not change, so its LU factorization is reused in
 every iteration, for the response matrix of the corrections, for the
 second branch of a post-stall case and for every condition of a sweep
@@ -105,7 +111,7 @@ from ventorum.aero.loads import compute_loads
 from ventorum.core.constants import MU_SL
 from ventorum.aero.polar_table import PolarTable, source_supports_ground
 from ventorum.aero.polars import blend_tabulated
-from ventorum.aero.system import GroundPlane, UnknownMap, has_rates
+from ventorum.aero.system import GroundPlane, UnknownMap, freestream_direction, has_rates
 from ventorum.core.datatypes import (
     Aircraft,
     FlightCondition,
@@ -354,7 +360,14 @@ def _strip_thickness_ratio(aircraft: Aircraft, lattice: VortexLattice, s: int, c
 # ═══════════════════════════════════════════════════════════════════════════════
 
 class _StripPolars:
-    """Resolve the section polar of each strip; memo over the conditions of one call."""
+    """Resolve the section polar of each strip; memo over the conditions of one call.
+
+    A dict of polars maps a strip index, a surface name, an airfoil name or
+    ``"default"`` to a polar. A key that matches none of these raises a
+    ``ValueError``. A strip without an entry uses the section airfoil of the
+    geometry; ``last_fallback`` flags these strips of the last
+    :meth:`resolve` call, and :meth:`fallback_note` gives the trust note.
+    """
 
     def __init__(self, polars: Any, aircraft: Aircraft) -> None:
         if polars is None:
@@ -362,16 +375,69 @@ class _StripPolars:
         self.polars = polars
         self.aircraft = aircraft
         self._memo: dict[Any, TabulatedAirfoil] = {}
+        self._keys_checked = False
+        self.last_fallback = np.zeros(0, dtype=bool)
 
-    def _candidate(self, lattice: VortexLattice, s: int) -> Any:
+    def check_keys(self, lattice: VortexLattice) -> None:
+        """Refuse dict keys that match no strip, surface or airfoil name.
+
+        Raises
+        ------
+        ValueError
+            If a key of the polar dict is not a strip index of *lattice*, a
+            surface name, an airfoil name of a section or ``"default"``. The
+            message lists the valid keys.
+        """
+        if self._keys_checked or not isinstance(self.polars, dict):
+            return
+        surfaces = {str(surf.name) for surf in self.aircraft.surfaces if surf.name}
+        airfoils = {str(getattr(sec.airfoil, "name", "") or "")
+                    for surf in self.aircraft.surfaces for sec in surf.sections}
+        airfoils |= {str(getattr(_base_airfoil(self.aircraft, lattice, s), "name", "") or "")
+                     for s in range(lattice.n_strips)}
+        airfoils.discard("")
+        n = int(lattice.n_strips)
+        unknown = []
+        for key in self.polars:
+            if isinstance(key, (int, np.integer)) and not isinstance(key, bool):
+                if 0 <= int(key) < n:
+                    continue
+            elif isinstance(key, str) and (key == "default" or key in surfaces or key in airfoils):
+                continue
+            unknown.append(key)
+        if unknown:
+            raise ValueError(
+                f"The polar dict keys {unknown!r} match no strip, surface or airfoil. Valid keys: "
+                f"strip indices 0 to {n - 1}, surface names {sorted(surfaces)}, airfoil names "
+                f"{sorted(airfoils)} and 'default'."
+            )
+        self._keys_checked = True
+
+    def _entry(self, lattice: VortexLattice, s: int) -> tuple[Any, bool]:
+        """Return the polar of strip *s* and True when it falls back to the section airfoil."""
         if not isinstance(self.polars, dict):
-            return self.polars
+            return self.polars, False
         surf = self.aircraft.surfaces[int(lattice.strip_surface[s])]
         base = _base_airfoil(self.aircraft, lattice, s)
         for key in (s, surf.name, getattr(base, "name", None), "default"):
             if key is not None and key in self.polars:
-                return self.polars[key]
-        return base
+                return self.polars[key], False
+        return base, True
+
+    def _candidate(self, lattice: VortexLattice, s: int) -> Any:
+        return self._entry(lattice, s)[0]
+
+    def fallback_note(self, lattice: VortexLattice, strips: np.ndarray) -> str | None:
+        """Return the trust note of the strips of the last resolve without a dict entry, or None."""
+        flags = self.last_fallback
+        if flags.size == 0 or not np.any(flags):
+            return None
+        names = sorted({str(self.aircraft.surfaces[int(lattice.strip_surface[s])].name)
+                        for s in np.asarray(strips)[flags]})
+        return (
+            f"{int(np.sum(flags))} of {len(flags)} strips (surfaces {', '.join(names)}) have no entry "
+            "in the polar dict; they use the section airfoil of the geometry."
+        )
 
     def resolve(
         self,
@@ -381,7 +447,9 @@ class _StripPolars:
         ground: GroundPlane | None,
     ) -> tuple[list[Any], np.ndarray, np.ndarray]:
         """Return the polar of each strip, the flags "polar uses the height" and the strip h/c [-]."""
+        self.check_keys(lattice)
         n = len(strips)
+        self.last_fallback = np.zeros(n, dtype=bool)
         out: list[Any] = [None] * n
         uses_height = np.zeros(n, dtype=bool)
         h_over_c = np.full(n, np.nan)
@@ -393,7 +461,7 @@ class _StripPolars:
             flap_deg, hinge = _strip_control(lattice, self.aircraft, s)
             if ground is not None:
                 h_over_c[i] = float(ground.height(lattice.qc_mid[s][None, :])[0]) / chord
-            cand = self._candidate(lattice, s)
+            cand, self.last_fallback[i] = self._entry(lattice, s)
             if isinstance(cand, PolarTable):
                 out[i], uses_height[i] = self._from_table(cand, re_s, flap_deg, hinge, h_over_c[i], ground)
             elif isinstance(cand, (TabulatedAirfoil, LinearAirfoil)):
@@ -706,27 +774,88 @@ def _thin_airfoil_zero_lift(
     return out
 
 
+def _strip_span_axes(lattice: VortexLattice, strips: np.ndarray) -> np.ndarray:
+    """Return the unit span axis ``n x c`` [-] of each strip, shape (n_strips, 3).
+
+    The axis is normal to the section plane of the strip: the plane of its
+    chord direction ``c`` and its normal ``n``. The 2D section relation of
+    the strip and the section cut of the panel coupling use this plane. An
+    axis within 1e-12 of +y is set to +y exactly, so a planar strip keeps
+    the arithmetic of the global angle of attack.
+    """
+    axes = np.cross(lattice.normal[strips], lattice.chord_dir[strips])
+    axes = axes / np.linalg.norm(axes, axis=1)[:, None]
+    planar = (np.abs(axes[:, 0]) < 1e-12) & (np.abs(axes[:, 2]) < 1e-12) & (axes[:, 1] > 0.0)
+    axes[planar] = (0.0, 1.0, 0.0)
+    return axes
+
+
+def _section_onset_derivative(direction: np.ndarray, axes: np.ndarray) -> np.ndarray:
+    """Return the change of the onset direction per unit section angle [1/rad].
+
+    The section angle of a strip is the angle of the onset in its section
+    plane, measured from the chord towards the strip normal. A change of
+    this angle turns the in-plane part of the onset ``d_p = d - (d . e) e``
+    about the span axis ``e``. Thus the onset changes by ``d_p x e`` per
+    radian. The spanwise part of the onset does not change. For a planar
+    strip (``e`` = +y) this is the derivative of the free-stream direction
+    with respect to the angle of attack,
+    ``cos(beta) [-sin(alpha), 0, cos(alpha)]``.
+
+    Parameters
+    ----------
+    direction : numpy.ndarray
+        Unit free-stream direction [-], shape (3,).
+    axes : numpy.ndarray
+        Unit span axes of the strips [-], shape (n_strips, 3).
+
+    Returns
+    -------
+    numpy.ndarray
+        Onset change per unit section angle [1/rad], shape (n_strips, 3).
+        Its norm is the in-plane part of the unit onset; it is parallel to
+        the section lift direction.
+    """
+    direction = np.asarray(direction, dtype=float)
+    in_plane = direction[None, :] - (axes @ direction)[:, None] * axes
+    return np.cross(in_plane, axes)
+
+
 def _rhs_derivative(
     lattice: VortexLattice,
     model: str,
     umap: UnknownMap,
     V_inf: float,
-    u_alpha: np.ndarray,
+    u_strip: np.ndarray,
     strips: np.ndarray,
 ) -> np.ndarray:
     """Return the right-hand-side change per unit correction of each strip.
 
-    A correction ``delta_s`` lowers the angle of strip s: the onset direction
-    of its boundary condition becomes ``d(alpha - delta_s)``. The columns are
-    ``d rhs / d delta_s``, shape (n_unknowns, n_strips).
+    A correction ``delta_s`` lowers the section angle of strip s: the
+    in-plane onset of its boundary condition turns about the strip span
+    axis by ``-delta_s``. The onset changes by ``-delta_s u_s``, with
+    ``u_s`` from :func:`_section_onset_derivative` (one row per strip of
+    *strips*, [1/rad]; a single vector applies to all strips). The columns
+    are ``d rhs / d delta_s``, shape (n_unknowns, n_strips).
     """
+    u_strip = np.atleast_2d(np.asarray(u_strip, dtype=float))
+    unk_strip = lattice.panel_strip[umap.unknown_panels]
     if model == "vlm":
         n_vec = lattice.normal_bc[umap.unknown_panels]
-        w = V_inf * (n_vec @ u_alpha)
+        sign = 1.0
     else:
-        sd = _llt_strip_data(lattice, umap)
-        w = -V_inf * (sd["normal"] @ u_alpha)
-    unk_strip = lattice.panel_strip[umap.unknown_panels]
+        n_vec = _llt_strip_data(lattice, umap)["normal"]
+        sign = -1.0
+    if np.all(u_strip == u_strip[0]):
+        # One onset change for all strips (a planar configuration).
+        w = sign * V_inf * (n_vec @ u_strip[0])
+    else:
+        col_of = np.full(lattice.n_strips, -1)
+        col_of[strips] = np.arange(len(strips))
+        cols = col_of[unk_strip]
+        w = np.zeros(len(unk_strip))
+        own = cols >= 0
+        w[own] = sign * V_inf * np.sum(n_vec[own] * u_strip[cols[own]], axis=1)
     B = np.zeros((umap.n, len(strips)))
     for col, s in enumerate(strips):
         mask = unk_strip == s
@@ -803,11 +932,12 @@ def _solve_condition(
         else:
             A, rhs0, umap, _ = _assemble_llt_linear(lattice, condition, ground, use_sym, wd, ref_point)
         lu, factorized = fact.get(A)
-        ca, sa = np.cos(condition.alpha), np.sin(condition.alpha)
-        cb = np.cos(condition.beta)
-        u_alpha = np.array([-sa * cb, 0.0, ca * cb])
         strips = np.flatnonzero(lattice.strip_is_right) if umap.symmetric else np.arange(lattice.n_strips)
-        B = _rhs_derivative(lattice, model, umap, V_inf, u_alpha, strips)
+        # The correction turns the onset in the section plane of each strip.
+        u_strip = _section_onset_derivative(
+            freestream_direction(condition.alpha, condition.beta), _strip_span_axes(lattice, strips),
+        )
+        B = _rhs_derivative(lattice, model, umap, V_inf, u_strip, strips)
         G = scipy.linalg.lu_solve(lu, B)
         gamma0 = scipy.linalg.lu_solve(lu, rhs0)
 
@@ -819,6 +949,9 @@ def _solve_condition(
     D = -np.array([np.sum(G[unk_strip == s, :], axis=0) for s in strips]) * scale[:, None]
 
     polars, uses_height, h_over_c = resolver.resolve(lattice, strips, condition, ground)
+    fallback = resolver.fallback_note(lattice, strips)
+    if fallback is not None:
+        notes = [*notes, fallback]
     if ground is not None and model in ("vlm", "llt"):
         h_vals = h_over_c[np.isfinite(h_over_c)]
         if h_vals.size > 0 and float(np.min(h_vals)) < 0.30:
@@ -1048,7 +1181,10 @@ def _solve_condition(
         warnings.warn(_not_converged_note(primary, max_iter, tol), RuntimeWarning, stacklevel=3)
     if non_unique:
         result.details["branches"] = [result] + [make_result(sol, bl, False) for sol, bl in branches]
+    mesh = getattr(lattice, "mesh_warnings", ())
     for msg in notes:
+        if msg in mesh:
+            continue  # Issued by build_lattice or by the lattice cache.
         if warned is not None and msg == _THICK_GROUND_FLAP_NOTE:
             if msg in warned:
                 continue
@@ -1093,8 +1229,9 @@ def solve_viscous(
         comes from ``WingSection.shape`` or a NACA airfoil name (no default
         section). A single airfoil is used on every strip, with the Glauert
         flap shift on a deflected strip. A dict maps a strip index, a
-        surface name, an airfoil name or ``"default"`` to one of these;
-        strips without an entry use their section airfoil.
+        surface name, an airfoil name or ``"default"`` to one of these.
+        A key that matches none of them raises ``ValueError``. Strips
+        without an entry use their section airfoil, with a trust note.
     model : {"vlm", "llt", "panel3d"}
         Potential-flow solver. The panel method matches surface-pressure
         strip lift and also closes the pressure Kutta residual when selected.
@@ -1312,7 +1449,11 @@ class _PanelCoupling:
         )
         self.owner = np.empty(len(col), dtype=int)
         self.owner[col] = row
-        solver._set_viscous_strips(self.maps)
+        # Span axes of the reporting sections. A strip whose axis is not +y
+        # (dihedral, fin) needs the y onset response of its panels.
+        self.axes = _strip_span_axes(self.lattice, self.strips)
+        self.lateral = bool(np.any(self.axes != np.array([0.0, 1.0, 0.0])))
+        solver._set_viscous_strips(self.maps, lateral=self.lateral)
         solver._viscous_evaluator = self.evaluate
 
     def full(self, values):
@@ -1341,7 +1482,14 @@ class _PanelCoupling:
         coeffs = solver._condition_coeffs(condition)
         mu0 = cfg.unit_mu @ coeffs
         mu_full0 = solver._reconstruct_full_mu(cfg.unit_mu, coeffs)
-        g = solver._viscous_response(cfg, condition)
+        if self.lateral:
+            # Section onset change and section lift direction of each strip.
+            u_strip = _section_onset_derivative(freestream_direction(condition.alpha, condition.beta), self.axes)
+            norm = np.linalg.norm(u_strip, axis=1)
+            lift_strip = u_strip / np.where(norm > 1e-12, norm, np.inf)[:, None]
+        else:
+            u_strip = lift_strip = None
+        g = solver._viscous_response(cfg, condition, u_strip)
         gf = np.vstack([g, g]) if solver.mesh.half else g
         if solver.kutta == "pressure":
             z, zf, up, lo, expand = solver._viscous_pressure_response(cfg, coeffs)
@@ -1353,21 +1501,34 @@ class _PanelCoupling:
         response = np.column_stack([g, z])
         response_full = np.column_stack([gf, zf])
         dv = -surface_gradient(solver._grad_op, response_full)
-        ua = np.cos(condition.beta) * np.array([-np.sin(condition.alpha), 0, np.cos(condition.alpha)])
-        onset_delta = -speed * ua
         normal = solver._full_geom.normal
-        tangential = onset_delta - (normal @ onset_delta)[:, None] * normal
         owners = np.tile(self.owner, 2) if solver.mesh.half else self.owner
+        if self.lateral:
+            onset_delta = -speed * u_strip[owners]
+            if solver.mesh.half:
+                # The mirrored panels have the mirrored onset change.
+                onset_delta[n:, 1] *= -1.0
+            tangential = onset_delta - np.sum(normal * onset_delta, axis=1)[:, None] * normal
+            # Strip lift along the section lift direction: in the section
+            # plane, normal to the in-plane onset (the 2D section reference).
+            weights = -solver.areas * np.sum(solver.normals * lift_strip[self.owner], axis=1)
+            source_rate = speed * np.sum(solver.normals * u_strip[self.owner], axis=1)
+        else:
+            ua = np.cos(condition.beta) * np.array([-np.sin(condition.alpha), 0, np.cos(condition.alpha)])
+            onset_delta = -speed * ua
+            tangential = onset_delta - (normal @ onset_delta)[:, None] * normal
+            lift_axis = np.array([-np.sin(condition.alpha), 0, np.cos(condition.alpha)])
+            weights = -solver.areas * (solver.normals @ lift_axis)
+            source_rate = speed * (solver.normals @ ua)
         dv[np.arange(len(owners)), :, owners] += tangential
         onset = solver._condition_velocity(condition, solver._full_geom.centroid)
         velocity0, _ = compute_surface_velocity_and_cp(
             onset, normal, surface_gradient(solver._grad_op, mu_full0), speed,
         )
         onset_sq = np.sum(onset**2, axis=1) if has_rates(condition) else None
-        lift_axis = np.array([-np.sin(condition.alpha), 0, np.cos(condition.alpha)])
-        weights = -solver.areas * (solver.normals @ lift_axis)
         ground = None if cfg.ground is None else GroundPlane(*cfg.ground)
         polars, uses_height, h_over_c = self.resolver.resolve(self.lattice, self.strips, condition, ground)
+        fallback = self.resolver.fallback_note(self.lattice, self.strips)
         slope, zero, moment = self.slope, self.zero, self.moment
         clean_zero = self.clean_zero
         if np.any(uses_height):
@@ -1436,7 +1597,7 @@ class _PanelCoupling:
             wake = muf[cfg.full_wake.wake_up] - muf[cfg.full_wake.wake_lo]
             if solver.kutta == "pressure":
                 wake += expand(state["x"][ns:])
-            sigma = solver._unit_sigma @ coeffs + speed * (solver.normals @ ua) * state["x"][:ns][self.owner]
+            sigma = solver._unit_sigma @ coeffs + source_rate * state["x"][:ns][self.owner]
             return PanelResult(
                 CL=force["CL"], CD_pressure=force["CD_pressure"], CY=force["CY"],
                 Cl=force["Cl"], Cm=force["Cm"], Cn=force["Cn"],
@@ -1503,7 +1664,7 @@ class _PanelCoupling:
                         if all(abs(other["panel"].CL - s["panel"].CL) > BRANCH_CL_DIFFERENCE
                                for s in [primary, *branches]):
                             branches.append(other)
-        self.states[id(condition)] = (primary, branches, polars, offset, h_over_c, branch_runs)
+        self.states[id(condition)] = (primary, branches, polars, offset, h_over_c, branch_runs, fallback)
         for state in [primary, *branches]:
             state.pop("jac")
             state.pop("dc")
@@ -1513,7 +1674,9 @@ class _PanelCoupling:
         """Add polar drag, the lumped moment correction, and branch reports."""
         from ventorum.solvers.panel3d import _spanwise_results_batch
 
-        primary, branches, polars, offset, heights, branch_runs = self.states[id(result.condition)]
+        primary, branches, polars, offset, heights, branch_runs, fallback = self.states[id(result.condition)]
+        if fallback is not None and fallback not in result.details["notes"]:
+            result.details["notes"].append(fallback)
         area = self.full(self.area)
         chord = self.lattice.chord
         axis = np.cross(self.lattice.normal, self.lattice.chord_dir)
