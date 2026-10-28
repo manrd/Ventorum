@@ -633,7 +633,8 @@ def _camber_matrices(
     W_a = _zeros((n_p, E_total))
     W_b = _zeros((n_p, E_total))
     # Mean-line offsets of the leg nodes between two bound points (the
-    # middle chord fraction; geometry.lattice._leg_nodes).
+    # middle chord fraction) and between the last bound point and the
+    # trailing edge (geometry.lattice._leg_nodes).
     W_ma = _zeros((n_p, E_total))
     W_mb = _zeros((n_p, E_total))
     W_le_l = _zeros((n_s, E_total))
@@ -668,8 +669,11 @@ def _camber_matrices(
                 p = s * n_chord + j
                 W_a[p] = _joined_offset_weights(si, e, xb[k_idx, j])
                 W_b[p] = _joined_offset_weights(si, e + 1, xb[k_idx, j])
-                if j < n_chord - 1:
-                    xm = 0.5 * (xb[k_idx, j] + xb[k_idx, j + 1])
+                if n_chord > 1:
+                    # The last panel has its node half a panel length aft of
+                    # its bound point (geometry.lattice.build_lattice).
+                    xm = (0.5 * (xb[k_idx, j] + xb[k_idx, j + 1]) if j < n_chord - 1
+                          else xb[k_idx, j] + 0.5 * dx[k_idx, j])
                     W_ma[p] = _joined_offset_weights(si, e, xm)
                     W_mb[p] = _joined_offset_weights(si, e + 1, xm)
             W_le_l[s] = _joined_offset_weights(si, e, 0.0)
@@ -878,6 +882,12 @@ def build_reference(
         "accum": accum,
         "origin": None,
     }
+    # Strip edges of the flap strips whose hinge point is not a leg node
+    # (geometry.lattice._leg_nodes), per panel, shape (n_panels, 2).
+    off = (lattice.geom_cache.get("flap_field") or {}).get("hinge_off")
+    build["hinge_off_panel"] = (None if off is None else
+                                torch.as_tensor(np.asarray(off, dtype=bool)[np.asarray(lattice.panel_strip)],
+                                                device=device))
     from ventorum.solvers.factory import resolve_solver_type
 
     build["solver"] = resolve_solver_type(settings.solver_type)
@@ -894,6 +904,10 @@ def build_reference(
     build["ctrl_chord"] = chord_map
     camber_data = _camber_matrices(lattice, xi, chord_map, device, dtype)
     build["camber_data"] = camber_data
+    # Folds of the reference surfaces for the blend of the mean-line offset
+    # (geometry.lattice.camber_span_field); a property of the mesh.
+    frames = getattr(lattice, "camber_frames", None) or lattice.geom_cache.get("camber_frames") or []
+    build["camber_folds"] = [f for frame in frames for f in frame.get("folds", [])]
     if camber_data is not None:
         build["strip_camber"] = camber_data["strip_camber"]
     tables, lin_mask = _airfoil_tables(lattice, unknown_panels, device, dtype)
@@ -1518,9 +1532,11 @@ def _forward_check(prep: dict, outputs: dict, prod: dict[str, float],
     vector (the normwise relative error of the vector). The round-off of a
     vector component is relative to the vector, so a small component (CY
     in a small sideslip, or CY, Cl and Cn of a symmetric state, which are
-    zero by symmetry) has no relative scale of its own. An output with an
-    exact zero production value (for example CDp with Cd0 = 0) uses the
-    force scale.
+    zero by symmetry) has no relative scale of its own. The moment scale
+    is not smaller than the force scale, so a moment vector that is zero
+    as a whole (all its components at the round-off) does not give a
+    false mismatch. An output with an exact zero production value (for
+    example CDp with Cd0 = 0) uses the force scale.
 
     A requested vector output (``strip_force`` [N], ``section_cl``) is
     compared with its production array: the largest difference relative
@@ -1531,7 +1547,12 @@ def _forward_check(prep: dict, outputs: dict, prod: dict[str, float],
     both64 = precision == "float64" and prep["precision_primal"] == "float64"
     tol = 1e-10 if both64 else 1e-4
     force_scale = max(abs(prod[k]) for k in _FORCE_VECTOR)
-    moment_scale = max(abs(prod[k]) for k in _MOMENT_VECTOR)
+    # The force scale is the lower limit of the moment scale: a moment is a
+    # sum of forces times arms, so its round-off is at most of the order of
+    # the round-off of the forces. A state whose whole moment vector is zero
+    # by geometry (reference point on the quarter-chord line of a straight
+    # wing) has moments at the round-off only, with no relative scale.
+    moment_scale = max(max(abs(prod[k]) for k in _MOMENT_VECTOR), force_scale)
     worst = 0.0
     bad = []
     for k, p in prod.items():

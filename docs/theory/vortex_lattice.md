@@ -54,18 +54,38 @@ When all defining sections give `WingSection.shape` and the vortex lattice has m
 The bound-vortex endpoints and the control points move from their chord-plane positions to
 
 ```{math}
-\mathbf p(\xi) = \mathbf p_{\mathrm{chord}}(\xi) + c z_c(\xi)\hat{\mathbf n}_{\mathrm{strip}}.
+\mathbf p(\eta, \xi) = \mathbf p_{\mathrm{chord}}(\eta, \xi) + c(\eta)\, z_c(\eta, \xi)\,\hat{\mathbf n}(\eta),
+\qquad
+\hat{\mathbf n} = \frac{\hat{\mathbf c}\times\hat{\mathbf s}}{|\hat{\mathbf c}\times\hat{\mathbf s}|}.
 ```
 
-The chord and the geometric normal come from the rotated and displaced section frame. Thus the camber rotates with incidence, twist and dihedral. The normal of a panel follows the mean-line tangent at its control point:
+The chord direction $\hat{\mathbf c}$ comes from the rotated and displaced section frame. Thus the camber rotates with incidence, twist and dihedral. The span direction $\hat{\mathbf s}(\eta)$ is in the y-z plane. It is one continuous field along the span, and every point of the lattice uses it: the edge nodes (leading edge, trailing edge, bound points, leg nodes and hinge points) and the control points. Thus the mean surface is the same surface at every mesh. Away from a fold, $\hat{\mathbf s}$ is the direction of the quarter-chord line (the central difference of the nodes at an edge node, the strip direction at a control point).
+
+A fold is a node where the span direction of the geometry definition changes: the root of a symmetric surface with dihedral, a change of dihedral between two sections, or the common end of two joined surfaces at an angle (`geometry.lattice._camber_folds`). A junction of three or more surfaces has no fold blend. At the fold, $\hat{\mathbf s}$ is the bisector of the two sides. On each side it turns to the direction of that side over the span length
 
 ```{math}
-\mathbf t = \hat{\mathbf c} + z_c'(\xi_{cp})\hat{\mathbf n}_{\mathrm{strip}},
+L = K\,\theta_h \max_\xi |c\, z_c|,
 \qquad
-\hat{\mathbf n}_{bc} = \frac{\mathbf t\times\hat{\mathbf s}}{|\mathbf t\times\hat{\mathbf s}|}.
+\angle(\hat{\mathbf s}, \hat{\mathbf s}_{\mathrm{bis}}) = \theta_h\, b(d/L),
+\qquad
+b(t) = 3t^2 - 2t^3 \ (0 \le t \le 1),
 ```
 
-The slope is the exact slope of the piecewise linear section mean line between its knots. The panel count, chordwise spacing and CLAF collocation rule do not change. The chordwise legs follow the mean surface: the legs of a panel run from its bound points through the bound points of the panels aft of it on the same strip edge to the trailing edge, with one node on the mean surface between each two bound points (see [Vortex kernels](vortex_kernels.md)). A straight leg from a bound point on the curved mean line to the trailing edge would leave the mean surface and pass close to the control points of narrow strips. Flap panels retain the normal rotation about the hinge axis.
+with $\theta_h$ the half fold angle, $d$ the span distance from the fold in the y-z plane, and $\max_\xi |c z_c|$ the largest mean-line height at the fold (of all the joined surfaces at a junction). The turn is a spherical interpolation between the bisector and the side direction. Where the next fold of the surface is nearer than $2L$, the length on that side is half the distance between the folds, and the lattice gets a warning if that is shorter than $1.5L/K$. $K$ is `CAMBER_FOLD_BLEND_FACTOR` = 3, a code setting with no published source. The length depends only on the geometry, not on the mesh.
+
+The blend keeps every strip from turning over at every mesh. With $b' \le 1.5$, the offset direction turns at most at the rate $1.5\,\theta_h/L$, so the width of a strip at a chord station changes by at most $|c z_c| \cdot 1.5\,\theta_h / L \le 1.5/K$ of its reference width (plus the small terms of the change of chord and camber inside the blend). With $K = 3$ a strip keeps at least half its width. The earlier lattice took the bisector at the fold node and the side normal at the next node; the strip at the fold was then narrower by about $c z_c \sin\theta_h$ at each chord station and turned over when its width was smaller. `tests/test_camber_line_mesh.py` checks the strip widths down to root strips of $10^{-3}$ chord and fold angles up to 178 deg. For a typical dihedral the blend is short (a few hundredths of the chord), so a mesh with wider strips has only the fold node in it.
+
+The normal of a panel follows the mean-line tangent at its control point, with the offset normal $\hat{\mathbf n}$ of the field at the span station of the control point:
+
+```{math}
+\mathbf t = \hat{\mathbf c} + z_c'(\xi_{cp})\hat{\mathbf n},
+\qquad
+\hat{\mathbf n}_{bc} = \frac{\mathbf t\times\hat{\mathbf s}_{\mathrm{strip}}}{|\mathbf t\times\hat{\mathbf s}_{\mathrm{strip}}|}.
+```
+
+The spanwise change of the offset (taper, a change of section, the fold blend) does not enter $\hat{\mathbf n}_{bc}$.
+
+The slope is the exact slope of the piecewise linear section mean line between its knots. The panel count, chordwise spacing and CLAF collocation rule do not change. The chordwise legs follow the mean surface: the legs of a panel run from its bound points through the bound points of the panels aft of it on the same strip edge to the trailing edge, with one node on the mean surface between each two bound points, and one node between the last bound point and the trailing edge (see [Vortex kernels](vortex_kernels.md)). A straight leg from a bound point on the curved mean line to the trailing edge would leave the mean surface and pass close to the control points of narrow strips. The node of the last panel is half a panel length aft of its bound point: the middle chord fraction to the bound point that a next panel of the same length would have, which is the chord fraction of its control point when CLAF = 1. Without it the legs of the last panel ran straight to the trailing edge, off the curved mean line at its control point by the sagitta of the mean line over the panel. On a tip strip narrower than that offset, the influence of the own legs at the control point collapsed and the circulation of the panel grew with the spanwise count. `tests/test_camber_line_mesh.py` checks the convergence of CL and Cm up to 128 spanwise panels (NACA 4412 and 6409 sections, dihedral 0, 5 and 10 deg, cosine and default spacing) and the side force in sideslip. Flap panels retain the normal rotation about the hinge axis.
 
 The forces on a geometric mean surface already produce its camber moment. The CPU and GPU therefore exclude the section polar moment on these strips. A shape and a polar can still give different zero-lift angles. A difference greater than 0.5 deg gives one warning per defining section; the shape sets the inviscid boundary condition.
 
@@ -101,7 +121,7 @@ where $\mathbf v_{ij}$ [1/m] is the velocity at $\mathbf P_i$ from the horseshoe
 
 ## Assumptions
 
-- Thin surfaces: thickness enters only through the section data. Inviscid, incompressible, attached flow.
+- Thin surfaces: thickness enters only through the section data. Inviscid, attached flow. The flow is incompressible unless `mach` is set (see the envelope below).
 - Linear section data. A tabulated polar enters through its linear fit, with a warning; stall is not modelled.
 - Small disturbances: the boundary condition is applied on the mean surface, and the wake is rigid and straight (along the free stream by default).
 
@@ -109,8 +129,8 @@ where $\mathbf v_{ij}$ [1/m] is the velocity at $\mathbf P_i$ from the horseshoe
 
 - No stall: for the start of stall on an unswept wing use the nonlinear lifting line.
 - No leading-edge or side-edge vortex lift. The trust score lowers the rating for slender, highly swept wings and for low-aspect-ratio wings at high angle of attack (E. C. Polhamus 1966; J. E. Lamar 1974).
-- No compressibility correction. Above the Mach number `ventorum.core.constants.MACH_LIMIT_INCOMPRESSIBLE` the case is outside the envelope.
-- Two surfaces that overlap (control points of different surfaces closer than a small fraction of the local chord) are refused (`check_overlaps`).
+- Compressibility: with `FlightCondition.mach` set, the vortex lattice applies the Prandtl-Glauert rule in the form of Goethert in free air, on the CPU and on the GPU (see [Compressibility correction](compressibility.md)). Ground effect refuses `mach > 0`. Above the Mach number `ventorum.core.constants.MACH_LIMIT_INCOMPRESSIBLE` the case is outside the envelope and the trust score lowers the rating.
+- Two surfaces that overlap are refused (`check_overlaps`): two control points of different surfaces are closer than the smaller of 1e-3 times the smaller local chord and 0.25 times the smaller local strip width of the two strips.
 - In ground effect, panels longer than the gap get a trust penalty.
 
 ## Implementation

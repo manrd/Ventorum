@@ -30,3 +30,9 @@ from ventorum.reference.derivatives import (  # noqa: F401
     central_difference,
     slope_fit,
 )
+from ventorum.reference.ground_effect import (  # noqa: F401
+    elliptic_ground_drag_ratio,
+    elliptic_ground_drag_ratio_asymptote,
+    elliptic_ground_drag_ratio_spectral,
+    wieselsberger_prandtl_drag_ratio,
+)

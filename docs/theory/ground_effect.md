@@ -112,10 +112,38 @@ The moment rows in the stability or wind axes turn the dimensional moments with 
 - `ventorum.ground_effect.analyze_ground_effect`; `ventorum.ground_effect.solver.find_bank_strike_limit` and `clearance_info`. The result also gives the force coefficient along the ground normal (`vertical_force_coefficient`), the body-axis force coefficients, and $C_l$ and $C_n$ in the stability axes.
 - `ventorum.ground_effect.GroundEffectSweep`, `GroundEffectSweepResult.compute_stability_derivatives`.
 - `ventorum.height_derivatives` (`ventorum/solvers/height_derivatives.py`): the derivative matrix and the Irodov terms of one state.
+- `ventorum.reference.ground_effect`: the independent reference of the induced drag of an elliptic loading near the ground (see below).
+
+## Reference: elliptic loading with an image wake
+
+`ventorum.reference.ground_effect` gives an independent reference for the induced drag in ground effect. It does not use the production kernels, the lattice or the Trefftz-plane code. C. Wieselsberger (1921) replaced the ground by the mirror image of the wing and calculated the change of the induced drag of an elliptic loading from the vertical velocity of the image wing. This module evaluates the same model exactly in the Trefftz plane.
+
+The wing of span $b = 2a$ [m] has the circulation $\Gamma(y) = \Gamma_0\sqrt{1 - (y/a)^2}$. Its wake is a flat sheet at the height $h$ [m], parallel to the ground. The image sheet has the circulation $-\Gamma$ at the distance $H = 2h$ below the sheet. In the Trefftz plane, with $z = y + \mathrm i\,z_v$, the complex velocity of the elliptic sheet alone is
+
+```{math}
+W(z) = u - \mathrm i\,v = \mathrm i\,w_0\left(1 - \frac{z}{\sqrt{z^2 - a^2}}\right), \qquad w_0 = \frac{\Gamma_0}{b} ,
+```
+
+with the branch of the root that is $z$ at infinity and has its cut on the sheet. $W$ goes to zero at infinity, the vertical velocity on the sheet is the uniform downwash $-w_0$, and the potential jump across the sheet is $2w_0\sqrt{a^2 - y^2} = \Gamma(y)$. Thus $W$ is the flow of the sheet (the flow of a flat plate that moves normal to itself). The image gives the upwash $v_\text{img}(y) = w_0\,(1 - \mathrm{Re}[\zeta/\sqrt{\zeta^2 - a^2}])$ on the real sheet, with $\zeta = y + \mathrm i H$. The Trefftz-plane drag $D_i = \tfrac{\rho}{2}\int \Gamma\,(w_0 - v_\text{img})\,dy$ at the same circulation (the same lift) gives the ratio
+
+```{math}
+R = \frac{k_\text{GE}}{k_\text{free}} = \frac{2}{\pi a^2}\int_{-a}^{a}\sqrt{a^2 - y^2}\;\mathrm{Re}\,\frac{\zeta}{\sqrt{\zeta^2 - a^2}}\,dy , \qquad k = \frac{C_{D_i}}{C_L^2} .
+```
+
+$R = 1 - \sigma$, where $\sigma$ is the influence coefficient of Wieselsberger (his equation 3). With $y = a\cos\theta$ the integrand is a smooth periodic function of $\theta$ for $h > 0$, and the midpoint rule converges exponentially. A second evaluation uses the Fourier transform of the loading ($\pi a J_1(ka)/|k|$) and of the interaction kernel of two parallel sheets ($\pi |k| e^{-H|k|}$):
+
+```{math}
+R = 1 - 2\int_0^\infty \frac{J_1(x)^2}{x}\,e^{-\beta x}\,dx, \qquad \beta = \frac{H}{a} = \frac{4h}{b} .
+```
+
+The two limits are $1 - R \sim (b/h)^2/32$ for $h \to \infty$ (the far field of the image is a vortex pair) and $R \sim (2\beta/\pi)(\ln(8/\beta) - 1)$ for $\beta \to 0$. These two asymptotes were derived for this reference. The tests check both evaluations against each other, the convergence of the quadrature and both asymptotes. Wieselsberger also gives Prandtl's approximation $\sigma = (1 - 0.66\,g/b)/(1.05 + 3.7\,g/b)$ with $g = 2h$, for $g/b$ from 1/15 to 1/2 (his equation 4); the tests compare it with the exact value in that range.
+
+The reference holds for an elliptic loading. A wing near the ground changes its loading, so the comparison with the vortex lattice uses only heights at which the loading stays near elliptic. `tests/test_analytical_verification.py` compares $k_\text{GE}/k_\text{free}$ of planar elliptic wings (aspect ratios 6 and 10) with $R$ at $h/b$ = 0.5, 0.3 and 0.2. The wing is parallel to the ground ($\alpha = 0$, with the zero-lift angle of the section), so the lattice and the wake are both at the height $h$. A wing at an angle of attack has its trailing edge and its wake below the reference point, which decreases the ratio.
 
 ## Verification
 
 - [V7](../verification_report.md): zero normal velocity on a tilted and banked plane; the free-air limit at large height; chordwise convergence of the vortex lattice; lifting line against the vortex lattice.
+- `tests/test_analytical_verification.py`: the induced-drag ratio of elliptic wings against the image Trefftz-plane theory of an elliptic loading (see above). `tests/test_reference_ground_effect.py` checks the reference itself.
 - Tests compare an explicit mirror wing with the image method, and the Irodov terms with direct differences.
 - `tests/test_height_derivatives.py`: the derivatives of one state against single solves and against the sweep; the chain rule of the $\alpha$ derivative between two pivots; symmetry; the free-air limit; the axes transform with the reference lengths; the GPU path.
 

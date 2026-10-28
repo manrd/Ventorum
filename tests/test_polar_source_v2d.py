@@ -341,3 +341,21 @@ def test_nan_loads_of_failed_angles_are_dropped(monkeypatch):
     assert "1 of 2 alpha dropped" in polar.name
     assert np.all(np.isfinite(polar.Cl_data)) and np.all(np.isfinite(polar.Cd_data))
     np.testing.assert_allclose(np.degrees(polar.alpha), [0.0])
+
+
+def test_cache_hit_sets_last_dropped(tmp_path, monkeypatch):
+    """Regression: a cache hit kept last_dropped of the previous call."""
+    import ventorum.aero.polar_source_v2d as module
+
+    def fake_solve(bodies, alpha_deg, Re, **kwargs):
+        res = _fake_viscous_result(alpha_deg)
+        res.converged = np.array([True, False])
+        return res
+
+    monkeypatch.setattr(module, "solve_viscous", fake_solve)
+    source = Ventorum2DPolarSource(cache=PolarCache(tmp_path))
+    source.polar("naca 0012", 1e6, [0.0, 4.0])
+    assert source.last_dropped == 1
+    source.last_dropped = 0
+    source.polar("naca 0012", 1e6, [0.0, 4.0])
+    assert source.last_dropped == 1

@@ -110,6 +110,21 @@ CORE_RADIUS_FRACTION = 0.01
 # added core does not apply between them (see ``core_groups``).
 CROSS_SURFACE_CORE_FRACTION = 0.5  # owner decision of 2026-10-03, from the core-size study with a wing and a tail
 
+#: Length factor K of the blend of the camber-offset direction at a fold
+#: [-]. At a fold of the reference surface (the root of a symmetric surface
+#: with dihedral, a change of dihedral between sections, or the angle
+#: between two joined surfaces) the mean-line offset turns from the bisector
+#: of the two sides to the normal of each side over the span length
+#: ``L = K * theta_h * max|c z|`` [m], with ``theta_h`` the half fold angle
+#: [rad] and ``max|c z|`` the largest mean-line height [m] at the fold. With
+#: the smoothstep blend the offset direction turns at most at the rate
+#: ``1.5 theta_h / L`` [rad/m], so a strip keeps at least ``1 - 1.5 / K``
+#: of its width at every chord station, for every mesh. K = 3 keeps half of
+#: it. The factor is a code setting with no published source.
+CAMBER_FOLD_BLEND_FACTOR = 3.0
+#: Smallest fold angle [rad] of the geometry definition that gets a blend.
+CAMBER_FOLD_TOL_RAD = 1e-8
+
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # Section geometry along one surface
@@ -357,9 +372,10 @@ class VortexLattice:
         (``leg_next`` False) the left leg of a panel runs ``a_te -> a_kink
         -> a`` and the right leg ``b -> b_kink -> b_te``. A panel ahead of
         the hinge of a chordwise flap has the hinge point of its strip edge
-        here, so its legs follow the deflected mean surface. On all other
-        panels ``a_kink`` is ``a_te`` and ``b_kink`` is ``b_te`` (the legs
-        are straight).
+        here, so its legs follow the deflected mean surface. On a strip
+        with geometric camber the nodes are on the mean surface (see
+        ``leg_next``). On all other panels ``a_kink`` is ``a_te`` and
+        ``b_kink`` is ``b_te`` (the legs are straight).
     leg_next : numpy.ndarray or None
         Node chains of the chordwise legs, shape (n_panels,) bool, or None.
         On a strip with geometric camber the legs follow the mean surface:
@@ -369,9 +385,12 @@ class VortexLattice:
         of such a strip except the last; its legs end at the bound points of
         the next panel and continue on its legs (see
         :class:`ventorum.aero.vortex.HorseshoeSet`). ``a_kink`` is then the
-        bound point of the next panel, or the hinge point of a chordwise
-        flap where the hinge lies between the two bound points. Strips
-        without a mean line keep their legs.
+        mean-surface node between the two bound points, or the hinge point
+        of a chordwise flap where the hinge lies between the two bound
+        points. On the last panel of such a strip ``a_kink`` is the
+        mean-surface node between its bound point and the trailing edge
+        (or the hinge point there). Strips without a mean line keep their
+        legs.
     chord : numpy.ndarray
         Strip chord [m].
     twist : numpy.ndarray
@@ -437,6 +456,13 @@ class VortexLattice:
     # lattice cache hands out, so they are computed once per geometry.
     geom_cache: dict = field(default_factory=dict, repr=False, compare=False)
     control_info: list[dict] = field(default_factory=list)
+    # Warnings that build_lattice issues about the mesh (a hinge that snaps
+    # to a node, a hinge that moves a node of a cambered strip, a mean line
+    # that does not match the polar alpha_L0, a section shape that the
+    # lifting line does not use). The lattice
+    # cache issues them again when it returns a cached lattice, and the
+    # solvers give them to the trust score as notes.
+    mesh_warnings: list[str] = field(default_factory=list)
     geometric_camber: np.ndarray | None = None
     # Hinge nodes of the chordwise legs (see ``a_kink`` in the class notes).
     # None when no leg has a hinge node.
@@ -654,17 +680,27 @@ def _relate_surfaces(si: SurfaceSlice, sj: SurfaceSlice) -> tuple[bool, tuple[fl
 def check_overlaps(lattice: VortexLattice) -> None:
     """Refuse a lattice where two surfaces overlap.
 
-    Two control points of different surfaces closer than 1.0e-3 times the
-    smaller local chord of the two strips mean that the surfaces overlap
-    (they share more than an edge). The strips of one surface never count
-    as an overlap with each other. Two surfaces that only share an edge
-    still pass: their control points are not at the same place.
+    Two control points of different surfaces closer than a limit mean that
+    the surfaces overlap (they share more than an edge). The limit is the
+    smaller of two values: 1.0e-3 times the smaller local chord of the two
+    strips (``OVERLAP_FRACTION``), and 0.25 times the smaller local strip
+    width of the two strips (``OVERLAP_WIDTH_FRACTION``). The strips of one
+    surface never count as an overlap with each other.
+
+    Two surfaces that only share an edge still pass. Each control point is
+    at the spanwise middle of its strip, so two control points across a
+    shared edge are at least half of the smaller strip width apart. The
+    width limit keeps this true on fine meshes that cluster strips at the
+    shared edge (cosine spacing at a root or at a winglet join), where the
+    strips are narrower than the chord limit. Two surfaces that lie on each
+    other have control points at the same place and are refused.
 
     Parameters
     ----------
     lattice : VortexLattice
-        Built lattice; control points ``cp`` are in body axes [m] and
-        ``chord`` holds the strip chords [m].
+        Built lattice; control points ``cp`` are in body axes [m],
+        ``chord`` holds the strip chords [m] and ``width`` the strip
+        widths [m].
 
     Raises
     ------
@@ -677,18 +713,21 @@ def check_overlaps(lattice: VortexLattice) -> None:
     from scipy.spatial import cKDTree
 
     OVERLAP_FRACTION = 1.0e-3
+    OVERLAP_WIDTH_FRACTION = 0.25
     cp = np.asarray(lattice.cp, dtype=float)
     if cp.shape[0] < 2:
         return
     panels = np.asarray(lattice.panel_strip, dtype=int)
     panel_surface = np.asarray(lattice.strip_surface, dtype=int)[panels]
     panel_chord = np.asarray(lattice.chord, dtype=float)[panels]
+    panel_width = np.abs(np.asarray(lattice.width, dtype=float))[panels]
     keep = np.flatnonzero(np.all(np.isfinite(cp), axis=1))
     if keep.size < 2:
         return
     pts = cp[keep]
     surf_of = panel_surface[keep]
     chord = panel_chord[keep]
+    width = panel_width[keep]
     r_max = OVERLAP_FRACTION * float(np.max(chord))
     if not np.isfinite(r_max) or r_max <= 0.0:
         return
@@ -697,14 +736,16 @@ def check_overlaps(lattice: VortexLattice) -> None:
         if surf_of[i] == surf_of[j]:
             continue
         dist = float(np.linalg.norm(pts[i] - pts[j]))
-        limit = OVERLAP_FRACTION * min(float(chord[i]), float(chord[j]))
+        limit = min(OVERLAP_FRACTION * min(float(chord[i]), float(chord[j])),
+                    OVERLAP_WIDTH_FRACTION * min(float(width[i]), float(width[j])))
         if dist < limit:
             name_i = lattice.surfaces[int(surf_of[i])].name
             name_j = lattice.surfaces[int(surf_of[j])].name
             raise ValueError(
                 f"Surfaces '{name_i}' and '{name_j}' overlap: control points "
                 f"{int(keep[i])} and {int(keep[j])} are {dist:.3g} m apart "
-                f"(closer than 1.0e-3 times the smaller local chord, {limit:.3g} m). "
+                f"(closer than {limit:.3g} m: the smaller of 1.0e-3 times the smaller "
+                "local chord and 0.25 times the smaller local strip width). "
                 "Two surfaces at the same place are not valid: move them apart "
                 "or join them into one surface."
             )
@@ -963,6 +1004,10 @@ def _chordwise_fractions(n_chord: int, chord_spacing: str) -> np.ndarray:
     return np.linspace(0.0, 1.0, n_chord + 1)
 
 
+#: Chordwise stations [-] that test whether a mean line has camber.
+_CAMBER_PROBE = np.linspace(0.0, 1.0, 21)
+
+
 def _hinge_node(xi: np.ndarray, hinge_x_c: float) -> tuple[int, bool]:
     """Return the chordwise node nearest to a hinge and if it can move there.
 
@@ -1084,13 +1129,235 @@ def _joined_camber_offset(frames: list[dict], surface: int, edge: int, xi: np.nd
     return np.mean([_camber_edge_offset(frames, s, e, xi) for s, e in members], axis=0)
 
 
+class _NumpyOps:
+    """Array operations of :func:`camber_span_field` for numpy arrays."""
+
+    @staticmethod
+    def cross(u: np.ndarray, v: np.ndarray) -> np.ndarray:
+        return cross3(u, v)
+
+    @staticmethod
+    def norm(v: np.ndarray) -> np.ndarray:
+        return np.linalg.norm(v, axis=-1)
+
+    @staticmethod
+    def yz(v: np.ndarray) -> np.ndarray:
+        out = np.array(v, dtype=float)
+        out[..., 0] = 0.0
+        return out
+
+    @staticmethod
+    def central(q: np.ndarray) -> np.ndarray:
+        if q.shape[0] < 2:
+            return np.zeros_like(q)
+        return np.gradient(q, axis=0)
+
+    @staticmethod
+    def cumsum0(w: np.ndarray) -> np.ndarray:
+        return np.concatenate([[0.0], np.cumsum(w)])
+
+    @staticmethod
+    def detach(x: Any) -> np.ndarray:
+        return np.asarray(x, dtype=float)
+
+    atan2 = staticmethod(np.arctan2)
+    sin = staticmethod(np.sin)
+    where = staticmethod(np.where)
+    clip = staticmethod(np.clip)
+    abs = staticmethod(np.abs)
+    minimum = staticmethod(np.minimum)
+    maximum = staticmethod(np.maximum)
+
+
+def _blend_span(ops: Any, s_half: Any, d: Any, lo: Any, hi: Any, bis: Any, theta: Any, flat: bool) -> Any:
+    """Turn span directions toward the bisector of a fold (see :func:`camber_span_field`).
+
+    *s_half* are the span directions of the side (any length), *d* the
+    signed span distance [m] from the fold, *lo* and *hi* the blend lengths
+    [m] on the two sides, *bis* the unit bisector and *theta* the half fold
+    angle [rad]. A fold without a mean-line height (*flat*) changes only the
+    fold node itself.
+    """
+    ad = ops.abs(d)
+    if flat:
+        inside = ops.detach(ad) == 0.0
+        b = 0.0 * ad
+    else:
+        length = ops.where(d < 0.0, lo + 0.0 * d, hi + 0.0 * d)
+        inside = ops.detach(ad) < ops.detach(length)
+        length = ops.where(inside, length, 1.0 + 0.0 * d)
+        t = ops.clip(ad / length, 0.0, 1.0)
+        b = t * t * (3.0 - 2.0 * t)
+    half = s_half / ops.norm(s_half)[..., None]
+    turned = ops.sin((1.0 - b) * theta)[..., None] * bis + ops.sin(b * theta)[..., None] * half
+    turned = turned / ops.norm(turned)[..., None]
+    return ops.where(inside[..., None], turned, s_half)
+
+
+def camber_span_field(
+    ops: Any, le: list, te: list, frac: list, folds: list[dict],
+    factor: float | None = None,
+) -> tuple[list, list, list[tuple]]:
+    """Return the span directions of the mean-line offset at the edge nodes and the control points.
+
+    The mean surface is the chord surface plus ``c z(xi) n``, with ``n``
+    the unit vector normal to the local chord and to the span direction
+    ``s`` in the y-z plane. Away from a fold, ``s`` is the direction of the
+    quarter-chord line: the central difference of the nodes at an edge
+    node, the strip direction at a control point. At a fold (see
+    ``CAMBER_FOLD_BLEND_FACTOR``) ``s`` is the bisector of the two sides.
+    Over the blend length ``L`` it turns to the direction of each side
+    with the smoothstep ``b = 3 t^2 - 2 t^3``, ``t = d / L``, where ``d``
+    is the span distance [m] from the fold in the y-z plane (a spherical
+    interpolation: the angle from the bisector is ``b theta_h``). Every
+    point (edge node, bound point, leg node, control point) thus uses one
+    continuous field, so the mean surface is the same surface at every
+    mesh. Where the next fold is nearer than ``2 L``, the length on that
+    side is half the distance between the folds.
+
+    The function works on numpy arrays (production lattice) and on torch
+    tensors (gradient reference) through *ops*.
+
+    Parameters
+    ----------
+    ops : object
+        Array operations (``_NumpyOps`` or the torch equivalent).
+    le, te : list
+        Per surface, the chord-line leading and trailing edge nodes [m],
+        shape (n_edges, 3), before the mean-line offset.
+    frac : list
+        Per surface, the span fraction of the control point in each strip
+        [-], shape (n_edges - 1,).
+    folds : list of dict
+        Fold descriptions from :func:`_camber_folds`.
+    factor : float or None
+        Blend length factor K [-]; None for ``CAMBER_FOLD_BLEND_FACTOR``.
+
+    Returns
+    -------
+    s_node : list
+        Per surface, span directions at the edge nodes, shape (n_edges, 3).
+        Blended entries are unit vectors; the others are the central
+        differences of the quarter-chord nodes [m] (not unit).
+    s_cp : list
+        Per surface, unit span directions at the control points, shape
+        (n_edges - 1, 3).
+    lengths : list of tuple
+        Per fold, ``(L, lo, hi)``: the blend length [m] and the lengths [m]
+        on the two sides after the limit by the next fold.
+    """
+    factor = CAMBER_FOLD_BLEND_FACTOR if factor is None else factor
+    q = [lv + 0.25 * (tv - lv) for lv, tv in zip(le, te)]
+    dq = [ops.yz(x[1:] - x[:-1]) for x in q]
+    w = [ops.norm(x) for x in dq]
+    u = [x / ops.where(wi > 0.0, wi, 1.0 + 0.0 * wi)[:, None] for x, wi in zip(dq, w)]
+    pos = [ops.cumsum0(wi) for wi in w]
+    s_node = [ops.yz(ops.central(x)) for x in q]
+    s_cp = list(u)
+    lengths = []
+    for f in folds:
+        si, e = f["surface"], f["node"]
+        (sl, jl, gl), (sr, jr, gr) = f["left"], f["right"]
+        ul = gl * u[sl][jl]
+        ur = gr * u[sr][jr]
+        bis = ul + ur
+        bis = bis / ops.norm(bis)
+        theta = 0.5 * ops.atan2(ops.norm(ops.cross(ul, ur)), (ul * ur).sum())
+        flat = all(z == 0.0 for _, _, z in f["members"])
+        if flat:
+            length = lo = hi = 0.0
+        else:
+            cz = None
+            for sm, em, zm in f["members"]:
+                c_z = ops.norm(te[sm][em] - le[sm][em]) * zm
+                cz = c_z if cz is None else ops.maximum(cz, c_z)
+            length = factor * theta * cz
+            lo = length if f["prev"] is None else ops.minimum(length, 0.5 * (pos[si][e] - pos[si][f["prev"]]))
+            hi = length if f["next"] is None else ops.minimum(length, 0.5 * (pos[si][f["next"]] - pos[si][e]))
+        lengths.append((length, lo, hi))
+        d_node = pos[si] - pos[si][e]
+        s_node[si] = _blend_span(ops, s_node[si], d_node, lo, hi, bis, theta, flat)
+        d_cp = pos[si][:-1] + frac[si] * w[si] - pos[si][e]
+        s_cp[si] = _blend_span(ops, s_cp[si], d_cp, lo, hi, bis, theta, flat)
+    return s_node, s_cp, lengths
+
+
+def _mean_line_height_max(frame: dict, edge: int) -> float:
+    """Return the largest mean-line height [chord units] of a surface edge (0 without a mean line)."""
+    lines = frame["lines"]
+    if any(line is None for line in lines):
+        return 0.0
+    xi = np.unique(np.concatenate([np.array([0.0, 1.0])] + [line.x for line in lines]))
+    z = _mean_line_at(frame["sections"], lines, np.abs(frame["eta"][edge]), xi)
+    return float(np.max(np.abs(z)))
+
+
+def _camber_folds(surfaces: list[SurfaceSlice], frames: list[dict], groups: list[list[tuple]]) -> list[dict]:
+    """Return the folds of the reference surfaces for the mean-line offset.
+
+    A fold is an edge node where the span directions of the geometry
+    definition (``SurfaceSlice.strip_span_def``) of the two sides differ by
+    more than ``CAMBER_FOLD_TOL_RAD``: an interior node of a surface (the
+    root of a symmetric surface, a change of dihedral between sections) or
+    the common end node of two joined surfaces. A junction of three or more
+    surfaces gets no blend. Each fold names the two strips next to it as
+    ``(surface, strip, sign)``, with the sign that makes their directions
+    follow the span direction of the surface of the fold, the members
+    ``(surface, edge, max |z|)`` of the edge, and the nodes of the folds
+    before and after it on its surface (``"prev"``, ``"next"``, or None).
+    """
+    def fold_angle(d0: np.ndarray, d1: np.ndarray) -> float:
+        return float(np.arctan2(np.linalg.norm(cross3(d0, d1)), float(np.dot(d0, d1))))
+
+    out: list[list[dict]] = [[] for _ in surfaces]
+    for si, sf in enumerate(surfaces):
+        sd = sf.strip_span_def
+        if sd is None:
+            continue
+        for e in range(1, sd.shape[0]):
+            if fold_angle(sd[e - 1], sd[e]) > CAMBER_FOLD_TOL_RAD:
+                out[si].append({"surface": si, "node": e, "left": (si, e - 1, 1.0), "right": (si, e, 1.0),
+                                "members": [(si, e, _mean_line_height_max(frames[si], e))]})
+    for members in groups:
+        if any(surfaces[s].strip_span_def is None for s, _ in members):
+            continue
+        # The junction is the end node of each of the two surfaces (the
+        # join tolerance can also put a near interior node in the group).
+        ends = [(s, e) for s, e in members if e in (0, surfaces[s].strip_span_def.shape[0])]
+        if len({s for s, _ in members}) != 2 or len(ends) != 2 or ends[0][0] == ends[1][0]:
+            continue
+        for (s, e), (s2, e2) in (ends, ends[::-1]):
+            last, last2 = surfaces[s].strip_span_def.shape[0], surfaces[s2].strip_span_def.shape[0]
+            if e == last:
+                left, right = (s, last - 1, 1.0), ((s2, last2 - 1, -1.0) if e2 == last2 else (s2, 0, 1.0))
+            else:
+                left, right = ((s2, last2 - 1, 1.0) if e2 == last2 else (s2, 0, -1.0)), (s, 0, 1.0)
+            d0 = left[2] * surfaces[left[0]].strip_span_def[left[1]]
+            d1 = right[2] * surfaces[right[0]].strip_span_def[right[1]]
+            if fold_angle(d0, d1) > CAMBER_FOLD_TOL_RAD:
+                out[s].append({"surface": s, "node": e, "left": left, "right": right,
+                               "members": [(sm, em, _mean_line_height_max(frames[sm], em)) for sm, em in ends]})
+    folds = []
+    for entries in out:
+        entries.sort(key=lambda f: f["node"])
+        for k, f in enumerate(entries):
+            f["prev"] = entries[k - 1]["node"] if k > 0 else None
+            f["next"] = entries[k + 1]["node"] if k + 1 < len(entries) else None
+        folds.extend(entries)
+    return folds
+
+
 def _camber_edge_frames(
-    surfaces: list[SurfaceSlice], mean_surfaces: list[tuple], aircraft: Aircraft,
+    surfaces: list[SurfaceSlice], mean_surfaces: list[tuple], aircraft: Aircraft, strip_frac: np.ndarray,
 ) -> tuple[list[dict] | None, list[str]]:
     """Build chord frames and shared-edge groups for mean-line offsets [m].
 
     The existing surface join rule defines the groups. Each distinct edge
-    contributes once to the mean, including an edge with zero offset.
+    contributes once to the mean, including an edge with zero offset. The
+    offset normals of the edge nodes (``"normal"``) and of the control
+    points of the strips (``"cp_normal"``) come from one span field with a
+    blend at the folds (:func:`camber_span_field`); ``"folds"`` holds the
+    folds of the surface, for the gradient reference.
     """
     if not any(all(line is not None for line in lines) for _, lines, _ in mean_surfaces):
         return None, []
@@ -1098,12 +1365,6 @@ def _camber_edge_frames(
     parent = {}
     for si, (sf, (secs, lines, eta_e)) in enumerate(zip(surfaces, mean_surfaces)):
         edge_c = np.linalg.norm(sf.edge_te - sf.edge_le, axis=1)
-        edge_dir = (sf.edge_te - sf.edge_le) / np.maximum(edge_c[:, None], 1e-300)
-        q = sf.edge_le + 0.25 * (sf.edge_te - sf.edge_le)
-        span = np.gradient(q, axis=0)
-        span[:, 0] = 0.0
-        normal = cross3(edge_dir, span)
-        normal /= np.maximum(np.linalg.norm(normal, axis=1, keepdims=True), 1e-300)
         if sf.is_symmetric:
             eta = np.concatenate([-eta_e[::-1], eta_e[1:]])
         elif getattr(aircraft.surfaces[sf.index], "mirror_y", False):
@@ -1111,7 +1372,7 @@ def _camber_edge_frames(
         else:
             eta = eta_e
         frames.append({"sections": secs, "lines": lines, "eta": eta, "chord": edge_c,
-                       "normal": normal, "le": sf.edge_le.copy(), "te": sf.edge_te.copy(), "joined": {}})
+                       "le": sf.edge_le.copy(), "te": sf.edge_te.copy(), "joined": {}})
         for e in range(len(eta)):
             parent[si, e] = (si, e)
 
@@ -1130,13 +1391,43 @@ def _camber_edge_frames(
     groups = {}
     for edge in parent:
         groups.setdefault(find(edge), []).append(edge)
-    warnings_out = []
-    for members in groups.values():
-        if len(members) < 2:
-            continue
-        knots = [np.array([0.0, 1.0])]
+    shared = [members for members in groups.values() if len(members) > 1]
+    for members in shared:
         for s, e in members:
             frames[s]["joined"][e] = members
+
+    folds = _camber_folds(surfaces, frames, shared)
+    frac = [np.asarray(strip_frac[sf.strips], dtype=float) for sf in surfaces]
+    s_node, s_cp, lengths = camber_span_field(
+        _NumpyOps, [f["le"] for f in frames], [f["te"] for f in frames], frac, folds)
+    warnings_out = []
+    for si, frame in enumerate(frames):
+        edge_vec = frame["te"] - frame["le"]
+        edge_dir = edge_vec / np.maximum(frame["chord"][:, None], 1e-300)
+        normal = cross3(edge_dir, s_node[si])
+        normal /= np.maximum(np.linalg.norm(normal, axis=1, keepdims=True), 1e-300)
+        f_cp = frac[si][:, None]
+        cp_vec = (1.0 - f_cp) * edge_vec[:-1] + f_cp * edge_vec[1:]
+        cp_dir = cp_vec / np.maximum(np.linalg.norm(cp_vec, axis=1, keepdims=True), 1e-300)
+        cp_normal = cross3(cp_dir, s_cp[si])
+        cp_normal /= np.maximum(np.linalg.norm(cp_normal, axis=1, keepdims=True), 1e-300)
+        frame["normal"] = normal
+        frame["cp_normal"] = cp_normal
+        frame["folds"] = [f for f in folds if f["surface"] == si]
+    for f, (length, lo, hi) in zip(folds, lengths):
+        # The limit by a near fold can make the blend shorter than the
+        # length that keeps every strip from turning over (1.5 L / K).
+        need = 1.5 * float(length) / CAMBER_FOLD_BLEND_FACTOR
+        short = min(float(lo), float(hi))
+        if short < need:
+            warnings_out.append(
+                f"Camber fold of surface {surfaces[f['surface']].name!r} at edge {f['node']}: the next fold is "
+                f"near, so the blend of the mean-line offset is {short:.4g} m, shorter than {need:.4g} m. "
+                "Narrow strips there can turn over."
+            )
+    for members in shared:
+        knots = [np.array([0.0, 1.0])]
+        for s, _e in members:
             knots.extend(line.x for line in frames[s]["lines"] if line is not None)
         xi = np.unique(np.concatenate(knots))
         offsets = [_camber_edge_offset(frames, s, e, xi) for s, e in members]
@@ -1205,6 +1496,8 @@ def build_lattice(
     strip_flap_nominal_all: list[float] = []
     strip_side_terms_all: list[tuple[list, list]] = []
     control_info: list[dict[str, Any]] = []
+    # Warnings of the mesh construction (VortexLattice.mesh_warnings).
+    mesh_warnings: list[str] = []
     mean_surfaces: list[tuple[list[WingSection], list[_MeanLine | None], np.ndarray]] = []
     camber_warnings: list[str] = []
     camber_fallback = False
@@ -1241,15 +1534,40 @@ def build_lattice(
             camber_warnings.append(
                 f"camber of surface {surf.name} modelled by a turned normal: not every section gives a mean line"
             )
+        if collocation == "llt" and any(supplied):
+            # The lifting line has no chordwise mesh: it takes alpha_L0, the
+            # lift slope, Cd0 and Cm0 from the section polar, never from the
+            # shape. The note goes to the trust warnings (no penalty).
+            mesh_warnings.append(
+                f"[{surf.name}] the sections give an airfoil shape, but the lifting line does not use it: "
+                "the lifting line uses the section polar only (WingSection.airfoil: alpha_L0, lift slope, "
+                "Cd0, Cm0). Give each section a polar that matches its shape, or use the VLM."
+            )
+            warnings.warn(mesh_warnings[-1], RuntimeWarning, stacklevel=2)
+        if collocation == "vlm" and n_chord == 1 and any(supplied):
+            # The mean line needs two or more chordwise panels. With one panel
+            # the strip keeps the zero-lift line of its section polar: the
+            # normal turned by the polar alpha_L0 and the polar Cm0 as the
+            # section moment. The note goes to the trust warnings (no
+            # penalty) and each solve issues it. It is not a mesh warning:
+            # many callers build a one-panel lattice only to read the strips
+            # or the ground clearance, and they use the shape elsewhere.
+            camber_warnings.append(
+                f"[{surf.name}] the sections give an airfoil shape, but the vortex lattice with n_chord = 1 "
+                "does not use it: the mean line needs two or more chordwise panels. The lattice uses the "
+                "section polar (WingSection.airfoil): the normal is turned by the polar alpha_L0, and the "
+                "polar Cm0 gives the section moment. Use n_chord = 2 or more to use the shape."
+            )
         use_mean_line = collocation == "vlm" and n_chord > 1 and all(supplied)
         lines = [_MeanLine(sec.shape) if use_mean_line else None for sec in secs]
         for sec, line in zip(secs, lines):
             if line is not None and abs(line.alpha_l0() - sec.airfoil.alpha_L0) > np.radians(0.5):
-                warnings.warn(
+                # The warning is also a note of the trust score (no penalty).
+                mesh_warnings.append(
                     f"[{surf.name}] section at eta={sec.y_frac:g}: mean line and polar alpha_L0 "
-                    "differ by more than 0.5 deg. The mean line sets the VLM boundary condition.",
-                    RuntimeWarning, stacklevel=2,
+                    "differ by more than 0.5 deg. The mean line sets the VLM boundary condition."
                 )
+                warnings.warn(mesh_warnings[-1], RuntimeWarning, stacklevel=2)
         mean_surfaces.append((secs, lines, eta_e))
         geo = surface_edge_geometry(surf, eta_e)
         d = getattr(surf, "node_displacements", None)
@@ -1342,6 +1660,22 @@ def build_lattice(
                     hinge_x_c_eff = float(c.hinge_x_c)
                     ctrl_xi = xi.copy()
                     ctrl_xi[k_hinge] = c.hinge_x_c
+                    cambered = any(
+                        line is not None and float(np.max(np.abs(line.at(_CAMBER_PROBE)))) > 0.0
+                        for line in lines
+                    )
+                    if cambered and abs(float(c.hinge_x_c) - float(xi[k_hinge])) > 1e-12:
+                        counts = _hinge_chord_counts(float(c.hinge_x_c), n_chord, chord_spacing)
+                        mesh_warnings.append(
+                            f"[{surf.name}] control {c.name!r}: the hinge at x/c = {float(c.hinge_x_c):.4g} "
+                            f"moves a chordwise node of the control strips (n_chord = {n_chord}). On a "
+                            "cambered mean line the legs of the control strips and of their clean "
+                            "neighbours then do not coincide at the control side edges, and the leg "
+                            "forces there do not converge with the spanwise mesh. Use a chordwise count "
+                            "with a node at the hinge"
+                            + (f", for example n_chord = {', '.join(str(n) for n in counts)}." if counts else ".")
+                        )
+                        warnings.warn(mesh_warnings[-1], RuntimeWarning, stacklevel=2)
                 else:
                     hinge_x_c_eff = float(xi[k_hinge])
                     ctrl_xi = xi.copy()
@@ -1351,13 +1685,13 @@ def build_lattice(
                         f"n_chord = {', '.join(str(n) for n in counts)} ({chord_spacing} spacing)."
                         if counts else "Use a chordwise count that puts a node near the hinge."
                     )
-                    warnings.warn(
+                    mesh_warnings.append(
                         f"[{surf.name}] control {c.name!r}: no lattice node can move onto the hinge at "
                         f"x/c = {float(c.hinge_x_c):.4g} with n_chord = {n_chord}. The hinge snaps to the "
                         f"nearest node at x/c = {hinge_x_c_eff:.4g} (lattice control_info 'hinge_x_c_eff'). "
-                        + advice,
-                        RuntimeWarning, stacklevel=2,
+                        + advice
                     )
+                    warnings.warn(mesh_warnings[-1], RuntimeWarning, stacklevel=2)
             else:
                 hinge_x_c_eff = None
                 ctrl_xi = xi.copy()
@@ -1678,7 +2012,7 @@ def build_lattice(
     # Mean-surface node of the leg of each panel between its bound point and
     # the bound point of the next panel of its strip [m] (see _leg_nodes).
     mid_a = mid_b = None
-    camber_frames, offset_warnings = _camber_edge_frames(surfaces, mean_surfaces, aircraft)
+    camber_frames, offset_warnings = _camber_edge_frames(surfaces, mean_surfaces, aircraft, cat["frac"])
     # Keep the old arithmetic for sections without a mean line and for
     # symmetric mean lines. This preserves the uncambered results in bits.
     for si, (sf, (secs, lines, _eta_e)) in enumerate(zip(surfaces, mean_surfaces)):
@@ -1710,8 +2044,14 @@ def build_lattice(
         curved[idx] = known & (np.any(off_l != 0.0, axis=(1, 2)) | np.any(off_r != 0.0, axis=(1, 2)))
         if n_chord > 1:
             # The node at the middle chord fraction between two bound points,
-            # on the mean line of the strip edge.
-            xm = 0.5 * (xb[:, :-1] + xb[:, 1:])
+            # on the mean line of the strip edge. On the last panel the node
+            # is at the middle chord fraction between its bound point and the
+            # bound point that a next panel of the same length would have
+            # (1/4 of its length aft of the trailing edge): the bound point
+            # plus half the panel length. With CLAF = 1 that is the chord
+            # fraction of the control point, as on the panels with uniform
+            # chordwise spacing.
+            xm = 0.5 * (xb + np.concatenate([xb[:, 1:], xb[:, -1:] + dx[:, -1:]], axis=1))
             z_ml = _mean_line_at(secs, lines, np.abs(eta_full[:-1, None]), xm)
             z_mr = _mean_line_at(secs, lines, np.abs(eta_full[1:, None]), xm)
             off_ml = edge_c[:-1, None, None] * z_ml[..., None] * edge_n[:-1, None, :]
@@ -1724,7 +2064,7 @@ def build_lattice(
             if mid_a is None:
                 mid_a = np.zeros_like(a)
                 mid_b = np.zeros_like(b)
-            m_idx = (idx[:, None] * n_chord + np.arange(n_chord - 1)).ravel()
+            m_idx = p_idx
             mid_a[m_idx] = (le_l[idx, None] + xm[..., None] * (te_l[idx] - le_l[idx])[:, None] + off_ml).reshape(-1, 3)
             mid_b[m_idx] = (le_r[idx, None] + xm[..., None] * (te_r[idx] - le_r[idx])[:, None] + off_mr).reshape(-1, 3)
         a[p_idx] += off_l.reshape(-1, 3)
@@ -1732,8 +2072,11 @@ def build_lattice(
         f_mid = cat["frac"][idx, None]
         edge_vec = frame["te"] - frame["le"]
         cp_chord = np.linalg.norm((1.0 - f_mid) * edge_vec[:-1] + f_mid * edge_vec[1:], axis=1)
-        cp[p_idx] += (cp_chord[:, None, None] * z_c[..., None] * normal[idx, None, :]).reshape(-1, 3)
-        tangent = cdir[idx, None, :] + slope[..., None] * normal[idx, None, :]
+        # The control points and their normals use the offset direction of
+        # the same span field as the edge nodes (camber_span_field).
+        cp_n = frame["cp_normal"]
+        cp[p_idx] += (cp_chord[:, None, None] * z_c[..., None] * cp_n[:, None, :]).reshape(-1, 3)
+        tangent = cdir[idx, None, :] + slope[..., None] * cp_n[:, None, :]
         nb = cross3(tangent.reshape(-1, 3), np.repeat(s_hat[idx], n_chord, axis=0))
         nb /= np.maximum(np.linalg.norm(nb, axis=1, keepdims=True), 1e-300)
         use = np.repeat(known, n_chord)
@@ -1753,6 +2096,9 @@ def build_lattice(
     flap_hinges = {}
     leg_kinks = {}
     flap_field = None
+    # Strip edges (n_strips, 2) of the flap strips whose hinge point is not a
+    # leg node (see _leg_nodes); None without chordwise flaps.
+    hinge_off = None
     # Lattice before the flap turn: the leg-force rules come from it.
     undeflected = None
     if is_chordwise:
@@ -1808,17 +2154,20 @@ def build_lattice(
             if s + 1 < n_strips and strip_surf[s + 1] == strip_surf[s] and np.isfinite(hinge_of[s + 1]):
                 partner[s, 1] = (s + 1, 0)
                 far[s, 1] = (s + 1, 1)
+        def coincident(s: int, side: int, q: int, jq: int) -> bool:
+            # True when edge jq of strip q is at the place of edge side of
+            # strip s (leading and trailing edge before the flap turn).
+            tol = 1e-9 * max(1.0, float(chord[s]))
+            return bool(np.max(np.abs((le_l, le_r)[jq][q] - (le_l, le_r)[side][s])) <= tol
+                        and np.max(np.abs(undeflected[2 + jq][q] - undeflected[2 + side][s])) <= tol)
+
         for s, side, si in ends:
             if np.isnan(hinge_of[s]) or partner[s, side, 0] >= 0:
                 continue
-            le_s = (le_l, le_r)[side][s]
-            te_s = undeflected[2 + side][s]
-            tol = 1e-9 * max(1.0, float(chord[s]))
             for q, jq, sq in ends:
                 if sq == si or hinge_of[q] != hinge_of[s]:
                     continue
-                if (np.max(np.abs((le_l, le_r)[jq][q] - le_s)) <= tol
-                        and np.max(np.abs(undeflected[2 + jq][q] - te_s)) <= tol):
+                if coincident(s, side, q, jq):
                     partner[s, side] = (q, jq)
                     far[s, side] = (q, 1 - jq)
                     break
@@ -1860,10 +2209,13 @@ def build_lattice(
                                                     (cp, xc_k, H_f, ax_f, d_f)):
                     if fraction > h and dd != 0.0:
                         points[p_idx:p_idx + 1] = _rotate_flap_points(points[p_idx:p_idx + 1], H, ax, dd)
-                if mid_a is not None and k < n_chord - 1:
+                if mid_a is not None:
                     # The mean-surface node aft of the hinge turns with the flap.
                     x1_k = strip_xi_arr[s, k + 1]
-                    xm_k = 0.5 * (xb_k + x1_k + 0.25 * (strip_xi_arr[s, k + 2] - x1_k))
+                    if k < n_chord - 1:
+                        xm_k = 0.5 * (xb_k + x1_k + 0.25 * (strip_xi_arr[s, k + 2] - x1_k))
+                    else:
+                        xm_k = xb_k + 0.5 * dx_k
                     for points, H, ax, dd in ((mid_a, H_l, ax_l, d_l), (mid_b, H_r, ax_r, d_r)):
                         if xm_k > h and dd != 0.0:
                             points[p_idx:p_idx + 1] = _rotate_flap_points(points[p_idx:p_idx + 1], H, ax, dd)
@@ -1886,16 +2238,40 @@ def build_lattice(
             # Per flap strip: the deflection at the span fraction of its
             # control point [rad] and the hinge of its control as defined.
             frac_s = np.asarray(cat["frac"], dtype=float)
+            # An edge that a flap strip shares with a strip of a different
+            # hinge has a different hinge point on the legs of the other
+            # strip: a strip without a hinge (the outer edge of the join at
+            # a side edge of a control) or a strip of a control with another
+            # hinge fraction. The other strip can be the neighbour strip of
+            # the same surface or the end strip of another surface whose end
+            # edge is at the same place (a joined surface). On a leg chain
+            # the legs of the two strips must pass through the same nodes,
+            # so the hinge point is not a node of either strip at that edge:
+            # the legs of both use the mean-surface node. On a symmetric
+            # section the hinge point and the mean-surface node are on one
+            # straight line and the legs coincide also with the hinge node.
+            hinge_off = np.zeros((n_strips, 2), dtype=bool)
+            for s in np.flatnonzero(np.isfinite(hinge_of)):
+                for side, q in ((0, s - 1), (1, s + 1)):
+                    if 0 <= q < n_strips and strip_surf[q] == strip_surf[s] and hinge_of[q] != hinge_of[s]:
+                        hinge_off[s, side] = True
+            for s, side, si in ends:
+                if np.isnan(hinge_of[s]):
+                    continue
+                for q, jq, sq in ends:
+                    if sq != si and hinge_of[q] != hinge_of[s] and coincident(s, side, q, jq):
+                        hinge_off[s, side] = True
             flap_field = {"hinge": hinge_of, "angle": angle, "coef": coef, "partner": partner, "far": far,
                           "strip_angle": angle[:, 0] + frac_s * (angle[:, 1] - angle[:, 0]),
-                          "hinge_x_c": np.asarray(strip_flap_nominal_all, dtype=float)}
+                          "hinge_x_c": np.asarray(strip_flap_nominal_all, dtype=float),
+                          "hinge_off": hinge_off}
 
     a_kink = b_kink = None
     leg_next = None
     chain_strips = np.flatnonzero(curved) if n_chord > 1 else np.zeros(0, dtype=np.int64)
     if leg_kinks or chain_strips.size:
         a_kink, b_kink, leg_next = _leg_nodes(a, b, te_l[panel_strip], te_r[panel_strip], leg_kinks,
-                                              chain_strips, n_chord, mid_a, mid_b)
+                                              chain_strips, n_chord, mid_a, mid_b, hinge_off)
 
     lattice = VortexLattice(
         collocation=collocation,
@@ -1935,6 +2311,7 @@ def build_lattice(
         surfaces=surfaces,
         strip_core_group=core_groups(surfaces)[cat["surface"].astype(int)],
         join_warnings=near_miss_warnings(surfaces) + camber_warnings + offset_warnings,
+        mesh_warnings=mesh_warnings,
         control_info=control_info,
         geometric_camber=geometric_camber,
         a_kink=a_kink,
@@ -1974,7 +2351,7 @@ def build_lattice(
             a0, b0, te_l0, te_r0, _ = undeflected
             mid0 = (None, None) if mid_undeflected is None else mid_undeflected
             a_k0, b_k0, next0 = _leg_nodes(a0, b0, te_l0[panel_strip], te_r0[panel_strip], leg_kinks,
-                                           chain_strips, n_chord, *mid0)
+                                           chain_strips, n_chord, *mid0, hinge_off)
             flat = replace(lattice, a=a0, b=b0, a_te=te_l0[panel_strip], b_te=te_r0[panel_strip],
                            a_kink=a_k0, b_kink=b_k0, leg_next=next0, te_left=te_l0, te_right=te_r0,
                            geom_cache={})
@@ -1985,13 +2362,33 @@ def build_lattice(
             normal = normal.copy()
             n_p = panel_strip.size
             for s, (ax_l, d_l, ax_r, d_r, h) in edge_turn.items():
+                xb_s = [strip_xi_arr[s, k] + 0.25 * (strip_xi_arr[s, k + 1] - strip_xi_arr[s, k])
+                        for k in range(n_chord)]
                 for k in range(n_chord):
-                    x0_k = strip_xi_arr[s, k]
                     p_idx = s * n_chord + k
-                    aft = x0_k + 0.25 * (strip_xi_arr[s, k + 1] - x0_k) > h
-                    # Aft panel: the whole legs (rows 0, 1); panel ahead of
-                    # the hinge: the aft segments (rows 2, 3).
-                    rows = ((0, ax_l, d_l), (1, ax_r, d_r)) if aft else ((2, ax_l, d_l), (3, ax_r, d_r))
+                    # On a strip with geometric camber every panel has a
+                    # mean-surface node (on the last panel between the bound
+                    # point and the trailing edge, see _leg_nodes).
+                    chained = bool(curved[s])
+                    # Rows 0, 1 are the forward segments of the legs (bound
+                    # point to the first node), rows 2, 3 the aft segments
+                    # (first node to the end of the leg), see leg_segments
+                    # and _leg_nodes. A segment turns when it lies aft of
+                    # the hinge. Aft panel: the forward segments, and on a
+                    # chain also the aft segments (mean-surface node to the
+                    # next bound point or to the trailing edge; without a
+                    # chain the aft segments have zero length). Panel ahead
+                    # of the hinge: the aft
+                    # segments only when the first node is the hinge point.
+                    # On a chain that is only the last panel ahead of the
+                    # hinge: the panels ahead of it have a mean-surface node
+                    # ahead of the hinge, and their legs stay.
+                    if xb_s[k] > h:
+                        rows = ((0, ax_l, d_l), (1, ax_r, d_r)) + (((2, ax_l, d_l), (3, ax_r, d_r)) if chained else ())
+                    elif chained and k < n_chord - 1 and xb_s[k + 1] <= h:
+                        rows = ()
+                    else:
+                        rows = ((2, ax_l, d_l), (3, ax_r, d_r))
                     for r, ax, dd in rows:
                         if dd != 0.0:
                             i = r * n_p + p_idx
@@ -2012,6 +2409,7 @@ def _leg_nodes(
     n_chord: int,
     mid_a: np.ndarray | None = None,
     mid_b: np.ndarray | None = None,
+    hinge_off: np.ndarray | None = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray | None]:
     """Return the first leg nodes and the chain flags of the panels (see ``VortexLattice.leg_next``).
 
@@ -2020,9 +2418,21 @@ def _leg_nodes(
     strip edge, in chordwise order, to the trailing edge. On a strip with
     geometric camber the nodes are the bound points of the panels aft of it,
     one mean-surface node between each two bound points (at the middle chord
-    fraction) and the hinge point of a flap; on a strip without a mean line
-    only the hinge point. Where the hinge point lies between two bound
-    points, it is the node between them (one node per segment pair).
+    fraction), one mean-surface node between the last bound point and the
+    trailing edge (half a panel length aft of the bound point, the middle
+    chord fraction to the bound point that a next panel of the same length
+    would have; the legs of the last panel then pass at the chord fraction
+    of its control point when CLAF = 1) and the
+    hinge point of a flap; on a strip without a mean line only the hinge
+    point. Where the hinge point lies between two bound points (or between
+    the last bound point and the trailing edge), it is the node between
+    them (one node per segment pair). The
+    two strips at an edge must have the same nodes there, so that their
+    legs coincide. Thus on a leg chain the hinge point is not a node at an
+    edge that the flap strip shares with a strip of a different hinge (no
+    hinge or another hinge fraction, on the same surface or on a joined
+    surface; *hinge_off*); the mean-surface node is the node there, as on
+    the other strip.
 
     Parameters
     ----------
@@ -2041,8 +2451,13 @@ def _leg_nodes(
         Chordwise panels per strip.
     mid_a, mid_b : numpy.ndarray or None
         Mean-surface nodes [m], shape (n_panels, 3), between the bound points
-        of each panel and of the next panel of its strip, after the flap
-        turn; None to use the bound point of the next panel as the node.
+        of each panel and of the next panel of its strip (on the last panel
+        of a strip: between its bound point and the trailing edge), after
+        the flap turn; None to use the bound point of the next panel as the
+        node and no node on the last panel.
+    hinge_off : numpy.ndarray or None
+        Strip edges whose hinge point is not a node of a leg chain, shape
+        (n_strips, 2) bool (left and right edge); None for none.
 
     Returns
     -------
@@ -2060,13 +2475,22 @@ def _leg_nodes(
         return a_kink, b_kink, None
     leg_next = np.zeros(a.shape[0], dtype=bool)
     for s in chain_strips:
-        for k in range(n_chord - 1):
+        for k in range(n_chord):
             p = int(s) * n_chord + k
-            leg_next[p] = True
+            last = k == n_chord - 1
+            if last and mid_a is None:
+                break
+            leg_next[p] = not last
             # The hinge point is a node of this leg only if it lies between
-            # the bound points of this panel and of the next one.
-            if p not in hinge_nodes or p + 1 in hinge_nodes:
+            # the bound points of this panel and of the next one (on the
+            # last panel: between its bound point and the trailing edge).
+            hinge = p in hinge_nodes and (last or p + 1 not in hinge_nodes)
+            off_a = off_b = not hinge
+            if hinge and hinge_off is not None:
+                off_a, off_b = bool(hinge_off[s, 0]), bool(hinge_off[s, 1])
+            if off_a:
                 a_kink[p] = a[p + 1] if mid_a is None else mid_a[p]
+            if off_b:
                 b_kink[p] = b[p + 1] if mid_b is None else mid_b[p]
     return a_kink, b_kink, leg_next
 

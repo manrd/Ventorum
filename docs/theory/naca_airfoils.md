@@ -51,8 +51,9 @@ designation "0012" gives $m = 0$ and $p = 0$ (symmetric section).
 The standard (non-reflex) 5-digit mean lines follow Abbott and von Doenhoff
 (1959). Jacobs, Ward and Pinkerton (NACA Report 460, 1933) and Jacobs and
 Pinkerton (NACA Report 537, 1935) define the series. The first digit sets
-the design lift coefficient ($0.15$ times the digit), the second and third
-digits set the camber position, and the last two digits set $t$. With the
+the design lift coefficient ($0.15$ times the digit), the second digit sets
+the camber position, the third digit is the reflex flag (0 for a standard
+mean line, 1 for a reflex mean line), and the last two digits set $t$. With the
 parameters $m$ [-] and $k_1$ [-], the mean line is, for $x \le m$,
 
 ```{math}

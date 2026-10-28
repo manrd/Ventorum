@@ -137,3 +137,36 @@ def test_squire_young_against_surface_drag(re, alpha):
     i = [0.0, 2.0, 4.0, 6.0].index(alpha)
     assert r.converged[i]
     assert abs((r.Cd_friction[i] + r.Cd_pressure[i]) / r.Cd[i] - 1.0) < 0.05
+
+
+@pytest.mark.slow
+def test_squire_young_drag_independent_of_wake_length():
+    """The Squire-Young drag changes by less than 0.1 % from a wake of 0.5 c to 1.5 c (NACA 4412, 4 deg).
+
+    The wake shape factor at the wake end falls towards 1 as the wake gets longer, but stays above 1.
+    """
+    coords = airfoil("4412").repanel(n_panels=160).coords
+    rows = [_solve(coords, [0.0, 2.0, 4.0], 1e6, wake_length=wl, n_wake=30, work_budget=0) for wl in (0.5, 1.0, 1.5)]
+    assert all(r.converged[2] for r in rows), [r.reason[2] for r in rows]
+    cd = np.array([r.Cd[2] for r in rows])
+    assert np.max(np.abs(cd / cd[1] - 1.0)) < 1e-3
+    h_end = np.array([r.wake[2]["H"][-1] for r in rows])
+    assert np.all(np.diff(h_end) < 0.0) and np.all(h_end > 1.0)
+    print(f"\n[wake] Cd for wake 0.5, 1.0, 1.5 c: {cd}; H at the wake end: {h_end}")
+
+
+@pytest.mark.slow
+@pytest.mark.xfail(
+    reason="The wake equations (no skin friction, doubled outer dissipation 2 Ctau (1 - Us); Drela and Giles "
+           "1987) drive the wake shape factor H to 1 at a finite distance behind the trailing edge, about 1.5 to "
+           "2 chords at 4 deg. The dissipation does not fall to zero as H approaches 1, and the lag equation "
+           "relaxes Ctau more and more slowly because the layer thickness grows as 1 / (H - 1). Past that point "
+           "the station equations have no solution with H > 1, so a longer wake does not converge. A fix needs "
+           "a change of the far-wake model.",
+    strict=True)
+@pytest.mark.parametrize("wake_length", [2.0, 3.0])
+def test_long_wake_converges(wake_length):
+    """A wake of 2 c and 3 c converges (NACA 4412, Re 1e6, 4 deg)."""
+    coords = airfoil("4412").repanel(n_panels=160).coords
+    r = _solve(coords, 4.0, 1e6, wake_length=wake_length, n_wake=int(round(30 * wake_length)), work_budget=0)
+    assert r.converged, r.reason

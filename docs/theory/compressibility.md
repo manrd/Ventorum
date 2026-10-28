@@ -94,10 +94,11 @@ The vortex-lattice solver reproduces this scaling.
 ## Envelope
 
 - Valid for Mach numbers $0 \le M < 1$.
-- At $M > 0.7$, local flow can become supersonic. Shocks and wave drag can appear. The trust score gives a warning above $M = 0.7$ and reduces the confidence rating.
+- At $M > 0.7$, local flow can become supersonic. Shocks and wave drag can appear. The trust score has two thresholds. Above $M = 0.3$ (`ventorum.core.constants.MACH_LIMIT_INCOMPRESSIBLE`) the case is outside the validated envelope: the trust score gives a warning and a penalty that grows with the Mach number, which lowers the confidence rating. Above $M = 0.7$, with the correction applied, the trust score adds a second warning: linear theory loses validity near the critical Mach number.
 - The VLM solver (`solver_type="vlm"`) supports the compressibility correction on the CPU and GPU paths.
 - The lifting-line solvers (linear, nonlinear, and Fourier) refuse `mach > 0` and raise `ValidityError`.
 - Ground effect refuses `mach > 0` and raises `ValidityError`.
+- The 3D panel method has no compressibility correction: it refuses `mach > 0` and raises `ValidityError`.
 - Adjoint gradients support `mach > 0` for the vortex lattice in free air,
   with the new input `"mach"` (per unit Mach); ground effect and the lifting
   lines refuse it with `GradientScopeError`.

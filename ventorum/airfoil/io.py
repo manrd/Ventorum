@@ -20,8 +20,6 @@ References
 - M. S. Selig, J. J. Guglielmo, A. P. Broeren and P. Giguere, *Summary of
   Low-Speed Airfoil Data*, Vol. 1, SoarTech Publications, 1995 (Selig
   coordinate file format).
-- D. Lednicer, "A CFD evaluation of wind tunnel test sections", AIAA
-  paper 2010-0458, 2010 (Lednicer coordinate file format).
 - I. H. Abbott and A. E. von Doenhoff, *Theory of Wing Sections*, Dover,
   1959, chapter 6 (section geometry).
 """
