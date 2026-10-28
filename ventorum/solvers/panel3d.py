@@ -110,9 +110,10 @@ from ventorum.panel3d.images import (
 from ventorum.panel3d.mesh import (
     CONTACT_GAP_FRACTION,
     PanelMesh,
+    _check_mesh,
     _check_no_node_displacements,
+    _steep_root,
     check_contact,
-    check_mesh,
     mesh_lifting_surface,
 )
 from ventorum.panel3d import cache as panel_cache
@@ -158,9 +159,10 @@ _NODE_METADATA = ("node_station",)
 #: replaces one (for example a test that counts calls) never gets mesh data
 #: built with the original. Add each new helper of :func:`_build_geometry`.
 _GEOMETRY_HELPERS = (
-    "_build_geometry", "mesh_lifting_surface", "check_mesh", "_surface_strip_maps", "_assign_strips",
+    "_build_geometry", "mesh_lifting_surface", "_check_mesh", "_surface_strip_maps", "_assign_strips",
     "_strip_metadata", "_combined_metadata", "_sorted_sections", "_surface_eta", "resolve_spacing",
-    "surface_reference_line", "_AirfoilBlender", "airfoil_linear_properties",
+    "surface_reference_line", "_AirfoilBlender", "airfoil_linear_properties", "_check_self_intersection",
+    "_steep_root",
 )
 
 
@@ -758,6 +760,46 @@ def _check_surface_contact(mesh: PanelMesh, names: list[str]) -> None:
     )
 
 
+def _check_self_intersection(mesh_stats: dict, names: list[str]) -> None:
+    """Refuse a panel mesh where a closed surface passes through itself or its mirror image.
+
+    The key ``n_self_intersections`` of
+    :func:`ventorum.panel3d.mesh.check_mesh` counts the panel edges that
+    cross a panel of the same surface (or of its mirror image in y = 0)
+    with which they share no node. A symmetric wing with steep dihedral and
+    ``scale_root_thickness=False`` can give such a mesh: stations near the
+    root put the upper surface nodes past the plane of symmetry, so the two
+    halves pass through each other. The fold test of neighbour station rows
+    does not find this. The lift of such a mesh does not converge with the
+    spanwise panel count.
+
+    Parameters
+    ----------
+    mesh_stats : dict
+        Output of :func:`ventorum.panel3d.mesh.check_mesh`.
+    names : list of str
+        Surface name of each component index.
+
+    Raises
+    ------
+    ValueError
+        If a surface intersects itself or its mirror image. The message
+        names the surface.
+    """
+    n_x = int(mesh_stats.get("n_self_intersections", 0) or 0)
+    if n_x == 0:
+        return
+    comps = list(mesh_stats.get("self_intersecting_components", []))
+    shown = ", ".join(f"'{names[c]}'" for c in comps) if comps else "a surface"
+    raise ValueError(
+        f"3D panel surface {shown} intersects itself or its mirror image (plane of symmetry y = 0): "
+        f"{n_x} panel edges cross panels of the same closed surface. The influence matrix of such a "
+        "mesh is not valid and the loads can be wrong by orders of magnitude. Use "
+        "panel_scale_root_thickness=True (scale_root_thickness=True, the default), or change the "
+        "spanwise panel count or the dihedral."
+    )
+
+
 def _build_geometry(
     ac: Aircraft,
     settings: SolverSettings,
@@ -803,7 +845,22 @@ def _build_geometry(
     ------
     ValueError
         If two distinct closed surfaces touch or pass through each other
-        (see :func:`_check_surface_contact`).
+        (see :func:`_check_surface_contact`), or if a surface intersects
+        itself or its mirror image (see :func:`_check_self_intersection`).
+
+    Notes
+    -----
+    The self-intersection count of the mesh check runs only when
+    *scale_root_thickness* is False. With the root thickness scaling no
+    test mesh had a self-intersection, and the count is the most expensive
+    part of the check. Without the count, the mesh statistics do not have
+    the keys ``n_self_intersections`` and ``self_intersecting_components``.
+
+    The mesh statistics also get ``steep_root_dihedral`` (True when the
+    dihedral of the first panel row of a symmetric surface is
+    ``ventorum.panel3d.mesh.STEEP_ROOT_DIHEDRAL_DEG`` or more) and
+    ``scale_root_thickness``. The trust score reads them (see
+    :func:`ventorum.core.trust.panel3d_mesh_checks`).
     """
     # 2. Build panel mesh and track strip-to-panel associations
     node_parts = []
@@ -819,6 +876,7 @@ def _build_geometry(
     sub_meshes: list[PanelMesh] = []
 
     ref_semi = max((s.semi_span for s in ac.surfaces), default=1.0)
+    steep_root = False
     for s_idx, (surf, coords) in enumerate(zip(ac.surfaces, section_coords_by_surface)):
         if getattr(settings, "proportional_panels", False) and surf.n_panels is None:
             from ventorum.geometry.lattice import compute_surface_n_panels
@@ -848,6 +906,8 @@ def _build_geometry(
         spacing = resolve_spacing(surf.spacing if surf.spacing is not None else settings.spacing, surf, "vlm")
         eta_e, eta_mid = _surface_eta(surf, n_span, spacing)
         eta_e = np.asarray(eta_e, dtype=float)
+        if _steep_root(surf, eta_e):
+            steep_root = True
 
         surface_strip_maps.append(
             _surface_strip_maps(sub, surf, int(n_span), eta_e, n_panels_total, use_half)
@@ -910,8 +970,11 @@ def _build_geometry(
 
     # 3. Check mesh quality
     _check_surface_contact(mesh, [surf.name for surf in ac.surfaces])
-    mesh_stats = check_mesh(mesh)
+    mesh_stats = _check_mesh(mesh, self_intersections=not scale_root_thickness)
+    _check_self_intersection(mesh_stats, [surf.name for surf in ac.surfaces])
     mesh_stats["root_scale_warning"] = bool(getattr(mesh, "root_scale_warning", False))
+    mesh_stats["steep_root_dihedral"] = bool(steep_root)
+    mesh_stats["scale_root_thickness"] = bool(scale_root_thickness)
     return CachedGeometry(
         mesh=mesh,
         strip_maps=surface_strip_maps,

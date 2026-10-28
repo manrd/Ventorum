@@ -5,8 +5,9 @@ The kernels compute the same matrices as the numpy reference: the source
 potentials ``B`` and the doublet potentials ``C``, with the same formulas
 and the same branches (planar projection done on the host, the van
 Oosterom and Strackee solid angle, the body-side limit in the on-plane
-band, the analytic edge sums, and the point far-field expansions beyond
-``far_ratio`` panel diameters).
+band, the analytic edge sums, and the far-field multipole expansions about
+the area centroid (area and second moments of area, computed on the host)
+beyond ``far_ratio`` panel diameters).
 
 The on-plane band (the body-side limit of the doublet potential) uses a
 tolerance relative to the panel size and the coordinate magnitude, with the
@@ -212,10 +213,69 @@ def _kernels(precision: str):
                 lk = T(2.0) * wp.log(ra + rb + dk) - wp.log(T(2.0) * s)
             return lk
 
+        @wp.func(module=module)
+        def far_b(
+            px: T,
+            py: T,
+            pz: T,
+            j: int,
+            fc: wp.array2d(dtype=T),
+            qm: wp.array2d(dtype=T),
+            lax: wp.array2d(dtype=T),
+            maxis: wp.array2d(dtype=T),
+            area: wp.array(dtype=T),
+        ):
+            # Far-field source potential: monopole and second moments.
+            rx = px - fc[j, 0]
+            ry = py - fc[j, 1]
+            rz = pz - fc[j, 2]
+            r = wp.sqrt(rx * rx + ry * ry + rz * rz)
+            if r < T(floor):
+                r = T(floor)
+            x = rx * lax[j, 0] + ry * lax[j, 1] + rz * lax[j, 2]
+            y = rx * maxis[j, 0] + ry * maxis[j, 1] + rz * maxis[j, 2]
+            a = qm[j, 0] * x * x + T(2.0) * qm[j, 1] * x * y + qm[j, 2] * y * y
+            q = qm[j, 0] + qm[j, 2]
+            inv_r2 = T(1.0) / (r * r)
+            t = (T(1.5) * a * inv_r2 - T(0.5) * q) / (r * r * r)
+            return T(0.0) - T(_INV_4PI) * (area[j] / r + t)
+
+        @wp.func(module=module)
+        def far_c(
+            px: T,
+            py: T,
+            pz: T,
+            j: int,
+            fc: wp.array2d(dtype=T),
+            qm: wp.array2d(dtype=T),
+            nor: wp.array2d(dtype=T),
+            lax: wp.array2d(dtype=T),
+            maxis: wp.array2d(dtype=T),
+            area: wp.array(dtype=T),
+        ):
+            # Far-field doublet potential: point doublet and second moments.
+            rx = px - fc[j, 0]
+            ry = py - fc[j, 1]
+            rz = pz - fc[j, 2]
+            r = wp.sqrt(rx * rx + ry * ry + rz * rz)
+            if r < T(floor):
+                r = T(floor)
+            x = rx * lax[j, 0] + ry * lax[j, 1] + rz * lax[j, 2]
+            y = rx * maxis[j, 0] + ry * maxis[j, 1] + rz * maxis[j, 2]
+            z = rx * nor[j, 0] + ry * nor[j, 1] + rz * nor[j, 2]
+            a = qm[j, 0] * x * x + T(2.0) * qm[j, 1] * x * y + qm[j, 2] * y * y
+            q = qm[j, 0] + qm[j, 2]
+            inv_r2 = T(1.0) / (r * r)
+            r3 = r * r * r
+            f = (T(1.5) * q - T(7.5) * a * inv_r2) * inv_r2 / r3
+            return T(_INV_4PI) * z * (f - area[j] / r3)
+
         @wp.kernel(module=module)
         def bc_kernel(
             P: wp.array2d(dtype=T),
             cen: wp.array2d(dtype=T),
+            fc: wp.array2d(dtype=T),
+            qm: wp.array2d(dtype=T),
             nor: wp.array2d(dtype=T),
             lax: wp.array2d(dtype=T),
             maxis: wp.array2d(dtype=T),
@@ -237,21 +297,18 @@ def _kernels(precision: str):
             rx = P[i, 0] - cen[j, 0]
             ry = P[i, 1] - cen[j, 1]
             rz = P[i, 2] - cen[j, 2]
-            r = wp.sqrt(rx * rx + ry * ry + rz * rz)
             is_far = False
             if use_far != 0:
-                if r > far_ratio * diam[j]:
+                fx = P[i, 0] - fc[j, 0]
+                fy = P[i, 1] - fc[j, 1]
+                fz = P[i, 2] - fc[j, 2]
+                if wp.sqrt(fx * fx + fy * fy + fz * fz) > far_ratio * diam[j]:
                     is_far = True
+            b = T(0.0)
+            c = T(0.0)
             if is_far:
-                rs = r
-                if rs < T(floor):
-                    rs = T(floor)
-                b = T(0.0) - T(_INV_4PI) * area[j] / rs
-                rdotn = rx * nor[j, 0] + ry * nor[j, 1] + rz * nor[j, 2]
-                r3 = rs * rs * rs
-                if r3 < T(floor):
-                    r3 = T(floor)
-                c = T(0.0) - T(_INV_4PI) * area[j] * rdotn / r3
+                b = far_b(P[i, 0], P[i, 1], P[i, 2], j, fc, qm, lax, maxis, area)
+                c = far_c(P[i, 0], P[i, 1], P[i, 2], j, fc, qm, nor, lax, maxis, area)
             else:
                 x = rx * lax[j, 0] + ry * lax[j, 1] + rz * lax[j, 2]
                 y = rx * maxis[j, 0] + ry * maxis[j, 1] + rz * maxis[j, 2]
@@ -282,6 +339,8 @@ def _kernels(precision: str):
             pz: T,
             j: int,
             cen: wp.array2d(dtype=T),
+            fc: wp.array2d(dtype=T),
+            qm: wp.array2d(dtype=T),
             nor: wp.array2d(dtype=T),
             lax: wp.array2d(dtype=T),
             maxis: wp.array2d(dtype=T),
@@ -299,21 +358,17 @@ def _kernels(precision: str):
             rx = px - cen[j, 0]
             ry = py - cen[j, 1]
             rz = pz - cen[j, 2]
-            r = wp.sqrt(rx * rx + ry * ry + rz * rz)
             is_far = False
             if use_far != 0:
-                if r > far_ratio * diam[j]:
+                # Distance from the expansion centre (area centroid).
+                fx = px - fc[j, 0]
+                fy = py - fc[j, 1]
+                fz = pz - fc[j, 2]
+                if wp.sqrt(fx * fx + fy * fy + fz * fz) > far_ratio * diam[j]:
                     is_far = True
             c = T(0.0)
             if is_far:
-                rs = r
-                if rs < T(floor):
-                    rs = T(floor)
-                rdotn = rx * nor[j, 0] + ry * nor[j, 1] + rz * nor[j, 2]
-                r3 = rs * rs * rs
-                if r3 < T(floor):
-                    r3 = T(floor)
-                c = T(0.0) - T(_INV_4PI) * area[j] * rdotn / r3
+                c = far_c(px, py, pz, j, fc, qm, nor, lax, maxis, area)
             else:
                 x = rx * lax[j, 0] + ry * lax[j, 1] + rz * lax[j, 2]
                 y = rx * maxis[j, 0] + ry * maxis[j, 1] + rz * maxis[j, 2]
@@ -329,6 +384,8 @@ def _kernels(precision: str):
             pz: T,
             j: int,
             cen: wp.array2d(dtype=T),
+            fc: wp.array2d(dtype=T),
+            qm: wp.array2d(dtype=T),
             nor: wp.array2d(dtype=T),
             lax: wp.array2d(dtype=T),
             maxis: wp.array2d(dtype=T),
@@ -348,17 +405,17 @@ def _kernels(precision: str):
             rx = px - cen[j, 0]
             ry = py - cen[j, 1]
             rz = pz - cen[j, 2]
-            r = wp.sqrt(rx * rx + ry * ry + rz * rz)
             is_far = False
             if use_far != 0:
-                if r > far_ratio * diam[j]:
+                # Distance from the expansion centre (area centroid).
+                fx = px - fc[j, 0]
+                fy = py - fc[j, 1]
+                fz = pz - fc[j, 2]
+                if wp.sqrt(fx * fx + fy * fy + fz * fz) > far_ratio * diam[j]:
                     is_far = True
             b = T(0.0)
             if is_far:
-                rs = r
-                if rs < T(floor):
-                    rs = T(floor)
-                b = T(0.0) - T(_INV_4PI) * area[j] / rs
+                b = far_b(px, py, pz, j, fc, qm, lax, maxis, area)
             else:
                 x = rx * lax[j, 0] + ry * lax[j, 1] + rz * lax[j, 2]
                 y = rx * maxis[j, 0] + ry * maxis[j, 1] + rz * maxis[j, 2]
@@ -385,6 +442,8 @@ def _kernels(precision: str):
             P: wp.array2d(dtype=T),
             row0: int,
             cen_a: wp.array2d(dtype=T),
+            fc_a: wp.array2d(dtype=T),
+            qm_a: wp.array2d(dtype=T),
             nor_a: wp.array2d(dtype=T),
             lax_a: wp.array2d(dtype=T),
             max_a: wp.array2d(dtype=T),
@@ -396,6 +455,8 @@ def _kernels(precision: str):
             di_a: wp.array(dtype=T),
             tol_a: wp.array(dtype=T),
             cen_b: wp.array2d(dtype=T),
+            fc_b: wp.array2d(dtype=T),
+            qm_b: wp.array2d(dtype=T),
             nor_b: wp.array2d(dtype=T),
             lax_b: wp.array2d(dtype=T),
             max_b: wp.array2d(dtype=T),
@@ -418,11 +479,11 @@ def _kernels(precision: str):
             px = P[t, 0]
             py = P[t, 1]
             pz = P[t, 2]
-            c = pair_c(px, py, pz, j, cen_a, nor_a, lax_a, max_a, xl_a, yl_a, el_a, act_a, ar_a, di_a,
+            c = pair_c(px, py, pz, j, cen_a, fc_a, qm_a, nor_a, lax_a, max_a, xl_a, yl_a, el_a, act_a, ar_a, di_a,
                        tol_a, far_ratio, use_far)
             c2 = T(0.0)
             if has_b != 0:
-                c2 = pair_c(px, py, pz, j, cen_b, nor_b, lax_b, max_b, xl_b, yl_b, el_b, act_b, ar_b,
+                c2 = pair_c(px, py, pz, j, cen_b, fc_b, qm_b, nor_b, lax_b, max_b, xl_b, yl_b, el_b, act_b, ar_b,
                             di_b, tol_b, far_ratio, use_far)
                 c = c + sign * c2
             C[i, j] = c
@@ -431,6 +492,8 @@ def _kernels(precision: str):
         def source_pair_kernel(
             P: wp.array2d(dtype=T),
             cen_a: wp.array2d(dtype=T),
+            fc_a: wp.array2d(dtype=T),
+            qm_a: wp.array2d(dtype=T),
             nor_a: wp.array2d(dtype=T),
             lax_a: wp.array2d(dtype=T),
             max_a: wp.array2d(dtype=T),
@@ -444,6 +507,8 @@ def _kernels(precision: str):
             di_a: wp.array(dtype=T),
             tol_a: wp.array(dtype=T),
             cen_b: wp.array2d(dtype=T),
+            fc_b: wp.array2d(dtype=T),
+            qm_b: wp.array2d(dtype=T),
             nor_b: wp.array2d(dtype=T),
             lax_b: wp.array2d(dtype=T),
             max_b: wp.array2d(dtype=T),
@@ -484,10 +549,10 @@ def _kernels(precision: str):
             s4 = T(0.0)
             s5 = T(0.0)
             for j in range(j0, j1):
-                b = pair_b(px, py, pz, j, cen_a, nor_a, lax_a, max_a, xl_a, yl_a, dx_a, dy_a, el_a, act_a,
+                b = pair_b(px, py, pz, j, cen_a, fc_a, qm_a, nor_a, lax_a, max_a, xl_a, yl_a, dx_a, dy_a, el_a, act_a,
                            ar_a, di_a, tol_a, far_ratio, use_far)
                 if has_b != 0:
-                    b2 = pair_b(px, py, pz, j, cen_b, nor_b, lax_b, max_b, xl_b, yl_b, dx_b, dy_b, el_b,
+                    b2 = pair_b(px, py, pz, j, cen_b, fc_b, qm_b, nor_b, lax_b, max_b, xl_b, yl_b, dx_b, dy_b, el_b,
                                 act_b, ar_b, di_b, tol_b, far_ratio, use_far)
                     b = b + sign * b2
                 s0 = s0 + b * sigma[j, 0]
@@ -554,7 +619,7 @@ def influence_matrices_warp(
     panels : array_like
         Panel corner coordinates with shape (M, 4, 3) in m.
     far_ratio : float, default=5.0
-        Distance-to-diameter ratio for point far-field transition.
+        Distance-to-diameter ratio of the far-field transition.
     device : optional
         CUDA device of the computation (for example ``"cuda:0"``).
         None selects the current CUDA device.
@@ -606,6 +671,8 @@ def influence_matrices_warp(
 
     w_pts = _move(pts)
     w_cen = _move(geom.centroid)
+    w_fc = _move(geom.far_centre)
+    w_qm = _move(np.stack([geom.q_xx, geom.q_xy, geom.q_yy], axis=1))
     w_nor = _move(geom.normal)
     w_lax = _move(geom.l_axis)
     w_max = _move(geom.m_axis)
@@ -625,7 +692,7 @@ def influence_matrices_warp(
     wp.launch(
         kernel,
         dim=(n_targets, n_panels),
-        inputs=[w_pts, w_cen, w_nor, w_lax, w_max, w_xl, w_yl, w_dx, w_dy, w_el, w_act, w_area,
+        inputs=[w_pts, w_cen, w_fc, w_qm, w_nor, w_lax, w_max, w_xl, w_yl, w_dx, w_dy, w_el, w_act, w_area,
                 w_diam, w_tol, float(far_ratio), use_far, w_b, w_c],
         device=dev_str,
     )
@@ -691,6 +758,8 @@ def _geometry_arrays(pans: np.ndarray, eps: float, numpy_dtype, dev_str: str) ->
 
     return {
         "cen": _move(geom.centroid),
+        "fc": _move(geom.far_centre),
+        "qm": _move(np.stack([geom.q_xx, geom.q_xy, geom.q_yy], axis=1)),
         "nor": _move(geom.normal),
         "lax": _move(geom.l_axis),
         "max": _move(geom.m_axis),
@@ -709,14 +778,14 @@ def _geometry_arrays(pans: np.ndarray, eps: float, numpy_dtype, dev_str: str) ->
 
 def _doublet_args(g: dict) -> list:
     """Return the geometry arguments of the doublet pair kernel."""
-    return [g["cen"], g["nor"], g["lax"], g["max"], g["xl"], g["yl"], g["el"], g["act"], g["area"],
-            g["diam"], g["tol"]]
+    return [g["cen"], g["fc"], g["qm"], g["nor"], g["lax"], g["max"], g["xl"], g["yl"], g["el"],
+            g["act"], g["area"], g["diam"], g["tol"]]
 
 
 def _source_args(g: dict) -> list:
     """Return the geometry arguments of the source pair kernel."""
-    return [g["cen"], g["nor"], g["lax"], g["max"], g["xl"], g["yl"], g["dx"], g["dy"], g["el"],
-            g["act"], g["area"], g["diam"], g["tol"]]
+    return [g["cen"], g["fc"], g["qm"], g["nor"], g["lax"], g["max"], g["xl"], g["yl"], g["dx"],
+            g["dy"], g["el"], g["act"], g["area"], g["diam"], g["tol"]]
 
 
 def _torch_dtype(dtype, default):
@@ -870,7 +939,7 @@ def doublet_pair_matrix_warp(
     sign : float, default=1.0
         Factor of the second panel set [-] (+1 or -1).
     far_ratio : float, default=5.0
-        Distance-to-diameter ratio for point far-field transition.
+        Distance-to-diameter ratio of the far-field transition.
     device : optional
         CUDA device (for example ``"cuda:0"``). None selects the current
         CUDA device.
@@ -924,7 +993,7 @@ def source_pair_rhs_warp(
     sigma : array_like
         Source strengths with shape (M, K), K at most 6, or (M,) in m/s.
     far_ratio : float, default=5.0
-        Distance-to-diameter ratio for point far-field transition.
+        Distance-to-diameter ratio of the far-field transition.
     device : optional
         CUDA device. None selects the current CUDA device.
     dtype : optional
@@ -955,7 +1024,7 @@ def source_rhs_warp(points, panels, sigma, far_ratio: float = 5.0, device=None, 
     sigma : array_like
         Source strengths with shape (M, K), K at most 6, or (M,) in m/s.
     far_ratio : float, default=5.0
-        Distance-to-diameter ratio for point far-field transition.
+        Distance-to-diameter ratio of the far-field transition.
     device : optional
         CUDA device. None selects the current CUDA device.
     dtype : optional
@@ -1001,7 +1070,7 @@ def pair_system_warp(
     sigma : array_like
         Source strengths with shape (M, K), K at most 6, or (M,) in m/s.
     far_ratio : float, default=5.0
-        Distance-to-diameter ratio for point far-field transition.
+        Distance-to-diameter ratio of the far-field transition.
     device : optional
         CUDA device. None selects the current CUDA device.
     dtype : optional

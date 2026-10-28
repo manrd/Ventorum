@@ -41,6 +41,10 @@ Source panels exhibit continuous potential across the surface, giving a smooth s
 
 $$B_{ii} = \int_{S_i} -\frac{1}{4\pi \|\mathbf{c}_i - \mathbf{x}'\|} \, dS'$$
 
+### Far-Field Influence
+
+When a target is more than `far_ratio` panel diameters (default 5) from the area centroid of a panel, the influence of that panel comes from a multipole expansion about its area centroid instead of the exact integrals. The expansion keeps the area and the second moments of area of the panel (a Cartesian multipole expansion, Jackson 1999, section 4.1). Its relative error is $O((D / r)^3)$ for a general quadrilateral and $O((D / r)^4)$ for a parallelogram, with $D$ the panel diameter and $r$ the distance. The point source and point doublet alone have a relative error $O((D / r)^2)$, and $O(D / r)$ about the corner mean of a quadrilateral that is not a parallelogram; with them the lift did not converge with spanwise refinement. The collocation point stays at the corner mean. With `far_ratio = inf` the solver uses the exact integrals everywhere. The formulas and the error table are in the influence-kernel section of the [Ventorum-3DP chapter](ventorum_3dp.md).
+
 ### Known Source Strengths
 
 The external Neumann boundary condition requires zero normal velocity through the impermeable surface:
@@ -290,7 +294,7 @@ $$\mathbf{x}' = \mathbf{x} - 2 (\mathbf{x} \cdot \hat{\mathbf{k}} - o) \hat{\mat
 
 The loop order of the reflected panel vertices is reversed to preserve an outward-pointing unit normal on the image body: $\hat{\mathbf{n}}' = \mathcal{R} \hat{\mathbf{n}}$.
 
-The default far-field kernel can bias the lift low by about 1 to 4 % in ground effect and the moment more, growing with spanwise refinement; use `far_ratio=inf` for reference values.
+The default far-field kernel is a second-moment expansion about the panel centroid; in the tested cases it agreed with exact integration within about 0.01 % in lift, moment and induced drag, in free air and in ground effect, also at fine spanwise meshes. Use `far_ratio=inf` for reference values.
 
 ### Boundary Condition and Mirror Signs
 
@@ -349,7 +353,10 @@ Properties of the scaled root section:
 * Root twist $\theta$: before the scaling, the thickness normal to the surface is $t\cos\Gamma/\sqrt{1 - \sin^2\theta\,\sin^2\Gamma}$. The factor $1/\cos\Gamma$ leaves an error of second order in $\theta$.
 * No effect: a surface with zero dihedral at the root (the mesh stays bit for bit the same), a one-sided surface (its root section is normal to its span axis, for example a vertical fin with $\Gamma = 90$ deg) and a symmetric surface whose first panel row is vertical (the two halves coincide and there is no miter).
 * A deflected control surface at the root deflects the scaled section: the hinge point at half the local thickness does not move.
-* Steep first panel row: the factor $1/\cos\Gamma$ is not capped (an owner decision). Above $\Gamma = 60$ deg (`ROOT_SCALE_WARN_DIHEDRAL_DEG`, a factor above 2) the builder applies it and issues a `UserWarning`: the root section is strongly scaled and the result needs checking, for example against `scale_root_thickness=False`. The root thickness scaling is not verified above 75 deg dihedral (lift can change by more than 10 %).
+* Steep first panel row: the factor $1/\cos\Gamma$ is not capped (an owner decision). Above $\Gamma = 60$ deg (`ROOT_SCALE_WARN_DIHEDRAL_DEG`, a factor above 2) the builder applies it and issues a `UserWarning`: the root section is strongly scaled and the result needs a spanwise convergence study. A comparison with `scale_root_thickness=False` is not a check there, because the unscaled root pressure is singular at 60 deg and above. The root thickness scaling is not verified above 75 deg dihedral (lift can change by more than 10 %).
+* Without the option (`scale_root_thickness=False`), a steep first panel row can make the two halves of the surface pass through each other near the root (see the self-intersection check below). The solver refuses such a mesh.
+* Steep root without the option: at a first-row dihedral of 60 deg or more (`STEEP_ROOT_DIHEDRAL_DEG`, a code setting, not a calibrated value) and `scale_root_thickness=False`, the root section is too thin normal to the surface and the pressure coefficient at the root is singular. `check_mesh` accepts such a mesh when the two halves do not cross, and the lift can then still change erratically with the spanwise panel count (the two halves come near contact). The builder therefore issues a `RuntimeWarning`, and the trust score of a 3D panel solve gets a warning (without a penalty) that names the singular root pressure.
+* Steep root with the option (the default): at a first-row dihedral of 60 deg or more the mesh is valid, but the lift converges slowly with the spanwise panel count. The trust score of a 3D panel solve gets a note (without a penalty) that the result needs a spanwise convergence study: solve with at least two spanwise panel counts and compare the lift.
 
 ### Fold guard
 
@@ -362,6 +369,18 @@ $$(\mathbf{q}_j - \mathbf{q}_{j-1}) \cdot \mathbf{a}_{j-1} + s \, \mathbf{m}_j \
 from the plane of station $j - 1$. When the condition fails, the axis angle of station $j$ moves toward the angle of station $j - 1$ by the largest fraction that passes (bisection). The guarded station keeps its leading- and trailing-edge nodes (the lattice points); only its thickness direction turns. With `scale_root_thickness` its offsets from the camber line grow by $1/\cos B$, with $B$ the angle between the guarded plane and the plane normal to the span, as at the root. A station that does not fold keeps its plane bit for bit, so coarse meshes do not change.
 
 `check_mesh` detects a fold from the same station planes: for each pair of neighbour station rows (`node_station`) with different planes, a node of the outboard row on the inboard side of the inboard plane (or the reverse) marks the panels at that node as folded (`folded`, `n_folded`). Folded panels count in `n_nonconvex` and make `valid_panels` False, so the trust score reports them as folded panels. Two rows in one plane (a control gap) are skipped.
+
+### Self-intersection check
+
+The fold test compares a station row only with its neighbour row. It does not see a surface that passes through itself further away, for example through the plane of symmetry. Without `scale_root_thickness`, at steep dihedral the fold guard tilts only the stations next to a fold; a station that is not tilted puts its upper nodes below $y = 0$ when its span distance $s$ from the root is less than $h\tan\Gamma$, with $h$ the half thickness of the section. The two halves of the symmetric surface then pass through each other. For $t/c = 0.12$ this limit is about $0.10\,c$ at 60 deg and $0.34\,c$ at 80 deg. The influence matrix of such a mesh is not valid, and the lift does not converge with the spanwise panel count.
+
+`check_mesh` therefore also counts self-intersections (`n_self_intersections`, and the component indices in `self_intersecting_components`). Each quadrilateral panel gives the two triangles (0, 1, 2) and (0, 2, 3). The count is the number of pairs (panel edge, triangle) of one component where the edge crosses or touches the triangle and shares no node with the panel of the triangle. The segment-triangle test is the ray-triangle test of Moller and Trumbore (1997), limited to the segment. Its bounds are inclusive (tolerance $10^{-9}$ on the barycentric coordinates and the edge parameter), because the two halves of a symmetric mesh cross exactly on panel edges in $y = 0$. An edge nearly parallel to the triangle plane does not count (triple product below $10^{-6}$ times the product of the three lengths), so coplanar triangles of a tip cap do not count. A half mesh is tested together with its mirror image in $y = 0$; the nodes on $y = 0$ are shared by the two halves. Two different components are not tested against each other: the contact check of distinct closed surfaces does that.
+
+A prefilter keeps the cost low. Each edge and each triangle has its axis-aligned bounding box. A uniform grid (spatial hash) with the median triangle box size as cell size gives the pairs that share a cell; the cell size doubles while a few large boxes (tip caps) fill too many cells. Only the pairs whose boxes overlap go to the exact test. The cost grows about linearly with the panel count; on a desktop CPU a wing of about 10 000 panels takes less than one second (a half mesh twice the time of a full mesh with the same panel count, because of its mirror image). This is the largest part of the mesh check. A private loop over all pairs stays as the reference of the parity tests.
+
+The 3D panel solver runs the count only when `panel_scale_root_thickness` is False. With the root thickness scaling (the default) no test mesh had a self-intersection, so a default geometry build does not pay the cost, and its mesh statistics do not have the keys `n_self_intersections` and `self_intersecting_components`. A direct call of `check_mesh` is an explicit check and always counts.
+
+A count above zero makes `valid_panels` False, and the trust score gives the same penalty as for folded panels. When it runs the count, the 3D panel solver refuses such a mesh with a `ValueError` before the solve. The message names the surface and advises `panel_scale_root_thickness=True` (the default), or a different spanwise panel count or dihedral.
 
 ## Solver Family Interface
 
@@ -401,3 +420,5 @@ The solve returns a standard `SolverResult`:
 9. Blazek, J., 2015, "Computational Fluid Dynamics: Principles and Applications", 3rd ed., Butterworth-Heinemann, Chapter 5 (least-squares reconstruction and Green-Gauss gradient).
 10. Ladson, C. L., Brooks, C. W., Hill, A. S. and Sproles, D. W., 1996, "Computer Program To Obtain Ordinates for NACA Airfoils", NASA TM-4741 (closed trailing edge of the NACA 4-digit thickness law).
 11. Drela, M., 1989, "XFOIL: An analysis and design system for low Reynolds number airfoils", Lecture Notes in Engineering 54, Springer, pp. 1-12 (trailing-edge gap panel of the two-dimensional method).
+12. Jackson, J. D., 1999, "Classical Electrodynamics", 3rd ed., John Wiley & Sons, Section 4.1 (Cartesian multipole expansion of the far-field influence).
+13. Moller, T. and Trumbore, B., 1997, "Fast, minimum storage ray-triangle intersection", Journal of Graphics Tools, Vol. 2, No. 1, pp. 21-28 (segment-triangle test of the self-intersection check).
