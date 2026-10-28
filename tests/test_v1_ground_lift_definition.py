@@ -24,6 +24,7 @@ from ventorum.aero.polar_source_v2d import Ventorum2DPolarSource
 from ventorum.aero.polar_table import PolarTable, build_polar_table
 from ventorum.aero.polars import blend_tabulated
 from ventorum.core.datatypes import (
+    Aircraft,
     ControlSurface,
     FlightCondition,
     LiftingSurface,
@@ -382,3 +383,180 @@ def test_old_ground_cache_entry_without_circulation_is_solved_again(tmp_path, fa
     assert len(fake_2d) == 3
     source.polar("naca 0012", 1e6, [0.0, 4.0], height=0.4)  # the new entry is a hit
     assert len(fake_2d) == 3
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Non-planar strips in ground effect: dihedral and a vertical fin
+# ═══════════════════════════════════════════════════════════════════════════════
+
+#: Table heights [-] of the analytic ground table.
+_ANALYTIC_HEIGHTS = np.array([0.2, 0.3, 0.5, 0.8, 1.2, 2.0, 3.0])
+
+
+def _analytic_circulation_lift(alpha, h_over_c):
+    """Return the circulation lift [-] of the analytic table at *alpha* [rad] and *h_over_c* [-]."""
+    return (6.0 + 0.3 / h_over_c) * (alpha + 0.03)
+
+
+def _analytic_pressure_lift(alpha, h_over_c):
+    """Return the pressure lift [-] of the analytic table (smaller than the circulation lift)."""
+    return (5.6 - 0.2 / h_over_c) * (alpha + 0.03)
+
+
+def _analytic_ground_table() -> PolarTable:
+    """Return a ground table that the table interpolation reproduces exactly.
+
+    Both lift arrays have the form ``(a + b / h) (alpha + c)``. The table
+    interpolates linearly in 1/h and the polar is a PCHIP in alpha, so
+    these arrays come back without interpolation error. They do not
+    depend on Re. The circulation lift differs from the pressure lift, so
+    the test can tell which one the residual reads.
+    """
+    al = np.linspace(-10.0, 20.0, 31)
+    a = np.radians(al)[None, :]
+    h = _ANALYTIC_HEIGHTS[:, None]
+    one = np.ones((2, 1, 1, 1))
+    cl_c = one * _analytic_circulation_lift(a, h)[None, None]
+    cl_p = one * _analytic_pressure_lift(a, h)[None, None]
+    return PolarTable(
+        Re=np.array([1e4, 1e9]), flap_deg=np.array([0.0]), alpha_deg=al, Cl=cl_p, Cl_circulation=cl_c,
+        Cd=np.full(cl_p.shape, 0.01), Cm=np.full(cl_p.shape, -0.04), h_over_c=_ANALYTIC_HEIGHTS,
+        source_info={"section": "analytic"},
+    )
+
+
+def _strip_circulation_lift(res, strips, V_inf):
+    """Return the lattice strip lift ``2 Gamma / (V c)`` [-] from the solved panel circulations."""
+    lat = res.details["lattice"]
+    gamma = np.asarray(res.details["gamma"])
+    return np.array([2.0 * np.sum(gamma[lat.panel_strip == s]) / (V_inf * lat.chord[s]) for s in strips])
+
+
+def _assert_no_lift_or_convergence_warning(caught) -> None:
+    """Fail on the lift-definition note or a convergence warning; other trust notes are allowed."""
+    texts = [str(w.message) for w in caught]
+    assert _GROUND_LIFT_NOTE not in texts
+    assert not any("converge" in t.lower() for t in texts), texts
+
+
+def _dihedral_wing(dihedral_deg: float) -> LiftingSurface:
+    """Return a symmetric rectangular wing of aspect ratio 8 with dihedral."""
+    return LiftingSurface(
+        name="w",
+        semi_span=4.0,
+        sections=[WingSection(y_frac=0.0, chord=1.0), WingSection(y_frac=1.0, chord=1.0)],
+        dihedral=np.radians(dihedral_deg),
+    )
+
+
+@pytest.mark.parametrize("model, h", [("vlm", 0.4), ("llt", 1.5)])
+def test_dihedral_wing_in_ground_effect_reads_the_circulation_lift(model, h):
+    """A wing with dihedral 6 deg in ground effect: each strip residual reads Cl_circulation.
+
+    The strip lift of the lattice comes from the solved circulations, and
+    the circulation lift of the polar from the analytic function of the
+    table. At convergence they agree on each strip at its own h/c. The
+    pressure lift of the table does not agree.
+    """
+    V = 30.0
+    cond = FlightCondition(V_inf=V, alpha=np.radians(4.0), h=h)
+    st = SolverSettings(n_panels=16, n_chord=4 if model == "vlm" else 1)
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always", RuntimeWarning)
+        res = solve_viscous(_dihedral_wing(6.0), cond, st, _analytic_ground_table(), model=model, tol=1e-11)
+    _assert_no_lift_or_convergence_warning(caught)
+    assert res.converged
+    assert _GROUND_LIFT_NOTE not in res.details["notes"]
+    lat = res.details["lattice"]
+    strips = np.flatnonzero(lat.strip_is_right)
+    assert np.all(res.details["strip_circulation_lift"][strips])
+    # Dihedral: the strip height grows to the tip, over more than one table
+    # interval. The body pitches by alpha about the y axis, so a rise dz in
+    # the body axes is a rise dz cos(alpha) above the ground (chord 1 m).
+    hc = res.details["strip_h_over_c"][strips]
+    y = lat.qc_mid[strips, 1]
+    rise = (y.max() - y.min()) * np.tan(np.radians(6.0)) * np.cos(cond.alpha)
+    assert hc[np.argmax(y)] - hc[np.argmin(y)] == pytest.approx(rise, rel=1e-6)
+    alpha_v = res.details["alpha_eff"][strips]
+    cl_lattice = _strip_circulation_lift(res, strips, V)
+    np.testing.assert_allclose(cl_lattice, _analytic_circulation_lift(alpha_v, hc), rtol=0, atol=1e-8)
+    # The pressure lift is far from the lattice lift: the test can see a wrong definition.
+    assert np.min(np.abs(cl_lattice - _analytic_pressure_lift(alpha_v, hc))) > 1e-3
+
+
+def _wing_and_fin() -> Aircraft:
+    """Return a symmetric wing with a vertical fin (dihedral 90 deg) at x = 3 m."""
+    fin = LiftingSurface(
+        name="fin",
+        semi_span=1.0,
+        sections=[WingSection(y_frac=0.0, chord=0.8), WingSection(y_frac=1.0, chord=0.8)],
+        is_symmetric=False,
+        dihedral=np.radians(90.0),
+        position=np.array([3.0, 0.0, 0.0]),
+    )
+    return Aircraft(surfaces=[_dihedral_wing(0.0), fin])
+
+
+def _linear_free_polar() -> TabulatedAirfoil:
+    """Return a free-air polar that is linear in alpha (no interpolation error)."""
+    a = np.radians(np.linspace(-10.0, 20.0, 31))
+    return TabulatedAirfoil(name="fin polar", alpha=a, Cl_data=5.8 * (a - 0.01), Cd_data=0.01 + 0.0 * a,
+                            Cm_data=0.0 * a)
+
+
+@pytest.mark.parametrize("model, h", [("vlm", 0.4), ("llt", 1.5)])
+def test_fin_with_a_free_air_polar_in_ground_effect(model, h):
+    """Wing and vertical fin in ground effect: a fin with a free-air polar does not read the ground table.
+
+    The wing strips read the circulation lift of the ground table. The fin
+    strips read the Cl of their free-air polar, and on the lattice their
+    section relation has no ground images (the free-air section slope).
+    """
+    V = 30.0
+    cond = FlightCondition(V_inf=V, alpha=np.radians(4.0), beta=np.radians(3.0), h=h)
+    st = SolverSettings(n_panels=12, n_chord=4 if model == "vlm" else 1)
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always", RuntimeWarning)
+        res = solve_viscous(_wing_and_fin(), cond, st, {"w": _analytic_ground_table(), "fin": _linear_free_polar()},
+                            model=model, tol=1e-11)
+    _assert_no_lift_or_convergence_warning(caught)
+    assert res.converged
+    assert _GROUND_LIFT_NOTE not in res.details["notes"]
+    lat = res.details["lattice"]
+    fin = np.flatnonzero(lat.strip_surface == 1)
+    wing = np.flatnonzero((lat.strip_surface == 0) & lat.strip_is_right)
+    assert fin.size > 0 and wing.size > 0
+    used = res.details["strip_circulation_lift"]
+    assert np.all(used[wing]) and not np.any(used[fin])
+    alpha_v = res.details["alpha_eff"]
+    hc = res.details["strip_h_over_c"]
+    np.testing.assert_allclose(_strip_circulation_lift(res, wing, V),
+                               _analytic_circulation_lift(alpha_v[wing], hc[wing]), rtol=0, atol=1e-8)
+    np.testing.assert_allclose(_strip_circulation_lift(res, fin, V), 5.8 * (alpha_v[fin] - 0.01),
+                               rtol=0, atol=1e-8)
+    if model == "vlm":
+        # Free-air section of the fin strips: no images, the 2 pi of thin-airfoil theory.
+        np.testing.assert_allclose(res.details["lift_slope_section"][fin], 2.0 * np.pi, rtol=1e-6)
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "Known defect, open design question: a vertical fin strip that reads a ground table gets "
+        "ground images in its 2D section relation. The images of a section normal to the ground "
+        "fall on the section itself, so the section slope is degenerate (negative or very large). "
+        "The right rule for a fin with a height-axis polar (refuse it, read it as free air, or a "
+        "section ground line) is an owner decision."
+    ),
+)
+def test_fin_strips_with_a_ground_table_have_a_positive_section_slope():
+    """Wing and vertical fin with one ground table for all strips: the fin section slope must be sane."""
+    cond = FlightCondition(V_inf=30.0, alpha=np.radians(4.0), h=0.4)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)
+        res = solve_viscous(_wing_and_fin(), cond, SolverSettings(n_panels=12, n_chord=4),
+                            _analytic_ground_table(), model="vlm")
+    fin = np.flatnonzero(res.details["lattice"].strip_surface == 1)
+    slope = res.details["lift_slope_section"][fin]
+    assert np.all(np.isfinite(slope))
+    assert np.all((slope > 0.5 * np.pi) & (slope < 4.0 * np.pi))
