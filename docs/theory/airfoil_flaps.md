@@ -81,10 +81,10 @@ surface slope plus a part of the deflection.
 
 The option `hinge_treatment` of `deflect_plain_flap` and
 `AirfoilShape.with_flap` selects what happens to these nodes. The
-default is "none".
+default is "repanel".
 
-- "none": the outline stays as constructed (the behaviour before the
-  option; the output is the same, bit for bit).
+- "none": the outline stays as constructed (the output of the
+  construction above, bit for bit).
 - "merge": nodes in the hinge zone, $|x - x_h| < 0.05$ chord units, are
   removed. The trailing-edge nodes and the leading-edge node are never
   removed. Two rules apply in turn until neither removes a node.
@@ -145,8 +145,9 @@ node added at the hinge station of each surface, so their result changes
 continuously with the deflection ("merge" then returns the input
 outline with these two nodes).
 
-The default stays "none" until a comparison of the treatments with the
-viscous solver decides the default.
+The default is "repanel". A study of the method found that it makes
+the viscous solution converge where "none" fails (small deflections),
+and that its mesh does not depend on the input points.
 
 ## Limits
 

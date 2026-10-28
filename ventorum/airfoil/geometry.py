@@ -33,9 +33,6 @@ References
 - M. S. Selig, J. J. Guglielmo, A. P. Broeren and P. Giguere, *Summary of
   Low-Speed Airfoil Data*, Vol. 1, SoarTech Publications, 1995 (Selig
   coordinate file format: name line, then x y pairs from the trailing edge).
-- D. Lednicer, "A CFD evaluation of wind tunnel test sections", AIAA
-  paper 2010-0458, 2010 (Lednicer coordinate file format: name line, point
-  counts of the two surfaces, upper surface then lower surface).
 - I. H. Abbott and A. E. von Doenhoff, *Theory of Wing Sections*, Dover,
   1959, chapter 6 (NACA 4-digit thickness equation).
 - J. Katz and A. Plotkin, *Low-Speed Aerodynamics*, 2nd ed., Cambridge
@@ -512,8 +509,7 @@ class AirfoilShape:
 
         This method calls :func:`ventorum.airfoil.io.read_airfoil`.
         Selig and co-workers (*Summary of Low-Speed Airfoil Data*, 1995)
-        define the Selig format. Lednicer (AIAA paper 2010-0458, 2010)
-        defines the Lednicer format.
+        define the Selig format.
 
         Parameters
         ----------
@@ -653,8 +649,7 @@ class AirfoilShape:
         This method calls :func:`ventorum.airfoil.io.write_selig` or
         :func:`ventorum.airfoil.io.write_lednicer`. Selig and
         co-workers (*Summary of Low-Speed Airfoil Data*, 1995) define
-        the Selig format. Lednicer (AIAA paper 2010-0458, 2010) defines
-        the Lednicer format. The formats hold the points only: a stored
+        the Selig format. The formats hold the points only: a stored
         reference geometry is not written.
 
         Parameters

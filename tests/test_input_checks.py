@@ -287,3 +287,78 @@ def test_mach_warning_uses_the_isa_speed_of_sound():
     with warnings.catch_warnings():
         warnings.simplefilter("error")
         V.validate_flight_condition(vt.FlightCondition(V_inf=v, rho=1.225))
+
+
+def _half_wing_and_mirror(spacing="cosine"):
+    right = vt.LiftingSurface(
+        name="RightHalf",
+        semi_span=4.0,
+        is_symmetric=False,
+        spacing=spacing,
+        sections=[
+            vt.WingSection(y_frac=0.0, chord=1.0),
+            vt.WingSection(y_frac=1.0, chord=1.0),
+        ],
+    )
+    return vt.Aircraft(name="Split", surfaces=[right, right.mirrored("LeftHalf")])
+
+
+def _wing_with_winglets():
+    wing = vt.LiftingSurface(
+        name="Wing",
+        semi_span=4.0,
+        spacing="cosine",
+        sections=[
+            vt.WingSection(y_frac=0.0, chord=1.0),
+            vt.WingSection(y_frac=1.0, chord=1.0),
+        ],
+    )
+    winglet = vt.LiftingSurface(
+        name="Winglet",
+        semi_span=0.8,
+        dihedral=np.radians(90.0),
+        position=np.array([0.0, 4.0, 0.0]),
+        is_symmetric=False,
+        spacing="cosine",
+        sections=[
+            vt.WingSection(y_frac=0.0, chord=1.0),
+            vt.WingSection(y_frac=1.0, chord=0.5),
+        ],
+    )
+    return vt.Aircraft(name="Winglets", surfaces=[wing, winglet, winglet.mirrored()])
+
+
+def test_joined_halves_pass_on_a_fine_cosine_mesh():
+    """A half wing from y = 0 plus its mirror copy shares the root edge only.
+
+    Regression: with cosine spacing at 80 strips the root strips are narrower
+    than 1.0e-3 chords, and the overlap check refused the valid join.
+    """
+    aircraft = _half_wing_and_mirror()
+    settings = _settings(n_panels=80, n_chord=4, solver_type="vlm")
+    got = vt.analyze(aircraft, alpha_deg=4.0, settings=settings)
+    coarse = vt.analyze(aircraft, alpha_deg=4.0, settings=_settings(n_panels=40, n_chord=4, solver_type="vlm"))
+    assert got.totals.CL == pytest.approx(coarse.totals.CL, rel=1e-3)
+
+
+def test_wing_with_joined_winglets_passes_on_a_fine_cosine_mesh():
+    """A wing plus 90 deg winglets on separate joined surfaces is valid at 60 strips and more."""
+    aircraft = _wing_with_winglets()
+    for n in (60, 80):
+        res = vt.analyze(aircraft, alpha_deg=4.0, settings=_settings(n_panels=n, n_chord=4, solver_type="vlm"))
+        assert np.isfinite(res.totals.CL)
+
+
+@pytest.mark.parametrize("dz", [0.0, 1.0e-4])
+def test_stacked_surfaces_are_refused_on_a_fine_cosine_mesh(dz):
+    """Two surfaces that lie on each other stay refused on a fine clustered mesh."""
+    aircraft = _half_wing_and_mirror()
+    left = aircraft.surfaces[1]
+    copy = left.clone()
+    copy.name = "Copy"
+    copy.position = np.asarray(copy.position, dtype=float) + np.array([0.0, 0.0, dz])
+    stacked = vt.Aircraft(name="Stacked", surfaces=[aircraft.surfaces[0], left, copy])
+    with pytest.raises(ValueError) as exc:
+        vt.analyze(stacked, alpha_deg=4.0, settings=_settings(n_panels=80, n_chord=4, solver_type="vlm"))
+    msg = str(exc.value)
+    assert "overlap" in msg and "Copy" in msg
