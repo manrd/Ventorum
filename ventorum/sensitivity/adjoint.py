@@ -633,7 +633,8 @@ def _camber_matrices(
     W_a = _zeros((n_p, E_total))
     W_b = _zeros((n_p, E_total))
     # Mean-line offsets of the leg nodes between two bound points (the
-    # middle chord fraction; geometry.lattice._leg_nodes).
+    # middle chord fraction) and between the last bound point and the
+    # trailing edge (geometry.lattice._leg_nodes).
     W_ma = _zeros((n_p, E_total))
     W_mb = _zeros((n_p, E_total))
     W_le_l = _zeros((n_s, E_total))
@@ -668,8 +669,11 @@ def _camber_matrices(
                 p = s * n_chord + j
                 W_a[p] = _joined_offset_weights(si, e, xb[k_idx, j])
                 W_b[p] = _joined_offset_weights(si, e + 1, xb[k_idx, j])
-                if j < n_chord - 1:
-                    xm = 0.5 * (xb[k_idx, j] + xb[k_idx, j + 1])
+                if n_chord > 1:
+                    # The last panel has its node half a panel length aft of
+                    # its bound point (geometry.lattice.build_lattice).
+                    xm = (0.5 * (xb[k_idx, j] + xb[k_idx, j + 1]) if j < n_chord - 1
+                          else xb[k_idx, j] + 0.5 * dx[k_idx, j])
                     W_ma[p] = _joined_offset_weights(si, e, xm)
                     W_mb[p] = _joined_offset_weights(si, e + 1, xm)
             W_le_l[s] = _joined_offset_weights(si, e, 0.0)
@@ -900,6 +904,10 @@ def build_reference(
     build["ctrl_chord"] = chord_map
     camber_data = _camber_matrices(lattice, xi, chord_map, device, dtype)
     build["camber_data"] = camber_data
+    # Folds of the reference surfaces for the blend of the mean-line offset
+    # (geometry.lattice.camber_span_field); a property of the mesh.
+    frames = getattr(lattice, "camber_frames", None) or lattice.geom_cache.get("camber_frames") or []
+    build["camber_folds"] = [f for frame in frames for f in frame.get("folds", [])]
     if camber_data is not None:
         build["strip_camber"] = camber_data["strip_camber"]
     tables, lin_mask = _airfoil_tables(lattice, unknown_panels, device, dtype)

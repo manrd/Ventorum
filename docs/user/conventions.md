@@ -71,7 +71,7 @@ the selected system (`axes="all"` returns the three sets).
 
 `FlightCondition` holds an optional `mach` field (`float | None = None`). The valid range is $0 \le M < 1$. When `mach` is `None` or `0.0`, the flow is incompressible.
 
-Only the vortex-lattice solver (`solver_type="vlm"`) supports compressible flow. It applies the Prandtl-Glauert compressibility correction in the form given by Goethert (1946) on the CPU path. The GPU pipeline falls back to the CPU path when `mach` is set.
+Only the vortex-lattice solver (`solver_type="vlm"`) supports compressible flow. It applies the Prandtl-Glauert compressibility correction in the form given by Goethert (1946), in free air. The CPU path and the GPU pipeline both apply it; the GPU pipeline solves each group of conditions with the same Mach number and free-stream direction as one batch.
 
-The lifting-line solvers (linear, nonlinear, and Fourier) refuse `mach > 0` with `ValidityError`. Ground-effect analyses also refuse `mach > 0` with `ValidityError`. Adjoint gradients refuse `mach > 0` with `GradientScopeError`.
+The lifting-line solvers (linear, nonlinear, and Fourier) and the 3D panel method refuse `mach > 0` with `ValidityError`. Ground-effect analyses also refuse `mach > 0` with `ValidityError`. Adjoint gradients support `mach > 0` for the vortex lattice in free air, with the input `"mach"` (per unit Mach number); in ground effect and for the lifting lines they refuse `mach > 0` with `GradientScopeError`.
 

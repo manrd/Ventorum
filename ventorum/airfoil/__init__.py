@@ -19,8 +19,7 @@ section before the deflection, so that the 2D solvers use the chord of
 the undeflected section and its quarter-chord point.
 
 Sources: Selig and co-workers, *Summary of Low-Speed Airfoil Data*,
-1995 (Selig file format); Lednicer, AIAA paper 2010-0458, 2010
-(Lednicer file format); Abbott and von Doenhoff, *Theory of Wing
+1995 (Selig file format); Abbott and von Doenhoff, *Theory of Wing
 Sections*, 1959, section 6.4 (NACA thickness and 4-digit mean line);
 Jacobs, Ward and Pinkerton, NACA Report 460, 1933, and Jacobs and
 Pinkerton, NACA Report 537, 1935 (5-digit series); Ladson, Brooks, Hill
