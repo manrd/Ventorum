@@ -102,7 +102,7 @@ print(f"Factorizations in this call: {dispatch['factorization_count']}")
 
 Ventorum-3DP adds notes or warnings to `totals.trust` for specific aerodynamic and geometric edge cases:
 
-* **Far-field kernel**: finite `far_ratio` in ground effect adds a trust note because the point-singularity approximation can bias lift low by 1 to 4 % and pitching moment more, growing with spanwise refinement. In free air, the note appears when spanwise panel count exceeds 80 (bias about 1 %). For reference values, use exact integration: `far_ratio=np.inf` on the low-level `ventorum.panel3d.solver.PanelSolver`.
+* **Far-field kernel**: finite `far_ratio` in ground effect adds a trust note. The far-field kernel is a second-moment expansion about the panel centroid; in the tested cases it agreed with exact integration within about 0.01 % in lift, moment and induced drag, also at fine spanwise meshes. In free air, the note appears when the spanwise panel count exceeds 80. For reference values, use exact integration: `far_ratio=np.inf` on the low-level `ventorum.panel3d.solver.PanelSolver`.
 * **Outer strip of closed tip**: in ground effect with a closed tip (`tip="flat"` or `"round"`), a trust note reports that outermost strip loads are not resolved due to the sharp-edge feature, though total $C_L$ and $C_m$ remain within normal mesh error.
 * **Dihedral root thickness scaling**: when station root-thickness scaling exceeds $1/\cos(75^\circ) \approx 3.86$ (from dihedral or fold-guard tilt with `scale_root_thickness=True`), the solver raises a `RuntimeWarning` and records a trust warning because root thickness scaling is not verified above 75 deg dihedral (lift can change by more than 10 %).
 

@@ -41,6 +41,10 @@ Source panels exhibit continuous potential across the surface, giving a smooth s
 
 $$B_{ii} = \int_{S_i} -\frac{1}{4\pi \|\mathbf{c}_i - \mathbf{x}'\|} \, dS'$$
 
+### Far-Field Influence
+
+When a target is more than `far_ratio` panel diameters (default 5) from the area centroid of a panel, the influence of that panel comes from a multipole expansion about its area centroid instead of the exact integrals. The expansion keeps the area and the second moments of area of the panel (a Cartesian multipole expansion, Jackson 1999, section 4.1). Its relative error is $O((D / r)^3)$ for a general quadrilateral and $O((D / r)^4)$ for a parallelogram, with $D$ the panel diameter and $r$ the distance. The point source and point doublet alone have a relative error $O((D / r)^2)$, and $O(D / r)$ about the corner mean of a quadrilateral that is not a parallelogram; with them the lift did not converge with spanwise refinement. The collocation point stays at the corner mean. With `far_ratio = inf` the solver uses the exact integrals everywhere. The formulas and the error table are in the influence-kernel section of the [Ventorum-3DP chapter](ventorum_3dp.md).
+
 ### Known Source Strengths
 
 The external Neumann boundary condition requires zero normal velocity through the impermeable surface:
@@ -290,7 +294,7 @@ $$\mathbf{x}' = \mathbf{x} - 2 (\mathbf{x} \cdot \hat{\mathbf{k}} - o) \hat{\mat
 
 The loop order of the reflected panel vertices is reversed to preserve an outward-pointing unit normal on the image body: $\hat{\mathbf{n}}' = \mathcal{R} \hat{\mathbf{n}}$.
 
-The default far-field kernel can bias the lift low by about 1 to 4 % in ground effect and the moment more, growing with spanwise refinement; use `far_ratio=inf` for reference values.
+The default far-field kernel is a second-moment expansion about the panel centroid; in the tested cases it agreed with exact integration within about 0.01 % in lift, moment and induced drag, in free air and in ground effect, also at fine spanwise meshes. Use `far_ratio=inf` for reference values.
 
 ### Boundary Condition and Mirror Signs
 
@@ -401,3 +405,4 @@ The solve returns a standard `SolverResult`:
 9. Blazek, J., 2015, "Computational Fluid Dynamics: Principles and Applications", 3rd ed., Butterworth-Heinemann, Chapter 5 (Green-Gauss gradient).
 10. Ladson, C. L., Brooks, C. W., Hill, A. S. and Sproles, D. W., 1996, "Computer Program To Obtain Ordinates for NACA Airfoils", NASA TM-4741 (closed trailing edge of the NACA 4-digit thickness law).
 11. Drela, M., 1989, "XFOIL: An analysis and design system for low Reynolds number airfoils", Lecture Notes in Engineering 54, Springer, pp. 1-12 (trailing-edge gap panel of the two-dimensional method).
+12. Jackson, J. D., 1999, "Classical Electrodynamics", 3rd ed., John Wiley & Sons, Section 4.1 (Cartesian multipole expansion of the far-field influence).

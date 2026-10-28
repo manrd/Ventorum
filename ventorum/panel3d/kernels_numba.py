@@ -5,7 +5,8 @@ The functions here compute the same quantities as the numpy reference
 kernels, with the same formulas and the same branches: planar projection of
 the corners, the van Oosterom and Strackee solid angle of the two panel
 triangles, the body-side limit in the on-plane band, the analytic edge sums,
-the vortex-ring velocity of the doublet, and the point far-field expansions
+the vortex-ring velocity of the doublet, and the far-field multipole
+expansions about the area centroid (area and second moments of area)
 beyond ``far_ratio`` panel diameters. The outer loop runs over the target
 points in parallel (``prange``), and no temporary array of target-panel
 pairs is built. The numpy kernels stay the reference: the tests require
@@ -142,9 +143,11 @@ if HAVE_NUMBA:
         return om
 
     @njit(cache=True, inline="always")
-    def _geom_row(pan, cen, nor, lax, maxis, xl, yl, dx, dy, elen, act, cor, eps):
-        # Geometry of one panel: frame, projection, edges, area, diameter.
-        # Same steps as the reference precompute. Returns (area, diameter, tol).
+    def _geom_row(pan, cen, nor, lax, maxis, xl, yl, dx, dy, elen, act, cor, fc, qm, eps):
+        # Geometry of one panel: frame, projection, edges, area, diameter,
+        # area centroid fc and second moments of area qm (xx, xy, yy) about
+        # fc. Same steps as the reference precompute. Returns (area,
+        # diameter, tol).
         diam = 0.0
         for a in range(4):
             for b in range(a + 1, 4):
@@ -219,7 +222,74 @@ if HAVE_NUMBA:
             act[k] = elen[k] > tiny
         cnorm = math.sqrt(cen[0] * cen[0] + cen[1] * cen[1] + cen[2] * cen[2])
         tol = _PLANE_TOL_FACTOR * eps * (cnorm + diam)
+        # Area centroid and second moments of area (polygon formulas).
+        a2 = 0.0
+        sx = 0.0
+        sy = 0.0
+        sxx = 0.0
+        syy = 0.0
+        sxy = 0.0
+        for k in range(4):
+            kn = k + 1 if k < 3 else 0
+            cr = xl[k] * yl[kn] - xl[kn] * yl[k]
+            a2 += cr
+            sx += (xl[k] + xl[kn]) * cr
+            sy += (yl[k] + yl[kn]) * cr
+            sxx += (xl[k] * xl[k] + xl[k] * xl[kn] + xl[kn] * xl[kn]) * cr
+            syy += (yl[k] * yl[k] + yl[k] * yl[kn] + yl[kn] * yl[kn]) * cr
+            sxy += (xl[k] * yl[kn] + 2.0 * xl[k] * yl[k] + 2.0 * xl[kn] * yl[kn] + xl[kn] * yl[k]) * cr
+        a_poly = 0.5 * a2
+        a_inv = 1.0 / (a_poly if abs(a_poly) > 0.0 else 1.0)
+        cx = sx * a_inv / 6.0
+        cy = sy * a_inv / 6.0
+        sgn = 1.0 if a_poly > 0.0 else (-1.0 if a_poly < 0.0 else 0.0)
+        qm[0] = sgn * (sxx / 12.0 - a_poly * cx * cx)
+        qm[1] = sgn * (sxy / 24.0 - a_poly * cx * cy)
+        qm[2] = sgn * (syy / 12.0 - a_poly * cy * cy)
+        for c in range(3):
+            fc[c] = cen[c] + cx * lax[c] + cy * maxis[c]
         return area, diam, tol
+
+    @njit(cache=True, inline="always")
+    def _far_distance(tx, ty, tz, fc):
+        # Distance of a target from the expansion centre (area centroid) in m.
+        rx = tx - fc[0]
+        ry = ty - fc[1]
+        rz = tz - fc[2]
+        return math.sqrt(rx * rx + ry * ry + rz * rz)
+
+    @njit(cache=True, inline="always")
+    def _far_frame(tx, ty, tz, fc, qm, nor, lax, maxis):
+        # Far-field frame of one pair: R from the area centroid, its length,
+        # the local coordinates and the second-moment scalars a and q.
+        rx = tx - fc[0]
+        ry = ty - fc[1]
+        rz = tz - fc[2]
+        r = math.sqrt(rx * rx + ry * ry + rz * rz)
+        r = r if r > _FLOOR else _FLOOR
+        x = rx * lax[0] + ry * lax[1] + rz * lax[2]
+        y = rx * maxis[0] + ry * maxis[1] + rz * maxis[2]
+        z = rx * nor[0] + ry * nor[1] + rz * nor[2]
+        a = qm[0] * x * x + 2.0 * qm[1] * x * y + qm[2] * y * y
+        q = qm[0] + qm[2]
+        return rx, ry, rz, r, x, y, z, a, q
+
+    @njit(cache=True, inline="always")
+    def _far_b(tx, ty, tz, fc, qm, nor, lax, maxis, area):
+        # Far-field source potential: monopole and second moments.
+        rx, ry, rz, r, x, y, z, a, q = _far_frame(tx, ty, tz, fc, qm, nor, lax, maxis)
+        inv_r2 = 1.0 / (r * r)
+        t = (1.5 * a * inv_r2 - 0.5 * q) / (r * r * r)
+        return -_INV_4PI * (area / r + t)
+
+    @njit(cache=True, inline="always")
+    def _far_c(tx, ty, tz, fc, qm, nor, lax, maxis, area):
+        # Far-field doublet potential: point doublet and second moments.
+        rx, ry, rz, r, x, y, z, a, q = _far_frame(tx, ty, tz, fc, qm, nor, lax, maxis)
+        inv_r2 = 1.0 / (r * r)
+        r3 = r * r * r
+        f = (1.5 * q - 7.5 * a * inv_r2) * inv_r2 / r3
+        return _INV_4PI * z * (f - area / r3)
 
     @njit(cache=True, inline="always")
     def _edge_log(x, y, z, xa, ya, xb, yb, dk):
@@ -244,21 +314,16 @@ if HAVE_NUMBA:
         return 0.0
 
     @njit(cache=True, inline="always")
-    def _pair_bc(tx, ty, tz, cen, nor, lax, maxis, xl, yl, dx, dy, elen, act, area, diam, tol,
-                 far_ratio, use_far):
+    def _pair_bc(tx, ty, tz, cen, fc, qm, nor, lax, maxis, xl, yl, dx, dy, elen, act, area, diam,
+                 tol, far_ratio, use_far):
         # Source (B) and doublet (C) potentials of one target-panel pair.
+        if use_far and _far_distance(tx, ty, tz, fc) > far_ratio * diam:
+            b = _far_b(tx, ty, tz, fc, qm, nor, lax, maxis, area)
+            c = _far_c(tx, ty, tz, fc, qm, nor, lax, maxis, area)
+            return b, c
         rx = tx - cen[0]
         ry = ty - cen[1]
         rz = tz - cen[2]
-        r = math.sqrt(rx * rx + ry * ry + rz * rz)
-        if use_far and r > far_ratio * diam:
-            r_safe = r if r > _FLOOR else _FLOOR
-            b = -_INV_4PI * area / r_safe
-            rdotn = rx * nor[0] + ry * nor[1] + rz * nor[2]
-            r3 = r_safe * r_safe * r_safe
-            r3 = r3 if r3 > _FLOOR else _FLOOR
-            c = -_INV_4PI * area * rdotn / r3
-            return b, c
         x = rx * lax[0] + ry * lax[1] + rz * lax[2]
         y = rx * maxis[0] + ry * maxis[1] + rz * maxis[2]
         z = rx * nor[0] + ry * nor[1] + rz * nor[2]
@@ -277,18 +342,25 @@ if HAVE_NUMBA:
         return b, c
 
     @njit(cache=True, inline="always")
-    def _pair_source_vel(tx, ty, tz, cen, nor, lax, maxis, xl, yl, dx, dy, elen, act, area, diam,
-                         tol, far_ratio, use_far):
+    def _pair_source_vel(tx, ty, tz, cen, fc, qm, nor, lax, maxis, xl, yl, dx, dy, elen, act, area,
+                         diam, tol, far_ratio, use_far):
         # Induced velocity (+grad Phi) per unit source strength of one pair in m/s.
+        if use_far and _far_distance(tx, ty, tz, fc) > far_ratio * diam:
+            rx, ry, rz, r, x, y, z, a, q = _far_frame(tx, ty, tz, fc, qm, nor, lax, maxis)
+            inv_r2 = 1.0 / (r * r)
+            r3 = r * r * r
+            r5 = r3 * r * r
+            qrx = qm[0] * x + qm[1] * y
+            qry = qm[1] * x + qm[2] * y
+            radial = area / r3 - (1.5 * q - 7.5 * a * inv_r2) / r5
+            cq = 3.0 / r5
+            gx = _INV_4PI * (radial * rx - cq * (qrx * lax[0] + qry * maxis[0]))
+            gy = _INV_4PI * (radial * ry - cq * (qrx * lax[1] + qry * maxis[1]))
+            gz = _INV_4PI * (radial * rz - cq * (qrx * lax[2] + qry * maxis[2]))
+            return gx, gy, gz
         rx = tx - cen[0]
         ry = ty - cen[1]
         rz = tz - cen[2]
-        r = math.sqrt(rx * rx + ry * ry + rz * rz)
-        if use_far and r > far_ratio * diam:
-            r3 = r * r * r
-            r3 = r3 if r3 > _FLOOR else _FLOOR
-            f = _INV_4PI * area / r3
-            return f * rx, f * ry, f * rz
         x = rx * lax[0] + ry * lax[1] + rz * lax[2]
         y = rx * maxis[0] + ry * maxis[1] + rz * maxis[2]
         z = rx * nor[0] + ry * nor[1] + rz * nor[2]
@@ -350,22 +422,23 @@ if HAVE_NUMBA:
         return cx * f, cy * f, cz * f
 
     @njit(cache=True, inline="always")
-    def _pair_doublet_vel(tx, ty, tz, cen, nor, act, cor, area, diam, tol, far_ratio, use_far):
+    def _pair_doublet_vel(tx, ty, tz, fc, qm, nor, lax, maxis, act, cor, area, diam, tol, far_ratio,
+                          use_far):
         # Induced velocity (+grad Phi) per unit doublet strength of one pair in m/s.
-        rx = tx - cen[0]
-        ry = ty - cen[1]
-        rz = tz - cen[2]
-        r = math.sqrt(rx * rx + ry * ry + rz * rz)
-        if use_far and r > far_ratio * diam:
-            rdotn = rx * nor[0] + ry * nor[1] + rz * nor[2]
+        if use_far and _far_distance(tx, ty, tz, fc) > far_ratio * diam:
+            rx, ry, rz, r, x, y, z, a, q = _far_frame(tx, ty, tz, fc, qm, nor, lax, maxis)
+            inv_r2 = 1.0 / (r * r)
             r3 = r * r * r
-            r3 = r3 if r3 > _FLOOR else _FLOOR
             r5 = r3 * r * r
-            r5 = r5 if r5 > _FLOOR else _FLOOR
-            f = -_INV_4PI * area
-            gx = f * (nor[0] / r3 - 3.0 * rdotn * rx / r5)
-            gy = f * (nor[1] / r3 - 3.0 * rdotn * ry / r5)
-            gz = f * (nor[2] / r3 - 3.0 * rdotn * rz / r5)
+            r7 = r5 * r * r
+            qrx = qm[0] * x + qm[1] * y
+            qry = qm[1] * x + qm[2] * y
+            c_n = (1.5 * q - 7.5 * a * inv_r2) / r5 - area / r3
+            c_r = z * ((52.5 * a * inv_r2 - 7.5 * q) / r7 + 3.0 * area / r5)
+            c_q = -15.0 * z / r7
+            gx = _INV_4PI * (c_n * nor[0] + c_r * rx + c_q * (qrx * lax[0] + qry * maxis[0]))
+            gy = _INV_4PI * (c_n * nor[1] + c_r * ry + c_q * (qrx * lax[1] + qry * maxis[1]))
+            gz = _INV_4PI * (c_n * nor[2] + c_r * rz + c_q * (qrx * lax[2] + qry * maxis[2]))
             return gx, gy, gz
         ringx = 0.0
         ringy = 0.0
@@ -398,19 +471,23 @@ if HAVE_NUMBA:
         area = np.empty(nM, dtype=np.float64)
         diam = np.empty(nM, dtype=np.float64)
         tol = np.empty(nM, dtype=np.float64)
+        fc = np.empty((nM, 3), dtype=np.float64)
+        qm = np.empty((nM, 3), dtype=np.float64)
         for j in range(nM):
             area[j], diam[j], tol[j] = _geom_row(panels[j], cen[j], nor[j], lax[j], maxis[j], xl[j],
-                                                 yl[j], dx[j], dy[j], elen[j], act[j], cor[j], eps)
-        return cen, nor, lax, maxis, xl, yl, dx, dy, elen, act, cor, area, diam, tol
+                                                 yl[j], dx[j], dy[j], elen[j], act[j], cor[j], fc[j],
+                                                 qm[j], eps)
+        return cen, nor, lax, maxis, xl, yl, dx, dy, elen, act, cor, area, diam, tol, fc, qm
 
     @njit(cache=True, parallel=True, fastmath=False)
     def _influence_nb(P, panels, B, C, far_ratio, use_far, eps):
         # Influence matrices: prange over the target points.
-        cen, nor, lax, maxis, xl, yl, dx, dy, elen, act, cor, area, diam, tol = _geometry_nb(panels, eps)
+        geo = _geometry_nb(panels, eps)
+        cen, nor, lax, maxis, xl, yl, dx, dy, elen, act, cor, area, diam, tol, fc, qm = geo
         nM = panels.shape[0]
         for i in prange(P.shape[0]):
             for j in range(nM):
-                b, c = _pair_bc(P[i, 0], P[i, 1], P[i, 2], cen[j], nor[j], lax[j], maxis[j],
+                b, c = _pair_bc(P[i, 0], P[i, 1], P[i, 2], cen[j], fc[j], qm[j], nor[j], lax[j], maxis[j],
                                 xl[j], yl[j], dx[j], dy[j], elen[j], act[j], area[j], diam[j],
                                 tol[j], far_ratio, use_far)
                 B[i, j] = b
@@ -419,11 +496,13 @@ if HAVE_NUMBA:
     @njit(cache=True, parallel=True, fastmath=False)
     def _source_vel_nb(P, panels, V, far_ratio, use_far, eps):
         # Source velocities: prange over the target points.
-        cen, nor, lax, maxis, xl, yl, dx, dy, elen, act, cor, area, diam, tol = _geometry_nb(panels, eps)
+        geo = _geometry_nb(panels, eps)
+        cen, nor, lax, maxis, xl, yl, dx, dy, elen, act, cor, area, diam, tol, fc, qm = geo
         nM = panels.shape[0]
         for i in prange(P.shape[0]):
             for j in range(nM):
-                gx, gy, gz = _pair_source_vel(P[i, 0], P[i, 1], P[i, 2], cen[j], nor[j], lax[j],
+                gx, gy, gz = _pair_source_vel(P[i, 0], P[i, 1], P[i, 2], cen[j], fc[j], qm[j], nor[j],
+                                              lax[j],
                                               maxis[j], xl[j], yl[j], dx[j], dy[j], elen[j], act[j],
                                               area[j], diam[j], tol[j], far_ratio, use_far)
                 V[i, j, 0] = gx
@@ -433,31 +512,28 @@ if HAVE_NUMBA:
     @njit(cache=True, parallel=True, fastmath=False)
     def _doublet_vel_nb(P, panels, V, far_ratio, use_far, eps):
         # Doublet velocities: prange over the target points.
-        cen, nor, lax, maxis, xl, yl, dx, dy, elen, act, cor, area, diam, tol = _geometry_nb(panels, eps)
+        geo = _geometry_nb(panels, eps)
+        cen, nor, lax, maxis, xl, yl, dx, dy, elen, act, cor, area, diam, tol, fc, qm = geo
         nM = panels.shape[0]
         for i in prange(P.shape[0]):
             for j in range(nM):
-                gx, gy, gz = _pair_doublet_vel(P[i, 0], P[i, 1], P[i, 2], cen[j], nor[j], act[j],
-                                               cor[j], area[j], diam[j], tol[j], far_ratio, use_far)
+                gx, gy, gz = _pair_doublet_vel(P[i, 0], P[i, 1], P[i, 2], fc[j], qm[j], nor[j], lax[j],
+                                               maxis[j], act[j], cor[j], area[j], diam[j], tol[j],
+                                               far_ratio, use_far)
                 V[i, j, 0] = gx
                 V[i, j, 1] = gy
                 V[i, j, 2] = gz
 
     @njit(cache=True, inline="always")
-    def _pair_c(tx, ty, tz, cen, nor, lax, maxis, xl, yl, elen, act, area, diam, tol, far_ratio,
-                use_far):
+    def _pair_c(tx, ty, tz, cen, fc, qm, nor, lax, maxis, xl, yl, elen, act, area, diam, tol,
+                far_ratio, use_far):
         # Doublet (C) potential of one target-panel pair: the same steps as the
         # C part of _pair_bc, without the edge sums of the source potential.
+        if use_far and _far_distance(tx, ty, tz, fc) > far_ratio * diam:
+            return _far_c(tx, ty, tz, fc, qm, nor, lax, maxis, area)
         rx = tx - cen[0]
         ry = ty - cen[1]
         rz = tz - cen[2]
-        r = math.sqrt(rx * rx + ry * ry + rz * rz)
-        if use_far and r > far_ratio * diam:
-            r_safe = r if r > _FLOOR else _FLOOR
-            rdotn = rx * nor[0] + ry * nor[1] + rz * nor[2]
-            r3 = r_safe * r_safe * r_safe
-            r3 = r3 if r3 > _FLOOR else _FLOOR
-            return -_INV_4PI * area * rdotn / r3
         x = rx * lax[0] + ry * lax[1] + rz * lax[2]
         y = rx * maxis[0] + ry * maxis[1] + rz * maxis[2]
         z = rx * nor[0] + ry * nor[1] + rz * nor[2]
@@ -472,8 +548,10 @@ if HAVE_NUMBA:
         # the second panel set is not read.
         ga = _geometry_nb(pan_a, eps)
         gb = _geometry_nb(pan_b, eps)
-        cen_a, nor_a, lax_a, max_a, xl_a, yl_a, dx_a, dy_a, el_a, act_a, cor_a, ar_a, di_a, tol_a = ga
-        cen_b, nor_b, lax_b, max_b, xl_b, yl_b, dx_b, dy_b, el_b, act_b, cor_b, ar_b, di_b, tol_b = gb
+        cen_a, nor_a, lax_a, max_a, xl_a, yl_a, dx_a, dy_a, el_a, act_a, cor_a, ar_a, di_a, tol_a = ga[:14]
+        cen_b, nor_b, lax_b, max_b, xl_b, yl_b, dx_b, dy_b, el_b, act_b, cor_b, ar_b, di_b, tol_b = gb[:14]
+        fc_a, qm_a = ga[14], ga[15]
+        fc_b, qm_b = gb[14], gb[15]
         nM = pan_a.shape[0]
         nK = S.shape[1]
         for i in prange(P.shape[0]):
@@ -483,11 +561,11 @@ if HAVE_NUMBA:
             acc = np.zeros(nK, dtype=np.float64)
             for j in range(nM):
                 if want_rhs:
-                    b, c = _pair_bc(px, py, pz, cen_a[j], nor_a[j], lax_a[j], max_a[j], xl_a[j],
+                    b, c = _pair_bc(px, py, pz, cen_a[j], fc_a[j], qm_a[j], nor_a[j], lax_a[j], max_a[j], xl_a[j],
                                     yl_a[j], dx_a[j], dy_a[j], el_a[j], act_a[j], ar_a[j], di_a[j],
                                     tol_a[j], far_ratio, use_far)
                     if has_b:
-                        b2, c2 = _pair_bc(px, py, pz, cen_b[j], nor_b[j], lax_b[j], max_b[j],
+                        b2, c2 = _pair_bc(px, py, pz, cen_b[j], fc_b[j], qm_b[j], nor_b[j], lax_b[j], max_b[j],
                                           xl_b[j], yl_b[j], dx_b[j], dy_b[j], el_b[j], act_b[j],
                                           ar_b[j], di_b[j], tol_b[j], far_ratio, use_far)
                         b = b + sign * b2
@@ -495,11 +573,11 @@ if HAVE_NUMBA:
                     for k in range(nK):
                         acc[k] += b * S[j, k]
                 else:
-                    c = _pair_c(px, py, pz, cen_a[j], nor_a[j], lax_a[j], max_a[j], xl_a[j],
+                    c = _pair_c(px, py, pz, cen_a[j], fc_a[j], qm_a[j], nor_a[j], lax_a[j], max_a[j], xl_a[j],
                                 yl_a[j], el_a[j], act_a[j], ar_a[j], di_a[j], tol_a[j], far_ratio,
                                 use_far)
                     if has_b:
-                        c2 = _pair_c(px, py, pz, cen_b[j], nor_b[j], lax_b[j], max_b[j], xl_b[j],
+                        c2 = _pair_c(px, py, pz, cen_b[j], fc_b[j], qm_b[j], nor_b[j], lax_b[j], max_b[j], xl_b[j],
                                      yl_b[j], el_b[j], act_b[j], ar_b[j], di_b[j], tol_b[j],
                                      far_ratio, use_far)
                         c = c + sign * c2
@@ -627,7 +705,7 @@ def source_velocity_numba(
     panels : numpy.ndarray
         Panel corner coordinates with shape (M, 4, 3) in m.
     far_ratio : float, default=5.0
-        Distance-to-diameter ratio beyond which point source expansion is used.
+        Distance-to-diameter ratio beyond which the far-field source expansion is used.
         Setting to numpy.inf forces exact integration everywhere.
 
     Returns
@@ -663,7 +741,7 @@ def doublet_velocity_numba(
     panels : numpy.ndarray
         Panel corner coordinates with shape (M, 4, 3) in m.
     far_ratio : float, default=5.0
-        Distance-to-diameter ratio beyond which point doublet expansion is used.
+        Distance-to-diameter ratio beyond which the far-field doublet expansion is used.
         Setting to numpy.inf forces exact integration everywhere.
 
     Returns
@@ -699,7 +777,7 @@ def influence_matrices_numba(
     panels : numpy.ndarray
         Panel corner coordinates with shape (M, 4, 3) in m.
     far_ratio : float, default=5.0
-        Distance-to-diameter ratio for point far-field transition.
+        Distance-to-diameter ratio of the far-field transition.
 
     Returns
     -------
@@ -773,7 +851,7 @@ def doublet_pair_matrix_numba(
     sign : float, default=1.0
         Factor of the second panel set [-] (+1 or -1).
     far_ratio : float, default=5.0
-        Distance-to-diameter ratio beyond which point doublet expansion is used.
+        Distance-to-diameter ratio beyond which the far-field doublet expansion is used.
 
     Returns
     -------
@@ -813,7 +891,7 @@ def source_pair_rhs_numba(
     sigma : numpy.ndarray
         Source strengths with shape (M, K), K at most 6, or (M,) in m/s.
     far_ratio : float, default=5.0
-        Distance-to-diameter ratio beyond which point source expansion is used.
+        Distance-to-diameter ratio beyond which the far-field source expansion is used.
 
     Returns
     -------
@@ -847,7 +925,7 @@ def source_rhs_numba(
     sigma : numpy.ndarray
         Source strengths with shape (M, K), K at most 6, or (M,) in m/s.
     far_ratio : float, default=5.0
-        Distance-to-diameter ratio beyond which point source expansion is used.
+        Distance-to-diameter ratio beyond which the far-field source expansion is used.
 
     Returns
     -------
@@ -886,7 +964,7 @@ def pair_system_numba(
     sigma : numpy.ndarray
         Source strengths with shape (M, K), K at most 6, or (M,) in m/s.
     far_ratio : float, default=5.0
-        Distance-to-diameter ratio of the point far-field expansions.
+        Distance-to-diameter ratio of the far-field expansions.
 
     Returns
     -------

@@ -68,7 +68,7 @@ def test_far_field_note_ground_with_finite_far_ratio():
     trust_warns = res.totals.trust.warnings
     assert PANEL3D_FAR_FIELD_GROUND_NOTE in trust_warns
     assert PANEL3D_FAR_FIELD_GROUND_NOTE in res.details["notes"]
-    assert any("default far-field kernel can bias the lift low by about 1 to 4 %" in w for w in trust_warns)
+    assert any("exact integration within about 0.01 %" in w and "ground" in w for w in trust_warns)
     assert any("far_ratio=inf" in w for w in trust_warns)
 
 
@@ -102,7 +102,7 @@ def test_far_field_note_free_air_ns_above_80():
     trust_warns = res.totals.trust.warnings
     assert PANEL3D_FAR_FIELD_FREE_AIR_NOTE in trust_warns
     assert PANEL3D_FAR_FIELD_FREE_AIR_NOTE in res.details["notes"]
-    assert any("bias the lift low by about 1 % in free air with more than 80 spanwise panels" in w for w in trust_warns)
+    assert any("free-air cases with more than 80 spanwise panels" in w for w in trust_warns)
     assert any("far_ratio=inf" in w for w in trust_warns)
 
 

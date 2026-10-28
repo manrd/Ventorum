@@ -71,12 +71,14 @@ def test_wake_through_rear_wing_in_ground_effect_is_refused():
         _totals(_tandem(0.0), alpha_deg=0.5, h=1.0)
 
 
-# Stored baselines: the values of the solver before the wake check.
+# Stored baselines: the values of the solver before the wake check, updated for
+# the second-moment far-field expansion about the panel centroid (relative
+# change 7e-5 to 4e-4).
 _BASELINES = {
-    "tandem_offset": (0.5476515148619553, 0.010963121211527555, 0.07419855761191453),
-    "wing_tail": (0.3410566930302517, 0.004620902945699927, -0.024116329716774014),
-    "biplane": (0.5004119989789145, 0.008057080560914469, -0.0268381701774737),
-    "tandem_ground": (0.6582681027661107, 0.00882555767539694, -0.006218150875157406),
+    "tandem_offset": (0.5476904864986543, 0.010964617383178048, 0.07421572563822393),
+    "wing_tail": (0.3410794813583515, 0.004621505025221477, -0.02411077193768448),
+    "biplane": (0.5004755593440084, 0.008058950083729127, -0.026845055468020743),
+    "tandem_ground": (0.6583402939667865, 0.008827328079694441, -0.00622041350796974),
 }
 
 

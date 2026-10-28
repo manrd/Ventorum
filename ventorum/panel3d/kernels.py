@@ -38,9 +38,14 @@ Conventions
 * Singular target positions: a target on a panel edge or corner gives an
   infinite velocity. The kernels drop the singular edge term there (the
   vortex segment or the edge logarithm of that edge) and keep the finite rest.
-* Far field: Beyond far_ratio times the panel diameter (default 5.0), point source
-  and point doublet expansions are used. Setting far_ratio=np.inf disables the
-  far-field switch and uses exact integration everywhere.
+* Far field: when the distance of the target from the area centroid of the
+  panel is more than far_ratio times the panel diameter (default 5.0), a
+  multipole expansion about the area centroid replaces the exact integrals.
+  It keeps the area and the second moments of area of the panel, so the
+  relative error of one pair is O((D / r)^3), and O((D / r)^4) for a
+  parallelogram (Jackson 1999, section 4.1). The collocation point stays
+  at the corner average. Setting far_ratio=np.inf disables the far-field
+  switch and uses exact integration everywhere.
 * Pair kernels: a half mesh with symmetry about y = 0 (and the ground images)
   solves systems of the form ``C_a + sign * C_b``, where ``b`` is the mirror
   (or image) of the panel set ``a`` and ``sign`` is +1 (symmetric) or -1
@@ -71,6 +76,8 @@ References
   panel", Journal of Engineering Mathematics 20 (1986) 113-126.
 * A. van Oosterom and J. Strackee, "The solid angle of a plane triangle", IEEE
   Transactions on Biomedical Engineering 30 (1983) 125-126.
+* J. D. Jackson, "Classical Electrodynamics", 3rd ed., John Wiley & Sons,
+  1999, section 4.1 (Cartesian multipole expansion).
 """
 
 from __future__ import annotations
@@ -231,6 +238,10 @@ class _PanelGeometry:
     diameter: np.ndarray        # (M,) in m
     edge_active: np.ndarray     # (M, 4) bool, False for a degenerate edge
     plane_tol: np.ndarray       # (M,) in m, on-plane band half width
+    far_centre: np.ndarray      # (M, 3) in m, area centroid (centre of the far-field expansion)
+    q_xx: np.ndarray            # (M,) in m^4, second moment of area about far_centre, x x
+    q_xy: np.ndarray            # (M,) in m^4, second moment of area about far_centre, x y
+    q_yy: np.ndarray            # (M,) in m^4, second moment of area about far_centre, y y
 
 
 def _precompute_geometry(panels: np.ndarray, eps: float | None = None) -> _PanelGeometry:
@@ -317,6 +328,7 @@ def _precompute_geometry(panels: np.ndarray, eps: float | None = None) -> _Panel
     edge_active = edge_len > tiny[:, None]
     area = 0.5 * n_norm[:, 0]
     plane_tol = _PLANE_TOL_FACTOR * float(eps) * (np.linalg.norm(centroid, axis=-1) + diameter)
+    far_centre, q_xx, q_xy, q_yy = _area_moments(x_loc, y_loc, centroid, l_axis, m_axis)
 
     return _PanelGeometry(
         centroid=centroid,
@@ -333,7 +345,56 @@ def _precompute_geometry(panels: np.ndarray, eps: float | None = None) -> _Panel
         diameter=diameter,
         edge_active=edge_active,
         plane_tol=plane_tol,
+        far_centre=far_centre,
+        q_xx=q_xx,
+        q_xy=q_xy,
+        q_yy=q_yy,
     )
+
+
+def _area_moments(x_loc, y_loc, centroid, l_axis, m_axis):
+    """Return the area centroid and the second moments of area of the panels.
+
+    Green's theorem in the plane turns the integrals of 1, x, y, x^2, x y
+    and y^2 over the projected panel into sums over its four edges (the
+    polygon or shoelace formulas). The parallel-axis rule moves the second
+    moments to the area centroid. A triangle (fourth corner equal to the
+    third) has one edge of zero length, which adds zero.
+
+    Parameters
+    ----------
+    x_loc, y_loc : numpy.ndarray
+        Local corner coordinates with shape (M, 4) in m, relative to the
+        corner average *centroid*.
+    centroid : numpy.ndarray
+        Corner average of the projected corners with shape (M, 3) in m.
+    l_axis, m_axis : numpy.ndarray
+        Unit in-plane axes with shape (M, 3).
+
+    Returns
+    -------
+    tuple of numpy.ndarray
+        (area centroid with shape (M, 3) in m, q_xx, q_xy, q_yy with shape
+        (M,) in m^4). The moments are about the area centroid, in the local
+        axes: q_xx is the integral of x^2, q_xy of x y and q_yy of y^2.
+    """
+    xn = np.roll(x_loc, -1, axis=1)
+    yn = np.roll(y_loc, -1, axis=1)
+    cross = x_loc * yn - xn * y_loc
+    a_poly = 0.5 * np.sum(cross, axis=1)
+    inv = 1.0 / np.where(np.abs(a_poly) > 0.0, a_poly, 1.0)
+    cx = np.sum((x_loc + xn) * cross, axis=1) * inv / 6.0
+    cy = np.sum((y_loc + yn) * cross, axis=1) * inv / 6.0
+    i_xx = np.sum((x_loc * x_loc + x_loc * xn + xn * xn) * cross, axis=1) / 12.0
+    i_yy = np.sum((y_loc * y_loc + y_loc * yn + yn * yn) * cross, axis=1) / 12.0
+    i_xy = np.sum((x_loc * yn + 2.0 * x_loc * y_loc + 2.0 * xn * yn + xn * y_loc) * cross, axis=1) / 24.0
+    # The sums carry the sign of the polygon orientation; the moments do not.
+    sgn = np.sign(a_poly)
+    q_xx = sgn * (i_xx - a_poly * cx * cx)
+    q_xy = sgn * (i_xy - a_poly * cx * cy)
+    q_yy = sgn * (i_yy - a_poly * cy * cy)
+    far_centre = centroid + cx[:, None] * l_axis + cy[:, None] * m_axis
+    return far_centre, q_xx, q_xy, q_yy
 
 
 def _plane_winding(
@@ -563,11 +624,113 @@ def _prepare(points: np.ndarray, panels: np.ndarray):
     return target_dtype, pts.astype(np.float64, copy=False), pans.astype(np.float64, copy=False), eps
 
 
-def _far_mask(r_dist: np.ndarray, diameter: np.ndarray, far_ratio: float) -> np.ndarray:
-    """Return the mask of target-panel pairs that use the far-field formulas."""
+def _far_mask(pts_chunk: np.ndarray, geom: _PanelGeometry, far_ratio: float) -> np.ndarray:
+    """Return the mask of target-panel pairs that use the far-field formulas.
+
+    A pair is far when the distance of the target from the expansion centre
+    (the area centroid of the panel) is larger than *far_ratio* times the
+    panel diameter. An infinite *far_ratio* gives no far pair.
+    """
     if np.isinf(far_ratio):
-        return np.zeros(r_dist.shape, dtype=bool)
-    return r_dist > (far_ratio * diameter[None, :])
+        return np.zeros((pts_chunk.shape[0], geom.area.shape[0]), dtype=bool)
+    r_far = np.linalg.norm(pts_chunk[:, None, :] - geom.far_centre[None, :, :], axis=-1)
+    return r_far > (far_ratio * geom.diameter[None, :])
+
+
+# Far-field multipole expansion about the area centroid p_c of the panel, up
+# to the second moments of area Q (in the panel plane). With R = x - p_c,
+# a = R^T Q R and q = tr Q, the integral of 1 / |R - s| over the panel is
+# S = A / r + (3 a - r^2 q) / (2 r^5) + O(A D^3 / r^4) (the Cartesian
+# multipole expansion, J. D. Jackson, "Classical Electrodynamics", 3rd ed.,
+# Wiley, 1999, section 4.1). The source potential is -S / (4 pi), the
+# doublet potential n . grad(S) / (4 pi), and the velocities are their
+# gradients. The relative error of one pair is O((D / r)^3), and
+# O((D / r)^4) for a parallelogram. See docs/theory/ventorum_3dp.md.
+
+
+def _far_frame(pts_chunk: np.ndarray, geom: _PanelGeometry):
+    """Return the far-field frame of one chunk of targets.
+
+    Returns
+    -------
+    tuple of numpy.ndarray
+        (R with shape (P, M, 3) in m from the expansion centre, r with shape
+        (P, M) in m, local X, Y, Z with shape (P, M) in m).
+    """
+    R = pts_chunk[:, None, :] - geom.far_centre[None, :, :]
+    r = np.linalg.norm(R, axis=-1)
+    X = np.sum(R * geom.l_axis[None, :, :], axis=-1)
+    Y = np.sum(R * geom.m_axis[None, :, :], axis=-1)
+    Z = np.sum(R * geom.normal[None, :, :], axis=-1)
+    return R, r, X, Y, Z
+
+
+def _far_terms(X: np.ndarray, Y: np.ndarray, geom: _PanelGeometry):
+    """Return the second-moment scalars a = R^T Q R [m^6] and q = tr Q [m^4]."""
+    a = geom.q_xx[None, :] * X * X + 2.0 * geom.q_xy[None, :] * X * Y + geom.q_yy[None, :] * Y * Y
+    q = (geom.q_xx + geom.q_yy)[None, :]
+    return a, q
+
+
+def _far_source_potential(pts_chunk: np.ndarray, geom: _PanelGeometry) -> np.ndarray:
+    """Return the far-field source potentials [m] with shape (P, M) of one chunk of targets."""
+    R, r, X, Y, Z = _far_frame(pts_chunk, geom)
+    a, q = _far_terms(X, Y, geom)
+    r = np.maximum(r, 1e-300)
+    inv_r2 = 1.0 / (r * r)
+    t = (1.5 * a * inv_r2 - 0.5 * q) / (r * r * r)
+    return -_INV_4PI * (geom.area[None, :] / r + t)
+
+
+def _far_doublet_potential(pts_chunk: np.ndarray, geom: _PanelGeometry) -> np.ndarray:
+    """Return the far-field doublet potentials [-] with shape (P, M) of one chunk of targets."""
+    R, r, X, Y, Z = _far_frame(pts_chunk, geom)
+    a, q = _far_terms(X, Y, geom)
+    r = np.maximum(r, 1e-300)
+    inv_r2 = 1.0 / (r * r)
+    r3 = r * r * r
+    f = (1.5 * q - 7.5 * a * inv_r2) * inv_r2 / r3
+    return _INV_4PI * Z * (f - geom.area[None, :] / r3)
+
+
+def _far_source_velocity(pts_chunk: np.ndarray, geom: _PanelGeometry) -> np.ndarray:
+    """Return the far-field source velocities [m/s] with shape (P, M, 3) of one chunk of targets."""
+    R, r, X, Y, Z = _far_frame(pts_chunk, geom)
+    a, q = _far_terms(X, Y, geom)
+    r = np.maximum(r, 1e-300)
+    inv_r2 = 1.0 / (r * r)
+    r3 = r * r * r
+    r5 = r3 * r * r
+    qr_x = geom.q_xx[None, :] * X + geom.q_xy[None, :] * Y
+    qr_y = geom.q_xy[None, :] * X + geom.q_yy[None, :] * Y
+    radial = geom.area[None, :] / r3 - (1.5 * q - 7.5 * a * inv_r2) / r5
+    v = radial[..., None] * R - (3.0 / r5)[..., None] * (
+        qr_x[..., None] * geom.l_axis[None, :, :] + qr_y[..., None] * geom.m_axis[None, :, :]
+    )
+    return _INV_4PI * v
+
+
+def _far_doublet_velocity(pts_chunk: np.ndarray, geom: _PanelGeometry) -> np.ndarray:
+    """Return the far-field doublet velocities [m/s] with shape (P, M, 3) of one chunk of targets."""
+    R, r, X, Y, Z = _far_frame(pts_chunk, geom)
+    a, q = _far_terms(X, Y, geom)
+    r = np.maximum(r, 1e-300)
+    inv_r2 = 1.0 / (r * r)
+    r3 = r * r * r
+    r5 = r3 * r * r
+    r7 = r5 * r * r
+    qr_x = geom.q_xx[None, :] * X + geom.q_xy[None, :] * Y
+    qr_y = geom.q_xy[None, :] * X + geom.q_yy[None, :] * Y
+    area = geom.area[None, :]
+    c_n = (1.5 * q - 7.5 * a * inv_r2) / r5 - area / r3
+    c_r = Z * ((52.5 * a * inv_r2 - 7.5 * q) / r7 + 3.0 * area / r5)
+    c_q = -15.0 * Z / r7
+    v = (
+        c_n[..., None] * geom.normal[None, :, :]
+        + c_r[..., None] * R
+        + c_q[..., None] * (qr_x[..., None] * geom.l_axis[None, :, :] + qr_y[..., None] * geom.m_axis[None, :, :])
+    )
+    return _INV_4PI * v
 
 
 def _source_block(pts_chunk: np.ndarray, geom: _PanelGeometry, far_ratio: float) -> np.ndarray:
@@ -580,7 +743,7 @@ def _source_block(pts_chunk: np.ndarray, geom: _PanelGeometry, far_ratio: float)
     geom : _PanelGeometry
         Precomputed geometry of the M panels.
     far_ratio : float
-        Distance-to-diameter ratio of the point far-field expansion [-].
+        Distance-to-diameter ratio of the far-field expansion [-].
 
     Returns
     -------
@@ -592,8 +755,7 @@ def _source_block(pts_chunk: np.ndarray, geom: _PanelGeometry, far_ratio: float)
 
     # Target relative position vectors: (P_chunk, M, 3)
     R_vec = pts_chunk[:, None, :] - geom.centroid[None, :, :]
-    r_dist = np.linalg.norm(R_vec, axis=-1)
-    far_mask = _far_mask(r_dist, geom.diameter, far_ratio)
+    far_mask = _far_mask(pts_chunk, geom, far_ratio)
 
     # Local coordinates
     x_loc = np.sum(R_vec * geom.l_axis[None, :, :], axis=-1)
@@ -620,9 +782,12 @@ def _source_block(pts_chunk: np.ndarray, geom: _PanelGeometry, far_ratio: float)
     # Exact formula: (I - z * Omega) / (4 pi)
     phi_exact = _INV_4PI * (sum_edge - z_loc * poly_om)
 
-    # Far-field expansion: -A / (4 pi r)
-    phi_far = -_INV_4PI * geom.area[None, :] / np.maximum(r_dist, 1e-300)
-
+    if not far_mask.any():
+        return phi_exact
+    # Near pairs (also the own collocation point, r = 0) are evaluated and then
+    # dropped by the mask; their divisions by zero are harmless.
+    with np.errstate(divide="ignore", invalid="ignore", over="ignore"):
+        phi_far = _far_source_potential(pts_chunk, geom)
     return np.where(far_mask, phi_far, phi_exact)
 
 
@@ -636,7 +801,7 @@ def _doublet_block(pts_chunk: np.ndarray, geom: _PanelGeometry, far_ratio: float
     geom : _PanelGeometry
         Precomputed geometry of the M panels.
     far_ratio : float
-        Distance-to-diameter ratio of the point far-field expansion [-].
+        Distance-to-diameter ratio of the far-field expansion [-].
 
     Returns
     -------
@@ -645,8 +810,7 @@ def _doublet_block(pts_chunk: np.ndarray, geom: _PanelGeometry, far_ratio: float
         (P_chunk, M) [-].
     """
     R_vec = pts_chunk[:, None, :] - geom.centroid[None, :, :]
-    r_dist = np.linalg.norm(R_vec, axis=-1)
-    far_mask = _far_mask(r_dist, geom.diameter, far_ratio)
+    far_mask = _far_mask(pts_chunk, geom, far_ratio)
 
     x_loc = np.sum(R_vec * geom.l_axis[None, :, :], axis=-1)
     y_loc = np.sum(R_vec * geom.m_axis[None, :, :], axis=-1)
@@ -655,10 +819,12 @@ def _doublet_block(pts_chunk: np.ndarray, geom: _PanelGeometry, far_ratio: float
     poly_om = _solid_angle_triangles(x_loc, y_loc, z_loc, geom)
     phi_exact = _INV_4PI * poly_om
 
-    # Far-field point doublet: -A * (R . n) / (4 pi r^3)
-    r_cube = np.maximum(r_dist**3, 1e-300)
-    phi_far = -_INV_4PI * geom.area[None, :] * z_loc / r_cube
-
+    if not far_mask.any():
+        return phi_exact
+    # Near pairs (also the own collocation point, r = 0) are evaluated and then
+    # dropped by the mask; their divisions by zero are harmless.
+    with np.errstate(divide="ignore", invalid="ignore", over="ignore"):
+        phi_far = _far_doublet_potential(pts_chunk, geom)
     return np.where(far_mask, phi_far, phi_exact)
 
 
@@ -676,7 +842,7 @@ def source_potential(
     panels : numpy.ndarray
         Panel corner coordinates with shape (M, 4, 3) in m.
     far_ratio : float, default=5.0
-        Distance-to-diameter ratio beyond which point source expansion is used.
+        Distance-to-diameter ratio beyond which the far-field source expansion is used.
         Setting to numpy.inf forces exact integration everywhere.
 
     Returns
@@ -718,7 +884,7 @@ def doublet_potential(
     panels : numpy.ndarray
         Panel corner coordinates with shape (M, 4, 3) in m.
     far_ratio : float, default=5.0
-        Distance-to-diameter ratio beyond which point doublet expansion is used.
+        Distance-to-diameter ratio beyond which the far-field doublet expansion is used.
         Setting to numpy.inf forces exact integration everywhere.
 
     Returns
@@ -766,7 +932,7 @@ def source_velocity(
     panels : numpy.ndarray
         Panel corner coordinates with shape (M, 4, 3) in m.
     far_ratio : float, default=5.0
-        Distance-to-diameter ratio beyond which point source expansion is used.
+        Distance-to-diameter ratio beyond which the far-field source expansion is used.
         Setting to numpy.inf forces exact integration everywhere.
 
     Returns
@@ -793,8 +959,7 @@ def source_velocity(
         pts_chunk = pts_f64[p0:p1]
 
         R_vec = pts_chunk[:, None, :] - geom.centroid[None, :, :]
-        r_dist = np.linalg.norm(R_vec, axis=-1)
-        far_mask = _far_mask(r_dist, geom.diameter, far_ratio)
+        far_mask = _far_mask(pts_chunk, geom, far_ratio)
 
         x_loc = np.sum(R_vec * geom.l_axis[None, :, :], axis=-1)
         y_loc = np.sum(R_vec * geom.m_axis[None, :, :], axis=-1)
@@ -833,11 +998,13 @@ def source_velocity(
             + vz[..., None] * geom.normal[None, :, :]
         )
 
-        # Far-field expansion: +A * R / (4 pi r^3)
-        r_cube = np.maximum(r_dist**3, 1e-300)
-        v_far = _INV_4PI * geom.area[None, :, None] * R_vec / r_cube[..., None]
-
-        out[p0:p1] = np.where(far_mask[..., None], v_far, v_exact)
+        if far_mask.any():
+            # Near pairs (also the own collocation point, r = 0) are evaluated and then
+            # dropped by the mask; their divisions by zero are harmless.
+            with np.errstate(divide="ignore", invalid="ignore", over="ignore"):
+                v_far = _far_source_velocity(pts_chunk, geom)
+            v_exact = np.where(far_mask[..., None], v_far, v_exact)
+        out[p0:p1] = v_exact
 
     return out.astype(target_dtype)
 
@@ -860,7 +1027,7 @@ def doublet_velocity(
     panels : numpy.ndarray
         Panel corner coordinates with shape (M, 4, 3) in m.
     far_ratio : float, default=5.0
-        Distance-to-diameter ratio beyond which point doublet expansion is used.
+        Distance-to-diameter ratio beyond which the far-field doublet expansion is used.
         Setting to numpy.inf forces exact integration everywhere.
 
     Returns
@@ -886,9 +1053,7 @@ def doublet_velocity(
         p1 = min(p0 + chunk_size, P)
         pts_chunk = pts_f64[p0:p1]
 
-        R_vec = pts_chunk[:, None, :] - geom.centroid[None, :, :]
-        r_dist = np.linalg.norm(R_vec, axis=-1)
-        far_mask = _far_mask(r_dist, geom.diameter, far_ratio)
+        far_mask = _far_mask(pts_chunk, geom, far_ratio)
 
         # Equivalent vortex ring along 4 perimeter segments
         v_ring = np.zeros((p1 - p0, M, 3), dtype=np.float64)
@@ -902,16 +1067,13 @@ def doublet_velocity(
         # V_D = +grad Phi_D = v_ring
         v_exact = v_ring
 
-        # Far-field expansion: -(A / 4 pi) * [n/r^3 - 3 (R . n) R / r^5]
-        r_dot_n = np.sum(R_vec * geom.normal[None, :, :], axis=-1, keepdims=True)
-        r_cube = np.maximum(r_dist**3, 1e-300)[..., None]
-        r_fifth = np.maximum(r_dist**5, 1e-300)[..., None]
-
-        term1 = geom.normal[None, :, :] / r_cube
-        term2 = 3.0 * r_dot_n * R_vec / r_fifth
-        v_far = -_INV_4PI * geom.area[None, :, None] * (term1 - term2)
-
-        out[p0:p1] = np.where(far_mask[..., None], v_far, v_exact)
+        if far_mask.any():
+            # Near pairs (also the own collocation point, r = 0) are evaluated and then
+            # dropped by the mask; their divisions by zero are harmless.
+            with np.errstate(divide="ignore", invalid="ignore", over="ignore"):
+                v_far = _far_doublet_velocity(pts_chunk, geom)
+            v_exact = np.where(far_mask[..., None], v_far, v_exact)
+        out[p0:p1] = v_exact
 
     return out.astype(target_dtype)
 
@@ -930,7 +1092,7 @@ def influence_matrices(
     panels : numpy.ndarray
         Panel corner coordinates with shape (M, 4, 3) in m.
     far_ratio : float, default=5.0
-        Distance-to-diameter ratio for point far-field transition.
+        Distance-to-diameter ratio of the far-field transition.
 
     Returns
     -------
@@ -1083,7 +1245,7 @@ def doublet_pair_matrix(
     sign : float, default=1.0
         Factor of the second panel set [-] (+1 or -1).
     far_ratio : float, default=5.0
-        Distance-to-diameter ratio beyond which point doublet expansion is used.
+        Distance-to-diameter ratio beyond which the far-field doublet expansion is used.
 
     Returns
     -------
@@ -1127,7 +1289,7 @@ def source_pair_rhs(
     sigma : numpy.ndarray
         Source strengths with shape (M, K), K at most 6, or (M,) in m/s.
     far_ratio : float, default=5.0
-        Distance-to-diameter ratio beyond which point source expansion is used.
+        Distance-to-diameter ratio beyond which the far-field source expansion is used.
 
     Returns
     -------
@@ -1160,7 +1322,7 @@ def source_rhs(
     sigma : numpy.ndarray
         Source strengths with shape (M, K), K at most 6, or (M,) in m/s.
     far_ratio : float, default=5.0
-        Distance-to-diameter ratio beyond which point source expansion is used.
+        Distance-to-diameter ratio beyond which the far-field source expansion is used.
 
     Returns
     -------
@@ -1198,7 +1360,7 @@ def pair_system(
     sigma : numpy.ndarray
         Source strengths with shape (M, K), K at most 6, or (M,) in m/s.
     far_ratio : float, default=5.0
-        Distance-to-diameter ratio of the point far-field expansions.
+        Distance-to-diameter ratio of the far-field expansions.
 
     Returns
     -------
