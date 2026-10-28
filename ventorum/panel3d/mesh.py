@@ -987,8 +987,8 @@ def _warn_strong_root_scaling(surf, factor: float) -> bool:
     warnings.warn(
         f"Surface {name!r}: the root section is strongly scaled. The first panel row has a dihedral of "
         f"{dihedral_deg:.1f} deg (above {ROOT_SCALE_WARN_DIHEDRAL_DEG:g} deg), so the root-thickness factor "
-        f"1/cos(dihedral) is {factor:.2f}. The result needs checking (for example against "
-        "scale_root_thickness=False).",
+        f"1/cos(dihedral) is {factor:.2f}. The result needs a spanwise convergence study. Do not "
+        "check it against scale_root_thickness=False: at this dihedral the unscaled root pressure is singular.",
         UserWarning,
         stacklevel=3,
     )
