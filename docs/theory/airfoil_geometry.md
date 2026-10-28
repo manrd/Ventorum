@@ -17,7 +17,7 @@ The `upper` and `lower` methods each return one surface from the leading edge to
 Three plain-text formats are read. The reader detects the format from the first lines.
 
 - Selig: an optional name line, then x y pairs in Selig order (M. S. Selig and co-workers, *Summary of Low-Speed Airfoil Data*, 1995).
-- Lednicer: a name line, a line with the point counts of the upper and lower surfaces (two numbers larger than 1, for example `61 61`), then the upper surface from the leading edge to the trailing edge, a blank line, and the lower surface from the leading edge to the trailing edge (D. Lednicer, AIAA paper 2010-0458, 2010). The reader merges the duplicated leading-edge point. A Lednicer file without the name line is also read: its first line holds two whole numbers of at least 2 whose sum equals the number of data lines that follow. Two numbers that fail this count stay a data point.
+- Lednicer: a name line, a line with the point counts of the upper and lower surfaces (two numbers larger than 1, for example `61 61`), then the upper surface from the leading edge to the trailing edge, a blank line, and the lower surface from the leading edge to the trailing edge. The reader merges the duplicated leading-edge point. A Lednicer file without the name line is also read: its first line holds two whole numbers of at least 2 whose sum equals the number of data lines that follow. Two numbers that fail this count stay a data point.
 - Plain: x y pairs with no header. The name then comes from the file stem.
 
 Separators are spaces, tabs or commas. Lines that start with `#` are comments and blank lines are skipped. A file in reverse order (lower surface first, clockwise) is reversed to Selig order, so its signed area is positive.
@@ -44,6 +44,5 @@ The writers store the same point order with a fixed number of digits (`precision
 ## References
 
 - M. S. Selig, J. J. Guglielmo, A. P. Broeren and P. Giguere, *Summary of Low-Speed Airfoil Data*, Vol. 1, SoarTech Publications, 1995.
-- D. Lednicer, "A CFD evaluation of wind tunnel test sections", AIAA paper 2010-0458, 2010.
 - I. H. Abbott and A. E. von Doenhoff, *Theory of Wing Sections*, Dover, 1959, chapter 6.
 - J. Katz and A. Plotkin, *Low-Speed Aerodynamics*, 2nd ed., Cambridge University Press, 2001, chapter 11.

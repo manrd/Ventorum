@@ -93,7 +93,7 @@ import scipy.sparse.linalg
 
 from ventorum.aero.system import freestream_direction, has_rates, rotation_velocity
 from ventorum.core.datatypes import FlightCondition
-from ventorum.core.errors import GroundStrikeError
+from ventorum.core.errors import GroundStrikeError, ValidityError
 from ventorum.panel3d.images import (
     check_ground_clearance,
     ground_plane_parameters,
@@ -126,6 +126,7 @@ from ventorum.panel3d.wake import (
     DEFAULT_WAKE_CHORDS,
     PanelWake,
     build_wake,
+    check_wake_crossing,
     largest_streamwise_chord,
 )
 
@@ -454,6 +455,7 @@ class PanelSolver:
         device=None,
         dtype=None,
         ground_solver: str = "auto",
+        cpu_lu: str | None = None,
         _reuse_full_from: PanelSolver | None = None,
     ) -> None:
         if kutta not in ("morino", "pressure"):
@@ -470,6 +472,15 @@ class PanelSolver:
         self.ground_solver = ground_solver
         self.backend = key
         self.kutta = str(kutta)
+        if cpu_lu is None:
+            from ventorum import gpu
+
+            cpu_lu = gpu.cpu_lu()
+        cpu_lu_key = str(cpu_lu).strip().lower()
+        if cpu_lu_key not in ("scipy", "torch"):
+            raise ValueError(f"Unknown cpu_lu option {cpu_lu!r}; use 'scipy' or 'torch'.")
+        self.cpu_lu = cpu_lu_key
+        self._cpu_lu = cpu_lu_key
         self.mesh = mesh
         self.far_ratio = float(far_ratio)
         self.n_wake = int(n_wake)
@@ -758,21 +769,54 @@ class PanelSolver:
             from ventorum.panel3d import gpu as gpu_mod
 
             return gpu_mod.lu_factor_device(mat_a)
+        if self.cpu_lu == "torch":
+            import torch
+
+            if isinstance(mat_a, torch.Tensor):
+                t = mat_a
+            else:
+                try:
+                    t = torch.from_numpy(mat_a)
+                except ValueError:
+                    t = torch.as_tensor(mat_a, dtype=torch.float64, device="cpu")
+            piv = torch.empty(t.shape[0], dtype=torch.int32, device=t.device)
+            torch.linalg.lu_factor(t, out=(t, piv))
+            return (t, piv)
         return scipy.linalg.lu_factor(mat_a, overwrite_a=True)
 
     def _lu_solve(self, lu_info, rhs):
         """Solve with stored LU factors (numpy or torch right-hand sides)."""
-        if self.backend == "gpu":
-            from ventorum.panel3d import gpu as gpu_mod
+        import torch
 
-            return gpu_mod.lu_solve_device(lu_info, rhs)
+        if isinstance(lu_info[0], torch.Tensor):
+            lu, piv = lu_info
+            if isinstance(rhs, np.ndarray):
+                is_1d = rhs.ndim == 1
+                rhs_arr = rhs if rhs.flags.c_contiguous else np.ascontiguousarray(rhs)
+                rhs_t = torch.from_numpy(rhs_arr)
+                if is_1d:
+                    rhs_t = rhs_t.unsqueeze(-1)
+                if lu.device.type != "cpu" or rhs_t.dtype != lu.dtype:
+                    rhs_t = rhs_t.to(device=lu.device, dtype=lu.dtype)
+                sol_t = torch.linalg.lu_solve(lu, piv, rhs_t)
+                if lu.device.type != "cpu":
+                    sol_t = sol_t.to(torch.float64).cpu()
+                return sol_t.squeeze(-1).numpy() if is_1d else sol_t.numpy()
+            is_1d = rhs.ndim == 1
+            rhs_t = rhs.unsqueeze(-1) if is_1d else rhs
+            if rhs_t.device != lu.device or rhs_t.dtype != lu.dtype:
+                rhs_t = rhs_t.to(device=lu.device, dtype=lu.dtype)
+            sol_t = torch.linalg.lu_solve(lu, piv, rhs_t)
+            return sol_t.squeeze(-1) if is_1d else sol_t
         return scipy.linalg.lu_solve(lu_info, rhs)
 
     def _solve_host(self, cfg: _Configuration, parity: str, rhs: np.ndarray) -> np.ndarray:
         """Solve one stored system for host right-hand sides; return float64 numpy."""
         lu_info = cfg.systems[parity]
         if self.backend != "gpu":
-            return scipy.linalg.lu_solve(lu_info, rhs)
+            if isinstance(lu_info[0], np.ndarray):
+                return scipy.linalg.lu_solve(lu_info, rhs)
+            return self._lu_solve(lu_info, rhs)
         import torch
 
         rhs_t = torch.as_tensor(
@@ -1156,6 +1200,45 @@ class PanelSolver:
             return False
         return True
 
+    def _check_wake_crossing(self, full_wake: PanelWake) -> None:
+        """Refuse a wake sheet that touches or crosses another closed surface.
+
+        The rigid flat wake of constant doublet strength makes the
+        perturbation potential jump inside a closed surface that it
+        crosses, and the internal Dirichlet condition then has no solution
+        (see :func:`ventorum.panel3d.wake.check_wake_crossing`). A tandem
+        wing at the height of the front wing, 2 m behind it, gave CL of
+        about -2.5 at alpha 4 deg instead of about 0.54.
+
+        Parameters
+        ----------
+        full_wake : PanelWake
+            Wake of the full mesh of the configuration.
+
+        Raises
+        ------
+        ValidityError
+            If a wake sheet touches or crosses another component.
+        """
+        crossing = check_wake_crossing(
+            self._full_mesh.nodes,
+            self._standardized_full_panels,
+            self._full_mesh.component,
+            full_wake,
+        )
+        if not crossing["crossing_pairs"]:
+            return
+        src, dst, n_edges = crossing["crossing_pairs"][0]
+        raise ValidityError(
+            f"The wake of 3D panel component {src} touches or passes through component {dst} "
+            f"({n_edges} panel edges of component {dst} touch or cross the wake sheet; the "
+            "component index is the order of the surfaces in the aircraft). The 3D panel "
+            "method sheds a rigid flat wake (along the body x axis in free air, along the free "
+            "stream in ground effect). A wake sheet inside a closed surface makes the potential "
+            "jump inside that surface, and the loads are then wrong. Move the surface above or "
+            "below the wake of the surface in front of it."
+        )
+
     def _new_config(self, key, wake_dir, ground) -> _Configuration:
         """Build the wake geometry of a configuration (no matrices yet)."""
         attitude_key = (key[1], key[3]) if ground is not None else None
@@ -1177,6 +1260,8 @@ class PanelSolver:
                 self._full_geom.normal,
                 wake_dir,
             )
+        if shared is None:
+            self._check_wake_crossing(full_wake)
         if ground is not None:
             check_ground_clearance(self._full_mesh.nodes, ground[0], ground[1])
             if len(full_wake.panels) > 0:
@@ -1308,7 +1393,7 @@ class PanelSolver:
             return np.zeros_like(rhs), 0, 0.0, True
 
         def inverse(v):
-            return scipy.linalg.lu_solve(lu_info, v)
+            return self._lu_solve(lu_info, v)
 
         operator = scipy.sparse.linalg.LinearOperator(
             mat_a.shape, matvec=lambda v: mat_a @ inverse(v), dtype=np.float64,
@@ -1404,7 +1489,7 @@ class PanelSolver:
             for step in range(steps):
                 # The only dense inverse and matrix passes of this iteration.
                 vectors = basis[active, :, step].T
-                z = scipy.linalg.lu_solve(lu_info, vectors)
+                z = self._lu_solve(lu_info, vectors)
                 work = mat_a @ z
                 matrix_passes += 1
                 next_active = []
@@ -1591,7 +1676,7 @@ class PanelSolver:
                 self._unit_solutions(cfg, lu_info, rhs, cols, parity)
             elif parity in ("sym", "full"):
                 self._unit_solutions(cfg, lu_info, rhs[:, :len(cols)], cols, parity)
-                cfg.viscous_units = scipy.linalg.lu_solve(lu_info, -rhs[:, len(cols):])
+                cfg.viscous_units = self._lu_solve(lu_info, -rhs[:, len(cols):])
                 self._viscous_solve_count += (1 if parity == "full" else len(cols)) + 1
                 self._viscous_rhs_count += rhs.shape[1]
             cfg.iterations.update(dict.fromkeys(cols, 0))
@@ -1624,10 +1709,10 @@ class PanelSolver:
         if parity == "full":
             # Keep the memory layout of the solve output: the superposition
             # products then round as in every earlier version.
-            cfg.unit_mu = scipy.linalg.lu_solve(lu_info, -np.ascontiguousarray(rhs))
+            cfg.unit_mu = self._lu_solve(lu_info, -np.ascontiguousarray(rhs))
             return
         for idx, k in enumerate(cols):
-            cfg.unit_mu[:, k] = scipy.linalg.lu_solve(lu_info, -rhs[:, idx])
+            cfg.unit_mu[:, k] = self._lu_solve(lu_info, -rhs[:, idx])
 
     def _full_unit_mu(self, unit_mu: np.ndarray) -> np.ndarray:
         """Return the unit doublets on the full mesh with shape (Nf, 6)."""
@@ -2035,6 +2120,7 @@ class PanelSolver:
                 device=self._device_arg,
                 dtype=self._dtype_arg,
                 ground_solver=self.ground_solver,
+                cpu_lu=self.cpu_lu,
                 _reuse_full_from=self,
             )
         return self._full_solver

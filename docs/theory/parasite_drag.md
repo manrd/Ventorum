@@ -36,7 +36,7 @@ Mixed laminar-turbulent flow with transition at the fraction $x_{tr}$ [-] of the
 C_f = C_{f,\mathrm{turb}}(Re) - x_{tr}\,\left[C_{f,\mathrm{turb}}(Re_{tr}) - C_{f,\mathrm{lam}}(Re_{tr})\right] .
 ```
 
-Hence $x_{tr} = 0$ is fully turbulent and $x_{tr} = 1$ is fully laminar. At a transition Reynolds number of $5 \times 10^5$ the rule gives a correction term of $1612/Re$, against the value $1700/Re$ quoted in some textbooks.
+Hence $x_{tr} = 0$ is fully turbulent and $x_{tr} = 1$ is fully laminar. At a transition Reynolds number of $5 \times 10^5$ the rule gives a correction term of $Re_{tr}\,[C_{f,\mathrm{turb}}(Re_{tr}) - C_{f,\mathrm{lam}}(Re_{tr})]/Re \approx 1614/Re$, against the value $1700/Re$ quoted in some textbooks.
 
 The composite rule has a physical meaning only for a laminar run long enough that the laminar law gives less friction than the turbulent law. The two mean-friction laws give the same value at the Reynolds number $Re_{tr,\min}$ (`RE_TRANSITION_MIN`, about $1.2 \times 10^4$, computed in the module by bisection). A laminar run with $Re_{tr} < Re_{tr,\min}$ counts as turbulent. Without this guard, a run near $Re_{tr} = 1$ gives a negative $C_f$, and short runs give more than the fully turbulent value. With the guard and $Re \ge Re_{tr,\min}$, $C_f$ is continuous in $x_{tr}$ (the composite rule equals the fully turbulent value at the guard), it does not rise when the laminar run grows, and it stays between $C_{f,\mathrm{lam}}(Re)$ and $C_{f,\mathrm{turb}}(Re)$. Below $Re = Re_{tr,\min}$ the turbulent law is outside its range; the function then returns the turbulent value for $x_{tr} < 1$ and the laminar value for $x_{tr} = 1$.
 

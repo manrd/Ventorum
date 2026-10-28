@@ -117,7 +117,7 @@ def flat_plate_cf(
 
     so ``x_transition = 0`` is fully turbulent and ``x_transition = 1``
     is fully laminar. At a transition Reynolds number of 5e5 this gives
-    a correction term of 1612/Re, against the value 1700/Re quoted in
+    a correction term of about 1614/Re, against the value 1700/Re quoted in
     some textbooks; the difference is a small fraction of the correction.
 
     Guard of the composite rule: a laminar run counts only when

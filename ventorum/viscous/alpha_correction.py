@@ -1,8 +1,12 @@
 # Author: Manuel Alejandro Rodriguez Diaz, PhD
 """Viscous-inviscid coupling by angle-of-attack correction (V1, decambering with 2D polars).
 
-This module couples the linear potential-flow solvers (vortex-lattice
-method and linear lifting line) with two-dimensional section polars. One
+This module couples the linear potential-flow solvers with
+two-dimensional section polars: the vortex-lattice method
+(``model="vlm"``), the linear lifting line (``model="llt"``) and the 3D
+panel method of the thick surface (``model="panel3d"``, strip lift from
+the surface pressure). The nonlinear lifting line is not a model of this
+coupling: it reads the section polars itself. One
 correction angle ``delta_j`` [rad] per spanwise strip changes the
 right-hand side of that strip (a uniform change of its section angle of
 attack: the onset turns about the span axis ``n x c`` of the strip, in

@@ -309,9 +309,8 @@ The methods in this chapter are verified by tests in the repository test suite:
 - E. N. Jacobs, K. E. Ward and R. M. Pinkerton, "The Characteristics of 78 Related Airfoil Sections from Tests in the Variable-Density Wind Tunnel", NACA Report 460, 1933.
 - J. Katz and A. Plotkin, *Low-Speed Aerodynamics*, 2nd ed., Cambridge University Press, Cambridge, 2001.
 - C. L. Ladson, C. W. Brooks, A. S. Hill and D. W. Sproles, "Computer Program to Obtain Ordinates for NACA Airfoils", NASA TM-4741, 1996.
-- D. Lednicer, "A CFD Evaluation of Wind Tunnel Test Sections", 48th AIAA Aerospace Sciences Meeting, AIAA Paper 2010-0458, Orlando, FL, 2010.
 - M. J. Lighthill, "On Displacement Thickness", *Journal of Fluid Mechanics*, Vol. 4, No. 4, 1958, pp. 383-392.
 - M. S. Selig, J. J. Guglielmo, A. P. Broeren and P. Giguere, *Summary of Low-Speed Airfoil Data*, Vol. 1, SoarTech Publications, Virginia Beach, VA, 1995.
 - H. B. Squire and A. D. Young, "The Calculation of the Profile Drag of Aerofoils", Aeronautical Research Committee Reports and Memoranda, R&M 1838, 1938.
-- T. J. Swafford, "Analytical Approximation of Two-Dimensional Separated Turbulent Boundary-Layer Velocity Profiles", *AIAA Journal*, Vol. 21, No. 6, 1983, pp. 923-925.
+- T. J. Swafford, "Analytical Approximation of Two-Dimensional Separated Turbulent Boundary-Layer Velocity Profiles", *AIAA Journal*, Vol. 21, No. 6, 1983, pp. 923-926.
 - C. Wieselsberger, "Wing Resistance Near the Ground", NACA TM-77, 1922; translated from *Zeitschrift fuer Flugtechnik und Motorluftschiffahrt*, Vol. 12, No. 10, 1921.

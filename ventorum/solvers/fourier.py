@@ -22,7 +22,9 @@ the reference point therefore gets a moment from both parts.
 
 Limitations: one symmetric, unswept, planar wing; linear section data; no
 ground effect; no node displacements (the solver refuses a surface with
-``node_displacements`` with ``ValueError``). The solver refuses a wing outside that model with
+``node_displacements`` with ``ValueError``); no use of ``WingSection.shape``
+(the solver uses the section polar only, and a section with a shape gives
+a note in the trust warnings). The solver refuses a wing outside that model with
 ``ValidityError`` (see ``_check_geometry_in_model``): quarter-chord sweep
 above 1 deg on a spanwise interval, dihedral, or a vertical offset of the
 sections. Reference: H. Glauert, "The Elements of Aerofoil and Airscrew
@@ -32,6 +34,7 @@ Theory", Cambridge University Press, 1926, chapter XI.
 from __future__ import annotations
 
 import threading
+import warnings
 from collections import OrderedDict
 
 import numpy as np
@@ -132,6 +135,33 @@ def _check_geometry_in_model(surf: LiftingSurface) -> None:
             f"The quarter-chord line sweeps {sweep[k]:.1f} deg between sections {k} and "
             f"{k + 1} of surface '{surf.name}'; the limit is {SWEEP_LIMIT_DEG:g} deg. {use_vlm}"
         )
+
+
+def _unused_shape_notes(aircraft: Aircraft) -> list[str]:
+    """Return a note for each surface whose sections give a shape that the solver does not use.
+
+    The Fourier solver takes ``alpha_L0``, the lift slope ``a0``, ``Cd0``
+    and ``Cm0`` from the section polar (``WingSection.airfoil``) only. A
+    section shape (``WingSection.shape``) does not change the result. The
+    note goes to the trust warnings with no penalty.
+
+    Parameters
+    ----------
+    aircraft : Aircraft
+        The geometry.
+
+    Returns
+    -------
+    list of str
+        One note for each surface with at least one section shape.
+    """
+    return [
+        f"[{surf.name}] the sections give an airfoil shape, but the Fourier lifting line does not use it: "
+        "the Fourier lifting line uses the section polar only (WingSection.airfoil: alpha_L0, lift slope, "
+        "Cd0, Cm0). Give each section a polar that matches its shape, or use the VLM."
+        for surf in aircraft.surfaces
+        if any(sec.shape is not None for sec in surf.sections)
+    ]
 
 
 #: Cache of Gauss-Legendre nodes and weights by order. The nodes depend
@@ -310,6 +340,8 @@ class FourierSolver(BaseSolver):
         if has_rates(condition):
             raise ValidityError("The Fourier solver has no body rates (p, q, r). Use solver='vlm', 'linear' "
                                 "or 'nonlinear'.")
+        for msg in _unused_shape_notes(aircraft):
+            warnings.warn(msg, RuntimeWarning, stacklevel=3)
         # The reference values and the whole Fourier system depend only on the
         # surfaces and N: computed once per geometry (same fingerprint as the
         # lattice cache), read-only. The moment reference point is per call.
@@ -395,15 +427,17 @@ class FourierSolver(BaseSolver):
             CL=CL, CDi=CDi, CDp=CDp, CD_total=CD_total if has_profile else None,
             e=e, AR=AR, Cm=Cm,
         )
+        notes = _unused_shape_notes(aircraft)
         totals.trust = evaluate_aerodynamic_trust(
             AR=AR, condition=condition, spanwise_list=[spanwise], CL=CL, CDi=CDi,
             CD_total=totals.CD_total, converged=True, n_panels=N, max_sweep_rad=0.0,
-            solver_type="fourier",
+            solver_type="fourier", notes=notes,
         )
         return SolverResult(
             spanwise=[spanwise], totals=totals, solver_type="fourier", converged=True,
             iterations=1, fourier_coefficients=A, condition=condition,
             b_ref=float(aircraft.b_ref), c_ref=float(aircraft.c_ref),
+            details={"notes": list(notes)},
         )
 
     def solve(

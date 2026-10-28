@@ -20,6 +20,7 @@ a minor version can change a public interface.
   without it is solved again). A ground polar without circulation data keeps the old rule and gives a
   trust note. Free-air results and the `model="panel3d"` path do not change.
   `details["strip_circulation_lift"]` marks the strips that read the circulation lift.
+- Ventorum-3DP: tuner-chosen CPU LU factorization backend (`cpu_lu`, "scipy" or "torch"). A full tuner run measures SciPy and PyTorch CPU LU at the panel workload sizes and writes the faster backend to the profile. SciPy remains the default without a profile. The PyTorch path uses `torch.linalg.lu_factor` and `torch.linalg.lu_solve` on CPU float64 tensors that share memory with the work matrix where possible. The Krylov ground preconditioner and pressure Kutta accept both factor types. Direct results with SciPy are bit-identical, and results with PyTorch agree to round-off.
 
 - Adjoint gradients and finite-difference check at fixed shared-hinge topology:
   adjoint gradients with node inputs (`gradients`) are defined at a fixed shared-hinge

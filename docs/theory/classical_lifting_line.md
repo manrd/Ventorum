@@ -79,7 +79,11 @@ The solver refuses a geometry or a condition outside the model, with the error `
 - quarter-chord sweep above `ventorum.solvers.fourier.SWEEP_LIMIT_DEG` on any interval between two sections. A tapered wing with a straight leading edge has a swept quarter-chord line, so it is refused; give it with a straight quarter-chord line;
 - dihedral, or a vertical offset of a section, above a small fraction (`PLANAR_TOL_FRACTION`) of the semi-span;
 - sideslip ($\beta \neq 0$);
-- ground effect ($h$ given).
+- ground effect ($h$ given);
+- body rates ($p$, $q$ or $r$ not zero);
+- compressibility (`mach > 0`).
+
+The solver also refuses a deflected control surface, with the error `ValueError`; the message names the vortex-lattice and the lifting-line solvers.
 
 Inside the envelope, the model has the limits of Lanchester–Prandtl lifting-line theory: low aspect ratio, stall and compressibility are outside it. The trust score lowers the rating for them (see [Trust score](trust_score.md)).
 
