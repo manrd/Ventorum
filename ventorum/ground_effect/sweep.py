@@ -73,6 +73,12 @@ from ventorum.ground_effect.solver import (
 from ventorum.solvers.factory import make_solver, resolve_solver_type
 from ventorum.ground_effect.state import GroundEffectResult
 
+#: Largest height step of the grid differences, as a fraction of the smallest
+#: clearance of the case, without a warning. The error of a difference grows
+#: with the square of the step (central) or with the step (end point); the
+#: state tool :func:`ventorum.height_derivatives` uses 0.05.
+MAX_GRID_H_STEP_RATIO = 0.1
+
 
 def _nan_slope(x: np.ndarray, y: np.ndarray) -> float:
     ok = np.isfinite(y)
@@ -181,6 +187,29 @@ class GroundEffectSweepResult:
             return self.phis_deg, arr[h_idx, a_idx, :]
         raise ValueError("Specify exactly two of (h_val, alpha_val, phi_val) to obtain a 1D slice.")
 
+    def _height_step_ratio(self, p0: int) -> np.ndarray:
+        """Return the height step of the differences over the smallest clearance, shape (n_h, n_alpha).
+
+        The step at a height is the larger distance to its neighbours in
+        the height grid (the one neighbour at an end point). The clearance
+        is ``h_min`` [m] of the case, or the grid height when ``h_min`` is
+        not known. The value is NaN where the clearance is not positive or
+        not known (a failed case).
+        """
+        h = np.asarray(self.heights, dtype=float)
+        gaps = np.abs(np.diff(h))
+        step = np.empty_like(h)
+        step[0], step[-1] = gaps[0], gaps[-1]
+        if len(h) > 2:
+            step[1:-1] = np.maximum(gaps[:-1], gaps[1:])
+        hm = np.asarray(self.h_min, dtype=float)
+        if hm.ndim == 3 and hm.shape[:2] == (len(h), len(self.alphas_deg)):
+            clear = hm[:, :, p0]
+        else:
+            clear = np.repeat(h[:, None], len(self.alphas_deg), axis=1)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            return np.where(clear > 0, step[:, None] / clear, np.nan)
+
     def compute_stability_derivatives(self) -> dict[str, Any]:
         """Compute the derivatives, the aerodynamic centres and the Irodov margin.
 
@@ -206,6 +235,14 @@ class GroundEffectSweepResult:
               (``pivot_point_m``) with its height held fixed, for every
               ``height_ref``. The criterion applies only when that point is
               the centre of gravity.
+            * ``h_step_over_clearance``: height step of the differences
+              over the smallest clearance of each case, shape (n_h,
+              n_alpha). The height derivatives are differences on the
+              height grid, so their error grows with this step.
+            * ``warnings``: list of str. It has a warning when a step is
+              larger than ``MAX_GRID_H_STEP_RATIO`` (0.1) of the clearance.
+              For the derivatives of one flight state with a small step,
+              use :func:`ventorum.height_derivatives`.
             * ``Cl_phi``, ``Cn_phi``, ``CY_phi`` [1/rad] vs height (bank fit
               over abs(phi) <= 5 deg at the alpha nearest 4 deg). ``Cl``
               and ``Cn`` are the stability-axis rolling and yawing moments
@@ -222,6 +259,7 @@ class GroundEffectSweepResult:
         h_over_c = h_vals / c
         out.update(heights=h_vals, h_over_c=h_over_c, alphas_deg=self.alphas_deg, phis_deg=self.phis_deg)
         out["pivot_point_m"] = None if self.ref_point is None else np.asarray(self.ref_point, dtype=float)
+        out["warnings"] = []
         out["note"] = ("Pitch and height derivatives are about the moment reference point, with the height "
                        "of that point held fixed (also when height_ref is not 'ref'). Height derivatives "
                        "are at constant alpha. End points of the height grid use one-sided (first-order) "
@@ -257,6 +295,19 @@ class GroundEffectSweepResult:
             CL_h = np.gradient(self.CL[:, :, p0], h_over_c, axis=0)
             Cm_h = np.gradient(self.Cm[:, :, p0], h_over_c, axis=0)
             out.update(CL_h=CL_h, Cm_h=Cm_h)
+            ratio = self._height_step_ratio(p0)
+            out["h_step_over_clearance"] = ratio
+            with np.errstate(invalid="ignore"):
+                big = np.isfinite(ratio) & (ratio > MAX_GRID_H_STEP_RATIO)
+            if np.any(big):
+                rows = sorted({float(h_vals[i]) for i in np.nonzero(big)[0]})
+                out["warnings"].append(
+                    f"Coarse height grid: the height step of the differences is up to "
+                    f"{float(np.nanmax(ratio)):.2f} of the smallest clearance (limit "
+                    f"{MAX_GRID_H_STEP_RATIO:g}) at the heights {', '.join(f'{v:g}' for v in rows)} m. CL_h, "
+                    "Cm_h, x_h and irodov_margin carry the truncation error of this step, and a margin near "
+                    "zero can change sign. Use heights closer together, or ventorum.height_derivatives (a "
+                    "step of 5 % of the clearance) at each flight state.")
             with np.errstate(divide="ignore", invalid="ignore"):
                 x_h = np.where(np.abs(CL_h) > MIN_CENTRE_SLOPE, -Cm_h / CL_h * c, np.nan)
             out["x_h"] = x_h
