@@ -38,10 +38,18 @@ image singularities scales roughly inversely with the ground height
 three-dimensional shape (n_Re, n_flap, n_alpha) for backward
 compatibility.
 
+Lift definitions: in ground effect a section has a pressure (force) lift
+and a circulation lift ``2 Gamma / c``, and they differ near a wall
+(Coulliette and Plotkin 1996). ``Cl`` holds the lift that the source
+reports. The optional array ``Cl_circulation`` holds the circulation lift
+when every source polar of the table gives it (the in-house 2D solver in
+ground effect). It is interpolated like ``Cl``.
+
 Sources: Drela, M., 1989, XFOIL: An analysis and design system for low
 Reynolds number airfoils; Abbott, I. H. and Von Doenhoff, A. E., 1959,
 Theory of Wing Sections, Dover; Wieselsberger, C., 1921, Wing resistance
-near the ground, NACA TM-77; bilinear and trilinear interpolation on a
+near the ground, NACA TM-77; Coulliette, C. and Plotkin, A., 1996, Aerofoil
+ground effect revisited, The Aeronautical Journal 100; bilinear and trilinear interpolation on a
 rectangular grid follows the standard multidimensional interpolation
 described in Press, W. H. and others, Numerical Recipes, Cambridge
 University Press.
@@ -107,6 +115,12 @@ class PolarTable:
     h_over_c : np.ndarray or None
         Heights above ground in chords [-], strictly ascending,
         shape (n_h,). None indicates free air.
+    Cl_circulation : np.ndarray or None
+        Circulation lift coefficients ``2 Gamma / (V c)`` [-], the shape
+        of ``Cl`` (optional). None means that the table gives no
+        circulation lift. In ground effect ``Cl`` is then the lift that
+        the source reports (for the in-house 2D solver, the pressure
+        lift).
 
     Notes
     -----
@@ -124,6 +138,7 @@ class PolarTable:
     source_info: dict[str, Any] = field(default_factory=dict)
     last_dropped: int = field(default=0, compare=False)
     h_over_c: np.ndarray | None = field(default=None)
+    Cl_circulation: np.ndarray | None = field(default=None)
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "Re", _as_sorted_axis(self.Re, "Re"))
@@ -156,6 +171,13 @@ class PolarTable:
                     f"{name} has shape {arr.shape}, expected {shape}."
                 )
             object.__setattr__(self, name, arr)
+        if self.Cl_circulation is not None:
+            arr = np.asarray(self.Cl_circulation, dtype=float)
+            if arr.shape != shape:
+                raise ValueError(
+                    f"Cl_circulation has shape {arr.shape}, expected {shape}."
+                )
+            object.__setattr__(self, "Cl_circulation", arr)
         object.__setattr__(self, "source_info", dict(self.source_info))
 
     def coverage(self) -> np.ndarray:
@@ -198,7 +220,10 @@ class PolarTable:
         -------
         TabulatedAirfoil
             The interpolated polar. Angles are [rad]. Its ``Re`` field
-            holds the query Reynolds number [-].
+            holds the query Reynolds number [-]. When the table has
+            ``Cl_circulation``, the polar has ``Cl_circulation_data``
+            with the same interpolation, and an angle with a NaN
+            circulation lift is also dropped.
 
         Raises
         ------
@@ -242,9 +267,16 @@ class PolarTable:
                     & np.isfinite(self.Cd[ii, jj, :])
                     & np.isfinite(self.Cm[ii, jj, :])
                 )
+                if self.Cl_circulation is not None:
+                    ok &= np.isfinite(self.Cl_circulation[ii, jj, :])
             cl = _bilinear(self.Cl, i_re, j_flap, weight_re, weight_flap)
             cd = _bilinear(self.Cd, i_re, j_flap, weight_re, weight_flap)
             cm = _bilinear(self.Cm, i_re, j_flap, weight_re, weight_flap)
+            cl_circ = (
+                None
+                if self.Cl_circulation is None
+                else _bilinear(self.Cl_circulation, i_re, j_flap, weight_re, weight_flap)
+            )
             name_suffix = ""
         else:
             if h_over_c is None:
@@ -282,6 +314,8 @@ class PolarTable:
                     & np.isfinite(self.Cd[ii, jj, kk, :])
                     & np.isfinite(self.Cm[ii, jj, kk, :])
                 )
+                if self.Cl_circulation is not None:
+                    ok &= np.isfinite(self.Cl_circulation[ii, jj, kk, :])
             cl = _trilinear(
                 self.Cl, i_re, j_flap, k_h, weight_re, weight_flap, weight_h
             )
@@ -290,6 +324,13 @@ class PolarTable:
             )
             cm = _trilinear(
                 self.Cm, i_re, j_flap, k_h, weight_re, weight_flap, weight_h
+            )
+            cl_circ = (
+                None
+                if self.Cl_circulation is None
+                else _trilinear(
+                    self.Cl_circulation, i_re, j_flap, k_h, weight_re, weight_flap, weight_h
+                )
             )
             name_suffix = f", h={query_h:.6g}"
 
@@ -307,10 +348,16 @@ class PolarTable:
             Cd_data=np.asarray(cd[keep], dtype=float),
             Cm_data=np.asarray(cm[keep], dtype=float),
             Re=query_re,
+            Cl_circulation_data=(
+                None if cl_circ is None else np.asarray(cl_circ[keep], dtype=float)
+            ),
         )
 
     def to_npz(self, path: str | Path) -> Path:
         """Store the table in a numpy ``.npz`` file (no pickle).
+
+        The array ``Cl_circulation`` is stored only when the table has it,
+        so a table without it gives the same file as before.
 
         Parameters
         ----------
@@ -345,12 +392,17 @@ class PolarTable:
         }
         if self.h_over_c is not None:
             save_dict["h_over_c"] = np.asarray(self.h_over_c, dtype=float)
+        if self.Cl_circulation is not None:
+            save_dict["Cl_circulation"] = np.asarray(self.Cl_circulation, dtype=float)
         np.savez(out, **save_dict)
         return out
 
     @classmethod
     def from_npz(cls, path: str | Path) -> PolarTable:
         """Read a table stored by :meth:`to_npz`.
+
+        A file without ``Cl_circulation`` (for example a file of an older
+        version) gives a table without circulation lift.
 
         Parameters
         ----------
@@ -398,6 +450,11 @@ class PolarTable:
                 if "h_over_c" in keys
                 else None
             )
+            cl_circ = (
+                np.asarray(stored["Cl_circulation"], dtype=float)
+                if "Cl_circulation" in keys
+                else None
+            )
             return cls(
                 Re=np.asarray(stored["Re"], dtype=float),
                 flap_deg=np.asarray(stored["flap_deg"], dtype=float),
@@ -407,6 +464,7 @@ class PolarTable:
                 Cm=np.asarray(stored["Cm"], dtype=float),
                 source_info=info,
                 h_over_c=h_over_c,
+                Cl_circulation=cl_circ,
             )
 
 
@@ -682,6 +740,46 @@ def _place_on_grid(
     return cl, cd, cm
 
 
+def _place_circulation(
+    polar: TabulatedAirfoil | None,
+    alpha_rad: np.ndarray,
+    tolerance_rad: float,
+) -> np.ndarray | None:
+    """Map the circulation lift of one source polar onto the requested alpha grid.
+
+    The rule is the one of :func:`_place_on_grid`.
+
+    Parameters
+    ----------
+    polar : TabulatedAirfoil or None
+        The source polar, or None for a fully failed pair.
+    alpha_rad : np.ndarray
+        Requested angles [rad].
+    tolerance_rad : float
+        Largest accepted distance to a tabulated point [rad].
+
+    Returns
+    -------
+    np.ndarray or None
+        Circulation lift row [-] on the requested grid (NaN for gaps), or
+        None when the polar has no circulation lift data. A failed pair
+        (None) gives a NaN row.
+    """
+    if polar is None:
+        return np.full(alpha_rad.shape, np.nan)
+    if polar.Cl_circulation_data is None:
+        return None
+    probe = TabulatedAirfoil(
+        name=polar.name,
+        alpha=polar.alpha,
+        Cl_data=polar.Cl_circulation_data,
+        Cd_data=polar.Cd_data,
+        Cm_data=polar.Cm_data,
+    )
+    row, _, _ = _place_on_grid(probe, alpha_rad, tolerance_rad)
+    return row
+
+
 def source_supports_ground(source: Any) -> bool:
     """Report whether *source* supports ground effect (feature check).
 
@@ -762,6 +860,9 @@ def build_polar_table(
     -------
     PolarTable
         The built table, with NaN where the source did not converge.
+        ``Cl_circulation`` is set when every converged source polar
+        gives the circulation lift (the in-house 2D solver in ground
+        effect), else it is None.
         ``source_info`` holds the source name, the section, the options
         (the options of ``source.describe()`` when the source has that
         method, plus ``x_hinge``, ``y_hinge`` and ``h_over_c``) and the
@@ -854,6 +955,9 @@ def build_polar_table(
             cl[i_re, j_flap, :] = row_cl
             cd[i_re, j_flap, :] = row_cd
             cm[i_re, j_flap, :] = row_cm
+        cl_circ = _circulation_grid(
+            polars, [g[:2] for g in grid_items], cl.shape, alpha_rad, tolerance_rad
+        )
     else:
         n_re, n_flap, n_h, n_alpha = (
             res.size,
@@ -869,6 +973,9 @@ def build_polar_table(
             cl[i_re, j_flap, k_h, :] = row_cl
             cd[i_re, j_flap, k_h, :] = row_cd
             cm[i_re, j_flap, k_h, :] = row_cm
+        cl_circ = _circulation_grid(
+            polars, [g[:3] for g in grid_items], cl.shape, alpha_rad, tolerance_rad
+        )
 
     described = _describe_source(source)
     opts: dict[str, Any] = dict(described.get("options", {}))
@@ -891,7 +998,48 @@ def build_polar_table(
         Cm=cm,
         source_info=info,
         h_over_c=h_sorted,
+        Cl_circulation=cl_circ,
     )
+
+
+def _circulation_grid(
+    polars: list[TabulatedAirfoil | None],
+    indices: list[tuple],
+    shape: tuple[int, ...],
+    alpha_rad: np.ndarray,
+    tolerance_rad: float,
+) -> np.ndarray | None:
+    """Return the circulation lift array of a table, or None.
+
+    Parameters
+    ----------
+    polars : list
+        One source polar (or None for a failed case) per grid point.
+    indices : list of tuple
+        Table indices (without the alpha index) of each grid point.
+    shape : tuple of int
+        Shape of the table arrays.
+    alpha_rad : np.ndarray
+        Requested angles [rad].
+    tolerance_rad : float
+        Largest accepted distance to a tabulated point [rad].
+
+    Returns
+    -------
+    np.ndarray or None
+        Circulation lift [-] of the table shape, NaN for gaps. None when a
+        converged source polar has no circulation lift data, or when no
+        case converged.
+    """
+    if not any(p is not None for p in polars):
+        return None
+    out = np.full(shape, np.nan)
+    for idx, polar in zip(indices, polars):
+        row = _place_circulation(polar, alpha_rad, tolerance_rad)
+        if row is None:
+            return None
+        out[idx] = row
+    return out
 
 
 def _describe_source(source: Any) -> dict[str, Any]:

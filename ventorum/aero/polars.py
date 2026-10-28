@@ -181,7 +181,8 @@ def blend_tabulated(
     TabulatedAirfoil
         Blended polar evaluated on the common alpha range. If the input polars
         have different alpha ranges, a RuntimeWarning is issued giving both
-        ranges and the kept range in degrees.
+        ranges and the kept range in degrees. The blend has circulation lift
+        data only when both polars have it.
     """
     w = float(np.clip(weight, 0.0, 1.0))
     a1_min, a1_max = float(af1.alpha.min()), float(af1.alpha.max())
@@ -212,6 +213,9 @@ def blend_tabulated(
     if (af1.Cm_data is None) != (af2.Cm_data is None):
         warnings.warn("Only one of the blended polars has Cm data; the blend has no Cm.", RuntimeWarning, stacklevel=2)
     re_val = af1.Re if af1.Re == af2.Re else None
+    cl_circ = None
+    if af1.Cl_circulation_data is not None and af2.Cl_circulation_data is not None:
+        cl_circ = np.asarray(mix(af1.Cl_circulation, af2.Cl_circulation), dtype=float)
 
     return TabulatedAirfoil(
         name=f"blend({af1.name},{af2.name},w={w:.2f})",
@@ -220,5 +224,6 @@ def blend_tabulated(
         Cd_data=np.asarray(Cd, dtype=float),
         Cm_data=None if Cm is None else np.asarray(Cm, dtype=float),
         Re=re_val,
+        Cl_circulation_data=cl_circ,
     )
 

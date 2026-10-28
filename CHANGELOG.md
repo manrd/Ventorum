@@ -10,6 +10,27 @@ a minor version can change a public interface.
 
 ### Added
 
+- Viscous alpha-correction coupling (V1) in ground effect: the residual compares circulation lift
+  with circulation lift. The strip lift of the lattice is `2 Gamma / (V c)`, but in ground effect the
+  `Cl` of a Ventorum-2D polar is the pressure lift (Coulliette and Plotkin 1996), so an ideal
+  inviscid ground polar gave a coupled lift that was too low near the ground. `TabulatedAirfoil` has the
+  optional `Cl_circulation_data` (methods `Cl_circulation`, `Cl_circulation_slope`), `PolarTable` the
+  optional `Cl_circulation` (interpolated like `Cl`, stored in `.npz` files when present), and
+  `Ventorum2DPolarSource` stores the circulation lift in its ground polars (a ground cache entry
+  without it is solved again). A ground polar without circulation data keeps the old rule and gives a
+  trust note. Free-air results and the `model="panel3d"` path do not change.
+  `details["strip_circulation_lift"]` marks the strips that read the circulation lift.
+- Viscous alpha-correction coupling (V1) in ground effect: the 2D section of a vortex-lattice strip
+  has its ground images in the ground line of its section plane, at the section-plane distance
+  `h / cos(Gamma_g)` (the 3D panel coupling uses the same line). Before, the images were the 3D
+  mirror images, at `2 h cos(Gamma_g)` in the section plane, and a near-vertical fin strip that read a
+  ground table had a degenerate section slope. The ground factor of the flap shift uses the same
+  images. Planar strips and free-air results do not change.
+- Viscous alpha-correction coupling (V1) in ground effect: a strip steeper than 60 deg to the ground
+  plane (`STEEP_STRIP_LIMIT_DEG`, a code setting) uses free-air section data and a section relation
+  without images, with a trust note. A ground source runs without the height for it. A steep strip
+  that only has a ground table is refused with a `ValueError`: give a free-air polar for the surface
+  in the polar dict.
 - Ventorum-3DP: tuner-chosen CPU LU factorization backend (`cpu_lu`, "scipy" or "torch"). A full tuner run measures SciPy and PyTorch CPU LU at the panel workload sizes and writes the faster backend to the profile. SciPy remains the default without a profile. The PyTorch path uses `torch.linalg.lu_factor` and `torch.linalg.lu_solve` on CPU float64 tensors that share memory with the work matrix where possible. The Krylov ground preconditioner and pressure Kutta accept both factor types. Direct results with SciPy are bit-identical, and results with PyTorch agree to round-off.
 
 - Adjoint gradients and finite-difference check at fixed shared-hinge topology:

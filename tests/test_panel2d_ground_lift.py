@@ -161,7 +161,8 @@ def test_polar_source_uses_reported_viscous_lift(monkeypatch, height):
     """The polar source reads Cl from the solver for every height."""
     def solve(*args, **kwargs):
         return SimpleNamespace(alpha=np.array([4.0]), Cl=np.array([0.5]),
-                               Cl_pressure=np.array([0.4]), Cd=np.array([0.01]),
+                               Cl_pressure=np.array([0.4]), Cl_circulation=np.array([0.6]),
+                               Cd=np.array([0.01]),
                                Cm=np.array([0.0]), converged=np.array([True]))
 
     monkeypatch.setattr("ventorum.aero.polar_source_v2d.solve_viscous", solve)

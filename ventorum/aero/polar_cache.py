@@ -24,8 +24,13 @@ from ventorum.core.datatypes import TabulatedAirfoil
 
 
 def _polar_to_dict(polar: TabulatedAirfoil) -> dict[str, Any]:
-    """Serialise a TabulatedAirfoil to plain JSON types (angles in [rad])."""
-    return {
+    """Serialise a TabulatedAirfoil to plain JSON types (angles in [rad]).
+
+    The circulation lift is stored under the key ``"Cl_circulation"`` only
+    when the polar has it, so a polar without it gives the same file as
+    before.
+    """
+    out = {
         "name": polar.name,
         "alpha": np.asarray(polar.alpha, dtype=float).tolist(),
         "Cl": np.asarray(polar.Cl_data, dtype=float).tolist(),
@@ -37,10 +42,17 @@ def _polar_to_dict(polar: TabulatedAirfoil) -> dict[str, Any]:
         ),
         "Re": polar.Re,
     }
+    if polar.Cl_circulation_data is not None:
+        out["Cl_circulation"] = np.asarray(polar.Cl_circulation_data, dtype=float).tolist()
+    return out
 
 
 def _polar_from_dict(data: dict[str, Any]) -> TabulatedAirfoil:
-    """Rebuild a TabulatedAirfoil from :func:`_polar_to_dict` output."""
+    """Rebuild a TabulatedAirfoil from :func:`_polar_to_dict` output.
+
+    A file without the key ``"Cl_circulation"`` gives a polar without
+    circulation lift data.
+    """
     return TabulatedAirfoil(
         name=data.get("name", ""),
         alpha=np.asarray(data["alpha"], dtype=float),
@@ -50,6 +62,11 @@ def _polar_from_dict(data: dict[str, Any]) -> TabulatedAirfoil:
             None if data.get("Cm") is None else np.asarray(data["Cm"], dtype=float)
         ),
         Re=data.get("Re"),
+        Cl_circulation_data=(
+            None
+            if data.get("Cl_circulation") is None
+            else np.asarray(data["Cl_circulation"], dtype=float)
+        ),
     )
 
 
