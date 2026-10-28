@@ -539,25 +539,23 @@ def test_fin_with_a_free_air_polar_in_ground_effect(model, h):
         np.testing.assert_allclose(res.details["lift_slope_section"][fin], 2.0 * np.pi, rtol=1e-6)
 
 
-def test_fin_strips_with_a_ground_table_have_a_positive_section_slope():
-    """Regression: a fin strip that reads a ground table had a degenerate section slope.
+@pytest.mark.parametrize("model, h", [("vlm", 0.4), ("llt", 1.5)])
+def test_fin_strips_with_only_a_ground_table_are_refused(model, h):
+    """Regression: a fin strip that read a ground table had a degenerate section slope.
 
-    The images of the section came from the 3D mirror in the ground. For a
-    section plane normal to the ground they fall on the section itself (in
-    the section frame), and the slope was -5.35 to 4.75 1/rad at 90 deg
-    and 160 1/rad at 89 deg. With the ground line of the section plane, the
-    images are at the section-plane distance ``h / cos(Gamma_g)``, far from
-    a near-vertical section, and the slope is near the free-air value.
+    The images of the section came from the 3D mirror in the ground, and
+    the slope was -5.35 to 4.75 1/rad at 90 deg and 160 1/rad at 89 deg.
+    A strip steeper than 60 deg to the ground now uses free-air section
+    data. A ground table has none, so the coupling refuses the case and
+    asks for a free-air polar for the surface.
     """
-    cond = FlightCondition(V_inf=30.0, alpha=np.radians(4.0), h=0.4)
+    # The fin is 90 deg to the body; at alpha 4 deg it is 86 deg to the ground.
+    cond = FlightCondition(V_inf=30.0, alpha=np.radians(4.0), h=h)
+    st = SolverSettings(n_panels=12, n_chord=4 if model == "vlm" else 1)
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", RuntimeWarning)
-        res = solve_viscous(_wing_and_fin(), cond, SolverSettings(n_panels=12, n_chord=4),
-                            _analytic_ground_table(), model="vlm")
-    fin = np.flatnonzero(res.details["lattice"].strip_surface == 1)
-    slope = res.details["lift_slope_section"][fin]
-    assert np.all(np.isfinite(slope))
-    assert np.all((slope > 0.5 * np.pi) & (slope < 4.0 * np.pi))
+        with pytest.raises(ValueError, match=r"'fin'.*86\.0 deg.*free-air polar for this surface"):
+            solve_viscous(_wing_and_fin(), cond, st, _analytic_ground_table(), model=model)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -636,3 +634,77 @@ def test_section_plane_normal_to_the_ground_line_is_refused():
     pts = np.array([[0.25, 0.0, 0.5]])
     with pytest.raises(ValueError, match="no normal in this 2D section plane"):
         _section_images(ground, pts, np.array([1.0, 0.0, 0.0]), np.array([0.0, -1.0, 0.0]))
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Steep strips (more than 60 deg to the ground) use free-air section data
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def _steep_wing(dihedral_deg: float) -> LiftingSurface:
+    """Return a symmetric NACA 0012 wing (chord 1 m, semi-span 2 m) with dihedral."""
+    return LiftingSurface(
+        name="w", semi_span=2.0,
+        sections=[WingSection(y_frac=0.0, chord=1.0, shape="0012"), WingSection(y_frac=1.0, chord=1.0, shape="0012")],
+        dihedral=np.radians(dihedral_deg),
+    )
+
+
+def _steep_case(dihedral_deg, polars, h=0.4):
+    cond = FlightCondition(V_inf=30.0, alpha=np.radians(2.0), h=h)
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always", RuntimeWarning)
+        res = solve_viscous(_steep_wing(dihedral_deg), cond, SolverSettings(n_panels=8, n_chord=4), polars,
+                            model="vlm", tol=1e-10)
+    return res, [str(w.message) for w in caught]
+
+
+def _free_air_slope(dihedral_deg):
+    from ventorum.viscous.alpha_correction import _vlm_section_lines
+
+    lat = make_solver("vlm").build(Aircraft(surfaces=[_steep_wing(dihedral_deg)]),
+                                   SolverSettings(n_panels=8, n_chord=4),
+                                   FlightCondition(V_inf=30.0, alpha=np.radians(2.0)), None, np.zeros(3))
+    strips = np.arange(lat.n_strips)
+    return _vlm_section_lines(lat, strips, None, np.zeros(lat.n_strips, dtype=bool))[0]
+
+
+def test_steep_strip_with_a_ground_source_reads_free_air(tmp_path, fake_2d):
+    """A 60.5 deg strip: the ground source runs without the height, no images, a trust note."""
+    from ventorum.viscous.alpha_correction import STEEP_STRIP_LIMIT_DEG
+
+    assert STEEP_STRIP_LIMIT_DEG == 60.0
+    res, texts = _steep_case(60.5, Ventorum2DPolarSource(cache=PolarCache(tmp_path)))
+    assert res.converged
+    assert fake_2d and all(call.get("height") is None for call in fake_2d)
+    assert not np.any(res.details["strip_circulation_lift"])
+    np.testing.assert_allclose(res.details["lift_slope_section"], _free_air_slope(60.5), rtol=1e-12)
+    n_ind = int(np.sum(res.details["lattice"].strip_is_right))
+    note = (f"{n_ind} of {n_ind} strips are steeper than 60 deg to the ground plane; "
+            "they use free-air section data")
+    assert any(t.startswith(note) for t in res.details["notes"])
+    assert any(t.startswith(note) for t in res.totals.trust.warnings)
+    assert any(t.startswith(note) for t in texts)
+
+
+def test_steep_strip_with_only_a_ground_table_is_refused():
+    with pytest.raises(ValueError, match=r"'w'.*60\.4 deg.*free-air polar for this surface"):
+        _steep_case(60.5, _analytic_ground_table())
+
+
+def test_steep_strip_with_a_free_air_polar_in_the_dict_runs():
+    res, _ = _steep_case(60.5, {"w": _linear_free_polar()})
+    assert res.converged
+    assert not any("steeper than" in t for t in res.details["notes"])
+
+
+@pytest.mark.parametrize("kind", ["source", "table"])
+def test_strip_below_the_limit_keeps_the_ground_relation(tmp_path, fake_2d, kind):
+    """A 59.5 deg strip reads the polar in ground effect, with images in its section relation."""
+    polars = Ventorum2DPolarSource(cache=PolarCache(tmp_path)) if kind == "source" else _analytic_ground_table()
+    res, _ = _steep_case(59.5, polars)
+    assert res.converged
+    if kind == "source":
+        assert fake_2d and all(call.get("height") is not None for call in fake_2d)
+    assert np.all(res.details["strip_circulation_lift"][res.details["lattice"].strip_is_right])
+    assert not any("steeper than" in t for t in res.details["notes"])
+    assert np.min(np.abs(res.details["lift_slope_section"] - _free_air_slope(59.5))) > 1e-3

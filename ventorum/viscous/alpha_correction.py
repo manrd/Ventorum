@@ -61,7 +61,12 @@ ground effect is not counted twice. The images are in the ground line of
 the section plane of the strip: a point at the height ``h`` has the
 distance ``h / cos(Gamma_g)`` from that line, with ``Gamma_g`` the angle of
 the span axis from the ground plane (the 3D panel coupling uses the same
-line). A free-air polar is read with the free-air section relation.
+line). A free-air polar is read with the free-air section relation. A
+strip steeper than ``STEEP_STRIP_LIMIT_DEG`` (60 deg, a code setting) to
+the ground plane is not a section above a parallel ground: it uses
+free-air section data (a source runs without the height) and a section
+relation without images, with a trust note. A ground table has no
+free-air data, so a steep strip with a ground table is refused.
 
 Lift definitions in ground effect. The lift ``cl_inv`` of a lattice strip
 is its circulation lift ``2 Gamma / (V c)``, and the section relation and
@@ -173,6 +178,7 @@ __all__ = [
     "BRANCH_CL_DIFFERENCE",
     "SOURCE_ALPHAS_DEG",
     "STALL_START_MARGIN_DEG",
+    "STEEP_STRIP_LIMIT_DEG",
     "solve_viscous",
     "strip_reynolds_number",
 ]
@@ -197,6 +203,14 @@ SOURCE_Y_HINGE = 0.5
 #: Chordwise panels of the converged 2D discrete-vortex section that gives
 #: the ground factor of the thin-airfoil flap shift [-].
 GROUND_FLAP_REFERENCE_PANELS = 256
+
+#: Largest angle [deg] between the span axis of a strip and the ground plane
+#: for which a polar with a height axis is read in ground effect. A steeper
+#: strip (a fin, a strongly bent wing tip) uses free-air section data and a
+#: section relation without ground images: its 2D section is not a section
+#: above a parallel ground, so a 2D ground polar does not describe it. This
+#: limit is a code setting, not a value from a source.
+STEEP_STRIP_LIMIT_DEG = 60.0
 
 #: Trust and runtime warning when a thick section polar runs with a flap in ground effect.
 _THICK_GROUND_FLAP_NOTE = (
@@ -407,6 +421,7 @@ class _StripPolars:
         self._memo: dict[Any, TabulatedAirfoil] = {}
         self._keys_checked = False
         self.last_fallback = np.zeros(0, dtype=bool)
+        self.last_steep = np.zeros(0, dtype=bool)
 
     def check_keys(self, lattice: VortexLattice) -> None:
         """Refuse dict keys that match no strip, surface or airfoil name.
@@ -469,6 +484,17 @@ class _StripPolars:
             "in the polar dict; they use the section airfoil of the geometry."
         )
 
+    def steep_note(self) -> str | None:
+        """Return the trust note of the steep strips of the last resolve that use free-air data, or None."""
+        count = int(np.sum(self.last_steep))
+        if count == 0:
+            return None
+        return (
+            f"{count} of {len(self.last_steep)} strips are steeper than {STEEP_STRIP_LIMIT_DEG:g} deg "
+            "to the ground plane; they use free-air section data (no 2D ground effect in their polar "
+            "or in their section relation)."
+        )
+
     def resolve(
         self,
         lattice: VortexLattice,
@@ -476,10 +502,31 @@ class _StripPolars:
         condition: FlightCondition,
         ground: GroundPlane | None,
     ) -> tuple[list[Any], np.ndarray, np.ndarray]:
-        """Return the polar of each strip, the flags "polar uses the height" and the strip h/c [-]."""
+        """Return the polar of each strip, the flags "polar uses the height" and the strip h/c [-].
+
+        A strip whose span axis is steeper than :data:`STEEP_STRIP_LIMIT_DEG`
+        to the ground plane does not read a polar in ground effect: a source
+        with ground support runs without the height (free air), and
+        ``last_steep`` flags the strip (see :meth:`steep_note`). A free-air
+        polar is read as for any strip.
+
+        Raises
+        ------
+        ValueError
+            If a steep strip has a polar table with a height axis: the table
+            has no free-air data. The message names the surface and its angle.
+        """
         self.check_keys(lattice)
         n = len(strips)
         self.last_fallback = np.zeros(n, dtype=bool)
+        self.last_steep = np.zeros(n, dtype=bool)
+        steep = np.zeros(n, dtype=bool)
+        tilt_deg = np.zeros(n)
+        if ground is not None and n > 0:
+            axes = _strip_span_axes(lattice, np.asarray(strips))
+            sin_tilt = np.clip(np.abs(axes @ ground.normal) / np.linalg.norm(ground.normal), 0.0, 1.0)
+            tilt_deg = np.degrees(np.arcsin(sin_tilt))
+            steep = tilt_deg > STEEP_STRIP_LIMIT_DEG
         out: list[Any] = [None] * n
         uses_height = np.zeros(n, dtype=bool)
         h_over_c = np.full(n, np.nan)
@@ -493,11 +540,22 @@ class _StripPolars:
                 h_over_c[i] = float(ground.height(lattice.qc_mid[s][None, :])[0]) / chord
             cand, self.last_fallback[i] = self._entry(lattice, s)
             if isinstance(cand, PolarTable):
+                if steep[i] and cand.h_over_c is not None:
+                    name = self.aircraft.surfaces[int(lattice.strip_surface[s])].name
+                    raise ValueError(
+                        f"Surface {name!r} has a strip at {tilt_deg[i]:.1f} deg to the ground plane, and its "
+                        "polar is a table with a height axis (no free-air data). Give a free-air polar for "
+                        f"this surface in the polar dict (strips steeper than {STEEP_STRIP_LIMIT_DEG:g} deg "
+                        "do not read ground tables)."
+                    )
                 out[i], uses_height[i] = self._from_table(cand, re_s, flap_deg, hinge, h_over_c[i], ground)
             elif isinstance(cand, (TabulatedAirfoil, LinearAirfoil)):
                 out[i] = cand if flap_deg == 0.0 else deflected_airfoil(cand, np.radians(flap_deg), hinge)
             elif callable(getattr(cand, "polar", None)):
                 with_height = ground is not None and source_supports_ground(cand)
+                if with_height and steep[i]:
+                    with_height = False
+                    self.last_steep[i] = True
                 uses_height[i] = with_height
                 flap = None if flap_deg == 0.0 else (hinge, SOURCE_Y_HINGE, flap_deg)
                 h_arg = round(float(h_over_c[i]), 6) if with_height else None
@@ -1054,6 +1112,9 @@ def _solve_condition(
     fallback = resolver.fallback_note(lattice, strips)
     if fallback is not None:
         notes = [*notes, fallback]
+    steep_note = resolver.steep_note()
+    if steep_note is not None:
+        notes = [*notes, steep_note]
     if ground is not None and model in ("vlm", "llt"):
         h_vals = h_over_c[np.isfinite(h_over_c)]
         if h_vals.size > 0 and float(np.min(h_vals)) < 0.30:
@@ -1401,6 +1462,11 @@ def solve_viscous(
     give) when it has one. A ground polar without it is read with its
     ``Cl``, and the result gets a trust note: the pressure lift of a
     section near the ground is smaller than its circulation lift.
+
+    A strip steeper than :data:`STEEP_STRIP_LIMIT_DEG` to the ground plane
+    (a fin) uses free-air section data, with a trust note. A steep strip
+    whose polar is a table with a height axis raises ``ValueError``: give
+    a free-air polar for its surface in the polar dict.
     """
     model_str = str(model).lower()
     if model_str not in ("vlm", "llt", "panel3d"):
@@ -1646,7 +1712,8 @@ class _PanelCoupling:
         onset_sq = np.sum(onset**2, axis=1) if has_rates(condition) else None
         ground = None if cfg.ground is None else GroundPlane(*cfg.ground)
         polars, uses_height, h_over_c = self.resolver.resolve(self.lattice, self.strips, condition, ground)
-        fallback = self.resolver.fallback_note(self.lattice, self.strips)
+        fallback = [note for note in (self.resolver.fallback_note(self.lattice, self.strips),
+                                      self.resolver.steep_note()) if note is not None]
         slope, zero, moment = self.slope, self.zero, self.moment
         clean_zero = self.clean_zero
         if np.any(uses_height):
@@ -1793,8 +1860,9 @@ class _PanelCoupling:
         from ventorum.solvers.panel3d import _spanwise_results_batch
 
         primary, branches, polars, offset, heights, branch_runs, fallback = self.states[id(result.condition)]
-        if fallback is not None and fallback not in result.details["notes"]:
-            result.details["notes"].append(fallback)
+        for note in fallback:
+            if note not in result.details["notes"]:
+                result.details["notes"].append(note)
         area = self.full(self.area)
         chord = self.lattice.chord
         axis = np.cross(self.lattice.normal, self.lattice.chord_dir)

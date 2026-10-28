@@ -26,6 +26,11 @@ a minor version can change a public interface.
   mirror images, at `2 h cos(Gamma_g)` in the section plane, and a near-vertical fin strip that read a
   ground table had a degenerate section slope. The ground factor of the flap shift uses the same
   images. Planar strips and free-air results do not change.
+- Viscous alpha-correction coupling (V1) in ground effect: a strip steeper than 60 deg to the ground
+  plane (`STEEP_STRIP_LIMIT_DEG`, a code setting) uses free-air section data and a section relation
+  without images, with a trust note. A ground source runs without the height for it. A steep strip
+  that only has a ground table is refused with a `ValueError`: give a free-air polar for the surface
+  in the polar dict.
 - Ventorum-3DP: tuner-chosen CPU LU factorization backend (`cpu_lu`, "scipy" or "torch"). A full tuner run measures SciPy and PyTorch CPU LU at the panel workload sizes and writes the faster backend to the profile. SciPy remains the default without a profile. The PyTorch path uses `torch.linalg.lu_factor` and `torch.linalg.lu_solve` on CPU float64 tensors that share memory with the work matrix where possible. The Krylov ground preconditioner and pressure Kutta accept both factor types. Direct results with SciPy are bit-identical, and results with PyTorch agree to round-off.
 
 - Adjoint gradients and finite-difference check at fixed shared-hinge topology:
