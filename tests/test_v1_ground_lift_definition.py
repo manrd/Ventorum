@@ -539,18 +539,16 @@ def test_fin_with_a_free_air_polar_in_ground_effect(model, h):
         np.testing.assert_allclose(res.details["lift_slope_section"][fin], 2.0 * np.pi, rtol=1e-6)
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "Known defect, open design question: a vertical fin strip that reads a ground table gets "
-        "ground images in its 2D section relation. The images of a section normal to the ground "
-        "fall on the section itself, so the section slope is degenerate (negative or very large). "
-        "The right rule for a fin with a height-axis polar (refuse it, read it as free air, or a "
-        "section ground line) is an owner decision."
-    ),
-)
 def test_fin_strips_with_a_ground_table_have_a_positive_section_slope():
-    """Wing and vertical fin with one ground table for all strips: the fin section slope must be sane."""
+    """Regression: a fin strip that reads a ground table had a degenerate section slope.
+
+    The images of the section came from the 3D mirror in the ground. For a
+    section plane normal to the ground they fall on the section itself (in
+    the section frame), and the slope was -5.35 to 4.75 1/rad at 90 deg
+    and 160 1/rad at 89 deg. With the ground line of the section plane, the
+    images are at the section-plane distance ``h / cos(Gamma_g)``, far from
+    a near-vertical section, and the slope is near the free-air value.
+    """
     cond = FlightCondition(V_inf=30.0, alpha=np.radians(4.0), h=0.4)
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", RuntimeWarning)
@@ -560,3 +558,81 @@ def test_fin_strips_with_a_ground_table_have_a_positive_section_slope():
     slope = res.details["lift_slope_section"][fin]
     assert np.all(np.isfinite(slope))
     assert np.all((slope > 0.5 * np.pi) & (slope < 4.0 * np.pi))
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Image distance in the section plane of a strip with dihedral
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def _flat_wing(dihedral_deg: float) -> LiftingSurface:
+    """Return a flat rectangular one-sided wing (chord 1 m, semi-span 4 m) with dihedral."""
+    return LiftingSurface(
+        name="w", semi_span=4.0, is_symmetric=False,
+        sections=[WingSection(y_frac=0.0, chord=1.0), WingSection(y_frac=1.0, chord=1.0)],
+        dihedral=np.radians(dihedral_deg),
+    )
+
+
+def _lattice(dihedral_deg: float):
+    cond = FlightCondition(V_inf=30.0, alpha=0.0)
+    return make_solver("vlm").build(Aircraft(surfaces=[_flat_wing(dihedral_deg)]), SolverSettings(n_panels=8, n_chord=6), cond,
+                                    None, np.zeros(3))
+
+
+@pytest.mark.parametrize("dihedral_deg", [20.0, 45.0])
+def test_dihedral_section_images_are_at_the_section_plane_distance(dihedral_deg):
+    """The 2D section of a strip with dihedral sees the ground at h / cos(Gamma) in its own plane.
+
+    The section relation of a strip with dihedral Gamma at the height h
+    equals that of a planar strip at the height h / cos(Gamma), the
+    distance from the quarter-chord point to the ground line of the
+    section plane (the 3D panel coupling uses the same line). The old 3D
+    mirror image gave 2 h cos(Gamma) in the section plane, the section of a
+    planar strip at h cos(Gamma).
+    """
+    from ventorum.aero.system import GroundPlane
+    from ventorum.viscous.alpha_correction import _section_images, _vlm_section_lines
+
+    gamma = np.radians(dihedral_deg)
+    tilted, planar = _lattice(dihedral_deg), _lattice(0.0)
+    s = tilted.n_strips // 2
+    ground_t = GroundPlane(np.array([0.0, 0.0, 1.0]), float(tilted.qc_mid[s, 2]) - 0.3)
+    h = float(ground_t.height(tilted.qc_mid[s][None, :])[0])
+    assert h == pytest.approx(0.3, abs=1e-12)
+    ground_p = GroundPlane(np.array([0.0, 0.0, 1.0]), float(planar.qc_mid[s, 2]) - h / np.cos(gamma))
+    one = np.array([s])
+    got = _vlm_section_lines(tilted, one, ground_t, np.array([True]))
+    ref = _vlm_section_lines(planar, one, ground_p, np.array([True]))
+    np.testing.assert_allclose(np.ravel(got), np.ravel(ref), rtol=1e-10, atol=1e-12)
+    # The ground changes the section: the check can see a wrong distance.
+    free = _vlm_section_lines(planar, one, None, np.array([False]))
+    assert abs(float(ref[0][0]) - float(free[0][0])) > 1e-2
+    # The image of a point is 2 h / cos(Gamma) from it in the section plane.
+    q = tilted.qc_mid[s][None, :]
+    d = _section_images(ground_t, q, tilted.chord_dir[s], tilted.normal[s]) - q
+    in_plane = np.hypot(d @ tilted.chord_dir[s], d @ tilted.normal[s])
+    assert float(in_plane[0]) == pytest.approx(2.0 * h / np.cos(gamma), rel=1e-12)
+
+
+def test_planar_strip_images_are_the_3d_mirror_images():
+    """A strip whose span axis lies in the ground plane keeps the 3D mirror images, bit for bit."""
+    from ventorum.aero.system import GroundPlane
+    from ventorum.viscous.alpha_correction import _section_images
+
+    lat = _lattice(0.0)
+    ground = GroundPlane(np.array([np.sin(0.07), 0.0, np.cos(0.07)]), -0.4)
+    for s in range(lat.n_strips):
+        pts = lat.cp[lat.panel_strip == s]
+        np.testing.assert_array_equal(_section_images(ground, pts, lat.chord_dir[s], lat.normal[s]),
+                                      ground.reflect_points(pts))
+
+
+def test_section_plane_normal_to_the_ground_line_is_refused():
+    """A section plane that holds the ground normal has no ground line: a clear error, no NaN."""
+    from ventorum.aero.system import GroundPlane
+    from ventorum.viscous.alpha_correction import _section_images
+
+    ground = GroundPlane(np.array([0.0, 0.0, 1.0]), -1.0)
+    pts = np.array([[0.25, 0.0, 0.5]])
+    with pytest.raises(ValueError, match="no normal in this 2D section plane"):
+        _section_images(ground, pts, np.array([1.0, 0.0, 0.0]), np.array([0.0, -1.0, 0.0]))

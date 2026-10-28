@@ -57,8 +57,11 @@ already has the Glauert shift) have ``alpha0_TA,j = alpha0_j``: no change.
 Ground effect. When the polar of a strip has the ground height (a table
 with a height axis, or a source with ground support), the 2D section of
 the vortex-lattice strip also has its images in the ground, so the 2D
-ground effect is not counted twice. A free-air polar is read with the
-free-air section relation.
+ground effect is not counted twice. The images are in the ground line of
+the section plane of the strip: a point at the height ``h`` has the
+distance ``h / cos(Gamma_g)`` from that line, with ``Gamma_g`` the angle of
+the span axis from the ground plane (the 3D panel coupling uses the same
+line). A free-air polar is read with the free-air section relation.
 
 Lift definitions in ground effect. The lift ``cl_inv`` of a lattice strip
 is its circulation lift ``2 Gamma / (V c)``, and the section relation and
@@ -585,6 +588,53 @@ def _section_frame(
     return d @ cdir, d @ nrm
 
 
+def _section_images(ground: GroundPlane, pts: np.ndarray, cdir: np.ndarray, nrm: np.ndarray) -> np.ndarray:
+    """Return the images [m] of section points in the ground line of the section plane.
+
+    The 2D section of a strip lies in the plane of its chord direction
+    *cdir* and its normal *nrm*. The ground cuts this plane in a line. Its
+    normal in the plane is the projection ``n_s`` of the ground normal
+    ``n``, with ``|n_s| = cos(Gamma_g)``, where ``Gamma_g`` is the angle of
+    the span axis of the strip from the ground plane. A point at the height
+    ``h`` above the ground has the distance ``h / |n_s|`` from this line in
+    the section plane. Its 2D image is at twice that distance, on the other
+    side of the line: ``p - 2 h n / |n_s|^2`` (the in-plane displacement is
+    ``2 h n_s / |n_s|^2``). The 3D panel coupling uses the same ground line
+    for its 2D section reference. When the span axis lies in the ground
+    plane (``|n_s| = 1``), this is the 3D mirror image.
+
+    Parameters
+    ----------
+    ground : GroundPlane
+        The ground plane.
+    pts : numpy.ndarray
+        Points of the section [m], shape (n, 3).
+    cdir, nrm : numpy.ndarray
+        Unit chord direction and unit normal of the strip [-], shape (3,).
+
+    Returns
+    -------
+    numpy.ndarray
+        Image points [m], shape (n, 3). Only their coordinates in the
+        section frame are used.
+
+    Raises
+    ------
+    ValueError
+        If the ground plane has no normal in the section plane (a section
+        plane normal to the ground line, |n_s| < 1e-12).
+    """
+    axis = np.cross(nrm, cdir)
+    if abs(float(ground.normal @ axis)) <= 1e-12 * float(np.linalg.norm(axis)):
+        # The span axis lies in the ground plane: the 3D mirror image is in
+        # the section plane at the section-plane distance.
+        return ground.reflect_points(pts)
+    ns2 = float(ground.normal @ cdir) ** 2 + float(ground.normal @ nrm) ** 2
+    if ns2 < 1e-24:
+        raise ValueError("The ground plane has no normal in this 2D section plane.")
+    return pts - 2.0 * (ground.height(pts) / ns2)[..., None] * ground.normal
+
+
 def _vlm_section_lines(
     lattice: VortexLattice,
     strips: np.ndarray,
@@ -637,7 +687,7 @@ def _vlm_section_lines(
         rz = zp[:, None] - zq[None, :]
         M = -rx / (2.0 * np.pi * (rx * rx + rz * rz))
         if ground is not None and with_images[i]:
-            xi, zi = _section_frame(ground.reflect_points(q), origin, cdir, nrm)
+            xi, zi = _section_frame(_section_images(ground, q, cdir, nrm), origin, cdir, nrm)
             rxi = xp[:, None] - xi[None, :]
             rzi = zp[:, None] - zi[None, :]
             M = M + rxi / (2.0 * np.pi * (rxi * rxi + rzi * rzi))
@@ -730,7 +780,7 @@ def _section_flap_shift(
     rz = zp[:, None] - zq[None, :]
     M = -rx / (2.0 * np.pi * (rx * rx + rz * rz))
     if ground is not None:
-        xi, zi = _section_frame(ground.reflect_points(q), le, cdir, nrm)
+        xi, zi = _section_frame(_section_images(ground, q, cdir, nrm), le, cdir, nrm)
         rxi = xp[:, None] - xi[None, :]
         rzi = zp[:, None] - zi[None, :]
         M = M + rxi / (2.0 * np.pi * (rxi * rxi + rzi * rzi))
