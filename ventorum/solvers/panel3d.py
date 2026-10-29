@@ -94,6 +94,7 @@ from ventorum.core.trust import (
     PANEL3D_OUTER_STRIP_GROUND_NOTE,
     PANEL3D_ROOT_SCALE_WARNING,
     evaluate_aerodynamic_trust,
+    panel3d_convergence_notes,
 )
 from ventorum.geometry.lattice import (
     _AirfoilBlender,
@@ -1529,6 +1530,9 @@ class PanelMethodSolver(BaseSolver):
                             solver._full_mesh.nodes, gnd.normal, gnd.offset,
                         )
             results: list[SolverResult] = []
+            # Measured mesh-convergence limits (notes, no penalty): the chordwise
+            # bias of the method and a dihedral break inside a surface.
+            convergence_notes = panel3d_convergence_notes(ac.surfaces, int(n_chord))
 
             for case_index, (cond, gnd, p_res) in enumerate(zip(cond_list, grounds, panel_results)):
 
@@ -1576,6 +1580,7 @@ class PanelMethodSolver(BaseSolver):
 
                 if getattr(mesh, "root_scale_warning", False):
                     all_notes.append(PANEL3D_ROOT_SCALE_WARNING)
+                all_notes.extend(m for m in convergence_notes if m not in all_notes)
                 h_over_c = (h_min / c_ref) if (h_min is not None and c_ref) else None
 
                 # The chordwise count turns on the chordwise rule of the mesh
@@ -1642,7 +1647,8 @@ class PanelMethodSolver(BaseSolver):
                 if coupling is not None:
                     coupling.finish_result(result, solver, geometry, ac)
                 for msg in all_notes:
-                    if msg in _TRUST_NOTES_NO_WARN:
+                    # Trust notes only, no Python warning (as for the far-field notes).
+                    if msg in _TRUST_NOTES_NO_WARN or msg in convergence_notes:
                         continue
                     if msg == PANEL3D_ROOT_SCALE_WARNING:
                         continue

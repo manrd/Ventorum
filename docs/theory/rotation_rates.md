@@ -109,6 +109,7 @@ For large A the first three tend to the strip-theory values -a_0/8, C_L/4 and -C
 - The Fourier solver refuses a rate that is not zero (`ValidityError`).
 - The GPU pipelines support body rates for the vortex lattice and the numerical lifting lines (linear and nonlinear), in free air and in ground effect. Solves run on the selected device, and the result states the device. One fallback remains: a nonlinear batch with continuation that mixes symmetric and non-symmetric cases (for example a pitch rate in some cases and a roll rate in others) runs on the CPU, because the continuation needs the cases in order. `rate_derivatives` solves without continuation and runs on the GPU.
 - In ground effect the rate derivatives do not include the coupling with the height change (see [Ground effect](ground_effect.md)).
+- **Mesh sensitivity of the lateral values.** With body rates, the near-field lateral values (CY, Cl, Cn) of the lattice solvers are sensitive to the spanwise mesh. In a mesh study of a swept wing with a roll rate, Cn changed by about 0.8 % at each doubling of the spanwise panel count, and the cosine and the uniform spacing gave values 5 to 7 % apart. Each lattice result with a body rate gets a trust note (no penalty). Compare two spanwise panel counts or spacings before you use the lateral rate derivatives.
 
 ## Implementation
 

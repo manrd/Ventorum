@@ -10,6 +10,18 @@ a minor version can change a public interface.
 
 ### Added
 
+- Trust notes and warnings for the measured mesh-convergence limits (no change of the score and
+  of the results). Notes: a vortex-lattice junction of joined surfaces with a fold above 30 deg (a
+  winglet); a root fold above 5 deg on the lattice solvers (the near-field CL drifts by a constant
+  step per doubling); each lattice result with body rates (mesh-sensitive lateral values); the
+  lifting line and the Fourier solver with a tip chord above 0.1 times the largest chord (induced
+  drag 4 to 7 % high for rectangular wings); each 3D panel result (the chordwise lift bias of about
+  -(55 to 85)/n_chord %, with a pointer to the Richardson estimate); a 3D panel dihedral break above
+  5 deg inside a surface. Warnings: the lifting line at a winglet kink above 30 deg; the Fourier
+  solver with fewer than 50 terms at aspect ratio above 20. The functions are in
+  `ventorum.core.trust` (`lattice_convergence_notes`, `fourier_convergence_notes`,
+  `panel3d_convergence_notes`). The theory pages state the limits in their "Envelope" sections,
+  and `docs/user/how_to_panel3d.md` shows the Richardson estimate in `n_chord`.
 - Viscous alpha-correction coupling (V1) in ground effect: the residual compares circulation lift
   with circulation lift. The strip lift of the lattice is `2 Gamma / (V c)`, but in ground effect the
   `Cl` of a Ventorum-2D polar is the pressure lift (Coulliette and Plotkin 1996), so an ideal

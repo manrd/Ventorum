@@ -107,7 +107,27 @@ Ventorum-3DP adds notes or warnings to `totals.trust` for specific aerodynamic a
 * **Dihedral root thickness scaling**: when station root-thickness scaling exceeds $1/\cos(75^\circ) \approx 3.86$ (from dihedral or fold-guard tilt with `scale_root_thickness=True`), the solver raises a `RuntimeWarning` and records a trust warning because root thickness scaling is not verified above 75 deg dihedral (lift can change by more than 10 %).
 * **Steep root, default scaling**: when the first panel row of a symmetric surface has a dihedral of 60 deg or more (`ventorum.panel3d.mesh.STEEP_ROOT_DIHEDRAL_DEG`), the trust score gets a note: the lift converges slowly with the spanwise panel count, so the result needs a spanwise convergence study. Solve with at least two values of `n_panels` and compare the lift.
 * **Steep root without the scaling**: with `panel_scale_root_thickness=False` and the same steep root, the pressure coefficient at the root is singular. The mesh builder raises a `RuntimeWarning` and the trust score gets a warning. Use the default scaling.
+* **Chordwise bias**: every result gets a note with the probable low lift bias of the chordwise discretization, about $-(55 \text{ to } 85)/n_\text{chord}$ percent (see the next section).
+* **Dihedral break**: a dihedral break of more than 5 deg inside a surface (a gull wing) gets a note: the strip lift peak at the break grows with refinement, so use the integrated loads.
 * **Self-intersection**: with `panel_scale_root_thickness=False` the solver also counts the self-intersections of the mesh and refuses a surface that passes through itself or its mirror image. With the default scaling the solver skips this count to save time; call `ventorum.panel3d.mesh.check_mesh` on the mesh to run it.
+
+### Estimate the chordwise error
+
+The constant-strength panels give a lift that is low by about $(55 \text{ to } 85)/n_\text{chord}$ percent at a trailing edge with a finite angle (-1.5 to -2.1 % at the default `n_chord` of 40, for $t/c$ from 6 to 24 %). The Richardson extrapolation in `n_chord` estimates this error for your wing. Run the mesh convergence study and read its chordwise direction:
+
+```python
+from ventorum.panel3d.convergence import panel_mesh_convergence
+
+report = panel_mesh_convergence(aircraft, cond_free, settings)
+cl = report.quantities["CL"]
+print(f"CL of the given mesh: {cl.base_value:.4f}")
+print(f"Chordwise panel levels: {report.n_chord_levels}")
+print(f"CL at the chordwise levels: {cl.chordwise.values}")
+print(f"Richardson value in n_chord: {cl.chordwise.f_extrapolated}")
+print(f"Estimated error of the given mesh: {cl.base_relative_error}")
+```
+
+The study solves five meshes (three levels in each direction), so it costs about 30 base solves. `panel_estimate_mesh_error=True` in `SolverSettings` runs the same study inside `vt.analyze` and adds the estimate to the trust warnings. A Richardson value is given only when the levels converge monotonically; otherwise the value is None and the note of the direction gives the reason.
 
 ## Choose the backend and device
 
