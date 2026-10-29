@@ -646,7 +646,10 @@ def solve_viscous(
     mach : float
         Free-stream Mach number [-]; only 0 is supported.
     ncrit : float
-        Critical amplification exponent of the e^N method [-].
+        Critical amplification exponent of the e^N method [-]. The default
+        9 is the usual value of the e^N method for a low-disturbance wind
+        tunnel. It is a code setting: no source in this repository
+        confirms it yet.
     xtr : tuple of float
         Forced transition x/c on the upper and lower side [-] (x from the
         most forward point, over the reference chord); 1.0 (or more) means
@@ -660,7 +663,10 @@ def solve_viscous(
     tol : float
         Convergence limit of the largest absolute residual [-].
     wake_length : float
-        Wake length over the chord [-]. A wake longer than
+        Wake length over the chord [-]. The default 1 is a code setting,
+        not from a source. Measured reason: the Squire-Young drag changes
+        by less than 0.1 % from 0.5 to 1.5 chords (NACA 4412, Re 1e6,
+        4 deg; tests/test_panel2d_viscous_wake.py). A wake longer than
         :data:`WAKE_LENGTH_LIMIT` (1.5) gives a UserWarning and a note in
         the reason of each angle: it does not converge, because the wake
         shape factor of the wake model reaches 1 at a finite distance
@@ -1303,6 +1309,7 @@ def solve_viscous_flapped(
     moment_ref_opt = options.pop("moment_ref", None)
     _, chord_ref, moment_ref, pivot = resolve_body(base_shape, chord_ref_opt, moment_ref_opt)
 
+    # Default ncrit 9 and wake length 1 c: the origins are in solve_viscous.
     ncrit = options.pop("ncrit", 9.0)
     xtr = options.pop("xtr", (1.0, 1.0))
     height = options.pop("height", None)
@@ -1326,6 +1333,9 @@ def solve_viscous_flapped(
     rules = StopRules(stall_window=stall_window, stall_factor=stall_factor, divergence_factor=divergence_factor,
                       work_budget=work_budget, lm_trials=lm_trials)
     wake_note = warn_long_wake(wake_length, "solve_viscous_flapped")
+    # Work cap of the whole deflection path: 20 angle budgets. A code
+    # setting, not from a source; no measurement in the code or its tests
+    # supports the factor 20.
     total_cap = 20 * work_budget if work_budget > 0 else 0
     kw = dict(ncrit=ncrit, xtr=xtr, height=height, height_reference=height_reference,
               wake_length=wake_length, n_wake=n_wake, chord_ref=chord_ref, moment_ref=moment_ref, pivot=pivot)
@@ -1394,6 +1404,8 @@ def solve_viscous_flapped(
 
         target_d = float(deflection_deg)
         step_max = float(step_deg)
+        # Smallest deflection step [deg] of the halving. A code setting, not
+        # from a source; no measurement in the code or its tests supports it.
         min_step = 0.25
         sgn = 1.0 if target_d > 0.0 else -1.0
 

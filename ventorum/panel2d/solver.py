@@ -56,7 +56,9 @@ from ventorum.panel2d.influence import (
 __all__ = ["Panel2DResult", "solve_inviscid", "section_chord", "section_reference", "reference_point",
            "resolve_reference"]
 
-#: Trailing-edge gap below which a trailing edge is sharp, over the body chord [-].
+#: Trailing-edge gap at or below which a trailing edge is sharp, over the body chord [-].
+#: A code setting, not from a source; no measurement in the code or its tests
+#: supports the value.
 SHARP_TE_GAP = 1e-4
 
 
