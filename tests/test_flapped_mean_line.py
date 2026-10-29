@@ -48,13 +48,21 @@ def _wing(shape, controls=()) -> vt.LiftingSurface:
     )
 
 
+#: Chordwise panels of every solve [-]. The automatic count is 16 or more
+#: with a deflected control (flap effectiveness) and 4 without one, so a
+#: flap increment from two automatic solves would mix two meshes. These
+#: tests check the leg nodes of the mean line on one mesh: they keep the
+#: count of the stored results (4, the former automatic count).
+_N_CHORD = 4
+
+
 def _totals(shape, n_panels, controls=()):
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", RuntimeWarning)
         return vt.VortexLatticeSolver().solve(
             vt.Aircraft(surfaces=[_wing(shape, controls)]),
             vt.FlightCondition(V_inf=30.0, alpha=np.radians(2.0)),
-            vt.SolverSettings(n_panels=n_panels),
+            vt.SolverSettings(n_panels=n_panels, n_chord=_N_CHORD),
         ).totals
 
 

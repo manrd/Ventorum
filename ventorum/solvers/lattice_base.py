@@ -39,6 +39,7 @@ from ventorum.core.errors import ValidityError
 from ventorum.core.trust import (
     body_rate_note,
     check_mach_scope,
+    control_chord_note,
     evaluate_aerodynamic_trust,
     lattice_convergence_notes,
     lattice_spanwise_stats,
@@ -58,6 +59,17 @@ from ventorum.utils.validation import validate_aircraft
 # the centre is always at c/4, about 0.08 c wrong at aspect ratio 1).
 DEFAULT_N_CHORD = 4
 MAX_AUTO_N_CHORD = 32
+
+# Smallest automatic chordwise panel count when a surface has a control
+# (chordwise mode: vortex lattice, two or more chordwise panels), also at
+# zero deflection: control derivatives are differences about zero
+# deflection, and all their cases must use one mesh.
+# The flap effectiveness of the lattice converges at first order with the
+# chordwise count: for a rectangular wing of aspect ratio 40 with a full-span
+# flap (hinge at 0.75 c), Glauert's tau is 0.6090 and the lattice gives
+# 0.549, 0.578, 0.595 and 0.603 at 4, 8, 16 and 32 chordwise panels (an
+# error of about 40/n_chord %). With 16 panels the error is about 2.5 %.
+CONTROL_MIN_AUTO_N_CHORD = 16
 _CAMBER_GROUND_NOTE = (
     "camber modelled by a turned normal (no mean line given); near the ground the chordwise "
     "load and the camber height are approximate"
@@ -82,6 +94,11 @@ LLT_GE_WARN_H_OVER_C = 2.0
 # V_inf (a local helix angle of about 6 deg), the straight wake of the
 # quasi-steady model is a poor approximation and the result gets a note.
 LARGE_ROTATION_FRACTION = 0.1
+
+
+def _has_control(aircraft: Aircraft) -> bool:
+    """Return True if a surface of *aircraft* has a control surface (any deflection)."""
+    return any(getattr(s, "controls", None) for s in aircraft.surfaces)
 
 
 def _cpu_dispatch(n_panels: int, batch: int, reason: str | None, family: str | None = None) -> dict:
@@ -182,7 +199,11 @@ class LatticeSolver(BaseSolver):
         The lifting-line solvers use 1. A value in *settings* is used as
         given. Out of ground effect the default is used. In ground effect a
         chordwise panel is not longer than the smallest gap to the ground,
-        within the default and the maximum automatic count.
+        within the default and the maximum automatic count. When a surface
+        has a control surface (any deflection, zero included), the
+        automatic count is at least ``CONTROL_MIN_AUTO_N_CHORD`` (16), for a
+        flap effectiveness within about 2.5 % of the converged value and one
+        mesh for all cases of a control derivative.
 
         The automatic count is an integer, so CL(h) and the other results
         jump at the heights (and attitudes) where the count changes. For a
@@ -215,8 +236,11 @@ class LatticeSolver(BaseSolver):
             return 1
         if settings.n_chord is not None:
             return max(1, int(settings.n_chord))
+        # A control needs more chordwise panels for its flap effectiveness
+        # (see CONTROL_MIN_AUTO_N_CHORD), also at zero deflection.
+        floor = CONTROL_MIN_AUTO_N_CHORD if _has_control(aircraft) else DEFAULT_N_CHORD
         if ground is None and condition.h is None:
-            return DEFAULT_N_CHORD
+            return floor
         # In ground effect a chordwise panel should not be longer than the gap.
         chord_spacing = getattr(settings, "chord_spacing", "uniform")
         probe_count = DEFAULT_N_CHORD if any(s.controls for s in aircraft.surfaces) else 1
@@ -229,9 +253,9 @@ class LatticeSolver(BaseSolver):
         gp = ground if ground is not None else ground_plane_from_condition(probe, condition, rp)
         h_min = float(np.min(gp.height(probe.all_points())))
         if h_min <= 0.0:
-            return DEFAULT_N_CHORD  # the strike is reported later
+            return floor  # the strike is reported later
         n = int(np.ceil(float(np.max(probe.chord)) / h_min))
-        return int(np.clip(n, DEFAULT_N_CHORD, MAX_AUTO_N_CHORD))
+        return int(np.clip(n, floor, MAX_AUTO_N_CHORD))
 
     def build(
         self,
@@ -385,6 +409,12 @@ class LatticeSolver(BaseSolver):
         notes += [m for m in getattr(lattice, "mesh_warnings", ()) if m not in notes]
         if ground is not None and lattice.camber_fallback:
             notes.append(_CAMBER_GROUND_NOTE)
+        # A deflected control in chordwise mode with fewer panels than the
+        # automatic minimum (only a count that the user set can be below it).
+        if (self.collocation == "vlm" and 2 <= lattice.n_chord < CONTROL_MIN_AUTO_N_CHORD
+                and any(info["mode"] == "chordwise" and info["deflection_rad"] != 0.0
+                        for info in lattice.control_info)):
+            notes.append(control_chord_note(lattice.n_chord))
         if self.collocation == "llt" and h_min is not None and c_ref and h_min / c_ref < LLT_GE_WARN_H_OVER_C:
             notes.append(
                 f"Lifting line in ground effect at h_min/c = {h_min / c_ref:.2f}: it under-predicts the "

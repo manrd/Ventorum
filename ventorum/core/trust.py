@@ -207,6 +207,34 @@ PANEL3D_STEEP_ROOT_CONVERGENCE_NOTE = (
 POST_STALL_BRANCH_PENALTY = 0.35
 
 
+def control_chord_note(n_chord: int) -> str:
+    """Return the trust note of a deflected control with too few chordwise panels.
+
+    The flap effectiveness of the vortex lattice converges at first order
+    with the chordwise panel count: about 40/n_chord % below the converged
+    value (rectangular wing of aspect ratio 40, full-span flap with the
+    hinge at 0.75 c, against Glauert's tau). The note does not change the
+    score.
+
+    Parameters
+    ----------
+    n_chord : int
+        Chordwise panels of the vortex lattice [-], 2 or more.
+
+    Returns
+    -------
+    str
+        The note, with the expected error in percent.
+    """
+    error_pct = 40.0 / float(n_chord)
+    return (
+        f"Deflected control with n_chord = {int(n_chord)}: flap effectiveness about {error_pct:.3g} % low "
+        "(first-order chordwise convergence). The automatic n_chord uses 16 or more chordwise panels "
+        "when a surface has a control."
+    )
+
+
+
 def polar_gap_note(n_reads: int, n_strips: int, n_dropped: int, n_polars: int) -> str:
     """Return the trust note of a viscous coupling whose section polars have gaps.
 
