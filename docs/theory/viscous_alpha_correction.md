@@ -240,17 +240,60 @@ viscous polar, a prescribed thin-airfoil slope, or a finite-span substitute.
 Two unit onsets share one section factorization. Section factorizations
 are separate from the 3D body factorization count.
 
-The free-air line is a property of the cut polygon of the mesh. Its
-slope differs from the slope of the converged section by a
-discretization error that falls as the chordwise and spanwise panel
-counts grow. An identity polar (the polar equals the converged inviscid
-2D section) therefore does not give zero correction on a finite mesh:
-the coupled CL differs from the inviscid 3DP CL by a residual that falls
-about in proportion to the panel size (first order in the mesh). The
-reference rule of the flapped vortex-lattice strips (the inviscid result
-at the same mesh) is not applied to this section line. The slow test
-`tests/test_alpha_correction_ground_reference.py::test_ground_identity_polar_residual_does_not_grow_with_the_mesh`
-prints this free-air residual on three meshes.
+The line and the lift curve of the cut polygon are properties of the
+mesh. Their slope differs from the slope of the converged section by a
+discretization error that falls about in proportion to the panel size
+(first order in the mesh). The 3D strip lift has the same error. If the
+polar were read directly, an identity polar (the polar equals the
+converged inviscid 2D section) would not give zero correction on a
+finite mesh: it would replace the mesh lift of the section by the
+converged lift.
+
+**Owner decision: the reference of the coupled 3D panel result is the
+inviscid 3D panel result at the same mesh**, as for the vortex-lattice
+coupling (see "Reference of a flapped vortex-lattice strip"). The
+coupling therefore reads the departure of the polar from the converged
+inviscid 2D section and adds it to the same-mesh 2D section (a defect
+correction; the decambering idea of Mukherjee and Gopalarathnam 2006).
+The target lift of strip $j$ is
+
+$$c_{l,\mathrm{target},j}(\alpha_v)=C_{l,\mathrm{visc},j}(\alpha_v)
+-C_{l,\mathrm{conv},j}(\alpha_v)+C_{l,\mathrm{mesh},j}(\alpha_v).$$
+
+$C_{l,\mathrm{mesh},j}$ is the 2D Morino lift curve of the cut polygon
+(the pitch curve with images when the polar holds the ground height).
+$C_{l,\mathrm{conv},j}$ is the converged inviscid 2D lift of the same
+cut section: the section plane cuts a mesh of the same surfaces (same
+spanwise mesh, controls and root treatment) with
+`SECTION_REFERENCE_PANELS` (128) cosine-spaced chordwise panels per
+side, and Ventorum-2D (`ventorum.panel2d.solver.solve_inviscid`,
+linear-strength vortex panels, second order in the panel size) solves
+this polygon with the unit chord and the pivot and moment reference at
+the quarter chord. Its `Cl` is the lift of a Ventorum-2D polar: the
+circulation lift in free air, the pressure lift in ground effect, where
+the section pitches about the quarter chord at the height of the strip
+section (the same pitch curve as the same-mesh reference). The solves
+are at knots every `SECTION_REFERENCE_STEP` (0.5 deg) when they are first
+needed, joined by a cubic Hermite interpolation with central-difference
+knot slopes, so the curve and its slope are continuous. Outside the knots
+at which the section clears the ground by 0.01 chord (and at most
+60 deg), the curve is the tangent continuation. 128 panels per side give
+$C_l$ within $10^{-4}$ of 256 panels per side, and the interpolation is
+within $10^{-5}$ of a direct solve (NACA 0012, 10.25 deg, free air and
+$h/c$ = 0.5; `tests/test_panel3d_v1_ground_reference.py` checks both).
+
+A polar that equals the converged inviscid 2D section then gives zero
+correction on any mesh, up to the difference between that polar and the
+reference of the coupling. The tests check a CL correction below 0.1 %
+at 72, 264 and 1056 panels in ground effect and at 8 and 40 chordwise
+panels in free air, with the Ventorum-2D curves of a 100-point NACA 0012
+in a 0.5 deg table as the polar. A polar that is the same-mesh section
+itself now gets the mesh-error correction: its lift is that of the
+coarse cut section, lower than the converged lift, so the coupled CL is
+lower than the inviscid 3D panel CL by about the section mesh error.
+The details `cl_polar`, `cl_section_converged` and `cl_section_mesh`
+give the three parts of the target lift at $\alpha_{v,j}$, and
+`cl_viscous` gives the target lift.
 
 Surface gradients use adjacent panel values and inverse-distance node
 interpolation. The upper and lower trailing-edge connections are cut.
@@ -286,21 +329,23 @@ effective angle far from the attitude. With the tangent, an identity
 polar therefore left a local correction there that did not fall with
 the mesh.
 
-**Inversion of the pitch curve.** The effective angle of a strip with
-images does not come from the tangent. It is the attitude
-$\alpha_{e,j}$ at which the pitch curve of the cut section has the
-strip lift,
+**Inversion of the section curve.** The effective angle of a strip does
+not come from the tangent or the line. It is the angle $\alpha_{e,j}$
+at which the same-mesh lift curve of the cut section has the strip lift,
 
-$$C_l(\alpha_{e,j}; h_j) = c_{l,j},$$
+$$C_{l,\mathrm{mesh},j}(\alpha_{e,j}) = c_{l,j}.$$
 
-with one 2D Morino solve with images per attitude (the same solve that
-gives the three points of the tangent). A bracketed root finder (Brent
-1973) solves this equation to $10^{-13}$ rad. The inversion of the
+In ground effect this is the pitch curve $C_l(\alpha; h_j)$, with one
+2D Morino solve with images per attitude (the same solve that gives the
+three points of the tangent). In free air one Morino factorization gives
+the lift at any onset angle and its exact derivative. A bracketed root
+finder (Brent 1973) solves this equation to the round-off of the curve
+(absolute tolerance $10^{-15}$ rad). The inversion of the
 tangent, $\alpha_{0,j,2D}+c_{l,j}/a_{j,2D}$, is the start value; the
 bracket grows from it in steps that double. The Newton Jacobian uses
 $\partial\alpha_{e,j}/\partial c_{l,j}=1/C_l'(\alpha_{e,j})$, with a
-central difference of $10^{-5}$ rad on the curve
-(`GROUND_CURVE_STEP`). The search stays at the attitudes between $-90$
+central difference of $10^{-5}$ rad on the pitch curve
+(`GROUND_CURVE_STEP`) and the exact derivative in free air. The search stays at the attitudes between $-90$
 and $+90$ deg at which the cut section clears the ground. A lift outside
 the range of these attitudes gets the tangent continuation from the
 last attitude of the range and a trust note. The reported section line
@@ -308,13 +353,11 @@ last attitude of the range and a trust note. The reported section line
 those of the tangent; the inviscid section moment is read at the
 inverted angle.
 
-A polar that is the pitch curve of the same cut section gives zero
-correction to round-off on any mesh
-(`tests/test_panel3d_v1_ground_reference.py`, 72, 264 and 1056 panels).
-A polar that is the converged pitch curve of the section keeps the
-first-order mesh residual of the cut section, as in free air (the slow
-test of `tests/test_alpha_correction_ground_reference.py` prints it); the
-tangent error at the tips had partly cancelled this residual.
+With the tangent, the converged identity polar left a local
+correction at the tip strips that did not fall with the mesh; with the
+inversion and the converged reference, the correction is zero up to the
+difference between the polar and the reference
+(`tests/test_panel3d_v1_ground_reference.py`).
 
 ### Pressure residual and Jacobian
 
@@ -335,13 +378,20 @@ The spanwise `Cl` of the panel result keeps the global lift axis;
 
 The coupled strip equations are
 
-$$r_j=C_{l,p,j}(\delta)-C_{l,\mathrm{visc},j}(\alpha_{v,j})+o_j,
+$$r_j=C_{l,p,j}(\delta)-c_{l,\mathrm{target},j}(\alpha_{v,j})+o_j,
 \qquad
-\alpha_{v,j}=\alpha_{0,j,2D}+\frac{C_{l,p,j}}{a_{j,2D}}+\delta_j.$$
+\alpha_{v,j}=C_{l,\mathrm{mesh},j}^{-1}\left(C_{l,p,j}\right)+\delta_j.$$
 
-The flap offset $o_j$ uses the clean thick-section zero-lift angle and
-the polar's Glauert flap shift, with the same ground factor as the
-lattice coupling. It is zero without a deflected control.
+The flap offset $o_j=a_{j,2D}(\alpha_{0,j,2D}-\alpha_{0,\mathrm{TA},j})$
+uses the clean thick-section zero-lift angle and the polar's Glauert
+flap shift, with the same ground factor as the lattice coupling. It is
+zero without a deflected control. It is kept as it was before the
+converged reference. Note that the converged reference of a flapped
+strip already holds the converged flap of the cut section, so on a
+flapped strip the offset is a second mesh reference: a polar equal to
+the converged inviscid flapped section gets the correction of the
+offset (about the difference between the mesh and the thin-airfoil
+flap shift). This combination is open for a decision.
 
 Let $H_{jk}=\partial C_{l,p,j}/\partial x_k$, where $x$ holds the strip
 angles and, for pressure Kutta, the wake shifts. The surface gradient
@@ -352,11 +402,13 @@ $$\frac{\partial C_{p,i}}{\partial x_k}
 =-\frac{2}{V_\infty^2}\mathbf V_i\cdot
 \frac{\partial\mathbf V_i}{\partial x_k}.$$
 
-Strip pressure integration gives $H$. If $m_j=dC_{l,\mathrm{visc},j}/d\alpha$,
-then the lift rows of the Jacobian are
+Strip pressure integration gives $H$. If
+$t_j=dc_{l,\mathrm{target},j}/d\alpha$ at $\alpha_{v,j}$ and
+$s_j=C_{l,\mathrm{mesh},j}'(\alpha_{e,j})$, then the lift rows of the
+Jacobian are
 
-$$J_{jk}=\left(1-\frac{m_j}{a_{j,2D}}\right)H_{jk}
--m_j I_{jk},$$
+$$J_{jk}=\left(1-\frac{t_j}{s_j}\right)H_{jk}
+-t_j I_{jk},$$
 
 where $I$ selects the strip-angle columns. The Newton solve uses a
 backtracking line search and a damped step on the inviscid response when

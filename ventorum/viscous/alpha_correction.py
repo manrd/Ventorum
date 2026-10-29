@@ -1493,8 +1493,13 @@ def solve_viscous(
 
     For ``panel3d``, free-air conditions share the fixed panel wake and
     one body factorization. Strip lift comes from surface pressure. The
-    section relation comes from a 2D Morino solve of the mesh section.
-    Ground ``auto`` uses a direct solve per configuration; explicit
+    section relation comes from a 2D Morino solve of the mesh section:
+    the effective angle inverts its lift curve (the pitch curve in ground
+    effect). The polar is read relative to the converged inviscid 2D
+    section (Ventorum-2D on the same cut section with 128 chordwise panels
+    per side): the target lift is ``cl_visc - cl_conv + cl_mesh`` at the
+    viscous angle, so a polar equal to the converged inviscid section gives
+    the inviscid 3D panel result at the same mesh. Ground ``auto`` uses a direct solve per configuration; explicit
     ``krylov`` and GPU requests are refused. ``solve_count`` counts body
     triangular-solve calls; ``solve_rhs_count`` counts their columns.
 
@@ -1580,7 +1585,8 @@ def _independent(res: SolverResult) -> np.ndarray:
 
 
 def _panel_residual(x, velocity0, dv, speed, incidence, weights, area,
-                    zero, slope, polars, offset, up, lo, pressure, onset_sq=None, curves=None):
+                    zero, slope, polars, offset, up, lo, pressure, onset_sq=None, curves=None,
+                    references=None):
     """Return the coupled residual and its analytic Jacobian.
 
     Body velocities and their columns are in m/s; speed is in m/s. The
@@ -1592,12 +1598,17 @@ def _panel_residual(x, velocity0, dv, speed, incidence, weights, area,
     :func:`ventorum.panel3d.post.compute_surface_velocity_and_cp`); None
     means no rates.
 
-    The effective angle of a strip is ``zero + cl / slope`` [rad] (the
-    section line). *curves* gives, for each strip with ground images, its
-    2D ground pitch curve (``ventorum.solvers.panel3d._GroundPitchCurve``,
-    None for the other strips): the effective angle of that strip is then
-    the attitude at which the curve has the lift ``cl``, and the Jacobian
-    uses ``dalpha_e / dcl = 1 / (dCl/dalpha)`` of the curve there.
+    Without *curves*, the effective angle of a strip is ``zero + cl /
+    slope`` [rad] (the section line) and the target lift is the polar lift
+    ``cl_visc(alpha_v)``. *curves* gives the same-mesh 2D lift curve
+    ``cl_mesh`` of each strip (the pitch curve with images, or the
+    free-air curve of its cut section; ``ventorum.solvers.panel3d``), and
+    *references* the converged inviscid 2D curve ``cl_conv`` of the same
+    section (``_ConvergedSectionCurve``). The effective angle is then the
+    angle at which ``cl_mesh`` has the lift ``cl``, and the target lift is
+    the defect-corrected polar lift
+    ``cl_visc(alpha_v) - cl_conv(alpha_v) + cl_mesh(alpha_v)``. The
+    Jacobian uses ``dalpha_e / dcl = 1 / cl_mesh'(alpha_e)``.
     """
     ns = len(area)
     n = len(weights)
@@ -1619,16 +1630,26 @@ def _panel_residual(x, velocity0, dv, speed, incidence, weights, area,
     alpha_v = alpha_e + x[:ns]
     clv = np.array([float(section_cl(p, a)) for p, a in zip(polars, alpha_v)])
     m = np.array([float(section_cl_slope(p, a)) for p, a in zip(polars, alpha_v)])
-    residual = cl - clv + offset
-    jac = (1 - m / local_slope)[:, None] * dc
-    jac[np.arange(ns), np.arange(ns)] -= m
+    target, target_slope = clv, m
+    cl_mesh = cl_conv = None
+    if references is not None:
+        cl_mesh = np.array([curve.lift(a) for curve, a in zip(curves, alpha_v)])
+        mesh_slope = np.array([curve.slope(a) for curve, a in zip(curves, alpha_v)])
+        conv = np.array([reference.evaluate(a) for reference, a in zip(references, alpha_v)])
+        cl_conv = conv[:, 0]
+        target = clv - cl_conv + cl_mesh
+        target_slope = m - conv[:, 1] + mesh_slope
+    residual = cl - target + offset
+    jac = (1 - target_slope / local_slope)[:, None] * dc
+    jac[np.arange(ns), np.arange(ns)] -= target_slope
     jump = cp[up] - cp[lo]
     if pressure:
         residual = np.concatenate([residual, jump])
         jac = np.vstack([jac, dcp[up] - dcp[lo]])
         dc = np.vstack([dc, dcp[up] - dcp[lo]])
     return dict(r=residual, jac=jac, dc=dc, cl=cl, alpha_e=alpha_e, alpha_v=alpha_v, m=m,
-                cp=cp, velocity=velocity, jump=jump, curve_outside=outside)
+                cp=cp, velocity=velocity, jump=jump, curve_outside=outside, cl_polar=clv,
+                cl_mesh=cl_mesh, cl_conv=cl_conv)
 
 
 def _ground_curve_note(count: int, total: int) -> str:
@@ -1665,7 +1686,7 @@ class _PanelCoupling:
         import scipy.sparse
 
         from ventorum.airfoil import airfoil
-        from ventorum.solvers.panel3d import _build_geometry, _panel_section_lines
+        from ventorum.solvers.panel3d import SECTION_REFERENCE_PANELS, _build_geometry, _panel_section_lines
 
         # The lattice supplies only section/polar metadata, never aerodynamic
         # loads or section slopes. Its strips have the same reporting stations.
@@ -1681,10 +1702,20 @@ class _PanelCoupling:
             areas.extend(np.concatenate([meta["area"][::-1], meta["area"]])
                          if left is not None else meta["area"])
         self.area = np.asarray(areas)
-        self.slope, self.zero, self.moment = _panel_section_lines(
-            geometry.mesh, self.maps, self.lattice, self.strips,
+        self.slope, self.zero, self.moment, self.curves = _panel_section_lines(
+            geometry.mesh, self.maps, self.lattice, self.strips, curves=True,
         )
         self.geometry = geometry
+        # The converged inviscid 2D reference: the same cut sections of a
+        # mesh with SECTION_REFERENCE_PANELS cosine-spaced chordwise panels
+        # (same spanwise mesh, controls and root treatment).
+        section_coords = [[airfoil(sec.shape if sec.shape is not None else "0012").coords
+                           for sec in s.sections] for s in aircraft.surfaces]
+        fine = _build_geometry(aircraft, settings, section_coords, SECTION_REFERENCE_PANELS, "cosine",
+                               solver.mesh.half, settings.panel_scale_root_thickness)
+        self.reference_maps = [ids for right, left in fine.strip_maps for ids in (left or []) + right]
+        self.reference_mesh = fine.mesh
+        self.reference_memo = {}
         self.clean_geometry = None
         self.clean_zero = self.zero.copy()
         if any(s.controls for s in aircraft.surfaces):
@@ -1711,6 +1742,26 @@ class _PanelCoupling:
         self.lateral = bool(np.any(self.axes != np.array([0.0, 1.0, 0.0])))
         solver._set_viscous_strips(self.maps, lateral=self.lateral)
         solver._viscous_evaluator = self.evaluate
+
+    def references(self, ground, uses_height, curves):
+        """Return the converged inviscid 2D reference curve of each strip.
+
+        A strip with images has the pitch curve of its converged cut section
+        at the quarter-chord height of its same-mesh pitch curve [chord];
+        the other strips have the free-air curve. Equal sections share one
+        curve for all conditions of the coupling.
+        """
+        from ventorum.solvers.panel3d import _ConvergedSectionCurve, _panel_section_polygons
+
+        polygons = _panel_section_polygons(self.reference_mesh, self.reference_maps, self.lattice, self.strips)
+        out = []
+        for (coords, _), curve, images in zip(polygons, curves, uses_height):
+            height = getattr(curve, "height", None) if (ground is not None and images) else None
+            key = (np.round(coords, 12).tobytes(), None if height is None else round(float(height), 12))
+            if key not in self.reference_memo:
+                self.reference_memo[key] = _ConvergedSectionCurve(coords, height)
+            out.append(self.reference_memo[key])
+        return out
 
     def full(self, values):
         """Expand independent values to public strip order (same units)."""
@@ -1788,7 +1839,7 @@ class _PanelCoupling:
                                       self.resolver.steep_note()) if note is not None]
         slope, zero, moment = self.slope, self.zero, self.moment
         clean_zero = self.clean_zero
-        curves = None
+        curves = self.curves
         if np.any(uses_height):
             slope, zero, moment, curves = _panel_section_lines(
                 self.geometry.mesh, self.maps, self.lattice, self.strips, ground, uses_height, curves=True,
@@ -1803,11 +1854,12 @@ class _PanelCoupling:
             self.lattice, self.aircraft, self.strips, zero, clean_zero, ground, uses_height,
         )
         offset = slope * (zero - zero_target)
+        references = self.references(ground, uses_height, curves)
 
         def evaluate(x):
             return _panel_residual(x, velocity0, dv, speed, self.incidence, weights, self.area,
                                    zero, slope, polars, offset, up, lo, solver.kutta == "pressure",
-                                   onset_sq, curves)
+                                   onset_sq, curves, references)
 
         def newton(start, budget=None):
             x = start.copy()
@@ -1978,6 +2030,8 @@ class _PanelCoupling:
                 alpha0_section=self.full(zero), lift_slope_section=self.full(slope),
                 alpha0_thin_airfoil=self.full(zero - offset / slope),
                 cl_inviscid=self.full(state["cl"]), cl_viscous=self.full(state["cl"] - state["r"][:len(self.maps)] + offset),
+                cl_polar=self.full(state["cl_polar"]), cl_section_mesh=self.full(state["cl_mesh"]),
+                cl_section_converged=self.full(state["cl_conv"]),
                 flap_offset=self.full(offset), strip_area=area, strip_h_over_c=self.full(heights),
                 cd_profile=cd_full,
                 cm_section_inviscid=self.full(cm_inv), cm_section_pressure=pressure_cm,

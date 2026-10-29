@@ -1071,6 +1071,19 @@ def _morino_section_solution(polygon, ground=None):
         force = -np.sum(cp[:, None] * length[:, None] * normal, axis=0)
         return force @ np.array([-np.sin(angle), np.cos(angle)])
 
+    def lift_slope(angle):
+        # Exact derivative of lift(angle) for this factorization [1/rad].
+        direction = np.array([np.cos(angle), np.sin(angle)])
+        turn = np.array([-np.sin(angle), np.cos(angle)])
+        along = velocity @ direction
+        cp = 1 - along**2
+        dcp = -2 * along * (velocity @ turn)
+        force = -np.sum(cp[:, None] * length[:, None] * normal, axis=0)
+        dforce = -np.sum(dcp[:, None] * length[:, None] * normal, axis=0)
+        return dforce @ turn - force @ direction
+
+    lift.slope = lift_slope
+
     # Positive pitch is z Fx - x Fz in the geometry x-z plane.
     arm = center - np.array([0.25, 0.0])
     weight = -length * (arm[:, 1] * normal[:, 0] - arm[:, 0] * normal[:, 1])
@@ -1117,8 +1130,19 @@ GROUND_SECTION_STEP = np.radians(0.5)
 GROUND_CURVE_STEP = 1e-5
 
 #: Absolute tolerance [rad] of the bracketed root finder that inverts the
-#: 2D ground pitch curve.
-GROUND_CURVE_XTOL = 1e-13
+#: 2D section curves (the root is then at the round-off of the curve).
+GROUND_CURVE_XTOL = 1e-15
+
+#: Chordwise panels per side of the cut section of the converged inviscid
+#: 2D reference of the viscous coupling [-]. With the second-order
+#: linear-vortex method of Ventorum-2D, 128 panels per side give Cl within
+#: 1e-4 of 256 panels per side (NACA 0012, free air and h/c 0.5, 10 deg;
+#: ``tests/test_panel3d_v1_ground_reference.py`` checks this).
+SECTION_REFERENCE_PANELS = 128
+
+#: Knot spacing [rad] of the cubic Hermite interpolation of the converged
+#: inviscid 2D reference of the viscous coupling.
+SECTION_REFERENCE_STEP = np.radians(0.5)
 
 
 def _section_attitude_height(ground):
@@ -1159,7 +1183,194 @@ def _morino_section_pitch(polygon, height, angle):
     return lift(angle), _section_moment(moment, angle)
 
 
-class _GroundPitchCurve:
+class _SectionCurve:
+    """Lift curve ``Cl(alpha)`` [-] of a 2D section and its inversion.
+
+    A subclass gives :meth:`lift`, :meth:`slope` and :meth:`clearance`.
+    :meth:`invert` finds the angle at which the section has a given lift
+    with a bracketed root finder (Brent 1973). The inversion of the
+    section line is the start value.
+    """
+
+    def clearance(self, angle):
+        """Return the smallest height [chord] of the section above the ground (inf in free air)."""
+        return np.inf
+
+    def invert(self, cl, start, slope):
+        """Return the angle with the lift *cl*, the local slope and a flag.
+
+        Parameters
+        ----------
+        cl : float
+            Section lift coefficient [-].
+        start : float
+            Start value [rad]: the inversion of the section line.
+        slope : float
+            Slope of the section line [1/rad]. Its sign gives the search
+            direction.
+
+        Returns
+        -------
+        tuple
+            The angle ``alpha`` [rad] with ``Cl(alpha) = cl``, the local
+            slope ``dCl/dalpha`` [1/rad] there, and a flag. The search
+            stays in the angles between -90 and +90 deg at which the
+            section clears the ground. When *cl* is outside the lift range
+            of these angles, the angle is the tangent continuation from
+            the last angle of the range, and the flag is True.
+        """
+        import scipy.optimize
+
+        lower, upper = -0.5 * np.pi + 1e-6, 0.5 * np.pi - 1e-6
+        a0 = float(np.clip(start, lower, upper))
+        if self.clearance(a0) <= 0.0:
+            return float(start), float(slope), True
+        f0 = self.lift(a0) - cl
+        if f0 == 0.0:
+            return a0, self.slope(a0), False
+        direction = -np.sign(f0) * (1.0 if slope >= 0.0 else -1.0)
+        step = max(abs(f0 / slope) if slope != 0.0 else 0.0, np.radians(0.01))
+        while True:
+            a1 = a0 + direction * step
+            edge = False
+            if a1 < lower or a1 > upper:
+                a1 = upper if direction > 0 else lower
+                edge = True
+            if self.clearance(a1) <= 0.0:
+                # Stop a small distance before the attitude of ground contact.
+                a1 = float(scipy.optimize.brentq(self.clearance, a0, a1, xtol=1e-13))
+                a1 -= direction * 1e-9
+                edge = True
+            f1 = self.lift(a1) - cl
+            if np.sign(f1) != np.sign(f0):
+                root = scipy.optimize.brentq(lambda a: self.lift(a) - cl, min(a0, a1), max(a0, a1),
+                                             xtol=GROUND_CURVE_XTOL, rtol=4 * np.finfo(float).eps,
+                                             maxiter=200)
+                return float(root), self.slope(root), False
+            if edge:
+                local = self.slope(a1)
+                return float(a1 - f1 / local), float(local), True
+            a0, f0 = a1, f1
+            step *= 2.0
+
+
+class _FreeSectionCurve(_SectionCurve):
+    """Lift curve of a 2D section in free air (one 2D Morino factorization).
+
+    The Morino solution of :func:`_morino_section_solution` gives the
+    pressure lift at any onset angle [rad] from the chord, and its exact
+    derivative.
+
+    Parameters
+    ----------
+    polygon : numpy.ndarray
+        Section coordinates in chord units, upper-TE, LE, lower-TE order.
+    """
+
+    def __init__(self, polygon):
+        self.polygon = np.asarray(polygon, dtype=float)
+        self._lift = _morino_section_solution(self.polygon)[0]
+
+    def lift(self, angle):
+        """Return Cl [-] at the onset angle *angle* [rad]."""
+        return float(self._lift(float(angle)))
+
+    def slope(self, angle):
+        """Return dCl/dalpha [1/rad] at *angle* [rad] (exact)."""
+        return float(self._lift.slope(float(angle)))
+
+
+class _ConvergedSectionCurve:
+    """Converged inviscid 2D lift curve of a section (Ventorum-2D reference).
+
+    The values come from :func:`ventorum.panel2d.solver.solve_inviscid`
+    (linear-strength vortex panels, second order; Katz and Plotkin 2001),
+    with the unit chord, the pivot and the moment reference at the quarter
+    chord. In ground effect the section pitches about the quarter chord at
+    the fixed height (the pitch curve of a polar with a height axis). The
+    solves are at knots ``k * SECTION_REFERENCE_STEP`` [rad], when they
+    are first needed, and a cubic Hermite interpolation with central
+    difference knot slopes (Catmull-Rom) joins them: the curve and its
+    derivative are continuous. Outside the knots at which the section
+    clears the ground (by 0.01 chord) and at most 60 deg, the curve is the
+    tangent continuation from the last interval.
+
+    Parameters
+    ----------
+    polygon : numpy.ndarray
+        Section coordinates in chord units, upper-TE, LE, lower-TE order.
+    height : float or None
+        Quarter-chord height above the ground [chord], or None in free air.
+    """
+
+    #: Smallest clearance [chord] and largest angle [rad] of a knot.
+    MIN_CLEARANCE = 0.01
+    MAX_ANGLE = np.radians(60.0)
+
+    def __init__(self, polygon, height=None):
+        self.polygon = np.asarray(polygon, dtype=float)
+        self.height = None if height is None else float(height)
+        self.step = float(SECTION_REFERENCE_STEP)
+        self._knots = {}
+        self._arm = self.polygon - np.array([0.25, 0.0])
+        self._range = None
+
+    def _valid(self, k):
+        angle = k * self.step
+        if abs(angle) > self.MAX_ANGLE:
+            return False
+        if self.height is None:
+            return True
+        tilted = np.array([-np.sin(angle), np.cos(angle)])
+        return self.height + float(np.min(self._arm @ tilted)) > self.MIN_CLEARANCE
+
+    def _knot(self, k):
+        if k not in self._knots:
+            from ventorum.panel2d.solver import solve_inviscid
+
+            result = solve_inviscid(self.polygon, [np.degrees(k * self.step)], height=self.height,
+                                    pivot=(0.25, 0.0), chord_ref=1.0, moment_ref=(0.25, 0.0))
+            self._knots[k] = float(np.ravel(np.asarray(result.Cl, dtype=float))[0])
+        return self._knots[k]
+
+    def _intervals(self):
+        """Return the first and last interval index with four valid knots."""
+        if self._range is None:
+            lo = 0
+            while self._valid(lo - 1):
+                lo -= 1
+            hi = 0
+            while self._valid(hi + 1):
+                hi += 1
+            if hi - lo < 3:
+                raise ValueError("The section has fewer than four clear knots for its 2D reference curve.")
+            self._range = (lo + 1, hi - 2)
+        return self._range
+
+    def _hermite(self, k, t):
+        f0, f1, f2, f3 = (self._knot(k + i) for i in (-1, 0, 1, 2))
+        m1, m2 = 0.5 * (f2 - f0), 0.5 * (f3 - f1)
+        t2, t3 = t * t, t * t * t
+        value = (2 * t3 - 3 * t2 + 1) * f1 + (t3 - 2 * t2 + t) * m1 + (-2 * t3 + 3 * t2) * f2 + (t3 - t2) * m2
+        slope = ((6 * t2 - 6 * t) * f1 + (3 * t2 - 4 * t + 1) * m1 + (-6 * t2 + 6 * t) * f2
+                 + (3 * t2 - 2 * t) * m2) / self.step
+        return value, slope
+
+    def evaluate(self, angle):
+        """Return Cl [-] and dCl/dalpha [1/rad] of the reference at *angle* [rad]."""
+        first, last = self._intervals()
+        x = float(angle) / self.step
+        k = int(np.floor(x))
+        if k < first:
+            value, slope = self._hermite(first, 0.0)
+            return value + slope * (float(angle) - first * self.step), slope
+        if k > last:
+            value, slope = self._hermite(last, 1.0)
+            return value + slope * (float(angle) - (last + 1) * self.step), slope
+        return self._hermite(k, x - k)
+
+
+class _GroundPitchCurve(_SectionCurve):
     """Pitch curve ``Cl(alpha; h)`` of a 2D section in ground effect and its inversion.
 
     The curve is the one that :func:`_morino_section_ground_line` makes
@@ -1202,63 +1413,6 @@ class _GroundPitchCurve:
         """Return dCl/dalpha [1/rad] of the pitch curve at *angle* [rad] (central difference)."""
         return (self.lift(angle + GROUND_CURVE_STEP) - self.lift(angle - GROUND_CURVE_STEP)) / (
             2.0 * GROUND_CURVE_STEP)
-
-    def invert(self, cl, start, slope):
-        """Return the attitude with the lift *cl*, the local slope and a flag.
-
-        Parameters
-        ----------
-        cl : float
-            Section lift coefficient [-].
-        start : float
-            Start value [rad]: the inversion of the tangent line.
-        slope : float
-            Slope of the tangent line [1/rad]. Its sign gives the search
-            direction.
-
-        Returns
-        -------
-        tuple
-            The attitude ``alpha`` [rad] with ``Cl(alpha) = cl``, the local
-            slope ``dCl/dalpha`` [1/rad] there, and a flag. The search
-            stays in the attitudes between -90 and +90 deg at which the
-            section clears the ground. When *cl* is outside the lift range
-            of these attitudes, the attitude is the tangent continuation
-            from the last attitude of the range, and the flag is True.
-        """
-        import scipy.optimize
-
-        lower, upper = -0.5 * np.pi + 1e-6, 0.5 * np.pi - 1e-6
-        a0 = float(np.clip(start, lower, upper))
-        if self.clearance(a0) <= 0.0:
-            return float(start), float(slope), True
-        f0 = self.lift(a0) - cl
-        if f0 == 0.0:
-            return a0, self.slope(a0), False
-        direction = -np.sign(f0) * (1.0 if slope >= 0.0 else -1.0)
-        step = max(abs(f0 / slope) if slope != 0.0 else 0.0, np.radians(0.01))
-        while True:
-            a1 = a0 + direction * step
-            edge = False
-            if a1 < lower or a1 > upper:
-                a1 = upper if direction > 0 else lower
-                edge = True
-            if self.clearance(a1) <= 0.0:
-                # Stop a small distance before the attitude of ground contact.
-                a1 = float(scipy.optimize.brentq(self.clearance, a0, a1, xtol=GROUND_CURVE_XTOL))
-                a1 -= direction * 1e-9
-                edge = True
-            f1 = self.lift(a1) - cl
-            if np.sign(f1) != np.sign(f0):
-                root = scipy.optimize.brentq(lambda a: self.lift(a) - cl, min(a0, a1), max(a0, a1),
-                                             xtol=GROUND_CURVE_XTOL, rtol=4 * np.finfo(float).eps,
-                                             maxiter=200)
-                return float(root), self.slope(root), False
-            if edge:
-                local = self.slope(a1)
-                return float(a1 - f1 / local), float(local), True
-            a0, f0 = a1, f1
-            step *= 2.0
 
 
 def _morino_section_ground_line(polygon, ground, step=GROUND_SECTION_STEP):
@@ -1309,24 +1463,16 @@ def _morino_section_ground_line(polygon, ground, step=GROUND_SECTION_STEP):
     return float(slope), float(attitude - lifts[1] / slope), moment
 
 
-def _panel_section_lines(mesh, maps, lattice, strips, ground=None, with_images=None, curves=False):
-    """Solve the actual midspan section polygons of reporting strips in 2D.
+def _panel_section_polygons(mesh, maps, lattice, strips, ground=None, with_images=None):
+    """Return the midspan section polygon and the section ground line of reporting strips.
 
     Panel metadata selects the upper and lower chordwise segments. The
-    intersection with the reporting section plane gives its polygon. Coordinates
-    are projected into the clean section frame and divided by chord [m].
-    A strip with images uses the ground line of its section plane. Its line
-    is the tangent of the pitch curve at the attitude of the strip (onset
-    parallel to the ground, see :func:`_morino_section_ground_line`).
-    Return slopes [1/rad], zero-lift angles [rad], and moment quadratics [-].
-    With *curves* True, also return a list with the pitch curve
-    (:class:`_GroundPitchCurve`) of each strip with images, and None for
-    the other strips. Strips with the same polygon and ground line share
-    one curve.
+    intersection with the reporting section plane gives its polygon.
+    Coordinates are projected into the clean section frame and divided by
+    chord [m]. A strip with images has the ground line of its section
+    plane (unit normal and offset [chord]); the other strips have None.
     """
-    slopes, zeros, moments, pitch_curves = [], [], [], []
-    memo = {}
-    curve_memo = {}
+    out = []
     for index, (ids, strip) in enumerate(zip(maps, strips)):
         ids = np.asarray(ids, dtype=int)
         skin = ids[np.asarray(mesh.side)[ids] != 0]
@@ -1371,6 +1517,27 @@ def _panel_section_lines(mesh, maps, lattice, strips, ground=None, with_images=N
                 raise ValueError("The ground plane has no normal in this 2D section plane.")
             offset = (ground.offset - ground.normal @ origin) / (lattice.chord[strip] * norm)
             section_ground = ng / norm, offset
+        out.append((coords, section_ground))
+    return out
+
+
+def _panel_section_lines(mesh, maps, lattice, strips, ground=None, with_images=None, curves=False):
+    """Solve the actual midspan section polygons of reporting strips in 2D.
+
+    The polygons come from :func:`_panel_section_polygons`. A strip with
+    images uses the ground line of its section plane. Its line is the
+    tangent of the pitch curve at the attitude of the strip (onset
+    parallel to the ground, see :func:`_morino_section_ground_line`).
+    Return slopes [1/rad], zero-lift angles [rad], and moment quadratics [-].
+    With *curves* True, also return a list with the lift curve of each
+    strip: the pitch curve (:class:`_GroundPitchCurve`) of a strip with
+    images, the free-air curve (:class:`_FreeSectionCurve`) of the other
+    strips. Strips with the same polygon and ground line share one curve.
+    """
+    slopes, zeros, moments, pitch_curves = [], [], [], []
+    memo = {}
+    curve_memo = {}
+    for coords, section_ground in _panel_section_polygons(mesh, maps, lattice, strips, ground, with_images):
         key = (np.round(coords, 12).tobytes(), None if section_ground is None
                else tuple(np.round(np.r_[section_ground[0], section_ground[1]], 12)))
         if key not in memo:
@@ -1381,12 +1548,10 @@ def _panel_section_lines(mesh, maps, lattice, strips, ground=None, with_images=N
         zeros.append(a0)
         moments.append(cm)
         if curves:
-            if section_ground is None:
-                pitch_curves.append(None)
-            else:
-                if key not in curve_memo:
-                    curve_memo[key] = _GroundPitchCurve(coords, _section_attitude_height(section_ground)[1])
-                pitch_curves.append(curve_memo[key])
+            if key not in curve_memo:
+                curve_memo[key] = (_FreeSectionCurve(coords) if section_ground is None
+                                   else _GroundPitchCurve(coords, _section_attitude_height(section_ground)[1]))
+            pitch_curves.append(curve_memo[key])
     if curves:
         return np.asarray(slopes), np.asarray(zeros), np.asarray(moments), pitch_curves
     return np.asarray(slopes), np.asarray(zeros), np.asarray(moments)
