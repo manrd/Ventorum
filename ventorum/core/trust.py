@@ -193,6 +193,40 @@ PANEL3D_STEEP_ROOT_CONVERGENCE_NOTE = (
 POST_STALL_BRANCH_PENALTY = 0.35
 
 
+def polar_gap_note(n_reads: int, n_strips: int, n_dropped: int, n_polars: int) -> str:
+    """Return the trust note of a viscous coupling whose section polars have gaps.
+
+    A section polar source drops the angles that do not converge, and the
+    polar interpolates across them (a bridged interval, see
+    :attr:`ventorum.core.datatypes.TabulatedAirfoil.gap_mask`). A value
+    there is not a solution of the source.
+
+    Parameters
+    ----------
+    n_reads : int
+        Number of strips that read their polar inside a bridged interval
+        at the solution [-].
+    n_strips : int
+        Number of strips of the coupling [-].
+    n_dropped : int
+        Number of dropped angles of the section polars of the condition
+        (the ``last_dropped`` values of their sources and tables) [-].
+    n_polars : int
+        Number of section polars with a bridged interval [-].
+
+    Returns
+    -------
+    str
+        The note.
+    """
+    return (
+        f"{int(n_reads)} of {int(n_strips)} strips read their section polar inside an angle interval that "
+        f"the polar bridges across a failed angle of its source ({int(n_polars)} polars with gaps; "
+        f"last_dropped: {int(n_dropped)} angles dropped in total). The polar values in a bridged interval "
+        "are interpolated, not solutions."
+    )
+
+
 def _negligible_side_force(CY: float | None, CY_farfield: float | None) -> bool:
     """Return True when the near-field and far-field side forces are below the CY floor."""
     values = [v for v in (CY, CY_farfield) if v is not None and _is_finite(v)]
