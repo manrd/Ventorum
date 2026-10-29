@@ -103,7 +103,8 @@ STEP_BUDGET = 300
 #: longer wake does not converge in the measured sample. The Squire-Young drag is already converged at
 #: a wake length of 0.5 chords (within 0.1 % up to 1.5 chords at 4 deg).
 WAKE_LENGTH_LIMIT = 1.5
-#: Two angles closer than this are the same angle for the work budgets [deg].
+#: Two angles closer than this are the same angle [deg]: for the work budgets, the best attempt at the angle
+#: and the number of continuation steps (a round-off tolerance).
 ANGLE_MATCH_DEG = 1e-9
 #: A failed quasi-simultaneous cold-start attempt that stops above this residual ends the cold start [-].
 COLD_SKIP_RESIDUAL = 1e-2
@@ -274,7 +275,8 @@ class _AngleWork:
         self.solves += 1 + bool(res._first_stop)
         if res._first_stop:
             self.retry_notes.append(f"stage at alpha = {setup.sys.alpha:g} deg: {res.reason}")
-        if float(setup.sys.alpha) == self.alpha and (self.best is None or res.residual < self.best[1].residual):
+        if (abs(float(setup.sys.alpha) - self.alpha) <= ANGLE_MATCH_DEG
+                and (self.best is None or res.residual < self.best[1].residual)):
             self.best = (setup, res)
 
     def note(self, text: str):
@@ -1017,7 +1019,8 @@ def _cold_path(body, alpha, re, tol, max_iter, kw, bk=None, ctl=None, cache=None
     When the angle is more than CONTINUATION_STEP from the inviscid
     zero-lift angle, the solver starts cold at the zero-lift angle and
     continues to the angle in steps of at most CONTINUATION_STEP (each with
-    the halving of :func:`_warm_path`); the intermediate solutions serve as
+    the halving of :func:`_warm_path`; both tests have the round-off
+    tolerance ANGLE_MATCH_DEG, see :func:`_continuation_steps`); the intermediate solutions serve as
     start values only. When that start fails, a cold start at the angle
     itself is the last attempt. ``cache`` (a dict per sweep) keeps the cold
     start at the zero-lift angle, which is the same for every angle of a
@@ -1031,7 +1034,8 @@ def _cold_path(body, alpha, re, tol, max_iter, kw, bk=None, ctl=None, cache=None
     start at the angle follows.
     """
     a0 = zero_lift_angle(body, kw)
-    if abs(alpha - a0) > CONTINUATION_STEP:
+    n = _continuation_steps(alpha, a0)
+    if n > 0:
         if ctl is not None:
             # No budget left at the angle: the continuation path cannot end in a solve at the angle.
             ctl.check(max_iter, alpha)
@@ -1058,7 +1062,6 @@ def _cold_path(body, alpha, re, tol, max_iter, kw, bk=None, ctl=None, cache=None
         if r0 is not None and not r0.converged:
             _path_note(ctl, f"{cold_name} did not converge: {r0.reason}")
         if r0 is not None and r0.converged:
-            n = int(np.ceil(abs(alpha - a0) / CONTINUATION_STEP))
             prev = (s0, r0.state)
             setup, res = s0, r0
             for k in range(1, n + 1):
@@ -1082,6 +1085,33 @@ def _cold_path(body, alpha, re, tol, max_iter, kw, bk=None, ctl=None, cache=None
                 return setup, res
     setup = prepare_case(body, alpha, re, **kw)
     return setup, _cold_solve(setup, tol, max_iter, bk, ctl)
+
+
+def _continuation_steps(alpha, a0) -> int:
+    """Return the number of continuation steps from the zero-lift angle to an angle (0: no continuation path).
+
+    The path is used when the angle is more than CONTINUATION_STEP from the zero-lift angle, and its
+    steps are at most CONTINUATION_STEP long. Both tests use the round-off tolerance ANGLE_MATCH_DEG, so
+    an angle a whole number of steps from the zero-lift angle gives the same steps on every platform
+    (for a symmetric section the zero-lift angle is 0 deg only up to a round-off of either sign).
+
+    Parameters
+    ----------
+    alpha : float
+        Angle of attack [deg].
+    a0 : float
+        Inviscid zero-lift angle [deg] (see :func:`zero_lift_angle`).
+
+    Returns
+    -------
+    int
+        Number of continuation steps, 0 when the angle is within CONTINUATION_STEP (plus the tolerance)
+        of the zero-lift angle.
+    """
+    distance = abs(float(alpha) - float(a0))
+    if distance <= CONTINUATION_STEP + ANGLE_MATCH_DEG:
+        return 0
+    return int(np.ceil((distance - ANGLE_MATCH_DEG) / CONTINUATION_STEP))
 
 
 def _enter_stage(ctl, name: str, kind: str, budget: int):
