@@ -25,7 +25,7 @@ The kernel backends (numpy, Numba, Cython, PyTorch) are measured by the tuner pe
 
 ## Scope
 
-- Incompressible flow, Mach number below 0.3. Above Mach 0.3 a case is outside the envelope: `analyze` gives a warning and the trust rating is LOW or UNRELIABLE.
+- Scope: incompressible flow, Mach number below 0.3. With `FlightCondition.mach` from 0.3 to below 0.7, the vortex lattice applies the Prandtl-Glauert correction in the form of Goethert; the result is an estimate with the trust rating UNRELIABLE. A Mach number of 0.7 or more is refused with `ValidityError`. A speed above Mach 0.3 with `mach` None or 0 is outside the envelope too: `analyze` gives a warning and the trust score gives the same compressibility penalty as a stated Mach number. A stated Mach number that differs from `V_inf` divided by the ISA sea-level speed of sound (340.29 m/s; the flight condition has no temperature) by more than 0.05 gives a warning and a trust note.
 - Attached flow. Results after stall are not reliable.
 - Thin lifting surfaces, except in the 3D panel method. In the other solvers, thickness enters only through the section polars.
 - Compressibility: only the vortex lattice has a correction (Prandtl-Glauert in the form of Goethert, in free air, with `FlightCondition.mach`). The lifting lines, the Fourier solver and the 3D panel method refuse `mach > 0`.

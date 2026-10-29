@@ -113,6 +113,15 @@ a minor version can change a public interface.
 
 ### Changed
 
+- Compressibility scope: a stated `FlightCondition.mach` of 0.7 or more is refused with `ValidityError`
+  (`MACH_LIMIT_REFUSED`) by `analyze`, the other entry points that validate the flight condition, and
+  the lattice solvers. Before, Mach numbers up to just below 1 ran and only the trust score gave a
+  warning. From 0.3 to below 0.7 the Prandtl-Glauert correction stays an
+  estimate with the trust rating UNRELIABLE. The user manual and the theory page state the scope
+  (Mach below 0.3) in one place and no longer say "valid M < 1".
+- A stated Mach number above 0 that differs from `V_inf / a` by more than 0.05 (`MACH_SPEED_TOLERANCE`;
+  `a` is the ISA sea-level speed of sound, 340.29 m/s, because the flight condition has no temperature)
+  gives a `RuntimeWarning` and a trust note. The correction uses the stated Mach number.
 - Ventorum-2D lift in ground effect: `Panel2DResult.Cl` is the surface pressure lift in ground
   effect (`Cl_pressure`, Coulliette and Plotkin 1996, eq. 30). Near a wall the Kutta-Joukowski
   relation does not hold; the circulation lift is 12 % (h/c = 0.2) to 33 % (h/c = 0.1) too high
@@ -217,6 +226,14 @@ a minor version can change a public interface.
 
 ### Fixed
 
+- Vortex lattice with `mach > 0`: the `Cm0` of a linear airfoil now scales by `1 / beta`
+  (Prandtl-Glauert, Glauert 1928), as the camber lift of the stretched lattice and the camber-line
+  lattice do. Before, the section moment stayed at its incompressible value, so Cm was wrong for a
+  cambered linear section. The effective section angle now uses the compressible slope
+  `a0 / beta`; before, `alpha_i` of a wing of high aspect ratio became negative at high Mach numbers, and
+  the lookup angle of a tabulated Cd and Cm had the same error. The CPU loads, the GPU loads
+  kernels and the differentiable reference of the gradients apply the same equations. Results with
+  `mach` None or 0 do not change (bit for bit).
 - Ventorum-3DP with body rates p, q, r: the surface pressure now includes the kinematic term of the rotating body, Cp = (|V_k|^2 - |V|^2) / V_inf^2, with V_k the local onset velocity. The flow is steady in the body frame, so the unsteady Bernoulli equation of the earth frame applies. The former Cp = 1 - |V|^2 / V_inf^2 gave three times the added-mass force of a sphere on a circular path. On a wing the pitch-rate derivatives CL_q and Cm_q grow by several percent, and the yaw-rate side force CY_r falls by about an order of magnitude, close to the vortex-lattice values. The fix applies to the CPU and GPU paths, the pressure Kutta and the viscous strip coupling. Results without rates do not change.
 - Ventorum-3DP: the flat tip cap of a cambered section gave cap pressures of order 1e3 to 1e4, and with dihedral the cap force made the lift too high (NACA 2412 at 30 deg dihedral: CL 0.556 instead of about 0.43). A tip cap panel now keeps the surface gradient along its row of neighbours only. Symmetric sections do not change.
 - Ventorum-2D retries a residual-window stop once for the cold quasi-simultaneous first estimate at the

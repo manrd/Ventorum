@@ -37,6 +37,7 @@ from ventorum.core.datatypes import (
 )
 from ventorum.core.errors import ValidityError
 from ventorum.core.trust import (
+    check_mach_scope,
     evaluate_aerodynamic_trust,
     mean_line_strip_jump,
     polar_limits,
@@ -353,8 +354,9 @@ class LatticeSolver(BaseSolver):
         """Return the ground plane, the smallest ground clearance [m], the notes and the wake direction of one case.
 
         Raises the errors of the validity checks (ground strike, lifting line
-        too near the ground).
+        too near the ground, a Mach number at or above 0.7).
         """
+        check_mach_scope(condition)
         if ground is None and condition.h is not None:
             ground = ground_plane_from_condition(lattice, condition, ref_point)
         if getattr(condition, "mach", None) is not None and condition.mach > 0.0:

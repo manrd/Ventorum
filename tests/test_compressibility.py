@@ -213,12 +213,11 @@ def test_trust_score_compressibility():
     assert np.isclose(trust_05.factors["compressibility"], pen_expected)
     assert any("prandtl-glauert" in w.lower() for w in trust_05.warnings)
 
-    # 2. Mach 0.75: warning for linear theory validity near critical Mach
+    # 2. Mach 0.75: refused (the linear rule has no meaning near the critical
+    # Mach number; the solve gave a result rated only by a trust warning before).
     cond_075 = FlightCondition(V_inf=40.0, alpha=np.radians(3.0), mach=0.75)
-    res_075 = vt.analyze(wing, condition=cond_075, solver="vlm")
-    trust_075 = res_075.totals.trust
-    assert trust_075 is not None
-    assert any("0.7" in w for w in trust_075.warnings)
+    with pytest.raises(ValidityError, match="0.7"):
+        vt.analyze(wing, condition=cond_075, solver="vlm")
 
 
 def test_mach_none_and_zero_equality():

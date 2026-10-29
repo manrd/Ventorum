@@ -279,7 +279,7 @@ With `mach > 0` the vortex lattice in free air supports all free-air inputs
 plus `"mach"` (per unit Mach number):
 
 ```python
-mcond = vt.FlightCondition(V_inf=50.0, alpha=np.radians(4.0), mach=0.3)
+mcond = vt.FlightCondition(V_inf=102.0, alpha=np.radians(4.0), mach=0.3)  # V_inf = 0.3 a at ISA sea level
 mres = vt.gradients(
     aircraft, mcond, settings,
     outputs=("CL", "CD", "Cm"),
@@ -289,6 +289,8 @@ print(f"dCL/dM = {mres.jacobian['CL']['mach']:.4f} per unit Mach")
 ```
 
 At `mach = 0` the `"mach"` derivative is 0; at `mach = None` it is refused.
+A Mach number of 0.7 or more is refused with `ValidityError`. A Mach number that does not
+agree with `V_inf` (ISA sea-level speed of sound) gives a warning.
 Ground effect and the lifting lines refuse `mach > 0`. The gradients with
 `mach > 0` run on the selected device (CPU or GPU).
 

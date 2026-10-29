@@ -980,8 +980,14 @@ class FlightCondition:
         a rate that is not zero.
     mach : float or None
         Mach number [-] for the Prandtl-Glauert compressibility correction
-        in the vortex-lattice solver. *None* (default) means no correction:
-        every result is the same as today. Must satisfy 0 <= mach < 1.
+        in the vortex-lattice solver. *None* (default) or 0 means no
+        correction. The scope of Ventorum is incompressible flow (Mach below
+        0.3). Between 0.3 and 0.7 the correction is an estimate with the
+        trust rating UNRELIABLE. The validity check and the solvers refuse
+        ``mach >= 0.7`` with :class:`~ventorum.core.errors.ValidityError`.
+        The constructor accepts 0 <= mach < 1. A stated Mach number that
+        differs from ``V_inf`` divided by the ISA sea-level speed of sound
+        (340.29 m/s) by more than 0.05 gives a warning and a trust note.
     """
 
     V_inf: float = 50.0
@@ -993,7 +999,7 @@ class FlightCondition:
     p: float = 0.0  # Roll rate [rad/s], body axes, > 0 right wing down
     q: float = 0.0  # Pitch rate [rad/s], body axes, > 0 nose up
     r: float = 0.0  # Yaw rate [rad/s], body axes, > 0 nose right
-    mach: float | None = None  # Mach number [-] (0 <= mach < 1)
+    mach: float | None = None  # Mach number [-] (0 <= mach < 1; solvers refuse mach >= 0.7)
 
     def __post_init__(self) -> None:
         if self.mach is not None:
