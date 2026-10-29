@@ -393,7 +393,7 @@ def _results(solver, lattice, conditions, arrays: dict, setups: list, umap, b_re
         cy_ff = cn_tr = [None] * K
     # Statistics of the trust score from the GPU (None for a case with a
     # non-finite value: the trust score then names the array).
-    stats = [{"max_local_cl": r[1], "max_alpha_eff_deg": r[2], "n_extrema": int(r[3])} if r[0] != 0.0 else None
+    stats = [{"max_local_cl": r[1], "max_alpha_eff_deg": r[2], "sign_change_run": int(r[3])} if r[0] != 0.0 else None
              for r in arrays["stats"].tolist()]
     out = []
     for k, (cond, st) in enumerate(zip(conditions, setups)):

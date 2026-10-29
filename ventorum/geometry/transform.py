@@ -317,4 +317,6 @@ def transform_lattice(
         camber_fallback=lattice.camber_fallback,
         has_camber_offset=lattice.has_camber_offset,
         camber_frames=getattr(lattice, "camber_frames", None),
+        control_edge_step=(None if getattr(lattice, "control_edge_step", None) is None
+                           else lattice.control_edge_step.copy()),
     )

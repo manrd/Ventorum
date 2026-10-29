@@ -39,6 +39,7 @@ from ventorum.core.errors import ValidityError
 from ventorum.core.trust import (
     check_mach_scope,
     evaluate_aerodynamic_trust,
+    lattice_spanwise_stats,
     mean_line_strip_jump,
     polar_limits,
     polar_stats,
@@ -503,7 +504,8 @@ class LatticeSolver(BaseSolver):
             notes=notes,
             max_chord_over_c=(float(self._cached(lattice, "max_chord", lambda: np.max(lattice.chord)) / c_ref)
                               if c_ref else 1.0),
-            spanwise_stats=spanwise_stats,
+            spanwise_stats=(spanwise_stats if spanwise_stats is not None
+                            else lattice_spanwise_stats(lattice, loads.spanwise)),
             polar=polar,
             CY=totals.CY,
             CY_farfield=totals.CY_farfield,
