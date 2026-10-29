@@ -1470,7 +1470,7 @@ def loads(dl: DeviceLattice, lattice, G: torch.Tensor, v_points: list[torch.Tens
           V: torch.Tensor, rho: torch.Tensor, alpha: torch.Tensor, WD: torch.Tensor, grounds: list,
           S_ref: float, b_ref: float, c_ref: float, ref_point, alpha_eff: torch.Tensor | None,
           use_leg: bool, extra: dict | None = None, symmetric: bool = False, GK: torch.Tensor | None = None,
-          GO: torch.Tensor | None = None, omega: torch.Tensor | None = None) -> dict:
+          GO: torch.Tensor | None = None, omega: torch.Tensor | None = None, pg_beta: float = 1.0) -> dict:
     """Return all loads of the batch as host arrays (the equations of :func:`ventorum.aero.loads.compute_loads_batch`).
 
     Two kernels compute them: one per strip (forces, moments, section
@@ -1504,6 +1504,11 @@ def loads(dl: DeviceLattice, lattice, G: torch.Tensor, v_points: list[torch.Tens
         Angular velocity of each case in geometry axes [rad/s], or None for a
         batch without body rates (the host flag ``has_rates`` of
         :func:`batch_data` decides; no device sync here).
+    pg_beta : float
+        Prandtl-Glauert factor ``sqrt(1 - M^2)`` [-] of the batch (all cases
+        of a GPU group have the same Mach number), 1.0 without a Mach number.
+        The section slope is ``a0 / pg_beta`` and the ``Cm0`` of a linear
+        airfoil scales by ``1 / pg_beta``, as in the CPU loads.
 
     Returns
     -------
@@ -1613,7 +1618,7 @@ def loads(dl: DeviceLattice, lattice, G: torch.Tensor, v_points: list[torch.Tens
             cview(geo, "lmida", v3), cview(geo, "lmidb", v3), int(n_c),
             cview(lt, "chord", wp.float64), cview(lt, "width", wp.float64), cview(lt, "normal", v3),
             cview(lt, "chord_dir", v3), cview(lt, "dl", v3), cview(lt, "qc_mid", v3), cview(lt, "a0", wp.float64),
-            cview(lt, "alpha_L0", wp.float64), view(ae, wp.float64), 1 if alpha_eff is not None else 0, pol,
+            cview(lt, "alpha_L0", wp.float64), view(ae, wp.float64), 1 if alpha_eff is not None else 0, pol, float(pg_beta),
             view(w_n.contiguous(), wp.float64), view(seg_len.contiguous(), wp.float64),
             w_span, view(sforce, v3), w_part] + aft_args)
     else:
@@ -1625,7 +1630,7 @@ def loads(dl: DeviceLattice, lattice, G: torch.Tensor, v_points: list[torch.Tens
             cview(geo, "lmida", v3), cview(geo, "lmidb", v3), int(n_c),
             cview(lt, "chord", wp.float64), cview(lt, "width", wp.float64), cview(lt, "normal", v3),
             cview(lt, "chord_dir", v3), cview(lt, "dl", v3), cview(lt, "qc_mid", v3), cview(lt, "a0", wp.float64),
-            cview(lt, "alpha_L0", wp.float64), view(ae, wp.float64), 1 if alpha_eff is not None else 0, pol,
+            cview(lt, "alpha_L0", wp.float64), view(ae, wp.float64), 1 if alpha_eff is not None else 0, pol, float(pg_beta),
             view(w_n.contiguous(), wp.float64), view(seg_len.contiguous(), wp.float64),
             w_span, view(sforce, v3), w_part] + aft_args)
     tot = torch.empty((K, 22), dtype=_F64, device=dev)
