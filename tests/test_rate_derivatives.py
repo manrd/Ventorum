@@ -193,14 +193,24 @@ def test_vlm_pitch_damping_steps_from_section_term_to_chordwise_load():
         cm = vt.rate_derivatives(_rect(AR), fc, _settings("vlm", 40, nc)).derivatives["Cm_q"]
         return 1.0 - cm / (-np.pi / 4.0)
 
-    d8 = [deficit(8.0, nc) for nc in (1, 4, 16)]
+    d8 = [deficit(8.0, nc) for nc in (1, 4, 8, 16)]
     d20 = [deficit(20.0, nc) for nc in (1, 16)]
     assert abs(d8[0]) < 1e-4 and abs(d20[0]) < 1e-4
-    assert 0.07 < d8[2] < 0.095
+    assert 0.07 < d8[3] < 0.095
     assert 0.025 < d20[1] < 0.045
     # Converges from below in magnitude; the 3D deficit falls with the aspect ratio.
-    assert d8[1] > d8[2]
-    assert 1.8 < d8[2] / d20[1] < 2.8
+    assert d8[1] > d8[2] > d8[3]
+    assert 1.8 < d8[3] / d20[1] < 2.8
+    # Recommended minimum n_chord (theory page): the smallest n_chord of the
+    # table within 2 % of the value extrapolated from 4, 8 and 16 (Richardson
+    # with the observed order). Measured: order 2.0, extrapolated deficit
+    # 7.80 %; n_chord 8 is 1.6 % from it, n_chord 4 is 6.4 %.
+    cm = [1.0 - d for d in d8]
+    ratio = (cm[2] - cm[1]) / (cm[3] - cm[2])
+    assert 3.0 < ratio < 5.0
+    cm_ext = cm[3] + (cm[3] - cm[2]) / (ratio - 1.0)
+    assert abs(cm[2] / cm_ext - 1.0) < 0.02
+    assert abs(cm[1] / cm_ext - 1.0) > 0.02
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

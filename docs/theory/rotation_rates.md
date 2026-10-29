@@ -63,7 +63,7 @@ $$
 
 For a pitch rate, k = q, and the section term is -pi/4 per unit q c / (2 V). The code adds this term to the section moment of each strip, with k = -n . (Omega x e_c) (e_c the chord direction, n the section normal).
 
-This term is the two-dimensional value at every aspect ratio. A vortex lattice with two or more chordwise panels has no section term: its chordwise load gives the three-dimensional value, which is smaller in magnitude by an amount that falls with the aspect ratio, and which it approaches slowly from below in magnitude as the chordwise panel count grows. Thus C_m_q has a step between one and two chordwise panels; `test_vlm_pitch_damping_steps_from_section_term_to_chordwise_load` gives the measured values.
+This term is the two-dimensional value at every aspect ratio. A vortex lattice with two or more chordwise panels has no section term: its chordwise load gives the three-dimensional value, which is smaller in magnitude by an amount that falls with the aspect ratio, and which it approaches slowly from below in magnitude as the chordwise panel count grows. Thus C_m_q has a step between one and two chordwise panels; `test_vlm_pitch_damping_steps_from_section_term_to_chordwise_load` gives the measured values. Use at least 8 chordwise panels for C_m_q. This is a recommendation from that measurement (a straight wing of aspect ratio 8): 8 is the smallest chordwise panel count of the test that is within 2 % of the value extrapolated from 4, 8 and 16 panels; 4 panels are not.
 
 ### Profile drag and section moment
 

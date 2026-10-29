@@ -99,9 +99,12 @@ COLD_START_BUDGET = 200
 #: so a step that the former budget allowed is not cut.
 STEP_BUDGET = 300
 #: Largest wake length over the chord [-] without a warning. The far-wake model drives the wake shape
-#: factor H to 1 about 1.0 to 1.2 chords behind the trailing edge, so no state exists beyond, and a
-#: longer wake does not converge in the measured sample. The Squire-Young drag is already converged at
-#: a wake length of 0.5 chords (within 0.1 % up to 1.5 chords at 4 deg).
+#: factor H to 1 at a finite distance behind the trailing edge, so no state exists beyond, and a longer
+#: wake does not converge. Measured at Re 1e6 with the default settings (NACA 0012 and 4412, 0, 4 and
+#: 8 deg, wakes up to 3 chords): H reaches 1 at about 1.8 chords (NACA 4412, 4 deg) to more than 3
+#: chords (8 deg); see test_wake_shape_factor_reaches_one_behind_the_limit. The limit is below the
+#: smallest of these distances. The Squire-Young drag is already converged at a wake length of 0.5
+#: chords (within 0.1 % up to 1.5 chords at 4 deg).
 WAKE_LENGTH_LIMIT = 1.5
 #: Two angles closer than this are the same angle [deg]: for the work budgets, the best attempt at the angle
 #: and the number of continuation steps (a round-off tolerance).
@@ -844,7 +847,8 @@ def wake_length_note(wake_length) -> str | None:
     if not float(wake_length) > WAKE_LENGTH_LIMIT:
         return None
     return (f"wake length {float(wake_length):g} chords is above {WAKE_LENGTH_LIMIT:g} chords: the far-wake model "
-            "drives the wake shape factor H to 1 about 1.0 to 1.2 chords behind the trailing edge, so a longer "
+            "drives the wake shape factor H to 1 at a finite distance behind the trailing edge (about 1.8 chords or "
+            "more in the measured sample), so a longer "
             "wake does not converge; the Squire-Young drag is converged at a wake length of 0.5 chords")
 
 
