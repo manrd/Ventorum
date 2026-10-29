@@ -449,6 +449,175 @@ class TabulatedAirfoil:
 # Fields of TabulatedAirfoil whose change clears the cached interpolation.
 _TABLE_FIELDS = frozenset({"alpha", "Cl_data", "Cd_data", "Cm_data", "Cl_circulation_data"})
 
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Interpolation of many tabulated airfoils together (private)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def _build_pchip_batch(airfoils: Any) -> None:
+    """Build the cached interpolation of many tabulated airfoils together.
+
+    The airfoils that have the same sorted angles and the same tables
+    share one PCHIP construction per coefficient: their tables are the
+    columns of one array. The construction is column by column, so each
+    airfoil gets the same coefficients as from its own construction
+    (:meth:`TabulatedAirfoil._pchip`); only the call overhead is shared.
+    An airfoil that already has its interpolation does not change.
+
+    Parameters
+    ----------
+    airfoils : sequence
+        Airfoil models. Only the instances of :class:`TabulatedAirfoil`
+        (not of a subclass) without a cached interpolation are used.
+    """
+    from scipy.interpolate import PchipInterpolator, PPoly
+
+    groups: dict[tuple, list[TabulatedAirfoil]] = {}
+    seen: set[int] = set()
+    for af in airfoils:
+        if type(af) is not TabulatedAirfoil or af._interp is not None or id(af) in seen:
+            continue
+        seen.add(id(af))
+        a, _, _, cm = af._prepare_arrays()
+        if a.size < 2:
+            continue  # The construction of the airfoil itself gives the error.
+        key = (a.size, a.tobytes(), cm is not None, af._prepared_circulation is not None)
+        groups.setdefault(key, []).append(af)
+    for (_, _, has_cm, has_circ), members in groups.items():
+        if len(members) < 2:
+            continue
+        a = members[0]._prepare_arrays()[0]
+        columns = {
+            "Cl": [m._prepare_arrays()[1] for m in members],
+            "Cd": [m._prepare_arrays()[2] for m in members],
+        }
+        if has_cm:
+            columns["Cm"] = [m._prepare_arrays()[3] for m in members]
+        if has_circ:
+            columns["Clc"] = [m._prepared_circulation for m in members]
+        built = {
+            name: PchipInterpolator(a, np.stack([np.asarray(c, dtype=float) for c in cols], axis=1),
+                                    extrapolate=False)
+            for name, cols in columns.items()
+        }
+        built["dCl"] = built["Cl"].derivative()
+        if has_circ:
+            built["dClc"] = built["Clc"].derivative()
+        for j, af in enumerate(members):
+            f = {
+                name: PPoly.construct_fast(np.ascontiguousarray(pp.c[:, :, j]), pp.x, extrapolate=False)
+                for name, pp in built.items()
+            }
+            object.__setattr__(af, "_interp", f)
+
+
+def _piecewise_values(x: np.ndarray, c: np.ndarray, columns: np.ndarray, alpha: np.ndarray) -> np.ndarray:
+    """Return the values of stacked piecewise polynomials, one point per polynomial.
+
+    Parameters
+    ----------
+    x : numpy.ndarray
+        Breakpoints [rad], ascending, shape ``(n,)``, shared by all polynomials.
+    c : numpy.ndarray
+        Coefficients, highest power first, shape ``(k, n - 1, m)``: column
+        ``j`` holds polynomial ``j`` (the layout of ``scipy.interpolate.PPoly``).
+    columns : numpy.ndarray
+        Polynomial (column) of each point, shape ``(p,)``.
+    alpha : numpy.ndarray
+        Points [rad] inside ``[x[0], x[-1]]``, shape ``(p,)``.
+
+    Returns
+    -------
+    numpy.ndarray
+        Values at the points, shape ``(p,)``. An interval includes its left
+        breakpoint; the last interval also includes ``x[-1]``. The sum
+        ``sum_m c[k-1-m] s^m`` runs from the constant term up, with
+        ``s = alpha - x[i]`` and the powers made by repeated products.
+    """
+    i = np.clip(np.searchsorted(x, alpha, side="right") - 1, 0, x.size - 2)
+    s = alpha - x[i]
+    k = c.shape[0]
+    out = c[k - 1, i, columns] * 1.0
+    z = np.ones_like(s)
+    for p in range(1, k):
+        z = z * s
+        out = out + c[k - 1 - p, i, columns] * z
+    return out
+
+
+class _LiftLookup:
+    """Lift coefficient and lift slope of many airfoils, each at its own angle (private).
+
+    The lookup gives the same values as :meth:`TabulatedAirfoil.Cl` and
+    :meth:`TabulatedAirfoil.Cl_slope` (or the circulation lift and its
+    slope) of each airfoil, with one vectorised evaluation for each group
+    of airfoils with the same angles. It reads the cached interpolation of
+    the airfoils, so it must be made again when the data of an airfoil
+    change. The entries that are not an instance of
+    :class:`TabulatedAirfoil` (not of a subclass) are not handled
+    (``handled`` is False): the caller reads them itself.
+
+    Parameters
+    ----------
+    airfoils : sequence
+        Airfoil model of each entry.
+    circulation : sequence of bool
+        True for an entry that reads the circulation lift.
+    """
+
+    def __init__(self, airfoils: Any, circulation: Any) -> None:
+        airfoils = list(airfoils)
+        circ = np.asarray(circulation, dtype=bool)
+        _build_pchip_batch([af for af, c in zip(airfoils, circ) if type(af) is TabulatedAirfoil])
+        self.n = len(airfoils)
+        self.handled = np.zeros(self.n, dtype=bool)
+        groups: dict[tuple, dict] = {}
+        for idx, (af, c) in enumerate(zip(airfoils, circ)):
+            if type(af) is not TabulatedAirfoil:
+                continue
+            if c and af.Cl_circulation_data is None:
+                raise ValueError(f"TabulatedAirfoil {af.name!r} has no circulation lift data.")
+            f = af._pchip()
+            pp, dpp = (f["Clc"], f["dClc"]) if c else (f["Cl"], f["dCl"])
+            x = np.asarray(pp.x, dtype=float)
+            key = (x.size, x.tobytes(), pp.c.shape[0], dpp.c.shape[0])
+            g = groups.setdefault(key, {"x": x, "entries": [], "cols": [], "pp": {}, "gap": []})
+            col = g["pp"].setdefault((id(af), bool(c)), (len(g["pp"]), pp, dpp))[0]
+            g["entries"].append(idx)
+            g["cols"].append(col)
+            if af.has_gaps:
+                g["gap"].append((len(g["entries"]) - 1, af))
+            self.handled[idx] = True
+        self.groups = []
+        for g in groups.values():
+            polys = sorted(g["pp"].values(), key=lambda t: t[0])
+            self.groups.append((
+                np.asarray(g["entries"], dtype=np.intp),
+                g["x"],
+                np.stack([np.asarray(t[1].c, dtype=float) for t in polys], axis=2),
+                np.stack([np.asarray(t[2].c, dtype=float) for t in polys], axis=2),
+                np.asarray(g["cols"], dtype=np.intp),
+                g["gap"],
+            ))
+
+    def __call__(self, alpha: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        """Return the lift coefficient [-] and the lift slope [1/rad] at the angles *alpha* [rad].
+
+        The values of the entries that are not handled are NaN.
+        """
+        alpha = np.asarray(alpha, dtype=float)
+        cl = np.full(self.n, np.nan)
+        slope = np.full(self.n, np.nan)
+        for entries, x, c, dc, cols, gap in self.groups:
+            a = alpha[entries]
+            for pos, af in gap:
+                af._check_gap(a[pos])
+            lo, hi = x[0], x[-1]
+            ac = np.clip(a, lo, hi)
+            cl[entries] = _piecewise_values(x, c, cols, ac)
+            slope[entries] = np.where((a >= lo) & (a <= hi), _piecewise_values(x, dc, cols, ac), 0.0)
+        return cl, slope
+
 # Type alias for convenience
 AirfoilType = LinearAirfoil | TabulatedAirfoil
 

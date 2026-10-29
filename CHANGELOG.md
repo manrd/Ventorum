@@ -135,6 +135,12 @@ a minor version can change a public interface.
 
 ### Changed
 
+- Viscous alpha-correction coupling (V1) of the vortex lattice and the lifting line: the Newton
+  iteration reads the strip polars together. One vectorised PCHIP evaluation reads all tabulated
+  polars with the same angles, and the polars of one condition (for example the ground polars at
+  the strip heights) get their interpolation from one shared construction. The values are those of
+  the per-strip reads (`TabulatedAirfoil.Cl`, `Cl_slope` and the circulation lift); the results do
+  not change. The parity tests are in `tests/test_v1_polar_lookup_parity.py`.
 - 3D panel viscous coupling (V1): the polar is read relative to the converged inviscid 2D section
   (defect correction, as in the vortex-lattice coupling). The target lift of a strip is the polar
   lift minus the converged inviscid 2D lift of its cut section (Ventorum-2D, 128 cosine-spaced

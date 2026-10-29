@@ -144,6 +144,7 @@ from ventorum.core.datatypes import (
     SolverResult,
     SolverSettings,
     TabulatedAirfoil,
+    _LiftLookup,
 )
 from ventorum.core.trust import (
     evaluate_aerodynamic_trust,
@@ -1185,17 +1186,20 @@ def _solve_condition(
     # offset is zero on a strip without a deflected control.
     cl_offset = a_sec * (alpha0 - alpha0_ta)
 
+    # The tabulated strip polars are read together (one vectorised PCHIP
+    # evaluation for each group of polars with the same angles); the values
+    # are those of the per-strip reads. The other strips read their polar.
+    lookup = _LiftLookup(polars, use_circ)
+    unhandled = np.flatnonzero(~lookup.handled)
+
     def evaluate(delta: np.ndarray):
         cl_inv = cl0 - D @ delta
         alpha_v = alpha0 + cl_inv / a_sec + delta
-        cl_v = np.array([
-            float(p.Cl_circulation(a)) if c else float(section_cl(p, a))
-            for p, a, c in zip(polars, alpha_v, use_circ)
-        ])
-        m = np.array([
-            float(p.Cl_circulation_slope(a)) if c else float(section_cl_slope(p, a))
-            for p, a, c in zip(polars, alpha_v, use_circ)
-        ])
+        cl_v, m = lookup(alpha_v)
+        for i in unhandled:
+            p, a = polars[i], alpha_v[i]
+            cl_v[i] = float(p.Cl_circulation(a)) if use_circ[i] else float(section_cl(p, a))
+            m[i] = float(p.Cl_circulation_slope(a)) if use_circ[i] else float(section_cl_slope(p, a))
         return cl_inv - (cl_v - cl_offset), cl_inv, alpha_v, m
 
     def newton(start: np.ndarray):
