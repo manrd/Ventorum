@@ -187,16 +187,21 @@ __all__ = [
 ]
 
 #: Angles of attack [deg] that a section polar source computes for each
-#: strip polar.
+#: strip polar. The range -15 to 25 deg in steps of 0.5 deg is a code
+#: setting, not from a source; no measurement in the code or its tests
+#: supports it.
 SOURCE_ALPHAS_DEG = np.arange(-15.0, 25.0 + 1e-9, 0.5)
 
 #: Two converged solutions are different branches when their CL differ by
-#: more than this value [-].
+#: more than this value [-]. A code setting, not from a source. It is 1000
+#: times the default convergence tolerance of the strip Cl residual (1e-6),
+#: so two solutions of the same branch do not count as two branches.
 BRANCH_CL_DIFFERENCE = 1e-3
 
 #: The branch search starts once with every strip this angle [deg] above
 #: the angle of maximum Cl of its polar (stalled start) and once with every
-#: strip this angle below it (attached start).
+#: strip this angle below it (attached start). A code setting, not from a
+#: source; no measurement in the code or its tests supports the value.
 STALL_START_MARGIN_DEG = 5.0
 
 #: Hinge height of a control surface for a polar source, as a fraction of
@@ -1232,6 +1237,10 @@ def _solve_condition(
                 try:
                     target = delta + np.linalg.solve(D, r)
                 except np.linalg.LinAlgError:
+                    # D is singular: a fixed step of 0.1 rad per unit Cl
+                    # residual. A code setting, not from a source. It is
+                    # below 1 / (2 pi), the inverse of the thin-airfoil
+                    # section slope, and the damping loop below cuts it more.
                     target = delta + 0.1 * r
                 for omega in (0.5, 0.25, 0.1, 0.05, 0.02):
                     trial_delta = delta + omega * relaxation * (target - delta)

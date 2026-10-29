@@ -882,6 +882,8 @@ def initial_state(setup: CaseSetup, sweeps: int = 0) -> CaseState:
         cu = ctau(tu, uu[-1], itr_u < len(up) - 1)
         cl_ = ctau(tl, ul[-1], itr_l < len(lo) - 1)
         thw = tu[0] + tl[0]
+        # First wake station as in eq.trailing_edge_residuals. The
+        # theta-weighted mean of Ctau is a code setting, not from a source.
         xd[n] = (thw, tu[1] + tl[1] + s.te_gap, np.sqrt((tu[0] * cu + tl[0] * cl_) / thw))
         if coupling is not None:
             _march_edge(coupling, _law(coupling, n), ue_all, n, n, xd[n, 1])

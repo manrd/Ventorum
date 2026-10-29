@@ -520,6 +520,9 @@ def trailing_edge_residuals(up, lo, wk, gap, re: float, up_turb, lo_turb):
     shear-stress coefficient of the wake is the theta-weighted mean of the
     two sides; a side that is still laminar at the trailing edge enters
     with TRANSITION_CTAU_FACTOR * Ctau_eq (it transitions at the edge).
+    The theta weighting is a code setting, not from a source: no source
+    for it is confirmed (docs/theory/panel2d_viscous.md: "to be checked
+    against the source").
 
     Parameters
     ----------
@@ -555,6 +558,7 @@ def trailing_edge_residuals(up, lo, wk, gap, re: float, up_turb, lo_turb):
     cl_ = side_ctau(lo, lo_turb)
     thw, dsw, cw = wk
     th_sum = up[0] + lo[0]
+    # Theta-weighted mean of Ctau: a code setting, not from a source.
     cmix = ((up[0] * cu + lo[0] * cl_) / th_sum).sqrt()
     r1 = 1.0 - th_sum / thw
     r2 = 1.0 - (up[1] + lo[1] + gap) / dsw

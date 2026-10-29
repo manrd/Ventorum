@@ -63,6 +63,8 @@ $$
 
 For a pitch rate, k = q, and the section term is -pi/4 per unit q c / (2 V). The code adds this term to the section moment of each strip, with k = -n . (Omega x e_c) (e_c the chord direction, n the section normal).
 
+This term is the two-dimensional value at every aspect ratio. A vortex lattice with two or more chordwise panels has no section term: its chordwise load gives the three-dimensional value, which is smaller in magnitude by an amount that falls with the aspect ratio, and which it approaches slowly from below in magnitude as the chordwise panel count grows. Thus C_m_q has a step between one and two chordwise panels; `test_vlm_pitch_damping_steps_from_section_term_to_chordwise_load` gives the measured values.
+
 ### Profile drag and section moment
 
 With rates, the profile drag of a strip acts along the local onset at its quarter chord, with the local dynamic pressure, and the section moment uses the same onset. The section lift coefficient that the results report stays 2 Gamma / (V c).
@@ -96,6 +98,8 @@ C_{n_r} = -\frac{3\,C_L^2\,(1+\mu)}{8\,\pi A\,(1+2\mu)}.
 $$
 
 For large A the first three tend to the strip-theory values -a_0/8, C_L/4 and -C_L/8 of the elliptic wing (Etkin and Reid 1996 give the strip-theory method). C_n_r here has no profile-drag part.
+
+The linear lifting line differs from these closed forms by a term of order alpha^2 (|C_l_p| smaller, |C_n_p| larger). The cause is the linearisation of Phillips and Snyder (2000): the magnitude of the Kutta-Joukowski force omits the induced velocity, and the section angle uses its small-angle form. The nonlinear lifting line with linear sections keeps both and agrees with the closed forms more closely; `test_linear_lifting_line_roll_derivatives_differ_from_closed_forms_by_order_alpha_squared` gives the measured values.
 
 ## Assumptions
 
