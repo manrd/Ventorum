@@ -875,3 +875,38 @@ def test_strong_root_thickness_scaling_warns_above_60_deg():
     root_off = np.asarray(off.nodes)[np.asarray(off.node_station) == 0]
     assert float(np.ptp(root_on[:, 2])) == pytest.approx(float(np.ptp(root_off[:, 2])) / np.cos(np.radians(60.5)),
                                                          rel=1e-12)
+
+
+def test_section_shape_does_not_refine_above_source_points():
+    """A NACA designation gives 161 points; the mesh shape stops refining at n_chord 80.
+
+    The mesh interpolates the section linearly at its chordwise stations. The
+    relative area error of NACA 0012 against the exact thickness law is
+    (measured, cosine stations):
+
+        n_chord           20         40         80         160        320
+        161 points     -4.04e-3   -1.01e-3   -2.53e-4   -2.53e-4   -2.53e-4
+        2001 points    -4.05e-3   -1.01e-3   -2.55e-4   -6.47e-5   -1.72e-5
+    """
+    from ventorum.airfoil import airfoil
+    from ventorum.airfoil.naca import naca4_thickness
+    from ventorum.panel3d.mesh import _resample_section, _target_x
+
+    coarse = airfoil("0012").coords
+    fine = airfoil("0012").repanel(n_panels=2000).coords
+    assert coarse.shape[0] == 161
+    xs = np.linspace(0.0, 1.0, 200001)
+    area_exact = np.trapezoid(2.0 * naca4_thickness(xs, 0.12), xs)
+
+    def err(coords, nc):
+        xt = _target_x(nc, "cosine")
+        yu, yl = _resample_section(coords, xt)
+        return np.trapezoid(yu - yl, xt) / area_exact - 1.0
+
+    e80, e160, e320 = (err(coarse, nc) for nc in (80, 160, 320))
+    # No refinement above 80 with the 161-point source.
+    assert abs(e160 - e80) < 1e-3 * abs(e80) and abs(e320 - e80) < 1e-3 * abs(e80)
+    # A finer source keeps converging (second order): the stall is the source.
+    f80, f160 = err(fine, 80), err(fine, 160)
+    assert abs(f160) < 0.3 * abs(f80)
+    assert abs(err(coarse, 40)) > 3.0 * abs(e80)
