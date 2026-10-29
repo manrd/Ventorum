@@ -113,6 +113,12 @@ a minor version can change a public interface.
 
 ### Changed
 
+- Vortex lattice: with `n_chord=None` (automatic) and a control with a nonzero deflection, the
+  automatic chordwise count is at least 16 (`CONTROL_MIN_AUTO_N_CHORD`). The flap effectiveness
+  converges at first order with `n_chord` (about 40/n_chord % low), so the default 4 panels gave
+  about 10 % too little flap lift. The ground rule and `MAX_AUTO_N_CHORD` stay. A user-set count
+  from 2 to 15 with a deflected control gets a trust note with the expected error (no score
+  change). Cases without a deflected control do not change.
 - Ventorum-2D lift in ground effect: `Panel2DResult.Cl` is the surface pressure lift in ground
   effect (`Cl_pressure`, Coulliette and Plotkin 1996, eq. 30). Near a wall the Kutta-Joukowski
   relation does not hold; the circulation lift is 12 % (h/c = 0.2) to 33 % (h/c = 0.1) too high
