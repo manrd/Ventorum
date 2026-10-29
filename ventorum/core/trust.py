@@ -216,7 +216,7 @@ def control_chord_note(n_chord: int) -> str:
     return (
         f"Deflected control with n_chord = {int(n_chord)}: flap effectiveness about {error_pct:.3g} % low "
         "(first-order chordwise convergence). The automatic n_chord uses 16 or more chordwise panels "
-        "when a control is deflected."
+        "when a surface has a control."
     )
 
 

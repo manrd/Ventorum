@@ -56,8 +56,10 @@ from ventorum.utils.validation import validate_aircraft
 DEFAULT_N_CHORD = 4
 MAX_AUTO_N_CHORD = 32
 
-# Smallest automatic chordwise panel count when a control has a nonzero
-# deflection in chordwise mode (vortex lattice, two or more chordwise panels).
+# Smallest automatic chordwise panel count when a surface has a control
+# (chordwise mode: vortex lattice, two or more chordwise panels), also at
+# zero deflection: control derivatives are differences about zero
+# deflection, and all their cases must use one mesh.
 # The flap effectiveness of the lattice converges at first order with the
 # chordwise count: for a rectangular wing of aspect ratio 40 with a full-span
 # flap (hinge at 0.75 c), Glauert's tau is 0.6090 and the lattice gives
@@ -90,11 +92,9 @@ LLT_GE_WARN_H_OVER_C = 2.0
 LARGE_ROTATION_FRACTION = 0.1
 
 
-def _has_deflected_control(aircraft: Aircraft) -> bool:
-    """Return True if a control surface of *aircraft* has a nonzero deflection [rad]."""
-    return any(
-        float(c.deflection) != 0.0 for s in aircraft.surfaces for c in (getattr(s, "controls", None) or ())
-    )
+def _has_control(aircraft: Aircraft) -> bool:
+    """Return True if a surface of *aircraft* has a control surface (any deflection)."""
+    return any(getattr(s, "controls", None) for s in aircraft.surfaces)
 
 
 def _cpu_dispatch(n_panels: int, batch: int, reason: str | None, family: str | None = None) -> dict:
@@ -195,10 +195,11 @@ class LatticeSolver(BaseSolver):
         The lifting-line solvers use 1. A value in *settings* is used as
         given. Out of ground effect the default is used. In ground effect a
         chordwise panel is not longer than the smallest gap to the ground,
-        within the default and the maximum automatic count. When a control
-        surface has a nonzero deflection, the automatic count is at least
-        ``CONTROL_MIN_AUTO_N_CHORD`` (16), for a flap effectiveness within
-        about 2.5 % of the converged value.
+        within the default and the maximum automatic count. When a surface
+        has a control surface (any deflection, zero included), the
+        automatic count is at least ``CONTROL_MIN_AUTO_N_CHORD`` (16), for a
+        flap effectiveness within about 2.5 % of the converged value and one
+        mesh for all cases of a control derivative.
 
         The automatic count is an integer, so CL(h) and the other results
         jump at the heights (and attitudes) where the count changes. For a
@@ -231,9 +232,9 @@ class LatticeSolver(BaseSolver):
             return 1
         if settings.n_chord is not None:
             return max(1, int(settings.n_chord))
-        # A deflected control needs more chordwise panels for its flap
-        # effectiveness (see CONTROL_MIN_AUTO_N_CHORD).
-        floor = CONTROL_MIN_AUTO_N_CHORD if _has_deflected_control(aircraft) else DEFAULT_N_CHORD
+        # A control needs more chordwise panels for its flap effectiveness
+        # (see CONTROL_MIN_AUTO_N_CHORD), also at zero deflection.
+        floor = CONTROL_MIN_AUTO_N_CHORD if _has_control(aircraft) else DEFAULT_N_CHORD
         if ground is None and condition.h is None:
             return floor
         # In ground effect a chordwise panel should not be longer than the gap.

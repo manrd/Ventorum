@@ -50,7 +50,7 @@ A hinge moment is positive when it tends to increase the local deflection of tha
 
 ## Which model gives the hinge moment
 
-- Vortex lattice with `n_chord >= 2`: the panel loads aft of the hinge. The value converges slowly with `n_chord`; use 16 or more chordwise panels. With `n_chord=None`, a control with a nonzero deflection gets 16 or more chordwise panels automatically; at zero deflection the automatic count stays at the default, so set `n_chord` for hinge moments of an undeflected control.
+- Vortex lattice with `n_chord >= 2`: the panel loads aft of the hinge. The value converges slowly with `n_chord`; use 16 or more chordwise panels. With `n_chord=None`, an aircraft with a control gets 16 or more chordwise panels automatically, at every deflection, so the base case and the steps of the differences use one mesh.
 - Lifting lines, and the vortex lattice with `n_chord = 1`: thin-airfoil theory of a plain flap on each strip (no gap, no nose balance, attached flow only).
 - The Fourier solver refuses a deflected control and gives no hinge moments.
 

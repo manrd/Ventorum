@@ -67,7 +67,7 @@ print(f"CL = {result.totals.CL:.4f}, Cm = {result.totals.Cm:.4f}, Cl = {result.t
 
 The vortex-lattice solver with two or more chordwise panels turns the boundary-condition normals of the flap panels. The lifting-line solvers, and the vortex lattice with one chordwise panel, use a deflected section polar. The [theory chapter](../theory/control_surfaces.md) gives the two models. The Fourier solver does not accept a deflected control.
 
-The flap effectiveness of the vortex lattice converges slowly with the number of chordwise panels (about 40/n_chord % low). With `n_chord=None` (automatic) and a control with a nonzero deflection, the solver uses 16 or more chordwise panels. If you set `n_chord` from 2 to 15 with a deflected control, the result gets a trust note with the expected error; the score does not change.
+The flap effectiveness of the vortex lattice converges slowly with the number of chordwise panels (about 40/n_chord % low). With `n_chord=None` (automatic) and a control on a surface (at any deflection, also zero), the solver uses 16 or more chordwise panels. If you set `n_chord` from 2 to 15 with a deflected control, the result gets a trust note with the expected error; the score does not change.
 
 ## Deformed geometry
 

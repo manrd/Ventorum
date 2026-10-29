@@ -1,8 +1,10 @@
 """Automatic chordwise panel count of the vortex lattice with a deflected control.
 
 The flap effectiveness of the lattice converges at first order with
-n_chord (about 40/n_chord % low). With a deflected control, the automatic
-count is at least 16; a smaller count that the user sets gets a trust note.
+n_chord (about 40/n_chord % low). With a control (any deflection, zero
+included), the automatic count is at least 16, so that all cases of a
+control derivative use one mesh. A smaller count that the user sets with a
+deflected control gets a trust note.
 """
 
 from __future__ import annotations
@@ -67,14 +69,16 @@ def test_resolve_n_chord_rules():
     st = vt.SolverSettings(n_panels=20)
     cond = vt.FlightCondition(V_inf=30.0, alpha=0.0)
     assert solver.resolve_n_chord(_wing(0.05), st, cond, None) == CONTROL_MIN_AUTO_N_CHORD
-    # Zero deflection or no control: the default count, as before.
-    assert solver.resolve_n_chord(_wing(0.0), st, cond, None) == DEFAULT_N_CHORD
+    # A control at zero deflection gets the same count (one mesh for control derivatives).
+    assert solver.resolve_n_chord(_wing(0.0), st, cond, None) == CONTROL_MIN_AUTO_N_CHORD
+    # No control: the default count, as before.
     assert solver.resolve_n_chord(_wing(0.0, with_control=False), st, cond, None) == DEFAULT_N_CHORD
     # A count that the user sets is used as given.
     assert solver.resolve_n_chord(_wing(0.05), vt.SolverSettings(n_panels=20, n_chord=4), cond, None) == 4
     # In ground effect the deflected control keeps the minimum of 16 (gap rule gives less here).
     cond_ge = vt.FlightCondition(V_inf=30.0, alpha=0.0, h=2.0)
-    assert solver.resolve_n_chord(_wing(0.0), st, cond_ge, None) == DEFAULT_N_CHORD
+    assert solver.resolve_n_chord(_wing(0.0, with_control=False), st, cond_ge, None) == DEFAULT_N_CHORD
+    assert solver.resolve_n_chord(_wing(0.0), st, cond_ge, None) == CONTROL_MIN_AUTO_N_CHORD
     assert solver.resolve_n_chord(_wing(0.05), st, cond_ge, None) == CONTROL_MIN_AUTO_N_CHORD
     # Near the ground the gap rule can ask for more, up to the maximum.
     cond_low = vt.FlightCondition(V_inf=30.0, alpha=0.0, h=0.04)
@@ -115,6 +119,49 @@ def test_no_note_without_deflection():
     for ac in (_wing(0.0), _wing(0.0, with_control=False)):
         _, r = _cl(ac, 2.0, settings)
         assert not any("flap effectiveness about" in n for n in _notes(r))
+
+
+def _small_wing() -> vt.Aircraft:
+    """Rectangular wing of aspect ratio 8 with a part-span flap at zero deflection."""
+    return vt.Aircraft(surfaces=[vt.LiftingSurface(
+        name="wing", semi_span=4.0,
+        sections=[vt.WingSection(y_frac=e, chord=1.0) for e in (0.0, 1.0)],
+        controls=[vt.ControlSurface("flap", 0.2, 0.6, 0.75, 0.0)],
+    )], ref_point=np.array([0.25, 0.0, 0.0]))
+
+
+def test_control_derivatives_use_one_mesh_at_zero_deflection(monkeypatch):
+    """At zero base deflection, the base, alpha-step and deflection-step solves have the same n_chord."""
+    seen = []
+    original = vt.analyze
+
+    def recording(*args, **kwargs):
+        r = original(*args, **kwargs)
+        seen.append(int(r.details["lattice"].n_chord))
+        return r
+
+    monkeypatch.setattr(vt, "analyze", recording)
+    cond = vt.FlightCondition(V_inf=30.0, alpha=math.radians(3.0))
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)
+        vt.control_derivatives(_small_wing(), cond, vt.SolverSettings(solver_type="vlm", n_panels=12))
+    # Base, two deflection steps and two alpha steps.
+    assert len(seen) == 5
+    assert set(seen) == {CONTROL_MIN_AUTO_N_CHORD}
+
+
+def test_derivative_matrix_control_column_equals_control_derivatives():
+    """The control column of the derivative matrix equals a standalone control_derivatives call."""
+    cond = vt.FlightCondition(V_inf=30.0, alpha=math.radians(3.0))
+    st = vt.SolverSettings(solver_type="vlm", n_panels=12)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)
+        dm = vt.derivative_matrix(_small_wing(), cond, st, groups=("static", "control"))
+        cd = vt.control_derivatives(_small_wing(), cond, st, axes="body", hinge_alpha=False).derivatives["flap"]
+    col = dm.matrix[:, list(dm.columns).index("delta:flap")]
+    expected = np.array([cd.CL, cd.CD, cd.CY, cd.Cl, cd.Cm, cd.Cn])
+    np.testing.assert_allclose(col, expected, rtol=1e-12, atol=1e-14)
+    assert dm.base.details["lattice"].n_chord == CONTROL_MIN_AUTO_N_CHORD
 
 
 def test_case_without_controls_unchanged():
