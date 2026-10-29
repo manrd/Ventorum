@@ -141,8 +141,11 @@ def test_base_sections_are_clean(name):
 
 @pytest.mark.parametrize("name", ["naca0012", "naca4412"])
 def test_zero_deflection_returns_same_points(name):
+    # The treatment "none" adds no node, so a zero deflection returns the
+    # input points. "merge" and "repanel" (the default) add the hinge node
+    # also at a zero deflection (tests/test_hinge_zero_deflection.py).
     base = _sections()[name]
-    out = deflect_plain_flap(base, 0.7, 0.0)
+    out = deflect_plain_flap(base, 0.7, 0.0, hinge_treatment="none")
     assert out is not base
     np.testing.assert_array_equal(out, base)
 

@@ -125,6 +125,14 @@ a minor version can change a public interface.
 
 ### Changed
 
+- Plain-flap section (`deflect_plain_flap`, `AirfoilShape.with_flap`): the hinge treatments "merge"
+  and "repanel" (the default) now build the section also at a zero deflection, with a zero rotation.
+  The node set then has the hinge node of each surface, as at a small deflection, so the 2D panel
+  loads and their derivatives are continuous in the deflection. Before, a zero deflection
+  returned the input points for every treatment, against the documentation. "none" keeps that
+  behaviour. Results of a flapped section at zero deflection with "merge" or "repanel" change by the
+  added node; sections without a flap do not change. `solve_viscous_flapped` still solves the
+  input section when the deflection is zero.
 - Compressibility scope: a stated `FlightCondition.mach` of 0.7 or more is refused with `ValidityError`
   (`MACH_LIMIT_REFUSED`) by `analyze`, the other entry points that validate the flight condition, and
   the lattice solvers. Before, Mach numbers up to just below 1 ran and only the trust score gave a
