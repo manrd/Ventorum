@@ -37,8 +37,10 @@ from ventorum.core.datatypes import (
 )
 from ventorum.core.errors import ValidityError
 from ventorum.core.trust import (
+    body_rate_note,
     check_mach_scope,
     evaluate_aerodynamic_trust,
+    lattice_convergence_notes,
     lattice_spanwise_stats,
     mean_line_strip_jump,
     polar_limits,
@@ -398,6 +400,7 @@ class LatticeSolver(BaseSolver):
                     f"{LARGE_ROTATION_FRACTION:g}). The quasi-steady model keeps the wake straight along the free "
                     "stream; with this rotation the real wake is a helix, so the result is less reliable."
                 )
+            notes.append(body_rate_note())
         wd = wake_direction(condition, ground, getattr(settings, "wake_alignment", "freestream"))
         return ground, h_min, notes, wd
 
@@ -473,6 +476,12 @@ class LatticeSolver(BaseSolver):
                 "about -0.5 % at 2.4 deg and -4 % at 8.5 deg with 40 half-cosine panels). For linear "
                 "analysis use the VLM solver."
             )
+        # Measured mesh-convergence limits of the geometry (no penalty). The
+        # notes are trust notes only; the warnings are also run-time warnings.
+        conv_notes, conv_warnings = lattice_convergence_notes(lattice, self.collocation == "llt", main_surface)
+        notes += [m for m in conv_warnings + conv_notes if m not in notes]
+        quiet = set(conv_notes)
+        quiet.add(body_rate_note())
         h_over_c = (h_min / c_ref) if (h_min is not None and c_ref) else None
         totals = loads.totals
         # Tabulated section polars: compare the section results with the
@@ -544,7 +553,7 @@ class LatticeSolver(BaseSolver):
         }
         mesh = getattr(lattice, "mesh_warnings", ())
         for msg in notes:
-            if msg == _CAMBER_GROUND_NOTE:
+            if msg == _CAMBER_GROUND_NOTE or msg in quiet:
                 continue  # This is a result trust note, not a run-time warning.
             if msg in mesh:
                 continue  # Issued by build_lattice or by the lattice cache.

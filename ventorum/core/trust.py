@@ -556,6 +556,405 @@ def panel3d_mesh_checks(
     return penalties, warnings, recommendations
 
 
+#: Mesh-convergence notes and warnings.
+#:
+#: The notes and the warnings below state convergence limits that a mesh
+#: study of the solvers measured. They do not change the score: they go to
+#: the trust warnings with no penalty (see the "Envelope" sections of the
+#: theory manual for the measured values).
+#:
+#: Fold angle [deg] at a joined edge between two surfaces (away from the
+#: symmetry plane) or between neighbouring strips of one surface, above
+#: which the kink counts as a winglet-type kink: the junction note of the
+#: vortex lattice and the kink warning of the lifting line.
+WINGLET_KINK_NOTE_DEG = 30.0
+#: Fold angle [deg] at a dihedral break above which the break gets a note:
+#: at the root of a symmetric surface (twice the root dihedral) for the
+#: lattice solvers, and between two spanwise intervals of one surface for
+#: the 3D panel method.
+DIHEDRAL_BREAK_NOTE_DEG = 5.0
+#: Smallest tip chord over the largest chord of the main surface [-] that
+#: counts as a finite tip chord for the lifting-line induced-drag note.
+FINITE_TIP_CHORD_RATIO = 0.1
+#: Fourier lifting line: aspect ratio [-] above which fewer than
+#: ``FOURIER_MIN_TERMS`` series terms [-] give a warning.
+FOURIER_TERMS_AR = 20.0
+FOURIER_MIN_TERMS = 50
+#: Low lift bias of the 3D panel method from the chordwise discretization:
+#: about ``-(55 to 85) / n_chord`` percent of CL, for t/c from 6 to 24 %
+#: [%, the coefficients multiply 1/n_chord].
+PANEL3D_CHORD_BIAS_COEFFICIENTS = (55.0, 85.0)
+
+
+def _fold_deg(u_a: np.ndarray, u_b: np.ndarray) -> float:
+    """Return the fold angle [deg] of two strips whose directions from the common edge are *u_a* and *u_b*.
+
+    A flat continuation (``u_b = -u_a``) has a fold of 0 deg; a right
+    angle has a fold of 90 deg.
+    """
+    a = np.asarray(u_a, dtype=float)
+    b = -np.asarray(u_b, dtype=float)
+    return float(np.degrees(np.arctan2(np.linalg.norm(np.cross(a, b)), float(a @ b))))
+
+
+def lattice_fold_angles(lattice: VortexLattice | None) -> dict[str, float]:
+    """Return the largest fold angles of a lattice at the symmetry plane, at junctions and inside surfaces.
+
+    The fold of two neighbouring strips comes from the spanwise directions
+    of the geometry definition (``SurfaceSlice.strip_span_def``): twist,
+    taper and sweep do not change them, so only dihedral changes make a
+    fold. Three groups:
+
+    * ``"root"``: the root edge of a symmetric surface, and a joined edge
+      of two surfaces on the plane ``y = 0`` (a half wing and its mirror
+      image). The fold is twice the root dihedral.
+    * ``"junction"``: a joined edge of two surfaces away from ``y = 0``
+      (a winglet or a fin on the tip of a tail).
+    * ``"interior"``: an edge between two strips of one surface that is
+      not the root edge (a gull break or a winglet given as a section of
+      the surface).
+
+    Parameters
+    ----------
+    lattice : VortexLattice or None
+        Vortex lattice geometry. Lengths in metres.
+
+    Returns
+    -------
+    dict of str to float
+        The largest fold angle of each group [deg]; 0.0 when the group has
+        no edge, or when the lattice has no spanwise directions. The value
+        is cached on the lattice.
+    """
+    out = {"root": 0.0, "junction": 0.0, "interior": 0.0}
+    if lattice is None:
+        return out
+    cache = getattr(lattice, "geom_cache", None)
+    if cache is not None and "convergence_fold_angles" in cache:
+        return dict(cache["convergence_fold_angles"])
+    ends = []  # (surface index, leading-edge node, trailing-edge node, direction into the strip, chord)
+    for k, sf in enumerate(getattr(lattice, "surfaces", ()) or ()):
+        span = getattr(sf, "strip_span_def", None)
+        if span is None or len(span) == 0:
+            continue
+        span = np.asarray(span, dtype=float)
+        n = span.shape[0]
+        root_edge = n // 2 if (sf.is_symmetric and n % 2 == 0) else -1
+        for e in range(1, n):
+            fold = _fold_deg(-span[e - 1], span[e])
+            key = "root" if e == root_edge else "interior"
+            out[key] = max(out[key], fold)
+        joined = getattr(sf, "edge_joined", None)
+        if joined is None:
+            continue
+        le = np.asarray(sf.edge_le, dtype=float)
+        te = np.asarray(sf.edge_te, dtype=float)
+        chord = np.asarray(sf.edge_chord, dtype=float)
+        for e, u in ((0, span[0]), (n, -span[-1])):
+            if bool(joined[e]):
+                ends.append((k, le[e], te[e], u, float(chord[e])))
+    for i in range(len(ends)):
+        for j in range(i + 1, len(ends)):
+            k_a, le_a, te_a, u_a, c_a = ends[i]
+            k_b, le_b, te_b, u_b, c_b = ends[j]
+            if k_a == k_b:
+                continue
+            tol = 0.1 * min(c_a, c_b)
+            if np.linalg.norm(le_a - le_b) > tol or np.linalg.norm(te_a - te_b) > tol:
+                continue
+            fold = _fold_deg(u_a, u_b)
+            on_root = abs(0.5 * float(le_a[1] + le_b[1])) <= 1e-9 * max(c_a, c_b, 1.0)
+            key = "root" if on_root else "junction"
+            out[key] = max(out[key], fold)
+    if cache is not None:
+        cache["convergence_fold_angles"] = dict(out)
+    return out
+
+
+def lattice_tip_chord_ratio(lattice: VortexLattice | None, surface_index: int = 0) -> float | None:
+    """Return the smallest free-end chord of a lattice surface divided by its largest edge chord.
+
+    A free end is a boundary edge of the surface that is not joined to
+    another surface (a tip, or the root of a half wing without a mirror
+    image, which has the largest chord and does not set the minimum).
+
+    Parameters
+    ----------
+    lattice : VortexLattice or None
+        Vortex lattice geometry. Lengths in metres.
+    surface_index : int
+        Index of the surface in ``lattice.surfaces``.
+
+    Returns
+    -------
+    float or None
+        The ratio [-], or None when the surface has no free end or no
+        chord data.
+    """
+    surfaces = getattr(lattice, "surfaces", None) or ()
+    if not 0 <= int(surface_index) < len(surfaces):
+        return None
+    sf = surfaces[int(surface_index)]
+    chord = np.asarray(getattr(sf, "edge_chord", ()), dtype=float)
+    if chord.size < 2 or not np.all(np.isfinite(chord)) or float(np.max(chord)) <= 0.0:
+        return None
+    joined = getattr(sf, "edge_joined", None)
+    ends = [e for e in (0, chord.size - 1) if joined is None or not bool(joined[e])]
+    if not ends:
+        return None
+    return float(min(chord[e] for e in ends) / np.max(chord))
+
+
+def surface_tip_chord_ratio(surface: LiftingSurface) -> float | None:
+    """Return the tip chord of a surface divided by its largest section chord.
+
+    Parameters
+    ----------
+    surface : LiftingSurface
+        Surface definition. The tip is the section with the largest
+        ``y_frac``.
+
+    Returns
+    -------
+    float or None
+        The ratio [-], or None when the surface has no section with a
+        positive chord.
+    """
+    secs = sorted(getattr(surface, "sections", ()) or (), key=lambda s: s.y_frac)
+    if not secs:
+        return None
+    chords = np.array([float(s.chord) for s in secs])
+    if not np.all(np.isfinite(chords)) or float(np.max(chords)) <= 0.0:
+        return None
+    return float(chords[-1] / np.max(chords))
+
+
+def surface_dihedral_break_deg(surface: LiftingSurface) -> float:
+    """Return the largest dihedral break between two spanwise intervals of a surface [deg].
+
+    The break is the angle between the directions of two neighbouring
+    intervals of the leading-edge line between sections, in the y-z plane
+    (sweep does not count). The root of a symmetric surface is not a break
+    of this function.
+
+    Parameters
+    ----------
+    surface : LiftingSurface
+        Surface definition.
+
+    Returns
+    -------
+    float
+        The largest break [deg]; 0.0 with fewer than three sections.
+    """
+    from ventorum.geometry.lattice import _sorted_sections, surface_reference_line
+
+    secs = _sorted_sections(surface)
+    if len(secs) < 3:
+        return 0.0
+    fr = np.array([s.y_frac for s in secs], dtype=float)
+    _, y, z = surface_reference_line(surface, fr)
+    d = np.stack([np.diff(y), np.diff(z)], axis=1)
+    length = np.linalg.norm(d, axis=1)
+    d = d[length > 0.0] / length[length > 0.0, None]
+    if d.shape[0] < 2:
+        return 0.0
+    cross = d[:-1, 0] * d[1:, 1] - d[:-1, 1] * d[1:, 0]
+    dot = np.sum(d[:-1] * d[1:], axis=1)
+    return float(np.max(np.degrees(np.abs(np.arctan2(cross, dot)))))
+
+
+def lattice_convergence_notes(
+    lattice: VortexLattice | None,
+    lifting_line: bool,
+    main_surface: int = 0,
+) -> tuple[list[str], list[str]]:
+    """Return the mesh-convergence notes and warnings of a lattice geometry.
+
+    The notes are measured limits of the vortex lattice and of the
+    numerical lifting line. They do not change the score.
+
+    * Vortex lattice, a joined junction with a fold above
+      ``WINGLET_KINK_NOTE_DEG`` (a winglet): the junction legs make the
+      near-field CL not monotone with the spanwise panel count and the
+      sideslip rolling moment drift.
+    * Both solvers, a root fold above ``DIHEDRAL_BREAK_NOTE_DEG`` (a flat
+      wing with root dihedral): the near-field CL drifts by a constant step
+      per doubling of the spanwise panels.
+    * Lifting line, a junction or an interior fold above
+      ``WINGLET_KINK_NOTE_DEG``: a warning that the method is not verified
+      at a winglet kink.
+    * Lifting line, a main surface with a tip chord above
+      ``FINITE_TIP_CHORD_RATIO`` times its largest chord: the induced drag
+      is above the lifting-surface value.
+
+    Parameters
+    ----------
+    lattice : VortexLattice or None
+        Vortex lattice geometry. Lengths in metres.
+    lifting_line : bool
+        True for the numerical lifting line (one horseshoe per strip), False
+        for the vortex lattice.
+    main_surface : int
+        Index of the main surface in ``lattice.surfaces``.
+
+    Returns
+    -------
+    tuple of (list of str, list of str)
+        The notes (trust notes only) and the warnings (trust warnings that
+        the solver also issues as a ``RuntimeWarning``, as the sweep
+        warning). Each list is empty when none applies.
+    """
+    if lattice is None:
+        return [], []
+    folds = lattice_fold_angles(lattice)
+    notes: list[str] = []
+    warns: list[str] = []
+    if not lifting_line and folds["junction"] > WINGLET_KINK_NOTE_DEG:
+        notes.append(
+            f"Joined surfaces with a fold of {folds['junction']:.0f} deg (a winglet or a fin on a tip): the "
+            "near-field loads converge slowly with the spanwise panel count. In a measured case (a wing with "
+            "90 deg winglets, automatic spacing) CL was not monotone with the panel count and the sideslip "
+            "rolling moment Cl drifted; without the force on the chordwise legs at the junction the loads "
+            "converged. Compare two spanwise panel counts, or uniform spacing, before you use the lateral "
+            "values."
+        )
+    if folds["root"] > DIHEDRAL_BREAK_NOTE_DEG:
+        notes.append(
+            f"Root dihedral (fold of {folds['root']:.0f} deg at the root): the near-field CL increases by "
+            "about the same step at each doubling of the spanwise panel count (about 1e-4 at 10 deg "
+            "dihedral) because of the bound-vortex force at the root apex. The Trefftz-plane CDi is "
+            "converged."
+        )
+    if lifting_line:
+        kink = max(folds["junction"], folds["interior"])
+        if kink > WINGLET_KINK_NOTE_DEG:
+            warns.append(
+                f"Lifting line at a winglet kink (fold of {kink:.0f} deg): the lifting line is not verified "
+                "at a kink of the lifting line. In a measured case the induced drag depended on the "
+                "spanwise spacing and did not converge. For a winglet use the VLM solver."
+            )
+        ratio = lattice_tip_chord_ratio(lattice, main_surface)
+        if ratio is not None and ratio > FINITE_TIP_CHORD_RATIO:
+            notes.append(finite_tip_note(ratio))
+    return notes, warns
+
+
+def finite_tip_note(ratio: float) -> str:
+    """Return the lifting-line note of a finite tip chord.
+
+    Parameters
+    ----------
+    ratio : float
+        Tip chord divided by the largest chord of the main surface [-].
+
+    Returns
+    -------
+    str
+        The note.
+    """
+    return (
+        f"Finite tip chord (tip chord {100.0 * float(ratio):.0f} % of the largest chord): the lifting-line "
+        "induced drag is above the lifting-surface (VLM) value, 4 to 7 % for a rectangular wing. The "
+        "difference in the span efficiency e falls only like 1/ln(A) as the aspect ratio A grows. Elliptic "
+        "wings show no difference. For the induced drag of a wing with blunt tips use the VLM solver."
+    )
+
+
+def body_rate_note() -> str:
+    """Return the note of the near-field lateral values of a lattice solve with body rates.
+
+    Returns
+    -------
+    str
+        The note.
+    """
+    return (
+        "Body rates: the near-field lateral values (CY, Cl, Cn) are sensitive to the spanwise mesh. In a "
+        "measured case (a swept wing with a roll rate) Cn changed by about 0.8 % at each doubling of the "
+        "spanwise panel count, and the cosine and the uniform spacing gave values 5 to 7 % apart. Compare "
+        "two spanwise panel counts or spacings before you use the lateral rate derivatives."
+    )
+
+
+def fourier_convergence_notes(surface: LiftingSurface | None, AR: float, n_terms: int) -> list[str]:
+    """Return the notes and warnings of the Fourier lifting line.
+
+    * A tip chord above ``FINITE_TIP_CHORD_RATIO`` times the largest chord:
+      the induced drag is above the lifting-surface value (note).
+    * Fewer than ``FOURIER_MIN_TERMS`` terms at an aspect ratio above
+      ``FOURIER_TERMS_AR``: the series is probably not converged (warning).
+
+    Parameters
+    ----------
+    surface : LiftingSurface or None
+        The surface of the solve.
+    AR : float
+        Aspect ratio of the solve [-].
+    n_terms : int
+        Number of terms of the Fourier series [-].
+
+    Returns
+    -------
+    list of str
+        The notes and warnings (empty when none applies).
+    """
+    notes: list[str] = []
+    ratio = None if surface is None else surface_tip_chord_ratio(surface)
+    if ratio is not None and ratio > FINITE_TIP_CHORD_RATIO:
+        notes.append(finite_tip_note(ratio))
+    if _is_finite(AR) and float(AR) > FOURIER_TERMS_AR and int(n_terms) < FOURIER_MIN_TERMS:
+        notes.append(
+            f"Fourier lifting line with {int(n_terms)} terms at aspect ratio {float(AR):.1f} (above "
+            f"{FOURIER_TERMS_AR:g}): at a large aspect ratio the series needs about {FOURIER_MIN_TERMS} terms "
+            f"or more. Set n_panels to {FOURIER_MIN_TERMS} or more."
+        )
+    return notes
+
+
+def panel3d_convergence_notes(surfaces: Sequence[LiftingSurface] | None, n_chord: int | None) -> list[str]:
+    """Return the mesh-convergence notes of the 3D panel method.
+
+    * Every result: the low lift bias of the chordwise discretization,
+      about ``-(55 to 85) / n_chord`` percent of CL (constant-strength
+      source and doublet panels at a trailing edge with a finite angle; the
+      2D scheme has the same error, so it is a property of the method).
+    * A dihedral break above ``DIHEDRAL_BREAK_NOTE_DEG`` inside a surface
+      (a gull wing): the strip lift peak at the break grows with mesh
+      refinement.
+
+    Parameters
+    ----------
+    surfaces : sequence of LiftingSurface or None
+        The surfaces of the solve.
+    n_chord : int or None
+        Chordwise panels per surface [-].
+
+    Returns
+    -------
+    list of str
+        The notes.
+    """
+    notes: list[str] = []
+    if n_chord is not None and int(n_chord) > 0:
+        lo, hi = (c / int(n_chord) for c in PANEL3D_CHORD_BIAS_COEFFICIENTS)
+        notes.append(
+            f"Chordwise bias of the panel method: with {int(n_chord)} chordwise panels the lift is probably "
+            f"{lo:.1f} to {hi:.1f} % low (about -({PANEL3D_CHORD_BIAS_COEFFICIENTS[0]:g} to "
+            f"{PANEL3D_CHORD_BIAS_COEFFICIENTS[1]:g})/n_chord % for t/c 6 to 24 %), a property of the "
+            "constant-strength source and doublet panels at a trailing edge with a finite angle. Set "
+            "panel_estimate_mesh_error=True for a Richardson estimate in n_chord."
+        )
+    breaks = [surface_dihedral_break_deg(s) for s in surfaces or ()]
+    brk = max(breaks, default=0.0)
+    if brk > DIHEDRAL_BREAK_NOTE_DEG:
+        notes.append(
+            f"Dihedral break of {brk:.0f} deg inside a surface (a gull wing): the strip lift peak at the break "
+            "grows as the mesh is refined, so the strip loads next to the break are not converged. Use the "
+            "integrated loads."
+        )
+    return notes
+
 
 def isa_speed_of_sound(rho: float) -> float:
     """Return the ISA speed of sound [m/s] at the air density *rho* [kg/m^3].

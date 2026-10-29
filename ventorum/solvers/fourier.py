@@ -51,7 +51,7 @@ from ventorum.core.datatypes import (
 )
 from ventorum.aero.system import has_rates
 from ventorum.core.errors import ValidityError
-from ventorum.core.trust import evaluate_aerodynamic_trust
+from ventorum.core.trust import evaluate_aerodynamic_trust, fourier_convergence_notes
 from ventorum.geometry import lattice_cache
 from ventorum.geometry.controls import validate_controls
 from ventorum.geometry.discretization import fourier_collocation_angles
@@ -350,6 +350,10 @@ class FourierSolver(BaseSolver):
         surf = aircraft.surfaces[0]
         N = self._n_terms(surf, settings)
         b, theta, st, mu, n_idx, lhs, theta_q, q_geo, sin_n_theta, sin_n_theta_q = _fourier_system(fp, surf, N)
+        # The term-count warning is also a run-time warning (once per call);
+        # without a surface the function gives only that warning.
+        for msg in fourier_convergence_notes(None, b * b / aircraft.S_ref, N):
+            warnings.warn(msg, RuntimeWarning, stacklevel=3)
         q_data = dict(q_geo)
         ref = aircraft.moment_reference()
         q_data["x_ref"] = float(ref[0])
@@ -427,7 +431,7 @@ class FourierSolver(BaseSolver):
             CL=CL, CDi=CDi, CDp=CDp, CD_total=CD_total if has_profile else None,
             e=e, AR=AR, Cm=Cm,
         )
-        notes = _unused_shape_notes(aircraft)
+        notes = _unused_shape_notes(aircraft) + fourier_convergence_notes(surf, AR, N)
         totals.trust = evaluate_aerodynamic_trust(
             AR=AR, condition=condition, spanwise_list=[spanwise], CL=CL, CDi=CDi,
             CD_total=totals.CD_total, converged=True, n_panels=N, max_sweep_rad=0.0,
