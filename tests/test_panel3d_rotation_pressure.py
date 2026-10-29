@@ -246,24 +246,32 @@ _KEYS = ("CL", "CDi_nearfield", "CY", "Cl", "Cm", "Cn")
 #: fix"): (CL, CDi_nearfield, CY, Cl, Cm, Cn), the sum of the panel Cp
 #: values and the Cp of panel 3. Numpy backend, 6 x 6 panels. Updated for
 #: the second-moment far-field expansion about the panel centroid (the old
-#: expansion had an error of 1e-4 to 3e-4 relative on this mesh).
+#: expansion had an error of 1e-4 to 3e-4 relative on this mesh). Updated
+#: again for the least-squares node values of the surface gradient: with
+#: the previous inverse-distance node values
+#: (_build_surface_gradient_operator_shepard) the four cases give the
+#: previous values bit for bit, so only the gradient moves them. On this
+#: very coarse mesh (6 chordwise panels) the pressure values move much:
+#: CDi_nearfield changes sign, Cm changes by 27 to 35 %, and CY of the
+#: sideslip cases changes sign (the trust score gives a note below 16
+#: chordwise panels for the near-field drag).
 _BASELINE = {
     "morino_sym": ("morino", dict(alpha=4.0), (
-        0.3327788051124851, -0.0032292424761471723, 1.5436973789198368e-18,
-        1.4265904322469885e-18, -0.019742375535250867, -1.683531869243679e-19),
-        -11.504605920145679, -0.08153225923135698),
+        0.33318431966715517, 0.012018828435260084, -5.0727221826797205e-20,
+        2.279747455453521e-17, -0.025516027728158617, 3.1044130988187232e-18),
+        -10.11698294361551, -0.07544229956525039),
     "morino_beta": ("morino", dict(alpha=4.0, beta=3.0), (
-        0.3318673196341243, -0.003217419828229417, -0.00014471841447228097,
-        -0.0011212561304619812, -0.01968830013581702, 6.641381625027584e-05),
-        -22.92112840700115, -0.08138541221111817),
+        0.3322717180565286, 0.011968478088644097, 0.0006443527724316788,
+        -0.0011243694446524837, -0.02544613799331438, 8.385146787821022e-05),
+        -20.153594988035472, -0.0751672960340668),
     "pressure_beta": ("pressure", dict(alpha=4.0, beta=3.0), (
-        0.31517233171464176, -0.003622569633286369, -0.0001704076842781566,
-        -0.000561965751579083, -0.014654001302152483, 8.118348757454537e-05),
-        -22.707546992378646, -0.09000901968162722),
+        0.3147790888205251, 0.011285736379523216, 0.0006050695256616419,
+        -0.0005409287019424954, -0.019786376067684915, 9.505117209302419e-05),
+        -19.98394104181253, -0.08523052889502414),
     "morino_ground": ("morino", dict(alpha=4.0, h=0.8), (
-        0.3717514464133529, -0.0038660126844525583, 1.8567884144437119e-19,
-        -3.503538267430104e-18, -0.023931779682072805, 1.0329354446645879e-18),
-        -10.700572955622386, -0.022733656983591644),
+        0.37277758347902157, 0.011633788921274027, -8.632847116784143e-19,
+        -1.2902251703410263e-17, -0.03028883213931626, 5.172844934322515e-18),
+        -9.24178570469249, -0.007187633863274812),
 }
 
 

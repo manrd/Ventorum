@@ -32,18 +32,26 @@ ALPHA = np.radians(3.0)
 # NACA 0012 results before the fix (commit 87fcc02), from this test setup:
 # (CL, CD_pressure, CDi_trefftz, Cm, Cl) and the Cp of the right cap panels.
 # The fix does not change a symmetric section: its cap stencils are already
-# collinear to round-off.
+# collinear to round-off. The coefficients were stored again after the
+# change to least-squares node values in the surface gradient of the
+# interior panels. With the previous inverse-distance node values
+# (_build_surface_gradient_operator_shepard) this setup gives the previous
+# values bit for bit, so only the gradient moves them. The cap Cp and the
+# Trefftz drag do not change (the cap rows keep the row-only fit). On this
+# mesh (12 chordwise panels) the near-field pressure drag is about 1.6 to
+# 1.8 times the Trefftz drag (it was negative before); the trust score
+# gives a note below 16 chordwise panels.
 _BASE_0012 = {
     0.0: (
-        (0.24786632158307664, -0.00035238512346799416, 0.00247650183660262, -0.059638129543185765,
-         8.347250399390949e-18),
+        (0.2511658956237126, 0.0043951178957991385, 0.00247650183660262, -0.06093358482596186,
+         7.196668502059394e-18),
         [-0.07719358198836423, -0.10268742060309055, -0.10672202439934608, -0.10024900924028035,
          -0.09104682984989343, -0.08094397731202752, -0.06912989740226383, -0.054342587623420036,
          -0.03508918272312811, -0.011091897716775101, 0.010790684044762355, 0.02171451144835035],
     ),
     10.0: (
-        (0.24653794356113368, -0.0003913093053301684, 0.0024940655832007483, -0.06394217750223295,
-         -1.2746973464940256e-17),
+        (0.2499683400624803, 0.004002377048112701, 0.0024940655832007483, -0.06373257586752662,
+         -1.7289876153349012e-17),
         [-0.04111752046700512, -0.06817859937315363, -0.08202336820266365, -0.08542353508113831,
          -0.08116551697993879, -0.07217983468392553, -0.05958514579324836, -0.04369358293184544,
          -0.024884842951579778, -0.004801532779372231, 0.00986858065261198, 0.011249845989052654],

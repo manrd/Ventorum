@@ -89,18 +89,25 @@ def _te_jump(solver: PanelSolver, cp: np.ndarray) -> float:
 # Default (Morino) run stored after the change to the node-based surface
 # gradient with sharp edges at the panel kind changes. The doublets and the
 # Trefftz drag equal the run of the first solver version; the pressure
-# values follow the present gradient method.
+# values follow the present gradient method. The pressure values were
+# stored again after the change to least-squares node values in the
+# surface gradient: with the previous inverse-distance node values
+# (_build_surface_gradient_operator_shepard) the run gives the previous
+# stored values to 5e-13 relative, so only the gradient moves them. On this
+# coarse mesh (8 chordwise panels) the near-field pressure drag is about
+# 1.9 times the Trefftz drag (it was negative before); the trust score
+# gives a note below 16 chordwise panels.
 _STORED_MORINO = {
-    "CL": 0.3289444356419643,
-    "CD_pressure": -0.0025505797612635044,
+    "CL": 0.3317867672685191,
+    "CD_pressure": 0.007978170567468013,
     "CDi_trefftz": 0.004233828611102339,
-    "Cm": -0.07633453844471903,
-    "cp_sum": -36.89045346243077,
-    "cp_abs_sum": 70.88762986025384,
-    "cp_0": -1.3715636687742108,
-    "cp_100": -0.4000422007027551,
+    "Cm": -0.07968338690585908,
+    "cp_sum": -32.93577724926796,
+    "cp_abs_sum": 68.0982534507028,
+    "cp_0": -0.9291652303547266,
+    "cp_100": -0.40772955528941224,
     "mu_abs_sum": 783.0904197027365,
-    "velocity_abs_sum": 16393.504373839,
+    "velocity_abs_sum": 16296.597383994233,
 }
 
 
