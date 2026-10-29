@@ -124,7 +124,11 @@ def test_linear_llt_swept_wing():
 
     with pytest.warns(RuntimeWarning, match="not grid convergent"):
         res_swept = LinearLLTSolver().solve(wing_swept, cond, sett)
-    assert res_swept.totals.trust.factors["sweep"] > 0.5
+    # The calibrated error model replaced the sweep rule (factor "sweep") of the lifting line. This AR 5
+    # wing with 45 deg sweep has E = exp(-1.1) 5^-0.67 exp(0.063 * 45) = 192 %, so the score of the error
+    # model is 0 (penalty 1.0).
+    assert res_swept.totals.trust.factors["error_model"] > 0.5
+    assert res_swept.totals.trust.rating == "UNRELIABLE"
 
     def hd(AR, lam_half):  # Helmbold-Diederich, a0 = 2 pi
         return 2 * np.pi * AR / (2 + np.sqrt(AR * AR * (1 + np.tan(lam_half) ** 2) + 4))

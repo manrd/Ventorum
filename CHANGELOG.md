@@ -135,6 +135,21 @@ a minor version can change a public interface.
 
 ### Changed
 
+- Trust rating from a calibrated error model. For the lifting line (linear, nonlinear, Fourier),
+  the vortex lattice and the 3D panel method, the score and the rating come from a predicted error
+  `k * E` (`ventorum.core.trust.predicted_error`), fitted on 1157 known-answer cases against
+  converged lifting-surface and panel solutions. The rating is the band of `k * E` (HIGH below 2 %,
+  MODERATE below 5 %, LOW below 15 %); the score is a continuous function of `k * E` through the
+  score thresholds of the ratings (`error_score`). The model replaces the aspect-ratio and sweep
+  rules of the lifting line, the slender-wing rule, the penalties of the coarse spanwise mesh and of
+  chordwise panels longer than the ground gap, the chordwise-count rule of the 3D panel method and
+  the penalty of its elongated-panel rule (their warnings without a penalty stay where they tell
+  the user what to do). The other rules stay as caps (not calibrated). New factor `error_model`;
+  the factor `sweep` is removed. `evaluate_aerodynamic_trust` has the new keyword inputs `taper`,
+  `n_span` and `controls` (`lattice_error_inputs` reads them from a lattice);
+  `panel3d_mesh_checks` has the input `error_model`. Most lifting-line results are now rated LOW
+  (for example a rectangular wing of aspect ratio 8: predicted error 10.7 %). The coefficients
+  (CL, CD and the others) do not change.
 - 3D panel viscous coupling (V1): the polar is read relative to the converged inviscid 2D section
   (defect correction, as in the vortex-lattice coupling). The target lift of a strip is the polar
   lift minus the converged inviscid 2D lift of its cut section (Ventorum-2D, 128 cosine-spaced

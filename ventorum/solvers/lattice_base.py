@@ -41,6 +41,7 @@ from ventorum.core.trust import (
     check_mach_scope,
     control_chord_note,
     evaluate_aerodynamic_trust,
+    lattice_error_inputs,
     lattice_convergence_notes,
     lattice_spanwise_stats,
     mean_line_strip_jump,
@@ -552,6 +553,8 @@ class LatticeSolver(BaseSolver):
             Cn_trefftz=totals.Cn_trefftz,
             te_clearance=trailing_edge_clearance(lattice, ground),
             mean_line_jump=mean_line_strip_jump(lattice, loads.spanwise),
+            **self._cached(lattice, ("error_inputs", main_surface),
+                           lambda: lattice_error_inputs(lattice, main_surface)),
         )
         res = SolverResult(
             spanwise=loads.spanwise,

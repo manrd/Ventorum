@@ -46,7 +46,10 @@ At `detail_level="full"`, each agent tool that runs a lattice solve gives the ke
 
 ## Trust score
 
-Each result has a `TrustScore` with a rating (`HIGH`, `MODERATE`, `LOW`, `UNRELIABLE`), warnings and recommendations. It checks the aspect ratio, sweep, stall, Mach number, ground proximity and mesh.
+Each result has a `TrustScore` with a rating (`HIGH`, `MODERATE`, `LOW`, `UNRELIABLE`), warnings and recommendations.
+
+- Predicted error: for the lifting line, the vortex lattice and the 3D panel method, the rating comes from a calibrated error model. It predicts the error `E` of the result (the largest of the relative CL error, half the relative CDi error and the centre-of-pressure shift in reference chords) from the aspect ratio, the sweep, the taper, the panel counts, the ground clearance and the control deflections. The rating is the band of `k * E` (`k` is a calibrated safety factor): HIGH below 2 %, MODERATE below 5 %, LOW below 15 %, UNRELIABLE from 15 %. The factor `error_model` of the trust score gives its share. When `k * E` is 2 % or more, a warning gives the value and a recommendation names the input that controls it. The lifting line has a model error that falls only slowly with the aspect ratio, so most lifting-line results are rated LOW or below; use the vortex lattice for a smaller error. See [Trust score and error bars](../theory/trust_score).
+- Caps: the checks below (stall, polar range, side edges, Mach number, ground thickness and viscous effects, convergence, saw-tooth, panel validity) can only lower the rating. They are not calibrated.
 
 - Stall: with tabulated section polars, the limits are the maximum Cl and the stall angle of each polar. With linear sections, the limits are a section Cl of 1.55 and an effective angle of 16 deg.
 - Polar range: a section angle outside its polar table lowers the score. The end values of the table are used there.

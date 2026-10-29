@@ -40,7 +40,10 @@ def test_trust_score_high_aspect_ratio_straight_wing():
     assert trust.score >= 0.85
     assert trust.rating == "HIGH"
     assert trust.factors["aspect_ratio"] == 0.0
-    assert trust.factors["sweep"] == 0.0
+    # The calibrated error model replaced the sweep rule, so the factor "sweep" does not exist. The
+    # vortex lattice (the default solver) of this AR 20 wing has a predicted error k*E below 2 %.
+    assert "sweep" not in trust.factors
+    assert trust.factors["error_model"] == pytest.approx(1.0 - trust.score)
     assert trust.factors["compressibility"] == 0.0
     assert trust.uncertainty_CL > 0.0
     assert trust.uncertainty_CDi > 0.0
@@ -62,7 +65,12 @@ def test_trust_score_low_aspect_ratio_penalty():
 
     trust = result.totals.trust
     assert trust is not None
-    assert trust.factors["aspect_ratio"] > 0.40
+    # The calibrated error model replaced the aspect-ratio rule of the lifting line: AR 2 gives the
+    # predicted error E = exp(-1.1) 2^-0.67 = 20.9 %, k*E = 27 %, so the penalty of the factor
+    # "error_model" (0.73) replaces the former penalty of the factor "aspect_ratio".
+    assert trust.factors["aspect_ratio"] == 0.0
+    assert trust.factors["error_model"] > 0.40
+    assert trust.rating == "UNRELIABLE"
     assert trust.score < 0.65
     assert any("low aspect ratio" in w.lower() for w in trust.warnings)
     assert any("VLM" in r for r in trust.recommendations)
@@ -88,12 +96,20 @@ def test_trust_score_sweep_angle_penalty():
 
     trust = result.totals.trust
     assert trust is not None
-    assert trust.factors["sweep"] > 0.45
+    # The calibrated error model replaced the sweep rule of the lifting line (factor "sweep"): the
+    # predicted error grows with exp(0.063 sweep_qc_deg). This wing (AR 11.4, taper 0.4, mean
+    # quarter-chord sweep about 33 deg) has k*E above 15 %.
+    assert "sweep" not in trust.factors
+    assert trust.factors["error_model"] > 0.45
+    assert trust.rating == "UNRELIABLE"
     assert any("sweep angle" in w.lower() for w in trust.warnings)
+    assert "Use the VLM solver (solver='vlm') for swept wings." in trust.recommendations
 
-    # The vortex-lattice method handles sweep: no penalty.
+    # The vortex-lattice method handles sweep: a much smaller predicted error and no sweep warning.
     vlm = vt.analyze(wing, alpha_deg=4.0, V_inf=40.0).totals.trust
-    assert vlm.factors["sweep"] == 0.0
+    assert "sweep" not in vlm.factors
+    assert vlm.score > trust.score + 0.4
+    assert not any("sweep angle" in w.lower() for w in vlm.warnings)
 
 
 def test_trust_score_high_alpha_stall_proximity():
@@ -254,7 +270,10 @@ def test_polar_out_of_range_warns():
     tab = vt.TabulatedAirfoil(name="short", alpha=a, Cl_data=2 * np.pi * a, Cd_data=0.008 + 0 * a)
     inside = vt.analyze(_tab_wing(tab), alpha_deg=3.0, solver="nonlinear", n_panels=30).totals.trust
     outside = vt.analyze(_tab_wing(tab), alpha_deg=10.0, solver="nonlinear", n_panels=30).totals.trust
-    assert inside.rating == "HIGH"
+    # The calibrated error model rates the nonlinear lifting line of this rectangular AR 8 wing LOW:
+    # E = exp(-1.1) 8^-0.67 = 8.3 %, k*E = 10.7 % (was HIGH under the former penalty rules). The cap
+    # of the polar range is tested on the vortex lattice in tests/test_trust_error_model.py.
+    assert inside.rating == "LOW"
     assert not any("Outside the polar data" in w for w in inside.warnings)
     assert outside.rating != "HIGH"
     assert outside.factors["polar_range"] > 0.0
@@ -267,7 +286,10 @@ def test_polar_stall_lowers_trust(solver):
     tab = _stall_polar()
     low = vt.analyze(_tab_wing(tab), alpha_deg=4.0, solver=solver, n_panels=30).totals.trust
     high = vt.analyze(_tab_wing(tab), alpha_deg=11.0, solver=solver, n_panels=30).totals.trust
-    assert low.rating == "HIGH"
+    # The calibrated error model rates the linear lifting line of this rectangular AR 8 wing LOW
+    # before the stall: E = exp(-1.1) 8^-0.67 = 8.3 %, k*E = 10.7 % (was HIGH under the former
+    # penalty rules). The vortex lattice stays HIGH, and the stall cap lowers it.
+    assert low.rating == ("HIGH" if solver == "vlm" else "LOW")
     assert high.rating in ("LOW", "UNRELIABLE")
     assert high.factors["stall_proximity"] >= 0.5
     assert any("past the stall of their polar" in w for w in high.warnings)
@@ -414,8 +436,12 @@ def test_panel3d_chordwise_count_levels_and_worse_level_counts_once():
     """The chordwise rule follows the named counts; the worse level of the two indicators counts once."""
     from ventorum.core import trust as tr
 
+    # The calibrated error model replaced the chordwise rule in evaluate_aerodynamic_trust (the
+    # chordwise term exp(-0.46)/n_chord of the predicted error). The rule stays in
+    # panel3d_mesh_checks without the error model, so its levels are tested there.
     def pen(n_chord, rel=0.0):
-        return _panel_trust(n_chord=n_chord, CD_nearfield=0.0076 * (1.0 - rel)).factors["mesh_resolution"]
+        cdi = 0.0076
+        return tr.panel3d_mesh_checks(None, cdi, cdi * (1.0 - rel), n_chord)[0]["mesh_resolution"]
 
     assert pen(tr.PANEL3D_N_CHORD_WARN) == 0.0
     assert pen(tr.PANEL3D_N_CHORD_WARN - 1) == tr.PANEL3D_PENALTY_RESOLUTION_WARN
@@ -426,6 +452,11 @@ def test_panel3d_chordwise_count_levels_and_worse_level_counts_once():
     assert both == tr.PANEL3D_PENALTY_RESOLUTION_STRONG
     # Without n_chord the chordwise rule does not act.
     assert _panel_trust(CD_nearfield=0.0076).factors["mesh_resolution"] == 0.0
+    # With the error model the chordwise count gives no mesh_resolution penalty; the error model rates it.
+    coarse = _panel_trust(n_chord=tr.PANEL3D_N_CHORD_STRONG - 1, CD_nearfield=0.0076)
+    assert coarse.factors["mesh_resolution"] == 0.0
+    assert coarse.factors["error_model"] > 0.0
+    assert coarse.rating in ("LOW", "UNRELIABLE")
 
 
 def test_panel3d_median_aspect_ratio_and_folded_panels():
@@ -434,8 +465,13 @@ def test_panel3d_median_aspect_ratio_and_folded_panels():
 
     ok = _panel_trust(mesh_stats=_panel_stats(ar_median=0.9 * tr.PANEL3D_MAX_ASPECT_RATIO))
     assert ok.factors["mesh_adequacy"] == 0.0
-    long_panels = _panel_trust(mesh_stats=_panel_stats(ar_median=1.1 * tr.PANEL3D_MAX_ASPECT_RATIO))
-    assert long_panels.factors["mesh_adequacy"] == pytest.approx(tr.PANEL3D_PENALTY_ASPECT_RATIO)
+    long_stats = _panel_stats(ar_median=1.1 * tr.PANEL3D_MAX_ASPECT_RATIO)
+    long_panels = _panel_trust(mesh_stats=long_stats)
+    # The elongated-panel rule is a spanwise resolution rule: the calibrated error model (the spanwise
+    # term exp(-2.7) n_span^-0.66) replaced its penalty in evaluate_aerodynamic_trust. The warning
+    # stays; the penalty stays in panel3d_mesh_checks without the error model.
+    assert long_panels.factors["mesh_adequacy"] == 0.0
+    assert tr.panel3d_mesh_checks(long_stats)[0]["mesh_adequacy"] == pytest.approx(tr.PANEL3D_PENALTY_ASPECT_RATIO)
     assert any("Elongated panels: the median panel aspect ratio" in w for w in long_panels.warnings)
     folded = _panel_trust(mesh_stats=_panel_stats(n_nonconvex=2))
     assert folded.factors["mesh_adequacy"] == pytest.approx(tr.PANEL3D_PENALTY_NONCONVEX)
@@ -446,20 +482,33 @@ def test_panel3d_median_aspect_ratio_and_folded_panels():
 
 
 def test_panel3d_thresholds_are_used_by_name(monkeypatch):
-    """Changing a named threshold changes the result: the rules read the module constants."""
+    """Changing a named threshold changes the result: the rules read the module constants.
+
+    The calibrated error model replaced the chordwise rule and the penalty of the elongated-panel
+    rule in evaluate_aerodynamic_trust, so the thresholds of these two rules are tested on
+    panel3d_mesh_checks (without the error model); the drag rule is tested on both.
+    """
     from ventorum.core import trust as tr
 
     stats = _panel_stats(ar_median=10.0)
-    base = _panel_trust(mesh_stats=stats, CD_nearfield=0.0076 * 0.9, n_chord=20)
-    assert base.factors["mesh_adequacy"] == 0.0
-    assert base.factors["mesh_resolution"] == tr.PANEL3D_PENALTY_RESOLUTION_WARN  # n_chord 20
+
+    def checks():
+        return tr.panel3d_mesh_checks(stats, 0.0076, 0.0076 * 0.9, 20)
+
+    pen, _, _ = checks()
+    assert pen["mesh_adequacy"] == 0.0
+    assert pen["mesh_resolution"] == tr.PANEL3D_PENALTY_RESOLUTION_WARN  # n_chord 20
+    assert _panel_trust(mesh_stats=stats, CD_nearfield=0.0076 * 0.9, n_chord=20).factors["mesh_resolution"] == 0.0
     monkeypatch.setattr(tr, "PANEL3D_MAX_ASPECT_RATIO", 5.0)
     monkeypatch.setattr(tr, "PANEL3D_N_CHORD_WARN", 16)
     monkeypatch.setattr(tr, "PANEL3D_DRAG_WARN_REL", 0.05)
     monkeypatch.setattr(tr, "PANEL3D_PENALTY_RESOLUTION_WARN", 0.3)
+    pen, warns, _ = checks()
+    assert pen["mesh_adequacy"] == pytest.approx(tr.PANEL3D_PENALTY_ASPECT_RATIO)
+    assert pen["mesh_resolution"] == 0.3  # the drag rule now, at the new penalty
+    assert any("above 5%" in w for w in warns)
     changed = _panel_trust(mesh_stats=stats, CD_nearfield=0.0076 * 0.9, n_chord=20)
-    assert changed.factors["mesh_adequacy"] == pytest.approx(tr.PANEL3D_PENALTY_ASPECT_RATIO)
-    assert changed.factors["mesh_resolution"] == 0.3  # the drag rule now, at the new penalty
+    assert changed.factors["mesh_resolution"] == 0.3
     assert any("above 5%" in w for w in changed.warnings)
 
 

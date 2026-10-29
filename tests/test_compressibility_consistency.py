@@ -184,7 +184,12 @@ def test_mach_zero_results_bit_identical(mach):
     got = [res.totals.CL, res.totals.Cm, res.totals.CD_total, float(_spanwise(res).alpha_i[0])]
     stored = [0.47165222500722925, -0.34544423447247635, 0.01700951581976442, 0.0939928027825337]
     np.testing.assert_allclose(got, stored, rtol=1e-12, atol=0.0)
-    assert res.totals.trust.score == 1.0
+    # The calibrated error model gives this vortex lattice (12 strips, n_chord 3) a predicted error k*E of
+    # about 0.33 % (above 0.2 %), so the score is the error-model score 0.966 (HIGH), not 1.0. No cap acts.
+    t = res.totals.trust
+    assert t.rating == "HIGH"
+    assert t.score == 1.0 - t.factors["error_model"]
+    assert all(v == 0.0 for k, v in t.factors.items() if k != "error_model")
     assert not any("does not agree" in w for w in res.totals.trust.warnings)
 
 
