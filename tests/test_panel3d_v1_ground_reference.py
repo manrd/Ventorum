@@ -1,16 +1,25 @@
-"""Nonlinear ground reference of the thick-surface (3DP) alpha correction.
+"""Section reference of the thick-surface (3DP) alpha correction.
 
-In ground effect the effective angle of a strip is the attitude at which
-the 2D pitch curve ``Cl(alpha; h)`` of its cut section has the strip
-lift: a bracketed root finder on the curve that the tangent comes from,
-with the inversion of the tangent as the start value.
+The effective angle of a strip is the angle at which the same-mesh 2D
+lift curve of its cut section has the strip lift: the pitch curve
+``Cl(alpha; h)`` in ground effect, the free-air curve otherwise. A
+bracketed root finder on the curve that the tangent comes from solves
+it, with the inversion of the tangent as the start value. The target
+lift is the polar lift minus the converged inviscid 2D lift of the same
+section plus the same-mesh 2D lift (defect correction, as in the
+vortex-lattice coupling), so that the converged inviscid 2D polar is the
+identity on any mesh.
 
 The tests check the inversion against a brute-force scan of the pitch
-curve, the analytic Jacobian of the coupled residual with the curve, and
-that a polar equal to the pitch curve of the same cut section gives zero
-correction on three meshes (round-off).
+curve, the converged 2D reference against a finer one, the analytic
+Jacobian of the coupled residual, that the converged identity polar gives
+a CL correction below 0.1 % in ground effect (72, 264 and 1056 panels)
+and in free air (8 and 40 chordwise panels), and that a polar equal to
+the pitch curve of the same cut section now gets the mesh-error
+correction.
 """
 
+import functools
 import warnings
 
 import numpy as np
@@ -23,7 +32,15 @@ from ventorum.core.datatypes import (
 from ventorum.panel3d.mesh import _close_trailing_edge, _resample_section, _target_x
 from ventorum.solvers import panel3d
 from ventorum.solvers.factory import make_solver
-from ventorum.solvers.panel3d import _GroundPitchCurve, _morino_section_ground_line
+from ventorum.aero.polar_table import PolarTable
+from ventorum.core.datatypes import TabulatedAirfoil
+from ventorum.panel2d.solver import solve_inviscid
+from ventorum.solvers.panel3d import (
+    SECTION_REFERENCE_PANELS,
+    _ConvergedSectionCurve,
+    _GroundPitchCurve,
+    _morino_section_ground_line,
+)
 from ventorum.viscous.alpha_correction import solve_viscous
 
 
@@ -184,14 +201,103 @@ def _keep_exact_polar(monkeypatch):
                         lambda first, second, weight: first if first is second else original(first, second, weight))
 
 
-@pytest.mark.parametrize("mesh", [(4, 8), pytest.param((8, 16), marks=pytest.mark.slow),
-                                  pytest.param((16, 32), marks=pytest.mark.slow)])
-def test_same_mesh_pitch_curve_polar_gives_zero_correction(mesh, monkeypatch):
-    """The pitch curve of the cut section as the polar gives zero correction (round-off).
+#: Angles [deg] of the converged identity polars.
+POLAR_ANGLES_DEG = np.arange(-14.0, 14.01, 0.5)
+
+
+def _converged_curve(height, angles_deg):
+    """Return Cl [-] of NACA 0012 (100 points) pitched about its quarter chord, from Ventorum-2D."""
+    result = solve_inviscid(_closed_section(100), angles_deg, height=height, pivot=(0.25, 0.0))
+    return np.asarray(result.Cl, dtype=float).ravel()
+
+
+def _free_identity_polar():
+    """Return the converged inviscid 2D polar in free air."""
+    cl = _converged_curve(None, POLAR_ANGLES_DEG)
+    return TabulatedAirfoil(alpha=np.radians(POLAR_ANGLES_DEG), Cl_data=cl, Cd_data=np.zeros_like(cl))
+
+
+@functools.lru_cache(maxsize=1)
+def _ground_identity_polar():
+    """Return the converged inviscid 2D pitch curves as a table with a height axis."""
+    heights = np.array([0.4, 0.5, 0.7])
+    cl3 = np.array([[[_converged_curve(h, POLAR_ANGLES_DEG) for h in heights]]] * 2)
+    table = PolarTable(Re=np.array([1e5, 1e8]), flap_deg=np.array([0.0]), alpha_deg=POLAR_ANGLES_DEG,
+                       Cl=cl3, Cd=np.zeros_like(cl3), Cm=np.zeros_like(cl3), h_over_c=heights)
+    return table
+
+
+@pytest.mark.parametrize("height", [None, 0.5])
+def test_converged_reference_resolution(height):
+    """128 panels per side give Cl within 1e-4 of 256; the interpolation is within 1e-5.
+
+    The reference is Ventorum-2D (second-order linear-vortex panels) on
+    the cut section with ``SECTION_REFERENCE_PANELS`` cosine-spaced panels
+    per side. The cubic Hermite interpolation between the 0.5 deg knots
+    is checked against a direct solve between two knots.
+    """
+    assert SECTION_REFERENCE_PANELS == 128
+    angle = np.radians(10.25)
+    coarse = _ConvergedSectionCurve(_closed_section(SECTION_REFERENCE_PANELS + 1), height)
+    fine = _ConvergedSectionCurve(_closed_section(2 * SECTION_REFERENCE_PANELS + 1), height)
+    value = coarse.evaluate(angle)[0]
+    direct = float(np.ravel(solve_inviscid(coarse.polygon, [10.25], height=height, pivot=(0.25, 0.0),
+                                           chord_ref=1.0, moment_ref=(0.25, 0.0)).Cl)[0])
+    print(f"h/c {height}: Cl 128 {value:.7f}, 256 {fine.evaluate(angle)[0]:.7f}, direct {direct:.7f}")
+    assert abs(value - fine.evaluate(angle)[0]) < 1e-4
+    assert abs(value - direct) < 1e-5
+    step = 1e-6
+    slope = (coarse.evaluate(angle + step)[0] - coarse.evaluate(angle - step)[0]) / (2 * step)
+    assert coarse.evaluate(angle)[1] == pytest.approx(slope, rel=1e-7)
+
+
+def _identity_case(mesh, height):
+    settings = _settings(*mesh)
+    condition = FlightCondition(V_inf=30.0, alpha=np.radians(10.0), h=height)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)
+        polar = _free_identity_polar() if height is None else _ground_identity_polar()
+        result = solve_viscous(_wing(), condition, settings, polar,
+                               model="panel3d", tol=1e-12)
+        inviscid = make_solver("panel3d").solve(_wing(), condition, settings)
+    assert result.converged
+    delta = np.degrees(np.max(np.abs(result.details["delta"])))
+    change = result.totals.CL / inviscid.totals.CL - 1.0
+    print(f"mesh {mesh}, h/c {height}: max |delta| {delta:.3e} deg, CL change {100 * change:+.4f} %")
+    return change
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize("mesh", [(4, 8), (8, 16), (16, 32)])
+def test_converged_identity_polar_in_ground_effect(mesh):
+    """The converged inviscid 2D polar gives a CL correction below 0.1 % in ground effect.
 
     AR 8 NACA 0012 at h/c 0.5 and 10 deg; 72, 264 and 1056 panels. With
-    the tangent of the pitch curve, this polar gave corrections up to
-    0.33, 0.67 and 1.05 deg and CL changes of -0.9 to -1.0 %.
+    the same-mesh section as the only reference, this polar gave +6.0, +3.6
+    and +1.7 % (the first-order mesh error of the cut section).
+    """
+    assert abs(_identity_case(mesh, 0.5)) < 1e-3
+
+
+@pytest.mark.parametrize("mesh", [(4, 8), pytest.param((4, 40), marks=pytest.mark.slow)])
+def test_converged_identity_polar_in_free_air(mesh):
+    """The converged inviscid 2D polar gives a CL correction below 0.1 % in free air (nc 8 and 40).
+
+    With the same-mesh section line as the only reference, this polar gave
+    +4.2 % at nc 8 (10 deg).
+    """
+    assert abs(_identity_case(mesh, None)) < 1e-3
+
+
+@pytest.mark.parametrize("mesh", [(4, 8), pytest.param((8, 16), marks=pytest.mark.slow)])
+def test_same_mesh_pitch_curve_polar_gets_the_mesh_error_correction(mesh, monkeypatch):
+    """The pitch curve of the cut section as the polar gets the mesh-error correction.
+
+    Before the converged 2D reference, this polar was the identity (zero
+    correction to round-off). Now the coupling reads it relative to the
+    converged section, whose lift is higher than the lift of the coarse cut
+    section; the coupled CL is lower than the inviscid CL. The target lift
+    is ``cl_mesh(alpha_v) - cl_conv(alpha_v) + cl_mesh(alpha_v)``.
     """
     settings = _settings(*mesh)
     source = _PitchCurveSource(_cut_polygon(settings, monkeypatch))
@@ -203,11 +309,14 @@ def test_same_mesh_pitch_curve_polar_gives_zero_correction(mesh, monkeypatch):
         inviscid = make_solver("panel3d").solve(_wing(), condition, settings)
     assert result.converged
     assert source.heights and all(h == pytest.approx(0.5) for h in source.heights)
-    delta = np.degrees(np.max(np.abs(result.details["delta"])))
+    details = result.details
+    np.testing.assert_allclose(details["cl_polar"], details["cl_section_mesh"], rtol=0, atol=1e-12)
+    cl = np.concatenate([sw.Cl for sw in result.spanwise])
+    np.testing.assert_allclose(cl, 2 * details["cl_section_mesh"] - details["cl_section_converged"],
+                               rtol=0, atol=1e-10)
     change = result.totals.CL / inviscid.totals.CL - 1.0
-    print(f"mesh {mesh}: max |delta| {delta:.3e} deg, CL change {change:.3e}")
-    assert delta < 1e-9
-    assert abs(change) < 1e-10
+    print(f"mesh {mesh}: CL change {100 * change:+.3f} %")
+    assert change < -1e-3
 
 
 def test_ground_residual_jacobian_with_the_pitch_curve(monkeypatch):

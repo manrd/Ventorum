@@ -90,19 +90,19 @@ def _identity_polars():
 
 @pytest.mark.slow
 def test_ground_identity_polar_residual_does_not_grow_with_the_mesh():
-    """An identity polar with a height axis gives the free-air mesh residual, no more.
+    """An identity polar with a height axis gives a residual below 0.1 % on every mesh.
 
-    The 3DP section reference is the cut polygon of the mesh, so even in
-    free air an identity polar leaves a first-order mesh residual of the
-    coupled CL. In ground effect (h/c 0.5) this residual must fall with
-    refinement and stay near the free-air residual of the same mesh. The
-    line from the onsets 0 and 1 deg gave +0.3, -1.0 and -1.9 % at 10 deg
-    on these meshes, against +4.2, +3.2 and +2.5 % in free air. The
-    tolerance 0.02 on the difference to free air comes from the data: the
-    largest difference with the tangent of the pitch curve was 0.012, and
-    with the inversion of the full pitch curve it is 0.019 (4 x 8 panels,
-    10 deg: ground +6.0 %, free air +4.2 %). The tangent error at the tips
-    partly cancelled the mesh residual; the full curve removes that error.
+    The identity polars are the converged inviscid 2D NACA 0012 curves.
+    The coupling now reads a polar relative to the converged inviscid 2D
+    section and adds the departure to the same-mesh cut section (defect
+    correction), so the first-order mesh residual of the cut section is
+    gone in free air and in ground effect (h/c 0.5). Before, the residual
+    fell with refinement (free air +4.2, +3.2 and +2.5 % at 10 deg; ground
+    +6.0 % on 4 x 8 panels), and the test checked that the ground residual
+    fell and stayed within 0.02 of free air. The check is now stronger: the
+    residual is below 0.1 % in both, and the ground stays within 0.02 of
+    free air. The residual left is the difference between the identity
+    polar (100 points, a 0.5 deg table) and the reference of the coupling.
     """
     free_polar, table = _identity_polars()
     alphas = (2.0, 6.0, 10.0)
@@ -125,5 +125,5 @@ def test_ground_identity_polar_residual_does_not_grow_with_the_mesh():
         free = [residual[n, None, a] for n in (4, 6, 8)]
         print(f"alpha {a:g} deg: ground {np.round(100 * np.array(ground), 3)} %, "
               f"free {np.round(100 * np.array(free), 3)} %")
-        assert 0.0 < ground[2] < ground[1] < ground[0]
+        assert np.max(np.abs(ground)) < 1e-3 and np.max(np.abs(free)) < 1e-3
         np.testing.assert_allclose(ground, free, rtol=0, atol=0.02)

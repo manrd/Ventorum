@@ -135,6 +135,19 @@ a minor version can change a public interface.
 
 ### Changed
 
+- 3D panel viscous coupling (V1): the polar is read relative to the converged inviscid 2D section
+  (defect correction, as in the vortex-lattice coupling). The target lift of a strip is the polar
+  lift minus the converged inviscid 2D lift of its cut section (Ventorum-2D, 128 cosine-spaced
+  chordwise panels per side, the pitch curve in ground effect) plus the 2D Morino lift of the
+  same-mesh cut section, at the viscous angle. The effective angle inverts the nonlinear same-mesh
+  lift curve in free air too. A polar equal to the converged inviscid 2D section now gives the
+  inviscid 3D panel result at the same mesh (the first-order mesh residual of the section is gone);
+  a polar equal to the same-mesh section now gets the mesh-error correction. New details
+  `cl_polar`, `cl_section_converged` and `cl_section_mesh`; `cl_viscous` is the target lift. The
+  thin-airfoil flap offset is removed from the 3D panel coupling: both references are the flapped
+  cut section, so a polar equal to the converged flapped section is the identity (`flap_offset` is
+  zero). All 3D panel V1 results change; the vortex-lattice and lifting-line
+  couplings do not change.
 - Plain-flap section (`deflect_plain_flap`, `AirfoilShape.with_flap`): the hinge treatments "merge"
   and "repanel" (the default) now build the section also at a zero deflection, with a zero rotation.
   The node set then has the hinge node of each surface, as at a small deflection, so the 2D panel
@@ -147,8 +160,9 @@ a minor version can change a public interface.
   the ground height is the attitude at which the 2D pitch curve of its cut section has the strip
   lift (a bracketed root finder on the curve, with the inversion of the tangent as the start value).
   Before, the coupling used the tangent of the pitch curve at the strip attitude, whose error grows
-  away from the attitude (tip strips). 3D panel V1 results in ground effect change; free-air
-  results and the vortex-lattice and lifting-line couplings do not change. A strip lift outside the range of the
+  away from the attitude (tip strips). 3D panel V1 results in ground effect change (the free-air
+  curve is inverted too, see the entry above); the vortex-lattice and lifting-line couplings do
+  not change. A strip lift outside the range of the
   attitudes at which the section clears the ground gets the tangent continuation and a trust note.
 - Compressibility scope: a stated `FlightCondition.mach` of 0.7 or more is refused with `ValidityError`
   (`MACH_LIMIT_REFUSED`) by `analyze`, the other entry points that validate the flight condition, and
