@@ -151,22 +151,28 @@ PANEL3D_PENALTY_RESOLUTION_STRONG = 0.40
 
 #: Smallest chordwise panel count per surface [-] at which the near-field
 #: pressure drag (``CD_pressure``, ``CDi_nearfield``) of the 3D panel method
-#: is a usable drag value. The surface gradient uses least-squares node
-#: values. On the wing meshes of the gradient study, with 16 or more chordwise
-#: panels, the near-field pressure drag was 0.99 to 1.05 times the Trefftz
-#: CDi. With 12 or fewer chordwise panels it was up to 1.8 times the Trefftz
-#: CDi (the previous inverse-distance node values gave negative values
-#: there). Below this count the trust score gets a note that names the Trefftz
-#: CDi as the drag value to use. The note adds no penalty, and no result is
-#: removed.
-PANEL3D_CD_PRESSURE_MIN_N_CHORD = 16
+#: is within 5 % of the Trefftz CDi of the same mesh. The surface gradient
+#: uses least-squares node values. Measured on rectangular wings of aspect
+#: ratio 8 (NACA 0012 and NACA 2412, alpha 4 deg, 24 cosine spanwise panels,
+#: 6 to 64 chordwise panels, free air and h/c 0.5): the ratio of the two
+#: drags converges to 1 as the chordwise count grows, but slowly on the
+#: symmetric section. In free air the NACA 0012 wing gave 1.44 at 16, 1.12
+#: at 32, 1.06 at 48 and 1.04 at 64 chordwise panels; the NACA 2412 wing was
+#: within 6 % from 6 chordwise panels. At h/c 0.5 the NACA 2412 wing was
+#: within 5 % from 32 chordwise panels, and the NACA 0012 wing gave 1.13 at
+#: 64 (its extrapolated limit is about 6 % above the Trefftz CDi). The
+#: previous inverse-distance node values gave values below the Trefftz CDi
+#: (negative values on coarse meshes). Below this count the trust score
+#: gets a note that names the Trefftz CDi as the drag value to use. The
+#: note adds no penalty, and no result is removed.
+PANEL3D_CD_PRESSURE_MIN_N_CHORD = 64
 
 #: Note of a near-field pressure drag on a coarse chordwise mesh [-]. The
 #: placeholder ``{n_chord}`` takes the chordwise panel count.
 PANEL3D_CD_PRESSURE_COARSE_NOTE = (
-    "Near-field pressure drag (CD_pressure) is not reliable with {n_chord} chordwise panels "
-    "(below " + str(PANEL3D_CD_PRESSURE_MIN_N_CHORD) + "): on this mesh it can be much larger "
-    "than the far-field value. Use the Trefftz-plane CDi as the induced drag."
+    "Near-field pressure drag (CD_pressure) can differ from the far-field value by more than 5 % "
+    "with {n_chord} chordwise panels (below " + str(PANEL3D_CD_PRESSURE_MIN_N_CHORD) + "). "
+    "Use the Trefftz-plane CDi as the induced drag."
 )
 
 #: Far-field kernel trust note in ground effect [-].
