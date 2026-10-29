@@ -306,10 +306,14 @@ def test_gpu_solver_far_field_parity():
 
 #: CL, Cm and CDi (Trefftz) of a tapered half wing with far_ratio = inf from
 #: the implementation before the far-field change (numpy backend). The
-#: far-field change must not move them.
+#: far-field change must not move them. CL and Cm were stored again after
+#: the change to least-squares node values in the surface gradient: with
+#: the previous inverse-distance node values
+#: (_build_surface_gradient_operator_shepard) both cases give the previous
+#: values bit for bit, and the Trefftz CDi does not change.
 _EXACT_STORED = {
-    None: (0.4013241955564673, -0.06540097500865187, 0.007305302148882255),
-    0.5: (0.49023179325581084, -0.08465713558295335, 0.004361269712777281),
+    None: (0.4068085517769171, -0.07067287154850373, 0.007305302148882255),
+    0.5: (0.49795371023247337, -0.09089026273577583, 0.004361269712777281),
 }
 
 
