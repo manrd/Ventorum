@@ -22,6 +22,16 @@ a minor version can change a public interface.
   `ventorum.core.trust` (`lattice_convergence_notes`, `fourier_convergence_notes`,
   `panel3d_convergence_notes`). The theory pages state the limits in their "Envelope" sections,
   and `docs/user/how_to_panel3d.md` shows the Richardson estimate in `n_chord`.
+- Section polar gaps: a Ventorum-2D polar with dropped angles keeps a gap mask
+  (`TabulatedAirfoil.gap_mask`, one flag per interval of the sorted table, True when the interval
+  bridges a dropped angle; `has_gaps`, `in_gap`). A lookup inside a bridged interval gives one
+  `RuntimeWarning` per polar. A cached polar gets its mask again from the requested angles; a polar or
+  a table file without a mask loads with no mask. The viscous alpha-correction coupling (V1) gives a
+  trust note with the number of strips that read a bridged interval, the number of polars with gaps
+  and the dropped angles (`last_dropped`). The note has no penalty. Results do not change.
+- Ventorum-2D: a wake longer than 1.5 chords (`WAKE_LENGTH_LIMIT`) gives a `UserWarning` and a note in
+  the reason of each angle. The far-wake model drives the wake shape factor to 1 about 1.0 to 1.2
+  chords behind the trailing edge, so a longer wake does not converge. The solver does not refuse it.
 - Viscous alpha-correction coupling (V1) in ground effect: the residual compares circulation lift
   with circulation lift. The strip lift of the lattice is `2 Gamma / (V c)`, but in ground effect the
   `Cl` of a Ventorum-2D polar is the pressure lift (Coulliette and Plotkin 1996), so an ideal
@@ -134,6 +144,16 @@ a minor version can change a public interface.
 - A stated Mach number above 0 that differs from `V_inf / a` by more than 0.05 (`MACH_SPEED_TOLERANCE`;
   `a` is the ISA speed of sound at the flight-condition density, as in the envelope check of the speed)
   gives a `RuntimeWarning` and a trust note. The correction uses the stated Mach number.
+- Ventorum-2D work budgets: `WORK_BUDGET` (250) now counts only the Newton iterations at the angle
+  itself. The continuation path from the zero-lift angle has its own budgets: `COLD_START_BUDGET`
+  (200) for the cold start at the zero-lift angle and `STEP_BUDGET` (300) for each continuation step
+  (`StopRules.cold_start_budget`, `StopRules.step_budget`; `work_budget=0` switches all budgets off).
+  Before, one budget of 250 for the whole solve stopped angles that converge: NACA 4412 at Re 1e6 and
+  4 deg failed with 281 to 401 generated points in free air and with 161 and 321 to 401 points at
+  h/c 2; these cases now converge. A
+  failed stage of the path is named in the reason. Angles that converged before give the same
+  numbers. `newton_iterations` includes the work of the path, so it can now be above 250. The
+  solver revision for result caches is now 2026-10-29.1.
 - Ventorum-2D lift in ground effect: `Panel2DResult.Cl` is the surface pressure lift in ground
   effect (`Cl_pressure`, Coulliette and Plotkin 1996, eq. 30). Near a wall the Kutta-Joukowski
   relation does not hold; the circulation lift is 12 % (h/c = 0.2) to 33 % (h/c = 0.1) too high

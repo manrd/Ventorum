@@ -59,7 +59,7 @@ from ventorum.core.datatypes import TabulatedAirfoil
 from ventorum.panel2d.solver import check_point
 from ventorum.panel2d.viscous import check_chord_ref, solve_viscous
 
-__all__ = ["Ventorum2DPolarSource", "solver_fingerprint", "solver_revision"]
+__all__ = ["Ventorum2DPolarSource", "gap_mask", "solver_fingerprint", "solver_revision"]
 
 #: Packages whose source files form the solver fingerprint.
 _FINGERPRINT_PACKAGES = ("panel2d", "ibl2d", "airfoil")
@@ -141,6 +141,41 @@ def _json_value(value: object) -> object:
     return repr(value)
 
 
+def gap_mask(requested_deg: Sequence[float] | np.ndarray, kept_deg: Sequence[float] | np.ndarray) -> np.ndarray:
+    """Return the gap mask of a polar: the table intervals that bridge a dropped angle.
+
+    Parameters
+    ----------
+    requested_deg : array_like
+        Requested angles of attack [deg].
+    kept_deg : array_like
+        Converged angles that the polar keeps [deg], a subset of
+        *requested_deg*.
+
+    Returns
+    -------
+    np.ndarray
+        One bool per interval between neighbouring kept angles (sorted),
+        shape ``(n_kept - 1,)``. True when a requested angle strictly
+        inside the interval was dropped (see
+        :attr:`ventorum.core.datatypes.TabulatedAirfoil.gap_mask`).
+        Dropped angles below the first or above the last kept angle are
+        outside the table and do not mark an interval.
+    """
+    req = np.unique(np.asarray(requested_deg, dtype=float))
+    kept = np.unique(np.asarray(kept_deg, dtype=float))
+    if kept.size < 2:
+        return np.zeros(0, dtype=bool)
+    is_kept = np.array([bool(np.any(np.isclose(kept, a, rtol=0.0, atol=1e-6))) for a in req])
+    dropped = req[~is_kept]
+    mask = np.zeros(kept.size - 1, dtype=bool)
+    if dropped.size:
+        idx = np.searchsorted(kept, dropped, side="right") - 1
+        inside = (idx >= 0) & (idx < mask.size)
+        mask[idx[inside]] = True
+    return mask
+
+
 def _reference_key(shape: Any) -> list[float] | None:
     """Return the stored reference geometry of a shape for the cache key, or None."""
     ref = getattr(shape, "reference", None)
@@ -174,8 +209,9 @@ class Ventorum2DPolarSource:
         True: :meth:`polar` takes the ``height`` keyword.
     last_dropped : int
         Number of requested angles that did not converge in the last
-        :meth:`polar` call that ran the solver (the polar name also
-        states it).
+        :meth:`polar` call (the polar name also states it). The polar
+        keeps the intervals that bridge a dropped angle in its gap mask
+        (:attr:`ventorum.core.datatypes.TabulatedAirfoil.gap_mask`).
     """
 
     supports_ground: bool = True
@@ -339,7 +375,10 @@ class Ventorum2DPolarSource:
         TabulatedAirfoil
             The section polar over the converged requested angles. Angles
             are in radians. Non-converged angles are dropped; the polar
-            name and :attr:`last_dropped` give their number. ``Cl_data`` is
+            name and :attr:`last_dropped` give their number, and the gap
+            mask of the polar marks each table interval that bridges a
+            dropped angle (a lookup there gives a warning, once per
+            polar). ``Cl_data`` is
             the pressure lift. With a *height*, ``Cl_circulation_data``
             holds the circulation lift ``2 Gamma / c`` [-]; in free air it
             is None.
@@ -423,8 +462,11 @@ class Ventorum2DPolarSource:
             # A ground-effect entry written before the circulation lift was
             # stored is a miss: the solver runs again and replaces it.
             if hit is not None and (h_val is None or hit.Cl_circulation_data is not None):
-                # The cached polar holds the converged angles only.
+                # The cached polar holds the converged angles only: the requested
+                # angles give the dropped angles and the gap mask again.
                 self.last_dropped = int(unique_req.size - np.atleast_1d(hit.alpha).size)
+                if self.last_dropped:
+                    hit.gap_mask = gap_mask(unique_req, np.degrees(np.atleast_1d(hit.alpha)))
                 return hit
 
         res = solve_viscous(
@@ -481,6 +523,7 @@ class Ventorum2DPolarSource:
             Cm_data=np.asarray(kept_cms, dtype=float),
             Re=re_val,
             Cl_circulation_data=None if h_val is None else np.asarray(kept_circ, dtype=float),
+            gap_mask=gap_mask(unique_req, kept_alphas) if dropped else None,
         )
 
         if payload is not None and self._cache is not None:

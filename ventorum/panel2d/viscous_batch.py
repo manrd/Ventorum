@@ -309,6 +309,8 @@ def solve_viscous_batch(cases, *, backend: str = "torch", device=None, dtype=Non
             _pass([(p, p["dn"][k]) for p in plans if k < len(p["dn"])], bk, upward=False)
     out = [None] * len(parsed)
     for p in plans:
+        note = vs.warn_long_wake(p["case"].wake_length, "solve_viscous_batch")
+        vs.add_note(p["rows"].values(), note)
         for i in p["idx"]:
             r = p["rows"][float(parsed[i].alpha)]
             out[i] = vs.ViscousResult(**{f: r[f] for f in vs._FIELDS})

@@ -125,6 +125,15 @@ class TabulatedAirfoil:
         "Aerofoil ground effect revisited", The Aeronautical Journal 100,
         1996). None (default) means that the polar gives no circulation lift. In free
         air the two definitions are equal for a single section.
+    gap_mask : np.ndarray | None
+        Gap mask of the table (optional): one bool per interval between
+        neighbouring angles of the sorted table (see :meth:`tables`),
+        shape ``(n_alpha - 1,)``. True marks an interval that bridges a
+        failed (dropped) angle of the source: there the values come from
+        the interpolation across the gap, not from a solution. A lookup
+        strictly inside a bridged interval gives a RuntimeWarning, once
+        per polar. None (default) or no True value means no known gap
+        (for example a polar file written before the mask existed).
     """
 
     name: str = "Tabulated Airfoil"
@@ -134,6 +143,8 @@ class TabulatedAirfoil:
     Cm_data: np.ndarray | None = None
     Re: float | None = None
     Cl_circulation_data: np.ndarray | None = None
+    gap_mask: np.ndarray | None = None
+    _gap_warned: bool = field(default=False, init=False, repr=False)
     _cached_a0: float | None = field(default=None, init=False, repr=False)
     _cached_alpha_L0: float | None = field(default=None, init=False, repr=False)
     _interp: dict | None = field(default=None, init=False, repr=False)
@@ -142,6 +153,8 @@ class TabulatedAirfoil:
 
     def __setattr__(self, name: str, value: Any) -> None:
         object.__setattr__(self, name, value)
+        if name == "gap_mask":
+            object.__setattr__(self, "_gap_warned", False)
         if name in _TABLE_FIELDS:
             # New data: the interpolation and the linear fit are made again on next use.
             object.__setattr__(self, "_interp", None)
@@ -166,6 +179,7 @@ class TabulatedAirfoil:
             Cl_circulation_data=(
                 self.Cl_circulation_data.copy() if self.Cl_circulation_data is not None else None
             ),
+            gap_mask=None if self.gap_mask is None else np.array(self.gap_mask, dtype=bool),
         )
         inst._cached_a0 = self._cached_a0
         inst._cached_alpha_L0 = self._cached_alpha_L0
@@ -275,8 +289,52 @@ class TabulatedAirfoil:
             self._interp = f
         return self._interp
 
+    # -- gaps -----------------------------------------------------------------------
+    @property
+    def has_gaps(self) -> bool:
+        """True when the gap mask marks at least one bridged interval."""
+        return self.gap_mask is not None and bool(np.any(self.gap_mask))
+
+    def in_gap(self, alpha: float | np.ndarray) -> bool | np.ndarray:
+        """Return True where *alpha* [rad] is strictly inside a bridged interval of the gap mask.
+
+        Raises
+        ------
+        ValueError
+            If the gap mask does not have one value per interval of the
+            sorted table.
+        """
+        a = np.asarray(alpha, dtype=float)
+        out = np.zeros(a.shape, dtype=bool)
+        if self.has_gaps:
+            table = self._prepare_arrays()[0]
+            mask = np.atleast_1d(np.asarray(self.gap_mask, dtype=bool))
+            if mask.size != table.size - 1:
+                raise ValueError(
+                    f"TabulatedAirfoil {self.name!r}: gap_mask has {mask.size} values, the sorted table has "
+                    f"{table.size - 1} intervals."
+                )
+            idx = np.searchsorted(table, a, side="right") - 1
+            valid = (idx >= 0) & (idx < mask.size)
+            safe = np.clip(idx, 0, max(mask.size - 1, 0))
+            out = valid & (a > table[safe]) & mask[safe]
+        return out if np.ndim(alpha) else bool(out)
+
+    def _check_gap(self, alpha) -> None:
+        """Warn once per polar when a lookup is inside a bridged interval."""
+        if self._gap_warned or not self.has_gaps:
+            return
+        if np.any(self.in_gap(alpha)):
+            object.__setattr__(self, "_gap_warned", True)
+            warnings.warn(
+                f"TabulatedAirfoil {self.name!r}: a lookup is inside an angle interval that the polar bridges "
+                "across a failed angle of its source; the value there is interpolated, not a solution.",
+                RuntimeWarning, stacklevel=4,
+            )
+
     def _eval(self, key: str, alpha, data) -> np.ndarray:
         a = np.asarray(alpha, dtype=float)
+        self._check_gap(a)
         f = self._pchip()
         prep = self._prepare_arrays()
         lo, hi = float(prep[0][0]), float(prep[0][-1])
@@ -302,6 +360,7 @@ class TabulatedAirfoil:
     def Cl_slope(self, alpha: float | np.ndarray) -> float | np.ndarray:
         """dCl/dalpha [1/rad]; zero outside the table."""
         a = np.asarray(alpha, dtype=float)
+        self._check_gap(a)
         f = self._pchip()
         prep = self._prepare_arrays()
         lo, hi = float(prep[0][0]), float(prep[0][-1])
@@ -336,6 +395,7 @@ class TabulatedAirfoil:
         if self.Cl_circulation_data is None:
             raise ValueError(f"TabulatedAirfoil {self.name!r} has no circulation lift data.")
         a = np.asarray(alpha, dtype=float)
+        self._check_gap(a)
         f = self._pchip()
         prep = self._prepare_arrays()
         lo, hi = float(prep[0][0]), float(prep[0][-1])

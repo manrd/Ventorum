@@ -148,6 +148,7 @@ from ventorum.core.datatypes import (
 from ventorum.core.trust import (
     evaluate_aerodynamic_trust,
     lattice_spanwise_stats,
+    polar_gap_note,
     polar_limits,
     polar_stats,
 )
@@ -420,9 +421,12 @@ class _StripPolars:
         self.polars = polars
         self.aircraft = aircraft
         self._memo: dict[Any, TabulatedAirfoil] = {}
+        self._source_dropped: dict[Any, int] = {}
+        self._last_dropped: dict[int, int] = {}
         self._keys_checked = False
         self.last_fallback = np.zeros(0, dtype=bool)
         self.last_steep = np.zeros(0, dtype=bool)
+        self.last_components: list[list[Any]] = []
 
     def check_keys(self, lattice: VortexLattice) -> None:
         """Refuse dict keys that match no strip, surface or airfoil name.
@@ -496,6 +500,34 @@ class _StripPolars:
             "or in their section relation)."
         )
 
+    def gap_note(self, alpha_v: np.ndarray) -> str | None:
+        """Return the trust note of the strips that read a polar inside a bridged interval, or None.
+
+        Parameters
+        ----------
+        alpha_v : np.ndarray
+            Angle [rad] at which each strip of the last :meth:`resolve`
+            call reads its polar.
+
+        Returns
+        -------
+        str or None
+            The note (see :func:`ventorum.core.trust.polar_gap_note`) when
+            a polar of the last resolve has a bridged interval (gap mask),
+            else None.
+        """
+        comps = self.last_components
+        polars = {id(p): p for parts in comps for p in parts}
+        if not any(getattr(p, "has_gaps", False) for p in polars.values()):
+            return None
+        reads = 0
+        for parts, a in zip(comps, np.atleast_1d(np.asarray(alpha_v, dtype=float))):
+            if any(getattr(p, "has_gaps", False) and bool(p.in_gap(float(a))) for p in parts):
+                reads += 1
+        dropped = sum(self._last_dropped.get(k, 0) for k in polars)
+        return polar_gap_note(reads, len(comps), dropped,
+                              sum(1 for p in polars.values() if getattr(p, "has_gaps", False)))
+
     def resolve(
         self,
         lattice: VortexLattice,
@@ -521,6 +553,8 @@ class _StripPolars:
         n = len(strips)
         self.last_fallback = np.zeros(n, dtype=bool)
         self.last_steep = np.zeros(n, dtype=bool)
+        self.last_components = [[] for _ in range(n)]
+        self._last_dropped = {}
         steep = np.zeros(n, dtype=bool)
         tilt_deg = np.zeros(n)
         if ground is not None and n > 0:
@@ -550,6 +584,7 @@ class _StripPolars:
                         "do not read ground tables)."
                     )
                 out[i], uses_height[i] = self._from_table(cand, re_s, flap_deg, hinge, h_over_c[i], ground)
+                self._last_dropped[id(out[i])] = int(cand.last_dropped)
             elif isinstance(cand, (TabulatedAirfoil, LinearAirfoil)):
                 out[i] = cand if flap_deg == 0.0 else deflected_airfoil(cand, np.radians(flap_deg), hinge)
             elif callable(getattr(cand, "polar", None)):
@@ -580,6 +615,13 @@ class _StripPolars:
             else:
                 (k1, _), (k2, w2) = keys
                 out[i] = blend_tabulated(self._memo[k1], self._memo[k2], w2)
+            # The polars that the strip reads (before a blend): their gap masks give the trust note.
+            self.last_components[i] = [self._memo[k] for k, _ in keys]
+            for k, _ in keys:
+                self._last_dropped[id(self._memo[k])] = self._source_dropped.get(k, 0)
+        for i in range(n):
+            if not self.last_components[i]:
+                self.last_components[i] = [out[i]]
         return out, uses_height, h_over_c
 
     @staticmethod
@@ -633,6 +675,8 @@ class _StripPolars:
                     f"The polar source gave fewer than 2 converged angles for a strip ({polar.name})."
                 )
             self._memo[key] = polar
+            # The source computed SOURCE_ALPHAS_DEG: the angles it dropped (its last_dropped).
+            self._source_dropped[key] = int(np.unique(SOURCE_ALPHAS_DEG).size - np.unique(np.asarray(polar.alpha)).size)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -1203,6 +1247,9 @@ def _solve_condition(
     if delta0 is not None and np.asarray(delta0).shape == (n_ind,):
         start = np.asarray(delta0, dtype=float).copy()
     primary = newton(start)
+    gap_note = resolver.gap_note(primary["alpha_v"])
+    if gap_note is not None:
+        notes = [*notes, gap_note]
 
     # The airfoils change, so the cache starts empty, except the entries of
     # the flap geometry: the leg-force rules of a lattice with chordwise
@@ -1851,6 +1898,9 @@ class _PanelCoupling:
                         if all(abs(other["panel"].CL - s["panel"].CL) > BRANCH_CL_DIFFERENCE
                                for s in [primary, *branches]):
                             branches.append(other)
+        gap_note = self.resolver.gap_note(primary["alpha_v"])
+        if gap_note is not None:
+            fallback = [*fallback, gap_note]
         self.states[id(condition)] = (primary, branches, polars, offset, h_over_c, branch_runs, fallback)
         for state in [primary, *branches]:
             state.pop("jac")
