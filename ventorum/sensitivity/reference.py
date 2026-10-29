@@ -665,8 +665,16 @@ class TorchReference:
             xb_all = xi[:, :-1] + 0.25 * (xi[:, 1:] - xi[:, :-1])
             xm_last = xb_all[:, -1:] + 0.5 * (xi[:, -1:] - xi[:, -2:-1])
             xm_all = torch.cat((0.5 * (xb_all[:, :-1] + xb_all[:, 1:]), xm_last), dim=1)
-            nb_mid = ((le_l[:, None] + xm_all[..., None] * (te_l - le_l)[:, None]).reshape(-1, 3),
-                      (le_r[:, None] + xm_all[..., None] * (te_r - le_r)[:, None]).reshape(-1, 3), xm_all)
+            # A node of a common node set at an edge with other chordwise
+            # nodes has its own chord fraction (production:
+            # geometry.lattice._common_leg_node_set).
+            xm_a = xm_b = xm_all
+            mid_frac = b.get("leg_mid_frac")
+            if mid_frac is not None:
+                xm_a = torch.where(torch.isfinite(mid_frac[..., 0]), mid_frac[..., 0], xm_all)
+                xm_b = torch.where(torch.isfinite(mid_frac[..., 1]), mid_frac[..., 1], xm_all)
+            nb_mid = ((le_l[:, None] + xm_a[..., None] * (te_l - le_l)[:, None]).reshape(-1, 3),
+                      (le_r[:, None] + xm_b[..., None] * (te_r - le_r)[:, None]).reshape(-1, 3), (xm_a, xm_b))
         for k in range(n_chord):
             x0 = xi[:, k]
             x1 = xi[:, k + 1]
@@ -776,9 +784,9 @@ class TorchReference:
             bv = _turn(bv, xb_s > hcol, h_r, ax_r, d_r)
             if nb_mid is not None:
                 # The mean-surface leg nodes aft of the hinge turn with the flap.
-                xm_s = nb_mid[2][s_c]
-                nb_mid = (_turn(nb_mid[0], xm_s > hcol, h_l, ax_l, d_l),
-                          _turn(nb_mid[1], xm_s > hcol, h_r, ax_r, d_r), nb_mid[2])
+                xm_sa, xm_sb = nb_mid[2][0][s_c], nb_mid[2][1][s_c]
+                nb_mid = (_turn(nb_mid[0], xm_sa > hcol, h_l, ax_l, d_l),
+                          _turn(nb_mid[1], xm_sb > hcol, h_r, ax_r, d_r), nb_mid[2])
             # A high CLAF can put the control point of a panel ahead of the
             # hinge aft of it: the point moves, its normal does not turn.
             cp = _turn(cp, xc_s > hcol, h_f, ax_f, d_f)
@@ -836,9 +844,17 @@ class TorchReference:
             else:
                 take_a = (on_chain & ~(at_hinge & ~off[:, 0]))[:, None]
                 take_b = (on_chain & ~(at_hinge & ~off[:, 1]))[:, None]
+            a_end = torch.where(nxt_p[:, None], a_nx, a_te)
+            b_end = torch.where(nxt_p[:, None], b_nx, b_te)
+            # A straight leg of a common node set has its node at the end of
+            # the segment: the same point, so no aft segment (production:
+            # geometry.lattice._common_leg_node_set).
+            straight = b.get("leg_mid_end_panel")
+            if straight is not None:
+                a_md = torch.where(straight[:, 0:1], a_end, a_md)
+                b_md = torch.where(straight[:, 1:2], b_end, b_md)
             kink_geom = (torch.where(take_a, a_md, a_k0), torch.where(take_b, b_md, b_k0), hinge | on_chain)
-            chain_geom = (torch.where(nxt_p[:, None], a_nx, a_te), torch.where(nxt_p[:, None], b_nx, b_te),
-                          on_chain)
+            chain_geom = (a_end, b_end, on_chain)
         cp_u = cp[b["unknown_panels"]]
         n_bc_u = n_bc[b["unknown_panels"]]
         # Target cross-core radii follow the strip widths (they are not fixed:

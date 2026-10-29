@@ -568,6 +568,7 @@ def _camber_matrices(
     n_s = int(lattice.n_strips)
     n_p = int(lattice.n_panels)
     n_chord = int(lattice.n_chord)
+    mid_frac = lattice.geom_cache.get("leg_mid_frac")
 
     edge_start = [0]
     for sf in lattice.surfaces:
@@ -674,8 +675,17 @@ def _camber_matrices(
                     # its bound point (geometry.lattice.build_lattice).
                     xm = (0.5 * (xb[k_idx, j] + xb[k_idx, j + 1]) if j < n_chord - 1
                           else xb[k_idx, j] + 0.5 * dx[k_idx, j])
-                    W_ma[p] = _joined_offset_weights(si, e, xm)
-                    W_mb[p] = _joined_offset_weights(si, e + 1, xm)
+                    # A node of a common node set at an edge with other
+                    # chordwise nodes has its own chord fraction
+                    # (geometry.lattice._common_leg_node_set).
+                    xm_a = xm_b = xm
+                    if mid_frac is not None:
+                        if np.isfinite(mid_frac[p, 0]):
+                            xm_a = float(mid_frac[p, 0])
+                        if np.isfinite(mid_frac[p, 1]):
+                            xm_b = float(mid_frac[p, 1])
+                    W_ma[p] = _joined_offset_weights(si, e, xm_a)
+                    W_mb[p] = _joined_offset_weights(si, e + 1, xm_b)
             W_le_l[s] = _joined_offset_weights(si, e, 0.0)
             W_le_r[s] = _joined_offset_weights(si, e + 1, 0.0)
             W_te_l[s] = _joined_offset_weights(si, e, 1.0)
@@ -888,6 +898,17 @@ def build_reference(
     build["hinge_off_panel"] = (None if off is None else
                                 torch.as_tensor(np.asarray(off, dtype=bool)[np.asarray(lattice.panel_strip)],
                                                 device=device))
+    # Chord fractions [-] of the leg nodes of the common node sets at the
+    # edges with other chordwise nodes, shape (n_strips, n_chord, 2); NaN
+    # where the node is the mean-surface node (geometry.lattice).
+    mid_frac = lattice.geom_cache.get("leg_mid_frac")
+    build["leg_mid_frac"] = (None if mid_frac is None else
+                             _t("lmf", np.asarray(mid_frac, dtype=float).reshape(n_s, n_chord, 2)))
+    # Panels whose leg node of a common node set is the end of its segment
+    # (a straight leg), shape (n_panels, 2).
+    mid_end = lattice.geom_cache.get("leg_mid_end")
+    build["leg_mid_end_panel"] = (None if mid_end is None else
+                                  torch.as_tensor(np.asarray(mid_end, dtype=bool).copy(), device=device))
     from ventorum.solvers.factory import resolve_solver_type
 
     build["solver"] = resolve_solver_type(settings.solver_type)
