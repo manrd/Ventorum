@@ -1050,8 +1050,11 @@ def _morino_section_solution(polygon, ground=None):
     c[:, 0] += wake
     c[:, -1] -= wake
     mu = scipy.linalg.lu_solve(scipy.linalg.lu_factor(c), b @ normal)
-    # Interior nodes use inverse-distance interpolation, as the panel
-    # surface gradient. The trailing edge cuts the upper/lower connection.
+    # Interior nodes use the linear interpolation of the two adjacent panel
+    # values in arc length (inverse-distance weights of two points). In 2D
+    # this is also the least-squares linear node value of the 3D panel
+    # surface gradient: exact for a linear field. The trailing edge cuts the
+    # upper/lower connection.
     node = (length[1:, None] * mu[:-1] + length[:-1, None] * mu[1:]) / (
         length[:-1] + length[1:]
     )[:, None]
