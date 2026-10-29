@@ -156,10 +156,42 @@ def test_squire_young_drag_independent_of_wake_length():
 
 
 @pytest.mark.slow
+@pytest.mark.parametrize("name, wake_length, low, high", [("4412", 1.5, 1.6, 2.0), ("0012", 2.0, 1.95, 2.3)])
+def test_wake_shape_factor_reaches_one_behind_the_limit(name, wake_length, low, high):
+    """The wake shape factor H reaches 1 behind WAKE_LENGTH_LIMIT (Re 1e6, 4 deg, default section points).
+
+    The distance where H reaches 1 is the linear extrapolation of the last two
+    wake stations of the longest wake that converges (the decay of H - 1 is
+    convex, so this is a lower bound). Measured at Re 1e6 with the default
+    settings and wakes of 1, 1.5, 2, 2.5 and 3 chords (30 panels per chord):
+
+        section   0 deg    4 deg    8 deg
+        4412      2.75     1.78     3.16
+        0012      2.26     2.07     3.09
+
+    At 4 deg a wake of 2 chords (NACA 4412) and 2.5 chords (NACA 0012) does not
+    converge. The 4 deg values are pinned here.
+    """
+    from ventorum.panel2d.viscous import WAKE_LENGTH_LIMIT
+
+    r = _solve(airfoil(name).coords, [4.0], 1e6, wake_length=wake_length, n_wake=int(round(30 * wake_length)),
+               work_budget=0)
+    assert r.converged[0], r.reason[0]
+    x = np.asarray(r.wake[0]["x"], dtype=float)
+    h = np.asarray(r.wake[0]["H"], dtype=float)
+    s = np.concatenate([[0.0], np.cumsum(np.hypot(*np.diff(x, axis=0).T))])
+    assert np.all(h > 1.0)
+    s_one = s[-1] + (h[-1] - 1.0) * (s[-1] - s[-2]) / (h[-2] - h[-1])
+    assert low < s_one < high
+    assert WAKE_LENGTH_LIMIT < s_one
+
+
+@pytest.mark.slow
 @pytest.mark.xfail(
     reason="The wake equations (no skin friction, doubled outer dissipation 2 Ctau (1 - Us); Drela and Giles "
-           "1987) drive the wake shape factor H to 1 at a finite distance behind the trailing edge, about 1.5 to "
-           "2 chords at 4 deg. The dissipation does not fall to zero as H approaches 1, and the lag equation "
+           "1987) drive the wake shape factor H to 1 at a finite distance behind the trailing edge, about 1.8 "
+           "chords for NACA 4412 at 4 deg (test_wake_shape_factor_reaches_one_behind_the_limit). The "
+           "dissipation does not fall to zero as H approaches 1, and the lag equation "
            "relaxes Ctau more and more slowly because the layer thickness grows as 1 / (H - 1). Past that point "
            "the station equations have no solution with H > 1, so a longer wake does not converge. A fix needs "
            "a change of the far-wake model.",
