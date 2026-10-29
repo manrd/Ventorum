@@ -378,20 +378,23 @@ The spanwise `Cl` of the panel result keeps the global lift axis;
 
 The coupled strip equations are
 
-$$r_j=C_{l,p,j}(\delta)-c_{l,\mathrm{target},j}(\alpha_{v,j})+o_j,
+$$r_j=C_{l,p,j}(\delta)-c_{l,\mathrm{target},j}(\alpha_{v,j}),
 \qquad
 \alpha_{v,j}=C_{l,\mathrm{mesh},j}^{-1}\left(C_{l,p,j}\right)+\delta_j.$$
 
-The flap offset $o_j=a_{j,2D}(\alpha_{0,j,2D}-\alpha_{0,\mathrm{TA},j})$
-uses the clean thick-section zero-lift angle and the polar's Glauert
-flap shift, with the same ground factor as the lattice coupling. It is
-zero without a deflected control. It is kept as it was before the
-converged reference. Note that the converged reference of a flapped
-strip already holds the converged flap of the cut section, so on a
-flapped strip the offset is a second mesh reference: a polar equal to
-the converged inviscid flapped section gets the correction of the
-offset (about the difference between the mesh and the thin-airfoil
-flap shift). This combination is open for a decision.
+There is no thin-airfoil flap offset in the thick-surface coupling. The
+rule is that an identity polar gives zero correction. The converged and
+the same-mesh references of a strip with a deflected control are both
+the flapped cut section (the reference mesh has the same controls), so
+the departure of a flapped polar from the converged flapped section
+already holds the flap. The offset of the vortex-lattice coupling
+(see "Reference of a flapped vortex-lattice strip") would count the flap
+a second time; no path of the thick-surface coupling has an unflapped
+reference. A polar equal to the converged flapped section gives a CL
+correction below 0.1 %
+(`tests/test_panel3d_viscous_coupling.py::test_converged_flapped_section_polar_gives_zero_correction`).
+The details `flap_offset` (zero) and `alpha0_thin_airfoil` (equal to
+`alpha0_section`) stay in the result.
 
 Let $H_{jk}=\partial C_{l,p,j}/\partial x_k$, where $x$ holds the strip
 angles and, for pressure Kutta, the wake shifts. The surface gradient

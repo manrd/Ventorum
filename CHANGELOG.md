@@ -144,7 +144,9 @@ a minor version can change a public interface.
   inviscid 3D panel result at the same mesh (the first-order mesh residual of the section is gone);
   a polar equal to the same-mesh section now gets the mesh-error correction. New details
   `cl_polar`, `cl_section_converged` and `cl_section_mesh`; `cl_viscous` is the target lift. The
-  flap offset is unchanged. All 3D panel V1 results change; the vortex-lattice and lifting-line
+  thin-airfoil flap offset is removed from the 3D panel coupling: both references are the flapped
+  cut section, so a polar equal to the converged flapped section is the identity (`flap_offset` is
+  zero). All 3D panel V1 results change; the vortex-lattice and lifting-line
   couplings do not change.
 - Plain-flap section (`deflect_plain_flap`, `AirfoilShape.with_flap`): the hinge treatments "merge"
   and "repanel" (the default) now build the section also at a zero deflection, with a zero rotation.

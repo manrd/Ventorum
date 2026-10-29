@@ -427,6 +427,51 @@ def test_flap_offset_and_moment():
     assert np.all(np.isfinite(result.spanwise[0].Cm_section))
 
 
+def test_converged_flapped_section_polar_gives_zero_correction(monkeypatch):
+    """A polar equal to the converged flapped section gives a CL correction below 0.1 %.
+
+    NACA 2412 wing with a 5 deg full-span flap at 0.75 chord, n_chord 10.
+    The converged and the same-mesh references are both the flapped cut
+    section, so the coupling has no thin-airfoil flap offset. With the
+    offset, this polar got 0.10 deg and a CL 1.1 % lower (the flap
+    counted twice). The polar comes from a source that gets the flap, so
+    no Glauert shift is added to it.
+    """
+    from ventorum.viscous import alpha_correction as module
+
+    wing = _wing(shape="2412")
+    wing.controls = [ControlSurface("flap", 0, 1, 0.75, np.radians(5))]
+    captured = _capture_references(monkeypatch)
+    _solve(wing=wing)
+    curves = {id(c): c for c in captured["refs"]}
+    assert len(curves) == 1
+
+    class Source:
+        def __init__(self):
+            self.flaps = []
+
+        def polar(self, *, section, Re, alphas_deg, flap=None, height=None):
+            self.flaps.append(flap)
+            polar = _ReferencePolar(captured["refs"][0])
+            polar.alpha = np.radians(np.asarray(alphas_deg, dtype=float))
+            polar.name = "converged flapped section"
+            return polar
+
+    source = Source()
+    original = module.blend_tabulated
+    monkeypatch.setattr(module, "blend_tabulated",
+                        lambda first, second, weight: first if first is second else original(first, second, weight))
+    result = _solve(source, wing=wing)
+    inv = make_solver("panel3d").solve(wing, _condition(), _settings())
+    assert result.converged
+    assert all(flap is not None and flap[2] == pytest.approx(5.0) for flap in source.flaps)
+    np.testing.assert_array_equal(result.details["flap_offset"], 0.0)
+    change = result.totals.CL / inv.totals.CL - 1.0
+    print(f"flapped identity: max |delta| {np.degrees(np.max(np.abs(result.details['delta']))):.2e} deg, "
+          f"CL change {100 * change:+.5f} %")
+    assert abs(change) < 1e-3
+
+
 def test_unconverged_has_no_branch_verdict():
     with pytest.warns(RuntimeWarning, match="did not converge"):
         result = _solve(max_iter=0)

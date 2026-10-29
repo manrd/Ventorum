@@ -1716,17 +1716,10 @@ class _PanelCoupling:
         self.reference_maps = [ids for right, left in fine.strip_maps for ids in (left or []) + right]
         self.reference_mesh = fine.mesh
         self.reference_memo = {}
-        self.clean_geometry = None
-        self.clean_zero = self.zero.copy()
-        if any(s.controls for s in aircraft.surfaces):
-            clean = dataclasses.replace(aircraft, surfaces=[dataclasses.replace(s, controls=[]) for s in aircraft.surfaces])
-            coords = [[airfoil(sec.shape if sec.shape is not None else "0012").coords
-                       for sec in s.sections] for s in clean.surfaces]
-            geom = _build_geometry(clean, settings, coords, settings.n_chord or 40,
-                                   settings.panel_chord_spacing, solver.mesh.half, settings.panel_scale_root_thickness)
-            clean_maps = [ids for right, left in geom.strip_maps for ids in (left or []) + right]
-            _, self.clean_zero, _ = _panel_section_lines(geom.mesh, clean_maps, self.lattice, self.strips)
-            self.clean_geometry = geom, clean_maps
+        # No thin-airfoil flap offset: the converged and the same-mesh
+        # references are both the flapped cut section, so a polar equal to
+        # the converged flapped section is the identity. The vortex-lattice
+        # coupling keeps its offset (its reference is the thin lattice).
         self.resolver = _StripPolars(self.polars, aircraft)
         self.aircraft = aircraft
         row = np.repeat(np.arange(len(self.maps)), [len(ids) for ids in self.maps])
@@ -1838,22 +1831,14 @@ class _PanelCoupling:
         fallback = [note for note in (self.resolver.fallback_note(self.lattice, self.strips),
                                       self.resolver.steep_note()) if note is not None]
         slope, zero, moment = self.slope, self.zero, self.moment
-        clean_zero = self.clean_zero
         curves = self.curves
         if np.any(uses_height):
             slope, zero, moment, curves = _panel_section_lines(
                 self.geometry.mesh, self.maps, self.lattice, self.strips, ground, uses_height, curves=True,
             )
-            clean_zero = zero
-            if self.clean_geometry is not None:
-                clean_geom, clean_maps = self.clean_geometry
-                _, clean_zero, _ = _panel_section_lines(
-                    clean_geom.mesh, clean_maps, self.lattice, self.strips, ground, uses_height,
-                )
-        zero_target = _thin_airfoil_zero_lift(
-            self.lattice, self.aircraft, self.strips, zero, clean_zero, ground, uses_height,
-        )
-        offset = slope * (zero - zero_target)
+        # Every strip has the flapped cut section as its converged and
+        # same-mesh reference: the flap offset is zero (see prepare).
+        offset = np.zeros_like(slope)
         references = self.references(ground, uses_height, curves)
 
         def evaluate(x):
