@@ -355,6 +355,12 @@ def test_fourier_solver_refuses_rates():
         vt.rate_derivatives(_rect(6.0), vt.FlightCondition(V_inf=20.0), _settings("fourier", 20))
 
 
+def test_panel3d_solver_is_refused_with_a_clear_message():
+    """Regression: the 3D panel solver used to fail with an AttributeError (no lattice build)."""
+    with pytest.raises(ValueError, match="3D panel method"):
+        vt.rate_derivatives(_rect(6.0), vt.FlightCondition(V_inf=20.0), _settings("panel3d", 8, 8))
+
+
 @pytest.mark.parametrize("kw, match", [({"step": 0.0}, "step"), ({"step": 0.2}, "step"),
                                        ({"axes": "earth"}, "axes")])
 def test_invalid_inputs_are_refused(kw, match):
