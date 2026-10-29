@@ -15,6 +15,17 @@ Forces and moments from a solved vortex lattice.
 * Profile drag: section polar ``Cd(alpha_eff)`` on every strip.
 * Section pitching moment: ``Cm(alpha_eff)`` about the quarter chord
   (``Cm0`` for a linear airfoil), added as a pure moment.
+* Compressibility (``FlightCondition.mach > 0``, vortex lattice in free
+  air): the Prandtl-Glauert rule (H. Glauert, "The effect of
+  compressibility on the lift of an aerofoil", Proc. R. Soc. Lond. A 118,
+  1928; J. D. Anderson, "Fundamentals of Aerodynamics", McGraw-Hill,
+  chapter on subsonic compressible flow over airfoils) scales every
+  section pressure coefficient by ``1 / beta``, ``beta = sqrt(1 - M^2)``.
+  The solve on the stretched lattice gives this scaling to the lift and
+  to the camber lift. The constant section moment ``Cm0`` of a linear
+  airfoil is added here, so it gets the factor ``1 / beta`` here. The
+  effective section angle uses the compressible section slope:
+  ``alpha_eff = alpha_L0 + Cl / (a0 / beta)``.
 * Body rates (``FlightCondition.p, q, r``): the onset velocity at each
   point is ``V_inf d - Omega x (x - x_ref)`` (rotation about the moment
   reference point). It replaces the free stream in the Kutta-Joukowski
@@ -40,6 +51,7 @@ References
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -895,6 +907,28 @@ def _leg_force_rules_geometric(lattice: VortexLattice) -> tuple[np.ndarray, np.n
     return normal, scale, kind
 
 
+def prandtl_glauert_beta(conditions: list[FlightCondition]) -> np.ndarray:
+    """Return the Prandtl-Glauert factor of each condition.
+
+    Parameters
+    ----------
+    conditions : list of FlightCondition
+        The flight conditions; ``mach`` [-] can be None.
+
+    Returns
+    -------
+    numpy.ndarray
+        ``beta = sqrt(1 - M^2)`` [-] of each condition, exactly 1.0 when
+        ``mach`` is None or 0 (H. Glauert, Proc. R. Soc. Lond. A 118, 1928).
+    """
+    out = np.ones(len(conditions))
+    for k, c in enumerate(conditions):
+        m = getattr(c, "mach", None)
+        if m is not None and float(m) > 0.0:
+            out[k] = math.sqrt(1.0 - float(m) * float(m))
+    return out
+
+
 def compute_loads(
     lattice: VortexLattice,
     gamma_panel: np.ndarray,
@@ -926,7 +960,9 @@ def compute_loads(
         Circulation of every panel horseshoe [m^2/s].
     alpha_eff_strip : (n_strips,) or None
         Effective section angle of attack from the solver. If *None*, it is
-        found from the strip lift: ``alpha_L0 + Cl / a0``.
+        found from the strip lift: ``alpha_L0 + Cl / a0``, with the
+        compressible slope ``a0 / beta`` (``beta = sqrt(1 - M^2)``) when the
+        condition has ``mach > 0``.
     leg_forces : bool or None
         Apply the Kutta-Joukowski force also to the trailing legs that lie on
         the surface (from the bound vortex to the trailing edge). These legs
@@ -1105,8 +1141,15 @@ def compute_loads_batch(
         for k in rated:
             alpha_geom[k] = np.arctan2(np.sum(lattice.normal * U34[k], axis=1),
                                        np.sum(lattice.chord_dir * U34[k], axis=1))
+    # Prandtl-Glauert factor beta = sqrt(1 - M^2) of each case (1 without a
+    # Mach number, so the incompressible results do not change).
+    pg_beta = prandtl_glauert_beta(conditions)
     if alpha_eff_strips is None:
-        alpha_eff = lattice.alpha_L0 + Cl / np.maximum(lattice.a0, 1e-9)
+        # Compressible section slope a0 / beta (Glauert 1928).
+        slope = np.maximum(lattice.a0, 1e-9)
+        if np.any(pg_beta != 1.0):
+            slope = slope[None, :] / pg_beta[:, None]
+        alpha_eff = lattice.alpha_L0 + Cl / slope
     else:
         alpha_eff = np.asarray(alpha_eff_strips, dtype=float).reshape(K, n_s)
     alpha_i = alpha_geom - alpha_eff
@@ -1119,6 +1162,10 @@ def compute_loads_batch(
         # The values are read from the airfoil objects on every call.
         Cd_p[:, lin_strips] = np.array([af.Cd0 for af in lin_afs], dtype=float)[lin_index]
         Cm_s[:, lin_strips] = np.array([af.Cm0 for af in lin_afs], dtype=float)[lin_index]
+        if np.any(pg_beta != 1.0):
+            # Prandtl-Glauert: the zero-lift section moment scales by 1 / beta,
+            # as the camber lift of the stretched lattice does.
+            Cm_s[:, lin_strips] = Cm_s[:, lin_strips] / pg_beta[:, None]
     for af, idx in other_groups:
         a_idx = alpha_eff[:, idx].ravel()
         Cd_p[:, idx] = section_cd(af, a_idx).reshape(K, idx.size)

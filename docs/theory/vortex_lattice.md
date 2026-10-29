@@ -129,7 +129,7 @@ where $\mathbf v_{ij}$ [1/m] is the velocity at $\mathbf P_i$ from the horseshoe
 
 - No stall: for the start of stall on an unswept wing use the nonlinear lifting line.
 - No leading-edge or side-edge vortex lift. The trust score lowers the rating for slender, highly swept wings and for low-aspect-ratio wings at high angle of attack (E. C. Polhamus 1966; J. E. Lamar 1974).
-- Compressibility: with `FlightCondition.mach` set, the vortex lattice applies the Prandtl-Glauert rule in the form of Goethert in free air, on the CPU and on the GPU (see [Compressibility correction](compressibility.md)). Ground effect refuses `mach > 0`. Above the Mach number `ventorum.core.constants.MACH_LIMIT_INCOMPRESSIBLE` the case is outside the envelope and the trust score lowers the rating.
+- Compressibility: with `FlightCondition.mach` set, the vortex lattice applies the Prandtl-Glauert rule in the form of Goethert in free air, on the CPU and on the GPU (see [Compressibility correction](compressibility.md)). Ground effect refuses `mach > 0`. Above the Mach number `ventorum.core.constants.MACH_LIMIT_INCOMPRESSIBLE` (0.3) the case is outside the envelope and the trust rating is UNRELIABLE; a Mach number of 0.7 or more is refused.
 - Two surfaces that overlap are refused (`check_overlaps`): two control points of different surfaces are closer than the smaller of 1e-3 times the smaller local chord and 0.25 times the smaller local strip width of the two strips.
 - In ground effect, panels longer than the gap get a trust penalty.
 

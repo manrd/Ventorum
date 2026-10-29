@@ -1081,7 +1081,7 @@ def _build(precision: str) -> SimpleNamespace:  # noqa: C901 - one closure per k
                     chord: wp.array(dtype=wp.float64), width: wp.array(dtype=wp.float64),
                     nrm: wp.array(dtype=wp.vec3d), cdir: wp.array(dtype=wp.vec3d), dl: wp.array(dtype=wp.vec3d),
                     qc: wp.array(dtype=wp.vec3d), a0: wp.array(dtype=wp.float64), aL0: wp.array(dtype=wp.float64),
-                    ae_in: wp.array2d(dtype=wp.float64), has_ae: int, pol: Polars,
+                    ae_in: wp.array2d(dtype=wp.float64), has_ae: int, pol: Polars, pgb: wp.float64,
                     wn: wp.array2d(dtype=wp.float64), segl: wp.array2d(dtype=wp.float64),
                     span: wp.array3d(dtype=wp.float64), sforce: wp.array2d(dtype=wp.vec3d),
                     part: wp.array3d(dtype=wp.float64), use_aft: int,
@@ -1097,6 +1097,9 @@ def _build(precision: str) -> SimpleNamespace:  # noqa: C901 - one closure per k
         # the strip. span[k, :, s] gets the 8 spanwise arrays; part[k, s, :]
         # the parts of the totals (force 3, moment 3, profile force 3,
         # profile drag, induced drag term, profile flag).
+        # pgb is the Prandtl-Glauert factor beta = sqrt(1 - M^2) of the
+        # batch (1 without a Mach number): the section slope is a0 / beta
+        # and the Cm0 of a linear airfoil scales by 1 / beta (Glauert 1928).
         k, s = wp.tid()
         d = D[k]
         Vk = V[k]
@@ -1143,10 +1146,13 @@ def _build(precision: str) -> SimpleNamespace:  # noqa: C901 - one closure per k
         w = width[s]
         cl = wp.float64(2.0) * sg / (Vk * c)
         ag = wp.atan2(wp.dot(nrm[s], d), wp.dot(cdir[s], d))
-        ae = aL0[s] + cl / wp.max(a0[s], wp.float64(1e-9))
+        ae = aL0[s] + cl / (wp.max(a0[s], wp.float64(1e-9)) / pgb)
         if has_ae != 0:
             ae = ae_in[k, s]
         cdm = polar_cd_cm(pol, s, ae)
+        cm_sec = cdm[1]
+        if pol.kind[s] == 0:
+            cm_sec = cm_sec / pgb
         Dp = q * c * w * cdm[0]
         Fprof = Dp * d
         M = M + wp.cross(qc[s] - rp, Fprof)
@@ -1154,7 +1160,7 @@ def _build(precision: str) -> SimpleNamespace:  # noqa: C901 - one closure per k
         nl = nl / wp.max(wp.length(nl), wp.float64(1e-300))
         ax = wp.cross(nl, d)
         ax = ax / wp.max(wp.length(ax), wp.float64(1e-300))
-        M = M + (q * c * c * w * cdm[1]) * ax
+        M = M + (q * c * c * w * cm_sec) * ax
         di = sg * wn[k, s] * segl[k, s]
         span[k, 0, s] = sg
         span[k, 1, s] = cl
@@ -1163,7 +1169,7 @@ def _build(precision: str) -> SimpleNamespace:  # noqa: C901 - one closure per k
         span[k, 4, s] = ae
         span[k, 5, s] = ag - ae
         span[k, 6, s] = rk * Vk * sg
-        span[k, 7, s] = cdm[1]
+        span[k, 7, s] = cm_sec
         sforce[k, s] = F
         for j in range(3):
             part[k, s, j] = F[j]
@@ -1188,7 +1194,7 @@ def _build(precision: str) -> SimpleNamespace:  # noqa: C901 - one closure per k
                           chord: wp.array(dtype=wp.float64), width: wp.array(dtype=wp.float64),
                           nrm: wp.array(dtype=wp.vec3d), cdir: wp.array(dtype=wp.vec3d), dl: wp.array(dtype=wp.vec3d),
                           qc: wp.array(dtype=wp.vec3d), a0: wp.array(dtype=wp.float64), aL0: wp.array(dtype=wp.float64),
-                          ae_in: wp.array2d(dtype=wp.float64), has_ae: int, pol: Polars,
+                          ae_in: wp.array2d(dtype=wp.float64), has_ae: int, pol: Polars, pgb: wp.float64,
                           wn: wp.array2d(dtype=wp.float64), segl: wp.array2d(dtype=wp.float64),
                           span: wp.array3d(dtype=wp.float64), sforce: wp.array2d(dtype=wp.vec3d),
                           part: wp.array3d(dtype=wp.float64), use_aft: int,
@@ -1246,11 +1252,13 @@ def _build(precision: str) -> SimpleNamespace:  # noqa: C901 - one closure per k
         p34 = qc[s] + wp.float64(0.5) * c * cdir[s]
         u34 = Vd - wp.cross(om, p34 - rp)
         ag = wp.atan2(wp.dot(nrm[s], u34), wp.dot(cdir[s], u34))
-        ae = aL0[s] + cl / wp.max(a0[s], wp.float64(1e-9))
+        ae = aL0[s] + cl / (wp.max(a0[s], wp.float64(1e-9)) / pgb)
         if has_ae != 0:
             ae = ae_in[k, s]
         cdm = polar_cd_cm(pol, s, ae)
         cm_strip = cdm[1]
+        if pol.kind[s] == 0:
+            cm_strip = cm_strip / pgb
         if n_c == 1:
             slope = -wp.dot(nrm[s], wp.cross(om, cdir[s]))
             cm_strip = cm_strip - wp.float64(0.39269908169872414) * slope * c / wp.length(u34)

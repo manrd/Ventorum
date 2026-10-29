@@ -1222,9 +1222,17 @@ class TorchReference:
             # Nonlinear lifting line: the section angle of the solve (one
             # panel per strip; a left strip of the fold takes its mirror).
             alpha_eff = alpha_u_nl[b["panel_column_full"]]
+        elif mach_active:
+            # Compressible section slope a0 / beta (Glauert 1928), as in
+            # production (loads.compute_loads_batch).
+            alpha_eff = aL0 + cl_strip / (torch.clamp_min(a0, 1e-9) * inv_beta)
         else:
             alpha_eff = aL0 + cl_strip / torch.clamp_min(a0, 1e-9)
-        cd_p, cm_s = self._section_drag_moment(t["Cd0"], cm0, alpha_eff, shift_strip, cm_shift_strip)
+        # Prandtl-Glauert: the Cm0 of a linear airfoil scales by 1 / beta
+        # (production: loads.compute_loads_batch). Tabulated strips take
+        # their table moment (cm0 * lin is zero on them).
+        cm0_sec = cm0 * inv_beta if mach_active else cm0
+        cd_p, cm_s = self._section_drag_moment(t["Cd0"], cm0_sec, alpha_eff, shift_strip, cm_shift_strip)
         if b.get("strip_camber") is not None:
             cm_s = torch.where(b["strip_camber"], torch.zeros_like(cm_s), cm_s)
         q_inf = 0.5 * rho * V * V

@@ -9,7 +9,7 @@
 | Moments | As in AVL: `Cl > 0` right wing down, `Cm > 0` nose up, `Cn > 0` nose right. |
 | Moment reference point | `Aircraft.ref_point` (for example the centre of gravity), the origin if not set. |
 | Sideslip | `beta > 0` is wind from the right. Positive dihedral gives `Cl_beta < 0`. |
-| Mach number | Dimensionless, stored in `FlightCondition.mach`. Valid for $0 \le M < 1$. Supported by VLM (`solver_type="vlm"`). |
+| Mach number | Dimensionless, stored in `FlightCondition.mach`. Scope: $M < 0.3$. From 0.3 to below 0.7 an estimate rated UNRELIABLE; refused at 0.7 and above. Supported by VLM (`solver_type="vlm"`). |
 | Wake | `wake_alignment="freestream"` (default) sends the wake along the free stream; `"body"` sends it along the x axis, as in AVL. |
 | Units | SI: m, m/s, kg/m^3, N. |
 
@@ -69,7 +69,9 @@ the selected system (`axes="all"` returns the three sets).
 
 ## Mach number and compressibility
 
-`FlightCondition` holds an optional `mach` field (`float | None = None`). The valid range is $0 \le M < 1$. When `mach` is `None` or `0.0`, the flow is incompressible.
+`FlightCondition` holds an optional `mach` field (`float | None = None`). When `mach` is `None` or `0.0`, the flow is incompressible. Scope: incompressible flow, Mach number below 0.3. With `FlightCondition.mach` from 0.3 to below 0.7, the vortex lattice applies the Prandtl-Glauert correction in the form of Goethert; the result is an estimate with the trust rating UNRELIABLE. A Mach number of 0.7 or more is refused with `ValidityError`. The constructor of `FlightCondition` accepts $0 \le M < 1$; the validity check of `analyze` and the solvers refuse $M \ge 0.7$.
+
+When `mach > 0`, `analyze` compares it with `V_inf / a`, where `a` is the ISA speed of sound at the flight-condition density `rho` (340.29 m/s at sea level), the same value as in the envelope check of the speed. If the two differ by more than 0.05, `analyze` gives a `RuntimeWarning` and the trust score gets a note. The correction always uses the stated Mach number.
 
 Only the vortex-lattice solver (`solver_type="vlm"`) supports compressible flow. It applies the Prandtl-Glauert compressibility correction in the form given by Goethert (1946), in free air. The CPU path and the GPU pipeline both apply it; the GPU pipeline solves each group of conditions with the same Mach number and free-stream direction as one batch.
 

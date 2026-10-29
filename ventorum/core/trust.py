@@ -38,7 +38,13 @@ from __future__ import annotations
 
 import math
 
-from ventorum.core.constants import A_SL, MACH_LIMIT_INCOMPRESSIBLE, RHO_SL
+from ventorum.core.constants import (
+    A_SL,
+    MACH_LIMIT_INCOMPRESSIBLE,
+    MACH_LIMIT_REFUSED,
+    MACH_SPEED_TOLERANCE,
+    RHO_SL,
+)
 
 from collections.abc import Sequence
 from typing import TYPE_CHECKING
@@ -561,6 +567,77 @@ def isa_speed_of_sound(rho: float) -> float:
     return float(np.sqrt(_GAMMA_R_AIR * T))
 
 
+def check_mach_scope(condition) -> None:
+    """Refuse a stated Mach number at or above ``MACH_LIMIT_REFUSED``.
+
+    The scope of the package is incompressible flow (Mach below
+    ``MACH_LIMIT_INCOMPRESSIBLE``). Between that limit and
+    ``MACH_LIMIT_REFUSED`` the Prandtl-Glauert correction (Glauert 1928) in
+    the form of Goethert (1946) gives an estimate with the trust rating
+    UNRELIABLE. At and above ``MACH_LIMIT_REFUSED`` the local flow can become
+    supersonic near the critical Mach number, and the linear rule has no
+    meaning.
+
+    Parameters
+    ----------
+    condition : FlightCondition
+        The flight condition. Its ``mach`` [-] can be None.
+
+    Raises
+    ------
+    ValidityError
+        If ``condition.mach >= MACH_LIMIT_REFUSED``.
+    """
+    mach = getattr(condition, "mach", None)
+    if mach is not None and float(mach) >= MACH_LIMIT_REFUSED:
+        from ventorum.core.errors import ValidityError
+
+        raise ValidityError(
+            f"mach={float(mach):g} is refused: the scope of Ventorum is incompressible flow (Mach below "
+            f"{MACH_LIMIT_INCOMPRESSIBLE}). The Prandtl-Glauert correction of the vortex lattice gives an "
+            f"estimate rated UNRELIABLE between Mach {MACH_LIMIT_INCOMPRESSIBLE} and {MACH_LIMIT_REFUSED}, "
+            f"and is refused at Mach {MACH_LIMIT_REFUSED} and above."
+        )
+
+
+def mach_speed_mismatch(condition) -> str | None:
+    """Return a note when the stated Mach number does not agree with the speed, else None.
+
+    The check compares ``condition.mach`` with ``V_inf / a``. Here ``a``
+    [m/s] is the ISA speed of sound at the density of the flight condition
+    (:func:`isa_speed_of_sound`), the same value as in the incompressible
+    envelope check of the speed, so the two checks cannot disagree. At the
+    sea-level density it is ``A_SL`` (340.29 m/s). A difference above
+    ``MACH_SPEED_TOLERANCE``
+    gives the note. A Mach number of None or 0 means no compressibility
+    correction and gives no note (the incompressible envelope check of the
+    speed applies then).
+
+    Parameters
+    ----------
+    condition : FlightCondition
+        The flight condition: ``V_inf`` [m/s] and ``mach`` [-].
+
+    Returns
+    -------
+    str or None
+        The note, or None if the two agree or no Mach number is stated.
+    """
+    mach = getattr(condition, "mach", None)
+    if mach is None or not float(mach) > 0.0:
+        return None
+    a_sound = isa_speed_of_sound(getattr(condition, "rho", RHO_SL))
+    mach_v = float(condition.V_inf) / a_sound
+    if abs(mach_v - float(mach)) <= MACH_SPEED_TOLERANCE:
+        return None
+    return (
+        f"The stated Mach number {float(mach):.3f} does not agree with V_inf/a = {mach_v:.3f} "
+        f"(V_inf={float(condition.V_inf):g} m/s, a={a_sound:.2f} m/s: ISA speed of sound at the "
+        f"flight-condition density); the difference is more than {MACH_SPEED_TOLERANCE}. The "
+        "compressibility correction uses the stated Mach number."
+    )
+
+
 def polar_limits(airfoils: Sequence) -> dict[str, np.ndarray] | None:
     """Return the limits of the tabulated section data of each strip.
 
@@ -1053,6 +1130,10 @@ def evaluate_aerodynamic_trust(
             warnings.append(
                 f"Mach={mach:.2f} > 0.7: linear theory loses validity near the critical Mach number."
             )
+        mismatch = mach_speed_mismatch(condition)
+        if mismatch is not None:
+            warnings.append(mismatch)
+            recommendations.append("Give a Mach number that agrees with V_inf, or set V_inf from the Mach number.")
     penalties["compressibility"] = mach_pen
 
     # 5. Ground proximity (stated in h/c) ------------------------------------------------
