@@ -179,10 +179,11 @@ def test_mach_zero_results_bit_identical(mach):
         warnings.simplefilter("error", RuntimeWarning)
         res = vt.analyze(wing, condition=FlightCondition(V_inf=50.0, alpha=np.radians(4.0), mach=mach),
                          settings=settings)
-    assert res.totals.CL == 0.47165222500722925
-    assert res.totals.Cm == -0.34544423447247635
-    assert res.totals.CD_total == 0.01700951581976442
-    assert float(_spanwise(res).alpha_i[0]) == 0.0939928027825337
+    # Bit-identical on the machine that stored the values; other numpy and BLAS
+    # builds (CI) change the last digits (about 2e-15 relative seen).
+    got = [res.totals.CL, res.totals.Cm, res.totals.CD_total, float(_spanwise(res).alpha_i[0])]
+    stored = [0.47165222500722925, -0.34544423447247635, 0.01700951581976442, 0.0939928027825337]
+    np.testing.assert_allclose(got, stored, rtol=1e-12, atol=0.0)
     assert res.totals.trust.score == 1.0
     assert not any("does not agree" in w for w in res.totals.trust.warnings)
 
