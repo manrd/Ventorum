@@ -142,6 +142,8 @@ The control surface model uses these assumptions:
 
 The thin-wing panel comparison in ground effect still exceeds its lift bound.
 
+`tests/test_hinge_zero_deflection.py` checks the continuity at zero deflection of a chordwise control: the lattice at zero deflection has the hinge nodes of the lattice at 1 deg; CL, Cm and the hinge moments at zero deflection are the mean of the values at +/-1e-6 deg (relative 1e-8, float64); and the finite-difference derivative of CL at zero agrees with the adjoint control derivative and with `control_derivatives`.
+
 The implementation is verified in `tests/test_control_surfaces.py`:
 - `test_flap_effectiveness_matches_thin_airfoil_table`
 - `test_zero_deflection_full_span_gives_the_same_bits`

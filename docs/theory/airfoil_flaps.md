@@ -66,7 +66,9 @@ Before this rule, a side counted as stretched whenever the two polylines
 did not cross, so coarse input could get the filler arc on the
 compressed side and a self-intersecting contour without an error.
 
-A zero deflection returns a copy of the input.
+At a zero deflection the treatment "none" returns a copy of the input;
+"merge" and "repanel" run the construction with a zero rotation (see
+below).
 
 ## Hinge treatments
 
@@ -140,10 +142,14 @@ All treatments keep the trailing-edge points as the exact rotated input
 points, keep the flap rotation exact, and check that the result is a
 simple polygon with a positive area. "none" and "merge" keep the fixed
 part ($x < x_h - 0.05$) unchanged. A zero deflection returns a copy of
-the input with "none"; "merge" and "repanel" treat the input with a
-node added at the hinge station of each surface, so their result changes
-continuously with the deflection ("merge" then returns the input
-outline with these two nodes).
+the input with "none". "merge" and "repanel" run the same construction
+as at a nonzero deflection, with a zero rotation: a node is added at the
+hinge station of each surface, and then the treatment applies. The node
+set at a zero deflection is thus the limit of the node set at small
+deflections of both signs, and the loads, the hinge moment and their
+derivatives are continuous in the deflection ("merge" returns the input
+outline with these two nodes, less the nodes that its short-panel rule
+removes).
 
 The default is "repanel". A study of the method found that it makes
 the viscous solution converge where "none" fails (small deflections),
@@ -166,7 +172,13 @@ The operation is verified in `tests/test_airfoil_flap.py` on a symmetric
 12 % section and on a cambered 4412 section from the analytic NACA
 formulas, with 81 cosine-spaced points per surface:
 
-- zero deflection returns the same points;
+- zero deflection returns the same points with "none";
+- `tests/test_hinge_zero_deflection.py`: with "merge" and "repanel", the
+  section at zero deflection has the node count of the section at 1 deg
+  and is the limit of the sections at +/-1e-9 deg; the 2D panel CL, Cm
+  and hinge moment at zero deflection are the mean of the values at
+  +/-1e-6 deg (relative 1e-8), and the one-sided slopes at zero agree
+  with the central slope;
 - for a set of deflections and hinge stations, the output has positive
   area, has no self-intersection, keeps the fixed part ahead of the
   hinge, moves the trailing-edge points by the exact rotation, and turns
