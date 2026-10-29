@@ -986,8 +986,8 @@ class FlightCondition:
         trust rating UNRELIABLE. The validity check and the solvers refuse
         ``mach >= 0.7`` with :class:`~ventorum.core.errors.ValidityError`.
         The constructor accepts 0 <= mach < 1. A stated Mach number that
-        differs from ``V_inf`` divided by the ISA sea-level speed of sound
-        (340.29 m/s) by more than 0.05 gives a warning and a trust note.
+        differs from ``V_inf`` divided by the ISA speed of sound at the
+        density ``rho`` by more than 0.05 gives a warning and a trust note.
     """
 
     V_inf: float = 50.0

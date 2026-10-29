@@ -23,6 +23,7 @@ from ventorum import gpu
 from ventorum.core.constants import A_SL, MACH_LIMIT_INCOMPRESSIBLE
 from ventorum.core.datatypes import FlightCondition, LinearAirfoil, LiftingSurface, SolverSettings, WingSection
 from ventorum.core.errors import ValidityError
+from ventorum.core.trust import isa_speed_of_sound, mach_speed_mismatch
 from ventorum.solvers.factory import make_solver
 
 
@@ -96,13 +97,31 @@ def test_speed_and_mach_mismatch_warns_and_notes():
         res = vt.analyze(wing, condition=cond, settings=settings)
     notes = [w for w in res.totals.trust.warnings if "does not agree with V_inf/a" in w]
     assert len(notes) == 1
-    assert "340.29 m/s" in notes[0] and "ISA sea level" in notes[0]
+    assert "340.29 m/s" in notes[0] and "ISA speed of sound at the flight-condition density" in notes[0]
 
     cond_ok = FlightCondition(V_inf=0.2 * A_SL, alpha=np.radians(2.0), mach=0.2)
     with warnings.catch_warnings():
         warnings.simplefilter("error", RuntimeWarning)
         res_ok = vt.analyze(wing, condition=cond_ok, settings=settings)
     assert not any("does not agree" in w for w in res_ok.totals.trust.warnings)
+
+
+def test_mach_at_altitude_uses_the_density_speed_of_sound():
+    """rho 0.41 kg/m^3 with V_inf = 0.5 a(rho) and mach 0.5 gives no note (a from the density, not sea level)."""
+    wing = _high_ar_wing(LinearAirfoil())
+    settings = SolverSettings(solver_type="vlm", n_panels=8, n_chord=1)
+    rho = 0.41
+    a_rho = isa_speed_of_sound(rho)
+    assert a_rho < A_SL - 30.0  # a sea-level speed of sound would give a difference above 0.05
+    assert mach_speed_mismatch(FlightCondition(V_inf=0.5 * a_rho, rho=rho, mach=0.5)) is None
+    cond = FlightCondition(V_inf=0.5 * a_rho, rho=rho, alpha=np.radians(2.0), mach=0.5)
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        res = vt.analyze(wing, condition=cond, settings=settings)
+    assert not any("does not agree" in str(w.message) for w in caught)
+    assert not any("does not agree" in w for w in res.totals.trust.warnings)
+    # The same speed with a sea-level density does not agree with mach 0.5.
+    assert mach_speed_mismatch(FlightCondition(V_inf=0.5 * a_rho, mach=0.5)) is not None
 
 
 def test_mach_zero_fast_gets_the_stated_mach_penalty():

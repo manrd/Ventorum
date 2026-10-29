@@ -603,9 +603,12 @@ def check_mach_scope(condition) -> None:
 def mach_speed_mismatch(condition) -> str | None:
     """Return a note when the stated Mach number does not agree with the speed, else None.
 
-    The check compares ``condition.mach`` with ``V_inf / a``. The flight
-    condition has no temperature, so ``a`` is the ISA sea-level speed of
-    sound ``A_SL`` (340.29 m/s). A difference above ``MACH_SPEED_TOLERANCE``
+    The check compares ``condition.mach`` with ``V_inf / a``. Here ``a``
+    [m/s] is the ISA speed of sound at the density of the flight condition
+    (:func:`isa_speed_of_sound`), the same value as in the incompressible
+    envelope check of the speed, so the two checks cannot disagree. At the
+    sea-level density it is ``A_SL`` (340.29 m/s). A difference above
+    ``MACH_SPEED_TOLERANCE``
     gives the note. A Mach number of None or 0 means no compressibility
     correction and gives no note (the incompressible envelope check of the
     speed applies then).
@@ -623,13 +626,14 @@ def mach_speed_mismatch(condition) -> str | None:
     mach = getattr(condition, "mach", None)
     if mach is None or not float(mach) > 0.0:
         return None
-    mach_v = float(condition.V_inf) / A_SL
+    a_sound = isa_speed_of_sound(getattr(condition, "rho", RHO_SL))
+    mach_v = float(condition.V_inf) / a_sound
     if abs(mach_v - float(mach)) <= MACH_SPEED_TOLERANCE:
         return None
     return (
         f"The stated Mach number {float(mach):.3f} does not agree with V_inf/a = {mach_v:.3f} "
-        f"(V_inf={float(condition.V_inf):g} m/s, a={A_SL:.2f} m/s: ISA sea level, because the flight "
-        f"condition has no temperature); the difference is more than {MACH_SPEED_TOLERANCE}. The "
+        f"(V_inf={float(condition.V_inf):g} m/s, a={a_sound:.2f} m/s: ISA speed of sound at the "
+        f"flight-condition density); the difference is more than {MACH_SPEED_TOLERANCE}. The "
         "compressibility correction uses the stated Mach number."
     )
 

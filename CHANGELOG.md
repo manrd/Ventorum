@@ -120,7 +120,7 @@ a minor version can change a public interface.
   estimate with the trust rating UNRELIABLE. The user manual and the theory page state the scope
   (Mach below 0.3) in one place and no longer say "valid M < 1".
 - A stated Mach number above 0 that differs from `V_inf / a` by more than 0.05 (`MACH_SPEED_TOLERANCE`;
-  `a` is the ISA sea-level speed of sound, 340.29 m/s, because the flight condition has no temperature)
+  `a` is the ISA speed of sound at the flight-condition density, as in the envelope check of the speed)
   gives a `RuntimeWarning` and a trust note. The correction uses the stated Mach number.
 - Ventorum-2D lift in ground effect: `Panel2DResult.Cl` is the surface pressure lift in ground
   effect (`Cl_pressure`, Coulliette and Plotkin 1996, eq. 30). Near a wall the Kutta-Joukowski
