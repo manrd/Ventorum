@@ -488,8 +488,12 @@ def test_synthetic_saw_tooth_is_flagged_with_an_edge_mask():
 
 @pytest.mark.parametrize("n", [64, 160])
 def test_straight_legs_saw_tooth_with_a_flap_is_flagged(straight_legs, n):
-    """The ill-conditioned straight-leg lattice of a cambered wing with a flap is still flagged."""
-    res = _solve(_wing([_ctrl("flap", 0.2, 0.5, 0.75, 10.0)], shape="6409"), "vlm", n, alpha_deg=0.0)
+    """The ill-conditioned straight-leg lattice of a cambered wing with a flap is still flagged.
+
+    The case uses 4 chordwise panels, the mesh on which the saw-tooth was found; the automatic
+    count is now 16 for a wing with a control.
+    """
+    res = _solve(_wing([_ctrl("flap", 0.2, 0.5, 0.75, 10.0)], shape="6409"), "vlm", n, alpha_deg=0.0, n_chord=4)
     assert res.details["lattice"].control_edge_step is not None
     assert _flagged(res)
 
