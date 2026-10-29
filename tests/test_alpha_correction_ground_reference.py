@@ -3,7 +3,9 @@
 The 2D section reference of a strip in ground effect is the pitch curve
 ``Cl(alpha; h)`` of the section at a fixed quarter-chord height, with the
 onset parallel to the ground: the curve of a polar with a height axis.
-The coupling uses its tangent at the attitude of the strip. A line from
+The section line is its tangent at the attitude of the strip; the
+coupling inverts the full curve (``tests/test_panel3d_v1_ground_reference.py``).
+A line from
 the onsets 0 and 1 deg with the ground tilted by the attitude lets the
 onset cross the ground. Its value at the attitude was 10 % high at
 h/c = 0.5 and 30 % high at h/c = 0.25 (10 deg).
@@ -97,7 +99,10 @@ def test_ground_identity_polar_residual_does_not_grow_with_the_mesh():
     line from the onsets 0 and 1 deg gave +0.3, -1.0 and -1.9 % at 10 deg
     on these meshes, against +4.2, +3.2 and +2.5 % in free air. The
     tolerance 0.02 on the difference to free air comes from the data: the
-    largest difference after the fix is 0.012 (4 x 8 panels, 10 deg).
+    largest difference with the tangent of the pitch curve was 0.012, and
+    with the inversion of the full pitch curve it is 0.019 (4 x 8 panels,
+    10 deg: ground +6.0 %, free air +4.2 %). The tangent error at the tips
+    partly cancelled the mesh residual; the full curve removes that error.
     """
     free_polar, table = _identity_polars()
     alphas = (2.0, 6.0, 10.0)

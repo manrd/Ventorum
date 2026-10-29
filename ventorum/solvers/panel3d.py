@@ -55,6 +55,9 @@ Published sources
   Cambridge University Press, section 9.4 and chapter 12.
 * Wieselsberger, C., 1921, Ueber den Fluegelwiderstand in der Naehe des Bodens,
   Zeitschrift fuer Flugtechnik und Motorluftschiffahrt, Vol. 12, No. 10.
+* Brent, R. P., 1973, Algorithms for Minimization without Derivatives,
+  Prentice-Hall, chapter 4 (bracketed root finder of the 2D ground pitch
+  curve of the viscous coupling).
 """
 
 from __future__ import annotations
@@ -1109,6 +1112,154 @@ def _morino_section_line(polygon, ground=None):
 #: Half step [rad] of the central difference of the ground section line.
 GROUND_SECTION_STEP = np.radians(0.5)
 
+#: Half step [rad] of the central difference that gives the local slope of
+#: the 2D ground pitch curve at the inverted effective angle.
+GROUND_CURVE_STEP = 1e-5
+
+#: Absolute tolerance [rad] of the bracketed root finder that inverts the
+#: 2D ground pitch curve.
+GROUND_CURVE_XTOL = 1e-13
+
+
+def _section_attitude_height(ground):
+    """Return the attitude [rad] and the quarter-chord height [chord] of a section ground line.
+
+    Parameters
+    ----------
+    ground : tuple
+        Unit ground normal, shape (2,), in the chord frame and offset
+        [chord] of the ground line ``n . x = offset``.
+
+    Returns
+    -------
+    tuple of float
+        The attitude ``theta = atan2(-n_x, n_z)`` [rad] (the onset
+        parallel to the ground, measured from the chord) and the height
+        ``h`` [chord] of the quarter chord above the ground line.
+    """
+    normal, offset = ground
+    normal = np.asarray(normal, dtype=float)
+    attitude = float(np.arctan2(-normal[0], normal[1]))
+    height = float(np.array([0.25, 0.0]) @ normal - offset)
+    return attitude, height
+
+
+def _morino_section_pitch(polygon, height, angle):
+    """Return Cl and Cm [-] of a section pitched about its quarter chord in ground effect.
+
+    The section pitches to the attitude *angle* [rad] about its quarter
+    chord, which stays at the height *height* [chord] above the ground.
+    The ground line and the onset are parallel at the angle *angle* from
+    the chord (see :func:`_morino_section_ground_line`). One 2D Morino
+    solve with images gives one point of the pitch curve ``Cl(alpha; h)``.
+    """
+    quarter = np.array([0.25, 0.0])
+    tilted = np.array([-np.sin(angle), np.cos(angle)])
+    lift, moment = _morino_section_solution(polygon, (tilted, float(quarter @ tilted) - height))
+    return lift(angle), _section_moment(moment, angle)
+
+
+class _GroundPitchCurve:
+    """Pitch curve ``Cl(alpha; h)`` of a 2D section in ground effect and its inversion.
+
+    The curve is the one that :func:`_morino_section_ground_line` makes
+    its tangent from: the section pitches about its quarter chord at the
+    fixed quarter-chord height ``h`` [chord], with the onset parallel to
+    the ground. Each attitude needs one 2D Morino solve with images
+    (Katz and Plotkin 2001, method of images). :meth:`invert` finds the
+    attitude at which the section has a given lift with a bracketed root
+    finder (Brent 1973). The inversion of the tangent is the start value.
+
+    Parameters
+    ----------
+    polygon : numpy.ndarray
+        Section coordinates in chord units, upper-TE, LE, lower-TE order.
+    height : float
+        Quarter-chord height above the ground [chord].
+    """
+
+    def __init__(self, polygon, height):
+        self.polygon = np.asarray(polygon, dtype=float)
+        self.height = float(height)
+        self._lift = {}
+        # Each point p of the section is at the height
+        # h + n(alpha) . (p - quarter), n(alpha) = (-sin(alpha), cos(alpha)).
+        self._arm = self.polygon - np.array([0.25, 0.0])
+
+    def clearance(self, angle):
+        """Return the smallest height [chord] of the section above the ground at *angle* [rad]."""
+        tilted = np.array([-np.sin(angle), np.cos(angle)])
+        return float(self.height + np.min(self._arm @ tilted))
+
+    def lift(self, angle):
+        """Return Cl [-] of the pitch curve at the attitude *angle* [rad]."""
+        angle = float(angle)
+        if angle not in self._lift:
+            self._lift[angle] = float(_morino_section_pitch(self.polygon, self.height, angle)[0])
+        return self._lift[angle]
+
+    def slope(self, angle):
+        """Return dCl/dalpha [1/rad] of the pitch curve at *angle* [rad] (central difference)."""
+        return (self.lift(angle + GROUND_CURVE_STEP) - self.lift(angle - GROUND_CURVE_STEP)) / (
+            2.0 * GROUND_CURVE_STEP)
+
+    def invert(self, cl, start, slope):
+        """Return the attitude with the lift *cl*, the local slope and a flag.
+
+        Parameters
+        ----------
+        cl : float
+            Section lift coefficient [-].
+        start : float
+            Start value [rad]: the inversion of the tangent line.
+        slope : float
+            Slope of the tangent line [1/rad]. Its sign gives the search
+            direction.
+
+        Returns
+        -------
+        tuple
+            The attitude ``alpha`` [rad] with ``Cl(alpha) = cl``, the local
+            slope ``dCl/dalpha`` [1/rad] there, and a flag. The search
+            stays in the attitudes between -90 and +90 deg at which the
+            section clears the ground. When *cl* is outside the lift range
+            of these attitudes, the attitude is the tangent continuation
+            from the last attitude of the range, and the flag is True.
+        """
+        import scipy.optimize
+
+        lower, upper = -0.5 * np.pi + 1e-6, 0.5 * np.pi - 1e-6
+        a0 = float(np.clip(start, lower, upper))
+        if self.clearance(a0) <= 0.0:
+            return float(start), float(slope), True
+        f0 = self.lift(a0) - cl
+        if f0 == 0.0:
+            return a0, self.slope(a0), False
+        direction = -np.sign(f0) * (1.0 if slope >= 0.0 else -1.0)
+        step = max(abs(f0 / slope) if slope != 0.0 else 0.0, np.radians(0.01))
+        while True:
+            a1 = a0 + direction * step
+            edge = False
+            if a1 < lower or a1 > upper:
+                a1 = upper if direction > 0 else lower
+                edge = True
+            if self.clearance(a1) <= 0.0:
+                # Stop a small distance before the attitude of ground contact.
+                a1 = float(scipy.optimize.brentq(self.clearance, a0, a1, xtol=GROUND_CURVE_XTOL))
+                a1 -= direction * 1e-9
+                edge = True
+            f1 = self.lift(a1) - cl
+            if np.sign(f1) != np.sign(f0):
+                root = scipy.optimize.brentq(lambda a: self.lift(a) - cl, min(a0, a1), max(a0, a1),
+                                             xtol=GROUND_CURVE_XTOL, rtol=4 * np.finfo(float).eps,
+                                             maxiter=200)
+                return float(root), self.slope(root), False
+            if edge:
+                local = self.slope(a1)
+                return float(a1 - f1 / local), float(local), True
+            a0, f0 = a1, f1
+            step *= 2.0
+
 
 def _morino_section_ground_line(polygon, ground, step=GROUND_SECTION_STEP):
     """Return the lift line and moment quadratic of a section in ground effect.
@@ -1143,18 +1294,13 @@ def _morino_section_ground_line(polygon, ground, step=GROUND_SECTION_STEP):
         Lift slope [1/rad], zero-lift angle [rad], and the moment
         coefficients [-] as in :func:`_morino_section_line`.
     """
-    normal, offset = ground
-    normal = np.asarray(normal, dtype=float)
-    attitude = float(np.arctan2(-normal[0], normal[1]))
-    quarter = np.array([0.25, 0.0])
-    height = float(quarter @ normal - offset)
+    attitude, height = _section_attitude_height(ground)
     angles = attitude + np.array([-step, 0.0, step])
     lifts, moments = [], []
     for angle in angles:
-        tilted = np.array([-np.sin(angle), np.cos(angle)])
-        lift, moment = _morino_section_solution(polygon, (tilted, float(quarter @ tilted) - height))
-        lifts.append(lift(angle))
-        moments.append(_section_moment(moment, angle))
+        lift, moment = _morino_section_pitch(polygon, height, angle)
+        lifts.append(lift)
+        moments.append(moment)
     slope = (lifts[2] - lifts[0]) / (2.0 * step)
     fit = np.linalg.solve(np.column_stack([np.ones(3), np.cos(2 * angles), np.sin(2 * angles)]),
                           np.asarray(moments))
@@ -1163,7 +1309,7 @@ def _morino_section_ground_line(polygon, ground, step=GROUND_SECTION_STEP):
     return float(slope), float(attitude - lifts[1] / slope), moment
 
 
-def _panel_section_lines(mesh, maps, lattice, strips, ground=None, with_images=None):
+def _panel_section_lines(mesh, maps, lattice, strips, ground=None, with_images=None, curves=False):
     """Solve the actual midspan section polygons of reporting strips in 2D.
 
     Panel metadata selects the upper and lower chordwise segments. The
@@ -1173,9 +1319,14 @@ def _panel_section_lines(mesh, maps, lattice, strips, ground=None, with_images=N
     is the tangent of the pitch curve at the attitude of the strip (onset
     parallel to the ground, see :func:`_morino_section_ground_line`).
     Return slopes [1/rad], zero-lift angles [rad], and moment quadratics [-].
+    With *curves* True, also return a list with the pitch curve
+    (:class:`_GroundPitchCurve`) of each strip with images, and None for
+    the other strips. Strips with the same polygon and ground line share
+    one curve.
     """
-    slopes, zeros, moments = [], [], []
+    slopes, zeros, moments, pitch_curves = [], [], [], []
     memo = {}
+    curve_memo = {}
     for index, (ids, strip) in enumerate(zip(maps, strips)):
         ids = np.asarray(ids, dtype=int)
         skin = ids[np.asarray(mesh.side)[ids] != 0]
@@ -1229,6 +1380,15 @@ def _panel_section_lines(mesh, maps, lattice, strips, ground=None, with_images=N
         slopes.append(a)
         zeros.append(a0)
         moments.append(cm)
+        if curves:
+            if section_ground is None:
+                pitch_curves.append(None)
+            else:
+                if key not in curve_memo:
+                    curve_memo[key] = _GroundPitchCurve(coords, _section_attitude_height(section_ground)[1])
+                pitch_curves.append(curve_memo[key])
+    if curves:
+        return np.asarray(slopes), np.asarray(zeros), np.asarray(moments), pitch_curves
     return np.asarray(slopes), np.asarray(zeros), np.asarray(moments)
 
 

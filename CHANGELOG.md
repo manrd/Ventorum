@@ -135,6 +135,13 @@ a minor version can change a public interface.
 
 ### Changed
 
+- 3D panel viscous coupling (V1) in ground effect: the effective angle of a strip whose polar holds
+  the ground height is the attitude at which the 2D pitch curve of its cut section has the strip
+  lift (a bracketed root finder on the curve, with the inversion of the tangent as the start value).
+  Before, the coupling used the tangent of the pitch curve at the strip attitude, whose error grows
+  away from the attitude (tip strips). 3D panel V1 results in ground effect change; free-air
+  results and the vortex-lattice and lifting-line couplings do not change. A strip lift outside the range of the
+  attitudes at which the section clears the ground gets the tangent continuation and a trust note.
 - Compressibility scope: a stated `FlightCondition.mach` of 0.7 or more is refused with `ValidityError`
   (`MACH_LIMIT_REFUSED`) by `analyze`, the other entry points that validate the flight condition, and
   the lattice solvers. Before, Mach numbers up to just below 1 ran and only the trust score gave a

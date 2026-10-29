@@ -20,6 +20,7 @@ The inviscid solvers give linear lift curves and no stall. The coupling gives ea
 6. J. Katz and A. Plotkin, *Low-Speed Aerodynamics*, 2nd ed., Cambridge University Press, 2001 (discrete vortex method, method of images).
 7. ISO 2533:1975, Standard Atmosphere (dynamic viscosity of air at sea level).
 8. C. Coulliette and A. Plotkin, ["Aerofoil ground effect revisited"](https://www.cambridge.org/core/journals/aeronautical-journal/article/abs/aerofoil-ground-effectrevisited/561E5C4DD13ED87435EF7B438859EE20), *The Aeronautical Journal* 100, 1996 (the surface pressure lift of a section in ground effect, eq. 30, and its difference from the circulation lift).
+9. R. P. Brent, *Algorithms for Minimization without Derivatives*, Prentice-Hall, 1973, chapter 4 (bracketed root finder; the inversion of the 2D ground pitch curve of the thick-surface coupling).
 
 ## Section plane of a strip
 
@@ -60,7 +61,7 @@ $$\alpha_{v,j} = \alpha_{e,j} + \delta_j.$$
 
 **Steep strips.** A 2D ground polar describes a section above a parallel ground. A strip whose span axis is steeper than 60 deg to the ground plane (`STEEP_STRIP_LIMIT_DEG`; a fin, a strongly bent tip) is not such a section: near 90 deg its section plane holds the ground normal and has no ground line. Such a strip therefore uses free-air section data in every coupling (vortex lattice, lifting line and thick surface): a polar source with ground support runs without the height, its section relation has no images, and the result gets a trust note with the number of these strips. A free-air polar for the surface in the polar dict is read as usual. A polar table with a height axis has no free-air data, so a steep strip that only has a ground table is refused with a `ValueError` that names the surface and its angle and asks for a free-air polar for it. The limit of 60 deg is a code setting, not a value from a source. Strips at 60 deg or less keep the ground relation above.
 
-The ground plane of a condition is parallel to the free stream, so in the section frame it is tilted by the attitude of the strip. A polar with a height axis is a pitch curve: the section pitches about its quarter chord at a fixed height, with the onset parallel to the ground. The vortex-lattice section is linear in the angle (small angles) and keeps the image positions of the attitude. Its line therefore has the value of the section at its own attitude, but its slope is the slope at a fixed ground line, not the slope of the pitch curve. An identity polar from a converged flat-plate pitch curve thus leaves a small correction that is proportional to the downwash of the strip; it converges to a small value when the mesh is refined. The thick-surface coupling uses the tangent of the pitch curve itself (see "The thick section reference" below).
+The ground plane of a condition is parallel to the free stream, so in the section frame it is tilted by the attitude of the strip. A polar with a height axis is a pitch curve: the section pitches about its quarter chord at a fixed height, with the onset parallel to the ground. The vortex-lattice section is linear in the angle (small angles) and keeps the image positions of the attitude. Its line therefore has the value of the section at its own attitude, but its slope is the slope at a fixed ground line, not the slope of the pitch curve. An identity polar from a converged flat-plate pitch curve thus leaves a small correction that is proportional to the downwash of the strip; it converges to a small value when the mesh is refined. The thick-surface coupling inverts the pitch curve itself (see "The thick section reference" below).
 
 ### Lift definitions in ground effect
 
@@ -75,7 +76,7 @@ The coupling uses these definitions:
 - **Free air.** A free-air polar is read with `Cl`. A free-air polar of Ventorum-2D has no circulation lift data, because there the two definitions are equal. Free-air results do not change.
 - **Thick-surface panel coupling.** `model="panel3d"` matches the pressure lift of each strip with the polar `Cl`: pressure with pressure. It does not read the circulation lift.
 
-**Assumption: the pitch of the polar section.** A ground-effect polar is a set of 2D solutions at one height $h/c$ of the reference point. Ventorum-2D turns the section about its quarter-chord point on the chord line and keeps the height of that point. The coupling reads the polar at the height of the strip quarter-chord point and at the viscous section angle $\alpha_{v,j}$. So it assumes that the strip section has the attitude of the polar section: pitched about $c/4$ to $\alpha_{v,j}$. The lattice strip has its geometric attitude, and $\alpha_{v,j}$ differs from it by the induced angle and the correction $\delta_j$. Near the ground the height of the trailing edge, and so the 2D ground effect, therefore differ between the strip and the polar section. The vortex-lattice and lifting-line couplings have no correction for this difference; the thick-surface coupling takes the tangent of the pitch curve at the strip attitude (see "The thick section reference" below).
+**Assumption: the pitch of the polar section.** A ground-effect polar is a set of 2D solutions at one height $h/c$ of the reference point. Ventorum-2D turns the section about its quarter-chord point on the chord line and keeps the height of that point. The coupling reads the polar at the height of the strip quarter-chord point and at the viscous section angle $\alpha_{v,j}$. So it assumes that the strip section has the attitude of the polar section: pitched about $c/4$ to $\alpha_{v,j}$. The lattice strip has its geometric attitude, and $\alpha_{v,j}$ differs from it by the induced angle and the correction $\delta_j$. Near the ground the height of the trailing edge, and so the 2D ground effect, therefore differ between the strip and the polar section. The vortex-lattice and lifting-line couplings have no correction for this difference; the thick-surface coupling reads its effective angle on the pitch curve of the strip section (see "The thick section reference" below).
 
 ### Reference of a flapped vortex-lattice strip
 
@@ -281,11 +282,39 @@ three pitch-curve moments. The tangent is exact at the attitude. Away
 from it, its error grows with the square of $\alpha_{e,j}-\theta_j$
 and with the curvature of the pitch curve, which is large near the
 ground. Strips with a large downwash (near the tips) have their
-effective angle far from the attitude, so an identity polar leaves a
-local correction there that does not fall with the mesh, although the
-integrated lift residual falls as in free air. An inversion of the
-effective angle on the full nonlinear pitch curve would remove this
-local error; it is not implemented.
+effective angle far from the attitude. With the tangent, an identity
+polar therefore left a local correction there that did not fall with
+the mesh.
+
+**Inversion of the pitch curve.** The effective angle of a strip with
+images does not come from the tangent. It is the attitude
+$\alpha_{e,j}$ at which the pitch curve of the cut section has the
+strip lift,
+
+$$C_l(\alpha_{e,j}; h_j) = c_{l,j},$$
+
+with one 2D Morino solve with images per attitude (the same solve that
+gives the three points of the tangent). A bracketed root finder (Brent
+1973) solves this equation to $10^{-13}$ rad. The inversion of the
+tangent, $\alpha_{0,j,2D}+c_{l,j}/a_{j,2D}$, is the start value; the
+bracket grows from it in steps that double. The Newton Jacobian uses
+$\partial\alpha_{e,j}/\partial c_{l,j}=1/C_l'(\alpha_{e,j})$, with a
+central difference of $10^{-5}$ rad on the curve
+(`GROUND_CURVE_STEP`). The search stays at the attitudes between $-90$
+and $+90$ deg at which the cut section clears the ground. A lift outside
+the range of these attitudes gets the tangent continuation from the
+last attitude of the range and a trust note. The reported section line
+(`lift_slope_section`, `alpha0_section`) and the moment quadratic stay
+those of the tangent; the inviscid section moment is read at the
+inverted angle.
+
+A polar that is the pitch curve of the same cut section gives zero
+correction to round-off on any mesh
+(`tests/test_panel3d_v1_ground_reference.py`, 72, 264 and 1056 panels).
+A polar that is the converged pitch curve of the section keeps the
+first-order mesh residual of the cut section, as in free air (the slow
+test of `tests/test_alpha_correction_ground_reference.py` prints it); the
+tangent error at the tips had partly cancelled this residual.
 
 ### Pressure residual and Jacobian
 
