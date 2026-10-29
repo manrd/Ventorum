@@ -246,16 +246,17 @@ def test_hopeless_angle_fails_fast():
     print(f"\n[viscous] step-panel flap: work {r.newton_iterations}, reasons {r.reason}")
 
 
-@pytest.mark.parametrize("zero_lift", [0.0, -1e-14], ids=["path-skipped", "path-taken"])
+@pytest.mark.parametrize("zero_lift", [0.0, 1e-14, -1e-14, -1e-6],
+                         ids=["path-skipped", "round-off-above", "round-off-below", "path-taken"])
 def test_work_budget_stops_the_angle(monkeypatch, zero_lift):
     """A small work budget ends the chain of attempts at the angle; the reason names the budget.
 
     The budget applies to the Newton iterations at the angle itself. The continuation path from the
     zero-lift angle has its own budgets, and ``newton_iterations`` of the result also counts its work.
-    NACA 0012 is symmetric: its zero-lift angle is 0 deg up to round-off, and the sign of the round-off
-    depends on the numpy and BLAS build. At 2 deg (one CONTINUATION_STEP) the path is skipped when the
-    zero-lift angle is 0 or above, and taken when it is below 0. The test sets each case and reads the
-    work at the angle from the work record of the angle.
+    NACA 0012 is symmetric: its zero-lift angle is 0 deg up to a round-off of either sign, which
+    depends on the numpy and BLAS build. At 2 deg (one CONTINUATION_STEP) the path is skipped for a
+    round-off of either sign, and taken for a zero-lift angle of -1e-6 deg. The test sets each case and
+    reads the work at the angle from the work record of the angle.
     """
     from ventorum.panel2d import viscous as vs
 
@@ -273,14 +274,73 @@ def test_work_budget_stops_the_angle(monkeypatch, zero_lift):
         r = solve_viscous(_naca("0012", 100), 2.0, 1e6, work_budget=5)
     assert not r.converged
     assert "work budget of 5 Newton iterations" in r.reason
+    # The last continuation step ends at the angle up to round-off: it is an attempt at the angle.
+    assert "before a solve at this angle" not in r.reason
+    assert np.isfinite(r.residual)
     assert len(work) == 1
     at_angle, on_path = work[0]
     assert at_angle <= 5
     assert r.newton_iterations == at_angle + on_path
-    if zero_lift < 0.0:
+    if zero_lift == -1e-6:
         assert on_path > 0
     else:
         assert on_path == 0
+
+
+def test_continuation_steps_ignore_round_off():
+    """The path decision and the step count do not depend on a round-off of the zero-lift angle."""
+    from ventorum.panel2d import viscous as vs
+
+    for a0 in (0.0, 1e-14, -1e-14):
+        assert vs._continuation_steps(2.0, a0) == 0
+        assert vs._continuation_steps(-2.0, a0) == 0
+        assert vs._continuation_steps(6.0, a0) == 3
+        assert vs._continuation_steps(-4.0, a0) == 2
+        assert vs._continuation_steps(1.0, a0) == 0
+    assert vs._continuation_steps(2.0, -1e-6) == 2
+    assert vs._continuation_steps(6.0, -1e-6) == 4
+    assert vs._continuation_steps(-4.0 + 1e-14, -4.0) == 0
+
+
+def test_zero_lift_round_off_gives_the_same_solve(monkeypatch):
+    """A zero-lift angle of +1e-14 and -1e-14 deg give the same path decision and the same result at 2 deg."""
+    from ventorum.panel2d import viscous as vs
+
+    out = []
+    for a0 in (1e-14, -1e-14):
+        monkeypatch.setattr(vs, "zero_lift_angle", lambda body, kw, a0=a0: a0)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            out.append(solve_viscous(_naca("0012", 100), 2.0, 1e6))
+    up, down = out
+    assert up.converged == down.converged
+    assert up.newton_iterations == down.newton_iterations
+    assert up.reason == down.reason
+    for name in ("Cl", "Cd", "Cm", "residual"):
+        assert np.array_equal(getattr(up, name), getattr(down, name), equal_nan=True), name
+
+
+def test_attempt_at_the_angle_up_to_round_off_is_the_best_attempt():
+    """A solve that ends at 1.9999999999999998 deg is stored as the best attempt of the 2 deg angle."""
+    from types import SimpleNamespace
+
+    from ventorum.panel2d import viscous as vs
+
+    ctl = vs._AngleWork(2.0, vs.StopRules())
+    # With this zero-lift angle [deg], the last of two continuation steps ends below 2 deg by round-off.
+    a0 = -1.79631466230163e-14
+    end = a0 + (2.0 - a0) * 2 / 2
+    assert end != 2.0 and abs(end - 2.0) <= vs.ANGLE_MATCH_DEG
+    res = SimpleNamespace(status="max_iter", iterations=5, linear_solves=5, _first_stop=None, residual=0.2,
+                          reason="maximum number of iterations")
+    setup = SimpleNamespace(sys=SimpleNamespace(alpha=end))
+    ctl.add(setup, res, 50, 50)
+    assert ctl.best is not None and ctl.best[0] is setup
+    assert ctl.iterations == 5
+    # An attempt at another angle is not an attempt at the angle.
+    other = vs._AngleWork(2.0, vs.StopRules())
+    other.add(SimpleNamespace(sys=SimpleNamespace(alpha=2.0 - 1e-6)), res, 50, 50)
+    assert other.best is None
 
 
 @pytest.mark.slow
