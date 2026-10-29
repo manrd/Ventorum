@@ -1580,7 +1580,7 @@ def _independent(res: SolverResult) -> np.ndarray:
 
 
 def _panel_residual(x, velocity0, dv, speed, incidence, weights, area,
-                    zero, slope, polars, offset, up, lo, pressure, onset_sq=None):
+                    zero, slope, polars, offset, up, lo, pressure, onset_sq=None, curves=None):
     """Return the coupled residual and its analytic Jacobian.
 
     Body velocities and their columns are in m/s; speed is in m/s. The
@@ -1591,6 +1591,13 @@ def _panel_residual(x, velocity0, dv, speed, incidence, weights, area,
     panel and Cp = (|V_k|^2 - |V|^2) / V_inf^2 (see
     :func:`ventorum.panel3d.post.compute_surface_velocity_and_cp`); None
     means no rates.
+
+    The effective angle of a strip is ``zero + cl / slope`` [rad] (the
+    section line). *curves* gives, for each strip with ground images, its
+    2D ground pitch curve (``ventorum.solvers.panel3d._GroundPitchCurve``,
+    None for the other strips): the effective angle of that strip is then
+    the attitude at which the curve has the lift ``cl``, and the Jacobian
+    uses ``dalpha_e / dcl = 1 / (dCl/dalpha)`` of the curve there.
     """
     ns = len(area)
     n = len(weights)
@@ -1602,19 +1609,35 @@ def _panel_residual(x, velocity0, dv, speed, incidence, weights, area,
     dcp = -2 * np.einsum("ij,ijk->ik", velocity, dv) / speed**2
     cl = (incidence @ (weights * cp[:n])) / area
     dc = (incidence @ (weights[:, None] * dcp[:n])) / area[:, None]
-    alpha_v = zero + cl / slope + x[:ns]
+    alpha_e = zero + cl / slope
+    local_slope = np.asarray(slope, dtype=float).copy()
+    outside = np.zeros(ns, dtype=bool)
+    if curves is not None:
+        for j, curve in enumerate(curves):
+            if curve is not None:
+                alpha_e[j], local_slope[j], outside[j] = curve.invert(cl[j], alpha_e[j], slope[j])
+    alpha_v = alpha_e + x[:ns]
     clv = np.array([float(section_cl(p, a)) for p, a in zip(polars, alpha_v)])
     m = np.array([float(section_cl_slope(p, a)) for p, a in zip(polars, alpha_v)])
     residual = cl - clv + offset
-    jac = (1 - m / slope)[:, None] * dc
+    jac = (1 - m / local_slope)[:, None] * dc
     jac[np.arange(ns), np.arange(ns)] -= m
     jump = cp[up] - cp[lo]
     if pressure:
         residual = np.concatenate([residual, jump])
         jac = np.vstack([jac, dcp[up] - dcp[lo]])
         dc = np.vstack([dc, dcp[up] - dcp[lo]])
-    return dict(r=residual, jac=jac, dc=dc, cl=cl, alpha_v=alpha_v, m=m,
-                cp=cp, velocity=velocity, jump=jump)
+    return dict(r=residual, jac=jac, dc=dc, cl=cl, alpha_e=alpha_e, alpha_v=alpha_v, m=m,
+                cp=cp, velocity=velocity, jump=jump, curve_outside=outside)
+
+
+def _ground_curve_note(count: int, total: int) -> str:
+    """Return the trust note of strips whose lift is outside their 2D ground pitch curve."""
+    return (
+        f"{count} of {total} strips have a lift outside the range of their 2D ground pitch curve "
+        "(attitudes between -90 and +90 deg at which the section clears the ground); their "
+        "effective angle is the tangent continuation from the last attitude of that range."
+    )
 
 
 class _PanelCoupling:
@@ -1765,9 +1788,10 @@ class _PanelCoupling:
                                       self.resolver.steep_note()) if note is not None]
         slope, zero, moment = self.slope, self.zero, self.moment
         clean_zero = self.clean_zero
+        curves = None
         if np.any(uses_height):
-            slope, zero, moment = _panel_section_lines(
-                self.geometry.mesh, self.maps, self.lattice, self.strips, ground, uses_height,
+            slope, zero, moment, curves = _panel_section_lines(
+                self.geometry.mesh, self.maps, self.lattice, self.strips, ground, uses_height, curves=True,
             )
             clean_zero = zero
             if self.clean_geometry is not None:
@@ -1783,7 +1807,7 @@ class _PanelCoupling:
         def evaluate(x):
             return _panel_residual(x, velocity0, dv, speed, self.incidence, weights, self.area,
                                    zero, slope, polars, offset, up, lo, solver.kutta == "pressure",
-                                   onset_sq)
+                                   onset_sq, curves)
 
         def newton(start, budget=None):
             x = start.copy()
@@ -1901,6 +1925,8 @@ class _PanelCoupling:
         gap_note = self.resolver.gap_note(primary["alpha_v"])
         if gap_note is not None:
             fallback = [*fallback, gap_note]
+        if np.any(primary["curve_outside"]):
+            fallback = [*fallback, _ground_curve_note(int(np.sum(primary["curve_outside"])), ns)]
         self.states[id(condition)] = (primary, branches, polars, offset, h_over_c, branch_runs, fallback)
         for state in [primary, *branches]:
             state.pop("jac")
@@ -1921,7 +1947,7 @@ class _PanelCoupling:
 
         def finish(res, state):
             slope, zero = state["section_slope"], state["section_zero"]
-            alpha_e = zero + state["cl"] / slope
+            alpha_e = state["alpha_e"]
             co, si = np.cos(alpha_e), np.sin(alpha_e)
             cm_inv = np.sum(state["section_moment"] * np.column_stack([np.ones_like(co), co**2, co * si, si**2]), axis=1)
             cm_visc = np.array([float(section_cm(p, a)) for p, a in zip(polars, state["alpha_v"])])
