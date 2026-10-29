@@ -27,6 +27,7 @@ from ventorum.core.trust import (
     _sign_change_run,
     _sign_change_run_rows,
     evaluate_aerodynamic_trust,
+    lattice_spanwise_stats,
     spanwise_stats_batch,
 )
 
@@ -225,21 +226,16 @@ def test_batch_and_single_paths_agree_on_a_saw_tooth(straight_legs):
 
 
 # ----------------------------------------------------------------------------- GPU kernel of the statistics
-@pytest.mark.slow
-def test_warp_statistics_kernel_equals_the_cpu_rule():
-    """The trust statistics of the Warp loads kernel give the same run as the CPU rule (Warp CPU device)."""
-    wp = pytest.importorskip("warp")
+def _warp_run(dev, G, cut, edge):
+    """Return the sign-change run of the Warp loads kernel on device *dev* for the rows of *G*."""
+    import warp as wp
+
     from ventorum.gpu.kernels import kernels
 
     k = kernels("float64")
-    rng = np.random.default_rng(11)
-    K, m, cut = 200, 40, 25
-    G = rng.normal(size=(K, m)).cumsum(axis=1)
-    G[::2] = np.round(G[::2], 1)
-    G[::3] += 0.5 * (-1.0) ** np.arange(m)
+    K, m = G.shape
     span = np.zeros((K, 8, m))
     span[:, 0, :] = G
-    dev = "cpu"
     out = wp.zeros((K, 22), dtype=wp.float64, device=dev)
     ones = wp.array(np.ones(K), dtype=wp.float64, device=dev)
     wp.launch(k.loads_totals, dim=(K,), device=dev, inputs=[
@@ -248,9 +244,86 @@ def test_warp_statistics_kernel_equals_the_cpu_rule():
         ones, ones, wp.array(np.zeros(K), dtype=wp.float64, device=dev), 1.0, 1.0, 1.0,
         wp.array(span, dtype=wp.float64, device=dev),
         wp.array(np.array([0, cut], np.int32), dtype=wp.int32, device=dev),
-        wp.array(np.array([cut, m], np.int32), dtype=wp.int32, device=dev), out])
-    ref = np.maximum(_sign_change_run_rows(G[:, :cut]), _sign_change_run_rows(G[:, cut:]))
-    assert np.array_equal(out.numpy()[:, 21].astype(int), ref)
+        wp.array(np.array([cut, m], np.int32), dtype=wp.int32, device=dev),
+        wp.array(np.asarray(edge, dtype=np.int32), dtype=wp.int32, device=dev), out])
+    return out.numpy()[:, 21].astype(int)
+
+
+def _random_rows(seed=11, K=200, m=40):
+    rng = np.random.default_rng(seed)
+    G = rng.normal(size=(K, m)).cumsum(axis=1)
+    G[::2] = np.round(G[::2], 1)
+    G[::3] += 0.5 * (-1.0) ** np.arange(m)
+    return G
+
+
+def _cpu_run(G, cut, edge):
+    edge = np.asarray(edge, dtype=bool)
+    return np.maximum(_sign_change_run_rows(G[:, :cut], skip=edge[:cut - 1]),
+                      _sign_change_run_rows(G[:, cut:], skip=edge[cut:-1]))
+
+
+@pytest.mark.slow
+def test_warp_statistics_kernel_equals_the_cpu_rule():
+    """The trust statistics of the Warp loads kernel give the same run as the CPU rule (Warp CPU device)."""
+    pytest.importorskip("warp")
+    G, cut = _random_rows(), 25
+    edge = np.zeros(G.shape[1], dtype=bool)
+    assert np.array_equal(_warp_run("cpu", G, cut, edge), _cpu_run(G, cut, edge))
+
+
+@pytest.mark.slow
+def test_warp_statistics_kernel_with_control_edges_equals_the_cpu_rule():
+    """With steps near control edges masked, the Warp kernel (CPU device) gives the CPU run."""
+    pytest.importorskip("warp")
+    G, cut = _random_rows(13), 25
+    edge = np.zeros(G.shape[1], dtype=bool)
+    edge[[3, 4, 5, 10, 11, 12, 22, 23, 30, 31, 32]] = True
+    ref = _cpu_run(G, cut, edge)
+    assert not np.array_equal(ref, _cpu_run(G, cut, np.zeros_like(edge)))
+    assert np.array_equal(_warp_run("cpu", G, cut, edge), ref)
+
+
+@pytest.mark.gpu
+def test_warp_statistics_kernel_with_control_edges_on_the_gpu():
+    """CPU/GPU parity of the masked sign-change run (Warp kernel on the CUDA device)."""
+    wp = pytest.importorskip("warp")
+    wp.init()
+    if not wp.is_cuda_available():
+        pytest.skip("No CUDA device for Warp.")
+    G, cut = _random_rows(17), 25
+    edge = np.zeros(G.shape[1], dtype=bool)
+    edge[[3, 4, 5, 10, 11, 12, 22, 23, 30, 31, 32]] = True
+    assert np.array_equal(_warp_run("cuda:0", G, cut, edge), _cpu_run(G, cut, edge))
+
+
+@pytest.mark.gpu
+def test_gpu_sweep_with_a_flap_edge_gives_the_cpu_statistics():
+    """On the GPU the sweep of a flapped wing passes the lattice edge mask: same run, rating and warning as the CPU."""
+    from ventorum import gpu
+
+    if not gpu.available():
+        pytest.skip(f"The GPU pipelines cannot run: {gpu.unavailable_reason()}")
+    old_dev, old_prec = gpu.get_device(), gpu._precision
+    try:
+        st = vt.SolverSettings(solver_type="vlm", n_panels=48, n_chord=8)
+        runs = {}
+        for device in ("cpu", "gpu"):
+            gpu.set_device(device)
+            gpu.set_precision("float64")
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                runs[device] = vt.VortexLatticeSolver().solve_sweep(
+                    _swept_flap(), FlightCondition(V_inf=30.0), st, np.radians([0.0, 4.0, 8.0]))
+        for r, s in zip(runs["cpu"], runs["gpu"]):
+            assert s.details["device"] == "gpu"
+            lat = s.details["lattice"]
+            assert lat.control_edge_step is not None
+            assert r.totals.trust.rating == s.totals.trust.rating
+            assert _flagged(r) == _flagged(s)
+    finally:
+        gpu.set_device(old_dev)
+        gpu.set_precision(old_prec)
 
 
 @pytest.mark.gpu
@@ -279,3 +352,151 @@ def test_gpu_sweep_gives_the_cpu_saw_tooth_result(straight_legs):
     finally:
         gpu.set_device(old_dev)
         gpu.set_precision(old_prec)
+
+
+# ----------------------------------------------------------------------------- control edges
+# A jump of the deflection at a side edge of a control gives a jump of the
+# spanwise slope of the load with a logarithmic shape. When the mesh resolves
+# the edge, this physical feature can give a peak, a dip one strip wide and a
+# bump (about 5e-4 of the peak circulation), that is three consecutive sign
+# changes. The steps whose strips are both within two strips of a control
+# edge therefore have no sign in the saw-tooth measure.
+def _swept_flap(controls=None):
+    if controls is None:
+        controls = [_ctrl("flap", 0.2, 0.6, 0.75, 10.0)]
+    w = vt.LiftingSurface(name="w", semi_span=4.0, controls=list(controls), sweep_le=np.radians(30.0),
+                          sections=[vt.WingSection(0.0, 1.0), vt.WingSection(1.0, 0.6)])
+    ac = vt.Aircraft(surfaces=[w], ref_point=np.array([0.25, 0.0, 0.0]))
+    ac.compute_reference_values()
+    return ac
+
+
+@pytest.fixture(scope="module")
+def flap_case():
+    """Swept, tapered wing with a part-span flap (10 deg): the solved result and its lattice."""
+    res = _solve(_swept_flap(), "vlm", 48, alpha_deg=4.0, n_chord=8)
+    return res, res.details["lattice"]
+
+
+def _edges(lat):
+    """Return the strip index e of each control edge (between strips e - 1 and e) of the lattice."""
+    step = lat.control_edge_step
+    idx = np.flatnonzero(step)
+    # Each edge gives the three steps e - 2, e - 1 and e.
+    return [int(i) for i in idx if i >= 2 and step[i - 1] and step[i - 2] and not (i + 1 < step.size and step[i + 1])]
+
+
+def _edge_feature(g, e, rel=5e-4):
+    """Put a peak (strip e - 1), a dip one strip wide (strip e) and a bump (strip e + 1) at the edge e."""
+    g = g.copy()
+    h = rel * np.abs(g).max()
+    m = max(g[e - 2], g[e + 2])
+    g[e - 1], g[e], g[e + 1] = m + 2.0 * h, m + h, m + 2.0 * h
+    return g
+
+
+def test_control_edge_steps_of_the_lattice(flap_case):
+    """The flap has four edges (two per half); each gives the three steps whose strips are near it."""
+    _, lat = flap_case
+    step = lat.control_edge_step
+    assert step is not None and step.shape == (lat.n_strips,)
+    edges = _edges(lat)
+    assert len(edges) == 4
+    assert np.flatnonzero(step).tolist() == sorted(e + k for e in edges for k in (-2, -1, 0))
+    for e in edges:
+        assert lat.eta[e - 1] * lat.eta[e] > 0.0  # not at the root
+
+
+def test_no_control_edge_without_deflection():
+    """A control with zero deflection and a symmetric flap through the root give no edge there."""
+    res = _solve(_swept_flap([_ctrl("flap", 0.2, 0.6, 0.75, 0.0)]), "vlm", 24, n_chord=4)
+    assert res.details["lattice"].control_edge_step is None
+    lat = _solve(_swept_flap([_ctrl("flap", 0.0, 0.5, 0.75, 10.0)]), "vlm", 24, n_chord=4).details["lattice"]
+    assert len(_edges(lat)) == 2
+
+
+def test_antisymmetric_control_through_the_root_has_a_root_edge():
+    lat = _solve(_swept_flap([_ctrl("ail", 0.0, 0.5, 0.75, 10.0, symmetric=False)]), "vlm", 24,
+                 n_chord=4).details["lattice"]
+    root = lat.n_strips // 2
+    assert root in _edges(lat)
+
+
+def test_two_controls_that_meet_have_an_edge():
+    """Two adjacent controls with different deflections, or with different hinges, have an edge between them."""
+    for second in (_ctrl("f2", 0.4, 0.7, 0.75, -5.0), _ctrl("f2", 0.4, 0.7, 0.8, 10.0)):
+        lat = _solve(_swept_flap([_ctrl("f1", 0.1, 0.4, 0.75, 10.0), second]), "vlm", 24,
+                     n_chord=4).details["lattice"]
+        assert len(_edges(lat)) == 6
+
+
+def test_flap_edge_feature_is_not_flagged(flap_case):
+    """The peak, dip and bump at a flap edge give a run of 3 without the exemption, and are not flagged with it."""
+    res, lat = flap_case
+    sw = res.spanwise[0]
+    assert _sign_change_run(sw.gamma) < _SAW_TOOTH_RUN
+    for e in _edges(lat):
+        g = _edge_feature(sw.gamma, e)
+        skip = lat.control_edge_step[:-1]
+        assert _sign_change_run(g) >= _SAW_TOOTH_RUN
+        assert _sign_change_run(g, skip=skip) < _SAW_TOOTH_RUN
+        # The same feature one strip further out is also not flagged.
+        assert _sign_change_run(_edge_feature(sw.gamma, e + 1), skip=skip) < _SAW_TOOTH_RUN
+        # Through the trust score: the spanwise results alone flag it, the lattice statistics do not.
+        new = sw.clone()
+        new.gamma = g
+        t = res.totals
+        kw = dict(AR=t.AR, condition=res.condition, CL=t.CL, CDi=t.CDi, CD_total=t.CD_total, n_panels=48,
+                  solver_type="vlm", n_chord=8)
+        assert any(_KEY in w for w in evaluate_aerodynamic_trust(spanwise_list=[new], **kw).warnings)
+        stats = lattice_spanwise_stats(lat, [new])
+        assert stats["sign_change_run"] < _SAW_TOOTH_RUN
+        t2 = evaluate_aerodynamic_trust(spanwise_list=[new], spanwise_stats=stats, **kw)
+        assert not any(_KEY in w for w in t2.warnings)
+
+
+def test_saw_tooth_from_a_control_edge_is_flagged(flap_case):
+    """An odd-even oscillation that starts at a control edge and runs well beyond two strips is flagged."""
+    res, lat = flap_case
+    sw = res.spanwise[0]
+    for e in _edges(lat):
+        g = sw.gamma.copy()
+        h = 0.02 * np.abs(g).max()
+        j = np.arange(e - 2, min(e + 10, g.size))
+        g[j] += h * (-1.0) ** j
+        assert _sign_change_run(g, skip=lat.control_edge_step[:-1]) >= _SAW_TOOTH_RUN
+        new = sw.clone()
+        new.gamma = g
+        assert lattice_spanwise_stats(lat, [new])["sign_change_run"] >= _SAW_TOOTH_RUN
+
+
+def test_synthetic_saw_tooth_is_flagged_with_an_edge_mask():
+    """The odd-even case over the whole span stays flagged with steps near two edges masked."""
+    _, g = _elliptic(40)
+    g = g * (1.0 + 0.2 * (-1.0) ** np.arange(g.size))
+    skip = np.zeros(g.size - 1, dtype=bool)
+    skip[[18, 19, 20, 58, 59, 60]] = True
+    assert _sign_change_run(g, skip=skip) >= _SAW_TOOTH_RUN
+
+
+@pytest.mark.parametrize("n", [64, 160])
+def test_straight_legs_saw_tooth_with_a_flap_is_flagged(straight_legs, n):
+    """The ill-conditioned straight-leg lattice of a cambered wing with a flap is still flagged."""
+    res = _solve(_wing([_ctrl("flap", 0.2, 0.5, 0.75, 10.0)], shape="6409"), "vlm", n, alpha_deg=0.0)
+    assert res.details["lattice"].control_edge_step is not None
+    assert _flagged(res)
+
+
+def test_batch_and_single_paths_agree_with_an_edge_mask(flap_case):
+    """spanwise_stats_batch with the edge mask gives the run of _sign_change_run with the same mask."""
+    res, lat = flap_case
+    rng = np.random.default_rng(3)
+    G = np.array([_edge_feature(res.spanwise[0].gamma, e) for e in _edges(lat)]
+                 + [res.spanwise[0].gamma + 0.01 * rng.normal(size=lat.n_strips) for _ in range(4)])
+    arrays = {n: np.repeat(getattr(res.spanwise[0], n)[None, :], G.shape[0], axis=0)
+              for n in ("Cl", "Cd_i", "alpha_eff", "alpha_i", "local_lift")}
+    arrays["gamma"] = G
+    arrays["control_edge_step"] = lat.control_edge_step
+    stats = spanwise_stats_batch([surf.strips for surf in lat.surfaces], arrays)
+    skip = lat.control_edge_step[:-1]
+    assert [s["sign_change_run"] for s in stats] == [_sign_change_run(g, skip=skip) for g in G]

@@ -123,6 +123,7 @@ from ventorum.core.datatypes import (
 )
 from ventorum.core.trust import (
     evaluate_aerodynamic_trust,
+    lattice_spanwise_stats,
     polar_limits,
     polar_stats,
 )
@@ -1131,6 +1132,7 @@ def _solve_condition(
             n_chord=lattice.n_chord,
             notes=res_notes,
             max_chord_over_c=float(np.max(lattice.chord) / c_ref) if c_ref else 1.0,
+            spanwise_stats=lattice_spanwise_stats(lattice, loads.spanwise),
             polar=polar,
             CY=totals.CY,
             CY_farfield=totals.CY_farfield,

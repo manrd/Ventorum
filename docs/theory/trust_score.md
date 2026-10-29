@@ -43,7 +43,9 @@ Detection. Let $\Gamma_j$ be the circulation of strip $j$ of one surface, in spa
 
 Rationale. A smooth load has physical extrema: the maximum at the root, and two extrema at each edge of a part-span control, of a gap between controls or of a strong change of twist. These extrema are isolated: each gives one sign change. A load feature only one strip wide (a narrow control or gap on a coarse mesh) gives two consecutive sign changes, up then down. Three or more consecutive sign changes need two neighbouring one-strip features of opposite sign, which is the saw-tooth. The number of physical extrema grows with the number of controls, but their run does not; when the mesh is refined the features get wider and the run gets shorter. The measure therefore does not depend on the number of controls and does not grow with the mesh for a converged solution. The former rule counted all local extrema of the circulation (penalty for more than six). Each part-span control adds about two extrema per side, so a smooth solution with a flap and an aileron got the penalty, and the rating changed with the mesh.
 
-The batch path (`spanwise_stats_batch`) and the GPU loads kernel compute the same measure; the tests check that the paths agree. A wing with two or more controls that are each about one strip wide and have alternating deflections can still give a run of 3 or more. Such a mesh does not resolve the controls; use more spanwise panels.
+Control edges. A control edge is a spanwise strip boundary inside one surface where a control with a nonzero deflection starts or ends, or where two controls with different deflections or different hinges meet. The root of a symmetric surface with an antisymmetric control is also a control edge. A jump of the deflection gives a jump of the spanwise slope of the load with a logarithmic shape. When the mesh resolves the edge, this physical feature can give a small peak, a dip one strip wide and a bump next to the edge. This is three consecutive sign changes of a correct result, not a numerical problem. The measure therefore does not count the steps near a control edge: a step $d_j$ whose two strips $j$ and $j + 1$ are both within two strips of a control edge (`ventorum.geometry.lattice.CONTROL_EDGE_STRIPS`) has no sign, as a step below the tolerance. These are the three steps across the edge. A saw-tooth that starts at a control edge and continues beyond these steps still gives a run of 3 or more. The lattice keeps the masked steps in `VortexLattice.control_edge_step` (`ventorum.geometry.lattice.control_edge_steps`), from the controls of the strips. The threshold (3) and the penalty (0.40) do not change.
+
+The single path (`ventorum.core.trust.lattice_spanwise_stats`, used by the lattice solvers and by the angle-of-attack coupling on a lattice), the batch path (`spanwise_stats_batch`, with the entry `control_edge_step`) and the GPU loads kernel (with the mask as an input) compute the same measure; the tests check that the paths agree. A result without a lattice (for example the 3D panel method) gets the measure without the control-edge mask. A wing with two or more controls that are each about one strip wide and have alternating deflections can still give a run of 3 or more. Such a mesh does not resolve the controls; use more spanwise panels.
 
 ## 3D panel method
 
@@ -109,7 +111,7 @@ Until these layers exist, a result has only the trust score of this chapter plus
 
 ## Implementation
 
-- `ventorum.core.trust`: `evaluate_aerodynamic_trust`, `polar_limits`, `polar_stats`, `isa_speed_of_sound`, `spanwise_stats_batch`.
+- `ventorum.core.trust`: `evaluate_aerodynamic_trust`, `polar_limits`, `polar_stats`, `isa_speed_of_sound`, `spanwise_stats_batch`, `lattice_spanwise_stats`.
 - `ventorum.core.datatypes.TrustScore`.
 - `ventorum.geometry.mesh_convergence`: the GCI.
 - `ventorum.core.error_bars`: layer 1 (numerical error bars from three mesh levels) and the combination.

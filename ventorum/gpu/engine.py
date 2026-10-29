@@ -1532,6 +1532,9 @@ def loads(dl: DeviceLattice, lattice, G: torch.Tensor, v_points: list[torch.Tens
         geo = {
             "surf0": _i32([sf.strips.start for sf in lattice.surfaces]),
             "surf1": _i32([sf.strips.stop for sf in lattice.surfaces]),
+            # Steps near a control edge (no sign in the saw-tooth measure).
+            "edge": _i32(np.zeros(n_s, dtype=np.int32) if getattr(lattice, "control_edge_step", None) is None
+                         else lattice.control_edge_step.astype(np.int32)),
             "n_sets": start.shape[0] // n_p,
         }
         for j, c in enumerate("abcd"[:geo["n_sets"]]):
@@ -1632,7 +1635,8 @@ def loads(dl: DeviceLattice, lattice, G: torch.Tensor, v_points: list[torch.Tens
     tot = torch.empty((K, 22), dtype=_F64, device=dev)
     launch(k.loads_totals, (K,), [w_part, w_D, w_V, w_rho, view(alpha.contiguous(), wp.float64), float(S_ref),
                                   float(b_ref), float(c_ref), w_span, cview(geo, "surf0", wp.int32),
-                                  cview(geo, "surf1", wp.int32), view(tot, wp.float64)])
+                                  cview(geo, "surf1", wp.int32), cview(geo, "edge", wp.int32),
+                                  view(tot, wp.float64)])
     parts = [tot, span.reshape(K, -1), sforce.reshape(K, -1), w_n]
     names = [("tot", 22), ("span", 8 * n_s), ("strip_force", 3 * n_s), ("w_n", n_s)]
     for name, t in (extra or {}).items():

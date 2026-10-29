@@ -78,6 +78,8 @@ _MEAN_LINE_STRIP_JUMP = 0.3
 #: circulation that the rule ``numerical`` flags as a saw-tooth [-]. A load feature one strip
 #: wide (a narrow control, a gap between controls, the root joint) gives at most two
 #: consecutive sign changes; a saw-tooth (odd-even oscillation of neighbouring strips) gives more.
+#: The steps near a side edge of a control do not count (see
+#: :func:`ventorum.geometry.lattice.control_edge_steps`).
 _SAW_TOOTH_RUN = 3
 
 #: Thresholds of the low-aspect-ratio side-edge vortex rule (vortex lattice).
@@ -663,16 +665,17 @@ def _count_extrema_rows(G: np.ndarray, rel_tol: float = 1e-6) -> np.ndarray:
     return change.sum(axis=1).astype(int)
 
 
-def _sign_change_run(g: np.ndarray, rel_tol: float = 1e-6) -> int:
+def _sign_change_run(g: np.ndarray, rel_tol: float = 1e-6, skip: np.ndarray | None = None) -> int:
     """Return the longest run of consecutive sign changes of the steps of a sequence.
 
     The steps are ``d[j] = g[j + 1] - g[j]``. A step is a sign change when it
     and the step before it have opposite signs. The function returns the
     largest number of such steps in a row. A step with
     ``|d| <= rel_tol * max|g|`` has no sign: it is not a sign change and it
-    stops the run. A smooth load with physical extrema (also at the edges of
-    part-span controls) gives runs of one or two; a saw-tooth (the strips
-    alternate up and down) gives one long run.
+    stops the run. A step marked in *skip* (a step near a side edge of a
+    control) also has no sign. A smooth load with physical extrema gives
+    runs of one or two; a saw-tooth (the strips alternate up and down)
+    gives one long run.
 
     Parameters
     ----------
@@ -681,6 +684,8 @@ def _sign_change_run(g: np.ndarray, rel_tol: float = 1e-6) -> int:
         [m^2/s].
     rel_tol : float
         Relative size of a step that has no sign [-].
+    skip : array_like of bool, optional
+        Shape (len(g) - 1,): True for each step that has no sign.
 
     Returns
     -------
@@ -690,18 +695,25 @@ def _sign_change_run(g: np.ndarray, rel_tol: float = 1e-6) -> int:
     g = np.asarray(g, dtype=float)
     if g.size < 4:
         return 0
-    return int(_sign_change_run_rows(g[None, :], rel_tol)[0])
+    return int(_sign_change_run_rows(g[None, :], rel_tol, None if skip is None else np.asarray(skip)[None, :])[0])
 
 
-def _sign_change_run_rows(G: np.ndarray, rel_tol: float = 1e-6) -> np.ndarray:
-    """Return :func:`_sign_change_run` of each row of *G* (shape (K, m)), with the same rules."""
+def _sign_change_run_rows(G: np.ndarray, rel_tol: float = 1e-6, skip: np.ndarray | None = None) -> np.ndarray:
+    """Return :func:`_sign_change_run` of each row of *G* (shape (K, m)), with the same rules.
+
+    *skip* has the shape (m - 1,) or (K, m - 1): True for each step that has
+    no sign.
+    """
     G = np.asarray(G, dtype=float)
     K, m = G.shape
     if m < 4:
         return np.zeros(K, dtype=int)
     d = G[:, 1:] - G[:, :-1]
     scale = np.maximum(np.abs(G).max(axis=1), 1e-300)
-    s = np.where(np.abs(d) > rel_tol * scale[:, None], np.sign(d), 0.0)
+    keep = np.abs(d) > rel_tol * scale[:, None]
+    if skip is not None:
+        keep &= ~np.broadcast_to(np.asarray(skip, dtype=bool), d.shape)
+    s = np.where(keep, np.sign(d), 0.0)
     change = s[:, 1:] * s[:, :-1] < 0.0
     # Length of the run that ends at each step: the distance to the last step that is not a change.
     j = np.arange(change.shape[1])
@@ -720,7 +732,10 @@ def spanwise_stats_batch(surface_strips: Sequence, arrays: dict[str, np.ndarray]
     arrays : dict of (K, n_strips) arrays
         ``gamma``, ``Cl``, ``Cd_i``, ``alpha_eff``, ``alpha_i``,
         ``local_lift`` and, if present, ``Cd_profile`` and ``Cm_section``
-        (a value of None means "absent" for all cases).
+        (a value of None means "absent" for all cases). The optional entry
+        ``control_edge_step`` is the (n_strips,) bool array of the lattice
+        (``VortexLattice.control_edge_step``): the steps near a side edge
+        of a control, which the saw-tooth measure does not count.
 
     Returns
     -------
@@ -742,16 +757,55 @@ def spanwise_stats_batch(surface_strips: Sequence, arrays: dict[str, np.ndarray]
     max_cl = np.zeros(K)
     max_ae = np.zeros(K)
     n_run = np.zeros(K, dtype=int)
+    edge = arrays.get("control_edge_step")
     for sl in surface_strips:
         g = arrays["gamma"][:, sl]
         if g.shape[1] == 0:
             continue
         max_cl = np.maximum(max_cl, cl[:, sl].max(axis=1))
         max_ae = np.maximum(max_ae, np.degrees(ae[:, sl].max(axis=1)))
-        n_run = np.maximum(n_run, _sign_change_run_rows(g))
+        skip = None if edge is None else np.asarray(edge, dtype=bool)[sl][:-1]
+        n_run = np.maximum(n_run, _sign_change_run_rows(g, skip=skip))
     return [{"max_local_cl": float(max_cl[k]), "max_alpha_eff_deg": float(max_ae[k]),
              "sign_change_run": int(n_run[k])}
             if finite[k] else None for k in range(K)]
+
+
+def lattice_spanwise_stats(lattice: VortexLattice | None, spanwise_list: Sequence | None) -> dict | None:
+    """Return the spanwise statistics of one case on a lattice with control edges.
+
+    The saw-tooth measure needs the steps near the side edges of the
+    controls (``VortexLattice.control_edge_step``), which the spanwise
+    results do not carry. A solver gives this value to
+    :func:`evaluate_aerodynamic_trust` as *spanwise_stats*.
+
+    Parameters
+    ----------
+    lattice : VortexLattice or None
+        The lattice of the solve.
+    spanwise_list : sequence of SpanwiseResult or None
+        The spanwise results, one per surface of the lattice.
+
+    Returns
+    -------
+    dict or None
+        The statistics of :func:`spanwise_stats_batch` for the case, or None
+        when the lattice has no control edge, the results do not match the
+        surfaces of the lattice, or a value is not finite (the trust score
+        then uses *spanwise_list* alone).
+    """
+    edge = None if lattice is None else getattr(lattice, "control_edge_step", None)
+    if edge is None or not spanwise_list or len(spanwise_list) != len(lattice.surfaces):
+        return None
+    strips = [sf.strips for sf in lattice.surfaces]
+    n_s = len(edge)
+    if any(np.size(sw.gamma) != len(range(*sl.indices(n_s))) for sw, sl in zip(spanwise_list, strips)):
+        return None
+    arrays: dict[str, np.ndarray | None] = {"control_edge_step": edge}
+    for name in ("gamma", "Cl", "Cd_i", "alpha_eff", "alpha_i", "local_lift", "Cd_profile", "Cm_section"):
+        parts = [getattr(sw, name) for sw in spanwise_list]
+        arrays[name] = None if any(p is None for p in parts) else np.concatenate(parts)[None, :]
+    return spanwise_stats_batch(strips, arrays)[0]
 
 
 def evaluate_aerodynamic_trust(
@@ -821,7 +875,10 @@ def evaluate_aerodynamic_trust(
         The statistics of the spanwise results from
         :func:`spanwise_stats_batch` (all arrays finite). A batch computes
         them for all its cases at once; the result is the same as from
-        *spanwise_list*.
+        *spanwise_list*. On a lattice with control edges they also leave
+        out the steps near the edges from the saw-tooth measure
+        (:func:`lattice_spanwise_stats`); *spanwise_list* alone cannot do
+        this.
     polar : dict or None
         The comparison of the section results with their tabulated polars
         (:func:`polar_stats`), or None if no strip has a tabulated polar.
@@ -1114,7 +1171,8 @@ def evaluate_aerodynamic_trust(
     if spanwise_list or spanwise_stats is not None:
         # Saw-tooth check: a long run of consecutive sign changes of the strip-to-strip step of
         # the circulation (strips that alternate up and down). The physical extrema of a smooth
-        # load (also at the edges of part-span controls) are isolated and do not count.
+        # load are isolated and do not count. The steps near a side edge of a control are left
+        # out in spanwise_stats (lattice_spanwise_stats, spanwise_stats_batch, GPU kernel).
         if spanwise_stats is not None:
             n_run = spanwise_stats["sign_change_run"]
         else:

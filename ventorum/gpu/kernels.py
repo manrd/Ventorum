@@ -1292,12 +1292,15 @@ def _build(precision: str) -> SimpleNamespace:  # noqa: C901 - one closure per k
                      V: wp.array(dtype=wp.float64), rho: wp.array(dtype=wp.float64),
                      alpha: wp.array(dtype=wp.float64), S_ref: wp.float64, b_ref: wp.float64, c_ref: wp.float64,
                      span: wp.array3d(dtype=wp.float64), surf0: wp.array(dtype=wp.int32),
-                     surf1: wp.array(dtype=wp.int32), out: wp.array2d(dtype=wp.float64)):
+                     surf1: wp.array(dtype=wp.int32), edge: wp.array(dtype=wp.int32),
+                     out: wp.array2d(dtype=wp.float64)):
         # Totals of case k: the sums of the strip parts, the coefficients of
         # compute_loads_batch, and the statistics of the trust score (all
         # spanwise values finite, peak |Cl|, peak |alpha_eff| [deg], longest
         # run of consecutive sign changes of the strip-to-strip step of the
         # circulation on one surface, as in trust._sign_change_run_rows).
+        # edge[s] != 0 marks the step from strip s to s + 1 near a control
+        # edge (VortexLattice.control_edge_step): it has no sign.
         # out[k] = CL, CDi, CDp, CD_total, e, Cl, Cm, Cn, CY, CDi_nearfield,
         # profile flag, AR, F_total (3), M (3), finite, max |Cl|,
         # max |alpha_eff| [deg], sign-change run.
@@ -1367,8 +1370,8 @@ def _build(precision: str) -> SimpleNamespace:  # noqa: C901 - one closure per k
                 gmax = wp.max(gmax, wp.abs(span[k, 0, s]))
             if s1 - s0 >= 4:
                 tol = wp.float64(1e-6) * wp.max(gmax, wp.float64(1e-300))
-                # A step at or below tol has no sign (0): it is not a sign
-                # change and it stops the run.
+                # A step at or below tol, or near a control edge, has no
+                # sign (0): it is not a sign change and it stops the run.
                 last = wp.int32(0)
                 cnt = wp.int32(0)
                 for s in range(s0, s1 - 1):
@@ -1378,6 +1381,8 @@ def _build(precision: str) -> SimpleNamespace:  # noqa: C901 - one closure per k
                         sgn = wp.int32(1)
                     if dg < -tol:
                         sgn = wp.int32(-1)
+                    if edge[s] != 0:
+                        sgn = wp.int32(0)
                     if sgn != 0 and last != 0 and sgn != last:
                         cnt = cnt + 1
                     else:

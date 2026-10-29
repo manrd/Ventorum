@@ -53,6 +53,7 @@ from __future__ import annotations
 
 import bisect
 import warnings
+from collections.abc import Sequence
 from dataclasses import dataclass, field, replace
 from typing import Any
 
@@ -393,6 +394,13 @@ class VortexLattice:
         legs.
     chord : numpy.ndarray
         Strip chord [m].
+    control_edge_step : numpy.ndarray or None
+        Steps of the spanwise circulation near a side edge of a control,
+        shape (n_strips,) bool, or None when the lattice has no control
+        edge. Entry ``s`` is True when the step from strip ``s`` to strip
+        ``s + 1`` of the same surface has both strips within two strips of
+        a control edge (see :func:`control_edge_steps`). The saw-tooth rule
+        of the trust score does not count these steps.
     twist : numpy.ndarray
         Strip twist, with the incidence of the surface [rad].
         Keeps the undeformed (jig) twist; the deformed shape is in the nodes.
@@ -477,6 +485,10 @@ class VortexLattice:
     camber_fallback: bool = False
     has_camber_offset: bool = False
     camber_frames: list[dict] | None = None
+    # Steps of the spanwise circulation at the side edges of the controls
+    # (see ``control_edge_step`` in the class notes). None when the lattice
+    # has no control edge.
+    control_edge_step: np.ndarray | None = None
 
     @property
     def n_panels(self) -> int:
@@ -998,6 +1010,87 @@ def _surface_mesh_eta(
     return _surface_eta(surf, int(n_sp), spacing)
 
 
+#: Strips on each side of a control edge whose steps the saw-tooth rule of the
+#: trust score does not count [-] (see :func:`control_edge_steps`).
+CONTROL_EDGE_STRIPS = 2
+
+
+def _control_signature(c: ControlSurface | None, side: float) -> tuple[float, float] | None:
+    """Return the signed deflection [rad] and the hinge fraction [-] of the control of one strip.
+
+    Parameters
+    ----------
+    c : ControlSurface or None
+        The control of the strip.
+    side : float
+        +1 on a strip of the defining (right) half, -1 on a mirrored strip
+        (the left half of a symmetric surface or a ``mirror_y`` surface).
+        On a mirrored strip an antisymmetric control has the opposite
+        deflection.
+
+    Returns
+    -------
+    tuple of float or None
+        ``(deflection, hinge_x_c)``, or None when the strip has no control
+        or the deflection is zero.
+    """
+    if c is None or float(c.deflection) == 0.0:
+        return None
+    delta = float(c.deflection)
+    if side < 0.0 and not c.symmetric:
+        delta = -delta
+    return delta, float(c.hinge_x_c)
+
+
+def control_edge_steps(signatures: Sequence[tuple[float, float] | None],
+                       surface_strips: Sequence[slice]) -> np.ndarray | None:
+    """Return the steps of the spanwise circulation near the side edges of the controls.
+
+    A control edge is a strip edge inside one surface where the two strips
+    have different control signatures: a deflected control starts or ends
+    there, or two controls with different deflections or hinges meet (also
+    at the root of a symmetric surface with an antisymmetric control). A
+    jump of the deflection gives a jump of the spanwise slope of the load
+    with a logarithmic shape. When the mesh resolves the edge, this
+    physical feature can give up to three consecutive sign changes of the
+    strip-to-strip step. The saw-tooth rule of the trust score therefore
+    does not count these steps.
+
+    Parameters
+    ----------
+    signatures : sequence of tuple or None
+        For each strip of the lattice, the signed deflection [rad] and the
+        hinge fraction [-] of its control, or None for no deflected
+        control.
+    surface_strips : sequence of slice
+        The strips of each surface.
+
+    Returns
+    -------
+    numpy.ndarray or None
+        Shape (n_strips,) bool. Entry ``s`` is True when the step from
+        strip ``s`` to strip ``s + 1`` of the same surface has both strips
+        within :data:`CONTROL_EDGE_STRIPS` strips of a control edge. None
+        when there is no control edge.
+    """
+    n_near = CONTROL_EDGE_STRIPS
+    n = len(signatures)
+    near = np.zeros(n, dtype=bool)
+    found = False
+    for sl in surface_strips:
+        for e in range(sl.start + 1, sl.stop):
+            if signatures[e - 1] != signatures[e]:
+                found = True
+                near[max(sl.start, e - n_near):min(sl.stop, e + n_near)] = True
+    if not found:
+        return None
+    step = np.zeros(n, dtype=bool)
+    for sl in surface_strips:
+        if sl.stop - sl.start >= 2:
+            step[sl.start:sl.stop - 1] = near[sl.start:sl.stop - 1] & near[sl.start + 1:sl.stop]
+    return step
+
+
 def _chordwise_fractions(n_chord: int, chord_spacing: str) -> np.ndarray:
     if chord_spacing in ("cosine", "full-cosine"):
         return 0.5 * (1.0 - np.cos(np.linspace(0.0, np.pi, n_chord + 1)))
@@ -1488,6 +1581,9 @@ def build_lattice(
     )}
     strip_xi_all: list[np.ndarray] = []
     strip_ctrl_all: list[ControlSurface | None] = []
+    # Deflection [rad] and hinge fraction [-] of the control of each strip,
+    # with the sign of its side (None: no deflected control).
+    strip_ctrl_sig_all: list[tuple[float, float] | None] = []
     strip_hinge_eff_all: list[float | None] = []
     # Chordwise mode: the effective hinge fraction of every strip with a
     # deflected geometry (control strips and join strips), and the
@@ -1905,6 +2001,8 @@ def build_lattice(
         strip_xi_all.extend(xi_surf)
         strip_hinge_eff_all.extend(hinge_eff_surf)
         strip_ctrl_all.extend(ctrl_surf)
+        side_of_strip = [1.0 if r else -1.0 for r in is_right]
+        strip_ctrl_sig_all.extend(_control_signature(c, side) for c, side in zip(ctrl_surf, side_of_strip))
         strip_flap_hinge_all.extend(flap_hinge_surf)
         strip_flap_nominal_all.extend(flap_nominal_surf)
         if join_field is not None:
@@ -2324,6 +2422,7 @@ def build_lattice(
         has_camber_offset=any(line is not None and np.any(line.z != 0.0)
                               for _, lines, _ in mean_surfaces for line in lines),
         camber_frames=camber_frames,
+        control_edge_step=control_edge_steps(strip_ctrl_sig_all, [sf.strips for sf in surfaces]),
     )
     if camber_frames is not None:
         lattice.geom_cache["camber_frames"] = camber_frames
