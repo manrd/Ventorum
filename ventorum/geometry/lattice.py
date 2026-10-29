@@ -1015,8 +1015,8 @@ def _surface_mesh_eta(
 CONTROL_EDGE_STRIPS = 2
 
 
-def _control_signature(c: ControlSurface | None, side: float) -> tuple[float, float] | None:
-    """Return the signed deflection [rad] and the hinge fraction [-] of the control of one strip.
+def _control_signature(c: ControlSurface | None, side: float) -> tuple[str, float, float] | None:
+    """Return the name, the hinge fraction [-] and the signed deflection [rad] of the control of one strip.
 
     Parameters
     ----------
@@ -1030,38 +1030,40 @@ def _control_signature(c: ControlSurface | None, side: float) -> tuple[float, fl
 
     Returns
     -------
-    tuple of float or None
-        ``(deflection, hinge_x_c)``, or None when the strip has no control
-        or the deflection is zero.
+    tuple or None
+        ``(name, hinge_x_c, deflection)``, also for a zero deflection, or
+        None when the strip has no control.
     """
-    if c is None or float(c.deflection) == 0.0:
+    if c is None:
         return None
     delta = float(c.deflection)
     if side < 0.0 and not c.symmetric:
         delta = -delta
-    return delta, float(c.hinge_x_c)
+    # 0.0 and -0.0 compare equal, so a zero deflection is the same on both halves.
+    return str(c.name), float(c.hinge_x_c), delta
 
 
-def control_edge_steps(signatures: Sequence[tuple[float, float] | None],
+def control_edge_steps(signatures: Sequence[tuple[str, float, float] | None],
                        surface_strips: Sequence[slice]) -> np.ndarray | None:
     """Return the steps of the spanwise circulation near the side edges of the controls.
 
     A control edge is a strip edge inside one surface where the two strips
-    have different control signatures: a deflected control starts or ends
-    there, or two controls with different deflections or hinges meet (also
-    at the root of a symmetric surface with an antisymmetric control). A
-    jump of the deflection gives a jump of the spanwise slope of the load
-    with a logarithmic shape. When the mesh resolves the edge, this
-    physical feature can give up to three consecutive sign changes of the
-    strip-to-strip step. The saw-tooth rule of the trust score therefore
-    does not count these steps.
+    have different control signatures: a control starts or ends there, or
+    two controls with different names, hinges or deflections meet, also at
+    a zero deflection (also at the root of a symmetric surface with a
+    deflected antisymmetric control). A control at zero deflection still
+    changes the lattice at its span edges (the hinge nodes and the legs of
+    the control strips). A jump of the deflection gives a jump of the
+    spanwise slope of the load with a logarithmic shape. When the mesh
+    resolves the edge, these features can give up to three consecutive
+    sign changes of the strip-to-strip step. The saw-tooth rule of the
+    trust score therefore does not count these steps.
 
     Parameters
     ----------
     signatures : sequence of tuple or None
-        For each strip of the lattice, the signed deflection [rad] and the
-        hinge fraction [-] of its control, or None for no deflected
-        control.
+        For each strip of the lattice, the name, the hinge fraction [-] and
+        the signed deflection [rad] of its control, or None for no control.
     surface_strips : sequence of slice
         The strips of each surface.
 
@@ -1581,9 +1583,9 @@ def build_lattice(
     )}
     strip_xi_all: list[np.ndarray] = []
     strip_ctrl_all: list[ControlSurface | None] = []
-    # Deflection [rad] and hinge fraction [-] of the control of each strip,
-    # with the sign of its side (None: no deflected control).
-    strip_ctrl_sig_all: list[tuple[float, float] | None] = []
+    # Name, hinge fraction [-] and deflection [rad] of the control of each
+    # strip, with the sign of its side (None: no control).
+    strip_ctrl_sig_all: list[tuple[str, float, float] | None] = []
     strip_hinge_eff_all: list[float | None] = []
     # Chordwise mode: the effective hinge fraction of every strip with a
     # deflected geometry (control strips and join strips), and the

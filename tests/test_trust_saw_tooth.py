@@ -407,12 +407,19 @@ def test_control_edge_steps_of_the_lattice(flap_case):
         assert lat.eta[e - 1] * lat.eta[e] > 0.0  # not at the root
 
 
-def test_no_control_edge_without_deflection():
-    """A control with zero deflection and a symmetric flap through the root give no edge there."""
-    res = _solve(_swept_flap([_ctrl("flap", 0.2, 0.6, 0.75, 0.0)]), "vlm", 24, n_chord=4)
-    assert res.details["lattice"].control_edge_step is None
+def test_control_edges_at_zero_deflection_and_at_the_root():
+    """A control at zero deflection has its edges; a symmetric flap and an undeflected aileron through the root do not."""
+    lat = _solve(_swept_flap([_ctrl("flap", 0.2, 0.6, 0.75, 0.0)]), "vlm", 24, n_chord=4).details["lattice"]
+    assert len(_edges(lat)) == 4
     lat = _solve(_swept_flap([_ctrl("flap", 0.0, 0.5, 0.75, 10.0)]), "vlm", 24, n_chord=4).details["lattice"]
     assert len(_edges(lat)) == 2
+    lat = _solve(_swept_flap([_ctrl("ail", 0.0, 0.5, 0.75, 0.0, symmetric=False)]), "vlm", 24,
+                 n_chord=4).details["lattice"]
+    assert len(_edges(lat)) == 2
+
+
+def test_no_control_edge_without_controls():
+    assert _solve(_swept_flap([]), "vlm", 24, n_chord=4).details["lattice"].control_edge_step is None
 
 
 def test_antisymmetric_control_through_the_root_has_a_root_edge():
@@ -500,3 +507,72 @@ def test_batch_and_single_paths_agree_with_an_edge_mask(flap_case):
     stats = spanwise_stats_batch([surf.strips for surf in lat.surfaces], arrays)
     skip = lat.control_edge_step[:-1]
     assert [s["sign_change_run"] for s in stats] == [_sign_change_run(g, skip=skip) for g in G]
+
+
+def _zero_deflection_wing():
+    """Swept (25 deg), tapered (0.5) wing of aspect ratio 8, NACA 2412 mean line, flap and aileron at zero deflection.
+
+    This is the base case of the control derivatives (derivatives about zero
+    deflection). A control at zero deflection still changes the lattice at
+    its span edges (hinge nodes, legs of the control strips).
+    """
+    controls = [_ctrl("flap", 0.15, 0.55, 0.75, 0.0), _ctrl("ail", 0.6, 0.95, 0.75, 0.0, symmetric=False)]
+    w = vt.LiftingSurface(name="w", semi_span=4.0, controls=controls, sweep_le=np.radians(25.0),
+                          sections=[vt.WingSection(0.0, 4.0 / 3.0, shape="2412"),
+                                    vt.WingSection(1.0, 2.0 / 3.0, shape="2412")])
+    ac = vt.Aircraft(surfaces=[w], ref_point=np.array([0.25, 0.0, 0.0]))
+    ac.compute_reference_values()
+    return ac
+
+
+@pytest.mark.slow
+def test_zero_deflection_control_edge_is_not_flagged():
+    """Regression: at 96 x 32 panels and alpha 6 deg the inner flap edge gives a run of 3; it is not flagged.
+
+    The circulation at the inner flap edge (eta 0.15) has a peak, a dip one
+    strip wide and a bump (about 1e-4 of the peak circulation) on each half:
+    three consecutive sign changes of the step. The steps are near a control
+    edge, so the rule does not count them.
+    """
+    res = _solve(_zero_deflection_wing(), "vlm", 96, alpha_deg=6.0, n_chord=32)
+    lat = res.details["lattice"]
+    g = res.spanwise[0].gamma
+    skip = lat.control_edge_step[:-1]
+    assert _sign_change_run(g) == 3
+    assert _sign_change_run(g, skip=skip) < _SAW_TOOTH_RUN
+    assert lattice_spanwise_stats(lat, res.spanwise)["sign_change_run"] < _SAW_TOOTH_RUN
+    assert not _flagged(res)
+    assert res.totals.trust.factors.get("numerical", 0.0) == 0.0
+    # The spanwise results alone (no control-edge mask) give the former warning.
+    t = res.totals
+    old = evaluate_aerodynamic_trust(AR=t.AR, condition=res.condition, spanwise_list=res.spanwise, CL=t.CL,
+                                     CDi=t.CDi, CD_total=t.CD_total, n_panels=96, solver_type="vlm", n_chord=32)
+    assert any(_KEY in w for w in old.warnings)
+
+
+@pytest.mark.gpu
+@pytest.mark.slow
+def test_gpu_zero_deflection_control_edge_is_not_flagged():
+    """On the GPU the same case gets the CPU rating and no saw-tooth warning (the kernel uses the edge mask)."""
+    from ventorum import gpu
+
+    if not gpu.available():
+        pytest.skip(f"The GPU pipelines cannot run: {gpu.unavailable_reason()}")
+    old_dev, old_prec = gpu.get_device(), gpu._precision
+    try:
+        st = vt.SolverSettings(solver_type="vlm", n_panels=96, n_chord=32)
+        runs = {}
+        for device in ("cpu", "gpu"):
+            gpu.set_device(device)
+            gpu.set_precision("float64")
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                runs[device] = vt.VortexLatticeSolver().solve_sweep(
+                    _zero_deflection_wing(), FlightCondition(V_inf=30.0), st, np.radians([5.0, 6.0]))
+        for r, s in zip(runs["cpu"], runs["gpu"]):
+            assert s.details["device"] == "gpu"
+            assert not _flagged(r) and not _flagged(s)
+            assert r.totals.trust.rating == s.totals.trust.rating
+    finally:
+        gpu.set_device(old_dev)
+        gpu.set_precision(old_prec)
