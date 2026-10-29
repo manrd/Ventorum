@@ -246,14 +246,41 @@ def test_hopeless_angle_fails_fast():
     print(f"\n[viscous] step-panel flap: work {r.newton_iterations}, reasons {r.reason}")
 
 
-def test_work_budget_stops_the_angle():
-    """A small work budget ends the chain of attempts of an angle; the reason names the budget."""
+@pytest.mark.parametrize("zero_lift", [0.0, -1e-14], ids=["path-skipped", "path-taken"])
+def test_work_budget_stops_the_angle(monkeypatch, zero_lift):
+    """A small work budget ends the chain of attempts at the angle; the reason names the budget.
+
+    The budget applies to the Newton iterations at the angle itself. The continuation path from the
+    zero-lift angle has its own budgets, and ``newton_iterations`` of the result also counts its work.
+    NACA 0012 is symmetric: its zero-lift angle is 0 deg up to round-off, and the sign of the round-off
+    depends on the numpy and BLAS build. At 2 deg (one CONTINUATION_STEP) the path is skipped when the
+    zero-lift angle is 0 or above, and taken when it is below 0. The test sets each case and reads the
+    work at the angle from the work record of the angle.
+    """
+    from ventorum.panel2d import viscous as vs
+
+    monkeypatch.setattr(vs, "zero_lift_angle", lambda body, kw: zero_lift)
+    work = []
+    counters = vs._AngleWork.counters
+
+    def spy(self):
+        work.append((self.iterations, self.path_iterations))
+        return counters(self)
+
+    monkeypatch.setattr(vs._AngleWork, "counters", spy)
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         r = solve_viscous(_naca("0012", 100), 2.0, 1e6, work_budget=5)
     assert not r.converged
     assert "work budget of 5 Newton iterations" in r.reason
-    assert r.newton_iterations <= 5
+    assert len(work) == 1
+    at_angle, on_path = work[0]
+    assert at_angle <= 5
+    assert r.newton_iterations == at_angle + on_path
+    if zero_lift < 0.0:
+        assert on_path > 0
+    else:
+        assert on_path == 0
 
 
 @pytest.mark.slow
