@@ -834,11 +834,14 @@ def _section_flap_shift(
 ) -> float:
     """Return the zero-lift shift per unit flap angle of a converged 2D strip section.
 
-    The section is the mean chord line of strip *s* with *n_panels* lumped
-    vortices (vortex at the quarter point and control point at the
-    three-quarter point of each panel; thin-airfoil theory, Katz and
-    Plotkin 2001), a panel edge at the hinge and a unit panel angle behind
-    it. With *ground* the vortices have their images in the ground plane.
+    The section is the undeflected chord line of strip *s* (from the mean
+    leading edge along the chord direction, one chord long) with
+    *n_panels* lumped vortices (vortex at the quarter point and control
+    point at the three-quarter point of each panel; thin-airfoil theory,
+    Katz and Plotkin 2001), a panel edge at the hinge and a unit panel
+    angle behind it. The flap deflection does not move the section points,
+    so the ground factor does not depend on the deflection. With *ground*
+    the vortices have their images in the ground plane.
     The panel angle has the sign of the angles ``theta_k`` of
     :func:`_vlm_section_lines` (positive for a trailing-edge-up turn), so in
     free air the shift tends to ``+tau(x_hinge)`` of Glauert as the panel
@@ -865,23 +868,30 @@ def _section_flap_shift(
     Raises
     ------
     ValueError
-        If *ground* is given and the trailing edge of strip *s* is at or
-        below the ground plane (height <= 0).
+        If *ground* is given and the trailing edge of the section or the
+        deflected trailing edge of strip *s* is at or below the ground
+        plane (height <= 0).
     """
     n1 = int(np.clip(round(n_panels * x_hinge), 1, n_panels - 1))
     edges = np.concatenate([np.linspace(0.0, x_hinge, n1 + 1), np.linspace(x_hinge, 1.0, n_panels - n1 + 1)[1:]])
     x0, dx = edges[:-1], np.diff(edges)
     le = 0.5 * (lattice.le_left[s] + lattice.le_right[s])
-    te = 0.5 * (lattice.te_left[s] + lattice.te_right[s])
+    cdir = lattice.chord_dir[s]
+    nrm = lattice.normal[s]
+    # The section is on the undeflected chord line: the chord direction and
+    # the chord of the strip before the flap turn. The flap is only in the
+    # panel angles, as in the lattice section of _vlm_section_lines.
+    te = le + float(lattice.chord[s]) * cdir
     if ground is not None:
-        h_te = float(ground.height(te))
+        # The trailing edge of the section and the deflected trailing edge
+        # of the strip must be above the ground.
+        te_flap = 0.5 * (lattice.te_left[s] + lattice.te_right[s])
+        h_te = min(float(ground.height(te)), float(ground.height(te_flap)))
         if h_te <= 0.0:
             raise ValueError(
                 f"Strip {s} trailing edge is at or below the ground (height {h_te:.4g} m <= 0); "
                 "increase the height or reduce the angle."
             )
-    cdir = lattice.chord_dir[s]
-    nrm = lattice.normal[s]
     q = le + (x0 + 0.25 * dx)[:, None] * (te - le)
     p = le + (x0 + 0.75 * dx)[:, None] * (te - le)
     xq, zq = _section_frame(q, le, cdir, nrm)
