@@ -484,7 +484,11 @@ def test_panel3d_pressure_drag_note_below_the_named_chordwise_count():
     assert coarse.factors["mesh_resolution"] == fine.factors["mesh_resolution"] == 0.0
     warned = _panel_trust(n_chord=tr.PANEL3D_N_CHORD_WARN - 1, CD_nearfield=0.0076)
     assert len(notes(warned)) == 1
-    assert warned.factors["mesh_resolution"] == tr.PANEL3D_PENALTY_RESOLUTION_WARN
+    # The calibrated error model rates the chordwise resolution (the old
+    # chordwise penalty is replaced): the coarser mesh has the larger
+    # error-model factor, and the note still adds no penalty.
+    assert warned.factors["mesh_resolution"] == 0.0
+    assert warned.factors["error_model"] > fine.factors["error_model"]
     # The note acts also without a near-field drag value, and not without n_chord.
     assert len(notes(_panel_trust(n_chord=8))) == 1
     assert notes(_panel_trust(CD_nearfield=0.0076)) == []
