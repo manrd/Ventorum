@@ -275,3 +275,89 @@ def test_coupling_without_gaps_has_no_gap_note(monkeypatch):
     res = solve_coupled(wing, cond, SolverSettings(n_panels=12, n_chord=4), Ventorum2DPolarSource(cache=False),
                         model="vlm")
     assert not [n for n in res.details["notes"] if "strips read their section polar inside" in n]
+
+
+# ---------------------------------------------------------------------------------------------
+# Gap mask of derived polars: table lookup, blend, flap deflection
+# ---------------------------------------------------------------------------------------------
+
+def _table(cl_rows):
+    """Return a free-air PolarTable at Re 1e6 and 2e6 (flap 0 deg) with the given lift rows (NaN = dropped)."""
+    alpha = np.arange(-2.0, 4.1, 1.0)
+    cl = np.asarray(cl_rows, dtype=float).reshape(2, 1, alpha.size)
+    cd = np.where(np.isfinite(cl), 0.01, np.nan)
+    return PolarTable(Re=np.array([1e6, 2e6]), flap_deg=np.array([0.0]), alpha_deg=alpha, Cl=cl, Cd=cd,
+                      Cm=np.where(np.isfinite(cl), 0.0, np.nan), source_info={"source": "test"})
+
+
+def test_table_lookup_marks_the_intervals_it_bridges():
+    """PolarTable.at: a NaN point between kept points marks its interval; end drops mark none."""
+    full = 0.1 * np.arange(7.0)
+    row = full.copy()
+    row[3] = np.nan  # 1 deg dropped at Re 1e6
+    table = _table([row, full])
+    polar = table.at(Re=1e6, flap_deg=0.0)
+    np.testing.assert_allclose(np.degrees(polar.alpha), [-2.0, -1.0, 0.0, 2.0, 3.0, 4.0])
+    np.testing.assert_array_equal(polar.gap_mask, [False, False, True, False, False])
+    assert polar.in_gap(np.radians(1.0)) and not polar.in_gap(np.radians(2.5))
+    with pytest.warns(RuntimeWarning, match="bridges across a failed angle"):
+        polar.Cl(np.radians(1.0))
+    # Between the Reynolds rows both rows are used: the NaN of the lower row drops the point.
+    mid = table.at(Re=1.5e6, flap_deg=0.0)
+    np.testing.assert_array_equal(mid.gap_mask, [False, False, True, False, False])
+    # At the upper row only the full row is used: no point is dropped and no interval is marked.
+    upper = table.at(Re=2e6, flap_deg=0.0)
+    assert upper.alpha.size == 7 and upper.gap_mask is None and not upper.has_gaps
+    # Dropped points at the ends of the table bridge no interval.
+    ends = full.copy()
+    ends[[0, 6]] = np.nan
+    edge = _table([ends, full]).at(Re=1e6, flap_deg=0.0)
+    assert edge.alpha.size == 5 and edge.gap_mask is None
+    # Two neighbouring dropped points make one bridged interval.
+    two = full.copy()
+    two[[2, 3]] = np.nan
+    np.testing.assert_array_equal(_table([two, full]).at(Re=1e6, flap_deg=0.0).gap_mask, [False, True, False, False])
+
+
+def _gap_polar(name, alpha_deg, gap_after_deg):
+    """Return a polar whose interval that starts at ``gap_after_deg`` is bridged."""
+    a = np.radians(np.asarray(alpha_deg, dtype=float))
+    mask = np.isclose(np.asarray(alpha_deg[:-1], dtype=float), gap_after_deg)
+    return TabulatedAirfoil(name=name, alpha=a, Cl_data=2.0 * np.pi * a, Cd_data=0.01 + 0.0 * a,
+                            Cm_data=0.0 * a, Re=1e6, gap_mask=mask)
+
+
+def test_blend_marks_an_interval_when_a_used_component_interval_is_bridged():
+    """blend_tabulated: a blend interval is bridged when a polar with a weight above 0 bridges it."""
+    from ventorum.aero.polars import blend_tabulated
+
+    one = _gap_polar("one", np.array([-2.0, 0.0, 2.0, 4.0]), 0.0)  # bridged [0, 2] deg
+    two = _gap_polar("two", np.array([-2.0, -1.0, 1.0, 3.0, 4.0]), 3.0)  # bridged [3, 4] deg
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)
+        half = blend_tabulated(one, two, 0.5)
+        only_one = blend_tabulated(one, two, 0.0)
+        only_two = blend_tabulated(one, two, 1.0)
+    np.testing.assert_allclose(np.degrees(half.alpha), [-2.0, -1.0, 0.0, 1.0, 2.0, 3.0, 4.0])
+    np.testing.assert_array_equal(half.gap_mask, [False, False, True, True, False, True])
+    np.testing.assert_array_equal(only_one.gap_mask, [False, False, True, True, False, False])
+    np.testing.assert_array_equal(only_two.gap_mask, [False, False, False, False, False, True])
+    clean = TabulatedAirfoil(name="clean", alpha=one.alpha, Cl_data=one.Cl_data, Cd_data=one.Cd_data,
+                             Cm_data=one.Cm_data, Re=1e6)
+    assert blend_tabulated(clean, clean, 0.5).gap_mask is None
+    assert blend_tabulated(one, clean, 1.0).gap_mask is None
+
+
+def test_deflected_polar_keeps_the_gap_mask():
+    """deflected_airfoil: the shifted table keeps the mask, so the bridged interval moves with the angles."""
+    from ventorum.geometry.controls import deflected_airfoil, flap_effectiveness
+
+    base = _gap_polar("base", np.array([-2.0, 0.0, 2.0, 4.0]), 0.0)
+    delta = np.radians(5.0)
+    flapped = deflected_airfoil(base, delta, 0.75)
+    np.testing.assert_array_equal(flapped.gap_mask, base.gap_mask)
+    assert flapped.gap_mask is not base.gap_mask
+    shift = flap_effectiveness(0.75) * delta
+    assert flapped.in_gap(np.radians(1.0) - shift) and not flapped.in_gap(np.radians(3.0) - shift)
+    clean = TabulatedAirfoil(name="clean", alpha=base.alpha, Cl_data=base.Cl_data, Cd_data=base.Cd_data)
+    assert deflected_airfoil(clean, delta, 0.75).gap_mask is None

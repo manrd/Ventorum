@@ -195,7 +195,10 @@ def deflected_airfoil(airfoil: AirfoilType, delta: float, hinge_x_c: float) -> A
     deflected section has the same Cl and its Cm changes by
     ``dCm_ddelta * delta`` only. The angle range of the table also moves by
     ``-tau * delta``. A table without Cm data gets
-    ``Cm_new = dCm_ddelta * delta`` at every angle.
+    ``Cm_new = dCm_ddelta * delta`` at every angle. The shift keeps the
+    order of the angles, so the new table keeps the gap mask
+    (:attr:`ventorum.core.datatypes.TabulatedAirfoil.gap_mask`) of the
+    base table.
 
     For a ``LinearAirfoil``, Cm and Cd do not change with the angle, so the
     same rule gives ``alpha_L0_new = alpha_L0 - tau * delta`` and
@@ -254,6 +257,7 @@ def deflected_airfoil(airfoil: AirfoilType, delta: float, hinge_x_c: float) -> A
             Cd_data=cd,
             Cm_data=cm_new,
             Re=airfoil.Re,
+            gap_mask=None if airfoil.gap_mask is None else np.array(airfoil.gap_mask, dtype=bool),
         )
     raise TypeError(f"Unsupported airfoil type: {type(airfoil)}")
 

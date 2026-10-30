@@ -203,7 +203,12 @@ class PolarTable:
         Ground influence scales roughly with 1/h. The interpolation in
         height is therefore linear in 1/h. An alpha point is dropped
         when any table value used for it is NaN. The dropped count is
-        stored in :attr:`last_dropped` and in the polar name.
+        stored in :attr:`last_dropped` and in the polar name. The polar
+        bridges a dropped point between two kept points by its
+        interpolation; its gap mask
+        (:attr:`ventorum.core.datatypes.TabulatedAirfoil.gap_mask`) marks
+        each such interval. Dropped points below the first or above the
+        last kept point mark no interval.
 
         Parameters
         ----------
@@ -223,7 +228,9 @@ class PolarTable:
             holds the query Reynolds number [-]. When the table has
             ``Cl_circulation``, the polar has ``Cl_circulation_data``
             with the same interpolation, and an angle with a NaN
-            circulation lift is also dropped.
+            circulation lift is also dropped. Its ``gap_mask`` marks the
+            intervals that bridge a dropped point, or is None when no
+            interval does.
 
         Raises
         ------
@@ -341,6 +348,10 @@ class PolarTable:
             f"table(Re={query_re:.6g}, flap={query_flap:.6g} deg{name_suffix}, "
             f"{dropped} of {self.alpha_deg.size} alpha dropped)"
         )
+        # An interval between two kept angles that holds a dropped (NaN)
+        # angle bridges a gap: its values come from the interpolation of the
+        # polar across the gap, not from a solution of the source.
+        bridged = np.diff(keep) > 1
         return TabulatedAirfoil(
             name=name,
             alpha=np.radians(self.alpha_deg[keep]),
@@ -351,6 +362,7 @@ class PolarTable:
             Cl_circulation_data=(
                 None if cl_circ is None else np.asarray(cl_circ[keep], dtype=float)
             ),
+            gap_mask=bridged if bool(np.any(bridged)) else None,
         )
 
     def to_npz(self, path: str | Path) -> Path:
