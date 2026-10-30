@@ -223,6 +223,13 @@ PANEL3D_STEEP_ROOT_UNSCALED_WARNING = (
     "singular, so the loads are not reliable."
 )
 
+#: Cap penalty of a steep root dihedral without the root thickness scaling
+#: [-] (factor ``mesh_adequacy``, with
+#: :data:`PANEL3D_STEEP_ROOT_UNSCALED_WARNING`). The root pressure
+#: coefficient is singular there. The value is a choice (a cap rule, not
+#: calibrated): alone it gives the rating LOW.
+PANEL3D_PENALTY_STEEP_ROOT_UNSCALED = 0.40
+
 #: Trust note of a steep root dihedral with the root thickness scaling [-].
 #: The limit is ``ventorum.panel3d.mesh.STEEP_ROOT_DIHEDRAL_DEG``.
 PANEL3D_STEEP_ROOT_CONVERGENCE_NOTE = (
@@ -917,10 +924,12 @@ def panel3d_mesh_checks(
       watertight, panels that are not convex (a folded strip), and a surface
       that intersects itself or its mirror image (``n_self_intersections``,
       same penalty as the folded panels). The penalties add. A steep root
-      dihedral (``steep_root_dihedral``) gives a warning without a
-      penalty: without the root thickness scaling
-      (``scale_root_thickness`` False) the root pressure coefficient is
-      singular; with it the lift needs a spanwise convergence study.
+      dihedral (``steep_root_dihedral``, 60 deg or more) without the root
+      thickness scaling (``scale_root_thickness`` False) gives a warning
+      and the penalty :data:`PANEL3D_PENALTY_STEEP_ROOT_UNSCALED`: the
+      root pressure coefficient is singular. With the scaling it gives a
+      note without a penalty: the lift needs a spanwise convergence
+      study.
     * ``mesh_resolution``: the discretization-error indicators. The relative
       difference of the near-field pressure drag and the far-field Trefftz
       induced drag, and the chordwise panel count when it is given. Each
@@ -1021,6 +1030,7 @@ def panel3d_mesh_checks(
                     "Solve with at least two spanwise panel counts and compare the lift."
                 )
             else:
+                mesh_pen += PANEL3D_PENALTY_STEEP_ROOT_UNSCALED
                 warnings.append(PANEL3D_STEEP_ROOT_UNSCALED_WARNING)
                 recommendations.append(
                     "Use the root thickness scaling (panel_scale_root_thickness=True, the default)."

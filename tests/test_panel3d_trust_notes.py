@@ -16,6 +16,7 @@ import ventorum as vt
 from ventorum.core.datatypes import FlightCondition, LiftingSurface, SolverSettings, WingSection
 from ventorum.core.trust import (
     PANEL3D_FAR_FIELD_FREE_AIR_NOTE,
+    PANEL3D_PENALTY_STEEP_ROOT_UNSCALED,
     PANEL3D_FAR_FIELD_GROUND_NOTE,
     PANEL3D_OUTER_STRIP_GROUND_NOTE,
     PANEL3D_ROOT_SCALE_WARNING,
@@ -327,6 +328,8 @@ def test_steep_unscaled_root_trust_warning():
     assert PANEL3D_STEEP_ROOT_UNSCALED_WARNING in res.totals.trust.warnings
     assert PANEL3D_STEEP_ROOT_CONVERGENCE_NOTE not in res.totals.trust.warnings
     assert res.details["mesh_stats"]["steep_root_dihedral"] is True
+    assert res.totals.trust.factors["mesh_adequacy"] >= PANEL3D_PENALTY_STEEP_ROOT_UNSCALED
+    assert res.totals.trust.score <= 1.0 - PANEL3D_PENALTY_STEEP_ROOT_UNSCALED + 1e-12
 
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
@@ -353,7 +356,7 @@ def test_steep_scaled_root_convergence_note():
 
 
 def test_steep_root_mesh_checks_direct():
-    """panel3d_mesh_checks selects the note or the warning from the scaling flag; neither adds a penalty."""
+    """panel3d_mesh_checks selects the note or the warning from the scaling flag; only the warning has a penalty."""
     pen, warns, recs = panel3d_mesh_checks({"steep_root_dihedral": True, "scale_root_thickness": True})
     assert PANEL3D_STEEP_ROOT_CONVERGENCE_NOTE in warns
     assert PANEL3D_STEEP_ROOT_UNSCALED_WARNING not in warns
@@ -364,8 +367,10 @@ def test_steep_root_mesh_checks_direct():
     assert PANEL3D_STEEP_ROOT_UNSCALED_WARNING in warns
     assert PANEL3D_STEEP_ROOT_CONVERGENCE_NOTE not in warns
     assert any("panel_scale_root_thickness=True" in r for r in recs)
-    assert pen["mesh_adequacy"] == 0.0
+    assert PANEL3D_PENALTY_STEEP_ROOT_UNSCALED == 0.40
+    assert pen["mesh_adequacy"] == PANEL3D_PENALTY_STEEP_ROOT_UNSCALED
 
-    _, warns, _ = panel3d_mesh_checks({"steep_root_dihedral": False, "scale_root_thickness": False})
+    pen, warns, _ = panel3d_mesh_checks({"steep_root_dihedral": False, "scale_root_thickness": False})
+    assert pen["mesh_adequacy"] == 0.0
     assert PANEL3D_STEEP_ROOT_UNSCALED_WARNING not in warns
     assert PANEL3D_STEEP_ROOT_CONVERGENCE_NOTE not in warns
