@@ -371,6 +371,24 @@ def test_yaw_rate_derivatives_agree_with_the_vortex_lattice():
         assert p3 == pytest.approx(vlm, rel=YAW_TOLERANCE), f"{name}: 3DP {p3:.5f}, VLM {vlm:.5f}"
 
 
+def test_roll_rate_gives_no_side_force_on_a_planar_wing():
+    """A flat wing with a symmetric section gets CY = 0 (round-off) from a roll rate.
+
+    The flat tip cap has one panel across the thickness, so its surface
+    gradient is chordwise only and the cap carries no spanwise edge
+    suction: CY_p is 0 by construction of the cap (theory manual, Body
+    rates, Envelope). The vortex lattice gives a positive CY_p on this
+    wing from its free-edge legs.
+    """
+    secs = [WingSection(0.0, 1.0, x_le=-0.25, shape="0012"),
+            WingSection(1.0, 1.0, x_le=-0.25, shape="0012")]
+    aircraft = Aircraft(surfaces=[LiftingSurface(semi_span=4.0, sections=secs)])
+    res = vt.analyze(aircraft, FlightCondition(V_inf=20.0, alpha=np.radians(4.0), p=0.5),
+                     SolverSettings(solver_type="panel3d", n_panels=12, n_chord=12))
+    assert abs(res.totals.Cl) > 0.01            # the roll rate acts on the wing
+    assert abs(res.totals.CY) < 1e-12
+
+
 # ---------------------------------------------------------------------------
 # 5. GPU paths
 # ---------------------------------------------------------------------------

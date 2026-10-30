@@ -47,6 +47,7 @@ from ventorum.core.trust import (
     mean_line_strip_jump,
     polar_limits,
     polar_stats,
+    tip_edge_suction_note,
     trailing_edge_clearance,
 )
 from ventorum.geometry import lattice_cache
@@ -432,6 +433,8 @@ class LatticeSolver(BaseSolver):
                     "stream; with this rotation the real wake is a helix, so the result is less reliable."
                 )
             notes.append(body_rate_note())
+            if self.collocation == "vlm" and (float(condition.p) != 0.0 or float(condition.r) != 0.0):
+                notes.append(tip_edge_suction_note())
         wd = wake_direction(condition, ground, getattr(settings, "wake_alignment", "freestream"))
         return ground, h_min, notes, wd
 
@@ -513,6 +516,7 @@ class LatticeSolver(BaseSolver):
         notes += [m for m in conv_warnings + conv_notes if m not in notes]
         quiet = set(conv_notes)
         quiet.add(body_rate_note())
+        quiet.add(tip_edge_suction_note())
         h_over_c = (h_min / c_ref) if (h_min is not None and c_ref) else None
         totals = loads.totals
         # Tabulated section polars: compare the section results with the

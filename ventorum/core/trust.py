@@ -1391,6 +1391,32 @@ def body_rate_note() -> str:
     )
 
 
+def tip_edge_suction_note() -> str:
+    """Return the note of the tip edge suction in the lateral rate derivatives of the vortex lattice.
+
+    In attached potential flow a flat rectangular wing gets its roll-rate
+    side force ``CY_p`` only from the suction at the tip side edges. The
+    edge-singularity method of J. E. Lamar (NASA TR R-428, 1974) gives this
+    force. The free-edge leg rule of the vortex lattice gives the correct
+    sign, but about 30 % less, and its value depends on the spanwise
+    spacing. Measurement on an unswept wing (M. J. Queijo and T. A. Toll,
+    NACA TN 1581, 1948) gives ``CY_p`` of about 0: real square tips lose
+    the edge suction. The note adds no penalty.
+
+    Returns
+    -------
+    str
+        The note.
+    """
+    return (
+        "Tip edge suction in the lateral rate derivatives: CY_p and the other in-plane edge-force terms of a "
+        "roll or yaw rate include the attached-flow suction at the tip side edges. The free-edge leg rule of "
+        "the vortex lattice gives about 30 % less than the edge-singularity method (Lamar, NASA TR R-428, "
+        "1974), and its value depends on the spanwise spacing. Real square tips usually lose this suction: "
+        "measurement on an unswept wing gave CY_p of about 0 (Queijo and Toll, NACA TN 1581, 1948)."
+    )
+
+
 def fourier_convergence_notes(surface: LiftingSurface | None, AR: float, n_terms: int) -> list[str]:
     """Return the notes and warnings of the Fourier lifting line.
 

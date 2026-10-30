@@ -456,6 +456,34 @@ def test_non_finite_rate_is_refused():
         vt.analyze(_rect(6.0), vt.FlightCondition(V_inf=20.0, r=float("nan")), _settings("vlm", 8))
 
 
+@pytest.mark.parametrize("solver", ["vlm", "linear"])
+def test_tip_edge_suction_note_of_the_vortex_lattice(solver):
+    """The vortex-lattice rate derivatives carry the tip edge suction note; the lifting line does not."""
+    res = vt.rate_derivatives(_rect(6.0), vt.FlightCondition(V_inf=20.0, alpha=np.radians(3.0)), _settings(solver, 8))
+    has = any(n.startswith("Tip edge suction in the lateral rate derivatives") for n in res.notes)
+    assert has == (solver == "vlm")
+
+
+def test_vortex_lattice_roll_side_force_depends_on_the_spanwise_spacing():
+    """CY_p of a flat rectangular wing (AR 8, CL 0.32) comes from the tip edge suction of the leg rule.
+
+    The values are those of the theory manual (Body rates, Envelope): the
+    leg rule gives a positive CY_p, and the uniform spanwise spacing gives
+    about 45 % more than the cosine spacing on the same panel counts.
+    """
+    ac = _rect(8.0)
+    out = {}
+    for spacing in ("cosine", "uniform"):
+        st = vt.SolverSettings(solver_type="vlm", n_panels=40, n_chord=8, spacing=spacing)
+        base = vt.analyze(ac, vt.FlightCondition(V_inf=20.0, alpha=np.radians(4.0)), st)
+        alpha = np.radians(4.0) * 0.32 / base.totals.CL      # linear: this angle gives CL 0.32
+        rd = vt.rate_derivatives(ac, vt.FlightCondition(V_inf=20.0, alpha=alpha), st, axes="stability")
+        assert rd.base.totals.CL == pytest.approx(0.32, abs=1e-4)
+        out[spacing] = rd.derivatives["CY_p"]
+    assert round(out["cosine"], 3) == 0.041
+    assert round(out["uniform"], 3) == 0.060
+
+
 def test_condition_clone_keeps_the_rates():
     fc = vt.FlightCondition(p=0.1, q=-0.2, r=0.3)
     c = fc.clone()

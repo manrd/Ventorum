@@ -191,6 +191,8 @@ $$\Delta \mathbf{r}_{ij, t} \cdot \nabla_s \mu_i \approx \mu_j - \mu_i, \qquad \
 
 The minimum-norm solution keeps the gradient in the panel plane; displacement directions below $10^{-5}$ of the largest are treated as round-off (a row of collinear centroids gives the gradient along the row only). A flat tip cap panel (kind "tip") always keeps only the leading singular direction of its stencil, with no threshold, so its gradient is along its row of neighbours. The cut edges leave a cap panel with its two chordwise cap neighbours only. On a symmetric section their centroids lie on the chord line, and the threshold already gives this result. On a cambered section the centroids follow the camber line, and the second singular value is $10^{-4}$ to $10^{-1}$ of the first. A fit in that weak direction multiplies the round-off of the doublet values, and it gave cap pressures of order $10^3$. A fixed threshold cannot remove it: the stencils of the trailing-edge surface panels have ratios down to about $7 \times 10^{-3}$ on a fine cosine spacing.
 
+A consequence for the body rates: the cap gradient is chordwise only, so the flat tip cap carries no spanwise edge suction. The roll-rate side force $C_{Y_p}$ of a planar wing is therefore 0 by construction of the cap model. In attached potential flow the tip side-edge suction gives a positive $C_{Y_p}$ (the edge-singularity method of J. E. Lamar, NASA TR R-428, 1974), but real square tips usually lose it: measurement on an unswept wing gives $C_{Y_p}$ of about 0 (M. J. Queijo and T. A. Toll, NACA TN 1581, 1948). See [Body rates](rotation_rates.md), section *Envelope*.
+
 The total surface velocity on panel $i$ is:
 
 $$\mathbf{V}_{\text{surf}, i} = \mathbf{V}_{\text{onset}, t}(\mathbf{c}_i) - \nabla_s \mu_i$$
