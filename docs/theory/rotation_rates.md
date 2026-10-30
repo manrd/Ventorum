@@ -63,6 +63,8 @@ $$
 
 For a pitch rate, k = q, and the section term is -pi/4 per unit q c / (2 V). The code adds this term to the section moment of each strip, with k = -n . (Omega x e_c) (e_c the chord direction, n the section normal).
 
+This term is the two-dimensional value at every aspect ratio. A vortex lattice with two or more chordwise panels has no section term: its chordwise load gives the three-dimensional value, which is smaller in magnitude by an amount that falls with the aspect ratio, and which it approaches slowly from below in magnitude as the chordwise panel count grows. Thus C_m_q has a step between one and two chordwise panels; `test_vlm_pitch_damping_steps_from_section_term_to_chordwise_load` gives the measured values. Use at least 8 chordwise panels for C_m_q. This is a recommendation from that measurement (a straight wing of aspect ratio 8): 8 is the smallest chordwise panel count of the test that is within 2 % of the value extrapolated from 4, 8 and 16 panels; 4 panels are not.
+
 ### Profile drag and section moment
 
 With rates, the profile drag of a strip acts along the local onset at its quarter chord, with the local dynamic pressure, and the section moment uses the same onset. The section lift coefficient that the results report stays 2 Gamma / (V c).
@@ -97,6 +99,8 @@ $$
 
 For large A the first three tend to the strip-theory values -a_0/8, C_L/4 and -C_L/8 of the elliptic wing (Etkin and Reid 1996 give the strip-theory method). C_n_r here has no profile-drag part.
 
+The linear lifting line differs from these closed forms by a term of order alpha^2 (|C_l_p| smaller, |C_n_p| larger). The cause is the linearisation of Phillips and Snyder (2000): the magnitude of the Kutta-Joukowski force omits the induced velocity, and the section angle uses its small-angle form. The nonlinear lifting line with linear sections keeps both and agrees with the closed forms more closely; `test_linear_lifting_line_roll_derivatives_differ_from_closed_forms_by_order_alpha_squared` gives the measured values.
+
 ## Assumptions
 
 - Quasi-steady flow: no wake memory of the motion, no added-mass terms.
@@ -109,6 +113,7 @@ For large A the first three tend to the strip-theory values -a_0/8, C_L/4 and -C
 - The Fourier solver refuses a rate that is not zero (`ValidityError`).
 - The GPU pipelines support body rates for the vortex lattice and the numerical lifting lines (linear and nonlinear), in free air and in ground effect. Solves run on the selected device, and the result states the device. One fallback remains: a nonlinear batch with continuation that mixes symmetric and non-symmetric cases (for example a pitch rate in some cases and a roll rate in others) runs on the CPU, because the continuation needs the cases in order. `rate_derivatives` solves without continuation and runs on the GPU.
 - In ground effect the rate derivatives do not include the coupling with the height change (see [Ground effect](ground_effect.md)).
+- **Mesh sensitivity of the lateral values.** With body rates, the near-field lateral values (CY, Cl, Cn) of the lattice solvers are sensitive to the spanwise mesh. In a mesh study of a swept wing with a roll rate, Cn changed by about 0.8 % at each doubling of the spanwise panel count, and the cosine and the uniform spacing gave values 5 to 7 % apart. Each lattice result with a body rate gets a trust note (no penalty). Compare two spanwise panel counts or spacings before you use the lateral rate derivatives.
 
 ## Implementation
 

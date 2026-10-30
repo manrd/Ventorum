@@ -209,8 +209,9 @@ def rate_derivatives(
     Raises
     ------
     ValueError
-        For a step outside (0, 0.1], an unknown axis system, or the Fourier
-        solver.
+        For a step outside (0, 0.1], an unknown axis system, the Fourier
+        solver, or the 3D panel solver (give its body rates in the
+        flight condition of ``analyze`` instead).
 
     Notes
     -----
@@ -245,6 +246,12 @@ def rate_derivatives(
     canonical = resolve_solver_type(settings.solver_type)
     if canonical == "fourier":
         raise ValueError("The Fourier solver has no body rates. Use solver_type 'vlm', 'linear' or 'nonlinear'.")
+    if canonical not in ("vlm", "linear", "nonlinear"):
+        raise ValueError(
+            f"rate_derivatives supports solver_type 'vlm', 'linear' or 'nonlinear', got {settings.solver_type!r}. "
+            "For the 3D panel method, give the body rates p, q, r in the FlightCondition of analyze and take "
+            "the differences."
+        )
     step = float(step)
     if not (math.isfinite(step) and 0.0 < step <= 0.1):
         raise ValueError(f"step must satisfy 0 < step <= 0.1, got {step}.")

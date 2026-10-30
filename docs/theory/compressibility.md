@@ -8,7 +8,7 @@ At subsonic speeds, air is compressible. The vortex-lattice method models compre
 
 ### Coordinate transformation
 
-Let $M$ be the free-stream Mach number ($0 \le M < 1$). The Prandtl-Glauert factor is
+Let $M$ be the free-stream Mach number ($0 \le M < 0.7$, see [Envelope](#envelope)). The Prandtl-Glauert factor is
 
 ```{math}
 \beta = \sqrt{1 - M^2} .
@@ -83,9 +83,29 @@ C_{L\alpha}(M) = \frac{2\pi\, \text{AR}}{2 + \sqrt{\text{AR}^2\beta^2 (1 + \tan^
 
 The vortex-lattice solver reproduces this scaling.
 
+### Section quantities
+
+The Prandtl-Glauert rule scales every section pressure coefficient by $1/\beta$ (Glauert 1928; Anderson, *Fundamentals of Aerodynamics*, chapter on subsonic compressible flow over airfoils). The solve on the stretched lattice gives this scaling to the lift and to the camber lift. Two section quantities are added after the solve, so they get the scaling there:
+
+- The constant section moment $C_{m0}$ of a linear airfoil:
+
+  ```{math}
+  C_{m0}(M) = \frac{C_{m0}(0)}{\beta} .
+  ```
+
+  A strip on a camber-line lattice gets its camber moment from the loads of the mean surface, which the stretched lattice already scales. A tabulated airfoil keeps its table moment.
+
+- The effective section angle, found from the strip lift with the compressible section slope $a_0/\beta$:
+
+  ```{math}
+  \alpha_\text{eff} = \alpha_{L0} + \frac{C_l\,\beta}{a_0} .
+  ```
+
+  The induced angle $\alpha_i = \alpha_\text{geom} - \alpha_\text{eff}$ and the angle of the lookup in a tabulated polar ($C_d$ and $C_m$) use this angle.
+
 ## Assumptions
 
-- Subsonic, steady, inviscid flow ($M < 1$).
+- Subsonic, steady, inviscid flow ($M < 0.7$, see [Envelope](#envelope)).
 - Small perturbations: thin airfoils, small angles of attack and sideslip.
 - Linearized potential flow equation: $(1 - M^2) \phi_{xx} + \phi_{yy} + \phi_{zz} = 0$.
 - Attached flow without boundary-layer separation or shock waves.
@@ -93,8 +113,10 @@ The vortex-lattice solver reproduces this scaling.
 
 ## Envelope
 
-- Valid for Mach numbers $0 \le M < 1$.
-- At $M > 0.7$, local flow can become supersonic. Shocks and wave drag can appear. The trust score has two thresholds. Above $M = 0.3$ (`ventorum.core.constants.MACH_LIMIT_INCOMPRESSIBLE`) the case is outside the validated envelope: the trust score gives a warning and a penalty that grows with the Mach number, which lowers the confidence rating. Above $M = 0.7$, with the correction applied, the trust score adds a second warning: linear theory loses validity near the critical Mach number.
+- Scope: incompressible flow, Mach number below 0.3. With `FlightCondition.mach` from 0.3 to below 0.7, the vortex lattice applies the Prandtl-Glauert correction in the form of Goethert; the result is an estimate with the trust rating UNRELIABLE. A Mach number of 0.7 or more is refused with `ValidityError` (`ventorum.core.constants.MACH_LIMIT_REFUSED`).
+- Above $M = 0.3$ (`ventorum.core.constants.MACH_LIMIT_INCOMPRESSIBLE`) the trust score gives a warning and a penalty that grows with the Mach number. With $M \ge 0.7$ the local flow can become supersonic near the critical Mach number; shocks and wave drag can appear, and the linear rule has no meaning there.
+- A speed above $M = 0.3$ with `mach` None or 0 gets the same warning and penalty, with $M = V_\infty / a$ (ISA speed of sound at the air density); no correction is applied.
+- A stated Mach number that differs from $V_\infty / a$ by more than 0.05 (`ventorum.core.constants.MACH_SPEED_TOLERANCE`) gives a `RuntimeWarning` and a trust note. Here $a$ is the ISA speed of sound at the flight-condition density (340.29 m/s at sea level), the same value as in the envelope check above, so the two checks cannot disagree. The correction uses the stated Mach number.
 - The VLM solver (`solver_type="vlm"`) supports the compressibility correction on the CPU and GPU paths.
 - The lifting-line solvers (linear, nonlinear, and Fourier) refuse `mach > 0` and raise `ValidityError`.
 - Ground effect refuses `mach > 0` and raises `ValidityError`.
@@ -105,7 +127,10 @@ The vortex-lattice solver reproduces this scaling.
 
 ## Implementation
 
-- `ventorum.core.datatypes.FlightCondition`: stores the optional `mach` field ($0 \le M < 1$).
+- `ventorum.core.datatypes.FlightCondition`: stores the optional `mach` field (the constructor accepts $0 \le M < 1$).
+- `ventorum.core.trust.check_mach_scope`: refuses $M \ge 0.7$; `ventorum.utils.validation.validate_flight_condition` and the lattice solvers call it.
+- `ventorum.core.trust.mach_speed_mismatch`: the comparison of the stated Mach number with the speed.
+- `ventorum.aero.loads.compute_loads_batch` and the GPU loads kernels: the section slope $a_0/\beta$ and $C_{m0}/\beta$.
 - `ventorum.core.trust`: applies Mach number penalties and envelope warnings.
 - `ventorum.solvers.core.assemble_vlm`: applies the coordinate stretch and normal vector scaling in free-stream axes.
 - `ventorum.aero.loads._near_field_velocity`: computes transformed induced velocities and scales the streamwise component.
@@ -124,7 +149,8 @@ The vortex-lattice solver reproduces this scaling.
 - Finite wing: aspect ratio 8 wing scales within 3% of the Helmbold-Diederich formula up to $M = 0.6$.
 - Gradients: `check_gradients` at Mach 0.3 and 0.6 for every supported input
   and for `"mach"` (wing and tail with sideslip and control, float64, 1e-6).
-- Tests in `tests/test_compressibility.py` verify all rules and error conditions.
+- Section quantities: $C_{m0}$ of a linear airfoil at $M = 0.5$ equals the $M = 0$ value divided by $\beta$; the effective angle uses $a_0/\beta$ (`tests/test_compressibility_consistency.py`, with the GPU parity of both).
+- Tests in `tests/test_compressibility.py` and `tests/test_compressibility_consistency.py` verify all rules and error conditions.
 
 ## References
 

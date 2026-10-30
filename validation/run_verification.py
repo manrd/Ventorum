@@ -32,6 +32,7 @@ from ventorum.geometry.lattice import build_lattice
 from ventorum.reference import (
     REFERENCES,
     circular_wing_cl_alpha,
+    elliptic_ground_drag_ratio,
     elliptic_wing_cl_alpha,
     glauert_monoplane,
     helmbold_cl_alpha,
@@ -307,6 +308,25 @@ def case_ground() -> str:
             ll = "refused" if np.isnan(out["linear"]) else pct(out["linear"])
             rows_ll.append([f"{AR:g}", f"{hc:g}", pct(out["vlm"]), ll])
 
+    # 5. Induced drag against the image Trefftz-plane theory of an elliptic loading.
+    rows_ge = []
+    for AR in (10.0, 6.0):
+        c0 = 4.0 / (np.pi * AR)
+        secs = wing_sections_elliptic(c0)
+        for sec in secs:
+            sec.airfoil = vt.LinearAirfoil(alpha_L0=np.radians(-1.0))
+        ell = vt.Aircraft(surfaces=[vt.LiftingSurface(semi_span=0.5, sections=secs)])
+        ell.compute_reference_values()
+        st = vt.SolverSettings(solver_type="vlm", n_panels=40, n_chord=6)
+        fr = vt.analyze(ell, settings=st, alpha_deg=0.0).totals
+        k_free = fr.CDi / fr.CL ** 2
+        for hb in (0.5, 0.3, 0.2, 0.1, 0.05):
+            g = vt.analyze_ground_effect(ell, h=hb, alpha_deg=0.0, height_ref="qc", settings=st,
+                                         compute_strike_limit=False)
+            ratio = g.CDi / g.CL ** 2 / k_free
+            ref = elliptic_ground_drag_ratio(hb)
+            rows_ge.append([f"{AR:g}", f"{hb:g}", f"{ratio:.5f}", f"{ref:.5f}", pct(ratio / ref - 1.0)])
+
     s = ["## V7. Ground effect (image method)", "",
          f"* Velocity normal to a ground plane tilted by alpha = 5 deg and banked by 3 deg, at 200 points on "
          f"the plane, random circulation: largest |v.n| / |v| = {resid:.1e}.",
@@ -317,6 +337,12 @@ def case_ground() -> str:
          "Lift increment over free air, lifting line against VLM (rectangular wings, alpha 4 deg). The "
          "lifting line is refused below h_min/c = 1:", "",
          table(["AR", "h_min/c", "VLM", "lifting line"], rows_ll), "",
+         "Induced-drag ratio k_GE / k_free (k = CDi / CL^2) of planar elliptic wings parallel to the ground "
+         "(alpha = 0, alpha_L0 = -1 deg, 40 x 6 panels), against the Trefftz-plane image theory of an "
+         "elliptic loading (C. Wieselsberger, NACA TM 77, 1922; exact evaluation in "
+         "`ventorum.reference.ground_effect`). The reference keeps the loading elliptic; the VLM loading "
+         "departs from elliptic near the ground, so the difference grows below h/b = 0.2:", "",
+         table(["AR", "h/b", "VLM", "image theory", "difference"], rows_ge), "",
          "Limits that verification cannot remove: the model is a thin, inviscid wing over a flat, "
          "rigid ground with a wake parallel to the ground. Thickness (suction under the wing), viscous "
          "effects and wake deformation are not modelled. Experimental validation is pending.", ""]

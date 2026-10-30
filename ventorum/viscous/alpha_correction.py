@@ -57,8 +57,29 @@ already has the Glauert shift) have ``alpha0_TA,j = alpha0_j``: no change.
 Ground effect. When the polar of a strip has the ground height (a table
 with a height axis, or a source with ground support), the 2D section of
 the vortex-lattice strip also has its images in the ground, so the 2D
-ground effect is not counted twice. A free-air polar is read with the
-free-air section relation.
+ground effect is not counted twice. The images are in the ground line of
+the section plane of the strip: a point at the height ``h`` has the
+distance ``h / cos(Gamma_g)`` from that line, with ``Gamma_g`` the angle of
+the span axis from the ground plane (the 3D panel coupling uses the same
+line). A free-air polar is read with the free-air section relation. A
+strip steeper than ``STEEP_STRIP_LIMIT_DEG`` (60 deg, a code setting) to
+the ground plane is not a section above a parallel ground: it uses
+free-air section data (a source runs without the height) and a section
+relation without images, with a trust note. A ground table has no
+free-air data, so a steep strip with a ground table is refused.
+
+Lift definitions in ground effect. The lift ``cl_inv`` of a lattice strip
+is its circulation lift ``2 Gamma / (V c)``, and the section relation and
+the ground factor ``kappa`` also come from circulations. Near a wall the
+force (pressure) lift of a section differs from its circulation lift
+(Coulliette and Plotkin 1996). So on a strip whose polar holds the ground
+height, the residual reads the circulation lift of the polar
+(``TabulatedAirfoil.Cl_circulation``) when the polar has it. A ground
+polar without circulation data is read with its ``Cl`` as before, and the
+result gets a trust note. In free air the two definitions are equal and
+the residual reads ``Cl``. The reported loads are the Kutta-Joukowski
+forces of the lattice with the local velocity, images included: the force
+on the wing.
 
 Residual and Newton iteration::
 
@@ -89,6 +110,9 @@ References
   University Press, 1926 (thin-airfoil theory, flap effectiveness).
 * J. Katz and A. Plotkin, "Low-Speed Aerodynamics", 2nd ed., Cambridge
   University Press, 2001 (discrete vortex method, method of images).
+* C. Coulliette and A. Plotkin, "Aerofoil ground effect revisited", The
+  Aeronautical Journal 100, 1996 (pressure lift and circulation lift of a
+  section in ground effect).
 * ISO 2533:1975 (ISA sea-level dynamic viscosity of air).
 """
 
@@ -120,9 +144,13 @@ from ventorum.core.datatypes import (
     SolverResult,
     SolverSettings,
     TabulatedAirfoil,
+    _LiftLookup,
 )
 from ventorum.core.trust import (
     evaluate_aerodynamic_trust,
+    lattice_error_inputs,
+    lattice_spanwise_stats,
+    polar_gap_note,
     polar_limits,
     polar_stats,
 )
@@ -154,21 +182,27 @@ __all__ = [
     "BRANCH_CL_DIFFERENCE",
     "SOURCE_ALPHAS_DEG",
     "STALL_START_MARGIN_DEG",
+    "STEEP_STRIP_LIMIT_DEG",
     "solve_viscous",
     "strip_reynolds_number",
 ]
 
 #: Angles of attack [deg] that a section polar source computes for each
-#: strip polar.
+#: strip polar. The range -15 to 25 deg in steps of 0.5 deg is a code
+#: setting, not from a source; no measurement in the code or its tests
+#: supports it.
 SOURCE_ALPHAS_DEG = np.arange(-15.0, 25.0 + 1e-9, 0.5)
 
 #: Two converged solutions are different branches when their CL differ by
-#: more than this value [-].
+#: more than this value [-]. A code setting, not from a source. It is 1000
+#: times the default convergence tolerance of the strip Cl residual (1e-6),
+#: so two solutions of the same branch do not count as two branches.
 BRANCH_CL_DIFFERENCE = 1e-3
 
 #: The branch search starts once with every strip this angle [deg] above
 #: the angle of maximum Cl of its polar (stalled start) and once with every
-#: strip this angle below it (attached start).
+#: strip this angle below it (attached start). A code setting, not from a
+#: source; no measurement in the code or its tests supports the value.
 STALL_START_MARGIN_DEG = 5.0
 
 #: Hinge height of a control surface for a polar source, as a fraction of
@@ -179,12 +213,31 @@ SOURCE_Y_HINGE = 0.5
 #: the ground factor of the thin-airfoil flap shift [-].
 GROUND_FLAP_REFERENCE_PANELS = 256
 
+#: Largest angle [deg] between the span axis of a strip and the ground plane
+#: for which a polar with a height axis is read in ground effect. A steeper
+#: strip (a fin, a strongly bent wing tip) uses free-air section data and a
+#: section relation without ground images: its 2D section is not a section
+#: above a parallel ground, so a 2D ground polar does not describe it. This
+#: limit is a code setting, not a value from a source.
+STEEP_STRIP_LIMIT_DEG = 60.0
+
 #: Trust and runtime warning when a thick section polar runs with a flap in ground effect.
 _THICK_GROUND_FLAP_NOTE = (
     "The ground factor of the flap increment is a thin-airfoil value; "
     "for thick sections below h/c 0.30 it can differ by more than 2 % "
     "(about 0.1 to 0.2 deg of flap shift)."
 )
+
+#: Trust and runtime warning when a ground-effect polar gives no circulation lift.
+_GROUND_LIFT_NOTE = (
+    "A section polar in ground effect gives no circulation lift (Cl_circulation); "
+    "the coupling compares the circulation lift of the lattice with the Cl of the polar. "
+    "When that Cl is the pressure lift, the two lift definitions differ near the ground "
+    "(Coulliette and Plotkin 1996) and the coupled lift is too low at small h/c."
+)
+
+#: Notes that warn once per call of :func:`solve_viscous`.
+_ONCE_PER_CALL_NOTES = frozenset({_THICK_GROUND_FLAP_NOTE, _GROUND_LIFT_NOTE})
 
 _NACA_NAME = re.compile(r"^\s*(?:naca)?\s*(\d{4,5})\s*$", re.IGNORECASE)
 
@@ -375,8 +428,12 @@ class _StripPolars:
         self.polars = polars
         self.aircraft = aircraft
         self._memo: dict[Any, TabulatedAirfoil] = {}
+        self._source_dropped: dict[Any, int] = {}
+        self._last_dropped: dict[int, int] = {}
         self._keys_checked = False
         self.last_fallback = np.zeros(0, dtype=bool)
+        self.last_steep = np.zeros(0, dtype=bool)
+        self.last_components: list[list[Any]] = []
 
     def check_keys(self, lattice: VortexLattice) -> None:
         """Refuse dict keys that match no strip, surface or airfoil name.
@@ -439,6 +496,45 @@ class _StripPolars:
             "in the polar dict; they use the section airfoil of the geometry."
         )
 
+    def steep_note(self) -> str | None:
+        """Return the trust note of the steep strips of the last resolve that use free-air data, or None."""
+        count = int(np.sum(self.last_steep))
+        if count == 0:
+            return None
+        return (
+            f"{count} of {len(self.last_steep)} strips are steeper than {STEEP_STRIP_LIMIT_DEG:g} deg "
+            "to the ground plane; they use free-air section data (no 2D ground effect in their polar "
+            "or in their section relation)."
+        )
+
+    def gap_note(self, alpha_v: np.ndarray) -> str | None:
+        """Return the trust note of the strips that read a polar inside a bridged interval, or None.
+
+        Parameters
+        ----------
+        alpha_v : np.ndarray
+            Angle [rad] at which each strip of the last :meth:`resolve`
+            call reads its polar.
+
+        Returns
+        -------
+        str or None
+            The note (see :func:`ventorum.core.trust.polar_gap_note`) when
+            a polar of the last resolve has a bridged interval (gap mask),
+            else None.
+        """
+        comps = self.last_components
+        polars = {id(p): p for parts in comps for p in parts}
+        if not any(getattr(p, "has_gaps", False) for p in polars.values()):
+            return None
+        reads = 0
+        for parts, a in zip(comps, np.atleast_1d(np.asarray(alpha_v, dtype=float))):
+            if any(getattr(p, "has_gaps", False) and bool(p.in_gap(float(a))) for p in parts):
+                reads += 1
+        dropped = sum(self._last_dropped.get(k, 0) for k in polars)
+        return polar_gap_note(reads, len(comps), dropped,
+                              sum(1 for p in polars.values() if getattr(p, "has_gaps", False)))
+
     def resolve(
         self,
         lattice: VortexLattice,
@@ -446,10 +542,33 @@ class _StripPolars:
         condition: FlightCondition,
         ground: GroundPlane | None,
     ) -> tuple[list[Any], np.ndarray, np.ndarray]:
-        """Return the polar of each strip, the flags "polar uses the height" and the strip h/c [-]."""
+        """Return the polar of each strip, the flags "polar uses the height" and the strip h/c [-].
+
+        A strip whose span axis is steeper than :data:`STEEP_STRIP_LIMIT_DEG`
+        to the ground plane does not read a polar in ground effect: a source
+        with ground support runs without the height (free air), and
+        ``last_steep`` flags the strip (see :meth:`steep_note`). A free-air
+        polar is read as for any strip.
+
+        Raises
+        ------
+        ValueError
+            If a steep strip has a polar table with a height axis: the table
+            has no free-air data. The message names the surface and its angle.
+        """
         self.check_keys(lattice)
         n = len(strips)
         self.last_fallback = np.zeros(n, dtype=bool)
+        self.last_steep = np.zeros(n, dtype=bool)
+        self.last_components = [[] for _ in range(n)]
+        self._last_dropped = {}
+        steep = np.zeros(n, dtype=bool)
+        tilt_deg = np.zeros(n)
+        if ground is not None and n > 0:
+            axes = _strip_span_axes(lattice, np.asarray(strips))
+            sin_tilt = np.clip(np.abs(axes @ ground.normal) / np.linalg.norm(ground.normal), 0.0, 1.0)
+            tilt_deg = np.degrees(np.arcsin(sin_tilt))
+            steep = tilt_deg > STEEP_STRIP_LIMIT_DEG
         out: list[Any] = [None] * n
         uses_height = np.zeros(n, dtype=bool)
         h_over_c = np.full(n, np.nan)
@@ -463,11 +582,23 @@ class _StripPolars:
                 h_over_c[i] = float(ground.height(lattice.qc_mid[s][None, :])[0]) / chord
             cand, self.last_fallback[i] = self._entry(lattice, s)
             if isinstance(cand, PolarTable):
+                if steep[i] and cand.h_over_c is not None:
+                    name = self.aircraft.surfaces[int(lattice.strip_surface[s])].name
+                    raise ValueError(
+                        f"Surface {name!r} has a strip at {tilt_deg[i]:.1f} deg to the ground plane, and its "
+                        "polar is a table with a height axis (no free-air data). Give a free-air polar for "
+                        f"this surface in the polar dict (strips steeper than {STEEP_STRIP_LIMIT_DEG:g} deg "
+                        "do not read ground tables)."
+                    )
                 out[i], uses_height[i] = self._from_table(cand, re_s, flap_deg, hinge, h_over_c[i], ground)
+                self._last_dropped[id(out[i])] = int(cand.last_dropped)
             elif isinstance(cand, (TabulatedAirfoil, LinearAirfoil)):
                 out[i] = cand if flap_deg == 0.0 else deflected_airfoil(cand, np.radians(flap_deg), hinge)
             elif callable(getattr(cand, "polar", None)):
                 with_height = ground is not None and source_supports_ground(cand)
+                if with_height and steep[i]:
+                    with_height = False
+                    self.last_steep[i] = True
                 uses_height[i] = with_height
                 flap = None if flap_deg == 0.0 else (hinge, SOURCE_Y_HINGE, flap_deg)
                 h_arg = round(float(h_over_c[i]), 6) if with_height else None
@@ -491,6 +622,13 @@ class _StripPolars:
             else:
                 (k1, _), (k2, w2) = keys
                 out[i] = blend_tabulated(self._memo[k1], self._memo[k2], w2)
+            # The polars that the strip reads (before a blend): their gap masks give the trust note.
+            self.last_components[i] = [self._memo[k] for k, _ in keys]
+            for k, _ in keys:
+                self._last_dropped[id(self._memo[k])] = self._source_dropped.get(k, 0)
+        for i in range(n):
+            if not self.last_components[i]:
+                self.last_components[i] = [out[i]]
         return out, uses_height, h_over_c
 
     @staticmethod
@@ -544,6 +682,8 @@ class _StripPolars:
                     f"The polar source gave fewer than 2 converged angles for a strip ({polar.name})."
                 )
             self._memo[key] = polar
+            # The source computed SOURCE_ALPHAS_DEG: the angles it dropped (its last_dropped).
+            self._source_dropped[key] = int(np.unique(SOURCE_ALPHAS_DEG).size - np.unique(np.asarray(polar.alpha)).size)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -556,6 +696,53 @@ def _section_frame(
     """Return the chordwise and normal coordinates [m] of points in the strip section plane."""
     d = pts - origin
     return d @ cdir, d @ nrm
+
+
+def _section_images(ground: GroundPlane, pts: np.ndarray, cdir: np.ndarray, nrm: np.ndarray) -> np.ndarray:
+    """Return the images [m] of section points in the ground line of the section plane.
+
+    The 2D section of a strip lies in the plane of its chord direction
+    *cdir* and its normal *nrm*. The ground cuts this plane in a line. Its
+    normal in the plane is the projection ``n_s`` of the ground normal
+    ``n``, with ``|n_s| = cos(Gamma_g)``, where ``Gamma_g`` is the angle of
+    the span axis of the strip from the ground plane. A point at the height
+    ``h`` above the ground has the distance ``h / |n_s|`` from this line in
+    the section plane. Its 2D image is at twice that distance, on the other
+    side of the line: ``p - 2 h n / |n_s|^2`` (the in-plane displacement is
+    ``2 h n_s / |n_s|^2``). The 3D panel coupling uses the same ground line
+    for its 2D section reference. When the span axis lies in the ground
+    plane (``|n_s| = 1``), this is the 3D mirror image.
+
+    Parameters
+    ----------
+    ground : GroundPlane
+        The ground plane.
+    pts : numpy.ndarray
+        Points of the section [m], shape (n, 3).
+    cdir, nrm : numpy.ndarray
+        Unit chord direction and unit normal of the strip [-], shape (3,).
+
+    Returns
+    -------
+    numpy.ndarray
+        Image points [m], shape (n, 3). Only their coordinates in the
+        section frame are used.
+
+    Raises
+    ------
+    ValueError
+        If the ground plane has no normal in the section plane (a section
+        plane normal to the ground line, |n_s| < 1e-12).
+    """
+    axis = np.cross(nrm, cdir)
+    if abs(float(ground.normal @ axis)) <= 1e-12 * float(np.linalg.norm(axis)):
+        # The span axis lies in the ground plane: the 3D mirror image is in
+        # the section plane at the section-plane distance.
+        return ground.reflect_points(pts)
+    ns2 = float(ground.normal @ cdir) ** 2 + float(ground.normal @ nrm) ** 2
+    if ns2 < 1e-24:
+        raise ValueError("The ground plane has no normal in this 2D section plane.")
+    return pts - 2.0 * (ground.height(pts) / ns2)[..., None] * ground.normal
 
 
 def _vlm_section_lines(
@@ -610,7 +797,7 @@ def _vlm_section_lines(
         rz = zp[:, None] - zq[None, :]
         M = -rx / (2.0 * np.pi * (rx * rx + rz * rz))
         if ground is not None and with_images[i]:
-            xi, zi = _section_frame(ground.reflect_points(q), origin, cdir, nrm)
+            xi, zi = _section_frame(_section_images(ground, q, cdir, nrm), origin, cdir, nrm)
             rxi = xp[:, None] - xi[None, :]
             rzi = zp[:, None] - zi[None, :]
             M = M + rxi / (2.0 * np.pi * (rxi * rxi + rzi * rzi))
@@ -703,7 +890,7 @@ def _section_flap_shift(
     rz = zp[:, None] - zq[None, :]
     M = -rx / (2.0 * np.pi * (rx * rx + rz * rz))
     if ground is not None:
-        xi, zi = _section_frame(ground.reflect_points(q), le, cdir, nrm)
+        xi, zi = _section_frame(_section_images(ground, q, cdir, nrm), le, cdir, nrm)
         rxi = xp[:, None] - xi[None, :]
         rzi = zp[:, None] - zi[None, :]
         M = M + rxi / (2.0 * np.pi * (rxi * rxi + rzi * rzi))
@@ -894,12 +1081,32 @@ def _not_converged_note(sol: dict, max_iter: int, tol: float) -> str:
     )
 
 
-def _alpha_cl_max(polar: Any) -> float | None:
-    """Return the angle [rad] of the largest Cl of a tabulated polar, or None."""
+def _alpha_cl_max(polar: Any, circulation: bool = False) -> float | None:
+    """Return the angle [rad] of the largest Cl of a tabulated polar, or None.
+
+    With *circulation* the largest circulation lift is used.
+    """
     if not isinstance(polar, TabulatedAirfoil):
         return None
     alpha, cl, _, _ = polar.tables()
+    if circulation:
+        cl = polar.Cl_circulation(alpha)
     return float(np.asarray(alpha)[int(np.argmax(np.asarray(cl)))])
+
+
+def _uses_circulation_lift(polars: Sequence[Any], uses_height: np.ndarray) -> np.ndarray:
+    """Return True for the strips whose residual reads the circulation lift of the polar.
+
+    A strip reads the circulation lift when its polar holds the ground
+    height and has circulation lift data.
+    """
+    return np.array(
+        [
+            bool(h) and isinstance(p, TabulatedAirfoil) and p.has_circulation_lift
+            for p, h in zip(polars, uses_height)
+        ],
+        dtype=bool,
+    )
 
 
 def _solve_condition(
@@ -949,9 +1156,17 @@ def _solve_condition(
     D = -np.array([np.sum(G[unk_strip == s, :], axis=0) for s in strips]) * scale[:, None]
 
     polars, uses_height, h_over_c = resolver.resolve(lattice, strips, condition, ground)
+    # Circulation with circulation: a ground polar is read with its
+    # circulation lift when it has one (see the module notes).
+    use_circ = _uses_circulation_lift(polars, uses_height)
+    if np.any(uses_height & ~use_circ) and _GROUND_LIFT_NOTE not in notes:
+        notes.append(_GROUND_LIFT_NOTE)
     fallback = resolver.fallback_note(lattice, strips)
     if fallback is not None:
         notes = [*notes, fallback]
+    steep_note = resolver.steep_note()
+    if steep_note is not None:
+        notes = [*notes, steep_note]
     if ground is not None and model in ("vlm", "llt"):
         h_vals = h_over_c[np.isfinite(h_over_c)]
         if h_vals.size > 0 and float(np.min(h_vals)) < 0.30:
@@ -977,11 +1192,20 @@ def _solve_condition(
     # offset is zero on a strip without a deflected control.
     cl_offset = a_sec * (alpha0 - alpha0_ta)
 
+    # The tabulated strip polars are read together (one vectorised PCHIP
+    # evaluation for each group of polars with the same angles); the values
+    # are those of the per-strip reads. The other strips read their polar.
+    lookup = _LiftLookup(polars, use_circ)
+    unhandled = np.flatnonzero(~lookup.handled)
+
     def evaluate(delta: np.ndarray):
         cl_inv = cl0 - D @ delta
         alpha_v = alpha0 + cl_inv / a_sec + delta
-        cl_v = np.array([float(section_cl(p, a)) for p, a in zip(polars, alpha_v)])
-        m = np.array([float(section_cl_slope(p, a)) for p, a in zip(polars, alpha_v)])
+        cl_v, m = lookup(alpha_v)
+        for i in unhandled:
+            p, a = polars[i], alpha_v[i]
+            cl_v[i] = float(p.Cl_circulation(a)) if use_circ[i] else float(section_cl(p, a))
+            m[i] = float(p.Cl_circulation_slope(a)) if use_circ[i] else float(section_cl_slope(p, a))
         return cl_inv - (cl_v - cl_offset), cl_inv, alpha_v, m
 
     def newton(start: np.ndarray):
@@ -1014,6 +1238,10 @@ def _solve_condition(
                 try:
                     target = delta + np.linalg.solve(D, r)
                 except np.linalg.LinAlgError:
+                    # D is singular: a fixed step of 0.1 rad per unit Cl
+                    # residual. A code setting, not from a source. It is
+                    # below 1 / (2 pi), the inverse of the thin-airfoil
+                    # section slope, and the damping loop below cuts it more.
                     target = delta + 0.1 * r
                 for omega in (0.5, 0.25, 0.1, 0.05, 0.02):
                     trial_delta = delta + omega * relaxation * (target - delta)
@@ -1033,6 +1261,9 @@ def _solve_condition(
     if delta0 is not None and np.asarray(delta0).shape == (n_ind,):
         start = np.asarray(delta0, dtype=float).copy()
     primary = newton(start)
+    gap_note = resolver.gap_note(primary["alpha_v"])
+    if gap_note is not None:
+        notes = [*notes, gap_note]
 
     # The airfoils change, so the cache starts empty, except the entries of
     # the flap geometry: the leg-force rules of a lattice with chordwise
@@ -1073,7 +1304,7 @@ def _solve_condition(
         up_shift = np.zeros(n_ind)
         down_shift = np.zeros(n_ind)
         for i, p in enumerate(polars):
-            a_max = _alpha_cl_max(p)
+            a_max = _alpha_cl_max(p, bool(use_circ[i]))
             if a_max is not None:
                 a_v = float(primary["alpha_v"][i])
                 up_shift[i] = max(0.0, a_max + margin - a_v)
@@ -1131,11 +1362,13 @@ def _solve_condition(
             n_chord=lattice.n_chord,
             notes=res_notes,
             max_chord_over_c=float(np.max(lattice.chord) / c_ref) if c_ref else 1.0,
+            spanwise_stats=lattice_spanwise_stats(lattice, loads.spanwise),
             polar=polar,
             CY=totals.CY,
             CY_farfield=totals.CY_farfield,
             Cn_trefftz=totals.Cn_trefftz,
             post_stall_branch=non_unique,
+            **lattice_error_inputs(lattice, main_surface),
         )
         flags = np.where(sol["m"] <= 0.0, "post-stall, non-unique", "attached")
         res = SolverResult(
@@ -1166,6 +1399,7 @@ def _solve_condition(
             "alpha0_thin_airfoil": full(alpha0_ta),
             "lift_slope_section": full(a_sec),
             "strip_h_over_c": full(h_over_c),
+            "strip_circulation_lift": full(use_circ, dtype=bool),
             "post_stall": bool(np.any(sol["m"] <= 0.0)),
             "post_stall_strips": full(sol["m"] <= 0.0, dtype=bool),
             "strip_flags": list(full(flags, dtype=object)),
@@ -1185,7 +1419,7 @@ def _solve_condition(
     for msg in notes:
         if msg in mesh:
             continue  # Issued by build_lattice or by the lattice cache.
-        if warned is not None and msg == _THICK_GROUND_FLAP_NOTE:
+        if warned is not None and msg in _ONCE_PER_CALL_NOTES:
             if msg in warned:
                 continue
             warned.add(msg)
@@ -1254,6 +1488,8 @@ def solve_viscous(
         (the zero-lift angle of the thin-airfoil model of each strip; it
         differs from ``alpha0_section`` only on a vortex-lattice strip with
         a deflected control), ``strip_h_over_c`` [-],
+        ``strip_circulation_lift`` (True on a strip whose residual reads
+        the circulation lift of a ground-effect polar),
         ``post_stall_strips``, ``strip_flags``, ``non_unique``,
         ``branches`` (when a post-stall case has more than one converged
         solution), ``factorized`` (True when this condition needed a new
@@ -1272,8 +1508,13 @@ def solve_viscous(
 
     For ``panel3d``, free-air conditions share the fixed panel wake and
     one body factorization. Strip lift comes from surface pressure. The
-    section relation comes from a 2D Morino solve of the mesh section.
-    Ground ``auto`` uses a direct solve per configuration; explicit
+    section relation comes from a 2D Morino solve of the mesh section:
+    the effective angle inverts its lift curve (the pitch curve in ground
+    effect). The polar is read relative to the converged inviscid 2D
+    section (Ventorum-2D on the same cut section with 128 chordwise panels
+    per side): the target lift is ``cl_visc - cl_conv + cl_mesh`` at the
+    viscous angle, so a polar equal to the converged inviscid section gives
+    the inviscid 3D panel result at the same mesh. Ground ``auto`` uses a direct solve per configuration; explicit
     ``krylov`` and GPU requests are refused. ``solve_count`` counts body
     triangular-solve calls; ``solve_rhs_count`` counts their columns.
 
@@ -1283,6 +1524,18 @@ def solve_viscous(
     A polar that follows thin-airfoil theory (slope 2 pi, Glauert flap
     shift) then gives the inviscid vortex-lattice result at the same
     chordwise panel count, not the mesh-converged flap effect.
+
+    In ground effect the strip lift of the lattice is a circulation lift.
+    A polar that holds the ground height is read with its circulation lift
+    (``Cl_circulation_data``, which the in-house 2D source and its tables
+    give) when it has one. A ground polar without it is read with its
+    ``Cl``, and the result gets a trust note: the pressure lift of a
+    section near the ground is smaller than its circulation lift.
+
+    A strip steeper than :data:`STEEP_STRIP_LIMIT_DEG` to the ground plane
+    (a fin) uses free-air section data, with a trust note. A steep strip
+    whose polar is a table with a height axis raises ``ValueError``: give
+    a free-air polar for its surface in the polar dict.
     """
     model_str = str(model).lower()
     if model_str not in ("vlm", "llt", "panel3d"):
@@ -1347,7 +1600,8 @@ def _independent(res: SolverResult) -> np.ndarray:
 
 
 def _panel_residual(x, velocity0, dv, speed, incidence, weights, area,
-                    zero, slope, polars, offset, up, lo, pressure, onset_sq=None):
+                    zero, slope, polars, offset, up, lo, pressure, onset_sq=None, curves=None,
+                    references=None):
     """Return the coupled residual and its analytic Jacobian.
 
     Body velocities and their columns are in m/s; speed is in m/s. The
@@ -1358,6 +1612,18 @@ def _panel_residual(x, velocity0, dv, speed, incidence, weights, area,
     panel and Cp = (|V_k|^2 - |V|^2) / V_inf^2 (see
     :func:`ventorum.panel3d.post.compute_surface_velocity_and_cp`); None
     means no rates.
+
+    Without *curves*, the effective angle of a strip is ``zero + cl /
+    slope`` [rad] (the section line) and the target lift is the polar lift
+    ``cl_visc(alpha_v)``. *curves* gives the same-mesh 2D lift curve
+    ``cl_mesh`` of each strip (the pitch curve with images, or the
+    free-air curve of its cut section; ``ventorum.solvers.panel3d``), and
+    *references* the converged inviscid 2D curve ``cl_conv`` of the same
+    section (``_ConvergedSectionCurve``). The effective angle is then the
+    angle at which ``cl_mesh`` has the lift ``cl``, and the target lift is
+    the defect-corrected polar lift
+    ``cl_visc(alpha_v) - cl_conv(alpha_v) + cl_mesh(alpha_v)``. The
+    Jacobian uses ``dalpha_e / dcl = 1 / cl_mesh'(alpha_e)``.
     """
     ns = len(area)
     n = len(weights)
@@ -1369,19 +1635,45 @@ def _panel_residual(x, velocity0, dv, speed, incidence, weights, area,
     dcp = -2 * np.einsum("ij,ijk->ik", velocity, dv) / speed**2
     cl = (incidence @ (weights * cp[:n])) / area
     dc = (incidence @ (weights[:, None] * dcp[:n])) / area[:, None]
-    alpha_v = zero + cl / slope + x[:ns]
+    alpha_e = zero + cl / slope
+    local_slope = np.asarray(slope, dtype=float).copy()
+    outside = np.zeros(ns, dtype=bool)
+    if curves is not None:
+        for j, curve in enumerate(curves):
+            if curve is not None:
+                alpha_e[j], local_slope[j], outside[j] = curve.invert(cl[j], alpha_e[j], slope[j])
+    alpha_v = alpha_e + x[:ns]
     clv = np.array([float(section_cl(p, a)) for p, a in zip(polars, alpha_v)])
     m = np.array([float(section_cl_slope(p, a)) for p, a in zip(polars, alpha_v)])
-    residual = cl - clv + offset
-    jac = (1 - m / slope)[:, None] * dc
-    jac[np.arange(ns), np.arange(ns)] -= m
+    target, target_slope = clv, m
+    cl_mesh = cl_conv = None
+    if references is not None:
+        cl_mesh = np.array([curve.lift(a) for curve, a in zip(curves, alpha_v)])
+        mesh_slope = np.array([curve.slope(a) for curve, a in zip(curves, alpha_v)])
+        conv = np.array([reference.evaluate(a) for reference, a in zip(references, alpha_v)])
+        cl_conv = conv[:, 0]
+        target = clv - cl_conv + cl_mesh
+        target_slope = m - conv[:, 1] + mesh_slope
+    residual = cl - target + offset
+    jac = (1 - target_slope / local_slope)[:, None] * dc
+    jac[np.arange(ns), np.arange(ns)] -= target_slope
     jump = cp[up] - cp[lo]
     if pressure:
         residual = np.concatenate([residual, jump])
         jac = np.vstack([jac, dcp[up] - dcp[lo]])
         dc = np.vstack([dc, dcp[up] - dcp[lo]])
-    return dict(r=residual, jac=jac, dc=dc, cl=cl, alpha_v=alpha_v, m=m,
-                cp=cp, velocity=velocity, jump=jump)
+    return dict(r=residual, jac=jac, dc=dc, cl=cl, alpha_e=alpha_e, alpha_v=alpha_v, m=m,
+                cp=cp, velocity=velocity, jump=jump, curve_outside=outside, cl_polar=clv,
+                cl_mesh=cl_mesh, cl_conv=cl_conv)
+
+
+def _ground_curve_note(count: int, total: int) -> str:
+    """Return the trust note of strips whose lift is outside their 2D ground pitch curve."""
+    return (
+        f"{count} of {total} strips have a lift outside the range of their 2D ground pitch curve "
+        "(attitudes between -90 and +90 deg at which the section clears the ground); their "
+        "effective angle is the tangent continuation from the last attitude of that range."
+    )
 
 
 class _PanelCoupling:
@@ -1409,10 +1701,13 @@ class _PanelCoupling:
         import scipy.sparse
 
         from ventorum.airfoil import airfoil
-        from ventorum.solvers.panel3d import _build_geometry, _panel_section_lines
+        from ventorum.solvers.panel3d import SECTION_REFERENCE_PANELS, _build_geometry, _panel_section_lines
 
         # The lattice supplies only section/polar metadata, never aerodynamic
         # loads or section slopes. Its strips have the same reporting stations.
+        # Spanwise panel count of the error model: the smallest per-semi-span count of the surfaces, as
+        # in the inviscid 3D panel solve.
+        self.n_span = min(int(s.n_panels or settings.n_panels) for s in aircraft.surfaces)
         self.lattice = make_solver("vlm").build(
             aircraft, dataclasses.replace(settings, n_chord=1), conditions[0], None, solver.ref_point,
         )
@@ -1425,21 +1720,24 @@ class _PanelCoupling:
             areas.extend(np.concatenate([meta["area"][::-1], meta["area"]])
                          if left is not None else meta["area"])
         self.area = np.asarray(areas)
-        self.slope, self.zero, self.moment = _panel_section_lines(
-            geometry.mesh, self.maps, self.lattice, self.strips,
+        self.slope, self.zero, self.moment, self.curves = _panel_section_lines(
+            geometry.mesh, self.maps, self.lattice, self.strips, curves=True,
         )
         self.geometry = geometry
-        self.clean_geometry = None
-        self.clean_zero = self.zero.copy()
-        if any(s.controls for s in aircraft.surfaces):
-            clean = dataclasses.replace(aircraft, surfaces=[dataclasses.replace(s, controls=[]) for s in aircraft.surfaces])
-            coords = [[airfoil(sec.shape if sec.shape is not None else "0012").coords
-                       for sec in s.sections] for s in clean.surfaces]
-            geom = _build_geometry(clean, settings, coords, settings.n_chord or 40,
-                                   settings.panel_chord_spacing, solver.mesh.half, settings.panel_scale_root_thickness)
-            clean_maps = [ids for right, left in geom.strip_maps for ids in (left or []) + right]
-            _, self.clean_zero, _ = _panel_section_lines(geom.mesh, clean_maps, self.lattice, self.strips)
-            self.clean_geometry = geom, clean_maps
+        # The converged inviscid 2D reference: the same cut sections of a
+        # mesh with SECTION_REFERENCE_PANELS cosine-spaced chordwise panels
+        # (same spanwise mesh, controls and root treatment).
+        section_coords = [[airfoil(sec.shape if sec.shape is not None else "0012").coords
+                           for sec in s.sections] for s in aircraft.surfaces]
+        fine = _build_geometry(aircraft, settings, section_coords, SECTION_REFERENCE_PANELS, "cosine",
+                               solver.mesh.half, settings.panel_scale_root_thickness)
+        self.reference_maps = [ids for right, left in fine.strip_maps for ids in (left or []) + right]
+        self.reference_mesh = fine.mesh
+        self.reference_memo = {}
+        # No thin-airfoil flap offset: the converged and the same-mesh
+        # references are both the flapped cut section, so a polar equal to
+        # the converged flapped section is the identity. The vortex-lattice
+        # coupling keeps its offset (its reference is the thin lattice).
         self.resolver = _StripPolars(self.polars, aircraft)
         self.aircraft = aircraft
         row = np.repeat(np.arange(len(self.maps)), [len(ids) for ids in self.maps])
@@ -1455,6 +1753,26 @@ class _PanelCoupling:
         self.lateral = bool(np.any(self.axes != np.array([0.0, 1.0, 0.0])))
         solver._set_viscous_strips(self.maps, lateral=self.lateral)
         solver._viscous_evaluator = self.evaluate
+
+    def references(self, ground, uses_height, curves):
+        """Return the converged inviscid 2D reference curve of each strip.
+
+        A strip with images has the pitch curve of its converged cut section
+        at the quarter-chord height of its same-mesh pitch curve [chord];
+        the other strips have the free-air curve. Equal sections share one
+        curve for all conditions of the coupling.
+        """
+        from ventorum.solvers.panel3d import _ConvergedSectionCurve, _panel_section_polygons
+
+        polygons = _panel_section_polygons(self.reference_mesh, self.reference_maps, self.lattice, self.strips)
+        out = []
+        for (coords, _), curve, images in zip(polygons, curves, uses_height):
+            height = getattr(curve, "height", None) if (ground is not None and images) else None
+            key = (np.round(coords, 12).tobytes(), None if height is None else round(float(height), 12))
+            if key not in self.reference_memo:
+                self.reference_memo[key] = _ConvergedSectionCurve(coords, height)
+            out.append(self.reference_memo[key])
+        return out
 
     def full(self, values):
         """Expand independent values to public strip order (same units)."""
@@ -1528,28 +1846,23 @@ class _PanelCoupling:
         onset_sq = np.sum(onset**2, axis=1) if has_rates(condition) else None
         ground = None if cfg.ground is None else GroundPlane(*cfg.ground)
         polars, uses_height, h_over_c = self.resolver.resolve(self.lattice, self.strips, condition, ground)
-        fallback = self.resolver.fallback_note(self.lattice, self.strips)
+        fallback = [note for note in (self.resolver.fallback_note(self.lattice, self.strips),
+                                      self.resolver.steep_note()) if note is not None]
         slope, zero, moment = self.slope, self.zero, self.moment
-        clean_zero = self.clean_zero
+        curves = self.curves
         if np.any(uses_height):
-            slope, zero, moment = _panel_section_lines(
-                self.geometry.mesh, self.maps, self.lattice, self.strips, ground, uses_height,
+            slope, zero, moment, curves = _panel_section_lines(
+                self.geometry.mesh, self.maps, self.lattice, self.strips, ground, uses_height, curves=True,
             )
-            clean_zero = zero
-            if self.clean_geometry is not None:
-                clean_geom, clean_maps = self.clean_geometry
-                _, clean_zero, _ = _panel_section_lines(
-                    clean_geom.mesh, clean_maps, self.lattice, self.strips, ground, uses_height,
-                )
-        zero_target = _thin_airfoil_zero_lift(
-            self.lattice, self.aircraft, self.strips, zero, clean_zero, ground, uses_height,
-        )
-        offset = slope * (zero - zero_target)
+        # Every strip has the flapped cut section as its converged and
+        # same-mesh reference: the flap offset is zero (see prepare).
+        offset = np.zeros_like(slope)
+        references = self.references(ground, uses_height, curves)
 
         def evaluate(x):
             return _panel_residual(x, velocity0, dv, speed, self.incidence, weights, self.area,
                                    zero, slope, polars, offset, up, lo, solver.kutta == "pressure",
-                                   onset_sq)
+                                   onset_sq, curves, references)
 
         def newton(start, budget=None):
             x = start.copy()
@@ -1664,6 +1977,11 @@ class _PanelCoupling:
                         if all(abs(other["panel"].CL - s["panel"].CL) > BRANCH_CL_DIFFERENCE
                                for s in [primary, *branches]):
                             branches.append(other)
+        gap_note = self.resolver.gap_note(primary["alpha_v"])
+        if gap_note is not None:
+            fallback = [*fallback, gap_note]
+        if np.any(primary["curve_outside"]):
+            fallback = [*fallback, _ground_curve_note(int(np.sum(primary["curve_outside"])), ns)]
         self.states[id(condition)] = (primary, branches, polars, offset, h_over_c, branch_runs, fallback)
         for state in [primary, *branches]:
             state.pop("jac")
@@ -1675,15 +1993,16 @@ class _PanelCoupling:
         from ventorum.solvers.panel3d import _spanwise_results_batch
 
         primary, branches, polars, offset, heights, branch_runs, fallback = self.states[id(result.condition)]
-        if fallback is not None and fallback not in result.details["notes"]:
-            result.details["notes"].append(fallback)
+        for note in fallback:
+            if note not in result.details["notes"]:
+                result.details["notes"].append(note)
         area = self.full(self.area)
         chord = self.lattice.chord
         axis = np.cross(self.lattice.normal, self.lattice.chord_dir)
 
         def finish(res, state):
             slope, zero = state["section_slope"], state["section_zero"]
-            alpha_e = zero + state["cl"] / slope
+            alpha_e = state["alpha_e"]
             co, si = np.cos(alpha_e), np.sin(alpha_e)
             cm_inv = np.sum(state["section_moment"] * np.column_stack([np.ones_like(co), co**2, co * si, si**2]), axis=1)
             cm_visc = np.array([float(section_cm(p, a)) for p, a in zip(polars, state["alpha_v"])])
@@ -1714,6 +2033,8 @@ class _PanelCoupling:
                 alpha0_section=self.full(zero), lift_slope_section=self.full(slope),
                 alpha0_thin_airfoil=self.full(zero - offset / slope),
                 cl_inviscid=self.full(state["cl"]), cl_viscous=self.full(state["cl"] - state["r"][:len(self.maps)] + offset),
+                cl_polar=self.full(state["cl_polar"]), cl_section_mesh=self.full(state["cl_mesh"]),
+                cl_section_converged=self.full(state["cl_conv"]),
                 flap_offset=self.full(offset), strip_area=area, strip_h_over_c=self.full(heights),
                 cd_profile=cd_full,
                 cm_section_inviscid=self.full(cm_inv), cm_section_pressure=pressure_cm,
@@ -1741,7 +2062,7 @@ class _PanelCoupling:
                 h_over_c=None if res.details["h_min"] is None else res.details["h_min"] / aircraft.c_ref,
                 notes=res.details["notes"], CD_nearfield=res.totals.CDi_nearfield,
                 polar=None if limits is None else polar_stats(limits, self.full(state["cl"]), av),
-                post_stall_branch=bool(branches),
+                post_stall_branch=bool(branches), n_span=self.n_span,
             )
             return res
 

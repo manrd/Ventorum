@@ -239,7 +239,13 @@ def validate_aircraft(ac: Aircraft) -> None:
 
 
 def validate_flight_condition(fc: FlightCondition) -> None:
-    """Check :class:`FlightCondition` values."""
+    """Check :class:`FlightCondition` values.
+
+    A stated Mach number at or above ``MACH_LIMIT_REFUSED`` (0.7) raises
+    :class:`~ventorum.core.errors.ValidityError`. A speed above Mach 0.3, or
+    a stated Mach number that does not agree with ``V_inf / a``, gives a
+    ``RuntimeWarning``.
+    """
     _finite_value("V_inf", fc.V_inf)
     if fc.V_inf < MIN_SPEED_M_S:
         raise ValueError(f"V_inf={fc.V_inf} m/s must be >= {MIN_SPEED_M_S:g} m/s.")
@@ -267,7 +273,8 @@ def validate_flight_condition(fc: FlightCondition) -> None:
                 f"Height h={fc.h} m is above the size limit {LENGTH_LIMIT_M:g} m."
             )
     from ventorum.core.constants import MACH_LIMIT_INCOMPRESSIBLE
-    from ventorum.core.trust import isa_speed_of_sound
+    from ventorum.core.trust import check_mach_scope, isa_speed_of_sound, mach_speed_mismatch
+    check_mach_scope(fc)
     a_sound = isa_speed_of_sound(fc.rho)
     mach = fc.V_inf / a_sound
     if mach > MACH_LIMIT_INCOMPRESSIBLE:
@@ -278,6 +285,10 @@ def validate_flight_condition(fc: FlightCondition) -> None:
             "the valid envelope.",
             RuntimeWarning, stacklevel=3,
         )
+    mismatch = mach_speed_mismatch(fc)
+    if mismatch is not None:
+        import warnings
+        warnings.warn(mismatch, RuntimeWarning, stacklevel=3)
 
 
 def validate_solver_settings(ss: SolverSettings) -> None:

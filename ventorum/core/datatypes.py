@@ -115,6 +115,25 @@ class TabulatedAirfoil:
         Pitching-moment array (optional).
     Re : float | None
         Reynolds number this polar was generated / measured at.
+    Cl_circulation_data : np.ndarray | None
+        Circulation lift coefficient ``2 Gamma / (V c)`` [-] at *alpha*
+        (optional, same length as *alpha*). A section in ground effect has
+        two lift definitions: ``Cl_data`` holds the force (pressure) lift,
+        this array the lift of the total circulation. They differ near a
+        wall because the Kutta-Joukowski relation on the total circulation
+        does not give the force there (C. Coulliette and A. Plotkin,
+        "Aerofoil ground effect revisited", The Aeronautical Journal 100,
+        1996). None (default) means that the polar gives no circulation lift. In free
+        air the two definitions are equal for a single section.
+    gap_mask : np.ndarray | None
+        Gap mask of the table (optional): one bool per interval between
+        neighbouring angles of the sorted table (see :meth:`tables`),
+        shape ``(n_alpha - 1,)``. True marks an interval that bridges a
+        failed (dropped) angle of the source: there the values come from
+        the interpolation across the gap, not from a solution. A lookup
+        strictly inside a bridged interval gives a RuntimeWarning, once
+        per polar. None (default) or no True value means no known gap
+        (for example a polar file written before the mask existed).
     """
 
     name: str = "Tabulated Airfoil"
@@ -123,19 +142,26 @@ class TabulatedAirfoil:
     Cd_data: np.ndarray = field(default_factory=lambda: np.array([]))
     Cm_data: np.ndarray | None = None
     Re: float | None = None
+    Cl_circulation_data: np.ndarray | None = None
+    gap_mask: np.ndarray | None = None
+    _gap_warned: bool = field(default=False, init=False, repr=False)
     _cached_a0: float | None = field(default=None, init=False, repr=False)
     _cached_alpha_L0: float | None = field(default=None, init=False, repr=False)
     _interp: dict | None = field(default=None, init=False, repr=False)
     _prepared_arrays: tuple | None = field(default=None, init=False, repr=False)
+    _prepared_circulation: np.ndarray | None = field(default=None, init=False, repr=False)
 
     def __setattr__(self, name: str, value: Any) -> None:
         object.__setattr__(self, name, value)
+        if name == "gap_mask":
+            object.__setattr__(self, "_gap_warned", False)
         if name in _TABLE_FIELDS:
             # New data: the interpolation and the linear fit are made again on next use.
             object.__setattr__(self, "_interp", None)
             object.__setattr__(self, "_cached_a0", None)
             object.__setattr__(self, "_cached_alpha_L0", None)
             object.__setattr__(self, "_prepared_arrays", None)
+            object.__setattr__(self, "_prepared_circulation", None)
 
     def __post_init__(self) -> None:
         # Initialisation does not prepare arrays; they are prepared on first use.
@@ -150,10 +176,15 @@ class TabulatedAirfoil:
             Cd_data=self.Cd_data.copy(),
             Cm_data=self.Cm_data.copy() if self.Cm_data is not None else None,
             Re=self.Re,
+            Cl_circulation_data=(
+                self.Cl_circulation_data.copy() if self.Cl_circulation_data is not None else None
+            ),
+            gap_mask=None if self.gap_mask is None else np.array(self.gap_mask, dtype=bool),
         )
         inst._cached_a0 = self._cached_a0
         inst._cached_alpha_L0 = self._cached_alpha_L0
         inst._prepared_arrays = self._prepared_arrays
+        inst._prepared_circulation = self._prepared_circulation
         return inst
 
     def __copy__(self) -> TabulatedAirfoil:
@@ -173,7 +204,12 @@ class TabulatedAirfoil:
 
         a = np.atleast_1d(np.asarray(self.alpha, dtype=float))
         n = a.size
-        tables = {"Cl_data": self.Cl_data, "Cd_data": self.Cd_data, "Cm_data": self.Cm_data}
+        tables = {
+            "Cl_data": self.Cl_data,
+            "Cd_data": self.Cd_data,
+            "Cm_data": self.Cm_data,
+            "Cl_circulation_data": self.Cl_circulation_data,
+        }
         arrs: dict[str, np.ndarray | None] = {}
         for key, val in tables.items():
             if val is None:
@@ -209,6 +245,7 @@ class TabulatedAirfoil:
         cl = arrs["Cl_data"]
         cd = arrs["Cd_data"]
         cm = arrs["Cm_data"]
+        self._prepared_circulation = arrs["Cl_circulation_data"]
         self._prepared_arrays = (a, cl, cd, cm)
         return self._prepared_arrays
 
@@ -246,11 +283,58 @@ class TabulatedAirfoil:
             if cm is not None:
                 f["Cm"] = PchipInterpolator(a, np.asarray(cm, dtype=float), extrapolate=False)
             f["dCl"] = f["Cl"].derivative()
+            if self._prepared_circulation is not None:
+                f["Clc"] = PchipInterpolator(a, np.asarray(self._prepared_circulation, dtype=float), extrapolate=False)
+                f["dClc"] = f["Clc"].derivative()
             self._interp = f
         return self._interp
 
+    # -- gaps -----------------------------------------------------------------------
+    @property
+    def has_gaps(self) -> bool:
+        """True when the gap mask marks at least one bridged interval."""
+        return self.gap_mask is not None and bool(np.any(self.gap_mask))
+
+    def in_gap(self, alpha: float | np.ndarray) -> bool | np.ndarray:
+        """Return True where *alpha* [rad] is strictly inside a bridged interval of the gap mask.
+
+        Raises
+        ------
+        ValueError
+            If the gap mask does not have one value per interval of the
+            sorted table.
+        """
+        a = np.asarray(alpha, dtype=float)
+        out = np.zeros(a.shape, dtype=bool)
+        if self.has_gaps:
+            table = self._prepare_arrays()[0]
+            mask = np.atleast_1d(np.asarray(self.gap_mask, dtype=bool))
+            if mask.size != table.size - 1:
+                raise ValueError(
+                    f"TabulatedAirfoil {self.name!r}: gap_mask has {mask.size} values, the sorted table has "
+                    f"{table.size - 1} intervals."
+                )
+            idx = np.searchsorted(table, a, side="right") - 1
+            valid = (idx >= 0) & (idx < mask.size)
+            safe = np.clip(idx, 0, max(mask.size - 1, 0))
+            out = valid & (a > table[safe]) & mask[safe]
+        return out if np.ndim(alpha) else bool(out)
+
+    def _check_gap(self, alpha) -> None:
+        """Warn once per polar when a lookup is inside a bridged interval."""
+        if self._gap_warned or not self.has_gaps:
+            return
+        if np.any(self.in_gap(alpha)):
+            object.__setattr__(self, "_gap_warned", True)
+            warnings.warn(
+                f"TabulatedAirfoil {self.name!r}: a lookup is inside an angle interval that the polar bridges "
+                "across a failed angle of its source; the value there is interpolated, not a solution.",
+                RuntimeWarning, stacklevel=4,
+            )
+
     def _eval(self, key: str, alpha, data) -> np.ndarray:
         a = np.asarray(alpha, dtype=float)
+        self._check_gap(a)
         f = self._pchip()
         prep = self._prepare_arrays()
         lo, hi = float(prep[0][0]), float(prep[0][-1])
@@ -276,10 +360,46 @@ class TabulatedAirfoil:
     def Cl_slope(self, alpha: float | np.ndarray) -> float | np.ndarray:
         """dCl/dalpha [1/rad]; zero outside the table."""
         a = np.asarray(alpha, dtype=float)
+        self._check_gap(a)
         f = self._pchip()
         prep = self._prepare_arrays()
         lo, hi = float(prep[0][0]), float(prep[0][-1])
         out = np.where((a >= lo) & (a <= hi), f["dCl"](np.clip(a, lo, hi)), 0.0)
+        return out if np.ndim(alpha) else float(out)
+
+    @property
+    def has_circulation_lift(self) -> bool:
+        """True when the polar holds the circulation lift (``Cl_circulation_data``)."""
+        return self.Cl_circulation_data is not None
+
+    def Cl_circulation(self, alpha: float | np.ndarray) -> float | np.ndarray:
+        """Return the circulation lift coefficient at *alpha* [rad]; end values outside the table.
+
+        Raises
+        ------
+        ValueError
+            If the polar has no circulation lift data.
+        """
+        if self.Cl_circulation_data is None:
+            raise ValueError(f"TabulatedAirfoil {self.name!r} has no circulation lift data.")
+        return self._eval("Clc", alpha, self.Cl_circulation_data)
+
+    def Cl_circulation_slope(self, alpha: float | np.ndarray) -> float | np.ndarray:
+        """Return d(Cl_circulation)/dalpha [1/rad]; zero outside the table.
+
+        Raises
+        ------
+        ValueError
+            If the polar has no circulation lift data.
+        """
+        if self.Cl_circulation_data is None:
+            raise ValueError(f"TabulatedAirfoil {self.name!r} has no circulation lift data.")
+        a = np.asarray(alpha, dtype=float)
+        self._check_gap(a)
+        f = self._pchip()
+        prep = self._prepare_arrays()
+        lo, hi = float(prep[0][0]), float(prep[0][-1])
+        out = np.where((a >= lo) & (a <= hi), f["dClc"](np.clip(a, lo, hi)), 0.0)
         return out if np.ndim(alpha) else float(out)
 
     def _compute_linear_fit(self) -> None:
@@ -327,7 +447,176 @@ class TabulatedAirfoil:
 
 
 # Fields of TabulatedAirfoil whose change clears the cached interpolation.
-_TABLE_FIELDS = frozenset({"alpha", "Cl_data", "Cd_data", "Cm_data"})
+_TABLE_FIELDS = frozenset({"alpha", "Cl_data", "Cd_data", "Cm_data", "Cl_circulation_data"})
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Interpolation of many tabulated airfoils together (private)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def _build_pchip_batch(airfoils: Any) -> None:
+    """Build the cached interpolation of many tabulated airfoils together.
+
+    The airfoils that have the same sorted angles and the same tables
+    share one PCHIP construction per coefficient: their tables are the
+    columns of one array. The construction is column by column, so each
+    airfoil gets the same coefficients as from its own construction
+    (:meth:`TabulatedAirfoil._pchip`); only the call overhead is shared.
+    An airfoil that already has its interpolation does not change.
+
+    Parameters
+    ----------
+    airfoils : sequence
+        Airfoil models. Only the instances of :class:`TabulatedAirfoil`
+        (not of a subclass) without a cached interpolation are used.
+    """
+    from scipy.interpolate import PchipInterpolator, PPoly
+
+    groups: dict[tuple, list[TabulatedAirfoil]] = {}
+    seen: set[int] = set()
+    for af in airfoils:
+        if type(af) is not TabulatedAirfoil or af._interp is not None or id(af) in seen:
+            continue
+        seen.add(id(af))
+        a, _, _, cm = af._prepare_arrays()
+        if a.size < 2:
+            continue  # The construction of the airfoil itself gives the error.
+        key = (a.size, a.tobytes(), cm is not None, af._prepared_circulation is not None)
+        groups.setdefault(key, []).append(af)
+    for (_, _, has_cm, has_circ), members in groups.items():
+        if len(members) < 2:
+            continue
+        a = members[0]._prepare_arrays()[0]
+        columns = {
+            "Cl": [m._prepare_arrays()[1] for m in members],
+            "Cd": [m._prepare_arrays()[2] for m in members],
+        }
+        if has_cm:
+            columns["Cm"] = [m._prepare_arrays()[3] for m in members]
+        if has_circ:
+            columns["Clc"] = [m._prepared_circulation for m in members]
+        built = {
+            name: PchipInterpolator(a, np.stack([np.asarray(c, dtype=float) for c in cols], axis=1),
+                                    extrapolate=False)
+            for name, cols in columns.items()
+        }
+        built["dCl"] = built["Cl"].derivative()
+        if has_circ:
+            built["dClc"] = built["Clc"].derivative()
+        for j, af in enumerate(members):
+            f = {
+                name: PPoly.construct_fast(np.ascontiguousarray(pp.c[:, :, j]), pp.x, extrapolate=False)
+                for name, pp in built.items()
+            }
+            object.__setattr__(af, "_interp", f)
+
+
+def _piecewise_values(x: np.ndarray, c: np.ndarray, columns: np.ndarray, alpha: np.ndarray) -> np.ndarray:
+    """Return the values of stacked piecewise polynomials, one point per polynomial.
+
+    Parameters
+    ----------
+    x : numpy.ndarray
+        Breakpoints [rad], ascending, shape ``(n,)``, shared by all polynomials.
+    c : numpy.ndarray
+        Coefficients, highest power first, shape ``(k, n - 1, m)``: column
+        ``j`` holds polynomial ``j`` (the layout of ``scipy.interpolate.PPoly``).
+    columns : numpy.ndarray
+        Polynomial (column) of each point, shape ``(p,)``.
+    alpha : numpy.ndarray
+        Points [rad] inside ``[x[0], x[-1]]``, shape ``(p,)``.
+
+    Returns
+    -------
+    numpy.ndarray
+        Values at the points, shape ``(p,)``. An interval includes its left
+        breakpoint; the last interval also includes ``x[-1]``. The sum
+        ``sum_m c[k-1-m] s^m`` runs from the constant term up, with
+        ``s = alpha - x[i]`` and the powers made by repeated products.
+    """
+    i = np.clip(np.searchsorted(x, alpha, side="right") - 1, 0, x.size - 2)
+    s = alpha - x[i]
+    k = c.shape[0]
+    out = c[k - 1, i, columns] * 1.0
+    z = np.ones_like(s)
+    for p in range(1, k):
+        z = z * s
+        out = out + c[k - 1 - p, i, columns] * z
+    return out
+
+
+class _LiftLookup:
+    """Lift coefficient and lift slope of many airfoils, each at its own angle (private).
+
+    The lookup gives the same values as :meth:`TabulatedAirfoil.Cl` and
+    :meth:`TabulatedAirfoil.Cl_slope` (or the circulation lift and its
+    slope) of each airfoil, with one vectorised evaluation for each group
+    of airfoils with the same angles. It reads the cached interpolation of
+    the airfoils, so it must be made again when the data of an airfoil
+    change. The entries that are not an instance of
+    :class:`TabulatedAirfoil` (not of a subclass) are not handled
+    (``handled`` is False): the caller reads them itself.
+
+    Parameters
+    ----------
+    airfoils : sequence
+        Airfoil model of each entry.
+    circulation : sequence of bool
+        True for an entry that reads the circulation lift.
+    """
+
+    def __init__(self, airfoils: Any, circulation: Any) -> None:
+        airfoils = list(airfoils)
+        circ = np.asarray(circulation, dtype=bool)
+        _build_pchip_batch([af for af, c in zip(airfoils, circ) if type(af) is TabulatedAirfoil])
+        self.n = len(airfoils)
+        self.handled = np.zeros(self.n, dtype=bool)
+        groups: dict[tuple, dict] = {}
+        for idx, (af, c) in enumerate(zip(airfoils, circ)):
+            if type(af) is not TabulatedAirfoil:
+                continue
+            if c and af.Cl_circulation_data is None:
+                raise ValueError(f"TabulatedAirfoil {af.name!r} has no circulation lift data.")
+            f = af._pchip()
+            pp, dpp = (f["Clc"], f["dClc"]) if c else (f["Cl"], f["dCl"])
+            x = np.asarray(pp.x, dtype=float)
+            key = (x.size, x.tobytes(), pp.c.shape[0], dpp.c.shape[0])
+            g = groups.setdefault(key, {"x": x, "entries": [], "cols": [], "pp": {}, "gap": []})
+            col = g["pp"].setdefault((id(af), bool(c)), (len(g["pp"]), pp, dpp))[0]
+            g["entries"].append(idx)
+            g["cols"].append(col)
+            if af.has_gaps:
+                g["gap"].append((len(g["entries"]) - 1, af))
+            self.handled[idx] = True
+        self.groups = []
+        for g in groups.values():
+            polys = sorted(g["pp"].values(), key=lambda t: t[0])
+            self.groups.append((
+                np.asarray(g["entries"], dtype=np.intp),
+                g["x"],
+                np.stack([np.asarray(t[1].c, dtype=float) for t in polys], axis=2),
+                np.stack([np.asarray(t[2].c, dtype=float) for t in polys], axis=2),
+                np.asarray(g["cols"], dtype=np.intp),
+                g["gap"],
+            ))
+
+    def __call__(self, alpha: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        """Return the lift coefficient [-] and the lift slope [1/rad] at the angles *alpha* [rad].
+
+        The values of the entries that are not handled are NaN.
+        """
+        alpha = np.asarray(alpha, dtype=float)
+        cl = np.full(self.n, np.nan)
+        slope = np.full(self.n, np.nan)
+        for entries, x, c, dc, cols, gap in self.groups:
+            a = alpha[entries]
+            for pos, af in gap:
+                af._check_gap(a[pos])
+            lo, hi = x[0], x[-1]
+            ac = np.clip(a, lo, hi)
+            cl[entries] = _piecewise_values(x, c, cols, ac)
+            slope[entries] = np.where((a >= lo) & (a <= hi), _piecewise_values(x, dc, cols, ac), 0.0)
+        return cl, slope
 
 # Type alias for convenience
 AirfoilType = LinearAirfoil | TabulatedAirfoil
@@ -920,8 +1209,14 @@ class FlightCondition:
         a rate that is not zero.
     mach : float or None
         Mach number [-] for the Prandtl-Glauert compressibility correction
-        in the vortex-lattice solver. *None* (default) means no correction:
-        every result is the same as today. Must satisfy 0 <= mach < 1.
+        in the vortex-lattice solver. *None* (default) or 0 means no
+        correction. The scope of Ventorum is incompressible flow (Mach below
+        0.3). Between 0.3 and 0.7 the correction is an estimate with the
+        trust rating UNRELIABLE. The validity check and the solvers refuse
+        ``mach >= 0.7`` with :class:`~ventorum.core.errors.ValidityError`.
+        The constructor accepts 0 <= mach < 1. A stated Mach number that
+        differs from ``V_inf`` divided by the ISA speed of sound at the
+        density ``rho`` by more than 0.05 gives a warning and a trust note.
     """
 
     V_inf: float = 50.0
@@ -933,7 +1228,7 @@ class FlightCondition:
     p: float = 0.0  # Roll rate [rad/s], body axes, > 0 right wing down
     q: float = 0.0  # Pitch rate [rad/s], body axes, > 0 nose up
     r: float = 0.0  # Yaw rate [rad/s], body axes, > 0 nose right
-    mach: float | None = None  # Mach number [-] (0 <= mach < 1)
+    mach: float | None = None  # Mach number [-] (0 <= mach < 1; solvers refuse mach >= 0.7)
 
     def __post_init__(self) -> None:
         if self.mach is not None:

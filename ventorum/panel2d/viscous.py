@@ -75,14 +75,40 @@ from ventorum.panel2d.solver import resolve_reference
 from ventorum.utils.parallel import blas_single_thread
 
 __all__ = ["ViscousResult", "StopRules", "solve_viscous", "solve_viscous_flapped", "trace_wake_streamline", "prepare_case", "warm_state",
-           "finish_angle", "row_from_result", "sweep_order", "check_chord_ref", "resolve_body"]
+           "finish_angle", "row_from_result", "sweep_order", "check_chord_ref", "resolve_body", "wake_length_note",
+           "warn_long_wake", "WAKE_LENGTH_LIMIT", "WORK_BUDGET", "COLD_START_BUDGET", "STEP_BUDGET"]
 
 #: Number of times the angle step of a warm start may be halved.
 SUBSTEP_DEPTH = 3
 #: Largest angle step of the continuation from the zero-lift angle [deg].
 CONTINUATION_STEP = 2.0
-#: Work budget of one angle: largest sum of Newton iterations over all its attempts [-] (0: no budget).
+#: Work budget of one angle: largest sum of Newton iterations of the attempts at the angle itself (warm
+#: start, halved angle steps from a converged neighbour, the solve at the angle in the last continuation
+#: step and the cold start at the angle) [-] (0: no budget, also no budget of the continuation path).
 WORK_BUDGET = 250
+#: Work budget of the cold start at the zero-lift angle of the continuation path [-]. Measured: at most
+#: 65 Newton iterations (NACA 4412, Re 1e6, 4 deg, 161 to 401 points, free air and h/c 2). The cold start
+#: tries at most three first estimates, each up to its stage limit (max_iter, 50 by default), so it uses
+#: at most 150 Newton iterations at the default limit; the budget is above that value, so it never cuts
+#: a cold start at the default limit.
+COLD_START_BUDGET = 200
+#: Work budget of one continuation step (from one angle of the path to the next, halved steps
+#: included, without the solves at the angle itself) [-]. Measured: at most 225 Newton iterations in
+#: the sample of COLD_START_BUDGET (whole cases up to 378 in free air and 490 at h/c 2). The budget is
+#: that value with a margin of about 1.3. It is also above the former budget of the whole angle (250),
+#: so a step that the former budget allowed is not cut.
+STEP_BUDGET = 300
+#: Largest wake length over the chord [-] without a warning. The far-wake model drives the wake shape
+#: factor H to 1 at a finite distance behind the trailing edge, so no state exists beyond, and a longer
+#: wake does not converge. Measured at Re 1e6 with the default settings (NACA 0012 and 4412, 0, 4 and
+#: 8 deg, wakes up to 3 chords): H reaches 1 at about 1.8 chords (NACA 4412, 4 deg) to more than 3
+#: chords (8 deg); see test_wake_shape_factor_reaches_one_behind_the_limit. The limit is below the
+#: smallest of these distances. The Squire-Young drag is already converged at a wake length of 0.5
+#: chords (within 0.1 % up to 1.5 chords at 4 deg).
+WAKE_LENGTH_LIMIT = 1.5
+#: Two angles closer than this are the same angle [deg]: for the work budgets, the best attempt at the angle
+#: and the number of continuation steps (a round-off tolerance).
+ANGLE_MATCH_DEG = 1e-9
 #: A failed quasi-simultaneous cold-start attempt that stops above this residual ends the cold start [-].
 COLD_SKIP_RESIDUAL = 1e-2
 
@@ -107,9 +133,19 @@ class StopRules:
         omega = 1, the residual exceeds this factor times its smallest
         earlier value [-]. 0 switches the rule off.
     work_budget : int
-        Largest sum of Newton iterations over all attempts of one angle
-        (warm start, halved angle steps and cold start) [-]. 0 means no
-        budget.
+        Largest sum of Newton iterations of the attempts at one angle
+        (warm start, halved angle steps from a converged neighbour, the
+        solve at the angle in the last step of the continuation path and
+        the cold start at the angle) [-]. 0 means no budget: then the
+        continuation path has no budget either.
+    cold_start_budget : int
+        Largest sum of Newton iterations of the cold start at the
+        zero-lift angle of the continuation path [-] (see
+        :data:`COLD_START_BUDGET`). 0 means no budget.
+    step_budget : int
+        Largest sum of Newton iterations of one step of the continuation
+        path, halved steps included, without the solves at the angle
+        itself [-] (see :data:`STEP_BUDGET`). 0 means no budget.
     lm_trials : int
         Largest number of damping values (one linear solve each) of a
         Levenberg-Marquardt fallback step of a Newton iteration after a
@@ -124,6 +160,8 @@ class StopRules:
     divergence_factor: float = vii.DIVERGENCE_FACTOR
     work_budget: int = WORK_BUDGET
     lm_trials: int = vii.LM_RETRY_TRIALS
+    cold_start_budget: int = COLD_START_BUDGET
+    step_budget: int = STEP_BUDGET
 
     def __post_init__(self):
         if int(self.stall_window) != self.stall_window or self.stall_window < 0:
@@ -136,47 +174,112 @@ class StopRules:
             raise ValueError(f"work_budget must be an integer >= 0, got {self.work_budget}.")
         if int(self.lm_trials) != self.lm_trials or self.lm_trials < 1:
             raise ValueError(f"lm_trials must be an integer >= 1, got {self.lm_trials}.")
+        for name in ("cold_start_budget", "step_budget"):
+            value = getattr(self, name)
+            if int(value) != value or value < 0:
+                raise ValueError(f"{name} must be an integer >= 0, got {value}.")
 
 
 class _BudgetUsedUp(Exception):
     """The work budget of an angle is used up."""
 
 
+class _StageBudgetUsedUp(Exception):
+    """The work budget of a stage of the continuation path is used up."""
+
+
+class _Stage:
+    """A stage of the continuation path: its name, its work budget and its work."""
+
+    def __init__(self, name: str, kind: str, budget: int):
+        self.name = name
+        self.kind = kind
+        self.budget = int(budget)
+        self.iterations = 0
+
+    def label(self) -> str:
+        """Return the name of the budget of the stage."""
+        return f"{self.kind} budget of {self.budget} Newton iterations"
+
+
 class _AngleWork:
-    """Work counters, work budget and early-stop notes of one angle."""
+    """Work counters, work budgets and early-stop notes of one angle.
+
+    ``iterations`` counts the Newton iterations charged to the work
+    budget of the angle (the solves at the angle itself, and all solves
+    outside the continuation path). ``path_iterations`` counts the Newton
+    iterations of the continuation path at other angles (the cold start at
+    the zero-lift angle and the solves of its steps), which are charged to
+    the budget of their stage. The work counters of the result give the
+    sum of the two.
+    """
 
     def __init__(self, alpha, rules: StopRules):
         self.alpha = float(alpha)
         self.rules = rules
         self.iterations = 0
+        self.path_iterations = 0
         self.linear_solves = 0
         self.solves = 0
         self.notes = []
         self.retry_notes = []
         self.best = None
+        self.stage = None
 
-    def cap(self, max_iter: int) -> int:
-        """Return the iteration limit of the next Newton solve."""
+    def _stage_of(self, alpha):
+        """Return the stage that a solve at ``alpha`` [deg] is charged to, or None (the angle budget).
+
+        The last continuation step ends at the angle up to round-off (``a0 + (alpha - a0) * n / n``), so
+        a solve within ANGLE_MATCH_DEG of the angle is a solve at the angle.
+        """
+        if self.stage is None or (alpha is not None and abs(float(alpha) - self.alpha) <= ANGLE_MATCH_DEG):
+            return None
+        return self.stage
+
+    def cap(self, max_iter: int, alpha=None) -> int:
+        """Return the iteration limit of the next Newton solve (at ``alpha`` [deg], None: the angle)."""
         if self.rules.work_budget <= 0:
             return int(max_iter)
+        stage = self._stage_of(alpha)
+        if stage is not None:
+            if stage.budget <= 0:
+                return int(max_iter)
+            return int(min(max_iter, stage.budget - stage.iterations))
         return int(min(max_iter, self.rules.work_budget - self.iterations))
+
+    def check(self, max_iter: int, alpha=None) -> int:
+        """Return the iteration limit of the next Newton solve; raise when its budget is used up."""
+        cap = self.cap(max_iter, alpha)
+        if cap <= 0:
+            raise _StageBudgetUsedUp() if self._stage_of(alpha) is not None else _BudgetUsedUp()
+        return cap
 
     def add(self, setup, res, cap: int, max_iter: int):
         """Count a Newton solve; mark a stop at a limit below max_iter as a budget stop."""
+        stage = self._stage_of(setup.sys.alpha)
         if res.status == "max_iter" and cap < max_iter:
             retry_reason = res.reason if res._first_stop else ""
             res.status = "budget"
-            res.reason = (f"work budget of {self.rules.work_budget} Newton iterations per angle used up "
-                          f"(largest residual {res.residual:.3e})")
+            if stage is None:
+                label = f"work budget of {self.rules.work_budget} Newton iterations per angle"
+            else:
+                label = f"{stage.label()} ({stage.name})"
+            res.reason = f"{label} used up (largest residual {res.residual:.3e})"
             if retry_reason:
                 res.reason += "; " + retry_reason
-            self.note(f"work budget of {self.rules.work_budget} Newton iterations per angle used up")
-        self.iterations += int(res.iterations)
+            if stage is None:
+                self.note(f"{label} used up")
+        if stage is None:
+            self.iterations += int(res.iterations)
+        else:
+            stage.iterations += int(res.iterations)
+            self.path_iterations += int(res.iterations)
         self.linear_solves += int(res.linear_solves)
         self.solves += 1 + bool(res._first_stop)
         if res._first_stop:
             self.retry_notes.append(f"stage at alpha = {setup.sys.alpha:g} deg: {res.reason}")
-        if float(setup.sys.alpha) == self.alpha and (self.best is None or res.residual < self.best[1].residual):
+        if (abs(float(setup.sys.alpha) - self.alpha) <= ANGLE_MATCH_DEG
+                and (self.best is None or res.residual < self.best[1].residual)):
             self.best = (setup, res)
 
     def note(self, text: str):
@@ -185,8 +288,8 @@ class _AngleWork:
             self.notes.append(text)
 
     def counters(self) -> dict:
-        """Return the work counters of the angle."""
-        return {"newton_iterations": self.iterations, "linear_solves": self.linear_solves,
+        """Return the work counters of the angle (continuation path included)."""
+        return {"newton_iterations": self.iterations + self.path_iterations, "linear_solves": self.linear_solves,
                 "newton_solves": self.solves}
 
 
@@ -431,14 +534,14 @@ def _solve_one(setup, start, tol, max_iter, omega0, bk=None, ctl=None, *, retry_
     """Run the Newton solve of one case from a start state.
 
     With ``ctl`` (the work record of the angle) the solve uses its stop
-    rules, its iteration limit is cut to the work budget that is left, and
-    its work is counted. _BudgetUsedUp is raised when no budget is left.
+    rules, its iteration limit is cut to the work budget that is left (the
+    budget of the angle, or the budget of the stage of the continuation
+    path), and its work is counted. _BudgetUsedUp (_StageBudgetUsedUp for
+    a stage) is raised when no budget is left.
     """
     bk = _NUMPY if bk is None else bk
     rules = StopRules() if ctl is None else ctl.rules
-    cap = int(max_iter) if ctl is None else ctl.cap(max_iter)
-    if cap <= 0:
-        raise _BudgetUsedUp()
+    cap = int(max_iter) if ctl is None else ctl.check(max_iter, setup.sys.alpha)
     res = vii.newton_solve([setup], [start], tol=tol, max_iter=cap, omega0=[omega0], stall_window=rules.stall_window,
                            stall_factor=rules.stall_factor, divergence_factor=rules.divergence_factor,
                            lm_trials=rules.lm_trials, retry_window=retry_window, **bk)[0]
@@ -482,7 +585,13 @@ def _cold_solve(setup, tol, max_iter, bk=None, ctl=None, *, retry=True):
             init = vii.initial_state(setup, sweeps=sweeps)
         except np.linalg.LinAlgError:
             continue
-        res = _solve_one(setup, init, tol, max_iter, omega0, bk, ctl, retry_window=retry and sweeps > 0)
+        try:
+            res = _solve_one(setup, init, tol, max_iter, omega0, bk, ctl, retry_window=retry and sweeps > 0)
+        except _StageBudgetUsedUp:
+            # The budget of the stage of the continuation path is used up: keep the best attempt.
+            if best is None:
+                raise
+            break
         if res.converged:
             return res
         if best is None or res.residual < best.residual:
@@ -540,7 +649,10 @@ def solve_viscous(
     mach : float
         Free-stream Mach number [-]; only 0 is supported.
     ncrit : float
-        Critical amplification exponent of the e^N method [-].
+        Critical amplification exponent of the e^N method [-]. The default
+        9 is the usual value of the e^N method for a low-disturbance wind
+        tunnel. It is a code setting: no source in this repository
+        confirms it yet.
     xtr : tuple of float
         Forced transition x/c on the upper and lower side [-] (x from the
         most forward point, over the reference chord); 1.0 (or more) means
@@ -554,10 +666,14 @@ def solve_viscous(
     tol : float
         Convergence limit of the largest absolute residual [-].
     wake_length : float
-        Wake length over the chord [-]. A wake longer than about 1.5
-        does not converge: the wake shape factor of the wake model
-        reaches 1 at a finite distance behind the trailing edge (see
-        ``docs/theory/panel2d_viscous.md``).
+        Wake length over the chord [-]. The default 1 is a code setting,
+        not from a source. Measured reason: the Squire-Young drag changes
+        by less than 0.1 % from 0.5 to 1.5 chords (NACA 4412, Re 1e6,
+        4 deg; tests/test_panel2d_viscous_wake.py). A wake longer than
+        :data:`WAKE_LENGTH_LIMIT` (1.5) gives a UserWarning and a note in
+        the reason of each angle: it does not converge, because the wake
+        shape factor of the wake model reaches 1 at a finite distance
+        behind the trailing edge (see ``docs/theory/panel2d_viscous.md``).
     n_wake : int
         Number of wake panels.
     height_reference : {"pivot", "trailing_edge"}
@@ -582,8 +698,11 @@ def solve_viscous(
         the residual exceeds this factor times its smallest earlier value
         [-]. 0 switches the rule off.
     work_budget : int
-        Largest sum of Newton iterations over all attempts of one angle
-        [-]. 0 means no budget.
+        Largest sum of Newton iterations of the attempts at one angle
+        [-]. The continuation path from the zero-lift angle has its own
+        budgets (:data:`COLD_START_BUDGET` for its cold start and
+        :data:`STEP_BUDGET` for each step, see :class:`StopRules`). 0
+        means no budget, also on the continuation path.
     lm_trials : int
         Largest number of damping values (one linear solve each) of a
         Levenberg-Marquardt fallback step of a Newton iteration after a
@@ -630,6 +749,7 @@ def solve_viscous(
     rules = StopRules(stall_window=stall_window, stall_factor=stall_factor, divergence_factor=divergence_factor,
                       work_budget=work_budget, lm_trials=lm_trials)
     body, chord_ref, moment_ref, pivot = resolve_body(bodies, chord_ref, moment_ref)
+    wake_note = warn_long_wake(wake_length, "solve_viscous")
     is_scalar = np.ndim(alpha_deg) == 0
     alphas = np.atleast_1d(np.asarray(alpha_deg, dtype=np.float64))
     order_up, order_dn = sweep_order(alphas)
@@ -652,6 +772,7 @@ def solve_viscous(
             if out[a]["converged"]:
                 prev = state
     rows = [out[float(a)] for a in alphas]
+    add_note(rows, wake_note)
     bad = [r for r in rows if not r["converged"]]
     for r in bad:
         warnings.warn(f"solve_viscous: alpha = {r['alpha']:g} deg did not converge: {r['reason']}",
@@ -707,6 +828,60 @@ def check_chord_ref(chord_ref):
     if not np.isfinite(c) or c <= 0.0:
         raise ValueError(f"chord_ref must be a positive length, got {chord_ref}.")
     return c
+
+
+def wake_length_note(wake_length) -> str | None:
+    """Return the note of a wake longer than :data:`WAKE_LENGTH_LIMIT`, or None.
+
+    Parameters
+    ----------
+    wake_length : float
+        Wake length over the reference chord [-].
+
+    Returns
+    -------
+    str or None
+        The reason text of a long wake, None for a wake length up to the
+        limit.
+    """
+    if not float(wake_length) > WAKE_LENGTH_LIMIT:
+        return None
+    return (f"wake length {float(wake_length):g} chords is above {WAKE_LENGTH_LIMIT:g} chords: the far-wake model "
+            "drives the wake shape factor H to 1 at a finite distance behind the trailing edge (about 1.8 chords or "
+            "more in the measured sample), so a longer "
+            "wake does not converge; the Squire-Young drag is converged at a wake length of 0.5 chords")
+
+
+def warn_long_wake(wake_length, solver: str, stacklevel: int = 3) -> str | None:
+    """Give a UserWarning for a wake longer than :data:`WAKE_LENGTH_LIMIT`; return its note or None.
+
+    Parameters
+    ----------
+    wake_length : float
+        Wake length over the reference chord [-].
+    solver : str
+        Name of the calling solver (for the message).
+    stacklevel : int
+        Stack level of the warning.
+
+    Returns
+    -------
+    str or None
+        The note (see :func:`wake_length_note`).
+    """
+    note = wake_length_note(wake_length)
+    if note is not None:
+        warnings.warn(f"{solver}: {note}.", UserWarning, stacklevel=stacklevel)
+    return note
+
+
+def add_note(rows, note: str | None):
+    """Append ``note`` to the reason of each result row (no change when ``note`` is None)."""
+    if note is None:
+        return
+    for r in rows:
+        if note not in r["reason"]:
+            r["reason"] = f"{r['reason']}; {note}" if r["reason"] else note
 
 
 def sweep_order(alphas):
@@ -854,39 +1029,119 @@ def _cold_path(body, alpha, re, tol, max_iter, kw, bk=None, ctl=None, cache=None
     When the angle is more than CONTINUATION_STEP from the inviscid
     zero-lift angle, the solver starts cold at the zero-lift angle and
     continues to the angle in steps of at most CONTINUATION_STEP (each with
-    the halving of :func:`_warm_path`); the intermediate solutions serve as
+    the halving of :func:`_warm_path`; both tests have the round-off
+    tolerance ANGLE_MATCH_DEG, see :func:`_continuation_steps`); the intermediate solutions serve as
     start values only. When that start fails, a cold start at the angle
     itself is the last attempt. ``cache`` (a dict per sweep) keeps the cold
     start at the zero-lift angle, which is the same for every angle of a
     sweep; a later angle reuses it instead of solving it again.
+
+    Work budgets (with ``ctl``): the cold start at the zero-lift angle has
+    the budget ``cold_start_budget`` and each continuation step the budget
+    ``step_budget`` of the stop rules; the solves at the angle itself use
+    the budget of the angle. A stage of the path that fails (budget used
+    up, or no convergence) is named in a note of the angle, and the cold
+    start at the angle follows.
     """
     a0 = zero_lift_angle(body, kw)
-    if abs(alpha - a0) > CONTINUATION_STEP:
+    n = _continuation_steps(alpha, a0)
+    if n > 0:
+        if ctl is not None:
+            # No budget left at the angle: the continuation path cannot end in a solve at the angle.
+            ctl.check(max_iter, alpha)
+        rules = StopRules() if ctl is None else ctl.rules
+        cold_name = f"cold start at the zero-lift angle {a0:.4g} deg"
         if cache is not None and a0 in cache:
             s0, r0 = cache[a0]
         else:
+            s0, r0 = None, None
+            stage = _enter_stage(ctl, cold_name, "cold-start", rules.cold_start_budget)
             try:
                 s0 = prepare_case(body, a0, re, **kw)
                 r0 = _cold_solve(s0, tol, max_iter, bk, ctl, retry=False)
             except cp.WakeGroundError:
                 s0, r0 = None, None
-            # A cold start cut by the work budget depends on the angle: it is not kept.
-            if cache is not None and (ctl is None or ctl.cap(max_iter) > 0):
+            except _StageBudgetUsedUp:
+                r0 = None
+                _path_note(ctl, f"{cold_name} stopped: {stage.label()} used up")
+            finally:
+                _leave_stage(ctl)
+            # The cold start at the zero-lift angle has its own budget: it is the same for every angle.
+            if cache is not None:
                 cache[a0] = (s0, r0)
+        if r0 is not None and not r0.converged:
+            _path_note(ctl, f"{cold_name} did not converge: {r0.reason}")
         if r0 is not None and r0.converged:
-            n = int(np.ceil(abs(alpha - a0) / CONTINUATION_STEP))
             prev = (s0, r0.state)
             setup, res = s0, r0
             for k in range(1, n + 1):
                 a = a0 + (alpha - a0) * k / n
-                setup, res = _warm_path(body, a, re, prev, tol, max_iter, kw, 0, bk, ctl=ctl)
-                if not res.converged:
+                step_name = f"continuation step {k} of {n}, from {prev[0].sys.alpha:.4g} deg to {a:.4g} deg"
+                stage = _enter_stage(ctl, step_name, "continuation-step", rules.step_budget)
+                try:
+                    setup, res = _warm_path(body, a, re, prev, tol, max_iter, kw, 0, bk, ctl=ctl)
+                except _StageBudgetUsedUp:
+                    res = None
+                finally:
+                    _leave_stage(ctl)
+                if res is None or not res.converged:
+                    if stage is not None and ctl.rules.work_budget > 0 and 0 < stage.budget <= stage.iterations:
+                        _path_note(ctl, f"{step_name} stopped: {stage.label()} used up")
+                    else:
+                        _path_note(ctl, f"{step_name} did not converge: {res.reason}")
                     break
                 prev = (setup, res.state)
-            if res.converged:
+            if res is not None and res.converged:
                 return setup, res
     setup = prepare_case(body, alpha, re, **kw)
     return setup, _cold_solve(setup, tol, max_iter, bk, ctl)
+
+
+def _continuation_steps(alpha, a0) -> int:
+    """Return the number of continuation steps from the zero-lift angle to an angle (0: no continuation path).
+
+    The path is used when the angle is more than CONTINUATION_STEP from the zero-lift angle, and its
+    steps are at most CONTINUATION_STEP long. Both tests use the round-off tolerance ANGLE_MATCH_DEG, so
+    an angle a whole number of steps from the zero-lift angle gives the same steps on every platform
+    (for a symmetric section the zero-lift angle is 0 deg only up to a round-off of either sign).
+
+    Parameters
+    ----------
+    alpha : float
+        Angle of attack [deg].
+    a0 : float
+        Inviscid zero-lift angle [deg] (see :func:`zero_lift_angle`).
+
+    Returns
+    -------
+    int
+        Number of continuation steps, 0 when the angle is within CONTINUATION_STEP (plus the tolerance)
+        of the zero-lift angle.
+    """
+    distance = abs(float(alpha) - float(a0))
+    if distance <= CONTINUATION_STEP + ANGLE_MATCH_DEG:
+        return 0
+    return int(np.ceil((distance - ANGLE_MATCH_DEG) / CONTINUATION_STEP))
+
+
+def _enter_stage(ctl, name: str, kind: str, budget: int):
+    """Start a stage of the continuation path in the work record ``ctl``; return the stage (None without ctl)."""
+    if ctl is None:
+        return None
+    ctl.stage = _Stage(name, kind, budget)
+    return ctl.stage
+
+
+def _leave_stage(ctl):
+    """End the stage of the continuation path in the work record ``ctl``."""
+    if ctl is not None:
+        ctl.stage = None
+
+
+def _path_note(ctl, text: str):
+    """Record the failed stage of the continuation path in the notes of the angle."""
+    if ctl is not None:
+        ctl.note("continuation path: " + text)
 
 
 def _solve_angle(body, alpha, re, prev, tol, max_iter, kw, rules=None, cache=None):
@@ -1029,7 +1284,7 @@ def solve_viscous_flapped(
     n_panels = options.pop("n_panels", None)
 
     if abs(deflection_deg) < 1e-12:
-        res = solve_viscous(shape, alpha_deg, Re, mach=mach, **options)
+        res = solve_viscous(shape, alpha_deg, Re, mach=mach, **options)  # it gives the long-wake warning
         is_scalar = np.ndim(alpha_deg) == 0
         if is_scalar:
             res.details = {
@@ -1058,6 +1313,7 @@ def solve_viscous_flapped(
     moment_ref_opt = options.pop("moment_ref", None)
     _, chord_ref, moment_ref, pivot = resolve_body(base_shape, chord_ref_opt, moment_ref_opt)
 
+    # Default ncrit 9 and wake length 1 c: the origins are in solve_viscous.
     ncrit = options.pop("ncrit", 9.0)
     xtr = options.pop("xtr", (1.0, 1.0))
     height = options.pop("height", None)
@@ -1080,6 +1336,10 @@ def solve_viscous_flapped(
 
     rules = StopRules(stall_window=stall_window, stall_factor=stall_factor, divergence_factor=divergence_factor,
                       work_budget=work_budget, lm_trials=lm_trials)
+    wake_note = warn_long_wake(wake_length, "solve_viscous_flapped")
+    # Work cap of the whole deflection path: 20 angle budgets. A code
+    # setting, not from a source; no measurement in the code or its tests
+    # supports the factor 20.
     total_cap = 20 * work_budget if work_budget > 0 else 0
     kw = dict(ncrit=ncrit, xtr=xtr, height=height, height_reference=height_reference,
               wake_length=wake_length, n_wake=n_wake, chord_ref=chord_ref, moment_ref=moment_ref, pivot=pivot)
@@ -1148,6 +1408,8 @@ def solve_viscous_flapped(
 
         target_d = float(deflection_deg)
         step_max = float(step_deg)
+        # Smallest deflection step [deg] of the halving. A code setting, not
+        # from a source; no measurement in the code or its tests supports it.
         min_step = 0.25
         sgn = 1.0 if target_d > 0.0 else -1.0
 
@@ -1309,6 +1571,7 @@ def solve_viscous_flapped(
                 prev = state
 
     rows = [out[float(a)] for a in alphas]
+    add_note(rows, wake_note)
     bad = [r for r in rows if not r["converged"]]
     for r in bad:
         warnings.warn(f"solve_viscous_flapped: alpha = {r['alpha']:g} deg did not converge: {r['reason']}",

@@ -67,7 +67,7 @@ Example with `aircraft`:
 
 ## Trust and stability verdicts
 
-Every tool that solves gives the trust rating and the warnings of the solver result. The ratings are `HIGH`, `MODERATE`, `LOW` and `UNRELIABLE`. They are heuristic: read the warnings.
+Every tool that solves gives the trust rating and the warnings of the solver result. The ratings are `HIGH`, `MODERATE`, `LOW` and `UNRELIABLE`. They come from an error model calibrated against known-answer cases, with uncalibrated envelope rules as caps (see the trust score chapter of the theory manual): read the warnings.
 
 - `ventorum_wing_analysis`, `ventorum_panel_analysis`, `ventorum_trim`, `ventorum_derivative_matrix`, `ventorum_error_bars` (the fine level, the user mesh) and `ventorum_mesh_convergence` (the recommended mesh, else the reference mesh: see `trust_of`) give `trust` with `score`, `rating`, `warnings`, `recommendations`, `factors` and the heuristic bands.
 - `ventorum_polar_sweep`: each row of `polar_table` gives `trust_score`, `trust_rating` and `warnings`, the short labels of its warnings (for example `"Severe stall risk"`; at most 3, the count of the others in `warnings_not_shown`). `polar_summary` gives `trust_rating_lowest`, `trust_score_min`, `trust_alpha_deg_at_lowest` and `warnings`: each kind of warning once, as `{"warning": full text at the angle with the lowest score, "alpha_deg": [angles that have it]}` (at most 6, the count of the others in `warnings_not_shown`). These summary keys are also at `detail_level="summary"`, which has no `polar_table`. The executive summary names the lowest rating, its angle and its first warnings.

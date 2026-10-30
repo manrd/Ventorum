@@ -87,6 +87,10 @@ The solver also refuses a deflected control surface, with the error `ValueError`
 
 Inside the envelope, the model has the limits of Lanchester–Prandtl lifting-line theory: low aspect ratio, stall and compressibility are outside it. The trust score lowers the rating for them (see [Trust score](trust_score.md)).
 
+Tips with a finite chord: for a rectangular wing the induced drag of the Fourier solution is 4 to 7 % above the lifting-surface value. To leading order $1/e = (\ln A + k)/4$, and the lifting line and a lifting surface have different constants $k$, so the difference in $e$ falls only like $1/\ln A$ as the aspect ratio $A$ grows (see [Numerical lifting line](numerical_lifting_line.md), Envelope). Elliptic wings show no difference. A surface with a tip chord above `ventorum.core.trust.FINITE_TIP_CHORD_RATIO` (0.1) times its largest chord gets a trust note (no penalty).
+
+Number of terms: at a large aspect ratio the series needs about 50 terms or more. The number of terms is `n_panels`. Fewer than `ventorum.core.trust.FOURIER_MIN_TERMS` (50) terms at an aspect ratio above `ventorum.core.trust.FOURIER_TERMS_AR` (20) give a trust warning (no penalty).
+
 ## Implementation
 
 - `ventorum.solvers.fourier.FourierSolver`: `solve` (one angle) and `solve_sweep` (one factorisation, many right-hand sides).

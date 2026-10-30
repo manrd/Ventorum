@@ -17,6 +17,14 @@ thin-airfoil theory, Glauert 1927): the source passes the flapped
 :class:`ventorum.airfoil.AirfoilShape`, which holds that reference
 geometry. The options ``chord_ref`` and ``moment_ref`` override them.
 
+Lift definitions. In ground effect the 2D solver gives two lift
+coefficients: ``Cl`` is the surface pressure (force) lift and
+``Cl_circulation`` is ``2 Gamma / c`` of the total circulation. They
+differ near a wall (Coulliette and Plotkin 1996). A polar in ground effect
+keeps the pressure lift in ``Cl_data`` and stores the circulation lift in
+``Cl_circulation_data``. A free-air polar has only ``Cl_data``: there the
+two definitions are equal.
+
 The cache key holds the package version, the solver revision
 (``ventorum.panel2d.SOLVER_REVISION``) and a sha256 fingerprint of the source
 files of the 2D packages (:func:`solver_fingerprint`), so a polar of an
@@ -27,7 +35,9 @@ transonic and low Reynolds number airfoils, AIAA Journal; Drela, M., 1989,
 XFOIL: An analysis and design system for low Reynolds number airfoils;
 Katz, J. and Plotkin, A., 2001, Low-Speed Aerodynamics, 2nd ed. (ground effect
 by method of images); Glauert, H., 1927, Theoretical relationships for an
-aerofoil with hinged flap, R&M 1095.
+aerofoil with hinged flap, R&M 1095; Coulliette, C. and Plotkin, A., 1996,
+Aerofoil ground effect revisited, The Aeronautical Journal 100 (lift
+definitions in ground effect).
 """
 
 from __future__ import annotations
@@ -49,7 +59,7 @@ from ventorum.core.datatypes import TabulatedAirfoil
 from ventorum.panel2d.solver import check_point
 from ventorum.panel2d.viscous import check_chord_ref, solve_viscous
 
-__all__ = ["Ventorum2DPolarSource", "solver_fingerprint", "solver_revision"]
+__all__ = ["Ventorum2DPolarSource", "gap_mask", "solver_fingerprint", "solver_revision"]
 
 #: Packages whose source files form the solver fingerprint.
 _FINGERPRINT_PACKAGES = ("panel2d", "ibl2d", "airfoil")
@@ -131,6 +141,41 @@ def _json_value(value: object) -> object:
     return repr(value)
 
 
+def gap_mask(requested_deg: Sequence[float] | np.ndarray, kept_deg: Sequence[float] | np.ndarray) -> np.ndarray:
+    """Return the gap mask of a polar: the table intervals that bridge a dropped angle.
+
+    Parameters
+    ----------
+    requested_deg : array_like
+        Requested angles of attack [deg].
+    kept_deg : array_like
+        Converged angles that the polar keeps [deg], a subset of
+        *requested_deg*.
+
+    Returns
+    -------
+    np.ndarray
+        One bool per interval between neighbouring kept angles (sorted),
+        shape ``(n_kept - 1,)``. True when a requested angle strictly
+        inside the interval was dropped (see
+        :attr:`ventorum.core.datatypes.TabulatedAirfoil.gap_mask`).
+        Dropped angles below the first or above the last kept angle are
+        outside the table and do not mark an interval.
+    """
+    req = np.unique(np.asarray(requested_deg, dtype=float))
+    kept = np.unique(np.asarray(kept_deg, dtype=float))
+    if kept.size < 2:
+        return np.zeros(0, dtype=bool)
+    is_kept = np.array([bool(np.any(np.isclose(kept, a, rtol=0.0, atol=1e-6))) for a in req])
+    dropped = req[~is_kept]
+    mask = np.zeros(kept.size - 1, dtype=bool)
+    if dropped.size:
+        idx = np.searchsorted(kept, dropped, side="right") - 1
+        inside = (idx >= 0) & (idx < mask.size)
+        mask[idx[inside]] = True
+    return mask
+
+
 def _reference_key(shape: Any) -> list[float] | None:
     """Return the stored reference geometry of a shape for the cache key, or None."""
     ref = getattr(shape, "reference", None)
@@ -164,8 +209,9 @@ class Ventorum2DPolarSource:
         True: :meth:`polar` takes the ``height`` keyword.
     last_dropped : int
         Number of requested angles that did not converge in the last
-        :meth:`polar` call that ran the solver (the polar name also
-        states it).
+        :meth:`polar` call (the polar name also states it). The polar
+        keeps the intervals that bridge a dropped angle in its gap mask
+        (:attr:`ventorum.core.datatypes.TabulatedAirfoil.gap_mask`).
     """
 
     supports_ground: bool = True
@@ -329,7 +375,13 @@ class Ventorum2DPolarSource:
         TabulatedAirfoil
             The section polar over the converged requested angles. Angles
             are in radians. Non-converged angles are dropped; the polar
-            name and :attr:`last_dropped` give their number.
+            name and :attr:`last_dropped` give their number, and the gap
+            mask of the polar marks each table interval that bridges a
+            dropped angle (a lookup there gives a warning, once per
+            polar). ``Cl_data`` is
+            the pressure lift. With a *height*, ``Cl_circulation_data``
+            holds the circulation lift ``2 Gamma / c`` [-]; in free air it
+            is None.
         """
         try:
             mach_val = float(mach)
@@ -407,9 +459,14 @@ class Ventorum2DPolarSource:
                 "options": {k: _json_value(v) for k, v in sorted(settings.items())},
             }
             hit = self._cache.get(payload)
-            if hit is not None:
-                # The cached polar holds the converged angles only.
+            # A ground-effect entry written before the circulation lift was
+            # stored is a miss: the solver runs again and replaces it.
+            if hit is not None and (h_val is None or hit.Cl_circulation_data is not None):
+                # The cached polar holds the converged angles only: the requested
+                # angles give the dropped angles and the gap mask again.
                 self.last_dropped = int(unique_req.size - np.atleast_1d(hit.alpha).size)
+                if self.last_dropped:
+                    hit.gap_mask = gap_mask(unique_req, np.degrees(np.atleast_1d(hit.alpha)))
                 return hit
 
         res = solve_viscous(
@@ -425,12 +482,17 @@ class Ventorum2DPolarSource:
         res_cls = np.atleast_1d(np.asarray(res.Cl, dtype=float))
         res_cds = np.atleast_1d(np.asarray(res.Cd, dtype=float))
         res_cms = np.atleast_1d(np.asarray(res.Cm, dtype=float))
+        # The circulation lift is stored in ground effect only (equal to Cl in free air).
+        res_circ = (
+            None if h_val is None else np.atleast_1d(np.asarray(res.Cl_circulation, dtype=float))
+        )
         res_conv = np.atleast_1d(np.asarray(res.converged, dtype=bool))
 
         kept_alphas: list[float] = []
         kept_cls: list[float] = []
         kept_cds: list[float] = []
         kept_cms: list[float] = []
+        kept_circ: list[float] = []
 
         for a in unique_req:
             matches = np.flatnonzero(np.isclose(res_alphas, a, atol=1e-6))
@@ -441,6 +503,8 @@ class Ventorum2DPolarSource:
                     kept_cls.append(float(res_cls[idx]))
                     kept_cds.append(float(res_cds[idx]))
                     kept_cms.append(float(res_cms[idx]))
+                    if res_circ is not None:
+                        kept_circ.append(float(res_circ[idx]))
 
         n_requested = unique_req.size
         dropped = n_requested - len(kept_alphas)
@@ -458,6 +522,8 @@ class Ventorum2DPolarSource:
             Cd_data=np.asarray(kept_cds, dtype=float),
             Cm_data=np.asarray(kept_cms, dtype=float),
             Re=re_val,
+            Cl_circulation_data=None if h_val is None else np.asarray(kept_circ, dtype=float),
+            gap_mask=gap_mask(unique_req, kept_alphas) if dropped else None,
         )
 
         if payload is not None and self._cache is not None:

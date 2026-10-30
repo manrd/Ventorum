@@ -34,6 +34,53 @@ def _condition(alpha=4.0, **kwargs):
     return FlightCondition(V_inf=30.0, alpha=np.radians(alpha), **kwargs)
 
 
+def _defect_corrected(result, polar):
+    """Return the target strip lift [-]: polar - converged 2D reference + same-mesh 2D curve.
+
+    The coupling reads the departure of the polar from the converged
+    inviscid 2D section and adds it to the same-mesh 2D section, as the
+    vortex-lattice coupling does. The polar lift is checked at the
+    effective angle.
+    """
+    details = result.details
+    np.testing.assert_allclose(details["cl_polar"], polar.Cl(details["alpha_eff"]), atol=1e-12, rtol=0)
+    return details["cl_polar"] - details["cl_section_converged"] + details["cl_section_mesh"]
+
+
+def _capture_references(monkeypatch):
+    """Record the converged 2D reference curve of each strip (public strip order)."""
+    from ventorum.viscous import alpha_correction as module
+
+    captured = {}
+    original = module._PanelCoupling.references
+
+    def record(self, ground, uses_height, curves):
+        refs = original(self, ground, uses_height, curves)
+        captured["refs"] = list(self.full(np.array(refs, dtype=object)))
+        return refs
+
+    monkeypatch.setattr(module._PanelCoupling, "references", record)
+    return captured
+
+
+class _ReferencePolar(LinearAirfoil):
+    """Polar that is the converged inviscid 2D reference curve of one strip (exact, no table)."""
+
+    def __init__(self, curve, cm=None):
+        super().__init__(a0=2 * np.pi)
+        self.curve = curve
+        self.cm = cm
+
+    def Cl(self, angle):
+        return np.vectorize(lambda a: self.curve.evaluate(a)[0], otypes=[float])(np.asarray(angle, dtype=float))
+
+    def Cm(self, angle):
+        if self.cm is None:
+            return super().Cm(angle)
+        co, si = np.cos(angle), np.sin(angle)
+        return self.cm[0] + self.cm[1] * co**2 + self.cm[2] * co * si + self.cm[3] * si**2
+
+
 def _solve(polar=None, *, wing=None, settings=None, conditions=None, **kwargs):
     return solve_viscous(
         _wing() if wing is None else wing,
@@ -136,11 +183,15 @@ def test_partition_matches_finite_difference(half):
     assert solver.factorization_count == 1
 
 
-def test_identity_polar_gives_zero_correction():
-    first = _solve()
-    a = first.details["lift_slope_section"]
-    a0 = first.details["alpha0_section"]
-    polars = {i: LinearAirfoil(a0=slope, alpha_L0=zero) for i, (slope, zero) in enumerate(zip(a, a0))}
+def test_identity_polar_gives_zero_correction(monkeypatch):
+    # The identity polar is now the converged inviscid 2D section (the
+    # coupling reads the departure of the polar from it, as the
+    # vortex-lattice coupling does). Before, it was the same-mesh section
+    # line; that polar now gets the mesh-error correction
+    # (test_same_mesh_polar_gives_the_mesh_error_correction).
+    captured = _capture_references(monkeypatch)
+    _solve()
+    polars = {i: _ReferencePolar(curve) for i, curve in enumerate(captured["refs"])}
     result = _solve(polars)
     inv = make_solver("panel3d").solve(_wing(), _condition(), _settings())
     assert result.converged
@@ -151,11 +202,14 @@ def test_identity_polar_gives_zero_correction():
 
 
 def test_cl_matches_polar():
+    # The strip lift now matches the defect-corrected polar (polar minus the
+    # converged 2D section plus the same-mesh 2D section), not the polar
+    # itself: the mesh error of the section is not a viscous correction.
     polar = LinearAirfoil(a0=4.5)
     result = _solve(polar)
     assert result.converged
     cl = np.concatenate([sw.Cl for sw in result.spanwise])
-    np.testing.assert_allclose(cl, polar.Cl(result.details["alpha_eff"]), atol=1e-10, rtol=0)
+    np.testing.assert_allclose(cl, _defect_corrected(result, polar), atol=1e-10, rtol=0)
     area = result.details["strip_area"]
     assert result.totals.CL == pytest.approx(np.dot(cl, area) / 8, abs=1e-12)
 
@@ -183,8 +237,9 @@ def test_pressure_kutta_closure():
     result = _solve(settings=_settings(panel_kutta="pressure"))
     assert result.converged
     assert np.max(np.abs(result.details["trailing_edge_pressure_jump"])) < 1e-8
+    # Defect-corrected polar (see test_cl_matches_polar).
     np.testing.assert_allclose(result.spanwise[0].Cl,
-                               5 * result.details["alpha_eff"], atol=1e-10, rtol=0)
+                               _defect_corrected(result, LinearAirfoil(a0=5.0)), atol=1e-10, rtol=0)
 
 
 def test_sweep_reuses_one_factorization(monkeypatch):
@@ -246,9 +301,16 @@ def test_stall_branch():
         assert branch.converged
         assert branch.totals.e == pytest.approx(
             branch.totals.CL**2 / (np.pi * branch.totals.AR * branch.totals.CDi))
-        np.testing.assert_allclose(branch.spanwise[0].Cl,
-                                   polar.Cl(branch.details["alpha_eff"]), atol=1e-10)
-    assert all(flag == "post-stall, non-unique" for flag in result.details["strip_flags"])
+        # Defect-corrected polar (see test_cl_matches_polar).
+        np.testing.assert_allclose(branch.spanwise[0].Cl, _defect_corrected(branch, polar), atol=1e-10)
+    # With the converged 2D reference, the target lift differs from the
+    # polar by the mesh error of the section, and the primary Newton
+    # solution is now a mixed branch (tip strips attached). The fully
+    # stalled solution is still one of the branches; before, it was the
+    # primary solution.
+    branches = result.details.get("branches", [result])
+    assert len(branches) > 1
+    assert any(all(flag == "post-stall, non-unique" for flag in b.details["strip_flags"]) for b in branches)
 
 
 def test_profile_drag_and_moment():
@@ -273,7 +335,9 @@ def test_ground_supported(kutta):
                     conditions=_condition(h=2.0))
     assert result.converged
     assert result.details["factorization_count"] == 1
-    np.testing.assert_allclose(result.spanwise[0].Cl, 5 * result.details["alpha_eff"], atol=1e-10)
+    # Defect-corrected polar (see test_cl_matches_polar).
+    np.testing.assert_allclose(result.spanwise[0].Cl, _defect_corrected(result, LinearAirfoil(a0=5.0)),
+                               atol=1e-10)
 
 
 def test_krylov_refused():
@@ -363,6 +427,51 @@ def test_flap_offset_and_moment():
     assert np.all(np.isfinite(result.spanwise[0].Cm_section))
 
 
+def test_converged_flapped_section_polar_gives_zero_correction(monkeypatch):
+    """A polar equal to the converged flapped section gives a CL correction below 0.1 %.
+
+    NACA 2412 wing with a 5 deg full-span flap at 0.75 chord, n_chord 10.
+    The converged and the same-mesh references are both the flapped cut
+    section, so the coupling has no thin-airfoil flap offset. With the
+    offset, this polar got 0.10 deg and a CL 1.1 % lower (the flap
+    counted twice). The polar comes from a source that gets the flap, so
+    no Glauert shift is added to it.
+    """
+    from ventorum.viscous import alpha_correction as module
+
+    wing = _wing(shape="2412")
+    wing.controls = [ControlSurface("flap", 0, 1, 0.75, np.radians(5))]
+    captured = _capture_references(monkeypatch)
+    _solve(wing=wing)
+    curves = {id(c): c for c in captured["refs"]}
+    assert len(curves) == 1
+
+    class Source:
+        def __init__(self):
+            self.flaps = []
+
+        def polar(self, *, section, Re, alphas_deg, flap=None, height=None):
+            self.flaps.append(flap)
+            polar = _ReferencePolar(captured["refs"][0])
+            polar.alpha = np.radians(np.asarray(alphas_deg, dtype=float))
+            polar.name = "converged flapped section"
+            return polar
+
+    source = Source()
+    original = module.blend_tabulated
+    monkeypatch.setattr(module, "blend_tabulated",
+                        lambda first, second, weight: first if first is second else original(first, second, weight))
+    result = _solve(source, wing=wing)
+    inv = make_solver("panel3d").solve(wing, _condition(), _settings())
+    assert result.converged
+    assert all(flap is not None and flap[2] == pytest.approx(5.0) for flap in source.flaps)
+    np.testing.assert_array_equal(result.details["flap_offset"], 0.0)
+    change = result.totals.CL / inv.totals.CL - 1.0
+    print(f"flapped identity: max |delta| {np.degrees(np.max(np.abs(result.details['delta']))):.2e} deg, "
+          f"CL change {100 * change:+.5f} %")
+    assert abs(change) < 1e-3
+
+
 def test_unconverged_has_no_branch_verdict():
     with pytest.warns(RuntimeWarning, match="did not converge"):
         result = _solve(max_iter=0)
@@ -389,10 +498,17 @@ def test_ground_polar_section_reference_uses_images():
     assert ground.converged
     assert any(h is not None for h in source.heights)
     assert np.max(np.abs(ground.details["lift_slope_section"] - free.details["lift_slope_section"])) > 1e-3
-    np.testing.assert_allclose(ground.spanwise[0].Cl, 5 * ground.details["alpha_eff"], atol=1e-10)
+    # Defect-corrected polar (see test_cl_matches_polar); the converged 2D
+    # reference of a ground strip also has the ground.
+    np.testing.assert_allclose(ground.spanwise[0].Cl, _defect_corrected(ground, LinearAirfoil(a0=5.0)),
+                               atol=1e-10)
+    assert np.max(np.abs(ground.details["cl_section_converged"] - free.details["cl_section_converged"])) > 1e-3
 
 
-def test_identity_moment_preserves_all_loads():
+def test_identity_moment_preserves_all_loads(monkeypatch):
+    # The lift identity is now the converged inviscid 2D section (see
+    # test_identity_polar_gives_zero_correction); the moment identity stays
+    # the same-mesh moment quadratic of the section.
     from ventorum.panel3d.mesh import _close_trailing_edge, _resample_section, _target_x
     from ventorum.solvers.panel3d import _morino_section_line
 
@@ -400,20 +516,43 @@ def test_identity_moment_preserves_all_loads():
     yu, yl = _resample_section(airfoil("2412").coords, x)
     yu, yl = _close_trailing_edge(x, yu, yl)
     polygon = np.vstack([np.column_stack([x[::-1], yu[::-1]]), np.column_stack([x[1:], yl[1:]])])
-    slope, zero, cm = _morino_section_line(polygon)
-
-    class IdentityPolar(LinearAirfoil):
-        def Cm(self, angle):
-            co, si = np.cos(angle), np.sin(angle)
-            return cm[0] + cm[1] * co**2 + cm[2] * co * si + cm[3] * si**2
+    _, _, cm = _morino_section_line(polygon)
 
     wing = _wing(shape="2412")
-    result = _solve(IdentityPolar(a0=slope, alpha_L0=zero), wing=wing)
+    captured = _capture_references(monkeypatch)
+    _solve(wing=wing)
+    polars = {i: _ReferencePolar(curve, cm) for i, curve in enumerate(captured["refs"])}
+    result = _solve(polars, wing=wing)
     inv = make_solver("panel3d").solve(wing, _condition(), _settings())
     assert result.converged
     assert np.max(np.abs(result.details["delta"])) < 1e-9
     for key in ("CL", "CDi", "Cm", "CY", "Cl", "Cn"):
         assert getattr(result.totals, key) == pytest.approx(getattr(inv.totals, key), abs=1e-12)
+
+
+def test_same_mesh_polar_gives_the_mesh_error_correction():
+    """The same-mesh section line as the polar now gets the mesh-error correction.
+
+    Before the converged 2D reference, this polar was the identity. Now it
+    differs from the converged section by the discretization error of the
+    cut section (a smaller lift slope on a coarse chordwise mesh), so the
+    coupled CL is lower than the inviscid CL by about that error.
+    """
+    first = _solve()
+    a = first.details["lift_slope_section"]
+    a0 = first.details["alpha0_section"]
+    polars = {i: LinearAirfoil(a0=slope, alpha_L0=zero) for i, (slope, zero) in enumerate(zip(a, a0))}
+    result = _solve(polars)
+    inv = make_solver("panel3d").solve(_wing(), _condition(), _settings())
+    assert result.converged
+    assert np.max(np.abs(result.details["delta"])) > 1e-3
+    assert result.totals.CL < inv.totals.CL
+    cl = np.concatenate([sw.Cl for sw in result.spanwise])
+    expected = (np.array([polars[i].Cl(av) for i, av in enumerate(result.details["alpha_eff"])])
+                - result.details["cl_section_converged"] + result.details["cl_section_mesh"])
+    np.testing.assert_allclose(cl, expected, atol=1e-10, rtol=0)
+    slope_error = 1 - a / (result.details["cl_section_converged"] / result.details["alpha_eff"])
+    print(f"CL change {result.totals.CL / inv.totals.CL - 1:+.4%}, section slope error {np.mean(slope_error):+.4%}")
 
 
 def test_partition_assembly_evaluates_each_pair_once(monkeypatch):

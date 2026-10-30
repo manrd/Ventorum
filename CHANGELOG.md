@@ -10,6 +10,49 @@ a minor version can change a public interface.
 
 ### Added
 
+- Trust notes and warnings for the measured mesh-convergence limits (no change of the score and
+  of the results). Notes: a vortex-lattice junction of joined surfaces with a fold above 30 deg (a
+  winglet); a root fold above 5 deg on the lattice solvers (the near-field CL drifts by a constant
+  step per doubling); each lattice result with body rates (mesh-sensitive lateral values); the
+  lifting line and the Fourier solver with a tip chord above 0.1 times the largest chord (induced
+  drag 4 to 7 % high for rectangular wings); each 3D panel result (the chordwise lift bias of about
+  -(55 to 85)/n_chord %, with a pointer to the Richardson estimate); a 3D panel dihedral break above
+  5 deg inside a surface. Warnings: the lifting line at a winglet kink above 30 deg; the Fourier
+  solver with fewer than 50 terms at aspect ratio above 20. The functions are in
+  `ventorum.core.trust` (`lattice_convergence_notes`, `fourier_convergence_notes`,
+  `panel3d_convergence_notes`). The theory pages state the limits in their "Envelope" sections,
+  and `docs/user/how_to_panel3d.md` shows the Richardson estimate in `n_chord`.
+- Section polar gaps: a Ventorum-2D polar with dropped angles keeps a gap mask
+  (`TabulatedAirfoil.gap_mask`, one flag per interval of the sorted table, True when the interval
+  bridges a dropped angle; `has_gaps`, `in_gap`). A lookup inside a bridged interval gives one
+  `RuntimeWarning` per polar. A cached polar gets its mask again from the requested angles; a polar or
+  a table file without a mask loads with no mask. The viscous alpha-correction coupling (V1) gives a
+  trust note with the number of strips that read a bridged interval, the number of polars with gaps
+  and the dropped angles (`last_dropped`). The note has no penalty. Results do not change.
+- Ventorum-2D: a wake longer than 1.5 chords (`WAKE_LENGTH_LIMIT`) gives a `UserWarning` and a note in
+  the reason of each angle. The far-wake model drives the wake shape factor to 1 about 1.0 to 1.2
+  chords behind the trailing edge, so a longer wake does not converge. The solver does not refuse it.
+- Viscous alpha-correction coupling (V1) in ground effect: the residual compares circulation lift
+  with circulation lift. The strip lift of the lattice is `2 Gamma / (V c)`, but in ground effect the
+  `Cl` of a Ventorum-2D polar is the pressure lift (Coulliette and Plotkin 1996), so an ideal
+  inviscid ground polar gave a coupled lift that was too low near the ground. `TabulatedAirfoil` has the
+  optional `Cl_circulation_data` (methods `Cl_circulation`, `Cl_circulation_slope`), `PolarTable` the
+  optional `Cl_circulation` (interpolated like `Cl`, stored in `.npz` files when present), and
+  `Ventorum2DPolarSource` stores the circulation lift in its ground polars (a ground cache entry
+  without it is solved again). A ground polar without circulation data keeps the old rule and gives a
+  trust note. Free-air results and the `model="panel3d"` path do not change.
+  `details["strip_circulation_lift"]` marks the strips that read the circulation lift.
+- Viscous alpha-correction coupling (V1) in ground effect: the 2D section of a vortex-lattice strip
+  has its ground images in the ground line of its section plane, at the section-plane distance
+  `h / cos(Gamma_g)` (the 3D panel coupling uses the same line). Before, the images were the 3D
+  mirror images, at `2 h cos(Gamma_g)` in the section plane, and a near-vertical fin strip that read a
+  ground table had a degenerate section slope. The ground factor of the flap shift uses the same
+  images. Planar strips and free-air results do not change.
+- Viscous alpha-correction coupling (V1) in ground effect: a strip steeper than 60 deg to the ground
+  plane (`STEEP_STRIP_LIMIT_DEG`, a code setting) uses free-air section data and a section relation
+  without images, with a trust note. A ground source runs without the height for it. A steep strip
+  that only has a ground table is refused with a `ValueError`: give a free-air polar for the surface
+  in the polar dict.
 - Ventorum-3DP: tuner-chosen CPU LU factorization backend (`cpu_lu`, "scipy" or "torch"). A full tuner run measures SciPy and PyTorch CPU LU at the panel workload sizes and writes the faster backend to the profile. SciPy remains the default without a profile. The PyTorch path uses `torch.linalg.lu_factor` and `torch.linalg.lu_solve` on CPU float64 tensors that share memory with the work matrix where possible. The Krylov ground preconditioner and pressure Kutta accept both factor types. Direct results with SciPy are bit-identical, and results with PyTorch agree to round-off.
 
 - Adjoint gradients and finite-difference check at fixed shared-hinge topology:
@@ -92,6 +135,82 @@ a minor version can change a public interface.
 
 ### Changed
 
+- Viscous alpha-correction coupling (V1) of the vortex lattice and the lifting line: the Newton
+  iteration reads the strip polars together. One vectorised PCHIP evaluation reads all tabulated
+  polars with the same angles, and the polars of one condition (for example the ground polars at
+  the strip heights) get their interpolation from one shared construction. The values are those of
+  the per-strip reads (`TabulatedAirfoil.Cl`, `Cl_slope` and the circulation lift); the results do
+  not change. The parity tests are in `tests/test_v1_polar_lookup_parity.py`.
+- Trust rating from a calibrated error model. For the lifting line (linear, nonlinear, Fourier),
+  the vortex lattice and the 3D panel method, the score and the rating come from a predicted error
+  `k * E` (`ventorum.core.trust.predicted_error`), fitted on 1157 known-answer cases against
+  converged lifting-surface and panel solutions. The rating is the band of `k * E` (HIGH below 2 %,
+  MODERATE below 5 %, LOW below 15 %); the score is a continuous function of `k * E` through the
+  score thresholds of the ratings (`error_score`). The model replaces the aspect-ratio and sweep
+  rules of the lifting line, the slender-wing rule, the penalties of the coarse spanwise mesh and of
+  chordwise panels longer than the ground gap, the chordwise-count rule of the 3D panel method and
+  the penalty of its elongated-panel rule (their warnings without a penalty stay where they tell
+  the user what to do). The other rules stay as caps (not calibrated). New factor `error_model`;
+  the factor `sweep` is removed. `evaluate_aerodynamic_trust` has the new keyword inputs `taper`,
+  `n_span` and `controls` (`lattice_error_inputs` reads them from a lattice);
+  `panel3d_mesh_checks` has the input `error_model`. Most lifting-line results are now rated LOW
+  (for example a rectangular wing of aspect ratio 8: predicted error 10.7 %). The coefficients
+  (CL, CD and the others) do not change.
+- 3D panel viscous coupling (V1): the polar is read relative to the converged inviscid 2D section
+  (defect correction, as in the vortex-lattice coupling). The target lift of a strip is the polar
+  lift minus the converged inviscid 2D lift of its cut section (Ventorum-2D, 128 cosine-spaced
+  chordwise panels per side, the pitch curve in ground effect) plus the 2D Morino lift of the
+  same-mesh cut section, at the viscous angle. The effective angle inverts the nonlinear same-mesh
+  lift curve in free air too. A polar equal to the converged inviscid 2D section now gives the
+  inviscid 3D panel result at the same mesh (the first-order mesh residual of the section is gone);
+  a polar equal to the same-mesh section now gets the mesh-error correction. New details
+  `cl_polar`, `cl_section_converged` and `cl_section_mesh`; `cl_viscous` is the target lift. The
+  thin-airfoil flap offset is removed from the 3D panel coupling: both references are the flapped
+  cut section, so a polar equal to the converged flapped section is the identity (`flap_offset` is
+  zero). All 3D panel V1 results change; the vortex-lattice and lifting-line
+  couplings do not change.
+- Plain-flap section (`deflect_plain_flap`, `AirfoilShape.with_flap`): the hinge treatments "merge"
+  and "repanel" (the default) now build the section also at a zero deflection, with a zero rotation.
+  The node set then has the hinge node of each surface, as at a small deflection, so the 2D panel
+  loads and their derivatives are continuous in the deflection. Before, a zero deflection
+  returned the input points for every treatment, against the documentation. "none" keeps that
+  behaviour. Results of a flapped section at zero deflection with "merge" or "repanel" change by the
+  added node; sections without a flap do not change. `solve_viscous_flapped` still solves the
+  input section when the deflection is zero.
+- 3D panel viscous coupling (V1) in ground effect: the effective angle of a strip whose polar holds
+  the ground height is the attitude at which the 2D pitch curve of its cut section has the strip
+  lift (a bracketed root finder on the curve, with the inversion of the tangent as the start value).
+  Before, the coupling used the tangent of the pitch curve at the strip attitude, whose error grows
+  away from the attitude (tip strips). 3D panel V1 results in ground effect change (the free-air
+  curve is inverted too, see the entry above); the vortex-lattice and lifting-line couplings do
+  not change. A strip lift outside the range of the
+  attitudes at which the section clears the ground gets the tangent continuation and a trust note.
+- Compressibility scope: a stated `FlightCondition.mach` of 0.7 or more is refused with `ValidityError`
+  (`MACH_LIMIT_REFUSED`) by `analyze`, the other entry points that validate the flight condition, and
+  the lattice solvers. Before, Mach numbers up to just below 1 ran and only the trust score gave a
+  warning. From 0.3 to below 0.7 the Prandtl-Glauert correction stays an
+  estimate with the trust rating UNRELIABLE. The user manual and the theory page state the scope
+  (Mach below 0.3) in one place and no longer say "valid M < 1".
+- A stated Mach number above 0 that differs from `V_inf / a` by more than 0.05 (`MACH_SPEED_TOLERANCE`;
+  `a` is the ISA speed of sound at the flight-condition density, as in the envelope check of the speed)
+  gives a `RuntimeWarning` and a trust note. The correction uses the stated Mach number.
+- Ventorum-2D work budgets: `WORK_BUDGET` (250) now counts only the Newton iterations at the angle
+  itself. The continuation path from the zero-lift angle has its own budgets: `COLD_START_BUDGET`
+  (200) for the cold start at the zero-lift angle and `STEP_BUDGET` (300) for each continuation step
+  (`StopRules.cold_start_budget`, `StopRules.step_budget`; `work_budget=0` switches all budgets off).
+  Before, one budget of 250 for the whole solve stopped angles that converge: NACA 4412 at Re 1e6 and
+  4 deg failed with 281 to 401 generated points in free air and with 161 and 321 to 401 points at
+  h/c 2; these cases now converge. A
+  failed stage of the path is named in the reason. Angles that converged before give the same
+  numbers. `newton_iterations` includes the work of the path, so it can now be above 250. The
+  solver revision for result caches is now 2026-10-29.1.
+- Vortex lattice: with `n_chord=None` (automatic) and a control on a surface (any deflection,
+  zero included, so that control derivatives use one mesh), the automatic chordwise count is at
+  least 16 (`CONTROL_MIN_AUTO_N_CHORD`). The flap effectiveness
+  converges at first order with `n_chord` (about 40/n_chord % low), so the default 4 panels gave
+  about 10 % too little flap lift. The ground rule and `MAX_AUTO_N_CHORD` stay. A user-set count
+  from 2 to 15 with a deflected control gets a trust note with the expected error (no score
+  change). Cases without a control do not change.
 - Ventorum-2D lift in ground effect: `Panel2DResult.Cl` is the surface pressure lift in ground
   effect (`Cl_pressure`, Coulliette and Plotkin 1996, eq. 30). Near a wall the Kutta-Joukowski
   relation does not hold; the circulation lift is 12 % (h/c = 0.2) to 33 % (h/c = 0.1) too high
@@ -196,6 +315,15 @@ a minor version can change a public interface.
 
 ### Fixed
 
+- Vortex lattice with `mach > 0`: the `Cm0` of a linear airfoil now scales by `1 / beta`
+  (Prandtl-Glauert, Glauert 1928), as the camber lift of the stretched lattice and the camber-line
+  lattice do. Before, the section moment stayed at its incompressible value, so Cm was wrong for a
+  cambered linear section. The effective section angle now uses the compressible slope
+  `a0 / beta`; before, `alpha_i` of a wing of high aspect ratio became negative at high Mach numbers, and
+  the lookup angle of a tabulated Cd and Cm had the same error. The CPU loads, the GPU loads
+  kernels and the differentiable reference of the gradients apply the same equations. Results with
+  `mach` None or 0 do not change (bit for bit).
+- Trust score, rule `numerical`: the rule now flags a saw-tooth of the spanwise circulation (three or more consecutive sign changes of the strip-to-strip step) instead of more than six local extrema. Each part-span control adds physical extrema at its edges, so a smooth, mesh-converged solution with a flap and an aileron got the penalty 0.40 and the rating LOW, and the rating changed with the mesh. The penalty and the warning style do not change. The CPU, batch and GPU paths use the same measure. The spanwise statistics of `spanwise_stats_batch` give `sign_change_run` in place of `n_extrema`. The coefficients and the verification report do not change. A post-stall nonlinear lifting-line result with stall cells several strips wide no longer gets the warning; a post-stall saw-tooth still gets it.
 - Ventorum-3DP with body rates p, q, r: the surface pressure now includes the kinematic term of the rotating body, Cp = (|V_k|^2 - |V|^2) / V_inf^2, with V_k the local onset velocity. The flow is steady in the body frame, so the unsteady Bernoulli equation of the earth frame applies. The former Cp = 1 - |V|^2 / V_inf^2 gave three times the added-mass force of a sphere on a circular path. On a wing the pitch-rate derivatives CL_q and Cm_q grow by several percent, and the yaw-rate side force CY_r falls by about an order of magnitude, close to the vortex-lattice values. The fix applies to the CPU and GPU paths, the pressure Kutta and the viscous strip coupling. Results without rates do not change.
 - Ventorum-3DP: the flat tip cap of a cambered section gave cap pressures of order 1e3 to 1e4, and with dihedral the cap force made the lift too high (NACA 2412 at 30 deg dihedral: CL 0.556 instead of about 0.43). A tip cap panel now keeps the surface gradient along its row of neighbours only. Symmetric sections do not change.
 - Ventorum-2D retries a residual-window stop once for the cold quasi-simultaneous first estimate at the

@@ -42,6 +42,7 @@ from ventorum.aero.system import (
 from ventorum.aero.vortex import HorseshoeSet, influence_matrix, velocity_tensor_unknowns
 from ventorum.core.datatypes import FlightCondition
 from ventorum.core.errors import ValidityError
+from ventorum.core.trust import check_mach_scope
 from ventorum.geometry.lattice import VortexLattice, section_cl, section_cl_slope
 from ventorum.utils.vec import cross3
 
@@ -126,6 +127,7 @@ def assemble_vlm(
     if lattice.collocation != "vlm":
         raise ValueError("assemble_vlm needs a lattice built with collocation='vlm'.")
     if getattr(condition, "mach", None) is not None and condition.mach > 0.0:
+        check_mach_scope(condition)
         if ground is not None:
             raise ValidityError("Compressibility correction (mach > 0) is not supported in ground effect.")
         import math

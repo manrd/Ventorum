@@ -204,11 +204,39 @@ def test_batch_cp_mixes_rate_and_rate_free_conditions():
                                rtol=1e-14, atol=1e-14)
 
 
+class _ConvergedReferencePolar(LinearAirfoil):
+    """Polar that is the converged inviscid 2D reference curve of one strip (exact, no table)."""
+
+    def __init__(self, curve):
+        super().__init__(a0=2 * np.pi)
+        self.curve = curve
+
+    def Cl(self, angle):
+        return np.vectorize(lambda a: self.curve.evaluate(a)[0], otypes=[float])(
+            np.asarray(angle, dtype=float))
+
+
 @pytest.mark.parametrize("kutta", ["morino", "pressure"])
-def test_viscous_coupling_uses_the_rotating_pressure(kutta):
+def test_viscous_coupling_uses_the_rotating_pressure(kutta, monkeypatch):
     """Identity polar with a pitch rate: the viscous coupling gives the inviscid Cp and loads."""
     from ventorum.solvers.factory import make_solver
+    from ventorum.viscous import alpha_correction as module
     from ventorum.viscous.alpha_correction import solve_viscous
+
+    # The 3D panel coupling reads a polar relative to the converged inviscid
+    # 2D section of each strip (defect correction: polar - converged section
+    # + same-mesh section). The identity polar is therefore the converged
+    # section curve. The same-mesh section line that this test used before
+    # now gets the mesh-error correction, so it is not an identity polar.
+    captured = {}
+    original = module._PanelCoupling.references
+
+    def record(self, ground, uses_height, curves):
+        refs = original(self, ground, uses_height, curves)
+        captured["refs"] = list(self.full(np.array(refs, dtype=object)))
+        return refs
+
+    monkeypatch.setattr(module._PanelCoupling, "references", record)
 
     wing = LiftingSurface(
         name="Wing", semi_span=4.0, spacing="uniform",
@@ -218,9 +246,8 @@ def test_viscous_coupling_uses_the_rotating_pressure(kutta):
     settings = SolverSettings(n_panels=3, n_chord=10, spacing="uniform", panel_backend="numpy",
                               panel_cache=False, panel_kutta=kutta)
     condition = FlightCondition(V_inf=30.0, alpha=np.radians(4.0), q=1.5)
-    first = solve_viscous(wing, condition, settings, LinearAirfoil(a0=5.0), model="panel3d", tol=1e-10)
-    polars = {i: LinearAirfoil(a0=slope, alpha_L0=zero) for i, (slope, zero) in enumerate(
-        zip(first.details["lift_slope_section"], first.details["alpha0_section"]))}
+    solve_viscous(wing, condition, settings, LinearAirfoil(a0=5.0), model="panel3d", tol=1e-10)
+    polars = {i: _ConvergedReferencePolar(curve) for i, curve in enumerate(captured["refs"])}
     result = solve_viscous(wing, condition, settings, polars, model="panel3d", tol=1e-10)
     inviscid = make_solver("panel3d").solve(wing, condition, settings)
     assert result.converged

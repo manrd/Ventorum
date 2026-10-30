@@ -340,8 +340,11 @@ def test_ground_height_grid_converges(height, cl, cd, iterations):
     """Keep baseline convergence and rescue first-estimate stagnation stops."""
     result = vs.solve_viscous(airfoil("4412", n_points=161), 4.0, 1e6, height=height)
     if height in (1.8, 2.0, 2.2):
-        # These baseline budget failures have a different cause.
-        assert result.newton_iterations <= vs.WORK_BUDGET
+        # These heights stopped on the single work budget of the whole solve.
+        # With the separate budgets of the continuation path they converge;
+        # newton_iterations now also counts the path work (293 to 318).
+        assert result.converged, (height, result.reason)
+        assert result.residual < 1e-6
         return
     assert result.converged, (height, result.reason)
     assert result.residual < 1e-6

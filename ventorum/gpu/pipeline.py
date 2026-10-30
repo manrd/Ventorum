@@ -12,6 +12,7 @@ solve gives the same result objects as a CPU solve.
 
 from __future__ import annotations
 
+import math
 import time
 import warnings
 
@@ -199,7 +200,8 @@ def _solve_group(solver, lattice, conditions: list, setups: list, settings, S_re
     dl_phys = engine.device_lattice(lattice, precision) if has_mach else dl
     arrays = engine.loads(dl_phys, lattice, G, v_points, Dfs, V, rho, alpha, WD, grounds, S_ref, b_ref, c_ref,
                           ref_point, alpha_eff, use_leg=solver.name == "vlm", extra={"gamma": G}, symmetric=symmetric,
-                          GK=bd["GK"], GO=bd["GO"], omega=omega)
+                          GK=bd["GK"], GO=bd["GO"], omega=omega,
+                          pg_beta=math.sqrt(1.0 - float(conditions[0].mach) ** 2) if has_mach else 1.0)
     return (arrays, infos, umap, cpu_cases), None
 
 
@@ -391,7 +393,7 @@ def _results(solver, lattice, conditions, arrays: dict, setups: list, umap, b_re
         cy_ff = cn_tr = [None] * K
     # Statistics of the trust score from the GPU (None for a case with a
     # non-finite value: the trust score then names the array).
-    stats = [{"max_local_cl": r[1], "max_alpha_eff_deg": r[2], "n_extrema": int(r[3])} if r[0] != 0.0 else None
+    stats = [{"max_local_cl": r[1], "max_alpha_eff_deg": r[2], "sign_change_run": int(r[3])} if r[0] != 0.0 else None
              for r in arrays["stats"].tolist()]
     out = []
     for k, (cond, st) in enumerate(zip(conditions, setups)):

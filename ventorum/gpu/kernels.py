@@ -1081,7 +1081,7 @@ def _build(precision: str) -> SimpleNamespace:  # noqa: C901 - one closure per k
                     chord: wp.array(dtype=wp.float64), width: wp.array(dtype=wp.float64),
                     nrm: wp.array(dtype=wp.vec3d), cdir: wp.array(dtype=wp.vec3d), dl: wp.array(dtype=wp.vec3d),
                     qc: wp.array(dtype=wp.vec3d), a0: wp.array(dtype=wp.float64), aL0: wp.array(dtype=wp.float64),
-                    ae_in: wp.array2d(dtype=wp.float64), has_ae: int, pol: Polars,
+                    ae_in: wp.array2d(dtype=wp.float64), has_ae: int, pol: Polars, pgb: wp.float64,
                     wn: wp.array2d(dtype=wp.float64), segl: wp.array2d(dtype=wp.float64),
                     span: wp.array3d(dtype=wp.float64), sforce: wp.array2d(dtype=wp.vec3d),
                     part: wp.array3d(dtype=wp.float64), use_aft: int,
@@ -1097,6 +1097,9 @@ def _build(precision: str) -> SimpleNamespace:  # noqa: C901 - one closure per k
         # the strip. span[k, :, s] gets the 8 spanwise arrays; part[k, s, :]
         # the parts of the totals (force 3, moment 3, profile force 3,
         # profile drag, induced drag term, profile flag).
+        # pgb is the Prandtl-Glauert factor beta = sqrt(1 - M^2) of the
+        # batch (1 without a Mach number): the section slope is a0 / beta
+        # and the Cm0 of a linear airfoil scales by 1 / beta (Glauert 1928).
         k, s = wp.tid()
         d = D[k]
         Vk = V[k]
@@ -1143,10 +1146,13 @@ def _build(precision: str) -> SimpleNamespace:  # noqa: C901 - one closure per k
         w = width[s]
         cl = wp.float64(2.0) * sg / (Vk * c)
         ag = wp.atan2(wp.dot(nrm[s], d), wp.dot(cdir[s], d))
-        ae = aL0[s] + cl / wp.max(a0[s], wp.float64(1e-9))
+        ae = aL0[s] + cl / (wp.max(a0[s], wp.float64(1e-9)) / pgb)
         if has_ae != 0:
             ae = ae_in[k, s]
         cdm = polar_cd_cm(pol, s, ae)
+        cm_sec = cdm[1]
+        if pol.kind[s] == 0:
+            cm_sec = cm_sec / pgb
         Dp = q * c * w * cdm[0]
         Fprof = Dp * d
         M = M + wp.cross(qc[s] - rp, Fprof)
@@ -1154,7 +1160,7 @@ def _build(precision: str) -> SimpleNamespace:  # noqa: C901 - one closure per k
         nl = nl / wp.max(wp.length(nl), wp.float64(1e-300))
         ax = wp.cross(nl, d)
         ax = ax / wp.max(wp.length(ax), wp.float64(1e-300))
-        M = M + (q * c * c * w * cdm[1]) * ax
+        M = M + (q * c * c * w * cm_sec) * ax
         di = sg * wn[k, s] * segl[k, s]
         span[k, 0, s] = sg
         span[k, 1, s] = cl
@@ -1163,7 +1169,7 @@ def _build(precision: str) -> SimpleNamespace:  # noqa: C901 - one closure per k
         span[k, 4, s] = ae
         span[k, 5, s] = ag - ae
         span[k, 6, s] = rk * Vk * sg
-        span[k, 7, s] = cdm[1]
+        span[k, 7, s] = cm_sec
         sforce[k, s] = F
         for j in range(3):
             part[k, s, j] = F[j]
@@ -1188,7 +1194,7 @@ def _build(precision: str) -> SimpleNamespace:  # noqa: C901 - one closure per k
                           chord: wp.array(dtype=wp.float64), width: wp.array(dtype=wp.float64),
                           nrm: wp.array(dtype=wp.vec3d), cdir: wp.array(dtype=wp.vec3d), dl: wp.array(dtype=wp.vec3d),
                           qc: wp.array(dtype=wp.vec3d), a0: wp.array(dtype=wp.float64), aL0: wp.array(dtype=wp.float64),
-                          ae_in: wp.array2d(dtype=wp.float64), has_ae: int, pol: Polars,
+                          ae_in: wp.array2d(dtype=wp.float64), has_ae: int, pol: Polars, pgb: wp.float64,
                           wn: wp.array2d(dtype=wp.float64), segl: wp.array2d(dtype=wp.float64),
                           span: wp.array3d(dtype=wp.float64), sforce: wp.array2d(dtype=wp.vec3d),
                           part: wp.array3d(dtype=wp.float64), use_aft: int,
@@ -1246,11 +1252,13 @@ def _build(precision: str) -> SimpleNamespace:  # noqa: C901 - one closure per k
         p34 = qc[s] + wp.float64(0.5) * c * cdir[s]
         u34 = Vd - wp.cross(om, p34 - rp)
         ag = wp.atan2(wp.dot(nrm[s], u34), wp.dot(cdir[s], u34))
-        ae = aL0[s] + cl / wp.max(a0[s], wp.float64(1e-9))
+        ae = aL0[s] + cl / (wp.max(a0[s], wp.float64(1e-9)) / pgb)
         if has_ae != 0:
             ae = ae_in[k, s]
         cdm = polar_cd_cm(pol, s, ae)
         cm_strip = cdm[1]
+        if pol.kind[s] == 0:
+            cm_strip = cm_strip / pgb
         if n_c == 1:
             slope = -wp.dot(nrm[s], wp.cross(om, cdir[s]))
             cm_strip = cm_strip - wp.float64(0.39269908169872414) * slope * c / wp.length(u34)
@@ -1292,13 +1300,18 @@ def _build(precision: str) -> SimpleNamespace:  # noqa: C901 - one closure per k
                      V: wp.array(dtype=wp.float64), rho: wp.array(dtype=wp.float64),
                      alpha: wp.array(dtype=wp.float64), S_ref: wp.float64, b_ref: wp.float64, c_ref: wp.float64,
                      span: wp.array3d(dtype=wp.float64), surf0: wp.array(dtype=wp.int32),
-                     surf1: wp.array(dtype=wp.int32), out: wp.array2d(dtype=wp.float64)):
+                     surf1: wp.array(dtype=wp.int32), edge: wp.array(dtype=wp.int32),
+                     out: wp.array2d(dtype=wp.float64)):
         # Totals of case k: the sums of the strip parts, the coefficients of
         # compute_loads_batch, and the statistics of the trust score (all
-        # spanwise values finite, peak |Cl|, peak |alpha_eff| [deg], most
-        # extrema of the circulation on one surface). out[k] = CL, CDi, CDp,
-        # CD_total, e, Cl, Cm, Cn, CY, CDi_nearfield, profile flag, AR,
-        # F_total (3), M (3), finite, max |Cl|, max |alpha_eff| [deg], extrema.
+        # spanwise values finite, peak |Cl|, peak |alpha_eff| [deg], longest
+        # run of consecutive sign changes of the strip-to-strip step of the
+        # circulation on one surface, as in trust._sign_change_run_rows).
+        # edge[s] != 0 marks the step from strip s to s + 1 near a control
+        # edge (VortexLattice.control_edge_step): it has no sign.
+        # out[k] = CL, CDi, CDp, CD_total, e, Cl, Cm, Cn, CY, CDi_nearfield,
+        # profile flag, AR, F_total (3), M (3), finite, max |Cl|,
+        # max |alpha_eff| [deg], sign-change run.
         k = wp.tid()
         n_s = part.shape[1]
         F = wp.vec3d()
@@ -1350,7 +1363,7 @@ def _build(precision: str) -> SimpleNamespace:  # noqa: C901 - one closure per k
         finite = wp.float64(1.0)
         mcl = wp.float64(0.0)
         mae = wp.float64(0.0)
-        n_ext = wp.int32(0)
+        n_run = wp.int32(0)
         for f in range(surf0.shape[0]):
             s0 = surf0[f]
             s1 = surf1[f]
@@ -1365,22 +1378,29 @@ def _build(precision: str) -> SimpleNamespace:  # noqa: C901 - one closure per k
                 gmax = wp.max(gmax, wp.abs(span[k, 0, s]))
             if s1 - s0 >= 4:
                 tol = wp.float64(1e-6) * wp.max(gmax, wp.float64(1e-300))
+                # A step at or below tol, or near a control edge, has no
+                # sign (0): it is not a sign change and it stops the run.
                 last = wp.int32(0)
                 cnt = wp.int32(0)
                 for s in range(s0, s1 - 1):
                     dg = span[k, 0, s + 1] - span[k, 0, s]
-                    if wp.abs(dg) > tol:
+                    sgn = wp.int32(0)
+                    if dg > tol:
                         sgn = wp.int32(1)
-                        if dg < wp.float64(0.0):
-                            sgn = -1
-                        if last != 0 and sgn != last:
-                            cnt = cnt + 1
-                        last = sgn
-                n_ext = wp.max(n_ext, cnt)
+                    if dg < -tol:
+                        sgn = wp.int32(-1)
+                    if edge[s] != 0:
+                        sgn = wp.int32(0)
+                    if sgn != 0 and last != 0 and sgn != last:
+                        cnt = cnt + 1
+                    else:
+                        cnt = wp.int32(0)
+                    n_run = wp.max(n_run, cnt)
+                    last = sgn
         out[k, 18] = finite
         out[k, 19] = mcl
         out[k, 20] = mae * wp.float64(57.29577951308232)
-        out[k, 21] = wp.float64(n_ext)
+        out[k, 21] = wp.float64(n_run)
 
     @wp.kernel(module=module)
     def residual(MT: wp.array3d(dtype=T), x: wp.array2d(dtype=wp.float64), b: wp.array2d(dtype=wp.float64),

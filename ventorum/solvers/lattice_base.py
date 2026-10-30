@@ -37,7 +37,13 @@ from ventorum.core.datatypes import (
 )
 from ventorum.core.errors import ValidityError
 from ventorum.core.trust import (
+    body_rate_note,
+    check_mach_scope,
+    control_chord_note,
     evaluate_aerodynamic_trust,
+    lattice_error_inputs,
+    lattice_convergence_notes,
+    lattice_spanwise_stats,
     mean_line_strip_jump,
     polar_limits,
     polar_stats,
@@ -54,6 +60,17 @@ from ventorum.utils.validation import validate_aircraft
 # the centre is always at c/4, about 0.08 c wrong at aspect ratio 1).
 DEFAULT_N_CHORD = 4
 MAX_AUTO_N_CHORD = 32
+
+# Smallest automatic chordwise panel count when a surface has a control
+# (chordwise mode: vortex lattice, two or more chordwise panels), also at
+# zero deflection: control derivatives are differences about zero
+# deflection, and all their cases must use one mesh.
+# The flap effectiveness of the lattice converges at first order with the
+# chordwise count: for a rectangular wing of aspect ratio 40 with a full-span
+# flap (hinge at 0.75 c), Glauert's tau is 0.6090 and the lattice gives
+# 0.549, 0.578, 0.595 and 0.603 at 4, 8, 16 and 32 chordwise panels (an
+# error of about 40/n_chord %). With 16 panels the error is about 2.5 %.
+CONTROL_MIN_AUTO_N_CHORD = 16
 _CAMBER_GROUND_NOTE = (
     "camber modelled by a turned normal (no mean line given); near the ground the chordwise "
     "load and the camber height are approximate"
@@ -78,6 +95,11 @@ LLT_GE_WARN_H_OVER_C = 2.0
 # V_inf (a local helix angle of about 6 deg), the straight wake of the
 # quasi-steady model is a poor approximation and the result gets a note.
 LARGE_ROTATION_FRACTION = 0.1
+
+
+def _has_control(aircraft: Aircraft) -> bool:
+    """Return True if a surface of *aircraft* has a control surface (any deflection)."""
+    return any(getattr(s, "controls", None) for s in aircraft.surfaces)
 
 
 def _cpu_dispatch(n_panels: int, batch: int, reason: str | None, family: str | None = None) -> dict:
@@ -178,7 +200,11 @@ class LatticeSolver(BaseSolver):
         The lifting-line solvers use 1. A value in *settings* is used as
         given. Out of ground effect the default is used. In ground effect a
         chordwise panel is not longer than the smallest gap to the ground,
-        within the default and the maximum automatic count.
+        within the default and the maximum automatic count. When a surface
+        has a control surface (any deflection, zero included), the
+        automatic count is at least ``CONTROL_MIN_AUTO_N_CHORD`` (16), for a
+        flap effectiveness within about 2.5 % of the converged value and one
+        mesh for all cases of a control derivative.
 
         The automatic count is an integer, so CL(h) and the other results
         jump at the heights (and attitudes) where the count changes. For a
@@ -211,8 +237,11 @@ class LatticeSolver(BaseSolver):
             return 1
         if settings.n_chord is not None:
             return max(1, int(settings.n_chord))
+        # A control needs more chordwise panels for its flap effectiveness
+        # (see CONTROL_MIN_AUTO_N_CHORD), also at zero deflection.
+        floor = CONTROL_MIN_AUTO_N_CHORD if _has_control(aircraft) else DEFAULT_N_CHORD
         if ground is None and condition.h is None:
-            return DEFAULT_N_CHORD
+            return floor
         # In ground effect a chordwise panel should not be longer than the gap.
         chord_spacing = getattr(settings, "chord_spacing", "uniform")
         probe_count = DEFAULT_N_CHORD if any(s.controls for s in aircraft.surfaces) else 1
@@ -225,9 +254,9 @@ class LatticeSolver(BaseSolver):
         gp = ground if ground is not None else ground_plane_from_condition(probe, condition, rp)
         h_min = float(np.min(gp.height(probe.all_points())))
         if h_min <= 0.0:
-            return DEFAULT_N_CHORD  # the strike is reported later
+            return floor  # the strike is reported later
         n = int(np.ceil(float(np.max(probe.chord)) / h_min))
-        return int(np.clip(n, DEFAULT_N_CHORD, MAX_AUTO_N_CHORD))
+        return int(np.clip(n, floor, MAX_AUTO_N_CHORD))
 
     def build(
         self,
@@ -353,8 +382,9 @@ class LatticeSolver(BaseSolver):
         """Return the ground plane, the smallest ground clearance [m], the notes and the wake direction of one case.
 
         Raises the errors of the validity checks (ground strike, lifting line
-        too near the ground).
+        too near the ground, a Mach number at or above 0.7).
         """
+        check_mach_scope(condition)
         if ground is None and condition.h is not None:
             ground = ground_plane_from_condition(lattice, condition, ref_point)
         if getattr(condition, "mach", None) is not None and condition.mach > 0.0:
@@ -380,6 +410,12 @@ class LatticeSolver(BaseSolver):
         notes += [m for m in getattr(lattice, "mesh_warnings", ()) if m not in notes]
         if ground is not None and lattice.camber_fallback:
             notes.append(_CAMBER_GROUND_NOTE)
+        # A deflected control in chordwise mode with fewer panels than the
+        # automatic minimum (only a count that the user set can be below it).
+        if (self.collocation == "vlm" and 2 <= lattice.n_chord < CONTROL_MIN_AUTO_N_CHORD
+                and any(info["mode"] == "chordwise" and info["deflection_rad"] != 0.0
+                        for info in lattice.control_info)):
+            notes.append(control_chord_note(lattice.n_chord))
         if self.collocation == "llt" and h_min is not None and c_ref and h_min / c_ref < LLT_GE_WARN_H_OVER_C:
             notes.append(
                 f"Lifting line in ground effect at h_min/c = {h_min / c_ref:.2f}: it under-predicts the "
@@ -395,6 +431,7 @@ class LatticeSolver(BaseSolver):
                     f"{LARGE_ROTATION_FRACTION:g}). The quasi-steady model keeps the wake straight along the free "
                     "stream; with this rotation the real wake is a helix, so the result is less reliable."
                 )
+            notes.append(body_rate_note())
         wd = wake_direction(condition, ground, getattr(settings, "wake_alignment", "freestream"))
         return ground, h_min, notes, wd
 
@@ -470,6 +507,12 @@ class LatticeSolver(BaseSolver):
                 "about -0.5 % at 2.4 deg and -4 % at 8.5 deg with 40 half-cosine panels). For linear "
                 "analysis use the VLM solver."
             )
+        # Measured mesh-convergence limits of the geometry (no penalty). The
+        # notes are trust notes only; the warnings are also run-time warnings.
+        conv_notes, conv_warnings = lattice_convergence_notes(lattice, self.collocation == "llt", main_surface)
+        notes += [m for m in conv_warnings + conv_notes if m not in notes]
+        quiet = set(conv_notes)
+        quiet.add(body_rate_note())
         h_over_c = (h_min / c_ref) if (h_min is not None and c_ref) else None
         totals = loads.totals
         # Tabulated section polars: compare the section results with the
@@ -501,7 +544,8 @@ class LatticeSolver(BaseSolver):
             notes=notes,
             max_chord_over_c=(float(self._cached(lattice, "max_chord", lambda: np.max(lattice.chord)) / c_ref)
                               if c_ref else 1.0),
-            spanwise_stats=spanwise_stats,
+            spanwise_stats=(spanwise_stats if spanwise_stats is not None
+                            else lattice_spanwise_stats(lattice, loads.spanwise)),
             polar=polar,
             CY=totals.CY,
             CY_farfield=totals.CY_farfield,
@@ -509,6 +553,8 @@ class LatticeSolver(BaseSolver):
             Cn_trefftz=totals.Cn_trefftz,
             te_clearance=trailing_edge_clearance(lattice, ground),
             mean_line_jump=mean_line_strip_jump(lattice, loads.spanwise),
+            **self._cached(lattice, ("error_inputs", main_surface),
+                           lambda: lattice_error_inputs(lattice, main_surface)),
         )
         res = SolverResult(
             spanwise=loads.spanwise,
@@ -540,7 +586,7 @@ class LatticeSolver(BaseSolver):
         }
         mesh = getattr(lattice, "mesh_warnings", ())
         for msg in notes:
-            if msg == _CAMBER_GROUND_NOTE:
+            if msg == _CAMBER_GROUND_NOTE or msg in quiet:
                 continue  # This is a result trust note, not a run-time warning.
             if msg in mesh:
                 continue  # Issued by build_lattice or by the lattice cache.

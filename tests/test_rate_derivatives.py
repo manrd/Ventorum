@@ -93,6 +93,48 @@ def test_nonlinear_lifting_line_with_linear_sections_agrees_with_linear():
     assert np.allclose(non, lin, rtol=1e-2, atol=1e-4)
 
 
+def test_linear_lifting_line_roll_derivatives_differ_from_closed_forms_by_order_alpha_squared():
+    """Elliptic wing AR 8, stability axes: the linear lifting line is off the closed forms by a term in alpha^2.
+
+    Phillips and Snyder (2000) linearise the section equation in two steps:
+    the Kutta-Joukowski magnitude uses the onset only (no induced velocity),
+    and the section angle uses the small-angle form W . n / |U| instead of
+    atan2. The nonlinear lifting line keeps both. A decomposition with the
+    two steps applied one at a time (alpha 4 deg) gave about one third of
+    the difference in Cl_p from the magnitude and two thirds from the angle.
+
+    Measured (n_panels 40, step 0.01), relative difference to the closed form:
+
+        alpha   solver      Cl_p       Cn_p
+        2 deg   linear     -0.108 %   +0.118 %
+        4 deg   linear     -0.367 %   +0.364 %
+        4 deg   nonlinear  +0.005 %   -0.005 %
+        8 deg   linear     -1.395 %   +1.345 %
+    """
+    AR, a0 = 8.0, 2.0 * np.pi
+    mu = a0 / (np.pi * AR)
+
+    def errors(solver, alpha_deg):
+        fc = vt.FlightCondition(V_inf=20.0, alpha=np.radians(alpha_deg))
+        res = vt.rate_derivatives(_elliptic(AR, a0), fc, _settings(solver), axes="stability")
+        d, CL = res.derivatives, res.base.totals.CL
+        clp = -a0 * np.pi * AR / (8.0 * (np.pi * AR + 2.0 * a0))
+        cnp = -CL / 8.0 * (1.0 - mu) / (1.0 + 2.0 * mu)
+        return d["Cl_p"] / clp - 1.0, d["Cn_p"] / cnp - 1.0
+
+    lin2 = errors("linear", 2.0)
+    lin4 = errors("linear", 4.0)
+    non4 = errors("nonlinear", 4.0)
+    # Linear lifting line: |Cl_p| too small, |Cn_p| too large.
+    assert -4.5e-3 < lin4[0] < -3.0e-3
+    assert 3.0e-3 < lin4[1] < 4.5e-3
+    # Order alpha^2: the difference at 2 deg is about a quarter of that at 4 deg.
+    for e2, e4 in zip(lin2, lin4):
+        assert 0.2 < e2 / e4 < 0.4
+    # The nonlinear lifting line with linear sections agrees closely.
+    assert abs(non4[0]) < 5e-4 and abs(non4[1]) < 5e-4
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # 2. Pitch rate: three-quarter-chord rule and thin-airfoil section moment
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -128,6 +170,47 @@ def test_vlm_section_moment_converges_to_thin_airfoil_with_chordwise_panels():
     cm = [vt.rate_derivatives(ac, fc, _settings("vlm", 40, nc)).derivatives["Cm_q"] for nc in (4, 16)]
     err = [abs(c / (-np.pi / 4.0) - 1.0) for c in cm]
     assert err[1] < err[0] and err[1] < 0.04
+
+
+def test_vlm_pitch_damping_steps_from_section_term_to_chordwise_load():
+    """Cm_q of a straight wing about its quarter chord: one chordwise panel against two or more.
+
+    With one chordwise panel the section term gives the 2D value -pi/4 at
+    every aspect ratio. With chordwise panels the lattice gives the 3D
+    value: smaller in magnitude, by an amount that falls with the aspect
+    ratio, and approached from below in magnitude as n_chord grows. Thus
+    Cm_q has a step between n_chord 1 and n_chord 2 or more.
+
+    Measured (n_panels 40, alpha 0), relative difference to -pi/4:
+
+        n_chord    1         2          4          8         16
+        AR 8    -0.005 %  -31.13 %   -13.67 %   -9.27 %   -8.17 %
+        AR 20   -0.005 %  -27.53 %    -9.31 %   -4.75 %   -3.61 %
+    """
+    fc = vt.FlightCondition(V_inf=20.0, alpha=0.0)
+
+    def deficit(AR, nc):
+        cm = vt.rate_derivatives(_rect(AR), fc, _settings("vlm", 40, nc)).derivatives["Cm_q"]
+        return 1.0 - cm / (-np.pi / 4.0)
+
+    d8 = [deficit(8.0, nc) for nc in (1, 4, 8, 16)]
+    d20 = [deficit(20.0, nc) for nc in (1, 16)]
+    assert abs(d8[0]) < 1e-4 and abs(d20[0]) < 1e-4
+    assert 0.07 < d8[3] < 0.095
+    assert 0.025 < d20[1] < 0.045
+    # Converges from below in magnitude; the 3D deficit falls with the aspect ratio.
+    assert d8[1] > d8[2] > d8[3]
+    assert 1.8 < d8[3] / d20[1] < 2.8
+    # Recommended minimum n_chord (theory page): the smallest n_chord of the
+    # table within 2 % of the value extrapolated from 4, 8 and 16 (Richardson
+    # with the observed order). Measured: order 2.0, extrapolated deficit
+    # 7.80 %; n_chord 8 is 1.6 % from it, n_chord 4 is 6.4 %.
+    cm = [1.0 - d for d in d8]
+    ratio = (cm[2] - cm[1]) / (cm[3] - cm[2])
+    assert 3.0 < ratio < 5.0
+    cm_ext = cm[3] + (cm[3] - cm[2]) / (ratio - 1.0)
+    assert abs(cm[2] / cm_ext - 1.0) < 0.02
+    assert abs(cm[1] / cm_ext - 1.0) > 0.02
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -353,6 +436,12 @@ def test_fourier_solver_refuses_rates():
         vt.analyze(_rect(6.0), vt.FlightCondition(V_inf=20.0, alpha=0.05, p=0.1), _settings("fourier", 20))
     with pytest.raises(ValueError, match="Fourier"):
         vt.rate_derivatives(_rect(6.0), vt.FlightCondition(V_inf=20.0), _settings("fourier", 20))
+
+
+def test_panel3d_solver_is_refused_with_a_clear_message():
+    """Regression: the 3D panel solver used to fail with an AttributeError (no lattice build)."""
+    with pytest.raises(ValueError, match="3D panel method"):
+        vt.rate_derivatives(_rect(6.0), vt.FlightCondition(V_inf=20.0), _settings("panel3d", 8, 8))
 
 
 @pytest.mark.parametrize("kw, match", [({"step": 0.0}, "step"), ({"step": 0.2}, "step"),

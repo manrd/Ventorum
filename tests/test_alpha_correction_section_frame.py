@@ -99,10 +99,17 @@ def test_vertical_fin_side_force_follows_the_polar(model):
     assert res.converged
     assert abs(res.totals.CY) < 0.8 * abs(inv.totals.CY)
     # The strip lift of the coupling: the section lift of the fin. The
-    # spanwise Cl of the panel result is on the global lift axis.
-    cl = (res.details["cl_inviscid"] if model == "panel3d"
-          else np.concatenate([sw.Cl for sw in res.spanwise]))
-    np.testing.assert_allclose(cl, POLAR.Cl(res.details["alpha_eff"]), rtol=0, atol=1e-9)
+    # spanwise Cl of the panel result is on the global lift axis. The 3D
+    # panel coupling reads the polar relative to the converged 2D section
+    # (target = polar - converged + same-mesh section lift), so there the
+    # polar value and the target are checked separately.
+    if model == "panel3d":
+        np.testing.assert_allclose(res.details["cl_polar"], POLAR.Cl(res.details["alpha_eff"]),
+                                   rtol=0, atol=1e-9)
+        np.testing.assert_allclose(res.details["cl_inviscid"], res.details["cl_viscous"], rtol=0, atol=1e-9)
+    else:
+        cl = np.concatenate([sw.Cl for sw in res.spanwise])
+        np.testing.assert_allclose(cl, POLAR.Cl(res.details["alpha_eff"]), rtol=0, atol=1e-9)
 
 
 def test_dihedral_change_agrees_between_panel_and_lattice():

@@ -503,8 +503,11 @@ def deflect_plain_flap(coords: np.ndarray, x_hinge: float, deflection: float,
     n = _check_arc_count(n_arc)
     treatment = _check_treatment(hinge_treatment)
     n_rep = _check_panel_count(n_panels, treatment)
-    if delta == 0.0:
+    if delta == 0.0 and treatment == "none":
         return arr.copy()
+    # "repanel" and "merge" build the section also at a zero deflection: the
+    # construction then adds the hinge node of each surface and the rotation
+    # is zero, so the node set and the result are continuous in the deflection.
     upper, lower = _surfaces(arr)
     hinge = _hinge_from_surfaces(upper, lower, xh, yh)
     theta = -math.radians(delta)
