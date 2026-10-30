@@ -1462,6 +1462,49 @@ def fourier_convergence_notes(surface: LiftingSurface | None, AR: float, n_terms
     return notes
 
 
+#: Trust note of a 3D panel surface with two adjacent deflected controls [-].
+PANEL3D_ADJACENT_CONTROLS_NOTE = (
+    "Adjacent deflected controls: the 3D panel mesh closes the side edge between two deflected controls "
+    "with flat side panels (gap closure), not with the sealed transition. The flap increment of CL then "
+    "does not converge with spanwise refinement: it falls at each refinement. Compare two spanwise panel "
+    "counts, and compare the increment with the vortex lattice."
+)
+
+#: Tolerance on the span parameter [-] at which two controls touch (the
+#: tolerance of the control stations of the 3D panel mesh).
+_CONTROL_EDGE_TOL = 1e-9
+
+
+def surface_has_adjacent_deflected_controls(surface: LiftingSurface) -> bool:
+    """Return True when two deflected controls of a surface share a side edge.
+
+    Two controls with a nonzero deflection [rad] touch when the end span
+    parameter of one equals the start span parameter of the other (within
+    ``_CONTROL_EDGE_TOL``) inside the surface (not at the root or the tip).
+    The 3D panel mesh closes such an edge with side panels (gap closure),
+    whatever the control edge option (see
+    :func:`ventorum.panel3d.mesh.mesh_lifting_surface`).
+
+    Parameters
+    ----------
+    surface : LiftingSurface
+        The surface.
+
+    Returns
+    -------
+    bool
+        True if at least one such edge exists.
+    """
+    active = [c for c in getattr(surface, "controls", None) or () if float(getattr(c, "deflection", 0.0)) != 0.0]
+    for a in active:
+        edge = float(a.eta_end)
+        if not (_CONTROL_EDGE_TOL < edge < 1.0 - _CONTROL_EDGE_TOL):
+            continue
+        if any(b is not a and abs(float(b.eta_start) - edge) <= _CONTROL_EDGE_TOL for b in active):
+            return True
+    return False
+
+
 def panel3d_convergence_notes(surfaces: Sequence[LiftingSurface] | None, n_chord: int | None) -> list[str]:
     """Return the mesh-convergence notes of the 3D panel method.
 
@@ -1472,6 +1515,11 @@ def panel3d_convergence_notes(surfaces: Sequence[LiftingSurface] | None, n_chord
     * A dihedral break above ``DIHEDRAL_BREAK_NOTE_DEG`` inside a surface
       (a gull wing): the strip lift peak at the break grows with mesh
       refinement.
+    * A surface with two adjacent deflected controls
+      (:func:`surface_has_adjacent_deflected_controls`):
+      :data:`PANEL3D_ADJACENT_CONTROLS_NOTE`. The edge between them is a
+      gap closure, and the flap increment of CL does not converge with
+      spanwise refinement.
 
     Parameters
     ----------
@@ -1503,6 +1551,8 @@ def panel3d_convergence_notes(surfaces: Sequence[LiftingSurface] | None, n_chord
             "grows as the mesh is refined, so the strip loads next to the break are not converged. Use the "
             "integrated loads."
         )
+    if any(surface_has_adjacent_deflected_controls(s) for s in surfaces or ()):
+        notes.append(PANEL3D_ADJACENT_CONTROLS_NOTE)
     return notes
 
 
