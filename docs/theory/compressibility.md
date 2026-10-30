@@ -93,7 +93,7 @@ The Prandtl-Glauert rule scales every section pressure coefficient by $1/\beta$ 
   C_{m0}(M) = \frac{C_{m0}(0)}{\beta} .
   ```
 
-  A strip on a camber-line lattice gets its camber moment from the loads of the mean surface, which the stretched lattice already scales. A tabulated airfoil keeps its table moment.
+  A strip on a camber-line lattice gets its camber moment from the loads of the mean surface, which the stretched lattice already scales. A tabulated airfoil keeps its table moment: the section $C_m$ of a table is not scaled by $1/eta$, because a table belongs to its own Mach number (the Mach number of the measurement or of the section analysis that made it). For a flight Mach number above 0.3, give a table made at that Mach number.
 
 - The effective section angle, found from the strip lift with the compressible section slope $a_0/\beta$:
 
@@ -116,7 +116,7 @@ The Prandtl-Glauert rule scales every section pressure coefficient by $1/\beta$ 
 - Scope: incompressible flow, Mach number below 0.3. With `FlightCondition.mach` from 0.3 to below 0.7, the vortex lattice applies the Prandtl-Glauert correction in the form of Goethert; the result is an estimate with the trust rating UNRELIABLE. A Mach number of 0.7 or more is refused with `ValidityError` (`ventorum.core.constants.MACH_LIMIT_REFUSED`).
 - Above $M = 0.3$ (`ventorum.core.constants.MACH_LIMIT_INCOMPRESSIBLE`) the trust score gives a warning and a penalty that grows with the Mach number. With $M \ge 0.7$ the local flow can become supersonic near the critical Mach number; shocks and wave drag can appear, and the linear rule has no meaning there.
 - A speed above $M = 0.3$ with `mach` None or 0 gets the same warning and penalty, with $M = V_\infty / a$ (ISA speed of sound at the air density); no correction is applied.
-- A stated Mach number that differs from $V_\infty / a$ by more than 0.05 (`ventorum.core.constants.MACH_SPEED_TOLERANCE`) gives a `RuntimeWarning` and a trust note. Here $a$ is the ISA speed of sound at the flight-condition density (340.29 m/s at sea level), the same value as in the envelope check above, so the two checks cannot disagree. The correction uses the stated Mach number.
+- A stated Mach number that differs from $V_\infty / a$ by more than 0.05 (`ventorum.core.constants.MACH_SPEED_TOLERANCE`) gives a `RuntimeWarning` and a trust note. Here $a$ is the ISA speed of sound at the flight-condition density (340.29 m/s at sea level), the same value as in the envelope check above, so the two checks cannot disagree. The correction uses the stated Mach number. The trust score gives the compressibility penalty of the larger of the two Mach numbers (a cap rule), so a speed above Mach 0.3 with a smaller stated Mach number is rated as the speed.
 - The VLM solver (`solver_type="vlm"`) supports the compressibility correction on the CPU and GPU paths.
 - The lifting-line solvers (linear, nonlinear, and Fourier) refuse `mach > 0` and raise `ValidityError`.
 - Ground effect refuses `mach > 0` and raises `ValidityError`.

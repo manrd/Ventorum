@@ -34,6 +34,7 @@ from typing import Any
 import numpy as np
 
 from ventorum.core.datatypes import Aircraft, FlightCondition, LiftingSurface, SolverResult, SolverSettings
+from ventorum.core.trust import tip_edge_suction_note
 from ventorum.solvers.lattice_base import LARGE_ROTATION_FRACTION
 
 __all__ = ["RateDerivativesResult", "rate_derivatives", "rate_axes_transform"]
@@ -306,6 +307,8 @@ def rate_derivatives(
     if canonical in ("linear", "nonlinear"):
         notes.append("Lifting line: the section onset is taken at the three-quarter chord (thin-airfoil rule), "
                      "so a pitch rate changes the section lift as the equal change of the angle of attack.")
+    if canonical == "vlm":
+        notes.append(tip_edge_suction_note())
     if condition.h is not None:
         notes.append("Ground effect: the derivatives are at constant height of the reference point and constant "
                      "attitude. The ground images are mirror images of the vortices; the rotation enters only the "

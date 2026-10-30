@@ -23,6 +23,7 @@ ROOT = "Root dihedral (fold of"
 KINK = "Lifting line at a winglet kink"
 TIP = "Finite tip chord"
 RATES = "Body rates: the near-field lateral values"
+EDGE = "Tip edge suction in the lateral rate derivatives"
 TERMS = "Fourier lifting line with"
 BIAS = "Chordwise bias of the panel method"
 GULL = "Dihedral break of"
@@ -114,6 +115,29 @@ def test_body_rate_note():
     assert _has(res, RATES)
     _assert_score_unchanged(res, (RATES,))
     assert not _has(_solve(_wing(), "vlm"), RATES)
+
+
+@pytest.mark.parametrize("rate", ["p", "r"])
+def test_tip_edge_suction_note(rate):
+    """A vortex-lattice solve with a roll or yaw rate gets the tip edge suction note, without a penalty."""
+    res = _solve(_wing(), "vlm", **{rate: 0.2})
+    assert _has(res, EDGE)
+    assert "Lamar, NASA TR R-428" in next(w for w in res.totals.trust.warnings if w.startswith(EDGE))
+    _assert_score_unchanged(res, (EDGE,))
+    # Only a roll or yaw rate on the vortex lattice: no rate, a pitch rate or a lifting line give no note.
+    assert not _has(_solve(_wing(), "vlm"), EDGE)
+    assert not _has(_solve(_wing(), "vlm", q=0.2), EDGE)
+    assert not _has(_solve(_wing(), "linear", **{rate: 0.2}), EDGE)
+
+
+def test_tip_edge_suction_note_is_no_runtime_warning():
+    """The tip edge suction note is a trust note only: the solve issues no RuntimeWarning with it."""
+    ac = vt.Aircraft(surfaces=[_wing()])
+    fc = vt.FlightCondition(V_inf=40.0, alpha=math.radians(4.0), p=0.2)
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        vt.analyze(ac, fc, vt.SolverSettings(solver_type="vlm", n_panels=12))
+    assert not any(str(w.message).startswith(EDGE) for w in caught)
 
 
 def test_fourier_notes():

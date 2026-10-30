@@ -223,6 +223,13 @@ PANEL3D_STEEP_ROOT_UNSCALED_WARNING = (
     "singular, so the loads are not reliable."
 )
 
+#: Cap penalty of a steep root dihedral without the root thickness scaling
+#: [-] (factor ``mesh_adequacy``, with
+#: :data:`PANEL3D_STEEP_ROOT_UNSCALED_WARNING`). The root pressure
+#: coefficient is singular there. The value is a choice (a cap rule, not
+#: calibrated): alone it gives the rating LOW.
+PANEL3D_PENALTY_STEEP_ROOT_UNSCALED = 0.40
+
 #: Trust note of a steep root dihedral with the root thickness scaling [-].
 #: The limit is ``ventorum.panel3d.mesh.STEEP_ROOT_DIHEDRAL_DEG``.
 PANEL3D_STEEP_ROOT_CONVERGENCE_NOTE = (
@@ -917,10 +924,12 @@ def panel3d_mesh_checks(
       watertight, panels that are not convex (a folded strip), and a surface
       that intersects itself or its mirror image (``n_self_intersections``,
       same penalty as the folded panels). The penalties add. A steep root
-      dihedral (``steep_root_dihedral``) gives a warning without a
-      penalty: without the root thickness scaling
-      (``scale_root_thickness`` False) the root pressure coefficient is
-      singular; with it the lift needs a spanwise convergence study.
+      dihedral (``steep_root_dihedral``, 60 deg or more) without the root
+      thickness scaling (``scale_root_thickness`` False) gives a warning
+      and the penalty :data:`PANEL3D_PENALTY_STEEP_ROOT_UNSCALED`: the
+      root pressure coefficient is singular. With the scaling it gives a
+      note without a penalty: the lift needs a spanwise convergence
+      study.
     * ``mesh_resolution``: the discretization-error indicators. The relative
       difference of the near-field pressure drag and the far-field Trefftz
       induced drag, and the chordwise panel count when it is given. Each
@@ -1021,6 +1030,7 @@ def panel3d_mesh_checks(
                     "Solve with at least two spanwise panel counts and compare the lift."
                 )
             else:
+                mesh_pen += PANEL3D_PENALTY_STEEP_ROOT_UNSCALED
                 warnings.append(PANEL3D_STEEP_ROOT_UNSCALED_WARNING)
                 recommendations.append(
                     "Use the root thickness scaling (panel_scale_root_thickness=True, the default)."
@@ -1391,6 +1401,32 @@ def body_rate_note() -> str:
     )
 
 
+def tip_edge_suction_note() -> str:
+    """Return the note of the tip edge suction in the lateral rate derivatives of the vortex lattice.
+
+    In attached potential flow a flat rectangular wing gets its roll-rate
+    side force ``CY_p`` only from the suction at the tip side edges. The
+    edge-singularity method of J. E. Lamar (NASA TR R-428, 1974) gives this
+    force. The free-edge leg rule of the vortex lattice gives the correct
+    sign, but about 30 % less, and its value depends on the spanwise
+    spacing. Measurement on an unswept wing (M. J. Queijo and T. A. Toll,
+    NACA TN 1581, 1948) gives ``CY_p`` of about 0: real square tips lose
+    the edge suction. The note adds no penalty.
+
+    Returns
+    -------
+    str
+        The note.
+    """
+    return (
+        "Tip edge suction in the lateral rate derivatives: CY_p and the other in-plane edge-force terms of a "
+        "roll or yaw rate include the attached-flow suction at the tip side edges. The free-edge leg rule of "
+        "the vortex lattice gives about 30 % less than the edge-singularity method (Lamar, NASA TR R-428, "
+        "1974), and its value depends on the spanwise spacing. Real square tips usually lose this suction: "
+        "measurement on an unswept wing gave CY_p of about 0 (Toll and Queijo, NACA TN 1581, 1948)."
+    )
+
+
 def fourier_convergence_notes(surface: LiftingSurface | None, AR: float, n_terms: int) -> list[str]:
     """Return the notes and warnings of the Fourier lifting line.
 
@@ -1426,6 +1462,49 @@ def fourier_convergence_notes(surface: LiftingSurface | None, AR: float, n_terms
     return notes
 
 
+#: Trust note of a 3D panel surface with two adjacent deflected controls [-].
+PANEL3D_ADJACENT_CONTROLS_NOTE = (
+    "Adjacent deflected controls: the 3D panel mesh closes the side edge between two deflected controls "
+    "with flat side panels (gap closure), not with the sealed transition. The flap increment of CL then "
+    "does not converge with spanwise refinement: it falls at each refinement. Compare two spanwise panel "
+    "counts, and compare the increment with the vortex lattice."
+)
+
+#: Tolerance on the span parameter [-] at which two controls touch (the
+#: tolerance of the control stations of the 3D panel mesh).
+_CONTROL_EDGE_TOL = 1e-9
+
+
+def surface_has_adjacent_deflected_controls(surface: LiftingSurface) -> bool:
+    """Return True when two deflected controls of a surface share a side edge.
+
+    Two controls with a nonzero deflection [rad] touch when the end span
+    parameter of one equals the start span parameter of the other (within
+    ``_CONTROL_EDGE_TOL``) inside the surface (not at the root or the tip).
+    The 3D panel mesh closes such an edge with side panels (gap closure),
+    whatever the control edge option (see
+    :func:`ventorum.panel3d.mesh.mesh_lifting_surface`).
+
+    Parameters
+    ----------
+    surface : LiftingSurface
+        The surface.
+
+    Returns
+    -------
+    bool
+        True if at least one such edge exists.
+    """
+    active = [c for c in getattr(surface, "controls", None) or () if float(getattr(c, "deflection", 0.0)) != 0.0]
+    for a in active:
+        edge = float(a.eta_end)
+        if not (_CONTROL_EDGE_TOL < edge < 1.0 - _CONTROL_EDGE_TOL):
+            continue
+        if any(b is not a and abs(float(b.eta_start) - edge) <= _CONTROL_EDGE_TOL for b in active):
+            return True
+    return False
+
+
 def panel3d_convergence_notes(surfaces: Sequence[LiftingSurface] | None, n_chord: int | None) -> list[str]:
     """Return the mesh-convergence notes of the 3D panel method.
 
@@ -1436,6 +1515,11 @@ def panel3d_convergence_notes(surfaces: Sequence[LiftingSurface] | None, n_chord
     * A dihedral break above ``DIHEDRAL_BREAK_NOTE_DEG`` inside a surface
       (a gull wing): the strip lift peak at the break grows with mesh
       refinement.
+    * A surface with two adjacent deflected controls
+      (:func:`surface_has_adjacent_deflected_controls`):
+      :data:`PANEL3D_ADJACENT_CONTROLS_NOTE`. The edge between them is a
+      gap closure, and the flap increment of CL does not converge with
+      spanwise refinement.
 
     Parameters
     ----------
@@ -1467,6 +1551,8 @@ def panel3d_convergence_notes(surfaces: Sequence[LiftingSurface] | None, n_chord
             "grows as the mesh is refined, so the strip loads next to the break are not converged. Use the "
             "integrated loads."
         )
+    if any(surface_has_adjacent_deflected_controls(s) for s in surfaces or ()):
+        notes.append(PANEL3D_ADJACENT_CONTROLS_NOTE)
     return notes
 
 
@@ -1530,7 +1616,9 @@ def mach_speed_mismatch(condition) -> str | None:
     envelope check of the speed, so the two checks cannot disagree. At the
     sea-level density it is ``A_SL`` (340.29 m/s). A difference above
     ``MACH_SPEED_TOLERANCE``
-    gives the note. A Mach number of None or 0 means no compressibility
+    gives the note. :func:`evaluate_aerodynamic_trust` then gives the
+    compressibility penalty of the larger of the two Mach numbers. A Mach
+    number of None or 0 means no compressibility
     correction and gives no note (the incompressible envelope check of the
     speed applies then).
 
@@ -1555,7 +1643,8 @@ def mach_speed_mismatch(condition) -> str | None:
         f"The stated Mach number {float(mach):.3f} does not agree with V_inf/a = {mach_v:.3f} "
         f"(V_inf={float(condition.V_inf):g} m/s, a={a_sound:.2f} m/s: ISA speed of sound at the "
         f"flight-condition density); the difference is more than {MACH_SPEED_TOLERANCE}. The "
-        "compressibility correction uses the stated Mach number."
+        "compressibility correction uses the stated Mach number; the trust score rates the larger of the two "
+        "Mach numbers."
     )
 
 
@@ -2128,18 +2217,28 @@ def evaluate_aerodynamic_trust(
     penalties["side_edge_vortex"] = side_pen
 
     # 4. Compressibility (outside the valid envelope) ---------------------------------
+    # A stated Mach number that does not agree with V_inf/a gets the penalty of
+    # the larger of the two Mach numbers (a cap rule). The correction itself
+    # uses the stated Mach number.
     mach_pen = 0.0
     if condition is not None:
         correction_applied = getattr(condition, "mach", None) is not None and condition.mach > 0.0
-        if correction_applied:
-            mach = float(condition.mach)
-        else:
-            a_sound = isa_speed_of_sound(getattr(condition, "rho", RHO_SL))
-            mach = float(condition.V_inf) / a_sound
+        a_sound = isa_speed_of_sound(getattr(condition, "rho", RHO_SL))
+        mach_v = float(condition.V_inf) / a_sound
+        mach = float(condition.mach) if correction_applied else mach_v
+        mismatch = mach_speed_mismatch(condition)
+        mach_rated = max(mach, mach_v) if mismatch is not None else mach
 
-        if mach > MACH_LIMIT_INCOMPRESSIBLE:
-            mach_pen = 0.60 + 0.30 * min(1.0, (mach - MACH_LIMIT_INCOMPRESSIBLE) / 0.35)
-            if correction_applied:
+        if mach_rated > MACH_LIMIT_INCOMPRESSIBLE:
+            mach_pen = 0.60 + 0.30 * min(1.0, (mach_rated - MACH_LIMIT_INCOMPRESSIBLE) / 0.35)
+            if correction_applied and mach_rated > mach:
+                warnings.append(
+                    f"Out of the valid envelope: V_inf/a={mach_v:.2f} > {MACH_LIMIT_INCOMPRESSIBLE} (ISA speed "
+                    f"of sound {a_sound:.1f} m/s at the air density). The stated Mach number {mach:.2f} does not "
+                    "agree with it, so the rating uses the larger of the two. The Prandtl-Glauert correction "
+                    "uses the stated Mach number."
+                )
+            elif correction_applied:
                 warnings.append(
                     f"Out of the valid envelope: Mach={mach:.2f} > {MACH_LIMIT_INCOMPRESSIBLE}. "
                     "The Prandtl-Glauert correction is applied and is not validated above Mach 0.3."
@@ -2155,7 +2254,6 @@ def evaluate_aerodynamic_trust(
             warnings.append(
                 f"Mach={mach:.2f} > 0.7: linear theory loses validity near the critical Mach number."
             )
-        mismatch = mach_speed_mismatch(condition)
         if mismatch is not None:
             warnings.append(mismatch)
             recommendations.append("Give a Mach number that agrees with V_inf, or set V_inf from the Mach number.")

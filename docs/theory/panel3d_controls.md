@@ -144,6 +144,13 @@ The model uses these assumptions:
   edge with a continuous surface; the gap option closes the gap with flat
   side panels.
 - No flap-edge vortex model other than the panel mesh itself.
+- An edge between two deflected controls (for example a flap next to an
+  aileron, or two flaps with different hinges) is always a gap closure,
+  whatever `control_edge`. The flap increment of CL at such an edge does
+  not converge with spanwise refinement: in the measured cases it fell at
+  each refinement. A 3D panel result with two adjacent deflected controls
+  on one surface gets a trust note without a penalty
+  (`ventorum.core.trust.PANEL3D_ADJACENT_CONTROLS_NOTE`).
 - Attached inviscid flow only; no viscous separation effects.
 - The hinge height stays at mid thickness; no nose balance.
 

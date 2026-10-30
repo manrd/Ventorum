@@ -13,15 +13,18 @@ import warnings
 import numpy as np
 
 import ventorum as vt
-from ventorum.core.datatypes import FlightCondition, LiftingSurface, SolverSettings, WingSection
+from ventorum.core.datatypes import ControlSurface, FlightCondition, LiftingSurface, SolverSettings, WingSection
 from ventorum.core.trust import (
+    PANEL3D_ADJACENT_CONTROLS_NOTE,
     PANEL3D_FAR_FIELD_FREE_AIR_NOTE,
+    PANEL3D_PENALTY_STEEP_ROOT_UNSCALED,
     PANEL3D_FAR_FIELD_GROUND_NOTE,
     PANEL3D_OUTER_STRIP_GROUND_NOTE,
     PANEL3D_ROOT_SCALE_WARNING,
     PANEL3D_STEEP_ROOT_CONVERGENCE_NOTE,
     PANEL3D_STEEP_ROOT_UNSCALED_WARNING,
     panel3d_mesh_checks,
+    surface_has_adjacent_deflected_controls,
 )
 from ventorum.panel3d.mesh import STEEP_ROOT_DIHEDRAL_DEG, mesh_lifting_surface
 from ventorum.solvers.factory import make_solver
@@ -327,6 +330,8 @@ def test_steep_unscaled_root_trust_warning():
     assert PANEL3D_STEEP_ROOT_UNSCALED_WARNING in res.totals.trust.warnings
     assert PANEL3D_STEEP_ROOT_CONVERGENCE_NOTE not in res.totals.trust.warnings
     assert res.details["mesh_stats"]["steep_root_dihedral"] is True
+    assert res.totals.trust.factors["mesh_adequacy"] >= PANEL3D_PENALTY_STEEP_ROOT_UNSCALED
+    assert res.totals.trust.score <= 1.0 - PANEL3D_PENALTY_STEEP_ROOT_UNSCALED + 1e-12
 
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
@@ -353,7 +358,7 @@ def test_steep_scaled_root_convergence_note():
 
 
 def test_steep_root_mesh_checks_direct():
-    """panel3d_mesh_checks selects the note or the warning from the scaling flag; neither adds a penalty."""
+    """panel3d_mesh_checks selects the note or the warning from the scaling flag; only the warning has a penalty."""
     pen, warns, recs = panel3d_mesh_checks({"steep_root_dihedral": True, "scale_root_thickness": True})
     assert PANEL3D_STEEP_ROOT_CONVERGENCE_NOTE in warns
     assert PANEL3D_STEEP_ROOT_UNSCALED_WARNING not in warns
@@ -364,8 +369,58 @@ def test_steep_root_mesh_checks_direct():
     assert PANEL3D_STEEP_ROOT_UNSCALED_WARNING in warns
     assert PANEL3D_STEEP_ROOT_CONVERGENCE_NOTE not in warns
     assert any("panel_scale_root_thickness=True" in r for r in recs)
-    assert pen["mesh_adequacy"] == 0.0
+    assert PANEL3D_PENALTY_STEEP_ROOT_UNSCALED == 0.40
+    assert pen["mesh_adequacy"] == PANEL3D_PENALTY_STEEP_ROOT_UNSCALED
 
-    _, warns, _ = panel3d_mesh_checks({"steep_root_dihedral": False, "scale_root_thickness": False})
+    pen, warns, _ = panel3d_mesh_checks({"steep_root_dihedral": False, "scale_root_thickness": False})
+    assert pen["mesh_adequacy"] == 0.0
     assert PANEL3D_STEEP_ROOT_UNSCALED_WARNING not in warns
     assert PANEL3D_STEEP_ROOT_CONVERGENCE_NOTE not in warns
+
+
+def _wing_with_controls(*controls: tuple[float, float, float, bool]) -> LiftingSurface:
+    """Return the straight wing with controls (eta_start, eta_end, deflection [deg], symmetric)."""
+    wing = _straight_wing()
+    wing.controls = [
+        ControlSurface(name=f"c{i}", eta_start=a, eta_end=b, hinge_x_c=0.75, deflection=float(np.radians(d)),
+                       symmetric=sym)
+        for i, (a, b, d, sym) in enumerate(controls)
+    ]
+    return wing
+
+
+def test_adjacent_deflected_controls_detection():
+    """Two deflected controls that share a side edge inside the surface are detected; other layouts are not."""
+    assert surface_has_adjacent_deflected_controls(_wing_with_controls((0.0, 0.5, 10.0, True), (0.5, 1.0, 5.0, False)))
+    assert surface_has_adjacent_deflected_controls(_wing_with_controls((0.2, 0.5, 10.0, True), (0.5, 0.8, 10.0, True)))
+    # A gap between the controls, an undeflected neighbour, or one control only.
+    assert not surface_has_adjacent_deflected_controls(_wing_with_controls((0.0, 0.4, 10.0, True),
+                                                                          (0.5, 1.0, 5.0, False)))
+    assert not surface_has_adjacent_deflected_controls(_wing_with_controls((0.0, 0.5, 10.0, True),
+                                                                          (0.5, 1.0, 0.0, False)))
+    assert not surface_has_adjacent_deflected_controls(_wing_with_controls((0.2, 0.8, 10.0, True)))
+    assert not surface_has_adjacent_deflected_controls(_straight_wing())
+
+
+def test_adjacent_deflected_controls_trust_note():
+    """A 3D panel solve with a flap next to an aileron gets the note: no penalty and no Python warning."""
+    cond = FlightCondition(V_inf=30.0, alpha=np.radians(3.0))
+    settings = SolverSettings(solver_type="panel3d", n_panels=8, n_chord=6)
+    wing = _wing_with_controls((0.0, 0.5, 10.0, True), (0.5, 1.0, 5.0, False))
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        res = vt.analyze(wing, condition=cond, settings=settings)
+    trust = res.totals.trust
+    assert PANEL3D_ADJACENT_CONTROLS_NOTE in trust.warnings
+    assert not any(PANEL3D_ADJACENT_CONTROLS_NOTE in str(w.message) for w in caught)
+    # The note adds no penalty: the same inputs without the note give the same score.
+    kept = [w for w in trust.warnings if w != PANEL3D_ADJACENT_CONTROLS_NOTE]
+    ref = vt.evaluate_aerodynamic_trust(AR=8.0, CL=0.3, CDi=0.005, notes=kept, solver_type="panel3d")
+    new = vt.evaluate_aerodynamic_trust(AR=8.0, CL=0.3, CDi=0.005, notes=trust.warnings, solver_type="panel3d")
+    assert (new.score, new.rating, new.factors) == (ref.score, ref.rating, ref.factors)
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        res = vt.analyze(_wing_with_controls((0.0, 0.4, 10.0, True), (0.5, 1.0, 5.0, False)),
+                         condition=cond, settings=settings)
+    assert PANEL3D_ADJACENT_CONTROLS_NOTE not in res.totals.trust.warnings

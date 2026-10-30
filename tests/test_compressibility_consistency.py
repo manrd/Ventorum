@@ -139,6 +139,39 @@ def test_mach_zero_fast_gets_the_stated_mach_penalty():
     assert res0.totals.trust.rating == "UNRELIABLE"
 
 
+def _mach_penalty(m: float) -> float:
+    """Return the compressibility penalty of the trust score at the Mach number *m* [-] (above 0.3)."""
+    return 0.60 + 0.30 * min(1.0, (m - MACH_LIMIT_INCOMPRESSIBLE) / 0.35)
+
+
+def test_mach_speed_mismatch_gets_the_penalty_of_the_larger_mach():
+    """A stated Mach number that disagrees with V_inf/a gets the penalty of the larger of the two."""
+    wing = _high_ar_wing(LinearAirfoil())
+    settings = SolverSettings(solver_type="vlm", n_panels=8, n_chord=1)
+    # V_inf/a = 0.5 with a stated mach 0.2: the speed gives the larger Mach number.
+    with pytest.warns(RuntimeWarning, match="does not agree with V_inf/a"):
+        res = vt.analyze(wing, condition=FlightCondition(V_inf=0.5 * A_SL, alpha=np.radians(2.0), mach=0.2),
+                         settings=settings)
+    trust = res.totals.trust
+    assert trust.factors["compressibility"] == pytest.approx(_mach_penalty(0.5), rel=1e-12)
+    assert trust.rating == "UNRELIABLE"
+    assert any("rating uses the larger of the two" in w for w in trust.warnings)
+    # Stated mach 0.5 with V_inf/a = 0.2: the stated Mach number is the larger.
+    cond = FlightCondition(V_inf=0.2 * A_SL, alpha=np.radians(2.0), mach=0.5)
+    t = vt.evaluate_aerodynamic_trust(AR=8.0, condition=cond, CL=0.3, CDi=0.005, solver_type="vlm")
+    assert t.factors["compressibility"] == pytest.approx(_mach_penalty(0.5), rel=1e-12)
+    # Inside the tolerance (0.05) the stated Mach number alone is rated.
+    cond = FlightCondition(V_inf=0.34 * A_SL, alpha=np.radians(2.0), mach=0.31)
+    assert mach_speed_mismatch(cond) is None
+    t = vt.evaluate_aerodynamic_trust(AR=8.0, condition=cond, CL=0.3, CDi=0.005, solver_type="vlm")
+    assert t.factors["compressibility"] == pytest.approx(_mach_penalty(0.31), rel=1e-12)
+    # Both below 0.3 but not in agreement: a note, no penalty.
+    cond = FlightCondition(V_inf=0.25 * A_SL, alpha=np.radians(2.0), mach=0.1)
+    t = vt.evaluate_aerodynamic_trust(AR=8.0, condition=cond, CL=0.3, CDi=0.005, solver_type="vlm")
+    assert t.factors["compressibility"] == 0.0
+    assert any("does not agree with V_inf/a" in w for w in t.warnings)
+
+
 @pytest.mark.parametrize("mach", [0.7, 0.85, 0.9999])
 def test_mach_at_or_above_limit_is_refused(mach):
     """Regression: mach 0.9999 ran and gave a result; mach >= 0.7 now raises ValidityError."""
