@@ -389,8 +389,10 @@ def test_old_ground_cache_entry_without_circulation_is_solved_again(tmp_path, fa
 # Non-planar strips in ground effect: dihedral and a vertical fin
 # ═══════════════════════════════════════════════════════════════════════════════
 
-#: Table heights [-] of the analytic ground table.
-_ANALYTIC_HEIGHTS = np.array([0.2, 0.3, 0.5, 0.8, 1.2, 2.0, 3.0])
+#: Table heights [-] of the analytic ground table. A strip at 59.5 deg to the
+#: ground reads its polar at the section-plane height, about twice its
+#: vertical height: the table goes to 5.
+_ANALYTIC_HEIGHTS = np.array([0.2, 0.3, 0.5, 0.8, 1.2, 2.0, 3.0, 5.0])
 
 
 def _analytic_circulation_lift(alpha, h_over_c):
@@ -439,6 +441,15 @@ def _assert_no_lift_or_convergence_warning(caught) -> None:
     assert not any("converge" in t.lower() for t in texts), texts
 
 
+def _section_plane_cosine(res, strips) -> np.ndarray:
+    """Return cos(Gamma_g) [-] of each strip: the in-plane part of the ground normal."""
+    lat = res.details["lattice"]
+    axes = np.cross(lat.normal[strips], lat.chord_dir[strips])
+    axes /= np.linalg.norm(axes, axis=1)[:, None]
+    n = res.details["ground"].normal / np.linalg.norm(res.details["ground"].normal)
+    return np.sqrt(1.0 - (axes @ n) ** 2)
+
+
 def _dihedral_wing(dihedral_deg: float) -> LiftingSurface:
     """Return a symmetric rectangular wing of aspect ratio 8 with dihedral."""
     return LiftingSurface(
@@ -478,10 +489,12 @@ def test_dihedral_wing_in_ground_effect_reads_the_circulation_lift(model, h):
     rise = (y.max() - y.min()) * np.tan(np.radians(6.0)) * np.cos(cond.alpha)
     assert hc[np.argmax(y)] - hc[np.argmin(y)] == pytest.approx(rise, rel=1e-6)
     alpha_v = res.details["alpha_eff"][strips]
+    # The polar is read at the section-plane height h / (c cos(Gamma_g)).
+    h_read = hc / _section_plane_cosine(res, strips)
     cl_lattice = _strip_circulation_lift(res, strips, V)
-    np.testing.assert_allclose(cl_lattice, _analytic_circulation_lift(alpha_v, hc), rtol=0, atol=1e-8)
+    np.testing.assert_allclose(cl_lattice, _analytic_circulation_lift(alpha_v, h_read), rtol=0, atol=1e-8)
     # The pressure lift is far from the lattice lift: the test can see a wrong definition.
-    assert np.min(np.abs(cl_lattice - _analytic_pressure_lift(alpha_v, hc))) > 1e-3
+    assert np.min(np.abs(cl_lattice - _analytic_pressure_lift(alpha_v, h_read))) > 1e-3
 
 
 def _wing_and_fin() -> Aircraft:
@@ -708,3 +721,76 @@ def test_strip_below_the_limit_keeps_the_ground_relation(tmp_path, fake_2d, kind
     assert np.all(res.details["strip_circulation_lift"][res.details["lattice"].strip_is_right])
     assert not any("steeper than" in t for t in res.details["notes"])
     assert np.min(np.abs(res.details["lift_slope_section"] - _free_air_slope(59.5))) > 1e-3
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Polar read height of a strip with dihedral
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class _HeightSource:
+    """Ground source that records the heights it gets and gives a linear circulation polar."""
+
+    supports_ground = True
+
+    def __init__(self):
+        self.heights = []
+
+    def polar(self, section, Re, alphas_deg, *, mach=0.0, flap=None, height=None, **options):
+        self.heights.append(height)
+        alpha = np.radians(np.asarray(alphas_deg, dtype=float))
+        cl = 2.0 * np.pi * alpha
+        return TabulatedAirfoil(name="lin", alpha=alpha, Cl_data=cl, Cl_circulation_data=cl,
+                                Cd_data=np.full(alpha.shape, 0.01), Cm_data=np.zeros(alpha.shape), Re=float(Re))
+
+
+@pytest.mark.parametrize("model", ["vlm", "llt", "panel3d"])
+def test_dihedral_strip_reads_the_polar_at_the_section_plane_height(model):
+    """A strip with dihedral reads its ground polar at h / (c cos(Gamma_g)) in every V1 path.
+
+    The 2D section relation of the strip has its images at the section-plane
+    distance h / cos(Gamma_g). The polar is now read at the same distance;
+    before, it was read at the vertical height h / c.
+    """
+    source = _HeightSource()
+    cond = FlightCondition(V_inf=30.0, alpha=np.radians(4.0), h=1.5 if model == "llt" else 0.5)
+    wing = LiftingSurface(
+        name="w", semi_span=4.0, dihedral=np.radians(20.0),
+        sections=[WingSection(y_frac=0.0, chord=1.0, shape="0012"), WingSection(y_frac=1.0, chord=1.0, shape="0012")],
+    )
+    if model == "panel3d":
+        st = SolverSettings(solver_type="panel3d", n_panels=4, n_chord=8, spacing="uniform",
+                            panel_backend="numpy", panel_cache=False, panel_ground_solver="direct")
+    else:
+        st = SolverSettings(n_panels=8, n_chord=4 if model == "vlm" else 1, spacing="uniform")
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)
+        res = solve_viscous(wing, cond, st, source, model=model)
+    assert res.converged
+    # The strips of the polar read: the lattice of the condition (one chordwise panel is enough).
+    from ventorum.aero.system import ground_plane_from_condition
+
+    lat = make_solver("vlm").build(Aircraft(surfaces=[wing]), SolverSettings(n_panels=st.n_panels, n_chord=1, spacing="uniform"),
+                                   cond, None, np.zeros(3))
+    ground = ground_plane_from_condition(lat, cond, np.zeros(3))
+    strips = np.flatnonzero(lat.strip_is_right)
+    hc = ground.height(lat.qc_mid[strips]) / lat.chord[strips]
+    probe = SimpleNamespace(details={"lattice": lat, "ground": ground})
+    cosine = _section_plane_cosine(probe, strips)
+    assert np.all(cosine < 0.95)
+    expected = np.round(hc / cosine, 6)
+    got = np.array(sorted(set(source.heights)))
+    np.testing.assert_allclose(got, np.sort(np.unique(expected)), rtol=0, atol=2e-6)
+    # The vertical heights are not read.
+    assert np.min(np.abs(got - np.round(hc.min(), 6))) > 1e-2
+
+
+def test_planar_strip_read_height_is_the_vertical_height_bit_for_bit():
+    """A planar strip reads its polar at h / c with no arithmetic change, also with a tilted ground."""
+    from ventorum.aero.system import GroundPlane
+    from ventorum.viscous.alpha_correction import _polar_read_heights
+
+    lat = _lattice(0.0)
+    strips = np.arange(lat.n_strips)
+    ground = GroundPlane(np.array([np.sin(0.07), 0.0, np.cos(0.07)]), -0.4)
+    hc = ground.height(lat.qc_mid) / lat.chord
+    assert np.array_equal(_polar_read_heights(lat, strips, ground, hc), hc)

@@ -153,7 +153,12 @@ def test_guard_raises_for_trailing_edge_under_ground_study_case():
 
 
 def test_guard_passes_valid_case_bit_identical():
-    """A valid case keeps the flap shift of the code before the guard."""
+    """A valid case gives the flap shift of the section on the undeflected chord line.
+
+    The guard does not change a valid case. The section is on the
+    undeflected chord line, so the ground value is that of the clean
+    strip (the section on the deflected trailing edge gave 0.5725625381466319).
+    """
     wing = _make_flapped_wing(shape="0012", deflection_deg=10.0, hinge=0.75)
     ac = Aircraft(name="ValidCase", surfaces=[wing])
     cond = FlightCondition(V_inf=40.0, alpha=np.radians(2.0), h=0.5)
@@ -162,10 +167,10 @@ def test_guard_passes_valid_case_bit_identical():
     lat = solver.build(ac, settings, cond, None, np.zeros(3))
     ground = ground_plane_from_condition(lat, cond, np.zeros(3))
     assert ground is not None
-    # Values of the code before the guard (commit 609547b), same case. They are
-    # bit-identical on the machine that made them; other numpy and BLAS builds
-    # (CI) change the last bits, so the check uses a round-off tolerance.
-    assert _section_flap_shift(lat, 0, 0.75, ground) == pytest.approx(0.5725625381466319, rel=1e-12)
+    # Values of this code, same case. They are bit-identical on the machine
+    # that made them; other numpy and BLAS builds (CI) change the last bits,
+    # so the check uses a round-off tolerance.
+    assert _section_flap_shift(lat, 0, 0.75, ground) == pytest.approx(0.5738308930925224, rel=1e-12)
     assert _section_flap_shift(lat, 0, 0.75, None) == pytest.approx(0.607922146145465, rel=1e-12)
 
 
@@ -185,3 +190,35 @@ def test_warning_from_polar_source_section():
     matching = [w for w in recorded if "ground factor of the flap increment" in str(w.message)]
     assert len(matching) == 1
     assert all(_THICK_GROUND_FLAP_NOTE in r.totals.trust.warnings for r in results)
+
+
+def _flap_lattice(deflection_deg: float, h: float):
+    """Return the lattice and the ground plane of the flapped wing at alpha 2 deg."""
+    ac = Aircraft(name="KappaCase", surfaces=[_make_flapped_wing(shape="0012", deflection_deg=deflection_deg)])
+    cond = FlightCondition(V_inf=40.0, alpha=np.radians(2.0), h=h)
+    lat = make_solver("vlm").build(ac, SolverSettings(n_chord=4, n_panels=24), cond, None, np.zeros(3))
+    return lat, ground_plane_from_condition(lat, cond, np.zeros(3))
+
+
+@pytest.mark.parametrize("h", [0.5, 0.25])
+def test_ground_factor_uses_the_undeflected_chord_line(h):
+    """The ground factor kappa of the flap shift does not depend on the flap deflection.
+
+    The 2D section of kappa is on the undeflected chord line of the strip.
+    A section on the deflected trailing edge gave kappa 0.941835 (10 deg)
+    against 0.943922 (no deflection) at h/c 0.5, and 0.883337 against
+    0.884470 at h/c 0.25. The clean wing (no control) gives the reference
+    value.
+    """
+    lat0, ground0 = _flap_lattice(0.0, h)
+    free = _section_flap_shift(lat0, 0, 0.75, None)
+    reference = _section_flap_shift(lat0, 0, 0.75, ground0) / free
+    expected = {0.5: 0.943922, 0.25: 0.884470}[h]
+    assert reference == pytest.approx(expected, abs=1e-6)
+    for deflection in (10.0, -10.0, 20.0):
+        lat, ground = _flap_lattice(deflection, h)
+        te = 0.5 * (lat.te_left[0] + lat.te_right[0])
+        # The trailing edge of the strip is deflected: the old section would see it.
+        assert abs(float((te - lat.le_left[0]) @ lat.normal[0])) > 1e-2
+        kappa = _section_flap_shift(lat, 0, 0.75, ground) / _section_flap_shift(lat, 0, 0.75, None)
+        assert kappa == pytest.approx(reference, rel=1e-12)
