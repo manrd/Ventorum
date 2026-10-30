@@ -127,3 +127,54 @@ def test_ground_identity_polar_residual_does_not_grow_with_the_mesh():
               f"free {np.round(100 * np.array(free), 3)} %")
         assert np.max(np.abs(ground)) < 1e-3 and np.max(np.abs(free)) < 1e-3
         np.testing.assert_allclose(ground, free, rtol=0, atol=0.02)
+
+
+def _plate_slope_with_images(height, attitude, n=256):
+    """Return the lift slope [1/rad] of a flat plate of unit chord at a fixed attitude [rad] above the ground.
+
+    Lumped vortices at the quarter point and control points at the
+    three-quarter point of *n* equal panels (thin-airfoil theory, Katz and
+    Plotkin 2001), with their images in the ground. The quarter chord is at
+    *height* [chord]; the attitude is nose up.
+    """
+    x0 = np.arange(n) / n
+    xq, xp = x0 + 0.25 / n, x0 + 0.75 / n
+
+    def points(x):
+        return np.column_stack([(x - 0.25) * np.cos(attitude), height - (x - 0.25) * np.sin(attitude)])
+
+    q, p = points(xq), points(xp)
+    normal = np.array([np.sin(attitude), np.cos(attitude)])
+
+    def influence(src, sign):
+        r = p[:, None, :] - src[None, :, :]
+        r2 = np.sum(r * r, axis=2)
+        return sign * (r[:, :, 1] * normal[0] - r[:, :, 0] * normal[1]) / (2.0 * np.pi * r2)
+
+    m = influence(q, 1.0) + influence(q * np.array([1.0, -1.0]), -1.0)
+    return 2.0 * abs(float(np.linalg.solve(m, -np.ones(n)).sum()))
+
+
+@pytest.mark.parametrize("height, expected", [(0.5, -8.86e-4), (0.25, -4.06e-4)])
+def test_size_of_the_polar_attitude_assumption(height, expected):
+    """Measure the lift difference between the strip attitude and the pitch of the polar section.
+
+    A ground polar pitches the section about its quarter chord to the
+    section angle. The strip keeps its attitude (4 deg on a planar AR 8
+    flat-plate wing at alpha 4 deg). For the most loaded strip of the
+    inviscid lattice, the 2D flat-plate lift at the effective angle with
+    the ground line of the strip attitude differs from the pitch-curve
+    lift at that angle by the relative amount *expected* [-]: below 0.1 %.
+    """
+    assert _plate_slope_with_images(1e6, 0.0) == pytest.approx(2.0 * np.pi, rel=1e-6)
+    secs = [WingSection(0.0, 1.0, x_le=-0.25), WingSection(1.0, 1.0, x_le=-0.25)]
+    wing = Aircraft(surfaces=[LiftingSurface(name="w", semi_span=4.0, sections=secs)])
+    attitude = np.radians(4.0)
+    result = make_solver("vlm").solve(wing, FlightCondition(V_inf=30.0, alpha=attitude, h=height),
+                                      SolverSettings(n_panels=16, n_chord=8))
+    cl = float(np.max(result.spanwise[0].Cl))
+    slope_attitude = _plate_slope_with_images(height, attitude)
+    alpha_e = cl / slope_attitude
+    difference = slope_attitude / _plate_slope_with_images(height, alpha_e) - 1.0
+    print(f"h/c {height}: alpha_e {np.degrees(alpha_e):.4f} deg, relative lift difference {difference:+.3e}")
+    assert difference == pytest.approx(expected, abs=1e-6)

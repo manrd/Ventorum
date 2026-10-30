@@ -67,6 +67,12 @@ The ground plane of a condition is parallel to the free stream, so in the sectio
 
 A 2D section near a wall has two lift coefficients. The circulation lift is $C_{l,\Gamma} = 2\Gamma/(V_\infty c)$, from the total circulation $\Gamma$ of the section. The pressure lift $C_{l,p}$ is the integral of the surface pressure: it is the force on the section. In free air the Kutta-Joukowski relation makes the two equal for a single section. Near a wall it does not give the force from the total circulation, and the two differ (Coulliette and Plotkin 1996, eq. 30). Ventorum-2D reports $C_{l,p}$ as `Cl` in ground effect and keeps $C_{l,\Gamma}$ as `Cl_circulation` (see [](panel2d.md)).
 
+**The 2D lift coefficient of a polar.** The lift of a section polar has one of two definitions:
+
+- A free-air polar gives the circulation lift as `Cl`. In free air the circulation lift and the pressure lift are equal, so this `Cl` is also the pressure lift.
+- A ground polar (a polar with the ground height) gives the pressure lift as `Cl` and, when its source has it, the circulation lift as `Cl_circulation`.
+- The vortex-lattice and lifting-line couplings use the circulation lift in ground effect: they read `Cl_circulation` when the ground polar has it, and `Cl` with a trust note when it does not. In free air they read `Cl`. The thick-surface coupling (`model="panel3d"`) reads `Cl`, the pressure lift, also in ground effect (see the list below).
+
 The coupling uses these definitions:
 
 - **Residual: circulation with circulation.** The strip lift $C_{l,\text{inv},j} = 2\Gamma_j/(V_\infty c_j)$ of the lattice is a circulation lift. The section relation $(a_j, \alpha_{0,j})$ of a vortex-lattice strip with images, and the ground factor $\kappa_j$ of the flap shift, also come from sums of circulations. On a strip whose polar holds the ground height, the residual therefore reads the circulation lift of the polar, $C_{l,\Gamma,\text{visc}}$, and its slope in the Jacobian. A ground polar of Ventorum-2D has it: `Ventorum2DPolarSource` stores it in `TabulatedAirfoil.Cl_circulation_data`, `build_polar_table` stores it in `PolarTable.Cl_circulation`, and `PolarTable.at` interpolates it as `Cl`. The branch search uses the angle of the largest circulation lift. `details["strip_circulation_lift"]` marks these strips.
@@ -77,6 +83,8 @@ The coupling uses these definitions:
 - **Thick-surface panel coupling.** `model="panel3d"` matches the pressure lift of each strip with the polar `Cl`: pressure with pressure. It does not read the circulation lift.
 
 **Assumption: the pitch of the polar section.** A ground-effect polar is a set of 2D solutions at one height $h/c$ of the reference point. Ventorum-2D turns the section about its quarter-chord point on the chord line and keeps the height of that point. The coupling reads the polar at the height of the strip quarter-chord point and at the viscous section angle $\alpha_{v,j}$. So it assumes that the strip section has the attitude of the polar section: pitched about $c/4$ to $\alpha_{v,j}$. The lattice strip has its geometric attitude, and $\alpha_{v,j}$ differs from it by the induced angle and the correction $\delta_j$. Near the ground the height of the trailing edge, and so the 2D ground effect, therefore differ between the strip and the polar section. The vortex-lattice and lifting-line couplings have no correction for this difference; the thick-surface coupling reads its effective angle on the pitch curve of the strip section (see "The thick section reference" below).
+
+**Statement of the assumption and its measured size.** A ground polar pitches the section about its quarter chord at the section angle $\alpha_{v,j}$, with the onset parallel to the ground. It does not keep the strip at its attitude. The vortex-lattice and lifting-line couplings accept this difference. One case gives its size: a planar AR 8 flat-plate wing at $\alpha$ = 4 deg (the attitude of its strips). For its most loaded strip, the 2D flat-plate lift at the effective angle (about 3.9 deg) with the ground line of the strip attitude differs from the lift of the pitched section by $-0.089$ % at $h/c = 0.5$ and by $-0.041$ % at $h/c = 0.25$ (`test_size_of_the_polar_attitude_assumption` in `tests/test_alpha_correction_ground_reference.py`, which pins these values). The difference grows with the difference between $\alpha_{v,j}$ and the attitude (large corrections $\delta_j$, for example near stall); these cases are not measured.
 
 ### Reference of a flapped vortex-lattice strip
 
@@ -136,6 +144,15 @@ A sweep runs from the angle nearest to zero upward and from there downward. Each
 A strip with $m_j \le 0$ at the solution has the flag `"post-stall, non-unique"`. Then the solver also runs from a stalled start (every strip $5$ deg above the angle of the Cl maximum of its polar) and from an attached start (every strip $5$ deg below it). Every other converged solution whose CL differs by more than $10^{-3}$ (`BRANCH_CL_DIFFERENCE`) is a branch: `details["branches"]` holds all of them (the first is the main result), `details["non_unique"]` is true, and the trust score gets the penalty `POST_STALL_BRANCH_PENALTY`.
 
 Only converged solutions form branches. When the main iteration does not converge, the result has `converged=False`, a warning and a note, no branch search and no branch verdict.
+
+**Policy when the coupling does not converge.** The coupling does not raise an error and does not fall back to the inviscid result. It returns the last iterate: the corrections $\boldsymbol{\delta}$ after the last accepted Newton or damped fixed-point step. Each accepted step lowers $\frac{1}{2}\|\mathbf{r}\|_2^2$, so the last iterate has the smallest residual norm of the iteration. The iteration stops after `max_iter` iterations, or earlier when no step lowers the residual. The result then has:
+
+- `converged=False`, and the residual history in `details["viscous_residual_history"]`;
+- one `RuntimeWarning` and a note in `details["notes"]` that give the iteration count, the largest strip residual and the tolerance;
+- the trust penalty of a solver that did not converge (`evaluate_aerodynamic_trust` with `converged=False`), with its warning in the trust report;
+- no branch search and no branch verdict.
+
+The thick-surface coupling first tries the stalled and the attached starts within the remaining iterations when a strip of the last iterate is post-stall; if one of them converges, it is the result. In a sweep, a condition that did not converge does not give the start of the next condition. This is the policy of all V1 couplings (vortex lattice, lifting line and thick surface): use such a result only with its warning.
 
 ## Profile drag
 
