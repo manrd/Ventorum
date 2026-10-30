@@ -12,20 +12,48 @@ from ventorum.panel2d.viscous import ViscousResult, solve_viscous
 
 
 @pytest.mark.slow
-def test_zero_deflection_equals_solve_viscous():
-    """Deflection 0 gives the same result as solve_viscous on the base section."""
-    base = airfoil("2412").repanel(n_panels=160)
-    r_base = solve_viscous(base, 0.0, 1e6)
-    r_flapped = solve_viscous_flapped(base, 0.0, 1e6, x_hinge=0.75, deflection_deg=0.0)
+@pytest.mark.parametrize("treatment", ["repanel", "merge", "none"])
+def test_zero_deflection_solves_the_section_with_the_hinge_node(treatment):
+    """Deflection 0 solves the section of with_flap at 0 deg (with the hinge node for "repanel" and "merge").
 
-    assert r_base.converged
+    The result equals, bit for bit, solve_viscous of that section. With "none" the section is the input.
+    """
+    base = airfoil("2412").repanel(n_panels=160)
+    zero = base.with_flap(x_hinge=0.75, deflection=0.0, hinge_treatment=treatment)
+    r_zero = solve_viscous(zero, 0.0, 1e6)
+    r_flapped = solve_viscous_flapped(base, 0.0, 1e6, x_hinge=0.75, deflection_deg=0.0, hinge_treatment=treatment)
+
+    assert r_zero.converged
     assert r_flapped.converged
-    assert np.array_equal(r_flapped.Cl, r_base.Cl)
-    assert np.array_equal(r_flapped.Cd, r_base.Cd)
-    assert np.array_equal(r_flapped.Cm, r_base.Cm)
+    for name in ("Cl", "Cd", "Cm", "Cd_friction", "Cd_pressure", "newton_iterations"):
+        assert np.array_equal(getattr(r_flapped, name), getattr(r_zero, name)), name
+    np.testing.assert_array_equal(r_flapped.coordinates, zero.coords)
+    if treatment == "repanel":
+        assert np.sum(np.abs(zero.coords[:, 0] - 0.75) < 1e-15) == 2
+    if treatment == "none":
+        np.testing.assert_array_equal(zero.coords, base.coords)
     assert r_flapped.reached_deflection == 0.0
     assert r_flapped.details["reached_deflection"] == 0.0
-    assert r_flapped.step_history == [(0.0, True, int(r_flapped.iterations))]
+    assert r_flapped.step_history == [(0.0, True, int(r_flapped.newton_iterations))]
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize("treatment", ["repanel", "merge"])
+@pytest.mark.parametrize("alpha", [0.0, 4.0])
+def test_zero_deflection_loads_are_continuous(treatment, alpha):
+    """NACA 2412, 160 panels, Re 1e6: Cl, Cd, Cm at 0 deg equal the mean of +-1e-4 deg within the tolerance.
+
+    The convergence tolerance of the solve is 1e-6 (largest absolute residual). In these cases the
+    transition intervals of the three solutions are the same. A case where the 0 deg step keeps a
+    frozen transition interval can jump (see docs/theory/panel2d_viscous.md).
+    """
+    base = airfoil("2412").repanel(n_panels=160)
+    res = {d: solve_viscous_flapped(base, alpha, 1e6, x_hinge=0.75, deflection_deg=d, hinge_treatment=treatment)
+           for d in (0.0, 1e-4, -1e-4)}
+    assert all(bool(r.converged) for r in res.values())
+    for name in ("Cl", "Cd", "Cm"):
+        mean = 0.5 * (float(getattr(res[1e-4], name)) + float(getattr(res[-1e-4], name)))
+        assert abs(float(getattr(res[0.0], name)) - mean) < 1e-6, name
 
 
 @pytest.mark.slow
