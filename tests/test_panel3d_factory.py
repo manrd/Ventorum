@@ -530,8 +530,16 @@ def test_well_resolved_wing_mesh_has_no_mesh_warning():
     assert stats["max_skew"] > tr.PANEL3D_MAX_SKEW
     assert trust.factors["mesh_adequacy"] == 0.0
     assert trust.factors["mesh_resolution"] == 0.0
+    # The coarse-mesh note of the near-field pressure drag is not a mesh-adequacy warning: it
+    # has no penalty and it is given below a fixed chordwise count. Check it separately.
+    coarse_note = tr.PANEL3D_CD_PRESSURE_COARSE_NOTE.format(n_chord=40)
+    assert 40 < tr.PANEL3D_CD_PRESSURE_MIN_N_CHORD
+    mesh_warnings = [w for w in trust.warnings if w != coarse_note]
     mesh_words = ("Elongated", "Skewed", "Warped", "Folded", "Near-field", "chordwise mesh")
-    assert not any(word in w for w in trust.warnings for word in mesh_words), trust.warnings
+    assert not any(word in w for w in mesh_warnings for word in mesh_words), trust.warnings
+    # The pressure-drag note is the only drag note: no near/far-field drag warning.
+    drag_notes = [w for w in trust.warnings if "drag" in w]
+    assert drag_notes == [coarse_note], trust.warnings
     # The calibrated error model rates this mesh MODERATE: E = exp(-0.46)/40 + exp(-2.7) 16^-0.66
     # = 2.65 %, k*E = 4.0 % (was HIGH under the former mesh rules, which have no warning here).
     assert trust.rating == "MODERATE"
