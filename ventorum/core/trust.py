@@ -1423,7 +1423,7 @@ def tip_edge_suction_note() -> str:
         "roll or yaw rate include the attached-flow suction at the tip side edges. The free-edge leg rule of "
         "the vortex lattice gives about 30 % less than the edge-singularity method (Lamar, NASA TR R-428, "
         "1974), and its value depends on the spanwise spacing. Real square tips usually lose this suction: "
-        "measurement on an unswept wing gave CY_p of about 0 (Queijo and Toll, NACA TN 1581, 1948)."
+        "measurement on an unswept wing gave CY_p of about 0 (Toll and Queijo, NACA TN 1581, 1948)."
     )
 
 
