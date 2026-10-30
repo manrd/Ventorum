@@ -182,7 +182,11 @@ def blend_tabulated(
         Blended polar evaluated on the common alpha range. If the input polars
         have different alpha ranges, a RuntimeWarning is issued giving both
         ranges and the kept range in degrees. The blend has circulation lift
-        data only when both polars have it.
+        data only when both polars have it. Each interval of the blend lies
+        inside one interval of each input polar; its gap mask
+        (:attr:`ventorum.core.datatypes.TabulatedAirfoil.gap_mask`) marks it
+        when an input polar with a weight above 0 bridges a gap there. The
+        mask is None when no interval is marked.
     """
     w = float(np.clip(weight, 0.0, 1.0))
     a1_min, a1_max = float(af1.alpha.min()), float(af1.alpha.max())
@@ -217,6 +221,16 @@ def blend_tabulated(
     if af1.Cl_circulation_data is not None and af2.Cl_circulation_data is not None:
         cl_circ = np.asarray(mix(af1.Cl_circulation, af2.Cl_circulation), dtype=float)
 
+    # The grid holds every point of both polars, so the midpoint of a blend
+    # interval is strictly inside the one interval of each polar that the
+    # blend uses there. A polar with a zero weight does not change the blend.
+    bridged = np.zeros(max(alpha_common.size - 1, 0), dtype=bool)
+    if bridged.size:
+        mid = 0.5 * (alpha_common[:-1] + alpha_common[1:])
+        for af, wk in ((af1, 1.0 - w), (af2, w)):
+            if wk > 0.0 and getattr(af, "has_gaps", False):
+                bridged |= np.atleast_1d(af.in_gap(mid))
+
     return TabulatedAirfoil(
         name=f"blend({af1.name},{af2.name},w={w:.2f})",
         alpha=alpha_common,
@@ -225,5 +239,6 @@ def blend_tabulated(
         Cm_data=None if Cm is None else np.asarray(Cm, dtype=float),
         Re=re_val,
         Cl_circulation_data=cl_circ,
+        gap_mask=bridged if bool(np.any(bridged)) else None,
     )
 

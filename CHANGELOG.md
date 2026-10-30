@@ -29,6 +29,12 @@ a minor version can change a public interface.
   a table file without a mask loads with no mask. The viscous alpha-correction coupling (V1) gives a
   trust note with the number of strips that read a bridged interval, the number of polars with gaps
   and the dropped angles (`last_dropped`). The note has no penalty. Results do not change.
+- Section polar gaps of derived polars: `PolarTable.at` gives the interpolated polar a gap mask that marks
+  each interval across a dropped (NaN) point; `deflected_airfoil` keeps the mask of its base polar; and
+  `blend_tabulated` marks a blend interval when a polar with a weight above 0 bridges it. Before, these
+  polars had no mask, so a lookup in a bridged interval gave no warning and the V1 trust note did not
+  count it. A polar without a dropped point between kept points still has no mask. Loads do not change;
+  a V1 result that reads a table or a deflected or blended polar inside a gap now gets the gap note.
 - Ventorum-2D: a wake longer than 1.5 chords (`WAKE_LENGTH_LIMIT`) gives a `UserWarning` and a note in
   the reason of each angle. The far-wake model drives the wake shape factor to 1 about 1.0 to 1.2
   chords behind the trailing edge, so a longer wake does not converge. The solver does not refuse it.
@@ -177,6 +183,13 @@ a minor version can change a public interface.
   behaviour. Results of a flapped section at zero deflection with "merge" or "repanel" change by the
   added node; sections without a flap do not change. `solve_viscous_flapped` still solves the
   input section when the deflection is zero.
+- `solve_viscous_flapped` at a zero deflection, and the 0 deg step of its continuation, now solve the
+  section of `AirfoilShape.with_flap` at 0 deg. With "repanel" (the default) and "merge" it has the
+  hinge node of each surface, so the geometry is continuous in the deflection; "none" keeps the input
+  section. Before, these solves used the input section. Results at a zero deflection with "repanel"
+  change (NACA 2412, 160 panels, Re 1e6, 0 deg: Cl -1.2e-4 and Cd -1.8e-3 relative); in the sample
+  (NACA 2412, deflections 2.5 to 15 deg) the results at a deflection do not change to 10 digits, and
+  the 0 deg step needs more Newton iterations (65 instead of 47).
 - 3D panel viscous coupling (V1) in ground effect: the effective angle of a strip whose polar holds
   the ground height is the attitude at which the 2D pitch curve of its cut section has the strip
   lift (a bracketed root finder on the curve, with the inversion of the tangent as the start value).

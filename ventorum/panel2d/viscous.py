@@ -1230,7 +1230,12 @@ def solve_viscous_flapped(
 
     The solver steps the flap deflection from 0 deg to ``deflection_deg``
     in steps of at most ``step_deg`` [deg]. Each step starts from the
-    converged state of the previous deflection (warm start). A step that
+    converged state of the previous deflection (warm start). Every step
+    solves the section of :meth:`ventorum.airfoil.AirfoilShape.with_flap`,
+    also the step at 0 deg and a zero ``deflection_deg``: with the hinge
+    treatments "repanel" and "merge" that section has the hinge node of
+    each surface, so the geometry is continuous in the deflection. With
+    "none" the section at 0 deg is the input section. A step that
     fails is halved (down to 0.25 deg). When that also fails, the solver
     returns a result with ``converged=False`` and the reached deflection
     in its details (loads set to NaN).
@@ -1283,24 +1288,6 @@ def solve_viscous_flapped(
     n_arc = options.pop("n_arc", None)
     n_panels = options.pop("n_panels", None)
 
-    if abs(deflection_deg) < 1e-12:
-        res = solve_viscous(shape, alpha_deg, Re, mach=mach, **options)  # it gives the long-wake warning
-        is_scalar = np.ndim(alpha_deg) == 0
-        if is_scalar:
-            res.details = {
-                "reached_deflection": 0.0,
-                "step_history": [(0.0, bool(res.converged), int(res.iterations))],
-            }
-        else:
-            res.details = [
-                {
-                    "reached_deflection": 0.0,
-                    "step_history": [(0.0, bool(c), int(it))],
-                }
-                for c, it in zip(res.converged, res.iterations)
-            ]
-        return res
-
     if isinstance(shape, AirfoilShape):
         base_shape = shape
     else:
@@ -1347,8 +1334,8 @@ def solve_viscous_flapped(
     yh = 0.5 if y_hinge is None else float(y_hinge)
 
     def _deflect(d: float) -> AirfoilShape:
-        if abs(d) < 1e-12:
-            return base_shape
+        # Also at a zero deflection: "repanel" and "merge" then add the hinge
+        # node of each surface, so the geometry is continuous in the deflection.
         return base_shape.with_flap(
             x_hinge=x_hinge,
             deflection=d,
@@ -1375,13 +1362,13 @@ def solve_viscous_flapped(
             lm_trials=rules.lm_trials,
         )
         try:
-            row0, state0 = finish_angle(base_shape, alpha, Re, None, tol, max_iter, kw, rules=step0_rules)
+            row0, state0 = finish_angle(zero_shape, alpha, Re, None, tol, max_iter, kw, rules=step0_rules)
         except (_BudgetUsedUp, *vii.linalg_errors(np), cp.WakeGroundError, ValueError) as exc:
             if isinstance(exc, _BudgetUsedUp):
                 reason = "work budget used up at 0 deg (reached 0 deg)"
             else:
                 reason = f"continuation failed at deflection 0 deg (reached 0 deg): {exc}"
-            row = _failed_row(alpha, base_shape.coords, reason)
+            row = _failed_row(alpha, zero_shape.coords, reason)
             row["details"] = {
                 "reached_deflection": 0.0,
                 "step_history": [(0.0, False, 0)],
@@ -1407,6 +1394,12 @@ def solve_viscous_flapped(
             return row0, None
 
         target_d = float(deflection_deg)
+        if abs(target_d) < 1e-12:
+            row0["details"] = {
+                "reached_deflection": 0.0,
+                "step_history": step_history,
+            }
+            return row0, state0
         step_max = float(step_deg)
         # Smallest deflection step [deg] of the halving. A code setting, not
         # from a source; no measurement in the code or its tests supports it.
@@ -1535,6 +1528,7 @@ def solve_viscous_flapped(
         first_state = None
         prev = None
         target_shape = _deflect(float(deflection_deg))
+        zero_shape = target_shape if abs(float(deflection_deg)) < 1e-12 else _deflect(0.0)
         for a in order_up:
             if prev is not None:
                 row, state = finish_angle(target_shape, a, Re, prev, tol, max_iter, kw, rules=rules)
