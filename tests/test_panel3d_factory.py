@@ -300,10 +300,19 @@ def test_trust_score_lower_for_poor_mesh():
     stats_poor = res_poor.details["mesh_stats"]
     assert stats_poor["max_aspect_ratio"] > stats_clean["max_aspect_ratio"]
     assert stats_poor["max_skew"] > stats_clean["max_skew"]
-    pen_clean = res_clean.totals.trust.factors.get("mesh_adequacy", 0.0)
-    pen_poor = res_poor.totals.trust.factors.get("mesh_adequacy", 0.0)
-    assert pen_poor > pen_clean
-    assert res_poor.totals.trust.score < res_clean.totals.trust.score
+    # The elongated-panel rule is a spanwise resolution rule: the calibrated error model replaced its
+    # penalty (it keeps its warning). The error model gives the two meshes about the same predicted
+    # error: 8 x 24 panels E = exp(-0.46)/24 + exp(-2.7) 8^-0.66 = 4.33 %, 4 x 40 panels
+    # E = exp(-0.46)/40 + exp(-2.7) 4^-0.66 = 4.27 % (k*E 6.5 % and 6.4 %, both LOW). The test
+    # therefore checks the warning of the poor mesh and the error-model score of each mesh.
+    from ventorum.core import trust as tr
+
+    assert any("Elongated panels" in w for w in res_poor.totals.trust.warnings)
+    assert not any("Elongated panels" in w for w in res_clean.totals.trust.warnings)
+    for res, n_span, n_chord in ((res_clean, 8, 24), (res_poor, 4, 40)):
+        e, k, _ = tr.predicted_error("panel3d", 8.0, n_chord=n_chord, n_span=n_span)
+        assert res.totals.trust.factors["error_model"] == pytest.approx(1.0 - tr.error_score(k * e))
+        assert res.totals.trust.rating == "LOW"
 
 
 def test_panel_settings_reach_the_solver():
@@ -523,7 +532,9 @@ def test_well_resolved_wing_mesh_has_no_mesh_warning():
     assert trust.factors["mesh_resolution"] == 0.0
     mesh_words = ("Elongated", "Skewed", "Warped", "Folded", "Near-field", "chordwise mesh")
     assert not any(word in w for w in trust.warnings for word in mesh_words), trust.warnings
-    assert trust.rating == "HIGH"
+    # The calibrated error model rates this mesh MODERATE: E = exp(-0.46)/40 + exp(-2.7) 16^-0.66
+    # = 2.65 %, k*E = 4.0 % (was HIGH under the former mesh rules, which have no warning here).
+    assert trust.rating == "MODERATE"
 
 
 @pytest.mark.parametrize("n_chord, level", [(20, "warn"), (8, "strong")])
@@ -544,7 +555,10 @@ def test_coarse_chordwise_mesh_gets_the_mesh_warning(n_chord, level):
     expected = tr.PANEL3D_PENALTY_RESOLUTION_WARN if level == "warn" else tr.PANEL3D_PENALTY_RESOLUTION_STRONG
     assert trust.factors["mesh_resolution"] == expected
     assert any("Near-field pressure drag" in w for w in trust.warnings)
-    assert trust.rating == ("MODERATE" if level == "warn" else "LOW")
+    # The drag rule stays a cap (MODERATE at the warning level). The calibrated error model rates both
+    # meshes LOW: n_chord 20 gives E = exp(-0.46)/20 + exp(-2.7) 16^-0.66 = 4.23 %, k*E = 6.3 %; n_chord 8
+    # gives k*E = 12.4 % (the warning level was MODERATE under the former rules).
+    assert trust.rating == "LOW"
 
 
 @pytest.mark.slow
@@ -566,10 +580,14 @@ def test_chordwise_count_reaches_the_trust_score():
     fine_count = tr.PANEL3D_N_CHORD_WARN + 4
     coarse = solver.solve(_closed_te_wing(), cond, SolverSettings(n_panels=16, n_chord=coarse_count)).totals.trust
     fine = solver.solve(_closed_te_wing(), cond, SolverSettings(n_panels=16, n_chord=fine_count)).totals.trust
-    assert any(w.startswith(f"Coarse chordwise mesh: {coarse_count} chordwise panels") for w in coarse.warnings)
-    assert coarse.factors["mesh_resolution"] == tr.PANEL3D_PENALTY_RESOLUTION_WARN
-    assert not any("Coarse chordwise mesh" in w for w in fine.warnings), fine.warnings
-    assert fine.factors["mesh_resolution"] == 0.0
+    # The calibrated error model replaced the chordwise rule: the chordwise count reaches the trust score
+    # through the chordwise term exp(-0.46)/n_chord of the predicted error.
+    for t, count in ((coarse, coarse_count), (fine, fine_count)):
+        e, k, _ = tr.predicted_error("panel3d", 8.0, n_chord=count, n_span=16)
+        assert t.factors["error_model"] == pytest.approx(1.0 - tr.error_score(k * e))
+        assert not any("Coarse chordwise mesh" in w for w in t.warnings), t.warnings
+    assert coarse.factors["error_model"] > fine.factors["error_model"]
+    assert any("comes from the chordwise panel count" in w for w in coarse.warnings)
     # The default chordwise count (n_chord None) also reaches the rule.
     from ventorum.solvers.panel3d import _DEFAULT_N_CHORD
 

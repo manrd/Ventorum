@@ -51,7 +51,7 @@ from ventorum.core.datatypes import (
 )
 from ventorum.aero.system import has_rates
 from ventorum.core.errors import ValidityError
-from ventorum.core.trust import evaluate_aerodynamic_trust, fourier_convergence_notes
+from ventorum.core.trust import evaluate_aerodynamic_trust, fourier_convergence_notes, surface_tip_chord_ratio
 from ventorum.geometry import lattice_cache
 from ventorum.geometry.controls import validate_controls
 from ventorum.geometry.discretization import fourier_collocation_angles
@@ -436,6 +436,7 @@ class FourierSolver(BaseSolver):
             AR=AR, condition=condition, spanwise_list=[spanwise], CL=CL, CDi=CDi,
             CD_total=totals.CD_total, converged=True, n_panels=N, max_sweep_rad=0.0,
             solver_type="fourier", notes=notes,
+            taper=surface_tip_chord_ratio(surf) if surf is not None else None,
         )
         return SolverResult(
             spanwise=[spanwise], totals=totals, solver_type="fourier", converged=True,

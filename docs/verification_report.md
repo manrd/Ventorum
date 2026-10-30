@@ -118,10 +118,10 @@ A straight leading edge with taper gives a forward-swept quarter-chord line. Err
 
 | AR | taper | quarter-chord sweep [deg] | lifting line CL_alpha | lifting line e | lifting line trust | VLM CL_alpha (lifting-surface effect) |
 |---|---|---|---|---|---|---|
-| 4 | 0.5 | 4.8 | -1.770 % | -0.515 % | MODERATE | -10.891 % |
-| 4 | 0.25 | 8.5 | -4.025 % | -5.526 % | LOW | -12.087 % |
-| 8 | 0.5 | 2.4 | -0.438 % | +0.301 % | HIGH | -4.950 % |
-| 8 | 0.25 | 4.3 | -0.904 % | -1.698 % | MODERATE | -5.340 % |
+| 4 | 0.5 | 4.8 | -1.770 % | -0.515 % | UNRELIABLE | -10.891 % |
+| 4 | 0.25 | 8.5 | -4.025 % | -5.526 % | UNRELIABLE | -12.087 % |
+| 8 | 0.5 | 2.4 | -0.438 % | +0.301 % | LOW | -4.950 % |
+| 8 | 0.25 | 4.3 | -0.904 % | -1.698 % | LOW | -5.340 % |
 
 ## V6. Mesh convergence and conditioning
 
@@ -229,4 +229,4 @@ Dihedral break of 8 deg at y = 2 m with an incidence step of the outer panel. Th
 | 12 | 156.8 | 1.57 | no | -0.898 % | -0.898 % |
 | 20 | 260.5 | 2.60 | no | -0.143 % | -0.143 % |
 
-Run time: 22.4 s.
+Run time: 24.3 s.

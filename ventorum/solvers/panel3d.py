@@ -1928,6 +1928,7 @@ class PanelMethodSolver(BaseSolver):
                     max_chord_over_c=max_chord_over_c,
                     mesh_stats=mesh_stats,
                     CD_nearfield=totals.CDi_nearfield,
+                    n_span=min(int(s.n_panels or settings.n_panels) for s in ac.surfaces),
                 )
 
                 result = SolverResult(

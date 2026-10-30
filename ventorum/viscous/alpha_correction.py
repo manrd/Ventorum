@@ -148,6 +148,7 @@ from ventorum.core.datatypes import (
 )
 from ventorum.core.trust import (
     evaluate_aerodynamic_trust,
+    lattice_error_inputs,
     lattice_spanwise_stats,
     polar_gap_note,
     polar_limits,
@@ -1367,6 +1368,7 @@ def _solve_condition(
             CY_farfield=totals.CY_farfield,
             Cn_trefftz=totals.Cn_trefftz,
             post_stall_branch=non_unique,
+            **lattice_error_inputs(lattice, main_surface),
         )
         flags = np.where(sol["m"] <= 0.0, "post-stall, non-unique", "attached")
         res = SolverResult(
@@ -1703,6 +1705,9 @@ class _PanelCoupling:
 
         # The lattice supplies only section/polar metadata, never aerodynamic
         # loads or section slopes. Its strips have the same reporting stations.
+        # Spanwise panel count of the error model: the smallest per-semi-span count of the surfaces, as
+        # in the inviscid 3D panel solve.
+        self.n_span = min(int(s.n_panels or settings.n_panels) for s in aircraft.surfaces)
         self.lattice = make_solver("vlm").build(
             aircraft, dataclasses.replace(settings, n_chord=1), conditions[0], None, solver.ref_point,
         )
@@ -2057,7 +2062,7 @@ class _PanelCoupling:
                 h_over_c=None if res.details["h_min"] is None else res.details["h_min"] / aircraft.c_ref,
                 notes=res.details["notes"], CD_nearfield=res.totals.CDi_nearfield,
                 polar=None if limits is None else polar_stats(limits, self.full(state["cl"]), av),
-                post_stall_branch=bool(branches),
+                post_stall_branch=bool(branches), n_span=self.n_span,
             )
             return res
 

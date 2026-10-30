@@ -66,7 +66,9 @@ def test_panel_analysis_equals_direct_solve():
     assert m["Cl"] == pytest.approx(direct.totals.Cl, abs=1e-6)
     assert m["Cn"] == pytest.approx(direct.totals.Cn, abs=1e-6)
 
-    assert p["trust"]["score"] == pytest.approx(direct.totals.trust.score, abs=1e-6)
+    # The tool gives the score rounded to 4 decimals. The score of the calibrated error model is a
+    # continuous value (the former penalty sums were round numbers), so compare with the rounded score.
+    assert p["trust"]["score"] == round(direct.totals.trust.score, 4)
     assert p["dispatch"]["backend"] == direct.details["dispatch"]["backend"]
     assert p["dispatch"]["device"] == direct.details["dispatch"]["device"]
     assert p["dispatch"]["ground_solver"] == direct.details["dispatch"]["ground_solver"]

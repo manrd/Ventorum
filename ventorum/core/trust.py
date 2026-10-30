@@ -2,14 +2,15 @@
 """
 Validity checks and trust score for a solution.
 
-The score (0 to 1) adds penalties for conditions where the method in use is
-known to be weak. The rules depend on the method:
+The score (0 to 1) of the lifting line (``linear``, ``nonlinear``,
+``fourier``), the vortex lattice (``vlm``) and the 3D panel method
+(``panel3d``) comes from a calibrated error model: a fitted prediction of the
+result error from the geometry and the mesh (see :func:`predicted_error` and
+the notes of the ``ERROR_*`` constants). The rating is the error band of the
+prediction. Envelope rules for conditions where the method in use is known
+to be weak add penalties; these rules are caps on the score (they are not
+calibrated):
 
-* Lifting-line methods (``linear``, ``nonlinear``, ``fourier``) need a high
-  aspect ratio and no sweep: with sweep the numerical lifting line is not
-  grid convergent.
-* The vortex-lattice method (``vlm``) handles sweep and low aspect ratio,
-  but not the leading-edge vortex of slender, highly swept wings.
 * All methods are inviscid and incompressible and use thin-wing theory. In
   ground effect, thickness and viscous effects grow when the gap is small
   compared with the chord; the limits below are stated in h/c.
@@ -24,10 +25,10 @@ known to be weak. The rules depend on the method:
   separated flow around the side edges at subsonic speeds", NASA TR R-428,
   1974.
 * The 3D panel method (``panel3d``) adds mesh rules: the panel shape and
-  validity, and two indicators of the discretization error (the
-  near-field/far-field drag difference and the chordwise panel count). A
-  mesh-error study of the method calibrated their thresholds (see
-  :func:`panel3d_mesh_checks` and the ``PANEL3D_*`` constants).
+  validity, and the near-field/far-field drag difference. A mesh-error
+  study of the method calibrated their thresholds (see
+  :func:`panel3d_mesh_checks` and the ``PANEL3D_*`` constants). The
+  error model rates the chordwise and spanwise panel counts.
 
 The uncertainty values (``uncertainty_CL`` and the others) are heuristic
 bands. They are NOT calibrated against experimental data. Do not use them as
@@ -205,6 +206,416 @@ PANEL3D_STEEP_ROOT_CONVERGENCE_NOTE = (
 
 #: Penalty for non-unique post-stall solution branches in viscous coupling.
 POST_STALL_BRANCH_PENALTY = 0.35
+
+#: Smallest scores of the ratings HIGH, MODERATE and LOW [-]. A lower score
+#: is UNRELIABLE.
+RATING_SCORE_HIGH = 0.85
+RATING_SCORE_MODERATE = 0.65
+RATING_SCORE_LOW = 0.40
+
+#: Error bands of the ratings [-, fraction]: HIGH below 2 %, MODERATE below
+#: 5 %, LOW below 15 %, UNRELIABLE at 15 % and above. The error is
+#: ``k * E`` of the calibrated error model (see :func:`predicted_error`).
+ERROR_BAND_HIGH = 0.02
+ERROR_BAND_MODERATE = 0.05
+ERROR_BAND_LOW = 0.15
+#: Predicted error ``k * E`` [-] at and below which the score is 1.0.
+ERROR_SCORE_ONE = 0.002
+
+#: Calibrated error model of the trust rating.
+#:
+#: A calibration study of 1157 known-answer cases fitted a model of the
+#: result error of each method family. The error measure is
+#: ``E3 = max(eCL, eCDi / 2, eCm)``: the relative errors of CL and of the
+#: Trefftz-plane CDi, and ``eCm = |dCm| / |CL|`` (the shift of the centre of
+#: pressure as a fraction of the reference chord). The truth was a
+#: three-level Richardson extrapolation of the vortex lattice (a lifting
+#: surface) and a separable Richardson extrapolation of the 3D panel method
+#: with the exact kernel. Each factor ``k`` is the 90th percentile of the
+#: ratio of the true error to the predicted error ``E`` on the training
+#: cases, so ``k * E`` is a probable upper bound of the error. On 336 cases
+#: of geometries not used in the fit, the band of ``k * E`` gave the right
+#: rating in 76.5 % of the cases and an optimistic rating in 1.5 % (HIGH: 133
+#: cases below 2 %, 2 at 2 to 5 %, none above 5 %), with a rank correlation
+#: of 0.96 of ``E`` with the true error (lifting line 0.97, vortex lattice
+#: 0.92, vortex lattice in ground effect 0.87, 3D panel method 0.99). The
+#: rules that the model does not cover (stall, Mach number, side edges,
+#: polar range, convergence, saw-tooth, thickness and viscous effects near
+#: the ground, panel validity) stay as caps of the rating; they are not
+#: calibrated.
+#:
+#: Lifting line: ``E = exp(-1.1) AR^-0.67 exp(0.063 sweep_qc_deg) exp(-0.82 (1 - taper))``.
+ERROR_LL_LOG_C = -1.1
+ERROR_LL_AR_EXP = -0.67
+ERROR_LL_SWEEP_DEG = 0.063
+ERROR_LL_TAPER = -0.82
+ERROR_K_LIFTING_LINE = 1.3
+#: Vortex lattice: ``E = exp(-2.7) AR^-1 nc^-2.4 + exp(-5.5) exp(3.4 sweep_qc_rad) ns^-0.68``,
+#: plus in ground effect ``exp(-6.9) hc^-2.4 nc^-2.2``, plus for each deflected
+#: chordwise control ``exp(-1.7) d n_flap^-1.3 + exp(0.042) d ns^-0.94``.
+ERROR_VLM_CHORD = (-2.7, -1.0, -2.4)          # log coefficient, AR exponent, nc exponent
+ERROR_VLM_SPAN = (-5.5, 3.4, -0.68)           # log coefficient, sweep [1/rad], ns exponent
+ERROR_VLM_GROUND = (-6.9, -2.4, -2.2)         # log coefficient, hc exponent, nc exponent
+ERROR_VLM_CONTROL_CHORD = (-1.7, -1.3)        # log coefficient, n_flap exponent
+ERROR_VLM_CONTROL_SPAN = (0.042, -0.94)       # log coefficient, ns exponent
+ERROR_K_VLM = 1.8
+#: 3D panel method: ``E = exp(-0.46) n_chord^-1 + exp(-2.7) n_span^-0.66``.
+ERROR_P3D_CHORD = (-0.46, -1.0)               # log coefficient, n_chord exponent
+ERROR_P3D_SPAN = (-2.7, -0.66)                # log coefficient, n_span exponent
+ERROR_K_PANEL3D = 1.5
+
+
+def lifting_line_error(AR: float, sweep_qc_deg: float = 0.0, taper: float = 1.0) -> float:
+    """Return the predicted error of a lifting-line result (calibrated error model).
+
+    ``E = exp(-1.1) AR^-0.67 exp(0.063 |sweep_qc_deg|) exp(-0.82 (1 - taper))``.
+    The error is the model error of the Lanchester–Prandtl lifting line
+    against a converged lifting surface (see the notes of the ``ERROR_*``
+    constants). A spanwise-count term and a ground term were fitted and came
+    out as zero.
+
+    Parameters
+    ----------
+    AR : float
+        Aspect ratio of the main wing [-], positive.
+    sweep_qc_deg : float
+        Quarter-chord sweep [deg].
+    taper : float
+        Tip chord divided by the root chord [-], clipped to [0, 1].
+
+    Returns
+    -------
+    float
+        The predicted error ``E`` [-, fraction]. The rating uses
+        ``ERROR_K_LIFTING_LINE * E``.
+    """
+    t = min(1.0, max(0.0, float(taper)))
+    return float(math.exp(ERROR_LL_LOG_C) * float(AR) ** ERROR_LL_AR_EXP
+                 * math.exp(ERROR_LL_SWEEP_DEG * abs(float(sweep_qc_deg)))
+                 * math.exp(ERROR_LL_TAPER * (1.0 - t)))
+
+
+def _power(x: float, exponent: float) -> float:
+    """Return ``x ** exponent`` for a negative exponent, or inf when ``x <= 0``."""
+    x = float(x)
+    return x ** exponent if x > 0.0 else math.inf
+
+
+def vlm_error_terms(
+    AR: float,
+    n_chord: float,
+    n_span: float,
+    sweep_qc_rad: float = 0.0,
+    h_over_c: float | None = None,
+    controls: Sequence[tuple[float, float]] = (),
+) -> dict[str, float]:
+    """Return the terms of the predicted error of a vortex-lattice result (calibrated error model).
+
+    The predicted error is the sum of the terms (see the notes of the
+    ``ERROR_*`` constants):
+
+    * ``"chordwise"``: ``exp(-2.7) AR^-1 nc^-2.4``.
+    * ``"spanwise"``: ``exp(-5.5) exp(3.4 |sweep_qc_rad|) ns^-0.68``.
+    * ``"ground"`` (with *h_over_c*): ``exp(-6.9) hc^-2.4 nc^-2.2``.
+    * ``"control"`` (with *controls*): the sum over the controls of
+      ``exp(-1.7) d n_flap^-1.3 + exp(0.042) d ns^-0.94``, with
+      ``n_flap = nc (1 - hinge x/c)``. This term is calibrated on 4
+      geometries only.
+
+    Parameters
+    ----------
+    AR : float
+        Aspect ratio of the main wing [-], positive.
+    n_chord : float
+        Effective chordwise panel count ``nc`` [-] (1 for the section mode).
+    n_span : float
+        Spanwise strip count ``ns`` [-]: the smallest count per semi-span of
+        the lifting surfaces.
+    sweep_qc_rad : float
+        Quarter-chord sweep [rad].
+    h_over_c : float or None
+        Smallest ground clearance divided by the reference chord [-]; None
+        in free air.
+    controls : sequence of (float, float)
+        For each deflected chordwise control: the absolute deflection
+        ``d`` [rad] and the hinge position ``x/c`` [-].
+
+    Returns
+    -------
+    dict of str to float
+        The terms [-, fraction]; their sum is the predicted error ``E``. The
+        rating uses ``ERROR_K_VLM * E``.
+    """
+    nc, ns = float(n_chord), float(n_span)
+    c0, a_ar, a_nc = ERROR_VLM_CHORD
+    s0, s_sw, s_ns = ERROR_VLM_SPAN
+    terms = {
+        "chordwise": math.exp(c0) * _power(AR, a_ar) * _power(nc, a_nc),
+        "spanwise": math.exp(s0) * math.exp(s_sw * abs(float(sweep_qc_rad))) * _power(ns, s_ns),
+    }
+    if h_over_c is not None:
+        g0, g_hc, g_nc = ERROR_VLM_GROUND
+        terms["ground"] = math.exp(g0) * _power(h_over_c, g_hc) * _power(nc, g_nc)
+    if controls:
+        f0, f_n = ERROR_VLM_CONTROL_CHORD
+        p0, p_n = ERROR_VLM_CONTROL_SPAN
+        total = 0.0
+        for d, hinge in controls:
+            d = abs(float(d))
+            total += (math.exp(f0) * d * _power(nc * (1.0 - float(hinge)), f_n)
+                      + math.exp(p0) * d * _power(ns, p_n))
+        terms["control"] = total
+    return terms
+
+
+def panel3d_error_terms(n_chord: float | None, n_span: float | None) -> dict[str, float]:
+    """Return the terms of the predicted error of a 3D panel result (calibrated error model).
+
+    ``E = exp(-0.46) n_chord^-1 + exp(-2.7) n_span^-0.66`` (see the notes of
+    the ``ERROR_*`` constants). A count of None leaves out its term.
+
+    Parameters
+    ----------
+    n_chord : float or None
+        Chordwise panels per surface [-].
+    n_span : float or None
+        Spanwise panels per semi-span [-].
+
+    Returns
+    -------
+    dict of str to float
+        The terms ``"chordwise"`` and ``"spanwise"`` [-, fraction]; their sum
+        is the predicted error ``E``. The rating uses ``ERROR_K_PANEL3D * E``.
+    """
+    terms: dict[str, float] = {}
+    if n_chord is not None:
+        terms["chordwise"] = math.exp(ERROR_P3D_CHORD[0]) * _power(n_chord, ERROR_P3D_CHORD[1])
+    if n_span is not None:
+        terms["spanwise"] = math.exp(ERROR_P3D_SPAN[0]) * _power(n_span, ERROR_P3D_SPAN[1])
+    return terms
+
+
+#: Points of the score function: (predicted error ``k * E`` [-], score [-]).
+_ERROR_SCORE_POINTS = (
+    (ERROR_SCORE_ONE, 1.0),
+    (ERROR_BAND_HIGH, RATING_SCORE_HIGH),
+    (ERROR_BAND_MODERATE, RATING_SCORE_MODERATE),
+    (ERROR_BAND_LOW, RATING_SCORE_LOW),
+)
+
+
+def error_score(k_error: float) -> float:
+    """Return the trust score of a predicted error.
+
+    The score is a continuous, decreasing, piecewise-linear function of
+    ``ln(k E)``. It is 1.0 at and below ``k E = 0.2 %`` and passes through
+    the smallest score of each rating at the limit of its error band: 0.85
+    at 2 %, 0.65 at 5 % and 0.40 at 15 %. Above 15 % the slope of the last
+    segment continues down to 0. The rating from the score and the rating
+    from the band of ``k E`` therefore agree.
+
+    Parameters
+    ----------
+    k_error : float
+        Predicted error ``k * E`` [-, fraction].
+
+    Returns
+    -------
+    float
+        The score [-], from 0 to 1. A value that is not finite gives 0.
+    """
+    e = float(k_error)
+    if not math.isfinite(e):
+        return 0.0
+    pts = _ERROR_SCORE_POINTS
+    if e <= pts[0][0]:
+        return 1.0
+    x = math.log(e)
+    # The segment that holds e; above the last point, the last segment.
+    i = next((j for j in range(1, len(pts)) if e <= pts[j][0]), len(pts) - 1)
+    (e0, s0), (e1, s1) = pts[i - 1], pts[i]
+    x0, x1 = math.log(e0), math.log(e1)
+    return float(min(1.0, max(0.0, s0 + (s1 - s0) * (x - x0) / (x1 - x0))))
+
+
+def error_band(k_error: float) -> str:
+    """Return the rating of the error band of a predicted error ``k * E`` [-, fraction]."""
+    e = float(k_error)
+    if e < ERROR_BAND_HIGH:
+        return "HIGH"
+    if e < ERROR_BAND_MODERATE:
+        return "MODERATE"
+    if e < ERROR_BAND_LOW:
+        return "LOW"
+    return "UNRELIABLE"
+
+
+def lattice_error_inputs(lattice: VortexLattice | None, main_surface: int = 0) -> dict:
+    """Return the geometry inputs of the calibrated error model from a lattice.
+
+    Parameters
+    ----------
+    lattice : VortexLattice or None
+        Vortex lattice geometry.
+    main_surface : int
+        Index of the main surface in ``lattice.surfaces``.
+
+    Returns
+    -------
+    dict
+        Keyword arguments of :func:`evaluate_aerodynamic_trust`: ``taper``
+        (tip chord over the largest chord of the main surface [-], or None),
+        ``n_span`` (the smallest spanwise strip count per semi-span of the
+        surfaces [-]) and ``controls`` (the absolute deflection [rad] and the
+        hinge ``x/c`` [-] of each deflected chordwise control). Empty for
+        None.
+    """
+    if lattice is None:
+        return {}
+    surf_index = np.asarray(lattice.strip_surface)
+    right = np.asarray(lattice.strip_is_right, dtype=bool)
+    counts = []
+    for i in range(len(lattice.surfaces)):
+        on = surf_index == i
+        n_right = int(np.sum(on & right))
+        counts.append(n_right if n_right > 0 else int(np.sum(on)))
+    counts = [c for c in counts if c > 0]
+    controls = [(abs(float(info["deflection_rad"])), float(info["hinge_x_c"]))
+                for info in getattr(lattice, "control_info", []) or []
+                if info.get("mode") == "chordwise" and float(info.get("deflection_rad", 0.0)) != 0.0]
+    return {
+        "taper": lattice_tip_chord_ratio(lattice, main_surface),
+        "n_span": min(counts) if counts else None,
+        "controls": controls,
+    }
+
+
+def predicted_error(
+    solver_type: str | None,
+    AR: float,
+    *,
+    sweep_qc_deg: float = 0.0,
+    taper: float | None = None,
+    n_chord: int | None = None,
+    n_span: int | None = None,
+    h_over_c: float | None = None,
+    controls: Sequence[tuple[float, float]] = (),
+) -> tuple[float, float, dict[str, float]] | None:
+    """Return the predicted error of a result from the calibrated error model.
+
+    Parameters
+    ----------
+    solver_type : str or None
+        The solver: a lifting-line solver (``"linear"``, ``"nonlinear"``,
+        ``"fourier"``; None is the linear lifting line), ``"vlm"`` or
+        ``"panel3d"``.
+    AR : float
+        Aspect ratio of the main wing [-].
+    sweep_qc_deg : float
+        Quarter-chord sweep [deg].
+    taper : float or None
+        Tip chord over the root chord [-] (lifting line). None is 1.
+    n_chord : int or None
+        Chordwise panel count [-]. For the vortex lattice None is 1 (the
+        section mode); for the 3D panel method None leaves out the
+        chordwise term.
+    n_span : int or None
+        Spanwise strip count per semi-span [-] (vortex lattice and 3D panel
+        method). None leaves out the spanwise term of the 3D panel method.
+    h_over_c : float or None
+        Smallest ground clearance over the reference chord [-] (vortex
+        lattice).
+    controls : sequence of (float, float)
+        Absolute deflection [rad] and hinge ``x/c`` [-] of each deflected
+        chordwise control (vortex lattice).
+
+    Returns
+    -------
+    tuple of (float, float, dict) or None
+        The predicted error ``E`` [-, fraction], the factor ``k`` [-] and
+        the terms of ``E`` (one term ``"model"`` for the lifting line). None
+        for another solver, or when the inputs do not define the model (a
+        non-positive aspect ratio, no panel count).
+    """
+    solver = (solver_type or "linear").lower()
+    if solver in LIFTING_LINE_SOLVERS:
+        if not (_is_finite(AR) and float(AR) > 0.0):
+            return None
+        e = lifting_line_error(AR, sweep_qc_deg, 1.0 if taper is None else taper)
+        return e, ERROR_K_LIFTING_LINE, {"model": e}
+    if solver == "vlm":
+        if not (_is_finite(AR) and float(AR) > 0.0) or n_span is None:
+            return None
+        nc = 1 if n_chord is None or int(n_chord) < 1 else int(n_chord)
+        terms = vlm_error_terms(AR, nc, n_span, math.radians(sweep_qc_deg), h_over_c, controls)
+        return float(sum(terms.values())), ERROR_K_VLM, terms
+    if solver in ("panel3d", "3dp"):
+        nc = None if n_chord is None or int(n_chord) < 1 else int(n_chord)
+        terms = panel3d_error_terms(nc, n_span)
+        if not terms:
+            return None
+        return float(sum(terms.values())), ERROR_K_PANEL3D, terms
+    return None
+
+
+#: Text of each term of the predicted error in the trust warning.
+_ERROR_TERM_TEXT = {
+    "chordwise": "the chordwise panel count",
+    "spanwise": "the spanwise panel count (it grows with the sweep for the vortex lattice)",
+    "ground": "the chordwise panel count compared with the ground gap",
+    "control": "the panels of the deflected control (chordwise panels aft of the hinge and spanwise strips)",
+}
+
+
+def _error_model_messages(
+    solver: str,
+    k: float,
+    error: float,
+    terms: dict[str, float],
+    AR: float,
+    sweep_deg: float,
+) -> tuple[list[str], list[str]]:
+    """Return the warnings and recommendations of a predicted error at or above the HIGH band."""
+    k_error = k * error
+    band = error_band(k_error)
+    warnings = []
+    recs = []
+    head = (f"Predicted error about {100.0 * k_error:.1f} % (calibrated error model of the "
+            f"{{method}}: probable upper bound of max(eCL, eCDi/2, eCm), band {band}).")
+    if solver in LIFTING_LINE_SOLVERS:
+        warnings.append(head.format(method="lifting line") + " The lifting-line model error against a lifting "
+                        "surface falls with the aspect ratio and grows with the sweep.")
+        if sweep_deg > 2.5:
+            warnings.append(
+                f"Lifting line with sweep angle {sweep_deg:.1f} deg: the model error grows with the sweep "
+                f"(factor {math.exp(ERROR_LL_SWEEP_DEG * sweep_deg):.2f} on the predicted error)."
+            )
+            recs.append("Use the VLM solver (solver='vlm') for swept wings.")
+        elif AR < 5.0:
+            warnings.append(f"Low aspect ratio (AR={AR:.2f} < 5) for a lifting-line method: chordwise effects are large.")
+            recs.append("Use the VLM solver (solver='vlm') for a low aspect ratio.")
+        else:
+            recs.append("Use the VLM solver (solver='vlm') for a smaller model error.")
+        return warnings, recs
+    method = "vortex lattice" if solver == "vlm" else "3D panel method"
+    dominant = max(terms, key=terms.get)
+    share = terms[dominant] / error if error > 0.0 else 1.0
+    warnings.append(head.format(method=method)
+                    + f" The largest term ({100.0 * share:.0f} % of the error) comes from {_ERROR_TERM_TEXT[dominant]}.")
+    if solver == "vlm":
+        recs.append({
+            "chordwise": "Increase n_chord: the chordwise term dominates the predicted error.",
+            "spanwise": "Increase the spanwise panel count (n_panels): the spanwise term dominates the predicted error.",
+            "ground": "Increase n_chord so that c/n_chord < h_min.",
+            "control": "Increase n_chord (more chordwise panels aft of the hinge) and the spanwise panel count.",
+        }[dominant])
+    else:
+        recs.append({
+            "chordwise": ("Increase n_chord: the chordwise panel count controls most of the 3D panel mesh error. "
+                          "Set panel_estimate_mesh_error=True for an error estimate of this mesh."),
+            "spanwise": "Increase the spanwise panel count (n_panels).",
+        }[dominant])
+    return warnings, recs
 
 
 def control_chord_note(n_chord: int) -> str:
@@ -466,6 +877,7 @@ def panel3d_mesh_checks(
     CDi: float | None = None,
     CD_nearfield: float | None = None,
     n_chord: int | None = None,
+    error_model: bool = False,
 ) -> tuple[dict[str, float], list[str], list[str]]:
     """Return the mesh rules of the 3D panel method: penalties, warnings and recommendations.
 
@@ -502,6 +914,12 @@ def panel3d_mesh_checks(
         Near-field pressure drag coefficient [-].
     n_chord : int or None, optional
         Chordwise panels per surface [-]. None skips the chordwise rule.
+    error_model : bool, optional
+        True when the calibrated error model of :func:`predicted_error`
+        rates the mesh resolution (as in :func:`evaluate_aerodynamic_trust`):
+        the chordwise rule is not applied, and the elongated-panel rule (a
+        spanwise resolution indicator) gives its warning without a penalty.
+        The drag rule and the validity rules do not change.
 
     Returns
     -------
@@ -517,7 +935,8 @@ def panel3d_mesh_checks(
         q_ar = PANEL3D_ASPECT_RATIO_PERCENTILE
         ar, ar_is_pct = _robust_value(mesh_stats, "aspect_ratio", "max_aspect_ratio", q_ar, 1.0)
         if ar > PANEL3D_MAX_ASPECT_RATIO:
-            mesh_pen += PANEL3D_PENALTY_ASPECT_RATIO
+            if not error_model:
+                mesh_pen += PANEL3D_PENALTY_ASPECT_RATIO
             what = _percentile_name(q_ar, "panel aspect ratio") if ar_is_pct else "the panel aspect ratio"
             warnings.append(
                 f"Elongated panels: {what} is {ar:.1f} (above {PANEL3D_MAX_ASPECT_RATIO:g}). The spanwise "
@@ -598,7 +1017,7 @@ def panel3d_mesh_checks(
                 f"{limit:.0%}): {_RESOLUTION_TEXT[level]}"
             )
         levels.append(level)
-    if n_chord is not None and int(n_chord) > 0:
+    if n_chord is not None and int(n_chord) > 0 and not error_model:
         n_c = int(n_chord)
         level = 2 if n_c < PANEL3D_N_CHORD_STRONG else (1 if n_c < PANEL3D_N_CHORD_WARN else 0)
         if level:
@@ -1420,8 +1839,21 @@ def evaluate_aerodynamic_trust(
     post_stall_branch: bool = False,
     te_clearance: float | None = None,
     mean_line_jump: float | None = None,
+    taper: float | None = None,
+    n_span: int | None = None,
+    controls: Sequence[tuple[float, float]] | None = None,
 ) -> TrustScore:
     """Evaluate the validity of a solution.
+
+    The rating of the lifting line, the vortex lattice and the 3D panel
+    method comes from the calibrated error model (:func:`predicted_error`):
+    the score is :func:`error_score` of the predicted error ``k * E``. The
+    envelope rules that the model does not cover (stall, Mach number, side
+    edges, polar range, non-finite results, non-convergence, saw-tooth,
+    thickness and viscous effects at small h/c, panel validity of the 3D
+    panel method, post-stall branches) are caps: their penalties give a
+    second score ``1 - min(1, sum of the penalties)``, and the score is the
+    smaller of the two. The cap rules are not calibrated.
 
     Parameters
     ----------
@@ -1440,16 +1872,16 @@ def evaluate_aerodynamic_trust(
     n_panels : int
         Spanwise panels per semi-span of the main surface.
     max_sweep_rad : float, optional
-        Representative sweep of the lifting line [rad].
+        Representative quarter-chord sweep [rad] (the sweep of the error
+        model).
     solver_type : str, optional
-        ``"vlm"``, ``"linear"``, ``"nonlinear"`` or ``"fourier"``. If not
-        given, the lifting-line rules are used.
+        ``"vlm"``, ``"linear"``, ``"nonlinear"``, ``"fourier"`` or
+        ``"panel3d"``. If not given, the lifting-line rules are used.
     h_over_c : float, optional
         Smallest ground clearance divided by the reference chord.
     n_chord : int, optional
-        Chordwise panels of the vortex lattice, or chordwise panels per
-        surface of the 3D panel method (then also the chordwise rule of
-        :func:`panel3d_mesh_checks`).
+        Chordwise panels of the vortex lattice (None is 1 in the error
+        model), or chordwise panels per surface of the 3D panel method.
     notes : list of str, optional
         Extra warnings from the solver.
     max_chord_over_c : float
@@ -1496,6 +1928,18 @@ def evaluate_aerodynamic_trust(
         Largest change of the strip lift coefficient between neighbouring
         strips of a mean-line lattice [-] (see :func:`mean_line_strip_jump`).
         None when no surface lies on a cambered mean line.
+    taper : float or None, optional
+        Tip chord divided by the root chord of the main surface [-], for
+        the error model of the lifting line. None takes it from the first
+        of *surfaces* when that is a ``LiftingSurface``, else 1.
+    n_span : int or None, optional
+        Spanwise strip count per semi-span for the error model [-]: the
+        smallest of the lifting surfaces (vortex lattice), or the spanwise
+        panel count (3D panel method). None is *n_panels*.
+    controls : sequence of (float, float) or None, optional
+        Absolute deflection [rad] and hinge ``x/c`` [-] of each deflected
+        chordwise control, for the error model of the vortex lattice
+        (:func:`lattice_error_inputs`).
 
     A result with a non-finite coefficient never keeps a trust level above
     LOW: it gets the penalty ``non_finite_result`` and the warning
@@ -1546,26 +1990,15 @@ def evaluate_aerodynamic_trust(
     solver = (solver_type or "linear").lower()
     is_llt = solver in LIFTING_LINE_SOLVERS
 
-    # 1. Aspect ratio -----------------------------------------------------------
+    # 1. Aspect ratio (a cap: an undefined geometry) ---------------------------------
+    # The model error of low aspect ratio and sweep is in the calibrated error model (section 9).
     ar_pen = 0.0
     if AR <= 0:
         ar_pen = 1.0
         warnings.append("Aspect ratio is non-positive or undefined.")
-    elif is_llt and AR < 3.0:
-        ar_pen = 0.45 + 0.35 * min(1.0, (3.0 - AR) / 2.0)
-        warnings.append(
-            f"Very low aspect ratio (AR={AR:.2f} < 3) for a lifting-line method: "
-            "chordwise effects are large."
-        )
-        recommendations.append("Use the VLM solver (solver='vlm') for AR < 3.")
-    elif is_llt and AR < 5.0:
-        ar_pen = 0.20 * ((5.0 - AR) / 2.0)
-        warnings.append(f"Moderate aspect ratio (AR={AR:.2f} < 5) for a lifting-line method.")
-        recommendations.append("Compare with the VLM solver for AR < 5.")
     penalties["aspect_ratio"] = ar_pen
 
-    # 2. Sweep ------------------------------------------------------------------
-    sweep_pen = 0.0
+    # 2. Sweep (an input of the error model; no penalty) ------------------------------
     max_sweep = 0.0
     if max_sweep_rad is not None:
         max_sweep = float(abs(max_sweep_rad))
@@ -1574,19 +2007,6 @@ def evaluate_aerodynamic_trust(
             if hasattr(s, "sweep_le"):
                 max_sweep = max(max_sweep, abs(float(getattr(s, "sweep_le", 0.0))))
     sweep_deg = float(np.degrees(max_sweep))
-    if is_llt and sweep_deg > 2.5:
-        sweep_pen = min(0.8, 0.20 + 0.60 * (sweep_deg - 2.5) / 27.5)
-        warnings.append(
-            f"Lifting line with sweep angle {sweep_deg:.1f} deg: the numerical lifting line is not "
-            "grid convergent with sweep (lift falls as panels are added)."
-        )
-        recommendations.append("Use the VLM solver (solver='vlm') for swept wings.")
-    elif not is_llt and sweep_deg > 55.0 and AR < 2.5:
-        sweep_pen = 0.35
-        warnings.append(
-            f"Slender wing (sweep {sweep_deg:.0f} deg, AR={AR:.2f}): leading-edge vortex lift is not modelled."
-        )
-    penalties["sweep"] = sweep_pen
 
     # 3. Section lift and stall ---------------------------------------------------
     stall_pen = 0.0
@@ -1708,7 +2128,8 @@ def evaluate_aerodynamic_trust(
             recommendations.append("Give a Mach number that agrees with V_inf, or set V_inf from the Mach number.")
     penalties["compressibility"] = mach_pen
 
-    # 5. Ground proximity (stated in h/c) ------------------------------------------------
+    # 5. Ground proximity (stated in h/c): thickness and viscous effects (a cap) ----------
+    # The discretization error of the gap is in the error model of the vortex lattice.
     ground_pen = 0.0
     if h_over_c is not None:
         hc = float(h_over_c)
@@ -1724,7 +2145,6 @@ def evaluate_aerodynamic_trust(
                 f"Strong ground effect (h_min/c={hc:.3f} < 0.3): thickness and viscous effects are not modelled."
             )
         if not is_llt and n_chord is not None and n_chord > 0 and (max_chord_over_c / n_chord) > hc:
-            ground_pen += 0.20
             warnings.append(
                 f"Chordwise panels ({n_chord} on the largest chord, {max_chord_over_c:.2f} c_ref) are longer "
                 f"than the ground gap (h_min/c={hc:.3f})."
@@ -1754,7 +2174,7 @@ def evaluate_aerodynamic_trust(
         warnings.append("Solver did not converge to the specified tolerance.")
         recommendations.append("Increase max_iterations, or check for post-stall conditions.")
     if n_panels < 8:
-        num_pen += 0.15 * ((8 - n_panels) / 4.0)
+        # A warning only: the error model has the spanwise count.
         warnings.append(f"Coarse spanwise mesh (n_panels={n_panels} < 8).")
     if spanwise_list or spanwise_stats is not None:
         # Saw-tooth check: a long run of consecutive sign changes of the strip-to-strip step of
@@ -1778,7 +2198,7 @@ def evaluate_aerodynamic_trust(
 
     # 8. 3D panel method: mesh adequacy and discretization-error indicators -------------------
     if solver in ("panel3d", "3dp"):
-        p3_pen, p3_warn, p3_rec = panel3d_mesh_checks(mesh_stats, CDi, CD_nearfield, n_chord)
+        p3_pen, p3_warn, p3_rec = panel3d_mesh_checks(mesh_stats, CDi, CD_nearfield, n_chord, error_model=True)
         penalties.update(p3_pen)
         warnings.extend(p3_warn)
         recommendations.extend(r for r in p3_rec if r not in recommendations)
@@ -1794,18 +2214,38 @@ def evaluate_aerodynamic_trust(
         recommendations.append("Treat post-stall aerodynamic forces with caution; compare both solution branches.")
     penalties["post_stall_branch"] = branch_pen
 
+    # 9. Calibrated error model -------------------------------------------------------------
+    cap_penalty = min(1.0, sum(penalties.values()))
+    cap_score = max(0.0, 1.0 - cap_penalty)
+    if taper is None and surfaces and isinstance(surfaces[0], LiftingSurface):
+        taper = surface_tip_chord_ratio(surfaces[0])
+    model = predicted_error(
+        solver, AR, sweep_qc_deg=sweep_deg, taper=taper, n_chord=n_chord,
+        n_span=n_panels if n_span is None else n_span,
+        h_over_c=None if h_over_c is None or not _is_finite(h_over_c) else float(h_over_c),
+        controls=tuple(controls or ()),
+    )
+    model_score = 1.0
+    if model is not None:
+        error, k, terms = model
+        model_score = error_score(k * error)
+        penalties["error_model"] = 1.0 - model_score
+        if k * error >= ERROR_BAND_HIGH:
+            m_warn, m_rec = _error_model_messages(solver, k, error, terms, AR, sweep_deg)
+            warnings.extend(m_warn)
+            recommendations.extend(r for r in m_rec if r not in recommendations)
+
     for msg in notes or ():
         if msg not in warnings:
             warnings.append(msg)
 
-    # Composite score ------------------------------------------------------------------------
-    total_penalty = min(1.0, sum(penalties.values()))
-    score = max(0.0, 1.0 - total_penalty)
-    if score >= 0.85:
+    # Composite score: the error-model score with the envelope rules as caps ------------------
+    score = min(model_score, cap_score)
+    if score >= RATING_SCORE_HIGH:
         rating = "HIGH"
-    elif score >= 0.65:
+    elif score >= RATING_SCORE_MODERATE:
         rating = "MODERATE"
-    elif score >= 0.40:
+    elif score >= RATING_SCORE_LOW:
         rating = "LOW"
     else:
         rating = "UNRELIABLE"
