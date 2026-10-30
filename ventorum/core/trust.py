@@ -164,6 +164,32 @@ PANEL3D_N_CHORD_STRONG = 14
 PANEL3D_PENALTY_RESOLUTION_WARN = 0.20
 PANEL3D_PENALTY_RESOLUTION_STRONG = 0.40
 
+#: Smallest chordwise panel count per surface [-] at which the near-field
+#: pressure drag (``CD_pressure``, ``CDi_nearfield``) of the 3D panel method
+#: is within 5 % of the Trefftz CDi of the same mesh. The surface gradient
+#: uses least-squares node values. Measured on rectangular wings of aspect
+#: ratio 8 (NACA 0012 and NACA 2412, alpha 4 deg, 24 cosine spanwise panels,
+#: 6 to 64 chordwise panels, free air and h/c 0.5): the ratio of the two
+#: drags converges to 1 as the chordwise count grows, but slowly on the
+#: symmetric section. In free air the NACA 0012 wing gave 1.44 at 16, 1.12
+#: at 32, 1.06 at 48 and 1.04 at 64 chordwise panels; the NACA 2412 wing was
+#: within 6 % from 6 chordwise panels. At h/c 0.5 the NACA 2412 wing was
+#: within 5 % from 32 chordwise panels, and the NACA 0012 wing gave 1.13 at
+#: 64 (its extrapolated limit is about 6 % above the Trefftz CDi). The
+#: previous inverse-distance node values gave values below the Trefftz CDi
+#: (negative values on coarse meshes). Below this count the trust score
+#: gets a note that names the Trefftz CDi as the drag value to use. The
+#: note adds no penalty, and no result is removed.
+PANEL3D_CD_PRESSURE_MIN_N_CHORD = 64
+
+#: Note of a near-field pressure drag on a coarse chordwise mesh [-]. The
+#: placeholder ``{n_chord}`` takes the chordwise panel count.
+PANEL3D_CD_PRESSURE_COARSE_NOTE = (
+    "Near-field pressure drag (CD_pressure) can differ from the far-field value by more than 5 % "
+    "with {n_chord} chordwise panels (below " + str(PANEL3D_CD_PRESSURE_MIN_N_CHORD) + "). "
+    "Use the Trefftz-plane CDi as the induced drag."
+)
+
 #: Far-field kernel trust note in ground effect [-].
 PANEL3D_FAR_FIELD_GROUND_NOTE = (
     "The default far-field kernel (second-moment expansion about the panel centroid) agreed with "
@@ -914,6 +940,9 @@ def panel3d_mesh_checks(
         Near-field pressure drag coefficient [-].
     n_chord : int or None, optional
         Chordwise panels per surface [-]. None skips the chordwise rule.
+        Below :data:`PANEL3D_CD_PRESSURE_MIN_N_CHORD` the warnings also get
+        :data:`PANEL3D_CD_PRESSURE_COARSE_NOTE` (no penalty): the
+        near-field pressure drag is not reliable on that mesh.
     error_model : bool, optional
         True when the calibrated error model of :func:`predicted_error`
         rates the mesh resolution (as in :func:`evaluate_aerodynamic_trust`):
@@ -1026,6 +1055,10 @@ def panel3d_mesh_checks(
                 f"Coarse chordwise mesh: {n_c} chordwise panels (below {limit}): {_RESOLUTION_TEXT[level]}"
             )
         levels.append(level)
+    # The pressure-drag note holds whatever rates the resolution (the
+    # chordwise rule above or the calibrated error model).
+    if n_chord is not None and 0 < int(n_chord) < PANEL3D_CD_PRESSURE_MIN_N_CHORD:
+        warnings.append(PANEL3D_CD_PRESSURE_COARSE_NOTE.format(n_chord=int(n_chord)))
     if levels:
         worst = max(levels)
         penalties["mesh_resolution"] = (0.0, PANEL3D_PENALTY_RESOLUTION_WARN, PANEL3D_PENALTY_RESOLUTION_STRONG)[worst]

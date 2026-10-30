@@ -459,6 +459,43 @@ def test_panel3d_chordwise_count_levels_and_worse_level_counts_once():
     assert coarse.rating in ("LOW", "UNRELIABLE")
 
 
+def test_panel3d_pressure_drag_note_below_the_named_chordwise_count():
+    """Below PANEL3D_CD_PRESSURE_MIN_N_CHORD a note says to use the Trefftz CDi, with no penalty.
+
+    The near-field pressure drag converges slowly to the Trefftz CDi with the
+    chordwise panel count (the constant comment gives the measured values).
+    The note must not change the penalty of the chordwise rule, and no value
+    is removed from the result.
+    """
+    from ventorum.core import trust as tr
+
+    n_min = tr.PANEL3D_CD_PRESSURE_MIN_N_CHORD
+    assert n_min == 64
+
+    def notes(t):
+        return [w for w in t.warnings if "CD_pressure" in w and "Trefftz-plane CDi" in w]
+
+    coarse = _panel_trust(n_chord=n_min - 1, CD_nearfield=0.0076)
+    assert len(notes(coarse)) == 1
+    assert f"{n_min - 1} chordwise panels" in notes(coarse)[0]
+    fine = _panel_trust(n_chord=n_min, CD_nearfield=0.0076)
+    assert notes(fine) == []
+    # The note adds no penalty: the penalty is that of the chordwise rule alone.
+    assert coarse.factors["mesh_resolution"] == fine.factors["mesh_resolution"] == 0.0
+    warned = _panel_trust(n_chord=tr.PANEL3D_N_CHORD_WARN - 1, CD_nearfield=0.0076)
+    assert len(notes(warned)) == 1
+    # The calibrated error model rates the chordwise resolution (the old
+    # chordwise penalty is replaced): the coarser mesh has the larger
+    # error-model factor, and the note still adds no penalty.
+    assert warned.factors["mesh_resolution"] == 0.0
+    assert warned.factors["error_model"] > fine.factors["error_model"]
+    # The note acts also without a near-field drag value, and not without n_chord.
+    assert len(notes(_panel_trust(n_chord=8))) == 1
+    assert notes(_panel_trust(CD_nearfield=0.0076)) == []
+    # The note is for the 3D panel method only.
+    assert notes(_panel_trust(n_chord=8, solver_type="vlm")) == []
+
+
 def test_panel3d_median_aspect_ratio_and_folded_panels():
     """The median aspect ratio and folded (non-convex) panels add to mesh_adequacy."""
     from ventorum.core import trust as tr

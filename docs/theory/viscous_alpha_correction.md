@@ -295,8 +295,8 @@ The details `cl_polar`, `cl_section_converged` and `cl_section_mesh`
 give the three parts of the target lift at $\alpha_{v,j}$, and
 `cl_viscous` gives the target lift.
 
-Surface gradients use adjacent panel values and inverse-distance node
-interpolation. The upper and lower trailing-edge connections are cut.
+Surface gradients use adjacent panel values and least-squares node
+values. The upper and lower trailing-edge connections are cut.
 The same two unit responses give the inviscid section moment as a
 quadratic in the sine and cosine of the section angle. If a polar has a
 ground-height axis, the section reference includes the corresponding

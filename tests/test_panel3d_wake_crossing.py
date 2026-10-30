@@ -73,12 +73,17 @@ def test_wake_through_rear_wing_in_ground_effect_is_refused():
 
 # Stored baselines: the values of the solver before the wake check, updated for
 # the second-moment far-field expansion about the panel centroid (relative
-# change 7e-5 to 4e-4).
+# change 7e-5 to 4e-4). Updated again for the least-squares node values of
+# the surface gradient: with the previous inverse-distance node values
+# (_build_surface_gradient_operator_shepard) the four cases give the previous
+# values to 5e-13 relative, so only the gradient moves them. CL changes by
+# 1.2 to 1.3 %, Cm by 1 to 35 % (10 chordwise panels), and the Trefftz CDi
+# does not change.
 _BASELINES = {
-    "tandem_offset": (0.5476904864986543, 0.010964617383178048, 0.07421572563822393),
-    "wing_tail": (0.3410794813583515, 0.004621505025221477, -0.02411077193768448),
-    "biplane": (0.5004755593440084, 0.008058950083729127, -0.026845055468020743),
-    "tandem_ground": (0.6583402939667865, 0.008827328079694441, -0.00622041350796974),
+    "tandem_offset": (0.554367196934527, 0.010964617383178119, 0.07505217808509079),
+    "wing_tail": (0.3452886021683871, 0.004621505025221453, -0.02550505624312208),
+    "biplane": (0.5066005708654079, 0.00805895008372906, -0.02923308977602326),
+    "tandem_ground": (0.6666319507264357, 0.008827328079694476, -0.008389251198743803),
 }
 
 
