@@ -278,6 +278,44 @@ def test_aileron_far_field_side_force_sign():
     assert t.CY_farfield > 0.0
 
 
+def _swept_wing(sweep_deg: float):
+    """Return a flat untapered wing of AR 8 (chord 1 m) with the leading-edge sweep *sweep_deg* [deg]."""
+    af = vt.LinearAirfoil()
+    return vt.LiftingSurface(
+        name="w", semi_span=4.0, is_symmetric=True,
+        sections=[vt.WingSection(0.0, 1.0, airfoil=af),
+                  vt.WingSection(1.0, 1.0, x_le=4.0 * math.tan(math.radians(sweep_deg)), airfoil=af)],
+    )
+
+
+@pytest.mark.parametrize(("n_panels", "n_chord"), [(24, 4), (48, 8)])
+def test_near_field_accuracy_of_the_lattice_solvers(n_panels, n_chord):
+    """The near-field CDi and Cn of the vortex lattice against the Trefftz-plane values.
+
+    The values are those of the results page of the user manual (Results
+    and trust): flat wings of AR 8, alpha 4 deg (aileron case: alpha 3
+    deg), cosine spacing.
+
+    * Straight wing: CDi_nearfield agrees with CDi within 0.1 %.
+    * 30 deg leading-edge sweep: CDi_nearfield is 11 % above CDi with
+      24 x 4 panels and 7 % above with 48 x 8 panels (the leading-edge
+      suction of the discrete vortices converges slowly).
+    * Antisymmetric aileron (5 deg, outer 40 % of the span): the near-field
+      Cn in stability axes is 15 % below Cn_trefftz on both meshes; the
+      difference does not fall with the panel count.
+    """
+    st = vt.SolverSettings(solver_type="vlm", n_panels=n_panels, n_chord=n_chord, spacing="cosine")
+    cond = vt.FlightCondition(V_inf=20.0, alpha=math.radians(4.0))
+    straight = _quiet(vt.analyze, _swept_wing(0.0), cond, st).totals
+    assert abs(straight.CDi_nearfield / straight.CDi - 1.0) < 1e-3
+    swept = _quiet(vt.analyze, _swept_wing(30.0), cond, st).totals
+    expected = {4: 0.11, 8: 0.07}[n_chord]
+    assert round(swept.CDi_nearfield / swept.CDi - 1.0, 2) == expected
+    ail = _quiet(vt.analyze, _wing(0.0, AILERON), AILERON_COND, st)
+    assert round(_cn_stab(ail) / ail.totals.Cn_trefftz - 1.0, 2) == -0.15
+    assert abs(_cn_stab(ail) - ail.totals.Cn_trefftz) < NEAR_FAR_FLOOR_CN   # no near/far warning
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # 4. The warning rule
 # ═══════════════════════════════════════════════════════════════════════════════

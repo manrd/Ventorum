@@ -9,6 +9,13 @@
 | `converged` | False if the solver did not meet its tolerance |
 | `details` | Solver data (lattice, circulation, wake direction, ground plane, dispatch) for plots and checks |
 
+### Accuracy of the near-field values of the lattice solvers
+
+The lattice solvers give `CDi` and the far-field diagnostics from the Trefftz plane, and `CDi_nearfield`, `CY` and `Cn` from the forces on the surface (the near field). The near-field drag and yawing moment are less accurate than the Trefftz values. `tests/test_farfield_lateral.py::test_near_field_accuracy_of_the_lattice_solvers` measures them on flat wings of aspect ratio 8 with the vortex lattice (alpha 4 deg, cosine spacing, 24 x 4 and 48 x 8 spanwise x chordwise panels):
+
+- `CDi_nearfield` agrees with `CDi` within 0.1 % on the straight wing. With 30 deg leading-edge sweep it is 11 % above `CDi` with 24 x 4 panels and 7 % above with 48 x 8 panels: the leading-edge suction of the discrete vortices converges slowly. Use `CDi` as the induced drag.
+- With an antisymmetric aileron (5 deg on the outer 40 % of the span, alpha 3 deg) the near-field `Cn` in stability axes is 15 % below `Cn_trefftz` on both meshes; the difference does not fall with the panel count, because the model does not resolve the flow at the side edges of the flap. The difference is below the `Cn` floor of the near-field and far-field warning (below), so this case gets no warning. `Cn` stays the result value; compare it with `Cn_trefftz` when the yawing moment is important.
+
 ## Dispatch record
 
 Every result of a lattice solver records how it was computed and why in `result.details["dispatch"]`.
