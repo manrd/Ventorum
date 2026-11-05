@@ -9,7 +9,8 @@ import numpy as np
 import pytest
 
 from ventorum.airfoil import airfoil
-from ventorum.panel2d.viscous import solve_viscous, trace_wake_streamline
+from ventorum.panel2d.viscous import (WAKE_SAWTOOTH_LIMIT, solve_viscous, trace_wake_streamline, wake_sawtooth_index,
+                                      wake_sawtooth_note)
 
 
 def _solve(coords, alphas, re, **kw):
@@ -202,3 +203,47 @@ def test_long_wake_converges(wake_length):
     coords = airfoil("4412").repanel(n_panels=160).coords
     r = _solve(coords, 4.0, 1e6, wake_length=wake_length, n_wake=int(round(30 * wake_length)), work_budget=0)
     assert r.converged, r.reason
+
+
+def test_wake_sawtooth_index():
+    """The index is 0 on a linear wake, near 1 on an odd-even wake and NaN on a short or NaN wake."""
+    assert wake_sawtooth_index(np.linspace(5e-3, 4e-3, 30)) < 1e-12
+    saw = 5e-3 * (1.0 + 0.25 * (-1.0) ** np.arange(30))
+    assert wake_sawtooth_index(saw) > 0.9
+    assert np.isnan(wake_sawtooth_index([1e-3, 2e-3]))
+    assert np.isnan(wake_sawtooth_index(np.full(30, np.nan)))
+
+
+def test_wake_sawtooth_note_only_on_converged_rows():
+    """The note fires on a converged row above the limit, not on a smooth or a failed row."""
+    saw = 5e-3 * (1.0 + 0.25 * (-1.0) ** np.arange(30))
+    assert wake_sawtooth_index(saw) > WAKE_SAWTOOTH_LIMIT
+    assert "near-wake sawtooth" in wake_sawtooth_note({"converged": True, "wake": {"theta": saw}})
+    assert wake_sawtooth_note({"converged": True, "wake": {"theta": np.linspace(5e-3, 4e-3, 30)}}) is None
+    assert wake_sawtooth_note({"converged": False, "wake": {"theta": saw}}) is None
+    assert wake_sawtooth_note({"converged": True, "wake": {}}) is None
+
+
+@pytest.mark.slow
+def test_false_low_lift_branch_is_flagged():
+    """Regression: the false low-lift branch of a sharp NACA 0012 (240 panels, 2 deg) gives a warning.
+
+    The solve converges on a false branch with an odd-even near wake (Cl about 0.51 of the inviscid
+    value instead of about 0.84). Before the check it returned this solution without a warning.
+    """
+    with pytest.warns(UserWarning, match="near-wake sawtooth"):
+        r = solve_viscous(airfoil("0012", closed_te=True).repanel(n_panels=240), 2.0, 1e6)
+    assert r.converged
+    assert "near-wake sawtooth" in r.reason
+    assert wake_sawtooth_index(r.wake["theta"]) > WAKE_SAWTOOTH_LIMIT
+
+
+@pytest.mark.slow
+def test_normal_branch_is_not_flagged():
+    """The correct solution (sharp NACA 0012, 160 panels, 2 deg) gives no sawtooth warning."""
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", UserWarning)
+        r = solve_viscous(airfoil("0012", closed_te=True).repanel(n_panels=160), 2.0, 1e6)
+    assert r.converged
+    assert "near-wake sawtooth" not in r.reason
+    assert wake_sawtooth_index(r.wake["theta"]) < 0.05
