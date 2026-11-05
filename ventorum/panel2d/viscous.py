@@ -76,7 +76,8 @@ from ventorum.utils.parallel import blas_single_thread
 
 __all__ = ["ViscousResult", "StopRules", "solve_viscous", "solve_viscous_flapped", "trace_wake_streamline", "prepare_case", "warm_state",
            "finish_angle", "row_from_result", "sweep_order", "check_chord_ref", "resolve_body", "wake_length_note",
-           "warn_long_wake", "WAKE_LENGTH_LIMIT", "WORK_BUDGET", "COLD_START_BUDGET", "STEP_BUDGET"]
+           "warn_long_wake", "wake_sawtooth_index", "wake_sawtooth_note", "warn_wake_sawtooth",
+           "WAKE_LENGTH_LIMIT", "WAKE_SAWTOOTH_LIMIT", "WAKE_SAWTOOTH_STATIONS", "WORK_BUDGET", "COLD_START_BUDGET", "STEP_BUDGET"]
 
 #: Number of times the angle step of a warm start may be halved.
 SUBSTEP_DEPTH = 3
@@ -106,6 +107,23 @@ STEP_BUDGET = 300
 #: smallest of these distances. The Squire-Young drag is already converged at a wake length of 0.5
 #: chords (within 0.1 % up to 1.5 chords at 4 deg).
 WAKE_LENGTH_LIMIT = 1.5
+#: Number of wake stations behind the trailing edge that the near-wake sawtooth check reads [-].
+WAKE_SAWTOOTH_STATIONS = 10
+#: Largest near-wake sawtooth index (see :func:`wake_sawtooth_index`) of a converged solution without
+#: a warning [-]. A converged solution can hold a false odd-even (sawtooth) pattern of theta, ue and
+#: the wake sources behind the trailing edge. That pattern lowers the trailing-edge ue and, through the
+#: Kutta condition, the circulation (Cl about half of the correct value). Measured (NACA 0012, sharp
+#: trailing edge, Re 1e6, 0 to 4 deg, 160 to 320 panels, both start paths): index 0.004 to 0.009 on the
+#: correct solutions, 0.42 to 0.94 on the false ones. XFOIL 6.99 on the same nodes (black box) gives a
+#: smooth wake with index 0.03 to 0.05. Survey of other converged solutions (NACA 0012,
+#: 0018, 2412, 4412, blunt and sharp trailing edge, -4 to 12 deg, 160 and 240 panels, Re 1e6; also
+#: Re 2e5 and 3e6, ground effect): at most 0.08 with a blunt trailing edge; with a sharp trailing edge,
+#: values from 0.05 to 0.23 occur (NACA 4412, 2 to 12 deg) and 0.39 in ground effect (NACA 4412, h/c
+#: 0.3, 0 deg). The limit 0.3 is a code setting between the largest free-air value of the survey and
+#: the smallest false value; it flags the gross cases only. Sharp-trailing-edge solutions with an
+#: index from about 0.05 to 0.3 can also have a lower Cl (NACA 4412, 160 panels, 8 deg: index 0.11,
+#: Cl about 5 % below the 240-panel value); the check does not flag them.
+WAKE_SAWTOOTH_LIMIT = 0.3
 #: Two angles closer than this are the same angle [deg]: for the work budgets, the best attempt at the angle
 #: and the number of continuation steps (a round-off tolerance).
 ANGLE_MATCH_DEG = 1e-9
@@ -777,6 +795,7 @@ def solve_viscous(
     for r in bad:
         warnings.warn(f"solve_viscous: alpha = {r['alpha']:g} deg did not converge: {r['reason']}",
                       UserWarning, stacklevel=2)
+    warn_wake_sawtooth(rows, "solve_viscous")
     if is_scalar:
         r = rows[0]
         return ViscousResult(**{k: r[k] for k in _FIELDS})
@@ -873,6 +892,73 @@ def warn_long_wake(wake_length, solver: str, stacklevel: int = 3) -> str | None:
     if note is not None:
         warnings.warn(f"{solver}: {note}.", UserWarning, stacklevel=stacklevel)
     return note
+
+
+def wake_sawtooth_index(theta) -> float:
+    """Return the near-wake sawtooth index of a wake momentum thickness distribution [-].
+
+    The index is the largest absolute second difference of theta over the
+    first :data:`WAKE_SAWTOOTH_STATIONS` wake stations, each divided by the
+    theta of the middle station. A smooth wake gives a small value; an
+    odd-even pattern gives a value near 1.
+
+    Parameters
+    ----------
+    theta : array_like
+        Wake momentum thickness [m] from the trailing edge downstream.
+
+    Returns
+    -------
+    float
+        The index [-]; NaN when there are fewer than three finite stations.
+    """
+    t = np.asarray(theta, dtype=np.float64)[:WAKE_SAWTOOTH_STATIONS]
+    if t.size < 3 or not np.all(np.isfinite(t)):
+        return float("nan")
+    return float(np.max(np.abs(t[2:] - 2.0 * t[1:-1] + t[:-2]) / np.abs(t[1:-1])))
+
+
+def wake_sawtooth_note(row) -> str | None:
+    """Return the note of a converged row whose near wake has a sawtooth pattern, or None.
+
+    Parameters
+    ----------
+    row : dict
+        Result row (see :func:`row_from_result`).
+
+    Returns
+    -------
+    str or None
+        The reason text when the row converged and its index (see
+        :func:`wake_sawtooth_index`) is above :data:`WAKE_SAWTOOTH_LIMIT`.
+    """
+    if not row.get("converged") or "theta" not in row.get("wake", {}):
+        return None
+    idx = wake_sawtooth_index(row["wake"]["theta"])
+    if not idx > WAKE_SAWTOOTH_LIMIT:
+        return None
+    return (f"near-wake sawtooth: the wake momentum thickness alternates behind the trailing edge (index {idx:.2f}, "
+            f"limit {WAKE_SAWTOOTH_LIMIT:g}); this converged solution is probably a false numerical branch with too "
+            "little circulation (Cl can be about half of the correct value); do not use its loads; another panel "
+            "count can avoid it")
+
+
+def warn_wake_sawtooth(rows, solver: str, stacklevel: int = 3):
+    """Give a UserWarning for each converged row with a near-wake sawtooth note.
+
+    Parameters
+    ----------
+    rows : iterable of dict
+        Result rows (see :func:`row_from_result`).
+    solver : str
+        Name of the calling solver (for the message).
+    stacklevel : int
+        Stack level of the warning.
+    """
+    for r in rows:
+        if r.get("converged") and "near-wake sawtooth" in r.get("reason", ""):
+            warnings.warn(f"{solver}: alpha = {r['alpha']:g} deg: {wake_sawtooth_note(r)}.", UserWarning,
+                          stacklevel=stacklevel)
 
 
 def add_note(rows, note: str | None):
@@ -1163,7 +1249,7 @@ def row_from_result(setup, res, alpha) -> dict:
         row.update(iterations=int(res.iterations), residual=float(res.residual))
         return row
     o = vii.case_outputs(setup, res.state, res.ue)
-    return {
+    row = {
         "alpha": float(alpha),
         "Cl": o["Cl_pressure"] if setup.sys.ground else o["Cl"],
         "Cl_circulation": o["Cl"],
@@ -1187,6 +1273,10 @@ def row_from_result(setup, res, alpha) -> dict:
         "ue": o["ue"],
         "wake": {"x": o["wake_x"], "theta": o["wake_theta"], "H": o["wake_H"], "ue": o["wake_ue"]},
     }
+    note = wake_sawtooth_note(row)
+    if note is not None:
+        row["reason"] = f"{row['reason']}; {note}" if row["reason"] else note
+    return row
 
 
 def _failed_row(alpha, body, reason, wake_x=None) -> dict:
@@ -1570,6 +1660,7 @@ def solve_viscous_flapped(
     for r in bad:
         warnings.warn(f"solve_viscous_flapped: alpha = {r['alpha']:g} deg did not converge: {r['reason']}",
                       UserWarning, stacklevel=2)
+    warn_wake_sawtooth(rows, "solve_viscous_flapped")
     if is_scalar:
         r = rows[0]
         return ViscousResult(**{k: r[k] for k in _FIELDS}, details=r.get("details", {}))
