@@ -134,7 +134,7 @@ def constant(value, like: Dual) -> Dual:
     return Dual(v, like.der * 0.0, like.xp)
 
 
-def variables(values, xp=None):
+def variables(values, xp=None, derivatives: bool = True):
     """Return independent variables with unit derivative seeds.
 
     Parameters
@@ -143,14 +143,28 @@ def variables(values, xp=None):
         The ``n`` independent variables, each of shape ``S``.
     xp : module, optional
         Array module. Default numpy.
+    derivatives : bool
+        True (default) seeds the ``n`` derivatives. False gives a value-only
+        evaluation: the derivative arrays have shape ``S + (0,)``, so the
+        chain rule costs no array work and the values are the same.
 
     Returns
     -------
     list of Dual
-        Variable ``k`` has the derivative ``e_k``.
+        Variable ``k`` has the derivative ``e_k`` (no derivative when
+        ``derivatives`` is False).
     """
     xp = np if xp is None else xp
     n = len(values)
+    if not derivatives:
+        out = []
+        for v in values:
+            if xp is np:
+                der = np.zeros(np.shape(v) + (0,), dtype=np.result_type(v, np.float64))
+            else:
+                der = xp.zeros(tuple(v.shape) + (0,), dtype=v.dtype, device=v.device)
+            out.append(Dual(v, der, xp))
+        return out
     out = []
     for k, v in enumerate(values):
         if xp is np:

@@ -676,6 +676,100 @@ def _setup_and_state(code="4412", alpha=3.0, n=80, closed_te=True):
     return setup, vii.initial_state(setup)
 
 
+def test_residual_only_evaluation_builds_no_derivatives(monkeypatch):
+    """A residual-only evaluation (line search, Levenberg-Marquardt trial) carries no derivative columns.
+
+    Its residuals equal those of the evaluation with the Jacobian bit for bit.
+    """
+    from ventorum.ibl2d import dual
+    from ventorum.panel2d import vii
+
+    setup, st = _setup_and_state()
+    widths = []
+    seed = dual.variables
+
+    def spy(values, xp=None, derivatives=True):
+        out = seed(values, xp=xp, derivatives=derivatives)
+        widths.append(out[0].der.shape[-1])
+        return out
+
+    monkeypatch.setattr(vii, "variables", spy)
+    be = vii._Backend(np)
+    lists = vii._build_lists([setup], [st])
+    ui, D = vii._coupling_matrices(setup, st)
+    S = vii._dstar_mask(setup, st).astype(float)
+    drop = np.array([], dtype=int)
+    args = (be, lists, st.x[None], ui[None], D[None], np.array([setup.re_l]), S[None], drop, drop)
+    r_jac, J, ue_jac = vii._residual_m(*args, True)
+    n_jac = len(widths)
+    r_val, none, ue_val = vii._residual_m(*args, False)
+    assert none is None and J is not None
+    assert min(widths[:n_jac]) > 0 and set(widths[n_jac:]) == {0}
+    assert np.array_equal(r_val, r_jac) and np.array_equal(ue_val, ue_jac)
+
+
+@pytest.mark.parametrize("closed_te", [True, False])
+def test_source_matrix_equals_the_panel_loop(closed_te):
+    """The vectorized source matrix equals the panel-by-panel rule (sharp and blunt edge, with a dropped node)."""
+    from ventorum.panel2d import vii
+
+    setup, st = _setup_and_state(closed_te=closed_te)
+    s, lay = setup.sys, setup.sys.layout
+    for drop in (-1, st.i_s, st.i_s + 1):
+        st.drop = drop
+        sg = vii._signs(setup, st)
+        ref = np.zeros((setup.n_src, setup.n_st))
+        for p in range(lay.n_panels):
+            if p in lay.te_panel:
+                continue
+            i1, i2, L = lay.idx1[p], lay.idx2[p], s.panel_len[p]
+            if sg[i1] != 0.0:
+                ref[p, i1] = (1.0 if sg[i1] > 0.0 else -1.0) / L
+            if sg[i2] != 0.0:
+                ref[p, i2] = (-1.0 if sg[i2] > 0.0 else 1.0) / L
+        for j in range(setup.nw - 1):
+            ref[lay.n_panels + j, setup.n + j + 1] = 1.0 / s.wake_len[j]
+            ref[lay.n_panels + j, setup.n + j] = -1.0 / s.wake_len[j]
+        assert np.array_equal(vii._source_matrix(setup, st), ref)
+
+
+def test_equation_lists_are_built_only_when_the_structure_changes(monkeypatch):
+    """The Newton solve builds the equation lists again only after a structure change.
+
+    The coupling matrices are those of the current structure in every evaluation (also when the last
+    omega pass of a cold start moves the stagnation point and no refresh is asked).
+    """
+    from ventorum.panel2d import vii
+
+    setup, st = _setup_and_state(alpha=2.0)
+    builds, structures = [], []
+    build = vii._build_lists
+    residual = vii._residual_m
+
+    def count(setups, states):
+        # The Levenberg-Marquardt fallback builds the lists of its one case itself.
+        if sys._getframe(1).f_code.co_name != "_lm_step":
+            builds.append([(s.i_s, s.drop, tuple(s.itr)) for s in states])
+        return build(setups, states)
+
+    def check(be, lists, X, ue_inv, D, re_b, S, drop_b, drop_g, need_jac):
+        if need_jac:
+            structures.append((st.i_s, st.drop, tuple(st.itr)))
+            P, _ = vii._p_and_b(setup, st)
+            assert np.array_equal(be.host(ue_inv)[0], P @ setup.base)
+        return residual(be, lists, X, ue_inv, D, re_b, S, drop_b, drop_g, need_jac)
+
+    monkeypatch.setattr(vii, "_build_lists", count)
+    monkeypatch.setattr(vii, "_residual_m", check)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        res = vii.newton_solve([setup], [st], max_iter=30)[0]
+    assert res.iterations > 3
+    n_struct = 1 + sum(a != b for a, b in zip(structures[:-1], structures[1:]))
+    assert len(structures) == res.iterations + 1
+    assert len(builds) == n_struct < len(structures)
+
+
 def test_coupling_matrices_follow_a_structure_moved_by_the_last_omega_pass(monkeypatch):
     """Regression: a structure moved by the last of the three omega passes gets new coupling matrices.
 

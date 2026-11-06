@@ -319,19 +319,19 @@ def _source_matrix(setup: CaseSetup, st: CaseState):
     sg = _signs(setup, st)
     lay = s.layout
     B = np.zeros((setup.n_src, setup.n_st))
-    for p in range(lay.n_panels):
-        if p in lay.te_panel:
-            continue
-        i1, i2 = lay.idx1[p], lay.idx2[p]
-        L = s.panel_len[p]
-        if sg[i1] != 0.0:
-            B[p, i1] = (1.0 if sg[i1] > 0.0 else -1.0) / L
-        if sg[i2] != 0.0:
-            B[p, i2] = (-1.0 if sg[i2] > 0.0 else 1.0) / L
     npn = lay.n_panels
-    for j in range(nw - 1):
-        B[npn + j, n + j + 1] = 1.0 / s.wake_len[j]
-        B[npn + j, n + j] = -1.0 / s.wake_len[j]
+    wall = np.ones(npn, dtype=bool)
+    wall[[p for p in lay.te_panel if p >= 0]] = False
+    p = np.nonzero(wall)[0]
+    i1, i2 = lay.idx1[p], lay.idx2[p]
+    L = s.panel_len[p]
+    on = sg[i1] != 0.0
+    B[p[on], i1[on]] = np.where(sg[i1[on]] > 0.0, 1.0, -1.0) / L[on]
+    on = sg[i2] != 0.0
+    B[p[on], i2[on]] = np.where(sg[i2[on]] > 0.0, -1.0, 1.0) / L[on]
+    j = np.arange(nw - 1)
+    B[npn + j, n + j + 1] = 1.0 / s.wake_len[j]
+    B[npn + j, n + j] = -1.0 / s.wake_len[j]
     return B
 
 
@@ -619,13 +619,13 @@ def _evaluate(be: _Backend, lists: _Lists, Xd, UE, re_b, need_jac: bool):
         g2 = be.arr(lst["g2"], True)
         dxi = be.arr(lst["dxi"])
         v = variables([Xd[bi, g1, 0], Xd[bi, g1, 1], Xd[bi, g1, 2], UE[bi, g1],
-                       Xd[bi, g2, 0], Xd[bi, g2, 1], Xd[bi, g2, 2], UE[bi, g2]], xp=xp)
+                       Xd[bi, g2, 0], Xd[bi, g2, 1], Xd[bi, g2, 2], UE[bi, g2]], xp=xp, derivatives=need_jac)
         re = re_b[bi]
         if kind == eq.POST:
             g0 = be.arr(lst["g0"], True)
             v = variables([Xd[bi, g1, 0], Xd[bi, g1, 1], Xd[bi, g1, 2], UE[bi, g1],
                            Xd[bi, g2, 0], Xd[bi, g2, 1], Xd[bi, g2, 2], UE[bi, g2],
-                           Xd[bi, g0, 0], Xd[bi, g0, 1], Xd[bi, g0, 2], UE[bi, g0]], xp=xp)
+                           Xd[bi, g0, 0], Xd[bi, g0, 1], Xd[bi, g0, 2], UE[bi, g0]], xp=xp, derivatives=need_jac)
             r1, r2, r3 = eq.post_transition_residuals(tuple(v[8:]), tuple(v[:4]), tuple(v[4:8]),
                                                       be.arr(lst["dxi0"]), dxi, re, be.arr(lst["nc"]),
                                                       be.arr(lst["wf"]))
@@ -653,7 +653,7 @@ def _evaluate(be: _Backend, lists: _Lists, Xd, UE, re_b, need_jac: bool):
         g = be.arr(sm["g"], True)
         gu = be.arr(sm["gu"], True)
         gl = be.arr(sm["gl"], True)
-        v = variables([Xd[bi, g, 0], Xd[bi, g, 1], Xd[bi, g, 2], UE[bi, gu], UE[bi, gl]], xp=xp)
+        v = variables([Xd[bi, g, 0], Xd[bi, g, 1], Xd[bi, g, 2], UE[bi, gu], UE[bi, gl]], xp=xp, derivatives=need_jac)
         a = (be.arr(sm["cu"]) * v[3] + be.arr(sm["cl"]) * v[4]) / be.arr(sm["ds"])
         for k, r in enumerate(eq.similarity_residuals(v[0], v[1], v[2], a, re_b[bi])):
             row = 3 * g + k
@@ -671,7 +671,8 @@ def _evaluate(be: _Backend, lists: _Lists, Xd, UE, re_b, need_jac: bool):
         gw = be.arr(te["gw"], True)
         v = variables([Xd[bi, gu, 0], Xd[bi, gu, 1], Xd[bi, gu, 2], UE[bi, gu],
                        Xd[bi, gl, 0], Xd[bi, gl, 1], Xd[bi, gl, 2], UE[bi, gl],
-                       Xd[bi, gw, 0], Xd[bi, gw, 1], Xd[bi, gw, 2]], xp=xp)
+                       Xd[bi, gw, 0], Xd[bi, gw, 1], Xd[bi, gw, 2]], xp=xp,
+                      derivatives=need_jac)
         res = eq.trailing_edge_residuals(tuple(v[0:4]), tuple(v[4:8]), tuple(v[8:11]), be.arr(te["gap"]),
                                          re_b[bi], be.bool(te["tu"]), be.bool(te["tl"]))
         cols = ((0, gu, 0), (1, gu, 1), (2, gu, 2), (4, gl, 0), (5, gl, 1), (6, gl, 2),
@@ -1301,6 +1302,17 @@ def newton_solve(setups, states, *, tol=1e-6, max_iter=50, xp=np, device=None, d
     first_stop = [""] * nb
 
     sens = {}
+    lists_cache = {}
+
+    def lists_for(idx):
+        # The equation lists depend on the structure only (stagnation node,
+        # dropped node and transition intervals): build them again only when
+        # it changes.
+        key = tuple((i, states[i].i_s, states[i].drop, tuple(int(v) for v in states[i].itr)) for i in idx)
+        if lists_cache.get("key") != key:
+            lists_cache["key"] = key
+            lists_cache["lists"] = _build_lists([setups[i] for i in idx], [states[i] for i in idx])
+        return lists_cache["lists"]
 
     def assemble(idx, refresh=True):
         for i in idx:
@@ -1407,7 +1419,7 @@ def newton_solve(setups, states, *, tol=1e-6, max_iter=50, xp=np, device=None, d
                         best_it[i] = it
                         best_res[i] = np.inf
             ue_inv, D, X, re_b, masks, drop_b, drop_g, S = assemble(active, refresh=bool(np.any(changed)) or it == 0)
-            lists = _build_lists([setups[i] for i in active], [states[i] for i in active])
+            lists = lists_for(active)
             R, J, UE = _residual_m(be, lists, X, ue_inv, D, re_b, S, drop_b, drop_g, True)
             R_h = be.host(R)
             ue_h = be.host(UE)
@@ -1474,7 +1486,7 @@ def newton_solve(setups, states, *, tol=1e-6, max_iter=50, xp=np, device=None, d
                 R, J = R[kk], J[kk]
                 active = [active[k] for k in keep]
                 ue_inv, D, X, re_b, masks, drop_b, drop_g, S = assemble(active, refresh=False)
-                lists = _build_lists([setups[i] for i in active], [states[i] for i in active])
+                lists = lists_for(active)
             dx_h, singular = _newton_steps(be, J, R)
             dx_h = dx_h.reshape(len(active), -1, 3)
             res_k = res[keep]
