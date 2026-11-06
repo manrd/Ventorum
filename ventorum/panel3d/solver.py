@@ -452,6 +452,11 @@ class PanelSolver:
         mesh uses for asymmetric configurations in ground effect.
     wake_length : float
         Wake length in m.
+    gradient_stencil_stats : dict
+        Counts of the surface gradient stencil fallbacks of the full mesh
+        (keys "fold_rule", "n_fold_edges", "n_ls_reduced",
+        "n_node_fallback"; see
+        :func:`ventorum.panel3d.post.build_surface_gradient_operator`).
     """
 
     def __init__(
@@ -561,6 +566,7 @@ class PanelSolver:
                 self._full_geom.normal,
                 None,
             )
+            self.gradient_stencil_stats = {}
             self._grad_op = build_surface_gradient_operator(
                 self._full_mesh.nodes,
                 self._standardized_full_panels,
@@ -569,6 +575,7 @@ class PanelSolver:
                 self._full_geom.area,
                 self._full_mesh.wake_edges,
                 kinds=self._full_mesh.kind,
+                stats=self.gradient_stencil_stats,
             )
         else:
             # The parent already prepared these full-mesh pieces.
@@ -576,6 +583,7 @@ class PanelSolver:
             self._full_geom = _reuse_full_from._full_geom
             self._full_wake = _reuse_full_from._full_wake
             self._grad_op = _reuse_full_from._grad_op
+            self.gradient_stencil_stats = dict(_reuse_full_from.gradient_stencil_stats)
 
         # Reference center
         if ref_point is None:

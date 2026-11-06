@@ -564,3 +564,61 @@ def test_surface_gradient_does_not_cross_sharp_edges():
     )
     grad_mixed = surface_gradient(mixed, mu)
     assert np.max(np.abs(grad_mixed[inner] - exact[inner])) > 0.1
+
+
+def _strip_mesh(m: int = 5):
+    """One row of m flat square panels along x (unit size) in the plane z = 0."""
+    nodes = np.array([[i, j, 0.0] for i in range(m + 1) for j in (0.0, 1.0)], dtype=float)
+    panels = np.array([[2 * i, 2 * i + 2, 2 * i + 3, 2 * i + 1] for i in range(m)])
+    verts = nodes[panels]
+    raw = np.cross(verts[:, 2] - verts[:, 0], verts[:, 3] - verts[:, 1])
+    return nodes, panels, verts.mean(axis=1), raw / np.linalg.norm(raw, axis=1, keepdims=True), \
+        0.5 * np.linalg.norm(raw, axis=1)
+
+
+def test_surface_gradient_reports_the_stencil_fallbacks():
+    """The gradient operator counts the nodes and panels that use a fallback stencil."""
+    from ventorum.panel3d.post import build_surface_gradient_operator
+
+    m = 5
+    nodes, panels, cen, nrm, area = _strip_mesh(m)
+    # A row of panels: each least-squares stencil gives one direction only,
+    # and no node has the three panels of a least-squares node value.
+    stats = {}
+    build_surface_gradient_operator(nodes, panels, cen, nrm, area, stats=stats)
+    assert stats == {"fold_rule": True, "n_fold_edges": 0, "n_ls_reduced": m,
+                     "n_node_fallback": 2 * (m + 1)}
+    # A tip cap keeps one direction by design and is not counted.
+    stats = {}
+    build_surface_gradient_operator(nodes, panels, cen, nrm, area,
+                                    kinds=np.array(["tip"] * (m - 1) + ["surface"]), stats=stats)
+    assert stats["fold_rule"] is False and stats["n_ls_reduced"] == 1
+    # Fold the second half of the row by 90 deg about the line x = 3: the
+    # fold angle cuts one edge when the mesh has no kinds.
+    folded = nodes.copy()
+    far = folded[:, 0] > 3.0
+    folded[far, 2] = folded[far, 0] - 3.0
+    folded[far, 0] = 3.0
+    verts = folded[panels]
+    raw = np.cross(verts[:, 2] - verts[:, 0], verts[:, 3] - verts[:, 1])
+    stats = {}
+    build_surface_gradient_operator(
+        folded, panels, verts.mean(axis=1), raw / np.linalg.norm(raw, axis=1, keepdims=True),
+        0.5 * np.linalg.norm(raw, axis=1), stats=stats,
+    )
+    assert stats["fold_rule"] is True and stats["n_fold_edges"] == 1
+
+
+def test_solver_keeps_the_gradient_stencil_counts():
+    """PanelSolver keeps the stencil counts of its full-mesh gradient operator."""
+    surf = LiftingSurface(
+        name="Wing", semi_span=4.0, is_symmetric=True,
+        sections=[WingSection(y_frac=0.0, chord=1.0), WingSection(y_frac=1.0, chord=1.0)],
+    )
+    mesh = mesh_lifting_surface(surf, _naca0012_test_coordinates(51), n_chord=8, n_span=6, half=True)
+    solver = PanelSolver(mesh, far_ratio=np.inf)
+    stats = solver.gradient_stencil_stats
+    assert set(stats) == {"fold_rule", "n_fold_edges", "n_ls_reduced", "n_node_fallback"}
+    assert stats["fold_rule"] is False and stats["n_fold_edges"] == 0
+    assert solver._full_mesh_solver().gradient_stencil_stats == stats
+    print(f"wing gradient stencil counts: {stats}")
