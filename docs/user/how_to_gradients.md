@@ -225,9 +225,10 @@ result. The call also checks that the production circulation solves the equation
 the reference copy (the componentwise backward error, limit 1e-6 in float64 and 3e-2 in
 float32; see the theory manual). A wrong term of a boundary condition then raises
 `RuntimeError` also when the outputs do not show it. `check_gradients` checks the gradients against Richardson-extrapolated central
-differences of the production solve. The default tolerance is `rtol=1e-6`. Use
-`rtol=1e-3` for float32 gradients (float32 is the default precision) and `rtol=1e-6` for
-float64 gradients:
+differences of the production solve. The default tolerance follows the precision of the
+gradients: `rtol=1e-3` for float32 gradients (float32 is the default precision; 1e-3 is the
+float32 floor) and `rtol=1e-6` for float64 gradients. The result gives the tolerance in
+use in `check["rtol"]`:
 
 ```python
 check = vt.check_gradients(
@@ -235,7 +236,6 @@ check = vt.check_gradients(
     outputs=("CL", "CD", "Cm"),
     wrt=("alpha", "nodes"),
     n_directions=3,
-    rtol=1e-3 if result.precision_gradient == "float32" else 1e-6,
 )
 print(f"gradients pass: {check['pass']} ({check['compared']} compared, {check['skipped']} skipped)")
 print(check["reasons"])

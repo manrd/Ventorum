@@ -90,13 +90,17 @@ def _model_cases() -> list[tuple]:
 
 _CASE_IDS = [c[0] for c in _model_cases()]
 
-# Cases checked in float64 only. In the ground case of this wing the float32
-# PyTorch reference itself is 6 % from the float64 reference in the
-# wake-direction gradient at the leg points (the same without camber and
-# without the chains, so a property of the geometry in float32); the float32
-# kernels and the float32 reference then differ by more than the float32
-# tolerance. The float64 products agree to about 1e-15.
-_FLOAT64_ONLY = {"vlm-chain-ground"}
+# Cases checked in float64 only (none at present). The ground case of the
+# cambered chain wing was here: with the leg nodes of that time, the float32
+# reference was 6.6 % from the float64 reference in the wake-direction
+# gradient of the induced velocity at the leg points. A float64 evaluation on
+# the same inputs rounded to float32 gave the same 6.6 %, so the cause was the
+# float32 rounding of the coordinates of a load point very near a leg (input
+# conditioning), not the arithmetic of the kernels. With the current leg
+# nodes (the mean-surface node at every edge between different hinges, the
+# leg node on the last panel) that pair is gone, and the case meets the
+# float32 parity tolerance with all backends.
+_FLOAT64_ONLY: set[str] = set()
 
 
 def _captured_calls(case_id: str, device: str, precision: str):  # type: ignore[no-untyped-def]
@@ -229,6 +233,72 @@ def test_vjp_parity_warp(case_id: str, precision: str) -> None:
     if case_id in _FLOAT64_ONLY and precision == "float32":
         pytest.skip("float64 only (see _FLOAT64_ONLY)")
     _check_parity(case_id, "warp", "cuda", precision)
+
+
+def _per_output_error(ref, new, outputs: tuple) -> dict[str, float]:  # type: ignore[no-untyped-def]
+    """Return per output the largest gradient difference relative to the largest *ref* component of that output."""
+    def flat(x):  # type: ignore[no-untyped-def]
+        if isinstance(x, dict):
+            return np.concatenate([flat(x[k]) for k in sorted(x)]) if x else np.zeros(0)
+        return np.atleast_1d(np.asarray(x, dtype=float)).ravel()
+
+    out = {}
+    for o in outputs:
+        a = np.concatenate([flat(ref.jacobian[o][w]) for w in sorted(ref.jacobian[o])])
+        b = np.concatenate([flat(new.jacobian[o][w]) for w in sorted(ref.jacobian[o])])
+        out[o] = float(np.max(np.abs(a - b))) / float(np.max(np.abs(a)))
+    return out
+
+
+def _float32_gate_chain_ground(device: str) -> dict[str, float]:
+    """Return the per-output float32 error of the cambered chain wing in ground effect against float64."""
+    from ventorum import gpu
+
+    _, ac, cond, st, wrt, outs = {c[0]: c for c in _model_cases()}["vlm-chain-ground"]
+    old_dev, old_prec = gpu.get_device(), gpu._precision
+    res = {}
+    try:
+        gpu.set_device(device)
+        for prec in ("float64", "float32"):
+            gpu.set_precision(prec)
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                res[prec] = vt.gradients(ac, cond, st, outputs=outs, wrt=wrt, method="kernels")
+            assert res[prec].precision_gradient == prec
+    finally:
+        gpu.set_device(old_dev)
+        gpu.set_precision(old_prec)
+    return _per_output_error(res["float64"], res["float32"], outs)
+
+
+def test_float32_gate_chain_ground_cpu() -> None:
+    """Float32 gradients of the cambered chain wing in ground effect meet the float32 floor (CPU).
+
+    The case was once 6 % off in float32 and excluded from the float32
+    parity test. Each output is compared with the float64 gradient,
+    relative to the largest component of its float64 gradient over all
+    inputs (nodes, alpha, h). The tolerance is the float32 floor of
+    check_gradients (``RTOL_FLOAT32``, 1e-3); the measured error is at most
+    3e-4 (the side force).
+    """
+    pytest.importorskip("torch")
+    from ventorum.sensitivity.check import RTOL_FLOAT32
+
+    err = _float32_gate_chain_ground("cpu")
+    assert max(err.values()) <= RTOL_FLOAT32, err
+
+
+@pytest.mark.gpu
+def test_float32_gate_chain_ground_gpu() -> None:
+    """Float32 gradients of the cambered chain wing in ground effect meet the float32 floor (Warp, GPU)."""
+    _need_cuda()
+    from ventorum import gpu
+    from ventorum.sensitivity.check import RTOL_FLOAT32
+
+    if not gpu.available():
+        pytest.skip(f"The GPU pipelines cannot run: {gpu.unavailable_reason()}")
+    err = _float32_gate_chain_ground("gpu")
+    assert max(err.values()) <= RTOL_FLOAT32, err
 
 
 def _synthetic(m: int, n: int, n_u: int, seed: int) -> tuple:

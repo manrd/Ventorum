@@ -1399,3 +1399,30 @@ def test_gradients_with_zero_moment_vector(precision) -> None:
             gr = vt.gradients(ac, cond, st, outputs=outputs, wrt=("controls",))
             assert gr.forward_mismatch <= (1e-10 if precision == "float64" else 1e-4)
             assert gr.jacobian["CL"]["controls"]["flap"] > 0.5
+
+
+@pytest.mark.parametrize("precision", ["float32", "float64"])
+def test_check_gradients_default_tolerance_follows_the_precision(precision, cpu_device) -> None:
+    """Regression: the default rtol of check_gradients follows the gradient precision.
+
+    Before, the default was 1e-6 for every precision, and a default
+    (float32) gradient on the CPU failed the check (CDi node directions,
+    4e-6 relative) although it met the float32 floor 1e-3.
+    """
+    pytest.importorskip("torch")
+    from ventorum.sensitivity.check import RTOL_FLOAT32, RTOL_FLOAT64
+
+    af = vt.LinearAirfoil(name="S", a0=2.0 * np.pi, alpha_L0=np.radians(-2.0), Cd0=0.008, Cm0=-0.05)
+    wing = vt.LiftingSurface(
+        name="Wing", semi_span=4.0, sweep_le=np.radians(10.0), dihedral=np.radians(3.0),
+        sections=[vt.WingSection(y_frac=0.0, chord=1.2, airfoil=af),
+                  vt.WingSection(y_frac=1.0, chord=0.7, airfoil=af)])
+    ac = vt.Aircraft(surfaces=[wing])
+    st = vt.SolverSettings(solver_type="vlm", n_panels=6, n_chord=2)
+    cond = vt.FlightCondition(V_inf=30.0, alpha=np.radians(4.0), beta=np.radians(2.0), h=1.5)
+    with _gpu_settings(precision=precision), warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        out = vt.check_gradients(ac, cond, st, outputs=("CL", "CDi", "Cm"), wrt=("alpha", "nodes"),
+                                 n_directions=2)
+    assert out["rtol"] == (RTOL_FLOAT32 if precision == "float32" else RTOL_FLOAT64)
+    assert out["pass"], _failed(out)
