@@ -27,7 +27,9 @@ Jacobian entries is then about 1e-3 per rad (about 1e-4 relative to a lift slope
 of 5 per rad), which is enough for Newton's method.
 
 When condition.h is set (ground effect), the height of Aircraft.ref_point above the
-ground plane remains constant while the angle of attack changes.
+ground plane remains constant while the angle of attack changes. With the automatic
+chordwise count of the vortex lattice, all solves of a trim in ground effect use one
+count, so that the residual is continuous in the angle of attack.
 
 References
 ----------
@@ -175,6 +177,89 @@ class TrimResult:
         }
 
 
+#: Largest spacing [deg] of the angles of attack at which trim finds the
+#: automatic chordwise count in ground effect (see :func:`_fixed_ground_n_chord`).
+GROUND_N_CHORD_SAMPLE_DEG = 1.0
+
+
+def _fixed_ground_n_chord(
+    aircraft: Aircraft,
+    condition: FlightCondition,
+    settings: SolverSettings | None,
+    alpha_bounds_rad: tuple[float, float],
+    alpha_start_rad: float,
+) -> tuple[SolverSettings | None, str | None]:
+    """Return the settings with one chordwise count for all solves of a trim in ground effect.
+
+    In ground effect the automatic chordwise count of the vortex lattice
+    (:meth:`ventorum.solvers.lattice_base.LatticeSolver.resolve_n_chord`)
+    is an integer that depends on the attitude. When each solve of the trim
+    finds its own count, the residual is not continuous in alpha, and a
+    finite-difference step or a Newton step can contain a mesh change. This
+    function finds the automatic count at the angles of attack of the bounds,
+    at intervals of at most ``GROUND_N_CHORD_SAMPLE_DEG``, and at the start
+    angle, with the start deflections of *aircraft*. All solves then use the
+    largest of these counts (the count of the smallest gap to the ground), as
+    ``LatticeSolver.solve_sweep`` does for the angles of a sweep.
+
+    Parameters
+    ----------
+    aircraft : Aircraft
+        Aircraft with the start deflections.
+    condition : FlightCondition
+        Flight condition of the trim. Nothing is done when ``condition.h``
+        is None.
+    settings : SolverSettings or None
+        Settings of the trim. None is the default of :func:`ventorum.analyze`.
+    alpha_bounds_rad : tuple of float
+        Bounds of the angle of attack [rad].
+    alpha_start_rad : float
+        Angle of attack of the start point [rad].
+
+    Returns
+    -------
+    settings : SolverSettings or None
+        A copy of the settings with ``n_chord`` set, or *settings* unchanged
+        when the count is not automatic (count given, lifting line, or no
+        ground).
+    note : str or None
+        The note for the trim result, or None when *settings* is unchanged.
+    """
+    from ventorum.solvers.factory import make_solver, resolve_solver_type
+    from ventorum.utils.validation import validate_aircraft
+
+    if condition.h is None:
+        return settings, None
+    # The default settings of ventorum.analyze.
+    st = SolverSettings(solver_type="auto", n_panels=80) if settings is None else settings
+    if st.n_chord is not None:
+        return settings, None
+    solver = make_solver(resolve_solver_type(st.solver_type))
+    if solver.collocation != "vlm":
+        return settings, None
+    # The same check as the solve; an invalid aircraft raises here.
+    validate_aircraft(aircraft)
+    rp = aircraft.moment_reference()
+    lo, hi = alpha_bounds_rad
+    n_samples = max(2, int(math.ceil((hi - lo) / math.radians(GROUND_N_CHORD_SAMPLE_DEG))) + 1)
+    alphas = np.append(np.linspace(lo, hi, n_samples), alpha_start_rad)
+    counts = []
+    for a in alphas:
+        fc = condition.clone()
+        fc.alpha = float(a)
+        counts.append(solver.resolve_n_chord(aircraft, st, fc, None, rp))
+    n_chord = int(max(counts))
+    st = st.clone()
+    st.n_chord = n_chord
+    note = (
+        f"Ground effect: all solves of the trim use n_chord = {n_chord}, the largest automatic chordwise "
+        f"count over the angle-of-attack bounds (at intervals of at most {GROUND_N_CHORD_SAMPLE_DEG:g} deg, "
+        "with the start deflections). Thus the residual contains no mesh change between the Newton steps "
+        "and the finite differences. Set settings.n_chord to select a different count."
+    )
+    return st, note
+
+
 def _get_control_deflection(ac: Aircraft, name: str) -> float:
     """Return the current deflection [rad] of a named control surface."""
     for surf in ac.surfaces:
@@ -277,6 +362,10 @@ def trim(
 
     When ``condition.h`` is set (ground effect), the height of ``Aircraft.ref_point``
     above the ground plane stays constant while the angle of attack changes.
+    When the vortex lattice finds its chordwise count automatically
+    (``settings.n_chord`` None), all solves of the trim use one count: the
+    largest automatic count over the angle-of-attack bounds. A note of the
+    result gives the count.
 
     References
     ----------
@@ -386,6 +475,19 @@ def trim(
             f"The start point ({_describe(x_start)}) is outside the bounds; the iteration starts "
             f"from the nearest point in the bounds ({_describe(x)})."
         )
+
+    # In ground effect with the automatic chordwise count, one count for all
+    # solves: the residual is then continuous in alpha.
+    ac_clone.set_deflection(pitch_control, float(x[1]))
+    if is_lateral:
+        assert roll_control is not None and yaw_control is not None
+        ac_clone.set_deflection(roll_control, float(x[2]))
+        ac_clone.set_deflection(yaw_control, float(x[3]))
+    settings, n_chord_note = _fixed_ground_n_chord(
+        ac_clone, condition, settings, (alpha_min_rad, alpha_max_rad), float(x[0])
+    )
+    if n_chord_note is not None:
+        start_notes.append(n_chord_note)
 
     devices: set[str] = set()
     precisions: set[str] = set()

@@ -672,3 +672,45 @@ def test_start_point_outside_the_bounds_gives_a_note():
     inside = vt.trim(ac, vt.FlightCondition(V_inf=30.0, alpha=np.radians(2.0)), st,
                      CL_target=0.5, pitch_control="elevator")
     assert not any("start point" in n for n in inside.notes)
+
+
+@pytest.mark.slow
+def test_ground_effect_trim_uses_one_automatic_chordwise_count(monkeypatch):
+    """Verify that all solves of a trim in ground effect use one automatic chordwise count.
+
+    Regression: each solve found its own automatic count. Near the ground the
+    count changes with alpha (here from 16 to 21 inside the bounds),
+    so the residual was not continuous and a finite-difference step of the
+    Jacobian could contain a mesh change.
+    """
+    from ventorum.solvers.horseshoe import VortexLatticeSolver
+
+    counts = []
+    real_analyze = vt.analyze
+
+    def recording(*args, **kwargs):
+        sol = real_analyze(*args, **kwargs)
+        counts.append(sol.details["lattice"].n_chord)
+        return sol
+
+    monkeypatch.setattr(vt, "analyze", recording)
+    ac = _build_wing_tail_aircraft(z_tail=0.5)
+    ac.surfaces[0].n_panels = 4
+    ac.surfaces[1].n_panels = 4
+    st = vt.SolverSettings(solver_type="vlm")
+    cond = vt.FlightCondition(V_inf=30.0, alpha=np.radians(1.0), h=0.075)
+    bounds = (0.5, 2.0)
+
+    res = vt.trim(ac, cond, st, CL_target=0.45, pitch_control="elevator", alpha_bounds_deg=bounds)
+
+    assert res.status == "trimmed"
+    assert len(counts) > 3
+    assert len(set(counts)) == 1
+    # The count is the largest automatic count over the bounds.
+    solver = VortexLatticeSolver()
+    auto = [solver.resolve_n_chord(ac, st, vt.FlightCondition(V_inf=30.0, alpha=np.radians(a), h=0.075), None)
+            for a in np.linspace(bounds[0], bounds[1], 5)]
+    assert counts[0] == max(auto)
+    assert len(set(auto)) > 1   # the automatic count changes inside the bounds
+    assert any(f"n_chord = {counts[0]}" in n for n in res.notes)
+    assert st.n_chord is None   # the settings of the caller do not change
