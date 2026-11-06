@@ -46,9 +46,12 @@ from types import SimpleNamespace
 import torch
 import warp as wp
 
+from ventorum.aero.vortex_vjp import FLOORS
+
 _INV_4PI = 1.0 / (4.0 * math.pi)
 _INV_2PI = 1.0 / (2.0 * math.pi)
-_FLOORS = {"float64": 1e-300, "float32": 1e-30}
+# Floors per precision: the shared table of all VJP backends.
+_FLOORS = FLOORS
 
 # Sources (or targets) per thread of the row (column) launch.
 BLOCK = 32

@@ -432,6 +432,35 @@ def test_resolve_rules_restores_the_forced_backend(monkeypatch) -> None:
     assert K.get_forced_backend() is None
 
 
+def test_one_floor_per_precision_in_all_backends() -> None:
+    """Regression: every VJP backend and the reference copy use the floor table of vortex_vjp.
+
+    Before, the float32 reference copy used the smallest normal float32
+    number (1.2e-38) and the float32 Warp kernels 1e-30, although the
+    docstrings said "same floors".
+    """
+    import re
+    from pathlib import Path
+
+    torch = pytest.importorskip("torch")
+    from ventorum.aero import vortex_vjp as ref
+    from ventorum.aero import vortex_vjp_numba as nb
+    from ventorum.sensitivity.reference import _length_floor
+
+    assert ref.FLOORS == {"float64": 1e-300, "float32": 1e-30}
+    assert nb._FLOOR == ref.FLOORS["float64"]
+    assert _length_floor(torch.float64) == ref.FLOORS["float64"]
+    assert _length_floor(torch.float32) == ref.FLOORS["float32"]
+    # The Cython kernels compute in float64; their floor is a C constant.
+    pyx = Path(ref.__file__).with_name("vortex_vjp_cython.pyx").read_text(encoding="utf-8")
+    m = re.search(r"cdef double _FLOOR = ([0-9.eE+-]+)", pyx)
+    assert m is not None and float(m.group(1)) == ref.FLOORS["float64"]
+    if K.available("warp", "cuda"):
+        from ventorum.gpu import vjp_kernels as wk
+
+        assert wk._FLOORS == ref.FLOORS
+
+
 def test_row_blocks_depend_only_on_the_row_count() -> None:
     """The VJP row partition is a function of the row count only (fixed block size, capped count)."""
     from ventorum.aero import vortex_vjp as ref

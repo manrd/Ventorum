@@ -224,11 +224,11 @@ D2 = n1^2 if before, else n2^2,  F = D2 / (D2 + rc2)
 k = (n1 + n2) F / (4 pi D),  v = k c
 ```
 
-The floor `f` is 1e-300 in float64 arithmetic (all CPU kernels, which compute in
-float64) and 1e-30 in the float32 Warp kernels and in the numpy reference with float32
-arrays. The PyTorch reference copy adds the larger of 1e-300 and the smallest normal
-number of its dtype (`torch.finfo(dtype).tiny`): 1e-300 in float64, and the float32
-floor in float32, where 1e-300 rounds to zero. A pair with `den` at or below
+The floor `f` is one value per precision, shared by all backends and the PyTorch
+reference copy (`FLOORS` in `ventorum/aero/vortex_vjp.py`): 1e-300 in float64 arithmetic
+(all CPU kernels, which compute in float64, also for float32 requests) and 1e-30 in
+float32 (the float32 Warp kernels and the float32 reference copy), where 1e-300 rounds
+to zero. A pair with `den` at or below
 the floor has `v = 0` and zero derivatives. The reverse sweep:
 
 ```text
