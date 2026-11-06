@@ -171,11 +171,7 @@ def assemble_vlm(
         n_eff = n_fs.copy()
         n_eff[:, 0] /= beta
         A = influence_matrix(P_s, n_eff, src, umap.n, tg)
-        rhs = -condition.V_inf * (n_bc @ d)
-        w_rot = rotation_velocity(condition, P, ref_point)
-        if w_rot is not None:
-            rhs = rhs - np.sum(n_bc * w_rot, axis=1)
-        return A, rhs, umap
+        return A, _vlm_rhs(lattice, umap, condition, ref_point), umap
 
     d = freestream_direction(condition.alpha, condition.beta)
     wd = d if wake_dir is None else np.asarray(wake_dir, dtype=float)
@@ -186,11 +182,34 @@ def assemble_vlm(
     n_bc = lattice.normal_bc[umap.unknown_panels]
     cache = lattice.kernel_cache if ground is None else None
     A = influence_matrix(P, n_bc, src, umap.n, tg, cache=cache, cache_key=("vlm", umap.symmetric))
+    return A, _vlm_rhs(lattice, umap, condition, ref_point), umap
+
+
+def _vlm_rhs(
+    lattice: VortexLattice,
+    umap: UnknownMap,
+    condition: FlightCondition,
+    ref_point: np.ndarray | None,
+) -> np.ndarray:
+    """Return the right-hand side of the vortex-lattice system [m/s], shape (umap.n,).
+
+    The value is ``-(V_inf d - Omega x (x - x_ref)) . n`` at the control
+    points of the unknowns (see :func:`assemble_vlm`).
+    """
+    d = freestream_direction(condition.alpha, condition.beta)
+    P = lattice.cp[umap.unknown_panels]
+    n_bc = lattice.normal_bc[umap.unknown_panels]
     rhs = -condition.V_inf * (n_bc @ d)
     w_rot = rotation_velocity(condition, P, ref_point)
     if w_rot is not None:
         rhs = rhs - np.sum(n_bc * w_rot, axis=1)
-    return A, rhs, umap
+    return rhs
+
+
+# Largest stack of dense matrices of one chunk of solve_vlm_batch [bytes]: the
+# same default cap as the chunks of the ground-effect sweep
+# (ventorum.ground_effect.sweep._MAX_BATCH_BYTES, 256 MiB).
+_VLM_BATCH_BYTES = 256 * 1024 ** 2
 
 
 def solve_vlm(
@@ -221,9 +240,11 @@ def solve_vlm_batch(
     """Solve the vortex lattice for K cases on the same lattice.
 
     Each system is assembled as in :func:`assemble_vlm` (with the kernel
-    cache of the lattice out of ground effect), and one call of the dense
-    solver solves all systems. Each case gets the same result, to the last
-    bit, as :func:`solve_vlm` for that case.
+    cache of the lattice out of ground effect). The cases are solved in
+    chunks: one call of the dense solver solves the stacked systems of one
+    chunk, and the stack of one chunk is not larger than
+    ``_VLM_BATCH_BYTES`` (256 MiB). Each case gets the same result, to the
+    last bit, as :func:`solve_vlm` for that case.
 
     Returns
     -------
@@ -237,11 +258,15 @@ def solve_vlm_batch(
     if any(u is not umap for u in umaps):
         return None
     K, n = len(conditions), umap.n
-    A = np.empty((K, n, n))
-    rhs = np.empty((K, n))
-    for k, (cond, ground) in enumerate(zip(conditions, grounds)):
-        A[k], rhs[k], _ = assemble_vlm(lattice, cond, ground, use_symmetry, wake_dirs[k], ref_point)
-    g = np.linalg.solve(A, rhs[:, :, None])[:, :, 0]
+    g = np.empty((K, n))
+    step = max(1, _VLM_BATCH_BYTES // max(1, n * n * 8))
+    for k0 in range(0, K, step):
+        k1 = min(K, k0 + step)
+        A = np.empty((k1 - k0, n, n))
+        rhs = np.empty((k1 - k0, n))
+        for j, k in enumerate(range(k0, k1)):
+            A[j], rhs[j], _ = assemble_vlm(lattice, conditions[k], grounds[k], use_symmetry, wake_dirs[k], ref_point)
+        g[k0:k1] = np.linalg.solve(A, rhs[:, :, None])[:, :, 0]
     return [(g[k][umap.panel_column], SolveInfo(symmetric=umap.symmetric)) for k in range(K)]
 
 

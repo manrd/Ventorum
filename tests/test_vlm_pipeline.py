@@ -248,3 +248,49 @@ def test_probe_lattices_come_from_the_cache():
     assert solver.resolve_n_chord(ac, st, cond, None) == solver.resolve_n_chord(ac, st, cond, None)
     assert estimate_panels(ac, st) == estimate_panels(ac, st) == 16 * 4
     assert len(lattice_cache._cache) == 2   # the probe (one chordwise panel) and the four-panel lattice
+
+
+def _batch_inputs(kw, alphas_deg=(-2.0, 0.0, 3.0, 6.0, 10.0), **cond_kw):
+    """Return a lattice, conditions, grounds and wake directions of a batch of solve_vlm_batch."""
+    ac = vt.Aircraft(surfaces=[_wing(), _tail()])
+    ac.compute_reference_values()
+    rp = ac.moment_reference()
+    st = vt.SolverSettings(solver_type="vlm", n_chord=4)
+    conds = [vt.FlightCondition(V_inf=30.0, alpha=np.radians(a), **kw, **cond_kw) for a in alphas_deg]
+    lattice = make_solver("vlm").build(ac, st, conds[0], None, rp)
+    grounds = [ground_plane_from_condition(lattice, c, rp) if c.h is not None else None for c in conds]
+    wds = np.array([wake_direction(c, g, "freestream") for c, g in zip(conds, grounds)])
+    return lattice, conds, grounds, wds, rp
+
+
+@pytest.mark.parametrize("kw", [{}, {"h": 1.5}])
+def test_solve_vlm_batch_in_chunks_equals_one_stack(kw, monkeypatch):
+    """solve_vlm_batch with a small chunk cap gives the bits of one stack and of solve_vlm.
+
+    Regression: the batch allocated all K matrices at once (K n^2 8 bytes,
+    for example 758 MB for 37 angles at 1600 unknowns). The stack of one
+    chunk is now limited by core._VLM_BATCH_BYTES.
+    """
+    lattice, conds, grounds, wds, rp = _batch_inputs(kw)
+    full = core.solve_vlm_batch(lattice, conds, grounds, True, wds, rp)
+    n = _unknown_count(lattice, conds[0], grounds[0])
+    stacks = []
+    real_solve = np.linalg.solve
+
+    def recording_solve(a, b):
+        stacks.append(np.shape(a))
+        return real_solve(a, b)
+
+    monkeypatch.setattr(core, "_VLM_BATCH_BYTES", 2 * n * n * 8)
+    monkeypatch.setattr(np.linalg, "solve", recording_solve)
+    chunked = core.solve_vlm_batch(lattice, conds, grounds, True, wds, rp)
+    monkeypatch.undo()
+    assert stacks == [(2, n, n), (2, n, n), (1, n, n)]
+    for (g_c, _), (g_f, _), cond, gp, wd in zip(chunked, full, conds, grounds, wds):
+        assert np.array_equal(g_c, g_f)
+        assert np.array_equal(g_c, core.solve_vlm(lattice, cond, gp, True, wd, rp)[0])
+
+
+def _unknown_count(lattice, cond, ground):
+    """Return the number of unknowns of a symmetric vortex-lattice case."""
+    return core._unknown_map(lattice, cond, ground, True).n
