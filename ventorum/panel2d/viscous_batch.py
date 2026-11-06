@@ -312,6 +312,7 @@ def solve_viscous_batch(cases, *, backend: str = "torch", device=None, dtype=Non
         note = vs.warn_long_wake(p["case"].wake_length, "solve_viscous_batch")
         vs.add_note(p["rows"].values(), note)
         vs.warn_wake_sawtooth(p["rows"].values(), "solve_viscous_batch")
+        vs.warn_transition_rule(p["rows"].values(), "solve_viscous_batch")
         for i in p["idx"]:
             r = p["rows"][float(parsed[i].alpha)]
             out[i] = vs.ViscousResult(**{f: r[f] for f in vs._FIELDS})

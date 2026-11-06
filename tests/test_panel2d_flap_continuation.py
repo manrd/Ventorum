@@ -44,8 +44,8 @@ def test_zero_deflection_loads_are_continuous(treatment, alpha):
     """NACA 2412, 160 panels, Re 1e6: Cl, Cd, Cm at 0 deg equal the mean of +-1e-4 deg within the tolerance.
 
     The convergence tolerance of the solve is 1e-6 (largest absolute residual). In these cases the
-    transition intervals of the three solutions are the same. A case where the 0 deg step keeps a
-    frozen transition interval can jump (see docs/theory/panel2d_viscous.md).
+    transition intervals of the three solutions are the same (see the transition rule in
+    docs/theory/panel2d_viscous.md).
     """
     base = airfoil("2412").repanel(n_panels=160)
     res = {d: solve_viscous_flapped(base, alpha, 1e6, x_hinge=0.75, deflection_deg=d, hinge_treatment=treatment)

@@ -77,6 +77,7 @@ from ventorum.utils.parallel import blas_single_thread
 __all__ = ["ViscousResult", "StopRules", "solve_viscous", "solve_viscous_flapped", "trace_wake_streamline", "prepare_case", "warm_state",
            "finish_angle", "row_from_result", "sweep_order", "check_chord_ref", "resolve_body", "wake_length_note",
            "warn_long_wake", "wake_sawtooth_index", "wake_sawtooth_note", "warn_wake_sawtooth",
+           "transition_rule_note", "warn_transition_rule",
            "WAKE_LENGTH_LIMIT", "WAKE_SAWTOOTH_LIMIT", "WAKE_SAWTOOTH_STATIONS", "WORK_BUDGET", "COLD_START_BUDGET", "STEP_BUDGET"]
 
 #: Number of times the angle step of a warm start may be halved.
@@ -536,7 +537,6 @@ def warm_state(setup: vii.CaseSetup, prev_setup: vii.CaseSetup, prev: vii.CaseSt
     """
     _, ds_prev, _ = vii.host_edge(prev_setup, prev)
     st = prev.copy()
-    st.frozen = [False, False]
     xd = st.x.copy()
     xd[:, 1] = ds_prev
     ue_est, _, _ = vii.host_edge(setup, prev)
@@ -796,6 +796,7 @@ def solve_viscous(
         warnings.warn(f"solve_viscous: alpha = {r['alpha']:g} deg did not converge: {r['reason']}",
                       UserWarning, stacklevel=2)
     warn_wake_sawtooth(rows, "solve_viscous")
+    warn_transition_rule(rows, "solve_viscous")
     if is_scalar:
         r = rows[0]
         return ViscousResult(**{k: r[k] for k in _FIELDS})
@@ -959,6 +960,55 @@ def warn_wake_sawtooth(rows, solver: str, stacklevel: int = 3):
         if r.get("converged") and "near-wake sawtooth" in r.get("reason", ""):
             warnings.warn(f"{solver}: alpha = {r['alpha']:g} deg: {wake_sawtooth_note(r)}.", UserWarning,
                           stacklevel=stacklevel)
+
+
+def transition_rule_note(fractions) -> str | None:
+    """Return the note of a converged state whose transition point lies outside its interval, or None.
+
+    The solve converges only when the transition rule moves no interval, so
+    the transition fraction w of each side (see
+    :func:`ventorum.panel2d.vii.case_outputs`) lies in [0, 1] to within the
+    band :data:`ventorum.panel2d.vii.EPS_W`. This check makes sure that a
+    state that breaks this condition is never returned without a sign.
+
+    Parameters
+    ----------
+    fractions : tuple of float
+        Unclipped transition fraction per side (upper, lower) [-]; NaN when
+        the side has no transition.
+
+    Returns
+    -------
+    str or None
+        The reason text when a fraction is outside [-EPS_W, 1 + EPS_W].
+    """
+    bad = [(name, w) for name, w in zip(("upper", "lower"), fractions)
+           if np.isfinite(w) and not -vii.EPS_W <= w <= 1.0 + vii.EPS_W]
+    if not bad:
+        return None
+    text = ", ".join(f"{name} side w = {w:.4g}" for name, w in bad)
+    return (f"transition rule: the transition point lies outside its interval ({text}, it must be in [0, 1]): "
+            "the transition position and the loads of this state are not consistent with the e^N rule")
+
+
+def warn_transition_rule(rows, solver: str, stacklevel: int = 3):
+    """Give a UserWarning for each converged row with a transition rule note.
+
+    Parameters
+    ----------
+    rows : iterable of dict
+        Result rows (see :func:`row_from_result`).
+    solver : str
+        Name of the calling solver (for the message).
+    stacklevel : int
+        Stack level of the warning.
+    """
+    for r in rows:
+        if r.get("converged"):
+            for part in r.get("reason", "").split("; "):
+                if part.startswith("transition rule:"):
+                    warnings.warn(f"{solver}: alpha = {r['alpha']:g} deg: {part}.", UserWarning,
+                                  stacklevel=stacklevel)
 
 
 def add_note(rows, note: str | None):
@@ -1273,9 +1323,9 @@ def row_from_result(setup, res, alpha) -> dict:
         "ue": o["ue"],
         "wake": {"x": o["wake_x"], "theta": o["wake_theta"], "H": o["wake_H"], "ue": o["wake_ue"]},
     }
-    note = wake_sawtooth_note(row)
-    if note is not None:
-        row["reason"] = f"{row['reason']}; {note}" if row["reason"] else note
+    for note in (wake_sawtooth_note(row), transition_rule_note(o["transition_fraction"])):
+        if note is not None:
+            row["reason"] = f"{row['reason']}; {note}" if row["reason"] else note
     return row
 
 
@@ -1661,6 +1711,7 @@ def solve_viscous_flapped(
         warnings.warn(f"solve_viscous_flapped: alpha = {r['alpha']:g} deg did not converge: {r['reason']}",
                       UserWarning, stacklevel=2)
     warn_wake_sawtooth(rows, "solve_viscous_flapped")
+    warn_transition_rule(rows, "solve_viscous_flapped")
     if is_scalar:
         r = rows[0]
         return ViscousResult(**{k: r[k] for k in _FIELDS}, details=r.get("details", {}))

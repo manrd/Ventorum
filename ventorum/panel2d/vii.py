@@ -98,11 +98,22 @@ STAGNATION_DROP = 0.1
 OMEGA_STEP_RESIDUAL = 0.1
 #: Iterations without halving the residual after which omega is doubled anyway (path only).
 OMEGA_STALL = 4
-#: Largest residual at which the transition intervals are updated (path only) [-].
+#: Largest residual at which the transition intervals are updated when TRANSITION_EVERY_ITERATION is
+#: False [-].
 STRUCTURE_RESIDUAL = 1e-3
 #: Iterations without halving the residual after which the structure is updated anyway (path only).
 STALL_ITERATIONS = 8
+#: Update the transition intervals at every Newton iteration (True), or only below STRUCTURE_RESIDUAL
+#: or after a stall (False).
 TRANSITION_EVERY_ITERATION = True
+#: Tolerance band of the transition rule, as a fraction of an interval [-]. The current interval is
+#: kept while its transition fraction w is at most 1 + EPS_W, and an upstream interval is taken only
+#: when its fraction is at most 1 - EPS_W. This decides a transition point that lies on a station to
+#: within the solve tolerance: there the two intervals give the same equations and the same loads. A
+#: shift of one interval changes Cl by about 1e-3 and Cd by about 1e-2 (relative), so the band
+#: changes the loads by less than 1e-7 and 1e-6. The converged w is uncertain by about 1e-5 (the
+#: solve tolerance divided by the N increase of the interval); the band is ten times that.
+EPS_W = 1e-4
 #: Newton step factor below which a Levenberg-Marquardt step is tried instead (path only) [-].
 LM_SWITCH = 1e-2
 #: Largest number of damping values (trials, one linear solve each) of one Levenberg-Marquardt step [-].
@@ -179,9 +190,6 @@ class CaseState:
         Position (in the side list) of the last laminar station, per side.
     panel : int
         Panel that holds the stagnation point (gamma changes sign on it).
-    frozen : list of bool
-        Sides whose transition interval no longer moves (see
-        :func:`newton_solve`).
     """
 
     x: np.ndarray
@@ -189,11 +197,10 @@ class CaseState:
     drop: int = -1
     itr: list = field(default_factory=lambda: [0, 0])
     panel: int = -1
-    frozen: list = field(default_factory=lambda: [False, False])
 
     def copy(self):
         """Return a deep copy."""
-        return CaseState(self.x.copy(), self.i_s, self.drop, list(self.itr), self.panel, list(self.frozen))
+        return CaseState(self.x.copy(), self.i_s, self.drop, list(self.itr), self.panel)
 
 
 @dataclass
@@ -1014,7 +1021,7 @@ def _update_structure(setup: CaseSetup, st: CaseState, omega: float = 1.0, trans
         changed = True
     up, lo = _sides(setup, st)
     for side, nodes_idx in enumerate((up, lo)):
-        if st.frozen[side] or not transition:
+        if not transition:
             continue
         m = len(nodes_idx)
         itr = st.itr[side]
@@ -1025,7 +1032,9 @@ def _update_structure(setup: CaseSetup, st: CaseState, omega: float = 1.0, trans
         jf, _ = _forced_interval(setup, side, nodes_idx)
         new = m - 1
         for j in range(min(itr + 1, m - 1)):
-            if xs[j, 2] + dxi[j] * rate[j] >= setup.ncrit or (jf is not None and j == jf):
+            # The band EPS_W keeps the current interval at a tie (see EPS_W).
+            band = (-EPS_W if j == itr else EPS_W) * dxi[j] * rate[j]
+            if xs[j, 2] + dxi[j] * rate[j] >= setup.ncrit + band or (jf is not None and j == jf):
                 new = j
                 break
         if new == m - 1 and itr < m - 1:
@@ -1127,44 +1136,6 @@ def _lm_step(be, setup, st, x0, J, R, r0, ui, D, S, mask, mu, trials=LM_TRIALS):
                 return xt, max(mu * 0.1, 1e-12), n_solves
         mu *= 10.0
     return None, 1e-3, n_solves
-
-
-def _freeze_cycles(hist, setup: CaseSetup, st: CaseState):
-    """Stop a transition interval that alternates between two positions.
-
-    The converged states of two adjacent transition intervals can each
-    place the transition point in the other interval (the laminar and the
-    turbulent closures differ at the station between them). The positions
-    are updated only near convergence (see :func:`newton_solve`); when the
-    position of a side returns to its value of two updates before,
-    the downstream position is kept for the rest of the solve; the
-    transition point then lies at the node between the two intervals,
-    within one interval of the point where N = ncrit.
-    """
-    hist.append((st.i_s, st.drop, tuple(st.itr)))
-    moved = False
-    if len(hist) < 3:
-        return moved
-    a, b, c = hist[-3], hist[-2], hist[-1]
-    if a[:2] != c[:2] or b[:2] != c[:2]:
-        return moved
-    for side in (0, 1):
-        if not st.frozen[side] and a[2][side] == c[2][side] != b[2][side]:
-            keep = max(b[2][side], c[2][side])
-            if keep != st.itr[side]:
-                up, lo = _sides(setup, st)
-                nodes_idx = (up, lo)[side]
-                ue, ds, _ = host_edge(setup, st)
-                itr = st.itr[side]
-                dxi, _ = _side_geometry(setup, nodes_idx)
-                for j in range(itr, keep):
-                    ga, gb = nodes_idx[j], nodes_idx[j + 1]
-                    st.x[gb, 2] = st.x[ga, 2] + _n_increase(setup, st.x[ga], st.x[gb], ds[ga], ds[gb], ue[ga],
-                                                            ue[gb], dxi[j])
-                st.itr[side] = keep
-                moved = True
-            st.frozen[side] = True
-    return moved
 
 
 class _EarlyStop(NamedTuple):
@@ -1295,7 +1266,7 @@ def newton_solve(setups, states, *, tol=1e-6, max_iter=50, xp=np, device=None, d
     structure: the following iterations would repeat the last one exactly.
     With ``retry_window``, a residual-window stop retries once from that state
     with only the window rule off. It retains the coupling factor,
-    damping and structure history. The retry uses the remaining iterations
+    damping and structure. The retry uses the remaining iterations
     of this stage, within ``max_iter``. Other stops do not start a retry.
     The reason names the first stop and the outcome of the retry.
 
@@ -1318,7 +1289,6 @@ def newton_solve(setups, states, *, tol=1e-6, max_iter=50, xp=np, device=None, d
     changed_prev = np.ones(nb, dtype=bool)
     active = list(range(nb))
     mats = {}
-    history = [[] for _ in range(nb)]
     best_res = np.full(nb, np.inf)
     best_it = np.zeros(nb, dtype=int)
     lm_mu = np.full(nb, 1e-3)
@@ -1419,15 +1389,14 @@ def newton_solve(setups, states, *, tol=1e-6, max_iter=50, xp=np, device=None, d
                 gam0 = base_b[:, :nn] + om[:, None] * (sens_b[:, :nn] @ (Bm @ mfull[:, :, None]))[:, :, 0]
                 pre_ue, pre_ds, pre_gam = be.host(UE0), be.host(ds0), be.host(gam0)
                 for k, i in enumerate(active):
-                    # The transition intervals move only when the equations of the
-                    # current structure are nearly solved (or the iteration stalls),
-                    # so that each move compares converged states.
+                    # The transition intervals follow the iterate. A cycle of an interval
+                    # far from convergence is a transient of the iteration; the solve
+                    # converges only when the rule moves nothing (see the convergence
+                    # test below), so the converged state satisfies the rule.
                     stalled = it - best_it[i] > STALL_ITERATIONS
                     allow = TRANSITION_EVERY_ITERATION or last_res[i] < STRUCTURE_RESIDUAL or stalled
                     changed[k] = _update_structure(setups[i], states[i], omega[i], transition=allow,
                                                    pre=(pre_ue[k], pre_ds[k], pre_gam[k]))
-                    if allow and omega[i] == 1.0:
-                        changed[k] = _freeze_cycles(history[i], setups[i], states[i]) or changed[k]
                     if changed[k]:
                         best_it[i] = it
                         best_res[i] = np.inf
@@ -1453,8 +1422,8 @@ def newton_solve(setups, states, *, tol=1e-6, max_iter=50, xp=np, device=None, d
                 # Stop-rule bookkeeping: the stagnation window starts again when
                 # omega changes, and at omega = 1 also when the structure changes
                 # (a different discrete problem). Below omega = 1 the transition
-                # intervals are not frozen and can alternate without end, so a
-                # structure change does not restart the window there.
+                # intervals can alternate without end, so a structure change does not
+                # restart the window there.
                 if omega[i] != level_omega[i] or (changed[k] and omega[i] == 1.0):
                     level_min[i] = []
                     level_omega[i] = omega[i]
@@ -1610,8 +1579,12 @@ def case_outputs(setup: CaseSetup, st: CaseState, ue: np.ndarray, x_ref=None) ->
     -------
     dict
         Cl, Cl_pressure, Cd (Squire-Young at the wake end), Cd_friction,
-        Cd_pressure, Cm, transition x/c per side, separation flags (Cf < 0
-        at a station of the side) and node and wake distributions.
+        Cd_pressure, Cm, transition x/c per side, the transition fraction
+        per side (``transition_fraction``: the unclipped position of the
+        transition point in its interval, 0 at the upstream station and 1 at
+        the downstream one; NaN when the side has no transition), separation
+        flags (Cf < 0 at a station of the side) and node and wake
+        distributions.
     """
     from ventorum.panel2d.solver import _loads
 
@@ -1634,6 +1607,7 @@ def case_outputs(setup: CaseSetup, st: CaseState, ue: np.ndarray, x_ref=None) ->
     ctau = np.full(n, np.nan)
     amp = np.full(n, np.nan)
     xtr = [1.0, 1.0]
+    wtr = [np.nan, np.nan]
     sep = [False, False]
     cdf = 0.0
     if st.drop >= 0:
@@ -1659,6 +1633,7 @@ def case_outputs(setup: CaseSetup, st: CaseState, ue: np.ndarray, x_ref=None) ->
             jf, wfv = _forced_interval(setup, side, g)
             if jf is not None and jf == itr:
                 w = min(w, wfv)
+            wtr[side] = float(w)
             w = min(max(w, 0.0), 1.0)
             xtr[side] = float(xoc[itr] + w * (xoc[itr + 1] - xoc[itr]))
         tau = cf[g] * ue[g] ** 2
@@ -1679,6 +1654,7 @@ def case_outputs(setup: CaseSetup, st: CaseState, ue: np.ndarray, x_ref=None) ->
         "Cd_pressure": float(cdp[0]),
         "Cm": float(cm[0]),
         "xtr": (xtr[0], xtr[1]),
+        "transition_fraction": (wtr[0], wtr[1]),
         "separated": (sep[0], sep[1]),
         "Cp": cp[0],
         "H": H,
