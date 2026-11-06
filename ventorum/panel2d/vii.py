@@ -1306,8 +1306,14 @@ def newton_solve(setups, states, *, tol=1e-6, max_iter=50, xp=np, device=None, d
         for i in idx:
             if i not in sens:
                 sens[i] = (be.arr(setups[i].sens), be.arr(setups[i].base))
-            if refresh or i not in mats:
-                mats[i] = _p_and_b(setups[i], states[i])
+            # P and B depend on the stagnation structure only. Rebuild them when
+            # that structure differs from the one they were built for, also
+            # when the caller does not ask for a refresh: a structure update
+            # (for example the last pass of the omega loop) can move it after
+            # the last refresh.
+            key = (states[i].i_s, states[i].drop)
+            if refresh or i not in mats or mats[i][2] != key:
+                mats[i] = (*_p_and_b(setups[i], states[i]), key)
         P = be.arr(np.stack([mats[i][0] for i in idx]))
         B = be.arr(np.stack([mats[i][1] for i in idx]))
         sens_b = be.stack([sens[i][0] for i in idx])

@@ -8,6 +8,7 @@ equations below 1e-6). The sweeps take more than 5 s and are marked slow.
 from __future__ import annotations
 
 import os
+import sys
 import warnings
 
 import numpy as np
@@ -662,3 +663,63 @@ def test_viscous_reference_inputs_are_checked():
             solve_viscous(c, 0.0, 1e6, moment_ref=bad)
     with pytest.raises(ValueError, match="chord_ref"):
         solve_viscous(airfoil("0012", n_points=61), 0.0, 1e6, chord_ref=-1.0)
+
+
+def _setup_and_state(code="4412", alpha=3.0, n=80, closed_te=True):
+    """Return the CaseSetup and the first estimate of one case (cheap, no Newton solve)."""
+    from ventorum.panel2d import vii
+    from ventorum.panel2d.viscous import prepare_case
+
+    body = airfoil(code, n_points=n + 1, closed_te=closed_te).coords
+    setup = prepare_case(body, alpha, 1e6, ncrit=9.0, xtr=(1.0, 1.0), height=None, height_reference="pivot",
+                         wake_length=1.0, n_wake=30)
+    return setup, vii.initial_state(setup)
+
+
+def test_coupling_matrices_follow_a_structure_moved_by_the_last_omega_pass(monkeypatch):
+    """Regression: a structure moved by the last of the three omega passes gets new coupling matrices.
+
+    The omega passes refresh P and B before they move the structure. When the third pass still moved it
+    and the structure update of the iteration changed nothing, the next evaluation used the P and B of
+    the former structure with the station lists of the new one. Here the edge velocities of the omega
+    passes are made negative and each pass moves the stagnation node, so all three passes move it; every
+    Jacobian evaluation must use P and B of the current structure.
+    """
+    from ventorum.panel2d import vii
+
+    setup, st = _setup_and_state(alpha=2.0)
+    armed = {"on": False, "moves": 0}
+    edge, update, residual = vii._edge, vii._update_structure, vii._residual_m
+
+    def fake_edge(be, ue_inv, D, X, S):
+        ue, A = edge(be, ue_inv, D, X, S)
+        if armed["on"] and sys._getframe(1).f_code.co_name == "edge":
+            return -ue, A
+        return ue, A
+
+    def fake_update(su, s, omega=1.0, transition=True, pre=None):
+        if not armed["on"]:
+            return update(su, s, omega, transition=transition, pre=pre)
+        if pre is None and not transition:
+            s.i_s += 1 if armed["moves"] % 2 == 0 else -1
+            armed["moves"] += 1
+            return True
+        armed["on"] = False
+        return False
+
+    def check(be, lists, X, ue_inv, D, re_b, S, drop_b, drop_g, need_jac):
+        if need_jac:
+            P, _ = vii._p_and_b(setup, st)
+            assert np.array_equal(be.host(ue_inv)[0], P @ setup.base), "stale coupling matrices"
+            armed["on"] = armed["moves"] == 0
+        return residual(be, lists, X, ue_inv, D, re_b, S, drop_b, drop_g, need_jac)
+
+    monkeypatch.setattr(vii, "OMEGA_STEP_RESIDUAL", np.inf)
+    monkeypatch.setattr(vii, "_edge", fake_edge)
+    monkeypatch.setattr(vii, "_update_structure", fake_update)
+    monkeypatch.setattr(vii, "_residual_m", check)
+    i_s = st.i_s
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        vii.newton_solve([setup], [st], max_iter=2, omega0=[0.25], stall_window=0)
+    assert armed["moves"] == 3 and st.i_s == i_s + 1
