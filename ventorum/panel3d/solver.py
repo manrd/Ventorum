@@ -201,6 +201,10 @@ class PanelResult:
         Final max |delta Cp| at the trailing-edge pairs [-].
     kutta_converged : bool
         True when the pressure residual falls below tolerance.
+    kutta_lstsq_steps : int
+        Number of pressure Kutta Newton steps that used the least-squares
+        solution because the Jacobian was singular. Zero for the Morino
+        option.
     trust_note : str
         Note on the trust of the result. Empty when converged.
     mu_w : numpy.ndarray or None
@@ -225,6 +229,7 @@ class PanelResult:
     kutta_converged: bool = True
     trust_note: str = ""
     mu_w: np.ndarray | None = None
+    kutta_lstsq_steps: int = 0
 
 
 @dataclass
@@ -2112,6 +2117,7 @@ class PanelSolver:
             kutta_iters=int(kres.n_iters),
             kutta_residual=float(kres.residual),
             kutta_converged=bool(kres.converged),
+            kutta_lstsq_steps=int(kres.lstsq_steps),
             trust_note=trust_note,
             mu_w=np.array(gamma_full[:n_strips], dtype=float, copy=True),
         )

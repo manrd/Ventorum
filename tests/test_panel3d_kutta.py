@@ -321,3 +321,32 @@ def test_pressure_sensitivity_cached_per_configuration_and_symmetry_case():
             assert abs(getattr(res, name) - getattr(ref, name)) < 1e-12, name
         assert np.max(np.abs(res.cp - ref.cp)) < 1e-12
         assert np.max(np.abs(res.mu_w - ref.mu_w)) < 1e-12
+
+
+def test_singular_newton_jacobian_counts_the_least_squares_steps():
+    """Verify a singular Newton Jacobian is counted in the result.
+
+    Two unknowns with the same sensitivity column and the same
+    trailing-edge pair make the Jacobian singular. The iteration takes the
+    least-squares step and the result counts it.
+    """
+    from ventorum.panel3d.kutta import solve_pressure_kutta
+    from ventorum.panel3d.solver import _condition_arrays
+
+    surf = _rectangular_wing_surface()
+    mesh = mesh_lifting_surface(surf, _naca0012_coordinates(51), n_chord=8, n_span=6)
+    cond = FlightCondition(V_inf=50.0, alpha=np.radians(4.0))
+    solver = PanelSolver(mesh, far_ratio=np.inf, kutta="pressure")
+    res = solver.solve(cond)
+    assert res.kutta_lstsq_steps == 0
+    cfg = next(iter(solver._configs.values()))
+    _, z_full, up, lo, _ = cfg.pressure_wake["sym"]
+    coeffs = _condition_arrays([cond])[0][0]
+    mu_full0 = cfg.unit_mu @ coeffs
+    onset = solver._condition_velocity(cond, solver._full_geom.centroid)
+    kres = solve_pressure_kutta(
+        mu_full0, z_full[:, [0, 0]], solver._grad_op, up[[0, 0]], lo[[0, 0]],
+        solver._full_geom.normal, onset, float(cond.V_inf),
+    )
+    assert kres.lstsq_steps >= 1
+    assert kres.lstsq_steps <= kres.n_iters
