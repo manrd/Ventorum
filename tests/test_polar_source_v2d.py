@@ -77,6 +77,30 @@ def fake_solver(monkeypatch):
     return calls
 
 
+def test_flagged_converged_angles_are_dropped(monkeypatch):
+    """Regression: a converged angle with a near-wake sawtooth note (a probable false branch) entered the polar.
+
+    An angle with a transition rule note is dropped in the same way.
+    """
+    import ventorum.aero.polar_source_v2d as module
+
+    def fake_solve(bodies, alpha_deg, Re, **kwargs):
+        res = _fake_viscous_result(alpha_deg, kwargs.get("height"))
+        res.reason = ["converged",
+                      "converged; near-wake sawtooth: the wake momentum thickness alternates behind the trailing edge",
+                      "converged; transition rule: the transition point lies outside its interval",
+                      "converged"]
+        return res
+
+    monkeypatch.setattr(module, "solve_viscous", fake_solve)
+    source = Ventorum2DPolarSource(cache=False)
+    polar = source.polar("naca 0012", 1e6, [0.0, 2.0, 4.0, 6.0])
+    np.testing.assert_allclose(np.degrees(polar.alpha), [0.0, 6.0])
+    assert source.last_dropped == 2
+    assert "2 of 4 alpha dropped" in polar.name
+    assert polar.gap_mask is not None
+
+
 def test_protocol_keyword_call_works(fake_solver):
     """Regression: polar(*args) refused section=, Re= and alphas_deg= keywords."""
     source = Ventorum2DPolarSource(cache=False)

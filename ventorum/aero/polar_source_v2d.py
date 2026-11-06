@@ -59,6 +59,12 @@ from ventorum.core.datatypes import TabulatedAirfoil
 from ventorum.panel2d.solver import check_point
 from ventorum.panel2d.viscous import check_chord_ref, solve_viscous
 
+#: Start texts of the notes of :func:`ventorum.panel2d.viscous.row_from_result` that
+#: mark a converged angle whose loads must not be used: a near-wake sawtooth (a
+#: probable false branch with too little circulation) and a transition point outside
+#: its interval. The polar drops such an angle like a non-converged one.
+_UNUSABLE_NOTES = ("near-wake sawtooth", "transition rule:")
+
 __all__ = ["Ventorum2DPolarSource", "gap_mask", "solver_fingerprint", "solver_revision"]
 
 #: Packages whose source files form the solver fingerprint.
@@ -374,7 +380,9 @@ class Ventorum2DPolarSource:
         -------
         TabulatedAirfoil
             The section polar over the converged requested angles. Angles
-            are in radians. Non-converged angles are dropped; the polar
+            are in radians. Non-converged angles are dropped, and also
+            converged angles whose reason holds a near-wake sawtooth note or
+            a transition rule note (their loads must not be used); the polar
             name and :attr:`last_dropped` give their number, and the gap
             mask of the polar marks each table interval that bridges a
             dropped angle (a lookup there gives a warning, once per
@@ -487,6 +495,11 @@ class Ventorum2DPolarSource:
             None if h_val is None else np.atleast_1d(np.asarray(res.Cl_circulation, dtype=float))
         )
         res_conv = np.atleast_1d(np.asarray(res.converged, dtype=bool))
+        reasons = getattr(res, "reason", None)
+        if reasons is None or isinstance(reasons, str):
+            reasons = [reasons or ""] * res_conv.size
+        res_usable = res_conv & np.array([not any(note in r for note in _UNUSABLE_NOTES) for r in reasons],
+                                         dtype=bool)
 
         kept_alphas: list[float] = []
         kept_cls: list[float] = []
@@ -498,7 +511,7 @@ class Ventorum2DPolarSource:
             matches = np.flatnonzero(np.isclose(res_alphas, a, atol=1e-6))
             if matches.size > 0:
                 idx = int(matches[0])
-                if res_conv[idx]:
+                if res_usable[idx]:
                     kept_alphas.append(float(res_alphas[idx]))
                     kept_cls.append(float(res_cls[idx]))
                     kept_cds.append(float(res_cds[idx]))
