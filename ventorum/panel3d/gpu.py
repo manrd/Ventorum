@@ -860,7 +860,8 @@ def _evaluate_conditions_on_device(
     Unit fields have the units of :func:`evaluate_condition_on_device`.
     Coeffs has shape (K, 6), with translations in m/s and rates in rad/s.
     Speed and rho have shape (K,) in m/s and kg/m^3. Geometry holds cached
-    full-mesh normals [-], areas [m^2], relative centroids [m] and the host
+    full-mesh normals [-], areas [m^2], collocation points and area centroids
+    relative to the reference point [m] ("arm", "moment_arm") and the host
     unit doublets [m^2/s per unit onset] as device tensors. Trefftz holds
     velocity factors [1/m], strip normals [-], lengths [m], panel indices
     and the reference area [m^2], or None for a body without a wake.
@@ -929,7 +930,8 @@ def _evaluate_conditions_on_device(
     q = 0.5 * densities * speeds**2
     force = -cp.to(torch.float64)[..., None] * geometry["area"][:, None]
     force = force * geometry["normal"] * q[:, None, None]
-    moment = torch.linalg.cross(geometry["arm"][None, :, :], force, dim=-1)
+    # The force of a constant Cp acts at the area centroid of the panel.
+    moment = torch.linalg.cross(geometry["moment_arm"][None, :, :], force, dim=-1)
     cdi = torch.zeros_like(speeds)
     if trefftz is not None:
         factors, up, lo, s_ref, ground = trefftz

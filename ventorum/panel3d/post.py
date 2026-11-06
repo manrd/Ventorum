@@ -1483,7 +1483,8 @@ def integrate_forces_and_moments(
     normals : numpy.ndarray
         Panel outward unit normals with shape (Np, 3).
     centroids : numpy.ndarray
-        Panel centroid coordinates with shape (Np, 3) in m.
+        Points of action of the panel forces with shape (Np, 3) in m. The
+        force of a constant Cp acts at the area centroid of the panel.
     condition : FlightCondition
         Flight condition with alpha [rad], beta [rad], V_inf [m/s], rho [kg/m^3].
     S_ref : float
@@ -1641,7 +1642,8 @@ def _integrate_batch(cp, geom, speed, rho, lift, drag, S_ref, b_ref, c_ref, ref_
     """
     q = 0.5 * rho * speed**2
     force = -cp[..., None] * geom.area[:, None] * geom.normal * q[:, None, None]
-    moment = np.cross(geom.centroid - ref_point, force)
+    # The force of a constant Cp acts at the area centroid of the panel.
+    moment = np.cross(geom.far_centre - ref_point, force)
     return _force_coefficients_batch(
         np.sum(force, axis=1), np.sum(moment, axis=1), speed, rho, lift, drag,
         S_ref, b_ref, c_ref,

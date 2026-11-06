@@ -387,3 +387,37 @@ def test_factory_auto_backend_uses_the_gpu_selection() -> None:
     assert disp["backend"] == "gpu" and disp["device"] == "gpu" and disp["dtype"] == "float64"
     assert disp["factorization_count"] == 1
     _assert_close(res_gpu.totals.CL, res_cpu.totals.CL, 1e-10, "factory gpu CL")
+
+
+@pytest.mark.gpu
+def test_gpu_float64_moment_parity_tapered_swept_wing() -> None:
+    """Gpu float64 moments match numpy to 1e-10 on skewed panels.
+
+    On a tapered and swept wing the area centroid of a panel (the moment
+    arm) differs from its corner average (the collocation point), so this
+    case checks that both backends use the same moment arm.
+    """
+    torch = _need_cuda()
+    surf = LiftingSurface(
+        name="Wing",
+        semi_span=3.0,
+        sections=[
+            WingSection(y_frac=0.0, chord=1.0, x_le=0.0),
+            WingSection(y_frac=1.0, chord=0.4, x_le=3.0 * np.tan(np.radians(30.0))),
+        ],
+        is_symmetric=True,
+    )
+    mesh = mesh_lifting_surface(surf, _naca0012_coordinates(51), n_chord=6, n_span=6, half=True)
+    conds = [
+        FlightCondition(V_inf=50.0, alpha=np.radians(4.0)),
+        FlightCondition(V_inf=50.0, alpha=np.radians(4.0), q=0.2),
+    ]
+    rp = np.array([0.3, 0.0, 0.0])
+    ref = PanelSolver(mesh, far_ratio=np.inf, backend="numpy", ref_point=rp).solve_conditions(conds)
+    new = PanelSolver(
+        mesh, far_ratio=np.inf, backend="gpu", dtype=torch.float64, ref_point=rp,
+    ).solve_conditions(conds)
+    for res_new, res_ref in zip(new, ref):
+        _check_solver_parity(res_new, res_ref, 1e-10, "gpu tapered swept")
+        for name in ("Cl", "Cm", "Cn"):
+            _assert_close(getattr(res_new, name), getattr(res_ref, name), 1e-10, name)
