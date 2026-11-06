@@ -557,3 +557,70 @@ def test_flap_against_glauert_on_the_original_chord():
     assert via_shape.Cl == res.Cl
     assert abs(via_shape.Cl / thickness_factor / cl_glauert - 1.0) < 0.01
     assert abs(via_shape.Cm / thickness_factor / cm_glauert - 1.0) < 0.01
+
+
+def _dense_panel_to_node(a1, a2, layout):
+    """Return the influence per unit nodal gamma by the dense incidence products (reference form)."""
+    xp = torch if isinstance(a1, torch.Tensor) else np
+    p1, p2 = sv._incidence(xp, layout, a1)
+    return a1 @ p1 + a2 @ p2
+
+
+def _incidence_sections():
+    """Return section sets with sharp and blunt trailing edges, one and two bodies."""
+    sharp = karman_trefftz_airfoil((-0.07, 0.04), 10.0, n_points=61)
+    blunt = airfoil("4412", n_points=81, closed_te=False).coords
+    flap = 0.3 * airfoil("0012", n_points=41, closed_te=False).coords + np.array([1.05, -0.1])
+    return {"sharp": [sharp], "blunt": [blunt], "two_bodies": [blunt, flap]}
+
+
+@pytest.mark.parametrize("case", ["sharp", "blunt", "two_bodies"])
+def test_panel_to_node_equals_dense_incidence(case):
+    """The slice-add incidence equals the dense incidence products (numpy and torch)."""
+    bodies = _incidence_sections()[case]
+    layout = sv.panel_layout(bodies)
+    rng = np.random.default_rng(3)
+    a1 = rng.normal(size=(2, 7, layout.n_panels))
+    a2 = rng.normal(size=(2, 7, layout.n_panels))
+    ref = _dense_panel_to_node(a1, a2, layout)
+    assert np.array_equal(sv.panel_to_node(a1, a2, layout), ref)
+    t1, t2 = torch.as_tensor(a1), torch.as_tensor(a2)
+    out_t = sv.panel_to_node(t1, t2, layout)
+    assert np.allclose(out_t.numpy(), _dense_panel_to_node(t1, t2, layout).numpy(), rtol=0.0, atol=1e-15)
+
+
+@pytest.mark.parametrize("case", ["sharp", "blunt", "two_bodies"])
+@pytest.mark.parametrize("ground", [False, True])
+def test_influence_matrices_match_the_dense_incidence(monkeypatch, case, ground):
+    """System matrix, solution and coupling velocities are those of the dense incidence to round-off."""
+    from ventorum.panel2d import coupling as cp
+
+    bodies = _incidence_sections()[case]
+    if ground:
+        bodies = sv.place_in_ground_effect(bodies, 4.0, 0.3, "pivot", (0.25, 0.0))
+    layout = sv.panel_layout(bodies)
+    nodes = np.concatenate(bodies)
+    field = nodes[::3] + np.array([0.01, 0.02])
+    wake = np.stack([np.linspace(1.0, 2.0, 6), np.full(6, 0.05 if not ground else 0.4)], 1)
+
+    def run():
+        out = [sv.vortex_stream_matrix(nodes, layout, ground=ground),
+               sv.vortex_stream_matrix(nodes, layout, field=field, ground=ground),
+               sv.system_matrix(nodes, layout, ground=ground)]
+        if len(bodies) == 1:
+            out += list(cp._velocity_matrices(field, nodes, layout, wake, ground))
+        return out
+
+    new = run()
+    monkeypatch.setattr(sv, "panel_to_node", _dense_panel_to_node)
+    old = run()
+    for a, b in zip(new, old):
+        scale = np.max(np.abs(b))
+        assert np.max(np.abs(a - b)) <= 1e-14 * scale
+    raw = _incidence_sections()[case]
+    height = 0.3 if ground else None
+    ref = solve_inviscid(raw, 4.0, height=height)
+    monkeypatch.undo()
+    res = solve_inviscid(raw, 4.0, height=height)
+    assert abs(res.Cl - ref.Cl) <= 1e-12 * max(1.0, abs(ref.Cl))
+    assert abs(res.Cm - ref.Cm) <= 1e-12

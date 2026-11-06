@@ -195,7 +195,6 @@ def _velocity_matrices(field, nodes, layout, wake_nodes, ground):
         u, v = source_panel_velocity_influence(xi, eta, L)
         return np.stack([u * tx - v * ty, u * ty + v * tx], 1)
 
-    p1, p2 = sv._incidence(np, layout, None)
     g1, g2 = panel_vel(ps, pe, True)
     vs_body = panel_vel(ps, pe, False)
     vs_wake = panel_vel(wps, wpe, False)
@@ -206,7 +205,7 @@ def _velocity_matrices(field, nodes, layout, wake_nodes, ground):
         g2 = g2 - h2
         vs_body = vs_body + panel_vel(mps, mpe, False)
         vs_wake = vs_wake + panel_vel(sv._mirror(wps), sv._mirror(wpe), False)
-    vg = g1 @ p1 + g2 @ p2
+    vg = sv.panel_to_node(g1, g2, layout)
     for b, p in enumerate(layout.te_panel):
         if p >= 0:
             s0, e0 = layout.node_ranges[b]
