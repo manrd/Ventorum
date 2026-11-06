@@ -65,8 +65,9 @@ class CouplingSystem:
     s : np.ndarray
         Arc length along the contour from node 0, shape (N,) [m].
     x_over_c : np.ndarray
-        Body-frame chordwise position of the nodes over the reference chord
-        [-], measured from the leading edge.
+        Body-frame x position of the nodes over the reference chord [-],
+        measured from the x of the leading edge of the reference geometry
+        (:func:`ventorum.panel2d.solver.section_reference`).
     gamma_inv : np.ndarray
         Inviscid nodal vortex strengths [-], shape (N,).
     gamma_src : np.ndarray
@@ -290,7 +291,10 @@ def build_coupling_system(body, alpha_deg: float, *, height=None, height_referen
     chord_ref, x_ref, quarter = sv.resolve_reference(body, chord_ref, moment_ref)
     b = sv._as_numpy(body)
     layout = sv.panel_layout([b])
-    xle = float(np.min(b[:, 0]))
+    # Origin of x/c: the leading edge of the reference geometry (the same
+    # leading edge as the reference chord and the moment point), not the
+    # most forward point, which differs for a rotated or flapped section.
+    xle = float(sv.section_reference(body).leading_edge[0])
     if pivot is None:
         pivot = quarter
     ground = height is not None

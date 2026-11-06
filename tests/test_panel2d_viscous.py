@@ -665,6 +665,32 @@ def test_viscous_reference_inputs_are_checked():
         solve_viscous(airfoil("0012", n_points=61), 0.0, 1e6, chord_ref=-1.0)
 
 
+def test_x_over_c_is_measured_from_the_reference_leading_edge():
+    """The x/c of forced transition and of the reported transition starts at the reference leading edge.
+
+    Regression: the origin was the most forward point of the body. On a section rotated nose down by
+    8 deg the most forward point is not the leading edge (the point farthest from the trailing-edge
+    midpoint), so x/c was not zero at the leading edge.
+    """
+    from ventorum.airfoil.geometry import leading_edge_index
+    from ventorum.panel2d.coupling import build_coupling_system
+
+    c = _naca("2412", 120)
+    t = np.radians(-8.0)
+    rot = np.array([[np.cos(t), -np.sin(t)], [np.sin(t), np.cos(t)]])
+    body = (c - [0.25, 0.0]) @ rot.T + [0.25, 0.0]
+    i_le = leading_edge_index(body)
+    assert int(np.argmin(body[:, 0])) != i_le
+    sys_ = build_coupling_system(body, 2.0)
+    assert sys_.x_over_c[i_le] == 0.0
+    assert np.min(sys_.x_over_c) < 0.0
+    flapped = airfoil("2412", n_points=121).with_flap(x_hinge=0.7, deflection=10.0)
+    sys_f = build_coupling_system(flapped, 2.0)
+    le = flapped.reference_geometry().leading_edge
+    assert np.allclose(sys_f.x_over_c, (flapped.coords[:, 0] - le[0]) / flapped.reference_geometry().chord_ref,
+                       rtol=0.0, atol=1e-15)
+
+
 def _setup_and_state(code="4412", alpha=3.0, n=80, closed_te=True):
     """Return the CaseSetup and the first estimate of one case (cheap, no Newton solve)."""
     from ventorum.panel2d import vii

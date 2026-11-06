@@ -673,8 +673,9 @@ def solve_viscous(
         confirms it yet.
     xtr : tuple of float
         Forced transition x/c on the upper and lower side [-] (x from the
-        most forward point, over the reference chord); 1.0 (or more) means
-        free transition only.
+        x of the leading edge of the reference geometry, see
+        :func:`ventorum.panel2d.solver.section_reference`, over the
+        reference chord); 1.0 (or more) means free transition only.
     height : float or None
         Height above the ground [m] (of the pivot, the quarter-chord point
         on the chord line of the reference geometry, by default), or None
