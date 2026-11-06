@@ -276,6 +276,9 @@ class _Configuration:
     factor_use: int = 0
     viscous_units: np.ndarray | None = None
     viscous_wake: tuple | None = None
+    # Pressure Kutta wake response per symmetry case ("sym" or "asym").
+    # It is not in the factor pool; it is dropped with the factors.
+    pressure_wake: dict = field(default_factory=dict)
 
 
 def _standardize_panels(panels: np.ndarray, nodes: np.ndarray | None = None) -> np.ndarray:
@@ -640,6 +643,7 @@ class PanelSolver:
         self._viscous_evaluator = None
         self._viscous_solve_count = 0
         self._viscous_rhs_count = 0
+        self._pressure_solve_count = 0
         if self.backend == "gpu":
             import torch
 
@@ -707,6 +711,7 @@ class PanelSolver:
                 cfg.systems[parity] = None
                 self._factors_dropped += 1
         cfg.ground_anchor = False
+        cfg.pressure_wake.clear()
         if self._viscous_strips is not None:
             cfg.viscous_units = None
             cfg.viscous_wake = None
@@ -2030,7 +2035,15 @@ class PanelSolver:
             def expand(d):
                 return d
         else:
-            z_solve, z_full, up, lo, expand = self._pressure_sensitivity(cfg, coeffs)
+            # The wake response depends only on the configuration and on the
+            # symmetry case of the flow. Compute it once and keep it.
+            case = "asym" if self.mesh.half and np.any(coeffs[list(_ASYM_COLS)] != 0.0) else "sym"
+            cached = cfg.pressure_wake.get(case)
+            if cached is None:
+                cached = self._pressure_sensitivity(cfg, coeffs)
+                cfg.pressure_wake[case] = cached
+                self._pressure_solve_count += 1
+            z_solve, z_full, up, lo, expand = cached
 
         kres = solve_pressure_kutta(
             mu_full0,
