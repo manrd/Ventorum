@@ -294,3 +294,77 @@ def test_solve_vlm_batch_in_chunks_equals_one_stack(kw, monkeypatch):
 def _unknown_count(lattice, cond, ground):
     """Return the number of unknowns of a symmetric vortex-lattice case."""
     return core._unknown_map(lattice, cond, ground, True).n
+
+
+SHARED_MATRIX_CASES = {
+    # The rate-derivative cases: one attitude, different body rates (and speeds).
+    "rates": ({}, [{}, {"p": 0.3}, {"p": -0.3}, {"q": 0.5}, {"r": -0.2}]),
+    "rates in ground effect": ({"h": 1.5}, [{}, {"q": 0.5}, {"r": 0.2}]),
+    "rates and speeds, compressible": ({"mach": 0.3}, [{}, {"p": 0.3}, {"V_inf": 40.0}]),
+}
+
+
+@pytest.mark.parametrize("case", list(SHARED_MATRIX_CASES))
+def test_solve_vlm_batch_shares_one_matrix(case, monkeypatch):
+    """Cases with the same matrix inputs are assembled and factorised once; the result equals solve_vlm.
+
+    Regression: the batch assembled and factorised K identical matrices
+    (for example the 7 cases of rate_derivatives). The shared solve is the
+    same to round-off.
+    """
+    kw, extra = SHARED_MATRIX_CASES[case]
+    lattice, _, _, _, rp = _batch_inputs(kw, (4.0,))
+    conds = [vt.FlightCondition(**{"V_inf": 30.0, "alpha": np.radians(4.0), **kw, **e}) for e in extra]
+    grounds = [ground_plane_from_condition(lattice, c, rp) if c.h is not None else None for c in conds]
+    wds = np.array([wake_direction(c, g, "freestream") for c, g in zip(conds, grounds)])
+    calls = []
+    real_assemble = core.assemble_vlm
+
+    def counting(*args, **kwargs):
+        calls.append(1)
+        return real_assemble(*args, **kwargs)
+
+    monkeypatch.setattr(core, "assemble_vlm", counting)
+    batch = core.solve_vlm_batch(lattice, conds, grounds, False, wds, rp)
+    monkeypatch.undo()
+    assert len(calls) == 1
+    for (g_b, _), cond, gp, wd in zip(batch, conds, grounds, wds):
+        g_1 = core.solve_vlm(lattice, cond, gp, False, wd, rp)[0]
+        np.testing.assert_allclose(g_b, g_1, rtol=1e-12, atol=1e-12 * np.max(np.abs(g_1)))
+
+
+def test_solve_vlm_batch_with_body_wake_shares_one_matrix(monkeypatch):
+    """With wake_alignment="body" all angles of a sweep share one matrix; the result equals solve_vlm."""
+    lattice, conds, grounds, _, rp = _batch_inputs({}, (-2.0, 3.0, 8.0), beta=np.radians(2.0))
+    wds = np.array([wake_direction(c, None, "body") for c in conds])
+    calls = []
+    real_assemble = core.assemble_vlm
+
+    def counting(*args, **kwargs):
+        calls.append(1)
+        return real_assemble(*args, **kwargs)
+
+    monkeypatch.setattr(core, "assemble_vlm", counting)
+    batch = core.solve_vlm_batch(lattice, conds, grounds, True, wds, rp)
+    monkeypatch.undo()
+    assert len(calls) == 1
+    for (g_b, _), cond, wd in zip(batch, conds, wds):
+        g_1 = core.solve_vlm(lattice, cond, None, True, wd, rp)[0]
+        np.testing.assert_allclose(g_b, g_1, rtol=1e-12, atol=1e-12 * np.max(np.abs(g_1)))
+
+
+def test_solve_vlm_batch_does_not_share_different_matrices(monkeypatch):
+    """Different wake directions, grounds or Mach-number attitudes give one matrix per case."""
+    for kw in ({}, {"h": 1.5}, {"mach": 0.3}):
+        lattice, conds, grounds, wds, rp = _batch_inputs(kw, (1.0, 2.0, 3.0))
+        calls = []
+        real_assemble = core.assemble_vlm
+
+        def counting(*args, _real=real_assemble, _calls=calls, **kwargs):
+            _calls.append(1)
+            return _real(*args, **kwargs)
+
+        monkeypatch.setattr(core, "assemble_vlm", counting)
+        core.solve_vlm_batch(lattice, conds, grounds, True, wds, rp)
+        monkeypatch.undo()
+        assert len(calls) == 3, kw

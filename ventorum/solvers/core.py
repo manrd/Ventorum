@@ -206,6 +206,24 @@ def _vlm_rhs(
     return rhs
 
 
+def _vlm_matrix_key(condition: FlightCondition, ground: GroundPlane | None, wake_dir: np.ndarray) -> tuple:
+    """Return a key of the inputs that define the vortex-lattice matrix of one case.
+
+    For one lattice and one unknown map, two cases with the same key have
+    the same matrix (:func:`assemble_vlm`). Without compressibility the
+    matrix depends only on the wake direction and the ground plane; the
+    body rates, the speed and the flow angles change only the right-hand
+    side. With a Mach number the stretched coordinates depend on alpha,
+    beta and the Mach number. The key compares the input values exactly
+    (the bytes of the arrays), so it never joins two different matrices.
+    """
+    mach = getattr(condition, "mach", None)
+    if mach is not None and mach > 0.0:
+        return ("mach", float(condition.alpha), float(condition.beta), float(mach))
+    g = None if ground is None else (np.asarray(ground.normal, dtype=float).tobytes(), float(ground.offset))
+    return ("wake", np.asarray(wake_dir, dtype=float).tobytes(), g)
+
+
 # Largest stack of dense matrices of one chunk of solve_vlm_batch [bytes]: the
 # same default cap as the chunks of the ground-effect sweep
 # (ventorum.ground_effect.sweep._MAX_BATCH_BYTES, 256 MiB).
@@ -240,11 +258,17 @@ def solve_vlm_batch(
     """Solve the vortex lattice for K cases on the same lattice.
 
     Each system is assembled as in :func:`assemble_vlm` (with the kernel
-    cache of the lattice out of ground effect). The cases are solved in
-    chunks: one call of the dense solver solves the stacked systems of one
-    chunk, and the stack of one chunk is not larger than
-    ``_VLM_BATCH_BYTES`` (256 MiB). Each case gets the same result, to the
-    last bit, as :func:`solve_vlm` for that case.
+    cache of the lattice out of ground effect). The cases whose matrices
+    have the same inputs (:func:`_vlm_matrix_key`: the same wake direction
+    and ground plane, for example the cases of the rate derivatives or a
+    sweep with ``wake_alignment="body"``) share one matrix: it is assembled
+    and factorised once and solved with the right-hand sides of all these
+    cases. The other cases are solved in chunks: one call of the dense
+    solver solves the stacked systems of one chunk, and the stack of one
+    chunk is not larger than ``_VLM_BATCH_BYTES`` (256 MiB). A case with
+    its own matrix gets the same result, to the last bit, as
+    :func:`solve_vlm` for that case; a case that shares its matrix gets the
+    same result to round-off.
 
     Returns
     -------
@@ -258,15 +282,28 @@ def solve_vlm_batch(
     if any(u is not umap for u in umaps):
         return None
     K, n = len(conditions), umap.n
+    rhs = np.empty((K, n))
+    groups: dict[tuple, list[int]] = {}
+    for k, (cond, ground) in enumerate(zip(conditions, grounds)):
+        rhs[k] = _vlm_rhs(lattice, umap, cond, ref_point)
+        groups.setdefault(_vlm_matrix_key(cond, ground, wake_dirs[k]), []).append(k)
+
+    def matrix(k: int) -> np.ndarray:
+        return assemble_vlm(lattice, conditions[k], grounds[k], use_symmetry, wake_dirs[k], ref_point)[0]
+
     g = np.empty((K, n))
+    single = [ks[0] for ks in groups.values() if len(ks) == 1]
     step = max(1, _VLM_BATCH_BYTES // max(1, n * n * 8))
-    for k0 in range(0, K, step):
-        k1 = min(K, k0 + step)
-        A = np.empty((k1 - k0, n, n))
-        rhs = np.empty((k1 - k0, n))
-        for j, k in enumerate(range(k0, k1)):
-            A[j], rhs[j], _ = assemble_vlm(lattice, conditions[k], grounds[k], use_symmetry, wake_dirs[k], ref_point)
-        g[k0:k1] = np.linalg.solve(A, rhs[:, :, None])[:, :, 0]
+    for i0 in range(0, len(single), step):
+        ks = single[i0:i0 + step]
+        A = np.empty((len(ks), n, n))
+        for j, k in enumerate(ks):
+            A[j] = matrix(k)
+        g[ks] = np.linalg.solve(A, rhs[ks][:, :, None])[:, :, 0]
+    for ks in groups.values():
+        if len(ks) > 1:
+            # One LU factorisation for the right-hand sides of all cases of the group.
+            g[ks] = np.linalg.solve(matrix(ks[0]), rhs[ks].T).T
     return [(g[k][umap.panel_column], SolveInfo(symmetric=umap.symmetric)) for k in range(K)]
 
 
