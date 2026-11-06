@@ -95,6 +95,8 @@ from ventorum.aero.system import freestream_direction, has_rates, rotation_veloc
 from ventorum.core.datatypes import FlightCondition
 from ventorum.core.errors import GroundStrikeError, ValidityError
 from ventorum.panel3d.images import (
+    _corner_diameter,
+    _repeated_corner,
     check_ground_clearance,
     ground_plane_parameters,
     mirror_panels_y,
@@ -201,6 +203,10 @@ class PanelResult:
         Final max |delta Cp| at the trailing-edge pairs [-].
     kutta_converged : bool
         True when the pressure residual falls below tolerance.
+    kutta_lstsq_steps : int
+        Number of pressure Kutta Newton steps that used the least-squares
+        solution because the Jacobian was singular. Zero for the Morino
+        option.
     trust_note : str
         Note on the trust of the result. Empty when converged.
     mu_w : numpy.ndarray or None
@@ -225,6 +231,7 @@ class PanelResult:
     kutta_converged: bool = True
     trust_note: str = ""
     mu_w: np.ndarray | None = None
+    kutta_lstsq_steps: int = 0
 
 
 @dataclass
@@ -276,6 +283,9 @@ class _Configuration:
     factor_use: int = 0
     viscous_units: np.ndarray | None = None
     viscous_wake: tuple | None = None
+    # Pressure Kutta wake response per symmetry case ("sym" or "asym").
+    # It is not in the factor pool; it is dropped with the factors.
+    pressure_wake: dict = field(default_factory=dict)
 
 
 def _standardize_panels(panels: np.ndarray, nodes: np.ndarray | None = None) -> np.ndarray:
@@ -296,6 +306,7 @@ def _standardize_panels(panels: np.ndarray, nodes: np.ndarray | None = None) -> 
     pans = np.asarray(panels, dtype=int).copy()
     shifts = np.zeros(len(pans), dtype=int)
     found = np.zeros(len(pans), dtype=bool)
+    diameter = None
     # Search shifts in order. Do not read coordinates after an index match
     # or after an earlier shift matched, as in the loop reference.
     for shift in range(4):
@@ -304,9 +315,13 @@ def _standardize_panels(panels: np.ndarray, nodes: np.ndarray | None = None) -> 
         if nodes is not None:
             active = ~found & ~match
             coords = np.asarray(nodes)
-            match[active] = np.all(
-                np.isclose(coords[pans[active, a]], coords[pans[active, b]], atol=1e-12),
-                axis=-1,
+            if diameter is None:
+                # The rows of the first coordinate test hold the rows of
+                # all later tests. Read only their corners.
+                diameter = np.zeros(len(pans), dtype=float)
+                diameter[active] = _corner_diameter(coords[pans[active]])
+            match[active] = _repeated_corner(
+                coords[pans[active, a]], coords[pans[active, b]], diameter[active],
             )
         choose = ~found & match
         shifts[choose] = shift
@@ -338,8 +353,8 @@ def _standardize_panels_reference(panels: np.ndarray, nodes: np.ndarray | None =
             if shifted[2] == shifted[3]:
                 pans[i] = shifted
                 break
-            if nodes is not None and np.allclose(
-                nodes[shifted[2]], nodes[shifted[3]], atol=1e-12
+            if nodes is not None and _repeated_corner(
+                nodes[shifted[2]], nodes[shifted[3]], _corner_diameter(nodes[row])
             ):
                 pans[i] = shifted
                 break
@@ -437,6 +452,11 @@ class PanelSolver:
         mesh uses for asymmetric configurations in ground effect.
     wake_length : float
         Wake length in m.
+    gradient_stencil_stats : dict
+        Counts of the surface gradient stencil fallbacks of the full mesh
+        (keys "fold_rule", "n_fold_edges", "n_ls_reduced",
+        "n_node_fallback"; see
+        :func:`ventorum.panel3d.post.build_surface_gradient_operator`).
     """
 
     def __init__(
@@ -546,6 +566,7 @@ class PanelSolver:
                 self._full_geom.normal,
                 None,
             )
+            self.gradient_stencil_stats = {}
             self._grad_op = build_surface_gradient_operator(
                 self._full_mesh.nodes,
                 self._standardized_full_panels,
@@ -554,6 +575,7 @@ class PanelSolver:
                 self._full_geom.area,
                 self._full_mesh.wake_edges,
                 kinds=self._full_mesh.kind,
+                stats=self.gradient_stencil_stats,
             )
         else:
             # The parent already prepared these full-mesh pieces.
@@ -561,6 +583,7 @@ class PanelSolver:
             self._full_geom = _reuse_full_from._full_geom
             self._full_wake = _reuse_full_from._full_wake
             self._grad_op = _reuse_full_from._grad_op
+            self.gradient_stencil_stats = dict(_reuse_full_from.gradient_stencil_stats)
 
         # Reference center
         if ref_point is None:
@@ -640,6 +663,7 @@ class PanelSolver:
         self._viscous_evaluator = None
         self._viscous_solve_count = 0
         self._viscous_rhs_count = 0
+        self._pressure_solve_count = 0
         if self.backend == "gpu":
             import torch
 
@@ -707,6 +731,7 @@ class PanelSolver:
                 cfg.systems[parity] = None
                 self._factors_dropped += 1
         cfg.ground_anchor = False
+        cfg.pressure_wake.clear()
         if self._viscous_strips is not None:
             cfg.viscous_units = None
             cfg.viscous_wake = None
@@ -2030,7 +2055,15 @@ class PanelSolver:
             def expand(d):
                 return d
         else:
-            z_solve, z_full, up, lo, expand = self._pressure_sensitivity(cfg, coeffs)
+            # The wake response depends only on the configuration and on the
+            # symmetry case of the flow. Compute it once and keep it.
+            case = "asym" if self.mesh.half and np.any(coeffs[list(_ASYM_COLS)] != 0.0) else "sym"
+            cached = cfg.pressure_wake.get(case)
+            if cached is None:
+                cached = self._pressure_sensitivity(cfg, coeffs)
+                cfg.pressure_wake[case] = cached
+                self._pressure_solve_count += 1
+            z_solve, z_full, up, lo, expand = cached
 
         kres = solve_pressure_kutta(
             mu_full0,
@@ -2099,6 +2132,7 @@ class PanelSolver:
             kutta_iters=int(kres.n_iters),
             kutta_residual=float(kres.residual),
             kutta_converged=bool(kres.converged),
+            kutta_lstsq_steps=int(kres.lstsq_steps),
             trust_note=trust_note,
             mu_w=np.array(gamma_full[:n_strips], dtype=float, copy=True),
         )

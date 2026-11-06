@@ -194,3 +194,50 @@ def test_empty_arrays_and_input_dtypes():
                      component=np.empty(0, dtype=int), kind=np.empty(0, dtype="U7"),
                      wake_edges=np.empty((0, 4), dtype=int), half=True)
     _same_mesh(mesh)
+
+
+def _criterion_rows():
+    """Corner rows near the repeated-corner limit (1e-12 of the panel diameter)."""
+    rows = []
+    base = np.array([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [1.0, 1.0, 0.0], [0.0, 1.0, 0.0]])
+    for offset in (0.0, 500.0, -1e4):
+        for gap in (0.0, 5e-13, 1e-12, 2e-12, 1e-9, 4.9e-3):
+            row = base + offset
+            row[3] = row[2] + np.array([0.0, 0.0, gap])
+            for shift in range(4):
+                rows.append(np.roll(row, shift, axis=0))
+    return np.asarray(rows)
+
+
+def test_repeated_corner_criterion_has_no_relative_part():
+    """A short real edge far from the origin is not a repeated corner.
+
+    The old test (numpy.isclose with its default relative tolerance 1e-5)
+    took two corners 4.9 mm apart at z = 500 m as one corner. The criterion
+    is now a distance of at most 1e-12 of the panel diameter, the limit of
+    a degenerate edge in the kernels.
+    """
+    # Tip cap panel of a wing (chord 1 m) moved by 500 m in x, y and z.
+    cap = np.array([[[0.9330127018922099, 4.0, 0.009329859751005642],
+                     [0.9829629131445472, 4.0, 0.002448781896930541],
+                     [0.9829629131445472, 4.0, -0.002448781896930541],
+                     [0.9330127018922099, 4.0, -0.009329859751005642]]]) + 500.0
+    _same(standardize_panel_corners(cap), cap)
+    nodes = cap[0]
+    _same(_standardize_panels(np.array([[0, 1, 2, 3]]), nodes), np.array([[0, 1, 2, 3]]))
+    # Repeated corners within the limit are found at every position and offset.
+    corners = _criterion_rows()
+    out = standardize_panel_corners(corners)
+    diameter = np.sqrt(2.0)
+    # The stored gap after rounding of the coordinates (the closing edge of each row).
+    stored = np.repeat(np.linalg.norm(corners[::4, 3] - corners[::4, 2], axis=-1), 4)
+    repeated = stored <= 1e-12 * diameter
+    assert repeated.any() and not repeated.all()
+    gaps = np.linalg.norm(out[:, 2] - out[:, 3], axis=-1)
+    assert np.all(gaps[repeated] == stored[repeated])
+    # A row that is not repeated keeps its corner order.
+    _same(out[~repeated], corners[~repeated])
+    _same(out, _standardize_panel_corners_reference(corners))
+    indices = np.arange(corners.shape[0] * 4).reshape(-1, 4)
+    flat = corners.reshape(-1, 3)
+    _same(_standardize_panels(indices, flat), _standardize_panels_reference(indices, flat))

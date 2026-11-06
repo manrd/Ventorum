@@ -280,3 +280,73 @@ def test_pressure_kutta_half_mesh_asymmetric_equals_full_mesh():
     # The right and left trailing edges of the full mesh carry no pressure jump.
     full_jump = np.abs(res_full.cp[mesh_full.wake_edges[:, 0]] - res_full.cp[mesh_full.wake_edges[:, 1]])
     assert float(np.max(full_jump)) < 1e-6
+
+
+def test_pressure_sensitivity_cached_per_configuration_and_symmetry_case():
+    """Verify the pressure Kutta wake response is solved once per symmetry case.
+
+    The response depends only on the configuration and on the symmetry case
+    of the flow. Four conditions in one configuration (three symmetric, one
+    with sideslip) need two solves on a half mesh. The results must equal
+    the results of one new solver per condition to round-off.
+    """
+    surf = _rectangular_wing_surface()
+    coords = _naca0012_coordinates(51)
+    mesh = mesh_lifting_surface(surf, coords, n_chord=8, n_span=6, half=True)
+    conds = [
+        FlightCondition(V_inf=50.0, alpha=np.radians(2.0)),
+        FlightCondition(V_inf=50.0, alpha=np.radians(4.0), beta=np.radians(5.0)),
+        FlightCondition(V_inf=50.0, alpha=np.radians(6.0)),
+        FlightCondition(V_inf=40.0, alpha=np.radians(3.0)),
+    ]
+
+    solver = PanelSolver(mesh, far_ratio=np.inf, kutta="pressure")
+    calls = []
+    original = solver._pressure_sensitivity
+
+    def counted(cfg, coeffs):
+        calls.append(1)
+        return original(cfg, coeffs)
+
+    solver._pressure_sensitivity = counted
+    batch = solver.solve_conditions(conds)
+    assert len(calls) == 2
+    # A second call in the same configuration reuses the cached response.
+    solver.solve_conditions(conds[:1])
+    assert len(calls) == 2
+
+    for cond, res in zip(conds, batch):
+        ref = PanelSolver(mesh, far_ratio=np.inf, kutta="pressure").solve(cond)
+        for name in ("CL", "CD_pressure", "CDi_trefftz", "CY", "Cl", "Cm", "Cn"):
+            assert abs(getattr(res, name) - getattr(ref, name)) < 1e-12, name
+        assert np.max(np.abs(res.cp - ref.cp)) < 1e-12
+        assert np.max(np.abs(res.mu_w - ref.mu_w)) < 1e-12
+
+
+def test_singular_newton_jacobian_counts_the_least_squares_steps():
+    """Verify a singular Newton Jacobian is counted in the result.
+
+    Two unknowns with the same sensitivity column and the same
+    trailing-edge pair make the Jacobian singular. The iteration takes the
+    least-squares step and the result counts it.
+    """
+    from ventorum.panel3d.kutta import solve_pressure_kutta
+    from ventorum.panel3d.solver import _condition_arrays
+
+    surf = _rectangular_wing_surface()
+    mesh = mesh_lifting_surface(surf, _naca0012_coordinates(51), n_chord=8, n_span=6)
+    cond = FlightCondition(V_inf=50.0, alpha=np.radians(4.0))
+    solver = PanelSolver(mesh, far_ratio=np.inf, kutta="pressure")
+    res = solver.solve(cond)
+    assert res.kutta_lstsq_steps == 0
+    cfg = next(iter(solver._configs.values()))
+    _, z_full, up, lo, _ = cfg.pressure_wake["sym"]
+    coeffs = _condition_arrays([cond])[0][0]
+    mu_full0 = cfg.unit_mu @ coeffs
+    onset = solver._condition_velocity(cond, solver._full_geom.centroid)
+    kres = solve_pressure_kutta(
+        mu_full0, z_full[:, [0, 0]], solver._grad_op, up[[0, 0]], lo[[0, 0]],
+        solver._full_geom.normal, onset, float(cond.V_inf),
+    )
+    assert kres.lstsq_steps >= 1
+    assert kres.lstsq_steps <= kres.n_iters

@@ -475,7 +475,9 @@ LS_RCOND = 1e-5
 ROW_GRADIENT_KIND = "tip"
 
 
-def _stencil_pinv(dr_t: np.ndarray, row_only: np.ndarray | bool) -> np.ndarray:
+def _stencil_pinv(
+    dr_t: np.ndarray, row_only: np.ndarray | bool, return_rank: bool = False,
+) -> np.ndarray | tuple[np.ndarray, np.ndarray]:
     """Return the pseudo-inverse of in-plane stencil displacements.
 
     Parameters
@@ -489,11 +491,17 @@ def _stencil_pinv(dr_t: np.ndarray, row_only: np.ndarray | bool) -> np.ndarray:
         neighbours). False keeps every direction with a singular value
         above ``LS_RCOND`` times the largest.
 
+    return_rank : bool, optional
+        True also returns the count of the kept directions.
+
     Returns
     -------
     numpy.ndarray
         Pseudo-inverse with shape (..., 3, k) in 1/m. False flags give the
         result of ``numpy.linalg.pinv(dr_t, rcond=LS_RCOND)``.
+    numpy.ndarray
+        Count of the kept directions with the batch shape of *dr_t*
+        (only when *return_rank* is True).
     """
     u, s, vt = np.linalg.svd(dr_t, full_matrices=False)
     large = s > LS_RCOND * np.max(s, axis=-1, keepdims=True)
@@ -501,7 +509,10 @@ def _stencil_pinv(dr_t: np.ndarray, row_only: np.ndarray | bool) -> np.ndarray:
     large[flag, 1:] = False
     s = np.divide(1.0, s, where=large, out=s)
     s[~large] = 0.0
-    return np.matmul(np.swapaxes(vt, -1, -2), s[..., None] * np.swapaxes(u, -1, -2))
+    pinv = np.matmul(np.swapaxes(vt, -1, -2), s[..., None] * np.swapaxes(u, -1, -2))
+    if return_rank:
+        return pinv, np.sum(large, axis=-1)
+    return pinv
 
 
 #: Largest magnitude of a least-squares node weight [-]. A node with a larger
@@ -562,6 +573,7 @@ def _list_node_weights(
     cen: np.ndarray,
     nrm: np.ndarray,
     fallback: np.ndarray,
+    counts: dict | None = None,
 ) -> np.ndarray:
     """Return the least-squares node weights of CSR member lists.
 
@@ -585,6 +597,10 @@ def _list_node_weights(
     fallback : numpy.ndarray
         Inverse-distance weights of the members with shape (M,) [-]. A
         list that is not valid keeps them.
+    counts : dict or None, optional
+        When given, the key "n_node_fallback" gets the count of the lists
+        that keep the inverse-distance weights (rank below 3, or a weight
+        larger than ``NODE_WEIGHT_LIMIT`` in magnitude).
 
     Returns
     -------
@@ -593,6 +609,7 @@ def _list_node_weights(
     """
     out = np.array(fallback, dtype=float, copy=True)
     length = np.diff(ptr)
+    n_fallback = 0
     for k in np.unique(length):
         if k == 0:
             continue
@@ -601,6 +618,9 @@ def _list_node_weights(
         members = col[idx]
         w, valid = _linear_node_weights(cen[members] - pts[node[lists]][:, None, :], nrm[members])
         out[idx[valid]] = w[valid]
+        n_fallback += int(np.count_nonzero(~valid))
+    if counts is not None:
+        counts["n_node_fallback"] = n_fallback
     return out
 
 
@@ -612,6 +632,7 @@ def _least_squares_entries(
     nrm: np.ndarray,
     n_p: int,
     row_only: np.ndarray | None = None,
+    counts: dict | None = None,
 ) -> tuple[list[np.ndarray], list[np.ndarray], list[np.ndarray]]:
     """Return the matrix entries of the edge-neighbour least-squares gradient.
 
@@ -635,6 +656,11 @@ def _least_squares_entries(
         Flag of each panel with shape (Np,): True keeps only the gradient
         along the row of neighbours (see :func:`_stencil_pinv`). None
         gives False for all panels.
+    counts : dict or None, optional
+        When given, the key "n_ls_reduced" gets the count of the panels
+        (not flagged *row_only*) whose stencil gives fewer than two in-plane
+        directions: no neighbour, one neighbour, or neighbour centroids on
+        one line within ``LS_RCOND``.
 
     Returns
     -------
@@ -649,10 +675,12 @@ def _least_squares_entries(
     rows: list[np.ndarray] = []
     cols: list[np.ndarray] = []
     vals: list[np.ndarray] = []
+    n_reduced = 0
     for n in np.unique(n_nb):
         ps = ls[n_nb == n]
         if n == 0:
             # No neighbour: explicit zeros on the panel itself.
+            n_reduced += int(np.count_nonzero(~row_only[ps]))
             rows.append((3 * ps[:, None] + comp[None, :]).ravel())
             cols.append(np.repeat(ps, 3))
             vals.append(np.zeros(3 * ps.size))
@@ -664,12 +692,15 @@ def _least_squares_entries(
         # Displacement directions below LS_RCOND of the largest are round-off
         # (a row of collinear centroids gives the gradient along the row).
         # A tip cap keeps only the direction along its row.
-        pinv = _stencil_pinv(dr_t, row_only[ps])
+        pinv, rank = _stencil_pinv(dr_t, row_only[ps], return_rank=True)
+        n_reduced += int(np.count_nonzero((rank < 2) & ~row_only[ps]))
         mat = np.concatenate([pinv, -np.sum(pinv, axis=2, keepdims=True)], axis=2)
         idx = np.concatenate([nb, ps[:, None]], axis=1)
         rows.append(np.broadcast_to(3 * ps[:, None, None] + comp[None, :, None], mat.shape).ravel())
         cols.append(np.broadcast_to(idx[:, None, :], mat.shape).ravel())
         vals.append(mat.ravel())
+    if counts is not None:
+        counts["n_ls_reduced"] = n_reduced
     return rows, cols, vals
 
 
@@ -692,6 +723,7 @@ def build_surface_gradient_operator(
     wake_edges: np.ndarray | None = None,
     kinds: np.ndarray | None = None,
     fold_angle_deg: float = FOLD_ANGLE_DEG,
+    stats: dict | None = None,
 ) -> scipy.sparse.csr_matrix:
     """Build the sparse operator of the tangential surface gradient.
 
@@ -769,6 +801,19 @@ def build_surface_gradient_operator(
         Largest angle between the normals of two panels across an edge
         that the gradient connects when the mesh has no kinds [deg].
         Default ``FOLD_ANGLE_DEG`` (45).
+    stats : dict or None, optional
+        When given, the function adds the counts of the stencil fallbacks
+        (an empty mesh gives zeros):
+
+        * "fold_rule": True when the sharp edges come from the fold angle
+          (a mesh without panel kinds), False when they come from the kinds.
+        * "n_fold_edges": edges that the fold angle cuts (zero with kinds).
+        * "n_ls_reduced": border panels whose least-squares stencil gives
+          fewer than two in-plane directions (see ``LS_RCOND``); the flat
+          tip caps, which keep one direction by design, are not counted.
+        * "n_node_fallback": node value lists that keep the inverse-distance
+          weights (rank below 3, or a weight larger than
+          ``NODE_WEIGHT_LIMIT`` in magnitude).
 
     Returns
     -------
@@ -776,7 +821,8 @@ def build_surface_gradient_operator(
         Operator with shape (3 Np, Np) in 1/m.
     """
     return _gradient_operator_arrays(
-        nodes, panels, centroids, normals, areas, wake_edges, kinds, fold_angle_deg, shepard=False
+        nodes, panels, centroids, normals, areas, wake_edges, kinds, fold_angle_deg, shepard=False,
+        stats=stats,
     )
 
 
@@ -844,6 +890,7 @@ def _gradient_operator_arrays(
     kinds: np.ndarray | None,
     fold_angle_deg: float,
     shepard: bool,
+    stats: dict | None = None,
 ) -> scipy.sparse.csr_matrix:
     """Build the surface gradient operator with array operations.
 
@@ -852,7 +899,8 @@ def _gradient_operator_arrays(
     the same sparsity pattern, and values equal to round-off. The
     arguments are those of :func:`build_surface_gradient_operator`.
     *shepard* True gives the previous operator (see
-    :func:`_build_surface_gradient_operator_shepard`).
+    :func:`_build_surface_gradient_operator_shepard`). *stats* gets the
+    counts of :func:`build_surface_gradient_operator`.
 
     Returns
     -------
@@ -870,6 +918,9 @@ def _gradient_operator_arrays(
         if wake_edges is None
         else np.asarray(wake_edges, dtype=int).reshape(-1, 4)
     )
+    counts = {"fold_rule": False, "n_fold_edges": 0, "n_ls_reduced": 0, "n_node_fallback": 0}
+    if stats is not None:
+        stats.update(counts)
     if n_p == 0:
         return _gradient_matrix([], [], [], 0)
 
@@ -913,7 +964,11 @@ def _gradient_operator_arrays(
         sharp_pair = np.asarray(kind_arr[pa] != kind_arr[pb], dtype=bool)
     else:
         sharp_pair = _fold_pairs(nrm, pa, pb, float(np.cos(np.radians(fold_angle_deg))))
-    cut = is_wake_key | (np.bincount(pair_key[sharp_pair], minlength=n_key) > 0)
+    sharp_key = np.bincount(pair_key[sharp_pair], minlength=n_key) > 0
+    if not use_kinds:
+        counts["fold_rule"] = True
+        counts["n_fold_edges"] = int(np.count_nonzero(sharp_key & ~is_wake_key))
+    cut = is_wake_key | sharp_key
     ok_key = ~cut & (n_distinct >= 2)
 
     # Corner incidences (node v, panel p) and their multiplicity.
@@ -995,7 +1050,7 @@ def _gradient_operator_arrays(
         list_node = inc_v[g_member[g_ptr[:-1]]]
         if special.size > 0:
             list_node = np.concatenate([list_node, inc_v[special]])
-        all_w = _list_node_weights(all_col, all_ptr, list_node, pts, cen, nrm, all_w)
+        all_w = _list_node_weights(all_col, all_ptr, list_node, pts, cen, nrm, all_w, counts)
 
     # Panels with a row: at least three distinct corners and an area that
     # is not zero or negative.
@@ -1034,11 +1089,13 @@ def _gradient_operator_arrays(
     ls = np.nonzero(has_row & (open_corners > 0))[0]
     if ls.size > 0:
         ls_rows, ls_cols, ls_vals = _least_squares_entries(
-            ls, nb_codes // n_p, nb_codes % n_p, cen, nrm, n_p, row_only
+            ls, nb_codes // n_p, nb_codes % n_p, cen, nrm, n_p, row_only, counts
         )
         rows.extend(ls_rows)
         cols.extend(ls_cols)
         vals.extend(ls_vals)
+    if stats is not None:
+        stats.update(counts)
     return _gradient_matrix(rows, cols, vals, n_p)
 
 

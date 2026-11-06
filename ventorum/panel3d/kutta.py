@@ -138,6 +138,9 @@ class PressureKuttaResult:
         Final largest trailing-edge pressure jump [-].
     converged : bool
         True when the residual falls below the tolerance.
+    lstsq_steps : int
+        Number of Newton steps that used the least-squares solution
+        because the Jacobian was singular.
     """
 
     delta: np.ndarray
@@ -145,6 +148,7 @@ class PressureKuttaResult:
     n_iters: int
     residual: float
     converged: bool
+    lstsq_steps: int = 0
 
 
 def _surface_cp(grad_op, mu_full, v_onset, normals, v_inf, rates=False):
@@ -242,6 +246,7 @@ def solve_pressure_kutta(
         return PressureKuttaResult(delta, mu_f, 0, max_res, True)
 
     n_iters = 0
+    lstsq_steps = 0
     converged = False
     for _ in range(int(max_iter)):
         # Exact Jacobian from the linearized pressure at the current speed.
@@ -252,7 +257,10 @@ def solve_pressure_kutta(
         try:
             step = np.linalg.solve(jac, -resid)
         except np.linalg.LinAlgError:
+            # Singular Jacobian (for example a degenerate trailing-edge
+            # pair): take the least-squares step and count it.
             step, _, _, _ = np.linalg.lstsq(jac, -resid, rcond=None)
+            lstsq_steps += 1
         n_iters += 1
 
         # Backtracking: accept the first halving that lowers the residual,
@@ -275,4 +283,6 @@ def solve_pressure_kutta(
             converged = True
             break
 
-    return PressureKuttaResult(delta, mu_f, int(n_iters), float(max_res), bool(converged))
+    return PressureKuttaResult(
+        delta, mu_f, int(n_iters), float(max_res), bool(converged), int(lstsq_steps),
+    )
