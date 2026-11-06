@@ -1426,3 +1426,16 @@ def test_check_gradients_default_tolerance_follows_the_precision(precision, cpu_
                                  n_directions=2)
     assert out["rtol"] == (RTOL_FLOAT32 if precision == "float32" else RTOL_FLOAT64)
     assert out["pass"], _failed(out)
+
+
+def test_cpu_kernels_float32_note_states_float32_accuracy() -> None:
+    """Regression: the note of the CPU kernels in float32 does not suggest float64 gradients.
+
+    The kernels compute each pair in float64 from the float32 inputs of the
+    reference copy and return float32 values; the adjoint solve is float32.
+    The old note named only the float64 partials.
+    """
+    from ventorum.sensitivity.adjoint import CPU_KERNELS_FLOAT64_NOTE
+
+    assert "float32 inputs" in CPU_KERNELS_FLOAT64_NOTE
+    assert "float32 accuracy" in CPU_KERNELS_FLOAT64_NOTE

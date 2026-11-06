@@ -60,8 +60,10 @@ _SYMMETRIC_OUTPUTS = ("CL", "CDi", "CDp", "CD", "Cm")
 
 
 CPU_KERNELS_FLOAT64_NOTE = (
-    "The CPU VJP kernels evaluate the O(n^2) partials in float64; the O(n) parts and the adjoint "
-    "solve use float32.")
+    "The CPU VJP kernels evaluate the O(n^2) pairs in float64 arithmetic, but from the float32 "
+    "inputs of the reference copy, and return float32 values; the O(n) parts and the adjoint solve "
+    "use float32. The gradients therefore have float32 accuracy (the float32 floor 1e-3 applies), "
+    "as on the GPU.")
 
 
 def _cpu_kernels_in_float64(partials: str) -> bool:
@@ -1440,7 +1442,14 @@ _MOMENT_VECTOR = ("Cl", "Cm", "Cn")
 # at most 3.6e-9 (linear lifting line, 1000 unknowns; the vortex lattice
 # at most 2e-15), float32 at most 2.8e-3 (linear lifting line, 1000
 # unknowns; the vortex lattice at most 2.5e-4). An angle error of 0.01 deg
-# in the boundary condition gave 2.8e-5 or more in the same cases.
+# in the boundary condition gave 2.8e-5 or more in the same cases, so the
+# float64 limit detects it and the float32 limit does not. In float32 the
+# backward error of a correct state comes from the float32 data of A and
+# rhs (the geometry of the reference copy rounded to float32), not from the
+# arithmetic of the check: the same data in float64 arithmetic gave the same
+# omega (9e-7 at 80 vortex-lattice unknowns, 1e-4 at 1280, 2.4e-3 at 1000
+# lifting-line unknowns). The float32 check therefore detects only
+# boundary-condition errors above its limit.
 _RESIDUAL_TOL_FLOAT64 = 1e-6
 _RESIDUAL_TOL_FLOAT32 = 3e-2
 # The nonlinear lifting line stops at its section Cl tolerance: its limit is
@@ -1489,6 +1498,14 @@ def _residual_check(prep: dict, A: Any, rhs: Any, g: Any) -> float:
         the gradient precision are both float64) or ``_RESIDUAL_TOL_FLOAT32``
         (3e-2; one of them is float32). For the nonlinear lifting line the
         limit is at least 100 times the solver tolerance.
+
+    Notes
+    -----
+    In float32 the check detects only large errors of a boundary
+    condition (backward error above 3e-2). The backward error of a correct
+    state is then set by the float32 data of *A* and *rhs*, up to 2.4e-3
+    in the measured cases, which is more than the 2.8e-5 of a 0.01 deg
+    angle error.
     """
     import torch
 
@@ -1955,8 +1972,8 @@ def gradients(
             "alpha, beta and mach. The Trefftz plane is unchanged.")
     if prep["precision"] == "float32":
         notes.append(
-            "Float32 gradients: the gradient gate of float32 is 1e-3 relative; check the result with "
-            "check_gradients (rtol=1e-3).")
+            "Float32 gradients: the gradient gate of float32 is 1e-3 relative; check_gradients uses "
+            "this tolerance by default for float32 gradients.")
         if _cpu_kernels_in_float64(prep["partials"]):
             notes.append(CPU_KERNELS_FLOAT64_NOTE)
     return GradientResult(
