@@ -86,6 +86,9 @@ class RateDerivativesResult:
         Number of solves done.
     notes : list[str]
         Notes on the method and its limits.
+    case_converged : list[bool]
+        Converged flag of each solved case, in the order base, p +, p -, q +, q -, r +, r -. A
+        note of the result names the cases with False.
     """
 
     derivatives: dict[str, float]
@@ -101,6 +104,7 @@ class RateDerivativesResult:
     precision: str
     n_solves: int
     notes: list[str] = field(default_factory=list)
+    case_converged: list[bool] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         """Return a JSON-compatible dictionary without the result object."""
@@ -116,6 +120,7 @@ class RateDerivativesResult:
             "precision": self.precision,
             "n_solves": int(self.n_solves),
             "notes": list(self.notes),
+            "case_converged": [bool(v) for v in self.case_converged],
         }
 
 
@@ -323,11 +328,16 @@ def rate_derivatives(
         notes.append(f"The rotation speed reaches {w_max:.3f} V_inf on the geometry (above "
                      f"{LARGE_ROTATION_FRACTION:g}): the straight wake of the quasi-steady model is then a poor "
                      "approximation.")
+    case_converged = [bool(r.converged) for r in results]
+    failed = [lab for lab, ok in zip(("base", "p +", "p -", "q +", "q -", "r +", "r -"), case_converged) if not ok]
+    if failed:
+        notes.append("Not all cases of the differences converged ({}): the derivatives that use these cases are "
+                     "not reliable.".format(", ".join(failed)))
     return RateDerivativesResult(
         derivatives=derivs, matrix=matrix, axes=axes, step=step,
         drag_basis="CD_total" if use_cd_total else "CDi", b_ref=b_ref, c_ref=c_ref, ref_point=rp,
         base=base,
         device=devices.pop() if len(devices) == 1 else "mixed",
         precision=precisions.pop() if len(precisions) == 1 else "mixed",
-        n_solves=len(results), notes=notes,
+        n_solves=len(results), notes=notes, case_converged=case_converged,
     )

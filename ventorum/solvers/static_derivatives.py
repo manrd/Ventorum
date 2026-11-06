@@ -81,6 +81,9 @@ class StaticDerivativesResult:
         body-axis pitching moment derivative.
     neutral_point_x : float or None
         Neutral point x position [m], geometry axes (x aft).
+    case_converged : list[bool]
+        Converged flag of each solved case, in the order base, alpha +, alpha -, beta +, beta -. A
+        note of the result names the cases with False.
     """
 
     derivatives: dict[str, float]
@@ -98,6 +101,7 @@ class StaticDerivativesResult:
     notes: list[str] = field(default_factory=list)
     static_margin: float | None = None
     neutral_point_x: float | None = None
+    case_converged: list[bool] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         """Return a JSON-compatible dictionary without the result object."""
@@ -119,6 +123,7 @@ class StaticDerivativesResult:
             "notes": list(self.notes),
             "static_margin": _json_float(self.static_margin),
             "neutral_point_x": _json_float(self.neutral_point_x),
+            "case_converged": [bool(v) for v in self.case_converged],
         }
 
 
@@ -261,6 +266,11 @@ def static_derivatives(
         "relative to the free stream.",
         "Static margin and neutral point use the body-axis Cm_alpha.",
     ]
+    case_converged = [bool(r.converged) for r in results]
+    failed = [lab for lab, ok in zip(("base", "alpha +", "alpha -", "beta +", "beta -"), case_converged) if not ok]
+    if failed:
+        notes.append("Not all cases of the differences converged ({}): the derivatives that use these cases are "
+                     "not reliable.".format(", ".join(failed)))
     return StaticDerivativesResult(
         derivatives=derivs,
         matrix=matrix,
@@ -277,4 +287,5 @@ def static_derivatives(
         notes=notes,
         static_margin=sm,
         neutral_point_x=x_np,
+        case_converged=case_converged,
     )
