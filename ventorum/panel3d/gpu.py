@@ -852,6 +852,34 @@ def _sum_batch_axis(values, axis):
     return work[..., 0]
 
 
+def _trefftz_gamma(mu, c64, geometry, up, lo):
+    """Return the wake strip strengths of the full wake [m^2/s] (float64).
+
+    On a half mesh, both halves come from the same float64 unit doublets
+    ``geometry["unit_mu"]`` and the float64 coefficients *c64* (K, 6). The
+    device mu of the solve precision must not supply the right half: in
+    float32 the two halves of a symmetric case would then differ by
+    rounding. On a full mesh, *mu* (K, N) [m^2/s] gives the strengths.
+    """
+    import torch
+
+    if not geometry["half"]:
+        mu_full = mu.to(torch.float64)
+    else:
+        host_mu = geometry["unit_mu"]
+        right = torch.zeros((c64.shape[0], host_mu.shape[0]), dtype=torch.float64, device=c64.device)
+        symmetric = torch.zeros_like(right)
+        asymmetric = torch.zeros_like(right)
+        for k in range(N_ONSETS):
+            right = torch.addcmul(right, c64[:, None, k], host_mu[None, :, k])
+        for k in (0, 2, 4):
+            symmetric = torch.addcmul(symmetric, c64[:, None, k], host_mu[None, :, k])
+        for k in (1, 3, 5):
+            asymmetric = torch.addcmul(asymmetric, c64[:, None, k], host_mu[None, :, k])
+        mu_full = torch.cat([right, symmetric - asymmetric], dim=1)
+    return mu_full[:, up] - mu_full[:, lo]
+
+
 def _evaluate_conditions_on_device(
     unit_mu, unit_sigma, unit_grad, coeffs, speed, rho, geometry, trefftz,
 ):
@@ -935,18 +963,7 @@ def _evaluate_conditions_on_device(
     cdi = torch.zeros_like(speeds)
     if trefftz is not None:
         factors, up, lo, s_ref, ground = trefftz
-        mu_full = mu.to(torch.float64)
-        if geometry["half"]:
-            host_mu = geometry["unit_mu"]
-            symmetric = torch.zeros_like(mu_full)
-            asymmetric = torch.zeros_like(mu_full)
-            for k in (0, 2, 4):
-                symmetric = torch.addcmul(symmetric, c64[:, None, k], host_mu[None, :, k])
-            for k in (1, 3, 5):
-                asymmetric = torch.addcmul(asymmetric, c64[:, None, k], host_mu[None, :, k])
-            left = symmetric - asymmetric
-            mu_full = torch.cat([mu_full, left], dim=1)
-        gamma = mu_full[:, up] - mu_full[:, lo]
+        gamma = _trefftz_gamma(mu, c64, geometry, up, lo)
         gv = torch.cat([gamma, -gamma], dim=1)
         if ground:
             gv = torch.cat([gv, -gv], dim=1)

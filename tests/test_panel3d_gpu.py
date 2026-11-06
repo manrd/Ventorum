@@ -421,3 +421,35 @@ def test_gpu_float64_moment_parity_tapered_swept_wing() -> None:
         _check_solver_parity(res_new, res_ref, 1e-10, "gpu tapered swept")
         for name in ("Cl", "Cm", "Cn"):
             _assert_close(getattr(res_new, name), getattr(res_ref, name), 1e-10, name)
+
+
+@pytest.mark.gpu
+def test_gpu_float32_half_mesh_trefftz_halves_equal(monkeypatch) -> None:
+    """The two halves of the Trefftz wake strengths are equal for a symmetric case.
+
+    A half mesh in float32 on the GPU must make the right and the left wake
+    strip strengths from one source. A mix of the float32 device mu and the
+    float64 host unit doublets makes them differ by rounding.
+    """
+    torch = _need_cuda()
+    from ventorum.panel3d import gpu as gpu_mod
+
+    captured = []
+    original = gpu_mod._trefftz_gamma
+
+    def capture(*args):
+        gamma = original(*args)
+        captured.append(gamma.cpu().numpy())
+        return gamma
+
+    monkeypatch.setattr(gpu_mod, "_trefftz_gamma", capture)
+    surf = _rectangular_wing_surface()
+    mesh = mesh_lifting_surface(surf, _naca0012_coordinates(51), n_chord=6, n_span=6, half=True)
+    conds = [FlightCondition(V_inf=50.0, alpha=np.radians(a)) for a in (2.0, 5.0)]
+    solver = PanelSolver(mesh, far_ratio=np.inf, backend="gpu", dtype=torch.float32)
+    solver.solve_conditions(conds)
+    assert captured
+    gamma = captured[-1]
+    n_strips = gamma.shape[1] // 2
+    assert n_strips > 0 and gamma.shape[1] == 2 * n_strips
+    np.testing.assert_array_equal(gamma[:, :n_strips], gamma[:, n_strips:])
