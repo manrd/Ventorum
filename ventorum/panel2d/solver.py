@@ -241,12 +241,21 @@ def section_chord(body) -> float:
     Returns
     -------
     float
-        Chord [m]; 1.0 for a section of zero size.
+        Chord [m].
+
+    Raises
+    ------
+    ValueError
+        If the chord is zero or not finite (a section of zero size or with
+        points that are not finite).
     """
     pts = np.asarray(body, dtype=np.float64)
     mid = 0.5 * (pts[0] + pts[-1])
     chord = float(np.linalg.norm(pts[leading_edge_index(pts)] - mid))
-    return chord if chord > 0.0 else 1.0
+    if not np.isfinite(chord) or chord <= 0.0:
+        raise ValueError(f"The section has no chord (leading edge to trailing-edge midpoint {chord!r}): "
+                         "give a section of non-zero size with finite points.")
+    return chord
 
 
 def _as_numpy(body) -> np.ndarray:

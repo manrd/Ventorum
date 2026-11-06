@@ -315,3 +315,11 @@ def test_section_reference_checks_its_inputs():
         SectionReference((0.0, 0.0), (1.0, 0.0, 0.0))
     with pytest.raises(AirfoilGeometryError, match="reference"):
         AirfoilShape(coords=np.zeros((3, 2)) + [[1.0, 0.0], [0.0, 0.0], [1.0, 0.0]], reference=(0.0, 1.0))
+
+
+def test_reference_of_a_section_without_chord_raises():
+    """A section of zero size or with points that are not finite has no reference chord: ValueError."""
+    for pts in (np.zeros((5, 2)), np.full((5, 2), 0.3), np.array([[1.0, 0.0], [np.nan, 0.1], [1.0, 0.0]])):
+        with pytest.raises(ValueError, match="no chord"):
+            SectionReference.from_coords(pts)
+    assert SectionReference.from_coords(np.array([[1.0, 0.0], [0.0, 0.0], [1.0, 0.0]])).chord_ref == 1.0

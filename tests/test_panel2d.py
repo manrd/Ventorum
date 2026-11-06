@@ -624,3 +624,13 @@ def test_influence_matrices_match_the_dense_incidence(monkeypatch, case, ground)
     res = solve_inviscid(raw, 4.0, height=height)
     assert abs(res.Cl - ref.Cl) <= 1e-12 * max(1.0, abs(ref.Cl))
     assert abs(res.Cm - ref.Cm) <= 1e-12
+
+
+def test_section_chord_of_a_section_without_chord_raises():
+    """section_chord and the default reference raise ValueError for a section of zero size (no silent 1.0)."""
+    for pts in (np.zeros((5, 2)), np.full((5, 2), 0.3), np.array([[1.0, 0.0], [np.inf, 0.1], [1.0, 0.0]])):
+        with pytest.raises(ValueError, match="no chord"):
+            sv.section_chord(pts)
+        with pytest.raises(ValueError, match="no chord"):
+            sv.resolve_reference(pts, None, None)
+    assert sv.section_chord(np.array([[2.0, 0.0], [0.0, 0.0], [2.0, 0.0]])) == 2.0
