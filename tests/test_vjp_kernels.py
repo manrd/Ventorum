@@ -802,3 +802,85 @@ def test_warp_vjp_parity_on_extended_leg_lines(precision: str) -> None:
         assert np.all(np.isfinite(gn)), q
         err = float(np.max(np.abs(gn - gw))) / float(np.max(np.abs(gw)))
         assert err <= tol, (precision, q, err)
+
+
+
+def test_warp_block_count_is_capped() -> None:
+    """The Warp launches have at most MAX_BLOCKS blocks; below the cap the block size is BLOCK."""
+    pytest.importorskip("warp")
+    from ventorum.aero.vortex_vjp import VJP_MAX_BLOCKS
+    from ventorum.gpu import vjp_kernels as wk
+
+    assert wk.MAX_BLOCKS == VJP_MAX_BLOCKS
+    assert wk._blocks(1) == 1 and wk._block_size(1) == wk.BLOCK
+    assert wk._blocks(wk.BLOCK * wk.MAX_BLOCKS) == wk.MAX_BLOCKS
+    assert wk._block_size(wk.BLOCK * wk.MAX_BLOCKS) == wk.BLOCK
+    for n in (wk.BLOCK * wk.MAX_BLOCKS + 1, 15_000, 10**7):
+        nb, bs = wk._blocks(n), wk._block_size(n)
+        assert nb <= wk.MAX_BLOCKS and nb * bs >= n and (nb - 1) * bs < n, n
+
+
+@pytest.mark.gpu
+@pytest.mark.parametrize("precision", ["float64", "float32"])
+def test_warp_capped_blocks_equal_uncapped(precision: str, monkeypatch) -> None:
+    """The capped Warp launches equal the uncapped launches (BLOCK members per block) to round-off.
+
+    The counts of sources and targets are above BLOCK * MAX_BLOCKS, so the
+    cap makes larger blocks. The tolerances are those of the parity tests.
+    The float64 sum of the block buffers in small parts gives the same
+    values to round-off.
+    """
+    torch = _need_cuda()
+    from types import SimpleNamespace
+
+    from ventorum.gpu import vjp_kernels as wk
+
+    rng = np.random.default_rng(31)
+    m = n = wk.BLOCK * wk.MAX_BLOCKS + 300
+    dt = torch.float64 if precision == "float64" else torch.float32
+
+    def t(x):  # type: ignore[no-untyped-def]
+        return torch.tensor(x, dtype=dt, device="cuda")
+
+    P, X = t(rng.uniform(-2.0, 2.0, (m, 3))), t(rng.normal(size=(m, 3)))
+    a = rng.uniform(-2.0, 2.0, (n, 3))
+    b = a + rng.normal(scale=0.2, size=(n, 3))
+    d = np.array([0.95, 0.05, 0.3]) / np.linalg.norm([0.95, 0.05, 0.3])
+    ate, bte = a + np.array([0.3, 0.0, 0.02]), b + np.array([0.3, 0.0, 0.02])
+    rc2, s = t(rng.uniform(1e-4, 1e-3, n)), t(rng.choice([-1.0, 1.0], n))
+    i64 = torch.int64
+    topo = SimpleNamespace(src_group=torch.zeros(n, dtype=i64), tg_group=torch.zeros(m, dtype=i64),
+                           own=torch.full((m,), -1, dtype=i64), src_panel=torch.arange(n, dtype=i64),
+                           edge=torch.full((m,), -1, dtype=i64), src_edge_a=torch.arange(n, dtype=i64),
+                           src_edge_b=torch.arange(n, dtype=i64), col=torch.arange(n, dtype=i64),
+                           n_u=n, use_tg=False)
+    hs = (P, X, t(a), t(b), t(ate), t(bte), t(np.tile(d, (n, 1))), rc2, None, s, None, topo)
+    q, qn = t(rng.normal(size=(m, 3))), t(rng.normal(size=(m, 3)))
+    groups = (torch.zeros(n, dtype=i64), torch.zeros(m, dtype=i64), False)
+    tz = (q, qn, t(rng.normal(size=(n, 3))), t(rng.normal(size=n)), t(d), rc2, t(np.zeros(m)), groups)
+    gw = t(rng.normal(size=m))
+
+    def run() -> list[np.ndarray]:
+        out = list(wk.horseshoe_vjp(*hs))
+        out.append(wk.horseshoe_forward(1, P, None, *hs[2:8], None, s, topo))
+        out.append(wk.trefftz_forward(*tz))
+        out.extend(wk.trefftz_vjp(*tz, gw))
+        return [None if x is None else x.double().cpu().numpy() for x in out]
+
+    capped_blocks = wk._blocks(n)
+    assert capped_blocks <= wk.MAX_BLOCKS and wk._block_size(n) > wk.BLOCK
+    capped = run()
+    monkeypatch.setattr(wk, "_SUM_CHUNK_VALUES", 4096)
+    chunked = run()
+    monkeypatch.setattr(wk, "MAX_BLOCKS", 10**9)
+    monkeypatch.setattr(wk, "_SUM_CHUNK_VALUES", 1 << 40)
+    assert wk._blocks(n) > capped_blocks and wk._block_size(n) == wk.BLOCK
+    uncapped = run()
+    tol = _TOL[precision]
+    for k, (x, y, z) in enumerate(zip(capped, uncapped, chunked)):
+        if y is None:
+            assert x is None and z is None, k
+            continue
+        scale = max(float(np.max(np.abs(y))), 1e-300)
+        assert float(np.max(np.abs(x - z))) <= tol * scale, (k, "chunked")
+        assert float(np.max(np.abs(x - y))) <= tol * scale, (k, float(np.max(np.abs(x - y))) / scale)
