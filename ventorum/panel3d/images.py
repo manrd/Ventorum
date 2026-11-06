@@ -24,6 +24,7 @@ import numpy as np
 from ventorum.aero.system import ground_normal
 from ventorum.core.datatypes import FlightCondition
 from ventorum.core.errors import GroundStrikeError
+from ventorum.panel3d.kernels import _DEGENERATE_EDGE
 from ventorum.panel3d.mesh import PanelMesh
 
 __all__ = [
@@ -85,6 +86,47 @@ def reflect_points_plane(
     return p - 2.0 * h * n
 
 
+def _corner_diameter(corners: np.ndarray) -> np.ndarray:
+    """Return the largest distance [m] between two corners of each panel.
+
+    *corners* has shape (..., 4, 3) in m. The result has shape (...).
+    """
+    diam_sq = np.zeros(corners.shape[:-2], dtype=float)
+    for i in range(4):
+        for j in range(i + 1, 4):
+            d_sq = np.sum((corners[..., i, :] - corners[..., j, :]) ** 2, axis=-1)
+            diam_sq = np.fmax(diam_sq, d_sq)
+    return np.sqrt(diam_sq)
+
+
+def _repeated_corner(a: np.ndarray, b: np.ndarray, diameter: np.ndarray) -> np.ndarray:
+    """Return True where two panel corners [m] are the same point.
+
+    This is the one criterion of a repeated corner (the closing edge of a
+    triangle) in Ventorum-3DP: equal coordinates, or a distance not larger
+    than ``_DEGENERATE_EDGE`` times the panel *diameter* [m]. The kernels use
+    the same limit for a degenerate edge (see
+    :func:`ventorum.panel3d.kernels._precompute_geometry`). The test has no
+    relative part in the coordinates, so it does not depend on the distance
+    of the panel from the origin.
+
+    Parameters
+    ----------
+    a, b : numpy.ndarray
+        Corner coordinates with shape (..., 3) in m.
+    diameter : numpy.ndarray
+        Panel diameters with shape (...) in m.
+
+    Returns
+    -------
+    numpy.ndarray
+        Boolean array with shape (...).
+    """
+    with np.errstate(invalid="ignore"):
+        dist = np.linalg.norm(a - b, axis=-1)
+        return np.all(a == b, axis=-1) | (dist <= _DEGENERATE_EDGE * diameter)
+
+
 def standardize_panel_corners(panels: np.ndarray) -> np.ndarray:
     """Standardize triangle panels to repeat the third vertex in the fourth position.
 
@@ -99,11 +141,9 @@ def standardize_panel_corners(panels: np.ndarray) -> np.ndarray:
         Standardized panel corner coordinates with shape (M, 4, 3) in m.
     """
     out = np.array(panels, dtype=float, copy=True)
+    diameter = _corner_diameter(out)
     # These adjacent pairs are corners 2 and 3 after shifts 0, 1, 2, 3.
-    close = np.all(
-        np.isclose(out[:, [2, 3, 0, 1]], out[:, [3, 0, 1, 2]], atol=1e-12),
-        axis=-1,
-    )
+    close = _repeated_corner(out[:, [2, 3, 0, 1]], out[:, [3, 0, 1, 2]], diameter[:, None])
     # argmax returns zero for a row with no match, so its order stays fixed.
     shifts = np.argmax(close, axis=1)
     order = (np.arange(4)[None, :] + shifts[:, None]) % 4
@@ -127,13 +167,14 @@ def _standardize_panel_corners_reference(panels: np.ndarray) -> np.ndarray:
     m = out.shape[0]
     for i in range(m):
         row = out[i]
-        # Check if already standardized (corner 2 close to corner 3)
-        if np.allclose(row[2], row[3], atol=1e-12):
+        diameter = _corner_diameter(row)
+        # Check if already standardized (corner 2 equal to corner 3)
+        if _repeated_corner(row[2], row[3], diameter):
             continue
         # Search which adjacent pair is identical
         for shift in range(1, 4):
             shifted = np.roll(row, -shift, axis=0)
-            if np.allclose(shifted[2], shifted[3], atol=1e-12):
+            if _repeated_corner(shifted[2], shifted[3], diameter):
                 out[i] = shifted
                 break
     return out

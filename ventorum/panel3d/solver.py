@@ -95,6 +95,8 @@ from ventorum.aero.system import freestream_direction, has_rates, rotation_veloc
 from ventorum.core.datatypes import FlightCondition
 from ventorum.core.errors import GroundStrikeError, ValidityError
 from ventorum.panel3d.images import (
+    _corner_diameter,
+    _repeated_corner,
     check_ground_clearance,
     ground_plane_parameters,
     mirror_panels_y,
@@ -304,6 +306,7 @@ def _standardize_panels(panels: np.ndarray, nodes: np.ndarray | None = None) -> 
     pans = np.asarray(panels, dtype=int).copy()
     shifts = np.zeros(len(pans), dtype=int)
     found = np.zeros(len(pans), dtype=bool)
+    diameter = None
     # Search shifts in order. Do not read coordinates after an index match
     # or after an earlier shift matched, as in the loop reference.
     for shift in range(4):
@@ -312,9 +315,13 @@ def _standardize_panels(panels: np.ndarray, nodes: np.ndarray | None = None) -> 
         if nodes is not None:
             active = ~found & ~match
             coords = np.asarray(nodes)
-            match[active] = np.all(
-                np.isclose(coords[pans[active, a]], coords[pans[active, b]], atol=1e-12),
-                axis=-1,
+            if diameter is None:
+                # The rows of the first coordinate test hold the rows of
+                # all later tests. Read only their corners.
+                diameter = np.zeros(len(pans), dtype=float)
+                diameter[active] = _corner_diameter(coords[pans[active]])
+            match[active] = _repeated_corner(
+                coords[pans[active, a]], coords[pans[active, b]], diameter[active],
             )
         choose = ~found & match
         shifts[choose] = shift
@@ -346,8 +353,8 @@ def _standardize_panels_reference(panels: np.ndarray, nodes: np.ndarray | None =
             if shifted[2] == shifted[3]:
                 pans[i] = shifted
                 break
-            if nodes is not None and np.allclose(
-                nodes[shifted[2]], nodes[shifted[3]], atol=1e-12
+            if nodes is not None and _repeated_corner(
+                nodes[shifted[2]], nodes[shifted[3]], _corner_diameter(nodes[row])
             ):
                 pans[i] = shifted
                 break
