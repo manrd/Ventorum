@@ -90,13 +90,17 @@ def _model_cases() -> list[tuple]:
 
 _CASE_IDS = [c[0] for c in _model_cases()]
 
-# Cases checked in float64 only. In the ground case of this wing the float32
-# PyTorch reference itself is 6 % from the float64 reference in the
-# wake-direction gradient at the leg points (the same without camber and
-# without the chains, so a property of the geometry in float32); the float32
-# kernels and the float32 reference then differ by more than the float32
-# tolerance. The float64 products agree to about 1e-15.
-_FLOAT64_ONLY = {"vlm-chain-ground"}
+# Cases checked in float64 only (none at present). The ground case of the
+# cambered chain wing was here: with the leg nodes of that time, the float32
+# reference was 6.6 % from the float64 reference in the wake-direction
+# gradient of the induced velocity at the leg points. A float64 evaluation on
+# the same inputs rounded to float32 gave the same 6.6 %, so the cause was the
+# float32 rounding of the coordinates of a load point very near a leg (input
+# conditioning), not the arithmetic of the kernels. With the current leg
+# nodes (the mean-surface node at every edge between different hinges, the
+# leg node on the last panel) that pair is gone, and the case meets the
+# float32 parity tolerance with all backends.
+_FLOAT64_ONLY: set[str] = set()
 
 
 def _captured_calls(case_id: str, device: str, precision: str):  # type: ignore[no-untyped-def]
@@ -231,6 +235,72 @@ def test_vjp_parity_warp(case_id: str, precision: str) -> None:
     _check_parity(case_id, "warp", "cuda", precision)
 
 
+def _per_output_error(ref, new, outputs: tuple) -> dict[str, float]:  # type: ignore[no-untyped-def]
+    """Return per output the largest gradient difference relative to the largest *ref* component of that output."""
+    def flat(x):  # type: ignore[no-untyped-def]
+        if isinstance(x, dict):
+            return np.concatenate([flat(x[k]) for k in sorted(x)]) if x else np.zeros(0)
+        return np.atleast_1d(np.asarray(x, dtype=float)).ravel()
+
+    out = {}
+    for o in outputs:
+        a = np.concatenate([flat(ref.jacobian[o][w]) for w in sorted(ref.jacobian[o])])
+        b = np.concatenate([flat(new.jacobian[o][w]) for w in sorted(ref.jacobian[o])])
+        out[o] = float(np.max(np.abs(a - b))) / float(np.max(np.abs(a)))
+    return out
+
+
+def _float32_gate_chain_ground(device: str) -> dict[str, float]:
+    """Return the per-output float32 error of the cambered chain wing in ground effect against float64."""
+    from ventorum import gpu
+
+    _, ac, cond, st, wrt, outs = {c[0]: c for c in _model_cases()}["vlm-chain-ground"]
+    old_dev, old_prec = gpu.get_device(), gpu._precision
+    res = {}
+    try:
+        gpu.set_device(device)
+        for prec in ("float64", "float32"):
+            gpu.set_precision(prec)
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                res[prec] = vt.gradients(ac, cond, st, outputs=outs, wrt=wrt, method="kernels")
+            assert res[prec].precision_gradient == prec
+    finally:
+        gpu.set_device(old_dev)
+        gpu.set_precision(old_prec)
+    return _per_output_error(res["float64"], res["float32"], outs)
+
+
+def test_float32_gate_chain_ground_cpu() -> None:
+    """Float32 gradients of the cambered chain wing in ground effect meet the float32 floor (CPU).
+
+    The case was once 6 % off in float32 and excluded from the float32
+    parity test. Each output is compared with the float64 gradient,
+    relative to the largest component of its float64 gradient over all
+    inputs (nodes, alpha, h). The tolerance is the float32 floor of
+    check_gradients (``RTOL_FLOAT32``, 1e-3); the measured error is at most
+    3e-4 (the side force).
+    """
+    pytest.importorskip("torch")
+    from ventorum.sensitivity.check import RTOL_FLOAT32
+
+    err = _float32_gate_chain_ground("cpu")
+    assert max(err.values()) <= RTOL_FLOAT32, err
+
+
+@pytest.mark.gpu
+def test_float32_gate_chain_ground_gpu() -> None:
+    """Float32 gradients of the cambered chain wing in ground effect meet the float32 floor (Warp, GPU)."""
+    _need_cuda()
+    from ventorum import gpu
+    from ventorum.sensitivity.check import RTOL_FLOAT32
+
+    if not gpu.available():
+        pytest.skip(f"The GPU pipelines cannot run: {gpu.unavailable_reason()}")
+    err = _float32_gate_chain_ground("gpu")
+    assert max(err.values()) <= RTOL_FLOAT32, err
+
+
 def _synthetic(m: int, n: int, n_u: int, seed: int) -> tuple:
     """Return random horseshoe arrays with masked pairs, zero-length legs and two core groups."""
     rng = np.random.default_rng(seed)
@@ -360,6 +430,35 @@ def test_resolve_rules_restores_the_forced_backend(monkeypatch) -> None:
         test_resolve_rules()
     assert len(calls) == 3
     assert K.get_forced_backend() is None
+
+
+def test_one_floor_per_precision_in_all_backends() -> None:
+    """Regression: every VJP backend and the reference copy use the floor table of vortex_vjp.
+
+    Before, the float32 reference copy used the smallest normal float32
+    number (1.2e-38) and the float32 Warp kernels 1e-30, although the
+    docstrings said "same floors".
+    """
+    import re
+    from pathlib import Path
+
+    torch = pytest.importorskip("torch")
+    from ventorum.aero import vortex_vjp as ref
+    from ventorum.aero import vortex_vjp_numba as nb
+    from ventorum.sensitivity.reference import _length_floor
+
+    assert ref.FLOORS == {"float64": 1e-300, "float32": 1e-30}
+    assert nb._FLOOR == ref.FLOORS["float64"]
+    assert _length_floor(torch.float64) == ref.FLOORS["float64"]
+    assert _length_floor(torch.float32) == ref.FLOORS["float32"]
+    # The Cython kernels compute in float64; their floor is a C constant.
+    pyx = Path(ref.__file__).with_name("vortex_vjp_cython.pyx").read_text(encoding="utf-8")
+    m = re.search(r"cdef double _FLOOR = ([0-9.eE+-]+)", pyx)
+    assert m is not None and float(m.group(1)) == ref.FLOORS["float64"]
+    if K.available("warp", "cuda"):
+        from ventorum.gpu import vjp_kernels as wk
+
+        assert wk._FLOORS == ref.FLOORS
 
 
 def test_row_blocks_depend_only_on_the_row_count() -> None:
@@ -703,3 +802,85 @@ def test_warp_vjp_parity_on_extended_leg_lines(precision: str) -> None:
         assert np.all(np.isfinite(gn)), q
         err = float(np.max(np.abs(gn - gw))) / float(np.max(np.abs(gw)))
         assert err <= tol, (precision, q, err)
+
+
+
+def test_warp_block_count_is_capped() -> None:
+    """The Warp launches have at most MAX_BLOCKS blocks; below the cap the block size is BLOCK."""
+    pytest.importorskip("warp")
+    from ventorum.aero.vortex_vjp import VJP_MAX_BLOCKS
+    from ventorum.gpu import vjp_kernels as wk
+
+    assert wk.MAX_BLOCKS == VJP_MAX_BLOCKS
+    assert wk._blocks(1) == 1 and wk._block_size(1) == wk.BLOCK
+    assert wk._blocks(wk.BLOCK * wk.MAX_BLOCKS) == wk.MAX_BLOCKS
+    assert wk._block_size(wk.BLOCK * wk.MAX_BLOCKS) == wk.BLOCK
+    for n in (wk.BLOCK * wk.MAX_BLOCKS + 1, 15_000, 10**7):
+        nb, bs = wk._blocks(n), wk._block_size(n)
+        assert nb <= wk.MAX_BLOCKS and nb * bs >= n and (nb - 1) * bs < n, n
+
+
+@pytest.mark.gpu
+@pytest.mark.parametrize("precision", ["float64", "float32"])
+def test_warp_capped_blocks_equal_uncapped(precision: str, monkeypatch) -> None:
+    """The capped Warp launches equal the uncapped launches (BLOCK members per block) to round-off.
+
+    The counts of sources and targets are above BLOCK * MAX_BLOCKS, so the
+    cap makes larger blocks. The tolerances are those of the parity tests.
+    The float64 sum of the block buffers in small parts gives the same
+    values to round-off.
+    """
+    torch = _need_cuda()
+    from types import SimpleNamespace
+
+    from ventorum.gpu import vjp_kernels as wk
+
+    rng = np.random.default_rng(31)
+    m = n = wk.BLOCK * wk.MAX_BLOCKS + 300
+    dt = torch.float64 if precision == "float64" else torch.float32
+
+    def t(x):  # type: ignore[no-untyped-def]
+        return torch.tensor(x, dtype=dt, device="cuda")
+
+    P, X = t(rng.uniform(-2.0, 2.0, (m, 3))), t(rng.normal(size=(m, 3)))
+    a = rng.uniform(-2.0, 2.0, (n, 3))
+    b = a + rng.normal(scale=0.2, size=(n, 3))
+    d = np.array([0.95, 0.05, 0.3]) / np.linalg.norm([0.95, 0.05, 0.3])
+    ate, bte = a + np.array([0.3, 0.0, 0.02]), b + np.array([0.3, 0.0, 0.02])
+    rc2, s = t(rng.uniform(1e-4, 1e-3, n)), t(rng.choice([-1.0, 1.0], n))
+    i64 = torch.int64
+    topo = SimpleNamespace(src_group=torch.zeros(n, dtype=i64), tg_group=torch.zeros(m, dtype=i64),
+                           own=torch.full((m,), -1, dtype=i64), src_panel=torch.arange(n, dtype=i64),
+                           edge=torch.full((m,), -1, dtype=i64), src_edge_a=torch.arange(n, dtype=i64),
+                           src_edge_b=torch.arange(n, dtype=i64), col=torch.arange(n, dtype=i64),
+                           n_u=n, use_tg=False)
+    hs = (P, X, t(a), t(b), t(ate), t(bte), t(np.tile(d, (n, 1))), rc2, None, s, None, topo)
+    q, qn = t(rng.normal(size=(m, 3))), t(rng.normal(size=(m, 3)))
+    groups = (torch.zeros(n, dtype=i64), torch.zeros(m, dtype=i64), False)
+    tz = (q, qn, t(rng.normal(size=(n, 3))), t(rng.normal(size=n)), t(d), rc2, t(np.zeros(m)), groups)
+    gw = t(rng.normal(size=m))
+
+    def run() -> list[np.ndarray]:
+        out = list(wk.horseshoe_vjp(*hs))
+        out.append(wk.horseshoe_forward(1, P, None, *hs[2:8], None, s, topo))
+        out.append(wk.trefftz_forward(*tz))
+        out.extend(wk.trefftz_vjp(*tz, gw))
+        return [None if x is None else x.double().cpu().numpy() for x in out]
+
+    capped_blocks = wk._blocks(n)
+    assert capped_blocks <= wk.MAX_BLOCKS and wk._block_size(n) > wk.BLOCK
+    capped = run()
+    monkeypatch.setattr(wk, "_SUM_CHUNK_VALUES", 4096)
+    chunked = run()
+    monkeypatch.setattr(wk, "MAX_BLOCKS", 10**9)
+    monkeypatch.setattr(wk, "_SUM_CHUNK_VALUES", 1 << 40)
+    assert wk._blocks(n) > capped_blocks and wk._block_size(n) == wk.BLOCK
+    uncapped = run()
+    tol = _TOL[precision]
+    for k, (x, y, z) in enumerate(zip(capped, uncapped, chunked)):
+        if y is None:
+            assert x is None and z is None, k
+            continue
+        scale = max(float(np.max(np.abs(y))), 1e-300)
+        assert float(np.max(np.abs(x - z))) <= tol * scale, (k, "chunked")
+        assert float(np.max(np.abs(x - y))) <= tol * scale, (k, float(np.max(np.abs(x - y))) / scale)

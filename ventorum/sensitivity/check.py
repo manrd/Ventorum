@@ -49,12 +49,29 @@ _NOISE_POINTS = 10
 _NOISE_SPACING = 1e-3
 _NOISE_FACTOR = 6.0
 
+# Default relative tolerances of check_gradients per gradient precision
+# (the precision of the partials and of the adjoint solve, see
+# ventorum.sensitivity.gradients). float32 is the default precision of the
+# gradients. Its floor is set by the float32 data of the reference copy
+# (the lattice geometry rounded to float32), not by the arithmetic: on the
+# parity cases of tests/test_vjp_kernels.py the float32 gradients differ
+# from the float64 gradients by at most 1.4e-4 of the scale of their force
+# or moment vector, and by at most 9e-4 of the largest component of one
+# output (a small side force with sideslip, in ground effect). 1e-3 is the
+# float32 floor; 1e-6 is the float64 tolerance.
+RTOL_FLOAT64 = 1e-6
+RTOL_FLOAT32 = 1e-3
+
 
 def _production_scalars(geometry: Any, condition: Any, settings: Any, axes: str) -> dict[str, float]:
     """Return the scalar outputs of one production solve in *axes*."""
     import ventorum as vt
 
-    res = vt.analyze(geometry.clone(), condition, settings.clone())
+    return _result_scalars(vt.analyze(geometry.clone(), condition, settings.clone()), axes)
+
+
+def _result_scalars(res: Any, axes: str) -> dict[str, float]:
+    """Return the scalar outputs of the production result *res* in *axes*."""
     out = {
         "CL": float(res.totals.CL),
         "CY": float(res.totals.CY),
@@ -185,7 +202,7 @@ def check_gradients(
     outputs: tuple[str, ...] = ("CL", "CD", "Cm"),
     wrt: tuple[str, ...] = ("alpha", "nodes"),
     n_directions: int = 3,
-    rtol: float = 1e-6,
+    rtol: float | None = None,
     seed: int = 0,
     method: str = "auto",
     node_step: float | None = None,
@@ -219,8 +236,16 @@ def check_gradients(
         automatic reference values (a change of one copy breaks the pair).
     n_directions : int
         Number of random node directions.
-    rtol : float
-        Relative tolerance: 1e-6 in float64, 1e-3 in float32.
+    rtol : float or None, optional
+        Relative tolerance. If None (default), the tolerance follows the
+        precision of the gradients (``precision_gradient`` of
+        :func:`ventorum.sensitivity.gradients`): ``RTOL_FLOAT64`` (1e-6)
+        for float64 gradients and the float32 floor ``RTOL_FLOAT32``
+        (1e-3) for float32 gradients (the default precision). A float32
+        gradient cannot meet 1e-6: the reference copy holds the geometry in
+        float32, and the rounding of the coordinates alone changes the
+        gradients by up to about 1e-4 (see ``RTOL_FLOAT32``). The tolerance
+        in use is in the ``"rtol"`` item of the result.
     seed : int
         Seed of the random node directions.
     method : str
@@ -314,6 +339,8 @@ def check_gradients(
     axes = "body"
     grad_res = gradients(ac, condition, st, outputs=outs, wrt=ins, axes=axes, method=method)
     jac = grad_res.jacobian
+    if rtol is None:
+        rtol = RTOL_FLOAT64 if grad_res.precision_gradient == "float64" else RTOL_FLOAT32
     base_res = vt.analyze(ac.clone(), condition, st.clone())
     prec = str(base_res.details.get("precision", "float64"))
     eps = float(np.finfo(np.float32 if prec == "float32" else np.float64).eps)
@@ -322,18 +349,21 @@ def check_gradients(
     groups: dict[str, dict[str, int]] = {}
     ok_all = True
 
-    f0 = _production_scalars(ac, condition, st, axes)
+    # The base solve gives the base outputs (the same solve as
+    # _production_scalars of the base case).
+    f0 = _result_scalars(base_res, axes)
 
     from ventorum.sensitivity.topology import shared_hinge_topology
-    from ventorum.solvers.factory import make_solver
 
-    solver = make_solver(resolve_solver_type(st.solver_type))
     base_lat = base_res.details.get("lattice")
     base_topo = shared_hinge_topology(base_lat) if base_lat is not None else None
 
     def _evaluate(geometry_pert: Any, condition_pert: Any, input_name: str, step: float) -> dict[str, float]:
+        # One production solve per evaluation. The topology check uses the
+        # lattice of that solve (before, the lattice was built a second time).
+        res = vt.analyze(geometry_pert.clone(), condition_pert, st.clone())
         if base_topo is not None:
-            pert_lat = solver.build(geometry_pert, st, condition_pert)
+            pert_lat = res.details.get("lattice")
             pert_topo = shared_hinge_topology(pert_lat)
             if pert_topo != base_topo:
                 changed = base_topo.diff_surfaces(pert_topo)
@@ -344,7 +374,7 @@ def check_gradients(
                     f"shared-hinge topology of surface(s) {surfs}. Adjoint gradients are "
                     "defined at a fixed shared-hinge topology. Use a smaller finite-difference step."
                 )
-        return _production_scalars(geometry_pert, condition_pert, st, axes)
+        return _result_scalars(res, axes)
 
     def _record(group: str, suffix: str, grads: dict[str, float],
                 fd: dict[str, list[tuple[float, float, float, float]]], x_scale: float) -> None:

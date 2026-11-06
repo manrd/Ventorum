@@ -23,10 +23,17 @@ Layout
   the own legs of the sources after it on its chain (each thread walks the
   chain). In the VJP the own legs of a source take the sum of the adjoint
   weights of the sources before them on the chain.
+* Blocks: a block has ``BLOCK`` sources (targets), and more when the
+  count is above ``BLOCK * MAX_BLOCKS``: the number of blocks is at most
+  ``MAX_BLOCKS`` (the cap of the CPU kernels,
+  :data:`ventorum.aero.vortex_vjp.VJP_MAX_BLOCKS`). The cap limits the
+  memory of the block buffers of large lattices. Below the cap the blocks
+  have ``BLOCK`` members, so the cap does not change those results.
 * Each kernel is made for float32 or float64 (the type ``T``). In float32
   each pair is computed in float32 (the speed of consumer GPUs); the block
-  sums have at most ``BLOCK`` terms and the sums of the blocks are made in
-  float64.
+  sums have at most ``max(BLOCK, ceil(n / MAX_BLOCKS))`` terms and the
+  sums of the blocks are made in float64 (in parts for a large buffer,
+  without a float64 copy of the whole buffer).
 
 The derivation of the derivatives is in :mod:`ventorum.aero.vortex_vjp` and
 in the theory manual (``docs/theory/gradients.md``). Sources: J. Katz and
@@ -46,12 +53,17 @@ from types import SimpleNamespace
 import torch
 import warp as wp
 
+from ventorum.aero.vortex_vjp import FLOORS, VJP_MAX_BLOCKS
+
 _INV_4PI = 1.0 / (4.0 * math.pi)
 _INV_2PI = 1.0 / (2.0 * math.pi)
-_FLOORS = {"float64": 1e-300, "float32": 1e-30}
+# Floors per precision: the shared table of all VJP backends.
+_FLOORS = FLOORS
 
-# Sources (or targets) per thread of the row (column) launch.
+# Sources (or targets) per thread of the row (column) launch, and the
+# largest number of blocks of one launch (see _block_size).
 BLOCK = 32
+MAX_BLOCKS = VJP_MAX_BLOCKS
 
 _lock = threading.Lock()
 _built: dict = {}
@@ -77,7 +89,6 @@ def _build(precision: str) -> SimpleNamespace:  # noqa: C901 - one closure per k
     floor = _FLOORS[precision]
     module = f"ventorum_vjp_{precision}"
     wp.set_module_options({"enable_backward": False}, wp.get_module(module))
-    BJ = BLOCK
 
     @wp.func(module=module)
     def seg_v(p: vec, A: vec, B: vec, rc2: T):
@@ -432,13 +443,14 @@ def _build(precision: str) -> SimpleNamespace:  # noqa: C901 - one closure per k
                     sea: wp.array(dtype=wp.int64), seb: wp.array(dtype=wp.int64), s: wp.array(dtype=T),
                     use_tg: int, buf: wp.array3d(dtype=T), ak: wp.array(dtype=vec), bk: wp.array(dtype=vec),
                     kfl: wp.array(dtype=wp.int64), seka: wp.array(dtype=wp.int64), sekb: wp.array(dtype=wp.int64),
-                    ae: wp.array(dtype=vec), be: wp.array(dtype=vec), nxt: wp.array(dtype=wp.int64), chain: int):
+                    ae: wp.array(dtype=vec), be: wp.array(dtype=vec), nxt: wp.array(dtype=wp.int64), chain: int,
+                    bj: int):
         # Induced velocity: one thread per (target, source block); one partial sum per block.
         i, jb = wp.tid()
         n = a.shape[0]
         p = P[i]
         acc = vec()
-        for j in range(jb * BJ, wp.min((jb + 1) * BJ, n)):
+        for j in range(jb * bj, wp.min((jb + 1) * bj, n)):
             rc2 = pair_rc2(i, j, rc2s, tgrc2, sgrp, tgrp, use_tg)
             v = hs_v(i, j, p, a, b, ate, bte, d, rc2, own, spanel, edge, sea, seb, ak, bk, kfl, seka, sekb, ae, be)
             if chain != 0:
@@ -554,7 +566,7 @@ def _build(precision: str) -> SimpleNamespace:  # noqa: C901 - one closure per k
                  ak: wp.array(dtype=vec), bk: wp.array(dtype=vec), kfl: wp.array(dtype=wp.int64),
                  seka: wp.array(dtype=wp.int64), sekb: wp.array(dtype=wp.int64),
                  ae: wp.array(dtype=vec), be: wp.array(dtype=vec), nxt: wp.array(dtype=wp.int64), chain: int,
-                 buf: wp.array3d(dtype=T)):
+                 buf: wp.array3d(dtype=T), bj: int):
         # Target derivatives: one thread per (target, source block). buf[jb, i] = gP, gX, g_tg_rc2.
         i, jb = wp.tid()
         n = a.shape[0]
@@ -563,7 +575,7 @@ def _build(precision: str) -> SimpleNamespace:  # noqa: C901 - one closure per k
         aP = vec()
         aX = vec()
         atg = T(0.0)
-        for j in range(jb * BJ, wp.min((jb + 1) * BJ, n)):
+        for j in range(jb * bj, wp.min((jb + 1) * bj, n)):
             wf = T(1.0)
             if use_W != 0:
                 wf = W[i, int(col[j])]
@@ -601,7 +613,7 @@ def _build(precision: str) -> SimpleNamespace:  # noqa: C901 - one closure per k
                  ak: wp.array(dtype=vec), bk: wp.array(dtype=vec), kfl: wp.array(dtype=wp.int64),
                  seka: wp.array(dtype=wp.int64), sekb: wp.array(dtype=wp.int64),
                  ae: wp.array(dtype=vec), be: wp.array(dtype=vec), nxt: wp.array(dtype=wp.int64), chain: int,
-                 buf: wp.array3d(dtype=T)):
+                 buf: wp.array3d(dtype=T), bj: int):
         # Source derivatives: one thread per (source, target block).
         # buf[ib, j] = ga, gb, ga_te, gb_te, gd, g_rc2_src, gs, ga_k, gb_k, ga_e, gb_e.
         j, ib = wp.tid()
@@ -619,7 +631,7 @@ def _build(precision: str) -> SimpleNamespace:  # noqa: C901 - one closure per k
         abk = vec()
         aae = vec()
         abe = vec()
-        for i in range(ib * BJ, wp.min((ib + 1) * BJ, m)):
+        for i in range(ib * bj, wp.min((ib + 1) * bj, m)):
             wf = T(1.0)
             if use_W != 0:
                 wf = W[i, cj]
@@ -665,7 +677,7 @@ def _build(precision: str) -> SimpleNamespace:  # noqa: C901 - one closure per k
     def tz_rows(q: wp.array(dtype=vec), qn: wp.array(dtype=vec), p: wp.array(dtype=vec),
                 gamma: wp.array(dtype=T), dd: wp.array(dtype=vec), rc2: wp.array(dtype=T), tgrc2: wp.array(dtype=T),
                 sgrp: wp.array(dtype=wp.int64), tgrp: wp.array(dtype=wp.int64), use_tg: int,
-                gw: wp.array(dtype=T), buf: wp.array3d(dtype=T)):
+                gw: wp.array(dtype=T), buf: wp.array3d(dtype=T), bj: int):
         # Trefftz wash and target derivatives: buf[jb, i] = w, gq, gqn, g_tg_rc2.
         i, jb = wp.tid()
         n = p.shape[0]
@@ -677,7 +689,7 @@ def _build(precision: str) -> SimpleNamespace:  # noqa: C901 - one closure per k
         aq = vec()
         an = vec()
         atg = T(0.0)
-        for j in range(jb * BJ, wp.min((jb + 1) * BJ, n)):
+        for j in range(jb * bj, wp.min((jb + 1) * bj, n)):
             c2 = pair_rc2(i, j, rc2, tgrc2, sgrp, tgrp, use_tg)
             r = qi - p[j]
             v = wp.cross(d, r)
@@ -701,7 +713,7 @@ def _build(precision: str) -> SimpleNamespace:  # noqa: C901 - one closure per k
     def tz_cols(q: wp.array(dtype=vec), qn: wp.array(dtype=vec), p: wp.array(dtype=vec),
                 gamma: wp.array(dtype=T), dd: wp.array(dtype=vec), rc2: wp.array(dtype=T), tgrc2: wp.array(dtype=T),
                 sgrp: wp.array(dtype=wp.int64), tgrp: wp.array(dtype=wp.int64), use_tg: int,
-                gw: wp.array(dtype=T), buf: wp.array3d(dtype=T)):
+                gw: wp.array(dtype=T), buf: wp.array3d(dtype=T), bj: int):
         # Trefftz vortex derivatives: buf[ib, j] = gp, ggamma, g_rc2, gd.
         j, ib = wp.tid()
         m = q.shape[0]
@@ -712,7 +724,7 @@ def _build(precision: str) -> SimpleNamespace:  # noqa: C901 - one closure per k
         ag = T(0.0)
         arc = T(0.0)
         ad = vec()
-        for i in range(ib * BJ, wp.min((ib + 1) * BJ, m)):
+        for i in range(ib * bj, wp.min((ib + 1) * bj, m)):
             c2 = pair_rc2(i, j, rc2, tgrc2, sgrp, tgrp, use_tg)
             r = q[i] - pj
             v = wp.cross(d, r)
@@ -765,13 +777,62 @@ def _i(t: torch.Tensor):  # type: ignore[no-untyped-def]
     return wp.from_torch(t.to(torch.int64).contiguous())
 
 
+def _block_size(n: int) -> int:
+    """Return the members per block of a launch over *n* sources (or targets).
+
+    ``BLOCK``, or ``ceil(n / MAX_BLOCKS)`` when that is larger, so that a
+    launch has at most ``MAX_BLOCKS`` blocks. It depends only on *n*.
+    """
+    return max(BLOCK, -(-int(n) // MAX_BLOCKS))
+
+
 def _blocks(n: int) -> int:
-    return max(1, (int(n) + BLOCK - 1) // BLOCK)
+    """Return the number of blocks of a launch over *n* sources (or targets): at least 1, at most ``MAX_BLOCKS``."""
+    return max(1, -(-int(n) // _block_size(n)))
+
+
+# Largest float64 copy of a part of a block buffer in _sum_blocks and
+# _sum_all [values] (2**22 values, 32 MiB).
+_SUM_CHUNK_VALUES = 1 << 22
+
+
+def _chunk_rows(buf: torch.Tensor) -> int:
+    """Return the number of entries along axis 1 of *buf* per float64 part (at least 1)."""
+    per_row = max(1, int(buf.shape[0]) * int(buf[0, 0].numel()))
+    return max(1, _SUM_CHUNK_VALUES // per_row)
 
 
 def _sum_blocks(buf: torch.Tensor, dtype) -> torch.Tensor:  # type: ignore[no-untyped-def]
-    """Add the block partial sums (axis 0) in float64; return them in *dtype*."""
-    return buf.to(torch.float64).sum(dim=0).to(dtype)
+    """Add the block partial sums (axis 0) in float64; return them in *dtype*.
+
+    A large buffer is converted to float64 in parts along axis 1, each part
+    with at most ``_SUM_CHUNK_VALUES`` values, so no float64 copy of the
+    whole buffer is made (``torch.sum`` with a float64 ``dtype`` also makes
+    one on the GPU). Each output value is the same sum over axis 0 as
+    without parts.
+    """
+    m = int(buf.shape[1])
+    step = _chunk_rows(buf)
+    if step >= m:
+        return buf.to(torch.float64).sum(dim=0).to(dtype)
+    out = torch.empty(tuple(buf.shape[1:]), dtype=dtype, device=buf.device)
+    for i0 in range(0, m, step):
+        out[i0:i0 + step] = buf[:, i0:i0 + step].to(torch.float64).sum(dim=0).to(dtype)
+    return out
+
+
+def _sum_all(buf: torch.Tensor, dtype) -> torch.Tensor:  # type: ignore[no-untyped-def]
+    """Add *buf* over axes 0 and 1 in float64; return the sum in *dtype*.
+
+    A large buffer is added in parts along axis 1 (see :func:`_sum_blocks`):
+    the float64 sums of the parts are then added in float64.
+    """
+    m = int(buf.shape[1])
+    step = _chunk_rows(buf)
+    if step >= m:
+        return buf.to(torch.float64).sum(dim=(0, 1)).to(dtype)
+    parts = [buf[:, i0:i0 + step].to(torch.float64).sum(dim=(0, 1)) for i0 in range(0, m, step)]
+    return torch.stack(parts).sum(dim=0).to(dtype)
 
 
 def _topo_arrays(topo, m: int, dev) -> tuple:  # type: ignore[no-untyped-def]
@@ -849,7 +910,8 @@ def horseshoe_forward(mode, P, X, a, b, a_te, b_te, d, rc2_src, tg_rc2, s, topo,
     nb = _blocks(n)
     buf = torch.empty((nb, m, 3), dtype=P.dtype, device=dev)
     _launch(ns.fwd_induced, (m, nb),
-            [_v(P, ns), *geo, sg, tg, own, sp, edge, sea, seb, _s(s), use_tg, wp.from_torch(buf), *kink])
+            [_v(P, ns), *geo, sg, tg, own, sp, edge, sea, seb, _s(s), use_tg, wp.from_torch(buf), *kink,
+             _block_size(n)])
     return _sum_blocks(buf, P.dtype)
 
 
@@ -873,10 +935,10 @@ def horseshoe_vjp(P, X, a, b, a_te, b_te, d, rc2_src, tg_rc2, s, W, topo,
     args = args + _kink_args(topo, a_te, b_te, a_k, b_k, ns, dev, sea, seb, a_e, b_e)
     nbj = _blocks(n)
     rbuf = torch.empty((nbj, m, 7), dtype=P.dtype, device=dev)
-    _launch(ns.vjp_rows, (m, nbj), args + [wp.from_torch(rbuf)])
+    _launch(ns.vjp_rows, (m, nbj), args + [wp.from_torch(rbuf), _block_size(n)])
     nbi = _blocks(m)
     cbuf = torch.empty((nbi, n, 29), dtype=P.dtype, device=dev)
-    _launch(ns.vjp_cols, (n, nbi), args + [wp.from_torch(cbuf)])
+    _launch(ns.vjp_cols, (n, nbi), args + [wp.from_torch(cbuf), _block_size(m)])
     r = _sum_blocks(rbuf, P.dtype)
     c = _sum_blocks(cbuf, P.dtype)
     out = (r[:, 0:3], r[:, 3:6], r[:, 6], c[:, 0:3], c[:, 3:6], c[:, 6:9], c[:, 9:12], c[:, 12:15],
@@ -902,8 +964,8 @@ def trefftz_forward(q, qn, p, gamma, d, rc2, tg_rc2, groups):  # type: ignore[no
     nb = _blocks(n)
     buf = torch.empty((nb, m, 8), dtype=q.dtype, device=q.device)
     gw = torch.zeros(m, dtype=q.dtype, device=q.device)
-    _launch(ns.tz_rows, (m, nb), _tz_args(q, qn, p, gamma, d, rc2, tg_rc2, groups, ns) + [_s(gw),
-                                                                                        wp.from_torch(buf)])
+    _launch(ns.tz_rows, (m, nb), _tz_args(q, qn, p, gamma, d, rc2, tg_rc2, groups, ns)
+            + [_s(gw), wp.from_torch(buf), _block_size(n)])
     return _sum_blocks(buf[:, :, 0], q.dtype)
 
 
@@ -914,11 +976,11 @@ def trefftz_vjp(q, qn, p, gamma, d, rc2, tg_rc2, groups, gw):  # type: ignore[no
     args = _tz_args(q, qn, p, gamma, d, rc2, tg_rc2, groups, ns) + [_s(gw)]
     nbj = _blocks(n)
     rbuf = torch.empty((nbj, m, 8), dtype=q.dtype, device=q.device)
-    _launch(ns.tz_rows, (m, nbj), args + [wp.from_torch(rbuf)])
+    _launch(ns.tz_rows, (m, nbj), args + [wp.from_torch(rbuf), _block_size(n)])
     nbi = _blocks(m)
     cbuf = torch.empty((nbi, n, 8), dtype=q.dtype, device=q.device)
-    _launch(ns.tz_cols, (n, nbi), args + [wp.from_torch(cbuf)])
+    _launch(ns.tz_cols, (n, nbi), args + [wp.from_torch(cbuf), _block_size(m)])
     r = _sum_blocks(rbuf, q.dtype)
     c = _sum_blocks(cbuf, q.dtype)
-    gd = cbuf[:, :, 5:8].to(torch.float64).sum(dim=(0, 1)).to(q.dtype)
+    gd = _sum_all(cbuf[:, :, 5:8], q.dtype)
     return r[:, 1:4], r[:, 4:7], r[:, 7], c[:, 0:3], c[:, 3], c[:, 4], gd

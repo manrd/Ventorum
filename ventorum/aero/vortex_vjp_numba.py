@@ -32,7 +32,7 @@ import math
 
 import numpy as np
 
-from ventorum.aero.vortex_vjp import row_blocks
+from ventorum.aero.vortex_vjp import FLOORS, row_blocks
 
 try:
     from numba import njit, prange
@@ -43,7 +43,8 @@ except ImportError:  # pragma: no cover - numba is a dependency
 
 _INV_4PI = 1.0 / (4.0 * math.pi)
 _INV_2PI = 1.0 / (2.0 * math.pi)
-_FLOOR = 1e-300
+# The kernels compute in float64: the float64 floor of the shared table.
+_FLOOR = FLOORS["float64"]
 
 # Values per source in the block buffers of the horseshoe VJP:
 # ga (3), gb (3), ga_te (3), gb_te (3), gd (3), g_rc2_src, gs, the leg

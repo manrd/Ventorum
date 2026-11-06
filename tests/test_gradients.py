@@ -1399,3 +1399,73 @@ def test_gradients_with_zero_moment_vector(precision) -> None:
             gr = vt.gradients(ac, cond, st, outputs=outputs, wrt=("controls",))
             assert gr.forward_mismatch <= (1e-10 if precision == "float64" else 1e-4)
             assert gr.jacobian["CL"]["controls"]["flap"] > 0.5
+
+
+@pytest.mark.parametrize("precision", ["float32", "float64"])
+def test_check_gradients_default_tolerance_follows_the_precision(precision, cpu_device) -> None:
+    """Regression: the default rtol of check_gradients follows the gradient precision.
+
+    Before, the default was 1e-6 for every precision, and a default
+    (float32) gradient on the CPU failed the check (CDi node directions,
+    4e-6 relative) although it met the float32 floor 1e-3.
+    """
+    pytest.importorskip("torch")
+    from ventorum.sensitivity.check import RTOL_FLOAT32, RTOL_FLOAT64
+
+    af = vt.LinearAirfoil(name="S", a0=2.0 * np.pi, alpha_L0=np.radians(-2.0), Cd0=0.008, Cm0=-0.05)
+    wing = vt.LiftingSurface(
+        name="Wing", semi_span=4.0, sweep_le=np.radians(10.0), dihedral=np.radians(3.0),
+        sections=[vt.WingSection(y_frac=0.0, chord=1.2, airfoil=af),
+                  vt.WingSection(y_frac=1.0, chord=0.7, airfoil=af)])
+    ac = vt.Aircraft(surfaces=[wing])
+    st = vt.SolverSettings(solver_type="vlm", n_panels=6, n_chord=2)
+    cond = vt.FlightCondition(V_inf=30.0, alpha=np.radians(4.0), beta=np.radians(2.0), h=1.5)
+    with _gpu_settings(precision=precision), warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        out = vt.check_gradients(ac, cond, st, outputs=("CL", "CDi", "Cm"), wrt=("alpha", "nodes"),
+                                 n_directions=2)
+    assert out["rtol"] == (RTOL_FLOAT32 if precision == "float32" else RTOL_FLOAT64)
+    assert out["pass"], _failed(out)
+
+
+def test_cpu_kernels_float32_note_states_float32_accuracy() -> None:
+    """Regression: the note of the CPU kernels in float32 does not suggest float64 gradients.
+
+    The kernels compute each pair in float64 from the float32 inputs of the
+    reference copy and return float32 values; the adjoint solve is float32.
+    The old note named only the float64 partials.
+    """
+    from ventorum.sensitivity.adjoint import CPU_KERNELS_FLOAT64_NOTE
+
+    assert "float32 inputs" in CPU_KERNELS_FLOAT64_NOTE
+    assert "float32 accuracy" in CPU_KERNELS_FLOAT64_NOTE
+
+
+def test_check_gradients_solves_each_case_once(cpu_device, monkeypatch) -> None:
+    """Regression: check_gradients solves the base case once and each perturbed case once.
+
+    Before, it solved the base case twice (the base result and the base
+    outputs) besides the solve of the gradients, and it built the lattice of
+    each perturbed case once more for the topology check (now the lattice
+    of the solve is used).
+    """
+    pytest.importorskip("torch")
+    from ventorum.sensitivity import check as chk
+
+    calls = {"analyze": 0}
+    real_analyze = vt.analyze
+
+    def counting_analyze(*args, **kwargs):  # type: ignore[no-untyped-def]
+        calls["analyze"] += 1
+        return real_analyze(*args, **kwargs)
+
+    monkeypatch.setattr(vt, "analyze", counting_analyze)
+    ac = vt.Aircraft(surfaces=[_plain_wing()])
+    cond = vt.FlightCondition(V_inf=30.0, alpha=np.radians(4.0))
+    st = vt.SolverSettings(solver_type="vlm", n_panels=6, n_chord=1)
+    with _gpu_settings(precision="float64"), warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        out = vt.check_gradients(ac, cond, st, outputs=("CL", "Cm"), wrt=("alpha",), n_directions=0)
+    assert out["pass"], _failed(out)
+    # One base solve and four solves (two central differences) per step.
+    assert calls["analyze"] == 1 + 4 * len(chk._STEP_FACTORS), calls

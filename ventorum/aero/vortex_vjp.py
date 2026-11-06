@@ -94,9 +94,15 @@ import numpy as np
 _INV_4PI = 1.0 / (4.0 * math.pi)
 _INV_2PI = 1.0 / (2.0 * math.pi)
 
-# Floors of the squared norms and of the denominators, per precision. The
-# float64 floor is the one of the reference copy; float32 uses a value that
-# is representable (1e-300 is zero in float32).
+# Floors of the squared norms and of the denominators, per precision: the
+# one table of all VJP backends (this module, the Numba and Cython kernels,
+# the Warp kernels of ventorum.gpu.vjp_kernels) and of the PyTorch reference
+# copy (ventorum.sensitivity.reference). float32 uses a value that is
+# representable (1e-300 is zero in float32) and well above the smallest
+# normal number 1.2e-38, so that no product near the floor is subnormal.
+# The floor acts only on degenerate pairs (a point on an end point of a
+# segment, a zero-length segment). The CPU kernels convert their inputs to
+# float64, so they use the float64 floor also for float32 requests.
 FLOORS = {"float64": 1e-300, "float32": 1e-30}
 
 # Row blocks of the compiled VJP kernels (Numba, Cython). Each block adds its

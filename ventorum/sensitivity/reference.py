@@ -182,11 +182,16 @@ def rod_rot(v: torch.Tensor, axis: torch.Tensor, angle: torch.Tensor) -> torch.T
 def _length_floor(dtype: torch.dtype) -> float:
     """Return the floor of the squared distances in the kernels [m^2].
 
-    The floor is 1e-300, or the smallest normal number of *dtype* when that
-    is larger. In float32 the value 1e-300 rounds to zero, and a target on
-    a segment end point then gives 0/0 in the unit vectors.
+    The floor is the one of the VJP kernels for the precision
+    (:data:`ventorum.aero.vortex_vjp.FLOORS`: 1e-300 in float64, 1e-30 in
+    float32), or the smallest normal number of *dtype* when that is larger.
+    In float32 the value 1e-300 rounds to zero, and a target on a segment
+    end point then gives 0/0 in the unit vectors.
     """
-    return max(1e-300, float(torch.finfo(dtype).tiny))
+    from ventorum.aero.vortex_vjp import FLOORS
+
+    floor = FLOORS["float32" if dtype == torch.float32 else "float64"]
+    return max(floor, float(torch.finfo(dtype).tiny))
 
 
 def seg_vel(P: torch.Tensor, A: torch.Tensor, B: torch.Tensor, rc2: torch.Tensor) -> torch.Tensor:
