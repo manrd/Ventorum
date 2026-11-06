@@ -1439,3 +1439,33 @@ def test_cpu_kernels_float32_note_states_float32_accuracy() -> None:
 
     assert "float32 inputs" in CPU_KERNELS_FLOAT64_NOTE
     assert "float32 accuracy" in CPU_KERNELS_FLOAT64_NOTE
+
+
+def test_check_gradients_solves_each_case_once(cpu_device, monkeypatch) -> None:
+    """Regression: check_gradients solves the base case once and each perturbed case once.
+
+    Before, it solved the base case twice (the base result and the base
+    outputs) besides the solve of the gradients, and it built the lattice of
+    each perturbed case once more for the topology check (now the lattice
+    of the solve is used).
+    """
+    pytest.importorskip("torch")
+    from ventorum.sensitivity import check as chk
+
+    calls = {"analyze": 0}
+    real_analyze = vt.analyze
+
+    def counting_analyze(*args, **kwargs):  # type: ignore[no-untyped-def]
+        calls["analyze"] += 1
+        return real_analyze(*args, **kwargs)
+
+    monkeypatch.setattr(vt, "analyze", counting_analyze)
+    ac = vt.Aircraft(surfaces=[_plain_wing()])
+    cond = vt.FlightCondition(V_inf=30.0, alpha=np.radians(4.0))
+    st = vt.SolverSettings(solver_type="vlm", n_panels=6, n_chord=1)
+    with _gpu_settings(precision="float64"), warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        out = vt.check_gradients(ac, cond, st, outputs=("CL", "Cm"), wrt=("alpha",), n_directions=0)
+    assert out["pass"], _failed(out)
+    # One base solve and four solves (two central differences) per step.
+    assert calls["analyze"] == 1 + 4 * len(chk._STEP_FACTORS), calls

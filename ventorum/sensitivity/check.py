@@ -67,7 +67,11 @@ def _production_scalars(geometry: Any, condition: Any, settings: Any, axes: str)
     """Return the scalar outputs of one production solve in *axes*."""
     import ventorum as vt
 
-    res = vt.analyze(geometry.clone(), condition, settings.clone())
+    return _result_scalars(vt.analyze(geometry.clone(), condition, settings.clone()), axes)
+
+
+def _result_scalars(res: Any, axes: str) -> dict[str, float]:
+    """Return the scalar outputs of the production result *res* in *axes*."""
     out = {
         "CL": float(res.totals.CL),
         "CY": float(res.totals.CY),
@@ -345,18 +349,21 @@ def check_gradients(
     groups: dict[str, dict[str, int]] = {}
     ok_all = True
 
-    f0 = _production_scalars(ac, condition, st, axes)
+    # The base solve gives the base outputs (the same solve as
+    # _production_scalars of the base case).
+    f0 = _result_scalars(base_res, axes)
 
     from ventorum.sensitivity.topology import shared_hinge_topology
-    from ventorum.solvers.factory import make_solver
 
-    solver = make_solver(resolve_solver_type(st.solver_type))
     base_lat = base_res.details.get("lattice")
     base_topo = shared_hinge_topology(base_lat) if base_lat is not None else None
 
     def _evaluate(geometry_pert: Any, condition_pert: Any, input_name: str, step: float) -> dict[str, float]:
+        # One production solve per evaluation. The topology check uses the
+        # lattice of that solve (before, the lattice was built a second time).
+        res = vt.analyze(geometry_pert.clone(), condition_pert, st.clone())
         if base_topo is not None:
-            pert_lat = solver.build(geometry_pert, st, condition_pert)
+            pert_lat = res.details.get("lattice")
             pert_topo = shared_hinge_topology(pert_lat)
             if pert_topo != base_topo:
                 changed = base_topo.diff_surfaces(pert_topo)
@@ -367,7 +374,7 @@ def check_gradients(
                     f"shared-hinge topology of surface(s) {surfs}. Adjoint gradients are "
                     "defined at a fixed shared-hinge topology. Use a smaller finite-difference step."
                 )
-        return _production_scalars(geometry_pert, condition_pert, st, axes)
+        return _result_scalars(res, axes)
 
     def _record(group: str, suffix: str, grads: dict[str, float],
                 fd: dict[str, list[tuple[float, float, float, float]]], x_scale: float) -> None:
