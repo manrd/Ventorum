@@ -114,6 +114,10 @@ class HeightDerivativesResult:
         Number of solves done.
     notes : list[str]
         Notes on the method and its limits.
+    case_converged : list[bool]
+        Converged flag of each solved case, in the order base, alpha +,
+        alpha -, beta +, beta -, phi +, phi -, h +, h -. A note of the
+        result names the cases with False.
     """
 
     derivatives: dict[str, float]
@@ -133,6 +137,7 @@ class HeightDerivativesResult:
     precision: str
     n_solves: int
     notes: list[str] = field(default_factory=list)
+    case_converged: list[bool] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         """Return a JSON-compatible dictionary without the result object."""
@@ -152,6 +157,7 @@ class HeightDerivativesResult:
             "precision": self.precision,
             "n_solves": int(self.n_solves),
             "notes": list(self.notes),
+            "case_converged": [bool(v) for v in self.case_converged],
         }
 
 
@@ -376,6 +382,11 @@ def height_derivatives(
         "Quasi-steady, level flight: the ground stays parallel to the free stream. Heave-rate (flight-path) "
         "effects are not modelled.",
     ]
+    case_converged = [bool(r.converged) for r in results]
+    failed = [lab for lab, ok in zip(labels, case_converged) if not ok]
+    if failed:
+        notes.append("Not all cases of the differences converged ({}): the derivatives that use these cases are "
+                     "not reliable.".format(", ".join(failed)))
     return HeightDerivativesResult(
         derivatives=derivs, matrix=matrix, irodov=irodov, axes=axes,
         steps={"alpha_deg": math.degrees(d_alpha), "beta_deg": math.degrees(d_beta),
@@ -384,5 +395,5 @@ def height_derivatives(
         ref_point=rp, n_chord=int(lattice.n_chord), base=base,
         device=devices.pop() if len(devices) == 1 else "mixed",
         precision=precisions.pop() if len(precisions) == 1 else "mixed",
-        n_solves=len(results), notes=notes,
+        n_solves=len(results), notes=notes, case_converged=case_converged,
     )

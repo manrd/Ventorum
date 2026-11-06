@@ -97,11 +97,13 @@ class VortexLatticeSolver(LatticeSolver):
         continuation: bool = True,
         ref_point: np.ndarray | None = None,
     ) -> list[tuple[np.ndarray, None, SolveInfo]]:
-        """Solve all cases together: the systems one by one, the dense solves in one call.
+        """Solve all cases together (see :func:`ventorum.solvers.core.solve_vlm_batch`).
 
-        Each case gets the same circulation, to the last bit, as
-        :meth:`solve_circulation`. *continuation* has no effect (the system
-        is linear).
+        A case with its own system matrix gets the same circulation, to the
+        last bit, as :meth:`solve_circulation`. Cases with the same matrix
+        (the same wake direction and ground) share one factorisation and get
+        the same circulation to round-off. *continuation* has no effect (the
+        system is linear).
         """
         if _has_tabulated(lattice):
             warnings.warn(
