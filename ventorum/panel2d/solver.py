@@ -241,12 +241,21 @@ def section_chord(body) -> float:
     Returns
     -------
     float
-        Chord [m]; 1.0 for a section of zero size.
+        Chord [m].
+
+    Raises
+    ------
+    ValueError
+        If the chord is zero or not finite (a section of zero size or with
+        points that are not finite).
     """
     pts = np.asarray(body, dtype=np.float64)
     mid = 0.5 * (pts[0] + pts[-1])
     chord = float(np.linalg.norm(pts[leading_edge_index(pts)] - mid))
-    return chord if chord > 0.0 else 1.0
+    if not np.isfinite(chord) or chord <= 0.0:
+        raise ValueError(f"The section has no chord (leading edge to trailing-edge midpoint {chord!r}): "
+                         "give a section of non-zero size with finite points.")
+    return chord
 
 
 def _as_numpy(body) -> np.ndarray:
@@ -407,7 +416,9 @@ def _incidence(xp, layout: PanelLayout, like):
     """Return the panel-to-node incidence matrices of the linear vortex panels.
 
     The trailing-edge gap panels carry no linear vortex (see
-    :class:`PanelLayout`); their rows are zero.
+    :class:`PanelLayout`); their rows are zero. The solvers apply the
+    incidence with :func:`panel_to_node`; these dense matrices are its
+    reference form (``a1 @ p1 + a2 @ p2``) for the parity tests.
     """
     npn, nn = layout.n_panels, layout.n_nodes
     p1 = np.zeros((npn, nn))
@@ -422,6 +433,44 @@ def _incidence(xp, layout: PanelLayout, like):
         return p1, p2
     return (torch.as_tensor(p1, dtype=like.dtype, device=like.device),
             torch.as_tensor(p2, dtype=like.dtype, device=like.device))
+
+
+def panel_to_node(a1, a2, layout: PanelLayout):
+    """Return the influence per unit nodal gamma from the influences of the panel ends.
+
+    The linear vortex panel p goes from node idx1[p] to node idx2[p];
+    ``a1`` and ``a2`` are the influences of its unit start and end
+    strengths. The result is ``a1 @ p1 + a2 @ p2`` with the incidence
+    matrices of :func:`_incidence`, computed as two shifted column blocks
+    per body (2 Nc N additions in place of 4 Nc Np N flops of the dense
+    products). The trailing-edge gap panels carry no linear vortex and do
+    not contribute.
+
+    Parameters
+    ----------
+    a1, a2 : array
+        Influences of the panel start and end strengths, shape (..., Np);
+        numpy arrays or torch tensors.
+    layout : PanelLayout
+        Index structure.
+
+    Returns
+    -------
+    array
+        Influences per unit nodal gamma, shape (..., N).
+    """
+    xp = _xp(a1)
+    cat = np.concatenate if xp is np else torch.cat
+    zero = xp.zeros_like(a1[..., :1])
+    blocks = []
+    p0 = 0
+    for b, (s, e) in enumerate(layout.node_ranges):
+        n_real = e - s - 1
+        u = a1[..., p0:p0 + n_real]
+        v = a2[..., p0:p0 + n_real]
+        blocks.append(cat([u, zero], -1) + cat([zero, v], -1))
+        p0 += n_real + (1 if layout.te_panel[b] >= 0 else 0)
+    return cat(blocks, -1)
 
 
 def panel_ends(nodes, layout: PanelLayout):
@@ -481,7 +530,6 @@ def vortex_stream_matrix(nodes, layout: PanelLayout, field=None, ground: bool = 
     if field is None:
         field = nodes
     ps, pe = panel_ends(nodes, layout)
-    p1, p2 = _incidence(xp, layout, nodes)
     xi, eta, L, _ = _local(xp, field, ps, pe)
     eta = xp.where(abs(eta) < 1e-12 * L, 0.0 * eta + 0.0, eta)
     a1, a2 = linear_vortex_stream_influence(xi, eta, L)
@@ -490,7 +538,7 @@ def vortex_stream_matrix(nodes, layout: PanelLayout, field=None, ground: bool = 
         b1, b2 = linear_vortex_stream_influence(xi, eta, L)
         a1 = a1 - b1
         a2 = a2 - b2
-    out = a1 @ p1 + a2 @ p2
+    out = panel_to_node(a1, a2, layout)
     if any(p >= 0 for p in layout.te_panel):
         src = body_source_stream_matrix(nodes, layout, field=field, ground=ground)
         out = out * 1.0

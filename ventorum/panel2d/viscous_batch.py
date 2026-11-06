@@ -104,6 +104,9 @@ class ViscousCase:
         Moment reference point (x, y) [m] (None: the quarter-chord point
         on the chord line of the reference geometry); see
         :func:`ventorum.panel2d.viscous.solve_viscous`.
+    height_reference : {"pivot", "trailing_edge"}
+        Reference point of ``height`` (default "pivot"); see
+        :func:`ventorum.panel2d.viscous.solve_viscous`.
     """
 
     coordinates: np.ndarray
@@ -124,6 +127,7 @@ class ViscousCase:
     lm_trials: int = vii.LM_RETRY_TRIALS
     chord_ref: float | None = None
     moment_ref: tuple | None = None
+    height_reference: str = "pivot"
 
 
 class ViscousBatchResult(list):
@@ -218,6 +222,8 @@ def _case(c) -> ViscousCase:
         raise ValueError(f"Only mach=0.0 is supported, got mach={out.mach}.")
     if not np.isfinite(out.Re) or out.Re <= 0.0:
         raise ValueError(f"Reynolds number must be positive, got {out.Re}.")
+    if out.height_reference not in ("pivot", "trailing_edge"):
+        raise ValueError(f"height_reference must be 'pivot' or 'trailing_edge', got {out.height_reference!r}.")
     _reference(out)
     _rules(out)
     return out
@@ -254,7 +260,8 @@ def _seq_key(c: ViscousCase):
     xtr = (float(c.xtr[0]), float(c.xtr[1]))
     return (coords.tobytes(), coords.shape, float(c.Re), c.height, float(c.ncrit), xtr, float(c.wake_length),
             int(c.n_wake), int(c.max_iter), float(c.tol), int(c.stall_window), float(c.stall_factor),
-            float(c.divergence_factor), int(c.work_budget), int(c.lm_trials), chord, moment, pivot)
+            float(c.divergence_factor), int(c.work_budget), int(c.lm_trials), chord, moment, pivot,
+            c.height_reference)
 
 
 def solve_viscous_batch(cases, *, backend: str = "torch", device=None, dtype=None) -> ViscousBatchResult:
@@ -294,7 +301,7 @@ def solve_viscous_batch(cases, *, backend: str = "torch", device=None, dtype=Non
         c0 = parsed[idx[0]]
         up, dn = vs.sweep_order([parsed[i].alpha for i in idx])
         body, chord, moment, pivot = _reference(c0)
-        kw = dict(ncrit=c0.ncrit, xtr=tuple(c0.xtr), height=c0.height, height_reference="pivot",
+        kw = dict(ncrit=c0.ncrit, xtr=tuple(c0.xtr), height=c0.height, height_reference=c0.height_reference,
                   wake_length=c0.wake_length, n_wake=c0.n_wake, chord_ref=chord, moment_ref=moment, pivot=pivot)
         plans.append({"idx": idx, "up": up, "dn": dn, "kw": kw, "body": body, "case": c0, "prev": None,
                       "first": None, "rows": {}, "rules": _rules(c0), "cache": {}})

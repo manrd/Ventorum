@@ -180,3 +180,27 @@ def test_batch_moment_point_is_checked():
     coords = airfoil("0012").repanel(n_panels=80).coords
     with pytest.raises(ValueError, match="moment_ref"):
         solve_viscous_batch([ViscousCase(coordinates=coords, alpha=0.0, Re=1e6, moment_ref=(0.25,))])
+
+
+def test_batch_takes_the_height_reference(monkeypatch):
+    """ViscousCase.height_reference (default "pivot") reaches the coupling system; a bad value raises."""
+    from ventorum.panel2d import coupling as cp
+
+    seen = []
+    build = cp.build_coupling_system
+
+    def spy(*args, **kwargs):
+        seen.append(kwargs.get("height_reference"))
+        return build(*args, **kwargs)
+
+    monkeypatch.setattr(cp, "build_coupling_system", spy)
+    coords = airfoil("0012").repanel(n_panels=80).coords
+    assert ViscousCase(coordinates=coords, alpha=0.0, Re=1e6).height_reference == "pivot"
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        solve_viscous_batch([ViscousCase(coordinates=coords, alpha=2.0, Re=1e6, height=0.2, max_iter=1,
+                                         height_reference="trailing_edge", work_budget=1)],
+                            device="cpu", dtype=torch.float64)
+    assert seen and set(seen) == {"trailing_edge"}
+    with pytest.raises(ValueError, match="height_reference"):
+        solve_viscous_batch([ViscousCase(coordinates=coords, alpha=0.0, Re=1e6, height_reference="nose")])

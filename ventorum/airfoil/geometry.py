@@ -125,7 +125,7 @@ class SectionReference:
         The leading edge is the point farthest from the trailing-edge
         midpoint (:func:`leading_edge_index`), the trailing edge is the
         midpoint of the first and the last point, and the reference chord
-        is the distance between them (1.0 for a section of zero size).
+        is the distance between them.
 
         Parameters
         ----------
@@ -136,13 +136,25 @@ class SectionReference:
         -------
         SectionReference
             The derived reference geometry.
+
+        Raises
+        ------
+        AirfoilGeometryError
+            If the distance between the leading edge and the trailing-edge
+            midpoint is zero or not finite (a section of zero size or with
+            points that are not finite). The error is a ValueError.
         """
         pts = np.asarray(coords, dtype=np.float64)
         le = pts[leading_edge_index(pts)]
         mid = 0.5 * (pts[0] + pts[-1])
         chord = float(np.linalg.norm(le - mid))
+        if not np.isfinite(chord) or chord <= 0.0:
+            raise AirfoilGeometryError(
+                f"The section has no chord (leading edge to trailing-edge midpoint {chord!r}): give a section "
+                "of non-zero size with finite points, or give the reference geometry."
+            )
         return cls(leading_edge=(float(le[0]), float(le[1])), trailing_edge=(float(mid[0]), float(mid[1])),
-                   chord_ref=chord if chord > 0.0 else 1.0)
+                   chord_ref=chord)
 
     @property
     def quarter_chord(self) -> tuple[float, float]:
