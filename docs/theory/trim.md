@@ -64,6 +64,8 @@ The iteration stops when one of the following criteria is met:
 
 When `condition.h` is defined, Ventorum models flight in ground effect over a flat boundary plane. In accordance with the ground-effect solver conventions of Ventorum, the vertical distance from `Aircraft.ref_point` to the ground plane remains constant while the angle of attack changes.
 
+Near the ground the automatic chordwise count of the vortex lattice (`settings.n_chord` None) depends on the attitude: a chordwise panel is not longer than the smallest gap to the ground. The count is an integer, so a residual with a new count at each solve is not continuous, and a finite-difference step of the Jacobian can contain a mesh change. Thus all solves of one pass of the trim (the Newton steps and the finite differences) use one count. The first pass uses the automatic count of the start point. After a pass converges, the trim finds the automatic count at the trimmed state; when it differs, a new pass starts from the trimmed state with that count. This repeats until the count does not change, at most three passes (`GROUND_N_CHORD_MAX_PASSES`). The final result then equals an analysis at the trimmed state with the automatic count. When the count still changes after the third pass, the result is the third pass and a note says so. A count in `settings.n_chord` is used as given for all solves.
+
 ## Precision and device execution
 
 The trim solves run on the device that the settings and the global device select (the CPU in `float64`, or the GPU pipelines in `float32` or `float64`); the result states the device and the precision. For the central difference with step $h$, the truncation error is $O(h^2)$ and the round-off error is about $\varepsilon / h$, with $\varepsilon$ the machine epsilon of the arithmetic (about $1.2 \times 10^{-7}$ in `float32`, $2.2 \times 10^{-16}$ in `float64`). With $h = 1.0 \times 10^{-4}$ rad, $\varepsilon / h$ is about $10^{-3}$ in `float32` and about $2 \times 10^{-12}$ in `float64`.
@@ -87,6 +89,7 @@ The trim solver is verified by the unit test suite in `tests/test_trim.py`:
 - Lateral trim convergence to zero moments ($C_l = C_m = C_n = 0$) under non-zero sideslip.
 - Boundary limit detection when target lift exceeds achievable performance.
 - Ground effect lift increase demonstrating reduced trim angle of attack.
+- In ground effect with the automatic chordwise count: one count per pass, a final count equal to the automatic count of the trimmed state, a result equal to a direct analysis there, the stop after three passes, and a given count that does not change.
 - Multi-solver compatibility across vortex lattice and lifting-line solvers.
 - Input geometry immutability ensuring that input objects are never modified in place.
 - The solves use the selected device and the global device setting does not change; on the GPU in `float32` the residuals are within `FLOAT32_TOLERANCE_FLOOR`, and the angle of attack and the deflection agree with the CPU `float64` trim within 1e-3 deg.
