@@ -67,7 +67,8 @@ class LinearLLTSolver(LatticeSolver):
             raise ValidityError("Lifting-line solver 'linear' does not support compressibility (mach > 0). Use solver='vlm'.")
         gamma, info = solve_llt_linear(lattice, condition, ground,
                                        use_symmetry=getattr(settings, "use_symmetry", True), wake_dir=wake_dir,
-                                       ref_point=ref_point)
+                                       ref_point=ref_point,
+                                       report_condition=bool(getattr(settings, "report_condition", False)))
         return gamma, None, info
 
     def solve_circulation_batch(
@@ -89,7 +90,8 @@ class LinearLLTSolver(LatticeSolver):
         if any(getattr(c, "mach", None) is not None and c.mach > 0.0 for c in conditions):
             raise ValidityError("Lifting-line solver 'linear' does not support compressibility (mach > 0). Use solver='vlm'.")
         sols = solve_llt_linear_batch(lattice, conditions, grounds,
-                                      getattr(settings, "use_symmetry", True), wake_dirs, ref_point)
+                                      getattr(settings, "use_symmetry", True), wake_dirs, ref_point,
+                                      report_condition=bool(getattr(settings, "report_condition", False)))
         if sols is None:
             return super().solve_circulation_batch(lattice, conditions, settings, grounds, wake_dirs, False,
                                                    ref_point=ref_point)

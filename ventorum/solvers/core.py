@@ -49,7 +49,16 @@ from ventorum.utils.vec import cross3
 
 @dataclass
 class SolveInfo:
-    """Hold the convergence information of a circulation solve."""
+    """Hold the convergence information of a circulation solve.
+
+    ``converged`` is True by definition for the direct solves (vortex
+    lattice and linear lifting line); it is not a check of the conditioning.
+    ``condition_number`` is the LAPACK estimate of the 1-norm condition
+    number of the system matrix (see :func:`lu_solve_with_condition`). Only
+    the direct CPU solves of the vortex lattice and of the linear lifting
+    line set it, and only when ``SolverSettings.report_condition`` is True;
+    otherwise it is None.
+    """
 
     converged: bool = True
     iterations: int = 1
@@ -63,6 +72,62 @@ class SolveInfo:
 
 
 _MIRROR_Y = np.array([1.0, -1.0, 1.0])
+
+
+def lu_solve_with_condition(A: np.ndarray, rhs: np.ndarray) -> tuple[np.ndarray, float]:
+    """Solve ``A x = rhs`` by LU factorisation and estimate the 1-norm condition number of *A*.
+
+    The LU factorisation with partial pivoting (``scipy.linalg.lu_factor``)
+    solves the system (``scipy.linalg.lu_solve``). The LAPACK routine
+    ``xGECON`` of the dtype of the factors then estimates the reciprocal
+    condition number ``rcond`` of *A* in the 1-norm from the LU factors and
+    ``||A||_1``. The estimate uses the method of Hager (1984) as refined by
+    Higham (1988): it is a lower bound of the exact 1-norm condition number
+    and is normally within a factor of 3 of it, but it is not exact.
+
+    Cost: the estimate needs ``||A||_1`` (O(n^2)) and a few triangular
+    solves with the factors (O(n^2) each), small against the factorisation
+    (O(n^3)). The LU path of scipy can be slower than the solve of numpy
+    that the default path uses, and its bits can differ from it in the
+    last place.
+
+    Parameters
+    ----------
+    A : numpy.ndarray
+        System matrix, shape (n, n).
+    rhs : numpy.ndarray
+        Right-hand side, shape (n,) or (n, m).
+
+    Returns
+    -------
+    x : numpy.ndarray
+        Solution, with the shape of *rhs*.
+    condition_number : float
+        Estimate of the 1-norm condition number ``||A||_1 ||A^-1||_1`` [-],
+        ``1 / rcond``. Infinity for a singular matrix (``rcond`` 0).
+
+    References
+    ----------
+    W. W. Hager, "Condition estimates", SIAM Journal on Scientific and
+    Statistical Computing 5(2), 1984, pp. 311-316.
+
+    N. J. Higham, "FORTRAN codes for estimating the one-norm of a real or
+    complex matrix, with applications to condition estimation", ACM
+    Transactions on Mathematical Software 14(4), 1988, pp. 381-396.
+
+    E. Anderson et al., LAPACK Users' Guide, 3rd ed., SIAM, 1999.
+    """
+    import scipy.linalg
+
+    anorm = float(np.linalg.norm(A, 1))
+    lu, piv = scipy.linalg.lu_factor(A)
+    x = scipy.linalg.lu_solve((lu, piv), rhs)
+    (gecon,) = scipy.linalg.lapack.get_lapack_funcs(("gecon",), (lu,))
+    rcond, info = gecon(lu, anorm, norm="1")
+    if info != 0:
+        raise ValueError(f"LAPACK gecon failed with info = {info}.")
+    rcond = float(rcond)
+    return x, (float("inf") if rcond == 0.0 else 1.0 / rcond)
 
 
 def _panel_velocity(lattice: VortexLattice, umap: UnknownMap, v_unknown: np.ndarray) -> np.ndarray:
@@ -237,12 +302,19 @@ def solve_vlm(
     use_symmetry: bool = True,
     wake_dir: np.ndarray | None = None,
     ref_point: np.ndarray | None = None,
+    report_condition: bool = False,
 ) -> tuple[np.ndarray, SolveInfo]:
     """Solve the vortex lattice. Returns the circulation of every panel.
 
     *ref_point* [m] is the centre of the body rates (see :func:`assemble_vlm`).
+    With *report_condition*, the solve uses :func:`lu_solve_with_condition`
+    and ``SolveInfo.condition_number`` gets the 1-norm condition estimate;
+    otherwise (default) the solve is ``numpy.linalg.solve``.
     """
     A, rhs, umap = assemble_vlm(lattice, condition, ground, use_symmetry, wake_dir, ref_point)
+    if report_condition:
+        g, cond = lu_solve_with_condition(A, rhs)
+        return g[umap.panel_column], SolveInfo(symmetric=umap.symmetric, condition_number=cond)
     g = np.linalg.solve(A, rhs)
     return g[umap.panel_column], SolveInfo(symmetric=umap.symmetric)
 
@@ -254,6 +326,7 @@ def solve_vlm_batch(
     use_symmetry: bool,
     wake_dirs: np.ndarray,
     ref_point: np.ndarray | None = None,
+    report_condition: bool = False,
 ) -> list[tuple[np.ndarray, SolveInfo]] | None:
     """Solve the vortex lattice for K cases on the same lattice.
 
@@ -269,6 +342,11 @@ def solve_vlm_batch(
     its own matrix gets the same result, to the last bit, as
     :func:`solve_vlm` for that case; a case that shares its matrix gets the
     same result to round-off.
+
+    With *report_condition*, each matrix is factorised by
+    :func:`lu_solve_with_condition` (one matrix at a time, no stack), and
+    the ``SolveInfo`` of each case gets the 1-norm condition estimate of its
+    matrix (cases that share a matrix share the estimate).
 
     Returns
     -------
@@ -292,6 +370,15 @@ def solve_vlm_batch(
         return assemble_vlm(lattice, conditions[k], grounds[k], use_symmetry, wake_dirs[k], ref_point)[0]
 
     g = np.empty((K, n))
+    if report_condition:
+        conds = [0.0] * K
+        for ks in groups.values():
+            gk, cond = lu_solve_with_condition(matrix(ks[0]), rhs[ks].T)
+            g[ks] = gk.T
+            for k in ks:
+                conds[k] = cond
+        return [(g[k][umap.panel_column], SolveInfo(symmetric=umap.symmetric, condition_number=conds[k]))
+                for k in range(K)]
     single = [ks[0] for ks in groups.values() if len(ks) == 1]
     step = max(1, _VLM_BATCH_BYTES // max(1, n * n * 8))
     for i0 in range(0, len(single), step):
@@ -460,14 +547,22 @@ def solve_llt_linear(
     use_symmetry: bool = True,
     wake_dir: np.ndarray | None = None,
     ref_point: np.ndarray | None = None,
+    report_condition: bool = False,
 ) -> tuple[np.ndarray, SolveInfo]:
     """Solve the linear lifting line. Returns the circulation of every strip.
 
     *ref_point* [m] is the centre of the body rates (see :func:`llt_onset`).
+    With *report_condition*, the solve uses :func:`lu_solve_with_condition`
+    and ``SolveInfo.condition_number`` gets the 1-norm condition estimate;
+    otherwise (default) the solve is ``numpy.linalg.solve``.
     """
     M, rhs, umap, Vt = _assemble_llt_linear(lattice, condition, ground, use_symmetry, wake_dir, ref_point)
-    g = np.linalg.solve(M, rhs)
-    info = SolveInfo(symmetric=umap.symmetric)
+    if report_condition:
+        g, cond = lu_solve_with_condition(M, rhs)
+        info = SolveInfo(symmetric=umap.symmetric, condition_number=cond)
+    else:
+        g = np.linalg.solve(M, rhs)
+        info = SolveInfo(symmetric=umap.symmetric)
     if Vt is not None:
         info.v_control = _panel_velocity(lattice, umap, np.einsum("ijk,j->ik", Vt, g))
     return g[umap.panel_column], info
@@ -628,6 +723,7 @@ def solve_llt_linear_batch(
     use_symmetry: bool,
     wake_dirs: np.ndarray,
     ref_point: np.ndarray | None = None,
+    report_condition: bool = False,
 ) -> list[tuple[np.ndarray, SolveInfo]] | None:
     """Solve the linear lifting line for K cases on the same lattice.
 
@@ -635,6 +731,11 @@ def solve_llt_linear_batch(
     (:func:`llt_velocity_tensors`) and one call of the dense solver solves
     all systems. Each case gets the same result, to the last bit, as
     :func:`solve_llt_linear` (without a kernel cache) for that case.
+
+    With *report_condition*, each system is solved by
+    :func:`lu_solve_with_condition` (one matrix at a time) and the
+    ``SolveInfo`` of each case gets the 1-norm condition estimate of its
+    matrix.
 
     Returns
     -------
@@ -667,12 +768,18 @@ def solve_llt_linear_batch(
     M = np.empty((K, n, n))
     for k, Mk in enumerate(_map_cases(system, K, n)):
         M[k] = Mk
-    g = np.linalg.solve(M, rhs[:, :, None])[:, :, 0]
+    conds: list[float | None] = [None] * K
+    if report_condition:
+        g = np.empty((K, n))
+        for k in range(K):
+            g[k], conds[k] = lu_solve_with_condition(M[k], rhs[k])
+    else:
+        g = np.linalg.solve(M, rhs[:, :, None])[:, :, 0]
     v_unknown = _map_cases(lambda k: np.einsum("ijk,j->ik", Vts[k], g[k]), K, n)
     v_panel = _panel_velocity_batch(lattice, umap, np.array(v_unknown).reshape(K, n, 3))
     out = []
     for k in range(K):
-        info = SolveInfo(symmetric=umap.symmetric)
+        info = SolveInfo(symmetric=umap.symmetric, condition_number=conds[k])
         info.v_control = v_panel[k]
         out.append((g[k][umap.panel_column], info))
     return out

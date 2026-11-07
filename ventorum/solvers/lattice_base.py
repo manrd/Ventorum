@@ -356,7 +356,7 @@ class LatticeSolver(BaseSolver):
             return_reason=True,
         )
         if gpu_results is not None:
-            return gpu_results[0]
+            return _report_condition(gpu_results, None, settings)[0]
         ground, h_min, notes, wd = self._case_setup(lattice, condition, settings, c_ref, ground, ref_point)
         gamma, alpha_eff, info = self.solve_circulation(lattice, condition, settings, ground, wd, gamma0=gamma0,
                                                         ref_point=ref_point)
@@ -365,11 +365,12 @@ class LatticeSolver(BaseSolver):
             ground=ground, ref_point=ref_point, alpha_eff_strip=alpha_eff, wake_dir=wd,
             v_control=getattr(info, "v_control", None),
         )
-        return self._case_result(
+        res = self._case_result(
             lattice, condition, loads, info, gamma, ground, h_min, notes, wd,
             b_ref, c_ref, main_surface, t0, ref_point=ref_point,
             dispatch=_cpu_dispatch(lattice.n_panels, 1, gpu_reason),
         )
+        return _report_condition([res], [info], settings)[0]
 
     def _case_setup(
         self,
@@ -749,7 +750,7 @@ class LatticeSolver(BaseSolver):
                 main_surface, continuation, t0, grounds=grounds, return_reason=True,
             )
             if gpu_results is not None:
-                return gpu_results
+                return _report_condition(gpu_results, None, settings)
         else:
             gpu_reason = _cpu_reason or "caller requested cpu only"
         explicit = [None] * len(conditions) if grounds is None else list(grounds)
@@ -769,13 +770,14 @@ class LatticeSolver(BaseSolver):
             )
             dispatch = _cpu_dispatch(lattice.n_panels, len(conditions), gpu_reason, self.name)
             share = (time.perf_counter() - t0) / len(conditions)
-            return [
+            results = [
                 self._case_result(
                     lattice, cond, ld, info, g, st[0], st[1], st[2], st[3], b_ref, c_ref, main_surface,
                     t0, execution_time=share, ref_point=ref_point, dispatch=dispatch,
                 )
                 for cond, ld, (g, _, info), st in zip(conditions, loads, sols, setups)
             ]
+            return _report_condition(results, [info for _, _, info in sols], settings)
 
     def _gpu_batch(
         self,
@@ -862,6 +864,35 @@ class LatticeSolver(BaseSolver):
             g_prev = sol[0] if sol[2].converged else None
             out.append(sol)
         return out
+
+
+#: Note of a GPU result when ``SolverSettings.report_condition`` is True.
+CONDITION_GPU_NOTE = (
+    "Condition number: the estimate (settings.report_condition) is CPU-only. The GPU pipelines do not "
+    "give it, so details['condition_number'] is None. Select the CPU device to get the estimate."
+)
+
+
+def _report_condition(results: list[SolverResult], infos: list | None, settings: SolverSettings) -> list[SolverResult]:
+    """Add the condition estimate to the details of the results when the settings ask for it.
+
+    Nothing changes when ``settings.report_condition`` is False. Otherwise
+    ``details["condition_number"]`` of each result gets
+    ``SolveInfo.condition_number`` of its case (None for a solver that does
+    not give it). *infos* None marks the results of a GPU pipeline: the
+    value is None and ``details["notes"]`` gets ``CONDITION_GPU_NOTE``.
+    """
+    if not getattr(settings, "report_condition", False):
+        return results
+    for k, res in enumerate(results):
+        if infos is None:
+            res.details["condition_number"] = None
+            notes = res.details.setdefault("notes", [])
+            if CONDITION_GPU_NOTE not in notes:
+                notes.append(CONDITION_GPU_NOTE)
+        else:
+            res.details["condition_number"] = getattr(infos[k], "condition_number", None)
+    return results
 
 
 def assemble_system_matrix(
