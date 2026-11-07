@@ -451,6 +451,32 @@ above the round-off that was measured on the CPU and the GPU (vortex lattice up 
 unknowns, lifting lines up to 1000 unknowns). In float64, an angle error of 0.01 deg in
 one boundary condition is above the limit; float32 finds only large errors.
 
+In float32 the check above is coarse: the float32 data of `A` and `b` of the reference
+copy give a backward error of up to 2.4e-3 for a correct state, more than the 2.8e-5 of a
+0.01 deg angle error. So when the gradients or the production solve are in float32, a
+second check assembles `A` and `b` once in float64 from the geometry (on the device of
+the gradients), only for the check, and computes `omega` of the production circulation
+in this float64 system. Nothing is solved in float64: the gradients and the adjoint
+solves keep their precision. The result notes give both backward errors.
+
+The limit of the float64 check comes from the round-off floor of the production state.
+By the theorem of Oettli and Prager, `omega` is the smallest componentwise relative
+perturbation of `A` and `b` for which the state is an exact solution, so the `omega` of a
+correct state is not larger than the relative difference between the production data
+and the float64 data. For a float64 production solve the limit is 1e-6, as above. A
+float32 production solve (GPU pipelines) solves its float32 matrix to far below its
+round-off (refinement with float64 residuals) with a float64 right-hand side, so the
+floor is the relative error of one float32 matrix entry: about 16 roundings for the
+induced velocity of one filament (from float64 point differences) and 16 for the sum of
+the filaments and images of one entry, with the bound `k u` for `k` operations (Higham
+2002, lemma 3.1; `u = 2^-24`). The limit is 32 `u` = 1.9e-6. The measured `omega` of
+correct float32 GPU states was 7e-8 to 2.2e-7 (vortex lattice up to 2560 unknowns,
+lifting lines up to 1000 unknowns). An angle error of 0.01 deg in one boundary condition
+gave 5.3e-6 or more in the vortex-lattice cases and is refused. In the linear lifting
+line with 1000 unknowns it gave 1.3e-6, below the limit: there the check finds only an
+error of about 0.014 deg or more in one boundary condition. For the nonlinear lifting
+line the limit is at least 100 times the solver `tolerance`, as above.
+
 ## Implementation
 
 * `ventorum/sensitivity/reference.py`: the differentiable copy (lattice from edge nodes,
@@ -602,3 +628,5 @@ smaller finite-difference step.
 * W. Oettli and W. Prager, "Compatibility of approximate solution of linear equations
   with given error bounds for coefficients and right-hand sides", Numerische Mathematik
   6, 1964, pp. 405-409.
+* N. J. Higham, "Accuracy and Stability of Numerical Algorithms", 2nd ed., SIAM, 2002,
+  lemma 3.1 and theorem 7.3.

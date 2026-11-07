@@ -223,7 +223,10 @@ relative difference to the production result. Above 1e-10 (when the gradients an
 production solve are both float64; else above 1e-4) the call raises `RuntimeError`: the gradient would not be the gradient of the reported
 result. The call also checks that the production circulation solves the equations of
 the reference copy (the componentwise backward error, limit 1e-6 in float64 and 3e-2 in
-float32; see the theory manual). A wrong term of a boundary condition then raises
+float32; see the theory manual). In float32 this check is coarse, so the call also
+checks the production circulation against a float64 assembly of the same system (only
+for the check; limit 1.9e-6 for a float32 production solve, 1e-6 for a float64 one). The
+notes of the result give both backward errors. A wrong term of a boundary condition then raises
 `RuntimeError` also when the outputs do not show it. `check_gradients` checks the gradients against Richardson-extrapolated central
 differences of the production solve. The default tolerance follows the precision of the
 gradients: `rtol=1e-3` for float32 gradients (float32 is the default precision; 1e-3 is the

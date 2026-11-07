@@ -1457,6 +1457,24 @@ _RESIDUAL_TOL_FLOAT32 = 3e-2
 _RESIDUAL_TOL_NONLINEAR_FACTOR = 100.0
 
 
+def _backward_error(A: Any, rhs: Any, g: Any) -> float:
+    """Return the componentwise backward error of *g* in ``A g = rhs`` (Oettli and Prager 1964).
+
+    ``omega = max_i |A g - rhs|_i / (|A| |g| + |rhs|)_i`` [-], in the dtype
+    of the tensors. A row with a zero denominator gives 0 when its residual
+    is 0, else infinity.
+    """
+    import torch
+
+    with torch.no_grad():
+        r = torch.abs(A @ g - rhs)
+        denom = torch.abs(A) @ torch.abs(g) + torch.abs(rhs)
+        tiny = torch.finfo(r.dtype).tiny
+        ratio = torch.where(denom > tiny, r / torch.clamp(denom, min=tiny),
+                            torch.where(r > 0.0, torch.full_like(r, float("inf")), torch.zeros_like(r)))
+        return float(torch.max(ratio)) if ratio.numel() else 0.0
+
+
 def _residual_check(prep: dict, A: Any, rhs: Any, g: Any) -> float:
     """Check that the production circulation solves the system of the reference copy.
 
@@ -1501,25 +1519,18 @@ def _residual_check(prep: dict, A: Any, rhs: Any, g: Any) -> float:
 
     Notes
     -----
-    In float32 the check detects only large errors of a boundary
-    condition (backward error above 3e-2). The backward error of a correct
-    state is then set by the float32 data of *A* and *rhs*, up to 2.4e-3
-    in the measured cases, which is more than the 2.8e-5 of a 0.01 deg
-    angle error.
+    In float32 this is a coarse check: it detects only large errors of a
+    boundary condition (backward error above 3e-2). The backward error of a
+    correct state is then set by the float32 data of *A* and *rhs*, up to
+    2.4e-3 in the measured cases, which is more than the 2.8e-5 of a
+    0.01 deg angle error. :func:`_residual_check_float64` then checks the
+    same state against a float64 assembly of the system.
     """
-    import torch
-
     both64 = prep["precision"] == "float64" and prep["precision_primal"] == "float64"
     tol = _RESIDUAL_TOL_FLOAT64 if both64 else _RESIDUAL_TOL_FLOAT32
     if prep.get("canonical") == "nonlinear":
         tol = max(tol, _RESIDUAL_TOL_NONLINEAR_FACTOR * float(prep["settings"].tolerance))
-    with torch.no_grad():
-        r = torch.abs(A @ g - rhs)
-        denom = torch.abs(A) @ torch.abs(g) + torch.abs(rhs)
-        tiny = torch.finfo(r.dtype).tiny
-        ratio = torch.where(denom > tiny, r / torch.clamp(denom, min=tiny),
-                            torch.where(r > 0.0, torch.full_like(r, float("inf")), torch.zeros_like(r)))
-        omega = float(torch.max(ratio)) if ratio.numel() else 0.0
+    omega = _backward_error(A, rhs, g)
     if not math.isfinite(omega) or omega > tol:
         raise RuntimeError(
             f"The production circulation does not solve the system of the reference copy: "
@@ -1529,6 +1540,165 @@ def _residual_check(prep: dict, A: Any, rhs: Any, g: Any) -> float:
     return omega
 
 
+# Unit round-off of float32 (2^-24) [-].
+_U_FLOAT32 = 2.0 ** -24
+# Limit of the float64 check for a float32 production state, in units of
+# the float32 unit round-off: the rounding steps of one float32 matrix entry
+# (see _float64_check_limit).
+_FLOAT64_CHECK_ULPS = 32
+
+
+def _float64_check_limit(prep: dict) -> float:
+    """Return the limit of :func:`_residual_check_float64` [-].
+
+    The limit is the round-off floor of the backward error of a correct
+    production state in the float64 system. By the theorem of Oettli and
+    Prager (1964; Higham 2002, theorem 7.3), the componentwise backward
+    error of a state is the smallest relative perturbation of the entries
+    of A and rhs for which the state solves the system exactly. So the
+    backward error of the production state is not larger than the largest
+    componentwise relative difference between the production data and the
+    float64 data, plus the residual of the production solve:
+
+    * A float64 production solve (CPU, or GPU in float64): the data are
+      float64, and the limit is ``_RESIDUAL_TOL_FLOAT64`` (1e-6), the
+      limit of the float64 check of the reference copy.
+    * A float32 production solve (GPU pipelines in float32): the solve
+      refines the solution with float64 residuals until it solves the
+      float32 matrix far below its round-off (see :mod:`ventorum.gpu.engine`),
+      and the right-hand side is float64. The floor is then the relative
+      error of one float32 matrix entry. One entry is the sum of the
+      induced velocities of the filaments of one horseshoe or strip (with
+      their mirror and ground images), each from the float64 point
+      differences rounded once to float32 and about 15 float32 operations
+      (cross product, squared norms, dot products, a division, a square
+      root). With the standard model of floating-point arithmetic the
+      relative error of k operations is at most about ``k u`` (Higham 2002,
+      lemma 3.1), ``u = 2^-24``. The limit counts 16 roundings for one
+      filament and 16 for the sum of the filaments and images of one
+      entry: ``_FLOAT64_CHECK_ULPS * u`` = 32 u = 1.9e-6.
+
+    For the nonlinear lifting line, the limit is at least 100 times the
+    solver tolerance, as for the coarse check: the solve stops there.
+
+    The measured backward errors of correct float32 GPU states were 7e-8
+    to 2.2e-7 (1.2 to 3.6 u; vortex lattice up to 2560 unknowns, linear
+    lifting line up to 1000 and nonlinear lifting line up to 600 unknowns).
+    An angle error of 0.01 deg in one boundary condition gave 5.3e-6 or
+    more in the vortex-lattice cases; in the linear lifting line with 1000
+    unknowns it gave 1.3e-6, below the limit, so the check does not detect
+    an error of this size there (an error of 0.01 deg in alpha, in all
+    rows, gave 1.1e-5).
+
+    References
+    ----------
+    N. J. Higham, Accuracy and Stability of Numerical Algorithms, 2nd ed.,
+    SIAM, 2002, lemma 3.1 and theorem 7.3.
+    """
+    if prep["precision_primal"] == "float64":
+        tol = _RESIDUAL_TOL_FLOAT64
+    else:
+        tol = _FLOAT64_CHECK_ULPS * _U_FLOAT32
+    if prep.get("canonical") == "nonlinear":
+        tol = max(tol, _RESIDUAL_TOL_NONLINEAR_FACTOR * float(prep["settings"].tolerance))
+    return tol
+
+
+def float64_check_system(prep: dict) -> tuple[Any, Any, Any]:
+    """Assemble the system of the reference copy once in float64, for the check only.
+
+    The reference model is built again from the geometry of the production
+    lattice with float64 tensors, on the device of the gradients, and one
+    forward pass at the base point gives the system. Nothing is solved: the
+    production circulation is the state of the check, and the gradient
+    computation keeps its precision.
+
+    Parameters
+    ----------
+    prep : dict
+        Case of :func:`_prepare_case`.
+
+    Returns
+    -------
+    A : torch.Tensor
+        System matrix in float64 (the Newton Jacobian for the nonlinear
+        lifting line).
+    rhs : torch.Tensor
+        Right-hand side in float64.
+    g : torch.Tensor
+        Production circulation per unknown [m^2/s] in float64.
+    """
+    import torch
+
+    model, base = build_reference(prep["aircraft"], prep["condition"], prep["settings"], prep["lattice"],
+                                  prep["axes"], prep["device"], "float64", prep["symmetric"])
+    model.b["rates"] = bool(prep["model"].b.get("rates", False))
+    t = make_input_tensors(model, base, (), prep["device"], "float64", prep)
+    g = torch.as_tensor(np.ascontiguousarray(prep["g_unknown"]), dtype=torch.float64,
+                        device=model.b["device"])
+    with torch.no_grad():
+        _, A, rhs = model.forward(t, g)
+    return A, rhs, g
+
+
+def _residual_check_float64(prep: dict, system: tuple | None = None) -> float:
+    """Check the production circulation against a float64 assembly of the system.
+
+    The coarse check of :func:`_residual_check` uses the system of the
+    reference copy in the gradient precision. In float32 its data limit it
+    to errors above 3e-2. This check assembles the system once in float64
+    (:func:`float64_check_system`) and computes the componentwise backward
+    error (Oettli and Prager 1964) of the production circulation in it. The
+    limit comes from the round-off floor of the production state
+    (:func:`_float64_check_limit`), not from the float32 data of the
+    reference copy.
+
+    Parameters
+    ----------
+    prep : dict
+        Case of :func:`_prepare_case`.
+    system : tuple or None, optional
+        ``(A, rhs, g)`` in float64; None assembles it with
+        :func:`float64_check_system`.
+
+    Returns
+    -------
+    float
+        The backward error omega [-] in the float64 system.
+
+    Raises
+    ------
+    RuntimeError
+        When omega is above the limit of :func:`_float64_check_limit`.
+    """
+    A, rhs, g = float64_check_system(prep) if system is None else system
+    tol = _float64_check_limit(prep)
+    omega = _backward_error(A, rhs, g)
+    if not math.isfinite(omega) or omega > tol:
+        raise RuntimeError(
+            f"The production circulation does not solve the float64 system of the reference copy: "
+            f"the backward error is {omega:.3g} (limit {tol:.3g}, from the round-off floor of the "
+            f"{prep['precision_primal']} production state). A term of the boundary condition of the "
+            "reference copy differs from the production solve. "
+            "The gradient would not be the gradient of the reported result.")
+    return omega
+
+
+def _bc_check_notes(prep: dict) -> list[str]:
+    """Return the note with the backward errors of the boundary-condition checks."""
+    if "bc_backward_error" not in prep:
+        return []
+    coarse = float(prep["bc_backward_error"])
+    if "bc_backward_error_float64" not in prep:
+        return [f"Boundary-condition check: backward error {coarse:.2e} of the production state in the "
+                f"float64 system of the reference copy (limit {_RESIDUAL_TOL_FLOAT64:g})."]
+    fine = float(prep["bc_backward_error_float64"])
+    return [f"Boundary-condition checks: backward error {coarse:.2e} of the production state in the "
+            f"{prep['precision']} system of the reference copy (coarse check, limit "
+            f"{_RESIDUAL_TOL_FLOAT32:g}), and {fine:.2e} in a float64 assembly of the same system "
+            f"(limit {_float64_check_limit(prep):.2e})."]
+
+
 def _forward_check(prep: dict, outputs: dict, prod: dict[str, float],
                    vectors: tuple[str, ...], A: Any = None, rhs: Any = None,
                    g: Any = None) -> float:
@@ -1536,6 +1706,9 @@ def _forward_check(prep: dict, outputs: dict, prod: dict[str, float],
 
     With *A*, *rhs* and *g* given, :func:`_residual_check` also checks that
     the production circulation solves the system of the reference copy.
+    When the gradient or the production solve is in float32, that check is
+    coarse, and :func:`_residual_check_float64` also checks the production
+    circulation against a float64 assembly of the system.
 
     Returns the largest relative difference (``forward_mismatch``). Raises
     RuntimeError with the output names when it is above 1e-10 (the primal
@@ -1605,6 +1778,8 @@ def _forward_check(prep: dict, outputs: dict, prod: dict[str, float],
             "The gradient would not be the gradient of the reported result.")
     if A is not None:
         prep["bc_backward_error"] = _residual_check(prep, A, rhs, g)
+        if not (precision == "float64" and prep["precision_primal"] == "float64"):
+            prep["bc_backward_error_float64"] = _residual_check_float64(prep)
     return worst
 
 
@@ -1963,6 +2138,7 @@ def gradients(
             notes.append("Planform inputs use the full system, also for symmetric cases.")
         notes.extend(prep["model"].b.get("_planform", {}).get("notes", []))
     notes.extend(_case_notes(prep, ins))
+    notes.extend(_bc_check_notes(prep))
     notes.extend(_rate_notes(prep, jacobian, outs, ins))
     if bool(prep["model"].b.get("mach_active", False)):
         notes.append(
