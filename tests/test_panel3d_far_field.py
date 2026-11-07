@@ -310,10 +310,13 @@ def test_gpu_solver_far_field_parity():
 #: the change to least-squares node values in the surface gradient: with
 #: the previous inverse-distance node values
 #: (_build_surface_gradient_operator_shepard) both cases give the previous
-#: values bit for bit, and the Trefftz CDi does not change.
+#: values bit for bit, and the Trefftz CDi does not change. Cm was stored
+#: again after the change of the moment arm to the panel area centroid
+#: (before: -0.07067287154850373 and -0.09089026273577583, the corner
+#: average as the arm); CL and CDi did not change.
 _EXACT_STORED = {
-    None: (0.4068085517769171, -0.07067287154850373, 0.007305302148882255),
-    0.5: (0.49795371023247337, -0.09089026273577583, 0.004361269712777281),
+    None: (0.4068085517769171, -0.07038023749417746, 0.007305302148882255),
+    0.5: (0.49795371023247337, -0.09053863168037617, 0.004361269712777281),
 }
 
 
