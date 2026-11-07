@@ -1219,7 +1219,15 @@ class TorchReference:
         f_strip = f_panel.reshape(n_s, n_chord, 3).sum(1)
         strip_gamma = g_panel.reshape(n_s, n_chord).sum(1)
 
-        cl_strip = 2.0 * strip_gamma / (V * chord)
+        if rated:
+            # Section lift coefficient on the local dynamic pressure, at the
+            # onset of the quarter-chord mid-point (production:
+            # loads.compute_loads_batch).
+            u_qc = _onset(qc_mid)
+            speed_qc = torch.linalg.norm(u_qc, dim=1)
+            cl_strip = 2.0 * strip_gamma / (speed_qc * chord)
+        else:
+            cl_strip = 2.0 * strip_gamma / (V * chord)
         nd = (normal * d).sum(-1)
         cd_ = (cdir * d).sum(-1)
         alpha_geom = torch.atan2(nd, cd_)
@@ -1253,8 +1261,6 @@ class TorchReference:
                 p34s = qc_mid + 0.5 * chord[:, None] * cdir
                 slope = -(normal * torch.linalg.cross(omega.expand_as(cdir), cdir)).sum(-1)
                 cm_s = cm_s - (math.pi / 8.0) * slope * chord / torch.linalg.norm(_onset(p34s), dim=1)
-            u_qc = _onset(qc_mid)
-            speed_qc = torch.linalg.norm(u_qc, dim=1)
             d_loc = u_qc / speed_qc[:, None]
             q_loc = 0.5 * rho * speed_qc * speed_qc
         else:

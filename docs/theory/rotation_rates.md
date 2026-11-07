@@ -67,7 +67,16 @@ This term is the two-dimensional value at every aspect ratio. A vortex lattice w
 
 ### Profile drag and section moment
 
-With rates, the profile drag of a strip acts along the local onset at its quarter chord, with the local dynamic pressure, and the section moment uses the same onset. The section lift coefficient that the results report stays 2 Gamma / (V c).
+With rates, the profile drag of a strip acts along the local onset at its quarter chord, with the local dynamic pressure, and the section moment uses the same onset.
+
+The section lift coefficient uses the same local dynamic pressure. Let U_qc [m/s] be the onset at the quarter-chord mid-point of the strip: the free stream plus the velocity of the body rates, without the induced velocity. Then
+
+$$
+c_l = \frac{2\,\Gamma}{|\mathbf U_{qc}|\,c}, \qquad
+c_{l,\infty} = \frac{2\,\Gamma}{V_\infty\,c}.
+$$
+
+The results report c_l as `SpanwiseResult.Cl` and c_l,inf as `SpanwiseResult.Cl_freestream`. The effective angle of the linear section, alpha_eff = alpha_L0 + c_l / a_0, uses c_l, and so do the section polar values C_d(alpha_eff) and C_m(alpha_eff). The lifting-line solve uses the local onset too (the section lift |U_i|^2 dA_i C_l / 2 above), so the strip value and the solve have the same normalisation. The two points are not the same: the solve uses the three-quarter chord at the span fraction of the control point, the strip value the quarter-chord mid-point of the strip; the difference of the speeds is small (of the order of the rate velocity over the chord and the strip width). A yaw rate r changes the local speed by about r y, so with r b / (2 V) = 0.1 the tip value of c_l differs from c_l,inf by about 10 %. Use `Cl_freestream` for a load distribution on the free-stream dynamic pressure: the lift per unit span is q_inf c c_l,inf [N/m]. Without rates, |U_qc| = V_inf and the two values are equal.
 
 ### Ground effect
 

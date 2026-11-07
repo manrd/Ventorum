@@ -1495,8 +1495,17 @@ class SpanwiseResult:
         Spanwise position of each strip [m].
     gamma : numpy.ndarray
         Circulation of each strip [m^2/s].
-    Cl, Cd_i, Cd_profile : numpy.ndarray
-        Section lift, induced-drag and profile-drag coefficients [-].
+    Cl : numpy.ndarray
+        Section lift coefficient [-] on the local dynamic pressure of the
+        strip. On a lattice strip it is ``2 Gamma / (|U_qc| c)``, with
+        ``U_qc`` [m/s] the local onset velocity (free stream plus the
+        velocity of the body rates, without the induced velocity) at the
+        quarter-chord mid-point of the strip. Without body rates
+        ``|U_qc| = V_inf`` and ``Cl`` equals ``Cl_freestream``. The
+        effective angle of the linear section, ``alpha_L0 + Cl / a0``, uses
+        this value.
+    Cd_i, Cd_profile : numpy.ndarray
+        Section induced-drag and profile-drag coefficients [-].
     alpha_eff, alpha_i : numpy.ndarray
         Effective and induced angle of attack of each strip [rad].
     local_lift : numpy.ndarray
@@ -1505,6 +1514,11 @@ class SpanwiseResult:
         Strip chord [m].
     Cm_section : numpy.ndarray or None
         Section pitching moment about the quarter chord [-].
+    Cl_freestream : numpy.ndarray or None
+        Section lift coefficient on the free-stream dynamic pressure,
+        ``2 Gamma / (V_inf c)`` [-], so that ``Cl_freestream * q_inf * c``
+        is the lift per unit span [N/m] for every case. It differs from
+        ``Cl`` only with body rates. None for a solver that does not give it.
     """
 
     y: np.ndarray = field(default_factory=lambda: np.empty(0))
@@ -1519,6 +1533,8 @@ class SpanwiseResult:
     # Strip chord [m] and section pitching moment about the quarter chord.
     chord: np.ndarray | None = None
     Cm_section: np.ndarray | None = None
+    # Section lift coefficient on the free-stream dynamic pressure [-].
+    Cl_freestream: np.ndarray | None = None
 
     def clone(self) -> SpanwiseResult:
         """Fast explicit clone."""
@@ -1534,6 +1550,7 @@ class SpanwiseResult:
             surface_name=self.surface_name,
             chord=self.chord.copy() if self.chord is not None else None,
             Cm_section=self.Cm_section.copy() if self.Cm_section is not None else None,
+            Cl_freestream=self.Cl_freestream.copy() if self.Cl_freestream is not None else None,
         )
 
     def __copy__(self) -> SpanwiseResult:
@@ -1880,6 +1897,8 @@ class SolverResult:
                     "y": sw.y.tolist() if isinstance(sw.y, np.ndarray) else list(sw.y),
                     "Cl": sw.Cl.tolist() if isinstance(sw.Cl, np.ndarray) else list(sw.Cl),
                     "Cd_i": sw.Cd_i.tolist() if isinstance(sw.Cd_i, np.ndarray) else list(sw.Cd_i),
+                    "Cl_freestream": (None if sw.Cl_freestream is None
+                                      else np.asarray(sw.Cl_freestream, dtype=float).tolist()),
                 }
                 for sw in self.spanwise
             ]
