@@ -158,6 +158,8 @@ When `condition.h` is set, the trim solver models flight in ground effect. The h
 
 Because ground effect increases wing lift at a given angle of attack, the trimmed angle of attack in ground effect is usually lower than in free air.
 
+With the vortex lattice and `settings.n_chord` None, the automatic chordwise count near the ground depends on the attitude. Each pass of the trim uses one count. When the automatic count at the trimmed state differs from the count of the pass, `trim` runs a new pass from the trimmed state with that count (at most three passes). The final result then equals `ventorum.analyze` at the trimmed state. A note of the result gives the passes and their counts.
+
 ## Execution device and precision
 
 The solves of `trim` run on the device that the settings and the global device select. `res.device` and `res.precision` give the device and the precision of the solves. In `float32` (the default precision of the GPU pipelines) the tolerances `tol_CL` and `tol_moment` are at least `1e-6`, about ten times the `float32` round-off of the coefficients, and a note says so. `trim` does not change the global device setting.

@@ -672,3 +672,137 @@ def test_start_point_outside_the_bounds_gives_a_note():
     inside = vt.trim(ac, vt.FlightCondition(V_inf=30.0, alpha=np.radians(2.0)), st,
                      CL_target=0.5, pitch_control="elevator")
     assert not any("start point" in n for n in inside.notes)
+
+
+def _record_analyze(monkeypatch):
+    """Record the chordwise count and the settings object of each solve of a trim."""
+    counts: list[int] = []
+    settings_seen: list[object] = []
+    real_analyze = vt.analyze
+
+    def recording(*args, **kwargs):
+        sol = real_analyze(*args, **kwargs)
+        counts.append(int(sol.details["lattice"].n_chord))
+        settings_seen.append(kwargs.get("settings"))
+        return sol
+
+    monkeypatch.setattr(vt, "analyze", recording)
+    return counts, settings_seen
+
+
+def _runs(values: list[int]) -> list[int]:
+    """Return the value of each block of equal consecutive values."""
+    blocks: list[int] = []
+    for v in values:
+        if not blocks or blocks[-1] != v:
+            blocks.append(v)
+    return blocks
+
+
+def _ground_trim_case():
+    """Return the wing-tail case near the ground where the automatic count changes with the attitude."""
+    ac = _build_wing_tail_aircraft(z_tail=0.5)
+    ac.surfaces[0].n_panels = 4
+    ac.surfaces[1].n_panels = 4
+    st = vt.SolverSettings(solver_type="vlm")
+    cond = vt.FlightCondition(V_inf=30.0, alpha=np.radians(1.0), h=0.075)
+    return ac, st, cond
+
+
+def _automatic_count(ac, st, alpha_rad, h):
+    """Return the automatic chordwise count of the vortex lattice at one attitude."""
+    from ventorum.solvers.horseshoe import VortexLatticeSolver
+
+    fc = vt.FlightCondition(V_inf=30.0, alpha=float(alpha_rad), h=h)
+    return VortexLatticeSolver().resolve_n_chord(ac, st, fc, None)
+
+
+@pytest.mark.slow
+def test_ground_effect_trim_uses_one_automatic_chordwise_count_per_pass(monkeypatch):
+    """Verify the passes of a trim in ground effect with the automatic chordwise count.
+
+    Regression: each solve found its own automatic count. Near the ground the
+    count changes with alpha and with the elevator, so the residual was not
+    continuous and a finite-difference step of the Jacobian could contain a
+    mesh change. Now each pass uses one count: the first pass the automatic
+    count of the start point, each next pass the automatic count of the
+    trimmed state of the pass before. The final count is the automatic count
+    of the trimmed state, so the result equals a direct analysis there.
+    """
+    counts, _ = _record_analyze(monkeypatch)
+    ac, st, cond = _ground_trim_case()
+
+    res = vt.trim(ac, cond, st, CL_target=0.45, pitch_control="elevator", alpha_bounds_deg=(0.5, 2.0))
+
+    assert res.status == "trimmed"
+    passes = _runs(counts)
+    # One count per pass, at most three passes.
+    assert 1 <= len(passes) <= 3
+    # The first pass uses the automatic count of the start point.
+    assert passes[0] == _automatic_count(ac, st, cond.alpha, cond.h)
+    # The final count is the automatic count of the trimmed state.
+    final_auto = _automatic_count(res.aircraft, st, np.radians(res.alpha_deg), cond.h)
+    assert passes[-1] == final_auto
+    assert res.result is not None
+    assert res.result.details["lattice"].n_chord == final_auto
+    assert any(f"n_chord = {final_auto}" in n for n in res.notes)
+    # The final result equals a direct analysis at the trimmed state.
+    check = vt.analyze(res.aircraft, vt.FlightCondition(V_inf=30.0, alpha=np.radians(res.alpha_deg), h=cond.h), st)
+    assert check.details["lattice"].n_chord == final_auto
+    assert check.totals.CL == pytest.approx(0.45, abs=1.0e-6)
+    assert check.totals.Cm == pytest.approx(0.0, abs=1.0e-7)
+    assert check.totals.CL == pytest.approx(res.CL, abs=1.0e-9)
+    assert check.totals.Cm == pytest.approx(res.Cm, abs=1.0e-9)
+    # The settings of the caller do not change.
+    assert st.n_chord is None
+
+
+@pytest.mark.slow
+def test_ground_effect_trim_stops_after_three_passes(monkeypatch):
+    """Verify that a count that changes after each pass stops after three passes with a note."""
+    sequence = iter([17, 18, 19, 20, 21])
+    monkeypatch.setattr(trimming, "_automatic_ground_n_chord", lambda *args: next(sequence))
+    counts, _ = _record_analyze(monkeypatch)
+    ac, st, cond = _ground_trim_case()
+
+    res = vt.trim(ac, cond, st, CL_target=0.45, pitch_control="elevator", alpha_bounds_deg=(0.5, 2.0))
+
+    assert res.status == "trimmed"
+    assert _runs(counts) == [17, 18, 19]
+    assert res.result is not None
+    assert res.result.details["lattice"].n_chord == 19
+    assert any("3 passes" in n and "20" in n for n in res.notes)
+
+
+@pytest.mark.slow
+def test_ground_effect_trim_keeps_a_given_chordwise_count(monkeypatch):
+    """Verify that a chordwise count of the caller is used for all solves of a trim in ground effect."""
+    counts, settings_seen = _record_analyze(monkeypatch)
+    ac, _, cond = _ground_trim_case()
+    st = vt.SolverSettings(solver_type="vlm", n_chord=6)
+
+    res = vt.trim(ac, cond, st, CL_target=0.45, pitch_control="elevator", alpha_bounds_deg=(0.5, 2.0))
+
+    assert res.status == "trimmed"
+    assert set(counts) == {6}
+    assert all(s is st for s in settings_seen)
+    assert not any("n_chord" in n for n in res.notes)
+    assert st.n_chord == 6
+
+
+def test_trim_out_of_ground_effect_keeps_the_settings(monkeypatch):
+    """Verify that a trim out of ground effect with the automatic count gets the settings of the caller."""
+    counts, settings_seen = _record_analyze(monkeypatch)
+    ac = _build_wing_tail_aircraft()
+    ac.surfaces[0].n_panels = 4
+    ac.surfaces[1].n_panels = 4
+    st = vt.SolverSettings(solver_type="vlm")
+    cond = vt.FlightCondition(V_inf=30.0, alpha=np.radians(2.0))
+
+    res = vt.trim(ac, cond, st, CL_target=0.5, pitch_control="elevator")
+
+    assert res.status == "trimmed"
+    assert all(s is st for s in settings_seen)
+    assert len(set(counts)) == 1
+    assert not any("n_chord" in n for n in res.notes)
+    assert st.n_chord is None

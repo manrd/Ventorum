@@ -1362,6 +1362,22 @@ class SolverSettings:
         (default), ``"direct"`` or ``"krylov"``. Auto reuses an anchor
         LU with GMRES for CPU ground configurations with Morino Kutta.
         Free air, GPU backends and pressure Kutta use the direct solve.
+    report_condition : bool
+        If True, the direct CPU solves of the vortex lattice and of the
+        linear lifting line factorise the system matrix with
+        ``scipy.linalg.lu_factor`` and estimate its 1-norm condition number
+        with the LAPACK routine ``xGECON``
+        (:func:`ventorum.solvers.core.lu_solve_with_condition`). The
+        estimate is in ``SolveInfo.condition_number`` and in
+        ``result.details["condition_number"]``. It is an estimate (a lower
+        bound, normally within a factor of 3 of the exact 1-norm condition
+        number), not the exact value. Its cost is O(n^2) after the
+        factorisation, but the LU path of scipy replaces the solve of numpy,
+        so the circulation can differ in the last bits and a batch solves
+        its matrices one at a time. The GPU pipelines do not give the
+        estimate: ``details["condition_number"]`` is then None and
+        ``details["notes"]`` says so. The other solvers ignore it. Default
+        False: the solve path and the results do not change.
     """
 
     solver_type: Literal["auto", "vlm", "linear", "nonlinear", "fourier"] | str = "auto"
@@ -1383,6 +1399,7 @@ class SolverSettings:
     panel_scale_root_thickness: bool = True
     panel_cache: bool = True
     panel_ground_solver: str = "auto"
+    report_condition: bool = False
 
     def clone(self) -> SolverSettings:
         """Fast explicit clone.
@@ -1412,6 +1429,7 @@ class SolverSettings:
             panel_scale_root_thickness=self.panel_scale_root_thickness,
             panel_cache=self.panel_cache,
             panel_ground_solver=self.panel_ground_solver,
+            report_condition=self.report_condition,
         )
 
     def __copy__(self) -> SolverSettings:

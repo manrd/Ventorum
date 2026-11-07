@@ -31,6 +31,8 @@ For a linear section, $C_l = a_0(\alpha - \alpha_{L0})$. Phillips and Snyder lin
 
 The linear solver solves equation {eq}`eq-llt-linear` with one dense LU factorisation.
 
+With `SolverSettings.report_condition = True` (default False), the CPU solve uses the LU factorisation of `scipy.linalg.lu_factor` and estimates the 1-norm condition number $\kappa_1(A) = \|A\|_1 \|A^{-1}\|_1$ with the LAPACK routine `xGECON` (`ventorum.solvers.core.lu_solve_with_condition`). The routine uses the estimate of W. W. Hager (1984) as refined by N. J. Higham (1988): a lower bound of $\kappa_1$, normally within a factor of 3 of it. It costs a few solves with the LU factors, $O(n^2)$ against $O(n^3)$ for the factorisation. The estimate is in `SolveInfo.condition_number` and `result.details["condition_number"]`. The GPU pipelines do not give it (the value is None and a note says so). With the default the solve is `numpy.linalg.solve` and the results do not change.
+
 ### Newton's method
 
 The nonlinear solver starts from the linear solution (or from a given start value, for example the previous angle of a sweep) and solves equation {eq}`eq-llt-nonlinear` with Newton's method. The Jacobian is exact:
@@ -105,3 +107,5 @@ A linear airfoil has the constants $a_0$, $\alpha_{L0}$, $C_{d0}$ and $C_{m0}$. 
 - F. N. Fritsch and J. Butland, "A method for constructing local monotone piecewise cubic interpolants", *SIAM Journal on Scientific and Statistical Computing* 5(2), 1984, pp. 300-304.
 - M. Drela, "XFOIL: an analysis and design system for low Reynolds number airfoils", in T. J. Mueller (ed.), *Low Reynolds Number Aerodynamics*, Lecture Notes in Engineering 54, Springer, 1989, pp. 1-12.
 - J. Nocedal and S. J. Wright, *Numerical Optimization*, 2nd ed., Springer, 2006, chapter 3.
+- W. W. Hager, "Condition estimates", SIAM Journal on Scientific and Statistical Computing 5(2), 1984, pp. 311-316.
+- N. J. Higham, "FORTRAN codes for estimating the one-norm of a real or complex matrix, with applications to condition estimation", ACM Transactions on Mathematical Software 14(4), 1988, pp. 381-396.

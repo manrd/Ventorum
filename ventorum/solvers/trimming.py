@@ -27,7 +27,13 @@ Jacobian entries is then about 1e-3 per rad (about 1e-4 relative to a lift slope
 of 5 per rad), which is enough for Newton's method.
 
 When condition.h is set (ground effect), the height of Aircraft.ref_point above the
-ground plane remains constant while the angle of attack changes.
+ground plane remains constant while the angle of attack changes. With the automatic
+chordwise count of the vortex lattice, all solves of one pass of a trim in ground
+effect use one count, so that the residual is continuous in the unknowns. The first
+pass uses the automatic count of the start point. When the automatic count at the
+trimmed state differs, a new pass starts from the trimmed state with that count (at
+most ``GROUND_N_CHORD_MAX_PASSES`` passes), so that the result equals an analysis at
+the trimmed state.
 
 References
 ----------
@@ -175,6 +181,71 @@ class TrimResult:
         }
 
 
+#: Largest number of trim passes in ground effect with the automatic chordwise
+#: count (see :func:`trim`).
+GROUND_N_CHORD_MAX_PASSES = 3
+
+
+def _automatic_ground_n_chord(
+    aircraft: Aircraft,
+    condition: FlightCondition,
+    settings: SolverSettings | None,
+    alpha_rad: float,
+) -> int | None:
+    """Return the automatic chordwise count of a trim point in ground effect.
+
+    In ground effect the automatic chordwise count of the vortex lattice
+    (:meth:`ventorum.solvers.lattice_base.LatticeSolver.resolve_n_chord`)
+    is an integer that depends on the attitude: the angle of attack and the
+    deflections. This function gives the count of :func:`ventorum.analyze`
+    at the angle of attack *alpha_rad* with the current deflections of
+    *aircraft*.
+
+    Parameters
+    ----------
+    aircraft : Aircraft
+        Aircraft with the deflections of the point.
+    condition : FlightCondition
+        Flight condition of the trim.
+    settings : SolverSettings or None
+        Settings of the trim. None is the default of :func:`ventorum.analyze`.
+    alpha_rad : float
+        Angle of attack of the point [rad].
+
+    Returns
+    -------
+    int or None
+        The automatic count, or None when the count is not automatic in
+        ground effect: no ground (``condition.h`` None), a count in the
+        settings, or a lifting-line solver.
+    """
+    from ventorum.solvers.factory import make_solver, resolve_solver_type
+    from ventorum.utils.validation import validate_aircraft
+
+    if condition.h is None:
+        return None
+    # The default settings of ventorum.analyze.
+    st = SolverSettings(solver_type="auto", n_panels=80) if settings is None else settings
+    if st.n_chord is not None:
+        return None
+    solver = make_solver(resolve_solver_type(st.solver_type))
+    if solver.collocation != "vlm":
+        return None
+    # The same check as the solve; an invalid aircraft raises here.
+    validate_aircraft(aircraft)
+    fc = condition.clone()
+    fc.alpha = float(alpha_rad)
+    # A strike gives the floor count; the solve then reports the strike.
+    return int(solver.resolve_n_chord(aircraft, st, fc, None, aircraft.moment_reference()))
+
+
+def _with_n_chord(settings: SolverSettings | None, n_chord: int) -> SolverSettings:
+    """Return a copy of the settings (None: the defaults of ``analyze``) with ``n_chord`` set."""
+    st = SolverSettings(solver_type="auto", n_panels=80) if settings is None else settings.clone()
+    st.n_chord = int(n_chord)
+    return st
+
+
 def _get_control_deflection(ac: Aircraft, name: str) -> float:
     """Return the current deflection [rad] of a named control surface."""
     for surf in ac.surfaces:
@@ -277,6 +348,20 @@ def trim(
 
     When ``condition.h`` is set (ground effect), the height of ``Aircraft.ref_point``
     above the ground plane stays constant while the angle of attack changes.
+    When the vortex lattice finds its chordwise count automatically
+    (``settings.n_chord`` None), the count depends on the attitude near the
+    ground. Then all solves of one pass of the trim (the Newton steps and the
+    finite differences of the Jacobian) use one count: the first pass the
+    automatic count of the start point. After a pass converges, trim finds
+    the automatic count at the trimmed state. When it differs, a new pass
+    starts from the trimmed state with that count. This repeats until the
+    count does not change, at most ``GROUND_N_CHORD_MAX_PASSES`` (3) passes.
+    The final result then equals :func:`ventorum.analyze` at the trimmed
+    state with the automatic count. When the count still changes after the
+    last pass, the result is the last pass and a note says so. The
+    iterations and the residual history are those of the last pass; a note
+    gives the number of passes and their counts. A count in
+    ``settings.n_chord`` is used as given.
 
     References
     ----------
@@ -387,22 +472,33 @@ def trim(
             f"from the nearest point in the bounds ({_describe(x)})."
         )
 
-    devices: set[str] = set()
-    precisions: set[str] = set()
-
-    def _evaluate(x_vec: np.ndarray) -> tuple[SolverResult | None, np.ndarray | None, str | None]:
-        fc = condition.clone()
-        fc.alpha = float(x_vec[0])
+    def _set_deflections(x_vec: np.ndarray) -> None:
+        """Set the deflections of the unknowns of a point on the aircraft clone."""
         ac_clone.set_deflection(pitch_control, float(x_vec[1]))
         if is_lateral:
             assert roll_control is not None and yaw_control is not None
             ac_clone.set_deflection(roll_control, float(x_vec[2]))
             ac_clone.set_deflection(yaw_control, float(x_vec[3]))
 
+    # In ground effect with the automatic chordwise count, each pass of the
+    # trim uses one count, so that the residual is continuous in the unknowns.
+    _set_deflections(x)
+    n_chord_auto = _automatic_ground_n_chord(ac_clone, condition, settings, float(x[0]))
+    # The settings of the solves of the current pass.
+    run_settings = settings if n_chord_auto is None else _with_n_chord(settings, n_chord_auto)
+
+    devices: set[str] = set()
+    precisions: set[str] = set()
+
+    def _evaluate(x_vec: np.ndarray) -> tuple[SolverResult | None, np.ndarray | None, str | None]:
+        fc = condition.clone()
+        fc.alpha = float(x_vec[0])
+        _set_deflections(x_vec)
+
         # Only the documented solver failures become a status. All other
         # exceptions (programming errors, KeyboardInterrupt) propagate.
         try:
-            sol = analyze(ac_clone, fc, settings=settings)
+            sol = analyze(ac_clone, fc, settings=run_settings)
         except _SOLVE_FAILURES as exc:
             return None, None, f"The solve failed at ({_describe(x_vec)}): {exc}"
 
@@ -484,11 +580,8 @@ def trim(
         jac_matrix: np.ndarray,
         notes_list: list[str],
     ) -> TrimResult:
-        ac_clone.set_deflection(pitch_control, float(x_final[1]))
-        if is_lateral:
-            assert roll_control is not None and yaw_control is not None
-            ac_clone.set_deflection(roll_control, float(x_final[2]))
-            ac_clone.set_deflection(yaw_control, float(x_final[3]))
+        _set_deflections(x_final)
+        final_x[:] = [float(v) for v in x_final]
 
         # Collect deflections from all surfaces
         defs_deg: dict[str, float] = {}
@@ -535,139 +628,187 @@ def trim(
                                                      else "mixed"),
         )
 
-    notes: list[str] = list(start_notes)
-    residual_history: list[float] = []
-    outward_counts = np.zeros(n_vars, dtype=int)
-    # The last point with a good solve, its solution and its Jacobian.
-    good_x: np.ndarray | None = None
-    good_sol: SolverResult | None = None
-    good_J = nan_jacobian
+    def _newton(x0: np.ndarray) -> TrimResult:
+        """Run the Newton iteration from *x0* with the settings ``run_settings``."""
+        x = x0.copy()
+        notes: list[str] = list(start_notes)
+        residual_history: list[float] = []
+        outward_counts = np.zeros(n_vars, dtype=int)
+        # The last point with a good solve, its solution and its Jacobian.
+        good_x: np.ndarray | None = None
+        good_sol: SolverResult | None = None
+        good_J = nan_jacobian
 
-    # iter_idx is the number of Newton steps done before this point. Every
-    # stop returns iterations = iter_idx, thus
-    # len(residual_history) == iterations + 1.
-    for iter_idx in range(max_iterations + 1):
-        sol, R, err = _evaluate(x)
-        if err is not None or sol is None or R is None:
-            residual_history.append(float("nan"))
-            notes.append(err if err is not None else "Evaluation failed.")
-            if good_x is None:
-                notes.append("No solve succeeded: the coefficients are NaN.")
-                return _build_result(
-                    "not_converged", False, x, None, iter_idx, residual_history, nan_jacobian, notes
-                )
-            notes.append(f"The result gives the last point with a good solve ({_describe(good_x)}).")
-            return _build_result(
-                "not_converged", False, good_x, good_sol, iter_idx, residual_history, good_J, notes
-            )
-
-        good_x, good_sol, good_J = x.copy(), sol, nan_jacobian
-        max_res = float(np.max(np.abs(R)))
-        residual_history.append(max_res)
-
-        # Check convergence. In float32 the tolerances have a floor at
-        # the round-off of the coefficients.
-        tl_CL, tl_m = tol_CL, tol_moment
-        if "float32" in precisions:
-            tl_CL = max(tol_CL, FLOAT32_TOLERANCE_FLOOR)
-            tl_m = max(tol_moment, FLOAT32_TOLERANCE_FLOOR)
-            if (tl_CL, tl_m) != (tol_CL, tol_moment) and not any("float32" in n for n in notes):
-                notes.append(f"The solves are in float32: the tolerances are tol_CL = {tl_CL:.1e} and "
-                             f"tol_moment = {tl_m:.1e} (floor {FLOAT32_TOLERANCE_FLOOR:.0e}, about five "
-                             "times the float32 round-off of the coefficients).")
-        if abs(R[0]) <= tl_CL and all(abs(r) <= tl_m for r in R[1:]):
-            J_final, err_final = _compute_jacobian(x)
-            if J_final is not None:
-                good_J = J_final
-            else:
-                notes.append(f"The Jacobian at the trim point is not available: {err_final}")
-            return _build_result(
-                "trimmed", True, x, sol, iter_idx, residual_history, good_J, notes
-            )
-
-        if iter_idx == max_iterations:
-            notes.append(f"Maximum iterations ({max_iterations}) reached without convergence.")
-            J_final, err_final = _compute_jacobian(x)
-            if J_final is not None:
-                good_J = J_final
-            else:
-                notes.append(f"The Jacobian at the last point is not available: {err_final}")
-            return _build_result(
-                "not_converged", False, x, sol, iter_idx, residual_history, good_J, notes
-            )
-
-        # Compute Jacobian
-        J, err_J = _compute_jacobian(x)
-        if err_J is not None or J is None:
-            notes.append(err_J if err_J is not None else "Jacobian computation failed.")
-            return _build_result(
-                "not_converged", False, x, sol, iter_idx, residual_history, nan_jacobian, notes
-            )
-        good_J = J
-
-        # Check singularity: an unknown with no effect, or a large condition number
-        reason = _singular_reason(J)
-        if reason is not None:
-            notes.append(reason)
-            return _build_result(
-                "not_converged", False, x, sol, iter_idx, residual_history, good_J, notes
-            )
-        try:
-            dx = np.linalg.solve(J, -R)
-        except np.linalg.LinAlgError as exc:
-            notes.append(f"Singular Jacobian: {exc}.")
-            return _build_result(
-                "not_converged", False, x, sol, iter_idx, residual_history, good_J, notes
-            )
-
-        if not np.all(np.isfinite(dx)):
-            notes.append("Newton step contains non-finite entries.")
-            return _build_result(
-                "not_converged", False, x, sol, iter_idx, residual_history, good_J, notes
-            )
-
-        # Bound limit stop check
-        limit_stop = False
-        stop_status = ""
-        for j in range(n_vars):
-            at_lower = (x[j] - lower_bounds[j]) <= 1.0e-10
-            points_outward_lower = at_lower and (dx[j] < -1.0e-10)
-
-            at_upper = (upper_bounds[j] - x[j]) <= 1.0e-10
-            points_outward_upper = at_upper and (dx[j] > 1.0e-10)
-
-            if points_outward_lower or points_outward_upper:
-                outward_counts[j] += 1
-            else:
-                outward_counts[j] = 0
-
-            if outward_counts[j] >= 2 and not limit_stop:
-                limit_stop = True
-                if j == 0:
-                    stop_status = "alpha_limit"
-                    bnd_deg = alpha_bounds_deg[0] if points_outward_lower else alpha_bounds_deg[1]
-                    notes.append(f"Angle of attack reached bound of {bnd_deg:.1f} deg.")
-                else:
-                    stop_status = "control_limit"
-                    ctrl_name = unknown_names[j]
-                    bnd_deg = -30.0 if points_outward_lower else 30.0
-                    notes.append(
-                        f"Control surface {ctrl_name!r} reached deflection bound of {bnd_deg:.1f} deg."
+        # iter_idx is the number of Newton steps done before this point. Every
+        # stop returns iterations = iter_idx, thus
+        # len(residual_history) == iterations + 1.
+        for iter_idx in range(max_iterations + 1):
+            sol, R, err = _evaluate(x)
+            if err is not None or sol is None or R is None:
+                residual_history.append(float("nan"))
+                notes.append(err if err is not None else "Evaluation failed.")
+                if good_x is None:
+                    notes.append("No solve succeeded: the coefficients are NaN.")
+                    return _build_result(
+                        "not_converged", False, x, None, iter_idx, residual_history, nan_jacobian, notes
                     )
+                notes.append(f"The result gives the last point with a good solve ({_describe(good_x)}).")
+                return _build_result(
+                    "not_converged", False, good_x, good_sol, iter_idx, residual_history, good_J, notes
+                )
 
-        if limit_stop:
-            return _build_result(
-                stop_status, False, x, sol, iter_idx, residual_history, good_J, notes
+            good_x, good_sol, good_J = x.copy(), sol, nan_jacobian
+            max_res = float(np.max(np.abs(R)))
+            residual_history.append(max_res)
+
+            # Check convergence. In float32 the tolerances have a floor at
+            # the round-off of the coefficients.
+            tl_CL, tl_m = tol_CL, tol_moment
+            if "float32" in precisions:
+                tl_CL = max(tol_CL, FLOAT32_TOLERANCE_FLOOR)
+                tl_m = max(tol_moment, FLOAT32_TOLERANCE_FLOOR)
+                if (tl_CL, tl_m) != (tol_CL, tol_moment) and not any("float32" in n for n in notes):
+                    notes.append(f"The solves are in float32: the tolerances are tol_CL = {tl_CL:.1e} and "
+                                 f"tol_moment = {tl_m:.1e} (floor {FLOAT32_TOLERANCE_FLOOR:.0e}, about five "
+                                 "times the float32 round-off of the coefficients).")
+            if abs(R[0]) <= tl_CL and all(abs(r) <= tl_m for r in R[1:]):
+                J_final, err_final = _compute_jacobian(x)
+                if J_final is not None:
+                    good_J = J_final
+                else:
+                    notes.append(f"The Jacobian at the trim point is not available: {err_final}")
+                return _build_result(
+                    "trimmed", True, x, sol, iter_idx, residual_history, good_J, notes
+                )
+
+            if iter_idx == max_iterations:
+                notes.append(f"Maximum iterations ({max_iterations}) reached without convergence.")
+                J_final, err_final = _compute_jacobian(x)
+                if J_final is not None:
+                    good_J = J_final
+                else:
+                    notes.append(f"The Jacobian at the last point is not available: {err_final}")
+                return _build_result(
+                    "not_converged", False, x, sol, iter_idx, residual_history, good_J, notes
+                )
+
+            # Compute Jacobian
+            J, err_J = _compute_jacobian(x)
+            if err_J is not None or J is None:
+                notes.append(err_J if err_J is not None else "Jacobian computation failed.")
+                return _build_result(
+                    "not_converged", False, x, sol, iter_idx, residual_history, nan_jacobian, notes
+                )
+            good_J = J
+
+            # Check singularity: an unknown with no effect, or a large condition number
+            reason = _singular_reason(J)
+            if reason is not None:
+                notes.append(reason)
+                return _build_result(
+                    "not_converged", False, x, sol, iter_idx, residual_history, good_J, notes
+                )
+            try:
+                dx = np.linalg.solve(J, -R)
+            except np.linalg.LinAlgError as exc:
+                notes.append(f"Singular Jacobian: {exc}.")
+                return _build_result(
+                    "not_converged", False, x, sol, iter_idx, residual_history, good_J, notes
+                )
+
+            if not np.all(np.isfinite(dx)):
+                notes.append("Newton step contains non-finite entries.")
+                return _build_result(
+                    "not_converged", False, x, sol, iter_idx, residual_history, good_J, notes
+                )
+
+            # Bound limit stop check
+            limit_stop = False
+            stop_status = ""
+            for j in range(n_vars):
+                at_lower = (x[j] - lower_bounds[j]) <= 1.0e-10
+                points_outward_lower = at_lower and (dx[j] < -1.0e-10)
+
+                at_upper = (upper_bounds[j] - x[j]) <= 1.0e-10
+                points_outward_upper = at_upper and (dx[j] > 1.0e-10)
+
+                if points_outward_lower or points_outward_upper:
+                    outward_counts[j] += 1
+                else:
+                    outward_counts[j] = 0
+
+                if outward_counts[j] >= 2 and not limit_stop:
+                    limit_stop = True
+                    if j == 0:
+                        stop_status = "alpha_limit"
+                        bnd_deg = alpha_bounds_deg[0] if points_outward_lower else alpha_bounds_deg[1]
+                        notes.append(f"Angle of attack reached bound of {bnd_deg:.1f} deg.")
+                    else:
+                        stop_status = "control_limit"
+                        ctrl_name = unknown_names[j]
+                        bnd_deg = -30.0 if points_outward_lower else 30.0
+                        notes.append(
+                            f"Control surface {ctrl_name!r} reached deflection bound of {bnd_deg:.1f} deg."
+                        )
+
+            if limit_stop:
+                return _build_result(
+                    stop_status, False, x, sol, iter_idx, residual_history, good_J, notes
+                )
+
+            # Step limit: scale down if largest change exceeds 5 deg
+            max_step = math.radians(5.0)
+            largest_change = float(np.max(np.abs(dx)))
+            if largest_change > max_step:
+                dx = dx * (max_step / largest_change)
+
+            # Cut at bounds
+            x = np.clip(x + dx, lower_bounds, upper_bounds)
+
+        # Not reached: the loop returns when iter_idx == max_iterations.
+        raise AssertionError("The trim loop ended without a result.")
+
+    # The unknowns [rad] of the reported point of the last pass.
+    final_x: list[float] = [float(v) for v in x]
+
+    if n_chord_auto is None:
+        return _newton(x)
+
+    # Ground effect with the automatic chordwise count: a pass uses one count.
+    # When the automatic count at the trimmed state differs, a new pass starts
+    # from the trimmed state with that count. The final result then equals an
+    # analysis at the trimmed state with the automatic count.
+    pass_counts = [n_chord_auto]
+    while True:
+        res = _newton(x)
+        if res.status != "trimmed":
+            res.notes.append(
+                f"Ground effect: the solves of pass {len(pass_counts)} of the trim use n_chord = "
+                f"{pass_counts[-1]}, the automatic chordwise count of the start point of the pass. "
+                "The trim did not converge, so the count was not checked at the end point."
             )
-
-        # Step limit: scale down if largest change exceeds 5 deg
-        max_step = math.radians(5.0)
-        largest_change = float(np.max(np.abs(dx)))
-        if largest_change > max_step:
-            dx = dx * (max_step / largest_change)
-
-        # Cut at bounds
-        x = np.clip(x + dx, lower_bounds, upper_bounds)
-
-    # Not reached: the loop returns when iter_idx == max_iterations.
-    raise AssertionError("The trim loop ended without a result.")
+            return res
+        x = np.array(final_x, dtype=float)
+        _set_deflections(x)
+        n_next = _automatic_ground_n_chord(ac_clone, condition, settings, float(x[0]))
+        assert n_next is not None
+        counts_text = ", ".join(str(n) for n in pass_counts)
+        if n_next == pass_counts[-1]:
+            res.notes.append(
+                f"Ground effect: all solves of the last pass of the trim use n_chord = {n_next}, the "
+                "automatic chordwise count at the trimmed state, so the result equals an analysis there "
+                f"(passes: {len(pass_counts)}, counts {counts_text}). The iterations and the residual "
+                "history are those of the last pass. Set settings.n_chord to select a different count."
+            )
+            return res
+        if len(pass_counts) >= GROUND_N_CHORD_MAX_PASSES:
+            res.notes.append(
+                f"Ground effect: the automatic chordwise count changed after each of {len(pass_counts)} "
+                f"passes of the trim (counts {counts_text}); at the trimmed state of the last pass it is "
+                f"{n_next}. The result is the last pass, with n_chord = {pass_counts[-1]}, so it differs "
+                "from an analysis at the trimmed state with the automatic count. Set settings.n_chord to "
+                "select one count."
+            )
+            return res
+        pass_counts.append(n_next)
+        run_settings = _with_n_chord(settings, n_next)

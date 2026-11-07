@@ -84,7 +84,8 @@ class VortexLatticeSolver(LatticeSolver):
             )
         gamma, info = solve_vlm(lattice, condition, ground,
                                 use_symmetry=getattr(settings, "use_symmetry", True), wake_dir=wake_dir,
-                                ref_point=ref_point)
+                                ref_point=ref_point,
+                                report_condition=bool(getattr(settings, "report_condition", False)))
         return gamma, None, info
 
     def solve_circulation_batch(
@@ -113,7 +114,8 @@ class VortexLatticeSolver(LatticeSolver):
                 stacklevel=4,
             )
         sols = solve_vlm_batch(lattice, conditions, grounds,
-                               getattr(settings, "use_symmetry", True), wake_dirs, ref_point)
+                               getattr(settings, "use_symmetry", True), wake_dirs, ref_point,
+                               report_condition=bool(getattr(settings, "report_condition", False)))
         if sols is None:
             return super().solve_circulation_batch(lattice, conditions, settings, grounds, wake_dirs, False,
                                                    ref_point=ref_point)

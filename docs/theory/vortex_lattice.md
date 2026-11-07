@@ -119,6 +119,8 @@ The flow-tangency condition at the control point $\mathbf P_i$ of panel $i$ is
 
 where $\mathbf v_{ij}$ [1/m] is the velocity at $\mathbf P_i$ from the horseshoe $j$ with unit circulation, including its mirror and ground images when they apply (see [Symmetry](symmetry.md) and [Ground effect](ground_effect.md)). The system is solved with one dense LU factorisation (LAPACK through `numpy.linalg.solve`).
 
+With `SolverSettings.report_condition = True` (default False), the CPU solve uses the LU factorisation of `scipy.linalg.lu_factor` and estimates the 1-norm condition number $\kappa_1(A) = \|A\|_1 \|A^{-1}\|_1$ with the LAPACK routine `xGECON` (`ventorum.solvers.core.lu_solve_with_condition`). The routine uses the estimate of W. W. Hager (1984) as refined by N. J. Higham (1988): a lower bound of $\kappa_1$, normally within a factor of 3 of it. It costs a few solves with the LU factors, $O(n^2)$ against $O(n^3)$ for the factorisation. The estimate is in `SolveInfo.condition_number` and `result.details["condition_number"]`. The GPU pipelines do not give it (the value is None and a note says so). With the default the solve is `numpy.linalg.solve` and the results do not change.
+
 ## Assumptions
 
 - Thin surfaces: thickness enters only through the section data. Inviscid, attached flow. The flow is incompressible unless `mach` is set (see the envelope below).
@@ -164,3 +166,5 @@ where $\mathbf v_{ij}$ [1/m] is the velocity at $\mathbf P_i$ from the horseshoe
 - W. Kinner, "Die kreisförmige Tragfläche auf potentialtheoretischer Grundlage", *Ingenieur-Archiv* 8, 1937, pp. 47-80.
 - C. Coulliette and A. Plotkin, ["Aerofoil ground effect revisited"](https://www.cambridge.org/core/journals/aeronautical-journal/article/abs/aerofoil-ground-effectrevisited/561E5C4DD13ED87435EF7B438859EE20), *The Aeronautical Journal* 100, 1996.
 - S. E. Widnall and T. M. Barrows, ["An analytic solution for two- and three-dimensional wings in ground effect"](https://doi.org/10.1017/S0022112070000915), *Journal of Fluid Mechanics* 41, 1970, pp. 769-792.
+- W. W. Hager, "Condition estimates", SIAM Journal on Scientific and Statistical Computing 5(2), 1984, pp. 311-316.
+- N. J. Higham, "FORTRAN codes for estimating the one-norm of a real or complex matrix, with applications to condition estimation", ACM Transactions on Mathematical Software 14(4), 1988, pp. 381-396.
