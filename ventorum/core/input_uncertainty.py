@@ -18,8 +18,10 @@ gradients come from central differences of the production solve; section
 inputs are then refused. Section inputs are also refused on tabulated
 airfoils, because the table, not the section values, sets the section
 there. The adjoint runs on the device of the production
-solve, with the precision of ``ventorum.gpu.get_precision()``; the CPU
-kernels evaluate the O(n^2) partials in float64. The central differences
+solve, with the precision of ``ventorum.gpu.get_precision()``. The CPU
+kernels evaluate the O(n^2) partials in float64 arithmetic from float32
+inputs, and the adjoint solve stays float32, so the gradients have
+float32 accuracy (relative floor 1e-3). The central differences
 use the production solve itself.
 
 References
