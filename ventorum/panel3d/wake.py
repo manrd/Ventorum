@@ -6,6 +6,11 @@ of lifting surfaces in Ventorum-3DP. In free air the wake follows the body
 +x axis, so the influence matrix does not depend on the flight condition.
 In ground effect the solver sheds the wake along the free stream (parallel
 to the ground), so that no wake panel goes below the ground plane.
+The free-air wake does not turn with the free stream, so the Trefftz
+plane is normal to the body x axis. The far-field drag is then the induced
+force along the body x axis, not along the free stream: it has a relative
+term of order sin^2(alpha) (an estimate: about 1 % of CDi at alpha 6 deg
+and 7 % at 15 deg).
 
 Published sources
 -----------------

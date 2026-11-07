@@ -39,8 +39,12 @@ In free air the wake follows the body x axis, so one configuration (and one
 factorization of each system) serves all free-air conditions. In ground
 effect the wake follows the free stream, parallel to the ground, and the
 ground images depend on the attitude and the height, so each (attitude,
-height) group is one configuration with its own factorization. The solver
-factorizes a system only when a condition needs it. On a half mesh the
+height) group is one configuration with its own factorization. The free-air
+wake does not turn with the free stream, so the Trefftz plane is normal to
+the body x axis. The far-field drag is then the induced force along the
+body x axis, not along the free stream: it has a relative term of order
+sin^2(alpha) (an estimate: about 1 % of CDi at alpha 6 deg and 7 % at
+15 deg). The solver factorizes a system only when a condition needs it. On a half mesh the
 symmetric system serves the symmetric unit onsets (u, w, q) and the
 antisymmetric system the antisymmetric ones (v, p, r); the antisymmetric
 system is factorized only when a condition has sideslip, roll rate or yaw
