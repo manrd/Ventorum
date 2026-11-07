@@ -204,9 +204,16 @@ class PanelResult:
     kutta_iters : int
         Number of pressure Kutta Newton updates performed.
     kutta_residual : float
-        Final max |delta Cp| at the trailing-edge pairs [-].
+        Final max |delta Cp| at the trailing-edge pairs [-]: the pressure
+        jump between the upper and the lower trailing-edge panels. For the
+        "morino" option it is a diagnostic only: the Morino condition sets
+        the doublet jump, not the pressure jump, so this value does not go
+        to zero.
     kutta_converged : bool
-        True when the pressure residual falls below tolerance.
+        For the "pressure" option, True when the pressure residual falls
+        below the tolerance. For the "morino" option, True means only that
+        the linear solve finished; it does not check the trailing-edge
+        pressure jump (read kutta_residual for that).
     kutta_lstsq_steps : int
         Number of pressure Kutta Newton steps that used the least-squares
         solution because the Jacobian was singular. Zero for the Morino
