@@ -169,8 +169,15 @@ class CaseSetup:
         for j in range(1, nw - 1):
             P[n + j, n + j - 1] = 0.5
             P[n + j, n + j] = 0.5
-        P[n + nw - 1, n + nw - 2] = 1.5
-        P[n + nw - 1, n + nw - 3] = -0.5
+        # Linear extrapolation from the midpoints of the last two wake panels
+        # to the wake end. The midpoints are L_last / 2 and L_last + L_prev / 2
+        # upstream of the end, so the weights are 1 + f and -f with
+        # f = L_last / (L_last + L_prev) (1.5 and -0.5 for equal lengths only;
+        # the wake spacing is geometric).
+        l_last, l_prev = s.wake_len[nw - 2], s.wake_len[nw - 3]
+        f = l_last / (l_last + l_prev)
+        P[n + nw - 1, n + nw - 2] = 1.0 + f
+        P[n + nw - 1, n + nw - 3] = -f
         self._p_wake = P
 
 
@@ -342,7 +349,8 @@ def _coupling_matrices(setup: CaseSetup, st: CaseState):
     the upper trailing-edge node at the first wake station (equal to the
     lower one by the Kutta condition), the mean of the two adjacent
     wake-panel midpoint velocities at the other wake stations and a linear
-    extrapolation at the last one.
+    extrapolation from the last two midpoints (weights from the panel
+    lengths) at the last one.
     """
     P, B = _p_and_b(setup, st)
     return P @ setup.base, P @ setup.sens @ B

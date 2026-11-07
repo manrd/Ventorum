@@ -72,7 +72,9 @@ class ViscousCase:
     ncrit : float
         Critical amplification exponent [-].
     xtr : tuple of float
-        Forced transition x/c on the upper and lower side [-] (1.0: free).
+        Forced transition x/c on the upper and lower side [-] (1.0: free),
+        on the chord line of the reference geometry (the same measure as
+        ``xtr`` of :func:`ventorum.panel2d.viscous.solve_viscous`).
     height : float or None
         Height above the ground [m], or None for free air.
     max_iter : int
@@ -235,6 +237,19 @@ def _reference(c: ViscousCase):
     return vs.resolve_body(body, c.chord_ref, c.moment_ref)
 
 
+def _stored_reference(c: ViscousCase):
+    """Return the stored reference geometry of an AirfoilShape case (it sets the x/c of transition), or None."""
+    return c.coordinates.reference if isinstance(c.coordinates, AirfoilShape) else None
+
+
+def _reference_key(c: ViscousCase):
+    """Return the stored reference geometry of a case as a hashable tuple, or None."""
+    ref = _stored_reference(c)
+    if ref is None:
+        return None
+    return (*map(float, ref.leading_edge), *map(float, ref.trailing_edge), float(ref.chord_ref))
+
+
 def _rules(c: ViscousCase) -> vs.StopRules:
     """Return the stop rules of a case (ValueError for values out of range)."""
     return vs.StopRules(stall_window=c.stall_window, stall_factor=c.stall_factor,
@@ -261,7 +276,7 @@ def _seq_key(c: ViscousCase):
     return (coords.tobytes(), coords.shape, float(c.Re), c.height, float(c.ncrit), xtr, float(c.wake_length),
             int(c.n_wake), int(c.max_iter), float(c.tol), int(c.stall_window), float(c.stall_factor),
             float(c.divergence_factor), int(c.work_budget), int(c.lm_trials), chord, moment, pivot,
-            c.height_reference)
+            c.height_reference, _reference_key(c))
 
 
 def solve_viscous_batch(cases, *, backend: str = "torch", device=None, dtype=None) -> ViscousBatchResult:
@@ -302,7 +317,8 @@ def solve_viscous_batch(cases, *, backend: str = "torch", device=None, dtype=Non
         up, dn = vs.sweep_order([parsed[i].alpha for i in idx])
         body, chord, moment, pivot = _reference(c0)
         kw = dict(ncrit=c0.ncrit, xtr=tuple(c0.xtr), height=c0.height, height_reference=c0.height_reference,
-                  wake_length=c0.wake_length, n_wake=c0.n_wake, chord_ref=chord, moment_ref=moment, pivot=pivot)
+                  wake_length=c0.wake_length, n_wake=c0.n_wake, chord_ref=chord, moment_ref=moment, pivot=pivot,
+                  reference=_stored_reference(c0))
         plans.append({"idx": idx, "up": up, "dn": dn, "kw": kw, "body": body, "case": c0, "prev": None,
                       "first": None, "rows": {}, "rules": _rules(c0), "cache": {}})
     with blas_single_thread():

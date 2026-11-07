@@ -665,6 +665,72 @@ def test_viscous_reference_inputs_are_checked():
         solve_viscous(airfoil("0012", n_points=61), 0.0, 1e6, chord_ref=-1.0)
 
 
+def _rotate(coords, deg):
+    """Return a section rotated by deg about its quarter-chord point (positive: nose down)."""
+    t = np.radians(deg)
+    rot = np.array([[np.cos(t), -np.sin(t)], [np.sin(t), np.cos(t)]])
+    return (coords - [0.25, 0.0]) @ rot.T + [0.25, 0.0]
+
+
+def test_x_over_c_is_the_projection_on_the_reference_chord_line():
+    """The x/c of forced transition and of the reported transition is the projection on the reference chord line.
+
+    Regression: x/c was the body-frame x difference from the leading edge over the chord. For a rotated
+    section that is not the chordwise position (it differs by the cosine of the chord-line angle and by
+    a y term), so the same xtr put the transition at another point of the section.
+    """
+    from ventorum.airfoil.geometry import leading_edge_index
+    from ventorum.panel2d.coupling import build_coupling_system
+    from ventorum.panel2d.solver import section_reference
+
+    # A rotated section has the x/c of the unrotated section, zero at the reference leading edge.
+    for c in (_naca("2412", 120), airfoil("2412", n_points=121).coords):
+        x_ref = build_coupling_system(c, 2.0).x_over_c
+        for deg in (8.0, -8.0):
+            body = _rotate(c, deg)
+            i_le = leading_edge_index(body)
+            # The body-frame x difference is not the chordwise position of the rotated section.
+            assert np.max(np.abs((body[:, 0] - body[i_le, 0]) / section_reference(body).chord_ref - x_ref)) > 1e-3
+            x_rot = build_coupling_system(body, 2.0).x_over_c
+            assert x_rot[i_le] == 0.0
+            assert np.max(np.abs(x_rot - x_ref)) < 1e-14
+    # A section with the leading edge at (0, 0) and the trailing-edge midpoint at (1, 0): x/c is x.
+    c = airfoil("2412", n_points=121).coords
+    assert np.array_equal(build_coupling_system(c, 2.0).x_over_c, c[:, 0])
+    # A flapped shape uses its stored undeflected reference geometry (owner choice: unchanged).
+    flapped = airfoil("2412", n_points=121).with_flap(x_hinge=0.7, deflection=10.0)
+    ref = flapped.reference_geometry()
+    assert np.allclose(build_coupling_system(flapped, 2.0).x_over_c, (flapped.coords[:, 0] - ref.leading_edge[0])
+                       / ref.chord_ref, rtol=0.0, atol=1e-15)
+    # The point array of the same flapped section uses the chord line of the deflected points.
+    pts = flapped.coords
+    r = section_reference(pts)
+    le, te = np.asarray(r.leading_edge), np.asarray(r.trailing_edge)
+    expected = (pts - le) @ (te - le) / np.sum((te - le) ** 2)
+    assert np.allclose(build_coupling_system(pts, 2.0).x_over_c, expected, rtol=0.0, atol=1e-14)
+
+
+@pytest.mark.slow
+def test_rotated_section_gives_the_same_transition_and_drag():
+    """A section rotated 8 deg nose down at alpha + 8 deg gives the transition x/c and Cd of the section.
+
+    Regression: with x/c measured along the body x axis the forced transition point moved on a rotated
+    section and the reported transition x/c changed. The flow is the same, so both must agree to the
+    solver tolerance, with free and with forced transition.
+    """
+    c = airfoil("2412", n_points=121).coords
+    body = _rotate(c, 8.0)
+    for xtr in ((1.0, 1.0), (0.3, 0.3)):
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            r0 = solve_viscous(c, [0.0, 2.0], 1e6, xtr=xtr)
+            r1 = solve_viscous(body, [8.0, 10.0], 1e6, xtr=xtr)
+        assert all(r0.converged) and all(r1.converged)
+        assert np.max(np.abs(np.asarray(r1.Cd) / np.asarray(r0.Cd) - 1.0)) < 1e-5
+        assert np.max(np.abs(np.asarray(r1.Cl) - np.asarray(r0.Cl))) < 1e-5
+        assert np.max(np.abs(np.asarray(r1.transition_positions) - np.asarray(r0.transition_positions))) < 1e-5
+
+
 def _setup_and_state(code="4412", alpha=3.0, n=80, closed_te=True):
     """Return the CaseSetup and the first estimate of one case (cheap, no Newton solve)."""
     from ventorum.panel2d import vii
@@ -817,3 +883,48 @@ def test_coupling_matrices_follow_a_structure_moved_by_the_last_omega_pass(monke
         warnings.simplefilter("ignore")
         vii.newton_solve([setup], [st], max_iter=2, omega0=[0.25], stall_window=0)
     assert armed["moves"] == 3 and st.i_s == i_s + 1
+
+
+@pytest.mark.slow
+def test_solve_viscous_of_a_flapped_shape_uses_the_stored_reference_for_x_over_c(monkeypatch):
+    """solve_viscous and solve_viscous_batch give a flapped AirfoilShape the x/c of its stored reference geometry.
+
+    Regression: solve_viscous reduced the shape to its points, so the x/c of transition used the leading edge
+    and the chord line of the deflected points, while build_coupling_system and solve_viscous_flapped (which
+    get the shape) used the stored reference geometry of the undeflected section. A point array of the same
+    section keeps the chord line of the deflected points (owner choice).
+    """
+    import ventorum.panel2d.viscous as vs
+    from ventorum.panel2d.solver import section_reference
+    from ventorum.panel2d.viscous_batch import ViscousCase, solve_viscous_batch
+
+    seen = []
+    original = vs.prepare_case
+
+    def recording(*args, **kwargs):
+        setup = original(*args, **kwargs)
+        seen.append(setup.sys.x_over_c.copy())
+        return setup
+
+    monkeypatch.setattr(vs, "prepare_case", recording)
+    flapped = airfoil("2412", n_points=121).with_flap(x_hinge=0.7, deflection=8.0)
+    ref = flapped.reference_geometry()
+    stored = (flapped.coords - ref.leading_edge) @ np.array([1.0, 0.0]) / ref.chord_ref
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        solve_viscous(flapped, 0.0, 1e6, max_iter=1)
+        assert seen and all(np.allclose(x, stored, rtol=0.0, atol=1e-15) for x in seen)
+        seen.clear()
+        import torch
+
+        solve_viscous_batch([ViscousCase(coordinates=flapped, alpha=0.0, Re=1e6, max_iter=1)], device="cpu",
+                            dtype=torch.float64)
+        assert seen and all(np.allclose(x, stored, rtol=0.0, atol=1e-15) for x in seen)
+        seen.clear()
+        pts = flapped.coords
+        r = section_reference(pts)
+        le, te = np.asarray(r.leading_edge), np.asarray(r.trailing_edge)
+        deflected = (pts - le) @ (te - le) / np.linalg.norm(te - le) / ref.chord_ref
+        solve_viscous(pts, 0.0, 1e6, max_iter=1, chord_ref=ref.chord_ref)
+        assert seen and all(np.allclose(x, deflected, rtol=0.0, atol=1e-14) for x in seen)
+    assert np.max(np.abs(stored - deflected)) > 1e-3

@@ -247,3 +247,25 @@ def test_normal_branch_is_not_flagged():
     assert r.converged
     assert "near-wake sawtooth" not in r.reason
     assert wake_sawtooth_index(r.wake["theta"]) < 0.05
+
+
+def test_last_wake_station_extrapolation_is_exact_for_a_linear_field():
+    """The edge velocity of the last wake station extrapolates the last two midpoints with length weights.
+
+    Regression: the weights 1.5 and -0.5 are exact for equal panel lengths only; the wake spacing is
+    geometric. A velocity that is linear in the arc length along the wake must give its value at the
+    wake end (to round-off).
+    """
+    from ventorum.panel2d.viscous import prepare_case
+
+    setup = prepare_case(airfoil("0012").repanel(n_panels=80).coords, 2.0, 1e6, ncrit=9.0, xtr=(1.0, 1.0),
+                         height=None, height_reference="pivot", wake_length=1.0, n_wake=30)
+    n, nw = setup.n, setup.nw
+    wl = setup.sys.wake_len
+    assert wl[-1] > 1.01 * wl[-2]
+    s_end = np.sum(wl)
+    s_mid = np.cumsum(wl) - 0.5 * wl
+    q_mid = 0.7 + 0.3 * s_mid
+    row = setup._p_wake[n + nw - 1, n:]
+    assert abs(row @ q_mid - (0.7 + 0.3 * s_end)) < 1e-14
+    assert abs(np.sum(row) - 1.0) < 1e-15
