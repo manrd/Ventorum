@@ -206,15 +206,23 @@ def test_pressure_factors_refactorize_with_identical_bits(mesh, monkeypatch):
     actual = solver.solve_conditions(conditions)
     for a, b in zip(actual, expected, strict=True):
         _equal(a, b)
-    assert solver.factorization_count == 2 and solver._factors_dropped == 1
+    # The budget is one factor. The cached pressure Kutta wake response
+    # counts in the pool too, so one factor and its wake response exceed
+    # the budget: the first configuration is dropped before the second LU,
+    # and the second one after its group (2 drops; without the wake
+    # response in the pool, the second factor fitted exactly).
+    assert solver.factorization_count == 2 and solver._factors_dropped == 2
     _equal(solver.solve(conditions[0]), expected[0])
+    # Refactorized, then dropped after its group for the same reason.
     assert solver.factorization_count == 3 and solver._factors_dropped == 1
+    assert _pool(solver) == (0, 0)
     monkeypatch.setattr(solver, "_factorize", original)
     # A group needs both parities together, even when they exceed the budget.
     monkeypatch.setattr(module, "_FACTOR_BUDGET_HOST_FRACTION", 0.0)
     free = FlightCondition(V_inf=25.0, alpha=0.04, p=0.01)
     _equal(solver.solve(free), reference.solve(free))
-    assert solver.factorization_count == 5 and solver._factors_dropped == 3
+    # Only the two free-air parities are dropped: no ground factor was kept.
+    assert solver.factorization_count == 5 and solver._factors_dropped == 2
     assert _pool(solver) == (0, 0)
     _equal(solver.solve(free), reference.solve(free))
     assert solver.factorization_count == 7 and solver._factors_dropped == 2
@@ -385,3 +393,18 @@ def test_gpu_map_bits_drops_and_budget_reads(mesh, monkeypatch):
     _equal(zero.solve(_map()[0]), expected)
     assert zero.factorization_count == 2 and zero._factors_dropped == 1
     assert _pool(zero) == (0, 0)
+
+
+def test_pressure_wake_response_counts_in_the_factor_pool(mesh):
+    """The cached pressure Kutta wake response adds its host bytes to the pool of its configuration."""
+    solver = PanelSolver(mesh, kutta="pressure")
+    solver.solve(_map()[0])
+    (cfg,) = solver._configs.values()
+    assert cfg.pressure_wake
+    arrays = {id(a): a for cached in cfg.pressure_wake.values() for a in cached[:4]
+              if isinstance(a, np.ndarray)}
+    wake_bytes = sum(a.nbytes for a in arrays.values())
+    assert wake_bytes > 0
+    assert solver._factor_bytes(cfg)[0] == _pool(solver)[0] + wake_bytes
+    solver._drop_factors(cfg)
+    assert solver._factor_bytes(cfg) == (0, 0)

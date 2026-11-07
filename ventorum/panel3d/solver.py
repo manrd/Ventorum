@@ -284,7 +284,7 @@ class _Configuration:
     viscous_units: np.ndarray | None = None
     viscous_wake: tuple | None = None
     # Pressure Kutta wake response per symmetry case ("sym" or "asym").
-    # It is not in the factor pool; it is dropped with the factors.
+    # Its bytes count in the factor pool; it is dropped with the factors.
     pressure_wake: dict = field(default_factory=dict)
 
 
@@ -700,7 +700,7 @@ class PanelSolver:
 
     @staticmethod
     def _factor_bytes(cfg: _Configuration) -> tuple[int, int]:
-        """Return bytes held by factors and optional viscous responses [bytes]."""
+        """Return bytes held by factors, viscous and pressure Kutta responses [bytes]."""
         host = device = 0
         for factors in cfg.systems.values():
             for array in factors or ():
@@ -711,6 +711,10 @@ class PanelSolver:
                 else:
                     device += array.numel() * array.element_size()
         arrays = [cfg.viscous_units, *(cfg.viscous_wake or ())]
+        # The cached pressure Kutta wake responses (solved and full mesh,
+        # wake rows) are host arrays that are dropped with the factors.
+        for cached in cfg.pressure_wake.values():
+            arrays.extend(cached[:4])
         seen = set()
         for array in arrays:
             if isinstance(array, np.ndarray) and id(array) not in seen:
