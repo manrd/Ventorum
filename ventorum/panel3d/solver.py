@@ -687,6 +687,17 @@ class PanelSolver:
         sub = self._full_solver.factorization_count if self._full_solver is not None else 0
         return int(self._own_factorizations + sub)
 
+    @property
+    def _moment_points(self) -> np.ndarray:
+        """Points of action of the full-mesh panel forces with shape (Np, 3) in m.
+
+        The force of a constant Cp on a flat panel acts at the area centroid
+        of the panel. On a skewed or tapered panel this point differs from
+        the corner average (the collocation point). All the moment
+        integrations (CPU, GPU and the viscous coupling) use these points.
+        """
+        return self._full_geom.far_centre
+
     @staticmethod
     def _factor_bytes(cfg: _Configuration) -> tuple[int, int]:
         """Return bytes held by factors and optional viscous responses [bytes]."""
@@ -1847,7 +1858,7 @@ class PanelSolver:
             cp=cp_full,
             areas=self._full_geom.area,
             normals=self._full_geom.normal,
-            centroids=self._full_geom.far_centre,
+            centroids=self._moment_points,
             condition=condition,
             S_ref=self.S_ref,
             b_ref=self.b_ref,
@@ -1932,7 +1943,7 @@ class PanelSolver:
                     "normal": device_array(self._full_geom.normal),
                     "area": device_array(self._full_geom.area),
                     "arm": device_array(self._full_geom.centroid - self.ref_point),
-                    "moment_arm": device_array(self._full_geom.far_centre - self.ref_point),
+                    "moment_arm": device_array(self._moment_points - self.ref_point),
                     "unit_mu": device_array(cfg.unit_mu),
                     "half": self.mesh.half,
                 }
@@ -2097,7 +2108,7 @@ class PanelSolver:
             cp=cp_full,
             areas=self._full_geom.area,
             normals=self._full_geom.normal,
-            centroids=self._full_geom.far_centre,
+            centroids=self._moment_points,
             condition=condition,
             S_ref=self.S_ref,
             b_ref=self.b_ref,

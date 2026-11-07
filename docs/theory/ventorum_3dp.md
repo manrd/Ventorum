@@ -431,8 +431,10 @@ C_{D, \text{pressure}} = \frac{\mathbf{F} \cdot \hat{\mathbf{u}}_{\text{wind}}}{
 The aerodynamic moment vector about reference point $\mathbf{r}_{\text{ref}}$ is:
 
 ```{math}
-\mathbf{M} = \sum_{i=1}^{N} (\mathbf{c}_i - \mathbf{r}_{\text{ref}}) \times \left(-C_{p, i} \, q_\infty \, A_i \, \hat{\mathbf{n}}_i\right).
+\mathbf{M} = \sum_{i=1}^{N} (\mathbf{p}_{c, i} - \mathbf{r}_{\text{ref}}) \times \left(-C_{p, i} \, q_\infty \, A_i \, \hat{\mathbf{n}}_i\right).
 ```
+
+The arm goes to the area centroid $\mathbf{p}_{c, i}$ of each panel, where the force of a constant $C_p$ acts. The corner mean (the collocation point) is a different point on a skewed or tapered panel. The viscous coupling uses the same arm.
 
 Moments follow AVL flight-dynamics conventions:
 

@@ -574,3 +574,45 @@ def test_partition_assembly_evaluates_each_pair_once(monkeypatch):
     solver.solve_conditions([_condition(a) for a in range(10)])
     assert pairs == 2 * len(solver.centroids)**2
     assert solver.factorization_count == 1
+
+
+def test_coupled_moment_arm_is_the_panel_area_centroid(monkeypatch):
+    """The coupled panel moments use the same moment arm as the inviscid solver.
+
+    The force of a constant Cp on a panel acts at its area centroid. On a
+    tapered and swept wing the corner average of a panel (its collocation
+    point) is a different point. With the identity polar the coupled Cp is
+    the inviscid Cp, so the pressure moments of the coupled solve must equal
+    the inviscid moments. With the corner average as the arm, Cm differed
+    by about 1e-3 relative on this mesh.
+    """
+    from ventorum.panel3d import post
+
+    wing = LiftingSurface(
+        name="Wing", semi_span=4.0, spacing="uniform",
+        sections=[WingSection(y_frac=0, chord=1.0, shape="0012"),
+                  WingSection(y_frac=1, chord=0.4, x_le=4.0 * np.tan(np.radians(30.0)), shape="0012")],
+    )
+    condition = _condition()
+    settings = _settings()
+    captured = _capture_references(monkeypatch)
+    _solve(wing=wing, conditions=condition, settings=settings)
+    polars = {i: _ReferencePolar(curve) for i, curve in enumerate(captured["refs"])}
+
+    forces = []
+    original = post.integrate_forces_and_moments
+
+    def record(*args, **kwargs):
+        out = original(*args, **kwargs)
+        forces.append(out)
+        return out
+
+    monkeypatch.setattr(post, "integrate_forces_and_moments", record)
+    result = _solve(polars, wing=wing, conditions=condition, settings=settings)
+    monkeypatch.setattr(post, "integrate_forces_and_moments", original)
+    inv = make_solver("panel3d").solve(wing, condition, settings)
+    assert result.converged
+    assert forces
+    np.testing.assert_allclose(result.details["cp"], inv.details["cp"], rtol=1e-10, atol=1e-12)
+    coupled = forces[-1]
+    assert coupled["Cm"] == pytest.approx(inv.totals.Cm, rel=1e-9, abs=1e-12)

@@ -233,7 +233,9 @@ In ground effect, the strip loads of the outermost strip of a closed tip are not
 
 The total aerodynamic moment vector about the reference point $\mathbf{r}_{\text{ref}}$ in geometry axes is:
 
-$$\mathbf{M} = \sum_{i=1}^{N} (\mathbf{c}_i - \mathbf{r}_{\text{ref}}) \times \left(-C_{p, i} \, q_{\infty} \, A_i \, \hat{\mathbf{n}}_i\right)$$
+$$\mathbf{M} = \sum_{i=1}^{N} (\mathbf{p}_{c, i} - \mathbf{r}_{\text{ref}}) \times \left(-C_{p, i} \, q_{\infty} \, A_i \, \hat{\mathbf{n}}_i\right)$$
+
+Here $\mathbf{p}_{c, i}$ is the area centroid of panel $i$ (from its projected corners, as for the far-field expansion). The force of a constant $C_p$ on a flat panel acts at this point. On a skewed or tapered panel it differs from the corner mean (the collocation point) by a fraction of the panel size, so the corner mean as the arm gives a moment error that falls with the square of the panel size. The CPU and GPU integrations and the viscous coupling use the area centroid. The onset velocity of the body rates stays at the collocation point.
 
 Moments follow the standard flight-dynamics body axis convention (AVL style):
 
