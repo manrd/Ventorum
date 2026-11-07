@@ -64,6 +64,7 @@ from __future__ import annotations
 
 import copy
 import dataclasses
+import inspect
 import math
 import time
 import warnings
@@ -227,6 +228,28 @@ def _cuda_device_index(backend: str) -> int | None:
     import torch
 
     return int(torch.cuda.current_device()) if torch.cuda.is_available() else None
+
+
+def _solver_defaults(solver_class) -> tuple[float, int]:
+    """Return the far-field ratio [-] and the wake panel count [-] that a solver class uses by default.
+
+    The factory does not pass these two values, so the solver takes its
+    defaults. They come from the signature of *solver_class* when it gives
+    a default for them, else from :class:`ventorum.panel3d.solver.PanelSolver`
+    (a subclass or a wrapper that takes ``*args, **kwargs``).
+    """
+    values = {}
+    try:
+        parameters = inspect.signature(solver_class).parameters
+    except (TypeError, ValueError):
+        parameters = {}
+    base = inspect.signature(panel_solver_module.PanelSolver).parameters
+    for name in ("far_ratio", "n_wake"):
+        param = parameters.get(name)
+        if param is None or param.default is inspect.Parameter.empty:
+            param = base[name]
+        values[name] = param.default
+    return float(values["far_ratio"]), int(values["n_wake"])
 
 
 def _thread_settings(backend: str) -> tuple:
@@ -1776,6 +1799,10 @@ class PanelMethodSolver(BaseSolver):
         )
         t0 = time.perf_counter()
         solver_class = PanelSolver
+        # The far-field ratio and the wake panel count are the solver
+        # defaults. They are in the cache key, so a cached solver never
+        # serves a solve with other values.
+        far_ratio, n_wake = _solver_defaults(solver_class)
 
         def build_solver():
             panel_solver = solver_class(
@@ -1797,13 +1824,16 @@ class PanelMethodSolver(BaseSolver):
         key = None
         if use_cache:
             key = panel_cache.solver_key(geom_key, (
-                solver_class, wake_length, kutta, backend, _cuda_device_index(backend), precision, ground_solver,
+                solver_class, wake_length, far_ratio, n_wake, kutta, backend, _cuda_device_index(backend),
+                precision, ground_solver,
                 float(s_ref), float(b_ref), float(c_ref), np.asarray(rp, dtype=float).tobytes(),
             ) + _thread_settings(backend) + _solver_helpers(backend))
         # A solver in use by another thread is not shared: acquire builds a
         # second one for this call (see ventorum.panel3d.cache).
         lease = panel_cache.acquire(key, geom_key, geometry, build_solver, gpu=backend == "gpu")
         solver = lease.solver
+        # Fallback stencils of the surface gradient (counts, no units).
+        mesh_stats["gradient_stencil"] = dict(solver.gradient_stencil_stats)
         factorizations_before = int(solver.factorization_count)
         solve_ok = False
         try:

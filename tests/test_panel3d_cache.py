@@ -552,3 +552,34 @@ def test_gpu_keeps_one_solver_and_frees_device_memory(monkeypatch):
     # A GPU solve without the cache frees the cached GPU solver too.
     _solve(_wing(twist=0.04), _cond(2.0), _uncached(st))
     assert cache.cache_info()["gpu_entries"] == 0
+
+
+@pytest.mark.parametrize("name, value", [("far_ratio", 4.0), ("n_wake", 2)])
+def test_far_ratio_and_wake_panel_count_are_in_the_solver_key(monkeypatch, name, value):
+    """Two solves that differ only in far_ratio or n_wake do not share the cached solver.
+
+    The factory takes these two values from the PanelSolver defaults. A
+    cached solver built with other values must not serve the second solve.
+    """
+    st = _settings()
+    first = _solve(_wing(), _cond(3.0), st)
+    assert first.details["dispatch"]["cached_solver"] is False
+    default = PanelSolver.__init__.__kwdefaults__[name]
+    assert default != value
+    monkeypatch.setitem(PanelSolver.__init__.__kwdefaults__, name, value)
+    second = _solve(_wing(), _cond(3.0), st)
+    assert second.details["dispatch"]["cached_solver"] is False
+    assert second.details["dispatch"]["factorization_count"] == 1
+    solvers = [entry.solver for entry in cache._entries.values()]
+    assert sorted(getattr(s, name) for s in solvers) == sorted([default, value])
+    again = _solve(_wing(), _cond(4.0), st)
+    assert again.details["dispatch"]["cached_solver"] is True
+
+
+def test_mesh_stats_hold_the_gradient_stencil_counts():
+    """The mesh statistics of the result hold the stencil counts of the surface gradient."""
+    res = _solve(_wing(), _cond(3.0), _uncached(_settings()))
+    stats = res.details["mesh_stats"]["gradient_stencil"]
+    assert set(stats) == {"fold_rule", "n_fold_edges", "n_ls_reduced", "n_node_fallback"}
+    cached = _solve(_wing(), _cond(3.0), _settings())
+    assert cached.details["mesh_stats"]["gradient_stencil"] == stats
