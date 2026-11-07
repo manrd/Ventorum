@@ -309,8 +309,11 @@ def plot_component_breakdown(
         cdis.append(Di_surf)
 
         if sw.Cd_profile is not None:
-            safe_cl = np.where(np.abs(sw.Cl[sort_y]) > 1e-4, np.abs(sw.Cl[sort_y]), 1.0)
-            c_local = np.where(np.abs(sw.Cl[sort_y]) > 1e-4, 2.0 * sw.gamma[sort_y] / (V_inf * safe_cl), 0.1)
+            # The chord from 2 Gamma / (V_inf Cl) needs the section lift
+            # coefficient on the free-stream dynamic pressure.
+            cl_ff = sw.Cl_freestream if sw.Cl_freestream is not None else sw.Cl
+            safe_cl = np.where(np.abs(cl_ff[sort_y]) > 1e-4, np.abs(cl_ff[sort_y]), 1.0)
+            c_local = np.where(np.abs(cl_ff[sort_y]) > 1e-4, 2.0 * sw.gamma[sort_y] / (V_inf * safe_cl), 0.1)
             D_prof_prime = q_inf * c_local * sw.Cd_profile[sort_y]
             cd_tots.append(Di_surf + float(_trap(D_prof_prime, y_s)))
         else:

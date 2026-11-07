@@ -402,7 +402,9 @@ def _results(solver, lattice, conditions, arrays: dict, setups: list, umap, b_re
         ld = loads_result(
             lattice, CL=t[0], CDi=t[1], CDp=t[2] if hp else None, CD_total=t[3] if hp else None, e=t[4],
             AR=t[11], Cl=t[5], Cm=t[6], Cn=t[7], CY=t[8], CDi_nearfield=t[9],
-            strip_gamma=span[k, 0], Cl_strip=span[k, 1], Cd_i=span[k, 2], Cd_profile=span[k, 3] if hp else None,
+            strip_gamma=span[k, 0], Cl_strip=span[k, 1],
+            Cl_freestream=2.0 * np.asarray(span[k, 0], dtype=float) / (float(cond.V_inf) * lattice.chord),
+            Cd_i=span[k, 2], Cd_profile=span[k, 3] if hp else None,
             alpha_eff=span[k, 4], alpha_i=span[k, 5], local_lift_factor=float(cond.rho) * float(cond.V_inf),
             Cm_section=span[k, 7], strip_force=arrays["strip_force"][k], trefftz_normalwash=arrays["w_n"][k],
             force_total=arrays["F_total"][k], moment_total=arrays["M"][k],

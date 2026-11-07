@@ -404,7 +404,7 @@ class FourierSolver(BaseSolver):
             Cd_profile=sta["Cd0"].copy() if has_profile else None,
             alpha_eff=alpha_eff, alpha_i=alpha_i,
             local_lift=rho * V * gamma, surface_name=surf.name,
-            chord=chord, Cm_section=sta["Cm0"].copy(),
+            chord=chord, Cm_section=sta["Cm0"].copy(), Cl_freestream=Cl.copy(),
         )
 
         # Moment of the section forces about the reference point, M_y = r_z F_x - r_x F_z,

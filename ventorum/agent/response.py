@@ -379,6 +379,8 @@ def spanwise_payload(res: SolverResult) -> list[dict[str, Any]]:
             "chord_m": [rnd(v, 5) for v in sw.chord] if sw.chord is not None else None,
             "gamma_m2_s": [rnd(v, 6) for v in sw.gamma],
             "Cl": [rnd(v, 5) for v in sw.Cl],
+            "Cl_freestream": ([rnd(v, 5) for v in sw.Cl_freestream]
+                              if sw.Cl_freestream is not None else None),
             "Cd_i": [rnd(v, 7) for v in sw.Cd_i],
             "alpha_eff_deg": [rnd(np.degrees(v), 4) for v in sw.alpha_eff],
         })

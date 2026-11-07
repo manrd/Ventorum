@@ -32,6 +32,10 @@ Forces and moments from a solved vortex lattice.
   forces, and in the direction and the dynamic pressure of the profile drag
   and the section moment of each strip (at the quarter chord). The
   geometric angle of a strip uses the onset at its three-quarter chord.
+  The section lift coefficient ``Cl`` of a strip and its effective angle
+  ``alpha_L0 + Cl / a0`` use the dynamic pressure of the onset at the
+  quarter chord, ``Cl = 2 Gamma / (|U_qc| c)``; the free-stream value
+  ``2 Gamma / (V_inf c)`` is kept as ``Cl_freestream``.
   The wake and the Trefftz plane stay along the free stream. With one
   chordwise panel, the section moment gets the thin-airfoil term of the
   chordwise change of the rotation velocity (-pi/4 per unit q c / (2 V)).
@@ -1123,7 +1127,11 @@ def compute_loads_batch(
     # --- section quantities ---------------------------------------------------
     chord = lattice.chord
     width = lattice.width
-    Cl = 2.0 * strip_gamma / (V[:, None] * chord)
+    # Section lift coefficient on the free-stream dynamic pressure. With body
+    # rates the reported Cl and alpha_eff use the local onset at the quarter
+    # chord instead (below).
+    Cl_ff = 2.0 * strip_gamma / (V[:, None] * chord)
+    Cl = Cl_ff
     alpha_geom = np.empty((K, n_s))
     for k in range(K):
         alpha_geom[k] = np.arctan2(lattice.normal @ D[k], lattice.chord_dir @ D[k])
@@ -1141,6 +1149,16 @@ def compute_loads_batch(
         for k in rated:
             alpha_geom[k] = np.arctan2(np.sum(lattice.normal * U34[k], axis=1),
                                        np.sum(lattice.chord_dir * U34[k], axis=1))
+        # Section lift coefficient on the local dynamic pressure: 2 Gamma /
+        # (|U_qc| c), with U_qc the onset (free stream and body rates, no
+        # induced velocity) at the quarter-chord mid-point of the strip, the
+        # point of the profile drag and the section moment. The effective
+        # angle alpha_L0 + Cl / a0 then uses one normalisation, as the
+        # lifting-line solve does with its local onset.
+        Cl = Cl_ff.copy()
+        speed_qc = np.linalg.norm(U_qc, axis=-1)
+        for k in rated:
+            Cl[k] = 2.0 * strip_gamma[k] / (speed_qc[k] * chord)
     # Prandtl-Glauert factor beta = sqrt(1 - M^2) of each case (1 without a
     # Mach number, so the incompressible results do not change).
     pg_beta = prandtl_glauert_beta(conditions)
@@ -1188,7 +1206,7 @@ def compute_loads_batch(
     # Profile drag along the free stream (the local onset with body
     # rates), applied at the strip quarter chord.
     if rated:
-        speed = np.linalg.norm(U_qc, axis=-1)
+        speed = speed_qc
         D_loc = U_qc / speed[:, :, None]
         q_loc = 0.5 * rho[:, None] * speed * speed
     else:
@@ -1233,7 +1251,7 @@ def compute_loads_batch(
         out.append(loads_result(
             lattice, CL=CL, CDi=CDi, CDp=CDp, CD_total=CD_total if hp else None, e=e, AR=AR,
             Cl=-float(M[0]) / (qS * b_ref), Cm=float(M[1]) / (qS * c_ref), Cn=-float(M[2]) / (qS * b_ref),
-            CY=CY, CDi_nearfield=CDi_near, strip_gamma=sg, Cl_strip=Cl[k], Cd_i=Cd_i[k],
+            CY=CY, CDi_nearfield=CDi_near, strip_gamma=sg, Cl_strip=Cl[k], Cl_freestream=Cl_ff[k], Cd_i=Cd_i[k],
             Cd_profile=Cd_p[k] if hp else None, alpha_eff=alpha_eff[k], alpha_i=alpha_i[k],
             local_lift_factor=rVk, Cm_section=Cm_s[k], strip_force=F_strip[k], trefftz_normalwash=w_n[k],
             force_total=F_total, moment_total=M,
@@ -1276,6 +1294,7 @@ def loads_result(
     CDi_nearfield: float,
     strip_gamma: np.ndarray,
     Cl_strip: np.ndarray,
+    Cl_freestream: np.ndarray,
     Cd_i: np.ndarray,
     Cd_profile: np.ndarray | None,
     alpha_eff: np.ndarray,
@@ -1295,6 +1314,10 @@ def loads_result(
     (:mod:`ventorum.gpu`) make their result objects here. The strip arrays
     (shape (n_strips,)) are split per surface; ``local_lift_factor`` is
     ``rho * V_inf`` [kg/(m^2 s)], so the local lift is ``rho V Gamma`` [N/m].
+    ``Cl_strip`` is the section lift coefficient on the local dynamic
+    pressure (``2 Gamma / (|U_qc| c)``, see :class:`SpanwiseResult`) and
+    ``Cl_freestream`` the one on the free-stream dynamic pressure
+    (``2 Gamma / (V_inf c)``) [-].
     ``CY_farfield`` and ``Cn_trefftz`` are the far-field lateral diagnostics
     of :func:`trefftz_lateral_batch` (None if not computed).
     """
@@ -1329,6 +1352,7 @@ def loads_result(
             surface_name=surf.name,
             chord=chord[sl].copy(),
             Cm_section=Cm_section[sl].copy(),
+            Cl_freestream=Cl_freestream[sl].copy(),
         ))
     return LoadsResult(
         totals=totals,

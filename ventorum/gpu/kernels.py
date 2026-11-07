@@ -1248,7 +1248,11 @@ def _build(precision: str) -> SimpleNamespace:  # noqa: C901 - one closure per k
             F = F + Fp
         c = chord[s]
         w = width[s]
-        cl = wp.float64(2.0) * sg / (Vk * c)
+        # Section lift coefficient on the local dynamic pressure: the onset
+        # (free stream and body rates) at the quarter-chord mid-point.
+        u_qc = Vd - wp.cross(om, qc[s] - rp)
+        speed = wp.length(u_qc)
+        cl = wp.float64(2.0) * sg / (speed * c)
         p34 = qc[s] + wp.float64(0.5) * c * cdir[s]
         u34 = Vd - wp.cross(om, p34 - rp)
         ag = wp.atan2(wp.dot(nrm[s], u34), wp.dot(cdir[s], u34))
@@ -1262,8 +1266,6 @@ def _build(precision: str) -> SimpleNamespace:  # noqa: C901 - one closure per k
         if n_c == 1:
             slope = -wp.dot(nrm[s], wp.cross(om, cdir[s]))
             cm_strip = cm_strip - wp.float64(0.39269908169872414) * slope * c / wp.length(u34)
-        u_qc = Vd - wp.cross(om, qc[s] - rp)
-        speed = wp.length(u_qc)
         d_loc = u_qc / wp.max(speed, wp.float64(1e-300))
         q_loc = wp.float64(0.5) * rk * speed * speed
         Dp = q_loc * c * w * cdm[0]
