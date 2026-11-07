@@ -281,23 +281,26 @@ _KEYS = ("CL", "CDi_nearfield", "CY", "Cl", "Cm", "Cn")
 #: very coarse mesh (6 chordwise panels) the pressure values move much:
 #: CDi_nearfield changes sign, Cm changes by 27 to 35 %, and CY of the
 #: sideslip cases changes sign (the trust score gives a note below 16
-#: chordwise panels for the near-field drag).
+#: chordwise panels for the near-field drag). Updated again for the
+#: moment arm at the area centroid of each panel (it was the corner
+#: average): Cm changes by 0.4 to 0.6 %, Cl and Cn of the sideslip cases by
+#: 0.2 %; the forces and Cp do not change.
 _BASELINE = {
     "morino_sym": ("morino", dict(alpha=4.0), (
         0.33318431966715517, 0.012018828435260084, -5.0727221826797205e-20,
-        2.279747455453521e-17, -0.025516027728158617, 3.1044130988187232e-18),
+        -9.185423004546788e-18, -0.02539548244754573, 3.676986029944508e-18),
         -10.11698294361551, -0.07544229956525039),
     "morino_beta": ("morino", dict(alpha=4.0, beta=3.0), (
         0.3322717180565286, 0.011968478088644097, 0.0006443527724316788,
-        -0.0011243694446524837, -0.02544613799331438, 8.385146787821022e-05),
+        -0.0011219838936082766, -0.02532592289253153, 8.371758450198349e-05),
         -20.153594988035472, -0.0751672960340668),
     "pressure_beta": ("pressure", dict(alpha=4.0, beta=3.0), (
         0.3147790888205251, 0.011285736379523216, 0.0006050695256616419,
-        -0.0005409287019424954, -0.019786376067684915, 9.505117209302419e-05),
+        -0.0005398448645211067, -0.01966843686069161, 9.488573645046777e-05),
         -19.98394104181253, -0.08523052889502414),
     "morino_ground": ("morino", dict(alpha=4.0, h=0.8), (
         0.37277758347902157, 0.011633788921274027, -8.632847116784143e-19,
-        -1.2902251703410263e-17, -0.03028883213931626, 5.172844934322515e-18),
+        -2.995839801366572e-17, -0.030155276228753435, 3.623983834265927e-18),
         -9.24178570469249, -0.007187633863274812),
 }
 

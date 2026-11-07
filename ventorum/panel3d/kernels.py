@@ -112,6 +112,11 @@ _PLANE_TOL_FACTOR = 32.0
 #: Edge length [-] (fraction of the panel diameter) below which an edge
 #: counts as degenerate (the closing edge of a triangle).
 _DEGENERATE_EDGE = 1e-12
+#: Round-off floor of the degenerate-edge and repeated-corner limit: this
+#: factor times the input machine epsilon times the largest absolute corner
+#: coordinate of the panel (a few ulp of the coordinates). Far from the
+#: origin, 1e-12 of a small panel diameter is below the coordinate round-off.
+_CORNER_ULP_FACTOR = 8.0
 
 
 #: Environment variable of the developer path for float32 kernels. The path
@@ -244,6 +249,32 @@ class _PanelGeometry:
     q_yy: np.ndarray            # (M,) in m^4, second moment of area about far_centre, y y
 
 
+def _corner_tolerance(diameter, scale, eps: float):
+    """Return the degenerate-edge limit [m] of panels.
+
+    The limit is ``_DEGENERATE_EDGE`` times the panel *diameter* [m], but
+    not less than ``_CORNER_ULP_FACTOR`` times *eps* [-] times *scale*, the
+    largest absolute corner coordinate of the panel [m]. The second part is
+    the round-off of the coordinates, so the result of the test does not
+    change when the mesh moves far from the origin.
+
+    Parameters
+    ----------
+    diameter : numpy.ndarray
+        Panel diameters in m.
+    scale : numpy.ndarray
+        Largest absolute corner coordinate of each panel in m.
+    eps : float
+        Machine epsilon [-] of the coordinates.
+
+    Returns
+    -------
+    numpy.ndarray
+        Limit of a degenerate edge in m, with the shape of *diameter*.
+    """
+    return np.maximum(_DEGENERATE_EDGE * diameter, _CORNER_ULP_FACTOR * eps * scale)
+
+
 def _precompute_geometry(panels: np.ndarray, eps: float | None = None) -> _PanelGeometry:
     """Precompute frame, projection, and edge parameters for panels.
 
@@ -274,7 +305,7 @@ def _precompute_geometry(panels: np.ndarray, eps: float | None = None) -> _Panel
             d_sq = np.sum((panels[:, i, :] - panels[:, j, :]) ** 2, axis=-1)
             diam_sq = np.maximum(diam_sq, d_sq)
     diameter = np.sqrt(diam_sq)
-    tiny = _DEGENERATE_EDGE * diameter
+    tiny = _corner_tolerance(diameter, np.max(np.abs(panels), axis=(1, 2)), eps)
 
     d13 = p3 - p1
     d24 = p4 - p2

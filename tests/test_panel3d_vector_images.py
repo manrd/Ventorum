@@ -215,7 +215,8 @@ def test_repeated_corner_criterion_has_no_relative_part():
     The old test (numpy.isclose with its default relative tolerance 1e-5)
     took two corners 4.9 mm apart at z = 500 m as one corner. The criterion
     is now a distance of at most 1e-12 of the panel diameter, the limit of
-    a degenerate edge in the kernels.
+    a degenerate edge in the kernels, with a floor of a few ulp of the
+    coordinates (8 eps times the largest absolute corner coordinate).
     """
     # Tip cap panel of a wing (chord 1 m) moved by 500 m in x, y and z.
     cap = np.array([[[0.9330127018922099, 4.0, 0.009329859751005642],
@@ -231,7 +232,10 @@ def test_repeated_corner_criterion_has_no_relative_part():
     diameter = np.sqrt(2.0)
     # The stored gap after rounding of the coordinates (the closing edge of each row).
     stored = np.repeat(np.linalg.norm(corners[::4, 3] - corners[::4, 2], axis=-1), 4)
-    repeated = stored <= 1e-12 * diameter
+    # The limit: 1e-12 of the diameter, with a floor of 8 eps times the
+    # largest absolute coordinate (the round-off of the coordinates).
+    floor = 8.0 * np.finfo(float).eps * np.max(np.abs(corners), axis=(1, 2))
+    repeated = stored <= np.maximum(1e-12 * diameter, floor)
     assert repeated.any() and not repeated.all()
     gaps = np.linalg.norm(out[:, 2] - out[:, 3], axis=-1)
     assert np.all(gaps[repeated] == stored[repeated])
@@ -241,3 +245,59 @@ def test_repeated_corner_criterion_has_no_relative_part():
     indices = np.arange(corners.shape[0] * 4).reshape(-1, 4)
     flat = corners.reshape(-1, 3)
     _same(_standardize_panels(indices, flat), _standardize_panels_reference(indices, flat))
+
+
+def _shift_rows():
+    """Unit-square rows whose closing edge along x is near the repeated-corner limit [m].
+
+    The gaps 5e-13 m and 9.5e-13 m are repeated corners at the origin
+    (below 1e-12 of the diameter). Moved to x + 1e4 m, the coordinate
+    round-off (one ulp of 1e4 m is 1.8e-12 m) can make the stored gap one
+    ulp, above 1e-12 of the diameter.
+    """
+    rows = []
+    base = np.array([[0.0, 0.0, 0.0], [0.0, 1.0, 0.0], [1.0, 1.0, 0.0], [1.0, 0.0, 0.0]])
+    for gap in (0.0, 5e-13, 9.5e-13, 1e-9, 1e-3):
+        row = base.copy()
+        row[3] = row[2] + np.array([gap, 0.0, 0.0])
+        for shift in range(4):
+            rows.append(np.roll(row, shift, axis=0))
+    return np.asarray(rows)
+
+
+def test_repeated_corner_classification_does_not_change_far_from_the_origin():
+    """A mesh moved to x + 1e4 m gives the same repeated corners and degenerate edges.
+
+    The limit has a floor of a few ulp of the largest absolute corner
+    coordinate, so the round-off of the moved coordinates does not change
+    the classification of the standardizations and of the kernels.
+    """
+    from ventorum.panel3d.kernels import _precompute_geometry
+
+    corners = _shift_rows()
+    moved = corners + np.array([1e4, 0.0, 0.0])
+    # The round-off of the move opens at least one repeated corner to one ulp.
+    gap0 = np.linalg.norm(corners[::4, 3] - corners[::4, 2], axis=-1)
+    gap1 = np.linalg.norm(moved[::4, 3] - moved[::4, 2], axis=-1)
+    assert np.any((gap0 <= 1e-12) & (gap1 > 1e-12 * np.sqrt(2.0)))
+
+    # Another corner order moves a corner by about 1 m; the round-off of the
+    # move is about 1e-12 m.
+    back = standardize_panel_corners(moved) - np.array([1e4, 0.0, 0.0])
+    np.testing.assert_allclose(back, standardize_panel_corners(corners), rtol=0, atol=1e-9)
+    _same(_standardize_panel_corners_reference(moved), standardize_panel_corners(moved))
+    indices = np.arange(corners.shape[0] * 4).reshape(-1, 4)
+    expected = _standardize_panels(indices, corners.reshape(-1, 3))
+    _same(_standardize_panels(indices, moved.reshape(-1, 3)), expected)
+    _same(_standardize_panels_reference(indices, moved.reshape(-1, 3)), expected)
+    # The kernels: the same degenerate edges (the closing edge of a triangle).
+    standard = standardize_panel_corners(corners)
+    standard_moved = standardize_panel_corners(moved)
+    active = _precompute_geometry(standard).edge_active
+    assert not active.all() and active.any()
+    np.testing.assert_array_equal(_precompute_geometry(standard_moved).edge_active, active)
+    from ventorum.panel3d import kernels_numba
+
+    if kernels_numba.HAVE_NUMBA:
+        act = kernels_numba._geometry_nb(np.ascontiguousarray(standard_moved), float(np.finfo(float).eps))[9]
+        np.testing.assert_array_equal(act, active)

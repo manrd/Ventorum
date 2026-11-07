@@ -39,8 +39,12 @@ In free air the wake follows the body x axis, so one configuration (and one
 factorization of each system) serves all free-air conditions. In ground
 effect the wake follows the free stream, parallel to the ground, and the
 ground images depend on the attitude and the height, so each (attitude,
-height) group is one configuration with its own factorization. The solver
-factorizes a system only when a condition needs it. On a half mesh the
+height) group is one configuration with its own factorization. The free-air
+wake does not turn with the free stream, so the Trefftz plane is normal to
+the body x axis. The far-field drag is then the induced force along the
+body x axis, not along the free stream: it has a relative term of order
+sin^2(alpha) (an estimate: about 1 % of CDi at alpha 6 deg and 7 % at
+15 deg). The solver factorizes a system only when a condition needs it. On a half mesh the
 symmetric system serves the symmetric unit onsets (u, w, q) and the
 antisymmetric system the antisymmetric ones (v, p, r); the antisymmetric
 system is factorized only when a condition has sideslip, roll rate or yaw
@@ -95,7 +99,7 @@ from ventorum.aero.system import freestream_direction, has_rates, rotation_veloc
 from ventorum.core.datatypes import FlightCondition
 from ventorum.core.errors import GroundStrikeError, ValidityError
 from ventorum.panel3d.images import (
-    _corner_diameter,
+    _corner_limit,
     _repeated_corner,
     check_ground_clearance,
     ground_plane_parameters,
@@ -200,9 +204,16 @@ class PanelResult:
     kutta_iters : int
         Number of pressure Kutta Newton updates performed.
     kutta_residual : float
-        Final max |delta Cp| at the trailing-edge pairs [-].
+        Final max |delta Cp| at the trailing-edge pairs [-]: the pressure
+        jump between the upper and the lower trailing-edge panels. For the
+        "morino" option it is a diagnostic only: the Morino condition sets
+        the doublet jump, not the pressure jump, so this value does not go
+        to zero.
     kutta_converged : bool
-        True when the pressure residual falls below tolerance.
+        For the "pressure" option, True when the pressure residual falls
+        below the tolerance. For the "morino" option, True means only that
+        the linear solve finished; it does not check the trailing-edge
+        pressure jump (read kutta_residual for that).
     kutta_lstsq_steps : int
         Number of pressure Kutta Newton steps that used the least-squares
         solution because the Jacobian was singular. Zero for the Morino
@@ -284,7 +295,7 @@ class _Configuration:
     viscous_units: np.ndarray | None = None
     viscous_wake: tuple | None = None
     # Pressure Kutta wake response per symmetry case ("sym" or "asym").
-    # It is not in the factor pool; it is dropped with the factors.
+    # Its bytes count in the factor pool; it is dropped with the factors.
     pressure_wake: dict = field(default_factory=dict)
 
 
@@ -306,7 +317,7 @@ def _standardize_panels(panels: np.ndarray, nodes: np.ndarray | None = None) -> 
     pans = np.asarray(panels, dtype=int).copy()
     shifts = np.zeros(len(pans), dtype=int)
     found = np.zeros(len(pans), dtype=bool)
-    diameter = None
+    limit = None
     # Search shifts in order. Do not read coordinates after an index match
     # or after an earlier shift matched, as in the loop reference.
     for shift in range(4):
@@ -315,13 +326,13 @@ def _standardize_panels(panels: np.ndarray, nodes: np.ndarray | None = None) -> 
         if nodes is not None:
             active = ~found & ~match
             coords = np.asarray(nodes)
-            if diameter is None:
+            if limit is None:
                 # The rows of the first coordinate test hold the rows of
                 # all later tests. Read only their corners.
-                diameter = np.zeros(len(pans), dtype=float)
-                diameter[active] = _corner_diameter(coords[pans[active]])
+                limit = np.zeros(len(pans), dtype=float)
+                limit[active] = _corner_limit(coords[pans[active]])
             match[active] = _repeated_corner(
-                coords[pans[active, a]], coords[pans[active, b]], diameter[active],
+                coords[pans[active, a]], coords[pans[active, b]], limit[active],
             )
         choose = ~found & match
         shifts[choose] = shift
@@ -354,7 +365,7 @@ def _standardize_panels_reference(panels: np.ndarray, nodes: np.ndarray | None =
                 pans[i] = shifted
                 break
             if nodes is not None and _repeated_corner(
-                nodes[shifted[2]], nodes[shifted[3]], _corner_diameter(nodes[row])
+                nodes[shifted[2]], nodes[shifted[3]], _corner_limit(nodes[row])
             ):
                 pans[i] = shifted
                 break
@@ -687,9 +698,20 @@ class PanelSolver:
         sub = self._full_solver.factorization_count if self._full_solver is not None else 0
         return int(self._own_factorizations + sub)
 
+    @property
+    def _moment_points(self) -> np.ndarray:
+        """Points of action of the full-mesh panel forces with shape (Np, 3) in m.
+
+        The force of a constant Cp on a flat panel acts at the area centroid
+        of the panel. On a skewed or tapered panel this point differs from
+        the corner average (the collocation point). All the moment
+        integrations (CPU, GPU and the viscous coupling) use these points.
+        """
+        return self._full_geom.far_centre
+
     @staticmethod
     def _factor_bytes(cfg: _Configuration) -> tuple[int, int]:
-        """Return bytes held by factors and optional viscous responses [bytes]."""
+        """Return bytes held by factors, viscous and pressure Kutta responses [bytes]."""
         host = device = 0
         for factors in cfg.systems.values():
             for array in factors or ():
@@ -700,6 +722,10 @@ class PanelSolver:
                 else:
                     device += array.numel() * array.element_size()
         arrays = [cfg.viscous_units, *(cfg.viscous_wake or ())]
+        # The cached pressure Kutta wake responses (solved and full mesh,
+        # wake rows) are host arrays that are dropped with the factors.
+        for cached in cfg.pressure_wake.values():
+            arrays.extend(cached[:4])
         seen = set()
         for array in arrays:
             if isinstance(array, np.ndarray) and id(array) not in seen:
@@ -1847,7 +1873,7 @@ class PanelSolver:
             cp=cp_full,
             areas=self._full_geom.area,
             normals=self._full_geom.normal,
-            centroids=self._full_geom.centroid,
+            centroids=self._moment_points,
             condition=condition,
             S_ref=self.S_ref,
             b_ref=self.b_ref,
@@ -1932,6 +1958,7 @@ class PanelSolver:
                     "normal": device_array(self._full_geom.normal),
                     "area": device_array(self._full_geom.area),
                     "arm": device_array(self._full_geom.centroid - self.ref_point),
+                    "moment_arm": device_array(self._moment_points - self.ref_point),
                     "unit_mu": device_array(cfg.unit_mu),
                     "half": self.mesh.half,
                 }
@@ -2096,7 +2123,7 @@ class PanelSolver:
             cp=cp_full,
             areas=self._full_geom.area,
             normals=self._full_geom.normal,
-            centroids=self._full_geom.centroid,
+            centroids=self._moment_points,
             condition=condition,
             S_ref=self.S_ref,
             b_ref=self.b_ref,

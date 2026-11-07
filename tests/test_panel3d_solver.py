@@ -622,3 +622,61 @@ def test_solver_keeps_the_gradient_stencil_counts():
     assert stats["fold_rule"] is False and stats["n_fold_edges"] == 0
     assert solver._full_mesh_solver().gradient_stencil_stats == stats
     print(f"wing gradient stencil counts: {stats}")
+
+
+def _tapered_swept_surface() -> LiftingSurface:
+    """Wing with taper 0.4 and 30 deg leading-edge sweep (skewed panels)."""
+    return LiftingSurface(
+        name="Wing",
+        semi_span=4.0,
+        sections=[
+            WingSection(y_frac=0.0, chord=1.0, x_le=0.0),
+            WingSection(y_frac=1.0, chord=0.4, x_le=4.0 * np.tan(np.radians(30.0))),
+        ],
+        is_symmetric=True,
+    )
+
+
+def _area_centroids(nodes: np.ndarray, panels: np.ndarray) -> np.ndarray:
+    """Area centroids [m] of quadrilaterals from their two triangles (p1 p2 p3, p1 p3 p4)."""
+    p1, p2, p3, p4 = (nodes[panels[:, k]] for k in range(4))
+    a1 = 0.5 * np.linalg.norm(np.cross(p2 - p1, p3 - p1), axis=1)
+    a2 = 0.5 * np.linalg.norm(np.cross(p3 - p1, p4 - p1), axis=1)
+    c1 = (p1 + p2 + p3) / 3.0
+    c2 = (p1 + p3 + p4) / 3.0
+    return (a1[:, None] * c1 + a2[:, None] * c2) / (a1 + a2)[:, None]
+
+
+@pytest.mark.parametrize("kutta", ["morino", "pressure"])
+def test_moment_arm_is_the_panel_area_centroid(kutta):
+    """The pitching, rolling and yawing moments use the area centroid of each panel.
+
+    The force of a constant Cp on a panel acts at its area centroid. On a
+    tapered and swept wing the corner average of the panel is a different
+    point, which moved Cm by 4e-3 relative on this mesh.
+    """
+    mesh = mesh_lifting_surface(
+        _tapered_swept_surface(), _naca0012_test_coordinates(51), n_chord=8, n_span=8,
+    )
+    rp = np.array([0.25, 0.0, 0.0])
+    solver = PanelSolver(
+        mesh, far_ratio=np.inf, kutta=kutta, S_ref=5.6, b_ref=8.0, c_ref=0.7, ref_point=rp,
+    )
+    cond = FlightCondition(V_inf=50.0, alpha=np.radians(4.0), beta=np.radians(5.0), p=0.3)
+    res = solver.solve_conditions([cond])[0]
+
+    q = 0.5 * cond.rho * cond.V_inf**2
+    geom = solver._full_geom
+    force = -res.cp[:, None] * geom.area[:, None] * geom.normal * q
+    arms = _area_centroids(mesh.nodes, solver.standardized_panels) - rp
+    moment = np.sum(np.cross(arms, force), axis=0)
+    cm = moment[1] / (q * 5.6 * 0.7)
+    cl_roll = -moment[0] / (q * 5.6 * 8.0)
+    cn = -moment[2] / (q * 5.6 * 8.0)
+    assert abs(res.Cm - cm) < 2e-6 * abs(cm)
+    assert abs(res.Cl - cl_roll) < 1e-6
+    assert abs(res.Cn - cn) < 1e-6
+    # The corner average gives a different moment on this mesh.
+    old_arms = geom.centroid - rp
+    cm_old = np.sum(np.cross(old_arms, force), axis=0)[1] / (q * 5.6 * 0.7)
+    assert abs(cm_old - cm) > 1e-3 * abs(cm)

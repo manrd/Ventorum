@@ -63,7 +63,7 @@ The source strengths are known directly from the onset flow and surface geometry
 
 Each lifting surface sheds a flat vortex sheet from its trailing edge. The wake is discretized into strips of quadrilateral panels, one strip per trailing-edge panel pair. Each strip contains $n_{\text{wake}}$ panels ($n_{\text{wake}} = 1$ by default). The default wake length is 50 times the largest streamwise chord of the mesh: the largest x extent of a section, where a section is the set of nodes of one component in the station plane of a trailing-edge node (`ventorum.panel3d.wake.largest_streamwise_chord`). A node is in the station plane when its distance from the plane is at most a quarter of the width of the wake strip; this band is a code setting, not from a source. Without wake edges, or when no section is found, the chord is the x extent of the mesh. The option `wake_length` sets another length in m.
 
-In free air the wake follows the body $+x$ axis. It does not rotate with angle of attack $\alpha$ or sideslip angle $\beta$, so the aerodynamic influence matrix does not depend on the flight condition and one factorization serves a whole sweep.
+In free air the wake follows the body $+x$ axis. It does not rotate with angle of attack $\alpha$ or sideslip angle $\beta$, so the aerodynamic influence matrix does not depend on the flight condition and one factorization serves a whole sweep. The free-air wake does not turn with the free stream, so the Trefftz plane is normal to the body $x$ axis. The far-field drag is then the induced force along the body $x$ axis, not along the free stream. Its relative difference to the drag of a wake along the free stream is of order $\sin^2 \alpha$ (an estimate, not a measured value: about 1 % of $C_{D_i}$ at $\alpha = 6$ deg and 7 % at 15 deg). The solver has no option for a free-stream wake in free air.
 
 In ground effect the wake follows the free stream, parallel to the ground (owner decision). The matrix depends on the attitude in ground effect anyway (see below), so this costs no extra factorization, and no wake panel goes below the ground plane: every wake panel keeps the height of its trailing edge. With an explicit ground plane that is not parallel to the free stream, the wake follows the projection of the free stream on the ground plane. The solver checks that the body and the wake stay above the ground. Far from the ground the image solve therefore tends to a free-air solve with a free-stream wake, not to the body-axis free-air solve; the difference is the effect of the wake direction.
 
@@ -233,7 +233,9 @@ In ground effect, the strip loads of the outermost strip of a closed tip are not
 
 The total aerodynamic moment vector about the reference point $\mathbf{r}_{\text{ref}}$ in geometry axes is:
 
-$$\mathbf{M} = \sum_{i=1}^{N} (\mathbf{c}_i - \mathbf{r}_{\text{ref}}) \times \left(-C_{p, i} \, q_{\infty} \, A_i \, \hat{\mathbf{n}}_i\right)$$
+$$\mathbf{M} = \sum_{i=1}^{N} (\mathbf{p}_{c, i} - \mathbf{r}_{\text{ref}}) \times \left(-C_{p, i} \, q_{\infty} \, A_i \, \hat{\mathbf{n}}_i\right)$$
+
+Here $\mathbf{p}_{c, i}$ is the area centroid of panel $i$ (from its projected corners, as for the far-field expansion). The force of a constant $C_p$ on a flat panel acts at this point. On a skewed or tapered panel it differs from the corner mean (the collocation point) by a fraction of the panel size, so the corner mean as the arm gives a moment error that falls with the square of the panel size. The CPU and GPU integrations and the viscous coupling use the area centroid. The onset velocity of the body rates stays at the collocation point.
 
 Moments follow the standard flight-dynamics body axis convention (AVL style):
 

@@ -225,7 +225,7 @@ The source strengths $\sigma_j$ are known directly from the surface geometry and
 
 ### Wake model and Kutta options
 
-Lifting surfaces shed flat vortex sheets from their trailing edges, one strip of panels per trailing-edge panel pair. The default wake length is 50 times the largest streamwise chord of the mesh (the largest x extent of a section). In free air the wake panels extend downstream along the body $+x$ axis, so the influence matrix does not change with the flight condition and one factorization serves a whole sweep. In ground effect the wake follows the free stream, parallel to the ground: the matrix depends on the attitude in ground effect anyway, and no wake panel goes below the ground plane.
+Lifting surfaces shed flat vortex sheets from their trailing edges, one strip of panels per trailing-edge panel pair. The default wake length is 50 times the largest streamwise chord of the mesh (the largest x extent of a section). In free air the wake panels extend downstream along the body $+x$ axis, so the influence matrix does not change with the flight condition and one factorization serves a whole sweep. The free-air wake does not turn with the free stream, so the Trefftz plane is normal to the body $x$ axis. The far-field drag is then the induced force along the body $x$ axis, not along the free stream. Its relative difference to the drag of a wake along the free stream is of order $\sin^2 \alpha$ (an estimate, not a measured value: about 1 % of $C_{D_i}$ at $\alpha = 6$ deg and 7 % at 15 deg). The solver has no option for a free-stream wake in free air. In ground effect the wake follows the free stream, parallel to the ground: the matrix depends on the attitude in ground effect anyway, and no wake panel goes below the ground plane.
 
 1. Morino Kutta condition (`kutta="morino"`):
 The doublet strength of each wake strip $\mu_w$ equals the difference between upper and lower surface doublet strengths at the trailing edge:
@@ -431,8 +431,10 @@ C_{D, \text{pressure}} = \frac{\mathbf{F} \cdot \hat{\mathbf{u}}_{\text{wind}}}{
 The aerodynamic moment vector about reference point $\mathbf{r}_{\text{ref}}$ is:
 
 ```{math}
-\mathbf{M} = \sum_{i=1}^{N} (\mathbf{c}_i - \mathbf{r}_{\text{ref}}) \times \left(-C_{p, i} \, q_\infty \, A_i \, \hat{\mathbf{n}}_i\right).
+\mathbf{M} = \sum_{i=1}^{N} (\mathbf{p}_{c, i} - \mathbf{r}_{\text{ref}}) \times \left(-C_{p, i} \, q_\infty \, A_i \, \hat{\mathbf{n}}_i\right).
 ```
+
+The arm goes to the area centroid $\mathbf{p}_{c, i}$ of each panel, where the force of a constant $C_p$ acts. The corner mean (the collocation point) is a different point on a skewed or tapered panel. The viscous coupling uses the same arm.
 
 Moments follow AVL flight-dynamics conventions:
 

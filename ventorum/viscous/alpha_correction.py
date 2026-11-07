@@ -1961,7 +1961,7 @@ class _PanelCoupling:
             mu = mu0 + response @ state["x"]
             muf = mu_full0 + response_full @ state["x"]
             force = integrate_forces_and_moments(
-                state["cp"], solver._full_geom.area, normal, solver._full_geom.centroid,
+                state["cp"], solver._full_geom.area, normal, solver._moment_points,
                 condition, solver.S_ref, solver.b_ref, solver.c_ref, solver.ref_point,
             )
             wake = muf[cfg.full_wake.wake_up] - muf[cfg.full_wake.wake_lo]
