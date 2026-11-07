@@ -257,6 +257,11 @@ def test_cpu_lu_factor_budget_counts_torch_factors():
     assert device_bytes == 0
     # Expected bytes for one parity system factor (LU float64 matrix + int32 pivots)
     expected_bytes = n_panels * n_panels * 8 + n_panels * 4
+    # The cached pressure Kutta wake response counts in the pool too.
+    wake = {id(a): a for cached in cfg.pressure_wake.values() for a in cached[:4]
+            if isinstance(a, np.ndarray)}
+    assert wake
+    expected_bytes += sum(a.nbytes for a in wake.values())
     assert host_bytes == expected_bytes
 
 
