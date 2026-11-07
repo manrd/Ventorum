@@ -24,7 +24,7 @@ import numpy as np
 from ventorum.aero.system import ground_normal
 from ventorum.core.datatypes import FlightCondition
 from ventorum.core.errors import GroundStrikeError
-from ventorum.panel3d.kernels import _DEGENERATE_EDGE
+from ventorum.panel3d.kernels import _corner_tolerance
 from ventorum.panel3d.mesh import PanelMesh
 
 __all__ = [
@@ -99,23 +99,39 @@ def _corner_diameter(corners: np.ndarray) -> np.ndarray:
     return np.sqrt(diam_sq)
 
 
-def _repeated_corner(a: np.ndarray, b: np.ndarray, diameter: np.ndarray) -> np.ndarray:
+def _corner_limit(corners: np.ndarray) -> np.ndarray:
+    """Return the repeated-corner limit [m] of each panel.
+
+    *corners* has shape (..., 4, 3) in m (float64). The limit is
+    ``_DEGENERATE_EDGE`` times the panel diameter, with a floor of a few ulp
+    of the largest absolute corner coordinate (see
+    :func:`ventorum.panel3d.kernels._corner_tolerance`). The result has
+    shape (...).
+    """
+    corners = np.asarray(corners, dtype=float)
+    with np.errstate(invalid="ignore"):
+        scale = np.max(np.abs(corners), axis=(-2, -1))
+    return _corner_tolerance(_corner_diameter(corners), scale, float(np.finfo(float).eps))
+
+
+def _repeated_corner(a: np.ndarray, b: np.ndarray, limit: np.ndarray) -> np.ndarray:
     """Return True where two panel corners [m] are the same point.
 
     This is the one criterion of a repeated corner (the closing edge of a
     triangle) in Ventorum-3DP: equal coordinates, or a distance not larger
-    than ``_DEGENERATE_EDGE`` times the panel *diameter* [m]. The kernels use
-    the same limit for a degenerate edge (see
-    :func:`ventorum.panel3d.kernels._precompute_geometry`). The test has no
-    relative part in the coordinates, so it does not depend on the distance
-    of the panel from the origin.
+    than the *limit* of the panel from :func:`_corner_limit` [m]. The
+    kernels use the same limit for a degenerate edge (see
+    :func:`ventorum.panel3d.kernels._precompute_geometry`). The limit is
+    ``_DEGENERATE_EDGE`` times the panel diameter, with a floor at the
+    round-off of the coordinates, so the test gives the same result when
+    the mesh moves far from the origin.
 
     Parameters
     ----------
     a, b : numpy.ndarray
         Corner coordinates with shape (..., 3) in m.
-    diameter : numpy.ndarray
-        Panel diameters with shape (...) in m.
+    limit : numpy.ndarray
+        Repeated-corner limits with shape (...) in m.
 
     Returns
     -------
@@ -124,7 +140,7 @@ def _repeated_corner(a: np.ndarray, b: np.ndarray, diameter: np.ndarray) -> np.n
     """
     with np.errstate(invalid="ignore"):
         dist = np.linalg.norm(a - b, axis=-1)
-        return np.all(a == b, axis=-1) | (dist <= _DEGENERATE_EDGE * diameter)
+        return np.all(a == b, axis=-1) | (dist <= limit)
 
 
 def standardize_panel_corners(panels: np.ndarray) -> np.ndarray:
@@ -141,9 +157,9 @@ def standardize_panel_corners(panels: np.ndarray) -> np.ndarray:
         Standardized panel corner coordinates with shape (M, 4, 3) in m.
     """
     out = np.array(panels, dtype=float, copy=True)
-    diameter = _corner_diameter(out)
+    limit = _corner_limit(out)
     # These adjacent pairs are corners 2 and 3 after shifts 0, 1, 2, 3.
-    close = _repeated_corner(out[:, [2, 3, 0, 1]], out[:, [3, 0, 1, 2]], diameter[:, None])
+    close = _repeated_corner(out[:, [2, 3, 0, 1]], out[:, [3, 0, 1, 2]], limit[:, None])
     # argmax returns zero for a row with no match, so its order stays fixed.
     shifts = np.argmax(close, axis=1)
     order = (np.arange(4)[None, :] + shifts[:, None]) % 4
@@ -167,14 +183,14 @@ def _standardize_panel_corners_reference(panels: np.ndarray) -> np.ndarray:
     m = out.shape[0]
     for i in range(m):
         row = out[i]
-        diameter = _corner_diameter(row)
+        limit = _corner_limit(row)
         # Check if already standardized (corner 2 equal to corner 3)
-        if _repeated_corner(row[2], row[3], diameter):
+        if _repeated_corner(row[2], row[3], limit):
             continue
         # Search which adjacent pair is identical
         for shift in range(1, 4):
             shifted = np.roll(row, -shift, axis=0)
-            if _repeated_corner(shifted[2], shifted[3], diameter):
+            if _repeated_corner(shifted[2], shifted[3], limit):
                 out[i] = shifted
                 break
     return out

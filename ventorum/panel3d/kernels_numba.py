@@ -46,7 +46,7 @@ import math
 
 import numpy as np
 
-from ventorum.panel3d.kernels import _DEGENERATE_EDGE, _PLANE_TOL_FACTOR, _input_eps
+from ventorum.panel3d.kernels import _CORNER_ULP_FACTOR, _DEGENERATE_EDGE, _PLANE_TOL_FACTOR, _input_eps
 
 try:
     from numba import njit, prange
@@ -155,7 +155,12 @@ if HAVE_NUMBA:
                                + (pan[a, 2] - pan[b, 2]) ** 2)
                 if dd > diam:
                     diam = dd
-        tiny = _DEGENERATE_EDGE * diam
+        scale = 0.0
+        for a in range(4):
+            for c in range(3):
+                if abs(pan[a, c]) > scale:
+                    scale = abs(pan[a, c])
+        tiny = max(_DEGENERATE_EDGE * diam, _CORNER_ULP_FACTOR * eps * scale)
         d13x = pan[2, 0] - pan[0, 0]
         d13y = pan[2, 1] - pan[0, 1]
         d13z = pan[2, 2] - pan[0, 2]

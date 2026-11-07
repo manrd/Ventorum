@@ -36,7 +36,7 @@ The panel reference point (collocation point) $\mathbf{p}_0$ is the corner avera
 * For quadrilaterals: $\mathbf{p}_0 = \frac{1}{4} \sum_{k=1}^4 \mathbf{p}'_k$. For a general quadrilateral this point is not the area centroid (for example, the area centroid of a trapezoid is nearer to its longer side).
 * For triangles ($\mathbf{p}_4 = \mathbf{p}_3$): $\mathbf{p}_0 = \frac{1}{3} (\mathbf{p}'_1 + \mathbf{p}'_2 + \mathbf{p}'_3)$, which is also the area centroid.
 
-A corner counts as repeated (triangle) and an edge counts as degenerate when its length is at most $10^{-12}$ times the panel diameter.
+A corner counts as repeated (triangle) and an edge counts as degenerate when its length is at most $10^{-12}$ times the panel diameter, but not less than $8 arepsilon$ times the largest absolute corner coordinate of the panel ($arepsilon$ the machine epsilon of the input). The second limit is the round-off of the coordinates: far from the origin, $10^{-12}$ of a small panel diameter is less than one ulp of the coordinates, and a repeated node from another computation could then count as a short edge. With the floor, a mesh moved far from the origin (for example by $10^4$ m) gives the same triangles and the same degenerate edges as the mesh at the origin. The standardization of the corner order (images and solver) uses the same limit.
 
 ### Local Coordinate Frame
 
