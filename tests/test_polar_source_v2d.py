@@ -388,3 +388,24 @@ def test_cache_hit_sets_last_dropped(tmp_path, monkeypatch):
     source.last_dropped = 0
     source.polar("naca 0012", 1e6, [0.0, 4.0])
     assert source.last_dropped == 1
+
+
+def test_newton_tolerance_is_in_the_polar_metadata_and_the_cache_key(tmp_path, fake_solver):
+    """The Newton tolerance of the solve is stated in the polar name, in describe() and in the cache key.
+
+    Regression: the source solves with tol 1e-4 (solve_viscous defaults to 1e-6), but the polar itself did
+    not state the tolerance, so a polar of the source and a polar of solve_viscous could not be told apart.
+    """
+    source = Ventorum2DPolarSource(cache=PolarCache(tmp_path), n_panels=80)
+    default = source.polar("naca 0012", 1e6, [0.0, 2.0])
+    assert fake_solver[-1]["tol"] == 1e-4
+    assert "tol=0.0001" in default.name
+    assert source.describe()["options"]["tol"] == 1e-4
+    tight = source.polar("naca 0012", 1e6, [0.0, 2.0], tol=1e-6)
+    assert len(fake_solver) == 2 and fake_solver[-1]["tol"] == 1e-6
+    assert "tol=1e-06" in tight.name
+    assert source.describe(tol=1e-6)["options"]["tol"] == 1e-6
+    # The cache gives back each polar with its own tolerance.
+    assert "tol=0.0001" in source.polar("naca 0012", 1e6, [0.0, 2.0]).name
+    assert "tol=1e-06" in source.polar("naca 0012", 1e6, [0.0, 2.0], tol=1e-6).name
+    assert len(fake_solver) == 2

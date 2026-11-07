@@ -382,8 +382,13 @@ class Ventorum2DPolarSource:
             The section polar over the converged requested angles. Angles
             are in radians. Non-converged angles are dropped, and also
             converged angles whose reason holds a near-wake sawtooth note or
-            a transition rule note (their loads must not be used); the polar
-            name and :attr:`last_dropped` give their number, and the gap
+            a transition rule note (their loads must not be used). The
+            polar name states the Newton tolerance ``tol`` of the solve
+            (default 1e-4, looser than the 1e-6 default of
+            :func:`solve_viscous`); the tolerance is also in the options of
+            :meth:`describe` and in the cache key. The polar
+            name and :attr:`last_dropped` give the number of dropped
+            angles, and the gap
             mask of the polar marks each table interval that bridges a
             dropped angle (a lookup there gives a warning, once per
             polar). ``Cl_data`` is
@@ -524,8 +529,11 @@ class Ventorum2DPolarSource:
         self.last_dropped = dropped
 
         h_str = "free air" if h_val is None else f"{h_val:g}"
+        # The Newton tolerance of the solve is part of the provenance: the
+        # source default (1e-4) is looser than the solve_viscous default (1e-6).
         name = (
             f"Ventorum-2D {shape.name} Re={re_val:.6g} h={h_str} "
+            f"tol={float(settings['tol']):g} "
             f"({dropped} of {n_requested} alpha dropped)"
         )
         polar = TabulatedAirfoil(
