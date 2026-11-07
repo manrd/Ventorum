@@ -65,9 +65,22 @@ class CouplingSystem:
     s : np.ndarray
         Arc length along the contour from node 0, shape (N,) [m].
     x_over_c : np.ndarray
-        Body-frame x position of the nodes over the reference chord [-],
-        measured from the x of the leading edge of the reference geometry
-        (:func:`ventorum.panel2d.solver.section_reference`).
+        Chordwise position of the nodes [-], shape (N,): the projection of
+        the body-frame node position on the chord line of the reference
+        geometry (:func:`ventorum.panel2d.solver.section_reference`),
+        x/c = (p - le) . e / chord_ref with e the unit vector from the
+        leading edge le to the trailing-edge midpoint te. It is 0 at the
+        leading edge and 1 at the trailing-edge midpoint for the default
+        reference chord |te - le|, and it does not change when the
+        section is rotated. The forced transition point (xtr) and the
+        reported transition positions use this measure. The reference
+        geometry depends on the input: a flapped
+        :class:`ventorum.airfoil.AirfoilShape` gives its stored leading
+        and trailing edges of the undeflected section; a point array of a
+        deflected section gives the leading edge and the trailing-edge
+        midpoint of the deflected points, so the same flapped section can
+        give a different x/c (and a different forced-transition result)
+        as a point array and as a shape.
     gamma_inv : np.ndarray
         Inviscid nodal vortex strengths [-], shape (N,).
     gamma_src : np.ndarray
@@ -291,10 +304,15 @@ def build_coupling_system(body, alpha_deg: float, *, height=None, height_referen
     chord_ref, x_ref, quarter = sv.resolve_reference(body, chord_ref, moment_ref)
     b = sv._as_numpy(body)
     layout = sv.panel_layout([b])
-    # Origin of x/c: the leading edge of the reference geometry (the same
-    # leading edge as the reference chord and the moment point), not the
-    # most forward point, which differs for a rotated or flapped section.
-    xle = float(sv.section_reference(body).leading_edge[0])
+    # x/c: projection on the chord line of the reference geometry (the same
+    # leading edge and trailing edge as the reference chord and the moment
+    # point). The origin is the reference leading edge, not the most
+    # forward point, and the measure does not change when the section is
+    # rotated.
+    ref = sv.section_reference(body)
+    le = np.asarray(ref.leading_edge, dtype=np.float64)
+    chord_vec = np.asarray(ref.trailing_edge, dtype=np.float64) - le
+    e_chord = chord_vec / np.hypot(*chord_vec)
     if pivot is None:
         pivot = quarter
     ground = height is not None
@@ -345,7 +363,7 @@ def build_coupling_system(body, alpha_deg: float, *, height=None, height_referen
         nodes_ref=b,
         layout=layout,
         s=s,
-        x_over_c=(b[:, 0] - xle) / chord_ref,
+        x_over_c=((b - le) @ e_chord) / chord_ref,
         gamma_inv=gamma_inv,
         gamma_src=gamma_src,
         wake_nodes=wake,

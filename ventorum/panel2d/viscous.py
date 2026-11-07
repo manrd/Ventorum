@@ -343,7 +343,9 @@ class ViscousResult:
         reference geometry.
     transition_positions : tuple of float or list of tuple
         Transition x/c on the upper and lower side [-] (1.0 when the layer
-        stays laminar to the trailing edge).
+        stays laminar to the trailing edge). x/c is the projection on the
+        chord line of the reference geometry, the same measure as the
+        forced transition ``xtr`` of :func:`solve_viscous`.
     separation_flags : tuple of bool or list of tuple
         True when the skin friction is negative at a station of the side.
     Cp : np.ndarray or list of np.ndarray
@@ -518,8 +520,17 @@ def resolve_body(bodies, chord_ref=None, moment_ref=None):
 
 
 def prepare_case(body, alpha, re, *, ncrit, xtr, height, height_reference, wake_length, n_wake, chord_ref=None,
-                 moment_ref=None, pivot=None):
-    """Return the CaseSetup of one angle, or raise a ValueError with the reason."""
+                 moment_ref=None, pivot=None, reference=None):
+    """Return the CaseSetup of one angle, or raise a ValueError with the reason.
+
+    *reference* is the stored reference geometry of an AirfoilShape input
+    (or None). When it is given, the coupling system gets the coordinates
+    with this reference geometry, so that the x/c of transition uses the
+    chord line of the undeflected section of a flapped shape, as when the
+    shape itself is given.
+    """
+    if reference is not None and not isinstance(body, AirfoilShape):
+        body = AirfoilShape(coords=body, reference=reference)
     sys_ = cp.build_coupling_system(body, alpha, height=height, height_reference=height_reference, pivot=pivot,
                                     chord_ref=chord_ref, moment_ref=moment_ref, wake_length=wake_length,
                                     n_wake=n_wake)
@@ -672,10 +683,20 @@ def solve_viscous(
         tunnel. It is a code setting: no source in this repository
         confirms it yet.
     xtr : tuple of float
-        Forced transition x/c on the upper and lower side [-] (x from the
-        x of the leading edge of the reference geometry, see
-        :func:`ventorum.panel2d.solver.section_reference`, over the
-        reference chord); 1.0 (or more) means free transition only.
+        Forced transition x/c on the upper and lower side [-]; 1.0 (or
+        more) means free transition only. x/c is the projection of the
+        point on the chord line of the reference geometry (see
+        :func:`ventorum.panel2d.solver.section_reference`), from the
+        leading edge le towards the trailing-edge midpoint te, over the
+        reference chord: x/c = (p - le) . (te - le) / (|te - le| c). It
+        does not change when the section is rotated, and the reported
+        ``transition_positions`` use the same measure. For a deflected
+        plain flap the input type matters: an
+        :class:`ventorum.airfoil.AirfoilShape` gives the stored leading
+        and trailing edges of the undeflected section, while a point
+        array gives the leading edge and the trailing-edge midpoint of
+        the deflected points. The same xtr can then give a different
+        transition point (and a different Cd) for the two inputs.
     height : float or None
         Height above the ground [m] (of the pivot, the quarter-chord point
         on the chord line of the reference geometry, by default), or None
@@ -768,13 +789,15 @@ def solve_viscous(
     rules = StopRules(stall_window=stall_window, stall_factor=stall_factor, divergence_factor=divergence_factor,
                       work_budget=work_budget, lm_trials=lm_trials)
     body, chord_ref, moment_ref, pivot = resolve_body(bodies, chord_ref, moment_ref)
+    reference = getattr(_single_body(bodies), "reference", None)
     wake_note = warn_long_wake(wake_length, "solve_viscous")
     is_scalar = np.ndim(alpha_deg) == 0
     alphas = np.atleast_1d(np.asarray(alpha_deg, dtype=np.float64))
     order_up, order_dn = sweep_order(alphas)
     out: dict[float, dict] = {}
     kw = dict(ncrit=ncrit, xtr=xtr, height=height, height_reference=height_reference,
-              wake_length=wake_length, n_wake=n_wake, chord_ref=chord_ref, moment_ref=moment_ref, pivot=pivot)
+              wake_length=wake_length, n_wake=n_wake, chord_ref=chord_ref, moment_ref=moment_ref, pivot=pivot,
+              reference=reference)
     cache: dict = {}
     with blas_single_thread():
         first_state = None
