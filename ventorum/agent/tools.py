@@ -301,6 +301,19 @@ def _planned_panels(
     return int(strips * n)
 
 
+def _condition_value(res: Any) -> float | None:
+    """Return the condition estimate of a result for the payload.
+
+    The value is the 1-norm condition estimate [-] of the system matrix
+    (``SolverSettings.report_condition``). It is None on the GPU, for the
+    solvers that do not give it, for no result, and for a value that is not
+    finite (a singular matrix; the trust then has a warning).
+    """
+    details = getattr(res, "details", None)
+    kappa = details.get("condition_number") if isinstance(details, dict) else None
+    return float(kappa) if kappa is not None and np.isfinite(kappa) else None
+
+
 def _check_call_work(estimate: int, hint: str) -> None:
     """Refuse a call whose estimated work is above MAX_CALL_WORK.
 
@@ -389,11 +402,7 @@ def wing_analysis(
             res.totals.Cl, res.totals.Cm, res.totals.Cn, c["alpha_deg"], c["beta_deg"],
             b_ref=b_ref, c_ref=c_ref)
     if sett.report_condition:
-        # 1-norm condition estimate of the system matrix; None on the GPU, for
-        # the solvers that do not give it, and for a singular matrix (the
-        # trust then has a warning).
-        kappa = res.details.get("condition_number") if isinstance(res.details, dict) else None
-        m["condition_number"] = (float(kappa) if kappa is not None and np.isfinite(kappa) else None)
+        m["condition_number"] = _condition_value(res)
     trust = trust_payload(res.totals.trust)
     rp = ac.moment_reference()
     where = "free air" if c["h_m"] is None else f"h={c['h_m']:g} m above the ground"
@@ -747,6 +756,14 @@ def polar_sweep(
     once, with the full text at the angle of the lowest score and the
     angles that have it (at most 6, the count of the others in
     ``warnings_not_shown``). These keys are at every detail level.
+
+    With ``settings.report_condition`` true, each valid row of
+    ``polar_table`` gives ``condition_number``, the 1-norm condition
+    estimate of the system matrix of that angle [-] (None when the solve
+    does not give it: on the GPU, for the Fourier solver, or for a matrix
+    that is singular). ``polar_summary`` then gives
+    ``condition_number_max`` and ``condition_number_alpha_deg_at_max``
+    at every detail level.
     """
     ac = build_aircraft_from_spec(wing=wing, aircraft=aircraft)
     missing = [k for k, v in (("alpha_start_deg", alpha_start_deg), ("alpha_end_deg", alpha_end_deg),
@@ -856,6 +873,8 @@ def polar_sweep(
             row["warnings_not_shown"] = n_more
         if in_ground:
             row["n_chord"] = _used_n_chord(res)
+        if sett.report_condition:
+            row["condition_number"] = _condition_value(res)
         if ax == "all":
             row["moments"] = moments_all_sets(
                 res.totals.Cl, res.totals.Cm, res.totals.Cn, a, c["beta_deg"],
@@ -920,6 +939,12 @@ def polar_sweep(
     summary["trust_alpha_deg_at_lowest"] = low[0] if low else None
     summary["warnings"] = union
     summary["warnings_not_shown"] = n_more
+    if sett.report_condition:
+        kappas = [(a, _condition_value(r)) for a, r in ok]
+        kappas = [(a, k) for a, k in kappas if k is not None]
+        top = max(kappas, key=lambda it: it[1]) if kappas else None
+        summary["condition_number_max"] = top[1] if top else None
+        summary["condition_number_alpha_deg_at_max"] = top[0] if top else None
     summary["trust_note"] = ("warnings lists each kind of warning once: the text at the angle with the "
                              "lowest trust score, and every angle that has it. The rows give the short "
                              "labels of their warnings.")
@@ -2164,6 +2189,32 @@ def undeformed_nodes(
 # Trim
 # ═══════════════════════════════════════════════════════════════════════════════
 
+def _trim_passes(ac: Aircraft, sett: SolverSettings, condition: FlightCondition) -> int:
+    """Return the largest number of passes of a trim.
+
+    A trim in ground effect with the automatic chordwise count of the vortex
+    lattice can do up to ``GROUND_N_CHORD_MAX_PASSES`` passes (see
+    :func:`ventorum.solvers.trimming.trim`). All other trims do one pass.
+    """
+    from ventorum.solvers.trimming import GROUND_N_CHORD_MAX_PASSES
+
+    if condition.h is not None and sett.n_chord is None and _uses_lattice_chord(ac, sett):
+        return int(GROUND_N_CHORD_MAX_PASSES)
+    return 1
+
+
+def _trim_solve_count(max_iterations: int, n_unknowns: int, passes: int) -> int:
+    """Return the largest number of solves of a trim.
+
+    Each evaluated point of a pass costs one solve and a central-difference
+    Jacobian of ``2 n_unknowns`` solves (also the last point, for the
+    Jacobian of the result). A pass with k Newton steps evaluates k + 1
+    points, and the steps of all passes total at most *max_iterations*. Thus
+    the count is at most ``(max_iterations + passes) (1 + 2 n_unknowns)``.
+    """
+    return int((int(max_iterations) + int(passes)) * (1 + 2 * int(n_unknowns)))
+
+
 @_tool
 def trim(
     wing: Any = None,
@@ -2207,11 +2258,17 @@ def trim(
     alpha_bounds_deg : list of float or None
         Lower and upper bounds of the angle of attack [deg]. Default [-10, 20].
     max_iterations : int
-        Maximum Newton iterations. Default 20.
+        Maximum Newton iterations, the total over all passes of a trim in
+        ground effect with the automatic chordwise count. Default 20.
     settings : dict or None
-        ``solver``, ``n_panels``, ``n_chord``, ``wake_alignment``.
+        ``solver``, ``n_panels``, ``n_chord``, ``wake_alignment``,
+        ``report_condition``. With ``report_condition`` true, the payload
+        gives ``condition_number``, the 1-norm condition estimate [-] of
+        the system matrix of the solve of the reported trim point (None
+        when no solve succeeded or the solve does not give it).
     detail_level : 'summary', 'standard' or 'full'
-        ``standard`` and ``full`` add ``residual_history``; ``full`` adds
+        ``standard`` and ``full`` add ``residual_history`` (all passes
+        joined) and ``pass_residual_histories`` (one list per pass); ``full`` adds
         ``jacobian`` and ``dispatch``: the dispatch record of the solve of
         the final trim point (None when no solve succeeded).
     axes : 'body', 'stability', 'wind' or 'all'
@@ -2247,7 +2304,7 @@ def trim(
     n_unknowns = 4 if (roll is not None or yaw is not None) else 2
     n_panels = _planned_panels(ac, sett, fc)
     _check_call_work(
-        (1 + max_iter * (1 + 2 * n_unknowns)) * n_panels * n_panels,
+        _trim_solve_count(max_iter, n_unknowns, _trim_passes(ac, case_sett, fc)) * n_panels * n_panels,
         "fewer panels (smaller n_panels or n_chord) or a smaller max_iterations")
     tr = vt.trim(ac, fc, case_sett, CL_target=cl_t, pitch_control=pitch, roll_control=roll,
                  yaw_control=yaw, alpha_bounds_deg=(lo, hi), max_iterations=max_iter)
@@ -2306,11 +2363,14 @@ def trim(
                           "device": device, "precision": precision},
         "axes": ax,
     }
+    if sett.report_condition:
+        out["condition_number"] = _condition_value(tr.result)
     if ax == "all" and all(np.isfinite(v) for v in vals):
         out["moments"] = moments_all_sets(tr.Cl, tr.Cm, tr.Cn, tr.alpha_deg, c["beta_deg"],
                                           b_ref=b_ref, c_ref=c_ref)
     if dl in ("standard", "full"):
         out["residual_history"] = [float(v) for v in tr.residual_history]
+        out["pass_residual_histories"] = [[float(v) for v in h] for h in tr.pass_residual_histories]
     if dl == "full":
         out["jacobian"] = [[float(v) for v in row] for row in tr.jacobian]
         out["dispatch"] = dispatch_payload(tr.result)

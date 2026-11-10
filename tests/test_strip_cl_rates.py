@@ -104,11 +104,14 @@ def test_rated_strip_cl_uses_the_local_onset(solver, rate):
 
 @pytest.mark.parametrize("solver", ["vlm", "linear", "nonlinear"])
 @pytest.mark.parametrize("rate", list(_RATES))
-def test_rated_strip_induced_drag_and_local_lift_use_the_free_stream(solver, rate):
-    """With a body rate, Cd_i and local_lift stay on the free-stream speed, as the docstrings say.
+def test_rated_strip_induced_drag_uses_the_free_stream_and_local_lift_the_local_onset(solver, rate):
+    """With a body rate, Cd_i stays on the free-stream speed and local_lift uses the local onset.
 
     The strip Cd_i is the part of the Trefftz-plane induced drag CDi, which
-    uses V_inf, so the strips sum to CDi. local_lift is rho V_inf Gamma.
+    uses V_inf, so the strips sum to CDi. Regression: local_lift was
+    rho V_inf Gamma also with rates, so local_lift and Cl had different
+    onsets. Now local_lift = rho |U_qc| Gamma = Cl (rho |U_qc|^2 / 2) c, with
+    the onset U_qc of the strip Cl.
     """
     ac = _tapered()
     cond = vt.FlightCondition(V_inf=_V, alpha=np.radians(4.0), **_RATES[rate])
@@ -117,8 +120,15 @@ def test_rated_strip_induced_drag_and_local_lift_use_the_free_stream(solver, rat
     cd_i = _strip(lattice, res, "Cd_i")
     np.testing.assert_allclose(np.sum(cd_i * lattice.chord * lattice.width) / ac.S_ref, res.totals.CDi,
                                rtol=1e-10)
-    np.testing.assert_allclose(_strip(lattice, res, "local_lift"), cond.rho * cond.V_inf * gamma,
+    u_qc = (cond.V_inf * freestream_direction(cond.alpha, cond.beta)[None, :]
+            + rotation_velocity(cond, lattice.qc_mid, ac.ref_point))
+    speed = np.linalg.norm(u_qc, axis=1)
+    local_lift = _strip(lattice, res, "local_lift")
+    np.testing.assert_allclose(local_lift, cond.rho * speed * gamma, rtol=1e-12, atol=1e-12)
+    np.testing.assert_allclose(local_lift, _strip(lattice, res, "Cl") * 0.5 * cond.rho * speed ** 2 * lattice.chord,
                                rtol=1e-12, atol=1e-12)
+    # The local and the free-stream speed differ by more than round-off on this case.
+    assert np.max(np.abs(local_lift - cond.rho * cond.V_inf * gamma)) > 1e-3 * np.max(np.abs(local_lift))
 
 
 @pytest.mark.parametrize("solver", ["vlm", "linear"])
@@ -142,6 +152,9 @@ def test_without_rates_the_two_normalisations_are_equal(solver):
     cl = _strip(lattice, res, "Cl")
     np.testing.assert_array_equal(cl, _strip(lattice, res, "Cl_freestream"))
     np.testing.assert_allclose(cl, 2.0 * _strip(lattice, res, "gamma") / (_V * lattice.chord), rtol=1e-14)
+    # Without rates local_lift stays rho V_inf Gamma, to the last bit.
+    np.testing.assert_array_equal(_strip(lattice, res, "local_lift"),
+                                  (cond.rho * cond.V_inf) * _strip(lattice, res, "gamma"))
 
 
 def test_fourier_fills_cl_freestream():
@@ -200,7 +213,7 @@ def _need_gpu():
 @pytest.mark.parametrize("solver", ["vlm", "linear"])
 @pytest.mark.parametrize("rate", list(_RATES))
 def test_gpu_strip_cl_matches_cpu(solver, rate, precision, tol):
-    """GPU and CPU give the same Cl, Cl_freestream, alpha_eff, Cd_profile and totals with a body rate."""
+    """GPU and CPU give the same Cl, Cl_freestream, local_lift, alpha_eff, Cd_profile and totals with a body rate."""
     _need_gpu()
     ac = _tapered()
     cond = vt.FlightCondition(V_inf=_V, alpha=np.radians(4.0), **_RATES[rate])
@@ -215,7 +228,7 @@ def test_gpu_strip_cl_matches_cpu(solver, rate, precision, tol):
         gpu.set_precision(precision)
         res = s.solve_batch(lattice, [cond], st, ac.S_ref, ac.b_ref, ac.c_ref, ref_point=ac.ref_point)[0]
     assert res.details["device"] == "gpu"
-    for name in ("Cl", "Cl_freestream", "alpha_eff", "Cd_profile", "Cm_section"):
+    for name in ("Cl", "Cl_freestream", "local_lift", "alpha_eff", "Cd_profile", "Cm_section"):
         a, b = _strip(lattice, cpu, name), _strip(lattice, res, name)
         scale = max(float(np.max(np.abs(a))), 1e-6)
         assert np.max(np.abs(a - b)) <= tol * scale, (name, np.max(np.abs(a - b)), scale)

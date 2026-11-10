@@ -1507,8 +1507,10 @@ class SpanwiseResult:
         ``|U_qc| = V_inf`` and ``Cl`` equals ``Cl_freestream``. The
         effective angle of the linear section, ``alpha_L0 + Cl / a0``, uses
         this value. On a 3D panel strip ``Cl`` is the strip pressure lift
-        over ``q_inf`` and the strip area, also with body rates (see
-        ``Cl_freestream``).
+        over the strip area and the local dynamic pressure
+        ``rho |U_qc|^2 / 2`` of the same onset ``U_qc`` at the strip
+        quarter-chord point (the lattice rule); without body rates the
+        dynamic pressure is ``q_inf``.
     Cd_i, Cd_profile : numpy.ndarray
         Section induced-drag and profile-drag coefficients [-]. On a
         lattice strip ``Cd_i`` is the strip part of the Trefftz-plane
@@ -1521,8 +1523,11 @@ class SpanwiseResult:
     alpha_eff, alpha_i : numpy.ndarray
         Effective and induced angle of attack of each strip [rad].
     local_lift : numpy.ndarray
-        Lift per unit span [N/m], ``rho V_inf Gamma`` on a lattice strip.
-        It uses the free-stream speed also with body rates.
+        Lift per unit span [N/m]. On a lattice strip it is
+        ``rho |U_qc| Gamma``, with the same onset ``U_qc`` as ``Cl``, so
+        that ``local_lift = Cl (rho |U_qc|^2 / 2) c``. Without body rates
+        it is ``rho V_inf Gamma``. On a 3D panel strip it is the strip
+        pressure lift per unit width.
     chord : numpy.ndarray or None
         Strip chord [m].
     Cm_section : numpy.ndarray or None
@@ -1530,13 +1535,22 @@ class SpanwiseResult:
     Cl_freestream : numpy.ndarray or None
         Section lift coefficient on the free-stream dynamic pressure,
         ``2 Gamma / (V_inf c)`` [-], so that ``Cl_freestream * q_inf * c``
-        is the lift per unit span [N/m] for every case. On a lattice strip
-        it differs from ``Cl`` only with body rates. On a 3D panel strip
-        ``Gamma = local_lift / (rho V_inf)`` and ``Cl`` is the strip
-        pressure lift over ``q_inf`` and the strip area, also with body
-        rates; the two differ only by the ratio of the strip area to width
-        times chord (a small difference on a tapered strip with cosine
-        spacing). None for a solver that does not give it.
+        is ``rho V_inf Gamma`` [N/m] for every case. On a lattice strip
+        it differs from ``Cl`` only with body rates; then
+        ``Cl_freestream * q_inf * c`` differs from ``local_lift`` by the
+        factor ``V_inf / |U_qc|``. On a 3D panel strip
+        ``Gamma = local_lift / (rho V_inf)``, so ``Cl_freestream`` stays on
+        ``V_inf`` also with body rates, and ``Cl`` differs from it by the
+        factor ``(V_inf / |U_qc|)^2`` with body rates and by the ratio
+        ``area / (width * chord)``: the strip area is from the mean of the
+        edge chords, the chord is at the strip mid span fraction. The ratio
+        is 1 for a constant chord and for a linear taper with uniform
+        spacing. With a taper and cosine spacing it is not 1: 0.36 % at the
+        tip strip of a taper 0.4 wing with cosine spacing (16 strips per
+        semi-span). This difference is kept: ``Cl`` is the pressure lift of
+        the real strip area, ``Cl_freestream`` keeps
+        ``Cl_freestream * q_inf * c = rho V_inf Gamma``. None for a solver
+        that does not give it.
     """
 
     y: np.ndarray = field(default_factory=lambda: np.empty(0))

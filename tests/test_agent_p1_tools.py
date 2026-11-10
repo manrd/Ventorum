@@ -295,6 +295,58 @@ def test_trim_tool_not_reached_is_success_with_status():
                  "invalid_input", "Fourier")
 
 
+def test_trim_tool_work_estimate_covers_the_passes(monkeypatch):
+    """The trim work estimate counts every evaluated point of every pass.
+
+    Regression: the estimate was ``(1 + max_iterations (1 + 2 n)) N^2``, for one
+    pass and without the Jacobian of the last point. A trim in ground effect
+    with the automatic chordwise count can do up to GROUND_N_CHORD_MAX_PASSES
+    passes. Now the estimate is ``(max_iterations + passes) (1 + 2 n) N^2``.
+    """
+    import ventorum.agent.tools as tools
+    from ventorum.agent.tools import InputError
+    from ventorum.solvers.trimming import GROUND_N_CHORD_MAX_PASSES
+
+    seen: list[int] = []
+
+    def record(estimate, hint):
+        seen.append(int(estimate))
+        raise InputError("stop after the estimate")
+
+    monkeypatch.setattr(tools, "_check_call_work", record)
+    monkeypatch.setattr(tools, "_planned_panels", lambda *args, **kwargs: 100)
+    ground = {"alpha_deg": 3.0, "h_m": 2.0}
+    cases = [
+        (None, {"n_panels": 8}, 1),
+        (ground, {"n_panels": 8}, GROUND_N_CHORD_MAX_PASSES),
+        (ground, {"n_panels": 8, "n_chord": 4}, 1),
+        (ground, {"n_panels": 8, "solver": "linear"}, 1),
+    ]
+    for fc, sett, passes in cases:
+        seen.clear()
+        t = trim(aircraft=dict(WING_TAIL), CL_target=0.5, pitch_control="elevator", flight_condition=fc,
+                 settings=sett, max_iterations=7)
+        assert_error(t, "invalid_input", "stop after the estimate")
+        assert seen == [(7 + passes) * (1 + 2 * 2) * 100 * 100], (fc, sett)
+    assert GROUND_N_CHORD_MAX_PASSES == 3
+
+
+def test_trim_tool_gives_the_residual_history_of_each_pass():
+    """The trim payload gives pass_residual_histories with residual_history; one pass out of ground effect."""
+    from ventorum.agent.schemas import AGENT_TOOL_DEFINITIONS
+
+    t = trim(aircraft=dict(WING_TAIL), CL_target=0.5, pitch_control="elevator", settings={"n_panels": 8})
+    strict_json(t)
+    assert t["trimmed"] is True
+    assert t["pass_residual_histories"] == [t["residual_history"]]
+    assert len(t["residual_history"]) == t["iterations"] + 1
+    s = trim(aircraft=dict(WING_TAIL), CL_target=0.5, pitch_control="elevator", settings={"n_panels": 8},
+             detail_level="summary")
+    assert "pass_residual_histories" not in s and "residual_history" not in s
+    tool = next(d for d in AGENT_TOOL_DEFINITIONS if d["name"] == "ventorum_trim")
+    assert "total over all passes" in tool["parameters"]["properties"]["max_iterations"]["description"]
+
+
 # 9. Error bars equal the Python error bars ────────────────────────────────────
 
 def test_error_bars_tool_equals_python():

@@ -13,7 +13,8 @@ tests check:
 * a small residual for a normal case (free air, half mesh with both
   parities, ground effect) and a large one for a perturbed solution;
 * an empty record on the float64 GPU path and on the CPU;
-* the new field of the factory dispatch record.
+* the new field of the factory dispatch record;
+* the trust warning above the limit 1e-4 (a perturbed record).
 
 Published sources
 -----------------
@@ -223,3 +224,88 @@ def test_factory_dispatch_record_holds_the_float64_residuals() -> None:
     assert disp64["float64_relative_residuals"] == {}
     cpu = make_solver("panel3d").solve(ac, cond, SolverSettings(n_panels=6, n_chord=8, panel_backend="numpy"))
     assert cpu.details["dispatch"]["float64_relative_residuals"] == {}
+
+
+# ---------------------------------------------------------------------------
+# Trust warning of the float64 residual
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize(
+    "record,warned",
+    [
+        (None, False),
+        ({}, False),
+        ({0: 2.6e-7, 2: 1.65e-5, 4: 1.0e-4}, False),
+        ({0: 2.6e-7, 2: 1.1e-4}, True),
+        ({4: float("inf")}, True),
+        ({4: float("nan")}, True),
+    ],
+)
+def test_trust_warning_above_the_float32_residual_limit(record, warned) -> None:
+    """A float64 relative residual above 1e-4 (or not finite) gives a trust warning, no penalty.
+
+    The record is made by hand (a perturbed record), so the test runs on
+    every machine.
+    """
+    from ventorum.core.trust import FLOAT32_RESIDUAL_WARNING, evaluate_aerodynamic_trust
+
+    assert FLOAT32_RESIDUAL_WARNING == 1.0e-4
+    base = evaluate_aerodynamic_trust(AR=8.0, CL=0.4, CDi=0.007, solver_type="panel3d", n_chord=10)
+    t = evaluate_aerodynamic_trust(AR=8.0, CL=0.4, CDi=0.007, solver_type="panel3d", n_chord=10,
+                                   float32_residuals=record)
+    found = [w for w in t.warnings if "float64 relative residual" in w]
+    assert len(found) == (1 if warned else 0)
+    assert t.score == base.score and t.factors == base.factors
+    if warned:
+        assert "1e-04" in found[0]
+        bad = {k: v for k, v in record.items() if not (v <= FLOAT32_RESIDUAL_WARNING)}
+        names = {0: "u", 2: "w", 4: "q"}
+        for k in bad:
+            assert f"{names[k]} " in found[0]
+        assert "u 2.60e-07" not in found[0]
+
+
+@pytest.mark.gpu
+@pytest.mark.parametrize("h", [None, 0.6])
+def test_float32_residual_warning_reaches_the_result_trust(h, monkeypatch) -> None:
+    """A float32 GPU solve has no residual warning; a perturbed residual record gives it.
+
+    The same limit holds in free air and in ground effect.
+    """
+    _need_cuda()
+    from ventorum import gpu
+    from ventorum.core.datatypes import Aircraft, SolverSettings
+    from ventorum.solvers.factory import make_solver
+
+    surf = LiftingSurface(
+        name="Wing",
+        semi_span=3.0,
+        sections=[WingSection(y_frac=0.0, chord=1.0, shape="0012"), WingSection(y_frac=1.0, chord=1.0, shape="0012")],
+        is_symmetric=True,
+    )
+    ac = Aircraft(name="W", surfaces=[surf])
+    cond = FlightCondition(V_inf=30.0, alpha=np.radians(4.0), h=h)
+    settings = SolverSettings(n_panels=6, n_chord=8, panel_cache=False)
+    old_device, old_precision = gpu.get_device(), gpu._precision
+    real = PanelSolver._float64_unit_residuals
+
+    def perturbed(self, *args, **kwargs):
+        return 1.0e4 * np.asarray(real(self, *args, **kwargs))
+
+    try:
+        gpu.set_device("gpu")
+        gpu.set_precision("float32")
+        normal = make_solver("panel3d").solve(ac, cond, settings)
+        monkeypatch.setattr(PanelSolver, "_float64_unit_residuals", perturbed)
+        bad = make_solver("panel3d").solve(ac, cond, settings)
+    finally:
+        gpu.set_device(old_device)
+        gpu.set_precision(old_precision)
+    res = normal.details["dispatch"]["float64_relative_residuals"]
+    assert res and all(v < 1.0e-4 for v in res.values())
+    assert not [w for w in normal.totals.trust.warnings if "float64 relative residual" in w]
+    res_bad = bad.details["dispatch"]["float64_relative_residuals"]
+    assert max(res_bad.values()) > 1.0e-4
+    found = [w for w in bad.totals.trust.warnings if "float64 relative residual" in w]
+    assert len(found) == 1
+    assert bad.totals.trust.score == normal.totals.trust.score

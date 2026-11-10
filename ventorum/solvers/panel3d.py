@@ -78,8 +78,10 @@ from ventorum import gpu
 from ventorum.aero.system import (
     GroundPlane,
     freestream_direction,
+    has_rates,
     is_symmetric_condition,
     lift_direction,
+    rotation_velocity,
 )
 from ventorum.airfoil import airfoil
 from ventorum.core.errors import ValidityError
@@ -537,6 +539,20 @@ def _surface_strip_maps(
     return right, (left_map if mirror_side else None)
 
 
+def _strip_onset_speed(condition: FlightCondition, points: np.ndarray, ref_point: np.ndarray) -> np.ndarray:
+    """Return the onset speed [m/s] at the strip quarter-chord *points* (m, 3) [m].
+
+    The onset is the free stream plus the velocity of the body rates about
+    *ref_point* [m] (:func:`ventorum.aero.system.rotation_velocity`), without
+    the induced velocity: the onset of the lattice strip Cl.
+    """
+    u = float(condition.V_inf) * freestream_direction(condition.alpha, condition.beta)[None, :]
+    rot = rotation_velocity(condition, points, ref_point)
+    if rot is not None:
+        u = u + rot
+    return np.linalg.norm(u, axis=1)
+
+
 def _spanwise_results_batch(solver, panel_results, conditions, strip_maps, metadata):
     """Integrate all strips and conditions with one shared incidence matrix.
 
@@ -565,13 +581,22 @@ def _spanwise_results_batch(solver, panel_results, conditions, strip_maps, metad
     )
     owner = np.zeros(len(solver.areas), dtype=int)
     owner[col] = row
-    arm = solver.centroids - np.asarray(quarter_chords)[owner]
+    quarter_chords = np.asarray(quarter_chords, dtype=float).reshape(-1, 3)
+    arm = solver.centroids - quarter_chords[owner]
     out = [[] for _ in conditions]
     size = max(1, panel_solver_module._CONDITION_BATCH_BYTES // solver._condition_bytes())
     for start in range(0, len(conditions), size):
         chunk = conditions[start:start + size]
         _, speed, rho, lift_axis, drag_axis = _condition_arrays(chunk)
         q = 0.5 * rho * speed**2
+        # Dynamic pressure of the strip Cl [Pa], one row per condition: q_inf
+        # without body rates; with rates the local onset (free stream and
+        # rotation, no induced velocity) at the strip quarter-chord point,
+        # the rule of the lattice strips.
+        q_strip = np.broadcast_to(q[:, None], (len(chunk), len(maps))).copy()
+        for i, c in enumerate(chunk):
+            if has_rates(c):
+                q_strip[i] = 0.5 * rho[i] * _strip_onset_speed(c, quarter_chords, solver.ref_point) ** 2
         cp = np.array([r.cp for r in panel_results[start:start + size]])
         force = -cp[..., None] * solver.areas[:, None] * solver.normals * q[:, None, None]
         moment = np.cross(arm, force)
@@ -601,7 +626,7 @@ def _spanwise_results_batch(solver, panel_results, conditions, strip_maps, metad
                 a0 = np.concatenate([a0[::-1], a0])
                 alpha0 = np.concatenate([alpha0[::-1], alpha0])
                 y = np.concatenate([-y[::-1], y])
-            cl = lift[:, ids] / np.maximum(q[:, None] * area, 1e-300)
+            cl = lift[:, ids] / np.maximum(q_strip[:, ids] * area, 1e-300)
             cdi = drag[:, ids] / np.maximum(q[:, None] * area, 1e-300)
             cm = strip_moment[:, ids, 1] / np.maximum(q[:, None] * area * chord, 1e-300)
             local = lift[:, ids] / np.maximum(width, 1e-300)
@@ -629,6 +654,13 @@ def _spanwise_reference(solver, p_res, cond, surface_strip_maps, surface_geom_me
     """Retain the scalar strip integration for parity tests (SI units)."""
     alpha, beta, v_inf = float(cond.alpha), float(cond.beta), float(cond.V_inf)
     q_inf = 0.5 * float(cond.rho) * v_inf**2
+    rated = has_rates(cond)
+
+    def q_cl(points: np.ndarray) -> np.ndarray | float:
+        """Dynamic pressure [Pa] of the strip Cl at the strip quarter-chord *points* (lattice rule)."""
+        if not rated:
+            return q_inf
+        return 0.5 * float(cond.rho) * _strip_onset_speed(cond, points, solver.ref_point) ** 2
     l_hat, d_hat = lift_direction(alpha), freestream_direction(alpha, beta)
     x_hat = np.array([1.0, 0.0, 0.0])
     # Evaluate forces on mesh panels
@@ -669,7 +701,8 @@ def _spanwise_reference(solver, p_res, cond, surface_strip_maps, surface_geom_me
             # Pitching moment (nose up): My in body axes
             r_cm[j] = float(mj[1]) / max(q_inf * r_area[j] * r_chord[j], 1e-300)
 
-        r_cl = r_lift / np.maximum(q_inf * r_area, 1e-300)
+        r_qc = r_mid + 0.25 * r_chord[:, None] * x_hat[None, :]
+        r_cl = r_lift / np.maximum(q_cl(r_qc) * r_area, 1e-300)
         r_cdi = r_drag / np.maximum(q_inf * r_area, 1e-300)
         r_local_lift = r_lift / np.maximum(r_width, 1e-300)
         r_gamma = r_local_lift / max(float(cond.rho) * v_inf, 1e-300)
@@ -694,7 +727,8 @@ def _spanwise_reference(solver, p_res, cond, surface_strip_maps, surface_geom_me
                     mk = np.sum(np.cross(arm, dF_panel[p_ids]), axis=0) if p_ids else np.zeros(3)
                     l_cm[k] = float(mk[1]) / max(q_inf * r_area[j] * r_chord[j], 1e-300)
 
-                l_cl = l_lift / np.maximum(q_inf * r_area[::-1], 1e-300)
+                l_qc = r_qc[::-1] * np.array([1.0, -1.0, 1.0])
+                l_cl = l_lift / np.maximum(q_cl(l_qc) * r_area[::-1], 1e-300)
                 l_cdi = l_drag / np.maximum(q_inf * r_area[::-1], 1e-300)
                 l_local_lift = l_lift / np.maximum(r_width[::-1], 1e-300)
                 l_gamma = l_local_lift / max(float(cond.rho) * v_inf, 1e-300)
@@ -1955,6 +1989,14 @@ class PanelMethodSolver(BaseSolver):
                 # checks and the ground rule "chordwise panels longer than the
                 # gap"; the largest strip chord scales that ground rule, as for
                 # the vortex lattice.
+                # The configuration of this case: its solve records (also the
+                # float64 residuals of a float32 GPU solve for the trust).
+                config_solver = solver
+                config_key, wake_dir, gp = solver._config_key(cond, gnd)
+                if solver.mesh.half and not solver._symmetric_config(wake_dir, gp):
+                    config_solver = solver._full_solver
+                cfg = config_solver._configs[config_key]
+
                 totals.trust = evaluate_aerodynamic_trust(
                     AR=ar,
                     condition=cond,
@@ -1972,6 +2014,7 @@ class PanelMethodSolver(BaseSolver):
                     mesh_stats=mesh_stats,
                     CD_nearfield=totals.CDi_nearfield,
                     n_span=min(int(s.n_panels or settings.n_panels) for s in ac.surfaces),
+                    float32_residuals=dict(cfg.float64_residuals),
                 )
 
                 result = SolverResult(
@@ -1999,11 +2042,6 @@ class PanelMethodSolver(BaseSolver):
                     "dispatch": dict(dispatch),
                     "panel": panel_options,
                 }
-                config_solver = solver
-                config_key, wake_dir, gp = solver._config_key(cond, gnd)
-                if solver.mesh.half and not solver._symmetric_config(wake_dir, gp):
-                    config_solver = solver._full_solver
-                cfg = config_solver._configs[config_key]
                 result.details["dispatch"].update({
                     "ground_solver": cfg.ground_solver,
                     "ground_solver_reason": cfg.ground_solver_reason,

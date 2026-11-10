@@ -110,6 +110,83 @@ def test_wing_analysis_reports_the_condition_number():
         "status"] == "error"
 
 
+@pytest.mark.parametrize("h_m", [None, 2.0])
+def test_polar_sweep_reports_the_condition_number_per_angle(h_m):
+    """Verify that report_condition gives the condition estimate of each angle of a polar sweep.
+
+    Regression: only ventorum_wing_analysis gave the estimate; the sweep
+    accepted the setting but did not report the value.
+    """
+    from ventorum import gpu
+
+    fc = {} if h_m is None else {"h_m": h_m}
+    old = gpu.get_device()
+    try:
+        gpu.set_device("cpu")
+        on = polar_sweep(RECT, alpha_start_deg=0.0, alpha_end_deg=4.0, alpha_step_deg=2.0,
+                         flight_condition=fc, settings={**FAST, "report_condition": True}, detail_level="standard")
+        off = polar_sweep(RECT, alpha_start_deg=0.0, alpha_end_deg=4.0, alpha_step_deg=2.0,
+                         flight_condition=fc, settings=FAST, detail_level="standard")
+        short = polar_sweep(RECT, alpha_start_deg=0.0, alpha_end_deg=4.0, alpha_step_deg=2.0,
+                         flight_condition=fc, settings={**FAST, "report_condition": True}, detail_level="summary")
+        one = wing_analysis(RECT, {"alpha_deg": 2.0, **fc}, {**FAST, "report_condition": True}, "summary")
+    finally:
+        gpu.set_device(old)
+    strict_json(on)
+    assert on["status"] == "success", on
+    rows = [r for r in on["polar_table"] if r["status"] == "ok"]
+    assert len(rows) == 3
+    kappas = [r["condition_number"] for r in rows]
+    assert all(1.0 < k < 1.0e10 for k in kappas)
+    summ = on["polar_summary"]
+    assert summ["condition_number_max"] == max(kappas)
+    assert summ["condition_number_alpha_deg_at_max"] == rows[kappas.index(max(kappas))]["alpha_deg"]
+    # Out of ground effect each angle equals a single analysis of that angle.
+    if h_m is None:
+        assert kappas[1] == pytest.approx(one["metrics"]["condition_number"], rel=1.0e-9)
+    assert short["polar_summary"]["condition_number_max"] == summ["condition_number_max"]
+    assert all("condition_number" not in r for r in off["polar_table"])
+    assert "condition_number_max" not in off["polar_summary"]
+
+
+def test_trim_reports_the_condition_number_of_the_trim_point():
+    """Verify that report_condition gives the condition estimate of the reported trim point.
+
+    Regression: ventorum_trim accepted the setting but did not report the value.
+    """
+    from ventorum import gpu
+    from ventorum.agent import trim
+
+    def wing_tail(elevator_deg=0.0):
+        return {
+            "surfaces": [
+                {"name": "wing", "span_m": 12.0, "root_chord_m": 1.8, "tip_chord_m": 1.0},
+                {"name": "tail", "span_m": 4.0, "chord_m": 0.7, "position_m": [4.6, 0.0, 0.3],
+                 "controls": [{"name": "elevator", "hinge_x_c": 0.7, "deflection_deg": elevator_deg}]},
+            ],
+            "ref_point_m": [0.45, 0.0, 0.0],
+        }
+
+    old = gpu.get_device()
+    try:
+        gpu.set_device("cpu")
+        on = trim(aircraft=wing_tail(), CL_target=0.5, pitch_control="elevator",
+                  settings={**FAST, "report_condition": True}, detail_level="summary")
+        off = trim(aircraft=wing_tail(), CL_target=0.5, pitch_control="elevator", settings=FAST,
+                   detail_level="summary")
+        ref = wing_analysis(None, wing_tail(on["deflections_deg"]["elevator"]), {"alpha_deg": on["alpha_deg"]},
+                            {**FAST, "report_condition": True}, "summary")
+    finally:
+        gpu.set_device(old)
+    strict_json(on)
+    assert on["trimmed"] is True, on
+    assert 1.0 < on["condition_number"] < 1.0e10
+    assert on["settings_used"]["report_condition"] is True
+    assert "condition_number" not in off
+    # The estimate is that of an analysis at the reported trim point.
+    assert on["condition_number"] == pytest.approx(ref["metrics"]["condition_number"], rel=1.0e-6)
+
+
 # ── Wing analysis ────────────────────────────────────────────────────────────
 
 def test_wing_analysis_success():

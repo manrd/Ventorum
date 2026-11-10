@@ -34,7 +34,8 @@ pass uses the automatic count of the start point. When the automatic count at th
 trimmed state differs, a new pass starts from the trimmed state with that count (at
 most ``GROUND_N_CHORD_MAX_PASSES`` passes), so that the result equals an analysis at
 the trimmed state. When a later pass does not converge, the result is the trimmed state
-of the pass before it, with a note.
+of the pass before it, with a note. ``max_iterations`` of :func:`trim` is the limit of
+the Newton steps in total over all passes.
 
 References
 ----------
@@ -311,7 +312,8 @@ def trim(
         [-30, 30] deg) moves to the nearest point in the bounds, and a note
         of the result says so.
     max_iterations : int
-        Maximum number of Newton iterations of one pass. Default is 20.
+        Maximum number of Newton iterations, the total over all passes (see
+        the notes). Default is 20.
     tol_CL : float
         Convergence tolerance on lift coefficient residual ``abs(CL - CL_target)`` [-].
         Default is 1.0e-6.
@@ -372,9 +374,13 @@ def trim(
     last pass, the result is the last pass and a note says so. When a later
     pass does not converge, the result is the trimmed state of the pass
     before it (status "trimmed"), and a note says that its count is not the
-    automatic count of the trimmed state and gives that count. Each pass can
-    do up to *max_iterations* Newton steps. ``iterations`` is the total over
-    all passes, ``residual_history`` joins the histories of the passes, and
+    automatic count of the trimmed state and gives that count.
+    *max_iterations* is the limit of the Newton steps in total over all
+    passes: a later pass can do only the steps that the passes before it did
+    not use. A later pass that has no step left evaluates its start point
+    only; when that point is not trimmed with the new count, the pass does
+    not converge and the result is the trimmed state of the pass before it.
+    ``iterations`` is the total over all passes, ``residual_history`` joins the histories of the passes, and
     ``pass_residual_histories`` gives the history of each pass; a note gives
     the number of passes and their counts. A count in ``settings.n_chord``
     is used as given.
@@ -658,8 +664,12 @@ def trim(
         res.precision = _set_text(precisions)
         return res
 
-    def _newton(x0: np.ndarray) -> TrimResult:
-        """Run the Newton iteration from *x0* with the settings ``run_settings``."""
+    def _newton(x0: np.ndarray, budget: int) -> TrimResult:
+        """Run the Newton iteration from *x0* with the settings ``run_settings``.
+
+        *budget* is the number of Newton steps that this pass can do: the
+        part of *max_iterations* that the passes before it did not use.
+        """
         x = x0.copy()
         notes: list[str] = list(start_notes)
         residual_history: list[float] = []
@@ -672,7 +682,7 @@ def trim(
         # iter_idx is the number of Newton steps done before this point. Every
         # stop returns iterations = iter_idx, thus
         # len(residual_history) == iterations + 1.
-        for iter_idx in range(max_iterations + 1):
+        for iter_idx in range(budget + 1):
             sol, R, err = _evaluate(x)
             if err is not None or sol is None or R is None:
                 residual_history.append(float("nan"))
@@ -711,8 +721,9 @@ def trim(
                     "trimmed", True, x, sol, iter_idx, residual_history, good_J, notes
                 )
 
-            if iter_idx == max_iterations:
-                notes.append(f"Maximum iterations ({max_iterations}) reached without convergence.")
+            if iter_idx == budget:
+                notes.append(f"Maximum iterations ({max_iterations}, the total over all passes) reached "
+                             "without convergence.")
                 J_final, err_final = _compute_jacobian(x)
                 if J_final is not None:
                     good_J = J_final
@@ -795,14 +806,14 @@ def trim(
             # Cut at bounds
             x = np.clip(x + dx, lower_bounds, upper_bounds)
 
-        # Not reached: the loop returns when iter_idx == max_iterations.
+        # Not reached: the loop returns when iter_idx == budget.
         raise AssertionError("The trim loop ended without a result.")
 
     # The unknowns [rad] of the reported point of the last pass.
     final_x: list[float] = [float(v) for v in x]
 
     if n_chord_auto is None:
-        return _newton(x)
+        return _newton(x, max_iterations)
 
     # Ground effect with the automatic chordwise count: a pass uses one count.
     # When the automatic count at the trimmed state differs, a new pass starts
@@ -816,7 +827,8 @@ def trim(
     history_text = ("The iterations are the total over all passes; residual_history joins the residual "
                     "histories of the passes, and pass_residual_histories gives each pass.")
     while True:
-        res = _newton(x)
+        # max_iterations is a total limit: a pass gets the steps that are left.
+        res = _newton(x, max_iterations - sum(p.iterations for p in passes))
         passes.append(res)
         if res.status != "trimmed":
             if trimmed_res is None:

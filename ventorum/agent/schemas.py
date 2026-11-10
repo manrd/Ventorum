@@ -363,7 +363,11 @@ SETTINGS_PROPS: dict[str, dict[str, Any]] = {
                                         "estimate, a lower bound within about 3x). Default false. Only the "
                                         "vortex-lattice and linear lifting-line solves on the CPU give it; "
                                         "other solvers and the GPU give null. Above 1e10 the trust gets a "
-                                        "warning (about 10 of the 16 float64 digits can be lost)."},
+                                        "warning (about 10 of the 16 float64 digits can be lost). "
+                                        "ventorum_wing_analysis gives it in metrics.condition_number, "
+                                        "ventorum_polar_sweep in each row of polar_table and as "
+                                        "polar_summary.condition_number_max, ventorum_trim as "
+                                        "condition_number of the reported trim point."},
 }
 
 DETAIL_LEVEL = {"type": "string", "enum": ["summary", "standard", "full"],
@@ -1379,8 +1383,10 @@ AGENT_TOOL_DEFINITIONS: list[dict[str, Any]] = [
                                      "minItems": 2, "maxItems": 2,
                                      "description": "Lower and upper bounds of the angle of attack [deg]. "
                                                     "Must increase. Default [-10, 20]."},
-                "max_iterations": _int("Maximum Newton iterations [-] (integer). Range 1 to 50. "
-                                       "Default 20.", minimum=1, maximum=50),
+                "max_iterations": _int("Maximum Newton iterations [-] (integer), the total over all "
+                                       "passes (a trim in ground effect with the automatic n_chord "
+                                       "can do up to 3 passes). Range 1 to 50. Default 20.",
+                                       minimum=1, maximum=50),
                 "settings": SETTINGS_SCHEMA,
                 "detail_level": {**DETAIL_LEVEL, "default": "standard"},
                 "axes": {**AXES_SCHEMA, "default": "body"},

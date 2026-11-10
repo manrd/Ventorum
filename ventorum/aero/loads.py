@@ -39,7 +39,10 @@ Forces and moments from a solved vortex lattice.
   The wake and the Trefftz plane stay along the free stream. Thus the strip
   induced-drag coefficient ``Cd_i`` stays on the free-stream dynamic
   pressure: the strips are the parts of the total induced drag ``CDi``,
-  which uses ``V_inf``. The strip ``local_lift`` is ``rho V_inf Gamma``. With one
+  which uses ``V_inf``. The strip ``local_lift`` is ``rho |U_qc| Gamma`` [N/m],
+  with the same onset ``U_qc`` as the strip ``Cl``, so that
+  ``local_lift = Cl (rho |U_qc|^2 / 2) c``; without rates it is
+  ``rho V_inf Gamma``. With one
   chordwise panel, the section moment gets the thin-airfoil term of the
   chordwise change of the rotation velocity (-pi/4 per unit q c / (2 V)).
 
@@ -1251,12 +1254,14 @@ def compute_loads_batch(
         e = CL ** 2 / (np.pi * AR * CDi) if CDi > 1e-12 else float("nan")
         sg = strip_gamma[k]
         rVk = float(rho[k]) * float(V[k])
+        # Local lift rho |U_qc| Gamma [N/m]: the onset of the strip Cl.
+        lift_factor = rVk if k not in rated else float(rho[k]) * speed_qc[k]
         out.append(loads_result(
             lattice, CL=CL, CDi=CDi, CDp=CDp, CD_total=CD_total if hp else None, e=e, AR=AR,
             Cl=-float(M[0]) / (qS * b_ref), Cm=float(M[1]) / (qS * c_ref), Cn=-float(M[2]) / (qS * b_ref),
             CY=CY, CDi_nearfield=CDi_near, strip_gamma=sg, Cl_strip=Cl[k], Cl_freestream=Cl_ff[k], Cd_i=Cd_i[k],
             Cd_profile=Cd_p[k] if hp else None, alpha_eff=alpha_eff[k], alpha_i=alpha_i[k],
-            local_lift_factor=rVk, Cm_section=Cm_s[k], strip_force=F_strip[k], trefftz_normalwash=w_n[k],
+            local_lift_factor=lift_factor, Cm_section=Cm_s[k], strip_force=F_strip[k], trefftz_normalwash=w_n[k],
             force_total=F_total, moment_total=M,
             CY_farfield=float(CY_ff[k]), Cn_trefftz=float(Cn_tr[k]),
         ))
@@ -1281,6 +1286,38 @@ def _onset_at(
     return U
 
 
+def strip_onset_speed(
+    lattice: VortexLattice,
+    condition: FlightCondition,
+    ref_point: np.ndarray | None = None,
+) -> np.ndarray:
+    """Return the onset speed ``|U_qc|`` [m/s] of each strip, shape (n_strips,).
+
+    ``U_qc = V_inf d - Omega x (x_qc - x_ref)`` is the onset (free stream and
+    body rates, no induced velocity) at the quarter-chord mid-point of the
+    strip, the point of the strip ``Cl`` of :func:`compute_loads_batch`.
+    The GPU pipelines use it for the strip local lift with body rates.
+
+    Parameters
+    ----------
+    lattice : VortexLattice
+        The lattice of the case.
+    condition : FlightCondition
+        Flight condition with the body rates.
+    ref_point : numpy.ndarray or None
+        Centre of the rotation [m] (the moment reference point); None is the origin.
+
+    Returns
+    -------
+    numpy.ndarray
+        The onset speed of each strip [m/s].
+    """
+    rp = np.zeros(3) if ref_point is None else np.asarray(ref_point, dtype=float)
+    Vd = (float(condition.V_inf) * freestream_direction(condition.alpha, condition.beta)).reshape(1, 1, 3)
+    U = _onset_at([condition], [0] if has_rates(condition) else [], Vd, lattice.qc_mid, rp)
+    return np.linalg.norm(U[0], axis=-1)
+
+
 def loads_result(
     lattice: VortexLattice,
     *,
@@ -1302,7 +1339,7 @@ def loads_result(
     Cd_profile: np.ndarray | None,
     alpha_eff: np.ndarray,
     alpha_i: np.ndarray,
-    local_lift_factor: float,
+    local_lift_factor: float | np.ndarray,
     Cm_section: np.ndarray,
     strip_force: np.ndarray,
     trefftz_normalwash: np.ndarray,
@@ -1316,7 +1353,10 @@ def loads_result(
     The CPU loads (:func:`compute_loads_batch`) and the GPU pipelines
     (:mod:`ventorum.gpu`) make their result objects here. The strip arrays
     (shape (n_strips,)) are split per surface; ``local_lift_factor`` is
-    ``rho * V_inf`` [kg/(m^2 s)], so the local lift is ``rho V Gamma`` [N/m].
+    ``rho * V_inf`` [kg/(m^2 s)] without body rates, so the local lift is
+    ``rho V_inf Gamma`` [N/m]. With body rates it is the array (n_strips,)
+    ``rho |U_qc|`` (:func:`strip_onset_speed`), so the local lift is
+    ``rho |U_qc| Gamma``, on the same onset as ``Cl_strip``.
     ``Cl_strip`` is the section lift coefficient on the local dynamic
     pressure (``2 Gamma / (|U_qc| c)``, see :class:`SpanwiseResult`) and
     ``Cl_freestream`` the one on the free-stream dynamic pressure
@@ -1351,7 +1391,8 @@ def loads_result(
             Cd_profile=Cd_profile[sl].copy() if Cd_profile is not None else None,
             alpha_eff=alpha_eff[sl].copy(),
             alpha_i=alpha_i[sl].copy(),
-            local_lift=local_lift_factor * strip_gamma[sl],
+            local_lift=(local_lift_factor * strip_gamma[sl] if np.ndim(local_lift_factor) == 0
+                        else np.asarray(local_lift_factor, dtype=float)[sl] * strip_gamma[sl]),
             surface_name=surf.name,
             chord=chord[sl].copy(),
             Cm_section=Cm_section[sl].copy(),
