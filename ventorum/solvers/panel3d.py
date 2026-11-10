@@ -606,10 +606,12 @@ def _spanwise_results_batch(solver, panel_results, conditions, strip_maps, metad
             cm = strip_moment[:, ids, 1] / np.maximum(q[:, None] * area * chord, 1e-300)
             local = lift[:, ids] / np.maximum(width, 1e-300)
             gamma = local / np.maximum(rho * speed, 1e-300)[:, None]
+            # 2 Gamma / (V_inf c) = local_lift / (q_inf c): the free-stream rule of the lattice.
+            cl_ff = 2.0 * gamma / np.maximum(speed[:, None] * chord, 1e-300)
             effective = alpha0 + cl / np.maximum(a0, 1e-9)
             induced = alpha - effective
             arrays = dict(Cl=cl, Cd_i=cdi, Cm_section=cm, local_lift=local,
-                          gamma=gamma, alpha_eff=effective, alpha_i=induced)
+                          gamma=gamma, alpha_eff=effective, alpha_i=induced, Cl_freestream=cl_ff)
             if meta["is_symmetric"] and not has_left:
                 arrays = {key: np.concatenate([a[:, ::-1], a], axis=1)
                           for key, a in arrays.items()}
@@ -741,6 +743,7 @@ def _spanwise_reference(solver, p_res, cond, surface_strip_maps, surface_geom_me
                 surface_name=meta["name"],
                 chord=chord_full,
                 Cm_section=cm_full,
+                Cl_freestream=2.0 * gamma_full / np.maximum(v_inf * chord_full, 1e-300),
             )
         )
 

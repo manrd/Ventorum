@@ -1517,8 +1517,13 @@ class SpanwiseResult:
     Cl_freestream : numpy.ndarray or None
         Section lift coefficient on the free-stream dynamic pressure,
         ``2 Gamma / (V_inf c)`` [-], so that ``Cl_freestream * q_inf * c``
-        is the lift per unit span [N/m] for every case. It differs from
-        ``Cl`` only with body rates. None for a solver that does not give it.
+        is the lift per unit span [N/m] for every case. On a lattice strip
+        it differs from ``Cl`` only with body rates. On a 3D panel strip
+        ``Gamma = local_lift / (rho V_inf)`` and ``Cl`` is the strip
+        pressure lift over ``q_inf`` and the strip area, also with body
+        rates; the two differ only by the ratio of the strip area to width
+        times chord (a small difference on a tapered strip with cosine
+        spacing). None for a solver that does not give it.
     """
 
     y: np.ndarray = field(default_factory=lambda: np.empty(0))
