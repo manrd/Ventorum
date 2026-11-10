@@ -89,6 +89,15 @@ _MEAN_LINE_STRIP_JUMP = 0.3
 #: of the 16 significant float64 digits of the circulation can be lost, and about 6 remain.
 CONDITION_NUMBER_WARNING = 1.0e10
 
+#: Largest float64 relative residual ``||b - A64 x|| / ||b||`` [-] of a unit solution of the float32
+#: GPU 3D panel solve without a trust warning (``details["dispatch"]["float64_relative_residuals"]``).
+#: The relative residual bounds the normwise backward error of the solution (Higham, 2002, chapter 7):
+#: the float32 solution is the exact solution of a system whose matrix and right-hand side differ by
+#: about this relative amount. Measured values are 2.6e-7 to 1.65e-5 (free air and ground effect,
+#: up to 3660 panels); the float32 round-off alone gives about 1e-7 per entry. The same limit applies
+#: in free air and in ground effect (no penalty, a warning only).
+FLOAT32_RESIDUAL_WARNING = 1.0e-4
+
 #: Smallest run of consecutive sign changes of the strip-to-strip step of the spanwise
 #: circulation that the rule ``numerical`` flags as a saw-tooth [-]. A load feature one strip
 #: wide (a narrow control, a gap between controls, the root joint) gives at most two
@@ -1941,6 +1950,58 @@ def lattice_spanwise_stats(lattice: VortexLattice | None, spanwise_list: Sequenc
     return spanwise_stats_batch(strips, arrays)[0]
 
 
+_ONSET_NAMES = ("u", "v", "w", "p", "q", "r")
+
+
+def float32_residual_warnings(residuals: dict | None) -> list[str]:
+    """Return the trust warnings of the float64 residuals of a float32 GPU solve.
+
+    Parameters
+    ----------
+    residuals : dict or None
+        The float64 relative residual ``||b - A64 x|| / ||b||`` [-] of each
+        unit solution of the float32 GPU 3D panel solve, with the unit onset
+        index (0 to 5 for u, v, w, p, q, r) as the key
+        (``details["dispatch"]["float64_relative_residuals"]``). None or an
+        empty dict gives no warning.
+
+    Returns
+    -------
+    list of str
+        One warning when a value is above :data:`FLOAT32_RESIDUAL_WARNING`
+        or is not finite, else an empty list.
+
+    Notes
+    -----
+    The relative residual bounds the normwise backward error of the
+    solution (N. J. Higham, Accuracy and Stability of Numerical
+    Algorithms, 2nd ed., SIAM, 2002, chapter 7): the float32 solution is the
+    exact solution of a system that differs from the float64 system by
+    about this relative amount. The forward error can be larger by the
+    condition number of the system.
+    """
+    if not residuals:
+        return []
+    bad = []
+    for key, value in sorted(residuals.items(), key=lambda kv: int(kv[0])):
+        v = float(value)
+        if not math.isfinite(v) or v > FLOAT32_RESIDUAL_WARNING:
+            k = int(key)
+            name = _ONSET_NAMES[k] if 0 <= k < len(_ONSET_NAMES) else str(k)
+            bad.append((name, v))
+    if not bad:
+        return []
+    text = ", ".join(f"{name} {v:.2e}" for name, v in bad)
+    return [
+        f"Float32 GPU solve: the float64 relative residual ||b - A64 x|| / ||b|| of the unit solution "
+        f"({text}) is above {FLOAT32_RESIDUAL_WARNING:.0e} or not finite. The float32 solution is then "
+        "the exact solution of a system that differs from the float64 system by about that relative "
+        "amount, and the loads can have a relative error of that order times the condition number. "
+        "Normal values are 1e-7 to 2e-5. Check the mesh for thin or nearly coincident panels; a float64 "
+        "solve of the same case gives a reference."
+    ]
+
+
 def evaluate_aerodynamic_trust(
     AR: float,
     surfaces: Sequence[DiscretizedSurface | LiftingSurface] | None = None,
@@ -1973,6 +2034,7 @@ def evaluate_aerodynamic_trust(
     n_span: int | None = None,
     controls: Sequence[tuple[float, float]] | None = None,
     condition_number: float | None = None,
+    float32_residuals: dict | None = None,
 ) -> TrustScore:
     """Evaluate the validity of a solution.
 
@@ -2080,6 +2142,17 @@ def evaluate_aerodynamic_trust(
         circulation can be up to about ``kappa * 1.1e-16``, so about
         ``log10(kappa)`` of the 16 significant float64 digits can be lost
         (about 6 remain at 1e10). None gives no check.
+    float32_residuals : dict or None, optional
+        3D panel method on the GPU in float32 only: the float64 relative
+        residual ``||b - A64 x|| / ||b||`` [-] of each unit solution, with
+        the unit onset index as the key
+        (``details["dispatch"]["float64_relative_residuals"]``). A value
+        above :data:`FLOAT32_RESIDUAL_WARNING` (1e-4), or a value that is
+        not finite, gives a warning (no penalty): the float32 solution is
+        then the solution of a system that differs from the float64 system
+        by more than that relative amount, so the loads can have a
+        relative error of that order times the condition number. None or
+        an empty dict gives no check.
 
     A result with a non-finite coefficient never keeps a trust level above
     LOW: it gets the penalty ``non_finite_result`` and the warning
@@ -2359,6 +2432,9 @@ def evaluate_aerodynamic_trust(
                 f"float64 digits can be lost (about {max(0.0, 16.0 - lost):.0f} remain). Check the geometry "
                 "for coincident or nearly coincident panels and control points."
             )
+
+    # 6c. Float64 residual of the float32 GPU solve (a warning only, no penalty) ----------------
+    warnings.extend(float32_residual_warnings(float32_residuals))
 
     # 7. Near-field and far-field lateral values (a warning only, no penalty) -------------------
     warnings.extend(near_far_lateral_warnings(CY, CY_farfield, Cn_stability, Cn_trefftz))

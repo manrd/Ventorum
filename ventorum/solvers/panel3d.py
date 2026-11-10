@@ -1989,6 +1989,14 @@ class PanelMethodSolver(BaseSolver):
                 # checks and the ground rule "chordwise panels longer than the
                 # gap"; the largest strip chord scales that ground rule, as for
                 # the vortex lattice.
+                # The configuration of this case: its solve records (also the
+                # float64 residuals of a float32 GPU solve for the trust).
+                config_solver = solver
+                config_key, wake_dir, gp = solver._config_key(cond, gnd)
+                if solver.mesh.half and not solver._symmetric_config(wake_dir, gp):
+                    config_solver = solver._full_solver
+                cfg = config_solver._configs[config_key]
+
                 totals.trust = evaluate_aerodynamic_trust(
                     AR=ar,
                     condition=cond,
@@ -2006,6 +2014,7 @@ class PanelMethodSolver(BaseSolver):
                     mesh_stats=mesh_stats,
                     CD_nearfield=totals.CDi_nearfield,
                     n_span=min(int(s.n_panels or settings.n_panels) for s in ac.surfaces),
+                    float32_residuals=dict(cfg.float64_residuals),
                 )
 
                 result = SolverResult(
@@ -2033,11 +2042,6 @@ class PanelMethodSolver(BaseSolver):
                     "dispatch": dict(dispatch),
                     "panel": panel_options,
                 }
-                config_solver = solver
-                config_key, wake_dir, gp = solver._config_key(cond, gnd)
-                if solver.mesh.half and not solver._symmetric_config(wake_dir, gp):
-                    config_solver = solver._full_solver
-                cfg = config_solver._configs[config_key]
                 result.details["dispatch"].update({
                     "ground_solver": cfg.ground_solver,
                     "ground_solver_reason": cfg.ground_solver_reason,
