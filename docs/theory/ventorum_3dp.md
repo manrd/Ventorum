@@ -444,6 +444,17 @@ C_m = +\frac{M_y}{q_\infty S_{\text{ref}} c_{\text{ref}}}, \qquad
 C_n = -\frac{M_z}{q_\infty S_{\text{ref}} b_{\text{ref}}}.
 ```
 
+Spanwise strips. The panels of each spanwise strip $j$ (width $w_j$ in the $y$-$z$ plane, chord $c_j$ at the strip mid span fraction, area $S_j$ from the mean of the edge chords) give the strip lift $L_j = \mathbf{F}_j \cdot \hat{\mathbf{l}}_{\text{wind}}$ [N]. The strip outputs are:
+
+```{math}
+C_{l, j} = \frac{L_j}{q_\infty S_j}, \qquad
+L'_j = \frac{L_j}{w_j}, \qquad
+\Gamma_j = \frac{L'_j}{\rho_\infty V_\infty}, \qquad
+C_{l, j}^{\infty} = \frac{2 \Gamma_j}{V_\infty c_j} = \frac{L'_j}{q_\infty c_j}.
+```
+
+$C_{l, j}^{\infty}$ is `Cl_freestream`, with the same rule as the lattice strips: `Cl_freestream * q_inf * c` is the lift per unit span. $C_{l, j}$ and $C_{l, j}^{\infty}$ differ only by $S_j / (w_j c_j)$: they are equal when the chord at the strip mid span fraction is the mean of the edge chords (constant chord, or a linear taper with uniform spacing). With a taper and a cosine spacing the strip mid span fraction is not the middle of the strip, and the two differ slightly (most at the tip strip). Both coefficients use $q_\infty$, also with body rates. The 3D panel strip $C_l$ does not use the local onset speed $\lVert \mathbf{U}_{qc} \rVert$ at the strip quarter chord, as the lattice strip $C_l$ does (see the [rotation rates page](rotation_rates.md)). The lift of a strip on its local dynamic pressure is $C_{l, j} V_\infty^2 / \lVert \mathbf{U}_{qc, j} \rVert^2$. A yaw rate changes $\lVert \mathbf{U}_{qc} \rVert$ to first order in $r y / V_\infty$, so the two rules then differ by a relative amount of about $2 \lvert r y \rvert / V_\infty$ at the span station $y$.
+
 ### Trefftz-plane induced drag
 
 Far-field induced drag is computed in the Trefftz plane, normal to the wake direction (the body $x$ axis in free air, the free stream in ground effect), from the trailing vortex sheet circulation $\Gamma_s = \mu_{w, s}$. Each strip trailing edge is projected on the plane; its ends carry 2D point vortices $\pm \Gamma_s$, with $+\Gamma_s$ at the end with the larger projection on $\hat{\mathbf{n}}_w \times \hat{\mathbf{d}}$ (strip normal on the upper side, wake direction). In ground effect the image vortices (reflected ends, opposite circulation) add their normal wash. The normal wash $w_{n, s}$ at the midpoint of each segment of length $l_s$ follows from the 2D Biot-Savart law with the squared distance $r^2 + r_c^2$, where the core radius is $r_c = 0.01 \bar{l}$ and $\bar{l}$ the mean segment length:
@@ -461,6 +472,8 @@ Ventorum-3DP supports three computational backends:
 - `"numpy"` (default): Reference vectorised kernel evaluations and SciPy LAPACK LU solves on CPU.
 - `"numba"`: JIT-compiled CPU kernels executing identical formulas with multithreaded loops and SciPy LU factorizations.
 - `"gpu"`: GPU pipeline using NVIDIA Warp kernels for matrix assembly (one thread per panel-target pair) and PyTorch `torch.linalg.lu_factor` / `lu_solve` on the device. Unit onset solves are batched in a single call. Matrix assembly runs in float64; the matrices are kept, factorized and solved in the selected precision (float32 or float64). The gpu backend does no factorization on the CPU and keeps no copy of the matrices on the host. Before each configuration the solver estimates the device memory of its body, mirror and image matrices, systems and factors, and refuses a solve that does not fit (no silent fallback).
+
+Float64 residual of the float32 solve. On the float32 path the system matrix is rounded to float32 after the float64 assembly, so the LU solve gives the solution of a nearby system. After the unit solve of each system, the solver measures the solution against the float64 system: it runs the float64 doublet pair kernels of the assembly again (body and mirror, and the ground image pair), one block of target rows at a time, multiplies each block by the solution in float64 and releases it, then adds the float64 wake strips through the trailing-edge fold. So it accumulates $A_{64} x$ without storing $A_{64}$. The right-hand sides $b = -R$ are the float64 source sums of the assembly. The dispatch record gives $\lVert b_k - A_{64} x_k \rVert_2 / \lVert b_k \rVert_2$ for each unit onset $k$ (`float64_relative_residuals`). The relative residual bounds the normwise backward error of the solution (Higham, 2002, *Accuracy and Stability of Numerical Algorithms*, 2nd ed., SIAM, chapter 7). The cost is about one more pass of the doublet kernel per system (no source kernel and no factorization) and one float64 block of rows (at most 64 MiB) of device memory, which the memory estimate already holds for the float32 assembly. The float64 GPU path and the CPU backends do not compute it. No trust rule reads the value yet.
 
 The solver family layer selects the backend with `panel_backend="auto"` as the lattice solvers do (`ventorum.gpu`: device setting, CPU worker threads, and `use_gpu` with the work of the dense systems and the thresholds of the vortex lattice); the precision on the GPU is the selected precision. On the CPU, "auto" runs the compiled Numba kernels (they agree with the numpy reference kernels to round-off), or the numpy reference kernels when Numba is not installed; the dispatch reason names the CPU kernels.
 
