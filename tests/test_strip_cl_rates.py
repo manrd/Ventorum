@@ -102,6 +102,25 @@ def test_rated_strip_cl_uses_the_local_onset(solver, rate):
     assert np.max(np.abs(local - free)) > 1e-4
 
 
+@pytest.mark.parametrize("solver", ["vlm", "linear", "nonlinear"])
+@pytest.mark.parametrize("rate", list(_RATES))
+def test_rated_strip_induced_drag_and_local_lift_use_the_free_stream(solver, rate):
+    """With a body rate, Cd_i and local_lift stay on the free-stream speed, as the docstrings say.
+
+    The strip Cd_i is the part of the Trefftz-plane induced drag CDi, which
+    uses V_inf, so the strips sum to CDi. local_lift is rho V_inf Gamma.
+    """
+    ac = _tapered()
+    cond = vt.FlightCondition(V_inf=_V, alpha=np.radians(4.0), **_RATES[rate])
+    lattice, res = _solve(solver, ac, cond)
+    gamma = _strip(lattice, res, "gamma")
+    cd_i = _strip(lattice, res, "Cd_i")
+    np.testing.assert_allclose(np.sum(cd_i * lattice.chord * lattice.width) / ac.S_ref, res.totals.CDi,
+                               rtol=1e-10)
+    np.testing.assert_allclose(_strip(lattice, res, "local_lift"), cond.rho * cond.V_inf * gamma,
+                               rtol=1e-12, atol=1e-12)
+
+
 @pytest.mark.parametrize("solver", ["vlm", "linear"])
 @pytest.mark.parametrize("rate", list(_RATES))
 def test_alpha_eff_uses_the_local_strip_cl(solver, rate):

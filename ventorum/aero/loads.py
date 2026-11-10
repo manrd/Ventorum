@@ -36,7 +36,10 @@ Forces and moments from a solved vortex lattice.
   ``alpha_L0 + Cl / a0`` use the dynamic pressure of the onset at the
   quarter chord, ``Cl = 2 Gamma / (|U_qc| c)``; the free-stream value
   ``2 Gamma / (V_inf c)`` is kept as ``Cl_freestream``.
-  The wake and the Trefftz plane stay along the free stream. With one
+  The wake and the Trefftz plane stay along the free stream. Thus the strip
+  induced-drag coefficient ``Cd_i`` stays on the free-stream dynamic
+  pressure: the strips are the parts of the total induced drag ``CDi``,
+  which uses ``V_inf``. The strip ``local_lift`` is ``rho V_inf Gamma``. With one
   chordwise panel, the section moment gets the thin-airfoil term of the
   chordwise change of the rotation velocity (-pi/4 per unit q c / (2 V)).
 
