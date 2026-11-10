@@ -165,6 +165,8 @@ if gpu.available():
 
 On the GPU, the influence matrices are assembled in `float64`, because the on-plane self terms need `float64` coordinates. The factorization, the solve and the post-processing then run in the solve precision (`float32` by default).
 
+In `float32` the solver also checks the unit solutions against the `float64` system. After the solve it runs the `float64` doublet kernels of the assembly again, one block of rows at a time, and computes `||b - A64 x|| / ||b||` for each unit onset. `res_gpu.details["dispatch"]["float64_relative_residuals"]` gives these values, with the onset index as the key (0 to 5 for u, v, w, p, q, r). The check costs about one more pass of the doublet kernel per system and no more matrix memory. The dict is empty for a `float64` or CPU solve. No trust rule reads the value yet.
+
 The GPU device and the solve precision are global choices of `ventorum.gpu`. Read them with `gpu.get_device()` and `gpu.get_precision()`, and set them with `gpu.set_device(...)` and `gpu.set_precision(...)` (for example `"float64"` when you compare with the CPU to round-off). See [Run solves on the GPU](how_to_gpu) for the device selection rules.
 
 ```python

@@ -963,6 +963,82 @@ def doublet_pair_matrix_warp(
     return _doublet_pair(setup, sign, far_ratio, out_dtype, block_rows)
 
 
+def doublet_pair_matvec_warp(
+    points,
+    panels_a,
+    panels_b,
+    sign: float,
+    x,
+    far_ratio: float = 5.0,
+    device=None,
+    block_rows: int | None = None,
+):
+    """Compute ``(C(points, panels_a) + sign * C(points, panels_b)) @ x`` in float64 on a CUDA GPU.
+
+    The doublet pair kernel runs in float64 on blocks of target rows. Each
+    block is multiplied by *x* at once and then released, so the device
+    holds one float64 block (about :data:`BLOCK_BYTES`) and never the
+    full matrix. The matrix entries are the same as those of
+    :func:`doublet_pair_matrix_warp` with float64 arithmetic.
+
+    Parameters
+    ----------
+    points : array_like
+        Target coordinates with shape (P, 3) in m.
+    panels_a : array_like
+        Panel corner coordinates with shape (M, 4, 3) in m.
+    panels_b : array_like or None
+        Second panel set with shape (M, 4, 3) in m, or None.
+    sign : float
+        Factor of the second panel set [-] (+1 or -1).
+    x : torch.Tensor
+        Doublet strengths with shape (M, K) in m^2/s on the CUDA device.
+        They are converted to float64.
+    far_ratio : float, default=5.0
+        Distance-to-diameter ratio of the far-field transition.
+    device : optional
+        CUDA device. None selects the current CUDA device.
+    block_rows : int or None, optional
+        Rows of one block [-]. None uses blocks of about 64 MiB.
+
+    Returns
+    -------
+    torch.Tensor
+        Product with shape (P, K) in float64 on the CUDA device, in m^2/s.
+    """
+    import torch
+    import warp as wp
+
+    setup = _PairSetup(points, panels_a, panels_b, None, device, "float64")
+    x64 = torch.as_tensor(x, device=setup.dev).to(torch.float64)
+    squeeze = x64.ndim == 1
+    if squeeze:
+        x64 = x64.reshape(-1, 1)
+    n_p, n_m = setup.n_targets, setup.n_panels
+    if x64.shape[0] != n_m:
+        raise ValueError(f"x has {x64.shape[0]} rows; the panel set has {n_m} panels.")
+    out = torch.zeros((n_p, x64.shape[1]), dtype=torch.float64, device=setup.dev)
+    if setup.empty:
+        return out.reshape(-1) if squeeze else out
+    kernel = setup.kernels["doublet_pair"]
+    use_far = 0 if np.isinf(far_ratio) else 1
+    tail = [1 if setup.has_b else 0, float(sign), float(far_ratio), use_far]
+    geo = _doublet_args(setup.geom_a) + _doublet_args(setup.geom_b)
+    rows = int(block_rows) if block_rows is not None else max(1, BLOCK_BYTES // (n_m * 8))
+    rows = max(1, min(rows, n_p))
+    w_block = wp.empty((rows, n_m), dtype=wp.float64, device=setup.dev_str)
+    block_t = wp.to_torch(w_block)
+    for r0 in range(0, n_p, rows):
+        r1 = min(r0 + rows, n_p)
+        wp.launch(kernel, dim=(r1 - r0, n_m), inputs=[setup.w_pts, r0, *geo, *tail, w_block],
+                  device=setup.dev_str)
+        wp.synchronize()
+        out[r0:r1] = block_t[: r1 - r0] @ x64
+        torch.cuda.synchronize(setup.dev)
+    del block_t, w_block
+    return out.reshape(-1) if squeeze else out
+
+
 def source_pair_rhs_warp(
     points,
     panels_a,

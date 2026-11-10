@@ -200,7 +200,7 @@ _SOLVER_HELPERS_NUMBA = {"ventorum.panel3d.kernels_numba": ("influence_matrices_
 _SOLVER_HELPERS_GPU = {
     "ventorum.panel3d.gpu": (
         "influence_matrices_device", "doublet_potential_device", "strip_sum", "lu_factor_device",
-        "lu_solve_device",
+        "lu_solve_device", "doublet_pair_matvec_device",
     ),
 }
 
@@ -1679,8 +1679,15 @@ class PanelMethodSolver(BaseSolver):
             solved mesh, ``details["dispatch"]`` the backend, device,
             precision, the factorizations of this call
             (``factorization_count``) and whether the call used a cached
-            solver (``cached_solver``), and
-            ``details["panel"]`` the panel options used (Kutta option,
+            solver (``cached_solver``). On the float32 GPU path,
+            ``details["dispatch"]["float64_relative_residuals"]`` gives
+            ``||b - A64 x|| / ||b||`` [-] per unit onset index (0 to 5
+            for u, v, w, p, q, r): the float32 unit solutions against the
+            float64 system matrix, which the solver assembles again block
+            by block after the solve (about one more assembly pass of the
+            doublet kernel). The dict is empty on the other paths. No
+            trust rule reads it yet.
+            ``details["panel"]`` holds the panel options used (Kutta option,
             chordwise spacing and count, wake length in m, half mesh,
             root-thickness scaling, trailing-edge closure, control side
             edges and fold guard of the mesh). With the solver cache
@@ -2001,6 +2008,7 @@ class PanelMethodSolver(BaseSolver):
                     "matrix_passes": cfg.matrix_passes,
                     "wake_shared": cfg.wake_shared,
                     "relative_residuals": dict(cfg.relative_residuals),
+                    "float64_relative_residuals": dict(cfg.float64_residuals),
                     "fallbacks": copy.deepcopy(cfg.fallbacks),
                 })
                 if coupling is not None:

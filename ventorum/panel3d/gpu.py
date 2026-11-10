@@ -53,6 +53,7 @@ __all__ = [
     "add_wake_influence",
     "check_device_memory",
     "doublet_pair_matrix_device",
+    "doublet_pair_matvec_device",
     "doublet_potential_device",
     "evaluate_condition_on_device",
     "factorize_solve",
@@ -599,6 +600,61 @@ def pair_system_device(
         points, panels_a, panels_b, sign, sigma, far_ratio=far_ratio, device=dev,
         dtype=torch.float64, out_dtype=torch_dtype,
     )
+
+
+def doublet_pair_matvec_device(
+    points,
+    panels_a,
+    panels_b,
+    sign: float,
+    x,
+    *,
+    device=None,
+    far_ratio: float = 5.0,
+):
+    """Compute ``(C_a + sign * C_b) @ x`` in float64 on the device, one block of rows at a time.
+
+    The Warp doublet pair kernel runs in float64, as in the assembly.
+    Each block of rows is multiplied by *x* and released, so the full
+    float64 matrix is never stored. The cost is one more pass of the
+    doublet pair kernel over the matrix.
+
+    Parameters
+    ----------
+    points : numpy.ndarray
+        Target coordinates with shape (P, 3) in m.
+    panels_a : numpy.ndarray
+        Panel corner coordinates with shape (M, 4, 3) in m.
+    panels_b : numpy.ndarray or None
+        Second panel set with shape (M, 4, 3) in m, or None.
+    sign : float
+        Factor of the second panel set [-] (+1 or -1).
+    x : torch.Tensor
+        Doublet strengths with shape (M, K) in m^2/s on the device.
+    device : optional
+        CUDA device. None selects the current CUDA device.
+    far_ratio : float, default=5.0
+        Distance-to-diameter ratio of the far-field transition.
+
+    Returns
+    -------
+    torch.Tensor
+        Product with shape (P, K) in float64 on the device, in m^2/s.
+    """
+    from ventorum.panel3d.kernels_warp import BLOCK_BYTES, doublet_pair_matvec_warp
+
+    dev = resolve_device(device)
+    n_targets = int(np.asarray(points).shape[0])
+    n_sources = int(np.asarray(panels_a).shape[0])
+    need = min(BLOCK_BYTES, 8 * n_targets * n_sources) + 8 * n_targets * N_ONSETS
+    free = free_device_bytes(dev)
+    if need > free:
+        raise MemoryError(
+            f"The gpu panel backend needs about {need / 2**20:.1f} MiB for the float64 "
+            f"residual of the {n_targets} x {n_sources} pair matrix, but only "
+            f"{free / 2**20:.1f} MiB is free on {dev}."
+        )
+    return doublet_pair_matvec_warp(points, panels_a, panels_b, sign, x, far_ratio=far_ratio, device=dev)
 
 
 def add_wake_influence(

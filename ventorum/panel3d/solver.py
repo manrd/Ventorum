@@ -267,6 +267,9 @@ class _Configuration:
     including residual checks and failed attempts. Direct anchors use none.
     Wake sharing records a geometry hit in the ground attitude cache.
     A system value of None marks solved units whose matrix was dropped.
+    Float64 residuals [-] (float32 GPU solves only, unit-onset indices)
+    are ``||b - A64 x|| / ||b||`` of the float32 unit solutions against
+    the float64 system matrix; see ``PanelSolver._float64_unit_residuals``.
     """
 
     key: tuple
@@ -287,6 +290,7 @@ class _Configuration:
     ground_solver_reason: str = ""
     iterations: dict = field(default_factory=dict)
     relative_residuals: dict = field(default_factory=dict)
+    float64_residuals: dict = field(default_factory=dict)
     fallbacks: list = field(default_factory=list)
     matrix_passes: int = 0
     wake_shared: bool = False
@@ -1725,6 +1729,12 @@ class PanelSolver:
             cfg.systems[parity] = lu_info
             if self._viscous_strips is None:
                 self._unit_solutions(cfg, lu_info, rhs, cols, parity)
+                if self._float32_gpu:
+                    res =self._float64_unit_residuals(
+                        cfg, parity, rhs, cfg.unit_mu_t[:, list(cols)],
+                        image if in_ground else None, image_m if in_ground else None,
+                    )
+                    cfg.float64_residuals.update(zip(cols, res.tolist()))
             elif parity in ("sym", "full"):
                 self._unit_solutions(cfg, lu_info, rhs[:, :len(cols)], cols, parity)
                 cfg.viscous_units = self._lu_solve(lu_info, -rhs[:, len(cols):])
@@ -1764,6 +1774,78 @@ class PanelSolver:
             return
         for idx, k in enumerate(cols):
             cfg.unit_mu[:, k] = self._lu_solve(lu_info, -rhs[:, idx])
+
+    @property
+    def _float32_gpu(self) -> bool:
+        """Return True for the gpu backend with a float32 factorization and solve."""
+        if self.backend != "gpu":
+            return False
+        import torch
+
+        return self._gpu_dtype == torch.float32
+
+    def _float64_unit_residuals(self, cfg, parity, rhs, x, image=None, image_m=None) -> np.ndarray:
+        """Return the float64 relative residuals of unit solutions of one system [-].
+
+        The float32 GPU path rounds the system matrix to float32 before
+        the LU factorization. This check measures the error of the float32
+        solution against the float64 system: it runs the float64 doublet
+        pair kernels of the assembly again, one block of rows at a time
+        (see :func:`ventorum.panel3d.gpu.doublet_pair_matvec_device`), and
+        accumulates ``A64 x`` in float64 without storing ``A64``. The
+        system is ``A64 = C_body + sign * C_mirror`` (+ the ground image
+        pair) + the fold of the float64 wake strips on the trailing-edge
+        columns. The cost is about one more pass of the doublet kernel per
+        system (no source kernel, no factorization).
+
+        Parameters
+        ----------
+        cfg : _Configuration
+            Configuration of the system (wake strips must be present).
+        parity : str
+            ``"full"``, ``"sym"`` or ``"asym"``.
+        rhs : torch.Tensor
+            Float64 source sums ``R`` with shape (N, K) in m^2/s per unit
+            onset; the right-hand sides are ``b = -R``.
+        x : torch.Tensor
+            Unit solutions with shape (N, K) in m^2/s per unit onset.
+        image, image_m : numpy.ndarray or None
+            Ground image panels of the body and of its mirror with shape
+            (N, 4, 3) in m, or None in free air.
+
+        Returns
+        -------
+        numpy.ndarray
+            ``||b_k - A64 x_k|| / ||b_k||`` per column k [-]. A column
+            with ``||b_k|| = 0`` gives ``||A64 x_k||``.
+        """
+        import torch
+
+        from ventorum.panel3d import gpu as gpu_mod
+
+        sign, _ = self._parity_sign_cols(parity)
+        x64 = x.to(torch.float64)
+        panels_m = self._body_verts_m if self.mesh.half else None
+        ax = gpu_mod.doublet_pair_matvec_device(
+            self.centroids, self.body_verts, panels_m, sign, x64,
+            device=self._gpu_device, far_ratio=self.far_ratio,
+        )
+        if image is not None:
+            ax += gpu_mod.doublet_pair_matvec_device(
+                self.centroids, image, image_m, sign, x64,
+                device=self._gpu_device, far_ratio=self.far_ratio,
+            )
+        if len(cfg.wake.panels) > 0:
+            d64 = torch.as_tensor(self._strip_system(cfg, parity), dtype=torch.float64, device=self._gpu_device)
+            up = torch.as_tensor(np.asarray(cfg.wake.wake_up, dtype=np.int64), device=self._gpu_device)
+            lo = torch.as_tensor(np.asarray(cfg.wake.wake_lo, dtype=np.int64), device=self._gpu_device)
+            # The fold adds strip s to column up_s and subtracts it from column lo_s.
+            ax += d64 @ (x64.index_select(0, up) - x64.index_select(0, lo))
+        b = -rhs.to(torch.float64)
+        norm_r = torch.linalg.vector_norm(b - ax, dim=0)
+        norm_b = torch.linalg.vector_norm(b, dim=0)
+        rel = torch.where(norm_b > 0.0, norm_r / torch.where(norm_b > 0.0, norm_b, 1.0), norm_r)
+        return rel.cpu().numpy()
 
     def _full_unit_mu(self, unit_mu: np.ndarray) -> np.ndarray:
         """Return the unit doublets on the full mesh with shape (Nf, 6)."""
