@@ -1521,8 +1521,11 @@ class SpanwiseResult:
     alpha_eff, alpha_i : numpy.ndarray
         Effective and induced angle of attack of each strip [rad].
     local_lift : numpy.ndarray
-        Lift per unit span [N/m], ``rho V_inf Gamma`` on a lattice strip.
-        It uses the free-stream speed also with body rates.
+        Lift per unit span [N/m]. On a lattice strip it is
+        ``rho |U_qc| Gamma``, with the same onset ``U_qc`` as ``Cl``, so
+        that ``local_lift = Cl (rho |U_qc|^2 / 2) c``. Without body rates
+        it is ``rho V_inf Gamma``. On a 3D panel strip it is the strip
+        pressure lift per unit width.
     chord : numpy.ndarray or None
         Strip chord [m].
     Cm_section : numpy.ndarray or None
@@ -1530,8 +1533,10 @@ class SpanwiseResult:
     Cl_freestream : numpy.ndarray or None
         Section lift coefficient on the free-stream dynamic pressure,
         ``2 Gamma / (V_inf c)`` [-], so that ``Cl_freestream * q_inf * c``
-        is the lift per unit span [N/m] for every case. On a lattice strip
-        it differs from ``Cl`` only with body rates. On a 3D panel strip
+        is ``rho V_inf Gamma`` [N/m] for every case. On a lattice strip
+        it differs from ``Cl`` only with body rates; then
+        ``Cl_freestream * q_inf * c`` differs from ``local_lift`` by the
+        factor ``V_inf / |U_qc|``. On a 3D panel strip
         ``Gamma = local_lift / (rho V_inf)`` and ``Cl`` is the strip
         pressure lift over ``q_inf`` and the strip area, also with body
         rates; the two differ only by the ratio of the strip area to width
