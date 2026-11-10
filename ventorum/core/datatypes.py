@@ -1541,9 +1541,16 @@ class SpanwiseResult:
         factor ``V_inf / |U_qc|``. On a 3D panel strip
         ``Gamma = local_lift / (rho V_inf)``, so ``Cl_freestream`` stays on
         ``V_inf`` also with body rates, and ``Cl`` differs from it by the
-        factor ``(V_inf / |U_qc|)^2`` with body rates and by the ratio of
-        the strip area to width times chord. None for a solver that does
-        not give it.
+        factor ``(V_inf / |U_qc|)^2`` with body rates and by the ratio
+        ``area / (width * chord)``: the strip area is from the mean of the
+        edge chords, the chord is at the strip mid span fraction. The ratio
+        is 1 for a constant chord and for a linear taper with uniform
+        spacing. With a taper and cosine spacing it is not 1: 0.36 % at the
+        tip strip of a taper 0.4 wing with cosine spacing (16 strips per
+        semi-span). This difference is kept: ``Cl`` is the pressure lift of
+        the real strip area, ``Cl_freestream`` keeps
+        ``Cl_freestream * q_inf * c = rho V_inf Gamma``. None for a solver
+        that does not give it.
     """
 
     y: np.ndarray = field(default_factory=lambda: np.empty(0))
