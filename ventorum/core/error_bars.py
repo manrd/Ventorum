@@ -6,8 +6,10 @@ coefficient with the Grid Convergence Index (GCI) of Roache (1998). The
 observed order of convergence comes from the fixed-point iteration of
 Celik et al. (2008) for non-constant refinement ratios. The convergence
 states (monotonic, oscillatory, divergent) follow Oberkampf and Roy
-(2010). The oscillatory rule, the order limits 0.5 and 4.0, and the
-"roundoff" and "not_converged_order" rules are project decisions
+(2010); monotonic values are divergent only when the equation of Celik
+et al. (2008) with the actual ratios has no positive order. The
+oscillatory rule, the order limits 0.5 and 4.0, and the "roundoff" and
+"not_converged_order" rules are project decisions
 (conservative choices), not results of these sources.
 
 Index 1 is always the FINE mesh: ``f1`` and ``N1`` are the fine-level
@@ -403,6 +405,52 @@ def refinement_ratios(levels: list[int]) -> tuple[float, float]:
     return (n1 / n2, n2 / n3)
 
 
+#: Largest observed order that the bracketing solve of
+#: :func:`observed_order` looks for [-]. A larger order is not found.
+ORDER_SEARCH_MAX = 100.0
+
+
+def monotonic_ratio_limit(r21: float, r32: float) -> float:
+    """Return the limit of ``R = eps21 / eps32`` for a positive observed order.
+
+    For monotonic values (``R > 0``) the equation of Celik et al. (2008),
+    with index 1 = fine, is::
+
+        eps32 / eps21 = g(p) = r21^p * (r32^p - 1) / (r21^p - 1)
+
+    The function g increases strictly with p (its logarithmic derivative
+    is ``a e^(a p) / (e^(a p) - 1) - b / (e^(b p) - 1) > 0`` with
+    ``a = ln r32`` and ``b = ln r21``), from ``ln(r32) / ln(r21)`` at
+    ``p -> 0`` to infinity. So a positive order exists only when
+    ``R < ln(r21) / ln(r32)``. With a constant ratio the limit is 1.
+
+    Parameters
+    ----------
+    r21 : float
+        Refinement ratio of fine to medium (N1 / N2) [-].
+    r32 : float
+        Refinement ratio of medium to coarse (N2 / N3) [-].
+
+    Returns
+    -------
+    float
+        ``ln(r21) / ln(r32)`` [-].
+    """
+    return math.log(float(r21)) / math.log(float(r32))
+
+
+def _log_g(p: float, r21: float, r32: float) -> float | None:
+    """Return ln g(p) of :func:`monotonic_ratio_limit`, or None on overflow."""
+    try:
+        a1 = math.expm1(p * math.log(r21))
+        a2 = math.expm1(p * math.log(r32))
+    except OverflowError:
+        return None
+    if not (math.isfinite(a1) and math.isfinite(a2)) or a1 <= 0.0 or a2 <= 0.0:
+        return None
+    return p * math.log(r21) + math.log(a2) - math.log(a1)
+
+
 def observed_order(
     f1: float,
     f2: float,
@@ -419,8 +467,21 @@ def observed_order(
         p = | ln|eps32 / eps21| + q(p) | / ln(r21)
         q(p) = ln((r21^p - s) / (r32^p - s))
 
-    The iteration starts from ``p = ln|eps32 / eps21| / ln(r21)`` (q = 0),
-    runs at most 100 times and stops when the change of p is below 1e-10.
+    The iteration starts from ``p = |ln|eps32 / eps21|| / ln(r21)``
+    (q = 0), runs at most 100 times and stops when the change of p is
+    below 1e-10.
+
+    For monotonic values (``s = +1``) the order is the positive root of the
+    equation without the absolute value,
+    ``ln|eps32 / eps21| + q(p) = p ln(r21)``. That root exists only when
+    ``R = eps21 / eps32`` is below :func:`monotonic_ratio_limit`; else the
+    function returns None (the change does not fall at a positive order).
+    A fixed point of the iteration that is not that root (the absolute
+    value changed its sign) is not accepted. When the iteration does not
+    converge (with ``r32`` much larger than ``r21`` the fixed-point map is
+    not a contraction), the same equation is solved by bisection on
+    ``0 < p <= ORDER_SEARCH_MAX``; it has one root because g increases
+    strictly with p.
 
     Parameters
     ----------
@@ -438,8 +499,9 @@ def observed_order(
     Returns
     -------
     float or None
-        The observed order, or None when the iteration does not converge
-        or gives a non-finite value.
+        The observed order, or None when there is no positive order, the
+        iteration and the bisection do not find it, or a value is not
+        finite.
     """
     eps21 = float(f2) - float(f1)
     eps32 = float(f3) - float(f2)
@@ -463,7 +525,10 @@ def observed_order(
     log_abs = math.log(abs(ratio))
     if not math.isfinite(log_abs):
         return None
-    p = log_abs / log_r21
+    if s > 0.0 and 1.0 / ratio >= monotonic_ratio_limit(r21, r32):
+        # No positive root: the change does not fall at a positive order.
+        return None
+    p = abs(log_abs) / log_r21
     if not math.isfinite(p):
         return None
     for _ in range(100):
@@ -471,21 +536,44 @@ def observed_order(
             a1 = r21**p - s
             a2 = r32**p - s
         except OverflowError:
-            return None
+            break
         if not (math.isfinite(a1) and math.isfinite(a2)):
-            return None
+            break
         if a1 <= 0.0 or a2 <= 0.0:
-            return None
+            break
         q = math.log(a1 / a2)
         if not math.isfinite(q):
-            return None
+            break
         p_new = abs(log_abs + q) / log_r21
         if not math.isfinite(p_new):
-            return None
+            break
         if abs(p_new - p) < 1e-10:
-            return float(p_new)
+            if s < 0.0:
+                return float(p_new)
+            # Accept only the root of the equation without the absolute value.
+            if log_abs + q > 0.0:
+                return float(p_new)
+            break
         p = p_new
-    return None
+    if s < 0.0:
+        return None
+    # Bisection on ln g(p) = ln(eps32 / eps21) (monotonic values only).
+    lo, hi = 0.0, ORDER_SEARCH_MAX
+    g_hi = _log_g(hi, r21, r32)
+    if g_hi is None or g_hi < log_abs:
+        return None
+    for _ in range(200):
+        mid = 0.5 * (lo + hi)
+        g_mid = _log_g(mid, r21, r32)
+        if g_mid is None:
+            return None
+        if g_mid < log_abs:
+            lo = mid
+        else:
+            hi = mid
+        if hi - lo < 1e-12 * max(1.0, hi):
+            break
+    return float(0.5 * (lo + hi))
 
 
 def richardson_extrapolate(f1: float, f2: float, r21: float, p_used: float) -> float:
@@ -520,21 +608,28 @@ def coefficient_error_bar(
 
     Classify the convergence with ``R = eps21 / eps32`` where
     ``eps21 = f2 - f1`` and ``eps32 = f3 - f2`` (index 1 is the fine
-    mesh):
+    mesh), and, for monotonic values, with the observed order of the
+    actual refinement ratios ``r21`` and ``r32`` (Celik et al. 2008, see
+    :func:`observed_order`). The limit ``R_lim = ln(r21) / ln(r32)``
+    (:func:`monotonic_ratio_limit`) is the value of R at an order that
+    goes to zero; it is 1 for a constant ratio:
 
     * ``"roundoff"``: the changes are at round-off level. The half-width
       is ``3 * max(|eps21|, |eps32|)``.
-    * ``"monotonic"`` (``0 < R < 1``): the observed order comes from
-      :func:`observed_order`. With ``0.5 <= p <= 4.0`` the safety factor
-      is 1.25, else it is 3.0 with the order clipped to [0.5, 4.0]. The
-      half-width is ``Fs * |eps21| / (r21^p_used - 1)``.
+    * ``"monotonic"`` (``0 < R < R_lim``, and the order is found): with
+      ``0.5 <= p <= 4.0`` the safety factor is 1.25, else it is 3.0 with
+      the order clipped to [0.5, 4.0]. The half-width is
+      ``Fs * |eps21| / (r21^p_used - 1)``.
     * ``"oscillatory"`` (``R < 0``): the half-width is
       ``3.0 * 0.5 * (max - min)`` of the three values (project decision).
-    * ``"divergent"`` (``R >= 1``, or ``eps32 = 0`` with ``eps21 != 0``):
-      the change grows with refinement, so there is no interval.
-    * ``"not_converged_order"``: monotonic values (``0 <= R < 1``) whose
-      observed-order iteration fails. The half-width is ``3.0 * |eps21|``
-      (a simple conservative project rule). At ``R = 0`` (``eps21 = 0``)
+    * ``"divergent"`` (``R >= R_lim``, or ``eps32 = 0`` with
+      ``eps21 != 0``): the equation of Celik et al. has no positive order,
+      the change does not fall with refinement, so there is no interval.
+      With unequal ratios a sequence with ``1 <= R < R_lim`` (possible
+      when ``r21 > r32``) converges at an order below 1 and is monotonic.
+    * ``"not_converged_order"``: monotonic values (``0 <= R < R_lim``)
+      whose order is not found. The half-width is ``3.0 * |eps21|`` (a
+      simple conservative project rule). At ``R = 0`` (``eps21 = 0``)
       this rule gives zero, so the half-width is
       ``3.0 * max(|eps21|, |eps32|)`` there.
 
@@ -636,7 +731,9 @@ def coefficient_error_bar(
             notes=notes,
         )
 
-    if big_r >= 1.0:
+    # Divergent: no positive order of the Celik et al. (2008) equation with
+    # the actual ratios (R at or above its limit for p -> 0).
+    if big_r >= monotonic_ratio_limit(r21, r32):
         layer = LayerContribution(
             half_width=None,
             state="divergent",

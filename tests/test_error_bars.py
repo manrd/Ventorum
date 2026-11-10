@@ -27,6 +27,7 @@ from ventorum.core.error_bars import (
     ErrorBar,
     coefficient_error_bar,
     mesh_levels,
+    monotonic_ratio_limit,
     numerical_error_bars,
     observed_order,
     refinement_ratios,
@@ -53,6 +54,69 @@ def test_observed_order_recovers_p_with_unequal_ratios():
         assert layer.state == "monotonic"
         assert layer.safety_factor == pytest.approx(1.25)
         assert layer.f_extrapolated == pytest.approx(1.7, abs=1e-10)
+
+
+@pytest.mark.parametrize("levels", [[48, 24, 12], [48, 32, 24]], ids=["constant_ratio", "ratios_1.5_1.33"])
+@pytest.mark.parametrize("p", [1.0, 2.0])
+def test_order_and_state_with_constant_and_unequal_ratios(levels, p):
+    # f(h) = 0.43 - 0.2 * h**p, h = 1 / N: a known first- or second-order error.
+    # Regression: with the levels 48, 32, 24 a first-order sequence has
+    # R = eps21 / eps32 = 1 exactly, and the old rule R >= 1 marked it
+    # divergent. The order comes from the Celik et al. (2008) equation
+    # with the actual ratios.
+    f1, f2, f3 = _power_values(0.43, -0.2, p, levels)
+    r21, r32 = refinement_ratios(levels)
+    assert observed_order(f1, f2, f3, r21, r32) == pytest.approx(p, abs=1e-8)
+    layer = coefficient_error_bar("CL", [f1, f2, f3], levels).layers["numerical"]
+    assert layer.state == "monotonic"
+    assert layer.observed_order == pytest.approx(p, abs=1e-8)
+    assert layer.f_extrapolated == pytest.approx(0.43, abs=1e-10)
+    assert layer.safety_factor == pytest.approx(1.25)
+
+
+def test_order_below_one_with_unequal_ratios_is_monotonic():
+    # Levels 48, 32, 24 and an order of 0.884: R = eps21 / eps32 > 1, but
+    # below the limit ln(r21) / ln(r32), so the order is positive.
+    levels = [48, 32, 24]
+    r21, r32 = refinement_ratios(levels)
+    f1, f2, f3 = _power_values(0.43, -0.2, 0.884, levels)
+    big_r = (f2 - f1) / (f3 - f2)
+    assert 1.0 < big_r < monotonic_ratio_limit(r21, r32)
+    layer = coefficient_error_bar("CL", [f1, f2, f3], levels).layers["numerical"]
+    assert layer.state == "monotonic"
+    assert layer.observed_order == pytest.approx(0.884, abs=1e-8)
+    assert layer.safety_factor == pytest.approx(1.25)
+
+
+@pytest.mark.parametrize("levels", [[48, 24, 12], [48, 32, 24], [36, 24, 12]])
+def test_growing_change_stays_divergent_with_actual_ratios(levels):
+    # f(h) = 1 + 0.3 * h**(-0.2): the change grows with refinement. With
+    # the levels 36, 24, 12 (r21 = 1.5, r32 = 2) the old iteration found a
+    # false order of 0.43 (a root where the absolute value changes sign).
+    f1, f2, f3 = _power_values(1.0, 0.3, -0.2, levels)
+    r21, r32 = refinement_ratios(levels)
+    assert observed_order(f1, f2, f3, r21, r32) is None
+    bar = coefficient_error_bar("CL", [f1, f2, f3], levels)
+    assert bar.layers["numerical"].state == "divergent"
+    assert bar.interval_low is None
+    assert DIVERGENT_NOTE in bar.notes
+
+
+def test_order_found_when_the_fixed_point_map_is_not_a_contraction():
+    # Levels 30, 24, 12 (r21 = 1.25, r32 = 2): the fixed-point iteration of
+    # Celik et al. (2008) does not converge, so the bisection of the same
+    # equation gives the order. The old code gave "not_converged_order".
+    levels = [30, 24, 12]
+    r21, r32 = refinement_ratios(levels)
+    for p in (0.5, 1.0, 2.0, 3.0):
+        f1, f2, f3 = _power_values(1.7, 0.3, p, levels)
+        assert observed_order(f1, f2, f3, r21, r32) == pytest.approx(p, abs=1e-8)
+        assert coefficient_error_bar("CL", [f1, f2, f3], levels).layers["numerical"].state == "monotonic"
+
+
+def test_oscillatory_state_with_unequal_ratios():
+    bar = coefficient_error_bar("CL", [0.4298, 0.4273, 0.4291], [48, 32, 24])
+    assert bar.layers["numerical"].state == "oscillatory"
 
 
 def test_gci_formula():
