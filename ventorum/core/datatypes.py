@@ -1506,7 +1506,9 @@ class SpanwiseResult:
         quarter-chord mid-point of the strip. Without body rates
         ``|U_qc| = V_inf`` and ``Cl`` equals ``Cl_freestream``. The
         effective angle of the linear section, ``alpha_L0 + Cl / a0``, uses
-        this value.
+        this value. On a 3D panel strip ``Cl`` is the strip pressure lift
+        over ``q_inf`` and the strip area, also with body rates (see
+        ``Cl_freestream``).
     Cd_i, Cd_profile : numpy.ndarray
         Section induced-drag and profile-drag coefficients [-]. On a
         lattice strip ``Cd_i`` is the strip part of the Trefftz-plane
