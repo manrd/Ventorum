@@ -363,7 +363,11 @@ SETTINGS_PROPS: dict[str, dict[str, Any]] = {
                                         "estimate, a lower bound within about 3x). Default false. Only the "
                                         "vortex-lattice and linear lifting-line solves on the CPU give it; "
                                         "other solvers and the GPU give null. Above 1e10 the trust gets a "
-                                        "warning (about 10 of the 16 float64 digits can be lost)."},
+                                        "warning (about 10 of the 16 float64 digits can be lost). "
+                                        "ventorum_wing_analysis gives it in metrics.condition_number, "
+                                        "ventorum_polar_sweep in each row of polar_table and as "
+                                        "polar_summary.condition_number_max, ventorum_trim as "
+                                        "condition_number of the reported trim point."},
 }
 
 DETAIL_LEVEL = {"type": "string", "enum": ["summary", "standard", "full"],
