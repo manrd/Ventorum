@@ -204,8 +204,10 @@ class Ventorum2DPolarSource:
     ncrit : float
         Critical amplification exponent [-] for transition. Default is 9.0.
     xtr : tuple of (float, float)
-        Forced transition locations (upper, lower) as fraction of chord [-].
-        Default is (1.0, 1.0).
+        Forced transition locations (upper, lower) as fraction of chord [-]:
+        the x/c of ``xtr`` of :func:`solve_viscous` (projection on the
+        chord line of the reference geometry, over the reference chord
+        ``chord_ref``). Default is (1.0, 1.0).
     backend : {"numpy"}
         Computational backend. Default is "numpy".
 

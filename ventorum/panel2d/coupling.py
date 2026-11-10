@@ -71,7 +71,9 @@ class CouplingSystem:
         x/c = (p - le) . e / chord_ref with e the unit vector from the
         leading edge le to the trailing-edge midpoint te. It is 0 at the
         leading edge and 1 at the trailing-edge midpoint for the default
-        reference chord |te - le|, and it does not change when the
+        reference chord |te - le|. The divisor is chord_ref, not
+        |te - le|: with an explicit chord_ref the trailing-edge midpoint
+        is at x/c = |te - le| / chord_ref. It does not change when the
         section is rotated. The forced transition point (xtr) and the
         reported transition positions use this measure. The reference
         geometry depends on the input: a flapped
