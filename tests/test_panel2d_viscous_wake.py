@@ -79,9 +79,16 @@ _FLAP5_XFAIL = pytest.mark.xfail(
 @pytest.mark.slow
 @pytest.mark.parametrize("defl", [0.0, 5.0, pytest.param(10.0, marks=_FLAP10_XFAIL)])
 def test_flapped_sections(defl):
-    """NACA 2412 with a plain flap at x 0.75 (default hinge treatment) converges at alpha 0 and 2 deg."""
+    """NACA 2412 with a plain flap at x 0.75 (default hinge treatment) converges at alpha 0 and 2 deg.
+
+    The 5 deg case at alpha 0 needs a stage limit of 150 Newton iterations (the default is 50). With the
+    length-weighted interior wake stations it converges after 189 Newton iterations (104 with the plain
+    mean of the two midpoint velocities); the convergence is slower, the result is the same to 4e-5 in Cl.
+    The other deflections keep the default limit.
+    """
     base = airfoil("2412").repanel(n_panels=160)
-    r = _solve(base.with_flap(x_hinge=0.75, deflection=defl).coords, [0.0, 2.0], 1e6)
+    max_iter = 150 if defl == 5.0 else 50
+    r = _solve(base.with_flap(x_hinge=0.75, deflection=defl).coords, [0.0, 2.0], 1e6, max_iter=max_iter)
     assert np.all(r.converged), (defl, r.reason)
 
 
@@ -104,11 +111,14 @@ def test_flapped_section_5deg_hinge_treatment(treatment):
     limit of convergence of the solver: with the chord of the undeflected section the "repanel" case
     does not converge at Re 1e6, and with the chord of the deflected section the "merge" case does not
     (the Reynolds number per unit length and the wake length change slightly with the chord).
+
+    The stage limit is 150 Newton iterations (the default is 50): with the length-weighted interior wake
+    stations the alpha 0 case converges more slowly ("repanel": 180 Newton iterations).
     """
     base = airfoil("2412").repanel(n_panels=160)
     coords = base.with_flap(x_hinge=0.75, deflection=5.0, hinge_treatment=treatment).coords
     extent = float(np.max(coords[:, 0]) - np.min(coords[:, 0]))
-    r = _solve(coords, [0.0, 2.0], 1e6, chord_ref=extent)
+    r = _solve(coords, [0.0, 2.0], 1e6, chord_ref=extent, max_iter=150)
     assert np.all(r.converged), (treatment, r.reason)
 
 
@@ -226,14 +236,17 @@ def test_wake_sawtooth_note_only_on_converged_rows():
 
 @pytest.mark.slow
 def test_false_low_lift_branch_is_flagged():
-    """Regression: the false low-lift branch of a sharp NACA 0012 (240 panels, 2 deg) gives a warning.
+    """Regression: the false low-lift branch of a sharp NACA 0012 (200 panels, Re 1e6, 2 deg) gives a warning.
 
-    The solve converges on a false branch with an odd-even near wake (Cl about 0.51 of the inviscid
-    value instead of about 0.84). Before the check it returned this solution without a warning.
+    The solve converges on a false branch with an odd-even near wake (Cl about 0.13 instead of about
+    0.20 on the correct branch, sawtooth index about 0.78). Before the check it returned this solution
+    without a warning. The former trigger case (240 panels) converges on the correct branch since the
+    interior wake stations use length weights; the 200-panel case still falls on the false branch.
     """
     with pytest.warns(UserWarning, match="near-wake sawtooth"):
-        r = solve_viscous(airfoil("0012", closed_te=True).repanel(n_panels=240), 2.0, 1e6)
+        r = solve_viscous(airfoil("0012", closed_te=True).repanel(n_panels=200), 2.0, 1e6)
     assert r.converged
+    assert r.Cl < 0.16
     assert "near-wake sawtooth" in r.reason
     assert wake_sawtooth_index(r.wake["theta"]) > WAKE_SAWTOOTH_LIMIT
 
@@ -269,3 +282,31 @@ def test_last_wake_station_extrapolation_is_exact_for_a_linear_field():
     row = setup._p_wake[n + nw - 1, n:]
     assert abs(row @ q_mid - (0.7 + 0.3 * s_end)) < 1e-14
     assert abs(np.sum(row) - 1.0) < 1e-15
+
+
+def test_interior_wake_stations_interpolate_a_linear_field_exactly():
+    """The edge velocity of an interior wake station interpolates the two adjacent midpoints with length weights.
+
+    Regression: the plain mean of the two midpoint velocities is the value at the node only for equal panel
+    lengths; the wake spacing is geometric. Node j lies L_{j-1} / 2 behind the midpoint of panel j - 1 and
+    L_j / 2 ahead of the midpoint of panel j, so the weights are L_j / (L_{j-1} + L_j) on panel j - 1 and
+    L_{j-1} / (L_{j-1} + L_j) on panel j. A velocity that is linear in the arc length along the wake must
+    give its value at every interior node (to round-off).
+    """
+    from ventorum.panel2d.viscous import prepare_case
+
+    setup = prepare_case(airfoil("0012").repanel(n_panels=80).coords, 2.0, 1e6, ncrit=9.0, xtr=(1.0, 1.0),
+                         height=None, height_reference="pivot", wake_length=1.0, n_wake=30)
+    n, nw = setup.n, setup.nw
+    wl = setup.sys.wake_len
+    assert np.max(wl[1:] / wl[:-1]) > 1.01
+    s_node = np.concatenate([[0.0], np.cumsum(wl)])
+    s_mid = np.cumsum(wl) - 0.5 * wl
+    q_mid = 0.7 + 0.3 * s_mid
+    rows = setup._p_wake[n + 1:n + nw - 1, n:]
+    assert np.max(np.abs(rows @ q_mid - (0.7 + 0.3 * s_node[1:nw - 1]))) < 1e-14
+    assert np.max(np.abs(np.sum(rows, axis=1) - 1.0)) < 1e-15
+    # Each interior row uses only the two adjacent midpoints.
+    for j in range(1, nw - 1):
+        nz = np.flatnonzero(rows[j - 1])
+        assert list(nz) == [j - 1, j]

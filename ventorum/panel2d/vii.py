@@ -166,9 +166,16 @@ class CaseSetup:
         P = np.zeros((self.n_st, self.n + self.nw - 1))
         n, nw = self.n, self.nw
         P[n, 0] = 1.0
+        # Linear interpolation at the interior wake nodes. Node j lies
+        # L_{j-1} / 2 behind the midpoint of panel j - 1 and L_j / 2 ahead of
+        # the midpoint of panel j, so the weights are L_j / (L_{j-1} + L_j)
+        # on panel j - 1 and L_{j-1} / (L_{j-1} + L_j) on panel j (0.5 and
+        # 0.5 for equal lengths only; the wake spacing is geometric).
+        wl = s.wake_len
         for j in range(1, nw - 1):
-            P[n + j, n + j - 1] = 0.5
-            P[n + j, n + j] = 0.5
+            l_up, l_dn = wl[j - 1], wl[j]
+            P[n + j, n + j - 1] = l_dn / (l_up + l_dn)
+            P[n + j, n + j] = l_up / (l_up + l_dn)
         # Linear extrapolation from the midpoints of the last two wake panels
         # to the wake end. The midpoints are L_last / 2 and L_last + L_prev / 2
         # upstream of the end, so the weights are 1 + f and -f with
@@ -347,10 +354,11 @@ def _coupling_matrices(setup: CaseSetup, st: CaseState):
 
     Station edge velocities: sign * gamma at the airfoil nodes, gamma of
     the upper trailing-edge node at the first wake station (equal to the
-    lower one by the Kutta condition), the mean of the two adjacent
-    wake-panel midpoint velocities at the other wake stations and a linear
-    extrapolation from the last two midpoints (weights from the panel
-    lengths) at the last one.
+    lower one by the Kutta condition), the linear interpolation of the two
+    adjacent wake-panel midpoint velocities (weights from the panel
+    lengths) at the interior wake stations and a linear extrapolation from
+    the last two midpoints (weights from the panel lengths) at the last
+    one.
     """
     P, B = _p_and_b(setup, st)
     return P @ setup.base, P @ setup.sens @ B

@@ -20,7 +20,13 @@ For each angle (and height) the inviscid matrix is factorized once. The solver f
 
 The stagnation point lies on the panel where the total $\gamma$ changes sign, by linear interpolation. The upper stations run from it over the upper nodes to the trailing edge, the lower stations likewise, and the wake stations from the trailing edge downstream. A node closer to the stagnation point than 0.1 of its next interval is not a station (its mass defect is zero; constant `STAGNATION_DROP`): next to the stagnation point $u_e$ is nearly zero and the logarithmic differences of the next interval would be ill-conditioned.
 
-Station edge velocities: $u_e = \pm\gamma$ at the airfoil nodes (sign of the side), $\gamma$ of the trailing-edge node at the first wake station (both trailing-edge speeds are equal by the Kutta condition), the mean of the two adjacent wake-panel midpoint velocities at the other wake stations and a linear extrapolation at the last one. Source strengths: on an airfoil panel $\sigma L$ = ($m$ where the layer leaves the panel) - ($m$ where it enters), on the stagnation panel both ends are exits, on a wake panel $\sigma L = m_{down} - m_{up}$. The gap panel of a blunt edge carries no viscous source: the gap thickness is the displacement of its inviscid gap source. Together:
+Station edge velocities: $u_e = \pm\gamma$ at the airfoil nodes (sign of the side), $\gamma$ of the trailing-edge node at the first wake station (both trailing-edge speeds are equal by the Kutta condition), the linear interpolation of the two adjacent wake-panel midpoint velocities $q_{j-1}$ and $q_j$ at the interior wake stations and a linear extrapolation from the last two midpoints at the last one. The wake panel lengths grow geometrically, so the weights come from the lengths: wake node $j$ lies $L_{j-1}/2$ behind the midpoint of panel $j-1$ and $L_j/2$ ahead of the midpoint of panel $j$, which gives
+
+```{math}
+u_{e,j} = \frac{L_j}{L_{j-1} + L_j}\,q_{j-1} + \frac{L_{j-1}}{L_{j-1} + L_j}\,q_j .
+```
+
+At the last station (the wake end) the midpoints of the last two panels lie $L_{last}/2$ and $L_{last} + L_{prev}/2$ upstream, so $u_e = (1 + f)\,q_{last} - f\,q_{prev}$ with $f = L_{last}/(L_{last} + L_{prev})$. Both maps are exact for a velocity that is linear in the arc length along the wake (for equal lengths they reduce to the mean and to the weights 1.5 and -0.5). Source strengths: on an airfoil panel $\sigma L$ = ($m$ where the layer leaves the panel) - ($m$ where it enters), on the stagnation panel both ends are exits, on a wake panel $\sigma L = m_{down} - m_{up}$. The gap panel of a blunt edge carries no viscous source: the gap thickness is the displacement of its inviscid gap source. Together:
 
 ```{math}
 u_e = u_{e,inv} + D\,m, \qquad D = P\,S\,B,
