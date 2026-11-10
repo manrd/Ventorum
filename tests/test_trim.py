@@ -847,6 +847,43 @@ def test_ground_effect_trim_returns_the_trimmed_pass_when_a_later_pass_fails(mon
 
 
 @pytest.mark.slow
+def test_ground_effect_trim_max_iterations_is_a_total_over_the_passes(monkeypatch):
+    """Verify that max_iterations limits the Newton steps in total over all passes.
+
+    Regression: each pass could do up to max_iterations Newton steps, so a
+    trim in ground effect could do up to three times max_iterations steps.
+    Now a later pass can do only the steps that are left. With a limit equal
+    to the steps of the first pass, the second pass has no step left: it
+    evaluates its start point only, does not converge with the new count, and
+    the result is the trimmed state of the first pass.
+    """
+    ac, st, cond = _ground_trim_case()
+
+    def run(limit: int):
+        sequence = iter([17, 18, 19, 20])
+        monkeypatch.setattr(trimming, "_automatic_ground_n_chord", lambda *args: next(sequence))
+        return vt.trim(ac, cond, st, CL_target=0.45, pitch_control="elevator", alpha_bounds_deg=(0.5, 2.0),
+                       max_iterations=limit)
+
+    free = run(20)
+    assert free.status == "trimmed"
+    first_steps = len(free.pass_residual_histories[0]) - 1
+    assert first_steps >= 1
+    assert free.iterations <= 20
+
+    res = run(first_steps)
+    assert res.iterations <= first_steps
+    assert res.iterations == first_steps
+    assert res.status == "trimmed"
+    assert res.result is not None
+    assert res.result.details["lattice"].n_chord == 17
+    _check_pass_histories(res, n_passes=2)
+    # The second pass evaluated its start point only.
+    assert len(res.pass_residual_histories[1]) == 1
+    assert any(n.startswith("Pass 2: ") and "total over all passes" in n for n in res.notes)
+
+
+@pytest.mark.slow
 def test_ground_effect_trim_keeps_a_given_chordwise_count(monkeypatch):
     """Verify that a chordwise count of the caller is used for all solves of a trim in ground effect."""
     counts, settings_seen = _record_analyze(monkeypatch)

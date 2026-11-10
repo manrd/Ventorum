@@ -1379,8 +1379,10 @@ AGENT_TOOL_DEFINITIONS: list[dict[str, Any]] = [
                                      "minItems": 2, "maxItems": 2,
                                      "description": "Lower and upper bounds of the angle of attack [deg]. "
                                                     "Must increase. Default [-10, 20]."},
-                "max_iterations": _int("Maximum Newton iterations [-] (integer). Range 1 to 50. "
-                                       "Default 20.", minimum=1, maximum=50),
+                "max_iterations": _int("Maximum Newton iterations [-] (integer), the total over all "
+                                       "passes (a trim in ground effect with the automatic n_chord "
+                                       "can do up to 3 passes). Range 1 to 50. Default 20.",
+                                       minimum=1, maximum=50),
                 "settings": SETTINGS_SCHEMA,
                 "detail_level": {**DETAIL_LEVEL, "default": "standard"},
                 "axes": {**AXES_SCHEMA, "default": "body"},
