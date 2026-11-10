@@ -282,7 +282,7 @@ class Ventorum2DPolarSource:
             "ncrit": self._ncrit,
             "xtr": self._xtr,
             "backend": self._backend,
-            "tol": 1e-4,
+            "tol": 1e-6,
             "max_iter": 50,
         }
         settings.update(options)
@@ -384,8 +384,8 @@ class Ventorum2DPolarSource:
             converged angles whose reason holds a near-wake sawtooth note or
             a transition rule note (their loads must not be used). The
             polar name states the Newton tolerance ``tol`` of the solve
-            (default 1e-4, looser than the 1e-6 default of
-            :func:`solve_viscous`); the tolerance is also in the options of
+            (default 1e-6, the default of :func:`solve_viscous`); the
+            tolerance is also in the options of
             :meth:`describe` and in the cache key. The polar
             name and :attr:`last_dropped` give the number of dropped
             angles, and the gap
@@ -529,8 +529,8 @@ class Ventorum2DPolarSource:
         self.last_dropped = dropped
 
         h_str = "free air" if h_val is None else f"{h_val:g}"
-        # The Newton tolerance of the solve is part of the provenance: the
-        # source default (1e-4) is looser than the solve_viscous default (1e-6).
+        # The Newton tolerance of the solve is part of the provenance: a
+        # polar can be computed with a tolerance other than the default (1e-6).
         name = (
             f"Ventorum-2D {shape.name} Re={re_val:.6g} h={h_str} "
             f"tol={float(settings['tol']):g} "
