@@ -5,9 +5,10 @@ The 3D panel strips give ``Cl_freestream = 2 Gamma / (V_inf c)`` [-] with
 ``Gamma = local_lift / (rho V_inf)`` [m^2/s], so
 ``Cl_freestream * q_inf * c`` is the lift per unit span [N/m], as for the
 lattice solvers. The strip ``Cl`` of the 3D panel solver is the strip
-pressure lift on the free-stream dynamic pressure and the strip area, also
-with body rates (it does not use the local onset speed of the lattice
-rule). These tests check both definitions, with and without rates.
+pressure lift on the strip area and the local dynamic pressure of the
+onset at the strip quarter-chord point (the lattice rule); without body
+rates that is ``q_inf``. These tests check both definitions, with and
+without rates.
 """
 
 from __future__ import annotations
@@ -55,15 +56,61 @@ def test_cl_freestream_is_two_gamma_over_v_inf_c(rates: dict) -> None:
     assert item["Cl_freestream"] == pytest.approx(res.spanwise[0].Cl_freestream.tolist(), rel=1e-15)
 
 
-@pytest.mark.parametrize("rates", [{}, {"p": 0.5}, {"r": 0.5}], ids=["none", "roll", "yaw"])
-def test_panel_strip_cl_stays_on_the_free_stream_dynamic_pressure(rates: dict) -> None:
-    """On a rectangular wing (strip area = width x chord) Cl equals Cl_freestream, also with rates.
+@pytest.mark.parametrize("rates", [{}, {"p": 0.5}, {"r": 0.5}, {"q": 0.3}], ids=["none", "roll", "yaw", "pitch"])
+def test_panel_strip_cl_uses_the_local_dynamic_pressure(rates: dict) -> None:
+    """Cl is the strip pressure lift on the local dynamic pressure of the strip (the lattice rule).
 
-    The 3D panel strip Cl is the strip pressure lift over ``q_inf`` and the
-    strip area. With body rates it does not change to the local onset
-    speed (the lattice rule ``2 Gamma / (|U_qc| c)``). This test records
-    that normalisation.
+    Regression: with body rates the 3D panel strip Cl stayed on ``q_inf``.
+    Now the dynamic pressure is that of the onset (free stream and body
+    rates, no induced velocity) at the strip quarter-chord point, as for the
+    lattice strips. On a rectangular wing (strip area = width x chord)
+    ``Cl = Cl_freestream (V_inf / |U_qc|)^2``; without rates the two are equal.
     """
+    from ventorum.aero.system import freestream_direction, rotation_velocity
+
+    ac = _aircraft(1.0)
     cond = FlightCondition(V_inf=30.0, alpha=np.radians(5.0), **rates)
-    sw = _solve(_aircraft(1.0), cond).spanwise[0]
-    np.testing.assert_allclose(sw.Cl, sw.Cl_freestream, rtol=1e-12, atol=1e-14)
+    sw = _solve(ac, cond).spanwise[0]
+    ac.compute_reference_values()
+    qc = np.column_stack([0.25 * sw.chord, sw.y, np.zeros_like(sw.y)])
+    u = cond.V_inf * freestream_direction(cond.alpha, cond.beta)[None, :]
+    rot = rotation_velocity(cond, qc, ac.moment_reference())
+    if rot is not None:
+        u = u + rot
+    ratio = (cond.V_inf / np.linalg.norm(u, axis=1)) ** 2
+    np.testing.assert_allclose(sw.Cl, sw.Cl_freestream * ratio, rtol=1e-12, atol=1e-14)
+    if rates:
+        assert np.max(np.abs(ratio - 1.0)) > 1e-4
+    else:
+        np.testing.assert_allclose(sw.Cl, sw.Cl_freestream, rtol=1e-12, atol=1e-14)
+
+
+def test_batch_and_scalar_strip_cl_agree_with_rates(monkeypatch) -> None:
+    """The batch strip integration and the scalar reference give the same strips with body rates."""
+    from dataclasses import fields
+
+    import ventorum.solvers.panel3d as factory_module
+
+    ac = _aircraft(0.5)
+    conds = [FlightCondition(V_inf=30.0, alpha=np.radians(5.0), p=0.4, q=-0.2, r=0.3),
+             FlightCondition(V_inf=25.0, alpha=np.radians(3.0), beta=0.02, r=-0.5),
+             FlightCondition(V_inf=30.0, alpha=np.radians(4.0))]
+    settings = SolverSettings(n_panels=6, n_chord=10, panel_backend="numpy", panel_cache=False)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        batch = make_solver("panel3d").solve(ac, conds, settings)
+
+        def scalar_strips(solver, results, conditions, maps, meta):
+            return [factory_module._spanwise_reference(solver, r, c, maps, meta)
+                    for r, c in zip(results, conditions)]
+
+        monkeypatch.setattr(factory_module, "_spanwise_results_batch", scalar_strips)
+        # The same batch of panel solves, with the scalar strip integration.
+        singles = make_solver("panel3d").solve(ac, conds, settings)
+    for a, b in zip(batch, singles):
+        for x, y in zip(a.spanwise, b.spanwise):
+            for f in fields(y):
+                va, vb = getattr(x, f.name), getattr(y, f.name)
+                if isinstance(vb, np.ndarray):
+                    scale = max(float(np.max(np.abs(vb))), 1e-12)
+                    assert np.max(np.abs(va - vb)) <= 1e-12 * scale, f.name

@@ -447,13 +447,14 @@ C_n = -\frac{M_z}{q_\infty S_{\text{ref}} b_{\text{ref}}}.
 Spanwise strips. The panels of each spanwise strip $j$ (width $w_j$ in the $y$-$z$ plane, chord $c_j$ at the strip mid span fraction, area $S_j$ from the mean of the edge chords) give the strip lift $L_j = \mathbf{F}_j \cdot \hat{\mathbf{l}}_{\text{wind}}$ [N]. The strip outputs are:
 
 ```{math}
-C_{l, j} = \frac{L_j}{q_\infty S_j}, \qquad
+C_{l, j} = \frac{L_j}{q_j S_j}, \qquad
+q_j = \tfrac{1}{2} \rho_\infty \lVert \mathbf{U}_{qc, j} \rVert^2, \qquad
 L'_j = \frac{L_j}{w_j}, \qquad
 \Gamma_j = \frac{L'_j}{\rho_\infty V_\infty}, \qquad
 C_{l, j}^{\infty} = \frac{2 \Gamma_j}{V_\infty c_j} = \frac{L'_j}{q_\infty c_j}.
 ```
 
-$C_{l, j}^{\infty}$ is `Cl_freestream`, with the same rule as the lattice strips: `Cl_freestream * q_inf * c` is the lift per unit span. $C_{l, j}$ and $C_{l, j}^{\infty}$ differ only by $S_j / (w_j c_j)$: they are equal when the chord at the strip mid span fraction is the mean of the edge chords (constant chord, or a linear taper with uniform spacing). With a taper and a cosine spacing the strip mid span fraction is not the middle of the strip, and the two differ slightly (most at the tip strip). Both coefficients use $q_\infty$, also with body rates. The 3D panel strip $C_l$ does not use the local onset speed $\lVert \mathbf{U}_{qc} \rVert$ at the strip quarter chord, as the lattice strip $C_l$ does (see the [rotation rates page](rotation_rates.md)). The lift of a strip on its local dynamic pressure is $C_{l, j} V_\infty^2 / \lVert \mathbf{U}_{qc, j} \rVert^2$. A yaw rate changes $\lVert \mathbf{U}_{qc} \rVert$ to first order in $r y / V_\infty$, so the two rules then differ by a relative amount of about $2 \lvert r y \rvert / V_\infty$ at the span station $y$.
+$\mathbf{U}_{qc, j}$ is the onset velocity (the free stream and the velocity of the body rates about the moment reference point, without the induced velocity) at the strip quarter-chord point, the leading edge of the strip at its mid span fraction plus $c_j / 4$ in $x$. This is the rule of the lattice strip $C_l$ (see the [rotation rates page](rotation_rates.md)). Without body rates $q_j = q_\infty$. $C_{l, j}$ is `Cl`, and the effective angle $\alpha_{L0} + C_{l, j} / a_0$ uses it. $C_{l, j}^{\infty}$ is `Cl_freestream`, with the same rule as the lattice strips: `Cl_freestream * q_inf * c` is $\rho_\infty V_\infty \Gamma_j$. It stays on $q_\infty$ also with body rates. The strip `Cd_i` and `Cm_section` stay on $q_\infty$. With body rates $C_{l, j} = C_{l, j}^{\infty} \, (V_\infty / \lVert \mathbf{U}_{qc, j} \rVert)^2 \, w_j c_j / S_j$. A yaw rate changes $\lVert \mathbf{U}_{qc} \rVert$ to first order in $r y / V_\infty$, so the two coefficients then differ by a relative amount of about $2 \lvert r y \rvert / V_\infty$ at the span station $y$. Without body rates $C_{l, j}$ and $C_{l, j}^{\infty}$ differ only by $S_j / (w_j c_j)$: they are equal when the chord at the strip mid span fraction is the mean of the edge chords (constant chord, or a linear taper with uniform spacing). With a taper and a cosine spacing the strip mid span fraction is not the middle of the strip, and the two differ slightly (most at the tip strip).
 
 ### Trefftz-plane induced drag
 

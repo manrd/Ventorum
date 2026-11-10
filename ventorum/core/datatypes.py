@@ -1507,8 +1507,10 @@ class SpanwiseResult:
         ``|U_qc| = V_inf`` and ``Cl`` equals ``Cl_freestream``. The
         effective angle of the linear section, ``alpha_L0 + Cl / a0``, uses
         this value. On a 3D panel strip ``Cl`` is the strip pressure lift
-        over ``q_inf`` and the strip area, also with body rates (see
-        ``Cl_freestream``).
+        over the strip area and the local dynamic pressure
+        ``rho |U_qc|^2 / 2`` of the same onset ``U_qc`` at the strip
+        quarter-chord point (the lattice rule); without body rates the
+        dynamic pressure is ``q_inf``.
     Cd_i, Cd_profile : numpy.ndarray
         Section induced-drag and profile-drag coefficients [-]. On a
         lattice strip ``Cd_i`` is the strip part of the Trefftz-plane
@@ -1537,11 +1539,11 @@ class SpanwiseResult:
         it differs from ``Cl`` only with body rates; then
         ``Cl_freestream * q_inf * c`` differs from ``local_lift`` by the
         factor ``V_inf / |U_qc|``. On a 3D panel strip
-        ``Gamma = local_lift / (rho V_inf)`` and ``Cl`` is the strip
-        pressure lift over ``q_inf`` and the strip area, also with body
-        rates; the two differ only by the ratio of the strip area to width
-        times chord (a small difference on a tapered strip with cosine
-        spacing). None for a solver that does not give it.
+        ``Gamma = local_lift / (rho V_inf)``, so ``Cl_freestream`` stays on
+        ``V_inf`` also with body rates, and ``Cl`` differs from it by the
+        factor ``(V_inf / |U_qc|)^2`` with body rates and by the ratio of
+        the strip area to width times chord. None for a solver that does
+        not give it.
     """
 
     y: np.ndarray = field(default_factory=lambda: np.empty(0))
