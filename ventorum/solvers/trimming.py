@@ -33,7 +33,8 @@ effect use one count, so that the residual is continuous in the unknowns. The fi
 pass uses the automatic count of the start point. When the automatic count at the
 trimmed state differs, a new pass starts from the trimmed state with that count (at
 most ``GROUND_N_CHORD_MAX_PASSES`` passes), so that the result equals an analysis at
-the trimmed state.
+the trimmed state. When a later pass does not converge, the result is the trimmed state
+of the pass before it, with a note.
 
 References
 ----------
@@ -111,11 +112,15 @@ class TrimResult:
         Yawing moment coefficient in body axes at the reported point [-]. NaN when
         no solve succeeded.
     iterations : int
-        Number of Newton steps done.
+        Number of Newton steps done, the total over all passes (a trim in
+        ground effect with the automatic chordwise count can have more than
+        one pass, see :func:`trim`).
     residual_history : list[float]
-        Largest absolute residual [-] at each evaluated point, from the start point.
-        It has ``iterations + 1`` entries for every status. The entry is NaN for a
-        point where the solve failed.
+        Largest absolute residual [-] at each evaluated point, from the start point,
+        for all passes in their order. Each pass has its Newton steps plus one
+        entries, so the list has ``iterations + len(pass_residual_histories)``
+        entries for every status (``iterations + 1`` with one pass). The entry is
+        NaN for a point where the solve failed.
     jacobian : list[list[float]]
         Jacobian matrix at the reported point [1/rad]. Rows correspond to residuals,
         columns correspond to unknowns. All entries are NaN when the Jacobian was
@@ -132,6 +137,10 @@ class TrimResult:
         succeeded.
     precision : str
         Precision of the solves: "float64", "float32", "mixed", or "none".
+    pass_residual_histories : list[list[float]]
+        The residual history [-] of each pass, in order. ``residual_history``
+        is these lists joined. A trim with one pass has one list, equal to
+        ``residual_history``.
     """
 
     status: str
@@ -153,6 +162,7 @@ class TrimResult:
     notes: list[str] = field(default_factory=list)
     device: str = "none"
     precision: str = "none"
+    pass_residual_histories: list[list[float]] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         """Return a JSON-compatible dictionary without result and aircraft objects.
@@ -178,6 +188,7 @@ class TrimResult:
             "notes": list(self.notes),
             "device": str(self.device),
             "precision": str(self.precision),
+            "pass_residual_histories": [[_json_float(r) for r in h] for h in self.pass_residual_histories],
         }
 
 
@@ -300,7 +311,7 @@ def trim(
         [-30, 30] deg) moves to the nearest point in the bounds, and a note
         of the result says so.
     max_iterations : int
-        Maximum number of Newton iterations. Default is 20.
+        Maximum number of Newton iterations of one pass. Default is 20.
     tol_CL : float
         Convergence tolerance on lift coefficient residual ``abs(CL - CL_target)`` [-].
         Default is 1.0e-6.
@@ -358,10 +369,15 @@ def trim(
     count does not change, at most ``GROUND_N_CHORD_MAX_PASSES`` (3) passes.
     The final result then equals :func:`ventorum.analyze` at the trimmed
     state with the automatic count. When the count still changes after the
-    last pass, the result is the last pass and a note says so. The
-    iterations and the residual history are those of the last pass; a note
-    gives the number of passes and their counts. A count in
-    ``settings.n_chord`` is used as given.
+    last pass, the result is the last pass and a note says so. When a later
+    pass does not converge, the result is the trimmed state of the pass
+    before it (status "trimmed"), and a note says that its count is not the
+    automatic count of the trimmed state and gives that count. Each pass can
+    do up to *max_iterations* Newton steps. ``iterations`` is the total over
+    all passes, ``residual_history`` joins the histories of the passes, and
+    ``pass_residual_histories`` gives the history of each pass; a note gives
+    the number of passes and their counts. A count in ``settings.n_chord``
+    is used as given.
 
     References
     ----------
@@ -623,10 +639,24 @@ def trim(
             result=last_sol,
             aircraft=ac_clone,
             notes=list(notes_list),
-            device="none" if not devices else (next(iter(devices)) if len(devices) == 1 else "mixed"),
-            precision="none" if not precisions else (next(iter(precisions)) if len(precisions) == 1
-                                                     else "mixed"),
+            device=_set_text(devices),
+            precision=_set_text(precisions),
+            pass_residual_histories=[list(history)],
         )
+
+    def _set_text(values: set[str]) -> str:
+        """Return the one value of *values*, "mixed" for more, or "none" for no value."""
+        return "none" if not values else (next(iter(values)) if len(values) == 1 else "mixed")
+
+    def _join_passes(res: TrimResult, passes: list[TrimResult]) -> TrimResult:
+        """Give *res* the iteration count and the residual histories of all *passes*."""
+        histories = [list(p.residual_history) for p in passes]
+        res.iterations = int(sum(p.iterations for p in passes))
+        res.residual_history = [r for h in histories for r in h]
+        res.pass_residual_histories = histories
+        res.device = _set_text(devices)
+        res.precision = _set_text(precisions)
+        return res
 
     def _newton(x0: np.ndarray) -> TrimResult:
         """Run the Newton iteration from *x0* with the settings ``run_settings``."""
@@ -779,15 +809,42 @@ def trim(
     # from the trimmed state with that count. The final result then equals an
     # analysis at the trimmed state with the automatic count.
     pass_counts = [n_chord_auto]
+    passes: list[TrimResult] = []
+    # The trimmed pass before the current one and its unknowns [rad].
+    trimmed_res: TrimResult | None = None
+    trimmed_x: np.ndarray | None = None
+    history_text = ("The iterations are the total over all passes; residual_history joins the residual "
+                    "histories of the passes, and pass_residual_histories gives each pass.")
     while True:
         res = _newton(x)
+        passes.append(res)
         if res.status != "trimmed":
-            res.notes.append(
-                f"Ground effect: the solves of pass {len(pass_counts)} of the trim use n_chord = "
-                f"{pass_counts[-1]}, the automatic chordwise count of the start point of the pass. "
-                "The trim did not converge, so the count was not checked at the end point."
+            if trimmed_res is None:
+                res.notes.append(
+                    f"Ground effect: the solves of pass {len(pass_counts)} of the trim use n_chord = "
+                    f"{pass_counts[-1]}, the automatic chordwise count of the start point of the pass. "
+                    "The trim did not converge, so the count was not checked at the end point."
+                )
+                return _join_passes(res, passes)
+            # A later pass failed: return the trimmed pass before it. The
+            # aircraft clone is shared, so its deflections go back to that state.
+            assert trimmed_x is not None
+            _set_deflections(trimmed_x)
+            final_x[:] = [float(v) for v in trimmed_x]
+            k = len(pass_counts)
+            for note in res.notes:
+                if note not in start_notes:
+                    trimmed_res.notes.append(f"Pass {k}: {note}")
+            trimmed_res.notes.append(
+                f"Ground effect: pass {k} of the trim, with n_chord = {pass_counts[-1]} (the automatic "
+                f"chordwise count at the trimmed state of pass {k - 1}), did not converge (status "
+                f"{res.status!r}). The result is the trimmed state of pass {k - 1}, with n_chord = "
+                f"{pass_counts[-2]}. This is not the automatic chordwise count of the trimmed state, which is "
+                f"{pass_counts[-1]}, so the result differs from an analysis there with the automatic count. "
+                f"Passes: {k}, counts {', '.join(str(n) for n in pass_counts)}. {history_text} Set "
+                "settings.n_chord to select one count."
             )
-            return res
+            return _join_passes(trimmed_res, passes)
         x = np.array(final_x, dtype=float)
         _set_deflections(x)
         n_next = _automatic_ground_n_chord(ac_clone, condition, settings, float(x[0]))
@@ -797,18 +854,19 @@ def trim(
             res.notes.append(
                 f"Ground effect: all solves of the last pass of the trim use n_chord = {n_next}, the "
                 "automatic chordwise count at the trimmed state, so the result equals an analysis there "
-                f"(passes: {len(pass_counts)}, counts {counts_text}). The iterations and the residual "
-                "history are those of the last pass. Set settings.n_chord to select a different count."
+                f"(passes: {len(pass_counts)}, counts {counts_text}). {history_text} Set settings.n_chord "
+                "to select a different count."
             )
-            return res
+            return _join_passes(res, passes)
         if len(pass_counts) >= GROUND_N_CHORD_MAX_PASSES:
             res.notes.append(
                 f"Ground effect: the automatic chordwise count changed after each of {len(pass_counts)} "
                 f"passes of the trim (counts {counts_text}); at the trimmed state of the last pass it is "
                 f"{n_next}. The result is the last pass, with n_chord = {pass_counts[-1]}, so it differs "
-                "from an analysis at the trimmed state with the automatic count. Set settings.n_chord to "
-                "select one count."
+                f"from an analysis at the trimmed state with the automatic count. {history_text} Set "
+                "settings.n_chord to select one count."
             )
-            return res
+            return _join_passes(res, passes)
+        trimmed_res, trimmed_x = res, x.copy()
         pass_counts.append(n_next)
         run_settings = _with_n_chord(settings, n_next)
