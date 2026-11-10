@@ -393,19 +393,33 @@ def test_cache_hit_sets_last_dropped(tmp_path, monkeypatch):
 def test_newton_tolerance_is_in_the_polar_metadata_and_the_cache_key(tmp_path, fake_solver):
     """The Newton tolerance of the solve is stated in the polar name, in describe() and in the cache key.
 
-    Regression: the source solves with tol 1e-4 (solve_viscous defaults to 1e-6), but the polar itself did
-    not state the tolerance, so a polar of the source and a polar of solve_viscous could not be told apart.
+    Regression: the polar itself did not state the tolerance, so polars of the source with different
+    tolerances could not be told apart.
     """
     source = Ventorum2DPolarSource(cache=PolarCache(tmp_path), n_panels=80)
     default = source.polar("naca 0012", 1e6, [0.0, 2.0])
-    assert fake_solver[-1]["tol"] == 1e-4
-    assert "tol=0.0001" in default.name
-    assert source.describe()["options"]["tol"] == 1e-4
-    tight = source.polar("naca 0012", 1e6, [0.0, 2.0], tol=1e-6)
-    assert len(fake_solver) == 2 and fake_solver[-1]["tol"] == 1e-6
-    assert "tol=1e-06" in tight.name
-    assert source.describe(tol=1e-6)["options"]["tol"] == 1e-6
+    assert fake_solver[-1]["tol"] == 1e-6
+    assert "tol=1e-06" in default.name
+    assert source.describe()["options"]["tol"] == 1e-6
+    loose = source.polar("naca 0012", 1e6, [0.0, 2.0], tol=1e-4)
+    assert len(fake_solver) == 2 and fake_solver[-1]["tol"] == 1e-4
+    assert "tol=0.0001" in loose.name
+    assert source.describe(tol=1e-4)["options"]["tol"] == 1e-4
     # The cache gives back each polar with its own tolerance.
-    assert "tol=0.0001" in source.polar("naca 0012", 1e6, [0.0, 2.0]).name
-    assert "tol=1e-06" in source.polar("naca 0012", 1e6, [0.0, 2.0], tol=1e-6).name
+    assert "tol=1e-06" in source.polar("naca 0012", 1e6, [0.0, 2.0]).name
+    assert "tol=0.0001" in source.polar("naca 0012", 1e6, [0.0, 2.0], tol=1e-4).name
     assert len(fake_solver) == 2
+
+
+def test_default_newton_tolerance_is_the_solve_viscous_default(fake_solver):
+    """The source solves with the Newton tolerance of solve_viscous (1e-6) by default.
+
+    Regression: the default of the source was 1e-4. Measured against 1e-6 (NACA 0012 and 4412, Re 1e6
+    and 3e6, -4 to 12 deg), it changed Cl by up to 6.1e-5 and Cd by up to 6.2e-5 (relative).
+    """
+    from ventorum.panel2d.viscous import solve_viscous
+
+    source = Ventorum2DPolarSource(cache=False)
+    source.polar("naca 0012", 1e6, [0.0])
+    assert fake_solver[-1]["tol"] == inspect.signature(solve_viscous).parameters["tol"].default == 1e-6
+    assert source.describe()["options"]["tol"] == 1e-6

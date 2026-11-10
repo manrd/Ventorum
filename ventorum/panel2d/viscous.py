@@ -688,8 +688,11 @@ def solve_viscous(
         point on the chord line of the reference geometry (see
         :func:`ventorum.panel2d.solver.section_reference`), from the
         leading edge le towards the trailing-edge midpoint te, over the
-        reference chord: x/c = (p - le) . (te - le) / (|te - le| c). It
-        does not change when the section is rotated, and the reported
+        reference chord: x/c = (p - le) . (te - le) / (|te - le| c), with
+        c the reference chord (``chord_ref``). The divisor is c, not
+        |te - le|: with an explicit ``chord_ref`` other than |te - le|,
+        the trailing-edge midpoint is at x/c = |te - le| / c. It does not
+        change when the section is rotated, and the reported
         ``transition_positions`` use the same measure. For a deflected
         plain flap the input type matters: an
         :class:`ventorum.airfoil.AirfoilShape` gives the stored leading
