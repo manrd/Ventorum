@@ -81,6 +81,14 @@ _CDI_TE_CLEARANCE = 0.15
 #: conditioning warning [-]. Converged cambered wings stay below about 0.25 (NACA 2412 to 6409).
 _MEAN_LINE_STRIP_JUMP = 0.3
 
+#: Estimate of the 1-norm condition number of the system matrix [-] above which the result
+#: gets a trust warning (``SolverSettings.report_condition``; no penalty). The relative error
+#: of a solution of a linear system is bounded by about ``kappa * u`` (N. J. Higham, Accuracy and
+#: Stability of Numerical Algorithms, 2nd ed., SIAM, 2002, chapter 7: the forward error of a
+#: backward-stable solve), with ``u = 1.1e-16`` the unit round-off of float64. Above 1e10 the bound is 1e-6: about 10
+#: of the 16 significant float64 digits of the circulation can be lost, and about 6 remain.
+CONDITION_NUMBER_WARNING = 1.0e10
+
 #: Smallest run of consecutive sign changes of the strip-to-strip step of the spanwise
 #: circulation that the rule ``numerical`` flags as a saw-tooth [-]. A load feature one strip
 #: wide (a narrow control, a gap between controls, the root joint) gives at most two
@@ -1964,6 +1972,7 @@ def evaluate_aerodynamic_trust(
     taper: float | None = None,
     n_span: int | None = None,
     controls: Sequence[tuple[float, float]] | None = None,
+    condition_number: float | None = None,
 ) -> TrustScore:
     """Evaluate the validity of a solution.
 
@@ -2062,6 +2071,15 @@ def evaluate_aerodynamic_trust(
         Absolute deflection [rad] and hinge ``x/c`` [-] of each deflected
         chordwise control, for the error model of the vortex lattice
         (:func:`lattice_error_inputs`).
+    condition_number : float or None, optional
+        Estimate of the 1-norm condition number of the system matrix [-]
+        (``SolveInfo.condition_number``, given only with
+        ``SolverSettings.report_condition``). Above
+        :data:`CONDITION_NUMBER_WARNING` (1e10), or when it is not finite,
+        the result gets a warning (no penalty): the relative error of the
+        circulation can be up to about ``kappa * 1.1e-16``, so about
+        ``log10(kappa)`` of the 16 significant float64 digits can be lost
+        (about 6 remain at 1e10). None gives no check.
 
     A result with a non-finite coefficient never keeps a trust level above
     LOW: it gets the penalty ``non_finite_result`` and the warning
@@ -2323,6 +2341,24 @@ def evaluate_aerodynamic_trust(
                 "step): probable numerical problem."
             )
     penalties["numerical"] = num_pen
+
+    # 6b. Condition number of the system matrix (a warning only, no penalty) ---------------------
+    if condition_number is not None:
+        kappa = float(condition_number)
+        if not math.isfinite(kappa):
+            warnings.append(
+                "Singular system matrix: the condition number estimate of the circulation solve is not "
+                "finite, so the circulation and the loads are not reliable."
+            )
+        elif kappa > CONDITION_NUMBER_WARNING:
+            lost = math.log10(kappa)
+            warnings.append(
+                f"Ill-conditioned system matrix: the condition number estimate (1-norm) is {kappa:.2e}, "
+                f"above {CONDITION_NUMBER_WARNING:.0e}. The relative error of the circulation can be up to "
+                f"about kappa * 1.1e-16 = {kappa * 1.1e-16:.1e}: about {lost:.0f} of the 16 significant "
+                f"float64 digits can be lost (about {max(0.0, 16.0 - lost):.0f} remain). Check the geometry "
+                "for coincident or nearly coincident panels and control points."
+            )
 
     # 7. Near-field and far-field lateral values (a warning only, no penalty) -------------------
     warnings.extend(near_far_lateral_warnings(CY, CY_farfield, Cn_stability, Cn_trefftz))

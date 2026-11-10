@@ -558,6 +558,7 @@ class LatticeSolver(BaseSolver):
             Cn_trefftz=totals.Cn_trefftz,
             te_clearance=trailing_edge_clearance(lattice, ground),
             mean_line_jump=mean_line_strip_jump(lattice, loads.spanwise),
+            condition_number=getattr(info, "condition_number", None),
             **self._cached(lattice, ("error_inputs", main_surface),
                            lambda: lattice_error_inputs(lattice, main_surface)),
         )

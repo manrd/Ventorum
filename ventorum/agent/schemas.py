@@ -358,6 +358,12 @@ SETTINGS_PROPS: dict[str, dict[str, Any]] = {
     "wake_alignment": {"type": "string", "enum": ["freestream", "body"],
                        "description": "Wake direction. 'freestream' (default) or 'body' (as in AVL; not "
                                       "allowed in ground effect)."},
+    "report_condition": {"type": "boolean", "default": False,
+                         "description": "Estimate the 1-norm condition number of the system matrix (LAPACK "
+                                        "estimate, a lower bound within about 3x). Default false. Only the "
+                                        "vortex-lattice and linear lifting-line solves on the CPU give it; "
+                                        "other solvers and the GPU give null. Above 1e10 the trust gets a "
+                                        "warning (about 10 of the 16 float64 digits can be lost)."},
 }
 
 DETAIL_LEVEL = {"type": "string", "enum": ["summary", "standard", "full"],
@@ -1007,6 +1013,8 @@ def parse_settings(spec: Any, where: str = "settings") -> SolverSettings:
     if "wake_alignment" in d:
         s.wake_alignment = string(d["wake_alignment"], f"{where}.wake_alignment",
                                   SETTINGS_PROPS["wake_alignment"]["enum"])
+    if "report_condition" in d:
+        s.report_condition = boolean(d["report_condition"], f"{where}.report_condition")
     return s
 
 

@@ -72,6 +72,44 @@ def test_schema_keys_match_parser_tables():
     assert "NEGATIVE" in surface["properties"]["tip_twist_deg"]["description"]
 
 
+def test_settings_schema_exposes_report_condition():
+    """Verify the agent setting report_condition: a boolean, default false, strict parse."""
+    from ventorum.agent.schemas import parse_settings
+    from ventorum.agent.tools import InputError
+
+    prop = SETTINGS_PROPS["report_condition"]
+    assert prop["type"] == "boolean" and prop["default"] is False
+    assert "1e10" in prop["description"]
+    for name in ("ventorum_wing_analysis", "ventorum_trim"):
+        tool = next(t for t in AGENT_TOOL_DEFINITIONS if t["name"] == name)["parameters"]
+        assert "report_condition" in tool["properties"]["settings"]["properties"]
+    assert parse_settings(None).report_condition is False
+    assert parse_settings({"report_condition": True}).report_condition is True
+    with pytest.raises(InputError, match="report_condition"):
+        parse_settings({"report_condition": "true"})
+
+
+def test_wing_analysis_reports_the_condition_number():
+    """Verify that report_condition gives the condition estimate in the metrics; the default gives none."""
+    from ventorum import gpu
+
+    old = gpu.get_device()
+    try:
+        gpu.set_device("cpu")
+        on = wing_analysis(RECT, None, {**FAST, "report_condition": True}, "summary")
+        off = wing_analysis(RECT, None, FAST, "summary")
+    finally:
+        gpu.set_device(old)
+    strict_json(on)
+    assert on["status"] == "success"
+    assert 1.0 < on["metrics"]["condition_number"] < 1.0e10
+    assert on["settings_used"]["report_condition"] is True
+    assert "condition_number" not in off["metrics"]
+    assert off["settings_used"]["report_condition"] is False
+    assert call_tool("ventorum_wing_analysis", {"wing": RECT, "settings": {"report_condition": "yes"}})[
+        "status"] == "error"
+
+
 # ── Wing analysis ────────────────────────────────────────────────────────────
 
 def test_wing_analysis_success():

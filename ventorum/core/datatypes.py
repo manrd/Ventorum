@@ -1376,8 +1376,11 @@ class SolverSettings:
         so the circulation can differ in the last bits and a batch solves
         its matrices one at a time. The GPU pipelines do not give the
         estimate: ``details["condition_number"]`` is then None and
-        ``details["notes"]`` says so. The other solvers ignore it. Default
-        False: the solve path and the results do not change.
+        ``details["notes"]`` says so. The other solvers ignore it. An
+        estimate above 1e10 (or not finite) gives a trust warning
+        (:data:`ventorum.core.trust.CONDITION_NUMBER_WARNING`): about 10 of
+        the 16 significant float64 digits of the circulation can be lost.
+        Default False: the solve path and the results do not change.
     """
 
     solver_type: Literal["auto", "vlm", "linear", "nonlinear", "fourier"] | str = "auto"

@@ -414,6 +414,7 @@ def settings_payload(s: Any, res: SolverResult | None = None) -> dict[str, Any]:
         "n_panels": int(s.n_panels),
         "n_chord": s.n_chord if s.n_chord is not None else "auto",
         "wake_alignment": s.wake_alignment,
+        "report_condition": bool(getattr(s, "report_condition", False)),
     }
     device, precision = result_device_precision(res)
     out["device"] = device

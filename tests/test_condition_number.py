@@ -172,3 +172,60 @@ def test_gpu_path_gives_no_estimate_and_a_note():
     assert res.details.get("device") == "gpu"
     assert res.details["condition_number"] is None
     assert CONDITION_GPU_NOTE in res.details["notes"]
+
+
+@pytest.mark.parametrize("kappa, warned", [
+    (None, False),
+    (1.0e9, False),
+    (1.0e10, False),
+    (1.1e10, True),
+    (1.0e13, True),
+    (float("inf"), True),
+])
+def test_trust_warning_above_the_condition_limit(kappa, warned):
+    """Verify the trust warning of a large condition estimate: above 1e10 or not finite, no penalty."""
+    from ventorum.core.trust import CONDITION_NUMBER_WARNING, evaluate_aerodynamic_trust
+
+    assert CONDITION_NUMBER_WARNING == 1.0e10
+    base = evaluate_aerodynamic_trust(AR=8.0, CL=0.4, CDi=0.007, solver_type="vlm", n_chord=4)
+    t = evaluate_aerodynamic_trust(AR=8.0, CL=0.4, CDi=0.007, solver_type="vlm", n_chord=4,
+                                   condition_number=kappa)
+    found = [w for w in t.warnings if "condition number" in w]
+    assert bool(found) == warned
+    # A warning only: the score and the penalties do not change.
+    assert t.score == base.score and t.factors == base.factors
+    if warned and np.isfinite(kappa):
+        assert f"{kappa:.2e}" in found[0]
+        assert f"about {np.log10(kappa):.0f} of the 16 significant float64 digits" in found[0]
+        assert f"about {16 - np.log10(kappa):.0f} remain" in found[0]
+
+
+@pytest.mark.parametrize("solver", ["vlm", "linear"])
+def test_large_condition_estimate_reaches_the_trust_of_the_result(solver, monkeypatch):
+    """Verify that the estimate of the solve reaches the trust warnings of the result.
+
+    The real estimate of a small wing is far below the limit, so it gives no
+    warning. A solve whose estimate is above the limit (here a scaled
+    estimate) gives the warning.
+    """
+    ac = _wing()
+    cond = vt.FlightCondition(V_inf=30.0, alpha=np.radians(4.0))
+    st = vt.SolverSettings(solver_type=solver, n_panels=6, report_condition=True)
+
+    normal = vt.analyze(ac, cond, st)
+    assert normal.details["condition_number"] < 1.0e10
+    assert not any("condition number" in w for w in normal.totals.trust.warnings)
+
+    real = core.lu_solve_with_condition
+
+    def scaled(A, rhs):
+        x, c = real(A, rhs)
+        return x, c * 1.0e12
+
+    monkeypatch.setattr(core, "lu_solve_with_condition", scaled)
+    bad = vt.analyze(ac, cond, st)
+    assert bad.details["condition_number"] > 1.0e10
+    assert any("Ill-conditioned system matrix" in w for w in bad.totals.trust.warnings)
+    # The default (no estimate) gives no check.
+    plain = vt.analyze(ac, cond, vt.SolverSettings(solver_type=solver, n_panels=6))
+    assert not any("condition number" in w for w in plain.totals.trust.warnings)
