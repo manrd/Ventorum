@@ -772,6 +772,78 @@ def test_ground_effect_trim_stops_after_three_passes(monkeypatch):
     assert res.result is not None
     assert res.result.details["lattice"].n_chord == 19
     assert any("3 passes" in n and "20" in n for n in res.notes)
+    # Regression: the iterations and the history were those of the last pass
+    # only. Now the iterations are the total, and each pass keeps its history.
+    _check_pass_histories(res, n_passes=3)
+
+
+def _check_pass_histories(res, n_passes: int) -> None:
+    """Check the iteration count and the residual histories of a trim with *n_passes* passes."""
+    hists = res.pass_residual_histories
+    assert len(hists) == n_passes
+    assert all(len(h) >= 1 for h in hists)
+    joined = [r for h in hists for r in h]
+    np.testing.assert_array_equal(np.asarray(res.residual_history), np.asarray(joined))
+    assert res.iterations == sum(len(h) - 1 for h in hists)
+    assert len(res.residual_history) == res.iterations + n_passes
+    data = json.loads(json.dumps(res.to_dict(), allow_nan=False))
+    assert len(data["pass_residual_histories"]) == n_passes
+
+
+@pytest.mark.slow
+def test_ground_effect_trim_returns_the_trimmed_pass_when_a_later_pass_fails(monkeypatch):
+    """Verify that a later pass that fails gives the trimmed state of the pass before it.
+
+    Regression: the failed pass was returned as the result (status
+    "not_converged"), although the pass before it had a trimmed state. Now
+    the result is that trimmed state, with a note that its chordwise count is
+    not the automatic count of the trimmed state, and the note gives that count.
+    """
+    from ventorum.core.errors import GroundStrikeError
+
+    sequence = iter([17, 18])
+    monkeypatch.setattr(trimming, "_automatic_ground_n_chord", lambda *args: next(sequence))
+    real_analyze = vt.analyze
+    pass2_calls = []
+    counts: list[int] = []
+
+    def failing(*args, **kwargs):
+        st_used = kwargs.get("settings")
+        if st_used is not None and st_used.n_chord == 18:
+            pass2_calls.append(1)
+            if len(pass2_calls) == 2:
+                raise GroundStrikeError("test failure in the second pass")
+        sol = real_analyze(*args, **kwargs)
+        counts.append(int(sol.details["lattice"].n_chord))
+        return sol
+
+    monkeypatch.setattr(vt, "analyze", failing)
+    ac, st, cond = _ground_trim_case()
+
+    res = vt.trim(ac, cond, st, CL_target=0.45, pitch_control="elevator", alpha_bounds_deg=(0.5, 2.0))
+
+    assert len(pass2_calls) == 2
+    assert res.status == "trimmed"
+    assert res.converged
+    assert res.result is not None
+    assert res.result.details["lattice"].n_chord == 17
+    assert res.CL == pytest.approx(0.45, abs=1.0e-6)
+    assert res.Cm == pytest.approx(0.0, abs=1.0e-7)
+    note = [n for n in res.notes if "did not converge" in n and "pass 2" in n]
+    assert len(note) == 1
+    assert "n_chord = 17" in note[0] and "not the automatic chordwise count" in note[0] and "18" in note[0]
+    assert any(n.startswith("Pass 2: ") and "test failure" in n for n in res.notes)
+    # The aircraft has the deflections of the reported (trimmed) state.
+    elev = [c for c in res.aircraft.surfaces[1].controls if c.name == "elevator"][0]
+    assert np.degrees(elev.deflection) == pytest.approx(res.deflections_deg["elevator"], abs=1.0e-12)
+    check = vt.analyze(res.aircraft, vt.FlightCondition(V_inf=30.0, alpha=np.radians(res.alpha_deg), h=cond.h),
+                       vt.SolverSettings(solver_type="vlm", n_chord=17))
+    assert check.totals.CL == pytest.approx(res.CL, abs=1.0e-9)
+    _check_pass_histories(res, n_passes=2)
+    # The second pass evaluated its start point; its Jacobian then failed.
+    assert len(res.pass_residual_histories[1]) == 1
+    assert np.isfinite(res.pass_residual_histories[1][0])
+    assert res.pass_residual_histories[1][0] > 1.0e-6
 
 
 @pytest.mark.slow
@@ -806,3 +878,6 @@ def test_trim_out_of_ground_effect_keeps_the_settings(monkeypatch):
     assert len(set(counts)) == 1
     assert not any("n_chord" in n for n in res.notes)
     assert st.n_chord is None
+    # One pass: its history is the residual history.
+    assert res.pass_residual_histories == [res.residual_history]
+    assert len(res.residual_history) == res.iterations + 1

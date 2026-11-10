@@ -347,7 +347,10 @@ def wing_analysis(
         ``V_inf_m_s``, ``alpha_deg``, ``beta_deg``, ``rho_kg_m3`` or
         ``altitude_m``, ``h_m`` (ground effect).
     settings : dict or None
-        ``solver``, ``n_panels``, ``n_chord``, ``wake_alignment``.
+        ``solver``, ``n_panels``, ``n_chord``, ``wake_alignment``,
+        ``report_condition``. With ``report_condition`` true,
+        ``metrics["condition_number"]`` is the 1-norm condition estimate
+        of the system matrix [-] (None when the solve does not give it).
     detail_level : 'summary', 'standard' or 'full'
         ``full`` adds the spanwise arrays and ``dispatch``: the dispatch
         record of the solve (device, backends, threads, plan and reason),
@@ -385,6 +388,12 @@ def wing_analysis(
         m["moments"] = moments_all_sets(
             res.totals.Cl, res.totals.Cm, res.totals.Cn, c["alpha_deg"], c["beta_deg"],
             b_ref=b_ref, c_ref=c_ref)
+    if sett.report_condition:
+        # 1-norm condition estimate of the system matrix; None on the GPU, for
+        # the solvers that do not give it, and for a singular matrix (the
+        # trust then has a warning).
+        kappa = res.details.get("condition_number") if isinstance(res.details, dict) else None
+        m["condition_number"] = (float(kappa) if kappa is not None and np.isfinite(kappa) else None)
     trust = trust_payload(res.totals.trust)
     rp = ac.moment_reference()
     where = "free air" if c["h_m"] is None else f"h={c['h_m']:g} m above the ground"

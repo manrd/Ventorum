@@ -1376,8 +1376,11 @@ class SolverSettings:
         so the circulation can differ in the last bits and a batch solves
         its matrices one at a time. The GPU pipelines do not give the
         estimate: ``details["condition_number"]`` is then None and
-        ``details["notes"]`` says so. The other solvers ignore it. Default
-        False: the solve path and the results do not change.
+        ``details["notes"]`` says so. The other solvers ignore it. An
+        estimate above 1e10 (or not finite) gives a trust warning
+        (:data:`ventorum.core.trust.CONDITION_NUMBER_WARNING`): about 10 of
+        the 16 significant float64 digits of the circulation can be lost.
+        Default False: the solve path and the results do not change.
     """
 
     solver_type: Literal["auto", "vlm", "linear", "nonlinear", "fourier"] | str = "auto"
@@ -1505,11 +1508,19 @@ class SpanwiseResult:
         effective angle of the linear section, ``alpha_L0 + Cl / a0``, uses
         this value.
     Cd_i, Cd_profile : numpy.ndarray
-        Section induced-drag and profile-drag coefficients [-].
+        Section induced-drag and profile-drag coefficients [-]. On a
+        lattice strip ``Cd_i`` is the strip part of the Trefftz-plane
+        induced drag, ``-Gamma w_n ds / (V_inf^2 c w)``, with ``w_n`` [m/s]
+        the normalwash in the Trefftz plane, ``ds`` [m] the length of the
+        trailing segment and ``w`` [m] the strip width. It stays on the
+        free-stream dynamic pressure also with body rates: the strips sum
+        to the total induced drag ``CDi``, which uses ``V_inf`` (the wake
+        and the Trefftz plane stay along the free stream).
     alpha_eff, alpha_i : numpy.ndarray
         Effective and induced angle of attack of each strip [rad].
     local_lift : numpy.ndarray
-        Lift per unit span [N/m].
+        Lift per unit span [N/m], ``rho V_inf Gamma`` on a lattice strip.
+        It uses the free-stream speed also with body rates.
     chord : numpy.ndarray or None
         Strip chord [m].
     Cm_section : numpy.ndarray or None
