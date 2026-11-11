@@ -96,7 +96,13 @@ def test_continuation_matches_cold_where_cold_converges():
 
 @pytest.mark.slow
 def test_failed_step_is_reported():
-    """An impossible case returns not converged with reached deflection and no exception."""
+    """An impossible case returns not converged with reached deflection and no exception.
+
+    The reached deflection is the largest converged deflection of the step path, so it depends on the
+    path. With the length weights of the interior wake stations the step from 18.125 to 19.375 deg
+    converges (it failed with the former plain mean), so the later steps fall on other deflections, and
+    the path stops at 38.0859375 deg (before: 38.75 deg). Both paths end between 38 and 40 deg.
+    """
     base = airfoil("2412").repanel(n_panels=160)
     r40 = solve_viscous_flapped(base, 0.0, 1e6, x_hinge=0.75, deflection_deg=40.0)
 
@@ -105,8 +111,9 @@ def test_failed_step_is_reported():
     assert np.isnan(r40.Cd)
     assert "reached" in r40.reason.lower()
     assert "deg" in r40.reason.lower()
-    assert r40.reached_deflection == 38.75
-    assert r40.details["reached_deflection"] == 38.75
+    assert r40.reached_deflection == 38.0859375
+    assert r40.details["reached_deflection"] == 38.0859375
+    assert r40.reached_deflection == max(d for d, ok, _ in r40.step_history if ok)
     assert len(r40.step_history) > 0
     assert r40.step_history[-1][1] is False
     assert isinstance(r40.step_history[-1][2], (int, np.integer))

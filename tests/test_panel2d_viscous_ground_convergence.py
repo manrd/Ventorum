@@ -252,14 +252,14 @@ def test_zero_lift_start_does_not_retry(monkeypatch):
 @pytest.mark.slow
 @pytest.mark.parametrize("height,alphas,expected", [
     (0.5, 0.0, {
-        "Cl": -0.04369472494881709, "Cd": 0.006227273996078116,
-        "Cm": 0.007747045631031554, "iterations": 19,
+        "Cl": -0.043692190463068326, "Cd": 0.006227655458166425,
+        "Cm": 0.007746622772972753, "iterations": 19,
         "newton_iterations": 19, "linear_solves": 19, "newton_solves": 1,
     }),
     (None, [0.0, 2.0, 4.0], {
-        "Cl": [-6.713379852030243e-16, 0.20654190290719307, 0.4144975148568998],
-        "Cd": [0.005990709078866008, 0.006464657284215485, 0.007887538947373655],
-        "Cm": [1.4577098209067607e-16, 0.004286071087666402, 0.008342647042727618],
+        "Cl": [-6.375108774214766e-16, 0.20651733529175564, 0.41447571631957375],
+        "Cd": [0.005991106907818574, 0.0064649960462908425, 0.007888126934412442],
+        "Cm": [1.3720578492804059e-16, 0.004291754868394739, 0.008347585741137413],
         "iterations": [16, 17, 18], "newton_iterations": [16, 17, 18],
         "linear_solves": [16, 17, 18], "newton_solves": [1, 1, 1],
     }),
@@ -272,8 +272,8 @@ def test_unstopped_cold_and_warm_results_keep_their_values(height, alphas, expec
     level of the convergence tolerance and the work counts may differ by a
     few iterations.
     """
-    # Generated before the change at commit 7e627bce0a8c1cce06ccdbf2b0286b60efca8013.
-    # NACA 0012: 61 nodes, Re 1e6, default solver settings, two-thread environment.
+    # Generated with the length weights of the interior wake stations (solver revision 2026-11-11.1).
+    # NACA 0012: 61 nodes, Re 1e6, default solver settings, one-thread environment.
     result = vs.solve_viscous(airfoil("0012", n_points=61), alphas, 1e6, height=height)
     assert np.all(result.converged), result.reason
     for name, values in expected.items():
@@ -289,48 +289,55 @@ def test_unstopped_cold_and_warm_results_keep_their_values(height, alphas, expec
 
 @pytest.mark.slow
 def test_ground_repro_converges_with_monotonic_lift():
-    """NACA 4412 at 4 deg and Re 1e6 converges across the failed heights [m]."""
+    """NACA 4412 at 4 deg and Re 1e6 converges across the failed heights [m].
+
+    The heights 0.8 and 1.0 failed before the retry of the quasi-simultaneous first estimate, and the
+    retry rescued them. With the length weights of the interior wake stations and the relaxed
+    quasi-simultaneous sweeps they converge without the retry (measured: no height of the grid of
+    test_ground_height_grid_converges uses the retry now), so the test requires convergence, the
+    residual and the work, not the retry. The retry itself is tested by the other tests of this file.
+    """
     shape = airfoil("4412", n_points=161)
     results = [vs.solve_viscous(shape, [4.0], 1e6, height=h) for h in (0.5, 0.8, 1.0, 1.5)]
     assert all(np.all(r.converged) for r in results), [r.reason for r in results]
     assert np.all(np.diff([r.Cl[0] for r in results]) < 0.0)
     for result in results[1:3]:
-        assert "retry" in result.reason[0]
         assert result.residual[0] < 1e-6
         assert result.newton_iterations[0] <= vs.WORK_BUDGET
 
 
-# Generated on commit 7e627bc, NACA 4412, 161 nodes, 4 deg, Re 1e6.
+# Generated with the length weights of the interior wake stations and the start strategies of the
+# solver revision 2026-11-11.1 (one-thread environment). NACA 4412, 161 nodes, 4 deg, Re 1e6.
 # Each tuple holds h/c [-], Cl [-], Cd [-] and all Newton iterations [-].
 _BASELINE_GROUND = [
-    (0.3, 0.9531481373622906, 0.0066211888816142365, 126),
-    (0.4, 0.9241297344267764, 0.0067374163497281245, 139),
-    (0.5, 0.9077149883817701, 0.006828083632150489, 74),
-    (0.6, 0.8978539576459436, 0.0069016410086535935, 93),
-    (0.7, None, None, 92),
-    (0.8, None, None, 96),
-    (0.9, 0.8857953033961473, 0.007055251449109737, 132),
-    (1.0, None, None, 105),
-    (1.1, None, None, 69),
-    (1.2, 0.8833683721135536, 0.007155404971392701, 133),
-    (1.3, None, None, 108),
-    (1.4, 0.8834445106215448, 0.007204857668090244, 87),
-    (1.5, 0.8836997319932497, 0.007225894204390919, 93),
-    (1.6, 0.8840372933175253, 0.0072449286995900615, 102),
-    (1.7, 0.8844279554313729, 0.007262229333964469, 216),
-    (1.8, None, None, 250),
-    (1.9, 0.8852928515384123, 0.007292485353469964, 82),
-    (2.0, None, None, 250),
-    (2.1, 0.8861933472065198, 0.007318053045871725, 102),
-    (2.2, None, None, 250),
-    (2.3, 0.8870795459158601, 0.007339934490707898, 81),
-    (2.4, 0.887509203586706, 0.007349730968473838, 217),
-    (2.5, 0.8879275811615636, 0.007358866772713231, 86),
-    (2.6, 0.8883337274266404, 0.0073674056031519585, 114),
-    (2.7, 0.8887271050244128, 0.007375403925168447, 96),
-    (2.8, 0.8891074845256571, 0.007382911144940258, 69),
-    (2.9, 0.8894748560132977, 0.007389970864516792, 123),
-    (3.0, 0.8898293662359457, 0.007396621444341924, 138),
+    (0.3, 0.9531226948196488, 0.006623107045503646, 134),
+    (0.4, 0.9241018086448973, 0.006739203326902924, 142),
+    (0.5, 0.9076812429241111, 0.006829822636608692, 202),
+    (0.6, 0.8978250388711114, 0.006903295187759113, 201),
+    (0.7, None, None, 218),
+    (0.8, None, None, 131),
+    (0.9, 0.8857672507166842, 0.007056817085067056, 139),
+    (1.0, None, None, 126),
+    (1.1, None, None, 115),
+    (1.2, 0.8833407694628899, 0.007156947077280827, 136),
+    (1.3, None, None, 134),
+    (1.4, 0.8834170789099528, 0.007206394516815438, 150),
+    (1.5, 0.8836749658843072, 0.00722744593443187, 214),
+    (1.6, 0.8840099651655114, 0.007246464062543222, 214),
+    (1.7, 0.8844006647011214, 0.0072637646890125595, 185),
+    (1.8, None, None, 279),
+    (1.9, 0.885265472925404, 0.007294020275162975, 273),
+    (2.0, None, None, 293),
+    (2.1, 0.8861659803618196, 0.007319589834427724, 306),
+    (2.2, None, None, 360),
+    (2.3, 0.8870523327316073, 0.007341474308113431, 211),
+    (2.4, 0.8874819915902379, 0.007351271685967537, 199),
+    (2.5, 0.8879003862696289, 0.007360407940784891, 121),
+    (2.6, 0.8883065131144754, 0.00736894795379221, 245),
+    (2.7, 0.8886999026061962, 0.007376946977316944, 319),
+    (2.8, 0.8890802766766231, 0.007384455119416496, 149),
+    (2.9, 0.8894476419726463, 0.00739151574102193, 148),
+    (3.0, 0.8898021452507265, 0.007398167460515863, 140),
 ]
 
 
@@ -339,20 +346,24 @@ _BASELINE_GROUND = [
 def test_ground_height_grid_converges(height, cl, cd, iterations):
     """Keep baseline convergence and rescue first-estimate stagnation stops."""
     result = vs.solve_viscous(airfoil("4412", n_points=161), 4.0, 1e6, height=height)
-    if height in (1.8, 2.0, 2.2):
-        # These heights stopped on the single work budget of the whole solve.
-        # With the separate budgets of the continuation path they converge;
-        # newton_iterations now also counts the path work (293 to 318).
-        assert result.converged, (height, result.reason)
-        assert result.residual < 1e-6
-        return
     assert result.converged, (height, result.reason)
     assert result.residual < 1e-6
-    assert result.newton_iterations <= vs.WORK_BUDGET
+    # The work agrees with the stored count on every height (also where the loads are not stored).
+    # Other numpy and BLAS builds (CI) take another Newton path: up to 10 of about 120 iterations
+    # differ there.
+    assert abs(int(result.newton_iterations) - iterations) <= max(5, 0.25 * iterations)
+    if iterations <= vs.WORK_BUDGET:
+        assert result.newton_iterations <= vs.WORK_BUDGET
+    # Else newton_iterations also counts the work of the continuation path (the cold start at the
+    # zero-lift angle and the continuation steps), which has its own budgets (COLD_START_BUDGET and
+    # STEP_BUDGET). With the relaxed quasi-simultaneous sweeps the cold start at the zero-lift angle
+    # converges more often; a continuation step can then stop before the cold start at the angle
+    # converges (traced at h/c 0.5: 202 iterations against 85 before). Measured: 273 to 360 here.
     if cl is None:
-        # These heights failed before the retry. On this machine they converge
-        # through the retry; other numpy and BLAS builds (CI) can converge
-        # them directly. Convergence is the requirement.
+        # These heights failed before the retry of the quasi-simultaneous
+        # first estimate. Now they converge without it on this machine;
+        # other numpy and BLAS builds (CI) can take other paths.
+        # Convergence is the requirement.
         pass
     elif "retry" not in result.reason:
         # Bit-identical on the machine that made the baseline. Other numpy and
@@ -360,4 +371,3 @@ def test_ground_height_grid_converges(height, cl, cd, iterations):
         # level of the convergence tolerance and the work differs by a few
         # iterations (up to 10 of about 120 seen on CI).
         assert np.allclose([result.Cl, result.Cd], [cl, cd], rtol=1e-5, atol=1e-9)
-        assert abs(int(result.newton_iterations) - iterations) <= max(5, 0.25 * iterations)
