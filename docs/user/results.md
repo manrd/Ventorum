@@ -4,7 +4,7 @@
 
 | Attribute | Content |
 | --- | --- |
-| `totals` | Integrated coefficients: `CL`, `CDi` (Trefftz plane), `CDp`, `CD_total`, `e`, `CY`, `Cl`, `Cm`, `Cn`, the far-field diagnostics `CY_farfield` (wind axes) and `Cn_trefftz` (stability axes; both None for the Fourier solver), and the trust score |
+| `totals` | Integrated coefficients: `CL`, `CDi` (Trefftz plane), `CDp`, `CD_total`, `e`, `CY`, `Cl`, `Cm`, `Cn`, the far-field diagnostics `CY_farfield` (wind axes) and `Cn_trefftz` (stability axes; both None for the Fourier solver; for the 3D panel solver `CY_farfield` is None, and both are None with the viscous coupling), and the trust score |
 | `spanwise` | One `SpanwiseResult` per surface: circulation, section lift, induced drag, effective angle of attack |
 | `converged` | False if the solver did not meet its tolerance |
 | `details` | Solver data (lattice, circulation, wake direction, ground plane, dispatch) for plots and checks |

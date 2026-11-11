@@ -20,7 +20,8 @@ Checks:
   Kutta, gpu) satisfies the formula above;
 * results without rates are unchanged;
 * the yaw-rate derivatives CY_r and Cn_r of a rectangular wing agree with
-  the vortex lattice (stability axes);
+  the vortex lattice (stability axes): the near-field Cn_r is a known limit
+  on the 16 x 16 mesh, the far-field Cn_r (from Cn_trefftz) agrees;
 * the viscous strip coupling uses the same Cp.
 
 The derivation of the formula and of the sphere force is in the theory
@@ -330,10 +331,16 @@ def test_results_without_rates_are_unchanged(case):
 # ---------------------------------------------------------------------------
 
 #: Agreement of the 3DP and VLM yaw-rate derivatives [-], relative. The
-#: 3DP wing is thick (NACA 0012) and the lattice is thin, and Cn_r is a
-#: small difference of near-field pressure drag terms, so only a loose
-#: agreement is expected. On the 16 x 16 mesh: CY_r -0.00307 against
-#: -0.00289 and Cn_r -0.00156 against -0.00170.
+#: 3DP wing is thick (NACA 0012) and the lattice is thin, and the
+#: near-field Cn_r is a small difference of near-field pressure drag
+#: terms, so only a loose agreement is expected. On the 16 x 16 mesh, with
+#: the least-squares node values of the surface gradient: CY_r -0.003067
+#: against -0.002886; near-field Cn_r -0.002537 against -0.001702 (+49 %,
+#: the known limit below: the first upper leading-edge panel row of a
+#: 16-panel cosine chord is too slow, see the theory manual envelope);
+#: far-field Cn_r (from Cn_trefftz) -0.001777 against the lattice
+#: near-field -0.001702 (+4.4 %) and the lattice far-field -0.001629
+#: (+9.1 %). The far-field value does not use the surface gradient.
 YAW_TOLERANCE = 0.25
 
 
@@ -377,6 +384,96 @@ def test_yaw_rate_derivatives_agree_with_the_vortex_lattice():
         p3, vlm = panel[row, 2], lattice[row, 2]
         assert vlm < 0.0 and p3 < 0.0, f"{name}: 3DP {p3:.5f}, VLM {vlm:.5f}"
         assert p3 == pytest.approx(vlm, rel=YAW_TOLERANCE), f"{name}: 3DP {p3:.5f}, VLM {vlm:.5f}"
+
+
+def _far_field_yaw_rate(aircraft, condition, settings, step=0.01):
+    """Stability-axis Cn_r [-] of Cn_trefftz, central difference in the stability yaw rate.
+
+    ``Cn_trefftz`` is already in stability axes. The stability yaw rate
+    ``r_s`` (nondimensional ``r_s b / (2 V)`` = *step*) is the body rates
+    ``p = -r_s sin(alpha)``, ``r = r_s cos(alpha)`` [rad/s].
+    """
+    rate = step * 2.0 * condition.V_inf / 8.0
+    values = []
+    for sign in (1.0, -1.0):
+        cond = dataclasses.replace(condition, p=-sign * rate * np.sin(condition.alpha),
+                                   r=sign * rate * np.cos(condition.alpha))
+        values.append(vt.analyze(aircraft, condition=cond, settings=settings).totals.Cn_trefftz)
+    return (values[0] - values[1]) / (2.0 * step)
+
+
+@pytest.mark.slow
+def test_far_field_yaw_damping_agrees_with_the_vortex_lattice():
+    """AR 8 NACA 0012 wing, alpha 4 deg: the 3DP far-field Cn_r agrees with the lattice Cn_r.
+
+    The far-field Cn_r comes from the Trefftz-plane yawing moment of the
+    wake strips (``Cn_trefftz``). It does not use the surface gradient,
+    so it does not have the coarse-mesh leading-edge error of the
+    near-field value (the known limit above). It is compared with the
+    lattice near-field Cn_r of the test above and with the lattice
+    far-field Cn_r.
+    """
+    secs = [WingSection(0.0, 1.0, x_le=-0.25, shape="0012"),
+            WingSection(1.0, 1.0, x_le=-0.25, shape="0012")]
+    aircraft = Aircraft(surfaces=[LiftingSurface(semi_span=4.0, sections=secs)])
+    condition = FlightCondition(V_inf=30.0, alpha=np.radians(4.0))
+    panel = _far_field_yaw_rate(aircraft, condition,
+                                SolverSettings(solver_type="panel3d", n_panels=16, n_chord=16))
+    lattice_settings = SolverSettings(solver_type="vlm", n_panels=40, n_chord=8)
+    lattice = _rate_matrix(aircraft, condition, lattice_settings)[5, 2]
+    lattice_far = _far_field_yaw_rate(aircraft, condition, lattice_settings)
+    for name, vlm in (("near field", lattice), ("far field", lattice_far)):
+        assert vlm < 0.0 and panel < 0.0, f"Cn_r, lattice {name}: 3DP {panel:.6f}, VLM {vlm:.6f}"
+        assert panel == pytest.approx(vlm, rel=YAW_TOLERANCE), f"Cn_r, lattice {name}: 3DP {panel:.6f}, VLM {vlm:.6f}"
+
+
+def _upper_row_speed_errors(n_chord, reference):
+    """Speed error [-] of the first upper panel row against a fine chord, per station.
+
+    Base flow (alpha 4 deg, no rates) on the wing of the yaw-rate test, 16
+    spanwise panels per semi-span. The speed is ``sqrt(1 - Cp)``; the
+    reference speed is the speed of the *reference* mesh, interpolated
+    linearly at the same x on the same station.
+    """
+    secs = [WingSection(0.0, 1.0, x_le=-0.25, shape="0012"),
+            WingSection(1.0, 1.0, x_le=-0.25, shape="0012")]
+    aircraft = Aircraft(surfaces=[LiftingSurface(semi_span=4.0, sections=secs)])
+    condition = FlightCondition(V_inf=30.0, alpha=np.radians(4.0))
+
+    def upper(nc):
+        res = vt.analyze(aircraft, condition=condition,
+                         settings=SolverSettings(solver_type="panel3d", n_panels=16, n_chord=nc))
+        mesh = res.details["mesh"]
+        centroid = mesh.nodes[mesh.panels].mean(axis=1)
+        keep = (np.asarray(mesh.kind) == "surface") & (np.asarray(mesh.side) == 1)
+        speed = np.sqrt(1.0 - np.asarray(res.details["cp"]))
+        return centroid[keep], speed[keep], np.asarray(mesh.chord_index)[keep]
+
+    fine_c, fine_v, _ = upper(reference)
+    c, v, ci = upper(n_chord)
+    errors = []
+    for k in np.flatnonzero((ci == 0) & (c[:, 1] > 0.0)):
+        station = np.flatnonzero(np.abs(fine_c[:, 1] - c[k, 1]) < 1e-6)
+        station = station[np.argsort(fine_c[station, 0])]
+        errors.append(v[k] / np.interp(c[k, 0], fine_c[station, 0], fine_v[station]) - 1.0)
+    return np.array(errors)
+
+
+@pytest.mark.slow
+def test_coarse_leading_edge_row_speed_converges_with_the_chord():
+    """Known limit of the least-squares node values: the first upper row of a coarse chord is too slow.
+
+    Against a 48-panel chord, the median speed error of the first upper
+    panel row is about -9.6 % with 16 chordwise panels and -6.3 % with 24
+    (theory manual, Envelope, coarse-mesh leading-edge speed). The error
+    falls with chord refinement. This error is the cause of the near-field
+    Cn_r known limit above.
+    """
+    coarse = _upper_row_speed_errors(16, 48)
+    medium = _upper_row_speed_errors(24, 48)
+    assert np.all(coarse < 0.0) and np.all(medium < 0.0)
+    assert -0.12 < np.median(coarse) < -0.07
+    assert abs(np.median(medium)) < 0.75 * abs(np.median(coarse))
 
 
 def test_roll_rate_gives_no_side_force_on_a_planar_wing():

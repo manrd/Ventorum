@@ -954,8 +954,11 @@ def _evaluate_conditions_on_device(
 
     Return host float64 arrays: mu (K, N) [m^2/s], sigma (K, N) [m/s],
     velocity (K, Nf, 3) [m/s], Cp (K, Nf) [-], total force (K, 3) [N],
-    total moment (K, 3) [N m] and Trefftz drag (K,) [-]. Pressure loads
-    and Trefftz drag use float64, as in the old host post-processing.
+    total moment (K, 3) [N m], Trefftz drag (K,) [-] and the Trefftz strip
+    terms ``Gamma_s w_n,s l_s`` (K, Ns) [m^3/s^2] (zero columns for a body
+    without a wake; the host gives the Trefftz yawing moment from them).
+    Pressure loads and Trefftz drag use float64, as in the old host
+    post-processing.
     """
     import torch
 
@@ -1017,6 +1020,7 @@ def _evaluate_conditions_on_device(
     # The force of a constant Cp acts at the area centroid of the panel.
     moment = torch.linalg.cross(geometry["moment_arm"][None, :, :], force, dim=-1)
     cdi = torch.zeros_like(speeds)
+    strip = torch.zeros((len(coeffs), 0), dtype=torch.float64, device=dev)
     if trefftz is not None:
         factors, up, lo, s_ref, ground = trefftz
         gamma = _trefftz_gamma(mu, c64, geometry, up, lo)
@@ -1026,9 +1030,10 @@ def _evaluate_conditions_on_device(
         vy, vz, ny, nz, length = factors
         wash = (_sum_batch_axis(gv[:, None, :] * vy[None], -1) * ny
                 + _sum_batch_axis(gv[:, None, :] * vz[None], -1) * nz)
-        drag = -0.5 * densities * _sum_batch_axis(gamma * wash * length, 1)
+        strip = gamma * wash * length
+        drag = -0.5 * densities * _sum_batch_axis(strip, 1)
         if s_ref > 1e-12:
             cdi = torch.where(valid, drag / (q * s_ref), 0.0)
     return tuple(t.to(torch.float64).cpu().numpy() for t in (
-        mu, sigma, velocity, cp, _sum_batch_axis(force, 1), _sum_batch_axis(moment, 1), cdi,
+        mu, sigma, velocity, cp, _sum_batch_axis(force, 1), _sum_batch_axis(moment, 1), cdi, strip,
     ))

@@ -1696,7 +1696,9 @@ class IntegratedResult:
       the moment reference point, in stability axes (``Cn > 0`` nose right).
       Both are diagnostics that show where the near field is weak; the
       near-field ``CY`` and ``Cn`` stay the result values. They are None
-      for the Fourier solver.
+      for the Fourier solver. The 3D panel solver gives ``Cn_trefftz``
+      and not ``CY_farfield`` (None); with the viscous coupling both are
+      None.
     * ``Cl``, ``Cm``, ``Cn`` are body-axis moments about the reference point
       in the standard aircraft convention: ``Cl > 0`` right wing down,
       ``Cm > 0`` nose up, ``Cn > 0`` nose right. Static stability needs

@@ -10,6 +10,13 @@ a minor version can change a public interface.
 
 ### Added
 
+- 3D panel solver: `totals.Cn_trefftz` (it was None), the yawing moment of the Trefftz-plane
+  induced drag of the wake strips in stability axes, with the rule of the vortex lattice
+  (`Cn > 0` nose right). The single-condition, batch, pressure Kutta and GPU paths fill it; a
+  symmetric flow on a half mesh gives 0 exactly. New function
+  `ventorum.panel3d.post.compute_trefftz_yawing_moment` and field `PanelResult.Cn_trefftz`. No
+  existing value changes. It gives a far-field yaw damping `Cn_r` that does not have the
+  coarse-mesh leading-edge error of the near-field value (theory manual, 3D panel envelope).
 - Trust notes and warnings for the measured mesh-convergence limits (no change of the score and
   of the results). Notes: a vortex-lattice junction of joined surfaces with a fold above 30 deg (a
   winglet); a root fold above 5 deg on the lattice solvers (the near-field CL drifts by a constant

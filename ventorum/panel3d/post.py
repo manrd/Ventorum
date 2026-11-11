@@ -73,6 +73,7 @@ __all__ = [
     "compute_surface_gradient",
     "compute_surface_velocity_and_cp",
     "compute_trefftz_induced_drag",
+    "compute_trefftz_yawing_moment",
     "integrate_forces_and_moments",
     "surface_gradient",
 ]
@@ -1693,14 +1694,17 @@ def _trefftz_factors(wake, wake_dir=None, ground=None):
     return -rq[..., 1] / denom, rq[..., 0] / denom, normal[:, 0], normal[:, 1], length
 
 
-def _trefftz_batch(gamma, speed, rho, S_ref, factors, ground=False):
+def _trefftz_batch(gamma, speed, rho, S_ref, factors, ground=False, return_strips=False):
     """Return Trefftz drag coefficients [-] for circulation (K, Ns) in m^2/s.
 
     Speed and density have shape (K,) in m/s and kg/m^3. S_ref is in m^2.
     Factors are from :func:`_trefftz_factors`. Ground selects image vortices.
+    With *return_strips*, also return the strip terms ``Gamma_s w_n,s l_s``
+    [m^3/s^2] with shape (K, Ns) (the input of :func:`_trefftz_yaw_batch`).
     """
     if gamma.shape[1] == 0 or S_ref <= 1e-12:
-        return np.zeros(len(speed))
+        zeros = np.zeros(len(speed))
+        return (zeros, np.zeros(gamma.shape)) if return_strips else zeros
     gamma = np.ascontiguousarray(gamma)
     vy, vz, ny, nz, length = factors
     gv = np.concatenate([gamma, -gamma], axis=1)
@@ -1708,64 +1712,35 @@ def _trefftz_batch(gamma, speed, rho, S_ref, factors, ground=False):
         gv = np.concatenate([gv, -gv], axis=1)
     wash = (np.sum(gv[:, None, :] * vy[None], axis=-1) * ny
             + np.sum(gv[:, None, :] * vz[None], axis=-1) * nz)
-    drag = -0.5 * rho * np.sum(gamma * wash * length, axis=1)
+    strip = gamma * wash * length
+    drag = -0.5 * rho * np.sum(strip, axis=1)
     ref = 0.5 * rho * speed**2 * S_ref
-    return np.divide(drag, ref, out=np.zeros_like(speed), where=speed > 1e-12)
+    cdi = np.divide(drag, ref, out=np.zeros_like(speed), where=speed > 1e-12)
+    return (cdi, strip) if return_strips else cdi
 
 
-def compute_trefftz_induced_drag(
+def _trefftz_strip_wash(
     wake: PanelWake,
     mu: np.ndarray,
-    V_inf: float,
-    rho: float,
-    S_ref: float,
-    *,
-    wake_dir: np.ndarray | None = None,
-    ground: tuple[np.ndarray, float] | None = None,
-    wake_gamma: np.ndarray | None = None,
-) -> float:
-    """Compute far-field induced drag from trailing vortex sheet in Trefftz plane.
+    wake_dir: np.ndarray | None,
+    ground: tuple[np.ndarray, float] | None,
+    wake_gamma: np.ndarray | None,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Return the strip circulations, normal wash and lengths of the Trefftz plane.
 
-    Each wake strip carries the circulation Gamma_s = mu_upper - mu_lower
-    (or *wake_gamma*). The trailing edges of the strips are projected on
-    the Trefftz plane (normal to the wake direction); each strip end
-    carries a 2D point vortex, +Gamma_s at the end with the larger
-    projection on n_w x d (n_w the strip normal on the upper side, d the
-    wake direction) and -Gamma_s at the other end. The normal wash at the strip midpoints gives
-    D_i = -0.5 * rho * sum(Gamma_s * w_n,s * l_s). The vortices have a core
-    of radius ``TREFFTZ_CORE_FRACTION`` times the mean strip length. In
-    ground effect the image vortices (the ends reflected in the ground,
-    with opposite circulation) add their normal wash (method of images).
-
-    Parameters
-    ----------
-    wake : PanelWake
-        Precomputed wake geometry.
-    mu : numpy.ndarray
-        Doublet strengths on body panels with shape (Np,) in m^2/s.
-    V_inf : float
-        Free-stream speed in m/s.
-    rho : float
-        Air density in kg/m^3.
-    S_ref : float
-        Reference area in m^2.
-    wake_dir : numpy.ndarray or None, optional
-        Wake direction with shape (3,) [-]. None is the body x axis.
-    ground : tuple of (numpy.ndarray, float) or None, optional
-        Ground plane (unit normal [-], offset [m]) with
-        ``dot(x, normal) = offset``. None is free air.
-    wake_gamma : numpy.ndarray or None, optional
-        Strip circulations with shape (Ns,) in m^2/s. None uses
-        ``mu[wake_up] - mu[wake_lo]``.
+    The rules are those of :func:`compute_trefftz_induced_drag`. The wake
+    must have at least one strip.
 
     Returns
     -------
-    float
-        Far-field induced drag coefficient CDi_trefftz.
+    gamma_w : numpy.ndarray
+        Strip circulations with shape (Ns,) in m^2/s.
+    w_n : numpy.ndarray
+        Normal wash at the strip midpoints with shape (Ns,) in m/s.
+    seg_len : numpy.ndarray
+        Strip trailing-edge lengths with shape (Ns,) in m.
     """
     n_strips = len(wake.wake_up)
-    if n_strips == 0 or V_inf <= 1.0e-12 or S_ref <= 1.0e-12:
-        return 0.0
 
     # Circulation of each wake strip: Gamma_s = mu_upper - mu_lower
     if wake_gamma is None:
@@ -1831,11 +1806,7 @@ def compute_trefftz_induced_drag(
             v_y_ind = float(np.sum(gv * vy))
             v_z_ind = float(np.sum(gv * vz))
             w_n[s] = v_y_ind * qn[s, 1] + v_z_ind * qn[s, 2]
-
-        # Induced drag: D_i = -0.5 * rho * sum(Gamma_s * w_n,s * l_s)
-        d_ind = -0.5 * rho * float(np.sum(gamma_w * w_n * seg_len))
-        q_inf = 0.5 * rho * V_inf**2
-        return float(d_ind / (q_inf * S_ref))
+        return gamma_w, w_n, seg_len
 
     # General Trefftz plane normal to the wake direction, with ground images.
     _, e1, e2 = _trefftz_plane_basis(
@@ -1863,6 +1834,201 @@ def compute_trefftz_induced_drag(
     v1 = np.sum(-gv[None, :] * rq[..., 1] / denom, axis=1)
     v2 = np.sum(gv[None, :] * rq[..., 0] / denom, axis=1)
     w_n = v1 * qn2[:, 0] + v2 * qn2[:, 1]
-    d_ind = -0.5 * rho * float(np.sum(gamma_w * w_n * seg_len))
+    return gamma_w, w_n, seg_len
+
+
+def compute_trefftz_induced_drag(
+    wake: PanelWake,
+    mu: np.ndarray,
+    V_inf: float,
+    rho: float,
+    S_ref: float,
+    *,
+    wake_dir: np.ndarray | None = None,
+    ground: tuple[np.ndarray, float] | None = None,
+    wake_gamma: np.ndarray | None = None,
+) -> float:
+    """Compute far-field induced drag from trailing vortex sheet in Trefftz plane.
+
+    Each wake strip carries the circulation Gamma_s = mu_upper - mu_lower
+    (or *wake_gamma*). The trailing edges of the strips are projected on
+    the Trefftz plane (normal to the wake direction); each strip end
+    carries a 2D point vortex, +Gamma_s at the end with the larger
+    projection on n_w x d (n_w the strip normal on the upper side, d the
+    wake direction) and -Gamma_s at the other end. The normal wash at the strip midpoints gives
+    D_i = -0.5 * rho * sum(Gamma_s * w_n,s * l_s). The vortices have a core
+    of radius ``TREFFTZ_CORE_FRACTION`` times the mean strip length. In
+    ground effect the image vortices (the ends reflected in the ground,
+    with opposite circulation) add their normal wash (method of images).
+
+    Parameters
+    ----------
+    wake : PanelWake
+        Precomputed wake geometry.
+    mu : numpy.ndarray
+        Doublet strengths on body panels with shape (Np,) in m^2/s.
+    V_inf : float
+        Free-stream speed in m/s.
+    rho : float
+        Air density in kg/m^3.
+    S_ref : float
+        Reference area in m^2.
+    wake_dir : numpy.ndarray or None, optional
+        Wake direction with shape (3,) [-]. None is the body x axis.
+    ground : tuple of (numpy.ndarray, float) or None, optional
+        Ground plane (unit normal [-], offset [m]) with
+        ``dot(x, normal) = offset``. None is free air.
+    wake_gamma : numpy.ndarray or None, optional
+        Strip circulations with shape (Ns,) in m^2/s. None uses
+        ``mu[wake_up] - mu[wake_lo]``.
+
+    Returns
+    -------
+    float
+        Far-field induced drag coefficient CDi_trefftz.
+    """
+    return _trefftz_drag_and_yaw(
+        wake, mu, V_inf, rho, S_ref, wake_dir=wake_dir, ground=ground, wake_gamma=wake_gamma,
+    )[0]
+
+
+def compute_trefftz_yawing_moment(
+    wake: PanelWake,
+    mu: np.ndarray,
+    condition: FlightCondition,
+    S_ref: float,
+    b_ref: float,
+    *,
+    wake_dir: np.ndarray | None = None,
+    ground: tuple[np.ndarray, float] | None = None,
+    wake_gamma: np.ndarray | None = None,
+    ref_point: np.ndarray | None = None,
+) -> float:
+    """Compute the yawing moment of the Trefftz-plane induced drag (stability axes).
+
+    The induced drag of each wake strip, ``D'_s = -0.5 rho Gamma_s w_n,s
+    l_s`` [N] (the strip terms of :func:`compute_trefftz_induced_drag`),
+    acts along the free stream at the strip midpoint. The arm ``a_s`` is
+    the vector from the reference point to the midpoint, projected on the
+    Trefftz plane. The moment is ``M_T = sum a_s x D'_s V_hat``, and
+    ``Cn_trefftz = -M_T . z_s / (q S_ref b_ref)`` with ``z_s`` the
+    stability z axis (the lift direction, up in the geometry axes). With
+    the lateral arm ``y_s`` this is ``sum D'_s y_s / (q S_ref b_ref)``:
+    more drag on the right wing gives ``Cn > 0`` (nose right). This is the
+    rule of the vortex-lattice ``Cn_trefftz``
+    (:func:`ventorum.aero.loads.trefftz_lateral_batch`). In ground effect
+    the normal wash includes the image vortices; the image strips carry no
+    moment.
+
+    Parameters
+    ----------
+    wake : PanelWake
+        Precomputed wake geometry (all strips of the full wake).
+    mu : numpy.ndarray
+        Doublet strengths on body panels with shape (Np,) in m^2/s.
+    condition : FlightCondition
+        Flight condition: speed [m/s], density [kg/m^3], alpha and beta
+        [rad].
+    S_ref : float
+        Reference area in m^2.
+    b_ref : float
+        Reference span in m.
+    wake_dir : numpy.ndarray or None, optional
+        Wake direction with shape (3,) [-]. None is the body x axis.
+    ground : tuple of (numpy.ndarray, float) or None, optional
+        Ground plane (unit normal [-], offset [m]). None is free air.
+    wake_gamma : numpy.ndarray or None, optional
+        Strip circulations with shape (Ns,) in m^2/s. None uses
+        ``mu[wake_up] - mu[wake_lo]``.
+    ref_point : numpy.ndarray or None, optional
+        Moment reference point with shape (3,) in m. None is the origin.
+
+    Returns
+    -------
+    float
+        Yawing-moment coefficient of the induced drag in stability axes [-].
+
+    References
+    ----------
+    * E. Trefftz, "Prandtlsche Tragflaechen- und Propeller-Theorie",
+      Zeitschrift fuer angewandte Mathematik und Mechanik 1, 1921: the
+      far-field plane of the trailing vortex sheet.
+    * J. Katz and A. Plotkin, "Low-Speed Aerodynamics", 2nd ed., Cambridge
+      University Press, 2001: the induced drag in the Trefftz plane.
+    * M. Drela, "Flight Vehicle Aerodynamics", MIT Press, 2014: the
+      far-field forces and moments of the trailing vortex sheet.
+    """
+    return _trefftz_drag_and_yaw(
+        wake, mu, float(condition.V_inf), float(condition.rho), S_ref,
+        wake_dir=wake_dir, ground=ground, wake_gamma=wake_gamma,
+        yaw=(condition, b_ref, ref_point),
+    )[1]
+
+
+def _trefftz_drag_and_yaw(
+    wake, mu, V_inf, rho, S_ref, *, wake_dir=None, ground=None, wake_gamma=None, yaw=None,
+):
+    """Return the Trefftz drag [-] and, with *yaw*, the Trefftz yawing moment [-].
+
+    *yaw* is (condition, b_ref [m], ref_point [m] or None), or None for no
+    yawing moment (the second value is then None). Speed is in m/s, density
+    in kg/m^3 and S_ref in m^2. See :func:`compute_trefftz_induced_drag`
+    and :func:`compute_trefftz_yawing_moment`.
+    """
+    n_strips = len(wake.wake_up)
+    if n_strips == 0 or V_inf <= 1.0e-12 or S_ref <= 1.0e-12:
+        return 0.0, (None if yaw is None else 0.0)
+    gamma_w, w_n, seg_len = _trefftz_strip_wash(wake, mu, wake_dir, ground, wake_gamma)
+    # Induced drag: D_i = -0.5 * rho * sum(Gamma_s * w_n,s * l_s)
+    strip = gamma_w * w_n * seg_len
+    d_ind = -0.5 * rho * float(np.sum(strip))
     q_inf = 0.5 * rho * V_inf**2
-    return float(d_ind / (q_inf * S_ref))
+    cdi = float(d_ind / (q_inf * S_ref))
+    if yaw is None:
+        return cdi, None
+    condition, b_ref, ref_point = yaw
+    _, _, _, lift, drag = _condition_arrays([condition])
+    cn = _trefftz_yaw_batch(
+        strip[None, :], np.array([V_inf]), np.array([rho]), lift, drag, S_ref, b_ref,
+        _trefftz_arms(wake, wake_dir, ref_point),
+    )
+    return cdi, float(cn[0])
+
+
+def _trefftz_arms(wake, wake_dir=None, ref_point=None):
+    """Return the Trefftz-plane arms of the strip midpoints [m], shape (Ns, 3).
+
+    The arm is the vector from *ref_point* [m] (None is the origin) to the
+    strip trailing-edge midpoint, projected on the Trefftz plane (normal to
+    the wake direction; None is the body x axis): ``a = r - (r . d) d``.
+    """
+    mid = 0.5 * (np.asarray(wake.p_left, dtype=float) + np.asarray(wake.p_right, dtype=float))
+    rp = np.zeros(3) if ref_point is None else np.asarray(ref_point, dtype=float).reshape(3)
+    d = (np.array([1.0, 0.0, 0.0]) if wake_dir is None
+         else np.asarray(wake_dir, dtype=float).reshape(3) / np.linalg.norm(wake_dir))
+    rel = mid.reshape(-1, 3) - rp[None, :]
+    return rel - (rel @ d)[:, None] * d[None, :]
+
+
+def _trefftz_yaw_batch(strip, speed, rho, lift, drag, S_ref, b_ref, arms):
+    """Return the Trefftz yawing moments in stability axes [-], shape (K,).
+
+    *strip* holds ``Gamma_s w_n,s l_s`` [m^3/s^2] with shape (K, Ns); the
+    strip induced drag is ``D'_s = -0.5 rho strip`` [N]. Speed and density
+    have shape (K,) in m/s and kg/m^3. Lift and drag are the unit wind axes
+    (K, 3) of :func:`_condition_arrays` [-]. S_ref is in m^2 and b_ref in m.
+    Arms are from :func:`_trefftz_arms` [m]. The moment is
+    ``Cn = -sum(a_s x D'_s V_hat) . L_hat / (q S b)``; the triple product
+    gives ``(a x V_hat) . L_hat = a . (V_hat x L_hat)``.
+    """
+    speed = np.asarray(speed, dtype=float)
+    rho = np.asarray(rho, dtype=float)
+    out = np.zeros(len(speed))
+    if strip.shape[1] == 0 or S_ref <= 1e-12 or b_ref is None or b_ref <= 1e-12:
+        return out
+    strip_drag = -0.5 * rho[:, None] * strip
+    # Fixed three-term products keep each row independent of the chunk size.
+    u = np.cross(drag, lift)
+    arm_u = u[:, 0, None] * arms[None, :, 0] + u[:, 1, None] * arms[None, :, 1] + u[:, 2, None] * arms[None, :, 2]
+    ref = 0.5 * rho * speed**2 * S_ref * b_ref
+    return np.divide(-np.sum(strip_drag * arm_u, axis=1), ref, out=out, where=speed > 1e-12)
