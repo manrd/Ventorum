@@ -367,7 +367,9 @@ SETTINGS_PROPS: dict[str, dict[str, Any]] = {
                                         "ventorum_wing_analysis gives it in metrics.condition_number, "
                                         "ventorum_polar_sweep in each row of polar_table and as "
                                         "polar_summary.condition_number_max, ventorum_trim as "
-                                        "condition_number of the reported trim point."},
+                                        "condition_number of the reported trim point, "
+                                        "ventorum_ground_effect in each row (each height), in free_air and "
+                                        "as summary.condition_number_max."},
 }
 
 DETAIL_LEVEL = {"type": "string", "enum": ["summary", "standard", "full"],
