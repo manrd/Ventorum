@@ -119,6 +119,7 @@ The image method of the inviscid solver; the image body carries the mirror image
 
 One body only: more bodies raise `ValueError`. A plain flap is part of the single-element geometry.
 
+Known limit: a strongly flapped section can have more than one converged solution of the same discrete equations. A study solved 12 strongly flapped sections (NACA 0012, 2412 and 4415; 120 and 160 panels; plain flaps of 10 and 15 deg at x/c 0.75 with the outline as constructed; Re 1e6; -2 to 8 deg in steps of 2 deg: 72 angles) from seven start strategies each (the sweep, the direct and the quasi-simultaneous first estimates, warm starts from the angles 2 deg lower and 2 deg higher, the cold path). At 1 of the 72 angles (NACA 4415, 160 panels, 15 deg flap, 6 deg) the warm start from the higher angle (8 deg) gave a second converged solution: $|\Delta C_l|$ 2.6e-3, $|\Delta C_d|/C_d$ 3.7e-3, $|\Delta C_m|$ 5.8e-4. The sweep, the quasi-simultaneous first estimate and the cold path gave the first solution. At the other 21 angles where two or more strategies converged, the solutions agreed to the Newton tolerance ($|\Delta C_l|$ below 1e-6). So for such sections the start path decides which solution the solver returns, and a change of the start strategies can move a converged result by this amount. The solver does not detect this case and gives no warning.
 
 ## Plain flap continuation in deflection
 
