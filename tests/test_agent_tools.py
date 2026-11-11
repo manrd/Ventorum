@@ -187,6 +187,47 @@ def test_trim_reports_the_condition_number_of_the_trim_point():
     assert on["condition_number"] == pytest.approx(ref["metrics"]["condition_number"], rel=1.0e-6)
 
 
+def test_ground_effect_reports_the_condition_number_per_height():
+    """Verify that report_condition gives the condition estimate of each height of ventorum_ground_effect.
+
+    Regression: the height sweep accepted the setting but did not report
+    the value. Each row must equal a single analysis at that height with
+    the same mesh, and the free-air value a single free-air analysis.
+    """
+    from ventorum import gpu
+
+    heights = [0.5, 1.5]
+    mesh = {**FAST, "n_chord": 4, "report_condition": True}
+    old = gpu.get_device()
+    try:
+        gpu.set_device("cpu")
+        on = ground_effect(RECT, heights, alpha_deg=4.0, settings=mesh, detail_level="standard")
+        short = ground_effect(RECT, heights, alpha_deg=4.0, settings=mesh, detail_level="summary")
+        off = ground_effect(RECT, heights, alpha_deg=4.0, settings={**FAST, "n_chord": 4},
+                            detail_level="standard")
+        one = wing_analysis(RECT, {"alpha_deg": 4.0, "h_m": heights[0]}, mesh, "summary")
+        free = wing_analysis(RECT, {"alpha_deg": 4.0}, mesh, "summary")
+    finally:
+        gpu.set_device(old)
+    strict_json(on)
+    assert on["status"] == "success", on
+    rows = [r for r in on["rows"] if r["status"] == "ok"]
+    assert len(rows) == len(heights)
+    kappas = [r["condition_number"] for r in rows]
+    assert all(1.0 < k < 1.0e10 for k in kappas)
+    # The matrix changes with the height (the ground images), so the values differ.
+    assert len(set(kappas)) == len(kappas)
+    assert kappas[0] == pytest.approx(one["metrics"]["condition_number"], rel=1.0e-9)
+    assert on["free_air"]["condition_number"] == pytest.approx(free["metrics"]["condition_number"], rel=1.0e-9)
+    summ = on["summary"]
+    assert summ["condition_number_max"] == max(kappas)
+    assert summ["condition_number_h_m_at_max"] == rows[kappas.index(max(kappas))]["h_m"]
+    assert short["summary"]["condition_number_max"] == summ["condition_number_max"]
+    assert all("condition_number" not in r for r in off["rows"])
+    assert "condition_number" not in off["free_air"]
+    assert "condition_number_max" not in off["summary"]
+
+
 # ── Wing analysis ────────────────────────────────────────────────────────────
 
 def test_wing_analysis_success():

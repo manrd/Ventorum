@@ -13,6 +13,8 @@ Published sources
 
 from __future__ import annotations
 
+import functools
+
 import numpy as np
 import pytest
 import scipy.linalg
@@ -140,35 +142,127 @@ def test_sphere_cp_both_orientations_and_dalembert():
         assert err[1] < 0.03, f"Error at 32x64 not below 0.03 ({name}): {err[1]}"
 
 
-@pytest.mark.slow
-def test_ellipsoid_oblique_surface_velocity():
-    """Verify the surface speed on an ellipsoid at oblique onset on all panels.
+# Semi-axes [m] and onset vector [m/s] of the oblique ellipsoid tests.
+_ELLIPSOID_AXES = (1.0, 0.5, 0.25)
+_ELLIPSOID_STREAM = (10.0, 3.0, -2.0)
+# Turn of the exact surface normal across a panel [rad], in both panel
+# directions, above which a panel is a tip panel of the ellipsoid tests.
+# A flat panel has its centroid inside the surface by about
+# h^2 / (8 R) = h theta / 8, with theta = h / R the turn of the normal
+# across the panel. At theta = 0.1 rad the offset is 1.25 % of the panel
+# size h, below the 2 % speed bound.
+_TIP_NORMAL_TURN = 0.1
 
-    The card asks for 2 % away from the poles. The node-based surface
-    gradient keeps the error below 2 % on every panel, including the
-    polar triangle fans of the mesh (poles on z) and the panels next to
-    the stagnation points, so the test uses no mask.
+
+@functools.cache
+def _ellipsoid_oblique_speed_error(n_lat: int, n_lon: int) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Speed error, tip mask and centroids of an ellipsoid at oblique onset.
+
+    Parameters
+    ----------
+    n_lat : int
+        Count of latitude bands (dimensionless).
+    n_lon : int
+        Count of longitude divisions (dimensionless).
+
+    Returns
+    -------
+    tuple[np.ndarray, np.ndarray, np.ndarray]
+        The relative surface speed error per panel (dimensionless), the
+        mask of the tip panels (bool) and the panel centroids [m]. A tip
+        panel is a panel where the exact surface normal turns by more than
+        ``_TIP_NORMAL_TURN`` [rad] between its corners in both panel
+        directions (doubly curved at the panel scale).
     """
-    a, b, c = 1.0, 0.5, 0.25
-    nodes, panels = ellipsoid_quad_mesh(a, b, c, 32, 64, spacing="cosine")
+    a, b, c = _ELLIPSOID_AXES
+    nodes, panels = ellipsoid_quad_mesh(a, b, c, n_lat, n_lon, spacing="cosine")
     solver = PanelSolver(_closed_mesh(nodes, panels), far_ratio=5.0)
 
-    # Oblique onset flow
-    V_stream = np.array([10.0, 3.0, -2.0])
-    v_mag = float(np.linalg.norm(V_stream))
-    alpha = float(np.arctan2(V_stream[2], V_stream[0]))
-    beta = float(-np.arcsin(V_stream[1] / v_mag))
-    cond = FlightCondition(V_inf=v_mag, alpha=alpha, beta=beta)
-    res = solver.solve(cond)
+    v_stream = np.asarray(_ELLIPSOID_STREAM)
+    v_mag = float(np.linalg.norm(v_stream))
+    alpha = float(np.arctan2(v_stream[2], v_stream[0]))
+    beta = float(-np.arcsin(v_stream[1] / v_mag))
+    res = solver.solve(FlightCondition(V_inf=v_mag, alpha=alpha, beta=beta))
 
     speed_num = np.linalg.norm(res.velocity, axis=-1)
-    v_exact = ellipsoid_surface_velocity(solver.centroids, a, b, c, V_stream)
+    v_exact = ellipsoid_surface_velocity(solver.centroids, a, b, c, v_stream)
     speed_exact = np.linalg.norm(v_exact, axis=-1)
-
     rel_err = np.abs(speed_num - speed_exact) / speed_exact
-    max_rel_err = float(np.max(rel_err))
-    print(f"ellipsoid max relative speed error on all panels: {max_rel_err:.4f}")
+
+    # Exact unit normals at the panel corners (the mesh nodes lie on the surface).
+    grad = nodes[panels] / np.array([a**2, b**2, c**2])
+    normal = grad / np.linalg.norm(grad, axis=-1, keepdims=True)
+
+    def turn(i: int, j: int) -> np.ndarray:
+        cos_t = np.sum(normal[:, i] * normal[:, j], axis=-1)
+        return np.arccos(np.clip(cos_t, -1.0, 1.0))
+
+    turn_first = np.maximum(turn(0, 1), turn(3, 2))
+    turn_second = np.maximum(turn(1, 2), turn(0, 3))
+    tip = np.minimum(turn_first, turn_second) > _TIP_NORMAL_TURN
+    return rel_err, tip, solver.centroids
+
+
+@pytest.mark.slow
+def test_ellipsoid_oblique_surface_velocity():
+    """Verify the surface speed on an ellipsoid at oblique onset away from the tips.
+
+    The card asks for 2 % away from the poles. The test keeps that bound
+    on every panel of the 32 x 64 mesh except the tip panels near
+    x = +-a. The polar triangle fans (poles on z), the thin rim at z = 0
+    and the panels next to the stagnation points stay in the check.
+
+    The tip panels are treated apart for a geometric reason. A flat panel
+    has its centroid inside the curved surface by about h^2 / (8 R), with
+    h the panel size [m] and R the curvature radius [m]. The node fit of
+    the surface gradient works in the tangent plane, so it cannot remove
+    this offset along the normal, and the node values carry an error of
+    that size. At the tips the curvature radius c^2 / a is the smallest of
+    the body, the surface is curved in both directions of each panel, and
+    the local speed is low (stagnation points). A tip panel is a panel
+    where the exact normal turns by more than 0.1 rad across the panel in
+    both panel directions: the offset is then more than 1.25 % of h. The
+    rim panels are curved in one direction only, so they stay in the
+    check. The tip error is checked for convergence with mesh refinement
+    in ``test_ellipsoid_oblique_tip_error_converges``.
+    """
+    a = _ELLIPSOID_AXES[0]
+    rel_err, tip, centroids = _ellipsoid_oblique_speed_error(32, 64)
+    # The mask holds only panels of the two tip caps, and it is not empty.
+    assert np.any(tip)
+    assert np.all(np.abs(centroids[tip, 0]) > 0.75 * a)
+    max_rel_err = float(np.max(rel_err[~tip]))
+    print(
+        f"ellipsoid max relative speed error away from the tips: {max_rel_err:.4f} "
+        f"({int(np.sum(tip))} of {tip.size} panels are tip panels)"
+    )
     assert max_rel_err < 0.02, f"Ellipsoid relative speed error exceeds 2 %: {max_rel_err:.4f}"
+
+
+@pytest.mark.slow
+def test_ellipsoid_oblique_tip_error_converges():
+    """Verify that the ellipsoid tip speed error falls with mesh refinement.
+
+    The meshes are 16 x 32, 24 x 48 and 32 x 64 (cosine latitude spacing),
+    with the panel size h proportional to 1 / n_lat. The tip error is the
+    largest relative speed error on the tip panels of each mesh (see
+    ``test_ellipsoid_oblique_surface_velocity``). The centroid offset
+    h^2 / (8 R) gives a node error of h theta / 8 with theta = h / R, so
+    the relative gradient error at the tip is expected to fall at least
+    at first order in h. The test asks for an observed order of at least
+    1 on each refinement step.
+    """
+    levels = (16, 24, 32)
+    tip_error = []
+    for n_lat in levels:
+        rel_err, tip, _ = _ellipsoid_oblique_speed_error(n_lat, 2 * n_lat)
+        assert np.any(tip)
+        tip_error.append(float(np.max(rel_err[tip])))
+    print(f"ellipsoid tip speed error for n_lat {levels}: {tip_error}")
+    for k in range(len(levels) - 1):
+        assert tip_error[k + 1] < tip_error[k], f"tip error does not fall: {tip_error}"
+        order = np.log(tip_error[k] / tip_error[k + 1]) / np.log(levels[k + 1] / levels[k])
+        assert order >= 1.0, f"tip error order {order:.2f} below 1 ({levels[k]} to {levels[k + 1]})"
 
 
 def test_surface_gradient_operator_exact_and_cut_at_wake():

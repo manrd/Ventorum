@@ -1183,6 +1183,14 @@ def ground_effect(
         ``{"rows": [...], "free_air": ...}``: one dispatch record per entry
         of ``rows`` (None for a failed height) and the record of the
         free-air case. The cases of the Irodov derivatives are not included.
+        With ``settings.report_condition`` true, each valid row gives
+        ``condition_number``, the 1-norm condition estimate [-] of the
+        system matrix at that height (None when the solve does not give it:
+        on the GPU, for the Fourier solver, or for a singular matrix).
+        ``free_air`` then gives the value of the free-air case, and
+        ``summary`` gives ``condition_number_max`` and
+        ``condition_number_h_m_at_max`` [m] over the valid heights, at
+        every detail level.
 
     Notes
     -----
@@ -1332,6 +1340,8 @@ def ground_effect(
             row["moments"] = moments_all_sets(
                 res.Cl_body, res.Cm_body, res.Cn_body, alpha, beta,
                 b_ref=b_ref, c_ref=c_ref)
+        if sett.report_condition:
+            row["condition_number"] = _condition_value(res.solver_result)
         rows.append(row)
         ok.append((h, res))
 
@@ -1367,6 +1377,11 @@ def ground_effect(
         "ratio_definitions": "CL_ratio = CL / CL_free_air. induced_drag_factor_ratio = (CDi/CL^2) / "
                              "(CDi/CL^2)_free_air; below 1 means less induced drag for the same lift.",
     }
+    if sett.report_condition:
+        kappas = [(r["h_m"], r["condition_number"]) for r in ok_rows if r["condition_number"] is not None]
+        top = max(kappas, key=lambda t: t[1]) if kappas else None
+        summary["condition_number_max"] = top[1] if top else None
+        summary["condition_number_h_m_at_max"] = top[0] if top else None
     b_ref, c_ref = float(ac.b_ref), float(ac.c_ref)
     _, free_cm, _ = _apply_axes(
         free.totals.Cl, free.totals.Cm, free.totals.Cn, alpha, beta, ax,
@@ -1374,6 +1389,8 @@ def ground_effect(
     free_air = {"CL": rnd(cl_f), "CDi": rnd(free.totals.CDi, 7), "Cm": free_cm,
                 "L_over_D": rnd(drag_and_ld(free.totals)[2], 3), "e": rnd(free.totals.e, 4),
                 "note": "Free air at the same alpha and beta, bank angle 0, same mesh."}
+    if sett.report_condition:
+        free_air["condition_number"] = _condition_value(free)
     if ax == "all":
         free_air["moments"] = moments_all_sets(
             free.totals.Cl, free.totals.Cm, free.totals.Cn, alpha, beta,
