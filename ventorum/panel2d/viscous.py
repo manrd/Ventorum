@@ -75,7 +75,7 @@ from ventorum.panel2d.solver import resolve_reference
 from ventorum.utils.parallel import blas_single_thread
 
 __all__ = ["ViscousResult", "StopRules", "solve_viscous", "solve_viscous_flapped", "trace_wake_streamline", "prepare_case", "warm_state",
-           "finish_angle", "row_from_result", "sweep_order", "check_chord_ref", "resolve_body", "wake_length_note",
+           "finish_angle", "restart_false_branches", "row_from_result", "sweep_order", "check_chord_ref", "resolve_body", "wake_length_note",
            "warn_long_wake", "wake_sawtooth_index", "wake_sawtooth_note", "warn_wake_sawtooth",
            "transition_rule_note", "warn_transition_rule",
            "WAKE_LENGTH_LIMIT", "WAKE_SAWTOOTH_LIMIT", "WAKE_SAWTOOTH_STATIONS", "WORK_BUDGET", "COLD_START_BUDGET", "STEP_BUDGET"]
@@ -802,20 +802,22 @@ def solve_viscous(
               wake_length=wake_length, n_wake=n_wake, chord_ref=chord_ref, moment_ref=moment_ref, pivot=pivot,
               reference=reference)
     cache: dict = {}
+    states: dict = {}
     with blas_single_thread():
         first_state = None
         prev = None
         for a in order_up:
             out[a], state = _solve_angle(body, a, Re, prev, tol, max_iter, kw, rules, cache)
             if out[a]["converged"]:
-                prev = state
+                prev = states[a] = state
                 if first_state is None:
                     first_state = state
         prev = first_state
         for a in order_dn:
             out[a], state = _solve_angle(body, a, Re, prev, tol, max_iter, kw, rules, cache)
             if out[a]["converged"]:
-                prev = state
+                prev = states[a] = state
+        restart_false_branches(out, states, body, Re, tol, max_iter, kw, rules=rules)
     rows = [out[float(a)] for a in alphas]
     add_note(rows, wake_note)
     bad = [r for r in rows if not r["converged"]]
@@ -1119,17 +1121,30 @@ def finish_angle(body, alpha, re, prev, tol, max_iter, kw, bk=None, first=None, 
     reason names each early stop of a failed angle. ``cache`` (a dict, one
     per sweep) keeps the cold start at the zero-lift angle for the next
     angles (see :func:`_cold_path`).
+
+    False-branch restart: when the converged solution has a near-wake
+    sawtooth (see :func:`wake_sawtooth_note`), the angle is solved again
+    from the quasi-simultaneous first estimate (see
+    :func:`ventorum.panel2d.vii.initial_state`) at omega = 1. A converged
+    solution without the sawtooth replaces the first one, and the reason
+    names the restart; else the first solution and its sawtooth note stay.
+    The callers then try a warm start from a lower angle (see
+    :func:`restart_false_branches`).
     """
     ctl = _AngleWork(alpha, StopRules() if rules is None else rules)
     if first is not None:
         ctl.add(first[0], first[1], ctl.cap(max_iter), max_iter)
+    notes = []
+    warm_from = None
     try:
         if prev is not None:
             setup, res = _warm_path(body, alpha, re, prev, tol, max_iter, kw, 0, bk, first, ctl=ctl)
+            warm_from = float(prev[0].sys.alpha)
             if not res.converged:
                 cold_setup, cold = _cold_path(body, alpha, re, tol, max_iter, kw, bk, ctl=ctl, cache=cache)
                 if cold.converged or cold.residual < res.residual:
                     setup, res = cold_setup, cold
+                    warm_from = None
         else:
             setup, res = _cold_path(body, alpha, re, tol, max_iter, kw, bk, ctl=ctl, cache=cache)
     except (_BudgetUsedUp, *vii.linalg_errors((bk or _NUMPY)["xp"])) as exc:
@@ -1147,15 +1162,132 @@ def finish_angle(body, alpha, re, prev, tol, max_iter, kw, bk=None, first=None, 
         row.update(ctl.counters())
         return row, None
     row = row_from_result(setup, res, alpha)
+    if wake_sawtooth_note(row) is not None:
+        setup, res, row, note = _qs_restart(setup, res, row, alpha, tol, max_iter, bk, ctl)
+        notes.append(note)
+        warm_from = None if note.startswith(RESTART_NOTE + ": the first") else warm_from
     row.update(ctl.counters())
+    row["_warm_from"] = warm_from
     retry_notes = [n for n in ctl.retry_notes if res.reason not in n or not res._first_stop]
     if retry_notes:
         row["reason"] += "; " + "; ".join(retry_notes)
     if not res.converged and ctl.notes:
-        notes = [n for n in ctl.notes if n not in row["reason"]]
-        if notes:
-            row["reason"] += "; " + "; ".join(notes)
+        stops = [n for n in ctl.notes if n not in row["reason"]]
+        if stops:
+            row["reason"] += "; " + "; ".join(stops)
+    for note in notes:
+        row["reason"] = f"{row['reason']}; {note}" if row["reason"] else note
     return row, (setup, res.state)
+
+
+#: Start of the reason note of a false-branch restart (see :func:`finish_angle` and
+#: :func:`restart_false_branches`).
+RESTART_NOTE = "false-branch restart"
+
+
+def _qs_restart(setup, res, row, alpha, tol, max_iter, bk, ctl):
+    """Solve a flagged angle again from the quasi-simultaneous first estimate; return (setup, res, row, note).
+
+    The new solution replaces the flagged one only when it converges without
+    the near-wake sawtooth. The note names the outcome.
+    """
+    idx = wake_sawtooth_index(row["wake"]["theta"])
+    new = None
+    try:
+        start = vii.initial_state(setup, sweeps=vii.QS_SWEEPS)
+        new = _solve_one(setup, start, tol, max_iter, 1.0, bk, ctl)
+    except (_BudgetUsedUp, *vii.linalg_errors((bk or _NUMPY)["xp"])):
+        new = None
+    if new is not None and new.converged:
+        new_row = row_from_result(setup, new, alpha)
+        if wake_sawtooth_note(new_row) is None:
+            note = (f"{RESTART_NOTE}: the first converged solution was flagged (sawtooth index {idx:.2f}, "
+                    f"Cl {row['Cl']:.4g}); the solve from the quasi-simultaneous first estimate replaced it")
+            return setup, new, new_row, note
+    outcome = "no convergence" if new is None or not new.converged else "the sawtooth again"
+    note = f"{RESTART_NOTE}: the solve from the quasi-simultaneous first estimate gave {outcome}"
+    return setup, res, row, note
+
+
+def restart_false_branches(rows, states, body, re, tol, max_iter, kw, bk=None, rules=None):
+    """Solve again the flagged angles of a sweep by a warm start from a lower angle (in place).
+
+    A converged angle with a near-wake sawtooth (see
+    :func:`wake_sawtooth_note`; the restart from the quasi-simultaneous
+    first estimate of :func:`finish_angle` did not remove it) is solved
+    again by a warm start (with the halved steps of :func:`_warm_path`)
+    from the converged solution without the sawtooth at the nearest lower
+    angle of the same sweep. The angles are taken in increasing order, so
+    a replaced angle can be the start of the next one. A converged solution
+    without the sawtooth replaces the flagged one; the reason names the
+    restart. Else the flagged solution and its sawtooth note stay, with a
+    note of the outcome. No restart is made when there is no such lower
+    angle, or when the flagged solution came from a warm start from that
+    same angle (the solve would repeat itself). The work of a restart is
+    added to the work counters of the angle; it has the work budget of
+    one angle (see :class:`StopRules`).
+
+    Parameters
+    ----------
+    rows : dict
+        Result rows of the sweep by angle [deg] (see :func:`finish_angle`);
+        changed in place.
+    states : dict
+        (setup, state) of the converged angles by angle [deg]; changed in
+        place.
+    body : np.ndarray or AirfoilShape
+        Section of the sweep.
+    re : float
+        Reynolds number [-].
+    tol : float
+        Convergence limit [-].
+    max_iter : int
+        Stage limit of one Newton solve.
+    kw : dict
+        Case settings of :func:`prepare_case`.
+    bk : dict, optional
+        Array backend of the Newton solves (numpy when None).
+    rules : StopRules, optional
+        Stop rules (default values when None).
+    """
+    rules = StopRules() if rules is None else rules
+    angles = sorted(rows)
+    for a in angles:
+        row = rows[a]
+        if wake_sawtooth_note(row) is None:
+            continue
+        lower = [b for b in angles if b < a and states.get(b) is not None and rows[b]["converged"]
+                 and wake_sawtooth_note(rows[b]) is None]
+        if not lower or row.get("_warm_from") == lower[-1]:
+            continue
+        b = lower[-1]
+        idx = wake_sawtooth_index(row["wake"]["theta"])
+        ctl = _AngleWork(a, rules)
+        try:
+            setup, res = _warm_path(body, a, re, states[b], tol, max_iter, kw, 0, bk, ctl=ctl)
+        except (_BudgetUsedUp, cp.WakeGroundError, *vii.linalg_errors((bk or _NUMPY)["xp"])):
+            setup, res = None, None
+        work = ctl.counters()
+        new_row = None
+        if res is not None and res.converged:
+            new_row = row_from_result(setup, res, a)
+            if wake_sawtooth_note(new_row) is not None:
+                new_row = None
+        if new_row is None:
+            outcome = "no convergence" if res is None or not res.converged else "the sawtooth again"
+            row["reason"] += f"; {RESTART_NOTE}: the warm start from {b:g} deg gave {outcome}"
+            for k, v in work.items():
+                row[k] += v
+            continue
+        for k, v in work.items():
+            new_row[k] = row[k] + v
+        new_row["_warm_from"] = b
+        new_row["reason"] += (f"; {RESTART_NOTE}: the first converged solution was flagged (sawtooth index "
+                              f"{idx:.2f}, Cl {row['Cl']:.4g}); the warm start from {b:g} deg replaced it")
+        if "details" in row:
+            new_row["details"] = row["details"]
+        rows[a] = new_row
+        states[a] = (setup, res.state)
 
 
 def zero_lift_angle(body, kw) -> float:
@@ -1690,6 +1822,7 @@ def solve_viscous_flapped(
     alphas = np.atleast_1d(np.asarray(alpha_deg, dtype=np.float64))
     order_up, order_dn = sweep_order(alphas)
     out: dict[float, dict] = {}
+    states: dict = {}
 
     with blas_single_thread():
         first_state = None
@@ -1710,7 +1843,7 @@ def solve_viscous_flapped(
                 row, state = _continue_deflection(a)
             out[a] = row
             if row["converged"]:
-                prev = state
+                prev = states[a] = state
                 if first_state is None:
                     first_state = state
 
@@ -1729,7 +1862,8 @@ def solve_viscous_flapped(
                 row, state = _continue_deflection(a)
             out[a] = row
             if row["converged"]:
-                prev = state
+                prev = states[a] = state
+        restart_false_branches(out, states, target_shape, Re, tol, max_iter, kw, rules=rules)
 
     rows = [out[float(a)] for a in alphas]
     add_note(rows, wake_note)
