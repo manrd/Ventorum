@@ -234,7 +234,12 @@ def test_unaffected_cases_keep_their_results(case):
     ("2412", 0.7, 10, False),
 ])
 def test_moved_hinge_on_cambered_strip_warns(shape, hinge, n_chord, expect):
-    """A hinge that moves a chordwise node of a cambered strip gives a warning."""
+    """A hinge that moves a chordwise node of a cambered strip gives a warning.
+
+    The legs at the control side edges now use a common node set, so the
+    warning says that the leg forces converge (it formerly said that the
+    legs do not coincide).
+    """
     import warnings as _w
 
     import ventorum as vt
@@ -251,7 +256,9 @@ def test_moved_hinge_on_cambered_strip_warns(shape, hinge, n_chord, expect):
             vt.Aircraft(surfaces=[wing]), vt.FlightCondition(V_inf=30.0, alpha=np.radians(2.0)),
             vt.SolverSettings(n_panels=24, n_chord=n_chord),
         )
-    assert any("do not coincide" in str(w.message) for w in caught) is expect
+    moved = [str(w.message) for w in caught if "moves a chordwise node" in str(w.message)]
+    assert bool(moved) is expect
+    assert all("common node set" in m and "do not coincide" not in m for m in moved)
 
 
 # --- edges between different hinges ---------------------------------------------

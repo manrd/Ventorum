@@ -5,7 +5,9 @@ The PyTorch reference copy (:mod:`ventorum.sensitivity.reference`) is the
 reference. Every VJP backend (numpy, Numba, Cython, NVIDIA Warp) must give
 the same products and the same input gradients to round-off: 1e-12 in
 float64 and 1e-5 in float32, relative to the largest component of each
-gradient.
+gradient. In float32 the tolerance of an ill-conditioned gradient is raised
+to two times the error of the float32 reference against float64 (see
+``_float32_floor``).
 """
 
 from __future__ import annotations
@@ -98,8 +100,11 @@ _CASE_IDS = [c[0] for c in _model_cases()]
 # float32 rounding of the coordinates of a load point very near a leg (input
 # conditioning), not the arithmetic of the kernels. With the current leg
 # nodes (the mean-surface node at every edge between different hinges, the
-# leg node on the last panel) that pair is gone, and the case meets the
-# float32 parity tolerance with all backends.
+# leg node on the last panel) that pair is gone. With the common leg node
+# set at edges with a moved hinge node, the float32 reference of the chain
+# cases is again up to about 1.3e-2 from float64 on the gradient of the
+# induced velocity with respect to the core radius; the float32 check uses
+# the conditioning floor of :func:`_float32_floor` for such gradients.
 _FLOAT64_ONLY: set[str] = set()
 
 
@@ -180,6 +185,26 @@ def _grads(model, name: str, args: tuple, kwargs: dict, backend: str | None, see
                                                  for gr in grads]
 
 
+def _float32_floor(tol: float, ref32, ref64) -> float:  # type: ignore[no-untyped-def]
+    """Return the parity tolerance of one input gradient.
+
+    In float64 (*ref64* None) this is *tol*. In float32 it is the larger of
+    *tol* and two times the error of the float32 reference against the
+    float64 reference, relative to the largest float64 component. Reason: on
+    an ill-conditioned gradient (for example the leg chains of the
+    ``vlm-chain`` cases, where load points lie very near a leg) the float32
+    reference itself is up to about 1.3e-2 from the float64 value, so two
+    float32 evaluations with a different summation order cannot agree to
+    1e-5. The kernel must then agree with the float32 reference to the
+    accuracy that float32 can give on that gradient. On well-conditioned
+    gradients the reference error is below 5e-6 and the tolerance stays *tol*.
+    """
+    if ref64 is None or not np.any(ref64):
+        return tol
+    ref_err = float(np.max(np.abs(ref32 - ref64))) / float(np.max(np.abs(ref64)))
+    return max(tol, 2.0 * ref_err)
+
+
 def _check_parity(case_id: str, backend: str, device: str, precision: str) -> None:
     import torch
 
@@ -195,9 +220,21 @@ def _check_parity(case_id: str, backend: str, device: str, precision: str) -> No
             N = (N / torch.linalg.norm(N, dim=1, keepdim=True)).to(dtype=args[0].dtype, device=args[0].device)
             calls[k] = (name, tuple(args) + (N,), kwargs)
     tol = _TOL[precision]
+    calls64 = None
+    if precision == "float32":
+        # The same calls of a float64 reference pass, for the conditioning floor.
+        model64, calls64 = _captured_calls(case_id, device, "float64")
+        for k, (name, args, kwargs) in enumerate(calls64):
+            if name == "_tensor_unknowns":
+                calls64[k] = (name, tuple(args) + (calls[k][1][-1].to(dtype=args[0].dtype),), kwargs)
     for k, (name, args, kwargs) in enumerate(calls):
         ref_out, ref_g = _grads(model, name, args, kwargs, None, seed=k)
         new_out, new_g = _grads(model, name, args, kwargs, backend, seed=k)
+        ref64_g = None
+        if calls64 is not None:
+            n64, a64, kw64 = calls64[k]
+            assert n64 == name, (case_id, k, n64, name)
+            ref64_g = _grads(model64, n64, a64, kw64, None, seed=k)[1]
         scale = float(np.max(np.abs(ref_out)))
         assert float(np.max(np.abs(new_out - ref_out))) <= tol * scale, (case_id, name, "output")
         assert len(ref_g) == len(new_g)
@@ -208,7 +245,7 @@ def _check_parity(case_id: str, backend: str, device: str, precision: str) -> No
                 continue
             assert gn is not None, (case_id, name, q)
             err = float(np.max(np.abs(gn - gr))) / float(np.max(np.abs(gr)))
-            assert err <= tol, (case_id, name, q, err)
+            assert err <= _float32_floor(tol, gr, None if ref64_g is None else ref64_g[q]), (case_id, name, q, err)
 
 
 @pytest.mark.parametrize("precision", ["float64", "float32"])

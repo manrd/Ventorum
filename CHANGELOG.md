@@ -345,6 +345,20 @@ a minor version can change a public interface.
 
 ### Fixed
 
+- Vortex lattice on a cambered mean line with a hinge that moves a chordwise node (a hinge that is
+  not on a node, for example at 0.7 chord with 4 uniform chordwise panels): the legs of the strips
+  with the moved node and of their neighbours did not coincide at the edges between them, and CL
+  did not converge with the spanwise panels, also at zero deflection. At such an edge (also at the
+  coincident end edges of two joined surfaces) the legs of both strips now use one common node set:
+  the union of the bound points of the two strips on the mean surface
+  (`geometry.lattice._common_leg_node_set`). The bound points do not move. Lattices without a
+  moved hinge node give the same results, bit for bit. The warning about the moved node now says
+  that the legs use a common node set, and its example counts have a node at the hinge. The
+  adjoint gradients rebuild the common nodes from their chord fractions
+  (`geom_cache["leg_mid_frac"]`). Test: `tests/test_off_node_hinge.py`.
+- Trust note for an open slit: a deflected strip edge between two strips with different hinges,
+  or a deflected control at a surface joint, gives a note that names the edge and says that the
+  flap increment does not converge with the spanwise mesh there (no penalty).
 - Vortex lattice with `mach > 0`: the `Cm0` of a linear airfoil now scales by `1 / beta`
   (Prandtl-Glauert, Glauert 1928), as the camber lift of the stretched lattice and the camber-line
   lattice do. Before, the section moment stayed at its incompressible value, so Cm was wrong for a

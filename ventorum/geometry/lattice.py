@@ -53,7 +53,7 @@ from __future__ import annotations
 
 import bisect
 import warnings
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field, replace
 from typing import Any
 
@@ -390,8 +390,11 @@ class VortexLattice:
         of a chordwise flap where the hinge lies between the two bound
         points. On the last panel of such a strip ``a_kink`` is the
         mean-surface node between its bound point and the trailing edge
-        (or the hinge point there). Strips without a mean line keep their
-        legs.
+        (or the hinge point there). At an edge between a strip with a moved
+        hinge node and a strip without one, the nodes of both strips are
+        one common node set: the bound point of the other strip, or the end
+        of the segment (a straight leg); see ``_common_leg_node_set``.
+        Strips without a mean line keep their legs.
     chord : numpy.ndarray
         Strip chord [m].
     control_edge_step : numpy.ndarray or None
@@ -1163,6 +1166,99 @@ def _hinge_chord_counts(hinge_x_c: float, n_chord: int, chord_spacing: str, n_ma
     return sorted(out)
 
 
+def _exact_hinge_counts(hinge_x_c: float, n_chord: int, chord_spacing: str, n_max: int = 3) -> list[int]:
+    """Return chordwise panel counts near *n_chord* that have a node at the hinge without a move.
+
+    Parameters
+    ----------
+    hinge_x_c : float
+        Hinge position as a fraction of the chord [-].
+    n_chord : int
+        Present chordwise panel count.
+    chord_spacing : str
+        Chordwise panel distribution.
+    n_max : int, optional
+        Largest number of counts to return.
+
+    Returns
+    -------
+    list of int
+        Counts between 2 and ``max(4 * n_chord, 100)`` with a node within
+        1e-9 chord of the hinge, the counts nearest to *n_chord*, in
+        increasing order.
+    """
+    out = []
+    for n in sorted(range(2, max(4 * n_chord, 100) + 1), key=lambda m: (abs(m - n_chord), m)):
+        if float(np.min(np.abs(_chordwise_fractions(n, chord_spacing) - hinge_x_c))) <= 1e-9:
+            out.append(n)
+            if len(out) >= n_max:
+                break
+    return sorted(out)
+
+
+#: Tolerance [-] of two chord fractions of leg nodes at one strip edge that
+#: are the same node.
+_COMMON_NODE_TOL = 1e-12
+
+
+def _common_edge_plan(xb_own: np.ndarray, xb_other: np.ndarray) -> list[tuple[str, int]] | None:
+    """Return the leg node of each panel on one side of an edge with a common node set.
+
+    The two strips at a strip edge must have legs that coincide there. When
+    their chordwise nodes differ (a hinge that moves a node on one side),
+    their bound points on the edge are at different chord fractions. The
+    legs of both strips then use one common node set: the union of the
+    bound points of the two strips on the edge, on the mean surface. The
+    leg of a panel runs from its bound point to the next bound point of its
+    strip (on the last panel, to the trailing edge), with one node between
+    them (see :func:`_leg_nodes`). That node is the bound point of the other
+    strip between the two, if there is one. Where the two strips have the
+    same two bound points, it is their common mean-surface node. Otherwise
+    no node of the union is between them, and the leg is straight there.
+
+    Parameters
+    ----------
+    xb_own : numpy.ndarray
+        Chord fractions [-] of the bound points of the strip on this side,
+        shape (n_chord,), in increasing order.
+    xb_other : numpy.ndarray
+        Chord fractions [-] of the bound points of the strip on the other
+        side of the edge, shape (n_chord,), in increasing order.
+
+    Returns
+    -------
+    list of tuple or None
+        For each panel of this side: ``("mid", -1)`` to keep the
+        mean-surface node, ``("other", j)`` for the bound point of panel
+        ``j`` of the other strip, or ``("end", -1)`` for a straight leg (the
+        node is the end of the segment: the next bound point, or the
+        trailing edge on the last panel). None when the leg of a panel has
+        two or more bound points of the other strip between its ends: one
+        node per segment cannot hold the common node set.
+    """
+    tol = _COMMON_NODE_TOL
+    n = xb_own.shape[0]
+    plan: list[tuple[str, int]] = []
+    for k in range(n):
+        lo = float(xb_own[k])
+        hi = float(xb_own[k + 1]) if k + 1 < n else 1.0
+        inside = np.flatnonzero((xb_other > lo + tol) & (xb_other < hi - tol))
+        if inside.size > 1:
+            return None
+        if inside.size == 1:
+            plan.append(("other", int(inside[0])))
+            continue
+        same_lo = np.flatnonzero(np.abs(xb_other - lo) <= tol)
+        if same_lo.size == 1:
+            j = int(same_lo[0])
+            last = k + 1 == n and j + 1 == n
+            if last or (k + 1 < n and j + 1 < n and abs(float(xb_other[j + 1]) - hi) <= tol):
+                plan.append(("mid", -1))
+                continue
+        plan.append(("end", -1))
+    return plan
+
+
 class _MeanLine:
     """Piecewise linear section mean line in chord units.
 
@@ -1596,6 +1692,14 @@ def build_lattice(
     control_info: list[dict[str, Any]] = []
     # Warnings of the mesh construction (VortexLattice.mesh_warnings).
     mesh_warnings: list[str] = []
+    # Controls whose hinge moves a chordwise node of a cambered strip:
+    # (surface index, surface name, control name, hinge [-], chordwise
+    # nodes [-], chordwise counts that can move a node onto the hinge,
+    # chordwise counts with a node at the hinge).
+    moved_hinge_notes: list[tuple[int, str, str, float, np.ndarray, list[int], list[int]]] = []
+    # Chordwise mode: the name of the control whose hinge each strip with a
+    # deflected geometry takes (see strip_flap_hinge_all).
+    strip_flap_name_all: list[str | None] = []
     mean_surfaces: list[tuple[list[WingSection], list[_MeanLine | None], np.ndarray]] = []
     camber_warnings: list[str] = []
     camber_fallback = False
@@ -1763,17 +1867,12 @@ def build_lattice(
                         for line in lines
                     )
                     if cambered and abs(float(c.hinge_x_c) - float(xi[k_hinge])) > 1e-12:
+                        # The text depends on the common node set at the
+                        # side edges; it is issued after the leg nodes.
                         counts = _hinge_chord_counts(float(c.hinge_x_c), n_chord, chord_spacing)
-                        mesh_warnings.append(
-                            f"[{surf.name}] control {c.name!r}: the hinge at x/c = {float(c.hinge_x_c):.4g} "
-                            f"moves a chordwise node of the control strips (n_chord = {n_chord}). On a "
-                            "cambered mean line the legs of the control strips and of their clean "
-                            "neighbours then do not coincide at the control side edges, and the leg "
-                            "forces there do not converge with the spanwise mesh. Use a chordwise count "
-                            "with a node at the hinge"
-                            + (f", for example n_chord = {', '.join(str(n) for n in counts)}." if counts else ".")
-                        )
-                        warnings.warn(mesh_warnings[-1], RuntimeWarning, stacklevel=2)
+                        exact = _exact_hinge_counts(float(c.hinge_x_c), n_chord, chord_spacing)
+                        moved_hinge_notes.append(
+                            (s_idx, surf.name, c.name, float(c.hinge_x_c), ctrl_xi, counts, exact))
                 else:
                     hinge_x_c_eff = float(xi[k_hinge])
                     ctrl_xi = xi.copy()
@@ -1827,6 +1926,7 @@ def build_lattice(
         join_field = None
         flap_hinge_for_k: list[float | None] = [None] * n_r
         flap_nominal_for_k: list[float] = [np.nan] * n_r
+        flap_name_for_k: list[str | None] = [None] * n_r
         if is_chordwise and controls:
             def chord_of(e: float, _surf=surf) -> float:
                 return float(surface_edge_geometry(_surf, np.array([e]))["chord"][0])
@@ -1850,6 +1950,7 @@ def build_lattice(
                 h_eff, c_xi = snap_of[id(hc)]
                 flap_hinge_for_k[k] = h_eff
                 flap_nominal_for_k[k] = float(hc.hinge_x_c)
+                flap_name_for_k[k] = str(hc.name)
                 if ctrl_for_k[k] is None:
                     xi_for_k[k] = c_xi
 
@@ -1930,6 +2031,7 @@ def build_lattice(
             ctrl_surf = [ctrl_for_k[n_r - 1 - j] for j in range(n_r)] + ctrl_for_k
             flap_hinge_surf = flap_hinge_for_k[::-1] + flap_hinge_for_k
             flap_nominal_surf = flap_nominal_for_k[::-1] + flap_nominal_for_k
+            flap_name_surf = flap_name_for_k[::-1] + flap_name_for_k
             node_eta = np.concatenate([-eta_e[::-1], eta_e[1:]])
         elif getattr(surf, "mirror_y", False):
             # Mirror image (y -> -y) of the surface; strips run left to right
@@ -1965,6 +2067,7 @@ def build_lattice(
             ctrl_surf = [ctrl_for_k[n_r - 1 - j] for j in range(n_r)]
             flap_hinge_surf = flap_hinge_for_k[::-1]
             flap_nominal_surf = flap_nominal_for_k[::-1]
+            flap_name_surf = flap_name_for_k[::-1]
             node_eta = -eta_e[::-1]
         else:
             edge_le, edge_te = le_e, te_e
@@ -1982,6 +2085,7 @@ def build_lattice(
             ctrl_surf = list(ctrl_for_k)
             flap_hinge_surf = list(flap_hinge_for_k)
             flap_nominal_surf = list(flap_nominal_for_k)
+            flap_name_surf = list(flap_name_for_k)
             node_eta = np.asarray(eta_e, dtype=float)
 
         n_s = edge_le.shape[0] - 1
@@ -2007,6 +2111,7 @@ def build_lattice(
         strip_ctrl_sig_all.extend(_control_signature(c, side) for c, side in zip(ctrl_surf, side_of_strip))
         strip_flap_hinge_all.extend(flap_hinge_surf)
         strip_flap_nominal_all.extend(flap_nominal_surf)
+        strip_flap_name_all.extend(flap_name_surf)
         if join_field is not None:
             node_terms = [join_field.at(float(e))[0] for e in node_eta]
             strip_side_terms_all.extend((node_terms[j], node_terms[j + 1]) for j in range(len(node_eta) - 1))
@@ -2192,6 +2297,44 @@ def build_lattice(
         sf.edge_te = sf.edge_te + off_te
         le_l[idx], le_r[idx] = sf.edge_le[:-1], sf.edge_le[1:]
         te_l[idx], te_r[idx] = sf.edge_te[:-1], sf.edge_te[1:]
+    # Common node set of the legs at the strip edges where the chordwise
+    # nodes of the two strips differ (a hinge that moves a node of a
+    # cambered strip, see _common_edge_plan). ``mid_frac`` holds the chord
+    # fraction [-] of each changed mean-surface node (NaN: not changed),
+    # left and right edge, shape (n_panels, 2); ``common_off`` the changed
+    # strip edges, shape (n_strips, 2). ``common_failed`` holds the strips
+    # of the edges where one node per segment cannot hold the common set.
+    mid_frac = None
+    common_off = None
+    mid_end = None
+    common_failed: set[int] = set()
+    common_built = bool(is_chordwise and mid_a is not None and np.any(curved))
+    if common_built:
+        mid_frac, common_off, mid_end = _common_leg_node_set(
+            a, b, mid_a, mid_b, te_l, te_r, le_l, le_r, strip_xi_arr, curved,
+            cat["surface"].astype(int), surfaces, chord, common_failed)
+    for s_idx_n, surf_name, c_name, h_c, c_xi, counts, exact in moved_hinge_notes:
+        failed = not common_built or any(
+            int(cat["surface"][s]) == s_idx_n and np.array_equal(strip_xi_arr[s], c_xi) for s in common_failed)
+        example = f", for example n_chord = {', '.join(str(n) for n in counts)}." if counts else "."
+        if failed:
+            msg = (f"[{surf_name}] control {c_name!r}: the hinge at x/c = {h_c:.4g} "
+                   f"moves a chordwise node of the control strips (n_chord = {n_chord}). On a "
+                   "cambered mean line the legs of the control strips and of their clean "
+                   "neighbours then do not coincide at the control side edges, and the leg "
+                   "forces there do not converge with the spanwise mesh. Use a chordwise count "
+                   "with a node at the hinge" + example)
+        else:
+            msg = (f"[{surf_name}] control {c_name!r}: the hinge at x/c = {h_c:.4g} "
+                   f"moves a chordwise node of the control strips (n_chord = {n_chord}). At the "
+                   "control side edges the legs of the control strips and of their neighbours "
+                   "use one common node set (the bound points of both strips on the mean "
+                   "surface), so the leg forces converge with the spanwise mesh. The panels "
+                   "next to the hinge do not have the chordwise spacing of the other panels. "
+                   "For that spacing everywhere, use a chordwise count with a node at the hinge"
+                   + (f", for example n_chord = {', '.join(str(n) for n in exact)}." if exact else "."))
+        mesh_warnings.append(msg)
+        warnings.warn(msg, RuntimeWarning, stacklevel=2)
     normal_bc_clean = None
     flap_hinges = {}
     leg_kinks = {}
@@ -2316,8 +2459,12 @@ def build_lattice(
                         xm_k = 0.5 * (xb_k + x1_k + 0.25 * (strip_xi_arr[s, k + 2] - x1_k))
                     else:
                         xm_k = xb_k + 0.5 * dx_k
-                    for points, H, ax, dd in ((mid_a, H_l, ax_l, d_l), (mid_b, H_r, ax_r, d_r)):
-                        if xm_k > h and dd != 0.0:
+                    for side, points, H, ax, dd in ((0, mid_a, H_l, ax_l, d_l), (1, mid_b, H_r, ax_r, d_r)):
+                        # A node of a common node set has its own chord fraction.
+                        xm_side = xm_k
+                        if mid_frac is not None and np.isfinite(mid_frac[p_idx, side]):
+                            xm_side = mid_frac[p_idx, side]
+                        if xm_side > h and dd != 0.0:
                             points[p_idx:p_idx + 1] = _rotate_flap_points(points[p_idx:p_idx + 1], H, ax, dd)
                 if x0_k >= h - 1e-12 and d_f != 0.0:
                     normal_bc[p_idx] = _rotate(normal_bc[p_idx:p_idx + 1], ax_f[None, :], d_f)[0]
@@ -2361,11 +2508,19 @@ def build_lattice(
                 for q, jq, sq in ends:
                     if sq != si and hinge_of[q] != hinge_of[s] and coincident(s, side, q, jq):
                         hinge_off[s, side] = True
+            # The edges with a common node set use the mean-surface nodes
+            # of _common_leg_node_set, also at the hinge.
+            if common_off is not None:
+                hinge_off |= common_off
+            _slit_notes(hinge_of, angle, strip_surf, ends, coincident, le_l, le_r, surfaces,
+                        strip_flap_name_all, strip_flap_nominal_all, mesh_warnings)
             flap_field = {"hinge": hinge_of, "angle": angle, "coef": coef, "partner": partner, "far": far,
                           "strip_angle": angle[:, 0] + frac_s * (angle[:, 1] - angle[:, 0]),
                           "hinge_x_c": np.asarray(strip_flap_nominal_all, dtype=float),
                           "hinge_off": hinge_off}
 
+    if hinge_off is None and common_off is not None:
+        hinge_off = common_off
     a_kink = b_kink = None
     leg_next = None
     chain_strips = np.flatnonzero(curved) if n_chord > 1 else np.zeros(0, dtype=np.int64)
@@ -2430,6 +2585,11 @@ def build_lattice(
         lattice.geom_cache["camber_frames"] = camber_frames
         lattice.geom_cache["mean_surfaces"] = mean_surfaces
     lattice.geom_cache["flap_hinges"] = flap_hinges
+    if mid_frac is not None:
+        # Chord fractions [-] of the leg nodes of the common node sets
+        # (_common_leg_node_set); the gradients rebuild the nodes from them.
+        lattice.geom_cache["leg_mid_frac"] = mid_frac
+        lattice.geom_cache["leg_mid_end"] = mid_end
     if flap_field is not None:
         lattice.geom_cache["flap_field"] = flap_field
         # Bound points and control points before the flap turn (the linear
@@ -2500,6 +2660,234 @@ def build_lattice(
     return lattice
 
 
+#: Edge deflections [rad] below this value are round-off of the join
+#: field (for example opposite deflections that cancel at an edge), not
+#: an open slit.
+_SLIT_ROUNDOFF_RAD = 1e-9
+
+
+def _slit_notes(
+    hinge_of: np.ndarray,
+    angle: np.ndarray,
+    strip_surf: np.ndarray,
+    ends: list[tuple[int, int, int]],
+    coincident: Callable[[int, int, int, int], bool],
+    le_l: np.ndarray,
+    le_r: np.ndarray,
+    surfaces: list[SurfaceSlice],
+    names: list[str | None],
+    hinges: list[float],
+    notes: list[str],
+) -> None:
+    """Add a note for each deflected strip edge that is an open slit.
+
+    At an edge between two strips with different hinges (a control and a
+    strip without a hinge, or two controls with different hinge fractions),
+    or at a surface joint, the two strips turn their edge nodes about
+    different hinge lines or by different angles. When a side of such an
+    edge has a deflection, the deflected surfaces do not meet there: the
+    edge is an open slit of about 2e-2 to 4e-2 chord. The flap increment
+    does not converge with the spanwise mesh at that edge. The note names
+    the edge (no penalty of the trust score). The side edges of a control
+    inside one surface are sealed by the joins (see
+    :class:`ventorum.geometry.controls.ControlJoinField`) and get no note.
+
+    Parameters
+    ----------
+    hinge_of : numpy.ndarray
+        Effective hinge fraction [-] of each strip, NaN for no hinge, shape
+        (n_strips,).
+    angle : numpy.ndarray
+        Deflection [rad] of the left and right edge node of each strip,
+        shape (n_strips, 2).
+    strip_surf : numpy.ndarray
+        Surface index of each strip, shape (n_strips,).
+    ends : list of tuple
+        ``(strip, side, surface)`` of the end edges of the surfaces.
+    coincident : callable
+        ``coincident(s, side, q, jq)`` is True when edge *jq* of strip *q*
+        is at the place of edge *side* of strip *s*.
+    le_l, le_r : numpy.ndarray
+        Leading-edge points of the strip edges [m], shape (n_strips, 3).
+    surfaces : list of SurfaceSlice
+        The surfaces of the lattice.
+    names : list of str or None
+        Name of the control whose hinge each strip takes, or None.
+    hinges : list of float
+        Hinge fraction [-] of that control as defined (NaN for none).
+    notes : list of str
+        The function appends the notes here and issues each as a
+        RuntimeWarning.
+    """
+    n_s = hinge_of.shape[0]
+    pairs = [(s, 1, s + 1, 0) for s in range(n_s - 1) if strip_surf[s] == strip_surf[s + 1]]
+    for i, (s, side, si) in enumerate(ends):
+        for q, jq, sq in ends[i + 1:]:
+            if sq != si and coincident(s, side, q, jq):
+                pairs.append((s, side, q, jq))
+
+    def label(s: int) -> str:
+        if names[s] is None:
+            return "a strip without a control"
+        return f"control {names[s]!r} (hinge x/c = {float(hinges[s]):.4g})"
+
+    found: dict[tuple[str, str, str, bool], list[float]] = {}
+    for s, side, q, jq in pairs:
+        h_s, h_q = hinge_of[s], hinge_of[q]
+        if np.isnan(h_s) and np.isnan(h_q):
+            continue
+        d_s, d_q = float(angle[s, side]), float(angle[q, jq])
+        joint = bool(strip_surf[s] != strip_surf[q])
+        # NaN compares unequal: a strip without a hinge differs from a control.
+        other_hinge = not (h_s == h_q)
+        tol = _SLIT_ROUNDOFF_RAD
+        if not ((other_hinge and max(abs(d_s), abs(d_q)) > tol) or (joint and abs(d_s - d_q) > tol)):
+            continue
+        where = " and ".join(dict.fromkeys(surfaces[int(strip_surf[x])].name for x in (s, q)))
+        first, second = sorted((label(s), label(q)))
+        y = float((le_l, le_r)[side][s][1])
+        found.setdefault((where, first, second, joint), []).append(y)
+    for (where, first, second, joint), ys in found.items():
+        place = "surface joint" if joint else "strip edge"
+        at = ", ".join(f"{y:.4g}" for y in sorted(ys))
+        msg = (f"[{where}] the deflected {place} between {first} and {second} at y = {at} m is an open "
+               "slit: the two sides turn about different hinge lines or by different angles, so the "
+               "deflected surfaces do not meet there. The flap increment does not converge with the "
+               "spanwise mesh at that edge.")
+        notes.append(msg)
+        warnings.warn(msg, RuntimeWarning, stacklevel=3)
+
+
+def _common_leg_node_set(
+    a: np.ndarray,
+    b: np.ndarray,
+    mid_a: np.ndarray,
+    mid_b: np.ndarray,
+    te_l: np.ndarray,
+    te_r: np.ndarray,
+    le_l: np.ndarray,
+    le_r: np.ndarray,
+    strip_xi: np.ndarray,
+    curved: np.ndarray,
+    strip_surf: np.ndarray,
+    surfaces: list[SurfaceSlice],
+    chord: np.ndarray,
+    failed: set[int],
+) -> tuple[np.ndarray | None, np.ndarray | None, np.ndarray | None]:
+    """Put a common node set on the legs at the strip edges where the chordwise nodes of the two strips differ.
+
+    A hinge that moves a chordwise node (see :func:`_hinge_node`) gives the
+    control strips (and the strips of the joins at their side edges) other
+    chordwise nodes than their neighbours. On a cambered strip the legs
+    follow the mean surface through the bound points of the strip (see
+    :func:`_leg_nodes`), so at an edge between a strip with a moved node and
+    a strip without one the two legs do not coincide. The velocity of one
+    leg at the other then grows as the spanwise mesh gets finer, and the
+    leg forces do not converge. At such an edge (two strips of one surface,
+    or the coincident end edges of two joined surfaces) the legs of both
+    strips use one common node set (see :func:`_common_edge_plan`): this
+    function sets the mean-surface nodes ``mid_a``, ``mid_b`` of the panels
+    on that edge. The bound points do not move, and the other edges do not
+    change. All points are before the flap turn.
+
+    Parameters
+    ----------
+    a, b : numpy.ndarray
+        Bound points of the panels [m], shape (n_panels, 3).
+    mid_a, mid_b : numpy.ndarray
+        Mean-surface leg nodes of the panels [m], shape (n_panels, 3). The
+        function changes them in place.
+    te_l, te_r : numpy.ndarray
+        Trailing-edge points of the strip edges [m], shape (n_strips, 3).
+    le_l, le_r : numpy.ndarray
+        Leading-edge points of the strip edges [m], shape (n_strips, 3).
+    strip_xi : numpy.ndarray
+        Chordwise nodes of each strip [-], shape (n_strips, n_chord + 1).
+    curved : numpy.ndarray
+        Strips whose legs follow the mean surface (leg chains), shape
+        (n_strips,) bool.
+    strip_surf : numpy.ndarray
+        Surface index of each strip, shape (n_strips,).
+    surfaces : list of SurfaceSlice
+        The surfaces of the lattice.
+    chord : numpy.ndarray
+        Strip chords [m], shape (n_strips,).
+    failed : set of int
+        The function adds the strips of the edges where one node per leg
+        segment cannot hold the common node set. These edges keep their
+        nodes.
+
+    Returns
+    -------
+    mid_frac : numpy.ndarray or None
+        Chord fraction [-] of each changed node, left and right edge of
+        each panel, shape (n_panels, 2); NaN where the node did not change.
+        None when no node changed.
+    common_off : numpy.ndarray or None
+        The changed strip edges (left, right), shape (n_strips, 2) bool;
+        None when no node changed.
+    mid_end : numpy.ndarray or None
+        The changed nodes that are the end of their segment (a straight
+        leg), shape (n_panels, 2) bool; None when no node changed.
+    """
+    n_s, n_chord = strip_xi.shape[0], strip_xi.shape[1] - 1
+    xb = strip_xi[:, :-1] + 0.25 * np.diff(strip_xi, axis=1)
+    pairs: list[tuple[int, int, int, int]] = []
+    for s in range(n_s - 1):
+        if strip_surf[s] == strip_surf[s + 1]:
+            pairs.append((s, 1, s + 1, 0))
+    ends = []
+    for si, sl in enumerate(surfaces):
+        if sl.strips.stop > sl.strips.start:
+            ends += [(sl.strips.start, 0, si), (sl.strips.stop - 1, 1, si)]
+    for i, (s, side, si) in enumerate(ends):
+        for q, jq, sq in ends[i + 1:]:
+            if sq == si:
+                continue
+            tol = 1e-9 * max(1.0, float(chord[s]))
+            if (np.max(np.abs((le_l, le_r)[jq][q] - (le_l, le_r)[side][s])) <= tol
+                    and np.max(np.abs((te_l, te_r)[jq][q] - (te_l, te_r)[side][s])) <= tol):
+                pairs.append((s, side, q, jq))
+    mid_frac = np.full((a.shape[0], 2), np.nan)
+    mid_end = np.zeros((a.shape[0], 2), dtype=bool)
+    common_off = np.zeros((n_s, 2), dtype=bool)
+    # Plan every edge first: the plans read the nodes before any change.
+    plans = []
+    for s, side, q, jq in pairs:
+        if not (curved[s] and curved[q]):
+            continue
+        if float(np.max(np.abs(xb[s] - xb[q]))) <= _COMMON_NODE_TOL:
+            continue
+        plan_s = _common_edge_plan(xb[s], xb[q])
+        plan_q = _common_edge_plan(xb[q], xb[s])
+        if plan_s is None or plan_q is None:
+            failed.update((s, q))
+            continue
+        plans.append((s, side, q, jq, plan_s))
+        plans.append((q, jq, s, side, plan_q))
+    if not plans:
+        return None, None, None
+    new_nodes = []
+    for s, side, q, jq, plan in plans:
+        own, other = (a, b)[side], (a, b)[jq]
+        te = (te_l, te_r)[side]
+        for k, (kind, j) in enumerate(plan):
+            p = s * n_chord + k
+            if kind == "other":
+                new_nodes.append((p, side, other[q * n_chord + j].copy(), float(xb[q, j])))
+            elif kind == "end":
+                if k + 1 < n_chord:
+                    new_nodes.append((p, side, own[p + 1].copy(), float(xb[s, k + 1])))
+                else:
+                    new_nodes.append((p, side, te[s].copy(), 1.0))
+                mid_end[p, side] = True
+        common_off[s, side] = True
+    for p, side, node, f in new_nodes:
+        (mid_a, mid_b)[side][p] = node
+        mid_frac[p, side] = f
+    return mid_frac, common_off, mid_end
+
+
 def _leg_nodes(
     a: np.ndarray,
     b: np.ndarray,
@@ -2533,7 +2921,10 @@ def _leg_nodes(
     edge that the flap strip shares with a strip of a different hinge (no
     hinge or another hinge fraction, on the same surface or on a joined
     surface; *hinge_off*); the mean-surface node is the node there, as on
-    the other strip.
+    the other strip. At an edge where the chordwise nodes of the two strips
+    differ (a hinge that moves a node), the mean-surface nodes of both
+    strips are the nodes of one common node set (see
+    :func:`_common_leg_node_set`), and *hinge_off* is True there too.
 
     Parameters
     ----------
@@ -2557,8 +2948,9 @@ def _leg_nodes(
         the flap turn; None to use the bound point of the next panel as the
         node and no node on the last panel.
     hinge_off : numpy.ndarray or None
-        Strip edges whose hinge point is not a node of a leg chain, shape
-        (n_strips, 2) bool (left and right edge); None for none.
+        Strip edges whose hinge point is not a node of a leg chain (also the
+        edges with a common node set), shape (n_strips, 2) bool (left and
+        right edge); None for none.
 
     Returns
     -------
