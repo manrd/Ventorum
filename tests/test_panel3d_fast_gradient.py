@@ -312,7 +312,12 @@ def test_solver_results_unchanged(monkeypatch, kutta):
     mesh = _small_wing_mesh()
     cond = FlightCondition(V_inf=30.0, alpha=float(np.radians(5.0)))
     new = PanelSolver(mesh, far_ratio=np.inf, kutta=kutta).solve(cond)
-    monkeypatch.setattr(solver_module, "build_surface_gradient_operator", _build_surface_gradient_operator_reference)
+    def reference_build(*args, stats=None, **kwargs):  # type: ignore[no-untyped-def]
+        # The solver passes a stats dict for the fallback-stencil counts; the
+        # loop reference does not count stencils.
+        return _build_surface_gradient_operator_reference(*args, **kwargs)
+
+    monkeypatch.setattr(solver_module, "build_surface_gradient_operator", reference_build)
     old = PanelSolver(mesh, far_ratio=np.inf, kutta=kutta).solve(cond)
     for name in ("CL", "CDi_trefftz", "CD_pressure", "Cm"):
         a, b = float(getattr(new, name)), float(getattr(old, name))
