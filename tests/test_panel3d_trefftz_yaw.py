@@ -226,7 +226,8 @@ def test_totals_carry_the_value():
     assert t.Cn_trefftz is not None and t.Cn_trefftz < 0.0
     assert t.clone().Cn_trefftz == t.Cn_trefftz
     assert t.to_dict()["Cn_trefftz"] == t.Cn_trefftz
-    assert t.CY_farfield is None        # the far-field side force is not computed for the 3D panel solver
+    # The far-field side force is filled too (tests/test_panel3d_trefftz_side_force.py); 0 on a planar wing.
+    assert t.CY_farfield is not None and abs(t.CY_farfield) < 1e-14
 
 
 # ---------------------------------------------------------------------------

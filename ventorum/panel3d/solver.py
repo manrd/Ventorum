@@ -124,6 +124,9 @@ from ventorum.panel3d.post import (
     _trefftz_batch,
     _trefftz_drag_and_yaw,
     _trefftz_factors,
+    _trefftz_segments,
+    _trefftz_side_batch,
+    _trefftz_side_force,
     _trefftz_yaw_batch,
     build_surface_gradient_operator,
     compute_surface_velocity_and_cp,
@@ -230,6 +233,11 @@ class PanelResult:
         stability axes [-] (``Cn > 0`` nose right), see
         :func:`ventorum.panel3d.post.compute_trefftz_yawing_moment`. None
         when a path does not compute it.
+    CY_farfield : float or None
+        Side-force coefficient of the trailing vortex sheet in the Trefftz
+        plane, in wind axes [-] (positive to the right), see
+        :func:`ventorum.panel3d.post.compute_trefftz_side_force`. None
+        when a path does not compute it.
     """
 
     CL: float
@@ -252,6 +260,7 @@ class PanelResult:
     mu_w: np.ndarray | None = None
     kutta_lstsq_steps: int = 0
     Cn_trefftz: float | None = None
+    CY_farfield: float | None = None
 
 
 @dataclass
@@ -295,6 +304,7 @@ class _Configuration:
     strips: dict = field(default_factory=dict)
     trefftz_factors: object = None
     trefftz_arms: object = None
+    trefftz_segments: object = None
     gpu_post: object = None
     ground_solver: str = "direct"
     ground_solver_reason: str = ""
@@ -1935,21 +1945,27 @@ class PanelSolver:
         )
 
     def _trefftz_pair(self, cfg: _Configuration, mu_full, condition, coeffs, wake_gamma=None):
-        """Return the Trefftz drag [-] and yawing moment [-] of one condition.
+        """Return the Trefftz drag [-], yawing moment [-] and side force [-] of one condition.
 
         The yawing moment is in stability axes, about the reference point
-        (:func:`ventorum.panel3d.post.compute_trefftz_yawing_moment`). A
+        (:func:`ventorum.panel3d.post.compute_trefftz_yawing_moment`). The
+        side force is in wind axes
+        (:func:`ventorum.panel3d.post.compute_trefftz_side_force`). A
         symmetric flow on a half mesh (no asymmetric onset in *coeffs*)
-        gives 0 exactly, as in the vortex lattice.
+        gives 0 exactly for both, as in the vortex lattice.
         """
         cdi, cn = _trefftz_drag_and_yaw(
             cfg.full_wake, mu_full, float(condition.V_inf), float(condition.rho), self.S_ref,
             wake_dir=cfg.wake_dir, ground=cfg.ground, wake_gamma=wake_gamma,
             yaw=(condition, self.b_ref, self.ref_point),
         )
+        cy = _trefftz_side_force(
+            cfg.full_wake, mu_full, condition, self.S_ref, wake_dir=cfg.wake_dir, wake_gamma=wake_gamma,
+        )
         if self.mesh.half and not np.any(np.asarray(coeffs)[list(_ASYM_COLS)] != 0.0):
             cn = 0.0
-        return cdi, cn
+            cy = 0.0
+        return cdi, cn, cy
 
     def _evaluate_result(self, cfg: _Configuration, condition: FlightCondition) -> PanelResult:
         """Evaluate coefficients and distributions of one condition (Morino Kutta)."""
@@ -1997,7 +2013,7 @@ class PanelSolver:
             mu_asym = unit_mu[:, list(_ASYM_COLS)] @ coeffs[list(_ASYM_COLS)]
             mu_left = mu_sym - mu_asym
             mu_full = np.concatenate([mu_body, mu_left])
-        cdi_trefftz, cn_trefftz = self._trefftz_pair(cfg, mu_full, condition, coeffs)
+        cdi_trefftz, cn_trefftz, cy_farfield = self._trefftz_pair(cfg, mu_full, condition, coeffs)
 
         n_panels = len(self.centroids)
         cp_out = cp_full[:n_panels]
@@ -2032,6 +2048,7 @@ class PanelSolver:
             trust_note="",
             mu_w=mu_wake,
             Cn_trefftz=cn_trefftz,
+            CY_farfield=cy_farfield,
         )
 
     def _condition_bytes(self) -> int:
@@ -2057,6 +2074,8 @@ class PanelSolver:
             cfg.trefftz_factors = _trefftz_factors(wake, cfg.wake_dir, cfg.ground)
         if cfg.trefftz_arms is None:
             cfg.trefftz_arms = _trefftz_arms(wake, cfg.wake_dir, self.ref_point)
+        if cfg.trefftz_segments is None:
+            cfg.trefftz_segments = _trefftz_segments(wake, cfg.wake_dir)
         if self.backend == "gpu":
             import torch
 
@@ -2086,7 +2105,7 @@ class PanelSolver:
                 # An antisymmetric solve can fill new unit columns on a
                 # later call. Refresh only this small linear field.
                 cfg.gpu_post[0]["unit_mu"] = device_array(cfg.unit_mu)
-            mu, sigma, velocity, cp, force, moment, cdi, strip = _evaluate_conditions_on_device(
+            mu, sigma, velocity, cp, force, moment, cdi, strip, gamma = _evaluate_conditions_on_device(
                 cfg.unit_mu_t, self._gpu_unit_sigma, cfg.unit_grad_t,
                 coeffs, speed, rho, *cfg.gpu_post,
             )
@@ -2125,8 +2144,12 @@ class PanelSolver:
         # Trefftz yawing moment (stability axes); a symmetric flow on a half
         # mesh gives 0 exactly, as in the vortex lattice.
         cn = _trefftz_yaw_batch(strip, speed, rho, lift, drag, self.S_ref, self.b_ref, cfg.trefftz_arms)
+        # Trefftz side force (wind axes), with the same symmetric-flow rule.
+        cy = _trefftz_side_batch(gamma, speed, lift, drag, self.S_ref, cfg.trefftz_segments)
         if self.mesh.half:
-            cn[~np.any(coeffs[:, list(_ASYM_COLS)] != 0.0, axis=1)] = 0.0
+            symmetric = ~np.any(coeffs[:, list(_ASYM_COLS)] != 0.0, axis=1)
+            cn[symmetric] = 0.0
+            cy[symmetric] = 0.0
         up, lo = cfg.wake.wake_up, cfg.wake.wake_lo
         mu_w = mu[:, up] - mu[:, lo]
         residual = (np.max(np.abs(cp[:, up] - cp[:, lo]), axis=1)
@@ -2136,6 +2159,7 @@ class PanelSolver:
             CDi_trefftz=float(cdi[i]), cp=cp[i, :n], mu=mu[i], sigma=sigma[i],
             velocity=velocity[i, :n], condition=condition,
             kutta_residual=float(residual[i]), mu_w=mu_w[i], Cn_trefftz=float(cn[i]),
+            CY_farfield=float(cy[i]),
         ) for i, condition in enumerate(conditions)]
 
     def _strip_system(self, cfg: _Configuration, parity: str) -> np.ndarray:
@@ -2256,7 +2280,9 @@ class PanelSolver:
             gamma_full = (mu_full[up_f] - mu_full[lo_f]) + expand(kres.delta)
         else:
             gamma_full = np.zeros(0, dtype=float)
-        cdi_trefftz, cn_trefftz = self._trefftz_pair(cfg, mu_full, condition, coeffs, wake_gamma=gamma_full)
+        cdi_trefftz, cn_trefftz, cy_farfield = self._trefftz_pair(
+            cfg, mu_full, condition, coeffs, wake_gamma=gamma_full,
+        )
 
         n_panels = len(self.centroids)
         n_strips = len(cfg.wake.wake_up)
@@ -2281,6 +2307,7 @@ class PanelSolver:
             trust_note=trust_note,
             mu_w=np.array(gamma_full[:n_strips], dtype=float, copy=True),
             Cn_trefftz=cn_trefftz,
+            CY_farfield=cy_farfield,
         )
 
     def _full_mesh_solver(self) -> PanelSolver:

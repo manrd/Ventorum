@@ -1968,10 +1968,13 @@ class _PanelCoupling:
             if solver.kutta == "pressure":
                 wake += expand(state["x"][ns:])
             sigma = solver._unit_sigma @ coeffs + source_rate * state["x"][:ns][self.owner]
+            # Trefftz drag, yawing moment (stability axes) and side force (wind
+            # axes) of the coupled wake, with the rules of the inviscid solve.
+            cdi, cn_trefftz, cy_farfield = solver._trefftz_pair(cfg, muf, condition, coeffs, wake_gamma=wake)
             return PanelResult(
                 CL=force["CL"], CD_pressure=force["CD_pressure"], CY=force["CY"],
                 Cl=force["Cl"], Cm=force["Cm"], Cn=force["Cn"],
-                CDi_trefftz=solver._trefftz(cfg, muf, condition, wake_gamma=wake),
+                CDi_trefftz=cdi, Cn_trefftz=cn_trefftz, CY_farfield=cy_farfield,
                 cp=state["cp"][:n], mu=mu, sigma=sigma, velocity=state["velocity"][:n],
                 condition=condition, kutta=solver.kutta,
                 kutta_iters=state.get("primary_iterations", len(state["hist"]) - 1),
@@ -2128,7 +2131,8 @@ class _PanelCoupling:
             panel = branch["panel"]
             totals = dataclasses.replace(result.totals, CL=panel.CL, CDi=panel.CDi_trefftz,
                                           Cm=panel.Cm, Cl=panel.Cl, Cn=panel.Cn, CY=panel.CY,
-                                          CDi_nearfield=panel.CD_pressure)
+                                          CDi_nearfield=panel.CD_pressure, Cn_trefftz=panel.Cn_trefftz,
+                                          CY_farfield=panel.CY_farfield)
             sw = _spanwise_results_batch(solver, [panel], [result.condition], geometry.strip_maps, geometry.geom_meta)[0]
             details = {**result.details, "panel_result": panel, "cp": panel.cp, "panel_cp": panel.cp,
                        "notes": list(result.details["notes"])}
