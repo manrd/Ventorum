@@ -1531,7 +1531,15 @@ class SpanwiseResult:
     chord : numpy.ndarray or None
         Strip chord [m].
     Cm_section : numpy.ndarray or None
-        Section pitching moment about the quarter chord [-].
+        Section pitching moment about the quarter chord [-]. On a lattice
+        strip it uses the local onset ``U_qc`` of ``Cl`` (direction and
+        dynamic pressure) with body rates. On a 3D panel strip it is the
+        strip pressure moment about the strip quarter-chord point over
+        ``q S c``, with ``S`` [m^2] the strip area, ``c`` [m] the strip
+        chord and ``q`` the dynamic pressure of ``Cl``: the local
+        ``rho |U_qc|^2 / 2`` with body rates, ``q_inf`` without them. The
+        3D panel ``Cd_i`` stays on ``q_inf`` also with body rates (a part
+        of the total induced drag).
     Cl_freestream : numpy.ndarray or None
         Section lift coefficient on the free-stream dynamic pressure,
         ``2 Gamma / (V_inf c)`` [-], so that ``Cl_freestream * q_inf * c``

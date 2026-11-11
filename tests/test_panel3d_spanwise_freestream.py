@@ -85,6 +85,46 @@ def test_panel_strip_cl_uses_the_local_dynamic_pressure(rates: dict) -> None:
         np.testing.assert_allclose(sw.Cl, sw.Cl_freestream, rtol=1e-12, atol=1e-14)
 
 
+@pytest.mark.parametrize("rates", [{"p": 0.5}, {"r": 0.5}, {"q": 0.3}], ids=["roll", "yaw", "pitch"])
+@pytest.mark.parametrize("path", ["batch", "scalar"])
+def test_panel_strip_cm_section_uses_the_local_dynamic_pressure(rates: dict, path: str, monkeypatch) -> None:
+    """Cm_section is on the local dynamic pressure of the strip, Cd_i on q_inf, with body rates.
+
+    Regression: with body rates the 3D panel strip Cm_section stayed on
+    ``q_inf``, while the strip Cl used the local onset. The lattice section
+    moment uses the local onset too. The reference here is the same panel
+    solve with the strip rules of a case without rates (``has_rates``
+    patched to False in the strip integration only): the strip pressure
+    moment and lift do not change, so ``Cm_section`` and ``Cl`` change by
+    the factor ``(V_inf / |U_qc|)^2`` and ``Cd_i`` does not change.
+    """
+    import ventorum.solvers.panel3d as factory_module
+    from ventorum.aero.system import freestream_direction, rotation_velocity
+
+    if path == "scalar":
+        def scalar_strips(solver, results, conditions, maps, meta):
+            return [factory_module._spanwise_reference(solver, r, c, maps, meta)
+                    for r, c in zip(results, conditions)]
+
+        monkeypatch.setattr(factory_module, "_spanwise_results_batch", scalar_strips)
+    ac = _aircraft(0.5)
+    cond = FlightCondition(V_inf=30.0, alpha=np.radians(5.0), **rates)
+    sw = _solve(ac, cond).spanwise[0]
+    monkeypatch.setattr(factory_module, "has_rates", lambda c: False)
+    ref = _solve(ac, cond).spanwise[0]
+
+    ac.compute_reference_values()
+    qc = np.column_stack([0.25 * sw.chord, sw.y, np.zeros_like(sw.y)])
+    u = cond.V_inf * freestream_direction(cond.alpha, cond.beta)[None, :]
+    u = u + rotation_velocity(cond, qc, ac.moment_reference())
+    ratio = (cond.V_inf / np.linalg.norm(u, axis=1)) ** 2
+    assert np.max(np.abs(ratio - 1.0)) > 1e-4
+    np.testing.assert_allclose(sw.Cm_section, ref.Cm_section * ratio, rtol=1e-12, atol=1e-15)
+    np.testing.assert_allclose(sw.Cl, ref.Cl * ratio, rtol=1e-12, atol=1e-15)
+    np.testing.assert_array_equal(sw.Cd_i, ref.Cd_i)
+    np.testing.assert_array_equal(sw.local_lift, ref.local_lift)
+
+
 def test_batch_and_scalar_strip_cl_agree_with_rates(monkeypatch) -> None:
     """The batch strip integration and the scalar reference give the same strips with body rates."""
     from dataclasses import fields

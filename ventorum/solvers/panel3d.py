@@ -589,10 +589,11 @@ def _spanwise_results_batch(solver, panel_results, conditions, strip_maps, metad
         chunk = conditions[start:start + size]
         _, speed, rho, lift_axis, drag_axis = _condition_arrays(chunk)
         q = 0.5 * rho * speed**2
-        # Dynamic pressure of the strip Cl [Pa], one row per condition: q_inf
-        # without body rates; with rates the local onset (free stream and
-        # rotation, no induced velocity) at the strip quarter-chord point,
-        # the rule of the lattice strips.
+        # Dynamic pressure of the strip Cl and Cm_section [Pa], one row per
+        # condition: q_inf without body rates; with rates the local onset
+        # (free stream and rotation, no induced velocity) at the strip
+        # quarter-chord point, the rule of the lattice strips. Cd_i stays on
+        # q_inf (a part of the total induced drag).
         q_strip = np.broadcast_to(q[:, None], (len(chunk), len(maps))).copy()
         for i, c in enumerate(chunk):
             if has_rates(c):
@@ -628,7 +629,7 @@ def _spanwise_results_batch(solver, panel_results, conditions, strip_maps, metad
                 y = np.concatenate([-y[::-1], y])
             cl = lift[:, ids] / np.maximum(q_strip[:, ids] * area, 1e-300)
             cdi = drag[:, ids] / np.maximum(q[:, None] * area, 1e-300)
-            cm = strip_moment[:, ids, 1] / np.maximum(q[:, None] * area * chord, 1e-300)
+            cm = strip_moment[:, ids, 1] / np.maximum(q_strip[:, ids] * area * chord, 1e-300)
             local = lift[:, ids] / np.maximum(width, 1e-300)
             gamma = local / np.maximum(rho * speed, 1e-300)[:, None]
             # 2 Gamma / (V_inf c) = local_lift / (q_inf c): the free-stream rule of the lattice.
@@ -657,7 +658,7 @@ def _spanwise_reference(solver, p_res, cond, surface_strip_maps, surface_geom_me
     rated = has_rates(cond)
 
     def q_cl(points: np.ndarray) -> np.ndarray | float:
-        """Dynamic pressure [Pa] of the strip Cl at the strip quarter-chord *points* (lattice rule)."""
+        """Dynamic pressure [Pa] of the strip Cl and Cm_section at the quarter-chord *points* (lattice rule)."""
         if not rated:
             return q_inf
         return 0.5 * float(cond.rho) * _strip_onset_speed(cond, points, solver.ref_point) ** 2
@@ -688,6 +689,8 @@ def _spanwise_reference(solver, p_res, cond, surface_strip_maps, surface_geom_me
         r_lift = np.empty(n_sp)
         r_drag = np.empty(n_sp)
         r_cm = np.empty(n_sp)
+        r_qc = r_mid + 0.25 * r_chord[:, None] * x_hat[None, :]
+        r_q = np.broadcast_to(q_cl(r_qc), (n_sp,))
         for j in range(n_sp):
             p_ids = r_map[j]
             fj = np.sum(dF_panel[p_ids], axis=0) if p_ids else np.zeros(3)
@@ -699,9 +702,8 @@ def _spanwise_reference(solver, p_res, cond, surface_strip_maps, surface_geom_me
             arm = centroids[p_ids] - qc_j[None, :] if p_ids else np.zeros((0, 3))
             mj = np.sum(np.cross(arm, dF_panel[p_ids]), axis=0) if p_ids else np.zeros(3)
             # Pitching moment (nose up): My in body axes
-            r_cm[j] = float(mj[1]) / max(q_inf * r_area[j] * r_chord[j], 1e-300)
+            r_cm[j] = float(mj[1]) / max(float(r_q[j]) * r_area[j] * r_chord[j], 1e-300)
 
-        r_qc = r_mid + 0.25 * r_chord[:, None] * x_hat[None, :]
         r_cl = r_lift / np.maximum(q_cl(r_qc) * r_area, 1e-300)
         r_cdi = r_drag / np.maximum(q_inf * r_area, 1e-300)
         r_local_lift = r_lift / np.maximum(r_width, 1e-300)
@@ -715,6 +717,8 @@ def _spanwise_reference(solver, p_res, cond, surface_strip_maps, surface_geom_me
                 l_lift = np.empty(n_sp)
                 l_drag = np.empty(n_sp)
                 l_cm = np.empty(n_sp)
+                l_qc = r_qc[::-1] * np.array([1.0, -1.0, 1.0])
+                l_q = np.broadcast_to(q_cl(l_qc), (n_sp,))
                 for k in range(n_sp):
                     p_ids = l_map[k]
                     j = n_sp - 1 - k
@@ -725,9 +729,8 @@ def _spanwise_reference(solver, p_res, cond, surface_strip_maps, surface_geom_me
                     qc_k = np.array([r_mid[j, 0], -r_mid[j, 1], r_mid[j, 2]]) + 0.25 * r_chord[j] * x_hat
                     arm = centroids[p_ids] - qc_k[None, :] if p_ids else np.zeros((0, 3))
                     mk = np.sum(np.cross(arm, dF_panel[p_ids]), axis=0) if p_ids else np.zeros(3)
-                    l_cm[k] = float(mk[1]) / max(q_inf * r_area[j] * r_chord[j], 1e-300)
+                    l_cm[k] = float(mk[1]) / max(float(l_q[k]) * r_area[j] * r_chord[j], 1e-300)
 
-                l_qc = r_qc[::-1] * np.array([1.0, -1.0, 1.0])
                 l_cl = l_lift / np.maximum(q_cl(l_qc) * r_area[::-1], 1e-300)
                 l_cdi = l_drag / np.maximum(q_inf * r_area[::-1], 1e-300)
                 l_local_lift = l_lift / np.maximum(r_width[::-1], 1e-300)
