@@ -235,6 +235,16 @@ GPU would be faster. To see the crossovers on a machine, run
 
 **How to remove the limit.** A precision-aware on-plane rule (for example a band from the local panel scale near the target, or from the distance to the nearest edge) is an open question; it needs a method study before float32 assembly can be considered.
 
+## PL-8: Ventorum-2D ground cases use more Newton work since the relaxed start sweeps
+
+**What happens.** The viscous Ventorum-2D solver starts with relaxed quasi-simultaneous sweeps. With them the cold start at the zero-lift angle of the continuation path converges more often, and a continuation step can then stop before the cold start at the angle converges. In ground effect a solve then takes more Newton iterations: NACA 4412, 161 nodes, 4 deg, Re 1e6, h/c 0.5 takes 202 iterations against 85 before. Six heights of the h/c 0.3 to 3.0 grid use 273 to 360 iterations, above `WORK_BUDGET` (250). The continuation path has its own budgets, so these solves converge. The solutions do not change (Cl agrees to about 2e-9).
+
+**What Ventorum does now.** Nothing special: the solves converge with the extra work. The test `test_ground_height_grid_work_budget` is a strict expected failure at h/c 1.9, 2.1 and 2.7, the heights that were inside the budget before.
+
+**Cost.** About 2.4 times the Newton iterations at the affected heights.
+
+**How to remove the limit.** A rule that skips the extra continuation path in the ground cases, when the cold start at the angle converges, is under study.
+
 ## Ground-sweep solve
 
 The 3D panel ground solve defaults to

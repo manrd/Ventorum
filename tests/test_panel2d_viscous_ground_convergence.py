@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import functools
 from types import SimpleNamespace
 
 import numpy as np
@@ -341,24 +342,37 @@ _BASELINE_GROUND = [
 ]
 
 
+# Heights that stopped on the single work budget of the whole solve before the continuation path
+# had its own budgets (COLD_START_BUDGET and STEP_BUDGET). newton_iterations also counts the path
+# work there, so the check against WORK_BUDGET does not apply.
+_PATH_BUDGET_HEIGHTS = (1.8, 2.0, 2.2)
+# Heights that were inside WORK_BUDGET before the relaxed quasi-simultaneous sweeps and are above it
+# now (273, 306 and 319 iterations): with the relaxed sweeps the cold start at the zero-lift angle
+# converges more often, and a continuation step can then stop before the cold start at the angle
+# converges (traced at h/c 0.5: 202 iterations against 85 before). This is a known work regression,
+# not a change of the solution; test_ground_height_grid_work_budget keeps the check on them.
+_OVER_BUDGET_HEIGHTS = (1.9, 2.1, 2.7)
+
+
+@functools.cache
+def _ground_grid_solve(height):
+    """Solve NACA 4412 (161 nodes) at 4 deg and Re 1e6 at the ground height h/c [-], once per height."""
+    return vs.solve_viscous(airfoil("4412", n_points=161), 4.0, 1e6, height=height)
+
+
 @pytest.mark.slow
 @pytest.mark.parametrize("height,cl,cd,iterations", _BASELINE_GROUND)
 def test_ground_height_grid_converges(height, cl, cd, iterations):
     """Keep baseline convergence and rescue first-estimate stagnation stops."""
-    result = vs.solve_viscous(airfoil("4412", n_points=161), 4.0, 1e6, height=height)
+    result = _ground_grid_solve(height)
     assert result.converged, (height, result.reason)
     assert result.residual < 1e-6
     # The work agrees with the stored count on every height (also where the loads are not stored).
     # Other numpy and BLAS builds (CI) take another Newton path: up to 10 of about 120 iterations
     # differ there.
     assert abs(int(result.newton_iterations) - iterations) <= max(5, 0.25 * iterations)
-    if iterations <= vs.WORK_BUDGET:
+    if height not in _PATH_BUDGET_HEIGHTS and height not in _OVER_BUDGET_HEIGHTS:
         assert result.newton_iterations <= vs.WORK_BUDGET
-    # Else newton_iterations also counts the work of the continuation path (the cold start at the
-    # zero-lift angle and the continuation steps), which has its own budgets (COLD_START_BUDGET and
-    # STEP_BUDGET). With the relaxed quasi-simultaneous sweeps the cold start at the zero-lift angle
-    # converges more often; a continuation step can then stop before the cold start at the angle
-    # converges (traced at h/c 0.5: 202 iterations against 85 before). Measured: 273 to 360 here.
     if cl is None:
         # These heights failed before the retry of the quasi-simultaneous
         # first estimate. Now they converge without it on this machine;
@@ -371,3 +385,23 @@ def test_ground_height_grid_converges(height, cl, cd, iterations):
         # level of the convergence tolerance and the work differs by a few
         # iterations (up to 10 of about 120 seen on CI).
         assert np.allclose([result.Cl, result.Cd], [cl, cd], rtol=1e-5, atol=1e-9)
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize("height", [
+    pytest.param(h, marks=pytest.mark.xfail(
+        strict=True,
+        reason="known work regression of the relaxed quasi-simultaneous sweeps: the continuation path "
+               "uses more than WORK_BUDGET Newton iterations at this height (the solution is unchanged)",
+    ))
+    for h in _OVER_BUDGET_HEIGHTS
+])
+def test_ground_height_grid_work_budget(height):
+    """Keep the work of the grid heights that left WORK_BUDGET inside the budget.
+
+    These heights converged inside WORK_BUDGET before the relaxed sweeps of the start. The test
+    fails now (strict expected failure), so that a fix of the work regression turns it back on.
+    """
+    result = _ground_grid_solve(height)
+    assert result.converged, (height, result.reason)
+    assert result.newton_iterations <= vs.WORK_BUDGET
