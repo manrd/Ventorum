@@ -1407,6 +1407,19 @@ def _cold_path(body, alpha, re, tol, max_iter, kw, bk=None, ctl=None, cache=None
     start at the zero-lift angle, which is the same for every angle of a
     sweep; a later angle reuses it instead of solving it again.
 
+    Angle probe: before the continuation path, one Newton solve at the
+    angle itself starts from the quasi-simultaneous first estimate (see
+    :func:`ventorum.panel2d.vii.initial_state`) at omega = 1, without the
+    retry after a residual-window stop (see :func:`_angle_probe`). When it
+    converges, the path is not used. Reason (measured, NACA 4412, 161
+    nodes, 4 deg, Re 1e6, ground heights h/c 0.3 to 3.0): with the relaxed
+    quasi-simultaneous sweeps the cold start at the zero-lift angle
+    converges, the path then often stops in a late step, and the cold start
+    at the angle converges after it; the probe converges there in 10 to 15
+    Newton iterations, against 115 to 360 for the path. The solves with
+    the "first_mean" wake weights (the wake-weight continuation) have no
+    probe.
+
     Work budgets (with ``ctl``): the cold start at the zero-lift angle has
     the budget ``cold_start_budget`` and each continuation step the budget
     ``step_budget`` of the stop rules; the solves at the angle itself use
@@ -1416,6 +1429,10 @@ def _cold_path(body, alpha, re, tol, max_iter, kw, bk=None, ctl=None, cache=None
     """
     a0 = zero_lift_angle(body, kw)
     n = _continuation_steps(alpha, a0)
+    if n > 0 and kw.get("wake_weights", "length") == "length":
+        probe = _angle_probe(body, alpha, re, tol, max_iter, kw, bk, ctl)
+        if probe is not None and probe[1].converged:
+            return probe
     if n > 0:
         if ctl is not None:
             # No budget left at the angle: the continuation path cannot end in a solve at the angle.
@@ -1467,6 +1484,24 @@ def _cold_path(body, alpha, re, tol, max_iter, kw, bk=None, ctl=None, cache=None
                 return setup, res
     setup = prepare_case(body, alpha, re, **kw)
     return setup, _cold_solve(setup, tol, max_iter, bk, ctl)
+
+
+def _angle_probe(body, alpha, re, tol, max_iter, kw, bk=None, ctl=None):
+    """Solve an angle once from the quasi-simultaneous first estimate; return (setup, result) or None.
+
+    The Newton solve starts at omega = 1 from the relaxed quasi-simultaneous
+    sweeps (:data:`ventorum.panel2d.vii.QS_SWEEPS`, :data:`ventorum.panel2d.vii.QS_RELAX`)
+    and has no retry after a residual-window stop, so a failed probe costs
+    about one stagnation window. It counts in the work budget of the angle.
+    None is returned when the marches of the first estimate meet a singular
+    linear system.
+    """
+    setup = prepare_case(body, alpha, re, **kw)
+    try:
+        init = vii.initial_state(setup, sweeps=vii.QS_SWEEPS, relax=vii.QS_RELAX)
+    except np.linalg.LinAlgError:
+        return None
+    return setup, _solve_one(setup, init, tol, max_iter, 1.0, bk, ctl, retry_window=False)
 
 
 def _continuation_steps(alpha, a0) -> int:

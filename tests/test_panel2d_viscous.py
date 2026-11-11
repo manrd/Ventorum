@@ -262,6 +262,9 @@ def test_work_budget_stops_the_angle(monkeypatch, zero_lift):
     from ventorum.panel2d import viscous as vs
 
     monkeypatch.setattr(vs, "zero_lift_angle", lambda body, kw: zero_lift)
+    # The angle probe before the continuation path converges this case within the budget; the test is
+    # about the budget of the attempts and the path decision, so the probe is switched off.
+    monkeypatch.setattr(vs, "_angle_probe", lambda *args, **kwargs: None)
     work = []
     counters = vs._AngleWork.counters
 
@@ -346,7 +349,7 @@ def test_attempt_at_the_angle_up_to_round_off_is_the_best_attempt():
 
 @pytest.mark.slow
 @pytest.mark.parametrize("code,defl", [("4415", 0.0), ("2412", 15.0)])
-def test_slow_case_still_converges(code, defl):
+def test_slow_case_still_converges(monkeypatch, code, defl):
     """Slow but sure solves still converge (and, for the cheaper case, give the result without the stop rules).
 
     NACA 4415 (120 panels, Re 1e6, alpha 0): the cold start at the zero-lift angle stays long below
@@ -361,23 +364,36 @@ def test_slow_case_still_converges(code, defl):
     of the same equations, with every residual below tol = 1e-6. The measured differences are 3.0e-7 in
     Cl and 4.9e-10 in Cd (7e-8 relative). The test accepts tol in Cl and Cm and tol relative in Cd: the
     order of the Newton tolerance, about three times the measured Cl difference.
+
+    The angle probe of the cold path (one solve at the angle from the quasi-simultaneous first
+    estimate) converges the 4415 case in 10 Newton iterations without the slow zero-lift start. The
+    default solve must converge (and agree with the path solve to the same tolerance); the slow solves
+    are checked with the probe switched off.
     """
+    from ventorum.panel2d import viscous as vs
+
     shape = airfoil(code).repanel(n_panels=120)
     if defl:
         # The sample that set the defaults used the outline as constructed.
         shape = shape.with_flap(x_hinge=0.75, deflection=defl, hinge_treatment="none")
     # The sample that set the defaults used the x extent of the section as the reference chord.
     extent = float(np.max(shape.coords[:, 0]) - np.min(shape.coords[:, 0]))
+    tol = 1e-6
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
+        default = solve_viscous(shape.coords, 0.0, 1e6, chord_ref=extent)
+        assert default.converged, default.reason
+        monkeypatch.setattr(vs, "_angle_probe", lambda *args, **kwargs: None)
         on = solve_viscous(shape.coords, 0.0, 1e6, chord_ref=extent)
         assert on.converged, on.reason
         assert on.newton_iterations >= 40
         if defl == 0.0:
+            assert abs(default.Cl - on.Cl) <= tol
+            assert abs(default.Cm - on.Cm) <= tol
+            assert abs(default.Cd / on.Cd - 1.0) <= tol
             off = solve_viscous(shape.coords, 0.0, 1e6, stall_window=0, divergence_factor=0.0, work_budget=0,
                                 chord_ref=extent)
             assert off.converged
-            tol = 1e-6
             assert abs(on.Cl - off.Cl) <= tol
             assert abs(on.Cm - off.Cm) <= tol
             assert abs(on.Cd / off.Cd - 1.0) <= tol

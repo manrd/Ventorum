@@ -38,9 +38,20 @@ from ventorum.viscous.alpha_correction import solve_viscous as solve_coupled
 # ---------------------------------------------------------------------------------------------
 
 @pytest.mark.slow
-def test_naca4412_320_panels_converges_with_the_path_budgets():
+def test_naca4412_320_panels_converges_with_the_path_budgets(monkeypatch):
     """NACA 4412, Re 1e6, 4 deg, 320 panels (321 generated points, as in the polar source): the single
-    angle converges (the budget of 250 for the whole solve stopped it before)."""
+    angle converges (the budget of 250 for the whole solve stopped it before).
+
+    The angle probe of the cold path converges this case without the continuation path. The path
+    budgets are checked with the probe switched off (monkeypatch): the path then needs more than
+    WORK_BUDGET Newton iterations and converges.
+    """
+    r = vs.solve_viscous(airfoil("4412", n_points=321), 4.0, 1e6)
+    assert r.converged, r.reason
+    assert r.residual < 1e-6
+    assert r.newton_iterations <= vs.WORK_BUDGET
+    assert 0.0 < r.Cd < 0.02 and 0.8 < r.Cl < 1.0
+    monkeypatch.setattr(vs, "_angle_probe", lambda *args, **kwargs: None)
     r = vs.solve_viscous(airfoil("4412", n_points=321), 4.0, 1e6)
     assert r.converged, r.reason
     assert r.residual < 1e-6
@@ -91,7 +102,7 @@ def test_stop_rules_check_the_path_budgets():
 
 
 @pytest.mark.slow
-def test_failed_cold_start_stage_is_named():
+def test_failed_cold_start_stage_is_named(monkeypatch):
     """A cold start at the zero-lift angle cut by its budget is named in the reason of the failed angle."""
     coords = airfoil("0012").repanel(n_panels=120).coords
     kw = dict(ncrit=9.0, xtr=(1.0, 1.0), height=None, height_reference="pivot", wake_length=1.0, n_wake=30,
@@ -99,6 +110,9 @@ def test_failed_cold_start_stage_is_named():
     body, chord, moment, pivot = vs.resolve_body(coords)
     kw.update(chord_ref=chord, moment_ref=moment, pivot=pivot)
     rules = vs.StopRules(work_budget=2, cold_start_budget=2, step_budget=2)
+    # The angle probe would use the angle budget of 2 iterations before the path (see
+    # test_angle_probe_counts_in_the_angle_budget); this test is about the path, so the probe is switched off.
+    monkeypatch.setattr(vs, "_angle_probe", lambda *args, **kwargs: None)
     row, _ = vs.finish_angle(body, 6.0, 1e6, None, 1e-6, 50, kw, rules=rules)
     assert not row["converged"]
     assert "continuation path: cold start at the zero-lift angle" in row["reason"]
@@ -107,17 +121,36 @@ def test_failed_cold_start_stage_is_named():
 
 
 @pytest.mark.slow
-def test_failed_continuation_step_is_named():
+def test_failed_continuation_step_is_named(monkeypatch):
     """A continuation step cut by its budget is named in the reason of the failed angle."""
     coords = airfoil("0012").repanel(n_panels=120).coords
     body, chord, moment, pivot = vs.resolve_body(coords)
     kw = dict(ncrit=9.0, xtr=(1.0, 1.0), height=None, height_reference="pivot", wake_length=1.0, n_wake=30,
               chord_ref=chord, moment_ref=moment, pivot=pivot)
     rules = vs.StopRules(work_budget=2, step_budget=1)
+    monkeypatch.setattr(vs, "_angle_probe", lambda *args, **kwargs: None)
     row, _ = vs.finish_angle(body, 6.0, 1e6, None, 1e-6, 50, kw, rules=rules)
     assert not row["converged"]
     assert "continuation path: continuation step 1 of" in row["reason"]
     assert "continuation-step budget of 1 Newton iterations used up" in row["reason"]
+
+
+@pytest.mark.slow
+def test_angle_probe_counts_in_the_angle_budget():
+    """The angle probe is a solve at the angle: it uses the work budget of the angle.
+
+    With a budget of 2 Newton iterations the failed probe uses up the budget, and the continuation path
+    does not start; the reason names the angle budget.
+    """
+    coords = airfoil("0012").repanel(n_panels=120).coords
+    body, chord, moment, pivot = vs.resolve_body(coords)
+    kw = dict(ncrit=9.0, xtr=(1.0, 1.0), height=None, height_reference="pivot", wake_length=1.0, n_wake=30,
+              chord_ref=chord, moment_ref=moment, pivot=pivot)
+    row, _ = vs.finish_angle(body, 6.0, 1e6, None, 1e-6, 50, kw, rules=vs.StopRules(work_budget=2))
+    assert not row["converged"]
+    assert "work budget of 2 Newton iterations per angle used up" in row["reason"]
+    assert "continuation path" not in row["reason"]
+    assert row["newton_iterations"] <= 2
 
 
 # ---------------------------------------------------------------------------------------------
