@@ -1279,15 +1279,20 @@ def _qs_restart(setup, res, row, alpha, tol, max_iter, bk, ctl):
 
 
 def restart_false_branches(rows, states, body, re, tol, max_iter, kw, bk=None, rules=None):
-    """Solve again the flagged angles of a sweep by a warm start from a lower angle (in place).
+    """Solve again the flagged angles of a sweep by a warm start from an angle closer to 0 deg (in place).
 
     A converged angle with a near-wake sawtooth (see
     :func:`wake_sawtooth_note`; the restart from the quasi-simultaneous
     first estimate of :func:`finish_angle` did not remove it) is solved
     again by a warm start (with the halved steps of :func:`_warm_path`)
-    from the converged solution without the sawtooth at the nearest lower
-    angle of the same sweep. The angles are taken in increasing order, so
-    a replaced angle can be the start of the next one. A converged solution
+    from the converged solution without the sawtooth at the next angle of
+    the same sweep in the direction of 0 deg: the nearest lower angle for
+    an angle of 0 deg or more, the nearest higher angle for a negative
+    angle (the mirror rule, as in the warm starts of the sweep). The
+    angles are taken in the order of the sweep (see :func:`sweep_order`:
+    upwards from the first angle of 0 deg or more, then downwards from the
+    first negative angle), so a replaced angle can be the start of the
+    next one. A converged solution
     without the sawtooth replaces the flagged one; the reason names the
     restart. Else the flagged solution and its sawtooth note stay, with a
     note of the outcome. No restart is made when there is no such lower
@@ -1321,15 +1326,17 @@ def restart_false_branches(rows, states, body, re, tol, max_iter, kw, bk=None, r
     """
     rules = StopRules() if rules is None else rules
     angles = sorted(rows)
-    for a in angles:
+    up, down = sweep_order(angles)
+    for a in up + down:
         row = rows[a]
         if wake_sawtooth_note(row) is None:
             continue
-        lower = [b for b in angles if b < a and states.get(b) is not None and rows[b]["converged"]
-                 and wake_sawtooth_note(rows[b]) is None]
-        if not lower or row.get("_warm_from") == lower[-1]:
+        # The start is the nearest angle on the side of 0 deg: lower for a >= 0, higher for a < 0.
+        near = [b for b in (angles if a >= 0.0 else angles[::-1]) if (b < a if a >= 0.0 else b > a)
+                and states.get(b) is not None and rows[b]["converged"] and wake_sawtooth_note(rows[b]) is None]
+        if not near or row.get("_warm_from") == near[-1]:
             continue
-        b = lower[-1]
+        b = near[-1]
         idx = wake_sawtooth_index(row["wake"]["theta"])
         ctl = _AngleWork(a, rules)
         try:

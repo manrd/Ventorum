@@ -310,6 +310,37 @@ def test_false_branch_restart_from_a_lower_angle():
 
 
 @pytest.mark.slow
+def test_false_branch_restart_of_a_negative_angle_from_a_higher_angle():
+    """A flagged negative angle is solved again by a warm start from the next angle closer to 0 deg.
+
+    Mirror of test_false_branch_restart_from_a_lower_angle: the sharp NACA 0012 (200 panels, Re 1e6) is
+    symmetric, so the single-angle solve at -2 deg stays on the false branch (Cl about -0.13) and the solve
+    at -1 deg is correct. Regression: the restart took only a lower angle, and -2 deg has none in this
+    sweep, so the angle stayed flagged. The restart now starts -2 deg from the -1 deg solution and gets
+    the correct branch (Cl about -0.20).
+    """
+    from ventorum.panel2d import viscous as vs
+
+    body = airfoil("0012", closed_te=True).repanel(n_panels=200).coords
+    kw = dict(ncrit=9.0, xtr=(1.0, 1.0), height=None, height_reference="pivot", wake_length=1.0, n_wake=30,
+              chord_ref=None, moment_ref=None, pivot=None, reference=None)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        rows, states = {}, {}
+        for a in (-1.0, -2.0):
+            rows[a], states[a] = vs.finish_angle(body, a, 1e6, None, 1e-6, 50, kw)
+        assert wake_sawtooth_note(rows[-1.0]) is None
+        assert wake_sawtooth_note(rows[-2.0]) is not None
+        vs.restart_false_branches(rows, states, body, 1e6, 1e-6, 50, kw)
+    r = rows[-2.0]
+    assert r["converged"]
+    assert wake_sawtooth_note(r) is None and "near-wake sawtooth" not in r["reason"]
+    assert "warm start from -1 deg replaced it" in r["reason"]
+    assert -0.21 < r["Cl"] < -0.19
+    assert wake_sawtooth_note(rows[-1.0]) is None
+
+
+@pytest.mark.slow
 def test_normal_branch_is_not_flagged():
     """The correct solution (sharp NACA 0012, 160 panels, 2 deg) gives no sawtooth warning."""
     with warnings.catch_warnings():

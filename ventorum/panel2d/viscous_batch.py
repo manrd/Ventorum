@@ -331,7 +331,7 @@ def solve_viscous_batch(cases, *, backend: str = "torch", device=None, dtype=Non
         for k in range(n_dn):
             _pass([(p, p["dn"][k]) for p in plans if k < len(p["dn"])], bk, upward=False)
         for p in plans:
-            # Flagged angles: a warm start from the nearest lower angle without a sawtooth (sequential solver rule).
+            # Flagged angles: a warm start from the next angle closer to 0 deg without a sawtooth (sequential rule).
             c = p["case"]
             vs.restart_false_branches(p["rows"], p["states"], p["body"], c.Re, c.tol, c.max_iter, p["kw"], bk,
                                       rules=p["rules"])
