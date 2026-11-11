@@ -467,6 +467,21 @@ C_{Di, \text{trefftz}} = \frac{D_i}{q_\infty S_{\text{ref}}}.
 
 The in-plane normal is $\hat{\mathbf{d}} \times (\mathbf{p}_r - \mathbf{p}_l) / l_s$, so the product $w_{n, s} \, l_s$ uses the length of the segment projected on the Trefftz plane, also for sweep and dihedral.
 
+#### Yawing moment of the induced drag
+
+The Trefftz plane also gives `Cn_trefftz`, the yawing moment of the induced-drag distribution, in stability axes. It is a far-field diagnostic next to the near-field `Cn`, with the rule of the vortex lattice (see [Forces and moments](forces_and_moments.md), section *Far-field lateral diagnostics*). The induced drag of each strip, $D'_s = -\tfrac{1}{2} \rho_\infty \Gamma_s w_{n, s} l_s$ [N] (the terms of the sum above), acts along the free stream $\hat{\mathbf{u}}$ at the midpoint $\mathbf{q}_s$ of the strip segment. The arm $\mathbf{a}_s$ is the vector $\mathbf{r}_s$ from the moment reference point to $\mathbf{q}_s$, projected on the Trefftz plane: $\mathbf{a}_s = \mathbf{r}_s - (\mathbf{r}_s \cdot \hat{\mathbf{d}}) \hat{\mathbf{d}}$. With the lift direction $\hat{\mathbf{L}}$ (the stability $z$ axis, up in the geometry axes):
+
+```{math}
+C_{n, T} = -\frac{\sum_s \left( \mathbf{a}_s \times D'_s \hat{\mathbf{u}} \right) \cdot \hat{\mathbf{L}}}{q_\infty S_{\text{ref}} b_{\text{ref}}}
+= \frac{\sum_s D'_s \, y_s}{q_\infty S_{\text{ref}} b_{\text{ref}}},
+```
+
+where $y_s$ is the lateral arm along the wind-axis side direction. More drag on the right wing gives $C_{n, T} > 0$ (nose right), the AVL sign of `Cn`. The far-field drag and its distribution are those of the Trefftz-plane analysis (E. Trefftz, 1921; Katz and Plotkin, 2001; Drela, 2014). In ground effect the normal wash includes the image vortices; the image strips carry no moment. A symmetric flow on a half mesh (no sideslip, roll rate or yaw rate) gives 0 exactly, as in the lattice. The single-condition, batch and pressure Kutta paths use the same equations; the GPU batch path computes the strip terms $\Gamma_s w_{n, s} l_s$ on the device in float64 and the moment on the host. The viscous strip coupling does not compute it (`Cn_trefftz` is None for `viscous_panel3d`), and the far-field side force `CY_farfield` is not computed for the 3D panel solver (None).
+
+Properties of the free-air value. The free-air wake follows the body $x$ axis, so the Trefftz plane is the $y$-$z$ plane. On a planar wing in sideslip the side onset lies in the plane of the wing, the circulation stays symmetric and `Cn_trefftz` is 0. A vortex lattice with the wake along the free stream gives a value that is not zero there, because its wake turns with the sideslip; with the wake along the body $x$ axis (`wake_alignment="body"`) it also gives 0. With dihedral, and with roll and yaw rates, the circulation is antisymmetric and the value agrees with the lattice (checks below). `Cn_trefftz` does not use the surface gradient, so it does not have the coarse-mesh leading-edge error of the near-field `Cn` (see *Envelope*).
+
+Checks (`tests/test_panel3d_trefftz_yaw.py`): the value equals an independent sum $\sum_s D'_s y_s / (q_\infty S b)$ of the wake strips on half and full meshes; a roll rate $p > 0$ gives $C_{n, T} > 0$ and a yaw rate $r > 0$ gives $C_{n, T} < 0$, and the opposite rate gives the opposite value; a symmetric flow gives 0; on a NACA 0006 wing of aspect ratio 8 (16 x 16 mesh) the yaw-rate, roll-rate and dihedral-sideslip values agree with the lattice `Cn_trefftz` within 10 % (Morino and pressure Kutta; the tolerance and the measured values are in the test); the GPU batch and single-condition paths agree with numpy (float64 to $10^{-10}$, float32 to its rounding floor). `tests/test_panel3d_rotation_pressure.py` compares the far-field yaw damping $C_{n_r}$ (central difference of `Cn_trefftz` in the stability yaw rate) with the lattice.
+
 ## Computational backends
 
 Ventorum-3DP supports three computational backends:
@@ -583,6 +598,7 @@ The 3D panel method implementation is verified by tests in the test suite:
 - Refinement regressions (open trailing edge with chordwise refinement, dihedral root strip with spanwise refinement): `tests/test_panel3d_refinement.py`; flapped wing with spanwise refinement: `tests/test_panel3d_controls.py`.
 - Solver family integration, settings, ground plane, strip map and trust scores: `tests/test_panel3d_factory.py`.
 - GPU pipeline parity (when CUDA is available): `tests/test_panel3d_gpu.py`.
+- Yawing moment of the Trefftz-plane induced drag (`Cn_trefftz`: independent strip sum, sign, lattice parity, all paths, GPU): `tests/test_panel3d_trefftz_yaw.py`.
 
 ## References
 
@@ -603,4 +619,5 @@ The 3D panel method implementation is verified by tests in the test suite:
 - D. Shepard, "A Two-Dimensional Interpolation Function for Irregularly-Spaced Data", *Proceedings of the 23rd ACM National Conference*, 1968, pp. 517-524.
 - B. L. Stevens, F. L. Lewis and E. N. Johnson, *Aircraft Control and Simulation: Dynamics, Controls Design, and Autonomous Systems*, 3rd ed., John Wiley & Sons, Hoboken, NJ, 2016.
 - A. van Oosterom and J. Strackee, "The Solid Angle of a Plane Triangle", *IEEE Transactions on Biomedical Engineering*, Vol. BME-30, No. 2, 1983, pp. 125-126.
+- E. Trefftz, "Prandtlsche Tragflaechen- und Propeller-Theorie", *Zeitschrift fuer angewandte Mathematik und Mechanik*, Vol. 1, 1921.
 - C. Wieselsberger, "Wing Resistance Near the Ground", NACA TM-77, 1922; translated from *Zeitschrift fuer Flugtechnik und Motorluftschiffahrt*, Vol. 12, No. 10, 1921.

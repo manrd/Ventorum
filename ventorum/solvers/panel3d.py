@@ -1966,6 +1966,7 @@ class PanelMethodSolver(BaseSolver):
                     Cn=float(p_res.Cn),
                     CY=float(p_res.CY),
                     CDi_nearfield=float(p_res.CD_pressure),
+                    Cn_trefftz=None if p_res.Cn_trefftz is None else float(p_res.Cn_trefftz),
                 )
 
                 # Trust score evaluation
