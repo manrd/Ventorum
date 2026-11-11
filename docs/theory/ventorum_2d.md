@@ -232,7 +232,7 @@ Only the quasi-simultaneous first estimate of a cold start may retry. The cold s
 
 `ventorum.panel2d.viscous_batch.solve_viscous_batch` runs the same algorithm and the same equations with torch on the CPU or on CUDA. Cases with the same geometry and settings form angle sequences. Each pass solves one angle of each sequence, and the cases with equal node and wake counts share one batched Newton iteration (`torch.linalg.solve`). The first angle of a sequence and the failed first attempts use the fallback path of the sequential solver. In float64 the batch equals the sequential solver.
 
-The sequential solver solves the angles $\ge 0$ upwards and the angles $< 0$ downwards, each from the converged state of the previous angle, with halved angle steps when needed. An angle without a converged neighbour starts cold at the inviscid zero-lift angle and continues to the angle in steps of at most 2 deg.
+The sequential solver solves the angles $\ge 0$ upwards and the angles $< 0$ downwards, each from the converged state of the previous angle, with halved angle steps when needed. An angle without a converged neighbour first tries one solve at the angle from the quasi-simultaneous first estimate (the angle probe, see [](panel2d_viscous.md)); when that fails, it starts cold at the inviscid zero-lift angle and continues to the angle in steps of at most 2 deg.
 
 ## Polar sources and tables
 

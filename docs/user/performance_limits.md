@@ -235,15 +235,15 @@ GPU would be faster. To see the crossovers on a machine, run
 
 **How to remove the limit.** A precision-aware on-plane rule (for example a band from the local panel scale near the target, or from the distance to the nearest edge) is an open question; it needs a method study before float32 assembly can be considered.
 
-## PL-8: Ventorum-2D ground cases use more Newton work since the relaxed start sweeps
+## PL-8: Ventorum-2D ground cases used more Newton work since the relaxed start sweeps (removed)
 
 **What happens.** The viscous Ventorum-2D solver starts with relaxed quasi-simultaneous sweeps. With them the cold start at the zero-lift angle of the continuation path converges more often, and a continuation step can then stop before the cold start at the angle converges. In ground effect a solve then takes more Newton iterations: NACA 4412, 161 nodes, 4 deg, Re 1e6, h/c 0.5 takes 202 iterations against 85 before. Six heights of the h/c 0.3 to 3.0 grid use 273 to 360 iterations, above `WORK_BUDGET` (250). The continuation path has its own budgets, so these solves converge. The solutions do not change (Cl agrees to about 2e-9).
 
-**What Ventorum does now.** Nothing special: the solves converge with the extra work. The test `test_ground_height_grid_work_budget` is a strict expected failure at h/c 1.9, 2.1 and 2.7, the heights that were inside the budget before.
+**What Ventorum does now.** Before the continuation path, the solver makes one Newton solve at the angle from the quasi-simultaneous first estimate (the angle probe). When it converges, the path is skipped. On the grid of NACA 4412 (161 nodes, 4 deg, Re 1e6, h/c 0.3 to 3.0) every height now converges in 10 to 15 Newton iterations, inside `WORK_BUDGET`. The probe gives another converged solution of the same equations where the path converged before (Cl differs by up to 7e-6 on that grid). The test `test_ground_height_grid_work_budget` checks the budget again at h/c 1.9, 2.1 and 2.7.
 
-**Cost.** About 2.4 times the Newton iterations at the affected heights.
+**Cost.** A failed probe adds about one stagnation window (12 to 50 Newton iterations) to an angle that then takes the continuation path, for example at 10 deg in ground effect. In the stop-rule sample of the theory manual the total work rises by 7 % (failed angles); the work of the converged angles falls by 17 %.
 
-**How to remove the limit.** A rule that skips the extra continuation path in the ground cases, when the cold start at the angle converges, is under study.
+**How to remove the limit.** The work regression is removed. The remaining extra work of a failed probe is a known cost.
 
 ## Ground-sweep solve
 
