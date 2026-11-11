@@ -320,7 +320,7 @@ def solve_viscous_batch(cases, *, backend: str = "torch", device=None, dtype=Non
                   wake_length=c0.wake_length, n_wake=c0.n_wake, chord_ref=chord, moment_ref=moment, pivot=pivot,
                   reference=_stored_reference(c0))
         plans.append({"idx": idx, "up": up, "dn": dn, "kw": kw, "body": body, "case": c0, "prev": None,
-                      "first": None, "rows": {}, "rules": _rules(c0), "cache": {}})
+                      "first": None, "rows": {}, "states": {}, "rules": _rules(c0), "cache": {}})
     with blas_single_thread():
         n_up = max(len(p["up"]) for p in plans)
         for k in range(n_up):
@@ -330,6 +330,11 @@ def solve_viscous_batch(cases, *, backend: str = "torch", device=None, dtype=Non
         n_dn = max(len(p["dn"]) for p in plans)
         for k in range(n_dn):
             _pass([(p, p["dn"][k]) for p in plans if k < len(p["dn"])], bk, upward=False)
+        for p in plans:
+            # Flagged angles: a warm start from the next angle closer to 0 deg without a sawtooth (sequential rule).
+            c = p["case"]
+            vs.restart_false_branches(p["rows"], p["states"], p["body"], c.Re, c.tol, c.max_iter, p["kw"], bk,
+                                      rules=p["rules"])
     out = [None] * len(parsed)
     for p in plans:
         note = vs.warn_long_wake(p["case"].wake_length, "solve_viscous_batch")
@@ -383,6 +388,7 @@ def _store(plan, alpha, row, state, upward):
     """Store the result of one angle and keep a converged state as the next start."""
     plan["rows"][float(alpha)] = row
     if row["converged"]:
+        plan["states"][float(alpha)] = state
         plan["prev"] = state
         if upward and plan["first"] is None:
             plan["first"] = state

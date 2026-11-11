@@ -353,6 +353,14 @@ def test_slow_case_still_converges(code, defl):
     omega = 1, with long plateaus of the residual. NACA 2412 with a 15 deg flap: after failed attempts,
     the quasi-simultaneous cold start converges after a slow decrease of the residual. These were the
     most demanding converged solves of the sample that set the defaults.
+
+    The intent of the 4415 comparison: the stop rules must not change the result of a solve that
+    converges. The rules can select another start path of the same angle (with the length-weighted
+    interior wake stations the zero-lift start stops by stagnation with the rules, and the cold start at
+    the angle converges instead), so the two solves are not the same bits. Both are converged solutions
+    of the same equations, with every residual below tol = 1e-6. The measured differences are 3.0e-7 in
+    Cl and 4.9e-10 in Cd (7e-8 relative). The test accepts tol in Cl and Cm and tol relative in Cd: the
+    order of the Newton tolerance, about three times the measured Cl difference.
     """
     shape = airfoil(code).repanel(n_panels=120)
     if defl:
@@ -369,8 +377,10 @@ def test_slow_case_still_converges(code, defl):
             off = solve_viscous(shape.coords, 0.0, 1e6, stall_window=0, divergence_factor=0.0, work_budget=0,
                                 chord_ref=extent)
             assert off.converged
-            assert on.Cl == off.Cl and on.Cd == off.Cd and on.Cm == off.Cm
-            assert on.newton_iterations == off.newton_iterations
+            tol = 1e-6
+            assert abs(on.Cl - off.Cl) <= tol
+            assert abs(on.Cm - off.Cm) <= tol
+            assert abs(on.Cd / off.Cd - 1.0) <= tol
 
 
 @pytest.mark.slow

@@ -270,6 +270,7 @@ Gaps. An angle that does not converge is dropped from the polar, and the PCHIP i
 - Mach number below 0.3.
 - Chord Reynolds numbers from $10^4$ to $10^8$.
 - Any ground height where the geometry stays above the ground; there is no height limit. A wake line that reaches the ground stops the case with a reason.
+- Strongly flapped sections (10 deg or more) can have more than one converged solution: in a study of 72 angles one angle had a second solution with $|\Delta C_l|$ 2.6e-3, found only by a warm start from the higher angle. The start path decides which one the solver returns; there is no warning. See [](panel2d_viscous.md), "Multi-element and flaps".
 
 ## Implementation
 

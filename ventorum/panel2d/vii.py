@@ -90,7 +90,7 @@ from ventorum.ibl2d import transition as tr
 from ventorum.ibl2d.dual import variables
 from ventorum.panel2d.coupling import CouplingSystem
 
-__all__ = ["CaseSetup", "CaseState", "NewtonResult", "newton_solve", "initial_state", "case_outputs"]
+__all__ = ["CaseSetup", "CaseState", "NewtonResult", "newton_solve", "initial_state", "start_residual", "case_outputs"]
 
 #: A node closer to the stagnation point than this fraction of its next interval is not a station [-].
 STAGNATION_DROP = 0.1
@@ -120,8 +120,25 @@ LM_SWITCH = 1e-2
 LM_TRIALS = 12
 #: Default trials of a Levenberg-Marquardt step after a step of the same Newton solve found no decrease [-].
 LM_RETRY_TRIALS = 2
-#: Number of quasi-simultaneous sweeps of the second first estimate of a cold start (path only).
-QS_SWEEPS = 3
+#: Largest number of quasi-simultaneous sweeps of the second first estimate of a cold start (path
+#: only). The sweep with the smallest residual is the start (see :func:`initial_state`). With the
+#: relaxation QS_RELAX each sweep moves the mass defects by half of the plain update, so 6 relaxed
+#: sweeps move them by the same total amount as the 3 plain sweeps of before. Each sweep costs one
+#: march and one residual evaluation, much less than one Newton iteration.
+QS_SWEEPS = 6
+#: Under-relaxation factor of the mass defects between quasi-simultaneous sweeps (path only) [-]. The
+#: plain sweeps oscillate with period two on flapped sections (the trailing-edge ue alternates between
+#: high and low values), the sign of a sweep map with a derivative near -1. The relaxed map
+#: m + beta (g(m) - m) has the derivative 1 - beta (1 - g'), which is 0 for g' = -1 at beta = 0.5,
+#: and it contracts for every g' in (-3, 1).
+QS_RELAX = 0.5
+#: Number of plain (not relaxed, QS_RELAX 1) quasi-simultaneous sweeps of the first estimate of a solve
+#: with the "first_mean" wake weights (the wake-weight continuation, path only). These are the three
+#: sweeps of the former first estimate. On the robustness set of the flapped sections, the continuation
+#: with this start converged all 25 runs, and with the relaxed start 20 of 25: the relaxed sweeps did not
+#: give a usable start at the zero-lift angle of a NACA 2412 with a 15 deg flap (sweep residuals inf,
+#: 27.4, 204 against inf, 27.4, 5.93 for the plain sweeps).
+QS_PLAIN_SWEEPS = 3
 #: Window of the stagnation stop [Newton iterations] (0 switches the stagnation stops off).
 STALL_WINDOW = 12
 #: Factor by which the smallest residual must fall within STALL_WINDOW iterations [-].
@@ -147,12 +164,22 @@ class CaseSetup:
     xtr : tuple of float
         Forced transition x/c on the upper and lower side [-]; values of 1
         or more mean free transition.
+    wake_weights : {"length", "first_mean"}
+        Edge velocity map of the interior wake stations. "length" (the
+        discretisation of the solver): linear interpolation of the two
+        adjacent wake-panel midpoint velocities with length weights.
+        "first_mean": the same, but the plain mean of the two midpoint
+        velocities at the first interior wake station. The second map is
+        only a step of the path of a failed solve (see
+        :func:`ventorum.panel2d.viscous.finish_angle`); a result is always
+        a solution of the first map.
     """
 
     sys: CouplingSystem
     re: float
     ncrit: float
     xtr: tuple
+    wake_weights: str = "length"
 
     def __post_init__(self):
         s = self.sys
@@ -166,9 +193,20 @@ class CaseSetup:
         P = np.zeros((self.n_st, self.n + self.nw - 1))
         n, nw = self.n, self.nw
         P[n, 0] = 1.0
+        # Linear interpolation at the interior wake nodes. Node j lies
+        # L_{j-1} / 2 behind the midpoint of panel j - 1 and L_j / 2 ahead of
+        # the midpoint of panel j, so the weights are L_j / (L_{j-1} + L_j)
+        # on panel j - 1 and L_{j-1} / (L_{j-1} + L_j) on panel j (0.5 and
+        # 0.5 for equal lengths only; the wake spacing is geometric).
+        wl = s.wake_len
         for j in range(1, nw - 1):
-            P[n + j, n + j - 1] = 0.5
-            P[n + j, n + j] = 0.5
+            l_up, l_dn = wl[j - 1], wl[j]
+            P[n + j, n + j - 1] = l_dn / (l_up + l_dn)
+            P[n + j, n + j] = l_up / (l_up + l_dn)
+        if self.wake_weights == "first_mean":
+            P[n + 1, n] = P[n + 1, n + 1] = 0.5
+        elif self.wake_weights != "length":
+            raise ValueError(f"wake_weights must be 'length' or 'first_mean', got {self.wake_weights!r}.")
         # Linear extrapolation from the midpoints of the last two wake panels
         # to the wake end. The midpoints are L_last / 2 and L_last + L_prev / 2
         # upstream of the end, so the weights are 1 + f and -f with
@@ -347,10 +385,11 @@ def _coupling_matrices(setup: CaseSetup, st: CaseState):
 
     Station edge velocities: sign * gamma at the airfoil nodes, gamma of
     the upper trailing-edge node at the first wake station (equal to the
-    lower one by the Kutta condition), the mean of the two adjacent
-    wake-panel midpoint velocities at the other wake stations and a linear
-    extrapolation from the last two midpoints (weights from the panel
-    lengths) at the last one.
+    lower one by the Kutta condition), the linear interpolation of the two
+    adjacent wake-panel midpoint velocities (weights from the panel
+    lengths) at the interior wake stations and a linear extrapolation from
+    the last two midpoints (weights from the panel lengths) at the last
+    one.
     """
     P, B = _p_and_b(setup, st)
     return P @ setup.base, P @ setup.sens @ B
@@ -844,7 +883,7 @@ def _march_edge(coupling, law, ue, k, g, ds):
     coupling[2][g] = ue[k] * ds
 
 
-def initial_state(setup: CaseSetup, sweeps: int = 0) -> CaseState:
+def initial_state(setup: CaseSetup, sweeps: int = 0, relax: float | None = None) -> CaseState:
     """Return the first estimate of a case from marches on the inviscid edge velocity.
 
     Parameters
@@ -852,11 +891,19 @@ def initial_state(setup: CaseSetup, sweeps: int = 0) -> CaseState:
     setup : CaseSetup
         Case data.
     sweeps : int
-        0: direct marches on the inviscid edge velocity. k > 0: k sweeps of
-        quasi-simultaneous marches (see :func:`_march_side`) over both
-        sides and the wake, each sweep with the mass defects of the
-        previous one; the edge velocities then include the displacement
-        effect and the march passes separation points.
+        0: direct marches on the inviscid edge velocity. k > 0: up to k
+        sweeps of quasi-simultaneous marches (see :func:`_march_side`)
+        over both sides and the wake; the edge velocities then include the
+        displacement effect and the march passes separation points. Each
+        sweep after the first uses the mass defects of the previous sweep,
+        under-relaxed by QS_RELAX: m = m_prev + QS_RELAX (m_sweep -
+        m_prev). The start is the sweep whose state has the smallest
+        largest absolute residual of the coupled equations at omega = 1
+        (see :func:`start_residual`); the sweeps can oscillate, so the last
+        sweep is not always the best one.
+    relax : float, optional
+        Under-relaxation factor of the mass defects between the sweeps [-]
+        (QS_RELAX when None). 1 gives the plain sweeps.
 
     Returns
     -------
@@ -878,7 +925,10 @@ def initial_state(setup: CaseSetup, sweeps: int = 0) -> CaseState:
     mm = np.zeros(setup.n_st)
     coupling = None if sweeps <= 0 else (ue_inv, D, mm)
     one = np.array([setup.re_l])
-    for _ in range(max(sweeps, 1)):
+    beta = QS_RELAX if relax is None else float(relax)
+    best = None
+    for k_sweep in range(max(sweeps, 1)):
+        m_prev = mm.copy()
         xu, itr_u, uu = _march_side(setup, up, ue_inv[up], a_u, 0, coupling)
         xl, itr_l, ul = _march_side(setup, lo, ue_inv[lo], a_l, 1, coupling)
         xd = np.zeros((setup.n_st, 3))
@@ -911,8 +961,73 @@ def initial_state(setup: CaseSetup, sweeps: int = 0) -> CaseState:
                                                one, st1[:3], law=law)
             xd[g2] = (t[0], d[0], c[0]) if ok[0] else xd[g1]
             _march_edge(coupling, law, ue_all, g2, g2, xd[g2, 1])
+        if coupling is None:
+            break
+        if k_sweep > 0:
+            mm[:] = m_prev + beta * (mm - m_prev)
+        trial = st.copy()
+        to_mixed(setup, trial, xd, ue_all)
+        r = start_residual(setup, trial)
+        if best is None or r < best[0]:
+            best = (r, xd.copy(), ue_all.copy(), list(st.itr))
+    if best is not None:
+        _, xd, ue_all, st.itr = best
     to_mixed(setup, st, xd, ue_all)
     return st
+
+
+def start_residual(setup: CaseSetup, st: CaseState) -> float:
+    """Return the largest absolute residual of a first estimate at omega = 1 [-].
+
+    As at the start of :func:`newton_solve`, a state whose residual is not
+    finite (or whose edge velocity is not positive at a station) gets one
+    update of the stagnation structure first, on a copy. The value is inf
+    when the residual is still not finite, when an edge velocity is not
+    positive or when a linear system is singular.
+
+    Parameters
+    ----------
+    setup : CaseSetup
+        Case data.
+    st : CaseState
+        First estimate (not changed).
+
+    Returns
+    -------
+    float
+        Largest absolute residual [-], or inf.
+    """
+    r = _residual_at_one(setup, st)
+    if np.isfinite(r):
+        return r
+    trial = st.copy()
+    try:
+        _update_structure(setup, trial, 1.0, transition=False)
+    except np.linalg.LinAlgError:
+        return float("inf")
+    return _residual_at_one(setup, trial)
+
+
+def _residual_at_one(setup: CaseSetup, st: CaseState) -> float:
+    """Return the largest absolute residual of a state at omega = 1 (inf: not finite, ue <= 0, singular)."""
+    try:
+        P, B = _p_and_b(setup, st)
+        ue_inv = P @ setup.base
+        D = P @ setup.sens @ B
+        S = _dstar_mask(setup, st).astype(float)
+        lists = _build_lists([setup], [st])
+        drop_b = np.array([0] if st.drop >= 0 else [], dtype=int)
+        drop_g = np.array([st.drop] if st.drop >= 0 else [], dtype=int)
+        with np.errstate(all="ignore"):
+            R, _, UE = _residual_m(_Backend(np), lists, st.x[None], ue_inv[None], D[None],
+                                   np.array([setup.re_l]), S[None], drop_b, drop_g, False)
+    except np.linalg.LinAlgError:
+        return float("inf")
+    R = np.asarray(R)
+    UE = np.asarray(UE)
+    if not (np.all(np.isfinite(R)) and np.all(UE[0][_station_mask(setup, st)] > 0.0)):
+        return float("inf")
+    return float(np.max(np.abs(R)))
 
 
 # ---------------------------------------------------------------------------
