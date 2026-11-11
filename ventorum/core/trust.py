@@ -741,6 +741,7 @@ def near_far_lateral_warnings(
     CY_farfield: float | None = None,
     Cn: float | None = None,
     Cn_trefftz: float | None = None,
+    beta: float | None = None,
 ) -> list[str]:
     """Return the warnings of the near-field and far-field lateral comparison.
 
@@ -757,6 +758,19 @@ def near_far_lateral_warnings(
     acts ahead of or behind the reference point; with a side force the two
     Cn values differ for that reason alone.
 
+    In sideslip, the Trefftz-plane values of a planar wing are zero or
+    nearly zero: the wake trace does not see the yaw and the side force
+    that the sideslip gives on a planar wing (the 3D panel wake and the
+    lattice wake with either alignment). On a planar wing the near-field
+    ``Cn`` passes its floor at about 5 deg of sideslip. When *beta* is not
+    zero, each warning says so, because the difference then does not show
+    a solve problem.
+
+    The viscous couplings do not compare ``Cn``. The section profile drag
+    of the two wing halves differs in sideslip and with a yaw rate, and
+    gives a real near-field yawing moment. The far field is inviscid and
+    cannot contain it, so a ``Cn`` comparison would warn for a real effect.
+
     Parameters
     ----------
     CY : float or None
@@ -768,6 +782,9 @@ def near_far_lateral_warnings(
     Cn_trefftz : float or None
         Yawing-moment coefficient of the Trefftz-plane induced drag in
         stability axes [-].
+    beta : float or None
+        Sideslip angle of the condition [rad]. None or 0 gives no sideslip
+        note.
 
     Returns
     -------
@@ -785,13 +802,22 @@ def near_far_lateral_warnings(
         near_v, far_v = float(near), float(far)
         diff = abs(near_v - far_v)
         if diff > NEAR_FAR_RELATIVE * abs(far_v) and diff > floor:
-            out.append(
+            text = (
                 f"Near field and far field do not agree for {name} ({axes}): near field {near_v:.6g}, "
                 f"{far_name} {far_v:.6g}, difference {diff:.3g}. Probable causes: a junction of surfaces that "
                 "the mesh does not resolve (for example a fin on a tail tip, a winglet, or joined edges with "
-                "chordwise grids or strip widths that do not match), or a deflected control, whose trailing-edge "
-                "displacement the Trefftz-plane trace does not include (see the theory manual, forces and moments)."
+                "chordwise grids or strip widths that do not match), a deflected control, whose trailing-edge "
+                "displacement the Trefftz-plane trace does not include, or a coarse spanwise mesh (compare "
+                "with a finer mesh; see the theory manual, forces and moments)."
             )
+            if beta is not None and _is_finite(beta) and float(beta) != 0.0:
+                text += (
+                    f" The condition is in sideslip (beta {np.degrees(float(beta)):.3g} deg). On a planar "
+                    "wing the Trefftz-plane values are zero or nearly zero in sideslip, because the wake trace "
+                    "does not see the yaw and the side force of the sideslip; above about 5 deg of sideslip "
+                    "a difference is then expected and does not show a solve problem."
+                )
+            out.append(text)
     return out
 
 
@@ -2437,7 +2463,10 @@ def evaluate_aerodynamic_trust(
     warnings.extend(float32_residual_warnings(float32_residuals))
 
     # 7. Near-field and far-field lateral values (a warning only, no penalty) -------------------
-    warnings.extend(near_far_lateral_warnings(CY, CY_farfield, Cn_stability, Cn_trefftz))
+    warnings.extend(near_far_lateral_warnings(
+        CY, CY_farfield, Cn_stability, Cn_trefftz,
+        beta=None if condition is None else getattr(condition, "beta", None),
+    ))
 
     # 8. 3D panel method: mesh adequacy and discretization-error indicators -------------------
     if solver in ("panel3d", "3dp"):

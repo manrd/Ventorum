@@ -223,6 +223,8 @@ Thus every column equals the result of its source function (`static_derivatives`
 - `CDi_nearfield` is not reliable on swept wings; use `CDi`.
 - With `wake_alignment="body"`, the Trefftz plane is normal to the body x-axis, not to the free stream; at large angles the two drag definitions differ.
 - Profile drag from section data does not include interference or three-dimensional viscous effects.
+- In sideslip the Trefftz-plane `CY_farfield` and `Cn_trefftz` of a planar wing are zero or nearly zero: the wake trace does not see the yaw and the side force of the sideslip. The near-field `Cn` of a planar wing passes the floor of the near/far rule at about 5 deg of sideslip, so the near/far warning is then expected; its text says so when the condition has sideslip.
+- The viscous couplings compare the side force only, not `Cn`. The section profile drag of the two wing halves differs in sideslip and with a yaw rate, and gives a real near-field yawing moment that the inviscid far field cannot contain.
 
 ## Implementation
 

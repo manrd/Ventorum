@@ -362,6 +362,45 @@ def test_cn_compared_only_without_side_force():
     assert len(w) == 1 and "Cn" in w[0]
 
 
+def test_warning_names_a_coarse_mesh_as_a_cause():
+    """Regression test: the warning names a coarse spanwise mesh as a probable cause.
+
+    A coarse viscous 3D panel mesh (3 spanwise panels) fired the CY warning, and the
+    text named only junctions and controls.
+    """
+    w = near_far_lateral_warnings(CY=0.0011, CY_farfield=0.0)
+    assert len(w) == 1 and "coarse spanwise mesh" in w[0]
+
+
+def test_sideslip_note_only_with_sideslip():
+    """Regression test: in sideslip the warning says that a difference is expected on a planar wing.
+
+    On a planar wing in sideslip the Trefftz-plane values are zero or nearly zero, so the
+    near-field Cn passes its floor at about 5 deg. The warning did not say so.
+    """
+    for beta in (None, 0.0):
+        w = near_far_lateral_warnings(Cn=0.00021, Cn_trefftz=0.0, beta=beta)
+        assert len(w) == 1 and "sideslip" not in w[0]
+    w = near_far_lateral_warnings(Cn=0.00021, Cn_trefftz=0.0, beta=math.radians(-8.0))
+    assert len(w) == 1 and "beta -8 deg" in w[0] and "planar" in w[0]
+    w = near_far_lateral_warnings(CY=0.0011, CY_farfield=0.0, beta=math.radians(10.0))
+    assert len(w) == 1 and "beta 10 deg" in w[0]
+
+
+def test_trust_passes_the_sideslip_of_the_condition():
+    """The trust score gives the sideslip note when its condition has sideslip."""
+    from ventorum.core.trust import evaluate_aerodynamic_trust
+
+    kw = dict(AR=8.0, CL=0.4, CDi=0.008, solver_type="vlm", n_panels=24, CY=0.0, CY_farfield=0.0,
+              Cn_stability=0.00021, Cn_trefftz=0.0)
+    side = evaluate_aerodynamic_trust(
+        condition=vt.FlightCondition(V_inf=20.0, alpha=math.radians(4.0), beta=math.radians(8.0)), **kw)
+    straight = evaluate_aerodynamic_trust(
+        condition=vt.FlightCondition(V_inf=20.0, alpha=math.radians(4.0)), **kw)
+    assert any("beta 8 deg" in w for w in side.warnings)
+    assert not any("sideslip (beta" in w for w in straight.warnings)
+
+
 def test_warning_does_not_change_the_score():
     """The comparison adds a warning only: the score and the factors stay the same."""
     from ventorum.core.trust import evaluate_aerodynamic_trust
