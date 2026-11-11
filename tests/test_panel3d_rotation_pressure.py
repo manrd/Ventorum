@@ -427,6 +427,55 @@ def test_far_field_yaw_damping_agrees_with_the_vortex_lattice():
         assert panel == pytest.approx(vlm, rel=YAW_TOLERANCE), f"Cn_r, lattice {name}: 3DP {panel:.6f}, VLM {vlm:.6f}"
 
 
+def _upper_row_speed_errors(n_chord, reference):
+    """Speed error [-] of the first upper panel row against a fine chord, per station.
+
+    Base flow (alpha 4 deg, no rates) on the wing of the yaw-rate test, 16
+    spanwise panels per semi-span. The speed is ``sqrt(1 - Cp)``; the
+    reference speed is the speed of the *reference* mesh, interpolated
+    linearly at the same x on the same station.
+    """
+    secs = [WingSection(0.0, 1.0, x_le=-0.25, shape="0012"),
+            WingSection(1.0, 1.0, x_le=-0.25, shape="0012")]
+    aircraft = Aircraft(surfaces=[LiftingSurface(semi_span=4.0, sections=secs)])
+    condition = FlightCondition(V_inf=30.0, alpha=np.radians(4.0))
+
+    def upper(nc):
+        res = vt.analyze(aircraft, condition=condition,
+                         settings=SolverSettings(solver_type="panel3d", n_panels=16, n_chord=nc))
+        mesh = res.details["mesh"]
+        centroid = mesh.nodes[mesh.panels].mean(axis=1)
+        keep = (np.asarray(mesh.kind) == "surface") & (np.asarray(mesh.side) == 1)
+        speed = np.sqrt(1.0 - np.asarray(res.details["cp"]))
+        return centroid[keep], speed[keep], np.asarray(mesh.chord_index)[keep]
+
+    fine_c, fine_v, _ = upper(reference)
+    c, v, ci = upper(n_chord)
+    errors = []
+    for k in np.flatnonzero((ci == 0) & (c[:, 1] > 0.0)):
+        station = np.flatnonzero(np.abs(fine_c[:, 1] - c[k, 1]) < 1e-6)
+        station = station[np.argsort(fine_c[station, 0])]
+        errors.append(v[k] / np.interp(c[k, 0], fine_c[station, 0], fine_v[station]) - 1.0)
+    return np.array(errors)
+
+
+@pytest.mark.slow
+def test_coarse_leading_edge_row_speed_converges_with_the_chord():
+    """Known limit of the least-squares node values: the first upper row of a coarse chord is too slow.
+
+    Against a 48-panel chord, the median speed error of the first upper
+    panel row is about -9.6 % with 16 chordwise panels and -6.3 % with 24
+    (theory manual, Envelope, coarse-mesh leading-edge speed). The error
+    falls with chord refinement. This error is the cause of the near-field
+    Cn_r known limit above.
+    """
+    coarse = _upper_row_speed_errors(16, 48)
+    medium = _upper_row_speed_errors(24, 48)
+    assert np.all(coarse < 0.0) and np.all(medium < 0.0)
+    assert -0.12 < np.median(coarse) < -0.07
+    assert abs(np.median(medium)) < 0.75 * abs(np.median(coarse))
+
+
 def test_roll_rate_gives_no_side_force_on_a_planar_wing():
     """A flat wing with a symmetric section gets CY = 0 (round-off) from a roll rate.
 
