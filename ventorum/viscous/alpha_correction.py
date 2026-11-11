@@ -2123,6 +2123,9 @@ class _PanelCoupling:
                 notes=res.details["notes"], CD_nearfield=res.totals.CDi_nearfield,
                 polar=None if limits is None else polar_stats(limits, self.full(state["cl"]), av),
                 post_stall_branch=bool(branches), n_span=self.n_span,
+                # Near-field and far-field side force, as in the lattice coupling
+                # (no near-field Cn in stability axes there either).
+                CY=res.totals.CY, CY_farfield=res.totals.CY_farfield, Cn_trefftz=res.totals.Cn_trefftz,
             )
             return res
 

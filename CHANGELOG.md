@@ -24,6 +24,9 @@ a minor version can change a public interface.
 - Viscous 3D panel coupling (`viscous_panel3d`): `totals.Cn_trefftz` and `totals.CY_farfield`
   (they were None), from the coupled wake strengths; the post-stall branches carry their own
   values.
+- 3D panel trust score: the near-field and far-field lateral warning of the lattice
+  (`near_far_lateral_warnings`, same floors). The viscous coupling compares the side force
+  only, as the lattice coupling. A warning only; no score and no result value changes.
 - Trust notes and warnings for the measured mesh-convergence limits (no change of the score and
   of the results). Notes: a vortex-lattice junction of joined surfaces with a fold above 30 deg (a
   winglet); a root fold above 5 deg on the lattice solvers (the near-field CL drifts by a constant

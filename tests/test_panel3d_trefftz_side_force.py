@@ -12,7 +12,9 @@ Checks:
 * parity with the vortex-lattice ``CY_farfield`` on a wing with dihedral
   in sideslip and with yaw and roll rates;
 * every path: Morino batch and single condition, pressure Kutta, half and
-  full mesh, the viscous coupling, GPU float64 and float32.
+  full mesh, the viscous coupling, GPU float64 and float32;
+* the near-field and far-field lateral rule of the trust score is applied
+  to the 3D panel results.
 
 The formula is in the theory manual (docs/theory/ventorum_3dp.md, far-field
 induced drag) and in docs/theory/forces_and_moments.md.
@@ -20,6 +22,7 @@ induced drag) and in docs/theory/forces_and_moments.md.
 
 from __future__ import annotations
 
+import math
 import warnings
 
 import numpy as np
@@ -28,6 +31,7 @@ import pytest
 import ventorum as vt
 from ventorum.airfoil import airfoil
 from ventorum.core.datatypes import Aircraft, FlightCondition, LiftingSurface, SolverSettings, WingSection
+from ventorum.core.trust import near_far_lateral_warnings
 from ventorum.panel3d.mesh import mesh_lifting_surface
 from ventorum.panel3d.post import compute_trefftz_side_force
 from ventorum.panel3d.solver import PanelSolver
@@ -330,6 +334,50 @@ def test_viscous_symmetric_flow_gives_zero():
                  LinearAirfoil(a0=5.0), model="panel3d", tol=1e-10)
     assert res.symmetry_used
     assert res.totals.Cn_trefftz == 0.0 and res.totals.CY_farfield == 0.0
+
+
+# ---------------------------------------------------------------------------
+# 5. Trust score: near-field and far-field lateral rule
+# ---------------------------------------------------------------------------
+
+def _near_far(res) -> list[str]:
+    return [w for w in res.totals.trust.warnings if w.startswith("Near field and far field")]
+
+
+@pytest.mark.parametrize("condition", [_roll(), _beta()], ids=["roll_rate", "sideslip"])
+def test_trust_applies_the_near_far_lateral_rule(condition):
+    """The 3D panel trust gives the warnings of near_far_lateral_warnings (CY wind axes, Cn stability axes).
+
+    Planar wing with a roll rate p_hat = 0.01: the near-field Cn (adverse
+    yaw of the tilted lift) and the Trefftz Cn (induced-drag distribution)
+    have opposite signs, and the Cn warning fires, as for the lattice.
+    """
+    res = _quiet(vt.analyze, _aircraft(), condition, _panel(8))
+    t = res.totals
+    cn_s = -math.sin(condition.alpha) * t.Cl + math.cos(condition.alpha) * t.Cn
+    expected = near_far_lateral_warnings(t.CY, t.CY_farfield, cn_s, t.Cn_trefftz)
+    assert _near_far(res) == expected
+    if condition.p:
+        assert len(expected) == 1 and "for Cn" in expected[0]
+        assert _near_far(_quiet(vt.analyze, _aircraft(), condition, _lattice()))
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize("dihedral_deg", [0.0, 10.0])
+@pytest.mark.parametrize("condition", [_beta(), _yaw()], ids=["sideslip", "yaw_rate"])
+def test_trust_rule_quiet_on_the_yaw_rate_and_sideslip_cases(dihedral_deg, condition):
+    """The near/far warning does not fire on the 16 x 16 yaw-rate and sideslip cases.
+
+    The measured differences are below the floors (CY 0.001, Cn 0.0002):
+    planar beta 5 deg |dCn| = 1.90e-04 (the body-axis Trefftz plane gives
+    Cn_trefftz = 0 there; the lattice with the body wake 1.84e-04);
+    planar yaw rate |dCn| = 4.6e-06; dihedral yaw rate |dCY| = 2.5e-04,
+    |dCn| = 8.1e-06; dihedral beta 5 deg |dCY| = 1.9e-04 (Cn not compared:
+    the side force is above the CY floor).
+    """
+    res = _quiet(vt.analyze, _aircraft(dihedral_deg), condition, _panel())
+    assert res.totals.CY_farfield is not None and res.totals.Cn_trefftz is not None
+    assert _near_far(res) == []
 
 
 # ---------------------------------------------------------------------------

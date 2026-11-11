@@ -129,7 +129,7 @@ from ventorum.panel3d.cache import CachedGeometry
 from ventorum.panel3d.post import _condition_arrays
 from ventorum.panel3d.solver import PanelResult, PanelSolver
 from ventorum.solvers.base import BaseSolver
-from ventorum.solvers.lattice_base import as_aircraft
+from ventorum.solvers.lattice_base import LatticeSolver, as_aircraft
 from ventorum.utils.validation import validate_aircraft
 
 __all__ = ["PanelMethodSolver"]
@@ -2020,6 +2020,12 @@ class PanelMethodSolver(BaseSolver):
                     CD_nearfield=totals.CDi_nearfield,
                     n_span=min(int(s.n_panels or settings.n_panels) for s in ac.surfaces),
                     float32_residuals=dict(cfg.float64_residuals),
+                    # Near-field and far-field lateral rule, as for the lattice
+                    # (CY in wind axes, Cn in stability axes).
+                    CY=totals.CY,
+                    CY_farfield=totals.CY_farfield,
+                    Cn_stability=LatticeSolver._cn_stability(totals, cond, b_ref, c_ref),
+                    Cn_trefftz=totals.Cn_trefftz,
                 )
 
                 result = SolverResult(

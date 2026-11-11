@@ -495,6 +495,8 @@ Checks of `CY_farfield` (`tests/test_panel3d_trefftz_side_force.py`): the value 
 
 Float32 floor. On the GPU in float32, the doublets of a full-mesh solve are not symmetric to rounding. A case that is 0 in exact arithmetic then gives about $10^{-8}$ in `Cn_trefftz` and $10^{-7}$ in `CY_farfield`. Example: the planar NACA 0006 wing of aspect ratio 8 at $\beta = \pm 5$ deg (full mesh; `Cn_trefftz` is 0 in exact arithmetic, see above) gives $8.1 \times 10^{-8}$ for both signs of $\beta$ on the 24 x 24 mesh in float32, and about $2 \times 10^{-15}$ in float64 on the CPU and the GPU. The automatic backend can select the float32 GPU for this mesh size. These values are far below the floors of the near/far trust rule.
 
+Trust. The 3D panel trust score applies the near-field and far-field lateral rule of the lattice (`ventorum.core.trust.near_far_lateral_warnings`, see [Forces and moments](forces_and_moments.md)): `CY` against `CY_farfield` in wind axes, and the near-field `Cn` in stability axes against `Cn_trefftz`, with the same floors. The viscous coupling compares the side force only, as the lattice coupling. On the NACA 0006 wing of aspect ratio 8 (16 x 16 mesh, alpha 4 deg) the rule does not fire for the yaw rates $\hat r = 0.01$ and $0.05$, for sideslip up to 5 deg on the planar wing, and for sideslip 5 deg and a yaw rate on the wing with 10 deg dihedral. On the planar wing in sideslip the body-axis Trefftz plane gives `Cn_trefftz` = 0 (see above), and the near-field `Cn` grows with $\beta$: at 5 deg the difference is 0.95 times the Cn floor, and at 8 deg the Cn warning fires, as for the lattice with either wake alignment. At 10 deg the near-field side force of the thick wing (0.00102) is above the `CY` floor, so the `CY` warning fires instead; the thin lattice stays below that floor. With a roll rate the near-field and far-field `Cn` have opposite signs in both solvers, and the Cn warning fires for both. The numbers come from a study script (not in the repository) that runs `vt.analyze` on these cases; the tests check the cases that must not fire.
+
 ## Computational backends
 
 Ventorum-3DP supports three computational backends:
@@ -613,7 +615,7 @@ The 3D panel method implementation is verified by tests in the test suite:
 - Solver family integration, settings, ground plane, strip map and trust scores: `tests/test_panel3d_factory.py`.
 - GPU pipeline parity (when CUDA is available): `tests/test_panel3d_gpu.py`.
 - Yawing moment of the Trefftz-plane induced drag (`Cn_trefftz`: independent strip sum, sign, lattice parity, all paths, GPU): `tests/test_panel3d_trefftz_yaw.py`.
-- Side force of the Trefftz plane (`CY_farfield`: independent Kutta-Joukowski sum, lift sign check, sign, lattice parity, all paths, viscous coupling, GPU): `tests/test_panel3d_trefftz_side_force.py`.
+- Side force of the Trefftz plane (`CY_farfield`: independent Kutta-Joukowski sum, lift sign check, sign, lattice parity, all paths, viscous coupling, GPU) and the near/far lateral trust rule: `tests/test_panel3d_trefftz_side_force.py`.
 
 ## References
 
