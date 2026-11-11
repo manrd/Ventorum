@@ -1995,6 +1995,136 @@ def _trefftz_drag_and_yaw(
     return cdi, float(cn[0])
 
 
+def _trefftz_side_force(wake, mu, condition, S_ref, *, wake_dir=None, wake_gamma=None):
+    """Return the Trefftz-plane side-force coefficient of one condition [-].
+
+    See :func:`compute_trefftz_side_force`. Speed is in m/s, density in
+    kg/m^3 and S_ref in m^2.
+    """
+    n_strips = len(wake.wake_up)
+    if n_strips == 0:
+        return 0.0
+    if wake_gamma is None:
+        gamma = mu[wake.wake_up] - mu[wake.wake_lo]
+    else:
+        gamma = np.asarray(wake_gamma, dtype=float).reshape(n_strips)
+    _, speed, _, lift, drag = _condition_arrays([condition])
+    cy = _trefftz_side_batch(gamma[None, :], speed, lift, drag, S_ref, _trefftz_segments(wake, wake_dir))
+    return float(cy[0])
+
+
+def compute_trefftz_side_force(
+    wake: PanelWake,
+    mu: np.ndarray,
+    condition: FlightCondition,
+    S_ref: float,
+    *,
+    wake_dir: np.ndarray | None = None,
+    wake_gamma: np.ndarray | None = None,
+) -> float:
+    """Compute the side force of the trailing vortex sheet in the Trefftz plane (wind axes).
+
+    Each wake strip carries the doublet jump ``Gamma_s = mu_upper -
+    mu_lower`` (as in :func:`compute_trefftz_induced_drag`). Its
+    trailing-edge segment ``ds_s``, from the end with ``-Gamma_s`` to the
+    end with ``+Gamma_s`` (along ``n_w x d``) and projected on the Trefftz
+    plane (normal to the wake direction), gives the Kutta-Joukowski force
+    ``F_s = -rho V_inf Gamma_s (V_hat x ds_s)`` [N], with ``V_hat`` the
+    free-stream direction. The minus sign: with the doublet sign of the
+    solver, a strip that lifts towards its upper side ``n_w`` has
+    ``Gamma_s < 0``, and ``-Gamma_s`` is the circulation of the
+    Kutta-Joukowski law (``V_hat x ds`` points along ``n_w``). The drag
+    and the yawing moment are quadratic in ``Gamma_s`` and do not depend
+    on this sign. ``CY_farfield`` is the sum of the force components along
+    the wind-axis side direction ``S_hat = L_hat x V_hat`` (positive to the
+    right), divided by ``q S_ref``. The triple product gives ``(V_hat x
+    ds) . S_hat = ds . (S_hat x V_hat)``. This is the rule of the vortex-lattice
+    ``CY_farfield`` (:func:`ventorum.aero.loads.trefftz_lateral_batch`):
+    a planar wing gives 0, and the side force comes from the parts of the
+    trace that are not parallel to the y axis (dihedral, fins). The
+    ground images do not enter: the force is the force on the real sheet.
+
+    Parameters
+    ----------
+    wake : PanelWake
+        Precomputed wake geometry (all strips of the full wake).
+    mu : numpy.ndarray
+        Doublet strengths on body panels with shape (Np,) in m^2/s.
+    condition : FlightCondition
+        Flight condition: speed [m/s], density [kg/m^3], alpha and beta
+        [rad].
+    S_ref : float
+        Reference area in m^2.
+    wake_dir : numpy.ndarray or None, optional
+        Wake direction with shape (3,) [-]. None is the body x axis.
+    wake_gamma : numpy.ndarray or None, optional
+        Strip circulations with shape (Ns,) in m^2/s. None uses
+        ``mu[wake_up] - mu[wake_lo]``.
+
+    Returns
+    -------
+    float
+        Far-field side-force coefficient in wind axes [-].
+
+    References
+    ----------
+    * E. Trefftz, "Prandtlsche Tragflaechen- und Propeller-Theorie",
+      Zeitschrift fuer angewandte Mathematik und Mechanik 1, 1921: the
+      far-field plane of the trailing vortex sheet.
+    * J. Katz and A. Plotkin, "Low-Speed Aerodynamics", 2nd ed., Cambridge
+      University Press, 2001: the Kutta-Joukowski force and the Trefftz
+      plane.
+    * M. Drela, "Flight Vehicle Aerodynamics", MIT Press, 2014: the
+      far-field force of the trailing vortex sheet in the Trefftz plane.
+    """
+    return _trefftz_side_force(wake, mu, condition, S_ref, wake_dir=wake_dir, wake_gamma=wake_gamma)
+
+
+def _trefftz_segments(wake, wake_dir=None):
+    """Return the strip trace segments projected on the Trefftz plane [m], shape (Ns, 3).
+
+    The segment goes from the end with ``-Gamma_s`` to the end with
+    ``+Gamma_s`` (the end rule of :func:`_trefftz_strip_wash`), and is
+    projected on the plane normal to the wake direction (None is the body x
+    axis): ``ds = s - (s . d) d``.
+    """
+    pl = np.array(wake.p_left, dtype=float, copy=True).reshape(-1, 3)
+    pr = np.array(wake.p_right, dtype=float, copy=True).reshape(-1, 3)
+    d = (np.array([1.0, 0.0, 0.0]) if wake_dir is None
+         else np.asarray(wake_dir, dtype=float).reshape(3) / np.linalg.norm(wake_dir))
+    if len(wake.panels) > 0 and len(pl):
+        first = np.array([idx[0] for idx in wake.strip_panel_indices], dtype=int)
+        quad = np.asarray(wake.panels, dtype=float)[first]
+        n_w = np.cross(quad[:, 2] - quad[:, 0], quad[:, 3] - quad[:, 1])
+        flip = np.sum((pr - pl) * np.cross(n_w, d[None, :]), axis=1) < 0.0
+        pl[flip], pr[flip] = pr[flip].copy(), pl[flip].copy()
+    seg = pr - pl
+    return seg - (seg @ d)[:, None] * d[None, :]
+
+
+def _trefftz_side_batch(gamma, speed, lift, drag, S_ref, segments):
+    """Return the Trefftz side-force coefficients in wind axes [-], shape (K,).
+
+    *gamma* holds the strip circulations [m^2/s] with shape (K, Ns). Speed
+    has shape (K,) in m/s. Lift and drag are the unit wind axes (K, 3) of
+    :func:`_condition_arrays` [-]. S_ref is in m^2. Segments are from
+    :func:`_trefftz_segments` [m]. The coefficient is ``CY = -rho V sum
+    Gamma_s ds_s . (S_hat x V_hat) / (q S) = -2 sum Gamma_s ds_s . u /
+    (V S)`` with ``S_hat = L_hat x V_hat``; the density cancels. See
+    :func:`compute_trefftz_side_force` for the sign.
+    """
+    speed = np.asarray(speed, dtype=float)
+    out = np.zeros(len(speed))
+    if gamma.shape[1] == 0 or S_ref <= 1e-12:
+        return out
+    side = np.cross(lift, drag)
+    u = np.cross(side, drag)
+    # Fixed three-term products keep each row independent of the chunk size.
+    seg_u = (u[:, 0, None] * segments[None, :, 0] + u[:, 1, None] * segments[None, :, 1]
+             + u[:, 2, None] * segments[None, :, 2])
+    return np.divide(-2.0 * np.sum(gamma * seg_u, axis=1), speed * S_ref, out=out, where=speed > 1e-12)
+
+
 def _trefftz_arms(wake, wake_dir=None, ref_point=None):
     """Return the Trefftz-plane arms of the strip midpoints [m], shape (Ns, 3).
 
