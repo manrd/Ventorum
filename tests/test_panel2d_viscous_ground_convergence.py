@@ -221,7 +221,7 @@ def test_failed_target_keeps_retry_and_early_stop_notes(monkeypatch):
 def test_only_cold_quasi_simultaneous_estimate_can_retry(monkeypatch):
     """The direct estimates do not retry, including the one at omega = 1."""
     calls = []
-    monkeypatch.setattr(vii, "initial_state", lambda setup, sweeps: sweeps)
+    monkeypatch.setattr(vii, "initial_state", lambda setup, sweeps, relax=None: sweeps)
 
     def solve(setup, start, *args, retry_window=False):
         calls.append((start, retry_window))
