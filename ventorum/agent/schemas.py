@@ -11,8 +11,11 @@ Rules:
   Keys without a clear unit or meaning (``alpha``, ``aoa``, ``washout``,
   ``aspect_ratio``) are also refused with a hint.
 * The mesh has at most :data:`MAX_TOTAL_PANELS` vortex-lattice panels
-  (spanwise strips of all surfaces x chordwise panels). A larger mesh is
-  refused, and an automatic ``n_chord`` is reduced to stay at the limit.
+  (spanwise strips of all surfaces x chordwise panels). A larger mesh with
+  counts of the caller is refused, and an automatic ``n_chord`` is reduced
+  to stay at the limit. When the spanwise count is automatic, the tools
+  reduce the spanwise strips first and keep the chordwise count
+  (``_fit_span`` in :mod:`ventorum.agent.tools`).
 * Numbers must be JSON numbers (int or float). Strings such as ``"60 m/s"``
   are refused. Booleans must be JSON booleans.
 
@@ -73,7 +76,9 @@ MAX_PANEL_CALL_WORK = 2.0e12
 MIN_ALPHA_STEP_DEG = 0.01
 
 _MESH_LIMIT_TXT = (f"The total mesh (spanwise strips of all surfaces, both halves, x chordwise panels) "
-                   f"must be at most {MAX_TOTAL_PANELS} panels; a larger mesh is refused.")
+                   f"must be at most {MAX_TOTAL_PANELS} panels; a larger mesh is refused. Without "
+                   "n_panels (in settings or on a surface) the tools reduce the spanwise count first "
+                   "when the mesh or the work budget needs it, and settings_used.mesh_note says so.")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

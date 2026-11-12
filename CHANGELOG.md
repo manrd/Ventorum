@@ -158,6 +158,19 @@ a minor version can change a public interface.
 
 ### Changed
 
+- Agent tools: automatic mesh fit. When the caller sets no spanwise count (no `n_panels` in
+  `settings` or on a surface) and a lattice call is above the mesh limit (4000 panels) or the work
+  budget, the tools reduce the spanwise strips of all surfaces by the same count and keep the
+  chordwise count (also the 16-panel floor with a control). The floor is 4 strips per semi-span
+  (16 for `ventorum_error_bars`); only at the floor is an automatic `n_chord` reduced, as before.
+  All the cases of one call use one fitted mesh. `settings_used.n_panels` gives the count used and
+  `settings_used.mesh_note` gives the strips, the chordwise count and the reason. A count that the
+  caller set does not change; such a call above a limit is refused or capped as before. The work
+  estimate, the limits and the library do not change. Result change of the agent tools only: an
+  aircraft with a control above the mesh limit now keeps 16 chordwise panels with fewer strips
+  (before, the automatic `n_chord` was cut to 12 or less), and calls above the work budget with an
+  automatic spanwise count (for example the trim of a wing and tail with an elevator) now run on
+  fewer strips instead of a refusal.
 - Viscous alpha-correction coupling (V1) of the vortex lattice and the lifting line: the Newton
   iteration reads the strip polars together. One vectorised PCHIP evaluation reads all tabulated
   polars with the same angles, and the polars of one condition (for example the ground polars at

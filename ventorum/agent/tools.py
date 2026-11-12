@@ -10,6 +10,7 @@ returns an error payload.
 
 from __future__ import annotations
 
+import dataclasses
 import functools
 import inspect
 import math
@@ -149,18 +150,23 @@ def _uses_lattice_chord(ac: Aircraft, sett: SolverSettings) -> bool:
     return resolve_solver_type(sett.solver_type) == "vlm"
 
 
+def _strip_count(ac: Aircraft, sett: SolverSettings) -> int:
+    """Return the number of spanwise strips of all surfaces (both halves) of the lattice."""
+    chord_spacing = getattr(sett, "chord_spacing", "uniform")
+    key = lattice_cache.lattice_key(ac, sett, "vlm", 1, chord_spacing)
+    probe = lattice_cache.get_or_build(key, lambda: build_lattice(
+        ac, sett, collocation="vlm", n_chord=1, chord_spacing=chord_spacing,
+    ))
+    return int(probe.n_strips)
+
+
 def _check_mesh(ac: Aircraft, sett: SolverSettings) -> int:
     """Refuse a mesh larger than MAX_TOTAL_PANELS. Return the number of spanwise strips.
 
     For an automatic n_chord the check uses the smallest automatic value;
     :func:`_case_settings` reduces a larger automatic value.
     """
-    chord_spacing = getattr(sett, "chord_spacing", "uniform")
-    key = lattice_cache.lattice_key(ac, sett, "vlm", 1, chord_spacing)
-    probe = lattice_cache.get_or_build(key, lambda: build_lattice(
-        ac, sett, collocation="vlm", n_chord=1, chord_spacing=chord_spacing,
-    ))
-    strips = probe.n_strips
+    strips = _strip_count(ac, sett)
     if _uses_lattice_chord(ac, sett):
         n_chord = int(sett.n_chord) if sett.n_chord is not None else DEFAULT_N_CHORD
     else:
@@ -227,12 +233,182 @@ def _common_settings(ac: Aircraft, sett: SolverSettings, strips: int,
     return out, cap < auto
 
 
-def _mesh_note(capped: bool, sett: SolverSettings | None = None) -> dict[str, Any]:
-    if not capped:
+#: Smallest automatic spanwise count per semi-span (one surface half) that
+#: :func:`_fit_span` gives [-]. At this floor the automatic n_chord can be
+#: reduced instead (the cap of :func:`_case_settings`), or the call is refused.
+MIN_AUTO_SPAN_PANELS = 4
+
+
+@dataclasses.dataclass
+class _SpanFit:
+    """Record of an automatic spanwise reduction of :func:`_fit_span`.
+
+    Attributes
+    ----------
+    n_panels_from, n_panels_to : int
+        Automatic spanwise panels per semi-span before and after the fit [-].
+    strips_from, strips_to : int
+        Spanwise strips of all surfaces (both halves) before and after [-].
+    n_chord : int or None
+        Largest chordwise count that the fitted mesh plans over the cases
+        of the call [-], or None for a solver without chordwise panels.
+    panels_from : int
+        Largest panel count of the automatic mesh before the fit [-].
+    work_from : int
+        Work estimate of the call before the fit [units].
+    floor_reached : bool
+        True if the spanwise floor was reached and the call still does not
+        fit both limits there.
+    """
+
+    n_panels_from: int
+    n_panels_to: int
+    strips_from: int
+    strips_to: int
+    n_chord: int | None
+    panels_from: int
+    work_from: int
+    floor_reached: bool
+
+
+def _span_is_automatic(ac: Aircraft, settings: Any) -> bool:
+    """Return True if the caller set no spanwise count.
+
+    The spanwise count is automatic when ``settings`` has no ``n_panels``
+    key and no surface has its own ``n_panels``. :func:`_fit_span` never
+    changes a count that the caller set.
+    """
+    if isinstance(settings, dict) and "n_panels" in settings:
+        return False
+    return all(getattr(s, "n_panels", None) is None for s in ac.surfaces)
+
+
+def _largest_panels(ac: Aircraft, sett: SolverSettings, cases: list[tuple[Any, Any, Any]]) -> int:
+    """Return the largest full automatic panel count over the cases of a call.
+
+    Each case is ``(condition, ground, ref_point)`` as for
+    :func:`_planned_panels`. The mesh-limit cap does not apply.
+    """
+    return max(_planned_panels(ac, sett, fc, ground=gp, ref_point=rp, cap=False) for fc, gp, rp in cases)
+
+
+def _fit_span(
+    ac: Aircraft,
+    sett: SolverSettings,
+    settings: Any,
+    panels: Callable[[SolverSettings], int],
+    work: Callable[[SolverSettings], int],
+    floor: int = MIN_AUTO_SPAN_PANELS,
+) -> tuple[SolverSettings, _SpanFit | None]:
+    """Reduce an automatic spanwise count until the call fits the limits.
+
+    When the caller set no spanwise count (see :func:`_span_is_automatic`)
+    and the call is above :data:`MAX_TOTAL_PANELS` (the largest planned
+    mesh of the cases, with the full automatic n_chord) or above
+    :data:`MAX_CALL_WORK` (the work estimate of the tool), the spanwise
+    panels per semi-span of all surfaces are reduced by the same factor
+    (all surfaces use the one settings count), to the largest count that
+    fits both limits. The chordwise count does not change. All the cases
+    of the call use this one spanwise count. The count does not go below
+    *floor*. At the floor, the cap of :func:`_case_settings` can reduce an
+    automatic n_chord, and the work check can refuse the call, as before.
+    The work estimate itself does not change.
+
+    Parameters
+    ----------
+    ac : Aircraft
+        The aircraft.
+    sett : SolverSettings
+        The parsed settings of the call.
+    settings : dict or None
+        The raw settings input of the call (to know if ``n_panels`` was given).
+    panels : callable
+        ``panels(s)``: the largest planned panel count of the call with the
+        settings ``s``, without the mesh-limit cap [-].
+    work : callable
+        ``work(s)``: the work estimate of the call with the settings ``s``
+        [units], the same estimate as the work check of the tool.
+    floor : int, optional
+        Smallest spanwise count per semi-span [-]. Default
+        :data:`MIN_AUTO_SPAN_PANELS`.
+
+    Returns
+    -------
+    tuple
+        The settings to use (a copy if the count was reduced, else *sett*)
+        and the :class:`_SpanFit` record, or None if nothing changed.
+    """
+    if not _span_is_automatic(ac, settings):
+        return sett, None
+    n0 = int(sett.n_panels)
+    floor = max(1, int(floor))
+    p0, w0 = int(panels(sett)), int(work(sett))
+    if (p0 <= MAX_TOTAL_PANELS and w0 <= MAX_CALL_WORK) or n0 <= floor:
+        return sett, None
+
+    def with_n(n: int) -> SolverSettings:
+        out = sett.clone()
+        out.n_panels = int(n)
+        return out
+
+    def fits(s: SolverSettings) -> bool:
+        return int(panels(s)) <= MAX_TOTAL_PANELS and int(work(s)) <= MAX_CALL_WORK
+
+    best = with_n(floor)
+    floor_reached = not fits(best)
+    if not floor_reached:
+        # Largest count in [floor, n0 - 1] that fits (the work grows with the count).
+        lo, hi = floor, n0 - 1
+        while lo < hi:
+            mid = (lo + hi + 1) // 2
+            if fits(with_n(mid)):
+                lo = mid
+            else:
+                hi = mid - 1
+        best = with_n(lo)
+    strips_to = _strip_count(ac, best)
+    n_chord = int(panels(best)) // max(strips_to, 1) if _uses_lattice_chord(ac, best) else None
+    return best, _SpanFit(
+        n_panels_from=n0, n_panels_to=int(best.n_panels), strips_from=_strip_count(ac, sett),
+        strips_to=strips_to, n_chord=n_chord, panels_from=p0, work_from=w0, floor_reached=floor_reached)
+
+
+def _mesh_note(capped: bool, sett: SolverSettings | None = None,
+               fit: _SpanFit | None = None) -> dict[str, Any]:
+    """Return the ``mesh_note`` of the settings payload, or an empty dict.
+
+    The note says which automatic count was reduced, the strips and the
+    n_chord that the call used, and why.
+    """
+    if not capped and fit is None:
         return {}
-    used = f" to n_chord={sett.n_chord}" if sett is not None and sett.n_chord is not None else ""
-    return {"mesh_note": f"The automatic n_chord was reduced{used} to keep the mesh at or below "
-                         f"{MAX_TOTAL_PANELS} panels."}
+    parts: list[str] = []
+    if fit is not None:
+        why = []
+        if fit.panels_from > MAX_TOTAL_PANELS:
+            why.append(f"the automatic mesh had {fit.panels_from} panels, above the limit of "
+                       f"{MAX_TOTAL_PANELS} panels")
+        if fit.work_from > MAX_CALL_WORK:
+            why.append(f"the estimated work was {fit.work_from} units, above the budget of "
+                       f"{int(MAX_CALL_WORK)} units")
+        reason = (f"because {' and '.join(why)}" if why
+                  else "because all the candidates of the call use one spanwise count")
+        parts.append(
+            f"The automatic spanwise count was reduced from n_panels={fit.n_panels_from} to "
+            f"n_panels={fit.n_panels_to} per semi-span ({fit.strips_from} to {fit.strips_to} strips "
+            f"of all surfaces) {reason}.")
+        if fit.floor_reached:
+            parts.append(f"This is the spanwise floor of {fit.n_panels_to} strips per semi-span.")
+        if not capped:
+            if sett is not None and sett.n_chord is not None:
+                parts.append(f"The chordwise count was kept (n_chord={sett.n_chord}).")
+            elif fit.n_chord is not None:
+                parts.append(f"The automatic chordwise count was kept (n_chord={fit.n_chord}).")
+    if capped:
+        used = f" to n_chord={sett.n_chord}" if sett is not None and sett.n_chord is not None else ""
+        parts.append(f"The automatic n_chord was reduced{used} to keep the mesh at or below "
+                     f"{MAX_TOTAL_PANELS} panels.")
+    return {"mesh_note": " ".join(parts)}
 
 
 def _used_n_chord(res: Any) -> int | None:
@@ -268,20 +444,18 @@ def _planned_panels(
     condition: FlightCondition | None = None,
     ground: Any = None,
     ref_point: np.ndarray | None = None,
+    cap: bool = True,
 ) -> int:
     """Return the panel count of the planned lattice, without solving.
 
     The count uses the real spanwise strips (including the ``n_panels``
     of each surface) times the chordwise count that the solve will use.
     An automatic ``n_chord`` is resolved without solving; the mesh-limit
-    cap of :func:`_case_settings` applies.
+    cap of :func:`_case_settings` applies when *cap* is True. With *cap*
+    False the count is the full automatic mesh (the mesh fit of
+    :func:`_fit_span` uses it).
     """
-    chord_spacing = getattr(sett, "chord_spacing", "uniform")
-    key = lattice_cache.lattice_key(ac, sett, "vlm", 1, chord_spacing)
-    probe = lattice_cache.get_or_build(key, lambda: build_lattice(
-        ac, sett, collocation="vlm", n_chord=1, chord_spacing=chord_spacing,
-    ))
-    strips = probe.n_strips
+    strips = _strip_count(ac, sett)
     if not _uses_lattice_chord(ac, sett):
         return int(strips)
     if sett.n_chord is not None:
@@ -295,9 +469,9 @@ def _planned_panels(
         n = int(VortexLatticeSolver().resolve_n_chord(ac, sett, condition, ground, rp))
     except Exception:  # noqa: BLE001 - only an estimate
         n = int(DEFAULT_N_CHORD)
-    cap = MAX_TOTAL_PANELS // max(int(strips), 1)
-    if cap < MAX_AUTO_N_CHORD and n > cap:
-        n = max(int(cap), 1)
+    limit = MAX_TOTAL_PANELS // max(int(strips), 1)
+    if cap and limit < MAX_AUTO_N_CHORD and n > limit:
+        n = max(int(limit), 1)
     return int(strips * n)
 
 
@@ -380,9 +554,12 @@ def wing_analysis(
     dl = parse_detail_level(detail_level)
     ax = parse_axes(axes)
     _check_method(ac, sett.solver_type, sett.wake_alignment, c["h_m"] is not None)
+    fc = make_flight_condition(c)
+    sett, fit = _fit_span(ac, sett, settings,
+                          lambda s: _planned_panels(ac, s, fc, cap=False),
+                          lambda s: _planned_panels(ac, s, fc) ** 2)
     strips = _check_mesh(ac, sett)
 
-    fc = make_flight_condition(c)
     _check_call_work(
         _planned_panels(ac, sett, fc) ** 2,
         "fewer panels (smaller n_panels or n_chord)")
@@ -425,7 +602,7 @@ def wing_analysis(
         "metrics": m,
         "trust": trust,
         "condition_used": condition_payload(c),
-        "settings_used": {**settings_payload(sett, res), **_mesh_note(case_sett is not sett, case_sett)},
+        "settings_used": {**settings_payload(sett, res), **_mesh_note(case_sett is not sett, case_sett, fit)},
         "axes": ax,
     }
     if dl in ("standard", "full"):
@@ -785,12 +962,20 @@ def polar_sweep(
         raise InputError(f"The sweep has {n} angles; the limit is {MAX_POLAR_POINTS}. Use a larger step.")
     alphas = [round(a0 + k * da, 10) for k in range(n)]
     _check_method(ac, sett.solver_type, sett.wake_alignment, c["h_m"] is not None)
+
+    def _sweep_work(s: SolverSettings) -> int:
+        if c["h_m"] is not None:
+            return sum(_planned_panels(ac, s, make_flight_condition(c, alpha_deg=a)) ** 2 for a in alphas)
+        return len(alphas) * (_planned_panels(ac, s) ** 2)
+
+    _mesh_alphas = alphas if c["h_m"] is not None else alphas[:1]
+    sett, fit = _fit_span(
+        ac, sett, settings,
+        lambda s: _largest_panels(ac, s, [(make_flight_condition(c, alpha_deg=a), None, None)
+                                          for a in _mesh_alphas]),
+        _sweep_work)
     strips = _check_mesh(ac, sett)
-    if c["h_m"] is not None:
-        estimate = sum(
-            _planned_panels(ac, sett, make_flight_condition(c, alpha_deg=a)) ** 2 for a in alphas)
-    else:
-        estimate = len(alphas) * (_planned_panels(ac, sett) ** 2)
+    estimate = _sweep_work(sett)
     _check_call_work(
         estimate,
         "fewer angles (smaller range or larger alpha_step_deg) or fewer panels "
@@ -964,8 +1149,8 @@ def polar_sweep(
     device_all, precision_all = computation_device_precision([r for _, r in ok])
     exec_summary += f" {device_summary_text(device_all, precision_all)}"
 
-    note_sett = capped[0] if capped else None
-    settings_used = {**settings_payload(sett, ok[0][1]), **_mesh_note(bool(capped), note_sett)}
+    note_sett = capped[0] if capped else fixed
+    settings_used = {**settings_payload(sett, ok[0][1]), **_mesh_note(bool(capped), note_sett, fit)}
     settings_used["device"] = device_all
     settings_used["precision"] = precision_all
     out: dict[str, Any] = {
@@ -1232,17 +1417,26 @@ def ground_effect(
                 f"{h_lo:g} m and {h_hi:g} m. A height difference below round-off "
                 f"gives no valid height derivative. Give distinct heights.")
     _check_method(ac, sett.solver_type, sett.wake_alignment, True)
-    strips = _check_mesh(ac, sett)
     a_rad, b_rad, p_rad = (float(np.radians(v)) for v in (alpha, beta, phi))
 
     # Work budget before any solve. All heights share the mesh fixed at
     # the lowest height (the largest automatic n_chord), plus free air
     # and the Irodov height-pitch cases.
     _fc_free = FlightCondition(V_inf=V, alpha=a_rad, beta=b_rad, rho=rho)
-    _n_fixed = 0
-    for _h in heights:
-        _gp, _ = place_ground(ac, sett, _h, a_rad, b_rad, p_rad, rp, href)
-        _n_fixed = max(_n_fixed, _planned_panels(ac, sett, _fc_free, ground=_gp, ref_point=rp))
+
+    def _height_panels(s: SolverSettings, cap: bool = True) -> int:
+        n_max = 0
+        for _h in heights:
+            _gp, _ = place_ground(ac, s, _h, a_rad, b_rad, p_rad, rp, href)
+            n_max = max(n_max, _planned_panels(ac, s, _fc_free, ground=_gp, ref_point=rp, cap=cap))
+        return n_max
+
+    # The smallest work of the call: the Irodov cases at the lowest height only.
+    sett, fit = _fit_span(
+        ac, sett, settings, lambda s: _height_panels(s, cap=False),
+        lambda s: (len(heights) + 1 + HEIGHT_DERIVATIVE_SOLVES) * (_height_panels(s) ** 2))
+    strips = _check_mesh(ac, sett)
+    _n_fixed = _height_panels(sett)
     # The Irodov cases (height_derivatives, 9 solves per height) run at every
     # height when the budget allows it, else only at the lowest valid height.
     _base_work = (len(heights) + 1) * (_n_fixed ** 2)
@@ -1405,7 +1599,8 @@ def ground_effect(
         "condition_used": {"alpha_deg": alpha, "phi_deg": phi, "beta_deg": beta, "V_inf_m_s": V,
                            "rho_kg_m3": rho, "height_ref": href, "ref_point_m": [rnd(v, 5) for v in rp],
                            "heights_meaning": f"heights_m are metres above the ground of the '{href}' point."},
-        "settings_used": {**settings_payload(fixed), "n_chord": int(fixed.n_chord), **_mesh_note(capped, fixed)},
+        "settings_used": {**settings_payload(fixed), "n_chord": int(fixed.n_chord),
+                          **_mesh_note(capped, fixed, fit)},
     }
     device_all, precision_all = computation_device_precision([r for _, r in ok] + ([free] if free is not None else []))
     out["settings_used"]["device"] = device_all
@@ -1564,16 +1759,23 @@ def stability_derivatives(
     ac.compute_reference_values()
     c_ref = float(ac.c_ref)
     _check_method(ac, sett.solver_type, sett.wake_alignment, c["h_m"] is not None)
-    strips = _check_mesh(ac, sett)
     in_ground = c["h_m"] is not None
-    # 5 cases, plus the Irodov cases (height_derivatives) in ground effect.
-    _check_call_work(
-        (5 + (HEIGHT_DERIVATIVE_SOLVES if in_ground else 0))
-        * (_planned_panels(ac, sett, make_flight_condition(c)) ** 2),
-        "fewer panels (smaller n_panels or n_chord)")
     d_a, d_b = 0.5, 1.0
     a, b = c["alpha_deg"], c["beta_deg"]
     cases = {"base": (a, b), "a+": (a + d_a, b), "a-": (a - d_a, b), "b+": (a, b + d_b), "b-": (a, b - d_b)}
+
+    def _stab_work(s: SolverSettings) -> int:
+        # 5 cases, plus the Irodov cases (height_derivatives) in ground effect.
+        return ((5 + (HEIGHT_DERIVATIVE_SOLVES if in_ground else 0))
+                * (_planned_panels(ac, s, make_flight_condition(c)) ** 2))
+
+    sett, fit = _fit_span(
+        ac, sett, settings,
+        lambda s: _largest_panels(ac, s, [(make_flight_condition(c, alpha_deg=aa, beta_deg=bb), None, None)
+                                          for aa, bb in cases.values()]),
+        _stab_work)
+    strips = _check_mesh(ac, sett)
+    _check_call_work(_stab_work(sett), "fewer panels (smaller n_panels or n_chord)")
     # All cases use one mesh, so that the differences contain no mesh change.
     case_sett, capped = _common_settings(
         ac, sett, strips, [make_flight_condition(c, alpha_deg=aa, beta_deg=bb) for aa, bb in cases.values()])
@@ -1739,7 +1941,7 @@ def stability_derivatives(
         base_point["moments"] = moments_all_sets(
             t["base"].Cl, t["base"].Cm, t["base"].Cn, a, b,
             b_ref=b_ref, c_ref=c_ref)
-    settings_used = {**settings_payload(sett, res["base"]), **_mesh_note(capped, case_sett)}
+    settings_used = {**settings_payload(sett, res["base"]), **_mesh_note(capped, case_sett, fit)}
     settings_used["device"] = device_all
     settings_used["precision"] = precision_all
     out: dict[str, Any] = {
@@ -1819,7 +2021,7 @@ def batch_evaluate(
     fc = make_flight_condition(c)
 
     failed: list[dict[str, Any]] = []
-    built: list[tuple[int, str, Any, int]] = []
+    geoms: list[tuple[int, str, Any]] = []
     for i, cand in enumerate(candidates):
         where = f"candidates[{i}]"
         name = f"candidate_{i + 1}"
@@ -1840,29 +2042,59 @@ def batch_evaluate(
                                      "(several surfaces, with 'surfaces').")
                 ac_i = build_aircraft_from_spec(**{key: geom}, where=f"{where}.{key}")
             _check_method(ac_i, sett.solver_type, sett.wake_alignment, in_ground)
-            built.append((i, name, ac_i, _check_mesh(ac_i, sett)))
+            _strip_count(ac_i, sett)  # a geometry that gives no lattice fails here
+            geoms.append((i, name, ac_i))
+        except Exception as exc:  # noqa: BLE001
+            failed.append({"index": i, "name": name, "error": error_info(exc)})
+
+    # One automatic spanwise count for all candidates with an automatic
+    # spanwise mesh; a candidate with a count that the caller set keeps it.
+    auto_geoms = [g for g in geoms if _span_is_automatic(g[2], settings)]
+    fixed_geoms = [g for g in geoms if not _span_is_automatic(g[2], settings)]
+    fit = None
+    s_auto = sett
+    if auto_geoms:
+        def _fixed_work() -> int:
+            total = 0
+            for _, _, ac_i in fixed_geoms:
+                try:
+                    total += _planned_panels(ac_i, sett, fc) ** 2
+                except Exception:  # noqa: BLE001 - the candidate fails later with its own error
+                    pass
+            return total
+
+        _w_fixed = _fixed_work()
+        s_auto, fit = _fit_span(
+            auto_geoms[0][2], sett, settings,
+            lambda s: max(_planned_panels(g[2], s, fc, cap=False) for g in auto_geoms),
+            lambda s: _w_fixed + sum(_planned_panels(g[2], s, fc) ** 2 for g in auto_geoms))
+    built: list[tuple[int, str, Any, int, SolverSettings]] = []
+    for i, name, ac_i in geoms:
+        s_i = s_auto if _span_is_automatic(ac_i, settings) else sett
+        try:
+            built.append((i, name, ac_i, _check_mesh(ac_i, s_i), s_i))
         except Exception as exc:  # noqa: BLE001
             failed.append({"index": i, "name": name, "error": error_info(exc)})
 
     def run(item):
-        i, name, ac, strips = item
+        i, name, ac, strips, s_i = item
         try:
-            s = _case_settings(ac, sett, strips, fc)
-            return i, name, ac, vt.analyze(ac, fc, s), None, s
+            s = _case_settings(ac, s_i, strips, fc)
+            return i, name, ac, vt.analyze(ac, fc, s), None, s, s_i
         except Exception as exc:  # noqa: BLE001
-            return i, name, ac, None, exc, None
+            return i, name, ac, None, exc, None, s_i
 
     if built:
         _check_call_work(
-            sum(_planned_panels(ac_i, sett, fc) ** 2 for _, _, ac_i, _ in built),
+            sum(_planned_panels(ac_i, s_i, fc) ** 2 for _, _, ac_i, _, s_i in built),
             "fewer candidates or fewer panels (smaller n_panels or n_chord)")
     outputs = []
     if built:
-        outputs = run_cases(run, built, max((estimate_panels(b[2], sett) or 0) for b in built) or None, workers)
+        outputs = run_cases(run, built, max((estimate_panels(b[2], b[4]) or 0) for b in built) or None, workers)
 
     ranked: list[dict[str, Any]] = []
     ok_results: list[Any] = []
-    for i, name, ac, res, err, s_used in outputs:
+    for i, name, ac, res, err, s_used, s_cand in outputs:
         if res is None:
             failed.append({"index": i, "name": name, "error": error_info(err)})
             continue
@@ -1890,8 +2122,14 @@ def batch_evaluate(
             used_chord = int(s_used.n_chord)
         if used_chord is not None:
             row["n_chord"] = int(used_chord)
-        if s_used is not None and s_used is not sett:
-            row.update(_mesh_note(True, s_used))
+        cand_fit = None
+        if fit is not None and s_cand is not sett:
+            cand_fit = dataclasses.replace(
+                fit, strips_from=_strip_count(ac, sett), strips_to=_strip_count(ac, s_cand),
+                panels_from=_planned_panels(ac, sett, fc, cap=False),
+                n_chord=used_chord if used_chord is not None else fit.n_chord)
+        if s_used is not None and (s_used is not s_cand or cand_fit is not None):
+            row.update(_mesh_note(s_used is not s_cand, s_used, cand_fit))
         if ax == "all":
             row["moments"] = moments_all_sets(
                 tot.Cl, tot.Cm, tot.Cn, c["alpha_deg"], c["beta_deg"],
@@ -1927,7 +2165,7 @@ def batch_evaluate(
                f"{device_summary_text(device_all, precision_all)}")
     if failed:
         summary += " Failed: " + ", ".join(f"'{f['name']}' ({f['error']['type']})" for f in failed) + "."
-    settings_used = settings_payload(sett)
+    settings_used = settings_payload(s_auto if not fixed_geoms else sett)
     settings_used["device"] = device_all
     settings_used["precision"] = precision_all
     return {
@@ -2315,10 +2553,17 @@ def trim(
     dl = parse_detail_level(detail_level)
     ax = parse_axes(axes)
     _check_method(ac, sett.solver_type, sett.wake_alignment, c["h_m"] is not None)
-    strips = _check_mesh(ac, sett)
     fc = make_flight_condition(c)
-    case_sett = _case_settings(ac, sett, strips, fc)
     n_unknowns = 4 if (roll is not None or yaw is not None) else 2
+
+    def _trim_work(s: SolverSettings) -> int:
+        # The passes depend only on an automatic n_chord, not on the spanwise count.
+        n_here = _planned_panels(ac, s, fc)
+        return _trim_solve_count(max_iter, n_unknowns, _trim_passes(ac, s, fc)) * n_here * n_here
+
+    sett, fit = _fit_span(ac, sett, settings, lambda s: _planned_panels(ac, s, fc, cap=False), _trim_work)
+    strips = _check_mesh(ac, sett)
+    case_sett = _case_settings(ac, sett, strips, fc)
     n_panels = _planned_panels(ac, sett, fc)
     _check_call_work(
         _trim_solve_count(max_iter, n_unknowns, _trim_passes(ac, case_sett, fc)) * n_panels * n_panels,
@@ -2376,7 +2621,7 @@ def trim(
         "device": device,
         "precision": precision,
         "condition_used": condition_payload(c),
-        "settings_used": {**settings_payload(sett, tr.result), **_mesh_note(case_sett is not sett, case_sett),
+        "settings_used": {**settings_payload(sett, tr.result), **_mesh_note(case_sett is not sett, case_sett, fit),
                           "device": device, "precision": precision},
         "axes": ax,
     }
@@ -2502,6 +2747,7 @@ def error_bars(
         ``alpha_L0_deg`` [deg], ``Cd0`` [-], ``Cm0`` [-]). The angles are
         converted to rad for :func:`ventorum.input_error_bars`.
     """
+    from ventorum.core.error_bars import MIN_FINE_PANELS
     from ventorum.core.error_bars import mesh_levels as _mesh_levels
 
     ac = build_aircraft_from_spec(wing=wing, aircraft=aircraft)
@@ -2510,26 +2756,34 @@ def error_bars(
     dl = parse_detail_level(detail_level)  # The bar content is the same at every level.
     ax = string(axes, "axes", ("body", "stability", "wind")) if axes is not None else "body"
     _check_method(ac, sett.solver_type, sett.wake_alignment, c["h_m"] is not None)
-    strips = _check_mesh(ac, sett)
-    levels = _mesh_levels(int(sett.n_panels))
     fc = make_flight_condition(c)
-    case_sett = _case_settings(ac, sett, strips, fc)
     parsed_unc = (None if input_uncertainties is None
                   else _parse_input_uncertainties(input_uncertainties, ac, c["h_m"] is not None))
-    estimate = 0
-    for n_level in levels:
-        s_level = case_sett.clone()
-        s_level.n_panels = int(n_level)
-        n_here = _planned_panels(ac, s_level, fc)
-        estimate += n_here * n_here
-    if parsed_unc is not None:
-        # Input layer: one production solve on the fine level, then the
-        # gradients: the adjoint (a forward and an adjoint solve) or central
-        # differences (two solves per flow input). The larger count is used.
-        n_fine = _planned_panels(ac, case_sett, fc)
-        n_flow = sum(1 for k in parsed_unc if k != "sections")
-        estimate += (1 + 2 * max(1, n_flow)) * n_fine * n_fine
-    _check_call_work(estimate, "fewer panels (smaller n_panels)")
+
+    def _bars_work(s: SolverSettings, s_case: SolverSettings | None = None) -> int:
+        s_case = s if s_case is None else s_case
+        total = 0
+        for n_level in _mesh_levels(int(s.n_panels)):
+            s_level = s_case.clone()
+            s_level.n_panels = int(n_level)
+            n_here = _planned_panels(ac, s_level, fc)
+            total += n_here * n_here
+        if parsed_unc is not None:
+            # Input layer: one production solve on the fine level, then the
+            # gradients: the adjoint (a forward and an adjoint solve) or central
+            # differences (two solves per flow input). The larger count is used.
+            n_fine = _planned_panels(ac, s_case, fc)
+            n_flow = sum(1 for k in parsed_unc if k != "sections")
+            total += (1 + 2 * max(1, n_flow)) * n_fine * n_fine
+        return total
+
+    # The spanwise count is the fine level: it stays at or above the smallest fine level.
+    sett, fit = _fit_span(ac, sett, settings, lambda s: _planned_panels(ac, s, fc, cap=False), _bars_work,
+                          floor=MIN_FINE_PANELS)
+    strips = _check_mesh(ac, sett)
+    levels = _mesh_levels(int(sett.n_panels))
+    case_sett = _case_settings(ac, sett, strips, fc)
+    _check_call_work(_bars_work(sett, case_sett), "fewer panels (smaller n_panels)")
     res = vt.numerical_error_bars(ac, condition=fc, settings=case_sett, axes=ax)
 
     status_of_bars = "numerical_only"
@@ -2575,7 +2829,7 @@ def error_bars(
         "device": device,
         "precision": precision,
         "condition_used": condition_payload(c),
-        "settings_used": {**settings_payload(sett), **_mesh_note(case_sett is not sett, case_sett)},
+        "settings_used": {**settings_payload(sett), **_mesh_note(case_sett is not sett, case_sett, fit)},
         "axes": ax,
     }
     if dl == "full":
@@ -2628,7 +2882,6 @@ def derivative_matrix(
     ac.compute_reference_values()
     in_ground = c["h_m"] is not None
     _check_method(ac, sett.solver_type, sett.wake_alignment, in_ground)
-    strips = _check_mesh(ac, sett)
 
     raw_groups = ["static", "control", "rate"] if groups is None else groups
     if isinstance(raw_groups, str) or not isinstance(raw_groups, (list, tuple)):
@@ -2647,10 +2900,6 @@ def derivative_matrix(
     ctrl_list = (known if controls is None else list(controls)) if "control" in eff_groups else []
 
     fc = make_flight_condition(c)
-    # One mesh for all the cases of the call (static, height, control and rate).
-    probe_conds = mesh_probe_conditions(ac, fc, sett, eff_groups, np.asarray(ac.moment_reference(), dtype=float))
-    case_sett, capped = _common_settings(ac, sett, strips, probe_conds)
-
     # Work budget: the real number of solves of the source functions.
     n_solves = 0
     if in_ground and ({"static", "height"} & set(eff_groups)):
@@ -2661,6 +2910,22 @@ def derivative_matrix(
         n_solves += 1 + 2 * len(ctrl_list)  # control_derivatives: base and 2 per control
     if "rate" in eff_groups:
         n_solves += 7                       # rate_derivatives: base and 6 steps
+    rp_dm = np.asarray(ac.moment_reference(), dtype=float)
+
+    def _dm_work(s: SolverSettings) -> int:
+        # One mesh for all the cases of the call (static, height, control and rate).
+        conds = mesh_probe_conditions(ac, fc, s, eff_groups, rp_dm)
+        s_case, _ = _common_settings(ac, s, _strip_count(ac, s), conds)
+        return n_solves * (_planned_panels(ac, s_case, fc) ** 2)
+
+    sett, fit = _fit_span(
+        ac, sett, settings,
+        lambda s: _largest_panels(ac, s, [(cond, None, None) for cond in mesh_probe_conditions(
+            ac, fc, s, eff_groups, rp_dm)]),
+        _dm_work)
+    strips = _check_mesh(ac, sett)
+    probe_conds = mesh_probe_conditions(ac, fc, sett, eff_groups, rp_dm)
+    case_sett, capped = _common_settings(ac, sett, strips, probe_conds)
     _check_call_work(
         n_solves * (_planned_panels(ac, case_sett, fc) ** 2),
         "fewer panels (smaller n_panels or n_chord), fewer groups or fewer controls",
@@ -2719,7 +2984,7 @@ def derivative_matrix(
         f"{len(cols)} columns ({', '.join(cols)}). "
         f"{dev_txt}"
     )
-    settings_used = {**settings_payload(sett, base_sol), **_mesh_note(capped, case_sett)}
+    settings_used = {**settings_payload(sett, base_sol), **_mesh_note(capped, case_sett, fit)}
     out: dict[str, Any] = {
         "status": "success",
         "executive_summary": summary,
