@@ -92,3 +92,34 @@ def test_nested_context_restores_once(blas_two_threads):
             assert _limited_counts() == {1}
         assert _limited_counts() == {1}
     assert _blas_state() == before
+
+
+def test_worker_after_main_thread_context_keeps_one_thread():
+    """A worker thread gets one BLAS thread after a solve in the main thread.
+
+    threadpoolctl 3.8.0 keeps the control of the OpenBLAS pool with the main
+    thread after its first limit, and ignores the limits of other threads.
+    The workers of a parallel run then used all BLAS threads, and their
+    results differed from the serial run in the last bits.
+    """
+    wing = vt.LiftingSurface(semi_span=2.0, sections=[vt.WingSection(y_frac=0.0, chord=1.0),
+                                                      vt.WingSection(y_frac=1.0, chord=1.0)])
+    vt.analyze(wing, alpha_deg=2.0, solver="vlm", n_panels=4)
+    if not _blas_state() or par._blas_controller() is None:
+        pytest.skip("no BLAS library or no threadpoolctl")
+    before = _blas_state()
+    with par.blas_single_thread():
+        assert _limited_counts() == {1}
+    seen: dict[str, set[int]] = {}
+
+    def worker():
+        with par.blas_single_thread():
+            seen["worker"] = _limited_counts()
+
+    th = threading.Thread(target=worker)
+    th.start()
+    th.join()
+    if max(before.values()) == 1:
+        pytest.skip("the BLAS libraries have one thread already")
+    assert seen["worker"] == {1}
+    assert _blas_state() == before

@@ -345,6 +345,11 @@ a minor version can change a public interface.
 
 ### Fixed
 
+- Parallel runs: the dependency bound is now `threadpoolctl>=3.1,<3.8`. With threadpoolctl
+  3.8.0, after one solve in the main thread, the limit of one BLAS thread inside
+  `blas_single_thread` had no effect in the worker threads. The workers of a parallel run then
+  used all OpenBLAS threads (too many threads on the cores), and their results differed from
+  the serial run in the last bits. New regression test in `tests/test_parallel.py`.
 - Vortex lattice on a cambered mean line with a hinge that moves a chordwise node (a hinge that is
   not on a node, for example at 0.7 chord with 4 uniform chordwise panels): the legs of the strips
   with the moved node and of their neighbours did not coincide at the edges between them, and CL
