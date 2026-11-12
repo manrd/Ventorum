@@ -254,10 +254,15 @@ def selftest(task_set: TaskSet | None = None, rel: float = 0.005) -> list[dict[s
             float(sd.derivatives["Cm_alpha"]))
         add("AB-19 x_np (vt.static_derivatives)", p["stability_derivatives"]["neutral_point_x_m"],
             float(sd.neutral_point_x))
-        # 3. Trim.
+        # 3. Trim. The tool can fit the automatic mesh to its work budget
+        # (``mesh_note``); the library call then uses the same mesh.
         v, p = golden("AB-24")
         a = v.canonical_call["args"]
-        tr = vt.trim(geom(a), build_flight_condition_from_spec(a["flight_condition"]),
+        used = p.get("settings_used", {})
+        trim_sett = None
+        if "mesh_note" in used:
+            trim_sett = vt.SolverSettings(n_panels=int(used["n_panels"]), n_chord=int(used["n_chord_used"]))
+        tr = vt.trim(geom(a), build_flight_condition_from_spec(a["flight_condition"]), trim_sett,
                      CL_target=a["CL_target"], pitch_control=a["pitch_control"])
         add("AB-24 alpha (vt.trim)", p["alpha_deg"], float(tr.alpha_deg))
         add("AB-24 elevator (vt.trim)", p["deflections_deg"]["elevator"], float(tr.deflections_deg["elevator"]))

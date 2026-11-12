@@ -358,6 +358,16 @@ a minor version can change a public interface.
 
 ### Fixed
 
+- Agent tool `polar_sweep`: out of ground effect, the work estimate used the default of 4
+  chordwise panels also for a wing with a control, which uses at least 16. The estimate was 16
+  times too low, and a call above the work budget was not reduced. The estimate now resolves
+  the automatic chordwise count with the flight condition. New regression test in
+  `tests/test_agent_span_fit.py`.
+- Agent benchmark: the golden call of AB-25 (trim with three controls) no longer sets
+  `n_panels`, so the tool fits its automatic mesh to the work budget and the call succeeds. The
+  self-test gives `vt.trim` the mesh that the trim tool reports in its `mesh_note`, so it
+  compares the tool and the library on the same mesh (limit 0.5 %, unchanged).
+
 - Parallel runs: the dependency bound is now `threadpoolctl>=3.1,<3.8`. With threadpoolctl
   3.8.0, after one solve in the main thread, the limit of one BLAS thread inside
   `blas_single_thread` had no effect in the worker threads. The workers of a parallel run then

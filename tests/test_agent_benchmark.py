@@ -156,6 +156,23 @@ def test_references_reproduce(task_set, refs):
         assert r["calls"]["main"]["error_type"] == etype
 
 
+@pytest.mark.slow
+def test_budget_recovery_trim_succeeds(task_set):
+    """AB-25 (trim with three controls) succeeds: the tool fits its automatic mesh to the budget."""
+    r = compute_references(task_set.variant("AB-25", 0))
+    assert r["valid"], r["problems"]
+    assert all(math.isfinite(x) for x in r["values"].values()), r["values"]
+
+
+@pytest.mark.slow
+def test_selftest_agrees_with_the_library():
+    """The tool results agree with the library API; the trim check uses the mesh that the tool used."""
+    from validation.agent_benchmark.references import selftest
+
+    checks = selftest()
+    assert all(c["ok"] for c in checks), [c for c in checks if not c["ok"]]
+
+
 # ---------------------------------------------------------------------------
 # Scoring through the real server
 # ---------------------------------------------------------------------------
