@@ -344,12 +344,17 @@ def _singular_diagnostics(kres, jacobians: list[np.ndarray]) -> str:
     return "; ".join(lines)
 
 
-def test_singular_newton_jacobian_counts_the_least_squares_steps(monkeypatch):
+@pytest.mark.parametrize("kernel_rounding", [False, True])
+def test_singular_newton_jacobian_counts_the_least_squares_steps(monkeypatch, kernel_rounding):
     """Verify a singular Newton Jacobian is counted in the result.
 
     Two unknowns with the same sensitivity column and the same
     trailing-edge pair make the Jacobian singular. The iteration takes the
     least-squares step and the result counts it.
+
+    With ``kernel_rounding`` the solve sees the rounding of an OpenBLAS
+    kernel that leaves a pivot of about 1e-17 instead of 0 (SkylakeX on the
+    CI runners): it gives no error. The singular test must not depend on it.
     """
     from ventorum.panel3d.kutta import solve_pressure_kutta
     from ventorum.panel3d.solver import _condition_arrays
@@ -370,6 +375,8 @@ def test_singular_newton_jacobian_counts_the_least_squares_steps(monkeypatch):
 
     def recording_solve(a, b):
         jacobians.append(np.array(a, copy=True))
+        if kernel_rounding:
+            a = np.asarray(a, dtype=float) + 1e-16 * np.abs(a).max() * np.eye(len(a))
         return real_solve(a, b)
 
     monkeypatch.setattr(np.linalg, "solve", recording_solve)
@@ -380,3 +387,14 @@ def test_singular_newton_jacobian_counts_the_least_squares_steps(monkeypatch):
     monkeypatch.undo()
     assert kres.lstsq_steps >= 1, _singular_diagnostics(kres, jacobians)
     assert kres.lstsq_steps <= kres.n_iters
+
+
+def test_numerical_rank_test_of_the_newton_jacobian():
+    """The singular test uses the singular values, not an exact zero pivot."""
+    from ventorum.panel3d.kutta import _numerically_singular
+
+    a = 0.36463807605379106  # the Jacobian entry of the CI runner
+    assert _numerically_singular(np.array([[a, a], [a, a]]))
+    assert _numerically_singular(np.zeros((3, 3)))
+    assert not _numerically_singular(np.eye(4))
+    assert not _numerically_singular(np.array([[1.0, 0.0], [0.0, 1e-12]]))

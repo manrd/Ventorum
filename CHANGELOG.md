@@ -358,6 +358,13 @@ a minor version can change a public interface.
 
 ### Fixed
 
+- 3D panel solver, pressure Kutta option: the Newton iteration found a singular Jacobian only
+  from an exact zero pivot of the LU factorization. With the OpenBLAS kernel of AVX-512 CPUs the
+  pivot of an exactly singular Jacobian was about 1e-17, so the solver took a plain Newton step
+  and did not count a least-squares step. The test now uses the singular values (numerical
+  rank, Golub and Van Loan). A regular Jacobian uses the same solve as before. New regression
+  tests in `tests/test_panel3d_kutta.py`.
+
 - Agent tool `polar_sweep`: out of ground effect, the work estimate used the default of 4
   chordwise panels also for a wing with a control, which uses at least 16. The estimate was 16
   times too low, and a call above the work budget was not reduced. The estimate now resolves

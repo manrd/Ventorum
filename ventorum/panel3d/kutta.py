@@ -35,6 +35,9 @@ Published sources
 * Katz, J. and Plotkin, A., 2001, Low-Speed Aerodynamics, 2nd ed.,
   Cambridge University Press, section 12.4 (the Kutta condition).
 * Maskew, B., 1987, Program VSAERO Theory Document, NASA CR-4023.
+* Golub, G. H. and Van Loan, C. F., 2013, Matrix Computations, 4th ed.,
+  Johns Hopkins University Press, section 5.4.1 (numerical rank from the
+  singular values; the test of a singular Newton Jacobian).
 
 Conventions
 -----------
@@ -140,7 +143,11 @@ class PressureKuttaResult:
         True when the residual falls below the tolerance.
     lstsq_steps : int
         Number of Newton steps that used the least-squares solution
-        because the Jacobian was singular.
+        because the Jacobian was singular. The Jacobian is singular when
+        its smallest singular value is at most ``n eps`` times its largest
+        (``n`` unknowns, ``eps`` the float64 machine epsilon). An exact
+        zero pivot of the LU factorization is not a reliable test: it
+        depends on the rounding of the BLAS kernel.
     """
 
     delta: np.ndarray
@@ -155,6 +162,20 @@ def _surface_cp(grad_op, mu_full, v_onset, normals, v_inf, rates=False):
     """Return the surface velocity (Nf, 3) in m/s and Cp (Nf,) of a doublet vector."""
     grad = surface_gradient(grad_op, mu_full)
     return compute_surface_velocity_and_cp(v_onset, normals, grad, v_inf, rates)
+
+
+def _numerically_singular(jac: np.ndarray) -> bool:
+    """Return True if the square matrix *jac* is singular to float64 round-off.
+
+    The test is the numerical rank of Golub and Van Loan (section 5.4.1):
+    the smallest singular value is at most ``n eps`` times the largest,
+    with ``n`` the size of the matrix and ``eps`` the float64 machine
+    epsilon. A zero matrix is singular.
+    """
+    sv = np.linalg.svd(jac, compute_uv=False)
+    if sv.size == 0 or not np.all(np.isfinite(sv)):
+        return False
+    return bool(sv[-1] <= jac.shape[0] * np.finfo(np.float64).eps * sv[0])
 
 
 def solve_pressure_kutta(
@@ -254,13 +275,17 @@ def solve_pressure_kutta(
             np.einsum("sd,sdt->st", v_surf[up_idx], g_up)
             - np.einsum("sd,sdt->st", v_surf[lo_idx], g_lo)
         ) / v_inf_f**2
-        try:
-            step = np.linalg.solve(jac, -resid)
-        except np.linalg.LinAlgError:
+        if _numerically_singular(jac):
             # Singular Jacobian (for example a degenerate trailing-edge
             # pair): take the least-squares step and count it.
             step, _, _, _ = np.linalg.lstsq(jac, -resid, rcond=None)
             lstsq_steps += 1
+        else:
+            try:
+                step = np.linalg.solve(jac, -resid)
+            except np.linalg.LinAlgError:
+                step, _, _, _ = np.linalg.lstsq(jac, -resid, rcond=None)
+                lstsq_steps += 1
         n_iters += 1
 
         # Backtracking: accept the first halving that lowers the residual,

@@ -271,7 +271,7 @@ where $\mathbf{D}_{:, t}$ is the wake doublet influence of strip $t$. The exact 
 J_{s, t} = \frac{2 \left(\mathbf{V}_{\text{upper}(s)} \cdot \mathbf{g}_{t, \text{upper}(s)} - \mathbf{V}_{\text{lower}(s)} \cdot \mathbf{g}_{t, \text{lower}(s)}\right)}{V_\infty^2},
 ```
 
-where $\mathbf{g}_{t}$ is the surface gradient of sensitivity $\mathbf{z}_t$ (one sparse product for all columns). The iteration uses line-search backtracking and converges when $\max |R_s| < 10^{-6}$ (at most 20 steps). On a half mesh, a symmetric condition has one correction per right strip (it also applies to the mirror strip); an asymmetric condition (sideslip, roll or yaw rate) has one correction per strip of the full wake, with the sensitivities $\frac{1}{2}(\mathbf{z}^{\text{sym}}_t \pm \mathbf{z}^{\text{asym}}_t)$ from the symmetric and the antisymmetric factorizations. No new factorization is needed.
+where $\mathbf{g}_{t}$ is the surface gradient of sensitivity $\mathbf{z}_t$ (one sparse product for all columns). The iteration uses line-search backtracking and converges when $\max |R_s| < 10^{-6}$ (at most 20 steps). When the Jacobian is singular to round-off (its smallest singular value is at most $n\,\epsilon$ times its largest, with $n$ corrections and $\epsilon$ the float64 machine epsilon; Golub and Van Loan 2013, section 5.4.1), the step is the least-squares solution, and the result counts these steps (`PressureKuttaResult.lstsq_steps`). A degenerate trailing-edge pair gives such a Jacobian. The solver does not use an exact zero pivot of the LU factorization as the test, because that depends on the rounding of the BLAS kernel. On a half mesh, a symmetric condition has one correction per right strip (it also applies to the mirror strip); an asymmetric condition (sideslip, roll or yaw rate) has one correction per strip of the full wake, with the sensitivities $\frac{1}{2}(\mathbf{z}^{\text{sym}}_t \pm \mathbf{z}^{\text{asym}}_t)$ from the symmetric and the antisymmetric factorizations. No new factorization is needed.
 
 ## Six unit-onset superposition
 
@@ -623,6 +623,7 @@ The 3D panel method implementation is verified by tests in the test suite:
 - I. B. Celik, U. Ghia, P. J. Roache, C. J. Freitas, H. Coleman and P. E. Raad, "Procedure for Estimation and Reporting of Uncertainty Due to Discretization in CFD Applications", *Journal of Fluids Engineering*, Vol. 130, No. 7, 078001, 2008.
 - M. Drela, *Flight Vehicle Aerodynamics*, MIT Press, Cambridge, MA, 2014.
 - J. Blazek, *Computational Fluid Dynamics: Principles and Applications*, 3rd ed., Butterworth-Heinemann, Oxford, 2015, chapter 5.
+- G. H. Golub and C. F. Van Loan, *Matrix Computations*, 4th ed., Johns Hopkins University Press, Baltimore, 2013, section 5.4.1.
 - J. L. Hess and A. M. O. Smith, "Calculation of Potential Flow About Arbitrary Bodies", *Progress in Aeronautical Sciences*, Vol. 8, Pergamon Press, 1967, pp. 1-138.
 - J. D. Jackson, *Classical Electrodynamics*, 3rd ed., John Wiley & Sons, New York, 1999, section 4.1.
 - J. Katz and A. Plotkin, *Low-Speed Aerodynamics*, 2nd ed., Cambridge University Press, Cambridge, 2001.
