@@ -11,9 +11,10 @@ permissions:
 jobs:
   test:
     runs-on: ${{ matrix.os }}
-    # The Windows runner is slower: the full suite, two verification reports
-    # and the examples take about 60 minutes there, so it gets more time.
-    timeout-minutes: ${{ matrix.os == 'windows-latest' && 90 || 60 }}
+    # The full suite, two verification reports and the examples take about
+    # 60 minutes on the Windows runner and up to about 60 minutes on the
+    # slower Ubuntu runners, so all jobs get 90 minutes.
+    timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
