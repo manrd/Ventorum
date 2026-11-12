@@ -188,6 +188,25 @@ def test_polar_sweep_in_ground_uses_one_fitted_mesh(small_limits, monkeypatch):
     assert all(row["n_chord"] >= CONTROL_MIN_AUTO_N_CHORD for row in p["polar_table"])
 
 
+
+def test_polar_sweep_work_counts_the_control_chord(monkeypatch):
+    """Out of ground effect, the work estimate of a polar sweep uses the chordwise count of a control.
+
+    The estimate used the default of 4 chordwise panels, so for a wing with
+    a control (16 panels) it was 16 times too low and a call above the
+    budget was not reduced.
+    """
+    # 3 angles of at most 800 panels.
+    monkeypatch.setattr(tools, "MAX_CALL_WORK", 3 * 800 ** 2)
+    p = polar_sweep(wing=dict(FLAP_WING), alpha_start_deg=0.0, alpha_end_deg=4.0, alpha_step_deg=2.0,
+                    flight_condition={"V_inf_m_s": 40.0})
+    assert p["status"] == "success", p
+    su = p["settings_used"]
+    # 3 (2 n 16)^2 <= 3 * 800^2 gives n = 25.
+    assert su["n_panels"] == 25, su
+    assert su["n_chord_used"] == CONTROL_MIN_AUTO_N_CHORD, su
+    assert "budget" in su["mesh_note"], su["mesh_note"]
+
 @pytest.mark.slow
 def test_ground_effect_fits_the_strips(small_limits):
     """The heights and free air use the fitted spanwise count and one chordwise count."""

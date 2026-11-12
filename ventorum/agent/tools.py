@@ -966,7 +966,9 @@ def polar_sweep(
     def _sweep_work(s: SolverSettings) -> int:
         if c["h_m"] is not None:
             return sum(_planned_panels(ac, s, make_flight_condition(c, alpha_deg=a)) ** 2 for a in alphas)
-        return len(alphas) * (_planned_panels(ac, s) ** 2)
+        # Out of ground effect the automatic n_chord does not change with the
+        # angle, but it depends on the controls: resolve it with a condition.
+        return len(alphas) * (_planned_panels(ac, s, make_flight_condition(c, alpha_deg=alphas[0])) ** 2)
 
     _mesh_alphas = alphas if c["h_m"] is not None else alphas[:1]
     sett, fit = _fit_span(
