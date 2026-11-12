@@ -363,6 +363,10 @@ a minor version can change a public interface.
   times too low, and a call above the work budget was not reduced. The estimate now resolves
   the automatic chordwise count with the flight condition. New regression test in
   `tests/test_agent_span_fit.py`.
+- Agent tool `polar_sweep`: out of ground effect, the choice of one GPU batch also counted the
+  panels with 4 chordwise panels for a wing with a control. It now uses the resolved chordwise
+  count. On the test machine no sweep changes its device; on a machine with other GPU limits a
+  short sweep can now go to the GPU batch.
 - Agent benchmark: the golden call of AB-25 (trim with three controls) no longer sets
   `n_panels`, so the tool fits its automatic mesh to the work budget and the call succeeds. The
   self-test gives `vt.trim` the mesh that the trim tool reports in its `mesh_note`, so it

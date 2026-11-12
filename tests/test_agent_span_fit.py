@@ -207,6 +207,27 @@ def test_polar_sweep_work_counts_the_control_chord(monkeypatch):
     assert su["n_chord_used"] == CONTROL_MIN_AUTO_N_CHORD, su
     assert "budget" in su["mesh_note"], su["mesh_note"]
 
+
+def test_polar_sweep_gpu_choice_counts_the_control_chord(monkeypatch):
+    """Out of ground effect, the GPU choice of a polar sweep uses the chordwise count of a control.
+
+    The count used the default of 4 chordwise panels, so for a wing with a
+    control (16 panels) the GPU choice saw a lattice 4 times too small.
+    """
+    seen: list[int] = []
+
+    def record(n_cases, n_panels):
+        seen.append(int(n_panels))
+        return False
+
+    monkeypatch.setattr(tools, "_gpu_takes", record)
+    monkeypatch.setattr(tools, "size_class", lambda n: "large")
+    p = polar_sweep(wing=dict(FLAP_WING), alpha_start_deg=2.0, alpha_end_deg=2.0, alpha_step_deg=1.0,
+                    flight_condition={"V_inf_m_s": 40.0}, settings={"n_panels": 10})
+    assert p["status"] == "success", p
+    # 20 spanwise strips x 16 chordwise panels.
+    assert seen == [20 * CONTROL_MIN_AUTO_N_CHORD], seen
+
 @pytest.mark.slow
 def test_ground_effect_fits_the_strips(small_limits):
     """The heights and free air use the fitted spanwise count and one chordwise count."""

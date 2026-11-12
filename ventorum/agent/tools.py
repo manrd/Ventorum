@@ -1023,7 +1023,7 @@ def polar_sweep(
     elif (resolve_solver_type(sett.solver_type) in ("linear", "nonlinear")
           or (resolve_solver_type(sett.solver_type) == "vlm"
               and (size_class(estimate_panels(ac, sett)) == "small"
-                   or _gpu_takes(len(alphas), _planned_panels(ac, sett)))
+                   or _gpu_takes(len(alphas), _planned_panels(ac, sett, make_flight_condition(c, alpha_deg=alphas[0]))))
               and _case_settings(ac, sett, strips, make_flight_condition(c, alpha_deg=alphas[0])) is sett)):
         # Lifting lines, small vortex lattices and batches that the GPU takes:
         # one batch. A larger vortex lattice on the CPU gains more from cases
