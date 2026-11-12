@@ -1796,7 +1796,7 @@ class SolverResult:
         solver with the "morino" Kutta option there is no iteration: True
         means only that the linear solve finished. Then
         ``residual_history`` holds the trailing-edge pressure jump
-        (max |delta Cp| [-]), which is a diagnostic and does not go to zero.
+        (``max |delta Cp|`` [-]), which is a diagnostic and does not go to zero.
         With the "pressure" option, True means that this jump fell below the
         tolerance.
     b_ref : float or None

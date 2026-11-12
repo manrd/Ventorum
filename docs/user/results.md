@@ -9,7 +9,7 @@
 | `converged` | False if the solver did not meet its tolerance |
 | `details` | Solver data (lattice, circulation, wake direction, ground plane, dispatch) for plots and checks |
 
-### Accuracy of the near-field values of the lattice solvers
+## Accuracy of the near-field values of the lattice solvers
 
 The lattice solvers give `CDi` and the far-field diagnostics from the Trefftz plane, and `CDi_nearfield`, `CY` and `Cn` from the forces on the surface (the near field). The near-field drag and yawing moment are less accurate than the Trefftz values. `tests/test_farfield_lateral.py::test_near_field_accuracy_of_the_lattice_solvers` measures them on flat wings of aspect ratio 8 with the vortex lattice (alpha 4 deg, cosine spacing, 24 x 4 and 48 x 8 spanwise x chordwise panels):
 
