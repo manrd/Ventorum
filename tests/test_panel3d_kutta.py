@@ -323,7 +323,28 @@ def test_pressure_sensitivity_cached_per_configuration_and_symmetry_case():
         assert np.max(np.abs(res.mu_w - ref.mu_w)) < 1e-12
 
 
-def test_singular_newton_jacobian_counts_the_least_squares_steps():
+def _singular_diagnostics(kres, jacobians: list[np.ndarray]) -> str:
+    """Return the state of a pressure Kutta solve for the message of a failed check."""
+    import platform
+
+    import threadpoolctl
+
+    lines = [f"n_iters {kres.n_iters}, residual {kres.residual!r}, converged {kres.converged}, "
+             f"lstsq_steps {kres.lstsq_steps}, machine {platform.machine()} {platform.processor()}"]
+    try:
+        from numpy._core._multiarray_umath import __cpu_features__ as feats
+        lines.append("numpy CPU features: " + " ".join(k for k, v in feats.items() if v and k.startswith("AVX")))
+    except ImportError:
+        lines.append("numpy CPU features: unknown")
+    lines += [f"BLAS {d.get('internal_api')} {d.get('version')} {d.get('architecture')}"
+              for d in threadpoolctl.threadpool_info() if d.get("user_api") == "blas"]
+    for k, jac in enumerate(jacobians):
+        lines.append(f"Jacobian {k}: {jac.tolist()!r}, rows equal {np.array_equal(jac[0], jac[1])}, "
+                     f"columns equal {np.array_equal(jac[:, 0], jac[:, 1])}, det {np.linalg.det(jac)!r}")
+    return "; ".join(lines)
+
+
+def test_singular_newton_jacobian_counts_the_least_squares_steps(monkeypatch):
     """Verify a singular Newton Jacobian is counted in the result.
 
     Two unknowns with the same sensitivity column and the same
@@ -344,9 +365,18 @@ def test_singular_newton_jacobian_counts_the_least_squares_steps():
     coeffs = _condition_arrays([cond])[0][0]
     mu_full0 = cfg.unit_mu @ coeffs
     onset = solver._condition_velocity(cond, solver._full_geom.centroid)
+    jacobians: list[np.ndarray] = []
+    real_solve = np.linalg.solve
+
+    def recording_solve(a, b):
+        jacobians.append(np.array(a, copy=True))
+        return real_solve(a, b)
+
+    monkeypatch.setattr(np.linalg, "solve", recording_solve)
     kres = solve_pressure_kutta(
         mu_full0, z_full[:, [0, 0]], solver._grad_op, up[[0, 0]], lo[[0, 0]],
         solver._full_geom.normal, onset, float(cond.V_inf),
     )
-    assert kres.lstsq_steps >= 1
+    monkeypatch.undo()
+    assert kres.lstsq_steps >= 1, _singular_diagnostics(kres, jacobians)
     assert kres.lstsq_steps <= kres.n_iters
