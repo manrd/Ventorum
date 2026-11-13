@@ -478,6 +478,307 @@ def case_split_surfaces() -> str:
     return "\n".join(s)
 
 
+def verdict(ok: bool) -> str:
+    return "pass" if ok else "FAIL"
+
+
+def _closed_panel_mesh(nodes: np.ndarray, panels: np.ndarray):
+    from ventorum.panel3d.mesh import PanelMesh
+
+    return PanelMesh(nodes=nodes, panels=panels, component=np.zeros(len(panels), dtype=int),
+                     kind=np.full(len(panels), "surface"), wake_edges=np.empty((0, 4), dtype=int))
+
+
+def _closed_body_solver(nodes: np.ndarray, panels: np.ndarray):
+    # The CPU kernels that the solver family selects ("auto"): Numba when it
+    # is available. They agree with the numpy reference kernels to round-off.
+    from ventorum.panel3d.solver import PanelSolver
+    from ventorum.solvers.panel3d import _auto_cpu_backend
+
+    return PanelSolver(_closed_panel_mesh(nodes, panels), far_ratio=5.0, backend=_auto_cpu_backend()[0])
+
+
+def case_panel3d_sphere() -> str:
+    from ventorum.reference.analytic3d import sphere_cp, sphere_quad_mesh
+
+    flows = (("across the pole axis", 0.0), ("along the pole axis", np.pi / 2.0))
+    meshes = ((16, 32), (32, 64))
+    max_err: dict[str, list[float]] = {name: [] for name, _ in flows}
+    rows = []
+    for n_lat, n_lon in meshes:
+        nodes, panels = sphere_quad_mesh(1.0, n_lat, n_lon)
+        solver = _closed_body_solver(nodes, panels)
+        conds = [vt.FlightCondition(V_inf=1.0, alpha=a) for _, a in flows]
+        for (name, _), cond, res in zip(flows, conds, solver.solve_conditions(conds)):
+            err = res.cp - sphere_cp(solver.centroids, 1.0, vt.freestream_direction(float(cond.alpha), 0.0))
+            e_max = float(np.max(np.abs(err)))
+            e_rms = float(np.sqrt(np.sum(solver.areas * err ** 2) / np.sum(solver.areas)))
+            q_inf = 0.5 * float(cond.rho) * cond.V_inf ** 2
+            force = float(np.linalg.norm(np.sum(res.cp[:, None] * solver.areas[:, None] * solver.normals, axis=0)
+                                         * q_inf))
+            max_err[name].append(e_max)
+            if n_lat == meshes[-1][0]:
+                falls = e_max < max_err[name][0]
+                cp_check = verdict(e_max < 0.03 and falls)
+            else:
+                cp_check = "-"
+            rows.append([f"{n_lat} x {n_lon}", name, f"{e_max:.4f}", f"{e_rms:.5f}", cp_check,
+                         f"{force:.1e}", verdict(force < 1e-3)])
+    s = ["## V11. 3D panel method: sphere", "",
+         "Reference: exact potential flow past a sphere, Cp = 1 - (9/4) sin^2(theta), with theta the angle "
+         "between the surface point and the onset direction (H. Lamb, Hydrodynamics, 6th ed., 1932, "
+         "article 92; Katz and Plotkin, Low-Speed Aerodynamics, 2nd ed., 2001, section 3.12). Evaluation in "
+         "`ventorum.reference.analytic3d.sphere_cp`.", "",
+         "Unit sphere, latitude-longitude meshes with the poles on the z axis (triangle fans at the poles), "
+         "constant source and doublet panels (`PanelSolver`, far-field ratio 5, automatic CPU kernel selection), "
+         "V = 1 m/s. With the flow "
+         "across the pole axis the poles sit at the points of highest speed; with the flow along the pole "
+         "axis they sit at the stagnation points. The Cp error is taken at the panel centroids; the rms "
+         "error is area-weighted. The net force must be zero (d'Alembert's paradox).", "",
+         "Limits: largest Cp error below 0.03 at 32 x 64 and smaller than at 16 x 32; net force below "
+         "1e-3 N.", "",
+         table(["mesh", "flow", "largest Cp error", "rms Cp error", "Cp check", "net force [N]",
+                "force check"], rows), ""]
+    return "\n".join(s)
+
+
+# Semi-axes [m], onset [m/s] and tip rule of the ellipsoid case. A tip panel
+# is a panel where the exact surface normal turns by more than 0.1 rad
+# across the panel in both panel directions (the rule of the solver tests).
+_ELL_AXES = (1.0, 0.5, 0.25)
+_ELL_STREAM = (10.0, 3.0, -2.0)
+_ELL_TIP_TURN = 0.1
+
+
+def _ellipsoid_errors(n_lat: int, n_lon: int) -> tuple[np.ndarray, np.ndarray]:
+    from ventorum.reference.analytic3d import ellipsoid_quad_mesh, ellipsoid_surface_velocity
+
+    a, b, c = _ELL_AXES
+    nodes, panels = ellipsoid_quad_mesh(a, b, c, n_lat, n_lon, spacing="cosine")
+    solver = _closed_body_solver(nodes, panels)
+    v_stream = np.asarray(_ELL_STREAM)
+    v_mag = float(np.linalg.norm(v_stream))
+    res = solver.solve(vt.FlightCondition(V_inf=v_mag, alpha=float(np.arctan2(v_stream[2], v_stream[0])),
+                                          beta=float(-np.arcsin(v_stream[1] / v_mag))))
+    speed = np.linalg.norm(res.velocity, axis=-1)
+    exact = np.linalg.norm(ellipsoid_surface_velocity(solver.centroids, a, b, c, v_stream), axis=-1)
+    rel_err = np.abs(speed - exact) / exact
+    grad = nodes[panels] / np.array([a ** 2, b ** 2, c ** 2])
+    normal = grad / np.linalg.norm(grad, axis=-1, keepdims=True)
+
+    def turn(i: int, j: int) -> np.ndarray:
+        return np.arccos(np.clip(np.sum(normal[:, i] * normal[:, j], axis=-1), -1.0, 1.0))
+
+    tip = np.minimum(np.maximum(turn(0, 1), turn(3, 2)), np.maximum(turn(1, 2), turn(0, 3))) > _ELL_TIP_TURN
+    return rel_err, tip
+
+
+def case_panel3d_ellipsoid() -> str:
+    levels = (16, 24, 32)
+    rows = []
+    tip_err = []
+    for k, n_lat in enumerate(levels):
+        rel_err, tip = _ellipsoid_errors(n_lat, 2 * n_lat)
+        away = float(np.max(rel_err[~tip]))
+        tip_err.append(float(np.max(rel_err[tip])))
+        if k == 0:
+            order, order_check = "-", "-"
+        else:
+            p = np.log(tip_err[k - 1] / tip_err[k]) / np.log(n_lat / levels[k - 1])
+            order, order_check = f"{p:.2f}", verdict(p >= 1.0)
+        away_check = verdict(away < 0.02) if n_lat == levels[-1] else "-"
+        rows.append([f"{n_lat} x {2 * n_lat}", f"{int(np.sum(tip))} of {tip.size}", f"{100 * away:.3f} %",
+                     away_check, f"{100 * tip_err[-1]:.3f} %", order, order_check])
+    s = ["## V12. 3D panel method: ellipsoid at oblique onset", "",
+         "Reference: exact potential flow past a tri-axial ellipsoid (H. Lamb, Hydrodynamics, 6th ed., 1932, "
+         "article 114). For a uniform stream the surface velocity is the tangential part of a scaled stream "
+         "vector; evaluation in `ventorum.reference.analytic3d.ellipsoid_surface_velocity`.", "",
+         "Ellipsoid with semi-axes 1, 0.5 and 0.25 m, onset velocity (10, 3, -2) m/s, latitude-longitude "
+         "meshes with cosine spacing in latitude and the poles on the z axis (`PanelSolver`, far-field ratio "
+         "5, automatic CPU kernel selection). The error is the relative error of the surface speed at the "
+         "panel centroids. A tip panel is a "
+         "panel where the exact surface normal turns by more than 0.1 rad across the panel in both panel "
+         "directions. At the tips (x = +-a) the surface is curved in both directions and the flat-panel "
+         "centroid lies inside the surface by about h^2 / (8 R), with h the panel size and R the radius of "
+         "curvature, so these panels are checked for convergence only. The order is the observed order of "
+         "the tip error against the latitude count.", "",
+         "Limits: largest error away from the tips below 2 % at 32 x 64; observed order of the tip error "
+         "at least 1 on each refinement step.", "",
+         table(["mesh", "tip panels", "largest error away from the tips", "check", "largest tip error",
+                "tip error order", "order check"], rows), ""]
+    return "\n".join(s)
+
+
+def case_panel3d_thin_wing() -> str:
+    from ventorum.solvers.factory import make_solver
+
+    cond = vt.FlightCondition(alpha=np.radians(4.0))
+
+    def wing(shape):
+        secs = [vt.WingSection(0.0, 1.0, shape=shape), vt.WingSection(1.0, 1.0, shape=shape)]
+        ac = vt.Aircraft(surfaces=[vt.LiftingSurface(name="wing", semi_span=4.0, sections=secs)])
+        ac.compute_reference_values()
+        return ac
+
+    vlm = make_solver("vlm").solve(wing(None), cond,
+                                   vt.SolverSettings(solver_type="vlm", n_panels=40, n_chord=16)).totals
+    sett = vt.SolverSettings(solver_type="panel3d", n_chord=40, n_panels=40, panel_kutta="morino")
+    res = {}
+    rows = []
+    for shape in ("0006", "0012", "0018", "0024"):
+        t = make_solver("panel3d").solve(wing(shape), cond, sett).totals
+        res[shape] = (t.CL, t.Cm, t.CDi)
+        rows.append([f"NACA {shape}", f"{t.CL:.5f}", f"{t.Cm:.5f}", f"{t.CDi:.6f}"])
+    zero = [2.0 * a - b for a, b in zip(res["0006"], res["0012"])]
+    rows.append(["zero thickness (from 0006 and 0012)", f"{zero[0]:.5f}", f"{zero[1]:.5f}", f"{zero[2]:.6f}"])
+    rows.append(["VLM, 40 x 16", f"{vlm.CL:.5f}", f"{vlm.Cm:.5f}", f"{vlm.CDi:.6f}"])
+    rows_d = []
+    for name, val, ref, lim in (("CL", zero[0], vlm.CL, 0.01), ("Cm", zero[1], vlm.Cm, 0.03),
+                                ("CDi", zero[2], vlm.CDi, 0.03)):
+        d = val / ref - 1.0
+        rows_d.append([name, pct(d), f"{100 * lim:g} %", verdict(abs(d) < lim)])
+    s = ["## V13. 3D panel method: thin-wing limit", "",
+         "Reference: as the thickness goes to zero, the potential flow about a thick wing goes to the "
+         "lifting-surface solution of the thin wing (Katz and Plotkin, Low-Speed Aerodynamics, 2nd ed., "
+         "2001, chapters 9 and 12). The vortex-lattice method of V3 gives an independent solution of the "
+         "thin-wing problem. Both are discretized, so the difference also holds the discretization error "
+         "of both methods.", "",
+         "Rectangular wing, span 8 m, chord 1 m (AR 8), symmetric NACA sections set by the section shape, "
+         "alpha = 4 deg. The 3D panel method (`make_solver(\"panel3d\")`) has 40 spanwise panels per "
+         "semi-span and 40 chordwise panels with the Morino Kutta condition; CDi is the Trefftz-plane "
+         "induced drag. The zero-thickness values are a linear extrapolation in the thickness from NACA "
+         "0006 and 0012. The VLM has 40 spanwise panels per semi-span and 16 chordwise panels. Moments "
+         "are about the leading edge.", "",
+         table(["section", "CL", "Cm", "CDi"], rows), "",
+         "Zero-thickness extrapolation against the VLM:", "",
+         table(["coefficient", "difference", "limit", "check"], rows_d), ""]
+    return "\n".join(s)
+
+
+def case_panel3d_ground_images() -> str:
+    from ventorum.aero.system import ground_normal
+    from ventorum.airfoil import naca
+    from ventorum.panel3d.kernels import _precompute_geometry, doublet_potential, influence_matrices
+    from ventorum.panel3d.mesh import mesh_lifting_surface
+    from ventorum.panel3d.post import (
+        build_surface_gradient_operator,
+        compute_surface_velocity_and_cp,
+        integrate_forces_and_moments,
+        surface_gradient,
+    )
+    from ventorum.panel3d.solver import PanelSolver, _standardize_panels
+    from ventorum.panel3d.wake import build_wake
+
+    surf = vt.LiftingSurface(name="wing", semi_span=2.0,
+                             sections=[vt.WingSection(0.0, 1.0), vt.WingSection(1.0, 1.0)])
+    mesh = mesh_lifting_surface(surf, naca("0012", n_points=41, closed_te=True), n_chord=6, n_span=6,
+                                half=False)
+    alpha, h = np.radians(4.0), 0.5
+    cond = vt.FlightCondition(V_inf=15.0, alpha=alpha, h=h)
+    solver = PanelSolver(mesh, far_ratio=np.inf)
+    res = solver.solve(cond)
+
+    # Explicit mirror body in free air; its wake also follows the free stream.
+    k_g = ground_normal(alpha, 0.0, 0.0)
+    offset = float(np.dot(solver.ref_point, k_g) - h)
+    nodes = mesh.nodes
+    nodes_img = nodes - 2.0 * (np.dot(nodes, k_g) - offset)[:, None] * k_g[None, :]
+    panels = _standardize_panels(mesh.panels, nodes)
+    panels_img = _standardize_panels(panels[:, [0, 3, 2, 1]], nodes_img) + len(nodes)
+    nodes_both = np.vstack([nodes, nodes_img])
+    panels_both = np.vstack([panels, panels_img])
+    n_real = len(panels)
+    wake_edges = np.vstack([mesh.wake_edges,
+                            mesh.wake_edges + np.array([n_real, n_real, len(nodes), len(nodes)])])
+    geom = _precompute_geometry(nodes_both[panels_both])
+    wake_dir = vt.freestream_direction(alpha, 0.0)
+    wake = build_wake(nodes_both, panels_both, wake_edges, geom.normal, wake_length=solver.wake_length,
+                      wake_dir=wake_dir)
+    c_wake = doublet_potential(geom.centroid, wake.panels, far_ratio=np.inf)
+    b_mat, a_mat = influence_matrices(geom.centroid, nodes_both[panels_both], far_ratio=np.inf)
+    for s_i, strip in enumerate(wake.strip_panel_indices):
+        cs = np.sum(c_wake[:, strip], axis=1)
+        a_mat[:, wake.wake_up[s_i]] += cs
+        a_mat[:, wake.wake_lo[s_i]] -= cs
+    v_inf = float(cond.V_inf) * wake_dir
+    mu = np.linalg.solve(a_mat, -b_mat @ (-np.sum(geom.normal * v_inf, axis=-1)))
+
+    geom_r = _precompute_geometry(nodes[panels])
+    grad_op = build_surface_gradient_operator(nodes, panels, geom_r.centroid, geom_r.normal, geom_r.area,
+                                              mesh.wake_edges, kinds=mesh.kind)
+    _, cp = compute_surface_velocity_and_cp(np.broadcast_to(v_inf, geom_r.centroid.shape), geom_r.normal,
+                                            surface_gradient(grad_op, mu[:n_real]), float(cond.V_inf))
+    f = integrate_forces_and_moments(cp=cp, areas=geom_r.area, normals=geom_r.normal, centroids=geom_r.centroid,
+                                     condition=cond, S_ref=solver.S_ref, b_ref=solver.b_ref, c_ref=solver.c_ref,
+                                     ref_point=solver.ref_point)
+    lim = 1e-10
+    rows = []
+    for name, d in (("doublet strength mu", np.max(np.abs(res.mu - mu[:n_real]))),
+                    ("Cp", np.max(np.abs(res.cp - cp))),
+                    ("CL", abs(res.CL - f["CL"])),
+                    ("Cm", abs(res.Cm - f["Cm"]))):
+        rows.append([name, "below 1e-12" if d < 1e-12 else f"{d:.1e}", f"{lim:g}", verdict(d < lim)])
+    s = ["## V14. 3D panel method: ground images", "",
+         "Reference: the method of images. Over a flat ground the flow about the body is the free-air flow "
+         "about the body and its mirror image (Katz and Plotkin, Low-Speed Aerodynamics, 2nd ed., 2001, "
+         "section 9.4). The image solve of `PanelSolver` must give the same solution as a free-air solve "
+         "of the body and an explicit mirror mesh, assembled in this script from the panel influences.", "",
+         "Rectangular wing of semi-span 2 m and chord 1 m, NACA 0012, 6 spanwise panels per semi-span and "
+         f"6 chordwise panels on each side, mesh of the full span ({n_real} panels), alpha = 4 deg, "
+         "h/c = 0.5, exact influences (no far-field expansion). In both models the wake follows the free stream. "
+         "The differences are the largest absolute differences on the real body; they must be at round-off level.", "",
+         table(["quantity", "largest difference", "limit", "check"], rows), ""]
+    return "\n".join(s)
+
+
+def case_panel2d_karman_trefftz() -> str:
+    from ventorum.panel2d.solver import solve_inviscid
+    from ventorum.reference.karman_trefftz import karman_trefftz_airfoil, karman_trefftz_solution
+
+    center, tau = (-0.07, 0.04), 10.0
+    alphas = (0.0, 4.0, 8.0)
+    res = solve_inviscid(karman_trefftz_airfoil(center, tau, n_points=201), list(alphas))
+    rows = []
+    for i, a in enumerate(alphas):
+        _, cl_ex = karman_trefftz_solution(center, tau, n_points=201, alpha_deg=a)
+        e_cl = res.Cl[i] / cl_ex - 1.0
+        e_p = res.Cl_pressure[i] / res.Cl[i] - 1.0
+        rows.append([f"{a:g}", f"{cl_ex:.5f}", f"{res.Cl[i]:.5f}", pct(e_cl), verdict(abs(e_cl) < 1e-3),
+                     pct(e_p), verdict(abs(e_p) < 1e-2)])
+    rows_cp = []
+    errs = []
+    levels = (100, 200, 400)
+    for k, n in enumerate(levels):
+        cp_ex, _ = karman_trefftz_solution(center, tau, n_points=n + 1, alpha_deg=4.0)
+        r = solve_inviscid(karman_trefftz_airfoil(center, tau, n_points=n + 1), 4.0)
+        errs.append(float(np.max(np.abs(r.Cp[1:-1] - cp_ex[1:-1]))))
+        if k == 0:
+            order, order_check = "-", "-"
+        else:
+            p = np.log(errs[k - 1] / errs[k]) / np.log(n / levels[k - 1])
+            order, order_check = f"{p:.2f}", verdict(p >= 1.0)
+        rows_cp.append([str(n), f"{errs[-1]:.4f}", verdict(errs[-1] < 0.03) if n == 200 else "-",
+                        order, order_check])
+    s = ["## V15. 2D panel method: Karman-Trefftz section", "",
+         "Reference: exact potential flow about a Karman-Trefftz section by conformal mapping of the flow "
+         "about a circle, with the Kutta condition at the trailing edge (L. M. Milne-Thomson, Theoretical "
+         "Aerodynamics, 4th ed., 1958; Katz and Plotkin, Low-Speed Aerodynamics, 2nd ed., 2001, section "
+         "6.6). Evaluation in `ventorum.reference.karman_trefftz`.", "",
+         "Circle center (-0.07, 0.04), trailing-edge angle tau = 10 deg, inviscid 2D panel solver "
+         "(`ventorum.panel2d.solver.solve_inviscid`) on the exact section nodes. Cl_pressure is the lift "
+         "from the integrated surface pressure. Limits: Cl within 0.1 % of exact, Cl_pressure within 1 % "
+         "of Cl.", "",
+         table(["alpha [deg]", "Cl exact", "Cl (200 panels)", "error", "check", "Cl_pressure vs Cl",
+                "check"], rows), "",
+         "Largest Cp error at the nodes, alpha = 4 deg, all nodes except the trailing-edge node. At a sharp "
+         "trailing edge of angle tau the exact speed is zero, but it rises as r^(tau / (2 pi - tau)) with "
+         "the distance r from the edge, so no node value converges to it. The order is the observed order "
+         "against the panel count. Limits: error below 0.03 at 200 panels; order at least 1 on each "
+         "refinement step.", "",
+         table(["panels", "largest Cp error", "check", "order", "order check"], rows_cp), ""]
+    return "\n".join(s)
+
+
 def main(out_path: str | None = None) -> Path:
     t0 = time.perf_counter()
     parts = [
@@ -499,7 +800,9 @@ def main(out_path: str | None = None) -> Path:
     gpu.set_device("cpu")
     try:
         for fn in (case_elliptic, case_glauert, case_lifting_surface, case_sweep, case_tapered_straight_le,
-                   case_convergence, case_ground, case_camber_moment, case_signs, case_split_surfaces):
+                   case_convergence, case_ground, case_camber_moment, case_signs, case_split_surfaces,
+                   case_panel3d_sphere, case_panel3d_ellipsoid, case_panel3d_thin_wing,
+                   case_panel3d_ground_images, case_panel2d_karman_trefftz):
             parts.append(fn())
     finally:
         gpu.set_device(old_device)

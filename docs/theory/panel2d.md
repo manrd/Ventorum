@@ -77,7 +77,9 @@ Potential flow; the Kutta condition fixes the circulation. Ground effect is the 
 
 ## Verification
 
-`tests/test_panel2d.py`, `tests/test_karman_trefftz.py`:
+[V15](../verification_report.md) in the verification report: Karman-Trefftz section (circle center (-0.07, 0.04), trailing-edge angle 10 deg), $C_l$ and $C_{l,pressure}$ against the exact solution, and the observed order of the largest $C_p$ error without the trailing-edge node.
+
+Tests in `tests/test_panel2d.py`, `tests/test_karman_trefftz.py`:
 
 - closed-form stream-function and velocity influences against composite Gauss quadrature (break points at $t = \xi$), 0.1 to 5 panel lengths away, 1e-10 relative; image source influences likewise;
 - Karman-Trefftz airfoil (10 deg trailing edge): $C_l$ within 0.5 % of exact at 200 panels, $C_l$ and $C_{l,pressure}$ within 1 %, $|C_{d,pressure}| < 10^{-3}$; the largest $C_p$ error over all nodes except the trailing-edge node decreases from 100 to 200 to 400 panels with an observed order of at least 1 (at a sharp edge of angle $\tau$ the exact speed is zero but rises as $r^{\tau/(2\pi - \tau)}$, here $r^{0.029}$, so no node value converges to it);

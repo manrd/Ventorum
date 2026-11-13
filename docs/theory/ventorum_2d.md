@@ -285,7 +285,9 @@ Gaps. An angle that does not converge is dropped from the polar, and the PCHIP i
 
 ## Verification
 
-The methods in this chapter are verified by tests in the repository test suite:
+[V15](../verification_report.md) in the verification report checks the inviscid panel method against the exact Karman-Trefftz solution: Cl and the pressure-integrated Cl at three angles of attack, and the convergence of the largest Cp error with the panel count.
+
+The methods in this chapter are also verified by tests in the repository test suite:
 - Geometry, file formats and NACA profiles: `tests/test_airfoil_io.py`, `tests/test_naca.py`, `tests/test_airfoil_api.py`.
 - Flap deflections: `tests/test_airfoil_flap.py`.
 - Panel resampling: `tests/test_airfoil_paneling.py`.

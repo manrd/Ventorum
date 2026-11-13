@@ -602,7 +602,14 @@ page and equation numbers for right preconditioning: to be checked.
 
 ## Verification
 
-The 3D panel method implementation is verified by tests in the test suite:
+The [verification report](../verification_report.md) has these cases of the 3D panel method:
+
+- [V11](../verification_report.md): sphere against the exact potential flow (Lamb), with the flow across and along the pole axis of the mesh: largest and rms Cp error on two meshes, and the net force (d'Alembert).
+- [V12](../verification_report.md): tri-axial ellipsoid at oblique onset against the exact surface speed (Lamb): error away from the tips on three meshes, and the observed order of the tip error.
+- [V13](../verification_report.md): thin-wing limit of a rectangular wing of aspect ratio 8: NACA 0006 to 0024 sections, CL, Cm and CDi extrapolated to zero thickness, against the vortex-lattice method on the same planform.
+- [V14](../verification_report.md): ground effect by images against a free-air solve of the body and an explicit mirror mesh (Cp, CL and Cm at round-off level).
+
+The 3D panel method implementation is also verified by tests in the test suite:
 - Kernel parity and asymptotic limits: `tests/test_panel3d_kernels.py`, `tests/test_panel3d_backends.py`.
 - Far-field multipole expansions (order of the per-pair error, lift with spanwise refinement against exact integration, backend parity): `tests/test_panel3d_far_field.py`.
 - Mesh construction and control surface deflections: `tests/test_panel3d_mesh.py`, `tests/test_panel3d_controls.py`.
