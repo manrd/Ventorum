@@ -156,7 +156,10 @@ def _refuse_configuration(ac: Any, condition: Any, settings: Any, canonical: str
     """Raise GradientScopeError for configurations that the adjoint gradients do not cover.
 
     The Fourier solver is refused (closed form: central differences are the
-    method there). The planform input needs linear airfoils: the planform
+    method there). The 3D panel solver is refused before its solve: the
+    adjoint covers only the lattice solvers (``"vlm"``, ``"linear"`` and
+    ``"nonlinear"``). The ``"h"`` input needs a height in the condition
+    (ground effect). The planform input needs linear airfoils: the planform
     chain interpolates the linear section properties of the sections.
     The section input (``"sections"``: a0, alpha_L0, Cd0 and Cm0 of every
     strip) is refused when a surface has a tabulated airfoil: on the
@@ -196,6 +199,15 @@ def _refuse_configuration(ac: Any, condition: Any, settings: Any, canonical: str
         raise GradientScopeError(
             "The Fourier solver has no adjoint gradients (closed form): use central differences "
             "of the production solve, or solver_type 'vlm', 'linear' or 'nonlinear'.")
+    if canonical not in ("vlm", "linear", "nonlinear"):
+        raise GradientScopeError(
+            f"Solver '{canonical}' has no adjoint gradients: the adjoint covers the lattice solvers "
+            "only. The 3D panel solver has no vortex lattice. Use central differences of the "
+            "production solve, or solver_type 'vlm', 'linear' or 'nonlinear'.")
+    if "h" in wrt and getattr(condition, "h", None) is None:
+        raise GradientScopeError(
+            "Input 'h' needs a height in the flight condition (FlightCondition h [m], ground "
+            "effect); the condition has h=None.")
     lattice_mean_line = canonical == "vlm" and getattr(settings, "n_chord", None) != 1
     shapes_given = lattice_mean_line and any(
         surf.sections and all(sec.shape is not None for sec in surf.sections) for surf in ac.surfaces
@@ -1454,6 +1466,16 @@ _BRANCH_NEWTON_STEPS = 30
 # moment vector (relative scale of the forward check).
 _FORCE_VECTOR = ("CL", "CY")
 _MOMENT_VECTOR = ("Cl", "Cm", "Cn")
+# Lower limit of the force scale of the forward check [-]: the lift
+# coefficient of a 1 deg angle of attack on the thin-airfoil lift slope,
+# 2 pi per rad times pi / 180 rad (about 0.11). The round-off of a force
+# coefficient comes from the onset terms of the boundary condition (unit
+# velocity times the geometry), so it has the scale of the lift of an
+# angle change, also when the lift itself is zero (a symmetric wing at
+# alpha 0). At this floor the limit of the check (tol times the floor) is
+# the lift change of an angle-of-attack change of tol deg. A case with
+# |CL| or |CY| at or above the floor keeps its relative check.
+_FORCE_SCALE_FLOOR = 2.0 * math.pi * math.radians(1.0)
 
 
 # Limits of the componentwise backward error of the production state in the
@@ -1740,7 +1762,11 @@ def _forward_check(prep: dict, outputs: dict, prod: dict[str, float],
     of each. CL and CY are components of one force vector, and Cl, Cm and
     Cn are components of one moment vector: their differences are relative
     to the largest production magnitude of the components of the same
-    vector (the normwise relative error of the vector). The round-off of a
+    vector (the normwise relative error of the vector). The force scale
+    has the lower limit ``_FORCE_SCALE_FLOOR``, the lift coefficient of a
+    1 deg angle on the thin-airfoil lift slope (about 0.11): at zero lift
+    (a symmetric wing at alpha 0) all force components are zero or at the
+    round-off. The round-off of a
     vector component is relative to the vector, so a small component (CY
     in a small sideslip, or CY, Cl and Cn of a symmetric state, which are
     zero by symmetry) has no relative scale of its own. The moment scale
@@ -1757,7 +1783,10 @@ def _forward_check(prep: dict, outputs: dict, prod: dict[str, float],
     precision = prep["precision"]
     both64 = precision == "float64" and prep["precision_primal"] == "float64"
     tol = 1e-10 if both64 else 1e-4
-    force_scale = max(abs(prod[k]) for k in _FORCE_VECTOR)
+    # The floor keeps a scale at zero lift: max(|CL|, |CY|) is then zero or
+    # at the round-off, and the relative difference of a round-off value
+    # has no meaning (see _FORCE_SCALE_FLOOR).
+    force_scale = max(max(abs(prod[k]) for k in _FORCE_VECTOR), _FORCE_SCALE_FLOOR)
     # The force scale is the lower limit of the moment scale: a moment is a
     # sum of forces times arms, so its round-off is at most of the order of
     # the round-off of the forces. A state whose whole moment vector is zero
@@ -2009,8 +2038,6 @@ def _pack_jacobian(model: TorchReference, t: dict, gmap: dict, wrt: tuple[str, .
         j["nodes"] = nodes
     for key in SCALAR_INPUTS:
         if key in wrt:
-            if key == "h" and base["h"] is None:
-                continue
             gr = gmap.get(id(t[key])) if t.get(key) is not None else None
             j[key] = 0.0 if gr is None else float(np.asarray(gr, dtype=float))
     if "controls" in wrt:
@@ -2086,8 +2113,9 @@ def gradients(
     settings : SolverSettings or None
         Solver settings: ``"vlm"``, ``"linear"`` or ``"nonlinear"``, with
         linear or tabulated airfoils, control deflections and body rates.
-        The Fourier solver is refused (``GradientScopeError``), and so is a
-        nonlinear solve that did not converge.
+        The Fourier solver and the 3D panel solver are refused
+        (``GradientScopeError``), and so is a nonlinear solve that did not
+        converge.
     outputs : tuple of str
         Scalar outputs from ``"CL", "CY", "CDi", "CDp", "CD", "Cl", "Cm", "Cn"``.
         Vector outputs go through :func:`gradient_vjp`.
@@ -2100,7 +2128,8 @@ def gradients(
         sweep_le, dihedral and incidence [rad], position [m] and per-section
         lists (chord [m], twist [rad], x_le [m] or None, z_le [m] or None,
         y_frac [-], alpha_L0 [rad]); it cannot be combined with ``"nodes"``
-        and needs linear airfoils. ``"controls"`` gives per control name the
+        and needs linear airfoils. ``"h"`` needs a height in the condition
+        (``GradientScopeError`` in free air). ``"controls"`` gives per control name the
         derivative per unit deflection [1/rad] (all controls with one name
         move together). ``"p"``, ``"q"``, ``"r"`` are the body rates
         [rad/s] (flight-dynamics body axes); the notes give the
@@ -2180,6 +2209,28 @@ def gradients(
         symmetric=prep["symmetric"], notes=notes)
 
 
+def _check_seed_shapes(prep: dict, seeds: dict) -> None:
+    """Raise ValueError when a seed does not have the shape of its output.
+
+    A scalar output takes a scalar weight. A vector output takes an array
+    with the shape of the production array: (n_strips, 3) for
+    ``"strip_force"`` and (n_strips,) for ``"section_cl"``. The weighted
+    sum broadcasts the seed with the output, so a seed of another shape
+    (for example (n_strips, 1)) would give a wrong gradient without an
+    error.
+    """
+    vectors = tuple(o for o in seeds if o in VECTOR_OUTPUTS)
+    shapes = {k: arr.shape for k, arr in _production_vectors(prep, vectors).items()}
+    for o, w in seeds.items():
+        got = np.shape(w)
+        want = shapes.get(o, ())
+        if got != want:
+            raise ValueError(
+                f"The seed of output {o!r} has the shape {got}; it must have the shape {want} "
+                "(a float for a scalar output, (n_strips, 3) for 'strip_force', "
+                "(n_strips,) for 'section_cl').")
+
+
 def gradient_vjp(
     geometry: Any,
     condition: Any,
@@ -2216,6 +2267,13 @@ def gradient_vjp(
     dict
         Gradient of the weighted sum, same input structure as the jacobian
         of :func:`gradients`.
+
+    Raises
+    ------
+    ValueError
+        For an unknown output or input name, a refused configuration, a
+        non-finite input, or a seed that does not have the shape of its
+        output.
     """
     if not seeds:
         raise ValueError(f"seeds must name at least one output; use one of {list(ALL_OUTPUTS)}.")
@@ -2224,6 +2282,7 @@ def gradient_vjp(
             raise ValueError(f"Unknown output {o!r}; use one of {list(ALL_OUTPUTS)}.")
     _, ins = _check_names(tuple(seeds), wrt)
     prep = _prepare_case(geometry, condition, settings, axes, ins, tuple(seeds), method)
+    _check_seed_shapes(prep, seeds)
     import torch
 
     model: TorchReference = prep["model"]

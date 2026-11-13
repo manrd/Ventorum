@@ -663,16 +663,27 @@ def _system64(MT: torch.Tensor, diag64: torch.Tensor | None) -> torch.Tensor:
 
 
 def _direct(MT: torch.Tensor, rhs: torch.Tensor, diag64: torch.Tensor | None, kern) -> torch.Tensor:
-    """Solve every case with its own factorisation (float64 LU; large float32 systems: LU and two refinements)."""
+    """Solve every case with its own factorisation (float64 LU; large float32 systems: LU and two refinements).
+
+    The float64 LU (``torch.linalg.solve``) raises ``torch.linalg.LinAlgError``
+    for a singular system. In the float32 LU, a case with a zero pivot
+    (``info != 0``) or a non-finite solution gets the float64 LU, which
+    raises when the system is singular also in float64.
+    """
     if MT.dtype == torch.float64 or (MT.shape[-1] <= DIRECT64_MAX_N
                                      and MT.shape[0] * MT.shape[-1] ** 2 * 8 <= DIRECT64_MAX_BYTES):
         return torch.linalg.solve(_system64(MT, diag64), rhs.unsqueeze(-1)).squeeze(-1)
     A = _system(MT, diag64)
-    LU, piv, _ = torch.linalg.lu_factor_ex(A)
+    LU, piv, info = torch.linalg.lu_factor_ex(A)
     x = torch.linalg.lu_solve(LU, piv, rhs.to(torch.float32).unsqueeze(-1)).squeeze(-1).to(_F64)
     for _ in range(2):
         r = residual(MT, x, rhs, diag64, kern)
         x = x + torch.linalg.lu_solve(LU, piv, r.to(torch.float32).unsqueeze(-1)).squeeze(-1).to(_F64)
+    # A zero pivot gives inf or NaN without an error: these cases get the float64 LU.
+    bad = torch.nonzero((info != 0) | ~torch.isfinite(x).all(dim=1)).flatten()
+    if bad.numel():
+        x[bad] = torch.linalg.solve(_system64(MT[bad], None if diag64 is None else diag64[bad]),
+                                    rhs[bad].unsqueeze(-1)).squeeze(-1)
     return x
 
 
@@ -692,7 +703,10 @@ def batched_solve(MT: torch.Tensor, rhs: torch.Tensor, diag64: torch.Tensor | No
     1963, Higham 2002, chapter 12) until the relative residual is at the
     round-off level (float64 matrix) or below ``REF_TOL32`` (float32 matrix:
     three orders below the errors of its entries). A case that does not
-    converge gets a direct solve.
+    converge, a case with a non-finite residual (NaN is not below the
+    limit) and the cases of a group whose reference matrix has no inverse
+    (``info != 0`` of the inversion) get a direct solve, which raises
+    ``torch.linalg.LinAlgError`` for a singular system.
     """
     if kern is None:
         kern = kernels("float64" if MT.dtype == torch.float64 else "float32")
@@ -703,7 +717,10 @@ def batched_solve(MT: torch.Tensor, rhs: torch.Tensor, diag64: torch.Tensor | No
     ng = max(1, min(REF_MAX_GROUPS, round(K / REF_CASES)))
     size = (K + ng - 1) // ng
     refs = [min(K - 1, g * size + size // 2) for g in range(ng)]
-    inv = torch.stack([torch.linalg.inv_ex(_system(MT, diag64, [r]).to(torch.float32))[0][0] for r in refs])
+    inv_info = [torch.linalg.inv_ex(_system(MT, diag64, [r]).to(torch.float32)) for r in refs]
+    inv = torch.stack([iv[0] for iv, _ in inv_info])
+    # A reference matrix without an inverse makes the preconditioner of its group unusable.
+    ref_bad = torch.stack([info[0] != 0 for _, info in inv_info]) | ~torch.isfinite(inv).flatten(1).all(dim=1)
     pad = ng * size - K
 
     def precond(r: torch.Tensor) -> torch.Tensor:
@@ -727,7 +744,9 @@ def batched_solve(MT: torch.Tensor, rhs: torch.Tensor, diag64: torch.Tensor | No
         if not going:
             break   # no case is still converging (round-off floor or divergence)
         x = x + precond(r)
-    bad = torch.nonzero(hist[-1] > accept).flatten()
+    # "not <=" also marks a NaN residual (a comparison with NaN is False).
+    group_bad = ref_bad.repeat_interleave(size)[:K]
+    bad = torch.nonzero(~(hist[-1] <= accept) | group_bad).flatten()
     if bad.numel():
         x[bad] = _direct(MT[bad], rhs[bad], None if diag64 is None else diag64[bad], kern)
     return x

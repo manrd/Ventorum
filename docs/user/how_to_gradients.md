@@ -60,7 +60,10 @@ Outputs: `"CL"`, `"CY"`, `"CDi"`, `"CDp"`, `"CD"`, `"Cl"`, `"Cm"`, `"Cn"` in the
 `axes` (`"body"`, `"stability"`, `"wind"`). The vector outputs `"strip_force"` and
 `"section_cl"` go through `gradient_vjp` with a seed per output:
 
-Use the strips of the solved lattice for the seed shape:
+Use the strips of the solved lattice for the seed shape. A seed must have the shape of
+its output: (n_strips, 3) for `"strip_force"`, (n_strips,) for `"section_cl"` and a
+float for a scalar output. Another shape (for example (n_strips, 1)) raises
+`ValueError`:
 
 ```python
 loads = vt.analyze(aircraft, condition, settings).details["loads"]
@@ -301,6 +304,9 @@ Ground effect and the lifting lines refuse `mach > 0`. The gradients with
 
 The Fourier solver is refused with `GradientScopeError` (a `ValueError`): it is a
 closed form, and central differences of the production solve are the method there.
+The 3D panel solver is refused with `GradientScopeError` before its solve: the adjoint
+covers only the lattice solvers. The input `"h"` needs a height in the condition
+(ground effect); in free air it is refused with `GradientScopeError`.
 Ground effect is supported: `h` is the height of the moment reference point, and the
 ground plane and its images follow the inputs. With body rates the ground images stay
 mirror images of the vortices, as in the production solve.

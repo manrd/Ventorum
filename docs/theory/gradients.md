@@ -399,7 +399,9 @@ results are equal to round-off.
 ## Envelope
 
 The functions raise `GradientScopeError` (a `ValueError`) for the Fourier solver (a
-closed form: central differences are the method there), for a nonlinear lifting-line
+closed form: central differences are the method there), for the 3D panel solver (it has
+no vortex lattice; the refusal comes before the solve), for the input `"h"` when the
+condition has no height, for a nonlinear lifting-line
 solve that did not converge, for the planform input with tabulated airfoils, and for the
 section input (`"sections"`) when a surface has a tabulated airfoil (some of `a0`,
 `alpha_L0`, `Cd0` and `Cm0` do not enter the result on a tabulated strip, so their
@@ -426,7 +428,14 @@ magnitude among the components of the same vector, because the round-off of a co
 is relative to its vector (CY, Cl and Cn of a symmetric state are zero by symmetry). The
 scale of the moment vector is not smaller than the scale of the force vector: the moments
 of a straight wing about a point on its quarter-chord line are all at the round-off, and
-without this floor their round-off gave a false mismatch. The
+without this floor their round-off gave a false mismatch. The scale of the force vector
+has a floor too: the thin-airfoil lift coefficient of a 1 deg angle, 2 pi times pi/180.
+The round-off of a force coefficient comes from the onset terms of the boundary
+condition, so it has the scale of the lift of an angle change, also at zero lift (a
+symmetric wing at alpha 0, where all force components are zero and the old scale was
+zero). At the floor, the limit of the check is the lift change of an angle-of-attack
+change of 1e-10 deg (float64). A case with a larger |CL| or |CY| keeps its relative
+check. The
 requested vector outputs (`strip_force`, `section_cl`) are compared relative to the
 largest production magnitude of the array.
 

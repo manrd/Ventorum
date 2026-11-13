@@ -21,6 +21,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 import time
 from typing import Any, Literal
+import warnings
 from collections.abc import Sequence
 
 import numpy as np
@@ -78,13 +79,16 @@ class MeshConvergencePoint:
         Median measured solve time [ms]. Information only: the selection of
         the minimal and recommended meshes does not use it.
     cond_num : float
-        Condition number of the aerodynamic influence coefficient (AIC) matrix.
+        Condition number of the aerodynamic influence coefficient (AIC) matrix
+        [-]. NaN when it is unknown (the matrix could not be assembled or its
+        SVD failed; the study gives a RuntimeWarning with the reason).
     min_panel_ar : float
         Minimum panel aspect ratio (Δy / chord) across all panels.
     is_accurate : bool
         Whether this mesh meets the user-defined accuracy tolerance.
     is_safe : bool
-        Whether the mesh avoids numerical ill-conditioning and aspect ratio collapse.
+        Whether the mesh avoids numerical ill-conditioning and aspect ratio
+        collapse. A level with an unknown condition number is not safe.
     efficiency_score : float
         Composite score that balances accuracy and computational cost [-]:
         ``(panels_solved_ref / panels_solved)**2 / (1 + mean error in %)``,
@@ -570,6 +574,34 @@ def _solve_sweep(
     return out
 
 
+# Errors of the condition-number check that the study reports as an unknown
+# value: a lattice that cannot be built or assembled (ValueError), an SVD
+# that does not converge (LinAlgError) and a matrix too large for the dense
+# SVD (MemoryError). Other errors are defects and are not caught.
+_COND_ERRORS = (ValueError, np.linalg.LinAlgError, MemoryError)
+
+
+def _condition_number(aircraft: Aircraft, condition: FlightCondition, settings: SolverSettings,
+                      label: str) -> float:
+    """Return the 2-norm condition number [-] of the system matrix of one mesh level.
+
+    When the matrix cannot be assembled or its SVD fails (``_COND_ERRORS``),
+    the value is unknown: the function gives a RuntimeWarning with the
+    reason and returns NaN. A level with an unknown condition number is not
+    safe (see ``is_safe`` of :class:`MeshConvergencePoint`).
+    """
+    from ventorum.solvers.lattice_base import assemble_system_matrix
+
+    try:
+        return float(np.linalg.cond(assemble_system_matrix(aircraft, condition, settings)))
+    except _COND_ERRORS as exc:
+        warnings.warn(
+            f"The condition number of the {label} mesh is unknown: {type(exc).__name__}: {exc}. "
+            "The study stores NaN, and a candidate level with an unknown condition number is not safe.",
+            RuntimeWarning, stacklevel=3)
+        return float("nan")
+
+
 def _evaluate_candidate(
     aircraft: Aircraft,
     condition: FlightCondition,
@@ -586,11 +618,8 @@ def _evaluate_candidate(
     """
     from ventorum import analyze
 
-    try:
-        from ventorum.solvers.lattice_base import assemble_system_matrix
-        cond_num = float(np.linalg.cond(assemble_system_matrix(aircraft, condition, settings)))
-    except Exception:
-        cond_num = 1e12
+    cond_num = _condition_number(aircraft, condition, settings,
+                                 f"candidate ({settings.n_panels} panels, {settings.spacing})")
 
     # Measure timing on the primary flight condition
     times: list[float] = []
@@ -910,11 +939,7 @@ def run_mesh_convergence_study(
         ref_t_ms = (time.perf_counter() - t_ref0) * 1000.0
 
         ref_tot_panels, ref_min_ar, ref_panels_solved = _mesh_stats(ref_res, ref_aircraft, ref_settings, use_symmetry)
-        try:
-            from ventorum.solvers.lattice_base import assemble_system_matrix
-            ref_cond = float(np.linalg.cond(assemble_system_matrix(ref_aircraft, base_cond, ref_settings)))
-        except Exception:
-            ref_cond = 1e6
+        ref_cond = _condition_number(ref_aircraft, base_cond, ref_settings, "reference")
 
         if do_sweep:
             ref_sweep_res = _solve_sweep(ref_aircraft, base_cond, ref_settings, sweep_angles, ref_res)
@@ -998,8 +1023,8 @@ def run_mesh_convergence_study(
             if do_sweep:
                 metric_pass = metric_pass and (max_swp_err <= max(tol_cl, tol_cdi))
 
-            # Numerical safety checks
-            is_safe = (cond_num < 1e8) and (min_ar > 0.001)
+            # Numerical safety checks. An unknown (NaN) condition number is not safe.
+            is_safe = bool(np.isfinite(cond_num)) and (cond_num < 1e8) and (min_ar > 0.001)
 
             # Efficiency score: rewards a low cost and a small error. The
             # cost is the work of one dense solve (panels solved squared),

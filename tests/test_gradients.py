@@ -1469,3 +1469,102 @@ def test_check_gradients_solves_each_case_once(cpu_device, monkeypatch) -> None:
     assert out["pass"], _failed(out)
     # One base solve and four solves (two central differences) per step.
     assert calls["analyze"] == 1 + 4 * len(chk._STEP_FACTORS), calls
+
+
+def _symmetric_section_wing() -> vt.Aircraft:
+    """Return a wing with a symmetric linear section (alpha_L0 = 0, Cm0 = 0)."""
+    sec = vt.LinearAirfoil(name="SymSec", a0=2.0 * np.pi, alpha_L0=0.0, Cd0=0.008, Cm0=0.0)
+    wing = vt.LiftingSurface(
+        name="Wing", semi_span=5.0,
+        sections=[vt.WingSection(y_frac=0.0, chord=2.0, airfoil=sec),
+                  vt.WingSection(y_frac=1.0, chord=1.0, airfoil=sec)])
+    return vt.Aircraft(surfaces=[wing])
+
+
+@pytest.mark.parametrize("solver", ["vlm", "linear", "nonlinear"])
+def test_gradients_at_zero_lift(solver: str, float64_precision, cpu_device) -> None:
+    """A symmetric wing at alpha 0 (zero lift) has gradients (formerly a RuntimeError).
+
+    All force components are zero, so the old force scale max(|CL|, |CY|)
+    was zero, and a moment at the round-off (Cn of about 1e-19 from the
+    profile drag) gave a relative mismatch of order 1.
+    """
+    ac = _symmetric_section_wing()
+    cond = vt.FlightCondition(V_inf=30.0, alpha=0.0)
+    st = vt.SolverSettings(solver_type=solver, n_panels=8, n_chord=1)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        res = vt.analyze(ac.clone(), cond, st.clone())
+        assert abs(float(res.totals.CL)) < 1e-15
+        gr = vt.gradients(ac, cond, st, outputs=("CL", "CD", "Cl", "Cm", "Cn"), wrt=("alpha",))
+    assert gr.forward_mismatch <= 1e-10
+    assert gr.jacobian["CL"]["alpha"] > 3.0
+
+
+def test_forward_check_force_scale_floor() -> None:
+    """At zero lift the force scale has the floor 2 pi * (pi / 180) and the check stays strict."""
+    torch = pytest.importorskip("torch")
+    from ventorum.sensitivity.adjoint import _FORCE_SCALE_FLOOR, _forward_check
+
+    assert _FORCE_SCALE_FLOOR == pytest.approx(2.0 * np.pi * np.pi / 180.0, rel=1e-15)
+    prep = {"precision": "float64", "precision_primal": "float64",
+            "result": vt.SolverResult(details={"loads": None})}
+    prod = {"CL": 0.0, "CY": 0.0, "CDp": 0.008, "Cl": 0.0, "Cm": 0.0, "Cn": -8.6e-20}
+    outputs = {k: torch.tensor(v, dtype=torch.float64) for k, v in prod.items()}
+    outputs["Cn"] = torch.tensor(-2.1e-20, dtype=torch.float64)
+    assert _forward_check(prep, outputs, prod, ()) == pytest.approx(6.5e-20 / _FORCE_SCALE_FLOOR, rel=1e-6)
+    # A lift error of 1e-10 absolute (about 1e-9 of the floor) is still found.
+    outputs["CL"] = torch.tensor(1e-10, dtype=torch.float64)
+    with pytest.raises(RuntimeError, match="CL"):
+        _forward_check(prep, outputs, prod, ())
+
+
+def test_gradients_refuse_the_panel_solver_before_the_solve(float64_precision, monkeypatch) -> None:
+    """The 3D panel solver is refused with GradientScopeError before any solve (formerly KeyError 'lattice')."""
+    from ventorum.solvers import factory
+
+    def no_solver(canonical):  # type: ignore[no-untyped-def]
+        raise AssertionError(f"solver {canonical!r} was made before the refusal")
+
+    monkeypatch.setattr(factory, "make_solver", no_solver)
+    ac = vt.Aircraft(surfaces=[_plain_wing()])
+    cond = vt.FlightCondition(V_inf=30.0, alpha=np.radians(4.0))
+    for name in ("panel3d", "3dp"):
+        st = vt.SolverSettings(solver_type=name, n_panels=8)
+        with pytest.raises(vt.GradientScopeError, match="panel"):
+            vt.gradients(ac, cond, st, outputs=("CL",), wrt=("alpha",))
+        with pytest.raises(vt.GradientScopeError, match="panel"):
+            vt.gradient_vjp(ac, cond, st, seeds={"CL": 1.0}, wrt=("alpha",))
+
+
+def test_gradient_vjp_refuses_a_seed_of_the_wrong_shape(float64_precision, cpu_device) -> None:
+    """A vector seed must have the documented shape (an (n, 1) seed formerly broadcast silently)."""
+    ac = vt.Aircraft(surfaces=[_plain_wing()])
+    cond = vt.FlightCondition(V_inf=30.0, alpha=np.radians(4.0))
+    st = vt.SolverSettings(solver_type="vlm", n_panels=8, n_chord=1)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        n_s = vt.analyze(ac.clone(), cond, st.clone()).details["loads"].strip_force.shape[0]
+        for seeds in ({"section_cl": np.ones((n_s, 1))}, {"section_cl": np.ones(n_s + 1)},
+                      {"strip_force": np.ones((n_s, 1))}, {"strip_force": np.ones(3)},
+                      {"strip_force": np.ones((n_s, 3, 1))}, {"CL": np.ones(2)}):
+            with pytest.raises(ValueError, match="shape"):
+                vt.gradient_vjp(ac, cond, st, seeds=seeds, wrt=("alpha",))
+        # The documented shapes are accepted.
+        g1 = vt.gradient_vjp(ac, cond, st, seeds={"section_cl": np.ones(n_s)}, wrt=("alpha",))
+        g2 = vt.gradient_vjp(ac, cond, st, seeds={"strip_force": np.ones((n_s, 3)), "CL": 1.0},
+                             wrt=("alpha",))
+    assert math.isfinite(float(g1["alpha"])) and math.isfinite(float(g2["alpha"]))
+
+
+def test_input_h_needs_a_height(float64_precision, cpu_device) -> None:
+    """Input 'h' in free air is refused (formerly dropped from the jacobian without a message)."""
+    ac = vt.Aircraft(surfaces=[_plain_wing()])
+    cond = vt.FlightCondition(V_inf=30.0, alpha=np.radians(4.0))
+    st = vt.SolverSettings(solver_type="vlm", n_panels=8, n_chord=1)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        with pytest.raises(vt.GradientScopeError, match="'h'"):
+            vt.gradients(ac, cond, st, outputs=("CL",), wrt=("alpha", "h"))
+        with pytest.raises(vt.GradientScopeError, match="'h'"):
+            vt.gradient_vjp(ac, cond, st, seeds={"CL": 1.0}, wrt=("h",))

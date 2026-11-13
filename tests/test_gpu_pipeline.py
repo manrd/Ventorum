@@ -220,6 +220,48 @@ def test_gpu_nonlinear_lifting_line_equals_cpu(gpu_device, precision, tail, h, b
 
 
 @pytest.mark.gpu
+def test_gpu_nonlinear_nan_state_is_not_converged(gpu_device, monkeypatch):
+    """A NaN circulation has an infinite residual (formerly 0: converged True with NaN circulation).
+
+    The start circulation of case 1 is set to NaN. The Newton solve must
+    report the case as not converged, and the pipeline then solves it on
+    the CPU, so the sweep equals the CPU sweep.
+    """
+    import torch
+
+    from ventorum.gpu import engine
+
+    ac = _aircraft(False, _polar())
+    st = vt.SolverSettings(solver_type="nonlinear", n_panels=16, spacing="cosine", tolerance=1e-9)
+    alphas = np.radians(np.linspace(0.0, 6.0, 4))
+    ref = _sweep(vt.NonlinearLLTSolver(), ac, st, alphas, "cpu")
+    real_prepare = engine.llt_nonlinear_prepare
+    real_solve = engine.llt_nonlinear
+    seen = []
+
+    def nan_prepare(*args, **kwargs):  # type: ignore[no-untyped-def]
+        prep = real_prepare(*args, **kwargs)
+        prep["g_lin"][1, :] = float("nan")
+        return prep
+
+    def record(*args, **kwargs):  # type: ignore[no-untyped-def]
+        out = real_solve(*args, **kwargs)
+        seen.append((out["converged"].cpu().numpy().copy(), torch.isfinite(out["g"]).all(dim=1).cpu().numpy()))
+        return out
+
+    monkeypatch.setattr(engine, "llt_nonlinear_prepare", nan_prepare)
+    monkeypatch.setattr(engine, "llt_nonlinear", record)
+    new = _sweep(vt.NonlinearLLTSolver(), ac, st, alphas, "gpu", "float64")
+    assert seen
+    for conv, finite in seen:
+        # A case with a non-finite state is never reported as converged.
+        assert not np.any(conv.astype(bool) & ~finite)
+    assert not bool(seen[0][0][1])
+    assert all(np.all(np.isfinite(r.details["gamma"])) for r in new)
+    _assert_close(ref, new, 1e-8)
+
+
+@pytest.mark.gpu
 def test_gpu_nonlinear_lifting_line_past_stall_follows_the_cpu_branch(gpu_device):
     ac = _aircraft(False, _polar(stall=True))
     st = vt.SolverSettings(solver_type="nonlinear", n_panels=20, spacing="cosine")
@@ -327,6 +369,65 @@ def test_gpu_batch_solve_equals_a_direct_solve(gpu_device, monkeypatch, dtype, m
         ref = np.linalg.solve(A, b[..., None])[..., 0]
         tol = 1e-12 if dtype == "float64" else 1e-9
         assert np.max(np.abs(x - ref)) <= tol * np.max(np.abs(ref))
+
+
+@pytest.mark.gpu
+@pytest.mark.parametrize("dtype", ["float64", "float32"])
+@pytest.mark.parametrize("singular", [4, 1])
+def test_gpu_batch_solve_raises_for_a_singular_case(gpu_device, dtype, singular):
+    """A singular case raises LinAlgError (a singular reference formerly gave NaN in all cases, without an error).
+
+    Case 4 is the reference of the one group of 8 cases: its float32
+    inverse is not finite, so the preconditioner of the group was NaN and
+    the acceptance test ``residual > limit`` did not find the NaN residuals.
+    """
+    import torch
+
+    from ventorum.gpu import engine
+    from ventorum.gpu.kernels import kernels
+
+    rng = np.random.default_rng(1)
+    n, K = 200, 8
+    assert n > engine.REF_MIN_N and K >= engine.REF_MIN_BATCH
+    base = rng.normal(size=(n, n)) + n * np.eye(n)
+    M = np.stack([base + 0.05 * rng.normal(size=(n, n)) for _ in range(K)])
+    b = rng.normal(size=(K, n))
+    # The reference solution uses the matrices rounded to the type of the solve.
+    good = np.linalg.solve(M.astype(dtype).astype(float), b[..., None])[..., 0]
+    M[singular, :, 0] = 0.0
+    M[singular, 0, :] = 0.0
+    MT = torch.as_tensor(np.ascontiguousarray(M.astype(dtype).transpose(0, 2, 1)), device="cuda")
+    with pytest.raises(torch.linalg.LinAlgError):
+        engine.batched_solve(MT, torch.as_tensor(b, device="cuda"), kern=kernels(dtype))
+    # Without the singular case, the other cases give the direct solution.
+    keep = [k for k in range(K) if k != singular][:4]
+    x = engine.batched_solve(MT[keep].contiguous(), torch.as_tensor(b[keep], device="cuda"),
+                             kern=kernels(dtype)).cpu().numpy()
+    tol = 1e-12 if dtype == "float64" else 1e-9
+    assert np.max(np.abs(x - good[keep])) <= tol * np.max(np.abs(good[keep]))
+
+
+@pytest.mark.gpu
+def test_gpu_float32_direct_solve_raises_for_a_singular_case(gpu_device):
+    """The float32 LU of a large system checks its pivots (a zero pivot formerly gave NaN without an error)."""
+    import torch
+
+    from ventorum.gpu import engine
+    from ventorum.gpu.kernels import kernels
+
+    rng = np.random.default_rng(2)
+    n = engine.DIRECT64_MAX_N + 8
+    A = rng.normal(size=(2, n, n)) + n * np.eye(n)
+    b = rng.normal(size=(2, n))
+    good = np.linalg.solve(A.astype("float32").astype(float), b[..., None])[..., 0]
+    MT = torch.as_tensor(np.ascontiguousarray(A.astype("float32").transpose(0, 2, 1)), device="cuda")
+    x = engine._direct(MT, torch.as_tensor(b, device="cuda"), None, kernels("float32")).cpu().numpy()
+    assert np.max(np.abs(x - good)) <= 1e-9 * np.max(np.abs(good))
+    A[1, :, 0] = 0.0
+    A[1, 0, :] = 0.0
+    MT = torch.as_tensor(np.ascontiguousarray(A.astype("float32").transpose(0, 2, 1)), device="cuda")
+    with pytest.raises(torch.linalg.LinAlgError):
+        engine._direct(MT, torch.as_tensor(b, device="cuda"), None, kernels("float32"))
 
 
 @pytest.mark.gpu
