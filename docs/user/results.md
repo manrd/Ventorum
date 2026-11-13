@@ -6,7 +6,7 @@
 | --- | --- |
 | `totals` | Integrated coefficients: `CL`, `CDi` (Trefftz plane), `CDp`, `CD_total`, `e`, `CY`, `Cl`, `Cm`, `Cn`, the far-field diagnostics `CY_farfield` (wind axes) and `Cn_trefftz` (stability axes; both None for the Fourier solver; the 3D panel solver gives both, also with the viscous coupling), and the trust score |
 | `spanwise` | One `SpanwiseResult` per surface: circulation, section lift, induced drag, effective angle of attack |
-| `converged` | False if the solver did not meet its tolerance, or if a direct solve (vortex lattice, linear lifting line, Fourier) gave a non-finite circulation. |
+| `converged` | False if the solver did not meet its tolerance, or if a direct solve (vortex lattice, linear lifting line, Fourier) gave a non-finite circulation. For the 3D panel solver with the Morino Kutta condition (the default) it refers only to the linear solve (see [the 3D panel guide](how_to_panel3d.md)) |
 | `details` | Solver data (lattice, circulation, wake direction, ground plane, dispatch) for plots and checks |
 
 ## Accuracy of the near-field values of the lattice solvers

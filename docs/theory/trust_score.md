@@ -57,10 +57,11 @@ Limits. $kE$ is a probable bound of the error against a converged inviscid solut
 
 The penalty values and the thresholds of the caps are in the code; they are design settings, not calibrated values (the drag rule and the panel shape rules of the 3D panel method come from the mesh-error study below). The cap score is $1 - \min(1, \sum \text{penalties})$ over the caps; the score is the smaller of the cap score and the error-model score. The uncertainty bands grow with $1 - \text{score}$, with fixed coefficients; this is why they are not error bars. The notes of the solver (for example a lifting line near the ground) are added to the warnings.
 
-Three checks add a warning and no penalty:
+Four checks add a warning and no penalty:
 
 - The near-field side force and yawing moment are compared with the far-field values of the Trefftz plane (`CY_farfield`, `Cn_trefftz`). The rule and its reason are in [Forces and moments](forces_and_moments.md) (section *Far-field lateral diagnostics*).
 - Small trailing-edge clearance: the lattice solvers warn when the smallest trailing-edge height above the ground is below 0.15 of the local chord. At small trailing-edge clearance the Trefftz induced drag CDi depends on the height of the far wake.
+- Morino Kutta condition of the 3D panel method: the condition is linear, so the panel solve has no Kutta iteration (`kutta_converged` is always True and `kutta_iters` is 0) and the convergence flag refers only to the linear solve. The note gives the trailing-edge pressure jump (`kutta_residual`) when the result has it (`ventorum.core.trust.morino_kutta_note`, inputs `kutta` and `kutta_residual` of `evaluate_aerodynamic_trust`).
 - Mean-line lattice conditioning: on a vortex lattice on a cambered section mean line, straight horseshoe legs would leave the curved mean surface; with narrow strips they passed close to control points of other strips, and the solve was near-singular. The legs now follow the mean surface (see [Vortex kernels](vortex_kernels.md)). The rule stays as a diagnostic: the vortex lattice warns when the strip lift changes by more than 0.3 between neighbouring strips of such a surface (strips at a deflected control are left out).
 
 ## Saw-tooth rule

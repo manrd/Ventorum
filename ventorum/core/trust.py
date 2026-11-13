@@ -1986,6 +1986,38 @@ def lattice_spanwise_stats(lattice: VortexLattice | None, spanwise_list: Sequenc
 _ONSET_NAMES = ("u", "v", "w", "p", "q", "r")
 
 
+def morino_kutta_note(kutta_residual: float | None = None) -> str:
+    """Return the trust note of a 3D panel result with the Morino Kutta condition.
+
+    The Morino condition (Morino and Kuo 1974) sets the wake doublet equal
+    to the jump of the surface doublets at the trailing edge. It is linear,
+    so the panel solve has no Kutta iteration: ``kutta_converged`` is
+    always True and ``kutta_iters`` is 0, and the convergence flag of the
+    panel solve (``SolverResult.converged`` of the panel solver) refers
+    only to the linear solve. The condition does not set the pressure jump
+    at the trailing edge to zero; ``kutta_residual`` gives that jump.
+
+    Parameters
+    ----------
+    kutta_residual : float or None, optional
+        Largest pressure-coefficient jump between the upper and the lower
+        trailing-edge panels [-] (``PanelResult.kutta_residual``). None
+        when the result does not give it.
+
+    Returns
+    -------
+    str
+        The note.
+    """
+    text = ("Morino Kutta condition: the condition is linear, so the panel solve has no Kutta iteration "
+            "(kutta_converged is always True, kutta_iters is 0) and the convergence flag of the panel solve "
+            "refers only to the linear solve. The condition does not set the trailing-edge pressure jump to zero")
+    if kutta_residual is not None and _is_finite(kutta_residual):
+        return (f"{text}: the largest jump of Cp between the upper and the lower trailing-edge panels "
+                f"(kutta_residual) is {float(kutta_residual):.3g}. Use panel_kutta=\"pressure\" to remove it.")
+    return f"{text}. Use panel_kutta=\"pressure\" to remove it."
+
+
 def float32_residual_warnings(residuals: dict | None) -> list[str]:
     """Return the trust warnings of the float64 residuals of a float32 GPU solve.
 
@@ -2072,6 +2104,8 @@ def evaluate_aerodynamic_trust(
     Cl: float | None = None,
     Cm: float | None = None,
     Cn: float | None = None,
+    kutta: str | None = None,
+    kutta_residual: float | None = None,
 ) -> TrustScore:
     """Evaluate the validity of a solution.
 
@@ -2196,6 +2230,14 @@ def evaluate_aerodynamic_trust(
     Cl, Cm, Cn : float or None, optional
         Total rolling, pitching and yawing moment coefficients [-], for the
         check of non-finite results. None gives no check of that value.
+    kutta : str or None, optional
+        3D panel method only: the Kutta condition (``"morino"`` or
+        ``"pressure"``). With ``"morino"`` the result gets the note of
+        :func:`morino_kutta_note` (no penalty).
+    kutta_residual : float or None, optional
+        3D panel method only: the largest jump of Cp between the upper and
+        the lower trailing-edge panels [-] (``PanelResult.kutta_residual``),
+        given in the Morino note.
 
     Notes
     -----
@@ -2512,6 +2554,10 @@ def evaluate_aerodynamic_trust(
 
     # 6c. Float64 residual of the float32 GPU solve (a warning only, no penalty) ----------------
     warnings.extend(float32_residual_warnings(float32_residuals))
+
+    # 6d. Morino Kutta condition of the 3D panel method (a note only, no penalty) ---------------
+    if solver in ("panel3d", "3dp") and kutta is not None and str(kutta).lower() == "morino":
+        warnings.append(morino_kutta_note(kutta_residual))
 
     # 7. Near-field and far-field lateral values (a warning only, no penalty) -------------------
     warnings.extend(near_far_lateral_warnings(

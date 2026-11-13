@@ -772,3 +772,20 @@ def test_non_finite_result_is_unreliable_and_not_converged(solver, monkeypatch):
     assert r.converged is False
     assert r.totals.trust.rating == "UNRELIABLE"
 
+
+def test_morino_kutta_note_keeps_the_score():
+    """The Morino Kutta condition adds a note with the trailing-edge pressure jump and no penalty."""
+    from ventorum.core.trust import morino_kutta_note
+
+    kw = dict(AR=8.0, CL=0.4, CDi=0.007, max_sweep_rad=0.0, solver_type="panel3d", n_chord=40, n_panels=24)
+    plain = evaluate_aerodynamic_trust(**kw)
+    morino = evaluate_aerodynamic_trust(**kw, kutta="morino", kutta_residual=0.0123)
+    pressure = evaluate_aerodynamic_trust(**kw, kutta="pressure", kutta_residual=1e-8)
+    assert morino.score == plain.score and morino.rating == plain.rating
+    assert morino.factors == plain.factors
+    assert morino_kutta_note(0.0123) in morino.warnings
+    assert "0.0123" in morino_kutta_note(0.0123) and "converged" in morino_kutta_note(0.0123)
+    assert not any("Morino" in w for w in pressure.warnings)
+    assert not any("Morino" in w for w in plain.warnings)
+    assert "kutta_residual" not in morino_kutta_note(None)
+
