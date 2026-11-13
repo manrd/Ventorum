@@ -304,14 +304,11 @@ def height_derivatives(
     b_ref, c_ref = float(ac.b_ref), float(ac.c_ref)
     h0 = float(condition.h)
 
-    # Smallest clearance of the base state, on the lattice with one chordwise
-    # panel (the nodes of the leading and trailing edges).
-    chord_spacing = getattr(settings, "chord_spacing", "uniform")
-    from ventorum.geometry.lattice import build_lattice
+    # Smallest clearance of the base state, on the geometry of the solve
+    # (the edges, and the mean lines and the controls of a chordwise lattice).
+    from ventorum.solvers.lattice_base import ground_probe_lattice
 
-    key = lattice_cache.lattice_key(ac, settings, "vlm", 1, chord_spacing, fingerprint=fp)
-    probe = lattice_cache.get_or_build(key, lambda: build_lattice(
-        ac, settings, collocation="vlm", n_chord=1, chord_spacing=chord_spacing))
+    probe = ground_probe_lattice(ac, settings, chordwise=solver.collocation == "vlm", fingerprint=fp)
     h_min = float(np.min(ground_plane_from_condition(probe, condition, rp).height(probe.all_points())))
     if h_min <= 0.0:
         raise GroundStrikeError(f"The base state touches the ground (minimum clearance {h_min:.4g} m at "

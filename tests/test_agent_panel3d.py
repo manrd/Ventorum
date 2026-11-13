@@ -59,7 +59,8 @@ def test_panel_analysis_equals_direct_solve():
     m = p["metrics"]
     assert m["CL"] == pytest.approx(direct.totals.CL, abs=1e-6)
     assert m["CDi"] == pytest.approx(direct.totals.CDi, abs=1e-6)
-    assert m["CD"] == pytest.approx(direct.totals.CDi_nearfield, abs=1e-6)
+    # CD is the Trefftz CDi; the pressure integral is CD_pressure.
+    assert m["CD"] == pytest.approx(direct.totals.CDi, abs=1e-6)
     assert m["CD_pressure"] == pytest.approx(direct.totals.CDi_nearfield, abs=1e-6)
     assert m["Cm"] == pytest.approx(direct.totals.Cm, abs=1e-6)
     assert m["CY"] == pytest.approx(direct.totals.CY, abs=1e-6)
@@ -343,7 +344,8 @@ def test_panel_analysis_axes_all():
     assert m["moments"]["body"]["Cm"] == pytest.approx(direct.totals.Cm, abs=1e-6)
     assert m["moments"]["body"]["Cn"] == pytest.approx(direct.totals.Cn, abs=1e-6)
     assert m["CL"] == pytest.approx(direct.totals.CL, abs=1e-6)
-    assert m["CD"] == pytest.approx(direct.totals.CDi_nearfield, abs=1e-6)
+    assert m["CD"] == pytest.approx(direct.totals.CDi, abs=1e-6)
+    assert m["CD_pressure"] == pytest.approx(direct.totals.CDi_nearfield, abs=1e-6)
     assert m["CDi"] == pytest.approx(direct.totals.CDi, abs=1e-6)
 
 
@@ -413,7 +415,8 @@ def test_panel_analysis_sideslip_beta_matches_direct():
     assert m["Cl"] == pytest.approx(direct.totals.Cl, abs=1e-6)
     assert m["Cm"] == pytest.approx(direct.totals.Cm, abs=1e-6)
     assert m["Cn"] == pytest.approx(direct.totals.Cn, abs=1e-6)
-    assert m["CD"] == pytest.approx(direct.totals.CDi_nearfield, abs=1e-6)
+    assert m["CD"] == pytest.approx(direct.totals.CDi, abs=1e-6)
+    assert m["CD_pressure"] == pytest.approx(direct.totals.CDi_nearfield, abs=1e-6)
     assert m["CDi"] == pytest.approx(direct.totals.CDi, abs=1e-6)
 
 
@@ -442,8 +445,50 @@ def test_panel_analysis_ground_effect_matches_direct():
 
     m = p["metrics"]
     assert m["CL"] == pytest.approx(direct.totals.CL, abs=1e-6)
-    assert m["CD"] == pytest.approx(direct.totals.CDi_nearfield, abs=1e-6)
+    assert m["CD"] == pytest.approx(direct.totals.CDi, abs=1e-6)
+    assert m["CD_pressure"] == pytest.approx(direct.totals.CDi_nearfield, abs=1e-6)
     assert m["CDi"] == pytest.approx(direct.totals.CDi, abs=1e-6)
     assert m["Cm"] == pytest.approx(direct.totals.Cm, abs=1e-6)
     assert p["dispatch"]["ground_solver"] == direct.details["dispatch"]["ground_solver"]
 
+
+
+def test_panel_analysis_lift_to_drag_uses_reported_cd():
+    """L_over_D is CL / CD of the payload, and CD is the Trefftz CDi.
+
+    Regression: CD was the pressure integral, but L_over_D was CL / CDi
+    (Trefftz). For this wing (n_chord 8, n_span 10, alpha 5 deg) the tool
+    gave CD 0.0126 and L_over_D 62.5, but CL / CD is 32.8.
+    """
+    cond = {"V_inf_m_s": 30.0, "alpha_deg": 5.0}
+    p = panel_analysis(wing=RECT, flight_condition=cond, n_chord=8, n_span=10)
+    strict_json(p)
+    assert p["status"] == "success", p
+    m = p["metrics"]
+    direct = make_solver("panel3d").solve(
+        *_direct_case(cond), _direct_settings(n_chord=8, n_span=10))
+    assert m["CD"] == pytest.approx(direct.totals.CDi, abs=1e-7)
+    assert m["CDi"] == m["CD"] == m["CDi_trefftz"]
+    assert m["CD_pressure"] == pytest.approx(direct.totals.CDi_nearfield, abs=1e-7)
+    assert m["L_over_D"] == pytest.approx(m["CL"] / m["CD"], rel=1e-5)
+    # The pressure drag of this coarse mesh differs from the Trefftz drag.
+    assert abs(m["CD_pressure"] - m["CD"]) > 0.1 * m["CD"]
+    assert "CDp" not in m
+    assert m["drag_basis"].startswith("CDi (Trefftz plane)")
+    summary = p["executive_summary"]
+    assert f"L/D={m['L_over_D']:.2f}" in summary
+    assert f"CD={m['CD']:.5f} (Trefftz CDi" in summary
+    assert "(pressure)" not in summary
+
+
+def _direct_case(cond):
+    from ventorum.agent.schemas import build_aircraft_from_spec, build_flight_condition_from_spec
+
+    return build_aircraft_from_spec(wing=RECT), build_flight_condition_from_spec(cond)
+
+
+def _direct_settings(n_chord, n_span):
+    from ventorum.core.datatypes import SolverSettings
+
+    return SolverSettings(solver_type="panel3d", n_chord=n_chord, n_panels=n_span, panel_kutta="morino",
+                          panel_backend="auto", panel_ground_solver="auto", panel_cache=True)

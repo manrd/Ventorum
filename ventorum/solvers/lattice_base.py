@@ -103,6 +103,84 @@ def _has_control(aircraft: Aircraft) -> bool:
     return any(getattr(s, "controls", None) for s in aircraft.surfaces)
 
 
+def _has_mean_line(aircraft: Aircraft) -> bool:
+    """Return True if a surface gives a shape at every section.
+
+    The vortex lattice with two or more chordwise panels then puts that
+    surface on the mean line of the shapes (see
+    :func:`ventorum.geometry.lattice.build_lattice`).
+    """
+    return any(s.sections and all(sec.shape is not None for sec in s.sections) for s in aircraft.surfaces)
+
+
+def ground_probe_count(aircraft: Aircraft, settings: SolverSettings, chordwise: bool | None = None) -> int:
+    """Return the chordwise count of the lattice that gives the ground clearance.
+
+    The probe lattice must have the geometry of the solve. A flat lattice
+    without a control has its lowest points on the leading and trailing
+    edges for every chordwise count, so one chordwise panel is sufficient.
+    A control or a mean line puts points between the edges, and a lattice
+    with one chordwise panel does not have these points. For such an
+    aircraft the probe uses ``settings.n_chord`` (the solve lattice), or
+    ``DEFAULT_N_CHORD`` when the count is automatic.
+
+    Parameters
+    ----------
+    aircraft : Aircraft
+        The aircraft.
+    settings : SolverSettings
+        Solver settings.
+    chordwise : bool or None, optional
+        True if the solve has chordwise panels (vortex lattice). If None,
+        ``settings.solver_type`` sets it.
+
+    Returns
+    -------
+    int
+        Number of chordwise panels of the probe lattice.
+    """
+    if chordwise is None:
+        from ventorum.solvers.factory import resolve_solver_type
+
+        chordwise = resolve_solver_type(settings.solver_type) == "vlm"
+    if not chordwise or not (_has_control(aircraft) or _has_mean_line(aircraft)):
+        return 1
+    return max(1, int(settings.n_chord)) if settings.n_chord is not None else DEFAULT_N_CHORD
+
+
+def ground_probe_lattice(
+    aircraft: Aircraft,
+    settings: SolverSettings,
+    chordwise: bool | None = None,
+    fingerprint: object = None,
+) -> VortexLattice:
+    """Return the lattice that gives the ground clearance (see :func:`ground_probe_count`).
+
+    Parameters
+    ----------
+    aircraft : Aircraft
+        The aircraft.
+    settings : SolverSettings
+        Solver settings.
+    chordwise : bool or None, optional
+        True if the solve has chordwise panels. If None,
+        ``settings.solver_type`` sets it.
+    fingerprint : object, optional
+        Surfaces fingerprint if the caller computed it.
+
+    Returns
+    -------
+    VortexLattice
+        Probe lattice (vortex-lattice collocation), from the lattice cache.
+    """
+    count = ground_probe_count(aircraft, settings, chordwise)
+    chord_spacing = getattr(settings, "chord_spacing", "uniform")
+    key = lattice_cache.lattice_key(aircraft, settings, "vlm", count, chord_spacing, fingerprint=fingerprint)
+    return lattice_cache.get_or_build(key, lambda: build_lattice(
+        aircraft, settings, collocation="vlm", n_chord=count, chord_spacing=chord_spacing,
+    ))
+
+
 def _cpu_dispatch(n_panels: int, batch: int, reason: str | None, family: str | None = None) -> dict:
     """Return the dispatch record of a CPU solve, for all cases of one batch.
 
@@ -244,13 +322,9 @@ class LatticeSolver(BaseSolver):
         if ground is None and condition.h is None:
             return floor
         # In ground effect a chordwise panel should not be longer than the gap.
-        chord_spacing = getattr(settings, "chord_spacing", "uniform")
-        probe_count = DEFAULT_N_CHORD if any(s.controls for s in aircraft.surfaces) else 1
-        key = lattice_cache.lattice_key(aircraft, settings, "vlm", probe_count, chord_spacing,
-                                        fingerprint=fingerprint)
-        probe = lattice_cache.get_or_build(key, lambda: build_lattice(
-            aircraft, settings, collocation="vlm", n_chord=probe_count, chord_spacing=chord_spacing,
-        ))
+        # The gap comes from the geometry of the solve: the mean line of
+        # sections with a shape and the deflected controls.
+        probe = ground_probe_lattice(aircraft, settings, chordwise=True, fingerprint=fingerprint)
         rp = aircraft.moment_reference() if ref_point is None else ref_point
         gp = ground if ground is not None else ground_plane_from_condition(probe, condition, rp)
         h_min = float(np.min(gp.height(probe.all_points())))

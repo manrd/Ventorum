@@ -195,6 +195,91 @@ def _shifted(ac: Aircraft, name: str, d: float) -> Aircraft:
     return out
 
 
+def _difference_plan(defl: list[float], h: float, step_deg: float, name: str) -> tuple[str, tuple[float, float]]:
+    """Return the scheme and the two deflection changes [rad] of the differences of one control.
+
+    Parameters
+    ----------
+    defl : list of float
+        Deflections [rad] of the controls with this name.
+    h : float
+        Deflection step [rad].
+    step_deg : float
+        Deflection step [deg], for the error message.
+    name : str
+        Control name, for the error message.
+
+    Returns
+    -------
+    scheme : {'central', 'forward', 'backward'}
+        Difference scheme.
+    shifts : tuple of float
+        Deflection changes [rad] of the two solves: ``(h, -h)`` for the
+        central scheme, ``(s h, 2 s h)`` for the one-sided schemes
+        (``s = 1`` forward, ``s = -1`` backward).
+
+    Raises
+    ------
+    ValueError
+        If the 30 deg limit leaves no room for the step.
+    """
+    top = max(defl) + h
+    bottom = min(defl) - h
+    if top <= _MAX_DEFLECTION + 1e-12 and bottom >= -_MAX_DEFLECTION - 1e-12:
+        return "central", (h, -h)
+    sgn = -1.0 if top > _MAX_DEFLECTION + 1e-12 else 1.0
+    if min(defl) + sgn * 2.0 * h < -_MAX_DEFLECTION - 1e-12 or max(defl) + sgn * 2.0 * h > _MAX_DEFLECTION + 1e-12:
+        raise ValueError(
+            f"Control {name!r}: the deflections {[round(math.degrees(x), 3) for x in defl]} deg leave no "
+            f"room for a step of {step_deg:g} deg inside the 30 deg limit. Use a smaller step_deg."
+        )
+    return ("forward" if sgn > 0 else "backward"), (sgn * h, sgn * 2.0 * h)
+
+
+def _common_n_chord(
+    ac: Aircraft,
+    condition: FlightCondition,
+    settings: SolverSettings,
+    cases: list[tuple[Aircraft, FlightCondition]],
+) -> SolverSettings:
+    """Return the settings with one chordwise count for all the cases of the differences.
+
+    In ground effect the automatic chordwise count of the vortex lattice
+    depends on the deflections and on the angle of attack. A change of the
+    count between the cases puts a mesh change into the differences. The
+    count is set to the largest automatic count of the *cases*, as
+    :func:`ventorum.solvers.static_derivatives.static_derivatives` does.
+    Out of ground effect, with a count in the settings or with a lifting
+    line, the settings are returned unchanged.
+
+    Parameters
+    ----------
+    ac : Aircraft
+        Base aircraft.
+    condition : FlightCondition
+        Base flight condition.
+    settings : SolverSettings
+        Solver settings.
+    cases : list of tuple
+        ``(aircraft, condition)`` of every solve of the differences.
+
+    Returns
+    -------
+    SolverSettings
+        The settings, or a copy with ``n_chord`` set.
+    """
+    from ventorum.solvers.trimming import _automatic_ground_n_chord
+
+    if condition.h is None or settings.n_chord is not None:
+        return settings
+    counts = [_automatic_ground_n_chord(a, c, settings, float(c.alpha)) for a, c in cases]
+    if any(n is None for n in counts):
+        return settings
+    out = settings.clone()
+    out.n_chord = int(max(counts))
+    return out
+
+
 def _coefficients(res: SolverResult, use_cd_total: bool) -> np.ndarray:
     """Return ``[CL, CD, CY, Cl, Cm, Cn, CY_farfield, Cn_trefftz]`` of a result.
 
@@ -266,7 +351,11 @@ def control_derivatives(
     difference ``(3 C(delta) - 4 C(delta - h) + C(delta - 2 h)) / (2 h)`` (or its
     forward form) replaces it. The cases with a changed deflection use the
     same mesh: the hinge snap and the control strips do not depend on the
-    deflection.
+    deflection. In ground effect the automatic chordwise count
+    (``settings.n_chord`` None) depends on the deflection and on the angle
+    of attack. All the cases then use one count: the largest automatic
+    count of the cases, as in
+    :func:`ventorum.solvers.static_derivatives.static_derivatives`.
 
     The solves run on the device that the settings and the global device
     select. The result states the device and the precision. With a 1 deg
@@ -306,6 +395,15 @@ def control_derivatives(
         raise ValueError(f"'axes' must be one of ['body', 'stability', 'wind'], got {axes!r}.")
     h = math.radians(step_deg)
 
+    plans = {name: _difference_plan(_deflections(ac, name), h, step_deg, name) for name in names}
+    da = math.radians(_ALPHA_STEP_DEG)
+    settings = _common_n_chord(ac, condition, settings, [
+        (ac, condition),
+        *((_shifted(ac, name, d), condition) for name in names for d in plans[name][1]),
+        *(((ac, _with_alpha(condition, float(condition.alpha) + s * da)) for s in (1.0, -1.0))
+          if hinge_alpha else ()),
+    ])
+
     results: list[SolverResult] = []
 
     def solve(aircraft: Aircraft, cond: FlightCondition) -> SolverResult:
@@ -341,25 +439,17 @@ def control_derivatives(
     ch_delta: dict[int, dict[str, float]] = {k: {} for k in keys}
     for name in names:
         defl = _deflections(ac, name)
-        top = max(defl) + h
-        bottom = min(defl) - h
-        if top <= _MAX_DEFLECTION + 1e-12 and bottom >= -_MAX_DEFLECTION - 1e-12:
-            scheme = "central"
-            r_p = solve(_shifted(ac, name, h), condition)
-            r_m = solve(_shifted(ac, name, -h), condition)
+        scheme, shifts = plans[name]
+        if scheme == "central":
+            r_p = solve(_shifted(ac, name, shifts[0]), condition)
+            r_m = solve(_shifted(ac, name, shifts[1]), condition)
             dc = (coeffs(r_p) - coeffs(r_m)) / (2.0 * h)
             chp, chm = hinge_ch(r_p), hinge_ch(r_m)
             dch = {k: (chp[k] - chm[k]) / (2.0 * h) for k in keys}
         else:
-            sgn = -1.0 if top > _MAX_DEFLECTION + 1e-12 else 1.0
-            if min(defl) + sgn * 2.0 * h < -_MAX_DEFLECTION - 1e-12 or max(defl) + sgn * 2.0 * h > _MAX_DEFLECTION + 1e-12:
-                raise ValueError(
-                    f"Control {name!r}: the deflections {[round(math.degrees(x), 3) for x in defl]} deg leave no "
-                    f"room for a step of {step_deg:g} deg inside the 30 deg limit. Use a smaller step_deg."
-                )
-            scheme = "forward" if sgn > 0 else "backward"
-            r_1 = solve(_shifted(ac, name, sgn * h), condition)
-            r_2 = solve(_shifted(ac, name, sgn * 2.0 * h), condition)
+            sgn = 1.0 if scheme == "forward" else -1.0
+            r_1 = solve(_shifted(ac, name, shifts[0]), condition)
+            r_2 = solve(_shifted(ac, name, shifts[1]), condition)
             dc = sgn * (-3.0 * c0 + 4.0 * coeffs(r_1) - coeffs(r_2)) / (2.0 * h)
             ch1, ch2 = hinge_ch(r_1), hinge_ch(r_2)
             dch = {k: sgn * (-3.0 * ch0[k] + 4.0 * ch1[k] - ch2[k]) / (2.0 * h) for k in keys}
@@ -373,7 +463,6 @@ def control_derivatives(
 
     ch_alpha = {k: float("nan") for k in keys}
     if hinge_alpha:
-        da = math.radians(_ALPHA_STEP_DEG)
         r_ap = solve(ac, _with_alpha(condition, float(condition.alpha) + da))
         r_am = solve(ac, _with_alpha(condition, float(condition.alpha) - da))
         chp, chm = hinge_ch(r_ap), hinge_ch(r_am)
