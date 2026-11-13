@@ -366,6 +366,41 @@ a minor version can change a public interface.
 
 ### Fixed
 
+- Airfoil data: `TabulatedAirfoil.clone` works with a scalar `Cm_data` (Aircraft.clone, deepcopy and
+  every agent tool crashed); a surface position given as a tuple can be cloned and saved.
+- Aircraft JSON: the save keeps `Cl_circulation_data` and `gap_mask` and writes strict JSON
+  (non-finite numbers as `{"__nonfinite__": ...}`); old files still load.
+- Input checks: non-finite airfoil values and a lift slope `a0 <= 0` are refused with a ValueError
+  that names the section and the field; a spacing that is not a string gives a ValueError.
+- MCP server: a deeply nested JSON line gives a parse error (-32700) and a failing message no longer
+  stops the server; an integer too large for a float is `invalid_input`.
+- Gemini tool declarations: no object without properties (Gemini rejects the whole tool list); a
+  tool without arguments has no `parameters`, and `input_uncertainties.sections` is JSON text that
+  the dispatcher decodes. The other client schemas do not change.
+- Agent tool `ventorum_mesh_convergence`: without `panel_counts` the reference check uses the levels
+  that the study tests (`ref_n_panels` 50 was refused); the work estimate builds the lattice once per
+  level.
+- Adjoint gradients: the forward check has a force-scale floor (the lift of 1 deg on the thin-airfoil
+  slope), so a zero-lift state no longer raises; the 3D panel solver is refused before its solve;
+  `gradient_vjp` refuses a seed of the wrong shape; input `"h"` without a height is refused instead of
+  dropped.
+- GPU batched solve: a singular reference matrix or a NaN residual sends the case to the direct solve
+  (which raises for a singular system) instead of returning NaN; a zero pivot of the float32 LU gets the
+  float64 solve. GPU nonlinear lifting line: a NaN residual counts as infinite, so a NaN state is never
+  reported converged.
+- Mesh convergence: a failed condition-number computation warns and stores NaN (only the expected error
+  types are caught; the old values 1e12 and 1e6 are gone).
+- Ventorum-2D viscous: a section that touches the ground at the zero-lift probe, on the continuation
+  path or at the requested angle gives a failed row with a reason (it raised at the first angle below a
+  pivot height of about 0.05 chord); converged results do not change. `solve_viscous_batch` warns for each
+  angle that did not converge, and equal batch cases no longer share arrays.
+- XFOIL polar cache: a coordinate file is keyed by its path and the sha256 of its bytes (an edited file
+  returned the old polar; names that differ only in case shared an entry).
+- Plots: surface-result colours sit on the strips of the solve (the default plot used cosine spacing,
+  up to 1.25 m off in y); sweep plots take the angles from the results (without `alpha_range` the x axis
+  was the case index, so the printed slopes were wrong). A Fourier result is refused by the surface plot
+  (its stations do not match the lattice strips).
+
 - Boundary-layer march: the step limit of `station_newton` divided 0.5 by a step ratio of exactly
   0 (a zero Newton step from a residual that is not finite) in a branch that `np.where` discards.
   Under `np.errstate(divide="raise")` this raised `FloatingPointError` on some machines. The
