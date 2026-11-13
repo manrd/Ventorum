@@ -426,9 +426,10 @@ def _forced_interval(setup: CaseSetup, side: int, nodes_idx):
     if xf >= 1.0:
         return None, 2.0
     x = setup.sys.x_over_c[nodes_idx]
-    if xf <= x[0]:
-        return 0, 0.0
-    for j in range(len(x) - 1):
+    j0 = int(np.argmin(x))
+    if xf <= x[j0]:
+        return j0, 0.0
+    for j in range(j0, len(x) - 1):
         if x[j] < xf <= x[j + 1]:
             return j, (xf - x[j]) / (x[j + 1] - x[j])
     return None, 2.0
