@@ -512,7 +512,13 @@ line the limit is at least 100 times the solver `tolerance`, as above.
   When a central step of a control goes past the deflection limit of 30 deg, the
   differences are one-sided, away from the limit: the second-order one-sided difference
   `(-3 f(0) + 4 f(s h) - f(2 s h)) / (2 s h)` with the same Richardson combination. When
-  controls of one name are at both limits, the check raises `ValueError`.
+  controls of one name are at both limits, the check raises `ValueError`. The input
+  checks refuse a negative profile drag coefficient `Cd0`. When the largest central step
+  of `Cd0` goes below 0 (`Cd0 - h < 0`, for example at `Cd0 = 0`), the differences of
+  `Cd0` are one-sided and forward (`s = +1`), so no point is below `Cd0`. The forward
+  difference has the error `-(h^2 / 3) f'''(x0) + O(h^3)`: it is of order `h^2`, as the
+  central difference, so the Richardson combination and the error estimate stay the
+  same. `"one_sided"` in the details gives the side.
 
 Path of the partials: `method="auto"` (the default) takes the backend that
 `set_vjp_backend` forces, else the `grad_vjp` entry of the machine profile for the
