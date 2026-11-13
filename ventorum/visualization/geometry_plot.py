@@ -30,7 +30,8 @@ def plot_geometry(
     ----------
     aircraft : Aircraft
     settings : SolverSettings or None
-        If provided, the discretised panels are shown.
+        Panel count and spacing of the shown strips. None gives the
+        defaults of the solvers (:class:`SolverSettings`).
     show_normals : bool
         If *True*, draw short arrows for panel normals.
     show_control_points : bool
@@ -47,8 +48,9 @@ def plot_geometry(
     fig = plt.figure(figsize=(12, 8))
     ax = fig.add_subplot(111, projection="3d")
 
-    n_panels = settings.n_panels if settings else 40
-    spacing = settings.spacing if settings else "cosine"
+    # None gives the solver defaults (see discretize_surface).
+    n_panels = settings.n_panels if settings else None
+    spacing = settings.spacing if settings else None
 
     for idx, surf in enumerate(aircraft.surfaces):
         ds = discretize_surface(surf, n_panels, spacing, idx)
@@ -122,6 +124,84 @@ def plot_geometry(
     return fig
 
 
+def result_strip_polygons(
+    aircraft: Aircraft,
+    result: SolverResult,
+    settings: SolverSettings | None = None,
+) -> list[np.ndarray]:
+    """Return the strip outlines of a solved result, one array per surface.
+
+    The outlines come from the lattice of the solve
+    (``result.details["lattice"]``), so each outline is at the spanwise
+    position of the solved strip. A result without a lattice (for
+    example the 3D panel solver) gets the lattice that
+    :func:`ventorum.geometry.lattice.build_lattice` makes from
+    ``aircraft`` and ``settings`` (the solver defaults when None).
+
+    Parameters
+    ----------
+    aircraft : Aircraft
+        Aircraft geometry model.
+    result : SolverResult
+        Solved result; ``result.spanwise`` holds one entry per surface.
+    settings : SolverSettings or None
+        Settings of the solve. They are used only for a result without a
+        lattice.
+
+    Returns
+    -------
+    list of numpy.ndarray
+        For each entry of ``result.spanwise``, the outlines of its strips,
+        shape (n_strips, 4, 3) [m]: leading edge left, leading edge right,
+        trailing edge right, trailing edge left.
+
+    Raises
+    ------
+    ValueError
+        If the number of surfaces or strips of the layout is not the number
+        in the result, or if a solved strip position ``y`` [m] is not in
+        its outline (the layout is not the layout of the solve).
+    """
+    from ventorum.geometry.lattice import build_lattice
+
+    lattice = (result.details or {}).get("lattice")
+    if lattice is None:
+        lattice = build_lattice(aircraft, settings or SolverSettings(), collocation="vlm", n_chord=1)
+        origin = "the lattice rebuilt from the aircraft and the settings"
+    else:
+        origin = "the lattice of the result"
+    if len(lattice.surfaces) != len(result.spanwise):
+        raise ValueError(
+            f"The result has {len(result.spanwise)} surfaces, but {origin} has "
+            f"{len(lattice.surfaces)}."
+        )
+    out = []
+    for sl, sw in zip(lattice.surfaces, result.spanwise):
+        idx = np.arange(sl.strips.start, sl.strips.stop)
+        polys = np.stack(
+            [lattice.le_left[idx], lattice.le_right[idx], lattice.te_right[idx], lattice.te_left[idx]],
+            axis=1,
+        )
+        n_vals = len(sw.Cl)
+        if len(polys) != n_vals:
+            raise ValueError(
+                f"Surface {sl.name!r}: the result has {n_vals} strips, but {origin} has "
+                f"{len(polys)}. Give the settings of the solve."
+            )
+        if sw.y is not None and n_vals:
+            y_lo = np.minimum(polys[:, 0, 1], polys[:, 1, 1])
+            y_hi = np.maximum(polys[:, 0, 1], polys[:, 1, 1])
+            tol = 1e-9 * max(1.0, float(np.max(np.abs(polys[..., 1]))))
+            y = np.asarray(sw.y, dtype=float)
+            if np.any(y < y_lo - tol) or np.any(y > y_hi + tol):
+                raise ValueError(
+                    f"Surface {sl.name!r}: a solved strip position y is not in its strip of "
+                    f"{origin}. Give the settings of the solve."
+                )
+        out.append(polys)
+    return out
+
+
 def plot_surface_results(
     aircraft: Aircraft,
     result: SolverResult,
@@ -153,7 +233,9 @@ def plot_surface_results(
         - "Cd_i": Local induced drag coefficient
         - "lift": Local section lift force per unit span L' [N/m]
     settings : SolverSettings or None
-        Solver settings used for discretisation (to match mesh density).
+        Settings of the solve. The strips come from the lattice of the
+        result; the settings are used only for a result without a lattice
+        (see :func:`result_strip_polygons`).
     cmap : str
         Matplotlib colormap name (e.g. 'viridis', 'plasma', 'turbo', 'coolwarm').
     clim : tuple[float, float] or None
@@ -225,36 +307,10 @@ def plot_surface_results(
     all_polys = []
     all_vals = []
 
-    for idx, surf in enumerate(aircraft.surfaces):
-        if idx < len(result.spanwise):
-            sw = result.spanwise[idx]
-        else:
-            continue
-
-        n_pts = len(sw.Cl)
-        if settings is not None:
-            n_semi = settings.n_panels
-            spacing = settings.spacing
-        else:
-            n_semi = n_pts // 2 if surf.is_symmetric else n_pts
-            spacing = "cosine"
-
-        ds = discretize_surface(surf, n_semi, spacing, idx)
-        vals = extract_fn(sw)
-
-        n_panels = min(len(ds.chords), len(vals))
-        for i in range(n_panels):
-            node_A = ds.nodes_qc[i]
-            node_B = ds.nodes_qc[i + 1]
-            vec_c = ds.control_points[i] - 0.5 * (node_A + node_B)
-            poly = [
-                node_A - 0.5 * vec_c,
-                node_B - 0.5 * vec_c,
-                node_B + 1.5 * vec_c,
-                node_A + 1.5 * vec_c,
-            ]
-            all_polys.append(poly)
-            all_vals.append(vals[i])
+    # The strips of the solve (see result_strip_polygons): each value is at its solved strip.
+    for polys, sw in zip(result_strip_polygons(aircraft, result, settings), result.spanwise):
+        all_polys.extend(list(p) for p in polys)
+        all_vals.extend(np.asarray(extract_fn(sw)))
 
     all_vals_arr = np.asarray(all_vals)
     if len(all_vals_arr) == 0:

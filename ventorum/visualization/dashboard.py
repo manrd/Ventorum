@@ -19,6 +19,7 @@ from mpl_toolkits.mplot3d.art3d import Poly3DCollection
 from ventorum.core.datatypes import Aircraft, LiftingSurface, SolverResult, SolverSettings
 from ventorum.core.constants import RHO_SL
 from ventorum.geometry.processing import discretize_surface
+from ventorum.visualization.geometry_plot import result_strip_polygons
 
 
 def plot_aircraft_dashboard(
@@ -92,31 +93,11 @@ def plot_aircraft_dashboard(
     all_vals = []
     all_pts_list = []
 
-    for idx, surf in enumerate(aircraft.surfaces):
-        if idx >= len(result.spanwise):
-            continue
-        sw = result.spanwise[idx]
-        n_semi = (
-            settings.n_panels
-            if settings is not None
-            else (len(sw.gamma) // 2 if surf.is_symmetric else len(sw.gamma))
-        )
-        spacing = settings.spacing if settings is not None else "cosine"
-        ds = discretize_surface(surf, n_semi, spacing, idx)
-        n_panels = min(len(ds.chords), len(sw.Cl))
-
-        for i in range(n_panels):
-            node_A = ds.nodes_qc[i]
-            node_B = ds.nodes_qc[i + 1]
-            vec_c = ds.control_points[i] - 0.5 * (node_A + node_B)
-            p_le_A = node_A - 0.5 * vec_c
-            p_le_B = node_B - 0.5 * vec_c
-            p_te_B = node_B + 1.5 * vec_c
-            p_te_A = node_A + 1.5 * vec_c
-
-            poly = [p_le_A, p_le_B, p_te_B, p_te_A]
-            all_polys.append(poly)
-            all_vals.append(sw.Cl[i])
+    # The strips of the solve (see result_strip_polygons): each colour is at its solved strip.
+    for polys, sw in zip(result_strip_polygons(aircraft, result, settings), result.spanwise):
+        for poly, val in zip(polys, sw.Cl):
+            all_polys.append(list(poly))
+            all_vals.append(val)
             all_pts_list.extend(poly)
 
     if all_polys:

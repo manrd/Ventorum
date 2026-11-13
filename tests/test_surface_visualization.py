@@ -145,3 +145,85 @@ def test_plot_surface_results_invalid_metric(sample_aircraft):
     result = vt.analyze(sample_aircraft, alpha_deg=2.0, V_inf=25.0)
     with pytest.raises(ValueError, match="Unknown metric"):
         vt.plot_surface_results(sample_aircraft, result, metric="invalid_metric_xyz")
+
+
+def _RecordingPolys(base):
+    """Return a subclass of Poly3DCollection that keeps the polygons it gets (in ``polys``)."""
+
+    class Recording(base):
+        polys = []
+
+        def __init__(self, verts, *args, **kwargs):
+            Recording.polys.append(np.asarray(verts, dtype=float))
+            super().__init__(verts, *args, **kwargs)
+
+    return Recording
+
+
+def _strip_y(polys):
+    """Return the y of the quarter-chord mid point of each outline (LE left, LE right, TE right, TE left) [m]."""
+    qc_left = polys[:, 0] + 0.25 * (polys[:, 3] - polys[:, 0])
+    qc_right = polys[:, 1] + 0.25 * (polys[:, 2] - polys[:, 1])
+    return 0.5 * (qc_left[:, 1] + qc_right[:, 1])
+
+
+@pytest.fixture
+def wing_and_tail():
+    """Return a wing (10 m span) and a tail, solved with the default settings."""
+    wing = vt.LiftingSurface(
+        name="Wing", semi_span=5.0,
+        sections=[vt.WingSection(y_frac=0.0, chord=1.2), vt.WingSection(y_frac=1.0, chord=0.6)],
+    )
+    tail = vt.LiftingSurface(
+        name="Tail", semi_span=1.5,
+        sections=[vt.WingSection(y_frac=0.0, chord=0.5), vt.WingSection(y_frac=1.0, chord=0.3)],
+        position=np.array([4.0, 0.0, 0.2]),
+    )
+    ac = vt.Aircraft(name="Wing and tail", surfaces=[wing, tail])
+    return ac, vt.analyze(ac, alpha_deg=4.0, V_inf=30.0)
+
+
+def test_surface_plot_strips_are_at_the_solved_positions(wing_and_tail, monkeypatch):
+    """Each coloured strip is at the y of its solved strip (default settings, two surfaces).
+
+    Regression: with settings None the plot built cosine strips, but the
+    default solve uses the "auto" spacing, so the colours were up to
+    1.25 m from their strips on a 10 m wing.
+    """
+    import mpl_toolkits.mplot3d.art3d as art3d
+
+    ac, result = wing_and_tail
+    rec = _RecordingPolys(art3d.Poly3DCollection)
+    monkeypatch.setattr(art3d, "Poly3DCollection", rec)
+    fig = vt.plot_surface_results(ac, result, metric="Cl")
+    assert len(rec.polys) == 1
+    y_solved = np.concatenate([sw.y for sw in result.spanwise])
+    np.testing.assert_allclose(_strip_y(rec.polys[0]), y_solved, rtol=0.0, atol=1e-12)
+    plt.close(fig)
+
+
+def test_dashboard_strips_are_at_the_solved_positions(wing_and_tail, monkeypatch):
+    """The 3-D panel of the dashboard puts each Cl at the y of its solved strip."""
+    from ventorum.visualization import dashboard
+
+    ac, result = wing_and_tail
+    rec = _RecordingPolys(dashboard.Poly3DCollection)
+    monkeypatch.setattr(dashboard, "Poly3DCollection", rec)
+    fig = vt.plot_aircraft_dashboard(ac, result)
+    assert len(rec.polys) == 1
+    y_solved = np.concatenate([sw.y for sw in result.spanwise])
+    np.testing.assert_allclose(_strip_y(rec.polys[0]), y_solved, rtol=0.0, atol=1e-12)
+    plt.close(fig)
+
+
+def test_surface_plot_refuses_a_strip_count_mismatch(wing_and_tail):
+    """A result whose strip count is not the count of its layout raises; the plot does not truncate."""
+    ac, result = wing_and_tail
+    bad = result.clone()
+    sw = bad.spanwise[1]
+    for name in ("y", "gamma", "Cl", "Cd_i", "alpha_eff", "alpha_i", "local_lift"):
+        setattr(sw, name, getattr(sw, name)[:-2])
+    with pytest.raises(ValueError, match="Tail.*strips"):
+        vt.plot_surface_results(ac, bad, metric="Cl")
+    with pytest.raises(ValueError, match="Tail.*strips"):
+        vt.plot_aircraft_dashboard(ac, bad)
