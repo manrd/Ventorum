@@ -554,6 +554,44 @@ def test_mcp_refuses_nan_and_infinity():
                  "invalid_input", "JSON")
 
 
+def test_mcp_deeply_nested_line_is_a_parse_error():
+    """A deeply nested line gives a parse error (-32700); it does not stop the server."""
+    for line in ("[" * 100000, "[" * 100000 + "]" * 100000, '{"a":' * 100000 + "1" + "}" * 100000):
+        r = _rpc(line)
+        assert r["id"] is None and r["error"]["code"] == -32700, r
+
+
+def test_mcp_server_loop_survives_a_bad_message(monkeypatch):
+    """One message can never stop the server: the next line is still answered."""
+    import io
+
+    import ventorum.agent.mcp_server as server
+
+    ping = json.dumps({"jsonrpc": "2.0", "id": 7, "method": "ping"})
+    out = io.StringIO()
+    server.run_mcp_server(io.StringIO("[" * 100000 + "\n" + ping + "\n"), out)
+    replies = [json.loads(x) for x in out.getvalue().splitlines()]
+    assert [r.get("id") for r in replies] == [None, 7]
+    assert replies[0]["error"]["code"] == -32700 and "result" in replies[1]
+
+    real = server.handle_message
+    calls = []
+
+    def flaky(line):
+        calls.append(line)
+        if len(calls) == 1:
+            raise RuntimeError("unexpected")
+        return real(line)
+
+    monkeypatch.setattr(server, "handle_message", flaky)
+    out = io.StringIO()
+    server.run_mcp_server(io.StringIO(ping + "\n" + ping + "\n"), out)
+    replies = [json.loads(x) for x in out.getvalue().splitlines()]
+    assert len(replies) == 2
+    assert replies[0]["id"] is None and replies[0]["error"]["code"] == -32603
+    assert replies[1]["id"] == 7 and "result" in replies[1]
+
+
 def test_mcp_null_id_is_invalid_request():
     r = _rpc(json.dumps({"jsonrpc": "2.0", "id": None, "method": "ping"}))
     assert r["id"] is None and r["error"]["code"] == -32600
