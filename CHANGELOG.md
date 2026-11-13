@@ -10,6 +10,11 @@ a minor version can change a public interface.
 
 ### Added
 
+- Verification report: sections V11 to V15 for the 3D panel method (sphere and ellipsoid against exact
+  potential flow, thin-wing limit against the vortex lattice, ground images against an explicit mirror
+  mesh) and the 2D panel method (Karman-Trefftz section). V1 to V10 do not change. The theory chapters
+  name the new sections.
+
 - 3D panel solver: `totals.Cn_trefftz` (it was None), the yawing moment of the Trefftz-plane
   induced drag of the wake strips in stability axes, with the rule of the vortex lattice
   (`Cn > 0` nose right). The single-condition, batch, pressure Kutta and GPU paths fill it; a
