@@ -362,3 +362,10 @@ def test_stacked_surfaces_are_refused_on_a_fine_cosine_mesh(dz):
         vt.analyze(stacked, alpha_deg=4.0, settings=_settings(n_panels=80, n_chord=4, solver_type="vlm"))
     msg = str(exc.value)
     assert "overlap" in msg and "Copy" in msg
+
+
+# ── Solver settings ──────────────────────────────────────────────────────────
+
+def test_spacing_none_gives_value_error():
+    with pytest.raises(ValueError, match="spacing"):
+        V.validate_solver_settings(_settings(spacing=None))

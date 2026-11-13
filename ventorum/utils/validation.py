@@ -323,6 +323,10 @@ def validate_solver_settings(ss: SolverSettings) -> None:
         "root", "root-cosine", "root_cosine", "root-clustered",
         "uniform", "power", "stretched",
     )
+    if not isinstance(ss.spacing, str):
+        raise ValueError(
+            f"spacing={ss.spacing!r} is invalid; give a string, for example 'auto' or 'cosine'."
+        )
     if ss.spacing.lower() not in valid_spacings:
         raise ValueError(
             f"spacing='{ss.spacing}' is invalid. Options: 'auto', 'cosine', 'half-cosine', 'root', 'uniform', 'power'."
