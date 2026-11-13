@@ -311,3 +311,33 @@ def test_load_csv_polar(tmp_path):
     np.testing.assert_allclose(af.Cl_data, [-0.44, -0.22, 0.0, 0.22, 0.44])
     np.testing.assert_allclose(af.Cd_data, [0.006, 0.0055, 0.005, 0.0055, 0.006])
     np.testing.assert_allclose(af.Cm_data, [0.002, 0.001, 0.0, -0.001, -0.002])
+
+
+# ── Copy and JSON round trip of the airfoil types and the surfaces ───────────
+
+def _scalar_cm_polar() -> TabulatedAirfoil:
+    a = np.radians([-4.0, 0.0, 4.0, 8.0])
+    return TabulatedAirfoil(name="scalar_cm", alpha=a, Cl_data=6.0 * a, Cd_data=0.01 + 0.0 * a, Cm_data=-0.07)
+
+
+def test_clone_of_tabulated_airfoil_with_scalar_cm():
+    """A scalar Cm_data (allowed by the docstring) must not stop a copy of the airfoil or the aircraft."""
+    import copy
+
+    af = _scalar_cm_polar()
+    for out in (af.clone(), copy.copy(af), copy.deepcopy(af)):
+        assert np.ndim(out.Cm_data) == 0
+        assert float(out.Cm_data) == -0.07
+        assert np.isclose(out.Cm(0.03), af.Cm(0.03))
+        assert np.isclose(out.Cl(0.03), af.Cl(0.03))
+    wing = _wing()
+    for sec in wing.sections:
+        sec.airfoil = _scalar_cm_polar()
+    ac = vt.Aircraft(surfaces=[wing])
+    for out in (ac.clone(), copy.deepcopy(ac)):
+        assert float(out.surfaces[0].sections[0].airfoil.Cm_data) == -0.07
+    # The clone is independent of the original arrays.
+    cl = af.clone()
+    cl.Cl_data[0] = 99.0
+    assert af.Cl_data[0] != 99.0
+

@@ -88,6 +88,28 @@ class LinearAirfoil:
         return np.full(np.shape(alpha), self.Cm0, dtype=float)
 
 
+def _copy_table(value: Any) -> Any:
+    """Return an independent copy of a polar table field.
+
+    Parameters
+    ----------
+    value : array_like, float or None
+        Table values as the user gave them: an array, a list or a scalar
+        (for example a constant ``Cm_data``).
+
+    Returns
+    -------
+    np.ndarray, float or None
+        None for None. A Python float for a scalar that is not an array, so
+        that the scalar form is kept. Otherwise a new float array.
+    """
+    if value is None:
+        return None
+    if not isinstance(value, np.ndarray) and np.ndim(value) == 0:
+        return float(value)
+    return np.array(value, dtype=float)
+
+
 @dataclass(slots=True)
 class TabulatedAirfoil:
     """Nonlinear aerodynamic model from polar-data tables.
@@ -171,14 +193,12 @@ class TabulatedAirfoil:
         """Fast explicit clone avoiding reflection."""
         inst = TabulatedAirfoil(
             name=self.name,
-            alpha=self.alpha.copy(),
-            Cl_data=self.Cl_data.copy(),
-            Cd_data=self.Cd_data.copy(),
-            Cm_data=self.Cm_data.copy() if self.Cm_data is not None else None,
+            alpha=_copy_table(self.alpha),
+            Cl_data=_copy_table(self.Cl_data),
+            Cd_data=_copy_table(self.Cd_data),
+            Cm_data=_copy_table(self.Cm_data),
             Re=self.Re,
-            Cl_circulation_data=(
-                self.Cl_circulation_data.copy() if self.Cl_circulation_data is not None else None
-            ),
+            Cl_circulation_data=_copy_table(self.Cl_circulation_data),
             gap_mask=None if self.gap_mask is None else np.array(self.gap_mask, dtype=bool),
         )
         inst._cached_a0 = self._cached_a0
