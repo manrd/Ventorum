@@ -592,6 +592,23 @@ def test_mcp_server_loop_survives_a_bad_message(monkeypatch):
     assert replies[1]["id"] == 7 and "result" in replies[1]
 
 
+def test_huge_integer_input_is_invalid_input():
+    """An integer too large for a float is invalid input, not an internal error."""
+    from ventorum.agent.schemas import InputError, integer, number
+
+    with pytest.raises(InputError, match="span_m"):
+        number(10 ** 400, "span_m")
+    with pytest.raises(InputError, match="n_panels"):
+        integer(10 ** 5000, "n_panels", maximum=400)
+    with pytest.raises(InputError, match="n_panels"):
+        integer(-(10 ** 5000), "n_panels", minimum=4)
+    big = call_tool("ventorum_wing_analysis", {"wing": {"span_m": 10 ** 400, "chord_m": 1.0}})
+    assert_error(big, "invalid_input", "span_m")
+    big = call_tool("ventorum_wing_analysis", {"wing": RECT, "settings": {"n_panels": 10 ** 5000}})
+    assert_error(big, "invalid_input", "n_panels")
+    assert len(big["error"]["message"]) < 500
+
+
 def test_mcp_null_id_is_invalid_request():
     r = _rpc(json.dumps({"jsonrpc": "2.0", "id": None, "method": "ping"}))
     assert r["id"] is None and r["error"]["code"] == -32600

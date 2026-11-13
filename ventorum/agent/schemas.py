@@ -586,12 +586,29 @@ def check_keys(obj: Any, allowed: dict[str, Any] | set[str] | list[str], where: 
     return out
 
 
+def _show_value(val: Any) -> str:
+    """Return the repr of *val* for an error message; a very large integer is not written out."""
+    if isinstance(val, (int, np.integer)) and not isinstance(val, bool) and abs(int(val)).bit_length() > 128:
+        digits = int(abs(int(val)).bit_length() * math.log10(2.0)) + 1
+        sign = "-" if int(val) < 0 else ""
+        return f"{sign}<an integer of about {digits} digits>"
+    return repr(val)
+
+
 def number(val: Any, name: str, *, minimum: float | None = None, maximum: float | None = None,
            exclusive_min: float | None = None) -> float:
-    """Return *val* as a float. Refuse strings, booleans, NaN, infinity and values out of range."""
+    """Return *val* as a float. Refuse strings, booleans, NaN, infinity and values out of range.
+
+    An integer too large for a float is refused as not finite.
+    """
     if isinstance(val, bool) or not isinstance(val, (int, float, np.integer, np.floating)):
-        raise InputError(f"'{name}' must be a number (JSON number, no unit text), got {val!r}.")
-    v = float(val)
+        raise InputError(f"'{name}' must be a number (JSON number, no unit text), got {_show_value(val)}.")
+    try:
+        v = float(val)
+    except OverflowError:
+        raise InputError(
+            f"'{name}' must be finite, got {_show_value(val)} (too large for a float)."
+        ) from None
     if not math.isfinite(v):
         raise InputError(f"'{name}' must be finite, got {val!r}.")
     if exclusive_min is not None and v <= exclusive_min:
@@ -610,12 +627,12 @@ def integer(val: Any, name: str, *, minimum: int | None = None, maximum: int | N
     if isinstance(val, (float, np.floating)) and math.isfinite(float(val)) and float(val).is_integer():
         val = int(val)
     if not isinstance(val, (int, np.integer)):
-        raise InputError(f"'{name}' must be an integer, got {val!r}.")
+        raise InputError(f"'{name}' must be an integer, got {_show_value(val)}.")
     v = int(val)
     if minimum is not None and v < minimum:
-        raise InputError(f"'{name}' must be >= {minimum}, got {v}.")
+        raise InputError(f"'{name}' must be >= {minimum}, got {_show_value(v)}.")
     if maximum is not None and v > maximum:
-        raise InputError(f"'{name}' must be <= {maximum}, got {v}.")
+        raise InputError(f"'{name}' must be <= {maximum}, got {_show_value(v)}.")
     return v
 
 
