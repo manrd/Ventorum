@@ -129,6 +129,18 @@ def _parse_uncertainties(
             "Uncertainty 'h' needs ground effect: set condition.h [m], "
             "the height of the moment reference point above the ground."
         )
+    mach_inputs = [key for key in ("V_inf", "rho") if flow.get(key, 0.0) > 0.0]
+    if mach_inputs and getattr(condition, "mach", None) is not None:
+        raise ValueError(
+            f"Uncertainty of {' and '.join(repr(k) for k in mach_inputs)} with a Mach number set "
+            f"(condition.mach={condition.mach!r}) is not supported. The propagation uses the coefficient "
+            "gradients at the stated Mach number, which does not change with the speed or the density, "
+            "but the real Mach number changes with them (M = V_inf / a, and the speed of sound a "
+            "changes with the air temperature). The speed and density dependence through the Mach "
+            "number would be missing from the bars. Remove this uncertainty, or set condition.mach=None "
+            "(incompressible, no Prandtl-Glauert correction) for the propagation, or solve the case "
+            "again at the changed speed with the matching Mach number."
+        )
     sections: dict[str, dict[str, float]] = {}
     raw_sections = uncertainties.get("sections", None)
     if raw_sections is not None:
@@ -444,7 +456,9 @@ def input_error_bars(
         Standard uncertainties (one standard deviation), never negative,
         finite. Optional flow keys: ``alpha`` [rad], ``beta`` [rad],
         ``phi`` [rad], ``V_inf`` [m/s], ``rho`` [kg/m^3], ``h`` [m]
-        (ground effect only). Optional ``sections``: dict of surface name
+        (ground effect only). ``V_inf`` and ``rho`` above 0 are refused
+        when ``condition.mach`` is set: the Mach dependence of the
+        coefficients is not in the propagation. Optional ``sections``: dict of surface name
         to dict with optional ``a0`` [1/rad], ``alpha_L0`` [rad],
         ``Cd0`` [-], ``Cm0`` [-]. A section uncertainty of a surface
         applies to every strip of that surface and is fully correlated
@@ -472,7 +486,8 @@ def input_error_bars(
     ValueError
         For an unknown axis system, a non-positive coverage factor, a
         negative, non-finite or unknown uncertainty key, ``h`` in free
-        air, an unknown surface name, a correlation outside [-1, 1], or
+        air, a ``V_inf`` or ``rho`` uncertainty with a Mach number set,
+        an unknown surface name, a correlation outside [-1, 1], or
         a correlation pair given more than once, correlations that give
         an input covariance that is not positive semi-definite, or
         a section input outside the adjoint scope (tabulated airfoils,

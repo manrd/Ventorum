@@ -417,3 +417,20 @@ def test_float32_device(float64_precision, cpu_device):
         h64 = float(ref.bars[name].layers["input"].half_width)
         h32 = float(got.bars[name].layers["input"].half_width)
         assert h32 == pytest.approx(h64, rel=1e-3)
+
+
+@pytest.mark.parametrize("key, sigma", [("V_inf", 10.0), ("rho", 0.05)])
+def test_speed_and_density_uncertainty_with_mach_is_refused(key, sigma):
+    """Regression: with condition.mach set, a V_inf uncertainty of 10 m/s at 100 m/s gave a CL half-width of 5e-9.
+
+    The gradients are taken at the stated Mach number, so the Mach dependence was missing (V_inf 110 m/s
+    with Mach 0.33 changes CL by about 0.8 %). The input is now refused.
+    """
+    cond = vt.FlightCondition(V_inf=100.0, alpha=np.radians(4.0), mach=0.3)
+    st = vt.SolverSettings(solver_type="vlm", n_panels=12, n_chord=2)
+    with pytest.raises(ValueError, match=rf"Uncertainty of '{key}' with a Mach number set.*condition.mach=None"):
+        vt.input_error_bars(_plain_wing(), condition=cond, settings=st, uncertainties={key: sigma})
+    # A zero uncertainty and the other inputs stay accepted with a Mach number.
+    bars = vt.input_error_bars(_plain_wing(), condition=cond, settings=st,
+                               uncertainties={key: 0.0, "alpha": 0.001})
+    assert bars.bars["CL"].half_width > 0.0
