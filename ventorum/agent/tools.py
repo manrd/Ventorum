@@ -2230,7 +2230,15 @@ def mesh_convergence(
     alphas = (number_list(alpha_sweep_deg, "alpha_sweep_deg", min_len=1, max_len=15, minimum=-30, maximum=30)
               if alpha_sweep_deg is not None else None)
     ref_n = integer(ref_n_panels, "ref_n_panels", minimum=20, maximum=400)
-    finest = max(counts) if counts else 80
+    # The tested levels. Without panel_counts, run_mesh_convergence_study
+    # tests the default levels below ref_n_panels, so the finest tested
+    # mesh is the largest of these. Given panel_counts must all be below
+    # ref_n_panels (the study would drop a larger level without a note).
+    if counts is None:
+        _tested = [n for n in (10, 15, 20, 30, 40, 60, 80) if n < ref_n] or [10, 20, 40]
+    else:
+        _tested = list(counts)
+    finest = max(_tested)
     if ref_n <= finest:
         raise InputError(f"ref_n_panels ({ref_n}) must be larger than the finest tested mesh ({finest}).")
     solver_type = (string(solver, "solver", ("auto", "vlm", "linear", "nonlinear", "fourier"))
@@ -2242,11 +2250,7 @@ def mesh_convergence(
     from ventorum.geometry.mesh_convergence import _level_aircraft
 
     _n_base = 80
-    if counts is None:
-        _levels = [n for n in (10, 15, 20, 30, 40, 60, 80) if n < ref_n] or [10, 20, 40]
-    else:
-        _levels = [int(n) for n in counts if int(n) < ref_n] or [int(n) for n in counts]
-    _levels = list(dict.fromkeys(_levels)) + [int(ref_n)]
+    _levels = list(dict.fromkeys(int(n) for n in _tested)) + [int(ref_n)]
     _level_panels: list[int] = []
     for _n_level in _levels:
         _lvl_ac = _level_aircraft(ac, int(_n_level), _n_base)
@@ -2254,9 +2258,10 @@ def mesh_convergence(
                                    proportional_panels=True)
         _cond_alphas = [c["alpha_deg"], *(alphas or [])]
         _n_level_panels = 0
+        # The strip count does not depend on the angle: build the lattice once per level.
+        _strips_a = build_lattice(_lvl_ac, _lvl_sett, collocation="vlm", n_chord=1).n_strips
         for _a in _cond_alphas:
             _fc_a = make_flight_condition(c, alpha_deg=_a)
-            _strips_a = build_lattice(_lvl_ac, _lvl_sett, collocation="vlm", n_chord=1).n_strips
             if _lvl_sett.n_chord is not None:
                 _n_a = int(_strips_a * int(_lvl_sett.n_chord))
             elif resolve_solver_type(_lvl_sett.solver_type) != "vlm":

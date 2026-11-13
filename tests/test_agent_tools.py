@@ -682,6 +682,25 @@ def test_mesh_convergence_tool_solves_requested_angle():
     assert len(p["alpha_tested_deg"]) == 2
 
 
+def test_mesh_convergence_ref_check_matches_the_tested_levels():
+    """Without panel_counts, the reference check uses the default levels below ref_n_panels.
+
+    Regression: ref_n_panels 50 without panel_counts was refused with "must
+    be larger than the finest tested mesh (80)", but the study tests only the
+    default levels below 50.
+    """
+    from ventorum.agent import mesh_convergence as mc_tool
+
+    wing = {"span_m": 10.0, "chord_m": 1.25}
+    fc = {"V_inf_m_s": 40.0, "alpha_deg": 4.0}
+    p = mc_tool(wing, fc, tolerance_pct=5.0, spacing_schemes=["half-cosine"], ref_n_panels=50, solver="linear")
+    strict_json(p)
+    assert p["status"] == "success", p
+    # Given levels must all be below the reference.
+    p = mc_tool(wing, fc, panel_counts=[10, 20, 80], ref_n_panels=50, solver="linear")
+    assert_error(p, "invalid_input", "finest tested mesh (80)")
+
+
 # ── A height step below round-off is refused ─────────────────────────────────
 
 def test_ground_effect_refuses_tiny_height_step():
