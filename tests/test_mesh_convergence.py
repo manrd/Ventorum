@@ -693,3 +693,37 @@ def test_gci_triplets_non_constant_ratios_and_order_limit():
     assert "Richardson limit" not in (mc.__doc__ or "")
 
 
+def test_given_panel_counts_at_or_above_reference_warn_or_raise(planar_rectangular_wing):
+    """Given levels >= ref_n_panels emit UserWarning and a note; all >= raises ValueError."""
+    cond = vt.FlightCondition(V_inf=40.0, alpha=np.radians(4.0))
+
+    with pytest.warns(UserWarning, match="ref_n_panels"):
+        study = run_mesh_convergence_study(
+            case=planar_rectangular_wing,
+            condition=cond,
+            tolerance_pct=1.0,
+            panel_counts=(10, 20, 40, 50),
+            ref_n_panels=40,
+            spacing_schemes=("half-cosine",),
+            progress=False,
+        )
+    assert [p.n_panels for p in study.points] == [10, 20]
+    assert hasattr(study, "notes") and len(study.notes) == 1
+    assert "40" in study.notes[0] and "50" in study.notes[0]
+    assert study.to_dict().get("notes") == study.notes
+    assert any("40" in line and "50" in line for line in study.summary(as_markdown=False).splitlines())
+    assert any("40" in line and "50" in line for line in study.summary(as_markdown=True).splitlines())
+
+    with pytest.raises(ValueError, match="ref_n_panels"):
+        run_mesh_convergence_study(
+            case=planar_rectangular_wing,
+            condition=cond,
+            tolerance_pct=1.0,
+            panel_counts=(40, 60),
+            ref_n_panels=40,
+            spacing_schemes=("half-cosine",),
+            progress=False,
+        )
+
+
+

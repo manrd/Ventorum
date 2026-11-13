@@ -258,6 +258,7 @@ class MeshConvergenceResult:
     # Cause of a NOT CONVERGED study (None when converged). Names the likely
     # cause when the solver is a lifting line on a swept wing.
     diagnosis: str | None = None
+    notes: list[str] = field(default_factory=list)
 
     def summary(self, as_markdown: bool = False) -> str:
         """Format a human-readable or Markdown summary table."""
@@ -280,6 +281,8 @@ class MeshConvergenceResult:
             lines.append(f"- **Reference Solution**: `N={self.reference_point.n_panels} {self.reference_point.spacing}` ({ref_panels} total panels)")
             ref_tot_drag = f"{self.reference_point.CD_total:.6f}" if self.reference_point.CD_total is not None else f"{ref_cdi:.6f}"
             lines.append(f"  - $C_L = {ref_cl:.6f}$, $C_{{Di}} = {ref_cdi:.6f}$, $C_{{D,tot}} = {ref_tot_drag}$")
+            for note in self.notes:
+                lines.append(f"- **Note**: {note}")
             lines.append("")
             lines.append("| N_ref | Spacing | N_tot | N_sol | CL | CL Err% | CDi Err% | Γ L2 Err% | Max Swp% | Time (ms) | Cond # | Status |")
             lines.append("|:-----:|:-------:|:-----:|:-----:|:--:|:-------:|:--------:|:---------:|:--------:|:---------:|:------:|:------:|")
@@ -338,6 +341,8 @@ class MeshConvergenceResult:
                 f"Reference Solution: CL = {ref_cl:.6f}, CDi = {ref_cdi:.6f}, CD_total = {ref_tot_drag} "
                 f"(solve time: {self.reference_point.solve_time_ms:.2f} ms)"
             )
+            for note in self.notes:
+                lines.append(f"Note: {note}")
             lines.append("-" * w)
             header = f"{'N_ref':<6} | {'Spacing':<12} | {'N_tot':<6} | {'N_sol':<6} | {'CL':<9} | {'CL Err%':<8} | {'CDi Err%':<9} | {'Gamma L2%':<9} | {'Max Swp%':<9} | {'Time (ms)':<9} | {'Cond #':<9} | {'Status'}"
             lines.append(header)
@@ -438,6 +443,7 @@ class MeshConvergenceResult:
             "recommended_settings": settings,
             "generalization": generalization,
             "diagnosis": self.diagnosis,
+            "notes": list(self.notes),
             "points": [p.to_dict() for p in self.points],
             "profiling": self.profiling,
         }
@@ -908,6 +914,7 @@ def run_mesh_convergence_study(
         schemes = list(spacing_schemes)
 
     # Panel counts to test
+    notes: list[str] = []
     if panel_counts is None:
         default_counts = [10, 15, 20, 30, 40, 60, 80]
         # Keep only counts strictly below ref_n_panels
@@ -915,9 +922,22 @@ def run_mesh_convergence_study(
         if not p_counts:
             p_counts = [10, 20, 40]
     else:
-        p_counts = [int(n) for n in panel_counts if int(n) < ref_n_panels]
+        given_counts = [int(n) for n in panel_counts]
+        dropped_counts = [n for n in given_counts if n >= ref_n_panels]
+        p_counts = [n for n in given_counts if n < ref_n_panels]
         if not p_counts:
-            p_counts = [int(n) for n in panel_counts]
+            raise ValueError(
+                f"All given panel_counts {given_counts} are at or above ref_n_panels={ref_n_panels}; "
+                "at least one tested level must be below ref_n_panels."
+            )
+        if dropped_counts:
+            kept_counts = list(dict.fromkeys(p_counts))
+            note_msg = (
+                f"Dropped panel_counts {dropped_counts} at or above ref_n_panels={ref_n_panels}; "
+                f"evaluated {kept_counts}."
+            )
+            warnings.warn(note_msg, UserWarning, stacklevel=2)
+            notes.append(note_msg)
     p_counts = list(dict.fromkeys(p_counts))  # each level once
 
     # Angle of attack sweep setup
@@ -1320,6 +1340,7 @@ def run_mesh_convergence_study(
         recommended_surface_n_panels=rec_surface_n,
         converged=converged,
         diagnosis=diagnosis,
+        notes=notes,
     )
 
     if progress:
