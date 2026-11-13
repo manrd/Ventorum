@@ -158,7 +158,8 @@ def _refuse_configuration(ac: Any, condition: Any, settings: Any, canonical: str
     The Fourier solver is refused (closed form: central differences are the
     method there). The 3D panel solver is refused before its solve: the
     adjoint covers only the lattice solvers (``"vlm"``, ``"linear"`` and
-    ``"nonlinear"``). The planform input needs linear airfoils: the planform
+    ``"nonlinear"``). The ``"h"`` input needs a height in the condition
+    (ground effect). The planform input needs linear airfoils: the planform
     chain interpolates the linear section properties of the sections.
     The section input (``"sections"``: a0, alpha_L0, Cd0 and Cm0 of every
     strip) is refused when a surface has a tabulated airfoil: on the
@@ -203,6 +204,10 @@ def _refuse_configuration(ac: Any, condition: Any, settings: Any, canonical: str
             f"Solver '{canonical}' has no adjoint gradients: the adjoint covers the lattice solvers "
             "only. The 3D panel solver has no vortex lattice. Use central differences of the "
             "production solve, or solver_type 'vlm', 'linear' or 'nonlinear'.")
+    if "h" in wrt and getattr(condition, "h", None) is None:
+        raise GradientScopeError(
+            "Input 'h' needs a height in the flight condition (FlightCondition h [m], ground "
+            "effect); the condition has h=None.")
     lattice_mean_line = canonical == "vlm" and getattr(settings, "n_chord", None) != 1
     shapes_given = lattice_mean_line and any(
         surf.sections and all(sec.shape is not None for sec in surf.sections) for surf in ac.surfaces
@@ -2033,8 +2038,6 @@ def _pack_jacobian(model: TorchReference, t: dict, gmap: dict, wrt: tuple[str, .
         j["nodes"] = nodes
     for key in SCALAR_INPUTS:
         if key in wrt:
-            if key == "h" and base["h"] is None:
-                continue
             gr = gmap.get(id(t[key])) if t.get(key) is not None else None
             j[key] = 0.0 if gr is None else float(np.asarray(gr, dtype=float))
     if "controls" in wrt:
@@ -2125,7 +2128,8 @@ def gradients(
         sweep_le, dihedral and incidence [rad], position [m] and per-section
         lists (chord [m], twist [rad], x_le [m] or None, z_le [m] or None,
         y_frac [-], alpha_L0 [rad]); it cannot be combined with ``"nodes"``
-        and needs linear airfoils. ``"controls"`` gives per control name the
+        and needs linear airfoils. ``"h"`` needs a height in the condition
+        (``GradientScopeError`` in free air). ``"controls"`` gives per control name the
         derivative per unit deflection [1/rad] (all controls with one name
         move together). ``"p"``, ``"q"``, ``"r"`` are the body rates
         [rad/s] (flight-dynamics body axes); the notes give the

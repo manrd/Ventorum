@@ -1556,3 +1556,15 @@ def test_gradient_vjp_refuses_a_seed_of_the_wrong_shape(float64_precision, cpu_d
                              wrt=("alpha",))
     assert math.isfinite(float(g1["alpha"])) and math.isfinite(float(g2["alpha"]))
 
+
+def test_input_h_needs_a_height(float64_precision, cpu_device) -> None:
+    """Input 'h' in free air is refused (formerly dropped from the jacobian without a message)."""
+    ac = vt.Aircraft(surfaces=[_plain_wing()])
+    cond = vt.FlightCondition(V_inf=30.0, alpha=np.radians(4.0))
+    st = vt.SolverSettings(solver_type="vlm", n_panels=8, n_chord=1)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        with pytest.raises(vt.GradientScopeError, match="'h'"):
+            vt.gradients(ac, cond, st, outputs=("CL",), wrt=("alpha", "h"))
+        with pytest.raises(vt.GradientScopeError, match="'h'"):
+            vt.gradient_vjp(ac, cond, st, seeds={"CL": 1.0}, wrt=("h",))

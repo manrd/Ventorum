@@ -305,7 +305,8 @@ Ground effect and the lifting lines refuse `mach > 0`. The gradients with
 The Fourier solver is refused with `GradientScopeError` (a `ValueError`): it is a
 closed form, and central differences of the production solve are the method there.
 The 3D panel solver is refused with `GradientScopeError` before its solve: the adjoint
-covers only the lattice solvers.
+covers only the lattice solvers. The input `"h"` needs a height in the condition
+(ground effect); in free air it is refused with `GradientScopeError`.
 Ground effect is supported: `h` is the height of the moment reference point, and the
 ground plane and its images follow the inputs. With body rates the ground images stay
 mirror images of the vortices, as in the production solve.
