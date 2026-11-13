@@ -239,10 +239,10 @@ Limits: largest Cp error below 0.03 at 32 x 64 and smaller than at 16 x 32; net 
 
 | mesh | flow | largest Cp error | rms Cp error | Cp check | net force [N] | force check |
 |---|---|---|---|---|---|---|
-| 16 x 32 | across the pole axis | 0.0397 | 0.00983 | - | 7.3e-16 | pass |
-| 16 x 32 | along the pole axis | 0.0200 | 0.01097 | - | 1.7e-15 | pass |
-| 32 x 64 | across the pole axis | 0.0220 | 0.00266 | pass | 1.4e-15 | pass |
-| 32 x 64 | along the pole axis | 0.0052 | 0.00258 | pass | 2.3e-15 | pass |
+| 16 x 32 | across the pole axis | 0.0397 | 0.00983 | - | below 1e-12 | pass |
+| 16 x 32 | along the pole axis | 0.0200 | 0.01097 | - | below 1e-12 | pass |
+| 32 x 64 | across the pole axis | 0.0220 | 0.00266 | pass | below 1e-12 | pass |
+| 32 x 64 | along the pole axis | 0.0052 | 0.00258 | pass | below 1e-12 | pass |
 
 ## V12. 3D panel method: ellipsoid at oblique onset
 
@@ -314,4 +314,4 @@ Largest Cp error at the nodes, alpha = 4 deg, all nodes except the trailing-edge
 | 200 | 0.0229 | pass | 1.78 | pass |
 | 400 | 0.0058 | - | 1.99 | pass |
 
-Run time: 38.7 s.
+Run time: 68.9 s.

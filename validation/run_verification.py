@@ -523,7 +523,7 @@ def case_panel3d_sphere() -> str:
             else:
                 cp_check = "-"
             rows.append([f"{n_lat} x {n_lon}", name, f"{e_max:.4f}", f"{e_rms:.5f}", cp_check,
-                         f"{force:.1e}", verdict(force < 1e-3)])
+                         "below 1e-12" if force < 1e-12 else f"{force:.1e}", verdict(force < 1e-3)])
     s = ["## V11. 3D panel method: sphere", "",
          "Reference: exact potential flow past a sphere, Cp = 1 - (9/4) sin^2(theta), with theta the angle "
          "between the surface point and the onset direction (H. Lamb, Hydrodynamics, 6th ed., 1932, "
