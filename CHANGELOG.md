@@ -158,6 +158,11 @@ a minor version can change a public interface.
 
 ### Changed
 
+- CI: each OS and Python version now has two test jobs that run at the same time. The part
+  `main` runs the tests not marked slow, the documentation, the verification reports and the
+  examples; the part `slow` runs the tests marked slow. The two parts run the same tests as
+  before. The single Windows job took 50 to more than 90 minutes and often reached its limit.
+
 - Agent tools: automatic mesh fit. When the caller sets no spanwise count (no `n_panels` in
   `settings` or on a surface) and a lattice call is above the mesh limit (4000 panels) or the work
   budget, the tools reduce the spanwise strips of all surfaces by the same count and keep the

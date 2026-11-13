@@ -11,15 +11,20 @@ permissions:
 jobs:
   test:
     runs-on: ${{ matrix.os }}
-    # The full suite, two verification reports and the examples take about
-    # 60 minutes on the Windows runner and up to about 60 minutes on the
-    # slower Ubuntu runners, so all jobs get 90 minutes.
+    # Each OS and Python version has two jobs that run at the same time.
+    # The part "main" runs the tests not marked slow, the documentation,
+    # the verification reports and the examples. The part "slow" runs the
+    # tests marked slow. Together they run all tests except the benchmarks.
+    # In one job, the full suite took 50 to more than 90 minutes on the
+    # Windows runner (the 2D viscous tests take most of the time), so the
+    # jobs are split. Each job gets 90 minutes.
     timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest]
         python-version: ["3.11", "3.12", "3.13"]
+        part: [main, slow]
         include:
           # One Python version per extra OS keeps the CI time low. The
           # compiled kernels depend on the OS and compiler, not on Python.
@@ -30,6 +35,10 @@ jobs:
           # For a single check, start the hand-started workflow macos-debug.yml.
           - os: windows-latest
             python-version: "3.12"
+            part: main
+          - os: windows-latest
+            python-version: "3.12"
+            part: slow
     defaults:
       run:
         shell: bash
@@ -68,20 +77,22 @@ jobs:
             echo "The Cython kernels are compiled with OpenMP."
           fi
       - name: Lint
-        if: runner.os == 'Linux'
+        if: runner.os == 'Linux' && matrix.part == 'main'
         run: ruff check .
       - name: Documentation (warnings are errors)
-        if: runner.os == 'Linux'
+        if: runner.os == 'Linux' && matrix.part == 'main'
         env:
           MPLBACKEND: Agg
         run: sphinx-build -W --keep-going -b html docs docs/_build/html
       - name: OpenMP and PyTorch in one process
+        if: matrix.part == 'main'
         # Runs before the full test suite: a crash there stops the run with
         # no message, and this test shows the message.
         env:
           MPLBACKEND: Agg
         run: python -m pytest -q -m "not benchmark" tests/test_kernels.py -k "pytorch or openmp"
-      - name: Tests
+      - name: Tests (not slow)
+        if: matrix.part == 'main'
         env:
           MPLBACKEND: Agg
           VENTORUM_REQUIRE_OPENMP: ${{ runner.os == 'macOS' && '0' || '1' }}
@@ -89,26 +100,37 @@ jobs:
         # thread (the run goes on), so a slow or stuck test shows in the log
         # even when the job reaches its time limit. The 30 slowest tests are
         # listed at the end.
-        run: python -m pytest -q -m "not benchmark" -o faulthandler_timeout=600 --durations=30
+        run: python -m pytest -q -m "not benchmark and not slow" -o faulthandler_timeout=600 --durations=30
+      - name: Tests (slow)
+        if: matrix.part == 'slow'
+        env:
+          MPLBACKEND: Agg
+          VENTORUM_REQUIRE_OPENMP: ${{ runner.os == 'macOS' && '0' || '1' }}
+        run: python -m pytest -q -m "slow and not benchmark" -o faulthandler_timeout=600 --durations=30
       - name: Verification report (theory checks)
+        if: matrix.part == 'main'
         env:
           MPLBACKEND: Agg
         run: python validation/run_verification.py "$RUNNER_TEMP/verification_report.md"
       - name: Verification report matches the committed report
+        if: matrix.part == 'main'
         # The committed report must match the code. The comparison ignores
         # the run time and the environment line.
         run: python validation/compare_reports.py docs/verification_report.md "$RUNNER_TEMP/verification_report.md"
       - name: Verification report with the Numba kernels
+        if: matrix.part == 'main'
         env:
           MPLBACKEND: Agg
           VENTORUM_KERNEL: numba
         run: python validation/run_verification.py "$RUNNER_TEMP/verification_report_numba.md"
       - name: Numba verification report matches the committed report
+        if: matrix.part == 'main'
         # The Numba backend must give the same physics as the default
         # backend (round-off only). The comparison ignores the run time
         # and the environment line.
         run: python validation/compare_reports.py docs/verification_report.md "$RUNNER_TEMP/verification_report_numba.md"
       - name: Examples (smoke run)
+        if: matrix.part == 'main'
         env:
           MPLBACKEND: Agg
         run: |
