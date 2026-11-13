@@ -426,7 +426,14 @@ magnitude among the components of the same vector, because the round-off of a co
 is relative to its vector (CY, Cl and Cn of a symmetric state are zero by symmetry). The
 scale of the moment vector is not smaller than the scale of the force vector: the moments
 of a straight wing about a point on its quarter-chord line are all at the round-off, and
-without this floor their round-off gave a false mismatch. The
+without this floor their round-off gave a false mismatch. The scale of the force vector
+has a floor too: the thin-airfoil lift coefficient of a 1 deg angle, 2 pi times pi/180.
+The round-off of a force coefficient comes from the onset terms of the boundary
+condition, so it has the scale of the lift of an angle change, also at zero lift (a
+symmetric wing at alpha 0, where all force components are zero and the old scale was
+zero). At the floor, the limit of the check is the lift change of an angle-of-attack
+change of 1e-10 deg (float64). A case with a larger |CL| or |CY| keeps its relative
+check. The
 requested vector outputs (`strip_force`, `section_cl`) are compared relative to the
 largest production magnitude of the array.
 

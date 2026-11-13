@@ -1454,6 +1454,16 @@ _BRANCH_NEWTON_STEPS = 30
 # moment vector (relative scale of the forward check).
 _FORCE_VECTOR = ("CL", "CY")
 _MOMENT_VECTOR = ("Cl", "Cm", "Cn")
+# Lower limit of the force scale of the forward check [-]: the lift
+# coefficient of a 1 deg angle of attack on the thin-airfoil lift slope,
+# 2 pi per rad times pi / 180 rad (about 0.11). The round-off of a force
+# coefficient comes from the onset terms of the boundary condition (unit
+# velocity times the geometry), so it has the scale of the lift of an
+# angle change, also when the lift itself is zero (a symmetric wing at
+# alpha 0). At this floor the limit of the check (tol times the floor) is
+# the lift change of an angle-of-attack change of tol deg. A case with
+# |CL| or |CY| at or above the floor keeps its relative check.
+_FORCE_SCALE_FLOOR = 2.0 * math.pi * math.radians(1.0)
 
 
 # Limits of the componentwise backward error of the production state in the
@@ -1740,7 +1750,11 @@ def _forward_check(prep: dict, outputs: dict, prod: dict[str, float],
     of each. CL and CY are components of one force vector, and Cl, Cm and
     Cn are components of one moment vector: their differences are relative
     to the largest production magnitude of the components of the same
-    vector (the normwise relative error of the vector). The round-off of a
+    vector (the normwise relative error of the vector). The force scale
+    has the lower limit ``_FORCE_SCALE_FLOOR``, the lift coefficient of a
+    1 deg angle on the thin-airfoil lift slope (about 0.11): at zero lift
+    (a symmetric wing at alpha 0) all force components are zero or at the
+    round-off. The round-off of a
     vector component is relative to the vector, so a small component (CY
     in a small sideslip, or CY, Cl and Cn of a symmetric state, which are
     zero by symmetry) has no relative scale of its own. The moment scale
@@ -1757,7 +1771,10 @@ def _forward_check(prep: dict, outputs: dict, prod: dict[str, float],
     precision = prep["precision"]
     both64 = precision == "float64" and prep["precision_primal"] == "float64"
     tol = 1e-10 if both64 else 1e-4
-    force_scale = max(abs(prod[k]) for k in _FORCE_VECTOR)
+    # The floor keeps a scale at zero lift: max(|CL|, |CY|) is then zero or
+    # at the round-off, and the relative difference of a round-off value
+    # has no meaning (see _FORCE_SCALE_FLOOR).
+    force_scale = max(max(abs(prod[k]) for k in _FORCE_VECTOR), _FORCE_SCALE_FLOOR)
     # The force scale is the lower limit of the moment scale: a moment is a
     # sum of forces times arms, so its round-off is at most of the order of
     # the round-off of the forces. A state whose whole moment vector is zero
