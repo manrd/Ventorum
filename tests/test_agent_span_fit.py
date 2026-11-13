@@ -252,6 +252,48 @@ def test_node_displacements_keep_the_spanwise_count(small_limits):
     assert su["n_panels"] == n_span, su
     assert "spanwise count was reduced" not in su.get("mesh_note", ""), su
 
+
+def test_polar_sweep_in_ground_uses_the_largest_chordwise_count():
+    """In ground effect all angles use the largest automatic n_chord over the angles.
+
+    The sweep pinned the count of the first valid angle (the lowest alpha),
+    so the high angles ran with fewer chordwise panels than the automatic
+    rule asks for (4 instead of 11 here).
+    """
+    from ventorum.solvers.horseshoe import VortexLatticeSolver
+
+    wing = {"span_m": 4.0, "chord_m": 1.0}
+    fc = {"V_inf_m_s": 40.0, "h_m": 0.3}
+    p = polar_sweep(wing=dict(wing), alpha_start_deg=-4.0, alpha_end_deg=12.0, alpha_step_deg=4.0,
+                    flight_condition=dict(fc), settings={"n_panels": 12})
+    assert p["status"] == "success", p
+    ac = tools.build_aircraft_from_spec(wing=dict(wing))
+    sett = SolverSettings(n_panels=12)
+    c = tools.parse_condition(dict(fc), allow=("V_inf_m_s", "h_m"))
+    autos = [VortexLatticeSolver().resolve_n_chord(
+        ac, sett, tools.make_flight_condition(c, alpha_deg=a), None, ac.moment_reference())
+        for a in (-4.0, 0.0, 4.0, 8.0, 12.0)]
+    assert len(set(autos)) > 1, autos  # the case needs a count that changes with alpha
+    assert {row["n_chord"] for row in p["polar_table"]} == {max(autos)}, (p["polar_table"], autos)
+
+
+def test_polar_sweep_in_ground_estimate_matches_the_solved_mesh(monkeypatch):
+    """The work estimate of a polar sweep in ground effect uses the mesh that is solved."""
+    seen: list[int] = []
+    real = tools._check_call_work
+
+    def record(estimate, hint):
+        seen.append(int(estimate))
+        return real(estimate, hint)
+
+    monkeypatch.setattr(tools, "_check_call_work", record)
+    p = polar_sweep(wing={"span_m": 4.0, "chord_m": 1.0}, alpha_start_deg=-4.0, alpha_end_deg=12.0,
+                    alpha_step_deg=4.0, flight_condition={"V_inf_m_s": 40.0, "h_m": 0.3},
+                    settings={"n_panels": 12})
+    assert p["status"] == "success", p
+    n_chord = p["polar_table"][0]["n_chord"]
+    assert seen == [5 * (24 * n_chord) ** 2], (seen, n_chord)
+
 @pytest.mark.slow
 def test_ground_effect_fits_the_strips(small_limits):
     """The heights and free air use the fitted spanwise count and one chordwise count."""

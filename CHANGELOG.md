@@ -358,6 +358,18 @@ a minor version can change a public interface.
 
 ### Fixed
 
+- Agent tool `polar_sweep` in ground effect: all angles used the chordwise count of the first
+  valid angle (the lowest alpha), so the high angles ran with fewer chordwise panels than the
+  automatic rule asks for, while the work estimate and the span fit used the count of each
+  angle. All angles now use the largest automatic count over the angles, reduced to the mesh
+  limit if needed, and the estimate and the fit use the same mesh. RESULT CHANGE: on a
+  rectangular wing of span 4 m at h 0.3 m, n_chord goes from 4 to 11 and CL changes by 0.2 to
+  0.6 % (alpha -4 to 12 deg).
+- Agent tools: a surface with `node_displacements` keeps the spanwise count of its nodes. The
+  automatic span fit changed it, and the call failed.
+- 3D panel solver, pressure Kutta option: a Jacobian or residual that is not finite stops the
+  iteration with the current state, not converged, instead of an error from the rank test.
+
 - 3D panel solver, pressure Kutta option: the Newton iteration found a singular Jacobian only
   from an exact zero pivot of the LU factorization. With the OpenBLAS kernel of AVX-512 CPUs the
   pivot of an exactly singular Jacobian was about 1e-17, so the solver took a plain Newton step

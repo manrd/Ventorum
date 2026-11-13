@@ -924,7 +924,9 @@ def polar_sweep(
 
     ``flight_condition`` takes the same keys as :func:`wing_analysis`
     without ``alpha_deg``. In ground effect all angles use one mesh: the
-    mesh of the first valid angle. The ``axes`` input selects the axis
+    largest automatic chordwise count over the angles (the angle with the
+    smallest gap to the ground), reduced to the mesh limit if needed. The
+    ``axes`` input selects the axis
     system of Cm (``"body"`` by default, ``"all"`` adds the three moment
     sets to each row). With ``detail_level="full"``, ``dispatch`` is a list
     with one entry per row of ``polar_table``: the dispatch record of that
@@ -970,7 +972,11 @@ def polar_sweep(
 
     def _sweep_work(s: SolverSettings) -> int:
         if c["h_m"] is not None:
-            return sum(_planned_panels(ac, s, make_flight_condition(c, alpha_deg=a)) ** 2 for a in alphas)
+            # In ground effect all angles use one mesh: the largest automatic
+            # n_chord over the angles, capped (see _common_settings).
+            pinned, _ = _common_settings(ac, s, _strip_count(ac, s),
+                                         [make_flight_condition(c, alpha_deg=a) for a in alphas])
+            return len(alphas) * (_planned_panels(ac, pinned) ** 2)
         # Out of ground effect the automatic n_chord does not change with the
         # angle, but it depends on the controls: resolve it with a condition.
         return len(alphas) * (_planned_panels(ac, s, make_flight_condition(c, alpha_deg=alphas[0])) ** 2)
@@ -1003,28 +1009,15 @@ def polar_sweep(
 
     in_ground = c["h_m"] is not None
     if in_ground:
-        # One mesh for all angles: solve in order until the first valid
-        # angle, pin its chordwise count, and reuse it for the rest.
-        first_done: list[tuple[float, Any, Any, Any]] = []
-        remaining = list(alphas)
-        while remaining and fixed is None:
-            a = remaining.pop(0)
-            item = run(a)
-            first_done.append(item)
-            if item[1] is not None:
-                s_first = item[3]
-                used = _used_n_chord(item[1])
-                if s_first is sett:
-                    fixed = sett.clone()
-                    if fixed.n_chord is None and used is not None:
-                        fixed.n_chord = int(used)
-                else:
-                    fixed = s_first.clone()
-                    if used is not None:
-                        fixed.n_chord = int(used)
-        rest = run_cases(lambda a: run(a, fixed), remaining, estimate_panels(ac, fixed or sett),
-                         "auto") if fixed is not None else []
-        outputs = first_done + list(rest)
+        # One mesh for all angles: the largest automatic chordwise count over
+        # the angles (the angle with the smallest gap to the ground), reduced
+        # to the mesh limit if needed. An angle that strikes the ground gives
+        # the smallest count, so it does not set the mesh.
+        fixed, was_capped = _common_settings(ac, sett, strips,
+                                             [make_flight_condition(c, alpha_deg=a) for a in alphas])
+        if was_capped:
+            capped.append(fixed)
+        outputs = list(run_cases(lambda a: run(a, fixed), alphas, estimate_panels(ac, fixed), "auto"))
     elif (resolve_solver_type(sett.solver_type) in ("linear", "nonlinear")
           or (resolve_solver_type(sett.solver_type) == "vlm"
               and (size_class(estimate_panels(ac, sett)) == "small"
