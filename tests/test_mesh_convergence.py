@@ -629,3 +629,67 @@ def test_recommendation_does_not_depend_on_measured_times(monkeypatch):
     assert a["recommended_settings"] == b["recommended_settings"]
     assert ([p["efficiency_score"] for p in a["all_evaluated_points"]]
             == [p["efficiency_score"] for p in b["all_evaluated_points"]])
+
+
+def test_gci_triplets_non_constant_ratios_and_order_limit():
+    """Synthetic f(n) = 1 - 5/n^2 on default counts gives p = 2 and GCI >= true error."""
+    import math
+    import ventorum.geometry.mesh_convergence as mc
+    from ventorum.core.error_bars import ORDER_UPPER, observed_order
+    from ventorum.geometry.mesh_convergence import MeshConvergencePoint, _compute_gci_triplets
+
+    counts = (10, 15, 20, 30, 40, 60, 80)
+    pts = [
+        MeshConvergencePoint(
+            n_panels=n,
+            spacing="auto",
+            total_panels=n,
+            panels_solved=n,
+            CL=1.0 - 5.0 / (n * n),
+            CDi=1.0 - 5.0 / (n * n),
+        )
+        for n in counts
+    ]
+    _compute_gci_triplets({"auto": pts})
+    by_n = {p.n_panels: p for p in pts}
+
+    for i in range(len(counts) - 2):
+        n1, n2, n3 = counts[i], counts[i + 1], counts[i + 2]
+        p1, p2, p3 = by_n[n1], by_n[n2], by_n[n3]
+        r21 = n3 / n2
+        r32 = n2 / n1
+        p_obs = observed_order(p3.CL, p2.CL, p1.CL, r21, r32)
+        assert p_obs == pytest.approx(2.0, abs=1e-9)
+        assert p3.gci_cl is not None and p3.gci_cdi is not None
+        e23 = abs(p3.CL - p2.CL) / abs(p3.CL)
+        p_implied = math.log(1.0 + 125.0 * e23 / p3.gci_cl) / math.log(r21)
+        assert p_implied == pytest.approx(2.0, abs=1e-9)
+
+    for n in (20, 40, 80):
+        pt = by_n[n]
+        true_err_pct = (5.0 / (n * n)) / abs(pt.CL) * 100.0
+        assert pt.gci_cl is not None and pt.gci_cl >= true_err_pct
+        assert pt.gci_cdi is not None and pt.gci_cdi >= true_err_pct
+
+    # High-order triplet (p = 8) must have its order clipped to ORDER_UPPER = 4.0.
+    pts_high = [
+        MeshConvergencePoint(
+            n_panels=n,
+            spacing="auto",
+            total_panels=n,
+            panels_solved=n,
+            CL=1.0 - (10.0 / n) ** 8,
+            CDi=1.0 - (10.0 / n) ** 8,
+        )
+        for n in (10, 20, 40)
+    ]
+    _compute_gci_triplets({"auto": pts_high})
+    e23_high = abs(pts_high[2].CL - pts_high[1].CL) / abs(pts_high[2].CL)
+    gci_unclipped = 125.0 * e23_high / (2.0**8 - 1.0)
+    gci_clipped_min = 125.0 * e23_high / (2.0**ORDER_UPPER - 1.0)
+    assert pts_high[2].gci_cl is not None
+    assert pts_high[2].gci_cl >= gci_clipped_min
+    assert pts_high[2].gci_cl > gci_unclipped
+    assert "Richardson limit" not in (mc.__doc__ or "")
+
+
