@@ -1536,3 +1536,23 @@ def test_gradients_refuse_the_panel_solver_before_the_solve(float64_precision, m
         with pytest.raises(vt.GradientScopeError, match="panel"):
             vt.gradient_vjp(ac, cond, st, seeds={"CL": 1.0}, wrt=("alpha",))
 
+
+def test_gradient_vjp_refuses_a_seed_of_the_wrong_shape(float64_precision, cpu_device) -> None:
+    """A vector seed must have the documented shape (an (n, 1) seed formerly broadcast silently)."""
+    ac = vt.Aircraft(surfaces=[_plain_wing()])
+    cond = vt.FlightCondition(V_inf=30.0, alpha=np.radians(4.0))
+    st = vt.SolverSettings(solver_type="vlm", n_panels=8, n_chord=1)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        n_s = vt.analyze(ac.clone(), cond, st.clone()).details["loads"].strip_force.shape[0]
+        for seeds in ({"section_cl": np.ones((n_s, 1))}, {"section_cl": np.ones(n_s + 1)},
+                      {"strip_force": np.ones((n_s, 1))}, {"strip_force": np.ones(3)},
+                      {"strip_force": np.ones((n_s, 3, 1))}, {"CL": np.ones(2)}):
+            with pytest.raises(ValueError, match="shape"):
+                vt.gradient_vjp(ac, cond, st, seeds=seeds, wrt=("alpha",))
+        # The documented shapes are accepted.
+        g1 = vt.gradient_vjp(ac, cond, st, seeds={"section_cl": np.ones(n_s)}, wrt=("alpha",))
+        g2 = vt.gradient_vjp(ac, cond, st, seeds={"strip_force": np.ones((n_s, 3)), "CL": 1.0},
+                             wrt=("alpha",))
+    assert math.isfinite(float(g1["alpha"])) and math.isfinite(float(g2["alpha"]))
+

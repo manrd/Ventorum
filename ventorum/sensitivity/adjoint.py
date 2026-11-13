@@ -2205,6 +2205,28 @@ def gradients(
         symmetric=prep["symmetric"], notes=notes)
 
 
+def _check_seed_shapes(prep: dict, seeds: dict) -> None:
+    """Raise ValueError when a seed does not have the shape of its output.
+
+    A scalar output takes a scalar weight. A vector output takes an array
+    with the shape of the production array: (n_strips, 3) for
+    ``"strip_force"`` and (n_strips,) for ``"section_cl"``. The weighted
+    sum broadcasts the seed with the output, so a seed of another shape
+    (for example (n_strips, 1)) would give a wrong gradient without an
+    error.
+    """
+    vectors = tuple(o for o in seeds if o in VECTOR_OUTPUTS)
+    shapes = {k: arr.shape for k, arr in _production_vectors(prep, vectors).items()}
+    for o, w in seeds.items():
+        got = np.shape(w)
+        want = shapes.get(o, ())
+        if got != want:
+            raise ValueError(
+                f"The seed of output {o!r} has the shape {got}; it must have the shape {want} "
+                "(a float for a scalar output, (n_strips, 3) for 'strip_force', "
+                "(n_strips,) for 'section_cl').")
+
+
 def gradient_vjp(
     geometry: Any,
     condition: Any,
@@ -2241,6 +2263,13 @@ def gradient_vjp(
     dict
         Gradient of the weighted sum, same input structure as the jacobian
         of :func:`gradients`.
+
+    Raises
+    ------
+    ValueError
+        For an unknown output or input name, a refused configuration, a
+        non-finite input, or a seed that does not have the shape of its
+        output.
     """
     if not seeds:
         raise ValueError(f"seeds must name at least one output; use one of {list(ALL_OUTPUTS)}.")
@@ -2249,6 +2278,7 @@ def gradient_vjp(
             raise ValueError(f"Unknown output {o!r}; use one of {list(ALL_OUTPUTS)}.")
     _, ins = _check_names(tuple(seeds), wrt)
     prep = _prepare_case(geometry, condition, settings, axes, ins, tuple(seeds), method)
+    _check_seed_shapes(prep, seeds)
     import torch
 
     model: TorchReference = prep["model"]

@@ -60,7 +60,10 @@ Outputs: `"CL"`, `"CY"`, `"CDi"`, `"CDp"`, `"CD"`, `"Cl"`, `"Cm"`, `"Cn"` in the
 `axes` (`"body"`, `"stability"`, `"wind"`). The vector outputs `"strip_force"` and
 `"section_cl"` go through `gradient_vjp` with a seed per output:
 
-Use the strips of the solved lattice for the seed shape:
+Use the strips of the solved lattice for the seed shape. A seed must have the shape of
+its output: (n_strips, 3) for `"strip_force"`, (n_strips,) for `"section_cl"` and a
+float for a scalar output. Another shape (for example (n_strips, 1)) raises
+`ValueError`:
 
 ```python
 loads = vt.analyze(aircraft, condition, settings).details["loads"]
