@@ -1530,7 +1530,8 @@ AGENT_TOOL_DEFINITIONS: list[dict[str, Any]] = [
     {
         "name": "ventorum_panel_analysis",
         "description": "Aerodynamic analysis with the 3D source-doublet potential-flow panel method "
-                       "(Ventorum-3DP, Morino Kutta condition). Computes CL, CD (pressure), CDi (Trefftz), "
+                       "(Ventorum-3DP, Morino Kutta condition). Computes CL, CD (the Trefftz-plane CDi, "
+                       "no profile drag), CD_pressure (the surface pressure integral), L_over_D = CL/CD, "
                        "CY, Cl, Cm and Cn, the trust score, and the execution dispatch record. Ground effect "
                        "is supported through flight_condition.h_m. Factorization work is N^3 / 3 operations "
                        f"for N solved panels (the full mesh with sideslip or an asymmetric surface). Refuses "

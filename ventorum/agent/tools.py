@@ -790,12 +790,19 @@ def panel_analysis(
     res = solver.solve(ac, fc, solver_sett)
 
     m = metrics_payload(res)
-    cd_press = float(res.totals.CDi_nearfield)
-    m["CD"] = rnd(cd_press)
-    m["CD_pressure"] = rnd(cd_press)
-    m["CDi"] = rnd(res.totals.CDi)
-    m["CDi_trefftz"] = rnd(res.totals.CDi)
-    m["drag_basis"] = "pressure integral"
+    # CD is the Trefftz-plane induced drag: on a panel mesh it converges
+    # faster than the pressure integral (see the theory manual, Ventorum-3DP).
+    # L/D uses the same CD. The pressure integral stays as CD_pressure. The
+    # panel method has no profile drag, so the payload has no CDp key.
+    cd_trefftz = float(res.totals.CDi)
+    m.pop("CDp", None)
+    m["CD"] = rnd(cd_trefftz, 7)
+    m["CD_pressure"] = rnd(res.totals.CDi_nearfield, 7)
+    m["CDi"] = rnd(cd_trefftz, 7)
+    m["CDi_trefftz"] = rnd(cd_trefftz, 7)
+    m["L_over_D"] = rnd(lift_to_drag(res.totals.CL, cd_trefftz), 3)
+    m["drag_basis"] = ("CDi (Trefftz plane), potential flow: no profile drag. "
+                       "CD_pressure is the surface pressure integral.")
 
     b_ref, c_ref = float(res.b_ref), float(res.c_ref)
     m["Cl"], m["Cm"], m["Cn"] = _apply_axes(
@@ -815,8 +822,9 @@ def panel_analysis(
     where = "free air" if c["h_m"] is None else f"h={c['h_m']:g} m above the ground"
     device, precision = result_device_precision(res)
     summary = (
-        f"[Ventorum RESULT] {ac.name}: CL={fmt(m['CL'], '.4f')}, CD={fmt(m['CD'], '.5f')} (pressure), "
-        f"CDi={fmt(m['CDi'], '.5f')} (Trefftz), L/D={fmt(m['L_over_D'], '.2f')}, "
+        f"[Ventorum RESULT] {ac.name}: CL={fmt(m['CL'], '.4f')}, CD={fmt(m['CD'], '.5f')} (Trefftz CDi, "
+        f"no profile drag), CD_pressure={fmt(m['CD_pressure'], '.5f')}, L/D={fmt(m['L_over_D'], '.2f')} "
+        f"(CL/CD), "
         f"Cm={fmt(m['Cm'], '.4f')} about {_fmt_point(rp)} m. "
         f"Condition: alpha={c['alpha_deg']:g} deg, beta={c['beta_deg']:g} deg, V={c['V_inf_m_s']:g} m/s, "
         f"{where}. Solver: panel3d, converged={bool(res.converged)}. "

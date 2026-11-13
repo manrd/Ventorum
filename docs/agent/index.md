@@ -227,7 +227,7 @@ print(res["alpha_deg"], res["Cl"], res["converged"])
   - `axes`: optional moment axes (`"body"`, `"stability"`, `"wind"`, or `"all"`, default `"body"`).
   - `detail_level`: optional detail level (`"summary"`, `"standard"` (the default), or `"full"`).
 - **Outputs:**
-  - Aerodynamic force and moment coefficients: `CL`, `CD` (pressure drag), `CDi` (Trefftz induced drag), `CY`, `Cl`, `Cm`, `Cn` for the flight condition.
+  - Aerodynamic force and moment coefficients: `CL`, `CD`, `CDi`, `CY`, `Cl`, `Cm`, `Cn` for the flight condition. `CD` is the induced drag of the Trefftz plane (equal to `CDi` and `CDi_trefftz`): on a panel mesh it converges faster than the pressure integral. The potential flow has no profile drag, so the metrics have no `CDp`. `CD_pressure` is the drag of the surface pressure integral (the near-field drag). `L_over_D` is `CL / CD`. `drag_basis` states this.
   - `trust`: trust score and warnings.
   - `dispatch`: execution record (`backend`, `device`, `ground_solver`).
   - `cp`: surface pressure coefficient array [-] per panel when `cp` is true. With a symmetric solve (no sideslip and every surface symmetric) it covers the solved right half (y >= 0) only.
@@ -255,7 +255,7 @@ res = call_tool("ventorum_panel_analysis", {
     "flight_condition": {"V_inf_m_s": 30.0, "alpha_deg": 4.0},
     "settings": {"n_chord": 20, "n_panels": 30},
 })
-print("CL:", res["metrics"]["CL"], "CD (pressure):", res["metrics"]["CD"], "CDi (Trefftz):", res["metrics"]["CDi"])
+print("CL:", res["metrics"]["CL"], "CD (Trefftz):", res["metrics"]["CD"], "CD_pressure:", res["metrics"]["CD_pressure"])
 ```
 
 ## Example
