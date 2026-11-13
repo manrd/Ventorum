@@ -446,8 +446,26 @@ componentwise backward error (Oettli and Prager 1964) of the production circulat
 `G*` in the system of the reference copy:
 
 ```text
-omega = max_i |A G* - b|_i / (|A| |G*| + |b|)_i
+omega = max_i |A G* - b|_i / (|A| |G*| + f)_i,    f_i = max(|b_i|, sum_k |t_ik|)
 ```
+
+Here `b_i = sum_k t_ik` is the sum of the terms of row `i` (the onset terms, for example
+`-V (n_x d_x + n_y d_y + n_z d_z)` of the vortex lattice, and `V alpha_L0` of the lifting
+line), and `f` is the magnitude of these terms before they cancel. By the theorem of
+Oettli and Prager (Higham 2002, theorem 7.3), `omega` is the smallest `eps` for which
+`G*` solves a system with `|dA| <= eps |A|` and `|db| <= eps f`, for any non-negative
+tolerance vector `f` (Higham 2002, section 7.1). The rounding error of a computed sum
+of terms is bounded by `gamma_m sum_k |t_ik|` (Higham 2002, lemma 3.1), not by `|b_i|`,
+so the production solve and the reference copy can agree on `b_i` only to about
+`u sum_k |t_ik|`. With `f = |b|`, an untwisted cambered wing at exactly
+`alpha = alpha_L0` gave a backward error of order 1 for a correct state (0.29 on the
+vortex lattice and 0.54 on the nonlinear lifting line in float64), because its terms
+cancel and `|b|` is at the round-off; this occurs only within about 1e-10 rad of that
+angle in float64. With `f = sum_k |t_ik|` the same states give 3e-16 or less. When the terms
+do not cancel, `sum_k |t_ik|` is of the order of `|b_i|` and the check is as strict as
+with `|b|`. For the nonlinear lifting line, the terms of a row are `|A| |G*|`,
+`2 |W x dl| |G*|` and `|U|^2 dA` times the section lift with the terms of the section
+angle (`sum_k |W_k n_k| / |W|`) and of `alpha_L0` multiplied by the slope.
 
 For the nonlinear lifting line, `A` is the Newton Jacobian and `A G* - b` is the
 residual of the section lift. Above 1e-6 (the gradients and the production solve both
@@ -512,7 +530,13 @@ line the limit is at least 100 times the solver `tolerance`, as above.
   When a central step of a control goes past the deflection limit of 30 deg, the
   differences are one-sided, away from the limit: the second-order one-sided difference
   `(-3 f(0) + 4 f(s h) - f(2 s h)) / (2 s h)` with the same Richardson combination. When
-  controls of one name are at both limits, the check raises `ValueError`.
+  controls of one name are at both limits, the check raises `ValueError`. The input
+  checks refuse a negative profile drag coefficient `Cd0`. When the largest central step
+  of `Cd0` goes below 0 (`Cd0 - h < 0`, for example at `Cd0 = 0`), the differences of
+  `Cd0` are one-sided and forward (`s = +1`), so no point is below `Cd0`. The forward
+  difference has the error `-(h^2 / 3) f'''(x0) + O(h^3)`: it is of order `h^2`, as the
+  central difference, so the Richardson combination and the error estimate stay the
+  same. `"one_sided"` in the details gives the side.
 
 Path of the partials: `method="auto"` (the default) takes the backend that
 `set_vjp_backend` forces, else the `grad_vjp` entry of the machine profile for the

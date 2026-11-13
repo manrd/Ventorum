@@ -1425,6 +1425,10 @@ def _solve_condition(
             CY_farfield=totals.CY_farfield,
             Cn_trefftz=totals.Cn_trefftz,
             post_stall_branch=non_unique,
+            CDp=totals.CDp,
+            Cl=totals.Cl,
+            Cm=totals.Cm,
+            Cn=totals.Cn,
             **lattice_error_inputs(lattice, main_surface),
         )
         flags = np.where(sol["m"] <= 0.0, "post-stall, non-unique", "attached")
@@ -2126,6 +2130,7 @@ class _PanelCoupling:
                 # Near-field and far-field side force, as in the lattice coupling
                 # (no near-field Cn in stability axes there either).
                 CY=res.totals.CY, CY_farfield=res.totals.CY_farfield, Cn_trefftz=res.totals.Cn_trefftz,
+                CDp=res.totals.CDp, Cl=res.totals.Cl, Cm=res.totals.Cm, Cn=res.totals.Cn,
             )
             return res
 

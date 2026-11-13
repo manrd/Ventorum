@@ -1500,32 +1500,66 @@ _RESIDUAL_TOL_FLOAT32 = 3e-2
 _RESIDUAL_TOL_NONLINEAR_FACTOR = 100.0
 
 
-def _backward_error(A: Any, rhs: Any, g: Any) -> float:
+def _backward_error(A: Any, rhs: Any, g: Any, rhs_terms: Any = None) -> float:
     """Return the componentwise backward error of *g* in ``A g = rhs`` (Oettli and Prager 1964).
 
-    ``omega = max_i |A g - rhs|_i / (|A| |g| + |rhs|)_i`` [-], in the dtype
-    of the tensors. A row with a zero denominator gives 0 when its residual
+    ``omega = max_i |A g - rhs|_i / (|A| |g| + f)_i`` [-], in the dtype of
+    the tensors. A row with a zero denominator gives 0 when its residual
     is 0, else infinity.
+
+    The tolerance vector *f* of the right-hand side is ``|rhs|`` when
+    *rhs_terms* is None. With *rhs_terms* (the magnitude of the terms of
+    each row before they cancel, ``sum_k |t_ik|`` for
+    ``rhs_i = sum_k t_ik``, unit of *rhs*), *f* is
+    ``max(|rhs|, rhs_terms)``.
+
+    Why this is the correct scale: by the theorem of Oettli and Prager
+    (Higham 2002, theorem 7.3), *omega* is the smallest ``eps`` for which
+    *g* solves ``(A + dA) g = rhs + drhs`` with ``|dA| <= eps |A|`` and
+    ``|drhs| <= eps f``, for any non-negative tolerance vector *f*
+    (Higham 2002, section 7.1). The right-hand side is a computed sum of
+    onset terms (for example ``-V (n_x d_x + n_y d_y + n_z d_z)``). The
+    rounding error of a computed sum or inner product is bounded by
+    ``gamma_m sum_k |t_ik|`` (Higham 2002, lemma 3.1 and section 3.1),
+    not by ``|rhs_i|``. So the production solve and the reference copy
+    can agree on ``rhs_i`` only to about ``u sum_k |t_ik|``. When the
+    terms cancel (an untwisted cambered wing at exactly
+    ``alpha = alpha_L0``), ``|rhs_i|`` is itself at the round-off, and
+    ``f = |rhs|`` gives a backward error of order 1 for a correct state.
+    With ``f = sum_k |t_ik|`` the backward error is the relative
+    perturbation of the data that the state needs, at the round-off for
+    a correct state. When the terms do not cancel, ``sum_k |t_ik|`` is of
+    the order of ``|rhs_i|``, and the check stays as strict as before
+    (within the ratio ``sum_k |t_ik| / |rhs_i|`` of the row).
     """
     import torch
 
     with torch.no_grad():
         r = torch.abs(A @ g - rhs)
-        denom = torch.abs(A) @ torch.abs(g) + torch.abs(rhs)
+        f = torch.abs(rhs)
+        if rhs_terms is not None and tuple(rhs_terms.shape) == tuple(f.shape):
+            f = torch.maximum(f, torch.abs(rhs_terms).to(dtype=f.dtype, device=f.device))
+        denom = torch.abs(A) @ torch.abs(g) + f
         tiny = torch.finfo(r.dtype).tiny
         ratio = torch.where(denom > tiny, r / torch.clamp(denom, min=tiny),
                             torch.where(r > 0.0, torch.full_like(r, float("inf")), torch.zeros_like(r)))
         return float(torch.max(ratio)) if ratio.numel() else 0.0
 
 
-def _residual_check(prep: dict, A: Any, rhs: Any, g: Any) -> float:
+def _residual_check(prep: dict, A: Any, rhs: Any, g: Any, rhs_terms: Any = None) -> float:
     """Check that the production circulation solves the system of the reference copy.
 
     The check computes the componentwise backward error (Oettli and
     Prager 1964) of the production state *g* in the system ``A g = rhs``
     of the reference copy::
 
-        omega = max_i |A g - rhs|_i / (|A| |g| + |rhs|)_i
+        omega = max_i |A g - rhs|_i / (|A| |g| + f)_i
+
+    with ``f = max(|rhs|, rhs_terms)``, the magnitude of the terms of each
+    right-hand-side row before they cancel (see :func:`_backward_error`).
+    At an exact cancellation of the onset terms (an untwisted cambered
+    wing at ``alpha = alpha_L0``) ``|rhs|`` alone is at the round-off and
+    gives a false failure.
 
     The output comparison of :func:`_forward_check` cannot see a wrong
     term of the boundary condition (a normal, a section alpha_L0, the
@@ -1546,6 +1580,11 @@ def _residual_check(prep: dict, A: Any, rhs: Any, g: Any) -> float:
         Right-hand side of the system.
     g : torch.Tensor
         Production circulation per unknown [m^2/s].
+    rhs_terms : torch.Tensor or None, optional
+        Magnitude of the terms of each right-hand-side row before they
+        cancel (unit of *rhs*). None takes ``_rhs_terms`` of the last
+        forward pass of the reference copy (``prep["model"]``), else
+        ``|rhs|``.
 
     Returns
     -------
@@ -1573,7 +1612,9 @@ def _residual_check(prep: dict, A: Any, rhs: Any, g: Any) -> float:
     tol = _RESIDUAL_TOL_FLOAT64 if both64 else _RESIDUAL_TOL_FLOAT32
     if prep.get("canonical") == "nonlinear":
         tol = max(tol, _RESIDUAL_TOL_NONLINEAR_FACTOR * float(prep["settings"].tolerance))
-    omega = _backward_error(A, rhs, g)
+    if rhs_terms is None and prep.get("model") is not None:
+        rhs_terms = prep["model"].b.get("_rhs_terms")
+    omega = _backward_error(A, rhs, g, rhs_terms)
     if not math.isfinite(omega) or omega > tol:
         raise RuntimeError(
             f"The production circulation does not solve the system of the reference copy: "
@@ -1647,7 +1688,7 @@ def _float64_check_limit(prep: dict) -> float:
     return tol
 
 
-def float64_check_system(prep: dict) -> tuple[Any, Any, Any]:
+def float64_check_system(prep: dict, with_terms: bool = False) -> tuple:
     """Assemble the system of the reference copy once in float64, for the check only.
 
     The reference model is built again from the geometry of the production
@@ -1660,6 +1701,9 @@ def float64_check_system(prep: dict) -> tuple[Any, Any, Any]:
     ----------
     prep : dict
         Case of :func:`_prepare_case`.
+    with_terms : bool, optional
+        If True, also return the magnitude of the terms of each
+        right-hand-side row before they cancel (see :func:`_backward_error`).
 
     Returns
     -------
@@ -1670,6 +1714,9 @@ def float64_check_system(prep: dict) -> tuple[Any, Any, Any]:
         Right-hand side in float64.
     g : torch.Tensor
         Production circulation per unknown [m^2/s] in float64.
+    rhs_terms : torch.Tensor or None
+        Only with *with_terms*: the magnitude of the right-hand-side terms
+        per row (unit of *rhs*), or None when the model does not give it.
     """
     import torch
 
@@ -1681,6 +1728,8 @@ def float64_check_system(prep: dict) -> tuple[Any, Any, Any]:
                         device=model.b["device"])
     with torch.no_grad():
         _, A, rhs = model.forward(t, g)
+    if with_terms:
+        return A, rhs, g, model.b.get("_rhs_terms")
     return A, rhs, g
 
 
@@ -1701,8 +1750,10 @@ def _residual_check_float64(prep: dict, system: tuple | None = None) -> float:
     prep : dict
         Case of :func:`_prepare_case`.
     system : tuple or None, optional
-        ``(A, rhs, g)`` in float64; None assembles it with
-        :func:`float64_check_system`.
+        ``(A, rhs, g)`` or ``(A, rhs, g, rhs_terms)`` in float64; None
+        assembles it with :func:`float64_check_system`. Without
+        ``rhs_terms`` the tolerance of the right-hand side is ``|rhs|``
+        (see :func:`_backward_error`).
 
     Returns
     -------
@@ -1714,9 +1765,12 @@ def _residual_check_float64(prep: dict, system: tuple | None = None) -> float:
     RuntimeError
         When omega is above the limit of :func:`_float64_check_limit`.
     """
-    A, rhs, g = float64_check_system(prep) if system is None else system
+    if system is None:
+        system = float64_check_system(prep, with_terms=True)
+    A, rhs, g = system[:3]
+    rhs_terms = system[3] if len(system) > 3 else None
     tol = _float64_check_limit(prep)
-    omega = _backward_error(A, rhs, g)
+    omega = _backward_error(A, rhs, g, rhs_terms)
     if not math.isfinite(omega) or omega > tol:
         raise RuntimeError(
             f"The production circulation does not solve the float64 system of the reference copy: "

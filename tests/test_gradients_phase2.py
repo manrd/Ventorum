@@ -745,6 +745,51 @@ def test_residual_check_detects_a_wrong_boundary_condition(float64_cpu) -> None:
             adjoint._residual_check(prep, A2, rhs2, g)
 
 
+@pytest.mark.parametrize("solver", ["vlm", "linear", "nonlinear"])
+def test_residual_check_at_the_zero_lift_angle(solver, float64_cpu) -> None:
+    """Regression: an untwisted cambered wing at exactly alpha = alpha_L0 passes the residual check.
+
+    The onset terms of each right-hand-side row cancel there, so ``|rhs|``
+    is at the round-off. With ``|rhs|`` as the scale, the backward error of
+    the correct state was 0.285 (vortex lattice) and 0.54 (nonlinear lifting
+    line), above the limit 1e-6. The scale is now the magnitude of the terms
+    before they cancel. A state with a 0.01 deg angle error in one row still
+    fails.
+    """
+    import torch
+
+    from ventorum.sensitivity import adjoint
+
+    a_l0 = -0.035
+    af = vt.LinearAirfoil(a0=2.0 * np.pi, alpha_L0=a_l0, Cd0=0.0, Cm0=-0.05)
+    wing = vt.LiftingSurface(name="Wing", semi_span=4.0, sections=[
+        vt.WingSection(y_frac=0.0, chord=1.0, airfoil=af), vt.WingSection(y_frac=1.0, chord=0.6, airfoil=af)])
+    ac = vt.Aircraft(surfaces=[wing])
+    cond = vt.FlightCondition(V_inf=30.0, alpha=a_l0)
+    st = _settings(solver, 2 if solver == "vlm" else None)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        res = vt.gradients(ac, cond, st, outputs=("CL",), wrt=("alpha",))
+        prep = adjoint._prepare_case(ac, cond, st, "body", ("alpha",), ("CL",), "reference")
+    assert any("backward error" in n for n in res.notes)
+    model = prep["model"]
+    t = adjoint.make_input_tensors(model, prep["base"], ("alpha",), prep["device"], prep["precision"], prep)
+    g = torch.as_tensor(prep["g_unknown"], dtype=model.b["dtype"], device=model.b["device"])
+    with torch.no_grad():
+        _, A, rhs = model.forward(t, g)
+    terms = model.b["_rhs_terms"]
+    assert adjoint._residual_check(prep, A, rhs, g, terms) <= 1e-12
+    # The old scale |rhs| fails the correct state for the vortex lattice and the nonlinear lifting line.
+    if solver != "linear":
+        assert adjoint._backward_error(A, rhs, g) > 1e-6
+    # A wrong state: the solution with an error of 0.01 deg times the onset terms in row 3.
+    e = torch.zeros_like(rhs)
+    e[3] = float(np.radians(0.01)) * float(torch.max(terms))
+    bad = g + torch.linalg.solve(A, e)
+    with pytest.raises(RuntimeError, match="does not solve the system"):
+        adjoint._residual_check(prep, A, rhs, bad, terms)
+
+
 @pytest.mark.parametrize("solver,n_chord", [("nonlinear", None), ("linear", None), ("vlm", 2)])
 def test_sections_refused_on_tabulated_airfoils(solver, n_chord, float64_cpu) -> None:
     """Regression: wrt='sections' with a tabulated airfoil raises GradientScopeError.

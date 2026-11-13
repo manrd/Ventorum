@@ -225,7 +225,10 @@ def check_gradients(
         ``"controls"`` is checked per control name (all controls with one
         name move together; base step 1e-4 rad). Near the deflection limit
         of 30 deg the differences are one-sided, away from the limit
-        (``"one_sided"`` in the details gives the side). ``"p"``, ``"q"``, ``"r"``
+        (``"one_sided"`` in the details gives the side). ``"sections"``
+        uses forward differences for ``Cd0`` when a central step would make
+        it negative (for example at ``Cd0 = 0``; ``"one_sided"`` is then 1).
+        ``"p"``, ``"q"``, ``"r"``
         use the base step 1e-4 of the nondimensional rate (1e-4 times
         2 V / b_ref for p and r, 2 V / c_ref for q) [rad/s].
         ``"planform"`` is checked parameter by parameter (surface
@@ -527,10 +530,14 @@ def check_gradients(
                         _set_section_prop(ac3, _n, _j, _p, v)
                         return _evaluate(ac3, condition, f"sections.{_n}[{_j}].{_p}", v - _x0)
 
-                    fd = _ladder(_get, x0, h, _STEP_FACTORS, outs, eps)
+                    side = _section_side(prop, x0, h * max(_STEP_FACTORS))
+                    fd = _ladder(_get, x0, h, _STEP_FACTORS, outs, eps, side=side)
                     grads = {o: float(np.asarray(jac[o]["sections"][prop], dtype=float).reshape(-1) @ w)
                              for o in outs}
                     _record("sections", f"sections.{surf.name}[{j}].{prop}", grads, fd, h / 1e-4)
+                    if side:
+                        for o in outs:
+                            details[f"{o}:sections.{surf.name}[{j}].{prop}"]["one_sided"] = side
     if "reference" in ins:
         ac2 = ac.clone()
         ac2.compute_reference_values()
@@ -726,6 +733,42 @@ def _control_side(name: str, deflections: list[float], h_max: float) -> int:
         f"deflection limit of 30 deg on either side (deflections "
         f"{[round(float(np.degrees(d)), 6) for d in deflections]} deg). Check the controls of "
         "this name at a smaller deflection.")
+
+
+def _section_side(prop: str, x0: float, h_max: float) -> int:
+    """Return the side of the differences of a section property: 0 central, +1 forward.
+
+    The profile drag coefficient ``Cd0`` must not be negative (the input
+    checks refuse it). When the central step of the largest ladder step
+    *h_max* goes below 0 (``Cd0 - h_max < 0``, for example at
+    ``Cd0 = 0``), the differences are one-sided and forward: the points
+    are ``Cd0``, ``Cd0 + h/2``, ``Cd0 + h`` and ``Cd0 + 2 h``, all >= 0.
+    The second-order forward difference
+    ``D(h) = (-3 f(x0) + 4 f(x0 + h) - f(x0 + 2 h)) / (2 h)`` has the
+    truncation error ``-(h^2 / 3) f_3(x0) + O(h^3)`` (``f_3`` is the third
+    derivative), of order h^2 as the central difference, so the Richardson
+    combination ``(4 D(h/2) - D(h)) / 3`` and the estimate
+    ``abs(D(h) - D(h/2)) / 3`` stay the same (see :func:`_richardson`).
+    The other section properties have no limit and use central
+    differences.
+
+    Parameters
+    ----------
+    prop : str
+        Section property: ``"a0"``, ``"alpha_L0"``, ``"Cd0"`` or ``"Cm0"``.
+    x0 : float
+        Base value of the property (unit of the property).
+    h_max : float
+        Largest step of the step ladder (unit of the property).
+
+    Returns
+    -------
+    int
+        0 (central) or +1 (forward).
+    """
+    if prop == "Cd0" and float(x0) - float(h_max) < 0.0:
+        return 1
+    return 0
 
 
 def _section_step(prop: str, x0: float) -> float:

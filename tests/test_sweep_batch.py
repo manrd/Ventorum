@@ -285,6 +285,7 @@ def test_trust_names_the_first_non_finite_array():
     sw.local_lift = sw.local_lift.copy()
     sw.local_lift[0] = np.inf
     t = evaluate_aerodynamic_trust(AR=r.totals.AR, spanwise_list=[sw], CL=r.totals.CL, CDi=r.totals.CDi)
-    assert t.factors.get("non_finite_result") == 0.6
+    assert t.factors.get("non_finite_result") == 1.0
+    assert t.rating == "UNRELIABLE"
     assert any(f"{sw.surface_name}.alpha_i" in w for w in t.warnings)
     assert not any("local_lift" in w for w in t.warnings)

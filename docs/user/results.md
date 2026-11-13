@@ -6,7 +6,7 @@
 | --- | --- |
 | `totals` | Integrated coefficients: `CL`, `CDi` (Trefftz plane), `CDp`, `CD_total`, `e`, `CY`, `Cl`, `Cm`, `Cn`, the far-field diagnostics `CY_farfield` (wind axes) and `Cn_trefftz` (stability axes; both None for the Fourier solver; the 3D panel solver gives both, also with the viscous coupling), and the trust score |
 | `spanwise` | One `SpanwiseResult` per surface: circulation, section lift, induced drag, effective angle of attack |
-| `converged` | False if the solver did not meet its tolerance |
+| `converged` | False if the solver did not meet its tolerance, or if a direct solve (vortex lattice, linear lifting line, Fourier) gave a non-finite circulation. For the 3D panel solver with the Morino Kutta condition (the default) it refers only to the linear solve (see [the 3D panel guide](how_to_panel3d.md)) |
 | `details` | Solver data (lattice, circulation, wake direction, ground plane, dispatch) for plots and checks |
 
 ## Accuracy of the near-field values of the lattice solvers
@@ -100,7 +100,7 @@ bars = vt.input_error_bars(
 print(bars.summary())
 ```
 
-Each `bars.bars[name]` holds the production value, the interval `[value - k u_c, value + k u_c]`, the status `"input_only"`, the coverage (always `None`, not calibrated) and the input layer contribution. `bars.bars[name].input_shares` gives the share of each input in `u_c^2` (they sum to 1 when `u_c > 0`; with correlations a share can be negative), and `gradient_methods` states the gradient method per input (`"adjoint"` or `"central differences"`). Outside the adjoint scope (nonlinear lifting line, tabulated airfoils, deflected controls, body rates, Fourier solver) the flow inputs use central differences and section inputs are refused. `ventorum.combine_error_bars(numerical, inputs)` combines a layer-1 result and a layer-2 result of the same case: the half-width is `sqrt(h_num^2 + h_input^2)`, centred on the fine-level value of layer 1, with status `"numerical_and_input"`.
+Each `bars.bars[name]` holds the production value, the interval `[value - k u_c, value + k u_c]`, the status `"input_only"`, the coverage (always `None`, not calibrated) and the input layer contribution. `bars.bars[name].input_shares` gives the share of each input in `u_c^2` (they sum to 1 when `u_c > 0`; with correlations a share can be negative), and `gradient_methods` states the gradient method per input (`"adjoint"` or `"central differences"`). Outside the adjoint scope (nonlinear lifting line, tabulated airfoils, deflected controls, body rates, Fourier solver) the flow inputs use central differences and section inputs are refused. A `V_inf` or `rho` uncertainty is refused when the condition has a Mach number (`condition.mach`): the gradients are taken at the stated Mach number, so the change of the Mach number with the speed and the air temperature would be missing from the bars. Remove the uncertainty, or set `condition.mach=None` for the propagation. `ventorum.combine_error_bars(numerical, inputs)` combines a layer-1 result and a layer-2 result of the same case: the half-width is `sqrt(h_num^2 + h_input^2)`, centred on the fine-level value of layer 1, with status `"numerical_and_input"`.
 
 ## Mesh convergence study
 

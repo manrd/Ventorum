@@ -112,11 +112,14 @@ def validate_airfoil(airfoil: object, label: str) -> None:
     Raises
     ------
     ValueError
-        If a value is not finite, or if the lift-curve slope ``a0``
-        [1/rad] of a linear airfoil is not positive. A negative profile
-        drag coefficient is not refused here: the finite-difference check
-        of the gradients (``check_gradients``) steps ``Cd0 = 0`` to small
-        negative values.
+        If a value is not finite, if the lift-curve slope ``a0``
+        [1/rad] of a linear airfoil is not positive, or if a profile drag
+        coefficient (``Cd0`` of a linear airfoil, a value of ``Cd_data``
+        of a tabulated airfoil) is negative. A negative profile drag has
+        no physical meaning: it gives a negative total drag and a thrust
+        from the viscous layer. The finite-difference check of the
+        gradients (``check_gradients``) steps ``Cd0`` one-sided (forward)
+        near 0, so it never makes a negative value.
     """
     if isinstance(airfoil, LinearAirfoil):
         tag = f"{label}: linear airfoil {airfoil.name!r}"
@@ -124,12 +127,22 @@ def validate_airfoil(airfoil: object, label: str) -> None:
             _finite_value(f"{tag}: {name}", getattr(airfoil, name))
         if float(airfoil.a0) <= 0.0:
             raise ValueError(f"{tag}: a0={airfoil.a0!r} 1/rad must be > 0.")
+        if float(airfoil.Cd0) < 0.0:
+            raise ValueError(
+                f"{tag}: Cd0={airfoil.Cd0!r} must be >= 0 (a negative profile drag is not physical)."
+            )
     elif isinstance(airfoil, TabulatedAirfoil):
         tag = f"{label}: tabulated airfoil {airfoil.name!r}"
         for name in ("alpha", "Cl_data", "Cd_data", "Cm_data", "Cl_circulation_data"):
             value = getattr(airfoil, name)
             if value is not None:
-                _finite_table(f"{tag}: {name}", value)
+                arr = _finite_table(f"{tag}: {name}", value)
+                if name == "Cd_data" and np.any(arr < 0.0):
+                    neg = np.ravel(arr)[np.ravel(arr) < 0.0]
+                    raise ValueError(
+                        f"{tag}: Cd_data: {neg.size} value(s) are negative (first: {float(neg[0])!r}); "
+                        "a negative profile drag is not physical."
+                    )
 
 
 def validate_section(sec: WingSection, idx: int, surface_name: str) -> None:

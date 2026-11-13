@@ -6,6 +6,8 @@ Unit tests for the aerodynamic trust scoring and uncertainty engine in Ventorum.
 from __future__ import annotations
 
 import time
+import warnings
+
 import numpy as np
 import pytest
 
@@ -702,3 +704,88 @@ def test_one_panel_lattice_build_gives_no_shape_warning():
         lat = build_lattice(ac, vt.SolverSettings(n_panels=8), collocation="vlm", n_chord=1)
     assert not any("does not use it" in m for m in lat.mesh_warnings)
     assert sum("n_chord = 1 does not use it" in m for m in lat.join_warnings) == 1
+
+
+# -- Negative drag, non-finite totals and the Morino Kutta note ------------------------------------
+
+def _wing_with_airfoil(af) -> LiftingSurface:
+    return LiftingSurface(name="w", semi_span=5.0, sections=[
+        WingSection(y_frac=0.0, chord=1.0, airfoil=af), WingSection(y_frac=1.0, chord=1.0, airfoil=af)])
+
+
+@pytest.mark.parametrize("kw", [{"CD_total": -0.00767}, {"CD_total": 0.002, "CDp": -0.01},
+                                {"CD_total": None, "CDi": -1e-4}])
+def test_negative_drag_is_unreliable(kw):
+    """Regression: a negative total or profile drag is rated UNRELIABLE with a warning."""
+    base = dict(AR=8.0, CL=0.4, CDi=0.007, max_sweep_rad=0.0, solver_type="vlm", n_chord=8, n_panels=40)
+    assert evaluate_aerodynamic_trust(**base, CD_total=0.017).rating == "HIGH"
+    t = evaluate_aerodynamic_trust(**{**base, **kw})
+    assert t.rating == "UNRELIABLE"
+    assert t.factors["negative_drag"] == 1.0
+    assert any(w.startswith("Negative drag") for w in t.warnings)
+
+
+def test_round_off_drag_is_not_negative():
+    """A zero-lift induced drag at the round-off below 0 is not a negative drag."""
+    t = evaluate_aerodynamic_trust(AR=8.0, CL=0.0, CDi=-1e-17, max_sweep_rad=0.0, solver_type="vlm",
+                                   n_chord=8, n_panels=40)
+    assert "negative_drag" not in t.factors
+    assert t.rating == "HIGH"
+
+
+@pytest.mark.parametrize("solver", ["vlm", "linear", "nonlinear", "fourier"])
+def test_negative_section_drag_result_is_unreliable(solver, monkeypatch):
+    """Regression: Cd0 = -0.01 (past the input check) gave CD_total -0.0062 with trust HIGH on the VLM."""
+    import ventorum.utils.validation as validation
+
+    monkeypatch.setattr(validation, "validate_airfoil", lambda *a, **k: None)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        r = vt.analyze(_wing_with_airfoil(vt.LinearAirfoil(Cd0=-0.01)), alpha_deg=4.0, solver=solver, n_panels=20)
+    assert r.totals.CD_total < 0.0
+    assert r.totals.trust.rating == "UNRELIABLE"
+    assert any("Negative drag" in w and "Cd_profile" in w for w in r.totals.trust.warnings)
+
+
+@pytest.mark.parametrize("name", ["CL", "CY", "Cl", "Cm", "Cn", "CDp", "CD_total"])
+def test_non_finite_total_is_unreliable(name):
+    """Regression: a non-finite total coefficient is UNRELIABLE (it was capped at LOW only)."""
+    kw = dict(AR=8.0, CL=0.4, CDi=0.007, CD_total=0.017, CDp=0.01, CY=0.0, Cl=0.0, Cm=-0.05, Cn=0.0,
+              max_sweep_rad=0.0, solver_type="vlm", n_chord=8, n_panels=40)
+    assert evaluate_aerodynamic_trust(**kw).rating == "HIGH"
+    kw[name] = float("nan")
+    t = evaluate_aerodynamic_trust(**kw)
+    assert t.rating == "UNRELIABLE"
+    assert any(f"{name}=nan" in w for w in t.warnings)
+
+
+@pytest.mark.parametrize("solver", ["vlm", "linear", "fourier"])
+def test_non_finite_result_is_unreliable_and_not_converged(solver, monkeypatch):
+    """Regression: LinearAirfoil(a0=nan) past the input check gave CL nan, converged True, trust LOW 0.4."""
+    import ventorum.utils.validation as validation
+
+    monkeypatch.setattr(validation, "validate_airfoil", lambda *a, **k: None)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        r = vt.analyze(_wing_with_airfoil(vt.LinearAirfoil(a0=np.nan)), alpha_deg=4.0, solver=solver, n_panels=20)
+    assert not np.isfinite(r.totals.CL)
+    assert r.converged is False
+    assert r.totals.trust.rating == "UNRELIABLE"
+
+
+def test_morino_kutta_note_keeps_the_score():
+    """The Morino Kutta condition adds a note with the trailing-edge pressure jump and no penalty."""
+    from ventorum.core.trust import morino_kutta_note
+
+    kw = dict(AR=8.0, CL=0.4, CDi=0.007, max_sweep_rad=0.0, solver_type="panel3d", n_chord=40, n_panels=24)
+    plain = evaluate_aerodynamic_trust(**kw)
+    morino = evaluate_aerodynamic_trust(**kw, kutta="morino", kutta_residual=0.0123)
+    pressure = evaluate_aerodynamic_trust(**kw, kutta="pressure", kutta_residual=1e-8)
+    assert morino.score == plain.score and morino.rating == plain.rating
+    assert morino.factors == plain.factors
+    assert morino_kutta_note(0.0123) in morino.warnings
+    assert "0.0123" in morino_kutta_note(0.0123) and "converged" in morino_kutta_note(0.0123)
+    assert not any("Morino" in w for w in pressure.warnings)
+    assert not any("Morino" in w for w in plain.warnings)
+    assert "kutta_residual" not in morino_kutta_note(None)
+

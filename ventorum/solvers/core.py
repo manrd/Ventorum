@@ -51,8 +51,10 @@ from ventorum.utils.vec import cross3
 class SolveInfo:
     """Hold the convergence information of a circulation solve.
 
-    ``converged`` is True by definition for the direct solves (vortex
-    lattice and linear lifting line); it is not a check of the conditioning.
+    ``converged`` of the direct solves (vortex lattice and linear lifting
+    line) is True when every circulation is a finite number and False when
+    the solve gives a non-finite circulation (:func:`direct_solve_info`); it
+    is not a check of the conditioning.
     ``condition_number`` is the LAPACK estimate of the 1-norm condition
     number of the system matrix (see :func:`lu_solve_with_condition`). Only
     the direct CPU solves of the vortex lattice and of the linear lifting
@@ -72,6 +74,18 @@ class SolveInfo:
 
 
 _MIRROR_Y = np.array([1.0, -1.0, 1.0])
+
+
+def direct_solve_info(g: np.ndarray, **kwargs) -> SolveInfo:
+    """Return the :class:`SolveInfo` of a direct solve with the circulation *g* [m^2/s].
+
+    A direct solve has no tolerance. ``converged`` is True when every value
+    of *g* is finite. A non-finite input (for example a NaN lift-curve slope
+    that the input checks did not stop) or a singular matrix gives a
+    non-finite circulation; the result must then not report a converged
+    solve. The other fields come from *kwargs*.
+    """
+    return SolveInfo(converged=bool(np.all(np.isfinite(g))), **kwargs)
 
 
 def lu_solve_with_condition(A: np.ndarray, rhs: np.ndarray) -> tuple[np.ndarray, float]:
@@ -314,9 +328,9 @@ def solve_vlm(
     A, rhs, umap = assemble_vlm(lattice, condition, ground, use_symmetry, wake_dir, ref_point)
     if report_condition:
         g, cond = lu_solve_with_condition(A, rhs)
-        return g[umap.panel_column], SolveInfo(symmetric=umap.symmetric, condition_number=cond)
+        return g[umap.panel_column], direct_solve_info(g, symmetric=umap.symmetric, condition_number=cond)
     g = np.linalg.solve(A, rhs)
-    return g[umap.panel_column], SolveInfo(symmetric=umap.symmetric)
+    return g[umap.panel_column], direct_solve_info(g, symmetric=umap.symmetric)
 
 
 def solve_vlm_batch(
@@ -377,7 +391,8 @@ def solve_vlm_batch(
             g[ks] = gk.T
             for k in ks:
                 conds[k] = cond
-        return [(g[k][umap.panel_column], SolveInfo(symmetric=umap.symmetric, condition_number=conds[k]))
+        return [(g[k][umap.panel_column],
+                 direct_solve_info(g[k], symmetric=umap.symmetric, condition_number=conds[k]))
                 for k in range(K)]
     single = [ks[0] for ks in groups.values() if len(ks) == 1]
     step = max(1, _VLM_BATCH_BYTES // max(1, n * n * 8))
@@ -391,7 +406,7 @@ def solve_vlm_batch(
         if len(ks) > 1:
             # One LU factorisation for the right-hand sides of all cases of the group.
             g[ks] = np.linalg.solve(matrix(ks[0]), rhs[ks].T).T
-    return [(g[k][umap.panel_column], SolveInfo(symmetric=umap.symmetric)) for k in range(K)]
+    return [(g[k][umap.panel_column], direct_solve_info(g[k], symmetric=umap.symmetric)) for k in range(K)]
 
 
 def _llt_strip_data(lattice: VortexLattice, umap: UnknownMap) -> dict[str, np.ndarray]:
@@ -559,10 +574,10 @@ def solve_llt_linear(
     M, rhs, umap, Vt = _assemble_llt_linear(lattice, condition, ground, use_symmetry, wake_dir, ref_point)
     if report_condition:
         g, cond = lu_solve_with_condition(M, rhs)
-        info = SolveInfo(symmetric=umap.symmetric, condition_number=cond)
+        info = direct_solve_info(g, symmetric=umap.symmetric, condition_number=cond)
     else:
         g = np.linalg.solve(M, rhs)
-        info = SolveInfo(symmetric=umap.symmetric)
+        info = direct_solve_info(g, symmetric=umap.symmetric)
     if Vt is not None:
         info.v_control = _panel_velocity(lattice, umap, np.einsum("ijk,j->ik", Vt, g))
     return g[umap.panel_column], info
@@ -779,7 +794,7 @@ def solve_llt_linear_batch(
     v_panel = _panel_velocity_batch(lattice, umap, np.array(v_unknown).reshape(K, n, 3))
     out = []
     for k in range(K):
-        info = SolveInfo(symmetric=umap.symmetric, condition_number=conds[k])
+        info = direct_solve_info(g[k], symmetric=umap.symmetric, condition_number=conds[k])
         info.v_control = v_panel[k]
         out.append((g[k][umap.panel_column], info))
     return out

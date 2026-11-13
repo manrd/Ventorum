@@ -162,12 +162,12 @@ def test_shared_edge_surfaces_still_pass():
 @pytest.mark.parametrize("bad", BAD_VALUES)
 def test_non_finite_result_is_never_high_trust(bad):
     trust = evaluate_aerodynamic_trust(AR=8.0, CL=bad, CDi=0.01, max_sweep_rad=0.0)
-    assert trust.rating in ("LOW", "UNRELIABLE")     # never above LOW (card, decision 6)
+    assert trust.rating == "UNRELIABLE"     # a non-finite result is never rated above UNRELIABLE
     assert any("non-finite result" in w.lower() for w in trust.warnings)
 
 
 def test_non_finite_guard_never_raises_the_trust_level():
-    """The guard caps the level at LOW; it must not lift UNRELIABLE to LOW."""
+    """The guard rates the result UNRELIABLE; it must not lift UNRELIABLE to LOW."""
     import numpy as np
 
     from ventorum.core.trust import evaluate_aerodynamic_trust
@@ -409,9 +409,21 @@ def test_non_finite_scalar_cm_is_refused(bad):
         V.validate_surface(_wing_with(_tab(Cm_data=bad)))
 
 
+@pytest.mark.parametrize("cd0", [-1.0e-6, -0.01])
+def test_negative_linear_cd0_is_refused(cd0):
+    # A negative profile drag is not physical; the gradient check steps Cd0 forward near 0.
+    with pytest.raises(ValueError, match=r"Section 1: linear airfoil .*Cd0"):
+        V.validate_surface(_wing_with(vt.LinearAirfoil(Cd0=cd0)))
+
+
+def test_negative_tabulated_cd_is_refused():
+    cd = np.full(4, 0.01)
+    cd[1] = -1.0e-4
+    with pytest.raises(ValueError, match=r"Section 1: tabulated airfoil .*Cd_data.*negative"):
+        V.validate_surface(_wing_with(_tab(Cd_data=cd)))
+
+
 def test_valid_airfoils_still_pass():
-    # A small negative Cd0 stays accepted: the gradient check steps Cd0 = 0 to -1e-6.
-    V.validate_surface(_wing_with(vt.LinearAirfoil(Cd0=-1.0e-6)))
     V.validate_surface(_wing_with(vt.LinearAirfoil(a0=5.7, alpha_L0=-0.03, Cd0=0.0, Cm0=-0.05)))
     V.validate_surface(_wing_with(_tab(Cd_data=np.zeros(4), Cm_data=-0.05, Cl_circulation_data=np.zeros(4))))
     V.validate_surface(_wing_with(_tab(Cm_data=None)))

@@ -181,7 +181,7 @@ The panel solver accepts the following knobs in `SolverSettings`:
 * `n_chord`: chordwise panel count per surface (default: 40 when None).
 * `n_panels`: spanwise panel count per semi-span (default: 80).
 * `panel_chord_spacing`: `"cosine"` (default, clustered at leading and trailing edges) or `"uniform"`.
-* `panel_kutta`: `"morino"` (default, linear potential jump condition) or `"pressure"` (iterative non-linear zero pressure jump condition).
+* `panel_kutta`: `"morino"` (default, linear potential jump condition) or `"pressure"` (iterative non-linear zero pressure jump condition). With `"morino"` there is no Kutta iteration: `result.converged` (from `kutta_converged`) is always True and `result.iterations` (`kutta_iters`) is 0, so `converged` refers only to the linear solve. The trailing-edge pressure jump that the Morino condition leaves is `result.details["panel_result"].kutta_residual` (the largest $|\Delta C_p|$ between the upper and the lower trailing-edge panels, also `result.residual_history[0]`). With `"pressure"`, `converged` is True when this jump falls below the tolerance of the iteration.
 * `panel_backend`: `"auto"` (default), `"numba"`, `"numpy"`, or `"gpu"`.
 * `panel_ground_solver`: `"auto"` (default), `"direct"`, or `"krylov"`. Reuses an anchor LU factorization with GMRES for CPU ground sweeps with Morino Kutta. Free air, GPU backends, and pressure Kutta use direct LU solves.
 * `panel_cache`: `True` (default) or `False`. Caches mesh, mesh check, and factorized solvers in memory. Free the cache with `ventorum.panel3d.clear_cache()`.

@@ -257,6 +257,13 @@ PANEL3D_STEEP_ROOT_CONVERGENCE_NOTE = (
 #: Penalty for non-unique post-stall solution branches in viscous coupling.
 POST_STALL_BRANCH_PENALTY = 0.35
 
+#: Round-off allowance of a total drag coefficient [-]: a total drag (``CD_total``, or ``CDi``
+#: when there is no profile drag) or a total profile drag ``CDp`` below ``-NEGATIVE_DRAG_TOLERANCE``
+#: is negative and makes the result UNRELIABLE. The far-field induced drag is a non-negative
+#: quadratic form of the trailing circulation, so a negative value is not physical; at zero lift
+#: its round-off is far below this value. 1e-8 is 1e-4 of one drag count (1e-4).
+NEGATIVE_DRAG_TOLERANCE = 1.0e-8
+
 #: Smallest scores of the ratings HIGH, MODERATE and LOW [-]. A lower score
 #: is UNRELIABLE.
 RATING_SCORE_HIGH = 0.85
@@ -1979,6 +1986,38 @@ def lattice_spanwise_stats(lattice: VortexLattice | None, spanwise_list: Sequenc
 _ONSET_NAMES = ("u", "v", "w", "p", "q", "r")
 
 
+def morino_kutta_note(kutta_residual: float | None = None) -> str:
+    """Return the trust note of a 3D panel result with the Morino Kutta condition.
+
+    The Morino condition (Morino and Kuo 1974) sets the wake doublet equal
+    to the jump of the surface doublets at the trailing edge. It is linear,
+    so the panel solve has no Kutta iteration: ``kutta_converged`` is
+    always True and ``kutta_iters`` is 0, and the convergence flag of the
+    panel solve (``SolverResult.converged`` of the panel solver) refers
+    only to the linear solve. The condition does not set the pressure jump
+    at the trailing edge to zero; ``kutta_residual`` gives that jump.
+
+    Parameters
+    ----------
+    kutta_residual : float or None, optional
+        Largest pressure-coefficient jump between the upper and the lower
+        trailing-edge panels [-] (``PanelResult.kutta_residual``). None
+        when the result does not give it.
+
+    Returns
+    -------
+    str
+        The note.
+    """
+    text = ("Morino Kutta condition: the condition is linear, so the panel solve has no Kutta iteration "
+            "(kutta_converged is always True, kutta_iters is 0) and the convergence flag of the panel solve "
+            "refers only to the linear solve. The condition does not set the trailing-edge pressure jump to zero")
+    if kutta_residual is not None and _is_finite(kutta_residual):
+        return (f"{text}: the largest jump of Cp between the upper and the lower trailing-edge panels "
+                f"(kutta_residual) is {float(kutta_residual):.3g}. Use panel_kutta=\"pressure\" to remove it.")
+    return f"{text}. Use panel_kutta=\"pressure\" to remove it."
+
+
 def float32_residual_warnings(residuals: dict | None) -> list[str]:
     """Return the trust warnings of the float64 residuals of a float32 GPU solve.
 
@@ -2061,6 +2100,12 @@ def evaluate_aerodynamic_trust(
     controls: Sequence[tuple[float, float]] | None = None,
     condition_number: float | None = None,
     float32_residuals: dict | None = None,
+    CDp: float | None = None,
+    Cl: float | None = None,
+    Cm: float | None = None,
+    Cn: float | None = None,
+    kutta: str | None = None,
+    kutta_residual: float | None = None,
 ) -> TrustScore:
     """Evaluate the validity of a solution.
 
@@ -2179,16 +2224,42 @@ def evaluate_aerodynamic_trust(
         by more than that relative amount, so the loads can have a
         relative error of that order times the condition number. None or
         an empty dict gives no check.
+    CDp : float or None, optional
+        Total profile drag coefficient [-]. None when the result has no
+        profile drag.
+    Cl, Cm, Cn : float or None, optional
+        Total rolling, pitching and yawing moment coefficients [-], for the
+        check of non-finite results. None gives no check of that value.
+    kutta : str or None, optional
+        3D panel method only: the Kutta condition (``"morino"`` or
+        ``"pressure"``). With ``"morino"`` the result gets the note of
+        :func:`morino_kutta_note` (no penalty).
+    kutta_residual : float or None, optional
+        3D panel method only: the largest jump of Cp between the upper and
+        the lower trailing-edge panels [-] (``PanelResult.kutta_residual``),
+        given in the Morino note.
 
-    A result with a non-finite coefficient never keeps a trust level above
-    LOW: it gets the penalty ``non_finite_result`` and the warning
-    "non-finite result". This is a second safety line; the input checks
-    must stop the known cases first.
+    Notes
+    -----
+    A result with a non-finite total coefficient (``CL``, ``CY``, ``Cl``,
+    ``Cm``, ``Cn``, ``CDi``, ``CDp``, ``CD_total``, or the yawing moment
+    in stability axes) or a non-finite value of a section result is
+    UNRELIABLE: it gets the penalty ``non_finite_result`` (1.0) and the
+    warning "non-finite result". A result with a negative drag is also
+    UNRELIABLE: a total drag (``CD_total``, or ``CDi`` when ``CD_total``
+    is None) or a total profile drag ``CDp`` below
+    ``-NEGATIVE_DRAG_TOLERANCE``, or a negative section profile drag
+    (``Cd_profile`` of *spanwise_list*, the polar drag in use), gets the
+    penalty ``negative_drag`` (1.0) and a warning. These are second safety
+    lines; the input checks must stop the known cases first (they refuse
+    non-finite inputs and a negative section drag).
     """
     # Non-finite result guard: any total coefficient that is not a finite
-    # number caps the trust level at LOW.
+    # number makes the result UNRELIABLE.
     bad_totals: list[str] = []
-    for label, value in (("CL", CL), ("CDi", CDi), ("CD_total", CD_total)):
+    for label, value in (("CL", CL), ("CY", CY), ("Cl", Cl), ("Cm", Cm), ("Cn", Cn),
+                         ("Cn (stability axes)", Cn_stability), ("CDi", CDi), ("CDp", CDp),
+                         ("CD_total", CD_total)):
         if value is not None and not _is_finite(value):
             bad_totals.append(f"{label}={value}")
     for sw in (spanwise_list or ()) if spanwise_stats is None else ():
@@ -2220,11 +2291,33 @@ def evaluate_aerodynamic_trust(
     warnings: list[str] = []
     recommendations: list[str] = []
     if non_finite_result:
-        penalties["non_finite_result"] = 0.6
+        penalties["non_finite_result"] = 1.0
         warnings.append(
             "Non-finite result (non-finite result coefficients: "
             + ", ".join(bad_totals)
             + "): the coefficients are not valid numbers; check the inputs."
+        )
+
+    # Negative drag guard: a negative total drag or profile drag is not physical.
+    negative: list[str] = []
+    cd_label, cd_value = ("CD_total", CD_total) if CD_total is not None else ("CDi", CDi)
+    if cd_value is not None and _is_finite(cd_value) and float(cd_value) < -NEGATIVE_DRAG_TOLERANCE:
+        negative.append(f"{cd_label}={float(cd_value):.6g}")
+    if CDp is not None and _is_finite(CDp) and float(CDp) < -NEGATIVE_DRAG_TOLERANCE:
+        negative.append(f"CDp={float(CDp):.6g}")
+    for sw in spanwise_list or ():
+        cdp_strips = getattr(sw, "Cd_profile", None)
+        if cdp_strips is None:
+            continue
+        values = np.asarray(cdp_strips, dtype=float)
+        if values.size and float(np.nanmin(values, initial=0.0)) < 0.0:
+            negative.append(f"{sw.surface_name}.Cd_profile (min {float(np.nanmin(values)):.6g})")
+    negative_drag = bool(negative)
+    if negative_drag:
+        penalties["negative_drag"] = 1.0
+        warnings.append(
+            "Negative drag (" + ", ".join(negative) + "): a negative total or profile drag is not physical. "
+            "Check the section drag inputs (Cd0, Cd_data) and the polars."
         )
     solver = (solver_type or "linear").lower()
     is_llt = solver in LIFTING_LINE_SOLVERS
@@ -2462,6 +2555,10 @@ def evaluate_aerodynamic_trust(
     # 6c. Float64 residual of the float32 GPU solve (a warning only, no penalty) ----------------
     warnings.extend(float32_residual_warnings(float32_residuals))
 
+    # 6d. Morino Kutta condition of the 3D panel method (a note only, no penalty) ---------------
+    if solver in ("panel3d", "3dp") and kutta is not None and str(kutta).lower() == "morino":
+        warnings.append(morino_kutta_note(kutta_residual))
+
     # 7. Near-field and far-field lateral values (a warning only, no penalty) -------------------
     warnings.extend(near_far_lateral_warnings(
         CY, CY_farfield, Cn_stability, Cn_trefftz,
@@ -2521,8 +2618,8 @@ def evaluate_aerodynamic_trust(
         rating = "LOW"
     else:
         rating = "UNRELIABLE"
-    if non_finite_result and rating in ("HIGH", "MODERATE"):
-        rating = "LOW"  # a cap: an UNRELIABLE rating stays UNRELIABLE
+    if non_finite_result or negative_drag:
+        rating = "UNRELIABLE"  # the penalty 1.0 gives score 0; kept explicit
 
     # Heuristic bands (not calibrated against data).
     fidelity_factor = 1.0 - score

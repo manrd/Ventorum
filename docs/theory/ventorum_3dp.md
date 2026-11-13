@@ -246,6 +246,8 @@ This yields the linear system:
 \mathbf{A} \boldsymbol{\mu} = -\mathbf{B} \boldsymbol{\sigma}.
 ```
 
+The Morino condition is linear, so the solve has no Kutta iteration. The result fields of the Morino condition are therefore fixed: `kutta_converged` is always True and `kutta_iters` is 0. The panel solver takes `SolverResult.converged` from `kutta_converged`, so with the Morino condition `converged` True means only that the linear solve finished. The condition sets the doublet jump at the trailing edge, not the pressure jump. The pressure jump that remains is in `kutta_residual`: the largest $|\Delta C_p|$ between the upper and the lower trailing-edge panels (`result.details["panel_result"].kutta_residual`, also `result.residual_history[0]`). At a thick trailing edge it does not go to zero. Read it to judge the Kutta condition, and use the pressure Kutta condition below to remove it. The trust function gives a note with this information and no penalty (`ventorum.core.trust.morino_kutta_note`, inputs `kutta` and `kutta_residual` of `evaluate_aerodynamic_trust`).
+
 2. Iterative pressure Kutta condition (`kutta="pressure"`):
 At thick trailing edges, the Morino condition can leave a residual pressure jump. The pressure Kutta option computes wake strip correction doublets $\delta_s$ to eliminate the trailing-edge pressure jump:
 
