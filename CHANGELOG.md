@@ -358,6 +358,11 @@ a minor version can change a public interface.
 
 ### Fixed
 
+- Boundary-layer march: the step limit of `station_newton` divided 0.5 by a step ratio of exactly
+  0 (a zero Newton step from a residual that is not finite) in a branch that `np.where` discards.
+  Under `np.errstate(divide="raise")` this raised `FloatingPointError` on some machines. The
+  divide now acts only where the limit acts. Results do not change.
+
 - Agent tool `polar_sweep` in ground effect: all angles used the chordwise count of the first
   valid angle (the lowest alpha), so the high angles ran with fewer chordwise panels than the
   automatic rule asks for, while the work estimate and the span fit used the count of each

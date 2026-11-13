@@ -282,7 +282,10 @@ def station_newton(kind, st1, ue2, dxi, re, guess, *, ncrit=None, w_forced=None,
         rel = xp.maximum(abs(d[:, 0]) / th, abs(d[:, 1]) / ds)
         if kind != eq.LAMINAR:
             rel = xp.maximum(rel, abs(d[:, 2]) / c)
-        lam = xp.where(rel > 0.5, 0.5 / rel, lam)
+        # Divide only where the limit acts: rel can be exactly 0 (a zero step),
+        # and 0.5 / 0 raises under np.errstate(divide="raise").
+        big = rel > 0.5
+        lam = xp.where(big, 0.5 / xp.where(big, rel, 1.0), lam)
         h_old = ds / th
         for _k in range(30):
             h_new = (ds + lam * d[:, 1]) / (th + lam * d[:, 0])

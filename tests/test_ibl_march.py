@@ -137,3 +137,23 @@ def test_station_interaction_law(kind):
     s1 = tuple(constant(x, v[0]) for x in st1)
     res = eq.interval_residuals(k, s1, (v[0], v[1], v[2], constant(ue2, v[0])), dxi, re)
     assert max(abs(float(r.val[0])) for r in res) < 1e-10
+
+
+def test_zero_newton_step_raises_no_division_error(monkeypatch):
+    """A zero Newton step (from a residual that is not finite) divides nothing by zero.
+
+    _solve3 gives a zero step for a system that is not valid, so the step
+    ratio is exactly 0. The step limit computed 0.5 / 0 in the branch that
+    np.where discards, and np.errstate(divide="raise") then raised. This
+    happened on a CI runner in the cold start of NACA 0012 at alpha 0.
+    """
+    def zero_step(xp, J, R):
+        return xp.zeros(R.shape, dtype=R.dtype), xp.zeros(R.shape[0], dtype=bool)
+
+    monkeypatch.setattr(mr, "_solve3", zero_step)
+    st1 = (np.array([0.00010145]), np.array([0.0002494]), np.array([0.0]), np.array([1.14238775]))
+    guess = (st1[0], st1[1], st1[2])
+    with np.errstate(divide="raise", invalid="raise"):
+        out = mr.station_newton(0, st1, np.array([1.15410641]), np.array([0.0062433]), np.array([1e6]),
+                                guess, max_iter=2)
+    assert len(out) == 5
