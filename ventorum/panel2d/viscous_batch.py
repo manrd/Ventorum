@@ -358,6 +358,10 @@ def _pass(items, bk, upward):
                                          rules=plan["rules"], cache=plan["cache"])
             _store(plan, alpha, row, state, upward)
             continue
+        contact = vs.ground_contact(plan["body"], alpha, plan["kw"])
+        if contact is not None:
+            plan["rows"][float(alpha)] = vs._failed_row(alpha, plan["body"], contact)
+            continue
         try:
             setup = vs.prepare_case(plan["body"], alpha, c.Re, **plan["kw"])
         except cp.WakeGroundError as exc:
