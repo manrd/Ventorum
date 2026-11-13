@@ -330,6 +330,65 @@ def test_gpu_batch_solve_equals_a_direct_solve(gpu_device, monkeypatch, dtype, m
 
 
 @pytest.mark.gpu
+@pytest.mark.parametrize("dtype", ["float64", "float32"])
+@pytest.mark.parametrize("singular", [4, 1])
+def test_gpu_batch_solve_raises_for_a_singular_case(gpu_device, dtype, singular):
+    """A singular case raises LinAlgError (a singular reference formerly gave NaN in all cases, without an error).
+
+    Case 4 is the reference of the one group of 8 cases: its float32
+    inverse is not finite, so the preconditioner of the group was NaN and
+    the acceptance test ``residual > limit`` did not find the NaN residuals.
+    """
+    import torch
+
+    from ventorum.gpu import engine
+    from ventorum.gpu.kernels import kernels
+
+    rng = np.random.default_rng(1)
+    n, K = 200, 8
+    assert n > engine.REF_MIN_N and K >= engine.REF_MIN_BATCH
+    base = rng.normal(size=(n, n)) + n * np.eye(n)
+    M = np.stack([base + 0.05 * rng.normal(size=(n, n)) for _ in range(K)])
+    b = rng.normal(size=(K, n))
+    # The reference solution uses the matrices rounded to the type of the solve.
+    good = np.linalg.solve(M.astype(dtype).astype(float), b[..., None])[..., 0]
+    M[singular, :, 0] = 0.0
+    M[singular, 0, :] = 0.0
+    MT = torch.as_tensor(np.ascontiguousarray(M.astype(dtype).transpose(0, 2, 1)), device="cuda")
+    with pytest.raises(torch.linalg.LinAlgError):
+        engine.batched_solve(MT, torch.as_tensor(b, device="cuda"), kern=kernels(dtype))
+    # Without the singular case, the other cases give the direct solution.
+    keep = [k for k in range(K) if k != singular][:4]
+    x = engine.batched_solve(MT[keep].contiguous(), torch.as_tensor(b[keep], device="cuda"),
+                             kern=kernels(dtype)).cpu().numpy()
+    tol = 1e-12 if dtype == "float64" else 1e-9
+    assert np.max(np.abs(x - good[keep])) <= tol * np.max(np.abs(good[keep]))
+
+
+@pytest.mark.gpu
+def test_gpu_float32_direct_solve_raises_for_a_singular_case(gpu_device):
+    """The float32 LU of a large system checks its pivots (a zero pivot formerly gave NaN without an error)."""
+    import torch
+
+    from ventorum.gpu import engine
+    from ventorum.gpu.kernels import kernels
+
+    rng = np.random.default_rng(2)
+    n = engine.DIRECT64_MAX_N + 8
+    A = rng.normal(size=(2, n, n)) + n * np.eye(n)
+    b = rng.normal(size=(2, n))
+    good = np.linalg.solve(A.astype("float32").astype(float), b[..., None])[..., 0]
+    MT = torch.as_tensor(np.ascontiguousarray(A.astype("float32").transpose(0, 2, 1)), device="cuda")
+    x = engine._direct(MT, torch.as_tensor(b, device="cuda"), None, kernels("float32")).cpu().numpy()
+    assert np.max(np.abs(x - good)) <= 1e-9 * np.max(np.abs(good))
+    A[1, :, 0] = 0.0
+    A[1, 0, :] = 0.0
+    MT = torch.as_tensor(np.ascontiguousarray(A.astype("float32").transpose(0, 2, 1)), device="cuda")
+    with pytest.raises(torch.linalg.LinAlgError):
+        engine._direct(MT, torch.as_tensor(b, device="cuda"), None, kernels("float32"))
+
+
+@pytest.mark.gpu
 @pytest.mark.parametrize("kind", ["linear", "nonlinear", "vlm"])
 @pytest.mark.parametrize("precision", ["float64", "float32"])
 def test_gpu_iterative_solves_equal_cpu(gpu_device, monkeypatch, kind, precision):
