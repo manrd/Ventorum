@@ -227,3 +227,52 @@ def test_surface_plot_refuses_a_strip_count_mismatch(wing_and_tail):
         vt.plot_surface_results(ac, bad, metric="Cl")
     with pytest.raises(ValueError, match="Tail.*strips"):
         vt.plot_aircraft_dashboard(ac, bad)
+
+
+def test_fourier_result_plots_in_surface_plot_and_dashboard(monkeypatch):
+    """A Fourier result plots in plot_surface_results and plot_aircraft_dashboard at its own stations."""
+    import mpl_toolkits.mplot3d.art3d as art3d
+    from ventorum.visualization import dashboard
+
+    wing = vt.LiftingSurface(
+        name="Fourier Wing",
+        semi_span=4.0,
+        sections=[
+            vt.WingSection(y_frac=0.0, chord=1.0),
+            vt.WingSection(y_frac=1.0, chord=1.0),
+        ],
+    )
+    ac = vt.Aircraft(name="Fourier Aircraft", surfaces=[wing])
+    settings = vt.SolverSettings(solver_type="fourier", n_panels=12)
+    result = vt.analyze(ac, alpha_deg=4.0, V_inf=30.0, settings=settings)
+    y_solved = np.asarray(result.spanwise[0].y, dtype=float)
+    expected_edges = np.concatenate([[-wing.semi_span], 0.5 * (y_solved[:-1] + y_solved[1:]), [wing.semi_span]])
+
+    rec_surf = _RecordingPolys(art3d.Poly3DCollection)
+    monkeypatch.setattr(art3d, "Poly3DCollection", rec_surf)
+    fig_surf = vt.plot_surface_results(ac, result, metric="Cl", settings=settings)
+    assert isinstance(fig_surf, Figure)
+    assert len(rec_surf.polys) == 1
+    polys_surf = rec_surf.polys[0]
+    assert len(polys_surf) == len(y_solved)
+    y_lo = np.minimum(polys_surf[:, 0, 1], polys_surf[:, 1, 1])
+    y_hi = np.maximum(polys_surf[:, 0, 1], polys_surf[:, 1, 1])
+    assert np.all(y_lo <= y_solved) and np.all(y_solved <= y_hi)
+    np.testing.assert_allclose(polys_surf[:, 0, 1], expected_edges[:-1], rtol=0.0, atol=1e-12)
+    np.testing.assert_allclose(polys_surf[:, 1, 1], expected_edges[1:], rtol=0.0, atol=1e-12)
+    plt.close(fig_surf)
+
+    rec_dash = _RecordingPolys(dashboard.Poly3DCollection)
+    monkeypatch.setattr(dashboard, "Poly3DCollection", rec_dash)
+    fig_dash = vt.plot_aircraft_dashboard(ac, result, settings=settings)
+    assert isinstance(fig_dash, Figure)
+    assert len(rec_dash.polys) == 1
+    polys_dash = rec_dash.polys[0]
+    assert len(polys_dash) == len(y_solved)
+    y_lo_d = np.minimum(polys_dash[:, 0, 1], polys_dash[:, 1, 1])
+    y_hi_d = np.maximum(polys_dash[:, 0, 1], polys_dash[:, 1, 1])
+    assert np.all(y_lo_d <= y_solved) and np.all(y_solved <= y_hi_d)
+    np.testing.assert_allclose(polys_dash[:, 0, 1], expected_edges[:-1], rtol=0.0, atol=1e-12)
+    np.testing.assert_allclose(polys_dash[:, 1, 1], expected_edges[1:], rtol=0.0, atol=1e-12)
+    plt.close(fig_dash)
+
