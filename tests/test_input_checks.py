@@ -162,12 +162,12 @@ def test_shared_edge_surfaces_still_pass():
 @pytest.mark.parametrize("bad", BAD_VALUES)
 def test_non_finite_result_is_never_high_trust(bad):
     trust = evaluate_aerodynamic_trust(AR=8.0, CL=bad, CDi=0.01, max_sweep_rad=0.0)
-    assert trust.rating in ("LOW", "UNRELIABLE")     # never above LOW (card, decision 6)
+    assert trust.rating == "UNRELIABLE"     # a non-finite result is never rated above UNRELIABLE
     assert any("non-finite result" in w.lower() for w in trust.warnings)
 
 
 def test_non_finite_guard_never_raises_the_trust_level():
-    """The guard caps the level at LOW; it must not lift UNRELIABLE to LOW."""
+    """The guard rates the result UNRELIABLE; it must not lift UNRELIABLE to LOW."""
     import numpy as np
 
     from ventorum.core.trust import evaluate_aerodynamic_trust

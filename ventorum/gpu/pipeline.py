@@ -365,7 +365,7 @@ def _results(solver, lattice, conditions, arrays: dict, setups: list, umap, b_re
     from ventorum.aero.loads import loads_result, strip_onset_speed, trefftz_lateral_batch
     from ventorum.aero.system import has_rates
     from ventorum.hardware.profile import active_profile
-    from ventorum.solvers.core import SolveInfo
+    from ventorum.solvers.core import direct_solve_info
 
     prof = active_profile()
     # The CPU thread plan does not apply to a GPU batch: threads, workers
@@ -415,7 +415,8 @@ def _results(solver, lattice, conditions, arrays: dict, setups: list, umap, b_re
             force_total=arrays["F_total"][k], moment_total=arrays["M"][k],
             CY_farfield=cy_ff[k], Cn_trefftz=cn_tr[k],
         )
-        info = infos[k] if infos is not None else SolveInfo(symmetric=umap.symmetric)
+        info = (infos[k] if infos is not None
+                else direct_solve_info(np.asarray(gammas[k], dtype=float), symmetric=umap.symmetric))
         cpu_record = cpu_cases.get(k) if cpu_cases else None
         res = solver._case_result(lattice, cond, ld, info, gammas[k], st[0], st[1], st[2], st[3], b_ref,
                                   c_ref, main_surface, t0, execution_time=share, spanwise_stats=stats[k],

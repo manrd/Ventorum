@@ -432,14 +432,18 @@ class FourierSolver(BaseSolver):
             e=e, AR=AR, Cm=Cm,
         )
         notes = _unused_shape_notes(aircraft) + fourier_convergence_notes(surf, AR, N)
+        # The direct solve has no tolerance: it counts as converged when its
+        # coefficients and totals are finite numbers.
+        converged = bool(np.all(np.isfinite(A)) and np.all(np.isfinite([CL, CDi, Cm])))
         totals.trust = evaluate_aerodynamic_trust(
             AR=AR, condition=condition, spanwise_list=[spanwise], CL=CL, CDi=CDi,
-            CD_total=totals.CD_total, converged=True, n_panels=N, max_sweep_rad=0.0,
+            CD_total=totals.CD_total, converged=converged, n_panels=N, max_sweep_rad=0.0,
             solver_type="fourier", notes=notes,
             taper=surface_tip_chord_ratio(surf) if surf is not None else None,
+            CDp=CDp, Cm=Cm,
         )
         return SolverResult(
-            spanwise=[spanwise], totals=totals, solver_type="fourier", converged=True,
+            spanwise=[spanwise], totals=totals, solver_type="fourier", converged=converged,
             iterations=1, fourier_coefficients=A, condition=condition,
             b_ref=float(aircraft.b_ref), c_ref=float(aircraft.c_ref),
             details={"notes": list(notes)},
