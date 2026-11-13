@@ -86,6 +86,62 @@ def test_batch_reports_failures():
 
 
 @pytest.mark.slow
+def test_batch_warns_per_failed_angle_as_the_sequential_solver():
+    """A failed angle gives the same warning in the batch as in the sequential solver.
+
+    Regression: the batch gave NaN rows with converged False and no warning.
+    """
+    coords = airfoil("0012").repanel(n_panels=80).coords
+    cases = [ViscousCase(coordinates=coords, alpha=2.0, Re=1e6, max_iter=2, work_budget=4)]
+    with pytest.warns(UserWarning, match=r"^solve_viscous_batch: alpha = 2 deg did not converge: ") as batch:
+        r = solve_viscous_batch(cases, device="cpu", dtype=torch.float64)
+    with pytest.warns(UserWarning, match=r"^solve_viscous: alpha = 2 deg did not converge: ") as seq:
+        s = solve_viscous(coords, 2.0, 1e6, max_iter=2, work_budget=4)
+    assert not r.converged[0] and not s.converged
+    texts_b = [str(w.message) for w in batch if "did not converge" in str(w.message)]
+    texts_s = [str(w.message) for w in seq if "did not converge" in str(w.message)]
+    assert len(texts_b) == len(texts_s) == 1
+    assert texts_b[0].removeprefix("solve_viscous_batch") == texts_s[0].removeprefix("solve_viscous")
+
+
+@pytest.mark.slow
+def test_batch_same_cases_do_not_share_arrays():
+    """Two equal cases give results with their own arrays.
+
+    Regression: the two results shared one row, so an in-place change of
+    one result changed the other.
+    """
+    coords = airfoil("0012").repanel(n_panels=80).coords
+    cases = [ViscousCase(coordinates=coords, alpha=2.0, Re=1e6, max_iter=2) for _ in range(2)]
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        r = solve_viscous_batch(cases, device="cpu", dtype=torch.float64)
+    a, b = r[0], r[1]
+    for name in ("Cp", "H", "theta", "Cf", "delta_star", "ue", "coordinates"):
+        assert getattr(a, name) is not getattr(b, name), name
+        assert np.array_equal(getattr(a, name), getattr(b, name), equal_nan=True), name
+    for key in a.wake:
+        assert a.wake[key] is not b.wake[key], key
+    a.Cp[0] = 123.0
+    assert b.Cp[0] != 123.0
+
+
+@pytest.mark.slow
+def test_batch_low_ground_height_does_not_raise():
+    """A pivot height below the reach of the 4 deg zero-lift probe gives batch rows, not a geometry error."""
+    coords = airfoil("0006", n_points=81)
+    cases = [ViscousCase(coordinates=coords, alpha=a, Re=1e6, height=0.04) for a in (0.0, 4.0)]
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        r = solve_viscous_batch(cases, device="cpu", dtype=torch.float64)
+        seq = solve_viscous(coords, [0.0, 4.0], 1e6, height=0.04)
+    assert r.converged[0], r.reason[0]
+    assert r.Cl[0] == pytest.approx(seq.Cl[0], rel=1e-8)
+    assert not r.converged[1] and np.isnan(r.Cl[1])
+    assert "touches the ground at alpha = 4 deg" in r.reason[1]
+
+
+@pytest.mark.slow
 def test_batch_work_counters_and_budget():
     """The batch reports the work per case (batched first attempt included) and applies the work budget."""
     coords = airfoil("0012").repanel(n_panels=80).coords

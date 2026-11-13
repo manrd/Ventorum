@@ -19,8 +19,10 @@ Reynolds number airfoils; Drela, M. and Youngren, H., XFOIL 6.99 user guide
 
 from __future__ import annotations
 
+import hashlib
 import inspect
 from collections.abc import Sequence
+from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 
 import numpy as np
@@ -145,8 +147,9 @@ class XfoilPolarSource:
 
     Notes
     -----
-    The cache key holds every input of the XFOIL run: the section, the
-    Reynolds number, the Mach number, the flap, the angle grid, every
+    The cache key holds every input of the XFOIL run: the section (for a
+    coordinate file, its path and the sha256 of its bytes), the Reynolds
+    number, the Mach number, the flap, the angle grid, every
     :func:`run_xfoil` option and the version line of the XFOIL executable
     that runs the case. The version is read for the executable of each
     call, so a call with another executable never reads a polar of the
@@ -249,8 +252,11 @@ class XfoilPolarSource:
         Parameters
         ----------
         section : str or np.ndarray
-            A NACA name (for example ``"naca 0012"``) or points (N, 2) in
-            Selig order.
+            A NACA name (for example ``"naca 0012"``), the path of a
+            coordinate file for the XFOIL LOAD command, or points (N, 2) in
+            Selig order. The cache key of a NACA name is the name in lower
+            case; the key of a file is its path as given and the sha256 of
+            its bytes (a file that cannot be read is not cached).
         Re : float
             Reynolds number [-].
         alphas_deg : sequence of float
@@ -281,10 +287,21 @@ class XfoilPolarSource:
         if not np.all(np.isfinite(alphas)):
             raise ValueError("alphas_deg must hold finite values only.")
         flap_tuple = check_flap(flap)
+        use_cache = self._cache is not None
         if isinstance(section, str):
             airfoil = section
             coordinates = None
-            key_section: object = section.strip().lower()
+            if section.lower().startswith("naca"):
+                key_section: object = section.strip().lower()
+            else:
+                # A coordinate file: the key holds the path as given and
+                # the sha256 of the file bytes, so an edited file misses.
+                try:
+                    digest = hashlib.sha256(Path(section).read_bytes()).hexdigest()
+                except OSError:
+                    use_cache = False
+                    digest = None
+                key_section = {"file": section, "sha256": digest}
         else:
             coordinates = np.asarray(section, dtype=float)
             if coordinates.ndim != 2 or coordinates.shape[1] != 2:
@@ -300,7 +317,7 @@ class XfoilPolarSource:
         uniq = np.unique(alphas)
         step = 0.5 if uniq.size == 1 else float(np.diff(uniq).min())
         payload: dict[str, object] | None = None
-        if self._cache is not None:
+        if use_cache:
             exe = resolve_xfoil_executable(settings.get("executable"))
             version = xfoil_version(exe)
             if version != "unknown":

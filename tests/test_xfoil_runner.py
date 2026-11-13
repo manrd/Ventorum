@@ -667,6 +667,40 @@ def test_polar_source_caches_and_misses_on_changed_input(monkeypatch, tmp_path):
     assert len(seen) == 2
 
 
+def test_polar_source_keys_a_file_path_by_its_content(monkeypatch, tmp_path):
+    """A coordinate file is keyed by its path as given and its content.
+
+    Regression: the key of a file path was the lower-case path, so an
+    edited file gave the old polar, and Foil.dat and foil.dat shared one
+    entry.
+    """
+    from ventorum.aero.polar_cache import PolarCache
+
+    seen: list[dict] = []
+    polar_source = _source_with_fake_run(monkeypatch, tmp_path, seen)
+    src = polar_source.XfoilPolarSource(
+        cache=PolarCache(directory=tmp_path / "polars")
+    )
+    foil = tmp_path / "Foil.dat"
+    foil.write_text("Foil\n1.0 0.0\n0.0 0.0\n1.0 0.0\n")
+    alphas = [0.0, 2.0, 4.0]
+    src.polar(str(foil), 1e6, alphas)
+    src.polar(str(foil), 1e6, alphas)
+    assert len(seen) == 1
+    foil.write_text("Foil\n1.0 0.0\n0.0 0.01\n1.0 0.0\n")
+    src.polar(str(foil), 1e6, alphas)
+    assert len(seen) == 2
+    assert seen[1]["airfoil"] == str(foil)
+    other = tmp_path / "sub"
+    other.mkdir()
+    lower = other / "foil.dat"
+    lower.write_text(foil.read_text())
+    src.polar(str(lower), 1e6, alphas)
+    assert len(seen) == 3
+    src.polar(str(foil).upper(), 1e6, alphas)
+    assert len(seen) == 4
+
+
 _BASE_CALL = {
     "section": "naca 0012",
     "Re": 1e6,

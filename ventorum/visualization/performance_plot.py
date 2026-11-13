@@ -7,6 +7,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.figure import Figure
 
+from ventorum.visualization.drag_polar import sweep_alphas_deg
 from ventorum.core.datatypes import (
     SolverResult,
     TabulatedAirfoil,
@@ -26,13 +27,16 @@ def plot_efficiency_curves(
     results : list[SolverResult]
         Sweep results across angles of attack.
     alpha_range : np.ndarray or None
-        Angles of attack in radians.
+        Angles of attack in radians. When None, the angles come from the
+        flight conditions of the results (see
+        :func:`ventorum.visualization.drag_polar.sweep_alphas_deg`).
     ax : plt.Axes or None
 
     Returns
     -------
     Figure
     """
+    alphas_deg = sweep_alphas_deg(results, alpha_range)
     if ax is None:
         fig, ax1 = plt.subplots(figsize=(10, 6))
     else:
@@ -55,11 +59,6 @@ def plot_efficiency_curves(
     pos_mask = CLs > 0
     endurance_param = np.zeros_like(CLs)
     endurance_param[pos_mask] = (CLs[pos_mask] ** 1.5) / safe_CDs[pos_mask]
-
-    if alpha_range is not None:
-        alphas_deg = np.degrees(alpha_range)
-    else:
-        alphas_deg = np.arange(len(CLs))
 
     # Primary axis: L/D
     color_ld = "#2563eb"
@@ -142,6 +141,9 @@ def plot_pitching_moment(
     ----------
     results : list[SolverResult]
     alpha_range : np.ndarray or None
+        Angles of attack [rad]. When None, the angles come from the flight
+        conditions of the results (see
+        :func:`ventorum.visualization.drag_polar.sweep_alphas_deg`).
     axes : tuple[plt.Axes, plt.Axes] or None
         Optional (ax1, ax2) to draw upon.
 
@@ -149,6 +151,13 @@ def plot_pitching_moment(
     -------
     Figure
     """
+    if alpha_range is not None:
+        alphas_deg = np.degrees(alpha_range)
+        alphas_rad = alpha_range
+    else:
+        alphas_deg = sweep_alphas_deg(results)
+        alphas_rad = np.radians(alphas_deg)
+
     if axes is None:
         fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(13, 5.5))
     else:
@@ -157,13 +166,6 @@ def plot_pitching_moment(
 
     CLs = np.array([r.totals.CL for r in results])
     Cms = np.array([r.totals.Cm for r in results])
-
-    if alpha_range is not None:
-        alphas_deg = np.degrees(alpha_range)
-        alphas_rad = alpha_range
-    else:
-        alphas_deg = np.arange(len(CLs))
-        alphas_rad = np.radians(alphas_deg)
 
     # 1. Cm vs Alpha
     ax1.plot(alphas_deg, Cms, "o-", color="#dc2626", linewidth=2.0)

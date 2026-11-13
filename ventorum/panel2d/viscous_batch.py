@@ -38,6 +38,8 @@ switch to float64).
 
 from __future__ import annotations
 
+import copy
+import warnings
 from dataclasses import dataclass
 
 import numpy as np
@@ -299,7 +301,10 @@ def solve_viscous_batch(cases, *, backend: str = "torch", device=None, dtype=Non
     -------
     ViscousBatchResult
         One :class:`ventorum.panel2d.viscous.ViscousResult` per case, in
-        input order.
+        input order. Each result holds its own arrays, also when two cases
+        are the same. As in :func:`ventorum.panel2d.viscous.solve_viscous`,
+        an angle that did not converge gives a UserWarning with its reason
+        (one per angle of a sequence).
     """
     if backend != "torch":
         raise ValueError(f"backend '{backend}' is not supported; solve_viscous_batch runs on 'torch'.")
@@ -341,9 +346,15 @@ def solve_viscous_batch(cases, *, backend: str = "torch", device=None, dtype=Non
         vs.add_note(p["rows"].values(), note)
         vs.warn_wake_sawtooth(p["rows"].values(), "solve_viscous_batch")
         vs.warn_transition_rule(p["rows"].values(), "solve_viscous_batch")
+        for a in dict.fromkeys(float(parsed[i].alpha) for i in p["idx"]):
+            r = p["rows"][a]
+            if not r["converged"]:
+                warnings.warn(f"solve_viscous_batch: alpha = {r['alpha']:g} deg did not converge: {r['reason']}",
+                              UserWarning, stacklevel=2)
         for i in p["idx"]:
             r = p["rows"][float(parsed[i].alpha)]
-            out[i] = vs.ViscousResult(**{f: r[f] for f in vs._FIELDS})
+            # A copy per case: two cases with the same sequence and angle must not share arrays.
+            out[i] = vs.ViscousResult(**{f: copy.deepcopy(r[f]) for f in vs._FIELDS})
     return ViscousBatchResult(out)
 
 
@@ -357,6 +368,10 @@ def _pass(items, bk, upward):
             row, state = vs.finish_angle(plan["body"], alpha, c.Re, None, c.tol, c.max_iter, plan["kw"], bk,
                                          rules=plan["rules"], cache=plan["cache"])
             _store(plan, alpha, row, state, upward)
+            continue
+        contact = vs.ground_contact(plan["body"], alpha, plan["kw"])
+        if contact is not None:
+            plan["rows"][float(alpha)] = vs._failed_row(alpha, plan["body"], contact)
             continue
         try:
             setup = vs.prepare_case(plan["body"], alpha, c.Re, **plan["kw"])

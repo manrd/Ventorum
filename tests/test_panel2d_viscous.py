@@ -954,3 +954,41 @@ def test_solve_viscous_of_a_flapped_shape_uses_the_stored_reference_for_x_over_c
         solve_viscous(pts, 0.0, 1e6, max_iter=1, chord_ref=ref.chord_ref)
         assert seen and all(np.allclose(x, deflected, rtol=0.0, atol=1e-14) for x in seen)
     assert np.max(np.abs(stored - deflected)) > 1e-3
+
+
+def _low_ground_section():
+    """Return a thin section whose zero-lift probe at 4 deg touches the ground at a pivot height of 0.04 c."""
+    return airfoil("0006", n_points=81)
+
+
+def test_ground_contact_names_the_angle():
+    """The ground-contact check finds the 4 deg probe angle under the ground at a pivot height of 0.04 c."""
+    from ventorum.panel2d import viscous as vs
+
+    body, chord, moment, pivot = vs.resolve_body(_low_ground_section())
+    kw = dict(height=0.04, height_reference="pivot", pivot=pivot, chord_ref=chord, moment_ref=moment)
+    assert vs.ground_contact(body, 0.0, kw) is None
+    reason = vs.ground_contact(body, 4.0, kw)
+    assert reason is not None and "alpha = 4 deg" in reason
+    assert vs.ground_contact(body, 4.0, dict(kw, height=None)) is None
+
+
+@pytest.mark.slow
+def test_low_ground_height_does_not_raise():
+    """A pivot height below the reach of the 4 deg zero-lift probe gives rows, not a geometry error.
+
+    Regression: the inviscid zero-lift probe at 4 deg put the section into
+    the ground for a pivot height below about 0.052 c, and the error
+    stopped the sweep at its first angle. Now the cold start at the angle
+    is used, and an angle where the section itself touches the ground is a
+    failed row with a warning.
+    """
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        r = solve_viscous(_low_ground_section(), [0.0, 4.0], 1e6, height=0.04)
+    assert r.converged[0], r.reason[0]
+    assert np.isfinite(r.Cl[0]) and r.Cl[0] < 0.0
+    assert not r.converged[1] and np.isnan(r.Cl[1])
+    assert "touches the ground at alpha = 4 deg" in r.reason[1]
+    texts = [str(w.message) for w in caught if issubclass(w.category, UserWarning)]
+    assert any(t.startswith("solve_viscous: alpha = 4 deg did not converge") for t in texts)

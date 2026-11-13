@@ -1133,7 +1133,9 @@ def finish_angle(body, alpha, re, prev, tol, max_iter, kw, bk=None, first=None, 
     :func:`row_from_result`). The row holds the work counters, and its
     reason names each early stop of a failed angle. ``cache`` (a dict, one
     per sweep) keeps the cold start at the zero-lift angle for the next
-    angles (see :func:`_cold_path`).
+    angles (see :func:`_cold_path`). An angle where the section touches
+    the ground (see :func:`ground_contact`) gives a failed row without a
+    solve.
 
     Wake-weight continuation: when these attempts do not converge, the
     angle is solved again (the same attempts) with the plain mean of the
@@ -1159,6 +1161,11 @@ def finish_angle(body, alpha, re, prev, tol, max_iter, kw, bk=None, first=None, 
     ctl = _AngleWork(alpha, StopRules() if rules is None else rules)
     if first is not None:
         ctl.add(first[0], first[1], ctl.cap(max_iter), max_iter)
+    contact = ground_contact(body, alpha, kw)
+    if contact is not None:
+        row = _failed_row(alpha, body, contact)
+        row.update(ctl.counters())
+        return row, None
     notes = []
     warm_from = None
     try:
@@ -1366,6 +1373,52 @@ def restart_false_branches(rows, states, body, re, tol, max_iter, kw, bk=None, r
         states[a] = (setup, res.state)
 
 
+#: Angles of the two inviscid solves of :func:`zero_lift_angle` [deg].
+ZERO_LIFT_PROBE_ANGLES = (0.0, 4.0)
+
+
+def ground_contact(body, alpha, kw) -> str | None:
+    """Return the reason when the section touches the ground at an angle, else None.
+
+    The section is rotated and placed as in the solves (see
+    :func:`ventorum.panel2d.solver.place_in_ground_effect`). A free-air
+    case (height None) or an unknown height reference gives None: the
+    solve itself then gives the result or the error.
+
+    Parameters
+    ----------
+    body : np.ndarray or AirfoilShape
+        Airfoil coordinates [m].
+    alpha : float
+        Angle of attack [deg].
+    kw : dict
+        Case settings (height, height reference, pivot, reference chord
+        and moment reference point are used).
+
+    Returns
+    -------
+    str or None
+        The reason of the failed angle, or None when the section is above
+        the ground.
+    """
+    from ventorum.panel2d import solver as sv
+
+    h = kw.get("height")
+    ref = kw.get("height_reference", "pivot")
+    if h is None or ref not in ("pivot", "trailing_edge"):
+        return None
+    pivot = kw.get("pivot")
+    if pivot is None:
+        pivot = resolve_reference(body, kw.get("chord_ref"), kw.get("moment_ref"))[2]
+    coords = body.coords if isinstance(body, AirfoilShape) else body
+    try:
+        sv.place_in_ground_effect([np.asarray(coords, dtype=np.float64)], float(alpha), h, ref, pivot)
+    except ValueError:
+        return (f"the section is under or touches the ground at alpha = {float(alpha):g} deg "
+                f"(height {h:g} m, height reference {ref})")
+    return None
+
+
 def zero_lift_angle(body, kw) -> float:
     """Return the inviscid zero-lift angle of a section [deg] (free air or ground effect).
 
@@ -1381,15 +1434,23 @@ def zero_lift_angle(body, kw) -> float:
     -------
     float
         Angle where the inviscid lift is zero [deg], from two inviscid
-        solves (0 and 4 deg).
+        solves (at :data:`ZERO_LIFT_PROBE_ANGLES`, 0 and 4 deg).
+
+    Raises
+    ------
+    ValueError
+        If the section touches the ground at a probe angle (see
+        :func:`ground_contact`).
     """
     from ventorum.panel2d.solver import solve_inviscid
 
     h = kw.get("height")
     opts = {} if h is None else {"height": h, "height_reference": kw.get("height_reference", "pivot"),
                                  "pivot": kw.get("pivot")}
-    cl = solve_inviscid(body, [0.0, 4.0], chord_ref=kw.get("chord_ref"), **opts).Cl
-    return float(-4.0 * cl[0] / (cl[1] - cl[0]))
+    a_hi = ZERO_LIFT_PROBE_ANGLES[1]
+    cl = solve_inviscid(body, list(ZERO_LIFT_PROBE_ANGLES), chord_ref=kw.get("chord_ref"), **opts).Cl
+    # The first probe angle is 0 deg.
+    return float(-a_hi * cl[0] / (cl[1] - cl[0]))
 
 
 def _cold_path(body, alpha, re, tol, max_iter, kw, bk=None, ctl=None, cache=None):
@@ -1426,9 +1487,24 @@ def _cold_path(body, alpha, re, tol, max_iter, kw, bk=None, ctl=None, cache=None
     the budget of the angle. A stage of the path that fails (budget used
     up, or no convergence) is named in a note of the angle, and the cold
     start at the angle follows.
+
+    Ground contact: when the section touches the ground at a probe angle
+    of :func:`zero_lift_angle`, at the zero-lift angle or at a step of the
+    path (see :func:`ground_contact`), the path and the angle probe are not
+    used: the cold start at the angle is the only attempt, and a note of
+    the angle names the reason.
     """
-    a0 = zero_lift_angle(body, kw)
-    n = _continuation_steps(alpha, a0)
+    contact = next(filter(None, (ground_contact(body, a, kw) for a in ZERO_LIFT_PROBE_ANGLES)), None)
+    n = 0
+    if contact is None:
+        a0 = zero_lift_angle(body, kw)
+        n = _continuation_steps(alpha, a0)
+        if n > 0:
+            path = [a0] + [a0 + (alpha - a0) * k / n for k in range(1, n + 1)]
+            contact = next(filter(None, (ground_contact(body, a, kw) for a in path)), None)
+    if contact is not None:
+        n = 0
+        _path_note(ctl, f"not used, because {contact}; cold start at the angle")
     if n > 0 and kw.get("wake_weights", "length") == "length":
         probe = _angle_probe(body, alpha, re, tol, max_iter, kw, bk, ctl)
         if probe is not None and probe[1].converged:

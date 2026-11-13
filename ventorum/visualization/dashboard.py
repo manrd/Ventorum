@@ -19,6 +19,8 @@ from mpl_toolkits.mplot3d.art3d import Poly3DCollection
 from ventorum.core.datatypes import Aircraft, LiftingSurface, SolverResult, SolverSettings
 from ventorum.core.constants import RHO_SL
 from ventorum.geometry.processing import discretize_surface
+from ventorum.visualization.drag_polar import sweep_alphas_deg
+from ventorum.visualization.geometry_plot import result_strip_polygons
 
 
 def plot_aircraft_dashboard(
@@ -52,7 +54,9 @@ def plot_aircraft_dashboard(
     sweep_results : list[SolverResult] or None
         Optional sweep results for polars and stability curves.
     alpha_sweep_deg : np.ndarray or None
-        Angles of attack corresponding to sweep_results in degrees.
+        Angles of attack corresponding to sweep_results in degrees. When
+        None, the angles come from the flight conditions of the results
+        (see :func:`ventorum.visualization.drag_polar.sweep_alphas_deg`).
     settings : SolverSettings or None
     figsize : tuple[float, float]
     elev : float
@@ -92,31 +96,11 @@ def plot_aircraft_dashboard(
     all_vals = []
     all_pts_list = []
 
-    for idx, surf in enumerate(aircraft.surfaces):
-        if idx >= len(result.spanwise):
-            continue
-        sw = result.spanwise[idx]
-        n_semi = (
-            settings.n_panels
-            if settings is not None
-            else (len(sw.gamma) // 2 if surf.is_symmetric else len(sw.gamma))
-        )
-        spacing = settings.spacing if settings is not None else "cosine"
-        ds = discretize_surface(surf, n_semi, spacing, idx)
-        n_panels = min(len(ds.chords), len(sw.Cl))
-
-        for i in range(n_panels):
-            node_A = ds.nodes_qc[i]
-            node_B = ds.nodes_qc[i + 1]
-            vec_c = ds.control_points[i] - 0.5 * (node_A + node_B)
-            p_le_A = node_A - 0.5 * vec_c
-            p_le_B = node_B - 0.5 * vec_c
-            p_te_B = node_B + 1.5 * vec_c
-            p_te_A = node_A + 1.5 * vec_c
-
-            poly = [p_le_A, p_le_B, p_te_B, p_te_A]
-            all_polys.append(poly)
-            all_vals.append(sw.Cl[i])
+    # The strips of the solve (see result_strip_polygons): each colour is at its solved strip.
+    for polys, sw in zip(result_strip_polygons(aircraft, result, settings), result.spanwise):
+        for poly, val in zip(polys, sw.Cl):
+            all_polys.append(list(poly))
+            all_vals.append(val)
             all_pts_list.extend(poly)
 
     if all_polys:
@@ -337,7 +321,7 @@ def plot_aircraft_dashboard(
         ])
         safe_cd = np.maximum(cds_sw, 1e-6)
         ld_sw = cls_sw / safe_cd
-        a_deg = alpha_sweep_deg if alpha_sweep_deg is not None else np.arange(len(cls_sw))
+        a_deg = alpha_sweep_deg if alpha_sweep_deg is not None else sweep_alphas_deg(sweep_results)
 
         c_ld = "#2563eb"
         ax6_1.plot(a_deg, ld_sw, "o-", color=c_ld, linewidth=1.8, label=r"$L/D$")
@@ -383,7 +367,7 @@ def plot_aircraft_dashboard(
     ax7 = fig.add_subplot(gs[1, 2])
     if sweep_results and len(sweep_results) > 1:
         cms = np.array([r.totals.Cm for r in sweep_results])
-        a_deg = alpha_sweep_deg if alpha_sweep_deg is not None else np.arange(len(cms))
+        a_deg = alpha_sweep_deg if alpha_sweep_deg is not None else sweep_alphas_deg(sweep_results)
         a_rad = np.radians(a_deg)
         cls_sw = np.array([r.totals.CL for r in sweep_results])
 
