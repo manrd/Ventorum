@@ -1,7 +1,3 @@
----
-orphan: true
----
-
 # Integral boundary-layer closures and transition (Ventorum-2D)
 
 ## Model

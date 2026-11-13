@@ -1,7 +1,3 @@
----
-orphan: true
----
-
 # 2D inviscid panel solver with ground effect (Ventorum-2D)
 
 ## Model

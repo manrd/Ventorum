@@ -1,7 +1,3 @@
----
-orphan: true
----
-
 # Integral boundary-layer equations and direct march (Ventorum-2D)
 
 ## Model

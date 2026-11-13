@@ -1,7 +1,3 @@
----
-orphan: true
----
-
 # Viscous coupling: angle-of-attack correction and parasite drag
 
 ## Model

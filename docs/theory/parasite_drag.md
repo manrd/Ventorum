@@ -1,7 +1,3 @@
----
-orphan: true
----
-
 # Parasite-drag build-up
 
 ## Model

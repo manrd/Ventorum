@@ -1,7 +1,3 @@
----
-orphan: true
----
-
 # Plain-flap deflection of airfoil sections
 
 This page describes the geometric plain-flap operation of Ventorum-2D.

@@ -1,7 +1,3 @@
----
-orphan: true
----
-
 # Viscous alpha-correction coupling
 
 This page describes the first viscous variant (V1) of the lattice solvers: an angle-of-attack correction (decambering) that couples the vortex-lattice method or the linear lifting line with 2D section polars. The code is `ventorum.viscous.alpha_correction.solve_viscous`.

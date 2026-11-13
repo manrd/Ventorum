@@ -158,6 +158,9 @@ a minor version can change a public interface.
 
 ### Changed
 
+- Theory manual: the Ventorum-2D, airfoil, boundary-layer, viscous-coupling and parasite-drag
+  pages are now in the table of contents and in the chapter table (they were orphan pages).
+
 - CI: each OS and Python version now has two test jobs that run at the same time. The part
   `main` runs the tests not marked slow, the documentation, the verification reports and the
   examples; the part `slow` runs the tests marked slow. The two parts run the same tests as

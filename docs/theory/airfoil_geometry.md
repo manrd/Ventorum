@@ -1,7 +1,3 @@
----
-orphan: true
----
-
 # Airfoil geometry
 
 This chapter gives the coordinate convention, the file formats and the geometry checks of the 2D airfoil tools.

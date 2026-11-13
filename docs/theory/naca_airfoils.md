@@ -1,7 +1,3 @@
----
-orphan: true
----
-
 # NACA 4-digit and 5-digit airfoils
 
 This chapter gives the thickness distribution and the mean lines that

@@ -1,7 +1,3 @@
----
-orphan: true
----
-
 # Airfoils: geometry, NACA sections, paneling and flaps
 
 This chapter joins the three airfoil notes into one coherent chapter.

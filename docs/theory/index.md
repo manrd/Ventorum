@@ -34,6 +34,18 @@ The values of the model parameters come from the code (the API reference shows t
 | [3D panel solver](panel3d.md) | Solver details of Ventorum-3DP: ground images, condition grouping, root section with dihedral, fold guard, solver interface | Morino and Kuo (1974); B. Maskew (1987); Katz and Plotkin (2001) |
 | [3D panel influence kernels](panel3d_kernels.md) | Exact and far-field influences of the constant source and doublet panels | Hess and Smith (1964, 1967); J. N. Newman (1986); Katz and Plotkin (2001) |
 | [3D panel control surfaces](panel3d_controls.md) | Plain control surfaces in 3D panel meshes | H. Glauert (1926, 1927); Katz and Plotkin (2001); B. Maskew (1987) |
+| [2D airfoil model (Ventorum-2D)](ventorum_2d.md) | Airfoil geometry, 2D panel method with ground effect, integral boundary layer and viscous-inviscid interaction | I. H. Abbott and A. E. von Doenhoff (1959); M. Drela and M. B. Giles (1987); M. Drela (1989) |
+| [Airfoils](airfoils.md) | Airfoil geometry, NACA sections, paneling and flaps | Abbott and von Doenhoff (1959); M. S. Selig et al. (1995); E. N. Jacobs et al. (1933) |
+| [Airfoil geometry](airfoil_geometry.md) | Coordinate formats, splines and repaneling | Selig et al. (1995); Abbott and von Doenhoff (1959); Katz and Plotkin (2001) |
+| [NACA airfoils](naca_airfoils.md) | NACA 4-digit and 5-digit generators | Abbott and von Doenhoff (1959); C. L. Ladson et al. (1996); Jacobs et al. (1933) |
+| [Airfoil flaps](airfoil_flaps.md) | Plain-flap deflection of airfoil coordinates | H. Glauert (1926, 1927) |
+| [2D panel solver](panel2d.md) | Inviscid 2D panels with ground effect and several elements | Katz and Plotkin (2001); M. Drela (1989); L. M. Milne-Thomson (1958) |
+| [2D viscous solver](panel2d_viscous.md) | Viscous-inviscid interaction with a global Newton coupling, profile drag | M. J. Lighthill (1958); Drela and Giles (1987); H. B. Squire and A. D. Young (1938) |
+| [Boundary-layer closures](ibl2d_closure.md) | Integral boundary-layer closure relations and e^N transition | Drela and Giles (1987); M. Drela (1986); T. J. Swafford (1983) |
+| [Boundary-layer march](ibl2d_march.md) | Integral boundary-layer equations and the direct march | Drela and Giles (1987); Drela (1986); H. Schlichting and K. Gersten (2017) |
+| [Viscous coupling](viscous_coupling.md) | Angle-of-attack correction with section polars, and parasite drag | S. Gallay and E. Laurendeau (2015); Glauert (1927); Katz and Plotkin (2001) |
+| [Viscous alpha-correction coupling](viscous_alpha_correction.md) | Alpha-correction coupling of the lattice, lifting-line and panel solvers with 2D polars | J. B. Tseng and C. E. Lan (1988) |
+| [Parasite drag](parasite_drag.md) | Component build-up of the parasite drag | D. P. Raymer (2018); E. Torenbeek (1982); S. F. Hoerner (1965) |
 
 ```{toctree}
 :maxdepth: 1
@@ -57,4 +69,16 @@ ventorum_3dp
 panel3d
 panel3d_kernels
 panel3d_controls
+ventorum_2d
+airfoils
+airfoil_geometry
+naca_airfoils
+airfoil_flaps
+panel2d
+panel2d_viscous
+ibl2d_closure
+ibl2d_march
+viscous_coupling
+viscous_alpha_correction
+parasite_drag
 ```

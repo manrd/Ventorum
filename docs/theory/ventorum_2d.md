@@ -1,7 +1,3 @@
----
-orphan: true
----
-
 # Ventorum-2D: Airfoil geometry, panel method and viscous-inviscid interaction
 
 ## Model

@@ -1,7 +1,3 @@
----
-orphan: true
----
-
 # 2D viscous-inviscid solver (Ventorum-2D)
 
 ## Model
