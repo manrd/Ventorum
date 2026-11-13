@@ -315,6 +315,39 @@ def test_control_derivatives_in_ground_effect():
     assert ge.hinge[0].moment.Ch != pytest.approx(free.hinge[0].moment.Ch, rel=1e-3)
 
 
+@pytest.mark.slow
+def test_control_derivatives_ground_effect_one_mesh():
+    """Regression: in ground effect all cases use one automatic chordwise count.
+
+    The automatic count depends on the deflection and on alpha. Before the
+    fix each case had its own count (here 28, 31 and 32 for the deflections
+    -1, 0 and +1 deg), and the derivative agreed with no single mesh. Now
+    the count is the largest automatic count of the cases.
+    """
+    w = _wing([vt.ControlSurface("flap", 0.0, 1.0, 0.75, 0.0)])
+    cond = vt.FlightCondition(V_inf=20.0, alpha=np.radians(3.0), h=0.085)
+    st = vt.SolverSettings(solver_type="vlm", n_panels=12)
+    step = np.radians(1.0)
+    da = np.radians(0.5)
+    cases = [(w, cond)]
+    for d in (step, -step):
+        shifted = w.clone()
+        shifted.controls[0].deflection = d
+        cases.append((shifted, cond))
+    cases += [(w, vt.FlightCondition(V_inf=20.0, alpha=cond.alpha + s * da, h=0.085)) for s in (1.0, -1.0)]
+    counts = [_quiet(vt.analyze, a, c, st).details["lattice"].n_chord for a, c in cases]
+    assert len(set(counts)) > 1
+    auto = _quiet(control_derivatives, w, cond, st)
+    fixed = _quiet(control_derivatives, w, cond, vt.SolverSettings(solver_type="vlm", n_panels=12,
+                                                                   n_chord=max(counts)))
+    assert auto.base.details["lattice"].n_chord == max(counts)
+    assert auto.derivatives["flap"].CL == fixed.derivatives["flap"].CL
+    assert auto.derivatives["flap"].Cm == fixed.derivatives["flap"].Cm
+    for a, f in zip(auto.hinge, fixed.hinge):
+        assert a.Ch_delta["flap"] == f.Ch_delta["flap"]
+        assert a.Ch_alpha == f.Ch_alpha
+
+
 def test_control_derivatives_input_errors():
     w = _wing([vt.ControlSurface("f", 0.0, 1.0, 0.75, 0.0)])
     st = vt.SolverSettings(solver_type="linear", n_panels=8)
