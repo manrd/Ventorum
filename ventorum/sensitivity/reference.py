@@ -1044,9 +1044,15 @@ class TorchReference:
                                         rc2_src, s_group, s_sign, s_col, n_u,
                                         tg_group, tg_rc)
             rhs = -V * (n_bc_u * d).sum(-1)
+            with torch.no_grad():
+                rhs_terms = torch.abs(V) * (torch.abs(n_bc_u) * torch.abs(d)).sum(-1)
             if rated:
-                rhs = rhs - (n_bc_u * _w_rot(cp_u)).sum(-1)
+                w_rot = _w_rot(cp_u)
+                rhs = rhs - (n_bc_u * w_rot).sum(-1)
+                with torch.no_grad():
+                    rhs_terms = rhs_terms + (torch.abs(n_bc_u) * torch.abs(w_rot)).sum(-1)
         elif b.get("solver") == "nonlinear":
+            rhs_terms = None
             A, rhs, alpha_u_nl = self._nonlinear_system(
                 t, g_unknown, d, V, cp_u, dl, area, normal, cdir, chord, a0, aL0, shift_strip,
                 s_a, s_b, s_ate, s_bte, s_wd, rc2_src, s_group, s_sign, s_col, n_u,
@@ -1081,11 +1087,17 @@ class TorchReference:
                 diag = 2.0 * torch.linalg.norm(torch.linalg.cross(unit, dl_u), dim=1) / (a0_u * area_u)
                 A = torch.diag(diag) - a_ind
                 rhs = (normal_u * onset_u).sum(-1) - speed * aL0_u
+                with torch.no_grad():
+                    rhs_terms = ((torch.abs(normal_u) * torch.abs(onset_u)).sum(-1)
+                                 + speed * torch.abs(aL0_u))
             else:
                 cross_dl = torch.linalg.cross(d.expand_as(dl_u), dl_u)
                 diag = 2.0 * torch.linalg.norm(cross_dl, dim=1) / (a0_u * area_u)
                 A = torch.diag(diag) - a_ind
                 rhs = V * ((normal_u * d).sum(-1) - aL0_u)
+                with torch.no_grad():
+                    rhs_terms = torch.abs(V) * ((torch.abs(normal_u) * torch.abs(d)).sum(-1)
+                                                + torch.abs(aL0_u))
 
         # --- near-field loads ------------------------------------------------
         f_frac = b["cp_frac_panel"]
@@ -1313,6 +1325,12 @@ class TorchReference:
                    "Cl": coef[0], "Cm": coef[1], "Cn": coef[2],
                    "strip_force": f_strip, "section_cl": cl_strip}
         _ = alpha_geom, alpha_eff, w_n
+        # Magnitude of the terms of each right-hand-side row before they
+        # cancel (no graph), for the backward error of the residual check
+        # (ventorum.sensitivity.adjoint._backward_error). The nonlinear
+        # lifting line sets it in _nonlinear_system.
+        if rhs_terms is not None:
+            b["_rhs_terms"] = rhs_terms.detach()
         return outputs, A, rhs
 
     def _strips(self, t: dict) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor,
@@ -1518,6 +1536,18 @@ class TorchReference:
             J = J + torch.diag(2.0 * wxnd)
             b["_nl_slope"] = dcl.detach()
             b["_nl_residual"] = (R.detach() / scale.detach())
+            # Magnitude of the terms of J G - R before they cancel: |J| |G|,
+            # 2 |W x dl| |G|, and s |Cl| with the terms of the section angle
+            # (sum_k |W_k n_k| / |W|) and of alpha_L0 (linear strips) times
+            # the slope. See ventorum.sensitivity.adjoint._backward_error.
+            dcl_d = torch.abs(dcl.detach())
+            ang = (torch.abs(W.detach()) * torch.abs(normal_u.detach())).sum(-1) / torch.sqrt(denom)
+            a_l0 = torch.abs(aL0.detach()[sou])
+            if b.get("tables"):
+                a_l0 = a_l0 * b["lin_strip_mask"][sou]
+            cl_terms = torch.abs(cl.detach()) + dcl_d * (ang + a_l0)
+            b["_rhs_terms"] = (torch.abs(J) @ torch.abs(g_d) + 2.0 * wxnd * torch.abs(g_d)
+                               + torch.abs(scale.detach()) * cl_terms)
         rhs = J @ g_d - R
         return J, rhs, alpha_u
 
