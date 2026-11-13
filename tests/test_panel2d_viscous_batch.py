@@ -105,6 +105,28 @@ def test_batch_warns_per_failed_angle_as_the_sequential_solver():
 
 
 @pytest.mark.slow
+def test_batch_same_cases_do_not_share_arrays():
+    """Two equal cases give results with their own arrays.
+
+    Regression: the two results shared one row, so an in-place change of
+    one result changed the other.
+    """
+    coords = airfoil("0012").repanel(n_panels=80).coords
+    cases = [ViscousCase(coordinates=coords, alpha=2.0, Re=1e6, max_iter=2) for _ in range(2)]
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        r = solve_viscous_batch(cases, device="cpu", dtype=torch.float64)
+    a, b = r[0], r[1]
+    for name in ("Cp", "H", "theta", "Cf", "delta_star", "ue", "coordinates"):
+        assert getattr(a, name) is not getattr(b, name), name
+        assert np.array_equal(getattr(a, name), getattr(b, name), equal_nan=True), name
+    for key in a.wake:
+        assert a.wake[key] is not b.wake[key], key
+    a.Cp[0] = 123.0
+    assert b.Cp[0] != 123.0
+
+
+@pytest.mark.slow
 def test_batch_low_ground_height_does_not_raise():
     """A pivot height below the reach of the 4 deg zero-lift probe gives batch rows, not a geometry error."""
     coords = airfoil("0006", n_points=81)

@@ -38,6 +38,7 @@ switch to float64).
 
 from __future__ import annotations
 
+import copy
 import warnings
 from dataclasses import dataclass
 
@@ -300,7 +301,8 @@ def solve_viscous_batch(cases, *, backend: str = "torch", device=None, dtype=Non
     -------
     ViscousBatchResult
         One :class:`ventorum.panel2d.viscous.ViscousResult` per case, in
-        input order. As in :func:`ventorum.panel2d.viscous.solve_viscous`,
+        input order. Each result holds its own arrays, also when two cases
+        are the same. As in :func:`ventorum.panel2d.viscous.solve_viscous`,
         an angle that did not converge gives a UserWarning with its reason
         (one per angle of a sequence).
     """
@@ -351,7 +353,8 @@ def solve_viscous_batch(cases, *, backend: str = "torch", device=None, dtype=Non
                               UserWarning, stacklevel=2)
         for i in p["idx"]:
             r = p["rows"][float(parsed[i].alpha)]
-            out[i] = vs.ViscousResult(**{f: r[f] for f in vs._FIELDS})
+            # A copy per case: two cases with the same sequence and angle must not share arrays.
+            out[i] = vs.ViscousResult(**{f: copy.deepcopy(r[f]) for f in vs._FIELDS})
     return ViscousBatchResult(out)
 
 
