@@ -139,3 +139,21 @@ def test_flat_wing_unchanged():
     assert res.h_min == 0.05
     assert res.n_chord == 20
     assert res.solver_result.details["h_min"] == 0.05
+
+
+def test_input_uncertainty_height_step_uses_the_mean_line_clearance():
+    """The input-uncertainty height step uses the clearance of the solve lattice.
+
+    The height step of the central differences is a fraction of the
+    smallest clearance. With a flat probe the clearance of the inverted
+    NACA 4412 at h 0.05 m is 0.05 m; the mean-line lattice of the solve
+    is about 0.038 m lower, so the step was about four times too large.
+    """
+    from ventorum.core.input_uncertainty import _smallest_clearance
+
+    ac = _wing(_inverted_4412())
+    cond = FlightCondition(V_inf=30.0, alpha=0.0, h=0.05)
+    h_min = _smallest_clearance(ac, cond, SolverSettings(solver_type="vlm", n_panels=12, n_chord=8))
+    assert h_min < 0.05 - 0.5 * _mean_line_depth()
+    flat = _smallest_clearance(_wing(None), cond, SolverSettings(solver_type="vlm", n_panels=12, n_chord=8))
+    assert flat == pytest.approx(0.05, abs=1e-12)

@@ -329,17 +329,16 @@ def _smallest_clearance(
     """Return the smallest clearance of the geometry above the ground [m]."""
     from ventorum.aero.system import ground_plane_from_condition
     from ventorum.geometry import lattice_cache
-    from ventorum.geometry.lattice import build_lattice
+    from ventorum.solvers.lattice_base import ground_probe_lattice
 
     ac = aircraft.clone()
     fp = lattice_cache.surfaces_fingerprint(ac)
     geo = lattice_cache.geometry_info(fp, ac)
     ac.compute_reference_values(auto=geo["auto_ref"])
     rp = np.asarray(ac.moment_reference(), dtype=float)
-    chord_spacing = getattr(settings, "chord_spacing", "uniform")
-    key = lattice_cache.lattice_key(ac, settings, "vlm", 1, chord_spacing, fingerprint=fp)
-    probe = lattice_cache.get_or_build(key, lambda: build_lattice(
-        ac, settings, collocation="vlm", n_chord=1, chord_spacing=chord_spacing))
+    # The probe of the solvers: with a mean line or controls it has the
+    # chordwise nodes of the solve, so the clearance is that of the solve.
+    probe = ground_probe_lattice(ac, settings, fingerprint=fp)
     plane = ground_plane_from_condition(probe, condition, rp)
     assert plane is not None
     return float(np.min(plane.height(probe.all_points())))

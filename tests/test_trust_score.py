@@ -789,3 +789,28 @@ def test_morino_kutta_note_keeps_the_score():
     assert not any("Morino" in w for w in plain.warnings)
     assert "kutta_residual" not in morino_kutta_note(None)
 
+
+
+def test_lattice_solvers_give_all_totals_to_the_trust_score(monkeypatch):
+    """The lattice solvers pass CDp, Cl, Cm and Cn to the trust score.
+
+    The trust score rates a non-finite moment or a negative profile drag
+    UNRELIABLE only when it gets these totals.
+    """
+    import ventorum as vt
+    from ventorum.core import trust as trust_mod
+    from ventorum.solvers import lattice_base
+
+    seen = {}
+    real = trust_mod.evaluate_aerodynamic_trust
+
+    def spy(*args, **kwargs):
+        seen.update(kwargs)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(lattice_base, "evaluate_aerodynamic_trust", spy)
+    wing = vt.LiftingSurface(name="w", semi_span=4.0, sections=[vt.WingSection(y_frac=0.0, chord=1.0),
+                                                                  vt.WingSection(y_frac=1.0, chord=1.0)])
+    vt.analyze(wing, alpha_deg=4.0, solver="vlm", n_panels=10)
+    for key in ("CDp", "Cl", "Cm", "Cn"):
+        assert key in seen, key

@@ -626,6 +626,10 @@ class LatticeSolver(BaseSolver):
             spanwise_stats=(spanwise_stats if spanwise_stats is not None
                             else lattice_spanwise_stats(lattice, loads.spanwise)),
             polar=polar,
+            CDp=totals.CDp,
+            Cl=totals.Cl,
+            Cm=totals.Cm,
+            Cn=totals.Cn,
             CY=totals.CY,
             CY_farfield=totals.CY_farfield,
             Cn_stability=self._cn_stability(totals, condition, b_ref, c_ref),
