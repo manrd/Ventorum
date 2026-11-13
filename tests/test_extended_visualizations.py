@@ -274,3 +274,81 @@ def test_executive_dashboard(aircraft_and_results):
     _dashboard_table(fig_dash_single, res)
     _dashboard_span_panel(fig_dash_single, res)
     plt.close(fig_dash_single)
+
+
+@pytest.fixture
+def sweep_2deg():
+    """Return a wing and a sweep from 0 to 14 deg in steps of 2 deg [deg]."""
+    wing = vt.LiftingSurface(
+        name="Wing", semi_span=2.5,
+        sections=[vt.WingSection(y_frac=0.0, chord=1.0), vt.WingSection(y_frac=1.0, chord=0.5)],
+    )
+    tail = vt.LiftingSurface(
+        name="Tail", semi_span=0.7,
+        sections=[vt.WingSection(y_frac=0.0, chord=0.35), vt.WingSection(y_frac=1.0, chord=0.2)],
+        position=np.array([2.0, 0.0, 0.15]),
+    )
+    ac = vt.Aircraft(name="Sweep", surfaces=[wing, tail])
+    alphas_deg = np.arange(0.0, 15.0, 2.0)
+    sweep = vt.analyze_sweep(ac, alphas_deg, V_inf=30.0, n_panels=15, spacing="uniform")
+    return ac, sweep, alphas_deg
+
+
+def _central_slope(alphas_deg, values):
+    """Return the slope [1/rad] of the central fit of the plots (five points around the middle)."""
+    mid = len(values) // 2
+    lo, hi = max(0, mid - 2), min(len(values), mid + 3)
+    return np.polyfit(np.radians(alphas_deg[lo:hi]), np.asarray(values)[lo:hi], 1)[0]
+
+
+def test_sweep_plots_take_the_angles_from_the_results(sweep_2deg):
+    """Without alpha_range the angle axis and the slopes come from the flight conditions of the results.
+
+    Regression: the axis was the result index, so a 2 deg step doubled
+    CL_alpha and Cm_alpha and moved the trim angle and the angle of
+    (L/D)max.
+    """
+    ac, sweep, alphas_deg = sweep_2deg
+    cls = [r.totals.CL for r in sweep]
+
+    fig = vt.plot_cl_vs_alpha(sweep)
+    ax = fig.axes[0]
+    np.testing.assert_allclose(ax.lines[0].get_xdata(), alphas_deg, rtol=0.0, atol=1e-12)
+    slope = _central_slope(alphas_deg, cls)
+    assert f"CL_α ≈ {slope:.3f} /rad" in ax.texts[0].get_text()
+    plt.close(fig)
+
+    fig = vt.plot_efficiency_curves(sweep)
+    np.testing.assert_allclose(fig.axes[0].lines[0].get_xdata(), alphas_deg, rtol=0.0, atol=1e-12)
+    plt.close(fig)
+
+    fig = vt.plot_pitching_moment(sweep)
+    ax_cm = fig.axes[0]
+    np.testing.assert_allclose(ax_cm.lines[0].get_xdata(), alphas_deg, rtol=0.0, atol=1e-12)
+    cm_alpha = _central_slope(alphas_deg, [r.totals.Cm for r in sweep])
+    assert f" = {cm_alpha:.3f}$ /rad" in ax_cm.texts[0].get_text()
+    plt.close(fig)
+
+    fig = vt.plot_aircraft_dashboard(ac, sweep[3], sweep_results=sweep)
+    ax6 = next(a for a in fig.axes if a.get_title().startswith("6."))
+    ax7 = next(a for a in fig.axes if a.get_title().startswith("7."))
+    np.testing.assert_allclose(ax6.lines[0].get_xdata(), alphas_deg, rtol=0.0, atol=1e-12)
+    np.testing.assert_allclose(ax7.lines[0].get_xdata(), alphas_deg, rtol=0.0, atol=1e-12)
+    cm_fit = np.polyfit(np.radians(alphas_deg), [r.totals.Cm for r in sweep], 1)[0]
+    assert f"{cm_fit:.3f} /rad" in ax7.texts[0].get_text()
+    plt.close(fig)
+
+    # A given alpha_range [rad] still wins.
+    fig = vt.plot_cl_vs_alpha(sweep, alpha_range=np.radians(alphas_deg + 1.0))
+    np.testing.assert_allclose(fig.axes[0].lines[0].get_xdata(), alphas_deg + 1.0, rtol=0.0, atol=1e-12)
+    plt.close(fig)
+
+
+def test_sweep_plots_refuse_a_result_without_an_angle(sweep_2deg):
+    """A result without a flight condition and no alpha_range raises a clear error."""
+    _, sweep, _ = sweep_2deg
+    bad = [r.clone() for r in sweep]
+    bad[2].condition = None
+    for plot in (vt.plot_cl_vs_alpha, vt.plot_efficiency_curves, vt.plot_pitching_moment):
+        with pytest.raises(ValueError, match="angle of attack"):
+            plot(bad)

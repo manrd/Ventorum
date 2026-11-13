@@ -170,6 +170,42 @@ def plot_drag_polar(
     return fig
 
 
+def sweep_alphas_deg(results: list[SolverResult], alpha_range: np.ndarray | None = None) -> np.ndarray:
+    """Return the angles of attack of sweep results [deg].
+
+    Parameters
+    ----------
+    results : list[SolverResult]
+        Sweep results.
+    alpha_range : np.ndarray or None
+        Angles of attack of *results* [rad]. When None, the angles come
+        from the flight condition of each result (``condition.alpha``
+        [rad]).
+
+    Returns
+    -------
+    numpy.ndarray
+        Angles of attack [deg], one per result.
+
+    Raises
+    ------
+    ValueError
+        If ``alpha_range`` is None and a result has no flight condition.
+    """
+    if alpha_range is not None:
+        return np.degrees(np.asarray(alpha_range, dtype=float))
+    out = []
+    for i, r in enumerate(results):
+        cond = getattr(r, "condition", None)
+        if cond is None or getattr(cond, "alpha", None) is None:
+            raise ValueError(
+                f"Result {i} of the sweep has no flight condition, so its angle of attack is "
+                "unknown. Give alpha_range [rad]."
+            )
+        out.append(float(cond.alpha))
+    return np.degrees(np.asarray(out, dtype=float))
+
+
 def plot_cl_vs_alpha(
     results: list[SolverResult],
     alpha_range: np.ndarray | None = None,
@@ -181,24 +217,22 @@ def plot_cl_vs_alpha(
     ----------
     results : list[SolverResult]
     alpha_range : np.ndarray or None
-        α values [rad] corresponding to *results*.
+        α values [rad] corresponding to *results*. When None, the angles
+        come from the flight conditions of the results (see
+        :func:`sweep_alphas_deg`).
     ax : plt.Axes or None
 
     Returns
     -------
     Figure
     """
+    CLs = [r.totals.CL for r in results]
+    alphas_deg = sweep_alphas_deg(results, alpha_range)
+
     if ax is None:
         fig, ax = plt.subplots(figsize=(8, 6))
     else:
         fig = ax.figure
-
-    CLs = [r.totals.CL for r in results]
-
-    if alpha_range is not None:
-        alphas_deg = np.degrees(alpha_range)
-    else:
-        alphas_deg = np.arange(len(CLs))
 
     ax.plot(alphas_deg, CLs, "o-", markersize=4, color="#2563eb", linewidth=2)
 

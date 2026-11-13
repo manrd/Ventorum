@@ -19,6 +19,7 @@ from mpl_toolkits.mplot3d.art3d import Poly3DCollection
 from ventorum.core.datatypes import Aircraft, LiftingSurface, SolverResult, SolverSettings
 from ventorum.core.constants import RHO_SL
 from ventorum.geometry.processing import discretize_surface
+from ventorum.visualization.drag_polar import sweep_alphas_deg
 from ventorum.visualization.geometry_plot import result_strip_polygons
 
 
@@ -53,7 +54,9 @@ def plot_aircraft_dashboard(
     sweep_results : list[SolverResult] or None
         Optional sweep results for polars and stability curves.
     alpha_sweep_deg : np.ndarray or None
-        Angles of attack corresponding to sweep_results in degrees.
+        Angles of attack corresponding to sweep_results in degrees. When
+        None, the angles come from the flight conditions of the results
+        (see :func:`ventorum.visualization.drag_polar.sweep_alphas_deg`).
     settings : SolverSettings or None
     figsize : tuple[float, float]
     elev : float
@@ -318,7 +321,7 @@ def plot_aircraft_dashboard(
         ])
         safe_cd = np.maximum(cds_sw, 1e-6)
         ld_sw = cls_sw / safe_cd
-        a_deg = alpha_sweep_deg if alpha_sweep_deg is not None else np.arange(len(cls_sw))
+        a_deg = alpha_sweep_deg if alpha_sweep_deg is not None else sweep_alphas_deg(sweep_results)
 
         c_ld = "#2563eb"
         ax6_1.plot(a_deg, ld_sw, "o-", color=c_ld, linewidth=1.8, label=r"$L/D$")
@@ -364,7 +367,7 @@ def plot_aircraft_dashboard(
     ax7 = fig.add_subplot(gs[1, 2])
     if sweep_results and len(sweep_results) > 1:
         cms = np.array([r.totals.Cm for r in sweep_results])
-        a_deg = alpha_sweep_deg if alpha_sweep_deg is not None else np.arange(len(cms))
+        a_deg = alpha_sweep_deg if alpha_sweep_deg is not None else sweep_alphas_deg(sweep_results)
         a_rad = np.radians(a_deg)
         cls_sw = np.array([r.totals.CL for r in sweep_results])
 
