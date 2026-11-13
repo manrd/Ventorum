@@ -17,6 +17,7 @@ from ventorum.core.datatypes import (
     Aircraft,
     FlightCondition,
     LiftingSurface,
+    LinearAirfoil,
     SolverSettings,
     TabulatedAirfoil,
     WingSection,
@@ -83,6 +84,54 @@ def _check_int(label: str, value: int) -> int:
     return int(value)
 
 
+def _finite_table(label: str, value: object) -> np.ndarray:
+    """Return *value* as a float array; refuse non-numbers and non-finite values, naming *label*."""
+    try:
+        arr = np.asarray(value, dtype=float)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{label}: value is not a number array.") from exc
+    bad = ~np.isfinite(arr)
+    if np.any(bad):
+        first = np.ravel(arr)[np.flatnonzero(np.ravel(bad))[0]]
+        raise ValueError(
+            f"{label}: {int(np.count_nonzero(bad))} value(s) are not finite (first: {first!r})."
+        )
+    return arr
+
+
+def validate_airfoil(airfoil: object, label: str) -> None:
+    """Check the values of a section airfoil model.
+
+    Parameters
+    ----------
+    airfoil : LinearAirfoil or TabulatedAirfoil
+        Airfoil model of a section. Other types are not checked here.
+    label : str
+        Text that names the section in the error message.
+
+    Raises
+    ------
+    ValueError
+        If a value is not finite, or if the lift-curve slope ``a0``
+        [1/rad] of a linear airfoil is not positive. A negative profile
+        drag coefficient is not refused here: the finite-difference check
+        of the gradients (``check_gradients``) steps ``Cd0 = 0`` to small
+        negative values.
+    """
+    if isinstance(airfoil, LinearAirfoil):
+        tag = f"{label}: linear airfoil {airfoil.name!r}"
+        for name in ("a0", "alpha_L0", "Cd0", "Cm0"):
+            _finite_value(f"{tag}: {name}", getattr(airfoil, name))
+        if float(airfoil.a0) <= 0.0:
+            raise ValueError(f"{tag}: a0={airfoil.a0!r} 1/rad must be > 0.")
+    elif isinstance(airfoil, TabulatedAirfoil):
+        tag = f"{label}: tabulated airfoil {airfoil.name!r}"
+        for name in ("alpha", "Cl_data", "Cd_data", "Cm_data", "Cl_circulation_data"):
+            value = getattr(airfoil, name)
+            if value is not None:
+                _finite_table(f"{tag}: {name}", value)
+
+
 def validate_section(sec: WingSection, idx: int, surface_name: str) -> None:
     """Check a single :class:`WingSection` for obvious errors."""
     tag = f"[{surface_name}] Section {idx}"
@@ -114,6 +163,7 @@ def validate_section(sec: WingSection, idx: int, surface_name: str) -> None:
                 f"[{surface_name}] Section {idx}: tabulated airfoil "
                 f"'{sec.airfoil.name}' has mismatched array lengths."
             )
+    validate_airfoil(sec.airfoil, tag)
 
 
 def validate_surface(surf: LiftingSurface) -> None:
@@ -323,6 +373,10 @@ def validate_solver_settings(ss: SolverSettings) -> None:
         "root", "root-cosine", "root_cosine", "root-clustered",
         "uniform", "power", "stretched",
     )
+    if not isinstance(ss.spacing, str):
+        raise ValueError(
+            f"spacing={ss.spacing!r} is invalid; give a string, for example 'auto' or 'cosine'."
+        )
     if ss.spacing.lower() not in valid_spacings:
         raise ValueError(
             f"spacing='{ss.spacing}' is invalid. Options: 'auto', 'cosine', 'half-cosine', 'root', 'uniform', 'power'."

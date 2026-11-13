@@ -112,3 +112,5 @@ from ventorum.core.config import save_aircraft_to_json, load_aircraft_from_json
 save_aircraft_to_json(aircraft, "my_plane.json")
 aircraft = load_aircraft_from_json("my_plane.json")
 ```
+
+The file is strict JSON. It keeps all fields of the airfoils, also the circulation lift (`Cl_circulation_data`), the gap mask (`gap_mask`) and a scalar `Cm_data`. A non-finite number is written as the object `{"__nonfinite__": "nan"}` (or `"inf"`, `"-inf"`), because strict JSON has no NaN or infinity.

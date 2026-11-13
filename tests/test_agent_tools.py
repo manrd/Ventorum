@@ -54,7 +54,9 @@ def test_schema_exporters():
     assert all("inputSchema" in s for s in mcp)
     assert all(s["inputSchema"]["additionalProperties"] is False for s in mcp)
     gemini = get_tool_schemas("gemini")
-    assert all("parameters" in s for s in gemini)
+    # A tool without arguments has no parameters in the Gemini form (Gemini refuses an empty object).
+    no_args = {t["name"] for t in AGENT_TOOL_DEFINITIONS if not t["parameters"].get("properties")}
+    assert all(("parameters" in s) == (s["name"] not in no_args) for s in gemini)
     assert "additionalProperties" not in json.dumps(gemini)
     for fmt in (openai, anthropic, mcp, gemini):
         assert len(fmt) == n
@@ -554,6 +556,61 @@ def test_mcp_refuses_nan_and_infinity():
                  "invalid_input", "JSON")
 
 
+def test_mcp_deeply_nested_line_is_a_parse_error():
+    """A deeply nested line gives a parse error (-32700); it does not stop the server."""
+    for line in ("[" * 100000, "[" * 100000 + "]" * 100000, '{"a":' * 100000 + "1" + "}" * 100000):
+        r = _rpc(line)
+        assert r["id"] is None and r["error"]["code"] == -32700, r
+
+
+def test_mcp_server_loop_survives_a_bad_message(monkeypatch):
+    """One message can never stop the server: the next line is still answered."""
+    import io
+
+    import ventorum.agent.mcp_server as server
+
+    ping = json.dumps({"jsonrpc": "2.0", "id": 7, "method": "ping"})
+    out = io.StringIO()
+    server.run_mcp_server(io.StringIO("[" * 100000 + "\n" + ping + "\n"), out)
+    replies = [json.loads(x) for x in out.getvalue().splitlines()]
+    assert [r.get("id") for r in replies] == [None, 7]
+    assert replies[0]["error"]["code"] == -32700 and "result" in replies[1]
+
+    real = server.handle_message
+    calls = []
+
+    def flaky(line):
+        calls.append(line)
+        if len(calls) == 1:
+            raise RuntimeError("unexpected")
+        return real(line)
+
+    monkeypatch.setattr(server, "handle_message", flaky)
+    out = io.StringIO()
+    server.run_mcp_server(io.StringIO(ping + "\n" + ping + "\n"), out)
+    replies = [json.loads(x) for x in out.getvalue().splitlines()]
+    assert len(replies) == 2
+    assert replies[0]["id"] is None and replies[0]["error"]["code"] == -32603
+    assert replies[1]["id"] == 7 and "result" in replies[1]
+
+
+def test_huge_integer_input_is_invalid_input():
+    """An integer too large for a float is invalid input, not an internal error."""
+    from ventorum.agent.schemas import InputError, integer, number
+
+    with pytest.raises(InputError, match="span_m"):
+        number(10 ** 400, "span_m")
+    with pytest.raises(InputError, match="n_panels"):
+        integer(10 ** 5000, "n_panels", maximum=400)
+    with pytest.raises(InputError, match="n_panels"):
+        integer(-(10 ** 5000), "n_panels", minimum=4)
+    big = call_tool("ventorum_wing_analysis", {"wing": {"span_m": 10 ** 400, "chord_m": 1.0}})
+    assert_error(big, "invalid_input", "span_m")
+    big = call_tool("ventorum_wing_analysis", {"wing": RECT, "settings": {"n_panels": 10 ** 5000}})
+    assert_error(big, "invalid_input", "n_panels")
+    assert len(big["error"]["message"]) < 500
+
+
 def test_mcp_null_id_is_invalid_request():
     r = _rpc(json.dumps({"jsonrpc": "2.0", "id": None, "method": "ping"}))
     assert r["id"] is None and r["error"]["code"] == -32600
@@ -623,6 +680,25 @@ def test_mesh_convergence_tool_solves_requested_angle():
     assert p["status"] == "success", p
     assert sorted(p["alpha_tested_deg"]) == pytest.approx([3.0, 4.0])
     assert len(p["alpha_tested_deg"]) == 2
+
+
+def test_mesh_convergence_ref_check_matches_the_tested_levels():
+    """Without panel_counts, the reference check uses the default levels below ref_n_panels.
+
+    Regression: ref_n_panels 50 without panel_counts was refused with "must
+    be larger than the finest tested mesh (80)", but the study tests only the
+    default levels below 50.
+    """
+    from ventorum.agent import mesh_convergence as mc_tool
+
+    wing = {"span_m": 10.0, "chord_m": 1.25}
+    fc = {"V_inf_m_s": 40.0, "alpha_deg": 4.0}
+    p = mc_tool(wing, fc, tolerance_pct=5.0, spacing_schemes=["half-cosine"], ref_n_panels=50, solver="linear")
+    strict_json(p)
+    assert p["status"] == "success", p
+    # Given levels must all be below the reference.
+    p = mc_tool(wing, fc, panel_counts=[10, 20, 80], ref_n_panels=50, solver="linear")
+    assert_error(p, "invalid_input", "finest tested mesh (80)")
 
 
 # ── A height step below round-off is refused ─────────────────────────────────
@@ -860,8 +936,28 @@ def test_gemini_schema_uses_the_openapi_subset():
         if "items" in node:
             walk(node["items"])
 
+    def no_empty_object(node, path):
+        # Gemini refuses an OBJECT schema without properties, and one bad
+        # declaration makes it refuse the whole tool list.
+        if node.get("type") == "object":
+            assert node.get("properties"), f"{path}: object without properties"
+        for name, sub in node.get("properties", {}).items():
+            no_empty_object(sub, f"{path}.{name}")
+        if "items" in node:
+            no_empty_object(node["items"], f"{path}[]")
+
     for decl in get_tool_schemas("gemini"):
-        walk(decl["parameters"])
+        if "parameters" in decl:
+            walk(decl["parameters"])
+            no_empty_object(decl["parameters"], decl["name"])
+    gemini = {d["name"]: d for d in get_tool_schemas("gemini")}
+    # A tool without arguments has no parameters in the Gemini form.
+    assert "parameters" not in gemini["ventorum_machine_capabilities"]
+    # The map of surface name to section uncertainties is JSON text in the Gemini form.
+    sections = (gemini["ventorum_error_bars"]["parameters"]["properties"]["input_uncertainties"]
+                ["properties"]["sections"])
+    assert sections["type"] == "string" and "JSON" in sections["description"]
+    assert "a0_per_rad" in sections["description"]
     wa = get_tool_schemas("gemini")[0]["parameters"]["properties"]["wing"]
     ac_schema = get_tool_schemas("gemini")[0]["parameters"]["properties"]["aircraft"]
     assert wa["type"] == "object" and "span_m" in wa["properties"]
@@ -872,6 +968,27 @@ def test_gemini_schema_uses_the_openapi_subset():
     assert nw["type"] == "integer" and "'auto'" in nw["description"]
     # The other formats keep the full JSON schema.
     assert "anyOf" in json.dumps(get_tool_schemas("mcp"))
+    for fmt, key in (("mcp", "inputSchema"), ("anthropic", "input_schema")):
+        tools = {d["name"]: d[key] for d in get_tool_schemas(fmt)}
+        assert tools["ventorum_machine_capabilities"]["properties"] == {}
+        unc = tools["ventorum_error_bars"]["properties"]["input_uncertainties"]["properties"]["sections"]
+        assert unc["type"] == "object" and "additionalProperties" in unc
+
+
+def test_gemini_sections_as_json_text_reach_the_tool():
+    """The dispatcher decodes the JSON text that a Gemini client gives for a map-like object."""
+    base = {"wing": {"span_m": 10.0, "chord_m": 1.0}, "flight_condition": {"alpha_deg": 3.0},
+            "settings": {"n_panels": 16}}
+    res = call_tool("ventorum_error_bars",
+                    {**base, "input_uncertainties": {"sections": '{"nope": {"Cd0": 0.001}}'}})
+    assert_error(res, "invalid_input", "nope")
+    res = call_tool("ventorum_error_bars",
+                    {**base, "input_uncertainties": {"sections": '{"Wing": {"cd0": 0.001}}'}})
+    assert_error(res, "invalid_input", "Cd0")
+    res = call_tool("ventorum_error_bars", {**base, "input_uncertainties": {"sections": "{not json"}})
+    assert_error(res, "invalid_input", "input_uncertainties.sections")
+    res = call_tool("ventorum_error_bars", {**base, "input_uncertainties": {"sections": "[1, 2]"}})
+    assert_error(res, "invalid_input", "input_uncertainties.sections")
 
 
 def test_stability_derivatives_ge_one_mesh():

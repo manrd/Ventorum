@@ -311,3 +311,112 @@ def test_load_csv_polar(tmp_path):
     np.testing.assert_allclose(af.Cl_data, [-0.44, -0.22, 0.0, 0.22, 0.44])
     np.testing.assert_allclose(af.Cd_data, [0.006, 0.0055, 0.005, 0.0055, 0.006])
     np.testing.assert_allclose(af.Cm_data, [0.002, 0.001, 0.0, -0.001, -0.002])
+
+
+# ── Copy and JSON round trip of the airfoil types and the surfaces ───────────
+
+def _scalar_cm_polar() -> TabulatedAirfoil:
+    a = np.radians([-4.0, 0.0, 4.0, 8.0])
+    return TabulatedAirfoil(name="scalar_cm", alpha=a, Cl_data=6.0 * a, Cd_data=0.01 + 0.0 * a, Cm_data=-0.07)
+
+
+def test_clone_of_tabulated_airfoil_with_scalar_cm():
+    """A scalar Cm_data (allowed by the docstring) must not stop a copy of the airfoil or the aircraft."""
+    import copy
+
+    af = _scalar_cm_polar()
+    for out in (af.clone(), copy.copy(af), copy.deepcopy(af)):
+        assert np.ndim(out.Cm_data) == 0
+        assert float(out.Cm_data) == -0.07
+        assert np.isclose(out.Cm(0.03), af.Cm(0.03))
+        assert np.isclose(out.Cl(0.03), af.Cl(0.03))
+    wing = _wing()
+    for sec in wing.sections:
+        sec.airfoil = _scalar_cm_polar()
+    ac = vt.Aircraft(surfaces=[wing])
+    for out in (ac.clone(), copy.deepcopy(ac)):
+        assert float(out.surfaces[0].sections[0].airfoil.Cm_data) == -0.07
+    # The clone is independent of the original arrays.
+    cl = af.clone()
+    cl.Cl_data[0] = 99.0
+    assert af.Cl_data[0] != 99.0
+
+
+def test_surface_position_as_tuple_can_be_cloned_and_saved():
+    """A position given as a tuple must be accepted by clone() and by the JSON writer."""
+    wing = _wing()
+    wing.position = (0.5, 0.0, -0.1)
+    out = wing.clone()
+    np.testing.assert_array_equal(np.asarray(out.position, dtype=float), [0.5, 0.0, -0.1])
+    back = aircraft_from_json(aircraft_to_json(vt.Aircraft(surfaces=[wing])))
+    np.testing.assert_array_equal(back.surfaces[0].position, [0.5, 0.0, -0.1])
+
+
+def _strict_json(text: str) -> dict:
+    """Parse *text* and refuse the non-standard constants NaN, Infinity and -Infinity."""
+    def refuse(name):
+        raise AssertionError(f"not strict JSON: bare {name}")
+    return json.loads(text, parse_constant=refuse)
+
+
+def _same_table(a, b) -> None:
+    if a is None or b is None:
+        assert a is None and b is None
+        return
+    assert np.ndim(a) == np.ndim(b)
+    np.testing.assert_array_equal(np.asarray(a, dtype=float), np.asarray(b, dtype=float))
+
+
+@pytest.mark.parametrize("cm_kind", ["array", "scalar", "none"])
+def test_json_round_trip_of_all_airfoil_fields(cm_kind):
+    """The JSON round trip keeps every field of both airfoil types and writes strict JSON."""
+    a = np.radians([-4.0, 0.0, 4.0, 8.0, 12.0])
+    cm = {"array": np.array([-0.05, -0.06, np.nan, -0.07, -0.08]), "scalar": -0.07, "none": None}[cm_kind]
+    tab = TabulatedAirfoil(
+        name="ground_polar",
+        alpha=a,
+        Cl_data=6.0 * a,
+        Cd_data=np.array([0.012, 0.010, 0.011, 0.014, np.inf]),
+        Cm_data=cm,
+        Re=1.5e6,
+        Cl_circulation_data=5.5 * a,
+        gap_mask=np.array([False, True, False, False]),
+    )
+    lin = vt.LinearAirfoil(name="lin", a0=5.9, alpha_L0=-0.03, Cd0=0.009, Cm0=-0.04)
+    wing = _wing()
+    wing.sections[0].airfoil = tab
+    wing.sections[1].airfoil = lin
+    text = aircraft_to_json(vt.Aircraft(surfaces=[wing]))
+    _strict_json(text)
+    back = aircraft_from_json(text)
+    tab2 = back.surfaces[0].sections[0].airfoil
+    lin2 = back.surfaces[0].sections[1].airfoil
+    assert isinstance(tab2, TabulatedAirfoil)
+    assert tab2.name == tab.name and tab2.Re == tab.Re
+    for key in ("alpha", "Cl_data", "Cd_data", "Cm_data", "Cl_circulation_data"):
+        _same_table(getattr(tab2, key), getattr(tab, key))
+    assert tab2.gap_mask is not None and tab2.gap_mask.dtype == bool
+    np.testing.assert_array_equal(tab2.gap_mask, tab.gap_mask)
+    assert tab2.has_circulation_lift
+    assert isinstance(lin2, vt.LinearAirfoil)
+    for key in ("name", "a0", "alpha_L0", "Cd0", "Cm0"):
+        assert getattr(lin2, key) == getattr(lin, key)
+
+
+def test_json_round_trip_of_non_finite_scalars_is_strict():
+    """A non-finite number outside the tables also gives strict JSON and comes back unchanged."""
+    lin = vt.LinearAirfoil(a0=float("nan"), Cd0=float("inf"), Cm0=float("-inf"))
+    wing = _wing()
+    wing.sections[0].airfoil = lin
+    text = aircraft_to_json(vt.Aircraft(surfaces=[wing]))
+    _strict_json(text)
+    back = aircraft_from_json(text).surfaces[0].sections[0].airfoil
+    assert np.isnan(back.a0) and back.Cd0 == np.inf and back.Cm0 == -np.inf
+
+
+def test_json_reads_files_with_bare_nan():
+    """A file written before the strict encoding (bare NaN) can still be read."""
+    wing = _wing()
+    text = aircraft_to_json(vt.Aircraft(surfaces=[wing])).replace('"Cm0": 0.0', '"Cm0": NaN', 1)
+    back = aircraft_from_json(text)
+    assert np.isnan(back.surfaces[0].sections[0].airfoil.Cm0)

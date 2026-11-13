@@ -134,6 +134,10 @@ def handle_message(line: str) -> str | None:
         msg = json.loads(line, parse_constant=_no_constant)
     except (json.JSONDecodeError, ValueError) as exc:
         return json.dumps(_error(None, PARSE_ERROR, f"Parse error: {exc}"))
+    except RecursionError:
+        # A deeply nested line (for example "[" * 100000) exceeds the
+        # recursion limit of the JSON decoder.
+        return json.dumps(_error(None, PARSE_ERROR, "Parse error: the JSON text is nested too deeply."))
     try:
         if isinstance(msg, list):
             return json.dumps(_error(None, INVALID_REQUEST,
@@ -149,8 +153,10 @@ def run_mcp_server(stdin: TextIO | None = None, stdout: TextIO | None = None) ->
     """Run the MCP server on stdin and stdout until the input ends.
 
     The input is read as bytes and decoded as UTF-8 per line. A line
-    that is not valid UTF-8 gets a JSON-RPC parse error (code -32700)
-    and the server keeps running.
+    that is not valid UTF-8 or not valid JSON (also a line that is nested
+    too deeply) gets a JSON-RPC parse error (code -32700) and the server
+    keeps running. Any other failure of one message gets an internal
+    error (code -32603); the server then reads the next line.
     """
     stdin = stdin or sys.stdin
     stdout = stdout or sys.stdout
@@ -168,7 +174,10 @@ def run_mcp_server(stdin: TextIO | None = None, stdout: TextIO | None = None) ->
             line = raw
         if not line.strip():
             continue
-        reply = handle_message(line)
+        try:
+            reply = handle_message(line)
+        except Exception as exc:  # noqa: BLE001 - one message must never stop the server
+            reply = json.dumps(_error(None, INTERNAL_ERROR, f"Internal error: {type(exc).__name__}."))
         if reply is not None:
             stdout.write(reply + "\n")
             stdout.flush()

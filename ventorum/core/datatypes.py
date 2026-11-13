@@ -88,6 +88,28 @@ class LinearAirfoil:
         return np.full(np.shape(alpha), self.Cm0, dtype=float)
 
 
+def _copy_table(value: Any) -> Any:
+    """Return an independent copy of a polar table field.
+
+    Parameters
+    ----------
+    value : array_like, float or None
+        Table values as the user gave them: an array, a list or a scalar
+        (for example a constant ``Cm_data``).
+
+    Returns
+    -------
+    np.ndarray, float or None
+        None for None. A Python float for a scalar that is not an array, so
+        that the scalar form is kept. Otherwise a new float array.
+    """
+    if value is None:
+        return None
+    if not isinstance(value, np.ndarray) and np.ndim(value) == 0:
+        return float(value)
+    return np.array(value, dtype=float)
+
+
 @dataclass(slots=True)
 class TabulatedAirfoil:
     """Nonlinear aerodynamic model from polar-data tables.
@@ -171,14 +193,12 @@ class TabulatedAirfoil:
         """Fast explicit clone avoiding reflection."""
         inst = TabulatedAirfoil(
             name=self.name,
-            alpha=self.alpha.copy(),
-            Cl_data=self.Cl_data.copy(),
-            Cd_data=self.Cd_data.copy(),
-            Cm_data=self.Cm_data.copy() if self.Cm_data is not None else None,
+            alpha=_copy_table(self.alpha),
+            Cl_data=_copy_table(self.Cl_data),
+            Cd_data=_copy_table(self.Cd_data),
+            Cm_data=_copy_table(self.Cm_data),
             Re=self.Re,
-            Cl_circulation_data=(
-                self.Cl_circulation_data.copy() if self.Cl_circulation_data is not None else None
-            ),
+            Cl_circulation_data=_copy_table(self.Cl_circulation_data),
             gap_mask=None if self.gap_mask is None else np.array(self.gap_mask, dtype=bool),
         )
         inst._cached_a0 = self._cached_a0
@@ -868,7 +888,7 @@ class LiftingSurface:
             semi_span=self.semi_span,
             sections=[sec.clone() for sec in self.sections],
             is_symmetric=self.is_symmetric,
-            position=self.position.copy(),
+            position=np.array(self.position, dtype=float),
             incidence=self.incidence,
             sweep_le=self.sweep_le,
             dihedral=self.dihedral,
@@ -1961,6 +1981,69 @@ class SolverResult:
 # JSON serialisation helpers
 # ═══════════════════════════════════════════════════════════════════════════════
 
+#: Key of the JSON object that holds a non-finite number. Strict JSON has no
+#: NaN or infinity, so ``float("nan")`` is written as ``{"__nonfinite__": "nan"}``
+#: (and ``"inf"``, ``"-inf"`` for the infinities).
+_NONFINITE_KEY = "__nonfinite__"
+_NONFINITE_TEXT = ("nan", "inf", "-inf")
+
+
+def _encode_json(value: Any) -> Any:
+    """Return *value* in a form that ``json.dumps(..., allow_nan=False)`` accepts.
+
+    Numpy arrays and numpy scalars become lists and Python numbers. A
+    non-finite float becomes the object ``{"__nonfinite__": "nan" | "inf" | "-inf"}``.
+    """
+    if isinstance(value, dict):
+        return {k: _encode_json(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_encode_json(v) for v in value]
+    if isinstance(value, np.ndarray):
+        return _encode_json(value.tolist())
+    if isinstance(value, (bool, np.bool_)):
+        return bool(value)
+    if isinstance(value, np.integer):
+        return int(value)
+    if isinstance(value, (float, np.floating)):
+        number = float(value)
+        if np.isfinite(number):
+            return number
+        if np.isnan(number):
+            return {_NONFINITE_KEY: "nan"}
+        return {_NONFINITE_KEY: "inf" if number > 0.0 else "-inf"}
+    return value
+
+
+def _decode_json_object(obj: dict) -> Any:
+    """Turn the JSON object of a non-finite number back into a float (``json.loads`` object hook)."""
+    if len(obj) == 1 and _NONFINITE_KEY in obj:
+        text = obj[_NONFINITE_KEY]
+        if text not in _NONFINITE_TEXT:
+            raise ValueError(
+                f"{_NONFINITE_KEY}={text!r} is not valid; use one of {list(_NONFINITE_TEXT)}."
+            )
+        return float(text)
+    return obj
+
+
+def _table_to_json(value: Any) -> Any:
+    """Serialise a polar table field: None, a scalar (kept as a number) or a list."""
+    if value is None:
+        return None
+    if np.ndim(value) == 0:
+        return float(value)
+    return np.asarray(value, dtype=float).tolist()
+
+
+def _table_from_json(value: Any) -> Any:
+    """Deserialise a polar table field written by :func:`_table_to_json`."""
+    if value is None:
+        return None
+    if np.ndim(value) == 0:
+        return float(value)
+    return np.asarray(value, dtype=float)
+
+
 def _airfoil_to_dict(af: AirfoilType) -> dict:
     """Serialise an airfoil to a plain dict."""
     if isinstance(af, LinearAirfoil):
@@ -1975,16 +2058,23 @@ def _airfoil_to_dict(af: AirfoilType) -> dict:
     return {
         "type": "tabulated",
         "name": af.name,
-        "alpha": af.alpha.tolist(),
-        "Cl": af.Cl_data.tolist(),
-        "Cd": af.Cd_data.tolist(),
-        "Cm": af.Cm_data.tolist() if af.Cm_data is not None else None,
+        "alpha": _table_to_json(af.alpha),
+        "Cl": _table_to_json(af.Cl_data),
+        "Cd": _table_to_json(af.Cd_data),
+        "Cm": _table_to_json(af.Cm_data),
         "Re": af.Re,
+        "Cl_circulation": _table_to_json(af.Cl_circulation_data),
+        "gap_mask": None if af.gap_mask is None else np.asarray(af.gap_mask, dtype=bool).tolist(),
     }
 
 
 def _airfoil_from_dict(d: dict) -> AirfoilType:
-    """Deserialise an airfoil from a plain dict."""
+    """Deserialise an airfoil from a plain dict.
+
+    A file written before the keys ``"Cl_circulation"`` and ``"gap_mask"``
+    existed gives a polar without circulation lift data and without a gap
+    mask.
+    """
     if d["type"] == "linear":
         return LinearAirfoil(
             name=d.get("name", ""),
@@ -1993,13 +2083,16 @@ def _airfoil_from_dict(d: dict) -> AirfoilType:
             Cd0=d.get("Cd0", 0.0),
             Cm0=d.get("Cm0", 0.0),
         )
+    gap = d.get("gap_mask")
     return TabulatedAirfoil(
         name=d.get("name", ""),
-        alpha=np.asarray(d["alpha"]),
-        Cl_data=np.asarray(d["Cl"]),
-        Cd_data=np.asarray(d["Cd"]),
-        Cm_data=np.asarray(d["Cm"]) if d.get("Cm") is not None else None,
+        alpha=_table_from_json(d["alpha"]),
+        Cl_data=_table_from_json(d["Cl"]),
+        Cd_data=_table_from_json(d["Cd"]),
+        Cm_data=_table_from_json(d.get("Cm")),
         Re=d.get("Re"),
+        Cl_circulation_data=_table_from_json(d.get("Cl_circulation")),
+        gap_mask=None if gap is None else np.asarray(gap, dtype=bool),
     )
 
 
@@ -2032,7 +2125,11 @@ def _shape_from_json(data: Any) -> Any:
 
 
 def aircraft_to_json(ac: Aircraft) -> str:
-    """Serialise an :class:`Aircraft` to a JSON string."""
+    """Serialise an :class:`Aircraft` to a strict JSON string.
+
+    A non-finite number is written as ``{"__nonfinite__": "nan" | "inf" | "-inf"}``
+    because strict JSON has no NaN or infinity.
+    """
     surfaces = []
     for surf in ac.surfaces:
         sections = []
@@ -2074,7 +2171,7 @@ def aircraft_to_json(ac: Aircraft) -> str:
             "semi_span": surf.semi_span,
             "sections": sections,
             "is_symmetric": surf.is_symmetric,
-            "position": surf.position.tolist(),
+            "position": np.asarray(surf.position, dtype=float).tolist(),
             "incidence": surf.incidence,
             "sweep_le": surf.sweep_le,
             "dihedral": surf.dihedral,
@@ -2093,12 +2190,18 @@ def aircraft_to_json(ac: Aircraft) -> str:
         "c_ref": None if "c_ref" in ac._auto_ref else ac.c_ref,
         "ref_point": None if ac.ref_point is None else np.asarray(ac.ref_point, dtype=float).tolist(),
     }
-    return json.dumps(data, indent=2)
+    # Strict JSON: a non-finite number is written as an object (see _encode_json).
+    return json.dumps(_encode_json(data), indent=2, allow_nan=False)
 
 
 def aircraft_from_json(text: str) -> Aircraft:
-    """Deserialise an :class:`Aircraft` from a JSON string."""
-    data = json.loads(text)
+    """Deserialise an :class:`Aircraft` from a JSON string.
+
+    The objects ``{"__nonfinite__": "nan" | "inf" | "-inf"}`` become non-finite
+    floats again. A bare ``NaN`` or ``Infinity`` (files written before the
+    strict encoding) is also read.
+    """
+    data = json.loads(text, object_hook=_decode_json_object)
     surfaces = []
     for sd in data["surfaces"]:
         sections = []

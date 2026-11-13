@@ -586,12 +586,29 @@ def check_keys(obj: Any, allowed: dict[str, Any] | set[str] | list[str], where: 
     return out
 
 
+def _show_value(val: Any) -> str:
+    """Return the repr of *val* for an error message; a very large integer is not written out."""
+    if isinstance(val, (int, np.integer)) and not isinstance(val, bool) and abs(int(val)).bit_length() > 128:
+        digits = int(abs(int(val)).bit_length() * math.log10(2.0)) + 1
+        sign = "-" if int(val) < 0 else ""
+        return f"{sign}<an integer of about {digits} digits>"
+    return repr(val)
+
+
 def number(val: Any, name: str, *, minimum: float | None = None, maximum: float | None = None,
            exclusive_min: float | None = None) -> float:
-    """Return *val* as a float. Refuse strings, booleans, NaN, infinity and values out of range."""
+    """Return *val* as a float. Refuse strings, booleans, NaN, infinity and values out of range.
+
+    An integer too large for a float is refused as not finite.
+    """
     if isinstance(val, bool) or not isinstance(val, (int, float, np.integer, np.floating)):
-        raise InputError(f"'{name}' must be a number (JSON number, no unit text), got {val!r}.")
-    v = float(val)
+        raise InputError(f"'{name}' must be a number (JSON number, no unit text), got {_show_value(val)}.")
+    try:
+        v = float(val)
+    except OverflowError:
+        raise InputError(
+            f"'{name}' must be finite, got {_show_value(val)} (too large for a float)."
+        ) from None
     if not math.isfinite(v):
         raise InputError(f"'{name}' must be finite, got {val!r}.")
     if exclusive_min is not None and v <= exclusive_min:
@@ -610,12 +627,12 @@ def integer(val: Any, name: str, *, minimum: int | None = None, maximum: int | N
     if isinstance(val, (float, np.floating)) and math.isfinite(float(val)) and float(val).is_integer():
         val = int(val)
     if not isinstance(val, (int, np.integer)):
-        raise InputError(f"'{name}' must be an integer, got {val!r}.")
+        raise InputError(f"'{name}' must be an integer, got {_show_value(val)}.")
     v = int(val)
     if minimum is not None and v < minimum:
-        raise InputError(f"'{name}' must be >= {minimum}, got {v}.")
+        raise InputError(f"'{name}' must be >= {minimum}, got {_show_value(v)}.")
     if maximum is not None and v > maximum:
-        raise InputError(f"'{name}' must be <= {maximum}, got {v}.")
+        raise InputError(f"'{name}' must be <= {maximum}, got {_show_value(v)}.")
     return v
 
 
@@ -1564,13 +1581,39 @@ def _merge_any_of(options: list[dict[str, Any]], desc: str | None) -> dict[str, 
     return first
 
 
+def is_json_text_object(schema: Any) -> bool:
+    """Return True for an object schema without named properties (for example a map of names).
+
+    Gemini refuses an OBJECT schema with no properties. The Gemini form
+    gives such an object as JSON text (a string), and the dispatcher
+    decodes the text back into the object.
+    """
+    return isinstance(schema, dict) and schema.get("type") == "object" and not schema.get("properties")
+
+
+def _json_text_schema(schema: dict[str, Any]) -> dict[str, Any]:
+    """Return the Gemini form (a string of JSON text) of an object schema without named properties."""
+    text = schema.get("description", "").strip()
+    text += " Give this object as JSON text (a string), for example '{\"name\": {...}}'."
+    values = schema.get("additionalProperties")
+    if isinstance(values, dict) and values.get("properties"):
+        keys = "; ".join(
+            f"{key}: {sub.get('description', '')}".strip() for key, sub in values["properties"].items()
+        )
+        text += f" Each value is an object with these keys (all optional): {keys}"
+    return {"type": "string", "description": text.strip()}
+
+
 def _to_gemini(schema: Any) -> Any:
     """Translate a JSON schema to the OpenAPI 3.0 subset of Gemini (:data:`GEMINI_SCHEMA_KEYS`).
 
     ``anyOf`` is merged into one schema, ``exclusiveMinimum`` becomes
     ``minimum`` plus a sentence in the description, and other keywords
-    (``additionalProperties``, ``default``) are removed. The tools still
-    check the full rules.
+    (``additionalProperties``, ``default``) are removed. An object without
+    named properties (a map such as ``input_uncertainties.sections``)
+    becomes a string of JSON text, because Gemini refuses an object with
+    no properties; the dispatcher decodes the text. The tools still check
+    the full rules.
     """
     if isinstance(schema, list):
         return [_to_gemini(v) for v in schema]
@@ -1578,6 +1621,8 @@ def _to_gemini(schema: Any) -> Any:
         return schema
     if "anyOf" in schema:
         schema = _merge_any_of(schema["anyOf"], schema.get("description"))
+    if is_json_text_object(schema):
+        return _json_text_schema(schema)
     out: dict[str, Any] = {}
     for key, val in schema.items():
         if key == "properties":
@@ -1599,8 +1644,9 @@ def get_tool_schemas(format: Literal["openai", "anthropic", "gemini", "mcp"] = "
     ``openai``: function-calling tools. ``anthropic``: tools with
     ``input_schema``. ``mcp``: tools with ``inputSchema``. ``gemini``:
     function declarations in the OpenAPI 3.0 subset of Gemini
-    (:data:`GEMINI_SCHEMA_KEYS`); see :func:`_to_gemini`. The tools still
-    refuse unknown keys and values out of range.
+    (:data:`GEMINI_SCHEMA_KEYS`); see :func:`_to_gemini`. A Gemini
+    declaration of a tool without arguments has no ``parameters``. The
+    tools still refuse unknown keys and values out of range.
     """
     out: list[dict[str, Any]] = []
     for tool in AGENT_TOOL_DEFINITIONS:
@@ -1611,8 +1657,11 @@ def get_tool_schemas(format: Literal["openai", "anthropic", "gemini", "mcp"] = "
         elif format == "anthropic":
             out.append({"name": tool["name"], "description": tool["description"], "input_schema": params})
         elif format == "gemini":
-            out.append({"name": tool["name"], "description": tool["description"],
-                        "parameters": _to_gemini(params)})
+            decl = {"name": tool["name"], "description": tool["description"]}
+            if params.get("properties"):
+                # Gemini refuses an OBJECT parameter schema with no properties.
+                decl["parameters"] = _to_gemini(params)
+            out.append(decl)
         elif format == "mcp":
             out.append({"name": tool["name"], "description": tool["description"], "inputSchema": params})
         else:
