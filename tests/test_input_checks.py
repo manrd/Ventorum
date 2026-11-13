@@ -364,6 +364,59 @@ def test_stacked_surfaces_are_refused_on_a_fine_cosine_mesh(dz):
     assert "overlap" in msg and "Copy" in msg
 
 
+# ── Airfoil values ───────────────────────────────────────────────────────────
+
+def _tab(**kw):
+    a = np.radians([-4.0, 0.0, 4.0, 8.0])
+    params = {"name": "tab", "alpha": a, "Cl_data": 6.0 * a, "Cd_data": np.full(a.shape, 0.01),
+              "Cm_data": np.full(a.shape, -0.05)}
+    params.update(kw)
+    return vt.TabulatedAirfoil(**params)
+
+
+def _wing_with(airfoil):
+    wing = _wing()
+    wing.sections[1].airfoil = airfoil
+    return wing
+
+
+@pytest.mark.parametrize("field", ["a0", "alpha_L0", "Cd0", "Cm0"])
+@pytest.mark.parametrize("bad", BAD_VALUES)
+def test_non_finite_linear_airfoil_values_are_refused(field, bad):
+    with pytest.raises(ValueError, match=field):
+        V.validate_surface(_wing_with(vt.LinearAirfoil(**{field: bad})))
+
+
+@pytest.mark.parametrize("a0", [0.0, -2.0 * np.pi])
+def test_non_positive_lift_slope_is_refused(a0):
+    with pytest.raises(ValueError, match="a0"):
+        V.validate_surface(_wing_with(vt.LinearAirfoil(a0=a0)))
+
+
+@pytest.mark.parametrize("field", ["alpha", "Cl_data", "Cd_data", "Cm_data", "Cl_circulation_data"])
+@pytest.mark.parametrize("bad", BAD_VALUES)
+def test_non_finite_tabulated_values_are_refused(field, bad):
+    good = _tab()
+    values = np.array(getattr(good, field) if field != "Cl_circulation_data" else good.Cl_data, dtype=float)
+    values[2] = bad
+    with pytest.raises(ValueError, match=field):
+        V.validate_surface(_wing_with(_tab(**{field: values})))
+
+
+@pytest.mark.parametrize("bad", BAD_VALUES)
+def test_non_finite_scalar_cm_is_refused(bad):
+    with pytest.raises(ValueError, match="Cm_data"):
+        V.validate_surface(_wing_with(_tab(Cm_data=bad)))
+
+
+def test_valid_airfoils_still_pass():
+    # A small negative Cd0 stays accepted: the gradient check steps Cd0 = 0 to -1e-6.
+    V.validate_surface(_wing_with(vt.LinearAirfoil(Cd0=-1.0e-6)))
+    V.validate_surface(_wing_with(vt.LinearAirfoil(a0=5.7, alpha_L0=-0.03, Cd0=0.0, Cm0=-0.05)))
+    V.validate_surface(_wing_with(_tab(Cd_data=np.zeros(4), Cm_data=-0.05, Cl_circulation_data=np.zeros(4))))
+    V.validate_surface(_wing_with(_tab(Cm_data=None)))
+
+
 # ── Solver settings ──────────────────────────────────────────────────────────
 
 def test_spacing_none_gives_value_error():
