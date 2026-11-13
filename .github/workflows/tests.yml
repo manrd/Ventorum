@@ -85,7 +85,11 @@ jobs:
         env:
           MPLBACKEND: Agg
           VENTORUM_REQUIRE_OPENMP: ${{ runner.os == 'macOS' && '0' || '1' }}
-        run: python -m pytest -q -m "not benchmark"
+        # A test that runs longer than 10 minutes prints the stack of every
+        # thread (the run goes on), so a slow or stuck test shows in the log
+        # even when the job reaches its time limit. The 30 slowest tests are
+        # listed at the end.
+        run: python -m pytest -q -m "not benchmark" -o faulthandler_timeout=600 --durations=30
       - name: Verification report (theory checks)
         env:
           MPLBACKEND: Agg
