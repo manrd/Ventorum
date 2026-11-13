@@ -38,6 +38,7 @@ switch to float64).
 
 from __future__ import annotations
 
+import warnings
 from dataclasses import dataclass
 
 import numpy as np
@@ -299,7 +300,9 @@ def solve_viscous_batch(cases, *, backend: str = "torch", device=None, dtype=Non
     -------
     ViscousBatchResult
         One :class:`ventorum.panel2d.viscous.ViscousResult` per case, in
-        input order.
+        input order. As in :func:`ventorum.panel2d.viscous.solve_viscous`,
+        an angle that did not converge gives a UserWarning with its reason
+        (one per angle of a sequence).
     """
     if backend != "torch":
         raise ValueError(f"backend '{backend}' is not supported; solve_viscous_batch runs on 'torch'.")
@@ -341,6 +344,11 @@ def solve_viscous_batch(cases, *, backend: str = "torch", device=None, dtype=Non
         vs.add_note(p["rows"].values(), note)
         vs.warn_wake_sawtooth(p["rows"].values(), "solve_viscous_batch")
         vs.warn_transition_rule(p["rows"].values(), "solve_viscous_batch")
+        for a in dict.fromkeys(float(parsed[i].alpha) for i in p["idx"]):
+            r = p["rows"][a]
+            if not r["converged"]:
+                warnings.warn(f"solve_viscous_batch: alpha = {r['alpha']:g} deg did not converge: {r['reason']}",
+                              UserWarning, stacklevel=2)
         for i in p["idx"]:
             r = p["rows"][float(parsed[i].alpha)]
             out[i] = vs.ViscousResult(**{f: r[f] for f in vs._FIELDS})

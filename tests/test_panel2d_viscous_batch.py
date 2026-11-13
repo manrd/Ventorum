@@ -86,6 +86,25 @@ def test_batch_reports_failures():
 
 
 @pytest.mark.slow
+def test_batch_warns_per_failed_angle_as_the_sequential_solver():
+    """A failed angle gives the same warning in the batch as in the sequential solver.
+
+    Regression: the batch gave NaN rows with converged False and no warning.
+    """
+    coords = airfoil("0012").repanel(n_panels=80).coords
+    cases = [ViscousCase(coordinates=coords, alpha=2.0, Re=1e6, max_iter=2, work_budget=4)]
+    with pytest.warns(UserWarning, match=r"^solve_viscous_batch: alpha = 2 deg did not converge: ") as batch:
+        r = solve_viscous_batch(cases, device="cpu", dtype=torch.float64)
+    with pytest.warns(UserWarning, match=r"^solve_viscous: alpha = 2 deg did not converge: ") as seq:
+        s = solve_viscous(coords, 2.0, 1e6, max_iter=2, work_budget=4)
+    assert not r.converged[0] and not s.converged
+    texts_b = [str(w.message) for w in batch if "did not converge" in str(w.message)]
+    texts_s = [str(w.message) for w in seq if "did not converge" in str(w.message)]
+    assert len(texts_b) == len(texts_s) == 1
+    assert texts_b[0].removeprefix("solve_viscous_batch") == texts_s[0].removeprefix("solve_viscous")
+
+
+@pytest.mark.slow
 def test_batch_low_ground_height_does_not_raise():
     """A pivot height below the reach of the 4 deg zero-lift probe gives batch rows, not a geometry error."""
     coords = airfoil("0006", n_points=81)
