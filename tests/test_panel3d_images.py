@@ -21,8 +21,9 @@ import scipy.linalg
 from ventorum.aero.system import freestream_direction, ground_normal
 from ventorum.core.datatypes import Aircraft, FlightCondition, LiftingSurface, SolverSettings, WingSection
 from ventorum.core.errors import GroundStrikeError
+from ventorum.panel3d.images import _reconstruct_full_mesh_reference, reconstruct_full_mesh
 from ventorum.panel3d.kernels import _precompute_geometry, doublet_potential, influence_matrices
-from ventorum.panel3d.mesh import mesh_lifting_surface
+from ventorum.panel3d.mesh import check_mesh, mesh_lifting_surface
 from ventorum.panel3d.post import (
     build_surface_gradient_operator,
     compute_surface_velocity_and_cp,
@@ -489,3 +490,34 @@ def test_explicit_ground_plane_equals_condition_height():
     for name in ("CL", "CD_pressure", "CDi_trefftz", "Cm"):
         assert getattr(res_g, name) == getattr(res_h, name)
     assert solver.factorization_count == 1
+
+
+def test_reconstruct_full_mesh_root_tolerance_matches_check_mesh():
+    """Verify that root nodes within the check_mesh tolerance merge in the full mesh."""
+    import dataclasses
+
+    surf = _rectangular_wing_surface(semi_span=4.0, chord=1.0)
+    mesh_zero = mesh_lifting_surface(surf, _naca0012_coordinates(41), n_chord=6, n_span=6, half=True)
+    nodes_shifted = np.array(mesh_zero.nodes, dtype=float, copy=True)
+    root_mask = np.abs(nodes_shifted[:, 1]) == 0.0
+    nodes_shifted[root_mask, 1] = 1.0e-10
+    mesh_shifted = dataclasses.replace(mesh_zero, nodes=nodes_shifted)
+
+    assert check_mesh(mesh_zero)["watertight"] is True
+    assert check_mesh(mesh_shifted)["watertight"] is True
+
+    full_zero = reconstruct_full_mesh(mesh_zero)
+    full_shifted = reconstruct_full_mesh(mesh_shifted)
+    full_shifted_ref = _reconstruct_full_mesh_reference(mesh_shifted)
+
+    assert len(full_shifted.nodes) == len(full_zero.nodes)
+    assert len(full_shifted_ref.nodes) == len(full_zero.nodes)
+    assert np.array_equal(full_shifted.panels, full_zero.panels)
+    assert np.array_equal(full_shifted_ref.panels, full_zero.panels)
+    assert check_mesh(full_shifted)["watertight"] is True
+
+    cond = FlightCondition(V_inf=20.0, alpha=np.radians(4.0))
+    res_zero = PanelSolver(mesh_zero, far_ratio=np.inf).solve(cond)
+    res_shifted = PanelSolver(mesh_shifted, far_ratio=np.inf).solve(cond)
+    assert abs(res_shifted.CL - res_zero.CL) < 1.0e-9
+

@@ -25,7 +25,7 @@ from ventorum.aero.system import ground_normal
 from ventorum.core.datatypes import FlightCondition
 from ventorum.core.errors import GroundStrikeError
 from ventorum.panel3d.kernels import _corner_tolerance
-from ventorum.panel3d.mesh import PanelMesh
+from ventorum.panel3d.mesh import _Y_ROOT_REL, PanelMesh
 
 __all__ = [
     "check_ground_clearance",
@@ -332,7 +332,9 @@ def reconstruct_full_mesh(half_mesh: PanelMesh) -> PanelMesh:
 
     right_n = len(half_mesh.nodes)
     node_array = np.asarray(half_mesh.nodes)
-    mirrored_nodes = np.flatnonzero(~(np.abs(node_array[:, 1]) < 1.0e-12))
+    size = float(np.max(np.ptp(node_array, axis=0))) if right_n else 1.0
+    y_tol = _Y_ROOT_REL * max(size, 1e-300)
+    mirrored_nodes = np.flatnonzero(~(np.abs(node_array[:, 1]) <= y_tol))
     index_map = np.arange(right_n)
     index_map[mirrored_nodes] = right_n + np.arange(len(mirrored_nodes))
     mirror = np.array(node_array[mirrored_nodes], dtype=float, copy=True)
@@ -440,10 +442,13 @@ def _reconstruct_full_mesh_reference(half_mesh: PanelMesh) -> PanelMesh:
 
     nodes = list(half_mesh.nodes)
     right_n = len(nodes)
+    node_array = np.asarray(half_mesh.nodes, dtype=float)
+    size = float(np.max(np.ptp(node_array, axis=0))) if right_n else 1.0
+    y_tol = _Y_ROOT_REL * max(size, 1e-300)
     index_map = np.full(right_n, -1, dtype=int)
 
     for i in range(right_n):
-        if abs(nodes[i][1]) < 1.0e-12:
+        if abs(nodes[i][1]) <= y_tol:
             index_map[i] = i
         else:
             p = np.array(nodes[i], dtype=float)
