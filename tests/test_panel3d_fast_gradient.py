@@ -324,3 +324,54 @@ def test_solver_results_unchanged(monkeypatch, kutta):
         assert abs(a - b) <= 1e-12 * max(abs(b), 1e-300), (name, a, b)
     cp_new, cp_old = np.asarray(new.cp), np.asarray(old.cp)
     assert np.max(np.abs(cp_new - cp_old)) <= 1e-12 * np.max(np.abs(cp_old))
+
+
+def test_int32_inputs_do_not_overflow_combined_integer_codes():
+    """Verify that int32 inputs at indices above 46341 do not overflow combined integer codes."""
+    from ventorum.panel3d.post import _wake_node_groups
+
+    # 1. Direct check on _wake_node_groups with int32 arrays and n_p = 50_000,
+    # where i_s * n_p + q = 47_000 * 50_000 + 47_001 = 2_350_047_001 > 2**31 - 1.
+    n_p = 50_000
+    p0, p1 = 47_000, 47_001
+    inc_p = np.array([p0, p1], dtype=np.int32)
+    inc_w = np.array([1.0, 2.0], dtype=float)
+    special = np.array([0], dtype=np.int32)
+    g_ptr = np.array([0, 2], dtype=np.int32)
+    g_member = np.array([0, 1], dtype=np.int32)
+    inc_grp = np.array([0, 0], dtype=np.int32)
+    opp_codes = np.array([np.int64(p0) * np.int64(n_p) + np.int64(p1)], dtype=np.int64)
+    ie_ptr = np.array([0, 1, 2], dtype=np.int32)
+    ie_key = np.array([0, 0], dtype=np.int32)
+    k_ptr = np.array([0, 2], dtype=np.int32)
+    k_pan = np.array([p0, p1], dtype=np.int32)
+    cut = np.array([True], dtype=bool)
+    q_k, w_k, ptr, closed = _wake_node_groups(
+        special,
+        inc_p,
+        inc_w,
+        (g_ptr, g_member, inc_grp),
+        opp_codes,
+        (ie_ptr, ie_key),
+        (k_ptr, k_pan),
+        cut,
+        n_p,
+    )
+    # Panel p1 is across the wake from p0, so only p0 remains in the group of special[0].
+    np.testing.assert_array_equal(q_k, np.array([p0], dtype=np.int64))
+    np.testing.assert_allclose(w_k, np.array([1.0]))
+    np.testing.assert_array_equal(ptr, np.array([0, 1]))
+    np.testing.assert_array_equal(closed, np.array([False]))
+
+    # 2. Gradient operator on a flat plate whose node indices start at 47_000
+    # (e_lo * n_code + e_hi > 2**31 - 1) with int32 panel and wake_edges arrays.
+    base_nodes, base_panels, cen, nrm, area = _flat_plate(4, 3)
+    offset = 47_000
+    nodes = np.zeros((offset + len(base_nodes), 3), dtype=float)
+    nodes[offset:] = base_nodes
+    panels = (base_panels + offset).astype(np.int32)
+    wake = np.array([[3, 6, offset + 6, offset + 7], [4, 7, offset + 7, offset + 8]], dtype=np.int32)
+    op = build_surface_gradient_operator(nodes, panels, cen, nrm, area, wake)
+    ref = _build_surface_gradient_operator_reference(nodes, panels, cen, nrm, area, wake)
+    _assert_same_operator(op, ref)
+

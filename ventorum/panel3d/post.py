@@ -395,18 +395,20 @@ def _wake_node_groups(
     ie_ptr, ie_key = inc_edges
     k_ptr, k_pan = key_panels
     n_s = special.size
+    n_p64 = np.int64(n_p)
     owner, entry = _csr_expand(g_ptr, inc_grp[special])
+    owner = owner.astype(np.int64, copy=False)
     member = g_member[entry]
-    i_s = inc_p[special][owner]
-    q = inc_p[member]
-    keep = (q == i_s) | ~np.isin(i_s * n_p + q, opp_codes)
+    i_s = inc_p[special][owner].astype(np.int64, copy=False)
+    q = inc_p[member].astype(np.int64, copy=False)
+    keep = (q == i_s) | ~np.isin(i_s * n_p64 + q, opp_codes)
     s_k = owner[keep]
     m_k = member[keep]
     q_k = q[keep]
     w_k = inc_w[m_k]
     w_sum = np.bincount(s_k, weights=w_k, minlength=n_s)
     ptr = _counts_to_ptr(np.bincount(s_k, minlength=n_s))
-    kept = np.unique(s_k * n_p + q_k)
+    kept = np.unique(s_k * n_p64 + q_k)
     # Each edge at the node of each kept member is shared when it is not
     # cut and another kept member lies on it.
     t_own, t_entry = _csr_expand(ie_ptr, m_k)
@@ -414,8 +416,8 @@ def _wake_node_groups(
     t_q = q_k[t_own]
     t_key = ie_key[t_entry]
     r_own, r_entry = _csr_expand(k_ptr, t_key)
-    r = k_pan[r_entry]
-    other = (r != t_q[r_own]) & np.isin(t_s[r_own] * n_p + r, kept)
+    r = k_pan[r_entry].astype(np.int64, copy=False)
+    other = (r != t_q[r_own]) & np.isin(t_s[r_own] * n_p64 + r, kept)
     shared = ~cut[t_key] & (np.bincount(r_own[other], minlength=t_key.size) > 0)
     closed = np.bincount(t_s[~shared], minlength=n_s) == 0
     return q_k, w_k / w_sum[s_k], ptr, closed
@@ -909,15 +911,16 @@ def _gradient_operator_arrays(
         Operator with shape (3 Np, Np) in 1/m.
     """
     pts = np.asarray(nodes, dtype=float)
-    pan = np.asarray(panels, dtype=int)
+    pan = np.asarray(panels, dtype=np.int64)
     cen = np.asarray(centroids, dtype=float)
     nrm = np.asarray(normals, dtype=float)
     area = np.asarray(areas, dtype=float)
     n_p = pan.shape[0]
+    n_p64 = np.int64(n_p)
     w_rows = (
-        np.empty((0, 4), dtype=int)
+        np.empty((0, 4), dtype=np.int64)
         if wake_edges is None
-        else np.asarray(wake_edges, dtype=int).reshape(-1, 4)
+        else np.asarray(wake_edges, dtype=np.int64).reshape(-1, 4)
     )
     counts = {"fold_rule": False, "n_fold_edges": 0, "n_ls_reduced": 0, "n_node_fallback": 0}
     if stats is not None:
@@ -929,18 +932,19 @@ def _gradient_operator_arrays(
     corner, n_corner = _distinct_corners(pan)
     has_corner = np.arange(corner.shape[1])[None, :] < n_corner[:, None]
     c_pan, c_pos = np.nonzero(has_corner)
-    c_node = corner[c_pan, c_pos]
+    c_pan = c_pan.astype(np.int64, copy=False)
+    c_node = corner[c_pan, c_pos].astype(np.int64, copy=False)
 
     # Edge incidences (panel, low node, high node) and their undirected keys.
     nxt = np.where(c_pos + 1 < n_corner[c_pan], c_pos + 1, 0)
-    c_next = corner[c_pan, nxt]
+    c_next = corner[c_pan, nxt].astype(np.int64, copy=False)
     is_edge = c_node != c_next
     e_pan = c_pan[is_edge]
     e_lo = np.minimum(c_node[is_edge], c_next[is_edge])
     e_hi = np.maximum(c_node[is_edge], c_next[is_edge])
-    n_code = int(max(pan.max(), w_rows[:, 2:].max(initial=0))) + 1
+    n_code = np.int64(int(max(pan.max(), w_rows[:, 2:].max(initial=0))) + 1)
     keys, e_key = np.unique(e_lo * n_code + e_hi, return_inverse=True)
-    e_key = e_key.reshape(-1)
+    e_key = e_key.reshape(-1).astype(np.int64, copy=False)
     n_key = keys.size
 
     # Panels of each key (CSR), and all pairs of two entries of one key.
@@ -952,7 +956,7 @@ def _gradient_operator_arrays(
     pa = k_pan[pair_a]
     pb = k_pan[pair_b]
     pair_key = k_key[pair_a]
-    n_distinct = np.bincount(np.unique(e_key * n_p + e_pan) // n_p, minlength=n_key)
+    n_distinct = np.bincount(np.unique(e_key * n_p64 + e_pan) // n_p64, minlength=n_key)
 
     # Cut keys: wake shedding edges, and sharp edges (kinds differ, or a
     # fold larger than fold_angle_deg without kinds).
@@ -973,14 +977,14 @@ def _gradient_operator_arrays(
     ok_key = ~cut & (n_distinct >= 2)
 
     # Corner incidences (node v, panel p) and their multiplicity.
-    inc_codes, c_inc = np.unique(c_node * n_p + c_pan, return_inverse=True)
+    inc_codes, c_inc = np.unique(c_node * n_p64 + c_pan, return_inverse=True)
     c_inc = c_inc.reshape(-1)
     n_inc = inc_codes.size
     inc_mult = np.bincount(c_inc, minlength=n_inc).astype(float)
-    inc_v = inc_codes // n_p
-    inc_p = inc_codes % n_p
-    e_inc_lo = np.searchsorted(inc_codes, e_lo * n_p + e_pan)
-    e_inc_hi = np.searchsorted(inc_codes, e_hi * n_p + e_pan)
+    inc_v = inc_codes // n_p64
+    inc_p = inc_codes % n_p64
+    e_inc_lo = np.searchsorted(inc_codes, e_lo * n_p64 + e_pan)
+    e_inc_hi = np.searchsorted(inc_codes, e_hi * n_p64 + e_pan)
 
     # Node groups: connected components of the incidences. Two incidences
     # at node v connect through a key at v that is not cut (one extra graph
@@ -1017,11 +1021,11 @@ def _gradient_operator_arrays(
     list_w = [inc_w[g_member] / grp_sum[inc_grp[g_member]]]
     list_ptr = [g_ptr]
     on_wake = is_wake_key[pair_key] & (pa != pb)
-    opp_i = np.concatenate([pa[on_wake], pb[on_wake], w_rows[:, 0], w_rows[:, 1]])
-    opp_q = np.concatenate([pb[on_wake], pa[on_wake], w_rows[:, 1], w_rows[:, 0]])
+    opp_i = np.concatenate([pa[on_wake], pb[on_wake], w_rows[:, 0], w_rows[:, 1]]).astype(np.int64, copy=False)
+    opp_q = np.concatenate([pb[on_wake], pa[on_wake], w_rows[:, 1], w_rows[:, 0]]).astype(np.int64, copy=False)
     valid = (opp_i != opp_q) & (opp_i >= 0) & (opp_i < n_p) & (opp_q >= 0) & (opp_q < n_p)
-    opp_codes = np.unique(opp_i[valid] * n_p + opp_q[valid])
-    special = np.nonzero(np.isin(inc_v, w_rows[:, 2:]) & np.isin(inc_p, opp_codes // n_p))[0]
+    opp_codes = np.unique(opp_i[valid] * n_p64 + opp_q[valid])
+    special = np.nonzero(np.isin(inc_v, w_rows[:, 2:]) & np.isin(inc_p, opp_codes // n_p64))[0]
     if special.size > 0:
         ie_inc = np.concatenate([e_inc_lo, e_inc_hi])
         ie_key = np.concatenate([e_key, e_key])[np.argsort(ie_inc, kind="stable")]
@@ -1063,19 +1067,21 @@ def _gradient_operator_arrays(
         else np.zeros(n_p, dtype=bool)
     )
     nb_pair = ~cut[pair_key] & (pa != pb)
-    nb_codes = np.unique(np.concatenate([pa[nb_pair] * n_p + pb[nb_pair], pb[nb_pair] * n_p + pa[nb_pair]]))
+    nb_codes = np.unique(
+        np.concatenate([pa[nb_pair] * n_p64 + pb[nb_pair], pb[nb_pair] * n_p64 + pa[nb_pair]])
+    )
     rows: list[np.ndarray] = []
     cols: list[np.ndarray] = []
     vals: list[np.ndarray] = []
 
     # Interior panels: node values and Green-Gauss (Blazek 2015). A corner
     # weight component that is exactly zero gives no entry.
-    gg = np.nonzero(has_row & (open_corners == 0))[0]
+    gg = np.nonzero(has_row & (open_corners == 0))[0].astype(np.int64, copy=False)
     if gg.size > 0:
         c_gg = corner[gg]
         corner_w = _green_gauss_corner_weights(pts, c_gg, n_corner[gg], nrm[gg], area[gg])
         g_slot, g_pos = np.nonzero(has_corner[gg])
-        g_inc = np.searchsorted(inc_codes, c_gg[g_slot, g_pos] * n_p + gg[g_slot])
+        g_inc = np.searchsorted(inc_codes, c_gg[g_slot, g_pos] * n_p64 + gg[g_slot])
         owner, entry = _csr_expand(all_ptr, list_of_inc[g_inc])
         o_slot = g_slot[owner]
         o_pos = g_pos[owner]
@@ -1090,7 +1096,7 @@ def _gradient_operator_arrays(
     ls = np.nonzero(has_row & (open_corners > 0))[0]
     if ls.size > 0:
         ls_rows, ls_cols, ls_vals = _least_squares_entries(
-            ls, nb_codes // n_p, nb_codes % n_p, cen, nrm, n_p, row_only, counts
+            ls, nb_codes // n_p64, nb_codes % n_p64, cen, nrm, n_p, row_only, counts
         )
         rows.extend(ls_rows)
         cols.extend(ls_cols)
