@@ -12,9 +12,9 @@ import ventorum as vt
 from ventorum import gpu
 from ventorum.aero import loads as loads_module
 from ventorum.geometry import lattice_cache
-from ventorum.ground_effect import solver as ge_solver
 from ventorum.ground_effect import sweep as ge_sweep
 from ventorum.ground_effect.sweep import GroundEffectSweep
+from ventorum.solvers import lattice_base
 from ventorum.solvers import core as solver_core
 from ventorum.solvers import horseshoe as horseshoe_module
 from ventorum.solvers import linear as linear_module
@@ -153,23 +153,17 @@ def test_probe_lattice_is_built_once(wing_tail_aircraft, monkeypatch):
     lattice_cache.clear()
 
     probe_build_calls = 0
-    orig_build_solver = ge_solver.build_lattice
-    orig_build_sweep = ge_sweep.build_lattice
+    # The ground-effect solver and the sweep get the probe from
+    # ventorum.solvers.lattice_base.ground_probe_lattice.
+    orig_build = lattice_base.build_lattice
 
-    def counting_build_solver(*args, **kwargs):
+    def counting_build(*args, **kwargs):
         nonlocal probe_build_calls
         if kwargs.get("n_chord") == 1 and kwargs.get("collocation") == "vlm":
             probe_build_calls += 1
-        return orig_build_solver(*args, **kwargs)
+        return orig_build(*args, **kwargs)
 
-    def counting_build_sweep(*args, **kwargs):
-        nonlocal probe_build_calls
-        if kwargs.get("n_chord") == 1 and kwargs.get("collocation") == "vlm":
-            probe_build_calls += 1
-        return orig_build_sweep(*args, **kwargs)
-
-    monkeypatch.setattr(ge_solver, "build_lattice", counting_build_solver)
-    monkeypatch.setattr(ge_sweep, "build_lattice", counting_build_sweep)
+    monkeypatch.setattr(lattice_base, "build_lattice", counting_build)
 
     sett = vt.SolverSettings(solver_type="vlm", n_panels=16)
     sweep = GroundEffectSweep(wing_tail_aircraft, settings=sett, backend="serial")

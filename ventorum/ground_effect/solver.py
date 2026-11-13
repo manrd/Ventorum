@@ -49,14 +49,13 @@ from ventorum.core.datatypes import (
     SolverSettings,
 )
 from ventorum.core.constants import RHO_SL
-from ventorum.geometry import lattice_cache
-from ventorum.geometry.lattice import VortexLattice, _rotate_flap_points, build_lattice, lattice_to_discretized
+from ventorum.geometry.lattice import VortexLattice, _rotate_flap_points, lattice_to_discretized
 from ventorum.ground_effect.state import GroundEffectCondition, GroundEffectResult
 from ventorum.solvers.factory import make_solver, resolve_solver_type
 from ventorum.core.errors import GroundStrikeError, ValidityError
 from ventorum.utils.validation import validate_aircraft
 
-from ventorum.solvers.lattice_base import DEFAULT_N_CHORD, LLT_GE_MIN_H_OVER_C  # noqa: E402
+from ventorum.solvers.lattice_base import LLT_GE_MIN_H_OVER_C, ground_probe_count, ground_probe_lattice  # noqa: E402
 
 
 def _as_aircraft(geometry: Aircraft | LiftingSurface) -> Aircraft:
@@ -126,19 +125,16 @@ def place_ground(
     gp : GroundPlane
         The ground plane in body axes.
     probe : VortexLattice
-        Probe lattice used to place the ground, with deflected flap points.
+        Probe lattice used to place the ground, with deflected flap points
+        and mean-line points. With a control or a mean line and an
+        automatic chordwise count, it is the lattice of the solve.
     """
-    chord_spacing = getattr(settings, "chord_spacing", "uniform")
-    controlled = any(s.controls for s in aircraft.surfaces)
-    chordwise = resolve_solver_type(settings.solver_type) == "vlm"
-    count = (settings.n_chord or DEFAULT_N_CHORD) if controlled and chordwise else 1
-    key = lattice_cache.lattice_key(aircraft, settings, "vlm", count, chord_spacing)
-    probe = lattice_cache.get_or_build(
-        key, lambda: build_lattice(aircraft, settings, collocation="vlm", n_chord=count, chord_spacing=chord_spacing)
-    )
+    probe = ground_probe_lattice(aircraft, settings)
     p, mode = _probe_reference(aircraft, ref_point, height_ref, probe)
     gp = make_ground_plane(probe, h, alpha, beta, phi, ref_point=p, height_ref=mode)
-    if controlled and chordwise and settings.n_chord is None:
+    if settings.n_chord is None and ground_probe_count(aircraft, settings) > 1:
+        # Controls and mean lines put points between the edges: place the
+        # ground again on the lattice of the solve (its automatic count).
         condition = FlightCondition(V_inf=1.0, alpha=alpha, beta=beta, phi=phi)
         count = make_solver("vlm").resolve_n_chord(aircraft, settings, condition, gp, ref_point)
         final_settings = settings.clone()
@@ -406,7 +402,8 @@ def prepare_ground_case(
 
     The arguments are those of :func:`analyze_ground_effect`; *probe* is
     the lattice that places the ground, when the caller has it from a sweep.
-    Controlled geometry gets a probe at its final chordwise count.
+    Geometry with a control or a mean line gets a probe at its final
+    chordwise count: the probe is then the lattice of the solve.
     The checks and the errors are those of :func:`analyze_ground_effect`.
     """
     h = check_height(h)
@@ -431,12 +428,14 @@ def prepare_ground_case(
 
     alpha, beta, phi = np.radians(alpha_deg), np.radians(beta_deg), np.radians(phi_deg)
     rp = aircraft.moment_reference() if ref_point is None else np.asarray(ref_point, dtype=float)
-    if probe is None or any(s.controls for s in aircraft.surfaces):
+    if probe is None or ground_probe_count(aircraft, sett) > 1:
         gp, probe = place_ground(aircraft, sett, h, alpha, beta, phi, rp, height_ref)
     else:
         p, mode = _probe_reference(aircraft, rp, height_ref, probe)
         gp = make_ground_plane(probe, h, alpha, beta, phi, ref_point=p, height_ref=mode)
-    if canonical == "vlm" and sett.n_chord is None and any(s.controls for s in aircraft.surfaces):
+    if sett.n_chord is None and ground_probe_count(aircraft, sett) > 1:
+        # The probe is the lattice of the solve: the clearance below and the
+        # solve use one geometry.
         sett.n_chord = probe.n_chord
     clear = clearance_info(probe, gp, rp, reference_surface_indices(aircraft))
     if clear["h_min"] <= 0.0:

@@ -60,7 +60,6 @@ from ventorum.core.errors import GroundStrikeError, ValidityError
 from ventorum.utils.jsonsafe import json_safe
 from ventorum.utils.parallel import estimate_panels, run_cases
 from ventorum.aero.system import make_ground_plane
-from ventorum.geometry.lattice import build_lattice
 from ventorum.core.constants import MIN_CENTRE_SLOPE, RHO_SL
 from ventorum.ground_effect.solver import (
     MAX_BANK_DEG,
@@ -540,7 +539,8 @@ def _prepare_sweep_cases(
     Returns
     -------
     probe : VortexLattice
-        The probe lattice (one chordwise panel, read-only).
+        The probe lattice of the clearance (read-only). See
+        :func:`ventorum.solvers.lattice_base.ground_probe_count`.
     prepared : list of tuple
         ``(case, data)`` of each valid case, in the order of *cases*. *data*
         is the dictionary of ``prepare_ground_case`` (flight condition,
@@ -797,13 +797,10 @@ def _fixed_n_chord(
         return None
     if not hasattr(solver, "resolve_n_chord"):
         return None
-    from ventorum.geometry import lattice_cache
+    from ventorum.solvers.lattice_base import ground_probe_lattice
 
-    chord_spacing = getattr(settings, "chord_spacing", "uniform")
-    key = lattice_cache.lattice_key(aircraft, settings, "vlm", 1, chord_spacing)
-    probe = lattice_cache.get_or_build(
-        key, lambda: build_lattice(aircraft, settings, collocation="vlm", n_chord=1, chord_spacing=chord_spacing)
-    )
+    # The gap comes from the geometry of the solve (mean lines and controls).
+    probe = ground_probe_lattice(aircraft, settings)
     pts = probe.all_points()
     p_plane, mode = plane_reference(aircraft, ref_point, height_ref)
     best_gap, best_gp = np.inf, None
