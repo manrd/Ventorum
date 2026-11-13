@@ -170,11 +170,13 @@ def _numerically_singular(jac: np.ndarray) -> bool:
     The test is the numerical rank of Golub and Van Loan (section 5.4.1):
     the smallest singular value is at most ``n eps`` times the largest,
     with ``n`` the size of the matrix and ``eps`` the float64 machine
-    epsilon. A zero matrix is singular.
+    epsilon. A zero matrix is singular. A matrix with a value that is not
+    finite is not tested (the result is False); :func:`solve_pressure_kutta`
+    stops before this test in that case.
     """
-    sv = np.linalg.svd(jac, compute_uv=False)
-    if sv.size == 0 or not np.all(np.isfinite(sv)):
+    if jac.size == 0 or not np.all(np.isfinite(jac)):
         return False
+    sv = np.linalg.svd(jac, compute_uv=False)
     return bool(sv[-1] <= jac.shape[0] * np.finfo(np.float64).eps * sv[0])
 
 
@@ -275,6 +277,10 @@ def solve_pressure_kutta(
             np.einsum("sd,sdt->st", v_surf[up_idx], g_up)
             - np.einsum("sd,sdt->st", v_surf[lo_idx], g_lo)
         ) / v_inf_f**2
+        if not (np.all(np.isfinite(jac)) and np.all(np.isfinite(resid))):
+            # A speed that is not finite at a trailing-edge panel: no Newton
+            # step is possible. Stop with the current state, not converged.
+            break
         if _numerically_singular(jac):
             # Singular Jacobian (for example a degenerate trailing-edge
             # pair): take the least-squares step and count it.

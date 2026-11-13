@@ -398,3 +398,33 @@ def test_numerical_rank_test_of_the_newton_jacobian():
     assert _numerically_singular(np.zeros((3, 3)))
     assert not _numerically_singular(np.eye(4))
     assert not _numerically_singular(np.array([[1.0, 0.0], [0.0, 1e-12]]))
+    # A value that is not finite is not tested and raises no error.
+    assert not _numerically_singular(np.full((2, 2), np.nan))
+    assert not _numerically_singular(np.full((2, 2), np.inf))
+
+
+def test_non_finite_trailing_edge_speed_stops_not_converged():
+    """A trailing-edge speed that is not finite stops the iteration, with no error.
+
+    The singular test used to run an SVD on the non-finite Jacobian, which
+    raised "SVD did not converge".
+    """
+    from ventorum.panel3d.kutta import solve_pressure_kutta
+    from ventorum.panel3d.solver import _condition_arrays
+
+    surf = _rectangular_wing_surface()
+    mesh = mesh_lifting_surface(surf, _naca0012_coordinates(51), n_chord=8, n_span=6)
+    cond = FlightCondition(V_inf=50.0, alpha=np.radians(4.0))
+    solver = PanelSolver(mesh, far_ratio=np.inf, kutta="pressure")
+    solver.solve(cond)
+    cfg = next(iter(solver._configs.values()))
+    _, z_full, up, lo, _ = cfg.pressure_wake["sym"]
+    coeffs = _condition_arrays([cond])[0][0]
+    mu_full0 = cfg.unit_mu @ coeffs
+    onset = np.array(solver._condition_velocity(cond, solver._full_geom.centroid), dtype=float)
+    onset[up[0]] = np.nan
+    kres = solve_pressure_kutta(
+        mu_full0, z_full, solver._grad_op, up, lo, solver._full_geom.normal, onset, float(cond.V_inf),
+    )
+    assert not kres.converged
+    assert kres.lstsq_steps == 0
