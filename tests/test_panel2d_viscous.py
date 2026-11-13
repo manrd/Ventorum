@@ -992,3 +992,48 @@ def test_low_ground_height_does_not_raise():
     assert "touches the ground at alpha = 4 deg" in r.reason[1]
     texts = [str(w.message) for w in caught if issubclass(w.category, UserWarning)]
     assert any(t.startswith("solve_viscous: alpha = 4 deg did not converge") for t in texts)
+
+
+def test_forced_transition_ahead_of_stagnation_point_is_on_the_upper_surface():
+    """A forced transition at x/c smaller than the stagnation-point x/c is placed on the upper surface after the leading edge.
+
+    Regression: the upper station list starts at the stagnation point (on the lower surface at positive
+    alpha), where x/c is 0.0309 for NACA 0012 (161 points) at 12 deg. Because _forced_interval checked
+    xf <= x[0] before reaching the x/c minimum at the leading edge, a trip at xtr = (0.01, 1.0) returned
+    interval (0, 0.0) on the lower surface at the stagnation point (about 0.064 chord of arc early) and
+    reported transition at x/c = 0.0309. Searching from the leading-edge x/c minimum places the trip on
+    the upper surface in the station interval bracketing x/c = 0.01, while trips downstream of the
+    leading edge stay bit-identical.
+    """
+    from ventorum.airfoil.naca import naca4
+    from ventorum.panel2d import vii
+    from ventorum.panel2d.coupling import build_coupling_system
+
+    coords = naca4("0012", 161)
+    sys_c = build_coupling_system(coords, 12.0)
+    setup = vii.CaseSetup(sys=sys_c, re=1e6, ncrit=9.0, xtr=(0.01, 1.0))
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        st = vii.initial_state(setup)
+    up, _ = vii._sides(setup, st)
+    x_up = sys_c.x_over_c[up]
+    assert x_up[0] == pytest.approx(0.03090433203875792, abs=1e-12)
+    jf, wf = vii._forced_interval(setup, 0, up)
+    assert jf is not None and jf >= int(np.argmin(x_up))
+    assert x_up[jf] < 0.01 <= x_up[jf + 1]
+    assert coords[up[jf], 1] > 0.0 and coords[up[jf + 1], 1] > 0.0
+    assert (1.0 - wf) * x_up[jf] + wf * x_up[jf + 1] == pytest.approx(0.01, abs=1e-15)
+    ue, _, _ = vii.host_edge(setup, st)
+    out = vii.case_outputs(setup, st, ue)
+    assert out["xtr"][0] == pytest.approx(0.01, abs=1e-12)
+    assert x_up[st.itr[0]] < 0.01 <= x_up[st.itr[0] + 1]
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        ref = solve_viscous(airfoil("2412", n_points=121).coords, 2.0, 1e6, xtr=(0.3, 0.3))
+    assert ref.converged
+    assert float(ref.Cl) == 0.4516078794667566
+    assert float(ref.Cd) == 0.009341715472419515
+    assert float(ref.Cm) == -0.04809352125389983
+    assert ref.transition_positions == (0.3, 0.3)
+

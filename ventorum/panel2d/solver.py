@@ -503,6 +503,70 @@ def _mirror(p):
     return q
 
 
+def _te_source_stream_matrix(xp, nodes, layout: PanelLayout, field, xi, eta, L, ground: bool):
+    """Return the source stream matrix for trailing-edge gap panels.
+
+    For a single body, this returns :func:`body_source_stream_matrix`
+    unchanged. For several bodies, the outer-strip branch cut of each
+    trailing-edge gap panel is replaced on other bodies by the continuous
+    branch centred on each target body so that bodies crossing the gap
+    strip do not see a stream-function jump.
+
+    Parameters
+    ----------
+    xp : module
+        Array namespace (``numpy`` or ``torch``).
+    nodes : array
+        Node coordinates, shape (..., N, 2) [m].
+    layout : PanelLayout
+        Index structure.
+    field : array
+        Field points, shape (..., Nc, 2) [m].
+    xi, eta : array
+        Panel-local coordinates, shape (..., Nc, Np) [m].
+    L : array
+        Panel lengths, shape (..., 1, Np) [m].
+    ground : bool
+        Add the mirror images about y = 0.
+
+    Returns
+    -------
+    array
+        Matrix of shape (..., Nc, Np) [m].
+    """
+    src = body_source_stream_matrix(nodes, layout, field=field, ground=ground)
+    if layout.n_bodies < 2:
+        return src
+    src = src * 1.0
+    is_nodes = field.shape[-2] == layout.n_nodes
+    for b, p in enumerate(layout.te_panel):
+        if p < 0:
+            continue
+        xi_p = xi[..., :, p]
+        eta_p = eta[..., :, p]
+        L_p = L[..., :, p]
+        xc = xp.minimum(xp.maximum(xi_p, 0.0 * xi_p), L_p)
+        corr = xp.where(eta_p < 0.0, L_p - xc, 0.0 * xi_p)
+        std_p = src[..., :, p] - corr
+        if is_nodes:
+            xm = xi_p - 0.5 * L_p
+            for b2, (s2, e2) in enumerate(layout.node_ranges):
+                if b2 == b:
+                    continue
+                xm_b2 = xm[..., s2:e2]
+                eta_b2 = eta_p[..., s2:e2]
+                phi = xp.arctan2(eta_b2, xm_b2)
+                beta = xp.arctan2(
+                    xp.mean(eta_b2, axis=-1, keepdims=True),
+                    xp.mean(xm_b2, axis=-1, keepdims=True),
+                )
+                k = xp.round((beta - phi) / (2.0 * np.pi))
+                src[..., s2:e2, p] = std_p[..., s2:e2] + k * L_p
+        else:
+            src[..., :, p] = std_p
+    return src
+
+
 def vortex_stream_matrix(nodes, layout: PanelLayout, field=None, ground: bool = False):
     """Return the stream function at field points per unit nodal gamma.
 
@@ -534,13 +598,13 @@ def vortex_stream_matrix(nodes, layout: PanelLayout, field=None, ground: bool = 
     eta = xp.where(abs(eta) < 1e-12 * L, 0.0 * eta + 0.0, eta)
     a1, a2 = linear_vortex_stream_influence(xi, eta, L)
     if ground:
-        xi, eta, L, _ = _local(xp, field, _mirror(ps), _mirror(pe))
-        b1, b2 = linear_vortex_stream_influence(xi, eta, L)
+        mxi, meta, mL, _ = _local(xp, field, _mirror(ps), _mirror(pe))
+        b1, b2 = linear_vortex_stream_influence(mxi, meta, mL)
         a1 = a1 - b1
         a2 = a2 - b2
     out = panel_to_node(a1, a2, layout)
     if any(p >= 0 for p in layout.te_panel):
-        src = body_source_stream_matrix(nodes, layout, field=field, ground=ground)
+        src = _te_source_stream_matrix(xp, nodes, layout, field, xi, eta, L, ground)
         out = out * 1.0
         for b, p in enumerate(layout.te_panel):
             if p < 0:
