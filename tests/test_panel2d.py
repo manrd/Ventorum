@@ -634,3 +634,51 @@ def test_section_chord_of_a_section_without_chord_raises():
         with pytest.raises(ValueError, match="no chord"):
             sv.resolve_reference(pts, None, None)
     assert sv.section_chord(np.array([[2.0, 0.0], [0.0, 0.0], [2.0, 0.0]])) == 2.0
+
+
+def test_tandem_blunt_trailing_edge_smooth_across_gap_strip():
+    """Tandem NACA 0012 sections with blunt trailing edges give smooth Cl and circulation across the gap strip.
+
+    Regression: the trailing-edge gap source used the outer-normal branch cut of
+    source_panel_stream_influence, whose strip {eta < 0, 0 < xi < L} runs
+    downstream from the trailing edge of body 0 across body 1. Moving body 1
+    through dy = (-0.004, -0.001, 0, +0.001, +0.004) (the half-gap is 0.00126)
+    then gave Cl = (0.9214, 0.8991, 0.9588, 1.0186, 0.9962) and a jump of the
+    circulation of body 1 from 0.1268 to 0.1668.
+
+    Limit derivation: with closed trailing edges, Cl varies smoothly from
+    0.9581 to 0.9566 across the 0.008 m sweep (slope dCl/dy = -0.189 1/m, step
+    changes 5.7e-4 over 0.003 m and 1.9e-4 over 0.001 m). A blunt gap of
+    L = 0.00252 m at distance r >= 0.5 m ahead of body 1 perturbs the velocity
+    gradient on body 1 by O(L / r^2) ~ 1e-2 relative, so no step change of the
+    blunt-edge Cl may exceed 1.1 times the closed-edge step change on the same
+    dy interval, and Cl stays within 2e-3 of the closed-edge value. Single-body
+    results stay bit-identical.
+    """
+    c_open = airfoil("0012", n_points=161, closed_te=False).coords
+    c_closed = airfoil("0012", n_points=161, closed_te=True).coords
+    single = solve_inviscid(c_open, 4.0)
+    assert single.Cl == 0.4833872055976377
+    assert single.Cm == -0.005692871112782457
+    single_60 = solve_inviscid(airfoil("0012").repanel(n_panels=60).coords, 4.0)
+    assert single_60.Cl == 0.4823610625516911
+    assert single_60.Cm == -0.005925925706023662
+
+    dys = np.array([-0.004, -0.001, 0.0, 0.001, 0.004])
+    cl_open, cl_closed, circ2_open = [], [], []
+    for dy in dys:
+        shift = np.array([1.5, float(dy)])
+        r_op = solve_inviscid([c_open, c_open + shift], 4.0)
+        r_cl = solve_inviscid([c_closed, c_closed + shift], 4.0)
+        cl_open.append(r_op.Cl)
+        cl_closed.append(r_cl.Cl)
+        circ2_open.append(float(r_op.circulation[1]))
+    cl_open = np.asarray(cl_open)
+    cl_closed = np.asarray(cl_closed)
+    circ2_open = np.asarray(circ2_open)
+    d_open = np.abs(np.diff(cl_open))
+    d_closed = np.abs(np.diff(cl_closed))
+    assert np.all(d_open <= 1.1 * d_closed), (d_open, d_closed)
+    assert np.max(np.abs(cl_open - cl_closed)) < 2e-3
+    assert np.max(np.abs(np.diff(circ2_open))) < 1e-4
+
