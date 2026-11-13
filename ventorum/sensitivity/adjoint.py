@@ -156,7 +156,9 @@ def _refuse_configuration(ac: Any, condition: Any, settings: Any, canonical: str
     """Raise GradientScopeError for configurations that the adjoint gradients do not cover.
 
     The Fourier solver is refused (closed form: central differences are the
-    method there). The planform input needs linear airfoils: the planform
+    method there). The 3D panel solver is refused before its solve: the
+    adjoint covers only the lattice solvers (``"vlm"``, ``"linear"`` and
+    ``"nonlinear"``). The planform input needs linear airfoils: the planform
     chain interpolates the linear section properties of the sections.
     The section input (``"sections"``: a0, alpha_L0, Cd0 and Cm0 of every
     strip) is refused when a surface has a tabulated airfoil: on the
@@ -196,6 +198,11 @@ def _refuse_configuration(ac: Any, condition: Any, settings: Any, canonical: str
         raise GradientScopeError(
             "The Fourier solver has no adjoint gradients (closed form): use central differences "
             "of the production solve, or solver_type 'vlm', 'linear' or 'nonlinear'.")
+    if canonical not in ("vlm", "linear", "nonlinear"):
+        raise GradientScopeError(
+            f"Solver '{canonical}' has no adjoint gradients: the adjoint covers the lattice solvers "
+            "only. The 3D panel solver has no vortex lattice. Use central differences of the "
+            "production solve, or solver_type 'vlm', 'linear' or 'nonlinear'.")
     lattice_mean_line = canonical == "vlm" and getattr(settings, "n_chord", None) != 1
     shapes_given = lattice_mean_line and any(
         surf.sections and all(sec.shape is not None for sec in surf.sections) for surf in ac.surfaces
@@ -2103,8 +2110,9 @@ def gradients(
     settings : SolverSettings or None
         Solver settings: ``"vlm"``, ``"linear"`` or ``"nonlinear"``, with
         linear or tabulated airfoils, control deflections and body rates.
-        The Fourier solver is refused (``GradientScopeError``), and so is a
-        nonlinear solve that did not converge.
+        The Fourier solver and the 3D panel solver are refused
+        (``GradientScopeError``), and so is a nonlinear solve that did not
+        converge.
     outputs : tuple of str
         Scalar outputs from ``"CL", "CY", "CDi", "CDp", "CD", "Cl", "Cm", "Cn"``.
         Vector outputs go through :func:`gradient_vjp`.

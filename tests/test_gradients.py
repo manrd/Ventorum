@@ -1518,3 +1518,21 @@ def test_forward_check_force_scale_floor() -> None:
     with pytest.raises(RuntimeError, match="CL"):
         _forward_check(prep, outputs, prod, ())
 
+
+def test_gradients_refuse_the_panel_solver_before_the_solve(float64_precision, monkeypatch) -> None:
+    """The 3D panel solver is refused with GradientScopeError before any solve (formerly KeyError 'lattice')."""
+    from ventorum.solvers import factory
+
+    def no_solver(canonical):  # type: ignore[no-untyped-def]
+        raise AssertionError(f"solver {canonical!r} was made before the refusal")
+
+    monkeypatch.setattr(factory, "make_solver", no_solver)
+    ac = vt.Aircraft(surfaces=[_plain_wing()])
+    cond = vt.FlightCondition(V_inf=30.0, alpha=np.radians(4.0))
+    for name in ("panel3d", "3dp"):
+        st = vt.SolverSettings(solver_type=name, n_panels=8)
+        with pytest.raises(vt.GradientScopeError, match="panel"):
+            vt.gradients(ac, cond, st, outputs=("CL",), wrt=("alpha",))
+        with pytest.raises(vt.GradientScopeError, match="panel"):
+            vt.gradient_vjp(ac, cond, st, seeds={"CL": 1.0}, wrt=("alpha",))
+

@@ -399,7 +399,8 @@ results are equal to round-off.
 ## Envelope
 
 The functions raise `GradientScopeError` (a `ValueError`) for the Fourier solver (a
-closed form: central differences are the method there), for a nonlinear lifting-line
+closed form: central differences are the method there), for the 3D panel solver (it has
+no vortex lattice; the refusal comes before the solve), for a nonlinear lifting-line
 solve that did not converge, for the planform input with tabulated airfoils, and for the
 section input (`"sections"`) when a surface has a tabulated airfoil (some of `a0`,
 `alpha_L0`, `Cd0` and `Cm0` do not enter the result on a tabulated strip, so their
