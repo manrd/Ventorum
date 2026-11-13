@@ -138,3 +138,54 @@ def test_converged_study_unchanged():
     assert study.converged is True
     assert (study.minimal_mesh.n_panels, study.minimal_mesh.spacing) == (10, "half-cosine")
     assert (study.recommended_mesh.n_panels, study.recommended_mesh.spacing) == (15, "half-cosine")
+
+
+def test_failed_condition_number_is_unknown_and_warned(monkeypatch):
+    """A failed condition-number assembly gives a warning and NaN (formerly 1e12 and 1e6 without a message).
+
+    The candidate levels with an unknown condition number stay not safe,
+    as before. The summary and the dictionary keep working with NaN.
+    """
+    import warnings
+
+    import pytest
+
+    from ventorum.solvers import lattice_base
+
+    def failing(*args, **kwargs):  # type: ignore[no-untyped-def]
+        raise ValueError("assembly test failure")
+
+    monkeypatch.setattr(lattice_base, "assemble_system_matrix", failing)
+    cond = vt.FlightCondition(V_inf=40.0, alpha=np.radians(5.0))
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        study = run_mesh_convergence_study(
+            case=_bench_wing(), condition=cond, tolerance_pct=5.0, panel_counts=(10, 15),
+            ref_n_panels=40, spacing_schemes=("uniform",), progress=False)
+    msgs = [str(w.message) for w in caught if issubclass(w.category, RuntimeWarning)]
+    assert any("condition number" in m and "assembly test failure" in m for m in msgs), msgs
+    assert np.isnan(study.reference_point.cond_num)
+    assert study.points and all(np.isnan(p.cond_num) for p in study.points)
+    assert not any(p.is_safe for p in study.points)
+    study.summary(as_markdown=False)
+    assert np.isnan(study.points[0].to_dict()["cond_num"])
+
+    def wrong(*args, **kwargs):  # type: ignore[no-untyped-def]
+        raise TypeError("a defect, not an expected failure")
+
+    # Only the expected error types are caught: a defect is not hidden.
+    monkeypatch.setattr(lattice_base, "assemble_system_matrix", wrong)
+    with pytest.raises(TypeError, match="defect"):
+        run_mesh_convergence_study(
+            case=_bench_wing(), condition=cond, tolerance_pct=5.0, panel_counts=(10,),
+            ref_n_panels=40, spacing_schemes=("uniform",), progress=False)
+
+
+def test_condition_number_is_finite_for_a_valid_mesh():
+    """A valid study stores the finite condition numbers of the assembled matrices."""
+    cond = vt.FlightCondition(V_inf=40.0, alpha=np.radians(5.0))
+    study = run_mesh_convergence_study(
+        case=_bench_wing(), condition=cond, tolerance_pct=5.0, panel_counts=(10, 15),
+        ref_n_panels=40, spacing_schemes=("uniform",), progress=False)
+    assert np.isfinite(study.reference_point.cond_num) and study.reference_point.cond_num >= 1.0
+    assert all(np.isfinite(p.cond_num) and p.cond_num >= 1.0 and p.is_safe for p in study.points)
