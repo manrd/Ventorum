@@ -952,13 +952,18 @@ def _build(precision: str) -> SimpleNamespace:  # noqa: C901 - one closure per k
                   f0: wp.array(dtype=wp.float64), res: wp.array(dtype=wp.float64)):
         # The merit 0.5 sum (R / (V^2 dA))^2 and the residual max |R| / (V^2 dA)
         # of case k, and its flags: converged, and still iterating (a case with
-        # no accepted trial stops; its state did not change).
+        # no accepted trial stops; its state did not change). wp.max ignores a
+        # NaN operand, so a NaN residual is set to infinity: a case with a NaN
+        # state is never converged. The merit is then NaN, and no trial passes
+        # the sufficient-decrease test against it.
         k = wp.tid()
         m = wp.float64(0.0)
         r = wp.float64(0.0)
         for i in range(R.shape[1]):
             q = R[k, i] / scale[k, i]
             m = m + q * q
+            if wp.isnan(q):
+                r = wp.float64(wp.inf)
             r = wp.max(r, wp.abs(q))
         f0[k] = wp.float64(0.5) * m
         res[k] = r

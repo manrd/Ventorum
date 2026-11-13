@@ -220,6 +220,48 @@ def test_gpu_nonlinear_lifting_line_equals_cpu(gpu_device, precision, tail, h, b
 
 
 @pytest.mark.gpu
+def test_gpu_nonlinear_nan_state_is_not_converged(gpu_device, monkeypatch):
+    """A NaN circulation has an infinite residual (formerly 0: converged True with NaN circulation).
+
+    The start circulation of case 1 is set to NaN. The Newton solve must
+    report the case as not converged, and the pipeline then solves it on
+    the CPU, so the sweep equals the CPU sweep.
+    """
+    import torch
+
+    from ventorum.gpu import engine
+
+    ac = _aircraft(False, _polar())
+    st = vt.SolverSettings(solver_type="nonlinear", n_panels=16, spacing="cosine", tolerance=1e-9)
+    alphas = np.radians(np.linspace(0.0, 6.0, 4))
+    ref = _sweep(vt.NonlinearLLTSolver(), ac, st, alphas, "cpu")
+    real_prepare = engine.llt_nonlinear_prepare
+    real_solve = engine.llt_nonlinear
+    seen = []
+
+    def nan_prepare(*args, **kwargs):  # type: ignore[no-untyped-def]
+        prep = real_prepare(*args, **kwargs)
+        prep["g_lin"][1, :] = float("nan")
+        return prep
+
+    def record(*args, **kwargs):  # type: ignore[no-untyped-def]
+        out = real_solve(*args, **kwargs)
+        seen.append((out["converged"].cpu().numpy().copy(), torch.isfinite(out["g"]).all(dim=1).cpu().numpy()))
+        return out
+
+    monkeypatch.setattr(engine, "llt_nonlinear_prepare", nan_prepare)
+    monkeypatch.setattr(engine, "llt_nonlinear", record)
+    new = _sweep(vt.NonlinearLLTSolver(), ac, st, alphas, "gpu", "float64")
+    assert seen
+    for conv, finite in seen:
+        # A case with a non-finite state is never reported as converged.
+        assert not np.any(conv.astype(bool) & ~finite)
+    assert not bool(seen[0][0][1])
+    assert all(np.all(np.isfinite(r.details["gamma"])) for r in new)
+    _assert_close(ref, new, 1e-8)
+
+
+@pytest.mark.gpu
 def test_gpu_nonlinear_lifting_line_past_stall_follows_the_cpu_branch(gpu_device):
     ac = _aircraft(False, _polar(stall=True))
     st = vt.SolverSettings(solver_type="nonlinear", n_panels=20, spacing="cosine")
