@@ -21,7 +21,14 @@ from typing import Any
 from collections.abc import Callable
 
 from ventorum.agent.response import error_payload
-from ventorum.agent.schemas import AGENT_TOOL_DEFINITIONS, TOOL_NAMES, active_tool_context, check_keys
+from ventorum.agent.schemas import (
+    AGENT_TOOL_DEFINITIONS,
+    TOOL_NAMES,
+    InputError,
+    active_tool_context,
+    check_keys,
+    is_json_text_object,
+)
 from ventorum.agent.tools import (
     airfoil_geometry,
     airfoil_polar,
@@ -81,6 +88,41 @@ def _no_constant(name: str) -> Any:
     raise ValueError(f"{name} is not valid JSON")
 
 
+def _decode_json_text_objects(args: dict[str, Any], schema: dict[str, Any], path: str) -> dict[str, Any]:
+    """Decode the JSON text that a Gemini client gives for an object without named properties.
+
+    The Gemini form of the tool declarations gives such an object (for
+    example ``input_uncertainties.sections``) as a string of JSON text,
+    because Gemini refuses an object schema with no properties. This
+    function follows the named properties of *schema* and replaces each
+    such string in *args* with the decoded object. An object given as an
+    object is not changed.
+
+    Raises
+    ------
+    InputError
+        If the text is not valid JSON or does not give a JSON object.
+    """
+    props = schema.get("properties") or {}
+    out = dict(args)
+    for key, val in args.items():
+        sub = props.get(key)
+        if not isinstance(sub, dict):
+            continue
+        where = f"{path}{key}"
+        if is_json_text_object(sub) and isinstance(val, str):
+            try:
+                decoded = json.loads(val, parse_constant=_no_constant)
+            except (ValueError, RecursionError) as err:
+                raise InputError(f"{where} must be a JSON object; the text is not valid JSON: {err}.") from None
+            if not isinstance(decoded, dict):
+                raise InputError(f"{where} must be a JSON object, got JSON text of a {type(decoded).__name__}.")
+            out[key] = decoded
+        elif isinstance(val, dict) and sub.get("properties"):
+            out[key] = _decode_json_text_objects(val, sub, f"{where}.")
+    return out
+
+
 def _write_audit(entry: dict[str, Any]) -> None:
     path = os.environ.get(AUDIT_ENV_VAR)
     if not path:
@@ -115,6 +157,7 @@ def _run(tool_name: Any, arguments: Any) -> tuple[str | None, dict[str, Any]]:
     with active_tool_context(name):
         try:
             args = check_keys(args, params["properties"], f"{name} arguments")
+            args = _decode_json_text_objects(args, params, "")
         except ValueError as exc:
             return name, error_payload(exc)
         missing = [k for k in params.get("required", []) if k not in args]

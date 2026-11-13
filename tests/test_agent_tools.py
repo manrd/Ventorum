@@ -54,7 +54,9 @@ def test_schema_exporters():
     assert all("inputSchema" in s for s in mcp)
     assert all(s["inputSchema"]["additionalProperties"] is False for s in mcp)
     gemini = get_tool_schemas("gemini")
-    assert all("parameters" in s for s in gemini)
+    # A tool without arguments has no parameters in the Gemini form (Gemini refuses an empty object).
+    no_args = {t["name"] for t in AGENT_TOOL_DEFINITIONS if not t["parameters"].get("properties")}
+    assert all(("parameters" in s) == (s["name"] not in no_args) for s in gemini)
     assert "additionalProperties" not in json.dumps(gemini)
     for fmt in (openai, anthropic, mcp, gemini):
         assert len(fmt) == n
@@ -915,8 +917,28 @@ def test_gemini_schema_uses_the_openapi_subset():
         if "items" in node:
             walk(node["items"])
 
+    def no_empty_object(node, path):
+        # Gemini refuses an OBJECT schema without properties, and one bad
+        # declaration makes it refuse the whole tool list.
+        if node.get("type") == "object":
+            assert node.get("properties"), f"{path}: object without properties"
+        for name, sub in node.get("properties", {}).items():
+            no_empty_object(sub, f"{path}.{name}")
+        if "items" in node:
+            no_empty_object(node["items"], f"{path}[]")
+
     for decl in get_tool_schemas("gemini"):
-        walk(decl["parameters"])
+        if "parameters" in decl:
+            walk(decl["parameters"])
+            no_empty_object(decl["parameters"], decl["name"])
+    gemini = {d["name"]: d for d in get_tool_schemas("gemini")}
+    # A tool without arguments has no parameters in the Gemini form.
+    assert "parameters" not in gemini["ventorum_machine_capabilities"]
+    # The map of surface name to section uncertainties is JSON text in the Gemini form.
+    sections = (gemini["ventorum_error_bars"]["parameters"]["properties"]["input_uncertainties"]
+                ["properties"]["sections"])
+    assert sections["type"] == "string" and "JSON" in sections["description"]
+    assert "a0_per_rad" in sections["description"]
     wa = get_tool_schemas("gemini")[0]["parameters"]["properties"]["wing"]
     ac_schema = get_tool_schemas("gemini")[0]["parameters"]["properties"]["aircraft"]
     assert wa["type"] == "object" and "span_m" in wa["properties"]
@@ -927,6 +949,27 @@ def test_gemini_schema_uses_the_openapi_subset():
     assert nw["type"] == "integer" and "'auto'" in nw["description"]
     # The other formats keep the full JSON schema.
     assert "anyOf" in json.dumps(get_tool_schemas("mcp"))
+    for fmt, key in (("mcp", "inputSchema"), ("anthropic", "input_schema")):
+        tools = {d["name"]: d[key] for d in get_tool_schemas(fmt)}
+        assert tools["ventorum_machine_capabilities"]["properties"] == {}
+        unc = tools["ventorum_error_bars"]["properties"]["input_uncertainties"]["properties"]["sections"]
+        assert unc["type"] == "object" and "additionalProperties" in unc
+
+
+def test_gemini_sections_as_json_text_reach_the_tool():
+    """The dispatcher decodes the JSON text that a Gemini client gives for a map-like object."""
+    base = {"wing": {"span_m": 10.0, "chord_m": 1.0}, "flight_condition": {"alpha_deg": 3.0},
+            "settings": {"n_panels": 16}}
+    res = call_tool("ventorum_error_bars",
+                    {**base, "input_uncertainties": {"sections": '{"nope": {"Cd0": 0.001}}'}})
+    assert_error(res, "invalid_input", "nope")
+    res = call_tool("ventorum_error_bars",
+                    {**base, "input_uncertainties": {"sections": '{"Wing": {"cd0": 0.001}}'}})
+    assert_error(res, "invalid_input", "Cd0")
+    res = call_tool("ventorum_error_bars", {**base, "input_uncertainties": {"sections": "{not json"}})
+    assert_error(res, "invalid_input", "input_uncertainties.sections")
+    res = call_tool("ventorum_error_bars", {**base, "input_uncertainties": {"sections": "[1, 2]"}})
+    assert_error(res, "invalid_input", "input_uncertainties.sections")
 
 
 def test_stability_derivatives_ge_one_mesh():

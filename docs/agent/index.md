@@ -273,6 +273,8 @@ print(res["executive_summary"])
 
 `get_tool_schemas(format=...)` exports the same schemas for OpenAI, Anthropic, Gemini and MCP.
 
+The Gemini form uses the OpenAPI 3.0 subset that Gemini accepts. Gemini refuses an object without properties, so a tool without arguments has no `parameters`, and a map of names (`input_uncertainties.sections` of `ventorum_error_bars`) is a string of JSON text. The dispatcher decodes this text back into the object.
+
 ```{toctree}
 :maxdepth: 1
 
