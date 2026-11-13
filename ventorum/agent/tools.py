@@ -276,9 +276,14 @@ def _span_is_automatic(ac: Aircraft, settings: Any) -> bool:
 
     The spanwise count is automatic when ``settings`` has no ``n_panels``
     key and no surface has its own ``n_panels``. :func:`_fit_span` never
-    changes a count that the caller set.
+    changes a count that the caller set. A surface with
+    ``node_displacements`` also fixes the count: the displacements belong
+    to the spanwise stations of the mesh that the caller got from
+    ``ventorum_undeformed_nodes``, and a fitted mesh would not match them.
     """
     if isinstance(settings, dict) and "n_panels" in settings:
+        return False
+    if any(getattr(s, "node_displacements", None) is not None for s in ac.surfaces):
         return False
     return all(getattr(s, "n_panels", None) is None for s in ac.surfaces)
 

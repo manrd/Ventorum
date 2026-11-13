@@ -21,6 +21,7 @@ from ventorum.agent import (
     polar_sweep,
     stability_derivatives,
     trim,
+    undeformed_nodes,
     wing_analysis,
 )
 from ventorum.core.datatypes import SolverSettings
@@ -227,6 +228,29 @@ def test_polar_sweep_gpu_choice_counts_the_control_chord(monkeypatch):
     assert p["status"] == "success", p
     # 20 spanwise strips x 16 chordwise panels.
     assert seen == [20 * CONTROL_MIN_AUTO_N_CHORD], seen
+
+
+def test_node_displacements_keep_the_spanwise_count(small_limits):
+    """A surface with node_displacements keeps the spanwise count of its nodes.
+
+    The documented workflow takes the nodes from ventorum_undeformed_nodes
+    and gives the displacements to wing_analysis with the same settings. The
+    automatic span fit changed the count, and the call failed with a
+    message that the displacements were made for another mesh.
+    """
+    wing = {"span_m": 10.0, "chord_m": 1.0}
+    u = undeformed_nodes(wing=dict(wing))
+    assert u["status"] == "success", u
+    n_span = u["settings_used"]["n_panels"]
+    eta = u["surfaces"]["Wing"]["eta"]
+    zeros = [[0.0, 0.0, 0.0] for _ in eta]
+    p = wing_analysis(wing={**wing, "node_displacements": {"le_m": zeros, "te_m": zeros, "eta": eta}},
+                      flight_condition={"V_inf_m_s": 40.0, "alpha_deg": 6.0, "h_m": 0.12},
+                      detail_level="summary")
+    assert p["status"] == "success", p
+    su = p["settings_used"]
+    assert su["n_panels"] == n_span, su
+    assert "spanwise count was reduced" not in su.get("mesh_note", ""), su
 
 @pytest.mark.slow
 def test_ground_effect_fits_the_strips(small_limits):
