@@ -341,3 +341,13 @@ def test_clone_of_tabulated_airfoil_with_scalar_cm():
     cl.Cl_data[0] = 99.0
     assert af.Cl_data[0] != 99.0
 
+
+def test_surface_position_as_tuple_can_be_cloned_and_saved():
+    """A position given as a tuple must be accepted by clone() and by the JSON writer."""
+    wing = _wing()
+    wing.position = (0.5, 0.0, -0.1)
+    out = wing.clone()
+    np.testing.assert_array_equal(np.asarray(out.position, dtype=float), [0.5, 0.0, -0.1])
+    back = aircraft_from_json(aircraft_to_json(vt.Aircraft(surfaces=[wing])))
+    np.testing.assert_array_equal(back.surfaces[0].position, [0.5, 0.0, -0.1])
+
