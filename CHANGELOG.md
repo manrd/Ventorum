@@ -400,6 +400,23 @@ a minor version can change a public interface.
 
 ### Fixed
 
+- Polar cache: files are written through a temporary file and `os.replace`, and a cached polar keeps
+  its `gap_mask`. The XFOIL version cache is keyed by the resolved executable path. `PolarTable.at`
+  keeps `last_dropped` per thread.
+- `VentorumCaseManager.find_optimal` ignores NaN cases; `SolverResult` clones and deep copies copy
+  `details` deeply; the machine profile is written through a unique temporary file.
+- 3D panel `solve_conditions` raises when a condition has no result (the list was shortened and
+  shifted).
+- Airfoil repaneling warns when it stops above its tolerance; a repeated point gives an
+  `AirfoilGeometryError` with its index.
+- `karman_trefftz_solution` takes `n_points` and a keyword-only `alpha_deg` (the positional parser could
+  swap them); `alpha_for_cl` catches only the expected errors.
+- Agent tools: the 3D panel tool notes the airfoil keys it ignores; the profile status accepts the
+  schemas that the profile loader accepts.
+- Plots: dashboard panel 2 uses the strips of the solve; the Trefftz-plane trace of the wake plot is at
+  the Trefftz plane; the Fourier spectrum uses the span of the surface, and the component breakdown
+  integrates over the strip widths with the sign of the local induced drag.
+
 - Input checks: a negative `Cd0` or negative values in `Cd_data` are refused; `check_gradients` steps
   `Cd0` forward (second order) near 0.
 - Adjoint gradients: the backward-error check scales each row by its right-hand-side terms before they
