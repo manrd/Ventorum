@@ -63,6 +63,7 @@ import scipy.sparse.csgraph
 
 from ventorum.aero.system import freestream_direction, lift_direction
 from ventorum.core.datatypes import FlightCondition
+from ventorum.geometry.lattice import CORE_RADIUS_FRACTION
 from ventorum.panel3d.wake import PanelWake
 
 __all__ = [
@@ -86,13 +87,14 @@ __all__ = [
 #: This is a method choice, not a tuned value.
 FOLD_ANGLE_DEG = 45.0
 
-#: Core radius of the 2D trailing vortices in the Trefftz plane, as a
-#: fraction of the mean length of the wake strip trailing edges [-]. The
-#: core only removes the singularity when a vortex lies on an evaluation
-#: point (for example at a wing-fin junction); the evaluation points are the
-#: strip midpoints, half a strip away from the nearest vortex, so the core
-#: changes the drag by about (2 * 0.01)^2 relative on a uniform strip layout.
-TREFFTZ_CORE_FRACTION = 0.01
+#: Core radius of each 2D trailing vortex in the Trefftz plane, as a
+#: fraction of its own wake strip trailing-edge trace length [-]. Alias
+#: of :data:`ventorum.geometry.lattice.CORE_RADIUS_FRACTION` (the VLM
+#: core fraction). The core removes the Cauchy singularity when a vortex
+#: sits at an evaluation point (for example at a wing-fin junction); each
+#: strip evaluates its normal wash at its control-point span fraction
+#: ``cp_frac`` (or 0.5 when absent).
+TREFFTZ_CORE_FRACTION = CORE_RADIUS_FRACTION
 
 
 def build_edge_neighbourhood(
@@ -1657,45 +1659,69 @@ def _integrate_batch(cp, geom, speed, rho, lift, drag, S_ref, b_ref, c_ref, ref_
     )
 
 
+def _trefftz_ordered_strips(
+    wake: PanelWake,
+    wake_dir: np.ndarray | None,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Return ordered trace ends, evaluation points [m], and unit wake direction [-]."""
+    pl = np.array(wake.p_left, dtype=float, copy=True)
+    pr = np.array(wake.p_right, dtype=float, copy=True)
+    d = (
+        np.array([1.0, 0.0, 0.0], dtype=float)
+        if wake_dir is None
+        else np.asarray(wake_dir, dtype=float).reshape(3) / np.linalg.norm(wake_dir)
+    )
+    cp_raw = getattr(wake, "cp_frac", None)
+    if cp_raw is None:
+        cp_frac = np.full(len(pl), 0.5, dtype=float)
+    else:
+        cp_frac = np.array(cp_raw, dtype=float, copy=True).reshape(len(pl))
+    if len(wake.panels):
+        first = np.fromiter((idx[0] for idx in wake.strip_panel_indices), dtype=int)
+        quad = np.asarray(wake.panels, dtype=float)[first]
+        nw = np.cross(quad[:, 2] - quad[:, 0], quad[:, 3] - quad[:, 1])
+        flip = np.sum((pr - pl) * np.cross(nw, d[None, :]), axis=1) < 0.0
+        if np.any(flip):
+            pl[flip], pr[flip] = wake.p_right[flip], wake.p_left[flip]
+            cp_frac[flip] = 1.0 - cp_frac[flip]
+    q = pl + cp_frac[:, None] * (pr - pl)
+    return pl, pr, q, d
+
+
 def _trefftz_factors(wake, wake_dir=None, ground=None):
     """Return the shared Trefftz velocity factors in 1/m and strip lengths in m.
 
     The two velocity matrices have shape (Ns, Nv). The two in-plane
     normal components have shape (Ns,) [-]. Ground is a unit normal and
-    an offset in m. Use the endpoint vortices and core of
-    :func:`compute_trefftz_induced_drag` (Katz and Plotkin, chapter 12).
+    an offset in m. Each strip evaluates induced wash at its span
+    fraction ``cp_frac`` (0.5 fallback when absent), and each trailing
+    vortex uses core radius ``TREFFTZ_CORE_FRACTION * l_s`` from its own
+    strip (Lan 1974; Multhopp 1950).
     """
-    pl = np.array(wake.p_left, dtype=float, copy=True)
-    pr = np.array(wake.p_right, dtype=float, copy=True)
-    d = (np.array([1.0, 0.0, 0.0]) if wake_dir is None
-         else np.asarray(wake_dir) / np.linalg.norm(wake_dir))
-    if len(wake.panels):
-        first = np.fromiter((idx[0] for idx in wake.strip_panel_indices), dtype=int)
-        quad = np.asarray(wake.panels)[first]
-        nw = np.cross(quad[:, 2] - quad[:, 0], quad[:, 3] - quad[:, 1])
-        flip = np.sum((pr - pl) * np.cross(nw, d), axis=1) < 0.0
-        pl[flip], pr[flip] = wake.p_right[flip], wake.p_left[flip]
+    pl, pr, q3, d = _trefftz_ordered_strips(wake, wake_dir)
     segment = pr - pl
     length = np.linalg.norm(segment, axis=-1)
     safe = np.maximum(length, 1e-12)
+    rc_vort = TREFFTZ_CORE_FRACTION * np.concatenate([safe, safe])
     vertices = np.vstack([pr, pl])
     if wake_dir is None and ground is None:
-        q = (0.5 * (pl + pr))[:, 1:]
+        q = q3[:, 1:]
         pv = vertices[:, 1:]
         seg = segment[:, 1:]
     else:
         _, e1, e2 = _trefftz_plane_basis(d)
         basis = np.column_stack([e1, e2])
-        q = (0.5 * (pl + pr)) @ basis
+        q = q3 @ basis
         seg = segment @ basis
         if ground is not None:
             normal, offset = ground
             height = vertices @ normal - offset
             vertices = np.vstack([vertices, vertices - 2.0 * height[:, None] * normal])
+            rc_vort = np.concatenate([rc_vort, rc_vort])
         pv = vertices @ basis
     normal = np.column_stack([-seg[:, 1], seg[:, 0]]) / safe[:, None]
     rq = q[:, None, :] - pv[None, :, :]
-    rc_sq = (TREFFTZ_CORE_FRACTION * float(np.mean(safe))) ** 2
+    rc_sq = (rc_vort ** 2)[None, :]
     denom = 2.0 * np.pi * (rq[..., 0] ** 2 + rq[..., 1] ** 2 + rc_sq)
     return -rq[..., 1] / denom, rq[..., 0] / denom, normal[:, 0], normal[:, 1], length
 
@@ -1742,7 +1768,7 @@ def _trefftz_strip_wash(
     gamma_w : numpy.ndarray
         Strip circulations with shape (Ns,) in m^2/s.
     w_n : numpy.ndarray
-        Normal wash at the strip midpoints with shape (Ns,) in m/s.
+        Normal wash at the strip evaluation points with shape (Ns,) in m/s.
     seg_len : numpy.ndarray
         Strip trailing-edge lengths with shape (Ns,) in m.
     """
@@ -1754,36 +1780,17 @@ def _trefftz_strip_wash(
     else:
         gamma_w = np.asarray(wake_gamma, dtype=float).reshape(n_strips)
 
-    # Endpoints of strip segments in the Trefftz plane. The vortex of
-    # circulation +Gamma about the wake direction d sits at the end with the
-    # larger projection on n_w x d, where n_w is the normal of the wake strip
-    # (the side of the upper trailing-edge panel). For a horizontal surface
-    # with the upper side up this is the end with the larger y.
-    pl = np.array(wake.p_left, dtype=float, copy=True)
-    pr = np.array(wake.p_right, dtype=float, copy=True)
-    d_hat = (
-        np.array([1.0, 0.0, 0.0])
-        if wake_dir is None
-        else np.asarray(wake_dir, dtype=float).reshape(3) / np.linalg.norm(wake_dir)
-    )
-    if len(wake.panels) > 0:
-        first = np.array([idx[0] for idx in wake.strip_panel_indices], dtype=int)
-        quad = np.asarray(wake.panels, dtype=float)[first]
-        n_w = np.cross(quad[:, 2] - quad[:, 0], quad[:, 3] - quad[:, 1])
-        t_hat = np.cross(n_w, d_hat[None, :])
-        flip = np.sum((pr - pl) * t_hat, axis=1) < 0.0
-        if np.any(flip):
-            pl[flip], pr[flip] = wake.p_right[flip], wake.p_left[flip]
+    # Endpoints of strip segments in the Trefftz plane and evaluation points
+    # at cp_frac along p_left -> p_right (0.5 fallback when absent).
+    pl, pr, q_eval, _ = _trefftz_ordered_strips(wake, wake_dir)
 
     seg_vec = pr - pl
     seg_len = np.linalg.norm(seg_vec, axis=-1)
     safe_len = np.maximum(seg_len, 1.0e-12)
+    rc_sq_vort = (TREFFTZ_CORE_FRACTION * np.concatenate([safe_len, safe_len])) ** 2
 
     if wake_dir is None and ground is None:
         # Body-axis wake in free air (the Trefftz plane is the y-z plane).
-        # Segment midpoint evaluation points
-        q_eval = 0.5 * (pl + pr)
-
         # In-plane normal vector: n = d_wake x seg_vec / seg_len
         # For body-axis wake d_wake = [1, 0, 0]:
         # [1, 0, 0] x [dx, dy, dz] = [0, -dz, dy]
@@ -1795,16 +1802,12 @@ def _trefftz_strip_wash(
         pv = np.vstack([pr, pl])
         gv = np.concatenate([gamma_w, -gamma_w])
 
-        # Core radius regularization to prevent zero-distance divisions
-        rc = TREFFTZ_CORE_FRACTION * float(np.mean(safe_len))
-        rc_sq = rc**2
-
         w_n = np.zeros(n_strips, dtype=np.float64)
         for s in range(n_strips):
             qs = q_eval[s]
             rq = qs[None, :] - pv
             r2 = rq[:, 1] ** 2 + rq[:, 2] ** 2
-            denom = 2.0 * np.pi * (r2 + rc_sq)
+            denom = 2.0 * np.pi * (r2 + rc_sq_vort)
 
             vy = -rq[:, 2] / denom
             vz = rq[:, 1] / denom
@@ -1824,7 +1827,7 @@ def _trefftz_strip_wash(
 
     seg2 = _plane(seg_vec)
     qn2 = np.column_stack([-seg2[:, 1], seg2[:, 0]]) / safe_len[:, None]
-    q2 = _plane(0.5 * (pl + pr))
+    q2 = _plane(q_eval)
     pv3 = np.vstack([pr, pl])
     gv = np.concatenate([gamma_w, -gamma_w])
     if ground is not None:
@@ -1833,10 +1836,10 @@ def _trefftz_strip_wash(
         height = pv3 @ k_hat - offset
         pv3 = np.vstack([pv3, pv3 - 2.0 * height[:, None] * k_hat[None, :]])
         gv = np.concatenate([gv, -gv])
+        rc_sq_vort = np.concatenate([rc_sq_vort, rc_sq_vort])
     pv2 = _plane(pv3)
-    rc_sq = (TREFFTZ_CORE_FRACTION * float(np.mean(safe_len))) ** 2
     rq = q2[:, None, :] - pv2[None, :, :]
-    denom = 2.0 * np.pi * (rq[..., 0] ** 2 + rq[..., 1] ** 2 + rc_sq)
+    denom = 2.0 * np.pi * (rq[..., 0] ** 2 + rq[..., 1] ** 2 + rc_sq_vort[None, :])
     v1 = np.sum(-gv[None, :] * rq[..., 1] / denom, axis=1)
     v2 = np.sum(gv[None, :] * rq[..., 0] / denom, axis=1)
     w_n = v1 * qn2[:, 0] + v2 * qn2[:, 1]
@@ -1861,11 +1864,15 @@ def compute_trefftz_induced_drag(
     the Trefftz plane (normal to the wake direction); each strip end
     carries a 2D point vortex, +Gamma_s at the end with the larger
     projection on n_w x d (n_w the strip normal on the upper side, d the
-    wake direction) and -Gamma_s at the other end. The normal wash at the strip midpoints gives
-    D_i = -0.5 * rho * sum(Gamma_s * w_n,s * l_s). The vortices have a core
-    of radius ``TREFFTZ_CORE_FRACTION`` times the mean strip length. In
-    ground effect the image vortices (the ends reflected in the ground,
-    with opposite circulation) add their normal wash (method of images).
+    wake direction) and -Gamma_s at the other end. The normal wash at the
+    strip evaluation point ``q = pl + cp_frac * (pr - pl)`` (0.5 when no
+    spacing fraction is stored, matching the Multhopp/VLM control-point
+    quadrature rule; Lan 1974, Multhopp 1950) gives
+    D_i = -0.5 * rho * sum(Gamma_s * w_n,s * l_s). Each trailing vortex
+    has a core of radius ``TREFFTZ_CORE_FRACTION`` times the trace length
+    of its own strip. In ground effect the image vortices (the ends
+    reflected in the ground, with opposite circulation and the same core
+    radius as their source) add their normal wash (method of images).
 
     Parameters
     ----------
@@ -1914,9 +1921,11 @@ def compute_trefftz_yawing_moment(
 
     The induced drag of each wake strip, ``D'_s = -0.5 rho Gamma_s w_n,s
     l_s`` [N] (the strip terms of :func:`compute_trefftz_induced_drag`),
-    acts along the free stream at the strip midpoint. The arm ``a_s`` is
-    the vector from the reference point to the midpoint, projected on the
-    Trefftz plane. The moment is ``M_T = sum a_s x D'_s V_hat``, and
+    acts along the free stream at the strip evaluation point
+    ``q = pl + cp_frac * (pr - pl)`` (0.5 fallback when absent). The arm
+    ``a_s`` is the vector from the reference point to that evaluation
+    point, projected on the Trefftz plane. The moment is
+    ``M_T = sum a_s x D'_s V_hat``, and
     ``Cn_trefftz = -M_T . z_s / (q S_ref b_ref)`` with ``z_s`` the
     stability z axis (the lift direction, up in the geometry axes). With
     the lateral arm ``y_s`` this is ``sum D'_s y_s / (q S_ref b_ref)``:
@@ -2132,17 +2141,16 @@ def _trefftz_side_batch(gamma, speed, lift, drag, S_ref, segments):
 
 
 def _trefftz_arms(wake, wake_dir=None, ref_point=None):
-    """Return the Trefftz-plane arms of the strip midpoints [m], shape (Ns, 3).
+    """Return the Trefftz-plane arms of the strip evaluation points [m], shape (Ns, 3).
 
     The arm is the vector from *ref_point* [m] (None is the origin) to the
-    strip trailing-edge midpoint, projected on the Trefftz plane (normal to
-    the wake direction; None is the body x axis): ``a = r - (r . d) d``.
+    strip evaluation point ``q = pl + cp_frac * (pr - pl)`` (0.5 fallback),
+    projected on the Trefftz plane (normal to the wake direction; None is
+    the body x axis): ``a = r - (r . d) d``.
     """
-    mid = 0.5 * (np.asarray(wake.p_left, dtype=float) + np.asarray(wake.p_right, dtype=float))
+    _, _, q, d = _trefftz_ordered_strips(wake, wake_dir)
     rp = np.zeros(3) if ref_point is None else np.asarray(ref_point, dtype=float).reshape(3)
-    d = (np.array([1.0, 0.0, 0.0]) if wake_dir is None
-         else np.asarray(wake_dir, dtype=float).reshape(3) / np.linalg.norm(wake_dir))
-    rel = mid.reshape(-1, 3) - rp[None, :]
+    rel = q.reshape(-1, 3) - rp[None, :]
     return rel - (rel @ d)[:, None] * d[None, :]
 
 

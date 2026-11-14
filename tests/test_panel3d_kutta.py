@@ -96,11 +96,13 @@ def _te_jump(solver: PanelSolver, cp: np.ndarray) -> float:
 # stored values to 5e-13 relative, so only the gradient moves them. On this
 # coarse mesh (8 chordwise panels) the near-field pressure drag is about
 # 1.9 times the Trefftz drag (it was negative before); the trust score
-# gives a note below 16 chordwise panels.
+# gives a note below 16 chordwise panels. CDi_trefftz was stored again
+# after the change to the VLM Trefftz evaluation point and per-strip core
+# (old: 0.004233828611102339).
 _STORED_MORINO = {
     "CL": 0.3317867672685191,
     "CD_pressure": 0.007978170567468013,
-    "CDi_trefftz": 0.004233828611102339,
+    "CDi_trefftz": 0.004823228167026525,
     "Cm": -0.07968338690585908,
     "cp_sum": -32.93577724926796,
     "cp_abs_sum": 68.0982534507028,

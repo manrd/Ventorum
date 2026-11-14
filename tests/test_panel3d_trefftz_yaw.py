@@ -38,12 +38,19 @@ ALPHA = np.radians(4.0)
 R_STAB = 0.01 * 2.0 * V_INF / 8.0
 
 #: Relative agreement of the 3D panel and the vortex-lattice Cn_trefftz [-].
-#: The 3D panel wing has a NACA 0006 section and the lattice is thin; the
-#: thickness adds about 4 % to the lift slope and the roll damping. On the
-#: 16 x 16 mesh against the lattice 40 x 8: yaw rate -1.690e-05 against
-#: -1.628e-05 (+3.8 %), roll rate +2.422e-04 against +2.335e-04 (+3.8 %),
-#: 10 deg dihedral at beta 5 deg +5.645e-04 against +5.472e-04 (+3.2 %).
-PARITY_TOLERANCE = 0.10
+#: The 3D panel wing has a NACA 0006 section and the lattice is thin. The
+#: thickness adds about 4 % to the lift slope, and Cn_trefftz is a product of
+#: the symmetric and the antisymmetric loading, so the converged 3D panel
+#: value is about 8 % above the lattice. The lattice 40 x 8 is converged
+#: (roll rate +2.3346e-04, 160 x 8 +2.3342e-04). The 3D panel values fall
+#: with refinement (roll rate, Morino: 16 x 16 +14.4 %, 24 x 24 +11.8 %,
+#: 32 x 32 +10.7 %; extrapolated about +8.6 %). On the 24 x 24 mesh: yaw
+#: rate +11.3 %, roll rate +11.8 % (pressure Kutta +11.7 %), 10 deg dihedral
+#: at beta 5 deg +12.9 %.
+PARITY_TOLERANCE = 0.15
+
+#: Spanwise and chordwise 3D panel count of the parity tests [-].
+PARITY_N = 24
 
 
 @pytest.fixture(autouse=True)
@@ -124,24 +131,26 @@ def _independent_cn(solver: PanelSolver, condition: FlightCondition) -> tuple[fl
     wake = cfg.full_wake
     gamma = mu[wake.wake_up] - mu[wake.wake_lo]
     pl, pr = np.array(wake.p_left, float), np.array(wake.p_right, float)
+    cp_frac = np.full(len(pl), 0.5, dtype=float) if wake.cp_frac is None else np.array(wake.cp_frac, float)
     first = np.array([idx[0] for idx in wake.strip_panel_indices], dtype=int)
     quad = np.asarray(wake.panels, dtype=float)[first]
     n_w = np.cross(quad[:, 2] - quad[:, 0], quad[:, 3] - quad[:, 1])
     flip = np.sum((pr - pl) * np.cross(n_w, [1.0, 0.0, 0.0]), axis=1) < 0.0
     pl[flip], pr[flip] = np.array(wake.p_right, float)[flip], np.array(wake.p_left, float)[flip]
+    cp_frac[flip] = 1.0 - cp_frac[flip]
     length = np.hypot(pr[:, 1] - pl[:, 1], pr[:, 2] - pl[:, 2])
-    mid = 0.5 * (pl + pr)
+    q_pts = pl + cp_frac[:, None] * (pr - pl)
     normal = np.column_stack([-(pr[:, 2] - pl[:, 2]), pr[:, 1] - pl[:, 1]]) / length[:, None]
-    rc2 = (0.01 * length.mean()) ** 2
+    rc2 = (0.01 * length)[None, :] ** 2
     w_n = np.zeros(len(gamma))
     for vertex, sign in ((pr, 1.0), (pl, -1.0)):
-        dy = mid[:, None, 1] - vertex[None, :, 1]
-        dz = mid[:, None, 2] - vertex[None, :, 2]
+        dy = q_pts[:, None, 1] - vertex[None, :, 1]
+        dz = q_pts[:, None, 2] - vertex[None, :, 2]
         den = 2.0 * np.pi * (dy**2 + dz**2 + rc2)
         w_n += np.sum(sign * gamma[None, :] * (-dz * normal[:, 0, None] + dy * normal[:, 1, None]) / den, axis=1)
     drag = -0.5 * condition.rho * gamma * w_n * length
     q_s = 0.5 * condition.rho * condition.V_inf**2 * solver.S_ref
-    return float(drag.sum() / q_s), float(np.sum(drag * mid[:, 1]) / (q_s * solver.b_ref))
+    return float(drag.sum() / q_s), float(np.sum(drag * q_pts[:, 1]) / (q_s * solver.b_ref))
 
 
 # ---------------------------------------------------------------------------
@@ -240,7 +249,7 @@ def test_totals_carry_the_value():
 def test_rates_agree_with_the_vortex_lattice(kutta, condition):
     """Thin planar wing (NACA 0006), alpha 4 deg: the 3D panel and lattice Cn_trefftz agree."""
     ac = _aircraft()
-    panel = _cn(ac, condition, _panel(panel_kutta=kutta))
+    panel = _cn(ac, condition, _panel(PARITY_N, panel_kutta=kutta))
     lattice = _cn(ac, condition, _lattice())
     assert np.sign(panel) == np.sign(lattice)
     assert panel == pytest.approx(lattice, rel=PARITY_TOLERANCE)
@@ -259,7 +268,7 @@ def test_sideslip_agrees_with_the_vortex_lattice():
     assert abs(_cn(planar, _beta(), _panel())) < 1e-9
     assert abs(_cn(planar, _beta(), _lattice(wake_alignment="body"))) < 1e-9
     dihedral = _aircraft(dihedral_deg=10.0)
-    panel = _cn(dihedral, _beta(), _panel())
+    panel = _cn(dihedral, _beta(), _panel(PARITY_N))
     lattice = _cn(dihedral, _beta(), _lattice(wake_alignment="body"))
     assert panel > 0.0 and lattice > 0.0
     assert panel == pytest.approx(lattice, rel=PARITY_TOLERANCE)

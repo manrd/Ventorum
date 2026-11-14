@@ -357,6 +357,10 @@ class PanelMesh:
         Spanwise station row of each node, shape (Nn,). It increases along
         the span; the smallest and the largest value of a component mark
         its two ends (tips, or root and tip). Values are per component.
+    wake_cp_frac : numpy.ndarray or None
+        Control-point span fraction along ``na -> nb`` of each wake edge
+        with shape (Nw_strips,) [-]. None for user-built meshes without
+        spacing data, which fall back to 0.5 during Trefftz evaluation.
     """
 
     nodes: np.ndarray
@@ -371,6 +375,7 @@ class PanelMesh:
     side: np.ndarray | None = None
     node_station: np.ndarray | None = None
     root_scale_warning: bool = False
+    wake_cp_frac: np.ndarray | None = None
 
 
 def _target_x(n_chord: int, chord_spacing: str) -> np.ndarray:
@@ -1361,6 +1366,40 @@ def _polygon_panels(p_chain: list[int], q_chain: list[int], pos: np.ndarray) -> 
     return _strip_triangles(p_chain, q_chain, pos)
 
 
+def _strip_cp_fractions(
+    eta_base: np.ndarray,
+    mids_base: np.ndarray,
+    edge_etas: np.ndarray | None = None,
+) -> np.ndarray:
+    """Return per-interval Trefftz control-point fractions [-] in [0, 1].
+
+    Each interval ``[eta[j], eta[j + 1]]`` receives
+    ``(mid - eta[j]) / (eta[j + 1] - eta[j])``. When *edge_etas* refines
+    *eta_base* (such as at control transitions), unsplit intervals retain
+    their base fraction and newly split or duplicate intervals receive 0.5.
+    """
+    edges = np.asarray(eta_base, dtype=float)
+    mids = np.asarray(mids_base, dtype=float)
+    de = np.diff(edges)
+    base_frac = np.where(np.abs(de) > 1e-12, (mids - edges[:-1]) / np.where(np.abs(de) > 1e-12, de, 1.0), 0.5)
+    if edge_etas is None:
+        return base_frac
+    ee = np.asarray(edge_etas, dtype=float)
+    n_int = max(ee.size - 1, 0)
+    out = np.full(n_int, 0.5, dtype=float)
+    bi = 0
+    nb = len(base_frac)
+    for j in range(n_int):
+        e0, e1 = float(ee[j]), float(ee[j + 1])
+        if abs(e1 - e0) <= _ETA_MERGE_TOL:
+            continue
+        while bi < nb and edges[bi + 1] < e1 - 1e-11:
+            bi += 1
+        if bi < nb and abs(edges[bi] - e0) <= 1e-11 and abs(edges[bi + 1] - e1) <= 1e-11:
+            out[j] = float(base_frac[bi])
+    return out
+
+
 def _build_station_mesh(
     upper: np.ndarray,
     lower: np.ndarray,
@@ -1372,6 +1411,7 @@ def _build_station_mesh(
     ndir: np.ndarray,
     cap_first: bool,
     cap_last: bool,
+    station_cp_frac: np.ndarray | None = None,
 ) -> dict:
     """Build nodes, panels, metadata and wake edges from station rows.
 
@@ -1558,6 +1598,7 @@ def _build_station_mesh(
         return out
 
     wake: list[list[int]] = []
+    wake_cp: list[float] | None = [] if station_cp_frac is not None else None
     s = 0
     for j in range(ns - 1):
         if dup_next[j]:
@@ -1583,6 +1624,8 @@ def _build_station_mesh(
         pl = [p for p in lo_te if la in panels[p] and lb in panels[p]]
         if pu and pl:
             wake.append([pu[0], pl[0], ua, ub])
+            if wake_cp is not None:
+                wake_cp.append(float(station_cp_frac[j]))
         s += 1
     n_strips = s
     add(side_tris, "side", -1, -1, 0)
@@ -1621,6 +1664,7 @@ def _build_station_mesh(
         "chord_index": chord_of,
         "side": side_of,
         "wake": wake,
+        "wake_cp_frac": None if wake_cp is None else np.array(wake_cp, dtype=float),
         "n_strips": n_strips,
     }
 
@@ -1646,6 +1690,7 @@ def _mesh_with_controls(
     twists: np.ndarray,
     xt_new: np.ndarray,
     eta_base: np.ndarray,
+    mids_base: np.ndarray,
     active: list,
     tip: str,
     half: bool,
@@ -1681,6 +1726,7 @@ def _mesh_with_controls(
         edge_etas, edge_ctrls = _edge_lists(eta_base, active)
         edge_factor = np.ones(edge_etas.size)
     ns = int(edge_etas.size)
+    edge_cp = _strip_cp_fractions(eta_base, mids_base, edge_etas)
     yu_base = _interp_rows(fr, yu_mat, edge_etas)
     yl_base = _interp_rows(fr, yl_mat, edge_etas)
     sharp_base = np.abs(yu_base[:, -1] - yl_base[:, -1]) <= _TE_GAP_TOL
@@ -1768,9 +1814,16 @@ def _mesh_with_controls(
         xl = np.where(is_left[:, None], rows_l[2][sel], rows_r[2][sel])
         zl = np.where(is_left[:, None], rows_l[3][sel], rows_r[3][sel])
         upper, lower = _station_rows(qc, chord_f, cdir, ndir, xu, zu, xl, zl)
+        a_s, b_s = sel[:-1], sel[1:]
+        full_cp = np.where(
+            a_s < b_s,
+            edge_cp[np.minimum(a_s, b_s)],
+            np.where(a_s > b_s, 1.0 - edge_cp[np.minimum(a_s, b_s)], 0.5),
+        )
         built = _build_station_mesh(
             upper, lower, sharp_base[sel], signed, chord_f, qc, cdir, ndir,
             cap_first=(tip == "flat"), cap_last=(tip == "flat"),
+            station_cp_frac=full_cp,
         )
         return _finish_mesh(built, n_full, half=False, tip=tip, mirror_full=False, mirror_flip=False, root_scale_warning=bool(has_root_scale_warn))
 
@@ -1780,6 +1833,7 @@ def _mesh_with_controls(
     built = _build_station_mesh(
         upper, lower, sharp_base, edge_etas, chord_e, qc_e, cdir_e, ndir_e,
         cap_first=(tip == "flat" and not symmetric), cap_last=(tip == "flat"),
+        station_cp_frac=edge_cp,
     )
     return _finish_mesh(
         built, ns, half=bool(half and symmetric), tip=tip,
@@ -1819,6 +1873,8 @@ def _finish_mesh(built: dict, ns: int, half: bool, tip: str, mirror_full: bool, 
     chord_i = list(built["chord_index"])
     side = list(built["side"])
     wake = [list(w) for w in built["wake"]]
+    wake_cp_raw = built.get("wake_cp_frac")
+    wake_cp = None if wake_cp_raw is None else [float(v) for v in wake_cp_raw]
     n_s = int(built["n_strips"])
     if mirror_full:
         right_n = len(nodes)
@@ -1847,6 +1903,8 @@ def _finish_mesh(built: dict, ns: int, half: bool, tip: str, mirror_full: bool, 
                 strip[pi] = n_s + strip[pi]
         for w in list(wake):
             wake.append([w[0] + n_right, w[1] + n_right, int(index_map[w[2]]), int(index_map[w[3]])])
+        if wake_cp is not None:
+            wake_cp.extend(list(wake_cp))
     else:
         node_station = list(station)
         if mirror_flip:
@@ -1867,6 +1925,7 @@ def _finish_mesh(built: dict, ns: int, half: bool, tip: str, mirror_full: bool, 
         side=np.array(side, dtype=np.int64),
         node_station=np.array(node_station, dtype=np.int64),
         root_scale_warning=bool(root_scale_warning),
+        wake_cp_frac=None if wake_cp is None else np.array(wake_cp, dtype=float),
     )
 
 
@@ -2055,9 +2114,9 @@ def mesh_lifting_surface(
         xt_new_c = _union_xt(xt_base_c, active)
         spacing_rule = surf.spacing if surf.spacing is not None else spacing
         spacing_c = resolve_spacing(spacing_rule, surf, "vlm")
-        eta_base_c, _ = _surface_eta(surf, n_span_eff, spacing_c)
+        eta_base_c, mids_base_c = _surface_eta(surf, n_span_eff, spacing_c)
         return _mesh_with_controls(
-            surf, coord_sorted_c, fr_c, chords_c, twists_c, xt_new_c, eta_base_c, active, tip, half,
+            surf, coord_sorted_c, fr_c, chords_c, twists_c, xt_new_c, eta_base_c, mids_base_c, active, tip, half,
             scale_root_thickness=bool(scale_root_thickness),
             trailing_edge=trailing_edge,
             control_edge=control_edge,
@@ -2088,8 +2147,9 @@ def mesh_lifting_surface(
 
     spacing_rule = surf.spacing if surf.spacing is not None else spacing
     spacing_resolved = resolve_spacing(spacing_rule, surf, "vlm")
-    eta_e, _ = _surface_eta(surf, n_span_eff, spacing_resolved)
+    eta_e, eta_mids = _surface_eta(surf, n_span_eff, spacing_resolved)
     eta_e = np.asarray(eta_e, dtype=float)
+    eta_mids = np.asarray(eta_mids, dtype=float)
     ns = len(eta_e)
     chord_e = np.interp(eta_e, fr, chords)
     twist_e = np.interp(eta_e, fr, twists) + float(surf.incidence)
@@ -2223,6 +2283,7 @@ def mesh_lifting_surface(
         "chord_index": chord_of,
         "side": side_of,
         "wake": wake,
+        "wake_cp_frac": _strip_cp_fractions(eta_e, eta_mids),
         "n_strips": ns - 1,
     }
     mirror = bool(getattr(surf, "mirror_y", False))
@@ -2286,6 +2347,7 @@ def mesh_aircraft(
     kind_parts = []
     comp_parts = []
     wake_parts = []
+    cp_parts = []
     strip_parts = []
     chord_parts = []
     side_parts = []
@@ -2306,6 +2368,11 @@ def mesh_aircraft(
             w[:, 0:2] += n_panels
             w[:, 2:4] += n_nodes
         wake_parts.append(w.reshape(-1, 4))
+        cp_sub = getattr(sub, "wake_cp_frac", None)
+        if cp_sub is None:
+            cp_parts.append(None if len(w) > 0 else np.empty(0, dtype=float))
+        else:
+            cp_parts.append(np.asarray(cp_sub, dtype=float))
         st = np.asarray(sub.strip, dtype=np.int64)
         strip_parts.append(np.where(st >= 0, st + n_strips, -1))
         chord_parts.append(np.asarray(sub.chord_index, dtype=np.int64))
@@ -2316,6 +2383,15 @@ def mesh_aircraft(
         n_panels += int(np.asarray(sub.panels).shape[0])
         half_all = half_all and bool(sub.half)
         root_scale_all = root_scale_all or bool(getattr(sub, "root_scale_warning", False))
+    if all(p is None for p in cp_parts):
+        wake_cp_all = None
+    elif cp_parts:
+        wake_cp_all = np.concatenate([
+            np.full(len(w), 0.5, dtype=float) if p is None else p
+            for w, p in zip(wake_parts, cp_parts)
+        ])
+    else:
+        wake_cp_all = np.empty(0, dtype=float)
     return PanelMesh(
         nodes=np.vstack(node_parts),
         panels=np.vstack(panel_parts),
@@ -2329,6 +2405,7 @@ def mesh_aircraft(
         side=np.concatenate(side_parts),
         node_station=np.concatenate(station_parts),
         root_scale_warning=bool(root_scale_all),
+        wake_cp_frac=wake_cp_all,
     )
 
 

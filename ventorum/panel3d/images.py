@@ -406,6 +406,10 @@ def reconstruct_full_mesh(half_mesh: PanelMesh) -> PanelMesh:
             orig = station_max + st
             mirror = station_max[mirrored_nodes] - st[mirrored_nodes]
             extra[name] = np.concatenate([orig, mirror])
+        elif name == "wake_cp_frac" and arr.ndim == 1 and arr.shape[0] == len(half_mesh.wake_edges):
+            # Mirrored wake_edges keep the na -> nb node order; build_wake reverses
+            # cp_frac to 1 - cp_frac when it orders endpoints by increasing y.
+            extra[name] = np.concatenate([arr, arr])
         elif arr.ndim >= 1 and arr.shape[0] == n_half:
             extra[name] = np.concatenate([arr, arr])
         elif arr.ndim >= 1 and arr.shape[0] == right_n:
@@ -526,6 +530,10 @@ def _reconstruct_full_mesh_reference(half_mesh: PanelMesh) -> PanelMesh:
             orig = np.array([n_st[int(node_comp[i])] - 1 + st[i] for i in range(right_n)], dtype=int)
             mirror = np.array([n_st[int(node_comp[i])] - 1 - st[i] for i in mirrored_nodes], dtype=int)
             extra[name] = np.concatenate([orig, mirror])
+        elif name == "wake_cp_frac" and arr.ndim == 1 and arr.shape[0] == len(half_mesh.wake_edges):
+            # Mirrored wake_edges keep the na -> nb node order; build_wake reverses
+            # cp_frac to 1 - cp_frac when it orders endpoints by increasing y.
+            extra[name] = np.concatenate([arr, arr])
         elif arr.ndim >= 1 and arr.shape[0] == n_half:
             extra[name] = np.concatenate([arr, arr])
         elif arr.ndim >= 1 and arr.shape[0] == right_n:

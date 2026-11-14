@@ -387,10 +387,14 @@ def test_rectangular_wing_ar8_naca0012():
     cl_left = l_left / (q_inf * half_sref)
     assert abs(cl_right - cl_left) < 1.0e-10, f"Half wing lift mismatch: {abs(cl_right - cl_left)}"
 
-    # 4. Trefftz plane induced drag positive and within 15 % of VLM CDi
+    # 4. Trefftz plane induced drag positive, and the span efficiency CL^2 / CDi
+    # within 15 % of the VLM. CDi itself is not compared: the thickness raises
+    # CL by about 6 % and so CDi by about 12 %, which the efficiency removes.
     assert res4.CDi_trefftz > 0.0, f"Trefftz drag is not positive: {res4.CDi_trefftz}"
-    assert abs(res4.CDi_trefftz - cdi_vlm) / cdi_vlm < 0.15, (
-        f"CDi_trefftz ({res4.CDi_trefftz}) not within 15 % of VLM CDi ({cdi_vlm})"
+    eff_panel = res4.CL**2 / res4.CDi_trefftz
+    eff_vlm = cl_vlm**2 / cdi_vlm
+    assert abs(eff_panel - eff_vlm) / eff_vlm < 0.15, (
+        f"CL^2/CDi ({eff_panel}) not within 15 % of the VLM value ({eff_vlm})"
     )
 
 
@@ -480,14 +484,16 @@ def test_solve_conditions_batch():
 
 
 # Values of a run made before the ground-effect wake change (free air, body
-# axis wake). They do not depend on the surface gradient method.
+# axis wake). They do not depend on the surface gradient method. CDi was
+# stored again after the change to the VLM Trefftz evaluation point and
+# per-strip core (old: 0.004233828611102339 full, 0.0042244555972296045 half).
 _STORED_FREE_AIR = {
     False: {
         "n": 272,
         "mu": {0: 2.450267924624242, 7: 3.315504490990303, 37: 3.7879630323326454, 271: -0.6988622766055512},
         "mu_sum": -12.476474280438861,
         "mu_abs_sum": 783.0904197027365,
-        "CDi": 0.004233828611102339,
+        "CDi": 0.004823228167026525,
         "sigma_abs_sum": 2285.451549319791,
         "wake_sum": 1664.0,
     },
@@ -496,7 +502,7 @@ _STORED_FREE_AIR = {
         "mu": {0: 2.43323004857819, 7: 3.3380171846878697, 37: 3.9010646242554325, 135: -0.5872020721156217},
         "mu_sum": 0.1197936848349741,
         "mu_abs_sum": 406.78969327039033,
-        "CDi": 0.0042244555972296045,
+        "CDi": 0.004812686152066885,
         "sigma_abs_sum": 1178.531864830276,
         "wake_sum": 913.2253631008709,
     },
