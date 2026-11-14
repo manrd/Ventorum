@@ -67,6 +67,7 @@ def test_batch_cpu_float64_equals_sequential():
     assert np.all(bat.converged)
 
 
+@pytest.mark.slow
 def test_batch_reports_failures():
     """A case that cannot converge is reported per case (converged False, reason, residual)."""
     coords = airfoil("0012").repanel(n_panels=80).coords
