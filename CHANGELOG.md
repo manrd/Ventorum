@@ -163,6 +163,21 @@ a minor version can change a public interface.
 
 ### Changed
 
+- RESULT CHANGE. 3D panel solver: the Trefftz-plane induced drag and `Cn_trefftz` use the rule of
+  the vortex lattice. The normal wash of each wake strip is evaluated at the control-point span
+  fraction of the strip (from the spanwise spacing of the mesh builder; 0.5 for a user-built mesh),
+  not at the strip midpoint, and each trailing vortex has a core of 0.01 times the length of its own
+  strip, not one core from the mean strip length. The same rule applies to the ground images and the
+  arms of `Cn_trefftz`. On the cosine-family spacings the midpoint is not the quadrature point of the
+  trailing-vortex kernel (Multhopp 1950; Lan 1974): an exact elliptic load gave first order and
+  -1.5 % at 40 strips, now second order. On rectangular, tapered and 30 deg swept wings (NACA 0012,
+  4 deg) the spanwise order of CDi rises from 0.35 to 0.87 to between 1.17 and 1.49, and CDi at 40 x 40
+  rises by 1.9 to 4.3 %. CL, CY, the near-field loads and `CY_farfield` do not change. Verification
+  report V13: the zero-thickness CDi now agrees with the vortex lattice to +0.04 % (it was -2.18 %).
+  New optional fields `PanelWake.cp_frac` and `PanelMesh.wake_cp_frac`. Three comparison tests with
+  the lattice were set with the old rule: the AR 8 wing test compares CL^2 / CDi, the Cn_trefftz
+  parity runs on 24 x 24 panels with a 15 % limit (the section thickness gives about +8 % in the
+  limit), and the flap convergence test has no CDi trend check.
 - RESULT CHANGE. Ground effect: the clearance, the automatic chordwise count, the strike checks and the
   height step use the geometry of the solve (the mean-line lattice when the sections have a shape, and
   the chordwise count of a control). A flat one-panel probe placed an inverted cambered wing too high
