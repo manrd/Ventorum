@@ -814,3 +814,19 @@ def test_lattice_solvers_give_all_totals_to_the_trust_score(monkeypatch):
     vt.analyze(wing, alpha_deg=4.0, solver="vlm", n_panels=10)
     for key in ("CDp", "Cl", "Cm", "Cn"):
         assert key in seen, key
+
+
+def test_panel_solver_result_has_the_morino_note():
+    """A 3D panel solve with the Morino condition shows the Kutta note in its trust warnings."""
+    from ventorum.agent.schemas import build_aircraft_from_spec
+    from ventorum.core.datatypes import FlightCondition, SolverSettings
+    from ventorum.solvers.factory import make_solver
+
+    ac = build_aircraft_from_spec(wing={"span_m": 8.0, "chord_m": 1.0})
+    st = SolverSettings(solver_type="panel3d", n_chord=6, n_panels=8, panel_kutta="morino")
+    res = make_solver("panel3d").solve(ac, FlightCondition(V_inf=40.0, alpha=np.radians(4.0)), st)
+    residual = res.details["panel_result"].kutta_residual
+    assert any("Morino" in w for w in res.totals.trust.warnings)
+    from ventorum.core.trust import morino_kutta_note
+
+    assert morino_kutta_note(float(residual)) in res.totals.trust.warnings

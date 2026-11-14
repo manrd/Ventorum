@@ -163,6 +163,35 @@ a minor version can change a public interface.
 
 ### Changed
 
+- RESULT CHANGE. Ground effect: the clearance, the automatic chordwise count, the strike checks and the
+  height step use the geometry of the solve (the mean-line lattice when the sections have a shape, and
+  the chordwise count of a control). A flat one-panel probe placed an inverted cambered wing too high
+  (NACA 4412 inverted at h 0.05 m: lowest point 0.012 m, not 0.05 m; n_chord 32 instead of 20) and let
+  a ground strike pass the check. Flat wings do not change. The input-uncertainty height step uses the
+  same probe.
+- RESULT CHANGE. Control derivatives in ground effect use one chordwise count (the largest automatic
+  count) for all stepped cases, as the static derivatives and trim do (CL_delta 5.197 to 5.209 on the
+  test case).
+- RESULT CHANGE. Agent tool `ventorum_panel_analysis`: `CD` is now the Trefftz-plane CDi (potential
+  flow, no profile drag), the pressure integral is `CD_pressure`, and `L_over_D` is CL/CD. Before, CD
+  was the pressure drag and L/D used the Trefftz CDi. The always-empty `CDp` key is removed.
+- RESULT CHANGE. Trust score: a negative total or profile drag, or a non-finite CL, CY, Cl, Cm, Cn,
+  CDi, CDp or CD_total, gives the rating UNRELIABLE; such a lattice or Fourier solve no longer reports
+  converged True. All solvers give these totals to the trust score.
+- RESULT CHANGE. 3D panel method: the free-air section line of the Morino strip results uses the exact
+  lift slope at 0 deg and a Newton root for the zero-lift angle (it used a 0 to 1 deg secant: slope
+  0.9 % low and zero-lift angle 0.12 deg off on a NACA 4412).
+- RESULT CHANGE. Mesh-convergence study: the observed order uses the fixed-point iteration of Celik et
+  al. (2008) for non-constant refinement ratios and the order limits of the error bars; the GCI was below
+  the true error at the default levels. The error bars do not change.
+- RESULT CHANGE. Ventorum-2D: with several bodies and blunt trailing edges, the gap source of each
+  trailing edge uses a branch of its stream function that is continuous on the other bodies (a tandem
+  case jumped by about 12 % in Cl when a body crossed the gap strip); single bodies do not change. A
+  forced transition upstream of the stagnation point is found after the leading edge, on the right
+  surface (a trip at x/c 0.01 at 12 deg acted on the lower surface).
+- 3D panel trust: a Morino solve gives a note that its converged flag refers to the linear solve, with
+  the trailing-edge pressure jump. No score change. Documented in the theory and user manuals.
+
 - Theory manual: the Ventorum-2D, airfoil, boundary-layer, viscous-coupling and parasite-drag
   pages are now in the table of contents and in the chapter table (they were orphan pages).
 
@@ -370,6 +399,20 @@ a minor version can change a public interface.
 - The 2D solver revision is raised, so cached Ventorum-2D polars are computed again.
 
 ### Fixed
+
+- Input checks: a negative `Cd0` or negative values in `Cd_data` are refused; `check_gradients` steps
+  `Cd0` forward (second order) near 0.
+- Adjoint gradients: the backward-error check scales each row by its right-hand-side terms before they
+  cancel, so a wing exactly at its zero-lift angle no longer fails the check.
+- Input uncertainty: a speed or density uncertainty with a Mach number set is refused (its Mach
+  dependence was missing, so the error bar was zero).
+- 3D panel method: a user-built half mesh with root nodes within the mesh-check tolerance (not exactly
+  y = 0) is closed at the root (it was open: CL -3.2 %); combined integer codes use int64 (int32 on
+  Windows with numpy below 2 wrapped above about 46 000 panels).
+- Plots: the span-loading totals sum the strip loads with the symmetry of each surface (they were 2 to
+  10 % low; a fin was counted twice); a Fourier result is drawn at its own stations.
+- Mesh-convergence study: a given level at or above the reference count gives a warning and a note, and
+  no level below the reference raises a ValueError.
 
 - Airfoil data: `TabulatedAirfoil.clone` works with a scalar `Cm_data` (Aircraft.clone, deepcopy and
   every agent tool crashed); a surface position given as a tuple can be cloned and saved.

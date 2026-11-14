@@ -2054,6 +2054,14 @@ class PanelMethodSolver(BaseSolver):
                     CY_farfield=totals.CY_farfield,
                     Cn_stability=LatticeSolver._cn_stability(totals, cond, b_ref, c_ref),
                     Cn_trefftz=totals.Cn_trefftz,
+                    CDp=totals.CDp,
+                    Cl=totals.Cl,
+                    Cm=totals.Cm,
+                    Cn=totals.Cn,
+                    # With the Morino condition the converged flag refers to the
+                    # linear solve; the note gives the trailing-edge pressure jump.
+                    kutta=kutta,
+                    kutta_residual=float(p_res.kutta_residual),
                 )
 
                 result = SolverResult(
