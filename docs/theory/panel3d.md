@@ -249,17 +249,19 @@ $$C_n = -\frac{M_z}{q_{\infty} S_{\text{ref}} b_{\text{ref}}} \quad (\text{nose 
 
 Near-field pressure drag integration on coarse meshes can suffer from numerical discretization noise. Ventorum-3DP also computes the induced drag in the downstream Trefftz plane, the plane normal to the wake direction (the body $x$ axis in free air, the free stream in ground effect).
 
-Each wake strip $s$ carries circulation $\Gamma_s = \mu_{w, s}$. The trailing edge of each strip is projected on the Trefftz plane; its two ends carry 2D point vortices, $+\Gamma_s$ at the end with the larger projection on $\hat{\mathbf{n}}_w \times \hat{\mathbf{d}}$ ($\hat{\mathbf{n}}_w$ the strip normal on the upper side, $\hat{\mathbf{d}}$ the wake direction) and $-\Gamma_s$ at the other end. For a horizontal surface this is the end with the larger $y$. The normal wash $w_{n, s}$ at the midpoint of each strip segment follows from the 2D Biot-Savart law. In ground effect the image vortices (the ends reflected in the ground, with opposite circulation) add their normal wash (method of images), so the induced drag falls near the ground.
+Each wake strip $s$ carries circulation $\Gamma_s = \mu_{w, s}$. The trailing edge of each strip is projected on the Trefftz plane; its two ends carry 2D point vortices, $+\Gamma_s$ at the end with the larger projection on $\hat{\mathbf{n}}_w \times \hat{\mathbf{d}}$ ($\hat{\mathbf{n}}_w$ the strip normal on the upper side, $\hat{\mathbf{d}}$ the wake direction) and $-\Gamma_s$ at the other end. For a horizontal surface this is the end with the larger $y$. The normal wash $w_{n, s}$ is evaluated at the control-point span fraction of the strip, $\mathbf{q}_s = \mathbf{p}_{l, s} + f_s (\mathbf{p}_{r, s} - \mathbf{p}_{l, s})$ with $f_s = (\eta_{\text{mid}, s} - \eta_{l, s}) / (\eta_{r, s} - \eta_{l, s})$ from the spacing parameter (defaulting to $0.5$ when a mesh carries no spacing metadata, and flipped to $1 - f_s$ when the strip ends reverse). On cosine-family span spacings, this is the midpoint in the angle parameter (the Multhopp / quasi-vortex-lattice quadrature point for the Cauchy kernel of the trailing vortices; Multhopp 1950, ARC R&M 2884; Lan 1974, J. Aircraft 11(9)), because the geometric midpoint is offset from the parameter midpoint on clustered tip strips and degrades spanwise convergence from second order to first order. In ground effect the image vortices (the ends reflected in the ground, with opposite circulation) add their normal wash (method of images), so the induced drag falls near the ground.
 
-The vortices have a core of radius $r_c = 0.01 \, \bar{l}$, where $\bar{l}$ is the mean length of the strip trailing edges (`TREFFTZ_CORE_FRACTION`); the squared distance in the Biot-Savart kernel is $r^2 + r_c^2$. The core only removes the singularity when a vortex lies on an evaluation point.
+Each strip's two trailing vortices have a per-strip core radius $r_{c, s} = 0.01 \, l_s$, where $l_s$ is the trailing-edge trace length of strip $s$ (`TREFFTZ_CORE_FRACTION`, equal to `CORE_RADIUS_FRACTION`); image vortices take the core radius of their source strip, and the squared distance in the Biot-Savart kernel is $r^2 + r_{c, v}^2$. Using a local per-strip core instead of a global mean avoids over-smoothing narrow tip strips on fine meshes and removes the singularity only when a vortex lies on an evaluation point.
 
-The far-field induced drag is:
+The far-field induced drag and yawing moment use the same evaluation points $\mathbf{q}_s$:
 
 $$D_i = -\frac{1}{2} \rho_{\infty} \sum_{s=1}^{N_{\text{strips}}} \Gamma_s \, w_{n, s} \, l_s$$
 
 $$C_{Di, \text{trefftz}} = \frac{D_i}{q_{\infty} S_{\text{ref}}}$$
 
 The product $w_{n, s} \, l_s$ uses the in-plane normal $\hat{\mathbf{d}} \times (\mathbf{p}_r - \mathbf{p}_l) / l_s$, so it equals the normal wash times the length of the segment projected on the Trefftz plane, also for a swept trailing edge.
+
+**References:** Multhopp, H. (1950), *Methods for calculating the lift distribution of wings (subsonic lifting-surface theory)*, ARC R&M 2884; Lan, C. E. (1974), *A quasi-vortex-lattice method in thin wing theory*, Journal of Aircraft, 11(9), 518-527.
 
 ## Symmetry Folding about y = 0
 
