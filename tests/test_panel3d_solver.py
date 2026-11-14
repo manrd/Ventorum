@@ -774,3 +774,24 @@ def test_moment_arm_is_the_panel_area_centroid(kutta):
     old_arms = geom.centroid - rp
     cm_old = np.sum(np.cross(old_arms, force), axis=0)[1] / (q * 5.6 * 0.7)
     assert abs(cm_old - cm) > 1e-3 * abs(cm)
+
+
+def test_solve_conditions_raises_when_slot_remains_none(monkeypatch):
+    """solve_conditions raises RuntimeError naming the missing condition index if a slot stays None."""
+    mesh = mesh_lifting_surface(
+        _rectangular_wing_surface(), _naca0012_test_coordinates(31), n_chord=4, n_span=4, half=True
+    )
+    solver = PanelSolver(mesh, far_ratio=np.inf)
+    real_eval = solver._evaluate_results_batch
+
+    def short_eval(cfg, conds, coeff_rows):
+        out = real_eval(cfg, conds, coeff_rows)
+        return out[:1]
+
+    monkeypatch.setattr(solver, "_evaluate_results_batch", short_eval)
+    conds = [
+        FlightCondition(V_inf=50.0, alpha=np.radians(2.0)),
+        FlightCondition(V_inf=50.0, alpha=np.radians(4.0)),
+    ]
+    with pytest.raises(RuntimeError, match=r"1"):
+        solver.solve_conditions(conds)

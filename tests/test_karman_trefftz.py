@@ -131,3 +131,19 @@ def test_joukowski_trailing_edge_cp_matches_neighbour_limit():
         lower = 2.0 * cp[-2] - cp[-3]
         assert abs(upper - cp[0]) < 1e-4, (center, alpha_deg, upper, cp[0])
         assert abs(lower - cp[-1]) < 1e-4, (center, alpha_deg, lower, cp[-1])
+
+
+def test_karman_trefftz_solution_argument_binding():
+    """karman_trefftz_solution binds n_points and keyword-only alpha_deg without swapping types."""
+    import pytest
+
+    center = (-0.07, 0.04)
+    cp_int, cl_int = karman_trefftz_solution(center, 10.0, 101, alpha_deg=4)
+    cp_flt, cl_flt = karman_trefftz_solution(center, 10.0, n_points=101, alpha_deg=4.0)
+    assert cp_int.shape == (101,)
+    assert cl_int == cl_flt
+    assert np.allclose(cp_int, cp_flt, atol=1e-15)
+    with pytest.raises(TypeError):
+        karman_trefftz_solution(center, 10.0, 4.0)
+    with pytest.raises(TypeError):
+        karman_trefftz_solution(center, 10.0, 101, 4.0)

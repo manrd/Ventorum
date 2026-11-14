@@ -158,3 +158,28 @@ def test_old_flat_batch_threads_form_is_ignored(config_dir):
             assert par.single_case_threads(100, batch=33, family=family) == par.cpu_cores()
     finally:
         prof.reset_profile_cache()
+
+
+def test_save_profile_uses_unique_temp_file_and_atomic_replace(config_dir, monkeypatch):
+    """save_profile writes to a unique temporary file in the same folder and replaces atomically."""
+    import os
+
+    sources: list[str] = []
+    real_replace = os.replace
+
+    def track_replace(src, dst):
+        sources.append(str(src))
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(os, "replace", track_replace)
+    target = config_dir / "machine_profile.json"
+    prof.save_profile({"schema": 4, "settings": {"a": 1}}, path=target)
+    prof.save_profile({"schema": 4, "settings": {"a": 2}}, path=target)
+
+    assert len(sources) == 2
+    assert sources[0] != sources[1]
+    for src in sources:
+        assert os.path.dirname(src) == str(config_dir)
+        assert src != str(target.with_suffix(".tmp"))
+    assert list(config_dir.glob("*.tmp")) == []
+    assert prof.read_profile(target) == {"schema": 4, "settings": {"a": 2}}

@@ -335,6 +335,41 @@ def test_xfoil_version_reads_banner_and_handles_missing(monkeypatch):
     assert xfoil_version("fake-exe-missing") == "unknown"
 
 
+def test_xfoil_version_caches_by_resolved_executable(monkeypatch):
+    """xfoil_version(None) keys its cache by the resolved executable path, not None."""
+    from ventorum.aero.xfoil_runner import xfoil_version
+
+    seen: list[str] = []
+    banners = {
+        "/bin/xfoil-697": "\n XFOIL Version 6.97\n" + _FAKE_PLOP_OUTPUT,
+        "/bin/xfoil-699": "\n XFOIL Version 6.99\n" + _FAKE_PLOP_OUTPUT,
+    }
+
+    def fake_run(argv, **kwargs):
+        exe = argv[0]
+        seen.append(exe)
+        return subprocess.CompletedProcess(
+            argv, 0, stdout=banners[exe], stderr=""
+        )
+
+    monkeypatch.setattr(xfoil_runner.subprocess, "run", fake_run)
+    xfoil_version.cache_clear()
+
+    monkeypatch.setattr(
+        xfoil_runner, "resolve_xfoil_executable", lambda executable=None: executable or "/bin/xfoil-697"
+    )
+    assert xfoil_version(None) == "XFOIL Version 6.97"
+    assert xfoil_version("/bin/xfoil-697") == "XFOIL Version 6.97"
+    assert seen == ["/bin/xfoil-697"]
+
+    monkeypatch.setattr(
+        xfoil_runner, "resolve_xfoil_executable", lambda executable=None: executable or "/bin/xfoil-699"
+    )
+    assert xfoil_version(None) == "XFOIL Version 6.99"
+    assert xfoil_version("/bin/xfoil-699") == "XFOIL Version 6.99"
+    assert seen == ["/bin/xfoil-697", "/bin/xfoil-699"]
+
+
 # ── Two-direction sweep ──────────────────────────────────────────────────────
 
 
@@ -618,6 +653,79 @@ def test_polar_cache_default_directory_uses_env(monkeypatch, tmp_path):
     assert str(cache.directory).endswith("polars")
     cache.put({"a": 1}, _flat_polar())
     assert cache.get({"a": 1}) is not None
+
+
+def test_polar_cache_roundtrip_keeps_all_fields(tmp_path):
+    """The cache round trip keeps every init field of TabulatedAirfoil, including gap_mask."""
+    import dataclasses
+    import warnings
+    from ventorum.aero.polar_cache import PolarCache
+
+    cache = PolarCache(directory=tmp_path / "polars")
+    polar = TabulatedAirfoil(
+        name="with_gaps",
+        alpha=np.radians(np.array([0.0, 2.0, 4.0])),
+        Cl_data=np.array([0.2, 0.4, 0.6]),
+        Cd_data=np.array([0.01, 0.011, 0.012]),
+        Cm_data=np.array([-0.05, -0.05, -0.06]),
+        Re=1.5e6,
+        Cl_circulation_data=np.array([0.21, 0.41, 0.61]),
+        gap_mask=np.array([True, False], dtype=bool),
+    )
+    payload = {"airfoil": "naca 0012", "Re": 1.5e6}
+    cache.put(payload, polar)
+    back = cache.get(payload)
+    assert back is not None
+    init_fields = [f.name for f in dataclasses.fields(TabulatedAirfoil) if f.init]
+    for name in init_fields:
+        orig_val = getattr(polar, name)
+        back_val = getattr(back, name)
+        if isinstance(orig_val, np.ndarray):
+            assert back_val is not None, name
+            np.testing.assert_array_equal(back_val, orig_val)
+        else:
+            assert back_val == orig_val, name
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        back.Cl(np.radians(1.0))
+    assert any("bridges across a failed angle" in str(w.message) for w in caught)
+
+
+def test_polar_cache_put_uses_atomic_replace(monkeypatch, tmp_path):
+    """PolarCache.put writes to a temporary file in the cache folder and calls os.replace."""
+    from pathlib import Path
+    from ventorum.aero import polar_cache
+    from ventorum.aero.polar_cache import PolarCache
+
+    cache = PolarCache(directory=tmp_path / "polars")
+    payload = {"airfoil": "naca 0012", "Re": 1e6}
+    replaced: list[tuple[Path, Path]] = []
+    real_replace = os.replace
+
+    def spy_replace(src, dst):
+        src_path, dst_path = Path(src), Path(dst)
+        assert src_path.parent == dst_path.parent == cache.directory
+        assert src_path != dst_path
+        assert src_path.exists()
+        replaced.append((src_path, dst_path))
+        real_replace(src, dst)
+
+    monkeypatch.setattr(polar_cache.os, "replace", spy_replace)
+    out = cache.put(payload, _flat_polar())
+    assert len(replaced) == 1
+    assert replaced[0][1] == out
+    assert list(cache.directory.iterdir()) == [out]
+
+    def fail_replace(src, dst):
+        raise OSError("simulated crash")
+
+    monkeypatch.setattr(polar_cache.os, "replace", fail_replace)
+    bad_payload = {"airfoil": "naca 2412", "Re": 2e6}
+    with pytest.raises(OSError, match="simulated crash"):
+        cache.put(bad_payload, _flat_polar())
+    assert not cache.path_for(bad_payload).exists()
+    assert list(cache.directory.iterdir()) == [out]
+
 
 
 # ── Polar source ─────────────────────────────────────────────────────────────

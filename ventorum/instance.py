@@ -767,6 +767,7 @@ class VentorumCaseManager:
         """
         best_inst = None
         best_val = -float("inf") if objective == "max" else float("inf")
+        saw_nan = False
 
         for inst in self.instances:
             if inst.status != "completed":
@@ -774,7 +775,13 @@ class VentorumCaseManager:
             val = None
             if metric == "L_over_D":
                 ld = inst.get_L_over_D()
-                val = float(np.max(ld)) if isinstance(ld, np.ndarray) else float(ld)
+                if isinstance(ld, np.ndarray):
+                    if np.all(np.isnan(ld)):
+                        val = float("nan")
+                    else:
+                        val = float(np.nanmax(ld) if objective == "max" else np.nanmin(ld))
+                else:
+                    val = float(ld)
             elif metric == "CL":
                 if inst.sweep_results:
                     val = float(max(r.totals.CL for r in inst.sweep_results))
@@ -792,6 +799,9 @@ class VentorumCaseManager:
                     val = float(inst.result.totals.e)
 
             if val is not None:
+                if np.isnan(val):
+                    saw_nan = True
+                    continue
                 if objective == "max" and val > best_val:
                     best_val = val
                     best_inst = inst
@@ -800,6 +810,8 @@ class VentorumCaseManager:
                     best_inst = inst
 
         if best_inst is None:
+            if saw_nan:
+                raise ValueError(f"All completed cases have NaN for metric '{metric}'.")
             raise ValueError(f"No completed cases found with metric '{metric}'.")
 
         return best_inst, best_val, best_inst.get_summary()

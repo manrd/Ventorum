@@ -233,12 +233,12 @@ def test_fourier_and_breakdown_visualizations(aircraft_and_results):
     assert len(ax_share.patches) == 4
     assert ax_force.get_ylabel() == "Aerodynamic Force [N]"
     assert ax_share.get_ylabel() == "Share of Total Force [%]"
-    # One data value: the lift bar of each surface, integrated from local lift.
-    _trap = getattr(np, "trapezoid", getattr(np, "trapz", None))
-    lifts = []
-    for sw in res.spanwise:
-        order = np.argsort(sw.y)
-        lifts.append(float(_trap(sw.local_lift[order], sw.y[order])))
+    # One data value: the lift bar of each surface, integrated over strip widths.
+    lat = res.details["lattice"]
+    lifts = [
+        float(np.sum(sw.local_lift * lat.width[sl.strips]))
+        for sl, sw in zip(lat.surfaces, res.spanwise)
+    ]
     np.testing.assert_allclose([p.get_height() for p in ax_force.patches[:2]], lifts,
                                rtol=DATA_RTOL, atol=DATA_ATOL)
     plt.close(fig_brk)
@@ -465,4 +465,93 @@ def test_span_loading_total_lift_and_per_surface_bending_moment():
     y_mac_expected = float(np.sum((dy / 6.0) * (y0 * (2.0 * c0 + c1) + y1 * (c0 + 2.0 * c1)))) / area_half
     np.testing.assert_allclose(mac_line.get_xdata()[0], y_mac_expected, rtol=1e-12, atol=1e-12)
     plt.close(fig_plan)
+
+
+def test_trefftz_plane_trailing_edge_trace_moves_along_wake():
+    """Trefftz-plane trailing edge trace advances from edge_te along wake_dir to x_slice."""
+    cambered = vt.LinearAirfoil(name="Cambered", a0=2.0 * np.pi, alpha_L0=np.radians(-2.0), Cd0=0.008)
+    wing = vt.LiftingSurface(
+        name="Wing",
+        semi_span=2.0,
+        sections=[vt.WingSection(y_frac=0.0, chord=1.0, airfoil=cambered),
+                  vt.WingSection(y_frac=1.0, chord=1.0, airfoil=cambered)],
+    )
+    ac = vt.Aircraft(name="Trefftz Trace", surfaces=[wing])
+    cond = vt.FlightCondition(alpha=np.radians(8.0), beta=np.radians(6.0), V_inf=30.0)
+    settings = vt.SolverSettings(solver_type="vlm", n_panels=8, spacing="uniform")
+    res = vt.analyze(ac, condition=cond, settings=settings)
+
+    x_slice = 4.0
+    fig = vt.plot_trefftz_plane(ac, res, x_slice=x_slice, grid_res=(8, 6), streamlines=False)
+    ax = fig.axes[0]
+    line = ax.lines[0]
+    te = res.details["lattice"].surfaces[0].edge_te
+    wake_dir = np.asarray(res.details["wake_dir"], dtype=float)
+    expected = te + ((x_slice - te[:, :1]) / float(wake_dir[0])) * wake_dir
+    np.testing.assert_allclose(line.get_xdata(), expected[:, 1], rtol=0.0, atol=1e-12)
+    np.testing.assert_allclose(line.get_ydata(), expected[:, 2], rtol=0.0, atol=1e-12)
+    plt.close(fig)
+
+
+def test_fourier_spectrum_uses_real_span():
+    """Fourier spectrum uses the surface's true span rather than 2 * max(|sw.y|)."""
+    wing = vt.LiftingSurface(
+        name="Rect Wing",
+        semi_span=5.0,
+        sections=[vt.WingSection(y_frac=0.0, chord=1.0), vt.WingSection(y_frac=1.0, chord=1.0)],
+    )
+    ac = vt.Aircraft(name="Fourier Span", surfaces=[wing])
+    cond = vt.FlightCondition(alpha=np.radians(6.0), V_inf=30.0)
+    trap = getattr(np, "trapezoid", getattr(np, "trapz", None))
+
+    for solver_type in ("vlm", "fourier"):
+        res = vt.analyze(
+            ac,
+            condition=cond,
+            settings=vt.SolverSettings(solver_type=solver_type, n_panels=20, spacing="cosine"),
+        )
+        sw = res.spanwise[0]
+        b_real = 10.0
+        eta_real = np.clip(sw.y / (0.5 * b_real), -1.0, 1.0)
+        th_real = np.arccos(-eta_real)
+        order = np.argsort(th_real)
+        gs_real = sw.gamma[order] / (2.0 * b_real * cond.V_inf)
+        a1_real = (2.0 / np.pi) * float(trap(gs_real * np.sin(th_real[order]), th_real[order]))
+
+        fig = vt.plot_fourier_spectrum(res, n_harmonics=6, surface_index=0)
+        box_text = fig.axes[0].texts[0].get_text()
+        assert f"Fundamental $A_1$: {a1_real:.5f}" in box_text
+        plt.close(fig)
+
+
+def test_component_breakdown_integrates_strip_widths_and_keeps_negative_induced_drag(aircraft_and_results):
+    """Component breakdown integrates strip widths (including tips/dihedral) and keeps signed induced drag."""
+    ac, res, _, _, _ = aircraft_and_results
+    lat = res.details["lattice"]
+
+    fig = vt.plot_component_breakdown(res)
+    ax_force = fig.axes[0]
+    expected_lifts = [
+        float(np.sum(sw.local_lift * lat.width[sl.strips]))
+        for sl, sw in zip(lat.surfaces, res.spanwise)
+    ]
+    np.testing.assert_allclose([p.get_height() for p in ax_force.patches[:2]], expected_lifts,
+                               rtol=1e-12, atol=1e-12)
+    plt.close(fig)
+
+    res_signed = res.clone()
+    for sw in res_signed.spanwise:
+        sw.Cd_profile = None
+    res_signed.spanwise[1].alpha_i = -0.05 * np.ones_like(res_signed.spanwise[1].alpha_i)
+    expected_di = [
+        float(np.sum(sw.local_lift * sw.alpha_i * lat.width[sl.strips]))
+        for sl, sw in zip(lat.surfaces, res_signed.spanwise)
+    ]
+    assert expected_di[1] < 0.0
+
+    fig_neg = vt.plot_component_breakdown(res_signed)
+    drag_bars = [p.get_height() for p in fig_neg.axes[0].patches[2:]]
+    np.testing.assert_allclose(drag_bars, expected_di, rtol=1e-12, atol=1e-12)
+    plt.close(fig_neg)
+
 

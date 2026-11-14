@@ -330,7 +330,7 @@ def alpha_for_cl(
     for alpha in grid:
         try:
             points.append((alpha, lift(alpha)))
-        except Exception:  # noqa: BLE001 - a failed sweep point (for example a ground strike) is skipped
+        except (ValueError, RuntimeError, np.linalg.LinAlgError):
             continue
     if not points:
         return None, (math.nan, math.nan), sweep_settings

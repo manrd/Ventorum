@@ -21,12 +21,14 @@ from __future__ import annotations
 import json
 import os
 import platform
+import tempfile
 import threading
 from pathlib import Path
 from typing import Any
 
 PROFILE_FILENAME = "machine_profile.json"
 SCHEMA_VERSION = 4
+ACCEPTED_SCHEMAS = (2, 3, SCHEMA_VERSION)
 # Schemas 2 and 3 still load. Schema 4 adds the GPU ``panel3d`` cost model,
 # per precision. Without that entry the panel method uses its fixed default
 # crossover. Schema 2 lacks the keys of schema 3 (the GPU
@@ -84,9 +86,25 @@ def save_profile(profile: dict[str, Any], path: str | Path | None = None) -> Pat
     """Write *profile* to the profile file and make it the active profile of this process."""
     p = Path(path) if path is not None else profile_path()
     p.parent.mkdir(parents=True, exist_ok=True)
-    tmp = p.with_suffix(".tmp")
-    tmp.write_text(json.dumps(profile, indent=2, sort_keys=True), encoding="utf-8")
-    tmp.replace(p)
+    text = json.dumps(profile, indent=2, sort_keys=True)
+    with tempfile.NamedTemporaryFile(
+        mode="w",
+        encoding="utf-8",
+        dir=p.parent,
+        prefix=f"{p.stem}.",
+        suffix=".tmp",
+        delete=False,
+    ) as fh:
+        tmp_name = fh.name
+        fh.write(text)
+    try:
+        os.replace(tmp_name, p)
+    except BaseException:
+        try:
+            os.unlink(tmp_name)
+        except OSError:
+            pass
+        raise
     reset_profile_cache()
     return p
 
@@ -126,7 +144,7 @@ def active_profile() -> dict[str, Any] | None:
         if data is not None:
             from ventorum.hardware.detector import get_machine_fingerprint
 
-            ok = data.get("schema") in (2, 3, SCHEMA_VERSION) and data.get("fingerprint") == get_machine_fingerprint()
+            ok = data.get("schema") in ACCEPTED_SCHEMAS and data.get("fingerprint") == get_machine_fingerprint()
             data = data if ok else None
         _cached, _cached_loaded = data, True
         return _cached

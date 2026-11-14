@@ -320,3 +320,36 @@ def test_process_backend_is_refused(sample_wings):
                      backend="process", n_jobs=2)
     with pytest.raises(ValueError, match="thread"):
         inst.run()
+
+
+def test_find_optimal_ignores_nan_and_raises_when_all_nan(sample_wings):
+    """find_optimal ignores NaN points in a sweep and NaN cases, and raises when all are NaN."""
+    mgr = VentorumCaseManager("NaNStudy")
+    # Symmetric rectangular wing at alpha=0 has CDi=0, so L/D is NaN at alpha=0.
+    mgr.create_case(
+        "SweepWithZero", sample_wings["rect"], alpha_sweep_deg=[0.0, 4.0, 8.0], solver="fourier", n_panels=12
+    )
+    mgr.create_case("ZeroSweepOnly", sample_wings["rect"], alpha_sweep_deg=[0.0], solver="fourier", n_panels=12)
+    mgr.create_case(
+        "ZeroSingle",
+        sample_wings["rect"],
+        condition=vt.FlightCondition(V_inf=50.0, alpha=0.0),
+        solver="fourier",
+        n_panels=12,
+    )
+    mgr.run_all(instance_backend="serial", show_progress=False)
+
+    best_max, val_max, _ = mgr.find_optimal(metric="L_over_D", objective="max")
+    assert best_max.name == "SweepWithZero"
+    assert np.isfinite(val_max) and val_max > 0.0
+
+    best_min, val_min, _ = mgr.find_optimal(metric="L_over_D", objective="min")
+    assert best_min.name == "SweepWithZero"
+    assert np.isfinite(val_min) and 0.0 < val_min < val_max
+
+    mgr_all_nan = VentorumCaseManager("AllNaNStudy")
+    mgr_all_nan.create_case("Zero1", sample_wings["rect"], alpha_sweep_deg=[0.0], solver="fourier", n_panels=12)
+    mgr_all_nan.run_all(instance_backend="serial", show_progress=False)
+    with pytest.raises(ValueError, match="NaN"):
+        mgr_all_nan.find_optimal(metric="L_over_D", objective="max")
+

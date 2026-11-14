@@ -162,6 +162,37 @@ def test_nan_neighbours_drop_alpha_and_count_is_recorded():
     assert len(dirty.alpha) == 10
 
 
+def test_last_dropped_is_isolated_per_thread():
+    """Concurrent calls to PolarTable.at on a shared table keep last_dropped per thread."""
+    import threading
+
+    source = _AnalyticSource(drop={(5e5, 0.0): [-2.0, 8.0]})
+    table = _std_table(source=source, workers=1)
+    t1_called = threading.Event()
+    t2_called = threading.Event()
+    seen: dict[str, int] = {}
+
+    def worker_dirty():
+        table.at(5e5, 0.0)
+        t1_called.set()
+        assert t2_called.wait(timeout=5.0)
+        seen["dirty"] = table.last_dropped
+
+    def worker_clean():
+        assert t1_called.wait(timeout=5.0)
+        table.at(1e6, 10.0)
+        seen["clean"] = table.last_dropped
+        t2_called.set()
+
+    th1 = threading.Thread(target=worker_dirty)
+    th2 = threading.Thread(target=worker_clean)
+    th1.start()
+    th2.start()
+    th1.join(timeout=5.0)
+    th2.join(timeout=5.0)
+    assert seen == {"dirty": 2, "clean": 0}
+
+
 def test_out_of_range_queries_raise():
     table = _std_table(workers=1)
     with pytest.raises(ValueError):

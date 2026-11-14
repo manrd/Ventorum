@@ -420,3 +420,15 @@ def test_json_reads_files_with_bare_nan():
     text = aircraft_to_json(vt.Aircraft(surfaces=[wing])).replace('"Cm0": 0.0', '"Cm0": NaN', 1)
     back = aircraft_from_json(text)
     assert np.isnan(back.surfaces[0].sections[0].airfoil.Cm0)
+
+
+def test_solver_result_clone_and_deepcopy_isolate_details():
+    """clone() and copy.deepcopy() of a SolverResult deep-copy details so notes do not leak."""
+    import copy
+
+    res = vt.SolverResult(details={"notes": ["initial"], "arr": np.array([1.0, 2.0])})
+    for copied in (res.clone(), copy.deepcopy(res)):
+        copied.details["notes"].append("added on copy")
+        copied.details["arr"][0] = 99.0
+        assert res.details["notes"] == ["initial"]
+        np.testing.assert_array_equal(res.details["arr"], np.array([1.0, 2.0]))

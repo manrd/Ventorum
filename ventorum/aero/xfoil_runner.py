@@ -236,6 +236,18 @@ def resolve_xfoil_executable(executable: str | None = None) -> str:
 
 
 @functools.lru_cache(maxsize=8)
+def _xfoil_version_for_executable(exe: str) -> str:
+    """Read and cache the XFOIL version line for a resolved executable."""
+    try:
+        result = _start_xfoil(exe, ["quit"], timeout=30.0, check=False)
+    except (OSError, subprocess.SubprocessError):
+        return "unknown"
+    for line in result.stdout.splitlines():
+        if "Version" in line:
+            return line.strip()
+    return "unknown"
+
+
 def xfoil_version(executable: str | None = None) -> str:
     """Read the XFOIL version line from its start-up banner.
 
@@ -256,14 +268,11 @@ def xfoil_version(executable: str | None = None) -> str:
         If XFOIL starts but its graphics could not be disabled.
     """
     exe = resolve_xfoil_executable(executable)
-    try:
-        result = _start_xfoil(exe, ["quit"], timeout=30.0, check=False)
-    except (OSError, subprocess.SubprocessError):
-        return "unknown"
-    for line in result.stdout.splitlines():
-        if "Version" in line:
-            return line.strip()
-    return "unknown"
+    return _xfoil_version_for_executable(exe)
+
+
+xfoil_version.cache_clear = _xfoil_version_for_executable.cache_clear  # type: ignore[attr-defined]
+xfoil_version.cache_info = _xfoil_version_for_executable.cache_info  # type: ignore[attr-defined]
 
 
 def _write_selig_file(path: str | Path, name: str, coordinates: np.ndarray) -> None:

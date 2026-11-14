@@ -276,3 +276,35 @@ def test_fourier_result_plots_in_surface_plot_and_dashboard(monkeypatch):
     np.testing.assert_allclose(polys_dash[:, 1, 1], expected_edges[1:], rtol=0.0, atol=1e-12)
     plt.close(fig_dash)
 
+
+def test_dashboard_panel2_uses_solved_strips_and_solver_default(wing_and_tail):
+    """Panel 2 of plot_aircraft_dashboard uses the solved lattice strips (or solver default when absent)."""
+    ac, result = wing_and_tail
+    fig = vt.plot_aircraft_dashboard(ac, result)
+    ax2 = next(ax for ax in fig.axes if ax.get_title().startswith("2."))
+
+    lat = result.details["lattice"]
+    # Quarter-chord lines are the dashed lines plotted per surface before the MAC lines.
+    qc_lines = [line for line in ax2.lines if line.get_linestyle() == "--"]
+    assert len(qc_lines) == len(ac.surfaces)
+    for sl, line in zip(lat.surfaces, qc_lines):
+        s_idx = np.arange(sl.strips.start, sl.strips.stop)
+        le_pts = np.vstack([lat.le_left[s_idx, :2], lat.le_right[s_idx[-1:], :2]])
+        te_pts = np.vstack([lat.te_left[s_idx, :2], lat.te_right[s_idx[-1:], :2]])
+        qc_pts = le_pts + 0.25 * (te_pts - le_pts)
+        np.testing.assert_allclose(line.get_xdata(), qc_pts[:, 1], rtol=0.0, atol=1e-12)
+        np.testing.assert_allclose(line.get_ydata(), qc_pts[:, 0], rtol=0.0, atol=1e-12)
+    plt.close(fig)
+
+    # Without a lattice on the result, settings=None uses the solver default (SolverSettings().n_panels), not 35.
+    no_lat = result.clone()
+    no_lat.details = dict(no_lat.details or {})
+    no_lat.details.pop("lattice", None)
+    fig2 = vt.plot_aircraft_dashboard(ac, no_lat, settings=None)
+    ax2_def = next(ax for ax in fig2.axes if ax.get_title().startswith("2."))
+    qc_lines2 = [line for line in ax2_def.lines if line.get_linestyle() == "--"]
+    default_n = vt.SolverSettings().n_panels
+    assert len(qc_lines2[0].get_xdata()) == 2 * default_n + 1
+    plt.close(fig2)
+
+

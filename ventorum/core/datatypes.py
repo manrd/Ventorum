@@ -13,6 +13,7 @@ incrementally. Some supporting dataclasses in other modules are frozen.
 
 from __future__ import annotations
 
+import copy
 import dataclasses
 import json
 import warnings
@@ -1861,7 +1862,7 @@ class SolverResult:
             condition=self.condition.clone() if self.condition is not None else None,
             execution_time=self.execution_time,
             symmetry_used=self.symmetry_used,
-            details=dict(self.details),
+            details=copy.deepcopy(self.details),
             b_ref=self.b_ref,
             c_ref=self.c_ref,
         )
@@ -1870,7 +1871,9 @@ class SolverResult:
         return self.clone()
 
     def __deepcopy__(self, memo: dict) -> SolverResult:
-        return self.clone()
+        out = self.clone()
+        memo[id(self)] = out
+        return out
 
     def moments(self, axes: str = "body") -> dict[str, float] | dict[str, dict[str, float]]:
         """Moment coefficients in the selected axis system.

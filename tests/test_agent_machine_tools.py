@@ -107,3 +107,24 @@ def test_both_tools_are_listed_by_the_mcp_server():
     assert tune["inputSchema"]["additionalProperties"] is False
     assert set(tune["inputSchema"]["properties"]) == {"quick", "save"}
     strict_json(reply)
+
+
+def test_profile_status_accepts_all_shared_schemas(config_dir):
+    """_profile_status and active_profile share the same tuple of accepted schemas."""
+    from ventorum.hardware.detector import get_machine_fingerprint
+
+    fp = get_machine_fingerprint()
+    assert hasattr(prof, "ACCEPTED_SCHEMAS")
+    assert set(prof.ACCEPTED_SCHEMAS) == {2, 3, prof.SCHEMA_VERSION}
+
+    for schema_ver in prof.ACCEPTED_SCHEMAS:
+        prof.save_profile({"schema": schema_ver, "fingerprint": fp, "created_utc": "2026-01-01T00:00:00Z", "quick": True})
+        assert prof.active_profile() is not None
+        status, _ = agent_tools._profile_status(fp)
+        assert status["status"] == "valid", f"schema {schema_ver} returned {status}"
+
+    prof.save_profile({"schema": 1, "fingerprint": fp, "created_utc": "2026-01-01T00:00:00Z"})
+    assert prof.active_profile() is None
+    status_old, _ = agent_tools._profile_status(fp)
+    assert status_old["status"] == "old schema"
+

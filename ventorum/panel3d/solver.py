@@ -2463,4 +2463,10 @@ class PanelSolver:
             self._protected_factors.clear()
             self._trim_factors()
 
+        missing = [i for i, r in enumerate(results) if r is None]
+        if missing:
+            raise RuntimeError(
+                f"solve_conditions left no result at condition index {missing[0]} "
+                f"(missing indices: {missing})."
+            )
         return [r for r in results if r is not None]

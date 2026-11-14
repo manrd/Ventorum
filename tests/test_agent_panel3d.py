@@ -492,3 +492,40 @@ def _direct_settings(n_chord, n_span):
 
     return SolverSettings(solver_type="panel3d", n_chord=n_chord, n_panels=n_span, panel_kutta="morino",
                           panel_backend="auto", panel_ground_solver="auto", panel_cache=True)
+
+
+def test_panel_analysis_warns_when_airfoil_keys_are_ignored():
+    """panel_analysis does not refuse linear airfoil keys, and warns that the 3D panel method uses the section shape only."""
+    wing_with_af = {
+        **RECT,
+        "airfoil": {"a0_per_rad": 5.5, "cd0": 0.01},
+    }
+    p = panel_analysis(wing=wing_with_af, flight_condition={"alpha_deg": 4.0}, **SMALL_MESH)
+    strict_json(p)
+    assert p["status"] == "success", p
+    assert "notes" in p and len(p["notes"]) >= 1
+    note_text = " ".join(p["notes"])
+    assert "a0_per_rad" in note_text
+    assert "cd0" in note_text
+    assert "shape" in note_text.lower()
+    assert any("a0_per_rad" in w and "shape" in w.lower() for w in p["trust"]["warnings"])
+
+    ac_with_sec_af = {
+        "surfaces": [
+            {
+                "name": "MainWing",
+                "span_m": 8.0,
+                "sections": [
+                    {"y_frac": 0.0, "chord_m": 1.0, "airfoil": {"alpha_L0_deg": -2.0}},
+                    {"y_frac": 1.0, "chord_m": 1.0},
+                ],
+            }
+        ]
+    }
+    p_sec = panel_analysis(aircraft=ac_with_sec_af, flight_condition={"alpha_deg": 4.0}, **SMALL_MESH)
+    strict_json(p_sec)
+    assert p_sec["status"] == "success", p_sec
+    sec_notes = " ".join(p_sec.get("notes", []))
+    assert "alpha_L0_deg" in sec_notes
+    assert "shape" in sec_notes.lower()
+

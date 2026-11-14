@@ -38,7 +38,7 @@ from scipy.interpolate import CubicSpline, PchipInterpolator
 from scipy.ndimage import gaussian_filter1d
 from scipy.optimize import brentq
 
-from ventorum.airfoil.geometry import leading_edge_index
+from ventorum.airfoil.geometry import AirfoilGeometryError, leading_edge_index
 
 #: Samples of the weight function along arc length.
 _FINE_GRID = 4096
@@ -128,6 +128,13 @@ class AirfoilSpline:
         _require_selig(pts)
         self._pts = pts
         seg = np.linalg.norm(np.diff(pts, axis=0), axis=1)
+        dup = np.flatnonzero(seg <= 0.0)
+        if dup.size:
+            idx = int(dup[0]) + 1
+            raise AirfoilGeometryError(
+                f"coords has a repeated consecutive point at index {idx} "
+                f"(matches index {idx - 1}: {pts[idx].tolist()})."
+            )
         self._s = np.concatenate([[0.0], np.cumsum(seg)])
         self._spline_x = CubicSpline(self._s, pts[:, 0])
         self._spline_y = CubicSpline(self._s, pts[:, 1])
@@ -411,9 +418,10 @@ def repanel(
     When the smoothing cannot reach the 1.5 bound, the function warns
     (see Warns) and returns the nodes of the last pass.
 
-    The fit-and-equidistribute pass repeats through the new nodes until the
-    set stops moving (fixed point of the equidistribution), so repaneling an
-    already repaneled set returns the same nodes.
+    The fit-and-equidistribute pass repeats through the new nodes for at most
+    12 passes or until the largest node shift is at most 1e-9 chord units.
+    When the shift stays above 1e-9 after 12 passes, the function emits a
+    RuntimeWarning with the last shift and returns the nodes of the last pass.
 
     Default values (le_refinement 4.0, te_refinement 3.0, curvature_weight
     2.0, Gaussian widths 5 percent and 3 percent of arc length) cluster the
@@ -447,6 +455,10 @@ def repanel(
 
     Warns
     -----
+    RuntimeWarning
+        When the fixed-point iteration stops after 12 passes with the
+        largest node shift still above 1e-9 chord units. The warning gives
+        the last shift, and the nodes of the last pass are returned.
     UserWarning
         When the weight smoothing cannot bring the adjacent panel length
         ratio to 1.5 or below (for example with very few panels). The
@@ -462,6 +474,7 @@ def repanel(
     nodes = _equidistribute_pass(
         AirfoilSpline(coords), n_panels, le_refinement, te_refinement, curvature_weight
     )
+    shift = 0.0
     for _ in range(_MAX_PASSES):
         update = _equidistribute_pass(
             AirfoilSpline(nodes),
@@ -474,6 +487,13 @@ def repanel(
         nodes = update
         if shift <= _FIXED_TOL:
             break
+    else:
+        warnings.warn(
+            f"repanel: fixed-point iteration did not reach the tolerance {_FIXED_TOL} "
+            f"in {_MAX_PASSES} passes; last node shift was {shift:.3e} chord units.",
+            RuntimeWarning,
+            stacklevel=2,
+        )
     ratio = _adjacent_ratio(nodes)
     if ratio > _MAX_RATIO:
         warnings.warn(

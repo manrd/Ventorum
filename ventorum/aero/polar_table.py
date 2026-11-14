@@ -62,6 +62,7 @@ import inspect
 import json
 import operator
 import os
+import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -136,9 +137,20 @@ class PolarTable:
     Cd: np.ndarray
     Cm: np.ndarray
     source_info: dict[str, Any] = field(default_factory=dict)
-    last_dropped: int = field(default=0, compare=False)
     h_over_c: np.ndarray | None = field(default=None)
     Cl_circulation: np.ndarray | None = field(default=None)
+    _dropped_local: threading.local = field(
+        default_factory=threading.local, init=False, repr=False, compare=False
+    )
+
+    @property
+    def last_dropped(self) -> int:
+        """Number of alpha points dropped by the last :meth:`at` call on this thread."""
+        return int(getattr(self._dropped_local, "value", 0))
+
+    @last_dropped.setter
+    def last_dropped(self, value: int) -> None:
+        self._dropped_local.value = int(value)
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "Re", _as_sorted_axis(self.Re, "Re"))
@@ -239,6 +251,14 @@ class PolarTable:
             is missing for a table with a height axis, or given for a
             free-air table. No extrapolation is done.
         """
+        polar, dropped = self._at_with_dropped(Re, flap_deg, h_over_c=h_over_c)
+        self._dropped_local.value = dropped
+        return polar
+
+    def _at_with_dropped(
+        self, Re: float, flap_deg: float, h_over_c: float | None = None
+    ) -> tuple[TabulatedAirfoil, int]:
+        """Interpolate the table at one operating point and return ``(polar, dropped)``."""
         query_re = float(Re)
         query_flap = float(flap_deg)
         if not np.isfinite(query_re) or not np.isfinite(query_flap):
@@ -343,7 +363,6 @@ class PolarTable:
 
         keep = np.flatnonzero(ok)
         dropped = int(self.alpha_deg.size - keep.size)
-        object.__setattr__(self, "last_dropped", dropped)
         name = (
             f"table(Re={query_re:.6g}, flap={query_flap:.6g} deg{name_suffix}, "
             f"{dropped} of {self.alpha_deg.size} alpha dropped)"
@@ -352,17 +371,20 @@ class PolarTable:
         # angle bridges a gap: its values come from the interpolation of the
         # polar across the gap, not from a solution of the source.
         bridged = np.diff(keep) > 1
-        return TabulatedAirfoil(
-            name=name,
-            alpha=np.radians(self.alpha_deg[keep]),
-            Cl_data=np.asarray(cl[keep], dtype=float),
-            Cd_data=np.asarray(cd[keep], dtype=float),
-            Cm_data=np.asarray(cm[keep], dtype=float),
-            Re=query_re,
-            Cl_circulation_data=(
-                None if cl_circ is None else np.asarray(cl_circ[keep], dtype=float)
+        return (
+            TabulatedAirfoil(
+                name=name,
+                alpha=np.radians(self.alpha_deg[keep]),
+                Cl_data=np.asarray(cl[keep], dtype=float),
+                Cd_data=np.asarray(cd[keep], dtype=float),
+                Cm_data=np.asarray(cm[keep], dtype=float),
+                Re=query_re,
+                Cl_circulation_data=(
+                    None if cl_circ is None else np.asarray(cl_circ[keep], dtype=float)
+                ),
+                gap_mask=bridged if bool(np.any(bridged)) else None,
             ),
-            gap_mask=bridged if bool(np.any(bridged)) else None,
+            dropped,
         )
 
     def to_npz(self, path: str | Path) -> Path:
