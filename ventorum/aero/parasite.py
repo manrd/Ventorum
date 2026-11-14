@@ -2,16 +2,18 @@
 """Parasite-drag build-up from skin friction and form factors.
 
 This module estimates the zero-lift (parasite) drag of aircraft parts that
-the lifting models do not cover (fuselages, hulls, nacelles, struts) and
-gives a cross-check of the polar-based profile drag of lifting surfaces.
-It changes no solver result and it couples to no solver.
+the lifting models do not cover (fuselages, hulls, nacelles, struts,
+landing gear) and gives a cross-check of the polar-based profile drag of
+lifting surfaces. It changes no solver result and it couples to no solver.
 
 Skin friction follows flat-plate theory: the laminar Blasius relation, the
 turbulent Prandtl-Schlichting relation, the Schlichting composite rule for
 mixed laminar-turbulent flow at a given transition position, and the cutoff
 Reynolds number for rough surfaces. Form factors follow the component
 build-up of Raymer, with the wing option of Torenbeek and the body option
-of Hoerner as alternatives.
+of Hoerner as alternatives. Bluff parts use user-given drag coefficients on
+a frontal area, and friction bodies accept an optional user-given base-drag
+term on a base area.
 
 Scope limit: the package covers incompressible flow (Mach below 0.3). The
 Mach factor ``1.34 M^0.18`` of the Raymer wing form factor is set to 1 and
@@ -30,16 +32,17 @@ References
   the composite rule for mixed laminar-turbulent flow.
 * D. P. Raymer, "Aircraft Design: A Conceptual Approach", AIAA, 6th ed.
   2018, section 12.5: the parasite-drag build-up, the wing form factor,
-  the fuselage form factor, the interference factors and the cutoff
-  Reynolds number ``38.21 (L/k)^1.053``; chapter 7 (wetted area): a
-  thickness-dependent factor between the exposed planform area and the
-  wetted area of a lifting surface. This module uses the approximation
+  the fuselage form factor, the interference factors, bluff-component drag
+  and the cutoff Reynolds number ``38.21 (L/k)^1.053``; chapter 7 (wetted
+  area): a thickness-dependent factor between the exposed planform area and
+  the wetted area of a lifting surface. This module uses the approximation
   ``2 (1 + 0.2 t/c)`` of that thickness factor (see Raymer).
 * E. Torenbeek, "Synthesis of Subsonic Airplane Design", Delft University
   Press, 1982, appendix F: the alternative wing form factor
   ``1 + 2.7 t/c + 100 (t/c)^4``.
 * S. F. Hoerner, "Fluid-Dynamic Drag", published by the author, 1965,
-  chapter 6: the alternative streamlined-body form factor.
+  chapter 6 (the alternative streamlined-body form factor) and chapter XIII
+  (bluff-component drag coefficients).
 * ISO 2533:1975 (ISA sea level): the air density and dynamic viscosity
   used for the Reynolds number.
 """
@@ -47,7 +50,7 @@ References
 from __future__ import annotations
 
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import numpy as np
 
@@ -309,7 +312,7 @@ def form_factor_body(fineness: float, method: str = "raymer") -> float:
 
 @dataclass(frozen=True, slots=True)
 class DragComponent:
-    """One part of the parasite-drag build-up.
+    """One friction-drag part of the parasite-drag build-up.
 
     Parameters
     ----------
@@ -336,6 +339,13 @@ class DragComponent:
     uncertainty : float
         Relative uncertainty of this component [-] (default 0.10, the
         typical scatter of form-factor methods). Passed as an input.
+    base_area : float or None
+        Optional blunt base area [m^2] of a body component (for example
+        a cut-off fuselage or nacelle tail). Must be positive and paired
+        with *cd_base*. Default None (no base-drag term).
+    cd_base : float or None
+        User-given base drag coefficient [-] counted on *base_area*.
+        Must be positive and paired with *base_area*. Default None.
     """
 
     name: str
@@ -346,6 +356,8 @@ class DragComponent:
     laminar_fraction: float = 0.0
     roughness_k: float | None = None
     uncertainty: float = 0.10
+    base_area: float | None = None
+    cd_base: float | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.name, str) or not self.name:
@@ -372,6 +384,65 @@ class DragComponent:
             raise ValueError(f"roughness_k [m] must be positive, got {self.roughness_k}.")
         if not np.isfinite(float(self.uncertainty)) or float(self.uncertainty) < 0.0:
             raise ValueError(f"uncertainty [-] must be non-negative, got {self.uncertainty}.")
+        if (self.base_area is None) != (self.cd_base is None):
+            raise ValueError("base_area and cd_base must both be given or both be None.")
+        if self.base_area is not None:
+            if not np.isfinite(float(self.base_area)) or float(self.base_area) <= 0.0:
+                raise ValueError(f"base_area [m^2] must be positive, got {self.base_area}.")
+            if not np.isfinite(float(self.cd_base)) or float(self.cd_base) <= 0.0:
+                raise ValueError(f"cd_base [-] must be positive, got {self.cd_base}.")
+
+
+@dataclass(frozen=True, slots=True)
+class BluffComponent:
+    """One bluff part of the parasite-drag build-up, counted on frontal area.
+
+    Bluff components (for example landing gear, struts, fairings or external
+    stores) have no Reynolds-number skin-friction law, form factor or laminar
+    run in the build-up. They contribute ``CD0_i = CD_pi * Q_i * S_pi / S_ref``.
+    Sources of typical frontal drag coefficients are Hoerner (1965),
+    chapter XIII, and Raymer (2018), section 12.5.
+
+    Do not also model the same part as a :class:`LiftingSurface` with a
+    profile drag, or its drag is counted twice.
+
+    Parameters
+    ----------
+    name : str
+        Component label (for example ``"main_gear"``).
+    frontal_area : float
+        Frontal area ``S_pi`` [m^2] on which *cd_frontal* is defined.
+        Must be positive.
+    cd_frontal : float
+        Drag coefficient ``CD_pi`` [-] based on *frontal_area*. Must be
+        positive.
+    interference : float
+        Interference factor ``Q_i`` [-] (default 1.0). Must be positive.
+        Passed as an input, never a hidden constant.
+    uncertainty : float
+        Relative uncertainty of this component [-] (default 0.20). Bluff
+        parts use a larger default than streamlined parts (0.10) because
+        experimental bluff-body drag data have wider scatter. Passed as
+        an input.
+    """
+
+    name: str
+    frontal_area: float
+    cd_frontal: float
+    interference: float = 1.0
+    uncertainty: float = 0.20
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.name, str) or not self.name:
+            raise ValueError("name must be a non-empty string.")
+        if not np.isfinite(float(self.frontal_area)) or float(self.frontal_area) <= 0.0:
+            raise ValueError(f"frontal_area [m^2] must be positive, got {self.frontal_area}.")
+        if not np.isfinite(float(self.cd_frontal)) or float(self.cd_frontal) <= 0.0:
+            raise ValueError(f"cd_frontal [-] must be positive, got {self.cd_frontal}.")
+        if not np.isfinite(float(self.interference)) or float(self.interference) <= 0.0:
+            raise ValueError(f"interference [-] must be positive, got {self.interference}.")
+        if not np.isfinite(float(self.uncertainty)) or float(self.uncertainty) < 0.0:
+            raise ValueError(f"uncertainty [-] must be non-negative, got {self.uncertainty}.")
 
 
 @dataclass(frozen=True, slots=True)
@@ -382,7 +453,7 @@ class ParasiteDragResult:
     ----------
     cd0_by_component : dict[str, float]
         Zero-lift drag coefficient of each component [-], counted on
-        *s_ref*.
+        *s_ref* (includes any base-drag term for that component).
     cd0_total : float
         Sum of the component coefficients [-].
     relative_uncertainty_by_component : dict[str, float]
@@ -392,6 +463,9 @@ class ParasiteDragResult:
         absolute component uncertainties, treated as independent).
     s_ref : float
         Reference area of the coefficients [m^2].
+    cd0_base_by_component : dict[str, float]
+        Base-drag part of each component coefficient [-], counted on
+        *s_ref* (0.0 for components with no base-drag term).
     """
 
     cd0_by_component: dict[str, float]
@@ -399,6 +473,7 @@ class ParasiteDragResult:
     relative_uncertainty_by_component: dict[str, float]
     cd0_total_uncertainty: float
     s_ref: float
+    cd0_base_by_component: dict[str, float] = field(default_factory=dict)
 
 
 def wetted_area_lifting_surface(
@@ -478,14 +553,14 @@ def wetted_area_lifting_surface(
 
 
 def parasite_drag(
-    components: Sequence[DragComponent],
+    components: Sequence[DragComponent | BluffComponent],
     condition: FlightCondition,
     s_ref: float,
     mu: float = MU_SL,
 ) -> ParasiteDragResult:
     """Return the parasite drag of a component build-up.
 
-    Each component gives, with its Reynolds number
+    Each :class:`DragComponent` gives, with its Reynolds number
     ``Re = rho V L / mu`` (density [kg/m^3] and velocity [m/s] from the
     flight condition, dynamic viscosity ``mu`` [Pa s]),
 
@@ -495,13 +570,25 @@ def parasite_drag(
     :func:`flat_plate_cf` (transition at ``laminar_fraction`` of the
     reference length, roughness ``roughness_k``), the form factor
     ``FF_i`` [-], the interference factor ``Q_i`` [-] and the wetted
-    area [m^2]. The total is the sum of the components (Raymer (2018),
-    section 12.5).
+    area [m^2]. When *base_area* and *cd_base* are given on a
+    :class:`DragComponent`, the user-given base term
+    ``CD0_base,i = cd_base_i S_base_i / S_ref`` is added to that
+    component and reported apart in ``cd0_base_by_component``.
+
+    Each :class:`BluffComponent` gives
+
+    ``CD0_i = CD_pi,i Q_i S_pi,i / S_ref``,
+
+    with the frontal drag coefficient ``CD_pi,i`` [-], the interference
+    factor ``Q_i`` [-] and the frontal area ``S_pi,i`` [m^2]. The total
+    is the sum of the components (Raymer (2018), section 12.5; Hoerner
+    (1965), chapter XIII).
 
     Parameters
     ----------
-    components : Sequence[DragComponent]
-        Non-empty list of components with unique names.
+    components : Sequence[DragComponent | BluffComponent]
+        Non-empty list of components with unique names across both
+        types.
     condition : FlightCondition
         Flight condition (uses ``V_inf`` [m/s] and ``rho`` [kg/m^3]).
     s_ref : float
@@ -514,18 +601,23 @@ def parasite_drag(
     Returns
     -------
     ParasiteDragResult
-        Per-component and total zero-lift drag coefficients with
-        uncertainties.
+        Per-component, base-drag and total zero-lift drag coefficients
+        with uncertainties.
 
     Raises
     ------
     ValueError
-        If the component list is empty, two names match, or *s_ref* or
-        *mu* is not positive.
+        If the component list is empty, contains an unknown component
+        type, two names match, or *s_ref* or *mu* is not positive.
     """
     comps = list(components)
     if not comps:
-        raise ValueError("components must hold at least one DragComponent.")
+        raise ValueError("components must hold at least one component.")
+    for comp in comps:
+        if not isinstance(comp, (DragComponent, BluffComponent)):
+            raise ValueError(
+                f"Expected DragComponent or BluffComponent, got {type(comp).__name__}."
+            )
     names = [c.name for c in comps]
     if len(set(names)) != len(names):
         raise ValueError(f"Component names must be unique, got {names}.")
@@ -542,8 +634,17 @@ def parasite_drag(
     if not np.isfinite(mu) or mu <= 0.0:
         raise ValueError(f"mu [Pa s] must be positive, got {mu}.")
     cd0_by_component: dict[str, float] = {}
+    cd0_base_by_component: dict[str, float] = {}
     rel_unc: dict[str, float] = {}
     for comp in comps:
+        if isinstance(comp, BluffComponent):
+            cd0 = float(comp.cd_frontal) * float(comp.interference) * float(
+                comp.frontal_area
+            ) / s_ref
+            cd0_by_component[comp.name] = float(cd0)
+            cd0_base_by_component[comp.name] = 0.0
+            rel_unc[comp.name] = float(comp.uncertainty)
+            continue
         re = rho * v_inf * float(comp.reference_length) / mu
         cf = flat_plate_cf(
             re,
@@ -554,6 +655,12 @@ def parasite_drag(
         cd0 = cf * float(comp.form_factor) * float(comp.interference) * float(
             comp.wetted_area
         ) / s_ref
+        if comp.base_area is not None:
+            cd0_base = float(comp.cd_base) * float(comp.base_area) / s_ref
+            cd0 = cd0 + cd0_base
+            cd0_base_by_component[comp.name] = float(cd0_base)
+        else:
+            cd0_base_by_component[comp.name] = 0.0
         cd0_by_component[comp.name] = float(cd0)
         rel_unc[comp.name] = float(comp.uncertainty)
     cd0_total = float(sum(cd0_by_component.values()))
@@ -566,4 +673,5 @@ def parasite_drag(
         relative_uncertainty_by_component=rel_unc,
         cd0_total_uncertainty=cd0_total_uncertainty,
         s_ref=s_ref,
+        cd0_base_by_component=cd0_base_by_component,
     )
