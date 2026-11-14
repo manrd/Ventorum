@@ -144,6 +144,69 @@ def plot_all_distributions(result: SolverResult) -> Figure:
     return fig
 
 
+def _surface_span_and_center(sw, result: SolverResult, surface_index: int) -> tuple[float, float]:
+    """Return the real span [m] and spanwise centre [m] of one solved surface."""
+    lattice = (getattr(result, "details", None) or {}).get("lattice")
+    if lattice is not None and surface_index < len(lattice.surfaces):
+        sl = lattice.surfaces[surface_index]
+        edge_y = 0.5 * (sl.edge_le[:, 1] + sl.edge_te[:, 1])
+        y_min = float(np.min(edge_y))
+        y_max = float(np.max(edge_y))
+        b = y_max - y_min
+        if b > 1e-12:
+            return b, 0.5 * (y_min + y_max)
+        w_sum = float(np.sum(lattice.width[sl.strips]))
+        if w_sum > 1e-12:
+            return w_sum, float(np.mean(sw.y)) if len(sw.y) > 0 else 0.0
+
+    b_ref = getattr(result, "b_ref", None)
+    if b_ref is not None and float(b_ref) > 0.0 and (surface_index == 0 or len(result.spanwise) == 1):
+        return float(b_ref), 0.0
+
+    b = 2.0 * float(np.max(np.abs(sw.y))) if len(sw.y) > 0 else 0.0
+    return (b if b > 0.0 else 2.0), 0.0
+
+
+def _surface_strip_widths(sw, result: SolverResult, surface_index: int) -> np.ndarray:
+    """Return the strip width [m] of each spanwise station in *sw*."""
+    lattice = (getattr(result, "details", None) or {}).get("lattice")
+    if lattice is not None and surface_index < len(lattice.surfaces):
+        return np.asarray(lattice.width[lattice.surfaces[surface_index].strips], dtype=float)
+
+    y = np.asarray(sw.y, dtype=float)
+    n = len(y)
+    if n == 0:
+        return np.empty(0, dtype=float)
+
+    b_ref = getattr(result, "b_ref", None)
+    use_b_ref = (
+        b_ref is not None
+        and float(b_ref) > 0.0
+        and (surface_index == 0 or len(result.spanwise) == 1)
+    )
+    if n == 1:
+        return np.array([float(b_ref) if use_b_ref else 1.0], dtype=float)
+
+    order = np.argsort(y)
+    y_s = y[order]
+    mids = 0.5 * (y_s[:-1] + y_s[1:])
+    if (
+        use_b_ref
+        and -0.5 * float(b_ref) <= y_s[0]
+        and y_s[-1] <= 0.5 * float(b_ref)
+        and abs(y_s[0] + y_s[-1]) < 0.25 * float(b_ref)
+    ):
+        y_min = -0.5 * float(b_ref)
+        y_max = 0.5 * float(b_ref)
+    else:
+        y_min = y_s[0] - 0.5 * (y_s[1] - y_s[0])
+        y_max = y_s[-1] + 0.5 * (y_s[-1] - y_s[-2])
+    w_sorted = np.diff(np.concatenate([[y_min], mids, [y_max]]))
+    w = np.empty(n, dtype=float)
+    w[order] = w_sorted
+    return w
+
+
 def plot_fourier_spectrum(
     result: SolverResult,
     n_harmonics: int = 15,
@@ -180,15 +243,13 @@ def plot_fourier_spectrum(
         raise IndexError(f"Surface index {surface_index} out of range ({len(result.spanwise)} available).")
 
     sw = result.spanwise[surface_index]
-    b = 2.0 * float(np.max(np.abs(sw.y)))
-    if b <= 0:
-        b = 2.0
+    b, y_center = _surface_span_and_center(sw, result, surface_index)
 
     cond = getattr(result, "condition", None)
     V_inf = cond.V_inf if cond is not None else 25.0
 
     # Map spanwise station y to Trefftz circle angle theta in [0, pi]
-    eta = np.clip(sw.y / (b / 2.0), -1.0, 1.0)
+    eta = np.clip((sw.y - y_center) / (b / 2.0), -1.0, 1.0)
     theta = np.arccos(-eta)
     gamma_star = sw.gamma / (2.0 * b * V_inf)
 
@@ -294,28 +355,29 @@ def plot_component_breakdown(
     lifts = []
     cdis = []
     cd_tots = []
-    _trap = getattr(np, "trapezoid", getattr(np, "trapz", None))
 
-    for sw in result.spanwise:
-        # Sort by y for trapezoidal integration
-        sort_y = np.argsort(sw.y)
-        y_s = sw.y[sort_y]
-        L_prime = sw.local_lift[sort_y] if len(sw.local_lift) > 0 else (rho * V_inf * sw.gamma[sort_y])
-        Di_prime = np.abs(L_prime * sw.alpha_i[sort_y])
+    for idx, sw in enumerate(result.spanwise):
+        w = _surface_strip_widths(sw, result, idx)
+        L_prime = (
+            np.asarray(sw.local_lift, dtype=float)
+            if len(sw.local_lift) > 0
+            else (rho * V_inf * np.asarray(sw.gamma, dtype=float))
+        )
+        Di_prime = L_prime * np.asarray(sw.alpha_i, dtype=float)
 
-        L_surf = float(_trap(L_prime, y_s))
-        Di_surf = float(_trap(Di_prime, y_s))
+        L_surf = float(np.sum(L_prime * w))
+        Di_surf = float(np.sum(Di_prime * w))
         lifts.append(L_surf)
         cdis.append(Di_surf)
 
         if sw.Cd_profile is not None:
             # The chord from 2 Gamma / (V_inf Cl) needs the section lift
             # coefficient on the free-stream dynamic pressure.
-            cl_ff = sw.Cl_freestream if sw.Cl_freestream is not None else sw.Cl
-            safe_cl = np.where(np.abs(cl_ff[sort_y]) > 1e-4, np.abs(cl_ff[sort_y]), 1.0)
-            c_local = np.where(np.abs(cl_ff[sort_y]) > 1e-4, 2.0 * sw.gamma[sort_y] / (V_inf * safe_cl), 0.1)
-            D_prof_prime = q_inf * c_local * sw.Cd_profile[sort_y]
-            cd_tots.append(Di_surf + float(_trap(D_prof_prime, y_s)))
+            cl_ff = np.asarray(sw.Cl_freestream if sw.Cl_freestream is not None else sw.Cl, dtype=float)
+            safe_cl = np.where(np.abs(cl_ff) > 1e-4, np.abs(cl_ff), 1.0)
+            c_local = np.where(np.abs(cl_ff) > 1e-4, 2.0 * np.asarray(sw.gamma, dtype=float) / (V_inf * safe_cl), 0.1)
+            D_prof_prime = q_inf * c_local * np.asarray(sw.Cd_profile, dtype=float)
+            cd_tots.append(Di_surf + float(np.sum(D_prof_prime * w)))
         else:
             cd_tots.append(Di_surf)
 

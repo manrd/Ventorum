@@ -187,8 +187,13 @@ def plot_trefftz_plane(
     cbar.set_label(r"Downwash angle $-w/V$ [deg]", fontsize=10)
     if streamlines:
         ax.streamplot(y_vals, z_vals, v_field, w_field, color="#0f172a", density=1.1, linewidth=0.8, arrowsize=1.0)
+    wx = float(wake_dir[0])
     for surf in lattice.surfaces:
-        ax.plot(surf.edge_te[:, 1], surf.edge_te[:, 2], color="black", linewidth=2.0, linestyle="--")
+        if abs(wx) > 1e-12:
+            te = surf.edge_te + ((x_slice - surf.edge_te[:, :1]) / wx) * wake_dir
+        else:
+            te = surf.edge_te
+        ax.plot(te[:, 1], te[:, 2], color="black", linewidth=2.0, linestyle="--")
     if ground is not None:
         # Trace of the ground plane in the cutting plane.
         k, off = ground.normal, ground.offset
