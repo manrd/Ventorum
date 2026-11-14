@@ -18,7 +18,6 @@ from mpl_toolkits.mplot3d.art3d import Poly3DCollection
 
 from ventorum.core.datatypes import Aircraft, LiftingSurface, SolverResult, SolverSettings
 from ventorum.core.constants import RHO_SL
-from ventorum.geometry.processing import discretize_surface
 from ventorum.visualization.drag_polar import sweep_alphas_deg
 from ventorum.visualization.geometry_plot import result_strip_polygons
 from ventorum.visualization.planform_plot import (
@@ -101,7 +100,8 @@ def plot_aircraft_dashboard(
     all_pts_list = []
 
     # The strips of the solve (see result_strip_polygons): each colour is at its solved strip.
-    for polys, sw in zip(result_strip_polygons(aircraft, result, settings), result.spanwise):
+    strip_polys = result_strip_polygons(aircraft, result, settings)
+    for polys, sw in zip(strip_polys, result.spanwise):
         for poly, val in zip(polys, sw.Cl):
             all_polys.append(list(poly))
             all_vals.append(val)
@@ -153,24 +153,13 @@ def plot_aircraft_dashboard(
     ax2 = fig.add_subplot(gs[0, 1])
     colors_surf = ["#2563eb", "#dc2626", "#059669", "#7c3aed"]
 
-    for idx, surf in enumerate(aircraft.surfaces):
+    for idx, (surf, polys) in enumerate(zip(aircraft.surfaces, strip_polys)):
+        if len(polys) == 0:
+            continue
         col = colors_surf[idx % len(colors_surf)]
-        ds = discretize_surface(surf, n_panels=surf.n_panels or 35, spacing=surf.spacing or "auto", surface_index=idx)
-        n_p = len(ds.chords)
-        le_pts = []
-        te_pts = []
-        for i in range(n_p):
-            nA = ds.nodes_qc[i]
-            nB = ds.nodes_qc[i + 1]
-            vc = ds.control_points[i] - 0.5 * (nA + nB)
-            if i == 0:
-                le_pts.append(nA[:2] - 0.5 * vc[:2])
-                te_pts.append(nA[:2] + 1.5 * vc[:2])
-            le_pts.append(nB[:2] - 0.5 * vc[:2])
-            te_pts.append(nB[:2] + 1.5 * vc[:2])
-
-        le_pts = np.array(le_pts)
-        te_pts = np.array(te_pts)
+        le_pts = np.vstack([polys[:, 0, :2], polys[-1:, 1, :2]])
+        te_pts = np.vstack([polys[:, 3, :2], polys[-1:, 2, :2]])
+        qc_pts = le_pts + 0.25 * (te_pts - le_pts)
         poly_pts = np.vstack([le_pts, te_pts[::-1]])
         poly = patches.Polygon(
             np.column_stack([poly_pts[:, 1], poly_pts[:, 0]]),
@@ -182,7 +171,7 @@ def plot_aircraft_dashboard(
             label=f"{surf.name}",
         )
         ax2.add_patch(poly)
-        ax2.plot(ds.nodes_qc[:, 1], ds.nodes_qc[:, 0], "--", color=col, linewidth=1.2, alpha=0.8)
+        ax2.plot(qc_pts[:, 1], qc_pts[:, 0], "--", color=col, linewidth=1.2, alpha=0.8)
 
     # MAC line
     main_surf, y_mac, x_mac_le = _main_surface_mac_geometry(aircraft)
