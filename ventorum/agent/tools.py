@@ -649,6 +649,74 @@ def _check_panel_work(estimate: float, n_configs: int, n_panels: int) -> None:
         )
 
 
+def _panel_ignored_airfoil_note(wing: Any, aircraft: Any, ac: Aircraft) -> str | None:
+    """Return a warning note when the input specifies linear airfoil keys that the 3D panel method ignores."""
+    has_airfoil = False
+    subkeys: list[str] = []
+
+    def _add(k: str) -> None:
+        if k not in subkeys:
+            subkeys.append(k)
+
+    surf_dicts: list[dict[str, Any]] = []
+    for raw in (wing, aircraft):
+        if isinstance(raw, dict):
+            if isinstance(raw.get("surfaces"), list):
+                surf_dicts.extend(s for s in raw["surfaces"] if isinstance(s, dict))
+            else:
+                surf_dicts.append(raw)
+
+    for s_dict in surf_dicts:
+        if "airfoil" in s_dict:
+            has_airfoil = True
+            af_val = s_dict["airfoil"]
+            if isinstance(af_val, dict):
+                for k in af_val:
+                    _add(str(k))
+        sections = s_dict.get("sections")
+        if isinstance(sections, list):
+            for sec_dict in sections:
+                if isinstance(sec_dict, dict) and "airfoil" in sec_dict:
+                    has_airfoil = True
+                    af_val = sec_dict["airfoil"]
+                    if isinstance(af_val, dict):
+                        for k in af_val:
+                            _add(str(k))
+
+    if not surf_dicts:
+        from ventorum.core.datatypes import LinearAirfoil
+
+        for surf in ac.surfaces:
+            for sec in surf.sections:
+                af = getattr(sec, "airfoil", None)
+                if isinstance(af, LinearAirfoil):
+                    if abs(float(af.a0) - 2.0 * np.pi) > 1e-12:
+                        has_airfoil = True
+                        _add("a0_per_rad")
+                    if abs(float(af.alpha_L0)) > 1e-12:
+                        has_airfoil = True
+                        _add("alpha_L0_deg")
+                    if abs(float(af.Cd0)) > 1e-12:
+                        has_airfoil = True
+                        _add("cd0")
+                    if abs(float(af.Cm0)) > 1e-12:
+                        has_airfoil = True
+                        _add("cm0")
+                elif af is not None:
+                    has_airfoil = True
+
+    if not has_airfoil:
+        return None
+    if subkeys:
+        keys_txt = "airfoil (" + ", ".join(subkeys) + ")"
+    else:
+        keys_txt = "airfoil"
+    return (
+        f"Warning: ignored airfoil input {keys_txt}; the 3D panel method uses the section shape only "
+        "(give 'shape' on the surface or sections)."
+    )
+
+
 @_tool
 def panel_analysis(
     wing: Any = None,
@@ -789,6 +857,17 @@ def panel_analysis(
     solver = make_solver("panel3d")
     res = solver.solve(ac, fc, solver_sett)
 
+    airfoil_note = _panel_ignored_airfoil_note(wing, aircraft, ac)
+    notes = list(res.details.get("notes", []))
+    if airfoil_note is not None:
+        if airfoil_note not in notes:
+            notes.append(airfoil_note)
+        res.details.setdefault("notes", [])
+        if airfoil_note not in res.details["notes"]:
+            res.details["notes"].append(airfoil_note)
+        if res.totals.trust is not None and airfoil_note not in res.totals.trust.warnings:
+            res.totals.trust.warnings.append(airfoil_note)
+
     m = metrics_payload(res)
     # CD is the Trefftz-plane induced drag: on a panel mesh it converges
     # faster than the pressure integral (see the theory manual, Ventorum-3DP).
@@ -839,6 +918,7 @@ def panel_analysis(
         "executive_summary": summary,
         "metrics": m,
         "trust": trust,
+        "notes": notes,
         "dispatch": dispatch,
         "condition_used": condition_payload(c),
         "settings_used": {
@@ -3047,7 +3127,7 @@ def _profile_status(hw_fingerprint: str) -> tuple[dict[str, Any], str]:
     data = _prof.read_profile()
     if data is None:
         return ({"status": "none"}, "Run ventorum_tune_machine to measure this machine.")
-    if data.get("schema") != _prof.SCHEMA_VERSION:
+    if data.get("schema") not in _prof.ACCEPTED_SCHEMAS:
         return ({"status": "old schema"}, "Run ventorum_tune_machine to measure this machine.")
     if data.get("fingerprint") != hw_fingerprint:
         return ({"status": "other machine"}, "Run ventorum_tune_machine to measure this machine.")

@@ -28,6 +28,7 @@ from typing import Any
 
 PROFILE_FILENAME = "machine_profile.json"
 SCHEMA_VERSION = 4
+ACCEPTED_SCHEMAS = (2, 3, SCHEMA_VERSION)
 # Schemas 2 and 3 still load. Schema 4 adds the GPU ``panel3d`` cost model,
 # per precision. Without that entry the panel method uses its fixed default
 # crossover. Schema 2 lacks the keys of schema 3 (the GPU
@@ -143,7 +144,7 @@ def active_profile() -> dict[str, Any] | None:
         if data is not None:
             from ventorum.hardware.detector import get_machine_fingerprint
 
-            ok = data.get("schema") in (2, 3, SCHEMA_VERSION) and data.get("fingerprint") == get_machine_fingerprint()
+            ok = data.get("schema") in ACCEPTED_SCHEMAS and data.get("fingerprint") == get_machine_fingerprint()
             data = data if ok else None
         _cached, _cached_loaded = data, True
         return _cached
