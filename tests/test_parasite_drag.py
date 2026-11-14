@@ -11,6 +11,7 @@ import pytest
 from ventorum.aero.parasite import (
     MU_SL,
     RE_TRANSITION_MIN,
+    BluffComponent,
     DragComponent,
     ParasiteDragResult,
     flat_plate_cf,
@@ -364,3 +365,205 @@ def test_wetted_area_of_the_exposed_part() -> None:
     for bad in (-0.1, semi, 2.0 * semi, float("nan")):
         with pytest.raises(ValueError):
             wetted_area_lifting_surface(surf, t_c, covered_root_span=bad)
+
+
+def test_bluff_component_drag_and_reference_area_scaling() -> None:
+    """Bluff component drag follows CD_pi * Q * S_pi / S_ref and scales with 1 / S_ref."""
+    condition = FlightCondition(V_inf=55.0, rho=1.225)
+    gear = BluffComponent(name="gear", frontal_area=0.18, cd_frontal=0.25, interference=1.15)
+    assert gear.uncertainty == 0.20
+    default_bluff = BluffComponent(name="mast", frontal_area=0.05, cd_frontal=1.0)
+    assert default_bluff.interference == 1.0
+    assert default_bluff.uncertainty == 0.20
+
+    s_ref_1, s_ref_2 = 10.0, 16.0
+    res_1 = parasite_drag([gear], condition, s_ref_1)
+    res_2 = parasite_drag([gear], condition, s_ref_2)
+
+    expected_1 = 0.25 * 1.15 * 0.18 / s_ref_1
+    expected_2 = 0.25 * 1.15 * 0.18 / s_ref_2
+    assert res_1.cd0_by_component["gear"] == pytest.approx(expected_1, rel=1e-15)
+    assert res_2.cd0_by_component["gear"] == pytest.approx(expected_2, rel=1e-15)
+    assert res_1.cd0_total * s_ref_1 == pytest.approx(res_2.cd0_total * s_ref_2, rel=1e-15)
+    assert res_1.cd0_base_by_component == {"gear": 0.0}
+    assert res_2.cd0_base_by_component == {"gear": 0.0}
+
+
+def test_base_drag_term_and_reference_area_scaling() -> None:
+    """Base term adds cd_base * base_area / S_ref while keeping friction drag unchanged."""
+    condition = FlightCondition(V_inf=60.0, rho=1.225)
+    base_area, cd_base = 0.12, 0.15
+    body_plain = DragComponent(
+        name="fuselage",
+        wetted_area=18.0,
+        reference_length=6.0,
+        form_factor=1.15,
+        interference=1.05,
+    )
+    body_with_base = DragComponent(
+        name="fuselage",
+        wetted_area=18.0,
+        reference_length=6.0,
+        form_factor=1.15,
+        interference=1.05,
+        base_area=base_area,
+        cd_base=cd_base,
+    )
+
+    for s_ref in (10.0, 15.0):
+        res_plain = parasite_drag([body_plain], condition, s_ref)
+        res_base = parasite_drag([body_with_base], condition, s_ref)
+        assert res_plain.cd0_base_by_component == {"fuselage": 0.0}
+        assert res_base.cd0_base_by_component["fuselage"] == pytest.approx(
+            cd_base * base_area / s_ref, rel=1e-15
+        )
+        assert res_base.cd0_base_by_component["fuselage"] * s_ref == pytest.approx(
+            cd_base * base_area, rel=1e-15
+        )
+        friction_part = res_base.cd0_by_component["fuselage"] - res_base.cd0_base_by_component["fuselage"]
+        assert friction_part == pytest.approx(res_plain.cd0_by_component["fuselage"], rel=1e-15)
+
+
+def test_mixed_buildup_total_and_rss_uncertainty() -> None:
+    """Mixed friction, base, and bluff build-up sums components and applies RSS uncertainty."""
+    condition = FlightCondition(V_inf=60.0, rho=1.225)
+    s_ref = 12.0
+    wing = DragComponent(
+        name="wing",
+        wetted_area=20.0,
+        reference_length=1.5,
+        form_factor=1.26,
+        uncertainty=0.10,
+    )
+    fuselage = DragComponent(
+        name="fuselage",
+        wetted_area=15.0,
+        reference_length=6.0,
+        form_factor=1.12,
+        interference=1.02,
+        uncertainty=0.12,
+        base_area=0.10,
+        cd_base=0.18,
+    )
+    wheel = BluffComponent(
+        name="wheel",
+        frontal_area=0.08,
+        cd_frontal=0.25,
+        interference=1.10,
+        uncertainty=0.20,
+    )
+    result = parasite_drag([wing, fuselage, wheel], condition, s_ref)
+
+    re_wing = condition.rho * condition.V_inf * wing.reference_length / MU_SL
+    cd_wing = flat_plate_cf(re_wing) * wing.form_factor * wing.interference * wing.wetted_area / s_ref
+    re_fuse = condition.rho * condition.V_inf * fuselage.reference_length / MU_SL
+    cd_fuse_fric = (
+        flat_plate_cf(re_fuse)
+        * fuselage.form_factor
+        * fuselage.interference
+        * fuselage.wetted_area
+        / s_ref
+    )
+    cd_fuse_base = 0.18 * 0.10 / s_ref
+    cd_fuse = cd_fuse_fric + cd_fuse_base
+    cd_wheel = 0.25 * 1.10 * 0.08 / s_ref
+    expected_total = cd_wing + cd_fuse + cd_wheel
+    expected_unc = math.sqrt((0.10 * cd_wing) ** 2 + (0.12 * cd_fuse) ** 2 + (0.20 * cd_wheel) ** 2)
+
+    assert result.cd0_by_component["wing"] == pytest.approx(cd_wing, rel=1e-15)
+    assert result.cd0_by_component["fuselage"] == pytest.approx(cd_fuse, rel=1e-15)
+    assert result.cd0_by_component["wheel"] == pytest.approx(cd_wheel, rel=1e-15)
+    assert result.cd0_base_by_component == {
+        "wing": 0.0,
+        "fuselage": pytest.approx(cd_fuse_base, rel=1e-15),
+        "wheel": 0.0,
+    }
+    assert result.cd0_total == pytest.approx(sum(result.cd0_by_component.values()), rel=1e-15)
+    assert result.cd0_total == pytest.approx(expected_total, rel=1e-15)
+    assert result.relative_uncertainty_by_component == {"wing": 0.10, "fuselage": 0.12, "wheel": 0.20}
+    assert result.cd0_total_uncertainty == pytest.approx(expected_unc, rel=1e-15)
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"name": "", "frontal_area": 0.1, "cd_frontal": 0.2},
+        {"name": 123, "frontal_area": 0.1, "cd_frontal": 0.2},
+        {"name": "strut", "frontal_area": 0.0, "cd_frontal": 0.2},
+        {"name": "strut", "frontal_area": -0.1, "cd_frontal": 0.2},
+        {"name": "strut", "frontal_area": float("nan"), "cd_frontal": 0.2},
+        {"name": "strut", "frontal_area": float("inf"), "cd_frontal": 0.2},
+        {"name": "strut", "frontal_area": 0.1, "cd_frontal": 0.0},
+        {"name": "strut", "frontal_area": 0.1, "cd_frontal": -0.2},
+        {"name": "strut", "frontal_area": 0.1, "cd_frontal": float("nan")},
+        {"name": "strut", "frontal_area": 0.1, "cd_frontal": float("inf")},
+        {"name": "strut", "frontal_area": 0.1, "cd_frontal": 0.2, "interference": 0.0},
+        {"name": "strut", "frontal_area": 0.1, "cd_frontal": 0.2, "interference": -1.0},
+        {"name": "strut", "frontal_area": 0.1, "cd_frontal": 0.2, "interference": float("nan")},
+        {"name": "strut", "frontal_area": 0.1, "cd_frontal": 0.2, "interference": float("inf")},
+        {"name": "strut", "frontal_area": 0.1, "cd_frontal": 0.2, "uncertainty": -0.01},
+        {"name": "strut", "frontal_area": 0.1, "cd_frontal": 0.2, "uncertainty": float("nan")},
+        {"name": "strut", "frontal_area": 0.1, "cd_frontal": 0.2, "uncertainty": float("inf")},
+    ],
+)
+def test_bluff_component_invalid_inputs_raise(kwargs: dict) -> None:
+    """Every validation rule on BluffComponent raises ValueError."""
+    with pytest.raises(ValueError):
+        BluffComponent(**kwargs)
+
+
+@pytest.mark.parametrize(
+    "base_kwargs",
+    [
+        {"base_area": 0.1, "cd_base": None},
+        {"base_area": None, "cd_base": 0.2},
+        {"base_area": 0.0, "cd_base": 0.2},
+        {"base_area": -0.1, "cd_base": 0.2},
+        {"base_area": float("nan"), "cd_base": 0.2},
+        {"base_area": float("inf"), "cd_base": 0.2},
+        {"base_area": 0.1, "cd_base": 0.0},
+        {"base_area": 0.1, "cd_base": -0.2},
+        {"base_area": 0.1, "cd_base": float("nan")},
+        {"base_area": 0.1, "cd_base": float("inf")},
+    ],
+)
+def test_drag_component_base_invalid_inputs_raise(base_kwargs: dict) -> None:
+    """Every validation rule on DragComponent base-drag fields raises ValueError."""
+    with pytest.raises(ValueError):
+        DragComponent(
+            name="fuselage",
+            wetted_area=10.0,
+            reference_length=4.0,
+            form_factor=1.15,
+            **base_kwargs,
+        )
+
+
+def test_duplicate_name_between_friction_and_bluff_raises() -> None:
+    """Component names must be unique across DragComponent and BluffComponent."""
+    condition = FlightCondition(V_inf=60.0, rho=1.225)
+    friction = DragComponent(name="nacelle", wetted_area=3.0, reference_length=1.5, form_factor=1.2)
+    bluff = BluffComponent(name="nacelle", frontal_area=0.1, cd_frontal=0.2)
+    with pytest.raises(ValueError):
+        parasite_drag([friction, bluff], condition, 10.0)
+
+
+def test_existing_buildup_is_bit_identical() -> None:
+    """An existing build-up without base drag keeps its exact bit-identical cd0_total."""
+    condition = FlightCondition(V_inf=60.0, rho=1.225)
+    comps = [
+        DragComponent(name="wing", wetted_area=20.0, reference_length=1.5, form_factor=1.26),
+        DragComponent(name="fuselage", wetted_area=15.0, reference_length=6.0, form_factor=1.10),
+    ]
+    result = parasite_drag(comps, condition, 12.0)
+    assert result.cd0_total == float.fromhex("0x1.5537c4c97b36ap-7")
+    assert result.cd0_base_by_component == {"wing": 0.0, "fuselage": 0.0}
+    # Existing 5-argument ParasiteDragResult construction still works.
+    legacy_shape = ParasiteDragResult(
+        result.cd0_by_component,
+        result.cd0_total,
+        result.relative_uncertainty_by_component,
+        result.cd0_total_uncertainty,
+        result.s_ref,
+    )
+    assert legacy_shape.cd0_base_by_component == {}

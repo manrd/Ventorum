@@ -82,11 +82,31 @@ Both body factors fall with rising fineness.
 
 ### Build-up
 
-With the skin-friction coefficient $C_{f,i}$ [-], the form factor $FF_i$ [-], the interference factor $Q_i$ [-] (an input with documented typical values, never a hidden constant) and the wetted area $S_{wet,i}$ [m^2], each component gives, counted on the reference area $S_{ref}$ [m^2]:
+With the skin-friction coefficient $C_{f,i}$ [-], the form factor $FF_i$ [-], the interference factor $Q_i$ [-] (an input with documented typical values, never a hidden constant) and the wetted area $S_{\mathrm{wet},i}$ [m^2], each friction component gives, counted on the reference area $S_{\mathrm{ref}}$ [m^2]:
 
 ```{math}
-C_{D0,i} = C_{f,i}\,FF_i\,Q_i\,\frac{S_{wet,i}}{S_{ref}}, \qquad C_{D0} = \sum_i C_{D0,i} .
+C_{D0,i} = C_{f,i}\,FF_i\,Q_i\,\frac{S_{\mathrm{wet},i}}{S_{\mathrm{ref}}}, \qquad C_{D0} = \sum_i C_{D0,i} .
 ```
+
+### Bluff parts and base drag
+
+Bluff parts (for example landing gear, struts, fairings or external stores) are modelled by `BluffComponent`. They have no flat-plate Reynolds number, form factor or laminar run in the build-up. With the user-given frontal drag coefficient $C_{D\pi,i}$ [-], the interference factor $Q_i$ [-] and the frontal area $S_{\pi,i}$ [m^2], each bluff component contributes, counted on the reference area $S_{\mathrm{ref}}$ [m^2]:
+
+```{math}
+C_{D0,i} = C_{D\pi,i}\,Q_i\,\frac{S_{\pi,i}}{S_{\mathrm{ref}}} .
+```
+
+Typical frontal drag coefficients are found in S. F. Hoerner, "Fluid-Dynamic Drag", 1965, chapter XIII, and D. P. Raymer, "Aircraft Design: A Conceptual Approach", AIAA, 6th ed. 2018, section 12.5. The module takes $C_{D\pi,i}$ only as a user input and stores no built-in table of component drag coefficients.
+
+A body friction component (`DragComponent`) can also carry an optional blunt base area $S_{\mathrm{base},i}$ [m^2] (`base_area`) and a user-given base drag coefficient $C_{D,\mathrm{base},i}$ [-] (`cd_base`), both given or both omitted. The base-drag contribution on $S_{\mathrm{ref}}$ [m^2] is
+
+```{math}
+C_{D0,\mathrm{base},i} = C_{D,\mathrm{base},i}\,\frac{S_{\mathrm{base},i}}{S_{\mathrm{ref}}} ,
+```
+
+with no built-in base-drag constant. It is added to that component's $C_{D0,i}$ and is also reported apart in `cd0_base_by_component`.
+
+Keep the reference areas distinct: $S_{\mathrm{wet},i}$ is the wetted area of a friction part, $S_{\pi,i}$ is the frontal area on which $C_{D\pi,i}$ is defined, $S_{\mathrm{base},i}$ is the blunt base area on which $C_{D,\mathrm{base},i}$ is defined, and $S_{\mathrm{ref}}$ is the common reference area of the aircraft build-up. Do not model the same physical part both as a `BluffComponent` (or `DragComponent`) and as a `LiftingSurface` with a profile drag, or its zero-lift drag is counted twice.
 
 ### Wetted area of a lifting surface
 
@@ -102,4 +122,4 @@ The factor 2 counts the upper and the lower surface. The term $0.2\,t/c$ is an a
 
 ## Trust
 
-Each component carries a relative uncertainty (default 0.10, the typical scatter of form-factor methods). The absolute uncertainty of the total is the root sum square of the absolute component uncertainties, treated as independent. The estimate is a conceptual-design value: it checks the order of the profile drag, but it does not replace measured polars.
+Each friction component carries a relative uncertainty (default 0.10, the typical scatter of form-factor methods). When a body component includes a base-drag term, that term shares the component's total $C_{D0,i}$ and takes the uncertainty of its component. Each bluff component carries a relative uncertainty (default 0.20, reflecting the wider scatter of experimental bluff-body drag data). The absolute uncertainty of the total is the root sum square of the absolute component uncertainties, treated as independent. The estimate is a conceptual-design value: it checks the order of the profile drag, but it does not replace measured polars.
