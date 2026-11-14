@@ -655,15 +655,17 @@ def test_tandem_blunt_trailing_edge_smooth_across_gap_strip():
     dy interval, and Cl stays within 2e-3 of the closed-edge value. Single-body
     results stay the same to round-off (1e-12 relative: the pinned values
     come from one machine, and other BLAS builds differ in the last digits).
+    Cm is a small difference of terms of order 1, so its round-off is
+    absolute: 1e-12 (Linux runners differ by 1.7e-14 from the pinned value).
     """
     c_open = airfoil("0012", n_points=161, closed_te=False).coords
     c_closed = airfoil("0012", n_points=161, closed_te=True).coords
     single = solve_inviscid(c_open, 4.0)
     assert single.Cl == pytest.approx(0.4833872055976377, rel=1e-12, abs=1e-15)
-    assert single.Cm == pytest.approx(-0.005692871112782457, rel=1e-12, abs=1e-15)
+    assert single.Cm == pytest.approx(-0.005692871112782457, rel=1e-12, abs=1e-12)
     single_60 = solve_inviscid(airfoil("0012").repanel(n_panels=60).coords, 4.0)
     assert single_60.Cl == pytest.approx(0.4823610625516911, rel=1e-12, abs=1e-15)
-    assert single_60.Cm == pytest.approx(-0.005925925706023662, rel=1e-12, abs=1e-15)
+    assert single_60.Cm == pytest.approx(-0.005925925706023662, rel=1e-12, abs=1e-12)
 
     dys = np.array([-0.004, -0.001, 0.0, 0.001, 0.004])
     cl_open, cl_closed, circ2_open = [], [], []

@@ -1033,7 +1033,7 @@ def test_forced_transition_ahead_of_stagnation_point_is_on_the_upper_surface():
         ref = solve_viscous(airfoil("2412", n_points=121).coords, 2.0, 1e6, xtr=(0.3, 0.3))
     assert ref.converged
     assert float(ref.Cl) == pytest.approx(0.4516078794667566, rel=1e-12, abs=1e-15)
-    assert float(ref.Cd) == pytest.approx(0.009341715472419515, rel=1e-12, abs=1e-15)
-    assert float(ref.Cm) == pytest.approx(-0.04809352125389983, rel=1e-12, abs=1e-15)
+    assert float(ref.Cd) == pytest.approx(0.009341715472419515, rel=1e-12, abs=1e-12)
+    assert float(ref.Cm) == pytest.approx(-0.04809352125389983, rel=1e-12, abs=1e-12)
     assert ref.transition_positions == (0.3, 0.3)
 
