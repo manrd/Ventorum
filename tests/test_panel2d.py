@@ -653,16 +653,17 @@ def test_tandem_blunt_trailing_edge_smooth_across_gap_strip():
     gradient on body 1 by O(L / r^2) ~ 1e-2 relative, so no step change of the
     blunt-edge Cl may exceed 1.1 times the closed-edge step change on the same
     dy interval, and Cl stays within 2e-3 of the closed-edge value. Single-body
-    results stay bit-identical.
+    results stay the same to round-off (1e-12 relative: the pinned values
+    come from one machine, and other BLAS builds differ in the last digits).
     """
     c_open = airfoil("0012", n_points=161, closed_te=False).coords
     c_closed = airfoil("0012", n_points=161, closed_te=True).coords
     single = solve_inviscid(c_open, 4.0)
-    assert single.Cl == 0.4833872055976377
-    assert single.Cm == -0.005692871112782457
+    assert single.Cl == pytest.approx(0.4833872055976377, rel=1e-12, abs=1e-15)
+    assert single.Cm == pytest.approx(-0.005692871112782457, rel=1e-12, abs=1e-15)
     single_60 = solve_inviscid(airfoil("0012").repanel(n_panels=60).coords, 4.0)
-    assert single_60.Cl == 0.4823610625516911
-    assert single_60.Cm == -0.005925925706023662
+    assert single_60.Cl == pytest.approx(0.4823610625516911, rel=1e-12, abs=1e-15)
+    assert single_60.Cm == pytest.approx(-0.005925925706023662, rel=1e-12, abs=1e-15)
 
     dys = np.array([-0.004, -0.001, 0.0, 0.001, 0.004])
     cl_open, cl_closed, circ2_open = [], [], []
