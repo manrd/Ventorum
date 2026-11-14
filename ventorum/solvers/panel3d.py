@@ -1165,29 +1165,6 @@ def _section_moment(moment, angle):
     return moment[0] + moment[1] * co**2 + moment[2] * co * si + moment[3] * si**2
 
 
-def _morino_section_line(polygon, ground=None):
-    """Return the lift line and moment quadratic of a unit-chord polygon.
-
-    The line comes from the onsets 0 and 1 deg of one factorization of
-    :func:`_morino_section_solution`. With a fixed ground line these
-    onsets cross the ground unless the ground is parallel to the chord;
-    :func:`_morino_section_ground_line` gives the reference of a section
-    in ground effect.
-
-    Returns
-    -------
-    tuple
-        Lift slope [1/rad], zero-lift angle [rad], and coefficients [-]
-        of Cm = c0 + cxx cos(alpha)^2 + cxz cos(alpha) sin(alpha)
-        + czz sin(alpha)^2. The moment reference is the clean quarter chord.
-    """
-    lift, moment = _morino_section_solution(polygon, ground)
-    step = np.radians(1.0)
-    cl0 = lift(0.0)
-    slope = (lift(step) - cl0) / step
-    return float(slope), float(-cl0 / slope), moment
-
-
 #: Half step [rad] of the central difference of the ground section line.
 GROUND_SECTION_STEP = np.radians(0.5)
 
@@ -1198,6 +1175,57 @@ GROUND_CURVE_STEP = 1e-5
 #: Absolute tolerance [rad] of the bracketed root finder that inverts the
 #: 2D section curves (the root is then at the round-off of the curve).
 GROUND_CURVE_XTOL = 1e-15
+
+#: Step tolerance [rad] and iteration limit [-] of the Newton root that gives
+#: the zero-lift angle of :func:`_morino_section_line`.
+SECTION_ZERO_TOL = 1e-14
+SECTION_ZERO_MAX_ITER = 10
+
+
+def _morino_section_line(polygon, ground=None):
+    """Return the lift line and moment quadratic of a unit-chord polygon.
+
+    The lift slope is the derivative of the lift curve at 0 deg from one
+    factorization of :func:`_morino_section_solution` (the exact slope
+    method of the lift callable when present, else a central difference
+    with half step ``GROUND_CURVE_STEP`` [rad]). The zero-lift angle is
+    the Newton root of that lift curve starting from ``-Cl(0) / slope``
+    to a step tolerance of ``SECTION_ZERO_TOL`` [rad]. With a fixed ground
+    line these onsets cross the ground unless the ground is parallel to
+    the chord; :func:`_morino_section_ground_line` gives the reference of
+    a section in ground effect.
+
+    Returns
+    -------
+    tuple
+        Lift slope [1/rad], zero-lift angle [rad], and coefficients [-]
+        of Cm = c0 + cxx cos(alpha)^2 + cxz cos(alpha) sin(alpha)
+        + czz sin(alpha)^2. The moment reference is the clean quarter chord.
+    """
+    lift, moment = _morino_section_solution(polygon, ground)
+    slope_fn = getattr(lift, "slope", None)
+
+    def deriv(angle: float) -> float:
+        if callable(slope_fn):
+            return float(slope_fn(angle))
+        return float(
+            (lift(angle + GROUND_CURVE_STEP) - lift(angle - GROUND_CURVE_STEP))
+            / (2.0 * GROUND_CURVE_STEP)
+        )
+
+    cl0 = float(lift(0.0))
+    slope = deriv(0.0)
+    alpha0 = -cl0 / slope if slope != 0.0 else 0.0
+    for _ in range(SECTION_ZERO_MAX_ITER):
+        f_val = float(lift(alpha0))
+        df_val = deriv(alpha0)
+        if df_val == 0.0:
+            break
+        step = f_val / df_val
+        alpha0 -= step
+        if abs(step) <= SECTION_ZERO_TOL:
+            break
+    return float(slope), float(alpha0), moment
 
 #: Chordwise panels per side of the cut section of the converged inviscid
 #: 2D reference of the viscous coupling [-]. With the second-order

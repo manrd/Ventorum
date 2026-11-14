@@ -1412,8 +1412,8 @@ def _build_station_mesh(
         station_of.append(int(station))
         return len(nodes) - 1
 
-    uid = np.full((ns, nc + 1), -1, dtype=int)
-    lid = np.full((ns, nc + 1), -1, dtype=int)
+    uid = np.full((ns, nc + 1), -1, dtype=np.int64)
+    lid = np.full((ns, nc + 1), -1, dtype=np.int64)
     for j in range(ns):
         cand: list[int] = []
         if j > 0 and dup_next[j - 1]:
@@ -1822,7 +1822,7 @@ def _finish_mesh(built: dict, ns: int, half: bool, tip: str, mirror_full: bool, 
     n_s = int(built["n_strips"])
     if mirror_full:
         right_n = len(nodes)
-        index_map = np.full(right_n, -1, dtype=int)
+        index_map = np.full(right_n, -1, dtype=np.int64)
         node_station = []
         for i in range(right_n):
             node_station.append(ns - 1 + station[i])
@@ -1853,19 +1853,19 @@ def _finish_mesh(built: dict, ns: int, half: bool, tip: str, mirror_full: bool, 
             for p in nodes:
                 p[1] = -p[1]
             panels = [_flip_panel(r) for r in panels]
-    panel_arr = np.array(panels, dtype=int).reshape(-1, 4)
+    panel_arr = np.array(panels, dtype=np.int64).reshape(-1, 4)
     return PanelMesh(
         nodes=np.vstack(nodes),
         panels=panel_arr,
-        component=np.zeros(panel_arr.shape[0], dtype=int),
+        component=np.zeros(panel_arr.shape[0], dtype=np.int64),
         kind=np.array(kinds, dtype=str),
-        wake_edges=np.array(wake, dtype=int).reshape(-1, 4),
+        wake_edges=np.array(wake, dtype=np.int64).reshape(-1, 4),
         half=bool(half),
         tip=str(tip),
-        strip=np.array(strip, dtype=int),
-        chord_index=np.array(chord_i, dtype=int),
-        side=np.array(side, dtype=int),
-        node_station=np.array(node_station, dtype=int),
+        strip=np.array(strip, dtype=np.int64),
+        chord_index=np.array(chord_i, dtype=np.int64),
+        side=np.array(side, dtype=np.int64),
+        node_station=np.array(node_station, dtype=np.int64),
         root_scale_warning=bool(root_scale_warning),
     )
 
@@ -2149,8 +2149,8 @@ def mesh_lifting_surface(
         station_of.append(int(station))
         return len(nodes) - 1
 
-    uid = np.full((ns, nc1), -1, dtype=int)
-    lid = np.full((ns, nc1), -1, dtype=int)
+    uid = np.full((ns, nc1), -1, dtype=np.int64)
+    lid = np.full((ns, nc1), -1, dtype=np.int64)
     for j in range(ns):
         uid[j, 0] = lid[j, 0] = add_node(0.5 * (upper[j, 0] + lower[j, 0]), j)
         for k in range(1, n_chord):
@@ -2167,8 +2167,8 @@ def mesh_lifting_surface(
     strip_of: list[int] = []
     chord_of: list[int] = []
     side_of: list[int] = []
-    up_pan = np.full((ns - 1, n_chord), -1, dtype=int)
-    lo_pan = np.full((ns - 1, n_chord), -1, dtype=int)
+    up_pan = np.full((ns - 1, n_chord), -1, dtype=np.int64)
+    lo_pan = np.full((ns - 1, n_chord), -1, dtype=np.int64)
 
     def add_panel(row: list[int], kind: str, s: int, k: int, sd: int) -> int:
         panels.append([int(v) for v in row])
@@ -2298,19 +2298,19 @@ def mesh_aircraft(
     for i, (s, c) in enumerate(zip(surfs, coord_list)):
         sub = mesh_lifting_surface(s, c, scale_root_thickness=scale_root_thickness, **kw)
         node_parts.append(np.asarray(sub.nodes, dtype=float))
-        panel_parts.append(np.asarray(sub.panels, dtype=int) + n_nodes)
+        panel_parts.append(np.asarray(sub.panels, dtype=np.int64) + n_nodes)
         kind_parts.append(np.asarray(sub.kind))
-        comp_parts.append(np.full(np.asarray(sub.panels).shape[0], i, dtype=int))
-        w = np.asarray(sub.wake_edges, dtype=int).copy()
+        comp_parts.append(np.full(np.asarray(sub.panels).shape[0], i, dtype=np.int64))
+        w = np.asarray(sub.wake_edges, dtype=np.int64).copy()
         if w.size:
             w[:, 0:2] += n_panels
             w[:, 2:4] += n_nodes
         wake_parts.append(w.reshape(-1, 4))
-        st = np.asarray(sub.strip, dtype=int)
+        st = np.asarray(sub.strip, dtype=np.int64)
         strip_parts.append(np.where(st >= 0, st + n_strips, -1))
-        chord_parts.append(np.asarray(sub.chord_index, dtype=int))
-        side_parts.append(np.asarray(sub.side, dtype=int))
-        station_parts.append(np.asarray(sub.node_station, dtype=int))
+        chord_parts.append(np.asarray(sub.chord_index, dtype=np.int64))
+        side_parts.append(np.asarray(sub.side, dtype=np.int64))
+        station_parts.append(np.asarray(sub.node_station, dtype=np.int64))
         n_strips += int(np.max(st)) + 1 if np.any(st >= 0) else 0
         n_nodes += int(np.asarray(sub.nodes).shape[0])
         n_panels += int(np.asarray(sub.panels).shape[0])
@@ -2847,8 +2847,9 @@ def _candidate_pairs(nodes: np.ndarray, edges: np.ndarray, tri: np.ndarray) -> t
     ie = np.repeat(e_row, cnt)
     it = t_row[np.repeat(first, cnt) + np.arange(int(np.sum(cnt))) - np.repeat(np.cumsum(cnt) - cnt, cnt)]
     ok = np.all((elo[ie] <= thi[it]) & (ehi[ie] >= tlo[it]), axis=1)
-    pair = np.unique(ie[ok].astype(np.int64) * tri.shape[0] + it[ok])
-    return pair // tri.shape[0], pair % tri.shape[0]
+    n_tri = np.int64(tri.shape[0])
+    pair = np.unique(ie[ok].astype(np.int64) * n_tri + it[ok].astype(np.int64))
+    return pair // n_tri, pair % n_tri
 
 
 def _self_intersections(
@@ -3013,7 +3014,7 @@ def _check_mesh_reference(mesh: PanelMesh, warp_limit: float = WARP_LIMIT) -> di
         n_open_edges : number of edges used by one panel only.
     """
     nodes = np.asarray(mesh.nodes, dtype=float)
-    panels = np.asarray(mesh.panels, dtype=int)
+    panels = np.asarray(mesh.panels, dtype=np.int64)
     n_p = panels.shape[0]
     areas = np.empty(n_p)
     aspects = np.empty(n_p)
@@ -3021,7 +3022,7 @@ def _check_mesh_reference(mesh: PanelMesh, warp_limit: float = WARP_LIMIT) -> di
     warps = np.empty(n_p)
     convex = np.empty(n_p, dtype=bool)
     comp_raw = np.asarray(mesh.component).reshape(-1)
-    comp_of = comp_raw.astype(int) if comp_raw.shape[0] == n_p else np.zeros(n_p, dtype=int)
+    comp_of = comp_raw.astype(np.int64) if comp_raw.shape[0] == n_p else np.zeros(n_p, dtype=np.int64)
     comp_ids = sorted({int(c) for c in comp_of})
     comp_volume = {c: 0.0 for c in comp_ids}
     for i in range(n_p):
@@ -3048,7 +3049,7 @@ def _check_mesh_reference(mesh: PanelMesh, warp_limit: float = WARP_LIMIT) -> di
     comp_nodes: dict[int, np.ndarray] = {}
     for c in comp_ids:
         comp_nodes[c] = np.unique(panels[comp_of == c].ravel())
-    station = None if mesh.node_station is None else np.asarray(mesh.node_station, dtype=int)
+    station = None if mesh.node_station is None else np.asarray(mesh.node_station, dtype=np.int64)
     ends: dict[int, tuple[int, int]] = {}
     if station is not None and station.shape[0] == nodes.shape[0]:
         for c in comp_ids:
@@ -3212,14 +3213,14 @@ def _check_mesh(mesh: PanelMesh, warp_limit: float = WARP_LIMIT, self_intersecti
         The keys of :func:`check_mesh` (see *self_intersections*).
     """
     nodes = np.asarray(mesh.nodes, dtype=float)
-    panels = np.asarray(mesh.panels, dtype=int).reshape(-1, 4)
+    panels = np.asarray(mesh.panels, dtype=np.int64).reshape(-1, 4)
     n_p = panels.shape[0]
     corners = nodes[panels]
     areas, _, aspects, skews, warps, convex = _panel_geometry_batch(corners)
     comp_raw = np.asarray(mesh.component).reshape(-1)
-    comp_of = comp_raw.astype(int) if comp_raw.shape[0] == n_p else np.zeros(n_p, dtype=int)
+    comp_of = comp_raw.astype(np.int64) if comp_raw.shape[0] == n_p else np.zeros(n_p, dtype=np.int64)
     comp_ids = sorted({int(c) for c in comp_of})
-    comp_index = np.asarray(comp_ids, dtype=int)
+    comp_index = np.asarray(comp_ids, dtype=np.int64)
     # Signed volume of each panel: the two tetrahedra of the corner fan.
     contrib = (
         np.sum(corners[:, 0] * np.cross(corners[:, 1], corners[:, 2]), axis=1)
@@ -3239,14 +3240,14 @@ def _check_mesh(mesh: PanelMesh, warp_limit: float = WARP_LIMIT, self_intersecti
     ea, eb = ea[used], eb[used]
     lo = np.minimum(ea, eb)
     hi = np.maximum(ea, eb)
-    owner_of = np.repeat(np.arange(n_p, dtype=int), 4)[used]
+    owner_of = np.repeat(np.arange(n_p, dtype=np.int64), 4)[used]
     keys = lo.astype(np.int64) * max(int(nodes.shape[0]), 1) + hi.astype(np.int64)
     _, first, inv, counts = np.unique(keys, return_index=True, return_inverse=True, return_counts=True)
     inv = np.asarray(inv).reshape(-1)
     dir_sum = np.bincount(inv, weights=np.where(ea < eb, 1.0, -1.0))
 
     comp_nodes = {c: np.unique(panels[comp_of == c].ravel()) for c in comp_ids}
-    station = None if mesh.node_station is None else np.asarray(mesh.node_station, dtype=int)
+    station = None if mesh.node_station is None else np.asarray(mesh.node_station, dtype=np.int64)
     ends: dict[int, tuple[int, int]] = {}
     if station is not None and station.shape[0] == nodes.shape[0]:
         for c in comp_ids:
@@ -3478,10 +3479,10 @@ def check_contact(mesh: PanelMesh, gap_fraction: float | None = None, n_near: in
 
     frac = CONTACT_GAP_FRACTION if gap_fraction is None else float(gap_fraction)
     nodes = np.asarray(mesh.nodes, dtype=float)
-    panels = np.asarray(mesh.panels, dtype=int).reshape(-1, 4)
+    panels = np.asarray(mesh.panels, dtype=np.int64).reshape(-1, 4)
     n_p = panels.shape[0]
     comp_raw = np.asarray(mesh.component).reshape(-1)
-    comp_of = comp_raw.astype(int) if comp_raw.shape[0] == n_p else np.zeros(n_p, dtype=int)
+    comp_of = comp_raw.astype(np.int64) if comp_raw.shape[0] == n_p else np.zeros(n_p, dtype=np.int64)
     comp_ids = sorted({int(c) for c in comp_of})
     result = {"n_contact_panels": 0, "contact_pairs": [], "min_gap": float("inf"), "min_gap_ratio": float("inf")}
     if len(comp_ids) < 2:

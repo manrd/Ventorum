@@ -352,3 +352,117 @@ def test_sweep_plots_refuse_a_result_without_an_angle(sweep_2deg):
     for plot in (vt.plot_cl_vs_alpha, vt.plot_efficiency_curves, vt.plot_pitching_moment):
         with pytest.raises(ValueError, match="angle of attack"):
             plot(bad)
+
+
+def _plotted_total_lift_from_elliptic_line(ax: plt.Axes, b_ref: float) -> float:
+    """Recover the exact float64 total lift [N] encoded in the elliptic reference line."""
+    ell_line = next(line for line in ax.lines if "Elliptic" in line.get_label())
+    xdata = np.asarray(ell_line.get_xdata(), dtype=float)
+    ydata = np.asarray(ell_line.get_ydata(), dtype=float)
+    mid = len(xdata) // 2
+    y_norm = 2.0 * xdata[mid] / b_ref
+    return float(ydata[mid] * (np.pi * b_ref) / (4.0 * np.sqrt(1.0 - y_norm**2)))
+
+
+def test_span_loading_total_lift_and_per_surface_bending_moment():
+    """Plotted total lift equals CL*q*S (to round-off) for a symmetric wing and a non-symmetric fin,
+    root bending moment is reported per surface, and MAC uses the main surface across all sections.
+    """
+    cambered = vt.LinearAirfoil(name="Cambered", a0=2.0 * np.pi, alpha_L0=np.radians(-5.0))
+    settings = vt.SolverSettings(solver_type="vlm", n_panels=10)
+    cond = vt.FlightCondition(V_inf=30.0, alpha=0.0)
+
+    # 1. Symmetric wing and non-symmetric fin: plotted total lift equals CL * q * S to round-off.
+    for is_sym in (True, False):
+        surf = vt.LiftingSurface(
+            name="Wing" if is_sym else "Fin",
+            semi_span=5.0,
+            is_symmetric=is_sym,
+            sections=[
+                vt.WingSection(y_frac=0.0, chord=2.0, airfoil=cambered),
+                vt.WingSection(y_frac=1.0, chord=2.0, airfoil=cambered),
+            ],
+        )
+        ac = vt.Aircraft(name=surf.name, surfaces=[surf])
+        res = vt.analyze(ac, condition=cond, settings=settings)
+        q_inf = 0.5 * cond.rho * cond.V_inf**2
+        expected_lift = float(res.totals.CL * q_inf * ac.S_ref)
+
+        fig_span = vt.plot_span_loading(ac, res, show_elliptic=True)
+        ax_span = fig_span.axes[0]
+        lift_span = _plotted_total_lift_from_elliptic_line(ax_span, ac.b_ref)
+        np.testing.assert_allclose(lift_span, expected_lift, rtol=1e-12, atol=1e-12)
+        assert f"Total Lift ($L$): {expected_lift:.1f} N" in ax_span.texts[0].get_text()
+        plt.close(fig_span)
+
+        fig_dash = vt.plot_aircraft_dashboard(ac, res, settings=settings)
+        ax_dash3 = next(a for a in fig_dash.axes if a.get_ylabel() == r"$L'(y)$ [N/m]")
+        lift_dash = _plotted_total_lift_from_elliptic_line(ax_dash3, ac.b_ref)
+        np.testing.assert_allclose(lift_dash, expected_lift, rtol=1e-12, atol=1e-12)
+        assert f"$L_{{tot}}$: {expected_lift:.1f} N" in ax_dash3.texts[0].get_text()
+        plt.close(fig_dash)
+
+    # 2. Multi-surface aircraft (tail listed before 3-section main wing):
+    #    bending moment is per surface (not summed) and MAC uses main_surface_index() and all sections.
+    tail = vt.LiftingSurface(
+        name="Tail",
+        semi_span=1.0,
+        sections=[
+            vt.WingSection(y_frac=0.0, chord=0.4, airfoil=cambered),
+            vt.WingSection(y_frac=1.0, chord=0.3, airfoil=cambered),
+        ],
+        position=np.array([4.0, 0.0, 0.2]),
+    )
+    wing_3sec = vt.LiftingSurface(
+        name="Main Wing",
+        semi_span=4.0,
+        sections=[
+            vt.WingSection(y_frac=0.0, chord=1.6, airfoil=cambered),
+            vt.WingSection(y_frac=0.5, chord=1.4, airfoil=cambered),
+            vt.WingSection(y_frac=1.0, chord=0.6, airfoil=cambered),
+        ],
+        sweep_le=np.radians(10.0),
+        position=np.array([0.5, 0.0, 0.0]),
+    )
+    ac_multi = vt.Aircraft(name="Canard/Tail First", surfaces=[tail, wing_3sec])
+    res_multi = vt.analyze(ac_multi, condition=cond, settings=settings)
+    lat = res_multi.details["lattice"]
+
+    expected_moments = []
+    for sl_surf, sw in zip(lat.surfaces, res_multi.spanwise):
+        sl = sl_surf.strips
+        right = lat.strip_is_right[sl]
+        w_r = lat.width[sl][right]
+        y_r = sw.y[right]
+        l_r = cond.rho * cond.V_inf * sw.gamma[right]
+        expected_moments.append(float(np.sum(y_r * l_r * w_r)))
+
+    fig_span_m = vt.plot_span_loading(ac_multi, res_multi)
+    txt_span = fig_span_m.axes[0].texts[0].get_text()
+    for sw, m_val in zip(res_multi.spanwise, expected_moments):
+        assert f"{sw.surface_name}): {m_val:.1f} N·m" in txt_span
+    assert f"{sum(expected_moments):.1f} N·m" not in txt_span
+    plt.close(fig_span_m)
+
+    fig_dash_m = vt.plot_aircraft_dashboard(ac_multi, res_multi, settings=settings)
+    ax_dash3_m = next(a for a in fig_dash_m.axes if a.get_ylabel() == r"$L'(y)$ [N/m]")
+    txt_dash = ax_dash3_m.texts[0].get_text()
+    for sw, m_val in zip(res_multi.spanwise, expected_moments):
+        assert f"{sw.surface_name}): {m_val:.1f} N·m" in txt_dash
+    plt.close(fig_dash_m)
+
+    # MAC overlay on 2D planform uses wing_3sec (index 1) and all 3 sections.
+    fig_plan = vt.plot_planform_2d(ac_multi, show_mac=True)
+    ax_plan = fig_plan.axes[0]
+    mac_line = next(line for line in ax_plan.lines if "MAC" in line.get_label())
+    # Exact area-weighted y_mac of the 3-section half-wing (dy = 2.0 m on each section panel):
+    dy = np.array([2.0, 2.0])
+    y0 = np.array([0.0, 2.0])
+    y1 = np.array([2.0, 4.0])
+    c0 = np.array([1.6, 1.4])
+    c1 = np.array([1.4, 0.6])
+    area_half = float(np.sum(0.5 * (c0 + c1) * dy))
+    y_mac_expected = float(np.sum((dy / 6.0) * (y0 * (2.0 * c0 + c1) + y1 * (c0 + 2.0 * c1)))) / area_half
+    np.testing.assert_allclose(mac_line.get_xdata()[0], y_mac_expected, rtol=1e-12, atol=1e-12)
+    plt.close(fig_plan)
+

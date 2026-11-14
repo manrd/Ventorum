@@ -5,9 +5,9 @@ The module does these tasks:
 
 1. Run a mesh convergence analysis over candidate panel counts and spacing
    schemes.
-2. Compare the results with a high-resolution reference solution or with
-   the Richardson limit.
-3. Calculate the Grid Convergence Index (GCI, Roache 1998).
+2. Compare the results with a high-resolution reference solution.
+3. Calculate the Grid Convergence Index (GCI, Roache 1998) with the
+   observed order of Celik et al. (2008).
 4. Find the **minimal mesh** that meets the error tolerance.
 5. Recommend a **general mesh** with a margin, for similar geometries,
    sweep angles and flight conditions.
@@ -33,6 +33,7 @@ from ventorum.core.datatypes import (
     SolverResult,
     SolverSettings,
 )
+from ventorum.core.error_bars import ORDER_LOWER, ORDER_UPPER, observed_order
 from ventorum.geometry.processing import discretize_aircraft_surfaces
 
 
@@ -257,6 +258,7 @@ class MeshConvergenceResult:
     # Cause of a NOT CONVERGED study (None when converged). Names the likely
     # cause when the solver is a lifting line on a swept wing.
     diagnosis: str | None = None
+    notes: list[str] = field(default_factory=list)
 
     def summary(self, as_markdown: bool = False) -> str:
         """Format a human-readable or Markdown summary table."""
@@ -279,6 +281,8 @@ class MeshConvergenceResult:
             lines.append(f"- **Reference Solution**: `N={self.reference_point.n_panels} {self.reference_point.spacing}` ({ref_panels} total panels)")
             ref_tot_drag = f"{self.reference_point.CD_total:.6f}" if self.reference_point.CD_total is not None else f"{ref_cdi:.6f}"
             lines.append(f"  - $C_L = {ref_cl:.6f}$, $C_{{Di}} = {ref_cdi:.6f}$, $C_{{D,tot}} = {ref_tot_drag}$")
+            for note in self.notes:
+                lines.append(f"- **Note**: {note}")
             lines.append("")
             lines.append("| N_ref | Spacing | N_tot | N_sol | CL | CL Err% | CDi Err% | Γ L2 Err% | Max Swp% | Time (ms) | Cond # | Status |")
             lines.append("|:-----:|:-------:|:-----:|:-----:|:--:|:-------:|:--------:|:---------:|:--------:|:---------:|:------:|:------:|")
@@ -337,6 +341,8 @@ class MeshConvergenceResult:
                 f"Reference Solution: CL = {ref_cl:.6f}, CDi = {ref_cdi:.6f}, CD_total = {ref_tot_drag} "
                 f"(solve time: {self.reference_point.solve_time_ms:.2f} ms)"
             )
+            for note in self.notes:
+                lines.append(f"Note: {note}")
             lines.append("-" * w)
             header = f"{'N_ref':<6} | {'Spacing':<12} | {'N_tot':<6} | {'N_sol':<6} | {'CL':<9} | {'CL Err%':<8} | {'CDi Err%':<9} | {'Gamma L2%':<9} | {'Max Swp%':<9} | {'Time (ms)':<9} | {'Cond #':<9} | {'Status'}"
             lines.append(header)
@@ -437,6 +443,7 @@ class MeshConvergenceResult:
             "recommended_settings": settings,
             "generalization": generalization,
             "diagnosis": self.diagnosis,
+            "notes": list(self.notes),
             "points": [p.to_dict() for p in self.points],
             "profiling": self.profiling,
         }
@@ -654,8 +661,55 @@ def _evaluate_candidate(
     return res_primary, t_solve_ms, cond_num, min_ar, max_swp_err, mean_swp_err, l2_gamma_err, tot_panels, panels_solved
 
 
+def _monotonic_gci_pct(
+    f_coarse: float,
+    f_med: float,
+    f_fine: float,
+    r32: float,
+    r21: float,
+) -> float | None:
+    """Return the relative Grid Convergence Index [%] for a monotonic triplet.
+
+    Parameters
+    ----------
+    f_coarse : float
+        Coarse-level coefficient value [-].
+    f_med : float
+        Medium-level coefficient value [-].
+    f_fine : float
+        Fine-level coefficient value [-].
+    r32 : float
+        Refinement ratio of medium to coarse (``n_med / n_coarse``) [-].
+    r21 : float
+        Refinement ratio of fine to medium (``n_fine / n_med``) [-].
+
+    Returns
+    -------
+    float or None
+        Relative GCI [%] on the fine level when the triplet converges
+        monotonically at a positive observed order, else ``None``.
+    """
+    e23 = f_fine - f_med
+    e12 = f_med - f_coarse
+    if (e23 * e12) <= 0.0 or abs(e23) == 0.0:
+        return None
+    order = observed_order(f_fine, f_med, f_coarse, r21, r32)
+    if order is None:
+        return None
+    if ORDER_LOWER <= order <= ORDER_UPPER:
+        safety = 1.25
+        p_used = order
+    else:
+        safety = 3.0
+        p_used = min(max(order, ORDER_LOWER), ORDER_UPPER)
+    denom = (r21 ** p_used) - 1.0
+    if denom <= 1e-6:
+        return None
+    return float((safety * abs(e23 / max(abs(f_fine), 1e-6)) / denom) * 100.0)
+
+
 def _compute_gci_triplets(points_by_spacing: dict[str, list[MeshConvergencePoint]]) -> None:
-    """Compute apparent order and Grid Convergence Index (GCI) for monotonic triplets."""
+    """Compute observed order and Grid Convergence Index (GCI) for monotonic triplets."""
     for _sp, pts in points_by_spacing.items():
         if len(pts) < 3:
             continue
@@ -669,31 +723,8 @@ def _compute_gci_triplets(points_by_spacing: dict[str, list[MeshConvergencePoint
             if r12 < 1.15 or r23 < 1.15:
                 continue
 
-            # GCI for CL
-            e23 = p3.CL - p2.CL
-            e12 = p2.CL - p1.CL
-            if (e23 * e12) > 0:  # Monotonic convergence
-                r_avg = 0.5 * (r12 + r23)
-                if r_avg > 1.0 and abs(e23) > 0.0:
-                    p_order = np.log(abs(e12 / e23)) / np.log(r_avg)
-                    if p_order > 0.1:
-                        denom = (r23 ** p_order) - 1.0
-                        if denom > 1e-6:
-                            gci = (1.25 * abs(e23 / max(abs(p3.CL), 1e-6)) / denom) * 100.0
-                            p3.gci_cl = float(gci)
-
-            # GCI for CDi
-            e23_cd = p3.CDi - p2.CDi
-            e12_cd = p2.CDi - p1.CDi
-            if (e23_cd * e12_cd) > 0:
-                r_avg = 0.5 * (r12 + r23)
-                if r_avg > 1.0 and abs(e23_cd) > 0.0:
-                    p_order_cd = np.log(abs(e12_cd / e23_cd)) / np.log(r_avg)
-                    if p_order_cd > 0.1:
-                        denom_cd = (r23 ** p_order_cd) - 1.0
-                        if denom_cd > 1e-6:
-                            gci_cd = (1.25 * abs(e23_cd / max(abs(p3.CDi), 1e-6)) / denom_cd) * 100.0
-                            p3.gci_cdi = float(gci_cd)
+            p3.gci_cl = _monotonic_gci_pct(p1.CL, p2.CL, p3.CL, r12, r23)
+            p3.gci_cdi = _monotonic_gci_pct(p1.CDi, p2.CDi, p3.CDi, r12, r23)
 
 
 def _cost_key(p: MeshConvergencePoint) -> tuple[int, int]:
@@ -883,6 +914,7 @@ def run_mesh_convergence_study(
         schemes = list(spacing_schemes)
 
     # Panel counts to test
+    notes: list[str] = []
     if panel_counts is None:
         default_counts = [10, 15, 20, 30, 40, 60, 80]
         # Keep only counts strictly below ref_n_panels
@@ -890,9 +922,22 @@ def run_mesh_convergence_study(
         if not p_counts:
             p_counts = [10, 20, 40]
     else:
-        p_counts = [int(n) for n in panel_counts if int(n) < ref_n_panels]
+        given_counts = [int(n) for n in panel_counts]
+        dropped_counts = [n for n in given_counts if n >= ref_n_panels]
+        p_counts = [n for n in given_counts if n < ref_n_panels]
         if not p_counts:
-            p_counts = [int(n) for n in panel_counts]
+            raise ValueError(
+                f"All given panel_counts {given_counts} are at or above ref_n_panels={ref_n_panels}; "
+                "at least one tested level must be below ref_n_panels."
+            )
+        if dropped_counts:
+            kept_counts = list(dict.fromkeys(p_counts))
+            note_msg = (
+                f"Dropped panel_counts {dropped_counts} at or above ref_n_panels={ref_n_panels}; "
+                f"evaluated {kept_counts}."
+            )
+            warnings.warn(note_msg, UserWarning, stacklevel=2)
+            notes.append(note_msg)
     p_counts = list(dict.fromkeys(p_counts))  # each level once
 
     # Angle of attack sweep setup
@@ -1295,6 +1340,7 @@ def run_mesh_convergence_study(
         recommended_surface_n_panels=rec_surface_n,
         converged=converged,
         diagnosis=diagnosis,
+        notes=notes,
     )
 
     if progress:

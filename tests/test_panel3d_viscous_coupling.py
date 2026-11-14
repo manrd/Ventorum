@@ -616,3 +616,41 @@ def test_coupled_moment_arm_is_the_panel_area_centroid(monkeypatch):
     np.testing.assert_allclose(result.details["cp"], inv.details["cp"], rtol=1e-10, atol=1e-12)
     coupled = forces[-1]
     assert coupled["Cm"] == pytest.approx(inv.totals.Cm, rel=1e-9, abs=1e-12)
+
+
+def test_morino_section_line_exact_slope_and_newton_root(monkeypatch):
+    """Verify _morino_section_line on NACA 4412 at 160 panels against fine central difference and root.
+
+    Stated tolerances: 1e-7 1/rad against an independent central difference
+    with step 1e-7 rad for the slope at 0 deg, and 1e-13 rad against an
+    independent bracketed root (xtol 1e-15 rad) for the zero-lift angle.
+    """
+    import scipy.optimize
+    from ventorum.solvers import panel3d as panel3d_mod
+    from ventorum.solvers.panel3d import _morino_section_line, _morino_section_solution
+
+    polygon = airfoil("4412", n_points=161).coords
+    assert len(polygon) - 1 == 160
+    lift, _ = _morino_section_solution(polygon)
+    step = 1.0e-7
+    fd_slope = float((lift(step) - lift(-step)) / (2.0 * step))
+    exact_root = float(scipy.optimize.brentq(lift, -0.5, 0.5, xtol=1.0e-15))
+
+    slope, alpha0, _ = _morino_section_line(polygon)
+    assert abs(slope - fd_slope) < 1.0e-7
+    assert abs(alpha0 - exact_root) < 1.0e-13
+    assert abs(float(lift(alpha0))) < 1.0e-13
+
+    # Fallback when the lift callable has no slope attribute: central difference.
+    original = panel3d_mod._morino_section_solution
+
+    def without_slope(poly, ground=None):
+        fn, mom = original(poly, ground)
+        return (lambda a: fn(a)), mom
+
+    monkeypatch.setattr(panel3d_mod, "_morino_section_solution", without_slope)
+    slope_fb, alpha0_fb, _ = _morino_section_line(polygon)
+    assert abs(slope_fb - fd_slope) < 1.0e-6
+    assert abs(alpha0_fb - exact_root) < 1.0e-12
+
+

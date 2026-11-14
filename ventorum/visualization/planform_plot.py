@@ -97,20 +97,10 @@ def plot_planform_2d(
 
     # Annotate Mean Aerodynamic Chord (MAC)
     if show_mac and aircraft.c_ref is not None:
-        main_surf = aircraft.surfaces[0]
-        # Position of MAC along span for a trapezoidal half-wing: y_mac ≈ (b/6) * (1 + 2*lambda)/(1 + lambda)
-        secs = sorted(main_surf.sections, key=lambda s: s.y_frac)
-        cr = secs[0].chord
-        ct = secs[-1].chord
-        taper = ct / cr if cr > 0 else 1.0
-        b_semi = main_surf.semi_span
-        y_mac = (b_semi / 3.0) * (1.0 + 2.0 * taper) / (1.0 + taper)
-
-        # Leading edge x at y_mac
-        x_mac_le = main_surf.position[0] + y_mac * np.tan(main_surf.sweep_le)
+        main_surf, y_mac, x_mac_le = _main_surface_mac_geometry(aircraft)
         c_mac = aircraft.c_ref
 
-        # Draw MAC line on positive Y side
+        # Draw MAC line on main surface side
         ax.plot(
             [y_mac, y_mac],
             [x_mac_le, x_mac_le + c_mac],
@@ -157,6 +147,116 @@ def plot_planform_2d(
     return fig
 
 
+def _main_surface_mac_geometry(aircraft: Aircraft) -> tuple[LiftingSurface, float, float]:
+    """Return the main surface, its MAC spanwise station y_mac [m] and leading-edge x_mac_le [m]."""
+    from ventorum.geometry.lattice import surface_reference_line
+
+    main_surf = aircraft.surfaces[aircraft.main_surface_index()]
+    secs = sorted(main_surf.sections, key=lambda s: s.y_frac)
+    eta = np.array([s.y_frac for s in secs], dtype=float)
+    chords = np.array([s.chord for s in secs], dtype=float)
+    x_le, y, _ = surface_reference_line(main_surf, eta)
+    dy = np.abs(np.diff(y))
+    if float(np.sum(dy)) <= 1e-9 * max(main_surf.semi_span, 1e-12):
+        dy = np.diff(eta) * main_surf.semi_span
+    y_abs = y + float(main_surf.position[1])
+    x_abs = x_le + float(main_surf.position[0])
+    y0, y1 = y_abs[:-1], y_abs[1:]
+    x0, x1 = x_abs[:-1], x_abs[1:]
+    c0, c1 = chords[:-1], chords[1:]
+    area_half = float(np.sum(0.5 * (c0 + c1) * dy))
+    if area_half > 0.0:
+        y_mac = float(np.sum((dy / 6.0) * (y0 * (2.0 * c0 + c1) + y1 * (c0 + 2.0 * c1)))) / area_half
+        x_mac_le = float(np.sum((dy / 6.0) * (x0 * (2.0 * c0 + c1) + x1 * (c0 + 2.0 * c1)))) / area_half
+    else:
+        y_mac = float(y_abs[0])
+        x_mac_le = float(x_abs[0])
+    if main_surf.mirror_y and not main_surf.is_symmetric:
+        y_mac = -y_mac
+    return main_surf, y_mac, x_mac_le
+
+
+def _span_loading_surface_stats(
+    aircraft: Aircraft,
+    result: SolverResult,
+    rho: float,
+    v_inf: float,
+) -> tuple[float, list[float], float]:
+    """Return total lift [N], per-surface root bending moments [N*m] and main-surface y_cp [m]."""
+    lattice = (result.details or {}).get("lattice")
+    total_lift_force = 0.0
+    surface_moments: list[float] = []
+    half_lifts: list[float] = []
+
+    for idx, sw in enumerate(result.spanwise):
+        surf = aircraft.surfaces[idx] if idx < len(aircraft.surfaces) else aircraft.surfaces[-1]
+        sym_factor = 2.0 if surf.is_symmetric else 1.0
+        L_prime = rho * v_inf * np.asarray(sw.gamma, dtype=float)
+        y_arr = np.asarray(sw.y, dtype=float)
+        y_root = float(surf.position[1])
+
+        if lattice is not None and idx < len(lattice.surfaces):
+            sl = lattice.surfaces[idx].strips
+            w_all = np.asarray(lattice.width[sl], dtype=float)
+            if surf.is_symmetric:
+                right = np.asarray(lattice.strip_is_right[sl], dtype=bool)
+                w_half = w_all[right]
+                L_half = L_prime[right]
+                y_half = y_arr[right]
+            else:
+                w_half = w_all
+                L_half = L_prime
+                y_half = y_arr
+        elif (
+            getattr(result, "solver_type", None) == "fourier"
+            or getattr(result, "fourier_coefficients", None) is not None
+        ):
+            b = 2.0 * surf.semi_span if surf.is_symmetric else surf.semi_span
+            y_s = np.sort(y_arr)
+            y_min = -0.5 * b if surf.is_symmetric else y_root
+            y_max = 0.5 * b if surf.is_symmetric else (y_root + surf.semi_span)
+            edges = np.concatenate([[y_min], 0.5 * (y_s[:-1] + y_s[1:]), [y_max]])
+            if surf.is_symmetric:
+                w_half = np.maximum(y_root, edges[1:]) - np.maximum(y_root, edges[:-1])
+                right = w_half > 0.0
+                w_half = w_half[right]
+                L_half = L_prime[right]
+                y_half = y_arr[right]
+            else:
+                w_half = np.diff(edges)
+                L_half = L_prime
+                y_half = y_arr
+        else:
+            if surf.is_symmetric and np.any(y_arr < y_root):
+                right = y_arr >= y_root
+            else:
+                right = np.ones(len(y_arr), dtype=bool)
+            L_half = L_prime[right]
+            y_half = y_arr[right]
+            n_half = max(1, int(np.sum(right)))
+            ds = discretize_surface(
+                surf,
+                n_panels=n_half,
+                spacing=surf.spacing or "auto",
+                surface_index=idx,
+                half_mesh=True,
+            )
+            w_half = np.asarray(ds.dy_panels, dtype=float)
+
+        l_half_sum = float(np.sum(L_half * w_half))
+        m_surf = float(np.sum(np.abs(y_half - y_root) * L_half * w_half))
+        total_lift_force += sym_factor * l_half_sum
+        surface_moments.append(m_surf)
+        half_lifts.append(l_half_sum)
+
+    main_idx = aircraft.main_surface_index()
+    if main_idx < len(surface_moments) and half_lifts[main_idx] > 0.0:
+        y_cp = surface_moments[main_idx] / half_lifts[main_idx]
+    else:
+        y_cp = 0.0
+    return total_lift_force, surface_moments, y_cp
+
+
 def plot_span_loading(
     aircraft: Aircraft | LiftingSurface,
     result: SolverResult,
@@ -193,24 +293,13 @@ def plot_span_loading(
     else:
         fig = ax.figure
 
-    total_lift_force = 0.0
-    root_bending_moment = 0.0
-
     # Plot each surface
     for sw in result.spanwise:
         # L'(y) = rho * V_inf * gamma
         L_prime = rho * V_inf * sw.gamma
         ax.plot(sw.y, L_prime, "o-", markersize=3, linewidth=2, label=f"{sw.surface_name} $L'(y)$")
 
-        # Accumulate lift and bending moment on positive semi-span (y >= 0)
-        pos_mask = sw.y >= 0
-        if np.any(pos_mask):
-            y_pos = sw.y[pos_mask]
-            L_pos = L_prime[pos_mask]
-            if len(y_pos) > 1:
-                _trap = getattr(np, "trapezoid", getattr(np, "trapz", None))
-                total_lift_force += 2.0 * float(_trap(L_pos, y_pos))
-                root_bending_moment += float(_trap(y_pos * L_pos, y_pos))
+    total_lift_force, surface_moments, y_cp = _span_loading_surface_stats(aircraft, result, rho, V_inf)
 
     # Equivalent elliptic loading: L_ell(y) = (4 * L_tot) / (pi * b) * sqrt(1 - (2y/b)^2)
     if show_elliptic and total_lift_force > 0:
@@ -220,15 +309,19 @@ def plot_span_loading(
         ax.plot(y_ell, L_ell, "k--", linewidth=1.8, alpha=0.75, label="Elliptic (Ideal Min Drag)")
         ax.fill_between(y_ell, L_ell, color="gray", alpha=0.10)
 
-    # Centroid of lift on half-wing
-    y_cp = (root_bending_moment / (0.5 * total_lift_force)) if total_lift_force > 0 else 0.0
-
     ax.set_xlabel("Spanwise Station Y [m]", fontsize=10, fontweight="bold")
     ax.set_ylabel("Sectional Lift Loading $L'(y)$ [N/m]", fontsize=10, fontweight="bold")
 
+    if len(surface_moments) == 1:
+        moment_lines = f"Root Bending Moment ($M_{{root}}$): {surface_moments[0]:.1f} N·m"
+    else:
+        moment_lines = "\n".join(
+            f"Root Bending Moment ($M_{{root}}$, {sw.surface_name}): {m:.1f} N·m"
+            for sw, m in zip(result.spanwise, surface_moments)
+        )
     stat_box = (
         f"Total Lift ($L$): {total_lift_force:.1f} N\n"
-        f"Root Bending Moment ($M_{{root}}$): {root_bending_moment:.1f} N·m\n"
+        f"{moment_lines}\n"
         f"Lift Centroid ($y_{{cp}}$): {y_cp:.3f} m ({y_cp/(b_ref/2.0)*100:.1f}% semi-span)"
     )
     ax.text(

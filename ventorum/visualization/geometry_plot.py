@@ -133,7 +133,9 @@ def result_strip_polygons(
 
     The outlines come from the lattice of the solve
     (``result.details["lattice"]``), so each outline is at the spanwise
-    position of the solved strip. A result without a lattice (for
+    position of the solved strip. A Fourier result without a lattice uses
+    strips between the midpoints of its solved cosine stations on the
+    planform of the surface. Any other result without a lattice (for
     example the 3D panel solver) gets the lattice that
     :func:`ventorum.geometry.lattice.build_lattice` makes from
     ``aircraft`` and ``settings`` (the solver defaults when None).
@@ -162,9 +164,67 @@ def result_strip_polygons(
         in the result, or if a solved strip position ``y`` [m] is not in
         its outline (the layout is not the layout of the solve).
     """
-    from ventorum.geometry.lattice import build_lattice
+    from ventorum.geometry.lattice import build_lattice, surface_edge_geometry, surface_reference_line
 
     lattice = (result.details or {}).get("lattice")
+    if lattice is None and (
+        getattr(result, "solver_type", None) == "fourier"
+        or getattr(result, "fourier_coefficients", None) is not None
+    ):
+        if len(aircraft.surfaces) != len(result.spanwise):
+            raise ValueError(
+                f"The result has {len(result.spanwise)} surfaces, but the aircraft has "
+                f"{len(aircraft.surfaces)}."
+            )
+        out = []
+        for surf, sw in zip(aircraft.surfaces, result.spanwise):
+            n_vals = len(sw.Cl)
+            if sw.y is None or len(sw.y) != n_vals:
+                raise ValueError(
+                    f"Surface {surf.name!r}: the result has {n_vals} strips, but the Fourier "
+                    f"stations have {0 if sw.y is None else len(sw.y)}."
+                )
+            if result.fourier_coefficients is not None and len(result.fourier_coefficients) != n_vals:
+                raise ValueError(
+                    f"Surface {surf.name!r}: the result has {n_vals} strips, but the Fourier "
+                    f"solution has {len(result.fourier_coefficients)}."
+                )
+            if n_vals == 0:
+                out.append(np.zeros((0, 4, 3), dtype=float))
+                continue
+            y = np.asarray(sw.y, dtype=float)
+            _, y_ref, _ = surface_reference_line(surf, np.array([0.0, 1.0]))
+            b_semi = float(abs(y_ref[1] - y_ref[0]))
+            if b_semi <= 1e-12:
+                b_semi = float(surf.semi_span)
+            y_root = float(surf.position[1])
+            eta_stations = (y - y_root) / max(b_semi, 1e-300)
+            eta_lo = -1.0 if surf.is_symmetric else 0.0
+            eta_hi = 1.0
+            if n_vals == 1:
+                eta_edges = np.array([eta_lo, eta_hi], dtype=float)
+            else:
+                eta_edges = np.concatenate(
+                    [[eta_lo], 0.5 * (eta_stations[:-1] + eta_stations[1:]), [eta_hi]]
+                )
+            geo = surface_edge_geometry(surf, np.clip(np.abs(eta_edges), 0.0, 1.0))
+            le = geo["le"].copy()
+            te = geo["te"].copy()
+            neg = eta_edges < 0.0
+            le[neg, 1] = 2.0 * y_root - le[neg, 1]
+            te[neg, 1] = 2.0 * y_root - te[neg, 1]
+            polys = np.stack([le[:-1], le[1:], te[1:], te[:-1]], axis=1)
+            y_lo = np.minimum(polys[:, 0, 1], polys[:, 1, 1])
+            y_hi = np.maximum(polys[:, 0, 1], polys[:, 1, 1])
+            tol = 1e-9 * max(1.0, float(np.max(np.abs(polys[..., 1]))))
+            if np.any(y < y_lo - tol) or np.any(y > y_hi + tol):
+                raise ValueError(
+                    f"Surface {surf.name!r}: a solved strip position y is not in its strip of "
+                    "the Fourier station layout."
+                )
+            out.append(polys)
+        return out
+
     if lattice is None:
         lattice = build_lattice(aircraft, settings or SolverSettings(), collocation="vlm", n_chord=1)
         origin = "the lattice rebuilt from the aircraft and the settings"

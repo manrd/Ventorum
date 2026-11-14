@@ -21,6 +21,10 @@ from ventorum.core.constants import RHO_SL
 from ventorum.geometry.processing import discretize_surface
 from ventorum.visualization.drag_polar import sweep_alphas_deg
 from ventorum.visualization.geometry_plot import result_strip_polygons
+from ventorum.visualization.planform_plot import (
+    _main_surface_mac_geometry,
+    _span_loading_surface_stats,
+)
 
 
 def plot_aircraft_dashboard(
@@ -181,14 +185,7 @@ def plot_aircraft_dashboard(
         ax2.plot(ds.nodes_qc[:, 1], ds.nodes_qc[:, 0], "--", color=col, linewidth=1.2, alpha=0.8)
 
     # MAC line
-    main_surf = aircraft.surfaces[0]
-    secs = sorted(main_surf.sections, key=lambda s: s.y_frac)
-    cr = secs[0].chord
-    ct = secs[-1].chord
-    taper = ct / cr if cr > 0 else 1.0
-    b_semi = main_surf.semi_span
-    y_mac = (b_semi / 3.0) * (1.0 + 2.0 * taper) / (1.0 + taper)
-    x_mac_le = main_surf.position[0] + y_mac * np.tan(main_surf.sweep_le)
+    main_surf, y_mac, x_mac_le = _main_surface_mac_geometry(aircraft)
 
     ax2.plot([y_mac, y_mac], [x_mac_le, x_mac_le + c_ref], color="#b91c1c", linewidth=2.2, label=r"MAC ($\overline{c}$)")
     if main_surf.is_symmetric:
@@ -207,21 +204,11 @@ def plot_aircraft_dashboard(
     # PANEL 3: Dimensional Span Loading L'(y) vs Elliptic & Root Bending Moment
     # ═══════════════════════════════════════════════════════════════════════════
     ax3 = fig.add_subplot(gs[0, 2])
-    _trap = getattr(np, "trapezoid", getattr(np, "trapz", None))
-    total_lift_force = 0.0
-    root_bending_moment = 0.0
-
     for sw in result.spanwise:
         L_prime = rho * V_inf * sw.gamma
         ax3.plot(sw.y, L_prime, "o-", markersize=2.5, linewidth=1.8, label=f"{sw.surface_name}")
 
-        pos_mask = sw.y >= 0
-        if np.any(pos_mask):
-            y_p = sw.y[pos_mask]
-            L_p = L_prime[pos_mask]
-            if len(y_p) > 1:
-                total_lift_force += 2.0 * float(_trap(L_p, y_p))
-                root_bending_moment += float(_trap(y_p * L_p, y_p))
+    total_lift_force, surface_moments, y_cp = _span_loading_surface_stats(aircraft, result, rho, V_inf)
 
     if total_lift_force > 0:
         y_ell = np.linspace(-b_ref / 2.0, b_ref / 2.0, 200)
@@ -230,10 +217,16 @@ def plot_aircraft_dashboard(
         ax3.plot(y_ell, L_ell, "k--", linewidth=1.5, alpha=0.7, label="Elliptic (Ideal)")
         ax3.fill_between(y_ell, L_ell, color="gray", alpha=0.08)
 
-    y_cp = (root_bending_moment / (0.5 * total_lift_force)) if total_lift_force > 0 else 0.0
+    if len(surface_moments) == 1:
+        moment_lines3 = f"$M_{{root}}$: {surface_moments[0]:.1f} N·m"
+    else:
+        moment_lines3 = "\n".join(
+            f"$M_{{root}}$ ({sw.surface_name}): {m:.1f} N·m"
+            for sw, m in zip(result.spanwise, surface_moments)
+        )
     stat_txt3 = (
         f"$L_{{tot}}$: {total_lift_force:.1f} N\n"
-        f"$M_{{root}}$: {root_bending_moment:.1f} N·m\n"
+        f"{moment_lines3}\n"
         f"$y_{{cp}}$: {y_cp:.2f} m"
     )
     ax3.text(
@@ -429,7 +422,14 @@ def plot_aircraft_dashboard(
         ["Span Efficiency (e)", f"{result.totals.e:.4f}"],
         ["Total Lift Force (L)", f"{lift_force:.1f} N"],
         ["Total Drag Force (D)", f"{d_tot_force:.2f} N"],
-        ["Root Bending (M_root)", f"{root_bending_moment:.1f} N·m"],
+        [
+            "Root Bending (M_root)",
+            (
+                f"{surface_moments[0]:.1f} N·m"
+                if len(surface_moments) == 1
+                else ", ".join(f"{sw.surface_name}: {m:.1f} N·m" for sw, m in zip(result.spanwise, surface_moments))
+            ),
+        ],
         ["Pitching Moment (Cm)", f"{result.totals.Cm:.4f}"],
     ]
 
