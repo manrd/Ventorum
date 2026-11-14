@@ -335,6 +335,41 @@ def test_xfoil_version_reads_banner_and_handles_missing(monkeypatch):
     assert xfoil_version("fake-exe-missing") == "unknown"
 
 
+def test_xfoil_version_caches_by_resolved_executable(monkeypatch):
+    """xfoil_version(None) keys its cache by the resolved executable path, not None."""
+    from ventorum.aero.xfoil_runner import xfoil_version
+
+    seen: list[str] = []
+    banners = {
+        "/bin/xfoil-697": "\n XFOIL Version 6.97\n" + _FAKE_PLOP_OUTPUT,
+        "/bin/xfoil-699": "\n XFOIL Version 6.99\n" + _FAKE_PLOP_OUTPUT,
+    }
+
+    def fake_run(argv, **kwargs):
+        exe = argv[0]
+        seen.append(exe)
+        return subprocess.CompletedProcess(
+            argv, 0, stdout=banners[exe], stderr=""
+        )
+
+    monkeypatch.setattr(xfoil_runner.subprocess, "run", fake_run)
+    xfoil_version.cache_clear()
+
+    monkeypatch.setattr(
+        xfoil_runner, "resolve_xfoil_executable", lambda executable=None: executable or "/bin/xfoil-697"
+    )
+    assert xfoil_version(None) == "XFOIL Version 6.97"
+    assert xfoil_version("/bin/xfoil-697") == "XFOIL Version 6.97"
+    assert seen == ["/bin/xfoil-697"]
+
+    monkeypatch.setattr(
+        xfoil_runner, "resolve_xfoil_executable", lambda executable=None: executable or "/bin/xfoil-699"
+    )
+    assert xfoil_version(None) == "XFOIL Version 6.99"
+    assert xfoil_version("/bin/xfoil-699") == "XFOIL Version 6.99"
+    assert seen == ["/bin/xfoil-697", "/bin/xfoil-699"]
+
+
 # ── Two-direction sweep ──────────────────────────────────────────────────────
 
 
