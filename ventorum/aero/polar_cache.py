@@ -14,6 +14,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import tempfile
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
@@ -26,9 +27,9 @@ from ventorum.core.datatypes import TabulatedAirfoil
 def _polar_to_dict(polar: TabulatedAirfoil) -> dict[str, Any]:
     """Serialise a TabulatedAirfoil to plain JSON types (angles in [rad]).
 
-    The circulation lift is stored under the key ``"Cl_circulation"`` only
-    when the polar has it, so a polar without it gives the same file as
-    before.
+    The circulation lift and the gap mask are stored under the keys
+    ``"Cl_circulation"`` and ``"gap_mask"`` only when the polar has them,
+    so a polar without them gives the same file as before.
     """
     out = {
         "name": polar.name,
@@ -44,14 +45,16 @@ def _polar_to_dict(polar: TabulatedAirfoil) -> dict[str, Any]:
     }
     if polar.Cl_circulation_data is not None:
         out["Cl_circulation"] = np.asarray(polar.Cl_circulation_data, dtype=float).tolist()
+    if polar.gap_mask is not None:
+        out["gap_mask"] = np.asarray(polar.gap_mask, dtype=bool).tolist()
     return out
 
 
 def _polar_from_dict(data: dict[str, Any]) -> TabulatedAirfoil:
     """Rebuild a TabulatedAirfoil from :func:`_polar_to_dict` output.
 
-    A file without the key ``"Cl_circulation"`` gives a polar without
-    circulation lift data.
+    A file without the keys ``"Cl_circulation"`` or ``"gap_mask"`` gives a
+    polar without circulation lift data or without a gap mask.
     """
     return TabulatedAirfoil(
         name=data.get("name", ""),
@@ -66,6 +69,11 @@ def _polar_from_dict(data: dict[str, Any]) -> TabulatedAirfoil:
             None
             if data.get("Cl_circulation") is None
             else np.asarray(data["Cl_circulation"], dtype=float)
+        ),
+        gap_mask=(
+            None
+            if data.get("gap_mask") is None
+            else np.asarray(data["gap_mask"], dtype=bool)
         ),
     )
 
@@ -155,7 +163,20 @@ class PolarCache:
             The cache file written.
         """
         path = self.path_for(payload)
-        path.write_text(json.dumps(_polar_to_dict(polar), indent=2))
+        text = json.dumps(_polar_to_dict(polar), indent=2)
+        fd, tmp_name = tempfile.mkstemp(
+            dir=self._directory, prefix=path.stem + ".", suffix=".tmp"
+        )
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                handle.write(text)
+            os.replace(tmp_name, path)
+        except BaseException:
+            try:
+                os.unlink(tmp_name)
+            except OSError:
+                pass
+            raise
         return path
 
     def clear(self) -> int:
