@@ -313,3 +313,23 @@ def test_two_panels_raise_a_clear_error() -> None:
     """Two panels give three nodes, too few for the spline of the next pass."""
     with pytest.raises(ValueError, match="at least 3"):
         repanel(naca_symmetric_coords(), n_panels=2)
+
+
+def test_repanel_warns_when_fixed_point_does_not_converge() -> None:
+    """repanel emits a RuntimeWarning with the last shift when _MAX_PASSES ends above 1e-9."""
+    from ventorum.airfoil import naca
+
+    coords = naca("2412")
+    with pytest.warns(RuntimeWarning, match=r"shift.*8\.\d+e-08"):
+        nodes = repanel(coords, n_panels=40)
+    assert nodes.shape == (41, 2)
+
+
+def test_airfoil_spline_repeated_consecutive_point_raises() -> None:
+    """AirfoilSpline raises AirfoilGeometryError naming the index of a repeated consecutive point."""
+    from ventorum.airfoil.geometry import AirfoilGeometryError
+
+    coords = naca_symmetric_coords()
+    dup = np.insert(coords, 10, coords[9], axis=0)
+    with pytest.raises(AirfoilGeometryError, match=r"\b10\b"):
+        AirfoilSpline(dup)
