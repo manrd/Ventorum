@@ -154,6 +154,7 @@ def test_ground_effect_equals_explicit_mirror():
         geom_both.normal,
         wake_length=solver_image.wake_length,
         wake_dir=wake_dir,
+        cp_frac=np.concatenate([mesh.wake_cp_frac, mesh.wake_cp_frac]),
     )
     Cw_both = doublet_potential(c_both, wake_both.panels, far_ratio=np.inf)
     B_both, C_both = influence_matrices(c_both, verts_both, far_ratio=np.inf)

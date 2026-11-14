@@ -73,6 +73,10 @@ class PanelWake:
         (Nw_strips, 3) in m (larger y coordinate).
     wake_edges : numpy.ndarray
         Original wake edge array with shape (Nw_strips, 4).
+    cp_frac : numpy.ndarray or None, default=None
+        Span evaluation fraction in [0, 1] along ``p_left -> p_right`` for
+        each strip with shape (Nw_strips,) [-]. When None, Trefftz
+        evaluation falls back to the geometric midpoint 0.5.
     """
 
     panels: np.ndarray
@@ -82,6 +86,7 @@ class PanelWake:
     p_left: np.ndarray
     p_right: np.ndarray
     wake_edges: np.ndarray
+    cp_frac: np.ndarray | None = None
 
 
 def largest_streamwise_chord(
@@ -321,6 +326,7 @@ def build_wake(
     n_wake: int = 1,
     wake_dir: np.ndarray | None = None,
     component: np.ndarray | None = None,
+    cp_frac: np.ndarray | None = None,
 ) -> PanelWake:
     """Build flat wake panels shed along a given direction from trailing edges.
 
@@ -347,6 +353,12 @@ def build_wake(
     component : numpy.ndarray or None, optional
         Component index of each panel with shape (Np,), used only for the
         default wake length.
+    cp_frac : numpy.ndarray or None, optional
+        Control-point span fraction along ``na -> nb`` of each wake edge
+        with shape (Nw_strips,) [-]. Stored on the returned wake after
+        reversing to ``1 - cp_frac`` whenever ``pa`` and ``pb`` swap to
+        order ``p_left`` and ``p_right``. When None, Trefftz evaluation
+        uses 0.5.
 
     Returns
     -------
@@ -362,6 +374,13 @@ def build_wake(
         else np.asarray(wake_edges, dtype=int).reshape(-1, 4)
     )
     n_strips = w_edges.shape[0]
+    cp_in: np.ndarray | None = None
+    if cp_frac is not None:
+        cp_in = np.asarray(cp_frac, dtype=float).reshape(-1)
+        if cp_in.shape != (n_strips,):
+            raise ValueError(
+                f"cp_frac must have shape ({n_strips},), got {cp_in.shape}."
+            )
 
     if n_strips == 0:
         return PanelWake(
@@ -372,6 +391,7 @@ def build_wake(
             p_left=np.empty((0, 3), dtype=float),
             p_right=np.empty((0, 3), dtype=float),
             wake_edges=w_edges,
+            cp_frac=None if cp_in is None else np.empty(0, dtype=float),
         )
 
     # Determine wake length if not given
@@ -399,6 +419,7 @@ def build_wake(
     p_right_list = []
     wake_up = np.empty(n_strips, dtype=int)
     wake_lo = np.empty(n_strips, dtype=int)
+    cp_out = np.empty(n_strips, dtype=float) if cp_in is not None else None
 
     panel_counter = 0
     for k in range(n_strips):
@@ -413,8 +434,12 @@ def build_wake(
         # Order endpoints so that p_left has smaller y coordinate
         if pa[1] < pb[1]:
             p_l, p_r = pa, pb
+            if cp_out is not None:
+                cp_out[k] = cp_in[k]
         else:
             p_l, p_r = pb, pa
+            if cp_out is not None:
+                cp_out[k] = 1.0 - cp_in[k]
         p_left_list.append(p_l)
         p_right_list.append(p_r)
 
@@ -447,4 +472,5 @@ def build_wake(
         p_left=np.array(p_left_list, dtype=float),
         p_right=np.array(p_right_list, dtype=float),
         wake_edges=w_edges,
+        cp_frac=cp_out,
     )

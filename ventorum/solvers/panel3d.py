@@ -380,6 +380,8 @@ def _combined_metadata(subs: list[PanelMesh]) -> dict:
             out[name] = np.concatenate([np.asarray(getattr(m, name), dtype=int) for m in subs])
     if "root_scale_warning" in names:
         out["root_scale_warning"] = any(getattr(m, "root_scale_warning", False) for m in subs)
+    if "wake_cp_frac" in names and subs and all(getattr(m, "wake_cp_frac", None) is not None for m in subs):
+        out["wake_cp_frac"] = np.concatenate([np.asarray(m.wake_cp_frac, dtype=float) for m in subs])
     return out
 
 

@@ -823,6 +823,13 @@ class PanelSolver:
 
     def _build_wake(self, nodes, panels, wake_edges, normals, wake_dir) -> PanelWake:
         """Build one wake with the wake length and panel count of the solver."""
+        cp_frac = None
+        if wake_edges is self.mesh.wake_edges:
+            cp_frac = getattr(self.mesh, "wake_cp_frac", None)
+        else:
+            full_mesh = getattr(self, "_full_mesh", None)
+            if full_mesh is not None and wake_edges is full_mesh.wake_edges:
+                cp_frac = getattr(full_mesh, "wake_cp_frac", None)
         return build_wake(
             nodes,
             panels,
@@ -831,6 +838,7 @@ class PanelSolver:
             wake_length=self.wake_length,
             n_wake=self.n_wake,
             wake_dir=wake_dir,
+            cp_frac=cp_frac,
         )
 
     def _factorize(self, mat_a):

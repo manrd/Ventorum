@@ -124,24 +124,26 @@ def _independent_cn(solver: PanelSolver, condition: FlightCondition) -> tuple[fl
     wake = cfg.full_wake
     gamma = mu[wake.wake_up] - mu[wake.wake_lo]
     pl, pr = np.array(wake.p_left, float), np.array(wake.p_right, float)
+    cp_frac = np.full(len(pl), 0.5, dtype=float) if wake.cp_frac is None else np.array(wake.cp_frac, float)
     first = np.array([idx[0] for idx in wake.strip_panel_indices], dtype=int)
     quad = np.asarray(wake.panels, dtype=float)[first]
     n_w = np.cross(quad[:, 2] - quad[:, 0], quad[:, 3] - quad[:, 1])
     flip = np.sum((pr - pl) * np.cross(n_w, [1.0, 0.0, 0.0]), axis=1) < 0.0
     pl[flip], pr[flip] = np.array(wake.p_right, float)[flip], np.array(wake.p_left, float)[flip]
+    cp_frac[flip] = 1.0 - cp_frac[flip]
     length = np.hypot(pr[:, 1] - pl[:, 1], pr[:, 2] - pl[:, 2])
-    mid = 0.5 * (pl + pr)
+    q_pts = pl + cp_frac[:, None] * (pr - pl)
     normal = np.column_stack([-(pr[:, 2] - pl[:, 2]), pr[:, 1] - pl[:, 1]]) / length[:, None]
-    rc2 = (0.01 * length.mean()) ** 2
+    rc2 = (0.01 * length)[None, :] ** 2
     w_n = np.zeros(len(gamma))
     for vertex, sign in ((pr, 1.0), (pl, -1.0)):
-        dy = mid[:, None, 1] - vertex[None, :, 1]
-        dz = mid[:, None, 2] - vertex[None, :, 2]
+        dy = q_pts[:, None, 1] - vertex[None, :, 1]
+        dz = q_pts[:, None, 2] - vertex[None, :, 2]
         den = 2.0 * np.pi * (dy**2 + dz**2 + rc2)
         w_n += np.sum(sign * gamma[None, :] * (-dz * normal[:, 0, None] + dy * normal[:, 1, None]) / den, axis=1)
     drag = -0.5 * condition.rho * gamma * w_n * length
     q_s = 0.5 * condition.rho * condition.V_inf**2 * solver.S_ref
-    return float(drag.sum() / q_s), float(np.sum(drag * mid[:, 1]) / (q_s * solver.b_ref))
+    return float(drag.sum() / q_s), float(np.sum(drag * q_pts[:, 1]) / (q_s * solver.b_ref))
 
 
 # ---------------------------------------------------------------------------

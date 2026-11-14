@@ -78,12 +78,13 @@ def test_wake_through_rear_wing_in_ground_effect_is_refused():
 # (_build_surface_gradient_operator_shepard) the four cases give the previous
 # values to 5e-13 relative, so only the gradient moves them. CL changes by
 # 1.2 to 1.3 %, Cm by 1 to 35 % (10 chordwise panels), and the Trefftz CDi
-# does not change.
+# does not change. CDi was stored again after the change to the VLM Trefftz
+# evaluation point and per-strip core.
 _BASELINES = {
-    "tandem_offset": (0.554367196934527, 0.010964617383178119, 0.07505217808509079),
-    "wing_tail": (0.3452886021683871, 0.004621505025221453, -0.02550505624312208),
-    "biplane": (0.5066005708654079, 0.00805895008372906, -0.02923308977602326),
-    "tandem_ground": (0.6666319507264357, 0.008827328079694476, -0.008389251198743803),
+    "tandem_offset": (0.554367196934527, 0.011879261428422305, 0.07505217808509079),
+    "wing_tail": (0.3452886021683871, 0.005227746890452119, -0.02550505624312208),
+    "biplane": (0.5066005708654079, 0.008844986949030787, -0.02923308977602326),
+    "tandem_ground": (0.6666319507264357, 0.010058204174762091, -0.008389251198743803),
 }
 
 
