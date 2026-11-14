@@ -387,10 +387,14 @@ def test_rectangular_wing_ar8_naca0012():
     cl_left = l_left / (q_inf * half_sref)
     assert abs(cl_right - cl_left) < 1.0e-10, f"Half wing lift mismatch: {abs(cl_right - cl_left)}"
 
-    # 4. Trefftz plane induced drag positive and within 15 % of VLM CDi
+    # 4. Trefftz plane induced drag positive, and the span efficiency CL^2 / CDi
+    # within 15 % of the VLM. CDi itself is not compared: the thickness raises
+    # CL by about 6 % and so CDi by about 12 %, which the efficiency removes.
     assert res4.CDi_trefftz > 0.0, f"Trefftz drag is not positive: {res4.CDi_trefftz}"
-    assert abs(res4.CDi_trefftz - cdi_vlm) / cdi_vlm < 0.15, (
-        f"CDi_trefftz ({res4.CDi_trefftz}) not within 15 % of VLM CDi ({cdi_vlm})"
+    eff_panel = res4.CL**2 / res4.CDi_trefftz
+    eff_vlm = cl_vlm**2 / cdi_vlm
+    assert abs(eff_panel - eff_vlm) / eff_vlm < 0.15, (
+        f"CL^2/CDi ({eff_panel}) not within 15 % of the VLM value ({eff_vlm})"
     )
 
 

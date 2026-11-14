@@ -579,8 +579,13 @@ def test_flap_spanwise_convergence_and_vlm_increment() -> None:
     Aspect ratio 8, NACA 0012 with a closed trailing edge, flap from 10 to
     60 percent of the semi-span with the hinge at 75 percent chord, 10 deg
     down, alpha 5 deg, 24 chordwise panels, 24, 48 and 96 spanwise panels.
-    CL and the Trefftz CDi change by less than 2 % from 48 to 96 strips and
-    move in the same direction as from 24 to 48 (a consistent trend). The
+    CL and the Trefftz CDi change by less than 2 % from 48 to 96 strips;
+    CL also moves in the same direction as from 24 to 48 (a consistent
+    trend). CDi has no trend check: the fixed strip edges at the flap ends
+    give neighbouring strips of very different width (ratio about 6 at 48
+    strips), and the Trefftz CDi of the control-point rule is not monotonic
+    on this layout (24, 48, 96: 0.02248, 0.02258, 0.02227). The vortex
+    lattice with the same rule and layout is not monotonic either. The
     flap increment of CL (the same wing without deflection subtracted)
     agrees with the vortex lattice (same planform and control, thin
     surface) to 10 %: the thick sections of the panel method make the flap
@@ -594,7 +599,8 @@ def test_flap_spanwise_convergence_and_vlm_increment() -> None:
     for k in (0, 1):
         f24, f48, f96 = (vals[n][k] for n in (24, 48, 96))
         assert abs(f96 / f48 - 1.0) < 0.02
-        assert np.sign(f48 - f24) == np.sign(f96 - f48)
+        if k == 0:
+            assert np.sign(f48 - f24) == np.sign(f96 - f48)
     d_panel = vals[96][0] - clean[0]
     ac_flap = Aircraft(name="A", surfaces=[_flap_wing_ar8()], ref_point=np.zeros(3))
     ac_clean = Aircraft(name="A", surfaces=[_rect_wing()], ref_point=np.zeros(3))
