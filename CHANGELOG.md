@@ -10,6 +10,12 @@ a minor version can change a public interface.
 
 ### Added
 
+- Parasite-drag build-up: new type `ventorum.aero.parasite.BluffComponent` for bluff parts (landing
+  gear, struts, fairings), counted as a user-given drag coefficient on a frontal area
+  (default relative uncertainty 0.20). `DragComponent` accepts an optional base term
+  (`base_area` [m^2] and `cd_base` [-], given together), and `ParasiteDragResult` gives it apart in
+  the new field `cd0_base_by_component`. The module has no built-in table of coefficients and no
+  base-drag constant. Existing build-ups do not change.
 - Verification report: sections V11 to V15 for the 3D panel method (sphere and ellipsoid against exact
   potential flow, thin-wing limit against the vortex lattice, ground images against an explicit mirror
   mesh) and the 2D panel method (Karman-Trefftz section). V1 to V10 do not change. The theory chapters
