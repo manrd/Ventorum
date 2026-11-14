@@ -96,9 +96,9 @@ def karman_trefftz_airfoil(
 def karman_trefftz_solution(
     center: tuple[float, float] | complex,
     trailing_edge_angle_deg: float,
-    *args,
-    alpha_deg: float | None = None,
-    **kwargs,
+    n_points: int = 201,
+    *,
+    alpha_deg: float = 0.0,
 ) -> tuple[np.ndarray, float]:
     """Calculate exact surface Cp and lift coefficient from conformal mapping.
 
@@ -108,12 +108,10 @@ def karman_trefftz_solution(
         Circle center (mu_x, mu_y).
     trailing_edge_angle_deg : float
         Interior trailing-edge angle [deg].
-    *args
-        Positional arguments supporting (n_points, alpha_deg) or (alpha_deg, n_points).
+    n_points : int, optional
+        Number of discretization points along the airfoil contour (default 201).
     alpha_deg : float, optional
-        Angle of attack [deg].
-    **kwargs
-        Keyword arguments, including n_points or alpha_deg.
+        Angle of attack [deg] (default 0.0).
 
     Returns
     -------
@@ -121,6 +119,11 @@ def karman_trefftz_solution(
         Surface pressure coefficients Cp at the nodes, and exact lift
         coefficient Cl.
     """
+    if isinstance(n_points, bool) or not isinstance(n_points, (int, np.integer)):
+        raise TypeError(f"n_points must be an integer, got {n_points!r}.")
+    n_points = int(n_points)
+    alpha_deg = float(alpha_deg)
+
     if isinstance(center, complex):
         mux = center.real
         muy = center.imag
@@ -131,28 +134,6 @@ def karman_trefftz_solution(
     b = 1.0
     radius = abs(b - zc)
     theta_te = np.angle(b - zc)
-
-    # Parse args for n_points and alpha_deg
-    n_points = kwargs.get("n_points", None)
-    if alpha_deg is None:
-        alpha_deg = kwargs.get("alpha_deg", None)
-
-    for a in args:
-        if isinstance(a, (int, np.integer)):
-            if n_points is None:
-                n_points = int(a)
-            elif alpha_deg is None:
-                alpha_deg = float(a)
-        elif isinstance(a, (float, np.floating)):
-            if alpha_deg is None:
-                alpha_deg = float(a)
-            elif n_points is None:
-                n_points = int(a)
-
-    if n_points is None:
-        n_points = 201
-    if alpha_deg is None:
-        alpha_deg = 0.0
 
     alpha = np.radians(alpha_deg)
     tau = np.radians(trailing_edge_angle_deg)

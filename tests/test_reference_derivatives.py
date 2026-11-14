@@ -355,3 +355,38 @@ def test_alpha_for_cl_warns_when_not_converged(monkeypatch):
         warnings.simplefilter("error", RuntimeWarning)
         alpha, _, _ = alpha_for_cl(ac, 0.15, 0.0, make, st, alpha_grid_deg=grid)
     assert abs(alpha - 1.5) < 1e-9
+
+
+def test_alpha_for_cl_skips_expected_errors_and_propagates_unexpected(monkeypatch):
+    """alpha_for_cl skips expected solve failures (GroundStrikeError) but propagates bugs (TypeError)."""
+    import types
+
+    from ventorum.core.errors import GroundStrikeError
+    from ventorum.reference.derivatives import alpha_for_cl
+
+    def make(alpha_deg, beta_deg):
+        return types.SimpleNamespace(alpha_deg=alpha_deg, beta_deg=beta_deg, h=None)
+
+    ac = vt.Aircraft(
+        surfaces=[vt.LiftingSurface(semi_span=3.0, sections=[vt.WingSection(0.0, 1.0), vt.WingSection(1.0, 1.0)])]
+    )
+    st = vt.SolverSettings(solver_type="linear")
+    grid = [0.0, 2.0, 4.0, 6.0]
+
+    def analyze_with_ground_strike(aircraft, condition=None, settings=None):
+        a = float(condition.alpha_deg)
+        if a >= 6.0:
+            raise GroundStrikeError("trailing edge touches ground")
+        return types.SimpleNamespace(totals=types.SimpleNamespace(CL=0.1 * a))
+
+    monkeypatch.setattr(vt, "analyze", analyze_with_ground_strike)
+    alpha, cl_range, _ = alpha_for_cl(ac, 0.25, 0.0, make, st, alpha_grid_deg=grid)
+    assert alpha == pytest.approx(2.5)
+    assert cl_range == pytest.approx((0.0, 0.4))
+
+    def analyze_with_bug(aircraft, condition=None, settings=None):
+        raise TypeError("unexpected bug in callback")
+
+    monkeypatch.setattr(vt, "analyze", analyze_with_bug)
+    with pytest.raises(TypeError, match="unexpected bug"):
+        alpha_for_cl(ac, 0.25, 0.0, make, st, alpha_grid_deg=grid)
