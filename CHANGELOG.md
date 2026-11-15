@@ -421,6 +421,12 @@ a minor version can change a public interface.
 
 ### Fixed
 
+- `copy.copy`, `copy.deepcopy` and `SolverResult.clone` of a result share the solver objects in
+  `details` (the cached lattice, the loads and the ground plane, the keys in
+  `SolverResult.SHARED_DETAILS`) and copy all other data. Before, a copy of a result solved on the
+  GPU raised TypeError, because the cached lattice holds device data, and a copy of a CPU result
+  copied the full cached lattice. A result whose `details` refers to the result itself (the list of
+  post-stall branches) can now be copied; before, the copy raised RecursionError.
 - Polar cache: files are written through a temporary file and `os.replace`, and a cached polar keeps
   its `gap_mask`. The XFOIL version cache is keyed by the resolved executable path. `PolarTable.at`
   keeps `last_dropped` per thread.
