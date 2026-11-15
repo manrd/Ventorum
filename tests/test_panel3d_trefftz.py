@@ -134,8 +134,12 @@ def test_elliptic_load_spanwise_convergence() -> None:
 
 @pytest.mark.slow
 def test_solved_wing_spanwise_order_and_cl() -> None:
-    """Solved AR 8 NACA 0012 at 4 deg keeps bit-identical CL and spanwise order >= 1.1."""
-    # Pre-change CPU CL values from the exact same Morino solve at n_chord=20.
+    """Solved AR 8 NACA 0012 at 4 deg keeps its CL to round-off and spanwise order >= 1.1."""
+    # Pre-change CPU CL values from the exact same Morino solve at n_chord=20,
+    # pinned on Windows. The Linux runners give CL values that differ by about
+    # 4e-13 (round-off of the linear solve). A change of the Trefftz rule does
+    # not touch CL, and a real change of the solve is many orders larger than
+    # the tolerance.
     pinned_cl = {
         20: 0.33778004568886427,
         40: 0.33701279298982434,
@@ -155,7 +159,7 @@ def test_solved_wing_spanwise_order_and_cl() -> None:
             panel_kutta="morino",
         )
         res = vt.analyze(ac, condition=cond, settings=sett)
-        assert res.totals.CL == pinned_cl[n_span]
+        assert res.totals.CL == pytest.approx(pinned_cl[n_span], rel=0.0, abs=1.0e-11)
         cdis.append(float(res.totals.CDi))
 
     order = np.log(abs(cdis[1] - cdis[0]) / abs(cdis[2] - cdis[1])) / np.log(2.0)
