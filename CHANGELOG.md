@@ -421,6 +421,11 @@ a minor version can change a public interface.
 
 ### Fixed
 
+- Lattice cache: a cached lattice kept the airfoil objects of its first caller. After an in-place
+  change of such an airfoil, a new aircraft with the old airfoil values got a cache hit and computed
+  with the changed values (for example the profile drag of the changed airfoil), with no warning. The
+  cache now keeps its own copies of the strip airfoils. An equal aircraft still gets a cache hit.
+  No result changes for an aircraft whose airfoils do not change after the solve.
 - Polar cache: files are written through a temporary file and `os.replace`, and a cached polar keeps
   its `gap_mask`. The XFOIL version cache is keyed by the resolved executable path. `PolarTable.at`
   keeps `last_dropped` per thread.

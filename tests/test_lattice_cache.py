@@ -154,3 +154,64 @@ def test_mesh_warnings_on_every_solve(shape, hinge, n_chord, text):
     assert not any(text in w for w in res0.totals.trust.warnings)
     assert res0.totals.trust.score == res.totals.trust.score
     lattice_cache.clear()
+
+
+def _airfoil_aircraft(af):
+    """Return a rectangular wing (semi-span 4 m, chord 1 m) with *af* at both sections."""
+    return vt.Aircraft(surfaces=[vt.LiftingSurface(name="W", semi_span=4.0, sections=[
+        vt.WingSection(y_frac=0.0, chord=1.0, airfoil=af), vt.WingSection(y_frac=1.0, chord=1.0, airfoil=af)])])
+
+
+def _tab_airfoil(cd0):
+    alpha = np.radians(np.arange(-10.0, 12.5, 2.5))
+    return vt.TabulatedAirfoil(alpha=alpha, Cl_data=2.0 * np.pi * alpha, Cd_data=cd0 + 0.01 * alpha**2,
+                               Cm_data=np.full(alpha.size, -0.05))
+
+
+@pytest.mark.parametrize("solver", ["vlm", "linear", "nonlinear"])
+@pytest.mark.parametrize("kind", ["linear", "tabulated"])
+def test_in_place_airfoil_change_does_not_reach_a_cached_lattice(solver, kind):
+    """Regression: a cached lattice kept the airfoil objects of its first caller.
+
+    After an in-place change of that airfoil, a new aircraft with the old
+    airfoil values hit the old cache entry and computed with the changed
+    values (CDp 0.03 instead of 0.01), with no warning. The cached lattice
+    now holds its own copies. The changed airfoil gives its new value, and
+    an equal aircraft still hits the cache with the old value.
+    """
+    cond = vt.FlightCondition(V_inf=30.0, alpha=np.radians(4.0))
+    st = vt.SolverSettings(solver_type=solver, n_panels=8)
+
+    def make(cd0):
+        return vt.LinearAirfoil(Cd0=cd0, Cm0=-0.05) if kind == "linear" else _tab_airfoil(cd0)
+
+    lattice_cache.clear()
+    cold = vt.analyze(_airfoil_aircraft(make(0.01)), cond, st.clone()).totals
+    lattice_cache.clear()
+    af = make(0.01)
+    first = vt.analyze(_airfoil_aircraft(af), cond, st.clone())
+    if kind == "linear":
+        af.Cd0 = 0.03
+        af.Cm0 = -0.10
+    else:
+        af.Cd_data = af.Cd_data + 0.02
+        af.Cm_data = np.full(af.alpha.size, -0.10)
+    changed = vt.analyze(_airfoil_aircraft(af), cond, st.clone()).totals
+    assert changed.CDp > cold.CDp + 0.015
+    fresh = vt.analyze(_airfoil_aircraft(make(0.01)), cond, st.clone())
+    # An equal aircraft is a cache hit: it shares the arrays of the first lattice.
+    assert fresh.details["lattice"].cp is first.details["lattice"].cp
+    for name in ("CL", "CDp", "Cm"):
+        assert getattr(fresh.totals, name) == pytest.approx(getattr(cold, name), rel=1e-12, abs=1e-15), name
+    lattice_cache.clear()
+
+
+def test_cached_lattice_keeps_the_airfoil_sharing():
+    """The cache copies keep one copy per user airfoil, not one per strip."""
+    lattice_cache.clear()
+    af = vt.LinearAirfoil(Cd0=0.01)
+    lat = _lattice(vt.LiftingSurface(name="wing", semi_span=4.0, n_panels=8, sections=[
+        vt.WingSection(y_frac=0.0, chord=1.2, airfoil=af), vt.WingSection(y_frac=1.0, chord=0.6, airfoil=af)]))
+    assert all(a is not af for a in lat.airfoils)
+    assert len({id(a) for a in lat.airfoils}) == 1
+    lattice_cache.clear()
