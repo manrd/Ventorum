@@ -421,6 +421,10 @@ a minor version can change a public interface.
 
 ### Fixed
 
+- Flight condition: only `ventorum.analyze` checked the flight condition. `analyze_sweep`, the
+  sweep of a `Ventorum` instance and `LatticeSolver.solve` (vortex lattice and lifting-line solvers)
+  accepted a negative speed and gave results with trust HIGH, and a zero speed gave a bare
+  ZeroDivisionError. These entry points now apply the same check and raise the same error text.
 - 3D panel `check_mesh`: a mesh station next to the end of a control-surface transition can give a
   sliver strip (width ratio near 0.01 to its neighbour), and the check said nothing. The output has
   the new keys `min_strip_width_ratio` and `notes`, with a note when two adjacent strips have a width

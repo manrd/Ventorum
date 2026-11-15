@@ -236,6 +236,8 @@ def analyze(
     from ventorum.utils.deprecation import canonical_settings
     from ventorum.utils.validation import validate_flight_condition, validate_solver_settings
 
+    from ventorum.solvers.lattice_base import LatticeSolver
+
     aircraft = Aircraft(name="SingleWing", surfaces=[geometry]) if isinstance(geometry, LiftingSurface) else geometry
 
     if condition is None:
@@ -256,9 +258,37 @@ def analyze(
     validate_solver_settings(settings)
 
     canonical = resolve_solver_type(settings.solver_type)
-    result = make_solver(canonical).solve(aircraft, condition, settings)
+    solver_obj = make_solver(canonical)
+    if isinstance(solver_obj, LatticeSolver):
+        # The condition is checked above: the solver does not check it again,
+        # so the warnings of the check are given once.
+        result = solver_obj.solve(aircraft, condition, settings, _condition_checked=True)
+    else:
+        result = solver_obj.solve(aircraft, condition, settings)
     result.condition = condition
     return result
+
+
+def _check_sweep_conditions(condition: FlightCondition, alpha_rad: np.ndarray) -> None:
+    """Apply the flight-condition check of :func:`analyze` to the cases of a sweep.
+
+    Parameters
+    ----------
+    condition : FlightCondition
+        Base condition of the sweep.
+    alpha_rad : numpy.ndarray
+        Angles of attack of the sweep [rad].
+
+    Raises
+    ------
+    ValueError
+        With the same text as :func:`analyze` for the same value.
+    """
+    from ventorum.utils.validation import _check_angle, validate_flight_condition
+
+    validate_flight_condition(condition)
+    for a in np.atleast_1d(np.asarray(alpha_rad, dtype=float)):
+        _check_angle("alpha", float(a))
 
 
 def analyze_sweep(
@@ -306,6 +336,12 @@ def analyze_sweep(
     Returns
     -------
     list[SolverResult]
+
+    Raises
+    ------
+    ValueError
+        The flight condition or an angle of the sweep is not valid (the
+        same check and text as :func:`analyze`).
     """
     if isinstance(geometry, LiftingSurface):
         aircraft = Aircraft(name="SingleWing", surfaces=[geometry])
@@ -313,6 +349,8 @@ def analyze_sweep(
         aircraft = geometry
 
     condition = FlightCondition(V_inf=V_inf, alpha=0.0)
+    alpha_range = np.radians(alpha_deg_range)
+    _check_sweep_conditions(condition, alpha_range)
 
     if settings is None:
         settings = SolverSettings(solver_type=solver or "auto", n_panels=n_panels, spacing=spacing)
@@ -326,8 +364,6 @@ def analyze_sweep(
     from ventorum.utils.deprecation import canonical_settings
 
     settings = canonical_settings(settings)
-
-    alpha_range = np.radians(alpha_deg_range)
 
     return alpha_sweep(
         aircraft, condition, settings, alpha_range,
