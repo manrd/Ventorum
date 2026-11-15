@@ -433,6 +433,9 @@ a minor version can change a public interface.
 - `PolarTable` can be copied with `copy.copy` and `copy.deepcopy` and pickled again (for example to
   send it to a process pool). Before, the per-thread store of `last_dropped` raised TypeError. A copy
   starts with `last_dropped` 0. The class docstring no longer lists `last_dropped` as an argument.
+- `PolarTable.at`: with an alpha axis that is not in ascending order, the gap mask marked the wrong
+  interval, and the real gap gave its bridged value with no warning. The mask now uses the sorted
+  axis. The values do not change.
 - Polar cache: files are written through a temporary file and `os.replace`, and a cached polar keeps
   its `gap_mask`. The XFOIL version cache is keyed by the resolved executable path. `PolarTable.at`
   keeps `last_dropped` per thread.

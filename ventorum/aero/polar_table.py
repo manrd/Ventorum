@@ -384,8 +384,10 @@ class PolarTable:
         )
         # An interval between two kept angles that holds a dropped (NaN)
         # angle bridges a gap: its values come from the interpolation of the
-        # polar across the gap, not from a solution of the source.
-        bridged = np.diff(keep) > 1
+        # polar across the gap, not from a solution of the source. The gap
+        # mask of TabulatedAirfoil is per interval of the sorted table, and
+        # the alpha axis can be in any order, so the mask uses the sorted axis.
+        bridged = np.diff(np.flatnonzero(ok[np.argsort(self.alpha_deg, kind="stable")])) > 1
         return (
             TabulatedAirfoil(
                 name=name,

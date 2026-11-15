@@ -813,3 +813,27 @@ def test_copy_deepcopy_and_pickle_keep_the_table(how):
         out.Cl[0, 0, 0] = 99.0
         assert table.Cl[0, 0, 0] != 99.0
 
+
+def test_gap_mask_on_a_descending_alpha_axis():
+    """A dropped angle inside a table with a non-ascending alpha axis marks the interval that holds it."""
+    alpha_asc = np.array([-4.0, -2.0, 0.0, 2.0, 4.0, 6.0])
+    cl_asc = 0.11 * alpha_asc
+    cl_asc[4] = np.nan  # 4 deg did not converge.
+    results = {}
+    for order in ("ascending", "descending", "sweep from zero"):
+        idx = {"ascending": [0, 1, 2, 3, 4, 5], "descending": [5, 4, 3, 2, 1, 0],
+               "sweep from zero": [2, 3, 4, 5, 1, 0]}[order]
+        table = PolarTable(
+            Re=np.array([1e6]), flap_deg=np.array([0.0]), alpha_deg=alpha_asc[idx],
+            Cl=cl_asc[idx][None, None, :], Cd=np.full((1, 1, 6), 0.01), Cm=np.zeros((1, 1, 6)),
+        )
+        polar = table.at(1e6, 0.0)
+        assert table.last_dropped == 1
+        # The sorted table is -4, -2, 0, 2, 6 deg: the gap is the last interval (2, 6) deg.
+        np.testing.assert_array_equal(polar.gap_mask, [False, False, False, True])
+        assert polar.in_gap(np.radians(4.0))
+        assert not polar.in_gap(np.radians(-1.0))
+        results[order] = polar.tables()
+    for order in ("descending", "sweep from zero"):
+        for got, ref in zip(results[order], results["ascending"]):
+            np.testing.assert_array_equal(got, ref)
