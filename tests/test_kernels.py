@@ -792,6 +792,7 @@ def test_trefftz_core_parity(backend, numpy_backend, monkeypatch):
     assert np.max(np.abs(new - ref)) <= 1e-12 * np.max(np.abs(ref))
 
 
+@pytest.mark.gpu
 def test_trefftz_core_parity_cuda(numpy_backend, monkeypatch):
     """The torch kernel on a CUDA GPU gives the numpy result with the cross-surface core."""
     _need_cuda()

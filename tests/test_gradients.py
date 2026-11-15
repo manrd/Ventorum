@@ -1249,7 +1249,7 @@ def test_kernels_target_on_end_point_float32() -> None:
         assert np.allclose(v32, v64, rtol=1e-5, atol=1e-6 * float(np.max(np.abs(v64)))), fn.__name__
 
 
-@pytest.mark.parametrize("device", ["cpu", "gpu"])
+@pytest.mark.parametrize("device", ["cpu", pytest.param("gpu", marks=pytest.mark.gpu)])
 def test_float32_reference_with_target_on_end_point(device: str, restore_vjp_backend) -> None:
     """Float32 reference gradients of a wing with a flap, a tail and a fin pass the forward check.
 

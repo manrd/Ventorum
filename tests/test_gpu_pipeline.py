@@ -678,6 +678,7 @@ def test_gpu_mach_parity_mixed_sweep(gpu_device, precision):
     _assert_close(ref, new, TOL[precision])
 
 
+@pytest.mark.gpu
 def test_mach_device_lattice_cache_keeps_one_entry():
     """A Mach sweep over many angles keeps one stretched GPU lattice per precision (no growth)."""
     from ventorum import gpu
