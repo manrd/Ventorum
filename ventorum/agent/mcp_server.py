@@ -13,7 +13,8 @@ Notifications (messages without ``id``) get no reply. Every request with an
 * -32700 parse error (invalid JSON, also NaN and Infinity; also bytes that are
   not valid UTF-8; the reply has ``id: null``)
 * -32600 invalid request (not an object, a JSON array, no ``method``, an ``id``
-  that is null or not a string or an integer)
+  that is null, a boolean, or not a string, an integer or a number with no
+  fraction part; an id such as 5.0 is accepted and echoed as 5.0)
 * -32601 method not found
 * -32602 invalid params (``params`` not an object, bad tool call params, unknown tool)
 * -32603 internal error
@@ -29,6 +30,7 @@ in ``content``.
 from __future__ import annotations
 
 import json
+import math
 import sys
 from typing import Any, TextIO
 
@@ -94,14 +96,30 @@ def _dispatch(method: str, params: dict[str, Any]) -> Any:
     raise _RpcError(METHOD_NOT_FOUND, f"Method not found: {method}")
 
 
+def _valid_id(req_id: Any) -> bool:
+    """Return True if *req_id* is a request id that the server accepts.
+
+    The rule: a string, an integer, or a JSON number with no fraction part
+    (for example 5.0, which JSON-RPC 2.0 allows). The reply echoes the id
+    as given (5.0 stays 5.0). A boolean, null, a number with a fraction
+    part (5.5) and a number that is not finite are refused.
+    """
+    if isinstance(req_id, bool):
+        return False
+    if isinstance(req_id, (str, int)):
+        return True
+    return isinstance(req_id, float) and math.isfinite(req_id) and req_id.is_integer()
+
+
 def handle_request(msg: Any) -> dict[str, Any] | None:
     """Process one decoded JSON-RPC message. Return the reply, or None for a notification."""
     if not isinstance(msg, dict):
         return _error(None, INVALID_REQUEST, "Invalid request: a request must be a JSON object.")
     is_notification = "id" not in msg
     req_id = msg.get("id")
-    if not is_notification and not (isinstance(req_id, (str, int)) and not isinstance(req_id, bool)):
-        return _error(None, INVALID_REQUEST, "Invalid request: 'id' must be a string or an integer (not null).")
+    if not is_notification and not _valid_id(req_id):
+        return _error(None, INVALID_REQUEST, "Invalid request: 'id' must be a string, an integer or a number "
+                      "with no fraction part (not null, not a boolean).")
     method = msg.get("method")
     if msg.get("jsonrpc") != "2.0" or not isinstance(method, str):
         if is_notification:

@@ -39,8 +39,10 @@ wing = vt.LiftingSurface(
     sections=sections
 )
 
-# Analyze the wing
-print("\nAnalyzing wing at alpha = 8.0 deg using Nonlinear Solver...")
+# Analyze the wing. The default solver "auto" is the vortex-lattice method,
+# which uses only the linear part of the tabulated polars (no stall). The
+# sweep below uses the nonlinear lifting line.
+print("\nAnalyzing wing at alpha = 8.0 deg using the default solver (vortex-lattice method)...")
 result = vt.analyze(wing, alpha_deg=8.0)
 
 print("\nResults:")

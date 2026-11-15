@@ -201,6 +201,7 @@ def test_check_mach_planform(mach: float) -> None:
     assert out["pass"], (mach, out["reasons"])
 
 
+@pytest.mark.gpu
 def test_mach_gradients_gpu_equal_cpu():
     """Mach gradients on the GPU device equal the CPU gradients to round-off (float64)."""
     import warnings

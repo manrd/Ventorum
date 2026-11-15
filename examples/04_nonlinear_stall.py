@@ -46,7 +46,8 @@ print("Ventorum Example 4: Nonlinear Polars / Stall Prediction")
 print("=" * 60)
 
 # "nonlinear": lifting line with the section polar (Newton iteration). The
-# default "auto" would also choose it, because the sections have tabulated polars.
+# default "auto" chooses the vortex-lattice method, which uses only the linear
+# part of the tabulated polars (no stall), so this example sets "nonlinear".
 settings = vt.SolverSettings(
     solver_type="nonlinear",
     n_panels=40,

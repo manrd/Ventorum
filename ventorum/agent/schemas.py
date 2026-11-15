@@ -75,6 +75,11 @@ MAX_PANEL_CALL_WORK = 2.0e12
 # Smallest step of a polar sweep [deg].
 MIN_ALPHA_STEP_DEG = 0.01
 
+# Smallest angle [deg] between the dihedral of a symmetric surface and +-90
+# deg. At +-90 deg both halves of a symmetric surface lie on the plane y = 0,
+# one on the other, and the lattice has no valid solution.
+MIN_SYMMETRIC_DIHEDRAL_MARGIN_DEG = 1.0
+
 _MESH_LIMIT_TXT = (f"The total mesh (spanwise strips of all surfaces, both halves, x chordwise panels) "
                    f"must be at most {MAX_TOTAL_PANELS} panels; a larger mesh is refused. Without "
                    "n_panels (in settings or on a surface) the tools reduce the spanwise count first "
@@ -285,7 +290,10 @@ SURFACE_PROPS: dict[str, dict[str, Any]] = {
                        "root_chord_m, tip_chord_m and tip_twist_deg.",
     },
     "sweep_le_deg": _num("Leading-edge sweep [deg]. Default 0.", minimum=-75, maximum=75),
-    "dihedral_deg": _num("Dihedral [deg], positive = tip up. Default 0. 90 with symmetric false is a fin.",
+    "dihedral_deg": _num("Dihedral [deg], positive = tip up. Default 0. 90 with symmetric false is a fin. "
+                         "A symmetric surface needs |dihedral_deg| at most "
+                         f"{90.0 - MIN_SYMMETRIC_DIHEDRAL_MARGIN_DEG:g}: nearer to 90 its two halves lie "
+                         "on the plane y = 0.",
                          minimum=-90, maximum=90),
     "tip_twist_deg": _num("Tip twist relative to the root [deg], linear along the span. Positive = leading "
                           "edge up (wash-in). Washout is a NEGATIVE value. Default 0.",
@@ -790,7 +798,13 @@ def _parse_node_displacements(val: Any, where: str) -> NodeDisplacements:
 
 
 def parse_surface(spec: Any, where: str = "wing", index: int = 0) -> list[LiftingSurface]:
-    """Build one surface (two if ``mirror`` is true) from a strict surface object."""
+    """Build one surface (two if ``mirror`` is true) from a strict surface object.
+
+    A symmetric surface with ``|dihedral_deg|`` above ``90 -
+    MIN_SYMMETRIC_DIHEDRAL_MARGIN_DEG`` (89 deg) is refused with an
+    :class:`InputError`: near 90 deg its two halves lie on the plane
+    y = 0. A fin is a surface with ``symmetric`` false.
+    """
     d = check_keys(spec, SURFACE_PROPS, where)
     name = string(d["name"], f"{where}.name") if "name" in d else ("Wing" if index == 0 else f"Surface_{index + 1}")
     symmetric = boolean(d["symmetric"], f"{where}.symmetric") if "symmetric" in d else True
@@ -846,6 +860,14 @@ def parse_surface(spec: Any, where: str = "wing", index: int = 0) -> list[Liftin
                          "For an off-centre surface use 'symmetric': false with 'mirror': true.")
     n_panels = (integer(d["n_panels"], f"{where}.n_panels", minimum=4, maximum=400)
                 if "n_panels" in d else None)
+    incidence_deg = _num_key(d, "incidence_deg", SURFACE_PROPS, where, 0.0)
+    sweep_le_deg = _num_key(d, "sweep_le_deg", SURFACE_PROPS, where, 0.0)
+    dihedral_deg = _num_key(d, "dihedral_deg", SURFACE_PROPS, where, 0.0)
+    max_dihedral = 90.0 - MIN_SYMMETRIC_DIHEDRAL_MARGIN_DEG
+    if symmetric and abs(dihedral_deg) > max_dihedral:
+        raise InputError(f"{where}: a symmetric surface with dihedral_deg {dihedral_deg:g} has its two halves "
+                         f"on the plane y = 0 (|dihedral_deg| must be at most {max_dihedral:g} for a symmetric "
+                         "surface). For a fin, set 'symmetric': false.")
 
     surf = LiftingSurface(
         name=name,
@@ -853,9 +875,9 @@ def parse_surface(spec: Any, where: str = "wing", index: int = 0) -> list[Liftin
         sections=sections,
         is_symmetric=symmetric,
         position=position,
-        incidence=float(np.radians(_num_key(d, "incidence_deg", SURFACE_PROPS, where, 0.0))),
-        sweep_le=float(np.radians(_num_key(d, "sweep_le_deg", SURFACE_PROPS, where, 0.0))),
-        dihedral=float(np.radians(_num_key(d, "dihedral_deg", SURFACE_PROPS, where, 0.0))),
+        incidence=float(np.radians(incidence_deg)),
+        sweep_le=float(np.radians(sweep_le_deg)),
+        dihedral=float(np.radians(dihedral_deg)),
         n_panels=n_panels,
     )
     if "controls" in d:
@@ -914,7 +936,9 @@ def build_aircraft_from_spec(
 
     Give exactly one of *wing* (one surface) or *aircraft* (several surfaces,
     with ``surfaces``). An :class:`Aircraft` or :class:`LiftingSurface` instance
-    is also accepted from Python callers under either name.
+    is also accepted from Python callers under either name. Two surfaces
+    with the same name are refused with an :class:`InputError`: the
+    inputs and outputs that name a surface would be ambiguous.
     """
     if (wing is None) == (aircraft is None):
         msg = "Give exactly one of 'wing' (one surface) or 'aircraft' (several surfaces, with 'surfaces')."
@@ -968,7 +992,12 @@ def build_aircraft_from_spec(
         except InputError:
             raise
         except ValueError as exc:
-            raise InputError(f"{where}: {exc}") from exc
+            raise InputError(f"{w_name}: {exc}") from exc
+    names = [surf.name for surf in ac.surfaces]
+    repeated = sorted({n for n in names if names.count(n) > 1})
+    if repeated:
+        raise InputError(f"{w_name}: surface names must be unique; these names are used more than once: "
+                         f"{repeated}. Give each surface its own 'name'.")
     ac.compute_reference_values()
     return ac
 

@@ -26,7 +26,13 @@ Selection
 * :func:`set_precision` (or ``VENTORUM_GPU_PRECISION``): ``"float64"`` gives
   the results of the CPU solvers to round-off; ``"float32"`` is faster on
   most GPUs, and its error is about 1e-7 to 1e-6 relative (the owner
-  accepts float32 for the GPU paths). ``"auto"`` is ``"float32"``.
+  accepts float32 for the GPU paths). ``"auto"`` is the precision that the
+  tuner stored in the machine profile (key ``"gpu"``, ``"precision"``: the
+  precision of the tuning run), or ``"float32"`` when the profile has no
+  valid value (see :func:`get_precision`).
+
+An unknown value of ``VENTORUM_DEVICE`` or ``VENTORUM_GPU_PRECISION`` gives
+one warning with the accepted values, and ``"auto"`` is used.
 
 The GPU pipelines need the packages ``torch`` (with CUDA) and ``warp-lang``.
 Without them, or without a CUDA GPU, all solves run on the CPU.
@@ -35,14 +41,17 @@ Without them, or without a CUDA GPU, all solves run on the CPU.
 from __future__ import annotations
 
 import importlib.util
+import math
 import os
 import threading
+import warnings
 
 DEVICES = ("auto", "cpu", "gpu")
 PRECISIONS = ("auto", "float32", "float64")
 
-# Default precision of "auto" on the GPU: float32, which the owner accepts
-# for the GPU paths.
+# Precision of "auto" on the GPU when the machine profile has no valid
+# "gpu" "precision" value: float32, which the owner accepts for the GPU
+# paths. With a valid profile value, "auto" is that value.
 AUTO_PRECISION = "float32"
 
 # Built-in rule of the "auto" device, per solver family (the solver names),
@@ -71,14 +80,35 @@ FAMILIES = ("vlm", "linear", "nonlinear")
 
 
 def _env(name: str, allowed: tuple[str, ...], default: str) -> str:
-    value = os.environ.get(name, default).strip().lower()
-    return value if value in allowed else default
+    """Return the value of the environment variable *name*, or *default*.
+
+    An unknown value gives one warning (with the value and the accepted
+    values), and *default* is used.
+    """
+    raw = os.environ.get(name, default)
+    value = raw.strip().lower()
+    if value in allowed:
+        return value
+    warnings.warn(f"Unknown value {raw!r} of the environment variable {name}; the accepted values are "
+                  f"{allowed}. Ventorum uses {default!r}.", RuntimeWarning, stacklevel=2)
+    return default
 
 
 _device = _env("VENTORUM_DEVICE", DEVICES, "auto")
 _precision = _env("VENTORUM_GPU_PRECISION", PRECISIONS, "auto")
 _lock = threading.Lock()
 _status: tuple[bool, str | None] | None = None
+# Keys of the profile warnings already given (one warning per key and process).
+_warned: set[str] = set()
+
+
+def _warn_once(key: str, message: str) -> None:
+    """Give *message* as a RuntimeWarning, once per *key* in this process."""
+    with _lock:
+        if key in _warned:
+            return
+        _warned.add(key)
+    warnings.warn(message, RuntimeWarning, stacklevel=3)
 
 
 def _check() -> tuple[bool, str | None]:
@@ -157,7 +187,14 @@ def set_precision(name: str) -> None:
 
 
 def get_precision() -> str:
-    """Return the precision of the GPU pipelines: ``"float32"`` or ``"float64"`` (``"auto"`` resolved)."""
+    """Return the precision of the GPU pipelines: ``"float32"`` or ``"float64"`` (``"auto"`` resolved).
+
+    With ``"auto"``, the result is the precision stored in the machine
+    profile (key ``"gpu"``, ``"precision"``; the tuner stores the precision
+    of its run), or :data:`AUTO_PRECISION` (``"float32"``) when the profile
+    has no valid value. A profile tuned with ``VENTORUM_GPU_PRECISION``
+    float64 therefore makes ``"auto"`` float64.
+    """
     if _precision != "auto":
         return _precision
     from ventorum.hardware.profile import tuned_setting
@@ -177,10 +214,17 @@ def min_work(family: str = "vlm") -> float:
         raise ValueError(f"Unknown solver family {family!r}; use one of {FAMILIES}.")
     tuned = tuned_setting("gpu", "min_work", default=None)
     value = tuned.get(family) if isinstance(tuned, dict) else None
-    try:
-        return float(value) if value is not None else DEFAULT_MIN_WORK[family]
-    except (TypeError, ValueError):
+    if value is None:
         return DEFAULT_MIN_WORK[family]
+    try:
+        work = math.nan if isinstance(value, bool) else float(value)
+    except (TypeError, ValueError, OverflowError):
+        work = math.nan
+    if not math.isfinite(work):
+        _warn_once(f"min_work.{family}", f"The machine profile value gpu.min_work.{family} = {value!r} is not "
+                   f"a finite number; Ventorum uses the default {DEFAULT_MIN_WORK[family]:g}.")
+        return DEFAULT_MIN_WORK[family]
+    return work
 
 
 def min_cases(family: str = "vlm") -> int:
@@ -191,10 +235,17 @@ def min_cases(family: str = "vlm") -> int:
         raise ValueError(f"Unknown solver family {family!r}; use one of {FAMILIES}.")
     tuned = tuned_setting("gpu", "min_cases", default=None)
     value = tuned.get(family) if isinstance(tuned, dict) else None
-    try:
-        return int(value) if value is not None else DEFAULT_MIN_CASES[family]
-    except (TypeError, ValueError):
+    if value is None:
         return DEFAULT_MIN_CASES[family]
+    try:
+        cases = None if isinstance(value, bool) else int(value)
+    except (TypeError, ValueError, OverflowError):
+        cases = None
+    if cases is None:
+        _warn_once(f"min_cases.{family}", f"The machine profile value gpu.min_cases.{family} = {value!r} is not "
+                   f"a finite number; Ventorum uses the default {DEFAULT_MIN_CASES[family]}.")
+        return DEFAULT_MIN_CASES[family]
+    return cases
 
 
 def _interp_loglog(xs, ys, x: float) -> float:
@@ -222,11 +273,14 @@ def _valid_times(table, n_rows: int) -> bool:
     if not isinstance(ks, list) or len(ks) < 2 or not isinstance(ts, list) or len(ts) != n_rows:
         return False
     try:
+        if any(not math.isfinite(float(k)) for k in ks):
+            return False
         if int(ks[0]) != 1 or any(float(b) <= float(a) for a, b in zip(ks, ks[1:])):
             return False
-        return all(isinstance(row, list) and len(row) == len(ks) and all(float(t) > 0.0 for t in row)
+        return all(isinstance(row, list) and len(row) == len(ks)
+                   and all(math.isfinite(float(t)) and float(t) > 0.0 for t in row)
                    for row in ts)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return False
 
 
@@ -248,23 +302,39 @@ def cost_model(family: str):
     if family == "panel3d":
         model = tuned_setting("gpu", "panel3d", get_precision(), default=None)
         return model if _valid_panel3d_model(model) else None
-    model = tuned_setting("gpu", "model", family, get_precision(), default=None)
-    if not isinstance(model, dict) or not isinstance(model.get("n"), list) or not model["n"]:
+    precision = get_precision()
+    model = tuned_setting("gpu", "model", family, precision, default=None)
+    if model is None:
         return None
-    try:
-        if any(float(n) < 1.0 for n in model["n"]):
-            return None
-    except (TypeError, ValueError):
-        return None
-    if not all(_valid_times(model.get(dev), len(model["n"])) for dev in ("cpu", "gpu")):
+    if not _valid_lattice_model(model):
+        # A model that the dispatch cannot use (for example a repeated panel
+        # count, which divides by zero in the interpolation) is ignored: the
+        # dispatch uses the built-in rule.
+        _warn_once(f"model.{family}.{precision}",
+                   f"The GPU cost model gpu.model.{family}.{precision} of the machine profile is not valid "
+                   "(it needs finite, strictly increasing panel counts n >= 1 and finite, positive times); "
+                   "Ventorum ignores it and uses the built-in dispatch rule. Run ventorum-tune again.")
         return None
     return model
 
 
+def _valid_lattice_model(model) -> bool:
+    """Return True for a lattice cost model with finite, strictly increasing ``n`` and valid time tables."""
+    if not isinstance(model, dict) or not isinstance(model.get("n"), list) or not model["n"]:
+        return False
+    ns = model["n"]
+    try:
+        if any(isinstance(n, bool) or not math.isfinite(float(n)) or float(n) < 1.0 for n in ns):
+            return False
+        if any(float(b) <= float(a) for a, b in zip(ns, ns[1:])):
+            return False
+    except (TypeError, ValueError, OverflowError):
+        return False
+    return all(_valid_times(model.get(dev), len(ns)) for dev in ("cpu", "gpu"))
+
+
 def _valid_panel3d_model(model) -> bool:
     """Return True for a finite, ordered panel timing table in seconds."""
-    import math
-
     if not isinstance(model, dict) or not isinstance(model.get("n"), list) or not model["n"]:
         return False
     ns = model["n"]

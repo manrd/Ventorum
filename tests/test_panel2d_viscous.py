@@ -399,6 +399,11 @@ def test_slow_case_still_converges(monkeypatch, code, defl):
             assert abs(on.Cd / off.Cd - 1.0) <= tol
 
 
+# Smallest number of angles of test_against_xfoil with an XFOIL result
+# (7 angles; XFOIL may fail to converge at one or two of them).
+MIN_XFOIL_ANGLES = 5
+
+
 @pytest.mark.slow
 @pytest.mark.skipif(not os.path.exists(XFOIL), reason="XFOIL is not installed")
 @pytest.mark.parametrize("re", [1e6, 3e6])
@@ -420,16 +425,22 @@ def test_against_xfoil(re):
     print(f"\n[viscous vs XFOIL] NACA 0012 Re {re:.0e}")
     print("alpha  Cl(V2D)  Cl(XFOIL)  Cd(V2D)   Cd(XFOIL)")
     bad = []
+    compared = 0
     for i, a in enumerate(alphas):
         k = np.flatnonzero(np.isclose(xa, a, atol=1e-6))
         if k.size == 0:
             continue
+        compared += 1
         cl_x, cd_x = xf.Cl_data[k[0]], xf.Cd_data[k[0]]
         print(f"{a:5.1f}  {mine.Cl[i]:7.4f}  {cl_x:9.4f}  {mine.Cd[i]:.5f}   {cd_x:.5f}")
         cl_ok = abs(mine.Cl[i] - cl_x) <= max(0.03 * abs(cl_x), 0.01)
         cd_ok = abs(mine.Cd[i] / cd_x - 1.0) <= 0.10
         if not (cl_ok and cd_ok and mine.converged[i]):
             bad.append(a)
+    # A comparison of fewer angles (XFOIL did not converge, or gave other
+    # angles) does not test the model: it fails, it does not pass or xfail.
+    assert compared >= MIN_XFOIL_ANGLES, (
+        f"only {compared} of {len(alphas)} angles have an XFOIL result; at least {MIN_XFOIL_ANGLES} are needed")
     if bad:
         pytest.xfail(
             f"angles {bad} deg miss the limits. Cause found: with the edge velocity of XFOIL 6.99 as input, the "

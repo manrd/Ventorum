@@ -107,6 +107,7 @@ def test_ground_effect_refusal_with_mach():
     assert "ground" in str(exc_info.value).lower()
 
 
+@pytest.mark.gpu
 def test_gpu_fallback_with_mach():
     """Check that GPU dispatch runs on the GPU and agrees with the CPU when mach > 0."""
     from ventorum import gpu
@@ -120,7 +121,14 @@ def test_gpu_fallback_with_mach():
         ],
     )
     cond = FlightCondition(V_inf=40.0, alpha=np.radians(3.0), mach=0.5)
-    res_cpu = vt.analyze(wing, condition=cond, solver="vlm")
+    # The gpu marker turns off the CPU device of conftest.py, so the
+    # reference solve selects the CPU itself.
+    dev_before = gpu.get_device()
+    try:
+        gpu.set_device("cpu")
+        res_cpu = vt.analyze(wing, condition=cond, solver="vlm")
+    finally:
+        gpu.set_device(dev_before)
     if not gpu.available():
         dispatch = res_cpu.details.get("dispatch", {})
         assert dispatch.get("device") == "cpu"

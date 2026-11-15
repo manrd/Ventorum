@@ -80,11 +80,13 @@ def test_fourier_analytical_elliptic_wing():
     # Measured relative error today: 2.8e-4 (0.028 %); old tolerance 0.10 accepted a 10 % error.
     np.testing.assert_allclose(res.totals.CL, expected_CL, rtol=2.8e-3)
 
-    # 3. Induced drag CDi = CL^2 / (pi * AR * e)
-    expected_CDi = (res.totals.CL ** 2) / (np.pi * AR * res.totals.e)
-    # Measured relative error today: 2.3e-3. Ten times that (2.3e-2) would be
-    # looser than the old tolerance, so the old, tighter 0.01 stays (a
-    # tolerance is never made looser).
+    # 3. Induced drag of the elliptic wing (Glauert, e = 1): CDi = CL^2 / (pi * AR),
+    # with the closed-form CL of check 2. The expected value does not use a
+    # result of the solver (e of the result comes from the same CDi).
+    expected_CDi = expected_CL ** 2 / (np.pi * AR)
+    # Measured relative error today: 1.2e-3 (the 31-section planform has a
+    # reference aspect ratio of 8.018, not 8). Ten times that is close to the
+    # old tolerance 0.01, so 0.01 stays (a tolerance is never made looser).
     np.testing.assert_allclose(res.totals.CDi, expected_CDi, rtol=0.01)
 
 

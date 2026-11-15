@@ -30,6 +30,9 @@ The schema has no `anyOf` for `wing` and `aircraft`, because some clients drop i
 
 A call must give exactly one of the two. A call with both or neither is refused with `invalid_input`.
 
+- **Surface names are unique.** Two surfaces with the same `name` are refused with `invalid_input`: the inputs and outputs that name a surface would be ambiguous. Surfaces without `name` get the names `Wing`, `Surface_2`, `Surface_3`, ...; a mirror copy gets the name of its surface with ` (mirror)`.
+- **Dihedral of a symmetric surface.** A symmetric surface needs `|dihedral_deg|` at most 89. Nearer to 90 its two halves lie on the plane y = 0, and the call is refused with `invalid_input`. For a fin, set `symmetric: false`.
+
 In `ventorum_batch_evaluate`, each item of `candidates` is an object with exactly one of the keys `wing` or `aircraft`, for example `{"wing": {"name": "AR8", "span_m": 8.0, "chord_m": 1.0}}`.
 
 Example with `wing`:
@@ -127,7 +130,7 @@ Every tool that solves gives the trust rating and the warnings of the solver res
 - **Rule.** All surfaces get the same spanwise count per semi-span (one settings value, so the spanwise proportions between surfaces stay). The count is the largest one that fits both limits. The floor is 4 strips per semi-span (16 for `ventorum_error_bars`, whose fine level is the spanwise count). Only at the floor is an automatic `n_chord` reduced to the mesh limit, as for a spanwise count of the caller; above the budget at the floor, the call is refused. The work estimate does not change.
 - **One mesh.** All the cases of one call (the steps of a finite difference, the angles of a sweep, the heights and free air, the cases of a trim) use the one fitted spanwise count. In `ventorum_batch_evaluate` all the candidates with an automatic spanwise count use one count; a candidate with a surface `n_panels` keeps its count.
 - **Counts of the caller.** A spanwise or chordwise count that the caller set is never changed. A call with a spanwise count of the caller above the budget is refused with `invalid_input`, and an automatic `n_chord` above the mesh limit is reduced, as before.
-- **Report.** `settings_used.n_panels` is the count that the call used, and `settings_used.mesh_note` (or `mesh_note` of each ranking in `ventorum_batch_evaluate`) gives the old and new spanwise counts, the strips of all surfaces, the chordwise count that was kept and the reason (the mesh limit, the work budget or both).
+- **Report.** `settings_used.n_panels` is the count of the settings that the call used. A surface can set its own `n_panels`, so `settings_used.surface_mesh` gives the mesh of each surface of the solved lattice: `name`, `n_panels` (spanwise strips per semi-span, as the surface key) and `n_strips` (all spanwise strips of the surface, both halves of a symmetric surface). It is present when the result has a vortex lattice (not for the Fourier and the 3D panel solvers). `settings_used.mesh_note` (or `mesh_note` of each ranking in `ventorum_batch_evaluate`) gives the old and new spanwise counts, the strips of all surfaces, the chordwise count that was kept and the reason (the mesh limit, the work budget or both).
 - **Scope.** `ventorum_wing_analysis`, `ventorum_polar_sweep`, `ventorum_ground_effect`, `ventorum_stability_derivatives`, `ventorum_derivative_matrix`, `ventorum_batch_evaluate`, `ventorum_trim` and `ventorum_error_bars`. `ventorum_mesh_convergence` does not fit: its spanwise counts are the levels of the study.
 
 ## Full aerodynamic derivative matrix

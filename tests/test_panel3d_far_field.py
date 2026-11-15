@@ -268,6 +268,7 @@ def _need_cuda():
     return torch
 
 
+@pytest.mark.gpu
 @pytest.mark.parametrize("far_ratio", [1.0, 5.0])
 def test_warp_far_field_parity(far_ratio):
     """The Warp (GPU) kernels agree with the numpy reference to round-off with many far pairs."""
@@ -284,6 +285,7 @@ def test_warp_far_field_parity(far_ratio):
         assert _rel(ref, got.cpu().numpy()) < 1e-12
 
 
+@pytest.mark.gpu
 def test_gpu_solver_far_field_parity():
     """The gpu solver backend (float64) gives the numpy CL with the default far_ratio."""
     torch = _need_cuda()
