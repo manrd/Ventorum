@@ -427,6 +427,9 @@ a minor version can change a public interface.
   GPU raised TypeError, because the cached lattice holds device data, and a copy of a CPU result
   copied the full cached lattice. A result whose `details` refers to the result itself (the list of
   post-stall branches) can now be copied; before, the copy raised RecursionError.
+- `SolverResult.to_dict` writes all fields of the flight condition: also `rho`, `h`, `phi`, the
+  rates `p`, `q`, `r` and `mach`. Before, it wrote only `V_inf`, `alpha` and `beta`, so the dict of a
+  ground-effect or rate result did not identify the case.
 - Polar cache: files are written through a temporary file and `os.replace`, and a cached polar keeps
   its `gap_mask`. The XFOIL version cache is keyed by the resolved executable path. `PolarTable.at`
   keeps `last_dropped` per thread.

@@ -1964,8 +1964,10 @@ class SolverResult:
             Dictionary of plain Python values: ``solver_type``,
             ``converged``, ``iterations``, ``execution_time`` [s],
             ``totals`` (see :meth:`IntegratedResult.to_dict`), ``condition``
-            (``V_inf`` [m/s], ``alpha`` [rad], ``beta`` [rad]) when the
-            result has one, ``spanwise`` (``y`` [m], ``Cl``, ``Cd_i`` per
+            (all fields of :class:`FlightCondition`: ``V_inf`` [m/s],
+            ``alpha`` [rad], ``beta`` [rad], ``rho`` [kg/m^3], ``h`` [m]
+            or None, ``phi`` [rad], ``p``, ``q``, ``r`` [rad/s] and
+            ``mach`` [-] or None) when the result has one, ``spanwise`` (``y`` [m], ``Cl``, ``Cd_i`` per
             surface) and ``dispatch``, as *detail_level* sets.
 
         Raises
@@ -1987,9 +1989,8 @@ class SolverResult:
         }
         if self.condition is not None:
             out["condition"] = {
-                "V_inf": float(self.condition.V_inf),
-                "alpha": float(self.condition.alpha),
-                "beta": float(self.condition.beta),
+                f.name: (None if getattr(self.condition, f.name) is None else float(getattr(self.condition, f.name)))
+                for f in dataclasses.fields(self.condition)
             }
         if detail_level in ("standard", "full"):
             out["spanwise"] = [

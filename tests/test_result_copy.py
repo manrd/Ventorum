@@ -89,3 +89,14 @@ def test_copy_of_a_result_that_refers_to_itself():
         assert out.details["branches"][0] is out
         assert out.details["branches"][1] is not res.details["branches"][1]
 
+
+def test_to_dict_keeps_all_fields_of_the_condition():
+    cond = vt.FlightCondition(V_inf=25.0, alpha=0.05, beta=0.01, rho=1.1, h=0.4, phi=0.02,
+                              p=0.1, q=-0.2, r=0.3, mach=0.07)
+    out = vt.SolverResult(condition=cond).to_dict("summary")["condition"]
+    assert out == {"V_inf": 25.0, "alpha": 0.05, "beta": 0.01, "rho": 1.1, "h": 0.4, "phi": 0.02,
+                   "p": 0.1, "q": -0.2, "r": 0.3, "mach": 0.07}
+    free = vt.SolverResult(condition=vt.FlightCondition()).to_dict("summary")["condition"]
+    assert free["h"] is None and free["mach"] is None
+    # The dict is plain data: a condition made from it is the same condition.
+    assert vt.FlightCondition(**out) == cond
