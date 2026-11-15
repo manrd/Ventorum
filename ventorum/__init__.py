@@ -195,9 +195,9 @@ def analyze(
     settings: SolverSettings | None = None,
     *,
     alpha_deg: float | None = None,
-    V_inf: float = 50.0,
+    V_inf: float | None = None,
     solver: str | None = None,
-    n_panels: int = 80,
+    n_panels: int | None = None,
     use_symmetry: bool | None = None,
 ) -> SolverResult:
     """One-call entry point for an analysis.
@@ -216,34 +216,53 @@ def analyze(
     settings : SolverSettings or None
         If *None*, defaults are used with *solver* and *n_panels*.
     alpha_deg : float or None
-        Angle of attack in **degrees** (convenience shorthand, default 5).
-    V_inf : float
-        Free-stream velocity [m/s].
+        Angle of attack in **degrees** (convenience shorthand, default 5
+        deg when *condition* is None).
+    V_inf : float or None
+        Free-stream velocity [m/s] (convenience shorthand, default 50 m/s
+        when *condition* is None).
     solver : str or None
         ``"auto"`` (default) is always ``"vlm"``. Also ``"vlm"``,
         ``"linear"`` (lifting line), ``"nonlinear"`` (select
         it to use tabulated polars past the linear range) and ``"fourier"``.
-    n_panels : int
-        Spanwise panels per semi-span (when *settings* is None).
+        With *settings*, it replaces ``settings.solver_type``.
+    n_panels : int or None
+        Spanwise panels per semi-span (convenience shorthand, default 80
+        when *settings* is None).
     use_symmetry : bool or None
         Use the y = 0 symmetry plane when the geometry and flow allow it.
+        With *settings*, it replaces ``settings.use_symmetry``.
 
     Returns
     -------
     SolverResult
+
+    Raises
+    ------
+    InputError
+        A shorthand argument is given together with the object that holds
+        the same value, and the two values are different: *alpha_deg* or
+        *V_inf* with *condition* (``condition.alpha`` [rad],
+        ``condition.V_inf`` [m/s]), or *n_panels* with *settings*
+        (``settings.n_panels``). The object does not take the shorthand
+        value, so the call is refused instead of ignoring the shorthand. An
+        equal value is accepted.
     """
     from ventorum.solvers.factory import make_solver, resolve_solver_type
     from ventorum.utils.deprecation import canonical_settings
     from ventorum.utils.validation import validate_flight_condition, validate_solver_settings
 
+    from ventorum.solvers.lattice_base import LatticeSolver
+
     aircraft = Aircraft(name="SingleWing", surfaces=[geometry]) if isinstance(geometry, LiftingSurface) else geometry
+    _check_shorthand(condition, settings, alpha_deg, V_inf, n_panels)
 
     if condition is None:
         alpha_rad = np.radians(alpha_deg) if alpha_deg is not None else np.radians(5.0)
-        condition = FlightCondition(V_inf=V_inf, alpha=alpha_rad)
+        condition = FlightCondition(V_inf=50.0 if V_inf is None else V_inf, alpha=alpha_rad)
 
     if settings is None:
-        settings = SolverSettings(solver_type=solver or "auto", n_panels=n_panels)
+        settings = SolverSettings(solver_type=solver or "auto", n_panels=80 if n_panels is None else n_panels)
     elif solver is not None:
         settings = settings.clone()
         settings.solver_type = solver
@@ -256,9 +275,86 @@ def analyze(
     validate_solver_settings(settings)
 
     canonical = resolve_solver_type(settings.solver_type)
-    result = make_solver(canonical).solve(aircraft, condition, settings)
+    solver_obj = make_solver(canonical)
+    if isinstance(solver_obj, LatticeSolver):
+        # The condition is checked above: the solver does not check it again,
+        # so the warnings of the check are given once.
+        result = solver_obj.solve(aircraft, condition, settings, _condition_checked=True)
+    else:
+        result = solver_obj.solve(aircraft, condition, settings)
     result.condition = condition
     return result
+
+
+def _check_shorthand(condition: FlightCondition | None, settings: SolverSettings | None,
+                     alpha_deg: float | None, V_inf: float | None, n_panels: int | None) -> None:
+    """Refuse a shorthand argument of :func:`analyze` that the given object would override.
+
+    Parameters
+    ----------
+    condition : FlightCondition or None
+        Flight condition of the call.
+    settings : SolverSettings or None
+        Solver settings of the call.
+    alpha_deg : float or None
+        Shorthand angle of attack [deg].
+    V_inf : float or None
+        Shorthand free-stream speed [m/s].
+    n_panels : int or None
+        Shorthand spanwise panel count.
+
+    Raises
+    ------
+    InputError
+        When a shorthand value is given and differs from the value of the
+        object that is used instead.
+    """
+    import math
+
+    from ventorum.agent.schemas import InputError
+
+    def _differ(a: float, b: float) -> bool:
+        try:
+            return not math.isclose(float(a), float(b), rel_tol=1e-12, abs_tol=1e-15)
+        except (TypeError, ValueError):
+            return True
+
+    if condition is not None:
+        if alpha_deg is not None and _differ(np.radians(alpha_deg), condition.alpha):
+            raise InputError(
+                f"analyze: alpha_deg={alpha_deg!r} deg differs from condition.alpha="
+                f"{float(np.degrees(condition.alpha))!r} deg. Give the angle in one place only: "
+                "the condition is used, and alpha_deg would be ignored.")
+        if V_inf is not None and _differ(V_inf, condition.V_inf):
+            raise InputError(
+                f"analyze: V_inf={V_inf!r} m/s differs from condition.V_inf={condition.V_inf!r} m/s. "
+                "Give the speed in one place only: the condition is used, and V_inf would be ignored.")
+    if settings is not None and n_panels is not None and _differ(n_panels, settings.n_panels):
+        raise InputError(
+            f"analyze: n_panels={n_panels!r} differs from settings.n_panels={settings.n_panels!r}. "
+            "Give the panel count in one place only: the settings are used, and n_panels would be ignored.")
+
+
+def _check_sweep_conditions(condition: FlightCondition, alpha_rad: np.ndarray) -> None:
+    """Apply the flight-condition check of :func:`analyze` to the cases of a sweep.
+
+    Parameters
+    ----------
+    condition : FlightCondition
+        Base condition of the sweep.
+    alpha_rad : numpy.ndarray
+        Angles of attack of the sweep [rad].
+
+    Raises
+    ------
+    ValueError
+        With the same text as :func:`analyze` for the same value.
+    """
+    from ventorum.utils.validation import _check_angle, validate_flight_condition
+
+    validate_flight_condition(condition)
+    for a in np.atleast_1d(np.asarray(alpha_rad, dtype=float)):
+        _check_angle("alpha", float(a))
 
 
 def analyze_sweep(
@@ -306,6 +402,12 @@ def analyze_sweep(
     Returns
     -------
     list[SolverResult]
+
+    Raises
+    ------
+    ValueError
+        The flight condition or an angle of the sweep is not valid (the
+        same check and text as :func:`analyze`).
     """
     if isinstance(geometry, LiftingSurface):
         aircraft = Aircraft(name="SingleWing", surfaces=[geometry])
@@ -313,6 +415,8 @@ def analyze_sweep(
         aircraft = geometry
 
     condition = FlightCondition(V_inf=V_inf, alpha=0.0)
+    alpha_range = np.radians(alpha_deg_range)
+    _check_sweep_conditions(condition, alpha_range)
 
     if settings is None:
         settings = SolverSettings(solver_type=solver or "auto", n_panels=n_panels, spacing=spacing)
@@ -326,8 +430,6 @@ def analyze_sweep(
     from ventorum.utils.deprecation import canonical_settings
 
     settings = canonical_settings(settings)
-
-    alpha_range = np.radians(alpha_deg_range)
 
     return alpha_sweep(
         aircraft, condition, settings, alpha_range,

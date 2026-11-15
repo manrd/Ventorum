@@ -17,6 +17,13 @@ lattice instead of building it again.
   caller has its own ``kernel_cache`` (set to None), so a single solve never
   uses the kernel cache of an earlier sweep and gives the same bits as a solve
   with a new lattice.
+* The key holds the values of the airfoil data (polar coefficients,
+  tabulated polars and the section shapes of the mean line). The cached
+  lattice keeps its own copies of the strip airfoils, made when it is
+  built. The loads read the polar values from these copies. A later change
+  of a user airfoil in place therefore never reaches a cached lattice: the
+  changed airfoil gives a new key, and an aircraft with the old values
+  gets a cache hit with the old values.
 """
 
 from __future__ import annotations
@@ -114,13 +121,38 @@ def lattice_key(aircraft: Any, settings: Any, collocation: str, n_chord: int, ch
     )
 
 
+def _own_airfoils(lattice: Any) -> None:
+    """Replace the strip airfoils of a new lattice by copies that the cache owns.
+
+    *lattice* comes from the build and has no cached derived data yet. The
+    copies keep the sharing of the originals: strips that share one airfoil
+    object share one copy, so the grouping of the strips by airfoil does not
+    change. An object without a ``clone`` method is kept as it is.
+    """
+    afs = getattr(lattice, "airfoils", None)
+    if not afs:
+        return
+    copies: dict[int, Any] = {}
+    owned = []
+    for af in afs:
+        key = id(af)
+        if key not in copies:
+            copies[key] = af.clone() if hasattr(af, "clone") else af
+        owned.append(copies[key])
+    lattice.airfoils = owned
+    for slc in getattr(lattice, "surfaces", None) or ():
+        slice_afs = getattr(slc, "airfoils", None)
+        if slice_afs:
+            slc.airfoils = [copies.get(id(af), af) for af in slice_afs]
+
+
 def _freeze(obj: Any) -> None:
     """Make every array of a lattice (and of its surface slices) read-only.
 
-    The airfoils of the strips are not frozen: they are the objects of the
-    user (their tables are the arrays the user gave), and a solve must not
-    change them. A change of their data changes the surfaces fingerprint,
-    so the cache then builds a new lattice.
+    The airfoils of the strips are not frozen: they are the copies that the
+    cache owns (see :func:`_own_airfoils`), and the polar tables keep their
+    lazy interpolation data. A change of the user airfoil data changes the
+    surfaces fingerprint, so the cache then builds a new lattice.
     """
     for f in dataclasses.fields(obj):
         if f.name == "airfoils":
@@ -150,6 +182,7 @@ def get_or_build(key: tuple, build: Callable[[], Any]) -> Any:
             warnings.warn(msg, RuntimeWarning, stacklevel=2)
     else:
         hit = build()
+        _own_airfoils(hit)
         _freeze(hit)
         with _lock:
             _cache[key] = hit

@@ -444,6 +444,26 @@ a minor version can change a public interface.
   `xtr` 0.998 on a section with a deflected flap, whose trailing edge is at x/c 0.996) gives a
   UserWarning that names the side, the forced x/c and the x/c of the last station. Before, the point
   was dropped silently. The point does not move: that side has free transition, as before.
+- `ventorum.analyze`: the shorthand arguments `alpha_deg` and `V_inf` were ignored without a message
+  when a `condition` was given, and `n_panels` when `settings` were given. A shorthand value that
+  differs from the value of the given object now raises `InputError`. An equal value is accepted.
+- Flight condition: only `ventorum.analyze` checked the flight condition. `analyze_sweep`, the
+  sweep of a `Ventorum` instance and `LatticeSolver.solve` (vortex lattice and lifting-line solvers)
+  accepted a negative speed and gave results with trust HIGH, and a zero speed gave a bare
+  ZeroDivisionError. These entry points now apply the same check and raise the same error text.
+- 3D panel `check_mesh`: a mesh station next to the end of a control-surface transition can give a
+  sliver strip (width ratio near 0.01 to its neighbour), and the check said nothing. The output has
+  the new keys `min_strip_width_ratio` and `notes`, with a note when two adjacent strips have a width
+  ratio below `SLIVER_STRIP_RATIO` (0.05). The note does not change `valid_panels` or the mesh.
+- `check_gradients` in ground effect with an automatic chordwise count: each finite-difference step
+  chose the count again, so at a height where the count changes the differences contained a mesh
+  change, and the check failed with a wrong "zero reference" reason. All evaluations now use the
+  chordwise count of the base lattice.
+- Lattice cache: a cached lattice kept the airfoil objects of its first caller. After an in-place
+  change of such an airfoil, a new aircraft with the old airfoil values got a cache hit and computed
+  with the changed values (for example the profile drag of the changed airfoil), with no warning. The
+  cache now keeps its own copies of the strip airfoils. An equal aircraft still gets a cache hit.
+  No result changes for an aircraft whose airfoils do not change after the solve.
 - Polar cache: files are written through a temporary file and `os.replace`, and a cached polar keeps
   its `gap_mask`. The XFOIL version cache is keyed by the resolved executable path. `PolarTable.at`
   keeps `last_dropped` per thread.

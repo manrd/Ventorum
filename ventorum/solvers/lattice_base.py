@@ -54,7 +54,7 @@ from ventorum.geometry import lattice_cache
 from ventorum.geometry.lattice import VortexLattice, build_lattice
 from ventorum.solvers.base import BaseSolver
 from ventorum.utils.parallel import solve_threads
-from ventorum.utils.validation import validate_aircraft
+from ventorum.utils.validation import validate_aircraft, validate_flight_condition
 
 # Out of ground effect, 4 chordwise panels put the aerodynamic centre within
 # about 0.01 c of the converged value, also for aspect ratio 1 (with 1 panel
@@ -685,8 +685,14 @@ class LatticeSolver(BaseSolver):
         *,
         ground: GroundPlane | None = None,
         ref_point: np.ndarray | None = None,
+        _condition_checked: bool = False,
     ) -> SolverResult:
         """Solve one flight condition.
+
+        The flight condition gets the same check as in
+        :func:`ventorum.analyze` (:func:`ventorum.utils.validation.validate_flight_condition`):
+        for example V_inf below the minimum speed raises ValueError with
+        the same text.
 
         Parameters
         ----------
@@ -701,12 +707,23 @@ class LatticeSolver(BaseSolver):
         ref_point : numpy.ndarray or None, optional
             Moment reference point [m], shape (3,). If None, the aircraft
             reference point is used.
+        _condition_checked : bool, optional
+            Internal: True when the caller has checked *condition* already
+            (:func:`ventorum.analyze`), so the check and its warnings are
+            not repeated.
 
         Returns
         -------
         SolverResult
             Spanwise and integrated results.
+
+        Raises
+        ------
+        ValueError
+            The flight condition is not valid.
         """
+        if not _condition_checked:
+            validate_flight_condition(condition)
         aircraft = as_aircraft(aircraft)
         validate_aircraft(aircraft)
         # The main surface and the automatic reference values depend only on

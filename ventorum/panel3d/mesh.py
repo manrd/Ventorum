@@ -248,6 +248,14 @@ _VOLUME_REL = 1e-8
 #: Default planarity limit of check_mesh: corner distance from the mean
 #: plane over the panel diameter [-].
 WARP_LIMIT = 0.05
+#: Sliver-strip note of check_mesh: a note is given when the spanwise width
+#: of a trailing-edge strip is below this fraction of the width of an
+#: adjacent strip of the same component [-] (see :func:`_strip_width_notes`).
+#: The cosine and tip spacings of the builder give neighbour ratios near
+#: 1/3 and above; a mesh station next to the end of a control-surface
+#: transition can give a ratio near 0.01. The value 0.05 lies between the
+#: two, with a margin to the smallest ratio of the meshes of the tests.
+SLIVER_STRIP_RATIO = 0.05
 #: Contact check of distinct closed surfaces (:func:`check_contact`): the
 #: smallest allowed gap between a panel centroid and another closed surface,
 #: over the local panel size [-]. A wing with 90 deg winglets meshed as
@@ -3036,6 +3044,74 @@ def _self_intersection_stats(mesh: PanelMesh, nodes: np.ndarray, panels: np.ndar
     }
 
 
+def _strip_width_notes(mesh: PanelMesh, ratio_limit: float = SLIVER_STRIP_RATIO) -> dict:
+    """Return the sliver-strip note of :func:`check_mesh`.
+
+    The width of a spanwise strip is the length of its trailing-edge wake
+    edge (nodes a and b of ``mesh.wake_edges``) projected on the y-z plane
+    [m], so a sweep or a deflection of the trailing edge along x does not
+    enter it. Two strips are adjacent when they are in the same component
+    and their indices in ``mesh.strip`` differ by one. A strip that is much
+    narrower than its neighbour (for example a strip made by a base station
+    next to the end of a control-surface transition) is a sliver strip. The
+    check only reports it: it does not change the mesh.
+
+    Parameters
+    ----------
+    mesh : PanelMesh
+        Mesh to check.
+    ratio_limit : float
+        Width ratio [-] of two adjacent strips (narrow over wide) below
+        which a note is given.
+
+    Returns
+    -------
+    dict
+        min_strip_width_ratio : the smallest width ratio [-] of two
+        adjacent strips, or None when the mesh has no strip data (no
+        ``mesh.strip``, or fewer than two strips with a wake edge).
+        notes : list of str, one note per component with a ratio below
+        *ratio_limit*, empty otherwise.
+    """
+    out: dict = {"min_strip_width_ratio": None, "notes": []}
+    strip = getattr(mesh, "strip", None)
+    edges = np.asarray(mesh.wake_edges, dtype=np.int64).reshape(-1, 4)
+    if strip is None or edges.shape[0] < 2:
+        return out
+    strip = np.asarray(strip, dtype=np.int64).reshape(-1)
+    nodes = np.asarray(mesh.nodes, dtype=float)
+    upper = edges[:, 0]
+    if np.any(upper < 0) or np.any(upper >= strip.shape[0]):
+        return out
+    seg = nodes[edges[:, 3]] - nodes[edges[:, 2]]
+    width = np.hypot(seg[:, 1], seg[:, 2])
+    s_idx = strip[upper]
+    comp_raw = np.asarray(mesh.component).reshape(-1)
+    comp = comp_raw[upper] if comp_raw.shape[0] == strip.shape[0] else np.zeros(upper.shape[0], dtype=np.int64)
+    keep = s_idx >= 0
+    width, s_idx, comp = width[keep], s_idx[keep], comp[keep]
+    order = np.lexsort((s_idx, comp))
+    width, s_idx, comp = width[order], s_idx[order], comp[order]
+    adjacent = (np.diff(s_idx) == 1) & (comp[1:] == comp[:-1])
+    if not np.any(adjacent):
+        return out
+    narrow = np.minimum(width[:-1], width[1:])
+    wide = np.maximum(width[:-1], width[1:])
+    ratio = np.where(wide > 0.0, narrow / np.where(wide > 0.0, wide, 1.0), 1.0)
+    ratio = np.where(adjacent, ratio, np.inf)
+    out["min_strip_width_ratio"] = float(np.min(ratio))
+    for c in sorted({int(v) for v in comp[:-1][ratio < ratio_limit]}):
+        in_c = (comp[:-1] == c) & (ratio < ratio_limit)
+        k = int(np.flatnonzero(in_c)[np.argmin(ratio[in_c])])
+        out["notes"].append(
+            f"Component {c}: {int(np.sum(in_c))} pair(s) of adjacent strips with a width ratio below "
+            f"{ratio_limit:g}; the smallest is {ratio[k]:.3g} (strip widths {narrow[k]:.3g} m and "
+            f"{wide[k]:.3g} m). A sliver strip can come from a mesh station next to the end of a "
+            "control-surface transition. Change n_span, or check the result with a mesh study."
+        )
+    return out
+
+
 def _check_mesh_reference(mesh: PanelMesh, warp_limit: float = WARP_LIMIT) -> dict:
     """Loop reference of :func:`check_mesh`, kept only for the parity tests.
 
@@ -3200,6 +3276,7 @@ def _check_mesh_reference(mesh: PanelMesh, warp_limit: float = WARP_LIMIT) -> di
         ),
         "n_open_edges": int(n_open),
         **self_x,
+        **_strip_width_notes(mesh),
     }
 
 
@@ -3260,8 +3337,18 @@ def check_mesh(mesh: PanelMesh, warp_limit: float = WARP_LIMIT) -> dict:
         valid_panels : no panel non-convex or folded, all planar, with
         positive area, and no self-intersection.
         n_open_edges : number of edges used by one panel only.
+        min_strip_width_ratio : smallest width ratio [-] (narrow over wide)
+        of two adjacent spanwise strips of one component, from the
+        trailing-edge wake edges, or None without strip data (see
+        :func:`_strip_width_notes`).
+        notes : list of str. A note is given for each component with two
+        adjacent strips whose width ratio is below ``SLIVER_STRIP_RATIO``
+        (0.05): a sliver strip. A note is not an error: it does not change
+        ``valid_panels`` or the mesh.
     """
-    return _check_mesh(mesh, warp_limit)
+    out = _check_mesh(mesh, warp_limit)
+    out.update(_strip_width_notes(mesh))
+    return out
 
 
 def _check_mesh(mesh: PanelMesh, warp_limit: float = WARP_LIMIT, self_intersections: bool = True) -> dict:

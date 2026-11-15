@@ -434,3 +434,73 @@ def test_valid_airfoils_still_pass():
 def test_spacing_none_gives_value_error():
     with pytest.raises(ValueError, match="spacing"):
         V.validate_solver_settings(_settings(spacing=None))
+
+
+# ── Flight condition on every entry point ────────────────────────────────────
+
+@pytest.mark.parametrize("v_inf", [-50.0, 0.0])
+def test_flight_condition_is_checked_on_every_entry_point(v_inf):
+    """Regression: only analyze checked the flight condition.
+
+    analyze_sweep, the instance sweep and LatticeSolver.solve gave CL 0.32
+    with trust HIGH at V_inf = -50 m/s, and a bare ZeroDivisionError at
+    V_inf = 0. Each entry point now raises the error of analyze, with the
+    same text.
+    """
+    from ventorum.solvers.factory import make_solver
+
+    wing = _wing()
+    cond = _condition(V_inf=v_inf)
+    st = vt.SolverSettings(n_panels=8)
+    with pytest.raises(ValueError) as ref:
+        vt.analyze(wing, condition=cond, settings=st)
+    text = str(ref.value)
+    assert "V_inf" in text
+    calls = {
+        "analyze_sweep": lambda: vt.analyze_sweep(wing, np.array([2.0, 4.0]), V_inf=v_inf, n_panels=8),
+        "instance analyze": lambda: vt.Ventorum(geometry=wing, condition=cond, settings=st).analyze(),
+        "instance analyze_sweep": lambda: vt.Ventorum(geometry=wing, condition=cond, settings=st).analyze_sweep(
+            [2.0, 4.0]),
+    }
+    for solver in ("vlm", "linear", "nonlinear"):
+        calls[f"{solver} solve"] = (lambda s=solver: make_solver(s).solve(
+            wing, cond, vt.SolverSettings(solver_type=s, n_panels=8)))
+    for name, call in calls.items():
+        with pytest.raises(ValueError) as exc:
+            call()
+        assert str(exc.value) == text, name
+
+
+def test_sweep_angle_is_checked_as_in_analyze():
+    """An angle of a sweep above the size limit gets the error text of analyze."""
+    with pytest.raises(ValueError) as ref:
+        vt.analyze(_wing(), alpha_deg=200.0, n_panels=8)
+    with pytest.raises(ValueError) as exc:
+        vt.analyze_sweep(_wing(), np.array([2.0, 200.0]), n_panels=8)
+    assert str(exc.value) == str(ref.value)
+
+
+# ── Shorthand arguments of analyze ───────────────────────────────────────────
+
+@pytest.mark.parametrize("kwargs", [
+    {"condition": "cond", "alpha_deg": 3.0},
+    {"condition": "cond", "V_inf": 20.0},
+    {"settings": "sett", "n_panels": 12},
+])
+def test_analyze_refuses_a_shorthand_that_the_object_overrides(kwargs):
+    """Regression: analyze ignored alpha_deg and V_inf with a condition, and n_panels with settings."""
+    from ventorum.agent.schemas import InputError
+
+    objects = {"cond": _condition(), "sett": vt.SolverSettings(n_panels=8)}
+    call = {k: objects.get(v, v) if isinstance(v, str) else v for k, v in kwargs.items()}
+    with pytest.raises(InputError, match="in one place only"):
+        vt.analyze(_wing(), **call)
+
+
+def test_analyze_accepts_an_equal_shorthand():
+    """A shorthand value equal to the value of the object is accepted and gives the same result."""
+    cond = _condition()
+    st = vt.SolverSettings(n_panels=8)
+    plain = vt.analyze(_wing(), condition=cond, settings=st).totals
+    same = vt.analyze(_wing(), condition=cond, settings=st, alpha_deg=5.0, V_inf=40.0, n_panels=8).totals
+    assert same.CL == plain.CL and same.CDi == plain.CDi

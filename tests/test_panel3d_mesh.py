@@ -910,3 +910,46 @@ def test_section_shape_does_not_refine_above_source_points():
     f80, f160 = err(fine, 80), err(fine, 160)
     assert abs(f160) < 0.3 * abs(f80)
     assert abs(err(coarse, 40)) > 3.0 * abs(e80)
+
+
+def _flapped_rect_wing(deflection_deg):
+    """Return the rectangular NACA 0012 wing of aspect ratio 5 with a flap at eta 0.3 to 0.7."""
+    s = LiftingSurface(name="W", semi_span=3.0, is_symmetric=True, sections=[
+        WingSection(y_frac=0.0, chord=1.2, x_le=0.0, shape="0012"),
+        WingSection(y_frac=1.0, chord=1.2, x_le=0.0, shape="0012")])
+    if deflection_deg is not None:
+        s.controls = [ControlSurface(name="f", eta_start=0.3, eta_end=0.7, hinge_x_c=0.75,
+                                     deflection=np.radians(deflection_deg), symmetric=True)]
+    return s
+
+
+def test_check_mesh_notes_a_sliver_strip():
+    """Regression: a mesh station next to the end of a control transition gave a sliver strip without a note.
+
+    The flapped rectangular wing of aspect ratio 5 at n_span 24 has a strip
+    of about 0.002 m next to a strip of about 0.15 m. check_mesh now gives a
+    note; the clean wing of the same mesh gives none. The note does not
+    change valid_panels.
+    """
+    from ventorum.airfoil import airfoil
+    from ventorum.panel3d.mesh import SLIVER_STRIP_RATIO
+
+    coords = airfoil("0012").coords
+    flapped = check_mesh(mesh_lifting_surface(_flapped_rect_wing(10.0), coords, n_chord=10, n_span=24,
+                                              spacing="auto", half=False))
+    assert flapped["min_strip_width_ratio"] < SLIVER_STRIP_RATIO
+    assert len(flapped["notes"]) == 1 and "sliver strip" in flapped["notes"][0]
+    assert flapped["valid_panels"]
+    clean = check_mesh(mesh_lifting_surface(_flapped_rect_wing(None), coords, n_chord=10, n_span=24,
+                                            spacing="auto", half=False))
+    assert clean["notes"] == []
+    assert clean["min_strip_width_ratio"] > SLIVER_STRIP_RATIO
+
+
+def test_check_mesh_has_no_strip_note_without_strip_data():
+    """A mesh without strip data gives no ratio and no note."""
+    nodes = np.array([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.5, 0.5, 0.0]])
+    mesh = PanelMesh(nodes=nodes, panels=np.array([[0, 1, 2, 2]]), component=np.array([0]),
+                     kind=np.array(["surface"]), wake_edges=np.empty((0, 4), dtype=int), half=True)
+    out = check_mesh(mesh)
+    assert out["min_strip_width_ratio"] is None and out["notes"] == []

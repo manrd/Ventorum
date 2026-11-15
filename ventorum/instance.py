@@ -238,6 +238,12 @@ class Ventorum:
         use_symmetry : bool or None
             Override symmetry plane usage for this sweep.
 
+        Raises
+        ------
+        ValueError
+            The flight condition or an angle of the sweep is not valid
+            (the same check and text as :meth:`analyze`).
+
         Notes
         -----
         The sweep becomes the result of the instance: ``last_run_mode`` is
@@ -268,6 +274,10 @@ class Ventorum:
             sett.use_symmetry = bool(use_symmetry)
 
         alpha_rad = np.radians(alphas)
+        # The same flight-condition check as analyze() (same error text).
+        from ventorum import _check_sweep_conditions
+
+        _check_sweep_conditions(cond, alpha_rad)
         results = alpha_sweep(
             self.aircraft,
             condition=cond,
