@@ -784,3 +784,32 @@ def test_table_rejects_bad_ground_axes():
             Cm=np.zeros((2, 2, 3)),
         )
 
+
+
+@pytest.mark.parametrize("how", ["copy", "deepcopy", "pickle"])
+def test_copy_deepcopy_and_pickle_keep_the_table(how):
+    """A table can be copied and pickled (its per-thread store is made again), and the copy gives the same values."""
+    import copy
+    import pickle
+
+    source = _AnalyticSource(drop={(5e5, 0.0): [8.0]})
+    table = _std_table(source=source, workers=1, Re_values=[5e5, 1e6, 2e6])
+    table.at(5e5, 0.0)
+    assert table.last_dropped == 1
+    out = {"copy": copy.copy, "deepcopy": copy.deepcopy,
+           "pickle": lambda t: pickle.loads(pickle.dumps(t))}[how](table)
+    assert out is not table
+    assert out.last_dropped == 0
+    assert table.last_dropped == 1
+    re_q = float(np.sqrt(5e5 * 1e6))
+    a, b = table.at(re_q, 5.0), out.at(re_q, 5.0)
+    assert out.last_dropped == table.last_dropped == 1
+    assert a.name == b.name
+    for got, ref in zip(b.tables(), a.tables()):
+        np.testing.assert_array_equal(got, ref)
+    np.testing.assert_array_equal(out.Cl, table.Cl)
+    assert out.source_info == table.source_info
+    if how != "copy":
+        out.Cl[0, 0, 0] = 99.0
+        assert table.Cl[0, 0, 0] != 99.0
+

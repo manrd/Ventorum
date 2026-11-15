@@ -430,6 +430,9 @@ a minor version can change a public interface.
 - `SolverResult.to_dict` writes all fields of the flight condition: also `rho`, `h`, `phi`, the
   rates `p`, `q`, `r` and `mach`. Before, it wrote only `V_inf`, `alpha` and `beta`, so the dict of a
   ground-effect or rate result did not identify the case.
+- `PolarTable` can be copied with `copy.copy` and `copy.deepcopy` and pickled again (for example to
+  send it to a process pool). Before, the per-thread store of `last_dropped` raised TypeError. A copy
+  starts with `last_dropped` 0. The class docstring no longer lists `last_dropped` as an argument.
 - Polar cache: files are written through a temporary file and `os.replace`, and a cached polar keeps
   its `gap_mask`. The XFOIL version cache is keyed by the resolved executable path. `PolarTable.at`
   keeps `last_dropped` per thread.
