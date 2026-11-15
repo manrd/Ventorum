@@ -18,7 +18,7 @@ import dataclasses
 import json
 import warnings
 from dataclasses import dataclass, field
-from typing import Literal, Any
+from typing import Any, ClassVar, Literal
 
 import numpy as np
 
@@ -1849,9 +1849,32 @@ class SolverResult:
     b_ref: float | None = None
     c_ref: float | None = None
 
+    #: Keys of ``details`` whose objects a copy shares with the original
+    #: (solver objects: the cached lattice, the loads and the ground plane).
+    SHARED_DETAILS: ClassVar[tuple[str, ...]] = ("lattice", "loads", "ground")
+
     def clone(self) -> SolverResult:
-        """Fast explicit clone."""
-        return SolverResult(
+        """Return a copy that shares no mutable data with this result.
+
+        The spanwise distributions, the totals, the condition and the
+        entries of ``details`` (notes, arrays, dicts) are copied. The
+        solver objects in ``details`` (the keys in
+        :attr:`SHARED_DETAILS`: the cached lattice, the loads and the
+        ground plane) stay shared: they belong to the solver caches, they
+        can be large, and after a GPU solve the lattice holds device data
+        that cannot be copied. :func:`copy.copy` and :func:`copy.deepcopy`
+        give the same copy.
+
+        Returns
+        -------
+        SolverResult
+            The copy.
+        """
+        return self._clone({})
+
+    def _clone(self, memo: dict) -> SolverResult:
+        """Return the copy of :meth:`clone` with the deepcopy memo *memo*."""
+        out = SolverResult(
             spanwise=[sw.clone() for sw in self.spanwise],
             totals=self.totals.clone(),
             solver_type=self.solver_type,
@@ -1862,18 +1885,24 @@ class SolverResult:
             condition=self.condition.clone() if self.condition is not None else None,
             execution_time=self.execution_time,
             symmetry_used=self.symmetry_used,
-            details=copy.deepcopy(self.details),
+            details={},
             b_ref=self.b_ref,
             c_ref=self.c_ref,
         )
+        # A result can refer to itself in details (the list of branches).
+        memo[id(self)] = out
+        for key in self.SHARED_DETAILS:
+            obj = self.details.get(key)
+            if obj is not None:
+                memo.setdefault(id(obj), obj)
+        out.details = copy.deepcopy(self.details, memo)
+        return out
 
     def __copy__(self) -> SolverResult:
         return self.clone()
 
     def __deepcopy__(self, memo: dict) -> SolverResult:
-        out = self.clone()
-        memo[id(self)] = out
-        return out
+        return self._clone(memo)
 
     def moments(self, axes: str = "body") -> dict[str, float] | dict[str, dict[str, float]]:
         """Moment coefficients in the selected axis system.
@@ -1935,8 +1964,10 @@ class SolverResult:
             Dictionary of plain Python values: ``solver_type``,
             ``converged``, ``iterations``, ``execution_time`` [s],
             ``totals`` (see :meth:`IntegratedResult.to_dict`), ``condition``
-            (``V_inf`` [m/s], ``alpha`` [rad], ``beta`` [rad]) when the
-            result has one, ``spanwise`` (``y`` [m], ``Cl``, ``Cd_i`` per
+            (all fields of :class:`FlightCondition`: ``V_inf`` [m/s],
+            ``alpha`` [rad], ``beta`` [rad], ``rho`` [kg/m^3], ``h`` [m]
+            or None, ``phi`` [rad], ``p``, ``q``, ``r`` [rad/s] and
+            ``mach`` [-] or None) when the result has one, ``spanwise`` (``y`` [m], ``Cl``, ``Cd_i`` per
             surface) and ``dispatch``, as *detail_level* sets.
 
         Raises
@@ -1958,9 +1989,8 @@ class SolverResult:
         }
         if self.condition is not None:
             out["condition"] = {
-                "V_inf": float(self.condition.V_inf),
-                "alpha": float(self.condition.alpha),
-                "beta": float(self.condition.beta),
+                f.name: (None if getattr(self.condition, f.name) is None else float(getattr(self.condition, f.name)))
+                for f in dataclasses.fields(self.condition)
             }
         if detail_level in ("standard", "full"):
             out["spanwise"] = [

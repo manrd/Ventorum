@@ -78,6 +78,7 @@ with the same node and wake counts, on the CPU or on CUDA).
 
 from __future__ import annotations
 
+import warnings
 from dataclasses import dataclass, field
 from typing import NamedTuple
 
@@ -421,7 +422,12 @@ def _side_geometry(setup: CaseSetup, nodes_idx):
 
 
 def _forced_interval(setup: CaseSetup, side: int, nodes_idx):
-    """Return (j, w) of the interval that holds the forced transition point, or (None, 2)."""
+    """Return (j, w) of the interval that holds the forced transition point, or (None, 2).
+
+    A forced point downstream of the last station of the side has no
+    interval: the side then has free transition. This gives a UserWarning,
+    once per case and side.
+    """
     xf = setup.xtr[side]
     if xf >= 1.0:
         return None, 2.0
@@ -432,6 +438,16 @@ def _forced_interval(setup: CaseSetup, side: int, nodes_idx):
     for j in range(j0, len(x) - 1):
         if x[j] < xf <= x[j + 1]:
             return j, (xf - x[j]) / (x[j + 1] - x[j])
+    warned = setup.__dict__.setdefault("_xtr_warned", set())
+    if side not in warned:
+        warned.add(side)
+        warnings.warn(
+            f"Forced transition at x/c = {xf:.6g} on the {('upper', 'lower')[side]} side is downstream of the "
+            f"last station of that side (x/c = {float(x[-1]):.6g}). The forced point is not used: that side "
+            f"has free transition.",
+            UserWarning,
+            stacklevel=2,
+        )
     return None, 2.0
 
 
@@ -833,44 +849,48 @@ def _march_side(setup: CaseSetup, nodes_idx, ue, a, side: int, coupling=None):
     itr = m - 1
     h_frozen = None
     one = np.array([re])
-    for j in range(m - 1):
-        g = nodes_idx[j + 1]
-        law = _law(coupling, g)
-        st1 = tuple(np.array([v]) for v in (out[j, 0], out[j, 1], out[j, 2], ue[j]))
-        u2 = np.array([ue[j + 1]])
-        dx = np.array([dxi[j]])
-        if not turb:
-            r1 = float(_laminar_rate(setup, out[j, 0], out[j, 1], ue[j]))
-            forced = jf is not None and jf == j
-            if out[j, 2] + dxi[j] * r1 >= setup.ncrit or forced:
-                g_c = _ctau_start(setup, out[j, 0], out[j, 1], ue[j])
-                t, d, c, ok, _ = mr.station_newton(eq.TRANSITION, st1, u2, dx, one, (st1[0], st1[1], g_c),
-                                                   ncrit=np.array([setup.ncrit]),
-                                                   w_forced=np.array([wfv if forced else 2.0]), law=law)
-                turb = True
-                itr = j
-                h_frozen = None
-                if not (ok[0] and d[0] / t[0] < 4.0):
-                    h_frozen = min(out[j, 1] / out[j, 0], 2.5)
-                    st1t = (st1[0], st1[1], g_c, st1[3])
-                    t, d, c, ok, _ = mr.station_newton(eq.TURBULENT, st1t, u2, dx, one, (st1[0], st1[1], g_c),
-                                                       h_fix=np.array([h_frozen]), law=law)
-                out[j + 1] = (t[0], d[0], c[0]) if ok[0] else (out[j, 0], out[j, 1], g_c[0])
-                _march_edge(coupling, law, ue, j + 1, g, out[j + 1, 1])
-                continue
-            kind = eq.LAMINAR
-        else:
-            kind = eq.TURBULENT
-        hf = None if h_frozen is None else np.array([h_frozen])
-        t, d, c, ok, _ = mr.station_newton(kind, st1, u2, dx, one, (st1[0], st1[1], st1[2]), h_fix=hf, law=law)
-        u_new = ue[j + 1] if law is None else law[0][0] / max(1.0 - law[1][0] * d[0], 0.1)
-        hsep = 4.0 if kind == eq.LAMINAR else float(cl.separation_shape_factor(u_new * t[0] * re)[0])
-        if hf is None and not (ok[0] and d[0] / t[0] < hsep):
-            h_frozen = min(out[j, 1] / out[j, 0], hsep - 0.2)
-            t, d, c, ok, _ = mr.station_newton(kind, st1, u2, dx, one, (st1[0], st1[1], st1[2]),
-                                               h_fix=np.array([h_frozen]), law=law)
-        out[j + 1] = (t[0], d[0], c[0]) if ok[0] else (out[j, 0] * 1.01, out[j, 1] * 1.01, out[j, 2])
-        _march_edge(coupling, law, ue, j + 1, g, out[j + 1, 1])
+    # A rejected trial step of the station Newton gives non-finite values
+    # (log or sqrt of a negative value, overflow). The march tests them with
+    # the ok flag, so numpy must not warn about them.
+    with np.errstate(all="ignore"):
+        for j in range(m - 1):
+            g = nodes_idx[j + 1]
+            law = _law(coupling, g)
+            st1 = tuple(np.array([v]) for v in (out[j, 0], out[j, 1], out[j, 2], ue[j]))
+            u2 = np.array([ue[j + 1]])
+            dx = np.array([dxi[j]])
+            if not turb:
+                r1 = float(_laminar_rate(setup, out[j, 0], out[j, 1], ue[j]))
+                forced = jf is not None and jf == j
+                if out[j, 2] + dxi[j] * r1 >= setup.ncrit or forced:
+                    g_c = _ctau_start(setup, out[j, 0], out[j, 1], ue[j])
+                    t, d, c, ok, _ = mr.station_newton(eq.TRANSITION, st1, u2, dx, one, (st1[0], st1[1], g_c),
+                                                       ncrit=np.array([setup.ncrit]),
+                                                       w_forced=np.array([wfv if forced else 2.0]), law=law)
+                    turb = True
+                    itr = j
+                    h_frozen = None
+                    if not (ok[0] and d[0] / t[0] < 4.0):
+                        h_frozen = min(out[j, 1] / out[j, 0], 2.5)
+                        st1t = (st1[0], st1[1], g_c, st1[3])
+                        t, d, c, ok, _ = mr.station_newton(eq.TURBULENT, st1t, u2, dx, one, (st1[0], st1[1], g_c),
+                                                           h_fix=np.array([h_frozen]), law=law)
+                    out[j + 1] = (t[0], d[0], c[0]) if ok[0] else (out[j, 0], out[j, 1], g_c[0])
+                    _march_edge(coupling, law, ue, j + 1, g, out[j + 1, 1])
+                    continue
+                kind = eq.LAMINAR
+            else:
+                kind = eq.TURBULENT
+            hf = None if h_frozen is None else np.array([h_frozen])
+            t, d, c, ok, _ = mr.station_newton(kind, st1, u2, dx, one, (st1[0], st1[1], st1[2]), h_fix=hf, law=law)
+            u_new = ue[j + 1] if law is None else law[0][0] / max(1.0 - law[1][0] * d[0], 0.1)
+            hsep = 4.0 if kind == eq.LAMINAR else float(cl.separation_shape_factor(u_new * t[0] * re)[0])
+            if hf is None and not (ok[0] and d[0] / t[0] < hsep):
+                h_frozen = min(out[j, 1] / out[j, 0], hsep - 0.2)
+                t, d, c, ok, _ = mr.station_newton(kind, st1, u2, dx, one, (st1[0], st1[1], st1[2]),
+                                                   h_fix=np.array([h_frozen]), law=law)
+            out[j + 1] = (t[0], d[0], c[0]) if ok[0] else (out[j, 0] * 1.01, out[j, 1] * 1.01, out[j, 2])
+            _march_edge(coupling, law, ue, j + 1, g, out[j + 1, 1])
     return out, itr, ue
 
 
@@ -954,14 +974,15 @@ def initial_state(setup: CaseSetup, sweeps: int = 0, relax: float | None = None)
         xd[n] = (thw, tu[1] + tl[1] + s.te_gap, np.sqrt((tu[0] * cu + tl[0] * cl_) / thw))
         if coupling is not None:
             _march_edge(coupling, _law(coupling, n), ue_all, n, n, xd[n, 1])
-        for j in range(setup.nw - 1):
-            g1, g2 = n + j, n + j + 1
-            law = _law(coupling, g2)
-            st1 = (np.array([xd[g1, 0]]), np.array([xd[g1, 1]]), np.array([xd[g1, 2]]), np.array([ue_all[g1]]))
-            t, d, c, ok, _ = mr.station_newton(eq.WAKE, st1, np.array([ue_all[g2]]), np.array([s.wake_len[j]]),
-                                               one, st1[:3], law=law)
-            xd[g2] = (t[0], d[0], c[0]) if ok[0] else xd[g1]
-            _march_edge(coupling, law, ue_all, g2, g2, xd[g2, 1])
+        with np.errstate(all="ignore"):  # Rejected trial steps, see _march_side.
+            for j in range(setup.nw - 1):
+                g1, g2 = n + j, n + j + 1
+                law = _law(coupling, g2)
+                st1 = (np.array([xd[g1, 0]]), np.array([xd[g1, 1]]), np.array([xd[g1, 2]]), np.array([ue_all[g1]]))
+                t, d, c, ok, _ = mr.station_newton(eq.WAKE, st1, np.array([ue_all[g2]]), np.array([s.wake_len[j]]),
+                                                   one, st1[:3], law=law)
+                xd[g2] = (t[0], d[0], c[0]) if ok[0] else xd[g1]
+                _march_edge(coupling, law, ue_all, g2, g2, xd[g2, 1])
         if coupling is None:
             break
         if k_sweep > 0:
@@ -1153,7 +1174,8 @@ def _update_structure(setup: CaseSetup, st: CaseState, omega: float = 1.0, trans
         dxi, _ = _side_geometry(setup, nodes_idx)
         xs = st.x[nodes_idx]
         us = ue[nodes_idx]
-        rate = _laminar_rate(setup, xs[:, 0], ds[nodes_idx], us)
+        with np.errstate(all="ignore"):  # A station out of the closure range gives NaN: no transition there.
+            rate = _laminar_rate(setup, xs[:, 0], ds[nodes_idx], us)
         jf, _ = _forced_interval(setup, side, nodes_idx)
         new = m - 1
         for j in range(min(itr + 1, m - 1)):
@@ -1182,7 +1204,8 @@ def _update_structure(setup: CaseSetup, st: CaseState, omega: float = 1.0, trans
         if new != itr:
             if new < itr:
                 g = nodes_idx[new + 1:itr + 1]
-                st.x[g, 2] = _ctau_start(setup, st.x[g, 0], ds[g], ue[g])
+                with np.errstate(all="ignore"):
+                    st.x[g, 2] = _ctau_start(setup, st.x[g, 0], ds[g], ue[g])
             st.itr[side] = new
             changed = True
     return changed
@@ -1253,8 +1276,10 @@ def _lm_step(be, setup, st, x0, J, R, r0, ui, D, S, mask, mu, trials=LM_TRIALS):
         lam = _limit_step(setup, st, x0, d, ui, D, S, mask)
         if lam > 0.0:
             xt = x0 + lam * d
-            Rt, _, UEt = _residual_m(be, lists, be.arr(xt[None]), be.arr(ui[None]), be.arr(D[None]), one,
-                                     be.arr(S[None]), drop_b, drop_g, False)
+            # A rejected trial can give non-finite values; the test below refuses them.
+            with np.errstate(all="ignore"):
+                Rt, _, UEt = _residual_m(be, lists, be.arr(xt[None]), be.arr(ui[None]), be.arr(D[None]), one,
+                                         be.arr(S[None]), drop_b, drop_g, False)
             rn = float(np.sqrt(np.sum(be.host(Rt) ** 2)))
             ue_t = be.host(UEt)[0]
             if np.isfinite(rn) and rn < r0 and np.all(ue_t[mask] > 0.0):
@@ -1544,7 +1569,11 @@ def newton_solve(setups, states, *, tol=1e-6, max_iter=50, xp=np, device=None, d
                         best_res[i] = np.inf
             ue_inv, D, X, re_b, masks, drop_b, drop_g, S = assemble(active, refresh=bool(np.any(changed)) or it == 0)
             lists = lists_for(active)
-            R, J, UE = _residual_m(be, lists, X, ue_inv, D, re_b, S, drop_b, drop_g, True)
+            # After a structure change the iterate can leave the range of a
+            # closure (non-finite values). The test below handles a non-finite
+            # residual, so numpy must not warn about it.
+            with np.errstate(all="ignore"):
+                R, J, UE = _residual_m(be, lists, X, ue_inv, D, re_b, S, drop_b, drop_g, True)
             R_h = be.host(R)
             ue_h = be.host(UE)
             res = np.max(np.abs(R_h), axis=1)
@@ -1630,8 +1659,11 @@ def newton_solve(setups, states, *, tol=1e-6, max_iter=50, xp=np, device=None, d
                 if np.all(accept):
                     break
                 Xt = be.arr(X_h + lam[:, None, None] * dx_h)
-                Rt, _, UEt = _residual_m(be, lists, Xt, ue_inv, D, re_b, S, drop_b, drop_g, False)
-                rn = np.sqrt(np.sum(be.host(Rt) ** 2, axis=1))
+                # A rejected trial step can give non-finite values (log or sqrt of a
+                # negative value, overflow); the test below refuses them.
+                with np.errstate(all="ignore"):
+                    Rt, _, UEt = _residual_m(be, lists, Xt, ue_inv, D, re_b, S, drop_b, drop_g, False)
+                    rn = np.sqrt(np.sum(be.host(Rt) ** 2, axis=1))
                 ok = np.isfinite(rn) & (rn <= (1.0 - 1e-4 * lam) * r0) & edge_ok(be.host(UEt), masks)
                 for k in range(len(active)):
                     if not accept[k]:
@@ -1763,7 +1795,10 @@ def case_outputs(setup: CaseSetup, st: CaseState, ue: np.ndarray, x_ref=None) ->
         lam = np.arange(m) <= itr
         rt = ue[g] * th[g] * re
         cfl = 2.0 * cl.laminar_cf_factor(H[g])[0] / rt
-        cft = cl.turbulent_cf(H[g], np.maximum(rt, 1.5))[0]
+        # The turbulent closure is evaluated also at the laminar stations, and
+        # np.where below does not use these values; they can overflow.
+        with np.errstate(all="ignore"):
+            cft = cl.turbulent_cf(H[g], np.maximum(rt, 1.5))[0]
         cf[g] = np.where(lam, cfl, cft)
         ctau[g] = np.where(lam, np.nan, st.x[g, 2] ** 2)
         amp[g] = np.where(lam, st.x[g, 2], np.nan)

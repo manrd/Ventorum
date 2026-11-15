@@ -111,8 +111,6 @@ class PolarTable:
         point where the source did not converge.
     source_info : dict
         Provenance: source name, section, options and version.
-    last_dropped : int
-        Number of alpha points dropped by the last :meth:`at` call.
     h_over_c : np.ndarray or None
         Heights above ground in chords [-], strictly ascending,
         shape (n_h,). None indicates free air.
@@ -122,6 +120,13 @@ class PolarTable:
         circulation lift. In ground effect ``Cl`` is then the lift that
         the source reports (for the in-house 2D solver, the pressure
         lift).
+
+    Attributes
+    ----------
+    last_dropped : int
+        Number of alpha points dropped by the last :meth:`at` call on the
+        current thread (a property, not an argument). A copy or a pickled
+        table starts again at 0.
 
     Notes
     -----
@@ -151,6 +156,16 @@ class PolarTable:
     @last_dropped.setter
     def last_dropped(self, value: int) -> None:
         self._dropped_local.value = int(value)
+
+    def __getstate__(self) -> dict[str, Any]:
+        # A threading.local cannot be copied or pickled. The state holds the
+        # data fields only; __setstate__ makes a new per-thread store.
+        return {name: getattr(self, name) for name in self.__dataclass_fields__ if name != "_dropped_local"}
+
+    def __setstate__(self, state: dict[str, Any]) -> None:
+        for name, value in state.items():
+            object.__setattr__(self, name, value)
+        object.__setattr__(self, "_dropped_local", threading.local())
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "Re", _as_sorted_axis(self.Re, "Re"))
@@ -369,8 +384,10 @@ class PolarTable:
         )
         # An interval between two kept angles that holds a dropped (NaN)
         # angle bridges a gap: its values come from the interpolation of the
-        # polar across the gap, not from a solution of the source.
-        bridged = np.diff(keep) > 1
+        # polar across the gap, not from a solution of the source. The gap
+        # mask of TabulatedAirfoil is per interval of the sorted table, and
+        # the alpha axis can be in any order, so the mask uses the sorted axis.
+        bridged = np.diff(np.flatnonzero(ok[np.argsort(self.alpha_deg, kind="stable")])) > 1
         return (
             TabulatedAirfoil(
                 name=name,

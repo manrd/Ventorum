@@ -421,6 +421,29 @@ a minor version can change a public interface.
 
 ### Fixed
 
+- `copy.copy`, `copy.deepcopy` and `SolverResult.clone` of a result share the solver objects in
+  `details` (the cached lattice, the loads and the ground plane, the keys in
+  `SolverResult.SHARED_DETAILS`) and copy all other data. Before, a copy of a result solved on the
+  GPU raised TypeError, because the cached lattice holds device data, and a copy of a CPU result
+  copied the full cached lattice. A result whose `details` refers to the result itself (the list of
+  post-stall branches) can now be copied; before, the copy raised RecursionError.
+- `SolverResult.to_dict` writes all fields of the flight condition: also `rho`, `h`, `phi`, the
+  rates `p`, `q`, `r` and `mach`. Before, it wrote only `V_inf`, `alpha` and `beta`, so the dict of a
+  ground-effect or rate result did not identify the case.
+- `PolarTable` can be copied with `copy.copy` and `copy.deepcopy` and pickled again (for example to
+  send it to a process pool). Before, the per-thread store of `last_dropped` raised TypeError. A copy
+  starts with `last_dropped` 0. The class docstring no longer lists `last_dropped` as an argument.
+- `PolarTable.at`: with an alpha axis that is not in ascending order, the gap mask marked the wrong
+  interval, and the real gap gave its bridged value with no warning. The mask now uses the sorted
+  axis. The values do not change.
+- 2D viscous solver: the rejected trial steps of the Newton iteration and of the start march give no
+  numpy RuntimeWarning ("invalid value", "overflow"). Before, one polar gave hundreds of them, and
+  they hid the UserWarnings (angle not converged, saw-tooth, transition rule). The handling of a
+  residual that is not finite and the values do not change.
+- 2D viscous solver: a forced transition point downstream of the last station of a side (for example
+  `xtr` 0.998 on a section with a deflected flap, whose trailing edge is at x/c 0.996) gives a
+  UserWarning that names the side, the forced x/c and the x/c of the last station. Before, the point
+  was dropped silently. The point does not move: that side has free transition, as before.
 - Polar cache: files are written through a temporary file and `os.replace`, and a cached polar keeps
   its `gap_mask`. The XFOIL version cache is keyed by the resolved executable path. `PolarTable.at`
   keeps `last_dropped` per thread.
