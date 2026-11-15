@@ -408,6 +408,13 @@ def settings_payload(s: Any, res: SolverResult | None = None) -> dict[str, Any]:
     precision (``"float32"`` or ``"float64"``) of the result. A CPU
     solve has no device keys in its details, so it reports ``"cpu"``
     and ``"float64"``.
+
+    ``n_panels`` is the spanwise count of the settings. A surface can set
+    its own count, so a result with a solved lattice also gives
+    ``surface_mesh``: one entry per surface of the lattice, with ``name``,
+    ``n_panels`` (spanwise strips per semi-span, the meaning of the
+    surface key ``n_panels``) and ``n_strips`` (spanwise strips of the
+    surface in the lattice, both halves of a symmetric surface).
     """
     out = {
         "solver_requested": s.solver_type,
@@ -429,6 +436,29 @@ def settings_payload(s: Any, res: SolverResult | None = None) -> dict[str, Any]:
         lat = details.get("lattice") if isinstance(details, dict) else None
         if lat is not None and hasattr(lat, "n_chord"):
             out["n_chord_used"] = int(lat.n_chord)
+        mesh = surface_mesh_payload(lat)
+        if mesh:
+            out["surface_mesh"] = mesh
+    return out
+
+
+def surface_mesh_payload(lat: Any) -> list[dict[str, Any]]:
+    """Return the spanwise strips of each surface of the solved lattice *lat*.
+
+    Each entry has ``name``, ``n_panels`` (strips per semi-span: half the
+    strips of a symmetric surface, all strips of a one-sided surface) and
+    ``n_strips`` (all strips of the surface). The list is empty when *lat*
+    has no surface slices.
+    """
+    out: list[dict[str, Any]] = []
+    for sl in getattr(lat, "surfaces", None) or []:
+        strips = getattr(sl, "strips", None)
+        if not isinstance(strips, slice) or strips.start is None or strips.stop is None:
+            continue
+        n_strips = int(strips.stop - strips.start)
+        symmetric = bool(getattr(sl, "is_symmetric", False))
+        out.append({"name": str(sl.name), "n_panels": n_strips // 2 if symmetric else n_strips,
+                    "n_strips": n_strips})
     return out
 
 
