@@ -440,6 +440,10 @@ a minor version can change a public interface.
   numpy RuntimeWarning ("invalid value", "overflow"). Before, one polar gave hundreds of them, and
   they hid the UserWarnings (angle not converged, saw-tooth, transition rule). The handling of a
   residual that is not finite and the values do not change.
+- 2D viscous solver: a forced transition point downstream of the last station of a side (for example
+  `xtr` 0.998 on a section with a deflected flap, whose trailing edge is at x/c 0.996) gives a
+  UserWarning that names the side, the forced x/c and the x/c of the last station. Before, the point
+  was dropped silently. The point does not move: that side has free transition, as before.
 - Polar cache: files are written through a temporary file and `os.replace`, and a cached polar keeps
   its `gap_mask`. The XFOIL version cache is keyed by the resolved executable path. `PolarTable.at`
   keeps `last_dropped` per thread.

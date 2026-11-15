@@ -1055,3 +1055,46 @@ def test_polar_gives_no_numpy_runtime_warning():
     user = [str(w.message) for w in caught if issubclass(w.category, UserWarning)]
     assert any("alpha = 8 deg did not converge" in m for m in user), user
 
+
+def _flapped_setup(xtr):
+    """Return the CaseSetup of a NACA 0012 with a 10 deg plain flap at alpha 0 deg."""
+    from ventorum.panel2d.viscous import prepare_case, resolve_body
+
+    shape = airfoil("0012").repanel(n_panels=120).with_flap(0.75, 10.0)
+    body, chord, moment, pivot = resolve_body(shape)
+    return prepare_case(body, 0.0, 1e6, ncrit=9.0, xtr=xtr, height=None, height_reference="pivot",
+                        wake_length=1.0, n_wake=30, chord_ref=chord, moment_ref=moment, pivot=pivot)
+
+
+def test_forced_transition_beyond_the_last_station_warns():
+    """A forced transition point downstream of the last station of a side gives a UserWarning.
+
+    The deflected trailing edge of a flapped section lies at x/c below 1, so a forced point between
+    it and 1 has no interval. Before, the point was dropped silently. The point does not move.
+    """
+    from ventorum.panel2d import vii
+
+    setup = _flapped_setup((0.9985, 0.5))
+    last = float(setup.sys.x_over_c[0])
+    assert last < 0.9985
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        state = vii.initial_state(setup)
+        vii.initial_state(setup)
+    msgs = [str(w.message) for w in caught if issubclass(w.category, UserWarning)]
+    assert len(msgs) == 1, msgs  # One warning per case and side.
+    assert "x/c = 0.9985 on the upper side" in msgs[0]
+    assert f"x/c = {last:.6g}" in msgs[0]
+    # The lower side has its forced point inside the side: no warning, and transition is forced there.
+    up, lo = vii._sides(setup, state)
+    assert vii._forced_interval(setup, 1, lo)[0] is not None
+    assert vii._forced_interval(setup, 0, up) == (None, 2.0)
+
+
+def test_forced_transition_inside_the_sides_does_not_warn():
+    from ventorum.panel2d import vii
+
+    setup = _flapped_setup((0.5, 0.5))
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", UserWarning)
+        vii.initial_state(setup)

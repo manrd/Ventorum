@@ -78,6 +78,7 @@ with the same node and wake counts, on the CPU or on CUDA).
 
 from __future__ import annotations
 
+import warnings
 from dataclasses import dataclass, field
 from typing import NamedTuple
 
@@ -421,7 +422,12 @@ def _side_geometry(setup: CaseSetup, nodes_idx):
 
 
 def _forced_interval(setup: CaseSetup, side: int, nodes_idx):
-    """Return (j, w) of the interval that holds the forced transition point, or (None, 2)."""
+    """Return (j, w) of the interval that holds the forced transition point, or (None, 2).
+
+    A forced point downstream of the last station of the side has no
+    interval: the side then has free transition. This gives a UserWarning,
+    once per case and side.
+    """
     xf = setup.xtr[side]
     if xf >= 1.0:
         return None, 2.0
@@ -432,6 +438,16 @@ def _forced_interval(setup: CaseSetup, side: int, nodes_idx):
     for j in range(j0, len(x) - 1):
         if x[j] < xf <= x[j + 1]:
             return j, (xf - x[j]) / (x[j + 1] - x[j])
+    warned = setup.__dict__.setdefault("_xtr_warned", set())
+    if side not in warned:
+        warned.add(side)
+        warnings.warn(
+            f"Forced transition at x/c = {xf:.6g} on the {('upper', 'lower')[side]} side is downstream of the "
+            f"last station of that side (x/c = {float(x[-1]):.6g}). The forced point is not used: that side "
+            f"has free transition.",
+            UserWarning,
+            stacklevel=2,
+        )
     return None, 2.0
 
 
