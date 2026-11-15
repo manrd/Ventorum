@@ -421,6 +421,10 @@ a minor version can change a public interface.
 
 ### Fixed
 
+- 3D panel `check_mesh`: a mesh station next to the end of a control-surface transition can give a
+  sliver strip (width ratio near 0.01 to its neighbour), and the check said nothing. The output has
+  the new keys `min_strip_width_ratio` and `notes`, with a note when two adjacent strips have a width
+  ratio below `SLIVER_STRIP_RATIO` (0.05). The note does not change `valid_panels` or the mesh.
 - `check_gradients` in ground effect with an automatic chordwise count: each finite-difference step
   chose the count again, so at a height where the count changes the differences contained a mesh
   change, and the check failed with a wrong "zero reference" reason. All evaluations now use the
