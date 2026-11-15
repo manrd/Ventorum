@@ -245,6 +245,54 @@ GPU would be faster. To see the crossovers on a machine, run
 
 **How to remove the limit.** The work regression is removed. The remaining extra work of a failed probe is a known cost.
 
+## PL-9: `machine_capabilities` reports Apple MPS as a usable GPU (macOS)
+
+**Cause.** The hardware scan (`ventorum/hardware/detector.py`,
+`_detect_gpu_capabilities`) sets the GPU as available when PyTorch finds
+the Apple MPS device, and also when `nvidia-smi` lists a GPU but PyTorch
+has no CUDA build. The agent tool `machine_capabilities`
+(`ventorum/agent/tools.py`) copies this value to `gpu.available`, and its
+summary gives, for example, "GPU: Apple MPS". The GPU pipelines of the
+lattice solvers need CUDA and NVIDIA Warp. On these machines
+`gpu_pipeline.available` is false, and every solve runs on the CPU.
+
+**What Ventorum does now.** Nothing more. The `gpu_pipeline` part of the
+payload is correct; only `gpu.available` and the summary text can make an
+agent or a user expect GPU solves.
+
+**Cost.** No solve becomes slower. An agent can plan for GPU speed that
+the machine does not give (for example large batches that it expects on
+the GPU). It is not tested on macOS.
+
+**How to remove the limit.** Options to study: state in `gpu` that the
+device is not usable by the GPU pipelines (for example a separate key for
+the pipelines, or the reason from `ventorum.gpu.unavailable_reason()` in
+the summary), and say "no CUDA GPU" in the summary when only MPS or
+`nvidia-smi` finds a device.
+
+## PL-10: Parallel cases with Numba kernels need a thread-safe threading layer (macOS)
+
+**Cause.** `case_executor` in `ventorum/utils/parallel.py` runs cases on
+worker threads, and each case can call the parallel Numba kernels. Two
+threads then call parallel Numba kernels at the same time. The Numba
+threading layers `omp` and `tbb` allow this. The layer `workqueue` does not:
+Numba stops the process with the message "Concurrent access has been
+detected" (see the Numba documentation of the threading layers). The
+`workqueue` layer is the only layer when neither OpenMP nor TBB is
+present, for example on macOS without libomp or TBB. Ventorum does not
+check the threading layer. On the Windows and Linux machines of the
+project the layer is `omp`.
+
+**What Ventorum does now.** Nothing. It is not tested on macOS.
+
+**Cost.** On such a machine a parallel batch (more than one worker in the
+parallel plan) with the Numba kernels can stop the process.
+
+**How to remove the limit.** Possible fix: when `numba.threading_layer()`
+is `"workqueue"`, run the cases one at a time (one worker, all kernel
+threads in the case), and give the reason in the dispatch record. A test
+on macOS without libomp or TBB must show it.
+
 ## Ground-sweep solve
 
 The 3D panel ground solve defaults to

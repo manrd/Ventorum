@@ -421,6 +421,24 @@ a minor version can change a public interface.
 
 ### Fixed
 
+- Agent tools: `settings_used.surface_mesh` gives the spanwise strips of each surface of the solved
+  lattice (`n_panels` per semi-span and `n_strips`); `settings_used.n_panels` was only the settings
+  value, also when a surface set its own count. A symmetric surface with `|dihedral_deg|` above 89
+  (both halves on y = 0) and two surfaces with the same name are refused with `invalid_input`. A
+  size-limit message of a section starts with the argument name (it started with "None"). The MCP
+  server accepts a request id that is a number with no fraction part (5.0) and echoes it.
+- GPU settings: a lattice cost model of the machine profile with a repeated panel count, or with
+  times that are not finite, is ignored with one warning, and the dispatch uses the built-in rule
+  (before, the dispatch raised ZeroDivisionError). Profile values of `min_work` and `min_cases`
+  that are not finite numbers give the defaults with one warning. An unknown `VENTORUM_DEVICE` or
+  `VENTORUM_GPU_PRECISION` value gives a warning (it was ignored silently). The docstring of the
+  `"auto"` precision says that it is the precision stored in the profile, else float32.
+- Tests: eight GPU test cases have the `gpu` marker, so the GPU gate runs them, and a new test
+  checks the marker of every test that skips without CUDA. The induced-drag check of the
+  elliptic-wing test compares with the closed-form value (it compared CDi with itself). The XFOIL
+  comparison of the 2D viscous solver fails when fewer than 5 angles have an XFOIL result.
+- Examples 04 and 07 say that the default solver is the vortex-lattice method (they said the
+  nonlinear lifting line). The computation does not change.
 - Polar cache: files are written through a temporary file and `os.replace`, and a cached polar keeps
   its `gap_mask`. The XFOIL version cache is keyed by the resolved executable path. `PolarTable.at`
   keeps `last_dropped` per thread.
@@ -602,6 +620,9 @@ a minor version can change a public interface.
 - Ventorum-2D: some drag and transition cases do not yet meet their limits (marked as expected
   failures with the reason); plain flaps at small deflections leave a short step panel at the
   hinge that the viscous solver cannot handle yet.
+- macOS (recorded, not fixed): `machine_capabilities` reports Apple MPS as a usable GPU, and
+  parallel cases with Numba kernels can stop the process with the Numba `workqueue` threading
+  layer. See entries PL-9 and PL-10 of the known performance limits.
 
 ## [0.5.0] - 2026-10-14
 
