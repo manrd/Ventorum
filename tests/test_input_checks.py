@@ -478,3 +478,29 @@ def test_sweep_angle_is_checked_as_in_analyze():
     with pytest.raises(ValueError) as exc:
         vt.analyze_sweep(_wing(), np.array([2.0, 200.0]), n_panels=8)
     assert str(exc.value) == str(ref.value)
+
+
+# ── Shorthand arguments of analyze ───────────────────────────────────────────
+
+@pytest.mark.parametrize("kwargs", [
+    {"condition": "cond", "alpha_deg": 3.0},
+    {"condition": "cond", "V_inf": 20.0},
+    {"settings": "sett", "n_panels": 12},
+])
+def test_analyze_refuses_a_shorthand_that_the_object_overrides(kwargs):
+    """Regression: analyze ignored alpha_deg and V_inf with a condition, and n_panels with settings."""
+    from ventorum.agent.schemas import InputError
+
+    objects = {"cond": _condition(), "sett": vt.SolverSettings(n_panels=8)}
+    call = {k: objects.get(v, v) if isinstance(v, str) else v for k, v in kwargs.items()}
+    with pytest.raises(InputError, match="in one place only"):
+        vt.analyze(_wing(), **call)
+
+
+def test_analyze_accepts_an_equal_shorthand():
+    """A shorthand value equal to the value of the object is accepted and gives the same result."""
+    cond = _condition()
+    st = vt.SolverSettings(n_panels=8)
+    plain = vt.analyze(_wing(), condition=cond, settings=st).totals
+    same = vt.analyze(_wing(), condition=cond, settings=st, alpha_deg=5.0, V_inf=40.0, n_panels=8).totals
+    assert same.CL == plain.CL and same.CDi == plain.CDi

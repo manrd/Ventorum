@@ -421,6 +421,9 @@ a minor version can change a public interface.
 
 ### Fixed
 
+- `ventorum.analyze`: the shorthand arguments `alpha_deg` and `V_inf` were ignored without a message
+  when a `condition` was given, and `n_panels` when `settings` were given. A shorthand value that
+  differs from the value of the given object now raises `InputError`. An equal value is accepted.
 - Flight condition: only `ventorum.analyze` checked the flight condition. `analyze_sweep`, the
   sweep of a `Ventorum` instance and `LatticeSolver.solve` (vortex lattice and lifting-line solvers)
   accepted a negative speed and gave results with trust HIGH, and a zero speed gave a bare
