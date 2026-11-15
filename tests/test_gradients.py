@@ -1568,3 +1568,31 @@ def test_input_h_needs_a_height(float64_precision, cpu_device) -> None:
             vt.gradients(ac, cond, st, outputs=("CL",), wrt=("alpha", "h"))
         with pytest.raises(vt.GradientScopeError, match="'h'"):
             vt.gradient_vjp(ac, cond, st, seeds={"CL": 1.0}, wrt=("h",))
+
+
+@pytest.mark.slow
+def test_check_ground_effect_automatic_count_at_a_threshold() -> None:
+    """Regression: check_gradients chose the automatic chordwise count again at each step.
+
+    At a height where the automatic count of the ground-effect lattice
+    changes (21 panels at the base height, 20 panels 1e-6 m higher), the
+    differences contained the mesh change, and the check failed with a
+    wrong "zero reference" reason. All evaluations now use the count of
+    the base lattice.
+    """
+    w = vt.LiftingSurface(name="w", semi_span=3.0, n_panels=8, sections=[
+        vt.WingSection(y_frac=0.0, chord=1.0), vt.WingSection(y_frac=1.0, chord=1.0)])
+    ac = vt.Aircraft(name="r", surfaces=[w], ref_point=np.array([0.25, 0.0, 0.0]))
+    a = math.radians(4.0)
+    st = vt.SolverSettings(solver_type="vlm", n_panels=8)
+    h = 0.05 - 1e-7 + 0.75 * math.sin(a)
+    cond = vt.FlightCondition(V_inf=50.0, alpha=a, h=h)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        base = vt.analyze(ac, cond, st.clone()).details["lattice"].n_chord
+        up = vt.analyze(ac, vt.FlightCondition(V_inf=50.0, alpha=a, h=h + 1e-6), st.clone()).details["lattice"].n_chord
+        assert base != up  # the case is at a count threshold
+        out = vt.check_gradients(ac, cond, st, outputs=("CL", "Cm"), wrt=("h", "alpha"))
+    assert out["pass"], out["reasons"]
+    assert out["compared"] == 4 and out["skipped"] == 0
+    assert st.n_chord is None  # the settings of the caller do not change

@@ -316,6 +316,12 @@ def check_gradients(
     no compared component: such a group is not verified. With a float32
     production solve (the GPU in float32) the differences do not resolve
     the node directions, and the check reports that group.
+
+    With an automatic chordwise count (``settings.n_chord`` None), all
+    finite-difference evaluations of the vortex lattice use the count of the
+    base lattice, as :func:`ventorum.sensitivity.gradients` does. In ground
+    effect the automatic count depends on the height and the attitude, so a
+    step could otherwise change the mesh inside a difference.
     """
     import ventorum as vt
     from ventorum.core.datatypes import Aircraft, LiftingSurface, SolverSettings
@@ -360,6 +366,12 @@ def check_gradients(
 
     base_lat = base_res.details.get("lattice")
     base_topo = shared_hinge_topology(base_lat) if base_lat is not None else None
+    if st.n_chord is None and base_lat is not None and str(getattr(base_lat, "collocation", "")) == "vlm":
+        # The gradients are defined on the mesh of the base solve. In ground
+        # effect the automatic chordwise count depends on the height and the
+        # attitude, so a step could change the mesh inside a difference.
+        # All evaluations use the count of the base lattice.
+        st.n_chord = int(base_lat.n_chord)
 
     def _evaluate(geometry_pert: Any, condition_pert: Any, input_name: str, step: float) -> dict[str, float]:
         # One production solve per evaluation. The topology check uses the

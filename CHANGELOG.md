@@ -421,6 +421,10 @@ a minor version can change a public interface.
 
 ### Fixed
 
+- `check_gradients` in ground effect with an automatic chordwise count: each finite-difference step
+  chose the count again, so at a height where the count changes the differences contained a mesh
+  change, and the check failed with a wrong "zero reference" reason. All evaluations now use the
+  chordwise count of the base lattice.
 - Lattice cache: a cached lattice kept the airfoil objects of its first caller. After an in-place
   change of such an airfoil, a new aircraft with the old airfoil values got a cache hit and computed
   with the changed values (for example the profile drag of the changed airfoil), with no warning. The
