@@ -1037,3 +1037,21 @@ def test_forced_transition_ahead_of_stagnation_point_is_on_the_upper_surface():
     assert float(ref.Cm) == pytest.approx(-0.04809352125389983, rel=1e-12, abs=1e-12)
     assert ref.transition_positions == (0.3, 0.3)
 
+
+
+@pytest.mark.slow
+def test_polar_gives_no_numpy_runtime_warning():
+    """Rejected trial steps of the Newton and march paths give no numpy RuntimeWarning.
+
+    Before, this ground-effect polar gave tens of "invalid value" warnings (log, sqrt, det) from trial
+    steps that the solver refuses. The UserWarning of the angle under the ground must still appear.
+    """
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        warnings.simplefilter("error", RuntimeWarning)
+        r = solve_viscous(_naca("0012", 100), [0.0, 8.0], 1e6, height=0.1)
+    assert bool(r.converged[0]) and not bool(r.converged[1])
+    assert r.Cl[0] < 0.0
+    user = [str(w.message) for w in caught if issubclass(w.category, UserWarning)]
+    assert any("alpha = 8 deg did not converge" in m for m in user), user
+

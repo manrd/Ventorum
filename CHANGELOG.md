@@ -436,6 +436,10 @@ a minor version can change a public interface.
 - `PolarTable.at`: with an alpha axis that is not in ascending order, the gap mask marked the wrong
   interval, and the real gap gave its bridged value with no warning. The mask now uses the sorted
   axis. The values do not change.
+- 2D viscous solver: the rejected trial steps of the Newton iteration and of the start march give no
+  numpy RuntimeWarning ("invalid value", "overflow"). Before, one polar gave hundreds of them, and
+  they hid the UserWarnings (angle not converged, saw-tooth, transition rule). The handling of a
+  residual that is not finite and the values do not change.
 - Polar cache: files are written through a temporary file and `os.replace`, and a cached polar keeps
   its `gap_mask`. The XFOIL version cache is keyed by the resolved executable path. `PolarTable.at`
   keeps `last_dropped` per thread.
