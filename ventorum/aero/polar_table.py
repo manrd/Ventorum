@@ -121,13 +121,6 @@ class PolarTable:
         the source reports (for the in-house 2D solver, the pressure
         lift).
 
-    Attributes
-    ----------
-    last_dropped : int
-        Number of alpha points dropped by the last :meth:`at` call on the
-        current thread (a property, not an argument). A copy or a pickled
-        table starts again at 0.
-
     Notes
     -----
     The height axis uses linear interpolation in 1/h because the
@@ -150,7 +143,11 @@ class PolarTable:
 
     @property
     def last_dropped(self) -> int:
-        """Number of alpha points dropped by the last :meth:`at` call on this thread."""
+        """Number of alpha points dropped by the last :meth:`at` call on this thread.
+
+        It is a property, not an argument. A copy or a pickled table starts
+        again at 0.
+        """
         return int(getattr(self._dropped_local, "value", 0))
 
     @last_dropped.setter
