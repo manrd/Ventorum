@@ -41,7 +41,7 @@ Small solves stay on the CPU: the time to start the GPU work is larger than the 
 ```python
 gpu.set_precision("float64")   # the CPU results to round-off
 gpu.set_precision("float32")   # faster on most GPUs
-gpu.set_precision("auto")      # default: float32
+gpu.set_precision("auto")      # default: the profile precision, else float32
 ```
 
 The environment variable `VENTORUM_GPU_PRECISION` sets the start value.
