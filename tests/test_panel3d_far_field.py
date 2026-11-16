@@ -318,9 +318,12 @@ def test_gpu_solver_far_field_parity():
 #: average as the arm); CL did not change. CDi_trefftz was stored again
 #: after the change to the VLM Trefftz evaluation point and per-strip
 #: core (old: 0.007305302148882255 free air, 0.004361269712777281 ground).
+#: CDi_trefftz was stored again after the merge of the trailing vortices
+#: per trace node with one core per node from the shortest adjacent strip
+#: (old: 0.008485552032604631 free air, 0.0060317342158080125 ground).
 _EXACT_STORED = {
-    None: (0.4068085517769171, -0.07038023749417746, 0.008485552032604631),
-    0.5: (0.49795371023247337, -0.09053863168037617, 0.0060317342158080125),
+    None: (0.4068085517769171, -0.07038023749417746, 0.008485847403669873),
+    0.5: (0.49795371023247337, -0.09053863168037617, 0.006032239794437574),
 }
 
 

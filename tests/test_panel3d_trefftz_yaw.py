@@ -121,7 +121,8 @@ def _solver(half: bool = True, kutta: str = "morino", ref_point=(0.0, 0.0, 0.0),
 def _independent_cn(solver: PanelSolver, condition: FlightCondition) -> tuple[float, float]:
     """Trefftz drag and yawing moment from the wake strips, written out again (body-axis wake, free air).
 
-    Each strip end carries a 2D point vortex in the y-z plane; the strip
+    Each trace node (the strip ends at one point) carries one 2D point
+    vortex in the y-z plane with the net circulation; the strip
     drag is ``D' = -0.5 rho Gamma w_n l`` and the yawing moment in
     stability axes (beta = 0) is ``sum D' y / (q S b)``.
     """
@@ -141,13 +142,20 @@ def _independent_cn(solver: PanelSolver, condition: FlightCondition) -> tuple[fl
     length = np.hypot(pr[:, 1] - pl[:, 1], pr[:, 2] - pl[:, 2])
     q_pts = pl + cp_frac[:, None] * (pr - pl)
     normal = np.column_stack([-(pr[:, 2] - pl[:, 2]), pr[:, 1] - pl[:, 1]]) / length[:, None]
-    rc2 = (0.01 * length)[None, :] ** 2
-    w_n = np.zeros(len(gamma))
-    for vertex, sign in ((pr, 1.0), (pl, -1.0)):
-        dy = q_pts[:, None, 1] - vertex[None, :, 1]
-        dz = q_pts[:, None, 2] - vertex[None, :, 2]
-        den = 2.0 * np.pi * (dy**2 + dz**2 + rc2)
-        w_n += np.sum(sign * gamma[None, :] * (-dz * normal[:, 0, None] + dy * normal[:, 1, None]) / den, axis=1)
+    # One vortex per trace node (equal end coordinates) with the net
+    # circulation, and one core per node: 0.01 times the shortest adjacent strip.
+    ends = np.vstack([pr, pl])
+    nodes, label = np.unique(ends, axis=0, return_inverse=True)
+    label = label.reshape(-1)
+    node_gamma = np.zeros(len(nodes))
+    np.add.at(node_gamma, label, np.concatenate([gamma, -gamma]))
+    node_len = np.full(len(nodes), np.inf)
+    np.minimum.at(node_len, label, np.concatenate([length, length]))
+    rc2 = (0.01 * node_len)[None, :] ** 2
+    dy = q_pts[:, None, 1] - nodes[None, :, 1]
+    dz = q_pts[:, None, 2] - nodes[None, :, 2]
+    den = 2.0 * np.pi * (dy**2 + dz**2 + rc2)
+    w_n = np.sum(node_gamma[None, :] * (-dz * normal[:, 0, None] + dy * normal[:, 1, None]) / den, axis=1)
     drag = -0.5 * condition.rho * gamma * w_n * length
     q_s = 0.5 * condition.rho * condition.V_inf**2 * solver.S_ref
     return float(drag.sum() / q_s), float(np.sum(drag * q_pts[:, 1]) / (q_s * solver.b_ref))

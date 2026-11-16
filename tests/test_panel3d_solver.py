@@ -488,13 +488,16 @@ def test_solve_conditions_batch():
 # axis wake). They do not depend on the surface gradient method. CDi was
 # stored again after the change to the VLM Trefftz evaluation point and
 # per-strip core (old: 0.004233828611102339 full, 0.0042244555972296045 half).
+# It was stored again after the merge of the trailing vortices per trace
+# node with one core per node from the shortest adjacent strip (old:
+# 0.004823228167026525 full, 0.004812686152066885 half).
 _STORED_FREE_AIR = {
     False: {
         "n": 272,
         "mu": {0: 2.450267924624242, 7: 3.315504490990303, 37: 3.7879630323326454, 271: -0.6988622766055512},
         "mu_sum": -12.476474280438861,
         "mu_abs_sum": 783.0904197027365,
-        "CDi": 0.004823228167026525,
+        "CDi": 0.004823340431486218,
         "sigma_abs_sum": 2285.451549319791,
         "wake_sum": 1664.0,
     },
@@ -503,7 +506,7 @@ _STORED_FREE_AIR = {
         "mu": {0: 2.43323004857819, 7: 3.3380171846878697, 37: 3.9010646242554325, 135: -0.5872020721156217},
         "mu_sum": 0.1197936848349741,
         "mu_abs_sum": 406.78969327039033,
-        "CDi": 0.004812686152066885,
+        "CDi": 0.004812797166992397,
         "sigma_abs_sum": 1178.531864830276,
         "wake_sum": 913.2253631008709,
     },
