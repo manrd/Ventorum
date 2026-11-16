@@ -60,6 +60,7 @@ from __future__ import annotations
 import numpy as np
 import scipy.sparse
 import scipy.sparse.csgraph
+import scipy.spatial
 
 from ventorum.aero.system import freestream_direction, lift_direction
 from ventorum.core.datatypes import FlightCondition
@@ -87,8 +88,9 @@ __all__ = [
 #: This is a method choice, not a tuned value.
 FOLD_ANGLE_DEG = 45.0
 
-#: Core radius of each 2D trailing vortex in the Trefftz plane, as a
-#: fraction of its own wake strip trailing-edge trace length [-]. Alias
+#: Core radius of each 2D trailing vortex (one per trace node) in the
+#: Trefftz plane, as a fraction of the trailing-edge trace length of the
+#: shortest wake strip adjacent to the node [-]. Alias
 #: of :data:`ventorum.geometry.lattice.CORE_RADIUS_FRACTION` (the VLM
 #: core fraction). The core removes the Cauchy singularity when a vortex
 #: sits at an evaluation point (for example at a wing-fin junction); each
@@ -1688,22 +1690,73 @@ def _trefftz_ordered_strips(
     return pl, pr, q, d
 
 
+#: Distance below which two strip ends are the same trace node, as a
+#: fraction of the largest extent of the trace points [-]. The wake builder
+#: copies the strip ends from the mesh nodes, so the ends of two strips
+#: that share a mesh node are bit-identical. The tolerance only adds
+#: duplicate nodes at the same position. This is a method choice, not a
+#: tuned value.
+TREFFTZ_NODE_TOLERANCE = 1.0e-9
+
+
+def _trefftz_vortex_nodes(pl: np.ndarray, pr: np.ndarray, length: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Return the merged trace-node position [m] and core radius [m] of each trailing vortex.
+
+    The trailing vortices are the strip ends in the order ``[pr; pl]``
+    (shape (2 Ns, 3) in m). Two ends at the same position (to
+    :data:`TREFFTZ_NODE_TOLERANCE` times the trace extent) are one trace
+    node, as the trailing legs of a vortex lattice. Each node has one core
+    radius, ``TREFFTZ_CORE_FRACTION`` times the length [m] of the shortest
+    strip adjacent to the node. Each vortex gets the position and the core
+    of its node, so the vortices of one node sum to one vortex with the
+    net circulation jump. Two vortices of different cores at one node do
+    not cancel: next to a narrow strip, the core of a wide strip leaves a
+    false wash proportional to the full strip circulation.
+
+    Returns
+    -------
+    position : numpy.ndarray
+        Node position of each vortex with shape (2 Ns, 3) in m.
+    core : numpy.ndarray
+        Node core radius of each vortex with shape (2 Ns,) in m.
+    """
+    ends = np.vstack([pr, pl])
+    safe = np.maximum(np.concatenate([length, length]), 1.0e-12)
+    n_end = len(ends)
+    if n_end == 0:
+        return ends, safe
+    extent = float(np.max(np.ptp(ends, axis=0))) if n_end > 1 else 0.0
+    tol = TREFFTZ_NODE_TOLERANCE * max(extent, 1.0e-12)
+    # Pairs of ends closer than tol, then the connected groups of the pairs.
+    pairs = scipy.spatial.cKDTree(ends).query_pairs(tol, output_type="ndarray")
+    graph = scipy.sparse.coo_matrix(
+        (np.ones(len(pairs)), (pairs[:, 0], pairs[:, 1])), shape=(n_end, n_end),
+    )
+    _, label = scipy.sparse.csgraph.connected_components(graph, directed=False)
+    # First end of each node gives the node position; the shortest adjacent strip gives the core.
+    first = np.full(label.max() + 1, n_end, dtype=int)
+    np.minimum.at(first, label, np.arange(n_end))
+    shortest = np.full(label.max() + 1, np.inf)
+    np.minimum.at(shortest, label, safe)
+    return ends[first[label]], TREFFTZ_CORE_FRACTION * shortest[label]
+
+
 def _trefftz_factors(wake, wake_dir=None, ground=None):
     """Return the shared Trefftz velocity factors in 1/m and strip lengths in m.
 
     The two velocity matrices have shape (Ns, Nv). The two in-plane
     normal components have shape (Ns,) [-]. Ground is a unit normal and
     an offset in m. Each strip evaluates induced wash at its span
-    fraction ``cp_frac`` (0.5 fallback when absent), and each trailing
-    vortex uses core radius ``TREFFTZ_CORE_FRACTION * l_s`` from its own
-    strip (Lan 1974; Multhopp 1950).
+    fraction ``cp_frac`` (0.5 fallback when absent; Lan 1974, Multhopp
+    1950). The trailing vortices are merged per trace node, with one core
+    radius per node from the shortest adjacent strip
+    (:func:`_trefftz_vortex_nodes`); the image vortices use the same nodes.
     """
     pl, pr, q3, d = _trefftz_ordered_strips(wake, wake_dir)
     segment = pr - pl
     length = np.linalg.norm(segment, axis=-1)
     safe = np.maximum(length, 1e-12)
-    rc_vort = TREFFTZ_CORE_FRACTION * np.concatenate([safe, safe])
-    vertices = np.vstack([pr, pl])
+    vertices, rc_vort = _trefftz_vortex_nodes(pl, pr, length)
     if wake_dir is None and ground is None:
         q = q3[:, 1:]
         pv = vertices[:, 1:]
@@ -1787,7 +1840,10 @@ def _trefftz_strip_wash(
     seg_vec = pr - pl
     seg_len = np.linalg.norm(seg_vec, axis=-1)
     safe_len = np.maximum(seg_len, 1.0e-12)
-    rc_sq_vort = (TREFFTZ_CORE_FRACTION * np.concatenate([safe_len, safe_len])) ** 2
+    # One position and one core per trace node (the vortices of a node sum
+    # to the net circulation jump there).
+    node_pos, node_core = _trefftz_vortex_nodes(pl, pr, seg_len)
+    rc_sq_vort = node_core ** 2
 
     if wake_dir is None and ground is None:
         # Body-axis wake in free air (the Trefftz plane is the y-z plane).
@@ -1798,8 +1854,9 @@ def _trefftz_strip_wash(
         dz = seg_vec[:, 2]
         qn = np.column_stack([np.zeros_like(dy), -dz, dy]) / safe_len[:, None]
 
-        # Trailing vortices at right endpoints (+gamma_w) and left endpoints (-gamma_w)
-        pv = np.vstack([pr, pl])
+        # Trailing vortices at the nodes of the right endpoints (+gamma_w)
+        # and of the left endpoints (-gamma_w)
+        pv = node_pos
         gv = np.concatenate([gamma_w, -gamma_w])
 
         w_n = np.zeros(n_strips, dtype=np.float64)
@@ -1828,7 +1885,7 @@ def _trefftz_strip_wash(
     seg2 = _plane(seg_vec)
     qn2 = np.column_stack([-seg2[:, 1], seg2[:, 0]]) / safe_len[:, None]
     q2 = _plane(q_eval)
-    pv3 = np.vstack([pr, pl])
+    pv3 = node_pos
     gv = np.concatenate([gamma_w, -gamma_w])
     if ground is not None:
         k_hat = np.asarray(ground[0], dtype=float).reshape(3)
@@ -1868,11 +1925,17 @@ def compute_trefftz_induced_drag(
     strip evaluation point ``q = pl + cp_frac * (pr - pl)`` (0.5 when no
     spacing fraction is stored, matching the Multhopp/VLM control-point
     quadrature rule; Lan 1974, Multhopp 1950) gives
-    D_i = -0.5 * rho * sum(Gamma_s * w_n,s * l_s). Each trailing vortex
-    has a core of radius ``TREFFTZ_CORE_FRACTION`` times the trace length
-    of its own strip. In ground effect the image vortices (the ends
-    reflected in the ground, with opposite circulation and the same core
-    radius as their source) add their normal wash (method of images).
+    D_i = -0.5 * rho * sum(Gamma_s * w_n,s * l_s). The strip ends at one
+    trace node (the shared end of two neighbour strips) are one vortex
+    with the net circulation jump, as the trailing legs of a vortex
+    lattice. Each node has one core of radius ``TREFFTZ_CORE_FRACTION``
+    times the trace length of the shortest strip adjacent to the node.
+    Two vortices of different cores at one node do not cancel: next to a
+    narrow strip (for example at a control-surface edge) they give a false
+    wash proportional to the full strip circulation. In ground effect the
+    image vortices (the nodes reflected in the ground, with opposite
+    circulation and the same core radius as their source node) add their
+    normal wash (method of images).
 
     Parameters
     ----------

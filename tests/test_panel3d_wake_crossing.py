@@ -79,12 +79,16 @@ def test_wake_through_rear_wing_in_ground_effect_is_refused():
 # values to 5e-13 relative, so only the gradient moves them. CL changes by
 # 1.2 to 1.3 %, Cm by 1 to 35 % (10 chordwise panels), and the Trefftz CDi
 # does not change. CDi was stored again after the change to the VLM Trefftz
-# evaluation point and per-strip core.
+# evaluation point and per-strip core, and again after the merge of the
+# trailing vortices per trace node with one core per node from the
+# shortest adjacent strip (old: tandem_offset 0.011879261428422305,
+# wing_tail 0.005227746890452119, biplane 0.008844986949030787,
+# tandem_ground 0.010058204174762091).
 _BASELINES = {
-    "tandem_offset": (0.554367196934527, 0.011879261428422305, 0.07505217808509079),
-    "wing_tail": (0.3452886021683871, 0.005227746890452119, -0.02550505624312208),
-    "biplane": (0.5066005708654079, 0.008844986949030787, -0.02923308977602326),
-    "tandem_ground": (0.6666319507264357, 0.010058204174762091, -0.008389251198743803),
+    "tandem_offset": (0.554367196934527, 0.011879534469481293, 0.07505217808509079),
+    "wing_tail": (0.3452886021683871, 0.005227871369118184, -0.02550505624312208),
+    "biplane": (0.5066005708654079, 0.008845105691617457, -0.02923308977602326),
+    "tandem_ground": (0.6666319507264357, 0.010058753557878296, -0.008389251198743803),
 }
 
 

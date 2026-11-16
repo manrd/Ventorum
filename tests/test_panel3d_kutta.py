@@ -98,11 +98,13 @@ def _te_jump(solver: PanelSolver, cp: np.ndarray) -> float:
 # 1.9 times the Trefftz drag (it was negative before); the trust score
 # gives a note below 16 chordwise panels. CDi_trefftz was stored again
 # after the change to the VLM Trefftz evaluation point and per-strip core
-# (old: 0.004233828611102339).
+# (old: 0.004233828611102339). It was stored again after the merge of the
+# trailing vortices per trace node with one core per node from the
+# shortest adjacent strip (old: 0.004823228167026525).
 _STORED_MORINO = {
     "CL": 0.3317867672685191,
     "CD_pressure": 0.007978170567468013,
-    "CDi_trefftz": 0.004823228167026525,
+    "CDi_trefftz": 0.004823340431486218,
     "Cm": -0.07968338690585908,
     "cp_sum": -32.93577724926796,
     "cp_abs_sum": 68.0982534507028,
