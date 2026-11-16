@@ -396,6 +396,13 @@ def _results(solver, lattice, conditions, arrays: dict, setups: list, umap, b_re
     # non-finite value: the trust score then names the array).
     stats = [{"max_local_cl": r[1], "max_alpha_eff_deg": r[2], "sign_change_run": int(r[3])} if r[0] != 0.0 else None
              for r in arrays["stats"].tolist()]
+    # The free-stream section Cl 2 Gamma / (V_inf c) and the finite test of
+    # the circulation of all cases in one array operation (the same values
+    # as case by case).
+    v_inf = np.array([float(c.V_inf) for c in conditions], dtype=float)
+    cl_freestream = 2.0 * np.asarray(span[:, 0], dtype=float) / (v_inf[:, None] * lattice.chord)
+    if infos is None:
+        finite = np.isfinite(np.asarray(gammas, dtype=float).reshape(K, -1)).all(axis=1).tolist()
     out = []
     for k, (cond, st) in enumerate(zip(conditions, setups)):
         t = totals[k]
@@ -408,7 +415,7 @@ def _results(solver, lattice, conditions, arrays: dict, setups: list, umap, b_re
             lattice, CL=t[0], CDi=t[1], CDp=t[2] if hp else None, CD_total=t[3] if hp else None, e=t[4],
             AR=t[11], Cl=t[5], Cm=t[6], Cn=t[7], CY=t[8], CDi_nearfield=t[9],
             strip_gamma=span[k, 0], Cl_strip=span[k, 1],
-            Cl_freestream=2.0 * np.asarray(span[k, 0], dtype=float) / (float(cond.V_inf) * lattice.chord),
+            Cl_freestream=cl_freestream[k],
             Cd_i=span[k, 2], Cd_profile=span[k, 3] if hp else None,
             alpha_eff=span[k, 4], alpha_i=span[k, 5], local_lift_factor=lift_factor,
             Cm_section=span[k, 7], strip_force=arrays["strip_force"][k], trefftz_normalwash=arrays["w_n"][k],
@@ -416,7 +423,7 @@ def _results(solver, lattice, conditions, arrays: dict, setups: list, umap, b_re
             CY_farfield=cy_ff[k], Cn_trefftz=cn_tr[k],
         )
         info = (infos[k] if infos is not None
-                else direct_solve_info(np.asarray(gammas[k], dtype=float), symmetric=umap.symmetric))
+                else direct_solve_info(None, converged=finite[k], symmetric=umap.symmetric))
         cpu_record = cpu_cases.get(k) if cpu_cases else None
         res = solver._case_result(lattice, cond, ld, info, gammas[k], st[0], st[1], st[2], st[3], b_ref,
                                   c_ref, main_surface, t0, execution_time=share, spanwise_stats=stats[k],

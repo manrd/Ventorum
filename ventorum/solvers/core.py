@@ -76,16 +76,20 @@ class SolveInfo:
 _MIRROR_Y = np.array([1.0, -1.0, 1.0])
 
 
-def direct_solve_info(g: np.ndarray, **kwargs) -> SolveInfo:
+def direct_solve_info(g: np.ndarray | None, *, converged: bool | None = None, **kwargs) -> SolveInfo:
     """Return the :class:`SolveInfo` of a direct solve with the circulation *g* [m^2/s].
 
     A direct solve has no tolerance. ``converged`` is True when every value
     of *g* is finite. A non-finite input (for example a NaN lift-curve slope
     that the input checks did not stop) or a singular matrix gives a
     non-finite circulation; the result must then not report a converged
-    solve. The other fields come from *kwargs*.
+    solve. A batch can test all its cases at once and give the result of
+    the test as *converged*; *g* is then not used (it can be None). The
+    other fields come from *kwargs*.
     """
-    return SolveInfo(converged=bool(np.all(np.isfinite(g))), **kwargs)
+    if converged is None:
+        converged = bool(np.all(np.isfinite(g)))
+    return SolveInfo(converged=bool(converged), **kwargs)
 
 
 def lu_solve_with_condition(A: np.ndarray, rhs: np.ndarray) -> tuple[np.ndarray, float]:

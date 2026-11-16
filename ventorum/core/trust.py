@@ -37,6 +37,7 @@ error bars in a report.
 
 from __future__ import annotations
 
+import functools
 import math
 
 from ventorum.core.constants import (
@@ -739,8 +740,10 @@ def polar_gap_note(n_reads: int, n_strips: int, n_dropped: int, n_polars: int) -
 
 def _negligible_side_force(CY: float | None, CY_farfield: float | None) -> bool:
     """Return True when the near-field and far-field side forces are below the CY floor."""
-    values = [v for v in (CY, CY_farfield) if v is not None and _is_finite(v)]
-    return all(abs(float(v)) <= NEAR_FAR_FLOOR_CY for v in values)
+    for v in (CY, CY_farfield):
+        if v is not None and _is_finite(v) and abs(float(v)) > NEAR_FAR_FLOOR_CY:
+            return False
+    return True
 
 
 def near_far_lateral_warnings(
@@ -855,6 +858,29 @@ def trailing_edge_clearance(lattice: VortexLattice | None, ground: GroundPlane |
     return float(np.min(h_min / chord))
 
 
+def mean_line_lattice(lattice: VortexLattice | None) -> bool:
+    """Return True when a surface of the lattice lies on a cambered section mean line.
+
+    Only then :func:`mean_line_strip_jump` gives a value. The test uses only
+    the lattice geometry, so a batch can do it once per lattice.
+
+    Parameters
+    ----------
+    lattice : VortexLattice or None
+        Vortex lattice geometry.
+
+    Returns
+    -------
+    bool
+        True when the lattice has strips on a cambered mean line and its
+        mean surface has a camber offset.
+    """
+    camber = getattr(lattice, "geometric_camber", None)
+    if lattice is None or camber is None or not np.any(camber):
+        return False
+    return bool(getattr(lattice, "has_camber_offset", True))
+
+
 def mean_line_strip_jump(lattice: VortexLattice | None, spanwise_list: Sequence | None) -> float | None:
     """Return the largest change of the strip lift between neighbouring strips on a mean-line lattice.
 
@@ -882,11 +908,9 @@ def mean_line_strip_jump(lattice: VortexLattice | None, spanwise_list: Sequence 
         neighbouring strips of one surface [-], or None when no surface lies
         on a cambered mean line.
     """
-    camber = getattr(lattice, "geometric_camber", None)
-    if lattice is None or spanwise_list is None or camber is None or not np.any(camber):
+    if spanwise_list is None or not mean_line_lattice(lattice):
         return None
-    if not getattr(lattice, "has_camber_offset", True):
-        return None
+    camber = lattice.geometric_camber
     control = np.zeros(lattice.n_strips, dtype=bool)
     eta = np.abs(np.asarray(lattice.eta, dtype=float))
     names = [s.name for s in lattice.surfaces]
@@ -1613,9 +1637,16 @@ def isa_speed_of_sound(rho: float) -> float:
     ``T = T0 (rho/rho0)^(1/4.25588)``, and 216.65 K above 11 000 m. At the
     sea-level density the value is the sea-level speed of sound. The result
     is exact for the ISA atmosphere and approximate for a non-standard day.
+    The function keeps the values of the last densities (a sweep has one
+    density).
     """
-    rho = float(rho)
-    if not np.isfinite(rho) or rho <= 0.0 or rho == RHO_SL:
+    return _isa_speed_of_sound(float(rho))
+
+
+@functools.lru_cache(maxsize=64)
+def _isa_speed_of_sound(rho: float) -> float:
+    """Return :func:`isa_speed_of_sound` of a float density *rho* [kg/m^3] (cached)."""
+    if not math.isfinite(rho) or rho <= 0.0 or rho == RHO_SL:
         return A_SL
     if rho <= _ISA_RHO_TROPOPAUSE:
         T = _ISA_T_TROPOPAUSE
@@ -1801,6 +1832,8 @@ def polar_stats(limits: dict[str, np.ndarray] | None, cl: np.ndarray, alpha_eff:
 
 def _is_finite(value: object) -> bool:
     """Return True when *value* is a finite number."""
+    if isinstance(value, float):
+        return math.isfinite(value)  # The usual case: no conversion needed.
     try:
         return math.isfinite(float(value))
     except (TypeError, ValueError):
@@ -2067,6 +2100,45 @@ def float32_residual_warnings(residuals: dict | None) -> list[str]:
     ]
 
 
+@functools.lru_cache(maxsize=512, typed=True)
+def _error_model_outcome(
+    solver: str,
+    AR: float,
+    sweep_deg: float,
+    taper: float | None,
+    n_chord: int | None,
+    n_span: int | None,
+    h_over_c: float | None,
+    controls: tuple[tuple[float, float], ...],
+) -> tuple[float, tuple[str, ...], tuple[str, ...]] | None:
+    """Return the score, the warnings and the recommendations of the calibrated error model.
+
+    The outcome depends only on the inputs of :func:`predicted_error`, and
+    these are the same for all cases of a sweep. The cache keeps the
+    outcome of each input set, so a sweep computes it once. The arguments
+    are those of :func:`predicted_error` (sweep in deg, *h_over_c* [-]).
+
+    Returns
+    -------
+    tuple of (float, tuple of str, tuple of str) or None
+        The score of :func:`error_score` [-], the warnings and the
+        recommendations (empty below the HIGH band), or None when the model
+        does not apply.
+    """
+    model = predicted_error(
+        solver, AR, sweep_qc_deg=sweep_deg, taper=taper, n_chord=n_chord,
+        n_span=n_span, h_over_c=h_over_c, controls=controls,
+    )
+    if model is None:
+        return None
+    error, k, terms = model
+    if k * error >= ERROR_BAND_HIGH:
+        m_warn, m_rec = _error_model_messages(solver, k, error, terms, AR, sweep_deg)
+    else:
+        m_warn, m_rec = [], []
+    return error_score(k * error), tuple(m_warn), tuple(m_rec)
+
+
 def evaluate_aerodynamic_trust(
     AR: float,
     surfaces: Sequence[DiscretizedSurface | LiftingSurface] | None = None,
@@ -2260,7 +2332,10 @@ def evaluate_aerodynamic_trust(
     for label, value in (("CL", CL), ("CY", CY), ("Cl", Cl), ("Cm", Cm), ("Cn", Cn),
                          ("Cn (stability axes)", Cn_stability), ("CDi", CDi), ("CDp", CDp),
                          ("CD_total", CD_total)):
-        if value is not None and not _is_finite(value):
+        if value is None:
+            continue
+        # The usual case, a float, without the call of _is_finite.
+        if not (math.isfinite(value) if isinstance(value, float) else _is_finite(value)):
             bad_totals.append(f"{label}={value}")
     for sw in (spanwise_list or ()) if spanwise_stats is None else ():
         arrays = [
@@ -2588,21 +2663,18 @@ def evaluate_aerodynamic_trust(
     cap_score = max(0.0, 1.0 - cap_penalty)
     if taper is None and surfaces and isinstance(surfaces[0], LiftingSurface):
         taper = surface_tip_chord_ratio(surfaces[0])
-    model = predicted_error(
-        solver, AR, sweep_qc_deg=sweep_deg, taper=taper, n_chord=n_chord,
-        n_span=n_panels if n_span is None else n_span,
-        h_over_c=None if h_over_c is None or not _is_finite(h_over_c) else float(h_over_c),
-        controls=tuple(controls or ()),
+    model = _error_model_outcome(
+        solver, AR, sweep_deg, taper, n_chord,
+        n_panels if n_span is None else n_span,
+        None if h_over_c is None or not _is_finite(h_over_c) else float(h_over_c),
+        tuple(map(tuple, controls)) if controls else (),
     )
     model_score = 1.0
     if model is not None:
-        error, k, terms = model
-        model_score = error_score(k * error)
+        model_score, m_warn, m_rec = model
         penalties["error_model"] = 1.0 - model_score
-        if k * error >= ERROR_BAND_HIGH:
-            m_warn, m_rec = _error_model_messages(solver, k, error, terms, AR, sweep_deg)
-            warnings.extend(m_warn)
-            recommendations.extend(r for r in m_rec if r not in recommendations)
+        warnings.extend(m_warn)
+        recommendations.extend(r for r in m_rec if r not in recommendations)
 
     for msg in notes or ():
         if msg not in warnings:

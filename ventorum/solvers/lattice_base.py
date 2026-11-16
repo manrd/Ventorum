@@ -25,6 +25,7 @@ from ventorum.aero.system import (
     GroundPlane,
     check_ground_clearance,
     ground_plane_from_condition,
+    has_rates,
     rotation_velocity,
     wake_direction,
 )
@@ -44,6 +45,7 @@ from ventorum.core.trust import (
     lattice_error_inputs,
     lattice_convergence_notes,
     lattice_spanwise_stats,
+    mean_line_lattice,
     mean_line_strip_jump,
     polar_limits,
     polar_stats,
@@ -498,7 +500,8 @@ class LatticeSolver(BaseSolver):
                 "ground-effect lift increment compared with the VLM (about 1 to 5 % of CL at "
                 "h_min/c 1 to 2)."
             )
-        w_rot = rotation_velocity(condition, lattice.all_points(), ref_point)
+        # Without body rates there is no rotation velocity: do not stack the points.
+        w_rot = rotation_velocity(condition, lattice.all_points(), ref_point) if has_rates(condition) else None
         if w_rot is not None:
             w_max = float(np.max(np.linalg.norm(w_rot, axis=1))) / float(condition.V_inf)
             if w_max > LARGE_ROTATION_FRACTION:
@@ -521,6 +524,44 @@ class LatticeSolver(BaseSolver):
             # A None value is cached too (for example no polar limits for linear airfoils).
             cache[key] = compute()
         return cache[key]
+
+    def _case_constants(self, lattice: VortexLattice, main_surface: int) -> dict:
+        """Return the values of :meth:`_case_result` that depend only on the lattice geometry.
+
+        A batch computes them once per lattice (``lattice.geom_cache``). The
+        keys are ``sweep_deg`` (mean quarter-chord sweep [deg]),
+        ``max_sweep_rad`` (the same [rad]), ``sweep_note`` (the lifting-line
+        sweep note, or None), ``convergence`` (the warnings, then the notes
+        of :func:`lattice_convergence_notes`), ``quiet`` (the trust notes
+        that are not run-time warnings: the convergence notes, the body-rate
+        note and the tip edge suction note), ``polar_limits``,
+        ``main_strip_count``, ``max_chord`` [m], ``mean_line`` (True when
+        :func:`mean_line_strip_jump` applies) and ``error_inputs`` (the
+        geometry inputs of the error model).
+        """
+        sweep_deg = quarter_chord_sweep_deg(lattice)
+        sweep_note = None
+        if self.collocation == "llt" and sweep_deg > LLT_SWEEP_WARNING_DEG:
+            sweep_note = (
+                f"Lifting line with {sweep_deg:.1f} deg mean quarter-chord sweep (a tapered wing with a "
+                "straight leading edge also has it): the method is not grid convergent with sweep, and "
+                "the lift falls as panels are added (lift-slope error measured against classical theory: "
+                "about -0.5 % at 2.4 deg and -4 % at 8.5 deg with 40 half-cosine panels). For linear "
+                "analysis use the VLM solver."
+            )
+        conv_notes, conv_warnings = lattice_convergence_notes(lattice, self.collocation == "llt", main_surface)
+        return {
+            "sweep_deg": sweep_deg,
+            "max_sweep_rad": np.radians(sweep_deg),
+            "sweep_note": sweep_note,
+            "convergence": tuple(conv_warnings + conv_notes),
+            "quiet": frozenset([*conv_notes, body_rate_note(), tip_edge_suction_note()]),
+            "polar_limits": polar_limits(lattice.airfoils),
+            "main_strip_count": main_surface_strip_count(lattice, main_surface),
+            "max_chord": np.max(lattice.chord),
+            "mean_line": mean_line_lattice(lattice),
+            "error_inputs": lattice_error_inputs(lattice, main_surface),
+        }
 
     @staticmethod
     def _cn_stability(totals, condition: FlightCondition, b_ref: float, c_ref: float) -> float | None:
@@ -576,27 +617,21 @@ class LatticeSolver(BaseSolver):
         pipeline on the GPU). Each case gets its own copy. None makes a CPU
         record of a single case.
         """
-        sweep_deg = self._cached(lattice, "quarter_chord_sweep_deg", lambda: quarter_chord_sweep_deg(lattice))
-        if self.collocation == "llt" and sweep_deg > LLT_SWEEP_WARNING_DEG:
-            notes.append(
-                f"Lifting line with {sweep_deg:.1f} deg mean quarter-chord sweep (a tapered wing with a "
-                "straight leading edge also has it): the method is not grid convergent with sweep, and "
-                "the lift falls as panels are added (lift-slope error measured against classical theory: "
-                "about -0.5 % at 2.4 deg and -4 % at 8.5 deg with 40 half-cosine panels). For linear "
-                "analysis use the VLM solver."
-            )
+        # The values that depend only on the lattice geometry: computed once per lattice.
+        cst = self._cached(lattice, ("case_constants", self.collocation, main_surface),
+                           lambda: self._case_constants(lattice, main_surface))
+        sweep_deg = cst["sweep_deg"]
+        if cst["sweep_note"] is not None:
+            notes.append(cst["sweep_note"])
         # Measured mesh-convergence limits of the geometry (no penalty). The
         # notes are trust notes only; the warnings are also run-time warnings.
-        conv_notes, conv_warnings = lattice_convergence_notes(lattice, self.collocation == "llt", main_surface)
-        notes += [m for m in conv_warnings + conv_notes if m not in notes]
-        quiet = set(conv_notes)
-        quiet.add(body_rate_note())
-        quiet.add(tip_edge_suction_note())
+        quiet = cst["quiet"]
+        notes += [m for m in cst["convergence"] if m not in notes]
         h_over_c = (h_min / c_ref) if (h_min is not None and c_ref) else None
         totals = loads.totals
         # Tabulated section polars: compare the section results with the
         # table range and the stall of each polar (None for linear sections).
-        limits = self._cached(lattice, "polar_limits", lambda: polar_limits(lattice.airfoils))
+        limits = cst["polar_limits"]
         polar = None
         if limits is not None:
             cl_strip = np.empty(lattice.n_strips)
@@ -614,15 +649,13 @@ class LatticeSolver(BaseSolver):
             CDi=totals.CDi,
             CD_total=totals.CD_total,
             converged=info.converged,
-            n_panels=self._cached(lattice, ("main_strip_count", main_surface),
-                                  lambda: main_surface_strip_count(lattice, main_surface)),
-            max_sweep_rad=np.radians(sweep_deg),
+            n_panels=cst["main_strip_count"],
+            max_sweep_rad=cst["max_sweep_rad"],
             solver_type=self.name,
             h_over_c=h_over_c,
             n_chord=lattice.n_chord,
             notes=notes,
-            max_chord_over_c=(float(self._cached(lattice, "max_chord", lambda: np.max(lattice.chord)) / c_ref)
-                              if c_ref else 1.0),
+            max_chord_over_c=(float(cst["max_chord"]) / c_ref if c_ref else 1.0),
             spanwise_stats=(spanwise_stats if spanwise_stats is not None
                             else lattice_spanwise_stats(lattice, loads.spanwise)),
             polar=polar,
@@ -635,10 +668,9 @@ class LatticeSolver(BaseSolver):
             Cn_stability=self._cn_stability(totals, condition, b_ref, c_ref),
             Cn_trefftz=totals.Cn_trefftz,
             te_clearance=trailing_edge_clearance(lattice, ground),
-            mean_line_jump=mean_line_strip_jump(lattice, loads.spanwise),
+            mean_line_jump=mean_line_strip_jump(lattice, loads.spanwise) if cst["mean_line"] else None,
             condition_number=getattr(info, "condition_number", None),
-            **self._cached(lattice, ("error_inputs", main_surface),
-                           lambda: lattice_error_inputs(lattice, main_surface)),
+            **cst["error_inputs"],
         )
         res = SolverResult(
             spanwise=loads.spanwise,

@@ -1380,6 +1380,8 @@ def loads_result(
         Cn_trefftz=Cn_trefftz,
     )
     chord = lattice.chord
+    # A float (no body rates) or an array of the strips.
+    scalar_lift = isinstance(local_lift_factor, float) or np.ndim(local_lift_factor) == 0
     spanwise: list[SpanwiseResult] = []
     for surf in lattice.surfaces:
         sl = surf.strips
@@ -1391,7 +1393,7 @@ def loads_result(
             Cd_profile=Cd_profile[sl].copy() if Cd_profile is not None else None,
             alpha_eff=alpha_eff[sl].copy(),
             alpha_i=alpha_i[sl].copy(),
-            local_lift=(local_lift_factor * strip_gamma[sl] if np.ndim(local_lift_factor) == 0
+            local_lift=(local_lift_factor * strip_gamma[sl] if scalar_lift
                         else np.asarray(local_lift_factor, dtype=float)[sl] * strip_gamma[sl]),
             surface_name=surf.name,
             chord=chord[sl].copy(),
