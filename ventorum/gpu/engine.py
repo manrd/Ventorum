@@ -271,7 +271,6 @@ class DeviceLattice:
 
         self.precision = precision
         self.mach_transform = mach_transform
-        self.k = kernels(precision)
         self.T = torch_dtype(precision)
         self.n_panels = int(lattice.n_panels)
         self.n_strips = int(lattice.n_strips)
@@ -291,6 +290,9 @@ class DeviceLattice:
         # lie on the oblique lines of the deflected flap, so the float32
         # kernels compute their cross products in float64.
         kink = np.isin(lattice.panel_strip, lattice.panel_strip[kink])
+        # A lattice without leg nodes gets the kernel set without the node
+        # code (the same arithmetic for its straight legs, fewer registers).
+        self.k = kernels(precision, kinks=bool(np.any(kink)))
         # Leg chains (see VortexLattice.leg_next): the ends of the own leg
         # segments are the bound points of the next panel on a chain.
         from ventorum.aero.loads import leg_ends

@@ -81,33 +81,42 @@ _INV_2PI = 1.0 / (2.0 * math.pi)
 _FLOORS = {"float64": 1e-300, "float32": 1e-30}
 
 _lock = threading.Lock()
-_built: dict[str, SimpleNamespace] = {}
+_built: dict[tuple[str, bool], SimpleNamespace] = {}
 
 
-def kernels(precision: str) -> SimpleNamespace:
+def kernels(precision: str, kinks: bool = True) -> SimpleNamespace:
     """Return the kernels and structs for *precision* (``"float32"`` or ``"float64"``); build them on the first call.
 
     Warp compiles the kernels on their first launch and keeps the binaries
     in its kernel cache on disk.
+
+    *kinks* False gives the set for a lattice without leg nodes (no source
+    with ``kink[s] != 0``, the usual case: no deflected chordwise control
+    and no mean-line leg chain). Its horseshoe functions have only the code
+    of the straight legs, which is the code that the full set runs for a
+    source without a node. The kernels without the node code use fewer
+    registers and run faster. The two sets are separate Warp modules with
+    their own structs: use the structs of the set that runs the kernels.
     """
+    key = (precision, bool(kinks))
     with _lock:
-        ns = _built.get(precision)
+        ns = _built.get(key)
         if ns is None:
             if precision not in _FLOORS:
                 raise ValueError(f"Unknown precision {precision!r}; use 'float32' or 'float64'.")
             wp.config.log_level = getattr(wp, "LOG_WARNING", wp.config.log_level)
             wp.init()
-            ns = _build(precision)
-            _built[precision] = ns
+            ns = _build(precision, bool(kinks))
+            _built[key] = ns
         return ns
 
 
-def _build(precision: str) -> SimpleNamespace:  # noqa: C901 - one closure per kernel type
+def _build(precision: str, kinks: bool = True) -> SimpleNamespace:  # noqa: C901 - one closure per kernel type
     T = wp.float64 if precision == "float64" else wp.float32
     vec = wp.vec3d if precision == "float64" else wp.vec3f
     floor = _FLOORS[precision]
     is64 = precision == "float64"
-    module = f"ventorum_gpu_{precision}"
+    module = f"ventorum_gpu_{precision}" if kinks else f"ventorum_gpu_{precision}_straight"
     # No adjoint kernels (faster compile, smaller binaries).
     wp.set_module_options({"enable_backward": False}, wp.get_module(module))
 
@@ -535,89 +544,94 @@ def _build(precision: str) -> SimpleNamespace:  # noqa: C901 - one closure per k
                     v = seg(r1, r2, vb, i1, i2, rc2)
                 else:
                     v = seg_c(cbound, r1, r2, vb, i1, i2, rc2)
-                has_kink = 0
-                if src.n_kink != 0:
-                    has_kink = src.kink[s]
-                if has_kink != 0:
-                    # Legs with a node: forward segment to the node, then
-                    # the aft segment from the node to the trailing edge.
-                    vka = vec()
-                    vkb = vec()
-                    vta = vec()
-                    vtb = vec()
-                    # Start of the a aft segment and end of the b aft
-                    # segment: the trailing edge, or on a chain the bound
-                    # points of the next source.
-                    qe = q1
-                    we = w2
-                    chained = 0
-                    if src.n_chain != 0:
-                        chained = src.nxt[s]
-                    if wp.static(is64):
-                        pak = src.AK[s]
-                        pbk = src.BK[s]
-                        pae = pat
-                        pbe = pbt
-                        if chained != 0:
-                            pae = src.AE[s]
-                            pbe = src.BE[s]
-                        if wp.static(IMG == 1):
-                            pak = mirror_point(pak, cs.GK[k], cs.GO[k])
-                            pbk = mirror_point(pbk, cs.GK[k], cs.GO[k])
+                if wp.static(kinks):
+                    # The full set: a source with a node takes the node path.
+                    has_kink = 0
+                    if src.n_kink != 0:
+                        has_kink = src.kink[s]
+                    if has_kink != 0:
+                        # Legs with a node: forward segment to the node, then
+                        # the aft segment from the node to the trailing edge.
+                        vka = vec()
+                        vkb = vec()
+                        vta = vec()
+                        vtb = vec()
+                        # Start of the a aft segment and end of the b aft
+                        # segment: the trailing edge, or on a chain the bound
+                        # points of the next source.
+                        qe = q1
+                        we = w2
+                        chained = 0
+                        if src.n_chain != 0:
+                            chained = src.nxt[s]
+                        if wp.static(is64):
+                            pak = src.AK[s]
+                            pbk = src.BK[s]
+                            pae = pat
+                            pbe = pbt
                             if chained != 0:
-                                pae = mirror_point(pae, cs.GK[k], cs.GO[k])
-                                pbe = mirror_point(pbe, cs.GK[k], cs.GO[k])
-                        vka = pa - pak
-                        vkb = pbk - pb
-                        vta = pak - pae
-                        vtb = pbe - pbk
+                                pae = src.AE[s]
+                                pbe = src.BE[s]
+                            if wp.static(IMG == 1):
+                                pak = mirror_point(pak, cs.GK[k], cs.GO[k])
+                                pbk = mirror_point(pbk, cs.GK[k], cs.GO[k])
+                                if chained != 0:
+                                    pae = mirror_point(pae, cs.GK[k], cs.GO[k])
+                                    pbe = mirror_point(pbe, cs.GK[k], cs.GO[k])
+                            vka = pa - pak
+                            vkb = pbk - pb
+                            vta = pak - pae
+                            vtb = pbe - pbk
+                            if chained != 0:
+                                qe = P - pae
+                                we = P - pbe
+                        else:
+                            vka = src.r0ka[s]
+                            vkb = src.r0kb[s]
+                            vta = src.r0ta[s]
+                            vtb = src.r0tb[s]
+                            if wp.static(IMG == 1):
+                                gkk = tvec(cs.GK[k])
+                                vka = mirror_dir(vka, gkk)
+                                vkb = mirror_dir(vkb, gkk)
+                                vta = mirror_dir(vta, gkk)
+                                vtb = mirror_dir(vtb, gkk)
+                        qk = r1 + vka
+                        wk = r2 - vkb
+                        iqk = inv_norm(qk)
+                        iwk = inv_norm(wk)
+                        iqe = iq
+                        iwe = iw
                         if chained != 0:
-                            qe = P - pae
-                            we = P - pbe
+                            if wp.static(not is64):
+                                qe = qk + vta
+                                we = wk - vtb
+                            iqe = inv_norm(qe)
+                            iwe = inv_norm(we)
+                        if wp.static(is64 or IMG == 1):
+                            v = v + seg(qk, r1, vka, iqk, i1, rc2) + seg(qe, qk, vta, iqe, iqk, rc2)
+                            v = v + seg(r2, wk, vkb, i2, iwk, rc2) + seg(wk, we, vtb, iwk, iwe, rc2)
+                        else:
+                            # The load points lie on the oblique leg lines of a
+                            # deflected flap: the cross products in float64, as
+                            # for the bound vortex (see the module notes).
+                            P64 = pts.P[i]
+                            ra = P64 - src.A[s]
+                            rb = P64 - src.B[s]
+                            rka = P64 - src.AK[s]
+                            rkb = P64 - src.BK[s]
+                            rta = P64 - src.AE[s]
+                            rtb = P64 - src.BE[s]
+                            v = v + seg_c(tvec(wp.cross(rka, ra)), qk, r1, vka, iqk, i1, rc2)
+                            v = v + seg_c(tvec(wp.cross(rta, rka)), qe, qk, vta, iqe, iqk, rc2)
+                            v = v + seg_c(tvec(wp.cross(rb, rkb)), r2, wk, vkb, i2, iwk, rc2)
+                            v = v + seg_c(tvec(wp.cross(rkb, rtb)), wk, we, vtb, iwk, iwe, rc2)
+                        if chained != 0:
+                            v = v + chain_tail(src, pts, cs, k, i, s)
                     else:
-                        vka = src.r0ka[s]
-                        vkb = src.r0kb[s]
-                        vta = src.r0ta[s]
-                        vtb = src.r0tb[s]
-                        if wp.static(IMG == 1):
-                            gkk = tvec(cs.GK[k])
-                            vka = mirror_dir(vka, gkk)
-                            vkb = mirror_dir(vkb, gkk)
-                            vta = mirror_dir(vta, gkk)
-                            vtb = mirror_dir(vtb, gkk)
-                    qk = r1 + vka
-                    wk = r2 - vkb
-                    iqk = inv_norm(qk)
-                    iwk = inv_norm(wk)
-                    iqe = iq
-                    iwe = iw
-                    if chained != 0:
-                        if wp.static(not is64):
-                            qe = qk + vta
-                            we = wk - vtb
-                        iqe = inv_norm(qe)
-                        iwe = inv_norm(we)
-                    if wp.static(is64 or IMG == 1):
-                        v = v + seg(qk, r1, vka, iqk, i1, rc2) + seg(qe, qk, vta, iqe, iqk, rc2)
-                        v = v + seg(r2, wk, vkb, i2, iwk, rc2) + seg(wk, we, vtb, iwk, iwe, rc2)
-                    else:
-                        # The load points lie on the oblique leg lines of a
-                        # deflected flap: the cross products in float64, as
-                        # for the bound vortex (see the module notes).
-                        P64 = pts.P[i]
-                        ra = P64 - src.A[s]
-                        rb = P64 - src.B[s]
-                        rka = P64 - src.AK[s]
-                        rkb = P64 - src.BK[s]
-                        rta = P64 - src.AE[s]
-                        rtb = P64 - src.BE[s]
-                        v = v + seg_c(tvec(wp.cross(rka, ra)), qk, r1, vka, iqk, i1, rc2)
-                        v = v + seg_c(tvec(wp.cross(rta, rka)), qe, qk, vta, iqe, iqk, rc2)
-                        v = v + seg_c(tvec(wp.cross(rb, rkb)), r2, wk, vkb, i2, iwk, rc2)
-                        v = v + seg_c(tvec(wp.cross(rkb, rtb)), wk, we, vtb, iwk, iwe, rc2)
-                    if chained != 0:
-                        v = v + chain_tail(src, pts, cs, k, i, s)
+                        v = v + seg(q1, r1, va, iq, i1, rc2) + seg(r2, w2, vt, i2, iw, rc2)
                 else:
+                    # The set without leg nodes: the straight legs only.
                     v = v + seg(q1, r1, va, iq, i1, rc2) + seg(r2, w2, vt, i2, iw, rc2)
             if wp.static(PARTS != 1):
                 if wp.static(is64):

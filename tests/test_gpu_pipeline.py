@@ -759,3 +759,84 @@ def test_mach_device_lattice_cache_keeps_one_entry():
         assert engine.device_lattice(lat, "float64", mach_transform=mt) is dl
     keys = [k for k in lat.geom_cache if isinstance(k, tuple) and k and k[0] == "gpu_lattice_mach"]
     assert len(keys) == 1
+
+
+@pytest.mark.gpu
+@pytest.mark.parametrize("precision", ["float64", "float32"])
+@pytest.mark.parametrize("solver_type, n_chord", [("vlm", 4), ("linear", None)])
+@pytest.mark.parametrize("h", [None, 1.5])
+def test_gpu_kernel_set_without_leg_nodes_agrees_bit_for_bit(gpu_device, monkeypatch, precision, solver_type,
+                                                             n_chord, h):
+    """A lattice without leg nodes gets the same bits from the kernel set without the node code as from the full set."""
+    from ventorum.gpu import engine
+    from ventorum.gpu import kernels as kmod
+
+    wing = vt.LiftingSurface(name="kernel_set_probe", semi_span=4.0, dihedral=0.05, sections=[
+        vt.WingSection(y_frac=0.0, chord=1.2), vt.WingSection(y_frac=1.0, chord=0.6)])
+    st = vt.SolverSettings(solver_type=solver_type, n_panels=24, n_chord=n_chord)
+    gpu.set_device("gpu")
+    gpu.set_precision(precision)
+    alphas = np.array([-2.0, 3.0, 8.0])
+
+    def run():
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            out = []
+            for a in alphas:
+                cond = vt.FlightCondition(V_inf=30.0, alpha=np.radians(a), h=h)
+                out.append(vt.analyze(wing, condition=cond, settings=st))
+            return out
+
+    used = []
+    real = kmod.kernels
+
+    def spy(precision, kinks=True):
+        used.append(kinks)
+        return real(precision, kinks)
+
+    monkeypatch.setattr(engine, "kernels", spy)
+    straight = run()
+    assert used and not any(used)
+
+    def drop_device_lattices(results):
+        # The GPU data of a lattice is cached on it: drop it, so the next run builds it with the other set.
+        for r in results:
+            cache = r.details["lattice"].geom_cache
+            for key in [k for k in cache if isinstance(k, tuple) and k and k[0] == "gpu_lattice"]:
+                del cache[key]
+
+    drop_device_lattices(straight)
+    monkeypatch.setattr(engine, "kernels", lambda precision, kinks=True: used.append("full") or real(precision, True))
+    full = run()
+    assert "full" in used
+    drop_device_lattices(full)
+    for a, b in zip(straight, full):
+        assert a.totals.CL == b.totals.CL
+        assert a.totals.CDi == b.totals.CDi
+        assert a.totals.Cm == b.totals.Cm
+        for sa, sb in zip(a.spanwise, b.spanwise):
+            assert np.array_equal(sa.gamma, sb.gamma)
+            assert np.array_equal(sa.Cl, sb.Cl)
+
+
+@pytest.mark.gpu
+def test_gpu_lattice_with_leg_nodes_gets_the_full_kernel_set(gpu_device):
+    """A deflected chordwise flap gives leg nodes: its device lattice uses the kernel set with the node code."""
+    from ventorum.gpu import engine
+    from ventorum.gpu.kernels import kernels
+
+    flap = vt.LiftingSurface(name="kink_probe", semi_span=4.0, sections=[
+        vt.WingSection(y_frac=0.0, chord=1.0), vt.WingSection(y_frac=1.0, chord=1.0)],
+        controls=[vt.ControlSurface(name="flap", eta_start=0.2, eta_end=0.7, hinge_x_c=0.75, deflection=0.15,
+                                    symmetric=True)])
+    clean = vt.LiftingSurface(name="straight_probe", semi_span=4.0, sections=[
+        vt.WingSection(y_frac=0.0, chord=1.0), vt.WingSection(y_frac=1.0, chord=1.0)])
+    gpu.set_device("gpu")
+    st = vt.SolverSettings(solver_type="vlm", n_panels=16, n_chord=4)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        lat_flap = vt.analyze(flap, alpha_deg=2.0, settings=st).details["lattice"]
+        lat_clean = vt.analyze(clean, alpha_deg=2.0, settings=st).details["lattice"]
+    prec = gpu.get_precision() if gpu.get_precision() in ("float32", "float64") else "float32"
+    assert engine.device_lattice(lat_flap, prec).k is kernels(prec, True)
+    assert engine.device_lattice(lat_clean, prec).k is kernels(prec, False)
