@@ -1873,17 +1873,21 @@ def _count_extrema_rows(G: np.ndarray, rel_tol: float = 1e-6) -> np.ndarray:
     return change.sum(axis=1).astype(int)
 
 
-def _sign_change_run(g: np.ndarray, rel_tol: float = 1e-6, skip: np.ndarray | None = None) -> int:
+def _sign_change_run(g: np.ndarray, rel_tol: float = 1e-6, skip: np.ndarray | None = None,
+                     case_scale: float | None = None) -> int:
     """Return the longest run of consecutive sign changes of the steps of a sequence.
 
     The steps are ``d[j] = g[j + 1] - g[j]``. A step is a sign change when it
     and the step before it have opposite signs. The function returns the
     largest number of such steps in a row. A step with
-    ``|d| <= rel_tol * max|g|`` has no sign: it is not a sign change and it
-    stops the run. A step marked in *skip* (a step near a side edge of a
-    control) also has no sign. A smooth load with physical extrema gives
-    runs of one or two; a saw-tooth (the strips alternate up and down)
-    gives one long run.
+    ``|d| <= rel_tol * scale`` has no sign: it is not a sign change and it
+    stops the run. The scale is *case_scale* (the largest ``|Gamma|`` of all
+    surfaces of the case) when it is finite and positive, else ``max|g|``.
+    A sequence with ``max|g| < rel_tol * case_scale`` (a surface without
+    load, whose circulation is round-off) gives 0. A step marked in *skip*
+    (a step near a side edge of a control) also has no sign. A smooth load
+    with physical extrema gives runs of one or two; a saw-tooth (the strips
+    alternate up and down) gives one long run.
 
     Parameters
     ----------
@@ -1894,6 +1898,9 @@ def _sign_change_run(g: np.ndarray, rel_tol: float = 1e-6, skip: np.ndarray | No
         Relative size of a step that has no sign [-].
     skip : array_like of bool, optional
         Shape (len(g) - 1,): True for each step that has no sign.
+    case_scale : float or None, optional
+        The largest ``|Gamma|`` of all surfaces of the case [m^2/s]. None,
+        zero or a value that is not finite gives the scale ``max|g|``.
 
     Returns
     -------
@@ -1903,21 +1910,33 @@ def _sign_change_run(g: np.ndarray, rel_tol: float = 1e-6, skip: np.ndarray | No
     g = np.asarray(g, dtype=float)
     if g.size < 4:
         return 0
-    return int(_sign_change_run_rows(g[None, :], rel_tol, None if skip is None else np.asarray(skip)[None, :])[0])
+    return int(_sign_change_run_rows(g[None, :], rel_tol, None if skip is None else np.asarray(skip)[None, :],
+                                     None if case_scale is None else np.array([case_scale], dtype=float))[0])
 
 
-def _sign_change_run_rows(G: np.ndarray, rel_tol: float = 1e-6, skip: np.ndarray | None = None) -> np.ndarray:
+def _sign_change_run_rows(G: np.ndarray, rel_tol: float = 1e-6, skip: np.ndarray | None = None,
+                          case_scale: np.ndarray | None = None) -> np.ndarray:
     """Return :func:`_sign_change_run` of each row of *G* (shape (K, m)), with the same rules.
 
     *skip* has the shape (m - 1,) or (K, m - 1): True for each step that has
-    no sign.
+    no sign. *case_scale* has the shape (K,): the largest ``|Gamma|`` of all
+    surfaces of each case [m^2/s] (see :func:`_sign_change_run`).
     """
     G = np.asarray(G, dtype=float)
     K, m = G.shape
     if m < 4:
         return np.zeros(K, dtype=int)
     d = G[:, 1:] - G[:, :-1]
-    scale = np.maximum(np.abs(G).max(axis=1), 1e-300)
+    row_max = np.abs(G).max(axis=1)
+    scale = np.maximum(row_max, 1e-300)
+    quiet = np.zeros(K, dtype=bool)
+    if case_scale is not None:
+        # One scale for all surfaces of a case: a surface without load (round-off circulation) has
+        # no step above the threshold of the loaded surfaces. With one surface the scale is max|g|.
+        cs = np.broadcast_to(np.asarray(case_scale, dtype=float), (K,))
+        use = np.isfinite(cs) & (cs > 0.0)
+        scale = np.where(use, np.maximum(cs, 1e-300), scale)
+        quiet = use & (row_max < rel_tol * cs)
     keep = np.abs(d) > rel_tol * scale[:, None]
     if skip is not None:
         keep &= ~np.broadcast_to(np.asarray(skip, dtype=bool), d.shape)
@@ -1927,7 +1946,19 @@ def _sign_change_run_rows(G: np.ndarray, rel_tol: float = 1e-6, skip: np.ndarray
     j = np.arange(change.shape[1])
     last_break = np.maximum.accumulate(np.where(change, -1, j[None, :]), axis=1)
     run = np.where(change, j[None, :] - last_break, 0)
-    return run.max(axis=1).astype(int)
+    return np.where(quiet, 0, run.max(axis=1)).astype(int)
+
+
+def _case_gamma_scale(G: np.ndarray, surface_strips: Sequence) -> np.ndarray:
+    """Return the largest ``|Gamma|`` of all surfaces of each case [m^2/s] (shape (K,))."""
+    G = np.asarray(G, dtype=float)
+    out = np.zeros(G.shape[0])
+    for sl in surface_strips:
+        g = G[:, sl]
+        if g.shape[1]:
+            # np.fmax would drop a NaN; np.maximum keeps it, so a case that is not finite keeps the old rule.
+            out = np.maximum(out, np.abs(g).max(axis=1))
+    return out
 
 
 def spanwise_stats_batch(surface_strips: Sequence, arrays: dict[str, np.ndarray]) -> list[dict | None]:
@@ -1943,7 +1974,9 @@ def spanwise_stats_batch(surface_strips: Sequence, arrays: dict[str, np.ndarray]
         (a value of None means "absent" for all cases). The optional entry
         ``control_edge_step`` is the (n_strips,) bool array of the lattice
         (``VortexLattice.control_edge_step``): the steps near a side edge
-        of a control, which the saw-tooth measure does not count.
+        of a control, which the saw-tooth measure does not count. The
+        saw-tooth measure uses the largest ``|Gamma|`` of all surfaces of
+        each case as its scale (see :func:`_sign_change_run`).
 
     Returns
     -------
@@ -1966,6 +1999,7 @@ def spanwise_stats_batch(surface_strips: Sequence, arrays: dict[str, np.ndarray]
     max_ae = np.zeros(K)
     n_run = np.zeros(K, dtype=int)
     edge = arrays.get("control_edge_step")
+    case_scale = _case_gamma_scale(arrays["gamma"], surface_strips)
     for sl in surface_strips:
         g = arrays["gamma"][:, sl]
         if g.shape[1] == 0:
@@ -1973,7 +2007,7 @@ def spanwise_stats_batch(surface_strips: Sequence, arrays: dict[str, np.ndarray]
         max_cl = np.maximum(max_cl, cl[:, sl].max(axis=1))
         max_ae = np.maximum(max_ae, np.degrees(ae[:, sl].max(axis=1)))
         skip = None if edge is None else np.asarray(edge, dtype=bool)[sl][:-1]
-        n_run = np.maximum(n_run, _sign_change_run_rows(g, skip=skip))
+        n_run = np.maximum(n_run, _sign_change_run_rows(g, skip=skip, case_scale=case_scale))
     return [{"max_local_cl": float(max_cl[k]), "max_alpha_eff_deg": float(max_ae[k]),
              "sign_change_run": int(n_run[k])}
             if finite[k] else None for k in range(K)]
@@ -2598,11 +2632,16 @@ def evaluate_aerodynamic_trust(
         # Saw-tooth check: a long run of consecutive sign changes of the strip-to-strip step of
         # the circulation (strips that alternate up and down). The physical extrema of a smooth
         # load are isolated and do not count. The steps near a side edge of a control are left
-        # out in spanwise_stats (lattice_spanwise_stats, spanwise_stats_batch, GPU kernel).
+        # out in spanwise_stats (lattice_spanwise_stats, spanwise_stats_batch, GPU kernel). The
+        # steps of all surfaces are measured against the largest |Gamma| of the case, so that a
+        # surface without load (round-off circulation) does not trigger the rule.
         if spanwise_stats is not None:
             n_run = spanwise_stats["sign_change_run"]
         else:
-            n_run = max((_sign_change_run(sw.gamma) for sw in spanwise_list), default=0)
+            gammas = [np.asarray(sw.gamma, dtype=float) for sw in spanwise_list]
+            sizes = [g.size for g in gammas if g.size]
+            case_scale = float(np.abs(np.concatenate(gammas)).max()) if sizes else None
+            n_run = max((_sign_change_run(g, case_scale=case_scale) for g in gammas), default=0)
         if n_run >= _SAW_TOOTH_RUN:
             num_pen += 0.40
             warnings.append(
