@@ -2329,14 +2329,16 @@ def evaluate_aerodynamic_trust(
     # Non-finite result guard: any total coefficient that is not a finite
     # number makes the result UNRELIABLE.
     bad_totals: list[str] = []
-    for label, value in (("CL", CL), ("CY", CY), ("Cl", Cl), ("Cm", Cm), ("Cn", Cn),
-                         ("Cn (stability axes)", Cn_stability), ("CDi", CDi), ("CDp", CDp),
-                         ("CD_total", CD_total)):
-        if value is None:
-            continue
-        # The usual case, a float, without the call of _is_finite.
-        if not (math.isfinite(value) if isinstance(value, float) else _is_finite(value)):
-            bad_totals.append(f"{label}={value}")
+    totals = (CL, CY, Cl, Cm, Cn, Cn_stability, CDi, CDp, CD_total)
+    for value in totals:
+        # The usual case, a finite float, without the call of _is_finite.
+        if value is not None and not (math.isfinite(value) if isinstance(value, float) else _is_finite(value)):
+            # A value that is not finite: name each of them.
+            for label, v in zip(("CL", "CY", "Cl", "Cm", "Cn", "Cn (stability axes)", "CDi", "CDp", "CD_total"),
+                                totals):
+                if v is not None and not _is_finite(v):
+                    bad_totals.append(f"{label}={v}")
+            break
     for sw in (spanwise_list or ()) if spanwise_stats is None else ():
         arrays = [
             ("gamma", sw.gamma), ("Cl", sw.Cl), ("Cd_i", sw.Cd_i),
@@ -2673,12 +2675,15 @@ def evaluate_aerodynamic_trust(
     if model is not None:
         model_score, m_warn, m_rec = model
         penalties["error_model"] = 1.0 - model_score
-        warnings.extend(m_warn)
-        recommendations.extend(r for r in m_rec if r not in recommendations)
+        if m_warn:
+            warnings.extend(m_warn)
+        if m_rec:
+            recommendations.extend(r for r in m_rec if r not in recommendations)
 
-    for msg in notes or ():
-        if msg not in warnings:
-            warnings.append(msg)
+    if notes:
+        for msg in notes:
+            if msg not in warnings:
+                warnings.append(msg)
 
     # Composite score: the error-model score with the envelope rules as caps ------------------
     score = min(model_score, cap_score)
