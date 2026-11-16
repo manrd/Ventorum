@@ -8,6 +8,8 @@ a minor version can change a public interface.
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-11-16
+
 ### Added
 
 - Parasite-drag build-up: new type `ventorum.aero.parasite.BluffComponent` for bluff parts (landing
@@ -169,6 +171,13 @@ a minor version can change a public interface.
 
 ### Changed
 
+- Lattice solvers: faster per-case result build of sweeps, with the same values bit for bit.
+  The geometry-only convergence notes, sweep values and error-model inputs are computed once per
+  lattice; the calibrated error model and the ISA speed of sound keep their last values; the CPU
+  batch computes the spanwise statistics of all cases together. On the GPU, the float32 check of
+  the direct solve runs after the loads are on the host (no extra wait per batch; a bad case still
+  gets the solve again), and a lattice without leg nodes uses a kernel set without the node code.
+  The speed of the lattice sweeps is again near the speed of version 0.5.0.
 - RESULT CHANGE. 3D panel solver: the Trefftz-plane induced drag and `Cn_trefftz` use the rule of
   the vortex lattice. The normal wash of each wake strip is evaluated at the control-point span
   fraction of the strip (from the spanwise spacing of the mesh builder; 0.5 for a user-built mesh),
