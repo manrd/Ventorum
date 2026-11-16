@@ -4,6 +4,7 @@
 import dataclasses
 
 import numpy as np
+import ventorum.gpu
 import pytest
 import scipy.linalg
 
@@ -36,6 +37,8 @@ def test_default_ground_sweep_dispatch_parity_and_counters(backend, monkeypatch)
         return original(*args, **kwargs)
 
     monkeypatch.setattr(scipy.linalg, "lu_factor", factor)
+    # The test counts SciPy factorizations: hold the CPU LU at SciPy, whatever the machine profile selects.
+    monkeypatch.setattr(ventorum.gpu, "cpu_lu", lambda: "scipy")
     method = PanelMethodSolver()
     direct = method.solve(_wing(), _sweep(), _settings(
         panel_backend=backend, panel_ground_solver="direct",

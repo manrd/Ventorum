@@ -16,6 +16,7 @@ from __future__ import annotations
 import functools
 
 import numpy as np
+import ventorum.gpu
 import pytest
 import scipy.linalg
 
@@ -584,6 +585,8 @@ def test_factorizations_are_lazy_and_counted(monkeypatch):
         return original(a, *args, **kwargs)
 
     monkeypatch.setattr(scipy.linalg, "lu_factor", counting)
+    # The test counts SciPy factorizations: hold the CPU LU at SciPy, whatever the machine profile selects.
+    monkeypatch.setattr(ventorum.gpu, "cpu_lu", lambda: "scipy")
     surf = _rectangular_wing_surface(semi_span=3.0, chord=1.0)
     coords = _naca0012_coordinates(61)
     sweep = [FlightCondition(V_inf=30.0, alpha=np.radians(a)) for a in (-2.0, 0.0, 2.0, 4.0, 6.0)]

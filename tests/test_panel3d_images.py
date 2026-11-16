@@ -15,6 +15,7 @@ Published sources
 from __future__ import annotations
 
 import numpy as np
+import ventorum.gpu
 import pytest
 import scipy.linalg
 
@@ -460,6 +461,8 @@ def test_ground_factorizations_one_per_group(monkeypatch, half: bool):
         return original(a, *args, **kwargs)
 
     monkeypatch.setattr(scipy.linalg, "lu_factor", counting)
+    # The test counts SciPy factorizations: hold the CPU LU at SciPy, whatever the machine profile selects.
+    monkeypatch.setattr(ventorum.gpu, "cpu_lu", lambda: "scipy")
     surf = _rectangular_wing_surface(semi_span=2.5, chord=1.0)
     mesh = mesh_lifting_surface(surf, _naca0012_coordinates(31), n_chord=6, n_span=6, half=half)
     solver = PanelSolver(mesh, far_ratio=np.inf, ground_solver="direct")

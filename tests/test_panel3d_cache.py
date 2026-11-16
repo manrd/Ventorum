@@ -15,6 +15,7 @@ import warnings
 from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
+import ventorum.gpu
 import pytest
 import scipy.linalg
 
@@ -112,6 +113,8 @@ def lu_calls(monkeypatch):
         return original(*args, **kwargs)
 
     monkeypatch.setattr(scipy.linalg, "lu_factor", counting)
+    # The test counts SciPy factorizations: hold the CPU LU at SciPy, whatever the machine profile selects.
+    monkeypatch.setattr(ventorum.gpu, "cpu_lu", lambda: "scipy")
     return calls
 
 
@@ -292,6 +295,8 @@ def test_replaced_mesh_builder_misses(monkeypatch):
 def test_replaced_factorization_misses(monkeypatch):
     """A replaced factorization function is part of the key: a test that counts it sees a new solver."""
     st = _settings()
+    # The test counts SciPy factorizations from the first solve on: hold the CPU LU at SciPy, whatever the machine profile selects.
+    monkeypatch.setattr(ventorum.gpu, "cpu_lu", lambda: "scipy")
     _solve(_wing(), _cond(3.0), st)
     original = scipy.linalg.lu_factor
     calls = []

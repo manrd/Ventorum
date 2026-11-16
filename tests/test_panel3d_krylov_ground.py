@@ -7,6 +7,7 @@ import dataclasses
 import inspect
 
 import numpy as np
+import ventorum.gpu
 import pytest
 import scipy.linalg
 import scipy.sparse.linalg
@@ -71,6 +72,8 @@ def test_ground_sweep_parity_and_counters(backend, monkeypatch):
         return original(*args, **kwargs)
 
     monkeypatch.setattr(scipy.linalg, "lu_factor", counted)
+    # The test counts SciPy factorizations: hold the CPU LU at SciPy, whatever the machine profile selects.
+    monkeypatch.setattr(ventorum.gpu, "cpu_lu", lambda: "scipy")
     settings = SolverSettings(n_panels=5, n_chord=6, panel_backend=backend, panel_cache=False,
                               panel_ground_solver="direct")
     method = PanelMethodSolver()

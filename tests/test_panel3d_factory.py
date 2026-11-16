@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import numpy as np
+import ventorum.gpu
 import pytest
 
 from ventorum.airfoil import airfoil
@@ -206,6 +207,8 @@ def test_five_angle_sweep_one_factorization(monkeypatch):
         return original(a, *args, **kwargs)
 
     monkeypatch.setattr(scipy.linalg, "lu_factor", counting)
+    # The test counts SciPy factorizations: hold the CPU LU at SciPy, whatever the machine profile selects.
+    monkeypatch.setattr(ventorum.gpu, "cpu_lu", lambda: "scipy")
     solver = make_solver("panel3d")
     ac = _simple_wing(shape="0012", semi_span=3.0, chord=1.0)
     cond = FlightCondition(V_inf=25.0, alpha=0.0)

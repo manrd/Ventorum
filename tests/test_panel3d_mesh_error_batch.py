@@ -6,6 +6,7 @@ from __future__ import annotations
 import dataclasses
 
 import numpy as np
+import ventorum.gpu
 import pytest
 import scipy.linalg
 
@@ -105,6 +106,8 @@ def test_base_results_skip_base_solve(aircraft, conditions, single, monkeypatch)
 def test_factory_shares_study_and_reuses_base(aircraft, conditions, monkeypatch):
     """The factory builds one base and four refined solvers for three conditions."""
     settings = _settings()
+    # The test counts SciPy factorizations and compares with reference solves: hold the CPU LU at SciPy, whatever the machine profile selects.
+    monkeypatch.setattr(ventorum.gpu, "cpu_lu", lambda: "scipy")
     expected = [panel_mesh_convergence(aircraft, c, settings).to_dict() for c in conditions]
     baseline = factory.PanelMethodSolver().solve(aircraft, conditions, settings)
     settings.panel_estimate_mesh_error = True

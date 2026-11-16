@@ -176,7 +176,8 @@ def _run_pressure_case(coords: np.ndarray, label: str) -> None:
 
     scipy.linalg.lu_factor = counting
     try:
-        solver = PanelSolver(mesh, far_ratio=np.inf, kutta="pressure")
+        # The test counts SciPy factorizations: hold the CPU LU at SciPy.
+        solver = PanelSolver(mesh, far_ratio=np.inf, kutta="pressure", cpu_lu="scipy")
         res = solver.solve(cond)
     finally:
         scipy.linalg.lu_factor = orig
