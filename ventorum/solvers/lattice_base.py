@@ -49,6 +49,7 @@ from ventorum.core.trust import (
     mean_line_strip_jump,
     polar_limits,
     polar_stats,
+    spanwise_stats_batch,
     tip_edge_suction_note,
     trailing_edge_clearance,
 )
@@ -258,6 +259,34 @@ def quarter_chord_sweep_deg(lattice: VortexLattice) -> float:
     lam = np.degrees(np.arctan2(np.abs(dl[:, 0]), np.sqrt(dl[:, 1] ** 2 + dl[:, 2] ** 2)))
     w = lattice.area
     return float(np.sum(lam * w) / max(np.sum(w), 1e-300))
+
+
+
+def _batch_spanwise_stats(lattice: VortexLattice, loads: list) -> list:
+    """Return the spanwise statistics of the trust score of the cases of a CPU batch, or None for each case.
+
+    :func:`ventorum.core.trust.spanwise_stats_batch` gives the values of all
+    cases at once (the values that :func:`evaluate_aerodynamic_trust`
+    computes from the spanwise results of each case, with the control-edge
+    rule of :func:`ventorum.core.trust.lattice_spanwise_stats`). A case
+    whose results do not match the surfaces of the lattice gets None, and
+    the result build then uses the case alone.
+    """
+    surfaces = lattice.surfaces
+    strips = [sf.strips for sf in surfaces]
+    n_s = lattice.n_strips
+    sizes = [len(range(*sl.indices(n_s))) for sl in strips]
+    if not loads or any(len(ld.spanwise) != len(surfaces)
+                        or any(np.size(sw.gamma) != m for sw, m in zip(ld.spanwise, sizes)) for ld in loads):
+        return [None] * len(loads)
+    arrays: dict[str, np.ndarray | None] = {"control_edge_step": getattr(lattice, "control_edge_step", None)}
+    for name in ("gamma", "Cl", "Cd_i", "alpha_eff", "alpha_i", "local_lift", "Cd_profile", "Cm_section"):
+        parts = [[getattr(sw, name) for sw in ld.spanwise] for ld in loads]
+        if any(p is None for case in parts for p in case):
+            arrays[name] = None
+        else:
+            arrays[name] = np.stack([np.concatenate(case) for case in parts])
+    return spanwise_stats_batch(strips, arrays)
 
 
 class LatticeSolver(BaseSolver):
@@ -898,12 +927,13 @@ class LatticeSolver(BaseSolver):
             )
             dispatch = _cpu_dispatch(lattice.n_panels, len(conditions), gpu_reason, self.name)
             share = (time.perf_counter() - t0) / len(conditions)
+            stats = _batch_spanwise_stats(lattice, loads)
             results = [
                 self._case_result(
                     lattice, cond, ld, info, g, st[0], st[1], st[2], st[3], b_ref, c_ref, main_surface,
-                    t0, execution_time=share, ref_point=ref_point, dispatch=dispatch,
+                    t0, execution_time=share, spanwise_stats=sw_stats, ref_point=ref_point, dispatch=dispatch,
                 )
-                for cond, ld, (g, _, info), st in zip(conditions, loads, sols, setups)
+                for cond, ld, (g, _, info), st, sw_stats in zip(conditions, loads, sols, setups, stats)
             ]
             return _report_condition(results, [info for _, _, info in sols], settings)
 

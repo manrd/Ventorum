@@ -431,6 +431,64 @@ def test_gpu_float32_direct_solve_raises_for_a_singular_case(gpu_device):
 
 
 @pytest.mark.gpu
+def test_gpu_float32_direct_solve_deferred_check(gpu_device):
+    """With the deferred check, the float32 LU marks the singular case and does not raise; without it, it raises."""
+    import torch
+
+    from ventorum.gpu import engine
+    from ventorum.gpu.kernels import kernels
+
+    rng = np.random.default_rng(3)
+    n = engine.DIRECT64_MAX_N + 8
+    A = rng.normal(size=(2, n, n)) + n * np.eye(n)
+    b = torch.as_tensor(rng.normal(size=(2, n)), device="cuda")
+    MT = torch.as_tensor(np.ascontiguousarray(A.astype("float32").transpose(0, 2, 1)), device="cuda")
+    x_now = engine._direct(MT, b, None, kernels("float32"))
+    pending: list = []
+    with engine.deferred_direct_checks(pending):
+        x_held = engine._direct(MT, b, None, kernels("float32"))
+    assert engine._DEFERRED_DIRECT.get() is None
+    assert len(pending) == 1 and not engine.any_deferred_bad(pending)
+    assert torch.equal(x_now, x_held)
+    A[1, :, 0] = 0.0
+    A[1, 0, :] = 0.0
+    MT = torch.as_tensor(np.ascontiguousarray(A.astype("float32").transpose(0, 2, 1)), device="cuda")
+    pending = []
+    with engine.deferred_direct_checks(pending):
+        engine._direct(MT, b, None, kernels("float32"))
+    assert engine.any_deferred_bad(pending)
+    assert pending[0].cpu().tolist() == [False, True]
+    with pytest.raises(torch.linalg.LinAlgError):
+        engine._direct(MT, b, None, kernels("float32"))
+
+
+@pytest.mark.gpu
+def test_gpu_vlm_solves_again_after_a_deferred_bad_case(gpu_device, monkeypatch):
+    """When a deferred check marks a bad case, the VLM solves again with the check and gives the same result."""
+    from ventorum.gpu import engine
+
+    wing = vt.LiftingSurface(name="defer_probe", semi_span=5.0, sections=[
+        vt.WingSection(y_frac=0.0, chord=1.25), vt.WingSection(y_frac=1.0, chord=1.25)])
+    st = vt.SolverSettings(solver_type="vlm", n_panels=125, n_chord=8)
+    ref = vt.analyze(wing, alpha_deg=4.0, settings=st)
+    calls = []
+    real = engine.vlm_solve
+
+    def counting(*args, **kwargs):
+        calls.append(engine._DEFERRED_DIRECT.get() is not None)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(engine, "vlm_solve", counting)
+    monkeypatch.setattr(engine, "any_deferred_bad", lambda pending: True)
+    again = vt.analyze(wing, alpha_deg=4.0, settings=st)
+    assert calls == [True, False]
+    assert again.totals.CL == ref.totals.CL
+    assert again.totals.CDi == ref.totals.CDi
+    for a, b in zip(again.spanwise, ref.spanwise):
+        assert np.array_equal(a.gamma, b.gamma)
+
+
+@pytest.mark.gpu
 @pytest.mark.parametrize("kind", ["linear", "nonlinear", "vlm"])
 @pytest.mark.parametrize("precision", ["float64", "float32"])
 def test_gpu_iterative_solves_equal_cpu(gpu_device, monkeypatch, kind, precision):

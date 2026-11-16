@@ -42,6 +42,8 @@ piecewise cubic interpolation", SIAM Journal on Numerical Analysis 17(2),
 
 from __future__ import annotations
 
+import contextlib
+import contextvars
 import math
 import threading
 
@@ -662,6 +664,39 @@ def _system64(MT: torch.Tensor, diag64: torch.Tensor | None) -> torch.Tensor:
     return A
 
 
+# The masks of the float32 direct solves whose check of the zero pivots and the
+# non-finite solutions waits (see deferred_direct_checks), or None.
+_DEFERRED_DIRECT: contextvars.ContextVar[list | None] = contextvars.ContextVar(
+    "ventorum_deferred_direct_checks", default=None)
+
+
+@contextlib.contextmanager
+def deferred_direct_checks(pending: list):
+    """Hold the check of the float32 direct solves (:func:`_direct`) in this context.
+
+    The check of a float32 direct solve (a zero pivot, or a non-finite
+    solution) needs the result on the host: it makes the host wait for the
+    factorisation on the GPU. In this context, each such solve adds the mask
+    of its bad cases (a boolean tensor on the GPU) to *pending* and returns
+    the float32 solution without the check, so the host can queue the next
+    kernels while the GPU factorises. The caller must test the masks with
+    :func:`any_deferred_bad` after its next host sync. When a case is bad, it
+    must solve again outside this context: the check then gives these cases
+    the float64 LU, or raises for a singular system, as without the
+    deferral.
+    """
+    token = _DEFERRED_DIRECT.set(pending)
+    try:
+        yield pending
+    finally:
+        _DEFERRED_DIRECT.reset(token)
+
+
+def any_deferred_bad(pending: list) -> bool:
+    """Return True when a mask of :func:`deferred_direct_checks` marks a bad case."""
+    return any(bool(m.any()) for m in pending)
+
+
 def _direct(MT: torch.Tensor, rhs: torch.Tensor, diag64: torch.Tensor | None, kern) -> torch.Tensor:
     """Solve every case with its own factorisation (float64 LU; large float32 systems: LU and two refinements).
 
@@ -680,7 +715,12 @@ def _direct(MT: torch.Tensor, rhs: torch.Tensor, diag64: torch.Tensor | None, ke
         r = residual(MT, x, rhs, diag64, kern)
         x = x + torch.linalg.lu_solve(LU, piv, r.to(torch.float32).unsqueeze(-1)).squeeze(-1).to(_F64)
     # A zero pivot gives inf or NaN without an error: these cases get the float64 LU.
-    bad = torch.nonzero((info != 0) | ~torch.isfinite(x).all(dim=1)).flatten()
+    bad_mask = (info != 0) | ~torch.isfinite(x).all(dim=1)
+    pending = _DEFERRED_DIRECT.get()
+    if pending is not None:
+        pending.append(bad_mask)  # The caller tests it after its next host sync.
+        return x
+    bad = torch.nonzero(bad_mask).flatten()
     if bad.numel():
         x[bad] = torch.linalg.solve(_system64(MT[bad], None if diag64 is None else diag64[bad]),
                                     rhs[bad].unsqueeze(-1)).squeeze(-1)

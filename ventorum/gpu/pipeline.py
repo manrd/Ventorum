@@ -193,16 +193,36 @@ def _solve_group(solver, lattice, conditions: list, setups: list, settings, S_re
                 "The VLM uses the linear part of the tabulated polars (lift slope and zero-lift "
                 "angle from a fit). Stall is not modelled; for the start of stall on an unswept wing use solver='nonlinear'.",
                 RuntimeWarning, stacklevel=6)
-        g = engine.vlm_solve(dl, md, cs, lattice, Dfs, V, omega=omega, ref_point=ref_point)
-        G = g[:, md["panel_column"]]
         symmetric = all(is_symmetric_condition(c, gr) for c, gr in zip(conditions, grounds))
-        v_points = engine.vlm_load_velocities(dl, lattice, cs, G, symmetric)
+        # The check of the float32 direct solves waits until the loads are on
+        # the host (one sync instead of two), so the host queues the load
+        # kernels while the GPU factorises.
+        pending: list = []
+        with engine.deferred_direct_checks(pending):
+            G, v_points = _vlm_circulation(engine, dl, md, cs, lattice, Dfs, V, omega, ref_point, symmetric)
     dl_phys = engine.device_lattice(lattice, precision) if has_mach else dl
-    arrays = engine.loads(dl_phys, lattice, G, v_points, Dfs, V, rho, alpha, WD, grounds, S_ref, b_ref, c_ref,
-                          ref_point, alpha_eff, use_leg=solver.name == "vlm", extra={"gamma": G}, symmetric=symmetric,
-                          GK=bd["GK"], GO=bd["GO"], omega=omega,
-                          pg_beta=math.sqrt(1.0 - float(conditions[0].mach) ** 2) if has_mach else 1.0)
+
+    def solve_loads(G, v_points):
+        return engine.loads(dl_phys, lattice, G, v_points, Dfs, V, rho, alpha, WD, grounds, S_ref, b_ref, c_ref,
+                            ref_point, alpha_eff, use_leg=solver.name == "vlm", extra={"gamma": G},
+                            symmetric=symmetric, GK=bd["GK"], GO=bd["GO"], omega=omega,
+                            pg_beta=math.sqrt(1.0 - float(conditions[0].mach) ** 2) if has_mach else 1.0)
+
+    arrays = solve_loads(G, v_points)
+    if solver.name == "vlm" and engine.any_deferred_bad(pending):
+        # A case with a zero pivot or a non-finite float32 solution: solve
+        # again with the check (float64 LU of these cases, or the error of a
+        # singular system), as without the deferral.
+        G, v_points = _vlm_circulation(engine, dl, md, cs, lattice, Dfs, V, omega, ref_point, symmetric)
+        arrays = solve_loads(G, v_points)
     return (arrays, infos, umap, cpu_cases), None
+
+
+def _vlm_circulation(engine, dl, md, cs, lattice, Dfs, V, omega, ref_point, symmetric: bool) -> tuple:
+    """Return the panel circulation (K, n_panels) [m^2/s] of the vortex lattice and the velocities of its loads."""
+    g = engine.vlm_solve(dl, md, cs, lattice, Dfs, V, omega=omega, ref_point=ref_point)
+    G = g[:, md["panel_column"]]
+    return G, engine.vlm_load_velocities(dl, lattice, cs, G, symmetric)
 
 
 # Dispatch reasons of a nonlinear case that the CPU solves again after the GPU.
