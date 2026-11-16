@@ -1327,7 +1327,8 @@ def _build(precision: str, kinks: bool = True) -> SimpleNamespace:  # noqa: C901
         # compute_loads_batch, and the statistics of the trust score (all
         # spanwise values finite, peak |Cl|, peak |alpha_eff| [deg], longest
         # run of consecutive sign changes of the strip-to-strip step of the
-        # circulation on one surface, as in trust._sign_change_run_rows).
+        # circulation on one surface, with the case-wide scale of the steps,
+        # as in trust._sign_change_run_rows and trust.spanwise_stats_batch).
         # edge[s] != 0 marks the step from strip s to s + 1 near a control
         # edge (VortexLattice.control_edge_step): it has no sign.
         # out[k] = CL, CDi, CDp, CD_total, e, Cl, Cm, Cn, CY, CDi_nearfield,
@@ -1385,6 +1386,21 @@ def _build(precision: str, kinks: bool = True) -> SimpleNamespace:  # noqa: C901
         mcl = wp.float64(0.0)
         mae = wp.float64(0.0)
         n_run = wp.int32(0)
+        # Largest |Gamma| of all surfaces of the case: the scale of the steps
+        # of every surface. A surface below 1e-6 of it (no load, round-off
+        # circulation) is skipped. If the scale is zero or not finite, each
+        # surface uses its own largest |Gamma| (the same rule with one surface).
+        cmax = wp.float64(0.0)
+        cfin = wp.int32(1)
+        for f in range(surf0.shape[0]):
+            for s in range(surf0[f], surf1[f]):
+                ga = wp.abs(span[k, 0, s])
+                if not wp.isfinite(ga):
+                    cfin = wp.int32(0)
+                cmax = wp.max(cmax, ga)
+        use_c = wp.int32(0)
+        if cfin != 0 and cmax > wp.float64(0.0):
+            use_c = wp.int32(1)
         for f in range(surf0.shape[0]):
             s0 = surf0[f]
             s1 = surf1[f]
@@ -1397,7 +1413,12 @@ def _build(precision: str, kinks: bool = True) -> SimpleNamespace:  # noqa: C901
                 mcl = wp.max(mcl, wp.abs(span[k, 1, s]))
                 mae = wp.max(mae, wp.abs(span[k, 4, s]))
                 gmax = wp.max(gmax, wp.abs(span[k, 0, s]))
-            if s1 - s0 >= 4:
+            quiet = wp.int32(0)
+            if use_c != 0:
+                if gmax < wp.float64(1e-6) * cmax:
+                    quiet = wp.int32(1)
+                gmax = cmax
+            if s1 - s0 >= 4 and quiet == 0:
                 tol = wp.float64(1e-6) * wp.max(gmax, wp.float64(1e-300))
                 # A step at or below tol, or near a control edge, has no
                 # sign (0): it is not a sign change and it stops the run.
