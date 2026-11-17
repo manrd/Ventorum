@@ -90,6 +90,15 @@ def _old_rule_fires(res) -> bool:
     return max(_sign_change_run(sw.gamma, case_scale=None) for sw in res.spanwise) >= _SAW_TOOTH_RUN
 
 
+def _fin_is_unloaded(res) -> bool:
+    """True when the largest |Gamma| of the fin is at most 1e-6 of the largest |Gamma| of the case (0 at alpha 0)."""
+    g_max = max(float(np.max(np.abs(sw.gamma))) for sw in res.spanwise)
+    fin = [sw for sw in res.spanwise if getattr(sw, "surface_name", None) == "fin"]
+    if not fin:
+        fin = [res.spanwise[-1]]
+    return float(np.max(np.abs(fin[0].gamma))) <= 1e-6 * g_max
+
+
 def _trust_kw(res):
     t = res.totals
     return dict(AR=t.AR, condition=res.condition, CL=t.CL, CDi=t.CDi, CD_total=t.CD_total,
@@ -126,7 +135,13 @@ def test_unloaded_fin_does_not_trigger_the_rule_sweep(cpu_device):
         t = evaluate_aerodynamic_trust(spanwise_list=r.spanwise, **_trust_kw(r))
         assert not any(_KEY in w for w in t.warnings)
         old_fired += _old_rule_fires(r)
-    assert old_fired >= 2
+        # The case has the defect condition: a fin with round-off circulation only.
+        assert _fin_is_unloaded(r)
+    # The former per-surface scale fired on the round-off of the fin. The
+    # number of angles where it fires depends on the round-off of the
+    # platform (two or more on one machine, one on another), so the test
+    # asks for at least one.
+    assert old_fired >= 1
 
 
 def test_batch_statistics_skip_the_unloaded_surface():
