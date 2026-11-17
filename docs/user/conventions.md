@@ -10,7 +10,7 @@
 | Moment reference point | `Aircraft.ref_point` (for example the centre of gravity), the origin if not set. |
 | Sideslip | `beta > 0` is wind from the right. Positive dihedral gives `Cl_beta < 0`. |
 | Mach number | Dimensionless, stored in `FlightCondition.mach`. Scope: $M < 0.3$. From 0.3 to below 0.7 an estimate rated UNRELIABLE; refused at 0.7 and above. Supported by VLM (`solver_type="vlm"`). |
-| Wake | `wake_alignment="freestream"` (default) sends the wake along the free stream; `"body"` sends it along the x axis, as in AVL. |
+| Wake | `wake_alignment="freestream"` (default) sends the wake along the free stream; `"body"` sends it along the x axis, as in AVL. `"body"` is refused with `mach > 0` (`ValidityError`). |
 | Units | SI: m, m/s, kg/m^3, N. |
 
 ## Moment axes

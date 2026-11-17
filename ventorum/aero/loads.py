@@ -917,6 +917,41 @@ def _leg_force_rules_geometric(lattice: VortexLattice) -> tuple[np.ndarray, np.n
     return normal, scale, kind
 
 
+def require_freestream_wake(condition: FlightCondition, wake_dir: np.ndarray | None) -> None:
+    """Refuse a wake that does not follow the free stream when ``mach > 0``.
+
+    The compressibility correction (Prandtl-Glauert, Goethert stretch along
+    the free stream) puts the semi-infinite wake legs along the stretched
+    free stream. A wake along another direction (``wake_alignment="body"``)
+    is not supported there, so it is refused and not replaced silently.
+
+    Parameters
+    ----------
+    condition : FlightCondition
+        The flight condition; ``mach`` [-] can be None.
+    wake_dir : numpy.ndarray or None
+        Unit direction of the wake legs in geometry axes, shape (3,). None
+        means the free stream.
+
+    Raises
+    ------
+    ventorum.core.errors.ValidityError
+        When ``mach > 0`` and *wake_dir* is not the free-stream direction.
+    """
+    m = getattr(condition, "mach", None)
+    if wake_dir is None or m is None or not float(m) > 0.0:
+        return
+    d = freestream_direction(condition.alpha, condition.beta)
+    if not np.allclose(np.asarray(wake_dir, dtype=float), d, rtol=0.0, atol=1e-12):
+        from ventorum.core.errors import ValidityError
+
+        raise ValidityError(
+            "The compressibility correction (mach > 0) needs a wake along the free stream "
+            "(wake_alignment='freestream'); a wake along the body x-axis (wake_alignment='body') "
+            "is not supported with mach > 0."
+        )
+
+
 def prandtl_glauert_beta(conditions: list[FlightCondition]) -> np.ndarray:
     """Return the Prandtl-Glauert factor of each condition.
 
@@ -1487,6 +1522,7 @@ def _near_field_velocity(
     """
     n_p = lattice.n_panels
     if getattr(condition, "mach", None) is not None and condition.mach > 0.0:
+        require_freestream_wake(condition, wake_dir)
         import math
         M = float(condition.mach)
         beta = math.sqrt(1.0 - M * M)

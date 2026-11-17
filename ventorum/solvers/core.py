@@ -25,7 +25,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-from ventorum.aero.loads import group_strips_by_airfoil
+from ventorum.aero.loads import group_strips_by_airfoil, require_freestream_wake
 from ventorum.aero.system import (
     GroundPlane,
     UnknownMap,
@@ -206,6 +206,11 @@ def assemble_vlm(
     With body rates in *condition*, the onset velocity at each control point
     includes the rotation about *ref_point* [m] (the origin if None):
     ``(V_inf d - Omega x (x - x_ref) + v) . n = 0``.
+
+    With ``condition.mach > 0`` the wake follows the stretched free stream.
+    A *wake_dir* that is not the free-stream direction (a body-axis wake)
+    then raises :class:`~ventorum.core.errors.ValidityError` (see
+    :func:`ventorum.aero.loads.require_freestream_wake`).
     """
     if lattice.collocation != "vlm":
         raise ValueError("assemble_vlm needs a lattice built with collocation='vlm'.")
@@ -213,6 +218,7 @@ def assemble_vlm(
         check_mach_scope(condition)
         if ground is not None:
             raise ValidityError("Compressibility correction (mach > 0) is not supported in ground effect.")
+        require_freestream_wake(condition, wake_dir)
         import math
         M = float(condition.mach)
         beta = math.sqrt(1.0 - M * M)
