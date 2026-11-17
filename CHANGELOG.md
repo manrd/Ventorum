@@ -8,6 +8,30 @@ a minor version can change a public interface.
 
 ## [Unreleased]
 
+### Fixed
+
+- RESULT CHANGE. 3D panel solver: the Trefftz-plane trailing vortices are merged per trace node, with
+  one core per node (0.01 of the shortest adjacent strip), also for the ground images. Before, each
+  strip gave its two vortices a core from its own length, so at a node shared by a narrow and a wide
+  strip the two vortices did not cancel. A flapped rectangular wing (flap from 0.3 to 0.7 of the
+  span) gave CDi 0.0130, 0.0269 and 0.0209 at 12, 24 and 48 spanwise strips; now 0.0130, 0.0126 and
+  0.0126 (VLM 0.0130). Cn_trefftz of an aileron case was 2 times the VLM value; now 3.6 % below it.
+  Wings without controls change by less than 1e-3 relative in CDi. CL and Cm do not change.
+- RESULT CHANGE. Ventorum-2D polar source: the section goes to unit chord with its leading edge at
+  the origin before the solve (translation and scale, no rotation), so `height` is in chords and the
+  flap hinge is a fraction of the chord for a section of any size and position, as documented.
+  Before, both were read in the units of the coordinates: NACA 4412 at chord 2 and height 0.3 gave
+  the result of height 0.15. The viscous alpha-correction coupling gives the unit-chord section to
+  every polar source and takes the thickness ratio of its ground-flap note from it. NACA 0012 and
+  other sections already at unit chord do not change; cambered NACA sections in ground effect change
+  by up to 2e-4 in Cl (their leading edge moves to the origin). Free-air results do not change.
+- RESULT CHANGE (trust ratings only). The saw-tooth rule of the trust score measures the steps of
+  all surfaces against the largest circulation of the case, on the CPU and the GPU. A surface
+  without load (for example a vertical fin at zero sideslip) has round-off circulation and gave a
+  false "Spanwise circulation oscillates" warning with the rating LOW: a wing, tail and fin VLM
+  sweep had the warning at 14 of 17 angles, now at none. Single-surface results do not change.
+  Forces and moments do not change.
+
 ## [0.6.0] - 2026-11-16
 
 ### Added
