@@ -64,10 +64,10 @@ from ventorum.core.constants import MIN_CENTRE_SLOPE, RHO_SL
 from ventorum.ground_effect.solver import (
     MAX_BANK_DEG,
     _as_aircraft,
+    _probe_reference,
     analyze_ground_effect,
     check_height,
     find_bank_strike_limit,
-    plane_reference,
 )
 from ventorum.solvers.factory import make_solver, resolve_solver_type
 from ventorum.ground_effect.state import GroundEffectResult
@@ -790,6 +790,12 @@ def _fixed_n_chord(
     positive gap to the ground (the lowest height). Cases that touch the
     ground are ignored. Returns None if the solver has no chordwise panels
     or if all cases touch the ground.
+
+    The ground of each case is placed as in a single solve: the height
+    reference point is rotated with the root flap (see
+    :func:`ventorum.ground_effect.solver.place_ground`). Thus the count of
+    the case with the smallest gap is the count that
+    :func:`ventorum.ground_effect.analyze_ground_effect` selects for it.
     """
     try:
         solver = make_solver(resolve_solver_type(settings.solver_type))
@@ -802,7 +808,8 @@ def _fixed_n_chord(
     # The gap comes from the geometry of the solve (mean lines and controls).
     probe = ground_probe_lattice(aircraft, settings)
     pts = probe.all_points()
-    p_plane, mode = plane_reference(aircraft, ref_point, height_ref)
+    # Rotate the height reference point with the root flap, as each case does.
+    p_plane, mode = _probe_reference(aircraft, ref_point, height_ref, probe)
     best_gap, best_gp = np.inf, None
     for hv in heights:
         for av in alphas_deg:
