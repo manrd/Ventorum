@@ -159,6 +159,7 @@ class _VentorumBase(om.ExplicitComponent):
         self._vt_settings = settings.clone() if settings is not None else SolverSettings()
         condition = self.options["condition"]
         self._vt_condition = dataclasses.replace(condition) if condition is not None else FlightCondition()
+        self._vt_pin_n_chord()
         self._vt_outputs = outs
         self._vt_groups = groups
         self.input_names = {}
@@ -209,6 +210,28 @@ class _VentorumBase(om.ExplicitComponent):
                 self.add_output(o, val=np.zeros(vector_shapes[o]), units=VECTOR_OUTPUTS[o])
             else:
                 self.add_output(o, val=0.0)
+
+    def _vt_pin_n_chord(self) -> None:
+        """Keep one chordwise panel count for all analyses of the component.
+
+        With ``settings.n_chord=None`` the vortex lattice selects its
+        chordwise count from the gap to the ground. The count is an integer,
+        so in ground effect it changes with the height, the attitude and the
+        node inputs, and the outputs jump where it changes. The partials are
+        derivatives on one mesh and do not show these jumps. Thus the
+        component resolves the automatic count once, from the base design
+        (the geometry and the base condition), and keeps it in its copy of
+        the settings. Out of ground effect the automatic count does not
+        change, and the kept count is the same.
+        """
+        from ventorum.solvers.factory import make_solver, resolve_solver_type
+
+        if self._vt_settings.n_chord is not None or resolve_solver_type(self._vt_settings.solver_type) != "vlm":
+            return
+        ac = self._vt_aircraft.clone()
+        ac.compute_reference_values()
+        solver = make_solver("vlm")
+        self._vt_settings.n_chord = int(solver.resolve_n_chord(ac, self._vt_settings, self._vt_condition, None))
 
     def _vt_add(self, om_name: str, key: tuple, val: Any, units: str) -> None:
         if om_name in self.input_names:
@@ -343,7 +366,14 @@ class VentorumComponent(_VentorumBase):
         Geometry. The component keeps a copy and does not change it. The
         mesh topology is fixed.
     settings : SolverSettings or None
-        Solver settings: ``"vlm"``, ``"linear"`` or ``"nonlinear"``.
+        Solver settings: ``"vlm"``, ``"linear"`` or ``"nonlinear"``. The
+        component keeps a copy. With the vortex lattice and an automatic
+        chordwise count (``n_chord=None``), the component resolves the count
+        once at setup from the base design (the geometry and *condition*)
+        and keeps it for all analyses and partials. In ground effect the
+        automatic count changes with the height and the attitude; a fixed
+        count keeps the outputs continuous and consistent with the partials.
+        A new setup resolves the count again.
     condition : FlightCondition or None
         Base flight condition (keyword). The inputs replace its values.
         None gives ``FlightCondition()``.
@@ -439,7 +469,8 @@ class VentorumMatrixFreeComponent(_VentorumBase):
     geometry : Aircraft or LiftingSurface
         Geometry, as in :class:`VentorumComponent`.
     settings : SolverSettings or None
-        Solver settings.
+        Solver settings. An automatic chordwise count is resolved once at
+        setup, as in :class:`VentorumComponent`.
     condition : FlightCondition or None
         Base flight condition (keyword).
     outputs : tuple of str

@@ -618,3 +618,84 @@ def test_user_manual_first_problem_runs(float64_precision) -> None:
     assert 0.0 < prob.get_val("CL")[0] < 1.0
     for path in re.findall(r"```\{literalinclude\} (\S+)", text):
         assert (ROOT / "docs" / "user" / path).resolve().is_file(), path
+
+
+def _ground_count_threshold():
+    """Return a rectangular wing case and two heights [m] just below and above a change of the automatic count."""
+    from ventorum.solvers.horseshoe import VortexLatticeSolver
+
+    wing = vt.LiftingSurface(name="Wing", semi_span=2.0, n_panels=12,
+                             sections=[vt.WingSection(y_frac=0.0, chord=1.0), vt.WingSection(y_frac=1.0, chord=1.0)])
+    aircraft = vt.Aircraft(surfaces=[wing])
+    settings = vt.SolverSettings(solver_type="vlm", n_panels=12)
+    solver = VortexLatticeSolver()
+
+    def count(h: float) -> int:
+        return solver.resolve_n_chord(aircraft, settings, vt.FlightCondition(V_inf=50.0, alpha=np.radians(5.0), h=h),
+                                      None)
+
+    lo, hi = 0.30, 0.40
+    assert count(lo) != count(hi)
+    for _ in range(45):
+        mid = 0.5 * (lo + hi)
+        if count(mid) == count(lo):
+            lo = mid
+        else:
+            hi = mid
+    return aircraft, settings, lo, hi, count(lo), count(hi)
+
+
+def test_automatic_chordwise_count_is_pinned_in_ground_effect(float64_precision) -> None:
+    """In ground effect the component keeps the automatic chordwise count of the base design.
+
+    Before the fix each compute resolved the count again: across a change of
+    the count (5 to 4 panels near h = 0.34 m) a height step of 2e-6 m changed
+    CL by about 3.5e-4, while the partial predicted about -1e-6. Now the
+    outputs are continuous across that height and agree with the partials.
+    """
+    _om()
+    from ventorum.mdo import VentorumComponent
+
+    aircraft, settings, h_lo, h_hi, n_lo, n_hi = _ground_count_threshold()
+    assert n_lo != n_hi
+    h0 = 0.5 * (h_lo + h_hi)
+    condition = vt.FlightCondition(V_inf=50.0, alpha=np.radians(5.0), h=h0)
+    comp = VentorumComponent(aircraft, settings, condition=condition, inputs=("h", "alpha"), outputs=("CL", "Cm"))
+    prob = _problem(comp)
+    base = vt.analyze(aircraft, condition, settings)
+    pinned = int(base.details["lattice"].n_chord)
+    assert prob.get_val("CL")[0] == pytest.approx(base.totals.CL, rel=1e-12)
+
+    values, counts = {}, []
+    for h in (h_lo - 1e-6, h_hi + 1e-6):
+        prob.set_val("h", h)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            prob.run_model()
+        counts.append(int(comp.last_result.details["lattice"].n_chord))
+        totals = prob.compute_totals(of=["CL"], wrt=["h"])
+        values[h] = (float(prob.get_val("CL")[0]), float(totals["CL", "h"][0, 0]))
+    (ha, (cla, da)), (hb, (clb, _)) = values.items()
+    # Continuous: the change is the partial times the step (to second order).
+    assert abs((clb - cla) - da * (hb - ha)) < 1e-9, (clb - cla, da * (hb - ha))
+    assert counts == [pinned, pinned]
+    assert comp._vt_settings.n_chord == pinned
+    assert settings.n_chord is None  # the settings of the caller do not change
+
+    # The central differences cross the old change of the count.
+    prob.set_val("h", h0)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        prob.run_model()
+    _assert_partials(_check(prob, step=1e-6), rtol=1e-5, atol=1e-8)
+
+
+def test_fixed_chordwise_count_is_not_changed(float64_precision) -> None:
+    """A chordwise count that the caller sets stays as given."""
+    _om()
+    from ventorum.mdo import VentorumComponent
+
+    aircraft, condition, settings = _case()
+    comp = VentorumComponent(aircraft, settings, condition=condition, inputs=("alpha",), outputs=("CL",))
+    _problem(comp)
+    assert comp._vt_settings.n_chord == settings.n_chord == 2
