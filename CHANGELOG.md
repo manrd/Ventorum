@@ -6,7 +6,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Before version 1.0.0,
 a minor version can change a public interface.
 
-## [Unreleased]
+## [0.6.1] - 2026-11-17
 
 ### Fixed
 

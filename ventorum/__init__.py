@@ -453,7 +453,7 @@ from ventorum.ground_effect import (  # noqa: F401, E402
     plot_clearance_envelope,
 )
 
-__version__ = "0.6.0"
+__version__ = "0.6.1"
 
 # Names of ventorum.sensitivity that load PyTorch (given by __getattr__).
 _LAZY_SENSITIVITY = ("GradientResult", "check_gradients", "gradient_vjp", "gradients")
