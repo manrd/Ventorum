@@ -15,8 +15,6 @@ import ventorum as vt
 from ventorum.core.datatypes import FlightCondition, LiftingSurface, WingSection
 from ventorum.core.trust import (
     TrustScore,
-    _count_extrema,
-    _count_extrema_rows,
     evaluate_aerodynamic_trust,
     spanwise_stats_batch,
 )
@@ -210,16 +208,6 @@ def test_trust_evaluation_is_cheap():
         )
     elapsed_ms = (time.perf_counter() - t0) * 1000.0 / n_runs
     assert elapsed_ms < 5.0, f"Trust evaluation too slow: {elapsed_ms:.4f} ms per call"
-
-
-def test_extrema_count_of_rows_equals_the_count_per_row():
-    rng = np.random.default_rng(3)
-    for _ in range(300):
-        m = int(rng.integers(1, 25))
-        G = rng.normal(size=(4, m)).cumsum(axis=1)
-        if rng.random() < 0.5:
-            G = np.round(G, 1)
-        assert np.array_equal(_count_extrema_rows(G), [_count_extrema(g) for g in G])
 
 
 def test_batch_trust_statistics_give_the_same_trust_score():

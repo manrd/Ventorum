@@ -1840,39 +1840,6 @@ def _is_finite(value: object) -> bool:
         return False
 
 
-def _count_extrema(g: np.ndarray, rel_tol: float = 1e-6) -> int:
-    """Return the number of local extrema of a sequence (tiny steps are ignored)."""
-    g = np.asarray(g, dtype=float)
-    if g.size < 4:
-        return 0
-    d = g[1:] - g[:-1]
-    scale = max(float(np.abs(g).max()), 1e-300)
-    d = d[np.abs(d) > rel_tol * scale]
-    if d.size < 2:
-        return 0
-    s = np.sign(d)
-    return int(np.count_nonzero(s[1:] != s[:-1]))
-
-
-def _count_extrema_rows(G: np.ndarray, rel_tol: float = 1e-6) -> np.ndarray:
-    """Return :func:`_count_extrema` of each row of *G* (shape (K, m)), with the same rules."""
-    G = np.asarray(G, dtype=float)
-    K, m = G.shape
-    if m < 4:
-        return np.zeros(K, dtype=int)
-    d = G[:, 1:] - G[:, :-1]
-    scale = np.maximum(np.abs(G).max(axis=1), 1e-300)
-    keep = np.abs(d) > rel_tol * scale[:, None]
-    s = np.sign(d)
-    # The sign of the last kept step before each step (forward fill).
-    idx = np.where(keep, np.arange(m - 1)[None, :], -1)
-    last = np.maximum.accumulate(idx, axis=1)
-    prev = np.concatenate([np.full((K, 1), -1), last[:, :-1]], axis=1)
-    prev_sign = np.take_along_axis(s, np.maximum(prev, 0), axis=1)
-    change = keep & (prev >= 0) & (s != prev_sign)
-    return change.sum(axis=1).astype(int)
-
-
 def _sign_change_run(g: np.ndarray, rel_tol: float = 1e-6, skip: np.ndarray | None = None,
                      case_scale: float | None = None) -> int:
     """Return the longest run of consecutive sign changes of the steps of a sequence.
