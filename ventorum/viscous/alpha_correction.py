@@ -318,13 +318,21 @@ def _section_spec(section: Any) -> Any:
 
 
 def _source_section(spec: Any) -> tuple[Any, str]:
-    """Return the section argument of a polar source and its memo key."""
+    """Return the section argument of a polar source and its memo key.
+
+    A shape goes to the source as points at unit chord with the leading
+    edge at the origin, not rotated
+    (:meth:`ventorum.airfoil.AirfoilShape.to_unit_chord` of the points).
+    Thus a shape of any size and position gives the strip polar of the
+    unit-chord section (the height h/c and the hinge x/c of the strip are in
+    chords), and a scaled copy has the same memo key.
+    """
     from ventorum.airfoil import airfoil
 
     if isinstance(spec, (str, int, np.integer)) and _NACA_NAME.match(str(spec)):
         digits = _NACA_NAME.match(str(spec)).group(1)  # type: ignore[union-attr]
         return f"naca {digits}", f"naca {digits}"
-    coords = np.asarray(airfoil(spec).coords, dtype=float)
+    coords = np.asarray(airfoil(airfoil(spec).coords).to_unit_chord().coords, dtype=float)
     key = hashlib.sha256(np.round(coords, 9).tobytes()).hexdigest()
     return coords, key
 
@@ -366,7 +374,12 @@ def _strip_sections(aircraft: Aircraft, lattice: VortexLattice, s: int) -> list[
 
 
 def _strip_thickness_ratio(aircraft: Aircraft, lattice: VortexLattice, s: int, cand: Any = None) -> float:
-    """Return the thickness-to-chord ratio t/c [-] of strip *s*, or 0.0 if not found."""
+    """Return the thickness-to-chord ratio t/c [-] of strip *s*, or 0.0 if not found.
+
+    The ratio is the largest thickness of the section at unit chord
+    (:meth:`ventorum.airfoil.AirfoilShape.to_unit_chord`), so a section
+    given in another length unit gives the same t/c.
+    """
     surf = aircraft.surfaces[int(lattice.strip_surface[s])]
     secs = _sorted_sections(surf)
     eta = abs(float(lattice.eta[s]))
@@ -391,7 +404,7 @@ def _strip_thickness_ratio(aircraft: Aircraft, lattice: VortexLattice, s: int, c
             try:
                 from ventorum.airfoil import airfoil
 
-                af = airfoil(spec)
+                af = airfoil(spec).to_unit_chord()
             except (KeyError, ValueError):
                 continue
             t_vals.append(w * float(af.max_thickness()[0]))
@@ -403,7 +416,7 @@ def _strip_thickness_ratio(aircraft: Aircraft, lattice: VortexLattice, s: int, c
         try:
             from ventorum.airfoil import airfoil
 
-            return float(airfoil(cand.source_info["section"]).max_thickness()[0])
+            return float(airfoil(cand.source_info["section"]).to_unit_chord().max_thickness()[0])
         except (KeyError, ValueError):
             pass
     return 0.0

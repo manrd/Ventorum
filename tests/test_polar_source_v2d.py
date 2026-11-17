@@ -423,3 +423,111 @@ def test_default_newton_tolerance_is_the_solve_viscous_default(fake_solver):
     source.polar("naca 0012", 1e6, [0.0])
     assert fake_solver[-1]["tol"] == inspect.signature(solve_viscous).parameters["tol"].default == 1e-6
     assert source.describe()["options"]["tol"] == 1e-6
+
+
+# ── Unit-chord map of the section ────────────────────────────────────────────
+
+#: Leading-edge offset [chord units] of the shifted test sections.
+LE_OFFSET = np.array([0.37, -0.21])
+
+
+def _scaled_4412(scale, offset=(0.0, 0.0)):
+    """NACA 4412 points (161, the source default) at another chord and position [chord units]."""
+    return airfoil("naca 4412", n_points=161).coords * scale + np.asarray(offset)
+
+
+def test_section_of_any_size_reaches_the_solver_at_unit_chord(fake_solver):
+    """Regression: a section at chord 2 gave the height and the hinge in coordinate units, not in chords.
+
+    The solver must get the same unit-chord points, height, hinge and reference options for a section
+    at chord 2 (also with its leading edge away from the origin) as for the unit-chord section.
+    """
+    source = Ventorum2DPolarSource(cache=False)
+    unit = airfoil("naca 4412", n_points=161)
+    origin, scale = unit.unit_chord_map()
+    kw = dict(height=0.3, flap=(0.75, 0.5, 10.0))
+    source.polar(unit.coords, 1e6, [2.0], **kw)
+    ref_call = fake_solver[-1]
+    for given in (_scaled_4412(2.0), _scaled_4412(2.0, LE_OFFSET)):
+        source.polar(given, 1e6, [2.0], **kw)
+        call = fake_solver[-1]
+        np.testing.assert_allclose(call["bodies"], ref_call["bodies"], rtol=0.0, atol=1e-14)
+        assert call["height"] == ref_call["height"] == 0.3
+    # The reference options are in the frame of the section as given: the source maps them too.
+    source.polar(unit.coords, 1e6, [2.0], chord_ref=1.2, moment_ref=(0.3, 0.01))
+    ref_call = fake_solver[-1]
+    source.polar(_scaled_4412(2.0, LE_OFFSET), 1e6, [2.0], chord_ref=2.4,
+                 moment_ref=tuple(2.0 * np.array([0.3, 0.01]) + LE_OFFSET))
+    call = fake_solver[-1]
+    assert call["chord_ref"] == pytest.approx(ref_call["chord_ref"], rel=1e-14)
+    np.testing.assert_allclose(call["moment_ref"], ref_call["moment_ref"], rtol=0.0, atol=1e-14)
+    np.testing.assert_allclose(ref_call["moment_ref"], (np.array([0.3, 0.01]) - origin) / scale, rtol=1e-15)
+
+
+def test_scaled_section_reads_the_cache_entry_of_the_unit_chord_section(tmp_path, fake_solver):
+    """A unit-chord section and its copies at chord 2 (also shifted) have one cache entry."""
+    source = Ventorum2DPolarSource(cache=PolarCache(tmp_path), n_panels=80)
+    unit = airfoil("naca 4412", n_points=81).coords
+    source.polar(unit, 1e6, [0.0, 2.0], height=0.3)
+    source.polar(2.0 * unit, 1e6, [0.0, 2.0], height=0.3)
+    source.polar(2.0 * unit + LE_OFFSET, 1e6, [0.0, 2.0], height=0.3)
+    assert len(fake_solver) == 1
+
+
+def test_unit_chord_section_at_the_origin_is_not_changed(fake_solver):
+    """NACA 0012 (leading edge at the origin, chord 1) reaches the solver bit for bit as given."""
+    source = Ventorum2DPolarSource(cache=False)
+    given = airfoil("naca 0012", n_points=161)
+    for section in ("naca 0012", given, given.coords):
+        source.polar(section, 1e6, [2.0], height=0.3, moment_ref=(0.3, 0.01), chord_ref=1.2)
+        call = fake_solver[-1]
+        np.testing.assert_array_equal(call["bodies"], given.coords)
+        assert call["height"] == 0.3 and call["chord_ref"] == 1.2 and call["moment_ref"] == (0.3, 0.01)
+    flapped = given.with_flap(x_hinge=0.75, deflection=10.0, y_hinge=0.5)
+    source.polar("naca 0012", 1e6, [2.0], flap=(0.75, 0.5, 10.0))
+    np.testing.assert_array_equal(fake_solver[-1]["bodies"], flapped.coords)
+
+
+def test_flapped_shape_with_a_stored_reference_uses_the_reference_chord_line(fake_solver):
+    """A pre-flapped shape keeps the frame of its section before the deflection (its reference geometry)."""
+    from ventorum.airfoil import AirfoilShape
+
+    source = Ventorum2DPolarSource(cache=False, n_panels=160)
+    unit = airfoil("naca 0012", n_points=161).with_flap(x_hinge=0.75, deflection=10.0, y_hinge=0.5)
+    # The same flapped section at chord 2 with its leading edge at LE_OFFSET.
+    moved = AirfoilShape(name="moved", coords=2.0 * unit.coords + LE_OFFSET,
+                         reference=unit.reference.mapped(-LE_OFFSET / 2.0, np.eye(2), 0.5))
+    source.polar(unit, 1e6, [2.0])
+    ref_call = fake_solver[-1]
+    source.polar(moved, 1e6, [2.0])
+    call = fake_solver[-1]
+    np.testing.assert_allclose(call["bodies"], ref_call["bodies"], rtol=0.0, atol=1e-14)
+    ref = call["shape"].reference
+    np.testing.assert_allclose([*ref.leading_edge, *ref.trailing_edge, ref.chord_ref], [0.0, 0.0, 1.0, 0.0, 1.0],
+                               atol=1e-14)
+
+
+#: Largest difference [-] of Cl, Cd and Cm between a section at chord 2 (or also shifted) and the
+#: unit-chord section. The unit-chord map changes the points by round-off only (the scale 2 is exact,
+#: the shift is not), and the viscous solve converges to 1e-6.
+SCALED_SECTION_TOLERANCE = 1e-6
+
+
+@pytest.mark.slow
+def test_section_at_chord_2_gives_the_unit_chord_polar_in_ground_and_with_a_flap():
+    """Regression: NACA 4412 at chord 2 and h 0.3 gave Cl(0) 0.41733 (the polar of h/c 0.15).
+
+    A 10 deg flap at hinge 0.75 had its hinge at 37.5 % of the chord (Cl(2 deg) 1.6095).
+    """
+    source = Ventorum2DPolarSource(cache=False)
+    unit = airfoil("naca 4412", n_points=161).coords
+    # Angles that converge at unit chord: at 2 deg the solve stalls at h 0.3 and with the 10 deg flap.
+    for kw, alphas in (({"height": 0.3}, [0.0, 4.0]), ({"flap": (0.75, 0.5, 10.0)}, [0.0])):
+        ref = source.polar(unit, 1e6, alphas, **kw)
+        assert np.asarray(ref.alpha).size == len(alphas)
+        for given in (_scaled_4412(2.0), _scaled_4412(2.0, LE_OFFSET)):
+            pol = source.polar(given, 1e6, alphas, **kw)
+            np.testing.assert_allclose(pol.alpha, ref.alpha, rtol=0.0, atol=1e-12)
+            for name in ("Cl_data", "Cd_data", "Cm_data"):
+                np.testing.assert_allclose(getattr(pol, name), getattr(ref, name), rtol=0.0,
+                                           atol=SCALED_SECTION_TOLERANCE)
