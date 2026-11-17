@@ -17,6 +17,22 @@ thin-airfoil theory, Glauert 1927): the source passes the flapped
 :class:`ventorum.airfoil.AirfoilShape`, which holds that reference
 geometry. The options ``chord_ref`` and ``moment_ref`` override them.
 
+Unit chord. Before the solve, the source moves the section to unit chord
+with its leading edge at the origin: p -> (p - le) / c, with the leading
+edge le and the chord c of the reference geometry
+(:meth:`ventorum.airfoil.AirfoilShape.unit_chord_map`; for a shape without
+a stored reference geometry, the leading edge is the point farthest from
+the trailing-edge midpoint, the rule of
+:meth:`ventorum.airfoil.AirfoilShape.normalized`). The map does not rotate
+the section: the angle of attack is measured from the x axis of the
+section as given. Thus a section of any size and position gives the same
+polar, the height is in chords and the hinge is a fraction of the chord.
+The VLM mean line (:meth:`ventorum.airfoil.AirfoilShape.normalized`) also
+rotates the chord line onto the x axis. For a section whose chord line is
+not parallel to the x axis the two angle frames differ by that angle (about
+0.2 deg for NACA 4412, whose farthest point from the trailing edge is not
+the NACA leading edge).
+
 Lift definitions. In ground effect the 2D solver gives two lift
 coefficients: ``Cl`` is the surface pressure (force) lift and
 ``Cl_circulation`` is ``2 Gamma / c`` of the total circulation. They
@@ -180,6 +196,33 @@ def gap_mask(requested_deg: Sequence[float] | np.ndarray, kept_deg: Sequence[flo
         inside = (idx >= 0) & (idx < mask.size)
         mask[idx[inside]] = True
     return mask
+
+
+def _unit_chord_settings(settings: dict[str, Any], origin: np.ndarray, scale: float) -> dict[str, Any]:
+    """Return *settings* with ``chord_ref`` and ``moment_ref`` mapped to the unit-chord frame.
+
+    Parameters
+    ----------
+    settings : dict
+        Solver keywords of one call (see ``Ventorum2DPolarSource._settings``).
+    origin : numpy.ndarray
+        Leading edge of the section as given [chord units], shape (2,).
+    scale : float
+        Reference chord of the section as given [chord units].
+
+    Returns
+    -------
+    dict
+        A copy. ``chord_ref`` becomes ``chord_ref / scale`` and
+        ``moment_ref`` becomes ``(moment_ref - origin) / scale``.
+    """
+    out = dict(settings)
+    if "chord_ref" in out:
+        out["chord_ref"] = float(out["chord_ref"]) / scale
+    if "moment_ref" in out:
+        x, y = out["moment_ref"]
+        out["moment_ref"] = ((float(x) - float(origin[0])) / scale, (float(y) - float(origin[1])) / scale)
+    return out
 
 
 def _reference_key(shape: Any) -> list[float] | None:
@@ -347,7 +390,10 @@ class Ventorum2DPolarSource:
         ----------
         section : str, np.ndarray or AirfoilShape
             A NACA designation string, coordinates of shape (N, 2) in
-            Selig order [chord units], or an AirfoilShape instance.
+            Selig order [any length unit], or an AirfoilShape instance.
+            The section can have any size and position: the source moves
+            it to unit chord with the leading edge at the origin, without
+            a rotation (see the module docstring).
         Re : float
             Reynolds number [-].
         alphas_deg : sequence of float
@@ -357,14 +403,15 @@ class Ventorum2DPolarSource:
             Mach number [-]. Must be 0.0.
         flap : tuple or None
             ``(x_hinge, y_hinge, deflection_deg)``: hinge position as a
-            fraction of the chord [-], hinge height as a fraction of the
-            local thickness [-] (0 lower surface, 1 upper surface) and
+            fraction of the chord from the leading edge [-] (x of the
+            unit-chord section), hinge height as a fraction of the local
+            thickness [-] (0 lower surface, 1 upper surface) and
             deflection [deg], positive down.
         height : float or None
             Height above the ground in chords [-] of the reference point
             of the 2D solver (its default pivot, the quarter-chord point on
             the chord line of the section before a flap deflection), for
-            a section of unit chord. None means free air.
+            a section of any size. None means free air.
         **options
             Extra keywords forwarded to :func:`solve_viscous` (for example
             ``ncrit``, ``xtr``, ``max_iter``, ``tol``, ``wake_length``,
@@ -372,8 +419,8 @@ class Ventorum2DPolarSource:
             is the reference chord of the coefficients and of the
             Reynolds number; ``moment_ref`` [chord units] is the moment
             reference point (x, y) in the frame of the section as given
-            (before the repaneling and the flap deflection, which do not
-            move the frame). Both win over the reference geometry of the
+            (before the unit-chord map, the repaneling and the flap
+            deflection; the source maps both with the section). Both win over the reference geometry of the
             section and are part of the cache key. Unknown names are
             refused. A named input given twice (for example ``Re``) is a
             TypeError of the call itself.
@@ -438,6 +485,14 @@ class Ventorum2DPolarSource:
             # Coordinates or a coordinate file: the factory takes no generator
             # options, and the cache key uses the points, not the file name.
             shape = airfoil(section)
+            key_section = None
+        # The section goes to unit chord with its leading edge at the origin
+        # (no rotation), so that the height is in chords and the hinge is a
+        # fraction of the chord. The reference options get the same map.
+        origin, scale = shape.unit_chord_map()
+        shape = shape.to_unit_chord()
+        settings = _unit_chord_settings(settings, origin, scale)
+        if key_section is None:
             key_section = [
                 [round(float(v), 9) for v in row] for row in shape.coords
             ]
@@ -464,6 +519,8 @@ class Ventorum2DPolarSource:
                 "solver_revision": solver_revision(),
                 "solver_fingerprint": solver_fingerprint(),
                 "section": key_section,
+                # The polars of the section as given (before the unit-chord map) are not read back.
+                "section_frame": "unit chord, leading edge at the origin, not rotated",
                 "reference": reference_key,
                 "Re": float(re_val),
                 "mach": float(mach_val),

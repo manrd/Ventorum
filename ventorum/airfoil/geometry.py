@@ -307,6 +307,43 @@ class AirfoilShape:
         ref = None if self.reference is None else self.reference.mapped(le, rot, length)
         return AirfoilShape(name=self.name, coords=out, reference=ref)
 
+    def unit_chord_map(self) -> tuple[np.ndarray, float]:
+        """Return the translation and the scale of :meth:`to_unit_chord`.
+
+        The leading edge and the chord come from :meth:`reference_geometry`:
+        the stored reference geometry, or else the rule of
+        :meth:`normalized` (the leading edge is the point farthest from the
+        trailing-edge midpoint, the chord is the distance between them).
+
+        Returns
+        -------
+        origin : numpy.ndarray
+            Leading edge of the reference geometry [chord units], shape (2,).
+        scale : float
+            Reference chord [chord units], positive.
+        """
+        ref = self.reference_geometry()
+        return np.array(ref.leading_edge, dtype=np.float64), float(ref.chord_ref)
+
+    def to_unit_chord(self) -> AirfoilShape:
+        """Return a copy with the leading edge at (0, 0) and unit reference chord, not rotated.
+
+        The map is p -> (p - origin) / scale, with the origin and the scale
+        of :meth:`unit_chord_map`. Unlike :meth:`normalized`, the shape is
+        not rotated: a chord line that is not parallel to the x axis keeps
+        its angle. A stored reference geometry gets the same map. The name
+        is kept.
+
+        Returns
+        -------
+        AirfoilShape
+            Copy of this shape (coordinates [chord units]).
+        """
+        origin, scale = self.unit_chord_map()
+        out = (self.coords - origin) / scale
+        ref = None if self.reference is None else self.reference.mapped(origin, np.eye(2), scale)
+        return AirfoilShape(name=self.name, coords=out, reference=ref)
+
     def _split_surfaces(self) -> tuple[np.ndarray, np.ndarray]:
         """Split the polygon into upper and lower surfaces from the leading edge.
 

@@ -837,3 +837,83 @@ def test_polar_dict_fallback_has_a_trust_note(model):
         partial = solve_viscous(_named_thick_wing(), cond, settings, {0: polar}, model=model, tol=1e-10)
     assert any(note in n for n in partial.details["notes"])
     assert any(note in w for w in partial.totals.trust.warnings)
+
+
+# ── Section shapes of any size ───────────────────────────────────────────────
+
+#: Leading-edge offset [chord units] of the shifted section shapes.
+SHAPE_OFFSET = np.array([0.37, -0.21])
+
+
+def test_thick_note_uses_the_unit_chord_thickness_ratio():
+    """Regression: the t/c of the thick-section ground-flap note came from the raw points (0.24 at chord 2)."""
+    from types import SimpleNamespace
+
+    from ventorum.airfoil import airfoil
+    from ventorum.viscous.alpha_correction import _strip_thickness_ratio
+
+    unit = airfoil("0012").coords
+    lattice = SimpleNamespace(strip_surface=np.array([0]), eta=np.array([0.5]))
+    ratios = []
+    for coords in (unit, 2.0 * unit, 2.0 * unit + SHAPE_OFFSET):
+        aircraft = SimpleNamespace(surfaces=[make_rectangular_wing(shape=coords)])
+        ratios.append(_strip_thickness_ratio(aircraft, lattice, 0))
+    assert ratios[0] == pytest.approx(0.12, abs=1e-3)
+    np.testing.assert_allclose(ratios, ratios[0], rtol=1e-12)
+
+
+def test_source_gets_the_shape_at_unit_chord():
+    """A shape at chord 2 (also shifted) reaches the polar source as the unit-chord points, with one memo key."""
+    from ventorum.airfoil import airfoil
+
+    unit = airfoil("4412").coords
+    expected = airfoil(unit).to_unit_chord().coords
+    for coords in (unit, 2.0 * unit, 2.0 * unit + SHAPE_OFFSET):
+        source = GlauertSource()
+        solve_viscous(make_rectangular_wing(shape=coords), FlightCondition(V_inf=40.0, alpha=np.radians(2.0)),
+                      SolverSettings(), source, model="llt")
+        assert len(source.calls) == 1
+        np.testing.assert_allclose(source.calls[0]["section"], expected, rtol=0.0, atol=1e-14)
+
+
+#: Angles [deg] of the source polars in the slow strip test (a few angles keep it short).
+FEW_SOURCE_ALPHAS_DEG = np.arange(-2.0, 8.0 + 1e-9, 2.0)
+
+
+@pytest.mark.slow
+def test_ventorum2d_strip_polar_of_a_shape_at_chord_2_in_ground(monkeypatch):
+    """Regression: a WingSection shape at chord 2 gave the strip polar of half the strip h/c.
+
+    The real Ventorum-2D source gives the same strip polar for the shape at chord 2 (also shifted) as
+    for the unit-chord shape. The tolerance is the Newton tolerance of the 2D solve (1e-6).
+    """
+    import ventorum.viscous.alpha_correction as module
+    from ventorum.aero.polar_source_v2d import Ventorum2DPolarSource
+    from ventorum.airfoil import airfoil
+
+    monkeypatch.setattr(module, "SOURCE_ALPHAS_DEG", FEW_SOURCE_ALPHAS_DEG)
+
+    class Recorder(Ventorum2DPolarSource):
+        def polar(self, *args, **kwargs):
+            out = super().polar(*args, **kwargs)
+            self.polars.append((kwargs.get("height"), out))
+            return out
+
+    unit = airfoil("4412").coords
+    # h/c 1.2: the lifting line is valid in ground effect from h/c 1.
+    cond = FlightCondition(V_inf=15.0, alpha=np.radians(2.0), h=1.2)
+    polars = []
+    for coords in (unit, 2.0 * unit, 2.0 * unit + SHAPE_OFFSET):
+        source = Recorder(cache=False)
+        source.polars = []
+        res = solve_viscous(make_rectangular_wing(shape=coords), cond, SolverSettings(), source, model="llt")
+        assert res.converged
+        assert len(source.polars) == 1 and source.polars[0][0] is not None
+        polars.append(source.polars[0])
+    h_ref, ref = polars[0]
+    assert np.asarray(ref.alpha).size == FEW_SOURCE_ALPHAS_DEG.size
+    for h, pol in polars[1:]:
+        assert h == h_ref
+        np.testing.assert_allclose(pol.alpha, ref.alpha, rtol=0.0, atol=1e-12)
+        for name in ("Cl_data", "Cd_data", "Cm_data", "Cl_circulation_data"):
+            np.testing.assert_allclose(getattr(pol, name), getattr(ref, name), rtol=0.0, atol=1e-6)
