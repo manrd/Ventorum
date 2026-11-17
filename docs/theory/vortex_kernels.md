@@ -20,7 +20,7 @@ infinity --(along d)--> TE_a --(along chord)--> A --(bound)--> B --(along chord)
 
 The chordwise legs stay on the surface. Thus a control point never sits just above or below a trailing leg at angle of attack, and the matrix does not become nearly singular for narrow panels (see [V6](../verification_report.md)). On a curved mean surface a straight leg from a bound point to the trailing edge leaves the surface: on narrow strips (cosine spacing near the tips) it passed close to control points of other strips, much closer than the strip width, and the solve was nearly singular with the default settings for strongly cambered sections. The leg chains above remove this; `tests/test_mean_line_legs.py` checks the default settings and the spanwise and chordwise refinement.
 
-The wake direction is the free-stream direction $\hat{\mathbf u}$ by default (`wake_alignment="freestream"`). The option `wake_alignment="body"` gives $\hat{\mathbf d} = (1, 0, 0)$; the system matrix then does not depend on $\alpha$ and $\beta$. In ground effect the free-stream direction is always used, because the image method needs a wake parallel to the ground (see [Ground effect](ground_effect.md)).
+The wake direction is the free-stream direction $\hat{\mathbf u}$ by default (`wake_alignment="freestream"`). The option `wake_alignment="body"` gives $\hat{\mathbf d} = (1, 0, 0)$; the system matrix then does not depend on $\alpha$ and $\beta$. In ground effect the free-stream direction is always used, because the image method needs a wake parallel to the ground (see [Ground effect](ground_effect.md)). With the compressibility correction (`mach > 0`) the option `"body"` is refused with `ValidityError` (see [Compressibility](compressibility.md)).
 
 ## Biot-Savart law
 

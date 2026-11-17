@@ -55,6 +55,15 @@ def alpha_sweep(
     -------
     list[SolverResult]
         One result per angle of attack; moments are about ``aircraft.ref_point``.
+
+    Raises
+    ------
+    ValueError
+        The base condition with an angle of the sweep is not valid (the
+        error checks of
+        :func:`ventorum.utils.validation.check_flight_condition_values`, for
+        example a zero or negative ``V_inf``). The check gives no warnings:
+        :func:`ventorum.analyze_sweep` gives them once.
     """
     from ventorum.hardware.profile import size_class
     from ventorum.solvers.factory import make_solver, resolve_solver_type
@@ -64,6 +73,10 @@ def alpha_sweep(
     if alpha_range is None:
         alpha_range = np.radians(np.arange(-2, 13, 1.0))
     alpha_range = np.asarray(alpha_range, dtype=float)
+    from ventorum.utils.validation import check_flight_condition_values
+
+    for a in alpha_range.ravel():
+        check_flight_condition_values(dataclasses.replace(condition, alpha=float(a)))
     b = (backend or "auto").lower()
     if b not in ("auto", "thread", "serial"):
         raise ValueError(f"backend={backend!r}: use 'auto', 'thread' or 'serial'.")

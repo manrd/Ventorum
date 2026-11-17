@@ -110,6 +110,7 @@ The Prandtl-Glauert rule scales every section pressure coefficient by $1/\beta$ 
 - Linearized potential flow equation: $(1 - M^2) \phi_{xx} + \phi_{yy} + \phi_{zz} = 0$.
 - Attached flow without boundary-layer separation or shock waves.
 - Free air: compressibility correction is not supported in ground effect.
+- Wake along the free stream: the stretch is along the free stream, and the wake legs follow the stretched free stream. The option `wake_alignment="body"` with `mach > 0` is refused with `ValidityError`, so that the solve, the reported wake direction and the Trefftz plane use the same wake.
 
 ## Envelope
 

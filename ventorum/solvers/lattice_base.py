@@ -39,7 +39,6 @@ from ventorum.core.datatypes import (
 from ventorum.core.errors import ValidityError
 from ventorum.core.trust import (
     body_rate_note,
-    check_mach_scope,
     control_chord_note,
     evaluate_aerodynamic_trust,
     lattice_error_inputs,
@@ -57,7 +56,7 @@ from ventorum.geometry import lattice_cache
 from ventorum.geometry.lattice import VortexLattice, build_lattice
 from ventorum.solvers.base import BaseSolver
 from ventorum.utils.parallel import solve_threads
-from ventorum.utils.validation import validate_aircraft, validate_flight_condition
+from ventorum.utils.validation import check_flight_condition_values, validate_aircraft, validate_flight_condition
 
 # Out of ground effect, 4 chordwise panels put the aerodynamic centre within
 # about 0.01 c of the converged value, also for aspect ratio 1 (with 1 panel
@@ -228,6 +227,28 @@ def _cpu_dispatch(n_panels: int, batch: int, reason: str | None, family: str | N
     }
 
 
+def _check_wake_alignment_mach(condition: FlightCondition, settings: SolverSettings) -> None:
+    """Refuse ``wake_alignment="body"`` together with ``mach > 0``.
+
+    Reason: the compressibility correction puts the wake along the
+    stretched free stream. The solve would then not use the body-axis wake
+    that ``details["wake_dir"]`` and the Trefftz plane report, and the
+    result would jump between ``mach=None`` and a small Mach number.
+
+    Raises
+    ------
+    ventorum.core.errors.ValidityError
+        When ``settings.wake_alignment`` is ``"body"`` and ``condition.mach > 0``.
+    """
+    mach = getattr(condition, "mach", None)
+    if (mach is not None and float(mach) > 0.0
+            and str(getattr(settings, "wake_alignment", "freestream")) == "body"):
+        raise ValidityError(
+            f"wake_alignment='body' is not supported with the compressibility correction (mach={float(mach):g} "
+            "> 0): the correction needs a wake along the free stream. Use wake_alignment='freestream' or mach=None."
+        )
+
+
 def as_aircraft(geometry: Aircraft | LiftingSurface) -> Aircraft:
     """Return *geometry* as an aircraft; wrap a single surface in a new aircraft."""
     if isinstance(geometry, LiftingSurface):
@@ -247,19 +268,42 @@ def main_surface_strip_count(lattice: VortexLattice, index: int = 0) -> int:
     return n_right if n_right > 0 else int(np.sum(on_surf))
 
 
-def quarter_chord_sweep_deg(lattice: VortexLattice) -> float:
+def quarter_chord_sweep_deg(lattice: VortexLattice, main_surface: int | None = None) -> float:
     """Return the area-weighted mean of abs(sweep) of the bound-vortex line [deg].
 
-    The mean is over the bound-vortex segments of all panels of all
-    surfaces, each weighted by its panel area. The sweep of a segment is
-    the angle between the segment and the y-z plane. The trust score uses
-    this value as the "sweep" of the lattice solvers.
+    The mean is over the bound-vortex segments of the strips, each
+    weighted by its strip area. The sweep of a segment is the angle
+    between the segment and the y-z plane.
+    The trust score uses this value as the "sweep" of the main wing in the
+    error model and in the lifting-line sweep warning of the lattice
+    solvers.
+
+    Parameters
+    ----------
+    lattice : VortexLattice
+        Vortex lattice geometry. Lengths in m.
+    main_surface : int or None, optional
+        Index of the main surface in ``lattice.surfaces``. The mean then
+        uses only the strips of this surface. Reason: the error model
+        describes the main wing, so a swept tail or fin must not change
+        its sweep. A mirror copy of the main surface has the same
+        abs(sweep), so it does not change the mean. None (or an index with
+        no strips) uses the strips of all surfaces.
+
+    Returns
+    -------
+    float
+        Mean quarter-chord sweep [deg].
     """
     dl = lattice.dl
-    lam = np.degrees(np.arctan2(np.abs(dl[:, 0]), np.sqrt(dl[:, 1] ** 2 + dl[:, 2] ** 2)))
     w = lattice.area
+    if main_surface is not None:
+        on_main = np.asarray(lattice.strip_surface) == int(main_surface)
+        if np.any(on_main):
+            dl = dl[on_main]
+            w = w[on_main]
+    lam = np.degrees(np.arctan2(np.abs(dl[:, 0]), np.sqrt(dl[:, 1] ** 2 + dl[:, 2] ** 2)))
     return float(np.sum(lam * w) / max(np.sum(w), 1e-300))
-
 
 
 def _batch_spanwise_stats(lattice: VortexLattice, loads: list) -> list:
@@ -489,9 +533,15 @@ class LatticeSolver(BaseSolver):
         """Return the ground plane, the smallest ground clearance [m], the notes and the wake direction of one case.
 
         Raises the errors of the validity checks (ground strike, lifting line
-        too near the ground, a Mach number at or above 0.7).
+        too near the ground, a Mach number at or above 0.7, a body-axis wake
+        with ``mach > 0``). Every solve path (single case, sweep, batch,
+        CPU and GPU) passes here, so the flight condition of each case is
+        checked here: :func:`ventorum.utils.validation.check_flight_condition_values`
+        refuses for example a zero or negative ``V_inf`` with ValueError. It
+        gives no warnings, so a condition that an entry point has checked
+        already does not give its warnings again.
         """
-        check_mach_scope(condition)
+        check_flight_condition_values(condition)
         if ground is None and condition.h is not None:
             ground = ground_plane_from_condition(lattice, condition, ref_point)
         if getattr(condition, "mach", None) is not None and condition.mach > 0.0:
@@ -503,6 +553,7 @@ class LatticeSolver(BaseSolver):
                 raise ValidityError(
                     "Compressibility correction (mach > 0) is not supported in ground effect."
                 )
+            _check_wake_alignment_mach(condition, settings)
         h_min = check_ground_clearance(lattice, ground)
         if self.collocation == "llt" and h_min is not None and c_ref:
             hc = h_min / c_ref
@@ -558,7 +609,7 @@ class LatticeSolver(BaseSolver):
         """Return the values of :meth:`_case_result` that depend only on the lattice geometry.
 
         A batch computes them once per lattice (``lattice.geom_cache``). The
-        keys are ``sweep_deg`` (mean quarter-chord sweep [deg]),
+        keys are ``sweep_deg`` (mean quarter-chord sweep of the main surface [deg]),
         ``max_sweep_rad`` (the same [rad]), ``sweep_note`` (the lifting-line
         sweep note, or None), ``convergence`` (the warnings, then the notes
         of :func:`lattice_convergence_notes`), ``quiet`` (the trust notes
@@ -568,7 +619,7 @@ class LatticeSolver(BaseSolver):
         :func:`mean_line_strip_jump` applies) and ``error_inputs`` (the
         geometry inputs of the error model).
         """
-        sweep_deg = quarter_chord_sweep_deg(lattice)
+        sweep_deg = quarter_chord_sweep_deg(lattice, main_surface)
         sweep_note = None
         if self.collocation == "llt" and sweep_deg > LLT_SWEEP_WARNING_DEG:
             sweep_note = (
@@ -753,7 +804,9 @@ class LatticeSolver(BaseSolver):
         The flight condition gets the same check as in
         :func:`ventorum.analyze` (:func:`ventorum.utils.validation.validate_flight_condition`):
         for example V_inf below the minimum speed raises ValueError with
-        the same text.
+        the same text. :meth:`solve_sweep`, :meth:`solve_batch` and
+        :meth:`solve_lattice` refuse the same values (without the
+        warnings of the check).
 
         Parameters
         ----------
@@ -822,12 +875,19 @@ class LatticeSolver(BaseSolver):
         all angles use one chordwise count: the count of the angle with the
         smallest gap to the ground. Each angle then gets the same result as
         a single solve with that ``n_chord``.
+
+        Each condition of the sweep gets the error checks of
+        :func:`ventorum.utils.validation.check_flight_condition_values`
+        (ValueError, for example for a zero or negative ``V_inf``) before
+        the lattice is built.
         """
         aircraft = as_aircraft(aircraft)
         validate_aircraft(aircraft)
+        conds = [dataclasses.replace(condition, alpha=float(a)) for a in np.asarray(alpha_range, dtype=float)]
+        for cond in conds:
+            check_flight_condition_values(cond)
         aircraft.compute_reference_values()
         rp = aircraft.moment_reference() if ref_point is None else np.asarray(ref_point, dtype=float)
-        conds = [dataclasses.replace(condition, alpha=float(a)) for a in np.asarray(alpha_range, dtype=float)]
         S, b, c = aircraft.S_ref, aircraft.b_ref, aircraft.c_ref
         main = aircraft.main_surface_index()
         if self.collocation == "llt":
@@ -1076,6 +1136,8 @@ def assemble_system_matrix(
     else:
         lattice = build_lattice(aircraft, settings, collocation="llt")
     ground = ground_plane_from_condition(lattice, condition, aircraft.moment_reference()) if condition.h is not None else None
+    if condition.h is None:
+        _check_wake_alignment_mach(condition, settings)
     wd = wake_direction(condition, ground, getattr(settings, "wake_alignment", "freestream"))
     use_sym = getattr(settings, "use_symmetry", True)
     if collocation == "vlm":
