@@ -29,7 +29,7 @@ gpu.set_device("gpu")    # the GPU for every solve that the GPU pipelines suppor
 gpu.set_device("cpu")    # never the GPU
 ```
 
-The environment variable `VENTORUM_DEVICE` (`auto`, `cpu`, `gpu`) sets the start value. With `"auto"`, the choice depends on the solver family (`"vlm"`, `"linear"` or `"nonlinear"`), the panel count and the number of cases:
+The environment variable `VENTORUM_DEVICE` (`auto`, `cpu`, `gpu`) sets the start value. An unknown value gives a warning, and Ventorum uses `auto`. With `"auto"`, the choice depends on the solver family (`"vlm"`, `"linear"` or `"nonlinear"`), the panel count and the number of cases:
 
 * After `ventorum-tune` on a machine with a GPU, the profile holds a cost model of the machine: the times of batches of a few sizes, on the CPU and on the GPU, at a few panel counts. `"auto"` estimates the two times of the solve from the model and selects the faster device.
 * Without a cost model, a solve runs on the GPU when its work is at least `gpu.min_work(family)` horseshoe evaluations (the number of control points times the number of panels times the number of cases; twice that in ground effect), or when the batch has at least `gpu.min_cases(family)` cases.
@@ -44,7 +44,7 @@ gpu.set_precision("float32")   # faster on most GPUs
 gpu.set_precision("auto")      # default: the profile precision, else float32
 ```
 
-The environment variable `VENTORUM_GPU_PRECISION` sets the start value.
+The environment variable `VENTORUM_GPU_PRECISION` (`auto`, `float32`, `float64`) sets the start value. An unknown value gives a warning, and Ventorum uses `auto`. With `"auto"`, the precision is the value that the tuner stored in the machine profile (key `gpu`, `precision`). When the profile has no valid value (`float32` or `float64`), the precision is float32. A profile tuned with `VENTORUM_GPU_PRECISION=float64` therefore makes `"auto"` float64.
 
 * `float64` gives the results of the CPU solvers to round-off (the order of the sums differs).
 * `float32` computes the vortex kernels in single precision. The kernels keep the digits that matter in float64 (point differences, the distance of a wake leg to a point, a point on the line of a bound vortex). The linear systems are solved with float64 residuals until the error of the solve is far below the float32 error of the matrix; the Newton steps of the nonlinear lifting line use the float32 factorisation of the Jacobian (its entries have float32 errors of the same size). The relative error of the coefficients is of the order of 1e-7 to 1e-6, small against the errors of the methods. Consumer GPUs have much less float64 than float32 throughput, so `float32` is much faster there.
