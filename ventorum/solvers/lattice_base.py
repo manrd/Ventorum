@@ -39,7 +39,6 @@ from ventorum.core.datatypes import (
 from ventorum.core.errors import ValidityError
 from ventorum.core.trust import (
     body_rate_note,
-    check_mach_scope,
     control_chord_note,
     evaluate_aerodynamic_trust,
     lattice_error_inputs,
@@ -57,7 +56,7 @@ from ventorum.geometry import lattice_cache
 from ventorum.geometry.lattice import VortexLattice, build_lattice
 from ventorum.solvers.base import BaseSolver
 from ventorum.utils.parallel import solve_threads
-from ventorum.utils.validation import validate_aircraft, validate_flight_condition
+from ventorum.utils.validation import check_flight_condition_values, validate_aircraft, validate_flight_condition
 
 # Out of ground effect, 4 chordwise panels put the aerodynamic centre within
 # about 0.01 c of the converged value, also for aspect ratio 1 (with 1 panel
@@ -535,9 +534,14 @@ class LatticeSolver(BaseSolver):
 
         Raises the errors of the validity checks (ground strike, lifting line
         too near the ground, a Mach number at or above 0.7, a body-axis wake
-        with ``mach > 0``).
+        with ``mach > 0``). Every solve path (single case, sweep, batch,
+        CPU and GPU) passes here, so the flight condition of each case is
+        checked here: :func:`ventorum.utils.validation.check_flight_condition_values`
+        refuses for example a zero or negative ``V_inf`` with ValueError. It
+        gives no warnings, so a condition that an entry point has checked
+        already does not give its warnings again.
         """
-        check_mach_scope(condition)
+        check_flight_condition_values(condition)
         if ground is None and condition.h is not None:
             ground = ground_plane_from_condition(lattice, condition, ref_point)
         if getattr(condition, "mach", None) is not None and condition.mach > 0.0:
@@ -800,7 +804,9 @@ class LatticeSolver(BaseSolver):
         The flight condition gets the same check as in
         :func:`ventorum.analyze` (:func:`ventorum.utils.validation.validate_flight_condition`):
         for example V_inf below the minimum speed raises ValueError with
-        the same text.
+        the same text. :meth:`solve_sweep`, :meth:`solve_batch` and
+        :meth:`solve_lattice` refuse the same values (without the
+        warnings of the check).
 
         Parameters
         ----------
@@ -869,12 +875,19 @@ class LatticeSolver(BaseSolver):
         all angles use one chordwise count: the count of the angle with the
         smallest gap to the ground. Each angle then gets the same result as
         a single solve with that ``n_chord``.
+
+        Each condition of the sweep gets the error checks of
+        :func:`ventorum.utils.validation.check_flight_condition_values`
+        (ValueError, for example for a zero or negative ``V_inf``) before
+        the lattice is built.
         """
         aircraft = as_aircraft(aircraft)
         validate_aircraft(aircraft)
+        conds = [dataclasses.replace(condition, alpha=float(a)) for a in np.asarray(alpha_range, dtype=float)]
+        for cond in conds:
+            check_flight_condition_values(cond)
         aircraft.compute_reference_values()
         rp = aircraft.moment_reference() if ref_point is None else np.asarray(ref_point, dtype=float)
-        conds = [dataclasses.replace(condition, alpha=float(a)) for a in np.asarray(alpha_range, dtype=float)]
         S, b, c = aircraft.S_ref, aircraft.b_ref, aircraft.c_ref
         main = aircraft.main_surface_index()
         if self.collocation == "llt":

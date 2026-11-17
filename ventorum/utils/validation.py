@@ -301,13 +301,31 @@ def validate_aircraft(ac: Aircraft) -> None:
             _check_length(f"Aircraft '{ac.name}': ref_point[{k}]", float(comp))
 
 
-def validate_flight_condition(fc: FlightCondition) -> None:
-    """Check :class:`FlightCondition` values.
+def check_flight_condition_values(fc: FlightCondition) -> None:
+    """Refuse :class:`FlightCondition` values that cannot be solved; give no warning.
 
-    A stated Mach number at or above ``MACH_LIMIT_REFUSED`` (0.7) raises
-    :class:`~ventorum.core.errors.ValidityError`. A speed above Mach 0.3, or
-    a stated Mach number that does not agree with ``V_inf / a``, gives a
-    ``RuntimeWarning``.
+    This is the error part of :func:`validate_flight_condition`, with the
+    same checks and the same messages. The solvers call it for each case
+    (the shared lower entry point of every solve path), so a direct call of
+    a solver method refuses the same input as :func:`ventorum.analyze`. It
+    gives no warning, so a case that an entry point has checked already
+    does not get the warnings again.
+
+    Parameters
+    ----------
+    fc : FlightCondition
+        The flight condition. Speed in m/s, angles in rad, density in
+        kg/m^3, height in m.
+
+    Raises
+    ------
+    ValueError
+        A value is not finite or is out of range: ``V_inf`` below
+        ``MIN_SPEED_M_S`` (also zero and negative speeds) or above
+        ``SPEED_LIMIT_M_S``, an angle above pi rad, ``rho`` not positive,
+        ``h`` not positive.
+    ventorum.core.errors.ValidityError
+        A stated Mach number at or above ``MACH_LIMIT_REFUSED`` (0.7).
     """
     _finite_value("V_inf", fc.V_inf)
     if fc.V_inf < MIN_SPEED_M_S:
@@ -335,9 +353,22 @@ def validate_flight_condition(fc: FlightCondition) -> None:
             raise ValueError(
                 f"Height h={fc.h} m is above the size limit {LENGTH_LIMIT_M:g} m."
             )
-    from ventorum.core.constants import MACH_LIMIT_INCOMPRESSIBLE
-    from ventorum.core.trust import check_mach_scope, isa_speed_of_sound, mach_speed_mismatch
+    from ventorum.core.trust import check_mach_scope
     check_mach_scope(fc)
+
+
+def validate_flight_condition(fc: FlightCondition) -> None:
+    """Check :class:`FlightCondition` values.
+
+    The errors are those of :func:`check_flight_condition_values`. A
+    stated Mach number at or above ``MACH_LIMIT_REFUSED`` (0.7) raises
+    :class:`~ventorum.core.errors.ValidityError`. A speed above Mach 0.3, or
+    a stated Mach number that does not agree with ``V_inf / a``, gives a
+    ``RuntimeWarning``.
+    """
+    check_flight_condition_values(fc)
+    from ventorum.core.constants import MACH_LIMIT_INCOMPRESSIBLE
+    from ventorum.core.trust import isa_speed_of_sound, mach_speed_mismatch
     a_sound = isa_speed_of_sound(fc.rho)
     mach = fc.V_inf / a_sound
     if mach > MACH_LIMIT_INCOMPRESSIBLE:

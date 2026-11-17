@@ -33,6 +33,7 @@ Theory", Cambridge University Press, 1926, chapter XI.
 
 from __future__ import annotations
 
+import dataclasses
 import threading
 import warnings
 from collections import OrderedDict
@@ -58,7 +59,11 @@ from ventorum.geometry.discretization import fourier_collocation_angles
 from ventorum.geometry.lattice import _AirfoilBlender, _sorted_sections, airfoil_linear_properties, surface_reference_line
 from ventorum.solvers.base import BaseSolver
 from ventorum.utils.parallel import blas_single_thread
-from ventorum.utils.validation import validate_aircraft, validate_fourier_applicability
+from ventorum.utils.validation import (
+    check_flight_condition_values,
+    validate_aircraft,
+    validate_fourier_applicability,
+)
 
 #: Largest quarter-chord sweep on one spanwise interval that the Fourier
 #: solver accepts [deg]. The Fourier model has one straight, unswept,
@@ -311,6 +316,9 @@ class FourierSolver(BaseSolver):
         return int(surf.n_panels if surf.n_panels is not None else settings.n_panels)
 
     def _prepare(self, aircraft: Aircraft | LiftingSurface, condition: FlightCondition, settings: SolverSettings):
+        # The same error checks of the flight condition as the lattice
+        # solvers (no warnings: ventorum.analyze gives them once).
+        check_flight_condition_values(condition)
         if isinstance(aircraft, LiftingSurface):
             aircraft = Aircraft(surfaces=[aircraft])
         validate_aircraft(aircraft)
@@ -486,7 +494,13 @@ class FourierSolver(BaseSolver):
         settings: SolverSettings,
         alpha_range: np.ndarray,
     ) -> list[SolverResult]:
-        """Angle-of-attack sweep: one factorisation, many right-hand sides."""
+        """Angle-of-attack sweep: one factorisation, many right-hand sides.
+
+        Each angle [rad] gets the error checks of the flight condition
+        (:func:`ventorum.utils.validation.check_flight_condition_values`).
+        """
+        for a in np.asarray(alpha_range, dtype=float).ravel():
+            check_flight_condition_values(dataclasses.replace(condition, alpha=float(a)))
         aircraft, surf, N, b, theta, st, mu, n_idx, lhs, theta_q, q_data, sin_n, sin_n_q = self._prepare(
             aircraft, condition, settings)
         alphas = np.asarray(alpha_range, dtype=float)
