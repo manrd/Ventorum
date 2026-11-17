@@ -1453,7 +1453,13 @@ AGENT_TOOL_DEFINITIONS: list[dict[str, Any]] = [
         "description": "Layer-1 numerical error bars of the six force and moment coefficients from three "
                        "spanwise mesh levels (Grid Convergence Index, Roache; observed order, Celik et al.). "
                        "The user mesh is the fine level. With input_uncertainties, layer-2 input uncertainty "
-                       "is combined by root sum of squares. n_panels below 16 is refused.",
+                       "is combined by root sum of squares. n_panels below 16 is refused. With method "
+                       "'panel3d', the 3D panel method gives the mesh error estimate of the user mesh (the "
+                       "coarsest level) from a chordwise and a spanwise refinement (3 levels each, ratio 1.5, "
+                       "5 solved meshes); CD is the Trefftz-plane CDi. Only the mesh part is given: the "
+                       "model-form error is not implemented. The panel study counts N^3 / 3 operations per "
+                       f"mesh against the budget {int(MAX_PANEL_CALL_WORK):.0e} operations, and each mesh "
+                       f"against the limit {MAX_PANEL_PANELS} half-mesh panels.",
         "parameters": {
             "type": "object",
             "properties": {
@@ -1464,6 +1470,19 @@ AGENT_TOOL_DEFINITIONS: list[dict[str, Any]] = [
                 "axes": {**_AXES_NO_ALL_SCHEMA, "default": "body"},
                 "detail_level": {**DETAIL_LEVEL, "default": "standard"},
                 "input_uncertainties": INPUT_UNCERTAINTIES_SCHEMA,
+                "method": {
+                    "type": "string",
+                    "enum": ["lattice", "panel3d"],
+                    "default": "lattice",
+                    "description": "Solver family. 'lattice' (default): the lattice solvers with 'settings'. "
+                                   "'panel3d': the 3D panel method with 'panel_settings'; 'settings' and "
+                                   "'input_uncertainties' are refused.",
+                },
+                "panel_settings": {
+                    **PANEL_SETTINGS_SCHEMA,
+                    "description": "Solver settings for the 3D panel method (only with method 'panel3d'). "
+                                   "n_chord and n_panels give the user mesh, the coarsest level of the study.",
+                },
             },
             "additionalProperties": False,
         },

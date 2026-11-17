@@ -635,18 +635,73 @@ def _check_panel_mesh(n_panels: int) -> None:
         )
 
 
-def _check_panel_work(estimate: float, n_configs: int, n_panels: int) -> None:
-    """Refuse a panel call whose estimated factorization work is above MAX_PANEL_CALL_WORK."""
+def _check_panel_work(estimate: float, n_configs: int, n_panels: int, detail: str | None = None) -> None:
+    """Refuse a panel call whose estimated factorization work is above MAX_PANEL_CALL_WORK.
+
+    Parameters
+    ----------
+    estimate : float
+        Estimated work of the call [operations].
+    n_configs : int
+        Number of solved configurations (meshes) of the call [-].
+    n_panels : int
+        Solved panel count per configuration [-].
+    detail : str or None, optional
+        Text that replaces the default description of the work in the
+        message (for calls whose configurations have different sizes).
+    """
     import ventorum.agent.tools as _tools
 
     limit = getattr(_tools, "MAX_PANEL_CALL_WORK", MAX_PANEL_CALL_WORK)
     if float(estimate) > float(limit):
+        what = (detail if detail is not None
+                else f"{n_configs} configuration(s) of {n_panels} panels at N^3 / 3 operations per configuration")
         raise InputError(
             f"The estimated work is {int(estimate)} operations "
-            f"({n_configs} configuration(s) of {n_panels} panels at N^3 / 3 operations per configuration), "
+            f"({what}), "
             f"above the budget {int(limit)} operations. "
             f"Reduce the work with fewer configurations, or fewer panels (smaller n_span or n_chord)."
         )
+
+
+def _panel_counts(ac: Aircraft, n_span: int, n_chord: int, beta_deg: float) -> tuple[int, int]:
+    """Return the half-mesh and the solved panel counts of a 3D panel mesh, without solving.
+
+    Parameters
+    ----------
+    ac : Aircraft
+        Case geometry. A surface with its own ``n_panels`` keeps it.
+    n_span : int
+        Spanwise panels per semi-span of the surfaces without their own count [-].
+    n_chord : int
+        Chordwise panels per surface [-].
+    beta_deg : float
+        Sideslip angle [deg]. A nonzero value solves the full mesh.
+
+    Returns
+    -------
+    tuple of int
+        (half-mesh panels, solved panels) [-]. The solver folds the
+        symmetry (solves the half mesh) only when every surface is
+        symmetric and the sideslip is zero.
+    """
+    total_half_panels = sum(
+        (2 * int(s.n_panels if s.n_panels is not None else n_span) + 1) * int(n_chord)
+        for s in ac.surfaces
+    )
+    is_symmetric_mesh = (
+        all(s.is_symmetric for s in ac.surfaces)
+        and abs(float(beta_deg)) <= 1e-12
+    )
+    if is_symmetric_mesh:
+        return total_half_panels, total_half_panels
+    solved_panels = sum(
+        (2 * (2 * int(s.n_panels if s.n_panels is not None else n_span) + 1) * int(n_chord))
+        if s.is_symmetric
+        else ((2 * int(s.n_panels if s.n_panels is not None else n_span) + 2) * int(n_chord))
+        for s in ac.surfaces
+    )
+    return total_half_panels, solved_panels
 
 
 def _panel_ignored_airfoil_note(wing: Any, aircraft: Any, ac: Aircraft) -> str | None:
@@ -812,26 +867,8 @@ def panel_analysis(
     else:
         ns = 80
 
-    total_half_panels = sum(
-        (2 * int(s.n_panels if s.n_panels is not None else ns) + 1) * int(nc)
-        for s in ac.surfaces
-    )
+    total_half_panels, solved_panels = _panel_counts(ac, ns, nc, float(c.get("beta_deg", 0.0)))
     _check_panel_mesh(total_half_panels)
-
-    is_symmetric_mesh = (
-        all(s.is_symmetric for s in ac.surfaces)
-        and abs(float(c.get("beta_deg", 0.0))) <= 1e-12
-    )
-
-    if is_symmetric_mesh:
-        solved_panels = total_half_panels
-    else:
-        solved_panels = sum(
-            (2 * (2 * int(s.n_panels if s.n_panels is not None else ns) + 1) * int(nc))
-            if s.is_symmetric
-            else ((2 * int(s.n_panels if s.n_panels is not None else ns) + 2) * int(nc))
-            for s in ac.surfaces
-        )
 
     n_configs = 1
     est_ops = n_configs * (float(solved_panels) ** 3 / 3.0)
@@ -2806,13 +2843,21 @@ def error_bars(
     axes: str = "body",
     detail_level: str = "standard",
     input_uncertainties: dict[str, Any] | None = None,
+    method: str = "lattice",
+    panel_settings: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Layer-1 numerical error bars of the six force and moment coefficients.
 
-    Three spanwise mesh levels (the user mesh is the fine level); Grid
-    Convergence Index (Roache) with the observed order (Celik et al.).
-    With ``input_uncertainties``, layer-2 input uncertainty is combined
-    by root sum of squares.
+    Lattice solvers (``method="lattice"``, the default): three spanwise
+    mesh levels (the user mesh is the fine level); Grid Convergence Index
+    (Roache) with the observed order (Celik et al.). With
+    ``input_uncertainties``, layer-2 input uncertainty is combined by root
+    sum of squares.
+
+    3D panel solver (``method="panel3d"``): the mesh error estimate of the
+    user mesh from a chordwise and a spanwise refinement (see
+    :func:`ventorum.panel3d.convergence.panel_mesh_convergence`). Only the
+    mesh part is given; the model-form error is not implemented.
 
     Parameters
     ----------
@@ -2838,8 +2883,30 @@ def error_bars(
         ``rho_kg_m3`` [kg/m^3], ``h_m`` [m] (ground effect only), and
         ``sections`` (surface name to ``a0_per_rad`` [1/rad],
         ``alpha_L0_deg`` [deg], ``Cd0`` [-], ``Cm0`` [-]). The angles are
-        converted to rad for :func:`ventorum.input_error_bars`.
+        converted to rad for :func:`ventorum.input_error_bars`. Lattice
+        method only.
+    method : 'lattice' or 'panel3d'
+        Solver family. ``"lattice"`` (default) uses ``settings``.
+        ``"panel3d"`` uses ``panel_settings`` and refuses ``settings``
+        and ``input_uncertainties``.
+    panel_settings : dict or None
+        Settings of the 3D panel solver (``n_chord``, ``n_panels``,
+        ``panel_kutta``, ``panel_backend``, ``panel_ground_solver``,
+        ``panel_cache``), as in the panel analysis tool. Only with
+        ``method="panel3d"``.
     """
+    meth = string(method, "method", ("lattice", "panel3d")) if method is not None else "lattice"
+    if meth == "panel3d":
+        if settings is not None:
+            raise InputError("'settings' is for the lattice solvers. With method 'panel3d', "
+                             "give the panel settings in 'panel_settings'.")
+        if input_uncertainties is not None:
+            raise InputError("'input_uncertainties' is not available with method 'panel3d': the input "
+                             "layer is implemented for the lattice solvers only.")
+        return _panel_error_bars(wing, aircraft, flight_condition, panel_settings, axes, detail_level)
+    if panel_settings is not None:
+        raise InputError("'panel_settings' is only for method 'panel3d'. Use 'settings' for the lattice solvers.")
+
     from ventorum.core.error_bars import MIN_FINE_PANELS
     from ventorum.core.error_bars import mesh_levels as _mesh_levels
 
@@ -2927,6 +2994,245 @@ def error_bars(
     }
     if dl == "full":
         out["dispatch"] = dispatch_payload(res.results[0] if res.results else None)
+    return out
+
+
+#: Mesh levels per direction and refinement ratio of the panel error bars.
+PANEL_BAR_LEVELS = 3
+PANEL_BAR_RATIO = 1.5
+
+#: Method text of the panel mesh error bars.
+PANEL_BAR_METHOD = (
+    "Directional mesh refinement (chordwise and spanwise, 3 levels each, ratio 1.5); "
+    "GCI, Roache (1998); observed order, Celik et al. (2008); separable error model"
+)
+
+#: Note of every panel error-bar result.
+PANEL_BAR_NOTE = (
+    "Mesh part only: chordwise plus spanwise discretisation error of the user mesh "
+    "(the coarsest level of the study). The model-form error is not implemented. "
+    "It is not an error against experiment."
+)
+
+
+def _panel_error_bars(
+    wing: Any,
+    aircraft: Any,
+    flight_condition: dict[str, Any] | None,
+    panel_settings: dict[str, Any] | None,
+    axes: str | None,
+    detail_level: str,
+) -> dict[str, Any]:
+    """Mesh error bars of the six coefficients of the 3D panel solver.
+
+    The user mesh is the base (coarsest) level. The study refines the
+    chordwise and the spanwise panel count separately (3 levels each,
+    ratio 1.5, 5 solved meshes) and gives, per coefficient, the error
+    estimate of the user mesh: the sum of the chordwise and the spanwise
+    estimates (:func:`ventorum.panel3d.convergence.directional_estimate`).
+    CD is the induced drag of the Trefftz plane, as in the panel analysis
+    tool. The work budget is the sum of ``N^3 / 3`` over the 5 meshes; the
+    mesh limit applies to each mesh.
+
+    Parameters
+    ----------
+    wing : dict or None
+        One surface specification.
+    aircraft : dict or None
+        Several surfaces with reference values and moment reference point.
+    flight_condition : dict or None
+        Flight condition (speed [m/s], angles [deg], density [kg/m^3] or
+        altitude [m], optional height [m]).
+    panel_settings : dict or None
+        Panel settings (see ``PANEL_SETTINGS_PROPS``).
+    axes : 'body', 'stability' or 'wind'
+        Moment axis system of the Cl, Cm and Cn bars.
+    detail_level : 'summary', 'standard' or 'full'
+        ``full`` adds the dispatch record of the user-mesh solve.
+
+    Returns
+    -------
+    dict
+        Tool payload with the same fields as the lattice error bars, plus
+        ``chord_levels``, ``meshes`` and ``mesh_convergence``.
+    """
+    from ventorum.core.error_bars import ErrorBar, ErrorBarResult, LayerContribution
+    from ventorum.geometry.mesh_convergence import _level_aircraft
+    from ventorum.panel3d.convergence import directional_estimate, level_counts, panel_mesh_convergence
+
+    ac = build_aircraft_from_spec(wing=wing, aircraft=aircraft)
+    for surf in ac.surfaces:
+        if getattr(surf, "controls", None):
+            raise InputError(
+                "The controls of the panel method are not exposed yet in the agent tools. "
+                "Remove 'controls' from the surface definition."
+            )
+    sett_dict = check_keys({} if panel_settings is None else panel_settings, PANEL_SETTINGS_PROPS,
+                           "panel_settings")
+    kutta = string(sett_dict.get("panel_kutta", "morino"), "panel_settings.panel_kutta",
+                   ["morino", "pressure"]).lower()
+    if kutta == "pressure":
+        raise InputError(
+            "The pressure Kutta condition is not exposed yet in the agent tools. "
+            "Use the default Morino Kutta condition."
+        )
+    c = parse_condition(flight_condition)
+    dl = parse_detail_level(detail_level)
+    ax = string(axes, "axes", ("body", "stability", "wind")) if axes is not None else "body"
+
+    def _whole(name: str, value) -> int:
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or float(value) != int(value):
+            raise InputError(f"'{name}' must be a whole number, got {value!r}.")
+        return int(value)
+
+    nc = (integer(_whole("panel_settings.n_chord", sett_dict["n_chord"]), "panel_settings.n_chord",
+                  minimum=4, maximum=200)
+          if "n_chord" in sett_dict else 40)
+    ns = (integer(_whole("panel_settings.n_panels", sett_dict["n_panels"]), "panel_settings.n_panels",
+                  minimum=4, maximum=400)
+          if "n_panels" in sett_dict else 80)
+    backend = string(sett_dict.get("panel_backend", "auto"), "panel_settings.panel_backend",
+                     ["auto", "numpy", "numba", "gpu"])
+    ground_solver = string(sett_dict.get("panel_ground_solver", "auto"), "panel_settings.panel_ground_solver",
+                           ["auto", "direct", "krylov"])
+    cache = boolean(sett_dict["panel_cache"], "panel_settings.panel_cache") if "panel_cache" in sett_dict else True
+
+    # Mesh limit per mesh and work budget of the whole study, before any solve.
+    spans = level_counts(ns, PANEL_BAR_RATIO, PANEL_BAR_LEVELS)
+    chords = level_counts(nc, PANEL_BAR_RATIO, PANEL_BAR_LEVELS)
+    meshes = [(spans[0], chords[0])]
+    meshes += [(spans[0], n) for n in chords[1:]]
+    meshes += [(n, chords[0]) for n in spans[1:]]
+    solved_counts: list[int] = []
+    half_counts: list[int] = []
+    for n_span, n_chord in meshes:
+        half, solved = _panel_counts(_level_aircraft(ac, n_span, max(ns, 1)), n_span, n_chord,
+                                     float(c.get("beta_deg", 0.0)))
+        _check_panel_mesh(half)
+        half_counts.append(int(half))
+        solved_counts.append(int(solved))
+    est_ops = float(sum(float(n) ** 3 / 3.0 for n in solved_counts))
+    _check_panel_work(
+        est_ops, len(meshes), max(solved_counts),
+        detail=(f"a mesh study of {len(meshes)} meshes of {', '.join(str(n) for n in solved_counts)} solved "
+                f"panels at N^3 / 3 operations per mesh"),
+    )
+
+    solver_sett = SolverSettings(
+        solver_type="panel3d",
+        n_panels=ns,
+        n_chord=nc,
+        panel_kutta="morino",
+        panel_backend=backend,
+        panel_ground_solver=ground_solver,
+        panel_cache=cache,
+    )
+    fc = make_flight_condition(c)
+    report = panel_mesh_convergence(ac, fc, solver_sett, levels=PANEL_BAR_LEVELS, ratio=PANEL_BAR_RATIO,
+                                    quantities=("CL", "CDi"))
+    results = list(report.results)
+
+    # Per mesh the six coefficients, the moments in the requested axes.
+    series: list[dict[str, float]] = []
+    for res in results:
+        mom = res.moments(ax)
+        series.append({
+            "CL": float(res.totals.CL),
+            "CD": float(res.totals.CDi),
+            "CY": float(res.totals.CY),
+            "Cl": float(mom["Cl"]),
+            "Cm": float(mom["Cm"]),
+            "Cn": float(mom["Cn"]),
+        })
+    n_lv = PANEL_BAR_LEVELS
+    chord_idx = list(range(0, n_lv))
+    span_idx = [0] + list(range(n_lv, 2 * n_lv - 1))
+
+    bars: dict[str, Any] = {}
+    estimates: dict[str, Any] = {}
+    lines = []
+    for name in ("CL", "CD", "CY", "Cl", "Cm", "Cn"):
+        est = directional_estimate(
+            [series[i][name] for i in chord_idx], chords,
+            [series[i][name] for i in span_idx], spans, quantity=name,
+        )
+        estimates[name] = est
+        err = est.base_abs_error
+        value = float(est.base_value)
+        low = None if err is None else value - float(err)
+        high = None if err is None else value + float(err)
+        bars[name] = ErrorBar(
+            name=name,
+            value=value,
+            interval_low=low,
+            interval_high=high,
+            status="numerical_only",
+            layers={"numerical": LayerContribution(
+                layer="numerical",
+                half_width=None if err is None else float(err),
+                method=PANEL_BAR_METHOD,
+                state=str(est.state),
+                f_extrapolated=est.f_extrapolated,
+            )},
+            notes=[str(est.note)],
+        )
+        lines.append(f"{name}={fmt(value, '.6f')} [{fmt(low, '.6f')}, {fmt(high, '.6f')}] ({est.state})")
+
+    notes = [PANEL_BAR_NOTE] + list(report.notes[:1])
+    airfoil_note = _panel_ignored_airfoil_note(wing, aircraft, ac)
+    if airfoil_note is not None:
+        notes.append(airfoil_note)
+    res_bars = ErrorBarResult(
+        bars=bars,
+        axes=ax,
+        drag_basis="CDi (Trefftz plane), potential flow: no profile drag",
+        solver="panel3d",
+        levels=[int(n) for n in spans],
+        results=results,
+        notes=notes,
+    )
+    base = results[0] if results else None
+    device, precision = result_device_precision(base)
+    summary = (
+        f"[Ventorum RESULT] Mesh error bars of {ac.name} with the 3D panel method (user mesh "
+        f"{spans[0]} span x {chords[0]} chord panels; span levels {spans[0]}/{spans[1]}/{spans[2]}, "
+        f"chord levels {chords[0]}/{chords[1]}/{chords[2]}):\n"
+        + "\n".join(lines)
+        + "\nOnly the mesh (chordwise and spanwise discretisation) part is included; the model-form error "
+        f"is not implemented. {device_summary_text(device, precision)}"
+    )
+    out: dict[str, Any] = {
+        "status": "success",
+        "executive_summary": summary,
+        "error_bars": res_bars.to_dict(),
+        "levels": [int(n) for n in spans],
+        "chord_levels": [int(n) for n in chords],
+        "meshes": [[int(a), int(b)] for a, b in meshes],
+        "notes": list(notes),
+        "status_of_bars": "numerical_only",
+        "trust": trust_payload(base.totals.trust if base is not None else None),
+        "device": device,
+        "precision": precision,
+        "condition_used": condition_payload(c),
+        "settings_used": {
+            "solver": "panel3d",
+            "n_chord": nc,
+            "n_span": ns,
+            "solved_panels": solved_counts,
+            "half_mesh_panels": half_counts,
+            "panel_backend": solver_sett.panel_backend,
+            "panel_ground_solver": solver_sett.panel_ground_solver,
+            "panel_cache": solver_sett.panel_cache,
+        },
+        "mesh_convergence": {
+            "method": "directional",
+            "quantities": {k: v.to_dict() for k, v in estimates.items()},
+            "cost_factor": float(report.cost_factor),
+        },
+        "axes": ax,
+    }
+    if dl == "full":
+        out["dispatch"] = dispatch_payload(base)
     return out
 
 
