@@ -82,6 +82,13 @@ give with `set_val`, `add_design_var` and connections.
   default value is the displacement of the geometry (zero when it has none).
   `vt.geometry.undeformed_nodes(aircraft, settings)` gives the node positions and
   the number of edges. The mesh topology is fixed.
+* With the vortex lattice and an automatic chordwise count (`n_chord=None`), the
+  component resolves the count once at `setup` from the base design (the
+  geometry and the base condition) and keeps it for all analyses and partials.
+  In ground effect the automatic count changes with the height and the attitude,
+  and the outputs would jump where it changes; the partials do not show such
+  jumps. A new `setup` resolves the count again. Set `settings.n_chord` to
+  select the count yourself.
 * On a symmetric surface the root stays on the plane y = 0 (the lattice refuses
   other roots). The component uses 0 for the y-displacement of the root nodes
   (row 0, column 1 of `le` and `te`), so the outputs do not depend on that entry
