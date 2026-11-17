@@ -6,6 +6,54 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Before version 1.0.0,
 a minor version can change a public interface.
 
+## [Unreleased]
+
+### Added
+
+- Agent tool `error_bars`: new argument `method="panel3d"` with `panel_settings`. It gives the mesh-error bars of
+  the 3D panel solver (chordwise and spanwise refinement, five meshes) for the forces and moments, with the same
+  output fields as the lattice case. Only the mesh part is given; model-form error is not implemented. The work
+  budget of the panel tool applies to the sum of the five meshes, so the default panel mesh is refused.
+
+### Changed
+
+- RESULT CHANGE. `wake_alignment="body"` together with `mach > 0` is now refused with `ValidityError`. Before, the
+  compressibility correction silently used a free-stream wake, while `details["wake_dir"]` and the Trefftz plane used
+  the body axis: CL went from 0.791643 (mach None) to 0.796063 (mach 1e-4) for a rectangular wing of aspect ratio 8 at
+  10 deg. The free-stream wake with Mach does not change.
+- All solver entry points check the flight condition (`solve`, `solve_sweep`, `solve_batch`, `solve_lattice`,
+  `alpha_sweep` and the Fourier solver). A zero or negative speed now raises `ValueError` on every path. Before, a
+  direct call with `V_inf=-50` gave a result with trust HIGH, and `V_inf=0` gave a ZeroDivisionError. Valid input
+  gives the same results.
+- OpenMDAO components: with the vortex lattice and an automatic chordwise count, the count is resolved once at setup
+  and kept. Before, in ground effect the count could change between evaluations, so the outputs jumped and the
+  partials did not show it. Out of ground effect the results do not change.
+- `plan_parallel`: a non-finite, boolean or non-numeric count in the machine profile gives the default with one
+  warning. Before, it raised an error or gave one worker.
+
+### Fixed
+
+- RESULT CHANGE. Ground-effect sweeps with `height_ref="te"` and a root flap: the sweep chose its chordwise count with
+  the ground placed without the flap rotation, so the count could differ from a single solve of the same case (flap
+  up, h 0.1: CL -21.9 %). The sweep now places the ground as a single solve does.
+- RESULT CHANGE (trust only). The error model and the lifting-line sweep warning take the quarter-chord sweep of the
+  main surface. Before, they used the mean over all surfaces: an unswept wing with a 45 deg fin got a sweep of 6.9 deg,
+  a predicted lifting-line error of 14.3 % instead of 9.3 % and false sweep warnings. Forces do not change.
+- RESULT CHANGE (reference value). The exact Karman-Trefftz lift coefficient takes the chord from the leading edge of
+  the smooth section (1D minimisation along the circle), not from the contour points. Before, it depended on the
+  number of points. The verification reference values move by about 1.5e-5 relative.
+- Viscous alpha correction: a section shape with a stored reference geometry (for example a pre-flapped shape) keeps
+  its reference when it goes to Ventorum-2D. Shapes without a stored reference give the same results.
+- 3D panel Trefftz plane: a node whose shortest adjacent strip is shorter than 1e-6 of the mean strip length of its
+  trace gets a core from the mean strip length, not a near-zero core. Existing meshes give the same results.
+
+### Documentation
+
+- The theory page of the viscous alpha correction states the two alpha frames of the lattice mean line and of a 2D
+  source polar (about 0.2 deg for NACA 4412, zero for symmetric sections).
+- The 2D viscous model has a known limit against XFOIL at Re 1e6 for NACA 0012 (user guide, solver scope).
+- The GPU guide states the warning for an unknown `VENTORUM_DEVICE` or `VENTORUM_GPU_PRECISION`.
+
 ## [0.6.1] - 2026-11-17
 
 ### Fixed
