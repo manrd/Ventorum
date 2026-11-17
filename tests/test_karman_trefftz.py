@@ -147,3 +147,20 @@ def test_karman_trefftz_solution_argument_binding():
         karman_trefftz_solution(center, 10.0, 4.0)
     with pytest.raises(TypeError):
         karman_trefftz_solution(center, 10.0, 101, 4.0)
+
+
+def test_exact_cl_does_not_depend_on_n_points():
+    """The exact Cl uses the chord of the smooth section, not of the contour points.
+
+    Before the fix the chord came from the smallest x of the contour points,
+    so Cl changed with n_points: 0.87023 (21 points), 0.86826 (51), 0.86815
+    (201), 0.868142 (2001). The limit of that sequence is about 0.8681415
+    (20001 points).
+    """
+    center, tau_deg, alpha_deg = (-0.08, 0.06), 10.0, 4.0
+    cls = [karman_trefftz_solution(center, tau_deg, n, alpha_deg=alpha_deg)[1] for n in (21, 51, 201, 2001)]
+    for cl in cls[1:]:
+        assert abs(cl / cls[2] - 1.0) < 1e-9, cls
+    assert abs(cls[0] / cls[2] - 1.0) < 1e-9, cls
+    # The fine-contour value of the old discrete chord tends to the same limit.
+    assert abs(cls[2] - 0.8681415) < 2e-7, cls[2]

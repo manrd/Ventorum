@@ -79,6 +79,8 @@ Potential flow; the Kutta condition fixes the circulation. Ground effect is the 
 
 [V15](../verification_report.md) in the verification report: Karman-Trefftz section (circle center (-0.07, 0.04), trailing-edge angle 10 deg), $C_l$ and $C_{l,pressure}$ against the exact solution, and the observed order of the largest $C_p$ error without the trailing-edge node.
 
+The exact $C_l$ uses the chord of the smooth section: the leading edge is the point of the mapped circle with the smallest $x$, found by a bounded 1D minimisation over the circle angle. Thus the exact $C_l$ does not depend on the number of contour points (`tests/test_karman_trefftz.py`). The section coordinates keep the unit chord of their own nodes.
+
 Tests in `tests/test_panel2d.py`, `tests/test_karman_trefftz.py`:
 
 - closed-form stream-function and velocity influences against composite Gauss quadrature (break points at $t = \xi$), 0.1 to 5 panel lengths away, 1e-10 relative; image source influences likewise;

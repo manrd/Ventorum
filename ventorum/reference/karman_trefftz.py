@@ -14,6 +14,66 @@ Press, 2001, section 6.6.
 from __future__ import annotations
 
 import numpy as np
+from scipy.optimize import minimize_scalar
+
+#: Number of points on the circle that bracket the leading edge before the
+#: 1D minimisation in :func:`_leading_edge_x`. It is fixed, so the chord does
+#: not depend on the number of contour points of the caller.
+_LE_BRACKET_POINTS = 2001
+
+
+def _leading_edge_x(zc: complex, radius: float, theta_te: float, k: float, b: float = 1.0) -> float:
+    """Return the x coordinate of the leading edge of the mapped section.
+
+    The leading edge is the point of the section contour with the smallest
+    x. A grid of ``_LE_BRACKET_POINTS`` points on the circle gives the
+    discrete minimum. A bounded 1D minimisation over the circle angle
+    between the two neighbours of that point then gives the minimum of the
+    smooth contour. The result does not depend on the contour points of the
+    caller.
+
+    Parameters
+    ----------
+    zc : complex
+        Circle centre in the circle plane.
+    radius : float
+        Circle radius.
+    theta_te : float
+        Circle angle of the trailing-edge point zeta = b [rad].
+    k : float
+        Karman-Trefftz exponent, 2 - tau / pi.
+    b : float, optional
+        Position of the trailing-edge singular point (default 1.0).
+
+    Returns
+    -------
+    float
+        x coordinate of the leading edge, in the units of the mapped plane
+        (before the unit-chord normalisation).
+    """
+    beta = np.linspace(0.0, 2.0 * np.pi, _LE_BRACKET_POINTS, endpoint=True)[1:-1]
+    zeta = zc + radius * np.exp(1j * (theta_te + beta))
+    lam = (zeta - b) / (zeta + b)
+    phi = np.unwrap(np.angle(lam))
+    s = (np.abs(lam) ** k) * np.exp(1j * k * phi)
+    x = (k * b * (1.0 + s) / (1.0 - s)).real
+    i = int(np.argmin(x))
+    if i == 0 or i == x.size - 1:
+        return float(x[i])
+    lam_i, phi_i = lam[i], phi[i]
+
+    def x_of(angle: float) -> float:
+        zeta_a = zc + radius * np.exp(1j * (theta_te + angle))
+        lam_a = (zeta_a - b) / (zeta_a + b)
+        # Continue the phase from the bracket point, so that the branch of
+        # lam**k is the branch of the contour.
+        phi_a = phi_i + np.angle(lam_a / lam_i)
+        s_a = (abs(lam_a) ** k) * np.exp(1j * k * phi_a)
+        return float((k * b * (1.0 + s_a) / (1.0 - s_a)).real)
+
+    res = minimize_scalar(x_of, bounds=(float(beta[i - 1]), float(beta[i + 1])), method="bounded",
+                          options={"xatol": 1e-12})
+    return float(min(res.fun, x[i]))
 
 
 def karman_trefftz_airfoil(
@@ -118,6 +178,13 @@ def karman_trefftz_solution(
     tuple of (np.ndarray, float)
         Surface pressure coefficients Cp at the nodes, and exact lift
         coefficient Cl.
+
+    Notes
+    -----
+    Cl is normalised by the chord of the smooth section: the distance from
+    the trailing edge to the leading edge, the point of the contour with the
+    smallest x (see :func:`_leading_edge_x`). Thus Cl does not depend on
+    *n_points*; only the Cp nodes do.
     """
     if isinstance(n_points, bool) or not isinstance(n_points, (int, np.integer)):
         raise TypeError(f"n_points must be an integer, got {n_points!r}.")
@@ -161,7 +228,9 @@ def karman_trefftz_solution(
         s = (r_lam**k) * np.exp(1j * k * phi_lam)
         z[1:-1] = k * b * (1.0 + s) / (1.0 - s)
 
-    x_le = float(np.min(z.real))
+    # The chord comes from the leading edge of the smooth contour, not from
+    # the contour points, so Cl does not depend on n_points.
+    x_le = _leading_edge_x(zc, radius, theta_te, k, b)
     x_te = float(z[0].real)
     chord = x_te - x_le
 
