@@ -334,6 +334,14 @@ def _source_section(spec: Any, keep_reference: bool = True) -> tuple[Any, str]:
     reference with the points, so the source keeps it. The memo key then
     also holds the mapped reference geometry.
 
+    Alpha frame. The map does not turn the section, so the source
+    measures the angle of attack from the x axis of the section as given.
+    The vortex-lattice mean line measures it from its own chord line, from
+    the point farthest from the trailing-edge midpoint to that midpoint.
+    For some cambered sections (for example NACA 4412) the two frames
+    differ by about 0.2 deg; the theory manual of the viscous alpha
+    correction gives the values. This difference is not corrected.
+
     Parameters
     ----------
     spec : Any
