@@ -17,14 +17,58 @@ never exceeds the number of cores.
 from __future__ import annotations
 
 import contextlib
+import math
 import os
 import threading
+import warnings
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 
 _controller = None
 _controller_lock = threading.Lock()
 _local = threading.local()
+# Keys of the profile warnings already given (one warning per key and process).
+_warned: set[str] = set()
+_warned_lock = threading.Lock()
+
+
+def _warn_once(key: str, message: str) -> None:
+    """Give *message* as a RuntimeWarning, once per *key* in this process."""
+    with _warned_lock:
+        if key in _warned:
+            return
+        _warned.add(key)
+    warnings.warn(message, RuntimeWarning, stacklevel=4)
+
+
+def _profile_count(value, name: str) -> int | None:
+    """Return a machine-profile count as an int, or None when the value is not valid.
+
+    A valid value is a finite number (or a numeric string), not a boolean.
+    A value that is not valid gives one RuntimeWarning per *name* and
+    process; the caller then uses its default.
+
+    Parameters
+    ----------
+    value : object
+        Value of the machine profile.
+    name : str
+        Name of the profile value, for the warning.
+
+    Returns
+    -------
+    int or None
+        The value truncated to an int, or None when it is not valid.
+    """
+    try:
+        number = math.nan if isinstance(value, bool) else float(value)
+    except (TypeError, ValueError, OverflowError):
+        number = math.nan
+    if not math.isfinite(number):
+        _warn_once(name, f"The machine profile value {name} = {value!r} is not a finite number; "
+                   "Ventorum uses the default.")
+        return None
+    return int(number)
 
 
 def cpu_cores() -> int:
@@ -269,11 +313,17 @@ def plan_parallel(n_tasks: int, n_panels: int | None = None, n_jobs: int | str |
     if n_tasks <= 1:
         return ParallelPlan(1, cores, "default")
     if n_jobs is None or (isinstance(n_jobs, str) and n_jobs.lower() == "auto"):
-        tuned = tuned_setting("batch", size_class(n_panels))
-        if isinstance(tuned, dict) and tuned.get("workers"):
-            w = max(1, min(int(tuned["workers"]), n_tasks, cores))
-            t = max(1, min(int(tuned.get("threads", cores // w)), cores // w))
-            return ParallelPlan(w, t, "profile")
+        cls = size_class(n_panels)
+        tuned = tuned_setting("batch", cls)
+        if isinstance(tuned, dict) and tuned.get("workers") is not None:
+            # A profile value that is not a finite number gives the default with one warning.
+            workers = _profile_count(tuned["workers"], f"batch.{cls}.workers")
+            if workers:
+                w = max(1, min(workers, n_tasks, cores))
+                threads = tuned.get("threads")
+                t_value = None if threads is None else _profile_count(threads, f"batch.{cls}.threads")
+                t = max(1, min(cores // w if t_value is None else t_value, cores // w))
+                return ParallelPlan(w, t, "profile")
         w, t = _default_plan(n_tasks, n_panels, cores)
         return ParallelPlan(w, t, "default")
     if isinstance(n_jobs, str):

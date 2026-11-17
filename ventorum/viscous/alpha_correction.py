@@ -317,24 +317,71 @@ def _section_spec(section: Any) -> Any:
     return None
 
 
-def _source_section(spec: Any) -> tuple[Any, str]:
+def _source_section(spec: Any, keep_reference: bool = True) -> tuple[Any, str]:
     """Return the section argument of a polar source and its memo key.
 
-    A shape goes to the source as points at unit chord with the leading
-    edge at the origin, not rotated
-    (:meth:`ventorum.airfoil.AirfoilShape.to_unit_chord` of the points).
+    A shape goes to the source at unit chord with the leading edge at the
+    origin, not rotated (:meth:`ventorum.airfoil.AirfoilShape.to_unit_chord`).
     Thus a shape of any size and position gives the strip polar of the
     unit-chord section (the height h/c and the hinge x/c of the strip are in
     chords), and a scaled copy has the same memo key.
+
+    A shape without a stored reference geometry goes as points. A shape
+    with a stored reference geometry (for example a pre-flapped section,
+    whose reference is the chord line of the section before the
+    deflection) goes as the mapped :class:`ventorum.airfoil.AirfoilShape`:
+    its own :meth:`~ventorum.airfoil.AirfoilShape.to_unit_chord` maps the
+    reference with the points, so the source keeps it. The memo key then
+    also holds the mapped reference geometry.
+
+    Alpha frame. The map does not turn the section, so the source
+    measures the angle of attack from the x axis of the section as given.
+    The vortex-lattice mean line measures it from its own chord line, from
+    the point farthest from the trailing-edge midpoint to that midpoint.
+    For some cambered sections (for example NACA 4412) the two frames
+    differ by about 0.2 deg; the theory manual of the viscous alpha
+    correction gives the values. This difference is not corrected.
+
+    Parameters
+    ----------
+    spec : Any
+        Section shape: a NACA designation, an AirfoilShape, points or a
+        coordinate file (see :func:`ventorum.airfoil.airfoil`).
+    keep_reference : bool, optional
+        True (default) to give a shape with a stored reference geometry as
+        an AirfoilShape. False gives the points only (for a source that
+        takes points, not shapes).
+
+    Returns
+    -------
+    tuple
+        The section argument (a NACA name, points (N, 2) [chord units] or
+        an AirfoilShape) and its memo key.
     """
     from ventorum.airfoil import airfoil
 
     if isinstance(spec, (str, int, np.integer)) and _NACA_NAME.match(str(spec)):
         digits = _NACA_NAME.match(str(spec)).group(1)  # type: ignore[union-attr]
         return f"naca {digits}", f"naca {digits}"
-    coords = np.asarray(airfoil(airfoil(spec).coords).to_unit_chord().coords, dtype=float)
-    key = hashlib.sha256(np.round(coords, 9).tobytes()).hexdigest()
-    return coords, key
+    shape = airfoil(spec)
+    if shape.reference is None or not keep_reference:
+        coords = np.asarray(airfoil(shape.coords).to_unit_chord().coords, dtype=float)
+        key = hashlib.sha256(np.round(coords, 9).tobytes()).hexdigest()
+        return coords, key
+    unit = shape.to_unit_chord()
+    ref = unit.reference
+    ref_values = np.array([*ref.leading_edge, *ref.trailing_edge, float(ref.chord_ref)], dtype=float)
+    digest = hashlib.sha256(np.round(np.asarray(unit.coords, dtype=float), 9).tobytes())
+    digest.update(b"reference")
+    digest.update(np.round(ref_values, 9).tobytes())
+    return unit, digest.hexdigest()
+
+
+def _takes_shape(source: Any) -> bool:
+    """Return True if the polar source takes an AirfoilShape as its section (Ventorum-2D)."""
+    from ventorum.aero.polar_source_v2d import Ventorum2DPolarSource
+
+    return isinstance(source, Ventorum2DPolarSource)
 
 
 def _strip_sections(aircraft: Aircraft, lattice: VortexLattice, s: int) -> list[tuple[Any, float]]:
@@ -621,7 +668,7 @@ class _StripPolars:
                 h_arg = round(float(h_read[i]), 6) if with_height else None
                 keys = []
                 for spec, w in _strip_sections(self.aircraft, lattice, s):
-                    section, skey = _source_section(spec)
+                    section, skey = _source_section(spec, keep_reference=_takes_shape(cand))
                     key = (id(cand), skey, round(re_s, 3), flap, h_arg)
                     if key not in self._memo:
                         jobs[key] = (cand, section, re_s, flap, h_arg)
