@@ -1698,6 +1698,13 @@ def _trefftz_ordered_strips(
 #: tuned value.
 TREFFTZ_NODE_TOLERANCE = 1.0e-9
 
+#: Fraction [-] of the mean strip length of a trace below which the shortest
+#: strip next to a trace node is degenerate (zero or nearly zero length).
+#: Such a node gets the core of the mean strip length of its trace instead
+#: (see :func:`_trefftz_vortex_nodes`). It is a guard against a near-zero
+#: core, far below any strip of a valid mesh, not a tuned value.
+TREFFTZ_DEGENERATE_STRIP_FRACTION = 1.0e-6
+
 
 def _trefftz_vortex_nodes(pl: np.ndarray, pr: np.ndarray, length: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     """Return the merged trace-node position [m] and core radius [m] of each trailing vortex.
@@ -1712,6 +1719,13 @@ def _trefftz_vortex_nodes(pl: np.ndarray, pr: np.ndarray, length: np.ndarray) ->
     net circulation jump. Two vortices of different cores at one node do
     not cancel: next to a narrow strip, the core of a wide strip leaves a
     false wash proportional to the full strip circulation.
+
+    Degenerate strips. A strip of zero length would give its nodes a core
+    of nearly zero. When the shortest strip next to a node is below
+    :data:`TREFFTZ_DEGENERATE_STRIP_FRACTION` times the mean strip length
+    of its trace (the strips connected to the node through shared nodes),
+    the node core is ``TREFFTZ_CORE_FRACTION`` times that mean length. A
+    valid mesh has no such strip, so its cores do not change.
 
     Returns
     -------
@@ -1738,7 +1752,23 @@ def _trefftz_vortex_nodes(pl: np.ndarray, pr: np.ndarray, length: np.ndarray) ->
     np.minimum.at(first, label, np.arange(n_end))
     shortest = np.full(label.max() + 1, np.inf)
     np.minimum.at(shortest, label, safe)
-    return ends[first[label]], TREFFTZ_CORE_FRACTION * shortest[label]
+    core = TREFFTZ_CORE_FRACTION * shortest
+    # Floor of a node next to a degenerate strip: the mean strip length of its trace.
+    n_strip = len(length)
+    n_node = label.max() + 1
+    strip_graph = scipy.sparse.coo_matrix(
+        (np.ones(n_strip), (label[:n_strip], label[n_strip:])), shape=(n_node, n_node),
+    )
+    _, trace = scipy.sparse.csgraph.connected_components(strip_graph, directed=False)
+    trace_sum = np.zeros(trace.max() + 1)
+    trace_count = np.zeros(trace.max() + 1)
+    np.add.at(trace_sum, trace[label[:n_strip]], np.asarray(length, dtype=float))
+    np.add.at(trace_count, trace[label[:n_strip]], 1.0)
+    mean = (trace_sum / np.maximum(trace_count, 1.0))[trace]
+    degenerate = shortest < TREFFTZ_DEGENERATE_STRIP_FRACTION * mean
+    if np.any(degenerate):
+        core = np.where(degenerate, TREFFTZ_CORE_FRACTION * mean, core)
+    return ends[first[label]], core[label]
 
 
 def _trefftz_factors(wake, wake_dir=None, ground=None):
