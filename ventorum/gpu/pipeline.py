@@ -13,6 +13,7 @@ solve gives the same result objects as a CPU solve.
 from __future__ import annotations
 
 import math
+import sys
 import time
 import warnings
 
@@ -107,11 +108,12 @@ def solve_batch(solver, lattice, conditions: list, settings, S_ref: float, b_ref
     solve raises an out-of-memory error (:func:`is_out_of_memory`), the
     GPU data of all cached lattices and of *lattice* are released
     (:func:`ventorum.gpu.memory.release`) and the solve runs once more. A
-    second out-of-memory error gives one RuntimeWarning, and the function
-    returns None with the reason :data:`REASON_OUT_OF_MEMORY`: the caller
-    solves the cases on the CPU, and the dispatch record of each result
-    (``details["dispatch"]["reason"]``) gives that reason. Other errors are
-    not caught. The CPU results have the bits of a CPU solve.
+    second out-of-memory error gives one RuntimeWarning, solves the cases
+    on the CPU with the dispatch reason :data:`REASON_OUT_OF_MEMORY`, and
+    adds :data:`NOTE_OUT_OF_MEMORY` to each result's ``details["notes"]``
+    and ``totals.trust.warnings`` without changing the trust level or the
+    coefficients. Other errors are not caught. The CPU results have the
+    bits of a CPU solve.
     """
     if gpu.get_device() == "cpu":
         return (None, gpu._REASON_DEVICE_CPU) if return_reason else None
@@ -187,12 +189,78 @@ def solve_batch(solver, lattice, conditions: list, settings, S_ref: float, b_ref
         memory.release()
     warnings.warn(f"The GPU ran out of memory twice ({message}). The cases are solved on the CPU; the "
                   "results give the reason in details['dispatch']['reason'].", RuntimeWarning, stacklevel=4)
-    return (None, REASON_OUT_OF_MEMORY) if return_reason else None
+    cpu_results = _cpu_fallback_after_oom(
+        solver, lattice, conditions, settings, S_ref, b_ref, c_ref,
+        ref_point, main_surface, continuation, t0, gamma0, grounds,
+    )
+    return (cpu_results, REASON_OUT_OF_MEMORY) if return_reason else cpu_results
 
 
 #: Dispatch reason of the CPU path after two GPU out-of-memory errors.
 REASON_OUT_OF_MEMORY = ("gpu: out of memory twice (the second time after the release of the GPU data of the "
                         "cached lattices); solved on the cpu")
+
+#: Result note added when the GPU runs out of memory twice and the solve falls back to the CPU.
+NOTE_OUT_OF_MEMORY = (
+    "GPU out of memory: the GPU ran out of memory twice, so this case was solved on the CPU "
+    "(see details['dispatch']['reason'])."
+)
+
+
+def _cpu_fallback_after_oom(
+    solver,
+    lattice,
+    conditions: list,
+    settings,
+    S_ref: float,
+    b_ref: float,
+    c_ref: float,
+    ref_point,
+    main_surface: int,
+    continuation: bool,
+    t0: float,
+    gamma0,
+    grounds,
+) -> list:
+    """Solve the cases on the CPU after two GPU out-of-memory errors and add :data:`NOTE_OUT_OF_MEMORY`."""
+    if gamma0 is not None and len(conditions) == 1:
+        from ventorum.aero.loads import compute_loads
+        from ventorum.solvers.lattice_base import _cpu_dispatch, _report_condition
+        from ventorum.utils.parallel import solve_threads
+
+        cond = conditions[0]
+        g_explicit = None if grounds is None else grounds[0]
+        with solve_threads(lattice.n_panels):
+            ground, h_min, notes, wd = solver._case_setup(lattice, cond, settings, c_ref, g_explicit, ref_point)
+            gamma, alpha_eff, info = solver.solve_circulation(
+                lattice, cond, settings, ground, wd, gamma0=gamma0, ref_point=ref_point,
+            )
+            loads = compute_loads(
+                lattice, gamma, cond, S_ref, b_ref, c_ref,
+                ground=ground, ref_point=ref_point, alpha_eff_strip=alpha_eff, wake_dir=wd,
+                v_control=getattr(info, "v_control", None),
+            )
+            res = solver._case_result(
+                lattice, cond, loads, info, gamma, ground, h_min, notes, wd,
+                b_ref, c_ref, main_surface, t0, ref_point=ref_point,
+                dispatch=_cpu_dispatch(lattice.n_panels, 1, REASON_OUT_OF_MEMORY),
+            )
+            results = _report_condition([res], [info], settings)
+    else:
+        results = solver.solve_batch(
+            lattice, conditions, settings, S_ref, b_ref, c_ref,
+            ref_point=ref_point, main_surface=main_surface,
+            continuation=continuation, grounds=grounds,
+            _cpu_only=True, _cpu_reason=REASON_OUT_OF_MEMORY,
+        )
+    for res in results:
+        notes = res.details.setdefault("notes", [])
+        if NOTE_OUT_OF_MEMORY not in notes:
+            notes.append(NOTE_OUT_OF_MEMORY)
+        trust = getattr(getattr(res, "totals", None), "trust", None)
+        if trust is not None and NOTE_OUT_OF_MEMORY not in trust.warnings:
+            trust.warnings.append(NOTE_OUT_OF_MEMORY)
+    return results
 
 
 def is_out_of_memory(exc: BaseException) -> bool:
@@ -209,11 +277,11 @@ def is_out_of_memory(exc: BaseException) -> bool:
         True for ``torch.OutOfMemoryError``, and for a RuntimeError or a
         MemoryError whose message says "out of memory" or "ALLOC_FAILED".
     """
-    import torch
-
-    oom = getattr(torch, "OutOfMemoryError", None) or getattr(torch.cuda, "OutOfMemoryError", None)
-    if oom is not None and isinstance(exc, oom):
-        return True
+    torch = sys.modules.get("torch")
+    if torch is not None:
+        oom = getattr(torch, "OutOfMemoryError", None) or getattr(torch.cuda, "OutOfMemoryError", None)
+        if oom is not None and isinstance(exc, oom):
+            return True
     if isinstance(exc, (RuntimeError, MemoryError)):
         text = str(exc).lower()
         return "out of memory" in text or "alloc_failed" in text
