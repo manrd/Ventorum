@@ -279,6 +279,38 @@ def test_transform_carries_camber_offset():
     np.testing.assert_allclose(transformed.normal_bc, lat.normal_bc @ R.T, atol=1e-14)
 
 
+def test_transform_moves_camber_frames_and_keeps_mean_line_cache():
+    """A rigid transform moves the mean-line frames and keeps the mean-line cache.
+
+    Before the fix, transform_lattice copied the frames of the old position
+    and dropped the cache entries of the mean lines, so the adjoint mean-line
+    matrices of a moved lattice could not be built (TypeError).
+    """
+    torch = pytest.importorskip("torch")
+    from ventorum.sensitivity.adjoint import _camber_matrices, _recover_xi
+
+    lat = build_lattice(_aircraft(), SolverSettings(n_panels=4), n_chord=5)
+    R = rotation_matrix(roll=0.1, pitch=0.2, yaw=0.05)
+    shift = np.array([1.0, 2.0, 3.0])
+    moved = transform_lattice(lat, rotation=R, translation=shift)
+    assert moved.camber_frames is not None
+    for old, new in zip(lat.camber_frames, moved.camber_frames):
+        for key in ("le", "te"):
+            np.testing.assert_allclose(new[key], old[key] @ R.T + shift, atol=1e-14)
+        for key in ("normal", "cp_normal"):
+            np.testing.assert_allclose(new[key], old[key] @ R.T, atol=1e-14)
+        assert new["lines"] is old["lines"]
+    for key in ("camber_frames", "mean_surfaces"):
+        assert key in moved.geom_cache
+    xi = _recover_xi(lat, None)
+    ref = _camber_matrices(lat, xi, None, "cpu", torch.float64)
+    out = _camber_matrices(moved, xi, None, "cpu", torch.float64)
+    assert ref is not None and out is not None
+    for key, value in ref.items():
+        if isinstance(value, torch.Tensor):
+            torch.testing.assert_close(out[key], value, rtol=0.0, atol=1e-14)
+
+
 def test_alpha_l0_gradient_refused_for_geometric_camber():
     from ventorum.sensitivity import GradientScopeError, gradients
 
