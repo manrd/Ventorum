@@ -90,6 +90,14 @@ The bank and height columns give the coupling of the height with the roll motion
 
 The moment rows in the stability or wind axes turn the dimensional moments with the axes of the base state, held fixed: $C' = L^{-1} R\, L\, C$ with $L = \mathrm{diag}(b, c, b)$, because $C_l$ and $C_n$ use $b$ and $C_m$ uses $c$. The Irodov centres use the body-axis $C_m$, which is equal to the stability-axis $C_m$.
 
+Far from the ground the height derivatives go to zero (about as $(h/c)^{-3}$), and the differences $C_L(h + \Delta h) - C_L(h - \Delta h)$ fall to the round-off level of the solves. The margin is then noise, and float32 and float64 solves of the same state can give margins of opposite sign. Thus the height centre and the Irodov margin are not given (verdict `"not available"`, with a note) when $|C_{Lh}|$ is below the noise bound
+
+```{math}
+K\, \varepsilon\, \max(|C_L|, |C_m|)\, \frac{c}{2\,\Delta h},
+```
+
+with $\varepsilon$ the machine epsilon of the solve precision (float32 also for mixed precision) and $K$ = `IRODOV_NOISE_FACTOR` (100). The factor keeps the verdict where the float32 and float64 margins agree (up to h/c 10 and more for a wing of moderate aspect ratio) and removes it where the float32 margin is not reliable; `tests/test_height_derivatives.py` checks both sides. In float64 the bound is far below the slope at all heights where the absolute floor $10^{-9}$ does not apply.
+
 ## Assumptions
 
 - Flat, rigid ground; free stream parallel to the ground (no climb or descent); steady flow.

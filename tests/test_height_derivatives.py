@@ -294,3 +294,54 @@ def test_gpu_agrees_with_cpu():
     assert on_gpu.device == "gpu"
     assert np.allclose(on_gpu.matrix, cpu.matrix, rtol=1e-3, atol=1e-3)
     assert on_gpu.irodov["margin"] == pytest.approx(cpu.irodov["margin"], abs=2e-3)
+
+
+def _irodov_matrix(cl_h: float, cm_h: float) -> np.ndarray:
+    body = np.zeros((6, 4))
+    body[0, 0], body[4, 0] = 4.2, -0.4  # CL_alpha, Cm_alpha [1/rad]
+    body[0, 3], body[4, 3] = cl_h, cm_h  # CL_h, Cm_h [-]
+    return body
+
+
+def test_irodov_far_from_the_ground_is_not_available_below_the_noise_bound():
+    """A height slope at the round-off level of float32 gives no Irodov verdict.
+
+    Before the fix the threshold was the absolute value 1e-9. At h/c 200 a
+    float32 solve gave the verdict 'stable' (margin +0.0048) and a float64
+    solve 'unstable' (margin -0.0005): the float32 verdict was noise.
+    """
+    from ventorum.solvers.height_derivatives import IRODOV_NOISE_FACTOR, _irodov
+
+    base = np.array([0.294, 0.0, 0.0, 0.0, -0.01, 0.0])  # CL, CD, CY, Cl, Cm, Cn at the base state
+    d_h = 9.98  # height step [m] at h/c 200 (0.05 of the clearance)
+    body = _irodov_matrix(-1.55e-8, 4.0e-9)
+    eps32 = float(np.finfo(np.float32).eps)
+    bound = IRODOV_NOISE_FACTOR * eps32 * 0.294 * C / (2.0 * d_h)
+    assert abs(body[0, 3]) < bound
+    far32 = _irodov(body, C, base=base, d_h=d_h, precision="float32")
+    assert far32["verdict"] == "not available" and far32["margin"] is None and far32["x_h_m"] is None
+    assert _irodov(body, C, base=base, d_h=d_h, precision="mixed")["verdict"] == "not available"
+    # The same slope is well above the float64 bound: the verdict stays.
+    far64 = _irodov(body, C, base=base, d_h=d_h, precision="float64")
+    assert far64["verdict"] in ("stable", "unstable") and far64["margin"] is not None
+    # Without the base values the old absolute threshold applies.
+    assert _irodov(body, C)["verdict"] in ("stable", "unstable")
+
+
+def test_irodov_near_the_ground_keeps_its_verdict_in_float32():
+    """At h/c 10 a float32 height slope is about 3.7e3 times the noise bound, so the verdict stays."""
+    from ventorum.solvers.height_derivatives import _irodov
+
+    base = np.array([0.2946, 0.0, 0.0, 0.0, -0.01, 0.0])
+    d_h = 0.4985  # height step [m] at h/c 10
+    body = _irodov_matrix(-1.303e-4, 3.0e-5)
+    ref = _irodov(body, C)
+    out = _irodov(body, C, base=base, d_h=d_h, precision="float32")
+    assert out == ref and out["verdict"] in ("stable", "unstable")
+
+
+def test_height_derivatives_note_when_the_height_slope_is_noise():
+    """At h/c 10 the noise bound does not change the verdict and adds no note."""
+    res = vt.height_derivatives(_ac(), _cond(alpha_deg=4.0, h=10.0), SETT)
+    assert res.irodov["verdict"] in ("stable", "unstable")
+    assert not any("round-off noise bound" in n for n in res.notes)
