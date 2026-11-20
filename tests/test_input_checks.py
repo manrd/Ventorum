@@ -233,7 +233,40 @@ def test_tiny_reference_values_are_refused():
             with pytest.raises(ValueError) as exc:
                 V.validate_aircraft(ac)
             assert key in str(exc.value)
-        V.validate_aircraft(vt.Aircraft(name="A", surfaces=[_wing()], **{key: floor}))
+        # The reference area must also be within a factor of 100 of the
+        # planform area, so the S_ref floor is checked on a wing of about
+        # that area (semi-span and chord at their own floors).
+        tiny = _wing(semi_span=V.MIN_SPAN_M, sections=[vt.WingSection(y_frac=0.0, chord=V.MIN_CHORD_M),
+                                                       vt.WingSection(y_frac=1.0, chord=V.MIN_CHORD_M)])
+        wing = tiny if key == "S_ref" else _wing()
+        V.validate_aircraft(vt.Aircraft(name="A", surfaces=[wing], **{key: floor}))
+
+
+def test_reference_area_far_from_the_planform_area_is_refused():
+    """A user S_ref more than 100 times above or below the planform area is refused.
+
+    Before the fix, S_ref = 1e-3 m^2 on a 10 m^2 wing gave CL 4216 with
+    trust HIGH and no warning: the coefficients scale with 1/S_ref.
+    """
+    rect = _wing(sections=[vt.WingSection(y_frac=0.0, chord=1.0), vt.WingSection(y_frac=1.0, chord=1.0)])
+    area = 10.0  # planform area [m^2]
+    for bad in (1.0e-3, 0.99 * area / V.MAX_S_REF_AREA_RATIO, 1.01 * area * V.MAX_S_REF_AREA_RATIO):
+        ac = vt.Aircraft(name="A", surfaces=[rect], S_ref=bad)
+        with pytest.raises(ValueError, match="S_ref") as exc:
+            V.validate_aircraft(ac)
+        assert "planform area" in str(exc.value)
+    with pytest.raises(ValueError, match="S_ref"):
+        vt.analyze(vt.Aircraft(name="A", surfaces=[rect], S_ref=1.0e-3), alpha_deg=4.0)
+    for good in (1.01 * area / V.MAX_S_REF_AREA_RATIO, area, 0.99 * area * V.MAX_S_REF_AREA_RATIO):
+        V.validate_aircraft(vt.Aircraft(name="A", surfaces=[rect], S_ref=good))
+    # A fin analysed with the reference area of its aircraft (15 times its own area) passes.
+    fin = vt.LiftingSurface(name="Fin", semi_span=1.0, is_symmetric=False, dihedral=np.radians(90.0),
+                            sections=[vt.WingSection(y_frac=0.0, chord=1.0), vt.WingSection(y_frac=1.0, chord=0.5)])
+    V.validate_aircraft(vt.Aircraft(name="F", surfaces=[fin], S_ref=15.0 * 0.75))
+    # The automatic reference values are not checked against the user limit.
+    ac = vt.Aircraft(name="A", surfaces=[rect])
+    ac.compute_reference_values()
+    V.validate_aircraft(ac)
 
 
 def test_speed_below_minimum_is_refused():

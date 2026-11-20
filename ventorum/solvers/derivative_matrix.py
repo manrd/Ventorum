@@ -30,6 +30,7 @@ from ventorum.core.axes import (
     transform_moments,
 )
 from ventorum.core.datatypes import Aircraft, FlightCondition, LiftingSurface, SolverResult, SolverSettings
+from ventorum.core.errors import GroundStrikeError
 from ventorum.core.trust import near_far_lateral_warnings
 from ventorum.solvers.control_derivatives import control_derivatives
 from ventorum.solvers.height_derivatives import height_derivatives
@@ -98,11 +99,19 @@ def mesh_probe_conditions(
     """Return the flight conditions that set the common chordwise count.
 
     In ground effect the automatic chordwise count depends on the
-    attitude and on the height. The static and height columns come from
-    ``height_derivatives``, which uses the largest count over its nine
-    cases (base, alpha, beta, phi and height steps). The control and rate
-    cases use the base condition. Out of ground effect the count does not
-    change with the attitude, so only the base condition is returned.
+    attitude and on the height. With the height group, the static and
+    height columns come from ``height_derivatives``, which uses the largest
+    count over its nine cases (base, alpha, beta, phi and height steps).
+    With the static group only, the static columns come from
+    ``static_derivatives``, which uses its five cases (base, alpha and beta
+    steps). The control and rate cases use the base condition. Out of
+    ground effect the count does not change with the attitude, so only the
+    base condition is returned.
+
+    The clearance comes from the probe lattice of
+    :func:`ventorum.solvers.lattice_base.ground_probe_lattice`, the lattice
+    from which the solver takes its automatic count, so the count is that of
+    the solver. Each solve checks the strikes on its own lattice.
 
     Parameters
     ----------
@@ -137,8 +146,10 @@ def mesh_probe_conditions(
         # The solve refuses this state with its own message.
         return [condition]
     conds = [condition]
-    for name, d in (("alpha", _GROUND_STEPS["alpha"]), ("beta", _GROUND_STEPS["beta"]),
-                    ("phi", _GROUND_STEPS["phi"]), ("h", _GROUND_STEPS["h_frac"] * h_min)):
+    steps = [("alpha", _GROUND_STEPS["alpha"]), ("beta", _GROUND_STEPS["beta"])]
+    if "height" in groups:
+        steps += [("phi", _GROUND_STEPS["phi"]), ("h", _GROUND_STEPS["h_frac"] * h_min)]
+    for name, d in steps:
         base_val = float(getattr(condition, name))
         for sgn in (1.0, -1.0):
             conds.append(dataclasses.replace(condition, **{name: base_val + sgn * d}))
@@ -187,7 +198,7 @@ class DerivativeMatrixResult:
     diagnostics : dict[str, Any]
         Diagnostic quantities: ``static_margin`` [-] and ``neutral_point_x``
         [m] from the body-axis Cm_alpha; ``irodov_margin`` [-] and
-        ``irodov`` in ground effect; ``controls``, one entry per control
+        ``irodov`` in ground effect with the height group; ``controls``, one entry per control
         name with the far-field derivatives ``CY_farfield`` and
         ``Cn_trefftz`` [1/rad] and the near/far lateral ``warnings``.
     notes : list of str
@@ -384,7 +395,10 @@ def derivative_matrix(
     groups : sequence of str
         Derivative groups to include. Default ``("static", "control", "rate")``.
         In ground effect (``condition.h`` set), ``"height"`` is added when
-        ``groups`` is the default.
+        ``groups`` is the default. With the height group, the static and
+        height columns come from :func:`height_derivatives`. Without it,
+        the static columns come from :func:`static_derivatives` (alpha and
+        beta steps only), also in ground effect.
     controls : list of str or None
         Control surface names to differentiate. None selects all controls
         of the aircraft.
@@ -403,6 +417,8 @@ def derivative_matrix(
     ValueError
         For an unknown group, an unknown control name, an unknown axis system,
         or requesting ``"height"`` in free air.
+    GroundStrikeError
+        If the base case or a stepped case touches the ground.
     """
     from ventorum.geometry import lattice_cache
     from ventorum.solvers.factory import make_solver, resolve_solver_type
@@ -462,52 +478,58 @@ def derivative_matrix(
     base_result: SolverResult | None = None
     drag_basis = "CDi"
 
-    # 1. Static and height groups
-    if in_ground:
+    # 1. Static and height groups. Without the height group, the static
+    # columns come from static_derivatives also in ground effect: the bank
+    # and height cases are then not solved, and a strike of one of them
+    # does not refuse the static columns.
+    if in_ground and "height" in effective_groups:
         has_static = "static" in effective_groups
-        has_height = "height" in effective_groups
-        if has_static or has_height:
+        try:
             h_res = height_derivatives(ac, condition, settings, axes="body")
-            devices.add(h_res.device)
-            precisions.add(h_res.precision)
-            base_result = h_res.base
-            drag_basis = h_res.drag_basis
-            notes.extend(h_res.notes)
-            diagnostics["irodov_margin"] = h_res.irodov.get("margin")
-            diagnostics["irodov"] = dict(h_res.irodov)
-            cl_a = float(h_res.matrix[0, 0])
-            cm_a = float(h_res.matrix[4, 0])
-            if abs(cl_a) > 1e-9:
-                x_np = float(rp[0] - c_ref * cm_a / cl_a)
-                diagnostics["neutral_point_x"] = x_np
-                diagnostics["static_margin"] = float((x_np - rp[0]) / c_ref)
-            else:
-                diagnostics["neutral_point_x"] = None
-                diagnostics["static_margin"] = None
+        except GroundStrikeError as exc:
+            raise GroundStrikeError(
+                f"{exc} derivative_matrix uses fixed steps (alpha 0.5 deg, beta 1 deg, phi 0.5 deg, h 0.05 "
+                "of the smallest clearance): use a larger height, leave out the height group, or call "
+                "height_derivatives with smaller steps.") from exc
+        devices.add(h_res.device)
+        precisions.add(h_res.precision)
+        base_result = h_res.base
+        drag_basis = h_res.drag_basis
+        notes.extend(h_res.notes)
+        diagnostics["irodov_margin"] = h_res.irodov.get("margin")
+        diagnostics["irodov"] = dict(h_res.irodov)
+        cl_a = float(h_res.matrix[0, 0])
+        cm_a = float(h_res.matrix[4, 0])
+        if abs(cl_a) > 1e-9:
+            x_np = float(rp[0] - c_ref * cm_a / cl_a)
+            diagnostics["neutral_point_x"] = x_np
+            diagnostics["static_margin"] = float((x_np - rp[0]) / c_ref)
+        else:
+            diagnostics["neutral_point_x"] = None
+            diagnostics["static_margin"] = None
 
-            if has_static:
-                # alpha
-                body_columns.append(h_res.matrix[:, 0])
-                col_names.append("alpha")
-                col_units.append("1/rad")
-                col_methods.append(f"central, {h_res.steps['alpha_deg']:g} deg")
-                # beta
-                body_columns.append(h_res.matrix[:, 1])
-                col_names.append("beta")
-                col_units.append("1/rad")
-                col_methods.append(f"central, {h_res.steps['beta_deg']:g} deg")
+        if has_static:
+            # alpha
+            body_columns.append(h_res.matrix[:, 0])
+            col_names.append("alpha")
+            col_units.append("1/rad")
+            col_methods.append(f"central, {h_res.steps['alpha_deg']:g} deg")
+            # beta
+            body_columns.append(h_res.matrix[:, 1])
+            col_names.append("beta")
+            col_units.append("1/rad")
+            col_methods.append(f"central, {h_res.steps['beta_deg']:g} deg")
 
-            if has_height:
-                # phi
-                body_columns.append(h_res.matrix[:, 2])
-                col_names.append("phi")
-                col_units.append("1/rad")
-                col_methods.append(f"central, {h_res.steps['phi_deg']:g} deg")
-                # h_over_c
-                body_columns.append(h_res.matrix[:, 3])
-                col_names.append("h_over_c")
-                col_units.append("-")
-                col_methods.append(f"central, {h_res.steps['h_m'] / c_ref:.4g}")
+        # phi
+        body_columns.append(h_res.matrix[:, 2])
+        col_names.append("phi")
+        col_units.append("1/rad")
+        col_methods.append(f"central, {h_res.steps['phi_deg']:g} deg")
+        # h_over_c
+        body_columns.append(h_res.matrix[:, 3])
+        col_names.append("h_over_c")
+        col_units.append("-")
+        col_methods.append(f"central, {h_res.steps['h_m'] / c_ref:.4g}")
     else:
         if "static" in effective_groups:
             s_res = static_derivatives(ac, condition, settings, axes="body")

@@ -33,6 +33,8 @@ print(hd.device, hd.n_solves, hd.n_chord)
 
 `hd.irodov` holds `x_alpha_m` and `x_h_m` (the pitch and height aerodynamic centres [m] aft of the pivot), `margin` = (x_alpha - x_h)/c_ref and `verdict`. Longitudinal static stability in ground effect at constant speed needs `margin > 0`: the height centre must be ahead of the pitch centre (R. D. Irodov 1970). The criterion applies only when the pivot is the centre of gravity. Set `Aircraft.ref_point` to the centre of gravity.
 
+Far from the ground the height derivatives go to zero, and the differences of the solves reach the round-off level. When `|CL_h|` is below a noise bound of the solve precision, `x_h_m` and `margin` are None, `verdict` is `"not available"` and a note gives the reason. In float32 (the default precision on the GPU) this occurs at a much smaller height than in float64. The [theory chapter](../theory/ground_effect.md) gives the bound.
+
 ## Steps and mesh
 
 - Central differences with the steps `alpha_step_deg=0.5`, `beta_step_deg=1.0`, `phi_step_deg=0.5` and `h_step=0.05` (a fraction of the smallest clearance of the base state). `hd.steps` gives the steps used.

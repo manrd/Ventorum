@@ -251,6 +251,18 @@ class GroundEffectSweepResult:
               free-stream direction; the aircraft keeps its body axes, and
               the ``height_ref`` point keeps the grid height. A
               bank-restoring moment has Cl_phi < 0.
+
+        Notes
+        -----
+        ``CL_alpha``, ``Cm_alpha`` and the bank derivatives are least-squares
+        line fits over the window of the grid: secant slopes, not the local
+        slopes at alpha = 0 or phi = 0. Near the ground the curves are not
+        linear (the gap of a tip or of the trailing edge changes with the
+        angle), so a fit can differ from the local slope by about 10 %
+        at h/c 0.5. ``x_alpha`` uses the local ``numpy.gradient`` along the
+        alpha grid, so ``x_ac`` and ``x_alpha`` of one result can differ
+        also for ``height_ref='ref'``. For the local slopes of one state,
+        use :func:`ventorum.height_derivatives` or a grid with small angles.
         """
         out: dict[str, Any] = {}
         h_vals = self.heights
@@ -603,6 +615,11 @@ def _gpu_batch(ac, sett, cases, h_arr, a_arr, p_arr, V_inf, rho, rp, height_ref,
     if canonical not in ("vlm", "linear", "nonlinear"):
         fallback(f"solver '{canonical}' is not supported on GPU")
         return None
+    from ventorum.gpu.pipeline import REASON_REPORT_CONDITION, report_condition_on_cpu
+
+    if gpu.get_device() == "auto" and report_condition_on_cpu(canonical, sett):
+        fallback(REASON_REPORT_CONDITION)
+        return None
     solver = make_solver(canonical)
     first = cases[0]
     probe_cond = FlightCondition(V_inf=V_inf, alpha=float(np.radians(a_arr[first[1]])), rho=rho)
@@ -796,6 +813,13 @@ def _fixed_n_chord(
     :func:`ventorum.ground_effect.solver.place_ground`). Thus the count of
     the case with the smallest gap is the count that
     :func:`ventorum.ground_effect.analyze_ground_effect` selects for it.
+
+    The gap comes from the clearance probe lattice (``DEFAULT_N_CHORD``
+    chordwise panels when the count is automatic), the lattice from which
+    :meth:`~ventorum.solvers.lattice_base.LatticeSolver.resolve_n_chord`
+    takes the count. Thus the count is the count of the solver, also when
+    the solve lattice has more chordwise panels than the probe. Each case
+    checks the clearance of its own solve lattice.
     """
     try:
         solver = make_solver(resolve_solver_type(settings.solver_type))

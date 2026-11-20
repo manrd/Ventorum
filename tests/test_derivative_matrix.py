@@ -318,3 +318,42 @@ def test_as_table():
     assert "| Coefficient |" in table
     assert "CL" in table
     assert "Cm" in table
+
+
+def _low_wing() -> tuple[vt.Aircraft, float]:
+    w = vt.LiftingSurface(name="w", semi_span=3.0, n_panels=10,
+                          sections=[vt.WingSection(0.0, 1.0), vt.WingSection(1.0, 1.0)])
+    ac = vt.Aircraft(surfaces=[w], ref_point=np.array([0.25, 0.0, 0.0]))
+    alpha = math.radians(4.0)
+    # The trailing edge is 0.02 m above the ground: the bank step of
+    # height_derivatives strikes, the alpha and beta steps do not.
+    return ac, alpha
+
+
+def test_static_only_in_ground_effect_does_not_solve_the_bank_and_height_cases():
+    """groups=("static",) in ground effect gives the columns of static_derivatives.
+
+    Before the fix the static-only request ran all nine cases of
+    height_derivatives, so a strike of the bank step refused the static
+    columns, which static_derivatives gives at the same state.
+    """
+    ac, alpha = _low_wing()
+    cond = vt.FlightCondition(V_inf=50.0, alpha=alpha, h=0.02 + 0.75 * math.sin(alpha))
+    for n_chord in (8, None):
+        st = vt.SolverSettings(n_panels=10, n_chord=n_chord)
+        ref = _quiet(static_derivatives, ac, cond, st)
+        dm = _quiet(derivative_matrix, ac, cond, st, groups=("static",))
+        assert list(dm.columns) == ["alpha", "beta"]
+        np.testing.assert_allclose(dm.matrix, ref.matrix, rtol=0.0, atol=1e-12)
+        assert "irodov_margin" not in dm.diagnostics
+
+
+def test_ground_strike_message_of_derivative_matrix_names_its_options():
+    """A strike of a stepped case names what the caller of derivative_matrix can change."""
+    ac, alpha = _low_wing()
+    cond = vt.FlightCondition(V_inf=50.0, alpha=alpha, h=0.02 + 0.75 * math.sin(alpha))
+    st = vt.SolverSettings(n_panels=10, n_chord=8)
+    from ventorum.core.errors import GroundStrikeError
+
+    with pytest.raises(GroundStrikeError, match="derivative_matrix uses fixed steps"):
+        _quiet(derivative_matrix, ac, cond, st)

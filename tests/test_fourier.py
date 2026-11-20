@@ -86,3 +86,27 @@ def test_sweep_equals_single_solve():
     for a, r in zip(alphas, sweep):
         single = vt.analyze(_wing(0.5), vt.FlightCondition(V_inf=30.0, alpha=float(a)), st)
         assert r.totals.Cm == pytest.approx(single.totals.Cm, rel=1e-12, abs=1e-15)
+
+
+def test_reported_aspect_ratio_and_e_use_b_ref():
+    """The reported AR and e use b_ref, as in the lattice solvers; CL and CDi do not change.
+
+    Before the fix, the Fourier solver reported AR = b^2 / S_ref with the
+    wing span b. With b_ref = 8 m on a 10 m wing it gave AR 10.0 and
+    e 0.921, and the linear lifting line gave AR 6.4 and e 1.438.
+    """
+    wing = vt.LiftingSurface(semi_span=5.0, sections=[vt.WingSection(y_frac=0.0, chord=1.0),
+                                                      vt.WingSection(y_frac=1.0, chord=1.0)])
+    cond = vt.FlightCondition(V_inf=30.0, alpha=np.radians(4.0))
+    st = vt.SolverSettings(solver_type="fourier")
+    auto = vt.analyze(vt.Aircraft(surfaces=[wing]), cond, settings=st).totals
+    user = vt.analyze(vt.Aircraft(surfaces=[wing], b_ref=8.0), cond, settings=st).totals
+    assert auto.AR == pytest.approx(10.0, rel=1e-12)
+    assert user.CL == pytest.approx(auto.CL, rel=1e-12)
+    assert user.CDi == pytest.approx(auto.CDi, rel=1e-12)
+    assert user.AR == pytest.approx(64.0 / 10.0, rel=1e-12)
+    assert user.e == pytest.approx(user.CL ** 2 / (np.pi * user.AR * user.CDi), rel=1e-12)
+    assert user.e == pytest.approx(auto.e * 10.0 / 6.4, rel=1e-12)
+    lin = vt.analyze(vt.Aircraft(surfaces=[wing], b_ref=8.0), cond,
+                     settings=vt.SolverSettings(solver_type="linear")).totals
+    assert user.AR == pytest.approx(lin.AR, rel=1e-12)

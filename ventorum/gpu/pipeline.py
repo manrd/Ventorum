@@ -40,6 +40,37 @@ def work_estimate(lattice, n_cases: int, in_ground: bool) -> float:
     return float(n_cases) * n_p * n_p * (2.0 if in_ground else 1.0)
 
 
+#: Reason of the CPU path when the condition estimate is asked for with the automatic device.
+REASON_REPORT_CONDITION = ("auto: settings.report_condition asks for the condition estimate, which only the "
+                           "CPU solve gives")
+
+
+def report_condition_on_cpu(solver_name: str, settings) -> bool:
+    """Return True if the automatic device must keep the solve on the CPU for the condition estimate.
+
+    The condition estimate of ``SolverSettings.report_condition`` comes
+    from the LU factorisation of the direct CPU solves of the vortex
+    lattice and of the linear lifting line. The GPU pipelines do not give
+    it. Thus the automatic device keeps these solves on the CPU when the
+    settings ask for the estimate. The device ``"gpu"`` still uses the GPU
+    (the value is then None, with a note).
+
+    Parameters
+    ----------
+    solver_name : str
+        Canonical solver name (``"vlm"``, ``"linear"`` or ``"nonlinear"``).
+    settings : SolverSettings or None
+        Solver settings.
+
+    Returns
+    -------
+    bool
+        True for the vortex lattice and the linear lifting line with
+        ``report_condition`` True.
+    """
+    return bool(getattr(settings, "report_condition", False)) and solver_name in ("vlm", "linear")
+
+
 def solve_batch(solver, lattice, conditions: list, settings, S_ref: float, b_ref: float, c_ref: float,
                 ref_point, main_surface: int, continuation: bool, t0: float, gamma0=None, grounds=None,
                 return_reason: bool = False):
@@ -79,6 +110,8 @@ def solve_batch(solver, lattice, conditions: list, settings, S_ref: float, b_ref
         # A worker of a CPU pool (cases in parallel): the pool was chosen for
         # the CPU, and many small GPU solves from several threads are slow.
         return (None, "called inside a CPU worker thread") if return_reason else None
+    if gpu.get_device() == "auto" and report_condition_on_cpu(solver.name, settings):
+        return (None, REASON_REPORT_CONDITION) if return_reason else None
     in_ground = any(c.h is not None for c in conditions) or (grounds is not None and any(g is not None for g in grounds))
     work = work_estimate(lattice, len(conditions), in_ground)
     use_gpu_dec, use_gpu_reason = gpu.use_gpu(work, solver.name, len(conditions),

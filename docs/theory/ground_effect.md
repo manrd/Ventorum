@@ -55,6 +55,8 @@ The vortex lattice selects the chordwise panel count from the gap (see [Vortex-l
 - $C_{Lh} = \partial C_L/\partial(h/c)$ and $C_{mh} = \partial C_m/\partial(h/c)$ at constant $\alpha$, by finite differences on the height grid (`numpy.gradient`: second-order central differences inside, first-order one-sided differences at the end points).
 - $C_{l\phi}$, $C_{n\phi}$, $C_{Y\phi}$ [1/rad] from a least-squares line over the bank angles with $|\phi| \le$ 5 deg (with fewer than two bank angles in this window, all bank angles of the grid), at the angle of attack of the grid nearest to 4 deg. $C_l$ and $C_n$ are the stability-axis rolling and yawing moments about the moment reference point ($C_l > 0$ right wing down, $C_n > 0$ nose right); $C_Y$ is the side force, positive to the right. The bank angle $\phi$ turns the ground about the free-stream direction; the aircraft keeps its body axes, and the `height_ref` point keeps the height of the grid. A bank-restoring rolling moment has $C_{l\phi} < 0$.
 
+The line fits of $C_{L\alpha}$, $C_{m\alpha}$ and the bank derivatives are secant slopes over the window, not the local slopes at $\alpha = 0$ or $\phi = 0$. Near the ground the curves are not linear: the gap of a tip or of the trailing edge changes with the angle, and the load varies about as $1/h$. Thus at h/c 0.5 a fit can differ from the local slope by about 10 %. For the local slopes of one state, use `height_derivatives` (central differences with small steps) or a grid with small angles only. The pitch centre $x_\alpha$ of the Irodov criterion below uses the local `numpy.gradient`, so it can differ from $x_{ac}$ of the line fit.
+
 ### Irodov criterion
 
 Near the ground the lift and the pitching moment depend on two variables, $\alpha$ and $h$. Each has its own aerodynamic centre, measured aft of the moment reference point [m]. $x_\alpha$ uses `numpy.gradient` along the $\alpha$ grid (not the line fit above):
@@ -89,6 +91,14 @@ The pivot keeps its height in every case. A change of $\alpha$ or $\phi$ turns t
 The bank and height columns give the coupling of the height with the roll motion: at $\phi \neq 0$ the two tips have different gaps, so $C_{lh}$, $C_{nh}$ and $C_{Yh}$ are not zero, and $C_{l\phi}$ is the ground-effect roll stiffness at constant height of the pivot. At $\phi = 0$ and $\beta = 0$ the flow is symmetric: the lateral coefficients do not change with $\alpha$ and $h$, and the longitudinal coefficients are even functions of $\beta$ and $\phi$.
 
 The moment rows in the stability or wind axes turn the dimensional moments with the axes of the base state, held fixed: $C' = L^{-1} R\, L\, C$ with $L = \mathrm{diag}(b, c, b)$, because $C_l$ and $C_n$ use $b$ and $C_m$ uses $c$. The Irodov centres use the body-axis $C_m$, which is equal to the stability-axis $C_m$.
+
+Far from the ground the height derivatives go to zero (about as $(h/c)^{-3}$), and the differences $C_L(h + \Delta h) - C_L(h - \Delta h)$ fall to the round-off level of the solves. The margin is then noise, and float32 and float64 solves of the same state can give margins of opposite sign. Thus the height centre and the Irodov margin are not given (verdict `"not available"`, with a note) when $|C_{Lh}|$ is below the noise bound
+
+```{math}
+K\, \varepsilon\, \max(|C_L|, |C_m|)\, \frac{c}{2\,\Delta h},
+```
+
+with $\varepsilon$ the machine epsilon of the solve precision (float32 also for mixed precision) and $K$ = `IRODOV_NOISE_FACTOR` (100). The factor keeps the verdict where the float32 and float64 margins agree (up to h/c 10 and more for a wing of moderate aspect ratio) and removes it where the float32 margin is not reliable; `tests/test_height_derivatives.py` checks both sides. In float64 the bound is far below the slope at all heights where the absolute floor $10^{-9}$ does not apply.
 
 ## Assumptions
 

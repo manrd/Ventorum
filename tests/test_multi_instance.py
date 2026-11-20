@@ -353,3 +353,35 @@ def test_find_optimal_ignores_nan_and_raises_when_all_nan(sample_wings):
     with pytest.raises(ValueError, match="NaN"):
         mgr_all_nan.find_optimal(metric="L_over_D", objective="max")
 
+
+
+def test_find_optimal_follows_the_objective_for_every_metric(sample_wings):
+    """find_optimal takes the sweep point that the objective asks for, for each metric.
+
+    Before the fix, the sweep value of CL was always the largest CL, of CDi
+    always the smallest CDi and of e always the largest e, whatever the
+    objective was.
+    """
+    mgr = VentorumCaseManager("ObjectiveStudy")
+    mgr.create_case("Low", sample_wings["rect"], alpha_sweep_deg=[-4.0, 2.0], solver="fourier", n_panels=12)
+    mgr.create_case("High", sample_wings["rect"], alpha_sweep_deg=[-1.0, 6.0], solver="fourier", n_panels=12)
+    mgr.run_all(instance_backend="serial", show_progress=False)
+    cl = {inst.name: [r.totals.CL for r in inst.sweep_results] for inst in mgr.instances}
+    cdi = {inst.name: [r.totals.CDi for r in inst.sweep_results] for inst in mgr.instances}
+
+    best, val, _ = mgr.find_optimal(metric="CL", objective="min")
+    assert best.name == "Low"
+    assert val == pytest.approx(min(cl["Low"]))
+    best, val, _ = mgr.find_optimal(metric="CL", objective="max")
+    assert best.name == "High"
+    assert val == pytest.approx(max(cl["High"]))
+    best, val, _ = mgr.find_optimal(metric="CDi", objective="max")
+    assert best.name == "High"
+    assert val == pytest.approx(max(cdi["High"]))
+    best, val, _ = mgr.find_optimal(metric="CDi", objective="min")
+    assert val == pytest.approx(min(min(v) for v in cdi.values()))
+
+    with pytest.raises(ValueError, match="Unknown metric"):
+        mgr.find_optimal(metric="Cm", objective="max")
+    with pytest.raises(ValueError, match="Unknown objective"):
+        mgr.find_optimal(metric="CL", objective="maximize")

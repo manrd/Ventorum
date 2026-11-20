@@ -126,6 +126,17 @@ def ground_probe_count(aircraft: Aircraft, settings: SolverSettings, chordwise: 
     aircraft the probe uses ``settings.n_chord`` (the solve lattice), or
     ``DEFAULT_N_CHORD`` when the count is automatic.
 
+    With an automatic count the solve lattice can have more chordwise
+    panels (up to ``MAX_AUTO_N_CHORD``) than the probe. The automatic count
+    itself comes from this probe (:meth:`LatticeSolver.resolve_n_chord`),
+    so every caller that takes the count from the same probe (the sweeps,
+    the derivative functions) gets the count of the solver. The clearance
+    of the solve lattice can differ from the probe clearance: with a
+    deflected chordwise control, the hinge nodes depend on the chordwise
+    count (a few millimetres on a 1 m chord with a 15 deg flap). The solve
+    checks the clearance of its own lattice, so a strike that the probe
+    does not see is still refused.
+
     Parameters
     ----------
     aircraft : Aircraft

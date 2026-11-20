@@ -2004,7 +2004,10 @@ class PanelMethodSolver(BaseSolver):
                 all_notes = list(notes)
                 if p_res.trust_note:
                     all_notes.append(p_res.trust_note)
-                main_surf_n_span = ac.surfaces[0].n_panels or settings.n_panels
+                # The spanwise count of the main surface (largest projected
+                # area), not of the first surface in the list.
+                main_surf = ac.surfaces[ac.main_surface_index()]
+                main_surf_n_span = main_surf.n_panels or settings.n_panels
                 far_ratio_active = solver.far_ratio
                 if math.isfinite(far_ratio_active):
                     if gnd is not None:

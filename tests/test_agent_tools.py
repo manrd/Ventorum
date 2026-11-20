@@ -1304,9 +1304,10 @@ def test_tiny_reference_values_are_invalid_input():
         p = call_tool("ventorum_wing_analysis",
                       {"aircraft": {"surfaces": [RECT], key: 1e-300}, "settings": FAST})
         assert_error(p, "invalid_input", key)
-    # A small but sane value passes.
+    # A small but sane value passes. S_ref must also be within a factor of
+    # 100 of the planform area (10 m^2), so its small value is 0.2 m^2.
     p = call_tool("ventorum_wing_analysis",
-                  {"aircraft": {"surfaces": [RECT], "S_ref_m2": 1e-3, "b_ref_m": 1e-3, "c_ref_m": 1e-3},
+                  {"aircraft": {"surfaces": [RECT], "S_ref_m2": 0.2, "b_ref_m": 1e-3, "c_ref_m": 1e-3},
                    "settings": FAST, "detail_level": "summary"})
     assert p["status"] == "success", p
     # The Python call path with an Aircraft object is checked too.
@@ -1338,3 +1339,13 @@ def test_speed_below_minimum_is_invalid_input():
                    "detail_level": "summary"})
     assert g["status"] == "success", g
     assert CONDITION_PROPS["V_inf_m_s"]["minimum"] == 0.1
+
+
+def test_reference_area_far_from_the_planform_area_is_invalid_input():
+    """S_ref_m2 = 1e-3 on a 10 m^2 wing is invalid_input that names S_ref.
+
+    Before the fix it gave CL 4216 with trust HIGH and no warning.
+    """
+    p = call_tool("ventorum_wing_analysis",
+                  {"aircraft": {"surfaces": [RECT], "S_ref_m2": 1e-3}, "settings": FAST})
+    assert_error(p, "invalid_input", "S_ref")

@@ -97,7 +97,10 @@ def rotation_matrix(
 
 
 def _transformed_cache(lattice: VortexLattice, points, directions) -> dict:
-    """Return the cache entries of a lattice with chordwise flaps that a rigid transform keeps.
+    """Return the cache entries of a lattice that a rigid transform keeps.
+
+    The entries are those of chordwise flaps and of mean-line (camber)
+    lattices.
 
     The hinge endpoints of the flap strips move with the lattice. The
     leg-force rules of such a lattice come from the lattice before the
@@ -118,7 +121,44 @@ def _transformed_cache(lattice: VortexLattice, points, directions) -> dict:
         if rules is not None:
             normal, scale, kind = rules
             cache["leg_force_rules"] = (directions(normal), scale.copy(), kind.copy())
+    # Mean-line (camber) data: the chord fractions, the section mean lines
+    # and the joined-edge groups do not change; the frames are moved.
+    frames = _transformed_camber_frames(lattice.geom_cache.get("camber_frames"), points, directions)
+    if frames is not None:
+        cache["camber_frames"] = frames
+    for key in ("mean_surfaces", "leg_mid_frac", "leg_mid_end"):
+        if key in lattice.geom_cache:
+            cache[key] = lattice.geom_cache[key]
     return cache
+
+
+#: Point entries [m] of a mean-line frame (see ``geometry.lattice._camber_edge_frames``).
+_CAMBER_FRAME_POINTS = ("le", "te")
+#: Direction entries [-] of a mean-line frame.
+_CAMBER_FRAME_DIRECTIONS = ("normal", "cp_normal")
+
+
+def _transformed_camber_frames(frames: list[dict] | None, points, directions) -> list[dict] | None:
+    """Return the mean-line frames of a lattice after a rigid transform.
+
+    The edge points (leading and trailing edge, [m]) move with the
+    lattice, and the edge and collocation normals turn with it. The other
+    entries (section mean lines, span fractions, chords, joined edges and
+    folds) do not change with a rigid transform; the new frames share them.
+    """
+    if frames is None:
+        return None
+    out = []
+    for frame in frames:
+        new = dict(frame)
+        for key in _CAMBER_FRAME_POINTS:
+            if frame.get(key) is not None:
+                new[key] = points(np.asarray(frame[key], dtype=float))
+        for key in _CAMBER_FRAME_DIRECTIONS:
+            if frame.get(key) is not None:
+                new[key] = directions(np.asarray(frame[key], dtype=float))
+        out.append(new)
+    return out
 
 
 def transform_lattice(
@@ -316,7 +356,8 @@ def transform_lattice(
         ),
         camber_fallback=lattice.camber_fallback,
         has_camber_offset=lattice.has_camber_offset,
-        camber_frames=getattr(lattice, "camber_frames", None),
+        camber_frames=_transformed_camber_frames(
+            getattr(lattice, "camber_frames", None), _transform_points, _transform_directions),
         control_edge_step=(None if getattr(lattice, "control_edge_step", None) is None
                            else lattice.control_edge_step.copy()),
     )

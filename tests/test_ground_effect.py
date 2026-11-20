@@ -571,3 +571,12 @@ def test_sweep_ge_one_mesh_gpu():
     assert len({r.details["lattice"].n_chord for r in rs}) == 1
     for g, c in zip(rs, cpu):
         assert g.totals.Cm == pytest.approx(c.totals.Cm, rel=1e-10, abs=1e-13)
+
+
+def test_sweep_derivative_docstring_states_the_secant_fits():
+    """The sweep pitch and bank slopes are line fits; the docstring says so and names the local slopes."""
+    from ventorum.ground_effect.sweep import GroundEffectSweepResult
+
+    doc = GroundEffectSweepResult.compute_stability_derivatives.__doc__
+    assert "secant slopes" in doc
+    assert "ventorum.height_derivatives" in doc

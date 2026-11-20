@@ -763,6 +763,10 @@ class VentorumCaseManager:
     ) -> tuple[Ventorum, float, dict[str, Any]]:
         """Identify the optimal case in the study based on a specified aerodynamic metric.
 
+        For a sweep, the value of a case is the best value of its sweep
+        points for the objective: the largest point value for 'max' and the
+        smallest point value for 'min'. NaN points and NaN cases are ignored.
+
         Parameters
         ----------
         metric : str
@@ -774,7 +778,25 @@ class VentorumCaseManager:
         -------
         tuple[Ventorum, float, dict[str, Any]]
             (best_instance, best_metric_value, summary_dict)
+
+        Raises
+        ------
+        ValueError
+            If the metric or the objective is not known, if no case is
+            completed, or if all completed cases have NaN for the metric.
         """
+        known_metrics = ("L_over_D", "CL", "CDi", "e")
+        if metric not in known_metrics:
+            raise ValueError(f"Unknown metric '{metric}'. Use one of {known_metrics}.")
+        if objective not in ("max", "min"):
+            raise ValueError(f"Unknown objective '{objective}'. Use 'max' or 'min'.")
+
+        def reduce(values: Any) -> float:
+            arr = np.asarray(values, dtype=float).ravel()
+            if arr.size == 0 or np.all(np.isnan(arr)):
+                return float("nan")
+            return float(np.nanmax(arr) if objective == "max" else np.nanmin(arr))
+
         best_inst = None
         best_val = -float("inf") if objective == "max" else float("inf")
         saw_nan = False
@@ -784,29 +806,11 @@ class VentorumCaseManager:
                 continue
             val = None
             if metric == "L_over_D":
-                ld = inst.get_L_over_D()
-                if isinstance(ld, np.ndarray):
-                    if np.all(np.isnan(ld)):
-                        val = float("nan")
-                    else:
-                        val = float(np.nanmax(ld) if objective == "max" else np.nanmin(ld))
-                else:
-                    val = float(ld)
-            elif metric == "CL":
-                if inst.sweep_results:
-                    val = float(max(r.totals.CL for r in inst.sweep_results))
-                elif inst.result:
-                    val = float(inst.result.totals.CL)
-            elif metric == "CDi":
-                if inst.sweep_results:
-                    val = float(min(r.totals.CDi for r in inst.sweep_results))
-                elif inst.result:
-                    val = float(inst.result.totals.CDi)
-            elif metric == "e":
-                if inst.sweep_results:
-                    val = float(max(r.totals.e for r in inst.sweep_results))
-                elif inst.result:
-                    val = float(inst.result.totals.e)
+                val = reduce(inst.get_L_over_D())
+            elif inst.sweep_results:
+                val = reduce([getattr(r.totals, metric) for r in inst.sweep_results])
+            elif inst.result:
+                val = reduce(getattr(inst.result.totals, metric))
 
             if val is not None:
                 if np.isnan(val):

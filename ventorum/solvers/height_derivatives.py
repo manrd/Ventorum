@@ -55,6 +55,14 @@ _VARIABLES = ("alpha", "beta", "phi", "h")
 _COEFFS = ("CL", "CD", "CY", "Cl", "Cm", "Cn")
 # A slope below this value [per rad or per unit h/c] gives no aerodynamic centre.
 _MIN_SLOPE = MIN_CENTRE_SLOPE
+# Factor of the round-off noise bound of the height slope [-] (see _irodov).
+# Measured on a rectangular wing of aspect ratio 6 (alpha 4 deg, 12 x 8
+# panels) with float32 solves: |CL_h| is 3.7e3 times the bound
+# eps |C| c / (2 d_h) at h/c 10, 1.5e2 times at h/c 50 (margin 11 % from the
+# float64 value) and 37 times at h/c 100, where the float32 margin is
+# 0.00013 and the float64 margin about 0.0012. At h/c 200 the float32
+# margin had the wrong sign.
+IRODOV_NOISE_FACTOR = 100.0
 
 
 def _json_float(value: float | None) -> float | None:
@@ -84,6 +92,9 @@ class HeightDerivativesResult:
         [m] aft of the pivot (None when the lift slope is near zero);
         ``margin``: (x_alpha - x_h)/c_ref [-], > 0 for static stability;
         ``verdict``: ``"stable"``, ``"unstable"`` or ``"not available"``.
+        The verdict is ``"not available"`` also when ``|CL_h|`` is below
+        the round-off noise bound of the solve precision (far from the
+        ground, see ``_irodov``).
     axes : str
         Axes of the moments: ``"body"``, ``"stability"`` or ``"wind"`` of
         the base condition, held fixed.
@@ -95,7 +106,12 @@ class HeightDerivativesResult:
     h_m : float
         Height of the pivot above the ground in the base state [m].
     h_min_m : float
-        Smallest clearance of the geometry in the base state [m].
+        Smallest clearance of the geometry in the base state [m], on the
+        clearance probe lattice (see
+        :func:`ventorum.solvers.lattice_base.ground_probe_count`). It sets
+        the height step and the automatic chordwise count. A note gives
+        the clearance of the solve lattice when it differs by more than
+        1 %.
     b_ref : float
         Reference span [m].
     c_ref : float
@@ -180,12 +196,27 @@ def _check_step(name: str, value: float, upper: float) -> float:
     return v
 
 
-def _irodov(matrix_body: np.ndarray, c_ref: float) -> dict[str, Any]:
-    """Return the pitch and height aerodynamic centres [m] and the Irodov margin."""
+def _irodov(matrix_body: np.ndarray, c_ref: float, *, base: np.ndarray | None = None,
+            d_h: float | None = None, precision: str = "float64") -> dict[str, Any]:
+    """Return the pitch and height aerodynamic centres [m] and the Irodov margin.
+
+    Far from the ground the height slopes ``CL_h`` and ``Cm_h`` fall to the
+    round-off level of the solves, and the margin is then noise. With the
+    base coefficients *base* ``[CL, CD, CY, Cl, Cm, Cn]`` and the height
+    step *d_h* [m], the height centre is not given when ``|CL_h|`` is below
+    the noise bound ``IRODOV_NOISE_FACTOR * eps * max(|CL|, |Cm|) * c_ref /
+    (2 d_h)``, with ``eps`` the machine epsilon of *precision* (float32 for
+    ``"float32"`` and ``"mixed"``). The verdict is then ``"not available"``.
+    """
     CL_a, CL_h = matrix_body[0, 0], matrix_body[0, 3]
     Cm_a, Cm_h = matrix_body[4, 0], matrix_body[4, 3]
+    h_floor = _MIN_SLOPE
+    if base is not None and d_h is not None and d_h > 0.0:
+        eps = float(np.finfo(np.float64 if precision == "float64" else np.float32).eps)
+        scale = max(abs(float(base[0])), abs(float(base[4])))
+        h_floor = max(h_floor, IRODOV_NOISE_FACTOR * eps * scale * c_ref / (2.0 * d_h))
     x_alpha = -c_ref * Cm_a / CL_a if abs(CL_a) > _MIN_SLOPE else None
-    x_h = -c_ref * Cm_h / CL_h if abs(CL_h) > _MIN_SLOPE else None
+    x_h = -c_ref * Cm_h / CL_h if abs(CL_h) > h_floor else None
     if x_alpha is None or x_h is None:
         return {"x_alpha_m": x_alpha, "x_h_m": x_h, "margin": None, "verdict": "not available"}
     margin = (x_alpha - x_h) / c_ref
@@ -336,6 +367,25 @@ def height_derivatives(
         settings = settings.clone()
         settings.n_chord = max(solver.resolve_n_chord(ac, settings, c, None, rp, fingerprint=fp) for c in conds)
     lattice = solver.build(ac, settings, condition, None, rp, fingerprint=fp)
+    # The probe above has DEFAULT_N_CHORD chordwise panels when the count is
+    # automatic (see ground_probe_count), and the solve lattice can have up
+    # to MAX_AUTO_N_CHORD. With a deflected chordwise control the two can
+    # have different hinge nodes, so their clearances differ by a few
+    # millimetres. The probe sets the count and the height step, as in the
+    # solver; the strike check of every case and the clearance note use the
+    # solve lattice.
+    pts = lattice.all_points()
+    h_solve = []
+    for c, lab in zip(conds, labels):
+        hm = float(np.min(ground_plane_from_condition(lattice, c, rp).height(pts)))
+        if hm <= 0.0:
+            what, hint = (("The base state", "Use a larger height.") if lab == "base" else
+                          (f"The case '{lab}' of the differences",
+                           "Use smaller steps (alpha_step_deg, phi_step_deg, h_step) or a larger height."))
+            raise GroundStrikeError(
+                f"{what} touches the ground on the solve lattice with {lattice.n_chord} chordwise panels "
+                f"(minimum clearance {hm:.4g} m). {hint}")
+        h_solve.append(hm)
     results = solver.solve_batch(lattice, conds, settings, ac.S_ref, b_ref, c_ref, ref_point=rp,
                                  main_surface=geo["main"], continuation=False)
     for r, c in zip(results, conds):
@@ -358,10 +408,10 @@ def height_derivatives(
         matrix = body.copy()
         matrix[3:] = Li @ R @ L @ body[3:]
     derivs = {f"{c}_{v}": float(matrix[i, j]) for i, c in enumerate(_COEFFS) for j, v in enumerate(_VARIABLES)}
-    irodov = _irodov(body, c_ref)
-
     devices = {str(r.details.get("device", "cpu")) for r in results}
     precisions = {str(r.details.get("precision", "float64")) for r in results}
+    precision = precisions.pop() if len(precisions) == 1 else "mixed"
+    irodov = _irodov(body, c_ref, base=coeffs[0], d_h=d_h, precision=precision)
     notes = [
         f"Central differences about the state alpha={math.degrees(condition.alpha):g} deg, "
         f"beta={math.degrees(condition.beta):g} deg, phi={math.degrees(condition.phi):g} deg, h={h0:g} m "
@@ -379,6 +429,15 @@ def height_derivatives(
         "Quasi-steady, level flight: the ground stays parallel to the free stream. Heave-rate (flight-path) "
         "effects are not modelled.",
     ]
+    if abs(h_solve[0] - h_min) > 0.01 * h_min:
+        notes.append(f"The smallest clearance of the solve lattice ({h_solve[0]:.4g} m, {lattice.n_chord} chordwise "
+                     f"panels) differs from that of the clearance probe ({h_min:.4g} m, h_min_m), which sets the "
+                     "height step and the automatic chordwise count. The hinge nodes of a deflected control "
+                     "depend on the chordwise count.")
+    if irodov["x_h_m"] is None and abs(float(body[0, 3])) > _MIN_SLOPE:
+        notes.append(f"The height slope CL_h = {body[0, 3]:.3g} is below the round-off noise bound of the "
+                     f"{precision} solves at this height, so the height centre and the Irodov margin are not "
+                     "given. Far from the ground the height derivatives go to zero.")
     case_converged = [bool(r.converged) for r in results]
     failed = [lab for lab, ok in zip(labels, case_converged) if not ok]
     if failed:
@@ -391,6 +450,6 @@ def height_derivatives(
         drag_basis="CD_total" if use_cd_total else "CDi", h_m=h0, h_min_m=h_min, b_ref=b_ref, c_ref=c_ref,
         ref_point=rp, n_chord=int(lattice.n_chord), base=base,
         device=devices.pop() if len(devices) == 1 else "mixed",
-        precision=precisions.pop() if len(precisions) == 1 else "mixed",
+        precision=precision,
         n_solves=len(results), notes=notes, case_converged=case_converged,
     )

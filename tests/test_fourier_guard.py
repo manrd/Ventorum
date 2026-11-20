@@ -127,3 +127,46 @@ def test_agent_reports_invalid_method():
     assert p["status"] == "error", p
     assert p["error"]["type"] == "invalid_method", p
     assert "vlm" in p["error"]["message"]
+
+
+def test_leading_edge_sweep_with_unswept_quarter_chord_passes():
+    """A ``sweep_le`` that only follows the taper solves, as the same wing given by ``x_le``.
+
+    Before the fix, the applicability check refused ``sweep_le`` above
+    0.5 deg with ``ValueError``, although the quarter-chord line of this
+    tapered wing is straight and unswept (the model limit is a
+    quarter-chord sweep of 1 deg).
+    """
+    b, cr, ct = 5.0, 1.5, 0.6  # semi-span, root chord, tip chord [m]
+    sweep_le = np.arctan(0.25 * (cr - ct) / b)  # [rad], about 2.58 deg
+    s = vt.LiftingSurface(
+        name="TaperLE",
+        semi_span=b,
+        sweep_le=sweep_le,
+        sections=[vt.WingSection(y_frac=0.0, chord=cr), vt.WingSection(y_frac=1.0, chord=ct)],
+    )
+    same = vt.LiftingSurface(
+        name="TaperXLE",
+        semi_span=b,
+        sections=[
+            vt.WingSection(y_frac=0.0, chord=cr),
+            vt.WingSection(y_frac=1.0, chord=ct, x_le=0.25 * (cr - ct)),
+        ],
+    )
+    res = vt.analyze(s, alpha_deg=4.0, settings=FOURIER)
+    ref = vt.analyze(same, alpha_deg=4.0, settings=FOURIER)
+    assert res.solver_type == "fourier"
+    assert res.totals.CL == pytest.approx(ref.totals.CL, rel=1e-12)
+    assert res.totals.CDi == pytest.approx(ref.totals.CDi, rel=1e-12)
+
+
+def test_swept_by_sweep_le_is_refused_with_validity_error():
+    """A ``sweep_le`` that sweeps the quarter-chord line is still refused."""
+    s = vt.LiftingSurface(
+        name="Swept",
+        semi_span=5.0,
+        sweep_le=np.radians(10.0),
+        sections=[vt.WingSection(y_frac=0.0, chord=1.0), vt.WingSection(y_frac=1.0, chord=1.0)],
+    )
+    with pytest.raises(ValidityError, match="quarter-chord"):
+        vt.analyze(s, alpha_deg=4.0, settings=FOURIER)
