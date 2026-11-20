@@ -917,39 +917,45 @@ def _leg_force_rules_geometric(lattice: VortexLattice) -> tuple[np.ndarray, np.n
     return normal, scale, kind
 
 
-def require_freestream_wake(condition: FlightCondition, wake_dir: np.ndarray | None) -> None:
-    """Refuse a wake that does not follow the free stream when ``mach > 0``.
+def stretched_wake_direction(condition: FlightCondition, wake_dir: np.ndarray | None) -> np.ndarray:
+    """Return the unit wake direction in the stretched free-stream axes of the Goethert rule.
 
-    The compressibility correction (Prandtl-Glauert, Goethert stretch along
-    the free stream) puts the semi-infinite wake legs along the stretched
-    free stream. A wake along another direction (``wake_alignment="body"``)
-    is not supported there, so it is refused and not replaced silently.
+    The compressibility correction (Prandtl-Glauert rule, H. Glauert, Proc.
+    R. Soc. Lond. A 118, 1928; Goethert rule, B. H. Goethert, NACA TM 1105,
+    1946) solves the incompressible problem on the geometry stretched along
+    the free stream: a point with free-stream axes components
+    ``(x_fs, y_fs, z_fs)`` goes to ``(x_fs / beta, y_fs, z_fs)``, with
+    ``beta = sqrt(1 - M^2)``. The wake legs are straight lines of the
+    geometry, so the same map applies to their direction: the wake
+    direction ``w`` in geometry axes gives ``(w . d / beta, w . s, w . l)``
+    (``d``, ``s``, ``l``: the free-stream, side and lift directions),
+    normalised to unit length. A wake along the free stream
+    (``wake_alignment="freestream"``) gives exactly ``(1, 0, 0)``; a wake
+    along the body x-axis (``wake_alignment="body"``) gives the image of
+    the body x-axis in the stretched axes.
 
     Parameters
     ----------
     condition : FlightCondition
-        The flight condition; ``mach`` [-] can be None.
+        The flight condition with ``mach > 0`` [-]; ``alpha`` and ``beta`` [rad].
     wake_dir : numpy.ndarray or None
         Unit direction of the wake legs in geometry axes, shape (3,). None
         means the free stream.
 
-    Raises
-    ------
-    ventorum.core.errors.ValidityError
-        When ``mach > 0`` and *wake_dir* is not the free-stream direction.
+    Returns
+    -------
+    numpy.ndarray
+        Unit wake direction in the stretched free-stream axes, shape (3,).
     """
-    m = getattr(condition, "mach", None)
-    if wake_dir is None or m is None or not float(m) > 0.0:
-        return
     d = freestream_direction(condition.alpha, condition.beta)
-    if not np.allclose(np.asarray(wake_dir, dtype=float), d, rtol=0.0, atol=1e-12):
-        from ventorum.core.errors import ValidityError
-
-        raise ValidityError(
-            "The compressibility correction (mach > 0) needs a wake along the free stream "
-            "(wake_alignment='freestream'); a wake along the body x-axis (wake_alignment='body') "
-            "is not supported with mach > 0."
-        )
+    if wake_dir is None or np.allclose(np.asarray(wake_dir, dtype=float), d, rtol=0.0, atol=1e-12):
+        return np.array([1.0, 0.0, 0.0])
+    M = float(condition.mach)
+    pg = math.sqrt(1.0 - M * M)
+    R = np.vstack([d, side_direction(condition.alpha, condition.beta), lift_direction(condition.alpha)])
+    w = R @ np.asarray(wake_dir, dtype=float)
+    w[0] /= pg
+    return w / np.linalg.norm(w)
 
 
 def prandtl_glauert_beta(conditions: list[FlightCondition]) -> np.ndarray:
@@ -1522,7 +1528,6 @@ def _near_field_velocity(
     """
     n_p = lattice.n_panels
     if getattr(condition, "mach", None) is not None and condition.mach > 0.0:
-        require_freestream_wake(condition, wake_dir)
         import math
         M = float(condition.mach)
         beta = math.sqrt(1.0 - M * M)
@@ -1548,7 +1553,9 @@ def _near_field_velocity(
         b_s = to_s(lattice.b)
         a_te_s = to_s(lattice.a_te)
         b_te_s = to_s(lattice.b_te)
-        w_fs = np.array([1.0, 0.0, 0.0])
+        # The wake legs in the stretched axes: the free stream gives (1, 0, 0),
+        # a body-axis wake its stretched image (stretched_wake_direction).
+        w_fs = stretched_wake_direction(condition, wake_dir)
         group = _core_group_of(lattice)[lattice.panel_strip]
         src_s = HorseshoeSet(
             a=a_s, b=b_s, a_te=a_te_s, b_te=b_te_s,

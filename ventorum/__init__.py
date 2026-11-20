@@ -89,6 +89,7 @@ from ventorum.solvers.derivative_matrix import (  # noqa: F401
 # The gradient functions load PyTorch: the module __getattr__ (end of this
 # file) gives them on first access, so that ``import ventorum`` stays light.
 from ventorum.sensitivity.errors import GradientScopeError  # noqa: F401
+from ventorum.core.errors import InputError  # noqa: F401
 from ventorum.aero.polars import (  # noqa: F401
     load_xfoil_polar,
     load_csv_polar,
@@ -310,8 +311,6 @@ def _check_shorthand(condition: FlightCondition | None, settings: SolverSettings
         object that is used instead.
     """
     import math
-
-    from ventorum.agent.schemas import InputError
 
     def _differ(a: float, b: float) -> bool:
         try:

@@ -262,7 +262,11 @@ def _solve_group(solver, lattice, conditions: list, setups: list, settings, S_re
     # The host flag avoids a device-to-host sync per solve in rate-free cases.
     omega = bd["omega"] if bd["has_rates"] else None
     if has_mach:
-        WD_s = engine._f64(np.tile([1.0, 0.0, 0.0], (K, 1)))
+        # The wake of each case in the stretched axes, as on the CPU
+        # (stretched_wake_direction): (1, 0, 0) for a free-stream wake.
+        from ventorum.aero.loads import stretched_wake_direction
+
+        WD_s = engine._f64(np.array([stretched_wake_direction(c, w) for c, w in zip(conditions, wds)]))
         cs = engine.CaseData(dl, WD_s, grounds)
     else:
         cs = engine.CaseData(dl, WD, grounds, GK=bd["GK"], GO=bd["GO"])
