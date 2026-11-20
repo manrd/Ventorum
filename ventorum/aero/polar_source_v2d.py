@@ -243,7 +243,16 @@ class Ventorum2DPolarSource:
         A PolarCache instance uses that folder. False or None disables
         caching.
     n_panels : int
-        Number of panels [-] for repaneling the section. Default is 160.
+        Number of panels [-] of the solved section. Default is 160. A NACA
+        designation is generated with ``n_panels + 1`` points. A coordinate
+        section (points, a coordinate file or an AirfoilShape) with exactly
+        ``n_panels + 1`` points is solved with its own nodes, at any node
+        spacing; a coordinate section with another point count is repaneled
+        to ``n_panels`` panels. So two coordinate sets of one shape can give
+        different polars when only one of them has ``n_panels + 1`` points.
+        To solve a coordinate section on the repaneled nodes, give it
+        another point count, or repanel it first with
+        ``AirfoilShape.repanel(n_panels=...)``.
     ncrit : float
         Critical amplification exponent [-] for transition. Default is 9.0.
     xtr : tuple of (float, float)
@@ -498,6 +507,8 @@ class Ventorum2DPolarSource:
             ]
 
         reference_key = _reference_key(shape)
+        # A section with n_panels + 1 points keeps its own nodes (see the
+        # n_panels parameter of the class); other counts are repaneled.
         if len(shape.coords) != self._n_panels + 1:
             shape = shape.repanel(n_panels=self._n_panels)
 
