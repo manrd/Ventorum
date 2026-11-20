@@ -39,6 +39,24 @@ a minor version can change a public interface.
   as "skip" (exit code 3, log "GPU gate: INCOMPLETE") and has a timeout for the test step (`--pytest-timeout`).
   `validation/compare_reports.py` sees a change of a round-off residual.
 - The tests do not read the tuner profile of the machine; tests of the profile opt in.
+- RESULT CHANGE. `wake_alignment="body"` with `mach > 0` maps the body-axis wake into the stretched
+  Prandtl-Glauert frame. Before, the solver used a free-stream wake and reported a body wake. AR 8 wing, alpha
+  10 deg, Mach 0.3: CL 0.817393 (free-stream wake 0.822167). At a very small Mach the result is the
+  incompressible one. Free-stream wake results do not change.
+- RESULT CHANGE. The bank derivatives of a ground sweep hold the pivot height (chain rule with the grid height,
+  as for alpha). With `height_ref="min"` Cl_phi goes from -0.0338 to -0.0713 (local value -0.0649); with
+  `height_ref="te"` it moves by less than 0.1 %; `height_ref="ref"` does not change. A sweep with one height and a moving
+  pivot gives NaN with a note.
+- Invalid user input raises `InputError`, a subclass of `ValueError` (exported as `ventorum.InputError`). Code
+  that catches `ValueError` still works.
+
+### Added
+
+- GPU memory limit for the lattice cache (default a quarter of the GPU memory, `VENTORUM_GPU_CACHE_BYTES`,
+  `gpu.set_cache_limit`), `gpu.release()` and `gpu.cache_bytes()`. A solve that runs out of GPU memory falls back
+  to the CPU.
+- The kernel cache of a sweep is freed when the sweep ends; a returned result does not keep it.
+- Derivative results give `stepped_trust_min` and a note when a stepped case has a lower trust than the base case.
 
 ### Fixed
 
@@ -55,6 +73,8 @@ a minor version can change a public interface.
 - The ground sweep docstring and the theory page state that CL_alpha and Cl_phi are secant fits.
 - The paneling rule of the Ventorum-2D polar source for coordinate input is stated.
 - Three formulas of the theory pages had a control character in place of a backslash.
+- The 3D panel Trefftz page states the control-point rule as a method choice and gives the measured spanwise
+  orders.
 
 ## [0.6.2] - 2026-11-17
 
