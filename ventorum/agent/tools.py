@@ -480,6 +480,21 @@ def _planned_panels(
     return int(strips * n)
 
 
+def _plan_panels(ac: Aircraft, sett: SolverSettings, condition: FlightCondition | None) -> int | None:
+    """Return the panel count of the solved mesh for the parallel plan, or None.
+
+    The count is that of :func:`_planned_panels` with the case condition: it
+    includes the automatic ``n_chord`` of ground effect and of a deflected
+    control (not the free-air default). The parallel plan uses it to find
+    the size class of the cases. None when the count cannot be found; the
+    plan then uses its default.
+    """
+    try:
+        return int(_planned_panels(ac, sett, condition))
+    except Exception:  # noqa: BLE001 - only an estimate for the plan
+        return None
+
+
 def _condition_value(res: Any) -> float | None:
     """Return the condition estimate of a result for the payload.
 
@@ -1145,7 +1160,7 @@ def polar_sweep(
         outputs = list(run_cases(lambda a: run(a, fixed), alphas, estimate_panels(ac, fixed), "auto"))
     elif (resolve_solver_type(sett.solver_type) in ("linear", "nonlinear")
           or (resolve_solver_type(sett.solver_type) == "vlm"
-              and (size_class(estimate_panels(ac, sett)) == "small"
+              and (size_class(_plan_panels(ac, sett, make_flight_condition(c, alpha_deg=alphas[0]))) == "small"
                    or _gpu_takes(len(alphas), _planned_panels(ac, sett, make_flight_condition(c, alpha_deg=alphas[0]))))
               and _case_settings(ac, sett, strips, make_flight_condition(c, alpha_deg=alphas[0])) is sett)):
         # Lifting lines, small vortex lattices and batches that the GPU takes:
@@ -1153,7 +1168,8 @@ def polar_sweep(
         # in parallel.
         outputs = _batched_polar(ac, sett, [make_flight_condition(c, alpha_deg=a) for a in alphas], alphas)
     else:
-        outputs = run_cases(run, alphas, estimate_panels(ac, sett), "auto")
+        outputs = run_cases(run, alphas, _plan_panels(ac, sett, make_flight_condition(c, alpha_deg=alphas[0])),
+                            "auto")
 
     table: list[dict[str, Any]] = []
     ok: list[tuple[float, Any]] = []
@@ -1913,7 +1929,7 @@ def stability_derivatives(
         except GroundStrikeError as exc:
             raise GroundStrikeError(f"Case alpha={aa:g} deg, beta={bb:g} deg: {exc}") from exc
 
-    res = dict(run_cases(run, list(cases.items()), estimate_panels(ac, sett), "auto"))
+    res = dict(run_cases(run, list(cases.items()), _plan_panels(ac, case_sett, make_flight_condition(c)), "auto"))
 
     # In ground effect the static margin alone is not the static stability
     # criterion: compute the Irodov height-pitch margin of the same state,
@@ -2215,7 +2231,7 @@ def batch_evaluate(
             "fewer candidates or fewer panels (smaller n_panels or n_chord)")
     outputs = []
     if built:
-        outputs = run_cases(run, built, max((estimate_panels(b[2], b[4]) or 0) for b in built) or None, workers)
+        outputs = run_cases(run, built, max((_plan_panels(b[2], b[4], fc) or 0) for b in built) or None, workers)
 
     ranked: list[dict[str, Any]] = []
     ok_results: list[Any] = []
