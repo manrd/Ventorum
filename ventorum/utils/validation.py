@@ -436,6 +436,11 @@ def validate_fourier_applicability(ac: Aircraft) -> None:
     """Warn / raise if the Fourier solver is used on incompatible geometry.
 
     The Fourier solver requires a single, symmetric, unswept, planar surface.
+    This function does not check the sweep. The solver checks the sweep of
+    the quarter-chord line (see ``_check_geometry_in_model`` in
+    :mod:`ventorum.solvers.fourier`), because the lifting line lies on the
+    quarter-chord line. A tapered wing with a swept leading edge and an
+    unswept quarter-chord line is therefore in the model.
     """
     if len(ac.surfaces) > 1:
         raise ValueError(
@@ -448,16 +453,6 @@ def validate_fourier_applicability(ac: Aircraft) -> None:
             "The Fourier solver requires a symmetric surface "
             f"(is_symmetric=True). Surface '{surf.name}' is not symmetric."
         )
-    if abs(surf.sweep_le) > np.radians(0.5):
-        has_explicit_sweep = any(
-            s.x_le is not None and abs(s.x_le) > 1e-6 for s in surf.sections
-        )
-        if has_explicit_sweep or abs(surf.sweep_le) > np.radians(0.5):
-            raise ValueError(
-                "The Fourier solver does not support swept wings "
-                f"(sweep_le={np.degrees(surf.sweep_le):.1f}°). "
-                "Use 'vlm' instead."
-            )
     if abs(surf.dihedral) > np.radians(0.5):
         raise ValueError(
             "The Fourier solver does not support dihedral "
