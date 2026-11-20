@@ -1198,17 +1198,103 @@ def _not_converged_note(sol: dict, max_iter: int, tol: float) -> str:
     )
 
 
-def _alpha_cl_max(polar: Any, circulation: bool = False) -> float | None:
-    """Return the angle [rad] of the largest Cl of a tabulated polar, or None.
+def _polar_lift_table(polar: Any, circulation: bool = False) -> tuple[np.ndarray, np.ndarray] | None:
+    """Return the angles [rad] and the lift coefficients [-] of a tabulated polar, or None.
 
-    With *circulation* the largest circulation lift is used.
+    With *circulation* the lift is the circulation lift.
     """
     if not isinstance(polar, TabulatedAirfoil):
         return None
     alpha, cl, _, _ = polar.tables()
-    if circulation:
-        cl = polar.Cl_circulation(alpha)
-    return float(np.asarray(alpha)[int(np.argmax(np.asarray(cl)))])
+    alpha = np.asarray(alpha, dtype=float)
+    cl = np.asarray(polar.Cl_circulation(alpha) if circulation else cl, dtype=float)
+    return alpha, cl
+
+
+def _alpha_cl_max(polar: Any, circulation: bool = False) -> float | None:
+    """Return the angle [rad] of the largest Cl of a tabulated polar, or None.
+
+    With *circulation* the largest circulation lift is used. A maximum at
+    an end of the table is not a stall (the table can stop before the
+    stall, for example a ground polar that stops where the section touches
+    the ground), so the function returns None for it, as
+    :func:`ventorum.core.trust.polar_limits` does.
+    """
+    table = _polar_lift_table(polar, circulation)
+    if table is None:
+        return None
+    alpha, cl = table
+    k = int(np.argmax(cl))
+    if not 0 < k < alpha.size - 1:
+        return None
+    return float(alpha[k])
+
+
+#: Flag of a strip whose section slope is zero or negative past a stall of its polar.
+FLAG_POST_STALL = "post-stall, non-unique"
+#: Flag of a strip whose angle is outside its polar table and not past a stall
+#: of the table: the polar gives its end values there (slope zero).
+FLAG_OUTSIDE_TABLE = "outside polar table"
+#: Flag of a strip with a positive section slope.
+FLAG_ATTACHED = "attached"
+
+
+def _strip_stall_state(
+    polars: Sequence[Any],
+    alpha_v: np.ndarray,
+    m: np.ndarray,
+    circulation: np.ndarray | None = None,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Return the post-stall and the outside-table masks of the strips.
+
+    A strip with a section slope ``m <= 0`` is post-stall, except when its
+    angle is outside the table of its polar and the table has no interior
+    Cl maximum (or minimum) that the angle passed. There the zero slope
+    comes from the end values of the table, not from a stall.
+
+    Parameters
+    ----------
+    polars : sequence
+        Polar of each solved strip.
+    alpha_v : numpy.ndarray
+        Section angle of each strip [rad].
+    m : numpy.ndarray
+        Section lift slope of each strip at ``alpha_v`` [1/rad].
+    circulation : numpy.ndarray or None
+        True on a strip that reads the circulation lift of its polar.
+
+    Returns
+    -------
+    post_stall : numpy.ndarray
+        Boolean mask of the post-stall strips.
+    outside : numpy.ndarray
+        Boolean mask of the strips whose angle is outside their polar table.
+    """
+    alpha_v = np.asarray(alpha_v, dtype=float)
+    stalled = np.asarray(m, dtype=float) <= 0.0
+    outside = np.zeros(alpha_v.shape, dtype=bool)
+    past_stall = np.zeros(alpha_v.shape, dtype=bool)
+    for j, polar in enumerate(polars):
+        circ = bool(circulation[j]) if circulation is not None else False
+        table = _polar_lift_table(polar, circ)
+        if table is None:
+            continue
+        alpha, cl = table
+        a = float(alpha_v[j])
+        if alpha[0] <= a <= alpha[-1]:
+            continue
+        outside[j] = True
+        k_max, k_min = int(np.argmax(cl)), int(np.argmin(cl))
+        past_max = 0 < k_max < alpha.size - 1 and a > alpha[k_max]
+        past_min = 0 < k_min < alpha.size - 1 and a < alpha[k_min]
+        past_stall[j] = bool(past_max or past_min)
+    post_stall = stalled & (~outside | past_stall)
+    return post_stall, outside
+
+
+def _strip_flag_names(post_stall: np.ndarray, outside: np.ndarray) -> np.ndarray:
+    """Return the flag of each strip from its post-stall and outside-table masks."""
+    return np.where(post_stall, FLAG_POST_STALL, np.where(outside, FLAG_OUTSIDE_TABLE, FLAG_ATTACHED))
 
 
 def _uses_circulation_lift(polars: Sequence[Any], uses_height: np.ndarray) -> np.ndarray:
@@ -1413,7 +1499,7 @@ def _solve_condition(
 
     primary_loads = loads_of(primary)
     branches: list[tuple[dict, Any]] = []
-    post_stall = primary["m"] <= 0.0
+    post_stall, _ = _strip_stall_state(polars, primary["alpha_v"], primary["m"], use_circ)
     if primary["converged"] and np.any(post_stall):
         # The stalled start puts every strip past the angle of its Cl maximum,
         # the attached start puts every strip below it.
@@ -1491,7 +1577,8 @@ def _solve_condition(
             Cn=totals.Cn,
             **lattice_error_inputs(lattice, main_surface),
         )
-        flags = np.where(sol["m"] <= 0.0, "post-stall, non-unique", "attached")
+        sol_post, sol_outside = _strip_stall_state(polars, sol["alpha_v"], sol["m"], use_circ)
+        flags = _strip_flag_names(sol_post, sol_outside)
         res = SolverResult(
             spanwise=loads.spanwise,
             totals=totals,
@@ -1521,8 +1608,9 @@ def _solve_condition(
             "lift_slope_section": full(a_sec),
             "strip_h_over_c": full(h_over_c),
             "strip_circulation_lift": full(use_circ, dtype=bool),
-            "post_stall": bool(np.any(sol["m"] <= 0.0)),
-            "post_stall_strips": full(sol["m"] <= 0.0, dtype=bool),
+            "post_stall": bool(np.any(sol_post)),
+            "post_stall_strips": full(sol_post, dtype=bool),
+            "outside_table_strips": full(sol_outside, dtype=bool),
             "strip_flags": list(full(flags, dtype=object)),
             "non_unique": non_unique,
             "factorized": bool(factorized) if is_primary else False,
@@ -1611,7 +1699,10 @@ def solve_viscous(
         a deflected control), ``strip_h_over_c`` [-],
         ``strip_circulation_lift`` (True on a strip whose residual reads
         the circulation lift of a ground-effect polar),
-        ``post_stall_strips``, ``strip_flags``, ``non_unique``,
+        ``post_stall_strips``, ``outside_table_strips`` (True on a strip
+        whose angle is outside its polar table and not past a stall of the
+        table), ``strip_flags`` (``"post-stall, non-unique"``,
+        ``"outside polar table"`` or ``"attached"``), ``non_unique``,
         ``branches`` (when a post-stall case has more than one converged
         solution), ``factorized`` (True when this condition needed a new
         factorization) and ``factorization_count`` (the number of LU
@@ -2091,7 +2182,7 @@ class _PanelCoupling:
             self.previous = primary["x"][:ns].copy()
             if condition.alpha >= 0 and self.first_positive is None:
                 self.first_positive = self.previous.copy()
-            if np.any(primary["m"] <= 0):
+            if np.any(_strip_stall_state(polars, primary["alpha_v"], primary["m"])[0]):
                 for sign in (1, -1):
                     seed = branch_seed(primary, sign)
                     branch_runs += 1
@@ -2152,6 +2243,7 @@ class _PanelCoupling:
             res.converged = state["converged"]
             res.iterations = state.get("primary_iterations", len(state["hist"]) - 1)
             res.residual_history = state["hist"].copy()
+            stall_post, stall_outside = _strip_stall_state(polars, state["alpha_v"], state["m"])
             res.details.update(
                 delta=self.full(state["x"][:len(self.maps)]), alpha_eff=av,
                 alpha0_section=self.full(zero), lift_slope_section=self.full(slope),
@@ -2163,8 +2255,9 @@ class _PanelCoupling:
                 cd_profile=cd_full,
                 cm_section_inviscid=self.full(cm_inv), cm_section_pressure=pressure_cm,
                 trailing_edge_pressure_jump=state["jump"].copy(),
-                post_stall=bool(np.any(state["m"] <= 0)), post_stall_strips=self.full(state["m"] <= 0),
-                strip_flags=list(self.full(np.where(state["m"] <= 0, "post-stall, non-unique", "attached"))),
+                post_stall=bool(np.any(stall_post)), post_stall_strips=self.full(stall_post),
+                outside_table_strips=self.full(stall_outside),
+                strip_flags=list(self.full(_strip_flag_names(stall_post, stall_outside))),
                 non_unique=bool(branches), branch_search_runs=branch_runs,
                 recovery_runs=state.get("recovery_runs", 0),
                 recovery_residual_histories=state.get("recovery_residual_histories", []),

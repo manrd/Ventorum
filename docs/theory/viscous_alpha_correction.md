@@ -137,7 +137,9 @@ A sweep runs from the angle nearest to zero upward and from there downward. Each
 
 ## Post-stall branches and honesty
 
-A strip with $m_j \le 0$ at the solution has the flag `"post-stall, non-unique"`. Then the solver also runs from a stalled start (every strip $5$ deg above the angle of the Cl maximum of its polar) and from an attached start (every strip $5$ deg below it). Every other converged solution whose CL differs by more than $10^{-3}$ (`BRANCH_CL_DIFFERENCE`) is a branch: `details["branches"]` holds all of them (the first is the main result), `details["non_unique"]` is true, and the trust score gets the penalty `POST_STALL_BRANCH_PENALTY`.
+A strip with $m_j \le 0$ at the solution has the flag `"post-stall, non-unique"`. Then the solver also runs from a stalled start (every strip $5$ deg above the angle of the Cl maximum of its polar) and from an attached start (every strip $5$ deg below it). Only an interior Cl maximum of a table is a stall. A maximum at an end of the table is not a stall: the table can stop before the stall, for example a ground polar that stops where the section touches the ground. A strip with such a polar keeps its angle in the two starts.
+
+A tabulated polar gives its end values outside its table, so the slope there is zero. A strip whose angle is outside its table, and that did not pass an interior Cl maximum (or minimum) of the table, has the flag `"outside polar table"`, not the post-stall flag. `details["outside_table_strips"]` marks these strips. Such strips alone do not start the branch search. The trust score warns about them (the polar note of the trust score). Every other converged solution whose CL differs by more than $10^{-3}$ (`BRANCH_CL_DIFFERENCE`) is a branch: `details["branches"]` holds all of them (the first is the main result), `details["non_unique"]` is true, and the trust score gets the penalty `POST_STALL_BRANCH_PENALTY`.
 
 Only converged solutions form branches. When the main iteration does not converge, the result has `converged=False`, a warning and a note, no branch search and no branch verdict.
 

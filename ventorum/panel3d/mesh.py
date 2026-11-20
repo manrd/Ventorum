@@ -226,6 +226,7 @@ __all__ = [
     "PanelMesh",
     "check_contact",
     "check_mesh",
+    "combine_wake_cp_frac",
     "mesh_aircraft",
     "mesh_lifting_surface",
 ]
@@ -2302,6 +2303,50 @@ def mesh_lifting_surface(
     )
 
 
+def combine_wake_cp_frac(meshes) -> np.ndarray | None:
+    """Return the wake control-point fractions of meshes put in one mesh.
+
+    This is the one merge rule for ``wake_cp_frac`` of several surface
+    meshes. A mesh without fractions (a user-built mesh) gets the midpoint
+    0.5 for each of its own wake strips only. The other meshes keep their
+    fractions. The result is None only when no mesh has fractions.
+
+    Parameters
+    ----------
+    meshes : sequence of PanelMesh
+        Surface meshes in the order of their wake edges in the combined
+        mesh.
+
+    Returns
+    -------
+    numpy.ndarray or None
+        Control-point span fraction of each wake strip of the combined mesh,
+        shape (Nw_strips,) [-], or None.
+
+    Raises
+    ------
+    ValueError
+        If the fractions of a mesh do not have one value per wake edge.
+    """
+    meshes = list(meshes)
+    if not meshes:
+        return np.empty(0, dtype=float)
+    if all(getattr(m, "wake_cp_frac", None) is None for m in meshes):
+        return None
+    parts = []
+    for m in meshes:
+        n_w = len(np.asarray(m.wake_edges).reshape(-1, 4))
+        cp = getattr(m, "wake_cp_frac", None)
+        if cp is None:
+            parts.append(np.full(n_w, 0.5, dtype=float))
+            continue
+        cp = np.asarray(cp, dtype=float).reshape(-1)
+        if cp.shape[0] != n_w:
+            raise ValueError(f"wake_cp_frac has {cp.shape[0]} values for {n_w} wake edges.")
+        parts.append(cp)
+    return np.concatenate(parts)
+
+
 def mesh_aircraft(
     aircraft,
     section_coords_by_surface,
@@ -2355,7 +2400,7 @@ def mesh_aircraft(
     kind_parts = []
     comp_parts = []
     wake_parts = []
-    cp_parts = []
+    sub_meshes = []
     strip_parts = []
     chord_parts = []
     side_parts = []
@@ -2376,11 +2421,7 @@ def mesh_aircraft(
             w[:, 0:2] += n_panels
             w[:, 2:4] += n_nodes
         wake_parts.append(w.reshape(-1, 4))
-        cp_sub = getattr(sub, "wake_cp_frac", None)
-        if cp_sub is None:
-            cp_parts.append(None if len(w) > 0 else np.empty(0, dtype=float))
-        else:
-            cp_parts.append(np.asarray(cp_sub, dtype=float))
+        sub_meshes.append(sub)
         st = np.asarray(sub.strip, dtype=np.int64)
         strip_parts.append(np.where(st >= 0, st + n_strips, -1))
         chord_parts.append(np.asarray(sub.chord_index, dtype=np.int64))
@@ -2391,15 +2432,7 @@ def mesh_aircraft(
         n_panels += int(np.asarray(sub.panels).shape[0])
         half_all = half_all and bool(sub.half)
         root_scale_all = root_scale_all or bool(getattr(sub, "root_scale_warning", False))
-    if all(p is None for p in cp_parts):
-        wake_cp_all = None
-    elif cp_parts:
-        wake_cp_all = np.concatenate([
-            np.full(len(w), 0.5, dtype=float) if p is None else p
-            for w, p in zip(wake_parts, cp_parts)
-        ])
-    else:
-        wake_cp_all = np.empty(0, dtype=float)
+    wake_cp_all = combine_wake_cp_frac(sub_meshes)
     return PanelMesh(
         nodes=np.vstack(node_parts),
         panels=np.vstack(panel_parts),

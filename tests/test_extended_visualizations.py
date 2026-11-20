@@ -555,3 +555,33 @@ def test_component_breakdown_integrates_strip_widths_and_keeps_negative_induced_
     plt.close(fig_neg)
 
 
+
+
+def test_component_breakdown_states_the_near_field_basis_and_the_trefftz_total(aircraft_and_results):
+    """Regression: the breakdown drew near-field induced drag without a statement of its basis.
+
+    The surface terms are the near-field sums of L' alpha_i, which differ from the
+    Trefftz-plane total ``totals.CDi``. The plot keeps the values (no rescale), the
+    drag labels say "near field", and a figure note gives the Trefftz-plane CDi.
+    """
+    _, res, _, _, _ = aircraft_and_results
+    lat = res.details["lattice"]
+    fig = vt.plot_component_breakdown(res)
+    ax_force, ax_share = fig.axes
+    labels = [t.get_text() for t in ax_force.get_legend().get_texts()]
+    assert any("near-field" in lab for lab in labels), labels
+    assert any("near field" in t.get_text() for t in ax_share.get_legend().get_texts())
+    notes = [t.get_text() for t in fig.texts]
+    assert any("near-field sum" in n and "Trefftz plane" in n and f"CDi = {res.totals.CDi:.6f}" in n
+               for n in notes), notes
+    plt.close(fig)
+    # The bars are not rescaled to the Trefftz total (the drag bars without
+    # profile drag are the near-field sums).
+    res_nf = res.clone()
+    for sw in res_nf.spanwise:
+        sw.Cd_profile = None
+    fig = vt.plot_component_breakdown(res_nf)
+    di = [float(np.sum(sw.local_lift * sw.alpha_i * lat.width[sl.strips]))
+          for sl, sw in zip(lat.surfaces, res_nf.spanwise)]
+    np.testing.assert_allclose([p.get_height() for p in fig.axes[0].patches[2:]], di, rtol=1e-12, atol=1e-12)
+    plt.close(fig)

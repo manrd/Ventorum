@@ -321,3 +321,60 @@ def test_gpu_trefftz_parity() -> None:
 
     np.testing.assert_allclose(res_gpu.CDi_trefftz, res_cpu.CDi_trefftz, rtol=1.0e-10, atol=1.0e-12)
     np.testing.assert_allclose(res_gpu.Cn_trefftz, res_cpu.Cn_trefftz, rtol=1.0e-10, atol=1.0e-12)
+
+
+def test_wake_cp_frac_does_not_depend_on_the_identity_of_the_edge_array() -> None:
+    """Regression: the solver found cp_frac by the identity of the wake edge array.
+
+    A copy of the edges (equal values, another array) dropped the fractions and
+    fell back to 0.5 with no error. The caller now gives the fractions.
+    """
+    surf = _rect_wing(semi_span=4.0, chord=1.0)
+    half = mesh_lifting_surface(surf, airfoil("0012").coords, n_span=12, n_chord=6, spacing="auto", half=True)
+    solver = PanelSolver(half, S_ref=8.0, b_ref=8.0, c_ref=1.0)
+    full = solver._full_mesh
+    assert solver.wake.cp_frac is not None and solver._full_wake.cp_frac is not None
+    copy = solver._build_wake(full.nodes, solver._standardized_full_panels, full.wake_edges.copy(),
+                              solver._full_geom.normal, full.wake_cp_frac, None)
+    np.testing.assert_array_equal(copy.cp_frac, solver._full_wake.cp_frac)
+    assert not np.allclose(copy.cp_frac, 0.5)
+    with pytest.raises(ValueError, match="cp_frac must have shape"):
+        solver._build_wake(full.nodes, solver._standardized_full_panels, full.wake_edges,
+                           solver._full_geom.normal, full.wake_cp_frac[:-1], None)
+
+
+def test_combine_wake_cp_frac_pads_only_the_mesh_without_fractions() -> None:
+    """One merge rule for the wake fractions of several surface meshes.
+
+    A mesh without fractions gets 0.5 for its own strips only; the other meshes
+    keep theirs. No fractions at all gives None. mesh_aircraft uses this rule.
+    """
+    from ventorum.panel3d.mesh import combine_wake_cp_frac, mesh_aircraft
+
+    surf = _rect_wing(semi_span=4.0, chord=1.0)
+    built = mesh_lifting_surface(surf, airfoil("0012").coords, n_span=12, n_chord=6, spacing="auto", half=False)
+    user = PanelMesh(nodes=built.nodes, panels=built.panels, component=built.component, kind=built.kind,
+                     wake_edges=built.wake_edges, half=False, tip=built.tip)
+    n_w = len(built.wake_edges)
+    out = combine_wake_cp_frac([built, user])
+    np.testing.assert_array_equal(out[:n_w], built.wake_cp_frac)
+    np.testing.assert_array_equal(out[n_w:], np.full(n_w, 0.5))
+    out = combine_wake_cp_frac([user, built])
+    np.testing.assert_array_equal(out[:n_w], np.full(n_w, 0.5))
+    np.testing.assert_array_equal(out[n_w:], built.wake_cp_frac)
+    assert combine_wake_cp_frac([user, user]) is None
+    assert combine_wake_cp_frac([]).shape == (0,)
+    bad = PanelMesh(nodes=built.nodes, panels=built.panels, component=built.component, kind=built.kind,
+                    wake_edges=built.wake_edges, half=False, tip=built.tip,
+                    wake_cp_frac=built.wake_cp_frac[:-1])
+    with pytest.raises(ValueError, match="wake_cp_frac has"):
+        combine_wake_cp_frac([built, bad])
+    tail = LiftingSurface(name="Tail", semi_span=1.5, position=np.array([4.0, 0.0, 0.0]), is_symmetric=True,
+                          sections=[WingSection(y_frac=0.0, chord=0.6, shape="0012"),
+                                    WingSection(y_frac=1.0, chord=0.4, shape="0012")])
+    ac = Aircraft(name="a", surfaces=[surf, tail])
+    coords = [airfoil("0012").coords, airfoil("0012").coords]
+    kw = dict(n_span=8, n_chord=4, spacing="auto", half=False)
+    both = mesh_aircraft(ac, coords, **kw)
+    parts = [mesh_lifting_surface(s, c, **kw) for s, c in zip(ac.surfaces, coords)]
+    np.testing.assert_array_equal(both.wake_cp_frac, combine_wake_cp_frac(parts))

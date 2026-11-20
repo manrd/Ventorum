@@ -10,6 +10,7 @@ returns an error payload.
 
 from __future__ import annotations
 
+import contextlib
 import dataclasses
 import functools
 import inspect
@@ -103,6 +104,40 @@ HEIGHT_DERIVATIVE_SOLVES = 9
 # with "a tuning run is in progress" (see tune_machine).
 _TUNE_LOCK = threading.Lock()
 
+# The tuner sets the device, the precision and the machine profile for the
+# whole process while it measures (see ventorum.hardware.tuner). A solve in
+# another thread during that time would run with the settings of the tuner.
+# So the tools refuse a tuning run while other tool calls run in this
+# process, and refuse other tool calls while a tuning run is in progress.
+# The gate counts the outermost tool call of each thread only.
+_GATE_LOCK = threading.Lock()
+_GATE_STATE = {"calls": 0, "tuning": False}
+_GATE_DEPTH = threading.local()
+#: Tools that do not take part in the gate (the tuning tool itself).
+_GATE_EXEMPT = frozenset({"ventorum_tune_machine"})
+
+
+@contextlib.contextmanager
+def _tool_gate(tool_name: str):
+    """Count one outermost tool call; refuse it while a tuning run is in progress."""
+    depth = getattr(_GATE_DEPTH, "n", 0)
+    counted = depth == 0 and tool_name not in _GATE_EXEMPT
+    if counted:
+        with _GATE_LOCK:
+            if _GATE_STATE["tuning"]:
+                raise InputError(
+                    "a tuning run is in progress: the tuner sets the device and the machine profile "
+                    "for the whole process. Call again when the tuning run is done.")
+            _GATE_STATE["calls"] += 1
+    _GATE_DEPTH.n = depth + 1
+    try:
+        yield
+    finally:
+        _GATE_DEPTH.n = depth
+        if counted:
+            with _GATE_LOCK:
+                _GATE_STATE["calls"] -= 1
+
 
 def _tool(fn: Callable[..., dict[str, Any]]) -> Callable[..., dict[str, Any]]:
     """Catch every exception of a tool and return an error payload; make the output JSON-safe."""
@@ -118,7 +153,7 @@ def _tool(fn: Callable[..., dict[str, Any]]) -> Callable[..., dict[str, Any]]:
             if not is_ac:
                 args = (args[0], None) + args[1:]
         try:
-            with active_tool_context(tool_name):
+            with _tool_gate(tool_name), active_tool_context(tool_name):
                 out = fn(*args, **kwargs)
         except Exception as exc:  # noqa: BLE001 - a tool must not raise
             return error_payload(exc)
@@ -259,6 +294,9 @@ class _SpanFit:
     floor_reached : bool
         True if the spanwise floor was reached and the call still does not
         fit both limits there.
+    kept_surfaces : tuple of str
+        Names of the surfaces with their own ``n_panels``. The fit does not
+        change their count.
     """
 
     n_panels_from: int
@@ -269,14 +307,17 @@ class _SpanFit:
     panels_from: int
     work_from: int
     floor_reached: bool
+    kept_surfaces: tuple[str, ...] = ()
 
 
 def _span_is_automatic(ac: Aircraft, settings: Any) -> bool:
-    """Return True if the caller set no spanwise count.
+    """Return True if at least one surface uses the automatic spanwise count.
 
     The spanwise count is automatic when ``settings`` has no ``n_panels``
-    key and no surface has its own ``n_panels``. :func:`_fit_span` never
-    changes a count that the caller set. A surface with
+    key and at least one surface has no ``n_panels`` of its own. Such a
+    surface uses the count of the settings, which :func:`_fit_span` can
+    reduce. A surface with its own ``n_panels`` keeps it: :func:`_fit_span`
+    never changes a count that the caller set. A surface with
     ``node_displacements`` also fixes the count: the displacements belong
     to the spanwise stations of the mesh that the caller got from
     ``ventorum_undeformed_nodes``, and a fitted mesh would not match them.
@@ -285,7 +326,7 @@ def _span_is_automatic(ac: Aircraft, settings: Any) -> bool:
         return False
     if any(getattr(s, "node_displacements", None) is not None for s in ac.surfaces):
         return False
-    return all(getattr(s, "n_panels", None) is None for s in ac.surfaces)
+    return any(getattr(s, "n_panels", None) is None for s in ac.surfaces)
 
 
 def _largest_panels(ac: Aircraft, sett: SolverSettings, cases: list[tuple[Any, Any, Any]]) -> int:
@@ -311,9 +352,10 @@ def _fit_span(
     and the call is above :data:`MAX_TOTAL_PANELS` (the largest planned
     mesh of the cases, with the full automatic n_chord) or above
     :data:`MAX_CALL_WORK` (the work estimate of the tool), the spanwise
-    panels per semi-span of all surfaces are reduced by the same factor
-    (all surfaces use the one settings count), to the largest count that
-    fits both limits. The chordwise count does not change. All the cases
+    panels per semi-span of the surfaces without their own ``n_panels``
+    are reduced (these surfaces use the one settings count), to the
+    largest count that fits both limits. A surface with its own
+    ``n_panels`` keeps its count. The chordwise count does not change. All the cases
     of the call use this one spanwise count. The count does not go below
     *floor*. At the floor, the cap of :func:`_case_settings` can reduce an
     automatic n_chord, and the work check can refuse the call, as before.
@@ -373,9 +415,11 @@ def _fit_span(
         best = with_n(lo)
     strips_to = _strip_count(ac, best)
     n_chord = int(panels(best)) // max(strips_to, 1) if _uses_lattice_chord(ac, best) else None
+    kept = tuple(str(getattr(s, "name", "")) for s in ac.surfaces if getattr(s, "n_panels", None) is not None)
     return best, _SpanFit(
         n_panels_from=n0, n_panels_to=int(best.n_panels), strips_from=_strip_count(ac, sett),
-        strips_to=strips_to, n_chord=n_chord, panels_from=p0, work_from=w0, floor_reached=floor_reached)
+        strips_to=strips_to, n_chord=n_chord, panels_from=p0, work_from=w0, floor_reached=floor_reached,
+        kept_surfaces=kept)
 
 
 def _mesh_note(capped: bool, sett: SolverSettings | None = None,
@@ -402,6 +446,9 @@ def _mesh_note(capped: bool, sett: SolverSettings | None = None,
             f"The automatic spanwise count was reduced from n_panels={fit.n_panels_from} to "
             f"n_panels={fit.n_panels_to} per semi-span ({fit.strips_from} to {fit.strips_to} strips "
             f"of all surfaces) {reason}.")
+        if fit.kept_surfaces:
+            names = ", ".join(repr(n) for n in fit.kept_surfaces)
+            parts.append(f"The surfaces with their own n_panels ({names}) kept their spanwise count.")
         if fit.floor_reached:
             parts.append(f"This is the spanwise floor of {fit.n_panels_to} strips per semi-span.")
         if not capped:
@@ -478,6 +525,21 @@ def _planned_panels(
     if cap and limit < MAX_AUTO_N_CHORD and n > limit:
         n = max(int(limit), 1)
     return int(strips * n)
+
+
+def _plan_panels(ac: Aircraft, sett: SolverSettings, condition: FlightCondition | None) -> int | None:
+    """Return the panel count of the solved mesh for the parallel plan, or None.
+
+    The count is that of :func:`_planned_panels` with the case condition: it
+    includes the automatic ``n_chord`` of ground effect and of a deflected
+    control (not the free-air default). The parallel plan uses it to find
+    the size class of the cases. None when the count cannot be found; the
+    plan then uses its default.
+    """
+    try:
+        return int(_planned_panels(ac, sett, condition))
+    except Exception:  # noqa: BLE001 - only an estimate for the plan
+        return None
 
 
 def _condition_value(res: Any) -> float | None:
@@ -1145,7 +1207,7 @@ def polar_sweep(
         outputs = list(run_cases(lambda a: run(a, fixed), alphas, estimate_panels(ac, fixed), "auto"))
     elif (resolve_solver_type(sett.solver_type) in ("linear", "nonlinear")
           or (resolve_solver_type(sett.solver_type) == "vlm"
-              and (size_class(estimate_panels(ac, sett)) == "small"
+              and (size_class(_plan_panels(ac, sett, make_flight_condition(c, alpha_deg=alphas[0]))) == "small"
                    or _gpu_takes(len(alphas), _planned_panels(ac, sett, make_flight_condition(c, alpha_deg=alphas[0]))))
               and _case_settings(ac, sett, strips, make_flight_condition(c, alpha_deg=alphas[0])) is sett)):
         # Lifting lines, small vortex lattices and batches that the GPU takes:
@@ -1153,7 +1215,8 @@ def polar_sweep(
         # in parallel.
         outputs = _batched_polar(ac, sett, [make_flight_condition(c, alpha_deg=a) for a in alphas], alphas)
     else:
-        outputs = run_cases(run, alphas, estimate_panels(ac, sett), "auto")
+        outputs = run_cases(run, alphas, _plan_panels(ac, sett, make_flight_condition(c, alpha_deg=alphas[0])),
+                            "auto")
 
     table: list[dict[str, Any]] = []
     ok: list[tuple[float, Any]] = []
@@ -1913,7 +1976,7 @@ def stability_derivatives(
         except GroundStrikeError as exc:
             raise GroundStrikeError(f"Case alpha={aa:g} deg, beta={bb:g} deg: {exc}") from exc
 
-    res = dict(run_cases(run, list(cases.items()), estimate_panels(ac, sett), "auto"))
+    res = dict(run_cases(run, list(cases.items()), _plan_panels(ac, case_sett, make_flight_condition(c)), "auto"))
 
     # In ground effect the static margin alone is not the static stability
     # criterion: compute the Irodov height-pitch margin of the same state,
@@ -2215,7 +2278,7 @@ def batch_evaluate(
             "fewer candidates or fewer panels (smaller n_panels or n_chord)")
     outputs = []
     if built:
-        outputs = run_cases(run, built, max((estimate_panels(b[2], b[4]) or 0) for b in built) or None, workers)
+        outputs = run_cases(run, built, max((_plan_panels(b[2], b[4], fc) or 0) for b in built) or None, workers)
 
     ranked: list[dict[str, Any]] = []
     ok_results: list[Any] = []
@@ -3505,7 +3568,11 @@ def machine_capabilities() -> dict[str, Any]:
 def tune_machine(quick: bool = True, save: bool = True) -> dict[str, Any]:
     """Measure this machine and return (and by default save) its tuning profile.
 
-    A second call while one runs is refused with ``"invalid_input"``. This
+    A second call while one runs is refused with ``"invalid_input"``. The
+    tuner sets the device, the precision and the machine profile for the
+    whole process while it measures. So a call while other tool calls run
+    in this process is refused with ``"invalid_input"``, and other tool
+    calls are refused while the tuning run is in progress. This
     tool is outside the work budget: it takes about half a minute with
     *quick* true and up to two minutes with *quick* false. Tuning changes
     the speed; the device choice can change results at the float32
@@ -3531,9 +3598,22 @@ def tune_machine(quick: bool = True, save: bool = True) -> dict[str, Any]:
     if not _TUNE_LOCK.acquire(blocking=False):
         raise InputError("a tuning run is in progress")
     try:
-        from ventorum.hardware.tuner import tune_machine as run_tuner
+        with _GATE_LOCK:
+            busy = _GATE_STATE["calls"]
+            if busy == 0:
+                _GATE_STATE["tuning"] = True
+        if busy:
+            raise InputError(
+                f"{busy} other tool call(s) run in this process. The tuner sets the device and the "
+                "machine profile for the whole process, so it does not run at the same time as a solve. "
+                "Call again when the other calls are done.")
+        try:
+            from ventorum.hardware.tuner import tune_machine as run_tuner
 
-        profile = run_tuner(quick=q, save=s, verbose=False)
+            profile = run_tuner(quick=q, save=s, verbose=False)
+        finally:
+            with _GATE_LOCK:
+                _GATE_STATE["tuning"] = False
     finally:
         _TUNE_LOCK.release()
     settings = profile.get("settings", {})

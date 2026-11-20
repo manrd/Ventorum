@@ -326,6 +326,13 @@ def plot_component_breakdown(
     Compares the relative aerodynamic contributions of each lifting surface
     (e.g., Main Wing vs V-Tail / Horizontal Tail / Canard).
 
+    The induced drag of each surface is the near-field sum of
+    ``L' alpha_i`` over its strips [N]. The sum of these near-field terms
+    is not equal to the aircraft induced drag ``result.totals.CDi``, which
+    comes from the Trefftz plane and is the reference value. The plot does
+    not rescale the surface terms. The drag bars and the figure note state
+    the near-field basis, and the note gives the Trefftz-plane total.
+
     Parameters
     ----------
     result : SolverResult
@@ -393,7 +400,8 @@ def plot_component_breakdown(
     # Subplot 1: Force Values
     width = 0.35
     ax1.bar(indices - width / 2, lifts, width=width, label="Lift $L$ [N]", color="#2563eb", edgecolor="#1e293b")
-    ax1.bar(indices + width / 2, cd_tots, width=width, label="Total Drag $D$ [N]", color="#dc2626", edgecolor="#1e293b")
+    ax1.bar(indices + width / 2, cd_tots, width=width, label="Drag $D$ [N] (near-field induced + profile)",
+            color="#dc2626", edgecolor="#1e293b")
     ax1.set_xticks(indices)
     ax1.set_xticklabels(names, fontsize=10, fontweight="bold")
     ax1.set_ylabel("Aerodynamic Force [N]", fontsize=10, fontweight="bold")
@@ -404,7 +412,8 @@ def plot_component_breakdown(
     # Subplot 2: Percentage Share
     if ax2 is not None:
         ax2.bar(indices - width / 2, lift_pcts, width=width, label="Lift Share [%]", color="#3b82f6", edgecolor="#1e293b")
-        ax2.bar(indices + width / 2, drag_pcts, width=width, label="Drag Share [%]", color="#ef4444", edgecolor="#1e293b")
+        ax2.bar(indices + width / 2, drag_pcts, width=width, label="Drag Share [%] (near field)", color="#ef4444",
+                edgecolor="#1e293b")
         ax2.set_xticks(indices)
         ax2.set_xticklabels(names, fontsize=10, fontweight="bold")
         ax2.set_ylabel("Share of Total Force [%]", fontsize=10, fontweight="bold")
@@ -413,6 +422,29 @@ def plot_component_breakdown(
         ax2.legend(loc="upper right", fontsize=9)
 
     fig.suptitle("Multi-Surface Aerodynamic Force & Share Breakdown", fontsize=13, fontweight="bold")
-    fig.tight_layout()
+    fig.text(0.5, 0.005, _breakdown_basis_note(result), ha="center", va="bottom", fontsize=8, color="#334155")
+    fig.tight_layout(rect=(0.0, 0.05, 1.0, 1.0))
     return fig
+
+
+def _breakdown_basis_note(result: SolverResult) -> str:
+    """Return the note that states the drag basis of the component breakdown.
+
+    Parameters
+    ----------
+    result : SolverResult
+        Solved result of the plot.
+
+    Returns
+    -------
+    str
+        Note text. It says that the surface induced drag is the near-field
+        sum of ``L' alpha_i`` and gives the Trefftz-plane total
+        ``result.totals.CDi`` [-] when the result has one.
+    """
+    note = "Surface induced drag: near-field sum of L' alpha_i (not rescaled)."
+    cdi = getattr(result.totals, "CDi", None)
+    if cdi is not None and np.isfinite(cdi):
+        note += f" Aircraft total induced drag: Trefftz plane, CDi = {float(cdi):.6f}."
+    return note
 

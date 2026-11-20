@@ -342,7 +342,27 @@ def plan_parallel(n_tasks: int, n_panels: int | None = None, n_jobs: int | str |
 
 
 def estimate_panels(aircraft, settings) -> int | None:
-    """Return the panel count of the vortex lattice of *aircraft* (an estimate for the parallel plan)."""
+    """Return the panel count of the vortex lattice of *aircraft* (an estimate for the parallel plan).
+
+    An automatic ``n_chord`` counts as 4, the free-air count without a
+    deflected control. In ground effect and with a deflected control the
+    solve uses more chordwise panels (at least 16 with a control), so the
+    count is too small there. A caller that knows the case condition must
+    give the plan the panel count of the solved mesh instead (the agent
+    tools use the automatic count of the condition).
+
+    Parameters
+    ----------
+    aircraft : Aircraft
+        Aircraft of the cases.
+    settings : SolverSettings
+        Solver settings of the cases.
+
+    Returns
+    -------
+    int or None
+        Panel count [-], or None when the lattice cannot be built.
+    """
     try:
         from ventorum.geometry import lattice_cache
         from ventorum.geometry.lattice import build_lattice

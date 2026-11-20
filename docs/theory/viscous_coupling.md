@@ -74,7 +74,7 @@ J = \frac{\partial \mathbf{r}}{\partial \boldsymbol{\delta}} = -\left(I - M \ope
 ### Post-stall branches and trust reporting
 
 In post-stall conditions the local section slope is not positive ($m_j \le 0$), and the coupled equations can have more than one solution:
-- Strip stall detection: a strip with $m_j \le 0$ at a converged solution gets the flag "post-stall, non-unique".
+- Strip stall detection: a strip with $m_j \le 0$ at a converged solution gets the flag "post-stall, non-unique". A strip whose angle is outside its polar table, and that did not pass an interior Cl maximum (or minimum) of the table, gets the flag "outside polar table" instead: the zero slope there comes from the end values of the table, not from a stall. An end maximum of a table is not a stall and does not set the branch starts.
 - Branch search: the solver also runs from a stalled start and from an attached start. Every other converged solution whose CL differs by more than $10^{-3}$ is reported as a branch.
 - Trust penalty: a result with more than one branch gets the trust penalty `POST_STALL_BRANCH_PENALTY`.
 - Convergence status: when the iteration reaches `max_iter` without the tolerance, the result has `converged=False`, a warning and no branch verdict.

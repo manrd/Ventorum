@@ -531,3 +531,24 @@ def test_section_at_chord_2_gives_the_unit_chord_polar_in_ground_and_with_a_flap
             for name in ("Cl_data", "Cd_data", "Cm_data"):
                 np.testing.assert_allclose(getattr(pol, name), getattr(ref, name), rtol=0.0,
                                            atol=SCALED_SECTION_TOLERANCE)
+
+
+def test_coordinate_section_paneling_rule_is_the_documented_one(fake_solver):
+    """The documented paneling rule of coordinate input (the n_panels parameter of the source).
+
+    A coordinate section with exactly n_panels + 1 points keeps its own nodes; one
+    with another point count is repaneled to n_panels panels.
+    """
+    source = Ventorum2DPolarSource(cache=False, n_panels=160)
+    given = airfoil("naca 4412", n_points=161)
+    source.polar(given.coords, 1e6, [2.0])
+    kept = fake_solver[-1]["bodies"]
+    np.testing.assert_array_equal(kept, airfoil(given.coords).to_unit_chord().coords)
+    other = airfoil("naca 4412", n_points=163)
+    source.polar(other.coords, 1e6, [2.0])
+    solved = fake_solver[-1]["bodies"]
+    assert solved.shape == (161, 2)
+    expected = airfoil(other.coords).to_unit_chord().repanel(n_panels=160).coords
+    np.testing.assert_allclose(solved, expected, rtol=0.0, atol=1e-12)
+    assert not np.allclose(solved, kept, rtol=0.0, atol=1e-6)
+    assert "n_panels + 1" in Ventorum2DPolarSource.__doc__
