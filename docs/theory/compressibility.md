@@ -53,6 +53,18 @@ b_i = -\mathbf V_\infty \cdot \mathbf n_i .
 
 The circulation vector $\mathbf \Gamma$ solves the linear system $A^* \mathbf \Gamma = \mathbf b$.
 
+### Wake direction
+
+The semi-infinite wake legs are straight lines of the geometry, so the transformation maps their direction too. Let $\hat{\mathbf w}$ be the wake direction in geometry axes: the free stream $\hat{\mathbf u}_\infty$ for `wake_alignment="freestream"`, the body x-axis $(1, 0, 0)$ for `wake_alignment="body"`. In free-stream axes, the wake direction of the transformed geometry is
+
+```{math}
+\mathbf w_\text{fs}^* = \begin{bmatrix} (\mathbf R \hat{\mathbf w})_x / \beta \\ (\mathbf R \hat{\mathbf w})_y \\ (\mathbf R \hat{\mathbf w})_z \end{bmatrix},
+\qquad
+\hat{\mathbf w}_\text{fs}^* = \frac{\mathbf w_\text{fs}^*}{\lVert \mathbf w_\text{fs}^* \rVert} .
+```
+
+A free-stream wake gives exactly $\hat{\mathbf w}_\text{fs}^* = (1, 0, 0)$. Without sideslip, the body x-axis makes the angle $-\alpha$ with the free stream, and its transformed image makes the angle $\theta^*$ with $\tan\theta^* = -\beta \tan\alpha$. The solve, the near-field velocity, the GPU pipeline and the differentiable gradient reference use this direction. The Trefftz plane and `details["wake_dir"]` use the physical direction $\hat{\mathbf w}$ of the same wake. As $M \to 0$, the result goes continuously to the incompressible result with the same wake option.
+
 ### Induced velocity and forces
 
 The near-field perturbation velocity $\mathbf v^*$ is evaluated on the transformed geometry. In free-stream axes, the physical perturbation velocity $\mathbf v_\text{fs}$ scales as
@@ -110,7 +122,7 @@ The Prandtl-Glauert rule scales every section pressure coefficient by $1/\beta$ 
 - Linearized potential flow equation: $(1 - M^2) \phi_{xx} + \phi_{yy} + \phi_{zz} = 0$.
 - Attached flow without boundary-layer separation or shock waves.
 - Free air: compressibility correction is not supported in ground effect.
-- Wake along the free stream: the stretch is along the free stream, and the wake legs follow the stretched free stream. The option `wake_alignment="body"` with `mach > 0` is refused with `ValidityError`, so that the solve, the reported wake direction and the Trefftz plane use the same wake.
+- Straight wake legs: the stretch is along the free stream, and the wake legs follow the stretched image of the wake direction (see [Wake direction](#wake-direction)), for `wake_alignment="freestream"` and for `wake_alignment="body"`.
 
 ## Envelope
 
@@ -134,6 +146,7 @@ The Prandtl-Glauert rule scales every section pressure coefficient by $1/\beta$ 
 - `ventorum.aero.loads.compute_loads_batch` and the GPU loads kernels: the section slope $a_0/\beta$ and $C_{m0}/\beta$.
 - `ventorum.core.trust`: applies Mach number penalties and envelope warnings.
 - `ventorum.solvers.core.assemble_vlm`: applies the coordinate stretch and normal vector scaling in free-stream axes.
+- `ventorum.aero.loads.stretched_wake_direction`: gives the wake direction in the stretched free-stream axes (free-stream or body-axis wake).
 - `ventorum.aero.loads._near_field_velocity`: computes transformed induced velocities and scales the streamwise component.
 - `ventorum.gpu.pipeline`: solves VLM batches with `mach > 0` on the GPU by transforming coordinates and normals per Mach group.
 - `ventorum.sensitivity.reference`: maps the lattice points and normals to the
@@ -146,6 +159,7 @@ The Prandtl-Glauert rule scales every section pressure coefficient by $1/\beta$ 
 ## Verification
 
 - Bit-for-bit equality: solves with `mach=None` and `mach=0.0` give identical results.
+- Body-axis wake: at $M = 10^{-6}$, CL, CDi and Cm agree with `mach=None` to $10^{-6}$ relative (also with sideslip). The CPU and GPU solves agree, `check_gradients` passes at $M = 0.4$, and the solve at $M = 0.5$ agrees with the incompressible solve of the hand-stretched wing within the second-order terms of the rule (`tests/test_mach_wake_alignment.py`).
 - Discrete identity: solving at Mach $M$ matches the incompressible solve on an explicitly stretched geometry.
 - Finite wing: aspect ratio 8 wing scales within 3% of the Helmbold-Diederich formula up to $M = 0.6$.
 - Gradients: `check_gradients` at Mach 0.3 and 0.6 for every supported input

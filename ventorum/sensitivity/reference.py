@@ -912,8 +912,16 @@ class TorchReference:
                 v_fs = v_s * torch.stack((inv_beta, one_pg, one_pg))
                 return v_fs @ R_pg
 
-            w_fs_pg = torch.tensor([1.0, 0.0, 0.0], dtype=self.dtype,
-                                   device=self.device).expand(n_p, 3)
+            if b["wake_body"]:
+                # Body-axis wake: the stretched image of the body x-axis,
+                # (w . d / beta, w . s, w . l) normalised (production:
+                # loads.stretched_wake_direction). It moves with alpha,
+                # beta and mach, so the chain rule includes it.
+                w_img = (R_pg @ wd) * torch.stack((inv_beta, one_pg, one_pg))
+                w_fs_pg = (w_img / torch.linalg.norm(w_img)).expand(n_p, 3)
+            else:
+                w_fs_pg = torch.tensor([1.0, 0.0, 0.0], dtype=self.dtype,
+                                       device=self.device).expand(n_p, 3)
         else:
             _to_s = None  # type: ignore[assignment]
             _n_eff = None  # type: ignore[assignment]

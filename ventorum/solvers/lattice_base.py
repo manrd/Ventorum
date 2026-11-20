@@ -238,28 +238,6 @@ def _cpu_dispatch(n_panels: int, batch: int, reason: str | None, family: str | N
     }
 
 
-def _check_wake_alignment_mach(condition: FlightCondition, settings: SolverSettings) -> None:
-    """Refuse ``wake_alignment="body"`` together with ``mach > 0``.
-
-    Reason: the compressibility correction puts the wake along the
-    stretched free stream. The solve would then not use the body-axis wake
-    that ``details["wake_dir"]`` and the Trefftz plane report, and the
-    result would jump between ``mach=None`` and a small Mach number.
-
-    Raises
-    ------
-    ventorum.core.errors.ValidityError
-        When ``settings.wake_alignment`` is ``"body"`` and ``condition.mach > 0``.
-    """
-    mach = getattr(condition, "mach", None)
-    if (mach is not None and float(mach) > 0.0
-            and str(getattr(settings, "wake_alignment", "freestream")) == "body"):
-        raise ValidityError(
-            f"wake_alignment='body' is not supported with the compressibility correction (mach={float(mach):g} "
-            "> 0): the correction needs a wake along the free stream. Use wake_alignment='freestream' or mach=None."
-        )
-
-
 def as_aircraft(geometry: Aircraft | LiftingSurface) -> Aircraft:
     """Return *geometry* as an aircraft; wrap a single surface in a new aircraft."""
     if isinstance(geometry, LiftingSurface):
@@ -544,8 +522,8 @@ class LatticeSolver(BaseSolver):
         """Return the ground plane, the smallest ground clearance [m], the notes and the wake direction of one case.
 
         Raises the errors of the validity checks (ground strike, lifting line
-        too near the ground, a Mach number at or above 0.7, a body-axis wake
-        with ``mach > 0``). Every solve path (single case, sweep, batch,
+        too near the ground, a Mach number at or above 0.7, a Mach number in
+        ground effect). Every solve path (single case, sweep, batch,
         CPU and GPU) passes here, so the flight condition of each case is
         checked here: :func:`ventorum.utils.validation.check_flight_condition_values`
         refuses for example a zero or negative ``V_inf`` with ValueError. It
@@ -564,7 +542,6 @@ class LatticeSolver(BaseSolver):
                 raise ValidityError(
                     "Compressibility correction (mach > 0) is not supported in ground effect."
                 )
-            _check_wake_alignment_mach(condition, settings)
         h_min = check_ground_clearance(lattice, ground)
         if self.collocation == "llt" and h_min is not None and c_ref:
             hc = h_min / c_ref
@@ -1147,8 +1124,6 @@ def assemble_system_matrix(
     else:
         lattice = build_lattice(aircraft, settings, collocation="llt")
     ground = ground_plane_from_condition(lattice, condition, aircraft.moment_reference()) if condition.h is not None else None
-    if condition.h is None:
-        _check_wake_alignment_mach(condition, settings)
     wd = wake_direction(condition, ground, getattr(settings, "wake_alignment", "freestream"))
     use_sym = getattr(settings, "use_symmetry", True)
     if collocation == "vlm":

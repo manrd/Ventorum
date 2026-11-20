@@ -25,7 +25,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-from ventorum.aero.loads import group_strips_by_airfoil, require_freestream_wake
+from ventorum.aero.loads import group_strips_by_airfoil, stretched_wake_direction
 from ventorum.aero.system import (
     GroundPlane,
     UnknownMap,
@@ -207,10 +207,11 @@ def assemble_vlm(
     includes the rotation about *ref_point* [m] (the origin if None):
     ``(V_inf d - Omega x (x - x_ref) + v) . n = 0``.
 
-    With ``condition.mach > 0`` the wake follows the stretched free stream.
-    A *wake_dir* that is not the free-stream direction (a body-axis wake)
-    then raises :class:`~ventorum.core.errors.ValidityError` (see
-    :func:`ventorum.aero.loads.require_freestream_wake`).
+    With ``condition.mach > 0`` the solve uses the lattice stretched along
+    the free stream (Goethert rule). The wake legs follow the stretched
+    image of *wake_dir* (see :func:`ventorum.aero.loads.stretched_wake_direction`):
+    the stretched free stream for a free-stream wake, the stretched body
+    x-axis for a body-axis wake.
     """
     if lattice.collocation != "vlm":
         raise ValueError("assemble_vlm needs a lattice built with collocation='vlm'.")
@@ -218,7 +219,6 @@ def assemble_vlm(
         check_mach_scope(condition)
         if ground is not None:
             raise ValidityError("Compressibility correction (mach > 0) is not supported in ground effect.")
-        require_freestream_wake(condition, wake_dir)
         import math
         M = float(condition.mach)
         beta = math.sqrt(1.0 - M * M)
@@ -239,7 +239,7 @@ def assemble_vlm(
         b_s = to_s(lattice.b)
         a_te_s = to_s(lattice.a_te)
         b_te_s = to_s(lattice.b_te)
-        w_fs = np.array([1.0, 0.0, 0.0])
+        w_fs = stretched_wake_direction(condition, wake_dir)
         group = _core_group(lattice)[lattice.panel_strip]
         src = HorseshoeSet(
             a=a_s, b=b_s, a_te=a_te_s, b_te=b_te_s,
@@ -303,12 +303,14 @@ def _vlm_matrix_key(condition: FlightCondition, ground: GroundPlane | None, wake
     matrix depends only on the wake direction and the ground plane; the
     body rates, the speed and the flow angles change only the right-hand
     side. With a Mach number the stretched coordinates depend on alpha,
-    beta and the Mach number. The key compares the input values exactly
-    (the bytes of the arrays), so it never joins two different matrices.
+    beta and the Mach number, and the stretched wake also on the wake
+    direction. The key compares the input values exactly (the bytes of
+    the arrays), so it never joins two different matrices.
     """
     mach = getattr(condition, "mach", None)
     if mach is not None and mach > 0.0:
-        return ("mach", float(condition.alpha), float(condition.beta), float(mach))
+        return ("mach", float(condition.alpha), float(condition.beta), float(mach),
+                np.asarray(wake_dir, dtype=float).tobytes())
     g = None if ground is None else (np.asarray(ground.normal, dtype=float).tobytes(), float(ground.offset))
     return ("wake", np.asarray(wake_dir, dtype=float).tobytes(), g)
 
