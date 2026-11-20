@@ -35,6 +35,10 @@ A profile with an unsupported schema is ignored; run `ventorum-tune` again. A pr
 
 Tuning changes the speed; the device choice can change results at the float32 round-off level (about 1e-7 to 1e-6 relative). All backends agree with the numpy reference to round-off. Check the active profile with `ventorum-tune show`. Disable it for one run with `VENTORUM_DISABLE_AUTOTUNE=1`.
 
+## Tuning inside a running program
+
+`ventorum.hardware.tuner.tune_machine` sets the device, the precision and the active profile (candidate kernel and thread settings) for the whole process while it measures, and restores them at the end. A solve in another thread of the same process during the run uses these settings. Do not call it while other solves run in the same process. The command `ventorum-tune` runs in its own process and has no such problem. The agent tool `ventorum_tune_machine` refuses a tuning run while other tool calls run in the process, and refuses other tool calls while a tuning run is in progress.
+
 ## Background
 
 For the backend precedence and the platform defaults, see [Force a kernel backend](how_to_backends). For the two levels of parallelism, see [Parallel execution and tuning](parallel.md). For the architecture, see the [software description](../design/index).

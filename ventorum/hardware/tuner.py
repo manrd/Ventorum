@@ -1052,6 +1052,19 @@ def tune_machine(quick: bool = False, save: bool = True, verbose: bool = True) -
     dict
         The profile (schema, version, fingerprint, hardware, settings and
         the raw measurements).
+
+    Notes
+    -----
+    The run sets the device (:func:`ventorum.gpu.set_device`), the
+    precision and the active machine profile (candidate kernel and thread
+    settings) for the whole process while it measures, and restores them
+    at the end. A solve in another thread of the same process during the
+    run uses these settings: it can run on another device and with other
+    kernels and threads. Do not start a tuning run while other solves run
+    in the process (for example :func:`ventorum.run_parallel_instances`).
+    The agent tool ``ventorum_tune_machine`` refuses a tuning run while
+    other tool calls run, and refuses other tool calls during the run.
+    The command ``ventorum-tune`` runs in its own process.
     """
     import warnings
 

@@ -10,6 +10,7 @@ returns an error payload.
 
 from __future__ import annotations
 
+import contextlib
 import dataclasses
 import functools
 import inspect
@@ -103,6 +104,40 @@ HEIGHT_DERIVATIVE_SOLVES = 9
 # with "a tuning run is in progress" (see tune_machine).
 _TUNE_LOCK = threading.Lock()
 
+# The tuner sets the device, the precision and the machine profile for the
+# whole process while it measures (see ventorum.hardware.tuner). A solve in
+# another thread during that time would run with the settings of the tuner.
+# So the tools refuse a tuning run while other tool calls run in this
+# process, and refuse other tool calls while a tuning run is in progress.
+# The gate counts the outermost tool call of each thread only.
+_GATE_LOCK = threading.Lock()
+_GATE_STATE = {"calls": 0, "tuning": False}
+_GATE_DEPTH = threading.local()
+#: Tools that do not take part in the gate (the tuning tool itself).
+_GATE_EXEMPT = frozenset({"ventorum_tune_machine"})
+
+
+@contextlib.contextmanager
+def _tool_gate(tool_name: str):
+    """Count one outermost tool call; refuse it while a tuning run is in progress."""
+    depth = getattr(_GATE_DEPTH, "n", 0)
+    counted = depth == 0 and tool_name not in _GATE_EXEMPT
+    if counted:
+        with _GATE_LOCK:
+            if _GATE_STATE["tuning"]:
+                raise InputError(
+                    "a tuning run is in progress: the tuner sets the device and the machine profile "
+                    "for the whole process. Call again when the tuning run is done.")
+            _GATE_STATE["calls"] += 1
+    _GATE_DEPTH.n = depth + 1
+    try:
+        yield
+    finally:
+        _GATE_DEPTH.n = depth
+        if counted:
+            with _GATE_LOCK:
+                _GATE_STATE["calls"] -= 1
+
 
 def _tool(fn: Callable[..., dict[str, Any]]) -> Callable[..., dict[str, Any]]:
     """Catch every exception of a tool and return an error payload; make the output JSON-safe."""
@@ -118,7 +153,7 @@ def _tool(fn: Callable[..., dict[str, Any]]) -> Callable[..., dict[str, Any]]:
             if not is_ac:
                 args = (args[0], None) + args[1:]
         try:
-            with active_tool_context(tool_name):
+            with _tool_gate(tool_name), active_tool_context(tool_name):
                 out = fn(*args, **kwargs)
         except Exception as exc:  # noqa: BLE001 - a tool must not raise
             return error_payload(exc)
@@ -3533,7 +3568,11 @@ def machine_capabilities() -> dict[str, Any]:
 def tune_machine(quick: bool = True, save: bool = True) -> dict[str, Any]:
     """Measure this machine and return (and by default save) its tuning profile.
 
-    A second call while one runs is refused with ``"invalid_input"``. This
+    A second call while one runs is refused with ``"invalid_input"``. The
+    tuner sets the device, the precision and the machine profile for the
+    whole process while it measures. So a call while other tool calls run
+    in this process is refused with ``"invalid_input"``, and other tool
+    calls are refused while the tuning run is in progress. This
     tool is outside the work budget: it takes about half a minute with
     *quick* true and up to two minutes with *quick* false. Tuning changes
     the speed; the device choice can change results at the float32
@@ -3559,9 +3598,22 @@ def tune_machine(quick: bool = True, save: bool = True) -> dict[str, Any]:
     if not _TUNE_LOCK.acquire(blocking=False):
         raise InputError("a tuning run is in progress")
     try:
-        from ventorum.hardware.tuner import tune_machine as run_tuner
+        with _GATE_LOCK:
+            busy = _GATE_STATE["calls"]
+            if busy == 0:
+                _GATE_STATE["tuning"] = True
+        if busy:
+            raise InputError(
+                f"{busy} other tool call(s) run in this process. The tuner sets the device and the "
+                "machine profile for the whole process, so it does not run at the same time as a solve. "
+                "Call again when the other calls are done.")
+        try:
+            from ventorum.hardware.tuner import tune_machine as run_tuner
 
-        profile = run_tuner(quick=q, save=s, verbose=False)
+            profile = run_tuner(quick=q, save=s, verbose=False)
+        finally:
+            with _GATE_LOCK:
+                _GATE_STATE["tuning"] = False
     finally:
         _TUNE_LOCK.release()
     settings = profile.get("settings", {})
