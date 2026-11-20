@@ -108,6 +108,11 @@ def mesh_probe_conditions(
     ground effect the count does not change with the attitude, so only the
     base condition is returned.
 
+    The clearance comes from the probe lattice of
+    :func:`ventorum.solvers.lattice_base.ground_probe_lattice`, the lattice
+    from which the solver takes its automatic count, so the count is that of
+    the solver. Each solve checks the strikes on its own lattice.
+
     Parameters
     ----------
     ac : Aircraft

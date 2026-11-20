@@ -106,7 +106,12 @@ class HeightDerivativesResult:
     h_m : float
         Height of the pivot above the ground in the base state [m].
     h_min_m : float
-        Smallest clearance of the geometry in the base state [m].
+        Smallest clearance of the geometry in the base state [m], on the
+        clearance probe lattice (see
+        :func:`ventorum.solvers.lattice_base.ground_probe_count`). It sets
+        the height step and the automatic chordwise count. A note gives
+        the clearance of the solve lattice when it differs by more than
+        1 %.
     b_ref : float
         Reference span [m].
     c_ref : float
@@ -362,6 +367,25 @@ def height_derivatives(
         settings = settings.clone()
         settings.n_chord = max(solver.resolve_n_chord(ac, settings, c, None, rp, fingerprint=fp) for c in conds)
     lattice = solver.build(ac, settings, condition, None, rp, fingerprint=fp)
+    # The probe above has DEFAULT_N_CHORD chordwise panels when the count is
+    # automatic (see ground_probe_count), and the solve lattice can have up
+    # to MAX_AUTO_N_CHORD. With a deflected chordwise control the two can
+    # have different hinge nodes, so their clearances differ by a few
+    # millimetres. The probe sets the count and the height step, as in the
+    # solver; the strike check of every case and the clearance note use the
+    # solve lattice.
+    pts = lattice.all_points()
+    h_solve = []
+    for c, lab in zip(conds, labels):
+        hm = float(np.min(ground_plane_from_condition(lattice, c, rp).height(pts)))
+        if hm <= 0.0:
+            what, hint = (("The base state", "Use a larger height.") if lab == "base" else
+                          (f"The case '{lab}' of the differences",
+                           "Use smaller steps (alpha_step_deg, phi_step_deg, h_step) or a larger height."))
+            raise GroundStrikeError(
+                f"{what} touches the ground on the solve lattice with {lattice.n_chord} chordwise panels "
+                f"(minimum clearance {hm:.4g} m). {hint}")
+        h_solve.append(hm)
     results = solver.solve_batch(lattice, conds, settings, ac.S_ref, b_ref, c_ref, ref_point=rp,
                                  main_surface=geo["main"], continuation=False)
     for r, c in zip(results, conds):
@@ -405,6 +429,11 @@ def height_derivatives(
         "Quasi-steady, level flight: the ground stays parallel to the free stream. Heave-rate (flight-path) "
         "effects are not modelled.",
     ]
+    if abs(h_solve[0] - h_min) > 0.01 * h_min:
+        notes.append(f"The smallest clearance of the solve lattice ({h_solve[0]:.4g} m, {lattice.n_chord} chordwise "
+                     f"panels) differs from that of the clearance probe ({h_min:.4g} m, h_min_m), which sets the "
+                     "height step and the automatic chordwise count. The hinge nodes of a deflected control "
+                     "depend on the chordwise count.")
     if irodov["x_h_m"] is None and abs(float(body[0, 3])) > _MIN_SLOPE:
         notes.append(f"The height slope CL_h = {body[0, 3]:.3g} is below the round-off noise bound of the "
                      f"{precision} solves at this height, so the height centre and the Irodov margin are not "

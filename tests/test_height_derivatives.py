@@ -345,3 +345,46 @@ def test_height_derivatives_note_when_the_height_slope_is_noise():
     res = vt.height_derivatives(_ac(), _cond(alpha_deg=4.0, h=10.0), SETT)
     assert res.irodov["verdict"] in ("stable", "unstable")
     assert not any("round-off noise bound" in n for n in res.notes)
+
+
+def _flapped_aircraft() -> vt.Aircraft:
+    flap = vt.ControlSurface("flap", 0.0, 1.0, 0.7, math.radians(15.0))
+    w = vt.LiftingSurface(name="w", semi_span=3.0, sections=[vt.WingSection(0.0, C), vt.WingSection(1.0, C)],
+                          controls=[flap])
+    return vt.Aircraft(surfaces=[w], ref_point=np.array([0.99, 0.0, 0.0]))
+
+
+def _probe_gap(ac: vt.Aircraft, cond: vt.FlightCondition, settings: vt.SolverSettings) -> float:
+    from ventorum.aero.system import ground_plane_from_condition
+    from ventorum.solvers.lattice_base import ground_probe_lattice
+
+    ac = ac.clone()
+    ac.compute_reference_values()
+    probe = ground_probe_lattice(ac, settings, chordwise=True)
+    return float(np.min(ground_plane_from_condition(probe, cond, ac.moment_reference()).height(probe.all_points())))
+
+
+def test_strike_seen_only_on_the_solve_lattice_names_the_case():
+    """A strike of the 32-panel solve lattice that the 4-panel probe does not see is named.
+
+    The automatic count uses a clearance probe with 4 chordwise panels; a
+    15 deg flap has other hinge nodes on the 32-panel solve lattice, which
+    is about 3 mm lower here. Before the fix, the solve refused the case
+    with the generic strike message of the solver.
+    """
+    ac, sett = _flapped_aircraft(), vt.SolverSettings(n_panels=12)
+    ref = _cond(alpha_deg=0.0, h=0.5)
+    h = 0.5 - _probe_gap(ac, ref, sett) + 0.0015  # the probe gap is 1.5 mm
+    with pytest.raises(GroundStrikeError, match="base state touches the ground on the solve lattice with 32"):
+        vt.height_derivatives(ac, _cond(alpha_deg=0.0, h=h), sett, alpha_step_deg=0.01, phi_step_deg=0.01)
+
+
+def test_note_when_the_solve_clearance_differs_from_the_probe():
+    """The result notes the clearance of the solve lattice when it differs from h_min_m by more than 1 %."""
+    ac, sett = _flapped_aircraft(), vt.SolverSettings(n_panels=12)
+    ref = _cond(alpha_deg=0.0, h=0.5)
+    h = 0.5 - _probe_gap(ac, ref, sett) + 0.03  # the probe gap is 30 mm: 32 chordwise panels
+    res = vt.height_derivatives(ac, _cond(alpha_deg=0.0, h=h), sett, alpha_step_deg=0.1, phi_step_deg=0.1)
+    assert res.n_chord == 32
+    assert res.h_min_m == pytest.approx(0.03, rel=1e-9)
+    assert any("smallest clearance of the solve lattice" in n for n in res.notes), res.notes

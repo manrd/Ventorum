@@ -808,6 +808,13 @@ def _fixed_n_chord(
     :func:`ventorum.ground_effect.solver.place_ground`). Thus the count of
     the case with the smallest gap is the count that
     :func:`ventorum.ground_effect.analyze_ground_effect` selects for it.
+
+    The gap comes from the clearance probe lattice (``DEFAULT_N_CHORD``
+    chordwise panels when the count is automatic), the lattice from which
+    :meth:`~ventorum.solvers.lattice_base.LatticeSolver.resolve_n_chord`
+    takes the count. Thus the count is the count of the solver, also when
+    the solve lattice has more chordwise panels than the probe. Each case
+    checks the clearance of its own solve lattice.
     """
     try:
         solver = make_solver(resolve_solver_type(settings.solver_type))
