@@ -143,6 +143,67 @@ def test_release_without_gpu_data_does_nothing():
     assert gpu.cache_bytes() == 0
 
 
+def test_out_of_memory_fallback_adds_note_and_keeps_trust_and_cl(monkeypatch):
+    """Two GPU out-of-memory errors fall back to the CPU and add a note without changing trust or CL."""
+    from ventorum.gpu import pipeline
+
+    old_dev = gpu.get_device()
+    try:
+        gpu.set_device("cpu")
+        ref_sweep = vt.analyze_sweep(_wing(), ALPHAS[:3], solver="vlm", n_panels=12, n_jobs=1)
+        ref_single = vt.analyze(_wing(), vt.FlightCondition(V_inf=30.0, alpha=np.radians(4.0)),
+                                vt.SolverSettings(solver_type="vlm", n_panels=12))
+    finally:
+        gpu.set_device(old_dev)
+
+    def raise_oom(*args, **kwargs):
+        raise RuntimeError("CUDA error: out of memory (test)")
+
+    monkeypatch.setattr(gpu, "get_device", lambda: "gpu")
+    monkeypatch.setattr(gpu, "use_gpu", lambda *args, return_reason=False, **kwargs: (
+        (True, "device setting is gpu") if return_reason else True))
+    monkeypatch.setattr(pipeline, "_solve_group", raise_oom)
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        res_sweep = vt.analyze_sweep(_wing(), ALPHAS[:3], solver="vlm", n_panels=12, n_jobs=1)
+    oom_warnings = [w for w in caught if "out of memory" in str(w.message)]
+    assert len(oom_warnings) == 1
+    assert "out of memory" in pipeline.NOTE_OUT_OF_MEMORY.lower()
+    assert "cpu" in pipeline.NOTE_OUT_OF_MEMORY.lower()
+    for r, ref_r in zip(res_sweep, ref_sweep, strict=True):
+        assert r.details["dispatch"]["device"] == "cpu"
+        assert r.details["dispatch"]["reason"] == pipeline.REASON_OUT_OF_MEMORY
+        assert pipeline.NOTE_OUT_OF_MEMORY in r.details["notes"]
+        assert pipeline.NOTE_OUT_OF_MEMORY in r.totals.trust.warnings
+        assert r.totals.trust.rating == ref_r.totals.trust.rating
+        assert r.totals.trust.score == ref_r.totals.trust.score
+        assert float(r.totals.CL).hex() == float(ref_r.totals.CL).hex()
+    assert _bits(res_sweep) == _bits(ref_sweep)
+
+    with warnings.catch_warnings(record=True) as caught_single:
+        warnings.simplefilter("always")
+        res_single = vt.analyze(_wing(), vt.FlightCondition(V_inf=30.0, alpha=np.radians(4.0)),
+                                vt.SolverSettings(solver_type="vlm", n_panels=12))
+    assert len([w for w in caught_single if "out of memory" in str(w.message)]) == 1
+    assert res_single.details["dispatch"]["device"] == "cpu"
+    assert res_single.details["dispatch"]["reason"] == pipeline.REASON_OUT_OF_MEMORY
+    assert pipeline.NOTE_OUT_OF_MEMORY in res_single.details["notes"]
+    assert pipeline.NOTE_OUT_OF_MEMORY in res_single.totals.trust.warnings
+    assert res_single.totals.trust.rating == ref_single.totals.trust.rating
+    assert res_single.totals.trust.score == ref_single.totals.trust.score
+    assert float(res_single.totals.CL).hex() == float(ref_single.totals.CL).hex()
+
+    # The CPU path after the fallback keeps the condition estimate.
+    st = vt.SolverSettings(solver_type="vlm", n_panels=12, report_condition=True)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)
+        res_cond = vt.analyze(_wing(), vt.FlightCondition(V_inf=30.0, alpha=np.radians(4.0)), st)
+    assert res_cond.details["dispatch"]["reason"] == pipeline.REASON_OUT_OF_MEMORY
+    cn = res_cond.details.get("condition_number")
+    assert cn is not None and np.isfinite(cn)
+
+
 # ---------------------------------------------------------------------------
 # GPU memory (need a CUDA GPU)
 # ---------------------------------------------------------------------------
@@ -268,7 +329,8 @@ def test_out_of_memory_twice_solves_on_the_cpu_with_one_warning(on_gpu, monkeypa
     from ventorum.gpu import pipeline
 
     gpu.set_device("cpu")
-    ref = _bits(vt.analyze_sweep(_wing(), ALPHAS, solver="vlm", n_panels=20, n_jobs=1))
+    ref_res = vt.analyze_sweep(_wing(), ALPHAS, solver="vlm", n_panels=20, n_jobs=1)
+    ref = _bits(ref_res)
     gpu.set_device("gpu")
     times = [2]
     monkeypatch.setattr(pipeline, "_solve_group", _raise_oom(times))
@@ -278,9 +340,13 @@ def test_out_of_memory_twice_solves_on_the_cpu_with_one_warning(on_gpu, monkeypa
     assert times == [0]
     oom_warnings = [w for w in caught if "out of memory" in str(w.message)]
     assert len(oom_warnings) == 1
-    for r in res:
+    for r, ref_r in zip(res, ref_res, strict=True):
         assert r.details["dispatch"]["device"] == "cpu"
         assert r.details["dispatch"]["reason"] == pipeline.REASON_OUT_OF_MEMORY
+        assert pipeline.NOTE_OUT_OF_MEMORY in r.details["notes"]
+        assert pipeline.NOTE_OUT_OF_MEMORY in r.totals.trust.warnings
+        assert r.totals.trust.rating == ref_r.totals.trust.rating
+        assert r.totals.trust.score == ref_r.totals.trust.score
     assert _bits(res) == ref
     assert gpu.cache_bytes() == 0
 

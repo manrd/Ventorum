@@ -13,6 +13,7 @@ solve gives the same result objects as a CPU solve.
 from __future__ import annotations
 
 import math
+import sys
 import time
 import warnings
 
@@ -109,9 +110,10 @@ def solve_batch(solver, lattice, conditions: list, settings, S_ref: float, b_ref
     (:func:`ventorum.gpu.memory.release`) and the solve runs once more. A
     second out-of-memory error gives one RuntimeWarning, and the function
     returns None with the reason :data:`REASON_OUT_OF_MEMORY`: the caller
-    solves the cases on the CPU, and the dispatch record of each result
-    (``details["dispatch"]["reason"]``) gives that reason. Other errors are
-    not caught. The CPU results have the bits of a CPU solve.
+    solves the cases on the CPU, gives that reason in the dispatch record
+    of each result (``details["dispatch"]["reason"]``) and adds
+    :data:`NOTE_OUT_OF_MEMORY` (:func:`add_out_of_memory_note`). Other
+    errors are not caught. The CPU results have the bits of a CPU solve.
     """
     if gpu.get_device() == "cpu":
         return (None, gpu._REASON_DEVICE_CPU) if return_reason else None
@@ -194,6 +196,29 @@ def solve_batch(solver, lattice, conditions: list, settings, S_ref: float, b_ref
 REASON_OUT_OF_MEMORY = ("gpu: out of memory twice (the second time after the release of the GPU data of the "
                         "cached lattices); solved on the cpu")
 
+#: Result note added when the GPU runs out of memory twice and the solve falls back to the CPU.
+NOTE_OUT_OF_MEMORY = (
+    "GPU out of memory: the GPU ran out of memory twice, so this case was solved on the CPU "
+    "(see details['dispatch']['reason'])."
+)
+
+
+def add_out_of_memory_note(results: list) -> list:
+    """Add :data:`NOTE_OUT_OF_MEMORY` to each result of the CPU path after two GPU out-of-memory errors.
+
+    The note goes to ``details["notes"]`` and to the warnings of the trust
+    score. The trust level, the trust score and the coefficients do not
+    change. Returns *results*.
+    """
+    for res in results:
+        notes = res.details.setdefault("notes", [])
+        if NOTE_OUT_OF_MEMORY not in notes:
+            notes.append(NOTE_OUT_OF_MEMORY)
+        trust = getattr(getattr(res, "totals", None), "trust", None)
+        if trust is not None and NOTE_OUT_OF_MEMORY not in trust.warnings:
+            trust.warnings.append(NOTE_OUT_OF_MEMORY)
+    return results
+
 
 def is_out_of_memory(exc: BaseException) -> bool:
     """Return True if *exc* is an out-of-memory error of the GPU (PyTorch, cuBLAS or cuSOLVER).
@@ -209,11 +234,11 @@ def is_out_of_memory(exc: BaseException) -> bool:
         True for ``torch.OutOfMemoryError``, and for a RuntimeError or a
         MemoryError whose message says "out of memory" or "ALLOC_FAILED".
     """
-    import torch
-
-    oom = getattr(torch, "OutOfMemoryError", None) or getattr(torch.cuda, "OutOfMemoryError", None)
-    if oom is not None and isinstance(exc, oom):
-        return True
+    torch = sys.modules.get("torch")
+    if torch is not None:
+        oom = getattr(torch, "OutOfMemoryError", None) or getattr(torch.cuda, "OutOfMemoryError", None)
+        if oom is not None and isinstance(exc, oom):
+            return True
     if isinstance(exc, (RuntimeError, MemoryError)):
         text = str(exc).lower()
         return "out of memory" in text or "alloc_failed" in text

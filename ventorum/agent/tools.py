@@ -45,6 +45,7 @@ from ventorum.agent.response import (
     sectional_payload,
     settings_payload,
     spanwise_payload,
+    stepped_trust_payload,
     trust_payload,
     warning_label,
 )
@@ -1925,7 +1926,10 @@ def stability_derivatives(
     warning when CY_beta and the CY_beta of the Trefftz plane do not agree
     (see :func:`_stability_trust`). At ``detail_level="summary"`` the
     ``trust`` output is compact: score, rating and the warnings (at most 6,
-    the count of the others in ``warnings_not_shown``).
+    the count of the others in ``warnings_not_shown``). The field
+    ``stepped_trust_min`` gives the stepped case with the lowest trust when
+    a stepped case has a lower trust than the base case (else None), and a
+    note in ``notes`` names that case.
 
     In ground effect (``flight_condition.h_m``) the tool also computes the
     Irodov height-pitch margin of the same state with
@@ -1981,6 +1985,7 @@ def stability_derivatives(
     # In ground effect the static margin alone is not the static stability
     # criterion: compute the Irodov height-pitch margin of the same state,
     # with the CG as the pivot and the same chordwise mesh.
+    hd = None
     irodov: dict[str, Any] | None = None
     if in_ground:
         s_ir = case_sett.clone()
@@ -2100,6 +2105,25 @@ def stability_derivatives(
                      "height-pitch margin (see irodov). Use the ventorum_ground_effect tool for several "
                      "heights.")
 
+    from ventorum.core.trust import TRUST_RATING_ORDER, stepped_trust_minimum, stepped_trust_note
+
+    stepped = stepped_trust_minimum(
+        [res["base"], res["a+"], res["a-"], res["b+"], res["b-"]],
+        ("base", "alpha +", "alpha -", "beta +", "beta -"),
+    )
+    if hd is not None and hd.stepped_trust_min is not None:
+        if stepped is None:
+            stepped = dict(hd.stepped_trust_min)
+        else:
+            s_key = (TRUST_RATING_ORDER.index(stepped["rating"]), float(stepped["score"]))
+            h_key = (TRUST_RATING_ORDER.index(hd.stepped_trust_min["rating"]), float(hd.stepped_trust_min["score"]))
+            if h_key < s_key:
+                stepped = dict(hd.stepped_trust_min)
+    if stepped is not None:
+        note_stepped = stepped_trust_note(stepped)
+        if note_stepped not in notes:
+            notes.append(note_stepped)
+
     derivs = by_axes["body"] if ax == "all" else by_axes[ax]
     sm_txt = f"{sm * 100:+.1f} %" if sm is not None else "n/a"
     if irodov is None:
@@ -2142,6 +2166,7 @@ def stability_derivatives(
         "condition_used": condition_payload(c),
         "settings_used": settings_used,
         "trust": _stability_trust(t, cases, CY_b, db),
+        "stepped_trust_min": stepped_trust_payload(stepped),
         "axes": ax,
     }
     if irodov is not None:
@@ -3329,7 +3354,10 @@ def derivative_matrix(
     ground effect 9 static and height solves instead of 5.
 
     With ``detail_level="full"``, ``dispatch`` is the dispatch record of
-    the base case (the solve of ``base_result``), or None.
+    the base case (the solve of ``base_result``), or None. The field
+    ``stepped_trust_min`` gives the stepped case with the lowest trust over
+    all groups when it is lower than the base case (else None), and a note
+    in ``notes`` names that case.
     """
     from ventorum.solvers.derivative_matrix import effective_groups_of, mesh_probe_conditions
 
@@ -3459,6 +3487,7 @@ def derivative_matrix(
         "diagnostics": diags,
         "notes": list(dm_res.notes),
         "trust": trust_payload(base_sol.totals.trust) if base_sol is not None else None,
+        "stepped_trust_min": stepped_trust_payload(dm_res.stepped_trust_min),
         "condition_used": condition_payload(c),
         "settings_used": settings_used,
         "device": dev,

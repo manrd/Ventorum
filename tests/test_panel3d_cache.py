@@ -588,3 +588,46 @@ def test_mesh_stats_hold_the_gradient_stencil_counts():
     assert set(stats) == {"fold_rule", "n_fold_edges", "n_ls_reduced", "n_node_fallback"}
     cached = _solve(_wing(), _cond(3.0), _settings())
     assert cached.details["mesh_stats"]["gradient_stencil"] == stats
+
+
+def test_release_gpu_removes_only_gpu_entries_and_returns_bytes():
+    """release_gpu() drops GPU entries, returns their device bytes, and keeps CPU entries."""
+    assert cache.release_gpu() == 0
+    _solve(_wing(), _cond(2.0), _settings())
+    assert cache.cache_info()["entries"] == 1
+    assert cache.release_gpu() == 0
+    assert cache.cache_info()["entries"] == 1
+
+    class _FakeGpuSolver:
+        def __init__(self):
+            self._configs = {"free": object()}
+            self._body_parts = {"B": object()}
+            self._gpu_unit_sigma = object()
+            self._full_solver = None
+
+    fake = _FakeGpuSolver()
+    entry = cache._Entry(
+        key=("fake-gpu",),
+        geom_key=("fake-geom",),
+        geometry=None,
+        solver=fake,
+        gpu=True,
+        host_bytes=64,
+        device_bytes=4096,
+    )
+    with cache._lock:
+        cache._entries[entry.key] = entry
+    assert cache.cache_info()["entries"] == 2
+    assert cache.cache_info()["gpu_entries"] == 1
+    assert cache.cache_info()["device_bytes"] == 4096
+
+    freed = cache.release_gpu()
+    assert freed == 4096
+    assert fake._configs == {}
+    assert fake._body_parts is None
+    assert fake._gpu_unit_sigma is None
+    assert entry.evicted is True
+    info = cache.cache_info()
+    assert info["entries"] == 1
+    assert info["gpu_entries"] == 0
+    assert info["device_bytes"] == 0
