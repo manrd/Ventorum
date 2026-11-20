@@ -60,7 +60,9 @@ Force rows (CL, CD, CY) are relative to the free stream in every set. In the sta
 
 ## Ground effect
 
-When `condition.h` is set and `groups` is the default, `derivative_matrix` adds the height group. The static columns come from height derivatives at fixed pivot height. Requesting the height group in free air raises a `ValueError`.
+When `condition.h` is set and `groups` is the default, `derivative_matrix` adds the height group. With the height group, the static and height columns come from `height_derivatives` at fixed pivot height, and the diagnostics give the Irodov margin. Without the height group (for example `groups=("static",)`), the static columns come from `static_derivatives` at the same state: the bank and height cases are not solved, and the diagnostics have no Irodov margin. Requesting the height group in free air raises a `ValueError`.
+
+A case of the differences that touches the ground raises `GroundStrikeError`. The steps of `derivative_matrix` are fixed; use a larger height, or call `height_derivatives` or `static_derivatives` with smaller steps.
 
 ## Diagnostics and export
 
