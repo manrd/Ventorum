@@ -24,8 +24,8 @@ Rules:
   result that keeps the lattice (``details["lattice"]``) does not keep GPU
   memory.
 * :func:`release` (also ``ventorum.gpu.release``) releases the GPU data of
-  all cached lattices and gives the cached blocks of the PyTorch memory
-  pool back to the driver.
+  all cached lattices and of the 3D panel cache, and gives the cached blocks
+  of the PyTorch memory pool back to the driver.
 
 A solve that runs while its GPU data are released keeps its own reference
 to them, so it ends normally; the memory is freed when it ends. Releasing
@@ -311,22 +311,34 @@ def trim(limit: int | None = None) -> int:
     return freed
 
 
-def release() -> int:
-    """Release the GPU data of all cached lattices and empty the PyTorch memory pool.
+def _release_panel3d() -> int:
+    """Release the GPU entries of the 3D panel cache if its module is loaded [B]."""
+    panel_cache = sys.modules.get("ventorum.panel3d.cache")
+    if panel_cache is None:
+        return 0
+    return int(panel_cache.release_gpu())
 
-    The CPU lattices stay in the lattice cache. A later GPU solve copies
-    its lattice to the GPU again; its results do not change. Without a
-    GPU, the function does nothing.
+
+def release() -> int:
+    """Release the GPU data of all cached lattices and of the 3D panel cache, and empty the PyTorch memory pool.
+
+    The CPU lattices stay in the lattice cache, and CPU-only entries stay in
+    the 3D panel cache. GPU entries of the 3D panel cache are removed because
+    they keep their matrices and factorizations on the GPU. A later GPU solve
+    builds its GPU data again; its results do not change. Without a GPU, the
+    function does nothing.
 
     Returns
     -------
     int
-        The bytes of the released GPU data [B].
+        The bytes of the released GPU data (cached lattices and 3D panel
+        cache) [B].
     """
     freed = 0
     for lat in _cached_lattices():
         size = lattice_bytes(lat)
         if drop(lat):
             freed += size
+    freed += _release_panel3d()
     _empty_pool()
     return freed

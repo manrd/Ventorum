@@ -53,8 +53,8 @@ a minor version can change a public interface.
 ### Added
 
 - GPU memory limit for the lattice cache (default a quarter of the GPU memory, `VENTORUM_GPU_CACHE_BYTES`,
-  `gpu.set_cache_limit`), `gpu.release()` and `gpu.cache_bytes()`. A solve that runs out of GPU memory falls back
-  to the CPU.
+  `gpu.set_cache_limit`), `gpu.release()` (frees both the lattice cache and the GPU entries of the 3D panel cache)
+  and `gpu.cache_bytes()`. A solve that runs out of GPU memory falls back to the CPU.
 - The kernel cache of a sweep is freed when the sweep ends; a returned result does not keep it.
 - Derivative results give `stepped_trust_min` and a note when a stepped case has a lower trust than the base case.
 

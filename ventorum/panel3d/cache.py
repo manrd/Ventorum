@@ -68,6 +68,7 @@ __all__ = [
     "find_geometry",
     "geometry_key",
     "release",
+    "release_gpu",
     "solver_bytes",
     "solver_key",
 ]
@@ -410,6 +411,8 @@ def _free(entries: list[_Entry]) -> None:
                 continue
             s._configs = {}
             s._body_parts = None
+            if hasattr(s, "_gpu_unit_sigma"):
+                s._gpu_unit_sigma = None
         solver._full_solver = None
         gpu_freed = gpu_freed or entry.gpu
     if gpu_freed:
@@ -418,6 +421,31 @@ def _free(entries: list[_Entry]) -> None:
             # Give the freed blocks back to the driver, so that the Warp
             # kernels and other programs can use them.
             torch.cuda.empty_cache()
+
+
+def release_gpu() -> int:
+    """Remove every cached panel solver that holds GPU data and free its device memory.
+
+    CPU-only entries stay in the cache. A GPU solver that a running solve uses
+    is marked evicted and freed when that solve ends.
+
+    Returns
+    -------
+    int
+        Device memory of the freed GPU solvers [B].
+    """
+    to_free: list[_Entry] = []
+    freed = 0
+    with _lock:
+        for entry in list(_entries.values()):
+            if entry.gpu or entry.device_bytes > 0:
+                _remove(entry)
+                if not entry.in_use:
+                    to_free.append(entry)
+                    freed += int(entry.device_bytes)
+    if to_free:
+        _free(to_free)
+    return freed
 
 
 def clear_cache() -> None:

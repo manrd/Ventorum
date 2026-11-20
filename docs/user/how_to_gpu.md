@@ -82,7 +82,7 @@ The GPU keeps the data of each cached lattice (the lattice arrays and the GPU ke
 * The GPU data of all cached lattices have a byte limit. The default is a quarter of the total memory of the GPU. To change it, set the environment variable `VENTORUM_GPU_CACHE_BYTES` (a number of bytes, or a number with the unit `KiB`, `MiB` or `GiB`, for example `800MiB`) or call `gpu.set_cache_limit(...)`. `gpu.get_cache_limit()` gives the limit in bytes and `gpu.cache_bytes()` the bytes that the cached lattices keep now.
 * After each GPU batch, the least recently used lattices lose their GPU data until the total is at or below the limit. The CPU lattice stays in the lattice cache. The most recent lattice loses its GPU data only when it alone is above the limit. A limit of 0 keeps no GPU data after a batch.
 * A lattice that leaves the lattice cache also loses its GPU data. Thus a result that you keep (it keeps its lattice in `details["lattice"]`) does not keep GPU memory.
-* `gpu.release()` frees the GPU data of all cached lattices and gives the cached blocks of the PyTorch memory pool back to the driver. Use it in a long-lived process (for example the MCP server) before other GPU work.
+* `gpu.release()` frees the GPU data of all cached lattices and of the 3D panel cache, and gives the cached blocks of the PyTorch memory pool back to the driver. CPU lattices and CPU-only panel entries stay cached. Use it in a long-lived process (for example the MCP server) before other GPU work.
 * When a GPU solve runs out of memory, Ventorum releases the GPU data of the cached lattices and runs the solve once more. If it runs out of memory again, the cases are solved on the CPU, with one `RuntimeWarning`. Each result then gives the reason in `details["dispatch"]["reason"]` (device `"cpu"`).
 
 ```python
@@ -92,7 +92,7 @@ from ventorum import gpu
 gpu.set_cache_limit("1GiB")   # or: export VENTORUM_GPU_CACHE_BYTES=1GiB
 results = vt.analyze_sweep(wing, alphas, solver="vlm", n_panels=250)
 print(gpu.cache_bytes() / 2**20, "MiB kept on the GPU")
-gpu.release()                 # free the GPU data of all cached lattices
+gpu.release()                 # free the GPU data of all cached lattices and of the 3D panel cache
 ```
 
 The release of GPU data never changes a result: the next GPU solve makes the same data again with the same arithmetic.
