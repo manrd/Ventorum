@@ -245,7 +245,9 @@ def test_probe_lattices_come_from_the_cache():
     st = vt.SolverSettings(solver_type="vlm")
     cond = vt.FlightCondition(V_inf=30.0, alpha=np.radians(4.0), h=1.0)
     solver = vt.VortexLatticeSolver()
-    assert solver.resolve_n_chord(ac, st, cond, None) == solver.resolve_n_chord(ac, st, cond, None)
+    # The default chordwise count of this wing is four panels (measured), the
+    # count of the lattice that estimate_panels builds below.
+    assert solver.resolve_n_chord(ac, st, cond, None) == 4
     assert estimate_panels(ac, st) == estimate_panels(ac, st) == 16 * 4
     assert len(lattice_cache._cache) == 2   # the probe (one chordwise panel) and the four-panel lattice
 

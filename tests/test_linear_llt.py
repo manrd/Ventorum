@@ -90,9 +90,11 @@ def test_linear_llt_airfoil_properties():
     # solution (measured: 0.035 % and 0.034 %).
     assert abs(res_linear.totals.CL - res_fourier.totals.CL) / res_fourier.totals.CL < 0.004
     assert abs(res_linear.totals.CDi - res_fourier.totals.CDi) / res_fourier.totals.CDi < 0.004
-    # Profile drag should be accounted for from Cd0
+    # Profile drag should be accounted for from Cd0. With a constant section
+    # Cd0 the area-weighted profile drag is Cd0 exactly (measured: relative
+    # difference 0.0), so the tolerance is round-off only.
     assert res_linear.totals.CDp is not None
-    assert np.isclose(res_linear.totals.CDp, 0.008, rtol=0.05)
+    assert np.isclose(res_linear.totals.CDp, 0.008, rtol=1e-12, atol=0.0)
 
 
 def test_linear_llt_swept_wing():
