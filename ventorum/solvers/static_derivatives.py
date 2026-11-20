@@ -25,6 +25,7 @@ from typing import Any
 import numpy as np
 
 from ventorum.core.datatypes import Aircraft, FlightCondition, LiftingSurface, SolverResult, SolverSettings
+from ventorum.core.trust import stepped_trust_minimum, stepped_trust_note
 
 __all__ = ["StaticDerivativesResult", "static_derivatives"]
 
@@ -84,6 +85,14 @@ class StaticDerivativesResult:
     case_converged : list[bool]
         Converged flag of each solved case, in the order base, alpha +, alpha -, beta +, beta -. A
         note of the result names the cases with False.
+    stepped_trust_min : dict or None
+        The stepped case with the lowest trust, when its trust rating or
+        score is lower than that of the base case: ``case`` (its name),
+        ``rating``, ``score``, ``base_rating`` and ``base_score`` (see
+        :func:`ventorum.core.trust.stepped_trust_minimum`). A note of the
+        result names the case. None when no stepped case is lower. The
+        trust of the result stays the trust of the base case
+        (``base.totals.trust``).
     """
 
     derivatives: dict[str, float]
@@ -102,6 +111,7 @@ class StaticDerivativesResult:
     static_margin: float | None = None
     neutral_point_x: float | None = None
     case_converged: list[bool] = field(default_factory=list)
+    stepped_trust_min: dict[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """Return a JSON-compatible dictionary without the result object."""
@@ -124,6 +134,7 @@ class StaticDerivativesResult:
             "static_margin": _json_float(self.static_margin),
             "neutral_point_x": _json_float(self.neutral_point_x),
             "case_converged": [bool(v) for v in self.case_converged],
+            "stepped_trust_min": None if self.stepped_trust_min is None else dict(self.stepped_trust_min),
         }
 
 
@@ -267,10 +278,14 @@ def static_derivatives(
         "Static margin and neutral point use the body-axis Cm_alpha.",
     ]
     case_converged = [bool(r.converged) for r in results]
-    failed = [lab for lab, ok in zip(("base", "alpha +", "alpha -", "beta +", "beta -"), case_converged) if not ok]
+    labels = ("base", "alpha +", "alpha -", "beta +", "beta -")
+    failed = [lab for lab, ok in zip(labels, case_converged) if not ok]
     if failed:
         notes.append("Not all cases of the differences converged ({}): the derivatives that use these cases are "
                      "not reliable.".format(", ".join(failed)))
+    stepped = stepped_trust_minimum(results, labels)
+    if stepped is not None:
+        notes.append(stepped_trust_note(stepped))
     return StaticDerivativesResult(
         derivatives=derivs,
         matrix=matrix,
@@ -288,4 +303,5 @@ def static_derivatives(
         static_margin=sm,
         neutral_point_x=x_np,
         case_converged=case_converged,
+        stepped_trust_min=stepped,
     )

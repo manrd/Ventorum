@@ -48,6 +48,7 @@ import numpy as np
 from ventorum.core.constants import MIN_CENTRE_SLOPE
 from ventorum.core.datatypes import Aircraft, FlightCondition, LiftingSurface, SolverResult, SolverSettings
 from ventorum.core.errors import GroundStrikeError
+from ventorum.core.trust import stepped_trust_minimum, stepped_trust_note
 
 __all__ = ["HeightDerivativesResult", "height_derivatives"]
 
@@ -134,6 +135,14 @@ class HeightDerivativesResult:
         Converged flag of each solved case, in the order base, alpha +,
         alpha -, beta +, beta -, phi +, phi -, h +, h -. A note of the
         result names the cases with False.
+    stepped_trust_min : dict or None
+        The stepped case with the lowest trust, when its trust rating or
+        score is lower than that of the base case: ``case`` (its name),
+        ``rating``, ``score``, ``base_rating`` and ``base_score`` (see
+        :func:`ventorum.core.trust.stepped_trust_minimum`). A note of the
+        result names the case. None when no stepped case is lower. The
+        trust of the result stays the trust of the base case
+        (``base.totals.trust``).
     """
 
     derivatives: dict[str, float]
@@ -154,6 +163,7 @@ class HeightDerivativesResult:
     n_solves: int
     notes: list[str] = field(default_factory=list)
     case_converged: list[bool] = field(default_factory=list)
+    stepped_trust_min: dict[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """Return a JSON-compatible dictionary without the result object."""
@@ -174,6 +184,7 @@ class HeightDerivativesResult:
             "n_solves": int(self.n_solves),
             "notes": list(self.notes),
             "case_converged": [bool(v) for v in self.case_converged],
+            "stepped_trust_min": None if self.stepped_trust_min is None else dict(self.stepped_trust_min),
         }
 
 
@@ -443,6 +454,9 @@ def height_derivatives(
     if failed:
         notes.append("Not all cases of the differences converged ({}): the derivatives that use these cases are "
                      "not reliable.".format(", ".join(failed)))
+    stepped = stepped_trust_minimum(results, labels)
+    if stepped is not None:
+        notes.append(stepped_trust_note(stepped))
     return HeightDerivativesResult(
         derivatives=derivs, matrix=matrix, irodov=irodov, axes=axes,
         steps={"alpha_deg": math.degrees(d_alpha), "beta_deg": math.degrees(d_beta),
@@ -452,4 +466,5 @@ def height_derivatives(
         device=devices.pop() if len(devices) == 1 else "mixed",
         precision=precision,
         n_solves=len(results), notes=notes, case_converged=case_converged,
+        stepped_trust_min=stepped,
     )

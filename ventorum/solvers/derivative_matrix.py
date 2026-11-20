@@ -31,7 +31,7 @@ from ventorum.core.axes import (
 )
 from ventorum.core.datatypes import Aircraft, FlightCondition, LiftingSurface, SolverResult, SolverSettings
 from ventorum.core.errors import GroundStrikeError
-from ventorum.core.trust import near_far_lateral_warnings
+from ventorum.core.trust import TRUST_RATING_ORDER, near_far_lateral_warnings
 from ventorum.solvers.control_derivatives import control_derivatives
 from ventorum.solvers.height_derivatives import height_derivatives
 from ventorum.solvers.rate_derivatives import rate_axes_transform, rate_derivatives
@@ -164,6 +164,18 @@ def _json_float(value: float | None) -> float | None:
     return v if math.isfinite(v) else None
 
 
+def _lowest_stepped_trust(stepped: list[tuple[str, dict[str, Any] | None]]) -> dict[str, Any] | None:
+    """Return the stepped case with the lowest trust over the groups, with its group name, or None."""
+    worst = None
+    for group, info in stepped:
+        if info is None:
+            continue
+        key = (TRUST_RATING_ORDER.index(info["rating"]), float(info["score"]))
+        if worst is None or key < worst[0]:
+            worst = (key, {**info, "group": group})
+    return None if worst is None else worst[1]
+
+
 @dataclass
 class DerivativeMatrixResult:
     """Result of :func:`derivative_matrix` for a single axis system.
@@ -205,6 +217,12 @@ class DerivativeMatrixResult:
         Notes on the methods and conventions.
     base : SolverResult or None
         Result of the base flight condition.
+    stepped_trust_min : dict or None
+        The stepped case with the lowest trust over all groups, when its
+        trust rating or score is lower than that of the base case (the
+        ``stepped_trust_min`` of the group tools; ``group`` names the
+        group). None when no stepped case is lower. The trust of the result
+        stays the trust of the base case.
     """
 
     matrix: np.ndarray
@@ -222,6 +240,7 @@ class DerivativeMatrixResult:
     diagnostics: dict[str, Any] = field(default_factory=dict)
     notes: list[str] = field(default_factory=list)
     base: SolverResult | None = None
+    stepped_trust_min: dict[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """Return a JSON-compatible dictionary of the result."""
@@ -245,6 +264,7 @@ class DerivativeMatrixResult:
             "precision": self.precision,
             "diagnostics": json_safe(self.diagnostics),
             "notes": list(self.notes),
+            "stepped_trust_min": None if self.stepped_trust_min is None else dict(self.stepped_trust_min),
         }
 
     def as_table(self) -> str:
@@ -301,6 +321,12 @@ class DerivativeMatrixAllDict(dict):
         Notes on the methods and conventions.
     base : SolverResult or None, optional
         Result of the base flight condition.
+    stepped_trust_min : dict or None, optional
+        The stepped case with the lowest trust over all groups, when its
+        trust rating or score is lower than that of the base case (the
+        ``stepped_trust_min`` of the group tools; ``group`` names the
+        group). None when no stepped case is lower. The trust of the result
+        stays the trust of the base case.
     """
 
     def __init__(
@@ -321,6 +347,7 @@ class DerivativeMatrixAllDict(dict):
         diagnostics: dict[str, Any],
         notes: list[str],
         base: SolverResult | None = None,
+        stepped_trust_min: dict[str, Any] | None = None,
     ) -> None:
         super().__init__(matrices)
         self.results = results
@@ -338,6 +365,7 @@ class DerivativeMatrixAllDict(dict):
         self.diagnostics = diagnostics
         self.notes = notes
         self.base = base
+        self.stepped_trust_min = stepped_trust_min
 
     def to_dict(self) -> dict[str, Any]:
         """Return a JSON-compatible dictionary."""
@@ -361,6 +389,7 @@ class DerivativeMatrixAllDict(dict):
             "precision": self.precision,
             "diagnostics": json_safe(self.diagnostics),
             "notes": list(self.notes),
+            "stepped_trust_min": None if self.stepped_trust_min is None else dict(self.stepped_trust_min),
         }
         return out
 
@@ -477,6 +506,7 @@ def derivative_matrix(
     precisions: set[str] = set()
     base_result: SolverResult | None = None
     drag_basis = "CDi"
+    stepped: list[tuple[str, dict[str, Any] | None]] = []
 
     # 1. Static and height groups. Without the height group, the static
     # columns come from static_derivatives also in ground effect: the bank
@@ -493,6 +523,7 @@ def derivative_matrix(
                 "height_derivatives with smaller steps.") from exc
         devices.add(h_res.device)
         precisions.add(h_res.precision)
+        stepped.append(("height", h_res.stepped_trust_min))
         base_result = h_res.base
         drag_basis = h_res.drag_basis
         notes.extend(h_res.notes)
@@ -535,6 +566,7 @@ def derivative_matrix(
             s_res = static_derivatives(ac, condition, settings, axes="body")
             devices.add(s_res.device)
             precisions.add(s_res.precision)
+            stepped.append(("static", s_res.stepped_trust_min))
             base_result = s_res.base
             drag_basis = s_res.drag_basis
             notes.extend(s_res.notes)
@@ -557,6 +589,7 @@ def derivative_matrix(
         c_res = control_derivatives(ac, condition, settings, controls=ctrl_names, axes="body", hinge_alpha=False)
         devices.add(c_res.device)
         precisions.add(c_res.precision)
+        stepped.append(("control", c_res.stepped_trust_min))
         if base_result is None:
             base_result = c_res.base
         drag_basis = c_res.drag_basis
@@ -597,6 +630,7 @@ def derivative_matrix(
         r_res = rate_derivatives(ac, condition, settings, axes="body")
         devices.add(r_res.device)
         precisions.add(r_res.precision)
+        stepped.append(("rate", r_res.stepped_trust_min))
         if base_result is None:
             base_result = r_res.base
         drag_basis = r_res.drag_basis
@@ -614,6 +648,7 @@ def derivative_matrix(
     else:
         matrix_body = np.empty((6, 0), dtype=float)
 
+    stepped_min = _lowest_stepped_trust(stepped)
     dev_str = devices.pop() if len(devices) == 1 else "mixed"
     prec_str = precisions.pop() if len(precisions) == 1 else "mixed"
 
@@ -667,6 +702,7 @@ def derivative_matrix(
                 diagnostics=dict(diagnostics),
                 notes=list(dict.fromkeys(notes)),
                 base=base_result,
+                stepped_trust_min=stepped_min,
             )
             for name in ("body", "stability", "wind")
         }
@@ -686,6 +722,7 @@ def derivative_matrix(
             diagnostics=diagnostics,
             notes=list(dict.fromkeys(notes)),
             base=base_result,
+            stepped_trust_min=stepped_min,
         )
 
     mat_out = _matrix_in(axes)
@@ -705,4 +742,5 @@ def derivative_matrix(
         diagnostics=diagnostics,
         notes=list(dict.fromkeys(notes)),
         base=base_result,
+        stepped_trust_min=stepped_min,
     )

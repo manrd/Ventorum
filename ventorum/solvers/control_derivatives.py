@@ -31,6 +31,7 @@ import numpy as np
 
 from ventorum.aero.hinge import HingeMoment, hinge_moments
 from ventorum.core.datatypes import Aircraft, FlightCondition, LiftingSurface, SolverResult, SolverSettings
+from ventorum.core.trust import stepped_trust_minimum, stepped_trust_note
 
 __all__ = ["ControlDerivatives", "HingeMomentDerivatives", "ControlDerivativesResult", "control_derivatives"]
 
@@ -154,6 +155,14 @@ class ControlDerivativesResult:
         Number of solves done.
     notes : list[str]
         Notes on the method and its limits.
+    stepped_trust_min : dict or None
+        The stepped case with the lowest trust, when its trust rating or
+        score is lower than that of the base case: ``case`` (its name),
+        ``rating``, ``score``, ``base_rating`` and ``base_score`` (see
+        :func:`ventorum.core.trust.stepped_trust_minimum`). A note of the
+        result names the case. None when no stepped case is lower. The
+        trust of the result stays the trust of the base case
+        (``base.totals.trust``).
     """
 
     derivatives: dict[str, ControlDerivatives]
@@ -165,6 +174,7 @@ class ControlDerivativesResult:
     precision: str
     n_solves: int
     notes: list[str] = field(default_factory=list)
+    stepped_trust_min: dict[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """Return a JSON-compatible dictionary without the result object."""
@@ -177,6 +187,7 @@ class ControlDerivativesResult:
             "precision": self.precision,
             "n_solves": int(self.n_solves),
             "notes": list(self.notes),
+            "stepped_trust_min": None if self.stepped_trust_min is None else dict(self.stepped_trust_min),
         }
 
 
@@ -405,13 +416,15 @@ def control_derivatives(
     ])
 
     results: list[SolverResult] = []
+    labels: list[str] = []
 
-    def solve(aircraft: Aircraft, cond: FlightCondition) -> SolverResult:
+    def solve(aircraft: Aircraft, cond: FlightCondition, label: str) -> SolverResult:
         r = analyze(aircraft, cond, settings)
         results.append(r)
+        labels.append(label)
         return r
 
-    base = solve(ac, condition)
+    base = solve(ac, condition, "base")
     use_cd_total = base.totals.CD_total is not None
     rot = moment_axes_matrix(float(condition.alpha), float(condition.beta),
                              to=axes, from_axes="body",
@@ -441,15 +454,15 @@ def control_derivatives(
         defl = _deflections(ac, name)
         scheme, shifts = plans[name]
         if scheme == "central":
-            r_p = solve(_shifted(ac, name, shifts[0]), condition)
-            r_m = solve(_shifted(ac, name, shifts[1]), condition)
+            r_p = solve(_shifted(ac, name, shifts[0]), condition, f"{name} +")
+            r_m = solve(_shifted(ac, name, shifts[1]), condition, f"{name} -")
             dc = (coeffs(r_p) - coeffs(r_m)) / (2.0 * h)
             chp, chm = hinge_ch(r_p), hinge_ch(r_m)
             dch = {k: (chp[k] - chm[k]) / (2.0 * h) for k in keys}
         else:
             sgn = 1.0 if scheme == "forward" else -1.0
-            r_1 = solve(_shifted(ac, name, shifts[0]), condition)
-            r_2 = solve(_shifted(ac, name, shifts[1]), condition)
+            r_1 = solve(_shifted(ac, name, shifts[0]), condition, f"{name} {scheme} 1")
+            r_2 = solve(_shifted(ac, name, shifts[1]), condition, f"{name} {scheme} 2")
             dc = sgn * (-3.0 * c0 + 4.0 * coeffs(r_1) - coeffs(r_2)) / (2.0 * h)
             ch1, ch2 = hinge_ch(r_1), hinge_ch(r_2)
             dch = {k: sgn * (-3.0 * ch0[k] + 4.0 * ch1[k] - ch2[k]) / (2.0 * h) for k in keys}
@@ -463,8 +476,8 @@ def control_derivatives(
 
     ch_alpha = {k: float("nan") for k in keys}
     if hinge_alpha:
-        r_ap = solve(ac, _with_alpha(condition, float(condition.alpha) + da))
-        r_am = solve(ac, _with_alpha(condition, float(condition.alpha) - da))
+        r_ap = solve(ac, _with_alpha(condition, float(condition.alpha) + da), "alpha +")
+        r_am = solve(ac, _with_alpha(condition, float(condition.alpha) - da), "alpha -")
         chp, chm = hinge_ch(r_ap), hinge_ch(r_am)
         ch_alpha = {k: (chp[k] - chm[k]) / (2.0 * da) for k in keys}
 
@@ -492,12 +505,15 @@ def control_derivatives(
     if "section" in modes:
         notes.append("Section hinge moments use thin-airfoil theory of a plain flap on a flat plate: no camber "
                      "term, no gap, attached flow only.")
+    stepped = stepped_trust_minimum(results, labels)
+    if stepped is not None:
+        notes.append(stepped_trust_note(stepped))
     return ControlDerivativesResult(
         derivatives=derivs, hinge=hinge, axes=axes, drag_basis="CD_total" if use_cd_total else "CDi",
         base=base,
         device=devices.pop() if len(devices) == 1 else "mixed",
         precision=precisions.pop() if len(precisions) == 1 else "mixed",
-        n_solves=len(results), notes=notes,
+        n_solves=len(results), notes=notes, stepped_trust_min=stepped,
     )
 
 
