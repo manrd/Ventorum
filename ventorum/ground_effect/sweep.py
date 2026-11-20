@@ -251,6 +251,18 @@ class GroundEffectSweepResult:
               free-stream direction; the aircraft keeps its body axes, and
               the ``height_ref`` point keeps the grid height. A
               bank-restoring moment has Cl_phi < 0.
+
+        Notes
+        -----
+        ``CL_alpha``, ``Cm_alpha`` and the bank derivatives are least-squares
+        line fits over the window of the grid: secant slopes, not the local
+        slopes at alpha = 0 or phi = 0. Near the ground the curves are not
+        linear (the gap of a tip or of the trailing edge changes with the
+        angle), so a fit can differ from the local slope by about 10 %
+        at h/c 0.5. ``x_alpha`` uses the local ``numpy.gradient`` along the
+        alpha grid, so ``x_ac`` and ``x_alpha`` of one result can differ
+        also for ``height_ref='ref'``. For the local slopes of one state,
+        use :func:`ventorum.height_derivatives` or a grid with small angles.
         """
         out: dict[str, Any] = {}
         h_vals = self.heights
