@@ -4,17 +4,24 @@
 Usage
 -----
 python validation/gpu_gate.py <log.md> [--float64] [--example-timeout SECONDS]
-[--allow-no-gpu] [--dry-run]
+[--pytest-timeout SECONDS] [--allow-no-gpu] [--dry-run]
 
 The steps run in this order: an environment check
-(``ventorum.gpu.available()``), all GPU tests (``python -m pytest -q -m
-gpu``), and every ``examples/[0-9]*.py`` with ``VENTORUM_DEVICE=gpu``.
+(``ventorum.gpu.available()``), all GPU tests (``python -m pytest -q -rs -m
+gpu``, with a timeout of 3600 s unless ``--pytest-timeout`` says
+otherwise), and every ``examples/[0-9]*.py`` with ``VENTORUM_DEVICE=gpu``.
 With ``--float64`` the examples run a second time with
 ``VENTORUM_GPU_PRECISION=float64``. Each step runs in a subprocess with
 ``sys.executable``, so a crash in one step does not stop the script.
 
+A skipped GPU test is not a pass: a test that skips did not run on the
+GPU. When the pytest step exits with code 0 but reports skipped tests,
+its result is "skip", the log lists the skip reasons, and the gate is not
+complete GPU evidence.
+
 Exit codes: 0 when every step passes, 1 when a step fails or times out,
-2 when there is no GPU and ``--allow-no-gpu`` is not given. With
+2 when there is no GPU and ``--allow-no-gpu`` is not given, 3 when no step
+fails but one or more steps have skipped tests. With
 ``--dry-run`` the script prints the commands in order and exits 0
 without running them.
 
@@ -23,7 +30,7 @@ and the git commit (short hash), the Python, NumPy, Warp and PyTorch
 versions (or "not installed"), the GPU model name and the CUDA version
 when they are known, one table row per step (name, result, time [s],
 last output line), and a final "GPU gate: PASS" or "GPU gate: FAIL (n
-failures)" line. It holds no host name, no user name and no home path;
+failures)" or "GPU gate: INCOMPLETE (n steps with skipped tests)" line. It holds no host name, no user name and no home path;
 paths are relative to the repository root.
 
 Testing only: when the environment variable
@@ -44,7 +51,8 @@ import platform
 import subprocess
 import sys
 import time
-from dataclasses import dataclass
+import re
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from ventorum import gpu
@@ -54,6 +62,18 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 
 #: Timeout [s] of each example step, unless --example-timeout says otherwise.
 EXAMPLE_TIMEOUT_S = 600.0
+
+#: Timeout [s] of the pytest step, unless --pytest-timeout says otherwise.
+PYTEST_TIMEOUT_S = 3600.0
+
+#: Exit code when no step fails but one or more steps have skipped tests.
+EXIT_SKIPPED = 3
+
+#: Count of skipped tests in the pytest summary line.
+SKIPPED_RE = re.compile(r"\b(\d+) skipped\b")
+
+#: Most skip reasons kept in the log.
+SKIP_REASONS_MAX = 50
 
 #: Testing only: "1" forces the no-GPU path (see the module docstring).
 FORCE_NO_GPU_ENV = "VENTORUM_GPU_GATE_FORCE_NO_GPU"
@@ -73,16 +93,22 @@ class Step:
     argv: list[str]
     env: dict[str, str]
     timeout: float | None
+    #: True for a pytest step: its skipped tests are counted.
+    counts_skips: bool = False
 
 
 @dataclass
 class StepResult:
-    """Outcome of one step: pass, fail or timeout, with its run time."""
+    """Outcome of one step: pass, skip, fail or timeout, with its run time."""
 
     name: str
     status: str
     seconds: float
     last_line: str
+    #: Number of skipped tests (pytest step only).
+    skipped: int = 0
+    #: Skip reasons as pytest prints them with ``-rs``.
+    skip_reasons: list[str] = field(default_factory=list)
 
 
 def list_examples() -> list[str]:
@@ -91,14 +117,19 @@ def list_examples() -> list[str]:
     return [f"examples/{name}" for name in names]
 
 
-def build_plan(include_float64: bool, example_timeout: float = EXAMPLE_TIMEOUT_S) -> list[Step]:
+def build_plan(
+    include_float64: bool,
+    example_timeout: float = EXAMPLE_TIMEOUT_S,
+    pytest_timeout: float = PYTEST_TIMEOUT_S,
+) -> list[Step]:
     """Return the steps of the gate in run order: pytest, examples, float64 examples."""
     plan = [
         Step(
             name="pytest -m gpu",
-            argv=[sys.executable, "-m", "pytest", "-q", "-m", "gpu"],
+            argv=[sys.executable, "-m", "pytest", "-q", "-rs", "-m", "gpu"],
             env={"MPLBACKEND": "Agg"},
-            timeout=None,
+            timeout=pytest_timeout,
+            counts_skips=True,
         )
     ]
     for relative in list_examples():
@@ -149,6 +180,29 @@ def _last_line(text: str) -> str:
     return last[:LAST_LINE_MAX]
 
 
+def count_skips(text: str) -> tuple[int, list[str]]:
+    """Return the number of skipped tests and the skip reasons in pytest output.
+
+    Parameters
+    ----------
+    text : str
+        Standard output of ``pytest -q -rs``.
+
+    Returns
+    -------
+    tuple of (int, list of str)
+        The skip count of the last summary line that has one, and the
+        "SKIPPED" lines of the short test summary, cleaned for the log.
+    """
+    skipped = 0
+    for line in text.splitlines():
+        match = SKIPPED_RE.search(line)
+        if match:
+            skipped = int(match.group(1))
+    reasons = [_last_line(line) for line in text.splitlines() if line.strip().startswith("SKIPPED")]
+    return skipped, reasons[:SKIP_REASONS_MAX]
+
+
 def run_step(step: Step) -> StepResult:
     """Run *step* in a subprocess and return its result."""
     env = dict(os.environ)
@@ -172,7 +226,12 @@ def run_step(step: Step) -> StepResult:
     seconds = time.perf_counter() - start
     status = "pass" if proc.returncode == 0 else "fail"
     output = proc.stdout if proc.stdout and proc.stdout.strip() else proc.stderr
-    return StepResult(step.name, status, seconds, _last_line(output or "-"))
+    skipped, reasons = (0, [])
+    if step.counts_skips:
+        skipped, reasons = count_skips(proc.stdout or "")
+        if status == "pass" and skipped > 0:
+            status = "skip"
+    return StepResult(step.name, status, seconds, _last_line(output or "-"), skipped, reasons)
 
 
 def _package_version(distribution: str, module: str) -> str:
@@ -267,11 +326,22 @@ def render_log(results: list[StepResult], notices: list[str]) -> str:
     for result in results:
         lines.append(f"| {result.name} | {result.status} | {result.seconds:.1f} | {result.last_line} |")
     lines.append("")
-    failures = sum(1 for result in results if result.status != "pass")
-    if failures == 0:
-        lines.append("GPU gate: PASS")
-    else:
+    for result in results:
+        if result.status != "skip" and result.skipped == 0:
+            continue
+        lines.append(
+            f"Skipped tests in step '{result.name}': {result.skipped} (a skipped test is not GPU evidence)"
+        )
+        lines += [f"- {reason}" for reason in result.skip_reasons]
+        lines.append("")
+    failures = sum(1 for result in results if result.status not in ("pass", "skip"))
+    skips = sum(1 for result in results if result.status == "skip")
+    if failures > 0:
         lines.append(f"GPU gate: FAIL ({failures} failures)")
+    elif skips > 0:
+        lines.append(f"GPU gate: INCOMPLETE ({skips} steps with skipped tests)")
+    else:
+        lines.append("GPU gate: PASS")
     return "\n".join(lines) + "\n"
 
 
@@ -287,6 +357,9 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
         "--example-timeout", type=float, default=EXAMPLE_TIMEOUT_S, help="timeout [s] of each example"
     )
     parser.add_argument(
+        "--pytest-timeout", type=float, default=PYTEST_TIMEOUT_S, help="timeout [s] of the pytest step"
+    )
+    parser.add_argument(
         "--allow-no-gpu", action="store_true", help="run the steps even without a GPU (not GPU evidence)"
     )
     parser.add_argument(
@@ -297,13 +370,15 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
         parser.error("the log path <log.md> is required without --dry-run.")
     if args.example_timeout is not None and args.example_timeout <= 0:
         parser.error("--example-timeout must be positive.")
+    if args.pytest_timeout is not None and args.pytest_timeout <= 0:
+        parser.error("--pytest-timeout must be positive.")
     return args
 
 
 def main(argv: list[str] | None = None, runner=None) -> int:
-    """Run the gate and return its exit code (0 pass, 1 failure, 2 no GPU)."""
+    """Run the gate and return its exit code (0 pass, 1 failure, 2 no GPU, 3 skipped tests)."""
     args = parse_args(argv)
-    plan = build_plan(args.float64, args.example_timeout)
+    plan = build_plan(args.float64, args.example_timeout, args.pytest_timeout)
     if args.dry_run:
         for step in plan:
             print(describe(step))
@@ -324,7 +399,11 @@ def main(argv: list[str] | None = None, runner=None) -> int:
         notices.append(NO_GPU_NOTICE)
     results = [run(step) for step in plan]
     Path(args.log).write_text(render_log(results, notices), encoding="utf-8")
-    return 0 if all(result.status == "pass" for result in results) else 1
+    if any(result.status not in ("pass", "skip") for result in results):
+        return 1
+    if any(result.status == "skip" for result in results):
+        return EXIT_SKIPPED
+    return 0
 
 
 if __name__ == "__main__":
