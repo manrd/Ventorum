@@ -353,3 +353,29 @@ def test_error_bars_floor_is_the_smallest_fine_level(monkeypatch):
     assert p["levels"][0] == 16, p["levels"]
     note = p["settings_used"]["mesh_note"]
     assert "floor" in note and "n_chord was reduced" in note, note
+
+
+def test_fit_reduces_the_automatic_surfaces_when_another_surface_sets_its_count(small_limits):
+    """Regression: the span fit was off when any surface set n_panels.
+
+    A surface with its own n_panels made the whole call fixed, also for the
+    surfaces with the default count, so a call above the limits was capped in
+    n_chord or refused. Now the surfaces without their own count are fitted;
+    the surface count of the caller is kept, and the note says so.
+    """
+    wing = {"name": "wing", **FLAP_WING}
+    tail = {"name": "tail", "span_m": 3.0, "chord_m": 0.5, "position_m": [4.0, 0.0, 0.0], "n_panels": 6}
+    ac = tools.build_aircraft_from_spec(aircraft={"surfaces": [wing, tail]})
+    assert tools._span_is_automatic(ac, None)
+    assert not tools._span_is_automatic(ac, {"n_panels": 80})
+    both = tools.build_aircraft_from_spec(aircraft={"surfaces": [{**wing, "n_panels": 80}, tail]})
+    assert not tools._span_is_automatic(both, None)
+    p = wing_analysis(aircraft={"surfaces": [wing, tail]}, flight_condition=dict(FC), detail_level="summary")
+    assert p["status"] == "success", p
+    su = p["settings_used"]
+    # Wing 2 n strips and tail 12 strips, 16 chordwise: (2 n + 12) 16 <= 1000 gives n = 25.
+    assert su["n_panels"] == 25, su
+    assert su["n_chord_used"] == CONTROL_MIN_AUTO_N_CHORD, su
+    note = su["mesh_note"]
+    assert "n_panels=80 to n_panels=25" in note and "172 to 62 strips" in note, note
+    assert "own n_panels ('tail') kept" in note, note

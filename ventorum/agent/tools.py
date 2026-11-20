@@ -259,6 +259,9 @@ class _SpanFit:
     floor_reached : bool
         True if the spanwise floor was reached and the call still does not
         fit both limits there.
+    kept_surfaces : tuple of str
+        Names of the surfaces with their own ``n_panels``. The fit does not
+        change their count.
     """
 
     n_panels_from: int
@@ -269,14 +272,17 @@ class _SpanFit:
     panels_from: int
     work_from: int
     floor_reached: bool
+    kept_surfaces: tuple[str, ...] = ()
 
 
 def _span_is_automatic(ac: Aircraft, settings: Any) -> bool:
-    """Return True if the caller set no spanwise count.
+    """Return True if at least one surface uses the automatic spanwise count.
 
     The spanwise count is automatic when ``settings`` has no ``n_panels``
-    key and no surface has its own ``n_panels``. :func:`_fit_span` never
-    changes a count that the caller set. A surface with
+    key and at least one surface has no ``n_panels`` of its own. Such a
+    surface uses the count of the settings, which :func:`_fit_span` can
+    reduce. A surface with its own ``n_panels`` keeps it: :func:`_fit_span`
+    never changes a count that the caller set. A surface with
     ``node_displacements`` also fixes the count: the displacements belong
     to the spanwise stations of the mesh that the caller got from
     ``ventorum_undeformed_nodes``, and a fitted mesh would not match them.
@@ -285,7 +291,7 @@ def _span_is_automatic(ac: Aircraft, settings: Any) -> bool:
         return False
     if any(getattr(s, "node_displacements", None) is not None for s in ac.surfaces):
         return False
-    return all(getattr(s, "n_panels", None) is None for s in ac.surfaces)
+    return any(getattr(s, "n_panels", None) is None for s in ac.surfaces)
 
 
 def _largest_panels(ac: Aircraft, sett: SolverSettings, cases: list[tuple[Any, Any, Any]]) -> int:
@@ -311,9 +317,10 @@ def _fit_span(
     and the call is above :data:`MAX_TOTAL_PANELS` (the largest planned
     mesh of the cases, with the full automatic n_chord) or above
     :data:`MAX_CALL_WORK` (the work estimate of the tool), the spanwise
-    panels per semi-span of all surfaces are reduced by the same factor
-    (all surfaces use the one settings count), to the largest count that
-    fits both limits. The chordwise count does not change. All the cases
+    panels per semi-span of the surfaces without their own ``n_panels``
+    are reduced (these surfaces use the one settings count), to the
+    largest count that fits both limits. A surface with its own
+    ``n_panels`` keeps its count. The chordwise count does not change. All the cases
     of the call use this one spanwise count. The count does not go below
     *floor*. At the floor, the cap of :func:`_case_settings` can reduce an
     automatic n_chord, and the work check can refuse the call, as before.
@@ -373,9 +380,11 @@ def _fit_span(
         best = with_n(lo)
     strips_to = _strip_count(ac, best)
     n_chord = int(panels(best)) // max(strips_to, 1) if _uses_lattice_chord(ac, best) else None
+    kept = tuple(str(getattr(s, "name", "")) for s in ac.surfaces if getattr(s, "n_panels", None) is not None)
     return best, _SpanFit(
         n_panels_from=n0, n_panels_to=int(best.n_panels), strips_from=_strip_count(ac, sett),
-        strips_to=strips_to, n_chord=n_chord, panels_from=p0, work_from=w0, floor_reached=floor_reached)
+        strips_to=strips_to, n_chord=n_chord, panels_from=p0, work_from=w0, floor_reached=floor_reached,
+        kept_surfaces=kept)
 
 
 def _mesh_note(capped: bool, sett: SolverSettings | None = None,
@@ -402,6 +411,9 @@ def _mesh_note(capped: bool, sett: SolverSettings | None = None,
             f"The automatic spanwise count was reduced from n_panels={fit.n_panels_from} to "
             f"n_panels={fit.n_panels_to} per semi-span ({fit.strips_from} to {fit.strips_to} strips "
             f"of all surfaces) {reason}.")
+        if fit.kept_surfaces:
+            names = ", ".join(repr(n) for n in fit.kept_surfaces)
+            parts.append(f"The surfaces with their own n_panels ({names}) kept their spanwise count.")
         if fit.floor_reached:
             parts.append(f"This is the spanwise floor of {fit.n_panels_to} strips per semi-span.")
         if not capped:
