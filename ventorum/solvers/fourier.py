@@ -393,10 +393,14 @@ class FourierSolver(BaseSolver):
         V = condition.V_inf
         rho = condition.rho
         S, c_ref = aircraft.S_ref, aircraft.c_ref
+        # CL and CDi need the aspect ratio of the wing span b. The reported
+        # aspect ratio and span efficiency use b_ref, as in the lattice
+        # solvers, so that the values of the solvers can be compared.
         AR = b * b / S
         CL = float(np.pi * AR * A[0])
         CDi = float(np.pi * AR * np.sum(n_idx * A ** 2))
-        e = CL ** 2 / (np.pi * AR * CDi) if CDi > 1e-14 else float("nan")
+        AR_ref = float(aircraft.b_ref) ** 2 / S
+        e = CL ** 2 / (np.pi * AR_ref * CDi) if CDi > 1e-14 else float("nan")
 
         # Spanwise output at the collocation stations (left tip to right tip).
         sta = self._stations(b, theta, st, sin_n_theta, theta_q) if stations is None else stations
@@ -437,7 +441,7 @@ class FourierSolver(BaseSolver):
 
         totals = IntegratedResult(
             CL=CL, CDi=CDi, CDp=CDp, CD_total=CD_total if has_profile else None,
-            e=e, AR=AR, Cm=Cm,
+            e=e, AR=AR_ref, Cm=Cm,
         )
         notes = _unused_shape_notes(aircraft) + fourier_convergence_notes(surf, AR, N)
         # The direct solve has no tolerance: it counts as converged when its

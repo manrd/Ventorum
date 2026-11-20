@@ -39,10 +39,10 @@ The integrated results follow from the orthogonality of the sine functions (Glau
 ```{math}
 C_L = \pi\, AR\, A_1, \qquad
 C_{Di} = \pi\, AR \sum_{n=1}^{N} n A_n^2, \qquad
-e = \frac{C_L^2}{\pi\, AR\, C_{Di}},
+e = \frac{C_L^2}{\pi\, AR_\text{ref}\, C_{Di}},
 ```
 
-with $AR = b^2/S_\text{ref}$. The section results at each station are $C_l = 2\Gamma/(V_\infty c)$, the induced drag coefficient $C_{d,i} = C_l\,\alpha_i$ and the local lift $\rho V_\infty \Gamma$ [N/m].
+with $AR = b^2/S_\text{ref}$, where $b$ is the span of the wing. The reported aspect ratio and the span efficiency $e$ use the reference span: $AR_\text{ref} = b_\text{ref}^2/S_\text{ref}$, as in the lattice solvers. Thus the values of the solvers can be compared when the user gives a $b_\text{ref}$ that is not the span. With the automatic reference values $b_\text{ref} = b$, and the two aspect ratios are equal. The section results at each station are $C_l = 2\Gamma/(V_\infty c)$, the induced drag coefficient $C_{d,i} = C_l\,\alpha_i$ and the local lift $\rho V_\infty \Gamma$ [N/m].
 
 The profile drag uses the section value $C_{d0}$: $C_{Dp} = \frac{1}{S_\text{ref}} \int_{-b/2}^{b/2} c\, C_{d0}\, dy$.
 
