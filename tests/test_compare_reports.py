@@ -7,9 +7,12 @@ round-off differences in numbers, and reject a changed result or a changed
 text. The tests run the script as a process and check the exit status.
 """
 
+import re
 import subprocess
 import sys
 from pathlib import Path
+
+import pytest
 
 SCRIPT = Path(__file__).resolve().parents[1] / "validation" / "compare_reports.py"
 
@@ -68,8 +71,8 @@ def test_missing_line_fails(tmp_path):
 
 
 def test_round_off_change_passes(tmp_path):
-    # The absolute tolerance 1e-12 catches the change of the tiny number, and
-    # the relative tolerance 1e-9 catches the change of the large number.
+    # The residual rule accepts the change of the tiny number, and the
+    # relative tolerance 1e-9 accepts the change of the large number.
     changed = CONTENT.replace(
         "1000000.0000001 and 1.2345678901234567e-16",
         "1000000.0000002 and 1.2345678901234569e-16",
@@ -93,3 +96,49 @@ def test_changed_environment_line_passes(tmp_path):
 def test_identical_reports_pass(tmp_path):
     proc = _compare(tmp_path, _report(), _report())
     assert proc.returncode == 0, proc.stdout
+
+
+RESIDUALS = (
+    "Largest |v.n| / |v| = 6.2e-16.\n"
+    "| vlm | -5.8e-18 | -0.093000 | 1.4e-17 |\n"
+    "| linear | 0.0e+00 | -0.093000 | 1.4e-17 |\n"
+    "\n"
+)
+
+
+@pytest.mark.parametrize("old, new", [
+    ("6.2e-16", "9.0e-13"),            # 1450 times larger, still below 1e-12
+    ("6.2e-16", "1.0e-13"),            # more than 100 times larger
+    ("| vlm | -5.8e-18 | -0.093000 | 1.4e-17 |", "| vlm | -5.8e-18 | -0.093000 | 9.0e-13 |"),
+    ("| linear | 0.0e+00 |", "| linear | 9.0e-13 |"),
+    ("| linear | 0.0e+00 |", "| linear | 2.0e-15 |"),
+])
+def test_grown_residual_fails(tmp_path, old, new):
+    """A residual that grows past round-off fails, also when it stays below 1e-12."""
+    proc = _compare(tmp_path, _report(RESIDUALS), _report(RESIDUALS.replace(old, new, 1)))
+    assert proc.returncode == 1, proc.stdout
+
+
+@pytest.mark.parametrize("old, new", [
+    ("6.2e-16", "4.4e-16"),            # round-off noise of another machine
+    ("6.2e-16", "1.1e-15"),            # less than 100 times larger
+    ("| vlm | -5.8e-18 |", "| vlm | 2.9e-17 |"),
+    ("| linear | 0.0e+00 |", "| linear | 8.9e-16 |"),
+])
+def test_round_off_residual_change_passes(tmp_path, old, new):
+    """A change of a residual inside round-off passes."""
+    proc = _compare(tmp_path, _report(RESIDUALS), _report(RESIDUALS.replace(old, new, 1)))
+    assert proc.returncode == 0, proc.stdout
+
+
+def test_committed_report_residual_change_is_seen(tmp_path):
+    """In the committed report, a ground-plane residual that grows to 9e-13 fails."""
+    text = (SCRIPT.parents[1] / "docs" / "verification_report.md").read_text(encoding="utf-8")
+    match = re.search(r"largest \|v\.n\| / \|v\| = (\d\.\de-\d\d)\.", text)
+    assert match is not None
+    assert float(match.group(1)) < 1e-14
+    grown = text.replace(match.group(0), match.group(0).replace(match.group(1), "9.0e-13"), 1)
+    proc = _compare(tmp_path, text, grown)
+    assert proc.returncode == 1, proc.stdout
+    proc_same = _compare(tmp_path, text, text)
+    assert proc_same.returncode == 0, proc_same.stdout

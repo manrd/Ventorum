@@ -12,6 +12,9 @@ hard-coded results.
 
 Usage:
     python validation/run_verification.py [output.md]
+
+The script writes the report in all cases. Its exit code is 0 when every
+check of the report passes and 1 when one or more table rows show "FAIL".
 """
 
 from __future__ import annotations
@@ -812,5 +815,56 @@ def main(out_path: str | None = None) -> Path:
     return out
 
 
+def failed_rows(text: str) -> list[str]:
+    """Return the table rows of a report that show a failed check.
+
+    Parameters
+    ----------
+    text : str
+        Text of a verification report.
+
+    Returns
+    -------
+    list of str
+        The table rows with a cell that holds the verdict "FAIL", in the
+        order of the report.
+    """
+    rows = []
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped.startswith("|"):
+            continue
+        cells = [cell.strip() for cell in stripped.strip("|").split("|")]
+        if verdict(False) in cells:
+            rows.append(stripped)
+    return rows
+
+
+def cli(argv: list[str] | None = None) -> int:
+    """Write the report and return the exit code of the script.
+
+    Parameters
+    ----------
+    argv : list of str, optional
+        Arguments without the program name: an optional output path.
+
+    Returns
+    -------
+    int
+        0 when every check passes, 1 when one or more checks fail. The
+        report is written in both cases.
+    """
+    args = sys.argv[1:] if argv is None else argv
+    out = main(args[0] if args else None)
+    print(out)
+    failures = failed_rows(out.read_text(encoding="utf-8"))
+    if failures:
+        print(f"run_verification: {len(failures)} failed checks:", file=sys.stderr)
+        for row in failures:
+            print(f"  {row}", file=sys.stderr)
+        return 1
+    return 0
+
+
 if __name__ == "__main__":
-    print(main(sys.argv[1] if len(sys.argv) > 1 else None))
+    raise SystemExit(cli())
