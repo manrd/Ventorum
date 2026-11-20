@@ -33,6 +33,14 @@ MIN_SPAN_M = 1.0e-6
 MIN_CHORD_M = 1.0e-6
 #: Smallest planform area [m^2] accepted (unprojected, both halves).
 MIN_AREA_M2 = 1.0e-12
+#: Largest ratio [-] between a user S_ref and the total planform area of the
+#: surfaces (unprojected, both halves), in both directions. The coefficients
+#: scale with 1/S_ref: a reference area far from the planform area (a typing
+#: error of the unit, for example mm^2 for m^2) gives coefficients that
+#: look like results but are not useful, with a high trust. A tail or a fin
+#: analysed with the reference area of its aircraft stays far inside this
+#: range.
+MAX_S_REF_AREA_RATIO = 100.0
 #: Largest absolute value of an angle [rad].
 ANGLE_LIMIT_RAD = math.pi
 #: Largest free-stream speed [m/s].
@@ -259,22 +267,31 @@ def validate_surface(surf: LiftingSurface) -> None:
     # Planform area (unprojected: semi_span is the length along the
     # dihedral line unless z_le is given). The unprojected area is used
     # so that a vertical fin (no projected area) still passes.
-    fracs = [s.y_frac for s in surf.sections]
-    chords = [s.chord for s in surf.sections]
-    area = surf.semi_span * sum(
-        0.5 * (a + b) * (g - f)
-        for a, b, f, g in zip(chords[:-1], chords[1:], fracs[:-1], fracs[1:])
-    )
-    if surf.is_symmetric:
-        area *= 2.0
+    area = _planform_area(surf)
     if area < MIN_AREA_M2:
         raise ValueError(
             f"[{surf.name}] planform area={area} m^2 must be >= {MIN_AREA_M2:g} m^2."
         )
 
 
+def _planform_area(surf: LiftingSurface) -> float:
+    """Return the unprojected planform area [m^2] of a surface (both halves of a symmetric surface)."""
+    fracs = [s.y_frac for s in surf.sections]
+    chords = [s.chord for s in surf.sections]
+    area = surf.semi_span * sum(
+        0.5 * (a + b) * (g - f)
+        for a, b, f, g in zip(chords[:-1], chords[1:], fracs[:-1], fracs[1:])
+    )
+    return 2.0 * area if surf.is_symmetric else area
+
+
 def validate_aircraft(ac: Aircraft) -> None:
-    """Validate all surfaces in an :class:`Aircraft`."""
+    """Validate all surfaces in an :class:`Aircraft`.
+
+    A reference area ``S_ref`` [m^2] that the user gives must be within a
+    factor ``MAX_S_REF_AREA_RATIO`` (100) of the total unprojected planform
+    area of the surfaces, in both directions.
+    """
     if not ac.surfaces:
         raise ValueError("Aircraft must have at least one LiftingSurface.")
     for surf in ac.surfaces:
@@ -290,6 +307,15 @@ def validate_aircraft(ac: Aircraft) -> None:
                 raise ValueError(
                     f"Aircraft '{ac.name}': {key}={value} {unit} must be >= {floor:g} {unit}."
                 )
+    if ac.S_ref is not None and "S_ref" not in getattr(ac, "_auto_ref", ()):
+        total = sum(_planform_area(surf) for surf in ac.surfaces)
+        ratio = float(ac.S_ref) / total
+        if not (1.0 / MAX_S_REF_AREA_RATIO <= ratio <= MAX_S_REF_AREA_RATIO):
+            raise ValueError(
+                f"Aircraft '{ac.name}': S_ref={ac.S_ref:g} m^2 is {ratio:.3g} times the total planform area "
+                f"of the surfaces ({total:.4g} m^2). The limit is a factor of {MAX_S_REF_AREA_RATIO:g} in both "
+                "directions: the coefficients scale with 1/S_ref. Check the unit of S_ref (m^2)."
+            )
     if ac.ref_point is not None:
         try:
             ref = np.asarray(ac.ref_point, dtype=float).reshape(3)
