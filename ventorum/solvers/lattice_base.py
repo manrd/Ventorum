@@ -21,6 +21,7 @@ from typing import Literal
 import numpy as np
 
 from ventorum.aero.loads import compute_loads, compute_loads_batch
+from ventorum.aero.vortex import kernel_cache_scope
 from ventorum.aero.system import (
     GroundPlane,
     check_ground_clearance,
@@ -911,9 +912,11 @@ class LatticeSolver(BaseSolver):
             # Vortex lattice out of ground effect: one lattice for all angles.
             # The bound vortices and the chordwise legs do not change with the
             # angle of attack: their influence is computed once (kernel cache).
+            # The sweep owns the kernel cache: the results keep the lattice,
+            # but not the cache (see ventorum.aero.vortex.kernel_cache_scope).
             lattice = self.build(aircraft, settings, condition, None, rp)
-            lattice.kernel_cache = {}
-            return self.solve_batch(lattice, conds, settings, S, b, c, ref_point=rp, main_surface=main)
+            with kernel_cache_scope(lattice):
+                return self.solve_batch(lattice, conds, settings, S, b, c, ref_point=rp, main_surface=main)
         # In ground effect the automatic chordwise count depends on the
         # attitude. All angles use the count of the angle with the smallest
         # gap to the ground (the largest count), so that the results of the

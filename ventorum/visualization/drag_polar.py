@@ -65,6 +65,7 @@ def alpha_sweep(
         example a zero or negative ``V_inf``). The check gives no warnings:
         :func:`ventorum.analyze_sweep` gives them once.
     """
+    from ventorum.aero.vortex import kernel_cache_scope
     from ventorum.hardware.profile import size_class
     from ventorum.solvers.factory import make_solver, resolve_solver_type
     from ventorum.solvers.lattice_base import LatticeSolver
@@ -125,15 +126,16 @@ def alpha_sweep(
         return results
 
     # Parallel: one lattice, the angles shared among the workers. The fixed
-    # part of the vortex system is computed once (see solve_sweep).
-    lattice.kernel_cache = {}
+    # part of the vortex system is computed once (see solve_sweep). The
+    # sweep owns the kernel cache: the results keep the lattice, but not the
+    # cache (see ventorum.aero.vortex.kernel_cache_scope).
 
     def one(a: float) -> SolverResult:
         cond = dataclasses.replace(condition, alpha=float(a))
         return solver.solve_lattice(lattice, cond, settings, aircraft.S_ref, aircraft.b_ref, aircraft.c_ref,
                                     ref_point=rp, main_surface=aircraft.main_surface_index())
 
-    with case_executor(plan) as ex:
+    with kernel_cache_scope(lattice), case_executor(plan) as ex:
         results = list(ex.map(one, alpha_range))
     if pb:
         pb.update(len(alpha_range))
