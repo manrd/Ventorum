@@ -57,7 +57,8 @@ a minor version can change a public interface.
   and `gpu.cache_bytes()`. A solve that runs out of GPU memory falls back to the CPU and adds a result note
   without changing the trust level or the coefficients.
 - The kernel cache of a sweep is freed when the sweep ends; a returned result does not keep it.
-- Derivative results give `stepped_trust_min` and a note when a stepped case has a lower trust than the base case.
+- Derivative results and the agent derivative tools (`ventorum_stability_derivatives`, `ventorum_derivative_matrix`)
+  give `stepped_trust_min` and a note when a stepped case has a lower trust than the base case.
 
 ### Fixed
 

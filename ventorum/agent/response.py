@@ -125,6 +125,27 @@ def trust_payload(trust: TrustScore | None) -> dict[str, Any]:
     }
 
 
+def stepped_trust_payload(info: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Return a JSON-safe copy of a ``stepped_trust_min`` dictionary, or None.
+
+    Parameters
+    ----------
+    info : dict or None
+        Lowest stepped-case trust record from
+        :func:`ventorum.core.trust.stepped_trust_minimum` (or with the extra
+        ``"group"`` key from :func:`ventorum.derivative_matrix`), or None
+        when no stepped case has a lower trust than the base case.
+
+    Returns
+    -------
+    dict or None
+        JSON-safe dictionary with the same keys, or None.
+    """
+    if info is None:
+        return None
+    return json_safe(dict(info))
+
+
 #: Largest number of warning labels in one table row of a compact payload.
 ROW_WARNINGS_CAP = 3
 #: Largest number of warnings in the summary of a compact payload.
