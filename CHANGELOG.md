@@ -45,8 +45,8 @@ a minor version can change a public interface.
   incompressible one. Free-stream wake results do not change.
 - RESULT CHANGE. The bank derivatives of a ground sweep hold the pivot height (chain rule with the grid height,
   as for alpha). With `height_ref="min"` Cl_phi goes from -0.0338 to -0.0713 (local value -0.0649); with
-  `height_ref="te"` it moves by less than 0.1 %; `height_ref="ref"` does not change. A sweep with one height and a moving
-  pivot gives NaN with a note.
+  `height_ref="te"` it moves by less than 0.1 %; `height_ref="ref"` does not change. A sweep with one height gives the plain fit
+  with a warning when the pivot moves by at most 1 % of the clearance, and NaN with a note when it moves more.
 - Invalid user input raises `InputError`, a subclass of `ValueError` (exported as `ventorum.InputError`). Code
   that catches `ValueError` still works.
 

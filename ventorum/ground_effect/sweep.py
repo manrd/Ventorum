@@ -95,6 +95,12 @@ MAX_GRID_H_STEP_RATIO = 0.1
 #: sweep need no correction to constant height of that point (round-off).
 BANK_PIVOT_TOLERANCE = 1e-9
 
+#: Largest change of the height of the moment reference point with the bank
+#: angle, as a fraction of the smallest clearance of the case, for which a
+#: sweep with one height gives the plain bank fits with a warning. With a
+#: larger change, the bank derivatives of a one-height sweep are NaN.
+MAX_UNCORRECTED_PIVOT_MOVE_RATIO = 0.01
+
 
 def _nan_slope(x: np.ndarray, y: np.ndarray) -> float:
     ok = np.isfinite(y)
@@ -252,8 +258,10 @@ class GroundEffectSweepResult:
             constant bank angle (see the module text): a piecewise-linear
             interpolation in the height of the reference point, and a linear
             extrapolation from the end segment outside the grid. All values
-            are NaN when the reference point moves with the bank angle and
-            the grid has one height or no reference heights.
+            are NaN when the grid has no reference heights. With one height,
+            the coefficients are not moved when the reference point moves by
+            at most ``MAX_UNCORRECTED_PIVOT_MOVE_RATIO`` of the clearance (a
+            warning is added), and are NaN when it moves more.
         """
         h_vals = np.asarray(self.heights, dtype=float)
         n_h, n_phi = len(h_vals), len(self.phis_deg)
@@ -265,17 +273,30 @@ class GroundEffectSweepResult:
             with np.errstate(invalid="ignore"):
                 if not np.any(np.abs(h_ref - target[:, None]) > tol):
                     return bank
+        hm = np.asarray(self.h_min, dtype=float)
+        clear = hm[:, a_nom, p0] if hm.ndim == 3 and hm.shape[0] == n_h else h_vals
+        if self.h_ref_grid is not None and n_h < 2:
+            with np.errstate(invalid="ignore", divide="ignore"):
+                move = np.nanmax(np.abs(h_ref - target[:, None]), axis=1) / clear
+            if np.all(np.isfinite(move)) and np.all(move <= MAX_UNCORRECTED_PIVOT_MOVE_RATIO):
+                out["warnings"].append(
+                    f"Bank derivatives with height_ref='{self.height_ref}': the moment reference point "
+                    f"changes its height with the bank angle by up to {float(np.max(move)):.2g} of the "
+                    "clearance, and the grid has one height, so Cl_phi, Cn_phi and CY_phi are not "
+                    "corrected to constant height of that point. The error is small for a change this "
+                    "small. Add heights to the grid for the corrected values.")
+                return bank
         if self.h_ref_grid is None or n_h < 2:
             nan = np.full((n_h, n_phi), np.nan)
             out["note"] += (" The moment reference point changes its height with the bank angle for "
                             f"height_ref='{self.height_ref}', and the correction to constant height of that "
-                            "point needs at least two heights and the heights of the reference point, so "
+                            "point needs at least two heights (or a change of at most "
+                            f"{MAX_UNCORRECTED_PIVOT_MOVE_RATIO:g} of the clearance) and the heights of the "
+                            "reference point, so "
                             "Cl_phi, Cn_phi and CY_phi are not available.")
             return {k: nan for k in bank}
         moved = {k: np.full((n_h, n_phi), np.nan) for k in bank}
         far = np.zeros(n_h, dtype=bool)
-        hm = np.asarray(self.h_min, dtype=float)
-        clear = hm[:, a_nom, p0] if hm.ndim == 3 and hm.shape[0] == n_h else h_vals
         for k in range(n_phi):
             ok = np.isfinite(h_ref[:, k])
             for name in bank:
@@ -354,8 +375,10 @@ class GroundEffectSweepResult:
               point changes from one tip to the other), each case is first
               moved along the height grid to the height that the point has
               at phi = 0 (see the module text). This needs at least two
-              heights; with one height the values are NaN and the ``note``
-              says why. A warning tells when the grid does not reach that
+              heights. With one height, the plain fits are given with a
+              warning when the point moves by at most
+              ``MAX_UNCORRECTED_PIVOT_MOVE_RATIO`` (0.01) of the clearance;
+              otherwise the values are NaN and the ``note`` says why. A warning tells when the grid does not reach that
               height and the move is an extrapolation of more than
               ``MAX_GRID_H_STEP_RATIO`` of the clearance. A bank-restoring
               moment has Cl_phi < 0.

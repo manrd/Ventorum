@@ -22,6 +22,7 @@ import ventorum as vt
 from ventorum.aero.system import freestream_direction, ground_normal
 from ventorum.core.errors import GroundStrikeError, ValidityError
 from ventorum.ground_effect.solver import find_bank_strike_limit
+from ventorum.ground_effect import sweep as sweep_mod
 from ventorum.ground_effect import (
     analyze_ground_effect,
     GroundEffectSweep,
@@ -644,6 +645,21 @@ def test_sweep_bank_derivatives_min_one_height_not_available():
     for k in ("Cl_phi", "Cn_phi", "CY_phi"):
         assert np.isnan(d[k][0])
     assert "Cl_phi, Cn_phi and CY_phi are not available" in d["note"]
+
+
+def test_sweep_bank_derivatives_te_one_height_plain_fit_with_warning():
+    """With one height and a small pivot move ('te'), the plain bank fit is given with a warning, not NaN."""
+    ac, st = _bank_case()
+    sw = GroundEffectSweep(ac, settings=st, backend="serial").run_sweep(
+        [_grid_height(ac, st, "te")], [4.0], _BANK_PHIS, height_ref="te", compute_strike_limit=False)
+    h_ref = sw.h_ref_grid[0, 0, :]
+    move = np.max(np.abs(h_ref - h_ref[2])) / sw.h_min[0, 0, 2]
+    assert 0 < move <= sweep_mod.MAX_UNCORRECTED_PIVOT_MOVE_RATIO
+    d = sw.compute_stability_derivatives()
+    phi = np.radians(_BANK_PHIS)
+    assert d["Cl_phi"][0] == np.polyfit(phi, sw.Cl[0, 0, :], 1)[0]
+    assert any("are not corrected to constant height" in w for w in d["warnings"])
+    assert "not available" not in d["note"]
 
 
 def test_sweep_bank_derivatives_warn_when_the_grid_does_not_reach_the_pivot_height():
