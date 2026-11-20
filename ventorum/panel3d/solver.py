@@ -575,7 +575,8 @@ class PanelSolver:
         # Body-axis wake of free air on the solved mesh
         self.wake: PanelWake = (
             self._build_wake(
-                mesh.nodes, self.standardized_panels, mesh.wake_edges, self.normals, None
+                mesh.nodes, self.standardized_panels, mesh.wake_edges, self.normals,
+                getattr(mesh, "wake_cp_frac", None), None,
             )
             if _reuse_full_from is None else _reuse_full_from._full_wake
         )
@@ -599,6 +600,7 @@ class PanelSolver:
                 self._standardized_full_panels,
                 self._full_mesh.wake_edges,
                 self._full_geom.normal,
+                getattr(self._full_mesh, "wake_cp_frac", None),
                 None,
             )
             self.gradient_stencil_stats = {}
@@ -821,15 +823,15 @@ class PanelSolver:
             self._drop_factors(cfg)
             self._configurations_evicted += 1
 
-    def _build_wake(self, nodes, panels, wake_edges, normals, wake_dir) -> PanelWake:
-        """Build one wake with the wake length and panel count of the solver."""
-        cp_frac = None
-        if wake_edges is self.mesh.wake_edges:
-            cp_frac = getattr(self.mesh, "wake_cp_frac", None)
-        else:
-            full_mesh = getattr(self, "_full_mesh", None)
-            if full_mesh is not None and wake_edges is full_mesh.wake_edges:
-                cp_frac = getattr(full_mesh, "wake_cp_frac", None)
+    def _build_wake(self, nodes, panels, wake_edges, normals, cp_frac, wake_dir) -> PanelWake:
+        """Build one wake with the wake length and panel count of the solver.
+
+        The caller gives ``cp_frac`` (the Trefftz control-point span fraction
+        of each wake strip, or None) of the mesh that owns ``wake_edges``.
+        The solver does not find it from the identity of the edge array, so a
+        copy of the edges keeps its fractions. :func:`build_wake` checks the
+        length of ``cp_frac`` against the strip count.
+        """
         return build_wake(
             nodes,
             panels,
@@ -1334,13 +1336,15 @@ class PanelSolver:
             full_wake = self._full_wake
         else:
             wake = self._build_wake(
-                self.mesh.nodes, self.standardized_panels, self.mesh.wake_edges, self.normals, wake_dir
+                self.mesh.nodes, self.standardized_panels, self.mesh.wake_edges, self.normals,
+                getattr(self.mesh, "wake_cp_frac", None), wake_dir,
             )
             full_wake = self._build_wake(
                 self._full_mesh.nodes,
                 self._standardized_full_panels,
                 self._full_mesh.wake_edges,
                 self._full_geom.normal,
+                getattr(self._full_mesh, "wake_cp_frac", None),
                 wake_dir,
             )
         if shared is None:
