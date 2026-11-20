@@ -195,6 +195,17 @@ def ground_probe_lattice(
     ))
 
 
+def _out_of_memory_note(results: list, reason: str | None) -> list:
+    """Add the out-of-memory note to CPU results when the GPU ran out of memory twice (*reason*)."""
+    if reason is None or "out of memory" not in reason:
+        return results
+    from ventorum.gpu import pipeline
+
+    if reason == pipeline.REASON_OUT_OF_MEMORY:
+        pipeline.add_out_of_memory_note(results)
+    return results
+
+
 def _cpu_dispatch(n_panels: int, batch: int, reason: str | None, family: str | None = None) -> dict:
     """Return the dispatch record of a CPU solve, for all cases of one batch.
 
@@ -509,7 +520,7 @@ class LatticeSolver(BaseSolver):
             b_ref, c_ref, main_surface, t0, ref_point=ref_point,
             dispatch=_cpu_dispatch(lattice.n_panels, 1, gpu_reason),
         )
-        return _report_condition([res], [info], settings)[0]
+        return _out_of_memory_note(_report_condition([res], [info], settings), gpu_reason)[0]
 
     def _case_setup(
         self,
@@ -987,7 +998,8 @@ class LatticeSolver(BaseSolver):
                 )
                 for cond, ld, (g, _, info), st, sw_stats in zip(conditions, loads, sols, setups, stats)
             ]
-            return _report_condition(results, [info for _, _, info in sols], settings)
+            return _out_of_memory_note(_report_condition(results, [info for _, _, info in sols], settings),
+                                       gpu_reason)
 
     def _gpu_batch(
         self,

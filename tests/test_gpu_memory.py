@@ -194,6 +194,15 @@ def test_out_of_memory_fallback_adds_note_and_keeps_trust_and_cl(monkeypatch):
     assert res_single.totals.trust.score == ref_single.totals.trust.score
     assert float(res_single.totals.CL).hex() == float(ref_single.totals.CL).hex()
 
+    # The CPU path after the fallback keeps the condition estimate.
+    st = vt.SolverSettings(solver_type="vlm", n_panels=12, report_condition=True)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)
+        res_cond = vt.analyze(_wing(), vt.FlightCondition(V_inf=30.0, alpha=np.radians(4.0)), st)
+    assert res_cond.details["dispatch"]["reason"] == pipeline.REASON_OUT_OF_MEMORY
+    cn = res_cond.details.get("condition_number")
+    assert cn is not None and np.isfinite(cn)
+
 
 # ---------------------------------------------------------------------------
 # GPU memory (need a CUDA GPU)
