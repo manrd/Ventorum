@@ -35,7 +35,7 @@ import numpy as np
 
 from ventorum.aero.vortex import kernel_cache_scope
 from ventorum.core.datatypes import Aircraft, FlightCondition, LiftingSurface, SolverResult, SolverSettings
-from ventorum.core.trust import tip_edge_suction_note
+from ventorum.core.trust import stepped_trust_minimum, stepped_trust_note, tip_edge_suction_note
 from ventorum.solvers.lattice_base import LARGE_ROTATION_FRACTION
 
 __all__ = ["RateDerivativesResult", "rate_derivatives", "rate_axes_transform"]
@@ -90,6 +90,14 @@ class RateDerivativesResult:
     case_converged : list[bool]
         Converged flag of each solved case, in the order base, p +, p -, q +, q -, r +, r -. A
         note of the result names the cases with False.
+    stepped_trust_min : dict or None
+        The stepped case with the lowest trust, when its trust rating or
+        score is lower than that of the base case: ``case`` (its name),
+        ``rating``, ``score``, ``base_rating`` and ``base_score`` (see
+        :func:`ventorum.core.trust.stepped_trust_minimum`). A note of the
+        result names the case. None when no stepped case is lower. The
+        trust of the result stays the trust of the base case
+        (``base.totals.trust``).
     """
 
     derivatives: dict[str, float]
@@ -106,6 +114,7 @@ class RateDerivativesResult:
     n_solves: int
     notes: list[str] = field(default_factory=list)
     case_converged: list[bool] = field(default_factory=list)
+    stepped_trust_min: dict[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """Return a JSON-compatible dictionary without the result object."""
@@ -122,6 +131,7 @@ class RateDerivativesResult:
             "n_solves": int(self.n_solves),
             "notes": list(self.notes),
             "case_converged": [bool(v) for v in self.case_converged],
+            "stepped_trust_min": None if self.stepped_trust_min is None else dict(self.stepped_trust_min),
         }
 
 
@@ -332,10 +342,14 @@ def rate_derivatives(
                      f"{LARGE_ROTATION_FRACTION:g}): the straight wake of the quasi-steady model is then a poor "
                      "approximation.")
     case_converged = [bool(r.converged) for r in results]
-    failed = [lab for lab, ok in zip(("base", "p +", "p -", "q +", "q -", "r +", "r -"), case_converged) if not ok]
+    labels = ("base", "p +", "p -", "q +", "q -", "r +", "r -")
+    failed = [lab for lab, ok in zip(labels, case_converged) if not ok]
     if failed:
         notes.append("Not all cases of the differences converged ({}): the derivatives that use these cases are "
                      "not reliable.".format(", ".join(failed)))
+    stepped = stepped_trust_minimum(results, labels)
+    if stepped is not None:
+        notes.append(stepped_trust_note(stepped))
     return RateDerivativesResult(
         derivatives=derivs, matrix=matrix, axes=axes, step=step,
         drag_basis="CD_total" if use_cd_total else "CDi", b_ref=b_ref, c_ref=c_ref, ref_point=rp,
@@ -343,4 +357,5 @@ def rate_derivatives(
         device=devices.pop() if len(devices) == 1 else "mixed",
         precision=precisions.pop() if len(precisions) == 1 else "mixed",
         n_solves=len(results), notes=notes, case_converged=case_converged,
+        stepped_trust_min=stepped,
     )

@@ -1501,6 +1501,86 @@ def tip_edge_suction_note() -> str:
     )
 
 
+#: Order of the trust ratings, from the worst to the best.
+TRUST_RATING_ORDER = ("UNRELIABLE", "LOW", "MODERATE", "HIGH")
+
+
+def stepped_trust_minimum(results: Sequence, labels: Sequence[str]) -> dict | None:
+    """Return the stepped case of a difference with the lowest trust, when it is lower than the base trust.
+
+    A derivative tool reports the trust of its base case. A stepped case
+    can have a lower trust than the base case, for example when the height
+    step crosses a threshold of the ground proximity. This function finds
+    the stepped case with the lowest rating (and, at equal rating, the
+    lowest score) and compares it with the base case. The base trust does
+    not change.
+
+    Parameters
+    ----------
+    results : sequence of SolverResult
+        The solved cases. The first one is the base case.
+    labels : sequence of str
+        The name of each case, in the order of *results*.
+
+    Returns
+    -------
+    dict or None
+        ``case`` (the name of the stepped case), ``rating`` and ``score``
+        (its trust), and ``base_rating`` and ``base_score`` (the trust of
+        the base case). None when no stepped case has a lower rating or a
+        lower score than the base case, or when a trust is not known.
+    """
+    if len(results) < 2 or len(labels) != len(results):
+        return None
+
+    def _trust(r):
+        t = getattr(getattr(r, "totals", None), "trust", None)
+        if t is None or t.rating not in TRUST_RATING_ORDER or not _is_finite(t.score):
+            return None
+        return t
+
+    base = _trust(results[0])
+    if base is None:
+        return None
+    worst = None
+    for r, lab in zip(results[1:], labels[1:]):
+        t = _trust(r)
+        if t is None:
+            continue
+        key = (TRUST_RATING_ORDER.index(t.rating), float(t.score))
+        if worst is None or key < worst[0]:
+            worst = (key, lab, t)
+    if worst is None:
+        return None
+    base_key = (TRUST_RATING_ORDER.index(base.rating), float(base.score))
+    if worst[0] >= base_key:
+        return None
+    t = worst[2]
+    return {"case": str(worst[1]), "rating": t.rating, "score": float(t.score),
+            "base_rating": base.rating, "base_score": float(base.score)}
+
+
+def stepped_trust_note(info: dict) -> str:
+    """Return the note of a stepped case with a lower trust than the base case.
+
+    Parameters
+    ----------
+    info : dict
+        The result of :func:`stepped_trust_minimum` (not None).
+
+    Returns
+    -------
+    str
+        The note.
+    """
+    return (
+        f"The stepped case '{info['case']}' of the differences has a lower trust ({info['rating']}, score "
+        f"{info['score']:.3f}) than the base case ({info['base_rating']}, score {info['base_score']:.3f}). "
+        "The reported trust is that of the base case. The derivatives that use this case have the lower trust; "
+        "see stepped_trust_min."
+    )
+
+
 def fourier_convergence_notes(surface: LiftingSurface | None, AR: float, n_terms: int) -> list[str]:
     """Return the notes and warnings of the Fourier lifting line.
 
