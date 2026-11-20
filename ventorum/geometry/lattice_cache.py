@@ -24,12 +24,18 @@ lattice instead of building it again.
   of a user airfoil in place therefore never reaches a cached lattice: the
   changed airfoil gives a new key, and an aircraft with the old values
   gets a cache hit with the old values.
+* The GPU pipelines keep the GPU data of a lattice in its ``geom_cache``
+  (shared by the copies). A lattice that leaves the cache (least recently
+  used out, or :func:`clear`) loses its GPU data, so a result that keeps
+  the lattice does not keep GPU memory. The byte limit of the GPU data of
+  the cached lattices is in :mod:`ventorum.gpu.memory`.
 """
 
 from __future__ import annotations
 
 import copy
 import dataclasses
+import sys
 import threading
 import warnings
 from collections import OrderedDict
@@ -184,11 +190,13 @@ def get_or_build(key: tuple, build: Callable[[], Any]) -> Any:
         hit = build()
         _own_airfoils(hit)
         _freeze(hit)
+        evicted = []
         with _lock:
             _cache[key] = hit
             _cache.move_to_end(key)
             while len(_cache) > MAX_ENTRIES:
-                _cache.popitem(last=False)
+                evicted.append(_cache.popitem(last=False)[1])
+        _drop_device_data(evicted)
     out = copy.copy(hit)
     out.kernel_cache = None
     # The control information is a list of dicts: give each copy its own, so
@@ -198,8 +206,32 @@ def get_or_build(key: tuple, build: Callable[[], Any]) -> Any:
     return out
 
 
-def clear() -> None:
-    """Remove every cached lattice."""
+def _drop_device_data(lattices: list) -> None:
+    """Remove the GPU data of *lattices* (see :func:`ventorum.gpu.memory.drop`).
+
+    Only when the GPU memory module is loaded: without it, no lattice has
+    GPU data.
+    """
+    memory = sys.modules.get("ventorum.gpu.memory")
+    if memory is None:
+        return
+    for lat in lattices:
+        memory.drop(lat)
+
+
+def entries() -> list:
+    """Return the cached lattices, the least recently used first.
+
+    The lattices are the cached objects, not copies. Do not change them.
+    """
     with _lock:
+        return list(_cache.values())
+
+
+def clear() -> None:
+    """Remove every cached lattice (and its GPU data)."""
+    with _lock:
+        evicted = list(_cache.values())
         _cache.clear()
         _info.clear()
+    _drop_device_data(evicted)
