@@ -580,3 +580,90 @@ def test_sweep_derivative_docstring_states_the_secant_fits():
     doc = GroundEffectSweepResult.compute_stability_derivatives.__doc__
     assert "secant slopes" in doc
     assert "ventorum.height_derivatives" in doc
+
+
+# ---------------------------------------------------------------------------
+# Bank derivatives of a sweep at constant height of the moment reference point
+# ---------------------------------------------------------------------------
+
+_BANK_PHIS = [-4.0, -2.0, 0.0, 2.0, 4.0]
+_BANK_H0 = 0.5  # height [m] of the moment reference point at phi = 0
+
+
+def _bank_case():
+    w = vt.LiftingSurface(name="w", semi_span=3.0, n_panels=12,
+                          sections=[vt.WingSection(y_frac=0.0, chord=1.0), vt.WingSection(y_frac=1.0, chord=1.0)])
+    ac = vt.Aircraft(name="r", surfaces=[w], ref_point=np.array([0.25, 0.0, 0.0]))
+    return ac, vt.SolverSettings(solver_type="vlm", n_panels=12, n_chord=8)
+
+
+def _grid_height(ac, st, mode):
+    """Height [m] in the convention ``mode`` that puts the reference point at _BANK_H0 at phi = 0."""
+    s = GroundEffectSweep(ac, settings=st, backend="serial").run_sweep(
+        [_BANK_H0], [4.0], [0.0], height_ref=mode, compute_strike_limit=False)
+    return _BANK_H0 - (s.result_at(0, 0, 0).h_ref - _BANK_H0)
+
+
+def test_sweep_bank_derivatives_at_constant_pivot_height():
+    """Cl_phi, Cn_phi, CY_phi of 'ref', 'min' and 'te' sweeps agree, and Cl_phi agrees with height_derivatives.
+
+    With height_ref 'min' the reference point rises with abs(phi) (the lowest
+    point is a tip). Without the chain rule the 'min' fit was at constant
+    height of the lowest point and gave about half of the roll stiffness.
+    """
+    ac, st = _bank_case()
+    fc = vt.FlightCondition(V_inf=50.0, alpha=np.radians(4.0), h=_BANK_H0)
+    hd = vt.height_derivatives(ac, fc, st, phi_step_deg=0.1, axes="stability").derivatives
+    got = {}
+    for mode in ("ref", "min", "te"):
+        hg = _grid_height(ac, st, mode)
+        # The grid reaches the reference-point height of phi = 0 also at 4 deg of bank.
+        heights = list(hg * np.linspace(0.5, 1.0, 6))
+        sw = GroundEffectSweep(ac, settings=st, backend="serial").run_sweep(
+            heights, [4.0], _BANK_PHIS, height_ref=mode, compute_strike_limit=False)
+        assert sw.h_ref_grid[-1, 0, 2] == pytest.approx(_BANK_H0, abs=1e-9)
+        if mode == "min":
+            assert sw.h_ref_grid[-1, 0, 0] > _BANK_H0 + 0.1  # the pivot moves with the bank angle
+        d = sw.compute_stability_derivatives()
+        got[mode] = {k: d[k][-1] for k in ("Cl_phi", "Cn_phi", "CY_phi")}
+    # The secant fit over +-4 deg differs from the local slope by about 10 % (docstring).
+    assert got["ref"]["Cl_phi"] == pytest.approx(hd["Cl_phi"], rel=0.15)
+    for mode in ("min", "te"):
+        assert got[mode]["Cl_phi"] == pytest.approx(hd["Cl_phi"], rel=0.15)
+        assert got[mode]["Cl_phi"] == pytest.approx(got["ref"]["Cl_phi"], rel=0.02)
+        assert got[mode]["CY_phi"] == pytest.approx(got["ref"]["CY_phi"], rel=0.02)
+        assert got[mode]["Cn_phi"] == pytest.approx(got["ref"]["Cn_phi"], abs=5e-6)
+
+
+def test_sweep_bank_derivatives_min_one_height_not_available():
+    """With one height and height_ref 'min' the chain rule is not available: NaN and a note, no wrong value."""
+    ac, st = _bank_case()
+    sw = GroundEffectSweep(ac, settings=st, backend="serial").run_sweep(
+        [_grid_height(ac, st, "min")], [4.0], _BANK_PHIS, height_ref="min", compute_strike_limit=False)
+    d = sw.compute_stability_derivatives()
+    for k in ("Cl_phi", "Cn_phi", "CY_phi"):
+        assert np.isnan(d[k][0])
+    assert "Cl_phi, Cn_phi and CY_phi are not available" in d["note"]
+
+
+def test_sweep_bank_derivatives_warn_when_the_grid_does_not_reach_the_pivot_height():
+    """A height grid that does not reach the pivot height of phi = 0 gives a warning (linear extrapolation)."""
+    ac, st = _bank_case()
+    hg = _grid_height(ac, st, "min")
+    sw = GroundEffectSweep(ac, settings=st, backend="serial").run_sweep(
+        [0.98 * hg, hg], [4.0], _BANK_PHIS, height_ref="min", compute_strike_limit=False)
+    d = sw.compute_stability_derivatives()
+    assert any("Bank derivatives with height_ref='min'" in w for w in d["warnings"])
+    assert np.all(np.isfinite(d["Cl_phi"]))
+
+
+def test_sweep_bank_derivatives_ref_unchanged_by_the_correction():
+    """With height_ref 'ref' the bank columns need no correction: the fit is the plain line fit of the grid."""
+    ac, st = _bank_case()
+    sw = GroundEffectSweep(ac, settings=st, backend="serial").run_sweep(
+        [0.45, 0.5], [4.0], _BANK_PHIS, height_ref="ref", compute_strike_limit=False)
+    d = sw.compute_stability_derivatives()
+    phi = np.radians(_BANK_PHIS)
+    for i in range(2):
+        assert d["Cl_phi"][i] == np.polyfit(phi, sw.Cl[i, 0, :], 1)[0]
+    assert not any("Bank derivatives" in w for w in d["warnings"])

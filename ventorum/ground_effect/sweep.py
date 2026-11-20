@@ -42,6 +42,18 @@ another point, and the reference point moves. The chain rule corrects it::
 
 where ``h_ref`` is the height of the reference point of each case.
 
+The bank derivatives ``Cl_phi``, ``Cn_phi`` and ``CY_phi`` are also at
+constant height of the moment reference point. With ``height_ref='min'`` the
+lowest point of a banked wing is a tip, and the reference point rises with
+abs(phi). The bank columns of the grid are then at constant height of the
+lowest point, not of the reference point. The same chain rule applies, in
+the integral form along the height grid at constant bank angle: each case
+moves to the height that the reference point has at phi = 0 in its grid
+row, by a piecewise-linear interpolation in the reference-point height (a
+linear extrapolation outside the grid). The change of height can be a
+large fraction of the clearance, so the move uses the grid values, not one
+local slope.
+
 Sign conventions are the standard ones: a bank-restoring rolling moment has
 ``Cl < 0`` for ``phi > 0``, so ground-effect roll stiffness is ``Cl_phi < 0``.
 """
@@ -77,6 +89,11 @@ from ventorum.ground_effect.state import GroundEffectResult
 #: with the square of the step (central) or with the step (end point); the
 #: state tool :func:`ventorum.height_derivatives` uses 0.05.
 MAX_GRID_H_STEP_RATIO = 0.1
+
+#: Change of the height of the moment reference point with the bank angle, as
+#: a fraction of the reference chord, below which the bank derivatives of a
+#: sweep need no correction to constant height of that point (round-off).
+BANK_PIVOT_TOLERANCE = 1e-9
 
 
 def _nan_slope(x: np.ndarray, y: np.ndarray) -> float:
@@ -209,6 +226,87 @@ class GroundEffectSweepResult:
         with np.errstate(divide="ignore", invalid="ignore"):
             return np.where(clear > 0, step[:, None] / clear, np.nan)
 
+    def _bank_columns_at_pivot_height(self, bank: dict[str, np.ndarray], a_nom: int, p0: int,
+                                      out: dict[str, Any]) -> dict[str, np.ndarray]:
+        """Move the bank columns to constant height of the moment reference point.
+
+        Parameters
+        ----------
+        bank : dict of str to numpy.ndarray
+            ``Cl``, ``Cn`` and ``CY`` at the angle ``a_nom``, shape (n_h, n_phi).
+            The columns are at constant height of the ``height_ref`` point.
+        a_nom : int
+            Index of the angle of attack of the bank fits.
+        p0 : int
+            Index of the bank angle nearest to 0.
+        out : dict
+            Result dictionary. A note or a warning is added when the
+            correction is not available or not accurate.
+
+        Returns
+        -------
+        dict of str to numpy.ndarray
+            The same coefficients, each at the height [m] that the moment
+            reference point has at the bank angle ``p0`` in the same grid row.
+            The values follow from the chain rule along the height grid at
+            constant bank angle (see the module text): a piecewise-linear
+            interpolation in the height of the reference point, and a linear
+            extrapolation from the end segment outside the grid. All values
+            are NaN when the reference point moves with the bank angle and
+            the grid has one height or no reference heights.
+        """
+        h_vals = np.asarray(self.heights, dtype=float)
+        n_h, n_phi = len(h_vals), len(self.phis_deg)
+        if self.h_ref_grid is not None:
+            h_ref = np.asarray(self.h_ref_grid, dtype=float)[:, a_nom, :]
+            target = h_ref[:, p0]
+            # A change below round-off of the geometry needs no correction.
+            tol = BANK_PIVOT_TOLERANCE * (self.c_ref if self.c_ref > 0 else 1.0)
+            with np.errstate(invalid="ignore"):
+                if not np.any(np.abs(h_ref - target[:, None]) > tol):
+                    return bank
+        if self.h_ref_grid is None or n_h < 2:
+            nan = np.full((n_h, n_phi), np.nan)
+            out["note"] += (" The moment reference point changes its height with the bank angle for "
+                            f"height_ref='{self.height_ref}', and the correction to constant height of that "
+                            "point needs at least two heights and the heights of the reference point, so "
+                            "Cl_phi, Cn_phi and CY_phi are not available.")
+            return {k: nan for k in bank}
+        moved = {k: np.full((n_h, n_phi), np.nan) for k in bank}
+        far = np.zeros(n_h, dtype=bool)
+        hm = np.asarray(self.h_min, dtype=float)
+        clear = hm[:, a_nom, p0] if hm.ndim == 3 and hm.shape[0] == n_h else h_vals
+        for k in range(n_phi):
+            ok = np.isfinite(h_ref[:, k])
+            for name in bank:
+                ok &= np.isfinite(bank[name][:, k])
+            if np.sum(ok) < 2:
+                continue
+            order = np.argsort(h_ref[ok, k])
+            x = h_ref[ok, k][order]
+            # Only the solved cases move; a failed case (a strike) stays NaN.
+            rows = np.isfinite(target) & ok
+            t = target[rows]
+            # Index of the segment of each target; the end segments extrapolate.
+            seg = np.clip(np.searchsorted(x, t) - 1, 0, len(x) - 2)
+            w = (t - x[seg]) / (x[seg + 1] - x[seg])
+            for name, v in bank.items():
+                y = v[ok, k][order]
+                moved[name][rows, k] = y[seg] + w * (y[seg + 1] - y[seg])
+            outside = np.maximum(x[0] - t, t - x[-1])
+            with np.errstate(invalid="ignore"):
+                far[rows] |= outside > MAX_GRID_H_STEP_RATIO * clear[rows]
+        if np.any(far):
+            rows = ", ".join(f"{float(h_vals[i]):g}" for i in np.nonzero(far)[0])
+            out["warnings"].append(
+                f"Bank derivatives with height_ref='{self.height_ref}': the moment reference point "
+                "changes its height with the bank angle, and at the heights " + rows + " m the height "
+                "grid does not reach the height of that point at the bank angle nearest to 0. Cl_phi, "
+                "Cn_phi and CY_phi there use a linear extrapolation over more than "
+                f"{MAX_GRID_H_STEP_RATIO:g} of the clearance and can be wrong. Extend the height grid "
+                "(for height_ref='min', heights below the lowest height), or use height_ref='ref'.")
+        return moved
+
     def compute_stability_derivatives(self) -> dict[str, Any]:
         """Compute the derivatives, the aerodynamic centres and the Irodov margin.
 
@@ -249,8 +347,18 @@ class GroundEffectSweepResult:
               Cn > 0 nose right); ``CY`` is the side force, positive to the
               right. The bank angle phi turns the ground about the
               free-stream direction; the aircraft keeps its body axes, and
-              the ``height_ref`` point keeps the grid height. A
-              bank-restoring moment has Cl_phi < 0.
+              the ``height_ref`` point keeps the grid height. The fits are
+              at constant height of the moment reference point, for every
+              ``height_ref``: when that point changes its height with phi
+              (for example with ``height_ref='min'``, where the lowest
+              point changes from one tip to the other), each case is first
+              moved along the height grid to the height that the point has
+              at phi = 0 (see the module text). This needs at least two
+              heights; with one height the values are NaN and the ``note``
+              says why. A warning tells when the grid does not reach that
+              height and the move is an extrapolation of more than
+              ``MAX_GRID_H_STEP_RATIO`` of the clearance. A bank-restoring
+              moment has Cl_phi < 0.
 
         Notes
         -----
@@ -296,9 +404,12 @@ class GroundEffectSweepResult:
             mask = np.abs(self.phis_deg) <= 5.0
             if np.sum(mask) < 2:
                 mask = np.ones_like(self.phis_deg, dtype=bool)
-            Cl_phi = np.array([_nan_slope(phi_rad[mask], self.Cl[hi, a_nom, mask]) for hi in range(len(h_vals))])
-            Cn_phi = np.array([_nan_slope(phi_rad[mask], self.Cn[hi, a_nom, mask]) for hi in range(len(h_vals))])
-            CY_phi = np.array([_nan_slope(phi_rad[mask], self.CY[hi, a_nom, mask]) for hi in range(len(h_vals))])
+            bank = {"Cl": self.Cl[:, a_nom, :], "Cn": self.Cn[:, a_nom, :], "CY": self.CY[:, a_nom, :]}
+            if self.height_ref != "ref":
+                bank = self._bank_columns_at_pivot_height(bank, a_nom, p0, out)
+            Cl_phi, Cn_phi, CY_phi = (
+                np.array([_nan_slope(phi_rad[mask], bank[k][hi, mask]) for hi in range(len(h_vals))])
+                for k in ("Cl", "Cn", "CY"))
             out.update(Cl_phi=Cl_phi, Cl_phi_deg=Cl_phi * np.pi / 180.0,
                        Cn_phi=Cn_phi, Cn_phi_deg=Cn_phi * np.pi / 180.0, CY_phi=CY_phi)
 
