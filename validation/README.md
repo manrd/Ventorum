@@ -12,6 +12,12 @@
   python validation/run_verification.py out.md     # writes another file
   ```
 
+  The script writes the report in all cases. It exits with code 1 when a
+  table row of the report shows "FAIL". `compare_reports.py` compares a new
+  report with the committed one: text must match, numbers may differ by
+  round-off, and a residual below 1e-12 may grow to max(1e-15, 100 times
+  the committed value) only.
+
   `tests/test_analytical_verification.py` checks the same items with fixed
   tolerances.
 
@@ -30,7 +36,10 @@
 
 * **GPU gate**: `python validation/gpu_gate.py <log.md>` runs all GPU
   tests and all examples on an NVIDIA GPU and writes a short Markdown
-  log for the phase-gate record (see `docs/contributing/index.md`).
+  log for the phase-gate record (see `docs/contributing/index.md`). The
+  pytest step has a timeout of 3600 s (`--pytest-timeout SECONDS`). A
+  skipped GPU test is not a pass: the log lists the skip reasons, ends with
+  "GPU gate: INCOMPLETE" and the exit code is 3.
 
 The references are in `ventorum/reference/analytic.py` (with citations) and
 the loader with the provenance check is in
