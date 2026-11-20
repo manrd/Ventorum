@@ -93,7 +93,7 @@ The Prandtl-Glauert rule scales every section pressure coefficient by $1/\beta$ 
   C_{m0}(M) = \frac{C_{m0}(0)}{\beta} .
   ```
 
-  A strip on a camber-line lattice gets its camber moment from the loads of the mean surface, which the stretched lattice already scales. A tabulated airfoil keeps its table moment: the section $C_m$ of a table is not scaled by $1/eta$, because a table belongs to its own Mach number (the Mach number of the measurement or of the section analysis that made it). For a flight Mach number above 0.3, give a table made at that Mach number.
+  A strip on a camber-line lattice gets its camber moment from the loads of the mean surface, which the stretched lattice already scales. A tabulated airfoil keeps its table moment: the section $C_m$ of a table is not scaled by $1/\beta$, because a table belongs to its own Mach number (the Mach number of the measurement or of the section analysis that made it). For a flight Mach number above 0.3, give a table made at that Mach number.
 
 - The effective section angle, found from the strip lift with the compressible section slope $a_0/\beta$:
 
