@@ -121,6 +121,7 @@ from ventorum.panel3d.mesh import (
     _check_no_node_displacements,
     _steep_root,
     check_contact,
+    combine_wake_cp_frac,
     mesh_lifting_surface,
 )
 from ventorum.panel3d import cache as panel_cache
@@ -380,8 +381,12 @@ def _combined_metadata(subs: list[PanelMesh]) -> dict:
             out[name] = np.concatenate([np.asarray(getattr(m, name), dtype=int) for m in subs])
     if "root_scale_warning" in names:
         out["root_scale_warning"] = any(getattr(m, "root_scale_warning", False) for m in subs)
-    if "wake_cp_frac" in names and subs and all(getattr(m, "wake_cp_frac", None) is not None for m in subs):
-        out["wake_cp_frac"] = np.concatenate([np.asarray(m.wake_cp_frac, dtype=float) for m in subs])
+    if "wake_cp_frac" in names and subs:
+        # The one merge rule of the mesh module: a mesh without fractions gets
+        # the midpoint 0.5 for its own strips only, the others keep theirs.
+        cp = combine_wake_cp_frac(subs)
+        if cp is not None:
+            out["wake_cp_frac"] = cp
     return out
 
 

@@ -378,3 +378,24 @@ def test_combine_wake_cp_frac_pads_only_the_mesh_without_fractions() -> None:
     both = mesh_aircraft(ac, coords, **kw)
     parts = [mesh_lifting_surface(s, c, **kw) for s, c in zip(ac.surfaces, coords)]
     np.testing.assert_array_equal(both.wake_cp_frac, combine_wake_cp_frac(parts))
+
+
+def test_combined_metadata_keeps_the_fractions_of_the_built_meshes() -> None:
+    """The combined mesh of the solver keeps the fractions of the built meshes.
+
+    Before, one mesh without fractions made the combined mesh drop the
+    fractions of all meshes, so every strip got the midpoint rule.
+    """
+    from ventorum.panel3d.mesh import combine_wake_cp_frac
+    from ventorum.solvers.panel3d import _combined_metadata
+
+    surf = _rect_wing(semi_span=4.0, chord=1.0)
+    built = mesh_lifting_surface(surf, airfoil("0012").coords, n_span=12, n_chord=6, spacing="auto", half=False)
+    user = PanelMesh(nodes=built.nodes, panels=built.panels, component=built.component, kind=built.kind,
+                     wake_edges=built.wake_edges, half=False, tip=built.tip)
+    out = _combined_metadata([built, user])
+    np.testing.assert_array_equal(out["wake_cp_frac"], combine_wake_cp_frac([built, user]))
+    assert not np.allclose(out["wake_cp_frac"][: len(built.wake_edges)], 0.5)
+    assert "wake_cp_frac" not in _combined_metadata([user, user])
+    np.testing.assert_array_equal(_combined_metadata([built, built])["wake_cp_frac"],
+                                  np.concatenate([built.wake_cp_frac, built.wake_cp_frac]))
