@@ -284,13 +284,15 @@ def test_gpu_agrees_with_cpu():
     if not gpu.available():
         pytest.skip(f"GPU pipeline unavailable: {gpu.unavailable_reason()}")
     cond = _cond(alpha_deg=4.0, h=0.3, phi_deg=2.0, beta_deg=1.0)
-    gpu.set_device("cpu")
-    cpu = vt.height_derivatives(_ac(), cond, SETT)
-    gpu.set_device("gpu")
+    old_device = gpu.get_device()
     try:
+        gpu.set_device("cpu")
+        cpu = vt.height_derivatives(_ac(), cond, SETT)
+        gpu.set_device("gpu")
         on_gpu = vt.height_derivatives(_ac(), cond, SETT)
     finally:
-        gpu.set_device("cpu")
+        # Restore the device of the session, so the next test is not changed.
+        gpu.set_device(old_device)
     assert on_gpu.device == "gpu"
     assert np.allclose(on_gpu.matrix, cpu.matrix, rtol=1e-3, atol=1e-3)
     assert on_gpu.irodov["margin"] == pytest.approx(cpu.irodov["margin"], abs=2e-3)
