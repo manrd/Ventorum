@@ -6,6 +6,56 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Before version 1.0.0,
 a minor version can change a public interface.
 
+## [Unreleased]
+
+### Changed
+
+- RESULT CHANGE. Fourier solver: the reported aspect ratio and span efficiency use `b_ref` and `S_ref`, as the
+  lifting lines do. With a user `b_ref` of 8 m on a 10 m rectangular wing, AR goes from 10.0 to 6.4 and e from
+  0.921 to 1.439. CL and CDi do not change.
+- RESULT CHANGE. Irodov verdict: when the height slope `CL_h` is below the round-off noise bound of the solve
+  precision, the verdict is "not available" with a note. Before, far from the ground (h/c 100 and more in float32)
+  the verdict was noise. Nothing changes at h/c 50 or less, or in float64.
+- RESULT CHANGE. `derivative_matrix(groups=("static",))` in ground effect uses the static derivatives only, not all
+  height cases. A bank step no longer refuses the static columns near the ground; with an automatic chordwise
+  count near the ground CL_alpha moves by up to 0.1 % (the count follows the static cases). A static-only result
+  has no Irodov diagnostic.
+- RESULT CHANGE. With the automatic device, vortex-lattice and linear lifting-line solves with
+  `report_condition=True` stay on the CPU, so the condition estimate is given. CL changes at the float32 level.
+- RESULT CHANGE. Agent span fit: the automatic spanwise count is also fitted when another surface sets its own
+  `n_panels`. Before, such a call was refused above the work budget or got a coarse chordwise count.
+- RESULT CHANGE. 3D panel solver: when one surface mesh has no wake control-point fractions (a user mesh), only
+  its strips take the midpoint rule in the Trefftz plane; before, all strips did.
+- A user `S_ref` more than 100 times larger or smaller than the total planform area is refused with `ValueError`
+  (a unit error, for example mm^2 for m^2).
+- The Fourier solver accepts a tapered wing with a swept leading edge when the quarter-chord line is unswept.
+- `find_optimal` follows the objective (max or min) for every metric; an unknown metric or objective raises
+  `ValueError`.
+- Strips of the viscous alpha correction beyond the end of a cut polar table are flagged "outside polar table",
+  not "post-stall". CL and trust do not change.
+- The agent tools size their parallel plan with the solved mesh, and a tuning run and agent tool calls do not run
+  at the same time in one process.
+- `validation/run_verification.py` exits with 1 when a check fails. `validation/gpu_gate.py` reports skipped tests
+  as "skip" (exit code 3, log "GPU gate: INCOMPLETE") and has a timeout for the test step (`--pytest-timeout`).
+  `validation/compare_reports.py` sees a change of a round-off residual.
+- The tests do not read the tuner profile of the machine; tests of the profile opt in.
+
+### Fixed
+
+- `transform_lattice` moves the camber frames of a mean-line lattice, so the adjoint of a moved lattice works.
+- 3D panel trust takes the spanwise count of the main surface for its mesh warnings.
+- `height_derivatives` checks the ground clearance of each case on the solve lattice, not only on the 4-panel
+  probe; a note gives a difference of more than 1 %.
+- The trailing-edge source of Ventorum-2D and the wake builder of the panel solver take explicit inputs instead of
+  guessing them from an array size or an array identity.
+
+### Documentation
+
+- The component breakdown plot states that its surface induced drag is the near-field value.
+- The ground sweep docstring and the theory page state that CL_alpha and Cl_phi are secant fits.
+- The paneling rule of the Ventorum-2D polar source for coordinate input is stated.
+- Three formulas of the theory pages had a control character in place of a backslash.
+
 ## [0.6.2] - 2026-11-17
 
 ### Added
