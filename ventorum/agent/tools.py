@@ -1462,7 +1462,7 @@ def _irodov(ac, ok, alpha, phi, beta, V, rho, rp, fixed, c_ref, dl, only_lowest)
                    x_alpha_over_c=rnd(xa / c_ref, 5) if xa is not None else None,
                    x_h_over_c=rnd(xh / c_ref, 5) if xh is not None else None,
                    irodov_margin=rnd(mg, 5),
-                   verdict=_irodov_verdict(rnd(mg, 12), err if hd is None else "a lift slope is near zero"),
+                   verdict=_irodov_verdict(rnd(mg, 12), err if hd is None else "a lift slope is near zero or at the round-off level of the solve"),
                    h_step_m=rnd(hd.steps["h_m"], 6) if hd is not None else None)
         if dl == "full" and hd is not None:
             row["derivatives"] = {"CL_alpha_per_rad": rnd(hd.derivatives["CL_alpha"]),
@@ -1993,7 +1993,7 @@ def stability_derivatives(
         irodov = {
             "x_alpha_m": rnd(iro.get("x_alpha_m"), 5), "x_h_m": rnd(iro.get("x_h_m"), 5),
             "irodov_margin": rnd(mg, 5),
-            "verdict": _irodov_verdict(rnd(mg, 12), hd_err if hd is None else "a lift slope is near zero"),
+            "verdict": _irodov_verdict(rnd(mg, 12), hd_err if hd is None else "a lift slope is near zero or at the round-off level of the solve"),
             "h_step_m": rnd(hd.steps["h_m"], 6) if hd is not None else None,
             "alpha_step_deg": 0.5,
             "pivot_point_m": [rnd(v, 5) for v in ac.moment_reference()],

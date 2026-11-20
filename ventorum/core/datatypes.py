@@ -1395,9 +1395,11 @@ class SolverSettings:
         number), not the exact value. Its cost is O(n^2) after the
         factorisation, but the LU path of scipy replaces the solve of numpy,
         so the circulation can differ in the last bits and a batch solves
-        its matrices one at a time. The GPU pipelines do not give the
-        estimate: ``details["condition_number"]`` is then None and
-        ``details["notes"]`` says so. The other solvers ignore it. An
+        its matrices one at a time. With the automatic device, these solves
+        stay on the CPU, so the estimate is given. The GPU pipelines (device
+        ``"gpu"``) do not give the estimate: ``details["condition_number"]``
+        is then None and ``details["notes"]`` says so. The other solvers
+        ignore it. An
         estimate above 1e10 (or not finite) gives a trust warning
         (:data:`ventorum.core.trust.CONDITION_NUMBER_WARNING`): about 10 of
         the 16 significant float64 digits of the circulation can be lost.
