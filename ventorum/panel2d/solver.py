@@ -503,7 +503,8 @@ def _mirror(p):
     return q
 
 
-def _te_source_stream_matrix(xp, nodes, layout: PanelLayout, field, xi, eta, L, ground: bool):
+def _te_source_stream_matrix(xp, nodes, layout: PanelLayout, field, xi, eta, L, ground: bool,
+                             field_is_nodes: bool = False):
     """Return the source stream matrix for trailing-edge gap panels.
 
     For a single body, this returns :func:`body_source_stream_matrix`
@@ -528,6 +529,11 @@ def _te_source_stream_matrix(xp, nodes, layout: PanelLayout, field, xi, eta, L, 
         Panel lengths, shape (..., 1, Np) [m].
     ground : bool
         Add the mirror images about y = 0.
+    field_is_nodes : bool
+        True when the field points are the nodes of ``layout`` (in node
+        order). Only then the rows of each body get the branch of that
+        body. The caller sets this flag; the function does not guess it from
+        the point count, because other field points can have the same count.
 
     Returns
     -------
@@ -538,7 +544,7 @@ def _te_source_stream_matrix(xp, nodes, layout: PanelLayout, field, xi, eta, L, 
     if layout.n_bodies < 2:
         return src
     src = src * 1.0
-    is_nodes = field.shape[-2] == layout.n_nodes
+    is_nodes = bool(field_is_nodes)
     for b, p in enumerate(layout.te_panel):
         if p < 0:
             continue
@@ -591,7 +597,8 @@ def vortex_stream_matrix(nodes, layout: PanelLayout, field=None, ground: bool = 
         Matrix of shape (..., Nc, N) [m].
     """
     xp = _xp(nodes)
-    if field is None:
+    field_is_nodes = field is None
+    if field_is_nodes:
         field = nodes
     ps, pe = panel_ends(nodes, layout)
     xi, eta, L, _ = _local(xp, field, ps, pe)
@@ -604,7 +611,7 @@ def vortex_stream_matrix(nodes, layout: PanelLayout, field=None, ground: bool = 
         a2 = a2 - b2
     out = panel_to_node(a1, a2, layout)
     if any(p >= 0 for p in layout.te_panel):
-        src = _te_source_stream_matrix(xp, nodes, layout, field, xi, eta, L, ground)
+        src = _te_source_stream_matrix(xp, nodes, layout, field, xi, eta, L, ground, field_is_nodes=field_is_nodes)
         out = out * 1.0
         for b, p in enumerate(layout.te_panel):
             if p < 0:
@@ -641,7 +648,8 @@ def body_source_stream_matrix(nodes, layout: PanelLayout, field=None, ground: bo
         Matrix of shape (..., Nc, Np) [m].
     """
     xp = _xp(nodes)
-    if field is None:
+    field_is_nodes = field is None
+    if field_is_nodes:
         field = nodes
     ps, pe = panel_ends(nodes, layout)
     xi, eta, L, _ = _local(xp, field, ps, pe)

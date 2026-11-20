@@ -685,3 +685,29 @@ def test_tandem_blunt_trailing_edge_smooth_across_gap_strip():
     assert np.max(np.abs(cl_open - cl_closed)) < 2e-3
     assert np.max(np.abs(np.diff(circ2_open))) < 1e-4
 
+
+
+@pytest.mark.parametrize("ground", [False, True])
+def test_field_points_with_the_node_count_get_no_per_body_branch(ground):
+    """Regression: the per-body branch of the trailing-edge source was chosen by the point count.
+
+    Field points that are not the nodes but have the node count got the branch
+    correction of the nodes. Each row of the stream matrix must depend only on
+    its own field point: the matrix of all points equals the rows of one-point
+    calls.
+    """
+    blunt = airfoil("4412", n_points=81, closed_te=False).coords
+    flap = 0.3 * airfoil("0012", n_points=41, closed_te=False).coords + np.array([1.05, -0.1])
+    bodies = [blunt, flap]
+    if ground:
+        bodies = sv.place_in_ground_effect(bodies, 4.0, 0.3, "pivot", (0.25, 0.0))
+    layout = sv.panel_layout(bodies)
+    nodes = np.concatenate(bodies)
+    n = layout.n_nodes
+    rng = np.random.default_rng(0)
+    lo = np.min(nodes[:, 1]) if ground else -0.2
+    field = np.stack([rng.uniform(0.9, 1.5, n), rng.uniform(lo, lo + 0.25, n)], 1)
+    full = sv.vortex_stream_matrix(nodes, layout, field=field, ground=ground)
+    rows = np.concatenate([sv.vortex_stream_matrix(nodes, layout, field=field[i:i + 1], ground=ground)
+                           for i in range(n)])
+    assert np.max(np.abs(full - rows)) <= 1e-14 * np.max(np.abs(rows))
