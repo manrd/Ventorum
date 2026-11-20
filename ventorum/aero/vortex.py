@@ -72,6 +72,7 @@ References
 
 from __future__ import annotations
 
+import contextlib
 import importlib.util
 import os
 import sys
@@ -1183,6 +1184,49 @@ def horseshoe_velocity_tensor(P: np.ndarray, hs: HorseshoeSet, targets: Targets 
 
 # Largest cached tensor [bytes]. A larger problem is solved without the cache.
 _CACHE_LIMIT_BYTES = 512 * 1024 ** 2
+
+
+class KernelCache(dict):
+    """Kernel cache of one sweep: the fixed parts of the vortex system, by key.
+
+    A dict that also accepts weak references, so that a test or a caller
+    can see when the cache is freed. :func:`kernel_cache_scope` gives a
+    lattice a new kernel cache for one sweep only.
+    """
+
+    __slots__ = ("__weakref__",)
+
+
+@contextlib.contextmanager
+def kernel_cache_scope(lattice):
+    """Give *lattice* a new kernel cache for the duration of the block.
+
+    The block (a sweep) owns the cache. At the end of the block, the
+    lattice gets its old ``kernel_cache`` value again (usually None).
+    The results of the sweep keep the lattice in ``details["lattice"]``,
+    but that lattice no longer refers to the kernel cache. Thus kept
+    results do not keep the fixed influence matrices alive (about 38
+    bytes per panel squared). The cache only changes how the fixed part
+    is computed, not the values: the results of the sweep do not change.
+
+    Parameters
+    ----------
+    lattice : VortexLattice
+        The lattice of the sweep (a copy that the caller owns, for example
+        from :func:`ventorum.geometry.lattice_cache.get_or_build`).
+
+    Yields
+    ------
+    KernelCache
+        The new kernel cache, set as ``lattice.kernel_cache`` in the block.
+    """
+    previous = lattice.kernel_cache
+    cache = KernelCache()
+    lattice.kernel_cache = cache
+    try:
+        yield cache
+    finally:
+        lattice.kernel_cache = previous
 
 
 def influence_matrix(

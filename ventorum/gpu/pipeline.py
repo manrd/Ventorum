@@ -99,6 +99,19 @@ def solve_batch(solver, lattice, conditions: list, settings, S_ref: float, b_ref
         the fallback to the CPU path, for example
         ``"called inside a CPU worker thread"``. Returned only when
         *return_reason* is True.
+
+    Notes
+    -----
+    GPU memory: after a GPU solve, :func:`ventorum.gpu.memory.trim` applies
+    the byte limit of the GPU data of the cached lattices. When the GPU
+    solve raises an out-of-memory error (:func:`is_out_of_memory`), the
+    GPU data of all cached lattices and of *lattice* are released
+    (:func:`ventorum.gpu.memory.release`) and the solve runs once more. A
+    second out-of-memory error gives one RuntimeWarning, and the function
+    returns None with the reason :data:`REASON_OUT_OF_MEMORY`: the caller
+    solves the cases on the CPU, and the dispatch record of each result
+    (``details["dispatch"]["reason"]``) gives that reason. Other errors are
+    not caught. The CPU results have the bits of a CPU solve.
     """
     if gpu.get_device() == "cpu":
         return (None, gpu._REASON_DEVICE_CPU) if return_reason else None
@@ -120,43 +133,91 @@ def solve_batch(solver, lattice, conditions: list, settings, S_ref: float, b_ref
         return (None, use_gpu_reason) if return_reason else None
     from ventorum.aero.system import is_symmetric_condition
     from ventorum.solvers.core import _unknown_map
+    from ventorum.gpu import memory
 
-    precision = gpu.get_precision()
-    K = len(conditions)
-    use_sym = getattr(settings, "use_symmetry", True)
-    explicit = [None] * K if grounds is None else list(grounds)
-    setups = [solver._case_setup(lattice, c, settings, c_ref, g, ref_point) for c, g in zip(conditions, explicit)]
-    # Groups of cases with the same unknown map, ground presence and symmetry:
-    # each group is one GPU batch. Cases with different Mach numbers or
-    # different free-stream directions form separate groups.
-    groups: dict[tuple, list[int]] = {}
-    for k, (c, st) in enumerate(zip(conditions, setups)):
-        umap = _unknown_map(lattice, c, st[0], use_sym)
-        has_mach = getattr(c, "mach", None) is not None and c.mach > 0.0
-        mach_key = (float(c.mach), float(c.alpha), float(c.beta)) if has_mach else None
-        key = (id(umap), st[0] is not None, is_symmetric_condition(c, st[0]), mach_key)
-        groups.setdefault(key, []).append(k)
-    if len(groups) > 1 and continuation and solver.name == "nonlinear":
-        return (None, "continuation needs the cases in order: the CPU path") if return_reason else None
-    solved = []
-    for idx in groups.values():
-        sub, group_reason = _solve_group(solver, lattice, [conditions[k] for k in idx], [setups[k] for k in idx], settings,
-                                         S_ref, b_ref, c_ref, ref_point, continuation, gamma0, precision, use_sym)
-        if sub is None:
-            return (None, group_reason) if return_reason else None
-        solved.append((idx, sub))
-    share = (time.perf_counter() - t0) / K
-    out: list = [None] * K
-    reason = use_gpu_reason if gpu.get_device() == "auto" else "device setting is gpu"
-    for idx, (arrays, infos, umap, cpu_cases) in solved:
-        res = _results(solver, lattice, [conditions[k] for k in idx], arrays, [setups[k] for k in idx], umap, b_ref,
-                       c_ref, main_surface, t0, share, precision, infos=infos, ref_point=ref_point, S_ref=S_ref,
-                       dispatch_reason=reason, cpu_cases=cpu_cases)
-        for k, r in zip(idx, res):
-            out[k] = r
-    if return_reason:
-        return out, reason
-    return out
+    # One more try after an out-of-memory error of the GPU, with the GPU data
+    # of the cached lattices released (see ventorum.gpu.memory). A second
+    # error sends the cases to the CPU path. The loop is in this function,
+    # so the warnings of the solve keep their stack levels.
+    message = ""
+    for _attempt in range(2):
+        try:
+            precision = gpu.get_precision()
+            K = len(conditions)
+            use_sym = getattr(settings, "use_symmetry", True)
+            explicit = [None] * K if grounds is None else list(grounds)
+            setups = [solver._case_setup(lattice, c, settings, c_ref, g, ref_point) for c, g in zip(conditions, explicit)]
+            # Groups of cases with the same unknown map, ground presence and symmetry:
+            # each group is one GPU batch. Cases with different Mach numbers or
+            # different free-stream directions form separate groups.
+            groups: dict[tuple, list[int]] = {}
+            for k, (c, st) in enumerate(zip(conditions, setups)):
+                umap = _unknown_map(lattice, c, st[0], use_sym)
+                has_mach = getattr(c, "mach", None) is not None and c.mach > 0.0
+                mach_key = (float(c.mach), float(c.alpha), float(c.beta)) if has_mach else None
+                key = (id(umap), st[0] is not None, is_symmetric_condition(c, st[0]), mach_key)
+                groups.setdefault(key, []).append(k)
+            if len(groups) > 1 and continuation and solver.name == "nonlinear":
+                return (None, "continuation needs the cases in order: the CPU path") if return_reason else None
+            solved = []
+            for idx in groups.values():
+                sub, group_reason = _solve_group(solver, lattice, [conditions[k] for k in idx], [setups[k] for k in idx], settings,
+                                                 S_ref, b_ref, c_ref, ref_point, continuation, gamma0, precision, use_sym)
+                if sub is None:
+                    return (None, group_reason) if return_reason else None
+                solved.append((idx, sub))
+            share = (time.perf_counter() - t0) / K
+            out: list = [None] * K
+            reason = use_gpu_reason if gpu.get_device() == "auto" else "device setting is gpu"
+            for idx, (arrays, infos, umap, cpu_cases) in solved:
+                res = _results(solver, lattice, [conditions[k] for k in idx], arrays, [setups[k] for k in idx], umap, b_ref,
+                               c_ref, main_surface, t0, share, precision, infos=infos, ref_point=ref_point, S_ref=S_ref,
+                               dispatch_reason=reason, cpu_cases=cpu_cases)
+                for k, r in zip(idx, res):
+                    out[k] = r
+            memory.trim()
+            return (out, reason) if return_reason else out
+        except Exception as exc:  # noqa: BLE001 - only the out-of-memory errors are caught
+            if not is_out_of_memory(exc):
+                raise
+            message = str(exc).splitlines()[0] if str(exc) else type(exc).__name__
+        # Outside the except block: the traceback (and the tensors of its
+        # frames) is free before the GPU data are released.
+        memory.drop(lattice)
+        memory.release()
+    warnings.warn(f"The GPU ran out of memory twice ({message}). The cases are solved on the CPU; the "
+                  "results give the reason in details['dispatch']['reason'].", RuntimeWarning, stacklevel=4)
+    return (None, REASON_OUT_OF_MEMORY) if return_reason else None
+
+
+#: Dispatch reason of the CPU path after two GPU out-of-memory errors.
+REASON_OUT_OF_MEMORY = ("gpu: out of memory twice (the second time after the release of the GPU data of the "
+                        "cached lattices); solved on the cpu")
+
+
+def is_out_of_memory(exc: BaseException) -> bool:
+    """Return True if *exc* is an out-of-memory error of the GPU (PyTorch, cuBLAS or cuSOLVER).
+
+    Parameters
+    ----------
+    exc : BaseException
+        The error of a GPU solve.
+
+    Returns
+    -------
+    bool
+        True for ``torch.OutOfMemoryError``, and for a RuntimeError or a
+        MemoryError whose message says "out of memory" or "ALLOC_FAILED".
+    """
+    import torch
+
+    oom = getattr(torch, "OutOfMemoryError", None) or getattr(torch.cuda, "OutOfMemoryError", None)
+    if oom is not None and isinstance(exc, oom):
+        return True
+    if isinstance(exc, (RuntimeError, MemoryError)):
+        text = str(exc).lower()
+        return "out of memory" in text or "alloc_failed" in text
+    return False
 
 
 def _solve_group(solver, lattice, conditions: list, setups: list, settings, S_ref: float, b_ref: float,

@@ -33,6 +33,7 @@ from typing import Any
 
 import numpy as np
 
+from ventorum.aero.vortex import kernel_cache_scope
 from ventorum.core.datatypes import Aircraft, FlightCondition, LiftingSurface, SolverResult, SolverSettings
 from ventorum.core.trust import tip_edge_suction_note
 from ventorum.solvers.lattice_base import LARGE_ROTATION_FRACTION
@@ -274,7 +275,6 @@ def rate_derivatives(
     b_ref, c_ref = float(ac.b_ref), float(ac.c_ref)
     V = float(condition.V_inf)
     lattice = solver.build(ac, settings, condition, None, rp, fingerprint=fp)
-    lattice.kernel_cache = {}   # the rate cases share the wake direction: one influence matrix
 
     to_rate = {"p": 2.0 * V / b_ref, "q": 2.0 * V / c_ref, "r": 2.0 * V / b_ref}
     conds = [condition]
@@ -282,8 +282,11 @@ def rate_derivatives(
         base_rate = float(getattr(condition, name))
         for sgn in (1.0, -1.0):
             conds.append(dataclasses.replace(condition, **{name: base_rate + sgn * step * to_rate[name]}))
-    results = solver.solve_batch(lattice, conds, settings, ac.S_ref, b_ref, c_ref, ref_point=rp,
-                                 main_surface=geo["main"], continuation=False)
+    # The rate cases share the wake direction: one influence matrix. The
+    # results do not keep the kernel cache (see kernel_cache_scope).
+    with kernel_cache_scope(lattice):
+        results = solver.solve_batch(lattice, conds, settings, ac.S_ref, b_ref, c_ref, ref_point=rp,
+                                     main_surface=geo["main"], continuation=False)
     for r, c in zip(results, conds):
         r.condition = c
     base = results[0]

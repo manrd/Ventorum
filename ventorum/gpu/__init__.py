@@ -34,6 +34,19 @@ Selection
 An unknown value of ``VENTORUM_DEVICE`` or ``VENTORUM_GPU_PRECISION`` gives
 one warning with the accepted values, and ``"auto"`` is used.
 
+Memory
+------
+The GPU data of the cached lattices (lattice arrays and the GPU kernel
+cache) have a byte limit: by default a quarter of the total GPU memory,
+changed with :func:`set_cache_limit` or the environment variable
+``VENTORUM_GPU_CACHE_BYTES``. After each GPU batch the least recently used
+lattices above the limit lose their GPU data (the CPU lattice stays
+cached). :func:`release` frees the GPU data of all cached lattices and the
+cached blocks of the PyTorch memory pool. A GPU solve that runs out of
+memory releases the GPU data and runs once more; a second out-of-memory
+error gives one warning, and the cases are solved on the CPU (the reason
+is in ``details["dispatch"]["reason"]``). See :mod:`ventorum.gpu.memory`.
+
 The GPU pipelines need the packages ``torch`` (with CUDA) and ``warp-lang``.
 Without them, or without a CUDA GPU, all solves run on the CPU.
 """
@@ -45,6 +58,8 @@ import math
 import os
 import threading
 import warnings
+
+from ventorum.gpu.memory import cache_bytes, get_cache_limit, release, set_cache_limit  # noqa: F401 - public API
 
 DEVICES = ("auto", "cpu", "gpu")
 PRECISIONS = ("auto", "float32", "float64")

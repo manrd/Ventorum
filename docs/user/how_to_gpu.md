@@ -77,6 +77,28 @@ The nonlinear lifting line on the GPU solves all cases together with the Newton 
 
 Large batches are split into chunks of cases, so the GPU memory stays bounded. The results do not depend on the chunks.
 
+The GPU keeps the data of each cached lattice (the lattice arrays and the GPU kernel cache of the bound vortices and the chordwise legs), so that the next solve of the same geometry does not copy and compute them again. A lattice of 4000 panels keeps about 300 MiB, and the lattice cache holds up to 8 lattices. These rules limit that memory:
+
+* The GPU data of all cached lattices have a byte limit. The default is a quarter of the total memory of the GPU. To change it, set the environment variable `VENTORUM_GPU_CACHE_BYTES` (a number of bytes, or a number with the unit `KiB`, `MiB` or `GiB`, for example `800MiB`) or call `gpu.set_cache_limit(...)`. `gpu.get_cache_limit()` gives the limit in bytes and `gpu.cache_bytes()` the bytes that the cached lattices keep now.
+* After each GPU batch, the least recently used lattices lose their GPU data until the total is at or below the limit. The CPU lattice stays in the lattice cache. The most recent lattice loses its GPU data only when it alone is above the limit. A limit of 0 keeps no GPU data after a batch.
+* A lattice that leaves the lattice cache also loses its GPU data. Thus a result that you keep (it keeps its lattice in `details["lattice"]`) does not keep GPU memory.
+* `gpu.release()` frees the GPU data of all cached lattices and gives the cached blocks of the PyTorch memory pool back to the driver. Use it in a long-lived process (for example the MCP server) before other GPU work.
+* When a GPU solve runs out of memory, Ventorum releases the GPU data of the cached lattices and runs the solve once more. If it runs out of memory again, the cases are solved on the CPU, with one `RuntimeWarning`. Each result then gives the reason in `details["dispatch"]["reason"]` (device `"cpu"`).
+
+```python
+import ventorum as vt
+from ventorum import gpu
+
+gpu.set_cache_limit("1GiB")   # or: export VENTORUM_GPU_CACHE_BYTES=1GiB
+results = vt.analyze_sweep(wing, alphas, solver="vlm", n_panels=250)
+print(gpu.cache_bytes() / 2**20, "MiB kept on the GPU")
+gpu.release()                 # free the GPU data of all cached lattices
+```
+
+The release of GPU data never changes a result: the next GPU solve makes the same data again with the same arithmetic.
+
+The kernel cache of a CPU sweep (about 38 bytes per panel squared) belongs to the sweep. The results of the sweep keep the lattice, but not the kernel cache, so kept results do not keep that memory.
+
 ## Speed
 
 * A GPU that was idle runs at low clocks for the first part of the next work (on the test machine, about 0.3 s of GPU work). A short solve after an idle time can then take some times longer than the same solve in a series. The tuner measures a GPU in use.

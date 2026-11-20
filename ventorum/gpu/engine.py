@@ -12,7 +12,8 @@ Data on the GPU
 ---------------
 :class:`DeviceLattice` holds the lattice arrays on the GPU, once per lattice
 and precision (it is kept in ``lattice.geom_cache``, as the other
-lattice-only data). The part of the system from the bound vortices and the
+lattice-only data; :mod:`ventorum.gpu.memory` limits the bytes that the
+cached lattices keep on the GPU). The part of the system from the bound vortices and the
 chordwise legs does not depend on the flight condition: it is computed once
 per lattice and unknown map (the GPU kernel cache), and each case adds its
 wake legs and ground images.
@@ -465,6 +466,10 @@ def device_lattice(lattice, precision: str, mach_transform: MachTransform | None
     A stretched lattice (Mach > 0) depends on the Mach number and the
     free-stream direction. Only the most recent one is kept per precision,
     so a long sweep over many angles does not fill the GPU memory.
+
+    The keys start with one of :data:`ventorum.gpu.memory.GPU_KEYS`. The
+    GPU data of the cached lattices have a byte limit, and
+    :func:`ventorum.gpu.release` removes them (see :mod:`ventorum.gpu.memory`).
     """
     if mach_transform is None:
         key = ("gpu_lattice", DEVICE, precision)
