@@ -526,7 +526,8 @@ class LatticeSolver(BaseSolver):
         ground effect). Every solve path (single case, sweep, batch,
         CPU and GPU) passes here, so the flight condition of each case is
         checked here: :func:`ventorum.utils.validation.check_flight_condition_values`
-        refuses for example a zero or negative ``V_inf`` with ValueError. It
+        refuses for example a zero or negative ``V_inf`` with
+        :class:`~ventorum.core.errors.InputError` (a ValueError). It
         gives no warnings, so a condition that an entry point has checked
         already does not give its warnings again.
         """

@@ -89,7 +89,7 @@ Every tool that solves gives the trust rating and the warnings of the solver res
 
 | Exception | `error.type` | Meaning |
 | --- | --- | --- |
-| `ValueError` from the input checks (includes `InputError` and `VentorumError`, for example an absurd position such as 1e300 m) | `invalid_input` | The input does not agree with the schema or the validity limits. |
+| `ValueError` from the input checks (includes `InputError` and `VentorumError`, for example an absurd position such as 1e300 m). `InputError` is one class, `ventorum.core.errors.InputError` (also `ventorum.InputError` and `ventorum.agent.InputError`); the tool checks and the solver input checks raise it. | `invalid_input` | The input does not agree with the schema or the validity limits. |
 | `numpy.linalg.LinAlgError` | `invalid_input` | The linear system is singular. This usually happens with overlapping or degenerate geometry; check the mesh for duplicate or zero-area panels. |
 | `ValidityError` | `invalid_method` | The selected method is not valid for this case (for example the Fourier solver in ground effect). |
 | `GroundStrikeError` | `ground_strike` | The aircraft touches or crosses the ground plane; no result is computed. |

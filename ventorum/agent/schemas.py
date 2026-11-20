@@ -45,12 +45,10 @@ from ventorum.core.datatypes import (
     WingSection,
 )
 from ventorum.core.constants import RHO_SL
-from ventorum.core.errors import VentorumError
+# The tool input does not agree with the schema: the package input error,
+# re-exported here so that the agent name stays valid.
+from ventorum.core.errors import InputError  # noqa: F401
 from ventorum.utils.validation import MIN_AREA_M2, MIN_CHORD_M, MIN_SPAN_M, MIN_SPEED_M_S
-
-
-class InputError(VentorumError):
-    """The tool input does not agree with the schema."""
 
 
 # Largest mesh that a tool solves: spanwise strips of all surfaces (both halves) x chordwise panels.
@@ -989,9 +987,9 @@ def build_aircraft_from_spec(
     for surf in ac.surfaces:
         try:
             validate_surface(surf)
-        except InputError:
-            raise
         except ValueError as exc:
+            # The package checks raise InputError too: the message gets the
+            # name of the tool argument in front, as for every check here.
             raise InputError(f"{w_name}: {exc}") from exc
     names = [surf.name for surf in ac.surfaces]
     repeated = sorted({n for n in names if names.count(n) > 1})
