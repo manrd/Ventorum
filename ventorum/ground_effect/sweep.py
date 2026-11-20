@@ -615,6 +615,11 @@ def _gpu_batch(ac, sett, cases, h_arr, a_arr, p_arr, V_inf, rho, rp, height_ref,
     if canonical not in ("vlm", "linear", "nonlinear"):
         fallback(f"solver '{canonical}' is not supported on GPU")
         return None
+    from ventorum.gpu.pipeline import REASON_REPORT_CONDITION, report_condition_on_cpu
+
+    if gpu.get_device() == "auto" and report_condition_on_cpu(canonical, sett):
+        fallback(REASON_REPORT_CONDITION)
+        return None
     solver = make_solver(canonical)
     first = cases[0]
     probe_cond = FlightCondition(V_inf=V_inf, alpha=float(np.radians(a_arr[first[1]])), rho=rho)

@@ -229,3 +229,69 @@ def test_large_condition_estimate_reaches_the_trust_of_the_result(solver, monkey
     # The default (no estimate) gives no check.
     plain = vt.analyze(ac, cond, vt.SolverSettings(solver_type=solver, n_panels=6))
     assert not any("condition number" in w for w in plain.totals.trust.warnings)
+
+
+@pytest.mark.parametrize("solver, on_cpu", [("vlm", True), ("linear", True), ("nonlinear", False)])
+def test_auto_device_keeps_the_condition_estimate_on_the_cpu(solver, on_cpu, monkeypatch):
+    """The automatic device keeps a solve with report_condition on the CPU, before the cost model.
+
+    Before the fix the automatic device could send the solve to the GPU,
+    where the estimate is None, although the settings asked for it.
+    """
+    from ventorum import gpu
+    from ventorum.gpu import pipeline
+
+    monkeypatch.setattr(gpu, "get_device", lambda: "auto")
+    monkeypatch.setattr(gpu, "use_gpu", lambda *a, **k: (False, "cost model"))
+    s = make_solver(solver)
+    ac = _wing()
+    st = vt.SolverSettings(solver_type=solver, report_condition=True)
+    cond = vt.FlightCondition(V_inf=30.0, alpha=np.radians(4.0))
+    lattice = s.build(ac, st, cond)
+    out, reason = pipeline.solve_batch(s, lattice, [cond], st, 1.0, 1.0, 1.0, np.zeros(3), 0, False, 0.0,
+                                       return_reason=True)
+    assert out is None
+    assert (reason == pipeline.REASON_REPORT_CONDITION) is on_cpu
+    st_off = vt.SolverSettings(solver_type=solver, report_condition=False)
+    _, reason_off = pipeline.solve_batch(s, lattice, [cond], st_off, 1.0, 1.0, 1.0, np.zeros(3), 0, False, 0.0,
+                                         return_reason=True)
+    assert reason_off == "cost model"
+
+
+@pytest.mark.gpu
+def test_auto_device_gives_the_estimate_on_a_gpu_machine():
+    """With the automatic device and a GPU, a solve with report_condition runs on the CPU and gives the value."""
+    from ventorum import gpu
+
+    if not gpu.available():
+        pytest.skip("No CUDA GPU.")
+    ac = _wing(n_panels=80)
+    cond = vt.FlightCondition(V_inf=30.0, alpha=np.radians(4.0))
+    old = gpu.get_device()
+    try:
+        gpu.set_device("auto")
+        res = vt.analyze(ac, cond, vt.SolverSettings(solver_type="vlm", n_panels=80, report_condition=True))
+    finally:
+        gpu.set_device(old)
+    assert res.details["dispatch"]["device"] == "cpu"
+    assert "report_condition" in res.details["dispatch"]["reason"]
+    assert res.details["condition_number"] is not None and np.isfinite(res.details["condition_number"])
+
+
+def test_auto_device_keeps_a_ground_sweep_with_the_estimate_on_the_cpu(monkeypatch):
+    """The GPU batch of a ground-effect sweep goes to the CPU when the settings ask for the estimate."""
+    from ventorum import gpu
+    from ventorum.ground_effect import sweep
+    from ventorum.gpu.pipeline import REASON_REPORT_CONDITION
+
+    def no_gpu(*args, **kwargs):
+        raise AssertionError("the cost model must not run")
+
+    monkeypatch.setattr(gpu, "get_device", lambda: "auto")
+    monkeypatch.setattr(gpu, "use_gpu", no_gpu)
+    st = vt.SolverSettings(solver_type="vlm", report_condition=True)
+    reason: list[str] = []
+    out = sweep._gpu_batch(_wing(), st, [(0, 0, 0)], np.array([0.5]), np.array([4.0]), np.array([0.0]),
+                           30.0, 1.225, np.zeros(3), "ref", reason_out=reason)
+    assert out is None
+    assert reason == [REASON_REPORT_CONDITION]
