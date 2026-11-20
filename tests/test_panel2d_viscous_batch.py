@@ -191,6 +191,7 @@ def test_batch_cuda():
     assert d_cd.max() < 1e-3
 
 
+@pytest.mark.slow
 def test_batch_reference_chord_is_checked():
     """ViscousCase takes the reference chord of solve_viscous; a value that is not positive raises ValueError."""
     coords = airfoil("0012").repanel(n_panels=80).coords
@@ -239,6 +240,7 @@ def test_batch_moment_point_is_checked():
         solve_viscous_batch([ViscousCase(coordinates=coords, alpha=0.0, Re=1e6, moment_ref=(0.25,))])
 
 
+@pytest.mark.slow
 def test_batch_takes_the_height_reference(monkeypatch):
     """ViscousCase.height_reference (default "pivot") reaches the coupling system; a bad value raises."""
     from ventorum.panel2d import coupling as cp

@@ -347,6 +347,7 @@ def test_superposition_exact_match():
     assert max_mu_diff < 1.0e-10, f"Superposition mu difference exceeds 1e-10: {max_mu_diff}"
 
 
+@pytest.mark.slow
 def test_rectangular_wing_ar8_naca0012():
     """Verify rectangular wing lift, symmetry, and Trefftz induced drag."""
     surf = _rectangular_wing_surface(semi_span=4.0, chord=1.0)

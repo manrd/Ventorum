@@ -151,6 +151,7 @@ def test_polar_sweep_reports_the_condition_number_per_angle(h_m):
     assert "condition_number_max" not in off["polar_summary"]
 
 
+@pytest.mark.slow
 def test_trim_reports_the_condition_number_of_the_trim_point():
     """Verify that report_condition gives the condition estimate of the reported trim point.
 
@@ -781,6 +782,7 @@ def test_ground_effect_ld_is_null_at_zero_drag():
     assert "None" not in p["executive_summary"]
 
 
+@pytest.mark.slow
 def test_mesh_limit_refuses_large_mesh():
     """Defect 2: a mesh larger than MAX_TOTAL_PANELS is refused before any solve."""
     from ventorum.agent.schemas import MAX_TOTAL_PANELS

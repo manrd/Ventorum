@@ -175,6 +175,16 @@ def _parity_cases() -> list[tuple]:
     return cases
 
 
+def _parity_params(slow_ids: tuple[str, ...] = ()) -> list:
+    """Return the parity cases as pytest parameters; the cases in *slow_ids* get the ``slow`` marker.
+
+    A case gets the marker when its test took more than about 5 s with
+    ``pytest --durations`` on the development machine.
+    """
+    return [pytest.param(*case, id=case[0], marks=pytest.mark.slow if case[0] in slow_ids else ())
+            for case in _parity_cases()]
+
+
 def _full_wrt(cond: vt.FlightCondition) -> tuple:
     wrt = ["nodes", "alpha", "beta", "V_inf", "rho", "phi", "sections", "reference"]
     if cond.h is not None:
@@ -250,7 +260,7 @@ def test_forward_parity(case_id: str, ac: vt.Aircraft, cond: vt.FlightCondition,
         assert res.symmetric is True
 
 
-@pytest.mark.parametrize("case_id,ac,cond,st", _parity_cases(), ids=[c[0] for c in _parity_cases()])
+@pytest.mark.parametrize("case_id,ac,cond,st", _parity_params(("vlm-wing-tail", "vlm-swept-fold", "vlm-swept-full")))
 def test_adjoint_vs_richardson(case_id: str, ac: vt.Aircraft, cond: vt.FlightCondition,
                                st: vt.SolverSettings, float64_precision) -> None:
     """check_gradients passes (1e-6) for all scalar inputs and 3 node directions.
@@ -565,7 +575,7 @@ def test_refusals(float64_precision) -> None:
                          outputs=("CL",), wrt=("alpha",))
 
 
-@pytest.mark.parametrize("case_id,ac,cond,st", _parity_cases(), ids=[c[0] for c in _parity_cases()])
+@pytest.mark.parametrize("case_id,ac,cond,st", _parity_params(("vlm-wing-tail",)))
 def test_float32_gate(case_id: str, ac: vt.Aircraft, cond: vt.FlightCondition,
                       st: vt.SolverSettings, float32_precision, cpu_device) -> None:
     """Float32 gradients (CPU) pass check_gradients with rtol 1e-3, node directions included.
@@ -1028,7 +1038,7 @@ def test_node_fold_equals_full(method: str, float64_precision) -> None:
 
 
 @pytest.mark.parametrize("backend", ["numba", "cython", "numpy"])
-@pytest.mark.parametrize("case_id,ac,cond,st", _parity_cases(), ids=[c[0] for c in _parity_cases()])
+@pytest.mark.parametrize("case_id,ac,cond,st", _parity_params(("vlm-wing-tail",)))
 def test_float32_gate_kernels(case_id: str, ac: vt.Aircraft, cond: vt.FlightCondition, st: vt.SolverSettings,
                               backend: str, float32_precision, cpu_device, restore_vjp_backend) -> None:
     """Float32 gradients with the compiled kernels pass the float32 gate with rtol 1e-3.
@@ -1249,7 +1259,8 @@ def test_kernels_target_on_end_point_float32() -> None:
         assert np.allclose(v32, v64, rtol=1e-5, atol=1e-6 * float(np.max(np.abs(v64)))), fn.__name__
 
 
-@pytest.mark.parametrize("device", ["cpu", pytest.param("gpu", marks=pytest.mark.gpu)])
+@pytest.mark.parametrize("device", [pytest.param("cpu", marks=pytest.mark.slow),
+                                    pytest.param("gpu", marks=pytest.mark.gpu)])
 def test_float32_reference_with_target_on_end_point(device: str, restore_vjp_backend) -> None:
     """Float32 reference gradients of a wing with a flap, a tail and a fin pass the forward check.
 
