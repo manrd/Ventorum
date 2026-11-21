@@ -26,9 +26,9 @@ airfoils, Lecture Notes in Engineering 54, Springer, 1989, pp. 1-12
 from __future__ import annotations
 
 import math
+import sys
 
 import numpy as np
-import torch
 
 __all__ = [
     "linear_vortex_stream_influence",
@@ -44,11 +44,21 @@ __all__ = [
 _TWO_PI = 2.0 * math.pi
 
 
+def _is_tensor(x) -> bool:
+    """Return True when ``x`` is a torch tensor.
+
+    No tensor can exist before torch is imported, so the check does not
+    import torch. The numpy paths work without torch installed.
+    """
+    torch = sys.modules.get("torch")
+    return torch is not None and isinstance(x, torch.Tensor)
+
+
 def _xp_of(*args):
     """Return torch when any argument is a tensor, else numpy."""
     for a in args:
-        if isinstance(a, torch.Tensor):
-            return torch
+        if _is_tensor(a):
+            return sys.modules["torch"]
     return np
 
 
@@ -56,16 +66,16 @@ def _as(xp, x, like=None):
     """Return ``x`` as a floating-point array of the ``xp`` module."""
     if xp is np:
         return np.asarray(x, dtype=np.float64)
-    if isinstance(x, torch.Tensor):
+    if _is_tensor(x):
         return x
     if like is not None:
-        return torch.as_tensor(x, dtype=like.dtype, device=like.device)
-    return torch.as_tensor(x, dtype=torch.float64)
+        return xp.as_tensor(x, dtype=like.dtype, device=like.device)
+    return xp.as_tensor(x, dtype=xp.float64)
 
 
 def _scalar_out(out, *inputs):
     """Return floats when every input is a scalar."""
-    if all(np.ndim(a) == 0 and not isinstance(a, torch.Tensor) for a in inputs):
+    if all(np.ndim(a) == 0 and not _is_tensor(a) for a in inputs):
         if isinstance(out, tuple):
             return tuple(float(o) for o in out)
         return float(out)
@@ -76,7 +86,7 @@ def _tiny(xp, a):
     """Return a tiny positive number of the precision of ``a``."""
     if xp is np:
         return 1e-300
-    return torch.finfo(a.dtype).tiny
+    return xp.finfo(a.dtype).tiny
 
 
 def _clean_eta(xp, eta, length):
@@ -162,8 +172,8 @@ def linear_vortex_stream_influence(xi, eta, length):
     """
     xp = _xp_of(xi, eta, length)
     x = _as(xp, xi)
-    e = _as(xp, eta, x if xp is torch else None)
-    L = _as(xp, length, x if xp is torch else None)
+    e = _as(xp, eta, x if xp is not np else None)
+    L = _as(xp, length, x if xp is not np else None)
     k = 1.0 / (4.0 * math.pi)
     i0 = _f0(xp, x, e) - _f0(xp, x - L, e)
     df1 = _f1(xp, x, e) - _f1(xp, x - L, e)
@@ -232,9 +242,9 @@ def source_panel_stream_influence(xi, eta, length, theta_panel=0.0):
     """
     xp = _xp_of(xi, eta, length, theta_panel)
     x = _as(xp, xi)
-    L = _as(xp, length, x if xp is torch else None)
-    e = _clean_eta(xp, _as(xp, eta, x if xp is torch else None), L)
-    th = _as(xp, theta_panel, x if xp is torch else None)
+    L = _as(xp, length, x if xp is not np else None)
+    e = _clean_eta(xp, _as(xp, eta, x if xp is not np else None), L)
+    th = _as(xp, theta_panel, x if xp is not np else None)
     val = _source_standard(xp, x, e, L)
     xc = xp.where(x < 0.0, 0.0 * x, xp.where(x > L, L + 0.0 * x, x))
     corr = xp.where(e < 0.0, L - xc, 0.0 * x)
@@ -264,8 +274,8 @@ def wake_source_stream_influence(xi, eta, length):
     """
     xp = _xp_of(xi, eta, length)
     x = _as(xp, xi)
-    L = _as(xp, length, x if xp is torch else None)
-    e = _clean_eta(xp, _as(xp, eta, x if xp is torch else None), L)
+    L = _as(xp, length, x if xp is not np else None)
+    e = _clean_eta(xp, _as(xp, eta, x if xp is not np else None), L)
     val = _source_standard(xp, x, e, L)
     out = val / _TWO_PI + xp.where(e < 0.0, L + 0.0 * x, 0.0 * x)
     return _scalar_out(out, xi, eta, length)
@@ -328,8 +338,8 @@ def linear_vortex_velocity_influence(xi, eta, length):
     """
     xp = _xp_of(xi, eta, length)
     x = _as(xp, xi)
-    e = _as(xp, eta, x if xp is torch else None)
-    L = _as(xp, length, x if xp is torch else None)
+    e = _as(xp, eta, x if xp is not np else None)
+    L = _as(xp, length, x if xp is not np else None)
     t2 = x - L
     r1 = x * x + e * e
     r2 = t2 * t2 + e * e
@@ -370,8 +380,8 @@ def source_panel_velocity_influence(xi, eta, length):
     """
     xp = _xp_of(xi, eta, length)
     x = _as(xp, xi)
-    L = _as(xp, length, x if xp is torch else None)
-    e = _clean_eta(xp, _as(xp, eta, x if xp is torch else None), L)
+    L = _as(xp, length, x if xp is not np else None)
+    e = _clean_eta(xp, _as(xp, eta, x if xp is not np else None), L)
     t2 = x - L
     r1 = x * x + e * e
     r2 = t2 * t2 + e * e
@@ -425,6 +435,8 @@ def compute_panel_local_coordinates_torch(colloc, p_start, p_end):
         ``(xi, eta, length, theta_panel)``: xi and eta of shape (..., Nc,
         Np) [m], length and theta_panel of shape (..., 1, Np) [m], [rad].
     """
+    import torch
+
     dx = p_end[..., :, 0] - p_start[..., :, 0]
     dy = p_end[..., :, 1] - p_start[..., :, 1]
     length = torch.hypot(dx, dy)

@@ -871,6 +871,9 @@ class PanelSolver:
 
     def _lu_solve(self, lu_info, rhs):
         """Solve with stored LU factors (numpy or torch right-hand sides)."""
+        if isinstance(lu_info[0], np.ndarray):
+            # SciPy factors: the CPU path does not need torch.
+            return scipy.linalg.lu_solve(lu_info, rhs)
         import torch
 
         if isinstance(lu_info[0], torch.Tensor):

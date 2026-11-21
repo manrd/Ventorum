@@ -76,3 +76,6 @@ build/
 
 # Agent benchmark run outputs (they stay outside the repository)
 agent_benchmark_runs/
+
+# Machine profile that the legacy autotuner writes to the working folder (machine identifiers).
+.ventorum_machine_config.json

@@ -37,14 +37,16 @@ reference chord of a flapped section).
 
 from __future__ import annotations
 
+import sys
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 import numpy as np
 import scipy.linalg
-import torch
 
 from ventorum.airfoil.geometry import AirfoilShape, SectionReference, leading_edge_index
 from ventorum.panel2d.influence import (
+    _is_tensor,
     compute_panel_local_coordinates_numpy,
     compute_panel_local_coordinates_torch,
     image_source_stream_influence,
@@ -52,6 +54,9 @@ from ventorum.panel2d.influence import (
     source_panel_stream_influence,
     wake_source_stream_influence,
 )
+
+if TYPE_CHECKING:
+    import torch
 
 __all__ = ["Panel2DResult", "solve_inviscid", "section_chord", "section_reference", "reference_point",
            "resolve_reference"]
@@ -262,7 +267,7 @@ def _as_numpy(body) -> np.ndarray:
     """Return the coordinates of a body (array, tensor or shape) as a float64 numpy array."""
     if isinstance(body, AirfoilShape):
         return body.coords
-    if isinstance(body, torch.Tensor):
+    if _is_tensor(body):
         return body.detach().cpu().numpy().astype(np.float64)
     return np.asarray(body, dtype=np.float64)
 
@@ -402,7 +407,7 @@ def check_point(value, name: str) -> tuple[float, float]:
 
 def _xp(a):
     """Return the array module of ``a``."""
-    return torch if isinstance(a, torch.Tensor) else np
+    return sys.modules["torch"] if _is_tensor(a) else np
 
 
 def _local(xp, field, ps, pe):
@@ -431,8 +436,8 @@ def _incidence(xp, layout: PanelLayout, like):
             p2[p] = 0.0
     if xp is np:
         return p1, p2
-    return (torch.as_tensor(p1, dtype=like.dtype, device=like.device),
-            torch.as_tensor(p2, dtype=like.dtype, device=like.device))
+    return (xp.as_tensor(p1, dtype=like.dtype, device=like.device),
+            xp.as_tensor(p2, dtype=like.dtype, device=like.device))
 
 
 def panel_to_node(a1, a2, layout: PanelLayout):
@@ -460,7 +465,7 @@ def panel_to_node(a1, a2, layout: PanelLayout):
         Influences per unit nodal gamma, shape (..., N).
     """
     xp = _xp(a1)
-    cat = np.concatenate if xp is np else torch.cat
+    cat = np.concatenate if xp is np else xp.cat
     zero = xp.zeros_like(a1[..., :1])
     blocks = []
     p0 = 0
@@ -491,8 +496,8 @@ def panel_ends(nodes, layout: PanelLayout):
     xp = _xp(nodes)
     if xp is np:
         return nodes[..., layout.idx1, :], nodes[..., layout.idx2, :]
-    i1 = torch.as_tensor(layout.idx1, device=nodes.device)
-    i2 = torch.as_tensor(layout.idx2, device=nodes.device)
+    i1 = xp.as_tensor(layout.idx1, device=nodes.device)
+    i2 = xp.as_tensor(layout.idx2, device=nodes.device)
     return nodes[..., i1, :], nodes[..., i2, :]
 
 
@@ -717,7 +722,7 @@ def system_matrix(nodes, layout: PanelLayout, ground: bool = False):
     if xp is np:
         A = np.zeros(batch + (nn + nb, nn + nb))
     else:
-        A = torch.zeros(batch + (nn + nb, nn + nb), dtype=nodes.dtype, device=nodes.device)
+        A = xp.zeros(batch + (nn + nb, nn + nb), dtype=nodes.dtype, device=nodes.device)
     A[..., :nn, :nn] = a_g
     for b, (s, e) in enumerate(layout.node_ranges):
         A[..., s:e, nn + b] = -1.0
@@ -778,8 +783,8 @@ def full_rhs(psi_rhs, layout: PanelLayout, columns: bool = False):
     """
     xp = _xp(psi_rhs)
     mask = condition_rows(layout)
-    if xp is torch:
-        mask = torch.as_tensor(mask, dtype=psi_rhs.dtype, device=psi_rhs.device)
+    if xp is not np:
+        mask = xp.as_tensor(mask, dtype=psi_rhs.dtype, device=psi_rhs.device)
     if columns:
         z_shape = tuple(psi_rhs.shape[:-2]) + (layout.n_bodies, psi_rhs.shape[-1])
         body = psi_rhs * mask[:, None]
@@ -790,7 +795,7 @@ def full_rhs(psi_rhs, layout: PanelLayout, columns: bool = False):
         axis = -1
     if xp is np:
         return np.concatenate([body, np.zeros(z_shape)], axis)
-    return torch.cat([body, torch.zeros(z_shape, dtype=psi_rhs.dtype, device=psi_rhs.device)], axis)
+    return xp.cat([body, xp.zeros(z_shape, dtype=psi_rhs.dtype, device=psi_rhs.device)], axis)
 
 
 def strip_check(nodes_np: np.ndarray, layout: PanelLayout) -> None:
@@ -833,7 +838,7 @@ def strip_check(nodes_np: np.ndarray, layout: PanelLayout) -> None:
 
 def _body_list(bodies):
     """Return the bodies as a list."""
-    if isinstance(bodies, (np.ndarray, torch.Tensor, AirfoilShape)):
+    if isinstance(bodies, (np.ndarray, AirfoilShape)) or _is_tensor(bodies):
         return [bodies]
     if isinstance(bodies, (list, tuple)):
         return list(bodies)
@@ -900,12 +905,12 @@ def _sigma_vector(sigma, n_panels, xp, like=None):
             raise ValueError(f"sigma must hold {n_panels} panel values, got {v.size}.")
         return None if np.all(v == 0.0) else v
     if isinstance(sigma, (list, tuple)):
-        v = torch.cat([torch.as_tensor(s, dtype=like.dtype, device=like.device).reshape(-1) for s in sigma])
+        v = xp.cat([xp.as_tensor(s, dtype=like.dtype, device=like.device).reshape(-1) for s in sigma])
     else:
-        v = torch.as_tensor(sigma, dtype=like.dtype, device=like.device).reshape(-1)
+        v = xp.as_tensor(sigma, dtype=like.dtype, device=like.device).reshape(-1)
     if v.numel() != n_panels:
         raise ValueError(f"sigma must hold {n_panels} panel values, got {v.numel()}.")
-    return None if not bool(torch.any(v != 0.0)) else v
+    return None if not bool(xp.any(v != 0.0)) else v
 
 
 def _loads(xp, gamma, nodes, nodes_ref, layout, chord_ref, x_ref, alpha_rad, ground):
@@ -915,8 +920,8 @@ def _loads(xp, gamma, nodes, nodes_ref, layout, chord_ref, x_ref, alpha_rad, gro
     ``nodes_ref`` the body-frame coordinates before rotation (moment).
     """
     ps, pe = panel_ends(nodes, layout)
-    i1 = layout.idx1 if xp is np else torch.as_tensor(layout.idx1, device=gamma.device)
-    i2 = layout.idx2 if xp is np else torch.as_tensor(layout.idx2, device=gamma.device)
+    i1 = layout.idx1 if xp is np else xp.as_tensor(layout.idx1, device=gamma.device)
+    i2 = layout.idx2 if xp is np else xp.as_tensor(layout.idx2, device=gamma.device)
     g1 = gamma[..., i1]
     g2 = gamma[..., i2]
     dx = pe[..., 0] - ps[..., 0]
@@ -929,8 +934,8 @@ def _loads(xp, gamma, nodes, nodes_ref, layout, chord_ref, x_ref, alpha_rad, gro
             dcirc[..., p] = layout.te_kv[b] * (gamma[..., s_] - gamma[..., e_ - 1]) * lens[..., p]
     pb = np.zeros((layout.n_panels, layout.n_bodies))
     pb[np.arange(layout.n_panels), layout.panel_body] = 1.0
-    if xp is torch:
-        pb = torch.as_tensor(pb, dtype=gamma.dtype, device=gamma.device)
+    if xp is not np:
+        pb = xp.as_tensor(pb, dtype=gamma.dtype, device=gamma.device)
     circ = dcirc @ pb
     cl = 2.0 * circ.sum(-1) / chord_ref
     cp = 1.0 - gamma * gamma
@@ -943,8 +948,8 @@ def _loads(xp, gamma, nodes, nodes_ref, layout, chord_ref, x_ref, alpha_rad, gro
     for p in layout.te_panel:
         if p >= 0:
             wall[p] = 0.0
-    if xp is torch:
-        wall = torch.as_tensor(wall, dtype=gamma.dtype, device=gamma.device)
+    if xp is not np:
+        wall = xp.as_tensor(wall, dtype=gamma.dtype, device=gamma.device)
     cpp = cpp * wall
     fx = -cpp * dy
     fy = cpp * dx
@@ -1056,9 +1061,9 @@ def solve_inviscid(
     chord_ref, x_ref, quarter = resolve_reference(blist[0], chord_ref, moment_ref)
     if pivot is None:
         pivot = quarter
-    is_scalar = np.ndim(alpha_deg) == 0 if not isinstance(alpha_deg, torch.Tensor) else alpha_deg.ndim == 0
+    is_scalar = np.ndim(alpha_deg) == 0 if not _is_tensor(alpha_deg) else alpha_deg.ndim == 0
     alphas = np.atleast_1d(np.asarray(
-        alpha_deg.detach().cpu().numpy() if isinstance(alpha_deg, torch.Tensor) else alpha_deg, dtype=np.float64))
+        alpha_deg.detach().cpu().numpy() if _is_tensor(alpha_deg) else alpha_deg, dtype=np.float64))
     ground = height is not None
     nodes_ref = np.vstack(bodies_np)
     if ground:
@@ -1077,33 +1082,35 @@ def solve_inviscid(
         ref = nodes_ref
         sig = _sigma_vector(sigma, layout.n_panels, np)
     else:
+        import torch
+
         xp = torch
         if device is None:
             device = "cpu"
         if dtype is None:
-            dtype = torch.float64
-        nodes = torch.as_tensor(nodes_np, dtype=dtype, device=device)
-        ref = torch.as_tensor(nodes_ref, dtype=dtype, device=device)
-        sig = _sigma_vector(sigma, layout.n_panels, torch, like=nodes)
+            dtype = xp.float64
+        nodes = xp.as_tensor(nodes_np, dtype=dtype, device=device)
+        ref = xp.as_tensor(nodes_ref, dtype=dtype, device=device)
+        sig = _sigma_vector(sigma, layout.n_panels, xp, like=nodes)
     nn = layout.n_nodes
     if not ground:
         A = system_matrix(nodes[0], layout)
         rhs = xp.stack([-nodes[0, :, 1], nodes[0, :, 0]], -1)
         if sig is not None:
             src = body_source_stream_matrix(nodes[0], layout) @ sig
-            rhs = xp.concatenate([rhs, -src[:, None]], -1) if xp is np else torch.cat([rhs, -src[:, None]], -1)
+            rhs = xp.concatenate([rhs, -src[:, None]], -1) if xp is np else xp.cat([rhs, -src[:, None]], -1)
         rhs = full_rhs(rhs, layout, columns=True)
         if xp is np:
             lu = scipy.linalg.lu_factor(A)
             sol = scipy.linalg.lu_solve(lu, rhs)
         else:
-            sol = torch.linalg.solve(A, rhs)
+            sol = xp.linalg.solve(A, rhs)
         a_rad = np.radians(alphas)
         if xp is np:
             ca, sa = np.cos(a_rad), np.sin(a_rad)
         else:
-            a_t = torch.as_tensor(a_rad, dtype=nodes.dtype, device=nodes.device)
-            ca, sa = torch.cos(a_t), torch.sin(a_t)
+            a_t = xp.as_tensor(a_rad, dtype=nodes.dtype, device=nodes.device)
+            ca, sa = xp.cos(a_t), xp.sin(a_t)
         sols = ca[:, None] * sol[None, :, 0] + sa[:, None] * sol[None, :, 1]
         if sig is not None:
             sols = sols + sol[None, :, 2]
@@ -1123,7 +1130,7 @@ def solve_inviscid(
         if xp is np:
             sol = np.linalg.solve(A, rhs[..., None])[..., 0]
         else:
-            sol = torch.linalg.solve(A, rhs.unsqueeze(-1)).squeeze(-1)
+            sol = xp.linalg.solve(A, rhs.unsqueeze(-1)).squeeze(-1)
         gamma = sol[:, :nn]
         cl, clp, cdp, cm, circ, cp = _loads(xp, gamma, nodes, ref, layout, chord_ref, x_ref, None, True)
         coords_per_alpha = [[nodes[k, s:e] for s, e in layout.node_ranges] for k in range(len(alphas))]
@@ -1152,7 +1159,7 @@ def _pack(xp, alphas, is_scalar, layout, cl, clp, cdp, cm, circ, cp, gamma, coor
     if is_scalar:
         circ0 = circ[0] if nb > 1 else (float(circ[0, 0]) if xp is np else circ[0, 0])
         return Panel2DResult(
-            alpha=float(alphas[0]) if xp is np else torch.as_tensor(alphas[0], dtype=gamma.dtype,
+            alpha=float(alphas[0]) if xp is np else xp.as_tensor(alphas[0], dtype=gamma.dtype,
                                                                      device=gamma.device),
             Cl=num(clp[0]) if ground else num(cl[0]),
             Cl_circulation=num(cl[0]),
@@ -1165,7 +1172,7 @@ def _pack(xp, alphas, is_scalar, layout, cl, clp, cdp, cm, circ, cp, gamma, coor
             coordinates=coords[0] if ground else coords,
             circulation=circ0,
         )
-    alpha_out = alphas if xp is np else torch.as_tensor(alphas, dtype=gamma.dtype, device=gamma.device)
+    alpha_out = alphas if xp is np else xp.as_tensor(alphas, dtype=gamma.dtype, device=gamma.device)
     return Panel2DResult(
         alpha=alpha_out,
         Cl=clp if ground else cl,
