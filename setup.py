@@ -63,15 +63,7 @@ def _openmp_args() -> tuple[list[str], list[str]]:
     return [], []
 
 
-extensions = [
-    Extension(
-        "ventorum.legacy.aero.cython_kernels",
-        ["ventorum/legacy/aero/cython_kernels.pyx"],
-        include_dirs=[np.get_include()],
-        define_macros=[("NPY_NO_DEPRECATED_API", "NPY_1_7_API_VERSION")],
-        optional=True,
-    ),
-]
+extensions = []
 
 cy_compile, cy_link = _openmp_args()
 extensions.append(

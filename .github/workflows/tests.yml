@@ -64,7 +64,7 @@ jobs:
         # The Cython extension is optional for users, but CI must build it on
         # every OS. Otherwise its tests skip and a build failure stays hidden.
         run: |
-          python -c "from ventorum.aero import vortex_cython; from ventorum.legacy.aero import cython_kernels"
+          python -c "from ventorum.aero import vortex_cython"
           # Without OpenMP the kernels are correct but run in one thread, and
           # the tests still pass. This check makes that case fail.
           if [ "$RUNNER_OS" = "macOS" ]; then

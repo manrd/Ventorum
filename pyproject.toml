@@ -92,6 +92,4 @@ convention = "numpy"
 "examples/*" = ["D"]
 "validation/*" = ["D"]
 "docs/*" = ["D"]
-# Original code kept to study and port its optimisations (see ventorum/legacy/__init__.py).
-"ventorum/legacy/*" = ["ALL"]
 "__init__.py" = ["F401"]

@@ -69,7 +69,6 @@ docs/agent/tool_reference.md
 # Compiled extensions
 *.so
 *.pyd
-ventorum/legacy/aero/cython_kernels.c
 ventorum/aero/vortex_cython.c
 ventorum/aero/vortex_vjp_cython.c
 build/
@@ -77,5 +76,5 @@ build/
 # Agent benchmark run outputs (they stay outside the repository)
 agent_benchmark_runs/
 
-# Machine profile that the legacy autotuner writes to the working folder (machine identifiers).
+# Machine profile that the original autotuner (no longer in this repository) wrote to the working folder (machine identifiers).
 .ventorum_machine_config.json

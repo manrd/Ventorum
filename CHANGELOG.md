@@ -69,6 +69,13 @@ a minor version can change a public interface.
 - The trailing-edge source of Ventorum-2D and the wake builder of the panel solver take explicit inputs instead of
   guessing them from an array size or an array identity.
 
+### Removed
+
+- The package `ventorum.legacy` (the original solvers and acceleration paths), its tests
+  (`tests/test_legacy.py`, `tests/test_legacy_entry_points.py`), its speed script (`validation/legacy_speed.py`)
+  and its Cython extension. Its acceleration methods are ported to the verified core or replaced by faster ones,
+  and no module of `ventorum` imported it. Some of its solvers had known physics defects.
+
 ### Documentation
 
 - The component breakdown plot states that its surface induced drag is the near-field value.

@@ -1,6 +1,6 @@
 # API reference
 
-Generated from the docstrings of the package (NumPy docstring standard). The original solvers in `ventorum.legacy` are not listed: they are kept to study and port their optimisations, and some of them have known physics defects.
+Generated from the docstrings of the package (NumPy docstring standard).
 
 ```{eval-rst}
 .. autosummary::

@@ -94,7 +94,6 @@ Also run `python validation/gpu_gate.py <log.md>` on a machine with an NVIDIA GP
 | `ventorum/visualization` | Plot functions (distributions, drag polar, planform, wake, convergence) |
 | `ventorum/instance.py` | Independent solver instances and a manager that runs them in parallel |
 | `ventorum/agent` | Tool interface for AI agents and the MCP server |
-| `ventorum/legacy` | The original solvers and acceleration paths (Numba, Cython, PyTorch GPU, autotuner), kept to study and port their optimisations. Some legacy solvers have known physics defects; see `tests/test_legacy.py`. Do not delete anything here. |
 | `tests/` | Tests; `test_analytical_verification.py` holds the theory checks |
 | `validation/` | Verification script and reference data rules |
 | `docs/` | Sphinx documentation (user manual, theory, agent guide, software description, V&V, API) |

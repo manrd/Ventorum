@@ -1,6 +1,6 @@
 # Software description
 
-This document describes the architecture of Ventorum: the packages, the data flow, the kernel backends, the tuner, the parallelism and the legacy package.
+This document describes the architecture of Ventorum: the packages, the data flow, the kernel backends, the tuner and the parallelism.
 
 ## Packages
 
@@ -17,7 +17,6 @@ This document describes the architecture of Ventorum: the packages, the data flo
 | `ventorum.visualization` | Plots of geometry, distributions, polars, wake and Trefftz plane |
 | `ventorum.reference` | Independent analytic solutions used by the verification |
 | `ventorum.instance` | Stateful case objects (`Ventorum`) and parallel runs of several instances |
-| `ventorum.legacy` | The original solvers and acceleration paths (Numba, Cython, PyTorch GPU kernels, hardware autotuner), kept to study and port their optimisations. Some of its solvers have known physics defects; see its module docstring and `tests/test_legacy.py`. |
 
 ## Data flow of one analysis
 
@@ -75,10 +74,6 @@ Ventorum uses all cores with no manual tuning, at two levels:
 
 The Cython kernels take a `num_threads` argument and loop over the evaluation points with `prange`. With OpenMP (Linux and Windows builds), the kernel splits its rows itself. Without OpenMP (the default macOS build), Ventorum splits the evaluation points into row blocks and runs one kernel call per block on Python threads; the kernels release the GIL, so the blocks run in parallel. Each row is computed alone, so both paths give the same result. See [Known performance limits](../user/performance_limits).
 
-## The legacy package
-
-`ventorum.legacy` keeps the original solvers and acceleration paths (Numba, Cython, PyTorch GPU kernels, hardware autotuner). It is kept to study and port its optimisations to the verified core. Some of its solvers have known physics defects; see its module docstring and `tests/test_legacy.py`. Do not use its results until they are corrected. Do not delete anything in it.
-
 ## Known limits
 
 Ventorum must use the full speed of each machine. Cases where it does not yet do so are listed in [Known performance limits](../user/performance_limits). Each entry gives the cause, what Ventorum does now, what it costs, and what must happen to remove the limit.
@@ -89,7 +84,7 @@ The design decisions and their reasons are kept in the owner's conceptual design
 
 ## Recovery audit
 
-The recovery audit gives a decision for every component of the original code (`ventorum/legacy`).
+The recovery audit gives a decision for every component of the original code. The original code is not in this repository any more; the audit is the record of how its methods came to the verified core.
 
 ```{toctree}
 :maxdepth: 1

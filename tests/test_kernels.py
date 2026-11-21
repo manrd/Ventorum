@@ -645,8 +645,8 @@ def test_import_does_not_load_torch():
 def _straight_horseshoes(n=48, with_images=False, with_groups=False):
     """Straight horseshoes with zero-length chordwise segments (a_te is a, b_te is b).
 
-    This is the input of ``validation/legacy_speed.py``: the bent-horseshoe
-    kernels must give the same matrix as the legacy straight-horseshoe
+    This was the input of the speed comparison with the original code: the
+    bent-horseshoe kernels must give the same matrix as straight-horseshoe
     kernels, and the zero-length legs must add nothing.
     """
     y = np.linspace(-5.0, 5.0, n + 1)

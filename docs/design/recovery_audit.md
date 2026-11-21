@@ -1,5 +1,9 @@
 # Recovery audit of the original code
 
+```{note}
+The original code (the package `ventorum.legacy`) is not in this repository any more. Its acceleration methods are ported to the verified core or replaced by faster ones, and no module of `ventorum` imported it. This page is the historical record of the audit. The files that it names (`ventorum/legacy`, `tests/test_legacy.py`, `tests/test_legacy_entry_points.py` and `validation/legacy_speed.py`) were removed with the package, and the statement "Nothing is deleted" below describes the state at the time of the audit.
+```
+
 This audit gives a recovery decision for every component of `ventorum/legacy`. The owner's rule applies: unverified code is code to verify, not code to delete. **Nothing is deleted.** A "leave out" decision needs the owner's approval, and even then the code stays in `legacy/` until the owner says otherwise. The owner approved all decisions of this audit.
 
 Decisions:

@@ -99,8 +99,6 @@ def test_no_old_names_in_package():
     for base in ("ventorum", "examples", "validation"):
         for path in sorted((root / base).rglob("*.py")):
             rel = path.as_posix().split(str(root.as_posix()) + "/")[-1]
-            if rel.startswith("ventorum/legacy/"):
-                continue
             text = path.read_text(encoding="utf-8")
             if rel in alias_modules:
                 text = _without_getattr(text)

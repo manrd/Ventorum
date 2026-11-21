@@ -3,7 +3,7 @@
 This page is the reference of every environment variable that the code reads. One table holds all of them. The command below prints the code lines that this table documents:
 
 ```bash
-grep -rn "os.environ" ventorum | grep -v legacy
+grep -rn "os.environ" ventorum
 ```
 
 (plus two build-time variables of `setup.py`, marked as such).

@@ -19,9 +19,6 @@ ROOT = Path(__file__).resolve().parents[1]
 #: Private ID patterns. "NASA TN D-3767" (a report number) is not one.
 PRIVATE_ID = re.compile(r"(?<!TN )\b(T-\d{4}|D-\d{2}|P[12]-\d{2})\b")
 
-#: Folders that keep historical text unchanged.
-EXCLUDED = ("ventorum/legacy/",)
-
 #: This file names the patterns.
 SELF = "tests/test_no_private_ids.py"
 
@@ -38,10 +35,10 @@ def _tracked_files() -> list[str]:
 
 
 def test_no_private_ids_in_tracked_files():
-    """No tracked text file outside the legacy package names a private ID."""
+    """No tracked text file names a private ID."""
     hits = []
     for rel in _tracked_files():
-        if rel == SELF or rel.startswith(EXCLUDED) or Path(rel).suffix not in TEXT_SUFFIXES:
+        if rel == SELF or Path(rel).suffix not in TEXT_SUFFIXES:
             continue
         path = ROOT / rel
         if not path.is_file():
