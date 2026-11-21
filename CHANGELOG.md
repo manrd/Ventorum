@@ -68,6 +68,8 @@ a minor version can change a public interface.
   probe; a note gives a difference of more than 1 %.
 - The trailing-edge source of Ventorum-2D and the wake builder of the panel solver take explicit inputs instead of
   guessing them from an array size or an array identity.
+- The numpy 2D panel solve and the 3D panel solve with SciPy factors do not import torch any more, so they run
+  without torch installed.
 
 ### Removed
 
