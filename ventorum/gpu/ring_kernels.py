@@ -89,6 +89,14 @@ _SEC2_W_32_NP = np.ascontiguousarray(_W_TH_32 / (np.cos(_TH_32) ** 2), dtype=np.
 _U01_32_NP = np.ascontiguousarray(0.5 * (_GL_X + 1.0), dtype=np.float64)
 _W01_32_NP = np.ascontiguousarray(0.5 * _GL_W, dtype=np.float64)
 
+# 64-point Gauss-Legendre tables for the 45-degree contour of the displaced steady far wake.
+_GL64_X, _GL64_W = np.polynomial.legendre.leggauss(64)
+_TH_64 = 0.25 * np.pi * (_GL64_X + 1.0)
+_W_TH_64 = 0.25 * np.pi * _GL64_W
+_T_64 = np.tan(_TH_64)
+_TAN2_64_NP = np.ascontiguousarray(_T_64 * _T_64, dtype=np.float64)
+_DTAN2_W_64_NP = np.ascontiguousarray((2.0 * _T_64 / (np.cos(_TH_64) ** 2)) * _W_TH_64, dtype=np.float64)
+
 
 # ---------------------------------------------------------------------------
 # Device-array registry for ventorum.gpu.release()
@@ -147,6 +155,8 @@ def _get_tail_quad() -> dict:
             _tail_quad["sec2_w"] = engine._f64(_SEC2_W_32_NP)
             _tail_quad["u01"] = engine._f64(_U01_32_NP)
             _tail_quad["w01"] = engine._f64(_W01_32_NP)
+            _tail_quad["tan2_64"] = engine._f64(_TAN2_64_NP)
+            _tail_quad["dtan2_w_64"] = engine._f64(_DTAN2_W_64_NP)
         return _tail_quad
 
 
@@ -1680,3 +1690,394 @@ def harmonic_tail_normal_influence_gpu(
     )
     out = torch.einsum("msi,mi->ms", v, N_c)
     return out if out_tensor else out.cpu().numpy()
+
+
+def segment_velocity_gpu(
+    P,
+    A,
+    B,
+    rc,
+    *,
+    ground=None,
+    img_mode: int | None = None,
+    out_tensor: bool = False,
+):
+    """Compute unit-circulation finite-segment velocity [1/m] on the GPU in float64.
+
+    Parameters
+    ----------
+    P : numpy.ndarray or torch.Tensor
+        Evaluation points [m], shape ``(M, 3)``.
+    A, B : numpy.ndarray or torch.Tensor
+        Segment start and end points [m], shape ``(N, 3)``.
+    rc : float, numpy.ndarray or torch.Tensor
+        Core radius [m], scalar, shape ``(N,)`` or shape ``(M, N)``.
+    ground : GroundPlane, tuple or None, optional
+        Flat ground plane for ground images (exact reflection identity).
+    img_mode : int or None, optional
+        ``0`` real only, ``1`` real plus ground image, ``2`` ground image only.
+    out_tensor : bool, optional
+        When True return a CUDA :class:`torch.Tensor` (float64); when False
+        return a host float64 :class:`numpy.ndarray`.
+
+    Returns
+    -------
+    numpy.ndarray or torch.Tensor
+        Induced velocity per unit circulation [1/m], shape ``(M, N, 3)``.
+    """
+    P64 = _as_cuda_f64(P)
+    A64 = _as_cuda_f64(A)
+    B64 = _as_cuda_f64(B)
+    m, n = int(P64.shape[0]), int(A64.shape[0])
+    if m == 0 or n == 0:
+        out = torch.empty((m, n, 3), dtype=torch.float64, device=engine._dev())
+        return out if out_tensor else out.cpu().numpy()
+    rc2_T, rc_is_2d = _pack_rc2_gpu(rc, m, n, torch.float64)
+    mode, gk_wp, go = _ground_params(ground, img_mode)
+    out = None
+    if mode != 2:
+        out = _segment_vel_gpu_f64(P64, A64, B64, rc2_T, rc_is_2d)
+    if mode != 0:
+        gk = torch.tensor([gk_wp[0], gk_wp[1], gk_wp[2]], dtype=torch.float64, device=engine._dev())
+        P_img = P64 - (2.0 * (P64 @ gk - go)).unsqueeze(-1) * gk[None, :]
+        vi = _segment_vel_gpu_f64(P_img, A64, B64, rc2_T, rc_is_2d)
+        vi_ref = vi - (2.0 * torch.sum(vi * gk[None, None, :], dim=-1, keepdim=True)) * gk[None, None, :]
+        out = vi_ref if out is None else (out + vi_ref)
+    return out if out_tensor else out.cpu().numpy()
+
+
+def _as_cuda_disp(u, n: int, name: str) -> torch.Tensor:
+    """Validate and convert displacement *u* to contiguous CUDA float64 of shape ``(n, 3)``."""
+    if isinstance(u, torch.Tensor):
+        t = u.to(device=engine._dev(), dtype=torch.float64)
+        if t.ndim == 1:
+            if tuple(t.shape) != (3,):
+                raise ValueError(f"Expected {name} of shape (3,) or ({n}, 3), got {tuple(t.shape)}.")
+            return t.unsqueeze(0).expand(n, 3).contiguous()
+        if t.ndim == 2 and tuple(t.shape) == (n, 3):
+            return t.contiguous()
+        raise ValueError(f"Expected {name} of shape (3,) or ({n}, 3), got {tuple(t.shape)}.")
+    return engine._f64(_broadcast_wake_dir(u, n))
+
+
+def _displaced_ray_contour_gpu(
+    r: torch.Tensor,
+    a: torch.Tensor,
+    rho2: torch.Tensor,
+    d: torch.Tensor,
+    u: torch.Tensor,
+    kappa: float,
+    L_w,
+    quad: dict,
+) -> torch.Tensor:
+    """Evaluate displaced semi-infinite filament integral for ``a > 0`` on CUDA in complex128."""
+    r_norm = torch.sqrt(a * a + rho2)
+    d_x_r = torch.linalg.cross(d, r, dim=-1)
+    d_x_u = torch.linalg.cross(d, u, dim=-1)
+    u_x_r = torch.linalg.cross(u, r, dim=-1)
+    u_x_d = -d_x_u
+    r_dot_u = torch.sum(r * u, dim=-1)
+    d_dot_u = torch.sum(d * u, dim=-1)
+
+    D = r_norm * (r_norm + a)
+    dD = -(2.0 + a / r_norm) * r_dot_u + r_norm * d_dot_u
+    I_static = _INV_4PI * (-d_x_u / D.unsqueeze(-1) - d_x_r * (dD / (D * D)).unsqueeze(-1))
+
+    L_scale = torch.clamp(r_norm, max=2.0 / kappa)
+    uv = L_scale.unsqueeze(-1) * quad["tan2_64"]
+    du_w = L_scale.unsqueeze(-1) * quad["dtan2_w_64"]
+    xi = torch.complex(uv, -uv)
+    decay = torch.exp(-torch.clamp(kappa * uv, max=700.0))
+    ang = -kappa * uv
+    osc = torch.complex(torch.cos(ang), torch.sin(ang))
+    wt = (1.0 - 1.0j) * du_w * decay * osc
+
+    s = xi + a.unsqueeze(-1)
+    r2 = s * s + rho2.unsqueeze(-1)
+    rad = torch.sqrt(r2)
+    inv_r3 = 1.0 / (rad * r2)
+    inv_r5 = inv_r3 / r2
+
+    J30 = torch.sum(wt * inv_r3, dim=-1)
+    J31 = torch.sum((wt * xi) * inv_r3, dim=-1)
+    J50 = torch.sum(wt * inv_r5, dim=-1)
+    J51 = torch.sum((wt * xi) * inv_r5, dim=-1)
+
+    I_osc = _INV_4PI * (
+        ((-1j * kappa) * u_x_r - d_x_u) * J30.unsqueeze(-1)
+        + (1j * kappa) * u_x_d * J31.unsqueeze(-1)
+        + 3.0 * d_x_r * (r_dot_u * J50 - d_dot_u * J51).unsqueeze(-1)
+    )
+    if isinstance(L_w, torch.Tensor):
+        ang_w = -kappa * L_w
+        phi_tail = torch.complex(torch.cos(ang_w), torch.sin(ang_w)).unsqueeze(-1)
+    else:
+        phi_tail = complex(math.cos(-kappa * float(L_w)), math.sin(-kappa * float(L_w)))
+    return phi_tail * I_osc - I_static
+
+
+def _displaced_ray_real_seg_gpu(
+    r: torch.Tensor,
+    a: torch.Tensor,
+    rho2: torch.Tensor,
+    d: torch.Tensor,
+    u: torch.Tensor,
+    xi_0: torch.Tensor,
+    kappa: float,
+    L_w: float,
+    rc2: torch.Tensor,
+    quad: dict,
+) -> torch.Tensor:
+    """Evaluate displaced filament integral on real ``[0, xi_0]`` on CUDA in complex128."""
+    d_x_r = torch.linalg.cross(d, r, dim=-1)
+    d_x_u = torch.linalg.cross(d, u, dim=-1)
+    u_x_r = torch.linalg.cross(u, r, dim=-1)
+    u_x_d = -d_x_u
+    r_dot_u = torch.sum(r * u, dim=-1)
+    d_dot_u = torch.sum(d * u, dim=-1)
+
+    xi = xi_0.unsqueeze(-1) * quad["u01"]
+    w = xi_0.unsqueeze(-1) * quad["w01"]
+    b = -kappa * (L_w + xi)
+    # Exact cancellation-free exp(i b) - 1 = -2 sin^2(b / 2) + i sin(b).
+    psi = torch.complex(-2.0 * (torch.sin(0.5 * b) ** 2), torch.sin(b))
+    dpsi = (-1j * kappa) * torch.complex(torch.cos(b), torch.sin(b))
+
+    s = xi + a.unsqueeze(-1)
+    r2 = s * s + rho2.unsqueeze(-1) + rc2.unsqueeze(-1)
+    rad = torch.sqrt(r2)
+    inv_r3 = 1.0 / (rad * r2)
+    inv_r5 = inv_r3 / r2
+
+    K30_p = torch.sum((w * dpsi) * inv_r3, dim=-1)
+    K31_p = torch.sum((w * dpsi * xi) * inv_r3, dim=-1)
+    K30 = torch.sum((w * psi) * inv_r3, dim=-1)
+    K50 = torch.sum((w * psi) * inv_r5, dim=-1)
+    K51 = torch.sum((w * psi * xi) * inv_r5, dim=-1)
+
+    return _INV_4PI * (
+        u_x_r * K30_p.unsqueeze(-1)
+        - u_x_d * K31_p.unsqueeze(-1)
+        - d_x_u * K30.unsqueeze(-1)
+        + 3.0 * d_x_r * (r_dot_u * K50 - d_dot_u * K51).unsqueeze(-1)
+    )
+
+
+def _displaced_tail_velocity_single_gpu(
+    P64: torch.Tensor,
+    pl64: torch.Tensor,
+    pr64: torch.Tensor,
+    wd64: torch.Tensor,
+    ul64: torch.Tensor,
+    ur64: torch.Tensor,
+    kappa: float,
+    L_w: float,
+    rc2_T: torch.Tensor,
+    rc_is_2d: int,
+) -> torch.Tensor:
+    """Evaluate real-side displaced steady far-wake velocity on CUDA, shape ``(M, N_s, 3)`` complex128."""
+    dev = engine._dev()
+    m, n = int(P64.shape[0]), int(pl64.shape[0])
+    quad = _get_tail_quad()
+    out = torch.zeros((m, n, 3), dtype=torch.complex128, device=dev)
+    step = max(1, min(m, _TAIL_CHUNK_BYTES // max(1, n * 64 * 16)))
+
+    for i0 in range(0, m, step):
+        i1 = min(m, i0 + step)
+        Pc = P64[i0:i1].contiguous()
+        rc2_c = rc2_T[:, i0:i1].contiguous() if rc_is_2d else rc2_T
+        v_tot = torch.zeros((i1 - i0, n, 3), dtype=torch.complex128, device=dev)
+        wd_b = wd64[None, :, :].expand(i1 - i0, n, 3)
+
+        for sign, pe, ue in ((+1.0, pr64, ur64), (-1.0, pl64, ul64)):
+            r = Pc[:, None, :] - pe[None, :, :]
+            a = -torch.sum(r * wd64[None, :, :], dim=-1)
+            d_x_r = torch.linalg.cross(wd_b, r, dim=-1)
+            rho2 = torch.sum(d_x_r * d_x_r, dim=-1)
+            u_b = ue[None, :, :].expand_as(r)
+
+            pos = a > 0.0
+            if bool(pos.all().item()):
+                v_ray = _displaced_ray_contour_gpu(r, a, rho2, wd_b, u_b, kappa, L_w, quad)
+            else:
+                v_ray = torch.empty(r.shape, dtype=torch.complex128, device=dev)
+                if bool(pos.any().item()):
+                    v_ray[pos] = _displaced_ray_contour_gpu(
+                        r[pos], a[pos], rho2[pos], wd_b[pos], u_b[pos], kappa, L_w, quad,
+                    )
+                neg = ~pos
+                if bool(neg.any().item()):
+                    pad = max(0.5, 1.0 / kappa)
+                    xi_0 = -a[neg] + pad
+                    rc2_mat = rc2_c.transpose(0, 1).expand_as(a)
+                    rc2_n = torch.clamp(rc2_mat[neg], min=1e-24)
+                    v_seg = _displaced_ray_real_seg_gpu(
+                        r[neg], a[neg], rho2[neg], wd_b[neg], u_b[neg], xi_0, kappa, L_w, rc2_n, quad,
+                    )
+                    r_shift = r[neg] - xi_0.unsqueeze(-1) * wd_b[neg]
+                    a_shift = a[neg] + xi_0
+                    v_tail = _displaced_ray_contour_gpu(
+                        r_shift, a_shift, rho2[neg], wd_b[neg], u_b[neg], kappa, L_w + xi_0, quad,
+                    )
+                    v_ray[neg] = v_seg + v_tail
+
+            v_tot = v_tot + sign * v_ray
+
+        out[i0:i1] = v_tot
+
+    return out
+
+
+def displaced_steady_tail_velocity_gpu(
+    P,
+    p_left,
+    p_right,
+    wake_dir,
+    u_left,
+    u_right,
+    kappa: float,
+    wake_length: float,
+    rc=0.0,
+    *,
+    ground=None,
+    img_mode: int | None = None,
+    out_tensor: bool = False,
+):
+    """Compute velocity perturbation from displaced steady far-wake filaments on the GPU.
+
+    Parameters
+    ----------
+    P : numpy.ndarray or torch.Tensor
+        Evaluation points [m], shape ``(M, 3)``.
+    p_left, p_right : numpy.ndarray or torch.Tensor
+        Left and right tail start corners [m], shape ``(N_s, 3)``.
+    wake_dir : numpy.ndarray or torch.Tensor
+        Unit wake direction [-], shape ``(3,)`` or ``(N_s, 3)``.
+    u_left, u_right : numpy.ndarray or torch.Tensor
+        Trailing-edge corner displacement vectors [m] (heave) or [m/rad]
+        (pitch), shape ``(3,)`` or ``(N_s, 3)``.
+    kappa : float
+        Spatial wavenumber ``omega / V_inf`` [1/m], must be ``>= 0``.
+    wake_length : float
+        Discrete wake length ``L_w`` [m] ahead of the tail start, must be ``>= 0``.
+    rc : float, numpy.ndarray or torch.Tensor, optional
+        Core radius [m], scalar, shape ``(N_s,)`` or shape ``(M, N_s)``.
+    ground : GroundPlane, tuple or None, optional
+        Flat ground plane for ground images (exact reflection identity).
+    img_mode : int or None, optional
+        ``0`` real only, ``1`` real plus ground image, ``2`` ground image only.
+    out_tensor : bool, optional
+        When True return a CUDA :class:`torch.Tensor` (complex128); when False
+        return a host complex128 :class:`numpy.ndarray`.
+
+    Returns
+    -------
+    numpy.ndarray or torch.Tensor
+        Complex linearised velocity perturbation per unit steady trailing-edge
+        circulation [1/m] (heave) or [1/(m rad)] (pitch), shape ``(M, N_s, 3)``.
+    """
+    kap = float(kappa)
+    if not math.isfinite(kap) or kap < 0.0:
+        raise ValueError(f"kappa must be finite and >= 0, got {kappa!r}.")
+    L_w = float(wake_length)
+    if not math.isfinite(L_w) or L_w < 0.0:
+        raise ValueError(f"wake_length must be finite and >= 0, got {wake_length!r}.")
+    P64 = _as_cuda_f64(P)
+    pl64 = _as_cuda_f64(p_left)
+    pr64 = _as_cuda_f64(p_right)
+    m, n = int(P64.shape[0]), int(pl64.shape[0])
+    if m == 0 or n == 0 or kap == 0.0:
+        out = torch.zeros((m, n, 3), dtype=torch.complex128, device=engine._dev())
+        return out if out_tensor else out.cpu().numpy()
+
+    if isinstance(wake_dir, torch.Tensor):
+        wd64 = wake_dir.to(device=engine._dev(), dtype=torch.float64)
+        if wd64.ndim == 1:
+            wd64 = wd64.unsqueeze(0).expand(n, 3).contiguous()
+        else:
+            wd64 = wd64.contiguous()
+    else:
+        wd64 = engine._f64(_broadcast_wake_dir(wake_dir, n))
+    wd_norms = torch.linalg.vector_norm(wd64, dim=1, keepdim=True)
+    if bool((wd_norms <= 1e-12).any().item()):
+        raise ValueError("wake_dir must have non-zero length for every strip.")
+    wd64 = (wd64 / wd_norms).contiguous()
+
+    ul64 = _as_cuda_disp(u_left, n, "u_left")
+    ur64 = _as_cuda_disp(u_right, n, "u_right")
+    rc2_T, rc_is_2d = _pack_rc2_gpu(rc, m, n, torch.float64)
+    mode, gk_wp, go = _ground_params(ground, img_mode)
+
+    out = None
+    if mode != 2:
+        out = _displaced_tail_velocity_single_gpu(P64, pl64, pr64, wd64, ul64, ur64, kap, L_w, rc2_T, rc_is_2d)
+    if mode != 0:
+        gk = torch.tensor([gk_wp[0], gk_wp[1], gk_wp[2]], dtype=torch.float64, device=engine._dev())
+        P_img = P64 - (2.0 * (P64 @ gk - go)).unsqueeze(-1) * gk[None, :]
+        vi = _displaced_tail_velocity_single_gpu(P_img, pl64, pr64, wd64, ul64, ur64, kap, L_w, rc2_T, rc_is_2d)
+        gk_c = gk.to(torch.complex128)
+        vi_ref = vi - (2.0 * torch.sum(vi * gk_c[None, None, :], dim=-1, keepdim=True)) * gk_c[None, None, :]
+        out = vi_ref if out is None else (out + vi_ref)
+
+    return out if out_tensor else out.cpu().numpy()
+
+
+def displaced_steady_tail_normal_influence_gpu(
+    P,
+    normals,
+    p_left,
+    p_right,
+    wake_dir,
+    u_left,
+    u_right,
+    kappa: float,
+    wake_length: float,
+    rc=0.0,
+    *,
+    ground=None,
+    img_mode: int | None = None,
+    out_tensor: bool = False,
+):
+    """Compute normal-velocity perturbation from displaced steady far-wake filaments on the GPU.
+
+    Parameters
+    ----------
+    P : numpy.ndarray or torch.Tensor
+        Evaluation points [m], shape ``(M, 3)``.
+    normals : numpy.ndarray or torch.Tensor
+        Unit normal vectors at *P* [-], shape ``(M, 3)``.
+    p_left, p_right : numpy.ndarray or torch.Tensor
+        Left and right tail start corners [m], shape ``(N_s, 3)``.
+    wake_dir : numpy.ndarray or torch.Tensor
+        Unit wake direction [-], shape ``(3,)`` or ``(N_s, 3)``.
+    u_left, u_right : numpy.ndarray or torch.Tensor
+        Trailing-edge corner displacement vectors [m] (heave) or [m/rad]
+        (pitch), shape ``(3,)`` or ``(N_s, 3)``.
+    kappa : float
+        Spatial wavenumber ``omega / V_inf`` [1/m], must be ``>= 0``.
+    wake_length : float
+        Discrete wake length ``L_w`` [m] ahead of the tail start, must be ``>= 0``.
+    rc : float, numpy.ndarray or torch.Tensor, optional
+        Core radius [m], scalar, shape ``(N_s,)`` or shape ``(M, N_s)``.
+    ground : GroundPlane, tuple or None, optional
+        Flat ground plane for ground images.
+    img_mode : int or None, optional
+        ``0`` real only, ``1`` real plus ground image, ``2`` ground image only.
+    out_tensor : bool, optional
+        When True return a CUDA :class:`torch.Tensor` (complex128); when False
+        return a host complex128 :class:`numpy.ndarray`.
+
+    Returns
+    -------
+    numpy.ndarray or torch.Tensor
+        Complex normal-velocity perturbation matrix [1/m] (heave) or
+        [1/(m rad)] (pitch), shape ``(M, N_s)``.
+    """
+    N_c = _as_cuda_f64(normals).to(torch.complex128)
+    v = displaced_steady_tail_velocity_gpu(
+        P, p_left, p_right, wake_dir, u_left, u_right, kappa, wake_length, rc,
+        ground=ground, img_mode=img_mode, out_tensor=True,
+    )
+    out = torch.einsum("msi,mi->ms", v, N_c)
+    return out if out_tensor else out.cpu().numpy()
+

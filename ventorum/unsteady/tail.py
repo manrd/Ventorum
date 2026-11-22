@@ -98,6 +98,27 @@ _SEC2_W_32 = _W_TH_32 / (np.cos(_TH_32) ** 2)
 _U01_32 = 0.5 * (_GL_X + 1.0)
 _W01_32 = 0.5 * _GL_W
 
+# 64-point Gauss-Legendre quadrature on [0, pi/2] with u = L * tan(theta)^2
+# for the 45-degree contour xi = (1 - i) u of the displaced steady far wake.
+_GL64_X, _GL64_W = np.polynomial.legendre.leggauss(64)
+_TH_64 = 0.25 * np.pi * (_GL64_X + 1.0)
+_W_TH_64 = 0.25 * np.pi * _GL64_W
+_T_64 = np.tan(_TH_64)
+_TAN2_64 = _T_64 * _T_64
+_DTAN2_W_64 = (2.0 * _T_64 / (np.cos(_TH_64) ** 2)) * _W_TH_64
+
+
+def _broadcast_disp(u: np.ndarray, n: int, name: str) -> np.ndarray:
+    """Validate and broadcast a displacement vector *u* to shape ``(n, 3)``."""
+    arr = np.asarray(u, dtype=np.float64)
+    if arr.ndim == 1:
+        if arr.shape != (3,):
+            raise ValueError(f"Expected {name} of shape (3,) or ({n}, 3), got {arr.shape}.")
+        return np.ascontiguousarray(np.broadcast_to(arr, (n, 3)))
+    if arr.ndim == 2 and arr.shape == (n, 3):
+        return np.ascontiguousarray(arr)
+    raise ValueError(f"Expected {name} of shape (3,) or ({n}, 3), got {arr.shape}.")
+
 
 def _broadcast_wake_dir(wake_dir: np.ndarray, n: int) -> np.ndarray:
     """Validate and broadcast *wake_dir* to unit vectors of shape ``(n, 3)``."""
@@ -400,3 +421,275 @@ def harmonic_tail_normal_influence(
         raise ValueError(f"Expected normals of shape {P_arr.shape}, got {n_arr.shape}.")
     v = harmonic_tail_velocity(P_arr, p_left, p_right, wake_dir, kappa, rc)
     return np.einsum("msi,mi->ms", v, n_arr)
+
+
+def _displaced_ray_contour(
+    r: np.ndarray,
+    a: np.ndarray,
+    rho2: np.ndarray,
+    d: np.ndarray,
+    u: np.ndarray,
+    kappa: float,
+    L_w: np.ndarray | float,
+) -> np.ndarray:
+    """Evaluate the displaced semi-infinite trailing filament integral for ``a > 0``."""
+    r_norm = np.sqrt(a * a + rho2)
+    d_x_r = cross3(d, r)
+    d_x_u = cross3(d, u)
+    u_x_r = cross3(u, r)
+    u_x_d = -d_x_u
+    r_dot_u = np.einsum("...i,...i->...", r, u)
+    d_dot_u = np.einsum("...i,...i->...", d, u)
+
+    # Exact directional derivative of the static semi-infinite ray (the -1 part of psi).
+    D = r_norm * (r_norm + a)
+    dD = -(2.0 + a / r_norm) * r_dot_u + r_norm * d_dot_u
+    I_static = _INV_4PI * (-d_x_u / D[..., None] - d_x_r * (dD / (D * D))[..., None])
+
+    # Oscillatory part on the 45-degree contour xi = (1 - i) u, u = L tan(theta)^2.
+    L_scale = np.minimum(r_norm, 2.0 / kappa)
+    uv = L_scale[..., None] * _TAN2_64
+    du_w = L_scale[..., None] * _DTAN2_W_64
+    xi = (1.0 - 1.0j) * uv
+    decay = np.exp(-np.minimum(kappa * uv, 700.0))
+    osc = np.exp(-1j * kappa * uv)
+    wt = (1.0 - 1.0j) * du_w * decay * osc
+
+    s = xi + a[..., None]
+    r2 = s * s + rho2[..., None]
+    rad = np.sqrt(r2)
+    inv_r3 = 1.0 / (rad * r2)
+    inv_r5 = inv_r3 / r2
+
+    J30 = np.sum(wt * inv_r3, axis=-1)
+    J31 = np.sum((wt * xi) * inv_r3, axis=-1)
+    J50 = np.sum(wt * inv_r5, axis=-1)
+    J51 = np.sum((wt * xi) * inv_r5, axis=-1)
+
+    I_osc = _INV_4PI * (
+        ((-1j * kappa) * u_x_r - d_x_u) * J30[..., None]
+        + (1j * kappa) * u_x_d * J31[..., None]
+        + 3.0 * d_x_r * (r_dot_u * J50 - d_dot_u * J51)[..., None]
+    )
+    phi_tail = np.exp(-1j * kappa * np.asarray(L_w, dtype=np.float64))
+    return phi_tail[..., None] * I_osc - I_static
+
+
+def _displaced_ray_real_seg(
+    r: np.ndarray,
+    a: np.ndarray,
+    rho2: np.ndarray,
+    d: np.ndarray,
+    u: np.ndarray,
+    xi_0: np.ndarray,
+    kappa: float,
+    L_w: float,
+    rc2: np.ndarray,
+) -> np.ndarray:
+    """Evaluate the displaced filament integral on the real segment ``[0, xi_0]``."""
+    d_x_r = cross3(d, r)
+    d_x_u = cross3(d, u)
+    u_x_r = cross3(u, r)
+    u_x_d = -d_x_u
+    r_dot_u = np.einsum("...i,...i->...", r, u)
+    d_dot_u = np.einsum("...i,...i->...", d, u)
+
+    xi = xi_0[..., None] * _U01_32
+    w = xi_0[..., None] * _W01_32
+    arg = -1j * kappa * (L_w + xi)
+    psi = np.expm1(arg)
+    dpsi = (-1j * kappa) * np.exp(arg)
+
+    s = xi + a[..., None]
+    r2 = s * s + rho2[..., None] + rc2[..., None]
+    rad = np.sqrt(r2)
+    inv_r3 = 1.0 / (rad * r2)
+    inv_r5 = inv_r3 / r2
+
+    K30_p = np.sum((w * dpsi) * inv_r3, axis=-1)
+    K31_p = np.sum((w * dpsi * xi) * inv_r3, axis=-1)
+    K30 = np.sum((w * psi) * inv_r3, axis=-1)
+    K50 = np.sum((w * psi) * inv_r5, axis=-1)
+    K51 = np.sum((w * psi * xi) * inv_r5, axis=-1)
+
+    return _INV_4PI * (
+        u_x_r * K30_p[..., None]
+        - u_x_d * K31_p[..., None]
+        - d_x_u * K30[..., None]
+        + 3.0 * d_x_r * (r_dot_u * K50 - d_dot_u * K51)[..., None]
+    )
+
+
+def displaced_steady_tail_velocity(
+    P: np.ndarray,
+    p_left: np.ndarray,
+    p_right: np.ndarray,
+    wake_dir: np.ndarray,
+    u_left: np.ndarray,
+    u_right: np.ndarray,
+    kappa: float,
+    wake_length: float,
+    rc: np.ndarray | float = 0.0,
+) -> np.ndarray:
+    """Compute velocity perturbation from travelling-wave displacement of steady far-wake filaments.
+
+    Each strip ``s`` has two semi-infinite steady trailing filaments starting at
+    ``p_right[s]`` (sign ``+1``) and ``p_left[s]`` (sign ``-1``) along
+    ``wake_dir[s]``. At downstream distance ``xi >= 0`` [m] from the tail start,
+    each filament point is displaced relative to the rigid ``k = 0`` wake by
+    ``u_e[s] * (exp(-i kappa (wake_length + xi)) - 1)``. This function returns
+    the exact first-order Biot-Savart velocity perturbation per unit steady
+    circulation ``Gamma_0,TE`` [1/m] (or [1/(m rad)] when *u_left*, *u_right*
+    are per radian).
+
+    Parameters
+    ----------
+    P : numpy.ndarray
+        Evaluation points [m], shape ``(M, 3)``.
+    p_left, p_right : numpy.ndarray
+        Left and right start corners of each tail strip [m], shape ``(N_s, 3)``.
+    wake_dir : numpy.ndarray
+        Unit wake direction [-], shape ``(3,)`` or ``(N_s, 3)``.
+    u_left, u_right : numpy.ndarray
+        Trailing-edge corner displacement vectors [m] (heave) or [m/rad]
+        (pitch), shape ``(3,)`` or ``(N_s, 3)``.
+    kappa : float
+        Spatial wavenumber ``omega / V_inf = 2 k / c_ref`` [1/m], must be ``>= 0``.
+    wake_length : float
+        Discrete wake length ``L_w = N_wx dx_w`` [m] ahead of the tail start,
+        must be ``>= 0``.
+    rc : numpy.ndarray or float, optional
+        Core radius [m], scalar, shape ``(N_s,)`` or shape ``(M, N_s)``. Used
+        on the finite real sub-interval when an evaluation point lies aft of
+        the tail start.
+
+    Returns
+    -------
+    numpy.ndarray
+        Complex linearised velocity perturbation per unit steady trailing-edge
+        circulation [1/m] (heave) or [1/(m rad)] (pitch), shape ``(M, N_s, 3)``.
+    """
+    P_arr = np.asarray(P, dtype=np.float64)
+    pl = np.asarray(p_left, dtype=np.float64)
+    pr = np.asarray(p_right, dtype=np.float64)
+    if P_arr.ndim != 2 or P_arr.shape[1] != 3:
+        raise ValueError(f"Expected P of shape (M, 3), got {P_arr.shape}.")
+    if pl.ndim != 2 or pl.shape[1] != 3 or pr.shape != pl.shape:
+        raise ValueError(f"Expected p_left and p_right of shape (N_s, 3), got {pl.shape} and {pr.shape}.")
+    kap = float(kappa)
+    if not math.isfinite(kap) or kap < 0.0:
+        raise ValueError(f"kappa must be finite and >= 0, got {kappa!r}.")
+    L_w = float(wake_length)
+    if not math.isfinite(L_w) or L_w < 0.0:
+        raise ValueError(f"wake_length must be finite and >= 0, got {wake_length!r}.")
+
+    m, n = P_arr.shape[0], pl.shape[0]
+    wd = _broadcast_wake_dir(wake_dir, n)
+    ul = _broadcast_disp(u_left, n, "u_left")
+    ur = _broadcast_disp(u_right, n, "u_right")
+    if m == 0 or n == 0 or kap == 0.0:
+        return np.zeros((m, n, 3), dtype=np.complex128)
+
+    out = np.zeros((m, n, 3), dtype=np.complex128)
+    step = max(1, min(m, _TAIL_CHUNK_BYTES // max(1, n * 64 * 16)))
+
+    for i0 in range(0, m, step):
+        i1 = min(m, i0 + step)
+        Pc = P_arr[i0:i1]
+        rc_c = _slice_rc(rc, i0, i1)
+        v_tot = np.zeros((i1 - i0, n, 3), dtype=np.complex128)
+        wd_b = np.broadcast_to(wd[None, :, :], (i1 - i0, n, 3))
+
+        for sign, pe, ue in ((+1.0, pr, ur), (-1.0, pl, ul)):
+            r = Pc[:, None, :] - pe[None, :, :]
+            a = -np.einsum("msi,si->ms", r, wd)
+            d_x_r = cross3(wd_b, r)
+            rho2 = np.einsum("msi,msi->ms", d_x_r, d_x_r)
+            u_b = np.broadcast_to(ue[None, :, :], r.shape)
+
+            if bool(np.all(a > 0.0)):
+                v_ray = _displaced_ray_contour(r, a, rho2, wd_b, u_b, kap, L_w)
+            else:
+                v_ray = np.empty(r.shape, dtype=np.complex128)
+                pos = a > 0.0
+                if np.any(pos):
+                    v_ray[pos] = _displaced_ray_contour(
+                        r[pos], a[pos], rho2[pos], wd_b[pos], u_b[pos], kap, L_w,
+                    )
+                neg = ~pos
+                if np.any(neg):
+                    pad = max(0.5, 1.0 / kap)
+                    xi_0 = -a[neg] + pad
+                    rc_mat = np.broadcast_to(np.asarray(rc_c, dtype=np.float64), a.shape)
+                    rc2_n = np.maximum(rc_mat[neg] ** 2, 1e-24)
+                    v_seg = _displaced_ray_real_seg(
+                        r[neg], a[neg], rho2[neg], wd_b[neg], u_b[neg], xi_0, kap, L_w, rc2_n,
+                    )
+                    r_shift = r[neg] - xi_0[:, None] * wd_b[neg]
+                    a_shift = a[neg] + xi_0
+                    v_tail = _displaced_ray_contour(
+                        r_shift, a_shift, rho2[neg], wd_b[neg], u_b[neg], kap, L_w + xi_0,
+                    )
+                    v_ray[neg] = v_seg + v_tail
+
+            v_tot += sign * v_ray
+
+        out[i0:i1] = v_tot
+
+    return out
+
+
+def displaced_steady_tail_normal_influence(
+    P: np.ndarray,
+    normals: np.ndarray,
+    p_left: np.ndarray,
+    p_right: np.ndarray,
+    wake_dir: np.ndarray,
+    u_left: np.ndarray,
+    u_right: np.ndarray,
+    kappa: float,
+    wake_length: float,
+    rc: np.ndarray | float = 0.0,
+) -> np.ndarray:
+    """Compute normal-velocity perturbation from travelling-wave steady far-wake filaments.
+
+    Entry ``(i, s)`` is the dot product of
+    :func:`displaced_steady_tail_velocity` at ``P[i]`` from strip ``s`` with
+    ``normals[i]``.
+
+    Parameters
+    ----------
+    P : numpy.ndarray
+        Evaluation points [m], shape ``(M, 3)``.
+    normals : numpy.ndarray
+        Unit normal vectors at *P* [-], shape ``(M, 3)``.
+    p_left, p_right : numpy.ndarray
+        Left and right start corners of each tail strip [m], shape ``(N_s, 3)``.
+    wake_dir : numpy.ndarray
+        Unit wake direction [-], shape ``(3,)`` or ``(N_s, 3)``.
+    u_left, u_right : numpy.ndarray
+        Trailing-edge corner displacement vectors [m] (heave) or [m/rad]
+        (pitch), shape ``(3,)`` or ``(N_s, 3)``.
+    kappa : float
+        Spatial wavenumber ``omega / V_inf = 2 k / c_ref`` [1/m], must be ``>= 0``.
+    wake_length : float
+        Discrete wake length ``L_w = N_wx dx_w`` [m] ahead of the tail start,
+        must be ``>= 0``.
+    rc : numpy.ndarray or float, optional
+        Core radius [m], scalar, shape ``(N_s,)`` or shape ``(M, N_s)``.
+
+    Returns
+    -------
+    numpy.ndarray
+        Complex normal-velocity perturbation matrix [1/m] (heave) or
+        [1/(m rad)] (pitch), shape ``(M, N_s)``.
+    """
+    n_arr = np.asarray(normals, dtype=np.float64)
+    P_arr = np.asarray(P, dtype=np.float64)
+    if n_arr.shape != P_arr.shape:
+        raise ValueError(f"Expected normals of shape {P_arr.shape}, got {n_arr.shape}.")
+    v = displaced_steady_tail_velocity(
+        P_arr, p_left, p_right, wake_dir, u_left, u_right, kappa, wake_length, rc,
+    )
+    return np.einsum("msi,mi->ms", v, n_arr)
+

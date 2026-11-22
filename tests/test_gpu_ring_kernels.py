@@ -663,3 +663,66 @@ print(json.dumps({
     assert not any("GPU unavailable" in n for n in out_cpu["notes"])
     assert out_gpu["CL_alpha"] == pytest.approx(out_cpu["CL_alpha"], rel=1e-14, abs=1e-14)
     assert out_gpu["Cm_q"] == pytest.approx(out_cpu["Cm_q"], rel=1e-14, abs=1e-14)
+
+
+@pytest.mark.gpu
+@pytest.mark.parametrize("use_ground", [False, True])
+@pytest.mark.parametrize("kappa", [0.0, 0.25, 1.5])
+def test_gpu_displaced_steady_tail_equals_cpu(gpu_device, use_ground, kappa):
+    """GPU displaced steady far-wake tail matches CPU to round-off, upstream and downstream."""
+    from ventorum.gpu import ring_kernels as RK
+    from ventorum.unsteady.harmonic import _ey_cross
+    from ventorum.unsteady.tail import (
+        displaced_steady_tail_normal_influence,
+        displaced_steady_tail_velocity,
+    )
+
+    ac = _rect_wing(n_panels=6)
+    lat = build_lattice(ac, n_chord=4, chord_spacing="uniform")
+    cond = vt.FlightCondition(V_inf=30.0, alpha=np.radians(4.0), h=0.5 if use_ground else None)
+    ground = (
+        make_ground_plane(lat, 0.5, cond.alpha, cond.beta, ref_point=ac.ref_point, height_ref="ref")
+        if use_ground
+        else None
+    )
+    rings = build_ring_lattice(lat, wake_dir=np.array([np.cos(cond.alpha), 0.0, np.sin(cond.alpha)]))
+    wake_length = 3.0
+    tail_l = rings.te_left + wake_length * rings.wake_dir
+    tail_r = rings.te_right + wake_length * rings.wake_dir
+    rc_w = rings.rc[rings.te_indices]
+
+    # Non-uniform left/right pitch-like displacement vectors plus upstream and downstream points.
+    u_l = _ey_cross(rings.te_left - ac.ref_point[None, :])
+    u_r = _ey_cross(rings.te_right - ac.ref_point[None, :])
+    P = np.vstack([rings.cp, tail_l[:2] + 0.5 * rings.wake_dir[:2] + np.array([[0.0, 0.1, 0.2], [0.0, -0.1, 0.3]])])
+    normals = np.vstack([rings.normal_bc, np.array([[0.0, 0.0, 1.0], [0.0, 0.0, 1.0]])])
+
+    ref_v = displaced_steady_tail_velocity(
+        P, tail_l, tail_r, rings.wake_dir, u_l, u_r, kappa, wake_length, rc_w,
+    )
+    ref_a = displaced_steady_tail_normal_influence(
+        P, normals, tail_l, tail_r, rings.wake_dir, u_l, u_r, kappa, wake_length, rc_w,
+    )
+    if use_ground:
+        img = ground_image_rings(rings, ground)
+        img_tl = img.te_left + wake_length * img.wake_dir
+        img_tr = img.te_right + wake_length * img.wake_dir
+        u_l_img = ground.reflect_directions(u_l)
+        u_r_img = ground.reflect_directions(u_r)
+        ref_v = ref_v + img.sign * displaced_steady_tail_velocity(
+            P, img_tl, img_tr, img.wake_dir, u_l_img, u_r_img, kappa, wake_length, rc_w,
+        )
+        ref_a = ref_a + img.sign * displaced_steady_tail_normal_influence(
+            P, normals, img_tl, img_tr, img.wake_dir, u_l_img, u_r_img, kappa, wake_length, rc_w,
+        )
+
+    got_v = RK.displaced_steady_tail_velocity_gpu(
+        P, tail_l, tail_r, rings.wake_dir, u_l, u_r, kappa, wake_length, rc_w, ground=ground,
+    )
+    got_a = RK.displaced_steady_tail_normal_influence_gpu(
+        P, normals, tail_l, tail_r, rings.wake_dir, u_l, u_r, kappa, wake_length, rc_w, ground=ground,
+    )
+
+    assert np.max(np.abs(got_v - ref_v)) <= 1e-12 * max(float(np.max(np.abs(ref_v))), 1.0)
+    assert np.max(np.abs(got_a - ref_a)) <= 1e-12 * max(float(np.max(np.abs(ref_a))), 1.0)
+

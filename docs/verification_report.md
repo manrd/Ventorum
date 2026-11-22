@@ -364,10 +364,10 @@ Rectangular AR 6 wing (4 panels per semi-span, 8 strips x 4 chordwise = 32 rings
 
 | motion and wing | ground-image max |Gamma| [m^2/s] | two-wing max |Gamma| [m^2/s] | difference | limit | check |
 |---|---|---|---|---|---|
-| heave, real wing | 23.89947 | 23.89947 | below 1e-12 | 1e-12 | pass |
-| heave, mirror wing (antiphase) | 23.89947 | 23.89947 | below 1e-12 | 1e-12 | pass |
-| pitch, real wing | 59.88086 | 59.88086 | below 1e-12 | 1e-12 | pass |
-| pitch, mirror wing (antiphase) | 59.88086 | 59.88086 | below 1e-12 | 1e-12 | pass |
+| heave, real wing | 23.84621 | 23.84621 | below 1e-12 | 1e-12 | pass |
+| heave, mirror wing (antiphase) | 23.84621 | 23.84621 | below 1e-12 | 1e-12 | pass |
+| pitch, real wing | 59.86163 | 59.86163 | below 1e-12 | 1e-12 | pass |
+| pitch, mirror wing (antiphase) | 59.86163 | 59.86163 | below 1e-12 | 1e-12 | pass |
 
 Tolerance: scaled circulation difference max |Gamma_img_sys - Gamma_2w| / max(|Gamma|, 1) below 1e-12, because the image operator is algebraically identical to the antiphase two-wing free-air system up to floating-point round-off.
 
@@ -377,15 +377,15 @@ Rectangular AR 6 wing (6 panels per semi-span, 12 strips x 4 chordwise = 48 ring
 
 | k | response | Woodbury | direct LU | difference | limit | check |
 |---|---|---|---|---|---|---|
-| 0.05 | heave CL | -0.19915 -0.50440i | -0.19915 -0.50440i | below 1e-12 | 1e-12 | pass |
-| 0.05 | pitch CL | +5.06254 +0.17243i | +5.06254 +0.17243i | below 1e-12 | 1e-12 | pass |
-| 0.05 | pitch Cm | -0.05056 -0.07952i | -0.05056 -0.07952i | below 1e-12 | 1e-12 | pass |
-| 0.2 | heave CL | -0.22473 -1.88054i | -0.22473 -1.88054i | below 1e-12 | 1e-12 | pass |
-| 0.2 | pitch CL | +4.77546 +0.80836i | +4.77546 +0.80836i | below 1e-12 | 1e-12 | pass |
-| 0.2 | pitch Cm | -0.03012 -0.31536i | -0.03012 -0.31536i | below 1e-12 | 1e-12 | pass |
-| 0.5 | heave CL | +0.52853 -3.97269i | +0.52853 -3.97269i | below 1e-12 | 1e-12 | pass |
-| 0.5 | pitch CL | +3.95448 +2.61240i | +3.95448 +2.61240i | below 1e-12 | 1e-12 | pass |
-| 0.5 | pitch Cm | +0.09966 -0.77467i | +0.09966 -0.77467i | below 1e-12 | 1e-12 | pass |
+| 0.05 | heave CL | -0.19924 -0.50417i | -0.19924 -0.50417i | below 1e-12 | 1e-12 | pass |
+| 0.05 | pitch CL | +5.06262 +0.17224i | +5.06262 +0.17224i | below 1e-12 | 1e-12 | pass |
+| 0.05 | pitch Cm | -0.05057 -0.07955i | -0.05057 -0.07955i | below 1e-12 | 1e-12 | pass |
+| 0.2 | heave CL | -0.22485 -1.87912i | -0.22485 -1.87912i | below 1e-12 | 1e-12 | pass |
+| 0.2 | pitch CL | +4.77556 +0.80721i | +4.77556 +0.80721i | below 1e-12 | 1e-12 | pass |
+| 0.2 | pitch Cm | -0.03029 -0.31537i | -0.03029 -0.31537i | below 1e-12 | 1e-12 | pass |
+| 0.5 | heave CL | +0.52874 -3.96971i | +0.52874 -3.96971i | below 1e-12 | 1e-12 | pass |
+| 0.5 | pitch CL | +3.95431 +2.60999i | +3.95431 +2.60999i | below 1e-12 | 1e-12 | pass |
+| 0.5 | pitch Cm | +0.09919 -0.77434i | +0.09919 -0.77434i | below 1e-12 | 1e-12 | pass |
 
 Tolerance: scaled complex difference |wb - direct| / max(|direct|, 1) below 1e-12, because the rank-n_strips Woodbury update solves the same linear system as the direct complex LU factorisation up to round-off.
 
@@ -420,19 +420,19 @@ Rectangular AR 6 wing (8 panels per semi-span, 16 strips x 4 chordwise = 64 ring
 
 | case | k | response | 5 chords + tail | 40 chords + tail | difference | limit | check |
 |---|---|---|---|---|---|---|---|
-| free air | 0.05 | heave CL | -0.01073 -0.41321i | -0.01073 -0.41321i | 1.15e-06 | 5e-05 | pass |
-| free air | 0.05 | pitch CL | +4.14164 +0.10407i | +4.14163 +0.10406i | 2.77e-06 | 5e-05 | pass |
-| free air | 0.05 | pitch Cm | +0.04290 -0.07133i | +0.04290 -0.07133i | 3.60e-07 | 5e-05 | pass |
-| free air | 0.5 | heave CL | +0.81308 -3.20346i | +0.81305 -3.20348i | 1.25e-05 | 5e-05 | pass |
-| free air | 0.5 | pitch CL | +3.13632 +2.45376i | +3.13636 +2.45374i | 1.16e-05 | 5e-05 | pass |
-| free air | 0.5 | pitch Cm | +0.18402 -0.69363i | +0.18401 -0.69363i | 5.09e-06 | 5e-05 | pass |
-| h/c = 0.5 | 0.05 | heave CL | -0.19907 -0.50453i | -0.19907 -0.50453i | 1.20e-07 | 5e-05 | pass |
-| h/c = 0.5 | 0.05 | pitch CL | +5.06360 +0.17250i | +5.06359 +0.17250i | 2.17e-07 | 5e-05 | pass |
-| h/c = 0.5 | 0.05 | pitch Cm | -0.05048 -0.07955i | -0.05048 -0.07955i | 4.46e-08 | 5e-05 | pass |
-| h/c = 0.5 | 0.5 | heave CL | +0.52886 -3.97372i | +0.52886 -3.97372i | 1.03e-06 | 5e-05 | pass |
-| h/c = 0.5 | 0.5 | pitch CL | +3.95533 +2.61319i | +3.95533 +2.61318i | 9.60e-07 | 5e-05 | pass |
-| h/c = 0.5 | 0.5 | pitch Cm | +0.09975 -0.77491i | +0.09975 -0.77491i | 7.19e-07 | 5e-05 | pass |
+| free air | 0.05 | heave CL | -0.01083 -0.41370i | -0.01083 -0.41370i | 1.15e-06 | 5e-05 | pass |
+| free air | 0.05 | pitch CL | +4.14172 +0.10447i | +4.14172 +0.10446i | 2.77e-06 | 5e-05 | pass |
+| free air | 0.05 | pitch Cm | +0.04290 -0.07138i | +0.04290 -0.07138i | 3.60e-07 | 5e-05 | pass |
+| free air | 0.5 | heave CL | +0.81134 -3.20521i | +0.81131 -3.20523i | 1.25e-05 | 5e-05 | pass |
+| free air | 0.5 | pitch CL | +3.13773 +2.45517i | +3.13777 +2.45515i | 1.17e-05 | 5e-05 | pass |
+| free air | 0.5 | pitch Cm | +0.18388 -0.69393i | +0.18387 -0.69394i | 5.11e-06 | 5e-05 | pass |
+| h/c = 0.5 | 0.05 | heave CL | -0.19916 -0.50429i | -0.19916 -0.50429i | 1.34e-07 | 5e-05 | pass |
+| h/c = 0.5 | 0.05 | pitch CL | +5.06367 +0.17231i | +5.06367 +0.17231i | 2.17e-07 | 5e-05 | pass |
+| h/c = 0.5 | 0.05 | pitch Cm | -0.05049 -0.07958i | -0.05049 -0.07958i | 4.51e-08 | 5e-05 | pass |
+| h/c = 0.5 | 0.5 | heave CL | +0.52908 -3.97071i | +0.52907 -3.97072i | 1.14e-06 | 5e-05 | pass |
+| h/c = 0.5 | 0.5 | pitch CL | +3.95515 +2.61075i | +3.95516 +2.61075i | 1.02e-06 | 5e-05 | pass |
+| h/c = 0.5 | 0.5 | pitch Cm | +0.09928 -0.77458i | +0.09928 -0.77458i | 7.65e-07 | 5e-05 | pass |
 
 Tolerance: scaled complex difference |v_5 - v_40| / max(|v_40|, 1) below 5e-5, which bounds the discrete-to-continuous wake transition error between 5 and 40 chords when the 3D harmonic tail closes the wake.
 
-Run time: 100.2 s.
+Run time: 74.0 s.

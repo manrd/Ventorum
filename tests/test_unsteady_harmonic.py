@@ -1049,3 +1049,152 @@ def test_harmonic_response_records_cpu_device_and_fallback_notes(monkeypatch):
         assert np.array_equal(r_fb.pitch.CL, r_cpu.pitch.CL)
     finally:
         gpu.set_device(old_dev)
+
+
+# ---------------------------------------------------------------------------
+# 9. Travelling-wave steady wake: k -> 0 limit, alpha0 = 0, and far-wake tail
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("h_ground", [None, 0.5])
+def test_travelling_wake_matches_rigid_at_k0_and_vanishes_at_alpha0(h_ground):
+    """Travelling-wave steady-wake term vanishes to round-off at k = 0 and at alpha0 = 0."""
+    ac = _rect_wing(semi_span=3.0, chord=1.0, n_panels=6)
+    lat = build_lattice(ac, n_chord=4, chord_spacing="uniform")
+
+    # 1. Lifting mean state (alpha0 = 4 deg): at k = 0 the travelling-wave correction is
+    #    identically zero, so RHS and loads equal the rigid k = 0 steady limit to round-off,
+    #    and as k -> 0 the travelling-wave RHS correction vanishes linearly in k.
+    cond_lift = vt.FlightCondition(V_inf=25.0, rho=1.225, alpha=np.radians(4.0), h=h_ground)
+    ground_lift = (
+        make_ground_plane(lat, h_ground, cond_lift.alpha, cond_lift.beta, ref_point=ac.ref_point, height_ref="ref")
+        if h_ground is not None
+        else None
+    )
+    sys_lift = _HarmonicRingSystem(
+        lat,
+        cond_lift,
+        S_ref=ac.S_ref,
+        b_ref=ac.b_ref,
+        c_ref=ac.c_ref,
+        ground=ground_lift,
+        ref_point=ac.ref_point,
+    )
+    rhs_0 = sys_lift.build_rhs(0.0)
+    assert np.max(np.abs(rhs_0[:, 0] - sys_lift.rhs_heave_geo)) <= 1e-14 * max(
+        float(np.max(np.abs(sys_lift.rhs_heave_geo))), 1.0,
+    )
+    dU_alpha = np.array(
+        [-sys_lift.V_0[2], 0.0, sys_lift.V_0[0]], dtype=np.float64,
+    )
+    rhs_p_rigid_0 = -(sys_lift.rings.normal_bc @ dU_alpha) + sys_lift.rhs_pitch_geo
+    assert np.max(np.abs(rhs_0[:, 1] - rhs_p_rigid_0)) <= 1e-14 * max(
+        float(np.max(np.abs(rhs_p_rigid_0))), 1.0,
+    )
+
+    resp_lift = sys_lift.solve([0.0, 1e-5, 0.2])
+    for name in ("CL", "CD", "CY", "Cl", "Cm", "Cn"):
+        v0_h = getattr(resp_lift.k0_heave, name)
+        v0_p = getattr(resp_lift.k0_pitch, name)
+        assert abs(getattr(resp_lift.heave, name)[0] - v0_h) <= 1e-12 * max(abs(v0_h), 1.0)
+        assert abs(getattr(resp_lift.pitch, name)[0] - v0_p) <= 1e-12 * max(abs(v0_p), 1.0)
+
+    # Tiny k = 1e-5 approaches the rigid k = 0 real parts to O(k^2) while the travelling term
+    # at k = 0.2 is nonzero (different from the rigid-wake RHS).
+    dn_h_tiny, dn_p_tiny = sys_lift._travelling_wake_rhs_delta(1e-5)
+    dn_h_02, dn_p_02 = sys_lift._travelling_wake_rhs_delta(0.2)
+    assert np.max(np.abs(dn_h_02)) > 1e-4
+    assert np.max(np.abs(dn_p_02)) > 1e-4
+    assert np.max(np.abs(dn_h_tiny)) <= 1e-3 * np.max(np.abs(dn_h_02))
+    assert np.max(np.abs(dn_p_tiny)) <= 1e-3 * np.max(np.abs(dn_p_02))
+
+    # 2. Unloaded mean state (alpha0 = 0 deg): Gamma_0 = 0 so the travelling-wave term is zero.
+    cond_zero = vt.FlightCondition(V_inf=25.0, rho=1.225, alpha=0.0, h=h_ground)
+    ground_zero = (
+        make_ground_plane(lat, h_ground, cond_zero.alpha, cond_zero.beta, ref_point=ac.ref_point, height_ref="ref")
+        if h_ground is not None
+        else None
+    )
+    sys_zero = _HarmonicRingSystem(
+        lat,
+        cond_zero,
+        S_ref=ac.S_ref,
+        b_ref=ac.b_ref,
+        c_ref=ac.c_ref,
+        ground=ground_zero,
+        ref_point=ac.ref_point,
+    )
+    assert sys_zero.has_mean_load is False
+    dn_h_z, dn_p_z = sys_zero._travelling_wake_rhs_delta(0.2)
+    assert np.max(np.abs(dn_h_z)) == 0.0
+    assert np.max(np.abs(dn_p_z)) == 0.0
+    fm_h_z, sl_h_z, fm_p_z, sl_p_z = sys_zero._travelling_wake_load_delta(0.2)
+    assert np.max(np.abs(fm_h_z)) == 0.0
+    assert np.max(np.abs(sl_h_z)) == 0.0
+    assert np.max(np.abs(fm_p_z)) == 0.0
+    assert np.max(np.abs(sl_p_z)) == 0.0
+
+
+@pytest.mark.parametrize("h_ground", [None, 0.5])
+def test_displaced_steady_tail_k0_and_5c_vs_40c_consistency(h_ground):
+    """Displaced steady far-wake tail vanishes at kappa = 0 and matches 5c vs 40c wake displacement."""
+    from ventorum.unsteady.tail import (
+        displaced_steady_tail_normal_influence,
+        displaced_steady_tail_velocity,
+    )
+
+    ac = _swept_tapered_wing(n_panels=4)
+    lat = build_lattice(ac, n_chord=4, chord_spacing="uniform")
+    cond = vt.FlightCondition(V_inf=20.0, rho=1.225, alpha=np.radians(4.0), h=h_ground)
+    ground = (
+        make_ground_plane(lat, h_ground, cond.alpha, cond.beta, ref_point=ac.ref_point, height_ref="ref")
+        if h_ground is not None
+        else None
+    )
+
+    sys_5 = _HarmonicRingSystem(
+        lat, cond, S_ref=ac.S_ref, b_ref=ac.b_ref, c_ref=ac.c_ref,
+        ground=ground, ref_point=ac.ref_point, wake_chords=5.0,
+    )
+    sys_40 = _HarmonicRingSystem(
+        lat, cond, S_ref=ac.S_ref, b_ref=ac.b_ref, c_ref=ac.c_ref,
+        ground=ground, ref_point=ac.ref_point, wake_chords=40.0,
+    )
+
+    # Zero at kappa = 0.
+    rings = sys_5.rings
+    u_L = np.broadcast_to(sys_5.c_ref * sys_5.e_h, (rings.n_strips, 3))
+    v0 = displaced_steady_tail_velocity(
+        rings.cp, sys_5.tail_left, sys_5.tail_right, rings.wake_dir,
+        u_L, u_L, 0.0, sys_5.wake_length, sys_5.rc_wake,
+    )
+    a0 = displaced_steady_tail_normal_influence(
+        rings.cp, rings.normal_bc, sys_5.tail_left, sys_5.tail_right, rings.wake_dir,
+        u_L, u_L, 0.0, sys_5.wake_length, sys_5.rc_wake,
+    )
+    assert np.max(np.abs(v0)) == 0.0
+    assert np.max(np.abs(a0)) == 0.0
+
+    # Downstream point (a <= 0) stays finite and matches normal projection.
+    p_aft = np.vstack([rings.cp, sys_5.tail_left[:2] + 0.5 * rings.wake_dir[:2] + np.array([[0.0, 0.1, 0.2], [0.0, -0.1, 0.3]])])
+    n_aft = np.vstack([rings.normal_bc, np.array([[0.0, 0.0, 1.0], [0.0, 0.0, 1.0]])])
+    v_aft = displaced_steady_tail_velocity(
+        p_aft, sys_5.tail_left, sys_5.tail_right, rings.wake_dir,
+        u_L, u_L, 0.4, sys_5.wake_length, sys_5.rc_wake,
+    )
+    a_aft = displaced_steady_tail_normal_influence(
+        p_aft, n_aft, sys_5.tail_left, sys_5.tail_right, rings.wake_dir,
+        u_L, u_L, 0.4, sys_5.wake_length, sys_5.rc_wake,
+    )
+    assert np.all(np.isfinite(v_aft))
+    assert np.max(np.abs(a_aft - np.einsum("msi,mi->ms", v_aft, n_aft))) <= 1e-14 * max(
+        float(np.max(np.abs(a_aft))), 1.0,
+    )
+
+    # 5 chords + far wake matches 40 chords + far wake on the travelling-wave RHS and load deltas.
+    for k_val in (0.05, 0.2, 0.5):
+        dh5, dp5 = sys_5._travelling_wake_rhs_delta(k_val)
+        dh40, dp40 = sys_40._travelling_wake_rhs_delta(k_val)
+        assert np.max(np.abs(dh5 - dh40)) <= 5e-4 * max(float(np.max(np.abs(dh40))), 1e-12)
+        assert np.max(np.abs(dp5 - dp40)) <= 5e-4 * max(float(np.max(np.abs(dp40))), 1e-12)
+

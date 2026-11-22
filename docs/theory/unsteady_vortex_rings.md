@@ -68,16 +68,32 @@ $\mathbf A_{bb}$ is LU-factorised once in real float64 arithmetic. For each $k$,
 
 and recovers $\hat{\boldsymbol\Gamma}(k) = \mathbf Y - \mathbf Z\,\mathbf c$. The result agrees with a direct $N \times N$ complex LU solve to round-off while avoiding $O(N^3)$ complex factorisation at every frequency.
 
-### Loaded-mean-state terms in ground effect
+### Loaded-mean-state terms and travelling-wave wake displacement
 
-In free air with a body-fixed wake and zero mean lift, only the kinematic boundary velocity drives the perturbation circulation. In flat-ground effect (or with a free-stream-aligned wake) about a lifting mean state $\boldsymbol\Gamma_0$, a small heave displacement $\delta h$ or pitch perturbation $\delta\theta$ moves the wing relative to its mirror image (and rotates the steady wake direction relative to the body). Linearising $\mathbf A_\text{steady}(h, \theta)\,\boldsymbol\Gamma = \mathbf b$ about the mean state adds the geometric right-hand-side forcing terms (Parenteau 2021, chapter 4)
+In free air with zero mean lift ($\boldsymbol\Gamma_0 = \mathbf 0$), only the kinematic boundary velocity drives the perturbation circulation. About a lifting mean state ($\boldsymbol\Gamma_0 \neq \mathbf 0$), small heave $\delta z$ or pitch $\delta\theta$ moves the wing relative to the ground plane (in ground effect) and relative to the steady wake.
+
+In the steady limit ($k = 0$), linearising $\mathbf A_\text{steady}(h, \theta)\,\boldsymbol\Gamma = \mathbf b$ about the mean state adds the rigid geometric right-hand-side forcing terms (Parenteau 2021, chapter 4)
 
 ```{math}
-\mathbf b_{h,\text{geo}} = -c_\text{ref}\,\frac{\partial \mathbf A_\text{steady}}{\partial h}\,\boldsymbol\Gamma_0, \qquad
-\mathbf b_{\theta,\text{geo}} = -\frac{\partial \mathbf A_\text{steady}}{\partial \theta}\,\boldsymbol\Gamma_0,
+\mathbf b_{h,\text{geo}}^{(0)} = -c_\text{ref}\,\frac{\partial \mathbf A_\text{steady}}{\partial h}\,\boldsymbol\Gamma_0, \qquad
+\mathbf b_{\theta,\text{geo}}^{(0)} = -\frac{\partial \mathbf A_\text{steady}}{\partial \theta}\,\boldsymbol\Gamma_0,
 ```
 
-together with the matching derivatives of the steady induced velocity at the load evaluation points. The solver computes these geometry derivatives by central finite differences of the steady influence operator and steady induced velocity. In pitch, the mean aerodynamic force $\mathbf F_0$ and moment $\mathbf M_0$ about the reference point also rotate with the body ($\hat{\mathbf e}_y \times \mathbf F_0$ and $\hat{\mathbf e}_y \times \mathbf M_0$). Together, these terms guarantee that the $k \to 0$ limits of heave and pitch reproduce the steady height and incidence derivatives of `ventorum.height_derivatives` and `ventorum.analyze`.
+together with the matching derivatives of the steady induced velocity at the load evaluation points. In pitch, the mean aerodynamic force $\mathbf F_0$ and moment $\mathbf M_0$ about the reference point also rotate with the body ($\hat{\mathbf e}_y \times \mathbf F_0$ and $\hat{\mathbf e}_y \times \mathbf M_0$). Together, these $k = 0$ terms guarantee that the real parts at $k \to 0$ reproduce the steady height and incidence derivatives of `ventorum.height_derivatives` and `ventorum.analyze`.
+
+At finite reduced frequency ($k > 0$), a prescribed wake does not move rigidly with the wing. Each wake corner remains where the trailing-edge closure was when it was shed and convects downstream with the free stream (Katz and Plotkin 2001, chapter 13). Linearising the prescribed-wake shedding geometry of the time-domain solver (`ventorum.unsteady.timedomain`) about the steady mean wake gives each steady wake station $m$ (at downstream distance $\xi_m = m \Delta x_w$) a travelling-wave displacement with the convective phase lag $e^{-\mathrm i \omega m \Delta t}$:
+
+```{math}
+\Delta\mathbf X_{e,s,m}^{\text{trav}}(k) = \mathbf u_{e,s}\left(e^{-\mathrm i \omega m \Delta t} - 1\right),
+```
+
+relative to the rigid $k = 0$ wake displacement $\mathbf u_{e,s}$, where $\mathbf u_{e,s} = c_\text{ref}\mathbf e_h$ for unit nondimensional heave and $\mathbf u_{e,s} = \hat{\mathbf e}_y \times (\mathbf p_{\text{TE},e,s} - \mathbf x_\text{ref})$ for unit pitch about $\mathbf x_\text{ref}$ ($e \in \{L, R\}$). In flat-ground effect, the mirror image of the displaced steady wake receives the reflected displacement $R_0(\Delta\mathbf X_{e,s,m}^{\text{trav}})$. Because every discrete steady wake row carries the same circulation $\Gamma_{0,\text{TE},s}$, all interior spanwise segments cancel identically, leaving the displaced trailing legs of the $N_{wx}$ discrete wake rows plus the two semi-infinite displaced far-wake trailing filaments on $\xi \in [0, \infty)$:
+
+```{math}
+\Delta\mathbf X_{e,s}^{\text{far}}(\xi; k) = \mathbf u_{e,s}\left(e^{-\mathrm i \kappa (L_w + \xi)} - 1\right).
+```
+
+The solver precomputes the per-station discrete wake normal-velocity and load-functional derivatives once by central finite differences of the ring kernels, contracts them per $k$ with $\phi_m = e^{-\mathrm i \omega m \Delta t} - 1$, and adds the semi-infinite far-wake contribution by contour-rotated quadrature along $\xi = (1 - \mathrm i) u$ (`ventorum.unsteady.tail`). This correction vanishes identically at $k = 0$ and at $\boldsymbol\Gamma_0 = \mathbf 0$, and makes the harmonic solver the exact small-amplitude periodic limit of the prescribed-wake time-domain solver at lifting mean states.
 
 ### Linearised loads and trailing-edge load correction
 
@@ -170,7 +186,7 @@ and the quasi-steady lift-rate limit as $k \to 0$ is $C_{L_q} = C_{L_\alpha} = 2
 
 - `ventorum.aero.vortex_ring`: numpy and Numba quadrilateral vortex-ring kernels and steady wake closure.
 - `ventorum.unsteady.rings`: `RingLattice`, `RingGroundImage`, `build_ring_lattice`, `ground_image_rings`.
-- `ventorum.unsteady.tail`: `harmonic_tail_velocity`, `harmonic_tail_normal_influence` (closed-form 3D semi-infinite harmonic wake tail with contour rotation).
+- `ventorum.unsteady.tail`: `harmonic_tail_velocity`, `harmonic_tail_normal_influence`, `displaced_steady_tail_velocity`, and `displaced_steady_tail_normal_influence` (closed-form 3D semi-infinite harmonic wake tail and travelling-wave displaced steady far wake with contour rotation).
 - `ventorum.unsteady.harmonic`: `_HarmonicRingSystem`, `_HarmonicResponse`, `_solve_harmonic_rings`.
 - `ventorum.unsteady.derivatives`: `dynamic_derivatives`, `DynamicDerivativesResult`.
 - `ventorum.agent.tools.dynamic_derivatives` and `ventorum.agent.mcp_server`: agent tool and MCP server entry point.
