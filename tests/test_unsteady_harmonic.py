@@ -1016,3 +1016,36 @@ def test_bent_ring_apparent_mass_area_follows_hinge():
     assert np.allclose(sys.area_vec[p], expected_vec, atol=1e-14, rtol=1e-14)
     assert np.allclose(sys.area_moment_vec[p], expected_mom, atol=1e-14, rtol=1e-14)
     assert np.linalg.norm(sys.area_moment_vec[p] - flat_mom) > 1e-4 * np.linalg.norm(expected_mom)
+
+
+def test_harmonic_response_records_cpu_device_and_fallback_notes(monkeypatch):
+    """_HarmonicResponse records device and precision, and adds a note on GPU fallback."""
+    from ventorum import gpu
+
+    ac = _rect_wing(n_panels=4)
+    lat = build_lattice(ac, n_chord=4, chord_spacing="uniform")
+    cond = vt.FlightCondition(V_inf=25.0, rho=1.225, alpha=np.radians(4.0))
+
+    old_dev = gpu.get_device()
+    try:
+        gpu.set_device("cpu")
+        r_cpu = _solve_harmonic_rings(
+            lat, cond, [0.0, 0.1], S_ref=ac.S_ref, b_ref=ac.b_ref, c_ref=ac.c_ref, ref_point=ac.ref_point,
+        )
+        assert r_cpu.device == "cpu"
+        assert r_cpu.precision == "float64"
+        assert r_cpu.notes == []
+
+        # GPU requested when CUDA is unavailable falls back to CPU with a note.
+        monkeypatch.setattr(gpu, "get_device", lambda: "gpu")
+        monkeypatch.setattr(gpu, "available", lambda: False)
+        monkeypatch.setattr(gpu, "unavailable_reason", lambda: "PyTorch finds no CUDA GPU.")
+        r_fb = _solve_harmonic_rings(
+            lat, cond, [0.0, 0.1], S_ref=ac.S_ref, b_ref=ac.b_ref, c_ref=ac.c_ref, ref_point=ac.ref_point,
+        )
+        assert r_fb.device == "cpu"
+        assert r_fb.precision == "float64"
+        assert any("GPU unavailable" in msg and "CPU" in msg for msg in r_fb.notes)
+        assert np.array_equal(r_fb.pitch.CL, r_cpu.pitch.CL)
+    finally:
+        gpu.set_device(old_dev)
