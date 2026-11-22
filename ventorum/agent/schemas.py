@@ -1203,6 +1203,110 @@ PANEL_SETTINGS_SCHEMA: dict[str, Any] = {
     "additionalProperties": False,
 }
 
+_WAVEFORM_OBJECT_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "description": (
+        "Named time waveform: 'harmonic' (amplitude, frequency_hz, optional phase_deg, offset), "
+        "'step' (amplitude, optional t_start_s, offset), or 'ramp' (amplitude, duration_s, "
+        "optional t_start_s, offset)."
+    ),
+    "properties": {
+        "kind": {"type": "string", "enum": ["harmonic", "step", "ramp"], "description": "Waveform kind."},
+        "amplitude": _num("Waveform amplitude in the unit of the axis (m for translations, deg for angles)."),
+        "frequency_hz": _num("Oscillation frequency [Hz] for kind='harmonic'.", exclusiveMinimum=0),
+        "phase_deg": _num("Phase angle [deg] for kind='harmonic'. Default 0."),
+        "t_start_s": _num("Start time [s] for kind='step' or 'ramp'. Default 0.", minimum=0),
+        "duration_s": _num("Ramp duration [s] for kind='ramp'.", exclusiveMinimum=0),
+        "offset": _num("Constant offset in the unit of the axis. Default 0."),
+    },
+    "required": ["kind", "amplitude"],
+    "additionalProperties": False,
+}
+
+_WAVEFORM_SCHEMA: dict[str, Any] = {
+    "anyOf": [
+        {
+            "type": "array",
+            "items": {"type": "number"},
+            "minItems": 2,
+            "description": "Explicit sample array of length n_steps + 1 in the unit of the axis.",
+        },
+        _WAVEFORM_OBJECT_SCHEMA,
+    ],
+    "description": "Explicit sample array of length n_steps + 1 or a named waveform object.",
+}
+
+_MOTION_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "description": (
+        "Prescribed six-axis rigid-body motion of ref_point: translations x_m, y_m, z_m [m] "
+        "along mean-flight axes and rotations roll_deg, pitch_deg, yaw_deg [deg] (3-2-1 sequence, "
+        "AVL signs). Each axis takes an explicit array or a named waveform object."
+    ),
+    "properties": {
+        "x_m": _WAVEFORM_SCHEMA,
+        "y_m": _WAVEFORM_SCHEMA,
+        "z_m": _WAVEFORM_SCHEMA,
+        "roll_deg": _WAVEFORM_SCHEMA,
+        "pitch_deg": _WAVEFORM_SCHEMA,
+        "yaw_deg": _WAVEFORM_SCHEMA,
+    },
+    "additionalProperties": False,
+}
+
+_TIME_CONTROLS_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "description": (
+        "Prescribed control-surface deflections [deg], mapping ControlSurface name to an explicit "
+        "array of length n_steps + 1 [deg] or a named waveform object [deg]."
+    ),
+    "additionalProperties": _WAVEFORM_SCHEMA,
+}
+
+_GUST_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "description": (
+        "Named gust or wind-shear field: 'sharp_edged' (amplitude_m_s, optional direction, x_front_m), "
+        "'one_minus_cosine' (amplitude_m_s, length_m, optional direction, x_front_m), or "
+        "'wind_shear' (profile 'linear' with du_dz_per_s and optional u0_m_s, z_ref_m; or "
+        "profile 'logarithmic' with u_ref_m_s, z_ref_m, z0_m; optional horizontal direction)."
+    ),
+    "properties": {
+        "kind": {
+            "type": "string",
+            "enum": ["sharp_edged", "one_minus_cosine", "wind_shear"],
+            "description": "Gust field kind.",
+        },
+        "direction": {
+            "anyOf": [
+                {
+                    "type": "string",
+                    "enum": ["vertical", "head", "side"],
+                    "description": "Named gust direction ('vertical', 'head', 'side').",
+                },
+                _vec3("Unit 3-vector in geometry axes [-]."),
+            ],
+            "description": "Gust direction ('vertical', 'head', 'side', or a unit 3-vector). "
+                           "Default 'vertical' for convected gusts and 'head' for wind_shear.",
+        },
+        "amplitude_m_s": _num("Gust velocity amplitude [m/s] for sharp_edged or one_minus_cosine."),
+        "length_m": _num("Total gust wavelength [m] for one_minus_cosine.", exclusiveMinimum=0),
+        "x_front_m": _num("Initial streamwise front position [m] at t = 0. Default 0."),
+        "profile": {
+            "type": "string",
+            "enum": ["linear", "logarithmic"],
+            "description": "Height profile kind for wind_shear.",
+        },
+        "u0_m_s": _num("Wind speed at z_ref_m [m/s] for linear wind_shear. Default 0."),
+        "du_dz_per_s": _num("Vertical wind-speed gradient [1/s] for linear wind_shear."),
+        "u_ref_m_s": _num("Reference wind speed at z_ref_m [m/s] for logarithmic wind_shear."),
+        "z_ref_m": _num("Reference height [m] for wind_shear (default 0 for linear; > z0_m for logarithmic)."),
+        "z0_m": _num("Aerodynamic roughness length [m] for logarithmic wind_shear.", exclusiveMinimum=0),
+    },
+    "required": ["kind"],
+    "additionalProperties": False,
+}
+
 AGENT_TOOL_DEFINITIONS: list[dict[str, Any]] = [
     {
         "name": "ventorum_wing_analysis",
@@ -1654,6 +1758,88 @@ AGENT_TOOL_DEFINITIONS: list[dict[str, Any]] = [
                     ),
                 },
             },
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "ventorum_time_response",
+        "description": (
+            "Time-domain aerodynamic response from the prescribed-wake vortex-ring lattice solver, "
+            "in free air or flat-ground effect. Supports six-axis rigid-body motion, moving control "
+            "surfaces and convected gusts or horizontal wind shear. Give exactly one of t_end_s or "
+            "n_steps. Work estimate is n_steps * n_bound * n_wake (n_wake = n_steps * n_strips). "
+            "Vortex-lattice solver only; incompressible flow (Mach <= 0.3); runs on CPU in float64."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "wing": _SURFACE_SCHEMA,
+                "aircraft": _AIRCRAFT_SCHEMA,
+                "flight_condition": CONDITION_SCHEMA,
+                "x_cg_m": {
+                    "type": "number",
+                    "description": (
+                        "Centre of gravity x position [m], geometry axes (x aft). Default: the "
+                        "aircraft ref_point_m x, else 0."
+                    ),
+                },
+                "t_end_s": _num("End time [s]. Give exactly one of t_end_s or n_steps.", exclusiveMinimum=0),
+                "n_steps": _int("Number of time steps to march [-]. Give exactly one of t_end_s or n_steps.", minimum=1),
+                "dt_s": _num("Time step [s]. Default: dx_TE / V_inf.", exclusiveMinimum=0),
+                "motion": _MOTION_SCHEMA,
+                "controls": _TIME_CONTROLS_SCHEMA,
+                "gust": _GUST_SCHEMA,
+                "store": {
+                    "type": "string",
+                    "enum": ["loads", "strengths"],
+                    "default": "loads",
+                    "description": "'loads' (default) returns time histories only; 'strengths' adds "
+                                   "final gamma_bound, gamma_wake and wake_corners.",
+                },
+                "settings": SETTINGS_SCHEMA,
+                "detail_level": {**DETAIL_LEVEL, "default": "standard"},
+            },
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "ventorum_indicial_response",
+        "description": (
+            "Unit-step indicial aerodynamic response as a function of semichords s = 2 V_inf t / c_ref: "
+            "'alpha' (Wagner incidence step), 'gust' (Kussner sharp-edged vertical gust at the leading edge), "
+            "or 'control' (named control-surface step). Runs in free air or flat-ground effect on CPU "
+            "in float64. Vortex-lattice solver only; incompressible flow (Mach <= 0.3)."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "wing": _SURFACE_SCHEMA,
+                "aircraft": _AIRCRAFT_SCHEMA,
+                "flight_condition": CONDITION_SCHEMA,
+                "x_cg_m": {
+                    "type": "number",
+                    "description": (
+                        "Centre of gravity x position [m], geometry axes (x aft). Default: the "
+                        "aircraft ref_point_m x, else 0."
+                    ),
+                },
+                "kind": {
+                    "type": "string",
+                    "enum": ["alpha", "gust", "control"],
+                    "description": "Indicial response kind: 'alpha' (Wagner), 'gust' (Kussner) or 'control'.",
+                },
+                "s_end": _num("Final distance in semichords 2 V_inf t / c_ref [-]. Default 20.0.",
+                              exclusiveMinimum=0, maximum=200.0),
+                "amplitude": _num("Step amplitude [rad] (or w_g / V_inf [-] for 'gust'). Default 1e-4.",
+                                  exclusiveMinimum=0, maximum=1.0),
+                "control": {
+                    "type": "string",
+                    "description": "Control surface name. Required when kind='control'; refused otherwise.",
+                },
+                "settings": SETTINGS_SCHEMA,
+                "detail_level": {**DETAIL_LEVEL, "default": "standard"},
+            },
+            "required": ["kind"],
             "additionalProperties": False,
         },
     },
