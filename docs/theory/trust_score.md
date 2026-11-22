@@ -102,6 +102,17 @@ Recalibration. Repeat the study with the new solver version: the same wing set, 
 
 Limits. The indicators give a probable error, not a bound. The thresholds hold for the cases of the study: attached flow, sections with a closed trailing edge, and the default chordwise (cosine) and spanwise spacings. For an error estimate of one result, use `panel_estimate_mesh_error` (separate chordwise and spanwise Richardson extrapolations of three mesh levels each, added with a separable error model; see [Ventorum-3DP](ventorum_3dp.md), section *Mesh convergence and Richardson extrapolation*).
 
+## Unsteady vortex-ring dynamic derivatives
+
+`ventorum.dynamic_derivatives` keeps the steady trust score and rating of the mean state (`base.totals.trust`), and applies four unsteady diagnostic rules (`ventorum.unsteady.derivatives`). None of these rules changes the steady score: the chordwise-count rule adds a warning to `trust.warnings` and `trust_notes`, and the other three add notes to `trust_notes`.
+
+| Condition | Level | Reason |
+| --- | --- | --- |
+| `n_chord < 8` (`MIN_UNSTEADY_N_CHORD`) | warning (in `trust.warnings` and `trust_notes`) | Unsteady pitching-moment derivatives (`Cm_q`, `Cm_alpha_dot`) converge at second order with the trailing-edge load correction, and need at least 8 chordwise panels for chordwise convergence. |
+| Strip ratio `dx_TE,s / dx_w` outside `[0.8, 1.25]` (`DX_TE_RATIO_MIN`, `DX_TE_RATIO_MAX`) | note (in `trust_notes`) | All strips share one wake time step `dt = dx_w / V_inf`, where `dx_w` is the strip-width-weighted mean trailing-edge panel length. Strong taper causes a local phase-step mismatch between the bound trailing-edge panel and the first wake row. |
+| Maximum reduced frequency `k > 1.0` (`MAX_VERIFIED_K`) | note (in `trust_notes`) | Reduced frequencies above 1.0 lie outside the verified range of the test suite. |
+| Discrete wake length `wake_chords < 5.0` (`MIN_TRUST_WAKE_CHORDS`) | note (in `trust_notes`) | Although the closed-form 3D far-wake tail closes the wake beyond the discrete rows, a discrete wake shorter than 5 chords increases near-wake discretisation error. |
+
 ## Planned error-bar layers
 
 A calibrated error bar is planned for the force and moment coefficients. It is built in layers, so that each result gets the layers that the available data support, and each layer states its status:
