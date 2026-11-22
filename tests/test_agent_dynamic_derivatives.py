@@ -167,3 +167,39 @@ def test_mcp_server_lists_and_calls_dynamic_derivatives():
     bad_body = json.loads(bad["result"]["content"][0]["text"])
     assert bad_body["status"] == "error"
     assert bad_body["error"]["type"] == "invalid_input"
+
+
+def test_agent_tool_controls_match_library_function():
+    """The controls input gives the control-mode derivatives of ventorum.dynamic_derivatives exactly."""
+    flap = {"name": "flap", "eta_start": 0.0, "eta_end": 1.0, "hinge_x_c": 0.75}
+    wing_spec = {**RECT, "controls": [flap]}
+    k_vals = [0.0, 0.2]
+    fc_spec = {"V_inf_m_s": 30.0, "alpha_deg": 2.0, "h_m": 0.5}
+    payload = tool_dynamic_derivatives(
+        wing=wing_spec, flight_condition=fc_spec, x_cg_m=0.25, k=k_vals, settings=FAST, controls=["flap"],
+    )
+    _strict_json(payload)
+    assert payload["status"] == "success", payload
+    assert "Control flap: CL_delta=" in payload["executive_summary"]
+
+    ctrl = vt.ControlSurface(name="flap", eta_start=0.0, eta_end=1.0, hinge_x_c=0.75)
+    wing = vt.LiftingSurface(
+        name="Wing",
+        semi_span=3.0,
+        controls=[ctrl],
+        sections=[vt.WingSection(y_frac=0.0, chord=1.0), vt.WingSection(y_frac=1.0, chord=1.0)],
+    )
+    ac = vt.Aircraft(name="Wing", surfaces=[wing], ref_point=np.array([0.25, 0.0, 0.0]))
+    ac.compute_reference_values()
+    fc = vt.FlightCondition(V_inf=30.0, rho=1.225, alpha=np.radians(2.0), h=0.5)
+    st = vt.SolverSettings(solver_type="vlm", n_panels=6, n_chord=8)
+    ref = vt.dynamic_derivatives(ac, fc, st, k=k_vals, controls=("flap",)).to_dict()
+    for coeff in ("CL", "Cm"):
+        for key in (f"{coeff}_delta_flap", f"{coeff}_delta_dot_flap"):
+            assert payload["k0"][key] == pytest.approx(ref["k0"][key], abs=1e-12)
+            assert payload["derivatives"][key] == pytest.approx(ref["derivatives"][key], abs=1e-12)
+
+    bad = tool_dynamic_derivatives(wing=wing_spec, flight_condition=fc_spec, settings=FAST, controls=["rudder"])
+    assert bad["status"] == "error" and "Unknown control name" in bad["error"]["message"]
+    bad = tool_dynamic_derivatives(wing=wing_spec, flight_condition=fc_spec, settings=FAST, controls="flap")
+    assert bad["status"] == "error" and "array of control names" in bad["error"]["message"]

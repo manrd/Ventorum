@@ -195,15 +195,16 @@ Example output (abridged: the rows CD, CY, Cl and Cn and the keys `rows`, `notes
 
 ## Dynamic derivatives
 
-- `ventorum_dynamic_derivatives` (`wing` or `aircraft`, `flight_condition`, `x_cg_m`, `k`, `wake_chords`, `settings`, `detail_level`, `axes`): frequency-dependent longitudinal dynamic derivatives from the harmonic vortex-ring lattice solver, in free air or in flat-ground effect (`flight_condition.h_m`).
+- `ventorum_dynamic_derivatives` (`wing` or `aircraft`, `flight_condition`, `x_cg_m`, `k`, `wake_chords`, `settings`, `detail_level`, `axes`, `controls`): frequency-dependent longitudinal dynamic derivatives from the harmonic vortex-ring lattice solver, in free air or in flat-ground effect (`flight_condition.h_m`).
 - **Inputs:**
   - `wing` or `aircraft`, `flight_condition`, `x_cg_m`, `settings` and `detail_level`: same pattern as `ventorum_stability_derivatives`. Only the vortex-lattice solver (`"vlm"` or `"auto"`) and incompressible flow (Mach at most 0.3) are accepted.
   - `k`: list of non-negative finite reduced frequencies `k = omega c_ref / (2 V_inf)` [-]. Default `[0.0]` (the `k -> 0` limit only).
   - `wake_chords`: positive discrete wake length in reference chords [-]. Default `5.0`.
   - `axes`: `"body"` (default) or `"stability"` of the mean state.
+  - `controls`: optional list of control-surface names for the harmonic control mode (the flap rings rotate about the hinge line). An unknown name is refused.
 - **Outputs:**
-  - `k`, `k0` (the `k -> 0` limits of all 36 longitudinal derivatives), `derivatives` (the equivalent derivatives per `k` for `C_alpha`, `C_q`, `C_alpha_dot`, `C_h`, `C_h_dot` and `C_h_dot_ground = C_h_dot + C_alpha` across `CL`, `CD`, `CY`, `Cl`, `Cm` and `Cn`), `CL0`, `Cm0`, `mean_state`, `mesh`, `trust`, `trust_notes`, `notes`, `condition_used`, `settings_used` and `axes`.
-  - At `detail_level="standard"` and `"full"`, the payload also includes `responses` (complex `H_theta`, `H_z` and `H_pureq` as `{"re": [...], "im": [...]}`) and `geometry`.
+  - `k`, `k0` (the `k -> 0` limits of all 36 longitudinal derivatives), `derivatives` (the equivalent derivatives per `k` for `C_alpha`, `C_q`, `C_alpha_dot`, `C_h`, `C_h_dot` and `C_h_dot_ground = C_h_dot + C_alpha` across `CL`, `CD`, `CY`, `Cl`, `Cm` and `Cn`), `CL0`, `Cm0`, `mean_state`, `mesh`, `trust`, `trust_notes`, `notes`, `condition_used`, `settings_used` and `axes`. With `controls`, `k0` and `derivatives` also hold `<C>_delta_<name>` [1/rad] and `<C>_delta_dot_<name>` [1/rad] per unit `delta_dot c_ref / (2 V_inf)`.
+  - At `detail_level="standard"` and `"full"`, the payload also includes `responses` (complex `H_theta`, `H_z` and `H_pureq`, and `H_delta` with `controls` as `{"re": [...], "im": [...]}`) and `geometry`.
   - Exposed through `ventorum.agent.tools.dynamic_derivatives` and through the MCP server (`tools/list` and `tools/call` under `"ventorum_dynamic_derivatives"`).
 
 Example call:

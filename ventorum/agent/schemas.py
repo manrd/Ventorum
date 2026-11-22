@@ -1717,7 +1717,9 @@ AGENT_TOOL_DEFINITIONS: list[dict[str, Any]] = [
             "and per-k equivalent derivatives (C_alpha, C_q, C_alpha_dot, C_h, C_h_dot and the "
             "ground part C_h_dot_ground = C_h_dot + C_alpha) for CL, CD, CY, Cl, Cm and Cn, "
             "complex responses H_theta, H_z and H_pureq, mean state (CL0, Cm0), mesh sizes and "
-            "trust notes. Vortex-lattice solver only; incompressible flow (Mach <= 0.3)."
+            "trust notes. With 'controls', also the harmonic control-surface mode: C_delta_<name> "
+            "and C_delta_dot_<name> per control and the complex responses H_delta. "
+            "Vortex-lattice solver only; incompressible flow (Mach <= 0.3)."
         ),
         "parameters": {
             "type": "object",
@@ -1747,6 +1749,16 @@ AGENT_TOOL_DEFINITIONS: list[dict[str, Any]] = [
                     "exclusiveMinimum": 0.0,
                     "maximum": 100.0,
                     "description": "Discrete wake length in reference chords [-]. Default 5.0.",
+                },
+                "controls": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "maxItems": 20,
+                    "description": (
+                        "Control-surface names for the harmonic control mode: the flap rings rotate "
+                        "about the hinge line. Gives C_delta_<name> [1/rad] and C_delta_dot_<name> "
+                        "[1/rad] per unit delta_dot c_ref / (2 V_inf). Default: none."
+                    ),
                 },
                 "settings": SETTINGS_SCHEMA,
                 "detail_level": {**DETAIL_LEVEL, "default": "standard"},

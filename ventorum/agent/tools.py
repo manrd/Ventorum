@@ -3520,6 +3520,7 @@ def dynamic_derivatives(
     settings: dict[str, Any] | None = None,
     detail_level: str = "standard",
     axes: str = "body",
+    controls: list[str] | None = None,
 ) -> dict[str, Any]:
     """Compute frequency-dependent longitudinal dynamic derivatives via harmonic vortex rings.
 
@@ -3554,6 +3555,10 @@ def dynamic_derivatives(
     axes : {'body', 'stability'}
         Moment axes of the mean state, held fixed. Force coefficients
         ``CL``, ``CD`` and ``CY`` are relative to the free stream.
+    controls : list of str or None
+        Control-surface names for the harmonic control mode of
+        :func:`ventorum.dynamic_derivatives` (``"<C>_delta_<name>"`` and
+        ``"<C>_delta_dot_<name>"`` [1/rad]). Default: none.
 
     Returns
     -------
@@ -3575,6 +3580,15 @@ def dynamic_derivatives(
 
     k_list = [0.0] if k is None else number_list(k, "k", min_len=1, max_len=50, minimum=0.0)
     wc = number(wake_chords, "wake_chords", exclusive_min=0.0, maximum=100.0)
+    ctrl_list: list[str] = []
+    if controls is not None:
+        if isinstance(controls, str) or not isinstance(controls, (list, tuple)):
+            raise InputError("'controls' must be an array of control names.")
+        ctrl_list = [string(n, "controls[]") for n in controls]
+        known = list(ac.control_names())
+        unknown = [n for n in ctrl_list if n not in known]
+        if unknown:
+            raise InputError(f"Unknown control name(s) {unknown}; known control names: {known}.")
 
     if resolve_solver_type(sett.solver_type) != "vlm":
         raise InputError(
@@ -3598,7 +3612,7 @@ def dynamic_derivatives(
     )
     case_sett = _case_settings(ac, sett, strips, fc)
 
-    res = vt.dynamic_derivatives(ac, fc, case_sett, k=k_list, wake_chords=wc, axes=ax)
+    res = vt.dynamic_derivatives(ac, fc, case_sett, k=k_list, wake_chords=wc, axes=ax, controls=tuple(ctrl_list))
     data = res.to_dict()
 
     where = "free air" if c["h_m"] is None else f"h={c['h_m']:g} m (h/c={c['h_m'] / res.c_ref:.3f})"
@@ -3612,6 +3626,12 @@ def dynamic_derivatives(
         f"CL_h={fmt(k0['CL_h'], '.4f')}, CL_h_dot={fmt(k0['CL_h_dot'], '.4f')} "
         f"about x_cg={x_cg:.4f} m."
     )
+    for cname in ctrl_list:
+        summary += (
+            f" Control {cname}: CL_delta={fmt(k0[f'CL_delta_{cname}'], '.4f')}/rad, "
+            f"Cm_delta={fmt(k0[f'Cm_delta_{cname}'], '.4f')}/rad, "
+            f"Cm_delta_dot={fmt(k0[f'Cm_delta_dot_{cname}'], '.4f')}/rad."
+        )
     if res.trust is not None:
         summary += f" Trust {res.trust.score:.2f} ({res.trust.rating}), {len(res.trust.warnings)} warning(s)."
 
