@@ -54,6 +54,7 @@ a minor version can change a public interface.
 ### Added
 
 - Harmonic control-surface deflection mode on CPU and GPU in the harmonic vortex-ring solver (`ventorum.unsteady.harmonic._solve_harmonic_rings`) and `controls=()` keyword on `ventorum.dynamic_derivatives`, returning complex control responses (`H_delta[name]`) and equivalent oscillatory control and control-rate derivatives (`<C>_delta_<name>`, `<C>_delta_dot_<name>`) with their `k -> 0` limits.
+- Public time-domain unsteady response (`ventorum.time_response`, `TimeResponseResult`), convected gust and wind-shear fields (`ventorum.unsteady.gusts`: `sharp_edged`, `one_minus_cosine`, `wind_shear`, `linear_shear`, `logarithmic_shear`), and indicial-response helper (`ventorum.indicial_response`, `IndicialResult` for Wagner, Kussner and control steps), with RK4 local-velocity wake convection (ground-parallel projection in ground effect), JSON-safe `to_dict()`, trust and diagnostic notes, agent and MCP tools (`ventorum_time_response`, `ventorum_indicial_response`), user and theory documentation, and `examples/14_time_response.py`.
 - Six-axis prescribed rigid-body motion and moving control surfaces (rotating flap ring geometry and ground images about strip hinge axes) in the private time-domain vortex-ring solver (`ventorum.unsteady.timedomain._solve_time_rings`).
 - Private prescribed-wake time-domain vortex-ring solver (`ventorum.unsteady.timedomain._solve_time_rings`)
   for rigid-body heave and pitch motions in free air and flat-ground effect; no public interface yet.

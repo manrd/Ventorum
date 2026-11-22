@@ -3639,6 +3639,494 @@ def dynamic_derivatives(
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# Time-domain response and indicial response (prescribed-wake vortex rings)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+_MOTION_AGENT_AXES: dict[str, tuple[str, float]] = {
+    "x_m": ("x", 1.0),
+    "y_m": ("y", 1.0),
+    "z_m": ("z", 1.0),
+    "roll_deg": ("roll", math.pi / 180.0),
+    "pitch_deg": ("pitch", math.pi / 180.0),
+    "yaw_deg": ("yaw", math.pi / 180.0),
+}
+
+
+def _parse_waveform(spec: Any, where: str, *, scale: float) -> np.ndarray | Callable[[float], float]:
+    """Parse an explicit sample array or named waveform object into SI units."""
+    if isinstance(spec, (list, tuple, np.ndarray)):
+        vals = number_list(spec, where, min_len=2, max_len=100_000)
+        return np.asarray(vals, dtype=np.float64) * scale
+    if not isinstance(spec, dict):
+        raise InputError(f"'{where}' must be an array of numbers or a named waveform object.")
+    d = check_keys(
+        spec,
+        ("kind", "amplitude", "frequency_hz", "phase_deg", "t_start_s", "duration_s", "offset", "values"),
+        where,
+    )
+    if "kind" not in d:
+        raise InputError(f"{where}: 'kind' is required ('harmonic', 'step', 'ramp' or 'samples').")
+    kind = string(d["kind"], f"{where}.kind", ("harmonic", "step", "ramp", "samples"))
+    if kind == "samples":
+        extra = sorted(k for k in d if k not in ("kind", "values"))
+        if extra:
+            raise InputError(f"{where}: {extra} not allowed for kind='samples' (give only 'values').")
+        if "values" not in d:
+            raise InputError(f"{where}: 'values' is required for kind='samples'.")
+        vals = number_list(d["values"], f"{where}.values", min_len=2, max_len=100_000)
+        return np.asarray(vals, dtype=np.float64) * scale
+    if "values" in d:
+        raise InputError(f"{where}: 'values' is allowed only for kind='samples'.")
+    if "amplitude" not in d:
+        raise InputError(f"{where}: 'amplitude' is required.")
+    amp = number(d["amplitude"], f"{where}.amplitude") * scale
+    offset = number(d["offset"], f"{where}.offset") * scale if "offset" in d else 0.0
+
+    if kind == "harmonic":
+        for bad in ("t_start_s", "duration_s"):
+            if bad in d:
+                raise InputError(f"{where}: '{bad}' is not allowed for kind='harmonic'.")
+        if "frequency_hz" not in d:
+            raise InputError(f"{where}: 'frequency_hz' is required for kind='harmonic'.")
+        freq = number(d["frequency_hz"], f"{where}.frequency_hz", exclusive_min=0.0)
+        phase = math.radians(number(d["phase_deg"], f"{where}.phase_deg")) if "phase_deg" in d else 0.0
+        omega = 2.0 * math.pi * freq
+
+        def _harm(t: float, _o: float = offset, _a: float = amp, _w: float = omega, _p: float = phase) -> float:
+            return _o + _a * math.sin(_w * t + _p)
+
+        return _harm
+
+    if kind == "step":
+        for bad in ("frequency_hz", "phase_deg", "duration_s"):
+            if bad in d:
+                raise InputError(f"{where}: '{bad}' is not allowed for kind='step'.")
+        t_start = number(d["t_start_s"], f"{where}.t_start_s", minimum=0.0) if "t_start_s" in d else 0.0
+
+        def _step(t: float, _o: float = offset, _a: float = amp, _ts: float = t_start) -> float:
+            return _o + (_a if t >= _ts else 0.0)
+
+        return _step
+
+    for bad in ("frequency_hz", "phase_deg"):
+        if bad in d:
+            raise InputError(f"{where}: '{bad}' is not allowed for kind='ramp'.")
+    if "duration_s" not in d:
+        raise InputError(f"{where}: 'duration_s' is required for kind='ramp'.")
+    dur = number(d["duration_s"], f"{where}.duration_s", exclusive_min=0.0)
+    t_start = number(d["t_start_s"], f"{where}.t_start_s", minimum=0.0) if "t_start_s" in d else 0.0
+
+    def _ramp(t: float, _o: float = offset, _a: float = amp, _ts: float = t_start, _d: float = dur) -> float:
+        if t <= _ts:
+            return _o
+        if t >= _ts + _d:
+            return _o + _a
+        return _o + _a * ((t - _ts) / _d)
+
+    return _ramp
+
+
+def _parse_gust_direction(raw: Any, default: str) -> str | np.ndarray:
+    """Parse a gust direction (string or 3-vector) for agent input."""
+    if raw is None:
+        return default
+    if isinstance(raw, str):
+        return raw
+    return vector3(raw, "gust.direction")
+
+
+def _parse_gust_spec(spec: Any) -> Callable[[np.ndarray, float], np.ndarray]:
+    """Build a Ventorum gust callable from a strict agent gust dictionary."""
+    d = check_keys(
+        spec,
+        (
+            "kind",
+            "direction",
+            "amplitude_m_s",
+            "length_m",
+            "x_front_m",
+            "profile",
+            "u0_m_s",
+            "du_dz_per_s",
+            "u_ref_m_s",
+            "z_ref_m",
+            "z0_m",
+        ),
+        "gust",
+    )
+    if "kind" not in d:
+        raise InputError("gust: 'kind' is required ('sharp_edged', 'one_minus_cosine' or 'wind_shear').")
+    kind = string(d["kind"], "gust.kind", ("sharp_edged", "one_minus_cosine", "wind_shear"))
+
+    if kind == "sharp_edged":
+        check_keys(d, ("kind", "direction", "amplitude_m_s", "x_front_m"), "gust")
+        if "amplitude_m_s" not in d:
+            raise InputError("gust: 'amplitude_m_s' is required for kind='sharp_edged'.")
+        amp = number(d["amplitude_m_s"], "gust.amplitude_m_s")
+        xf = number(d["x_front_m"], "gust.x_front_m") if "x_front_m" in d else 0.0
+        direction = _parse_gust_direction(d.get("direction"), "vertical")
+        return vt.sharp_edged(amp, direction=direction, x_front=xf)
+
+    if kind == "one_minus_cosine":
+        check_keys(d, ("kind", "direction", "amplitude_m_s", "length_m", "x_front_m"), "gust")
+        if "amplitude_m_s" not in d:
+            raise InputError("gust: 'amplitude_m_s' is required for kind='one_minus_cosine'.")
+        if "length_m" not in d:
+            raise InputError("gust: 'length_m' is required for kind='one_minus_cosine'.")
+        amp = number(d["amplitude_m_s"], "gust.amplitude_m_s")
+        length = number(d["length_m"], "gust.length_m", exclusive_min=0.0)
+        xf = number(d["x_front_m"], "gust.x_front_m") if "x_front_m" in d else 0.0
+        direction = _parse_gust_direction(d.get("direction"), "vertical")
+        return vt.one_minus_cosine(amp, length=length, direction=direction, x_front=xf)
+
+    if "profile" not in d:
+        raise InputError("gust: 'profile' ('linear' or 'logarithmic') is required for kind='wind_shear'.")
+    prof_kind = string(d["profile"], "gust.profile", ("linear", "logarithmic"))
+    direction = _parse_gust_direction(d.get("direction"), "head")
+    if prof_kind == "linear":
+        check_keys(d, ("kind", "profile", "direction", "u0_m_s", "du_dz_per_s", "z_ref_m"), "gust")
+        if "du_dz_per_s" not in d:
+            raise InputError("gust: 'du_dz_per_s' is required for wind_shear profile='linear'.")
+        u0 = number(d["u0_m_s"], "gust.u0_m_s") if "u0_m_s" in d else 0.0
+        grad = number(d["du_dz_per_s"], "gust.du_dz_per_s")
+        zr = number(d["z_ref_m"], "gust.z_ref_m") if "z_ref_m" in d else 0.0
+        return vt.wind_shear(vt.linear_shear(u0=u0, du_dz=grad, z_ref=zr), direction=direction)
+
+    check_keys(d, ("kind", "profile", "direction", "u_ref_m_s", "z_ref_m", "z0_m"), "gust")
+    for req_k in ("u_ref_m_s", "z_ref_m", "z0_m"):
+        if req_k not in d:
+            raise InputError(f"gust: '{req_k}' is required for wind_shear profile='logarithmic'.")
+    u_ref = number(d["u_ref_m_s"], "gust.u_ref_m_s")
+    z_ref = number(d["z_ref_m"], "gust.z_ref_m", exclusive_min=0.0)
+    z0 = number(d["z0_m"], "gust.z0_m", exclusive_min=0.0)
+    return vt.wind_shear(vt.logarithmic_shear(u_ref=u_ref, z_ref=z_ref, z0=z0), direction=direction)
+
+
+def _time_march_work(
+    ac: Aircraft,
+    sett: SolverSettings,
+    fc: FlightCondition,
+    *,
+    n_steps: int | None,
+    t_end_s: float | None,
+    dt_s: float | None,
+) -> int:
+    """Estimate time-domain work as ``n_steps * n_bound * n_wake`` (``n_wake = n_steps * n_strips``)."""
+    n_strips = _strip_count(ac, sett)
+    n_bound = _planned_panels(ac, sett, fc)
+    n_chord = max(1, n_bound // max(n_strips, 1))
+    if n_steps is not None:
+        ns = int(n_steps)
+    else:
+        assert t_end_s is not None
+        dt_est = float(dt_s) if dt_s is not None else (float(ac.c_ref) / float(n_chord)) / float(fc.V_inf)
+        ns = max(1, int(math.ceil(float(t_end_s) / dt_est - 1.0e-12)))
+    n_wake = ns * n_strips
+    return int(ns * n_bound * n_wake)
+
+
+@_tool
+def time_response(
+    wing: Any = None,
+    aircraft: Any = None,
+    flight_condition: dict[str, Any] | None = None,
+    x_cg_m: float | None = None,
+    t_end_s: float | None = None,
+    n_steps: int | None = None,
+    dt_s: float | None = None,
+    motion: dict[str, Any] | None = None,
+    controls: dict[str, Any] | None = None,
+    gust: dict[str, Any] | None = None,
+    store: str = "loads",
+    settings: dict[str, Any] | None = None,
+    detail_level: str = "standard",
+) -> dict[str, Any]:
+    """Compute the time-domain aerodynamic response via prescribed-wake vortex rings.
+
+    Parameters
+    ----------
+    wing : dict or None
+        One surface specification.
+    aircraft : dict or None
+        Multi-surface aircraft specification.
+    flight_condition : dict or None
+        Mean flight condition (``V_inf_m_s``, ``alpha_deg``, ``beta_deg``,
+        ``rho_kg_m3`` or ``altitude_m``, optional ``h_m`` for ground effect).
+    x_cg_m : float or None
+        Centre-of-gravity x coordinate [m], geometry axes (x aft).
+    t_end_s : float or None
+        End time [s]. Give exactly one of *t_end_s* or *n_steps*.
+    n_steps : int or None
+        Number of time steps to march [-]. Give exactly one of *t_end_s* or
+        *n_steps*.
+    dt_s : float or None
+        Time step [s]. Default ``dx_TE / V_inf``.
+    motion : dict or None
+        Prescribed six-axis rigid-body motion (``x_m``, ``y_m``, ``z_m`` [m];
+        ``roll_deg``, ``pitch_deg``, ``yaw_deg`` [deg]), each a waveform object
+        (``harmonic``, ``step``, ``ramp``, or ``samples`` with explicit
+        ``values`` of length ``n_steps + 1``).
+    controls : dict or None
+        Prescribed control deflections [deg] keyed by control name, each a
+        waveform object as for *motion*.
+    gust : dict or None
+        Named gust specification (``sharp_edged``, ``one_minus_cosine``, or
+        ``wind_shear``).
+    store : {'loads', 'strengths'}
+        ``"loads"`` (default) or ``"strengths"``.
+    settings : dict or None
+        Solver settings. Only VLM (``"vlm"`` or ``"auto"``) is supported.
+    detail_level : {'summary', 'standard', 'full'}
+        Verbosity of the payload.
+
+    Returns
+    -------
+    dict
+        JSON-safe payload built from :meth:`ventorum.TimeResponseResult.to_dict`.
+    """
+    ac = build_aircraft_from_spec(wing=wing, aircraft=aircraft)
+    c = parse_condition(flight_condition)
+    sett = parse_settings(settings)
+    dl = parse_detail_level(detail_level)
+    store_val = string(store, "store", ("loads", "strengths"))
+    base_rp = ac.moment_reference()
+    x_cg = number(x_cg_m, "x_cg_m") if x_cg_m is not None else float(base_rp[0])
+    ac.ref_point = np.array([x_cg, 0.0, float(base_rp[2])])
+    ac.compute_reference_values()
+
+    if (t_end_s is None) == (n_steps is None):
+        raise InputError("Give exactly one of 't_end_s' or 'n_steps'.")
+    t_end_val = None if t_end_s is None else number(t_end_s, "t_end_s", exclusive_min=0.0)
+    n_steps_val = None if n_steps is None else integer(n_steps, "n_steps", minimum=1)
+    dt_val = None if dt_s is None else number(dt_s, "dt_s", exclusive_min=0.0)
+
+    motion_arg: dict[str, Any] | None = None
+    if motion is not None:
+        m_obj = check_keys(motion, list(_MOTION_AGENT_AXES), "motion")
+        motion_arg = {
+            _MOTION_AGENT_AXES[k][0]: _parse_waveform(v, f"motion.{k}", scale=_MOTION_AGENT_AXES[k][1])
+            for k, v in m_obj.items()
+        }
+
+    controls_arg: dict[str, Any] | None = None
+    if controls is not None:
+        if not isinstance(controls, dict):
+            raise InputError(f"'controls' must be a JSON object mapping control names, got {type(controls).__name__}.")
+        known = list(ac.control_names())
+        controls_arg = {}
+        for cname, cspec in controls.items():
+            if not isinstance(cname, str) or cname not in known:
+                raise InputError(f"Unknown control name {cname!r}; available controls: {known}.")
+            if cspec is None:
+                raise InputError(f"controls.{cname} is null. Omit the key to keep the default deflection.")
+            controls_arg[cname] = _parse_waveform(cspec, f"controls.{cname}", scale=math.pi / 180.0)
+
+    gust_fn = None if gust is None else _parse_gust_spec(gust)
+
+    if resolve_solver_type(sett.solver_type) != "vlm":
+        raise InputError(
+            f"time_response supports only solver 'vlm' (or 'auto'), got {sett.solver_type!r}."
+        )
+    _check_method(ac, sett.solver_type, sett.wake_alignment, c["h_m"] is not None)
+    fc = make_flight_condition(c)
+
+    sett, fit = _fit_span(
+        ac,
+        sett,
+        settings,
+        lambda s: _planned_panels(ac, s, fc, cap=False),
+        lambda s: _time_march_work(ac, s, fc, n_steps=n_steps_val, t_end_s=t_end_val, dt_s=dt_val),
+    )
+    strips = _check_mesh(ac, sett)
+    case_sett = _case_settings(ac, sett, strips, fc)
+    work_est = _time_march_work(ac, case_sett, fc, n_steps=n_steps_val, t_end_s=t_end_val, dt_s=dt_val)
+    _check_call_work(
+        work_est,
+        "fewer time steps (smaller n_steps or t_end_s) or fewer panels (smaller n_panels or n_chord)",
+    )
+
+    res = vt.time_response(
+        ac,
+        fc,
+        case_sett,
+        t_end=t_end_val,
+        n_steps=n_steps_val,
+        dt=dt_val,
+        motion=motion_arg,
+        controls=controls_arg,
+        gust=gust_fn,
+        store=store_val,
+    )
+    data = res.to_dict()
+
+    where = "free air" if c["h_m"] is None else f"h={c['h_m']:g} m (h/c={c['h_m'] / res.c_ref:.3f})"
+    summary = (
+        f"[Ventorum RESULT] Time response of {ac.name} at alpha={c['alpha_deg']:g} deg, "
+        f"V={c['V_inf_m_s']:g} m/s, {where} ({res.n_steps} steps, t_end={float(res.time[-1]):.4g} s, "
+        f"dt={res.dt:.4g} s): CL in [{float(np.min(res.CL)):.4f}, {float(np.max(res.CL)):.4f}] "
+        f"(final {float(res.CL[-1]):.4f}), Cm in [{float(np.min(res.Cm)):.4f}, {float(np.max(res.Cm)):.4f}] "
+        f"(final {float(res.Cm[-1]):.4f}) about x_cg={x_cg:.4f} m. "
+        f"{device_summary_text(res.device, res.precision)}"
+    )
+    if res.trust is not None:
+        summary += f" Trust {res.trust.score:.2f} ({res.trust.rating}), {len(res.trust.warnings)} warning(s)."
+
+    trust_out = trust_payload(res.trust)
+    if dl == "summary":
+        trust_out = compact_trust(trust_out)
+
+    settings_used = {
+        **settings_payload(sett, res.base),
+        **_mesh_note(case_sett is not sett, case_sett, fit),
+    }
+    out: dict[str, Any] = {
+        "status": "success",
+        "executive_summary": summary,
+        **data,
+        "condition_used": condition_payload(c),
+        "settings_used": settings_used,
+        "trust": trust_out,
+    }
+    if dl == "summary":
+        out.pop("strip_cl", None)
+    else:
+        out["geometry"] = geometry_payload(ac)
+    return out
+
+
+@_tool
+def indicial_response(
+    wing: Any = None,
+    aircraft: Any = None,
+    flight_condition: dict[str, Any] | None = None,
+    x_cg_m: float | None = None,
+    kind: str | None = None,
+    s_end: float = 20.0,
+    amplitude: float = 1.0e-4,
+    control: str | None = None,
+    settings: dict[str, Any] | None = None,
+    detail_level: str = "standard",
+) -> dict[str, Any]:
+    """Compute unit-step indicial aerodynamic responses (Wagner, Kussner, control step).
+
+    Parameters
+    ----------
+    wing : dict or None
+        One surface specification.
+    aircraft : dict or None
+        Multi-surface aircraft specification.
+    flight_condition : dict or None
+        Mean flight condition (``V_inf_m_s``, ``alpha_deg``, ``beta_deg``,
+        ``rho_kg_m3`` or ``altitude_m``, optional ``h_m`` for ground effect).
+    x_cg_m : float or None
+        Centre-of-gravity x coordinate [m], geometry axes (x aft).
+    kind : {'alpha', 'gust', 'control'}
+        Indicial response kind. Required.
+    s_end : float
+        Final semichord distance ``2 V_inf t / c_ref`` [-]. Default 20.0.
+    amplitude : float
+        Step amplitude [rad] (or ``w_g / V_inf`` [-] for ``'gust'``). Default 1e-4.
+    control : str or None
+        Control surface name (required when ``kind='control'``).
+    settings : dict or None
+        Solver settings. Only VLM (``"vlm"`` or ``"auto"``) is supported.
+    detail_level : {'summary', 'standard', 'full'}
+        Verbosity of the payload.
+
+    Returns
+    -------
+    dict
+        JSON-safe payload built from :meth:`ventorum.IndicialResult.to_dict`.
+    """
+    if kind is None:
+        raise InputError("missing required argument 'kind' ('alpha', 'gust' or 'control').")
+    kind_val = string(kind, "kind", ("alpha", "gust", "control"))
+    s_end_val = number(s_end, "s_end", exclusive_min=0.0, maximum=200.0)
+    amp_val = number(amplitude, "amplitude", exclusive_min=0.0, maximum=1.0)
+    ctrl_val = None if control is None else string(control, "control")
+    if kind_val == "control" and (ctrl_val is None or not ctrl_val.strip()):
+        raise InputError("kind='control' requires a non-empty 'control' name.")
+    if kind_val != "control" and ctrl_val is not None:
+        raise InputError(f"'control' is only accepted when kind='control', got {ctrl_val!r}.")
+
+    ac = build_aircraft_from_spec(wing=wing, aircraft=aircraft)
+    c = parse_condition(flight_condition)
+    sett = parse_settings(settings)
+    dl = parse_detail_level(detail_level)
+    base_rp = ac.moment_reference()
+    x_cg = number(x_cg_m, "x_cg_m") if x_cg_m is not None else float(base_rp[0])
+    ac.ref_point = np.array([x_cg, 0.0, float(base_rp[2])])
+    ac.compute_reference_values()
+
+    if resolve_solver_type(sett.solver_type) != "vlm":
+        raise InputError(
+            f"indicial_response supports only solver 'vlm' (or 'auto'), got {sett.solver_type!r}."
+        )
+    _check_method(ac, sett.solver_type, sett.wake_alignment, c["h_m"] is not None)
+    fc = make_flight_condition(c)
+    t_end_est = s_end_val * float(ac.c_ref) / (2.0 * float(fc.V_inf))
+
+    sett, fit = _fit_span(
+        ac,
+        sett,
+        settings,
+        lambda s: _planned_panels(ac, s, fc, cap=False),
+        lambda s: _time_march_work(ac, s, fc, n_steps=None, t_end_s=t_end_est, dt_s=None),
+    )
+    strips = _check_mesh(ac, sett)
+    case_sett = _case_settings(ac, sett, strips, fc)
+    work_est = _time_march_work(ac, case_sett, fc, n_steps=None, t_end_s=t_end_est, dt_s=None)
+    _check_call_work(
+        work_est,
+        "smaller s_end or fewer panels (smaller n_panels or n_chord)",
+    )
+
+    res = vt.indicial_response(
+        ac,
+        fc,
+        case_sett,
+        kind=kind_val,
+        s_end=s_end_val,
+        amplitude=amp_val,
+        control=ctrl_val,
+    )
+    data = res.to_dict()
+
+    where = "free air" if c["h_m"] is None else f"h={c['h_m']:g} m (h/c={c['h_m'] / res.c_ref:.3f})"
+    steady_txt = "" if res.steady is None else f" (steady CL={res.steady['CL']:.4f}/rad)"
+    summary = (
+        f"[Ventorum RESULT] Indicial response ({kind_val}) of {ac.name} at alpha={c['alpha_deg']:g} deg, "
+        f"V={c['V_inf_m_s']:g} m/s, {where} (s_end={float(res.s[-1]):.3g}, {res.n_steps} steps): "
+        f"CL final={float(res.CL[-1]):.4f}/rad{steady_txt}, Cm final={float(res.Cm[-1]):.4f}/rad "
+        f"about x_cg={x_cg:.4f} m. {device_summary_text(res.device, res.precision)}"
+    )
+    if res.trust is not None:
+        summary += f" Trust {res.trust.score:.2f} ({res.trust.rating}), {len(res.trust.warnings)} warning(s)."
+
+    trust_out = trust_payload(res.trust)
+    if dl == "summary":
+        trust_out = compact_trust(trust_out)
+
+    settings_used = {
+        **settings_payload(sett, res.base),
+        **_mesh_note(case_sett is not sett, case_sett, fit),
+    }
+    out: dict[str, Any] = {
+        "status": "success",
+        "executive_summary": summary,
+        **data,
+        "condition_used": condition_payload(c),
+        "settings_used": settings_used,
+        "trust": trust_out,
+    }
+    if dl == "summary":
+        out.pop("strip_cl", None)
+    else:
+        out["geometry"] = geometry_payload(ac)
+    return out
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # Machine capabilities and tuning
 # ═══════════════════════════════════════════════════════════════════════════════
 

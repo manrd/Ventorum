@@ -28,6 +28,7 @@ The values of the model parameters come from the code (the API reference shows t
 | [Control surfaces](control_surfaces.md) | Thin-airfoil flap theory, panel deflection and section modification, hinge moments, control derivatives | H. Glauert (1926); Katz and Plotkin (2001); Etkin and Reid (1996) |
 | [Body rates](rotation_rates.md) | Quasi-steady rotation in the boundary condition and the loads, rate derivatives p, q, r | Katz and Plotkin (2001); Etkin and Reid (1996); Phillips and Snyder (2000) |
 | [Unsteady vortex-ring lattice](unsteady_vortex_rings.md) | Frequency-domain harmonic vortex-ring lattice, 3D far-wake tail, Woodbury solve, dynamic derivatives | Katz and Plotkin (2001); Hall (1994); Parenteau (2021); Rodden and Giesing (1970); Theodorsen (1935) |
+| [Time-domain unsteady vortex-ring lattice](unsteady_time_domain.md) | Prescribed-wake time-domain vortex rings, six-axis kinematics, moving flaps, convected gusts, wind shear, Wagner and Kussner indicial responses | Katz and Plotkin (2001); Etkin and Reid (1996); Wagner (1925); Kussner (1936); Jones (1940); Sears and Sparks (1941); Bisplinghoff et al. (1955); Hoblit (1988); Stull (1988) |
 | [Trim solver](trim.md) | Longitudinal and lateral trim for target lift and zero moments | B. Etkin and L. D. Reid (1996); J. E. Dennis and R. B. Schnabel (1996) |
 | [Symmetry](symmetry.md) | Use of the mirror symmetry of the flow | Katz and Plotkin (2001) |
 | [Trust score and error bars](trust_score.md) | Envelope checks (experimental) and the planned error-bar layers | W. L. Oberkampf and C. J. Roy (2010); ASME V&V 20 (2009); P. J. Roache (1998) |
@@ -64,6 +65,7 @@ gradients
 control_surfaces
 rotation_rates
 unsteady_vortex_rings
+unsteady_time_domain
 trim
 symmetry
 trust_score
