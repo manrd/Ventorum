@@ -292,3 +292,258 @@ def test_empty_inputs_and_invalid_backend():
 
     with pytest.raises(ValueError, match="Unknown ring kernel backend"):
         VR.ring_velocity(P2, C2, 0.0, backend="invalid")
+
+
+def _random_bent_rings(
+    n: int,
+    max_nodes: int = 2,
+    seed: int = 71,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Return random points, normals, 3D rings, bent side nodes, side counts and cores."""
+    P, normals, corners, _, rc = _random_rings(n=n, seed=seed)
+    rng = np.random.default_rng(seed + 100)
+    side_counts = np.zeros((n, 2), dtype=np.int64)
+    side_nodes = np.zeros((n, 2, max_nodes, 3), dtype=np.float64)
+
+    for j in range(n):
+        cr = int(rng.integers(0, max_nodes + 1))
+        cl = int(rng.integers(0, max_nodes + 1))
+        side_counts[j, 0] = cr
+        side_counts[j, 1] = cl
+        # Right side edge: c1 -> c2.
+        for k in range(cr):
+            frac = (k + 1) / (cr + 1)
+            base = (1.0 - frac) * corners[j, 1] + frac * corners[j, 2]
+            side_nodes[j, 0, k] = base + rng.normal(scale=0.06, size=3)
+        for k in range(cr, max_nodes):
+            side_nodes[j, 0, k] = corners[j, 2]
+        # Left side edge: c3 -> c0.
+        for k in range(cl):
+            frac = (k + 1) / (cl + 1)
+            base = (1.0 - frac) * corners[j, 3] + frac * corners[j, 0]
+            side_nodes[j, 1, k] = base + rng.normal(scale=0.06, size=3)
+        for k in range(cl, max_nodes):
+            side_nodes[j, 1, k] = corners[j, 0]
+
+    # Ensure at least one ring has zero, one, and max_nodes intermediate nodes.
+    if n >= 3 and max_nodes >= 2:
+        side_counts[0] = (0, 0)
+        side_counts[1] = (1, 0)
+        side_nodes[1, 0, 0] = 0.5 * (corners[1, 1] + corners[1, 2]) + np.array([0.0, 0.0, 0.05])
+        side_counts[2] = (2, 2)
+        side_nodes[2, 0, 0] = (2.0 * corners[2, 1] + corners[2, 2]) / 3.0 + np.array([0.0, 0.0, 0.04])
+        side_nodes[2, 0, 1] = (corners[2, 1] + 2.0 * corners[2, 2]) / 3.0 + np.array([0.0, 0.0, 0.03])
+        side_nodes[2, 1, 0] = (2.0 * corners[2, 3] + corners[2, 0]) / 3.0 + np.array([0.0, 0.0, 0.03])
+        side_nodes[2, 1, 1] = (corners[2, 3] + 2.0 * corners[2, 0]) / 3.0 + np.array([0.0, 0.0, 0.04])
+        # Put an evaluation point near a bent intermediate node.
+        P[3] = side_nodes[2, 0, 0] + np.array([0.0, 0.0, 1e-4])
+
+    return P, normals, corners, side_nodes, side_counts, rc
+
+
+def _direct_poly_ring_velocity(
+    P: np.ndarray,
+    corners: np.ndarray,
+    side_nodes: np.ndarray,
+    side_counts: np.ndarray,
+    rc: np.ndarray | float,
+) -> np.ndarray:
+    """Reference bent-ring velocity computed directly from segment_velocity."""
+    m, n = P.shape[0], corners.shape[0]
+    out = np.zeros((m, n, 3), dtype=np.float64)
+    for j in range(n):
+        rc_j = rc[:, j : j + 1] if np.ndim(rc) == 2 else (rc[j : j + 1] if np.ndim(rc) == 1 else rc)
+        cr = int(side_counts[j, 0])
+        cl = int(side_counts[j, 1])
+        pts = [corners[j, 0], corners[j, 1]]
+        for k in range(cr):
+            pts.append(side_nodes[j, 0, k])
+        pts.extend([corners[j, 2], corners[j, 3]])
+        for k in range(cl):
+            pts.append(side_nodes[j, 1, k])
+        vj = np.zeros((m, 3), dtype=np.float64)
+        for s in range(len(pts)):
+            a = pts[s][None, :]
+            b = pts[(s + 1) % len(pts)][None, :]
+            vj += V.segment_velocity(P, a, b, rc_j)[:, 0, :]
+        out[:, j, :] = vj
+    return out
+
+
+@pytest.mark.parametrize("rc_mode", ["scalar", "1d", "2d", "zero"])
+def test_numpy_bent_ring_kernel_matches_segment_sum(rc_mode):
+    """Numpy bent-ring velocity and normal influence match direct segment_velocity sums."""
+    P, normals, corners, side_nodes, side_counts, rc_1d = _random_bent_rings(n=20, max_nodes=2, seed=73)
+    m, n = P.shape[0], corners.shape[0]
+    if rc_mode == "scalar":
+        rc = 0.015
+    elif rc_mode == "1d":
+        rc = rc_1d
+    elif rc_mode == "2d":
+        rc = np.random.default_rng(79).uniform(1e-4, 5e-2, size=(m, n))
+    else:
+        rc = 0.0
+
+    V.set_kernel_backend("numpy")
+    got_v = VR.ring_velocity(P, corners, rc, side_nodes=side_nodes, side_counts=side_counts)
+    got_a = VR.ring_normal_influence(P, normals, corners, rc, side_nodes=side_nodes, side_counts=side_counts)
+
+    ref_v = _direct_poly_ring_velocity(P, corners, side_nodes, side_counts, rc)
+    ref_a = np.sum(ref_v * normals[:, None, :], axis=2)
+
+    assert got_v.shape == (m, n, 3)
+    assert got_a.shape == (m, n)
+    assert np.max(np.abs(got_v - ref_v)) <= 1e-13 * np.max(np.abs(ref_v))
+    assert np.max(np.abs(got_a - ref_a)) <= 1e-13 * np.max(np.abs(ref_a))
+
+
+@pytest.mark.parametrize("rc_mode", ["scalar", "1d", "2d", "zero"])
+def test_numba_bent_ring_kernels_equal_numpy(rc_mode):
+    """Numba bent-ring velocity and normal influence agree with numpy to round-off."""
+    if not VR_NB.HAVE_NUMBA:
+        pytest.skip("Numba is not installed.")
+    P, normals, corners, side_nodes, side_counts, rc_1d = _random_bent_rings(n=24, max_nodes=2, seed=83)
+    m, n = P.shape[0], corners.shape[0]
+    if rc_mode == "scalar":
+        rc = 0.012
+    elif rc_mode == "1d":
+        rc = rc_1d
+    elif rc_mode == "2d":
+        rc = np.random.default_rng(89).uniform(1e-4, 5e-2, size=(m, n))
+    else:
+        rc = 0.0
+
+    out = {}
+    for backend in ("numpy", "numba"):
+        V.set_kernel_backend(backend)
+        out[backend] = (
+            VR.ring_velocity(P, corners, rc, side_nodes=side_nodes, side_counts=side_counts),
+            VR.ring_normal_influence(P, normals, corners, rc, side_nodes=side_nodes, side_counts=side_counts),
+        )
+    for ref, new in zip(out["numpy"], out["numba"]):
+        assert np.max(np.abs(new - ref)) <= 1e-12 * np.max(np.abs(ref))
+
+
+@pytest.mark.parametrize("backend", ["numpy", "numba"])
+def test_straight_line_intermediate_nodes_equal_four_corner_ring(backend):
+    """A ring with intermediate nodes on straight lines equals the four-corner ring to round-off."""
+    if backend == "numba" and not VR_NB.HAVE_NUMBA:
+        pytest.skip("Numba is not installed.")
+    P, normals, corners, _, rc_1d = _random_rings(n=18, seed=97)
+    n = corners.shape[0]
+
+    side_counts = np.zeros((n, 2), dtype=np.int64)
+    side_nodes = np.zeros((n, 2, 2, 3), dtype=np.float64)
+    for j in range(n):
+        cr = j % 3
+        cl = (j + 1) % 3
+        side_counts[j, 0] = cr
+        side_counts[j, 1] = cl
+        for k in range(cr):
+            t = (k + 1) / (cr + 1)
+            side_nodes[j, 0, k] = (1.0 - t) * corners[j, 1] + t * corners[j, 2]
+        for k in range(cl):
+            t = (k + 1) / (cl + 1)
+            side_nodes[j, 1, k] = (1.0 - t) * corners[j, 3] + t * corners[j, 0]
+
+    # Exact Biot-Savart (rc = 0): subdivided straight side segments equal single segments to round-off.
+    v_quad = VR.ring_velocity(P, corners, 0.0, backend=backend)
+    v_poly = VR.ring_velocity(P, corners, 0.0, side_nodes=side_nodes, side_counts=side_counts, backend=backend)
+    a_quad = VR.ring_normal_influence(P, normals, corners, 0.0, backend=backend)
+    a_poly = VR.ring_normal_influence(
+        P, normals, corners, 0.0, side_nodes=side_nodes, side_counts=side_counts, backend=backend,
+    )
+    assert np.max(np.abs(v_poly - v_quad)) <= 1e-13 * np.max(np.abs(v_quad))
+    assert np.max(np.abs(a_poly - a_quad)) <= 1e-13 * np.max(np.abs(a_quad))
+
+    # Zero side counts take the four-corner fast path and match identically even with nonzero core.
+    zero_counts = np.zeros((n, 2), dtype=np.int64)
+    v_quad_rc = VR.ring_velocity(P, corners, rc_1d, backend=backend)
+    v_zero_rc = VR.ring_velocity(P, corners, rc_1d, side_nodes=side_nodes, side_counts=zero_counts, backend=backend)
+    assert np.array_equal(v_zero_rc, v_quad_rc)
+
+
+@pytest.mark.parametrize("rc", [0.0, 0.01])
+def test_bent_rings_shared_edge_cancellation_and_dipole_decay(rc):
+    """Two adjacent bent rings cancel their shared bent side edge; one bent ring decays as 1/R^3."""
+    r1 = np.array([[0.0, -1.0, 0.0], [0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [1.0, -1.0, 0.0]])
+    r2 = np.array([[0.0, 0.0, 0.0], [0.0, 1.0, 0.0], [1.0, 1.0, 0.0], [1.0, 0.0, 0.0]])
+    shared_mid = np.array([0.5, 0.0, 0.12])
+    outer_l = np.array([0.5, -1.0, 0.12])
+    outer_r = np.array([0.5, 1.0, 0.12])
+
+    both = np.stack([r1, r2], axis=0)
+    sn_both = np.zeros((2, 2, 1, 3), dtype=np.float64)
+    sc_both = np.ones((2, 2), dtype=np.int64)
+    sn_both[0, 0, 0] = shared_mid
+    sn_both[0, 1, 0] = outer_l
+    sn_both[1, 0, 0] = outer_r
+    sn_both[1, 1, 0] = shared_mid
+
+    outer = np.array([[[0.0, -1.0, 0.0], [0.0, 1.0, 0.0], [1.0, 1.0, 0.0], [1.0, -1.0, 0.0]]])
+    sn_outer = np.zeros((1, 2, 1, 3), dtype=np.float64)
+    sc_outer = np.ones((1, 2), dtype=np.int64)
+    sn_outer[0, 0, 0] = outer_r
+    sn_outer[0, 1, 0] = outer_l
+
+    rng = np.random.default_rng(101)
+    P = rng.normal(scale=1.5, size=(16, 3))
+    P[0] = shared_mid + np.array([0.0, 1e-4, 1e-4])
+
+    v_each = VR.ring_velocity(P, both, rc, side_nodes=sn_both, side_counts=sc_both)
+    v_sum = v_each.sum(axis=1)
+    scale = max(float(np.max(np.abs(v_each))), 1.0)
+    if rc == 0.0:
+        v_outer = VR.ring_velocity(P, outer, rc, side_nodes=sn_outer, side_counts=sc_outer)[:, 0, :]
+        assert np.max(np.abs(v_sum - v_outer)) <= 1e-14 * scale
+        assert np.max(np.abs(v_sum - v_outer)) <= 1e-12 * np.max(np.abs(v_outer))
+    else:
+        segs = [
+            (r1[0], r1[1]), (r2[0], r2[1]),
+            (r2[1], outer_r), (outer_r, r2[2]),
+            (r2[2], r2[3]), (r1[2], r1[3]),
+            (r1[3], outer_l), (outer_l, r1[0]),
+        ]
+        v_perim = sum(V.segment_velocity(P, a[None, :], b[None, :], rc)[:, 0, :] for a, b in segs)
+        assert np.max(np.abs(v_sum - v_perim)) <= 1e-14 * scale
+        assert np.max(np.abs(v_sum - v_perim)) <= 1e-12 * np.max(np.abs(v_perim))
+
+    # Closed bent ring centred at the origin decays as 1/R^3 in the far field.
+    outer_centered = np.array([[[-0.5, -0.5, 0.0], [-0.5, 0.5, 0.0], [0.5, 0.5, 0.0], [0.5, -0.5, 0.0]]])
+    sn_centered = np.array([[[[0.0, 0.5, 0.12]], [[0.0, -0.5, 0.12]]]], dtype=np.float64)
+    radii = np.array([20.0, 40.0, 80.0, 160.0])
+    direction = np.array([0.3, -0.4, 0.8660254])
+    direction /= np.linalg.norm(direction)
+    P_far = radii[:, None] * direction[None, :]
+    mag = np.linalg.norm(
+        VR.ring_velocity(P_far, outer_centered, rc, side_nodes=sn_centered, side_counts=sc_outer)[:, 0, :],
+        axis=1,
+    )
+    ratios = mag[:-1] / mag[1:]
+    assert np.all((ratios > 7.9) & (ratios < 8.1))
+
+
+def test_bent_ring_chunking_and_validation(monkeypatch):
+    """Chunking matches unchunked bent rings; invalid side_nodes or side_counts raise ValueError."""
+    P, normals, corners, side_nodes, side_counts, rc = _random_bent_rings(n=14, max_nodes=2, seed=107)
+    V.set_kernel_backend("numpy")
+    v_big = VR.ring_velocity(P, corners, rc, side_nodes=side_nodes, side_counts=side_counts)
+    a_big = VR.ring_normal_influence(P, normals, corners, rc, side_nodes=side_nodes, side_counts=side_counts)
+    monkeypatch.setattr(VR, "_CHUNK_BUDGET", 400)
+    v_small = VR.ring_velocity(P, corners, rc, side_nodes=side_nodes, side_counts=side_counts)
+    a_small = VR.ring_normal_influence(P, normals, corners, rc, side_nodes=side_nodes, side_counts=side_counts)
+    assert np.max(np.abs(v_small - v_big)) <= 1e-14 * np.max(np.abs(v_big))
+    assert np.max(np.abs(a_small - a_big)) <= 1e-14 * np.max(np.abs(a_big))
+
+    with pytest.raises(ValueError, match="side_nodes"):
+        VR.ring_velocity(P, corners, rc, side_nodes=side_nodes)
+    with pytest.raises(ValueError, match="side_nodes"):
+        VR.ring_velocity(P, corners, rc, side_counts=side_counts)
+    bad_counts = side_counts.copy()
+    bad_counts[0, 0] = 3
+    with pytest.raises(ValueError, match="side_counts"):
+        VR.ring_velocity(P, corners, rc, side_nodes=side_nodes, side_counts=bad_counts)
+    bad_neg = side_counts.copy()
+    bad_neg[0, 1] = -1
+    with pytest.raises(ValueError, match="side_counts"):
+        VR.ring_normal_influence(P, normals, corners, rc, side_nodes=side_nodes, side_counts=bad_neg)

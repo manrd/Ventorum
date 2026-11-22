@@ -688,63 +688,15 @@ def test_refuses_invalid_k_and_wake_length():
 
 
 def test_refuses_unsupported_lattices_and_ground_strike():
-    """Refused ring lattices raise InputError; ground strike raises GroundStrikeError."""
+    """Lifting-line collocation raises InputError; ground strike raises GroundStrikeError."""
     cond = vt.FlightCondition(V_inf=20.0, rho=1.225, alpha=0.0)
 
-    # Lifting-line collocation.
+    # Lifting-line collocation remains refused.
     ac_rect = _rect_wing(n_panels=4)
     lat_llt = build_lattice(ac_rect, collocation="llt", n_chord=1)
     with pytest.raises(InputError, match="collocation"):
         _solve_harmonic_rings(
             lat_llt, cond, [0.1], S_ref=ac_rect.S_ref, b_ref=ac_rect.b_ref, c_ref=ac_rect.c_ref,
-        )
-
-    # Cambered mean-line leg chain with n_chord > 1.
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore", RuntimeWarning)
-        w_cam = vt.LiftingSurface(
-            name="cam", semi_span=3.0, n_panels=4,
-            sections=[vt.WingSection(y_frac=0.0, chord=1.0, shape="4412"),
-                      vt.WingSection(y_frac=1.0, chord=1.0, shape="4412")],
-        )
-        ac_cam = vt.Aircraft(surfaces=[w_cam])
-        ac_cam.compute_reference_values()
-        lat_cam = build_lattice(ac_cam, n_chord=4)
-    with pytest.raises(InputError, match="leg chain"):
-        _solve_harmonic_rings(
-            lat_cam, cond, [0.1], S_ref=ac_cam.S_ref, b_ref=ac_cam.b_ref, c_ref=ac_cam.c_ref,
-        )
-
-    # Deflected chordwise flap.
-    fl = vt.ControlSurface(name="flap", eta_start=0.0, eta_end=1.0, hinge_x_c=0.75, deflection=np.radians(10.0))
-    w_fl = vt.LiftingSurface(
-        name="flapped", semi_span=3.0, n_panels=4, controls=[fl],
-        sections=[vt.WingSection(y_frac=0.0, chord=1.0), vt.WingSection(y_frac=1.0, chord=1.0)],
-    )
-    ac_fl = vt.Aircraft(surfaces=[w_fl])
-    ac_fl.compute_reference_values()
-    lat_fl = build_lattice(ac_fl, n_chord=4)
-    with pytest.raises(InputError, match="kink"):
-        _solve_harmonic_rings(
-            lat_fl, cond, [0.1], S_ref=ac_fl.S_ref, b_ref=ac_fl.b_ref, c_ref=ac_fl.c_ref,
-        )
-
-    # Surface junction (wing + winglet).
-    wing = vt.LiftingSurface(
-        name="wing", semi_span=3.0, n_panels=6,
-        sections=[vt.WingSection(y_frac=0.0, chord=1.0), vt.WingSection(y_frac=1.0, chord=1.0)],
-    )
-    winglet = vt.LiftingSurface(
-        name="winglet", semi_span=0.5, n_panels=3, is_symmetric=False,
-        dihedral=np.radians(90.0), position=np.array([0.0, 3.0, 0.0]),
-        sections=[vt.WingSection(y_frac=0.0, chord=1.0), vt.WingSection(y_frac=1.0, chord=0.5)],
-    )
-    ac_j = vt.Aircraft(surfaces=[wing, winglet])
-    ac_j.compute_reference_values()
-    lat_j = build_lattice(ac_j, n_chord=4)
-    with pytest.raises(InputError, match="junction"):
-        _solve_harmonic_rings(
-            lat_j, cond, [0.1], S_ref=ac_j.S_ref, b_ref=ac_j.b_ref, c_ref=ac_j.c_ref,
         )
 
     # Ground strike: large alpha at very low height lowers the trailing edge below ground.
@@ -759,3 +711,308 @@ def test_refuses_unsupported_lattices_and_ground_strike():
             S_ref=ac_rect.S_ref, b_ref=ac_rect.b_ref, c_ref=ac_rect.c_ref,
             ground=ground_strike, ref_point=ac_rect.ref_point,
         )
+
+
+# ---------------------------------------------------------------------------
+# 8. Cambered wings, deflected flaps and surface junctions
+# ---------------------------------------------------------------------------
+
+
+def _cambered_naca4412_wing(n_panels: int = 6) -> vt.Aircraft:
+    """Build a rectangular NACA 4412 wing with quarter-chord moment reference."""
+    wing = vt.LiftingSurface(
+        name="cambered",
+        semi_span=3.0,
+        n_panels=n_panels,
+        sections=[
+            vt.WingSection(y_frac=0.0, chord=1.0, shape="4412"),
+            vt.WingSection(y_frac=1.0, chord=1.0, shape="4412"),
+        ],
+    )
+    ac = vt.Aircraft(surfaces=[wing], ref_point=np.array([0.25, 0.0, 0.0]))
+    ac.compute_reference_values()
+    return ac
+
+
+def _deflected_flap_wing(deflection_deg: float = 20.0, n_panels: int = 6) -> vt.Aircraft:
+    """Build a rectangular wing with a full-span chordwise deflected flap."""
+    fl = vt.ControlSurface(
+        name="flap",
+        eta_start=0.0,
+        eta_end=1.0,
+        hinge_x_c=0.75,
+        deflection=np.radians(deflection_deg),
+    )
+    wing = vt.LiftingSurface(
+        name="flapped",
+        semi_span=3.0,
+        n_panels=n_panels,
+        controls=[fl],
+        sections=[vt.WingSection(y_frac=0.0, chord=1.0), vt.WingSection(y_frac=1.0, chord=1.0)],
+    )
+    ac = vt.Aircraft(surfaces=[wing], ref_point=np.array([0.25, 0.0, 0.0]))
+    ac.compute_reference_values()
+    return ac
+
+
+def _wing_with_winglet(n_wing: int = 6, n_winglet: int = 4) -> vt.Aircraft:
+    """Build a rectangular wing with a vertical winglet joined at the right tip."""
+    wing = vt.LiftingSurface(
+        name="wing",
+        semi_span=3.0,
+        n_panels=n_wing,
+        sections=[vt.WingSection(y_frac=0.0, chord=1.0), vt.WingSection(y_frac=1.0, chord=1.0)],
+    )
+    winglet = vt.LiftingSurface(
+        name="winglet",
+        semi_span=0.5,
+        n_panels=n_winglet,
+        is_symmetric=False,
+        dihedral=np.radians(90.0),
+        position=np.array([0.0, 3.0, 0.0]),
+        sections=[vt.WingSection(y_frac=0.0, chord=1.0), vt.WingSection(y_frac=1.0, chord=0.5)],
+    )
+    ac = vt.Aircraft(surfaces=[wing, winglet], ref_point=np.array([0.25, 0.0, 0.0]))
+    ac.compute_reference_values()
+    return ac
+
+
+@pytest.mark.parametrize("case_kind", ["camber", "flap", "winglet"])
+def test_harmonic_runs_and_woodbury_matches_direct_on_camber_flap_winglet(case_kind):
+    """Harmonic solver runs on cambered, flapped and joined-winglet lattices; Woodbury matches direct LU."""
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)
+        if case_kind == "camber":
+            ac = _cambered_naca4412_wing(n_panels=4)
+        elif case_kind == "flap":
+            ac = _deflected_flap_wing(deflection_deg=20.0, n_panels=4)
+        else:
+            ac = _wing_with_winglet(n_wing=4, n_winglet=2)
+        lat = build_lattice(ac, n_chord=4, chord_spacing="uniform")
+
+    cond = vt.FlightCondition(V_inf=25.0, rho=1.225, alpha=np.radians(4.0), h=0.5)
+    ground = make_ground_plane(lat, 0.5, cond.alpha, cond.beta, ref_point=ac.ref_point, height_ref="ref")
+    k_vals = [0.0, 0.05, 0.2]
+
+    r_wb = _solve_harmonic_rings(
+        lat, cond, k_vals, S_ref=ac.S_ref, b_ref=ac.b_ref, c_ref=ac.c_ref,
+        ground=ground, ref_point=ac.ref_point, solve_method="woodbury",
+    )
+    r_dir = _solve_harmonic_rings(
+        lat, cond, k_vals, S_ref=ac.S_ref, b_ref=ac.b_ref, c_ref=ac.c_ref,
+        ground=ground, ref_point=ac.ref_point, solve_method="direct",
+    )
+
+    for motion in ("heave", "pitch"):
+        m_wb = getattr(r_wb, motion)
+        m_dir = getattr(r_dir, motion)
+        for name in ("CL", "CD", "CY", "Cl", "Cm", "Cn"):
+            a = getattr(m_wb, name)
+            b = getattr(m_dir, name)
+            assert np.all(np.isfinite(a))
+            scale = max(float(np.max(np.abs(b))), 1.0)
+            assert np.max(np.abs(a - b)) <= 1e-12 * scale
+
+
+@pytest.mark.parametrize("case_kind", ["camber", "flap", "winglet"])
+def test_mirror_wing_parity_bent_and_junction(case_kind):
+    """Ground-image harmonic system equals explicit antiphase two-wing model on camber, flap and winglet."""
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)
+        if case_kind == "camber":
+            ac = _cambered_naca4412_wing(n_panels=4)
+        elif case_kind == "flap":
+            ac = _deflected_flap_wing(deflection_deg=20.0, n_panels=4)
+        else:
+            ac = _wing_with_winglet(n_wing=4, n_winglet=2)
+        lat = build_lattice(ac, n_chord=4, chord_spacing="uniform")
+
+    h_ground = 0.5
+    cond = vt.FlightCondition(V_inf=20.0, rho=1.225, alpha=np.radians(4.0), h=h_ground)
+    ground = make_ground_plane(lat, h_ground, cond.alpha, cond.beta, ref_point=ac.ref_point, height_ref="ref")
+    k = 0.2
+
+    sys_ge = _HarmonicRingSystem(
+        lat, cond, S_ref=ac.S_ref, b_ref=ac.b_ref, c_ref=ac.c_ref,
+        ground=ground, ref_point=ac.ref_point, wake_chords=5.0, use_tail=True,
+    )
+    rhs_ge, G_ge = sys_ge.solve_circulations(k, solve_method="woodbury")
+
+    rings = sys_ge.rings
+    img = ground_image_rings(rings, ground, wake_dir=rings.wake_dir)
+    n = rings.n_panels
+    n_s = rings.n_strips
+    te_idx = rings.te_indices
+    dx_w = sys_ge.dx_w
+    dt = sys_ge.dt
+    n_rows = sys_ge.n_wake_rows
+    omega = 2.0 * k * cond.V_inf / ac.c_ref
+    kappa = omega / cond.V_inf
+
+    cp_2 = np.concatenate([rings.cp, ground.reflect_points(rings.cp)], axis=0)
+    n_2 = np.concatenate([rings.normal_bc, ground.reflect_directions(rings.normal_bc)], axis=0)
+    c_2 = np.concatenate([rings.corners, img.corners], axis=0)
+    sn_2 = None if rings.side_nodes is None else np.concatenate([rings.side_nodes, img.side_nodes], axis=0)
+    sc_2 = None if rings.side_counts is None else np.concatenate([rings.side_counts, img.side_counts], axis=0)
+    rc_2 = np.concatenate([rings.rc, rings.rc], axis=0)
+    rc_te_2 = np.concatenate([rings.rc[te_idx], rings.rc[te_idx]], axis=0)
+
+    A_2 = VR.ring_normal_influence(cp_2, n_2, c_2, rc_2, side_nodes=sn_2, side_counts=sc_2).astype(np.complex128)
+
+    te_l_2 = np.concatenate([rings.te_left, img.te_left], axis=0)
+    te_r_2 = np.concatenate([rings.te_right, img.te_right], axis=0)
+    wd_2 = np.concatenate([rings.wake_dir, img.wake_dir], axis=0)
+    te_idx_2 = np.concatenate([te_idx, te_idx + n])
+
+    lags = np.exp(-1j * omega * np.arange(1, n_rows + 1, dtype=float) * dt)
+    W_2 = np.zeros((2 * n, 2 * n_s), dtype=np.complex128)
+    for m in range(n_rows):
+        p0_l = te_l_2 + (m * dx_w) * wd_2
+        p0_r = te_r_2 + (m * dx_w) * wd_2
+        p1_l = p0_l + dx_w * wd_2
+        p1_r = p0_r + dx_w * wd_2
+        w_corners = np.stack([p0_l, p0_r, p1_r, p1_l], axis=1)
+        W_2 += lags[m] * VR.ring_normal_influence(cp_2, n_2, w_corners, rc_te_2)
+
+    phase0 = np.exp(-1j * omega * (n_rows + 0.5) * dt)
+    tail_l = te_l_2 + (n_rows * dx_w) * wd_2
+    tail_r = te_r_2 + (n_rows * dx_w) * wd_2
+    W_2 += phase0 * harmonic_tail_normal_influence(cp_2, n_2, tail_l, tail_r, wd_2, kappa, rc_te_2)
+    A_2[:, te_idx_2] += W_2
+
+    rhs_2 = np.concatenate([rhs_ge, rhs_ge], axis=0)
+    G_2 = np.linalg.solve(A_2, rhs_2)
+
+    for col in range(G_ge.shape[1]):
+        scale = max(float(np.max(np.abs(G_ge[:, col]))), 1.0)
+        assert np.max(np.abs(G_2[:n, col] - G_ge[:, col])) <= 1e-12 * scale
+        assert np.max(np.abs(G_2[n:, col] + G_ge[:, col])) <= 1e-12 * scale
+
+
+@pytest.mark.parametrize(
+    "case_kind,h_ground",
+    [
+        ("camber", None),
+        ("camber", 0.5),
+        ("flap", None),
+        ("flap", 0.5),
+        ("winglet", None),
+        ("winglet", 0.5),
+    ],
+)
+def test_k0_limits_match_steady_solvers_camber_flap_winglet(monkeypatch, case_kind, h_ground):
+    """k -> 0 limits match analyze, height_derivatives and rate_derivatives on camber, flap and winglet."""
+    from ventorum import gpu
+
+    old_prec = gpu.get_precision()
+    gpu.set_precision("float64")
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", RuntimeWarning)
+            if case_kind == "camber":
+                ac = _cambered_naca4412_wing(n_panels=6)
+            elif case_kind == "flap":
+                ac = _deflected_flap_wing(deflection_deg=20.0, n_panels=6)
+            else:
+                ac = _wing_with_winglet(n_wing=6, n_winglet=4)
+
+            st = vt.SolverSettings(
+                solver_type="vlm",
+                n_panels=6,
+                n_chord=8,
+                spacing="half-cosine",
+                chord_spacing="uniform",
+            )
+            cond = vt.FlightCondition(V_inf=30.0, rho=1.225, alpha=np.radians(4.0), h=h_ground)
+
+            # Use CORE_RADIUS_FRACTION = 1e-4 (as in the 3D swept-tapered check above)
+            # so 3D non-planar leg midpoints do not hit 1e-16 round-off singularities.
+            monkeypatch.setattr(lattice_mod, "CORE_RADIUS_FRACTION", 1e-4)
+            lat = build_lattice(ac, st, collocation="vlm", n_chord=8, chord_spacing="uniform")
+            ground = (
+                make_ground_plane(lat, h_ground, cond.alpha, cond.beta, ref_point=ac.ref_point, height_ref="ref")
+                if h_ground is not None
+                else None
+            )
+
+            cl_a_ref, cm_a_ref = _steady_vlm_alpha_slopes(ac, cond, st, d_alpha=1e-5)
+            rd = vt.rate_derivatives(ac, cond, st, step=0.01, axes="body")
+            hd = (
+                vt.height_derivatives(ac, cond, st, h_step=1e-4, alpha_step_deg=1e-3, axes="body")
+                if h_ground is not None
+                else None
+            )
+
+        resp = _solve_harmonic_rings(
+            lat,
+            cond,
+            [0.0, 0.05],
+            S_ref=ac.S_ref,
+            b_ref=ac.b_ref,
+            c_ref=ac.c_ref,
+            ground=ground,
+            ref_point=ac.ref_point,
+            te_extension_fraction=0.0,
+        )
+
+        assert abs(resp.k0_pitch.CL - cl_a_ref) <= 1e-8 * max(abs(cl_a_ref), 1.0)
+        assert abs(resp.k0_pitch.Cm - cm_a_ref) <= 1e-8 * max(abs(cm_a_ref), 1.0)
+        assert abs(resp.pitch.CL[0] - resp.k0_pitch.CL) <= 1e-12 * max(abs(cl_a_ref), 1.0)
+        assert abs(resp.pitch.Cm[0] - resp.k0_pitch.Cm) <= 1e-12 * max(abs(cm_a_ref), 1.0)
+        assert abs(resp.k0_pitch_rate.CL - rd.derivatives["CL_q"]) <= 1e-8 * max(abs(rd.derivatives["CL_q"]), 1.0)
+        assert abs(resp.k0_pitch_rate.Cm - rd.derivatives["Cm_q"]) <= 1e-8 * max(abs(rd.derivatives["Cm_q"]), 1.0)
+
+        if hd is not None:
+            assert abs(resp.k0_heave.CL - hd.derivatives["CL_h"]) <= 1e-8 * max(abs(hd.derivatives["CL_h"]), 1.0)
+            assert abs(resp.k0_heave.Cm - hd.derivatives["Cm_h"]) <= 1e-8 * max(abs(hd.derivatives["Cm_h"]), 1.0)
+            assert abs(resp.mean_state.CL - hd.base.totals.CL) <= 1e-8 * max(abs(hd.base.totals.CL), 1.0)
+            assert abs(resp.mean_state.Cm - hd.base.totals.Cm) <= 1e-8 * max(abs(hd.base.totals.Cm), 1.0)
+    finally:
+        gpu.set_precision(old_prec)
+
+
+def test_bent_ring_apparent_mass_area_follows_hinge():
+    """Apparent-mass area and moment on a flap-hinge ring integrate the bent sub-quadrilaterals."""
+    fl = vt.ControlSurface(name="flap", eta_start=0.0, eta_end=1.0, hinge_x_c=0.75, deflection=np.radians(20.0))
+    wing = vt.LiftingSurface(
+        name="tapered_flapped",
+        semi_span=3.0,
+        n_panels=4,
+        controls=[fl],
+        sections=[vt.WingSection(y_frac=0.0, chord=1.2), vt.WingSection(y_frac=1.0, chord=0.6)],
+    )
+    ac = vt.Aircraft(surfaces=[wing], ref_point=np.array([0.3, 0.0, 0.0]))
+    ac.compute_reference_values()
+    lat = build_lattice(ac, n_chord=4, chord_spacing="uniform")
+    cond = vt.FlightCondition(V_inf=20.0, rho=1.225, alpha=0.0)
+    sys = _HarmonicRingSystem(
+        lat, cond, S_ref=ac.S_ref, b_ref=ac.b_ref, c_ref=ac.c_ref, ref_point=ac.ref_point,
+    )
+    # On a 4-chord uniform mesh with hinge at 0.75, panel k = 2 crosses the 20 deg hinge.
+    p = 2
+    a0, b0 = lat.a[p], lat.b[p]
+    hl, hr = lat.a_kink[p], lat.b_kink[p]
+    a1, b1 = lat.a[p + 1], lat.b[p + 1]
+    rp = ac.ref_point
+    tris = (
+        (a0, hr, b0),
+        (a0, hl, hr),
+        (hl, b1, hr),
+        (hl, a1, b1),
+    )
+    expected_vec = sum(0.5 * np.cross(t1 - t0, t2 - t0) for t0, t1, t2 in tris)
+    expected_mom = sum(
+        np.cross((t0 + t1 + t2) / 3.0 - rp, 0.5 * np.cross(t1 - t0, t2 - t0))
+        for t0, t1, t2 in tris
+    )
+    flat_a1 = 0.5 * np.cross(b1 - a0, b0 - a0)
+    flat_a2 = 0.5 * np.cross(a1 - a0, b1 - a0)
+    flat_c = (
+        np.linalg.norm(flat_a1) * (a0 + b0 + b1) / 3.0
+        + np.linalg.norm(flat_a2) * (a0 + b1 + a1) / 3.0
+    ) / (np.linalg.norm(flat_a1) + np.linalg.norm(flat_a2))
+    flat_mom = np.cross(flat_c - rp, flat_a1 + flat_a2)
+    assert sys.area_moment_vec is not None
+    assert np.allclose(sys.area_vec[p], expected_vec, atol=1e-14, rtol=1e-14)
+    assert np.allclose(sys.area_moment_vec[p], expected_mom, atol=1e-14, rtol=1e-14)
+    assert np.linalg.norm(sys.area_moment_vec[p] - flat_mom) > 1e-4 * np.linalg.norm(expected_mom)

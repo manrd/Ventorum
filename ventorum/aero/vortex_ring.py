@@ -86,6 +86,93 @@ def _slice_rc(rc: np.ndarray | float, i0: int, i1: int) -> np.ndarray | float:
     return rc
 
 
+def _select_rc_cols(rc: np.ndarray | float, idx: np.ndarray) -> np.ndarray | float:
+    """Select ring columns *idx* from *rc* (scalar, 1-D or 2-D)."""
+    nd = np.ndim(rc)
+    if nd == 2:
+        return np.asarray(rc, dtype=np.float64)[:, idx]
+    if nd == 1:
+        return np.asarray(rc, dtype=np.float64)[idx]
+    return rc
+
+
+def _validate_side_polylines(
+    n: int,
+    side_nodes: np.ndarray | None,
+    side_counts: np.ndarray | None,
+) -> tuple[np.ndarray | None, np.ndarray | None, bool]:
+    """Validate optional bent side-edge polyline arrays for *n* rings.
+
+    Returns ``(sn, sc, has_poly)`` where *has_poly* is True only when at least
+    one ring side edge carries an intermediate node.
+    """
+    if side_nodes is None and side_counts is None:
+        return None, None, False
+    if side_nodes is None or side_counts is None:
+        raise ValueError("side_nodes and side_counts must both be provided or both be None.")
+    sn = np.asarray(side_nodes, dtype=np.float64)
+    sc = np.asarray(side_counts, dtype=np.int64)
+    if sn.ndim != 4 or sn.shape[0] != n or sn.shape[1] != 2 or sn.shape[3] != 3:
+        raise ValueError(f"Expected side_nodes of shape ({n}, 2, K, 3), got {sn.shape}.")
+    if sc.shape != (n, 2):
+        raise ValueError(f"Expected side_counts of shape ({n}, 2), got {sc.shape}.")
+    k_max = int(sn.shape[2])
+    if n > 0 and (bool(np.any(sc < 0)) or bool(np.any(sc > k_max))):
+        raise ValueError(f"All side_counts entries must lie in [0, {k_max}].")
+    has_poly = (k_max > 0) and (n > 0) and bool(np.any(sc > 0))
+    return sn, sc, has_poly
+
+
+def _numpy_poly_ring_chunk(
+    Pc: np.ndarray,
+    c0: np.ndarray,
+    c1: np.ndarray,
+    c2: np.ndarray,
+    c3: np.ndarray,
+    sn: np.ndarray,
+    sc: np.ndarray,
+    rc_c: np.ndarray | float,
+) -> np.ndarray:
+    """Evaluate bent-ring velocities [1/m] on one row chunk *Pc* in numpy."""
+    k_max = int(sn.shape[2])
+    cnt_r = sc[:, 0]
+    cnt_l = sc[:, 1]
+
+    # Leading bound segment c0 -> c1 and trailing spanwise segment c2 -> c3.
+    v = segment_velocity(Pc, c0, c1, rc_c)
+    v += segment_velocity(Pc, c2, c3, rc_c)
+
+    # Right side polyline: c1 -> sn[:, 0, 0..cnt_r-1] -> c2.
+    end0_r = np.where((cnt_r > 0)[:, None], sn[:, 0, 0, :], c2)
+    v += segment_velocity(Pc, c1, end0_r, rc_c)
+    for s in range(1, k_max + 1):
+        idx = np.flatnonzero(cnt_r >= s)
+        if idx.size == 0:
+            break
+        seg_a = sn[idx, 0, s - 1, :]
+        if s < k_max:
+            seg_b = np.where((cnt_r[idx] > s)[:, None], sn[idx, 0, s, :], c2[idx])
+        else:
+            seg_b = c2[idx]
+        v[:, idx, :] += segment_velocity(Pc, seg_a, seg_b, _select_rc_cols(rc_c, idx))
+
+    # Left side polyline: c3 -> sn[:, 1, 0..cnt_l-1] -> c0.
+    end0_l = np.where((cnt_l > 0)[:, None], sn[:, 1, 0, :], c0)
+    v += segment_velocity(Pc, c3, end0_l, rc_c)
+    for s in range(1, k_max + 1):
+        idx = np.flatnonzero(cnt_l >= s)
+        if idx.size == 0:
+            break
+        seg_a = sn[idx, 1, s - 1, :]
+        if s < k_max:
+            seg_b = np.where((cnt_l[idx] > s)[:, None], sn[idx, 1, s, :], c0[idx])
+        else:
+            seg_b = c0[idx]
+        v[:, idx, :] += segment_velocity(Pc, seg_a, seg_b, _select_rc_cols(rc_c, idx))
+
+    return v
+
+
 def _broadcast_wake_dir(wake_dir: np.ndarray, n: int) -> np.ndarray:
     """Validate and broadcast *wake_dir* to shape ``(n, 3)``."""
     wd = np.asarray(wake_dir, dtype=np.float64)
@@ -103,13 +190,18 @@ def ring_velocity(
     corners: np.ndarray,
     rc: np.ndarray | float,
     *,
+    side_nodes: np.ndarray | None = None,
+    side_counts: np.ndarray | None = None,
     backend: str | None = None,
 ) -> np.ndarray:
-    """Compute velocity at *P* from unit-circulation quadrilateral vortex rings.
+    """Compute velocity at *P* from unit-circulation vortex rings.
 
-    Each ring ``j`` has four corners ``corners[j, 0..3]`` [m] ordered cyclically
-    so the four straight segments are ``0 -> 1``, ``1 -> 2``, ``2 -> 3`` and
-    ``3 -> 0``.
+    Each ring ``j`` has four end corners ``corners[j, 0..3]`` [m] ordered
+    cyclically. When *side_nodes* and *side_counts* are None (or all counts
+    are zero), each ring uses the four-corner fast path ``0 -> 1 -> 2 -> 3 ->
+    0``. Otherwise the right side edge ``1 -> 2`` passes through
+    ``side_nodes[j, 0, :side_counts[j, 0]]`` and the left side edge ``3 -> 0``
+    passes through ``side_nodes[j, 1, :side_counts[j, 1]]``.
 
     Parameters
     ----------
@@ -119,6 +211,12 @@ def ring_velocity(
         Ring corner coordinates [m], shape ``(N, 4, 3)``.
     rc : numpy.ndarray or float
         Core radius [m], scalar, shape ``(N,)`` or shape ``(M, N)``.
+    side_nodes : numpy.ndarray or None, optional
+        Padded intermediate nodes along the right (axis-1 index 0) and left
+        (axis-1 index 1) side polylines [m], shape ``(N, 2, K, 3)``.
+    side_counts : numpy.ndarray or None, optional
+        Number of active intermediate nodes per ring side edge, shape
+        ``(N, 2)`` int64.
     backend : str or None, optional
         Kernel backend (``"auto"``, ``"numba"`` or ``"numpy"``). None follows
         :mod:`ventorum.aero.vortex`.
@@ -136,12 +234,22 @@ def ring_velocity(
     if c_arr.ndim != 3 or c_arr.shape[1:] != (4, 3):
         raise ValueError(f"Expected corners of shape (N, 4, 3), got {c_arr.shape}.")
     m, n = P_arr.shape[0], c_arr.shape[0]
+    sn, sc, has_poly = _validate_side_polylines(n, side_nodes, side_counts)
     chosen = _ring_backend(backend)
     if m == 0 or n == 0:
         return np.empty((m, n, 3), dtype=np.float64)
 
     if chosen == "numba":
         rc2, rc_is_2d = _nb.pack_rc2(rc, m, n)
+        if has_poly:
+            return _nb.ring_poly_velocity_kernel(
+                np.ascontiguousarray(P_arr),
+                np.ascontiguousarray(c_arr),
+                np.ascontiguousarray(sn),
+                np.ascontiguousarray(sc),
+                rc2,
+                rc_is_2d,
+            )
         return _nb.ring_velocity_kernel(
             np.ascontiguousarray(P_arr),
             np.ascontiguousarray(c_arr),
@@ -156,11 +264,14 @@ def ring_velocity(
         i1 = min(m, i0 + step)
         Pc = P_arr[i0:i1]
         rc_c = _slice_rc(rc, i0, i1)
-        v = segment_velocity(Pc, c0, c1, rc_c)
-        v += segment_velocity(Pc, c1, c2, rc_c)
-        v += segment_velocity(Pc, c2, c3, rc_c)
-        v += segment_velocity(Pc, c3, c0, rc_c)
-        out[i0:i1] = v
+        if has_poly:
+            out[i0:i1] = _numpy_poly_ring_chunk(Pc, c0, c1, c2, c3, sn, sc, rc_c)
+        else:
+            v = segment_velocity(Pc, c0, c1, rc_c)
+            v += segment_velocity(Pc, c1, c2, rc_c)
+            v += segment_velocity(Pc, c2, c3, rc_c)
+            v += segment_velocity(Pc, c3, c0, rc_c)
+            out[i0:i1] = v
     return out
 
 
@@ -170,12 +281,16 @@ def ring_normal_influence(
     corners: np.ndarray,
     rc: np.ndarray | float,
     *,
+    side_nodes: np.ndarray | None = None,
+    side_counts: np.ndarray | None = None,
     backend: str | None = None,
 ) -> np.ndarray:
     """Compute normal-velocity influence of unit-circulation vortex rings.
 
     Entry ``(i, j)`` is the dot product of the velocity induced by ring ``j``
-    at ``P[i]`` with ``normals[i]``.
+    at ``P[i]`` with ``normals[i]``. Supports bent side polylines via
+    *side_nodes* and *side_counts* while retaining the four-corner fast path
+    when no side edge has intermediate nodes.
 
     Parameters
     ----------
@@ -187,6 +302,12 @@ def ring_normal_influence(
         Ring corner coordinates [m], shape ``(N, 4, 3)``.
     rc : numpy.ndarray or float
         Core radius [m], scalar, shape ``(N,)`` or shape ``(M, N)``.
+    side_nodes : numpy.ndarray or None, optional
+        Padded intermediate nodes along the right (axis-1 index 0) and left
+        (axis-1 index 1) side polylines [m], shape ``(N, 2, K, 3)``.
+    side_counts : numpy.ndarray or None, optional
+        Number of active intermediate nodes per ring side edge, shape
+        ``(N, 2)`` int64.
     backend : str or None, optional
         Kernel backend (``"auto"``, ``"numba"`` or ``"numpy"``). None follows
         :mod:`ventorum.aero.vortex`.
@@ -206,12 +327,23 @@ def ring_normal_influence(
     if c_arr.ndim != 3 or c_arr.shape[1:] != (4, 3):
         raise ValueError(f"Expected corners of shape (N, 4, 3), got {c_arr.shape}.")
     m, n = P_arr.shape[0], c_arr.shape[0]
+    sn, sc, has_poly = _validate_side_polylines(n, side_nodes, side_counts)
     chosen = _ring_backend(backend)
     if m == 0 or n == 0:
         return np.empty((m, n), dtype=np.float64)
 
     if chosen == "numba":
         rc2, rc_is_2d = _nb.pack_rc2(rc, m, n)
+        if has_poly:
+            return _nb.ring_poly_normal_influence_kernel(
+                np.ascontiguousarray(P_arr),
+                np.ascontiguousarray(n_arr),
+                np.ascontiguousarray(c_arr),
+                np.ascontiguousarray(sn),
+                np.ascontiguousarray(sc),
+                rc2,
+                rc_is_2d,
+            )
         return _nb.ring_normal_influence_kernel(
             np.ascontiguousarray(P_arr),
             np.ascontiguousarray(n_arr),
@@ -228,10 +360,13 @@ def ring_normal_influence(
         Pc = P_arr[i0:i1]
         nc = n_arr[i0:i1, None, :]
         rc_c = _slice_rc(rc, i0, i1)
-        v = segment_velocity(Pc, c0, c1, rc_c)
-        v += segment_velocity(Pc, c1, c2, rc_c)
-        v += segment_velocity(Pc, c2, c3, rc_c)
-        v += segment_velocity(Pc, c3, c0, rc_c)
+        if has_poly:
+            v = _numpy_poly_ring_chunk(Pc, c0, c1, c2, c3, sn, sc, rc_c)
+        else:
+            v = segment_velocity(Pc, c0, c1, rc_c)
+            v += segment_velocity(Pc, c1, c2, rc_c)
+            v += segment_velocity(Pc, c2, c3, rc_c)
+            v += segment_velocity(Pc, c3, c0, rc_c)
         out[i0:i1] = (
             v[..., 0] * nc[..., 0]
             + v[..., 1] * nc[..., 1]
