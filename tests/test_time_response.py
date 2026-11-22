@@ -888,10 +888,14 @@ def test_to_dict_store_trust_and_notes():
     st_coarse = vt.SolverSettings(solver_type="vlm", n_panels=4, n_chord=4, chord_spacing="uniform")
     cond = vt.FlightCondition(V_inf=20.0, rho=1.225, alpha=np.radians(4.0))
 
-    # store="loads" (default), dt differing > 25%, n_chord < 8, GPU device selected.
+    # store="loads" (default), dt differing > 25%, n_chord < 8, GPU device
+    # selected when the GPU pipelines can run (set_device refuses "gpu"
+    # without them; the GPU part then runs at the GPU gate).
+    gpu_selected = gpu.available()
     old_dev = gpu.get_device()
     try:
-        gpu.set_device("gpu")
+        if gpu_selected:
+            gpu.set_device("gpu")
         res_loads = vt.time_response(
             ac, cond, st_coarse, t_end=0.05, dt=0.025, gust=sharp_edged(1.0, "head"), store="loads",
         )
@@ -910,8 +914,9 @@ def test_to_dict_store_trust_and_notes():
     assert any("below 8" in w for w in res_loads.trust.warnings)
     notes_txt = " ".join(res_loads.notes).lower()
     assert "25 %" in notes_txt or "differs from the default" in notes_txt
-    assert "cpu" in notes_txt
-    assert "gpu" in notes_txt
+    if gpu_selected:
+        assert "cpu" in notes_txt
+        assert "gpu" in notes_txt
 
     d_loads = res_loads.to_dict()
     encoded = json.dumps(d_loads, allow_nan=False)
