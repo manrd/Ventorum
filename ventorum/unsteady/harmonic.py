@@ -1,9 +1,10 @@
 # Author: Manuel Alejandro Rodriguez Diaz, PhD
-"""Frequency-domain harmonic vortex-ring lattice solver (longitudinal motions).
+"""Frequency-domain harmonic vortex-ring lattice solver (longitudinal and control motions).
 
-This module solves small-amplitude harmonic heave and pitch motions about a
-steady mean flight state on a :class:`ventorum.unsteady.rings.RingLattice`,
-in free air or in flat-ground effect.
+This module solves small-amplitude harmonic heave, pitch and named
+control-surface deflection motions about a steady mean flight state on a
+:class:`ventorum.unsteady.rings.RingLattice`, in free air or in flat-ground
+effect.
 
 Formulation
 -----------
@@ -133,6 +134,8 @@ _LOAD_POINT_CHUNK = 256
 _DEFAULT_FD_STEP_THETA = 1.0e-5
 # Default central finite-difference step fraction for heave geometry derivatives [-].
 _DEFAULT_FD_STEP_H_FRAC = 1.0e-5
+# Default central finite-difference step for control-surface geometry derivatives [rad].
+_DEFAULT_FD_STEP_DELTA = 1.0e-5
 # Cap on temporary GPU batched linear-solve tensors [B].
 _GPU_SOLVE_BATCH_BYTES = 128 * 1024 ** 2
 
@@ -239,6 +242,28 @@ class _HarmonicMotionResponse:
 
 
 @dataclass(slots=True)
+class _FlapModeState:
+    """Precomputed linearised geometry, velocities and loaded terms for one control mode."""
+
+    name: str
+    rig: Any
+    unit_edges: np.ndarray
+    rhs_onset: np.ndarray
+    rhs_rate_coeff: np.ndarray
+    v_load_unit: np.ndarray
+    u_L: np.ndarray
+    u_R: np.ndarray
+    u_L_img: np.ndarray | None
+    u_R_img: np.ndarray | None
+    rhs_geo: np.ndarray
+    FM_geo: np.ndarray
+    SL_geo: np.ndarray
+    dA_wake: np.ndarray | None = None
+    dFM_wake: np.ndarray | None = None
+    dSL_wake: np.ndarray | None = None
+
+
+@dataclass(slots=True)
 class _HarmonicResponse:
     """Internal response of the harmonic vortex-ring lattice solver.
 
@@ -297,6 +322,13 @@ class _HarmonicResponse:
         Kernel arithmetic precision: ``"float64"`` or ``"float32"``.
     notes : list of str
         Device fallback notes (for example out-of-memory or unavailable CUDA).
+    controls : dict[str, _HarmonicMotionResponse]
+        Complex load response per unit control deflection [1/rad] keyed by
+        control-surface name. Empty when no controls are requested.
+    k0_controls : dict[str, _SteadyLoads]
+        Exact ``k -> 0`` limit of each requested control-surface deflection
+        [1/rad], keyed by control-surface name. Empty when no controls are
+        requested.
     """
 
     k: np.ndarray
@@ -323,6 +355,8 @@ class _HarmonicResponse:
     device: str = "cpu"
     precision: str = "float64"
     notes: list[str] = field(default_factory=list)
+    controls: dict[str, _HarmonicMotionResponse] = field(default_factory=dict)
+    k0_controls: dict[str, _SteadyLoads] = field(default_factory=dict)
 
     @property
     def CL0(self) -> float:
@@ -647,9 +681,16 @@ class _HarmonicRingSystem:
         te_correction: bool = True,
         fd_step_h: float | None = None,
         fd_step_theta: float | None = None,
+        fd_step_delta: float | None = None,
+        controls: Sequence[str] = (),
         wake_alignment: str = "freestream",
     ) -> None:
         self._validate_inputs(condition, S_ref, b_ref, c_ref, wake_chords, wake_alignment)
+        ctrl_names = self._validate_controls(controls)
+        if fd_step_delta is not None:
+            v_fd = float(fd_step_delta)
+            if not math.isfinite(v_fd) or v_fd <= 0.0:
+                raise InputError(f"fd_step_delta must be finite and > 0, got {fd_step_delta!r}.")
         if ground is not None:
             check_ground_clearance(lattice, ground)
 
@@ -671,6 +712,9 @@ class _HarmonicRingSystem:
         self.te_correction = bool(te_correction)
         self.use_cross_surface_core = bool(use_cross_surface_core)
         self.rc_override = rc
+        self.control_names: tuple[str, ...] = ctrl_names
+        self._flap_modes: dict[str, _FlapModeState] = {}
+        self.k0_controls: dict[str, _SteadyLoads] = {}
 
         # Mean-state wind axes and heave direction.
         self.d_0 = freestream_direction(float(condition.alpha), float(condition.beta))
@@ -722,6 +766,10 @@ class _HarmonicRingSystem:
             self.img_tail_left = None
             self.img_tail_right = None
 
+        # Prepare load geometry and validate/build control-surface modes before matrix assembly.
+        self._prepare_load_geometry()
+        self._prepare_control_modes()
+
         self.device, self.precision, self.notes = _select_harmonic_device(
             self.rings.n_panels, self.n_wake_rows, self.rings.n_strips, self.ground is not None,
         )
@@ -730,19 +778,175 @@ class _HarmonicRingSystem:
         self.lu_Asteady = None
 
         if self.device == "gpu":
-            self._init_with_gpu_fallback(fd_step_h=fd_step_h, fd_step_theta=fd_step_theta)
+            self._init_with_gpu_fallback(
+                fd_step_h=fd_step_h, fd_step_theta=fd_step_theta, fd_step_delta=fd_step_delta,
+            )
         else:
-            self._init_cpu(fd_step_h=fd_step_h, fd_step_theta=fd_step_theta)
+            self._init_cpu(
+                fd_step_h=fd_step_h, fd_step_theta=fd_step_theta, fd_step_delta=fd_step_delta,
+            )
 
-    def _init_cpu(self, *, fd_step_h: float | None, fd_step_theta: float | None) -> None:
+    @staticmethod
+    def _validate_controls(controls: Sequence[str] | None) -> tuple[str, ...]:
+        """Validate requested control-surface names and return a tuple of unique strings."""
+        if controls is None:
+            return ()
+        if isinstance(controls, (str, bytes)):
+            raise InputError(f"controls must be a sequence of control-surface names, got {controls!r}.")
+        try:
+            names = list(controls)
+        except TypeError as exc:
+            raise InputError(f"controls must be a sequence of control-surface names, got {controls!r}.") from exc
+        for name in names:
+            if not isinstance(name, str) or not name:
+                raise InputError(f"Each control name in controls must be a non-empty string, got {name!r}.")
+        if len(set(names)) != len(names):
+            raise InputError(f"Control names in controls must be unique, got {names!r}.")
+        return tuple(names)
+
+    def _prepare_control_modes(self) -> None:
+        """Build hinge maps, onset normal derivatives and unit hinge-rate velocities for requested controls."""
+        self._flap_modes = {}
+        if not self.control_names:
+            return
+
+        from ventorum.unsteady.timedomain import (
+            _build_control_rig,
+            _compute_flap_velocities,
+        )
+
+        rings = self.rings
+        n_p = rings.n_panels
+        n_s = rings.n_strips
+        n_c = rings.n_chord
+        time_probe = np.array([0.0, 1.0], dtype=np.float64)
+
+        for cname in self.control_names:
+            rig, _, _ = _build_control_rig(
+                self.lattice,
+                rings,
+                self.leg_normal,
+                {cname: time_probe},
+                time_probe,
+                1.0,
+            )
+            if rig is None:
+                self._flap_modes[cname] = _FlapModeState(
+                    name=cname,
+                    rig=None,
+                    unit_edges=np.zeros((n_s, 2), dtype=np.float64),
+                    rhs_onset=np.zeros(n_p, dtype=np.float64),
+                    rhs_rate_coeff=np.zeros(n_p, dtype=np.float64),
+                    v_load_unit=np.zeros_like(self.P_load),
+                    u_L=np.zeros((n_s, 3), dtype=np.float64),
+                    u_R=np.zeros((n_s, 3), dtype=np.float64),
+                    u_L_img=None if self.ground is None else np.zeros((n_s, 3), dtype=np.float64),
+                    u_R_img=None if self.ground is None else np.zeros((n_s, 3), dtype=np.float64),
+                    rhs_geo=np.zeros(n_p, dtype=np.float64),
+                    FM_geo=np.zeros(6, dtype=np.float64),
+                    SL_geo=np.zeros(n_s, dtype=np.float64),
+                )
+                continue
+
+            unit_edges = rig.rate_edges[0].copy()
+            dn_bc = np.zeros((n_p, 3), dtype=np.float64)
+            u_L = np.zeros((n_s, 3), dtype=np.float64)
+            u_R = np.zeros((n_s, 3), dtype=np.float64)
+            for st_map in rig.strips:
+                s = st_map.strip
+                c_l = float(unit_edges[s, 0])
+                c_r = float(unit_edges[s, 1])
+                c_f = c_l + st_map.f_cp * (c_r - c_l)
+                if c_f != 0.0:
+                    p0 = s * n_c
+                    p_aft = slice(p0 + st_map.k_hinge, p0 + n_c)
+                    dn_bc[p_aft] = cross3(
+                        np.broadcast_to((c_f * st_map.ax_f)[None, :], (n_c - st_map.k_hinge, 3)),
+                        rings.normal_bc[p_aft],
+                    )
+                if c_l != 0.0:
+                    u_L[s] = np.cross(c_l * st_map.ax_l, rings.te_left[s] - st_map.H_l)
+                if c_r != 0.0:
+                    u_R[s] = np.cross(c_r * st_map.ax_r, rings.te_right[s] - st_map.H_r)
+
+            rhs_onset = -(dn_bc @ self.V_0)
+            v_cp_unit, v_load_unit, _ = _compute_flap_velocities(
+                rig,
+                self.lattice,
+                rings,
+                unit_edges,
+                rig.a0,
+                rig.b0,
+                rig.cp0,
+                rig.te_l_phys0,
+                rig.te_r_phys0,
+                rig.a_kink0,
+                rig.b_kink0,
+            )
+            rhs_rate_coeff = np.sum(v_cp_unit * rings.normal_bc, axis=1)
+            u_L_img = None if self.ground is None else self.ground.reflect_directions(u_L)
+            u_R_img = None if self.ground is None else self.ground.reflect_directions(u_R)
+
+            self._flap_modes[cname] = _FlapModeState(
+                name=cname,
+                rig=rig,
+                unit_edges=unit_edges,
+                rhs_onset=rhs_onset,
+                rhs_rate_coeff=rhs_rate_coeff,
+                v_load_unit=v_load_unit,
+                u_L=u_L,
+                u_R=u_R,
+                u_L_img=u_L_img,
+                u_R_img=u_R_img,
+                rhs_geo=np.zeros(n_p, dtype=np.float64),
+                FM_geo=np.zeros(6, dtype=np.float64),
+                SL_geo=np.zeros(n_s, dtype=np.float64),
+            )
+
+    def _flap_step_delta(self, fm: _FlapModeState, h_min: float | None, fd_step_delta: float | None) -> float:
+        """Return validated central finite-difference step [rad] for control mode *fm*."""
+        max_lever = max(
+            float(np.max(np.linalg.norm(fm.u_L, axis=1))),
+            float(np.max(np.linalg.norm(fm.u_R, axis=1))),
+            1.0e-6,
+        )
+        if fd_step_delta is None:
+            eps_d = _DEFAULT_FD_STEP_DELTA
+            if self.ground is not None and h_min is not None:
+                eps_d = min(eps_d, 0.01 * h_min / max_lever)
+            return eps_d
+        eps_d = float(fd_step_delta)
+        if not math.isfinite(eps_d) or eps_d <= 0.0:
+            raise InputError(f"fd_step_delta must be finite and > 0, got {fd_step_delta!r}.")
+        if self.ground is not None and h_min is not None and eps_d * max_lever >= 0.5 * h_min:
+            raise InputError(
+                f"fd_step_delta={eps_d!r} rad moves flap nodes too close to the ground plane "
+                f"(max_lever={max_lever:.4g} m, h_min={h_min:.4g} m)."
+            )
+        return eps_d
+
+    def _init_cpu(
+        self,
+        *,
+        fd_step_h: float | None,
+        fd_step_theta: float | None,
+        fd_step_delta: float | None,
+    ) -> None:
         """Assemble matrices, mean state, loaded terms and k -> 0 limits on the CPU."""
         self._assemble_system_matrices()
-        self._prepare_load_geometry()
         self._solve_mean_state()
-        self._prepare_loaded_terms(fd_step_h=fd_step_h, fd_step_theta=fd_step_theta)
-        self.k0_heave, self.k0_pitch, self.k0_pitch_rate = self._compute_k0_limits()
+        self._prepare_loaded_terms(
+            fd_step_h=fd_step_h, fd_step_theta=fd_step_theta, fd_step_delta=fd_step_delta,
+        )
+        self.k0_heave, self.k0_pitch, self.k0_pitch_rate, self.k0_controls = self._compute_k0_limits()
 
-    def _init_with_gpu_fallback(self, *, fd_step_h: float | None, fd_step_theta: float | None) -> None:
+    def _init_with_gpu_fallback(
+        self,
+        *,
+        fd_step_h: float | None,
+        fd_step_theta: float | None,
+        fd_step_delta: float | None,
+    ) -> None:
         """Run GPU initialisation with one OOM retry, falling back to CPU after two OOM errors."""
         from ventorum.gpu import memory as gpu_memory
         from ventorum.gpu.pipeline import is_out_of_memory
@@ -750,7 +954,9 @@ class _HarmonicRingSystem:
         message = ""
         for _attempt in range(2):
             try:
-                self._init_gpu(fd_step_h=fd_step_h, fd_step_theta=fd_step_theta)
+                self._init_gpu(
+                    fd_step_h=fd_step_h, fd_step_theta=fd_step_theta, fd_step_delta=fd_step_delta,
+                )
                 return
             except Exception as exc:  # noqa: BLE001 - only out-of-memory errors are caught
                 if not is_out_of_memory(exc):
@@ -769,16 +975,25 @@ class _HarmonicRingSystem:
         self.precision = "float64"
         if NOTE_GPU_OUT_OF_MEMORY not in self.notes:
             self.notes.append(NOTE_GPU_OUT_OF_MEMORY)
-        self._init_cpu(fd_step_h=fd_step_h, fd_step_theta=fd_step_theta)
+        self._init_cpu(
+            fd_step_h=fd_step_h, fd_step_theta=fd_step_theta, fd_step_delta=fd_step_delta,
+        )
 
-    def _init_gpu(self, *, fd_step_h: float | None, fd_step_theta: float | None) -> None:
+    def _init_gpu(
+        self,
+        *,
+        fd_step_h: float | None,
+        fd_step_theta: float | None,
+        fd_step_delta: float | None,
+    ) -> None:
         """Assemble matrices, mean state, loaded terms and k -> 0 limits on the GPU."""
         self._gpu_state = _HarmonicGPUState(self.precision)
         self._assemble_system_matrices_gpu()
-        self._prepare_load_geometry()
         self._solve_mean_state_gpu()
-        self._prepare_loaded_terms_gpu(fd_step_h=fd_step_h, fd_step_theta=fd_step_theta)
-        self.k0_heave, self.k0_pitch, self.k0_pitch_rate = self._compute_k0_limits_gpu()
+        self._prepare_loaded_terms_gpu(
+            fd_step_h=fd_step_h, fd_step_theta=fd_step_theta, fd_step_delta=fd_step_delta,
+        )
+        self.k0_heave, self.k0_pitch, self.k0_pitch_rate, self.k0_controls = self._compute_k0_limits_gpu()
 
     def _assemble_system_matrices_gpu(self) -> None:
         import torch
@@ -1294,11 +1509,124 @@ class _HarmonicRingSystem:
 
         return dA_g.cpu().numpy(), dFM_g.cpu().numpy(), dSL_g.cpu().numpy()
 
+    def _flap_steady_state_eval_gpu(
+        self,
+        fm: _FlapModeState,
+        dd_step: np.ndarray,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Return ``(A_steady(delta) @ Gamma_0, FM_kj_0(delta), SL_kj_0(delta))`` on GPU in float64."""
+        import torch
+
+        from ventorum.gpu import engine
+        from ventorum.gpu import ring_kernels as RK
+        from ventorum.unsteady.timedomain import (
+            _build_body_load_geometry,
+            _deform_body_geometry,
+        )
+
+        st = self._gpu_state.tensors
+        dev = engine._dev()
+        rings = self.rings
+        Gamma_0_g = st["Gamma_0"]
+        g_te_g = Gamma_0_g[st["te_idx"]]
+        wd_g = st["wake_dir"]
+        sc_g = st.get("side_counts")
+
+        (
+            a_d,
+            b_d,
+            cp_d,
+            nbc_d,
+            corners_d,
+            te_l_d,
+            te_r_d,
+            te_lp_d,
+            te_rp_d,
+            sn_d,
+            ak_d,
+            bk_d,
+            leg_n_d,
+        ) = _deform_body_geometry(fm.rig, self.lattice, rings, dd_step)
+
+        cp_g = engine._f64(cp_d)
+        nbc_g = engine._f64(nbc_d)
+        corners_g = engine._f64(corners_d)
+        sn_g = None if sn_d is None else engine._f64(sn_d)
+        te_l_g = engine._f64(te_l_d)
+        te_r_g = engine._f64(te_r_d)
+
+        a_r = RK.ring_normal_influence_gpu(
+            cp_g, nbc_g, corners_g, self.rc_ring,
+            side_nodes=sn_g, side_counts=sc_g,
+            ground=self.ground, precision="float64", out_tensor=True,
+        )
+        a_w = RK.steady_wake_normal_influence_gpu(
+            cp_g, nbc_g, te_l_g, te_r_g, wd_g, self.rc_wake,
+            ground=self.ground, precision="float64", out_tensor=True,
+        )
+        v_sys = (a_r @ Gamma_0_g + a_w @ g_te_g).cpu().numpy()
+
+        (
+            P_load_u,
+            arm_d,
+            _,
+            seg_vec_d,
+            seg_normal_d,
+            _,
+            load_inv_idx,
+            rc_load_u_ring,
+            rc_load_u_wake,
+            _,
+            _,
+            _,
+            _,
+            _,
+            _,
+        ) = _build_body_load_geometry(
+            self.lattice,
+            rings,
+            self.ref_point,
+            a_d,
+            b_d,
+            corners_d,
+            te_lp_d,
+            te_rp_d,
+            sn_d,
+            ak_d,
+            bk_d,
+            leg_n_d,
+            self.rc_load_ring,
+            self.rc_load_wake,
+        )
+        m_u = P_load_u.shape[0]
+        v_ind_u_g = torch.zeros((m_u, 3), dtype=torch.float64, device=dev)
+        for i0 in range(0, m_u, _LOAD_POINT_CHUNK):
+            i1 = min(m_u, i0 + _LOAD_POINT_CHUNK)
+            Pc_g = engine._f64(P_load_u[i0:i1])
+            rc_r = _slice_rc_rows(rc_load_u_ring, i0, i1)
+            rc_w = _slice_rc_rows(rc_load_u_wake, i0, i1)
+            vr = RK.ring_velocity_gpu(
+                Pc_g, corners_g, rc_r, side_nodes=sn_g, side_counts=sc_g,
+                ground=self.ground, precision="float64", out_tensor=True,
+            )
+            vw = RK.steady_wake_velocity_gpu(
+                Pc_g, te_l_g, te_r_g, wd_g, rc_w,
+                ground=self.ground, precision="float64", out_tensor=True,
+            )
+            v_ind_u_g[i0:i1] = torch.einsum("mni,n->mi", vr, Gamma_0_g) + torch.einsum("msi,s->mi", vw, g_te_g)
+
+        v_ind_d = v_ind_u_g.cpu().numpy()[load_inv_idx]
+        V_tot_d = self.V_0[None, :] + v_ind_d
+        V_eff_d = V_tot_d - np.sum(V_tot_d * seg_normal_d, axis=1, keepdims=True) * seg_normal_d
+        F_seg_d = (self.rho * self.gamma_0_all * self.seg_scale_all)[:, None] * cross3(V_eff_d, seg_vec_d)
+        return v_sys, F_seg_d, arm_d
+
     def _prepare_loaded_terms_gpu(
         self,
         *,
         fd_step_h: float | None,
         fd_step_theta: float | None,
+        fd_step_delta: float | None,
     ) -> None:
         from ventorum.gpu import engine
 
@@ -1322,6 +1650,14 @@ class _HarmonicRingSystem:
         self.u_heave_R_img = None
         self.u_pitch_L_img = None
         self.u_pitch_R_img = None
+        for cname in self.control_names:
+            fm = self._flap_modes[cname]
+            fm.rhs_geo = np.zeros(n_p, dtype=np.float64)
+            fm.FM_geo = np.zeros(6, dtype=np.float64)
+            fm.SL_geo = np.zeros(self._n_strips, dtype=np.float64)
+            fm.dA_wake = None
+            fm.dFM_wake = None
+            fm.dSL_wake = None
 
         if not self.has_mean_load:
             self.W_fm = None
@@ -1411,7 +1747,28 @@ class _HarmonicRingSystem:
             self._assemble_travelling_wake_one_motion_gpu(self.u_pitch_L, self.u_pitch_R, eps_th)
         )
 
-    def _compute_k0_limits_gpu(self) -> tuple[_SteadyLoads, _SteadyLoads, _SteadyLoads]:
+        for cname in self.control_names:
+            fm = self._flap_modes[cname]
+            if fm.rig is None:
+                continue
+            eps_d = self._flap_step_delta(fm, h_min, fd_step_delta)
+            inv_2eps = 0.5 / eps_d
+            vp_sys, f_seg_p, arm_p = self._flap_steady_state_eval_gpu(fm, +eps_d * fm.unit_edges)
+            vm_sys, f_seg_m, arm_m = self._flap_steady_state_eval_gpu(fm, -eps_d * fm.unit_edges)
+            fm.rhs_geo = -(vp_sys - vm_sys) * inv_2eps
+            df_seg = (f_seg_p - f_seg_m) * inv_2eps
+            dm_seg = (cross3(arm_p, f_seg_p) - cross3(arm_m, f_seg_m)) * inv_2eps
+            fm.FM_geo = np.concatenate([np.sum(df_seg, axis=0), np.sum(dm_seg, axis=0)])
+            sl_geo = np.zeros(self._n_strips, dtype=np.float64)
+            np.add.at(sl_geo, self.eval_strips, df_seg @ self.L_0)
+            fm.SL_geo = sl_geo
+            fm.dA_wake, fm.dFM_wake, fm.dSL_wake = self._assemble_travelling_wake_one_motion_gpu(
+                fm.u_L, fm.u_R, eps_d,
+            )
+            st[f"u_ctrl_{cname}_L"] = engine._f64(fm.u_L)
+            st[f"u_ctrl_{cname}_R"] = engine._f64(fm.u_R)
+
+    def _compute_k0_limits_gpu(self) -> tuple[_SteadyLoads, _SteadyLoads, _SteadyLoads, dict[str, _SteadyLoads]]:
         """Compute exact real ``k -> 0`` limits using the GPU LU of ``A_steady``."""
         import torch
 
@@ -1427,9 +1784,13 @@ class _HarmonicRingSystem:
         rhs_h0 = self.rhs_heave_geo
         rhs_p0 = -(n_bc @ dU_alpha) + self.rhs_pitch_geo
         rhs_q0 = -np.sum(n_bc * dU_q_cp, axis=1)
+        rhs_cols = [rhs_h0, rhs_p0, rhs_q0]
+        for cname in self.control_names:
+            fm = self._flap_modes[cname]
+            rhs_cols.append(fm.rhs_onset + fm.rhs_geo)
 
         st = self._gpu_state.tensors
-        rhs_mat_g = engine._f64(np.column_stack([rhs_h0, rhs_p0, rhs_q0]))
+        rhs_mat_g = engine._f64(np.column_stack(rhs_cols))
         G_0s = torch.linalg.lu_solve(st["lu_Asteady"], st["piv_Asteady"], rhs_mat_g).cpu().numpy()
         G_h0, G_p0, G_q0 = G_0s[:, 0], G_0s[:, 1], G_0s[:, 2]
 
@@ -1452,10 +1813,22 @@ class _HarmonicRingSystem:
             rotate_mean_geometry=False, FM_wake_k=self.FM_steady_wake_mat,
             SL_wake_k=self.SL_steady_wake_mat, include_apparent_mass=False, include_te_correction=False,
         )
+        k0_ctrls: dict[str, _SteadyLoads] = {}
+        for j, cname in enumerate(self.control_names):
+            fm = self._flap_modes[cname]
+            c_d0, _ = self._evaluate_linearised_loads(
+                G_0s[:, 3 + j], k=0.0, dU_load=zero_v, dv_geo_load=zero_v,
+                rotate_mean_geometry=False, FM_wake_k=self.FM_steady_wake_mat,
+                SL_wake_k=self.SL_steady_wake_mat, include_apparent_mass=False, include_te_correction=False,
+                FM_extra=fm.FM_geo if self.has_mean_load else None,
+                SL_extra=fm.SL_geo if self.has_mean_load else None,
+            )
+            k0_ctrls[cname] = _SteadyLoads(*(float(x.real) for x in c_d0))
         return (
             _SteadyLoads(*(float(x.real) for x in c_h0)),
             _SteadyLoads(*(float(x.real) for x in c_p0)),
             _SteadyLoads(*(float(x.real) for x in c_q0)),
+            k0_ctrls,
         )
 
     def _ensure_gpu_solve_state(self) -> dict[str, Any]:
@@ -1493,6 +1866,11 @@ class _HarmonicRingSystem:
                 st["u_heave_R"] = engine._f64(self.u_heave_R)
                 st["u_pitch_L"] = engine._f64(self.u_pitch_L)
                 st["u_pitch_R"] = engine._f64(self.u_pitch_R)
+                for cname in self.control_names:
+                    fm = self._flap_modes[cname]
+                    if fm.rig is not None:
+                        st[f"u_ctrl_{cname}_L"] = engine._f64(fm.u_L)
+                        st[f"u_ctrl_{cname}_R"] = engine._f64(fm.u_R)
         return st
 
     def _wake_matrices_batch_gpu(self, k_arr: np.ndarray, *, tail_on: bool):
@@ -1917,11 +2295,121 @@ class _HarmonicRingSystem:
 
         return dA, dFM, dSL
 
+    def _flap_steady_state_eval(
+        self,
+        fm: _FlapModeState,
+        dd_step: np.ndarray,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Return ``(A_steady(delta) @ Gamma_0, FM_kj_0(delta), SL_kj_0(delta))`` on the CPU."""
+        from ventorum.unsteady.timedomain import (
+            _build_body_load_geometry,
+            _deform_body_geometry,
+        )
+
+        rings = self.rings
+        g_te = self.Gamma_0[rings.te_indices]
+        sc = rings.side_counts
+        wd = rings.wake_dir
+
+        (
+            a_d,
+            b_d,
+            cp_d,
+            nbc_d,
+            corners_d,
+            te_l_d,
+            te_r_d,
+            te_lp_d,
+            te_rp_d,
+            sn_d,
+            ak_d,
+            bk_d,
+            leg_n_d,
+        ) = _deform_body_geometry(fm.rig, self.lattice, rings, dd_step)
+
+        v_sys = (
+            ring_normal_influence(cp_d, nbc_d, corners_d, self.rc_ring, side_nodes=sn_d, side_counts=sc)
+            @ self.Gamma_0
+            + steady_wake_normal_influence(cp_d, nbc_d, te_l_d, te_r_d, wd, self.rc_wake) @ g_te
+        )
+        img_corners = None
+        img_sn = None
+        img_tl = None
+        img_tr = None
+        img_wd = None
+        if self.ground is not None:
+            img_corners = self.ground.reflect_points(corners_d)
+            img_sn = None if sn_d is None else self.ground.reflect_points(sn_d)
+            img_tl = self.ground.reflect_points(te_l_d)
+            img_tr = self.ground.reflect_points(te_r_d)
+            img_wd = self.ground.reflect_directions(wd)
+            v_sys -= (
+                ring_normal_influence(cp_d, nbc_d, img_corners, self.rc_ring, side_nodes=img_sn, side_counts=sc)
+                @ self.Gamma_0
+                + steady_wake_normal_influence(cp_d, nbc_d, img_tl, img_tr, img_wd, self.rc_wake) @ g_te
+            )
+
+        (
+            P_load_u,
+            arm_d,
+            _,
+            seg_vec_d,
+            seg_normal_d,
+            _,
+            load_inv_idx,
+            rc_load_u_ring,
+            rc_load_u_wake,
+            _,
+            _,
+            _,
+            _,
+            _,
+            _,
+        ) = _build_body_load_geometry(
+            self.lattice,
+            rings,
+            self.ref_point,
+            a_d,
+            b_d,
+            corners_d,
+            te_lp_d,
+            te_rp_d,
+            sn_d,
+            ak_d,
+            bk_d,
+            leg_n_d,
+            self.rc_load_ring,
+            self.rc_load_wake,
+        )
+        m_u = P_load_u.shape[0]
+        v_ind_u = np.zeros((m_u, 3), dtype=np.float64)
+        for i0 in range(0, m_u, _LOAD_POINT_CHUNK):
+            i1 = min(m_u, i0 + _LOAD_POINT_CHUNK)
+            Pc = P_load_u[i0:i1]
+            rc_r = _slice_rc_rows(rc_load_u_ring, i0, i1)
+            rc_w = _slice_rc_rows(rc_load_u_wake, i0, i1)
+            vr = ring_velocity(Pc, corners_d, rc_r, side_nodes=sn_d, side_counts=sc)
+            vw = steady_wake_velocity(Pc, te_l_d, te_r_d, wd, rc_w)
+            v_ind_u[i0:i1] += np.einsum("mni,n->mi", vr, self.Gamma_0)
+            v_ind_u[i0:i1] += np.einsum("msi,s->mi", vw, g_te)
+            if img_corners is not None:
+                vr_i = ring_velocity(Pc, img_corners, rc_r, side_nodes=img_sn, side_counts=sc)
+                vw_i = steady_wake_velocity(Pc, img_tl, img_tr, img_wd, rc_w)
+                v_ind_u[i0:i1] -= np.einsum("mni,n->mi", vr_i, self.Gamma_0)
+                v_ind_u[i0:i1] -= np.einsum("msi,s->mi", vw_i, g_te)
+
+        v_ind_d = v_ind_u[load_inv_idx]
+        V_tot_d = self.V_0[None, :] + v_ind_d
+        V_eff_d = V_tot_d - np.sum(V_tot_d * seg_normal_d, axis=1, keepdims=True) * seg_normal_d
+        F_seg_d = (self.rho * self.gamma_0_all * self.seg_scale_all)[:, None] * cross3(V_eff_d, seg_vec_d)
+        return v_sys, F_seg_d, arm_d
+
     def _prepare_loaded_terms(
         self,
         *,
         fd_step_h: float | None,
         fd_step_theta: float | None,
+        fd_step_delta: float | None,
     ) -> None:
         rings = self.rings
         n_p = rings.n_panels
@@ -1944,6 +2432,14 @@ class _HarmonicRingSystem:
         self.u_heave_R_img = None
         self.u_pitch_L_img = None
         self.u_pitch_R_img = None
+        for cname in self.control_names:
+            fm = self._flap_modes[cname]
+            fm.rhs_geo = np.zeros(n_p, dtype=np.float64)
+            fm.FM_geo = np.zeros(6, dtype=np.float64)
+            fm.SL_geo = np.zeros(self._n_strips, dtype=np.float64)
+            fm.dA_wake = None
+            fm.dFM_wake = None
+            fm.dSL_wake = None
 
         if not self.has_mean_load:
             self.W_fm = None
@@ -2034,6 +2530,26 @@ class _HarmonicRingSystem:
                 self.u_pitch_L, self.u_pitch_R, self.u_pitch_L_img, self.u_pitch_R_img, eps_th,
             )
         )
+
+        # 4. Precompute loaded-mean-state geometry and travelling-wave wake derivatives for requested controls.
+        for cname in self.control_names:
+            fm = self._flap_modes[cname]
+            if fm.rig is None:
+                continue
+            eps_d = self._flap_step_delta(fm, h_min, fd_step_delta)
+            inv_2eps = 0.5 / eps_d
+            vp_sys, f_seg_p, arm_p = self._flap_steady_state_eval(fm, +eps_d * fm.unit_edges)
+            vm_sys, f_seg_m, arm_m = self._flap_steady_state_eval(fm, -eps_d * fm.unit_edges)
+            fm.rhs_geo = -(vp_sys - vm_sys) * inv_2eps
+            df_seg = (f_seg_p - f_seg_m) * inv_2eps
+            dm_seg = (cross3(arm_p, f_seg_p) - cross3(arm_m, f_seg_m)) * inv_2eps
+            fm.FM_geo = np.concatenate([np.sum(df_seg, axis=0), np.sum(dm_seg, axis=0)])
+            sl_geo = np.zeros(self._n_strips, dtype=np.float64)
+            np.add.at(sl_geo, self.eval_strips, df_seg @ self.L_0)
+            fm.SL_geo = sl_geo
+            fm.dA_wake, fm.dFM_wake, fm.dSL_wake = self._assemble_travelling_wake_one_motion(
+                fm.u_L, fm.u_R, fm.u_L_img, fm.u_R_img, eps_d,
+            )
 
     def _pitched_steady_state(self, d_theta: float) -> tuple[GroundPlane | None, np.ndarray]:
         """Return ``(ground, wake_dir)`` in body axes for aircraft pitch perturbation *d_theta* [rad]."""
@@ -2426,8 +2942,121 @@ class _HarmonicRingSystem:
         dSL_p = dSL_p + sl_fp[:, 0]
         return dFM_h, dSL_h, dFM_p, dSL_p
 
+    def _travelling_wake_rhs_delta_ctrl(self, k: float, fm: _FlapModeState) -> np.ndarray:
+        """Return complex travelling-minus-rigid steady-wake normal-velocity delta for control mode *fm*."""
+        n_p = self.rings.n_panels
+        if not self.has_mean_load or k == 0.0 or fm.dA_wake is None:
+            return np.zeros(n_p, dtype=np.complex128)
+
+        omega = 2.0 * k * self.V_inf / self.c_ref
+        kappa = omega / self.V_inf
+        phi = np.expm1(-1j * omega * np.arange(1, self.n_wake_rows + 1, dtype=np.float64) * self.dt)
+        dn = (fm.dA_wake @ phi).astype(np.complex128)
+
+        u_l_key = f"u_ctrl_{fm.name}_L"
+        u_r_key = f"u_ctrl_{fm.name}_R"
+        if (
+            self.device == "gpu"
+            and self._gpu_state is not None
+            and "cp" in self._gpu_state.tensors
+            and "Gamma_0" in self._gpu_state.tensors
+            and u_l_key in self._gpu_state.tensors
+        ):
+            import torch
+
+            from ventorum.gpu import ring_kernels as RK
+
+            st = self._gpu_state.tensors
+            g_te_c = st["Gamma_0"][st["te_idx"]].to(torch.complex128)
+            a_fc = RK.displaced_steady_tail_normal_influence_gpu(
+                st["cp"], st["normal_bc"], st["tail_left"], st["tail_right"], st["wake_dir"],
+                st[u_l_key], st[u_r_key], kappa, self.wake_length, self.rc_wake,
+                ground=self.ground, out_tensor=True,
+            )
+            return dn + (a_fc @ g_te_c).cpu().numpy()
+
+        rings = self.rings
+        g_te = self.Gamma_0[rings.te_indices]
+        a_fc = displaced_steady_tail_normal_influence(
+            rings.cp, rings.normal_bc, self.tail_left, self.tail_right, rings.wake_dir,
+            fm.u_L, fm.u_R, kappa, self.wake_length, self.rc_wake,
+        )
+        if self.img is not None:
+            a_fc += self.img.sign * displaced_steady_tail_normal_influence(
+                rings.cp, rings.normal_bc, self.img_tail_left, self.img_tail_right, self.img.wake_dir,
+                fm.u_L_img, fm.u_R_img, kappa, self.wake_length, self.rc_wake,
+            )
+        return dn + a_fc @ g_te
+
+    def _travelling_wake_load_delta_ctrl(self, k: float, fm: _FlapModeState) -> tuple[np.ndarray, np.ndarray]:
+        """Return complex travelling-minus-rigid steady-wake load deltas ``(dFM, dSL)`` for control mode *fm*."""
+        n_s = self._n_strips
+        if not self.has_mean_load or k == 0.0 or fm.dFM_wake is None:
+            return np.zeros(6, dtype=np.complex128), np.zeros(n_s, dtype=np.complex128)
+
+        omega = 2.0 * k * self.V_inf / self.c_ref
+        kappa = omega / self.V_inf
+        phi = np.expm1(-1j * omega * np.arange(1, self.n_wake_rows + 1, dtype=np.float64) * self.dt)
+        dFM = (fm.dFM_wake @ phi).astype(np.complex128)
+        dSL = (fm.dSL_wake @ phi).astype(np.complex128)
+
+        m = self.P_load.shape[0]
+        u_l_key = f"u_ctrl_{fm.name}_L"
+        u_r_key = f"u_ctrl_{fm.name}_R"
+        if (
+            self.device == "gpu"
+            and self._gpu_state is not None
+            and "W_fm" in self._gpu_state.tensors
+            and "Gamma_0" in self._gpu_state.tensors
+            and u_l_key in self._gpu_state.tensors
+        ):
+            import torch
+
+            from ventorum.gpu import engine
+            from ventorum.gpu import ring_kernels as RK
+
+            st = self._gpu_state.tensors
+            dev = engine._dev()
+            g_te_c = st["Gamma_0"][st["te_idx"]].to(torch.complex128)
+            P_load_g = st["P_load"]
+            fm_fc = torch.zeros((6, 1), dtype=torch.complex128, device=dev)
+            sl_fc = torch.zeros((n_s, 1), dtype=torch.complex128, device=dev)
+            for i0 in range(0, m, _LOAD_POINT_CHUNK):
+                i1 = min(m, i0 + _LOAD_POINT_CHUNK)
+                Pc_g = P_load_g[i0:i1].contiguous()
+                rc_w = _slice_rc_rows(self.rc_load_wake, i0, i1)
+                vc_g = RK.displaced_steady_tail_velocity_gpu(
+                    Pc_g, st["tail_left"], st["tail_right"], st["wake_dir"],
+                    st[u_l_key], st[u_r_key], kappa, self.wake_length, rc_w,
+                    ground=self.ground, out_tensor=True,
+                )
+                dvc = torch.einsum("msi,s->mi", vc_g, g_te_c).unsqueeze(1)
+                self._contract_load_vel_gpu(dvc, i0, i1, fm_fc, sl_fc)
+            return dFM + fm_fc[:, 0].cpu().numpy(), dSL + sl_fc[:, 0].cpu().numpy()
+
+        rings = self.rings
+        g_te = self.Gamma_0[rings.te_indices]
+        fm_fc = np.zeros((6, 1), dtype=np.complex128)
+        sl_fc = np.zeros((n_s, 1), dtype=np.complex128)
+        for i0 in range(0, m, _LOAD_POINT_CHUNK):
+            i1 = min(m, i0 + _LOAD_POINT_CHUNK)
+            Pc = self.P_load[i0:i1]
+            rc_w = _slice_rc_rows(self.rc_load_wake, i0, i1)
+            vc = displaced_steady_tail_velocity(
+                Pc, self.tail_left, self.tail_right, rings.wake_dir,
+                fm.u_L, fm.u_R, kappa, self.wake_length, rc_w,
+            )
+            if self.img is not None:
+                vc += self.img.sign * displaced_steady_tail_velocity(
+                    Pc, self.img_tail_left, self.img_tail_right, self.img.wake_dir,
+                    fm.u_L_img, fm.u_R_img, kappa, self.wake_length, rc_w,
+                )
+            dvc = np.einsum("msi,s->mi", vc, g_te)[:, None, :]
+            self._contract_load_vel(dvc, i0, i1, fm_fc, sl_fc)
+        return dFM + fm_fc[:, 0], dSL + sl_fc[:, 0]
+
     def build_rhs(self, k: float) -> np.ndarray:
-        """Return complex RHS columns ``[rhs_heave, rhs_pitch]`` [m/s], shape ``(n_panels, 2)``."""
+        """Return complex RHS columns ``[rhs_heave, rhs_pitch, *rhs_controls]`` [m/s]."""
         omega = 2.0 * k * self.V_inf / self.c_ref
         rings = self.rings
         n_bc = rings.normal_bc
@@ -2446,7 +3075,15 @@ class _HarmonicRingSystem:
             rhs_h = rhs_h - dn_h
             rhs_p = rhs_p - dn_p
 
-        return np.column_stack([rhs_h, rhs_p]).astype(np.complex128)
+        cols = [rhs_h, rhs_p]
+        for cname in self.control_names:
+            fm = self._flap_modes[cname]
+            rhs_c = fm.rhs_onset + (1j * omega) * fm.rhs_rate_coeff + fm.rhs_geo
+            if self.has_mean_load and k != 0.0 and fm.dA_wake is not None:
+                rhs_c = rhs_c - self._travelling_wake_rhs_delta_ctrl(k, fm)
+            cols.append(rhs_c)
+
+        return np.column_stack(cols).astype(np.complex128)
 
     def _solve_linear(self, W: np.ndarray, rhs: np.ndarray, solve_method: str) -> np.ndarray:
         """Solve ``(A_bb + W E_te^T) Gamma = rhs`` by Woodbury or direct complex LU."""
@@ -2594,8 +3231,8 @@ class _HarmonicRingSystem:
             Cn=float(-M_tot[2] / (qS * self.b_ref)),
         )
 
-    def _compute_k0_limits(self) -> tuple[_SteadyLoads, _SteadyLoads, _SteadyLoads]:
-        """Compute exact real ``k -> 0`` limits for heave, pitch and pitch rate."""
+    def _compute_k0_limits(self) -> tuple[_SteadyLoads, _SteadyLoads, _SteadyLoads, dict[str, _SteadyLoads]]:
+        """Compute exact real ``k -> 0`` limits for heave, pitch, pitch rate and requested controls."""
         rings = self.rings
         n_bc = rings.normal_bc
         rel_cp = rings.cp - self.ref_point[None, :]
@@ -2608,8 +3245,12 @@ class _HarmonicRingSystem:
         rhs_h0 = self.rhs_heave_geo
         rhs_p0 = -(n_bc @ dU_alpha) + self.rhs_pitch_geo
         rhs_q0 = -np.sum(n_bc * dU_q_cp, axis=1)
+        rhs_cols = [rhs_h0, rhs_p0, rhs_q0]
+        for cname in self.control_names:
+            fm = self._flap_modes[cname]
+            rhs_cols.append(fm.rhs_onset + fm.rhs_geo)
 
-        G_0s = sl.lu_solve(self.lu_Asteady, np.column_stack([rhs_h0, rhs_p0, rhs_q0]))
+        G_0s = sl.lu_solve(self.lu_Asteady, np.column_stack(rhs_cols))
         G_h0, G_p0, G_q0 = G_0s[:, 0], G_0s[:, 1], G_0s[:, 2]
 
         zero_v = np.zeros_like(self.P_load)
@@ -2631,10 +3272,22 @@ class _HarmonicRingSystem:
             rotate_mean_geometry=False, FM_wake_k=self.FM_steady_wake_mat,
             SL_wake_k=self.SL_steady_wake_mat, include_apparent_mass=False, include_te_correction=False,
         )
+        k0_ctrls: dict[str, _SteadyLoads] = {}
+        for j, cname in enumerate(self.control_names):
+            fm = self._flap_modes[cname]
+            c_d0, _ = self._evaluate_linearised_loads(
+                G_0s[:, 3 + j], k=0.0, dU_load=zero_v, dv_geo_load=zero_v,
+                rotate_mean_geometry=False, FM_wake_k=self.FM_steady_wake_mat,
+                SL_wake_k=self.SL_steady_wake_mat, include_apparent_mass=False, include_te_correction=False,
+                FM_extra=fm.FM_geo if self.has_mean_load else None,
+                SL_extra=fm.SL_geo if self.has_mean_load else None,
+            )
+            k0_ctrls[cname] = _SteadyLoads(*(float(x.real) for x in c_d0))
         return (
             _SteadyLoads(*(float(x.real) for x in c_h0)),
             _SteadyLoads(*(float(x.real) for x in c_p0)),
             _SteadyLoads(*(float(x.real) for x in c_q0)),
+            k0_ctrls,
         )
 
     def solve(
@@ -2645,7 +3298,7 @@ class _HarmonicRingSystem:
         use_tail: bool | None = None,
         te_correction: bool | None = None,
     ) -> _HarmonicResponse:
-        """Solve heave and pitch harmonic responses for all reduced frequencies *k_values*."""
+        """Solve heave, pitch and requested control-surface harmonic responses for *k_values*."""
         k_arr = np.atleast_1d(np.asarray(k_values, dtype=np.float64))
         if k_arr.ndim != 1 or k_arr.size == 0:
             raise InputError("k_values must be a non-empty 1-D sequence of reduced frequencies.")
@@ -2663,6 +3316,13 @@ class _HarmonicRingSystem:
         pitch_c = np.empty((n_k, 6), dtype=np.complex128)
         heave_scl = np.empty((n_k, n_s), dtype=np.complex128)
         pitch_scl = np.empty((n_k, n_s), dtype=np.complex128)
+        ctrl_c: dict[str, np.ndarray] = {
+            cname: np.empty((n_k, 6), dtype=np.complex128) for cname in self.control_names
+        }
+        ctrl_scl: dict[str, np.ndarray] = {
+            cname: np.empty((n_k, n_s), dtype=np.complex128) for cname in self.control_names
+        }
+        zero_v = np.zeros_like(self.P_load)
 
         dU_alpha_load = np.broadcast_to((-_ey_cross(self.V_0))[None, :], self.P_load.shape)
         ey_arm_load = _ey_cross(self.arm_all)
@@ -2754,6 +3414,37 @@ class _HarmonicRingSystem:
                 FM_extra=dFM_p, SL_extra=dSL_p,
             )
 
+            for j, cname in enumerate(self.control_names):
+                fm = self._flap_modes[cname]
+                G_ctrl = G_mat[:, 2 + j]
+                dU_ctrl_load = -(1j * omega) * fm.v_load_unit
+                if self.has_mean_load and kf != 0.0 and fm.dFM_wake is not None:
+                    dFM_tr, dSL_tr = self._travelling_wake_load_delta_ctrl(kf, fm)
+                    FM_extra_c = fm.FM_geo + dFM_tr
+                    SL_extra_c = fm.SL_geo + dSL_tr
+                elif self.has_mean_load:
+                    FM_extra_c = fm.FM_geo
+                    SL_extra_c = fm.SL_geo
+                else:
+                    FM_extra_c = None
+                    SL_extra_c = None
+
+                ctrl_c[cname][ik], ctrl_scl[cname][ik] = self._evaluate_linearised_loads(
+                    G_ctrl, k=kf, dU_load=dU_ctrl_load, dv_geo_load=zero_v,
+                    rotate_mean_geometry=False, FM_wake_k=FM_wake_k, SL_wake_k=SL_wake_k,
+                    include_apparent_mass=True, include_te_correction=te_on,
+                    FM_extra=FM_extra_c, SL_extra=SL_extra_c,
+                )
+
+        ctrl_responses = {
+            cname: _HarmonicMotionResponse(
+                CL=ctrl_c[cname][:, 0], CD=ctrl_c[cname][:, 1], CY=ctrl_c[cname][:, 2],
+                Cl=ctrl_c[cname][:, 3], Cm=ctrl_c[cname][:, 4], Cn=ctrl_c[cname][:, 5],
+                strip_cl=ctrl_scl[cname],
+            )
+            for cname in self.control_names
+        }
+
         return _HarmonicResponse(
             k=k_arr,
             heave=_HarmonicMotionResponse(
@@ -2787,6 +3478,8 @@ class _HarmonicRingSystem:
             device=self.device,
             precision=self.precision,
             notes=list(self.notes),
+            controls=ctrl_responses,
+            k0_controls=dict(self.k0_controls),
         )
 
 
@@ -2810,9 +3503,11 @@ def _solve_harmonic_rings(
     solve_method: str = "woodbury",
     fd_step_h: float | None = None,
     fd_step_theta: float | None = None,
+    fd_step_delta: float | None = None,
+    controls: Sequence[str] = (),
     wake_alignment: str = "freestream",
 ) -> _HarmonicResponse:
-    """Solve small-amplitude harmonic heave and pitch on a vortex-ring lattice.
+    """Solve small-amplitude harmonic heave, pitch and control deflections on a vortex-ring lattice.
 
     Parameters
     ----------
@@ -2864,6 +3559,14 @@ def _solve_harmonic_rings(
         Override central finite-difference step [rad] for loaded-mean-state
         pitch geometry derivatives. None uses ``1e-5`` rad (clamped near
         ground).
+    fd_step_delta : float or None, optional
+        Override central finite-difference step [rad] for loaded-mean-state
+        control-surface geometry derivatives. None uses ``1e-5`` rad (clamped
+        near ground).
+    controls : sequence of str, optional
+        Control-surface names to solve as unit harmonic deflection modes
+        [1/rad] about the built lattice deflection. Default ``()`` (no control
+        modes).
     wake_alignment : {'freestream', 'body'}, optional
         Steady wake alignment rule when *wake_dir* is None. Default
         ``'freestream'``.
@@ -2871,13 +3574,14 @@ def _solve_harmonic_rings(
     Returns
     -------
     _HarmonicResponse
-        Complex heave and pitch load responses, exact ``k -> 0`` limits, mean
-        state and wake discretisation metadata.
+        Complex heave, pitch and control load responses, exact ``k -> 0``
+        limits, mean state and wake discretisation metadata.
 
     Raises
     ------
     InputError
-        If *k_values*, *wake_chords*, *solve_method* or the lattice is invalid.
+        If *k_values*, *wake_chords*, *solve_method*, *controls*,
+        *fd_step_delta* or the lattice is invalid.
     GroundStrikeError
         If the geometry touches or crosses *ground*.
     """
@@ -2907,6 +3611,8 @@ def _solve_harmonic_rings(
         te_correction=te_correction,
         fd_step_h=fd_step_h,
         fd_step_theta=fd_step_theta,
+        fd_step_delta=fd_step_delta,
+        controls=controls,
         wake_alignment=wake_alignment,
     )
     return system.solve(k_arr, solve_method=solve_method, use_tail=use_tail, te_correction=te_correction)
