@@ -23,13 +23,16 @@ Ring layout (Katz and Plotkin 2001, chapters 12 and 13):
   at ``1.0``, so ``te - bound`` spans ``0.75`` of the last panel length along
   each strip edge. The default trailing-edge closure places corners ``(3, 2)``
   at ``0.25`` of the last panel length aft of the trailing edge along each
-  strip edge: ``te + (0.25 / 0.75) * (te - bound)``. Adjacent strips share
-  their common trailing-edge corner with zero gap.
+  strip edge: ``te + (0.25 / 0.75) * (te - bound)``. Adjacent strips and
+  joined surfaces share their common trailing-edge corner with zero gap.
+* On lattices with curved mean-line leg chains (``leg_next``) or chordwise
+  flap hinge nodes (``a_kink``, ``b_kink``), each side edge carries the
+  intermediate nodes of the steady chordwise leg as a bent polyline
+  (``side_nodes`` and ``side_counts``), so the unsteady surface matches the
+  steady vortex-lattice surface without cutting across camber or flap hinges.
 
-Geometries that require a design decision before mapping to four-corner rings
-(lifting-line collocation, surface junctions with joined edges, curved
-mean-line leg chains, and deflected chordwise flaps with non-collinear hinge
-kinks) are refused with :class:`ventorum.core.errors.InputError`.
+Lifting-line collocation (``collocation="llt"``) is refused with
+:class:`ventorum.core.errors.InputError`.
 
 References
 ----------
@@ -61,13 +64,9 @@ from ventorum.geometry.lattice import (
 )
 from ventorum.solvers.core import _vlm_rhs
 
-# Relative perpendicular distance above which a leg node counts as a geometric kink.
-_KINK_COLLINEAR_TOL = 1e-10
-
-
 @dataclass(slots=True)
 class RingLattice:
-    """Quadrilateral vortex-ring representation of a :class:`VortexLattice`.
+    """Vortex-ring representation of a :class:`VortexLattice`.
 
     All lengths are in metres and all direction vectors are dimensionless unit
     vectors in geometry axes (x aft, y right, z up).
@@ -113,6 +112,15 @@ class RingLattice:
     te_extension_fraction : float
         Trailing-edge closure distance aft of the trailing edge as a fraction
         of the last panel length [-].
+    side_nodes : numpy.ndarray or None
+        Padded intermediate nodes along the bent side edges [m], shape
+        ``(n_panels, 2, K, 3)``, or None when all side edges are straight.
+        Axis-1 index ``0`` holds the right side edge nodes in cyclic order
+        ``1 -> 2``; axis-1 index ``1`` holds the left side edge nodes in
+        cyclic order ``3 -> 0``.
+    side_counts : numpy.ndarray or None
+        Number of active intermediate nodes per ring side edge, shape
+        ``(n_panels, 2)`` int64, or None when *side_nodes* is None.
     """
 
     corners: np.ndarray
@@ -130,6 +138,8 @@ class RingLattice:
     strip_core_group: np.ndarray
     strip_width: np.ndarray
     te_extension_fraction: float = 0.25
+    side_nodes: np.ndarray | None = None
+    side_counts: np.ndarray | None = None
 
     @property
     def n_panels(self) -> int:
@@ -145,6 +155,15 @@ class RingLattice:
     def te_indices(self) -> np.ndarray:
         """Return the panel indices of the trailing-edge rings, shape ``(n_strips,)``."""
         return np.flatnonzero(self.te_mask)
+
+    @property
+    def has_side_nodes(self) -> bool:
+        """Return True when at least one ring side edge carries intermediate nodes."""
+        return (
+            self.side_nodes is not None
+            and self.side_counts is not None
+            and bool(np.any(self.side_counts > 0))
+        )
 
 
 @dataclass(slots=True)
@@ -169,6 +188,12 @@ class RingGroundImage:
         Reflected unit wake directions [-], shape ``(n_strips, 3)``.
     sign : float
         Circulation multiplier [-] for the image velocities (``-1.0``).
+    side_nodes : numpy.ndarray or None
+        Reflected padded intermediate side-edge nodes [m], shape
+        ``(n_panels, 2, K, 3)``, or None when all side edges are straight.
+    side_counts : numpy.ndarray or None
+        Number of active intermediate nodes per ring side edge, shape
+        ``(n_panels, 2)`` int64, or None when *side_nodes* is None.
     """
 
     corners: np.ndarray
@@ -176,6 +201,8 @@ class RingGroundImage:
     te_right: np.ndarray
     wake_dir: np.ndarray
     sign: float = -1.0
+    side_nodes: np.ndarray | None = None
+    side_counts: np.ndarray | None = None
 
 
 def _normalize_wake_dir(wake_dir: np.ndarray | None, n_strips: int) -> np.ndarray:
@@ -201,32 +228,124 @@ def _normalize_wake_dir(wake_dir: np.ndarray | None, n_strips: int) -> np.ndarra
     return wd / norms
 
 
-def _has_off_line_kinks(lattice: VortexLattice) -> bool:
-    """Return True when ``a_kink`` or ``b_kink`` lies strictly off the straight chordwise legs."""
+def _point_distinct(p: np.ndarray, q: np.ndarray, tol: float) -> bool:
+    """Return True when 3-D points *p* and *q* are farther apart than *tol* [m]."""
+    dx = float(p[0] - q[0])
+    dy = float(p[1] - q[1])
+    dz = float(p[2] - q[2])
+    return (dx * dx + dy * dy + dz * dz) > (tol * tol)
+
+
+def _build_side_polylines(
+    lattice: VortexLattice,
+    corners: np.ndarray,
+) -> tuple[np.ndarray | None, np.ndarray | None]:
+    """Build padded bent side-edge polylines from the steady leg nodes of *lattice*.
+
+    Each side edge of ring ``p`` carries the intermediate nodes of the steady
+    chordwise leg between its two end corners:
+
+    * On a mean-line leg chain (``leg_next`` active on the strip), panel ``p``
+      has intermediate node ``b_kink[p]`` on its right edge ``1 -> 2`` and
+      ``a_kink[p]`` on its left edge ``3 -> 0``.
+    * On a non-chain strip with chordwise flap hinge nodes (``a_kink``,
+      ``b_kink``), only the ring whose side edge crosses the hinge carries the
+      hinge node.
+    * On a trailing-edge ring with ``te_extension_fraction > 0`` that also has
+      an intermediate leg node ahead of the trailing edge, the physical
+      trailing-edge node (``b_te[p]`` / ``a_te[p]``) is included so the side
+      polyline passes through the physical trailing edge before extending aft.
+
+    Returns ``(None, None)`` when no ring has any intermediate side node.
+    """
     if lattice.a_kink is None and lattice.b_kink is None:
-        return False
-    pairs = []
-    if lattice.a_kink is not None:
-        pairs.append((lattice.a, lattice.a_te, lattice.a_kink))
-    if lattice.b_kink is not None:
-        pairs.append((lattice.b, lattice.b_te, lattice.b_kink))
-    for start, end, mid in pairs:
-        seg = end - start
-        seg_len2 = np.sum(seg * seg, axis=1)
-        valid = seg_len2 > 1e-24
-        if not np.any(valid):
-            continue
-        rel = mid[valid] - start[valid]
-        s = seg[valid]
-        t = np.sum(rel * s, axis=1) / seg_len2[valid]
-        perp = np.linalg.norm(rel - t[:, None] * s, axis=1)
-        if np.any(perp > _KINK_COLLINEAR_TOL * np.sqrt(seg_len2[valid])):
-            return True
-    return False
+        return None, None
+
+    n_strips = lattice.n_strips
+    n_chord = int(lattice.n_chord)
+    n_panels = lattice.n_panels
+    a_te = np.asarray(lattice.a_te, dtype=np.float64)
+    b_te = np.asarray(lattice.b_te, dtype=np.float64)
+    a_kink = a_te if lattice.a_kink is None else np.asarray(lattice.a_kink, dtype=np.float64)
+    b_kink = b_te if lattice.b_kink is None else np.asarray(lattice.b_kink, dtype=np.float64)
+    leg_next = (
+        np.zeros(n_panels, dtype=bool)
+        if lattice.leg_next is None
+        else np.asarray(lattice.leg_next, dtype=bool)
+    )
+    panel_len = np.asarray(lattice.panel_length, dtype=np.float64)
+
+    right_lists: list[list[np.ndarray]] = [[] for _ in range(n_panels)]
+    left_lists: list[list[np.ndarray]] = [[] for _ in range(n_panels)]
+    max_nodes = 0
+
+    for s in range(n_strips):
+        p0 = s * n_chord
+        is_chain = (n_chord > 1) and bool(np.any(leg_next[p0 : p0 + n_chord]))
+        for k in range(n_chord):
+            p = p0 + k
+            is_te = k == (n_chord - 1)
+            tol = 1e-13 * max(float(panel_len[p]), 1e-12)
+
+            # Right side edge: c1 = b[p] -> ... -> c2.
+            phys_r = b_te[p] if is_te else corners[p, 2]
+            bk = b_kink[p]
+            if is_chain:
+                use_r = _point_distinct(bk, corners[p, 1], tol) and _point_distinct(bk, phys_r, tol)
+            else:
+                has_kink_r = _point_distinct(bk, b_te[p], tol)
+                crosses_r = has_kink_r and (is_te or _point_distinct(bk, b_kink[p + 1], tol))
+                use_r = crosses_r and _point_distinct(bk, corners[p, 1], tol) and _point_distinct(bk, phys_r, tol)
+            if use_r:
+                r_nodes = [bk]
+                if is_te and _point_distinct(phys_r, corners[p, 2], tol):
+                    r_nodes.append(phys_r)
+                right_lists[p] = r_nodes
+                if len(r_nodes) > max_nodes:
+                    max_nodes = len(r_nodes)
+
+            # Left side edge: c3 -> ... -> c0 = a[p] (cyclic order, aft to forward).
+            phys_l = a_te[p] if is_te else corners[p, 3]
+            ak = a_kink[p]
+            if is_chain:
+                use_l = _point_distinct(ak, corners[p, 0], tol) and _point_distinct(ak, phys_l, tol)
+            else:
+                has_kink_l = _point_distinct(ak, a_te[p], tol)
+                crosses_l = has_kink_l and (is_te or _point_distinct(ak, a_kink[p + 1], tol))
+                use_l = crosses_l and _point_distinct(ak, corners[p, 0], tol) and _point_distinct(ak, phys_l, tol)
+            if use_l:
+                l_nodes: list[np.ndarray] = []
+                if is_te and _point_distinct(phys_l, corners[p, 3], tol):
+                    l_nodes.append(phys_l)
+                l_nodes.append(ak)
+                left_lists[p] = l_nodes
+                if len(l_nodes) > max_nodes:
+                    max_nodes = len(l_nodes)
+
+    if max_nodes == 0:
+        return None, None
+
+    side_nodes = np.empty((n_panels, 2, max_nodes, 3), dtype=np.float64)
+    side_counts = np.zeros((n_panels, 2), dtype=np.int64)
+    # Pad unused slots with the side end corner so every stored point is finite and physical.
+    side_nodes[:, 0, :, :] = corners[:, 2, :][:, None, :]
+    side_nodes[:, 1, :, :] = corners[:, 0, :][:, None, :]
+    for p in range(n_panels):
+        rn = right_lists[p]
+        if rn:
+            side_counts[p, 0] = len(rn)
+            for idx_n, pt in enumerate(rn):
+                side_nodes[p, 0, idx_n, :] = pt
+        ln = left_lists[p]
+        if ln:
+            side_counts[p, 1] = len(ln)
+            for idx_n, pt in enumerate(ln):
+                side_nodes[p, 1, idx_n, :] = pt
+    return side_nodes, side_counts
 
 
 def _validate_lattice_for_rings(lattice: VortexLattice) -> None:
-    """Validate that *lattice* can be mapped cleanly to four-corner vortex rings."""
+    """Validate that *lattice* can be mapped cleanly to vortex rings."""
     if lattice.collocation != "vlm":
         raise InputError(
             f"build_ring_lattice requires vortex-lattice collocation ('vlm'), got {lattice.collocation!r}."
@@ -241,29 +360,6 @@ def _validate_lattice_for_rings(lattice: VortexLattice) -> None:
     expected_strip = np.repeat(np.arange(n_strips, dtype=np.int64), n_chord)
     if not np.array_equal(np.asarray(lattice.panel_strip, dtype=np.int64), expected_strip):
         raise InputError("build_ring_lattice requires panels ordered strip by strip from leading to trailing edge.")
-
-    joined_surfaces = [
-        surf.name
-        for surf in lattice.surfaces
-        if surf.edge_joined is not None and bool(np.any(surf.edge_joined))
-    ]
-    if joined_surfaces:
-        names = ", ".join(joined_surfaces)
-        raise InputError(
-            f"Cannot map a surface junction ({names}) to vortex rings without a junction wake topology decision."
-        )
-
-    if lattice.leg_next is not None and bool(np.any(lattice.leg_next)):
-        raise InputError(
-            "Cannot map a lattice with curved mean-line leg chains (leg_next) to four-corner vortex rings "
-            "without a decision on the intermediate mean-surface leg nodes."
-        )
-
-    if _has_off_line_kinks(lattice):
-        raise InputError(
-            "Cannot map a lattice with non-collinear leg kinks (for example a deflected chordwise flap) "
-            "to four-corner vortex rings without a decision on hinge-kink nodes."
-        )
 
 
 def build_ring_lattice(
@@ -290,14 +386,15 @@ def build_ring_lattice(
     Returns
     -------
     RingLattice
-        Vortex-ring lattice with one quadrilateral ring per lattice panel.
+        Vortex-ring lattice with one vortex ring per lattice panel, including
+        bent side polylines for cambered mean lines and deflected chordwise
+        flaps.
 
     Raises
     ------
     InputError
-        If *lattice* uses lifting-line collocation, has a surface junction,
-        has curved mean-line leg chains, has non-collinear leg kinks, or if
-        *wake_dir* or *te_extension_fraction* is invalid.
+        If *lattice* uses lifting-line collocation or an invalid panel layout,
+        or if *wake_dir* or *te_extension_fraction* is invalid.
     """
     _validate_lattice_for_rings(lattice)
     te_ext = float(te_extension_fraction)
@@ -329,7 +426,8 @@ def build_ring_lattice(
     # 1 - 0.75 * d_xi_last along each strip edge, so (te - bound) spans 0.75
     # of the last panel length. Extending by (te_ext / 0.75) * (te - bound)
     # places the trailing corners te_ext panel lengths aft of the TE along
-    # each strip edge.
+    # each strip edge. Joined surface edges share their bound and TE nodes,
+    # so their trailing-edge closures stay continuous across junctions.
     te_l_geom = np.asarray(lattice.te_left, dtype=np.float64)
     te_r_geom = np.asarray(lattice.te_right, dtype=np.float64)
     scale = te_ext / 0.75
@@ -337,6 +435,8 @@ def build_ring_lattice(
     te_right = te_r_geom + scale * (te_r_geom - b[te_idx])
     corners[te_idx, 2, :] = te_right
     corners[te_idx, 3, :] = te_left
+
+    side_nodes, side_counts = _build_side_polylines(lattice, corners)
 
     strip_surface = np.asarray(lattice.strip_surface, dtype=np.int64).copy()
     raw_group = lattice.strip_core_group
@@ -360,6 +460,8 @@ def build_ring_lattice(
         strip_core_group=strip_core_group,
         strip_width=np.asarray(lattice.width, dtype=np.float64).copy(),
         te_extension_fraction=te_ext,
+        side_nodes=side_nodes,
+        side_counts=side_counts,
     )
 
 
@@ -371,8 +473,8 @@ def ground_image_rings(
 ) -> RingGroundImage:
     """Return the mirror-image rings and steady wake legs for *ground*.
 
-    Uses :meth:`ventorum.aero.system.GroundPlane.reflect_points` for all ring
-    and trailing-edge corners and
+    Uses :meth:`ventorum.aero.system.GroundPlane.reflect_points` for all ring,
+    side-polyline and trailing-edge corners and
     :meth:`ventorum.aero.system.GroundPlane.reflect_directions` for the wake
     directions. The image circulation sign is ``-1.0``, matching the steady
     image method in :mod:`ventorum.aero.system`.
@@ -390,8 +492,9 @@ def ground_image_rings(
     Returns
     -------
     RingGroundImage
-        Reflected ring corners, reflected trailing-edge corners, reflected
-        wake directions and circulation sign ``-1.0``.
+        Reflected ring corners, reflected side-edge nodes, reflected
+        trailing-edge corners, reflected wake directions and circulation sign
+        ``-1.0``.
     """
     wd = rings.wake_dir if wake_dir is None else _normalize_wake_dir(wake_dir, rings.n_strips)
     return RingGroundImage(
@@ -400,6 +503,8 @@ def ground_image_rings(
         te_right=ground.reflect_points(rings.te_right),
         wake_dir=ground.reflect_directions(wd),
         sign=-1.0,
+        side_nodes=None if rings.side_nodes is None else ground.reflect_points(rings.side_nodes),
+        side_counts=None if rings.side_counts is None else rings.side_counts.copy(),
     )
 
 
@@ -466,13 +571,19 @@ def _steady_ring_influence(
     te_idx = rings.te_indices
     rc_ring, rc_wake = _ring_pair_cores(rings, rc, use_cross_surface_core)
 
-    A = ring_normal_influence(rings.cp, rings.normal_bc, rings.corners, rc_ring)
+    A = ring_normal_influence(
+        rings.cp, rings.normal_bc, rings.corners, rc_ring,
+        side_nodes=rings.side_nodes, side_counts=rings.side_counts,
+    )
     A[:, te_idx] += steady_wake_normal_influence(
         rings.cp, rings.normal_bc, rings.te_left, rings.te_right, wd, rc_wake,
     )
     if ground is not None:
         img = ground_image_rings(rings, ground, wake_dir=wd)
-        A += img.sign * ring_normal_influence(rings.cp, rings.normal_bc, img.corners, rc_ring)
+        A += img.sign * ring_normal_influence(
+            rings.cp, rings.normal_bc, img.corners, rc_ring,
+            side_nodes=img.side_nodes, side_counts=img.side_counts,
+        )
         A[:, te_idx] += img.sign * steady_wake_normal_influence(
             rings.cp, rings.normal_bc, img.te_left, img.te_right, img.wake_dir, rc_wake,
         )
