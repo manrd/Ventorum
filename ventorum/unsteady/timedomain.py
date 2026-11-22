@@ -242,9 +242,13 @@ class _TimeDomainResponse:
     controls_dot : dict of str to numpy.ndarray
         Time derivatives of prescribed control-surface deflections [rad/s],
         each of shape ``(n_steps + 1,)``.
+    gust_velocity : numpy.ndarray
+        Gust air velocity evaluated at the instantaneous reference point in
+        geometry axes [m/s], shape ``(n_steps + 1, 3)``. Zero when no gust is
+        given.
     notes : list of str
         Diagnostic notes (for example when ``dt`` differs from ``dx_TE / V_inf``
-        by more than 25 %).
+        by more than 25 %, or gust and ground-effect modelling notes).
     """
 
     time: np.ndarray
@@ -286,7 +290,67 @@ class _TimeDomainResponse:
     yaw_dot: np.ndarray = field(default_factory=lambda: np.empty(0, dtype=np.float64))
     controls: dict[str, np.ndarray] = field(default_factory=dict)
     controls_dot: dict[str, np.ndarray] = field(default_factory=dict)
+    gust_velocity: np.ndarray = field(default_factory=lambda: np.empty((0, 3), dtype=np.float64))
     notes: list[str] = field(default_factory=list)
+
+
+def _eval_gust(
+    gust_fn: Callable[[np.ndarray, float], np.ndarray],
+    points: np.ndarray,
+    t: float,
+) -> np.ndarray:
+    """Evaluate *gust_fn* at *points* [m] and time *t* [s], validating shape and finiteness."""
+    try:
+        raw = gust_fn(points, float(t))
+        arr = np.asarray(raw, dtype=np.float64)
+    except InputError:
+        raise
+    except Exception as exc:
+        raise InputError(f"gust callable failed at t = {float(t):.6g} s: {exc}") from exc
+    if arr.shape != points.shape:
+        raise InputError(
+            f"gust callable must return an array of shape {points.shape}, got {arr.shape}."
+        )
+    if not np.all(np.isfinite(arr)):
+        raise InputError(f"gust callable returned non-finite values at t = {float(t):.6g} s.")
+    return arr
+
+
+def _advect_wake_nodes_rk4(
+    wake_l: np.ndarray,
+    wake_r: np.ndarray,
+    n_lines: int,
+    v_base: np.ndarray,
+    gust_fn: Callable[[np.ndarray, float], np.ndarray],
+    t0: float,
+    dt: float,
+    ground: GroundPlane | None,
+) -> None:
+    """Advect the first *n_lines* wake node lines from *t0* to ``t0 + dt`` [s] by RK4 in place.
+
+    In ground effect, only the gust component parallel to *ground* convects
+    wake nodes so that wake nodes do not cross the ground plane.
+    """
+    n_s = v_base.shape[0]
+    half = n_lines * n_s
+    pts = np.vstack([wake_l[:n_lines].reshape(half, 3), wake_r[:n_lines].reshape(half, 3)])
+    v_base_tile = np.tile(v_base, (2 * n_lines, 1))
+    g_norm = None if ground is None else np.asarray(ground.normal, dtype=np.float64)
+
+    def _vel(p: np.ndarray, ts: float) -> np.ndarray:
+        vg = _eval_gust(gust_fn, p, ts)
+        if g_norm is not None:
+            vg = vg - (vg @ g_norm)[:, None] * g_norm[None, :]
+        return v_base_tile + vg
+
+    half_dt = 0.5 * dt
+    k1 = _vel(pts, t0)
+    k2 = _vel(pts + half_dt * k1, t0 + half_dt)
+    k3 = _vel(pts + half_dt * k2, t0 + half_dt)
+    k4 = _vel(pts + dt * k3, t0 + dt)
+    pts_new = pts + (dt / 6.0) * (k1 + 2.0 * k2 + 2.0 * k3 + k4)
+    wake_l[:n_lines] = pts_new[:half].reshape(n_lines, n_s, 3)
+    wake_r[:n_lines] = pts_new[half:].reshape(n_lines, n_s, 3)
 
 
 def _tile_wake_rc(rc_wake: np.ndarray | float, n_chunk: int) -> np.ndarray | float:
@@ -1416,6 +1480,7 @@ def _solve_time_rings(
     theta: Sequence[float] | np.ndarray | Callable[[float], float] | None = None,
     motion: Mapping[str, Sequence[float] | np.ndarray | Callable[[float], float]] | None = None,
     controls: Mapping[str, Sequence[float] | np.ndarray | Callable[[float], float]] | None = None,
+    gust: Callable[[np.ndarray, float], np.ndarray] | None = None,
     n_steps: int,
     dt: float | None = None,
     ground: GroundPlane | None = None,
@@ -1474,6 +1539,11 @@ def _solve_time_rings(
         Prescribed control-surface deflection histories [rad], keyed by
         ``ControlSurface.name``. Missing controls stay at their built lattice
         deflection.
+    gust : callable or None, optional
+        Optional gust velocity field ``gust(points, t) -> velocities`` where
+        *points* has shape ``(n, 3)`` [m] in geometry axes, *t* is time [s],
+        and the return array has shape ``(n, 3)`` [m/s] (air velocity added to
+        the free stream). None applies no gust.
     n_steps : int
         Number of time steps to march (must be ``>= 1``). Produces
         ``n_steps + 1`` load samples at ``t = 0, dt, ..., n_steps * dt``.
@@ -1608,6 +1678,28 @@ def _solve_time_rings(
     dx_w = V_inf * dt_val
     f_te = dx_te / (2.0 * (dx_te + dx_w))
     wake_conv = dx_w * rings.wake_dir  # (n_s, 3)
+
+    if gust is not None and not callable(gust):
+        raise InputError(f"gust must be a callable gust(points, t) -> velocities or None, got {type(gust).__name__}.")
+    gust_fn: Callable[[np.ndarray, float], np.ndarray] | None = None
+    if gust is not None:
+        bind_fn = getattr(gust, "_bind_flow", None)
+        gust_fn = bind_fn(condition, ground) if callable(bind_fn) else gust
+        if ground is not None:
+            notes.append(
+                "In ground effect, wake rows convect using only the gust velocity component "
+                "parallel to the ground so that wake nodes do not cross the ground plane."
+            )
+            notes.append(
+                "In ground effect, the gust velocity field is applied as given (not reflected); "
+                "a gust with a normal component at the ground does not satisfy the ground "
+                "impermeability condition by itself."
+            )
+        if bool(getattr(gust, "_is_shear", False)):
+            notes.append(
+                "Wind shear is rotational flow; the potential-flow vortex-ring method feels it "
+                "only as an onset velocity at the wing and wake nodes."
+            )
 
     # 4. Sample prescribed six-axis motion and moving control surfaces.
     time = np.arange(n_steps_int + 1, dtype=np.float64) * dt_val
@@ -1824,6 +1916,7 @@ def _solve_time_rings(
     )
 
     # Stationary-geometry detection: constant pose and constant controls allow O(n_steps) wake reuse.
+    # Turn off the stationary wake-row cache when a gust is given because wake convection varies locally.
     is_stationary = bool(
         (not controls_vary)
         and all(
@@ -1831,19 +1924,20 @@ def _solve_time_rings(
             for arr in (x_arr, y_arr, z_arr, roll_arr, pitch_arr, yaw_arr)
         )
     )
+    is_stationary_wake = is_stationary and (gust_fn is None)
     A_wake_stat = (
         np.empty((n_steps_int, n_p, n_s), dtype=np.float64)
-        if is_stationary and (n_steps_int * n_p * n_s * 8) <= _MAX_CACHE_BYTES
+        if is_stationary_wake and (n_steps_int * n_p * n_s * 8) <= _MAX_CACHE_BYTES
         else None
     )
     V_wake_load_stat = (
         np.empty((n_steps_int, n_eval_u, n_s, 3), dtype=np.float64)
-        if is_stationary and (n_steps_int * n_eval_u * n_s * 24) <= _MAX_CACHE_BYTES
+        if is_stationary_wake and (n_steps_int * n_eval_u * n_s * 24) <= _MAX_CACHE_BYTES
         else None
     )
     V_wake_te_stat = (
         np.empty((n_steps_int, n_s, n_s, 3), dtype=np.float64)
-        if is_stationary and te_correction and (n_steps_int * n_s * n_s * 24) <= _MAX_CACHE_BYTES
+        if is_stationary_wake and te_correction and (n_steps_int * n_s * n_s * 24) <= _MAX_CACHE_BYTES
         else None
     )
     V_bound_img_load_stat: np.ndarray | None = None
@@ -1853,6 +1947,9 @@ def _solve_time_rings(
     wake_corners_earth = np.empty((n_steps_int, n_s, 4, 3), dtype=np.float64)
     wake_corners_cur = np.empty((n_steps_int, n_s, 4, 3), dtype=np.float64)
     wake_gamma_buf = np.empty((n_steps_int, n_s), dtype=np.float64)
+    wake_l_nodes = np.empty((n_steps_int + 1, n_s, 3), dtype=np.float64) if gust_fn is not None else None
+    wake_r_nodes = np.empty((n_steps_int + 1, n_s, 3), dtype=np.float64) if gust_fn is not None else None
+    v_base_wake = V_inf * rings.wake_dir  # (n_s, 3)
 
     CL = np.empty(n_steps_int + 1, dtype=np.float64)
     CD = np.empty(n_steps_int + 1, dtype=np.float64)
@@ -1861,6 +1958,7 @@ def _solve_time_rings(
     Cm = np.empty(n_steps_int + 1, dtype=np.float64)
     Cn = np.empty(n_steps_int + 1, dtype=np.float64)
     strip_cl = np.empty((n_steps_int + 1, n_s), dtype=np.float64)
+    gust_ref = np.zeros((n_steps_int + 1, 3), dtype=np.float64)
 
     prev_base_l: np.ndarray | None = None
     prev_base_r: np.ndarray | None = None
@@ -2002,20 +2100,48 @@ def _solve_time_rings(
             v_fl_load = None
             v_fl_te = None
 
-        # Earth-frame trailing-edge closure corners for drift-free convection.
-        shift_conv = float(step) * wake_conv
-        base_l = te_left - shift_conv
-        base_r = te_right - shift_conv
+        # Earth-frame trailing-edge closure corners for drift-free convection (no gust),
+        # or local-velocity RK4 wake-node convection when a gust is active.
+        t_now = float(time[step])
+        if gust_fn is None:
+            shift_conv = float(step) * wake_conv
+            base_l = te_left - shift_conv
+            base_r = te_right - shift_conv
 
-        # Append the newly shed wake row at step >= 1 (Kutta condition: Gamma_TE of previous step).
-        if step > 0:
-            row_idx = step - 1
-            wake_corners_earth[row_idx, :, 0, :] = base_l
-            wake_corners_earth[row_idx, :, 1, :] = base_r
-            wake_corners_earth[row_idx, :, 2, :] = prev_base_r
-            wake_corners_earth[row_idx, :, 3, :] = prev_base_l
-            wake_gamma_buf[row_idx] = prev_gamma[te_idx]
-            wake_corners_cur[:step] = wake_corners_earth[:step] + shift_conv[None, :, None, :]
+            # Append the newly shed wake row at step >= 1 (Kutta condition: Gamma_TE of previous step).
+            if step > 0:
+                row_idx = step - 1
+                wake_corners_earth[row_idx, :, 0, :] = base_l
+                wake_corners_earth[row_idx, :, 1, :] = base_r
+                wake_corners_earth[row_idx, :, 2, :] = prev_base_r
+                wake_corners_earth[row_idx, :, 3, :] = prev_base_l
+                wake_gamma_buf[row_idx] = prev_gamma[te_idx]
+                wake_corners_cur[:step] = wake_corners_earth[:step] + shift_conv[None, :, None, :]
+        else:
+            gust_ref[step] = _eval_gust(gust_fn, x_ref[None, :], t_now)[0]
+            if step == 0:
+                wake_l_nodes[0] = te_left
+                wake_r_nodes[0] = te_right
+            else:
+                _advect_wake_nodes_rk4(
+                    wake_l_nodes,
+                    wake_r_nodes,
+                    step,
+                    v_base_wake,
+                    gust_fn,
+                    float(time[step - 1]),
+                    dt_val,
+                    ground,
+                )
+                wake_l_nodes[step] = te_left
+                wake_r_nodes[step] = te_right
+                wake_corners_cur[:step, :, 0, :] = wake_l_nodes[1 : step + 1]
+                wake_corners_cur[:step, :, 1, :] = wake_r_nodes[1 : step + 1]
+                wake_corners_cur[:step, :, 2, :] = wake_r_nodes[:step]
+                wake_corners_cur[:step, :, 3, :] = wake_l_nodes[:step]
+                wake_gamma_buf[step - 1] = prev_gamma[te_idx]
+            base_l = None
+            base_r = None
 
         # Bound linear system (refactorise in ground effect when pose or control deflections change).
         if ground is not None:
@@ -2036,11 +2162,12 @@ def _solve_time_rings(
                 lu_Abb = sl.lu_factor(A_bb_real - A_img)
                 prev_pose_ge = pose_key
 
-        # Impermeability right-hand side: (V_surf - V_0 - v_wake) . n_bc.
+        # Impermeability right-hand side: (V_surf - V_onset - v_wake) . n_bc.
         v_surf_cp = v_trans[None, :] + cross3(omega_g[None, :], cp - x_ref[None, :])
         if v_fl_cp is not None:
             v_surf_cp = v_surf_cp + v_fl_cp
-        rhs = np.sum((v_surf_cp - V_0[None, :]) * normal_bc, axis=1)
+        v_onset_cp = V_0[None, :] if gust_fn is None else V_0[None, :] + _eval_gust(gust_fn, cp, t_now)
+        rhs = np.sum((v_surf_cp - v_onset_cp) * normal_bc, axis=1)
 
         if step > 0:
             if A_wake_stat is not None:
@@ -2165,7 +2292,11 @@ def _solve_time_rings(
         v_surf_load = v_trans[None, :] + cross3(omega_g[None, :], arm_all)
         if v_fl_load is not None:
             v_surf_load = v_surf_load + v_fl_load
-        V_tot = V_0[None, :] - v_surf_load + v_ind_load
+        if gust_fn is None:
+            v_onset_load = V_0[None, :]
+        else:
+            v_onset_load = V_0[None, :] + _eval_gust(gust_fn, P_load_u, t_now)[load_inv_idx]
+        V_tot = v_onset_load - v_surf_load + v_ind_load
         V_eff = V_tot - np.sum(V_tot * seg_normal, axis=1, keepdims=True) * seg_normal
 
         g_hs = _rings_to_horseshoe(gamma_n, rings.n_chord)
@@ -2263,7 +2394,8 @@ def _solve_time_rings(
             v_surf_te = v_trans[None, :] + cross3(omega_g[None, :], arm_te)
             if v_fl_te is not None:
                 v_surf_te = v_surf_te + v_fl_te
-            V_te = V_0[None, :] - v_surf_te + v_ind_te
+            v_onset_te = V_0[None, :] if gust_fn is None else V_0[None, :] + _eval_gust(gust_fn, p_te, t_now)
+            V_te = v_onset_te - v_surf_te + v_ind_te
             dg_te = f_te * (wake_gamma_buf[step - 1] - gamma_n[te_idx])
             F_te = (rho * dg_te)[:, None] * cross3(V_te, l_te)
             F_tot = F_tot + np.sum(F_te, axis=0)
@@ -2323,5 +2455,6 @@ def _solve_time_rings(
         yaw_dot=yaw_dot,
         controls=ctrl_arrs,
         controls_dot=ctrl_dots,
+        gust_velocity=gust_ref,
         notes=notes,
     )
