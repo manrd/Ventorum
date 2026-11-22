@@ -88,7 +88,16 @@ from ventorum.solvers.derivative_matrix import (  # noqa: F401
 )
 from ventorum.unsteady import (  # noqa: F401
     DynamicDerivativesResult,
+    IndicialResult,
+    TimeResponseResult,
     dynamic_derivatives,
+    indicial_response,
+    linear_shear,
+    logarithmic_shear,
+    one_minus_cosine,
+    sharp_edged,
+    time_response,
+    wind_shear,
 )
 # The gradient functions load PyTorch: the module __getattr__ (end of this
 # file) gives them on first access, so that ``import ventorum`` stays light.

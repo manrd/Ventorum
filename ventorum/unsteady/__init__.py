@@ -13,6 +13,11 @@ interface:
   flat-ground effect.
 * :mod:`ventorum.unsteady.derivatives`: public :func:`dynamic_derivatives`
   function and :class:`DynamicDerivativesResult`.
+* :mod:`ventorum.unsteady.gusts`: convected gust and wind-shear fields
+  (:func:`sharp_edged`, :func:`one_minus_cosine`, :func:`wind_shear`,
+  :func:`linear_shear`, :func:`logarithmic_shear`).
+* :mod:`ventorum.unsteady.response`: public :func:`time_response` and
+  :func:`indicial_response` functions and their result records.
 
 References
 ----------
@@ -34,5 +39,30 @@ References
 from __future__ import annotations
 
 from ventorum.unsteady.derivatives import DynamicDerivativesResult, dynamic_derivatives
+from ventorum.unsteady.gusts import (
+    linear_shear,
+    logarithmic_shear,
+    one_minus_cosine,
+    sharp_edged,
+    wind_shear,
+)
+from ventorum.unsteady.response import (
+    IndicialResult,
+    TimeResponseResult,
+    indicial_response,
+    time_response,
+)
 
-__all__ = ["DynamicDerivativesResult", "dynamic_derivatives"]
+__all__ = [
+    "DynamicDerivativesResult",
+    "IndicialResult",
+    "TimeResponseResult",
+    "dynamic_derivatives",
+    "indicial_response",
+    "linear_shear",
+    "logarithmic_shear",
+    "one_minus_cosine",
+    "sharp_edged",
+    "time_response",
+    "wind_shear",
+]
