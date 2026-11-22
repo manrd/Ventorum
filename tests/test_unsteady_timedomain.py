@@ -1368,19 +1368,43 @@ def test_fixed_flap_steady_limit_matches_analyze(monkeypatch):
 @pytest.mark.slow
 @pytest.mark.parametrize("k,n_trans", [(0.05, 1.0), (0.2, 2.0)])
 def test_moving_flap_small_amplitude_dt_convergence(k, n_trans):
-    """Harmonic 1e-4 rad flap motion at k = 0.05 and 0.2 converges at second order under dt halving.
+    """Harmonic 1e-4 rad flap motion converges with the order of the steady hinge error.
 
     Doubling n_chord from 4 to 8 to 16 halves dt = dx_TE / V_inf while keeping
     hinge_x_c = 0.75 on an exact chordwise node and dx_w = dx_TE at every level.
+    This refinement changes the time step and the chordwise mesh together. The
+    slope discontinuity of the deflected camber line at the hinge gives a
+    first-order chordwise error, which dominates the second-order time error of
+    the backward difference. The steady flap derivatives CL_delta and Cm_delta
+    of ventorum.analyze on the same meshes show this spatial order (CL 0.870,
+    Cm 1.193). The observed orders of the first harmonics are CL 0.871 and Cm
+    1.144 at k = 0.05, and CL 0.886 and Cm 1.132 at k = 0.2. Thus the test
+    requires that the orders of the first harmonics agree with the steady
+    orders to 0.1. A defect of the time march (for example a wrong hinge rate
+    in the surface velocity) adds an error that does not decrease with the
+    spatial order and breaks this agreement. The second-order time-step check
+    with the same mesh needs a harmonic flap mode as the reference.
+
+    First harmonics per rad of flap deflection on n_chord = 4, 8, 16:
+
+    * k = 0.05: CL 2.349665 - 0.076997j, 2.470463 - 0.079419j,
+      2.536497 - 0.080922j; Cm -0.594247 - 0.021306j, -0.594784 - 0.023744j,
+      -0.594600 - 0.024859j.
+    * k = 0.2: CL 2.140701 - 0.097039j, 2.252147 - 0.096328j,
+      2.312440 - 0.096306j; Cm -0.593230 - 0.083426j, -0.594590 - 0.092851j,
+      -0.594642 - 0.097195j.
     """
     ac = _flapped_rect_wing(0.0, semi_span=3.0, chord=1.0, n_panels=4, hinge_x_c=0.75)
     cond = vt.FlightCondition(V_inf=20.0, rho=1.225, alpha=0.0)
     omega = 2.0 * k * cond.V_inf / ac.c_ref
     period = 2.0 * math.pi / omega
     amp = 1.0e-4
+    d_steady = 1.0e-2
 
     cl_h = []
     cm_h = []
+    cl_s = []
+    cm_s = []
     for n_c in (4, 8, 16):
         lat = build_lattice(ac, n_chord=n_c, chord_spacing="uniform")
         dt_use = 1.0 / (n_c * cond.V_inf)
@@ -1395,14 +1419,30 @@ def test_moving_flap_small_amplitude_dt_convergence(k, n_trans):
         cl_h.append(_fit_first_harmonic(res.time[mask], res.CL[mask], omega, amp))
         cm_h.append(_fit_first_harmonic(res.time[mask], res.Cm[mask], omega, amp))
 
-    ord_cl = math.log2(abs(cl_h[0] - cl_h[1]) / abs(cl_h[1] - cl_h[2]))
-    ord_cm = math.log2(abs(cm_h[0] - cm_h[1]) / abs(cm_h[1] - cm_h[2]))
-    assert 1.7 <= ord_cl <= 2.3, (
-        f"k={k}: CL order={ord_cl:.3f}, Cm order={ord_cm:.3f}, CL={cl_h}, Cm={cm_h}"
+        # Steady flap derivatives on the same mesh (the VLM is linear in delta).
+        st = vt.SolverSettings(solver_type="vlm", n_chord=n_c, chord_spacing="uniform")
+        tot = {}
+        for sgn in (1.0, -1.0):
+            ac_d = _flapped_rect_wing(
+                math.degrees(sgn * d_steady), semi_span=3.0, chord=1.0, n_panels=4, hinge_x_c=0.75,
+            )
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", RuntimeWarning)
+                tot[sgn] = vt.analyze(ac_d, cond, st).totals
+        cl_s.append((tot[1.0].CL - tot[-1.0].CL) / (2.0 * d_steady))
+        cm_s.append((tot[1.0].Cm - tot[-1.0].Cm) / (2.0 * d_steady))
+
+    def _order(v):
+        return math.log2(abs(v[0] - v[1]) / abs(v[1] - v[2]))
+
+    ord_cl, ord_cm = _order(cl_h), _order(cm_h)
+    ord_cl_s, ord_cm_s = _order(cl_s), _order(cm_s)
+    msg = (
+        f"k={k}: CL order={ord_cl:.3f} (steady {ord_cl_s:.3f}), "
+        f"Cm order={ord_cm:.3f} (steady {ord_cm_s:.3f}), CL={cl_h}, Cm={cm_h}"
     )
-    assert 1.7 <= ord_cm <= 2.3, (
-        f"k={k}: CL order={ord_cl:.3f}, Cm order={ord_cm:.3f}, CL={cl_h}, Cm={cm_h}"
-    )
+    assert abs(ord_cl - ord_cl_s) <= 0.1, msg
+    assert abs(ord_cm - ord_cm_s) <= 0.1, msg
 
 
 def test_ground_parity_moving_flap_antiphase_two_wing_model():
