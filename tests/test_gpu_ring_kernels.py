@@ -726,3 +726,125 @@ def test_gpu_displaced_steady_tail_equals_cpu(gpu_device, use_ground, kappa):
     assert np.max(np.abs(got_v - ref_v)) <= 1e-12 * max(float(np.max(np.abs(ref_v))), 1.0)
     assert np.max(np.abs(got_a - ref_a)) <= 1e-12 * max(float(np.max(np.abs(ref_a))), 1.0)
 
+
+def _flapped_wing_gpu(*, cambered: bool = False, n_panels: int = 6) -> vt.Aircraft:
+    """Build a rectangular wing (flat or NACA 4412) with a full-span chordwise flap."""
+    fl = vt.ControlSurface(name="flap", eta_start=0.0, eta_end=1.0, hinge_x_c=0.75, deflection=0.0)
+    shape = "4412" if cambered else None
+    wing = vt.LiftingSurface(
+        name="flapped_wing",
+        semi_span=3.0,
+        n_panels=n_panels,
+        controls=[fl],
+        sections=[
+            vt.WingSection(y_frac=0.0, chord=1.0, shape=shape),
+            vt.WingSection(y_frac=1.0, chord=1.0, shape=shape),
+        ],
+    )
+    ac = vt.Aircraft(surfaces=[wing], ref_point=np.array([0.25, 0.0, 0.0]))
+    ac.compute_reference_values()
+    return ac
+
+
+@pytest.mark.gpu
+@pytest.mark.parametrize("precision", ["float64", "float32"])
+@pytest.mark.parametrize("h_ground", [None, 0.5])
+@pytest.mark.parametrize("cambered", [False, True])
+def test_gpu_harmonic_flap_mode_equals_cpu(gpu_device, precision, h_ground, cambered):
+    """GPU harmonic flap mode agrees with CPU in float64 and float32 (free air, h/c = 0.5 and camber)."""
+    ac = _flapped_wing_gpu(cambered=cambered, n_panels=6)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)
+        lat = build_lattice(ac, n_chord=4, chord_spacing="uniform")
+    cond = vt.FlightCondition(V_inf=30.0, rho=1.225, alpha=np.radians(4.0), h=h_ground)
+    ground = (
+        make_ground_plane(lat, h_ground, cond.alpha, cond.beta, ref_point=ac.ref_point, height_ref="ref")
+        if h_ground is not None
+        else None
+    )
+    k_vals = [0.0, 0.05, 0.2, 0.5]
+
+    gpu.set_device("cpu")
+    ref = _solve_harmonic_rings(
+        lat, cond, k_vals, S_ref=ac.S_ref, b_ref=ac.b_ref, c_ref=ac.c_ref,
+        ground=ground, ref_point=ac.ref_point, controls=("flap",),
+    )
+
+    gpu.set_device("gpu")
+    gpu.set_precision(precision)
+    sys_gpu = _HarmonicRingSystem(
+        lat, cond, S_ref=ac.S_ref, b_ref=ac.b_ref, c_ref=ac.c_ref,
+        ground=ground, ref_point=ac.ref_point, controls=("flap",),
+    )
+    got = sys_gpu.solve(k_vals)
+    assert got.device == "gpu"
+    assert got.precision == precision
+
+    tol = TOL[precision]
+    cl_scale = max(float(np.max(np.abs(ref.controls["flap"].CL))), 1.0)
+    rf = ref.controls["flap"]
+    gf = got.controls["flap"]
+    for name in ("CL", "CD", "CY", "Cl", "Cm", "Cn"):
+        a = getattr(rf, name)
+        b = getattr(gf, name)
+        scale = max(float(np.max(np.abs(a))), cl_scale)
+        assert np.max(np.abs(a - b)) <= tol * scale, (name, np.max(np.abs(a - b)) / scale)
+    s_scale = max(float(np.max(np.abs(rf.strip_cl))), cl_scale)
+    assert np.max(np.abs(rf.strip_cl - gf.strip_cl)) <= 5 * tol * s_scale
+
+    rk0 = ref.k0_controls["flap"]
+    gk0 = got.k0_controls["flap"]
+    for name in ("CL", "CD", "CY", "Cl", "Cm", "Cn"):
+        va = getattr(rk0, name)
+        vb = getattr(gk0, name)
+        scale = max(abs(va), cl_scale)
+        assert abs(va - vb) <= tol * scale, ("k0", name, abs(va - vb) / scale)
+
+    # Re-solving after gpu.release() reproduces the flap mode on the GPU.
+    gpu.release()
+    after = sys_gpu.solve(k_vals)
+    assert np.max(np.abs(after.controls["flap"].CL - gf.CL)) <= 1e-12 * cl_scale
+
+
+@pytest.mark.gpu
+@pytest.mark.parametrize("precision", ["float64", "float32"])
+@pytest.mark.parametrize("h_ground", [None, 0.5])
+def test_gpu_dynamic_derivatives_controls_equals_cpu(gpu_device, precision, h_ground):
+    """dynamic_derivatives(..., controls=('flap',)) on GPU agrees with CPU in float64 and float32."""
+    ac = _flapped_wing_gpu(cambered=False, n_panels=6)
+    st = vt.SolverSettings(solver_type="vlm", n_panels=6, n_chord=8, spacing="half-cosine", chord_spacing="uniform")
+    cond = vt.FlightCondition(V_inf=30.0, rho=1.225, alpha=np.radians(4.0), h=h_ground)
+    k_vals = (0.0, 0.05, 0.2, 0.5)
+
+    gpu.set_device("cpu")
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        ref = vt.dynamic_derivatives(ac, cond, st, k=k_vals, controls=("flap",))
+
+    gpu.set_device("gpu")
+    gpu.set_precision(precision)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        got = vt.dynamic_derivatives(ac, cond, st, k=k_vals, controls=("flap",))
+    assert got.device == "gpu"
+    assert got.precision == precision
+
+    tol = TOL[precision]
+    base_scale = max(abs(ref.k0["CL_delta_flap"]), 1.0)
+    for key in ref.k0:
+        if "_delta_" not in key:
+            continue
+        scale = max(abs(ref.k0[key]), base_scale)
+        assert abs(ref.k0[key] - got.k0[key]) <= tol * scale, (key, abs(ref.k0[key] - got.k0[key]) / scale)
+        a = ref.derivatives[key]
+        b = got.derivatives[key]
+        d_scale = max(float(np.max(np.abs(a))), base_scale)
+        assert np.max(np.abs(a - b)) <= tol * d_scale, (key, np.max(np.abs(a - b)) / d_scale)
+
+    for coeff in ("CL", "CD", "CY", "Cl", "Cm", "Cn"):
+        a = ref.H_delta["flap"][coeff]
+        b = got.H_delta["flap"][coeff]
+        scale = max(float(np.max(np.abs(a))), base_scale)
+        assert np.max(np.abs(a - b)) <= tol * scale
+
+

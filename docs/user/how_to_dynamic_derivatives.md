@@ -58,6 +58,55 @@ For each coefficient `C` in `CL`, `CD`, `CY`, `Cl`, `Cm` and `Cn`, both `res.k0`
 - Pitch rotation is about `Aircraft.ref_point` (default the origin) at constant height. Set `ref_point` to the centre of gravity.
 - For a symmetric configuration in symmetric flight, the lateral keys (`CY_*`, `Cl_*`, `Cn_*`) are zero.
 
+## Control-surface modes and control-rate derivatives
+
+Pass `controls=("flap", ...)` to solve small-amplitude harmonic deflections of named chordwise control surfaces (`n_chord >= 2`) about the built lattice deflection.
+
+```python
+import numpy as np
+import ventorum as vt
+
+flap = vt.ControlSurface(
+    name="flap",
+    eta_start=0.0,
+    eta_end=1.0,
+    hinge_x_c=0.75,
+    deflection=0.0,
+)
+wing = vt.LiftingSurface(
+    name="wing",
+    semi_span=3.0,
+    controls=[flap],
+    sections=[
+        vt.WingSection(y_frac=0.0, chord=1.0),
+        vt.WingSection(y_frac=1.0, chord=1.0),
+    ],
+)
+aircraft = vt.Aircraft(surfaces=[wing], ref_point=np.array([0.25, 0.0, 0.0]))
+settings = vt.SolverSettings(solver_type="vlm", n_panels=12, n_chord=8)
+cond = vt.FlightCondition(V_inf=30.0, alpha=np.radians(4.0))
+
+res = vt.dynamic_derivatives(aircraft, cond, settings, k=(0.0, 0.05, 0.2), controls=("flap",))
+
+print("k -> 0 CL_delta_flap:", res.k0["CL_delta_flap"])          # 2.505200 1/rad
+print("k -> 0 CL_delta_dot_flap:", res.k0["CL_delta_dot_flap"])  # -2.026268 1/rad
+print("k = 0.2 CL_delta_flap:", res.derivatives["CL_delta_flap"][2])          # 2.248831 1/rad
+print("k = 0.2 Cm_delta_dot_flap:", res.derivatives["Cm_delta_dot_flap"][2])  # -0.464913 1/rad
+```
+
+For each requested control name `<name>` and each coefficient `C` in `CL`, `CD`, `CY`, `Cl`, `Cm` and `Cn`, the result adds:
+
+| Key / Field | Definition | Unit |
+| --- | --- | --- |
+| `<C>_delta_<name>` | `Re H_delta[name][C](k)`, control effectiveness derivative (exact steady limit at `k = 0`) | 1/rad |
+| `<C>_delta_dot_<name>` | `Im H_delta[name][C](k) / k`, control-rate derivative per unit `delta_dot c_ref / (2 V_inf)` | 1/rad |
+| `res.H_delta[name][C]` | Complex response per unit control deflection, shape `(n_k,)` | 1/rad |
+
+- `res.k0` holds `<C>_delta_<name>` from the exact steady ring solve and `<C>_delta_dot_<name>` from the small-frequency probe `k = 1e-3`.
+- `res.to_dict()` includes the new keys in `"k0"`, `"derivatives"` and `"responses"["H_delta"]`.
+- When `controls=()` (the default), no control keys are added and all longitudinal results stay unchanged.
+- Unknown control names or section-mode controls (`n_chord = 1`) raise `InputError`.
+
 ## Mesh, wake and trust notes
 
 - Use at least 8 chordwise panels (`n_chord >= 8`) for unsteady pitching-moment derivatives (`Cm_q`, `Cm_alpha_dot`). A chordwise count below 8 adds a warning to `res.trust.warnings` and `res.trust_notes`, while keeping the steady trust score and rating of the mean state (`res.base.totals.trust`).
@@ -73,7 +122,7 @@ For each coefficient `C` in `CL`, `CD`, `CY`, `Cl`, `Cm` and `Cn`, both `res.k0`
 
 - Only the vortex-lattice solver (`solver_type="vlm"` or `"auto"`) is supported. Lifting-line and Fourier solvers are refused with `InputError`.
 - Incompressible flow only: Mach numbers above 0.3 (either stated in `condition.mach` or from `V_inf / a`) are refused with `InputError`.
-- Geometries that cannot map cleanly to four-corner vortex rings (surface junctions, curved mean-line leg chains with `n_chord > 1`, and deflected chordwise flaps with hinge kinks) are refused with `InputError`.
-- Longitudinal motions (pitch and heave) only. Lateral dynamic rates (`p`, `r`, `beta_dot`) are not yet included.
+- Cambered mean-line leg chains, deflected chordwise flaps and joined surfaces (such as winglets) are supported via bent ring side polylines. Harmonic control-surface modes require a chordwise lattice (`n_chord >= 2`); section-mode controls (`n_chord = 1`) raise `InputError`.
+- Longitudinal rigid-body motions (pitch and heave) plus named chordwise control deflections only. Lateral rigid-body dynamic rates (`p`, `r`, `beta_dot`) are not yet included.
 
 See `examples/13_dynamic_derivatives.py` for a runnable script and the [theory chapter](../theory/unsteady_vortex_rings.md) for the equations, definitions and verification.

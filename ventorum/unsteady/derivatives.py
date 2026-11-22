@@ -210,6 +210,11 @@ class DynamicDerivativesResult:
     precision : str
         Kernel arithmetic precision of the harmonic solve: ``"float64"`` or
         ``"float32"``.
+    H_delta : dict[str, dict[str, numpy.ndarray]]
+        Complex control-surface response [1/rad] per unit deflection for each
+        requested control name and each coefficient in
+        ``(CL, CD, CY, Cl, Cm, Cn)``, shape ``(n_k,)``, dtype ``complex128``.
+        Empty when no controls are requested.
     """
 
     k: np.ndarray
@@ -244,6 +249,7 @@ class DynamicDerivativesResult:
     notes: list[str] = field(default_factory=list)
     device: str = "cpu"
     precision: str = "float64"
+    H_delta: dict[str, dict[str, np.ndarray]] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         """Return a strict JSON-compatible dictionary of the result."""
@@ -265,6 +271,17 @@ class DynamicDerivativesResult:
                 "recommendations": list(self.trust.recommendations),
             }
 
+        responses: dict[str, Any] = {
+            "H_theta": _pack_complex(self.H_theta),
+            "H_z": _pack_complex(self.H_z),
+            "H_pureq": _pack_complex(self.H_pureq),
+        }
+        if self.H_delta:
+            responses["H_delta"] = {
+                name: _pack_complex(mapping)
+                for name, mapping in self.H_delta.items()
+            }
+
         return {
             "k": [_json_float(float(v)) for v in self.k],
             "k0": {name: _json_float(val) for name, val in self.k0.items()},
@@ -272,11 +289,7 @@ class DynamicDerivativesResult:
                 name: [_json_float(float(v)) for v in arr]
                 for name, arr in self.derivatives.items()
             },
-            "responses": {
-                "H_theta": _pack_complex(self.H_theta),
-                "H_z": _pack_complex(self.H_z),
-                "H_pureq": _pack_complex(self.H_pureq),
-            },
+            "responses": responses,
             "mean_state": {c: _json_float(v) for c, v in self.mean_state.items()},
             "CL0": _json_float(self.CL0),
             "Cm0": _json_float(self.Cm0),
@@ -543,14 +556,16 @@ def dynamic_derivatives(
     k: Sequence[float] | np.ndarray = (0.0,),
     wake_chords: float = 5.0,
     axes: str = "body",
+    controls: Sequence[str] = (),
 ) -> DynamicDerivativesResult:
-    """Compute frequency-dependent longitudinal dynamic derivatives via harmonic vortex rings.
+    """Compute frequency-dependent longitudinal and control dynamic derivatives via harmonic vortex rings.
 
-    Solves small-amplitude harmonic pitch and heave motions about the steady
-    mean flight state *condition* on a vortex-ring lattice, in free air or in
-    flat-ground effect (``condition.h`` set), and returns the equivalent
-    oscillatory derivatives (Rodden and Giesing 1970) at every requested
-    reduced frequency ``k`` and in the ``k -> 0`` limit.
+    Solves small-amplitude harmonic pitch, heave and optional named
+    control-surface deflection motions about the steady mean flight state
+    *condition* on a vortex-ring lattice, in free air or in flat-ground effect
+    (``condition.h`` set), and returns the equivalent oscillatory derivatives
+    (Rodden and Giesing 1970) at every requested reduced frequency ``k`` and in
+    the ``k -> 0`` limit.
 
     Parameters
     ----------
@@ -579,22 +594,31 @@ def dynamic_derivatives(
         Moment axis system of the mean state, held fixed during the harmonic
         motion: ``"body"`` (default) or ``"stability"``. Force coefficients
         ``CL``, ``CD`` and ``CY`` are relative to the free stream in both sets.
+    controls : sequence of str, optional
+        Control-surface names to solve as unit harmonic deflection modes
+        [1/rad] about the built lattice deflection. For each name, the result
+        adds ``H_delta[name]`` and equivalent oscillatory derivatives
+        ``"<C>_delta_<name>"`` and ``"<C>_delta_dot_<name>"`` [1/rad]
+        (nondimensional rate ``delta_dot c_ref / (2 V_inf)``). Requires a
+        chordwise lattice (``n_chord >= 2``). Default ``()``.
 
     Returns
     -------
     DynamicDerivativesResult
         Reduced frequencies, ``k -> 0`` limit derivatives, per-``k``
-        derivatives, complex responses ``H_theta``, ``H_z`` and ``H_pureq``,
-        steady mean state, trust assessment, trust notes and mesh metadata.
+        derivatives, complex responses ``H_theta``, ``H_z``, ``H_pureq`` and
+        ``H_delta``, steady mean state, trust assessment, trust notes and mesh
+        metadata.
 
     Raises
     ------
     InputError
         If *k* is empty, negative or non-finite; *wake_chords* is non-positive
-        or non-finite; *axes* is unknown; *settings.solver_type* is not VLM;
-        Mach is above the incompressible limit (0.3); or the lattice is
-        refused by the ring-lattice builder (for example curved mean-line leg
-        chains, deflected chordwise flaps or surface junctions).
+        or non-finite; *axes* is unknown; *controls* contains an unknown,
+        duplicate or section-mode control name; *settings.solver_type* is not
+        VLM; Mach is above the incompressible limit (0.3); or the lattice is
+        refused by the ring-lattice builder (for example lifting-line
+        collocation).
     GroundStrikeError
         If the geometry touches or crosses the ground plane when
         ``condition.h`` is set.
@@ -611,6 +635,7 @@ def dynamic_derivatives(
     k_req = _validate_k(k)
     wc = _validate_wake_chords(wake_chords)
     ax = _validate_axes(axes)
+    ctrl_names = _HarmonicRingSystem._validate_controls(controls)
 
     ac = Aircraft(name="SingleWing", surfaces=[geometry]) if isinstance(geometry, LiftingSurface) else geometry
     ac = ac.clone()
@@ -626,6 +651,14 @@ def dynamic_derivatives(
     _check_incompressible_mach(condition)
     validate_flight_condition(condition)
     validate_aircraft(ac)
+
+    if ctrl_names:
+        known_ctrl = set(ac.control_names())
+        for cname in ctrl_names:
+            if cname not in known_ctrl:
+                raise InputError(
+                    f"Unknown control surface {cname!r}; available controls: {sorted(known_ctrl)}."
+                )
 
     solver = make_solver("vlm")
     fp = lattice_cache.surfaces_fingerprint(ac)
@@ -656,6 +689,7 @@ def dynamic_derivatives(
         ground=ground,
         ref_point=rp,
         wake_chords=wc,
+        controls=ctrl_names,
         wake_alignment=sett.wake_alignment,
     )
     resp = system.solve(k_solve)
@@ -688,6 +722,14 @@ def dynamic_derivatives(
     k0_q_vec = np.array([getattr(resp.k0_pitch_rate, c) for c in _COEFFS], dtype=np.float64)
     k0_h_vec = np.array([getattr(resp.k0_heave, c) for c in _COEFFS], dtype=np.float64)
     mean_vec = np.array([getattr(resp.mean_state, c) for c in _COEFFS], dtype=np.float64)
+    H_ctrl_all = {
+        cname: np.column_stack([getattr(resp.controls[cname], c) for c in _COEFFS])
+        for cname in ctrl_names
+    }
+    k0_ctrl_vec = {
+        cname: np.array([getattr(resp.k0_controls[cname], c) for c in _COEFFS], dtype=np.float64)
+        for cname in ctrl_names
+    }
 
     # Apply stability-axes transform when requested (via rate_axes_transform).
     if ax == "stability":
@@ -699,6 +741,9 @@ def dynamic_derivatives(
         k0_q_vec = _transform_six_to_stability(k0_q_vec, rot_bs, b_ref, c_ref)
         k0_h_vec = _transform_six_to_stability(k0_h_vec, rot_bs, b_ref, c_ref)
         mean_vec = _transform_six_to_stability(mean_vec, rot_bs, b_ref, c_ref)
+        for cname in ctrl_names:
+            H_ctrl_all[cname] = _transform_six_to_stability(H_ctrl_all[cname], rot_bs, b_ref, c_ref)
+            k0_ctrl_vec[cname] = _transform_six_to_stability(k0_ctrl_vec[cname], rot_bs, b_ref, c_ref)
 
     # Exact k -> 0 limits for alpha, q, h; small-k probe at k_probe for alpha_dot and h_dot.
     k0_alpha_dot_vec = H_th_all[probe_idx].imag / k_probe - k0_q_vec
@@ -758,6 +803,32 @@ def dynamic_derivatives(
         H_z_dict[coeff] = H_z_req[:, ic].copy()
         H_pureq_dict[coeff] = H_pq_req[:, ic].copy()
 
+    H_delta_dict: dict[str, dict[str, np.ndarray]] = {}
+    for cname in ctrl_names:
+        H_d_all = H_ctrl_all[cname]
+        k0_d_vec = k0_ctrl_vec[cname]
+        k0_ddot_vec = H_d_all[probe_idx].imag / k_probe
+        H_d_req = H_d_all[:n_req]
+
+        c_d_arr = np.empty((n_req, 6), dtype=np.float64)
+        c_ddot_arr = np.empty((n_req, 6), dtype=np.float64)
+        for ik in range(n_req):
+            kf = float(k_req[ik])
+            if kf == 0.0:
+                c_d_arr[ik] = k0_d_vec
+                c_ddot_arr[ik] = k0_ddot_vec
+            else:
+                c_d_arr[ik] = H_d_req[ik].real
+                c_ddot_arr[ik] = H_d_req[ik].imag / kf
+
+        H_delta_dict[cname] = {}
+        for ic, coeff in enumerate(_COEFFS):
+            k0_map[f"{coeff}_delta_{cname}"] = float(k0_d_vec[ic])
+            k0_map[f"{coeff}_delta_dot_{cname}"] = float(k0_ddot_vec[ic])
+            derivs[f"{coeff}_delta_{cname}"] = c_d_arr[:, ic].copy()
+            derivs[f"{coeff}_delta_dot_{cname}"] = c_ddot_arr[:, ic].copy()
+            H_delta_dict[cname][coeff] = H_d_req[:, ic].copy()
+
     mean_state = {coeff: float(mean_vec[ic]) for ic, coeff in enumerate(_COEFFS)}
 
     trust, trust_notes = _build_unsteady_trust(
@@ -776,6 +847,12 @@ def dynamic_derivatives(
         f"C_alpha_dot and C_h_dot are evaluated at the small-frequency probe k = {k_probe:g}.",
         f"Moments in '{ax}' axes of the mean state, held fixed; CL, CD and CY are relative to the free stream.",
     ]
+    if ctrl_names:
+        notes.append(
+            f"Harmonic control-surface modes for {list(ctrl_names)}: <C>_delta_<name> = Re(H_delta) [1/rad] "
+            f"(exact steady limit at k = 0) and <C>_delta_dot_<name> = Im(H_delta) / k [1/rad] per unit "
+            f"delta_dot c_ref / (2 V_inf) (k -> 0 limit evaluated at k = {k_probe:g})."
+        )
     if ground is not None:
         notes.append(
             f"Ground effect at h={float(condition.h):g} m (h/c_ref={float(condition.h) / c_ref:.4g}): "
@@ -822,4 +899,5 @@ def dynamic_derivatives(
         notes=notes,
         device=str(resp.device),
         precision=str(resp.precision),
+        H_delta=H_delta_dict,
     )
