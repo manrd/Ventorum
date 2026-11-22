@@ -53,6 +53,7 @@ a minor version can change a public interface.
 
 ### Added
 
+- Harmonic control-surface deflection mode on CPU and GPU in the harmonic vortex-ring solver (`ventorum.unsteady.harmonic._solve_harmonic_rings`) and `controls=()` keyword on `ventorum.dynamic_derivatives`, returning complex control responses (`H_delta[name]`) and equivalent oscillatory control and control-rate derivatives (`<C>_delta_<name>`, `<C>_delta_dot_<name>`) with their `k -> 0` limits.
 - Six-axis prescribed rigid-body motion and moving control surfaces (rotating flap ring geometry and ground images about strip hinge axes) in the private time-domain vortex-ring solver (`ventorum.unsteady.timedomain._solve_time_rings`).
 - Private prescribed-wake time-domain vortex-ring solver (`ventorum.unsteady.timedomain._solve_time_rings`)
   for rigid-body heave and pitch motions in free air and flat-ground effect; no public interface yet.

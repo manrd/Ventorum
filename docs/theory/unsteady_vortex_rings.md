@@ -154,6 +154,56 @@ Here $C_h$ is per unit $h / c_\text{ref}$, $C_{\dot h}$ is per unit $(\mathrm dz
 
 **Stability axes.** With `axes="stability"`, forces remain relative to the mean free stream and moments rotate by the mean angle of attack $\alpha$ about the body $y$ axis via `ventorum.solvers.rate_derivatives.rate_axes_transform`. Because the rotation is about $y$, the pitch rate $q$ and pitching moment $C_m$ are invariant, while $(C_l, C_n)$ rotate by $\alpha$.
 
+### Harmonic control-surface mode
+
+For each named chordwise control surface (`n_chord >= 2`), the solver adds a unit harmonic deflection mode about the built lattice deflection $\delta_0$ [rad]:
+
+```{math}
+\delta(t) = \delta_0 + \mathrm{Re}\left(\hat\delta\,e^{\mathrm i \omega t}\right), \qquad \hat\delta = 1\ \text{rad}.
+```
+
+The mode uses the same strip hinge points $\mathbf H_{L,s}, \mathbf H_{R,s}, \mathbf H_{f,s}$ [m], unit hinge axes $\hat{\mathbf a}_{L,s}, \hat{\mathbf a}_{R,s}, \hat{\mathbf a}_{f,s}$ [-], sealed join edge weights $(c_{L,s}, c_{R,s})$, bent hinge-crossing side polylines and `ControlSurface.symmetric` sign rule as the moving-flap geometry of `ventorum.unsteady.timedomain` (`_build_control_rig`, `_deform_body_geometry`, `_compute_flap_velocities`). Nodes aft of the hinge line rotate about the strip hinge axis; hinge nodes on bent side polylines stay fixed.
+
+**Boundary condition and geometric terms.** Linearising the impermeability condition about the steady mean state $(\delta_0, \boldsymbol\Gamma_0)$ gives the complex right-hand side on the same Woodbury system $\left(\mathbf A_{bb} + \mathbf W(k)\,\mathbf E_\text{te}^T\right)\hat{\boldsymbol\Gamma}_\delta = \hat{\mathbf b}_\delta(k)$:
+
+```{math}
+\hat{\mathbf b}_\delta(k)
+= -\mathbf V_0 \cdot \frac{\partial \mathbf n_{bc}}{\partial \delta}
++ \mathrm i \omega \left(\mathbf v_{\text{fl},cp} \cdot \mathbf n_{bc,0}\right)
+- \frac{\partial \mathbf A_\text{steady}}{\partial \delta}\,\boldsymbol\Gamma_0
+- \Delta\mathbf v_{n,\text{wake}}^{\text{trav}}(k),
+```
+
+where:
+
+- On each panel $p$ aft of the hinge on strip $s$, the unit normal rotates at rate $\partial \mathbf n_{bc,p} / \partial \delta = (c_{f,s}\hat{\mathbf a}_{f,s}) \times \mathbf n_{bc,p,0}$ with $c_{f,s} = c_{L,s} + f_{cp,s}(c_{R,s} - c_{L,s})$.
+- The unit hinge-rate velocity is $\mathbf v_{\text{fl},cp,p} = (c_{f,s}\hat{\mathbf a}_{f,s}) \times (\mathbf p_{cp,p} - \mathbf H_{f,s})$ [m/rad] at collocation points aft of the hinge, giving surface velocity $\mathrm i \omega\,\mathbf v_{\text{fl},cp,p}$ [m/(s rad)].
+- For a loaded mean state ($\boldsymbol\Gamma_0 \neq \mathbf 0$), the rigid $k = 0$ geometric influence term $-(\partial \mathbf A_\text{steady} / \partial \delta)\,\boldsymbol\Gamma_0$ captures the movement of the flap bound rings, bent hinge side polylines, flap collocation points and normals, trailing-edge steady wake start corners, and their flat-ground images. It is evaluated by central finite differences of `_deform_body_geometry` with default step $\varepsilon_\delta = 10^{-5}$ rad (`fd_step_delta`, clamped near the ground so $\varepsilon_\delta L_\text{max} \le 0.01 h_\text{min}$).
+- The trailing-edge closure corners move by $\mathbf u_{\text{flap},L,s} = (c_{L,s}\hat{\mathbf a}_{L,s}) \times (\mathbf p_{\text{TE},L,s} - \mathbf H_{L,s})$ and $\mathbf u_{\text{flap},R,s} = (c_{R,s}\hat{\mathbf a}_{R,s}) \times (\mathbf p_{\text{TE},R,s} - \mathbf H_{R,s})$ [m/rad]. At finite frequency ($k > 0$), the shed steady wake acquires the same travelling-wave displacement $\mathbf u_{\text{flap},e,s}(e^{-\mathrm i \omega m \Delta t} - 1)$ on the discrete wake rows and $\mathbf u_{\text{flap},e,s}(e^{-\mathrm i \kappa (L_w + \xi)} - 1)$ on the semi-infinite far wake (with reflected displacements in ground effect).
+
+**Linearised loads.** The control-mode force and moment combine:
+
+1. Perturbation circulation $\hat{\boldsymbol\Gamma}_\delta$ times mean local velocity on the mean bound segments and chordwise legs.
+2. Mean circulation $\boldsymbol\Gamma_0$ times the dynamic perturbation velocity (hinge-rate velocity $-\mathrm i \omega\,\mathbf v_{\text{fl,load}}$, perturbation bound and wake induced velocities, and the travelling-wave steady wake load delta).
+3. Mean circulation $\boldsymbol\Gamma_0$ times the deformed flap geometry and steady induced velocity gradient, evaluated by elementwise central finite differences of the mean Kutta-Joukowski segment forces and moments at $\delta_0 \pm \varepsilon_\delta$ (capturing rotated flap legs, rotated leg-force normals, moved load points, moved moment arms, and ground images).
+4. Apparent-mass loads $\rho\,(\mathrm i \omega \hat\Gamma_{\delta,p})\,\mathbf A_{p,0}$ over the physical ring areas (including bent hinge rings) and the trailing-edge boundary correction at the mean trailing edge. Because $\dot{\boldsymbol\Gamma}_0 = \mathbf 0$ and $\Delta\gamma_{\text{TE},0} = 0$, the first-order variations of $\mathbf A_p(\delta)$ and $\mathbf l_\text{TE}(\delta)$ do not enter these two terms.
+
+**Equivalent oscillatory control derivatives and $k \to 0$ limit.** For each coefficient $C \in \{C_L, C_D, C_Y, C_l, C_m, C_n\}$ and control name `<name>`, let $H_\delta(k)$ [1/rad] be the complex response per unit deflection. The equivalent oscillatory control and control-rate derivatives (Rodden and Giesing 1970; Etkin and Reid 1996) are:
+
+```{math}
+C_{\delta}(k) = \mathrm{Re}\,H_\delta(k) \quad [1/\text{rad}], \qquad
+C_{\dot\delta}(k) = \frac{\mathrm{Im}\,H_\delta(k)}{k} \quad [1/\text{rad}],
+```
+
+where the nondimensional deflection rate is $\dot\delta\,c_\text{ref} / (2 V_\infty)$ [rad]. At $k = 0$, $C_\delta(0)$ comes from the exact real steady solve $\mathbf A_\text{steady}\boldsymbol\Gamma_{\delta,0} = -\mathbf V_0 \cdot (\partial\mathbf n_{bc}/\partial\delta) - (\partial\mathbf A_\text{steady}/\partial\delta)\boldsymbol\Gamma_0$ (`k0_controls[name]`), which matches `ventorum.control_derivatives` on the same lattice. The $k \to 0$ control-rate limit $C_{\dot\delta}(0)$ is evaluated at the small-frequency probe $k_\text{probe} = 10^{-3}$ (`K_ZERO_PROBE`), matching $C_{\dot\alpha}(0)$ and $C_{\dot h}(0)$.
+
+**Verification summary.** On a rectangular $AR = 6$ wing with a full-span 25 % chord flap (`hinge_x_c = 0.75`):
+
+- At $k \to 0$ with `te_extension_fraction = 0.0` (`CORE_RADIUS_FRACTION = 1e-4`), `k0_controls["flap"]` agrees with `ventorum.control_derivatives` (`step_deg = 0.01`) to within $10^{-7}$ relative on $C_L, C_Y, C_l, C_m, C_n$ and near-field $C_D$ in free air and at $h/c = 0.5$ for $\alpha_0 = 0^\circ$ and $4^\circ$.
+- Against the prescribed-wake time-domain solver (`_solve_time_rings`, $10^{-4}$ rad sinusoidal flap), the first harmonics of $C_L$ and $C_m$ agree within $0.1\%$ at $k \le 0.2$ and within $1\%$ at $k = 0.5$ in free air and at $h/c = 0.5$.
+- On the same meshes ($n_c = 4, 8, 16$, $\Delta x_w = \Delta x_\text{TE}$) at $k = 0.5$, $\alpha_0 = 4^\circ$, the difference between the time-domain and harmonic flap first harmonics decreases at second order ($1.7 \le p \le 2.3$) for both $C_L$ and $C_m$, confirming the $O(\Delta t^2)$ accuracy of the second-order backward difference.
+- On the documented moving-flap meshes at $\alpha_0 = 0^\circ$ (`n_chord = 4, 8, 16`), relative differences between time-domain and harmonic first harmonics are $1.35 \times 10^{-5}$ to $8.63 \times 10^{-6}$ ($C_L$) and $1.61 \times 10^{-5}$ to $8.70 \times 10^{-7}$ ($C_m$) at $k = 0.05$, and fall at second order from $6.43 \times 10^{-4}$ to $5.49 \times 10^{-5}$ ($C_L$) and $9.31 \times 10^{-4}$ to $6.43 \times 10^{-5}$ ($C_m$) at $k = 0.2$.
+
 ### Two-dimensional thin-airfoil limits
 
 For a two-dimensional flat plate pitching about the quarter chord ($x_\text{ref} = c/4$, pivot parameter $a = -1/2$), Theodorsen (1935, NACA Report 496) gives the circulatory moment lever arm $a + 1/2 = 0$, so the pitching moment is independent of Theodorsen's circulation function $C(k)$:
@@ -169,16 +219,16 @@ and the quasi-steady lift-rate limit as $k \to 0$ is $C_{L_q} = C_{L_\alpha} = 2
 ## Assumptions
 
 - Incompressible, inviscid, attached potential flow (Mach $\le 0.3$).
-- Thin lifting surfaces with small-amplitude harmonic pitch and heave perturbations about a steady mean state.
+- Thin lifting surfaces with small-amplitude harmonic pitch, heave and chordwise control-surface perturbations about a steady mean state.
 - Flat, prescribed wake marching along the mean wake direction (no wake roll-up or free-wake deformation).
 - Flat, rigid ground plane with no ground boundary layer when `condition.h` is set.
-- Longitudinal motions only (pitch $\theta$ and heave $z$). Lateral angular rates and sideslip rate are not yet modelled.
+- Longitudinal rigid-body motions (pitch $\theta$ and heave $z$) plus named chordwise control deflections. Lateral rigid-body angular rates and sideslip rate are not yet modelled.
 
 ## Envelope
 
 - **Solver scope.** Only the vortex-lattice solver (`solver_type="vlm"` or `"auto"`) is accepted. Lifting-line and Fourier solvers are refused with `InputError`.
 - **Compressibility.** Mach numbers above `MACH_LIMIT_INCOMPRESSIBLE` ($0.3$), either stated in `condition.mach` or from $V_\infty / a$, are refused with `InputError`.
-- **Refused ring lattices.** Geometries that require a topology decision before mapping to four-corner vortex rings are refused with `InputError` by `ventorum.unsteady.rings.build_ring_lattice`: surface junctions with joined edges (for example a wing with a winglet), curved mean-line leg chains (`n_chord > 1` on cambered sections), and deflected chordwise flaps with non-collinear hinge kinks.
+- **Ring-lattice geometry.** `ventorum.unsteady.rings.build_ring_lattice` accepts planar wings, cambered mean-line leg chains, deflected chordwise flaps (via bent side polylines) and joined surfaces (such as winglets). Lifting-line collocation (`collocation="llt"`) and section-mode (`n_chord = 1`) control modes are refused with `InputError`.
 - **Ground clearance.** A configuration that touches or crosses the ground plane raises `GroundStrikeError`.
 - **Trust notes.** The steady trust score and rating of the mean state (`base.totals.trust`) are preserved. Unsteady diagnostic rules add a warning when $n_c < 8$, and notes when $\Delta x_{\text{TE},s} / \Delta x_w \notin [0.8, 1.25]$, when $k > 1.0$, or when `wake_chords < 5.0` (see [Trust score and error bars](trust_score.md)).
 
@@ -195,11 +245,14 @@ and the quasi-steady lift-rate limit as $k \to 0$ is $C_{L_q} = C_{L_\alpha} = 2
 
 - [V16](../verification_report.md) in the verification report: steady $k \to 0$ limits (default and exact-equivalence settings), mirror-wing parity, Woodbury against direct complex LU, AR 40 mid-span heave lift against Theodorsen $C(k)$, chordwise convergence order with the trailing-edge correction, and 5-chord against 40-chord far-wake tail accuracy.
 - `tests/test_unsteady_harmonic.py`: Woodbury against direct complex LU parity to round-off; explicit mirror-wing parity in ground effect with and without the 3D tail; exact-equivalence $k \to 0$ parity against `ventorum.analyze`, `height_derivatives` and `rate_derivatives`; loaded-mean-state finite-difference step independence; trailing-edge load correction (zero at $k = 0$ and second-order chordwise convergence of $\mathrm{Re}(C_{m_{\dot\alpha}})$); 5-chord tail accuracy against 40 chords; AR 40 mid-span strip lift against Theodorsen's $C(k)$.
-- `tests/test_dynamic_derivatives.py`: default-settings $k \to 0$ parity against `ventorum.analyze`, `rate_derivatives` and `height_derivatives`; loaded ground-effect smoothness of $C_q(k)$ and $C_{\dot\alpha}(k)$; free-air identities ($C_h = 0$ and $C_{\dot h} + C_\alpha = 0$); stability-axes rotation; AR 40 rectangular wing against Theodorsen thin-airfoil limits ($-\pi/4$, $-\pi/2$, $2\pi$); strict JSON `to_dict()`; all input checks and all four trust rules.
+- `tests/test_unsteady_flap_mode.py`: control-surface $k \to 0$ parity against `ventorum.control_derivatives`; Woodbury against direct LU and finite-difference step independence; ground mirror parity against the explicit two-wing model; antisymmetric aileron symmetry; periodic-limit agreement and second-order time-step convergence at $k = 0.5$ against `_solve_time_rings`; comparison with the documented moving-flap first harmonics.
+- `tests/test_dynamic_derivatives.py`: default-settings $k \to 0$ parity against `ventorum.analyze`, `rate_derivatives`, `height_derivatives` and `control_derivatives`; loaded ground-effect smoothness of $C_q(k)$ and $C_{\dot\alpha}(k)$; free-air identities ($C_h = 0$ and $C_{\dot h} + C_\alpha = 0$); stability-axes rotation (including control modes); AR 40 rectangular wing against Theodorsen thin-airfoil limits ($-\pi/4$, $-\pi/2$, $2\pi$); strict JSON `to_dict()`; all input checks and all four trust rules.
+- `tests/test_gpu_ring_kernels.py`: GPU against CPU parity in float64 and float32 for the ring kernels, far-wake tail, heave/pitch modes and control-surface modes.
 - `tests/test_agent_dynamic_derivatives.py`: numeric parity between `ventorum.agent.tools.dynamic_derivatives`, MCP `tools/call` and `ventorum.dynamic_derivatives`.
 
 ## References
 
+- B. Etkin and L. D. Reid, *Dynamics of Flight: Stability and Control*, 3rd ed., Wiley, 1996 (control and control-rate derivatives; cited, original text not read directly).
 - J. Katz and A. Plotkin, *Low-Speed Aerodynamics*, 2nd ed., Cambridge University Press, 2001, chapters 12 and 13 (vortex-ring lattice, trailing-edge closure, unsteady Bernoulli loads and method of images; cited, original text not read directly).
 - K. C. Hall, "Eigenanalysis of unsteady flows about airfoils, cascades, and wings", *AIAA Journal* 32(12), 1994, pp. 2426-2432 (harmonic wake phase relation; cited through Parenteau 2021, original paper not read directly).
 - M. Parenteau, *A Non-Linear Frequency Domain Potential Flow Model for Compressible, Transonic and Viscous Aeroelastic Analyses*, PhD thesis, Polytechnique Montreal, 2021, chapter 4 (frequency-domain vortex lattice, rank-$n_s$ Woodbury update and loaded-mean-state terms; cited through module formulation, original thesis not read directly).
