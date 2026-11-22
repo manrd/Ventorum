@@ -331,14 +331,25 @@ def _slice_rc_rows(rc: np.ndarray | float, i0: int, i1: int) -> np.ndarray | flo
     return rc
 
 
-def _physical_ring_areas(lattice: VortexLattice, rings: RingLattice) -> tuple[np.ndarray, np.ndarray]:
-    """Return physical surface area vectors [m^2] and centroids [m] of every bound ring.
+def _physical_ring_areas(
+    lattice: VortexLattice,
+    rings: RingLattice,
+    ref_point: np.ndarray | None = None,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray | None]:
+    """Return physical surface area vectors [m^2], centroids [m] and optional moment vectors [m^3].
 
-    Each interior ring ``p`` spans the quadrilateral from its own bound segment
-    ``(a[p], b[p])`` to the next bound segment ``(a[p + 1], b[p + 1])``. Each
-    trailing-edge ring spans from ``(a[p], b[p])`` to the physical trailing
-    edge ``(te_left[s], te_right[s])`` so the apparent-mass integral covers
-    exactly the physical chord (length ``0.75 dx_TE`` on the last panel).
+    Each interior ring ``p`` spans from its own bound segment ``(a[p], b[p])``
+    to the next bound segment ``(a[p + 1], b[p + 1])``. Each trailing-edge ring
+    spans from ``(a[p], b[p])`` to the physical trailing edge
+    ``(te_left[s], te_right[s])`` so the apparent-mass integral covers exactly
+    the physical chord (length ``0.75 dx_TE`` on the last panel).
+
+    When *rings* carries bent side polylines (camber or flap hinge nodes), each
+    bent ring is triangulated across its intermediate physical nodes so the
+    apparent-mass force and moment integrate over the bent surface rather than
+    cutting straight across the camber or hinge. When no ring has intermediate
+    side nodes, the third return value is None and the four-corner path is
+    unchanged.
     """
     q0 = rings.corners[:, 0, :]
     q1 = rings.corners[:, 1, :]
@@ -357,7 +368,65 @@ def _physical_ring_areas(lattice: VortexLattice, rings: RingLattice) -> tuple[np
     m1 = np.linalg.norm(a1, axis=1)
     m2 = np.linalg.norm(a2, axis=1)
     centroid = (m1[:, None] * c1 + m2[:, None] * c2) / np.maximum((m1 + m2)[:, None], 1e-300)
-    return area_vec, centroid
+
+    if not rings.has_side_nodes:
+        return area_vec, centroid, None
+
+    rp = np.zeros(3, dtype=np.float64) if ref_point is None else np.asarray(ref_point, dtype=np.float64)
+    area_moment = cross3(centroid - rp[None, :], area_vec)
+    sn = rings.side_nodes
+    sc = rings.side_counts
+    te_mask = rings.te_mask
+    n_p = rings.n_panels
+    for p in range(n_p):
+        cr = int(sc[p, 0])
+        cl = int(sc[p, 1])
+        if cr == 0 and cl == 0:
+            continue
+        r_pts = [sn[p, 0, k] for k in range(cr)]
+        l_pts = [sn[p, 1, k] for k in range(cl)]
+        # Exclude the physical TE node from the intermediate list on extended TE rings.
+        if te_mask[p]:
+            if r_pts and np.allclose(r_pts[-1], q2[p], atol=1e-13, rtol=1e-13):
+                r_pts.pop()
+            if l_pts and np.allclose(l_pts[0], q3[p], atol=1e-13, rtol=1e-13):
+                l_pts.pop(0)
+        if not r_pts and not l_pts:
+            continue
+
+        # Order both side chains from front (bound) to physical rear.
+        L = [q0[p], *l_pts[::-1], q3[p]]
+        R = [q1[p], *r_pts, q2[p]]
+        a_sum = np.zeros(3, dtype=np.float64)
+        m_sum = np.zeros(3, dtype=np.float64)
+        c_num = np.zeros(3, dtype=np.float64)
+        w_sum = 0.0
+        il, ir = 0, 0
+        nl, nr = len(L) - 1, len(R) - 1
+        while il < nl or ir < nr:
+            if il < nl and ir < nr:
+                tris = ((L[il], R[ir + 1], R[ir]), (L[il], L[il + 1], R[ir + 1]))
+                il += 1
+                ir += 1
+            elif ir < nr:
+                tris = ((L[il], R[ir + 1], R[ir]),)
+                ir += 1
+            else:
+                tris = ((L[il], L[il + 1], R[ir]),)
+                il += 1
+            for t0, t1, t2 in tris:
+                at = 0.5 * np.cross(t1 - t0, t2 - t0)
+                ct = (t0 + t1 + t2) / 3.0
+                mt = float(np.linalg.norm(at))
+                a_sum += at
+                m_sum += np.cross(ct - rp, at)
+                c_num += mt * ct
+                w_sum += mt
+        area_vec[p] = a_sum
+        centroid[p] = c_num / max(w_sum, 1e-300)
+        area_moment[p] = m_sum
+
+    return area_vec, centroid, area_moment
 
 
 def _build_wake_row_corners(
@@ -404,12 +473,16 @@ def _steady_velocity_at(
         rc_r = _slice_rc_rows(rc_ring, i0, i1)
         rc_w = _slice_rc_rows(rc_wake, i0, i1)
         if not image_only:
-            vr = ring_velocity(Pc, rings.corners, rc_r)
+            vr = ring_velocity(
+                Pc, rings.corners, rc_r, side_nodes=rings.side_nodes, side_counts=rings.side_counts,
+            )
             vw = steady_wake_velocity(Pc, rings.te_left, rings.te_right, wd, rc_w)
             v_out[i0:i1] += np.einsum("mni,n->mi", vr, gamma_rings)
             v_out[i0:i1] += np.einsum("msi,s->mi", vw, g_te)
         if img is not None:
-            vr_i = ring_velocity(Pc, img.corners, rc_r)
+            vr_i = ring_velocity(
+                Pc, img.corners, rc_r, side_nodes=img.side_nodes, side_counts=img.side_counts,
+            )
             vw_i = steady_wake_velocity(Pc, img.te_left, img.te_right, img.wake_dir, rc_w)
             v_out[i0:i1] += img.sign * np.einsum("mni,n->mi", vr_i, gamma_rings)
             v_out[i0:i1] += img.sign * np.einsum("msi,s->mi", vw_i, g_te)
@@ -606,12 +679,18 @@ class _HarmonicRingSystem:
         n_s = rings.n_strips
         te_idx = rings.te_indices
 
-        A_bb = ring_normal_influence(rings.cp, rings.normal_bc, rings.corners, self.rc_ring)
+        A_bb = ring_normal_influence(
+            rings.cp, rings.normal_bc, rings.corners, self.rc_ring,
+            side_nodes=rings.side_nodes, side_counts=rings.side_counts,
+        )
         A_bw_steady = steady_wake_normal_influence(
             rings.cp, rings.normal_bc, rings.te_left, rings.te_right, rings.wake_dir, self.rc_wake,
         )
         if self.img is not None:
-            A_bb += self.img.sign * ring_normal_influence(rings.cp, rings.normal_bc, self.img.corners, self.rc_ring)
+            A_bb += self.img.sign * ring_normal_influence(
+                rings.cp, rings.normal_bc, self.img.corners, self.rc_ring,
+                side_nodes=self.img.side_nodes, side_counts=self.img.side_counts,
+            )
             A_bw_steady += self.img.sign * steady_wake_normal_influence(
                 rings.cp, rings.normal_bc, self.img.te_left, self.img.te_right, self.img.wake_dir, self.rc_wake,
             )
@@ -687,8 +766,10 @@ class _HarmonicRingSystem:
             rings, rings.te_indices, self.rc_override, self.use_cross_surface_core,
         )
 
-        # Physical ring surface areas and centroids for apparent-mass loads.
-        self.area_vec, self.ring_centroid = _physical_ring_areas(lat, rings)
+        # Physical ring surface areas, centroids and bent moment vectors for apparent-mass loads.
+        self.area_vec, self.ring_centroid, self.area_moment_vec = _physical_ring_areas(
+            lat, rings, ref_point=self.ref_point,
+        )
         self.arm_ring = self.ring_centroid - self.ref_point[None, :]
 
         # Strip reference areas [m^2] for strip lift coefficient normalisation.
@@ -769,7 +850,10 @@ class _HarmonicRingSystem:
         # 2. Central finite differences of the steady system and steady induced velocity.
         h_min = None
         if self.ground is not None:
-            pts = np.vstack([self.lattice.all_points(), rings.corners.reshape(-1, 3)])
+            pts_list = [self.lattice.all_points(), rings.corners.reshape(-1, 3)]
+            if rings.side_nodes is not None:
+                pts_list.append(rings.side_nodes.reshape(-1, 3))
+            pts = np.vstack(pts_list)
             h_min = float(np.min(self.ground.height(pts)))
             if h_min <= 0.0:
                 h_min = float(np.min(self.ground.height(self.lattice.all_points())))
@@ -832,7 +916,10 @@ class _HarmonicRingSystem:
         rings = self.rings
         img = ground_image_rings(rings, ground, wake_dir=rings.wake_dir)
         v = img.sign * (
-            ring_normal_influence(rings.cp, rings.normal_bc, img.corners, self.rc_ring) @ self.Gamma_0
+            ring_normal_influence(
+                rings.cp, rings.normal_bc, img.corners, self.rc_ring,
+                side_nodes=img.side_nodes, side_counts=img.side_counts,
+            ) @ self.Gamma_0
         )
         v += img.sign * (
             steady_wake_normal_influence(
@@ -853,7 +940,10 @@ class _HarmonicRingSystem:
         if ground is not None:
             img = ground_image_rings(rings, ground, wake_dir=wd)
             v += img.sign * (
-                ring_normal_influence(rings.cp, rings.normal_bc, img.corners, self.rc_ring) @ self.Gamma_0
+                ring_normal_influence(
+                    rings.cp, rings.normal_bc, img.corners, self.rc_ring,
+                    side_nodes=img.side_nodes, side_counts=img.side_counts,
+                ) @ self.Gamma_0
             )
             v += img.sign * (
                 steady_wake_normal_influence(
@@ -878,7 +968,9 @@ class _HarmonicRingSystem:
                 vw = steady_wake_velocity(Pc, rings.te_left, rings.te_right, wd, rc_w)
                 v_out[i0:i1] += np.einsum("msi,s->mi", vw, g_te)
             if img is not None:
-                vr_i = ring_velocity(Pc, img.corners, rc_r)
+                vr_i = ring_velocity(
+                    Pc, img.corners, rc_r, side_nodes=img.side_nodes, side_counts=img.side_counts,
+                )
                 vw_i = steady_wake_velocity(Pc, img.te_left, img.te_right, img.wake_dir, rc_w)
                 v_out[i0:i1] += img.sign * np.einsum("mni,n->mi", vr_i, self.Gamma_0)
                 v_out[i0:i1] += img.sign * np.einsum("msi,s->mi", vw_i, g_te)
@@ -915,10 +1007,14 @@ class _HarmonicRingSystem:
             rc_r = _slice_rc_rows(self.rc_load_ring, i0, i1)
             rc_w = _slice_rc_rows(self.rc_load_wake, i0, i1)
 
-            vr = ring_velocity(Pc, rings.corners, rc_r)
+            vr = ring_velocity(
+                Pc, rings.corners, rc_r, side_nodes=rings.side_nodes, side_counts=rings.side_counts,
+            )
             vw = steady_wake_velocity(Pc, rings.te_left, rings.te_right, rings.wake_dir, rc_w)
             if self.img is not None:
-                vr += self.img.sign * ring_velocity(Pc, self.img.corners, rc_r)
+                vr += self.img.sign * ring_velocity(
+                    Pc, self.img.corners, rc_r, side_nodes=self.img.side_nodes, side_counts=self.img.side_counts,
+                )
                 vw += self.img.sign * steady_wake_velocity(
                     Pc, self.img.te_left, self.img.te_right, self.img.wake_dir, rc_w,
                 )
@@ -1106,9 +1202,13 @@ class _HarmonicRingSystem:
 
         # 4. Apparent-mass load: rho * (i omega Gamma_hat) * physical ring area vector.
         if include_apparent_mass and omega != 0.0:
-            F_am = (self.rho * 1j * omega * Gamma_hat)[:, None] * self.area_vec
+            coef_am = self.rho * 1j * omega * Gamma_hat
+            F_am = coef_am[:, None] * self.area_vec
             F_tot += np.sum(F_am, axis=0)
-            M_tot += np.sum(_cross3_c(self.arm_ring, F_am), axis=0)
+            if self.area_moment_vec is not None:
+                M_tot += np.sum(coef_am[:, None] * self.area_moment_vec, axis=0)
+            else:
+                M_tot += np.sum(_cross3_c(self.arm_ring, F_am), axis=0)
             np.add.at(strip_lift, rings.panel_strip, F_am @ self.L_0)
 
         # 5. Trailing-edge boundary load correction: Delta gamma_TE,s = f_TE,s (Gamma_w1,s - Gamma_TE,s).
