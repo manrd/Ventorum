@@ -319,20 +319,28 @@ def _release_panel3d() -> int:
     return int(panel_cache.release_gpu())
 
 
+def _release_ring_kernels() -> int:
+    """Release the registered GPU arrays of the vortex-ring kernels if loaded [B]."""
+    ring_kernels = sys.modules.get("ventorum.gpu.ring_kernels")
+    if ring_kernels is None:
+        return 0
+    return int(ring_kernels.release_gpu())
+
+
 def release() -> int:
-    """Release the GPU data of all cached lattices and of the 3D panel cache, and empty the PyTorch memory pool.
+    """Release cached GPU data (lattices, 3D panel cache and vortex-ring arrays) and empty the PyTorch pool.
 
     The CPU lattices stay in the lattice cache, and CPU-only entries stay in
-    the 3D panel cache. GPU entries of the 3D panel cache are removed because
-    they keep their matrices and factorizations on the GPU. A later GPU solve
-    builds its GPU data again; its results do not change. Without a GPU, the
-    function does nothing.
+    the 3D panel cache. GPU entries of the 3D panel cache and registered
+    vortex-ring device arrays are removed because they keep matrices and
+    factorisations on the GPU. A later GPU solve builds its GPU data again;
+    its results do not change. Without a GPU, the function does nothing.
 
     Returns
     -------
     int
-        The bytes of the released GPU data (cached lattices and 3D panel
-        cache) [B].
+        The bytes of the released GPU data (cached lattices, 3D panel cache
+        and vortex-ring arrays) [B].
     """
     freed = 0
     for lat in _cached_lattices():
@@ -340,5 +348,6 @@ def release() -> int:
         if drop(lat):
             freed += size
     freed += _release_panel3d()
+    freed += _release_ring_kernels()
     _empty_pool()
     return freed

@@ -204,7 +204,12 @@ class DynamicDerivativesResult:
     trust_notes : list[str]
         Unsteady trust warnings and notes triggered for this solve.
     notes : list[str]
-        Method notes and unsteady trust notes.
+        Method notes, device fallback notes and unsteady trust notes.
+    device : str
+        Execution device of the harmonic solve: ``"cpu"`` or ``"gpu"``.
+    precision : str
+        Kernel arithmetic precision of the harmonic solve: ``"float64"`` or
+        ``"float32"``.
     """
 
     k: np.ndarray
@@ -237,6 +242,8 @@ class DynamicDerivativesResult:
     trust: TrustScore | None
     trust_notes: list[str] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
+    device: str = "cpu"
+    precision: str = "float64"
 
     def to_dict(self) -> dict[str, Any]:
         """Return a strict JSON-compatible dictionary of the result."""
@@ -293,6 +300,8 @@ class DynamicDerivativesResult:
                 "dx_te_ratio_max": _json_float(float(np.max(self.dx_te_ratio))),
             },
             "k_zero_probe": _json_float(self.k_zero_probe),
+            "device": str(self.device),
+            "precision": str(self.precision),
             "trust": trust_dict,
             "trust_notes": list(self.trust_notes),
             "notes": list(self.notes),
@@ -774,6 +783,11 @@ def dynamic_derivatives(
             "and C_q is evaluated from the pure pitch-rate motion at constant height."
         )
     notes.extend(trust_notes)
+    for note in resp.notes:
+        if note not in notes:
+            notes.append(note)
+        if trust is not None and note not in trust.warnings:
+            trust.warnings.append(note)
 
     return DynamicDerivativesResult(
         k=k_req.copy(),
@@ -806,4 +820,6 @@ def dynamic_derivatives(
         trust=trust,
         trust_notes=trust_notes,
         notes=notes,
+        device=str(resp.device),
+        precision=str(resp.precision),
     )
