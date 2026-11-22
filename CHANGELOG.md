@@ -52,6 +52,8 @@ a minor version can change a public interface.
 
 ### Added
 
+- Private prescribed-wake time-domain vortex-ring solver (`ventorum.unsteady.timedomain._solve_time_rings`)
+  for rigid-body heave and pitch motions in free air and flat-ground effect; no public interface yet.
 - GPU vortex-ring, steady-wake and far-wake tail kernels (`ventorum.gpu.ring_kernels`, NVIDIA Warp and PyTorch)
   and a GPU path for the harmonic vortex-ring solver and `ventorum.dynamic_derivatives` (float64 and float32),
   with device and precision fields, CPU fallback notes and `gpu.release()` support.
