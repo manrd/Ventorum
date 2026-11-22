@@ -710,99 +710,51 @@ class _ControlRig:
     a_kink0: np.ndarray
     b_kink0: np.ndarray
     leg_normal0: np.ndarray
+    ctrl_strip_coefs: dict[str, tuple[np.ndarray, np.ndarray]] = field(default_factory=dict)
+
+    def edges_for_values(
+        self,
+        ctrl_vals: Mapping[str, float],
+        ctrl_rates: Mapping[str, float],
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Return ``(dd_step, rate_step)`` of shape ``(n_strips, 2)`` for control values and rates."""
+        n_s = self.dd_edges.shape[1]
+        dd_step = np.zeros((n_s, 2), dtype=np.float64)
+        rate_step = np.zeros((n_s, 2), dtype=np.float64)
+        for cname, (c_arr, d0_arr) in self.ctrl_strip_coefs.items():
+            if cname not in ctrl_vals:
+                continue
+            val = float(ctrl_vals[cname])
+            rate = float(ctrl_rates.get(cname, 0.0))
+            dd = val - d0_arr
+            dd_step[:, 0] += c_arr[:, 0] * dd
+            dd_step[:, 1] += c_arr[:, 1] * dd
+            rate_step[:, 0] += c_arr[:, 0] * rate
+            rate_step[:, 1] += c_arr[:, 1] * rate
+        return dd_step, rate_step
 
 
-def _build_control_rig(
+def _assemble_control_rig(
     lattice: VortexLattice,
     rings: RingLattice,
     leg_normal0: np.ndarray,
-    controls: Mapping[str, Sequence[float] | np.ndarray | Callable[[float], float]] | None,
-    time: np.ndarray,
-    dt_val: float,
-) -> tuple[_ControlRig | None, dict[str, np.ndarray], dict[str, np.ndarray]]:
-    """Validate and sample *controls*, returning ``(rig, ctrl_arrs, ctrl_dots)``."""
-    if controls is None:
-        return None, {}, {}
-    if not isinstance(controls, Mapping):
-        raise InputError(f"controls must be a mapping from control name to deflection history, got {type(controls).__name__}.")
-    if len(controls) == 0:
-        return None, {}, {}
-
-    info_list = list(getattr(lattice, "control_info", []))
-    known_names = {str(entry["name"]) for entry in info_list}
-    mode_by_name: dict[str, set[str]] = {}
-    delta0_by_surf_name: dict[tuple[str, str], float] = {}
-    delta0_by_name: dict[str, float] = {}
-    for entry in info_list:
-        cname = str(entry["name"])
-        sname = str(entry["surface"])
-        mode_by_name.setdefault(cname, set()).add(str(entry["mode"]))
-        delta0_by_surf_name[(sname, cname)] = float(entry["deflection_rad"])
-        delta0_by_name[cname] = float(entry["deflection_rad"])
-
-    ctrl_arrs: dict[str, np.ndarray] = {}
-    ctrl_dots: dict[str, np.ndarray] = {}
-    for raw_name, spec in controls.items():
-        if not isinstance(raw_name, str) or raw_name not in known_names:
-            raise InputError(
-                f"Unknown control surface {raw_name!r}; available controls: {sorted(known_names)}."
-            )
-        if mode_by_name.get(raw_name) != {"chordwise"}:
-            raise InputError(
-                f"Control surface {raw_name!r} uses section mode; moving control surfaces "
-                "require a chordwise lattice (n_chord >= 2)."
-            )
-        arr, dot = _sample_motion(spec, time, dt_val, f"controls[{raw_name!r}]")
-        ctrl_arrs[raw_name] = arr
-        ctrl_dots[raw_name] = dot
-
-    flap_field = lattice.geom_cache.get("flap_field")
-    flap_hinges = lattice.geom_cache.get("flap_hinges")
-    if flap_field is None or not flap_hinges or lattice.a_kink is None or lattice.b_kink is None:
-        raise InputError(
-            "Lattice does not hold chordwise flap hinge geometry; build with n_chord >= 2."
-        )
-
-    n_pts = int(time.size)
+    active_strip_ids: list[int],
+    dd_edges: np.ndarray,
+    rate_edges: np.ndarray,
+    *,
+    deflections_vary: bool,
+    ctrl_strip_coefs: dict[str, tuple[np.ndarray, np.ndarray]] | None = None,
+) -> _ControlRig:
+    """Assemble a :class:`_ControlRig` for *active_strip_ids*."""
+    flap_field = lattice.geom_cache["flap_field"]
+    flap_hinges = lattice.geom_cache["flap_hinges"]
     n_s = rings.n_strips
     n_c = rings.n_chord
     n_p = rings.n_panels
     hinge_of = np.asarray(flap_field["hinge"], dtype=np.float64)
     far = np.asarray(flap_field["far"], dtype=np.int64)
-    coef_map = flap_field["coef"]
     hinge_off = flap_field.get("hinge_off")
     leg_mid_frac = lattice.geom_cache.get("leg_mid_frac")
-
-    dd_edges = np.zeros((n_pts, n_s, 2), dtype=np.float64)
-    rate_edges = np.zeros((n_pts, n_s, 2), dtype=np.float64)
-    for s in range(n_s):
-        if not np.isfinite(hinge_of[s]):
-            continue
-        surf_name = lattice.surfaces[int(lattice.strip_surface[s])].name
-        for cname, arr in ctrl_arrs.items():
-            c_arr = coef_map.get(cname)
-            if c_arr is None:
-                continue
-            cl = float(c_arr[s, 0])
-            cr = float(c_arr[s, 1])
-            if cl == 0.0 and cr == 0.0:
-                continue
-            d0 = delta0_by_surf_name.get((surf_name, cname), delta0_by_name[cname])
-            dd = arr - d0
-            dt_c = ctrl_dots[cname]
-            dd_edges[:, s, 0] += cl * dd
-            dd_edges[:, s, 1] += cr * dd
-            rate_edges[:, s, 0] += cl * dt_c
-            rate_edges[:, s, 1] += cr * dt_c
-
-    active_strip_ids = [
-        s
-        for s in range(n_s)
-        if np.isfinite(hinge_of[s])
-        and (bool(np.any(dd_edges[:, s, :] != 0.0)) or bool(np.any(rate_edges[:, s, :] != 0.0)))
-    ]
-    if not active_strip_ids:
-        return None, ctrl_arrs, ctrl_dots
 
     def _far_hinge_pt(q: int, side_q: int, h_val: float) -> np.ndarray | None:
         if q < 0:
@@ -946,11 +898,8 @@ def _build_control_rig(
     col_mask = np.ones(n_p, dtype=bool)
     col_mask[moving_col_panels] = False
     fixed_col_panels = np.flatnonzero(col_mask)
-    deflections_vary = any(
-        not np.all(dd_edges[:, st.strip, :] == dd_edges[0, st.strip, :]) for st in strip_maps
-    )
 
-    rig = _ControlRig(
+    return _ControlRig(
         strips=strip_maps,
         dd_edges=dd_edges,
         rate_edges=rate_edges,
@@ -972,6 +921,177 @@ def _build_control_rig(
         a_kink0=np.asarray(lattice.a_kink, dtype=np.float64).copy(),
         b_kink0=np.asarray(lattice.b_kink, dtype=np.float64).copy(),
         leg_normal0=leg_normal0.copy(),
+        ctrl_strip_coefs={} if ctrl_strip_coefs is None else ctrl_strip_coefs,
+    )
+
+
+def _validate_control_names_and_extract_coefs(
+    lattice: VortexLattice,
+    rings: RingLattice,
+    control_names: Sequence[str],
+) -> tuple[np.ndarray, dict[str, tuple[np.ndarray, np.ndarray]], dict[str, float]]:
+    """Validate *control_names* against *lattice* and return ``(hinge_of, ctrl_strip_coefs, delta0_by_name)``."""
+    info_list = list(getattr(lattice, "control_info", []))
+    known_names = {str(entry["name"]) for entry in info_list}
+    mode_by_name: dict[str, set[str]] = {}
+    delta0_by_surf_name: dict[tuple[str, str], float] = {}
+    delta0_by_name: dict[str, float] = {}
+    for entry in info_list:
+        cname = str(entry["name"])
+        sname = str(entry["surface"])
+        mode_by_name.setdefault(cname, set()).add(str(entry["mode"]))
+        delta0_by_surf_name[(sname, cname)] = float(entry["deflection_rad"])
+        delta0_by_name[cname] = float(entry["deflection_rad"])
+
+    for raw_name in control_names:
+        if not isinstance(raw_name, str) or raw_name not in known_names:
+            raise InputError(
+                f"Unknown control surface {raw_name!r}; available controls: {sorted(known_names)}."
+            )
+        if mode_by_name.get(raw_name) != {"chordwise"}:
+            raise InputError(
+                f"Control surface {raw_name!r} uses section mode; moving control surfaces "
+                "require a chordwise lattice (n_chord >= 2)."
+            )
+
+    flap_field = lattice.geom_cache.get("flap_field")
+    flap_hinges = lattice.geom_cache.get("flap_hinges")
+    if flap_field is None or not flap_hinges or lattice.a_kink is None or lattice.b_kink is None:
+        raise InputError(
+            "Lattice does not hold chordwise flap hinge geometry; build with n_chord >= 2."
+        )
+
+    n_s = rings.n_strips
+    hinge_of = np.asarray(flap_field["hinge"], dtype=np.float64)
+    coef_map = flap_field["coef"]
+
+    ctrl_strip_coefs: dict[str, tuple[np.ndarray, np.ndarray]] = {}
+    for cname in control_names:
+        c_arr_raw = coef_map.get(cname)
+        c_arr = np.zeros((n_s, 2), dtype=np.float64)
+        d0_arr = np.zeros(n_s, dtype=np.float64)
+        if c_arr_raw is not None:
+            for s in range(n_s):
+                if not np.isfinite(hinge_of[s]):
+                    continue
+                surf_name = lattice.surfaces[int(lattice.strip_surface[s])].name
+                c_arr[s, 0] = float(c_arr_raw[s, 0])
+                c_arr[s, 1] = float(c_arr_raw[s, 1])
+                d0_arr[s] = delta0_by_surf_name.get((surf_name, cname), delta0_by_name[cname])
+        ctrl_strip_coefs[cname] = (c_arr, d0_arr)
+
+    return hinge_of, ctrl_strip_coefs, delta0_by_name
+
+
+def _build_dynamic_control_rig(
+    lattice: VortexLattice,
+    rings: RingLattice,
+    leg_normal0: np.ndarray,
+    control_names: Sequence[str],
+    n_pts: int,
+) -> tuple[_ControlRig | None, dict[str, float]]:
+    """Build a :class:`_ControlRig` for step-by-step control evaluation over *n_pts* time points."""
+    if not control_names:
+        return None, {}
+    hinge_of, ctrl_strip_coefs, delta0_by_name = _validate_control_names_and_extract_coefs(
+        lattice, rings, control_names,
+    )
+    n_s = rings.n_strips
+    active_strip_ids = [
+        s
+        for s in range(n_s)
+        if np.isfinite(hinge_of[s])
+        and any(
+            ctrl_strip_coefs[cname][0][s, 0] != 0.0 or ctrl_strip_coefs[cname][0][s, 1] != 0.0
+            for cname in control_names
+        )
+    ]
+    if not active_strip_ids:
+        return None, delta0_by_name
+    dd_edges = np.zeros((n_pts, n_s, 2), dtype=np.float64)
+    rate_edges = np.zeros((n_pts, n_s, 2), dtype=np.float64)
+    rig = _assemble_control_rig(
+        lattice,
+        rings,
+        leg_normal0,
+        active_strip_ids,
+        dd_edges,
+        rate_edges,
+        deflections_vary=True,
+        ctrl_strip_coefs=ctrl_strip_coefs,
+    )
+    return rig, delta0_by_name
+
+
+def _build_control_rig(
+    lattice: VortexLattice,
+    rings: RingLattice,
+    leg_normal0: np.ndarray,
+    controls: Mapping[str, Sequence[float] | np.ndarray | Callable[[float], float]] | None,
+    time: np.ndarray,
+    dt_val: float,
+) -> tuple[_ControlRig | None, dict[str, np.ndarray], dict[str, np.ndarray]]:
+    """Validate and sample *controls*, returning ``(rig, ctrl_arrs, ctrl_dots)``."""
+    if controls is None:
+        return None, {}, {}
+    if not isinstance(controls, Mapping):
+        raise InputError(f"controls must be a mapping from control name to deflection history, got {type(controls).__name__}.")
+    if len(controls) == 0:
+        return None, {}, {}
+
+    control_names = list(controls.keys())
+    hinge_of, ctrl_strip_coefs, _ = _validate_control_names_and_extract_coefs(
+        lattice, rings, control_names,
+    )
+
+    ctrl_arrs: dict[str, np.ndarray] = {}
+    ctrl_dots: dict[str, np.ndarray] = {}
+    for raw_name, spec in controls.items():
+        arr, dot = _sample_motion(spec, time, dt_val, f"controls[{raw_name!r}]")
+        ctrl_arrs[raw_name] = arr
+        ctrl_dots[raw_name] = dot
+
+    n_pts = int(time.size)
+    n_s = rings.n_strips
+    dd_edges = np.zeros((n_pts, n_s, 2), dtype=np.float64)
+    rate_edges = np.zeros((n_pts, n_s, 2), dtype=np.float64)
+    for s in range(n_s):
+        if not np.isfinite(hinge_of[s]):
+            continue
+        for cname, arr in ctrl_arrs.items():
+            c_arr, d0_arr = ctrl_strip_coefs[cname]
+            cl = float(c_arr[s, 0])
+            cr = float(c_arr[s, 1])
+            if cl == 0.0 and cr == 0.0:
+                continue
+            dd = arr - float(d0_arr[s])
+            dt_c = ctrl_dots[cname]
+            dd_edges[:, s, 0] += cl * dd
+            dd_edges[:, s, 1] += cr * dd
+            rate_edges[:, s, 0] += cl * dt_c
+            rate_edges[:, s, 1] += cr * dt_c
+
+    active_strip_ids = [
+        s
+        for s in range(n_s)
+        if np.isfinite(hinge_of[s])
+        and (bool(np.any(dd_edges[:, s, :] != 0.0)) or bool(np.any(rate_edges[:, s, :] != 0.0)))
+    ]
+    if not active_strip_ids:
+        return None, ctrl_arrs, ctrl_dots
+
+    deflections_vary = any(
+        not np.all(dd_edges[:, s, :] == dd_edges[0, s, :]) for s in active_strip_ids
+    )
+    rig = _assemble_control_rig(
+        lattice,
+        rings,
+        leg_normal0,
+        active_strip_ids,
+        dd_edges,
+        rate_edges,
+        deflections_vary=deflections_vary,
+        ctrl_strip_coefs=ctrl_strip_coefs,
     )
     return rig, ctrl_arrs, ctrl_dots
 
@@ -1468,6 +1588,1278 @@ def _build_body_load_geometry(
     )
 
 
+@dataclass(slots=True)
+class _StepLoads:
+    """Aerodynamic loads and diagnostics of one time step of :class:`_TimeDomainStepper`.
+
+    Attributes
+    ----------
+    CL, CD, CY : float
+        Force coefficients along mean wind axes [-].
+    Cl, Cm, Cn : float
+        Moment coefficients in body axes of the mean state about the
+        instantaneous reference point [-].
+    strip_cl : numpy.ndarray
+        Per-strip section lift coefficient [-], shape ``(n_strips,)``.
+    gust_ref : numpy.ndarray
+        Gust air velocity at the instantaneous reference point in geometry axes
+        [m/s], shape ``(3,)``.
+    F_tot : numpy.ndarray
+        Dimensional aerodynamic force vector in mean geometry axes [N],
+        shape ``(3,)``.
+    M_tot : numpy.ndarray
+        Dimensional aerodynamic moment vector about the instantaneous reference
+        point in mean geometry axes [N m], shape ``(3,)``.
+    """
+
+    CL: float
+    CD: float
+    CY: float
+    Cl: float
+    Cm: float
+    Cn: float
+    strip_cl: np.ndarray
+    gust_ref: np.ndarray
+    F_tot: np.ndarray
+    M_tot: np.ndarray
+
+
+@dataclass(slots=True)
+class _StepperState:
+    """Saved mutable time-marching state of :class:`_TimeDomainStepper`."""
+
+    step: int
+    prev_base_l: np.ndarray | None
+    prev_base_r: np.ndarray | None
+    prev_gamma: np.ndarray | None
+    prev2_gamma: np.ndarray | None
+    wake_l_nodes: np.ndarray | None
+    wake_r_nodes: np.ndarray | None
+
+
+class _TimeDomainStepper:
+    """Private single-step time-domain vortex-ring marcher with state save and restore.
+
+    Holds the vortex-ring geometry, core radii, precomputed real bound
+    influence matrix, optional stationary caches, and wake buffers for one
+    time-domain run. Calling :meth:`advance` marches one step ``step`` from a
+    given six-axis pose, pose rates and control-surface edge deflections and
+    rates. Calling :meth:`save_state` before a step and :meth:`restore_state`
+    inside sub-iterations rolls back the wake and bound circulation history so
+    the step can be repeated with updated state iterates.
+    """
+
+    def __init__(
+        self,
+        lattice: VortexLattice,
+        condition: FlightCondition,
+        *,
+        S_ref: float,
+        b_ref: float,
+        c_ref: float,
+        ref_point: np.ndarray | None = None,
+        n_steps: int,
+        dt: float | None = None,
+        ground: GroundPlane | None = None,
+        wake_dir: np.ndarray | None = None,
+        te_extension_fraction: float = 0.25,
+        rc: np.ndarray | float | None = None,
+        use_cross_surface_core: bool = True,
+        te_correction: bool = True,
+        wake_alignment: str = "freestream",
+        backend: str | None = None,
+        gust: Callable[[np.ndarray, float], np.ndarray] | None = None,
+        ctrl_rig: _ControlRig | None = None,
+        is_stationary: bool = False,
+        m_axes: dict[str, tuple[np.ndarray, np.ndarray]] | None = None,
+        ctrl_arrs: dict[str, np.ndarray] | None = None,
+        ctrl_dots: dict[str, np.ndarray] | None = None,
+        build_Dynamic_controls: Sequence[str] | None = None,
+    ) -> None:
+        if isinstance(n_steps, bool) or not isinstance(n_steps, (int, np.integer)):
+            raise InputError(f"n_steps must be an integer >= 1, got {n_steps!r}.")
+        n_steps_int = int(n_steps)
+        if n_steps_int < 1:
+            raise InputError(f"n_steps must be >= 1, got {n_steps_int}.")
+
+        for name, val in (
+            ("V_inf", condition.V_inf),
+            ("rho", condition.rho),
+            ("S_ref", S_ref),
+            ("b_ref", b_ref),
+            ("c_ref", c_ref),
+        ):
+            v = float(val)
+            if not math.isfinite(v) or v <= 0.0:
+                raise InputError(f"{name} must be finite and > 0, got {val!r}.")
+        if wake_alignment not in ("freestream", "body"):
+            raise InputError(f"wake_alignment must be 'freestream' or 'body', got {wake_alignment!r}.")
+
+        rp = np.zeros(3, dtype=np.float64) if ref_point is None else np.asarray(ref_point, dtype=np.float64)
+        if rp.shape != (3,) or not np.all(np.isfinite(rp)):
+            raise InputError(f"ref_point must be a finite 3-vector [m], got {ref_point!r}.")
+
+        V_inf = float(condition.V_inf)
+        rho = float(condition.rho)
+        S_ref_f = float(S_ref)
+        b_ref_f = float(b_ref)
+        c_ref_f = float(c_ref)
+        q_inf = 0.5 * rho * V_inf * V_inf
+        qS = q_inf * S_ref_f
+
+        d_0 = freestream_direction(float(condition.alpha), float(condition.beta))
+        L_0 = lift_direction(float(condition.alpha))
+        S_0 = side_direction(float(condition.alpha), float(condition.beta))
+        V_0 = V_inf * d_0
+        e_x = d_0
+        e_z = L_0 if ground is None else np.asarray(ground.normal, dtype=np.float64)
+        if ground is None:
+            e_y = S_0
+        else:
+            e_y_raw = cross3(e_z, e_x)
+            e_y_norm = float(np.linalg.norm(e_y_raw))
+            e_y = e_y_raw / e_y_norm if e_y_norm > 1e-12 else S_0
+
+        if wake_dir is None:
+            if wake_alignment == "body" and ground is None:
+                wd_in = np.array([1.0, 0.0, 0.0], dtype=np.float64)
+            else:
+                wd_in = d_0
+        else:
+            wd_in = np.asarray(wake_dir, dtype=np.float64)
+
+        rings = build_ring_lattice(
+            lattice,
+            wake_dir=wd_in,
+            te_extension_fraction=te_extension_fraction,
+        )
+        n_p = rings.n_panels
+        n_s = rings.n_strips
+        te_idx = rings.te_indices
+
+        dx_te = np.asarray(lattice.panel_length[te_idx], dtype=np.float64)
+        dx_te_mean = float(np.sum(rings.strip_width * dx_te) / np.sum(rings.strip_width))
+        if not math.isfinite(dx_te_mean) or dx_te_mean <= 0.0:
+            raise InputError(f"Invalid mean trailing-edge panel length dx_te_mean={dx_te_mean!r}.")
+        dt_default = dx_te_mean / V_inf
+
+        notes: list[str] = []
+        if dt is None:
+            dt_val = dt_default
+        else:
+            dt_val = float(dt)
+            if not math.isfinite(dt_val) or dt_val <= 0.0:
+                raise InputError(f"dt must be finite and > 0, got {dt!r}.")
+            if abs(dt_val - dt_default) > 0.25 * dt_default:
+                notes.append(
+                    f"Time step dt = {dt_val:.6g} s differs from the default dx_TE / V_inf = "
+                    f"{dt_default:.6g} s by more than 25 % (ratio {dt_val / dt_default:.3g})."
+                )
+
+        dx_w = V_inf * dt_val
+        f_te = dx_te / (2.0 * (dx_te + dx_w))
+        wake_conv = dx_w * rings.wake_dir
+
+        if gust is not None and not callable(gust):
+            raise InputError(f"gust must be a callable gust(points, t) -> velocities or None, got {type(gust).__name__}.")
+        gust_fn: Callable[[np.ndarray, float], np.ndarray] | None = None
+        if gust is not None:
+            bind_fn = getattr(gust, "_bind_flow", None)
+            gust_fn = bind_fn(condition, ground) if callable(bind_fn) else gust
+            if ground is not None:
+                notes.append(
+                    "In ground effect, wake rows convect using only the gust velocity component "
+                    "parallel to the ground so that wake nodes do not cross the ground plane."
+                )
+                notes.append(
+                    "In ground effect, the gust velocity field is applied as given (not reflected); "
+                    "a gust with a normal component at the ground does not satisfy the ground "
+                    "impermeability condition by itself."
+                )
+            if bool(getattr(gust, "_is_shear", False)):
+                notes.append(
+                    "Wind shear is rotational flow; the potential-flow vortex-ring method feels it "
+                    "only as an onset velocity at the wing and wake nodes."
+                )
+
+        time = np.arange(n_steps_int + 1, dtype=np.float64) * dt_val
+        leg_normal_0, leg_scale, _ = leg_force_rules(lattice)
+        leg_start_0, leg_end_0 = leg_segments(lattice)
+        n_leg_sets = leg_start_0.shape[0] // n_p
+
+        delta0_by_name: dict[str, float] = {}
+        if build_Dynamic_controls is not None:
+            ctrl_rig, delta0_by_name = _build_dynamic_control_rig(
+                lattice, rings, leg_normal_0, build_Dynamic_controls, n_steps_int + 1,
+            )
+
+        rc_ring, rc_wake = _ring_pair_cores(rings, rc, use_cross_surface_core)
+        eval_panels = np.tile(np.arange(n_p, dtype=np.int64), 1 + n_leg_sets)
+        eval_strips = rings.panel_strip[eval_panels]
+        seg_scale = np.concatenate([np.ones(n_p, dtype=np.float64), leg_scale])
+        rc_load_ring, rc_load_wake = _eval_pair_cores(rings, eval_panels, rc, use_cross_surface_core)
+        rc_te_ring, rc_te_wake = _eval_pair_cores(rings, te_idx, rc, use_cross_surface_core)
+        strip_area = np.asarray(lattice.chord, dtype=np.float64) * np.asarray(lattice.width, dtype=np.float64)
+
+        a_b = np.asarray(lattice.a, dtype=np.float64)
+        b_b = np.asarray(lattice.b, dtype=np.float64)
+        cp_b = rings.cp
+        normal_bc_b = rings.normal_bc
+        corners_b = rings.corners
+        te_left_b = rings.te_left
+        te_right_b = rings.te_right
+        te_l_phys_b = np.asarray(lattice.te_left, dtype=np.float64)
+        te_r_phys_b = np.asarray(lattice.te_right, dtype=np.float64)
+        side_nodes_b = rings.side_nodes
+        a_kink_b = None if lattice.a_kink is None else np.asarray(lattice.a_kink, dtype=np.float64)
+        b_kink_b = None if lattice.b_kink is None else np.asarray(lattice.b_kink, dtype=np.float64)
+        leg_normal_b = leg_normal_0
+
+        A_bb_real = ring_normal_influence(
+            rings.cp,
+            rings.normal_bc,
+            rings.corners,
+            rc_ring,
+            side_nodes=rings.side_nodes,
+            side_counts=rings.side_counts,
+            backend=backend,
+        )
+
+        controls_vary = (ctrl_rig is not None) and ctrl_rig.deflections_vary
+        if ctrl_rig is not None and not controls_vary:
+            (
+                a_b,
+                b_b,
+                cp_b,
+                normal_bc_b,
+                corners_b,
+                te_left_b,
+                te_right_b,
+                te_l_phys_b,
+                te_r_phys_b,
+                side_nodes_b,
+                a_kink_b,
+                b_kink_b,
+                leg_normal_b,
+            ) = _deform_body_geometry(ctrl_rig, lattice, rings, ctrl_rig.dd_edges[0])
+            _update_bound_influence_blocks(
+                A_bb_real,
+                ctrl_rig,
+                cp_b,
+                normal_bc_b,
+                corners_b,
+                side_nodes_b,
+                rings.side_counts,
+                rc_ring,
+                backend=backend,
+            )
+
+        if ctrl_rig is None:
+            mid_b = np.asarray(lattice.force_points, dtype=np.float64)
+            l_vec_b = b_b - a_b
+            leg_mid_b = 0.5 * (leg_start_0 + leg_end_0)
+            leg_vec_b = leg_end_0 - leg_start_0
+            P_load_b = np.vstack([mid_b, leg_mid_b])
+            seg_vec_b = np.vstack([l_vec_b, leg_vec_b])
+            seg_normal_b = np.vstack([np.zeros((n_p, 3), dtype=np.float64), leg_normal_b])
+            arm_b = P_load_b - rp[None, :]
+            load_unique_idx, load_inv_idx = _deduplicate_load_points(P_load_b, rc_load_ring, rc_load_wake)
+            P_load_u_b = P_load_b[load_unique_idx]
+            arm_u_b = arm_b[load_unique_idx]
+            rc_load_u_ring = rc_load_ring[load_unique_idx] if np.ndim(rc_load_ring) == 2 else rc_load_ring
+            rc_load_u_wake = rc_load_wake[load_unique_idx] if np.ndim(rc_load_wake) == 2 else rc_load_wake
+            l_te_b = te_r_phys_b - te_l_phys_b
+            p_te_b = te_l_phys_b + np.asarray(lattice.cp_frac, dtype=np.float64)[:, None] * l_te_b
+            arm_te_b = p_te_b - rp[None, :]
+            area_vec_b, ring_centroid_b, area_moment_vec_b = _physical_ring_areas(lattice, rings, ref_point=rp)
+            arm_ring_b = ring_centroid_b - rp[None, :]
+        else:
+            (
+                P_load_u_b,
+                arm_b,
+                arm_u_b,
+                seg_vec_b,
+                seg_normal_b,
+                load_unique_idx,
+                load_inv_idx,
+                rc_load_u_ring,
+                rc_load_u_wake,
+                p_te_b,
+                l_te_b,
+                arm_te_b,
+                area_vec_b,
+                arm_ring_b,
+                area_moment_vec_b,
+            ) = _build_body_load_geometry(
+                lattice,
+                rings,
+                rp,
+                a_b,
+                b_b,
+                corners_b,
+                te_l_phys_b,
+                te_r_phys_b,
+                side_nodes_b,
+                a_kink_b,
+                b_kink_b,
+                leg_normal_b,
+                rc_load_ring,
+                rc_load_wake,
+            )
+
+        n_eval_u = P_load_u_b.shape[0]
+        lu_Abb = sl.lu_factor(A_bb_real) if (ground is None and not controls_vary) else None
+
+        cache_bound_load = (not controls_vary) and ((n_eval_u * n_p * 24) <= _MAX_CACHE_BYTES)
+        V_bound_load_b = (
+            ring_velocity(
+                P_load_u_b,
+                corners_b,
+                rc_load_u_ring,
+                side_nodes=side_nodes_b,
+                side_counts=rings.side_counts,
+                backend=backend,
+            )
+            if cache_bound_load
+            else None
+        )
+        V_bound_te_b = (
+            ring_velocity(
+                p_te_b,
+                corners_b,
+                rc_te_ring,
+                side_nodes=side_nodes_b,
+                side_counts=rings.side_counts,
+                backend=backend,
+            )
+            if (not controls_vary) and te_correction and ((n_s * n_p * 24) <= _MAX_CACHE_BYTES)
+            else None
+        )
+
+        is_stationary_eff = bool(is_stationary and (not controls_vary))
+        is_stationary_wake = is_stationary_eff and (gust_fn is None)
+        A_wake_stat = (
+            np.empty((n_steps_int, n_p, n_s), dtype=np.float64)
+            if is_stationary_wake and (n_steps_int * n_p * n_s * 8) <= _MAX_CACHE_BYTES
+            else None
+        )
+        V_wake_load_stat = (
+            np.empty((n_steps_int, n_eval_u, n_s, 3), dtype=np.float64)
+            if is_stationary_wake and (n_steps_int * n_eval_u * n_s * 24) <= _MAX_CACHE_BYTES
+            else None
+        )
+        V_wake_te_stat = (
+            np.empty((n_steps_int, n_s, n_s, 3), dtype=np.float64)
+            if is_stationary_wake and te_correction and (n_steps_int * n_s * n_s * 24) <= _MAX_CACHE_BYTES
+            else None
+        )
+
+        self.lattice = lattice
+        self.condition = condition
+        self.rings = rings
+        self.ground = ground
+        self.backend = backend
+        self.te_correction = bool(te_correction)
+        self.rp = rp
+        self.V_inf = V_inf
+        self.rho = rho
+        self.S_ref = S_ref_f
+        self.b_ref = b_ref_f
+        self.c_ref = c_ref_f
+        self.q_inf = q_inf
+        self.qS = qS
+        self.d_0 = d_0
+        self.L_0 = L_0
+        self.S_0 = S_0
+        self.V_0 = V_0
+        self.e_x = e_x
+        self.e_y = e_y
+        self.e_z = e_z
+        self.n_steps = n_steps_int
+        self.n_panels = n_p
+        self.n_strips = n_s
+        self.n_chord = rings.n_chord
+        self.te_idx = te_idx
+        self.dx_te_mean = dx_te_mean
+        self.dt_default = dt_default
+        self.dt = dt_val
+        self.dx_w = dx_w
+        self.f_te = f_te
+        self.wake_conv = wake_conv
+        self.time = time
+        self.notes = notes
+        self.gust_fn = gust_fn
+        self.leg_normal_0 = leg_normal_0
+        self.n_leg_sets = n_leg_sets
+        self.ctrl_rig = ctrl_rig
+        self.controls_vary = controls_vary
+        self.delta0_by_name = delta0_by_name
+        self.rc_ring = rc_ring
+        self.rc_wake = rc_wake
+        self.eval_strips = eval_strips
+        self.seg_scale = seg_scale
+        self.rc_load_ring = rc_load_ring
+        self.rc_load_wake = rc_load_wake
+        self.rc_te_ring = rc_te_ring
+        self.rc_te_wake = rc_te_wake
+        self.strip_area = strip_area
+
+        self.a_b = a_b
+        self.b_b = b_b
+        self.cp_b = cp_b
+        self.normal_bc_b = normal_bc_b
+        self.corners_b = corners_b
+        self.te_left_b = te_left_b
+        self.te_right_b = te_right_b
+        self.te_l_phys_b = te_l_phys_b
+        self.te_r_phys_b = te_r_phys_b
+        self.side_nodes_b = side_nodes_b
+        self.a_kink_b = a_kink_b
+        self.b_kink_b = b_kink_b
+        self.leg_normal_b = leg_normal_b
+
+        self.P_load_u_b = P_load_u_b
+        self.arm_b = arm_b
+        self.arm_u_b = arm_u_b
+        self.seg_vec_b = seg_vec_b
+        self.seg_normal_b = seg_normal_b
+        self.load_unique_idx = load_unique_idx
+        self.load_inv_idx = load_inv_idx
+        self.rc_load_u_ring = rc_load_u_ring
+        self.rc_load_u_wake = rc_load_u_wake
+        self.p_te_b = p_te_b
+        self.l_te_b = l_te_b
+        self.arm_te_b = arm_te_b
+        self.area_vec_b = area_vec_b
+        self.arm_ring_b = arm_ring_b
+        self.area_moment_vec_b = area_moment_vec_b
+
+        self.A_bb_real = A_bb_real
+        self.lu_Abb = lu_Abb
+        self.cache_bound_load = cache_bound_load
+        self.V_bound_load_b = V_bound_load_b
+        self.V_bound_te_b = V_bound_te_b
+        self.is_stationary = is_stationary_eff
+        self.A_wake_stat = A_wake_stat
+        self.V_wake_load_stat = V_wake_load_stat
+        self.V_wake_te_stat = V_wake_te_stat
+        self.V_bound_img_load_stat: np.ndarray | None = None
+        self.V_bound_img_te_stat: np.ndarray | None = None
+
+        self.wake_corners_earth = np.empty((n_steps_int, n_s, 4, 3), dtype=np.float64)
+        self.wake_corners_cur = np.empty((n_steps_int, n_s, 4, 3), dtype=np.float64)
+        self.wake_gamma_buf = np.empty((n_steps_int, n_s), dtype=np.float64)
+        self.wake_l_nodes = (
+            np.empty((n_steps_int + 1, n_s, 3), dtype=np.float64) if gust_fn is not None else None
+        )
+        self.wake_r_nodes = (
+            np.empty((n_steps_int + 1, n_s, 3), dtype=np.float64) if gust_fn is not None else None
+        )
+        self.v_base_wake = V_inf * rings.wake_dir
+
+        self.step = 0
+        self.prev_base_l: np.ndarray | None = None
+        self.prev_base_r: np.ndarray | None = None
+        self.prev_gamma: np.ndarray | None = None
+        self.prev2_gamma: np.ndarray | None = None
+        self.prev_pose_ge: tuple[float, float, float, float, float, float] | None = None
+        self.prev_dd: np.ndarray | None = None
+
+        self.m_axes = m_axes
+        self.ctrl_arrs = {} if ctrl_arrs is None else ctrl_arrs
+        self.ctrl_dots = {} if ctrl_dots is None else ctrl_dots
+
+        if ground is not None:
+            if ctrl_rig is None:
+                self._wing_pts_rel: np.ndarray | None = lattice.all_points() - rp[None, :]
+                self._fixed_pts: np.ndarray | None = None
+            else:
+                self._wing_pts_rel = None
+                le_pts = np.vstack([sf.edge_le for sf in lattice.surfaces])
+                self._fixed_pts = np.vstack([le_pts, ctrl_rig.hinge_points])
+            self._cached_pts_rel: np.ndarray | None = None
+        else:
+            self._wing_pts_rel = None
+            self._fixed_pts = None
+            self._cached_pts_rel = None
+
+    @classmethod
+    def from_prescribed(
+        cls,
+        lattice: VortexLattice,
+        condition: FlightCondition,
+        *,
+        S_ref: float,
+        b_ref: float,
+        c_ref: float,
+        ref_point: np.ndarray | None = None,
+        z: Sequence[float] | np.ndarray | Callable[[float], float] | None = None,
+        theta: Sequence[float] | np.ndarray | Callable[[float], float] | None = None,
+        motion: Mapping[str, Sequence[float] | np.ndarray | Callable[[float], float]] | None = None,
+        controls: Mapping[str, Sequence[float] | np.ndarray | Callable[[float], float]] | None = None,
+        gust: Callable[[np.ndarray, float], np.ndarray] | None = None,
+        n_steps: int,
+        dt: float | None = None,
+        ground: GroundPlane | None = None,
+        wake_dir: np.ndarray | None = None,
+        te_extension_fraction: float = 0.25,
+        rc: np.ndarray | float | None = None,
+        use_cross_surface_core: bool = True,
+        te_correction: bool = True,
+        wake_alignment: str = "freestream",
+        backend: str | None = None,
+    ) -> _TimeDomainStepper:
+        """Build a :class:`_TimeDomainStepper` with pre-sampled prescribed motion and controls."""
+        if isinstance(n_steps, bool) or not isinstance(n_steps, (int, np.integer)):
+            raise InputError(f"n_steps must be an integer >= 1, got {n_steps!r}.")
+        n_steps_int = int(n_steps)
+        if n_steps_int < 1:
+            raise InputError(f"n_steps must be >= 1, got {n_steps_int}.")
+
+        for name, val in (
+            ("V_inf", condition.V_inf),
+            ("rho", condition.rho),
+            ("S_ref", S_ref),
+            ("b_ref", b_ref),
+            ("c_ref", c_ref),
+        ):
+            v = float(val)
+            if not math.isfinite(v) or v <= 0.0:
+                raise InputError(f"{name} must be finite and > 0, got {val!r}.")
+        if wake_alignment not in ("freestream", "body"):
+            raise InputError(f"wake_alignment must be 'freestream' or 'body', got {wake_alignment!r}.")
+
+        rp = np.zeros(3, dtype=np.float64) if ref_point is None else np.asarray(ref_point, dtype=np.float64)
+        if rp.shape != (3,) or not np.all(np.isfinite(rp)):
+            raise InputError(f"ref_point must be a finite 3-vector [m], got {ref_point!r}.")
+
+        V_inf = float(condition.V_inf)
+        d_0 = freestream_direction(float(condition.alpha), float(condition.beta))
+        if wake_dir is None:
+            wd_in = np.array([1.0, 0.0, 0.0], dtype=np.float64) if (wake_alignment == "body" and ground is None) else d_0
+        else:
+            wd_in = np.asarray(wake_dir, dtype=np.float64)
+        rings = build_ring_lattice(lattice, wake_dir=wd_in, te_extension_fraction=te_extension_fraction)
+        dx_te = np.asarray(lattice.panel_length[rings.te_indices], dtype=np.float64)
+        dx_te_mean = float(np.sum(rings.strip_width * dx_te) / np.sum(rings.strip_width))
+        if not math.isfinite(dx_te_mean) or dx_te_mean <= 0.0:
+            raise InputError(f"Invalid mean trailing-edge panel length dx_te_mean={dx_te_mean!r}.")
+        dt_default = dx_te_mean / V_inf
+        if dt is None:
+            dt_val = dt_default
+        else:
+            dt_val = float(dt)
+            if not math.isfinite(dt_val) or dt_val <= 0.0:
+                raise InputError(f"dt must be finite and > 0, got {dt!r}.")
+
+        if gust is not None and not callable(gust):
+            raise InputError(
+                f"gust must be a callable gust(points, t) -> velocities or None, got {type(gust).__name__}."
+            )
+
+        time = np.arange(n_steps_int + 1, dtype=np.float64) * dt_val
+        m_axes = _resolve_six_axis_motion(z, theta, motion, time, dt_val)
+        leg_normal_0, _, _ = leg_force_rules(lattice)
+        ctrl_rig, ctrl_arrs, ctrl_dots = _build_control_rig(
+            lattice, rings, leg_normal_0, controls, time, dt_val,
+        )
+
+        # Validate ground clearance at every step before constructing the stepper.
+        if ground is not None:
+            S_0 = side_direction(float(condition.alpha), float(condition.beta))
+            e_x = d_0
+            e_z = np.asarray(ground.normal, dtype=np.float64)
+            e_y_raw = cross3(e_z, e_x)
+            e_y_norm = float(np.linalg.norm(e_y_raw))
+            e_y = e_y_raw / e_y_norm if e_y_norm > 1e-12 else S_0
+            x_arr, _ = m_axes["x"]
+            y_arr, _ = m_axes["y"]
+            z_arr, _ = m_axes["z"]
+            roll_arr, _ = m_axes["roll"]
+            pitch_arr, _ = m_axes["pitch"]
+            yaw_arr, _ = m_axes["yaw"]
+
+            if ctrl_rig is None:
+                wing_pts_rel = lattice.all_points() - rp[None, :]
+                for step in range(n_steps_int + 1):
+                    x_ref_s = rp + x_arr[step] * e_x + y_arr[step] * e_y + z_arr[step] * e_z
+                    rn, pn, yn = float(roll_arr[step]), float(pitch_arr[step]), float(yaw_arr[step])
+                    if rn == 0.0 and pn == 0.0 and yn == 0.0:
+                        pts_s = x_ref_s[None, :] + wing_pts_rel
+                    elif rn == 0.0 and yn == 0.0:
+                        pts_s = x_ref_s[None, :] + _rot_y(wing_pts_rel, pn)
+                    else:
+                        R_s = _rotation_matrix_321(rn, pn, yn)
+                        pts_s = x_ref_s[None, :] + wing_pts_rel @ R_s.T
+                    h_min = float(np.min(ground.height(pts_s)))
+                    if h_min <= 0.0:
+                        raise InputError(
+                            f"Wing node reaches or crosses the ground plane at step {step} "
+                            f"(t = {time[step]:.6g} s, minimum height {h_min:.4g} m)."
+                        )
+            else:
+                le_pts = np.vstack([sf.edge_le for sf in lattice.surfaces])
+                fixed_pts = np.vstack([le_pts, ctrl_rig.hinge_points])
+                cached_pts_rel: np.ndarray | None = None
+                for step in range(n_steps_int + 1):
+                    if cached_pts_rel is None or ctrl_rig.deflections_vary:
+                        deformed_s = _deform_body_geometry(ctrl_rig, lattice, rings, ctrl_rig.dd_edges[step])
+                        a_s, b_s, cp_s = deformed_s[0], deformed_s[1], deformed_s[2]
+                        te_lp_s, te_rp_s = deformed_s[7], deformed_s[8]
+                        pts_rel_s = np.vstack([fixed_pts, a_s, b_s, cp_s, te_lp_s, te_rp_s]) - rp[None, :]
+                        if not ctrl_rig.deflections_vary:
+                            cached_pts_rel = pts_rel_s
+                    else:
+                        pts_rel_s = cached_pts_rel
+                    x_ref_s = rp + x_arr[step] * e_x + y_arr[step] * e_y + z_arr[step] * e_z
+                    rn, pn, yn = float(roll_arr[step]), float(pitch_arr[step]), float(yaw_arr[step])
+                    if rn == 0.0 and pn == 0.0 and yn == 0.0:
+                        pts_s = x_ref_s[None, :] + pts_rel_s
+                    elif rn == 0.0 and yn == 0.0:
+                        pts_s = x_ref_s[None, :] + _rot_y(pts_rel_s, pn)
+                    else:
+                        R_s = _rotation_matrix_321(rn, pn, yn)
+                        pts_s = x_ref_s[None, :] + pts_rel_s @ R_s.T
+                    h_min = float(np.min(ground.height(pts_s)))
+                    if h_min <= 0.0:
+                        raise InputError(
+                            f"Wing or flap node reaches or crosses the ground plane at step {step} "
+                            f"(t = {time[step]:.6g} s, minimum height {h_min:.4g} m)."
+                        )
+
+        controls_vary = (ctrl_rig is not None) and ctrl_rig.deflections_vary
+        is_stationary = bool(
+            (not controls_vary)
+            and all(np.all(m_axes[axis][0] == m_axes[axis][0][0]) for axis in _MOTION_AXES)
+        )
+
+        return cls(
+            lattice,
+            condition,
+            S_ref=S_ref,
+            b_ref=b_ref,
+            c_ref=c_ref,
+            ref_point=rp,
+            n_steps=n_steps_int,
+            dt=dt,
+            ground=ground,
+            wake_dir=wake_dir,
+            te_extension_fraction=te_extension_fraction,
+            rc=rc,
+            use_cross_surface_core=use_cross_surface_core,
+            te_correction=te_correction,
+            wake_alignment=wake_alignment,
+            backend=backend,
+            gust=gust,
+            ctrl_rig=ctrl_rig,
+            is_stationary=is_stationary,
+            m_axes=m_axes,
+            ctrl_arrs=ctrl_arrs,
+            ctrl_dots=ctrl_dots,
+        )
+
+    def min_ground_clearance(
+        self,
+        x: float,
+        y: float,
+        z: float,
+        roll: float,
+        pitch: float,
+        yaw: float,
+        dd_step: np.ndarray | None = None,
+    ) -> tuple[float, np.ndarray] | None:
+        """Return ``(h_min, lowest_point)`` [m] above ``ground``, or None in free air."""
+        if self.ground is None:
+            return None
+        if self.ctrl_rig is None:
+            assert self._wing_pts_rel is not None
+            pts_rel = self._wing_pts_rel
+        else:
+            assert self._fixed_pts is not None
+            if dd_step is None:
+                dd_use = self.ctrl_rig.dd_edges[min(self.step, self.n_steps)]
+            else:
+                dd_use = dd_step
+            if self._cached_pts_rel is None or self.ctrl_rig.deflections_vary or dd_step is not None:
+                deformed_s = _deform_body_geometry(self.ctrl_rig, self.lattice, self.rings, dd_use)
+                a_s, b_s, cp_s = deformed_s[0], deformed_s[1], deformed_s[2]
+                te_lp_s, te_rp_s = deformed_s[7], deformed_s[8]
+                pts_rel = np.vstack([self._fixed_pts, a_s, b_s, cp_s, te_lp_s, te_rp_s]) - self.rp[None, :]
+                if not self.ctrl_rig.deflections_vary and dd_step is None:
+                    self._cached_pts_rel = pts_rel
+            else:
+                pts_rel = self._cached_pts_rel
+
+        x_ref_s = self.rp + float(x) * self.e_x + float(y) * self.e_y + float(z) * self.e_z
+        rn, pn, yn = float(roll), float(pitch), float(yaw)
+        if rn == 0.0 and pn == 0.0 and yn == 0.0:
+            pts_s = x_ref_s[None, :] + pts_rel
+        elif rn == 0.0 and yn == 0.0:
+            pts_s = x_ref_s[None, :] + _rot_y(pts_rel, pn)
+        else:
+            R_s = _rotation_matrix_321(rn, pn, yn)
+            pts_s = x_ref_s[None, :] + pts_rel @ R_s.T
+        heights = self.ground.height(pts_s)
+        idx_min = int(np.argmin(heights))
+        return float(heights[idx_min]), pts_s[idx_min].copy()
+
+    def save_state(self) -> _StepperState:
+        """Return a snapshot of the mutable time-marching state before the current step."""
+        s = self.step
+        return _StepperState(
+            step=s,
+            prev_base_l=None if self.prev_base_l is None else self.prev_base_l.copy(),
+            prev_base_r=None if self.prev_base_r is None else self.prev_base_r.copy(),
+            prev_gamma=None if self.prev_gamma is None else self.prev_gamma.copy(),
+            prev2_gamma=None if self.prev2_gamma is None else self.prev2_gamma.copy(),
+            wake_l_nodes=(
+                None if (self.wake_l_nodes is None or s == 0) else self.wake_l_nodes[:s].copy()
+            ),
+            wake_r_nodes=(
+                None if (self.wake_r_nodes is None or s == 0) else self.wake_r_nodes[:s].copy()
+            ),
+        )
+
+    def restore_state(self, saved: _StepperState) -> None:
+        """Restore the time-marching state to *saved* so step ``saved.step`` can be repeated."""
+        s = int(saved.step)
+        self.step = s
+        self.prev_base_l = None if saved.prev_base_l is None else saved.prev_base_l.copy()
+        self.prev_base_r = None if saved.prev_base_r is None else saved.prev_base_r.copy()
+        self.prev_gamma = None if saved.prev_gamma is None else saved.prev_gamma.copy()
+        self.prev2_gamma = None if saved.prev2_gamma is None else saved.prev2_gamma.copy()
+        if self.wake_l_nodes is not None and saved.wake_l_nodes is not None:
+            self.wake_l_nodes[:s] = saved.wake_l_nodes
+            assert self.wake_r_nodes is not None and saved.wake_r_nodes is not None
+            self.wake_r_nodes[:s] = saved.wake_r_nodes
+            if s >= 2:
+                n_w = s - 1
+                self.wake_corners_cur[:n_w, :, 0, :] = self.wake_l_nodes[1 : n_w + 1]
+                self.wake_corners_cur[:n_w, :, 1, :] = self.wake_r_nodes[1 : n_w + 1]
+                self.wake_corners_cur[:n_w, :, 2, :] = self.wake_r_nodes[:n_w]
+                self.wake_corners_cur[:n_w, :, 3, :] = self.wake_l_nodes[:n_w]
+        elif self.gust_fn is None and s >= 2:
+            n_w = s - 1
+            shift_prev = float(n_w) * self.wake_conv
+            self.wake_corners_cur[:n_w] = self.wake_corners_earth[:n_w] + shift_prev[None, :, None, :]
+
+    def advance_prescribed(self, step: int | None = None) -> _StepLoads:
+        """Advance one step using the pre-sampled prescribed motion and control histories."""
+        assert self.m_axes is not None
+        s = self.step if step is None else int(step)
+        self.step = s
+        dd_s = None if self.ctrl_rig is None else self.ctrl_rig.dd_edges[s]
+        rate_s = None if self.ctrl_rig is None else self.ctrl_rig.rate_edges[s]
+        return self.advance(
+            x=float(self.m_axes["x"][0][s]),
+            y=float(self.m_axes["y"][0][s]),
+            z=float(self.m_axes["z"][0][s]),
+            roll=float(self.m_axes["roll"][0][s]),
+            pitch=float(self.m_axes["pitch"][0][s]),
+            yaw=float(self.m_axes["yaw"][0][s]),
+            x_dot=float(self.m_axes["x"][1][s]),
+            y_dot=float(self.m_axes["y"][1][s]),
+            z_dot=float(self.m_axes["z"][1][s]),
+            roll_dot=float(self.m_axes["roll"][1][s]),
+            pitch_dot=float(self.m_axes["pitch"][1][s]),
+            yaw_dot=float(self.m_axes["yaw"][1][s]),
+            dd_step=dd_s,
+            rate_step=rate_s,
+        )
+
+    def advance(
+        self,
+        *,
+        x: float,
+        y: float,
+        z: float,
+        roll: float,
+        pitch: float,
+        yaw: float,
+        x_dot: float,
+        y_dot: float,
+        z_dot: float,
+        roll_dot: float,
+        pitch_dot: float,
+        yaw_dot: float,
+        dd_step: np.ndarray | None = None,
+        rate_step: np.ndarray | None = None,
+    ) -> _StepLoads:
+        """Advance step ``self.step`` for the given pose, rates and control deflections."""
+        step = self.step
+        xn, yn, zn = float(x), float(y), float(z)
+        roll_n, pitch_n, yaw_n = float(roll), float(pitch), float(yaw)
+        xd, yd, zd = float(x_dot), float(y_dot), float(z_dot)
+        roll_d, pitch_d, yaw_d = float(roll_dot), float(pitch_dot), float(yaw_dot)
+
+        rp = self.rp
+        e_x, e_y, e_z = self.e_x, self.e_y, self.e_z
+        rings = self.rings
+        lattice = self.lattice
+        ground = self.ground
+        backend = self.backend
+        ctrl_rig = self.ctrl_rig
+
+        x_ref = rp + xn * e_x + yn * e_y + zn * e_z
+        v_trans = xd * e_x + yd * e_y + zd * e_z
+        omega_g = _angular_velocity_321(pitch_n, yaw_n, roll_d, pitch_d, yaw_d)
+
+        if roll_n == 0.0 and pitch_n == 0.0 and yaw_n == 0.0:
+            R: np.ndarray | None = None
+            pitch_only: float | None = None
+        elif roll_n == 0.0 and yaw_n == 0.0:
+            R = _rotation_matrix_321(0.0, pitch_n, 0.0)
+            pitch_only = pitch_n
+        else:
+            R = _rotation_matrix_321(roll_n, pitch_n, yaw_n)
+            pitch_only = None
+
+        ctrl_changed = False
+        if self.controls_vary and ctrl_rig is not None:
+            dd_use = ctrl_rig.dd_edges[step] if dd_step is None else dd_step
+            if self.prev_dd is None or not np.array_equal(dd_use, self.prev_dd):
+                (
+                    self.a_b,
+                    self.b_b,
+                    self.cp_b,
+                    self.normal_bc_b,
+                    self.corners_b,
+                    self.te_left_b,
+                    self.te_right_b,
+                    self.te_l_phys_b,
+                    self.te_r_phys_b,
+                    self.side_nodes_b,
+                    self.a_kink_b,
+                    self.b_kink_b,
+                    self.leg_normal_b,
+                ) = _deform_body_geometry(ctrl_rig, lattice, rings, dd_use)
+                (
+                    self.P_load_u_b,
+                    self.arm_b,
+                    self.arm_u_b,
+                    self.seg_vec_b,
+                    self.seg_normal_b,
+                    self.load_unique_idx,
+                    self.load_inv_idx,
+                    self.rc_load_u_ring,
+                    self.rc_load_u_wake,
+                    self.p_te_b,
+                    self.l_te_b,
+                    self.arm_te_b,
+                    self.area_vec_b,
+                    self.arm_ring_b,
+                    self.area_moment_vec_b,
+                ) = _build_body_load_geometry(
+                    lattice,
+                    rings,
+                    rp,
+                    self.a_b,
+                    self.b_b,
+                    self.corners_b,
+                    self.te_l_phys_b,
+                    self.te_r_phys_b,
+                    self.side_nodes_b,
+                    self.a_kink_b,
+                    self.b_kink_b,
+                    self.leg_normal_b,
+                    self.rc_load_ring,
+                    self.rc_load_wake,
+                )
+                _update_bound_influence_blocks(
+                    self.A_bb_real,
+                    ctrl_rig,
+                    self.cp_b,
+                    self.normal_bc_b,
+                    self.corners_b,
+                    self.side_nodes_b,
+                    rings.side_counts,
+                    self.rc_ring,
+                    backend=backend,
+                )
+                if ground is None:
+                    self.lu_Abb = sl.lu_factor(self.A_bb_real)
+                self.prev_dd = dd_use.copy()
+                self.prev_pose_ge = None
+                ctrl_changed = True
+
+        cp, normal_bc, corners, te_left, te_right, side_nodes = _move_wing_geometry(
+            self.cp_b,
+            self.normal_bc_b,
+            self.corners_b,
+            self.te_left_b,
+            self.te_right_b,
+            self.side_nodes_b,
+            rp,
+            x_ref,
+            R,
+            pitch_only,
+        )
+
+        if ctrl_rig is not None:
+            rate_use = ctrl_rig.rate_edges[step] if rate_step is None else rate_step
+            v_fl_cp_b, v_fl_load_b, v_fl_te_b = _compute_flap_velocities(
+                ctrl_rig,
+                lattice,
+                rings,
+                rate_use,
+                self.a_b,
+                self.b_b,
+                self.cp_b,
+                self.te_l_phys_b,
+                self.te_r_phys_b,
+                self.a_kink_b,
+                self.b_kink_b,
+            )
+            v_fl_cp = _rotate_vecs(v_fl_cp_b, R, pitch_only)
+            v_fl_load = _rotate_vecs(v_fl_load_b, R, pitch_only)
+            v_fl_te = _rotate_vecs(v_fl_te_b, R, pitch_only)
+        else:
+            v_fl_cp = None
+            v_fl_load = None
+            v_fl_te = None
+
+        t_now = float(self.time[step])
+        gust_fn = self.gust_fn
+        if gust_fn is None:
+            gust_ref_step = np.zeros(3, dtype=np.float64)
+            shift_conv = float(step) * self.wake_conv
+            base_l = te_left - shift_conv
+            base_r = te_right - shift_conv
+
+            if step > 0:
+                row_idx = step - 1
+                self.wake_corners_earth[row_idx, :, 0, :] = base_l
+                self.wake_corners_earth[row_idx, :, 1, :] = base_r
+                self.wake_corners_earth[row_idx, :, 2, :] = self.prev_base_r
+                self.wake_corners_earth[row_idx, :, 3, :] = self.prev_base_l
+                self.wake_gamma_buf[row_idx] = self.prev_gamma[self.te_idx]
+                self.wake_corners_cur[:step] = self.wake_corners_earth[:step] + shift_conv[None, :, None, :]
+        else:
+            assert self.wake_l_nodes is not None and self.wake_r_nodes is not None
+            gust_ref_step = _eval_gust(gust_fn, x_ref[None, :], t_now)[0]
+            if step == 0:
+                self.wake_l_nodes[0] = te_left
+                self.wake_r_nodes[0] = te_right
+            else:
+                _advect_wake_nodes_rk4(
+                    self.wake_l_nodes,
+                    self.wake_r_nodes,
+                    step,
+                    self.v_base_wake,
+                    gust_fn,
+                    float(self.time[step - 1]),
+                    self.dt,
+                    ground,
+                )
+                self.wake_l_nodes[step] = te_left
+                self.wake_r_nodes[step] = te_right
+                self.wake_corners_cur[:step, :, 0, :] = self.wake_l_nodes[1 : step + 1]
+                self.wake_corners_cur[:step, :, 1, :] = self.wake_r_nodes[1 : step + 1]
+                self.wake_corners_cur[:step, :, 2, :] = self.wake_r_nodes[:step]
+                self.wake_corners_cur[:step, :, 3, :] = self.wake_l_nodes[:step]
+                self.wake_gamma_buf[step - 1] = self.prev_gamma[self.te_idx]
+            base_l = None
+            base_r = None
+
+        if ground is not None:
+            pose_key = (xn, yn, zn, roll_n, pitch_n, yaw_n)
+            pose_changed = (self.prev_pose_ge is None) or (pose_key != self.prev_pose_ge) or ctrl_changed
+            if pose_changed:
+                img_corners = ground.reflect_points(corners)
+                img_sn = None if side_nodes is None else ground.reflect_points(side_nodes)
+                A_img = ring_normal_influence(
+                    cp,
+                    normal_bc,
+                    img_corners,
+                    self.rc_ring,
+                    side_nodes=img_sn,
+                    side_counts=rings.side_counts,
+                    backend=backend,
+                )
+                self.lu_Abb = sl.lu_factor(self.A_bb_real - A_img)
+                self.prev_pose_ge = pose_key
+
+        v_surf_cp = v_trans[None, :] + cross3(omega_g[None, :], cp - x_ref[None, :])
+        if v_fl_cp is not None:
+            v_surf_cp = v_surf_cp + v_fl_cp
+        v_onset_cp = self.V_0[None, :] if gust_fn is None else self.V_0[None, :] + _eval_gust(gust_fn, cp, t_now)
+        rhs = np.sum((v_surf_cp - v_onset_cp) * normal_bc, axis=1)
+
+        if step > 0:
+            if self.A_wake_stat is not None:
+                age = step - 1
+                wc_age = self.wake_corners_cur[0]
+                blk = ring_normal_influence(cp, normal_bc, wc_age, self.rc_wake, backend=backend)
+                if ground is not None:
+                    blk -= ring_normal_influence(
+                        cp, normal_bc, ground.reflect_points(wc_age), self.rc_wake, backend=backend,
+                    )
+                self.A_wake_stat[age] = blk
+                gamma_by_age = self.wake_gamma_buf[:step][::-1]
+                rhs -= np.einsum("rms,rs->m", self.A_wake_stat[:step], gamma_by_age)
+            else:
+                rhs -= _wake_normal_rhs(
+                    cp,
+                    normal_bc,
+                    self.wake_corners_cur,
+                    self.wake_gamma_buf,
+                    step,
+                    self.rc_wake,
+                    ground=ground,
+                    backend=backend,
+                )
+
+        gamma_n = sl.lu_solve(self.lu_Abb, rhs)
+
+        if R is None:
+            arm_all = self.arm_b
+            arm_u = self.arm_u_b
+            seg_vec = self.seg_vec_b
+            seg_normal = self.seg_normal_b
+            arm_te = self.arm_te_b
+            l_te = self.l_te_b
+            area_vec = self.area_vec_b
+            arm_ring = self.arm_ring_b
+            area_moment_vec = self.area_moment_vec_b
+        else:
+            arm_all = _rotate_vecs(self.arm_b, R, pitch_only)
+            arm_u = arm_all[self.load_unique_idx]
+            seg_vec = _rotate_vecs(self.seg_vec_b, R, pitch_only)
+            seg_normal = _rotate_vecs(self.seg_normal_b, R, pitch_only)
+            arm_te = _rotate_vecs(self.arm_te_b, R, pitch_only)
+            l_te = _rotate_vecs(self.l_te_b, R, pitch_only)
+            area_vec = _rotate_vecs(self.area_vec_b, R, pitch_only)
+            arm_ring = _rotate_vecs(self.arm_ring_b, R, pitch_only)
+            area_moment_vec = (
+                None if self.area_moment_vec_b is None else _rotate_vecs(self.area_moment_vec_b, R, pitch_only)
+            )
+        P_load_u = x_ref[None, :] + arm_u
+        p_te = x_ref[None, :] + arm_te
+
+        if self.V_bound_load_b is not None:
+            v_real_b = self.V_bound_load_b.swapaxes(1, 2) @ gamma_n
+            v_ind_u = _rotate_vecs(v_real_b, R, pitch_only)
+            if ground is not None:
+                if self.is_stationary and self.cache_bound_load:
+                    if self.V_bound_img_load_stat is None:
+                        img_c = ground.reflect_points(corners)
+                        img_s = None if side_nodes is None else ground.reflect_points(side_nodes)
+                        self.V_bound_img_load_stat = ring_velocity(
+                            P_load_u,
+                            img_c,
+                            self.rc_load_u_ring,
+                            side_nodes=img_s,
+                            side_counts=rings.side_counts,
+                            backend=backend,
+                        )
+                    v_ind_u = v_ind_u - (self.V_bound_img_load_stat.swapaxes(1, 2) @ gamma_n)
+                else:
+                    v_ind_u = v_ind_u + _bound_velocity_at(
+                        P_load_u,
+                        corners,
+                        side_nodes,
+                        rings.side_counts,
+                        gamma_n,
+                        self.rc_load_u_ring,
+                        ground=ground,
+                        backend=backend,
+                        image_only=True,
+                    )
+        else:
+            v_ind_u = _bound_velocity_at(
+                P_load_u,
+                corners,
+                side_nodes,
+                rings.side_counts,
+                gamma_n,
+                self.rc_load_u_ring,
+                ground=ground,
+                backend=backend,
+                image_only=False,
+            )
+
+        if step > 0:
+            if self.V_wake_load_stat is not None:
+                age = step - 1
+                wc_age = self.wake_corners_cur[0]
+                v_row = ring_velocity(P_load_u, wc_age, self.rc_load_u_wake, backend=backend)
+                if ground is not None:
+                    v_row -= ring_velocity(
+                        P_load_u, ground.reflect_points(wc_age), self.rc_load_u_wake, backend=backend,
+                    )
+                self.V_wake_load_stat[age] = v_row
+                gamma_by_age = self.wake_gamma_buf[:step][::-1]
+                v_ind_u = v_ind_u + np.einsum("rmsi,rs->mi", self.V_wake_load_stat[:step], gamma_by_age)
+            else:
+                v_ind_u = v_ind_u + _wake_velocity_at(
+                    P_load_u,
+                    self.wake_corners_cur,
+                    self.wake_gamma_buf,
+                    step,
+                    self.rc_load_u_wake,
+                    ground=ground,
+                    backend=backend,
+                )
+
+        v_ind_load = v_ind_u[self.load_inv_idx]
+
+        v_surf_load = v_trans[None, :] + cross3(omega_g[None, :], arm_all)
+        if v_fl_load is not None:
+            v_surf_load = v_surf_load + v_fl_load
+        if gust_fn is None:
+            v_onset_load = self.V_0[None, :]
+        else:
+            v_onset_load = self.V_0[None, :] + _eval_gust(gust_fn, P_load_u, t_now)[self.load_inv_idx]
+        V_tot = v_onset_load - v_surf_load + v_ind_load
+        V_eff = V_tot - np.sum(V_tot * seg_normal, axis=1, keepdims=True) * seg_normal
+
+        g_hs = _rings_to_horseshoe(gamma_n, rings.n_chord)
+        g_leg = leg_strength(lattice, g_hs)
+        g_all = np.concatenate([g_hs] + [g_leg] * self.n_leg_sets)
+
+        F_seg = (self.rho * g_all * self.seg_scale)[:, None] * cross3(V_eff, seg_vec)
+        F_tot = np.sum(F_seg, axis=0)
+        M_tot = np.sum(cross3(arm_all, F_seg), axis=0)
+        s_lift = np.zeros(self.n_strips, dtype=np.float64)
+        np.add.at(s_lift, self.eval_strips, F_seg @ self.L_0)
+
+        if step >= 2:
+            dG_dt = (3.0 * gamma_n - 4.0 * self.prev_gamma + self.prev2_gamma) / (2.0 * self.dt)
+        elif step == 1:
+            dG_dt = (gamma_n - self.prev_gamma) / self.dt
+        else:
+            dG_dt = None
+
+        if dG_dt is not None:
+            coef_am = self.rho * dG_dt
+            F_am = coef_am[:, None] * area_vec
+            F_tot = F_tot + np.sum(F_am, axis=0)
+            if area_moment_vec is not None:
+                M_tot = M_tot + np.sum(coef_am[:, None] * area_moment_vec, axis=0)
+            else:
+                M_tot = M_tot + np.sum(cross3(arm_ring, F_am), axis=0)
+            np.add.at(s_lift, rings.panel_strip, F_am @ self.L_0)
+
+        if self.te_correction and step >= 1:
+            if self.V_bound_te_b is not None:
+                v_te_real = self.V_bound_te_b.swapaxes(1, 2) @ gamma_n
+                v_ind_te = _rotate_vecs(v_te_real, R, pitch_only)
+                if ground is not None:
+                    if self.is_stationary:
+                        if self.V_bound_img_te_stat is None:
+                            img_c = ground.reflect_points(corners)
+                            img_s = None if side_nodes is None else ground.reflect_points(side_nodes)
+                            self.V_bound_img_te_stat = ring_velocity(
+                                p_te,
+                                img_c,
+                                self.rc_te_ring,
+                                side_nodes=img_s,
+                                side_counts=rings.side_counts,
+                                backend=backend,
+                            )
+                        v_ind_te = v_ind_te - (self.V_bound_img_te_stat.swapaxes(1, 2) @ gamma_n)
+                    else:
+                        v_ind_te = v_ind_te + _bound_velocity_at(
+                            p_te,
+                            corners,
+                            side_nodes,
+                            rings.side_counts,
+                            gamma_n,
+                            self.rc_te_ring,
+                            ground=ground,
+                            backend=backend,
+                            image_only=True,
+                        )
+            else:
+                v_ind_te = _bound_velocity_at(
+                    p_te,
+                    corners,
+                    side_nodes,
+                    rings.side_counts,
+                    gamma_n,
+                    self.rc_te_ring,
+                    ground=ground,
+                    backend=backend,
+                    image_only=False,
+                )
+
+            if self.V_wake_te_stat is not None:
+                age = step - 1
+                wc_age = self.wake_corners_cur[0]
+                v_row_te = ring_velocity(p_te, wc_age, self.rc_te_wake, backend=backend)
+                if ground is not None:
+                    v_row_te -= ring_velocity(
+                        p_te, ground.reflect_points(wc_age), self.rc_te_wake, backend=backend,
+                    )
+                self.V_wake_te_stat[age] = v_row_te
+                gamma_by_age = self.wake_gamma_buf[:step][::-1]
+                v_ind_te = v_ind_te + np.einsum("rmsi,rs->mi", self.V_wake_te_stat[:step], gamma_by_age)
+            else:
+                v_ind_te = v_ind_te + _wake_velocity_at(
+                    p_te,
+                    self.wake_corners_cur,
+                    self.wake_gamma_buf,
+                    step,
+                    self.rc_te_wake,
+                    ground=ground,
+                    backend=backend,
+                )
+
+            v_surf_te = v_trans[None, :] + cross3(omega_g[None, :], arm_te)
+            if v_fl_te is not None:
+                v_surf_te = v_surf_te + v_fl_te
+            v_onset_te = self.V_0[None, :] if gust_fn is None else self.V_0[None, :] + _eval_gust(gust_fn, p_te, t_now)
+            V_te = v_onset_te - v_surf_te + v_ind_te
+            dg_te = self.f_te * (self.wake_gamma_buf[step - 1] - gamma_n[self.te_idx])
+            F_te = (self.rho * dg_te)[:, None] * cross3(V_te, l_te)
+            F_tot = F_tot + np.sum(F_te, axis=0)
+            M_tot = M_tot + np.sum(cross3(arm_te, F_te), axis=0)
+            s_lift = s_lift + (F_te @ self.L_0)
+
+        CL_step = float((F_tot @ self.L_0) / self.qS)
+        CD_step = float((F_tot @ self.d_0) / self.qS)
+        CY_step = float((F_tot @ self.S_0) / self.qS)
+        Cl_step = float(-M_tot[0] / (self.qS * self.b_ref))
+        Cm_step = float(M_tot[1] / (self.qS * self.c_ref))
+        Cn_step = float(-M_tot[2] / (self.qS * self.b_ref))
+        strip_cl_step = s_lift / (self.q_inf * self.strip_area)
+
+        self.prev_base_l = base_l
+        self.prev_base_r = base_r
+        self.prev2_gamma = self.prev_gamma
+        self.prev_gamma = gamma_n
+        self.step = step + 1
+
+        return _StepLoads(
+            CL=CL_step,
+            CD=CD_step,
+            CY=CY_step,
+            Cl=Cl_step,
+            Cm=Cm_step,
+            Cn=Cn_step,
+            strip_cl=strip_cl_step,
+            gust_ref=gust_ref_step,
+            F_tot=F_tot,
+            M_tot=M_tot,
+        )
+
+    def gamma_bound(self) -> np.ndarray:
+        """Return bound ring circulations of the last completed step [m^2/s], shape ``(n_panels,)``."""
+        if self.prev_gamma is None:
+            return np.zeros(self.n_panels, dtype=np.float64)
+        return self.prev_gamma.copy()
+
+    def gamma_wake(self, n_marched: int | None = None) -> np.ndarray:
+        """Return wake ring circulations [m^2/s], shape ``(n_marched, n_strips)`` (newest row first)."""
+        nw = max(self.step - 1, 0) if n_marched is None else int(n_marched)
+        return self.wake_gamma_buf[:nw][::-1].copy()
+
+    def wake_corners(self, n_marched: int | None = None) -> np.ndarray:
+        """Return wake ring corners [m], shape ``(n_marched, n_strips, 4, 3)`` (newest row first)."""
+        nw = max(self.step - 1, 0) if n_marched is None else int(n_marched)
+        return self.wake_corners_cur[:nw][::-1].copy()
+
+
 def _solve_time_rings(
     lattice: VortexLattice,
     condition: FlightCondition,
@@ -1592,365 +2984,32 @@ def _solve_time_rings(
         or if any node of the wing or of a deflected flap reaches or crosses
         *ground* at any step.
     """
-    # 1. Validate scalar inputs and reference point.
-    if isinstance(n_steps, bool) or not isinstance(n_steps, (int, np.integer)):
-        raise InputError(f"n_steps must be an integer >= 1, got {n_steps!r}.")
-    n_steps_int = int(n_steps)
-    if n_steps_int < 1:
-        raise InputError(f"n_steps must be >= 1, got {n_steps_int}.")
-
-    for name, val in (
-        ("V_inf", condition.V_inf),
-        ("rho", condition.rho),
-        ("S_ref", S_ref),
-        ("b_ref", b_ref),
-        ("c_ref", c_ref),
-    ):
-        v = float(val)
-        if not math.isfinite(v) or v <= 0.0:
-            raise InputError(f"{name} must be finite and > 0, got {val!r}.")
-    if wake_alignment not in ("freestream", "body"):
-        raise InputError(f"wake_alignment must be 'freestream' or 'body', got {wake_alignment!r}.")
-
-    rp = np.zeros(3, dtype=np.float64) if ref_point is None else np.asarray(ref_point, dtype=np.float64)
-    if rp.shape != (3,) or not np.all(np.isfinite(rp)):
-        raise InputError(f"ref_point must be a finite 3-vector [m], got {ref_point!r}.")
-
-    V_inf = float(condition.V_inf)
-    rho = float(condition.rho)
-    S_ref_f = float(S_ref)
-    b_ref_f = float(b_ref)
-    c_ref_f = float(c_ref)
-    q_inf = 0.5 * rho * V_inf * V_inf
-    qS = q_inf * S_ref_f
-
-    # 2. Mean-flight axes and vortex-ring lattice.
-    d_0 = freestream_direction(float(condition.alpha), float(condition.beta))
-    L_0 = lift_direction(float(condition.alpha))
-    S_0 = side_direction(float(condition.alpha), float(condition.beta))
-    V_0 = V_inf * d_0
-    e_x = d_0
-    e_z = L_0 if ground is None else np.asarray(ground.normal, dtype=np.float64)
-    if ground is None:
-        e_y = S_0
-    else:
-        e_y_raw = cross3(e_z, e_x)
-        e_y_norm = float(np.linalg.norm(e_y_raw))
-        e_y = e_y_raw / e_y_norm if e_y_norm > 1e-12 else S_0
-
-    if wake_dir is None:
-        if wake_alignment == "body" and ground is None:
-            wd_in = np.array([1.0, 0.0, 0.0], dtype=np.float64)
-        else:
-            wd_in = d_0
-    else:
-        wd_in = np.asarray(wake_dir, dtype=np.float64)
-
-    rings = build_ring_lattice(
+    stepper = _TimeDomainStepper.from_prescribed(
         lattice,
-        wake_dir=wd_in,
+        condition,
+        S_ref=S_ref,
+        b_ref=b_ref,
+        c_ref=c_ref,
+        ref_point=ref_point,
+        z=z,
+        theta=theta,
+        motion=motion,
+        controls=controls,
+        gust=gust,
+        n_steps=n_steps,
+        dt=dt,
+        ground=ground,
+        wake_dir=wake_dir,
         te_extension_fraction=te_extension_fraction,
-    )
-    n_p = rings.n_panels
-    n_s = rings.n_strips
-    te_idx = rings.te_indices
-
-    # 3. Time step and diagnostic note.
-    dx_te = np.asarray(lattice.panel_length[te_idx], dtype=np.float64)
-    dx_te_mean = float(np.sum(rings.strip_width * dx_te) / np.sum(rings.strip_width))
-    if not math.isfinite(dx_te_mean) or dx_te_mean <= 0.0:
-        raise InputError(f"Invalid mean trailing-edge panel length dx_te_mean={dx_te_mean!r}.")
-    dt_default = dx_te_mean / V_inf
-
-    notes: list[str] = []
-    if dt is None:
-        dt_val = dt_default
-    else:
-        dt_val = float(dt)
-        if not math.isfinite(dt_val) or dt_val <= 0.0:
-            raise InputError(f"dt must be finite and > 0, got {dt!r}.")
-        if abs(dt_val - dt_default) > 0.25 * dt_default:
-            notes.append(
-                f"Time step dt = {dt_val:.6g} s differs from the default dx_TE / V_inf = "
-                f"{dt_default:.6g} s by more than 25 % (ratio {dt_val / dt_default:.3g})."
-            )
-
-    dx_w = V_inf * dt_val
-    f_te = dx_te / (2.0 * (dx_te + dx_w))
-    wake_conv = dx_w * rings.wake_dir  # (n_s, 3)
-
-    if gust is not None and not callable(gust):
-        raise InputError(f"gust must be a callable gust(points, t) -> velocities or None, got {type(gust).__name__}.")
-    gust_fn: Callable[[np.ndarray, float], np.ndarray] | None = None
-    if gust is not None:
-        bind_fn = getattr(gust, "_bind_flow", None)
-        gust_fn = bind_fn(condition, ground) if callable(bind_fn) else gust
-        if ground is not None:
-            notes.append(
-                "In ground effect, wake rows convect using only the gust velocity component "
-                "parallel to the ground so that wake nodes do not cross the ground plane."
-            )
-            notes.append(
-                "In ground effect, the gust velocity field is applied as given (not reflected); "
-                "a gust with a normal component at the ground does not satisfy the ground "
-                "impermeability condition by itself."
-            )
-        if bool(getattr(gust, "_is_shear", False)):
-            notes.append(
-                "Wind shear is rotational flow; the potential-flow vortex-ring method feels it "
-                "only as an onset velocity at the wing and wake nodes."
-            )
-
-    # 4. Sample prescribed six-axis motion and moving control surfaces.
-    time = np.arange(n_steps_int + 1, dtype=np.float64) * dt_val
-    m_axes = _resolve_six_axis_motion(z, theta, motion, time, dt_val)
-    x_arr, x_dot = m_axes["x"]
-    y_arr, y_dot = m_axes["y"]
-    z_arr, z_dot = m_axes["z"]
-    roll_arr, roll_dot = m_axes["roll"]
-    pitch_arr, pitch_dot = m_axes["pitch"]
-    yaw_arr, yaw_dot = m_axes["yaw"]
-
-    leg_normal_0, leg_scale, _ = leg_force_rules(lattice)
-    leg_start_0, leg_end_0 = leg_segments(lattice)
-    n_leg_sets = leg_start_0.shape[0] // n_p
-
-    ctrl_rig, ctrl_arrs, ctrl_dots = _build_control_rig(
-        lattice, rings, leg_normal_0, controls, time, dt_val,
-    )
-
-    # Validate ground clearance at every step (including deflected flap nodes).
-    if ground is not None:
-        if ctrl_rig is None:
-            wing_pts_rel = lattice.all_points() - rp[None, :]
-            for step in range(n_steps_int + 1):
-                x_ref_s = rp + x_arr[step] * e_x + y_arr[step] * e_y + z_arr[step] * e_z
-                rn, pn, yn = float(roll_arr[step]), float(pitch_arr[step]), float(yaw_arr[step])
-                if rn == 0.0 and pn == 0.0 and yn == 0.0:
-                    pts_s = x_ref_s[None, :] + wing_pts_rel
-                elif rn == 0.0 and yn == 0.0:
-                    pts_s = x_ref_s[None, :] + _rot_y(wing_pts_rel, pn)
-                else:
-                    R_s = _rotation_matrix_321(rn, pn, yn)
-                    pts_s = x_ref_s[None, :] + wing_pts_rel @ R_s.T
-                h_min = float(np.min(ground.height(pts_s)))
-                if h_min <= 0.0:
-                    raise InputError(
-                        f"Wing node reaches or crosses the ground plane at step {step} "
-                        f"(t = {time[step]:.6g} s, minimum height {h_min:.4g} m)."
-                    )
-        else:
-            le_pts = np.vstack([sf.edge_le for sf in lattice.surfaces])
-            fixed_pts = np.vstack([le_pts, ctrl_rig.hinge_points])
-            cached_pts_rel: np.ndarray | None = None
-            for step in range(n_steps_int + 1):
-                if cached_pts_rel is None or ctrl_rig.deflections_vary:
-                    deformed_s = _deform_body_geometry(ctrl_rig, lattice, rings, ctrl_rig.dd_edges[step])
-                    a_s, b_s, cp_s = deformed_s[0], deformed_s[1], deformed_s[2]
-                    te_lp_s, te_rp_s = deformed_s[7], deformed_s[8]
-                    pts_rel_s = np.vstack([fixed_pts, a_s, b_s, cp_s, te_lp_s, te_rp_s]) - rp[None, :]
-                    if not ctrl_rig.deflections_vary:
-                        cached_pts_rel = pts_rel_s
-                else:
-                    pts_rel_s = cached_pts_rel
-                x_ref_s = rp + x_arr[step] * e_x + y_arr[step] * e_y + z_arr[step] * e_z
-                rn, pn, yn = float(roll_arr[step]), float(pitch_arr[step]), float(yaw_arr[step])
-                if rn == 0.0 and pn == 0.0 and yn == 0.0:
-                    pts_s = x_ref_s[None, :] + pts_rel_s
-                elif rn == 0.0 and yn == 0.0:
-                    pts_s = x_ref_s[None, :] + _rot_y(pts_rel_s, pn)
-                else:
-                    R_s = _rotation_matrix_321(rn, pn, yn)
-                    pts_s = x_ref_s[None, :] + pts_rel_s @ R_s.T
-                h_min = float(np.min(ground.height(pts_s)))
-                if h_min <= 0.0:
-                    raise InputError(
-                        f"Wing or flap node reaches or crosses the ground plane at step {step} "
-                        f"(t = {time[step]:.6g} s, minimum height {h_min:.4g} m)."
-                    )
-
-    # 5. Core radii and body-frame load geometry (exact match with harmonic.py).
-    rc_ring, rc_wake = _ring_pair_cores(rings, rc, use_cross_surface_core)
-    eval_panels = np.tile(np.arange(n_p, dtype=np.int64), 1 + n_leg_sets)
-    eval_strips = rings.panel_strip[eval_panels]
-    seg_scale = np.concatenate([np.ones(n_p, dtype=np.float64), leg_scale])
-    rc_load_ring, rc_load_wake = _eval_pair_cores(rings, eval_panels, rc, use_cross_surface_core)
-    rc_te_ring, rc_te_wake = _eval_pair_cores(rings, te_idx, rc, use_cross_surface_core)
-    strip_area = np.asarray(lattice.chord, dtype=np.float64) * np.asarray(lattice.width, dtype=np.float64)
-
-    # Base body-frame arrays (updated per step when control deflections vary).
-    a_b = np.asarray(lattice.a, dtype=np.float64)
-    b_b = np.asarray(lattice.b, dtype=np.float64)
-    cp_b = rings.cp
-    normal_bc_b = rings.normal_bc
-    corners_b = rings.corners
-    te_left_b = rings.te_left
-    te_right_b = rings.te_right
-    te_l_phys_b = np.asarray(lattice.te_left, dtype=np.float64)
-    te_r_phys_b = np.asarray(lattice.te_right, dtype=np.float64)
-    side_nodes_b = rings.side_nodes
-    a_kink_b = None if lattice.a_kink is None else np.asarray(lattice.a_kink, dtype=np.float64)
-    b_kink_b = None if lattice.b_kink is None else np.asarray(lattice.b_kink, dtype=np.float64)
-    leg_normal_b = leg_normal_0
-
-    # 6. Precompute base real bound influence matrix; apply constant flap offset once if fixed.
-    A_bb_real = ring_normal_influence(
-        rings.cp,
-        rings.normal_bc,
-        rings.corners,
-        rc_ring,
-        side_nodes=rings.side_nodes,
-        side_counts=rings.side_counts,
+        rc=rc,
+        use_cross_surface_core=use_cross_surface_core,
+        te_correction=te_correction,
+        wake_alignment=wake_alignment,
         backend=backend,
     )
 
-    controls_vary = (ctrl_rig is not None) and ctrl_rig.deflections_vary
-    if ctrl_rig is not None and not controls_vary:
-        (
-            a_b,
-            b_b,
-            cp_b,
-            normal_bc_b,
-            corners_b,
-            te_left_b,
-            te_right_b,
-            te_l_phys_b,
-            te_r_phys_b,
-            side_nodes_b,
-            a_kink_b,
-            b_kink_b,
-            leg_normal_b,
-        ) = _deform_body_geometry(ctrl_rig, lattice, rings, ctrl_rig.dd_edges[0])
-        _update_bound_influence_blocks(
-            A_bb_real,
-            ctrl_rig,
-            cp_b,
-            normal_bc_b,
-            corners_b,
-            side_nodes_b,
-            rings.side_counts,
-            rc_ring,
-            backend=backend,
-        )
-
-    if ctrl_rig is None:
-        mid_b = np.asarray(lattice.force_points, dtype=np.float64)
-        l_vec_b = b_b - a_b
-        leg_mid_b = 0.5 * (leg_start_0 + leg_end_0)
-        leg_vec_b = leg_end_0 - leg_start_0
-        P_load_b = np.vstack([mid_b, leg_mid_b])
-        seg_vec_b = np.vstack([l_vec_b, leg_vec_b])
-        seg_normal_b = np.vstack([np.zeros((n_p, 3), dtype=np.float64), leg_normal_b])
-        arm_b = P_load_b - rp[None, :]
-        load_unique_idx, load_inv_idx = _deduplicate_load_points(P_load_b, rc_load_ring, rc_load_wake)
-        P_load_u_b = P_load_b[load_unique_idx]
-        arm_u_b = arm_b[load_unique_idx]
-        rc_load_u_ring = rc_load_ring[load_unique_idx] if np.ndim(rc_load_ring) == 2 else rc_load_ring
-        rc_load_u_wake = rc_load_wake[load_unique_idx] if np.ndim(rc_load_wake) == 2 else rc_load_wake
-        l_te_b = te_r_phys_b - te_l_phys_b
-        p_te_b = te_l_phys_b + np.asarray(lattice.cp_frac, dtype=np.float64)[:, None] * l_te_b
-        arm_te_b = p_te_b - rp[None, :]
-        area_vec_b, ring_centroid_b, area_moment_vec_b = _physical_ring_areas(lattice, rings, ref_point=rp)
-        arm_ring_b = ring_centroid_b - rp[None, :]
-    else:
-        (
-            P_load_u_b,
-            arm_b,
-            arm_u_b,
-            seg_vec_b,
-            seg_normal_b,
-            load_unique_idx,
-            load_inv_idx,
-            rc_load_u_ring,
-            rc_load_u_wake,
-            p_te_b,
-            l_te_b,
-            arm_te_b,
-            area_vec_b,
-            arm_ring_b,
-            area_moment_vec_b,
-        ) = _build_body_load_geometry(
-            lattice,
-            rings,
-            rp,
-            a_b,
-            b_b,
-            corners_b,
-            te_l_phys_b,
-            te_r_phys_b,
-            side_nodes_b,
-            a_kink_b,
-            b_kink_b,
-            leg_normal_b,
-            rc_load_ring,
-            rc_load_wake,
-        )
-
-    n_eval_u = P_load_u_b.shape[0]
-    lu_Abb = sl.lu_factor(A_bb_real) if (ground is None and not controls_vary) else None
-
-    cache_bound_load = (not controls_vary) and ((n_eval_u * n_p * 24) <= _MAX_CACHE_BYTES)
-    V_bound_load_b = (
-        ring_velocity(
-            P_load_u_b,
-            corners_b,
-            rc_load_u_ring,
-            side_nodes=side_nodes_b,
-            side_counts=rings.side_counts,
-            backend=backend,
-        )
-        if cache_bound_load
-        else None
-    )
-    V_bound_te_b = (
-        ring_velocity(
-            p_te_b,
-            corners_b,
-            rc_te_ring,
-            side_nodes=side_nodes_b,
-            side_counts=rings.side_counts,
-            backend=backend,
-        )
-        if (not controls_vary) and te_correction and ((n_s * n_p * 24) <= _MAX_CACHE_BYTES)
-        else None
-    )
-
-    # Stationary-geometry detection: constant pose and constant controls allow O(n_steps) wake reuse.
-    # Turn off the stationary wake-row cache when a gust is given because wake convection varies locally.
-    is_stationary = bool(
-        (not controls_vary)
-        and all(
-            np.all(arr == arr[0])
-            for arr in (x_arr, y_arr, z_arr, roll_arr, pitch_arr, yaw_arr)
-        )
-    )
-    is_stationary_wake = is_stationary and (gust_fn is None)
-    A_wake_stat = (
-        np.empty((n_steps_int, n_p, n_s), dtype=np.float64)
-        if is_stationary_wake and (n_steps_int * n_p * n_s * 8) <= _MAX_CACHE_BYTES
-        else None
-    )
-    V_wake_load_stat = (
-        np.empty((n_steps_int, n_eval_u, n_s, 3), dtype=np.float64)
-        if is_stationary_wake and (n_steps_int * n_eval_u * n_s * 24) <= _MAX_CACHE_BYTES
-        else None
-    )
-    V_wake_te_stat = (
-        np.empty((n_steps_int, n_s, n_s, 3), dtype=np.float64)
-        if is_stationary_wake and te_correction and (n_steps_int * n_s * n_s * 24) <= _MAX_CACHE_BYTES
-        else None
-    )
-    V_bound_img_load_stat: np.ndarray | None = None
-    V_bound_img_te_stat: np.ndarray | None = None
-
-    # 7. Preallocate wake buffers (length n_steps) and output time series (length n_steps + 1).
-    wake_corners_earth = np.empty((n_steps_int, n_s, 4, 3), dtype=np.float64)
-    wake_corners_cur = np.empty((n_steps_int, n_s, 4, 3), dtype=np.float64)
-    wake_gamma_buf = np.empty((n_steps_int, n_s), dtype=np.float64)
-    wake_l_nodes = np.empty((n_steps_int + 1, n_s, 3), dtype=np.float64) if gust_fn is not None else None
-    wake_r_nodes = np.empty((n_steps_int + 1, n_s, 3), dtype=np.float64) if gust_fn is not None else None
-    v_base_wake = V_inf * rings.wake_dir  # (n_s, 3)
-
+    n_steps_int = stepper.n_steps
+    n_s = stepper.n_strips
     CL = np.empty(n_steps_int + 1, dtype=np.float64)
     CD = np.empty(n_steps_int + 1, dtype=np.float64)
     CY = np.empty(n_steps_int + 1, dtype=np.float64)
@@ -1960,463 +3019,27 @@ def _solve_time_rings(
     strip_cl = np.empty((n_steps_int + 1, n_s), dtype=np.float64)
     gust_ref = np.zeros((n_steps_int + 1, 3), dtype=np.float64)
 
-    prev_base_l: np.ndarray | None = None
-    prev_base_r: np.ndarray | None = None
-    prev_gamma: np.ndarray | None = None
-    prev2_gamma: np.ndarray | None = None
-    prev_pose_ge: tuple[float, float, float, float, float, float] | None = None
-    prev_dd: np.ndarray | None = None
-
-    # 8. Time-marching loop (step = 0 .. n_steps).
     for step in range(n_steps_int + 1):
-        xn = float(x_arr[step])
-        yn = float(y_arr[step])
-        zn = float(z_arr[step])
-        roll_n = float(roll_arr[step])
-        pitch_n = float(pitch_arr[step])
-        yaw_n = float(yaw_arr[step])
-        xd = float(x_dot[step])
-        yd = float(y_dot[step])
-        zd = float(z_dot[step])
-        roll_d = float(roll_dot[step])
-        pitch_d = float(pitch_dot[step])
-        yaw_d = float(yaw_dot[step])
+        loads = stepper.advance_prescribed(step)
+        CL[step] = loads.CL
+        CD[step] = loads.CD
+        CY[step] = loads.CY
+        Cl[step] = loads.Cl
+        Cm[step] = loads.Cm
+        Cn[step] = loads.Cn
+        strip_cl[step] = loads.strip_cl
+        gust_ref[step] = loads.gust_ref
 
-        x_ref = rp + xn * e_x + yn * e_y + zn * e_z
-        v_trans = xd * e_x + yd * e_y + zd * e_z
-        omega_g = _angular_velocity_321(pitch_n, yaw_n, roll_d, pitch_d, yaw_d)
-
-        if roll_n == 0.0 and pitch_n == 0.0 and yaw_n == 0.0:
-            R: np.ndarray | None = None
-            pitch_only: float | None = None
-        elif roll_n == 0.0 and yaw_n == 0.0:
-            R = _rotation_matrix_321(0.0, pitch_n, 0.0)
-            pitch_only = pitch_n
-        else:
-            R = _rotation_matrix_321(roll_n, pitch_n, yaw_n)
-            pitch_only = None
-
-        # Update body-frame flap geometry and moving blocks of A_bb_real when deflections change.
-        ctrl_changed = False
-        if controls_vary and ctrl_rig is not None:
-            dd_step = ctrl_rig.dd_edges[step]
-            if prev_dd is None or not np.array_equal(dd_step, prev_dd):
-                (
-                    a_b,
-                    b_b,
-                    cp_b,
-                    normal_bc_b,
-                    corners_b,
-                    te_left_b,
-                    te_right_b,
-                    te_l_phys_b,
-                    te_r_phys_b,
-                    side_nodes_b,
-                    a_kink_b,
-                    b_kink_b,
-                    leg_normal_b,
-                ) = _deform_body_geometry(ctrl_rig, lattice, rings, dd_step)
-                (
-                    P_load_u_b,
-                    arm_b,
-                    arm_u_b,
-                    seg_vec_b,
-                    seg_normal_b,
-                    load_unique_idx,
-                    load_inv_idx,
-                    rc_load_u_ring,
-                    rc_load_u_wake,
-                    p_te_b,
-                    l_te_b,
-                    arm_te_b,
-                    area_vec_b,
-                    arm_ring_b,
-                    area_moment_vec_b,
-                ) = _build_body_load_geometry(
-                    lattice,
-                    rings,
-                    rp,
-                    a_b,
-                    b_b,
-                    corners_b,
-                    te_l_phys_b,
-                    te_r_phys_b,
-                    side_nodes_b,
-                    a_kink_b,
-                    b_kink_b,
-                    leg_normal_b,
-                    rc_load_ring,
-                    rc_load_wake,
-                )
-                _update_bound_influence_blocks(
-                    A_bb_real,
-                    ctrl_rig,
-                    cp_b,
-                    normal_bc_b,
-                    corners_b,
-                    side_nodes_b,
-                    rings.side_counts,
-                    rc_ring,
-                    backend=backend,
-                )
-                if ground is None:
-                    lu_Abb = sl.lu_factor(A_bb_real)
-                prev_dd = dd_step
-                ctrl_changed = True
-
-        cp, normal_bc, corners, te_left, te_right, side_nodes = _move_wing_geometry(
-            cp_b,
-            normal_bc_b,
-            corners_b,
-            te_left_b,
-            te_right_b,
-            side_nodes_b,
-            rp,
-            x_ref,
-            R,
-            pitch_only,
-        )
-
-        # Body-frame flap velocities from hinge rotation rates (rotated into mean-flight axes).
-        if ctrl_rig is not None:
-            v_fl_cp_b, v_fl_load_b, v_fl_te_b = _compute_flap_velocities(
-                ctrl_rig,
-                lattice,
-                rings,
-                ctrl_rig.rate_edges[step],
-                a_b,
-                b_b,
-                cp_b,
-                te_l_phys_b,
-                te_r_phys_b,
-                a_kink_b,
-                b_kink_b,
-            )
-            v_fl_cp = _rotate_vecs(v_fl_cp_b, R, pitch_only)
-            v_fl_load = _rotate_vecs(v_fl_load_b, R, pitch_only)
-            v_fl_te = _rotate_vecs(v_fl_te_b, R, pitch_only)
-        else:
-            v_fl_cp = None
-            v_fl_load = None
-            v_fl_te = None
-
-        # Earth-frame trailing-edge closure corners for drift-free convection (no gust),
-        # or local-velocity RK4 wake-node convection when a gust is active.
-        t_now = float(time[step])
-        if gust_fn is None:
-            shift_conv = float(step) * wake_conv
-            base_l = te_left - shift_conv
-            base_r = te_right - shift_conv
-
-            # Append the newly shed wake row at step >= 1 (Kutta condition: Gamma_TE of previous step).
-            if step > 0:
-                row_idx = step - 1
-                wake_corners_earth[row_idx, :, 0, :] = base_l
-                wake_corners_earth[row_idx, :, 1, :] = base_r
-                wake_corners_earth[row_idx, :, 2, :] = prev_base_r
-                wake_corners_earth[row_idx, :, 3, :] = prev_base_l
-                wake_gamma_buf[row_idx] = prev_gamma[te_idx]
-                wake_corners_cur[:step] = wake_corners_earth[:step] + shift_conv[None, :, None, :]
-        else:
-            gust_ref[step] = _eval_gust(gust_fn, x_ref[None, :], t_now)[0]
-            if step == 0:
-                wake_l_nodes[0] = te_left
-                wake_r_nodes[0] = te_right
-            else:
-                _advect_wake_nodes_rk4(
-                    wake_l_nodes,
-                    wake_r_nodes,
-                    step,
-                    v_base_wake,
-                    gust_fn,
-                    float(time[step - 1]),
-                    dt_val,
-                    ground,
-                )
-                wake_l_nodes[step] = te_left
-                wake_r_nodes[step] = te_right
-                wake_corners_cur[:step, :, 0, :] = wake_l_nodes[1 : step + 1]
-                wake_corners_cur[:step, :, 1, :] = wake_r_nodes[1 : step + 1]
-                wake_corners_cur[:step, :, 2, :] = wake_r_nodes[:step]
-                wake_corners_cur[:step, :, 3, :] = wake_l_nodes[:step]
-                wake_gamma_buf[step - 1] = prev_gamma[te_idx]
-            base_l = None
-            base_r = None
-
-        # Bound linear system (refactorise in ground effect when pose or control deflections change).
-        if ground is not None:
-            pose_key = (xn, yn, zn, roll_n, pitch_n, yaw_n)
-            pose_changed = (prev_pose_ge is None) or (pose_key != prev_pose_ge) or ctrl_changed
-            if pose_changed:
-                img_corners = ground.reflect_points(corners)
-                img_sn = None if side_nodes is None else ground.reflect_points(side_nodes)
-                A_img = ring_normal_influence(
-                    cp,
-                    normal_bc,
-                    img_corners,
-                    rc_ring,
-                    side_nodes=img_sn,
-                    side_counts=rings.side_counts,
-                    backend=backend,
-                )
-                lu_Abb = sl.lu_factor(A_bb_real - A_img)
-                prev_pose_ge = pose_key
-
-        # Impermeability right-hand side: (V_surf - V_onset - v_wake) . n_bc.
-        v_surf_cp = v_trans[None, :] + cross3(omega_g[None, :], cp - x_ref[None, :])
-        if v_fl_cp is not None:
-            v_surf_cp = v_surf_cp + v_fl_cp
-        v_onset_cp = V_0[None, :] if gust_fn is None else V_0[None, :] + _eval_gust(gust_fn, cp, t_now)
-        rhs = np.sum((v_surf_cp - v_onset_cp) * normal_bc, axis=1)
-
-        if step > 0:
-            if A_wake_stat is not None:
-                # Stationary geometry: row of age (step - 1) is the oldest row (index 0 in wake_corners_cur).
-                age = step - 1
-                wc_age = wake_corners_cur[0]  # (n_s, 4, 3)
-                blk = ring_normal_influence(cp, normal_bc, wc_age, rc_wake, backend=backend)
-                if ground is not None:
-                    blk -= ring_normal_influence(
-                        cp, normal_bc, ground.reflect_points(wc_age), rc_wake, backend=backend,
-                    )
-                A_wake_stat[age] = blk
-                gamma_by_age = wake_gamma_buf[:step][::-1]
-                rhs -= np.einsum("rms,rs->m", A_wake_stat[:step], gamma_by_age)
-            else:
-                rhs -= _wake_normal_rhs(
-                    cp,
-                    normal_bc,
-                    wake_corners_cur,
-                    wake_gamma_buf,
-                    step,
-                    rc_wake,
-                    ground=ground,
-                    backend=backend,
-                )
-
-        gamma_n = sl.lu_solve(lu_Abb, rhs)
-
-        # Unsteady loads: moved body-frame load geometry.
-        if R is None:
-            arm_all = arm_b
-            arm_u = arm_u_b
-            seg_vec = seg_vec_b
-            seg_normal = seg_normal_b
-            arm_te = arm_te_b
-            l_te = l_te_b
-            area_vec = area_vec_b
-            arm_ring = arm_ring_b
-            area_moment_vec = area_moment_vec_b
-        else:
-            arm_all = _rotate_vecs(arm_b, R, pitch_only)
-            arm_u = arm_all[load_unique_idx]
-            seg_vec = _rotate_vecs(seg_vec_b, R, pitch_only)
-            seg_normal = _rotate_vecs(seg_normal_b, R, pitch_only)
-            arm_te = _rotate_vecs(arm_te_b, R, pitch_only)
-            l_te = _rotate_vecs(l_te_b, R, pitch_only)
-            area_vec = _rotate_vecs(area_vec_b, R, pitch_only)
-            arm_ring = _rotate_vecs(arm_ring_b, R, pitch_only)
-            area_moment_vec = (
-                None if area_moment_vec_b is None else _rotate_vecs(area_moment_vec_b, R, pitch_only)
-            )
-        P_load_u = x_ref[None, :] + arm_u
-        p_te = x_ref[None, :] + arm_te
-
-        # Induced velocity at deduplicated Kutta-Joukowski load points.
-        if V_bound_load_b is not None:
-            v_real_b = V_bound_load_b.swapaxes(1, 2) @ gamma_n
-            v_ind_u = _rotate_vecs(v_real_b, R, pitch_only)
-            if ground is not None:
-                if is_stationary and cache_bound_load:
-                    if V_bound_img_load_stat is None:
-                        img_c = ground.reflect_points(corners)
-                        img_s = None if side_nodes is None else ground.reflect_points(side_nodes)
-                        V_bound_img_load_stat = ring_velocity(
-                            P_load_u,
-                            img_c,
-                            rc_load_u_ring,
-                            side_nodes=img_s,
-                            side_counts=rings.side_counts,
-                            backend=backend,
-                        )
-                    v_ind_u = v_ind_u - (V_bound_img_load_stat.swapaxes(1, 2) @ gamma_n)
-                else:
-                    v_ind_u = v_ind_u + _bound_velocity_at(
-                        P_load_u,
-                        corners,
-                        side_nodes,
-                        rings.side_counts,
-                        gamma_n,
-                        rc_load_u_ring,
-                        ground=ground,
-                        backend=backend,
-                        image_only=True,
-                    )
-        else:
-            v_ind_u = _bound_velocity_at(
-                P_load_u,
-                corners,
-                side_nodes,
-                rings.side_counts,
-                gamma_n,
-                rc_load_u_ring,
-                ground=ground,
-                backend=backend,
-                image_only=False,
-            )
-
-        if step > 0:
-            if V_wake_load_stat is not None:
-                age = step - 1
-                wc_age = wake_corners_cur[0]
-                v_row = ring_velocity(P_load_u, wc_age, rc_load_u_wake, backend=backend)
-                if ground is not None:
-                    v_row -= ring_velocity(P_load_u, ground.reflect_points(wc_age), rc_load_u_wake, backend=backend)
-                V_wake_load_stat[age] = v_row
-                gamma_by_age = wake_gamma_buf[:step][::-1]
-                v_ind_u = v_ind_u + np.einsum("rmsi,rs->mi", V_wake_load_stat[:step], gamma_by_age)
-            else:
-                v_ind_u = v_ind_u + _wake_velocity_at(
-                    P_load_u,
-                    wake_corners_cur,
-                    wake_gamma_buf,
-                    step,
-                    rc_load_u_wake,
-                    ground=ground,
-                    backend=backend,
-                )
-
-        v_ind_load = v_ind_u[load_inv_idx]
-
-        # Kutta-Joukowski force and moment.
-        v_surf_load = v_trans[None, :] + cross3(omega_g[None, :], arm_all)
-        if v_fl_load is not None:
-            v_surf_load = v_surf_load + v_fl_load
-        if gust_fn is None:
-            v_onset_load = V_0[None, :]
-        else:
-            v_onset_load = V_0[None, :] + _eval_gust(gust_fn, P_load_u, t_now)[load_inv_idx]
-        V_tot = v_onset_load - v_surf_load + v_ind_load
-        V_eff = V_tot - np.sum(V_tot * seg_normal, axis=1, keepdims=True) * seg_normal
-
-        g_hs = _rings_to_horseshoe(gamma_n, rings.n_chord)
-        g_leg = leg_strength(lattice, g_hs)
-        g_all = np.concatenate([g_hs] + [g_leg] * n_leg_sets)
-
-        F_seg = (rho * g_all * seg_scale)[:, None] * cross3(V_eff, seg_vec)
-        F_tot = np.sum(F_seg, axis=0)
-        M_tot = np.sum(cross3(arm_all, F_seg), axis=0)
-        s_lift = np.zeros(n_s, dtype=np.float64)
-        np.add.at(s_lift, eval_strips, F_seg @ L_0)
-
-        # Apparent-mass load: rho * (dGamma / dt) * area_vec.
-        if step >= 2:
-            dG_dt = (3.0 * gamma_n - 4.0 * prev_gamma + prev2_gamma) / (2.0 * dt_val)
-        elif step == 1:
-            dG_dt = (gamma_n - prev_gamma) / dt_val
-        else:
-            dG_dt = None
-
-        if dG_dt is not None:
-            coef_am = rho * dG_dt
-            F_am = coef_am[:, None] * area_vec
-            F_tot = F_tot + np.sum(F_am, axis=0)
-            if area_moment_vec is not None:
-                M_tot = M_tot + np.sum(coef_am[:, None] * area_moment_vec, axis=0)
-            else:
-                M_tot = M_tot + np.sum(cross3(arm_ring, F_am), axis=0)
-            np.add.at(s_lift, rings.panel_strip, F_am @ L_0)
-
-        # Trailing-edge boundary load correction with the first wake row as shed ring.
-        if te_correction and step >= 1:
-            if V_bound_te_b is not None:
-                v_te_real = V_bound_te_b.swapaxes(1, 2) @ gamma_n
-                v_ind_te = _rotate_vecs(v_te_real, R, pitch_only)
-                if ground is not None:
-                    if is_stationary:
-                        if V_bound_img_te_stat is None:
-                            img_c = ground.reflect_points(corners)
-                            img_s = None if side_nodes is None else ground.reflect_points(side_nodes)
-                            V_bound_img_te_stat = ring_velocity(
-                                p_te,
-                                img_c,
-                                rc_te_ring,
-                                side_nodes=img_s,
-                                side_counts=rings.side_counts,
-                                backend=backend,
-                            )
-                        v_ind_te = v_ind_te - (V_bound_img_te_stat.swapaxes(1, 2) @ gamma_n)
-                    else:
-                        v_ind_te = v_ind_te + _bound_velocity_at(
-                            p_te,
-                            corners,
-                            side_nodes,
-                            rings.side_counts,
-                            gamma_n,
-                            rc_te_ring,
-                            ground=ground,
-                            backend=backend,
-                            image_only=True,
-                        )
-            else:
-                v_ind_te = _bound_velocity_at(
-                    p_te,
-                    corners,
-                    side_nodes,
-                    rings.side_counts,
-                    gamma_n,
-                    rc_te_ring,
-                    ground=ground,
-                    backend=backend,
-                    image_only=False,
-                )
-
-            if V_wake_te_stat is not None:
-                age = step - 1
-                wc_age = wake_corners_cur[0]
-                v_row_te = ring_velocity(p_te, wc_age, rc_te_wake, backend=backend)
-                if ground is not None:
-                    v_row_te -= ring_velocity(p_te, ground.reflect_points(wc_age), rc_te_wake, backend=backend)
-                V_wake_te_stat[age] = v_row_te
-                gamma_by_age = wake_gamma_buf[:step][::-1]
-                v_ind_te = v_ind_te + np.einsum("rmsi,rs->mi", V_wake_te_stat[:step], gamma_by_age)
-            else:
-                v_ind_te = v_ind_te + _wake_velocity_at(
-                    p_te,
-                    wake_corners_cur,
-                    wake_gamma_buf,
-                    step,
-                    rc_te_wake,
-                    ground=ground,
-                    backend=backend,
-                )
-
-            v_surf_te = v_trans[None, :] + cross3(omega_g[None, :], arm_te)
-            if v_fl_te is not None:
-                v_surf_te = v_surf_te + v_fl_te
-            v_onset_te = V_0[None, :] if gust_fn is None else V_0[None, :] + _eval_gust(gust_fn, p_te, t_now)
-            V_te = v_onset_te - v_surf_te + v_ind_te
-            dg_te = f_te * (wake_gamma_buf[step - 1] - gamma_n[te_idx])
-            F_te = (rho * dg_te)[:, None] * cross3(V_te, l_te)
-            F_tot = F_tot + np.sum(F_te, axis=0)
-            M_tot = M_tot + np.sum(cross3(arm_te, F_te), axis=0)
-            s_lift = s_lift + (F_te @ L_0)
-
-        CL[step] = float((F_tot @ L_0) / qS)
-        CD[step] = float((F_tot @ d_0) / qS)
-        CY[step] = float((F_tot @ S_0) / qS)
-        Cl[step] = float(-M_tot[0] / (qS * b_ref_f))
-        Cm[step] = float(M_tot[1] / (qS * c_ref_f))
-        Cn[step] = float(-M_tot[2] / (qS * b_ref_f))
-        strip_cl[step] = s_lift / (q_inf * strip_area)
-
-        prev_base_l = base_l
-        prev_base_r = base_r
-        prev2_gamma = prev_gamma
-        prev_gamma = gamma_n
+    assert stepper.m_axes is not None
+    x_arr, x_dot = stepper.m_axes["x"]
+    y_arr, y_dot = stepper.m_axes["y"]
+    z_arr, z_dot = stepper.m_axes["z"]
+    roll_arr, roll_dot = stepper.m_axes["roll"]
+    pitch_arr, pitch_dot = stepper.m_axes["pitch"]
+    yaw_arr, yaw_dot = stepper.m_axes["yaw"]
 
     return _TimeDomainResponse(
-        time=time,
+        time=stepper.time,
         z=z_arr,
         theta=pitch_arr,
         z_dot=z_dot,
@@ -2428,21 +3051,21 @@ def _solve_time_rings(
         Cm=Cm,
         Cn=Cn,
         strip_cl=strip_cl,
-        gamma_bound=prev_gamma.copy(),
-        gamma_wake=wake_gamma_buf[::-1].copy(),
-        wake_corners=wake_corners_cur[::-1].copy(),
-        dt=dt_val,
-        dt_default=dt_default,
-        dx_w=dx_w,
-        dx_te_mean=dx_te_mean,
+        gamma_bound=stepper.gamma_bound(),
+        gamma_wake=stepper.gamma_wake(),
+        wake_corners=stepper.wake_corners(),
+        dt=stepper.dt,
+        dt_default=stepper.dt_default,
+        dx_w=stepper.dx_w,
+        dx_te_mean=stepper.dx_te_mean,
         n_steps=n_steps_int,
-        n_panels=n_p,
+        n_panels=stepper.n_panels,
         n_strips=n_s,
-        n_chord=rings.n_chord,
-        te_correction=bool(te_correction),
-        c_ref=c_ref_f,
-        b_ref=b_ref_f,
-        S_ref=S_ref_f,
+        n_chord=stepper.n_chord,
+        te_correction=stepper.te_correction,
+        c_ref=stepper.c_ref,
+        b_ref=stepper.b_ref,
+        S_ref=stepper.S_ref,
         x=x_arr,
         y=y_arr,
         roll=roll_arr,
@@ -2453,8 +3076,8 @@ def _solve_time_rings(
         roll_dot=roll_dot,
         pitch_dot=pitch_dot,
         yaw_dot=yaw_dot,
-        controls=ctrl_arrs,
-        controls_dot=ctrl_dots,
+        controls=stepper.ctrl_arrs,
+        controls_dot=stepper.ctrl_dots,
         gust_velocity=gust_ref,
-        notes=notes,
+        notes=stepper.notes,
     )
