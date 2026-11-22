@@ -660,7 +660,7 @@ def test_non_unit_chord_and_tapered_wing_k0_and_metadata(monkeypatch):
     assert abs(r_sw.k0_pitch.CL - hd_sw.derivatives["CL_alpha"]) <= 1e-8 * max(abs(hd_sw.derivatives["CL_alpha"]), 1.0)
     assert "_HarmonicResponse" not in getattr(vt, "__all__", [])
     assert "_solve_harmonic_rings" not in getattr(vt, "__all__", [])
-    assert vt.unsteady.__all__ == []
+    assert set(vt.unsteady.__all__) == {"DynamicDerivativesResult", "dynamic_derivatives"}
 
 
 # ---------------------------------------------------------------------------

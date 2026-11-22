@@ -65,7 +65,7 @@ Example with `aircraft`:
 
 - **Work units.** One solve of a lattice with N panels costs N^2 units. The work of a call is the sum over all solves that the call will run (sweep angles, heights, mesh levels, batch candidates, derivative steps).
 - **Budget.** A call whose estimated work is above 200000000 units is refused with `error.type` `invalid_input` before any solve. The message gives the estimate, the budget and how to reduce the work: fewer angles (smaller range or larger `alpha_step_deg`), fewer heights, fewer mesh levels or spacing schemes, fewer candidates, or fewer panels (smaller `n_panels` or `n_chord`).
-- **Scope.** The budget covers `ventorum_wing_analysis`, `ventorum_polar_sweep`, `ventorum_ground_effect` (heights plus free air plus 9 Irodov solves per height; when that is above the budget, 9 Irodov solves at the lowest valid height only), `ventorum_stability_derivatives` (5 solves, 14 in ground effect with the Irodov solves), `ventorum_derivative_matrix` (the real solves times N^2: in free air 5 static, 1 + 2 n control (n controls) and 7 rate solves, so 13 + 2 n with all groups; in ground effect 9 static and height solves instead of 5, so 17 + 2 n), `ventorum_batch_evaluate`, `ventorum_mesh_convergence` (levels times the angles that are really solved), `ventorum_trim` (`(max_iterations + passes) * (1 + 2 * n_unknowns) * N^2`, with 2 unknowns in longitudinal trim and 4 in lateral trim; `passes` is 3 (`GROUND_N_CHORD_MAX_PASSES`) in ground effect with the automatic `n_chord` of the vortex lattice, else 1; N is the panel count at the start point) and `ventorum_error_bars` (`N1^2 + N2^2 + N3^2` of the three spanwise levels, plus `(1 + 2 max(1, k)) N1^2` with `input_uncertainties`, k = number of flow inputs). `ventorum_tune_machine` and `ventorum_undeformed_nodes` are outside the budget: they run no solve (their duration or mesh is stated in their description instead).
+- **Scope.** The budget covers `ventorum_wing_analysis`, `ventorum_polar_sweep`, `ventorum_ground_effect` (heights plus free air plus 9 Irodov solves per height; when that is above the budget, 9 Irodov solves at the lowest valid height only), `ventorum_stability_derivatives` (5 solves, 14 in ground effect with the Irodov solves), `ventorum_derivative_matrix` (the real solves times N^2: in free air 5 static, 1 + 2 n control (n controls) and 7 rate solves, so 13 + 2 n with all groups; in ground effect 9 static and height solves instead of 5, so 17 + 2 n), `ventorum_dynamic_derivatives` (`(1 + n_k) * N^2` for `n_k` reduced frequencies plus the steady mean solve), `ventorum_batch_evaluate`, `ventorum_mesh_convergence` (levels times the angles that are really solved), `ventorum_trim` (`(max_iterations + passes) * (1 + 2 * n_unknowns) * N^2`, with 2 unknowns in longitudinal trim and 4 in lateral trim; `passes` is 3 (`GROUND_N_CHORD_MAX_PASSES`) in ground effect with the automatic `n_chord` of the vortex lattice, else 1; N is the panel count at the start point) and `ventorum_error_bars` (`N1^2 + N2^2 + N3^2` of the three spanwise levels, plus `(1 + 2 max(1, k)) N1^2` with `input_uncertainties`, k = number of flow inputs). `ventorum_tune_machine` and `ventorum_undeformed_nodes` are outside the budget: they run no solve (their duration or mesh is stated in their description instead).
 - **Automatic mesh fit.** See [Automatic mesh fit](#automatic-mesh-fit): when the spanwise count is automatic, a call above the budget gets fewer spanwise strips instead of a refusal.
 - **Panel method budget.** Dense LU factorization costs N^3 / 3 operations for N solved panels per configuration (the half mesh when the solver folds the symmetry; the full mesh with sideslip or an asymmetric surface). `ventorum_panel_analysis` and `ventorum_error_bars` with `method` `panel3d` (the sum over its 5 meshes) use module constants `MAX_PANEL_PANELS = 15000` panels and `MAX_PANEL_CALL_WORK = 2.0e12` operations. A call that exceeds either limit is refused before any solve.
 
@@ -73,7 +73,7 @@ Example with `aircraft`:
 
 Every tool that solves gives the trust rating and the warnings of the solver result. The ratings are `HIGH`, `MODERATE`, `LOW` and `UNRELIABLE`. They come from an error model calibrated against known-answer cases, with uncalibrated envelope rules as caps (see the trust score chapter of the theory manual): read the warnings.
 
-- `ventorum_wing_analysis`, `ventorum_panel_analysis`, `ventorum_trim`, `ventorum_derivative_matrix`, `ventorum_error_bars` (the fine level, the user mesh) and `ventorum_mesh_convergence` (the recommended mesh, else the reference mesh: see `trust_of`) give `trust` with `score`, `rating`, `warnings`, `recommendations`, `factors` and the heuristic bands.
+- `ventorum_wing_analysis`, `ventorum_panel_analysis`, `ventorum_trim`, `ventorum_derivative_matrix`, `ventorum_dynamic_derivatives`, `ventorum_error_bars` (the fine level, the user mesh) and `ventorum_mesh_convergence` (the recommended mesh, else the reference mesh: see `trust_of`) give `trust` with `score`, `rating`, `warnings`, `recommendations`, `factors` and the heuristic bands.
 - The `settings` object of the lattice tools accepts `report_condition` (boolean, default false). When it is true, the vortex-lattice and linear lifting-line solves on the CPU estimate the 1-norm condition number of the system matrix; `ventorum_wing_analysis` gives it in `metrics.condition_number`, `ventorum_polar_sweep` in `condition_number` of each valid row of `polar_table` and in `polar_summary.condition_number_max` (with `condition_number_alpha_deg_at_max`, at every detail level), `ventorum_trim` in `condition_number` (the solve of the reported trim point), and `ventorum_ground_effect` in `condition_number` of each valid row (each height), in `free_air.condition_number` and in `summary.condition_number_max` (with `condition_number_h_m_at_max`, at every detail level); the value is null on the GPU and for the other solvers, and `settings_used.report_condition` echoes the setting. An estimate above 1e10 gives a trust warning: about 10 of the 16 float64 digits of the circulation can be lost.
 - `ventorum_polar_sweep`: each row of `polar_table` gives `trust_score`, `trust_rating` and `warnings`, the short labels of its warnings (for example `"Severe stall risk"`; at most 3, the count of the others in `warnings_not_shown`). `polar_summary` gives `trust_rating_lowest`, `trust_score_min`, `trust_alpha_deg_at_lowest` and `warnings`: each kind of warning once, as `{"warning": full text at the angle with the lowest score, "alpha_deg": [angles that have it]}` (at most 6, the count of the others in `warnings_not_shown`). These summary keys are also at `detail_level="summary"`, which has no `polar_table`. The executive summary names the lowest rating, its angle and its first warnings.
 - `ventorum_ground_effect` and `ventorum_batch_evaluate`: each row gives `trust_score`, `trust_rating`, `warnings` and `converged`; the ground-effect summary gives the lowest rating.
@@ -136,7 +136,7 @@ Every tool that solves gives the trust rating and the warnings of the solver res
 - **One mesh.** All the cases of one call (the steps of a finite difference, the angles of a sweep, the heights and free air, the cases of a trim) use the one fitted spanwise count. In `ventorum_batch_evaluate` all the candidates with an automatic spanwise count use one count; a candidate with a surface `n_panels` keeps its count.
 - **Counts of the caller.** A spanwise or chordwise count that the caller set is never changed. A call with a spanwise count of the caller above the budget is refused with `invalid_input`, and an automatic `n_chord` above the mesh limit is reduced, as before.
 - **Report.** `settings_used.n_panels` is the count of the settings that the call used. A surface can set its own `n_panels`, so `settings_used.surface_mesh` gives the mesh of each surface of the solved lattice: `name`, `n_panels` (spanwise strips per semi-span, as the surface key) and `n_strips` (all spanwise strips of the surface, both halves of a symmetric surface). It is present when the result has a vortex lattice (not for the Fourier and the 3D panel solvers). `settings_used.mesh_note` (or `mesh_note` of each ranking in `ventorum_batch_evaluate`) gives the old and new spanwise counts, the strips of all surfaces, the chordwise count that was kept and the reason (the mesh limit, the work budget or both).
-- **Scope.** `ventorum_wing_analysis`, `ventorum_polar_sweep`, `ventorum_ground_effect`, `ventorum_stability_derivatives`, `ventorum_derivative_matrix`, `ventorum_batch_evaluate`, `ventorum_trim` and `ventorum_error_bars`. `ventorum_mesh_convergence` does not fit: its spanwise counts are the levels of the study.
+- **Scope.** `ventorum_wing_analysis`, `ventorum_polar_sweep`, `ventorum_ground_effect`, `ventorum_stability_derivatives`, `ventorum_derivative_matrix`, `ventorum_dynamic_derivatives`, `ventorum_batch_evaluate`, `ventorum_trim` and `ventorum_error_bars`. `ventorum_mesh_convergence` does not fit: its spanwise counts are the levels of the study.
 
 ## Full aerodynamic derivative matrix
 
@@ -191,6 +191,36 @@ Example output (abridged: the rows CD, CY, Cl and Cn and the keys `rows`, `notes
     }
   }
 }
+```
+
+## Dynamic derivatives
+
+- `ventorum_dynamic_derivatives` (`wing` or `aircraft`, `flight_condition`, `x_cg_m`, `k`, `wake_chords`, `settings`, `detail_level`, `axes`): frequency-dependent longitudinal dynamic derivatives from the harmonic vortex-ring lattice solver, in free air or in flat-ground effect (`flight_condition.h_m`).
+- **Inputs:**
+  - `wing` or `aircraft`, `flight_condition`, `x_cg_m`, `settings` and `detail_level`: same pattern as `ventorum_stability_derivatives`. Only the vortex-lattice solver (`"vlm"` or `"auto"`) and incompressible flow (Mach at most 0.3) are accepted.
+  - `k`: list of non-negative finite reduced frequencies `k = omega c_ref / (2 V_inf)` [-]. Default `[0.0]` (the `k -> 0` limit only).
+  - `wake_chords`: positive discrete wake length in reference chords [-]. Default `5.0`.
+  - `axes`: `"body"` (default) or `"stability"` of the mean state.
+- **Outputs:**
+  - `k`, `k0` (the `k -> 0` limits of all 36 longitudinal derivatives), `derivatives` (the equivalent derivatives per `k` for `C_alpha`, `C_q`, `C_alpha_dot`, `C_h`, `C_h_dot` and `C_h_dot_ground = C_h_dot + C_alpha` across `CL`, `CD`, `CY`, `Cl`, `Cm` and `Cn`), `CL0`, `Cm0`, `mean_state`, `mesh`, `trust`, `trust_notes`, `notes`, `condition_used`, `settings_used` and `axes`.
+  - At `detail_level="standard"` and `"full"`, the payload also includes `responses` (complex `H_theta`, `H_z` and `H_pureq` as `{"re": [...], "im": [...]}`) and `geometry`.
+  - Exposed through `ventorum.agent.tools.dynamic_derivatives` and through the MCP server (`tools/list` and `tools/call` under `"ventorum_dynamic_derivatives"`).
+
+Example call:
+
+```python
+from ventorum.agent.tools import dynamic_derivatives
+
+res = dynamic_derivatives(
+    wing={"span_m": 6.0, "chord_m": 1.0},
+    flight_condition={"V_inf_m_s": 30.0, "alpha_deg": 4.0, "h_m": 0.5},
+    x_cg_m=0.25,
+    k=[0.0, 0.05, 0.2],
+    settings={"n_panels": 12, "n_chord": 8},
+)
+print(res["executive_summary"])
+print("Cm_q(k):", res["derivatives"]["Cm_q"])
+print("Cm_alpha_dot(k):", res["derivatives"]["Cm_alpha_dot"])
 ```
 
 ## 2D airfoil tools

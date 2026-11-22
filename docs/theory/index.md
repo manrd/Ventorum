@@ -27,6 +27,7 @@ The values of the model parameters come from the code (the API reference shows t
 | [Adjoint gradients](gradients.md) | Discrete adjoint gradients of the vortex lattice and the linear and nonlinear lifting lines | J. R. R. A. Martins and J. T. Hwang (2013); J. R. R. A. Martins and A. Ning (2021) |
 | [Control surfaces](control_surfaces.md) | Thin-airfoil flap theory, panel deflection and section modification, hinge moments, control derivatives | H. Glauert (1926); Katz and Plotkin (2001); Etkin and Reid (1996) |
 | [Body rates](rotation_rates.md) | Quasi-steady rotation in the boundary condition and the loads, rate derivatives p, q, r | Katz and Plotkin (2001); Etkin and Reid (1996); Phillips and Snyder (2000) |
+| [Unsteady vortex-ring lattice](unsteady_vortex_rings.md) | Frequency-domain harmonic vortex-ring lattice, 3D far-wake tail, Woodbury solve, dynamic derivatives | Katz and Plotkin (2001); Hall (1994); Parenteau (2021); Rodden and Giesing (1970); Theodorsen (1935) |
 | [Trim solver](trim.md) | Longitudinal and lateral trim for target lift and zero moments | B. Etkin and L. D. Reid (1996); J. E. Dennis and R. B. Schnabel (1996) |
 | [Symmetry](symmetry.md) | Use of the mirror symmetry of the flow | Katz and Plotkin (2001) |
 | [Trust score and error bars](trust_score.md) | Envelope checks (experimental) and the planned error-bar layers | W. L. Oberkampf and C. J. Roy (2010); ASME V&V 20 (2009); P. J. Roache (1998) |
@@ -62,6 +63,7 @@ ground_effect
 gradients
 control_surfaces
 rotation_rates
+unsteady_vortex_rings
 trim
 symmetry
 trust_score

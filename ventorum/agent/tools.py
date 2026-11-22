@@ -3506,6 +3506,139 @@ def derivative_matrix(
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# Dynamic derivatives (harmonic vortex-ring lattice)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@_tool
+def dynamic_derivatives(
+    wing: Any = None,
+    aircraft: Any = None,
+    flight_condition: dict[str, Any] | None = None,
+    x_cg_m: float | None = None,
+    k: list[float] | None = None,
+    wake_chords: float = 5.0,
+    settings: dict[str, Any] | None = None,
+    detail_level: str = "standard",
+    axes: str = "body",
+) -> dict[str, Any]:
+    """Compute frequency-dependent longitudinal dynamic derivatives via harmonic vortex rings.
+
+    Uses the same geometry, flight condition and centre-of-gravity input
+    pattern as :func:`stability_derivatives`, plus the reduced frequency list
+    *k* and discrete wake length *wake_chords*. Returns a JSON-safe dictionary
+    built from :meth:`ventorum.DynamicDerivativesResult.to_dict`.
+
+    Parameters
+    ----------
+    wing : dict or None
+        One surface specification.
+    aircraft : dict or None
+        Multi-surface aircraft specification.
+    flight_condition : dict or None
+        Mean flight condition (``V_inf_m_s``, ``alpha_deg``, ``beta_deg``,
+        ``rho_kg_m3`` or ``altitude_m``, optional ``h_m`` for ground effect).
+    x_cg_m : float or None
+        Centre-of-gravity x coordinate [m], geometry axes (x aft). Default:
+        the aircraft ``ref_point_m`` x coordinate, else 0.
+    k : list of float or None
+        Reduced frequencies ``k = omega c_ref / (2 V_inf)`` [-], all finite
+        and ``>= 0``. Default ``[0.0]`` (the ``k -> 0`` limit only).
+    wake_chords : float
+        Discrete harmonic wake length in reference chords [-]. Default 5.0.
+    settings : dict or None
+        Solver settings. Only the vortex-lattice solver (``"vlm"`` or
+        ``"auto"``) is supported.
+    detail_level : {'summary', 'standard', 'full'}
+        Verbosity of the payload. ``"summary"`` omits ``geometry`` and
+        ``responses`` and returns compact trust metadata.
+    axes : {'body', 'stability'}
+        Moment axes of the mean state, held fixed. Force coefficients
+        ``CL``, ``CD`` and ``CY`` are relative to the free stream.
+
+    Returns
+    -------
+    dict
+        JSON-safe payload with ``"status"``, ``"executive_summary"``,
+        ``"k"``, ``"k0"``, ``"derivatives"``, ``"mean_state"``, ``"CL0"``,
+        ``"Cm0"``, ``"mesh"``, ``"trust"``, ``"trust_notes"``, ``"notes"``,
+        ``"condition_used"``, ``"settings_used"`` and ``"axes"``.
+    """
+    ac = build_aircraft_from_spec(wing=wing, aircraft=aircraft)
+    c = parse_condition(flight_condition)
+    sett = parse_settings(settings)
+    dl = parse_detail_level(detail_level)
+    ax = string(axes, "axes", ("body", "stability"))
+    base_rp = ac.moment_reference()
+    x_cg = number(x_cg_m, "x_cg_m") if x_cg_m is not None else float(base_rp[0])
+    ac.ref_point = np.array([x_cg, 0.0, float(base_rp[2])])
+    ac.compute_reference_values()
+
+    k_list = [0.0] if k is None else number_list(k, "k", min_len=1, max_len=50, minimum=0.0)
+    wc = number(wake_chords, "wake_chords", exclusive_min=0.0, maximum=100.0)
+
+    if resolve_solver_type(sett.solver_type) != "vlm":
+        raise InputError(
+            f"dynamic_derivatives supports only solver 'vlm' (or 'auto'), got {sett.solver_type!r}."
+        )
+    _check_method(ac, sett.solver_type, sett.wake_alignment, c["h_m"] is not None)
+    fc = make_flight_condition(c)
+
+    n_work_solves = 1 + len(k_list)
+    sett, fit = _fit_span(
+        ac,
+        sett,
+        settings,
+        lambda s: _planned_panels(ac, s, fc, cap=False),
+        lambda s: n_work_solves * (_planned_panels(ac, s, fc) ** 2),
+    )
+    strips = _check_mesh(ac, sett)
+    _check_call_work(
+        n_work_solves * (_planned_panels(ac, sett, fc) ** 2),
+        "fewer reduced frequencies k or fewer panels (smaller n_panels or n_chord)",
+    )
+    case_sett = _case_settings(ac, sett, strips, fc)
+
+    res = vt.dynamic_derivatives(ac, fc, case_sett, k=k_list, wake_chords=wc, axes=ax)
+    data = res.to_dict()
+
+    where = "free air" if c["h_m"] is None else f"h={c['h_m']:g} m (h/c={c['h_m'] / res.c_ref:.3f})"
+    k0 = res.k0
+    summary = (
+        f"[Ventorum RESULT] Dynamic derivatives of {ac.name} at alpha={c['alpha_deg']:g} deg, "
+        f"V={c['V_inf_m_s']:g} m/s, {where} ({ax} axes, {len(k_list)} k value(s)): "
+        f"k->0 CL_alpha={fmt(k0['CL_alpha'], '.4f')}/rad, Cm_alpha={fmt(k0['Cm_alpha'], '.4f')}/rad, "
+        f"CL_q={fmt(k0['CL_q'], '.4f')}, Cm_q={fmt(k0['Cm_q'], '.4f')}, "
+        f"CL_alpha_dot={fmt(k0['CL_alpha_dot'], '.4f')}, Cm_alpha_dot={fmt(k0['Cm_alpha_dot'], '.4f')}, "
+        f"CL_h={fmt(k0['CL_h'], '.4f')}, CL_h_dot={fmt(k0['CL_h_dot'], '.4f')} "
+        f"about x_cg={x_cg:.4f} m."
+    )
+    if res.trust is not None:
+        summary += f" Trust {res.trust.score:.2f} ({res.trust.rating}), {len(res.trust.warnings)} warning(s)."
+
+    trust_out = trust_payload(res.trust)
+    if dl == "summary":
+        trust_out = compact_trust(trust_out)
+
+    settings_used = {
+        **settings_payload(sett, res.base),
+        **_mesh_note(case_sett is not sett, case_sett, fit),
+    }
+    out: dict[str, Any] = {
+        "status": "success",
+        "executive_summary": summary,
+        **data,
+        "condition_used": condition_payload(c),
+        "settings_used": settings_used,
+        "trust": trust_out,
+    }
+    if dl == "summary":
+        out.pop("responses", None)
+    else:
+        out["geometry"] = geometry_payload(ac)
+    return out
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # Machine capabilities and tuning
 # ═══════════════════════════════════════════════════════════════════════════════
 

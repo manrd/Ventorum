@@ -52,6 +52,12 @@ a minor version can change a public interface.
 
 ### Added
 
+- Public frequency-domain longitudinal dynamic derivatives (`ventorum.dynamic_derivatives`,
+  `DynamicDerivativesResult`) from the harmonic vortex-ring lattice solver, in free air and in flat-ground
+  effect, with `k -> 0` limits, per-`k` equivalent derivatives, complex responses, stability-axes option,
+  JSON-safe `to_dict()`, unsteady trust notes, an agent tool (`ventorum.agent.tools.dynamic_derivatives`
+  and MCP tool `ventorum_dynamic_derivatives`), user and theory documentation, and
+  `examples/13_dynamic_derivatives.py`.
 - GPU memory limit for the lattice cache (default a quarter of the GPU memory, `VENTORUM_GPU_CACHE_BYTES`,
   `gpu.set_cache_limit`), `gpu.release()` (frees both the lattice cache and the GPU entries of the 3D panel cache)
   and `gpu.cache_bytes()`. A solve that runs out of GPU memory falls back to the CPU and adds a result note

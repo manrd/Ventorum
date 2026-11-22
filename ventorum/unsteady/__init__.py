@@ -1,7 +1,8 @@
 # Author: Manuel Alejandro Rodriguez Diaz, PhD
-"""Unsteady vortex-ring aerodynamics package (in development).
+"""Unsteady vortex-ring aerodynamics package.
 
-This package holds the shared unsteady vortex-ring core:
+This package holds the unsteady vortex-ring core and public dynamic-derivative
+interface:
 
 * :mod:`ventorum.unsteady.rings`: quadrilateral vortex-ring lattice geometry,
   ground mirror images and steady parity helpers.
@@ -10,8 +11,8 @@ This package holds the shared unsteady vortex-ring core:
 * :mod:`ventorum.unsteady.harmonic`: frequency-domain harmonic vortex-ring
   lattice solver for longitudinal motions (heave and pitch) in free air and in
   flat-ground effect.
-
-The package is in development and has no public interface yet.
+* :mod:`ventorum.unsteady.derivatives`: public :func:`dynamic_derivatives`
+  function and :class:`DynamicDerivativesResult`.
 
 References
 ----------
@@ -25,8 +26,13 @@ References
   Compressible, Transonic and Viscous Aeroelastic Analyses", PhD thesis,
   Polytechnique Montreal, 2021, chapter 4 (frequency-domain vortex lattice;
   cited through study material).
+* W. P. Rodden and J. P. Giesing, "Application of oscillatory aerodynamic
+  theory to estimation of dynamic stability derivatives", Journal of Aircraft
+  7(3), 1970, pp. 272-275 (equivalent derivatives at reduced frequency k).
 """
 
 from __future__ import annotations
 
-__all__: list[str] = []
+from ventorum.unsteady.derivatives import DynamicDerivativesResult, dynamic_derivatives
+
+__all__ = ["DynamicDerivativesResult", "dynamic_derivatives"]
