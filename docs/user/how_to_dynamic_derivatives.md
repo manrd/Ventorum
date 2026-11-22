@@ -65,6 +65,10 @@ For each coefficient `C` in `CL`, `CD`, `CY`, `Cl`, `Cm` and `Cn`, both `res.k0`
 - All strips share one wake time step `dt = dx_w / V_inf`. When a strongly tapered wing gives a trailing-edge panel length ratio `dx_TE,s / dx_w` outside `[0.8, 1.25]`, `res.trust_notes` records the span of the ratio.
 - Reduced frequencies above `k = 1.0` add a note that the frequency is outside the verified test range.
 
+## Device and GPU execution
+
+`dynamic_derivatives` follows the device and precision settings of `ventorum.gpu` (`gpu.set_device`, `gpu.set_precision`, `VENTORUM_DEVICE`, `VENTORUM_GPU_PRECISION`). When CUDA is selected, the solver assembles the bound, wake and tail influence matrices with NVIDIA Warp kernels and solves the reduced frequencies in batches with PyTorch on the GPU. `res.device` and `res.precision` (and `res.to_dict()`) record the device and precision used. Call `ventorum.gpu.release()` to free registered ring device arrays. When CUDA is unavailable or the GPU runs out of memory twice, the solver falls back to the CPU and records a fallback note in `res.notes` and `res.trust.warnings`.
+
 ## Limits
 
 - Only the vortex-lattice solver (`solver_type="vlm"` or `"auto"`) is supported. Lifting-line and Fourier solvers are refused with `InputError`.

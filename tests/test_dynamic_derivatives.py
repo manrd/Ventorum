@@ -471,3 +471,38 @@ def test_trust_notes_all_four_rules():
     # Rule 4: wake_chords < 5.
     r_shortw = vt.dynamic_derivatives(ac_rect, cond, st_clean, k=(0.0,), wake_chords=3.0)
     assert any("5 chords" in msg for msg in r_shortw.trust_notes)
+
+
+def test_dynamic_derivatives_records_device_precision_and_fallback_note(monkeypatch):
+    """DynamicDerivativesResult records device and precision (also in to_dict) and fallback notes."""
+    from ventorum import gpu
+
+    ac = _rect_wing(n_panels=4)
+    st = vt.SolverSettings(solver_type="vlm", n_panels=4, n_chord=4)
+    cond = vt.FlightCondition(V_inf=30.0, rho=1.225, alpha=np.radians(4.0))
+
+    old_dev = gpu.get_device()
+    try:
+        gpu.set_device("cpu")
+        r_cpu = vt.dynamic_derivatives(ac, cond, st, k=(0.0, 0.1))
+        assert r_cpu.device == "cpu"
+        assert r_cpu.precision == "float64"
+        d_cpu = r_cpu.to_dict()
+        assert d_cpu["device"] == "cpu"
+        assert d_cpu["precision"] == "float64"
+        assert not any("GPU unavailable" in msg for msg in r_cpu.notes)
+
+        monkeypatch.setattr(gpu, "get_device", lambda: "gpu")
+        monkeypatch.setattr(gpu, "available", lambda: False)
+        monkeypatch.setattr(gpu, "unavailable_reason", lambda: "PyTorch finds no CUDA GPU.")
+        r_fb = vt.dynamic_derivatives(ac, cond, st, k=(0.0, 0.1))
+        assert r_fb.device == "cpu"
+        assert r_fb.precision == "float64"
+        assert any("GPU unavailable" in msg and "CPU" in msg for msg in r_fb.notes)
+        assert r_fb.trust is not None
+        assert any("GPU unavailable" in msg and "CPU" in msg for msg in r_fb.trust.warnings)
+        assert r_fb.trust.score == r_cpu.trust.score
+        assert r_fb.trust.rating == r_cpu.trust.rating
+        assert float(r_fb.k0["CL_alpha"]).hex() == float(r_cpu.k0["CL_alpha"]).hex()
+    finally:
+        gpu.set_device(old_dev)

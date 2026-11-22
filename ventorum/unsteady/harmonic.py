@@ -80,8 +80,10 @@ References
 from __future__ import annotations
 
 import math
+import warnings
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from typing import Any
 
 import numpy as np
 from scipy import linalg as sl
@@ -123,6 +125,74 @@ _LOAD_POINT_CHUNK = 256
 _DEFAULT_FD_STEP_THETA = 1.0e-5
 # Default central finite-difference step fraction for heave geometry derivatives [-].
 _DEFAULT_FD_STEP_H_FRAC = 1.0e-5
+# Cap on temporary GPU batched linear-solve tensors [B].
+_GPU_SOLVE_BATCH_BYTES = 128 * 1024 ** 2
+
+#: Result note added when the GPU runs out of memory twice and the harmonic solve falls back to the CPU.
+NOTE_GPU_OUT_OF_MEMORY = (
+    "GPU out of memory: the GPU ran out of memory twice, so this case was solved on the CPU."
+)
+
+
+def _note_gpu_unavailable(reason: str) -> str:
+    """Return the CPU fallback note when a GPU solve was requested without CUDA."""
+    detail = str(reason).strip()
+    if detail and not detail.endswith("."):
+        detail += "."
+    return f"GPU unavailable: {detail} This case was solved on the CPU."
+
+
+def _select_harmonic_device(
+    n_p: int,
+    n_rows: int,
+    n_s: int,
+    has_ground: bool,
+) -> tuple[str, str, list[str]]:
+    """Return ``(device, precision, fallback_notes)`` for the harmonic ring solver."""
+    from ventorum import gpu
+    from ventorum.utils.parallel import _local as _par_local
+
+    setting = gpu.get_device()
+    if setting == "cpu":
+        return "cpu", "float64", []
+    if setting == "auto" and getattr(_par_local, "worker_threads", None) is not None:
+        return "cpu", "float64", []
+    if setting == "gpu":
+        if gpu.available():
+            return "gpu", gpu.get_precision(), []
+        reason = gpu.unavailable_reason() or "no CUDA GPU is available."
+        return "cpu", "float64", [_note_gpu_unavailable(reason)]
+    # setting == "auto"
+    if not gpu.available():
+        return "cpu", "float64", []
+    work = float(n_p * n_p + n_p * n_rows * n_s) * (2.0 if has_ground else 1.0)
+    use, _ = gpu.use_gpu(work, "vlm", n_cases=1, n_panels=None, return_reason=True)
+    if use:
+        return "gpu", gpu.get_precision(), []
+    return "cpu", "float64", []
+
+
+class _HarmonicGPUState:
+    """Registered container for CUDA arrays held by one :class:`_HarmonicRingSystem`."""
+
+    def __init__(self, precision: str) -> None:
+        from ventorum.gpu import ring_kernels as RK
+
+        self.precision = precision
+        self.tensors: dict[str, Any] = {}
+        RK.register_device_holder(self)
+
+    def device_bytes(self) -> int:
+        """Return total CUDA storage bytes held by this state [B]."""
+        from ventorum.gpu import memory as gpu_memory
+
+        return gpu_memory._tensor_bytes(self.tensors, set())
+
+    def release_gpu(self) -> int:
+        """Drop all CUDA tensor references and return freed bytes [B]."""
+        freed = self.device_bytes()
+        self.tensors.clear()
+        return freed
 
 
 @dataclass(slots=True)
@@ -213,6 +283,12 @@ class _HarmonicResponse:
         Reference span [m].
     S_ref : float
         Reference area [m^2].
+    device : str
+        Execution device: ``"cpu"`` or ``"gpu"``.
+    precision : str
+        Kernel arithmetic precision: ``"float64"`` or ``"float32"``.
+    notes : list of str
+        Device fallback notes (for example out-of-memory or unavailable CUDA).
     """
 
     k: np.ndarray
@@ -236,6 +312,9 @@ class _HarmonicResponse:
     c_ref: float
     b_ref: float
     S_ref: float
+    device: str = "cpu"
+    precision: str = "float64"
+    notes: list[str] = field(default_factory=list)
 
     @property
     def CL0(self) -> float:
@@ -635,20 +714,695 @@ class _HarmonicRingSystem:
             self.img_tail_left = None
             self.img_tail_right = None
 
-        # Assemble real A_bb, steady wake closure A_bw_steady, real LU of A_bb, and discrete wake tensor A_bw.
+        self.device, self.precision, self.notes = _select_harmonic_device(
+            self.rings.n_panels, self.n_wake_rows, self.rings.n_strips, self.ground is not None,
+        )
+        self._gpu_state: _HarmonicGPUState | None = None
+        self.lu_Abb = None
+        self.lu_Asteady = None
+
+        if self.device == "gpu":
+            self._init_with_gpu_fallback(fd_step_h=fd_step_h, fd_step_theta=fd_step_theta)
+        else:
+            self._init_cpu(fd_step_h=fd_step_h, fd_step_theta=fd_step_theta)
+
+    def _init_cpu(self, *, fd_step_h: float | None, fd_step_theta: float | None) -> None:
+        """Assemble matrices, mean state, loaded terms and k -> 0 limits on the CPU."""
         self._assemble_system_matrices()
-
-        # Precompute load geometry (bound segments, chordwise legs, physical ring areas, TE segments).
         self._prepare_load_geometry()
-
-        # Solve steady mean state Gamma_0 and mean loads.
         self._solve_mean_state()
-
-        # Precompute loaded-mean-state geometry derivatives and perturbation-velocity load functionals.
         self._prepare_loaded_terms(fd_step_h=fd_step_h, fd_step_theta=fd_step_theta)
-
-        # Exact k -> 0 limits (heave, pitch, pitch rate).
         self.k0_heave, self.k0_pitch, self.k0_pitch_rate = self._compute_k0_limits()
+
+    def _init_with_gpu_fallback(self, *, fd_step_h: float | None, fd_step_theta: float | None) -> None:
+        """Run GPU initialisation with one OOM retry, falling back to CPU after two OOM errors."""
+        from ventorum.gpu import memory as gpu_memory
+        from ventorum.gpu.pipeline import is_out_of_memory
+
+        message = ""
+        for _attempt in range(2):
+            try:
+                self._init_gpu(fd_step_h=fd_step_h, fd_step_theta=fd_step_theta)
+                return
+            except Exception as exc:  # noqa: BLE001 - only out-of-memory errors are caught
+                if not is_out_of_memory(exc):
+                    raise
+                message = str(exc).splitlines()[0] if str(exc) else type(exc).__name__
+            if self._gpu_state is not None:
+                self._gpu_state.release_gpu()
+                self._gpu_state = None
+            gpu_memory.release()
+        warnings.warn(
+            f"The GPU ran out of memory twice ({message}). The harmonic solve falls back to the CPU.",
+            RuntimeWarning,
+            stacklevel=4,
+        )
+        self.device = "cpu"
+        self.precision = "float64"
+        if NOTE_GPU_OUT_OF_MEMORY not in self.notes:
+            self.notes.append(NOTE_GPU_OUT_OF_MEMORY)
+        self._init_cpu(fd_step_h=fd_step_h, fd_step_theta=fd_step_theta)
+
+    def _init_gpu(self, *, fd_step_h: float | None, fd_step_theta: float | None) -> None:
+        """Assemble matrices, mean state, loaded terms and k -> 0 limits on the GPU."""
+        self._gpu_state = _HarmonicGPUState(self.precision)
+        self._assemble_system_matrices_gpu()
+        self._prepare_load_geometry()
+        self._solve_mean_state_gpu()
+        self._prepare_loaded_terms_gpu(fd_step_h=fd_step_h, fd_step_theta=fd_step_theta)
+        self.k0_heave, self.k0_pitch, self.k0_pitch_rate = self._compute_k0_limits_gpu()
+
+    def _assemble_system_matrices_gpu(self) -> None:
+        import torch
+
+        from ventorum.gpu import engine
+        from ventorum.gpu import ring_kernels as RK
+
+        rings = self.rings
+        n_p = rings.n_panels
+        n_s = rings.n_strips
+        te_idx = rings.te_indices
+        prec = self.precision
+        t_dtype = engine.torch_dtype(prec)
+        dev = engine._dev()
+        st = self._gpu_state.tensors
+
+        cp_g = engine._f64(rings.cp)
+        nbc_g = engine._f64(rings.normal_bc)
+        corners_g = engine._f64(rings.corners)
+        sn_g = engine._f64(rings.side_nodes) if rings.has_side_nodes else None
+        sc_g = engine._i32(rings.side_counts) if rings.has_side_nodes else None
+        te_l_g = engine._f64(rings.te_left)
+        te_r_g = engine._f64(rings.te_right)
+        wd_g = engine._f64(rings.wake_dir)
+        tail_l_g = engine._f64(self.tail_left)
+        tail_r_g = engine._f64(self.tail_right)
+        te_idx_g = torch.as_tensor(te_idx, dtype=torch.int64, device=dev)
+
+        A_bb_g = RK.ring_normal_influence_gpu(
+            cp_g, nbc_g, corners_g, self.rc_ring,
+            side_nodes=sn_g, side_counts=sc_g, ground=self.ground, precision=prec, out_tensor=True,
+        ).to(torch.float64)
+        A_bw_steady_g = RK.steady_wake_normal_influence_gpu(
+            cp_g, nbc_g, te_l_g, te_r_g, wd_g, self.rc_wake,
+            ground=self.ground, precision=prec, out_tensor=True,
+        ).to(torch.float64)
+
+        A_steady_g = A_bb_g.clone()
+        A_steady_g[:, te_idx_g] += A_bw_steady_g
+        lu_Abb_g, piv_Abb_g = torch.linalg.lu_factor(A_bb_g)
+        lu_Asteady_g, piv_Asteady_g = torch.linalg.lu_factor(A_steady_g)
+
+        n_rows = self.n_wake_rows
+        A_bw_g = torch.empty((n_p, n_rows, n_s), dtype=t_dtype, device=dev)
+        for m0 in range(0, n_rows, _WAKE_ROW_CHUNK):
+            m1 = min(n_rows, m0 + _WAKE_ROW_CHUNK)
+            n_chunk = m1 - m0
+            rc_chunk = self._tile_wake_rc(self.rc_wake, n_chunk)
+            m_idx = torch.arange(m0, m1, dtype=torch.float64, device=dev)[:, None, None]
+            d0 = (m_idx * self.dx_w) * wd_g[None, :, :]
+            d1 = ((m_idx + 1.0) * self.dx_w) * wd_g[None, :, :]
+            w_corners_g = torch.stack(
+                [te_l_g[None, :, :] + d0, te_r_g[None, :, :] + d0, te_r_g[None, :, :] + d1, te_l_g[None, :, :] + d1],
+                dim=2,
+            ).reshape(-1, 4, 3)
+            blk = RK.ring_normal_influence_gpu(
+                cp_g, nbc_g, w_corners_g, rc_chunk, ground=self.ground, precision=prec, out_tensor=True,
+            )
+            A_bw_g[:, m0:m1, :] = blk.reshape(n_p, n_chunk, n_s)
+
+        st["cp"] = cp_g
+        st["normal_bc"] = nbc_g
+        st["corners"] = corners_g
+        if sn_g is not None:
+            st["side_nodes"] = sn_g
+            st["side_counts"] = sc_g
+        st["te_left"] = te_l_g
+        st["te_right"] = te_r_g
+        st["wake_dir"] = wd_g
+        st["tail_left"] = tail_l_g
+        st["tail_right"] = tail_r_g
+        st["te_idx"] = te_idx_g
+        st["A_bb"] = A_bb_g
+        st["A_bw_steady"] = A_bw_steady_g
+        st["A_steady"] = A_steady_g
+        st["lu_Abb"] = lu_Abb_g
+        st["piv_Abb"] = piv_Abb_g
+        st["lu_Asteady"] = lu_Asteady_g
+        st["piv_Asteady"] = piv_Asteady_g
+        st["A_bw"] = A_bw_g
+
+        self.A_bb = A_bb_g.cpu().numpy()
+        self.A_bw_steady = A_bw_steady_g.cpu().numpy()
+        self.A_steady = A_steady_g.cpu().numpy()
+        self.A_bw = A_bw_g.double().cpu().numpy()
+        self.lu_Abb = None
+        self.lu_Asteady = None
+
+    def _steady_velocity_at_gpu(
+        self,
+        P: np.ndarray,
+        gamma_rings_g,
+        rc_ring: np.ndarray | float,
+        rc_wake: np.ndarray | float,
+        *,
+        ground: GroundPlane | None = None,
+        wake_dir=None,
+        img_mode: int | None = None,
+        precision: str | None = None,
+    ) -> np.ndarray:
+        """Return steady induced velocity [m/s] at *P* computed on the GPU."""
+        import torch
+
+        from ventorum.gpu import engine
+        from ventorum.gpu import ring_kernels as RK
+
+        st = self._gpu_state.tensors
+        prec = self.precision if precision is None else precision
+        wd_g = st["wake_dir"] if wake_dir is None else engine._f64(wake_dir)
+        g_te_g = gamma_rings_g[st["te_idx"]]
+        corners_g = st["corners"]
+        sn_g = st.get("side_nodes")
+        sc_g = st.get("side_counts")
+        te_l_g = st["te_left"]
+        te_r_g = st["te_right"]
+        m = P.shape[0]
+        v_out_g = torch.zeros((m, 3), dtype=torch.float64, device=engine._dev())
+        for i0 in range(0, m, _LOAD_POINT_CHUNK):
+            i1 = min(m, i0 + _LOAD_POINT_CHUNK)
+            Pc_g = engine._f64(P[i0:i1])
+            rc_r = _slice_rc_rows(rc_ring, i0, i1)
+            rc_w = _slice_rc_rows(rc_wake, i0, i1)
+            vr = RK.ring_velocity_gpu(
+                Pc_g, corners_g, rc_r, side_nodes=sn_g, side_counts=sc_g,
+                ground=ground, img_mode=img_mode, precision=prec, out_tensor=True,
+            ).to(torch.float64)
+            vw = RK.steady_wake_velocity_gpu(
+                Pc_g, te_l_g, te_r_g, wd_g, rc_w,
+                ground=ground, img_mode=img_mode, precision=prec, out_tensor=True,
+            ).to(torch.float64)
+            v_out_g[i0:i1] = torch.einsum("mni,n->mi", vr, gamma_rings_g) + torch.einsum("msi,s->mi", vw, g_te_g)
+        return v_out_g.cpu().numpy()
+
+    def _solve_mean_state_gpu(self) -> None:
+        import torch
+
+        from ventorum.gpu import engine
+
+        st = self._gpu_state.tensors
+        umap = make_unknown_map(self.lattice, False)
+        rhs_0 = _vlm_rhs(self.lattice, umap, self.condition, self.ref_point)
+        rhs_0_g = engine._f64(rhs_0)
+        Gamma_0_g = torch.linalg.lu_solve(
+            st["lu_Asteady"], st["piv_Asteady"], rhs_0_g.unsqueeze(-1),
+        ).squeeze(-1)
+        st["Gamma_0"] = Gamma_0_g
+        self.Gamma_0 = Gamma_0_g.cpu().numpy()
+        self.has_mean_load = bool(np.max(np.abs(self.Gamma_0)) > 1e-15 * max(self.V_inf * self.c_ref, 1.0))
+
+        self.gamma_hs_0 = _rings_to_horseshoe(self.Gamma_0, self.rings.n_chord)
+        g_leg_base = leg_strength(self.lattice, self.gamma_hs_0)
+        self.gamma_0_all = np.concatenate([self.gamma_hs_0] + [g_leg_base] * self.n_leg_sets)
+
+        if self.has_mean_load:
+            self.v_ind_load_0 = self._steady_velocity_at_gpu(
+                self.P_load, Gamma_0_g, self.rc_load_ring, self.rc_load_wake, ground=self.ground,
+            )
+            self.v_ind_te_0 = self._steady_velocity_at_gpu(
+                self.p_te, Gamma_0_g, self.rc_te_ring, self.rc_te_wake, ground=self.ground,
+            )
+        else:
+            self.v_ind_load_0 = np.zeros_like(self.P_load)
+            self.v_ind_te_0 = np.zeros_like(self.p_te)
+
+        self.V_tot_0_all = self.V_0[None, :] + self.v_ind_load_0
+        self.V_eff_0_all = (
+            self.V_tot_0_all
+            - np.sum(self.V_tot_0_all * self.seg_normal_all, axis=1, keepdims=True) * self.seg_normal_all
+        )
+        self.V_te_0 = self.V_0[None, :] + self.v_ind_te_0
+        self.F_seg_0 = (self.rho * self.gamma_0_all * self.seg_scale_all)[:, None] * cross3(
+            self.V_eff_0_all, self.seg_vec_all,
+        )
+        self.F_total_0 = np.sum(self.F_seg_0, axis=0)
+        self.M_total_0 = np.sum(cross3(self.arm_all, self.F_seg_0), axis=0)
+        self.mean_state = self._to_steady_loads(self.F_total_0, self.M_total_0)
+
+    def _contract_load_vel_gpu(self, v_chunk_g, i0: int, i1: int, fm_out_g, sl_out_g) -> None:
+        """Accumulate CUDA velocity chunk ``(chunk_m, n_src, 3)`` into ``fm_out_g`` and ``sl_out_g``."""
+        import torch
+
+        st = self._gpu_state.tensors
+        W_fm_c = st["W_fm"][:, i0:i1, :]
+        W_lift_c = st["W_lift"][i0:i1, :]
+        if v_chunk_g.is_complex():
+            W_fm_c = W_fm_c.to(torch.complex128)
+            W_lift_c = W_lift_c.to(torch.complex128)
+        else:
+            v_chunk_g = v_chunk_g.to(torch.float64)
+        fm_out_g.add_(torch.einsum("cmi,mni->cn", W_fm_c, v_chunk_g))
+        seg_lift = torch.einsum("mi,mni->mn", W_lift_c, v_chunk_g)
+        sl_out_g.index_add_(0, st["eval_strips"][i0:i1], seg_lift)
+
+    def _assemble_velocity_load_matrices_gpu(self) -> None:
+        import torch
+
+        from ventorum.gpu import engine
+        from ventorum.gpu import ring_kernels as RK
+
+        st = self._gpu_state.tensors
+        rings = self.rings
+        n_p = rings.n_panels
+        n_s = rings.n_strips
+        n_rows = self.n_wake_rows
+        m = self.P_load.shape[0]
+        prec = self.precision
+        dev = engine._dev()
+
+        P_load_g = engine._f64(self.P_load)
+        st["P_load"] = P_load_g
+        st["W_fm"] = engine._f64(self.W_fm)
+        st["W_lift"] = engine._f64(self.W_lift)
+        st["eval_strips"] = torch.as_tensor(self.eval_strips, dtype=torch.int64, device=dev)
+
+        corners_g = st["corners"]
+        sn_g = st.get("side_nodes")
+        sc_g = st.get("side_counts")
+        te_l_g = st["te_left"]
+        te_r_g = st["te_right"]
+        wd_g = st["wake_dir"]
+
+        FM_bound_g = torch.zeros((6, n_p), dtype=torch.float64, device=dev)
+        SL_bound_g = torch.zeros((n_s, n_p), dtype=torch.float64, device=dev)
+        FM_sw_g = torch.zeros((6, n_s), dtype=torch.float64, device=dev)
+        SL_sw_g = torch.zeros((n_s, n_s), dtype=torch.float64, device=dev)
+
+        for i0 in range(0, m, _LOAD_POINT_CHUNK):
+            i1 = min(m, i0 + _LOAD_POINT_CHUNK)
+            Pc_g = P_load_g[i0:i1].contiguous()
+            rc_r = _slice_rc_rows(self.rc_load_ring, i0, i1)
+            rc_w = _slice_rc_rows(self.rc_load_wake, i0, i1)
+            vr = RK.ring_velocity_gpu(
+                Pc_g, corners_g, rc_r, side_nodes=sn_g, side_counts=sc_g,
+                ground=self.ground, precision=prec, out_tensor=True,
+            )
+            vw = RK.steady_wake_velocity_gpu(
+                Pc_g, te_l_g, te_r_g, wd_g, rc_w,
+                ground=self.ground, precision=prec, out_tensor=True,
+            )
+            self._contract_load_vel_gpu(vr, i0, i1, FM_bound_g, SL_bound_g)
+            self._contract_load_vel_gpu(vw, i0, i1, FM_sw_g, SL_sw_g)
+
+        self.FM_bound_mat = FM_bound_g.cpu().numpy()
+        self.SL_bound_mat = SL_bound_g.cpu().numpy()
+        self.FM_steady_wake_mat = FM_sw_g.cpu().numpy()
+        self.SL_steady_wake_mat = SL_sw_g.cpu().numpy()
+
+        FM_wake_g = torch.zeros((6, n_rows, n_s), dtype=torch.float64, device=dev)
+        SL_wake_g = torch.zeros((n_s, n_rows, n_s), dtype=torch.float64, device=dev)
+        for m0 in range(0, n_rows, _WAKE_ROW_CHUNK):
+            m1 = min(n_rows, m0 + _WAKE_ROW_CHUNK)
+            n_chunk = m1 - m0
+            m_idx = torch.arange(m0, m1, dtype=torch.float64, device=dev)[:, None, None]
+            d0 = (m_idx * self.dx_w) * wd_g[None, :, :]
+            d1 = ((m_idx + 1.0) * self.dx_w) * wd_g[None, :, :]
+            w_corners_g = torch.stack(
+                [te_l_g[None, :, :] + d0, te_r_g[None, :, :] + d0, te_r_g[None, :, :] + d1, te_l_g[None, :, :] + d1],
+                dim=2,
+            ).reshape(-1, 4, 3)
+            fm_blk = torch.zeros((6, n_chunk * n_s), dtype=torch.float64, device=dev)
+            sl_blk = torch.zeros((n_s, n_chunk * n_s), dtype=torch.float64, device=dev)
+            for i0 in range(0, m, _LOAD_POINT_CHUNK):
+                i1 = min(m, i0 + _LOAD_POINT_CHUNK)
+                Pc_g = P_load_g[i0:i1].contiguous()
+                rc_w = self._tile_wake_rc(_slice_rc_rows(self.rc_load_wake, i0, i1), n_chunk)
+                vw = RK.ring_velocity_gpu(Pc_g, w_corners_g, rc_w, ground=self.ground, precision=prec, out_tensor=True)
+                self._contract_load_vel_gpu(vw, i0, i1, fm_blk, sl_blk)
+            FM_wake_g[:, m0:m1, :] = fm_blk.reshape(6, n_chunk, n_s)
+            SL_wake_g[:, m0:m1, :] = sl_blk.reshape(n_s, n_chunk, n_s)
+
+        self.FM_wake_tensor = FM_wake_g.cpu().numpy()
+        self.SL_wake_tensor = SL_wake_g.cpu().numpy()
+
+    def _image_steady_matvec_gpu(self, ground: GroundPlane) -> np.ndarray:
+        """Return ``A_img_steady @ Gamma_0`` on GPU in float64 (for central finite differences)."""
+        from ventorum.gpu import ring_kernels as RK
+
+        st = self._gpu_state.tensors
+        Gamma_0_g = st["Gamma_0"]
+        g_te_g = Gamma_0_g[st["te_idx"]]
+        a_r = RK.ring_normal_influence_gpu(
+            st["cp"], st["normal_bc"], st["corners"], self.rc_ring,
+            side_nodes=st.get("side_nodes"), side_counts=st.get("side_counts"),
+            ground=ground, img_mode=2, precision="float64", out_tensor=True,
+        )
+        a_w = RK.steady_wake_normal_influence_gpu(
+            st["cp"], st["normal_bc"], st["te_left"], st["te_right"], st["wake_dir"], self.rc_wake,
+            ground=ground, img_mode=2, precision="float64", out_tensor=True,
+        )
+        return (a_r @ Gamma_0_g + a_w @ g_te_g).cpu().numpy()
+
+    def _varying_steady_matvec_gpu(self, ground: GroundPlane | None, wd: np.ndarray) -> np.ndarray:
+        """Return ``(A_bw_real(wd) + A_img_steady(ground, wd)) @ Gamma_0`` on GPU in float64."""
+        import torch
+
+        from ventorum.gpu import engine
+        from ventorum.gpu import ring_kernels as RK
+
+        st = self._gpu_state.tensors
+        Gamma_0_g = st["Gamma_0"]
+        g_te_g = Gamma_0_g[st["te_idx"]]
+        wd_g = engine._f64(wd)
+        v_g = torch.zeros(self.rings.n_panels, dtype=torch.float64, device=engine._dev())
+        if self._wake_rotates_with_alpha:
+            a_w = RK.steady_wake_normal_influence_gpu(
+                st["cp"], st["normal_bc"], st["te_left"], st["te_right"], wd_g, self.rc_wake,
+                ground=None, img_mode=0, precision="float64", out_tensor=True,
+            )
+            v_g = v_g + a_w @ g_te_g
+        if ground is not None:
+            a_ri = RK.ring_normal_influence_gpu(
+                st["cp"], st["normal_bc"], st["corners"], self.rc_ring,
+                side_nodes=st.get("side_nodes"), side_counts=st.get("side_counts"),
+                ground=ground, img_mode=2, precision="float64", out_tensor=True,
+            )
+            a_wi = RK.steady_wake_normal_influence_gpu(
+                st["cp"], st["normal_bc"], st["te_left"], st["te_right"], wd_g, self.rc_wake,
+                ground=ground, img_mode=2, precision="float64", out_tensor=True,
+            )
+            v_g = v_g + a_ri @ Gamma_0_g + a_wi @ g_te_g
+        return v_g.cpu().numpy()
+
+    def _varying_steady_load_vel_gpu(self, ground: GroundPlane | None, wd: np.ndarray) -> np.ndarray:
+        """Return load-point velocity from real steady wake and ground images on GPU in float64."""
+        import torch
+
+        from ventorum.gpu import engine
+        from ventorum.gpu import ring_kernels as RK
+
+        st = self._gpu_state.tensors
+        Gamma_0_g = st["Gamma_0"]
+        g_te_g = Gamma_0_g[st["te_idx"]]
+        wd_g = engine._f64(wd)
+        P_load_g = st["P_load"]
+        m = self.P_load.shape[0]
+        v_out_g = torch.zeros((m, 3), dtype=torch.float64, device=engine._dev())
+        for i0 in range(0, m, _LOAD_POINT_CHUNK):
+            i1 = min(m, i0 + _LOAD_POINT_CHUNK)
+            Pc_g = P_load_g[i0:i1].contiguous()
+            rc_r = _slice_rc_rows(self.rc_load_ring, i0, i1)
+            rc_w = _slice_rc_rows(self.rc_load_wake, i0, i1)
+            if self._wake_rotates_with_alpha:
+                vw = RK.steady_wake_velocity_gpu(
+                    Pc_g, st["te_left"], st["te_right"], wd_g, rc_w,
+                    ground=None, img_mode=0, precision="float64", out_tensor=True,
+                )
+                v_out_g[i0:i1] += torch.einsum("msi,s->mi", vw, g_te_g)
+            if ground is not None:
+                vr_i = RK.ring_velocity_gpu(
+                    Pc_g, st["corners"], rc_r,
+                    side_nodes=st.get("side_nodes"), side_counts=st.get("side_counts"),
+                    ground=ground, img_mode=2, precision="float64", out_tensor=True,
+                )
+                vw_i = RK.steady_wake_velocity_gpu(
+                    Pc_g, st["te_left"], st["te_right"], wd_g, rc_w,
+                    ground=ground, img_mode=2, precision="float64", out_tensor=True,
+                )
+                v_out_g[i0:i1] += torch.einsum("mni,n->mi", vr_i, Gamma_0_g)
+                v_out_g[i0:i1] += torch.einsum("msi,s->mi", vw_i, g_te_g)
+        return v_out_g.cpu().numpy()
+
+    def _prepare_loaded_terms_gpu(
+        self,
+        *,
+        fd_step_h: float | None,
+        fd_step_theta: float | None,
+    ) -> None:
+        rings = self.rings
+        n_p = rings.n_panels
+        self.rhs_heave_geo = np.zeros(n_p, dtype=np.float64)
+        self.rhs_pitch_geo = np.zeros(n_p, dtype=np.float64)
+        self.dv_load_heave_geo = np.zeros_like(self.P_load)
+        self.dv_load_pitch_geo = np.zeros_like(self.P_load)
+
+        if not self.has_mean_load:
+            self.W_fm = None
+            self.W_lift = None
+            self.FM_bound_mat = None
+            self.SL_bound_mat = None
+            self.FM_wake_tensor = None
+            self.SL_wake_tensor = None
+            self.FM_steady_wake_mat = None
+            self.SL_steady_wake_mat = None
+            return
+
+        self.W_fm, self.W_lift = _build_velocity_load_weights(
+            self.rho, self.gamma_0_all, self.seg_vec_all, self.seg_normal_all,
+            self.seg_scale_all, self.arm_all, self.L_0,
+        )
+        self._assemble_velocity_load_matrices_gpu()
+
+        h_min = None
+        if self.ground is not None:
+            pts_list = [self.lattice.all_points(), rings.corners.reshape(-1, 3)]
+            if rings.side_nodes is not None:
+                pts_list.append(rings.side_nodes.reshape(-1, 3))
+            pts = np.vstack(pts_list)
+            h_min = float(np.min(self.ground.height(pts)))
+            if h_min <= 0.0:
+                h_min = float(np.min(self.ground.height(self.lattice.all_points())))
+
+        # Central finite differences use float64 GPU kernels so eps = 1e-5 does not amplify float32 noise.
+        if self.ground is not None:
+            eps_h = (
+                _DEFAULT_FD_STEP_H_FRAC * min(h_min, self.c_ref)
+                if fd_step_h is None
+                else float(fd_step_h)
+            )
+            if not math.isfinite(eps_h) or eps_h <= 0.0 or eps_h >= 0.5 * h_min:
+                raise InputError(f"fd_step_h must satisfy 0 < fd_step_h < 0.5 * h_min, got {eps_h!r}.")
+            g_plus = GroundPlane(normal=self.ground.normal, offset=self.ground.offset - eps_h)
+            g_minus = GroundPlane(normal=self.ground.normal, offset=self.ground.offset + eps_h)
+            dA_dh_G0 = (self._image_steady_matvec_gpu(g_plus) - self._image_steady_matvec_gpu(g_minus)) / (2.0 * eps_h)
+            self.rhs_heave_geo = -self.c_ref * dA_dh_G0
+
+            Gamma_0_g = self._gpu_state.tensors["Gamma_0"]
+            vp = self._steady_velocity_at_gpu(
+                self.P_load, Gamma_0_g, self.rc_load_ring, self.rc_load_wake,
+                ground=g_plus, img_mode=2, precision="float64",
+            )
+            vm = self._steady_velocity_at_gpu(
+                self.P_load, Gamma_0_g, self.rc_load_ring, self.rc_load_wake,
+                ground=g_minus, img_mode=2, precision="float64",
+            )
+            self.dv_load_heave_geo = self.c_ref * (vp - vm) / (2.0 * eps_h)
+
+        if self.ground is not None or self._wake_rotates_with_alpha:
+            eps_th = _DEFAULT_FD_STEP_THETA if fd_step_theta is None else float(fd_step_theta)
+            if self.ground is not None and fd_step_theta is None:
+                max_lever = max(float(np.max(np.linalg.norm(self.lattice.all_points() - self.ref_point, axis=1))), 1e-6)
+                eps_th = min(eps_th, 0.01 * h_min / max_lever)
+            if not math.isfinite(eps_th) or eps_th <= 0.0:
+                raise InputError(f"fd_step_theta must be finite and > 0, got {eps_th!r}.")
+
+            g_tp, wd_tp = self._pitched_steady_state(+eps_th)
+            g_tm, wd_tm = self._pitched_steady_state(-eps_th)
+            dA_dth_G0 = (
+                self._varying_steady_matvec_gpu(g_tp, wd_tp) - self._varying_steady_matvec_gpu(g_tm, wd_tm)
+            ) / (2.0 * eps_th)
+            self.rhs_pitch_geo = -dA_dth_G0
+
+            vp_th = self._varying_steady_load_vel_gpu(g_tp, wd_tp)
+            vm_th = self._varying_steady_load_vel_gpu(g_tm, wd_tm)
+            self.dv_load_pitch_geo = (vp_th - vm_th) / (2.0 * eps_th)
+
+    def _compute_k0_limits_gpu(self) -> tuple[_SteadyLoads, _SteadyLoads, _SteadyLoads]:
+        """Compute exact real ``k -> 0`` limits using the GPU LU of ``A_steady``."""
+        import torch
+
+        from ventorum.gpu import engine
+
+        rings = self.rings
+        n_bc = rings.normal_bc
+        rel_cp = rings.cp - self.ref_point[None, :]
+        dU_alpha = -_ey_cross(self.V_0)
+        q_dim = 2.0 * self.V_inf / self.c_ref
+        dU_q_cp = -q_dim * _ey_cross(rel_cp)
+
+        rhs_h0 = self.rhs_heave_geo
+        rhs_p0 = -(n_bc @ dU_alpha) + self.rhs_pitch_geo
+        rhs_q0 = -np.sum(n_bc * dU_q_cp, axis=1)
+
+        st = self._gpu_state.tensors
+        rhs_mat_g = engine._f64(np.column_stack([rhs_h0, rhs_p0, rhs_q0]))
+        G_0s = torch.linalg.lu_solve(st["lu_Asteady"], st["piv_Asteady"], rhs_mat_g).cpu().numpy()
+        G_h0, G_p0, G_q0 = G_0s[:, 0], G_0s[:, 1], G_0s[:, 2]
+
+        zero_v = np.zeros_like(self.P_load)
+        dU_alpha_load = np.broadcast_to(dU_alpha[None, :], self.P_load.shape)
+        dU_q_load = -q_dim * _ey_cross(self.arm_all)
+
+        c_h0, _ = self._evaluate_linearised_loads(
+            G_h0, k=0.0, dU_load=zero_v, dv_geo_load=self.dv_load_heave_geo,
+            rotate_mean_geometry=False, FM_wake_k=self.FM_steady_wake_mat,
+            SL_wake_k=self.SL_steady_wake_mat, include_apparent_mass=False, include_te_correction=False,
+        )
+        c_p0, _ = self._evaluate_linearised_loads(
+            G_p0, k=0.0, dU_load=dU_alpha_load, dv_geo_load=self.dv_load_pitch_geo,
+            rotate_mean_geometry=True, FM_wake_k=self.FM_steady_wake_mat,
+            SL_wake_k=self.SL_steady_wake_mat, include_apparent_mass=False, include_te_correction=False,
+        )
+        c_q0, _ = self._evaluate_linearised_loads(
+            G_q0, k=0.0, dU_load=dU_q_load, dv_geo_load=zero_v,
+            rotate_mean_geometry=False, FM_wake_k=self.FM_steady_wake_mat,
+            SL_wake_k=self.SL_steady_wake_mat, include_apparent_mass=False, include_te_correction=False,
+        )
+        return (
+            _SteadyLoads(*(float(x.real) for x in c_h0)),
+            _SteadyLoads(*(float(x.real) for x in c_p0)),
+            _SteadyLoads(*(float(x.real) for x in c_q0)),
+        )
+
+    def _ensure_gpu_solve_state(self) -> dict[str, Any]:
+        """Return active GPU tensors for solves, re-uploading from host if ``gpu.release()`` cleared them."""
+        import torch
+
+        from ventorum.gpu import engine
+
+        if self._gpu_state is None:
+            self._gpu_state = _HarmonicGPUState(self.precision)
+        st = self._gpu_state.tensors
+        if "lu_Abb" not in st:
+            dev = engine._dev()
+            t_dtype = engine.torch_dtype(self.precision)
+            A_bb_g = engine._f64(self.A_bb)
+            lu_Abb_g, piv_Abb_g = torch.linalg.lu_factor(A_bb_g)
+            st["A_bb"] = A_bb_g
+            st["lu_Abb"] = lu_Abb_g
+            st["piv_Abb"] = piv_Abb_g
+            st["A_bw_steady"] = engine._f64(self.A_bw_steady)
+            st["A_bw"] = engine._f64(self.A_bw).to(t_dtype).contiguous()
+            st["cp"] = engine._f64(self.rings.cp)
+            st["normal_bc"] = engine._f64(self.rings.normal_bc)
+            st["tail_left"] = engine._f64(self.tail_left)
+            st["tail_right"] = engine._f64(self.tail_right)
+            st["wake_dir"] = engine._f64(self.rings.wake_dir)
+            st["te_idx"] = torch.as_tensor(self.rings.te_indices, dtype=torch.int64, device=dev)
+            if self.has_mean_load and self.W_fm is not None:
+                st["P_load"] = engine._f64(self.P_load)
+                st["W_fm"] = engine._f64(self.W_fm)
+                st["W_lift"] = engine._f64(self.W_lift)
+                st["eval_strips"] = torch.as_tensor(self.eval_strips, dtype=torch.int64, device=dev)
+        return st
+
+    def _wake_matrices_batch_gpu(self, k_arr: np.ndarray, *, tail_on: bool):
+        """Return batched complex wake influence ``W_batch`` [1/m] on GPU, shape ``(n_k, n_panels, n_strips)``."""
+        import torch
+
+        from ventorum.gpu import engine
+        from ventorum.gpu import ring_kernels as RK
+
+        st = self._ensure_gpu_solve_state()
+        dev = engine._dev()
+        n_k = int(k_arr.size)
+        n_p = self.rings.n_panels
+        n_s = self.rings.n_strips
+        n_rows = self.n_wake_rows
+
+        omegas = 2.0 * k_arr * self.V_inf / self.c_ref
+        row_idx = torch.arange(1, n_rows + 1, dtype=torch.float64, device=dev)
+        omega_g = engine._f64(omegas)
+        ang = -omega_g[:, None] * (row_idx[None, :] * self.dt)
+        lags_re = torch.cos(ang)
+        lags_im = torch.sin(ang)
+
+        # Contract A_bw (n_p, n_rows, n_s) with lags (n_k, n_rows) via two float64 GEMMs.
+        A_bw_2d = st["A_bw"].to(torch.float64).permute(1, 0, 2).reshape(n_rows, n_p * n_s)
+        W_re = (lags_re @ A_bw_2d).reshape(n_k, n_p, n_s)
+        W_im = (lags_im @ A_bw_2d).reshape(n_k, n_p, n_s)
+        W_batch = torch.complex(W_re, W_im)
+
+        if tail_on:
+            A_bw_steady_c = st["A_bw_steady"].to(torch.complex128)
+            for ik in range(n_k):
+                kf = float(k_arr[ik])
+                if kf == 0.0:
+                    W_batch[ik] = A_bw_steady_c
+                else:
+                    omega = float(omegas[ik])
+                    kappa = omega / self.V_inf
+                    phase0 = complex(np.exp(-1j * omega * (n_rows + 0.5) * self.dt))
+                    W_t = RK.harmonic_tail_normal_influence_gpu(
+                        st["cp"], st["normal_bc"], st["tail_left"], st["tail_right"],
+                        st["wake_dir"], kappa, self.rc_wake, ground=self.ground, out_tensor=True,
+                    )
+                    W_batch[ik] = W_batch[ik] + phase0 * W_t
+        return W_batch
+
+    def _solve_linear_batch_gpu(self, W_batch, rhs_batch, solve_method: str):
+        """Solve batched ``(A_bb + W[ik] E_te^T) Gamma[ik] = rhs[ik]`` on GPU in complex128."""
+        import torch
+
+        from ventorum.gpu import engine
+
+        st = self._ensure_gpu_solve_state()
+        dev = engine._dev()
+        n_k, n_p, n_s = int(W_batch.shape[0]), int(W_batch.shape[1]), int(W_batch.shape[2])
+        n_r = int(rhs_batch.shape[2])
+        te_idx_g = st["te_idx"]
+
+        if solve_method == "woodbury":
+            lu_Abb = st["lu_Abb"]
+            piv_Abb = st["piv_Abb"]
+            bytes_per_k = max(1, n_p * (2 * (n_s + n_r)) * 8)
+            k_chunk = max(1, min(n_k, _GPU_SOLVE_BATCH_BYTES // bytes_per_k))
+            eye_s = torch.eye(n_s, dtype=torch.complex128, device=dev).unsqueeze(0)
+            out = torch.empty((n_k, n_p, n_r), dtype=torch.complex128, device=dev)
+            for k0 in range(0, n_k, k_chunk):
+                k1 = min(n_k, k0 + k_chunk)
+                nc = k1 - k0
+                Wc = W_batch[k0:k1]
+                rc = rhs_batch[k0:k1]
+                kw = nc * n_s
+                kr = nc * n_r
+                # Solve A_bb [W_re, W_im, rhs_re, rhs_im] for all k in the chunk in one real DTRSM call.
+                B = torch.cat(
+                    [
+                        Wc.real.permute(1, 0, 2).reshape(n_p, kw),
+                        Wc.imag.permute(1, 0, 2).reshape(n_p, kw),
+                        rc.real.permute(1, 0, 2).reshape(n_p, kr),
+                        rc.imag.permute(1, 0, 2).reshape(n_p, kr),
+                    ],
+                    dim=1,
+                ).contiguous()
+                sol = torch.linalg.lu_solve(lu_Abb, piv_Abb, B)
+                Z = torch.complex(
+                    sol[:, :kw].reshape(n_p, nc, n_s).permute(1, 0, 2),
+                    sol[:, kw : 2 * kw].reshape(n_p, nc, n_s).permute(1, 0, 2),
+                )
+                Y = torch.complex(
+                    sol[:, 2 * kw : 2 * kw + kr].reshape(n_p, nc, n_r).permute(1, 0, 2),
+                    sol[:, 2 * kw + kr :].reshape(n_p, nc, n_r).permute(1, 0, 2),
+                )
+                C_cap = eye_s + Z[:, te_idx_g, :]
+                c_sol = torch.linalg.solve(C_cap, Y[:, te_idx_g, :])
+                out[k0:k1] = Y - torch.bmm(Z, c_sol)
+            return out
+
+        if solve_method == "direct":
+            A_bb_c = st["A_bb"].to(torch.complex128)
+            bytes_per_k = max(1, n_p * n_p * 16)
+            k_chunk = max(1, min(n_k, _GPU_SOLVE_BATCH_BYTES // bytes_per_k))
+            out = torch.empty((n_k, n_p, n_r), dtype=torch.complex128, device=dev)
+            for k0 in range(0, n_k, k_chunk):
+                k1 = min(n_k, k0 + k_chunk)
+                nc = k1 - k0
+                A_sys = A_bb_c.unsqueeze(0).expand(nc, n_p, n_p).clone()
+                A_sys[:, :, te_idx_g] += W_batch[k0:k1]
+                out[k0:k1] = torch.linalg.solve(A_sys, rhs_batch[k0:k1])
+            return out
+
+        raise InputError(f"solve_method must be 'woodbury' or 'direct', got {solve_method!r}.")
 
     @staticmethod
     def _validate_inputs(
@@ -1058,6 +1812,32 @@ class _HarmonicRingSystem:
 
     def _tail_load_matrices(self, kappa: float, phase0: complex) -> tuple[np.ndarray, np.ndarray]:
         """Return complex tail perturbation-velocity load matrices ``(FM_tail, SL_tail)``."""
+        if self.device == "gpu" and self._gpu_state is not None and "W_fm" in self._gpu_state.tensors:
+            import torch
+
+            from ventorum.gpu import engine
+            from ventorum.gpu import ring_kernels as RK
+
+            st = self._gpu_state.tensors
+            dev = engine._dev()
+            n_s = self.rings.n_strips
+            m = self.P_load.shape[0]
+            FM_tail_g = torch.zeros((6, n_s), dtype=torch.complex128, device=dev)
+            SL_tail_g = torch.zeros((n_s, n_s), dtype=torch.complex128, device=dev)
+            P_load_g = st["P_load"]
+            for i0 in range(0, m, _LOAD_POINT_CHUNK):
+                i1 = min(m, i0 + _LOAD_POINT_CHUNK)
+                Pc_g = P_load_g[i0:i1].contiguous()
+                rc_w = _slice_rc_rows(self.rc_load_wake, i0, i1)
+                vt_g = RK.harmonic_tail_velocity_gpu(
+                    Pc_g, st["tail_left"], st["tail_right"], st["wake_dir"], kappa, rc_w,
+                    ground=self.ground, out_tensor=True,
+                )
+                self._contract_load_vel_gpu(vt_g, i0, i1, FM_tail_g, SL_tail_g)
+            FM_tail_g.mul_(phase0)
+            SL_tail_g.mul_(phase0)
+            return FM_tail_g.cpu().numpy(), SL_tail_g.cpu().numpy()
+
         n_s = self.rings.n_strips
         m = self.P_load.shape[0]
         FM_tail = np.zeros((6, n_s), dtype=np.complex128)
@@ -1081,6 +1861,10 @@ class _HarmonicRingSystem:
         tail_on = self.use_tail if use_tail is None else bool(use_tail)
         if k == 0.0 and tail_on:
             return self.A_bw_steady.astype(np.complex128, copy=True)
+
+        if self.device == "gpu" and self._gpu_state is not None and "A_bw" in self._gpu_state.tensors:
+            W_g = self._wake_matrices_batch_gpu(np.array([float(k)], dtype=np.float64), tail_on=tail_on)[0]
+            return W_g.cpu().numpy()
 
         omega = 2.0 * k * self.V_inf / self.c_ref
         kappa = omega / self.V_inf
@@ -1120,9 +1904,21 @@ class _HarmonicRingSystem:
 
     def _solve_linear(self, W: np.ndarray, rhs: np.ndarray, solve_method: str) -> np.ndarray:
         """Solve ``(A_bb + W E_te^T) Gamma = rhs`` by Woodbury or direct complex LU."""
+        if self.device == "gpu" and self._gpu_state is not None and "lu_Abb" in self._gpu_state.tensors:
+            import torch
+
+            from ventorum.gpu import engine
+
+            dev = engine._dev()
+            W_g = torch.as_tensor(np.ascontiguousarray(W, dtype=np.complex128), device=dev).unsqueeze(0)
+            rhs_g = torch.as_tensor(np.ascontiguousarray(rhs, dtype=np.complex128), device=dev).unsqueeze(0)
+            return self._solve_linear_batch_gpu(W_g, rhs_g, solve_method)[0].cpu().numpy()
+
         te_idx = self.rings.te_indices
         n_s = self.rings.n_strips
         if solve_method == "woodbury":
+            if self.lu_Abb is None:
+                self.lu_Abb = sl.lu_factor(self.A_bb)
             Y = sl.lu_solve(self.lu_Abb, rhs.real) + 1j * sl.lu_solve(self.lu_Abb, rhs.imag)
             Z = sl.lu_solve(self.lu_Abb, W.real) + 1j * sl.lu_solve(self.lu_Abb, W.imag)
             C_cap = np.eye(n_s, dtype=np.complex128) + Z[te_idx, :]
@@ -1319,11 +2115,52 @@ class _HarmonicRingSystem:
         dU_alpha_load = np.broadcast_to((-_ey_cross(self.V_0))[None, :], self.P_load.shape)
         ey_arm_load = _ey_cross(self.arm_all)
 
+        G_batch_all: np.ndarray | None = None
+        if self.device == "gpu":
+            from ventorum.gpu import memory as gpu_memory
+            from ventorum.gpu.pipeline import is_out_of_memory
+
+            message = ""
+            for _attempt in range(2):
+                try:
+                    import torch
+
+                    from ventorum.gpu import engine
+
+                    W_batch_g = self._wake_matrices_batch_gpu(k_arr, tail_on=tail_on)
+                    rhs_np = np.stack([self.build_rhs(float(kv)) for kv in k_arr], axis=0)
+                    rhs_batch_g = torch.as_tensor(
+                        np.ascontiguousarray(rhs_np, dtype=np.complex128), device=engine._dev(),
+                    )
+                    G_batch_all = self._solve_linear_batch_gpu(W_batch_g, rhs_batch_g, solve_method).cpu().numpy()
+                    break
+                except Exception as exc:  # noqa: BLE001 - only out-of-memory errors are caught
+                    if not is_out_of_memory(exc):
+                        raise
+                    message = str(exc).splitlines()[0] if str(exc) else type(exc).__name__
+                if self._gpu_state is not None:
+                    self._gpu_state.release_gpu()
+                    self._gpu_state = None
+                gpu_memory.release()
+            if G_batch_all is None:
+                warnings.warn(
+                    f"The GPU ran out of memory twice ({message}). The harmonic solve falls back to the CPU.",
+                    RuntimeWarning,
+                    stacklevel=3,
+                )
+                self.device = "cpu"
+                self.precision = "float64"
+                if NOTE_GPU_OUT_OF_MEMORY not in self.notes:
+                    self.notes.append(NOTE_GPU_OUT_OF_MEMORY)
+
         for ik, k_val in enumerate(k_arr):
             kf = float(k_val)
             omega = 2.0 * kf * self.V_inf / self.c_ref
             kappa = omega / self.V_inf
-            _, G_mat = self.solve_circulations(kf, solve_method=solve_method, use_tail=tail_on)
+            if G_batch_all is not None:
+                G_mat = G_batch_all[ik]
+            else:
+                _, G_mat = self.solve_circulations(kf, solve_method=solve_method, use_tail=tail_on)
             G_heave, G_pitch = G_mat[:, 0], G_mat[:, 1]
 
             FM_wake_k = None
@@ -1388,6 +2225,9 @@ class _HarmonicRingSystem:
             c_ref=self.c_ref,
             b_ref=self.b_ref,
             S_ref=self.S_ref,
+            device=self.device,
+            precision=self.precision,
+            notes=list(self.notes),
         )
 
 
