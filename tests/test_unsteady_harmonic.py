@@ -1198,3 +1198,28 @@ def test_displaced_steady_tail_k0_and_5c_vs_40c_consistency(h_ground):
         assert np.max(np.abs(dh5 - dh40)) <= 5e-4 * max(float(np.max(np.abs(dh40))), 1e-12)
         assert np.max(np.abs(dp5 - dp40)) <= 5e-4 * max(float(np.max(np.abs(dp40))), 1e-12)
 
+
+def test_harmonic_flap_mode_woodbury_and_k0_consistency():
+    """Harmonic flap mode matches direct LU to round-off and reproduces k -> 0 at k = 0."""
+    ac = _deflected_flap_wing(deflection_deg=0.0, n_panels=4)
+    lat = build_lattice(ac, n_chord=4, chord_spacing="uniform")
+    cond = vt.FlightCondition(V_inf=25.0, rho=1.225, alpha=np.radians(4.0), h=0.5)
+    ground = make_ground_plane(lat, 0.5, cond.alpha, cond.beta, ref_point=ac.ref_point, height_ref="ref")
+
+    r_wb = _solve_harmonic_rings(
+        lat, cond, [0.0, 0.2], S_ref=ac.S_ref, b_ref=ac.b_ref, c_ref=ac.c_ref,
+        ground=ground, ref_point=ac.ref_point, solve_method="woodbury", controls=("flap",),
+    )
+    r_dir = _solve_harmonic_rings(
+        lat, cond, [0.0, 0.2], S_ref=ac.S_ref, b_ref=ac.b_ref, c_ref=ac.c_ref,
+        ground=ground, ref_point=ac.ref_point, solve_method="direct", controls=("flap",),
+    )
+    assert "flap" in r_wb.controls and "flap" in r_wb.k0_controls
+    for name in ("CL", "CD", "CY", "Cl", "Cm", "Cn"):
+        a = getattr(r_wb.controls["flap"], name)
+        b = getattr(r_dir.controls["flap"], name)
+        scale = max(float(np.max(np.abs(b))), 1.0)
+        assert np.max(np.abs(a - b)) <= 1e-12 * scale
+        assert abs(a[0] - getattr(r_wb.k0_controls["flap"], name)) <= 1e-12 * scale
+
+

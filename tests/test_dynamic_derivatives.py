@@ -506,3 +506,128 @@ def test_dynamic_derivatives_records_device_precision_and_fallback_note(monkeypa
         assert float(r_fb.k0["CL_alpha"]).hex() == float(r_cpu.k0["CL_alpha"]).hex()
     finally:
         gpu.set_device(old_dev)
+
+
+# ---------------------------------------------------------------------------
+# 8. Control-surface harmonic mode and control-rate derivatives
+# ---------------------------------------------------------------------------
+
+
+def _flapped_wing(
+    *,
+    deflection_deg: float = 0.0,
+    n_panels: int = 6,
+    eta_start: float = 0.0,
+    eta_end: float = 1.0,
+    symmetric: bool = True,
+    name: str = "flap",
+) -> vt.Aircraft:
+    """Build a rectangular wing with one chordwise control surface."""
+    ctrl = vt.ControlSurface(
+        name=name,
+        eta_start=eta_start,
+        eta_end=eta_end,
+        hinge_x_c=0.75,
+        deflection=np.radians(deflection_deg),
+        symmetric=symmetric,
+    )
+    wing = vt.LiftingSurface(
+        name="wing",
+        semi_span=3.0,
+        n_panels=n_panels,
+        controls=[ctrl],
+        sections=[vt.WingSection(y_frac=0.0, chord=1.0), vt.WingSection(y_frac=1.0, chord=1.0)],
+    )
+    ac = vt.Aircraft(surfaces=[wing], ref_point=np.array([0.25, 0.0, 0.0]))
+    ac.compute_reference_values()
+    return ac
+
+
+def test_dynamic_derivatives_controls_keys_shapes_json_and_refusals():
+    """dynamic_derivatives(..., controls=('flap',)) adds H_delta and delta/delta_dot keys."""
+    ac = _flapped_wing(n_panels=6, name="flap")
+    st = vt.SolverSettings(solver_type="vlm", n_panels=6, n_chord=8, chord_spacing="uniform")
+    cond = vt.FlightCondition(V_inf=30.0, rho=1.225, alpha=np.radians(4.0), h=0.5)
+    k_vals = (0.0, 0.05, 0.2)
+
+    r_base = vt.dynamic_derivatives(ac, cond, st, k=k_vals)
+    r_ctrl = vt.dynamic_derivatives(ac, cond, st, k=k_vals, controls=("flap",))
+
+    # Without controls: H_delta is empty and no delta keys exist; base keys stay unchanged.
+    assert r_base.H_delta == {}
+    assert "H_delta" not in r_base.to_dict()["responses"]
+    assert not any("_delta_" in key for key in r_base.k0)
+    assert not any("_delta_" in key for key in r_base.derivatives)
+    for key in r_base.k0:
+        assert math.isclose(r_ctrl.k0[key], r_base.k0[key], rel_tol=1e-13, abs_tol=1e-13)
+        assert np.allclose(r_ctrl.derivatives[key], r_base.derivatives[key], rtol=1e-13, atol=1e-13)
+
+    # Control response and equivalent oscillatory derivatives match Rodden and Giesing (1970).
+    assert "flap" in r_ctrl.H_delta
+    for coeff in ("CL", "CD", "CY", "Cl", "Cm", "Cn"):
+        h_arr = r_ctrl.H_delta["flap"][coeff]
+        assert h_arr.shape == (3,)
+        assert h_arr.dtype == np.complex128
+        d_key = f"{coeff}_delta_flap"
+        dd_key = f"{coeff}_delta_dot_flap"
+        assert d_key in r_ctrl.k0 and dd_key in r_ctrl.k0
+        assert d_key in r_ctrl.derivatives and dd_key in r_ctrl.derivatives
+        assert r_ctrl.derivatives[d_key].shape == (3,)
+        assert r_ctrl.derivatives[dd_key].shape == (3,)
+        assert math.isclose(r_ctrl.derivatives[d_key][0], r_ctrl.k0[d_key], rel_tol=0.0, abs_tol=1e-15)
+        assert math.isclose(r_ctrl.derivatives[dd_key][0], r_ctrl.k0[dd_key], rel_tol=0.0, abs_tol=1e-15)
+        for ik in (1, 2):
+            kf = k_vals[ik]
+            assert math.isclose(r_ctrl.derivatives[d_key][ik], float(h_arr[ik].real), rel_tol=0.0, abs_tol=1e-14)
+            assert math.isclose(
+                r_ctrl.derivatives[dd_key][ik], float(h_arr[ik].imag) / kf, rel_tol=0.0, abs_tol=1e-14,
+            )
+
+    # Compare k -> 0 CL_delta and Cm_delta with control_derivatives (default TE extension within 5e-3).
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)
+        cd = vt.control_derivatives(ac, cond, st, controls=["flap"], step_deg=0.1, hinge_alpha=False).derivatives["flap"]
+    assert abs(r_ctrl.k0["CL_delta_flap"] - cd.CL) <= 5.0e-3 * max(abs(cd.CL), 1.0)
+    assert abs(r_ctrl.k0["Cm_delta_flap"] - cd.Cm) <= 5.0e-3 * max(abs(cd.Cm), 1.0)
+
+    # Strict JSON output includes the new keys and H_delta.
+    encoded = json.dumps(r_ctrl.to_dict(), allow_nan=False)
+    decoded = json.loads(encoded)
+    assert decoded["k0"]["CL_delta_flap"] == pytest.approx(r_ctrl.k0["CL_delta_flap"])
+    assert decoded["k0"]["Cm_delta_dot_flap"] == pytest.approx(r_ctrl.k0["Cm_delta_dot_flap"])
+    assert len(decoded["derivatives"]["CL_delta_flap"]) == 3
+    assert len(decoded["derivatives"]["CL_delta_dot_flap"]) == 3
+    assert len(decoded["responses"]["H_delta"]["flap"]["CL"]["re"]) == 3
+    assert len(decoded["responses"]["H_delta"]["flap"]["CL"]["im"]) == 3
+
+    # Unknown control name, string instead of sequence, duplicate names and n_chord = 1 are refused.
+    with pytest.raises(InputError, match="rudder"):
+        vt.dynamic_derivatives(ac, cond, st, k=(0.0,), controls=("rudder",))
+    with pytest.raises(InputError, match="controls"):
+        vt.dynamic_derivatives(ac, cond, st, k=(0.0,), controls="flap")  # type: ignore[arg-type]
+    with pytest.raises(InputError, match="unique|duplicate"):
+        vt.dynamic_derivatives(ac, cond, st, k=(0.0,), controls=("flap", "flap"))
+    st_1 = vt.SolverSettings(solver_type="vlm", n_panels=6, n_chord=1)
+    with pytest.raises(InputError, match="chordwise"):
+        vt.dynamic_derivatives(ac, cond, st_1, k=(0.0,), controls=("flap",))
+
+
+def test_dynamic_derivatives_controls_stability_axes():
+    """axes='stability' rotates control-surface (Cl, Cn) derivatives by alpha about y."""
+    ac = _flapped_wing(n_panels=6, eta_start=0.5, eta_end=1.0, symmetric=False, name="ail")
+    st = vt.SolverSettings(solver_type="vlm", n_panels=6, n_chord=8, chord_spacing="uniform")
+    alpha = np.radians(8.0)
+    cond = vt.FlightCondition(V_inf=30.0, rho=1.225, alpha=alpha)
+
+    r_body = vt.dynamic_derivatives(ac, cond, st, k=(0.0, 0.2), axes="body", controls=("ail",))
+    r_stab = vt.dynamic_derivatives(ac, cond, st, k=(0.0, 0.2), axes="stability", controls=("ail",))
+
+    ca, sa = math.cos(alpha), math.sin(alpha)
+    for suffix in ("delta_ail", "delta_dot_ail"):
+        for c in ("CL", "CD", "CY", "Cm"):
+            assert np.allclose(r_stab.derivatives[f"{c}_{suffix}"], r_body.derivatives[f"{c}_{suffix}"], atol=1e-13)
+        cl_exp = ca * r_body.derivatives[f"Cl_{suffix}"] + sa * r_body.derivatives[f"Cn_{suffix}"]
+        cn_exp = -sa * r_body.derivatives[f"Cl_{suffix}"] + ca * r_body.derivatives[f"Cn_{suffix}"]
+        assert np.allclose(r_stab.derivatives[f"Cl_{suffix}"], cl_exp, atol=1e-13)
+        assert np.allclose(r_stab.derivatives[f"Cn_{suffix}"], cn_exp, atol=1e-13)
+
