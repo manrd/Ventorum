@@ -782,6 +782,378 @@ def case_panel2d_karman_trefftz() -> str:
     return "\n".join(s)
 
 
+def _unsteady_rect_wing(semi_span: float, n_panels: int, chord: float = 1.0) -> vt.Aircraft:
+    wing = vt.LiftingSurface(
+        name="wing",
+        semi_span=semi_span,
+        n_panels=n_panels,
+        sections=[vt.WingSection(0.0, chord), vt.WingSection(1.0, chord)],
+    )
+    ac = vt.Aircraft(surfaces=[wing], ref_point=np.array([0.25 * chord, 0.0, 0.0]))
+    ac.compute_reference_values()
+    return ac
+
+
+def _steady_alpha_slopes(
+    ac: vt.Aircraft,
+    cond: vt.FlightCondition,
+    sett: vt.SolverSettings,
+    d_alpha: float = 1e-5,
+) -> tuple[float, float]:
+    cp = vt.FlightCondition(
+        V_inf=cond.V_inf, rho=cond.rho, alpha=cond.alpha + d_alpha,
+        beta=cond.beta, phi=cond.phi, h=cond.h,
+    )
+    cm = vt.FlightCondition(
+        V_inf=cond.V_inf, rho=cond.rho, alpha=cond.alpha - d_alpha,
+        beta=cond.beta, phi=cond.phi, h=cond.h,
+    )
+    rp = vt.analyze(ac, cp, sett).totals
+    rm = vt.analyze(ac, cm, sett).totals
+    return float((rp.CL - rm.CL) / (2.0 * d_alpha)), float((rp.Cm - rm.Cm) / (2.0 * d_alpha))
+
+
+def _fmt_complex(z: complex) -> str:
+    return f"{z.real:+.5f} {z.imag:+.5f}i"
+
+
+def _fmt_small(d: float, floor: float = 1e-12) -> str:
+    return f"below {floor:g}" if d < floor else f"{d:.1e}"
+
+
+def case_unsteady_rings() -> str:
+    from scipy.special import hankel2
+
+    from ventorum.aero import vortex_ring as VR
+    from ventorum.geometry import lattice as lattice_mod
+    from ventorum.geometry import lattice_cache
+    from ventorum.unsteady.harmonic import _HarmonicRingSystem, _solve_harmonic_rings
+    from ventorum.unsteady.rings import ground_image_rings
+    from ventorum.unsteady.tail import harmonic_tail_normal_influence
+
+    # (a) Steady limit: default settings on AR 6 rectangular wing (24 x 8).
+    ac6 = _unsteady_rect_wing(3.0, n_panels=12)
+    st6 = vt.SolverSettings(solver_type="vlm", n_panels=12, n_chord=8)
+    tol_def = 5e-3
+    rows_a = []
+    for h_label, h_val in (("free air", None), ("h/c = 0.5", 0.5)):
+        cond = vt.FlightCondition(V_inf=30.0, rho=1.225, alpha=np.radians(4.0), h=h_val)
+        res = vt.dynamic_derivatives(ac6, cond, st6, k=(0.0,))
+        cla, cma = _steady_alpha_slopes(ac6, cond, st6, d_alpha=1e-5)
+        rd = vt.rate_derivatives(ac6, cond, st6, step=0.01, axes="body")
+        pairs = [
+            ("CL_alpha", res.k0["CL_alpha"], cla),
+            ("Cm_alpha", res.k0["Cm_alpha"], cma),
+            ("CL_q", res.k0["CL_q"], rd.derivatives["CL_q"]),
+            ("Cm_q", res.k0["Cm_q"], rd.derivatives["Cm_q"]),
+        ]
+        if h_val is not None:
+            hd = vt.height_derivatives(ac6, cond, st6, h_step=1e-4, alpha_step_deg=1e-3, axes="body")
+            pairs.extend([
+                ("CL_h", res.k0["CL_h"], hd.derivatives["CL_h"]),
+                ("Cm_h", res.k0["Cm_h"], hd.derivatives["Cm_h"]),
+            ])
+        for name, val, ref in pairs:
+            d = abs(val - ref) / max(abs(ref), 1.0)
+            rows_a.append([
+                h_label, name, f"{val:+.6f}", f"{ref:+.6f}",
+                f"{d:.2e}", f"{tol_def:g}", verdict(d < tol_def),
+            ])
+
+    # (b) Exact-equivalence settings (TE closure at TE, zero core) on AR 6 (24 x 8).
+    rows_b = []
+    old_crf = lattice_mod.CORE_RADIUS_FRACTION
+    lattice_mod.CORE_RADIUS_FRACTION = 0.0
+    lattice_cache.clear()
+    try:
+        for h_label, h_val in (("free air", None), ("h/c = 0.5", 0.5)):
+            cond = vt.FlightCondition(V_inf=30.0, rho=1.225, alpha=np.radians(4.0), h=h_val)
+            lat = build_lattice(ac6, st6, collocation="vlm", n_chord=8)
+            gp = (
+                make_ground_plane(lat, h_val, cond.alpha, cond.beta, ref_point=ac6.ref_point, height_ref="ref")
+                if h_val is not None
+                else None
+            )
+            resp = _solve_harmonic_rings(
+                lat, cond, [0.0],
+                S_ref=ac6.S_ref, b_ref=ac6.b_ref, c_ref=ac6.c_ref,
+                ground=gp, ref_point=ac6.ref_point, te_extension_fraction=0.0, rc=0.0,
+            )
+            cla, cma = _steady_alpha_slopes(ac6, cond, st6, d_alpha=1e-5)
+            rd = vt.rate_derivatives(ac6, cond, st6, step=0.01, axes="body")
+            entries = [
+                ("CL_alpha", resp.k0_pitch.CL, cla, 1e-8, 1e-9),
+                ("Cm_alpha", resp.k0_pitch.Cm, cma, 1e-8, 1e-9),
+                ("CL_q", resp.k0_pitch_rate.CL, rd.derivatives["CL_q"], 1e-12, 1e-12),
+                ("Cm_q", resp.k0_pitch_rate.Cm, rd.derivatives["Cm_q"], 1e-12, 1e-12),
+            ]
+            if h_val is not None:
+                hd = vt.height_derivatives(ac6, cond, st6, h_step=1e-4, alpha_step_deg=1e-3, axes="body")
+                entries.extend([
+                    ("CL_h", resp.k0_heave.CL, hd.derivatives["CL_h"], 1e-8, 1e-9),
+                    ("Cm_h", resp.k0_heave.Cm, hd.derivatives["Cm_h"], 1e-8, 1e-9),
+                ])
+            for name, val, ref, lim, floor in entries:
+                d = abs(val - ref) / max(abs(ref), 1.0)
+                rows_b.append([
+                    h_label, name, f"{val:+.6f}", f"{ref:+.6f}",
+                    _fmt_small(d, floor), f"{lim:g}", verdict(d < lim),
+                ])
+    finally:
+        lattice_mod.CORE_RADIUS_FRACTION = old_crf
+        lattice_cache.clear()
+
+    # (c) Mirror-wing parity: ground images vs explicit antiphase two-wing free-air model (8 x 4).
+    ac_c = _unsteady_rect_wing(3.0, n_panels=4)
+    lat_c = build_lattice(ac_c, n_chord=4, chord_spacing="uniform")
+    cond_c = vt.FlightCondition(V_inf=20.0, rho=1.225, alpha=np.radians(4.0), h=0.5)
+    gp_c = make_ground_plane(lat_c, 0.5, cond_c.alpha, cond_c.beta, ref_point=ac_c.ref_point, height_ref="ref")
+    k_c = 0.2
+    sys_ge = _HarmonicRingSystem(
+        lat_c, cond_c, S_ref=ac_c.S_ref, b_ref=ac_c.b_ref, c_ref=ac_c.c_ref,
+        ground=gp_c, ref_point=ac_c.ref_point, wake_chords=5.0, use_tail=True,
+    )
+    rhs_ge, G_ge = sys_ge.solve_circulations(k_c, solve_method="woodbury")
+    rings = sys_ge.rings
+    img = ground_image_rings(rings, gp_c, wake_dir=rings.wake_dir)
+    n_p, n_s, te_idx = rings.n_panels, rings.n_strips, rings.te_indices
+    dx_w, dt, n_rows = sys_ge.dx_w, sys_ge.dt, sys_ge.n_wake_rows
+    omega_c = 2.0 * k_c * cond_c.V_inf / ac_c.c_ref
+    kappa_c = omega_c / cond_c.V_inf
+    cp_2 = np.concatenate([rings.cp, gp_c.reflect_points(rings.cp)], axis=0)
+    n_2 = np.concatenate([rings.normal_bc, gp_c.reflect_directions(rings.normal_bc)], axis=0)
+    c_2 = np.concatenate([rings.corners, img.corners], axis=0)
+    rc_2 = np.concatenate([rings.rc, rings.rc], axis=0)
+    rc_te_2 = np.concatenate([rings.rc[te_idx], rings.rc[te_idx]], axis=0)
+    A_2 = VR.ring_normal_influence(cp_2, n_2, c_2, rc_2).astype(np.complex128)
+    te_l_2 = np.concatenate([rings.te_left, img.te_left], axis=0)
+    te_r_2 = np.concatenate([rings.te_right, img.te_right], axis=0)
+    wd_2 = np.concatenate([rings.wake_dir, img.wake_dir], axis=0)
+    te_idx_2 = np.concatenate([te_idx, te_idx + n_p])
+    lags_c = np.exp(-1j * omega_c * np.arange(1, n_rows + 1, dtype=float) * dt)
+    W_2 = np.zeros((2 * n_p, 2 * n_s), dtype=np.complex128)
+    for m in range(n_rows):
+        p0_l = te_l_2 + (m * dx_w) * wd_2
+        p0_r = te_r_2 + (m * dx_w) * wd_2
+        w_corners = np.stack([p0_l, p0_r, p0_r + dx_w * wd_2, p0_l + dx_w * wd_2], axis=1)
+        W_2 += lags_c[m] * VR.ring_normal_influence(cp_2, n_2, w_corners, rc_te_2)
+    phase0_c = np.exp(-1j * omega_c * (n_rows + 0.5) * dt)
+    W_2 += phase0_c * harmonic_tail_normal_influence(
+        cp_2, n_2, te_l_2 + (n_rows * dx_w) * wd_2, te_r_2 + (n_rows * dx_w) * wd_2, wd_2, kappa_c, rc_te_2,
+    )
+    A_2[:, te_idx_2] += W_2
+    G_2 = np.linalg.solve(A_2, np.concatenate([rhs_ge, rhs_ge], axis=0))
+    tol_ro = 1e-12
+    rows_c = []
+    for col, motion in ((0, "heave"), (1, "pitch")):
+        scale = max(float(np.max(np.abs(G_ge[:, col]))), 1.0)
+        g_max = float(np.max(np.abs(G_ge[:, col])))
+        g_real_max = float(np.max(np.abs(G_2[:n_p, col])))
+        g_img_max = float(np.max(np.abs(G_2[n_p:, col])))
+        d_real = float(np.max(np.abs(G_2[:n_p, col] - G_ge[:, col]))) / scale
+        d_img = float(np.max(np.abs(G_2[n_p:, col] + G_ge[:, col]))) / scale
+        rows_c.append([
+            f"{motion}, real wing", f"{g_max:.5f}", f"{g_real_max:.5f}",
+            _fmt_small(d_real), f"{tol_ro:g}", verdict(d_real < tol_ro),
+        ])
+        rows_c.append([
+            f"{motion}, mirror wing (antiphase)", f"{g_max:.5f}", f"{g_img_max:.5f}",
+            _fmt_small(d_img), f"{tol_ro:g}", verdict(d_img < tol_ro),
+        ])
+
+    # (d) Rank-n_strips Woodbury update vs direct complex LU solve (12 x 4, h/c = 0.5).
+    ac_d = _unsteady_rect_wing(3.0, n_panels=6)
+    lat_d = build_lattice(ac_d, n_chord=4, chord_spacing="uniform")
+    cond_d = vt.FlightCondition(V_inf=25.0, rho=1.225, alpha=np.radians(4.0), h=0.5)
+    gp_d = make_ground_plane(lat_d, 0.5, cond_d.alpha, cond_d.beta, ref_point=ac_d.ref_point, height_ref="ref")
+    ks_d = (0.05, 0.2, 0.5)
+    sys_d = _HarmonicRingSystem(
+        lat_d, cond_d, S_ref=ac_d.S_ref, b_ref=ac_d.b_ref, c_ref=ac_d.c_ref,
+        ground=gp_d, ref_point=ac_d.ref_point,
+    )
+    r_wb = sys_d.solve(ks_d, solve_method="woodbury")
+    r_dir = sys_d.solve(ks_d, solve_method="direct")
+    rows_d = []
+    for i, kv in enumerate(ks_d):
+        for label, wb_val, dr_val in (
+            ("heave CL", complex(r_wb.heave.CL[i]), complex(r_dir.heave.CL[i])),
+            ("pitch CL", complex(r_wb.pitch.CL[i]), complex(r_dir.pitch.CL[i])),
+            ("pitch Cm", complex(r_wb.pitch.Cm[i]), complex(r_dir.pitch.Cm[i])),
+        ):
+            d = abs(wb_val - dr_val) / max(abs(dr_val), 1.0)
+            rows_d.append([
+                f"{kv:g}", label, _fmt_complex(wb_val), _fmt_complex(dr_val),
+                _fmt_small(d), f"{tol_ro:g}", verdict(d < tol_ro),
+            ])
+
+    # (e) High aspect ratio (AR 40, 40 x 8): mid-span strip heave lift vs Theodorsen C(k).
+    ac_e = _unsteady_rect_wing(20.0, n_panels=20)
+    lat_e = build_lattice(ac_e, n_chord=8, chord_spacing="uniform")
+    cond_e = vt.FlightCondition(V_inf=20.0, rho=1.225, alpha=0.0)
+    ks_e = (0.1, 0.2, 0.5)
+    r_e = _solve_harmonic_rings(
+        lat_e, cond_e, ks_e, S_ref=ac_e.S_ref, b_ref=ac_e.b_ref, c_ref=ac_e.c_ref,
+        ref_point=ac_e.ref_point, wake_chords=10.0, use_tail=True,
+    )
+    mid_strip = int(np.argmin(np.abs(lat_e.qc_mid[:, 1])))
+    tol_theo = 0.01
+    rows_e = []
+    for i, kv in enumerate(ks_e):
+        h1, h0 = hankel2(1, kv), hankel2(0, kv)
+        ck = complex(h1 / (h1 + 1j * h0))
+        cl_theo = 2.0 * np.pi * kv * kv - 4.0j * np.pi * kv * ck
+        cl_mid = complex(r_e.heave.strip_cl[i, mid_strip])
+        rel = abs(cl_mid - cl_theo) / abs(cl_theo)
+        rows_e.append([
+            f"{kv:g}", _fmt_complex(ck), _fmt_complex(cl_mid), _fmt_complex(cl_theo),
+            f"{100.0 * rel:.3f} %", f"{100.0 * tol_theo:g} %", verdict(rel < tol_theo),
+        ])
+
+    # (f) Trailing-edge load correction: chordwise order of Re(Cm_alpha_dot) at k = 0.2 (AR 6, 24 x N_c),
+    # N_c = 8, 16, 32.
+    ac_f = _unsteady_rect_wing(3.0, n_panels=12)
+    k_f = 0.2
+    rows_f = []
+    for h_label, h_val in (("free air", None), ("h/c = 0.5", 0.5)):
+        cond_f = vt.FlightCondition(V_inf=20.0, rho=1.225, alpha=0.0, h=h_val)
+        vals = {True: [], False: []}
+        for n_c in (8, 16, 32):
+            lat_f = build_lattice(ac_f, n_chord=n_c, chord_spacing="uniform")
+            gp_f = (
+                make_ground_plane(lat_f, h_val, cond_f.alpha, cond_f.beta, ref_point=ac_f.ref_point, height_ref="ref")
+                if h_val is not None
+                else None
+            )
+            sys_f = _HarmonicRingSystem(
+                lat_f, cond_f, S_ref=ac_f.S_ref, b_ref=ac_f.b_ref, c_ref=ac_f.c_ref,
+                ground=gp_f, ref_point=ac_f.ref_point, wake_chords=5.0, use_tail=True,
+            )
+            for te_on in (True, False):
+                rf = sys_f.solve([k_f], te_correction=te_on)
+                cm_adot = ((rf.heave.Cm[0] - rf.k0_heave.Cm) / (-2.0j * k_f) - rf.k0_pitch.Cm) / (1j * k_f)
+                vals[te_on].append(float(cm_adot.real))
+        for te_on in (True, False):
+            v = vals[te_on]
+            p = float(np.log2(abs(v[0] - v[1]) / abs(v[1] - v[2])))
+            if te_on:
+                rule, ok = "p >= 1.50", p >= 1.5
+            else:
+                rule, ok = "abs(p - 1) <= 0.20", abs(p - 1.0) <= 0.20
+            rows_f.append([
+                h_label, "on" if te_on else "off", " / ".join(f"{x:+.6f}" for x in v),
+                f"{p:.2f}", rule, verdict(ok),
+            ])
+
+    # (g) Far-wake tail: 5 chords + tail vs 40 chords + tail (AR 6, 16 x 4).
+    ac_g = _unsteady_rect_wing(3.0, n_panels=8)
+    lat_g = build_lattice(ac_g, n_chord=4, chord_spacing="uniform")
+    ks_g = (0.05, 0.5)
+    tol_tail = 5e-5
+    rows_g = []
+    for h_label, h_val in (("free air", None), ("h/c = 0.5", 0.5)):
+        cond_g = vt.FlightCondition(V_inf=20.0, rho=1.225, alpha=np.radians(4.0), h=h_val)
+        gp_g = (
+            make_ground_plane(lat_g, h_val, cond_g.alpha, cond_g.beta, ref_point=ac_g.ref_point, height_ref="ref")
+            if h_val is not None
+            else None
+        )
+        r5 = _solve_harmonic_rings(
+            lat_g, cond_g, ks_g, S_ref=ac_g.S_ref, b_ref=ac_g.b_ref, c_ref=ac_g.c_ref,
+            ground=gp_g, ref_point=ac_g.ref_point, wake_chords=5.0, use_tail=True,
+        )
+        r40 = _solve_harmonic_rings(
+            lat_g, cond_g, ks_g, S_ref=ac_g.S_ref, b_ref=ac_g.b_ref, c_ref=ac_g.c_ref,
+            ground=gp_g, ref_point=ac_g.ref_point, wake_chords=40.0, use_tail=True,
+        )
+        for i, kv in enumerate(ks_g):
+            for label, v5, v40 in (
+                ("heave CL", complex(r5.heave.CL[i]), complex(r40.heave.CL[i])),
+                ("pitch CL", complex(r5.pitch.CL[i]), complex(r40.pitch.CL[i])),
+                ("pitch Cm", complex(r5.pitch.Cm[i]), complex(r40.pitch.Cm[i])),
+            ):
+                d = abs(v5 - v40) / max(abs(v40), 1.0)
+                rows_g.append([
+                    h_label, f"{kv:g}", label, _fmt_complex(v5), _fmt_complex(v40),
+                    f"{d:.2e}", f"{tol_tail:g}", verdict(d < tol_tail),
+                ])
+
+    s = [
+        "## V16. Unsteady vortex-ring lattice (harmonic)", "",
+        "Reference: J. Katz and A. Plotkin, Low-Speed Aerodynamics, 2nd ed., Cambridge University Press, 2001, "
+        "chapters 12 and 13 (vortex-ring lattice, unsteady Bernoulli loads and method of images); "
+        "T. Theodorsen, General theory of aerodynamic instability and the mechanism of flutter, NACA Report 496, "
+        "1935 (2D thin-airfoil harmonic lift); W. P. Rodden and J. P. Giesing, Journal of Aircraft 7(3), 1970, "
+        "pp. 272-275 (oscillatory derivatives); M. Parenteau, PhD thesis, Polytechnique Montreal, 2021, chapter 4 "
+        "(rank-n_strips Woodbury solve and loaded-mean-state terms).", "",
+        "All wings below are flat rectangular wings of chord c = 1 m with the moment reference and pitch pivot at "
+        "the quarter chord (x = 0.25 c), uniform chordwise spacing and default half-cosine spanwise spacing. "
+        "Derivatives use body axes, rates normalised by c / (2 V), and height derivatives per unit h / c.", "",
+        "### Steady limit (default settings)", "",
+        "Rectangular AR 6 wing (12 panels per semi-span, 24 strips across the full span, 8 chordwise panels, "
+        "192 rings), V = 30 m/s, alpha = 4 deg. `dynamic_derivatives` at k -> 0 against central-difference "
+        "slopes of `analyze` (d_alpha = 1e-5 rad), `rate_derivatives` (step = 0.01) and `height_derivatives` "
+        "(h_step = 1e-4 m).", "",
+        table(["case", "derivative", "dynamic_derivatives", "steady reference", "difference", "limit", "check"], rows_a), "",
+        "Tolerance: scaled difference |val - ref| / max(|ref|, 1) below 5e-3, because the default trailing-edge "
+        "ring closure (0.25 dx_TE aft of the trailing edge) and default vortex core differ slightly from the "
+        "steady horseshoe lattice.", "",
+        "### Steady limit (exact-equivalence settings)", "",
+        "Same AR 6 wing (24 x 8), V = 30 m/s, alpha = 4 deg, with trailing-edge closure at the trailing edge "
+        "(`te_extension_fraction = 0`) and zero vortex core (`rc = 0`, `CORE_RADIUS_FRACTION = 0`) via "
+        "`_solve_harmonic_rings`.", "",
+        table(["case", "derivative", "harmonic k -> 0", "steady reference", "difference", "limit", "check"], rows_b), "",
+        "Tolerance: scaled difference below 1e-12 for linear pitch-rate derivatives (round-off) and below 1e-8 "
+        "for alpha and height slopes (central finite-difference truncation error of the steady references and "
+        "loaded-mean-state geometry derivatives).", "",
+        "### Mirror-wing parity in ground effect", "",
+        "Rectangular AR 6 wing (4 panels per semi-span, 8 strips x 4 chordwise = 32 rings), V = 20 m/s, "
+        "alpha = 4 deg, h/c = 0.5, k = 0.2, 5-chord discrete wake plus 3D harmonic tail. Ground-image ring "
+        "circulations against an explicit 64-ring free-air two-wing model moving in antiphase.", "",
+        table(["motion and wing", "ground-image max |Gamma| [m^2/s]", "two-wing max |Gamma| [m^2/s]",
+               "difference", "limit", "check"], rows_c), "",
+        "Tolerance: scaled circulation difference max |Gamma_img_sys - Gamma_2w| / max(|Gamma|, 1) below 1e-12, "
+        "because the image operator is algebraically identical to the antiphase two-wing free-air system up to "
+        "floating-point round-off.", "",
+        "### Rank-n_strips Woodbury update against direct complex LU", "",
+        "Rectangular AR 6 wing (6 panels per semi-span, 12 strips x 4 chordwise = 48 rings), V = 25 m/s, "
+        "alpha = 4 deg, h/c = 0.5. Complex responses from the Woodbury solve against direct complex LU.", "",
+        table(["k", "response", "Woodbury", "direct LU", "difference", "limit", "check"], rows_d), "",
+        "Tolerance: scaled complex difference |wb - direct| / max(|direct|, 1) below 1e-12, because the "
+        "rank-n_strips Woodbury update solves the same linear system as the direct complex LU factorisation up "
+        "to round-off.", "",
+        "### High aspect ratio against Theodorsen C(k)", "",
+        "Rectangular AR 40 wing (20 panels per semi-span, 40 strips x 8 chordwise = 320 rings), V = 20 m/s, "
+        "alpha = 0 deg, free air, 10-chord discrete wake plus 3D tail. Mid-span strip heave lift coefficient "
+        "per unit z / c against 2D Theodorsen theory cl_2d(k) = 2 pi k^2 - 4 pi i k C(k) with "
+        "C(k) = H_1^(2)(k) / (H_1^(2)(k) + i H_0^(2)(k)) from `scipy.special.hankel2` (Theodorsen, NACA "
+        "Report 496, 1935).", "",
+        table(["k", "C(k)", "mid-span cl (AR 40)", "Theodorsen cl_2d", "rel. difference", "limit", "check"], rows_e), "",
+        "Tolerance: relative complex magnitude difference |cl - cl_2d| / |cl_2d| below 1 %, to allow for finite "
+        "aspect ratio (AR 40) and 8-panel chordwise discretisation against the continuous 2D limit.", "",
+        "### Trailing-edge load correction (chordwise convergence)", "",
+        "Rectangular AR 6 wing (12 panels per semi-span, 24 strips x N_c chordwise with N_c = 8, 16, 32), "
+        "V = 20 m/s, alpha = 0 deg, k = 0.2, 5-chord discrete wake plus 3D tail. Observed chordwise order "
+        "p = log2(|v_8 - v_16| / |v_16 - v_32|) of Re(Cm_alpha_dot) with and without the trailing-edge boundary "
+        "correction.", "",
+        table(["case", "TE correction", "Re(Cm_alpha_dot) (8 / 16 / 32)", "order p", "requirement", "check"],
+              rows_f), "",
+        "Requirement: the correction must raise the order from first order to second order. Without the "
+        "correction the order must be within 0.20 of 1. With the correction the order must be at least 1.5. "
+        "With the correction the differences between the meshes are small (near 1e-4), so a three-mesh "
+        "estimate of the order scatters around 2; the check therefore tests that the order is clearly above "
+        "first order, not that it equals 2.", "",
+        "### Far-wake tail accuracy", "",
+        "Rectangular AR 6 wing (8 panels per semi-span, 16 strips x 4 chordwise = 64 rings), V = 20 m/s, "
+        "alpha = 4 deg. Complex responses with a 5-chord discrete wake plus the 3D harmonic tail against a "
+        "40-chord discrete wake plus the tail.", "",
+        table(["case", "k", "response", "5 chords + tail", "40 chords + tail", "difference", "limit", "check"], rows_g), "",
+        "Tolerance: scaled complex difference |v_5 - v_40| / max(|v_40|, 1) below 5e-5, which bounds the "
+        "discrete-to-continuous wake transition error between 5 and 40 chords when the 3D harmonic tail closes "
+        "the wake.", "",
+    ]
+    return "\n".join(s)
+
+
 def main(out_path: str | None = None) -> Path:
     t0 = time.perf_counter()
     parts = [
@@ -805,7 +1177,7 @@ def main(out_path: str | None = None) -> Path:
         for fn in (case_elliptic, case_glauert, case_lifting_surface, case_sweep, case_tapered_straight_le,
                    case_convergence, case_ground, case_camber_moment, case_signs, case_split_surfaces,
                    case_panel3d_sphere, case_panel3d_ellipsoid, case_panel3d_thin_wing,
-                   case_panel3d_ground_images, case_panel2d_karman_trefftz):
+                   case_panel3d_ground_images, case_panel2d_karman_trefftz, case_unsteady_rings):
             parts.append(fn())
     finally:
         gpu.set_device(old_device)

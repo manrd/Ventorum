@@ -55,6 +55,7 @@ a minor version can change a public interface.
 - GPU vortex-ring, steady-wake and far-wake tail kernels (`ventorum.gpu.ring_kernels`, NVIDIA Warp and PyTorch)
   and a GPU path for the harmonic vortex-ring solver and `ventorum.dynamic_derivatives` (float64 and float32),
   with device and precision fields, CPU fallback notes and `gpu.release()` support.
+- Verification report section V16 for the harmonic vortex-ring lattice and `ventorum.dynamic_derivatives`.
 - Public frequency-domain longitudinal dynamic derivatives (`ventorum.dynamic_derivatives`,
   `DynamicDerivativesResult`) from the harmonic vortex-ring lattice solver, in free air and in flat-ground
   effect, with `k -> 0` limits, per-`k` equivalent derivatives, complex responses, stability-axes option,
