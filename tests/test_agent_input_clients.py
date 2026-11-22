@@ -92,6 +92,8 @@ def test_exactly_one_geometry_argument():
             base_args.update({"alpha_start_deg": 0.0, "alpha_end_deg": 2.0, "alpha_step_deg": 1.0})
         elif name == "ventorum_ground_effect":
             base_args.update({"heights_m": [1.0]})
+        elif name == "ventorum_indicial_response":
+            base_args.update({"kind": "alpha"})
         elif name == "ventorum_trim":
             base_args.update({
                 "CL_target": 0.5,

@@ -156,7 +156,7 @@ def test_agent_time_response_wind_shear_ground_effect_and_waveforms():
             "motion": {
                 "z_m": {"kind": "ramp", "amplitude": 0.05, "t_start_s": 0.0, "duration_s": 0.05},
                 "pitch_deg": {"kind": "step", "amplitude": 1.0, "t_start_s": 0.01},
-                "x_m": [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+                "x_m": {"kind": "samples", "values": [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]},
             },
             "gust": {
                 "kind": "wind_shear",

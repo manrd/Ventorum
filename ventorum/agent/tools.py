@@ -3661,14 +3661,24 @@ def _parse_waveform(spec: Any, where: str, *, scale: float) -> np.ndarray | Call
         raise InputError(f"'{where}' must be an array of numbers or a named waveform object.")
     d = check_keys(
         spec,
-        ("kind", "amplitude", "frequency_hz", "phase_deg", "t_start_s", "duration_s", "offset"),
+        ("kind", "amplitude", "frequency_hz", "phase_deg", "t_start_s", "duration_s", "offset", "values"),
         where,
     )
     if "kind" not in d:
-        raise InputError(f"{where}: 'kind' is required ('harmonic', 'step' or 'ramp').")
+        raise InputError(f"{where}: 'kind' is required ('harmonic', 'step', 'ramp' or 'samples').")
+    kind = string(d["kind"], f"{where}.kind", ("harmonic", "step", "ramp", "samples"))
+    if kind == "samples":
+        extra = sorted(k for k in d if k not in ("kind", "values"))
+        if extra:
+            raise InputError(f"{where}: {extra} not allowed for kind='samples' (give only 'values').")
+        if "values" not in d:
+            raise InputError(f"{where}: 'values' is required for kind='samples'.")
+        vals = number_list(d["values"], f"{where}.values", min_len=2, max_len=100_000)
+        return np.asarray(vals, dtype=np.float64) * scale
+    if "values" in d:
+        raise InputError(f"{where}: 'values' is allowed only for kind='samples'.")
     if "amplitude" not in d:
         raise InputError(f"{where}: 'amplitude' is required.")
-    kind = string(d["kind"], f"{where}.kind", ("harmonic", "step", "ramp"))
     amp = number(d["amplitude"], f"{where}.amplitude") * scale
     offset = number(d["offset"], f"{where}.offset") * scale if "offset" in d else 0.0
 
@@ -3853,11 +3863,12 @@ def time_response(
         Time step [s]. Default ``dx_TE / V_inf``.
     motion : dict or None
         Prescribed six-axis rigid-body motion (``x_m``, ``y_m``, ``z_m`` [m];
-        ``roll_deg``, ``pitch_deg``, ``yaw_deg`` [deg]), each an explicit array
-        or a named waveform object (``harmonic``, ``step``, ``ramp``).
+        ``roll_deg``, ``pitch_deg``, ``yaw_deg`` [deg]), each a waveform object
+        (``harmonic``, ``step``, ``ramp``, or ``samples`` with explicit
+        ``values`` of length ``n_steps + 1``).
     controls : dict or None
-        Prescribed control deflections [deg] keyed by control name, each an
-        explicit array or a named waveform object.
+        Prescribed control deflections [deg] keyed by control name, each a
+        waveform object as for *motion*.
     gust : dict or None
         Named gust specification (``sharp_edged``, ``one_minus_cosine``, or
         ``wind_shear``).

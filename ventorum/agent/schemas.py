@@ -1206,12 +1206,23 @@ PANEL_SETTINGS_SCHEMA: dict[str, Any] = {
 _WAVEFORM_OBJECT_SCHEMA: dict[str, Any] = {
     "type": "object",
     "description": (
-        "Named time waveform: 'harmonic' (amplitude, frequency_hz, optional phase_deg, offset), "
-        "'step' (amplitude, optional t_start_s, offset), or 'ramp' (amplitude, duration_s, "
-        "optional t_start_s, offset)."
+        "Time waveform in the unit of the axis: 'harmonic' (amplitude, frequency_hz, optional "
+        "phase_deg, offset), 'step' (amplitude, optional t_start_s, offset), 'ramp' (amplitude, "
+        "duration_s, optional t_start_s, offset), or 'samples' (values: explicit array of length "
+        "n_steps + 1)."
     ),
     "properties": {
-        "kind": {"type": "string", "enum": ["harmonic", "step", "ramp"], "description": "Waveform kind."},
+        "kind": {
+            "type": "string",
+            "enum": ["harmonic", "step", "ramp", "samples"],
+            "description": "Waveform kind.",
+        },
+        "values": {
+            "type": "array",
+            "items": {"type": "number"},
+            "minItems": 2,
+            "description": "Explicit samples of length n_steps + 1 for kind='samples'.",
+        },
         "amplitude": _num("Waveform amplitude in the unit of the axis (m for translations, deg for angles)."),
         "frequency_hz": _num("Oscillation frequency [Hz] for kind='harmonic'.", exclusiveMinimum=0),
         "phase_deg": _num("Phase angle [deg] for kind='harmonic'. Default 0."),
@@ -1219,29 +1230,20 @@ _WAVEFORM_OBJECT_SCHEMA: dict[str, Any] = {
         "duration_s": _num("Ramp duration [s] for kind='ramp'.", exclusiveMinimum=0),
         "offset": _num("Constant offset in the unit of the axis. Default 0."),
     },
-    "required": ["kind", "amplitude"],
+    "required": ["kind"],
     "additionalProperties": False,
 }
 
-_WAVEFORM_SCHEMA: dict[str, Any] = {
-    "anyOf": [
-        {
-            "type": "array",
-            "items": {"type": "number"},
-            "minItems": 2,
-            "description": "Explicit sample array of length n_steps + 1 in the unit of the axis.",
-        },
-        _WAVEFORM_OBJECT_SCHEMA,
-    ],
-    "description": "Explicit sample array of length n_steps + 1 or a named waveform object.",
-}
+# One object schema (no anyOf with an object option): some agent clients cannot read an anyOf
+# that mixes an array and an object, so explicit samples use kind='samples' with 'values'.
+_WAVEFORM_SCHEMA: dict[str, Any] = _WAVEFORM_OBJECT_SCHEMA
 
 _MOTION_SCHEMA: dict[str, Any] = {
     "type": "object",
     "description": (
         "Prescribed six-axis rigid-body motion of ref_point: translations x_m, y_m, z_m [m] "
         "along mean-flight axes and rotations roll_deg, pitch_deg, yaw_deg [deg] (3-2-1 sequence, "
-        "AVL signs). Each axis takes an explicit array or a named waveform object."
+        "AVL signs). Each axis takes a waveform object (harmonic, step, ramp, or samples)."
     ),
     "properties": {
         "x_m": _WAVEFORM_SCHEMA,
@@ -1257,8 +1259,8 @@ _MOTION_SCHEMA: dict[str, Any] = {
 _TIME_CONTROLS_SCHEMA: dict[str, Any] = {
     "type": "object",
     "description": (
-        "Prescribed control-surface deflections [deg], mapping ControlSurface name to an explicit "
-        "array of length n_steps + 1 [deg] or a named waveform object [deg]."
+        "Prescribed control-surface deflections [deg], mapping ControlSurface name to a "
+        "waveform object [deg] (harmonic, step, ramp, or samples of length n_steps + 1)."
     ),
     "additionalProperties": _WAVEFORM_SCHEMA,
 }
