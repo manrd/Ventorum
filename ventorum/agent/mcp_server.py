@@ -35,79 +35,12 @@ import sys
 from typing import Any, TextIO
 
 from ventorum.agent.dispatcher import call_tool, resolve_tool_name
-from ventorum.agent.response import error_payload
-from ventorum.agent.schemas import (
-    _AIRCRAFT_SCHEMA,
-    _SURFACE_SCHEMA,
-    CONDITION_SCHEMA,
-    DETAIL_LEVEL,
-    SETTINGS_SCHEMA,
-    check_keys,
-    get_tool_schemas,
-)
-from ventorum.agent.tools import dynamic_derivatives as _dynamic_derivatives_tool
-from ventorum.utils.jsonsafe import json_safe
+from ventorum.agent.schemas import get_tool_schemas
 
 SERVER_NAME = "ventorum-aerodynamics"
 SERVER_VERSION = "0.6.2"
 LATEST_PROTOCOL = "2025-06-18"
 SUPPORTED_PROTOCOLS = ("2024-11-05", "2025-03-26", LATEST_PROTOCOL)
-
-_DYNAMIC_DERIVATIVES_TOOL_NAME = "ventorum_dynamic_derivatives"
-_DYNAMIC_DERIVATIVES_MCP_TOOL: dict[str, Any] = {
-    "name": _DYNAMIC_DERIVATIVES_TOOL_NAME,
-    "description": (
-        "Unsteady (frequency-dependent) longitudinal dynamic derivatives from the harmonic "
-        "vortex-ring lattice solver, in free air or in flat-ground effect. Returns k -> 0 limits "
-        "and per-k equivalent derivatives (C_alpha, C_q, C_alpha_dot, C_h, C_h_dot and the "
-        "ground part C_h_dot_ground = C_h_dot + C_alpha) for CL, CD, CY, Cl, Cm and Cn, "
-        "complex responses H_theta, H_z and H_pureq, mean state (CL0, Cm0), mesh sizes and "
-        "trust notes. Vortex-lattice solver only; incompressible flow (Mach <= 0.3)."
-    ),
-    "inputSchema": {
-        "type": "object",
-        "properties": {
-            "wing": _SURFACE_SCHEMA,
-            "aircraft": _AIRCRAFT_SCHEMA,
-            "flight_condition": CONDITION_SCHEMA,
-            "x_cg_m": {
-                "type": "number",
-                "description": (
-                    "Centre of gravity x position [m], geometry axes (x aft). Default: the "
-                    "aircraft ref_point_m x, else 0."
-                ),
-            },
-            "k": {
-                "type": "array",
-                "items": {"type": "number", "minimum": 0.0},
-                "minItems": 1,
-                "maxItems": 50,
-                "description": (
-                    "Reduced frequencies k = omega c_ref / (2 V_inf) [-], all finite and >= 0. "
-                    "Default [0.0]."
-                ),
-            },
-            "wake_chords": {
-                "type": "number",
-                "exclusiveMinimum": 0.0,
-                "maximum": 100.0,
-                "description": "Discrete wake length in reference chords [-]. Default 5.0.",
-            },
-            "settings": SETTINGS_SCHEMA,
-            "detail_level": {**DETAIL_LEVEL, "default": "standard"},
-            "axes": {
-                "type": "string",
-                "enum": ["body", "stability"],
-                "default": "body",
-                "description": (
-                    "Moment axes of the mean state: 'body' (default) or 'stability'. Forces "
-                    "CL, CD and CY are relative to the free stream."
-                ),
-            },
-        },
-        "additionalProperties": False,
-    },
-}
 
 PARSE_ERROR = -32700
 INVALID_REQUEST = -32600
@@ -143,29 +76,11 @@ def _dispatch(method: str, params: dict[str, Any]) -> Any:
     if method == "ping":
         return {}
     if method == "tools/list":
-        return {"tools": [*get_tool_schemas(format="mcp"), _DYNAMIC_DERIVATIVES_MCP_TOOL]}
+        return {"tools": get_tool_schemas(format="mcp")}
     if method == "tools/call":
         name = params.get("name")
         if not isinstance(name, str):
             raise _RpcError(INVALID_PARAMS, "tools/call needs 'params.name' (a string).")
-        if name.strip() in (_DYNAMIC_DERIVATIVES_TOOL_NAME, "dynamic_derivatives"):
-            args = params.get("arguments", {})
-            if args is None:
-                args = {}
-            if not isinstance(args, dict):
-                raise _RpcError(INVALID_PARAMS, "'params.arguments' must be an object.")
-            props = _DYNAMIC_DERIVATIVES_MCP_TOOL["inputSchema"]["properties"]
-            try:
-                checked = check_keys(args, props, f"{_DYNAMIC_DERIVATIVES_TOOL_NAME} arguments")
-                payload = _dynamic_derivatives_tool(**checked)
-            except Exception as exc:  # noqa: BLE001 - tool calls return error payloads
-                payload = error_payload(exc)
-            payload = json_safe(payload)
-            payload["tool"] = _DYNAMIC_DERIVATIVES_TOOL_NAME
-            return {
-                "content": [{"type": "text", "text": json.dumps(payload, allow_nan=False)}],
-                "isError": payload.get("status") != "success",
-            }
         if resolve_tool_name(name) is None:
             raise _RpcError(INVALID_PARAMS, f"Unknown tool: {name}")
         args = params.get("arguments", {})

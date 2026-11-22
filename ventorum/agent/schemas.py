@@ -1603,6 +1603,60 @@ AGENT_TOOL_DEFINITIONS: list[dict[str, Any]] = [
             "additionalProperties": False,
         },
     },
+    {
+        "name": "ventorum_dynamic_derivatives",
+        "description": (
+            "Unsteady (frequency-dependent) longitudinal dynamic derivatives from the harmonic "
+            "vortex-ring lattice solver, in free air or in flat-ground effect. Returns k -> 0 limits "
+            "and per-k equivalent derivatives (C_alpha, C_q, C_alpha_dot, C_h, C_h_dot and the "
+            "ground part C_h_dot_ground = C_h_dot + C_alpha) for CL, CD, CY, Cl, Cm and Cn, "
+            "complex responses H_theta, H_z and H_pureq, mean state (CL0, Cm0), mesh sizes and "
+            "trust notes. Vortex-lattice solver only; incompressible flow (Mach <= 0.3)."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "wing": _SURFACE_SCHEMA,
+                "aircraft": _AIRCRAFT_SCHEMA,
+                "flight_condition": CONDITION_SCHEMA,
+                "x_cg_m": {
+                    "type": "number",
+                    "description": (
+                        "Centre of gravity x position [m], geometry axes (x aft). Default: the "
+                        "aircraft ref_point_m x, else 0."
+                    ),
+                },
+                "k": {
+                    "type": "array",
+                    "items": {"type": "number", "minimum": 0.0},
+                    "minItems": 1,
+                    "maxItems": 50,
+                    "description": (
+                        "Reduced frequencies k = omega c_ref / (2 V_inf) [-], all finite and >= 0. "
+                        "Default [0.0]."
+                    ),
+                },
+                "wake_chords": {
+                    "type": "number",
+                    "exclusiveMinimum": 0.0,
+                    "maximum": 100.0,
+                    "description": "Discrete wake length in reference chords [-]. Default 5.0.",
+                },
+                "settings": SETTINGS_SCHEMA,
+                "detail_level": {**DETAIL_LEVEL, "default": "standard"},
+                "axes": {
+                    "type": "string",
+                    "enum": ["body", "stability"],
+                    "default": "body",
+                    "description": (
+                        "Moment axes of the mean state: 'body' (default) or 'stability'. Forces "
+                        "CL, CD and CY are relative to the free stream."
+                    ),
+                },
+            },
+            "additionalProperties": False,
+        },
+    },
 ]
 
 TOOL_NAMES = [t["name"] for t in AGENT_TOOL_DEFINITIONS]

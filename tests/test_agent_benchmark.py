@@ -106,11 +106,11 @@ def call_step(name, args):
 # Client, task file, references
 # ---------------------------------------------------------------------------
 
-def test_mcp_client_lists_15_tools(server):
-    """The client starts the server and gets 15 tools and protocol 2025-06-18."""
+def test_mcp_client_lists_16_tools(server):
+    """The client starts the server and gets 16 tools and protocol 2025-06-18."""
     assert server.protocol_version == "2025-06-18"
     names = [t["name"] for t in server.tools]
-    assert len(names) == 15 and len(set(names)) == 15
+    assert len(names) == 16 and len(set(names)) == 16
     assert "ventorum_wing_analysis" in names and "ventorum_tune_machine" in names
     assert "ventorum_airfoil_geometry" in names and "ventorum_airfoil_polar" in names
     assert all("inputSchema" in t for t in server.tools)

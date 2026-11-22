@@ -43,8 +43,8 @@ def assert_error(payload, kind, text=None):
 
 def test_schema_exporters():
     n = len(AGENT_TOOL_DEFINITIONS)
-    assert n == 15  # six analysis tools, derivative matrix, trim, error bars, undeformed nodes, the two machine tools,
-    # and the two 2D airfoil tools
+    assert n == 16  # six analysis tools, derivative matrix, trim, error bars, undeformed nodes, the two machine tools,
+    # the two 2D airfoil tools and the dynamic derivatives
     assert {"ventorum_airfoil_geometry", "ventorum_airfoil_polar"} <= {t["name"] for t in AGENT_TOOL_DEFINITIONS}
     openai = get_tool_schemas("openai")
     assert all(s["type"] == "function" and s["function"]["name"].startswith("ventorum_") for s in openai)
