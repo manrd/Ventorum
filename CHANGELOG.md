@@ -53,6 +53,7 @@ a minor version can change a public interface.
 
 ### Added
 
+- Six-axis prescribed rigid-body motion and moving control surfaces (rotating flap ring geometry and ground images about strip hinge axes) in the private time-domain vortex-ring solver (`ventorum.unsteady.timedomain._solve_time_rings`).
 - Private prescribed-wake time-domain vortex-ring solver (`ventorum.unsteady.timedomain._solve_time_rings`)
   for rigid-body heave and pitch motions in free air and flat-ground effect; no public interface yet.
 - GPU vortex-ring, steady-wake and far-wake tail kernels (`ventorum.gpu.ring_kernels`, NVIDIA Warp and PyTorch)
