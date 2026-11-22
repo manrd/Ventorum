@@ -368,9 +368,15 @@ def test_input_checks_k_wake_axes_solver_mach():
     with pytest.raises(InputError, match="Mach|mach"):
         vt.dynamic_derivatives(ac, cond_fast, st)
 
+def _assert_finite_k0(res):
+    """Assert that the k -> 0 lift derivatives of a result are finite numbers."""
+    assert res.k0, "the result has no k -> 0 derivatives"
+    assert all(math.isfinite(v) for v in res.k0.values())
+    json.dumps(res.to_dict(), allow_nan=False)
 
-def test_input_checks_refused_lattices_and_ground_strike():
-    """Refused ring lattices raise InputError with the ring message; ground strike raises GroundStrikeError."""
+
+def test_cambered_flapped_and_joined_lattices_run_and_ground_strike_refused():
+    """Cambered, flapped and joined lattices give finite derivatives; ground strike raises GroundStrikeError."""
     cond = vt.FlightCondition(V_inf=20.0, rho=1.225, alpha=0.0)
     st = vt.SolverSettings(solver_type="vlm", n_panels=4, n_chord=4)
 
@@ -387,8 +393,7 @@ def test_input_checks_refused_lattices_and_ground_strike():
             ],
         )
         ac_cam = vt.Aircraft(surfaces=[w_cam])
-        with pytest.raises(InputError, match="leg chain"):
-            vt.dynamic_derivatives(ac_cam, cond, st)
+        _assert_finite_k0(vt.dynamic_derivatives(ac_cam, cond, st))
 
     # Deflected chordwise flap.
     fl = vt.ControlSurface(name="flap", eta_start=0.0, eta_end=1.0, hinge_x_c=0.75, deflection=np.radians(10.0))
@@ -400,8 +405,7 @@ def test_input_checks_refused_lattices_and_ground_strike():
         sections=[vt.WingSection(y_frac=0.0, chord=1.0), vt.WingSection(y_frac=1.0, chord=1.0)],
     )
     ac_fl = vt.Aircraft(surfaces=[w_fl])
-    with pytest.raises(InputError, match="kink"):
-        vt.dynamic_derivatives(ac_fl, cond, st)
+    _assert_finite_k0(vt.dynamic_derivatives(ac_fl, cond, st))
 
     # Surface junction (wing + winglet).
     wing = vt.LiftingSurface(
@@ -420,8 +424,7 @@ def test_input_checks_refused_lattices_and_ground_strike():
         sections=[vt.WingSection(y_frac=0.0, chord=1.0), vt.WingSection(y_frac=1.0, chord=0.5)],
     )
     ac_j = vt.Aircraft(surfaces=[wing, winglet])
-    with pytest.raises(InputError, match="junction"):
-        vt.dynamic_derivatives(ac_j, cond, st)
+    _assert_finite_k0(vt.dynamic_derivatives(ac_j, cond, st))
 
     # Ground strike.
     ac_rect = _rect_wing(n_panels=4)
