@@ -1,0 +1,142 @@
+# Time-domain unsteady vortex-ring lattice
+
+## Model
+
+The time-domain vortex-ring lattice solver (`ventorum.unsteady.timedomain._solve_time_rings`, exposed through `ventorum.time_response` and `ventorum.indicial_response`) marches a lifting surface or aircraft along a prescribed six-axis rigid-body path with optional moving control surfaces and arbitrary convected gust or wind-shear velocity fields, in free air or over a flat ground plane. At each time step, the solver builds the instantaneous wing and flap geometry, enforces impermeability at every panel collocation point, sheds one row of quadrilateral wake rings behind the trailing edge with the trailing-edge circulation of the previous step, convects existing wake nodes with the local air velocity without induced deformation, and evaluates unsteady Kutta-Joukowski, apparent-mass and trailing-edge boundary loads.
+
+## Equations
+
+### Time march and wake shedding
+
+A vortex-lattice mesh (`collocation="vlm"`) with $n_s$ spanwise strips and $n_c$ chordwise panels per strip maps to $N = n_s n_c$ quadrilateral vortex rings (`ventorum.unsteady.rings.build_ring_lattice`; Katz and Plotkin 2001, chapter 13). All strips share one default convective time step [s]:
+
+```{math}
+\Delta x_{\text{TE,mean}} = \frac{\sum_{s=1}^{n_s} w_s\,\Delta x_{\text{TE},s}}{\sum_{s=1}^{n_s} w_s}, \qquad
+\Delta t_{\text{default}} = \frac{\Delta x_{\text{TE,mean}}}{V_\infty}, \qquad
+\Delta x_w = V_\infty \Delta t.
+```
+
+Time instants are $t_n = n \Delta t$ [s] for $n = 0, 1, \dots, n_\text{steps}$, and nondimensional distance travelled in semichords is $s_n = 2 V_\infty t_n / c_\text{ref}$ [-]. The run starts impulsively with zero wake rows at $n = 0$ (Katz and Plotkin 2001, section 13.11). At every step $n \ge 1$, one new wake row leaves the instantaneous trailing-edge closure with circulation equal to the trailing-edge bound ring strength of step $n - 1$ (unsteady Kutta condition; Katz and Plotkin 2001, section 13.8):
+
+```{math}
+\Gamma_{w,s}^{(n,1)} = \Gamma_{\text{TE},s}^{(n-1)}.
+```
+
+### Six-axis rigid-body kinematics
+
+Geometry axes are $x$ aft, $y$ right and $z$ up. The mean free stream is $\mathbf V_0 = V_\infty \mathbf d_0$ [m/s]. Translations $(x, y, z)$ [m] move the reference point $\mathbf x_{\text{ref},0}$ along the mean-flight basis $(\mathbf e_x, \mathbf e_y, \mathbf e_z)$, where $\mathbf e_x = \mathbf d_0$, $\mathbf e_z$ is `lift_direction(alpha)` in free air or `ground.normal` in ground effect, and $\mathbf e_y = \mathbf e_z \times \mathbf e_x$ (unit vector pointing right).
+
+Rotations $(\phi, \theta, \psi)$ (`roll`, `pitch`, `yaw` [rad]) about the reference point follow the intrinsic 3-2-1 sequence of flight mechanics (yaw about $-z$, pitch about rotated $+y$, roll about rotated $-x$; Etkin and Reid 1996, chapter 4) with AVL signs (`roll > 0` right wing down, `pitch > 0` nose up, `yaw > 0` nose right). With body-to-reference rotation matrix $\mathbf R(t)$, each body point $\mathbf p_b$ moves to $\mathbf p(t) = \mathbf x_\text{ref}(t) + \mathbf R(t)(\mathbf p_b - \mathbf x_{\text{ref},0})$ with rigid-body velocity [m/s]:
+
+```{math}
+\mathbf v_\text{body}(\mathbf p, t) = \mathbf v_\text{trans}(t) + \boldsymbol\omega(t) \times \bigl(\mathbf p - \mathbf x_\text{ref}(t)\bigr),
+```
+
+where $\boldsymbol\omega(t)$ [rad/s] comes from the 3-2-1 Euler-angle rates (Etkin and Reid 1996, chapter 4).
+
+### Moving control surfaces
+
+Time-varying control deflections $\delta(t)$ [rad] rotate the vortex-ring corners, collocation points, boundary normals, side polylines and physical trailing edges aft of the hinge line about each strip hinge axis by $\Delta\delta(t) = \delta(t) - \delta_0$, using Rodrigues' rotation formula and the sealed hinge geometry of `ventorum.geometry.lattice`. Points on the moving flap add the hinge rotation velocity $\mathbf v_\text{flap} = \boldsymbol\omega_\text{hinge} \times (\mathbf p - \mathbf H)$ [m/s] (rotated into mean-flight axes).
+
+In free air with rigid-body motion only, the real bound influence matrix $\mathbf A_{bb}$ is invariant and LU-factorised once. When a control surface deflects, only the columns of rings whose corners move and the rows of moved flap collocation points are recomputed in $\mathbf A_{bb}$ before refactorisation. In ground effect, the mirror image of the moved wing, flaps and wake updates at every step where the pose or flap deflections change.
+
+### Gust onset and prescribed wake convection
+
+A gust field supplies an air velocity $\mathbf v_g(\mathbf p, t)$ [m/s] in geometry axes added to the mean free stream $\mathbf V_0$:
+
+```{math}
+\mathbf V_\text{onset}(\mathbf p, t) = \mathbf V_0 + \mathbf v_g(\mathbf p, t).
+```
+
+This local onset enters three places at every step:
+
+1. **Impermeability boundary condition** at moved collocation points $\mathbf p_c$:
+
+```{math}
+\left(\mathbf A_{bb} - \mathbf A_{bb,\text{img}}\right)\boldsymbol\Gamma^{(n)}
+= \left(\mathbf v_\text{surf} - \mathbf V_\text{onset} - \mathbf v_\text{wake}\right) \cdot \mathbf n_{bc}.
+```
+
+2. **Kutta-Joukowski loads** at bound spanwise segments and chordwise legs, using $\mathbf V_\text{tot} = \mathbf V_\text{onset} - \mathbf v_\text{surf} + \mathbf v_\text{ind}$.
+3. **Trailing-edge boundary load correction** at the moved physical trailing edge for $n \ge 1$, with $\Delta\gamma_{\text{TE},s} = f_{\text{TE},s}(\Gamma_{w,s}^{(n,1)} - \Gamma_{\text{TE},s}^{(n)})$ and $f_{\text{TE},s} = \Delta x_{\text{TE},s} / (2(\Delta x_{\text{TE},s} + \Delta x_w))$.
+
+Apparent-mass loads add $\rho\,(\mathrm d\Gamma_p / \mathrm dt)\,\mathbf A_p$ over each physical ring area vector $\mathbf A_p$ [m$^2$], using a second-order backward difference for $n \ge 2$ and a first-order backward difference at $n = 1$ (zero at $n = 0$; Katz and Plotkin 2001, chapter 13). Force coefficients $(C_L, C_D, C_Y)$ project onto mean wind axes and moment coefficients $(C_l, C_m, C_n)$ use body axes of the mean state about $\mathbf x_\text{ref}(t)$, all normalised by the nominal $V_\infty$ and $\rho$ of the mean condition.
+
+Without a gust, wake nodes convect with the uniform base wake velocity $V_\infty \hat{\mathbf d}_s$ [m/s]. When a gust is given, the stationary wake-row cache is turned off and existing wake node lines advect from $t_{n-1}$ to $t_n$ by classical fourth-order Runge-Kutta (RK4) integration of:
+
+```{math}
+\frac{\mathrm d\mathbf p}{\mathrm dt} = V_\infty \hat{\mathbf d}_s + \mathbf v_{g,\text{conv}}(\mathbf p, t),
+```
+
+where $\mathbf v_{g,\text{conv}} = \mathbf v_g$ in free air and $\mathbf v_{g,\text{conv}} = \mathbf v_g - (\mathbf v_g \cdot \mathbf n_g)\mathbf n_g$ in ground effect so that wake nodes stay above and parallel to the ground plane.
+
+The built-in gust fields (`ventorum.unsteady.gusts`) use streamwise distance behind the gust front $\xi(\mathbf p, t) = x_\text{front} + V_\infty t - \mathbf p \cdot \mathbf d_0$ [m]:
+
+- **Sharp-edged gust** (`sharp_edged`): $\mathbf v_g = A\,\hat{\mathbf u}$ for $\xi \ge 0$ and $\mathbf 0$ for $\xi < 0$ (Bisplinghoff, Ashley and Halfman 1955, chapter 5).
+- **1-cosine discrete gust** (`one_minus_cosine`): $\mathbf v_g = \tfrac{1}{2}A\bigl(1 - \cos(2\pi\xi / L)\bigr)\hat{\mathbf u}$ for $0 \le \xi \le L$ and $\mathbf 0$ outside (Hoblit 1988, chapter 2).
+- **Horizontal wind shear** (`wind_shear`): $\mathbf v_g = f(t)\,U(h)\,\hat{\mathbf u}$ where $h$ is height above the ground (`ground.height`) or $z$ in free air. Built-in profiles are `linear_shear` ($U(h) = u_0 + (\mathrm du/\mathrm dz)(h - z_\text{ref})$) and `logarithmic_shear` for the neutral atmospheric surface layer (Stull 1988, chapter 9; Garratt 1992, chapter 3):
+
+```{math}
+U(h) = U_\text{ref}\,\frac{\ln(h / z_0)}{\ln(z_\text{ref} / z_0)} \quad (h > z_0), \qquad
+U(h) = 0 \quad (h \le z_0).
+```
+
+### Indicial response definitions
+
+`ventorum.indicial_response` computes unit-step responses per unit step amplitude (subtracting the zero-perturbation baseline transient when the mean state carries lift) as functions of $s = 2 V_\infty t / c_\text{ref}$ [-]:
+
+- `kind="alpha"` (**Wagner**, Wagner 1925): uniform vertical gust $w_g = V_\infty \Delta\alpha$ [m/s] over the whole wing at $t = 0$. Reference 2D approximation (Jones 1940, NACA Report 681):
+
+```{math}
+\Phi(s) \approx 1 - 0.165\,e^{-0.0455 s} - 0.335\,e^{-0.300 s}.
+```
+
+- `kind="gust"` (**Kussner**, Kussner 1936): sharp-edged vertical gust $w_g = V_\infty \Delta\alpha_g$ [m/s] with $x_\text{front}$ at the foremost leading-edge point along $\mathbf d_0$ at $t = 0$. Reference 2D two-exponential approximation (Sears and Sparks 1941; Bisplinghoff, Ashley and Halfman 1955, chapter 5):
+
+```{math}
+\psi(s) \approx 1 - 0.500\,e^{-0.130 s} - 0.500\,e^{-1.000 s}.
+```
+
+- `kind="control"`: step deflection $\Delta\delta$ [rad] of a named control surface at $t = 0$ with zero hinge rate for $t \ge 0^+$.
+
+## Assumptions
+
+- Incompressible, inviscid, attached potential flow (Mach $\le 0.3$).
+- Thin lifting surfaces represented by quadrilateral vortex rings.
+- Prescribed wake without induced wake roll-up or vortex-sheet stretching.
+- In ground effect, the gust field is applied as given (not mirror-reflected); a gust with a ground-normal component does not satisfy ground impermeability by itself, and wake convection uses only the ground-parallel gust component.
+- Wind shear is rotational flow. The potential-flow solver neglects background vorticity transport and feels shear only as a spatially varying onset velocity at the wing and wake nodes.
+
+## Envelope
+
+- **Solver scope.** Only `solver_type="vlm"` or `"auto"` is accepted; lifting-line and Fourier solvers raise `InputError`.
+- **Compressibility.** Mach numbers above `MACH_LIMIT_INCOMPRESSIBLE` ($0.3$) raise `InputError`.
+- **Ground clearance.** Any wing or deflected flap node reaching or crossing the ground plane at any step raises `InputError`.
+- **Device.** Time-domain marching runs on the CPU in float64. Selecting the GPU device falls back to the CPU with a note in `notes`.
+- **Chordwise resolution.** `n_chord < 8` adds a trust warning while keeping the steady trust score and rating of the mean state.
+
+## Implementation
+
+- `ventorum.unsteady.timedomain`: `_solve_time_rings`, `_TimeDomainResponse`, 3-2-1 kinematics, moving control rig, RK4 gust wake convection.
+- `ventorum.unsteady.gusts`: `sharp_edged`, `one_minus_cosine`, `wind_shear`, `linear_shear`, `logarithmic_shear`.
+- `ventorum.unsteady.response`: `time_response`, `TimeResponseResult`, `indicial_response`, `IndicialResult`.
+- `ventorum.agent.tools`, `ventorum.agent.schemas`, `ventorum.agent.dispatcher`: `ventorum_time_response` and `ventorum_indicial_response` tools.
+
+## Verification
+
+- `tests/test_unsteady_timedomain.py`: steady limit against `ventorum.analyze`; AR 40 Wagner build-up against Jones (1940); small-amplitude periodic limit against `_solve_harmonic_rings` in free air and ground effect; second-order time-step convergence; moving-flap and six-axis ground-image parity against explicit two-wing models; NumPy vs Numba backend parity.
+- `tests/test_time_response.py`: round-off parity between `time_response` and `_solve_time_rings` with six-axis motion and moving flaps; zero-gust parity; uniform time-varying head-wind gust equivalence with `x_dot = -g` (free air and $h/c = 0.5$) and vertical gust equivalence with `z_dot = -w` (free air) to round-off; AR 40 Wagner (`kind="alpha"`) and Kussner (`kind="gust"`) verification against Jones (1940), Sears and Sparks (1941) / Bisplinghoff et al. (1955) and the exact 2D Kussner Fourier integral; 1-cosine gust agreement with Duhamel superposition of the solver's sharp-edged response; steady linear horizontal shear long-time limit against a direct steady ring solve; ground-effect horizontal gust mirror parity and vertical gust wake clearance; control-step limit against `ventorum.control_derivatives`; JSON serialisation, `store` options, trust and input checks.
+- `tests/test_agent_time_response.py`: agent dispatcher and MCP server parity, waveform and gust parsers, work budget refusal and input checks.
+
+## References
+
+- J. Katz and A. Plotkin, *Low-Speed Aerodynamics*, 2nd ed., Cambridge University Press, 2001, chapter 13 (time-domain vortex-ring lattice, impulsive start, unsteady Kutta condition, unsteady Bernoulli loads and method of images).
+- B. Etkin and L. D. Reid, *Dynamics of Flight: Stability and Control*, 3rd ed., Wiley, 1996, chapter 4 (3-2-1 Euler rotation sequence and angular-velocity kinematics).
+- H. Wagner, "Uber die Entstehung des dynamischen Auftriebes von Tragflugeln", *ZAMM* 5(1), 1925, pp. 17-35 (indicial lift after an incidence step).
+- H. G. Kussner, "Zusammenfassender Bericht uber den instationaren Auftrieb von Flugeln", *Luftfahrtforschung* 13(12), 1936, pp. 410-424 (sharp-edged gust penetration).
+- R. T. Jones, "The Unsteady Lift of a Wing of Finite Aspect Ratio", NACA Report 681, 1940 (two-exponential Wagner approximation and finite-span tip relief).
+- W. R. Sears and B. O. Sparks, "On the Reaction of an Elastic Wing to Vertical Gusts", *Journal of the Aeronautical Sciences* 9(2), 1941, pp. 64-67 (two-exponential Kussner approximation).
+- R. L. Bisplinghoff, H. Ashley and R. L. Halfman, *Aeroelasticity*, Addison-Wesley, 1955, chapter 5 (Wagner, Kussner and discrete gust response).
+- F. M. Hoblit, *Gust Loads on Aircraft: Concepts and Applications*, AIAA, 1988, chapter 2 (1-cosine discrete gust profile).
+- R. B. Stull, *An Introduction to Boundary Layer Meteorology*, Kluwer Academic Publishers, 1988, chapter 9 (logarithmic wind profile of the neutral atmospheric surface layer).
+- J. R. Garratt, *The Atmospheric Boundary Layer*, Cambridge University Press, 1992, chapter 3 (atmospheric surface-layer logarithmic wind profile).

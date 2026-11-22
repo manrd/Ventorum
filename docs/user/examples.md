@@ -16,5 +16,7 @@ The `examples/` directory has these scripts:
 | `10_ai_agent_tool_integration.py` | AI agent tool calls, MCP schemas, stability derivatives and trust score |
 | `11_trim.py` | Trim of a wing, tail and fin with aileron, elevator and rudder: longitudinal trim to a target CL with Cm = 0, and lateral trim with sideslip with zero roll, pitch and yaw moments |
 | `12_openmdao_twist.py` | Twist optimisation in OpenMDAO with adjoint gradients: minimum CD at a fixed CL (needs the extra `mdo`; without OpenMDAO it prints a message and stops) |
+| `13_dynamic_derivatives.py` | Frequency-dependent longitudinal dynamic derivatives in free air and ground effect (AR 6 rectangular wing) |
+| `14_time_response.py` | Time-domain unsteady response: pitch oscillation with a moving flap, 1-cosine vertical gust, and logarithmic head-wind shear in ground effect (saves plots to `examples/output/`) |
 | `airfoil_ground_effect.py` | 2D inviscid NACA 4412 in ground effect: Cl against h/c and Cp pictures, saved as PNG files |
 | `airfoil_naca_flap.py` | 2D inviscid NACA 2412 with a plain flap: geometry and Cp pictures against the clean section, saved as PNG files |
