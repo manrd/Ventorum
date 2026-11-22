@@ -86,6 +86,10 @@ from ventorum.solvers.derivative_matrix import (  # noqa: F401
     DerivativeMatrixResult,
     derivative_matrix,
 )
+from ventorum.unsteady import (  # noqa: F401
+    DynamicDerivativesResult,
+    dynamic_derivatives,
+)
 # The gradient functions load PyTorch: the module __getattr__ (end of this
 # file) gives them on first access, so that ``import ventorum`` stays light.
 from ventorum.sensitivity.errors import GradientScopeError  # noqa: F401
