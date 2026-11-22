@@ -183,6 +183,109 @@ if HAVE_NUMBA:
         return vx + ux, vy + uy, vz + uz
 
     @njit(cache=True, inline="always")
+    def _ring_vel_poly_one(px, py, pz, corners, side_nodes, side_counts, j, rc2):
+        # Unit-circulation velocity at (px, py, pz) from ring j with bent side polylines.
+        c0x = corners[j, 0, 0]
+        c0y = corners[j, 0, 1]
+        c0z = corners[j, 0, 2]
+        c1x = corners[j, 1, 0]
+        c1y = corners[j, 1, 1]
+        c1z = corners[j, 1, 2]
+        c2x = corners[j, 2, 0]
+        c2y = corners[j, 2, 1]
+        c2z = corners[j, 2, 2]
+        c3x = corners[j, 3, 0]
+        c3y = corners[j, 3, 1]
+        c3z = corners[j, 3, 2]
+
+        r0x = px - c0x
+        r0y = py - c0y
+        r0z = pz - c0z
+        r1x = px - c1x
+        r1y = py - c1y
+        r1z = pz - c1z
+        r2x = px - c2x
+        r2y = py - c2y
+        r2z = pz - c2z
+        r3x = px - c3x
+        r3y = py - c3y
+        r3z = pz - c3z
+
+        n0 = math.sqrt(r0x * r0x + r0y * r0y + r0z * r0z + 1e-300)
+        n1 = math.sqrt(r1x * r1x + r1y * r1y + r1z * r1z + 1e-300)
+        n2 = math.sqrt(r2x * r2x + r2y * r2y + r2z * r2z + 1e-300)
+        n3 = math.sqrt(r3x * r3x + r3y * r3y + r3z * r3z + 1e-300)
+
+        # Leading bound segment: c0 -> c1.
+        vx, vy, vz = _seg_terms(r0x, r0y, r0z, r1x, r1y, r1z, c1x - c0x, c1y - c0y, c1z - c0z, n0, n1, rc2)
+
+        # Right side polyline: c1 -> side_nodes[j, 0, 0..cr-1] -> c2.
+        cr = side_counts[j, 0]
+        if cr == 0:
+            ux, uy, uz = _seg_terms(r1x, r1y, r1z, r2x, r2y, r2z, c2x - c1x, c2y - c1y, c2z - c1z, n1, n2, rc2)
+            vx += ux
+            vy += uy
+            vz += uz
+        else:
+            ax, ay, az = c1x, c1y, c1z
+            rax, ray, raz, na = r1x, r1y, r1z, n1
+            for k in range(cr):
+                bx = side_nodes[j, 0, k, 0]
+                by = side_nodes[j, 0, k, 1]
+                bz = side_nodes[j, 0, k, 2]
+                rbx = px - bx
+                rby = py - by
+                rbz = pz - bz
+                nb = math.sqrt(rbx * rbx + rby * rby + rbz * rbz + 1e-300)
+                ux, uy, uz = _seg_terms(rax, ray, raz, rbx, rby, rbz, bx - ax, by - ay, bz - az, na, nb, rc2)
+                vx += ux
+                vy += uy
+                vz += uz
+                ax, ay, az = bx, by, bz
+                rax, ray, raz, na = rbx, rby, rbz, nb
+            ux, uy, uz = _seg_terms(rax, ray, raz, r2x, r2y, r2z, c2x - ax, c2y - ay, c2z - az, na, n2, rc2)
+            vx += ux
+            vy += uy
+            vz += uz
+
+        # Trailing spanwise segment: c2 -> c3.
+        ux, uy, uz = _seg_terms(r2x, r2y, r2z, r3x, r3y, r3z, c3x - c2x, c3y - c2y, c3z - c2z, n2, n3, rc2)
+        vx += ux
+        vy += uy
+        vz += uz
+
+        # Left side polyline: c3 -> side_nodes[j, 1, 0..cl-1] -> c0.
+        cl = side_counts[j, 1]
+        if cl == 0:
+            ux, uy, uz = _seg_terms(r3x, r3y, r3z, r0x, r0y, r0z, c0x - c3x, c0y - c3y, c0z - c3z, n3, n0, rc2)
+            vx += ux
+            vy += uy
+            vz += uz
+        else:
+            ax, ay, az = c3x, c3y, c3z
+            rax, ray, raz, na = r3x, r3y, r3z, n3
+            for k in range(cl):
+                bx = side_nodes[j, 1, k, 0]
+                by = side_nodes[j, 1, k, 1]
+                bz = side_nodes[j, 1, k, 2]
+                rbx = px - bx
+                rby = py - by
+                rbz = pz - bz
+                nb = math.sqrt(rbx * rbx + rby * rby + rbz * rbz + 1e-300)
+                ux, uy, uz = _seg_terms(rax, ray, raz, rbx, rby, rbz, bx - ax, by - ay, bz - az, na, nb, rc2)
+                vx += ux
+                vy += uy
+                vz += uz
+                ax, ay, az = bx, by, bz
+                rax, ray, raz, na = rbx, rby, rbz, nb
+            ux, uy, uz = _seg_terms(rax, ray, raz, r0x, r0y, r0z, c0x - ax, c0y - ay, c0z - az, na, n0, rc2)
+            vx += ux
+            vy += uy
+            vz += uz
+
+        return vx, vy, vz
+
+    @njit(cache=True, inline="always")
     def _steady_wake_vel_one(px, py, pz, te_left, te_right, wake_dir, j, rc2):
         # Unit-circulation velocity of steady wake closure j:
         # segment te_left -> te_right plus ray(te_right, d) minus ray(te_left, d).
@@ -245,6 +348,43 @@ if HAVE_NUMBA:
             for j in range(n):
                 c2 = rc2[i, j] if rc_is_2d else rc2[0, j]
                 vx, vy, vz = _ring_vel_one(px, py, pz, corners, j, c2)
+                out[i, j] = vx * nx + vy * ny + vz * nz
+        return out
+
+    @njit(cache=True, parallel=True)
+    def ring_poly_velocity_kernel(P, corners, side_nodes, side_counts, rc2, rc_is_2d):
+        """Return unit-circulation bent-ring velocities [1/m], shape ``(M, N, 3)``."""
+        m = P.shape[0]
+        n = corners.shape[0]
+        out = np.empty((m, n, 3), dtype=np.float64)
+        for i in prange(m):
+            px = P[i, 0]
+            py = P[i, 1]
+            pz = P[i, 2]
+            for j in range(n):
+                c2 = rc2[i, j] if rc_is_2d else rc2[0, j]
+                vx, vy, vz = _ring_vel_poly_one(px, py, pz, corners, side_nodes, side_counts, j, c2)
+                out[i, j, 0] = vx
+                out[i, j, 1] = vy
+                out[i, j, 2] = vz
+        return out
+
+    @njit(cache=True, parallel=True)
+    def ring_poly_normal_influence_kernel(P, normals, corners, side_nodes, side_counts, rc2, rc_is_2d):
+        """Return unit-circulation bent-ring normal influence [1/m], shape ``(M, N)``."""
+        m = P.shape[0]
+        n = corners.shape[0]
+        out = np.empty((m, n), dtype=np.float64)
+        for i in prange(m):
+            px = P[i, 0]
+            py = P[i, 1]
+            pz = P[i, 2]
+            nx = normals[i, 0]
+            ny = normals[i, 1]
+            nz = normals[i, 2]
+            for j in range(n):
+                c2 = rc2[i, j] if rc_is_2d else rc2[0, j]
+                vx, vy, vz = _ring_vel_poly_one(px, py, pz, corners, side_nodes, side_counts, j, c2)
                 out[i, j] = vx * nx + vy * ny + vz * nz
         return out
 
