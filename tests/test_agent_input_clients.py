@@ -94,6 +94,8 @@ def test_exactly_one_geometry_argument():
             base_args.update({"heights_m": [1.0]})
         elif name == "ventorum_indicial_response":
             base_args.update({"kind": "alpha"})
+        elif name == "ventorum_free_flight":
+            base_args.update({"mass_kg": 250.0, "inertia_kg_m2": {"xx": 50.0, "yy": 75.0, "zz": 100.0}, "n_steps": 2})
         elif name == "ventorum_trim":
             base_args.update({
                 "CL_target": 0.5,
