@@ -95,8 +95,13 @@ _AITKEN_OMEGA_MAX = 1.25
 
 
 @dataclass(frozen=True, slots=True)
-class _FreeFlightState:
+class FlightState:
     """Read-only state record passed to state-dependent thrust and control callables.
+
+    :func:`ventorum.free_flight` gives this record to a ``thrust(t, state)``
+    callable and to each control callable ``fn(t, state)``. The values are
+    the state at the time ``t`` of the call. Inside the implicit coupling
+    sub-iterations, the record holds the current iterate of the step.
 
     Attributes
     ----------
@@ -143,6 +148,10 @@ class _FreeFlightState:
     def theta_dot(self) -> float:
         """Pitch rate [rad/s] (alias of :attr:`pitch_dot`)."""
         return self.pitch_dot
+
+
+# Private alias of the public state record (kept for the private tests).
+_FreeFlightState = FlightState
 
 
 @dataclass(slots=True)
@@ -272,6 +281,15 @@ class _FreeFlightResponse:
     inertia : numpy.ndarray
         Inertia tensor about the centre of gravity in geometry axes [kg m^2],
         shape ``(3, 3)``.
+    steady_force_imbalance, steady_moment_imbalance : numpy.ndarray or None
+        Net force ``F_aero + F_grav`` [N] and net moment about the centre of
+        gravity [N m] of the steady load of the mean state, without thrust,
+        in the inertial frame, shape ``(3,)``. None when *steady_loads* is
+        not given.
+    steady_force_imbalance_body, steady_moment_imbalance_body : numpy.ndarray or None
+        The same steady net force [N] and moment [N m] in body axes at the
+        mean pose, shape ``(3,)``. A constant thrust equal to minus these
+        values trims the mean state. None when *steady_loads* is not given.
     notes : list[str]
         Diagnostic notes (time-step ratio, gust notes, non-converged steps,
         and ground contact).
@@ -343,6 +361,10 @@ class _FreeFlightResponse:
     gravity: float
     inertia: np.ndarray
     notes: list[str] = field(default_factory=list)
+    steady_force_imbalance: np.ndarray | None = None
+    steady_moment_imbalance: np.ndarray | None = None
+    steady_force_imbalance_body: np.ndarray | None = None
+    steady_moment_imbalance_body: np.ndarray | None = None
 
 
 _FreeFlightResult = _FreeFlightResponse
@@ -529,7 +551,7 @@ def _eval_thrust(
     thrust_fn: Callable[..., Any] | None,
     takes_state: bool,
     t: float,
-    state: _FreeFlightState,
+    state: FlightState,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Evaluate *thrust_fn* at *t* [s] and *state*, returning ``(force_b, moment_b)`` [N, N m]."""
     if thrust_fn is None:
@@ -561,9 +583,9 @@ def _make_state(
     q: np.ndarray,
     q_dot: np.ndarray,
     ctrl_map: Mapping[str, float],
-) -> _FreeFlightState:
-    """Build a read-only :class:`_FreeFlightState` from 6-vectors *q*, *q_dot* and *ctrl_map*."""
-    return _FreeFlightState(
+) -> FlightState:
+    """Build a read-only :class:`FlightState` from 6-vectors *q*, *q_dot* and *ctrl_map*."""
+    return FlightState(
         t=float(t),
         x=float(q[0]),
         y=float(q[1]),
@@ -579,6 +601,44 @@ def _make_state(
         yaw_dot=float(q_dot[5]),
         controls=MappingProxyType(dict(ctrl_map)),
     )
+
+
+def _steady_imbalance(
+    steady_loads: Mapping[str, float] | None,
+    *,
+    qS: float,
+    b_ref: float,
+    c_ref: float,
+    d_0: np.ndarray,
+    S_0: np.ndarray,
+    L_0: np.ndarray,
+    E_mat: np.ndarray,
+    F_grav_g: np.ndarray,
+    r_cg_rel_b: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray] | None:
+    """Return the steady net force [N] and moment about the cg [N m] of the mean pose, or None.
+
+    The load is the steady aerodynamic load plus the weight, without thrust,
+    at the mean pose (body axes equal geometry axes). The function returns
+    ``(F_inertial, M_inertial, F_body, M_body)``.
+    """
+    if steady_loads is None:
+        return None
+    if not isinstance(steady_loads, Mapping):
+        raise InputError(f"steady_loads must be a mapping of coefficients, got {type(steady_loads).__name__}.")
+    vals: dict[str, float] = {}
+    for key in ("CL", "CD", "CY", "Cl", "Cm", "Cn"):
+        if key not in steady_loads:
+            raise InputError(f"steady_loads needs the key {key!r}.")
+        val = float(steady_loads[key])
+        if not math.isfinite(val):
+            raise InputError(f"steady_loads[{key!r}] must be finite, got {steady_loads[key]!r}.")
+        vals[key] = val
+    F_aero_g = qS * (vals["CD"] * d_0 + vals["CY"] * S_0 + vals["CL"] * L_0)
+    M_ref_g = np.array([-qS * b_ref * vals["Cl"], qS * c_ref * vals["Cm"], -qS * b_ref * vals["Cn"]], dtype=np.float64)
+    M_cg_g = M_ref_g - np.cross(r_cg_rel_b, F_aero_g)
+    F_net_g = F_aero_g + F_grav_g
+    return (E_mat.T @ F_net_g, E_mat.T @ M_cg_g, F_net_g.copy(), M_cg_g.copy())
 
 
 def _solve_free_flight(
@@ -613,6 +673,7 @@ def _solve_free_flight(
     coupling_tol: float = 1.0e-10,
     max_subiterations: int = 20,
     aerodynamics_off: bool = False,
+    steady_loads: Mapping[str, float] | None = None,
 ) -> _FreeFlightResponse:
     """Couple the time-domain vortex-ring solver to the six-DOF rigid-body equations of motion.
 
@@ -691,6 +752,12 @@ def _solve_free_flight(
     aerodynamics_off : bool, optional
         Private flag setting aerodynamic loads to zero for pure rigid-body
         verification checks. Default False.
+    steady_loads : mapping of str to float or None, optional
+        Steady coefficients of the mean state, keys ``'CL'``, ``'CD'``,
+        ``'CY'`` (mean wind axes) and ``'Cl'``, ``'Cm'``, ``'Cn'`` (body axes
+        about *ref_point*) [-]. When given, the result holds the steady
+        imbalance of the mean pose (aerodynamic load plus weight, no thrust).
+        Default None.
 
     Returns
     -------
@@ -1192,6 +1259,18 @@ def _solve_free_flight(
         init_F_imb_b,
         init_M_imb_b,
     ) = _dynamics_and_diagnostics(0, q0, qd0, loads0, c_vals0)
+    steady_imb = _steady_imbalance(
+        steady_loads,
+        qS=qS,
+        b_ref=b_ref_f,
+        c_ref=c_ref_f,
+        d_0=d_0,
+        S_0=S_0,
+        L_0=L_0,
+        E_mat=E_mat,
+        F_grav_g=F_grav_g,
+        r_cg_rel_b=r_cg_rel_b,
+    )
 
     q_hist[0] = q0
     qd_hist[0] = qd0
@@ -1594,4 +1673,8 @@ def _solve_free_flight(
         gravity=gravity_val,
         inertia=I_b.copy(),
         notes=list(stepper.notes),
+        steady_force_imbalance=None if steady_imb is None else steady_imb[0],
+        steady_moment_imbalance=None if steady_imb is None else steady_imb[1],
+        steady_force_imbalance_body=None if steady_imb is None else steady_imb[2],
+        steady_moment_imbalance_body=None if steady_imb is None else steady_imb[3],
     )

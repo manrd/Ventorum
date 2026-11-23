@@ -88,9 +88,12 @@ from ventorum.solvers.derivative_matrix import (  # noqa: F401
 )
 from ventorum.unsteady import (  # noqa: F401
     DynamicDerivativesResult,
+    FlightState,
+    FreeFlightResult,
     IndicialResult,
     TimeResponseResult,
     dynamic_derivatives,
+    free_flight,
     indicial_response,
     linear_shear,
     logarithmic_shear,

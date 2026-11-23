@@ -663,6 +663,9 @@ def test_non_unit_chord_and_tapered_wing_k0_and_metadata(monkeypatch):
     assert set(vt.unsteady.__all__) == {
         "DynamicDerivativesResult",
         "dynamic_derivatives",
+        "FlightState",
+        "FreeFlightResult",
+        "free_flight",
         "IndicialResult",
         "TimeResponseResult",
         "indicial_response",

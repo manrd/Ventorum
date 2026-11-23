@@ -18,6 +18,8 @@ interface:
   :func:`linear_shear`, :func:`logarithmic_shear`).
 * :mod:`ventorum.unsteady.response`: public :func:`time_response` and
   :func:`indicial_response` functions and their result records.
+* :mod:`ventorum.unsteady.flight`: public :func:`free_flight` function, its
+  result :class:`FreeFlightResult` and the state record :class:`FlightState`.
 
 References
 ----------
@@ -39,6 +41,7 @@ References
 from __future__ import annotations
 
 from ventorum.unsteady.derivatives import DynamicDerivativesResult, dynamic_derivatives
+from ventorum.unsteady.flight import FlightState, FreeFlightResult, free_flight
 from ventorum.unsteady.gusts import (
     linear_shear,
     logarithmic_shear,
@@ -55,9 +58,12 @@ from ventorum.unsteady.response import (
 
 __all__ = [
     "DynamicDerivativesResult",
+    "FlightState",
+    "FreeFlightResult",
     "IndicialResult",
     "TimeResponseResult",
     "dynamic_derivatives",
+    "free_flight",
     "indicial_response",
     "linear_shear",
     "logarithmic_shear",
