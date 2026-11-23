@@ -11,20 +11,22 @@ permissions:
 jobs:
   test:
     runs-on: ${{ matrix.os }}
-    # Each OS and Python version has two jobs that run at the same time.
+    # Each OS and Python version has three jobs that run at the same time.
     # The part "main" runs the tests not marked slow, the documentation,
-    # the verification reports and the examples. The part "slow" runs the
-    # tests marked slow. Together they run all tests except the benchmarks.
-    # In one job, the full suite took 50 to more than 90 minutes on the
-    # Windows runner (the 2D viscous tests take most of the time), so the
-    # jobs are split. Each job gets 90 minutes.
+    # the verification reports and the examples. The part "slow-2d" runs
+    # the tests marked slow in the 2D section files (panel, viscous, polar
+    # source and alpha correction tests). The part "slow-rest" runs the
+    # tests marked slow in all other files. Together they run all tests
+    # except the benchmarks. In one job, the slow tests took more than
+    # 90 minutes on the Windows runner and 88 minutes on the Linux runner,
+    # so they are split in two. Each job gets 90 minutes.
     timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest]
         python-version: ["3.11", "3.12", "3.13"]
-        part: [main, slow]
+        part: [main, slow-2d, slow-rest]
         include:
           # One Python version per extra OS keeps the CI time low. The
           # compiled kernels depend on the OS and compiler, not on Python.
@@ -38,7 +40,10 @@ jobs:
             part: main
           - os: windows-latest
             python-version: "3.12"
-            part: slow
+            part: slow-2d
+          - os: windows-latest
+            python-version: "3.12"
+            part: slow-rest
     defaults:
       run:
         shell: bash
@@ -101,12 +106,25 @@ jobs:
         # even when the job reaches its time limit. The 30 slowest tests are
         # listed at the end.
         run: python -m pytest -q -m "not benchmark and not slow" -o faulthandler_timeout=600 --durations=30
-      - name: Tests (slow)
-        if: matrix.part == 'slow'
+      - name: Tests (slow, 2D section files)
+        if: matrix.part == 'slow-2d'
         env:
           MPLBACKEND: Agg
           VENTORUM_REQUIRE_OPENMP: ${{ runner.os == 'macOS' && '0' || '1' }}
-        run: python -m pytest -q -m "slow and not benchmark" -o faulthandler_timeout=600 --durations=30
+        # The file patterns here must be the same as the --ignore-glob
+        # patterns of the step "Tests (slow, other files)".
+        run: >-
+          python -m pytest -q -m "slow and not benchmark" -o faulthandler_timeout=600 --durations=30
+          tests/test_panel2d*.py tests/test_v2d*.py tests/test_polar_source_v2d.py tests/test_alpha_correction*.py
+      - name: Tests (slow, other files)
+        if: matrix.part == 'slow-rest'
+        env:
+          MPLBACKEND: Agg
+          VENTORUM_REQUIRE_OPENMP: ${{ runner.os == 'macOS' && '0' || '1' }}
+        run: >-
+          python -m pytest -q -m "slow and not benchmark" -o faulthandler_timeout=600 --durations=30
+          --ignore-glob="tests/test_panel2d*.py" --ignore-glob="tests/test_v2d*.py"
+          --ignore-glob="tests/test_polar_source_v2d.py" --ignore-glob="tests/test_alpha_correction*.py"
       - name: Verification report (theory checks)
         if: matrix.part == 'main'
         env:
