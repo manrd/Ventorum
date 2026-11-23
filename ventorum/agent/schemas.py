@@ -1817,6 +1817,115 @@ AGENT_TOOL_DEFINITIONS: list[dict[str, Any]] = [
         },
     },
     {
+        "name": "ventorum_free_flight",
+        "description": (
+            "Free-body flight response: the time-domain prescribed-wake vortex-ring solver coupled "
+            "to the rigid-body equations of motion, in free air or flat-ground effect. The aircraft "
+            "moves freely in the selected DOFs under the aerodynamic loads, gravity, a constant "
+            "body-axes thrust and the control waveforms; frozen DOFs follow 'motion'. Returns the "
+            "pose and rate histories, coefficients, loads at the CG, energy and work, the initial "
+            "force and moment imbalance at t = 0 and the coupling statistics. The start is "
+            "impulsive (no wake at t = 0), so the loads change while the starting wake forms. A run that reaches the ground stops with a note. Give exactly one of "
+            "t_end_s or n_steps. Work estimate is 20 * n_steps * n_bound * n_wake (worst-case "
+            "coupling sub-iterations). Vortex-lattice solver only; incompressible flow "
+            "(Mach <= 0.3); runs on CPU in float64."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "wing": _SURFACE_SCHEMA,
+                "aircraft": _AIRCRAFT_SCHEMA,
+                "flight_condition": CONDITION_SCHEMA,
+                "x_cg_m": {
+                    "type": "number",
+                    "description": (
+                        "Centre of gravity x position [m], geometry axes (x aft). The CG, the moment "
+                        "reference and the rotation point are [x_cg_m, 0, z_ref]. Default: the "
+                        "aircraft ref_point_m x, else 0."
+                    ),
+                },
+                "mass_kg": _num("Mass [kg].", exclusiveMinimum=0),
+                "inertia_kg_m2": {
+                    "type": "object",
+                    "description": (
+                        "Inertia tensor about the CG in geometry axes [kg m^2]: diagonal entries xx, yy, "
+                        "zz (required) and off-diagonal matrix entries xy, xz, yz (default 0). The "
+                        "tensor must be positive definite."
+                    ),
+                    "properties": {
+                        "xx": _num("Tensor entry I_xx [kg m^2].", exclusiveMinimum=0),
+                        "yy": _num("Tensor entry I_yy [kg m^2].", exclusiveMinimum=0),
+                        "zz": _num("Tensor entry I_zz [kg m^2].", exclusiveMinimum=0),
+                        "xy": _num("Tensor entry I_xy [kg m^2]. Default 0."),
+                        "xz": _num("Tensor entry I_xz [kg m^2]. Default 0."),
+                        "yz": _num("Tensor entry I_yz [kg m^2]. Default 0."),
+                    },
+                    "required": ["xx", "yy", "zz"],
+                    "additionalProperties": False,
+                },
+                "dofs": {
+                    "type": "array",
+                    "items": {"type": "string", "enum": ["x", "y", "z", "roll", "pitch", "yaw"]},
+                    "maxItems": 6,
+                    "description": "Free degrees of freedom. Default: all six.",
+                },
+                "t_end_s": _num("End time [s]. Give exactly one of t_end_s or n_steps.", exclusiveMinimum=0),
+                "n_steps": _int("Number of time steps to march [-]. Give exactly one of t_end_s or n_steps.", minimum=1),
+                "dt_s": _num("Time step [s]. Default: dx_TE / V_inf.", exclusiveMinimum=0),
+                "initial_state": {
+                    "type": "object",
+                    "description": (
+                        "Initial displacements and rates of the free DOFs (missing entries are zero): "
+                        "x_m, y_m, z_m [m], roll_deg, pitch_deg, yaw_deg [deg], x_dot_m_s, y_dot_m_s, "
+                        "z_dot_m_s [m/s], roll_dot_deg_s, pitch_dot_deg_s, yaw_dot_deg_s [deg/s]."
+                    ),
+                    "properties": {
+                        key: _num(f"Initial value of {key}.")
+                        for key in (
+                            "x_m", "y_m", "z_m", "roll_deg", "pitch_deg", "yaw_deg",
+                            "x_dot_m_s", "y_dot_m_s", "z_dot_m_s",
+                            "roll_dot_deg_s", "pitch_dot_deg_s", "yaw_dot_deg_s",
+                        )
+                    },
+                    "additionalProperties": False,
+                },
+                "motion": {
+                    **_MOTION_SCHEMA,
+                    "description": "Prescribed waveforms of the frozen DOFs only. " + _MOTION_SCHEMA["description"],
+                },
+                "controls": _TIME_CONTROLS_SCHEMA,
+                "thrust": {
+                    "type": "object",
+                    "description": (
+                        "Constant thrust in body axes (geometry axes that turn with the body): force_N "
+                        "[N] and moment_Nm [N m] (default zero), applied at point_m [m] in geometry axes "
+                        "(default the CG). Minus the body-axes initial imbalance of a first run with "
+                        "n_steps=1 cancels the load at t = 0 only; it does not trim the steady state."
+                    ),
+                    "properties": {
+                        "force_N": _vec3("Thrust force in body axes [N]."),
+                        "moment_Nm": _vec3("Thrust moment in body axes [N m]."),
+                        "point_m": _vec3("Point of the thrust force in geometry axes [m]."),
+                    },
+                    "additionalProperties": False,
+                },
+                "gust": _GUST_SCHEMA,
+                "gravity_m_s2": _num("Gravitational acceleration [m/s^2]. Default 9.80665.", minimum=0),
+                "store": {
+                    "type": "string",
+                    "enum": ["loads", "strengths"],
+                    "default": "loads",
+                    "description": "'loads' (default) returns time histories only; 'strengths' adds "
+                                   "final gamma_bound, gamma_wake and wake_corners.",
+                },
+                "settings": SETTINGS_SCHEMA,
+                "detail_level": {**DETAIL_LEVEL, "default": "standard"},
+            },
+            "required": ["mass_kg", "inertia_kg_m2"],
+            "additionalProperties": False,
+        },
+    },
+    {
         "name": "ventorum_indicial_response",
         "description": (
             "Unit-step indicial aerodynamic response as a function of semichords s = 2 V_inf t / c_ref: "

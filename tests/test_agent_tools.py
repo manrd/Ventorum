@@ -43,8 +43,8 @@ def assert_error(payload, kind, text=None):
 
 def test_schema_exporters():
     n = len(AGENT_TOOL_DEFINITIONS)
-    assert n == 18  # six analysis tools, derivative matrix, trim, error bars, undeformed nodes, the two machine tools,
-    # the two 2D airfoil tools, the dynamic derivatives, the time response and the indicial response
+    assert n == 19  # six analysis tools, derivative matrix, trim, error bars, undeformed nodes, the two machine tools,
+    # the two 2D airfoil tools, the dynamic derivatives, the time response, the indicial response and free flight
     assert {"ventorum_airfoil_geometry", "ventorum_airfoil_polar"} <= {t["name"] for t in AGENT_TOOL_DEFINITIONS}
     openai = get_tool_schemas("openai")
     assert all(s["type"] == "function" and s["function"]["name"].startswith("ventorum_") for s in openai)
@@ -508,8 +508,8 @@ def test_mcp_initialize_list_and_call():
                          "params": {"protocolVersion": "2024-11-05"}}))
     assert r["result"]["protocolVersion"] == "2024-11-05"
     r = _rpc(json.dumps({"jsonrpc": "2.0", "id": "b", "method": "tools/list"}))
-    assert len(r["result"]["tools"]) == 18  # with derivative matrix, trim, error bars, undeformed nodes, the two machine
-    # tools, the two 2D airfoil tools, dynamic derivatives, time response and indicial response
+    assert len(r["result"]["tools"]) == 19  # with derivative matrix, trim, error bars, undeformed nodes, the two machine
+    # tools, the two 2D airfoil tools, dynamic derivatives, time response, indicial response and free flight
     call = {"jsonrpc": "2.0", "id": 7, "method": "tools/call",
             "params": {"name": "ventorum_wing_analysis",
                        "arguments": {"wing": RECT, "settings": FAST, "detail_level": "summary"}}}
@@ -1172,6 +1172,8 @@ _REQUIRED_ARGS = {
     "pitch_control": "elevator",
     "section": "NACA 0012",
     "Re": 1.0e6,
+    "mass_kg": 250.0,
+    "inertia_kg_m2": {"xx": 50.0, "yy": 75.0, "zz": 100.0},
     "kind": "alpha",
 }
 

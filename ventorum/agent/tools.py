@@ -4145,6 +4145,288 @@ def indicial_response(
         out["geometry"] = geometry_payload(ac)
     return out
 
+_FREE_FLIGHT_DOFS = ("x", "y", "z", "roll", "pitch", "yaw")
+_FREE_FLIGHT_STATE_KEYS: dict[str, tuple[str, float]] = {
+    "x_m": ("x", 1.0),
+    "y_m": ("y", 1.0),
+    "z_m": ("z", 1.0),
+    "roll_deg": ("roll", math.pi / 180.0),
+    "pitch_deg": ("pitch", math.pi / 180.0),
+    "yaw_deg": ("yaw", math.pi / 180.0),
+    "x_dot_m_s": ("x_dot", 1.0),
+    "y_dot_m_s": ("y_dot", 1.0),
+    "z_dot_m_s": ("z_dot", 1.0),
+    "roll_dot_deg_s": ("roll_dot", math.pi / 180.0),
+    "pitch_dot_deg_s": ("pitch_dot", math.pi / 180.0),
+    "yaw_dot_deg_s": ("yaw_dot", math.pi / 180.0),
+}
+# Worst-case number of coupling sub-iterations per step of ventorum.free_flight.
+_FREE_FLIGHT_MAX_SUBITERATIONS = 20
+
+
+def _parse_inertia_tensor(spec: Any) -> np.ndarray:
+    """Build the 3 x 3 inertia tensor [kg m^2] from the agent entries xx, yy, zz, xy, xz, yz."""
+    d = check_keys(spec, ("xx", "yy", "zz", "xy", "xz", "yz"), "inertia_kg_m2")
+    for req_k in ("xx", "yy", "zz"):
+        if req_k not in d:
+            raise InputError(f"inertia_kg_m2: '{req_k}' is required.")
+    v = {k: number(d[k], f"inertia_kg_m2.{k}") if k in d else 0.0 for k in ("xx", "yy", "zz", "xy", "xz", "yz")}
+    return np.array(
+        [
+            [v["xx"], v["xy"], v["xz"]],
+            [v["xy"], v["yy"], v["yz"]],
+            [v["xz"], v["yz"], v["zz"]],
+        ],
+        dtype=np.float64,
+    )
+
+
+@_tool
+def free_flight(
+    wing: Any = None,
+    aircraft: Any = None,
+    flight_condition: dict[str, Any] | None = None,
+    x_cg_m: float | None = None,
+    mass_kg: float | None = None,
+    inertia_kg_m2: dict[str, Any] | None = None,
+    dofs: list[str] | None = None,
+    t_end_s: float | None = None,
+    n_steps: int | None = None,
+    dt_s: float | None = None,
+    initial_state: dict[str, Any] | None = None,
+    motion: dict[str, Any] | None = None,
+    controls: dict[str, Any] | None = None,
+    thrust: dict[str, Any] | None = None,
+    gust: dict[str, Any] | None = None,
+    gravity_m_s2: float | None = None,
+    store: str = "loads",
+    settings: dict[str, Any] | None = None,
+    detail_level: str = "standard",
+) -> dict[str, Any]:
+    """Compute the free-body flight response via the time-domain vortex-ring solver.
+
+    Parameters
+    ----------
+    wing : dict or None
+        One surface specification.
+    aircraft : dict or None
+        Multi-surface aircraft specification.
+    flight_condition : dict or None
+        Mean flight condition (``V_inf_m_s``, ``alpha_deg``, ``beta_deg``,
+        ``rho_kg_m3`` or ``altitude_m``, optional ``h_m`` for ground effect).
+    x_cg_m : float or None
+        Centre-of-gravity x coordinate [m], geometry axes (x aft). The centre
+        of gravity, the moment reference and the rotation point are
+        ``[x_cg_m, 0, z_ref]``.
+    mass_kg : float
+        Mass [kg].
+    inertia_kg_m2 : dict
+        Entries of the inertia tensor about the centre of gravity in geometry
+        axes [kg m^2]: ``xx``, ``yy``, ``zz`` (required) and ``xy``, ``xz``,
+        ``yz`` (the off-diagonal matrix entries, default 0).
+    dofs : list of str or None
+        Free degrees of freedom (subset of x, y, z, roll, pitch, yaw).
+        Default: all six.
+    t_end_s : float or None
+        End time [s]. Give exactly one of *t_end_s* or *n_steps*.
+    n_steps : int or None
+        Number of time steps [-]. Give exactly one of *t_end_s* or *n_steps*.
+    dt_s : float or None
+        Time step [s]. Default ``dx_TE / V_inf``.
+    initial_state : dict or None
+        Initial displacements (``x_m``, ``z_m``, ``pitch_deg``, ...) and rates
+        (``x_dot_m_s``, ``pitch_dot_deg_s``, ...) of the free DOFs.
+    motion : dict or None
+        Prescribed waveforms of the frozen DOFs, as in ``ventorum_time_response``.
+    controls : dict or None
+        Control deflection waveforms [deg] keyed by control name.
+    thrust : dict or None
+        Constant thrust in body axes: ``force_N`` [N] and ``moment_Nm`` [N m]
+        (3-vectors, default zero) and ``point_m`` [m] (3-vector in geometry
+        axes, default the centre of gravity).
+    gust : dict or None
+        Named gust specification, as in ``ventorum_time_response``.
+    gravity_m_s2 : float or None
+        Gravitational acceleration [m/s^2]. Default 9.80665.
+    store : {'loads', 'strengths'}
+        ``"loads"`` (default) or ``"strengths"``.
+    settings : dict or None
+        Solver settings. Only VLM (``"vlm"`` or ``"auto"``) is supported.
+    detail_level : {'summary', 'standard', 'full'}
+        Verbosity of the payload.
+
+    Returns
+    -------
+    dict
+        JSON-safe payload built from :meth:`ventorum.FreeFlightResult.to_dict`.
+    """
+    ac = build_aircraft_from_spec(wing=wing, aircraft=aircraft)
+    c = parse_condition(flight_condition)
+    sett = parse_settings(settings)
+    dl = parse_detail_level(detail_level)
+    store_val = string(store, "store", ("loads", "strengths"))
+    base_rp = ac.moment_reference()
+    x_cg = number(x_cg_m, "x_cg_m") if x_cg_m is not None else float(base_rp[0])
+    ac.ref_point = np.array([x_cg, 0.0, float(base_rp[2])])
+    ac.compute_reference_values()
+
+    if mass_kg is None:
+        raise InputError("'mass_kg' is required.")
+    mass_val = number(mass_kg, "mass_kg", exclusive_min=0.0)
+    if inertia_kg_m2 is None:
+        raise InputError("'inertia_kg_m2' is required (entries xx, yy, zz and optional xy, xz, yz).")
+    inertia_val = _parse_inertia_tensor(inertia_kg_m2)
+    gravity_val = 9.80665 if gravity_m_s2 is None else number(gravity_m_s2, "gravity_m_s2", minimum=0.0)
+
+    if dofs is None:
+        dofs_val: tuple[str, ...] = _FREE_FLIGHT_DOFS
+    else:
+        if not isinstance(dofs, (list, tuple)):
+            raise InputError(f"'dofs' must be an array of names from {list(_FREE_FLIGHT_DOFS)}.")
+        dofs_val = tuple(string(v, "dofs[]", _FREE_FLIGHT_DOFS) for v in dofs)
+        if len(set(dofs_val)) != len(dofs_val):
+            raise InputError(f"'dofs' has repeated names: {list(dofs_val)}.")
+
+    if (t_end_s is None) == (n_steps is None):
+        raise InputError("Give exactly one of 't_end_s' or 'n_steps'.")
+    t_end_val = None if t_end_s is None else number(t_end_s, "t_end_s", exclusive_min=0.0)
+    n_steps_val = None if n_steps is None else integer(n_steps, "n_steps", minimum=1)
+    dt_val = None if dt_s is None else number(dt_s, "dt_s", exclusive_min=0.0)
+
+    state_arg: dict[str, float] | None = None
+    if initial_state is not None:
+        s_obj = check_keys(initial_state, list(_FREE_FLIGHT_STATE_KEYS), "initial_state")
+        state_arg = {}
+        for k, v in s_obj.items():
+            key, scale = _FREE_FLIGHT_STATE_KEYS[k]
+            base_dof = key[:-4] if key.endswith("_dot") else key
+            if base_dof not in dofs_val:
+                raise InputError(f"initial_state.{k} refers to the frozen DOF {base_dof!r}; use 'motion' for it.")
+            state_arg[key] = number(v, f"initial_state.{k}") * scale
+
+    motion_arg: dict[str, Any] | None = None
+    if motion is not None:
+        m_obj = check_keys(motion, list(_MOTION_AGENT_AXES), "motion")
+        motion_arg = {}
+        for k, v in m_obj.items():
+            axis, scale = _MOTION_AGENT_AXES[k]
+            if axis in dofs_val:
+                raise InputError(
+                    f"motion.{k} refers to the free DOF {axis!r}; remove it from 'dofs' or from 'motion'."
+                )
+            motion_arg[axis] = _parse_waveform(v, f"motion.{k}", scale=scale)
+
+    controls_arg: dict[str, Any] | None = None
+    if controls is not None:
+        if not isinstance(controls, dict):
+            raise InputError(f"'controls' must be a JSON object mapping control names, got {type(controls).__name__}.")
+        known = list(ac.control_names())
+        controls_arg = {}
+        for cname, cspec in controls.items():
+            if not isinstance(cname, str) or cname not in known:
+                raise InputError(f"Unknown control name {cname!r}; available controls: {known}.")
+            if cspec is None:
+                raise InputError(f"controls.{cname} is null. Omit the key to keep the default deflection.")
+            controls_arg[cname] = _parse_waveform(cspec, f"controls.{cname}", scale=math.pi / 180.0)
+
+    thrust_fn = None
+    thrust_point = None
+    if thrust is not None:
+        t_obj = check_keys(thrust, ("force_N", "moment_Nm", "point_m"), "thrust")
+        f_b = vector3(t_obj["force_N"], "thrust.force_N") if "force_N" in t_obj else np.zeros(3)
+        m_b = vector3(t_obj["moment_Nm"], "thrust.moment_Nm") if "moment_Nm" in t_obj else np.zeros(3)
+        thrust_point = vector3(t_obj["point_m"], "thrust.point_m") if "point_m" in t_obj else None
+
+        def thrust_fn(t: float, _f: np.ndarray = f_b, _m: np.ndarray = m_b) -> tuple[np.ndarray, np.ndarray]:
+            return _f, _m
+
+    gust_fn = None if gust is None else _parse_gust_spec(gust)
+
+    if resolve_solver_type(sett.solver_type) != "vlm":
+        raise InputError(
+            f"free_flight supports only solver 'vlm' (or 'auto'), got {sett.solver_type!r}."
+        )
+    _check_method(ac, sett.solver_type, sett.wake_alignment, c["h_m"] is not None)
+    fc = make_flight_condition(c)
+
+    def _work(s: SolverSettings) -> int:
+        return _FREE_FLIGHT_MAX_SUBITERATIONS * _time_march_work(
+            ac, s, fc, n_steps=n_steps_val, t_end_s=t_end_val, dt_s=dt_val,
+        )
+
+    sett, fit = _fit_span(
+        ac,
+        sett,
+        settings,
+        lambda s: _planned_panels(ac, s, fc, cap=False),
+        _work,
+    )
+    strips = _check_mesh(ac, sett)
+    case_sett = _case_settings(ac, sett, strips, fc)
+    _check_call_work(
+        _work(case_sett),
+        "fewer time steps (smaller n_steps or t_end_s) or fewer panels (smaller n_panels or n_chord)",
+    )
+
+    res = vt.free_flight(
+        ac,
+        fc,
+        case_sett,
+        mass=mass_val,
+        inertia=inertia_val,
+        dofs=dofs_val,
+        t_end=t_end_val,
+        n_steps=n_steps_val,
+        dt=dt_val,
+        initial_state=state_arg,
+        motion=motion_arg,
+        controls=controls_arg,
+        thrust=thrust_fn,
+        thrust_point=thrust_point,
+        gust=gust_fn,
+        gravity=gravity_val,
+        store=store_val,
+    )
+    data = res.to_dict()
+
+    where = "free air" if c["h_m"] is None else f"h={c['h_m']:g} m (h/c={c['h_m'] / res.c_ref:.3f})"
+    stop_txt = f" Stopped at step {res.ground_contact_step} by ground contact." if res.ground_contact else ""
+    sub_mean = float(np.mean(res.subiterations[1:])) if res.n_steps > 0 else 0.0
+    summary = (
+        f"[Ventorum RESULT] Free flight of {ac.name} at alpha={c['alpha_deg']:g} deg, "
+        f"V={c['V_inf_m_s']:g} m/s, {where}, free DOFs {list(res.dofs)} ({res.n_steps} steps, "
+        f"t_end={float(res.time[-1]):.4g} s, dt={res.dt:.4g} s): final z={float(res.z[-1]):.4g} m, "
+        f"pitch={math.degrees(float(res.pitch[-1])):.4g} deg, CL={float(res.CL[-1]):.4f}. "
+        f"Initial imbalance: force {float(np.linalg.norm(res.initial_force_imbalance)):.4g} N, "
+        f"moment {float(np.linalg.norm(res.initial_moment_imbalance)):.4g} N m about the CG "
+        f"x={x_cg:.4f} m. Coupling sub-iterations: mean {sub_mean:.2f}, max {int(np.max(res.subiterations))}."
+        f"{stop_txt} {device_summary_text(res.device, res.precision)}"
+    )
+    if res.trust is not None:
+        summary += f" Trust {res.trust.score:.2f} ({res.trust.rating}), {len(res.trust.warnings)} warning(s)."
+
+    trust_out = trust_payload(res.trust)
+    if dl == "summary":
+        trust_out = compact_trust(trust_out)
+
+    settings_used = {
+        **settings_payload(sett, res.base),
+        **_mesh_note(case_sett is not sett, case_sett, fit),
+    }
+    out: dict[str, Any] = {
+        "status": "success",
+        "executive_summary": summary,
+        **data,
+        "condition_used": condition_payload(c),
+        "settings_used": settings_used,
+        "trust": trust_out,
+    }
+    if dl == "summary":
+        out.pop("strip_cl", None)
+    else:
+        out["geometry"] = geometry_payload(ac)
+    return out
+
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # Machine capabilities and tuning
