@@ -2,7 +2,7 @@
 
 ## Model
 
-The time-domain vortex-ring lattice solver (`ventorum.unsteady.timedomain._solve_time_rings`, exposed through `ventorum.time_response` and `ventorum.indicial_response`) marches a lifting surface or aircraft along a prescribed six-axis rigid-body path with optional moving control surfaces and arbitrary convected gust or wind-shear velocity fields, in free air or over a flat ground plane. At each time step, the solver builds the instantaneous wing and flap geometry, enforces impermeability at every panel collocation point, sheds one row of quadrilateral wake rings behind the trailing edge with the trailing-edge circulation of the previous step, convects existing wake nodes with the local air velocity without induced deformation, and evaluates unsteady Kutta-Joukowski, apparent-mass and trailing-edge boundary loads.
+The time-domain vortex-ring lattice solver (`ventorum.unsteady.timedomain._solve_time_rings`, exposed through `ventorum.time_response`, `ventorum.indicial_response` and, coupled to the rigid-body equations of motion, `ventorum.free_flight`) marches a lifting surface or aircraft along a prescribed six-axis rigid-body path with optional moving control surfaces and arbitrary convected gust or wind-shear velocity fields, in free air or over a flat ground plane. At each time step, the solver builds the instantaneous wing and flap geometry, enforces impermeability at every panel collocation point, sheds one row of quadrilateral wake rings behind the trailing edge with the trailing-edge circulation of the previous step, convects existing wake nodes with the local air velocity without induced deformation, and evaluates unsteady Kutta-Joukowski, apparent-mass and trailing-edge boundary loads.
 
 ## Equations
 
@@ -99,6 +99,31 @@ U(h) = 0 \quad (h \le z_0).
 
 - `kind="control"`: step deflection $\Delta\delta$ [rad] of a named control surface at $t = 0$ with zero hinge rate for $t \ge 0^+$.
 
+### Free-body flight coupling
+
+`ventorum.free_flight` replaces the prescribed pose of the selected degrees of freedom with the rigid-body equations of motion (`ventorum.unsteady.freeflight`). The inertial frame is the mean-flight frame $(\mathbf e_x, \mathbf e_y, \mathbf e_z)$ above; it translates at $\mathbf V_0$ [m/s]. Gravity acts along $-\mathbf e_z$ with $g$ [m/s^2]. The loads on the body are the aerodynamic force and moment of the step (from the coefficients with the nominal $q_\infty S_\text{ref}$, moved from the reference point to the centre of gravity), the weight, and the thrust force $\mathbf F_T$ [N] and moment $\mathbf M_T$ [N m] in body axes at the point $\mathbf r_T$ [m].
+
+With the centre of gravity at the body offset $\mathbf r$ [m] from the reference point, the generalised coordinates are the pose rates $\mathbf u = [\dot{\mathbf p}, \dot{\boldsymbol\eta}]$, with $\mathbf p = (x, y, z)$ and $\boldsymbol\eta = (\phi, \theta, \psi)$. The body angular velocity is $\boldsymbol\omega_b = \mathbf S(\phi, \theta)\,\dot{\boldsymbol\eta}$ and the centre-of-gravity velocity is $\mathbf v_{cg} = \dot{\mathbf p} + \mathbf J \dot{\boldsymbol\eta}$, with $\mathbf J = -\mathbf E^T \mathbf R [\mathbf r]_\times \mathbf S$. The Newton and Euler equations about the centre of gravity (Etkin and Reid 1996, chapter 4; Stevens and Lewis 2003, chapter 1), projected on the partial velocities (Kane and Levinson 1985), give
+
+```{math}
+\mathbf G^T
+\begin{bmatrix} m\mathbf I & 0 \ 0 & \mathbf I_b \end{bmatrix}
+\mathbf G\,\dot{\mathbf u}
+= \mathbf G^T
+\begin{bmatrix}
+\mathbf F_{\text{net},I} - m\,\mathbf a_\text{vel} \
+\mathbf M_{cg,b} - \boldsymbol\omega_b \times \mathbf I_b \boldsymbol\omega_b - \mathbf I_b \dot{\mathbf S}\dot{\boldsymbol\eta}
+\end{bmatrix},
+\qquad
+\mathbf G = \begin{bmatrix} \mathbf I & \mathbf J \ 0 & \mathbf S \end{bmatrix},
+```
+
+where $\mathbf a_\text{vel} = \mathbf E^T \mathbf R\bigl((\dot{\mathbf S}\dot{\boldsymbol\eta}) \times \mathbf r + \boldsymbol\omega_b \times (\boldsymbol\omega_b \times \mathbf r)\bigr)$ is the velocity-dependent part of the centre-of-gravity acceleration. Only the rows of the free degrees of freedom are solved; the prescribed degrees of freedom enter with their accelerations on the right-hand side. The 3-2-1 kinematics are singular at $|\theta| = 90$ deg, and pitch angles of 89 deg or more are refused.
+
+Each step couples the loads and the motion implicitly. The free state at step $n + 1$ is predicted by second-order extrapolation, the loads of step $n + 1$ are computed from the restored solver state, and the equations of motion are integrated from $n$ to $n + 1$ with the trapezoidal rule. The sub-iterations repeat with Aitken dynamic relaxation (Irons and Tuck 1969; Kuttler and Wall 2008) until the relative change of the state is below `coupling_tol` (default $10^{-10}$), with at most `max_subiterations` (default 20) per step. The apparent-mass load makes the plain fixed-point iteration slow or unstable for light bodies; the relaxation removes most of this effect.
+
+The run starts impulsively, so the load at $t = 0$ is not the steady load. The steady imbalance of the result is the steady vortex-lattice load of the mean state (with $C_{D_i}$) plus the weight, about the centre of gravity, without thrust. A constant thrust equal to minus this imbalance trims the mean state. In ground effect, the run stops when a wing or flap node reaches the ground, and the result holds the valid steps.
+
 ## Assumptions
 
 - Incompressible, inviscid, attached potential flow (Mach $\le 0.3$).
@@ -120,18 +145,26 @@ U(h) = 0 \quad (h \le z_0).
 - `ventorum.unsteady.timedomain`: `_solve_time_rings`, `_TimeDomainResponse`, 3-2-1 kinematics, moving control rig, RK4 gust wake convection.
 - `ventorum.unsteady.gusts`: `sharp_edged`, `one_minus_cosine`, `wind_shear`, `linear_shear`, `logarithmic_shear`.
 - `ventorum.unsteady.response`: `time_response`, `TimeResponseResult`, `indicial_response`, `IndicialResult`.
-- `ventorum.agent.tools`, `ventorum.agent.schemas`, `ventorum.agent.dispatcher`: `ventorum_time_response` and `ventorum_indicial_response` tools.
+- `ventorum.unsteady.freeflight`: the implicit free-body coupling (`_solve_free_flight`) and `FlightState`.
+- `ventorum.unsteady.flight`: `free_flight` and `FreeFlightResult`.
+- `ventorum.agent.tools`, `ventorum.agent.schemas`, `ventorum.agent.dispatcher`: `ventorum_time_response`, `ventorum_indicial_response` and `ventorum_free_flight` tools.
 
 ## Verification
 
 - `tests/test_unsteady_timedomain.py`: steady limit against `ventorum.analyze`; AR 40 Wagner build-up against Jones (1940); small-amplitude periodic limit against `_solve_harmonic_rings` in free air and ground effect; second-order time-step convergence; moving-flap and six-axis ground-image parity against explicit two-wing models; NumPy vs Numba backend parity.
 - `tests/test_time_response.py`: round-off parity between `time_response` and `_solve_time_rings` with six-axis motion and moving flaps; zero-gust parity; uniform time-varying head-wind gust equivalence with `x_dot = -g` (free air and $h/c = 0.5$) and vertical gust equivalence with `z_dot = -w` (free air) to round-off; AR 40 Wagner (`kind="alpha"`) and Kussner (`kind="gust"`) verification against Jones (1940), Sears and Sparks (1941) / Bisplinghoff et al. (1955) and the exact 2D Kussner Fourier integral; 1-cosine gust agreement with Duhamel superposition of the solver's sharp-edged response; steady linear horizontal shear long-time limit against a direct steady ring solve; ground-effect horizontal gust mirror parity and vertical gust wake clearance; control-step limit against `ventorum.control_derivatives`; JSON serialisation, `store` options, trust and input checks.
 - `tests/test_agent_time_response.py`: agent dispatcher and MCP server parity, waveform and gust parsers, work budget refusal and input checks.
+- `tests/test_unsteady_freeflight.py`: all degrees of freedom frozen equals `_solve_time_rings` to round-off (free air and $h/c = 0.5$, with a moving flap and a gust); free fall, constant thrust and an offset centre of gravity without aerodynamics against the exact paths; torque-free rotation with energy and angular momentum conserved at second order in $\Delta t$; the large-mass limit; trimmed short-period frequency and damping against the linear model from `dynamic_derivatives`, in free air and at $h/c = 0.5$; second-order time-step convergence; a pitch damper against the linear model with the control derivatives; thrust callables; ground contact; input checks.
+- `tests/test_free_flight.py` and `tests/test_agent_free_flight.py`: the public function and the agent tool equal the private coupling to round-off; steady-imbalance trim; JSON output, notes, ground contact and input checks.
 
 ## References
 
 - J. Katz and A. Plotkin, *Low-Speed Aerodynamics*, 2nd ed., Cambridge University Press, 2001, chapter 13 (time-domain vortex-ring lattice, impulsive start, unsteady Kutta condition, unsteady Bernoulli loads and method of images).
-- B. Etkin and L. D. Reid, *Dynamics of Flight: Stability and Control*, 3rd ed., Wiley, 1996, chapter 4 (3-2-1 Euler rotation sequence and angular-velocity kinematics).
+- B. Etkin and L. D. Reid, *Dynamics of Flight: Stability and Control*, 3rd ed., Wiley, 1996, chapter 4 (3-2-1 Euler rotation sequence and angular-velocity kinematics, rigid-body equations of motion).
+- B. L. Stevens and F. L. Lewis, *Aircraft Control and Simulation*, 2nd ed., Wiley, 2003, chapter 1 (rigid-body equations and Euler-angle kinematics).
+- T. R. Kane and D. A. Levinson, *Dynamics: Theory and Applications*, McGraw-Hill, 1985 (partial velocities and the generalised equations of motion).
+- B. M. Irons and R. C. Tuck, "A version of the Aitken accelerator for computer iteration", *International Journal for Numerical Methods in Engineering* 1, 1969, pp. 275-277.
+- U. Kuttler and W. A. Wall, "Fixed-point fluid-structure interaction solvers with dynamic relaxation", *Computational Mechanics* 43, 2008, pp. 61-72.
 - H. Wagner, "Uber die Entstehung des dynamischen Auftriebes von Tragflugeln", *ZAMM* 5(1), 1925, pp. 17-35 (indicial lift after an incidence step).
 - H. G. Kussner, "Zusammenfassender Bericht uber den instationaren Auftrieb von Flugeln", *Luftfahrtforschung* 13(12), 1936, pp. 410-424 (sharp-edged gust penetration).
 - R. T. Jones, "The Unsteady Lift of a Wing of Finite Aspect Ratio", NACA Report 681, 1940 (two-exponential Wagner approximation and finite-span tip relief).

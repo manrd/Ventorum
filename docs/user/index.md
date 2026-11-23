@@ -33,6 +33,7 @@ how_to_rate_derivatives
 how_to_height_derivatives
 how_to_dynamic_derivatives
 how_to_time_response
+how_to_free_flight
 derivative_matrix
 how_to_gradients
 how_to_openmdao
