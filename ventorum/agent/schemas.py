@@ -1782,7 +1782,7 @@ AGENT_TOOL_DEFINITIONS: list[dict[str, Any]] = [
             "in free air or flat-ground effect. Supports six-axis rigid-body motion, moving control "
             "surfaces and convected gusts or horizontal wind shear. Give exactly one of t_end_s or "
             "n_steps. Work estimate is n_steps * n_bound * n_wake (n_wake = n_steps * n_strips). "
-            "Vortex-lattice solver only; incompressible flow (Mach <= 0.3); runs on CPU in float64."
+            "Vortex-lattice solver only; incompressible flow (Mach <= 0.3); runs on the CPU in float64 or on the GPU (device and precision as set by ventorum.gpu)."
         ),
         "parameters": {
             "type": "object",
@@ -1828,7 +1828,7 @@ AGENT_TOOL_DEFINITIONS: list[dict[str, Any]] = [
             "impulsive (no wake at t = 0), so the loads change while the starting wake forms. A run that reaches the ground stops with a note. Give exactly one of "
             "t_end_s or n_steps. Work estimate is max_subiterations (default 20) * n_steps * n_bound "
             "* n_wake (worst-case coupling sub-iterations). Vortex-lattice solver only; incompressible flow "
-            "(Mach <= 0.3); runs on CPU in float64."
+            "(Mach <= 0.3); runs on the CPU in float64 or on the GPU (device and precision as set by ventorum.gpu)."
         ),
         "parameters": {
             "type": "object",
