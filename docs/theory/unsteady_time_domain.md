@@ -146,14 +146,14 @@ The run starts impulsively, so the load at $t = 0$ is not the steady load. The s
 - **Solver scope.** Only `solver_type="vlm"` or `"auto"` is accepted; lifting-line and Fourier solvers raise `InputError`.
 - **Compressibility.** Mach numbers above `MACH_LIMIT_INCOMPRESSIBLE` ($0.3$) raise `InputError`.
 - **Ground clearance.** Any wing or deflected flap node reaching or crossing the ground plane at any step raises `InputError`.
-- **Device.** Time-domain marching runs on the CPU in float64. Selecting the GPU device falls back to the CPU with a note in `notes`.
+- **Device and precision.** Time-domain marching runs on the CPU (float64) or on a CUDA GPU (`float64` or `float32`, via `ventorum.gpu.set_device` and `ventorum.gpu.set_precision`). With `"auto"`, the solver asks `ventorum.gpu.use_gpu` with march work $n_\text{steps} N N_w$ (doubled in ground effect, where $N$ is the bound ring count and $N_w = n_\text{steps} n_s$ is the final wake ring count). Requesting `"gpu"` without CUDA, or two GPU out-of-memory errors, falls back to the CPU in float64 with a note in `notes` and `trust.warnings`.
 - **Chordwise resolution.** `n_chord < 8` adds a trust warning while keeping the steady trust score and rating of the mean state.
 
 ## Implementation
 
-- `ventorum.unsteady.timedomain`: `_solve_time_rings`, `_TimeDomainResponse`, 3-2-1 kinematics, moving control rig, RK4 gust wake convection.
+- `ventorum.unsteady.timedomain`: `_TimeDomainStepper`, `_solve_time_rings`, `_TimeDomainResponse`, `_select_time_device`, 3-2-1 kinematics, moving control rig, RK4 gust wake convection. On the GPU, `_TimeDomainStepper` uses `ring_velocity_gpu` and `ring_normal_influence_gpu` (`ventorum.gpu.ring_kernels`) in the selected precision (`float64` or `float32`), solves the bound system with PyTorch LU (`torch.linalg.lu_factor` and `torch.linalg.lu_solve`, factorised once when the matrix does not change), keeps the wake corner and circulation buffers on the device (so `save_state` and `restore_state` copy device buffers without host round trips), evaluates Python gust callables on the host per step and copies the velocities to the device, and releases its registered device buffers (`register_device_holder` and `release_gpu`) when the run ends.
 - `ventorum.unsteady.gusts`: `sharp_edged`, `one_minus_cosine`, `wind_shear`, `linear_shear`, `logarithmic_shear`.
-- `ventorum.unsteady.response`: `time_response`, `TimeResponseResult`, `indicial_response`, `IndicialResult`.
+- `ventorum.unsteady.response`: `time_response`, `TimeResponseResult`, `indicial_response`, `IndicialResult`, `_device_execution_notes` (records `device`, `precision` and execution or fallback notes).
 - `ventorum.unsteady.freeflight`: the implicit free-body coupling (`_solve_free_flight`) and `FlightState`.
 - `ventorum.unsteady.flight`: `free_flight` and `FreeFlightResult`.
 - `ventorum.agent.tools`, `ventorum.agent.schemas`, `ventorum.agent.dispatcher`: `ventorum_time_response`, `ventorum_indicial_response` and `ventorum_free_flight` tools.
@@ -166,6 +166,7 @@ The run starts impulsively, so the load at $t = 0$ is not the steady load. The s
 - `tests/test_unsteady_freeflight.py`: all degrees of freedom frozen equals `_solve_time_rings` to round-off (free air and $h/c = 0.5$, with a moving flap and a gust); free fall, constant thrust and an offset centre of gravity without aerodynamics against the exact paths; torque-free rotation with energy and angular momentum conserved at second order in $\Delta t$; the large-mass limit; trimmed short-period frequency and damping against the linear model from `dynamic_derivatives`, in free air and at $h/c = 0.5$; second-order time-step convergence; a pitch damper against the linear model with the control derivatives; thrust callables; ground contact; input checks.
 - `tests/test_free_flight.py` and `tests/test_agent_free_flight.py`: the public function and the agent tool equal the private coupling to round-off; steady-imbalance trim; the coupling options; JSON output, notes, ground contact and input checks.
 - `tests/test_callable_jumps.py`: smooth, kinked and constant callables keep their rates bit for bit; a step at a sample time and between samples gives the rates of the sampled array and a note; `time_response` and `free_flight` with a step callable equal the run with its sampled array (the free-flight case diverged before); the agent step waveform on a sample time.
+- `tests/test_gpu_time_march.py`: float64 (1e-11 relative) and float32 (float32 floor) GPU against CPU parity for `time_response`, `indicial_response` (`kind="alpha"`) and `free_flight` in free air and at $h/c = 0.5$ with six-axis motion, moving flaps, 1-cosine gusts, cambered rings and stationary ground caches; device-memory release; GPU out-of-memory and CUDA-hidden subprocess fallbacks; CPU device notes and automatic work selection.
 
 ## References
 
