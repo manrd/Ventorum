@@ -57,8 +57,8 @@ from ventorum.unsteady.derivatives import (
 from ventorum.unsteady.freeflight import FlightState, _solve_free_flight
 from ventorum.unsteady.response import (
     _STORE_OPTIONS,
-    _cpu_execution_notes,
     _default_dt_for_lattice,
+    _device_execution_notes,
     _pack_1d,
     _pack_nd,
     _pack_trust,
@@ -211,7 +211,8 @@ class FreeFlightResult:
     notes : list[str]
         Solver, device, coupling, gust, ground-contact and trust notes.
     device, precision : str
-        Execution device (``"cpu"``) and precision (``"float64"``).
+        Execution device (``"cpu"`` or ``"gpu"``) and precision
+        (``"float64"`` or ``"float32"``).
     """
 
     time: np.ndarray
@@ -477,7 +478,9 @@ def free_flight(
         uses *cg*. The moment ``(thrust_point - cg) x force`` is added.
     gust : callable or None, optional
         Gust field ``gust(points, t) -> velocities`` [m/s] (see
-        :mod:`ventorum.unsteady.gusts`).
+        :mod:`ventorum.unsteady.gusts`). On the GPU, a gust callable is
+        evaluated on the host at every step and its velocities are copied to
+        the device, so it adds a host cost per step.
     gravity : float, optional
         Gravitational acceleration [m/s^2] along ``-e_z``. Default
         ``9.80665``.
@@ -599,7 +602,7 @@ def free_flight(
         "The inertial frame translates at the mean flight velocity of condition; gravity acts along -z of "
         "this frame. Dimensional aerodynamic loads at the centre of gravity are in this frame.",
     ]
-    notes.extend(_cpu_execution_notes())
+    notes.extend(_device_execution_notes(resp.device, resp.precision, resp.notes))
     notes.extend(trust_notes)
     for note in resp.notes:
         if note not in notes:
@@ -685,6 +688,6 @@ def free_flight(
         trust=trust,
         trust_notes=trust_notes,
         notes=notes,
-        device="cpu",
-        precision="float64",
+        device=str(resp.device),
+        precision=str(resp.precision),
     )

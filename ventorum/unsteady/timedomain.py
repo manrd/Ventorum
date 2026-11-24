@@ -117,6 +117,7 @@ from ventorum.core.errors import InputError
 from ventorum.geometry.lattice import CLAF_MAX, CLAF_MIN, VortexLattice
 from ventorum.unsteady.harmonic import (
     _eval_pair_cores,
+    _note_gpu_unavailable,
     _physical_ring_areas,
     _rings_to_horseshoe,
     _rot_y,
@@ -136,6 +137,37 @@ _LOAD_POINT_CHUNK = 256
 _MAX_CACHE_BYTES = 64 * 1024 * 1024
 # Allowed rigid-body motion axes in the ``motion`` mapping.
 _MOTION_AXES = ("x", "y", "z", "roll", "pitch", "yaw")
+
+
+def _select_time_device(
+    n_steps: int,
+    n_bound: int,
+    n_strips: int,
+    has_ground: bool,
+) -> tuple[str, str, list[str]]:
+    """Return ``(device, precision, fallback_notes)`` for the time-domain ring solver."""
+    from ventorum import gpu
+    from ventorum.utils.parallel import _local as _par_local
+
+    setting = gpu.get_device()
+    if setting == "cpu":
+        return "cpu", "float64", []
+    if setting == "auto" and getattr(_par_local, "worker_threads", None) is not None:
+        return "cpu", "float64", []
+    if setting == "gpu":
+        if gpu.available():
+            return "gpu", gpu.get_precision(), []
+        reason = gpu.unavailable_reason() or "no CUDA GPU is available."
+        return "cpu", "float64", [_note_gpu_unavailable(reason)]
+    # setting == "auto"
+    if not gpu.available():
+        return "cpu", "float64", []
+    n_wake = n_steps * n_strips
+    work = float(n_steps * n_bound * n_wake) * (2.0 if has_ground else 1.0)
+    use, _ = gpu.use_gpu(work, "vlm", n_cases=1, n_panels=None, return_reason=True)
+    if use:
+        return "gpu", gpu.get_precision(), []
+    return "cpu", "float64", []
 
 
 @dataclass(slots=True)
@@ -248,7 +280,11 @@ class _TimeDomainResponse:
         given.
     notes : list of str
         Diagnostic notes (for example when ``dt`` differs from ``dx_TE / V_inf``
-        by more than 25 %, or gust and ground-effect modelling notes).
+        by more than 25 %, or gust, device fallback and ground-effect notes).
+    device : str
+        Execution device: ``"cpu"`` or ``"gpu"``.
+    precision : str
+        Kernel arithmetic precision: ``"float64"`` or ``"float32"``.
     """
 
     time: np.ndarray
@@ -292,6 +328,8 @@ class _TimeDomainResponse:
     controls_dot: dict[str, np.ndarray] = field(default_factory=dict)
     gust_velocity: np.ndarray = field(default_factory=lambda: np.empty((0, 3), dtype=np.float64))
     notes: list[str] = field(default_factory=list)
+    device: str = "cpu"
+    precision: str = "float64"
 
 
 def _eval_gust(
@@ -2067,6 +2105,8 @@ class _TimeDomainStepper:
         self.wake_conv = wake_conv
         self.time = time
         self.notes = notes
+        self.device = "cpu"
+        self.precision = "float64"
         self.gust_fn = gust_fn
         self.leg_normal_0 = leg_normal_0
         self.n_leg_sets = n_leg_sets
@@ -3162,4 +3202,6 @@ def _solve_time_rings(
         controls_dot=stepper.ctrl_dots,
         gust_velocity=gust_ref,
         notes=stepper.notes,
+        device=stepper.device,
+        precision=stepper.precision,
     )
