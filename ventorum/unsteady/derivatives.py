@@ -408,6 +408,12 @@ def _solve_pure_pitch_rate_responses(
     Woodbury system keeps the height fixed and avoids the ``-C_h / (2 k^2)``
     singularity while agreeing with ``H_theta + H_z / (2 i k)`` to round-off
     when the mean load is zero.
+
+    The loaded right-hand side holds the kinematic rotation velocity only. It
+    does not add the loaded-mean-state geometric terms (bound rings moving
+    relative to the steady wake, travelling-wave wake displacement), so the
+    wake stays straight in this response. This is the model of
+    ``rate_derivatives``; the size of the omitted terms is not measured.
     """
     n_k = k_solve.size
     out = np.zeros((n_k, 6), dtype=np.complex128)

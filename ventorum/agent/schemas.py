@@ -1826,8 +1826,8 @@ AGENT_TOOL_DEFINITIONS: list[dict[str, Any]] = [
             "pose and rate histories, coefficients, loads at the CG, energy and work, the initial "
             "force and moment imbalance at t = 0 and the coupling statistics. The start is "
             "impulsive (no wake at t = 0), so the loads change while the starting wake forms. A run that reaches the ground stops with a note. Give exactly one of "
-            "t_end_s or n_steps. Work estimate is 20 * n_steps * n_bound * n_wake (worst-case "
-            "coupling sub-iterations). Vortex-lattice solver only; incompressible flow "
+            "t_end_s or n_steps. Work estimate is max_subiterations (default 20) * n_steps * n_bound "
+            "* n_wake (worst-case coupling sub-iterations). Vortex-lattice solver only; incompressible flow "
             "(Mach <= 0.3); runs on CPU in float64."
         ),
         "parameters": {
@@ -1918,6 +1918,17 @@ AGENT_TOOL_DEFINITIONS: list[dict[str, Any]] = [
                     "description": "'loads' (default) returns time histories only; 'strengths' adds "
                                    "final gamma_bound, gamma_wake and wake_corners.",
                 },
+                "max_subiterations": _int(
+                    "Maximum coupling sub-iterations per step. Default 20. Light bodies can need more; "
+                    "a step that does not converge gets a note. The work estimate scales with it.",
+                    minimum=1,
+                    maximum=100,
+                ),
+                "coupling_tol": _num(
+                    "Relative state tolerance of the coupling sub-iterations [-]. Default 1e-10.",
+                    minimum=1e-14,
+                    maximum=1e-3,
+                ),
                 "settings": SETTINGS_SCHEMA,
                 "detail_level": {**DETAIL_LEVEL, "default": "standard"},
             },

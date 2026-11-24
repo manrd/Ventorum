@@ -930,7 +930,7 @@ def _solve_free_flight(
     elif motion is not None:
         for idx, ax in enumerate(_MOTION_AXES):
             if ax in motion:
-                arr, dot = _sample_motion(motion[ax], time, dt_val, ax)
+                arr, dot = _sample_motion(motion[ax], time, dt_val, ax, stepper.notes)
                 q_presc[:, idx] = arr
                 qd_presc[:, idx] = dot
                 qdd_presc[:, idx] = _second_order_diff(dot, dt_val)
@@ -944,7 +944,7 @@ def _solve_free_flight(
     elif controls is not None:
         for cname, spec in controls.items():
             if not ctrl_takes_state[cname]:
-                arr, dot = _sample_motion(spec, time, dt_val, f"controls[{cname!r}]")
+                arr, dot = _sample_motion(spec, time, dt_val, f"controls[{cname!r}]", stepper.notes)
                 ctrl_hist[cname] = arr
                 ctrl_dot_hist[cname] = dot
             else:

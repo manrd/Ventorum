@@ -61,8 +61,8 @@ With `condition.h` set, the mean state is over flat ground. When a wing or flap 
 
 ## Notes and limits
 
-- The coupling is implicit, with sub-iterations and Aitken relaxation. A step that does not reach the tolerance gets a note, and the run continues. Light bodies need more sub-iterations, because the apparent-mass load is large compared with the inertia.
-- Give smooth control and motion callables. The rate of a callable comes from a small central difference. When a step in a callable falls exactly on a sample time, the rate there is the jump divided by a very small time, and the run can diverge. Use a smooth input (for example a sine doublet) or an array input.
+- The coupling is implicit, with sub-iterations and Aitken relaxation. `coupling_tol` [-] (default 1e-10) is the relative state tolerance and `max_subiterations` (default 20) the limit per step. A step that does not reach the tolerance gets a note, and the run continues. Light bodies need more sub-iterations, because the apparent-mass load is large compared with the inertia: increase `max_subiterations` for them.
+- The rate of a time callable comes from a small central difference. A jump in a callable (a step input) has no finite rate. The solver finds a jump from the sampled values and rates, uses the grid rate of the sampled values next to it, as for an array input, and adds a note. The impulse of the jump is then spread over two time steps. For a defined input rate, give a smooth input (for example a sine doublet) or an array.
 - The solver runs on the CPU in float64. When the GPU device is selected, the run is on the CPU with a note.
 - Use at least 8 chordwise panels for the unsteady pitching moment; fewer panels give a trust warning.
 - The wake is prescribed: it convects with the free stream plus the gust, with no roll-up. Only the vortex-lattice solver is supported.

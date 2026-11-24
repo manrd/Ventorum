@@ -124,5 +124,6 @@ For each requested control name `<name>` and each coefficient `C` in `CL`, `CD`,
 - Incompressible flow only: Mach numbers above 0.3 (either stated in `condition.mach` or from `V_inf / a`) are refused with `InputError`.
 - Cambered mean-line leg chains, deflected chordwise flaps and joined surfaces (such as winglets) are supported via bent ring side polylines. Harmonic control-surface modes require a chordwise lattice (`n_chord >= 2`); section-mode controls (`n_chord = 1`) raise `InputError`.
 - Longitudinal rigid-body motions (pitch and heave) plus named chordwise control deflections only. Lateral rigid-body dynamic rates (`p`, `r`, `beta_dot`) are not yet included.
+- At a loaded mean state (mean lift not zero), the pure pitch-rate response that gives `C_q(k)` and `C_alpha_dot(k)` keeps a straight wake: it does not include the movement of the wing relative to the steady wake. The pitch and heave responses include it. This is the model of `rate_derivatives`, so the `k -> 0` limits agree. The size of this model limit is not measured.
 
 See `examples/13_dynamic_derivatives.py` for a runnable script and the [theory chapter](../theory/unsteady_vortex_rings.md) for the equations, definitions and verification.

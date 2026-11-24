@@ -196,6 +196,22 @@ def test_ground_contact_stops_the_public_run():
     json.dumps(res.to_dict(), allow_nan=False)
 
 
+def test_coupling_options_reach_the_private_coupling():
+    """coupling_tol and max_subiterations pass to the private coupling; a low limit gives notes."""
+    ac = _wing_tail()
+    cond = vt.FlightCondition(V_inf=25.0, rho=1.225, alpha=math.radians(2.0))
+    kw = {"mass": 40.0, "inertia": np.diag([8.0, 12.0, 18.0]), "dofs": ("z", "pitch")}
+    for opts in ({"max_subiterations": 2}, {"max_subiterations": 40, "coupling_tol": 1.0e-12}):
+        res = vt.free_flight(ac, cond, _SETTINGS, n_steps=6, **kw, **opts)
+        ref = _private_run(ac, cond, 6, **kw, **opts)
+        np.testing.assert_array_equal(res.subiterations, ref.subiterations)
+        np.testing.assert_allclose(res.pitch, ref.pitch, rtol=0.0, atol=1e-13)
+        assert int(np.max(res.subiterations)) <= opts["max_subiterations"]
+    low = vt.free_flight(ac, cond, _SETTINGS, n_steps=6, max_subiterations=1, **kw)
+    assert int(np.max(low.subiterations)) == 1
+    assert any("sub-iteration" in n or "subiteration" in n for n in low.notes)
+
+
 def test_public_input_checks():
     """Bad inputs raise InputError before or during the run."""
     ac = _wing_tail()
@@ -215,6 +231,10 @@ def test_public_input_checks():
         {**ok, "thrust": lambda t: (np.array([np.nan, 0.0, 0.0]), np.zeros(3))},
         {**ok, "cg": [0.0, 0.0]},
         {**ok, "dofs": ("pitch",), "initial_state": {"pitch": math.radians(89.5)}},
+        {**ok, "max_subiterations": 0},
+        {**ok, "max_subiterations": 2.5},
+        {**ok, "coupling_tol": 0.0},
+        {**ok, "coupling_tol": float("nan")},
     ]
     for kw in bad:
         with pytest.raises(InputError):

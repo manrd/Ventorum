@@ -410,6 +410,8 @@ def free_flight(
     gust: Callable[[np.ndarray, float], np.ndarray] | None = None,
     gravity: float = 9.80665,
     store: str = "loads",
+    coupling_tol: float = 1.0e-10,
+    max_subiterations: int = 20,
 ) -> FreeFlightResult:
     """Compute the free-body flight response with the time-domain vortex-ring solver.
 
@@ -482,6 +484,14 @@ def free_flight(
     store : {'loads', 'strengths'}, optional
         ``"loads"`` (default) keeps the histories only. ``"strengths"`` also
         keeps the final ring strengths and wake corners.
+    coupling_tol : float, optional
+        Relative state convergence tolerance of the implicit coupling
+        sub-iterations [-]. Default ``1e-10``.
+    max_subiterations : int, optional
+        Maximum coupling sub-iterations per step (``>= 1``). Default ``20``.
+        A step that does not reach *coupling_tol* gets a note, and the run
+        continues. Light bodies (large apparent-mass load compared with the
+        inertia) can need more sub-iterations.
 
     Returns
     -------
@@ -569,6 +579,8 @@ def free_flight(
         ground=ground,
         wake_alignment=sett.wake_alignment,
         steady_loads=steady_loads,
+        coupling_tol=coupling_tol,
+        max_subiterations=max_subiterations,
     )
 
     te_idx = np.arange(resp.n_strips, dtype=np.int64) * resp.n_chord + (resp.n_chord - 1)

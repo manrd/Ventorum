@@ -368,6 +368,7 @@ def _sample_motion(
     time: np.ndarray,
     dt: float,
     name: str,
+    notes: list[str] | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Sample motion *motion* and its time derivative at *time* [s].
 
@@ -376,6 +377,18 @@ def _sample_motion(
     ``t > 0``). Array motions of length ``n_steps + 1`` are differentiated with
     second-order finite differences on the time grid (first-order when
     ``n_steps == 1``).
+
+    A callable with a jump has no finite rate at the jump. The tiny difference
+    then gives a rate of about ``jump / (2e-7 dt)`` when the jump is at a sample
+    time, and no rate at all when the jump is between two sample times. To
+    find such intervals, the function compares the change of the sampled value
+    over each interval with the sampled rates (see :func:`_jump_points`). At
+    the samples next to a jump, the rate is the grid rate of the array rule,
+    so near a jump a callable gives the same rates as the array of its
+    samples, and the rate integrates to the jump. A note gives the times when
+    *notes* is given. A smooth callable that the time step resolves, or a
+    continuous callable with a kink, passes the tests, and its rates do not
+    change.
     """
     n_pts = int(time.size)
     if callable(motion):
@@ -398,6 +411,16 @@ def _sample_motion(
                 dots[i] = (vp - vm) / (2.0 * h)
         if not np.all(np.isfinite(vals)) or not np.all(np.isfinite(dots)):
             raise InputError(f"Motion {name} returned non-finite values.")
+        picked = _jump_points(vals, dots, dt)
+        if picked.size:
+            dots[picked] = _grid_rates(vals, dt)[picked]
+            if notes is not None:
+                notes.append(
+                    f"Motion {name}: the callable has a jump (or a change that the time step does not "
+                    f"resolve) between t = {float(time[picked[0]]):.6g} s and t = {float(time[picked[-1]]):.6g} s. "
+                    f"The rate at the {picked.size} samples there is the grid rate of the sampled values, "
+                    "as for an array input."
+                )
         return vals, dots
 
     try:
@@ -411,6 +434,16 @@ def _sample_motion(
     if not np.all(np.isfinite(arr)):
         raise InputError(f"Motion array {name} must contain only finite numbers.")
 
+    return arr.copy(), _grid_rates(arr, dt)
+
+
+def _grid_rates(arr: np.ndarray, dt: float) -> np.ndarray:
+    """Return the time derivative of the samples *arr* on a uniform grid of step *dt* [s].
+
+    Second-order finite differences: one-sided at the two ends, central
+    inside; first-order when *arr* has two samples.
+    """
+    n_pts = int(arr.shape[0])
     dots = np.empty(n_pts, dtype=np.float64)
     if n_pts == 2:
         slope = (arr[1] - arr[0]) / dt
@@ -420,7 +453,51 @@ def _sample_motion(
         dots[0] = (-3.0 * arr[0] + 4.0 * arr[1] - arr[2]) / (2.0 * dt)
         dots[1:-1] = (arr[2:] - arr[:-2]) / (2.0 * dt)
         dots[-1] = (3.0 * arr[-1] - 4.0 * arr[-2] + arr[-3]) / (2.0 * dt)
-    return arr.copy(), dots
+    return dots
+
+
+# Thresholds of the jump test of a sampled callable [-]. A sample rate is too
+# large when ``|dot_i| dt`` exceeds _JUMP_RATE_FACTOR times the larger value
+# change of its two intervals (a smooth or kinked input gives a ratio of
+# about 1; a jump at a sample time gives about 5e6). An interval change is
+# too large when ``|dv|`` exceeds _JUMP_CHANGE_FACTOR times ``dt`` times the
+# larger end rate (a resolved smooth input gives about 1 + (omega dt)^2 / 8,
+# a kink at most 1; a jump between sample times gives a very large ratio).
+_JUMP_RATE_FACTOR = 100.0
+_JUMP_CHANGE_FACTOR = 2.0
+
+
+def _jump_points(vals: np.ndarray, dots: np.ndarray, dt: float) -> np.ndarray:
+    """Return the sample indices whose rate must come from the grid because of a jump.
+
+    Two tests find a jump in a sampled callable, each above a round-off floor
+    of ``1e-9 max|vals|``:
+
+    1. A jump at the sample time ``t_i`` gives a rate ``dot_i`` that the value
+       changes of the two intervals at ``t_i`` cannot explain. The samples
+       ``i - 1``, ``i`` and ``i + 1`` are returned.
+    2. A jump inside the interval ``[t_(i-1), t_i]`` gives a value change that
+       the end rates cannot explain. The samples ``i - 1`` and ``i`` are
+       returned.
+
+    A continuous input with a kink (for example a ramp) passes both tests.
+    """
+    n_pts = int(vals.size)
+    if n_pts < 2:
+        return np.zeros(0, dtype=np.int64)
+    dv = np.abs(np.diff(vals))
+    floor = 1.0e-9 * float(np.max(np.abs(vals)))
+    dv_left = np.concatenate([[0.0], dv])
+    dv_right = np.concatenate([dv, [0.0]])
+    rate_bad = np.abs(dots) * dt > _JUMP_RATE_FACTOR * np.maximum(dv_left, dv_right) + floor
+    end_rate = np.maximum(np.abs(dots[:-1]), np.abs(dots[1:]))
+    change_bad = dv > _JUMP_CHANGE_FACTOR * dt * end_rate + floor
+    picked = np.zeros(n_pts, dtype=bool)
+    for i in np.flatnonzero(rate_bad):
+        picked[max(i - 1, 0):min(i + 2, n_pts)] = True
+    for i in np.flatnonzero(change_bad):
+        picked[i:i + 2] = True
+    return np.flatnonzero(picked).astype(np.int64)
 
 
 def _rotation_matrix_321(roll: float, pitch: float, yaw: float) -> np.ndarray:
@@ -1030,6 +1107,7 @@ def _build_control_rig(
     controls: Mapping[str, Sequence[float] | np.ndarray | Callable[[float], float]] | None,
     time: np.ndarray,
     dt_val: float,
+    notes: list[str] | None = None,
 ) -> tuple[_ControlRig | None, dict[str, np.ndarray], dict[str, np.ndarray]]:
     """Validate and sample *controls*, returning ``(rig, ctrl_arrs, ctrl_dots)``."""
     if controls is None:
@@ -1047,7 +1125,7 @@ def _build_control_rig(
     ctrl_arrs: dict[str, np.ndarray] = {}
     ctrl_dots: dict[str, np.ndarray] = {}
     for raw_name, spec in controls.items():
-        arr, dot = _sample_motion(spec, time, dt_val, f"controls[{raw_name!r}]")
+        arr, dot = _sample_motion(spec, time, dt_val, f"controls[{raw_name!r}]", notes)
         ctrl_arrs[raw_name] = arr
         ctrl_dots[raw_name] = dot
 
@@ -1463,6 +1541,7 @@ def _resolve_six_axis_motion(
     motion: Mapping[str, Sequence[float] | np.ndarray | Callable[[float], float]] | None,
     time: np.ndarray,
     dt_val: float,
+    notes: list[str] | None = None,
 ) -> dict[str, tuple[np.ndarray, np.ndarray]]:
     """Validate and sample the six rigid-body motion axes and their time derivatives."""
     if motion is not None and not isinstance(motion, Mapping):
@@ -1481,11 +1560,11 @@ def _resolve_six_axis_motion(
     out: dict[str, tuple[np.ndarray, np.ndarray]] = {}
     for axis in _MOTION_AXES:
         if axis == "z" and z is not None:
-            out[axis] = _sample_motion(z, time, dt_val, "z")
+            out[axis] = _sample_motion(z, time, dt_val, "z", notes)
         elif axis == "pitch" and theta is not None:
-            out[axis] = _sample_motion(theta, time, dt_val, "theta")
+            out[axis] = _sample_motion(theta, time, dt_val, "theta", notes)
         elif axis in m_map:
-            out[axis] = _sample_motion(m_map[axis], time, dt_val, axis)
+            out[axis] = _sample_motion(m_map[axis], time, dt_val, axis, notes)
         else:
             out[axis] = (np.zeros(n_pts, dtype=np.float64), np.zeros(n_pts, dtype=np.float64))
     return out
@@ -2158,10 +2237,11 @@ class _TimeDomainStepper:
             )
 
         time = np.arange(n_steps_int + 1, dtype=np.float64) * dt_val
-        m_axes = _resolve_six_axis_motion(z, theta, motion, time, dt_val)
+        input_notes: list[str] = []
+        m_axes = _resolve_six_axis_motion(z, theta, motion, time, dt_val, input_notes)
         leg_normal_0, _, _ = leg_force_rules(lattice)
         ctrl_rig, ctrl_arrs, ctrl_dots = _build_control_rig(
-            lattice, rings, leg_normal_0, controls, time, dt_val,
+            lattice, rings, leg_normal_0, controls, time, dt_val, input_notes,
         )
 
         # Validate ground clearance at every step before constructing the stepper.
@@ -2233,7 +2313,7 @@ class _TimeDomainStepper:
             and all(np.all(m_axes[axis][0] == m_axes[axis][0][0]) for axis in _MOTION_AXES)
         )
 
-        return cls(
+        stepper = cls(
             lattice,
             condition,
             S_ref=S_ref,
@@ -2257,6 +2337,8 @@ class _TimeDomainStepper:
             ctrl_arrs=ctrl_arrs,
             ctrl_dots=ctrl_dots,
         )
+        stepper.notes.extend(input_notes)
+        return stepper
 
     def min_ground_clearance(
         self,

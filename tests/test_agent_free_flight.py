@@ -137,6 +137,10 @@ def test_agent_free_flight_input_checks_and_work_budget_refusal():
         {**ok, "n_steps": None},
         {**ok, "t_end_s": 0.1},
         {**ok, "settings": {"solver": "linear", "n_panels": 4}},
+        {**ok, "max_subiterations": 0},
+        {**ok, "max_subiterations": 101},
+        {**ok, "coupling_tol": 0.0},
+        {**ok, "coupling_tol": 0.1},
     ]
     for args in bad:
         args = {k: v for k, v in args.items() if v is not None}
@@ -154,6 +158,14 @@ def test_agent_free_flight_input_checks_and_work_budget_refusal():
     assert over["status"] == "error"
     assert over["error"]["type"] == "invalid_input"
     assert "budget" in over["error"]["message"].lower()
+
+    # The budget uses max_subiterations. With 20 steps the work is about 20 * 20 * 320 * (20 * 40)
+    # = 1.0e8, below 2e8; with max_subiterations = 100 it is five times larger and is refused.
+    big = {**ok, "n_steps": 20, "settings": {"n_panels": 20, "n_chord": 8}, "max_subiterations": 100}
+    over_sub = call_tool("ventorum_free_flight", big)
+    _strict_json(over_sub)
+    assert over_sub["status"] == "error"
+    assert "budget" in over_sub["error"]["message"].lower()
 
 
 def test_free_flight_schema_exports_cleanly_for_all_formats():

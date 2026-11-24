@@ -34,6 +34,15 @@ Rotations $(\phi, \theta, \psi)$ (`roll`, `pitch`, `yaw` [rad]) about the refere
 
 where $\boldsymbol\omega(t)$ [rad/s] comes from the 3-2-1 Euler-angle rates (Etkin and Reid 1996, chapter 4).
 
+#### Input rates
+
+The rate of an array input comes from second-order finite differences on the time grid (one-sided at the two ends). The rate of a callable input comes from a central difference of the callable with the step $h = 10^{-7}\,\Delta t$ (one-sided at $t = 0$). A jump in a callable has no finite rate, so the solver tests the samples. With the sampled values $v_i$, the rates $\dot v_i$ and $\Delta v_i = |v_i - v_{i-1}|$:
+
+1. A rate is too large at $t_i$ when $|\dot v_i|\,\Delta t > 100 \max(\Delta v_i, \Delta v_{i+1})$ (a jump at $t_i$; a smooth or kinked input gives a ratio near 1, a jump about $5 \times 10^6$). The samples $i-1$, $i$ and $i+1$ are marked.
+2. A change is too large on $[t_{i-1}, t_i]$ when $\Delta v_i > 2\,\Delta t \max(|\dot v_{i-1}|, |\dot v_i|)$ (a jump between the two samples; a resolved smooth input gives about $1 + (\omega \Delta t)^2/8$, a kink at most 1). The samples $i-1$ and $i$ are marked.
+
+Both tests have a round-off floor of $10^{-9} \max_i |v_i|$. A marked sample takes the grid rate of the array rule, so near a jump a callable gives the rates of its sampled array, the trapezoidal integral of the rate equals the jump, and a note gives the times. Resolved smooth inputs and continuous inputs with a kink pass both tests and keep their rates.
+
 ### Moving control surfaces
 
 Time-varying control deflections $\delta(t)$ [rad] rotate the vortex-ring corners, collocation points, boundary normals, side polylines and physical trailing edges aft of the hinge line about each strip hinge axis by $\Delta\delta(t) = \delta(t) - \delta_0$, using Rodrigues' rotation formula and the sealed hinge geometry of `ventorum.geometry.lattice`. Points on the moving flap add the hinge rotation velocity $\mathbf v_\text{flap} = \boldsymbol\omega_\text{hinge} \times (\mathbf p - \mathbf H)$ [m/s] (rotated into mean-flight axes).
@@ -155,7 +164,8 @@ The run starts impulsively, so the load at $t = 0$ is not the steady load. The s
 - `tests/test_time_response.py`: round-off parity between `time_response` and `_solve_time_rings` with six-axis motion and moving flaps; zero-gust parity; uniform time-varying head-wind gust equivalence with `x_dot = -g` (free air and $h/c = 0.5$) and vertical gust equivalence with `z_dot = -w` (free air) to round-off; AR 40 Wagner (`kind="alpha"`) and Kussner (`kind="gust"`) verification against Jones (1940), Sears and Sparks (1941) / Bisplinghoff et al. (1955) and the exact 2D Kussner Fourier integral; 1-cosine gust agreement with Duhamel superposition of the solver's sharp-edged response; steady linear horizontal shear long-time limit against a direct steady ring solve; ground-effect horizontal gust mirror parity and vertical gust wake clearance; control-step limit against `ventorum.control_derivatives`; JSON serialisation, `store` options, trust and input checks.
 - `tests/test_agent_time_response.py`: agent dispatcher and MCP server parity, waveform and gust parsers, work budget refusal and input checks.
 - `tests/test_unsteady_freeflight.py`: all degrees of freedom frozen equals `_solve_time_rings` to round-off (free air and $h/c = 0.5$, with a moving flap and a gust); free fall, constant thrust and an offset centre of gravity without aerodynamics against the exact paths; torque-free rotation with energy and angular momentum conserved at second order in $\Delta t$; the large-mass limit; trimmed short-period frequency and damping against the linear model from `dynamic_derivatives`, in free air and at $h/c = 0.5$; second-order time-step convergence; a pitch damper against the linear model with the control derivatives; thrust callables; ground contact; input checks.
-- `tests/test_free_flight.py` and `tests/test_agent_free_flight.py`: the public function and the agent tool equal the private coupling to round-off; steady-imbalance trim; JSON output, notes, ground contact and input checks.
+- `tests/test_free_flight.py` and `tests/test_agent_free_flight.py`: the public function and the agent tool equal the private coupling to round-off; steady-imbalance trim; the coupling options; JSON output, notes, ground contact and input checks.
+- `tests/test_callable_jumps.py`: smooth, kinked and constant callables keep their rates bit for bit; a step at a sample time and between samples gives the rates of the sampled array and a note; `time_response` and `free_flight` with a step callable equal the run with its sampled array (the free-flight case diverged before); the agent step waveform on a sample time.
 
 ## References
 

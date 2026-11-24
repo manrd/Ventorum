@@ -10,6 +10,9 @@ a minor version can change a public interface.
 
 ### Changed
 
+- RESULT CHANGE. `time_response`, `free_flight` and the agent "step" waveform: a callable motion or control with a jump now gets the grid rate of its sampled values next to the jump, as an array input does, and a note gives the times. Before, a jump exactly at a sample time gave a rate of about jump / (2e-7 dt) (a free-flight run then diverged), and a jump between two sample times gave no rate. Smooth callables and continuous callables with a kink (for example a ramp) do not change.
+- `free_flight` and the agent tool `ventorum_free_flight` accept `coupling_tol` and `max_subiterations` (defaults 1e-10 and 20, as before). The agent work estimate uses `max_subiterations`.
+
 - RESULT CHANGE. `dynamic_derivatives` and the harmonic vortex-ring solver: frequency-dependent dynamic derivatives at a lifting mean state change because the steady wake (discrete rows, semi-infinite far wake and ground images) now takes the travelling-wave displacement of the prescribed wake instead of moving rigidly with the wing, matching the small-amplitude periodic limit of the time-domain solver. Static `k -> 0` real limits (`CL_alpha`, `Cm_alpha`, `CL_h`, `Cm_h`, `CL_q`, `Cm_q`) and unloaded (`alpha = 0`) results do not change.
 - RESULT CHANGE. Fourier solver: the reported aspect ratio and span efficiency use `b_ref` and `S_ref`, as the
   lifting lines do. With a user `b_ref` of 8 m on a 10 m rectangular wing, AR goes from 10.0 to 6.4 and e from

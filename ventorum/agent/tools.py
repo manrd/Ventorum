@@ -4200,6 +4200,8 @@ def free_flight(
     gust: dict[str, Any] | None = None,
     gravity_m_s2: float | None = None,
     store: str = "loads",
+    max_subiterations: int | None = None,
+    coupling_tol: float | None = None,
     settings: dict[str, Any] | None = None,
     detail_level: str = "standard",
 ) -> dict[str, Any]:
@@ -4250,6 +4252,12 @@ def free_flight(
         Gravitational acceleration [m/s^2]. Default 9.80665.
     store : {'loads', 'strengths'}
         ``"loads"`` (default) or ``"strengths"``.
+    max_subiterations : int or None
+        Maximum coupling sub-iterations per step, 1 to 100. Default 20. The
+        work estimate uses this value.
+    coupling_tol : float or None
+        Relative state tolerance of the coupling sub-iterations [-], 1e-14
+        to 1e-3. Default 1e-10.
     settings : dict or None
         Solver settings. Only VLM (``"vlm"`` or ``"auto"``) is supported.
     detail_level : {'summary', 'standard', 'full'}
@@ -4277,6 +4285,12 @@ def free_flight(
         raise InputError("'inertia_kg_m2' is required (entries xx, yy, zz and optional xy, xz, yz).")
     inertia_val = _parse_inertia_tensor(inertia_kg_m2)
     gravity_val = 9.80665 if gravity_m_s2 is None else number(gravity_m_s2, "gravity_m_s2", minimum=0.0)
+    max_sub_val = (
+        _FREE_FLIGHT_MAX_SUBITERATIONS
+        if max_subiterations is None
+        else integer(max_subiterations, "max_subiterations", minimum=1, maximum=100)
+    )
+    tol_val = 1.0e-10 if coupling_tol is None else number(coupling_tol, "coupling_tol", minimum=1.0e-14, maximum=1.0e-3)
 
     if dofs is None:
         dofs_val: tuple[str, ...] = _FREE_FLIGHT_DOFS
@@ -4350,7 +4364,7 @@ def free_flight(
     fc = make_flight_condition(c)
 
     def _work(s: SolverSettings) -> int:
-        return _FREE_FLIGHT_MAX_SUBITERATIONS * _time_march_work(
+        return max_sub_val * _time_march_work(
             ac, s, fc, n_steps=n_steps_val, t_end_s=t_end_val, dt_s=dt_val,
         )
 
@@ -4386,6 +4400,8 @@ def free_flight(
         gust=gust_fn,
         gravity=gravity_val,
         store=store_val,
+        coupling_tol=tol_val,
+        max_subiterations=max_sub_val,
     )
     data = res.to_dict()
 
