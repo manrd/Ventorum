@@ -291,8 +291,12 @@ class _FreeFlightResponse:
         mean pose, shape ``(3,)``. A constant thrust equal to minus these
         values trims the mean state. None when *steady_loads* is not given.
     notes : list[str]
-        Diagnostic notes (time-step ratio, gust notes, non-converged steps,
-        and ground contact).
+        Diagnostic notes (time-step ratio, gust notes, device fallback notes,
+        non-converged steps, and ground contact).
+    device : str
+        Execution device: ``"cpu"`` or ``"gpu"``.
+    precision : str
+        Kernel arithmetic precision: ``"float64"`` or ``"float32"``.
     """
 
     time: np.ndarray
@@ -365,6 +369,8 @@ class _FreeFlightResponse:
     steady_moment_imbalance: np.ndarray | None = None
     steady_force_imbalance_body: np.ndarray | None = None
     steady_moment_imbalance_body: np.ndarray | None = None
+    device: str = "cpu"
+    precision: str = "float64"
 
 
 _FreeFlightResult = _FreeFlightResponse
@@ -724,6 +730,9 @@ def _solve_free_flight(
         ``fn(t)``, or a callable ``fn(t, state)``.
     gust : callable or None, optional
         Convected gust velocity field ``gust(points, t) -> velocities`` [m/s].
+        On the GPU, a gust callable is evaluated on the host at every step and
+        its velocities are copied to the device, so it adds a host cost per
+        step.
     n_steps : int
         Number of time steps to march (``>= 1``).
     dt : float or None, optional
@@ -912,6 +921,67 @@ def _solve_free_flight(
             build_Dynamic_controls=ctrl_names_list if ctrl_names_list else None,
         )
 
+    try:
+        return _run_free_flight_march(
+            stepper,
+            condition=condition,
+            rp=rp,
+            cg_vec=cg_vec,
+            r_cg_rel_b=r_cg_rel_b,
+            r_thrust_cg_b=r_thrust_cg_b,
+            mass_val=mass_val,
+            gravity_val=gravity_val,
+            I_b=I_b,
+            dofs_tuple=dofs_tuple,
+            dof_set=dof_set,
+            all_frozen=all_frozen,
+            q0_free=q0_free,
+            qd0_free=qd0_free,
+            motion=motion,
+            thrust=thrust,
+            thrust_takes_state=thrust_takes_state,
+            controls=controls,
+            ctrl_takes_state=ctrl_takes_state,
+            has_state_controls=has_state_controls,
+            ground=ground,
+            tol_val=tol_val,
+            max_sub_int=max_sub_int,
+            aerodynamics_off=aerodynamics_off,
+            steady_loads=steady_loads,
+        )
+    finally:
+        stepper.release_gpu()
+
+
+def _run_free_flight_march(
+    stepper: _TimeDomainStepper,
+    *,
+    condition: FlightCondition,
+    rp: np.ndarray,
+    cg_vec: np.ndarray,
+    r_cg_rel_b: np.ndarray,
+    r_thrust_cg_b: np.ndarray,
+    mass_val: float,
+    gravity_val: float,
+    I_b: np.ndarray,
+    dofs_tuple: tuple[str, ...],
+    dof_set: set[str],
+    all_frozen: bool,
+    q0_free: np.ndarray,
+    qd0_free: np.ndarray,
+    motion: Mapping[str, Sequence[float] | np.ndarray | Callable[[float], float]] | None,
+    thrust: Callable[..., tuple[Sequence[float] | np.ndarray, Sequence[float] | np.ndarray]] | None,
+    thrust_takes_state: bool,
+    controls: Mapping[str, Sequence[float] | np.ndarray | Callable[..., float]] | None,
+    ctrl_takes_state: dict[str, bool],
+    has_state_controls: bool,
+    ground: GroundPlane | None,
+    tol_val: float,
+    max_sub_int: int,
+    aerodynamics_off: bool,
+    steady_loads: Mapping[str, float] | None,
+) -> _FreeFlightResponse:
+    """Run the coupled free-flight time march on an initialised *stepper*."""
     n_steps_int = stepper.n_steps
     n_s = stepper.n_strips
     dt_val = stepper.dt
@@ -1677,4 +1747,6 @@ def _solve_free_flight(
         steady_moment_imbalance=None if steady_imb is None else steady_imb[1],
         steady_force_imbalance_body=None if steady_imb is None else steady_imb[2],
         steady_moment_imbalance_body=None if steady_imb is None else steady_imb[3],
+        device=stepper.device,
+        precision=stepper.precision,
     )

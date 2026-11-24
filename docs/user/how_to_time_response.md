@@ -93,7 +93,7 @@ For `kind="alpha"` and `kind="control"`, `res.steady` gives the steady final der
 ## Trust, notes and limits
 
 - Use at least 8 chordwise panels (`n_chord >= 8`) for unsteady pitching-moment accuracy. Values below 8 add a warning to `res.trust.warnings` and `res.trust_notes` while preserving the steady trust score and rating of `res.base.totals.trust`.
-- The time-domain solver runs on the CPU in float64 (GPU time marching is not yet implemented). When the GPU device is selected, the call runs on the CPU and records a note in `res.notes`.
+- **Device and precision.** The time-domain solver runs on the CPU (float64) or on a CUDA GPU (`float64` or `float32`). Select the device with `ventorum.gpu.set_device("auto" | "cpu" | "gpu")` (or `VENTORUM_DEVICE`) and the GPU precision with `ventorum.gpu.set_precision("auto" | "float32" | "float64")` (or `VENTORUM_GPU_PRECISION`). With `"auto"`, small marches stay on the CPU and larger marches run on the GPU. `res.device` and `res.precision` record what ran, and `res.notes` states the device (or the fallback reason if CUDA is unavailable or runs out of memory). On the GPU, a Python `gust` callable runs on the host at every step and copies its velocities to the device, so it adds a host cost per step. Device memory is freed when the call ends.
 - Wind shear is rotational flow. The potential-flow vortex-ring solver feels shear only as an onset velocity at wing and wake nodes; `res.notes` states this whenever `wind_shear` is used.
 - Only the vortex-lattice solver (`solver_type="vlm"` or `"auto"`) is supported. Lifting-line and Fourier solvers raise `InputError`.
 - Incompressible flow only: Mach numbers above 0.3 raise `InputError`.

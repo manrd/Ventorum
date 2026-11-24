@@ -906,8 +906,12 @@ def test_to_dict_store_trust_and_notes():
     assert res_loads.gamma_bound is None
     assert res_loads.gamma_wake is None
     assert res_loads.wake_corners is None
-    assert res_loads.device == "cpu"
-    assert res_loads.precision == "float64"
+    if gpu_selected:
+        assert res_loads.device == "gpu"
+        assert res_loads.precision == gpu.get_precision()
+    else:
+        assert res_loads.device == "cpu"
+        assert res_loads.precision == "float64"
     assert res_loads.trust is not None
     assert res_loads.trust.rating == res_loads.base.totals.trust.rating
     assert any("below 8" in w for w in res_loads.trust_notes)
@@ -915,8 +919,9 @@ def test_to_dict_store_trust_and_notes():
     notes_txt = " ".join(res_loads.notes).lower()
     assert "25 %" in notes_txt or "differs from the default" in notes_txt
     if gpu_selected:
-        assert "cpu" in notes_txt
         assert "gpu" in notes_txt
+    else:
+        assert "cpu" in notes_txt
 
     d_loads = res_loads.to_dict()
     encoded = json.dumps(d_loads, allow_nan=False)

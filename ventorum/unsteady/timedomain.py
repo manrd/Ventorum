@@ -97,8 +97,10 @@ References
 from __future__ import annotations
 
 import math
+import warnings
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
+from typing import Any
 
 import numpy as np
 from scipy import linalg as sl
@@ -110,13 +112,15 @@ from ventorum.aero.system import (
     lift_direction,
     side_direction,
 )
-from ventorum.aero.vortex import chain_ends
+from ventorum.aero.vortex import chain_ends, chain_position
 from ventorum.aero.vortex_ring import ring_normal_influence, ring_velocity
 from ventorum.core.datatypes import FlightCondition
 from ventorum.core.errors import InputError
 from ventorum.geometry.lattice import CLAF_MAX, CLAF_MIN, VortexLattice
 from ventorum.unsteady.harmonic import (
+    NOTE_GPU_OUT_OF_MEMORY,
     _eval_pair_cores,
+    _note_gpu_unavailable,
     _physical_ring_areas,
     _rings_to_horseshoe,
     _rot_y,
@@ -136,6 +140,361 @@ _LOAD_POINT_CHUNK = 256
 _MAX_CACHE_BYTES = 64 * 1024 * 1024
 # Allowed rigid-body motion axes in the ``motion`` mapping.
 _MOTION_AXES = ("x", "y", "z", "roll", "pitch", "yaw")
+
+
+def _select_time_device(
+    n_steps: int,
+    n_bound: int,
+    n_strips: int,
+    has_ground: bool,
+) -> tuple[str, str, list[str]]:
+    """Return ``(device, precision, fallback_notes)`` for the time-domain ring solver."""
+    from ventorum import gpu
+    from ventorum.utils.parallel import _local as _par_local
+
+    setting = gpu.get_device()
+    if setting == "cpu":
+        return "cpu", "float64", []
+    if setting == "auto" and getattr(_par_local, "worker_threads", None) is not None:
+        return "cpu", "float64", []
+    if setting == "gpu":
+        if gpu.available():
+            return "gpu", gpu.get_precision(), []
+        reason = gpu.unavailable_reason() or "no CUDA GPU is available."
+        return "cpu", "float64", [_note_gpu_unavailable(reason)]
+    # setting == "auto"
+    if not gpu.available():
+        return "cpu", "float64", []
+    n_wake = n_steps * n_strips
+    work = float(n_steps * n_bound * n_wake) * (2.0 if has_ground else 1.0)
+    use, _ = gpu.use_gpu(work, "vlm", n_cases=1, n_panels=None, return_reason=True)
+    if use:
+        return "gpu", gpu.get_precision(), []
+    return "cpu", "float64", []
+
+
+class _TimeDomainGPUState:
+    """Registered container for CUDA arrays held by one :class:`_TimeDomainStepper`."""
+
+    def __init__(self, precision: str) -> None:
+        from ventorum.gpu import ring_kernels as RK
+
+        self.precision = precision
+        self.tensors: dict[str, Any] = {}
+        RK.register_device_holder(self)
+
+    def device_bytes(self) -> int:
+        """Return total CUDA storage bytes held by this state [B]."""
+        from ventorum.gpu import memory as gpu_memory
+
+        return gpu_memory._tensor_bytes(self.tensors, set())
+
+    def release_gpu(self) -> int:
+        """Drop all CUDA tensor references and return freed bytes [B]."""
+        freed = self.device_bytes()
+        self.tensors.clear()
+        return freed
+
+
+def _to_gpu_rc(rc: np.ndarray | float) -> Any:
+    """Upload array core radius *rc* [m] to CUDA float64; keep scalars as float."""
+    if np.ndim(rc) == 0:
+        return float(rc)
+    from ventorum.gpu import engine
+
+    return engine._f64(rc)
+
+
+def _slice_rc_rows_gpu(rc_g: Any, i0: int, i1: int) -> Any:
+    """Slice 2-D CUDA core-radius tensor *rc_g* [m] along the row axis."""
+    if not isinstance(rc_g, float) and getattr(rc_g, "ndim", 0) == 2:
+        return rc_g[i0:i1]
+    return rc_g
+
+
+def _tile_wake_rc_gpu(rc_g: Any, n_chunk: int) -> Any:
+    """Repeat per-strip CUDA wake core radii *rc_g* [m] across *n_chunk* wake rows."""
+    if isinstance(rc_g, float):
+        return rc_g
+    if rc_g.ndim == 1:
+        return rc_g.repeat(n_chunk)
+    return rc_g.repeat(1, n_chunk)
+
+
+def _slice_rc_sub_gpu(rc_g: Any, rows_g: Any | None, cols_g: Any | None) -> Any:
+    """Slice CUDA core-radius tensor *rc_g* [m] to *rows_g* and *cols_g*."""
+    if isinstance(rc_g, float):
+        return rc_g
+    if rc_g.ndim == 1:
+        return rc_g if cols_g is None else rc_g[cols_g]
+    if rows_g is None and cols_g is None:
+        return rc_g
+    if rows_g is None:
+        return rc_g[:, cols_g]
+    if cols_g is None:
+        return rc_g[rows_g, :]
+    return rc_g[rows_g[:, None], cols_g[None, :]]
+
+
+def _rotate_vecs_gpu(vec_g: Any, R_g: Any | None) -> Any:
+    """Apply CUDA body-to-reference rotation matrix *R_g* to *vec_g*."""
+    if R_g is None:
+        return vec_g
+    return vec_g @ R_g.T
+
+
+def _move_wing_geometry_gpu(
+    cp_b_g: Any,
+    normal_bc_b_g: Any,
+    corners_b_g: Any,
+    te_left_b_g: Any,
+    te_right_b_g: Any,
+    side_nodes_b_g: Any | None,
+    rp_g: Any,
+    x_ref_g: Any,
+    R_g: Any | None,
+) -> tuple[Any, Any, Any, Any, Any, Any | None]:
+    """Return moved CUDA tensors ``(cp, normal_bc, corners, te_left, te_right, side_nodes)``."""
+    if R_g is None:
+        shift = x_ref_g - rp_g
+        cp_g = cp_b_g + shift[None, :]
+        normal_bc_g = normal_bc_b_g
+        corners_g = corners_b_g + shift[None, None, :]
+        te_left_g = te_left_b_g + shift[None, :]
+        te_right_g = te_right_b_g + shift[None, :]
+        side_nodes_g = None if side_nodes_b_g is None else side_nodes_b_g + shift[None, None, None, :]
+        return cp_g, normal_bc_g, corners_g, te_left_g, te_right_g, side_nodes_g
+
+    rt = R_g.T
+    cp_g = x_ref_g[None, :] + (cp_b_g - rp_g[None, :]) @ rt
+    normal_bc_g = normal_bc_b_g @ rt
+    corners_g = x_ref_g[None, None, :] + (corners_b_g - rp_g[None, None, :]) @ rt
+    te_left_g = x_ref_g[None, :] + (te_left_b_g - rp_g[None, :]) @ rt
+    te_right_g = x_ref_g[None, :] + (te_right_b_g - rp_g[None, :]) @ rt
+    side_nodes_g = (
+        None
+        if side_nodes_b_g is None
+        else x_ref_g[None, None, None, :] + (side_nodes_b_g - rp_g[None, None, None, :]) @ rt
+    )
+    return cp_g, normal_bc_g, corners_g, te_left_g, te_right_g, side_nodes_g
+
+
+def _rings_to_horseshoe_gpu(gamma_rings_g: Any, n_chord: int) -> Any:
+    """Convert CUDA ring circulations [m^2/s] to horseshoe circulations [m^2/s]."""
+    import torch
+
+    g = gamma_rings_g.reshape(-1, int(n_chord))
+    if n_chord <= 1:
+        return gamma_rings_g.clone()
+    out = torch.empty_like(g)
+    out[:, 0] = g[:, 0]
+    out[:, 1:] = g[:, 1:] - g[:, :-1]
+    return out.reshape(-1)
+
+
+def _update_bound_influence_blocks_gpu(
+    A_bb_real_g: Any,
+    c_m_g: Any,
+    r_m_g: Any,
+    c_f_g: Any,
+    cp_b_g: Any,
+    normal_bc_b_g: Any,
+    corners_b_g: Any,
+    side_nodes_b_g: Any | None,
+    side_counts_g: Any | None,
+    rc_ring_g: Any,
+    *,
+    precision: str,
+) -> None:
+    """Update only the moving rows and columns of CUDA *A_bb_real_g* [1/m] in place."""
+    import torch
+
+    from ventorum.gpu import ring_kernels as RK
+
+    sn_cm = None if side_nodes_b_g is None else side_nodes_b_g[c_m_g]
+    sc_cm = None if side_counts_g is None else side_counts_g[c_m_g]
+    A_bb_real_g[:, c_m_g] = RK.ring_normal_influence_gpu(
+        cp_b_g,
+        normal_bc_b_g,
+        corners_b_g[c_m_g],
+        _slice_rc_sub_gpu(rc_ring_g, None, c_m_g),
+        side_nodes=sn_cm,
+        side_counts=sc_cm,
+        ground=None,
+        precision=precision,
+        out_tensor=True,
+    ).to(torch.float64)
+    if int(r_m_g.numel()) > 0 and int(c_f_g.numel()) > 0:
+        sn_cf = None if side_nodes_b_g is None else side_nodes_b_g[c_f_g]
+        sc_cf = None if side_counts_g is None else side_counts_g[c_f_g]
+        A_bb_real_g[r_m_g[:, None], c_f_g[None, :]] = RK.ring_normal_influence_gpu(
+            cp_b_g[r_m_g],
+            normal_bc_b_g[r_m_g],
+            corners_b_g[c_f_g],
+            _slice_rc_sub_gpu(rc_ring_g, r_m_g, c_f_g),
+            side_nodes=sn_cf,
+            side_counts=sc_cf,
+            ground=None,
+            precision=precision,
+            out_tensor=True,
+        ).to(torch.float64)
+
+
+def _bound_velocity_at_gpu(
+    P_g: Any,
+    corners_g: Any,
+    side_nodes_g: Any | None,
+    side_counts_g: Any | None,
+    gamma_g: Any,
+    rc_ring_g: Any,
+    *,
+    ground: GroundPlane | None,
+    precision: str,
+    image_only: bool = False,
+) -> Any:
+    """Return CUDA induced velocity [m/s] at *P_g* from bound rings (and optional ground images)."""
+    import torch
+
+    from ventorum.gpu import ring_kernels as RK
+
+    m = int(P_g.shape[0])
+    v_out_g = torch.zeros((m, 3), dtype=torch.float64, device=P_g.device)
+    img_mode = 2 if image_only else (1 if ground is not None else 0)
+    for i0 in range(0, m, _LOAD_POINT_CHUNK):
+        i1 = min(m, i0 + _LOAD_POINT_CHUNK)
+        Pc_g = P_g[i0:i1].contiguous()
+        rc_c = _slice_rc_rows_gpu(rc_ring_g, i0, i1)
+        vr = RK.ring_velocity_gpu(
+            Pc_g,
+            corners_g,
+            rc_c,
+            side_nodes=side_nodes_g,
+            side_counts=side_counts_g,
+            ground=ground,
+            img_mode=img_mode,
+            precision=precision,
+            out_tensor=True,
+        ).to(torch.float64)
+        v_out_g[i0:i1] = torch.einsum("mni,n->mi", vr, gamma_g)
+    return v_out_g
+
+
+def _wake_normal_rhs_gpu(
+    cp_g: Any,
+    normal_bc_g: Any,
+    wake_corners_g: Any,
+    wake_gamma_g: Any,
+    n_active: int,
+    rc_wake_g: Any,
+    *,
+    ground: GroundPlane | None,
+    precision: str,
+) -> Any:
+    """Return CUDA wake normal velocity [m/s] at *cp_g* from the first *n_active* wake rows."""
+    import torch
+
+    from ventorum.gpu import ring_kernels as RK
+
+    vn_g = torch.zeros(int(cp_g.shape[0]), dtype=torch.float64, device=cp_g.device)
+    for r0 in range(0, n_active, _WAKE_ROW_CHUNK):
+        r1 = min(n_active, r0 + _WAKE_ROW_CHUNK)
+        n_chunk = r1 - r0
+        wc = wake_corners_g[r0:r1].reshape(-1, 4, 3).contiguous()
+        wg = wake_gamma_g[r0:r1].reshape(-1)
+        rc_c = _tile_wake_rc_gpu(rc_wake_g, n_chunk)
+        A_w = RK.ring_normal_influence_gpu(
+            cp_g,
+            normal_bc_g,
+            wc,
+            rc_c,
+            ground=ground,
+            precision=precision,
+            out_tensor=True,
+        ).to(torch.float64)
+        vn_g = vn_g + A_w @ wg
+    return vn_g
+
+
+def _wake_velocity_at_gpu(
+    P_g: Any,
+    wake_corners_g: Any,
+    wake_gamma_g: Any,
+    n_active: int,
+    rc_wake_g: Any,
+    *,
+    ground: GroundPlane | None,
+    precision: str,
+) -> Any:
+    """Return CUDA wake induced velocity [m/s] at *P_g* from the first *n_active* wake rows."""
+    import torch
+
+    from ventorum.gpu import ring_kernels as RK
+
+    m = int(P_g.shape[0])
+    v_out_g = torch.zeros((m, 3), dtype=torch.float64, device=P_g.device)
+    for r0 in range(0, n_active, _WAKE_ROW_CHUNK):
+        r1 = min(n_active, r0 + _WAKE_ROW_CHUNK)
+        n_chunk = r1 - r0
+        wc = wake_corners_g[r0:r1].reshape(-1, 4, 3).contiguous()
+        wg = wake_gamma_g[r0:r1].reshape(-1)
+        for i0 in range(0, m, _LOAD_POINT_CHUNK):
+            i1 = min(m, i0 + _LOAD_POINT_CHUNK)
+            Pc_g = P_g[i0:i1].contiguous()
+            rc_c = _tile_wake_rc_gpu(_slice_rc_rows_gpu(rc_wake_g, i0, i1), n_chunk)
+            vw = RK.ring_velocity_gpu(
+                Pc_g,
+                wc,
+                rc_c,
+                ground=ground,
+                precision=precision,
+                out_tensor=True,
+            ).to(torch.float64)
+            v_out_g[i0:i1] = v_out_g[i0:i1] + torch.einsum("mni,n->mi", vw, wg)
+    return v_out_g
+
+
+def _advect_wake_nodes_rk4_gpu(
+    wake_l_g: Any,
+    wake_r_g: Any,
+    n_lines: int,
+    v_base_g: Any,
+    gust_fn: Callable[[np.ndarray, float], np.ndarray],
+    t0: float,
+    dt: float,
+    g_norm_g: Any | None,
+) -> None:
+    """Advect the first *n_lines* CUDA wake node lines from *t0* to ``t0 + dt`` [s] by RK4 in place.
+
+    Evaluates the Python *gust_fn* on the host at each RK4 stage, copies the
+    velocities to the device, and updates the device wake node buffers in place.
+    """
+    import torch
+
+    from ventorum.gpu import engine
+
+    n_s = int(v_base_g.shape[0])
+    half = n_lines * n_s
+    pts_g = torch.cat(
+        [wake_l_g[:n_lines].reshape(half, 3), wake_r_g[:n_lines].reshape(half, 3)],
+        dim=0,
+    )
+    v_base_tile_g = v_base_g.repeat(2 * n_lines, 1)
+
+    def _vel(p_g: torch.Tensor, ts: float) -> torch.Tensor:
+        vg_host = _eval_gust(gust_fn, p_g.cpu().numpy(), ts)
+        vg_g = engine._f64(vg_host)
+        if g_norm_g is not None:
+            vg_g = vg_g - (vg_g @ g_norm_g)[:, None] * g_norm_g[None, :]
+        return v_base_tile_g + vg_g
+
+    half_dt = 0.5 * dt
+    k1 = _vel(pts_g, t0)
+    k2 = _vel(pts_g + half_dt * k1, t0 + half_dt)
+    k3 = _vel(pts_g + half_dt * k2, t0 + half_dt)
+    k4 = _vel(pts_g + dt * k3, t0 + dt)
+    pts_new_g = pts_g + (dt / 6.0) * (k1 + 2.0 * k2 + 2.0 * k3 + k4)
+    wake_l_g[:n_lines] = pts_new_g[:half].reshape(n_lines, n_s, 3)
+    wake_r_g[:n_lines] = pts_new_g[half:].reshape(n_lines, n_s, 3)
 
 
 @dataclass(slots=True)
@@ -248,7 +607,11 @@ class _TimeDomainResponse:
         given.
     notes : list of str
         Diagnostic notes (for example when ``dt`` differs from ``dx_TE / V_inf``
-        by more than 25 %, or gust and ground-effect modelling notes).
+        by more than 25 %, or gust, device fallback and ground-effect notes).
+    device : str
+        Execution device: ``"cpu"`` or ``"gpu"``.
+    precision : str
+        Kernel arithmetic precision: ``"float64"`` or ``"float32"``.
     """
 
     time: np.ndarray
@@ -292,6 +655,8 @@ class _TimeDomainResponse:
     controls_dot: dict[str, np.ndarray] = field(default_factory=dict)
     gust_velocity: np.ndarray = field(default_factory=lambda: np.empty((0, 3), dtype=np.float64))
     notes: list[str] = field(default_factory=list)
+    device: str = "cpu"
+    precision: str = "float64"
 
 
 def _eval_gust(
@@ -1708,12 +2073,12 @@ class _StepperState:
     """Saved mutable time-marching state of :class:`_TimeDomainStepper`."""
 
     step: int
-    prev_base_l: np.ndarray | None
-    prev_base_r: np.ndarray | None
-    prev_gamma: np.ndarray | None
-    prev2_gamma: np.ndarray | None
-    wake_l_nodes: np.ndarray | None
-    wake_r_nodes: np.ndarray | None
+    prev_base_l: Any | None
+    prev_base_r: Any | None
+    prev_gamma: Any | None
+    prev2_gamma: Any | None
+    wake_l_nodes: Any | None
+    wake_r_nodes: Any | None
 
 
 class _TimeDomainStepper:
@@ -1721,11 +2086,14 @@ class _TimeDomainStepper:
 
     Holds the vortex-ring geometry, core radii, precomputed real bound
     influence matrix, optional stationary caches, and wake buffers for one
-    time-domain run. Calling :meth:`advance` marches one step ``step`` from a
-    given six-axis pose, pose rates and control-surface edge deflections and
-    rates. Calling :meth:`save_state` before a step and :meth:`restore_state`
-    inside sub-iterations rolls back the wake and bound circulation history so
-    the step can be repeated with updated state iterates.
+    time-domain run on the CPU or the GPU. Calling :meth:`advance` marches one
+    step ``step`` from a given six-axis pose, pose rates and control-surface
+    edge deflections and rates. Calling :meth:`save_state` before a step and
+    :meth:`restore_state` inside sub-iterations rolls back the wake and bound
+    circulation history (copying device buffers on the GPU without host round
+    trips) so the step can be repeated with updated state iterates. On the GPU,
+    a gust callable is evaluated on the host at every step and its velocities
+    are copied to the device, so it adds a host cost per step.
     """
 
     def __init__(
@@ -1894,16 +2262,6 @@ class _TimeDomainStepper:
         b_kink_b = None if lattice.b_kink is None else np.asarray(lattice.b_kink, dtype=np.float64)
         leg_normal_b = leg_normal_0
 
-        A_bb_real = ring_normal_influence(
-            rings.cp,
-            rings.normal_bc,
-            rings.corners,
-            rc_ring,
-            side_nodes=rings.side_nodes,
-            side_counts=rings.side_counts,
-            backend=backend,
-        )
-
         controls_vary = (ctrl_rig is not None) and ctrl_rig.deflections_vary
         if ctrl_rig is not None and not controls_vary:
             (
@@ -1921,17 +2279,6 @@ class _TimeDomainStepper:
                 b_kink_b,
                 leg_normal_b,
             ) = _deform_body_geometry(ctrl_rig, lattice, rings, ctrl_rig.dd_edges[0])
-            _update_bound_influence_blocks(
-                A_bb_real,
-                ctrl_rig,
-                cp_b,
-                normal_bc_b,
-                corners_b,
-                side_nodes_b,
-                rings.side_counts,
-                rc_ring,
-                backend=backend,
-            )
 
         if ctrl_rig is None:
             mid_b = np.asarray(lattice.force_points, dtype=np.float64)
@@ -1987,51 +2334,17 @@ class _TimeDomainStepper:
             )
 
         n_eval_u = P_load_u_b.shape[0]
-        lu_Abb = sl.lu_factor(A_bb_real) if (ground is None and not controls_vary) else None
-
         cache_bound_load = (not controls_vary) and ((n_eval_u * n_p * 24) <= _MAX_CACHE_BYTES)
-        V_bound_load_b = (
-            ring_velocity(
-                P_load_u_b,
-                corners_b,
-                rc_load_u_ring,
-                side_nodes=side_nodes_b,
-                side_counts=rings.side_counts,
-                backend=backend,
-            )
-            if cache_bound_load
-            else None
-        )
-        V_bound_te_b = (
-            ring_velocity(
-                p_te_b,
-                corners_b,
-                rc_te_ring,
-                side_nodes=side_nodes_b,
-                side_counts=rings.side_counts,
-                backend=backend,
-            )
-            if (not controls_vary) and te_correction and ((n_s * n_p * 24) <= _MAX_CACHE_BYTES)
-            else None
-        )
-
         is_stationary_eff = bool(is_stationary and (not controls_vary))
         is_stationary_wake = is_stationary_eff and (gust_fn is None)
-        A_wake_stat = (
-            np.empty((n_steps_int, n_p, n_s), dtype=np.float64)
-            if is_stationary_wake and (n_steps_int * n_p * n_s * 8) <= _MAX_CACHE_BYTES
-            else None
-        )
-        V_wake_load_stat = (
-            np.empty((n_steps_int, n_eval_u, n_s, 3), dtype=np.float64)
-            if is_stationary_wake and (n_steps_int * n_eval_u * n_s * 24) <= _MAX_CACHE_BYTES
-            else None
-        )
-        V_wake_te_stat = (
-            np.empty((n_steps_int, n_s, n_s, 3), dtype=np.float64)
-            if is_stationary_wake and te_correction and (n_steps_int * n_s * n_s * 24) <= _MAX_CACHE_BYTES
-            else None
-        )
+
+        if backend in ("numpy", "numba"):
+            device, precision, dev_notes = "cpu", "float64", []
+        else:
+            device, precision, dev_notes = _select_time_device(
+                n_steps_int, n_p, n_s, ground is not None,
+            )
+        notes.extend(dev_notes)
 
         self.lattice = lattice
         self.condition = condition
@@ -2067,6 +2380,9 @@ class _TimeDomainStepper:
         self.wake_conv = wake_conv
         self.time = time
         self.notes = notes
+        self.device = device
+        self.precision = precision
+        self._gpu_state: _TimeDomainGPUState | None = None
         self.gust_fn = gust_fn
         self.leg_normal_0 = leg_normal_0
         self.n_leg_sets = n_leg_sets
@@ -2113,27 +2429,23 @@ class _TimeDomainStepper:
         self.arm_ring_b = arm_ring_b
         self.area_moment_vec_b = area_moment_vec_b
 
-        self.A_bb_real = A_bb_real
-        self.lu_Abb = lu_Abb
         self.cache_bound_load = cache_bound_load
-        self.V_bound_load_b = V_bound_load_b
-        self.V_bound_te_b = V_bound_te_b
         self.is_stationary = is_stationary_eff
-        self.A_wake_stat = A_wake_stat
-        self.V_wake_load_stat = V_wake_load_stat
-        self.V_wake_te_stat = V_wake_te_stat
+        self._is_stationary_wake = is_stationary_wake
+        self.A_bb_real: np.ndarray | None = None
+        self.lu_Abb: Any = None
+        self.V_bound_load_b: np.ndarray | None = None
+        self.V_bound_te_b: np.ndarray | None = None
+        self.A_wake_stat: np.ndarray | None = None
+        self.V_wake_load_stat: np.ndarray | None = None
+        self.V_wake_te_stat: np.ndarray | None = None
         self.V_bound_img_load_stat: np.ndarray | None = None
         self.V_bound_img_te_stat: np.ndarray | None = None
-
-        self.wake_corners_earth = np.empty((n_steps_int, n_s, 4, 3), dtype=np.float64)
-        self.wake_corners_cur = np.empty((n_steps_int, n_s, 4, 3), dtype=np.float64)
-        self.wake_gamma_buf = np.empty((n_steps_int, n_s), dtype=np.float64)
-        self.wake_l_nodes = (
-            np.empty((n_steps_int + 1, n_s, 3), dtype=np.float64) if gust_fn is not None else None
-        )
-        self.wake_r_nodes = (
-            np.empty((n_steps_int + 1, n_s, 3), dtype=np.float64) if gust_fn is not None else None
-        )
+        self.wake_corners_earth: np.ndarray | None = None
+        self.wake_corners_cur: np.ndarray | None = None
+        self.wake_gamma_buf: np.ndarray | None = None
+        self.wake_l_nodes: np.ndarray | None = None
+        self.wake_r_nodes: np.ndarray | None = None
         self.v_base_wake = V_inf * rings.wake_dir
 
         self.step = 0
@@ -2161,6 +2473,319 @@ class _TimeDomainStepper:
             self._wing_pts_rel = None
             self._fixed_pts = None
             self._cached_pts_rel = None
+
+        if self.device == "gpu":
+            self._init_with_gpu_fallback()
+        else:
+            self._init_cpu_matrices()
+
+    def _init_cpu_matrices(self) -> None:
+        """Assemble CPU bound influence matrix, caches and wake buffers."""
+        rings = self.rings
+        n_p = self.n_panels
+        n_s = self.n_strips
+        n_steps_int = self.n_steps
+        n_eval_u = self.P_load_u_b.shape[0]
+        backend = self.backend
+
+        A_bb_real = ring_normal_influence(
+            rings.cp,
+            rings.normal_bc,
+            rings.corners,
+            self.rc_ring,
+            side_nodes=rings.side_nodes,
+            side_counts=rings.side_counts,
+            backend=backend,
+        )
+        if self.ctrl_rig is not None and not self.controls_vary:
+            _update_bound_influence_blocks(
+                A_bb_real,
+                self.ctrl_rig,
+                self.cp_b,
+                self.normal_bc_b,
+                self.corners_b,
+                self.side_nodes_b,
+                rings.side_counts,
+                self.rc_ring,
+                backend=backend,
+            )
+
+        self.A_bb_real = A_bb_real
+        self.lu_Abb = sl.lu_factor(A_bb_real) if (self.ground is None and not self.controls_vary) else None
+        self.V_bound_load_b = (
+            ring_velocity(
+                self.P_load_u_b,
+                self.corners_b,
+                self.rc_load_u_ring,
+                side_nodes=self.side_nodes_b,
+                side_counts=rings.side_counts,
+                backend=backend,
+            )
+            if self.cache_bound_load
+            else None
+        )
+        self.V_bound_te_b = (
+            ring_velocity(
+                self.p_te_b,
+                self.corners_b,
+                self.rc_te_ring,
+                side_nodes=self.side_nodes_b,
+                side_counts=rings.side_counts,
+                backend=backend,
+            )
+            if (not self.controls_vary) and self.te_correction and ((n_s * n_p * 24) <= _MAX_CACHE_BYTES)
+            else None
+        )
+        is_sw = self._is_stationary_wake
+        self.A_wake_stat = (
+            np.empty((n_steps_int, n_p, n_s), dtype=np.float64)
+            if is_sw and (n_steps_int * n_p * n_s * 8) <= _MAX_CACHE_BYTES
+            else None
+        )
+        self.V_wake_load_stat = (
+            np.empty((n_steps_int, n_eval_u, n_s, 3), dtype=np.float64)
+            if is_sw and (n_steps_int * n_eval_u * n_s * 24) <= _MAX_CACHE_BYTES
+            else None
+        )
+        self.V_wake_te_stat = (
+            np.empty((n_steps_int, n_s, n_s, 3), dtype=np.float64)
+            if is_sw and self.te_correction and (n_steps_int * n_s * n_s * 24) <= _MAX_CACHE_BYTES
+            else None
+        )
+        self.V_bound_img_load_stat = None
+        self.V_bound_img_te_stat = None
+
+        self.wake_corners_earth = np.empty((n_steps_int, n_s, 4, 3), dtype=np.float64)
+        self.wake_corners_cur = np.empty((n_steps_int, n_s, 4, 3), dtype=np.float64)
+        self.wake_gamma_buf = np.empty((n_steps_int, n_s), dtype=np.float64)
+        self.wake_l_nodes = (
+            np.empty((n_steps_int + 1, n_s, 3), dtype=np.float64) if self.gust_fn is not None else None
+        )
+        self.wake_r_nodes = (
+            np.empty((n_steps_int + 1, n_s, 3), dtype=np.float64) if self.gust_fn is not None else None
+        )
+
+    def _init_with_gpu_fallback(self) -> None:
+        """Initialise GPU buffers with one OOM retry, falling back to CPU after two OOM errors."""
+        from ventorum.gpu import memory as gpu_memory
+        from ventorum.gpu.pipeline import is_out_of_memory
+
+        message = ""
+        for _attempt in range(2):
+            try:
+                self._init_gpu()
+                return
+            except Exception as exc:  # noqa: BLE001 - only out-of-memory errors are caught
+                if not is_out_of_memory(exc):
+                    self.release_gpu()
+                    raise
+                message = str(exc).splitlines()[0] if str(exc) else type(exc).__name__
+            self.release_gpu()
+            gpu_memory.release()
+        warnings.warn(
+            f"The GPU ran out of memory twice ({message}). The time-domain march falls back to the CPU.",
+            RuntimeWarning,
+            stacklevel=4,
+        )
+        self.device = "cpu"
+        self.precision = "float64"
+        if NOTE_GPU_OUT_OF_MEMORY not in self.notes:
+            self.notes.append(NOTE_GPU_OUT_OF_MEMORY)
+        self._init_cpu_matrices()
+
+    def _upload_body_geometry_gpu(self) -> None:
+        """Upload current body-frame geometry and load arrays to the GPU state."""
+        import torch
+
+        from ventorum.gpu import engine
+
+        assert self._gpu_state is not None
+        st = self._gpu_state.tensors
+        dev = engine._dev()
+        st["cp_b"] = engine._f64(self.cp_b)
+        st["normal_bc_b"] = engine._f64(self.normal_bc_b)
+        st["corners_b"] = engine._f64(self.corners_b)
+        st["te_left_b"] = engine._f64(self.te_left_b)
+        st["te_right_b"] = engine._f64(self.te_right_b)
+        if self.side_nodes_b is not None:
+            st["side_nodes_b"] = engine._f64(self.side_nodes_b)
+        else:
+            st["side_nodes_b"] = None
+
+        st["P_load_u_b"] = engine._f64(self.P_load_u_b)
+        st["arm_b"] = engine._f64(self.arm_b)
+        st["arm_u_b"] = engine._f64(self.arm_u_b)
+        st["seg_vec_b"] = engine._f64(self.seg_vec_b)
+        st["seg_normal_b"] = engine._f64(self.seg_normal_b)
+        st["load_unique_idx"] = torch.as_tensor(self.load_unique_idx, dtype=torch.int64, device=dev)
+        st["load_inv_idx"] = torch.as_tensor(self.load_inv_idx, dtype=torch.int64, device=dev)
+        st["rc_load_u_ring"] = _to_gpu_rc(self.rc_load_u_ring)
+        st["rc_load_u_wake"] = _to_gpu_rc(self.rc_load_u_wake)
+        st["p_te_b"] = engine._f64(self.p_te_b)
+        st["l_te_b"] = engine._f64(self.l_te_b)
+        st["arm_te_b"] = engine._f64(self.arm_te_b)
+        st["area_vec_b"] = engine._f64(self.area_vec_b)
+        st["arm_ring_b"] = engine._f64(self.arm_ring_b)
+        st["area_moment_vec_b"] = None if self.area_moment_vec_b is None else engine._f64(self.area_moment_vec_b)
+
+    def _init_gpu(self) -> None:
+        """Assemble GPU bound influence matrix, caches and device wake buffers."""
+        import torch
+
+        from ventorum.gpu import engine
+        from ventorum.gpu import ring_kernels as RK
+
+        rings = self.rings
+        n_p = self.n_panels
+        n_s = self.n_strips
+        n_steps_int = self.n_steps
+        n_eval_u = self.P_load_u_b.shape[0]
+        prec = self.precision
+        t_dtype = engine.torch_dtype(prec)
+        dev = engine._dev()
+
+        self._gpu_state = _TimeDomainGPUState(prec)
+        st = self._gpu_state.tensors
+
+        st["rp"] = engine._f64(self.rp)
+        st["V_0"] = engine._f64(self.V_0)
+        st["L_0"] = engine._f64(self.L_0)
+        st["f_te"] = engine._f64(self.f_te)
+        st["wake_conv"] = engine._f64(self.wake_conv)
+        st["v_base_wake"] = engine._f64(self.v_base_wake)
+        st["te_idx"] = torch.as_tensor(self.te_idx, dtype=torch.int64, device=dev)
+        st["eval_strips"] = torch.as_tensor(self.eval_strips, dtype=torch.int64, device=dev)
+        st["panel_strip"] = torch.as_tensor(rings.panel_strip, dtype=torch.int64, device=dev)
+        st["seg_scale"] = engine._f64(self.seg_scale)
+        st["g_norm"] = None if self.ground is None else engine._f64(self.ground.normal)
+        st["side_counts"] = (
+            None
+            if (self.side_nodes_b is None or rings.side_counts is None)
+            else engine._i32(rings.side_counts)
+        )
+        st["rc_ring"] = _to_gpu_rc(self.rc_ring)
+        st["rc_wake"] = _to_gpu_rc(self.rc_wake)
+        st["rc_te_ring"] = _to_gpu_rc(self.rc_te_ring)
+        st["rc_te_wake"] = _to_gpu_rc(self.rc_te_wake)
+
+        if self.ctrl_rig is not None:
+            st["moving_col_panels"] = torch.as_tensor(self.ctrl_rig.moving_col_panels, dtype=torch.int64, device=dev)
+            st["moving_row_panels"] = torch.as_tensor(self.ctrl_rig.moving_row_panels, dtype=torch.int64, device=dev)
+            st["fixed_col_panels"] = torch.as_tensor(self.ctrl_rig.fixed_col_panels, dtype=torch.int64, device=dev)
+
+        chain_levels: list[tuple[torch.Tensor, torch.Tensor]] = []
+        if self.lattice.leg_next is not None and bool(np.any(self.lattice.leg_next)):
+            pos = chain_position(self.lattice.leg_next)
+            for lvl in range(1, int(pos.max(initial=0)) + 1):
+                dst = np.flatnonzero(pos == lvl)
+                chain_levels.append(
+                    (
+                        torch.as_tensor(dst, dtype=torch.int64, device=dev),
+                        torch.as_tensor(dst - 1, dtype=torch.int64, device=dev),
+                    )
+                )
+        st["chain_levels"] = chain_levels
+
+        self._upload_body_geometry_gpu()
+
+        sc_g = st["side_counts"]
+        A_bb_real_g = RK.ring_normal_influence_gpu(
+            st["cp_b"],
+            st["normal_bc_b"],
+            st["corners_b"],
+            st["rc_ring"],
+            side_nodes=st["side_nodes_b"],
+            side_counts=sc_g,
+            ground=None,
+            precision=prec,
+            out_tensor=True,
+        ).to(torch.float64)
+        st["A_bb_real"] = A_bb_real_g
+        if self.ground is None and not self.controls_vary:
+            st["lu_Abb"], st["piv_Abb"] = torch.linalg.lu_factor(A_bb_real_g)
+        else:
+            st["lu_Abb"] = None
+            st["piv_Abb"] = None
+
+        if self.cache_bound_load:
+            st["V_bound_load_b"] = RK.ring_velocity_gpu(
+                st["P_load_u_b"],
+                st["corners_b"],
+                st["rc_load_u_ring"],
+                side_nodes=st["side_nodes_b"],
+                side_counts=sc_g,
+                ground=None,
+                precision=prec,
+                out_tensor=True,
+            )
+        else:
+            st["V_bound_load_b"] = None
+
+        if (not self.controls_vary) and self.te_correction and ((n_s * n_p * 24) <= _MAX_CACHE_BYTES):
+            st["V_bound_te_b"] = RK.ring_velocity_gpu(
+                st["p_te_b"],
+                st["corners_b"],
+                st["rc_te_ring"],
+                side_nodes=st["side_nodes_b"],
+                side_counts=sc_g,
+                ground=None,
+                precision=prec,
+                out_tensor=True,
+            )
+        else:
+            st["V_bound_te_b"] = None
+
+        is_sw = self._is_stationary_wake
+        st["A_wake_stat"] = (
+            torch.empty((n_steps_int, n_p, n_s), dtype=t_dtype, device=dev)
+            if is_sw and (n_steps_int * n_p * n_s * 8) <= _MAX_CACHE_BYTES
+            else None
+        )
+        st["V_wake_load_stat"] = (
+            torch.empty((n_steps_int, n_eval_u, n_s, 3), dtype=t_dtype, device=dev)
+            if is_sw and (n_steps_int * n_eval_u * n_s * 24) <= _MAX_CACHE_BYTES
+            else None
+        )
+        st["V_wake_te_stat"] = (
+            torch.empty((n_steps_int, n_s, n_s, 3), dtype=t_dtype, device=dev)
+            if is_sw and self.te_correction and (n_steps_int * n_s * n_s * 24) <= _MAX_CACHE_BYTES
+            else None
+        )
+        st["V_bound_img_load_stat"] = None
+        st["V_bound_img_te_stat"] = None
+
+        st["wake_corners_earth"] = (
+            torch.empty((n_steps_int, n_s, 4, 3), dtype=torch.float64, device=dev)
+            if self.gust_fn is None
+            else None
+        )
+        st["wake_corners_cur"] = torch.empty((n_steps_int, n_s, 4, 3), dtype=torch.float64, device=dev)
+        st["wake_gamma_buf"] = torch.empty((n_steps_int, n_s), dtype=torch.float64, device=dev)
+        st["wake_l_nodes"] = (
+            torch.empty((n_steps_int + 1, n_s, 3), dtype=torch.float64, device=dev)
+            if self.gust_fn is not None
+            else None
+        )
+        st["wake_r_nodes"] = (
+            torch.empty((n_steps_int + 1, n_s, 3), dtype=torch.float64, device=dev)
+            if self.gust_fn is not None
+            else None
+        )
+        st["prev_base_l"] = None
+        st["prev_base_r"] = None
+        st["prev_gamma"] = None
+        st["prev2_gamma"] = None
+
+    def release_gpu(self) -> int:
+        """Release all CUDA tensors held by this stepper and return freed bytes [B]."""
+        if self._gpu_state is None:
+            return 0
+        from ventorum.gpu import ring_kernels as RK
+
+        freed = self._gpu_state.release_gpu()
+        RK.unregister_device_holder(self._gpu_state)
+        self._gpu_state = None
+        return freed
 
     @classmethod
     def from_prescribed(
@@ -2388,6 +3013,23 @@ class _TimeDomainStepper:
     def save_state(self) -> _StepperState:
         """Return a snapshot of the mutable time-marching state before the current step."""
         s = self.step
+        if self._gpu_state is not None:
+            st = self._gpu_state.tensors
+            wl = st.get("wake_l_nodes")
+            wr = st.get("wake_r_nodes")
+            pbl = st.get("prev_base_l")
+            pbr = st.get("prev_base_r")
+            pg = st.get("prev_gamma")
+            p2g = st.get("prev2_gamma")
+            return _StepperState(
+                step=s,
+                prev_base_l=None if pbl is None else pbl.clone(),
+                prev_base_r=None if pbr is None else pbr.clone(),
+                prev_gamma=None if pg is None else pg.clone(),
+                prev2_gamma=None if p2g is None else p2g.clone(),
+                wake_l_nodes=None if (wl is None or s == 0) else wl[:s].clone(),
+                wake_r_nodes=None if (wr is None or s == 0) else wr[:s].clone(),
+            )
         return _StepperState(
             step=s,
             prev_base_l=None if self.prev_base_l is None else self.prev_base_l.copy(),
@@ -2406,6 +3048,30 @@ class _TimeDomainStepper:
         """Restore the time-marching state to *saved* so step ``saved.step`` can be repeated."""
         s = int(saved.step)
         self.step = s
+        if self._gpu_state is not None:
+            st = self._gpu_state.tensors
+            st["prev_base_l"] = None if saved.prev_base_l is None else saved.prev_base_l.clone()
+            st["prev_base_r"] = None if saved.prev_base_r is None else saved.prev_base_r.clone()
+            st["prev_gamma"] = None if saved.prev_gamma is None else saved.prev_gamma.clone()
+            st["prev2_gamma"] = None if saved.prev2_gamma is None else saved.prev2_gamma.clone()
+            wl = st.get("wake_l_nodes")
+            wr = st.get("wake_r_nodes")
+            wcc = st["wake_corners_cur"]
+            if wl is not None and saved.wake_l_nodes is not None:
+                assert wr is not None and saved.wake_r_nodes is not None
+                wl[:s] = saved.wake_l_nodes
+                wr[:s] = saved.wake_r_nodes
+                if s >= 2:
+                    n_w = s - 1
+                    wcc[:n_w, :, 0, :] = wl[1 : n_w + 1]
+                    wcc[:n_w, :, 1, :] = wr[1 : n_w + 1]
+                    wcc[:n_w, :, 2, :] = wr[:n_w]
+                    wcc[:n_w, :, 3, :] = wl[:n_w]
+            elif self.gust_fn is None and s >= 2:
+                n_w = s - 1
+                shift_prev_g = float(n_w) * st["wake_conv"]
+                wcc[:n_w] = st["wake_corners_earth"][:n_w] + shift_prev_g[None, :, None, :]
+            return
         self.prev_base_l = None if saved.prev_base_l is None else saved.prev_base_l.copy()
         self.prev_base_r = None if saved.prev_base_r is None else saved.prev_base_r.copy()
         self.prev_gamma = None if saved.prev_gamma is None else saved.prev_gamma.copy()
@@ -2416,6 +3082,7 @@ class _TimeDomainStepper:
             self.wake_r_nodes[:s] = saved.wake_r_nodes
             if s >= 2:
                 n_w = s - 1
+                assert self.wake_corners_cur is not None
                 self.wake_corners_cur[:n_w, :, 0, :] = self.wake_l_nodes[1 : n_w + 1]
                 self.wake_corners_cur[:n_w, :, 1, :] = self.wake_r_nodes[1 : n_w + 1]
                 self.wake_corners_cur[:n_w, :, 2, :] = self.wake_r_nodes[:n_w]
@@ -2423,6 +3090,7 @@ class _TimeDomainStepper:
         elif self.gust_fn is None and s >= 2:
             n_w = s - 1
             shift_prev = float(n_w) * self.wake_conv
+            assert self.wake_corners_cur is not None and self.wake_corners_earth is not None
             self.wake_corners_cur[:n_w] = self.wake_corners_earth[:n_w] + shift_prev[None, :, None, :]
 
     def advance_prescribed(self, step: int | None = None) -> _StepLoads:
@@ -2468,6 +3136,23 @@ class _TimeDomainStepper:
         rate_step: np.ndarray | None = None,
     ) -> _StepLoads:
         """Advance step ``self.step`` for the given pose, rates and control deflections."""
+        if self._gpu_state is not None:
+            return self._advance_gpu(
+                x=x,
+                y=y,
+                z=z,
+                roll=roll,
+                pitch=pitch,
+                yaw=yaw,
+                x_dot=x_dot,
+                y_dot=y_dot,
+                z_dot=z_dot,
+                roll_dot=roll_dot,
+                pitch_dot=pitch_dot,
+                yaw_dot=yaw_dot,
+                dd_step=dd_step,
+                rate_step=rate_step,
+            )
         step = self.step
         xn, yn, zn = float(x), float(y), float(z)
         roll_n, pitch_n, yaw_n = float(roll), float(pitch), float(yaw)
@@ -2925,8 +3610,562 @@ class _TimeDomainStepper:
             M_tot=M_tot,
         )
 
+    def _advance_gpu(
+        self,
+        *,
+        x: float,
+        y: float,
+        z: float,
+        roll: float,
+        pitch: float,
+        yaw: float,
+        x_dot: float,
+        y_dot: float,
+        z_dot: float,
+        roll_dot: float,
+        pitch_dot: float,
+        yaw_dot: float,
+        dd_step: np.ndarray | None = None,
+        rate_step: np.ndarray | None = None,
+    ) -> _StepLoads:
+        """Advance step ``self.step`` on the GPU using Warp ring kernels and PyTorch LU."""
+        import torch
+
+        from ventorum.gpu import engine
+        from ventorum.gpu import ring_kernels as RK
+
+        assert self._gpu_state is not None
+        st = self._gpu_state.tensors
+        dev = engine._dev()
+        prec = self.precision
+
+        step = self.step
+        xn, yn, zn = float(x), float(y), float(z)
+        roll_n, pitch_n, yaw_n = float(roll), float(pitch), float(yaw)
+        xd, yd, zd = float(x_dot), float(y_dot), float(z_dot)
+        roll_d, pitch_d, yaw_d = float(roll_dot), float(pitch_dot), float(yaw_dot)
+
+        rp = self.rp
+        e_x, e_y, e_z = self.e_x, self.e_y, self.e_z
+        rings = self.rings
+        lattice = self.lattice
+        ground = self.ground
+        ctrl_rig = self.ctrl_rig
+
+        x_ref = rp + xn * e_x + yn * e_y + zn * e_z
+        v_trans = xd * e_x + yd * e_y + zd * e_z
+        omega_g = _angular_velocity_321(pitch_n, yaw_n, roll_d, pitch_d, yaw_d)
+
+        if roll_n == 0.0 and pitch_n == 0.0 and yaw_n == 0.0:
+            R: np.ndarray | None = None
+            R_g: torch.Tensor | None = None
+        else:
+            R = _rotation_matrix_321(roll_n, pitch_n, yaw_n)
+            R_g = engine._f64(R)
+
+        x_ref_g = engine._f64(x_ref)
+        v_trans_g = engine._f64(v_trans)
+        omega_g_g = engine._f64(omega_g)
+        sc_g = st["side_counts"]
+
+        ctrl_changed = False
+        if self.controls_vary and ctrl_rig is not None:
+            dd_use = ctrl_rig.dd_edges[step] if dd_step is None else dd_step
+            if self.prev_dd is None or not np.array_equal(dd_use, self.prev_dd):
+                (
+                    self.a_b,
+                    self.b_b,
+                    self.cp_b,
+                    self.normal_bc_b,
+                    self.corners_b,
+                    self.te_left_b,
+                    self.te_right_b,
+                    self.te_l_phys_b,
+                    self.te_r_phys_b,
+                    self.side_nodes_b,
+                    self.a_kink_b,
+                    self.b_kink_b,
+                    self.leg_normal_b,
+                ) = _deform_body_geometry(ctrl_rig, lattice, rings, dd_use)
+                (
+                    self.P_load_u_b,
+                    self.arm_b,
+                    self.arm_u_b,
+                    self.seg_vec_b,
+                    self.seg_normal_b,
+                    self.load_unique_idx,
+                    self.load_inv_idx,
+                    self.rc_load_u_ring,
+                    self.rc_load_u_wake,
+                    self.p_te_b,
+                    self.l_te_b,
+                    self.arm_te_b,
+                    self.area_vec_b,
+                    self.arm_ring_b,
+                    self.area_moment_vec_b,
+                ) = _build_body_load_geometry(
+                    lattice,
+                    rings,
+                    rp,
+                    self.a_b,
+                    self.b_b,
+                    self.corners_b,
+                    self.te_l_phys_b,
+                    self.te_r_phys_b,
+                    self.side_nodes_b,
+                    self.a_kink_b,
+                    self.b_kink_b,
+                    self.leg_normal_b,
+                    self.rc_load_ring,
+                    self.rc_load_wake,
+                )
+                self._upload_body_geometry_gpu()
+                _update_bound_influence_blocks_gpu(
+                    st["A_bb_real"],
+                    st["moving_col_panels"],
+                    st["moving_row_panels"],
+                    st["fixed_col_panels"],
+                    st["cp_b"],
+                    st["normal_bc_b"],
+                    st["corners_b"],
+                    st["side_nodes_b"],
+                    sc_g,
+                    st["rc_ring"],
+                    precision=prec,
+                )
+                if ground is None:
+                    st["lu_Abb"], st["piv_Abb"] = torch.linalg.lu_factor(st["A_bb_real"])
+                self.prev_dd = dd_use.copy()
+                self.prev_pose_ge = None
+                ctrl_changed = True
+
+        cp_g, normal_bc_g, corners_g, te_left_g, te_right_g, side_nodes_g = _move_wing_geometry_gpu(
+            st["cp_b"],
+            st["normal_bc_b"],
+            st["corners_b"],
+            st["te_left_b"],
+            st["te_right_b"],
+            st["side_nodes_b"],
+            st["rp"],
+            x_ref_g,
+            R_g,
+        )
+
+        if ctrl_rig is not None:
+            rate_use = ctrl_rig.rate_edges[step] if rate_step is None else rate_step
+            v_fl_cp_b, v_fl_load_b, v_fl_te_b = _compute_flap_velocities(
+                ctrl_rig,
+                lattice,
+                rings,
+                rate_use,
+                self.a_b,
+                self.b_b,
+                self.cp_b,
+                self.te_l_phys_b,
+                self.te_r_phys_b,
+                self.a_kink_b,
+                self.b_kink_b,
+            )
+            v_fl_cp_g: torch.Tensor | None = _rotate_vecs_gpu(engine._f64(v_fl_cp_b), R_g)
+            v_fl_load_g: torch.Tensor | None = _rotate_vecs_gpu(engine._f64(v_fl_load_b), R_g)
+            v_fl_te_g: torch.Tensor | None = _rotate_vecs_gpu(engine._f64(v_fl_te_b), R_g)
+        else:
+            v_fl_cp_g = None
+            v_fl_load_g = None
+            v_fl_te_g = None
+
+        t_now = float(self.time[step])
+        gust_fn = self.gust_fn
+        if gust_fn is None:
+            gust_ref_step = np.zeros(3, dtype=np.float64)
+            shift_conv_g = float(step) * st["wake_conv"]
+            base_l_g: torch.Tensor | None = te_left_g - shift_conv_g
+            base_r_g: torch.Tensor | None = te_right_g - shift_conv_g
+
+            if step > 0:
+                row_idx = step - 1
+                wce = st["wake_corners_earth"]
+                wce[row_idx, :, 0, :] = base_l_g
+                wce[row_idx, :, 1, :] = base_r_g
+                wce[row_idx, :, 2, :] = st["prev_base_r"]
+                wce[row_idx, :, 3, :] = st["prev_base_l"]
+                st["wake_gamma_buf"][row_idx] = st["prev_gamma"][st["te_idx"]]
+                st["wake_corners_cur"][:step] = wce[:step] + shift_conv_g[None, :, None, :]
+        else:
+            wl_g = st["wake_l_nodes"]
+            wr_g = st["wake_r_nodes"]
+            gust_ref_step = _eval_gust(gust_fn, x_ref[None, :], t_now)[0]
+            if step == 0:
+                wl_g[0] = te_left_g
+                wr_g[0] = te_right_g
+            else:
+                _advect_wake_nodes_rk4_gpu(
+                    wl_g,
+                    wr_g,
+                    step,
+                    st["v_base_wake"],
+                    gust_fn,
+                    float(self.time[step - 1]),
+                    self.dt,
+                    st["g_norm"],
+                )
+                wl_g[step] = te_left_g
+                wr_g[step] = te_right_g
+                wcc = st["wake_corners_cur"]
+                wcc[:step, :, 0, :] = wl_g[1 : step + 1]
+                wcc[:step, :, 1, :] = wr_g[1 : step + 1]
+                wcc[:step, :, 2, :] = wr_g[:step]
+                wcc[:step, :, 3, :] = wl_g[:step]
+                st["wake_gamma_buf"][step - 1] = st["prev_gamma"][st["te_idx"]]
+            base_l_g = None
+            base_r_g = None
+
+        if ground is not None:
+            pose_key = (xn, yn, zn, roll_n, pitch_n, yaw_n)
+            pose_changed = (self.prev_pose_ge is None) or (pose_key != self.prev_pose_ge) or ctrl_changed
+            if pose_changed:
+                A_img_signed = RK.ring_normal_influence_gpu(
+                    cp_g,
+                    normal_bc_g,
+                    corners_g,
+                    st["rc_ring"],
+                    side_nodes=side_nodes_g,
+                    side_counts=sc_g,
+                    ground=ground,
+                    img_mode=2,
+                    precision=prec,
+                    out_tensor=True,
+                ).to(torch.float64)
+                st["lu_Abb"], st["piv_Abb"] = torch.linalg.lu_factor(st["A_bb_real"] + A_img_signed)
+                self.prev_pose_ge = pose_key
+
+        v_surf_cp_g = v_trans_g[None, :] + torch.linalg.cross(
+            omega_g_g[None, :].expand_as(cp_g), cp_g - x_ref_g[None, :], dim=-1,
+        )
+        if v_fl_cp_g is not None:
+            v_surf_cp_g = v_surf_cp_g + v_fl_cp_g
+        if gust_fn is None:
+            v_onset_cp_g = st["V_0"][None, :]
+        else:
+            v_onset_cp_g = st["V_0"][None, :] + engine._f64(_eval_gust(gust_fn, cp_g.cpu().numpy(), t_now))
+        rhs_g = torch.sum((v_surf_cp_g - v_onset_cp_g) * normal_bc_g, dim=1)
+
+        if step > 0:
+            A_wake_stat_g = st["A_wake_stat"]
+            if A_wake_stat_g is not None:
+                age = step - 1
+                wc_age_g = st["wake_corners_cur"][0]
+                blk = RK.ring_normal_influence_gpu(
+                    cp_g,
+                    normal_bc_g,
+                    wc_age_g,
+                    st["rc_wake"],
+                    ground=ground,
+                    precision=prec,
+                    out_tensor=True,
+                )
+                A_wake_stat_g[age] = blk
+                gamma_by_age_g = torch.flip(st["wake_gamma_buf"][:step], dims=(0,))
+                rhs_g = rhs_g - torch.einsum("rms,rs->m", A_wake_stat_g[:step].to(torch.float64), gamma_by_age_g)
+            else:
+                rhs_g = rhs_g - _wake_normal_rhs_gpu(
+                    cp_g,
+                    normal_bc_g,
+                    st["wake_corners_cur"],
+                    st["wake_gamma_buf"],
+                    step,
+                    st["rc_wake"],
+                    ground=ground,
+                    precision=prec,
+                )
+
+        gamma_n_g = torch.linalg.lu_solve(
+            st["lu_Abb"], st["piv_Abb"], rhs_g.unsqueeze(-1),
+        ).squeeze(-1)
+
+        if R_g is None:
+            arm_all_g = st["arm_b"]
+            arm_u_g = st["arm_u_b"]
+            seg_vec_g = st["seg_vec_b"]
+            seg_normal_g = st["seg_normal_b"]
+            arm_te_g = st["arm_te_b"]
+            l_te_g = st["l_te_b"]
+            area_vec_g = st["area_vec_b"]
+            arm_ring_g = st["arm_ring_b"]
+            area_moment_vec_g = st["area_moment_vec_b"]
+        else:
+            arm_all_g = _rotate_vecs_gpu(st["arm_b"], R_g)
+            arm_u_g = arm_all_g[st["load_unique_idx"]]
+            seg_vec_g = _rotate_vecs_gpu(st["seg_vec_b"], R_g)
+            seg_normal_g = _rotate_vecs_gpu(st["seg_normal_b"], R_g)
+            arm_te_g = _rotate_vecs_gpu(st["arm_te_b"], R_g)
+            l_te_g = _rotate_vecs_gpu(st["l_te_b"], R_g)
+            area_vec_g = _rotate_vecs_gpu(st["area_vec_b"], R_g)
+            arm_ring_g = _rotate_vecs_gpu(st["arm_ring_b"], R_g)
+            area_moment_vec_g = (
+                None
+                if st["area_moment_vec_b"] is None
+                else _rotate_vecs_gpu(st["area_moment_vec_b"], R_g)
+            )
+        P_load_u_g = x_ref_g[None, :] + arm_u_g
+        p_te_g = x_ref_g[None, :] + arm_te_g
+
+        V_bound_load_b_g = st["V_bound_load_b"]
+        if V_bound_load_b_g is not None:
+            v_real_b_g = torch.einsum("mni,n->mi", V_bound_load_b_g.to(torch.float64), gamma_n_g)
+            v_ind_u_g = _rotate_vecs_gpu(v_real_b_g, R_g)
+            if ground is not None:
+                if self.is_stationary and self.cache_bound_load:
+                    if st["V_bound_img_load_stat"] is None:
+                        st["V_bound_img_load_stat"] = RK.ring_velocity_gpu(
+                            P_load_u_g,
+                            corners_g,
+                            st["rc_load_u_ring"],
+                            side_nodes=side_nodes_g,
+                            side_counts=sc_g,
+                            ground=ground,
+                            img_mode=2,
+                            precision=prec,
+                            out_tensor=True,
+                        )
+                    v_ind_u_g = v_ind_u_g + torch.einsum(
+                        "mni,n->mi", st["V_bound_img_load_stat"].to(torch.float64), gamma_n_g,
+                    )
+                else:
+                    v_ind_u_g = v_ind_u_g + _bound_velocity_at_gpu(
+                        P_load_u_g,
+                        corners_g,
+                        side_nodes_g,
+                        sc_g,
+                        gamma_n_g,
+                        st["rc_load_u_ring"],
+                        ground=ground,
+                        precision=prec,
+                        image_only=True,
+                    )
+        else:
+            v_ind_u_g = _bound_velocity_at_gpu(
+                P_load_u_g,
+                corners_g,
+                side_nodes_g,
+                sc_g,
+                gamma_n_g,
+                st["rc_load_u_ring"],
+                ground=ground,
+                precision=prec,
+                image_only=False,
+            )
+
+        if step > 0:
+            V_wake_load_stat_g = st["V_wake_load_stat"]
+            if V_wake_load_stat_g is not None:
+                age = step - 1
+                wc_age_g = st["wake_corners_cur"][0]
+                v_row = RK.ring_velocity_gpu(
+                    P_load_u_g,
+                    wc_age_g,
+                    st["rc_load_u_wake"],
+                    ground=ground,
+                    precision=prec,
+                    out_tensor=True,
+                )
+                V_wake_load_stat_g[age] = v_row
+                gamma_by_age_g = torch.flip(st["wake_gamma_buf"][:step], dims=(0,))
+                v_ind_u_g = v_ind_u_g + torch.einsum(
+                    "rmsi,rs->mi", V_wake_load_stat_g[:step].to(torch.float64), gamma_by_age_g,
+                )
+            else:
+                v_ind_u_g = v_ind_u_g + _wake_velocity_at_gpu(
+                    P_load_u_g,
+                    st["wake_corners_cur"],
+                    st["wake_gamma_buf"],
+                    step,
+                    st["rc_load_u_wake"],
+                    ground=ground,
+                    precision=prec,
+                )
+
+        v_ind_load_g = v_ind_u_g[st["load_inv_idx"]]
+
+        v_surf_load_g = v_trans_g[None, :] + torch.linalg.cross(
+            omega_g_g[None, :].expand_as(arm_all_g), arm_all_g, dim=-1,
+        )
+        if v_fl_load_g is not None:
+            v_surf_load_g = v_surf_load_g + v_fl_load_g
+        if gust_fn is None:
+            v_onset_load_g = st["V_0"][None, :]
+        else:
+            vg_load_g = engine._f64(_eval_gust(gust_fn, P_load_u_g.cpu().numpy(), t_now))
+            v_onset_load_g = st["V_0"][None, :] + vg_load_g[st["load_inv_idx"]]
+        V_tot_g = v_onset_load_g - v_surf_load_g + v_ind_load_g
+        V_eff_g = V_tot_g - torch.sum(V_tot_g * seg_normal_g, dim=1, keepdim=True) * seg_normal_g
+
+        g_hs_g = _rings_to_horseshoe_gpu(gamma_n_g, rings.n_chord)
+        chain_levels = st["chain_levels"]
+        if chain_levels:
+            g_leg_g = g_hs_g.clone()
+            for dst_g, src_g in chain_levels:
+                g_leg_g[dst_g] = g_leg_g[dst_g] + g_leg_g[src_g]
+        else:
+            g_leg_g = g_hs_g
+        g_all_g = torch.cat([g_hs_g] + [g_leg_g] * self.n_leg_sets, dim=0)
+
+        F_seg_g = (self.rho * g_all_g * st["seg_scale"])[:, None] * torch.linalg.cross(V_eff_g, seg_vec_g, dim=-1)
+        F_tot_g = torch.sum(F_seg_g, dim=0)
+        M_tot_g = torch.sum(torch.linalg.cross(arm_all_g, F_seg_g, dim=-1), dim=0)
+        s_lift_g = torch.zeros(self.n_strips, dtype=torch.float64, device=dev)
+        s_lift_g.index_add_(0, st["eval_strips"], F_seg_g @ st["L_0"])
+
+        if step >= 2:
+            dG_dt_g: torch.Tensor | None = (
+                3.0 * gamma_n_g - 4.0 * st["prev_gamma"] + st["prev2_gamma"]
+            ) / (2.0 * self.dt)
+        elif step == 1:
+            dG_dt_g = (gamma_n_g - st["prev_gamma"]) / self.dt
+        else:
+            dG_dt_g = None
+
+        if dG_dt_g is not None:
+            coef_am_g = self.rho * dG_dt_g
+            F_am_g = coef_am_g[:, None] * area_vec_g
+            F_tot_g = F_tot_g + torch.sum(F_am_g, dim=0)
+            if area_moment_vec_g is not None:
+                M_tot_g = M_tot_g + torch.sum(coef_am_g[:, None] * area_moment_vec_g, dim=0)
+            else:
+                M_tot_g = M_tot_g + torch.sum(torch.linalg.cross(arm_ring_g, F_am_g, dim=-1), dim=0)
+            s_lift_g.index_add_(0, st["panel_strip"], F_am_g @ st["L_0"])
+
+        if self.te_correction and step >= 1:
+            V_bound_te_b_g = st["V_bound_te_b"]
+            if V_bound_te_b_g is not None:
+                v_te_real_g = torch.einsum("mni,n->mi", V_bound_te_b_g.to(torch.float64), gamma_n_g)
+                v_ind_te_g = _rotate_vecs_gpu(v_te_real_g, R_g)
+                if ground is not None:
+                    if self.is_stationary:
+                        if st["V_bound_img_te_stat"] is None:
+                            st["V_bound_img_te_stat"] = RK.ring_velocity_gpu(
+                                p_te_g,
+                                corners_g,
+                                st["rc_te_ring"],
+                                side_nodes=side_nodes_g,
+                                side_counts=sc_g,
+                                ground=ground,
+                                img_mode=2,
+                                precision=prec,
+                                out_tensor=True,
+                            )
+                        v_ind_te_g = v_ind_te_g + torch.einsum(
+                            "mni,n->mi", st["V_bound_img_te_stat"].to(torch.float64), gamma_n_g,
+                        )
+                    else:
+                        v_ind_te_g = v_ind_te_g + _bound_velocity_at_gpu(
+                            p_te_g,
+                            corners_g,
+                            side_nodes_g,
+                            sc_g,
+                            gamma_n_g,
+                            st["rc_te_ring"],
+                            ground=ground,
+                            precision=prec,
+                            image_only=True,
+                        )
+            else:
+                v_ind_te_g = _bound_velocity_at_gpu(
+                    p_te_g,
+                    corners_g,
+                    side_nodes_g,
+                    sc_g,
+                    gamma_n_g,
+                    st["rc_te_ring"],
+                    ground=ground,
+                    precision=prec,
+                    image_only=False,
+                )
+
+            V_wake_te_stat_g = st["V_wake_te_stat"]
+            if V_wake_te_stat_g is not None:
+                age = step - 1
+                wc_age_g = st["wake_corners_cur"][0]
+                v_row_te = RK.ring_velocity_gpu(
+                    p_te_g,
+                    wc_age_g,
+                    st["rc_te_wake"],
+                    ground=ground,
+                    precision=prec,
+                    out_tensor=True,
+                )
+                V_wake_te_stat_g[age] = v_row_te
+                gamma_by_age_g = torch.flip(st["wake_gamma_buf"][:step], dims=(0,))
+                v_ind_te_g = v_ind_te_g + torch.einsum(
+                    "rmsi,rs->mi", V_wake_te_stat_g[:step].to(torch.float64), gamma_by_age_g,
+                )
+            else:
+                v_ind_te_g = v_ind_te_g + _wake_velocity_at_gpu(
+                    p_te_g,
+                    st["wake_corners_cur"],
+                    st["wake_gamma_buf"],
+                    step,
+                    st["rc_te_wake"],
+                    ground=ground,
+                    precision=prec,
+                )
+
+            v_surf_te_g = v_trans_g[None, :] + torch.linalg.cross(
+                omega_g_g[None, :].expand_as(arm_te_g), arm_te_g, dim=-1,
+            )
+            if v_fl_te_g is not None:
+                v_surf_te_g = v_surf_te_g + v_fl_te_g
+            if gust_fn is None:
+                v_onset_te_g = st["V_0"][None, :]
+            else:
+                v_onset_te_g = st["V_0"][None, :] + engine._f64(_eval_gust(gust_fn, p_te_g.cpu().numpy(), t_now))
+            V_te_g = v_onset_te_g - v_surf_te_g + v_ind_te_g
+            dg_te_g = st["f_te"] * (st["wake_gamma_buf"][step - 1] - gamma_n_g[st["te_idx"]])
+            F_te_g = (self.rho * dg_te_g)[:, None] * torch.linalg.cross(V_te_g, l_te_g, dim=-1)
+            F_tot_g = F_tot_g + torch.sum(F_te_g, dim=0)
+            M_tot_g = M_tot_g + torch.sum(torch.linalg.cross(arm_te_g, F_te_g, dim=-1), dim=0)
+            s_lift_g = s_lift_g + (F_te_g @ st["L_0"])
+
+        # Copy only the step loads back to the host.
+        loads_host = torch.cat([F_tot_g, M_tot_g, s_lift_g], dim=0).cpu().numpy()
+        F_tot = loads_host[:3].copy()
+        M_tot = loads_host[3:6].copy()
+        s_lift = loads_host[6:]
+
+        CL_step = float((F_tot @ self.L_0) / self.qS)
+        CD_step = float((F_tot @ self.d_0) / self.qS)
+        CY_step = float((F_tot @ self.S_0) / self.qS)
+        Cl_step = float(-M_tot[0] / (self.qS * self.b_ref))
+        Cm_step = float(M_tot[1] / (self.qS * self.c_ref))
+        Cn_step = float(-M_tot[2] / (self.qS * self.b_ref))
+        strip_cl_step = s_lift / (self.q_inf * self.strip_area)
+
+        st["prev_base_l"] = base_l_g
+        st["prev_base_r"] = base_r_g
+        st["prev2_gamma"] = st.get("prev_gamma")
+        st["prev_gamma"] = gamma_n_g
+        self.step = step + 1
+
+        return _StepLoads(
+            CL=CL_step,
+            CD=CD_step,
+            CY=CY_step,
+            Cl=Cl_step,
+            Cm=Cm_step,
+            Cn=Cn_step,
+            strip_cl=strip_cl_step,
+            gust_ref=gust_ref_step,
+            F_tot=F_tot,
+            M_tot=M_tot,
+        )
+
     def gamma_bound(self) -> np.ndarray:
         """Return bound ring circulations of the last completed step [m^2/s], shape ``(n_panels,)``."""
+        if self._gpu_state is not None:
+            pg = self._gpu_state.tensors.get("prev_gamma")
+            if pg is None:
+                return np.zeros(self.n_panels, dtype=np.float64)
+            return pg.cpu().numpy().copy()
         if self.prev_gamma is None:
             return np.zeros(self.n_panels, dtype=np.float64)
         return self.prev_gamma.copy()
@@ -2934,11 +4173,21 @@ class _TimeDomainStepper:
     def gamma_wake(self, n_marched: int | None = None) -> np.ndarray:
         """Return wake ring circulations [m^2/s], shape ``(n_marched, n_strips)`` (newest row first)."""
         nw = max(self.step - 1, 0) if n_marched is None else int(n_marched)
+        if self._gpu_state is not None:
+            if nw == 0:
+                return np.empty((0, self.n_strips), dtype=np.float64)
+            return self._gpu_state.tensors["wake_gamma_buf"][:nw].cpu().numpy()[::-1].copy()
+        assert self.wake_gamma_buf is not None
         return self.wake_gamma_buf[:nw][::-1].copy()
 
     def wake_corners(self, n_marched: int | None = None) -> np.ndarray:
         """Return wake ring corners [m], shape ``(n_marched, n_strips, 4, 3)`` (newest row first)."""
         nw = max(self.step - 1, 0) if n_marched is None else int(n_marched)
+        if self._gpu_state is not None:
+            if nw == 0:
+                return np.empty((0, self.n_strips, 4, 3), dtype=np.float64)
+            return self._gpu_state.tensors["wake_corners_cur"][:nw].cpu().numpy()[::-1].copy()
+        assert self.wake_corners_cur is not None
         return self.wake_corners_cur[:nw][::-1].copy()
 
 
@@ -3017,7 +4266,9 @@ def _solve_time_rings(
         Optional gust velocity field ``gust(points, t) -> velocities`` where
         *points* has shape ``(n, 3)`` [m] in geometry axes, *t* is time [s],
         and the return array has shape ``(n, 3)`` [m/s] (air velocity added to
-        the free stream). None applies no gust.
+        the free stream). None applies no gust. On the GPU, a gust callable is
+        evaluated on the host at every step and its velocities are copied to
+        the device, so it adds a host cost per step.
     n_steps : int
         Number of time steps to march (must be ``>= 1``). Produces
         ``n_steps + 1`` load samples at ``t = 0, dt, ..., n_steps * dt``.
@@ -3101,16 +4352,23 @@ def _solve_time_rings(
     strip_cl = np.empty((n_steps_int + 1, n_s), dtype=np.float64)
     gust_ref = np.zeros((n_steps_int + 1, 3), dtype=np.float64)
 
-    for step in range(n_steps_int + 1):
-        loads = stepper.advance_prescribed(step)
-        CL[step] = loads.CL
-        CD[step] = loads.CD
-        CY[step] = loads.CY
-        Cl[step] = loads.Cl
-        Cm[step] = loads.Cm
-        Cn[step] = loads.Cn
-        strip_cl[step] = loads.strip_cl
-        gust_ref[step] = loads.gust_ref
+    try:
+        for step in range(n_steps_int + 1):
+            loads = stepper.advance_prescribed(step)
+            CL[step] = loads.CL
+            CD[step] = loads.CD
+            CY[step] = loads.CY
+            Cl[step] = loads.Cl
+            Cm[step] = loads.Cm
+            Cn[step] = loads.Cn
+            strip_cl[step] = loads.strip_cl
+            gust_ref[step] = loads.gust_ref
+
+        gamma_bound = stepper.gamma_bound()
+        gamma_wake = stepper.gamma_wake()
+        wake_corners = stepper.wake_corners()
+    finally:
+        stepper.release_gpu()
 
     assert stepper.m_axes is not None
     x_arr, x_dot = stepper.m_axes["x"]
@@ -3133,9 +4391,9 @@ def _solve_time_rings(
         Cm=Cm,
         Cn=Cn,
         strip_cl=strip_cl,
-        gamma_bound=stepper.gamma_bound(),
-        gamma_wake=stepper.gamma_wake(),
-        wake_corners=stepper.wake_corners(),
+        gamma_bound=gamma_bound,
+        gamma_wake=gamma_wake,
+        wake_corners=wake_corners,
         dt=stepper.dt,
         dt_default=stepper.dt_default,
         dx_w=stepper.dx_w,
@@ -3162,4 +4420,6 @@ def _solve_time_rings(
         controls_dot=stepper.ctrl_dots,
         gust_velocity=gust_ref,
         notes=stepper.notes,
+        device=stepper.device,
+        precision=stepper.precision,
     )

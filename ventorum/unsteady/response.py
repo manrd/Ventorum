@@ -50,7 +50,6 @@ from typing import Any
 
 import numpy as np
 
-from ventorum import gpu as _gpu
 from ventorum.aero.system import freestream_direction, ground_plane_from_condition, lift_direction
 from ventorum.aero.vortex import kernel_cache_scope
 from ventorum.core.datatypes import (
@@ -212,17 +211,17 @@ def _default_dt_for_lattice(lattice: Any, V_inf: float) -> float:
     return dx_te_mean / float(V_inf)
 
 
-def _cpu_execution_notes() -> list[str]:
-    """Return execution-device notes for the CPU-only time-domain solver."""
-    req = _gpu.get_device()
-    if req == "gpu":
-        return [
-            "GPU device was selected, but time-domain vortex-ring marching is CPU only; "
-            "this run executed on the CPU in float64."
-        ]
-    return [
-        "Time-domain vortex-ring marching runs on the CPU in float64 (GPU time marching is not yet implemented)."
-    ]
+def _device_execution_notes(
+    device: str,
+    precision: str,
+    solver_notes: Sequence[str] = (),
+) -> list[str]:
+    """Return execution-device notes for the time-domain vortex-ring march."""
+    if device == "gpu":
+        return [f"Time-domain vortex-ring marching ran on the GPU in {precision}."]
+    if any("GPU unavailable" in note or "GPU out of memory" in note for note in solver_notes):
+        return []
+    return [f"Time-domain vortex-ring marching ran on the CPU in {precision}."]
 
 
 @dataclass
@@ -323,9 +322,10 @@ class TimeResponseResult:
     notes : list[str]
         Solver, device, gust and trust notes.
     device : str
-        Execution device of the time march (``"cpu"``).
+        Execution device of the time march (``"cpu"`` or ``"gpu"``).
     precision : str
-        Floating-point precision of the time march (``"float64"``).
+        Floating-point precision of the time march (``"float64"`` or
+        ``"float32"``).
     """
 
     time: np.ndarray
@@ -508,9 +508,9 @@ class IndicialResult:
     notes : list[str]
         Solver, device, gust and trust notes.
     device : str
-        Execution device (``"cpu"``).
+        Execution device (``"cpu"`` or ``"gpu"``).
     precision : str
-        Floating-point precision (``"float64"``).
+        Floating-point precision (``"float64"`` or ``"float32"``).
     """
 
     kind: str
@@ -637,7 +637,9 @@ def time_response(
     gust : callable or None, optional
         Gust velocity field ``gust(points, t) -> velocities`` where *points*
         has shape ``(n, 3)`` [m] in geometry axes and the return value has
-        shape ``(n, 3)`` [m/s] (see :mod:`ventorum.unsteady.gusts`).
+        shape ``(n, 3)`` [m/s] (see :mod:`ventorum.unsteady.gusts`). On the
+        GPU, a gust callable is evaluated on the host at every step and its
+        velocities are copied to the device, so it adds a host cost per step.
     store : {'loads', 'strengths'}, optional
         ``"loads"`` (default) stores time histories and ``strip_cl`` only.
         ``"strengths"`` also stores final ``gamma_bound`` [m^2/s],
@@ -711,7 +713,7 @@ def time_response(
         "Force coefficients (CL, CD, CY) are in mean wind axes and moment coefficients (Cl, Cm, Cn) "
         "are in body axes of the mean state, normalised by the nominal V_inf and rho of condition.",
     ]
-    notes.extend(_cpu_execution_notes())
+    notes.extend(_device_execution_notes(resp.device, resp.precision, resp.notes))
     notes.extend(trust_notes)
     for note in resp.notes:
         if note not in notes:
@@ -771,8 +773,8 @@ def time_response(
         trust=trust,
         trust_notes=trust_notes,
         notes=notes,
-        device="cpu",
-        precision="float64",
+        device=str(resp.device),
+        precision=str(resp.precision),
     )
 
 
@@ -980,6 +982,7 @@ def indicial_response(
         wake_alignment=sett.wake_alignment,
     )
 
+    solver_notes = list(resp_pert.notes)
     if has_mean_load:
         resp_base = _solve_time_rings(
             lattice,
@@ -992,6 +995,9 @@ def indicial_response(
             ground=ground,
             wake_alignment=sett.wake_alignment,
         )
+        for note in resp_base.notes:
+            if note not in solver_notes:
+                solver_notes.append(note)
         CL_ind = (resp_pert.CL - resp_base.CL) / amp_val
         CD_ind = (resp_pert.CD - resp_base.CD) / amp_val
         CY_ind = (resp_pert.CY - resp_base.CY) / amp_val
@@ -1023,10 +1029,10 @@ def indicial_response(
         f"Indicial response kind='{kind}' per unit step (amplitude={amp_val:g}), "
         "normalised by the nominal V_inf and rho of condition.",
     ]
-    notes.extend(_cpu_execution_notes())
+    notes.extend(_device_execution_notes(resp_pert.device, resp_pert.precision, solver_notes))
     notes.extend(extra_notes)
     notes.extend(trust_notes)
-    for note in resp_pert.notes:
+    for note in solver_notes:
         if note not in notes:
             notes.append(note)
         if trust is not None and note not in trust.warnings:
@@ -1063,6 +1069,6 @@ def indicial_response(
         trust=trust,
         trust_notes=trust_notes,
         notes=notes,
-        device="cpu",
-        precision="float64",
+        device=str(resp_pert.device),
+        precision=str(resp_pert.precision),
     )
