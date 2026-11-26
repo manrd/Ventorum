@@ -364,6 +364,31 @@ def _validate_axes(axes: str) -> str:
     return axes
 
 
+_RATE_HINTS = {
+    "dynamic_derivatives": "The rate derivatives come from the harmonic motion about a mean state without rotation.",
+    "time_response": "Give a rotation through motion, for example motion={'pitch': lambda t: q * t}.",
+    "indicial_response": "The indicial steps start from a mean state without rotation.",
+    "free_flight": "Give initial rates through initial_state, for example initial_state={'pitch_dot': q}.",
+}
+
+
+def _check_no_steady_rates(condition: FlightCondition, caller: str) -> None:
+    """Refuse nonzero steady body rates ``p``, ``q``, ``r`` [rad/s] with :class:`InputError`.
+
+    The unsteady solvers linearise about, or march from, a mean state that
+    does not rotate. The steady base solve would use the rates and the march
+    or the harmonic loads would not, so the result would be inconsistent.
+    """
+    rates = {name: float(getattr(condition, name, 0.0) or 0.0) for name in ("p", "q", "r")}
+    nonzero = {name: val for name, val in rates.items() if val != 0.0}
+    if nonzero:
+        given = ", ".join(f"{name}={val:g} rad/s" for name, val in nonzero.items())
+        raise InputError(
+            f"{caller} does not use the steady body rates of the flight condition ({given}); "
+            f"set p, q and r to 0. {_RATE_HINTS.get(caller, '')}".rstrip()
+        )
+
+
 def _check_incompressible_mach(condition: FlightCondition) -> None:
     """Refuse Mach numbers above the incompressible limit with :class:`InputError`."""
     mach_stated = getattr(condition, "mach", None)
@@ -584,7 +609,7 @@ def dynamic_derivatives(
         density ``rho`` [kg/m^3], angle of attack ``alpha`` [rad], sideslip
         ``beta`` [rad], bank angle ``phi`` [rad], and optional ground height
         ``h`` [m] of ``ref_point``. Must stay within the incompressible limit
-        (Mach <= 0.3).
+        (Mach <= 0.3). The body rates ``p``, ``q``, ``r`` must be 0.
     settings : SolverSettings or None, optional
         Solver settings (default :class:`SolverSettings`). Only the
         vortex-lattice solver (``"vlm"`` or ``"auto"``) is supported; other
@@ -656,6 +681,7 @@ def dynamic_derivatives(
 
     _check_incompressible_mach(condition)
     validate_flight_condition(condition)
+    _check_no_steady_rates(condition, "dynamic_derivatives")
     validate_aircraft(ac)
 
     if ctrl_names:

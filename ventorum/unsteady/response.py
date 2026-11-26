@@ -65,6 +65,7 @@ from ventorum.unsteady.derivatives import (
     MIN_TRUST_WAKE_CHORDS,
     _build_unsteady_trust,
     _check_incompressible_mach,
+    _check_no_steady_rates,
     _json_float,
 )
 from ventorum.unsteady.gusts import sharp_edged
@@ -159,6 +160,7 @@ def _prepare_setup(
 
     _check_incompressible_mach(condition)
     validate_flight_condition(condition)
+    _check_no_steady_rates(condition, caller)
     validate_aircraft(ac)
 
     solver = make_solver("vlm")
@@ -611,7 +613,7 @@ def time_response(
     condition : FlightCondition
         Mean flight state: ``V_inf`` [m/s], ``rho`` [kg/m^3], ``alpha`` [rad],
         ``beta`` [rad], ``phi`` [rad], and optional ground height ``h`` [m].
-        Must satisfy Mach <= 0.3.
+        Must satisfy Mach <= 0.3. The body rates ``p``, ``q``, ``r`` must be 0.
     settings : SolverSettings or None, optional
         Solver settings (default :class:`SolverSettings`). Only the
         vortex-lattice solver (``"vlm"`` or ``"auto"``) is supported.
@@ -803,7 +805,7 @@ def indicial_response(
     condition : FlightCondition
         Mean flight state: ``V_inf`` [m/s], ``rho`` [kg/m^3], ``alpha`` [rad],
         ``beta`` [rad], ``phi`` [rad], and optional ground height ``h`` [m].
-        Must satisfy Mach <= 0.3.
+        Must satisfy Mach <= 0.3. The body rates ``p``, ``q``, ``r`` must be 0.
     settings : SolverSettings or None, optional
         Solver settings (default :class:`SolverSettings`). Only the
         vortex-lattice solver (``"vlm"`` or ``"auto"``) is supported.

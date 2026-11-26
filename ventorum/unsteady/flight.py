@@ -434,7 +434,8 @@ def free_flight(
         Mean flight state: ``V_inf`` [m/s], ``rho`` [kg/m^3], ``alpha``
         [rad], ``beta`` [rad], and optional ground height ``h`` [m]. The
         inertial frame translates at this mean velocity. Must satisfy
-        Mach <= 0.3.
+        Mach <= 0.3. The body rates ``p``, ``q``, ``r`` must be 0; give
+        initial rates through *initial_state*.
     settings : SolverSettings or None, optional
         Solver settings (default :class:`SolverSettings`). Only the
         vortex-lattice solver (``"vlm"`` or ``"auto"``) is supported.
