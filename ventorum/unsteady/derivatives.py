@@ -39,7 +39,10 @@ are:
   free air at zero mean load, ``C_h_dot = -C_alpha`` as ``k -> 0``.
 * ``C_h_dot_ground(k) = C_h_dot(k) + C_alpha(k)`` [-], the ground-effect part
   of the heave-rate derivative (zero in free air at ``k -> 0`` for an unloaded
-  mean state).
+  mean state at ``beta = 0``). The definition is for ``beta = 0``: with
+  sideslip the heave axis is ``L_0`` but an incidence change moves the onset
+  along ``cos(beta) L_0``, so in free air ``C_h_dot(0) = -C_alpha(0) /
+  cos(beta)`` and ``C_h_dot_ground`` is not zero.
 
 The ``k -> 0`` limits are always returned alongside the per-``k`` values:
 ``C_alpha(0)``, ``C_q(0)`` and ``C_h(0)`` come from the exact steady limits
@@ -425,9 +428,12 @@ def _solve_pure_pitch_rate_responses(
 ) -> np.ndarray:
     """Return complex pure pitch-rate responses ``H_pureq(k)`` [1/rad], shape ``(len(k_solve), 6)``.
 
-    For an unloaded mean state (``not system.has_mean_load``), the exact
-    kinematic combination ``H_theta(k) + H_z(k) / (2 i k)`` cancels the
-    incidence term identically with zero extra linear solves. For a loaded
+    For an unloaded mean state (``not system.has_mean_load``) with the heave
+    axis ``e_h = cos(beta) L_0``, the exact kinematic combination
+    ``H_theta(k) + H_z(k) / (2 i k)`` cancels the incidence term identically
+    with zero extra linear solves. With sideslip, or banked in ground effect,
+    ``e_h`` is not ``cos(beta) L_0`` and the combination does not cancel the
+    incidence, so these states use the direct solve. For a loaded
     mean state (especially in ground effect where ``C_h != 0``), solving the
     pure pitch-rate right-hand side directly on the already-factorised
     Woodbury system keeps the height fixed and avoids the ``-C_h / (2 k^2)``
@@ -443,7 +449,9 @@ def _solve_pure_pitch_rate_responses(
     n_k = k_solve.size
     out = np.zeros((n_k, 6), dtype=np.complex128)
 
-    if not system.has_mean_load:
+    cos_beta = math.hypot(float(system.d_0[0]), float(system.d_0[2]))
+    shortcut_valid = bool(np.allclose(system.e_h, cos_beta * system.L_0, rtol=0.0, atol=1e-12))
+    if not system.has_mean_load and shortcut_valid:
         for ik, kf in enumerate(k_solve):
             if kf == 0.0:
                 continue
@@ -470,14 +478,18 @@ def _solve_pure_pitch_rate_responses(
         rhs_q = (-np.sum(n_bc * dU_rot_cp, axis=1)).astype(np.complex128)[:, None]
         G_q = system._solve_linear(W, rhs_q, "woodbury")[:, 0]
 
-        lags = np.exp(-1j * omega * np.arange(1, system.n_wake_rows + 1, dtype=np.float64) * system.dt)
-        FM_wake_k = np.tensordot(system.FM_wake_tensor, lags, axes=([1], [0]))
-        SL_wake_k = np.tensordot(system.SL_wake_tensor, lags, axes=([1], [0]))
-        if system.use_tail:
-            phase0 = complex(np.exp(-1j * omega * (system.n_wake_rows + 0.5) * system.dt))
-            fm_t, sl_t = system._tail_load_matrices(kappa, phase0)
-            FM_wake_k = FM_wake_k + fm_t
-            SL_wake_k = SL_wake_k + sl_t
+        FM_wake_k = SL_wake_k = None
+        if system.has_mean_load:
+            # The mean circulation times the perturbation velocity of the wake.
+            # An unloaded state (sideslip or bank in ground effect) has no such term.
+            lags = np.exp(-1j * omega * np.arange(1, system.n_wake_rows + 1, dtype=np.float64) * system.dt)
+            FM_wake_k = np.tensordot(system.FM_wake_tensor, lags, axes=([1], [0]))
+            SL_wake_k = np.tensordot(system.SL_wake_tensor, lags, axes=([1], [0]))
+            if system.use_tail:
+                phase0 = complex(np.exp(-1j * omega * (system.n_wake_rows + 0.5) * system.dt))
+                fm_t, sl_t = system._tail_load_matrices(kappa, phase0)
+                FM_wake_k = FM_wake_k + fm_t
+                SL_wake_k = SL_wake_k + sl_t
 
         dU_q_load = -(1j * omega) * ey_arm
         coeffs_q, _ = system._evaluate_linearised_loads(
