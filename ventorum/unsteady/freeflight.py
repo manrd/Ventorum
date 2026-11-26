@@ -1277,7 +1277,7 @@ def _run_free_flight_march(
         ctrl_hist[cname][0] = val
         ctrl_dot_hist[cname][0] = c_rates0[cname]
 
-    if ground is not None and not all_frozen:
+    if ground is not None and (not all_frozen or has_state_controls):
         gc0 = stepper.min_ground_clearance(
             q0[0], q0[1], q0[2], q0[3], q0[4], q0[5], dd_step=dd_step0,
         )
@@ -1591,6 +1591,10 @@ def _run_free_flight_march(
                         omega_vec[pos] = float(np.clip(w_new, _AITKEN_OMEGA_MIN, _AITKEN_OMEGA_MAX))
             prev_r_qd = r_qd.copy()
 
+            if sub == max_sub_int - 1:
+                # No update after the last iterate: the accepted state is the
+                # state of loads_k, of the controls and of the stepper wake.
+                break
             qd_k[free_idx] = qd_k[free_idx] + omega_vec * r_qd
             q_k[free_idx] = q_n[free_idx] + 0.5 * dt_val * (qd_n[free_idx] + qd_k[free_idx])
 
