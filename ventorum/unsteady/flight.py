@@ -469,7 +469,10 @@ def free_flight(
     controls : mapping of str to array or callable, or None, optional
         Control deflections [rad] keyed by ``ControlSurface.name``: a 1-D
         array of length ``n_steps + 1``, a callable ``fn(t)`` or a callable
-        ``fn(t, state)`` that gets a :class:`FlightState`.
+        ``fn(t, state)`` that gets a :class:`FlightState`. The values are
+        absolute deflections: they replace ``ControlSurface.deflection`` of
+        the geometry from t = 0. The steady imbalance uses the values at
+        t = 0 (with a note when they differ from the geometry).
     thrust : callable or None, optional
         ``thrust(t) -> (force, moment)`` or ``thrust(t, state) -> (force,
         moment)``, with the force [N] and the moment [N m] in body axes
@@ -549,16 +552,48 @@ def free_flight(
         assert t_end_val is not None
         n_steps_val = max(1, int(math.ceil(t_end_val / dt_eff - 1.0e-12)))
 
-    base, _ = _solve_steady_base(solver, lattice, condition, sett, ac, rp, geo["main"])
-    tot = base.totals
-    steady_loads = {
-        "CL": float(tot.CL),
-        "CD": float(tot.CDi),
-        "CY": float(tot.CY),
-        "Cl": float(tot.Cl),
-        "Cm": float(tot.Cm),
-        "Cn": float(tot.Cn),
+    base, fixed_sett = _solve_steady_base(solver, lattice, condition, sett, ac, rp, geo["main"])
+
+    def _loads_of(res: Any) -> dict[str, float]:
+        tot = res.totals
+        return {
+            "CL": float(tot.CL),
+            "CD": float(tot.CDi),
+            "CY": float(tot.CY),
+            "Cl": float(tot.Cl),
+            "Cm": float(tot.Cm),
+            "Cn": float(tot.Cn),
+        }
+
+    base_loads = _loads_of(base)
+    geometry_deflection = {
+        (surf.name, cs.name): float(cs.deflection)
+        for surf in ac.surfaces
+        for cs in (getattr(surf, "controls", None) or [])
     }
+
+    def steady_loads(controls0: dict[str, float]) -> tuple[dict[str, float], str | None]:
+        """Return the steady loads at the t = 0 control values and a note when they are not the geometry ones."""
+        changed = {
+            name: float(val)
+            for name, val in controls0.items()
+            if any(cn == name and float(val) != d for (_, cn), d in geometry_deflection.items())
+        }
+        if not changed:
+            return base_loads, None
+        ac_t0 = ac.clone()
+        for surf in ac_t0.surfaces:
+            for cs in getattr(surf, "controls", None) or []:
+                if cs.name in changed:
+                    cs.deflection = changed[cs.name]
+        lattice_t0 = solver.build(ac_t0, fixed_sett, condition, None, rp)
+        base_t0, _ = _solve_steady_base(solver, lattice_t0, condition, fixed_sett, ac, rp, geo["main"])
+        given = ", ".join(f"{name} = {math.degrees(val):.4g} deg" for name, val in changed.items())
+        note = (
+            f"The steady imbalance uses the control values of controls at t = 0 ({given}); "
+            "they differ from the geometry deflections. The values of controls are absolute deflections."
+        )
+        return _loads_of(base_t0), note
 
     resp = _solve_free_flight(
         lattice,

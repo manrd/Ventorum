@@ -10,7 +10,7 @@
 - `dofs`: the free degrees of freedom, a subset of `("x", "y", "z", "roll", "pitch", "yaw")`. The default is all six. The other degrees of freedom follow `motion` (default zero).
 - `t_end` [s] or `n_steps`: give exactly one. `dt` [s] defaults to `dx_TE / V_inf`.
 - `initial_state`: initial displacements (`"z"`, `"pitch"`, ...) [m, rad] and rates (`"z_dot"`, `"pitch_dot"`, ...) [m/s, rad/s] of the free degrees of freedom.
-- `controls`: control deflections [rad] keyed by control name, as arrays, callables `fn(t)` or callables `fn(t, state)`.
+- `controls`: control deflections [rad] keyed by control name, as arrays, callables `fn(t)` or callables `fn(t, state)`. The values are absolute deflections: they replace the geometry deflection from t = 0, and the steady imbalance uses the values at t = 0.
 - `thrust`: a callable `thrust(t)` or `thrust(t, state)` that returns `(force, moment)` in body axes [N, N m]. `thrust_point` [m] is the point of the force (default the centre of gravity).
 - `gust`: a gust field from `ventorum.unsteady.gusts`, as in `ventorum.time_response`.
 - `gravity` [m/s^2]: default 9.80665.

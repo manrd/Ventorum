@@ -679,7 +679,7 @@ def _solve_free_flight(
     coupling_tol: float = 1.0e-10,
     max_subiterations: int = 20,
     aerodynamics_off: bool = False,
-    steady_loads: Mapping[str, float] | None = None,
+    steady_loads: Mapping[str, float] | Callable[..., Any] | None = None,
 ) -> _FreeFlightResponse:
     """Couple the time-domain vortex-ring solver to the six-DOF rigid-body equations of motion.
 
@@ -766,7 +766,9 @@ def _solve_free_flight(
         ``'CY'`` (mean wind axes) and ``'Cl'``, ``'Cm'``, ``'Cn'`` (body axes
         about *ref_point*) [-]. When given, the result holds the steady
         imbalance of the mean pose (aerodynamic load plus weight, no thrust).
-        Default None.
+        It may also be a callable ``steady_loads(controls0)`` of the control
+        values at t = 0 [rad] that returns ``(mapping, note)``, where *note*
+        is a string or None. Default None.
 
     Returns
     -------
@@ -979,7 +981,7 @@ def _run_free_flight_march(
     tol_val: float,
     max_sub_int: int,
     aerodynamics_off: bool,
-    steady_loads: Mapping[str, float] | None,
+    steady_loads: Mapping[str, float] | Callable[..., Any] | None,
 ) -> _FreeFlightResponse:
     """Run the coupled free-flight time march on an initialised *stepper*."""
     n_steps_int = stepper.n_steps
@@ -1329,8 +1331,13 @@ def _run_free_flight_march(
         init_F_imb_b,
         init_M_imb_b,
     ) = _dynamics_and_diagnostics(0, q0, qd0, loads0, c_vals0)
+    steady_src = steady_loads
+    if callable(steady_loads):
+        steady_src, steady_note = steady_loads(dict(c_vals0))
+        if steady_note:
+            stepper.notes.append(str(steady_note))
     steady_imb = _steady_imbalance(
-        steady_loads,
+        steady_src,
         qS=qS,
         b_ref=b_ref_f,
         c_ref=c_ref_f,
