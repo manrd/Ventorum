@@ -99,12 +99,23 @@ def _wing():
 
 
 @pytest.mark.parametrize("solver", ["vlm", "linear"])
-@pytest.mark.parametrize("device", ["cpu", "gpu"])
-def test_lattice_sweep_checks_the_full_condition_once_per_entry(monkeypatch, solver, device):
+def test_lattice_sweep_checks_the_full_condition_once_per_entry(monkeypatch, solver):
+    _check_sweep_count(monkeypatch, solver, "cpu")
+
+
+@pytest.mark.gpu
+@pytest.mark.parametrize("solver", ["vlm", "linear"])
+def test_gpu_lattice_sweep_checks_the_full_condition_once_per_entry(monkeypatch, solver):
     from ventorum import gpu
 
-    if device == "gpu" and not gpu.available():
+    if not gpu.available():
         pytest.skip(f"The GPU pipelines cannot run: {gpu.unavailable_reason()}")
+    _check_sweep_count(monkeypatch, solver, "gpu")
+
+
+def _check_sweep_count(monkeypatch, solver, device):
+    from ventorum import gpu
+
     old = gpu.get_device()
     gpu.set_device(device)
     try:
