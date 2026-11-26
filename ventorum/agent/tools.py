@@ -3575,7 +3575,7 @@ def dynamic_derivatives(
     ax = string(axes, "axes", ("body", "stability"))
     base_rp = ac.moment_reference()
     x_cg = number(x_cg_m, "x_cg_m") if x_cg_m is not None else float(base_rp[0])
-    ac.ref_point = np.array([x_cg, 0.0, float(base_rp[2])])
+    ac.ref_point = np.array([x_cg, float(base_rp[1]), float(base_rp[2])])
     ac.compute_reference_values()
 
     k_list = [0.0] if k is None else number_list(k, "k", min_len=1, max_len=50, minimum=0.0)
@@ -3911,7 +3911,7 @@ def time_response(
     store_val = string(store, "store", ("loads", "strengths"))
     base_rp = ac.moment_reference()
     x_cg = number(x_cg_m, "x_cg_m") if x_cg_m is not None else float(base_rp[0])
-    ac.ref_point = np.array([x_cg, 0.0, float(base_rp[2])])
+    ac.ref_point = np.array([x_cg, float(base_rp[1]), float(base_rp[2])])
     ac.compute_reference_values()
 
     if (t_end_s is None) == (n_steps is None):
@@ -4075,7 +4075,7 @@ def indicial_response(
     dl = parse_detail_level(detail_level)
     base_rp = ac.moment_reference()
     x_cg = number(x_cg_m, "x_cg_m") if x_cg_m is not None else float(base_rp[0])
-    ac.ref_point = np.array([x_cg, 0.0, float(base_rp[2])])
+    ac.ref_point = np.array([x_cg, float(base_rp[1]), float(base_rp[2])])
     ac.compute_reference_values()
 
     if resolve_solver_type(sett.solver_type) != "vlm":
@@ -4275,7 +4275,7 @@ def free_flight(
     store_val = string(store, "store", ("loads", "strengths"))
     base_rp = ac.moment_reference()
     x_cg = number(x_cg_m, "x_cg_m") if x_cg_m is not None else float(base_rp[0])
-    ac.ref_point = np.array([x_cg, 0.0, float(base_rp[2])])
+    ac.ref_point = np.array([x_cg, float(base_rp[1]), float(base_rp[2])])
     ac.compute_reference_values()
 
     if mass_kg is None:

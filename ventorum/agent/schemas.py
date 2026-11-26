@@ -1730,8 +1730,9 @@ AGENT_TOOL_DEFINITIONS: list[dict[str, Any]] = [
                 "x_cg_m": {
                     "type": "number",
                     "description": (
-                        "Centre of gravity x position [m], geometry axes (x aft). Default: the "
-                        "aircraft ref_point_m x, else 0."
+                        "Centre of gravity x position [m], geometry axes (x aft). The moment "
+                        "reference is [x_cg_m, y_ref, z_ref], with y_ref and z_ref from the aircraft "
+                        "ref_point_m. Default: the aircraft ref_point_m x, else 0."
                     ),
                 },
                 "k": {
@@ -1793,8 +1794,9 @@ AGENT_TOOL_DEFINITIONS: list[dict[str, Any]] = [
                 "x_cg_m": {
                     "type": "number",
                     "description": (
-                        "Centre of gravity x position [m], geometry axes (x aft). Default: the "
-                        "aircraft ref_point_m x, else 0."
+                        "Centre of gravity x position [m], geometry axes (x aft). The moment "
+                        "reference is [x_cg_m, y_ref, z_ref], with y_ref and z_ref from the aircraft "
+                        "ref_point_m. Default: the aircraft ref_point_m x, else 0."
                     ),
                 },
                 "t_end_s": _num("End time [s]. Give exactly one of t_end_s or n_steps.", exclusiveMinimum=0),
@@ -1840,7 +1842,8 @@ AGENT_TOOL_DEFINITIONS: list[dict[str, Any]] = [
                     "type": "number",
                     "description": (
                         "Centre of gravity x position [m], geometry axes (x aft). The CG, the moment "
-                        "reference and the rotation point are [x_cg_m, 0, z_ref]. Default: the "
+                        "reference and the rotation point are [x_cg_m, y_ref, z_ref], with y_ref and "
+                        "z_ref from the aircraft ref_point_m. Default: the "
                         "aircraft ref_point_m x, else 0."
                     ),
                 },
@@ -1953,8 +1956,9 @@ AGENT_TOOL_DEFINITIONS: list[dict[str, Any]] = [
                 "x_cg_m": {
                     "type": "number",
                     "description": (
-                        "Centre of gravity x position [m], geometry axes (x aft). Default: the "
-                        "aircraft ref_point_m x, else 0."
+                        "Centre of gravity x position [m], geometry axes (x aft). The moment "
+                        "reference is [x_cg_m, y_ref, z_ref], with y_ref and z_ref from the aircraft "
+                        "ref_point_m. Default: the aircraft ref_point_m x, else 0."
                     ),
                 },
                 "kind": {
