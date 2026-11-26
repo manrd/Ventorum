@@ -8,8 +8,12 @@ Each function raises :class:`~ventorum.core.errors.InputError` (a
 
 from __future__ import annotations
 
+import contextlib
+import contextvars
+import dataclasses
 import math
 import numbers
+from collections.abc import Iterator, Sequence
 
 import numpy as np
 
@@ -382,6 +386,74 @@ def check_flight_condition_values(fc: FlightCondition) -> None:
             )
     from ventorum.core.trust import check_mach_scope
     check_mach_scope(fc)
+
+
+def check_alpha_sweep_values(condition: FlightCondition, alphas: Sequence[float] | np.ndarray) -> None:
+    """Apply :func:`check_flight_condition_values` to each case of an angle-of-attack sweep.
+
+    The cases are *condition* with ``alpha`` replaced by each value of
+    *alphas*. They differ only in ``alpha``, so the first case gets all
+    checks and the other cases get only the check of ``alpha``. The error
+    and its message are the same as a call of
+    :func:`check_flight_condition_values` for each case in order.
+
+    Parameters
+    ----------
+    condition : FlightCondition
+        Base condition of the sweep. Speed in m/s, angles in rad, density
+        in kg/m^3, height in m.
+    alphas : sequence of float or numpy.ndarray
+        Angles of attack of the cases [rad].
+
+    Raises
+    ------
+    ventorum.core.errors.InputError
+        As :func:`check_flight_condition_values`.
+    ventorum.core.errors.ValidityError
+        As :func:`check_flight_condition_values`.
+    """
+    values = np.asarray(alphas, dtype=float).ravel()
+    if values.size == 0:
+        return
+    check_flight_condition_values(dataclasses.replace(condition, alpha=float(values[0])))
+    for a in values[1:]:
+        _check_angle("alpha", float(a))
+
+
+_checked_conditions: contextvars.ContextVar[frozenset[int] | None] = contextvars.ContextVar(
+    "ventorum_checked_conditions", default=None)
+
+
+@contextlib.contextmanager
+def checked_conditions(conditions: Sequence[FlightCondition]) -> Iterator[None]:
+    """Mark *conditions* as checked by :func:`check_flight_condition_values` while the block runs.
+
+    A sweep checks its cases before it solves them (see
+    :func:`check_alpha_sweep_values`). In the block,
+    :func:`condition_is_checked` is True for these objects, so the solver
+    does not check them again for each case. The mark holds only for these
+    objects, only in this thread (context), and only while the block runs.
+    The caller must keep the objects alive and must not change them in the
+    block.
+
+    Parameters
+    ----------
+    conditions : sequence of FlightCondition
+        The checked conditions.
+    """
+    outer = _checked_conditions.get()
+    ids = frozenset(id(c) for c in conditions)
+    token = _checked_conditions.set(ids if outer is None else outer | ids)
+    try:
+        yield
+    finally:
+        _checked_conditions.reset(token)
+
+
+def condition_is_checked(fc: FlightCondition) -> bool:
+    """Return True if *fc* is in an active :func:`checked_conditions` block."""
+    ids = _checked_conditions.get()
+    return ids is not None and id(fc) in ids
 
 
 def validate_flight_condition(fc: FlightCondition) -> None:

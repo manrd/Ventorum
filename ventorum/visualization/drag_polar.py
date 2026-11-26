@@ -74,10 +74,9 @@ def alpha_sweep(
     if alpha_range is None:
         alpha_range = np.radians(np.arange(-2, 13, 1.0))
     alpha_range = np.asarray(alpha_range, dtype=float)
-    from ventorum.utils.validation import check_flight_condition_values
+    from ventorum.utils.validation import check_alpha_sweep_values
 
-    for a in alpha_range.ravel():
-        check_flight_condition_values(dataclasses.replace(condition, alpha=float(a)))
+    check_alpha_sweep_values(condition, alpha_range)
     b = (backend or "auto").lower()
     if b not in ("auto", "thread", "serial"):
         raise ValueError(f"backend={backend!r}: use 'auto', 'thread' or 'serial'.")

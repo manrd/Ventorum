@@ -57,7 +57,14 @@ from ventorum.geometry import lattice_cache
 from ventorum.geometry.lattice import VortexLattice, build_lattice
 from ventorum.solvers.base import BaseSolver
 from ventorum.utils.parallel import solve_threads
-from ventorum.utils.validation import check_flight_condition_values, validate_aircraft, validate_flight_condition
+from ventorum.utils.validation import (
+    check_alpha_sweep_values,
+    check_flight_condition_values,
+    checked_conditions,
+    condition_is_checked,
+    validate_aircraft,
+    validate_flight_condition,
+)
 
 # Out of ground effect, 4 chordwise panels put the aerodynamic centre within
 # about 0.01 c of the converged value, also for aspect ratio 1 (with 1 panel
@@ -541,9 +548,12 @@ class LatticeSolver(BaseSolver):
         refuses for example a zero or negative ``V_inf`` with
         :class:`~ventorum.core.errors.InputError` (a ValueError). It
         gives no warnings, so a condition that an entry point has checked
-        already does not give its warnings again.
+        already does not give its warnings again. A sweep that has checked
+        its cases already (:func:`ventorum.utils.validation.checked_conditions`)
+        does not check them again here.
         """
-        check_flight_condition_values(condition)
+        if not condition_is_checked(condition):
+            check_flight_condition_values(condition)
         if ground is None and condition.h is not None:
             ground = ground_plane_from_condition(lattice, condition, ref_point)
         if getattr(condition, "mach", None) is not None and condition.mach > 0.0:
@@ -884,9 +894,22 @@ class LatticeSolver(BaseSolver):
         """
         aircraft = as_aircraft(aircraft)
         validate_aircraft(aircraft)
-        conds = [dataclasses.replace(condition, alpha=float(a)) for a in np.asarray(alpha_range, dtype=float)]
-        for cond in conds:
-            check_flight_condition_values(cond)
+        alphas = np.asarray(alpha_range, dtype=float)
+        conds = [dataclasses.replace(condition, alpha=float(a)) for a in alphas]
+        check_alpha_sweep_values(condition, alphas)
+        # The cases are checked: the solve does not check them again for each case.
+        with checked_conditions(conds):
+            return self._solve_sweep_checked(aircraft, condition, settings, conds, ref_point)
+
+    def _solve_sweep_checked(
+        self,
+        aircraft: Aircraft,
+        condition: FlightCondition,
+        settings: SolverSettings,
+        conds: list[FlightCondition],
+        ref_point: np.ndarray | None,
+    ) -> list[SolverResult]:
+        """Solve the checked cases *conds* of :meth:`solve_sweep` (see there)."""
         aircraft.compute_reference_values()
         rp = aircraft.moment_reference() if ref_point is None else np.asarray(ref_point, dtype=float)
         S, b, c = aircraft.S_ref, aircraft.b_ref, aircraft.c_ref
