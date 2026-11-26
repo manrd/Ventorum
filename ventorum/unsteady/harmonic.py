@@ -1841,6 +1841,11 @@ class _HarmonicRingSystem:
             self._gpu_state = _HarmonicGPUState(self.precision)
         st = self._gpu_state.tensors
         if "lu_Abb" not in st:
+            from ventorum.gpu import ring_kernels as RK
+
+            # A release of all GPU data clears the registry and this dict; register
+            # the holder again so that a later release and device_bytes see the new data.
+            RK.register_device_holder(self._gpu_state)
             dev = engine._dev()
             t_dtype = engine.torch_dtype(self.precision)
             A_bb_g = engine._f64(self.A_bb)

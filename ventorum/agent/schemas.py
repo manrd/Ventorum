@@ -1826,7 +1826,9 @@ AGENT_TOOL_DEFINITIONS: list[dict[str, Any]] = [
             "moves freely in the selected DOFs under the aerodynamic loads, gravity, a constant "
             "body-axes thrust and the control waveforms; frozen DOFs follow 'motion'. Returns the "
             "pose and rate histories, coefficients, loads at the CG, energy and work, the initial "
-            "force and moment imbalance at t = 0 and the coupling statistics. The start is "
+            "force and moment imbalance at t = 0 (initial_imbalance), the steady imbalance of the "
+            "mean state (steady_imbalance; minus it as thrust trims the mean state) and the coupling "
+            "statistics. The start is "
             "impulsive (no wake at t = 0), so the loads change while the starting wake forms. A run that reaches the ground stops with a note. Give exactly one of "
             "t_end_s or n_steps. Work estimate is max_subiterations (default 20) * n_steps * n_bound "
             "* n_wake (worst-case coupling sub-iterations). Vortex-lattice solver only; incompressible flow "
@@ -1944,8 +1946,9 @@ AGENT_TOOL_DEFINITIONS: list[dict[str, Any]] = [
         "description": (
             "Unit-step indicial aerodynamic response as a function of semichords s = 2 V_inf t / c_ref: "
             "'alpha' (Wagner incidence step), 'gust' (Kussner sharp-edged vertical gust at the leading edge), "
-            "or 'control' (named control-surface step). Runs in free air or flat-ground effect on CPU "
-            "in float64. Vortex-lattice solver only; incompressible flow (Mach <= 0.3)."
+            "or 'control' (named control-surface step). Runs in free air or flat-ground effect. "
+            "Vortex-lattice solver only; incompressible flow (Mach <= 0.3); runs on the CPU in float64 "
+            "or on the GPU (device and precision as set by ventorum.gpu)."
         ),
         "parameters": {
             "type": "object",

@@ -181,7 +181,9 @@ class FreeFlightResult:
     in_ground_effect : bool
         True when solved over a flat ground plane.
     h_m : float or None
-        Height of ``ref_point`` above the ground at ``t = 0`` [m], or None.
+        Height of ``ref_point`` above the ground in the mean state
+        (``condition.h``) [m], or None. With ``initial_state`` ``z`` the height
+        at ``t = 0`` is ``h_m + z(0)``.
     S_ref : float
         Reference area [m^2].
     b_ref : float

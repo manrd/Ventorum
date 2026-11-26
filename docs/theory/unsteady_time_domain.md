@@ -116,15 +116,15 @@ With the centre of gravity at the body offset $\mathbf r$ [m] from the reference
 
 ```{math}
 \mathbf G^T
-\begin{bmatrix} m\mathbf I & 0 \ 0 & \mathbf I_b \end{bmatrix}
+\begin{bmatrix} m\mathbf I & 0 \\ 0 & \mathbf I_b \end{bmatrix}
 \mathbf G\,\dot{\mathbf u}
 = \mathbf G^T
 \begin{bmatrix}
-\mathbf F_{\text{net},I} - m\,\mathbf a_\text{vel} \
+\mathbf F_{\text{net},I} - m\,\mathbf a_\text{vel} \\
 \mathbf M_{cg,b} - \boldsymbol\omega_b \times \mathbf I_b \boldsymbol\omega_b - \mathbf I_b \dot{\mathbf S}\dot{\boldsymbol\eta}
 \end{bmatrix},
 \qquad
-\mathbf G = \begin{bmatrix} \mathbf I & \mathbf J \ 0 & \mathbf S \end{bmatrix},
+\mathbf G = \begin{bmatrix} \mathbf I & \mathbf J \\ 0 & \mathbf S \end{bmatrix},
 ```
 
 where $\mathbf a_\text{vel} = \mathbf E^T \mathbf R\bigl((\dot{\mathbf S}\dot{\boldsymbol\eta}) \times \mathbf r + \boldsymbol\omega_b \times (\boldsymbol\omega_b \times \mathbf r)\bigr)$ is the velocity-dependent part of the centre-of-gravity acceleration. Only the rows of the free degrees of freedom are solved; the prescribed degrees of freedom enter with their accelerations on the right-hand side. The 3-2-1 kinematics are singular at $|\theta| = 90$ deg, and pitch angles of 89 deg or more are refused.
