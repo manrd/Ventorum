@@ -287,9 +287,13 @@ def _allocated_bytes() -> int | None:
     Returns
     -------
     int or None
-        The bytes [B], or None when PyTorch has not started CUDA or the
-        counters cannot be read.
+        The bytes [B], or None when PyTorch has not started CUDA, the
+        counters cannot be read, or the caching allocator is off
+        (``PYTORCH_NO_CUDA_MEMORY_CACHING`` set): then the counters stay at 0
+        and are no bound.
     """
+    if os.environ.get("PYTORCH_NO_CUDA_MEMORY_CACHING", "").strip() not in ("", "0"):
+        return None
     torch = sys.modules.get("torch")
     if torch is None:
         return None
@@ -329,14 +333,16 @@ def trim(limit: int | None = None) -> int:
     int
         The bytes of the released GPU data [B].
     """
-    limit = get_cache_limit() if limit is None else int(limit)
     allocated = _allocated_bytes()
-    if allocated is not None and allocated <= limit:
-        return 0
+    if allocated is not None:
+        limit = get_cache_limit() if limit is None else int(limit)
+        if allocated <= limit:
+            return 0
     held = [(lat, lattice_bytes(lat)) for lat in _cached_lattices()]
     held = [(lat, size) for lat, size in held if size > 0]
     if not held:
         return 0
+    limit = get_cache_limit() if limit is None else int(limit)
     total = sum(size for _, size in held)
     freed = 0
     for lat, size in held:

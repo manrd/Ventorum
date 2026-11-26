@@ -132,6 +132,33 @@ def test_trim_returns_at_once_when_the_allocator_total_is_below_the_limit(monkey
     assert lats[0].geom_cache == {"airfoil_groups": "cpu data"}
 
 
+def test_allocated_bytes_is_no_bound_when_the_caching_allocator_is_off(monkeypatch):
+    # Regression: with PYTORCH_NO_CUDA_MEMORY_CACHING=1 the allocator counters
+    # stay at 0, and the quick return of trim never released GPU data.
+    monkeypatch.setenv("PYTORCH_NO_CUDA_MEMORY_CACHING", "1")
+    assert memory._allocated_bytes() is None
+    lats = [_FakeLattice(100), _FakeLattice(200)]
+    monkeypatch.setattr(memory, "_cached_lattices", lambda: list(lats))
+    monkeypatch.setattr(memory, "lattice_bytes", lambda lat: lat.size if memory._is_gpu_key(
+        next(iter(lat.geom_cache), None)) else 0)
+    monkeypatch.setattr(memory, "_empty_pool", lambda: None)
+    assert memory.trim(limit=250) == 100
+
+
+def test_trim_reads_the_limit_only_when_needed(monkeypatch):
+    # Without CUDA counters and without cached GPU data, trim returns 0 before
+    # it reads the limit (as before the quick return).
+    monkeypatch.setattr(memory, "_allocated_bytes", lambda: None)
+    monkeypatch.setattr(memory, "_cached_lattices", lambda: [])
+
+    def no_limit():
+        raise AssertionError("trim read the limit with nothing to release")
+
+    monkeypatch.setattr(memory, "get_cache_limit", no_limit)
+    assert memory.trim() == 0
+    assert memory.trim(limit="not a number") == 0
+
+
 def test_allocated_bytes_is_none_without_cuda(monkeypatch):
     import sys
 
