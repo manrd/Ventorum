@@ -97,6 +97,7 @@ def test_trim_releases_the_least_recently_used_first(monkeypatch):
     monkeypatch.setattr(memory, "lattice_bytes", lambda lat: lat.size if memory._is_gpu_key(
         next(iter(lat.geom_cache), None)) else 0)
     monkeypatch.setattr(memory, "_empty_pool", lambda: None)
+    monkeypatch.setattr(memory, "_allocated_bytes", lambda: None)   # fake sizes: no allocator bound
     assert memory.trim(limit=600) == 0
     assert memory.trim(limit=500) == 100
     assert ("gpu_lattice", "cuda:0", "float32") not in lats[0].geom_cache
@@ -106,6 +107,36 @@ def test_trim_releases_the_least_recently_used_first(monkeypatch):
     # The most recent lattice goes only when it alone is above the limit.
     assert memory.trim(limit=299) == 300
     assert lats[2].geom_cache == {"airfoil_groups": "cpu data"}
+
+
+def test_trim_returns_at_once_when_the_allocator_total_is_below_the_limit(monkeypatch):
+    # Regression: trim counted the bytes of every cached lattice after each GPU
+    # solve (about 3 ms of host time per call). The allocator total is an upper
+    # bound of the cache bytes, so at or below the limit trim does not count.
+    lats = [_FakeLattice(100), _FakeLattice(200), _FakeLattice(300)]
+    monkeypatch.setattr(memory, "_cached_lattices", lambda: list(lats))
+    monkeypatch.setattr(memory, "_empty_pool", lambda: None)
+
+    def no_count(lat):
+        raise AssertionError("trim counted the cache below the allocator bound")
+
+    monkeypatch.setattr(memory, "lattice_bytes", no_count)
+    monkeypatch.setattr(memory, "_allocated_bytes", lambda: 600)
+    assert memory.trim(limit=600) == 0
+    assert memory.trim(limit=10 ** 9) == 0
+    assert all(memory._is_gpu_key(next(iter(lat.geom_cache))) for lat in lats)
+    # Above the bound, trim counts and releases as before.
+    monkeypatch.setattr(memory, "lattice_bytes", lambda lat: lat.size if memory._is_gpu_key(
+        next(iter(lat.geom_cache), None)) else 0)
+    assert memory.trim(limit=500) == 100
+    assert lats[0].geom_cache == {"airfoil_groups": "cpu data"}
+
+
+def test_allocated_bytes_is_none_without_cuda(monkeypatch):
+    import sys
+
+    monkeypatch.setitem(sys.modules, "torch", None)
+    assert memory._allocated_bytes() is None
 
 
 def test_lattice_cache_drops_gpu_data_of_lattices_that_leave_it():
@@ -246,6 +277,23 @@ def test_release_frees_the_gpu_data_and_keeps_the_bits(on_gpu, precision):
     # The CPU lattice stays cached; the GPU data are made again with the same bits.
     assert _bits(_gpu_sweep()) == ref
     assert gpu.cache_bytes() == held
+
+
+@pytest.mark.gpu
+@pytest.mark.parametrize("precision", ["float64", "float32"])
+def test_allocator_total_bounds_the_cache_bytes(on_gpu, precision):
+    gpu.set_precision(precision)
+    _gpu_sweep(4.0)
+    _gpu_sweep(5.0)
+    held = gpu.cache_bytes()
+    allocated = memory._allocated_bytes()
+    assert held > 0
+    assert allocated is not None and allocated >= held
+    # A limit between the cache bytes and the allocator total still releases
+    # through the full count, as before.
+    one = memory.lattice_bytes(lattice_cache.entries()[-1])
+    assert memory.trim(limit=held - 1) > 0
+    assert 0 < gpu.cache_bytes() <= max(held - 1, one)
 
 
 @pytest.mark.gpu

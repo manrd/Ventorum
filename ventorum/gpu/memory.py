@@ -277,11 +277,47 @@ def cache_bytes() -> int:
     return total
 
 
+def _allocated_bytes() -> int | None:
+    """Return the bytes that the PyTorch CUDA allocator holds for live tensors on all GPUs [B].
+
+    The GPU data of the cached lattices are PyTorch tensors (the Warp arrays
+    are views of them), so this value is an upper bound of
+    :func:`cache_bytes`. The call is cheap: it reads the allocator counters.
+
+    Returns
+    -------
+    int or None
+        The bytes [B], or None when PyTorch has not started CUDA or the
+        counters cannot be read.
+    """
+    torch = sys.modules.get("torch")
+    if torch is None:
+        return None
+    try:
+        if not (torch.cuda.is_available() and torch.cuda.is_initialized()):
+            return None
+        # The nested statistics read the counters without the flat copy that
+        # torch.cuda.memory_allocated makes (about 0.02 ms against 0.37 ms).
+        total = 0
+        for i in range(torch.cuda.device_count()):
+            stats = torch.cuda.memory_stats_as_nested_dict(i)
+            total += int(stats.get("allocated_bytes", {}).get("all", {}).get("current", 0))
+        return total
+    except Exception:  # noqa: BLE001 - no counters: trim counts the cache entries
+        return None
+
+
 def trim(limit: int | None = None) -> int:
     """Release the GPU data of the least recently used cached lattices until the total is at or below the limit.
 
     The most recently used lattice is released only when it alone is above
     the limit. The pipelines call this function after each GPU batch.
+
+    When all memory that the PyTorch allocator holds is at or below the
+    limit, the GPU data of the cached lattices are also at or below it, and
+    the function returns at once. Only above that bound does it count the
+    bytes of each cached lattice. The released data are the same in both
+    cases.
 
     Parameters
     ----------
@@ -293,11 +329,14 @@ def trim(limit: int | None = None) -> int:
     int
         The bytes of the released GPU data [B].
     """
+    limit = get_cache_limit() if limit is None else int(limit)
+    allocated = _allocated_bytes()
+    if allocated is not None and allocated <= limit:
+        return 0
     held = [(lat, lattice_bytes(lat)) for lat in _cached_lattices()]
     held = [(lat, size) for lat, size in held if size > 0]
     if not held:
         return 0
-    limit = get_cache_limit() if limit is None else int(limit)
     total = sum(size for _, size in held)
     freed = 0
     for lat, size in held:
