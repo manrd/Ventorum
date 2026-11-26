@@ -10,8 +10,10 @@ fields, in free air or in flat-ground effect.
 as functions of nondimensional distance travelled in semichords
 ``s = 2 V_inf t / c_ref`` [-]:
 
-* ``kind="alpha"`` (Wagner): uniform vertical gust over the whole wing at
-  ``t = 0`` (equivalent to an incidence step).
+* ``kind="alpha"`` (Wagner): uniform onset step over the whole wing at
+  ``t = 0``, ``V_inf cos(beta) lift_direction(alpha) amplitude`` (the
+  first-order change of the free stream for an incidence step at fixed
+  geometry).
 * ``kind="gust"`` (Kussner): sharp-edged vertical gust front starting at the
   leading edge at ``t = 0``.
 * ``kind="control"``: step deflection of a named control surface at ``t = 0``.
@@ -50,7 +52,12 @@ from typing import Any
 
 import numpy as np
 
-from ventorum.aero.system import freestream_direction, ground_plane_from_condition, lift_direction
+from ventorum.aero.system import (
+    freestream_direction,
+    ground_plane_from_condition,
+    lift_direction,
+    side_direction,
+)
 from ventorum.aero.vortex import kernel_cache_scope
 from ventorum.core.datatypes import (
     Aircraft,
@@ -478,7 +485,9 @@ class IndicialResult:
     steady : dict[str, float] or None
         Steady final derivatives ``{CL, CD, CY, Cl, Cm, Cn}`` [1/rad] from the
         steady VLM solver on the same lattice for ``kind="alpha"`` and
-        ``kind="control"``; None for ``kind="gust"``.
+        ``kind="control"``; None for ``kind="gust"``. For ``kind="alpha"``
+        they are the long-time limit of the step: the same onset at fixed
+        geometry (and fixed ground), forces on the mean wind axes.
     dt : float
         Time step [s].
     n_steps : int
@@ -780,6 +789,74 @@ def time_response(
     )
 
 
+def _indicial_alpha_steady(
+    solver: Any,
+    lattice: Any,
+    condition: FlightCondition,
+    settings: SolverSettings,
+    ac: Aircraft,
+    rp: np.ndarray,
+    main_surface: int,
+    ground: Any,
+) -> dict[str, float]:
+    """Return the steady limit of the indicial alpha step per radian.
+
+    The step tilts the onset at fixed geometry, and the time march projects
+    the forces on the fixed mean wind axes. The steady solves at
+    ``alpha +/- d_a`` with the same lattice have the same onset. In ground
+    effect they keep the mean ground plane, so the wing does not rotate
+    against the ground. Their forces are projected on the mean wind axes
+    (so ``CD`` includes ``-CL0`` and ``CL`` includes ``+CD0``). The moments are
+    in body axes and need no projection.
+    """
+    d_a = 1.0e-4
+    alpha0 = float(condition.alpha)
+    beta0 = float(condition.beta)
+    axes0 = (
+        freestream_direction(alpha0, beta0),
+        side_direction(alpha0, beta0),
+        lift_direction(alpha0),
+    )
+    conds = [
+        FlightCondition(
+            V_inf=condition.V_inf, rho=condition.rho, alpha=alpha0 + sgn * d_a,
+            beta=condition.beta, phi=condition.phi, h=condition.h,
+        )
+        for sgn in (1.0, -1.0)
+    ]
+    S_ref, b_ref, c_ref = float(ac.S_ref), float(ac.b_ref), float(ac.c_ref)
+    with kernel_cache_scope(lattice):
+        if ground is None:
+            results = solver.solve_batch(
+                lattice, conds, settings, S_ref, b_ref, c_ref,
+                ref_point=rp, main_surface=main_surface, continuation=False,
+            )
+        else:
+            results = [
+                solver.solve_lattice(
+                    lattice, c, settings, S_ref, b_ref, c_ref,
+                    ground=ground, ref_point=rp, main_surface=main_surface,
+                )
+                for c in conds
+            ]
+
+    def _fixed_axes(res: Any, cond: FlightCondition) -> np.ndarray:
+        t = res.totals
+        a, b = float(cond.alpha), float(cond.beta)
+        force = (
+            float(t.CDi_nearfield) * freestream_direction(a, b)
+            + float(t.CY) * side_direction(a, b)
+            + float(t.CL) * lift_direction(a)
+        )
+        return np.array([
+            force @ axes0[2], force @ axes0[0], force @ axes0[1],
+            float(t.Cl), float(t.Cm), float(t.Cn),
+        ])
+
+    diff = (_fixed_axes(results[0], conds[0]) - _fixed_axes(results[1], conds[1])) / (2.0 * d_a)
+    return {key: float(val) for key, val in zip(("CL", "CD", "CY", "Cl", "Cm", "Cn"), diff, strict=True)}
+
+
 def indicial_response(
     geometry: Aircraft | LiftingSurface,
     condition: FlightCondition,
@@ -812,9 +889,9 @@ def indicial_response(
     kind : {'alpha', 'gust', 'control'}
         Indicial response kind:
 
-        * ``"alpha"`` (Wagner): uniform vertical gust ``w_g = V_inf * amplitude``
-          [m/s] over the whole wing at ``t = 0`` (equivalent to an incidence
-          step).
+        * ``"alpha"`` (Wagner): uniform onset step
+          ``V_inf cos(beta) lift_direction(alpha) amplitude`` [m/s] over the
+          whole wing at ``t = 0`` (an incidence step at fixed geometry).
         * ``"gust"`` (Kussner): sharp-edged vertical gust front starting at
           the foremost leading edge at ``t = 0`` with ``w_g = V_inf * amplitude``
           [m/s].
@@ -880,7 +957,6 @@ def indicial_response(
     )
 
     d_0 = freestream_direction(float(condition.alpha), float(condition.beta))
-    e_z = lift_direction(float(condition.alpha)) if ground is None else np.asarray(ground.normal, dtype=np.float64)
 
     gust_arg: Callable[[np.ndarray, float], np.ndarray] | None = None
     ctrl_arg: dict[str, np.ndarray] | None = None
@@ -888,56 +964,24 @@ def indicial_response(
     extra_notes: list[str] = []
 
     if kind == "alpha":
-        w_g = V_inf * amp_val
-        v_vec = w_g * e_z
+        # The step is the first-order change of the free stream for d_alpha =
+        # amplitude at fixed geometry: d(V_inf d(alpha, beta))/d_alpha =
+        # V_inf cos(beta) lift_direction(alpha).
+        beta0 = float(condition.beta)
+        v_vec = (V_inf * amp_val * math.cos(beta0)) * lift_direction(float(condition.alpha))
 
         def _uniform_vertical(pts: np.ndarray, t: float) -> np.ndarray:
             _ = t
             return np.broadcast_to(v_vec[None, :], pts.shape).copy()
 
         gust_arg = _uniform_vertical
-        # Steady final values from central difference in alpha on the same lattice.
-        d_a = 1.0e-4
-        c_p = FlightCondition(
-            V_inf=condition.V_inf,
-            rho=condition.rho,
-            alpha=float(condition.alpha) + d_a,
-            beta=condition.beta,
-            phi=condition.phi,
-            h=condition.h,
+        steady_map = _indicial_alpha_steady(
+            solver, lattice, condition, fixed_sett, ac, rp, geo["main"], ground,
         )
-        c_m = FlightCondition(
-            V_inf=condition.V_inf,
-            rho=condition.rho,
-            alpha=float(condition.alpha) - d_a,
-            beta=condition.beta,
-            phi=condition.phi,
-            h=condition.h,
-        )
-        with kernel_cache_scope(lattice):
-            r_p, r_m = solver.solve_batch(
-                lattice,
-                [c_p, c_m],
-                fixed_sett,
-                float(ac.S_ref),
-                float(ac.b_ref),
-                float(ac.c_ref),
-                ref_point=rp,
-                main_surface=geo["main"],
-                continuation=False,
-            )
-        steady_map = {
-            "CL": float((r_p.totals.CL - r_m.totals.CL) / (2.0 * d_a)),
-            "CD": float((r_p.totals.CDi_nearfield - r_m.totals.CDi_nearfield) / (2.0 * d_a)),
-            "CY": float((r_p.totals.CY - r_m.totals.CY) / (2.0 * d_a)),
-            "Cl": float((r_p.totals.Cl - r_m.totals.Cl) / (2.0 * d_a)),
-            "Cm": float((r_p.totals.Cm - r_m.totals.Cm) / (2.0 * d_a)),
-            "Cn": float((r_p.totals.Cn - r_m.totals.Cn) / (2.0 * d_a)),
-        }
         if ground is not None:
             extra_notes.append(
-                "Indicial kind='alpha' applies a uniform vertical gust at fixed wing attitude; "
-                "steady values are dC/dalpha at constant height from the steady solver."
+                "Indicial kind='alpha' tilts the onset at fixed wing attitude and fixed ground; "
+                "the steady values are the same input solved with the steady lattice."
             )
     elif kind == "gust":
         w_g = V_inf * amp_val
