@@ -994,13 +994,9 @@ def indicial_response(
         known = list(ac.control_names())
         if control not in known:
             raise InputError(f"Unknown control surface {control!r}; available controls: {known}.")
-        info_list = list(getattr(lattice, "control_info", []))
-        delta0 = 0.0
-        for entry in info_list:
-            if str(entry["name"]) == control:
-                delta0 = float(entry["deflection_rad"])
-                break
-        ctrl_arg = {control: np.full(n_steps + 1, delta0 + amp_val, dtype=np.float64)}
+        # The step is an increment over the built deflection of each surface
+        # with this control name (the surfaces may have different deflections).
+        ctrl_arg = {control: np.full(n_steps + 1, amp_val, dtype=np.float64)}
         from ventorum.solvers.control_derivatives import control_derivatives
 
         cd_res = control_derivatives(ac, condition, fixed_sett, controls=[control], axes="body")
@@ -1026,6 +1022,7 @@ def indicial_response(
         n_steps=n_steps,
         ground=ground,
         wake_alignment=sett.wake_alignment,
+        control_increments=True,
     )
 
     solver_notes = list(resp_pert.notes)

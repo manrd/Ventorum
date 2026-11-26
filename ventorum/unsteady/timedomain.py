@@ -1478,8 +1478,15 @@ def _validate_control_names_and_extract_coefs(
     lattice: VortexLattice,
     rings: RingLattice,
     control_names: Sequence[str],
+    *,
+    increments: bool = False,
 ) -> tuple[np.ndarray, dict[str, tuple[np.ndarray, np.ndarray]], dict[str, float]]:
-    """Validate *control_names* against *lattice* and return ``(hinge_of, ctrl_strip_coefs, delta0_by_name)``."""
+    """Validate *control_names* against *lattice* and return ``(hinge_of, ctrl_strip_coefs, delta0_by_name)``.
+
+    With *increments* the base deflection of every strip is 0, so a control
+    value is an increment over the built deflection of each surface (not an
+    absolute deflection).
+    """
     info_list = list(getattr(lattice, "control_info", []))
     known_names = {str(entry["name"]) for entry in info_list}
     mode_by_name: dict[str, set[str]] = {}
@@ -1526,7 +1533,8 @@ def _validate_control_names_and_extract_coefs(
                 surf_name = lattice.surfaces[int(lattice.strip_surface[s])].name
                 c_arr[s, 0] = float(c_arr_raw[s, 0])
                 c_arr[s, 1] = float(c_arr_raw[s, 1])
-                d0_arr[s] = delta0_by_surf_name.get((surf_name, cname), delta0_by_name[cname])
+                if not increments:
+                    d0_arr[s] = delta0_by_surf_name.get((surf_name, cname), delta0_by_name[cname])
         ctrl_strip_coefs[cname] = (c_arr, d0_arr)
 
     return hinge_of, ctrl_strip_coefs, delta0_by_name
@@ -1580,8 +1588,14 @@ def _build_control_rig(
     time: np.ndarray,
     dt_val: float,
     notes: list[str] | None = None,
+    *,
+    increments: bool = False,
 ) -> tuple[_ControlRig | None, dict[str, np.ndarray], dict[str, np.ndarray]]:
-    """Validate and sample *controls*, returning ``(rig, ctrl_arrs, ctrl_dots)``."""
+    """Validate and sample *controls*, returning ``(rig, ctrl_arrs, ctrl_dots)``.
+
+    With *increments* the values are increments over the built deflection of
+    each surface (see :func:`_validate_control_names_and_extract_coefs`).
+    """
     if controls is None:
         return None, {}, {}
     if not isinstance(controls, Mapping):
@@ -1591,7 +1605,7 @@ def _build_control_rig(
 
     control_names = list(controls.keys())
     hinge_of, ctrl_strip_coefs, _ = _validate_control_names_and_extract_coefs(
-        lattice, rings, control_names,
+        lattice, rings, control_names, increments=increments,
     )
 
     ctrl_arrs: dict[str, np.ndarray] = {}
@@ -2919,8 +2933,13 @@ class _TimeDomainStepper:
         te_correction: bool = True,
         wake_alignment: str = "freestream",
         backend: str | None = None,
+        control_increments: bool = False,
     ) -> _TimeDomainStepper:
-        """Build a :class:`_TimeDomainStepper` with pre-sampled prescribed motion and controls."""
+        """Build a :class:`_TimeDomainStepper` with pre-sampled prescribed motion and controls.
+
+        With *control_increments* the values of *controls* are increments over
+        the built deflection of each surface instead of absolute deflections.
+        """
         if isinstance(n_steps, bool) or not isinstance(n_steps, (int, np.integer)):
             raise InputError(f"n_steps must be an integer >= 1, got {n_steps!r}.")
         n_steps_int = int(n_steps)
@@ -2974,6 +2993,7 @@ class _TimeDomainStepper:
         leg_normal_0, _, _ = leg_force_rules(lattice)
         ctrl_rig, ctrl_arrs, ctrl_dots = _build_control_rig(
             lattice, rings, leg_normal_0, controls, time, dt_val, input_notes,
+            increments=control_increments,
         )
 
         # Validate ground clearance at every step before constructing the stepper.
@@ -4327,6 +4347,7 @@ def _solve_time_rings(
     te_correction: bool = True,
     wake_alignment: str = "freestream",
     backend: str | None = None,
+    control_increments: bool = False,
 ) -> _TimeDomainResponse:
     """March the prescribed-wake time-domain vortex-ring solver for *n_steps* steps.
 
@@ -4452,6 +4473,7 @@ def _solve_time_rings(
         te_correction=te_correction,
         wake_alignment=wake_alignment,
         backend=backend,
+        control_increments=control_increments,
     )
 
     n_steps_int = stepper.n_steps
