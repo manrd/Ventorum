@@ -60,10 +60,21 @@ oscillation and overflow at all reduced frequencies and ground heights. The
 substitution ``u = L tan(theta)`` with ``L = min(a_min, 2 / kappa)`` maps
 ``[0, inf)`` to ``[0, pi/2)`` for 32-point Gauss-Legendre quadrature.
 
-For the rare case where a downstream evaluation point lies aft of the tail
-start (``a_min <= 0``), the integral splits into a finite real segment
-``[0, xi_0]`` and a contour-rotated tail on ``[xi_0, inf)`` with
-``xi_0 = -a_min + max(0.5, 1 / kappa)``.
+When an evaluation point lies aft of the tail start (``a_min <= 0``, for
+example a tailplane more than the discrete wake length behind a wing), the
+integral splits into a finite real segment ``[0, xi_0]`` and a
+contour-rotated tail on ``[xi_0, inf)``. The pad ``xi_0 + a_min`` comes from
+the geometry: the largest of the strip width and the distances of the point
+from the singularities (the two trailing filaments and the spanwise line).
+The real segment has near-singular peaks at the closest-approach points
+``-a_L``, ``-a_R`` and ``xi_min``. These points and the midpoints between the
+break points cut the segment into panels. Each panel has a 32-point
+Gauss-Legendre rule on an exponential map that puts the nodes near its
+anchor end at the scale of the distance to the nearest singularity. This is
+a graded rule for nearly singular integrals in the sense of P. R. Johnston
+and D. Elliott, "A sinh transformation for evaluating nearly singular
+boundary element integrals", International Journal for Numerical Methods in
+Engineering 62, 2005, pp. 564-578, here with a logarithmic grading.
 
 References
 ----------
@@ -190,6 +201,82 @@ def _contour_integrals(
     return I_tr_R, I_tr_L, I_sp0, I_sp1
 
 
+def _graded_segment_nodes(
+    xi_0: np.ndarray,
+    centers: np.ndarray,
+    scales: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Return graded quadrature nodes and weights on the real segment ``[0, xi_0]``.
+
+    The closest-approach points *centers* (clipped to the segment) and the
+    midpoints between the break points cut ``[0, xi_0]`` into panels. Each
+    panel has one anchor end and a 32-point Gauss-Legendre rule in
+    ``t in [0, 1]`` on the map ``delta = b ((1 + H / b)^t - 1)``. ``H`` is the
+    panel length and ``b`` is the distance from the anchor to the nearest
+    singularity. Thus the nodes cluster at the anchor at the scale ``b``.
+
+    Parameters
+    ----------
+    xi_0 : numpy.ndarray
+        Segment end [m], shape ``(n,)``.
+    centers : numpy.ndarray
+        Closest-approach positions along the segment [m], shape ``(n, K)``.
+    scales : numpy.ndarray
+        Distances of the singularities from the real axis at the closest
+        approach [m], shape ``(n, K)``.
+
+    Returns
+    -------
+    tuple of numpy.ndarray
+        Nodes ``xi`` [m] and weights [m], each of shape ``(n, 64 (K + 1))``.
+    """
+    n = xi_0.shape[0]
+    clipped = np.clip(centers, 0.0, xi_0[:, None])
+    bp = np.sort(np.concatenate([np.zeros((n, 1)), clipped, xi_0[:, None]], axis=1), axis=1)
+    lo = bp[:, :-1]
+    hi = bp[:, 1:]
+    half = 0.5 * (hi - lo)
+    anchors = np.concatenate([lo, hi], axis=1)
+    sign = np.concatenate([np.ones(lo.shape[1]), -np.ones(lo.shape[1])])
+    length = np.concatenate([half, half], axis=1)
+    dist = np.sqrt((anchors[:, :, None] - centers[:, None, :]) ** 2 + scales[:, None, :] ** 2)
+    b = np.maximum(np.min(dist, axis=2), 1e-12 * xi_0[:, None] + 1e-300)
+    lam = np.log1p(length / b)
+    delta = b[:, :, None] * np.expm1(lam[:, :, None] * _U01_32)
+    w = (delta + b[:, :, None]) * (lam[:, :, None] * _W01_32)
+    xi = anchors[:, :, None] + sign[None, :, None] * delta
+    return xi.reshape(n, -1), w.reshape(n, -1)
+
+
+def _segment_layout(
+    a_L: np.ndarray,
+    a_R: np.ndarray,
+    rho2_L: np.ndarray,
+    rho2_R: np.ndarray,
+    v0_sq: np.ndarray,
+    v0_dot_v1: np.ndarray,
+    v1_sq: np.ndarray,
+    rc2: np.ndarray,
+    span_len: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Return ``(xi_0, pad, centers, scales)`` of the harmonic tail real segment [m].
+
+    The centres are the closest-approach points of the point to the right
+    and left trailing filaments and to the spanwise line. The scales are the
+    distances at those points. The pad is the largest scale or the strip
+    width, so the contour after ``xi_0`` starts at least one local length
+    behind every singularity.
+    """
+    v1s = np.maximum(v1_sq, 1e-300)
+    x_min = v0_dot_v1 / v1s
+    q_min = np.maximum(v0_sq - v0_dot_v1 * x_min, 0.0)
+    centers = np.stack([-a_L, -a_R, x_min], axis=1)
+    scales = np.sqrt(np.stack([rho2_L + rc2, rho2_R + rc2, (q_min + rc2) / v1s], axis=1))
+    pad = np.maximum(np.max(scales, axis=1), span_len)
+    xi_0 = -np.minimum(np.minimum(a_L, a_R), -x_min) + pad
+    return xi_0, pad, centers, scales
+
+
 def _real_segment_integrals(
     a_L: np.ndarray,
     a_R: np.ndarray,
@@ -201,13 +288,16 @@ def _real_segment_integrals(
     tL_0: np.ndarray,
     tR_0: np.ndarray,
     d_dot_us: np.ndarray,
-    xi_0: np.ndarray,
+    xi: np.ndarray,
+    w: np.ndarray,
     kappa: float,
     rc2: np.ndarray,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    """Evaluate the four scalar tail integrals on the real interval ``[0, xi_0]``."""
-    xi = xi_0[..., None] * _U01_32
-    wt = (xi_0[..., None] * _W01_32) * np.exp(-1j * kappa * xi)
+    """Evaluate the four scalar tail integrals on the real interval ``[0, xi_0]``.
+
+    *xi* and *w* are the nodes and weights [m] of :func:`_graded_segment_nodes`.
+    """
+    wt = w * np.exp(-1j * kappa * xi)
 
     sL = xi + a_L[..., None]
     sR = xi + a_R[..., None]
@@ -352,25 +442,36 @@ def harmonic_tail_velocity(
                 I_tr_R[pos], I_tr_L[pos], I_sp0[pos], I_sp1[pos] = rR, rL, s0, s1
             neg = ~pos
             if np.any(neg):
-                pad = max(0.5, 1.0 / kap)
-                xi_0 = -a_min[neg] + pad
                 rc_mat = np.broadcast_to(np.asarray(rc_c, dtype=np.float64), a_L.shape)
-                rc2_n = np.maximum(rc_mat[neg] ** 2, 1e-24)
-                rR_1, rL_1, s0_1, s1_1 = _real_segment_integrals(
+                fields = (
                     a_L[neg], a_R[neg], rho2_L[neg], rho2_R[neg],
                     v0_sq[neg], v0_dot_v1[neg], v1_sq_2d[neg],
-                    tL_0[neg], tR_0[neg], dus_2d[neg], xi_0, kap, rc2_n,
+                    tL_0[neg], tR_0[neg], dus_2d[neg],
+                    np.maximum(rc_mat[neg] ** 2, 1e-24),
+                    np.broadcast_to(span_len[None, :], a_L.shape)[neg],
                 )
-                L_n = np.minimum(a_min[neg] + xi_0, 2.0 / kap)
-                rR_2, rL_2, s0_2, s1_2 = _contour_integrals(
-                    a_L[neg], a_R[neg], rho2_L[neg], rho2_R[neg],
-                    v0_sq[neg], v0_dot_v1[neg], v1_sq_2d[neg],
-                    tL_0[neg], tR_0[neg], dus_2d[neg], L_n, kap, xi_shift=xi_0,
-                )
-                I_tr_R[neg] = rR_1 + rR_2
-                I_tr_L[neg] = rL_1 + rL_2
-                I_sp0[neg] = s0_1 + s0_2
-                I_sp1[neg] = s1_1 + s1_2
+                n_neg = fields[0].size
+                res = [np.empty(n_neg, dtype=np.complex128) for _ in range(4)]
+                batch = max(1, _TAIL_CHUNK_BYTES // (4 * 64 * 16))
+                for j0 in range(0, n_neg, batch):
+                    j1 = min(n_neg, j0 + batch)
+                    aL, aR, r2L, r2R, v0s, v01, v1s, tL, tR, dus, rc2_n, sp = (
+                        f[j0:j1] for f in fields
+                    )
+                    xi_0, pad, centers, scales = _segment_layout(
+                        aL, aR, r2L, r2R, v0s, v01, v1s, rc2_n, sp,
+                    )
+                    xi_q, w_q = _graded_segment_nodes(xi_0, centers, scales)
+                    part1 = _real_segment_integrals(
+                        aL, aR, r2L, r2R, v0s, v01, v1s, tL, tR, dus, xi_q, w_q, kap, rc2_n,
+                    )
+                    part2 = _contour_integrals(
+                        aL, aR, r2L, r2R, v0s, v01, v1s, tL, tR, dus,
+                        np.minimum(pad, 2.0 / kap), kap, xi_shift=xi_0,
+                    )
+                    for out_k, p1, p2 in zip(res, part1, part2, strict=True):
+                        out_k[j0:j1] = p1 + p2
+                I_tr_R[neg], I_tr_L[neg], I_sp0[neg], I_sp1[neg] = res
 
         # Part 2: oscillatory semi-infinite trailing filaments (+right, -left).
         v_tot += _INV_4PI * (I_tr_R[:, :, None] * d_x_rR - I_tr_L[:, :, None] * d_x_rL)
@@ -481,12 +582,16 @@ def _displaced_ray_real_seg(
     rho2: np.ndarray,
     d: np.ndarray,
     u: np.ndarray,
-    xi_0: np.ndarray,
+    xi: np.ndarray,
+    w: np.ndarray,
     kappa: float,
     L_w: float,
     rc2: np.ndarray,
 ) -> np.ndarray:
-    """Evaluate the displaced filament integral on the real segment ``[0, xi_0]``."""
+    """Evaluate the displaced filament integral on the real segment ``[0, xi_0]``.
+
+    *xi* and *w* are the nodes and weights [m] of :func:`_graded_segment_nodes`.
+    """
     d_x_r = cross3(d, r)
     d_x_u = cross3(d, u)
     u_x_r = cross3(u, r)
@@ -494,8 +599,6 @@ def _displaced_ray_real_seg(
     r_dot_u = np.einsum("...i,...i->...", r, u)
     d_dot_u = np.einsum("...i,...i->...", d, u)
 
-    xi = xi_0[..., None] * _U01_32
-    w = xi_0[..., None] * _W01_32
     arg = -1j * kappa * (L_w + xi)
     psi = np.expm1(arg)
     dpsi = (-1j * kappa) * np.exp(arg)
@@ -590,6 +693,7 @@ def displaced_steady_tail_velocity(
     if m == 0 or n == 0 or kap == 0.0:
         return np.zeros((m, n, 3), dtype=np.complex128)
 
+    span_len = np.linalg.norm(pr - pl, axis=1)
     out = np.zeros((m, n, 3), dtype=np.complex128)
     step = max(1, min(m, _TAIL_CHUNK_BYTES // max(1, n * 64 * 16)))
 
@@ -618,19 +722,31 @@ def displaced_steady_tail_velocity(
                     )
                 neg = ~pos
                 if np.any(neg):
-                    pad = max(0.5, 1.0 / kap)
-                    xi_0 = -a[neg] + pad
                     rc_mat = np.broadcast_to(np.asarray(rc_c, dtype=np.float64), a.shape)
-                    rc2_n = np.maximum(rc_mat[neg] ** 2, 1e-24)
-                    v_seg = _displaced_ray_real_seg(
-                        r[neg], a[neg], rho2[neg], wd_b[neg], u_b[neg], xi_0, kap, L_w, rc2_n,
+                    fields = (
+                        r[neg], a[neg], rho2[neg], wd_b[neg], u_b[neg],
+                        np.maximum(rc_mat[neg] ** 2, 1e-24),
+                        np.broadcast_to(span_len[None, :], a.shape)[neg],
                     )
-                    r_shift = r[neg] - xi_0[:, None] * wd_b[neg]
-                    a_shift = a[neg] + xi_0
-                    v_tail = _displaced_ray_contour(
-                        r_shift, a_shift, rho2[neg], wd_b[neg], u_b[neg], kap, L_w + xi_0,
-                    )
-                    v_ray[neg] = v_seg + v_tail
+                    n_neg = fields[1].size
+                    v_n = np.empty((n_neg, 3), dtype=np.complex128)
+                    batch = max(1, _TAIL_CHUNK_BYTES // (4 * 64 * 16))
+                    for j0 in range(0, n_neg, batch):
+                        j1 = min(n_neg, j0 + batch)
+                        r_j, a_j, rho2_j, d_j, u_j, rc2_j, sp_j = (f[j0:j1] for f in fields)
+                        scale = np.sqrt(rho2_j + rc2_j)
+                        pad = np.maximum(scale, sp_j)
+                        xi_0 = -a_j + pad
+                        xi_q, w_q = _graded_segment_nodes(xi_0, -a_j[:, None], scale[:, None])
+                        v_seg = _displaced_ray_real_seg(
+                            r_j, a_j, rho2_j, d_j, u_j, xi_q, w_q, kap, L_w, rc2_j,
+                        )
+                        v_tail = _displaced_ray_contour(
+                            r_j - xi_0[:, None] * d_j, a_j + xi_0, rho2_j, d_j, u_j,
+                            kap, L_w + xi_0,
+                        )
+                        v_n[j0:j1] = v_seg + v_tail
+                    v_ray[neg] = v_n
 
             v_tot += sign * v_ray
 

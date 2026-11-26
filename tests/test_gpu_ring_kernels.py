@@ -323,7 +323,7 @@ def test_warp_steady_wake_equals_numpy(gpu_device, precision, dir_mode, rc_mode,
 
 @pytest.mark.gpu
 @pytest.mark.parametrize("use_ground", [False, True])
-@pytest.mark.parametrize("kappa", [0.0, 0.25, 1.5])
+@pytest.mark.parametrize("kappa", [0.0, 0.002, 0.25, 1.5])
 def test_gpu_harmonic_tail_equals_cpu(gpu_device, use_ground, kappa):
     """GPU far-wake harmonic tail matches CPU tail to round-off, upstream and downstream."""
     from ventorum.gpu import ring_kernels as RK
@@ -667,7 +667,7 @@ print(json.dumps({
 
 @pytest.mark.gpu
 @pytest.mark.parametrize("use_ground", [False, True])
-@pytest.mark.parametrize("kappa", [0.0, 0.25, 1.5])
+@pytest.mark.parametrize("kappa", [0.0, 0.002, 0.25, 1.5])
 def test_gpu_displaced_steady_tail_equals_cpu(gpu_device, use_ground, kappa):
     """GPU displaced steady far-wake tail matches CPU to round-off, upstream and downstream."""
     from ventorum.gpu import ring_kernels as RK

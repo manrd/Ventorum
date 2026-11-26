@@ -1403,6 +1403,64 @@ def _contour_integrals_gpu(
     return I_tr_R, I_tr_L, I_sp0, I_sp1
 
 
+def _graded_segment_nodes_gpu(
+    xi_0: torch.Tensor,
+    centers: torch.Tensor,
+    scales: torch.Tensor,
+    quad: dict,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Return graded nodes and weights [m] on ``[0, xi_0]`` on CUDA.
+
+    This is the CUDA twin of :func:`ventorum.unsteady.tail._graded_segment_nodes`.
+    """
+    n = int(xi_0.shape[0])
+    end = xi_0.unsqueeze(-1)
+    clipped = torch.minimum(torch.clamp(centers, min=0.0), end)
+    bp, _ = torch.sort(torch.cat([torch.zeros_like(end), clipped, end], dim=1), dim=1)
+    lo = bp[:, :-1]
+    hi = bp[:, 1:]
+    half = 0.5 * (hi - lo)
+    anchors = torch.cat([lo, hi], dim=1)
+    n_pan = int(lo.shape[1])
+    sign = torch.cat([
+        torch.ones(n_pan, dtype=torch.float64, device=xi_0.device),
+        -torch.ones(n_pan, dtype=torch.float64, device=xi_0.device),
+    ])
+    length = torch.cat([half, half], dim=1)
+    dist = torch.sqrt((anchors.unsqueeze(-1) - centers.unsqueeze(1)) ** 2 + scales.unsqueeze(1) ** 2)
+    b = torch.maximum(torch.amin(dist, dim=2), 1e-12 * end + 1e-300)
+    lam = torch.log1p(length / b)
+    delta = b.unsqueeze(-1) * torch.expm1(lam.unsqueeze(-1) * quad["u01"])
+    w = (delta + b.unsqueeze(-1)) * (lam.unsqueeze(-1) * quad["w01"])
+    xi = anchors.unsqueeze(-1) + sign[None, :, None] * delta
+    return xi.reshape(n, -1), w.reshape(n, -1)
+
+
+def _segment_layout_gpu(
+    a_L: torch.Tensor,
+    a_R: torch.Tensor,
+    rho2_L: torch.Tensor,
+    rho2_R: torch.Tensor,
+    v0_sq: torch.Tensor,
+    v0_dot_v1: torch.Tensor,
+    v1_sq: torch.Tensor,
+    rc2: torch.Tensor,
+    span_len: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Return ``(xi_0, pad, centers, scales)`` [m] of the tail real segment on CUDA.
+
+    This is the CUDA twin of :func:`ventorum.unsteady.tail._segment_layout`.
+    """
+    v1s = torch.clamp(v1_sq, min=1e-300)
+    x_min = v0_dot_v1 / v1s
+    q_min = torch.clamp(v0_sq - v0_dot_v1 * x_min, min=0.0)
+    centers = torch.stack([-a_L, -a_R, x_min], dim=1)
+    scales = torch.sqrt(torch.stack([rho2_L + rc2, rho2_R + rc2, (q_min + rc2) / v1s], dim=1))
+    pad = torch.maximum(torch.amax(scales, dim=1), span_len)
+    xi_0 = -torch.minimum(torch.minimum(a_L, a_R), -x_min) + pad
+    return xi_0, pad, centers, scales
+
+
 def _real_segment_integrals_gpu(
     a_L: torch.Tensor,
     a_R: torch.Tensor,
@@ -1414,14 +1472,16 @@ def _real_segment_integrals_gpu(
     tL_0: torch.Tensor,
     tR_0: torch.Tensor,
     d_dot_us: torch.Tensor,
-    xi_0: torch.Tensor,
+    xi: torch.Tensor,
+    w: torch.Tensor,
     kappa: float,
     rc2: torch.Tensor,
-    quad: dict,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Evaluate the four scalar tail integrals on ``[0, xi_0]`` on CUDA in complex128."""
-    xi = xi_0.unsqueeze(-1) * quad["u01"]
-    wt = (xi_0.unsqueeze(-1) * quad["w01"]) * torch.exp((-1j * kappa) * xi)
+    """Evaluate the four scalar tail integrals on ``[0, xi_0]`` on CUDA in complex128.
+
+    *xi* and *w* are the graded nodes and weights [m] of :func:`_graded_segment_nodes_gpu`.
+    """
+    wt = w * torch.exp((-1j * kappa) * xi)
 
     sL = xi + a_L.unsqueeze(-1)
     sR = xi + a_R.unsqueeze(-1)
@@ -1527,25 +1587,36 @@ def _tail_velocity_single_gpu(
                 I_tr_R[pos], I_tr_L[pos], I_sp0[pos], I_sp1[pos] = rR, rL, s0, s1
             neg = ~pos
             if bool(neg.any().item()):
-                pad = max(0.5, 1.0 / kappa)
-                xi_0 = -a_min[neg] + pad
                 rc2_mat = rc2_c.transpose(0, 1).expand_as(a_L)
-                rc2_n = torch.clamp(rc2_mat[neg], min=1e-24)
-                rR_1, rL_1, s0_1, s1_1 = _real_segment_integrals_gpu(
+                fields = (
                     a_L[neg], a_R[neg], rho2_L[neg], rho2_R[neg],
                     v0_sq[neg], v0_dot_v1[neg], v1_sq_2d[neg],
-                    tL_0[neg], tR_0[neg], dus_2d[neg], xi_0, kappa, rc2_n, quad,
+                    tL_0[neg], tR_0[neg], dus_2d[neg],
+                    torch.clamp(rc2_mat[neg], min=1e-24),
+                    span_len.reshape(1, -1).expand_as(a_L)[neg],
                 )
-                L_n = torch.clamp(a_min[neg] + xi_0, max=2.0 / kappa)
-                rR_2, rL_2, s0_2, s1_2 = _contour_integrals_gpu(
-                    a_L[neg], a_R[neg], rho2_L[neg], rho2_R[neg],
-                    v0_sq[neg], v0_dot_v1[neg], v1_sq_2d[neg],
-                    tL_0[neg], tR_0[neg], dus_2d[neg], L_n, kappa, quad, xi_shift=xi_0,
-                )
-                I_tr_R[neg] = rR_1 + rR_2
-                I_tr_L[neg] = rL_1 + rL_2
-                I_sp0[neg] = s0_1 + s0_2
-                I_sp1[neg] = s1_1 + s1_2
+                n_neg = int(fields[0].shape[0])
+                res = [torch.empty(n_neg, dtype=torch.complex128, device=dev) for _ in range(4)]
+                batch = max(1, _TAIL_CHUNK_BYTES // (4 * 64 * 16))
+                for j0 in range(0, n_neg, batch):
+                    j1 = min(n_neg, j0 + batch)
+                    aL, aR, r2L, r2R, v0s, v01, v1s, tL, tR, dus, rc2_n, sp = (
+                        f[j0:j1] for f in fields
+                    )
+                    xi_0, pad, centers, scales = _segment_layout_gpu(
+                        aL, aR, r2L, r2R, v0s, v01, v1s, rc2_n, sp,
+                    )
+                    xi_q, w_q = _graded_segment_nodes_gpu(xi_0, centers, scales, quad)
+                    part1 = _real_segment_integrals_gpu(
+                        aL, aR, r2L, r2R, v0s, v01, v1s, tL, tR, dus, xi_q, w_q, kappa, rc2_n,
+                    )
+                    part2 = _contour_integrals_gpu(
+                        aL, aR, r2L, r2R, v0s, v01, v1s, tL, tR, dus,
+                        torch.clamp(pad, max=2.0 / kappa), kappa, quad, xi_shift=xi_0,
+                    )
+                    for out_k, p1, p2 in zip(res, part1, part2, strict=True):
+                        out_k[j0:j1] = p1 + p2
+                I_tr_R[neg], I_tr_L[neg], I_sp0[neg], I_sp1[neg] = res
 
         v_tot = v_tot + _INV_4PI * (I_tr_R.unsqueeze(-1) * d_x_rR - I_tr_L.unsqueeze(-1) * d_x_rL)
         v_tot = v_tot + span_pref * (I_sp0.unsqueeze(-1) * v0 - I_sp1.unsqueeze(-1) * v1[None, :, :])
@@ -1822,13 +1893,16 @@ def _displaced_ray_real_seg_gpu(
     rho2: torch.Tensor,
     d: torch.Tensor,
     u: torch.Tensor,
-    xi_0: torch.Tensor,
+    xi: torch.Tensor,
+    w: torch.Tensor,
     kappa: float,
     L_w: float,
     rc2: torch.Tensor,
-    quad: dict,
 ) -> torch.Tensor:
-    """Evaluate displaced filament integral on real ``[0, xi_0]`` on CUDA in complex128."""
+    """Evaluate displaced filament integral on real ``[0, xi_0]`` on CUDA in complex128.
+
+    *xi* and *w* are the graded nodes and weights [m] of :func:`_graded_segment_nodes_gpu`.
+    """
     d_x_r = torch.linalg.cross(d, r, dim=-1)
     d_x_u = torch.linalg.cross(d, u, dim=-1)
     u_x_r = torch.linalg.cross(u, r, dim=-1)
@@ -1836,8 +1910,6 @@ def _displaced_ray_real_seg_gpu(
     r_dot_u = torch.sum(r * u, dim=-1)
     d_dot_u = torch.sum(d * u, dim=-1)
 
-    xi = xi_0.unsqueeze(-1) * quad["u01"]
-    w = xi_0.unsqueeze(-1) * quad["w01"]
     b = -kappa * (L_w + xi)
     # Exact cancellation-free exp(i b) - 1 = -2 sin^2(b / 2) + i sin(b).
     psi = torch.complex(-2.0 * (torch.sin(0.5 * b) ** 2), torch.sin(b))
@@ -1879,6 +1951,7 @@ def _displaced_tail_velocity_single_gpu(
     dev = engine._dev()
     m, n = int(P64.shape[0]), int(pl64.shape[0])
     quad = _get_tail_quad()
+    span_len = torch.linalg.vector_norm(pr64 - pl64, dim=1)
     out = torch.zeros((m, n, 3), dtype=torch.complex128, device=dev)
     step = max(1, min(m, _TAIL_CHUNK_BYTES // max(1, n * 64 * 16)))
 
@@ -1907,19 +1980,33 @@ def _displaced_tail_velocity_single_gpu(
                     )
                 neg = ~pos
                 if bool(neg.any().item()):
-                    pad = max(0.5, 1.0 / kappa)
-                    xi_0 = -a[neg] + pad
                     rc2_mat = rc2_c.transpose(0, 1).expand_as(a)
-                    rc2_n = torch.clamp(rc2_mat[neg], min=1e-24)
-                    v_seg = _displaced_ray_real_seg_gpu(
-                        r[neg], a[neg], rho2[neg], wd_b[neg], u_b[neg], xi_0, kappa, L_w, rc2_n, quad,
+                    fields = (
+                        r[neg], a[neg], rho2[neg], wd_b[neg], u_b[neg],
+                        torch.clamp(rc2_mat[neg], min=1e-24),
+                        span_len.reshape(1, -1).expand_as(a)[neg],
                     )
-                    r_shift = r[neg] - xi_0.unsqueeze(-1) * wd_b[neg]
-                    a_shift = a[neg] + xi_0
-                    v_tail = _displaced_ray_contour_gpu(
-                        r_shift, a_shift, rho2[neg], wd_b[neg], u_b[neg], kappa, L_w + xi_0, quad,
-                    )
-                    v_ray[neg] = v_seg + v_tail
+                    n_neg = int(fields[1].shape[0])
+                    v_n = torch.empty((n_neg, 3), dtype=torch.complex128, device=dev)
+                    batch = max(1, _TAIL_CHUNK_BYTES // (4 * 64 * 16))
+                    for j0 in range(0, n_neg, batch):
+                        j1 = min(n_neg, j0 + batch)
+                        r_j, a_j, rho2_j, d_j, u_j, rc2_j, sp_j = (f[j0:j1] for f in fields)
+                        scale = torch.sqrt(rho2_j + rc2_j)
+                        pad = torch.maximum(scale, sp_j)
+                        xi_0 = -a_j + pad
+                        xi_q, w_q = _graded_segment_nodes_gpu(
+                            xi_0, -a_j.unsqueeze(-1), scale.unsqueeze(-1), quad,
+                        )
+                        v_seg = _displaced_ray_real_seg_gpu(
+                            r_j, a_j, rho2_j, d_j, u_j, xi_q, w_q, kappa, L_w, rc2_j,
+                        )
+                        v_tail = _displaced_ray_contour_gpu(
+                            r_j - xi_0.unsqueeze(-1) * d_j, a_j + xi_0, rho2_j, d_j, u_j,
+                            kappa, L_w + xi_0, quad,
+                        )
+                        v_n[j0:j1] = v_seg + v_tail
+                    v_ray[neg] = v_n
 
             v_tot = v_tot + sign * v_ray
 
