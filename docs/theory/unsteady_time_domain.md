@@ -83,7 +83,7 @@ The built-in gust fields (`ventorum.unsteady.gusts`) use streamwise distance beh
 
 - **Sharp-edged gust** (`sharp_edged`): $\mathbf v_g = A\,\hat{\mathbf u}$ for $\xi \ge 0$ and $\mathbf 0$ for $\xi < 0$ (Bisplinghoff, Ashley and Halfman 1955, chapter 5).
 - **1-cosine discrete gust** (`one_minus_cosine`): $\mathbf v_g = \tfrac{1}{2}A\bigl(1 - \cos(2\pi\xi / L)\bigr)\hat{\mathbf u}$ for $0 \le \xi \le L$ and $\mathbf 0$ outside (Hoblit 1988, chapter 2).
-- **Horizontal wind shear** (`wind_shear`): $\mathbf v_g = f(t)\,U(h)\,\hat{\mathbf u}$ where $h$ is height above the ground (`ground.height`) or $z$ in free air. Built-in profiles are `linear_shear` ($U(h) = u_0 + (\mathrm du/\mathrm dz)(h - z_\text{ref})$) and `logarithmic_shear` for the neutral atmospheric surface layer (Stull 1988, chapter 9; Garratt 1992, chapter 3):
+- **Horizontal wind shear** (`wind_shear`): $\mathbf v_g = f(t)\,U(h)\,\hat{\mathbf u}$ where $h$ is height above the ground (`ground.height`) or, in free air, the coordinate $h = \mathbf p \cdot \mathbf e_z$ along the mean-flight vertical $\mathbf e_z$ = `lift_direction(alpha)` from the geometry origin (so points on one line along the mean flight path see one wind speed; $h = z$ at $\alpha = 0$). Built-in profiles are `linear_shear` ($U(h) = u_0 + (\mathrm du/\mathrm dz)(h - z_\text{ref})$) and `logarithmic_shear` for the neutral atmospheric surface layer (Stull 1988, chapter 9; Garratt 1992, chapter 3):
 
 ```{math}
 U(h) = U_\text{ref}\,\frac{\ln(h / z_0)}{\ln(z_\text{ref} / z_0)} \quad (h > z_0), \qquad

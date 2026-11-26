@@ -324,7 +324,14 @@ class _WindShearGust:
         pts = _check_points(points)
         t_val = _validate_finite_float(t, "t")
         factor = 1.0 if self.time_factor is None else _validate_finite_float(self.time_factor(t_val), "time_factor(t)")
-        heights = pts[:, 2] if self._ground is None else self._ground.height(pts)
+        if self._ground is None:
+            # Height along the mean-flight vertical e_z = lift_direction(alpha),
+            # measured from the geometry origin. The wind blows along the mean
+            # flight path, so points on one line along d_0 see one wind speed.
+            _, _, e_z = _flow_basis(self._condition, None)
+            heights = pts @ e_z
+        else:
+            heights = self._ground.height(pts)
         try:
             raw = self.profile(heights)
             speeds = np.asarray(raw, dtype=np.float64)
@@ -560,8 +567,10 @@ def wind_shear(
     """Build a height-dependent horizontal wind-shear callable ``gust(points, t)``.
 
     Evaluates ``time_factor(t) * profile(height) * u_dir`` [m/s], where
-    ``height`` is ``ground.height(points)`` [m] in ground effect or
-    ``points[:, 2]`` [m] in free air.
+    ``height`` is ``ground.height(points)`` [m] in ground effect or, in
+    free air, the coordinate along the mean-flight vertical
+    ``e_z = lift_direction(alpha)`` from the geometry origin [m]
+    (``points[:, 2]`` at ``alpha = 0``).
 
     Parameters
     ----------
