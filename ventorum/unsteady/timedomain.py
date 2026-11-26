@@ -174,26 +174,133 @@ def _select_time_device(
 
 
 class _TimeDomainGPUState:
-    """Registered container for CUDA arrays held by one :class:`_TimeDomainStepper`."""
+    """Registered container for CUDA arrays held by one :class:`_TimeDomainStepper`.
+
+    The arrays hold the marching state (wake buffers, previous circulation),
+    which exists only on the device. A release of all GPU data
+    (``ventorum.gpu.release``, or the out-of-memory path of another solve)
+    while the march runs must not lose that state. So a release copies the
+    storages to the host and frees the device arrays; the next access to
+    :attr:`tensors` uploads them again, with the same views, so the march
+    continues with the same values. A release during a step (from a gust or
+    control callable, or from another thread) waits until the step ends.
+    The stepper frees the arrays at its end with ``release_gpu(force=True)``.
+    """
 
     def __init__(self, precision: str) -> None:
+        import threading
+
         from ventorum.gpu import ring_kernels as RK
 
         self.precision = precision
-        self.tensors: dict[str, Any] = {}
+        self._tensors: dict[str, Any] = {}
+        self._host: dict[str, Any] | None = None
+        self._host_storages: dict[int, Any] = {}
+        self._lock = threading.RLock()
+        self._depth = 0
+        self._pending = False
         RK.register_device_holder(self)
+
+    @property
+    def tensors(self) -> dict[str, Any]:
+        """Return the device arrays; upload them again after a release."""
+        with self._lock:
+            if self._host is not None:
+                self._upload_from_host()
+            return self._tensors
 
     def device_bytes(self) -> int:
         """Return total CUDA storage bytes held by this state [B]."""
         from ventorum.gpu import memory as gpu_memory
 
-        return gpu_memory._tensor_bytes(self.tensors, set())
+        return gpu_memory._tensor_bytes(self._tensors, set())
 
-    def release_gpu(self) -> int:
-        """Drop all CUDA tensor references and return freed bytes [B]."""
+    def step_scope(self):
+        """Return a context manager that marks one march step as running."""
+        import contextlib
+
+        @contextlib.contextmanager
+        def _scope():
+            with self._lock:
+                self._depth += 1
+            try:
+                yield
+            finally:
+                with self._lock:
+                    self._depth -= 1
+                    if self._depth == 0 and self._pending:
+                        self._pending = False
+                        self._move_to_host()
+
+        return _scope()
+
+    def _move_to_host(self) -> int:
+        """Copy the storages to the host, drop the device arrays and return freed bytes [B]."""
+        import torch
+
         freed = self.device_bytes()
-        self.tensors.clear()
+        storages: dict[int, Any] = {}
+        host: dict[str, Any] = {}
+        for key, val in self._tensors.items():
+            if isinstance(val, torch.Tensor) and val.is_cuda:
+                st = val.untyped_storage()
+                ptr = int(st.data_ptr())
+                if ptr not in storages:
+                    storages[ptr] = st.cpu()
+                host[key] = (ptr, val.dtype, int(val.storage_offset()), tuple(val.shape), tuple(val.stride()))
+            else:
+                host[key] = ("value", val)
+        self._host = host
+        self._host_storages = storages
+        self._tensors = {}
         return freed
+
+    def _upload_from_host(self) -> None:
+        """Upload the host copies again and register the holder again."""
+        import torch
+
+        from ventorum.gpu import engine
+        from ventorum.gpu import ring_kernels as RK
+
+        dev = engine._dev()
+        dev_storages = {ptr: st.to(device=dev) for ptr, st in self._host_storages.items()}
+        tensors: dict[str, Any] = {}
+        assert self._host is not None
+        for key, meta in self._host.items():
+            if meta[0] == "value":
+                tensors[key] = meta[1]
+                continue
+            ptr, dtype, offset, shape, stride = meta
+            tensors[key] = torch.empty((0,), dtype=dtype, device=dev).set_(dev_storages[ptr], offset, shape, stride)
+        self._tensors = tensors
+        self._host = None
+        self._host_storages = {}
+        RK.register_device_holder(self)
+
+    def release_gpu(self, *, force: bool = False) -> int:
+        """Free the CUDA arrays and return the freed bytes [B].
+
+        With *force* (the end of the march) the arrays and their host copies
+        are dropped. Without it (a release of all GPU data from outside the
+        march) the state moves to the host and comes back on the next use;
+        during a step the move waits until the step ends and this returns 0.
+        """
+        with self._lock:
+            if force:
+                freed = self.device_bytes()
+                self._tensors.clear()
+                self._host = None
+                self._host_storages = {}
+                return freed
+            if self._host is not None:
+                return 0
+            if self._depth > 0:
+                from ventorum.gpu import ring_kernels as RK
+
+                self._pending = True
+                RK.register_device_holder(self)
+                return 0
+            return self._move_to_host()
 
 
 def _to_gpu_rc(rc: np.ndarray | float) -> Any:
@@ -2782,7 +2889,7 @@ class _TimeDomainStepper:
             return 0
         from ventorum.gpu import ring_kernels as RK
 
-        freed = self._gpu_state.release_gpu()
+        freed = self._gpu_state.release_gpu(force=True)
         RK.unregister_device_holder(self._gpu_state)
         self._gpu_state = None
         return freed
@@ -3610,7 +3717,13 @@ class _TimeDomainStepper:
             M_tot=M_tot,
         )
 
-    def _advance_gpu(
+    def _advance_gpu(self, **kwargs: Any) -> _StepLoads:
+        """Advance one step on the GPU; a release of the GPU data waits until the step ends."""
+        assert self._gpu_state is not None
+        with self._gpu_state.step_scope():
+            return self._advance_gpu_step(**kwargs)
+
+    def _advance_gpu_step(
         self,
         *,
         x: float,

@@ -621,3 +621,71 @@ def test_gpu_time_march_oom_fallback_adds_note(gpu_device, monkeypatch):
     assert got.trust is not None and NOTE_GPU_OUT_OF_MEMORY in got.trust.warnings
     np.testing.assert_array_equal(got.CL, ref.CL)
     np.testing.assert_array_equal(got.Cm, ref.Cm)
+
+
+@pytest.mark.gpu
+def test_gpu_release_during_march_keeps_the_march_running(gpu_device):
+    """A release of all GPU data during a GPU march does not stop the march.
+
+    The march keeps its own device arrays and gives the same result as a
+    march without the release. The release used to clear the marching state
+    and the march stopped with a KeyError.
+    """
+    from ventorum.gpu import ring_kernels as RK
+
+    ac = _flapped_wing()
+    cond = vt.FlightCondition(V_inf=20.0, rho=1.225, alpha=math.radians(4.0))
+    sett = vt.SolverSettings(solver_type="vlm", n_panels=4, n_chord=4, chord_spacing="uniform")
+    base = one_minus_cosine(amplitude=1.0, length=4.0, direction="vertical", x_front=0.0, condition=cond)
+    seen = {"released": False, "bytes_after": -1}
+
+    def gust_with_release(points, t):
+        if t > 0.05 and not seen["released"]:
+            seen["released"] = True
+            gpu.release()
+            seen["bytes_after"] = RK.device_bytes()
+        return base(points, t)
+
+    gpu.set_device("gpu")
+    gpu.set_precision("float64")
+    ref = vt.time_response(ac, cond, sett, n_steps=20, gust=base)
+    got = vt.time_response(ac, cond, sett, n_steps=20, gust=gust_with_release)
+    assert seen["released"]
+    # The release came during a step: the march data stay until the step ends.
+    assert seen["bytes_after"] > 0
+    assert got.device == "gpu"
+    np.testing.assert_array_equal(got.CL, ref.CL)
+    np.testing.assert_array_equal(got.Cm, ref.Cm)
+    assert RK.device_bytes() == 0
+
+
+@pytest.mark.gpu
+def test_gpu_release_between_steps_frees_and_restores_the_march_state(gpu_device):
+    """A release between two steps frees the stepper data; the next step uploads them again."""
+    from ventorum.gpu import ring_kernels as RK
+
+    ac = _flapped_wing(n_panels=6)
+    lat = build_lattice(ac, n_chord=4, chord_spacing="uniform")
+    cond = vt.FlightCondition(V_inf=25.0, rho=1.225, alpha=math.radians(3.0))
+    gpu.set_device("gpu")
+    gpu.set_precision("float64")
+    gpu.release()
+
+    def _march(release_at: int | None) -> list:
+        stepper = _TimeDomainStepper.from_prescribed(
+            lat, cond, S_ref=ac.S_ref, b_ref=ac.b_ref, c_ref=ac.c_ref, ref_point=ac.ref_point, n_steps=6,
+        )
+        out = []
+        try:
+            for step in range(7):
+                if step == release_at:
+                    held = RK.device_bytes()
+                    assert held > 0
+                    assert gpu.release() >= held
+                    assert RK.device_bytes() == 0
+                out.append(stepper.advance_prescribed(step).CL)
+        finally:
+            stepper.release_gpu()
+        return out
+
+    assert _march(3) == _march(None)
